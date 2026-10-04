@@ -95,9 +95,15 @@ C wins these local performance and executable-size comparisons, but takes over t
 much application code. It does not beat Bun on every simplicity measure.
 
 Individual endpoints can be measured with `wrk -t1 -c64 -d8s --latency http://127.0.0.1:3000/feed`
-or `/posts/500000`, after a two-second warm-up. The mixed runs use
-[the Bun submission's benchmark script](https://github.com/tbsvttr/twelve-dollar-server-challenge/blob/5244d8fe567b45bbb1894da99192a96d29b3f921/submissions/typescript-bun-tbsvttr/bench.lua)
-via `wrk -t1 -c64 -d8s --latency -s bench.lua http://127.0.0.1:3000` from the repository root.
+or `/posts/500000`, after a two-second warm-up. The included `bench.lua` is identical to
+[the Bun submission's benchmark script](https://github.com/tbsvttr/twelve-dollar-server-challenge/blob/5244d8fe567b45bbb1894da99192a96d29b3f921/submissions/typescript-bun-tbsvttr/bench.lua).
+To repeat the mixed workload against an already-running test server, from the repository root:
+
+```bash
+wrk -t1 -c64 -d2s -s submissions/c-fio-tbsvttr/bench.lua http://127.0.0.1:3000
+wrk -t1 -c64 -d8s --latency -s submissions/c-fio-tbsvttr/bench.lua http://127.0.0.1:3000
+```
+
 `wrk` and Python are optional validation tools, not application dependencies.
 
 These are local throughput measurements, not challenge scores. The load generator shares the

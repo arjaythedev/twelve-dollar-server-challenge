@@ -25,7 +25,7 @@ SQLITE_PATH=... JWT_SECRET=... HOST=0.0.0.0 PORT=80 bash start.sh
 This submission starts from [`python-fastapi-cknutson12`](../python-fastapi-cknutson12), which is
 already well tuned: one uvicorn process with uvloop and httptools, no Nginx, orjson, no Pydantic
 models, JWT checked by hand, WAL with mmap. The SQL, auth, pragmas, GC settings and uvicorn
-settings are unchanged from it. The difference is how a request travels from uvicorn to a handler.
+settings are unchanged from it (`server.py` is identical). The difference is how a request travels from uvicorn to a handler.
 
 I profiled it with py-spy under load. About 40% of the Python CPU time was in FastAPI and Starlette
 layers, not in the handlers. So I removed those layers one at a time and measured each step.
@@ -60,12 +60,10 @@ Details of the final version (`app.py`):
 - **The middleware stack is the router plus one `try/except`.** It keeps every error in the API's
   JSON format: 404 for unknown paths (`router.default`), 405 for a wrong method, 500 for anything
   unexpected. `AsyncExitStackMiddleware` can go too, because only FastAPI `APIRoute`s need it.
-- **The open-file limit is raised in the process.** Each keep-alive client is one socket, and
-  Ubuntu's default soft limit is 1,024. `server.py` raises the soft limit to the hard limit.
 
 ## Results
 
-Test bench: a GCE `e2-small` (2 vCPUs that share one core, 2 GB RAM, Ubuntu 24.04) as the server,
+Test bench: a GCE `e2-small` (2 GB RAM, Ubuntu 24.04 x86_64, one vCPU of sustained CPU) as the server,
 and a separate k6 VM in the same zone, using `bench/load.js` unchanged. An e2-small can burst above
 its one core for a short time and is then throttled, which is much like a shared droplet CPU. Only
 5-minute holds give a true limit on it; 2-minute runs look much better than they are.

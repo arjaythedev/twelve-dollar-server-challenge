@@ -1,14 +1,9 @@
 """Starts the app with uvicorn: one process, uvloop event loop, httptools HTTP parser."""
 import os
-import resource
 
 import uvicorn
 
 if __name__ == "__main__":
-    # Each keep-alive client is one open socket. Ubuntu's default soft limit is 1024, so raise it
-    # to the hard limit inside the process (rule 11 allows in-process settings).
-    _, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
-    resource.setrlimit(resource.RLIMIT_NOFILE, (hard, hard))
     uvicorn.run(
         "app:app",
         host=os.environ.get("HOST", "127.0.0.1"),

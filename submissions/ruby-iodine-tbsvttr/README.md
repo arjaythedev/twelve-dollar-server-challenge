@@ -74,9 +74,17 @@ is 2.49× for feeds, 4.81× for single posts, and 3.03× for mixed traffic. Rela
 it increases by 26%, 51%, and 15%, respectively. Feed/post p99 is lower than both baselines;
 mixed p99 is lower than Rails but slightly higher than Granian (12.18 vs 11.73 ms).
 
-Median summed process RSS during mixed traffic was 183.82 MiB for Rails plus Nginx,
-93.95 MiB for Granian, and 81.00 MiB for Iodine. Summing multiple processes can count shared pages
-more than once; Iodine runs in one process.
+| Process RSS, MiB | Rails #12 + Nginx | Granian #13 | Ruby/Iodine |
+|---|---:|---:|---:|
+| Feed | 171.93 | 71.37 | 57.72 |
+| Single post | 170.90 | 66.59 | 47.20 |
+| Mixed reads/writes | 183.82 | 93.95 | 81.00 |
+
+Each value is the median of three summed process-RSS snapshots, sampled from
+`/proc/<pid>/status` immediately after the load run and before server shutdown.
+The sum includes descendant processes and Nginx for Rails; shared pages may be counted
+more than once. These are endpoint snapshots, not continuously sampled peaks or total
+container memory. Iodine runs in one process.
 
 These local throughput measurements do not establish an official x86_64 five-minute k6 user-capacity score.
 

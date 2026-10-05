@@ -142,8 +142,10 @@ int parse_id(std::string_view s, int64_t* out) {
 
 enum JType : uint8_t { J_NONE, J_NULL, J_BOOL, J_NUM, J_STR, J_ARR, J_OBJ };
 
+// Callers keep their JField arrays static, so `str` keeps its capacity across requests and the
+// parser fills it without allocating.
 struct JField {
-  JField(std::string_view k) : key(k) {}
+  JField(std::string_view k, size_t reserve = 64) : key(k) { str.reserve(reserve); }
   std::string_view key;
   JType type = J_NONE;  // J_NONE: key absent
   double num = 0;
@@ -157,6 +159,10 @@ class JsonParser {
   // Parses the whole document. If it is an object, `fields` with matching keys are filled in
   // (the last duplicate wins). Returns false if the document is not valid JSON.
   bool parse(JType* top, JField* fields, size_t nfields) {
+    for (size_t i = 0; i < nfields; i++) {
+      fields[i].type = J_NONE;
+      fields[i].str.clear();
+    }
     ws();
     if (!value(top, nullptr, nullptr, fields, nfields)) return false;
     ws();
@@ -167,7 +173,8 @@ class JsonParser {
   const char* p_;
   const char* e_;
   int depth_ = 0;
-  std::string key_;
+  // Shared by every parser (one thread): a key is only compared, before the value is parsed.
+  inline static std::string key_ = [] { std::string s; s.reserve(256); return s; }();
 
   void ws() {
     while (p_ < e_ && (*p_ == ' ' || *p_ == '\t' || *p_ == '\n' || *p_ == '\r')) ++p_;
@@ -580,9 +587,9 @@ AuthResult authenticate(std::string_view header, bool present, AuthUser* user) {
   std::string_view payload_b64 = token.substr(d1 + 1, d2 - d1 - 1);
   std::string_view sig_b64 = token.substr(d2 + 1);
 
-  static std::string decoded;
+  static std::string decoded = [] { std::string s; s.reserve(1024); return s; }();
   JType top;
-  JField alg[1] = {{"alg"}};
+  static JField alg[1] = {{"alg"}};
   if (!b64url_decode(head_b64, decoded) || !JsonParser(decoded).parse(&top, alg, 1) || top != J_OBJ ||
       alg[0].type != J_STR || alg[0].str != "HS256")
     return AuthResult::kInvalid;
@@ -597,7 +604,7 @@ AuthResult authenticate(std::string_view header, bool present, AuthUser* user) {
   if (diff) return AuthResult::kInvalid;
 
   enum { kSub, kUsername, kExp, kNbf };
-  JField f[4] = {{"sub"}, {"username"}, {"exp"}, {"nbf"}};
+  static JField f[4] = {{"sub"}, {"username"}, {"exp"}, {"nbf"}};
   if (!b64url_decode(payload_b64, decoded) || !JsonParser(decoded).parse(&top, f, 4) || top != J_OBJ)
     return AuthResult::kInvalid;
   double now = static_cast<double>(time(nullptr));
@@ -609,7 +616,7 @@ AuthResult authenticate(std::string_view header, bool present, AuthUser* user) {
 
   if (f[kSub].type != J_STR || parse_id(f[kSub].str, &user->id) != 1 || f[kUsername].type != J_STR)
     return AuthResult::kBadPayload;
-  user->username = std::move(f[kUsername].str);
+  user->username.assign(f[kUsername].str);  // a copy, so both buffers keep their capacity
   return AuthResult::kOk;
 }
 
@@ -809,7 +816,7 @@ int handle_create_post(std::string& b, std::string_view auth, bool has_auth, std
   if (ar != AuthResult::kOk) return auth_error(b, ar);
 
   JType top;
-  JField field[1] = {{"body"}};
+  static JField field[1] = {{"body", 4096}};
   if (!JsonParser(req_body).parse(&top, field, 1)) return error(b, 400, "malformed JSON body");
   if (top != J_OBJ || field[0].type != J_STR) return error(b, 400, "body is required");
   std::string_view text = trim_js(field[0].str);
@@ -1125,7 +1132,10 @@ bool send_or_queue(Conn* c, const char* data, size_t len) {
     return false;
   }
   if (len > 0) {
-    c->out.assign(data, len);
+    if (data >= c->out.data() && data <= c->out.data() + c->out.size())
+      c->out.erase(0, data - c->out.data());  // resending c->out itself: keep its buffer
+    else
+      c->out.assign(data, len);
     set_events(c, true);
     return true;
   }
@@ -1190,9 +1200,7 @@ void on_readable(Conn* c) {
 
 void on_writable(Conn* c) {
   c->last_active = g_now;
-  std::string pending;
-  pending.swap(c->out);
-  if (!send_or_queue(c, pending.data(), pending.size())) return;
+  if (!send_or_queue(c, c->out.data(), c->out.size())) return;
   // Requests that arrived while we were blocked on output are still in c->in.
   if (!c->want_write && !c->in.empty()) {
     g_wbuf.clear();

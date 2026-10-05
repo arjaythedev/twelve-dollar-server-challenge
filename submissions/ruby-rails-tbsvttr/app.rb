@@ -14,13 +14,18 @@ class FeedApp < Rails::Application
   config.logger = Logger.new(File::NULL)
   config.log_level = :warn
   config.secret_key_base = ENV.fetch("JWT_SECRET")
-  config.middleware.delete Rack::ETag
-  config.middleware.delete Rack::ConditionalGet
+  [Rack::Sendfile, Rack::Runtime, Rack::ETag, Rack::ConditionalGet, Rails::Rack::Logger,
+   ActionDispatch::RequestId, ActionDispatch::RemoteIp, ActionDispatch::Callbacks].each do |middleware|
+    config.middleware.delete middleware
+  end
 end
 
-class FeedController < ActionController::API
+class FeedController < ActionController::Metal
+  include AbstractController::Callbacks
+  include ActionController::Rescue
   STARTED = Process.clock_gettime(Process::CLOCK_MONOTONIC)
   SECRET = ENV.fetch("JWT_SECRET")
+  QUERY_LOCK = Mutex.new
   DB = SQLite3::Database.new(ENV.fetch("SQLITE_PATH"))
   DB.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON;
                     PRAGMA locking_mode=EXCLUSIVE; PRAGMA cache_size=500; PRAGMA mmap_size=536870912;")
@@ -29,8 +34,9 @@ class FeedController < ActionController::API
   FROM_POSTS = "FROM posts p JOIN users u ON u.id=p.user_id"
   QUERIES = {
     health: "SELECT 1",
-    feed: "SELECT json_object('posts',json_group_array(json(item))) FROM
-           (SELECT #{POST_JSON} AS item #{FROM_POSTS} ORDER BY p.created_at DESC,p.id DESC LIMIT 20)",
+    feed: "SELECT json_object('posts',json_group_array(#{POST_JSON} ORDER BY p.created_at DESC,p.id DESC))
+           FROM (SELECT * FROM posts ORDER BY created_at DESC,id DESC LIMIT 20) p
+           JOIN users u ON u.id=p.user_id",
     post: "SELECT json_object('post',#{POST_JSON}) #{FROM_POSTS} WHERE p.id=?",
     create: "INSERT INTO posts(user_id,body) VALUES(?,?) RETURNING json_object('post',
              json_object('id',id,'body',body,'created_at',created_at,'author',?,'like_count',0))",
@@ -40,9 +46,9 @@ class FeedController < ActionController::API
   }.transform_values { |sql| DB.prepare(sql) }
   SPACE = "\u0009-\u000d\u0020\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
   TRIM = /\A[#{SPACE}]+|[#{SPACE}]+\z/
-  wrap_parameters format: []
   before_action :authenticate, only: [:create, :like]
   before_action :identify, only: [:post, :like]
+  around_action ->(_controller, action) { QUERY_LOCK.synchronize(&action) }
   rescue_from StandardError, with: -> { error(500, "internal server error") }
 
   def health
@@ -90,7 +96,10 @@ class FeedController < ActionController::API
 
   def query(name, *arguments)
     statement = QUERIES.fetch(name)
-    statement.execute!(*arguments).dig(0, 0)
+    arguments.each_with_index { |value, index| statement.bind_param(index + 1, value) }
+    row = statement.step
+    statement.step if row # Each query returns at most one row; reach SQLITE_DONE before acknowledging writes.
+    row&.first
   ensure
     statement&.reset!
   end

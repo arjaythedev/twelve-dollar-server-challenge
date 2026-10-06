@@ -1,0 +1,5 @@
+/.deps/
+/bin/
+/target/
+*.o
+__pycache__/

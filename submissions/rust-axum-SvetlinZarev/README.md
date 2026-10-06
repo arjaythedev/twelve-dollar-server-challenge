@@ -96,6 +96,41 @@ worker (`TOKIO_WORKER_THREADS=1`).
 Both top out at **9000 VUs**, failing at 10000 on error rate (not latency — p50
 stays sub-millisecond).
 
+**On a dedicated Linux box** (same `bench/load.js` stepping) the server scales
+far further, holding sub-2.2ms p99 all the way to 28000 VUs:
+
+| VUs   | req/s | p50   | p95   | p99   | err% | result |
+|-------|-------|-------|-------|-------|------|--------|
+| 4000  | 307   | 0.3ms | 1.4ms | 2.2ms | 0.00 | pass   |
+| 5000  | 383   | 0.3ms | 1.3ms | 1.9ms | 0.00 | pass   |
+| 6000  | 460   | 0.2ms | 1.2ms | 1.8ms | 0.00 | pass   |
+| 7000  | 538   | 0.2ms | 1.2ms | 1.7ms | 0.00 | pass   |
+| 8000  | 611   | 0.2ms | 1.2ms | 1.7ms | 0.00 | pass   |
+| 9000  | 691   | 0.2ms | 1.2ms | 1.7ms | 0.00 | pass   |
+| 10000 | 769   | 0.2ms | 1.2ms | 1.7ms | 0.00 | pass   |
+| 11000 | 841   | 0.2ms | 1.2ms | 1.7ms | 0.00 | pass   |
+| 12000 | 917   | 0.2ms | 1.2ms | 1.7ms | 0.00 | pass   |
+| 13000 | 994   | 0.2ms | 1.1ms | 1.7ms | 0.00 | pass   |
+| 14000 | 1072  | 0.2ms | 1.1ms | 1.8ms | 0.00 | pass   |
+| 15000 | 1147  | 0.2ms | 1.1ms | 1.8ms | 0.00 | pass   |
+| 16000 | 1221  | 0.2ms | 1.1ms | 1.9ms | 0.00 | pass   |
+| 17000 | 1306  | 0.2ms | 1.1ms | 2.0ms | 0.00 | pass   |
+| 18000 | 1379  | 0.2ms | 1.1ms | 2.1ms | 0.00 | pass   |
+| 19000 | 1455  | 0.2ms | 1.1ms | 2.1ms | 0.00 | pass   |
+| 20000 | 1532  | 0.2ms | 1.1ms | 2.1ms | 0.00 | pass   |
+| 21000 | 1608  | 0.2ms | 1.1ms | 2.1ms | 0.00 | pass   |
+| 22000 | 1685  | 0.2ms | 1.1ms | 2.1ms | 0.00 | pass   |
+| 23000 | 1760  | 0.2ms | 1.1ms | 2.1ms | 0.00 | pass   |
+| 24000 | 1836  | 0.1ms | 1.1ms | 2.2ms | 0.00 | pass   |
+| 25000 | 1914  | 0.1ms | 1.1ms | 2.1ms | 0.00 | pass   |
+| 26000 | 1991  | 0.1ms | 1.1ms | 2.2ms | 0.00 | pass   |
+| 27000 | 2067  | 0.1ms | 1.1ms | 2.2ms | 0.00 | pass   |
+| 28000 | 2141  | 0.1ms | 1.1ms | 2.2ms | 0.00 | pass   |
+| 29000 | 2238  | 0.1ms | 1.1ms | 2.2ms | 2.59 | fail   |
+
+Tops out at **28000 VUs**, again failing on error rate rather than latency — p99
+never crosses 2.2ms, so the ceiling is connection/accept capacity, not compute.
+
 ### Resource usage (direct, 8000 VUs)
 
 | State      | CPU            | RSS     |

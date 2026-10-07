@@ -1,0 +1,54 @@
+x-server: &server
+  build: .
+  image: cpp-drogon-hendy643
+  cpuset: "${CPUSET:-0}"
+  user: "${UID:-1000}:${GID:-1000}"
+  ulimits:
+    nofile:
+      soft: 65535
+      hard: 65535
+  volumes:
+    - ${DB_DIR:?DB_DIR must be a directory holding a copy of seed/feed.db}:/data
+
+services:
+  server:
+    <<: *server
+    profiles: ["direct"]
+    network_mode: host
+    mem_limit: 2g
+    memswap_limit: 2g
+    environment:
+      SQLITE_PATH: /data/feed.db
+      JWT_SECRET: twelve-dollar-challenge
+      HOST: 0.0.0.0
+      PORT: ${HOST_PORT:-8080}
+
+  server-behind-nginx:
+    <<: *server
+    profiles: ["nginx"]
+    ports:
+      - "${HOST_PORT:-8080}:80"
+    mem_limit: 1792m
+    memswap_limit: 1792m
+    environment:
+      SQLITE_PATH: /data/feed.db
+      JWT_SECRET: twelve-dollar-challenge
+      HOST: 127.0.0.1
+      PORT: "3000"
+
+  nginx:
+    profiles: ["nginx"]
+    image: nginx:1.24
+    network_mode: "service:server-behind-nginx"
+    depends_on:
+      - server-behind-nginx
+    cpuset: "${CPUSET:-0}"
+    mem_limit: 256m
+    memswap_limit: 256m
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    volumes:
+      - ./docker/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ../../bench/nginx.conf:/etc/nginx/conf.d/default.conf:ro

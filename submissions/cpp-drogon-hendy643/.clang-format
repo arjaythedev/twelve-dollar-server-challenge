@@ -1,0 +1,26 @@
+---
+BasedOnStyle: Microsoft
+ColumnLimit: 120
+IncludeBlocks: Regroup
+IncludeCategories:
+  - Regex: '^<.*\.h>'
+    Priority: 1
+  - Regex: '^<.*>'
+    Priority: 2
+  - Regex: '^".*\.h"'
+    Priority: 3
+  - Regex: '^".*"'
+    Priority: 4
+  - Regex: '.*'
+    Priority: 5
+SortIncludes: true
+TabWidth: 4
+UseTab: Never
+IndentWidth: 4
+BreakConstructorInitializers: AfterColon
+PackConstructorInitializers: Never
+LambdaBodyIndentation: Signature
+AllowShortLambdasOnASingleLine: All
+InsertNewlineAtEOF: true
+IndentCaseLabels: true
+AllowAllArgumentsOnNextLine: true

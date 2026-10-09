@@ -36,7 +36,7 @@ All three external libraries are direct dependencies, pinned and SHA256-verified
 | picohttpparser | `465a7ff09fbd3432fe56c673451f5460154d1f07` |
 
 There are **3 direct / 3 resolved dependencies**, excluding Zig's standard library,
-libc, libm and the compiler. TLS is disabled. Application code is **673 physical
+libc, libm and the compiler. TLS is disabled. Application code is **680 physical
 lines** across `src/*.zig` and `src/c.h`, including blank lines and comments, after
 `zig fmt`. Automatically translated C declarations and downloaded library source
 are excluded from application LOC. Build, test and benchmark code is counted
@@ -71,6 +71,56 @@ are allocated lazily. Bodies are limited to 16 KiB, headers to 32 KiB / 64 field
 encoded chunked bodies to 128 KiB, buffered input to 512 KiB and queued output to
 8 MiB per connection. The idle timeout is 75 seconds. The process raises its own
 descriptor soft limit to the existing hard limit.
+
+## Connection pressure — 2026-10-09
+
+At ordinary connection counts, keep-alive retains the 75-second timeout. At
+60,000 open connections, completed responses advertise `Connection: close`
+and the transport drains the response before closing its socket. Clients reconnect
+for their next request. Uploads finish and successful writes commit before this
+response-based retirement takes place. The threshold is a connection/memory budget,
+not a limit on the number of logical users. Counters store transport metadata.
+
+The socket open/close callbacks count connections. The keep-alive budget leaves 128 descriptors free when the inherited file limit is smaller. An interim 100 Continue response retains the connection so its upload can finish.
+
+The source accounting and performance tables recorded before this change describe
+the pinned baseline. New diagnostic evidence is in [capacity-results.json](capacity-results.json).
+The selected local ARM64 diagnostic passed at **70,000 logical users**
+for a **1-minute hold**, with zero errors and a worst-shard p99 of
+**18.6 ms**. Peak process RSS was **65.6 MiB**;
+sampled peak container memory was **599.9 MiB**. This is
+one diagnostic trial, not a maximum-capacity search or an official droplet score.
+
+From the repository root, against a running server on a fresh database copy:
+
+```bash
+python3 submissions/zig-usockets-tbsvttr/tests/connection_check.py 3000 --users 512 --seconds 20 --ramp 2 --timeout 5
+```
+
+For descriptor pressure, run the server with hard/soft `nofile=256` and give the
+client a higher limit. The diagnostic uses the feed/post/like/create loop and think
+times from `bench/load.js`, measures the hold, and reports request latency plus
+latency including reconnects. It uses Python, separate loopback source addresses,
+and no warm-up or ramp-down; it is not an official k6 score. It writes posts and likes.
+
+For sustained runs on Linux, compile the socket generator. It retains only each
+user's selected post ID, uses deferred ephemeral-port allocation on several
+loopback addresses, and lets the server's FIN retire completed connections. The
+body text and random-number generator differ from k6; the request mix, user loop
+and think-time ranges match. It reports generator CPU, memory and loop delay:
+
+```bash
+cc -O3 -Wall -Wextra submissions/zig-usockets-tbsvttr/tests/connection_load.c -lm -o submissions/zig-usockets-tbsvttr/bin/connection-load
+submissions/zig-usockets-tbsvttr/bin/connection-load 3000 --users 70000 --seconds 300 --ramp 60 --tokens seed/tokens.json
+```
+
+With the same low server limit, this targeted regression keeps an unfinished upload
+open during connection retirement, verifies committed writes, and checks that
+keep-alive resumes after the other connections close:
+
+```bash
+python3 submissions/zig-usockets-tbsvttr/tests/pressure_regression.py 3000
+```
 
 ## Validation
 

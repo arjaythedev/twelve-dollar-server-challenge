@@ -13,6 +13,8 @@ const Connection = struct {
 };
 const Pending = struct { socket: ?*Socket, status: u16, body: []u8 };
 var pending: std.ArrayList(Pending) = .empty;
+var connections: usize = 0;
+var keepalive_limit: usize = 60000;
 
 fn connection(s: ?*Socket) *Connection {
     return @ptrCast(@alignCast(c.us_socket_ext(0, s)));
@@ -29,11 +31,13 @@ fn maybeClose(s: ?*Socket) void {
 
 fn opened(s: ?*Socket, _: c_int, _: [*c]u8, _: c_int) callconv(.c) ?*Socket {
     connection(s).* = .{};
+    connections += 1;
     c.us_socket_timeout(0, s, 75);
     return s;
 }
 
 fn closed(s: ?*Socket, _: c_int, _: ?*anyopaque) callconv(.c) ?*Socket {
+    connections -= 1;
     for (pending.items) |*item| if (item.socket == s) {
         item.socket = null;
     };
@@ -70,6 +74,7 @@ fn writable(s: ?*Socket) callconv(.c) ?*Socket {
 
 fn wire(s: ?*Socket, status: u16, body: []const u8) !void {
     const conn = connection(s);
+    if (status != 100 and connections >= keepalive_limit) conn.closing = true;
     var buf: [256]u8 = undefined;
     const reason: []const u8 = switch (status) {
         200 => "OK",
@@ -307,6 +312,8 @@ pub fn main() !void {
     if (c.getrlimit(c.RLIMIT_NOFILE, &limit) == 0) {
         limit.rlim_cur = limit.rlim_max;
         _ = c.setrlimit(c.RLIMIT_NOFILE, &limit);
+        if (limit.rlim_cur < keepalive_limit + 128)
+            keepalive_limit = if (limit.rlim_cur > 128) @intCast(limit.rlim_cur - 128) else 1;
     }
     const loop = c.us_create_loop(null, noop, noop, afterLoop, 0) orelse return error.EventLoop;
     const context = c.us_create_socket_context(0, loop, 0, std.mem.zeroes(c.struct_us_socket_context_options_t)) orelse return error.SocketContext;

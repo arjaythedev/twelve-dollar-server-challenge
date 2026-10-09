@@ -9,16 +9,32 @@ start() ->
     {ok, _} = challenge_db:start_link(Path),
     {ok, Address} = inet:getaddr(os:getenv("HOST", "127.0.0.1"), inet),
     Port = list_to_integer(os:getenv("PORT", "3000")),
-    State = #{secret => Secret, started => erlang:monotonic_time(second)},
+    Connections = atomics:new(1, []),
+    FileLimit = case file:read_file("/proc/self/limits") of
+        {ok, Limits} ->
+            case re:run(Limits, <<"Max open files\\s+(\\d+)">>, [{capture, [1], binary}]) of
+                {match, [Value]} -> binary_to_integer(Value);
+                nomatch -> 65535
+            end;
+        _ -> 65535
+    end,
+    Limit = min(FileLimit, erlang:system_info(port_limit)),
+    State = #{secret => Secret, started => erlang:monotonic_time(second),
+              connections => Connections, keepalive_limit => max(1, min(32000, Limit - 128))},
     Dispatch = cowboy_router:compile([{'_', [{"/[...]", ?MODULE, State}]}]),
     {ok, _} = cowboy:start_clear(challenge_listener,
-        #{socket_opts => [{ip, Address}, {port, Port}, {nodelay, true}],
-          num_acceptors => 10, max_connections => 20000},
+        #{socket_opts => [{ip, Address}, {port, Port}, {nodelay, true}, {backlog, 4096}],
+          num_acceptors => 10, max_connections => max(1, min(60000, Limit - 64))},
         #{env => #{dispatch => Dispatch}, protocols => [http],
           idle_timeout => 75000, request_timeout => 75000, inactivity_timeout => 75000,
           max_keepalive => 1000000000, max_header_value_length => 16384,
           max_authorization_header_value_length => 16384}),
+    spawn_link(fun() -> connection_count(Connections) end),
     io:format("Listening on ~s:~B~n", [inet:ntoa(Address), Port]).
+
+connection_count(Counter) ->
+    atomics:put(Counter, 1, proplists:get_value(active_connections, ranch:info(challenge_listener))),
+    receive after 100 -> connection_count(Counter) end.
 
 required_env(Name) ->
     case os:getenv(Name) of
@@ -35,7 +51,13 @@ init(Req0, State) ->
             logger:error("Request failed: ~p:~p", [Class, Reason]),
             {500, error_json(<<"internal server error">>), Req0}
     end,
-    {ok, cowboy_req:reply(Status, #{<<"content-type">> => <<"application/json">>}, Body, Req), State}.
+    Headers = #{<<"content-type">> => <<"application/json">>},
+    % Finish uploads, database work and the response before retiring a busy connection.
+    ReplyHeaders = case atomics:get(maps:get(connections, State), 1) >= maps:get(keepalive_limit, State) of
+        true -> Headers#{<<"connection">> => <<"close">>};
+        false -> Headers
+    end,
+    {ok, cowboy_req:reply(Status, ReplyHeaders, Body, Req), State}.
 
 route(<<"GET">>, <<"/feed">>, Req, _) -> respond(challenge_db:feed(), Req);
 route(<<"GET">>, <<"/health">>, Req, #{started := Started}) ->

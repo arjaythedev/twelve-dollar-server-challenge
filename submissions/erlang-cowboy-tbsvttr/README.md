@@ -1,7 +1,7 @@
 # Erlang + Cowboy + SQLite
 
 Experimental direct HTTP submission: `HOST=0.0.0.0 PORT=80`, without Nginx.
-261 application lines in three Erlang modules. Cowboy handles HTTP connections; one Erlang
+283 application lines in three Erlang modules. Cowboy handles HTTP connections; one Erlang
 `gen_server` owns the SQLite connection and prepared statements. JWT verification and strict
 JSON decoding use OTP's built-in `crypto` and `json` modules.
 
@@ -49,11 +49,70 @@ This is not a standalone native executable.
   query and live like counts. JSON property order follows the specification.
 - Inserts with `RETURNING` reach completion before acknowledging success. Likes also finish
   their autocommit transaction before responding. There is no write batching.
-- HTTP idle/request timeouts are 75 seconds. The connection limit is 20,000; `start.sh` raises
-  the descriptor soft limit to the current hard limit. There are no kernel settings or CPU
+- HTTP idle/request timeouts are 75 seconds. Connection pressure is handled as described below;
+  `start.sh` raises the descriptor soft limit to the current hard limit. There are no kernel settings or CPU
   affinity changes.
 - POST bodies are limited to 16 KiB. Validation counts Unicode code points and uses the exact
   JavaScript trim characters. Invalid UTF-8 and unpaired surrogate escapes are rejected.
+
+## Connection pressure — 2026-10-09
+
+At ordinary connection counts, keep-alive retains the 75-second timeout. At
+32,000 open connections, completed responses advertise `Connection: close`
+and the transport drains the response before closing its socket. Clients reconnect
+for their next request. Uploads finish and successful writes commit before this
+response-based retirement takes place. The threshold is a connection/memory budget,
+not a limit on the number of logical users. Counters store transport metadata.
+
+Ranch can accept up to 60,000 connections, with its ceiling reduced to leave
+64 descriptors/ports free when the inherited limits are smaller. A 100 ms sampler
+publishes the active connection count through an atomic counter. The listen
+backlog is 4,096.
+
+`+hmbs 1024` lowers the minimum binary virtual heap from the OTP default of
+46,422 words; OTP 29 rounds this setting to 1,598 words. This collects discarded
+response binaries sooner on mostly idle connections. It is a GC trigger, not a
+hard memory limit. See the [OTP runtime flags](https://www.erlang.org/doc/apps/erts/erl_cmd.html)
+and [binary GC](https://www.erlang.org/doc/apps/erts/garbagecollection.html#virtual-binary-heap).
+
+The source accounting and performance tables recorded before this change describe
+the pinned baseline. New diagnostic evidence is in [capacity-results.json](capacity-results.json).
+The selected local ARM64 diagnostic passed at **30,000 logical users**
+for a **5-minute hold**, with zero errors and a worst-shard p99 of
+**21.0 ms**. Peak process RSS was **1284.6 MiB**;
+sampled peak container memory was **1718.5 MiB**. This is
+one diagnostic trial, not a maximum-capacity search or an official droplet score.
+
+From the repository root, against a running server on a fresh database copy:
+
+```bash
+python3 submissions/erlang-cowboy-tbsvttr/tests/connection_check.py 3000 --users 512 --seconds 20 --ramp 2 --timeout 5
+```
+
+For descriptor pressure, run the server with hard/soft `nofile=256` and give the
+client a higher limit. The diagnostic uses the feed/post/like/create loop and think
+times from `bench/load.js`, measures the hold, and reports request latency plus
+latency including reconnects. It uses Python, separate loopback source addresses,
+and no warm-up or ramp-down; it is not an official k6 score. It writes posts and likes.
+
+For sustained runs on Linux, compile the socket generator. It retains only each
+user's selected post ID, uses deferred ephemeral-port allocation on several
+loopback addresses, and lets the server's FIN retire completed connections. The
+body text and random-number generator differ from k6; the request mix, user loop
+and think-time ranges match. It reports generator CPU, memory and loop delay:
+
+```bash
+cc -O3 -Wall -Wextra submissions/erlang-cowboy-tbsvttr/tests/connection_load.c -lm -o submissions/erlang-cowboy-tbsvttr/bin/connection-load
+submissions/erlang-cowboy-tbsvttr/bin/connection-load 3000 --users 70000 --seconds 300 --ramp 60 --tokens seed/tokens.json
+```
+
+With the same low server limit, this targeted regression keeps an unfinished upload
+open during connection retirement, verifies committed writes, and checks that
+keep-alive resumes after the other connections close:
+
+```bash
+python3 submissions/erlang-cowboy-tbsvttr/tests/pressure_regression.py 3000
+```
 
 ## Validation
 
@@ -61,6 +120,7 @@ From the repository root, with the seed available:
 
 ```bash
 bash test/run.sh submissions/erlang-cowboy-tbsvttr
+python3 submissions/erlang-cowboy-tbsvttr/verify.py
 ```
 
 Optional checks against an already-running server use Python's standard library:

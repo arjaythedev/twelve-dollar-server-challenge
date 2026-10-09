@@ -19,6 +19,7 @@ static sqlite3_stmt *feed, *post, *create, *like, *exists, *health, *valid, *bod
 static const char *secret;
 static int64_t started;
 static char *out;
+static size_t connections, keepalive_limit = 60000;
 
 static sqlite3_stmt *prepare(const char *sql) {
   sqlite3_stmt *s = NULL;
@@ -78,7 +79,8 @@ static void respond(Response *h, int status) {
     status == 404 ? "404 Not Found" : status == 413 ? "413 Payload Too Large" :
     status == 503 ? "503 Service Unavailable" : "500 Internal Server Error";
   h->writeStatus(text)->writeHeader("Content-Type", "application/json");
-  h->end(View(out, fio_bstr_len(out)), status == 413); // Copies bytes queued by backpressure.
+  // Drain the completed response before retiring its connection.
+  h->end(View(out, fio_bstr_len(out)), status == 413 || connections >= keepalive_limit);
 }
 
 static void error(Response *h, int status, const char *message) {
@@ -228,8 +230,14 @@ int main(void) {
   if (!getrlimit(RLIMIT_NOFILE, &limit)) {
     limit.rlim_cur = limit.rlim_max;
     setrlimit(RLIMIT_NOFILE, &limit);
+    if (!getrlimit(RLIMIT_NOFILE, &limit) && limit.rlim_cur < keepalive_limit + 128)
+      keepalive_limit = limit.rlim_cur > 128 ? limit.rlim_cur - 128 : 1;
   }
   uWS::App app;
+  app.filter([](Response *, int change) {
+    if (change > 0) ++connections;
+    else --connections;
+  });
   app.any("/*", [](Response *res, uWS::HttpRequest *req) {
     View method = req->getCaseSensitiveMethod(), path = req->getUrl();
     View auth = req->getHeader("authorization");

@@ -28,9 +28,9 @@ Four external libraries are downloaded as source with pinned revisions and verif
 There are three direct dependencies and four resolved libraries, using the same
 package boundary as #6. The platform C/C++ runtimes and build tools are excluded.
 TLS and compression libraries are disabled. Application code consists of
-`server.cpp`, `auth.h`, and `unicode.h`: **424 physical lines**, including comments
-and blank lines, versus **384** in #6. Including build/start scripts and all validation
-and benchmark code, total own source is **1,170 physical lines**. Documentation, recorded
+`server.cpp`, `auth.h`, and `unicode.h`: **432 physical lines**, including comments
+and blank lines, versus **384** in #6. The baseline inventory counted **1,170 physical lines** including its build/start
+scripts and validation/benchmark code. Documentation, recorded
 benchmark data and downloaded libraries are excluded from that source total.
 
 ## Changes and transaction behavior
@@ -63,6 +63,56 @@ Sequential HTTP/1.1 keep-alive is supported. uWebSockets rejects another pipelin
 on a connection while an asynchronous response is pending; clients should await each
 response before issuing another request on that connection. Read-only synchronous
 pipelining was also checked, including slow readers.
+
+## Connection pressure — 2026-10-09
+
+At ordinary connection counts, keep-alive retains the 75-second timeout. At
+60,000 open connections, completed responses advertise `Connection: close`
+and the transport drains the response before closing its socket. Clients reconnect
+for their next request. Uploads finish and successful writes commit before this
+response-based retirement takes place. The threshold is a connection/memory budget,
+not a limit on the number of logical users. Counters store transport metadata.
+
+The HTTP connection filter counts opens and closes. The keep-alive budget leaves 128 descriptors free when the inherited file limit is smaller.
+
+The source accounting and performance tables recorded before this change describe
+the pinned baseline. New diagnostic evidence is in [capacity-results.json](capacity-results.json).
+The selected local ARM64 diagnostic passed at **70,000 logical users**
+for a **1-minute hold**, with zero errors and a worst-shard p99 of
+**16.6 ms**. Peak process RSS was **52.7 MiB**;
+sampled peak container memory was **575.9 MiB**. This is
+one diagnostic trial, not a maximum-capacity search or an official droplet score.
+
+From the repository root, against a running server on a fresh database copy:
+
+```bash
+python3 submissions/cpp-uwebsockets-v2-tbsvttr/tests/connection_check.py 3000 --users 512 --seconds 20 --ramp 2 --timeout 5
+```
+
+For descriptor pressure, run the server with hard/soft `nofile=256` and give the
+client a higher limit. The diagnostic uses the feed/post/like/create loop and think
+times from `bench/load.js`, measures the hold, and reports request latency plus
+latency including reconnects. It uses Python, separate loopback source addresses,
+and no warm-up or ramp-down; it is not an official k6 score. It writes posts and likes.
+
+For sustained runs on Linux, compile the socket generator. It retains only each
+user's selected post ID, uses deferred ephemeral-port allocation on several
+loopback addresses, and lets the server's FIN retire completed connections. The
+body text and random-number generator differ from k6; the request mix, user loop
+and think-time ranges match. It reports generator CPU, memory and loop delay:
+
+```bash
+cc -O3 -Wall -Wextra submissions/cpp-uwebsockets-v2-tbsvttr/tests/connection_load.c -lm -o submissions/cpp-uwebsockets-v2-tbsvttr/bin/connection-load
+submissions/cpp-uwebsockets-v2-tbsvttr/bin/connection-load 3000 --users 70000 --seconds 300 --ramp 60 --tokens seed/tokens.json
+```
+
+With the same low server limit, this targeted regression keeps an unfinished upload
+open during connection retirement, verifies committed writes, and checks that
+keep-alive resumes after the other connections close:
+
+```bash
+python3 submissions/cpp-uwebsockets-v2-tbsvttr/tests/pressure_regression.py 3000
+```
 
 ## Validation
 

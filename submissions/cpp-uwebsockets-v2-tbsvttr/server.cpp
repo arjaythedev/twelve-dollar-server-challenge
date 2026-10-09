@@ -28,6 +28,7 @@ struct Pending {
 };
 static std::vector<std::shared_ptr<Pending>> pending;
 static bool transaction;
+static size_t connections, keepalive_limit = 60000;
 
 static sqlite3_stmt *prepare(const char *sql) {
   sqlite3_stmt *s = NULL;
@@ -87,7 +88,8 @@ static void send(Response *h, int status, View payload) {
     status == 404 ? "404 Not Found" : status == 413 ? "413 Payload Too Large" :
     status == 503 ? "503 Service Unavailable" : "500 Internal Server Error";
   h->writeStatus(text)->writeHeader("Content-Type", "application/json");
-  h->end(payload, status == 413); // Copies bytes queued by backpressure.
+  // Retire connections only after their response; pending commits and uploads stay intact.
+  h->end(payload, status == 413 || connections >= keepalive_limit);
 }
 
 static void respond(Response *h, int status) {
@@ -268,8 +270,14 @@ int main(void) {
   if (!getrlimit(RLIMIT_NOFILE, &limit)) {
     limit.rlim_cur = limit.rlim_max;
     setrlimit(RLIMIT_NOFILE, &limit);
+    if (limit.rlim_cur < keepalive_limit + 128)
+      keepalive_limit = limit.rlim_cur > 128 ? limit.rlim_cur - 128 : 1;
   }
   uWS::App app;
+  app.filter([](Response *, int change) {
+    if (change > 0) ++connections;
+    else --connections;
+  });
   app.any("/*", [](Response *res, uWS::HttpRequest *req) {
     View method = req->getCaseSensitiveMethod(), path = req->getUrl();
     View auth = req->getHeader("authorization");

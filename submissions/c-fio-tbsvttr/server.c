@@ -1,8 +1,11 @@
 #define FIO_HTTP
 #define FIO_SHA2
 #define FIO_NO_TLS
-#include "fio-stl.h"
+#include "fio-stl-pressure.h"
 #include "sqlite3.h"
+#include <dirent.h>
+#include <errno.h>
+#include <sys/resource.h>
 #include "unicode.h"
 
 static sqlite3 *db;
@@ -63,8 +66,34 @@ static void row(sqlite3_stmt *s) {
   WRITE("}");
 }
 
+static size_t keepalive_limit = 60000;
+static int connection_pressure(void) {
+  static int64_t next_sample;
+  static int retiring;
+  int64_t now = fio_time_milli();
+  if (now >= next_sample) {
+    next_sample = now + 100;
+    DIR *directory = opendir("/proc/self/fd");
+    if (directory) {
+      size_t count = 0;
+      for (struct dirent *entry; (entry = readdir(directory));)
+        count += entry->d_name[0] != '.';
+      closedir(directory);
+      retiring = count >= keepalive_limit;
+    } else if (errno == EMFILE || errno == ENFILE) retiring = 1;
+  }
+  return retiring;
+}
+static void finish_response(fio_http_s *h) {
+  fio_str_info_s value = fio_http_response_header(h, FIO_STR_INFO1("connection"), 0);
+  if (value.len == 5 && !memcmp(value.buf, "close", 5))
+    fio_io_close(fio_http_io(h)); // Headers and body are queued; drain them before closing.
+}
+
 static void respond(fio_http_s *h, int status) {
   fio_http_status_set(h, status);
+  if (connection_pressure())
+    fio_http_response_header_set(h, FIO_STR_INFO1("connection"), FIO_STR_INFO1("close"));
   // The challenge checks for a space after ':' in the raw Content-Type header.
   fio_http_response_header_set(h, FIO_STR_INFO1("content-type"), FIO_STR_INFO1(" application/json"));
   fio_http_write(h, .buf=out, .len=fio_bstr_len(out), .copy=1, .finish=1);
@@ -217,7 +246,10 @@ int main(void) {
   started = fio_time_milli();
   char address[1024];
   if (snprintf(address, sizeof(address), "%s:%s", host ? host : "127.0.0.1", port ? port : "3000") >= sizeof(address)) return 1;
-  if (!fio_http_listen(address, .on_http=on_http, .timeout=75, .max_body_size=16384)) return 1;
+  struct rlimit limit;
+  if (!getrlimit(RLIMIT_NOFILE, &limit) && limit.rlim_cur < keepalive_limit + 128)
+    keepalive_limit = limit.rlim_cur > 128 ? limit.rlim_cur - 128 : 1;
+  if (!fio_http_listen(address, .on_http=on_http, .on_finish=finish_response, .timeout=75, .max_body_size=16384)) return 1;
   fio_io_start(0);
   for (sqlite3_stmt *s; (s = sqlite3_next_stmt(db, NULL));) sqlite3_finalize(s);
   sqlite3_close(db);

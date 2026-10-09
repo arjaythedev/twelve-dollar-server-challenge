@@ -10,6 +10,7 @@ fetch() {
 }
 fetch https://raw.githubusercontent.com/facil-io/cstl/24a57015d0989c64d5cc08ea9d24bd6cf97848bb/fio-stl.h \
   .deps/fio-stl.h fa05bdd4c193cf77cc1791f4e5a0c356c56e7abba38af284786231f0d0082154
+python3 fix-fio.py .deps/fio-stl.h .deps/fio-stl-pressure.h
 fetch https://www.sqlite.org/2026/sqlite-amalgamation-3530400.zip \
   .deps/sqlite.zip 1e71ddf93849c6a6ecf58b827c0692073d2dd7ee40196158068f7b29f422e87d
 sqlite=.deps/sqlite-amalgamation-3530400

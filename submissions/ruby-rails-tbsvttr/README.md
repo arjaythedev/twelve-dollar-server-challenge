@@ -3,14 +3,77 @@
 Rails 8.1.4, Ruby 4.0.5 with YJIT, Puma 8.0.2, sqlite3 2.9.6 and jwt 3.3.0.
 All gem versions and checksums are pinned in `Gemfile.lock`; the Ruby source archive is checksum-pinned.
 
-**Behind Nginx:** use the repository's `bench/nginx.conf`. Puma listens on `$HOST:$PORT`, with two request
-threads and a 75-second keep-alive timeout. Nginx handles the many idle client connections.
+**Direct HTTP:** Puma listens on `$HOST:$PORT`, with two request threads, its request reactor,
+and a 75-second keep-alive timeout. Use `HOST=0.0.0.0 PORT=80` on the benchmark machine.
+The application and server configuration total 194 physical lines, including the pressure helper.
 
 ```sh
 sudo bash install.sh
 bash build.sh
-SQLITE_PATH=/path/to/feed.db JWT_SECRET=twelve-dollar-challenge HOST=127.0.0.1 PORT=3000 bash start.sh
+SQLITE_PATH=/path/to/feed.db JWT_SECRET=twelve-dollar-challenge HOST=0.0.0.0 PORT=80 bash start.sh
 ```
+
+## Connection pressure — 2026-10-09
+
+The Linux process descriptor count is sampled on the response path at most once
+per 100 ms. At 16,000 open descriptors, responses advertise `Connection: close`;
+the transport drains their headers and body before retiring the socket. Smaller
+inherited limits reduce the budget with a reserve of 128. An `EMFILE`/`ENFILE`
+sampling failure also triggers retirement. The sample includes non-socket
+descriptors and incomplete uploads; it stores transport metadata, not API data.
+On platforms without `/proc`, normal keep-alive remains available without this
+Linux pressure guard. Successful writes commit before their replies.
+
+Ordinary connection counts retain the 75-second keep-alive timeout. Clients
+reconnect after a retired response. The resource budget is not a logical-user cap.
+
+
+Puma now serves directly under rule 9, using its reactor for idle connections and
+incomplete uploads. `max_keep_alive` is 1,000,000,000 instead of the default 999:
+the default closes a long pipeline with unread requests still buffered. The
+75-second idle timeout remains. Puma 8 bases its keep-alive decision on the Rack
+request environment; the response path sets its connection-close flag after
+database work. A response header alone does not retire its socket. The historical tables below measured the older
+Nginx deployment; their recorded values are not measurements of this direct setup.
+
+The source and throughput comparisons recorded before this update describe their
+pinned baseline revisions. New evidence and exact source hashes are recorded in
+[capacity-results.json](capacity-results.json).
+
+The selected diagnostic served **30,000 logical users** for a **5-minute hold**, with **0 errors**, worst-shard p95/p99 **71.4/124.3 ms**, and sampled peak container memory **710.3 MiB**. The sum of process RSS high-water marks peaked at **345.0 MiB**; shared pages may be counted more than once. This is one local trial, not a maximum-capacity search.
+
+Run correctness and recovery checks from the submission directory on a fresh seed:
+
+```bash
+python3 verify.py
+```
+
+With server hard/soft `nofile=256` and a higher client limit:
+
+```bash
+python3 tests/pressure_regression.py 3000
+python3 tests/fd_exhaustion.py 3000
+```
+
+The first regression finishes an interrupted Unicode upload during retirement,
+checks committed writes/readbacks, and confirms keep-alive returns when pressure
+subsides. The second exhausts descriptors with incomplete HTTP headers before
+completing one valid request and checking that its full response drains and closes.
+
+For a sustained Linux diagnostic, against a running server and fresh seed copy:
+
+```bash
+mkdir -p bin
+cc -O3 -Wall -Wextra tests/connection_load.c -lm -o bin/connection-load
+bin/connection-load 3000 --users 70000 --seconds 300 --ramp 60 --tokens ../../seed/tokens.json
+```
+
+The C generator follows the feed/post/like/create loop, request probabilities and
+think-time ranges in `bench/load.js`. It uses a different PRNG and post text,
+several loopback source addresses, and no separate warm-up or ramp-down. It reports
+hold-only request latency, latency including reconnects, and generator resource
+usage. These are local diagnostics, not official k6/droplet scores or a search for
+maximum capacity. The diagnostic writes posts and likes.
 
 ## Implementation
 
@@ -60,7 +123,7 @@ duplicate likes, a forced-process-restart check preserving acknowledged writes, 
 Puma socket after 66 idle seconds. A targeted concurrent-create/like check also passes: the action mutex
 prevents the incorrect `already_liked: true` response possible when only individual queries were locked.
 
-## Comparison with Rails PR #2 and the previous PR #12
+## Historical comparison at `9fafb32` with Rails PR #2 and the previous PR #12
 
 The original Rails baseline is `ruby-rails-gambitboy` at `33dd92f6bc13d4b4a78e2ef3f50467fca2fc52cc`.
 The previous version of this submission is commit `230b469` from PR #12.

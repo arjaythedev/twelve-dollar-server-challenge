@@ -3,6 +3,7 @@ require "rails"
 require "action_controller/railtie"
 require "sqlite3"
 require "jwt"
+require_relative "connection_pressure"
 ActionDispatch::Request.parameter_parsers = {} # Parse JSON only after authentication.
 
 class FeedApp < Rails::Application
@@ -26,6 +27,7 @@ class FeedController < ActionController::Metal
   STARTED = Process.clock_gettime(Process::CLOCK_MONOTONIC)
   SECRET = ENV.fetch("JWT_SECRET")
   QUERY_LOCK = Mutex.new
+  PRESSURE = ConnectionPressure.new(16_000)
   DB = SQLite3::Database.new(ENV.fetch("SQLITE_PATH"))
   DB.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON;
                     PRAGMA locking_mode=EXCLUSIVE; PRAGMA cache_size=500; PRAGMA mmap_size=536870912;")
@@ -105,6 +107,7 @@ class FeedController < ActionController::Metal
   end
 
   def reply(document, status = 200)
+    request.env["HTTP_CONNECTION"] = "close" if PRESSURE.call # Puma bases retirement on the Rack environment.
     self.status = status
     self.content_type = "application/json"
     self.response_body = document

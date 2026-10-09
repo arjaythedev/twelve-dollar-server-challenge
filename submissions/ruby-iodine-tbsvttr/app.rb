@@ -2,6 +2,7 @@
 require "sqlite3"
 require "json"
 require "openssl"
+require_relative "connection_pressure"
 
 class FeedApp
   HEADERS = { "content-type" => " application/json" }.freeze # Iodine writes ':' without optional whitespace.
@@ -24,6 +25,7 @@ class FeedApp
   }.freeze
 
   def initialize
+    @pressure = ConnectionPressure.new(32_000)
     @started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
     @secret = ENV.fetch("JWT_SECRET")
     @lock = Mutex.new
@@ -131,7 +133,8 @@ class FeedApp
   end
 
   def reply(document, status = 200)
-    [status, HEADERS, [document]]
+    headers = @pressure.call ? HEADERS.merge("connection" => "close") : HEADERS
+    [status, headers, [document]]
   end
 
   def error(status, message)

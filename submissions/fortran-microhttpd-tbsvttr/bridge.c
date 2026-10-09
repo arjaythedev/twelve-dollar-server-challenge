@@ -8,6 +8,7 @@
 #include <microhttpd.h>
 #include <arpa/inet.h>
 #include <signal.h>
+#include <sys/resource.h>
 #include <time.h>
 
 extern void app_request(const char *, const char *, const char *, const char *, int, void *);
@@ -21,8 +22,15 @@ struct request {
   struct request *next;
 };
 static struct request *pending;
+static unsigned connections, keepalive_limit = 60000;
 static volatile sig_atomic_t stopping;
 static void stop(int signal) { (void)signal; stopping = 1; }
+static void connection_changed(void *cls, struct MHD_Connection *c, void **state,
+                               enum MHD_ConnectionNotificationCode reason) {
+  (void)cls; (void)c; (void)state;
+  if (reason == MHD_CONNECTION_NOTIFY_STARTED) ++connections;
+  else if (reason == MHD_CONNECTION_NOTIFY_CLOSED) --connections;
+}
 static void complete(void *cls, struct MHD_Connection *c, void **state,
                      enum MHD_RequestTerminationCode reason) {
   (void)cls; (void)c; (void)reason;
@@ -36,6 +44,8 @@ void http_reply(void *opaque, int status, const char *body, int length, int defe
   r->response = MHD_create_response_from_buffer((size_t)length, (void *)body, MHD_RESPMEM_MUST_COPY);
   if (!r->response) abort();
   MHD_add_response_header(r->response, "Content-Type", "application/json");
+  if (connections >= keepalive_limit)
+    MHD_add_response_header(r->response, "Connection", "close");
   if (defer) {
     MHD_suspend_connection(r->connection);
     r->next = pending;
@@ -84,11 +94,20 @@ int http_run(const char *host, int port) {
   struct sockaddr_in address = {.sin_family = AF_INET, .sin_port = htons((uint16_t)port)};
   if (port < 1 || port > 65535 || inet_pton(AF_INET, host, &address.sin_addr) != 1) return 1;
   signal(SIGTERM, stop); signal(SIGINT, stop); signal(SIGPIPE, SIG_IGN);
+  struct rlimit limit;
+  if (!getrlimit(RLIMIT_NOFILE, &limit)) {
+    limit.rlim_cur = limit.rlim_max;
+    if (setrlimit(RLIMIT_NOFILE, &limit)) return 1;
+    if (limit.rlim_cur < keepalive_limit + 128)
+      keepalive_limit = limit.rlim_cur > 128 ? (unsigned)limit.rlim_cur - 128 : 1;
+  }
   struct MHD_Daemon *daemon = MHD_start_daemon(MHD_USE_EPOLL | MHD_ALLOW_SUSPEND_RESUME,
       (uint16_t)port, NULL, NULL, access_handler, NULL,
       MHD_OPTION_SOCK_ADDR, &address,
-      MHD_OPTION_CONNECTION_LIMIT, (unsigned)60000,
+      MHD_OPTION_CONNECTION_LIMIT, (unsigned)65000,
+      MHD_OPTION_CONNECTION_MEMORY_LIMIT, (size_t)16384,
       MHD_OPTION_CONNECTION_TIMEOUT, (unsigned)75,
+      MHD_OPTION_NOTIFY_CONNECTION, connection_changed, NULL,
       MHD_OPTION_NOTIFY_COMPLETED, complete, NULL, MHD_OPTION_END);
   if (!daemon) return 1;
   while (!stopping) {

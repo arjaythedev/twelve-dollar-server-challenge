@@ -11,7 +11,7 @@ Routing, SQL, JWT claim checks, Unicode validation/trimming, JSON serialization,
 and transaction policy are implemented in Fortran. `bindings.f90` declares the
 ISO_C_BINDING interfaces. `bridge.c` supplies HTTP callbacks and generic adapters
 for C strings, crypto primitives, and SQLite ownership. **All application LOC
-includes both languages: 575 Fortran lines plus 156 C lines, 731 total**, including
+includes both languages: 575 Fortran lines plus 175 C lines, 750 total**, including
 comments and blanks. This is not an implementation written exclusively in Fortran.
 
 libmicrohttpd runs in one external epoll loop. Requests whose responses depend on
@@ -35,7 +35,7 @@ Direct HTTP/1.1 with keep-alive, without Nginx. Configuration uses only the four
 challenge environment variables. Installation supports Linux x86_64 and ARM64;
 measurements below are native ARM64, not the official x86_64 droplet.
 
-Source accounting: **731 application LOC**, **1,521 total own source/config LOC**,
+Baseline source accounting: **731 application LOC**, **1,521 total own source/config LOC**,
 and **496,302 own plus inspected dependency-source LOC**. The latter
 is a scoped source footprint, not executed code or a complete runtime footprint.
 File scopes and hashes are recorded in `source-inventory.json`; documentation,
@@ -63,6 +63,56 @@ Commit failure rolls back and changes queued responses to HTTP 500. A peer that
 abandons a complete request may still have its write committed; it receives no
 success response. Constraint failures do not undo unrelated successful statements.
 An automatically rolled-back transaction invalidates the whole pending batch.
+
+## Connection pressure — 2026-10-09
+
+At ordinary connection counts, keep-alive retains the 75-second timeout. At
+60,000 open connections, completed responses advertise `Connection: close`
+and the transport drains the response before closing its socket. Clients reconnect
+for their next request. Uploads finish and successful writes commit before this
+response-based retirement takes place. The threshold is a connection/memory budget,
+not a limit on the number of logical users. Counters store transport metadata.
+
+The per-connection libmicrohttpd pool is 16 KiB instead of its 32 KiB default. Incoming headers share this bounded pool; POST bodies stream into the separate 16 KiB application body limit. The library can accept up to 65,000 connections. The keep-alive budget leaves 128 descriptors free when the inherited file limit is smaller.
+
+The source accounting and performance tables recorded before this change describe
+the pinned baseline. New diagnostic evidence is in [capacity-results.json](capacity-results.json).
+The selected local ARM64 diagnostic passed at **70,000 logical users**
+for a **1-minute hold**, with zero errors and a worst-shard p99 of
+**23.6 ms**. Peak process RSS was **1018.6 MiB**;
+sampled peak container memory was **1547.0 MiB**. This is
+one diagnostic trial, not a maximum-capacity search or an official droplet score.
+
+From the repository root, against a running server on a fresh database copy:
+
+```bash
+python3 submissions/fortran-microhttpd-tbsvttr/tests/connection_check.py 3000 --users 512 --seconds 20 --ramp 2 --timeout 5
+```
+
+For descriptor pressure, run the server with hard/soft `nofile=256` and give the
+client a higher limit. The diagnostic uses the feed/post/like/create loop and think
+times from `bench/load.js`, measures the hold, and reports request latency plus
+latency including reconnects. It uses Python, separate loopback source addresses,
+and no warm-up or ramp-down; it is not an official k6 score. It writes posts and likes.
+
+For sustained runs on Linux, compile the socket generator. It retains only each
+user's selected post ID, uses deferred ephemeral-port allocation on several
+loopback addresses, and lets the server's FIN retire completed connections. The
+body text and random-number generator differ from k6; the request mix, user loop
+and think-time ranges match. It reports generator CPU, memory and loop delay:
+
+```bash
+cc -O3 -Wall -Wextra submissions/fortran-microhttpd-tbsvttr/tests/connection_load.c -lm -o submissions/fortran-microhttpd-tbsvttr/bin/connection-load
+submissions/fortran-microhttpd-tbsvttr/bin/connection-load 3000 --users 70000 --seconds 300 --ramp 60 --tokens seed/tokens.json
+```
+
+With the same low server limit, this targeted regression keeps an unfinished upload
+open during connection retirement, verifies committed writes, and checks that
+keep-alive resumes after the other connections close:
+
+```bash
+python3 submissions/fortran-microhttpd-tbsvttr/tests/pressure_regression.py 3000
+```
 
 ## Validation
 

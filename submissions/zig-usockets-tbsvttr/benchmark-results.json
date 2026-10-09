@@ -1,0 +1,1921 @@
+{
+  "summary": {
+    "batch": "Z1",
+    "weights": {
+      "score_throughput": 0.4,
+      "app_loc": 0.2,
+      "resolved_deps": 0.2,
+      "rss_mib": 0.2
+    },
+    "bounds": {
+      "score_throughput": [
+        3470.09,
+        83948.09
+      ],
+      "app_loc": [
+        105,
+        1357
+      ],
+      "resolved_deps": [
+        0,
+        111
+      ],
+      "rss_mib": [
+        39.84375,
+        237.30859375
+      ]
+    },
+    "normalization": "Published U5 min/max bounds held fixed; each component clipped to [0,100]. All rows freshly measured in Z1; no historic measurements used as row values.",
+    "rows": [
+      {
+        "pr": 15,
+        "repo": "tbsvttr/twelve-dollar-server-challenge",
+        "commit": "69c1ed23d9e467f74c6d1a121f1bcbcefda15094",
+        "folder": "cpp-uwebsockets-v2-tbsvttr",
+        "label": "[#15](https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/15) [C++ / uWebSockets group commit](https://github.com/tbsvttr/twelve-dollar-server-challenge/tree/69c1ed23d9e467f74c6d1a121f1bcbcefda15094/submissions/cpp-uwebsockets-v2-tbsvttr)",
+        "app_loc": 424,
+        "own_loc": 1170,
+        "direct_deps": 3,
+        "resolved_deps": 4,
+        "eligible": true,
+        "nginx": false,
+        "rps": 73603.22,
+        "rss_mib": 43.23046875,
+        "p99_ms": 12.59,
+        "cpu_percent": 88.07939876490657,
+        "score_throughput": 73603.22,
+        "components": {
+          "score_throughput": 87.14571684186983,
+          "app_loc": 74.52076677316293,
+          "resolved_deps": 96.3963963963964,
+          "rss_mib": 98.28490039761824
+        },
+        "score": 88.69869945018345,
+        "rps_min": 69036.91,
+        "rps_max": 73663.12
+      },
+      {
+        "pr": 16,
+        "repo": "tbsvttr/twelve-dollar-server-challenge",
+        "commit": "27af12495ab12fed93cf249a1b9e3fd6606b28c7",
+        "folder": "fortran-microhttpd-tbsvttr",
+        "label": "[#16](https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/16) [Fortran / libmicrohttpd](https://github.com/tbsvttr/twelve-dollar-server-challenge/blob/27af12495ab12fed93cf249a1b9e3fd6606b28c7/submissions/fortran-microhttpd-tbsvttr/README.md)",
+        "app_loc": 731,
+        "own_loc": 1521,
+        "direct_deps": 3,
+        "resolved_deps": 3,
+        "eligible": true,
+        "nginx": false,
+        "rps": 30568.17,
+        "rss_mib": 40.6171875,
+        "p99_ms": 13.2,
+        "cpu_percent": 94.6727757361708,
+        "score_throughput": 30568.17,
+        "components": {
+          "score_throughput": 33.67141330549964,
+          "app_loc": 50.0,
+          "resolved_deps": 97.29729729729729,
+          "rss_mib": 99.60831635378133
+        },
+        "score": 62.84968805241559,
+        "rps_min": 30091.96,
+        "rps_max": 31569.39
+      },
+      {
+        "pr": 17,
+        "repo": "tbsvttr/twelve-dollar-server-challenge",
+        "commit": "7f3057101d0b513a0f900ddc5e8c6cea17721d03",
+        "folder": "rust-axum-tbsvttr",
+        "label": "[#17](https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/17) [Rust / Axum](https://github.com/tbsvttr/twelve-dollar-server-challenge/blob/7f3057101d0b513a0f900ddc5e8c6cea17721d03/submissions/rust-axum-tbsvttr/README.md)",
+        "app_loc": 393,
+        "own_loc": 1197,
+        "direct_deps": 9,
+        "resolved_deps": 62,
+        "eligible": true,
+        "nginx": false,
+        "rps": 58345.52,
+        "rss_mib": 42.8046875,
+        "p99_ms": 12.17,
+        "cpu_percent": 90.6885659642752,
+        "score_throughput": 58345.52,
+        "components": {
+          "score_throughput": 68.18687094609706,
+          "app_loc": 76.99680511182109,
+          "resolved_deps": 44.14414414414414,
+          "rss_mib": 98.50052422306186
+        },
+        "score": 71.20304307424425,
+        "rps_min": 58126.34,
+        "rps_max": 59306.61
+      },
+      {
+        "pr": 18,
+        "repo": "tbsvttr/twelve-dollar-server-challenge",
+        "commit": "bd1187b3ef8883dcad0004bf6f2fa2b95ad8f988",
+        "folder": "go-nethttp-tbsvttr",
+        "label": "[#18](https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/18) [Go / net/http](https://github.com/tbsvttr/twelve-dollar-server-challenge/blob/bd1187b3ef8883dcad0004bf6f2fa2b95ad8f988/submissions/go-nethttp-tbsvttr/README.md)",
+        "app_loc": 391,
+        "own_loc": 1181,
+        "direct_deps": 2,
+        "resolved_deps": 2,
+        "eligible": true,
+        "nginx": false,
+        "rps": 32883.93,
+        "rss_mib": 53.2421875,
+        "p99_ms": 13.75,
+        "cpu_percent": 94.11909386569317,
+        "score_throughput": 32883.93,
+        "components": {
+          "score_throughput": 36.54892020179428,
+          "app_loc": 77.15654952076677,
+          "resolved_deps": 98.1981981981982,
+          "rss_mib": 93.21477319934324
+        },
+        "score": 68.33347226437935,
+        "rps_min": 31842.41,
+        "rps_max": 33402.07
+      },
+      {
+        "pr": 19,
+        "repo": "arjaythedev/twelve-dollar-server-challenge",
+        "commit": "f631fff22aa6b0d50e78505e3d57531fb8b88815",
+        "folder": "rust-epoll-scooter1337",
+        "label": "[#19](https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/19) [Rust / raw epoll (scooter1337)](https://github.com/arjaythedev/twelve-dollar-server-challenge/tree/f631fff22aa6b0d50e78505e3d57531fb8b88815/submissions/rust-epoll-scooter1337)",
+        "app_loc": 1357,
+        "own_loc": 2426,
+        "direct_deps": 10,
+        "resolved_deps": 25,
+        "eligible": true,
+        "nginx": false,
+        "rps": 83958.01,
+        "rss_mib": 41.140625,
+        "p99_ms": 13.41,
+        "cpu_percent": 85.86853386601086,
+        "score_throughput": 83958.01,
+        "components": {
+          "score_throughput": 100,
+          "app_loc": 0,
+          "resolved_deps": 77.47747747747748,
+          "rss_mib": 99.34323752250202
+        },
+        "score": 75.3641429999959,
+        "rps_min": 83272.47,
+        "rps_max": 87224.17
+      },
+      {
+        "pr": 0,
+        "repo": "local",
+        "commit": null,
+        "folder": "zig-usockets-tbsvttr",
+        "label": "Zig / uSockets + picohttpparser",
+        "app_loc": 673,
+        "own_loc": 1422,
+        "direct_deps": 3,
+        "resolved_deps": 3,
+        "eligible": true,
+        "nginx": false,
+        "rps": 72191.36,
+        "rss_mib": 42.125,
+        "p99_ms": 12.48,
+        "cpu_percent": 88.55536245691825,
+        "score_throughput": 72191.36,
+        "components": {
+          "score_throughput": 85.39137404011034,
+          "app_loc": 54.63258785942492,
+          "resolved_deps": 97.29729729729729,
+          "rss_mib": 98.84473106367827
+        },
+        "score": 84.31147286012424,
+        "rps_min": 71417.62,
+        "rps_max": 72275.42
+      }
+    ]
+  },
+  "environment": {
+    "host_cpu": "Apple M2 Pro",
+    "platform": "Linux-7.0.14-linuxkit-aarch64-with-glibc2.39",
+    "base_image": "sha256:901ab577025cfdcf7abc716fb4158774615b881383529bb77163b5f07f963898",
+    "containers": [
+      {
+        "Name": "/twelve-zig-server",
+        "Image": "sha256:901ab577025cfdcf7abc716fb4158774615b881383529bb77163b5f07f963898",
+        "Created": "2026-10-07T13:38:15.122056583Z",
+        "limits": {
+          "Memory": 2147483648,
+          "MemorySwap": 2147483648,
+          "NanoCpus": 1000000000,
+          "CpusetCpus": "0",
+          "Ulimits": [
+            {
+              "Name": "nofile",
+              "Hard": 65535,
+              "Soft": 65535
+            }
+          ]
+        }
+      },
+      {
+        "Name": "/twelve-zig-load",
+        "Image": "sha256:901ab577025cfdcf7abc716fb4158774615b881383529bb77163b5f07f963898",
+        "Created": "2026-10-07T13:39:04.753825968Z",
+        "limits": {
+          "Memory": 2147483648,
+          "MemorySwap": 2147483648,
+          "NanoCpus": 2000000000,
+          "CpusetCpus": "1,2",
+          "Ulimits": [
+            {
+              "Name": "nofile",
+              "Hard": 65535,
+              "Soft": 65535
+            }
+          ]
+        }
+      }
+    ],
+    "toolchain": "Zig 0.17.0",
+    "optimization": "ReleaseFast",
+    "source_inventory": {
+      "application_loc": 673,
+      "own_loc": 1422,
+      "files": {
+        "bench.lua": 28,
+        "build.sh": 40,
+        "check.py": 125,
+        "install.sh": 16,
+        "src/app.zig": 341,
+        "src/c.h": 8,
+        "src/c.zig": 1,
+        "src/main.zig": 323,
+        "start.sh": 3,
+        "tests/commit_check.py": 133,
+        "tests/commit_check.sh": 13,
+        "tests/commit_fault.c": 27,
+        "tests/http_check.py": 91,
+        "tests/idle_client.py": 40,
+        "transport_check.py": 140,
+        "verify.py": 93
+      },
+      "sha256": {
+        "bench.lua": "86087f6dc3f00f9d998112b84cb8f34096c302895e7c045d0b56f700cf496519",
+        "build.sh": "37b0b5fd5bc779cfa7e029bd3d3786050d7cdf1b9ae1d2f719390e86fa82168e",
+        "check.py": "e240070a4821509cd875186455b01f887900494e119e109d29714d2f9d55b177",
+        "install.sh": "a5c2bec82f01ae12589e642dab7a2943085a64fe786416807de9e9deaa696a2a",
+        "src/app.zig": "ac1e01b9434d65ddaac60b82fc9ed96ef94128033f947d9f31168e8da6fc64d1",
+        "src/c.h": "3d1ff888140240fcde46d09218acc1dd879eca11c6c85ebb3317ec3f089ada56",
+        "src/c.zig": "f0dfb1e9c2316e7e1b2d9d654c0512d222802910e20ce857de4bd51c94db42a8",
+        "src/main.zig": "5883eeb8328ff9eea6cd8e098dcc2c7d797f220cf0eaab2739f2520c4c7ce981",
+        "start.sh": "8742d39196b740703d4f017f6875477f49c18f4c9fd28ecb27784170d25dc9ac",
+        "tests/commit_check.py": "20cd5761825111a9ca2d98f8ffa5b0dde4681011f5add3c4ad2001b713d1b475",
+        "tests/commit_check.sh": "9b9c9d667126108476f4dd9a712ef28807f69b1d04fd8b44e75e3ab4ae0d8f1b",
+        "tests/commit_fault.c": "7bf9337f310a0d38c36fd4f4f0719f11f4f9ce38319d84d393840921e3e1621a",
+        "tests/http_check.py": "9f5b1cee4e69128599440ac8579b517dd40c21f1d0c14b51d4af29520a0e62e1",
+        "tests/idle_client.py": "52bc471ac1f876713bc3aa7c398863ecb6466083b8a9c1957465c0ece3354dd2",
+        "transport_check.py": "60b40beb7874ca8d0185660da8d53a586519af9901e106d2b50645fbd5f7a58e",
+        "verify.py": "01a6dd440d2ee064b5a1b780e993733ea802353c66faad5f3cccafe9b656f1a5"
+      }
+    },
+    "seed_sha256": "ef5f135c16a2277a68ef37f1f1a66e4100f9dbc6743d2ef54dbeb533c4dceb0e",
+    "mixed_lua_sha256": "86087f6dc3f00f9d998112b84cb8f34096c302895e7c045d0b56f700cf496519",
+    "candidate_inventory": {
+      "15": {
+        "binary_sha256": "3b3fcb36808bd179b2ca8fb9ceb992af8aaa7c54d07fe0d93b731757ae8adf42",
+        "source_mismatches": []
+      },
+      "16": {
+        "binary_sha256": "b72bad2862bd427dc19dd976082d4ed69f3ce07ee39b63f51fc4e7be770f1687",
+        "source_mismatches": []
+      },
+      "17": {
+        "binary_sha256": "fdb6b6155d04f90c8395bd5de9cb6cfa28ee70502d938bc26855a48fb8da43d7",
+        "source_mismatches": []
+      },
+      "18": {
+        "binary_sha256": "32a79057ac7592ce47f0efc613179097600c25b396145ba2a23fd3bbf5545143",
+        "source_mismatches": []
+      },
+      "19": {
+        "binary_sha256": "7e93d3386f79e244b6af96749249b222bc856d300f1c6007750f018bc3266e4e",
+        "source_mismatches": []
+      },
+      "0": {
+        "binary_sha256": "4be3296f79dd85f786a35cd1df42a8b921d03b2faa1243e79c7778aea2891fdc"
+      }
+    }
+  },
+  "measurements": [
+    {
+      "pr": 16,
+      "trial": 1,
+      "mode": "bench",
+      "port": 23116,
+      "recorded_at": "2026-10-07T13:39:53Z",
+      "service": {
+        "ready": true,
+        "roots": [
+          81
+        ],
+        "port": 23116,
+        "log": "/suite/logs/pr16-23116.log",
+        "nginx": false
+      },
+      "warmup_output": "Running 2s test @ http://127.0.0.1:23116/feed\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     4.00ms   10.11ms  90.84ms   96.31%\n    Req/Sec    15.14k     2.97k   25.77k    90.24%\n  Latency Distribution\n     50%    1.95ms\n     75%    2.39ms\n     90%    3.80ms\n     99%   67.82ms\n  61884 requests in 2.09s, 104.94MB read\nRequests/sec:  29671.68\nTransfer/sec:     50.31MB\n",
+      "output": "Running 15s test @ http://127.0.0.1:23116/feed\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     2.28ms    1.99ms  21.93ms   94.30%\n    Req/Sec    15.90k     1.44k   30.00k    81.40%\n  Latency Distribution\n     50%    1.92ms\n     75%    2.30ms\n     90%    2.83ms\n     99%   12.94ms\n  476523 requests in 15.09s, 811.65MB read\nRequests/sec:  31569.39\nTransfer/sec:     53.77MB\n",
+      "stderr": "",
+      "before": {
+        "monotonic": 1332.579499816,
+        "cpu_s": 1.9,
+        "rss_kib": 38380,
+        "hwm_kib": 38380,
+        "processes": {
+          "81": {
+            "ppid": 75,
+            "cpu_s": 1.9,
+            "rss_kib": 38380,
+            "hwm_kib": 38380,
+            "threads": 1
+          }
+        }
+      },
+      "after": {
+        "monotonic": 1347.784045657,
+        "cpu_s": 16.31,
+        "rss_kib": 41624,
+        "hwm_kib": 41624,
+        "processes": {
+          "81": {
+            "ppid": 75,
+            "cpu_s": 16.31,
+            "rss_kib": 41624,
+            "hwm_kib": 41624,
+            "threads": 1
+          }
+        }
+      },
+      "final": [
+        {
+          "database_after": {
+            "post_count": 505063,
+            "max_post_id": 505063,
+            "integrity": "ok"
+          }
+        }
+      ],
+      "rps": 31569.39,
+      "duration_s": 15.09,
+      "p99_ms": 12.94,
+      "rss_mib": 40.6484375,
+      "cpu_percent": 94.77428757617024,
+      "http_errors": 0,
+      "socket_errors": {
+        "connect": 0,
+        "read": 0,
+        "write": 0,
+        "timeout": 0
+      },
+      "valid_duration": true
+    },
+    {
+      "pr": 0,
+      "trial": 1,
+      "mode": "bench",
+      "port": 23100,
+      "recorded_at": "2026-10-07T13:40:11Z",
+      "service": {
+        "ready": true,
+        "roots": [
+          89
+        ],
+        "port": 23100,
+        "log": "/suite/logs/pr0-23100.log",
+        "nginx": false
+      },
+      "warmup_output": "Running 2s test @ http://127.0.0.1:23100/feed\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     4.96ms   17.14ms 132.78ms   95.61%\n    Req/Sec    33.78k     8.00k   57.10k    87.80%\n  Latency Distribution\n     50%  762.00us\n     75%    1.01ms\n     90%    8.29ms\n     99%  107.57ms\n  137850 requests in 2.08s, 232.85MB read\nRequests/sec:  66126.62\nTransfer/sec:    111.70MB\n",
+      "output": "Running 15s test @ http://127.0.0.1:23100/feed\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     1.53ms    2.59ms  32.66ms   90.49%\n    Req/Sec    36.36k     2.53k   54.67k    77.41%\n  Latency Distribution\n     50%  748.00us\n     75%    0.95ms\n     90%    3.71ms\n     99%   12.48ms\n  1090069 requests in 15.10s, 1.81GB read\nRequests/sec:  72191.36\nTransfer/sec:    122.59MB\n",
+      "stderr": "",
+      "before": {
+        "monotonic": 1350.412079825,
+        "cpu_s": 1.72,
+        "rss_kib": 37132,
+        "hwm_kib": 37132,
+        "processes": {
+          "89": {
+            "ppid": 83,
+            "cpu_s": 1.72,
+            "rss_kib": 37132,
+            "hwm_kib": 37132,
+            "threads": 1
+          }
+        }
+      },
+      "after": {
+        "monotonic": 1365.622903457,
+        "cpu_s": 15.19,
+        "rss_kib": 43052,
+        "hwm_kib": 43052,
+        "processes": {
+          "89": {
+            "ppid": 83,
+            "cpu_s": 15.19,
+            "rss_kib": 43052,
+            "hwm_kib": 43052,
+            "threads": 1
+          }
+        }
+      },
+      "final": [
+        {
+          "database_after": {
+            "post_count": 511361,
+            "max_post_id": 511361,
+            "integrity": "ok"
+          }
+        }
+      ],
+      "rps": 72191.36,
+      "duration_s": 15.1,
+      "p99_ms": 12.48,
+      "rss_mib": 42.04296875,
+      "cpu_percent": 88.55536245691825,
+      "http_errors": 0,
+      "socket_errors": {
+        "connect": 0,
+        "read": 0,
+        "write": 0,
+        "timeout": 0
+      },
+      "valid_duration": true
+    },
+    {
+      "pr": 19,
+      "trial": 1,
+      "mode": "bench",
+      "port": 23119,
+      "recorded_at": "2026-10-07T13:40:29Z",
+      "service": {
+        "ready": true,
+        "roots": [
+          97
+        ],
+        "port": 23119,
+        "log": "/suite/logs/pr19-23119.log",
+        "nginx": false
+      },
+      "warmup_output": "Running 2s test @ http://127.0.0.1:23119/feed\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     2.74ms    8.08ms  78.17ms   94.46%\n    Req/Sec    41.08k     7.74k   64.65k    92.68%\n  Latency Distribution\n     50%  575.00us\n     75%  691.00us\n     90%    7.46ms\n     99%   52.70ms\n  167960 requests in 2.09s, 279.49MB read\nRequests/sec:  80419.89\nTransfer/sec:    133.82MB\n",
+      "output": "Running 15s test @ http://127.0.0.1:23119/feed\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     1.47ms    2.60ms  17.46ms   89.15%\n    Req/Sec    43.91k     3.12k   57.96k    66.45%\n  Latency Distribution\n     50%  564.00us\n     75%  663.00us\n     90%    4.74ms\n     99%   11.96ms\n  1316316 requests in 15.09s, 2.16GB read\nRequests/sec:  87224.17\nTransfer/sec:    146.25MB\n",
+      "stderr": "",
+      "before": {
+        "monotonic": 1368.295644625,
+        "cpu_s": 1.71,
+        "rss_kib": 33944,
+        "hwm_kib": 33944,
+        "processes": {
+          "97": {
+            "ppid": 91,
+            "cpu_s": 1.71,
+            "rss_kib": 33944,
+            "hwm_kib": 33944,
+            "threads": 1
+          }
+        }
+      },
+      "after": {
+        "monotonic": 1383.497071715,
+        "cpu_s": 14.86,
+        "rss_kib": 41088,
+        "hwm_kib": 41088,
+        "processes": {
+          "97": {
+            "ppid": 91,
+            "cpu_s": 14.86,
+            "rss_kib": 41088,
+            "hwm_kib": 41088,
+            "threads": 1
+          }
+        }
+      },
+      "final": [
+        {
+          "database_after": {
+            "post_count": 513650,
+            "max_post_id": 513650,
+            "integrity": "ok"
+          }
+        }
+      ],
+      "rps": 87224.17,
+      "duration_s": 15.09,
+      "p99_ms": 11.96,
+      "rss_mib": 40.125,
+      "cpu_percent": 86.50503615315543,
+      "http_errors": 0,
+      "socket_errors": {
+        "connect": 0,
+        "read": 0,
+        "write": 0,
+        "timeout": 0
+      },
+      "valid_duration": true
+    },
+    {
+      "pr": 18,
+      "trial": 1,
+      "mode": "bench",
+      "port": 23118,
+      "recorded_at": "2026-10-07T13:40:47Z",
+      "service": {
+        "ready": true,
+        "roots": [
+          105
+        ],
+        "port": 23118,
+        "log": "/suite/logs/pr18-23118.log",
+        "nginx": false
+      },
+      "warmup_output": "Running 2s test @ http://127.0.0.1:23118/feed\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     4.09ms   10.09ms  94.12ms   95.92%\n    Req/Sec    14.99k     3.09k   21.86k    80.49%\n  Latency Distribution\n     50%    1.94ms\n     75%    2.58ms\n     90%    5.38ms\n     99%   67.46ms\n  61208 requests in 2.08s, 103.84MB read\nRequests/sec:  29469.37\nTransfer/sec:     49.99MB\n",
+      "output": "Running 15s test @ http://127.0.0.1:23118/feed\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     2.28ms    2.28ms  23.21ms   94.16%\n    Req/Sec    16.56k     1.48k   28.96k    74.09%\n  Latency Distribution\n     50%    1.86ms\n     75%    2.33ms\n     90%    3.08ms\n     99%   13.90ms\n  496349 requests in 15.09s, 845.48MB read\nRequests/sec:  32883.93\nTransfer/sec:     56.01MB\n",
+      "stderr": "",
+      "before": {
+        "monotonic": 1386.148804841,
+        "cpu_s": 1.88,
+        "rss_kib": 50848,
+        "hwm_kib": 50936,
+        "processes": {
+          "105": {
+            "ppid": 99,
+            "cpu_s": 1.88,
+            "rss_kib": 50848,
+            "hwm_kib": 50936,
+            "threads": 5
+          }
+        }
+      },
+      "after": {
+        "monotonic": 1401.357218681,
+        "cpu_s": 16.16,
+        "rss_kib": 54520,
+        "hwm_kib": 54776,
+        "processes": {
+          "105": {
+            "ppid": 99,
+            "cpu_s": 16.16,
+            "rss_kib": 54520,
+            "hwm_kib": 54776,
+            "threads": 5
+          }
+        }
+      },
+      "final": [
+        {
+          "database_after": {
+            "post_count": 505235,
+            "max_post_id": 505235,
+            "integrity": "ok"
+          }
+        }
+      ],
+      "rps": 32883.93,
+      "duration_s": 15.09,
+      "p99_ms": 13.9,
+      "rss_mib": 53.2421875,
+      "cpu_percent": 93.89539336733327,
+      "http_errors": 0,
+      "socket_errors": {
+        "connect": 0,
+        "read": 0,
+        "write": 0,
+        "timeout": 0
+      },
+      "valid_duration": true
+    },
+    {
+      "pr": 15,
+      "trial": 1,
+      "mode": "bench",
+      "port": 23115,
+      "recorded_at": "2026-10-07T13:41:05Z",
+      "service": {
+        "ready": true,
+        "roots": [
+          117
+        ],
+        "port": 23115,
+        "log": "/suite/logs/pr15-23115.log",
+        "nginx": false
+      },
+      "warmup_output": "Running 2s test @ http://127.0.0.1:23115/feed\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     2.83ms    8.69ms  83.76ms   95.72%\n    Req/Sec    35.38k     7.57k   63.78k    92.68%\n  Latency Distribution\n     50%  732.00us\n     75%    0.99ms\n     90%    6.58ms\n     99%   57.48ms\n  144615 requests in 2.09s, 245.85MB read\nRequests/sec:  69224.95\nTransfer/sec:    117.68MB\n",
+      "output": "Running 15s test @ http://127.0.0.1:23115/feed\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     1.52ms    2.58ms  21.79ms   90.35%\n    Req/Sec    37.05k     2.56k   55.94k    77.74%\n  Latency Distribution\n     50%  722.00us\n     75%    0.95ms\n     90%    3.77ms\n     99%   12.44ms\n  1110666 requests in 15.09s, 1.86GB read\nRequests/sec:  73603.22\nTransfer/sec:    125.92MB\n",
+      "stderr": "",
+      "before": {
+        "monotonic": 1404.002655308,
+        "cpu_s": 1.76,
+        "rss_kib": 38236,
+        "hwm_kib": 38236,
+        "processes": {
+          "117": {
+            "ppid": 111,
+            "cpu_s": 1.76,
+            "rss_kib": 38236,
+            "hwm_kib": 38236,
+            "threads": 1
+          }
+        }
+      },
+      "after": {
+        "monotonic": 1419.216201481,
+        "cpu_s": 15.16,
+        "rss_kib": 44268,
+        "hwm_kib": 44268,
+        "processes": {
+          "117": {
+            "ppid": 111,
+            "cpu_s": 15.16,
+            "rss_kib": 44268,
+            "hwm_kib": 44268,
+            "threads": 1
+          }
+        }
+      },
+      "final": [
+        {
+          "database_after": {
+            "post_count": 511638,
+            "max_post_id": 511638,
+            "integrity": "ok"
+          }
+        }
+      ],
+      "rps": 73603.22,
+      "duration_s": 15.09,
+      "p99_ms": 12.44,
+      "rss_mib": 43.23046875,
+      "cpu_percent": 88.07939876490657,
+      "http_errors": 0,
+      "socket_errors": {
+        "connect": 0,
+        "read": 0,
+        "write": 0,
+        "timeout": 0
+      },
+      "valid_duration": true
+    },
+    {
+      "pr": 17,
+      "trial": 1,
+      "mode": "bench",
+      "port": 23117,
+      "recorded_at": "2026-10-07T13:41:23Z",
+      "service": {
+        "ready": true,
+        "roots": [
+          125
+        ],
+        "port": 23117,
+        "log": "/suite/logs/pr17-23117.log",
+        "nginx": false
+      },
+      "warmup_output": "Running 2s test @ http://127.0.0.1:23117/feed\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     2.72ms    7.55ms  75.32ms   94.26%\n    Req/Sec    28.47k     5.01k   47.27k    92.68%\n  Latency Distribution\n     50%    0.91ms\n     75%    1.05ms\n     90%    5.91ms\n     99%   49.92ms\n  116157 requests in 2.09s, 197.50MB read\nRequests/sec:  55653.62\nTransfer/sec:     94.63MB\n",
+      "output": "Running 15s test @ http://127.0.0.1:23117/feed\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     1.58ms    2.41ms  21.81ms   91.58%\n    Req/Sec    29.86k     1.73k   45.46k    83.72%\n  Latency Distribution\n     50%    0.90ms\n     75%    1.03ms\n     90%    2.35ms\n     99%   12.64ms\n  894822 requests in 15.09s, 1.49GB read\nRequests/sec:  59306.61\nTransfer/sec:    101.36MB\n",
+      "stderr": "",
+      "before": {
+        "monotonic": 1421.865491982,
+        "cpu_s": 1.82,
+        "rss_kib": 38736,
+        "hwm_kib": 38736,
+        "processes": {
+          "125": {
+            "ppid": 119,
+            "cpu_s": 1.82,
+            "rss_kib": 38736,
+            "hwm_kib": 38736,
+            "threads": 1
+          }
+        }
+      },
+      "after": {
+        "monotonic": 1437.072605073,
+        "cpu_s": 15.56,
+        "rss_kib": 43832,
+        "hwm_kib": 43832,
+        "processes": {
+          "125": {
+            "ppid": 119,
+            "cpu_s": 15.56,
+            "rss_kib": 43832,
+            "hwm_kib": 43832,
+            "threads": 1
+          }
+        }
+      },
+      "final": [
+        {
+          "database_after": {
+            "post_count": 509409,
+            "max_post_id": 509409,
+            "integrity": "ok"
+          }
+        }
+      ],
+      "rps": 59306.61,
+      "duration_s": 15.09,
+      "p99_ms": 12.64,
+      "rss_mib": 42.8046875,
+      "cpu_percent": 90.35245491882235,
+      "http_errors": 0,
+      "socket_errors": {
+        "connect": 0,
+        "read": 0,
+        "write": 0,
+        "timeout": 0
+      },
+      "valid_duration": true
+    },
+    {
+      "pr": 17,
+      "trial": 2,
+      "mode": "bench",
+      "port": 23217,
+      "recorded_at": "2026-10-07T13:41:40Z",
+      "service": {
+        "ready": true,
+        "roots": [
+          133
+        ],
+        "port": 23217,
+        "log": "/suite/logs/pr17-23217.log",
+        "nginx": false
+      },
+      "warmup_output": "Running 2s test @ http://127.0.0.1:23217/feed\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     2.54ms    6.45ms  66.70ms   93.17%\n    Req/Sec    27.52k     4.87k   49.10k    92.68%\n  Latency Distribution\n     50%    0.94ms\n     75%    1.10ms\n     90%    5.63ms\n     99%   41.52ms\n  112517 requests in 2.09s, 191.52MB read\nRequests/sec:  53936.56\nTransfer/sec:     91.81MB\n",
+      "output": "Running 15s test @ http://127.0.0.1:23217/feed\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     1.46ms    2.03ms  18.45ms   92.52%\n    Req/Sec    29.37k     2.05k   45.76k    77.08%\n  Latency Distribution\n     50%    0.92ms\n     75%    1.06ms\n     90%    1.62ms\n     99%   11.27ms\n  880351 requests in 15.09s, 1.47GB read\nRequests/sec:  58345.52\nTransfer/sec:     99.71MB\n",
+      "stderr": "",
+      "before": {
+        "monotonic": 1439.739459407,
+        "cpu_s": 1.82,
+        "rss_kib": 38684,
+        "hwm_kib": 38768,
+        "processes": {
+          "133": {
+            "ppid": 127,
+            "cpu_s": 1.82,
+            "rss_kib": 38684,
+            "hwm_kib": 38768,
+            "threads": 1
+          }
+        }
+      },
+      "after": {
+        "monotonic": 1454.946755248,
+        "cpu_s": 15.75,
+        "rss_kib": 43536,
+        "hwm_kib": 43588,
+        "processes": {
+          "133": {
+            "ppid": 127,
+            "cpu_s": 15.75,
+            "rss_kib": 43536,
+            "hwm_kib": 43588,
+            "threads": 1
+          }
+        }
+      },
+      "final": [
+        {
+          "database_after": {
+            "post_count": 509238,
+            "max_post_id": 509238,
+            "integrity": "ok"
+          }
+        }
+      ],
+      "rps": 58345.52,
+      "duration_s": 15.09,
+      "p99_ms": 11.27,
+      "rss_mib": 42.515625,
+      "cpu_percent": 91.60076943096986,
+      "http_errors": 0,
+      "socket_errors": {
+        "connect": 0,
+        "read": 0,
+        "write": 0,
+        "timeout": 0
+      },
+      "valid_duration": true
+    },
+    {
+      "pr": 19,
+      "trial": 2,
+      "mode": "bench",
+      "port": 23219,
+      "recorded_at": "2026-10-07T13:41:58Z",
+      "service": {
+        "ready": true,
+        "roots": [
+          141
+        ],
+        "port": 23219,
+        "log": "/suite/logs/pr19-23219.log",
+        "nginx": false
+      },
+      "warmup_output": "Running 2s test @ http://127.0.0.1:23219/feed\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     2.01ms    4.27ms  43.66ms   89.35%\n    Req/Sec    39.72k     5.63k   58.78k    82.93%\n  Latency Distribution\n     50%  598.00us\n     75%  737.00us\n     90%    6.78ms\n     99%   19.12ms\n  162268 requests in 2.09s, 270.00MB read\nRequests/sec:  77822.20\nTransfer/sec:    129.49MB\n",
+      "output": "Running 15s test @ http://127.0.0.1:23219/feed\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     1.65ms    2.98ms  17.49ms   88.70%\n    Req/Sec    42.20k     3.36k   49.49k    64.00%\n  Latency Distribution\n     50%  580.00us\n     75%  698.00us\n     90%    5.72ms\n     99%   13.44ms\n  1261999 requests in 15.03s, 2.07GB read\nRequests/sec:  83958.01\nTransfer/sec:    140.80MB\n",
+      "stderr": "",
+      "before": {
+        "monotonic": 1457.609141624,
+        "cpu_s": 1.75,
+        "rss_kib": 33968,
+        "hwm_kib": 33968,
+        "processes": {
+          "141": {
+            "ppid": 135,
+            "cpu_s": 1.75,
+            "rss_kib": 33968,
+            "hwm_kib": 33968,
+            "threads": 1
+          }
+        }
+      },
+      "after": {
+        "monotonic": 1472.749732964,
+        "cpu_s": 14.73,
+        "rss_kib": 42312,
+        "hwm_kib": 42312,
+        "processes": {
+          "141": {
+            "ppid": 135,
+            "cpu_s": 14.73,
+            "rss_kib": 42312,
+            "hwm_kib": 42312,
+            "threads": 1
+          }
+        }
+      },
+      "final": [
+        {
+          "database_after": {
+            "post_count": 513138,
+            "max_post_id": 513138,
+            "integrity": "ok"
+          }
+        }
+      ],
+      "rps": 83958.01,
+      "duration_s": 15.03,
+      "p99_ms": 13.44,
+      "rss_mib": 41.3203125,
+      "cpu_percent": 85.72980875395511,
+      "http_errors": 0,
+      "socket_errors": {
+        "connect": 0,
+        "read": 0,
+        "write": 0,
+        "timeout": 0
+      },
+      "valid_duration": true
+    },
+    {
+      "pr": 15,
+      "trial": 2,
+      "mode": "bench",
+      "port": 23215,
+      "recorded_at": "2026-10-07T13:42:16Z",
+      "service": {
+        "ready": true,
+        "roots": [
+          149
+        ],
+        "port": 23215,
+        "log": "/suite/logs/pr15-23215.log",
+        "nginx": false
+      },
+      "warmup_output": "Running 2s test @ http://127.0.0.1:23215/feed\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     2.30ms    5.00ms  46.09ms   90.66%\n    Req/Sec    32.39k     5.06k   54.24k    90.24%\n  Latency Distribution\n     50%  798.00us\n     75%    1.08ms\n     90%    6.69ms\n     99%   29.96ms\n  132376 requests in 2.09s, 225.17MB read\nRequests/sec:  63481.07\nTransfer/sec:    107.98MB\n",
+      "output": "Running 15s test @ http://127.0.0.1:23215/feed\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     1.59ms    2.85ms  42.26ms   90.93%\n    Req/Sec    34.70k     2.10k   41.70k    78.00%\n  Latency Distribution\n     50%  779.00us\n     75%    1.02ms\n     90%    3.52ms\n     99%   12.90ms\n  1036612 requests in 15.02s, 1.73GB read\nRequests/sec:  69036.91\nTransfer/sec:    118.09MB\n",
+      "stderr": "",
+      "before": {
+        "monotonic": 1475.402661298,
+        "cpu_s": 1.78,
+        "rss_kib": 38224,
+        "hwm_kib": 38224,
+        "processes": {
+          "149": {
+            "ppid": 143,
+            "cpu_s": 1.78,
+            "rss_kib": 38224,
+            "hwm_kib": 38224,
+            "threads": 1
+          }
+        }
+      },
+      "after": {
+        "monotonic": 1490.540440972,
+        "cpu_s": 15.19,
+        "rss_kib": 43956,
+        "hwm_kib": 43956,
+        "processes": {
+          "149": {
+            "ppid": 143,
+            "cpu_s": 15.19,
+            "rss_kib": 43956,
+            "hwm_kib": 43956,
+            "threads": 1
+          }
+        }
+      },
+      "final": [
+        {
+          "database_after": {
+            "post_count": 510837,
+            "max_post_id": 510837,
+            "integrity": "ok"
+          }
+        }
+      ],
+      "rps": 69036.91,
+      "duration_s": 15.02,
+      "p99_ms": 12.9,
+      "rss_mib": 42.92578125,
+      "cpu_percent": 88.58630716519536,
+      "http_errors": 0,
+      "socket_errors": {
+        "connect": 0,
+        "read": 0,
+        "write": 0,
+        "timeout": 0
+      },
+      "valid_duration": true
+    },
+    {
+      "pr": 18,
+      "trial": 2,
+      "mode": "bench",
+      "port": 23218,
+      "recorded_at": "2026-10-07T13:42:34Z",
+      "service": {
+        "ready": true,
+        "roots": [
+          157
+        ],
+        "port": 23218,
+        "log": "/suite/logs/pr18-23218.log",
+        "nginx": false
+      },
+      "warmup_output": "Running 2s test @ http://127.0.0.1:23218/feed\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     4.15ms   10.21ms  93.22ms   95.94%\n    Req/Sec    14.75k     3.49k   30.48k    90.24%\n  Latency Distribution\n     50%    2.00ms\n     75%    2.65ms\n     90%    4.61ms\n     99%   68.44ms\n  60360 requests in 2.09s, 102.27MB read\nRequests/sec:  28907.19\nTransfer/sec:     48.98MB\n",
+      "output": "Running 15s test @ http://127.0.0.1:23218/feed\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     2.34ms    2.31ms  26.69ms   94.12%\n    Req/Sec    16.01k     1.53k   19.48k    70.00%\n  Latency Distribution\n     50%    1.91ms\n     75%    2.42ms\n     90%    3.21ms\n     99%   13.75ms\n  478282 requests in 15.02s, 814.62MB read\nRequests/sec:  31842.41\nTransfer/sec:     54.23MB\n",
+      "stderr": "",
+      "before": {
+        "monotonic": 1493.21613839,
+        "cpu_s": 1.91,
+        "rss_kib": 50940,
+        "hwm_kib": 51000,
+        "processes": {
+          "157": {
+            "ppid": 151,
+            "cpu_s": 1.91,
+            "rss_kib": 50940,
+            "hwm_kib": 51000,
+            "threads": 4
+          }
+        }
+      },
+      "after": {
+        "monotonic": 1508.356530647,
+        "cpu_s": 16.16,
+        "rss_kib": 54332,
+        "hwm_kib": 54504,
+        "processes": {
+          "157": {
+            "ppid": 151,
+            "cpu_s": 16.16,
+            "rss_kib": 54332,
+            "hwm_kib": 54504,
+            "threads": 5
+          }
+        }
+      },
+      "final": [
+        {
+          "database_after": {
+            "post_count": 505064,
+            "max_post_id": 505064,
+            "integrity": "ok"
+          }
+        }
+      ],
+      "rps": 31842.41,
+      "duration_s": 15.02,
+      "p99_ms": 13.75,
+      "rss_mib": 53.05859375,
+      "cpu_percent": 94.11909386569317,
+      "http_errors": 0,
+      "socket_errors": {
+        "connect": 0,
+        "read": 0,
+        "write": 0,
+        "timeout": 0
+      },
+      "valid_duration": true
+    },
+    {
+      "pr": 16,
+      "trial": 2,
+      "mode": "bench",
+      "port": 23216,
+      "recorded_at": "2026-10-07T13:42:52Z",
+      "service": {
+        "ready": true,
+        "roots": [
+          169
+        ],
+        "port": 23216,
+        "log": "/suite/logs/pr16-23216.log",
+        "nginx": false
+      },
+      "warmup_output": "Running 2s test @ http://127.0.0.1:23216/feed\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     3.02ms    5.46ms  60.92ms   94.48%\n    Req/Sec    15.25k     2.38k   26.48k    92.68%\n  Latency Distribution\n     50%    1.96ms\n     75%    2.38ms\n     90%    3.35ms\n     99%   36.28ms\n  62388 requests in 2.09s, 105.79MB read\nRequests/sec:  29858.60\nTransfer/sec:     50.63MB\n",
+      "output": "Running 15s test @ http://127.0.0.1:23216/feed\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     2.38ms    2.05ms  26.47ms   94.41%\n    Req/Sec    15.15k     1.35k   25.28k    75.08%\n  Latency Distribution\n     50%    2.02ms\n     75%    2.42ms\n     90%    2.97ms\n     99%   13.20ms\n  454320 requests in 15.10s, 773.59MB read\nRequests/sec:  30091.96\nTransfer/sec:     51.24MB\n",
+      "stderr": "",
+      "before": {
+        "monotonic": 1510.992598981,
+        "cpu_s": 1.93,
+        "rss_kib": 38440,
+        "hwm_kib": 38440,
+        "processes": {
+          "169": {
+            "ppid": 163,
+            "cpu_s": 1.93,
+            "rss_kib": 38440,
+            "hwm_kib": 38440,
+            "threads": 1
+          }
+        }
+      },
+      "after": {
+        "monotonic": 1526.20288503,
+        "cpu_s": 16.33,
+        "rss_kib": 41592,
+        "hwm_kib": 41592,
+        "processes": {
+          "169": {
+            "ppid": 163,
+            "cpu_s": 16.33,
+            "rss_kib": 41592,
+            "hwm_kib": 41592,
+            "threads": 1
+          }
+        }
+      },
+      "final": [
+        {
+          "database_after": {
+            "post_count": 504867,
+            "max_post_id": 504867,
+            "integrity": "ok"
+          }
+        }
+      ],
+      "rps": 30091.96,
+      "duration_s": 15.1,
+      "p99_ms": 13.2,
+      "rss_mib": 40.6171875,
+      "cpu_percent": 94.6727757361708,
+      "http_errors": 0,
+      "socket_errors": {
+        "connect": 0,
+        "read": 0,
+        "write": 0,
+        "timeout": 0
+      },
+      "valid_duration": true
+    },
+    {
+      "pr": 0,
+      "trial": 2,
+      "mode": "bench",
+      "port": 23200,
+      "recorded_at": "2026-10-07T13:43:10Z",
+      "service": {
+        "ready": true,
+        "roots": [
+          177
+        ],
+        "port": 23200,
+        "log": "/suite/logs/pr0-23200.log",
+        "nginx": false
+      },
+      "warmup_output": "Running 2s test @ http://127.0.0.1:23200/feed\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     2.66ms    6.95ms  70.10ms   92.38%\n    Req/Sec    33.77k     6.38k   56.39k    90.24%\n  Latency Distribution\n     50%  767.00us\n     75%    1.02ms\n     90%    7.42ms\n     99%   43.81ms\n  137931 requests in 2.08s, 232.95MB read\nRequests/sec:  66222.82\nTransfer/sec:    111.84MB\n",
+      "output": "Running 15s test @ http://127.0.0.1:23200/feed\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     1.59ms    2.74ms  24.66ms   90.36%\n    Req/Sec    35.97k     2.51k   57.03k    74.42%\n  Latency Distribution\n     50%  756.00us\n     75%    0.96ms\n     90%    3.97ms\n     99%   13.19ms\n  1078299 requests in 15.10s, 1.79GB read\nRequests/sec:  71417.62\nTransfer/sec:    121.29MB\n",
+      "stderr": "",
+      "before": {
+        "monotonic": 1528.872305948,
+        "cpu_s": 1.74,
+        "rss_kib": 37200,
+        "hwm_kib": 37200,
+        "processes": {
+          "177": {
+            "ppid": 171,
+            "cpu_s": 1.74,
+            "rss_kib": 37200,
+            "hwm_kib": 37200,
+            "threads": 1
+          }
+        }
+      },
+      "after": {
+        "monotonic": 1544.088746163,
+        "cpu_s": 15.17,
+        "rss_kib": 43152,
+        "hwm_kib": 43152,
+        "processes": {
+          "177": {
+            "ppid": 171,
+            "cpu_s": 15.17,
+            "rss_kib": 43152,
+            "hwm_kib": 43152,
+            "threads": 1
+          }
+        }
+      },
+      "final": [
+        {
+          "database_after": {
+            "post_count": 511263,
+            "max_post_id": 511263,
+            "integrity": "ok"
+          }
+        }
+      ],
+      "rps": 71417.62,
+      "duration_s": 15.1,
+      "p99_ms": 13.19,
+      "rss_mib": 42.140625,
+      "cpu_percent": 88.25980196577844,
+      "http_errors": 0,
+      "socket_errors": {
+        "connect": 0,
+        "read": 0,
+        "write": 0,
+        "timeout": 0
+      },
+      "valid_duration": true
+    },
+    {
+      "pr": 18,
+      "trial": 3,
+      "mode": "bench",
+      "port": 23318,
+      "recorded_at": "2026-10-07T13:43:27Z",
+      "service": {
+        "ready": true,
+        "roots": [
+          185
+        ],
+        "port": 23318,
+        "log": "/suite/logs/pr18-23318.log",
+        "nginx": false
+      },
+      "warmup_output": "Running 2s test @ http://127.0.0.1:23318/feed\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     3.44ms    7.91ms  80.18ms   95.29%\n    Req/Sec    16.19k     2.85k   27.42k    87.80%\n  Latency Distribution\n     50%    1.85ms\n     75%    2.39ms\n     90%    3.95ms\n     99%   52.83ms\n  66115 requests in 2.08s, 112.21MB read\nRequests/sec:  31735.02\nTransfer/sec:     53.86MB\n",
+      "output": "Running 15s test @ http://127.0.0.1:23318/feed\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     2.20ms    2.06ms  19.57ms   94.14%\n    Req/Sec    16.82k     1.50k   26.82k    70.76%\n  Latency Distribution\n     50%    1.84ms\n     75%    2.31ms\n     90%    3.00ms\n     99%   12.86ms\n  504232 requests in 15.10s, 858.89MB read\nRequests/sec:  33402.07\nTransfer/sec:     56.90MB\n",
+      "stderr": "",
+      "before": {
+        "monotonic": 1546.775892165,
+        "cpu_s": 1.9,
+        "rss_kib": 51368,
+        "hwm_kib": 51368,
+        "processes": {
+          "185": {
+            "ppid": 179,
+            "cpu_s": 1.9,
+            "rss_kib": 51368,
+            "hwm_kib": 51368,
+            "threads": 5
+          }
+        }
+      },
+      "after": {
+        "monotonic": 1561.996493546,
+        "cpu_s": 16.24,
+        "rss_kib": 54760,
+        "hwm_kib": 54760,
+        "processes": {
+          "185": {
+            "ppid": 179,
+            "cpu_s": 16.24,
+            "rss_kib": 54760,
+            "hwm_kib": 54760,
+            "threads": 5
+          }
+        }
+      },
+      "final": [
+        {
+          "database_after": {
+            "post_count": 505344,
+            "max_post_id": 505344,
+            "integrity": "ok"
+          }
+        }
+      ],
+      "rps": 33402.07,
+      "duration_s": 15.1,
+      "p99_ms": 12.86,
+      "rss_mib": 53.4765625,
+      "cpu_percent": 94.21441138259286,
+      "http_errors": 0,
+      "socket_errors": {
+        "connect": 0,
+        "read": 0,
+        "write": 0,
+        "timeout": 0
+      },
+      "valid_duration": true
+    },
+    {
+      "pr": 19,
+      "trial": 3,
+      "mode": "bench",
+      "port": 23319,
+      "recorded_at": "2026-10-07T13:43:45Z",
+      "service": {
+        "ready": true,
+        "roots": [
+          197
+        ],
+        "port": 23319,
+        "log": "/suite/logs/pr19-23319.log",
+        "nginx": false
+      },
+      "warmup_output": "Running 2s test @ http://127.0.0.1:23319/feed\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     4.63ms   16.04ms 127.46ms   95.83%\n    Req/Sec    38.83k     8.93k   54.10k    87.80%\n  Latency Distribution\n     50%  598.00us\n     75%  733.00us\n     90%    8.51ms\n     99%  102.00ms\n  158831 requests in 2.09s, 264.20MB read\nRequests/sec:  76090.57\nTransfer/sec:    126.57MB\n",
+      "output": "Running 15s test @ http://127.0.0.1:23319/feed\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     1.66ms    3.01ms  28.49ms   88.82%\n    Req/Sec    41.85k     3.59k   51.62k    68.67%\n  Latency Distribution\n     50%  585.00us\n     75%  695.00us\n     90%    5.65ms\n     99%   13.41ms\n  1251056 requests in 15.02s, 2.05GB read\nRequests/sec:  83272.47\nTransfer/sec:    139.63MB\n",
+      "stderr": "",
+      "before": {
+        "monotonic": 1564.628849672,
+        "cpu_s": 1.69,
+        "rss_kib": 33940,
+        "hwm_kib": 33940,
+        "processes": {
+          "197": {
+            "ppid": 191,
+            "cpu_s": 1.69,
+            "rss_kib": 33940,
+            "hwm_kib": 33940,
+            "threads": 1
+          }
+        }
+      },
+      "after": {
+        "monotonic": 1579.768272013,
+        "cpu_s": 14.69,
+        "rss_kib": 42128,
+        "hwm_kib": 42128,
+        "processes": {
+          "197": {
+            "ppid": 191,
+            "cpu_s": 14.69,
+            "rss_kib": 42128,
+            "hwm_kib": 42128,
+            "threads": 1
+          }
+        }
+      },
+      "final": [
+        {
+          "database_after": {
+            "post_count": 513036,
+            "max_post_id": 513036,
+            "integrity": "ok"
+          }
+        }
+      ],
+      "rps": 83272.47,
+      "duration_s": 15.02,
+      "p99_ms": 13.41,
+      "rss_mib": 41.140625,
+      "cpu_percent": 85.86853386601086,
+      "http_errors": 0,
+      "socket_errors": {
+        "connect": 0,
+        "read": 0,
+        "write": 0,
+        "timeout": 0
+      },
+      "valid_duration": true
+    },
+    {
+      "pr": 0,
+      "trial": 3,
+      "mode": "bench",
+      "port": 23300,
+      "recorded_at": "2026-10-07T13:44:03Z",
+      "service": {
+        "ready": true,
+        "roots": [
+          205
+        ],
+        "port": 23300,
+        "log": "/suite/logs/pr0-23300.log",
+        "nginx": false
+      },
+      "warmup_output": "Running 2s test @ http://127.0.0.1:23300/feed\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     2.63ms    7.20ms  72.07ms   93.13%\n    Req/Sec    34.46k     6.73k   61.27k    90.24%\n  Latency Distribution\n     50%  760.00us\n     75%    1.00ms\n     90%    7.01ms\n     99%   46.41ms\n  140850 requests in 2.09s, 237.64MB read\nRequests/sec:  67472.73\nTransfer/sec:    113.84MB\n",
+      "output": "Running 15s test @ http://127.0.0.1:23300/feed\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     1.48ms    2.44ms  20.92ms   90.67%\n    Req/Sec    36.39k     2.36k   56.46k    74.42%\n  Latency Distribution\n     50%  751.00us\n     75%    0.95ms\n     90%    3.29ms\n     99%   12.09ms\n  1091292 requests in 15.10s, 1.81GB read\nRequests/sec:  72275.42\nTransfer/sec:    122.74MB\n",
+      "stderr": "",
+      "before": {
+        "monotonic": 1582.429786681,
+        "cpu_s": 1.78,
+        "rss_kib": 37140,
+        "hwm_kib": 37140,
+        "processes": {
+          "205": {
+            "ppid": 199,
+            "cpu_s": 1.78,
+            "rss_kib": 37140,
+            "hwm_kib": 37140,
+            "threads": 1
+          }
+        }
+      },
+      "after": {
+        "monotonic": 1597.641133896,
+        "cpu_s": 15.29,
+        "rss_kib": 43136,
+        "hwm_kib": 43136,
+        "processes": {
+          "205": {
+            "ppid": 199,
+            "cpu_s": 15.29,
+            "rss_kib": 43136,
+            "hwm_kib": 43136,
+            "threads": 1
+          }
+        }
+      },
+      "final": [
+        {
+          "database_after": {
+            "post_count": 511409,
+            "max_post_id": 511409,
+            "integrity": "ok"
+          }
+        }
+      ],
+      "rps": 72275.42,
+      "duration_s": 15.1,
+      "p99_ms": 12.09,
+      "rss_mib": 42.125,
+      "cpu_percent": 88.81527591900452,
+      "http_errors": 0,
+      "socket_errors": {
+        "connect": 0,
+        "read": 0,
+        "write": 0,
+        "timeout": 0
+      },
+      "valid_duration": true
+    },
+    {
+      "pr": 15,
+      "trial": 3,
+      "mode": "bench",
+      "port": 23315,
+      "recorded_at": "2026-10-07T13:44:21Z",
+      "service": {
+        "ready": true,
+        "roots": [
+          213
+        ],
+        "port": 23315,
+        "log": "/suite/logs/pr15-23315.log",
+        "nginx": false
+      },
+      "warmup_output": "Running 2s test @ http://127.0.0.1:23315/feed\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     1.92ms    4.11ms  44.69ms   90.64%\n    Req/Sec    35.57k     5.80k   61.22k    90.24%\n  Latency Distribution\n     50%  738.00us\n     75%    0.99ms\n     90%    5.45ms\n     99%   19.87ms\n  145226 requests in 2.08s, 246.91MB read\nRequests/sec:  69722.45\nTransfer/sec:    118.54MB\n",
+      "output": "Running 15s test @ http://127.0.0.1:23315/feed\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     1.53ms    2.60ms  18.14ms   90.25%\n    Req/Sec    37.03k     2.21k   44.93k    68.00%\n  Latency Distribution\n     50%  721.00us\n     75%    0.95ms\n     90%    3.87ms\n     99%   12.59ms\n  1106612 requests in 15.02s, 1.85GB read\nRequests/sec:  73663.12\nTransfer/sec:    126.01MB\n",
+      "stderr": "",
+      "before": {
+        "monotonic": 1600.294353772,
+        "cpu_s": 1.79,
+        "rss_kib": 38288,
+        "hwm_kib": 38288,
+        "processes": {
+          "213": {
+            "ppid": 207,
+            "cpu_s": 1.79,
+            "rss_kib": 38288,
+            "hwm_kib": 38288,
+            "threads": 1
+          }
+        }
+      },
+      "after": {
+        "monotonic": 1615.434155112,
+        "cpu_s": 15.11,
+        "rss_kib": 44332,
+        "hwm_kib": 44332,
+        "processes": {
+          "213": {
+            "ppid": 207,
+            "cpu_s": 15.11,
+            "rss_kib": 44332,
+            "hwm_kib": 44332,
+            "threads": 1
+          }
+        }
+      },
+      "final": [
+        {
+          "database_after": {
+            "post_count": 511605,
+            "max_post_id": 511605,
+            "integrity": "ok"
+          }
+        }
+      ],
+      "rps": 73663.12,
+      "duration_s": 15.02,
+      "p99_ms": 12.59,
+      "rss_mib": 43.29296875,
+      "cpu_percent": 87.98001836924983,
+      "http_errors": 0,
+      "socket_errors": {
+        "connect": 0,
+        "read": 0,
+        "write": 0,
+        "timeout": 0
+      },
+      "valid_duration": true
+    },
+    {
+      "pr": 16,
+      "trial": 3,
+      "mode": "bench",
+      "port": 23316,
+      "recorded_at": "2026-10-07T13:44:39Z",
+      "service": {
+        "ready": true,
+        "roots": [
+          221
+        ],
+        "port": 23316,
+        "log": "/suite/logs/pr16-23316.log",
+        "nginx": false
+      },
+      "warmup_output": "Running 2s test @ http://127.0.0.1:23316/feed\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     2.77ms    4.00ms  47.29ms   93.67%\n    Req/Sec    15.12k     2.25k   25.78k    92.68%\n  Latency Distribution\n     50%    2.00ms\n     75%    2.40ms\n     90%    3.31ms\n     99%   23.22ms\n  61679 requests in 2.08s, 104.61MB read\nRequests/sec:  29599.64\nTransfer/sec:     50.20MB\n",
+      "output": "Running 15s test @ http://127.0.0.1:23316/feed\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     2.36ms    2.13ms  32.71ms   94.53%\n    Req/Sec    15.40k     1.40k   27.91k    75.75%\n  Latency Distribution\n     50%    1.98ms\n     75%    2.38ms\n     90%    2.94ms\n     99%   13.24ms\n  461321 requests in 15.09s, 785.62MB read\nRequests/sec:  30568.17\nTransfer/sec:     52.06MB\n",
+      "stderr": "",
+      "before": {
+        "monotonic": 1618.104285197,
+        "cpu_s": 1.94,
+        "rss_kib": 38360,
+        "hwm_kib": 38360,
+        "processes": {
+          "221": {
+            "ppid": 215,
+            "cpu_s": 1.94,
+            "rss_kib": 38360,
+            "hwm_kib": 38360,
+            "threads": 1
+          }
+        }
+      },
+      "after": {
+        "monotonic": 1633.308721703,
+        "cpu_s": 16.31,
+        "rss_kib": 41560,
+        "hwm_kib": 41560,
+        "processes": {
+          "221": {
+            "ppid": 215,
+            "cpu_s": 16.31,
+            "rss_kib": 41560,
+            "hwm_kib": 41560,
+            "threads": 1
+          }
+        }
+      },
+      "final": [
+        {
+          "database_after": {
+            "post_count": 504932,
+            "max_post_id": 504932,
+            "integrity": "ok"
+          }
+        }
+      ],
+      "rps": 30568.17,
+      "duration_s": 15.09,
+      "p99_ms": 13.24,
+      "rss_mib": 40.5859375,
+      "cpu_percent": 94.51188798959707,
+      "http_errors": 0,
+      "socket_errors": {
+        "connect": 0,
+        "read": 0,
+        "write": 0,
+        "timeout": 0
+      },
+      "valid_duration": true
+    },
+    {
+      "pr": 17,
+      "trial": 3,
+      "mode": "bench",
+      "port": 23317,
+      "recorded_at": "2026-10-07T13:44:57Z",
+      "service": {
+        "ready": true,
+        "roots": [
+          229
+        ],
+        "port": 23317,
+        "log": "/suite/logs/pr17-23317.log",
+        "nginx": false
+      },
+      "warmup_output": "Running 2s test @ http://127.0.0.1:23317/feed\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     2.12ms    4.70ms  52.45ms   92.11%\n    Req/Sec    28.74k     4.32k   48.45k    90.24%\n  Latency Distribution\n     50%    0.91ms\n     75%    1.05ms\n     90%    4.80ms\n     99%   27.21ms\n  117408 requests in 2.08s, 199.62MB read\nRequests/sec:  56354.63\nTransfer/sec:     95.82MB\n",
+      "output": "Running 15s test @ http://127.0.0.1:23317/feed\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     1.55ms    2.27ms  22.80ms   91.99%\n    Req/Sec    29.27k     1.78k   44.90k    78.41%\n  Latency Distribution\n     50%    0.92ms\n     75%    1.05ms\n     90%    2.04ms\n     99%   12.17ms\n  877151 requests in 15.09s, 1.46GB read\nRequests/sec:  58126.34\nTransfer/sec:     99.35MB\n",
+      "stderr": "",
+      "before": {
+        "monotonic": 1635.984435246,
+        "cpu_s": 1.84,
+        "rss_kib": 38804,
+        "hwm_kib": 38804,
+        "processes": {
+          "229": {
+            "ppid": 223,
+            "cpu_s": 1.84,
+            "rss_kib": 38804,
+            "hwm_kib": 38804,
+            "threads": 1
+          }
+        }
+      },
+      "after": {
+        "monotonic": 1651.190321295,
+        "cpu_s": 15.63,
+        "rss_kib": 43976,
+        "hwm_kib": 43976,
+        "processes": {
+          "229": {
+            "ppid": 223,
+            "cpu_s": 15.63,
+            "rss_kib": 43976,
+            "hwm_kib": 43976,
+            "threads": 1
+          }
+        }
+      },
+      "final": [
+        {
+          "database_after": {
+            "post_count": 509273,
+            "max_post_id": 509273,
+            "integrity": "ok"
+          }
+        }
+      ],
+      "rps": 58126.34,
+      "duration_s": 15.09,
+      "p99_ms": 12.17,
+      "rss_mib": 42.9453125,
+      "cpu_percent": 90.6885659642752,
+      "http_errors": 0,
+      "socket_errors": {
+        "connect": 0,
+        "read": 0,
+        "write": 0,
+        "timeout": 0
+      },
+      "valid_duration": true
+    }
+  ],
+  "official_verification": [
+    {
+      "pr": 16,
+      "trial": 1,
+      "mode": "verify",
+      "port": 22116,
+      "recorded_at": "2026-10-07T13:39:30Z",
+      "service": {
+        "ready": true,
+        "roots": [
+          30
+        ],
+        "port": 22116,
+        "log": "/suite/logs/pr16-22116.log",
+        "nginx": false
+      },
+      "exit_code": 0,
+      "output": "Testing http://127.0.0.1:22116\n-- golden reads (fresh database)\n  ok   GET /feed == golden -> 200\n  ok   GET /feed content-type (application/json)\n  ok   GET /posts/1 == golden -> 200\n  ok   GET /posts/250000 == golden -> 200\n  ok   GET /posts/500000 == golden -> 200\n  ok   GET /posts/:id content-type (application/json)\n-- health, 404s, id validation\n  ok   GET /health -> 200 {\"status\":\"ok\",\"db\":\"ok\",\"uptime_s\":0}\n  ok   GET /nope -> 404\n  ok   GET /posts/0 -> 400\n  ok   GET /posts/-1 -> 400\n  ok   GET /posts/abc -> 400\n  ok   GET /posts/1.5 -> 400\n  ok   GET /posts/999999999 -> 404\n-- auth\n  ok   POST /posts, no token -> 401\n  ok   POST /posts, Basic auth -> 401\n  ok   POST /posts, garbage token -> 401\n  ok   POST /posts, bad signature -> 401\n  ok   POST /posts, alg=none -> 401\n  ok   POST /posts, expired token -> 401\n  ok   POST /posts, sub not an integer -> 401\n  ok   POST /posts, no username -> 401\n  ok   POST /posts/abc/like, no token (auth before id) -> 401\n-- create validation\n  ok   empty body -> 400\n  ok   whitespace body -> 400\n  ok   numeric body -> 400\n  ok   missing body -> 400\n  ok   malformed JSON -> 400\n  ok   501-char body -> 400\n-- create, like, read back\n  ok   special characters round-trip (trimmed) -> 201\n  ok   create 500-char post -> 201\n  ok   POST /posts content-type (application/json)\n  ok   created_at format 2026-10-07T13:39:30.845Z\n  ok   created_at is now (UTC, 0s)\n  ok   like (first) -> 201\n  ok   like (repeat) -> 200\n  ok   like missing post -> 404\n  ok   like bad id (with token) -> 400\n  ok   read back, like_count 1 -> 200\n  ok   like on a seeded post is counted at once (12)\n  ok   feed has 20 posts\n  ok   new post is at the top of the feed\n  ok   feed entry matches the post\npassed=42 failed=0\n",
+      "stderr": "",
+      "passed": 42,
+      "failed": 0,
+      "after": {
+        "monotonic": 1307.400791805,
+        "cpu_s": 0.0,
+        "rss_kib": 7732,
+        "hwm_kib": 7732,
+        "processes": {
+          "30": {
+            "ppid": 24,
+            "cpu_s": 0.0,
+            "rss_kib": 7732,
+            "hwm_kib": 7732,
+            "threads": 1
+          }
+        }
+      },
+      "final": [
+        {
+          "database_after": {
+            "post_count": 500002,
+            "max_post_id": 500002,
+            "integrity": "ok"
+          }
+        }
+      ]
+    },
+    {
+      "pr": 0,
+      "trial": 1,
+      "mode": "verify",
+      "port": 22100,
+      "recorded_at": "2026-10-07T13:39:31Z",
+      "service": {
+        "ready": true,
+        "roots": [
+          38
+        ],
+        "port": 22100,
+        "log": "/suite/logs/pr0-22100.log",
+        "nginx": false
+      },
+      "exit_code": 0,
+      "output": "Testing http://127.0.0.1:22100\n-- golden reads (fresh database)\n  ok   GET /feed == golden -> 200\n  ok   GET /feed content-type (application/json)\n  ok   GET /posts/1 == golden -> 200\n  ok   GET /posts/250000 == golden -> 200\n  ok   GET /posts/500000 == golden -> 200\n  ok   GET /posts/:id content-type (application/json)\n-- health, 404s, id validation\n  ok   GET /health -> 200 {\"status\":\"ok\",\"db\":\"ok\",\"uptime_s\":0}\n  ok   GET /nope -> 404\n  ok   GET /posts/0 -> 400\n  ok   GET /posts/-1 -> 400\n  ok   GET /posts/abc -> 400\n  ok   GET /posts/1.5 -> 400\n  ok   GET /posts/999999999 -> 404\n-- auth\n  ok   POST /posts, no token -> 401\n  ok   POST /posts, Basic auth -> 401\n  ok   POST /posts, garbage token -> 401\n  ok   POST /posts, bad signature -> 401\n  ok   POST /posts, alg=none -> 401\n  ok   POST /posts, expired token -> 401\n  ok   POST /posts, sub not an integer -> 401\n  ok   POST /posts, no username -> 401\n  ok   POST /posts/abc/like, no token (auth before id) -> 401\n-- create validation\n  ok   empty body -> 400\n  ok   whitespace body -> 400\n  ok   numeric body -> 400\n  ok   missing body -> 400\n  ok   malformed JSON -> 400\n  ok   501-char body -> 400\n-- create, like, read back\n  ok   special characters round-trip (trimmed) -> 201\n  ok   create 500-char post -> 201\n  ok   POST /posts content-type (application/json)\n  ok   created_at format 2026-10-07T13:39:31.545Z\n  ok   created_at is now (UTC, 0s)\n  ok   like (first) -> 201\n  ok   like (repeat) -> 200\n  ok   like missing post -> 404\n  ok   like bad id (with token) -> 400\n  ok   read back, like_count 1 -> 200\n  ok   like on a seeded post is counted at once (12)\n  ok   feed has 20 posts\n  ok   new post is at the top of the feed\n  ok   feed entry matches the post\npassed=42 failed=0\n",
+      "stderr": "",
+      "passed": 42,
+      "failed": 0,
+      "after": {
+        "monotonic": 1308.10171518,
+        "cpu_s": 0.0,
+        "rss_kib": 7736,
+        "hwm_kib": 7736,
+        "processes": {
+          "38": {
+            "ppid": 32,
+            "cpu_s": 0.0,
+            "rss_kib": 7736,
+            "hwm_kib": 7736,
+            "threads": 1
+          }
+        }
+      },
+      "final": [
+        {
+          "database_after": {
+            "post_count": 500002,
+            "max_post_id": 500002,
+            "integrity": "ok"
+          }
+        }
+      ]
+    },
+    {
+      "pr": 19,
+      "trial": 1,
+      "mode": "verify",
+      "port": 22119,
+      "recorded_at": "2026-10-07T13:39:31Z",
+      "service": {
+        "ready": true,
+        "roots": [
+          46
+        ],
+        "port": 22119,
+        "log": "/suite/logs/pr19-22119.log",
+        "nginx": false
+      },
+      "exit_code": 0,
+      "output": "Testing http://127.0.0.1:22119\n-- golden reads (fresh database)\n  ok   GET /feed == golden -> 200\n  ok   GET /feed content-type (application/json)\n  ok   GET /posts/1 == golden -> 200\n  ok   GET /posts/250000 == golden -> 200\n  ok   GET /posts/500000 == golden -> 200\n  ok   GET /posts/:id content-type (application/json)\n-- health, 404s, id validation\n  ok   GET /health -> 200 {\"status\":\"ok\",\"db\":\"ok\",\"uptime_s\":0}\n  ok   GET /nope -> 404\n  ok   GET /posts/0 -> 400\n  ok   GET /posts/-1 -> 400\n  ok   GET /posts/abc -> 400\n  ok   GET /posts/1.5 -> 400\n  ok   GET /posts/999999999 -> 404\n-- auth\n  ok   POST /posts, no token -> 401\n  ok   POST /posts, Basic auth -> 401\n  ok   POST /posts, garbage token -> 401\n  ok   POST /posts, bad signature -> 401\n  ok   POST /posts, alg=none -> 401\n  ok   POST /posts, expired token -> 401\n  ok   POST /posts, sub not an integer -> 401\n  ok   POST /posts, no username -> 401\n  ok   POST /posts/abc/like, no token (auth before id) -> 401\n-- create validation\n  ok   empty body -> 400\n  ok   whitespace body -> 400\n  ok   numeric body -> 400\n  ok   missing body -> 400\n  ok   malformed JSON -> 400\n  ok   501-char body -> 400\n-- create, like, read back\n  ok   special characters round-trip (trimmed) -> 201\n  ok   create 500-char post -> 201\n  ok   POST /posts content-type (application/json)\n  ok   created_at format 2026-10-07T13:39:32.215Z\n  ok   created_at is now (UTC, 0s)\n  ok   like (first) -> 201\n  ok   like (repeat) -> 200\n  ok   like missing post -> 404\n  ok   like bad id (with token) -> 400\n  ok   read back, like_count 1 -> 200\n  ok   like on a seeded post is counted at once (12)\n  ok   feed has 20 posts\n  ok   new post is at the top of the feed\n  ok   feed entry matches the post\npassed=42 failed=0\n",
+      "stderr": "",
+      "passed": 42,
+      "failed": 0,
+      "after": {
+        "monotonic": 1308.774190181,
+        "cpu_s": 0.0,
+        "rss_kib": 12048,
+        "hwm_kib": 12048,
+        "processes": {
+          "46": {
+            "ppid": 40,
+            "cpu_s": 0.0,
+            "rss_kib": 12048,
+            "hwm_kib": 12048,
+            "threads": 1
+          }
+        }
+      },
+      "final": [
+        {
+          "database_after": {
+            "post_count": 500002,
+            "max_post_id": 500002,
+            "integrity": "ok"
+          }
+        }
+      ]
+    },
+    {
+      "pr": 18,
+      "trial": 1,
+      "mode": "verify",
+      "port": 22118,
+      "recorded_at": "2026-10-07T13:39:32Z",
+      "service": {
+        "ready": true,
+        "roots": [
+          54
+        ],
+        "port": 22118,
+        "log": "/suite/logs/pr18-22118.log",
+        "nginx": false
+      },
+      "exit_code": 0,
+      "output": "Testing http://127.0.0.1:22118\n-- golden reads (fresh database)\n  ok   GET /feed == golden -> 200\n  ok   GET /feed content-type (application/json)\n  ok   GET /posts/1 == golden -> 200\n  ok   GET /posts/250000 == golden -> 200\n  ok   GET /posts/500000 == golden -> 200\n  ok   GET /posts/:id content-type (application/json)\n-- health, 404s, id validation\n  ok   GET /health -> 200 {\"status\":\"ok\",\"db\":\"ok\",\"uptime_s\":0}\n  ok   GET /nope -> 404\n  ok   GET /posts/0 -> 400\n  ok   GET /posts/-1 -> 400\n  ok   GET /posts/abc -> 400\n  ok   GET /posts/1.5 -> 400\n  ok   GET /posts/999999999 -> 404\n-- auth\n  ok   POST /posts, no token -> 401\n  ok   POST /posts, Basic auth -> 401\n  ok   POST /posts, garbage token -> 401\n  ok   POST /posts, bad signature -> 401\n  ok   POST /posts, alg=none -> 401\n  ok   POST /posts, expired token -> 401\n  ok   POST /posts, sub not an integer -> 401\n  ok   POST /posts, no username -> 401\n  ok   POST /posts/abc/like, no token (auth before id) -> 401\n-- create validation\n  ok   empty body -> 400\n  ok   whitespace body -> 400\n  ok   numeric body -> 400\n  ok   missing body -> 400\n  ok   malformed JSON -> 400\n  ok   501-char body -> 400\n-- create, like, read back\n  ok   special characters round-trip (trimmed) -> 201\n  ok   create 500-char post -> 201\n  ok   POST /posts content-type (application/json)\n  ok   created_at format 2026-10-07T13:39:32.895Z\n  ok   created_at is now (UTC, 0s)\n  ok   like (first) -> 201\n  ok   like (repeat) -> 200\n  ok   like missing post -> 404\n  ok   like bad id (with token) -> 400\n  ok   read back, like_count 1 -> 200\n  ok   like on a seeded post is counted at once (12)\n  ok   feed has 20 posts\n  ok   new post is at the top of the feed\n  ok   feed entry matches the post\npassed=42 failed=0\n",
+      "stderr": "",
+      "passed": 42,
+      "failed": 0,
+      "after": {
+        "monotonic": 1309.450165598,
+        "cpu_s": 0.0,
+        "rss_kib": 16900,
+        "hwm_kib": 16900,
+        "processes": {
+          "54": {
+            "ppid": 48,
+            "cpu_s": 0.0,
+            "rss_kib": 16900,
+            "hwm_kib": 16900,
+            "threads": 4
+          }
+        }
+      },
+      "final": [
+        {
+          "database_after": {
+            "post_count": 500002,
+            "max_post_id": 500002,
+            "integrity": "ok"
+          }
+        }
+      ]
+    },
+    {
+      "pr": 15,
+      "trial": 1,
+      "mode": "verify",
+      "port": 22115,
+      "recorded_at": "2026-10-07T13:39:33Z",
+      "service": {
+        "ready": true,
+        "roots": [
+          65
+        ],
+        "port": 22115,
+        "log": "/suite/logs/pr15-22115.log",
+        "nginx": false
+      },
+      "exit_code": 0,
+      "output": "Testing http://127.0.0.1:22115\n-- golden reads (fresh database)\n  ok   GET /feed == golden -> 200\n  ok   GET /feed content-type (application/json)\n  ok   GET /posts/1 == golden -> 200\n  ok   GET /posts/250000 == golden -> 200\n  ok   GET /posts/500000 == golden -> 200\n  ok   GET /posts/:id content-type (application/json)\n-- health, 404s, id validation\n  ok   GET /health -> 200 {\"status\":\"ok\",\"db\":\"ok\",\"uptime_s\":0}\n  ok   GET /nope -> 404\n  ok   GET /posts/0 -> 400\n  ok   GET /posts/-1 -> 400\n  ok   GET /posts/abc -> 400\n  ok   GET /posts/1.5 -> 400\n  ok   GET /posts/999999999 -> 404\n-- auth\n  ok   POST /posts, no token -> 401\n  ok   POST /posts, Basic auth -> 401\n  ok   POST /posts, garbage token -> 401\n  ok   POST /posts, bad signature -> 401\n  ok   POST /posts, alg=none -> 401\n  ok   POST /posts, expired token -> 401\n  ok   POST /posts, sub not an integer -> 401\n  ok   POST /posts, no username -> 401\n  ok   POST /posts/abc/like, no token (auth before id) -> 401\n-- create validation\n  ok   empty body -> 400\n  ok   whitespace body -> 400\n  ok   numeric body -> 400\n  ok   missing body -> 400\n  ok   malformed JSON -> 400\n  ok   501-char body -> 400\n-- create, like, read back\n  ok   special characters round-trip (trimmed) -> 201\n  ok   create 500-char post -> 201\n  ok   POST /posts content-type (application/json)\n  ok   created_at format 2026-10-07T13:39:33.578Z\n  ok   created_at is now (UTC, 0s)\n  ok   like (first) -> 201\n  ok   like (repeat) -> 200\n  ok   like missing post -> 404\n  ok   like bad id (with token) -> 400\n  ok   read back, like_count 1 -> 200\n  ok   like on a seeded post is counted at once (12)\n  ok   feed has 20 posts\n  ok   new post is at the top of the feed\n  ok   feed entry matches the post\npassed=42 failed=0\n",
+      "stderr": "",
+      "passed": 42,
+      "failed": 0,
+      "after": {
+        "monotonic": 1310.134833973,
+        "cpu_s": 0.0,
+        "rss_kib": 8768,
+        "hwm_kib": 8768,
+        "processes": {
+          "65": {
+            "ppid": 59,
+            "cpu_s": 0.0,
+            "rss_kib": 8768,
+            "hwm_kib": 8768,
+            "threads": 1
+          }
+        }
+      },
+      "final": [
+        {
+          "database_after": {
+            "post_count": 500002,
+            "max_post_id": 500002,
+            "integrity": "ok"
+          }
+        }
+      ]
+    },
+    {
+      "pr": 17,
+      "trial": 1,
+      "mode": "verify",
+      "port": 22117,
+      "recorded_at": "2026-10-07T13:39:33Z",
+      "service": {
+        "ready": true,
+        "roots": [
+          73
+        ],
+        "port": 22117,
+        "log": "/suite/logs/pr17-22117.log",
+        "nginx": false
+      },
+      "exit_code": 0,
+      "output": "Testing http://127.0.0.1:22117\n-- golden reads (fresh database)\n  ok   GET /feed == golden -> 200\n  ok   GET /feed content-type (application/json)\n  ok   GET /posts/1 == golden -> 200\n  ok   GET /posts/250000 == golden -> 200\n  ok   GET /posts/500000 == golden -> 200\n  ok   GET /posts/:id content-type (application/json)\n-- health, 404s, id validation\n  ok   GET /health -> 200 {\"status\":\"ok\",\"db\":\"ok\",\"uptime_s\":0}\n  ok   GET /nope -> 404\n  ok   GET /posts/0 -> 400\n  ok   GET /posts/-1 -> 400\n  ok   GET /posts/abc -> 400\n  ok   GET /posts/1.5 -> 400\n  ok   GET /posts/999999999 -> 404\n-- auth\n  ok   POST /posts, no token -> 401\n  ok   POST /posts, Basic auth -> 401\n  ok   POST /posts, garbage token -> 401\n  ok   POST /posts, bad signature -> 401\n  ok   POST /posts, alg=none -> 401\n  ok   POST /posts, expired token -> 401\n  ok   POST /posts, sub not an integer -> 401\n  ok   POST /posts, no username -> 401\n  ok   POST /posts/abc/like, no token (auth before id) -> 401\n-- create validation\n  ok   empty body -> 400\n  ok   whitespace body -> 400\n  ok   numeric body -> 400\n  ok   missing body -> 400\n  ok   malformed JSON -> 400\n  ok   501-char body -> 400\n-- create, like, read back\n  ok   special characters round-trip (trimmed) -> 201\n  ok   create 500-char post -> 201\n  ok   POST /posts content-type (application/json)\n  ok   created_at format 2026-10-07T13:39:34.289Z\n  ok   created_at is now (UTC, 0s)\n  ok   like (first) -> 201\n  ok   like (repeat) -> 200\n  ok   like missing post -> 404\n  ok   like bad id (with token) -> 400\n  ok   read back, like_count 1 -> 200\n  ok   like on a seeded post is counted at once (12)\n  ok   feed has 20 posts\n  ok   new post is at the top of the feed\n  ok   feed entry matches the post\npassed=42 failed=0\n",
+      "stderr": "",
+      "passed": 42,
+      "failed": 0,
+      "after": {
+        "monotonic": 1310.854270057,
+        "cpu_s": 0.0,
+        "rss_kib": 7796,
+        "hwm_kib": 7796,
+        "processes": {
+          "73": {
+            "ppid": 67,
+            "cpu_s": 0.0,
+            "rss_kib": 7796,
+            "hwm_kib": 7796,
+            "threads": 1
+          }
+        }
+      },
+      "final": [
+        {
+          "database_after": {
+            "post_count": 500002,
+            "max_post_id": 500002,
+            "integrity": "ok"
+          }
+        }
+      ]
+    }
+  ],
+  "zig_release_verification": ".deps/sqlite.zip: OK\n.deps/usockets.tar.gz: OK\n.deps/pico.tar.gz: OK\nTesting http://127.0.0.1:19800\n-- golden reads (fresh database)\n  ok   GET /feed == golden -> 200\n  ok   GET /feed content-type (application/json)\n  ok   GET /posts/1 == golden -> 200\n  ok   GET /posts/250000 == golden -> 200\n  ok   GET /posts/500000 == golden -> 200\n  ok   GET /posts/:id content-type (application/json)\n-- health, 404s, id validation\n  ok   GET /health -> 200 {\"status\":\"ok\",\"db\":\"ok\",\"uptime_s\":0}\n  ok   GET /nope -> 404\n  ok   GET /posts/0 -> 400\n  ok   GET /posts/-1 -> 400\n  ok   GET /posts/abc -> 400\n  ok   GET /posts/1.5 -> 400\n  ok   GET /posts/999999999 -> 404\n-- auth\n  ok   POST /posts, no token -> 401\n  ok   POST /posts, Basic auth -> 401\n  ok   POST /posts, garbage token -> 401\n  ok   POST /posts, bad signature -> 401\n  ok   POST /posts, alg=none -> 401\n  ok   POST /posts, expired token -> 401\n  ok   POST /posts, sub not an integer -> 401\n  ok   POST /posts, no username -> 401\n  ok   POST /posts/abc/like, no token (auth before id) -> 401\n-- create validation\n  ok   empty body -> 400\n  ok   whitespace body -> 400\n  ok   numeric body -> 400\n  ok   missing body -> 400\n  ok   malformed JSON -> 400\n  ok   501-char body -> 400\n-- create, like, read back\n  ok   special characters round-trip (trimmed) -> 201\n  ok   create 500-char post -> 201\n  ok   POST /posts content-type (application/json)\n  ok   created_at format 2026-10-07T13:38:16.402Z\n  ok   created_at is now (UTC, 0s)\n  ok   like (first) -> 201\n  ok   like (repeat) -> 200\n  ok   like missing post -> 404\n  ok   like bad id (with token) -> 400\n  ok   read back, like_count 1 -> 200\n  ok   like on a seeded post is counted at once (12)\n  ok   feed has 20 posts\n  ok   new post is at the top of the feed\n  ok   feed entry matches the post\npassed=42 failed=0\n  ok   strict JSON, Unicode boundaries, trimming and embedded NUL\n  ok   16 concurrent duplicate likes insert one row and update reads\n  ok   signed invalid algorithms, claims, JSON and UTF-8 JWT segments\n  ok   previously accepted JWT is rejected after expiry\n  ok   feed reflects concurrent creates in timestamp/id order\nExtra checks passed (62 HTTP checks plus 16 concurrent likes). Post 500014 contains 500 emoji and one like.\nPASS ambiguous framing, duplicate headers and obsolete folding rejected\nPASS Expect: 100-continue followed by a pipelined request\nPASS chunk extensions, trailers and preservation of pipelined bytes\nPASS 600 ordered pipelined write/read responses across bounded commit batches\nPASS peer half-close preserves responses waiting for commit\nOpened keep-alive socket for 66-second reuse check\nPASS fragmented and chunked POST, owned headers, empty-body reuse\nPASS 100 aborted partial uploads\nPASS 100 reset connections after complete write uploads\nPASS 1,800 pipelined responses under backpressure\nPASS same-socket HTTP keep-alive after 66 idle seconds\nPASS 192 acknowledged creates and likes survive SIGKILL; 32 failed writes remain isolated\n",
+  "zig_safe_verification": "Testing http://127.0.0.1:19800\n-- golden reads (fresh database)\n  ok   GET /feed == golden -> 200\n  ok   GET /feed content-type (application/json)\n  ok   GET /posts/1 == golden -> 200\n  ok   GET /posts/250000 == golden -> 200\n  ok   GET /posts/500000 == golden -> 200\n  ok   GET /posts/:id content-type (application/json)\n-- health, 404s, id validation\n  ok   GET /health -> 200 {\"status\":\"ok\",\"db\":\"ok\",\"uptime_s\":0}\n  ok   GET /nope -> 404\n  ok   GET /posts/0 -> 400\n  ok   GET /posts/-1 -> 400\n  ok   GET /posts/abc -> 400\n  ok   GET /posts/1.5 -> 400\n  ok   GET /posts/999999999 -> 404\n-- auth\n  ok   POST /posts, no token -> 401\n  ok   POST /posts, Basic auth -> 401\n  ok   POST /posts, garbage token -> 401\n  ok   POST /posts, bad signature -> 401\n  ok   POST /posts, alg=none -> 401\n  ok   POST /posts, expired token -> 401\n  ok   POST /posts, sub not an integer -> 401\n  ok   POST /posts, no username -> 401\n  ok   POST /posts/abc/like, no token (auth before id) -> 401\n-- create validation\n  ok   empty body -> 400\n  ok   whitespace body -> 400\n  ok   numeric body -> 400\n  ok   missing body -> 400\n  ok   malformed JSON -> 400\n  ok   501-char body -> 400\n-- create, like, read back\n  ok   special characters round-trip (trimmed) -> 201\n  ok   create 500-char post -> 201\n  ok   POST /posts content-type (application/json)\n  ok   created_at format 2026-10-07T13:36:00.997Z\n  ok   created_at is now (UTC, 1s)\n  ok   like (first) -> 201\n  ok   like (repeat) -> 200\n  ok   like missing post -> 404\n  ok   like bad id (with token) -> 400\n  ok   read back, like_count 1 -> 200\n  ok   like on a seeded post is counted at once (12)\n  ok   feed has 20 posts\n  ok   new post is at the top of the feed\n  ok   feed entry matches the post\npassed=42 failed=0\n  ok   strict JSON, Unicode boundaries, trimming and embedded NUL\n  ok   16 concurrent duplicate likes insert one row and update reads\n  ok   signed invalid algorithms, claims, JSON and UTF-8 JWT segments\n  ok   previously accepted JWT is rejected after expiry\n  ok   feed reflects concurrent creates in timestamp/id order\nExtra checks passed (62 HTTP checks plus 16 concurrent likes). Post 500014 contains 500 emoji and one like.\nPASS ambiguous framing, duplicate headers and obsolete folding rejected\nPASS Expect: 100-continue followed by a pipelined request\nPASS chunk extensions, trailers and preservation of pipelined bytes\nPASS 600 ordered pipelined write/read responses across bounded commit batches\nPASS peer half-close preserves responses waiting for commit\nOpened keep-alive socket for 66-second reuse check\nPASS fragmented and chunked POST, owned headers, empty-body reuse\nPASS 100 aborted partial uploads\nPASS 100 reset connections after complete write uploads\nPASS 1,800 pipelined responses under backpressure\nPASS same-socket HTTP keep-alive after 66 idle seconds\nPASS 192 acknowledged creates and likes survive SIGKILL; 32 failed writes remain isolated\n",
+  "commit_fault_verification": "PASS failed commit returns 500 and rolls back the inserted post\nPASS success waits for commit; next write succeeds after rollback\nPASS failed batch releases neither write success nor uncommitted read data\nPASS pipelined writes and dependent reads wait for the same commit\nPASS failed like commit rolls back and a subsequent like succeeds\n",
+  "idle_connections": {
+    "service": {
+      "ready": true,
+      "roots": [
+        244
+      ],
+      "port": 26000,
+      "log": "/suite/logs/pr0-26000.log",
+      "nginx": false
+    },
+    "opened": {
+      "ready": true,
+      "connections": 15000
+    },
+    "warmup": "Running 2s test @ http://127.0.0.1:26000/feed\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     2.62ms    7.56ms  75.64ms   94.48%\n    Req/Sec    34.49k     5.79k   42.73k    92.50%\n  Latency Distribution\n     50%  760.00us\n     75%    1.00ms\n     90%    6.27ms\n     99%   49.75ms\n  137495 requests in 2.02s, 232.28MB read\nRequests/sec:  68058.17\nTransfer/sec:    114.98MB\n",
+    "mixed": "Running 8s test @ http://127.0.0.1:26000/feed\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     1.91ms    3.44ms  29.48ms   90.53%\n    Req/Sec    29.47k     5.92k   43.94k    58.75%\n  Latency Distribution\n     50%  804.00us\n     75%    1.18ms\n     90%    4.73ms\n     99%   17.38ms\n  469619 requests in 8.03s, 793.90MB read\nRequests/sec:  58480.74\nTransfer/sec:     98.86MB\n",
+    "with_idle": {
+      "monotonic": 1699.435063192,
+      "cpu_s": 8.82,
+      "rss_kib": 45256,
+      "hwm_kib": 45256,
+      "processes": {
+        "244": {
+          "ppid": 238,
+          "cpu_s": 8.82,
+          "rss_kib": 45256,
+          "hwm_kib": 45256,
+          "threads": 1
+        }
+      }
+    },
+    "verified": {
+      "verified": 15000,
+      "same_sockets": true
+    },
+    "after": {
+      "monotonic": 1756.015317676,
+      "cpu_s": 9.0,
+      "rss_kib": 45264,
+      "hwm_kib": 45264,
+      "processes": {
+        "244": {
+          "ppid": 238,
+          "cpu_s": 9.0,
+          "rss_kib": 45264,
+          "hwm_kib": 45264,
+          "threads": 1
+        }
+      }
+    },
+    "final": [
+      {
+        "database_after": {
+          "post_count": 505733,
+          "max_post_id": 505733,
+          "integrity": "ok"
+        }
+      }
+    ]
+  }
+}

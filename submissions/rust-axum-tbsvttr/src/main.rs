@@ -1,9 +1,11 @@
 use axum::{
     Router,
     body::{Body, to_bytes},
+    extract::connect_info::Connected,
     extract::{Request, State},
     http::{StatusCode, header},
     response::Response,
+    serve::IncomingStream,
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use hmac::{Hmac, Mac};
@@ -13,9 +15,34 @@ use serde_json::Value;
 use sha2::Sha256;
 use std::{
     env,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::{mpsc, oneshot};
+
+static CONNECTIONS: AtomicUsize = AtomicUsize::new(0);
+static KEEPALIVE_LIMIT: AtomicUsize = AtomicUsize::new(40000);
+struct ConnectionLease;
+impl Drop for ConnectionLease {
+    fn drop(&mut self) {
+        CONNECTIONS.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+#[derive(Clone)]
+struct ConnectionInfo {
+    _connection: Arc<ConnectionLease>,
+}
+impl Connected<IncomingStream<'_, tokio::net::TcpListener>> for ConnectionInfo {
+    fn connect_info(_: IncomingStream<'_, tokio::net::TcpListener>) -> Self {
+        CONNECTIONS.fetch_add(1, Ordering::Relaxed);
+        Self {
+            _connection: Arc::new(ConnectionLease),
+        }
+    }
+}
 
 const READ: &str = "SELECT p.id,p.body,p.created_at,u.username,(SELECT count(*) FROM likes WHERE post_id=p.id) FROM posts p JOIN users u ON u.id=p.user_id";
 type Reply = (u16, Vec<u8>);
@@ -325,7 +352,11 @@ impl App {
     }
 }
 fn http_response((status, data): Reply) -> Response {
-    Response::builder()
+    let mut builder = Response::builder();
+    if CONNECTIONS.load(Ordering::Relaxed) >= KEEPALIVE_LIMIT.load(Ordering::Relaxed) {
+        builder = builder.header(header::CONNECTION, "close");
+    }
+    builder
         .status(StatusCode::from_u16(status).unwrap())
         .header(header::CONTENT_TYPE, "application/json")
         .header(header::CONTENT_LENGTH, data.len())
@@ -362,6 +393,19 @@ async fn handle(State(queue): State<mpsc::Sender<Job>>, request: Request) -> Res
 }
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if let Ok(limits) = std::fs::read_to_string("/proc/self/limits") {
+        if let Some(limit) = limits
+            .lines()
+            .find(|line| line.starts_with("Max open files"))
+            .and_then(|line| line.split_whitespace().nth(3))
+            .and_then(|value| value.parse::<usize>().ok())
+        {
+            KEEPALIVE_LIMIT.store(
+                40000.min(limit.saturating_sub(128).max(1)),
+                Ordering::Relaxed,
+            );
+        }
+    }
     let path = env::var("SQLITE_PATH")?;
     let secret = env::var("JWT_SECRET")?;
     if path.is_empty() || secret.is_empty() {
@@ -388,6 +432,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         env::var("PORT").unwrap_or("3000".into()).parse::<u16>()?,
     ))
     .await?;
-    axum::serve(listener, Router::new().fallback(handle).with_state(send)).await?;
+    let app = Router::new()
+        .fallback(handle)
+        .with_state(send)
+        .into_make_service_with_connect_info::<ConnectionInfo>();
+    axum::serve(listener, app).await?;
     Ok(())
 }

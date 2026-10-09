@@ -1,6 +1,6 @@
 # Python + Granian
 
-A direct HTTP implementation using Python handlers, Granian's native RSGI interface, and SQLite-generated JSON.
+A direct HTTP implementation using Python handlers, Granian's native RSGI interface, and SQLite-generated JSON. Application, server and pressure helper total 183 physical lines.
 
 | Component | Version |
 |---|---|
@@ -12,6 +12,59 @@ A direct HTTP implementation using Python handlers, Granian's native RSGI interf
 | Deployment | Direct, `0.0.0.0:80`; no Nginx |
 
 All three installed runtime packages are pinned in `requirements.txt`.
+
+## Connection pressure — 2026-10-09
+
+The Linux process descriptor count is sampled on the response path at most once
+per 100 ms. At 40,000 open descriptors, responses advertise `Connection: close`;
+the transport drains their headers and body before retiring the socket. Smaller
+inherited limits reduce the budget with a reserve of 128. An `EMFILE`/`ENFILE`
+sampling failure also triggers retirement. The sample includes non-socket
+descriptors and incomplete uploads; it stores transport metadata, not API data.
+On platforms without `/proc`, normal keep-alive remains available without this
+Linux pressure guard. Successful writes commit before their replies.
+
+Ordinary connection counts retain the 75-second keep-alive timeout. Clients
+reconnect after a retired response. The resource budget is not a logical-user cap.
+
+The source and throughput comparisons recorded before this update describe their
+pinned baseline revisions. New evidence and exact source hashes are recorded in
+[capacity-results.json](capacity-results.json).
+
+The selected diagnostic served **70,000 logical users** for a **5-minute hold**, with **0 errors**, worst-shard p95/p99 **33.8/42.8 ms**, and sampled peak container memory **1289.1 MiB**. The sum of process RSS high-water marks peaked at **872.7 MiB**; shared pages may be counted more than once. This is one local trial, not a maximum-capacity search.
+
+Run correctness and recovery checks from the submission directory on a fresh seed:
+
+```bash
+python3 verify.py
+```
+
+With server hard/soft `nofile=256` and a higher client limit:
+
+```bash
+python3 tests/pressure_regression.py 3000
+python3 tests/fd_exhaustion.py 3000
+```
+
+The first regression finishes an interrupted Unicode upload during retirement,
+checks committed writes/readbacks, and confirms keep-alive returns when pressure
+subsides. The second exhausts descriptors with incomplete HTTP headers before
+completing one valid request and checking that its full response drains and closes.
+
+For a sustained Linux diagnostic, against a running server and fresh seed copy:
+
+```bash
+mkdir -p bin
+cc -O3 -Wall -Wextra tests/connection_load.c -lm -o bin/connection-load
+bin/connection-load 3000 --users 70000 --seconds 300 --ramp 60 --tokens ../../seed/tokens.json
+```
+
+The C generator follows the feed/post/like/create loop, request probabilities and
+think-time ranges in `bench/load.js`. It uses a different PRNG and post text,
+several loopback source addresses, and no separate warm-up or ramp-down. It reports
+hold-only request latency, latency including reconnects, and generator resource
+usage. These are local diagnostics, not official k6/droplet scores or a search for
+maximum capacity. The diagnostic writes posts and likes.
 
 ## Run
 

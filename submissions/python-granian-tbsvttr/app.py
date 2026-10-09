@@ -8,6 +8,7 @@ import sqlite3
 import time
 
 import orjson
+from pressure import connection_pressure
 
 SECRET = os.environ["JWT_SECRET"].encode()
 START = time.monotonic()
@@ -136,7 +137,8 @@ async def app(scope, protocol):
         body = orjson.dumps({"error": message})
     except Exception:
         status, body = 500, orjson.dumps({"error": "internal server error"})
-    protocol.response_bytes(status, HEADERS, body)
+    headers = HEADERS + [("connection", "close")] if connection_pressure() else HEADERS
+    protocol.response_bytes(status, headers, body)
 
 
 gc.collect()

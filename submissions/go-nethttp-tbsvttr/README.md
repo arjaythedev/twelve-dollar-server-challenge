@@ -27,7 +27,7 @@ Direct HTTP/1.1 with keep-alive, without Nginx. Configuration uses only the four
 challenge environment variables. Installation supports Linux x86_64 and ARM64;
 measurements below are native ARM64, not the official x86_64 droplet.
 
-Source accounting: **391 application LOC**, **1,181 total own source/config LOC**,
+Baseline source accounting: **391 application LOC**, **1,181 total own source/config LOC**,
 and **300,744 own plus inspected dependency-source LOC**. The latter
 is a scoped source footprint, not executed code or a complete runtime footprint.
 File scopes and hashes are recorded in `source-inventory.json`; documentation,
@@ -55,6 +55,56 @@ Commit failure rolls back and changes queued responses to HTTP 500. A peer that
 abandons a complete request may still have its write committed; it receives no
 success response. Constraint failures do not undo unrelated successful statements.
 An automatically rolled-back transaction invalidates the whole pending batch.
+
+## Connection pressure — 2026-10-09
+
+At ordinary connection counts, keep-alive retains the 75-second timeout. At
+16,000 open connections, completed responses advertise `Connection: close`
+and the transport drains the response before closing its socket. Clients reconnect
+for their next request. Uploads finish and successful writes commit before this
+response-based retirement takes place. The threshold is a connection/memory budget,
+not a limit on the number of logical users. Counters store transport metadata.
+
+The standard HTTP connection-state callback counts open connections. The keep-alive budget leaves 128 descriptors free when the inherited file limit is smaller. The Go runtime has a 768 MiB soft memory limit, which guides GC and memory release; SQLite allocations, mmap and kernel memory are additional to this budget.
+
+The source accounting and performance tables recorded before this change describe
+the pinned baseline. New diagnostic evidence is in [capacity-results.json](capacity-results.json).
+The selected local ARM64 diagnostic passed at **50,000 logical users**
+for a **5-minute hold**, with zero errors and a worst-shard p99 of
+**155.5 ms**. Peak process RSS was **573.2 MiB**;
+sampled peak container memory was **915.9 MiB**. This is
+one diagnostic trial, not a maximum-capacity search or an official droplet score.
+
+From the repository root, against a running server on a fresh database copy:
+
+```bash
+python3 submissions/go-nethttp-tbsvttr/tests/connection_check.py 3000 --users 512 --seconds 20 --ramp 2 --timeout 5
+```
+
+For descriptor pressure, run the server with hard/soft `nofile=256` and give the
+client a higher limit. The diagnostic uses the feed/post/like/create loop and think
+times from `bench/load.js`, measures the hold, and reports request latency plus
+latency including reconnects. It uses Python, separate loopback source addresses,
+and no warm-up or ramp-down; it is not an official k6 score. It writes posts and likes.
+
+For sustained runs on Linux, compile the socket generator. It retains only each
+user's selected post ID, uses deferred ephemeral-port allocation on several
+loopback addresses, and lets the server's FIN retire completed connections. The
+body text and random-number generator differ from k6; the request mix, user loop
+and think-time ranges match. It reports generator CPU, memory and loop delay:
+
+```bash
+cc -O3 -Wall -Wextra submissions/go-nethttp-tbsvttr/tests/connection_load.c -lm -o submissions/go-nethttp-tbsvttr/bin/connection-load
+submissions/go-nethttp-tbsvttr/bin/connection-load 3000 --users 70000 --seconds 300 --ramp 60 --tokens seed/tokens.json
+```
+
+With the same low server limit, this targeted regression keeps an unfinished upload
+open during connection retirement, verifies committed writes, and checks that
+keep-alive resumes after the other connections close:
+
+```bash
+python3 submissions/go-nethttp-tbsvttr/tests/pressure_regression.py 3000
+```
 
 ## Validation
 

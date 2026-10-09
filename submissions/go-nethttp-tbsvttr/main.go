@@ -15,8 +15,10 @@ import (
 	"net/url"
 	"os"
 	"runtime"
+	"runtime/debug"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -323,6 +325,8 @@ func (a *app) work(queue <-chan job) {
 }
 func main() {
 	runtime.GOMAXPROCS(1)
+	// Leave room for SQLite mappings, page cache and kernel socket memory.
+	debug.SetMemoryLimit(768 << 20)
 	path, secret := os.Getenv("SQLITE_PATH"), os.Getenv("JWT_SECRET")
 	if path == "" || secret == "" {
 		log.Fatal("SQLITE_PATH and JWT_SECRET are required")
@@ -355,15 +359,40 @@ func main() {
 	}
 	queue := make(chan job, 1024)
 	go a.work(queue)
+	var connections atomic.Int64
+	keepaliveLimit := int64(16000)
+	if limits, err := os.ReadFile("/proc/self/limits"); err == nil {
+		for _, line := range strings.Split(string(limits), "\n") {
+			if strings.HasPrefix(line, "Max open files") {
+				if limit, err := strconv.ParseInt(strings.Fields(line)[3], 10, 64); err == nil && limit < keepaliveLimit+128 {
+					keepaliveLimit = max(1, limit-128)
+				}
+			}
+		}
+	}
 	server := &http.Server{Addr: net.JoinHostPort(env("HOST", "127.0.0.1"), env("PORT", "3000")),
 		ReadHeaderTimeout: 75 * time.Second, ReadTimeout: 75 * time.Second, WriteTimeout: 75 * time.Second, IdleTimeout: 75 * time.Second, MaxHeaderBytes: 16384}
+	server.ConnState = func(_ net.Conn, state http.ConnState) {
+		switch state {
+		case http.StateNew:
+			connections.Add(1)
+		case http.StateClosed, http.StateHijacked:
+			connections.Add(-1)
+		}
+	}
 	server.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 16384))
-		if err != nil {
-			result := failure(413, "request body too large")
+		write := func(result reply) {
+			if connections.Load() >= keepaliveLimit {
+				w.Header().Set("Connection", "close")
+			}
+			w.Header().Set("Content-Length", strconv.Itoa(len(result.data)))
 			w.WriteHeader(result.status)
 			_, _ = w.Write(result.data)
+		}
+		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 16384))
+		if err != nil {
+			write(failure(413, "request body too large"))
 			return
 		}
 		j := job{r.Method, r.URL.Path, r.Header.Get("Authorization"), body, make(chan reply, 1)}
@@ -374,9 +403,7 @@ func main() {
 		}
 		select {
 		case result := <-j.done:
-			w.Header().Set("Content-Length", strconv.Itoa(len(result.data)))
-			w.WriteHeader(result.status)
-			_, _ = w.Write(result.data)
+			write(result)
 		case <-r.Context().Done():
 		}
 	})

@@ -1,5 +1,6 @@
 import { Database } from "bun:sqlite";
 import { timingSafeEqual } from "node:crypto";
+import { connectionPressure } from "./pressure";
 
 const { SQLITE_PATH, JWT_SECRET, HOST = "127.0.0.1", PORT = "3000" } = process.env;
 if (!SQLITE_PATH || !JWT_SECRET) throw new Error("SQLITE_PATH and JWT_SECRET are required");
@@ -24,7 +25,9 @@ const like = db.query(`INSERT INTO likes(user_id,post_id)
 const exists = db.query("SELECT 1 FROM posts WHERE id=?");
 const health = db.query("SELECT 1");
 
-const json = (body: unknown, status = 200) => Response.json(body, { status });
+const json = (body: unknown, status = 200) => Response.json(body, {
+  status, headers: connectionPressure() ? { Connection: "close" } : undefined,
+});
 const error = (status: number, message: string) => json({ error: message }, status);
 const positiveID = (s: string) => /^\d+$/.test(s) && Number.isSafeInteger(+s) && +s > 0 ? +s : 0;
 const hmac = new Bun.CryptoHasher("sha256", JWT_SECRET);

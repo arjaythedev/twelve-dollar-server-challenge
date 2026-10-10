@@ -221,7 +221,7 @@ fn read_feed(connection: &Connection) -> Result<Vec<u8>, DbError> {
             output.push(b',');
         }
         first = false;
-        serde_json::to_writer(&mut output, &decode_post(row)?)?;
+        decode_post(row)?.write_json(&mut output)?;
     }
     output.extend_from_slice(b"]}");
     Ok(output)
@@ -234,7 +234,7 @@ fn read_post(connection: &Connection, id: i64) -> Result<Option<Vec<u8>>, DbErro
         return Ok(None);
     };
     let mut output = Vec::from(b"{\"post\":".as_slice());
-    serde_json::to_writer(&mut output, &decode_post(row)?)?;
+    decode_post(row)?.write_json(&mut output)?;
     output.push(b'}');
     Ok(Some(output))
 }
@@ -261,7 +261,7 @@ fn insert_post(
             like_count: 0,
         };
         let mut output = Vec::from(b"{\"post\":".as_slice());
-        serde_json::to_writer(&mut output, &post)?;
+        post.write_json(&mut output)?;
         output.push(b'}');
         // Complete RETURNING before committing; borrowed row data is no longer used.
         rows.next()?;

@@ -117,19 +117,24 @@ struct Incoming<'a> {
 }
 
 fn post_body(bytes: &Bytes) -> Result<Bytes, &'static str> {
-    // Validate the entire document first, so malformed JSON remains distinct
-    // from a valid document with a missing or incorrectly typed body field.
-    let raw: &RawValue = serde_json::from_slice(bytes).map_err(|_| "malformed JSON body")?;
-    if !raw.get().starts_with('{') {
+    let object_start = bytes.iter().position(|byte| !byte.is_ascii_whitespace());
+    if !object_start.is_some_and(|index| bytes[index] == b'{') {
+        let _: &RawValue = serde_json::from_slice(bytes).map_err(|_| "malformed JSON body")?;
         return Err("body is required");
     }
-    let incoming: Incoming<'_> = serde_json::from_str(raw.get()).map_err(|error| {
-        if error.is_data() {
-            "body is required"
-        } else {
-            "malformed JSON body"
+    // Retain borrowed strings and parse accepted requests once. Rejected
+    // type errors get a full-document validation pass to preserve error order.
+    let incoming: Incoming<'_> = match serde_json::from_slice(bytes) {
+        Ok(incoming) => incoming,
+        Err(error) if error.is_data() => {
+            // Deserialization can stop at a type error before reaching invalid
+            // trailing JSON. Validate those uncommon rejected requests fully
+            // to preserve malformed-JSON precedence.
+            let _: &RawValue = serde_json::from_slice(bytes).map_err(|_| "malformed JSON body")?;
+            return Err("body is required");
         }
-    })?;
+        Err(_) => return Err("malformed JSON body"),
+    };
     let trimmed = incoming.body.trim();
     if trimmed.is_empty() {
         return Err("body is required");

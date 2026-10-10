@@ -3,7 +3,6 @@ package repository
 import (
 	"context"
 	"errors"
-	"fmt"
 	"sync"
 
 	"feed/internal/sqlite"
@@ -40,13 +39,13 @@ func Open(path string, readers int) (*DB, error) {
 	db := &DB{readers: make(chan *readConn, readers)}
 	w, err := sqlite.Open(path, false)
 	if err != nil {
-		return nil, fmt.Errorf("open writer: %w", err)
+		return nil, err
 	}
 	db.w = w
 	w.BusyTimeout(5000)
 	if err := w.Exec(pragmas); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("writer pragmas: %w", err)
+		return nil, err
 	}
 	if db.ws, err = prepareWrite(w); err != nil {
 		db.Close()
@@ -56,14 +55,14 @@ func Open(path string, readers int) (*DB, error) {
 		c, err := sqlite.Open(path, true)
 		if err != nil {
 			db.Close()
-			return nil, fmt.Errorf("open reader: %w", err)
+			return nil, err
 		}
 		c.BusyTimeout(5000)
 		rc := &readConn{c: c}
 		db.all = append(db.all, rc)
 		if err := c.Exec(`PRAGMA mmap_size = 1073741824; PRAGMA cache_size = -32768; PRAGMA temp_store = MEMORY;`); err != nil {
 			db.Close()
-			return nil, fmt.Errorf("reader pragmas: %w", err)
+			return nil, err
 		}
 		if rc.stmts, err = prepareRead(c); err != nil {
 			db.Close()

@@ -3,7 +3,7 @@ package repository
 
 import (
 	"context"
-	"fmt"
+	"database/sql"
 
 	"feed/domain"
 	"feed/internal/sqlite"
@@ -67,13 +67,13 @@ func prepareRead(c *sqlite.Conn) (readStmts, error) {
 	var s readStmts
 	var err error
 	if s.feed, err = c.Prepare(sqlFeed); err != nil {
-		return s, fmt.Errorf("prepare feed: %w", err)
+		return s, err
 	}
 	if s.get, err = c.Prepare(sqlGet); err != nil {
-		return s, fmt.Errorf("prepare get: %w", err)
+		return s, err
 	}
 	if s.ping, err = c.Prepare(sqlPing); err != nil {
-		return s, fmt.Errorf("prepare ping: %w", err)
+		return s, err
 	}
 	return s, nil
 }
@@ -82,13 +82,13 @@ func prepareWrite(c *sqlite.Conn) (writeStmts, error) {
 	var s writeStmts
 	var err error
 	if s.insert, err = c.Prepare(sqlInsert); err != nil {
-		return s, fmt.Errorf("prepare insert: %w", err)
+		return s, err
 	}
 	if s.like, err = c.Prepare(sqlLike); err != nil {
-		return s, fmt.Errorf("prepare like: %w", err)
+		return s, err
 	}
 	if s.exists, err = c.Prepare(sqlExists); err != nil {
-		return s, fmt.Errorf("prepare exists: %w", err)
+		return s, err
 	}
 	return s, nil
 }
@@ -122,7 +122,7 @@ func (r *postRepository) Feed(ctx context.Context) ([]domain.Post, error) {
 	for {
 		row, err := s.Step()
 		if err != nil {
-			return nil, fmt.Errorf("feed: %w", err)
+			return nil, err
 		}
 		if !row {
 			return posts, nil
@@ -140,12 +140,12 @@ func (r *postRepository) Get(ctx context.Context, id int64) (domain.Post, error)
 	s := rc.stmts.get
 	defer s.Reset()
 	if err := s.BindInt64(1, id); err != nil {
-		return domain.Post{}, fmt.Errorf("get: %w", err)
+		return domain.Post{}, err
 	}
 	row, err := s.Step()
 	switch {
 	case err != nil:
-		return domain.Post{}, fmt.Errorf("get: %w", err)
+		return domain.Post{}, err
 	case !row:
 		return domain.Post{}, domain.ErrPostNotFound
 	}
@@ -161,22 +161,22 @@ func (r *postRepository) Insert(ctx context.Context, userID int64, body string) 
 	s := w.insert
 	defer s.Reset()
 	if err := s.BindInt64(1, userID); err != nil {
-		return 0, "", fmt.Errorf("insert: %w", err)
+		return 0, "", err
 	}
 	if err := s.BindText(2, body); err != nil {
-		return 0, "", fmt.Errorf("insert: %w", err)
+		return 0, "", err
 	}
 	row, err := s.Step()
 	if err != nil {
-		return 0, "", fmt.Errorf("insert: %w", err)
+		return 0, "", err
 	}
 	if !row {
-		return 0, "", fmt.Errorf("insert: no row returned")
+		return 0, "", sql.ErrNoRows
 	}
 	id, createdAt := s.Int64(0), s.Text(1)
 	// stepping to done ends the statement, which commits it (autocommit)
 	if _, err := s.Step(); err != nil {
-		return 0, "", fmt.Errorf("insert: %w", err)
+		return 0, "", err
 	}
 	return id, createdAt, nil
 }
@@ -190,13 +190,13 @@ func (r *postRepository) Like(ctx context.Context, userID, postID int64) (bool, 
 	s := w.like
 	defer s.Reset()
 	if err := s.BindInt64(1, userID); err != nil {
-		return false, fmt.Errorf("like: %w", err)
+		return false, err
 	}
 	if err := s.BindInt64(2, postID); err != nil {
-		return false, fmt.Errorf("like: %w", err)
+		return false, err
 	}
 	if _, err := s.Step(); err != nil {
-		return false, fmt.Errorf("like: %w", err)
+		return false, err
 	}
 	if r.db.w.Changes() == 1 {
 		return true, nil
@@ -205,12 +205,12 @@ func (r *postRepository) Like(ctx context.Context, userID, postID int64) (bool, 
 	e := w.exists
 	defer e.Reset()
 	if err := e.BindInt64(1, postID); err != nil {
-		return false, fmt.Errorf("like: %w", err)
+		return false, err
 	}
 	row, err := e.Step()
 	switch {
 	case err != nil:
-		return false, fmt.Errorf("like: %w", err)
+		return false, err
 	case !row:
 		return false, domain.ErrPostNotFound
 	}

@@ -23,11 +23,6 @@ type PostRepository interface {
 	Like(ctx context.Context, userID, postID int64) (inserted bool, err error)
 }
 
-// Pinger is what the health check asks.
-type Pinger interface {
-	Ping(ctx context.Context) error
-}
-
 // Container is every repository there is, built on one database.
 type Container struct {
 	Posts PostRepository
@@ -40,8 +35,8 @@ func New(db *DB) Container {
 }
 
 const postColumns = `SELECT p.id, p.body, p.created_at, u.username,
-       (SELECT count(*) FROM likes l WHERE l.post_id = p.id)
-  FROM posts p JOIN users u ON u.id = p.user_id`
+(SELECT count(*) FROM likes l WHERE l.post_id = p.id)
+FROM posts p JOIN users u ON u.id = p.user_id`
 
 const (
 	sqlFeed   = postColumns + ` ORDER BY p.created_at DESC, p.id DESC LIMIT 20`
@@ -55,16 +50,9 @@ const (
 	sqlExists = `SELECT 1 FROM posts WHERE id = ?`
 )
 
-var (
-	readQueries  = []string{sqlFeed, sqlGet, sqlPing}
-	writeQueries = []string{sqlInsert, sqlLike, sqlExists}
-)
-
 type postRepository struct {
 	db *DB
 }
-
-var _ PostRepository = (*postRepository)(nil)
 
 // scanPost reads a row of postColumns.
 func scanPost(s *sqlite.Stmt) domain.Post {

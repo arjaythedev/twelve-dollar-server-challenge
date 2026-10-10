@@ -9,6 +9,11 @@ import (
 	"crawshaw.io/sqlite/sqlitex"
 )
 
+// Pinger is what the health check asks.
+type Pinger interface {
+	Ping(ctx context.Context) error
+}
+
 // DB is the SQLite database: a pool of reader connections and one writer.
 // WAL lets the readers run beside the writer; SQLite allows one writer at a
 // time anyway, so the writer is a single connection behind a mutex rather
@@ -42,7 +47,7 @@ func Open(path string, readers int) (*DB, error) {
 		return nil, err
 	}
 	db.w = w
-	if err := setup(w, writeQueries); err != nil {
+	if err := setup(w, sqlInsert, sqlLike, sqlExists); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -53,7 +58,7 @@ func Open(path string, readers int) (*DB, error) {
 			return nil, err
 		}
 		db.all = append(db.all, c)
-		if err := setup(c, readQueries); err != nil {
+		if err := setup(c, sqlFeed, sqlGet, sqlPing); err != nil {
 			db.Close()
 			return nil, err
 		}
@@ -63,7 +68,7 @@ func Open(path string, readers int) (*DB, error) {
 }
 
 // setup runs the pragmas on c and prepares queries, which c then keeps.
-func setup(c *sqlite.Conn, queries []string) error {
+func setup(c *sqlite.Conn, queries ...string) error {
 	for _, p := range pragmas {
 		if err := sqlitex.ExecTransient(c, p, nil); err != nil {
 			return err

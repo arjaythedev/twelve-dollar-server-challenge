@@ -2,7 +2,10 @@ module feed
 
 go 1.27.0
 
-require github.com/sirkostya009/ggen v0.0.0-20261009214007-38ae500ec7c6
+require (
+	crawshaw.io/sqlite v0.3.3-0.20220618202545-d1964889ea3c
+	github.com/sirkostya009/ggen v0.0.0-20261009214007-38ae500ec7c6
+)
 
 require (
 	github.com/sirkostya009/ggen/cmd/ggen v0.0.0-20261009214007-38ae500ec7c6 // indirect

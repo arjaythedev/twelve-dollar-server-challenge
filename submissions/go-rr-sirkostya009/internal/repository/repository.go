@@ -5,8 +5,9 @@ import (
 	"context"
 	"database/sql"
 
+	"crawshaw.io/sqlite"
+
 	"feed/domain"
-	"feed/internal/sqlite"
 )
 
 // PostRepository reads and writes posts and their likes.
@@ -54,44 +55,10 @@ const (
 	sqlExists = `SELECT 1 FROM posts WHERE id = ?`
 )
 
-// readStmts are a reader connection's prepared statements.
-type readStmts struct {
-	feed, get, ping *sqlite.Stmt
-}
-
-type writeStmts struct {
-	insert, like, exists *sqlite.Stmt
-}
-
-func prepareRead(c *sqlite.Conn) (readStmts, error) {
-	var s readStmts
-	var err error
-	if s.feed, err = c.Prepare(sqlFeed); err != nil {
-		return s, err
-	}
-	if s.get, err = c.Prepare(sqlGet); err != nil {
-		return s, err
-	}
-	if s.ping, err = c.Prepare(sqlPing); err != nil {
-		return s, err
-	}
-	return s, nil
-}
-
-func prepareWrite(c *sqlite.Conn) (writeStmts, error) {
-	var s writeStmts
-	var err error
-	if s.insert, err = c.Prepare(sqlInsert); err != nil {
-		return s, err
-	}
-	if s.like, err = c.Prepare(sqlLike); err != nil {
-		return s, err
-	}
-	if s.exists, err = c.Prepare(sqlExists); err != nil {
-		return s, err
-	}
-	return s, nil
-}
+var (
+	readQueries  = []string{sqlFeed, sqlGet, sqlPing}
+	writeQueries = []string{sqlInsert, sqlLike, sqlExists}
+)
 
 type postRepository struct {
 	db *DB
@@ -102,21 +69,24 @@ var _ PostRepository = (*postRepository)(nil)
 // scanPost reads a row of postColumns.
 func scanPost(s *sqlite.Stmt) domain.Post {
 	return domain.Post{
-		ID:        s.Int64(0),
-		Body:      s.Text(1),
-		CreatedAt: s.Text(2),
-		Author:    s.Text(3),
-		LikeCount: s.Int64(4),
+		ID:        s.ColumnInt64(0),
+		Body:      s.ColumnText(1),
+		CreatedAt: s.ColumnText(2),
+		Author:    s.ColumnText(3),
+		LikeCount: s.ColumnInt64(4),
 	}
 }
 
 func (r *postRepository) Feed(ctx context.Context) ([]domain.Post, error) {
-	rc, err := r.db.reader(ctx)
+	c, err := r.db.reader(ctx)
 	if err != nil {
 		return nil, err
 	}
-	defer r.db.release(rc)
-	s := rc.stmts.feed
+	defer r.db.release(c)
+	s, err := c.Prepare(sqlFeed)
+	if err != nil {
+		return nil, err
+	}
 	defer s.Reset()
 	posts := make([]domain.Post, 0, domain.FeedSize)
 	for {
@@ -132,16 +102,17 @@ func (r *postRepository) Feed(ctx context.Context) ([]domain.Post, error) {
 }
 
 func (r *postRepository) Get(ctx context.Context, id int64) (domain.Post, error) {
-	rc, err := r.db.reader(ctx)
+	c, err := r.db.reader(ctx)
 	if err != nil {
 		return domain.Post{}, err
 	}
-	defer r.db.release(rc)
-	s := rc.stmts.get
-	defer s.Reset()
-	if err := s.BindInt64(1, id); err != nil {
+	defer r.db.release(c)
+	s, err := c.Prepare(sqlGet)
+	if err != nil {
 		return domain.Post{}, err
 	}
+	defer s.Reset()
+	s.BindInt64(1, id) // a bind error comes back from Step
 	row, err := s.Step()
 	switch {
 	case err != nil:
@@ -153,19 +124,18 @@ func (r *postRepository) Get(ctx context.Context, id int64) (domain.Post, error)
 }
 
 func (r *postRepository) Insert(ctx context.Context, userID int64, body string) (int64, string, error) {
-	w, err := r.db.writer(ctx)
+	c, err := r.db.writer(ctx)
 	if err != nil {
 		return 0, "", err
 	}
 	defer r.db.releaseWriter()
-	s := w.insert
+	s, err := c.Prepare(sqlInsert)
+	if err != nil {
+		return 0, "", err
+	}
 	defer s.Reset()
-	if err := s.BindInt64(1, userID); err != nil {
-		return 0, "", err
-	}
-	if err := s.BindText(2, body); err != nil {
-		return 0, "", err
-	}
+	s.BindInt64(1, userID)
+	s.BindText(2, body)
 	row, err := s.Step()
 	if err != nil {
 		return 0, "", err
@@ -173,7 +143,7 @@ func (r *postRepository) Insert(ctx context.Context, userID int64, body string) 
 	if !row {
 		return 0, "", sql.ErrNoRows
 	}
-	id, createdAt := s.Int64(0), s.Text(1)
+	id, createdAt := s.ColumnInt64(0), s.ColumnText(1)
 	// stepping to done ends the statement, which commits it (autocommit)
 	if _, err := s.Step(); err != nil {
 		return 0, "", err
@@ -182,31 +152,31 @@ func (r *postRepository) Insert(ctx context.Context, userID int64, body string) 
 }
 
 func (r *postRepository) Like(ctx context.Context, userID, postID int64) (bool, error) {
-	w, err := r.db.writer(ctx)
+	c, err := r.db.writer(ctx)
 	if err != nil {
 		return false, err
 	}
 	defer r.db.releaseWriter()
-	s := w.like
+	s, err := c.Prepare(sqlLike)
+	if err != nil {
+		return false, err
+	}
 	defer s.Reset()
-	if err := s.BindInt64(1, userID); err != nil {
-		return false, err
-	}
-	if err := s.BindInt64(2, postID); err != nil {
-		return false, err
-	}
+	s.BindInt64(1, userID)
+	s.BindInt64(2, postID)
 	if _, err := s.Step(); err != nil {
 		return false, err
 	}
-	if r.db.w.Changes() == 1 {
+	if c.Changes() == 1 {
 		return true, nil
 	}
 	// nothing went in: a repeat, or no such post
-	e := w.exists
-	defer e.Reset()
-	if err := e.BindInt64(1, postID); err != nil {
+	e, err := c.Prepare(sqlExists)
+	if err != nil {
 		return false, err
 	}
+	defer e.Reset()
+	e.BindInt64(1, postID)
 	row, err := e.Step()
 	switch {
 	case err != nil:

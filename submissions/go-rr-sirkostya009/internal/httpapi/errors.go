@@ -22,7 +22,9 @@ func handleError(ctx context.Context, w http.ResponseWriter, err error) {
 	case errors.Is(err, domain.ErrInvalidPostID):
 		writeError(w, http.StatusBadRequest, domain.ErrInvalidPostID)
 	default:
-		slog.ErrorContext(ctx, "handler", slog.Any("err", err))
+		// ctx is r.Context(), cancelled when the client goes away; the error
+		// still deserves its log line
+		slog.ErrorContext(context.WithoutCancel(ctx), "handler", slog.Any("err", err))
 		writeError(w, http.StatusInternalServerError, domain.ErrInternal)
 	}
 }

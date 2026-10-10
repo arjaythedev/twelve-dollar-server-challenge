@@ -1,0 +1,65 @@
+name: twelve-dollar-java
+services:
+  seed:
+    build:
+      context: ../..
+      dockerfile: submissions/java-spring-boot-nb-99/Dockerfile
+      target: checks
+    command: /challenge/seed-local.sh
+    volumes:
+      - database:/data
+
+  app:
+    build:
+      context: ../..
+      dockerfile: submissions/java-spring-boot-nb-99/Dockerfile
+      target: runtime
+      args:
+        MAVEN_PROXY_ENABLED: ${MAVEN_PROXY_ENABLED:-false}
+        MAVEN_PROXY_HOST: ${MAVEN_PROXY_HOST:-localhost}
+        MAVEN_PROXY_PORT: ${MAVEN_PROXY_PORT:-8080}
+    environment:
+      SQLITE_PATH: /data/feed.db
+      JWT_SECRET: twelve-dollar-challenge
+      HOST: 0.0.0.0
+      PORT: "3000"
+    volumes:
+      - database:/data
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "--noproxy", "*", "--fail", "--silent", "http://127.0.0.1:3000/health"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    cpus: 1.0
+    mem_limit: 1g
+
+  nginx:
+    image: nginx:1.28.0-alpine@sha256:30f1c0d78e0ad60901648be663a710bdadf19e4c10ac6782c235200619158284
+    ports:
+      - "127.0.0.1:3000:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      app:
+        condition: service_healthy
+        restart: true
+
+  test:
+    profiles: ["test"]
+    build:
+      context: ../..
+      dockerfile: submissions/java-spring-boot-nb-99/Dockerfile
+      target: checks
+    command: ["/challenge/test/test.sh", "http://nginx"]
+    environment:
+      NO_PROXY: localhost,127.0.0.1,app,nginx
+      no_proxy: localhost,127.0.0.1,app,nginx
+    depends_on:
+      nginx:
+        condition: service_started
+
+volumes:
+  database:

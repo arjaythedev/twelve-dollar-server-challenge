@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unsafe"
 
 	"feed/domain"
 )
@@ -33,14 +34,22 @@ type claims struct {
 // Verifier checks tokens signed with one secret. Every call verifies the
 // signature anew; nothing is remembered between requests.
 type Verifier struct {
-	macs sync.Pool
+	macs sync.Pool // of *signer
 	now  func() time.Time
+}
+
+// signer is a keyed HMAC and the array it sums into. The sum goes through
+// the hash.Hash interface, so a local array would escape to the heap on
+// every call; pooled with the mac, it is allocated once.
+type signer struct {
+	mac hash.Hash
+	sum [sha256.Size]byte
 }
 
 func NewVerifier(secret []byte) *Verifier {
 	key := append([]byte(nil), secret...)
 	return &Verifier{
-		macs: sync.Pool{New: func() any { return hmac.New(sha256.New, key) }},
+		macs: sync.Pool{New: func() any { return &signer{mac: hmac.New(sha256.New, key)} }},
 		now:  time.Now,
 	}
 }
@@ -78,13 +87,16 @@ func (v *Verifier) Verify(token string) (domain.Principal, error) {
 	if _, err := b64.Decode(sigBuf[:], []byte(sig)); err != nil {
 		return domain.Principal{}, domain.ErrInvalidToken
 	}
-	mac := v.macs.Get().(hash.Hash)
-	mac.Reset()
-	mac.Write([]byte(token[:len(h)+1+len(p)]))
-	var want [sha256.Size]byte
-	mac.Sum(want[:0])
-	v.macs.Put(mac)
-	if !hmac.Equal(want[:], sigBuf[:]) {
+	sg := v.macs.Get().(*signer)
+	sg.mac.Reset()
+	// []byte(signed) would be copied to the heap: the slice goes through an
+	// interface call, so the compiler can't prove Write keeps no hold of it.
+	// hash.Hash.Write never retains or modifies its input.
+	signed := token[:len(h)+1+len(p)]
+	sg.mac.Write(unsafe.Slice(unsafe.StringData(signed), len(signed)))
+	valid := hmac.Equal(sg.mac.Sum(sg.sum[:0]), sigBuf[:])
+	v.macs.Put(sg)
+	if !valid {
 		return domain.Principal{}, domain.ErrInvalidToken
 	}
 

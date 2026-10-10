@@ -181,14 +181,14 @@ async fn like_post(
     path: Result<Path<String>, PathRejection>,
     headers: HeaderMap,
 ) -> Response {
-    let user = match state.auth.authenticate(&headers) {
+    let user_id = match state.auth.authenticate_id(&headers) {
         Ok(user) => user,
         Err(message) => return error(StatusCode::UNAUTHORIZED, message),
     };
     let Some(post_id) = path.ok().and_then(|Path(id)| positive_id(&id)) else {
         return error(StatusCode::BAD_REQUEST, "invalid post id");
     };
-    match state.db.like(user.user_id, post_id).await {
+    match state.db.like(user_id, post_id).await {
         Ok(Some(already_liked)) => (
             if already_liked {
                 StatusCode::OK

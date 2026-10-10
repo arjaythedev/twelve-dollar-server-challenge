@@ -17,175 +17,6 @@ import (
 // Tries to fit >2 elements in 80 bytes, then 512 bytes - never goes above that.
 const ggenCap_Feed_Posts_Post = (min((80/max(int(unsafe.Sizeof(*new(Post))), 1)), 2)/2)*(80/max(int(unsafe.Sizeof(*new(Post))), 1)) + (1-(min((80/max(int(unsafe.Sizeof(*new(Post))), 1)), 2)/2))*max(((8*int(unsafe.Sizeof(uintptr(0)))*int(unsafe.Sizeof(uintptr(0))))/max(int(unsafe.Sizeof(*new(Post))), 1)), 1)
 
-func (recv anyObject) DecodeFrom(data []byte) (result anyObject, i int, err error) {
-	result = recv
-	if i < len(data) && data[i] <= ' ' && (data[i] == ' ' || data[i] == '\t' || data[i] == '\n' || data[i] == '\r') {
-		i++
-		if i < len(data) && data[i] <= ' ' {
-			i = ggen.SkipSpaceAVX2(data, i)
-		}
-	}
-	if i >= len(data) || data[i] != '{' {
-		return result, i, ggen.NewParseErr("", i, ggen.ErrBadObject)
-	}
-	i++
-	if i < len(data) && data[i] <= ' ' && (data[i] == ' ' || data[i] == '\t' || data[i] == '\n' || data[i] == '\r') {
-		i++
-		if i < len(data) && data[i] <= ' ' {
-			i = ggen.SkipSpaceAVX2(data, i)
-		}
-	}
-	if i < len(data) && data[i] == '}' {
-		i++
-		return result, i, nil
-	}
-	for {
-		var key string
-		if i >= len(data) || data[i] != '"' {
-			return result, i, ggen.NewParseErr("", i, ggen.ErrExpectString)
-		}
-		ke := i + 1
-		kew := ke + 1
-		if kew > len(data) {
-			kew = len(data)
-		}
-		for ke < kew && data[ke] != '"' && data[ke] != '\\' && data[ke] >= 0x20 && data[ke] < 0x80 {
-			ke++
-		}
-		if ke < len(data) && data[ke] == '"' {
-			key = unsafe.String(unsafe.SliceData(data[i+1:]), ke-i-1)
-			i = ke + 1
-		} else {
-			key, i, err = ggen.StringAVX2(data, i, true)
-			if err != nil {
-				return result, i, ggen.NewParseErr("", i, err)
-			}
-		}
-		if i < len(data) && data[i] <= ' ' && (data[i] == ' ' || data[i] == '\t' || data[i] == '\n' || data[i] == '\r') {
-			i++
-			if i < len(data) && data[i] <= ' ' {
-				i = ggen.SkipSpaceAVX2(data, i)
-			}
-		}
-		if i >= len(data) || data[i] != ':' {
-			return result, i, ggen.NewParseErr("", i, ggen.ErrBadObject)
-		}
-		i++
-		if i < len(data) && data[i] <= ' ' && (data[i] == ' ' || data[i] == '\t' || data[i] == '\n' || data[i] == '\r') {
-			i++
-			if i < len(data) && data[i] <= ' ' {
-				i = ggen.SkipSpaceAVX2(data, i)
-			}
-		}
-		switch key {
-		default:
-			i, err = ggen.SkipValueAVX2(data, i)
-			if err != nil {
-				return result, i, ggen.NewParseErr(key, i, err)
-			}
-		}
-		if i < len(data) && data[i] <= ' ' && (data[i] == ' ' || data[i] == '\t' || data[i] == '\n' || data[i] == '\r') {
-			i++
-			if i < len(data) && data[i] <= ' ' {
-				i = ggen.SkipSpaceAVX2(data, i)
-			}
-		}
-		if i >= len(data) {
-			return result, i, ggen.NewParseErr("", i, ggen.ErrBadObject)
-		}
-		if data[i] == ',' {
-			i++
-			if i < len(data) && data[i] <= ' ' && (data[i] == ' ' || data[i] == '\t' || data[i] == '\n' || data[i] == '\r') {
-				i++
-				if i < len(data) && data[i] <= ' ' {
-					i = ggen.SkipSpaceAVX2(data, i)
-				}
-			}
-			continue
-		}
-		if data[i] == '}' {
-			i++
-			return result, i, nil
-		}
-		return result, i, ggen.NewParseErr("", i, ggen.ErrBadObject)
-	}
-}
-
-func (recv anyObject) DecodeFromStream(s *ggen.Stream) (result anyObject, err error) {
-	result = recv
-	err = s.ObjectOpen()
-	if err != nil {
-		return result, ggen.NewParseErr("", s.Offset(), err)
-	}
-	err = s.SkipSpaceAVX2()
-	if err != nil {
-		return result, ggen.NewParseErr("", s.Offset(), err)
-	}
-	if s.Pos >= len(s.Bytes()) {
-		if err = s.ReadMore(s.Pos); err != nil {
-			return result, ggen.NewParseErr("", s.Offset(), ggen.NotEOF(err, ggen.ErrExpectString))
-		}
-		s.Pos = 0
-	}
-	if s.Bytes()[s.Pos] == '}' {
-		s.Pos++
-		return result, nil
-	}
-	for {
-		var key string
-		key, err = s.KeyView(true)
-		if err != nil {
-			return result, ggen.NewParseErr("", s.Offset(), err)
-		}
-		switch key {
-		default:
-			ownKey := strings.Clone(key)
-			err = s.ConsumeColon()
-			if err != nil {
-				return result, ggen.NewParseErr(ownKey, s.Offset(), err)
-			}
-			err = s.SkipValueAVX2()
-			if err != nil {
-				return result, ggen.NewParseErr(ownKey, s.Offset(), err)
-			}
-		}
-
-		err = s.SkipSpaceAVX2()
-		if err != nil {
-			return result, ggen.NewParseErr("", s.Offset(), err)
-		}
-		if s.Pos >= len(s.Bytes()) {
-			if err = s.ReadMore(s.Pos); err != nil {
-				return result, ggen.NewParseErr("", s.Offset(), ggen.NotEOF(err, ggen.ErrBadObject))
-			}
-			s.Pos = 0
-		}
-		c := s.Bytes()[s.Pos]
-		if c == ',' {
-			s.Pos++
-			err = s.SkipSpaceAVX2()
-			if err != nil {
-				return result, ggen.NewParseErr("", s.Offset(), err)
-			}
-			continue
-		}
-		if c == '}' {
-			s.Pos++
-			return result, nil
-		}
-		return result, ggen.NewParseErr("", s.Offset(), ggen.ErrBadObject)
-	}
-}
-
-func (s anyObject) JSONSize() int {
-	size := 2
-	return size
-}
-
-func (s anyObject) AppendJSON(dst []byte) ([]byte, error) {
-	return append(dst, "{}"...), nil
-}
-
 func (recv Health) DecodeFrom(data []byte) (result Health, i int, err error) {
 	result = recv
 	seenStatus := false
@@ -2065,86 +1896,30 @@ func (recv CreatePost) DecodeFrom(data []byte) (result CreatePost, i int, err er
 				}
 			} else {
 				seenBody = true
-				if i < len(data) && data[i] <= ' ' && (data[i] == ' ' || data[i] == '\t' || data[i] == '\n' || data[i] == '\r') {
-					i++
-					if i < len(data) && data[i] <= ' ' {
-						i = ggen.SkipSpaceAVX2(data, i)
+				if i >= len(data) || data[i] != '"' {
+					return result, i, ggen.NewParseErr("body", i, ggen.ErrExpectString)
+				}
+				ke := i + 1
+				if ke+32 <= len(data) {
+					keV := archsimd.LoadUint8x32(data[ke:])
+					keD := keV.Sub(archsimd.BroadcastUint8x32(0x20))
+					keM := keV.Equal(archsimd.BroadcastUint8x32('"')).Or(keV.Equal(archsimd.BroadcastUint8x32('\\'))).Or(keD.Max(archsimd.BroadcastUint8x32(0x60)).Equal(keD)).ToBits()
+					if keM != 0 {
+						ke += bits.TrailingZeros32(keM)
+					}
+				} else {
+					for ke < len(data) && data[ke] != '"' && data[ke] != '\\' && data[ke] >= 0x20 && data[ke] < 0x80 {
+						ke++
 					}
 				}
-				if i >= len(data) {
-					return result, i, ggen.NewParseErr("body", i, ggen.ErrUnexpectedEnd)
-				}
-				switch data[i] {
-				case '"':
-					if i >= len(data) || data[i] != '"' {
-						return result, i, ggen.NewParseErr("body", i, ggen.ErrExpectString)
-					}
-					ke := i + 1
-					if ke+32 <= len(data) {
-						keV := archsimd.LoadUint8x32(data[ke:])
-						keD := keV.Sub(archsimd.BroadcastUint8x32(0x20))
-						keM := keV.Equal(archsimd.BroadcastUint8x32('"')).Or(keV.Equal(archsimd.BroadcastUint8x32('\\'))).Or(keD.Max(archsimd.BroadcastUint8x32(0x60)).Equal(keD)).ToBits()
-						if keM != 0 {
-							ke += bits.TrailingZeros32(keM)
-						}
-					} else {
-						for ke < len(data) && data[ke] != '"' && data[ke] != '\\' && data[ke] >= 0x20 && data[ke] < 0x80 {
-							ke++
-						}
-					}
-					if ke < len(data) && data[ke] == '"' {
-						result.Body = unsafe.String(unsafe.SliceData(data[i+1:]), ke-i-1)
-						i = ke + 1
-					} else {
-						result.Body, i, err = ggen.StringAVX2(data, i, true)
-						if err != nil {
-							return result, i, ggen.NewParseErr("body", i, err)
-						}
-					}
-				case '-', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9':
-					var conv1 float64
-					conv1, i, err = ggen.Float64(data, i)
+				if ke < len(data) && data[ke] == '"' {
+					result.Body = unsafe.String(unsafe.SliceData(data[i+1:]), ke-i-1)
+					i = ke + 1
+				} else {
+					result.Body, i, err = ggen.StringAVX2(data, i, true)
 					if err != nil {
 						return result, i, ggen.NewParseErr("body", i, err)
 					}
-					if cv, err := numberBody(conv1); err != nil {
-						return result, i, ggen.NewParseErr("body", i, err)
-					} else {
-						result.Body = cv
-					}
-				case 't', 'f':
-					var conv2 bool
-					conv2, i, err = ggen.Bool(data, i)
-					if err != nil {
-						i = ggen.BoolEnd(data, i)
-						return result, i, ggen.NewParseErr("body", i, err)
-					}
-					if cv, err := boolBody(conv2); err != nil {
-						return result, i, ggen.NewParseErr("body", i, err)
-					} else {
-						result.Body = cv
-					}
-				case '{':
-					var conv3 anyObject
-					var consumed int
-					conv3, consumed, err = conv3.DecodeFrom(data[i:])
-					i += consumed
-					if err != nil {
-						return result, i, ggen.NewParseErrShift("body", i, consumed, err)
-					}
-					if cv, err := objectBody(conv3); err != nil {
-						return result, i, ggen.NewParseErr("body", i, err)
-					} else {
-						result.Body = cv
-					}
-				case 'n':
-					if i+4 > len(data) || data[i+1] != 'u' || data[i+2] != 'l' || data[i+3] != 'l' {
-						return result, i, ggen.NewParseErr("body", i, ggen.ErrBadLiteral)
-					}
-					i += 4
-					result.Body = ""
-				default:
-					return result, i, ggen.NewParseErr("body", i, ggen.ErrBadValue)
 				}
 				result.Body = strings.TrimSpace(result.Body)
 				if len(result.Body) == 0 {
@@ -2243,65 +2018,9 @@ func (recv CreatePost) DecodeFromStream(s *ggen.Stream) (result CreatePost, err 
 				}
 			} else {
 				seenBody = true
-				if s.Pos >= len(s.Bytes()) {
-					if err = s.ReadMore(0); err != nil {
-						return result, ggen.NewParseErr("body", s.Offset(), ggen.NotEOF(err, ggen.ErrUnexpectedEnd))
-					}
-				}
-				switch s.Bytes()[s.Pos] {
-				case '"':
-					result.Body, err = s.StringAVX2(true)
-					if err != nil {
-						return result, ggen.NewParseErr("body", s.Offset(), err)
-					}
-				case '-', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9':
-					var conv1 float64
-					conv1, err = s.Float64()
-					if err != nil {
-						return result, ggen.NewParseErr("body", s.Offset(), err)
-					}
-					if cv, err := numberBody(conv1); err != nil {
-						return result, ggen.NewParseErr("body", s.Offset(), err)
-					} else {
-						result.Body = cv
-					}
-				case 't', 'f':
-					var conv2 bool
-					conv2, err = s.Bool()
-					if err != nil {
-						return result, ggen.NewParseErr("body", s.Offset(), err)
-					}
-					if cv, err := boolBody(conv2); err != nil {
-						return result, ggen.NewParseErr("body", s.Offset(), err)
-					} else {
-						result.Body = cv
-					}
-				case '{':
-					var conv3 anyObject
-					conv3, err = conv3.DecodeFromStream(s)
-					if err != nil {
-						return result, ggen.NewParseErr("body", s.Offset(), err)
-					}
-					if cv, err := objectBody(conv3); err != nil {
-						return result, ggen.NewParseErr("body", s.Offset(), err)
-					} else {
-						result.Body = cv
-					}
-				case 'n':
-					for ki := 1; ki < 4; ki++ {
-						if s.Pos+ki >= len(s.Bytes()) {
-							if err = s.ReadMore(0); err != nil {
-								return result, ggen.NewParseErr("body", s.Offset(), ggen.NotEOF(err, ggen.ErrBadLiteral))
-							}
-						}
-						if s.Bytes()[s.Pos+ki] != "null"[ki] {
-							return result, ggen.NewParseErr("body", s.Offset(), ggen.ErrBadLiteral)
-						}
-					}
-					s.Pos += 4
-					result.Body = ""
-				default:
-					return result, ggen.NewParseErr("body", s.Offset(), ggen.ErrBadValue)
+				result.Body, err = s.StringAVX2(true)
+				if err != nil {
+					return result, ggen.NewParseErr("body", s.Offset(), err)
 				}
 				result.Body = strings.TrimSpace(result.Body)
 				if len(result.Body) == 0 {

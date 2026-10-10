@@ -33,16 +33,9 @@ const MaxBody = 500
 
 // CreatePost is the body of POST /posts.
 //
-// Body takes every JSON shape. A string is the value; a number, bool or object
-// is valid JSON of the wrong type, which its converter turns into
-// ErrBodyNotString; null decodes to "" and fails notempty. So a decode error
-// that is neither of those nor a validation error means the bytes were not
-// JSON, and the http layer can tell malformed from wrong-type without reading
-// the body twice.
-//
 //ggen:generate ignoreunknown allowdups
 type CreatePost struct {
-	Body string `json:"body" pipe:"required . / @numberBody / @boolBody / @objectBody / nullzero ~ trim notempty maxrunes=500"`
+	Body string `json:"body" pipe:"required trim notempty maxrunes=500"`
 }
 
 //ggen:generate nosortkeys

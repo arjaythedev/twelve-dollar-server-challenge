@@ -36,20 +36,19 @@ func badRequest(w http.ResponseWriter, err error) {
 }
 
 // bodyError sorts a CreatePost decode error into the spec's three messages.
-// A wrong-type value comes back as a ParseError too, but one wrapping
-// ErrBodyNotString (see domain.CreatePost), so a ParseError without it is
-// bytes that were not JSON.
+// A parse error inside "body" is a value of the wrong type.
 func bodyError(err error) error {
 	var maxRunes *ggen.MaxRunesError
 	var parse *ggen.ParseError
 	switch {
 	case err == nil:
 		return domain.ErrMalformed
-	case errors.Is(err, domain.ErrBodyNotString):
-		return domain.ErrBodyRequired
 	case errors.As(err, &maxRunes):
 		return domain.ErrBodyTooLong
 	case errors.As(err, &parse):
+		if len(parse.Path) > 0 && parse.Path[0] == "body" {
+			return domain.ErrBodyRequired
+		}
 		return domain.ErrMalformed
 	default:
 		// required, notempty: the JSON was fine, the body was missing or blank

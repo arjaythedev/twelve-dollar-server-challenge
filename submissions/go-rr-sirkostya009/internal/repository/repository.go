@@ -66,11 +66,11 @@ func scanPost(s *sqlite.Stmt) domain.Post {
 }
 
 func (r *postRepository) Feed(ctx context.Context) ([]domain.Post, error) {
-	c, err := r.db.reader(ctx)
+	c, err := r.db.acquire(ctx)
 	if err != nil {
 		return nil, err
 	}
-	defer r.db.release(c)
+	defer r.db.release()
 	s, err := c.Prepare(sqlFeed)
 	if err != nil {
 		return nil, err
@@ -90,11 +90,11 @@ func (r *postRepository) Feed(ctx context.Context) ([]domain.Post, error) {
 }
 
 func (r *postRepository) Get(ctx context.Context, id int64) (domain.Post, error) {
-	c, err := r.db.reader(ctx)
+	c, err := r.db.acquire(ctx)
 	if err != nil {
 		return domain.Post{}, err
 	}
-	defer r.db.release(c)
+	defer r.db.release()
 	s, err := c.Prepare(sqlGet)
 	if err != nil {
 		return domain.Post{}, err
@@ -112,11 +112,11 @@ func (r *postRepository) Get(ctx context.Context, id int64) (domain.Post, error)
 }
 
 func (r *postRepository) Insert(ctx context.Context, userID int64, body string) (int64, string, error) {
-	c, err := r.db.writer(ctx)
+	c, err := r.db.acquire(ctx)
 	if err != nil {
 		return 0, "", err
 	}
-	defer r.db.releaseWriter()
+	defer r.db.release()
 	s, err := c.Prepare(sqlInsert)
 	if err != nil {
 		return 0, "", err
@@ -140,11 +140,11 @@ func (r *postRepository) Insert(ctx context.Context, userID int64, body string) 
 }
 
 func (r *postRepository) Like(ctx context.Context, userID, postID int64) (bool, error) {
-	c, err := r.db.writer(ctx)
+	c, err := r.db.acquire(ctx)
 	if err != nil {
 		return false, err
 	}
-	defer r.db.releaseWriter()
+	defer r.db.release()
 	s, err := c.Prepare(sqlLike)
 	if err != nil {
 		return false, err

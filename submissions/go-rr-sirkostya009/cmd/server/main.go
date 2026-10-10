@@ -21,7 +21,6 @@ import (
 
 // tuned for the 1 vCPU, 2 GB RAM droplet
 const (
-	readers = 4
 	// GC runs only near this limit, leaving the rest of RAM to the OS and
 	// SQLite's page cache and mmap
 	memLimit = 768 << 20
@@ -41,7 +40,7 @@ func main() {
 func run() error {
 	cfg := config.Parse()
 
-	db, err := repository.Open(cfg.SQLitePath, readers)
+	db, err := repository.Open(cfg.SQLitePath)
 	if err != nil {
 		return fmt.Errorf("open db: %w", err)
 	}

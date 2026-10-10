@@ -23,12 +23,10 @@ type Server struct {
 // New wires the http layer. It does no I/O.
 func New(db repository.Pinger, services service.Container, jwtSecret string) *Server {
 	return &Server{
-		Api: Api{
-			HealthApi: HealthApi{DB: db, Started: time.Now()},
-			FeedApi:   FeedApi{Posts: services.Posts},
-			PostsApi:  PostsApi{Posts: services.Posts},
-		},
-		tokens: auth.NewVerifier([]byte(jwtSecret)),
+		DB: db, Started: time.Now(),
+		FeedApi:  FeedApi{Posts: services.Posts},
+		PostsApi: PostsApi{Posts: services.Posts},
+		tokens:   auth.NewVerifier([]byte(jwtSecret)),
 	}
 }
 

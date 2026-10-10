@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
+	"runtime/debug"
 	"syscall"
 	"time"
 
@@ -17,7 +19,19 @@ import (
 	"feed/internal/service"
 )
 
+// tuned for the 1 vCPU, 2 GB RAM droplet
+const (
+	readers = 4
+	// GC runs only near this limit, leaving the rest of RAM to the OS and
+	// SQLite's page cache and mmap
+	memLimit = 768 << 20
+)
+
 func main() {
+	runtime.GOMAXPROCS(1)
+	debug.SetGCPercent(-1)
+	debug.SetMemoryLimit(memLimit)
+
 	if err := run(); err != nil {
 		slog.Error("server", slog.Any("err", err))
 		os.Exit(1)
@@ -27,7 +41,7 @@ func main() {
 func run() error {
 	cfg := config.Parse()
 
-	db, err := repository.Open(cfg.SQLitePath, cfg.Readers)
+	db, err := repository.Open(cfg.SQLitePath, readers)
 	if err != nil {
 		return fmt.Errorf("open db: %w", err)
 	}

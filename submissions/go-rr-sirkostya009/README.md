@@ -46,6 +46,8 @@ The layers of the goserver project it is adapted from:
   its statements prepared once. WAL, `synchronous=NORMAL` (rule 6), 1 GiB `mmap_size`, 32 MiB page cache. A like is
   one statement (`INSERT ... SELECT ... WHERE EXISTS ... ON CONFLICT DO NOTHING`); a post-existence check runs only
   when it inserted nothing, to tell a repeat from a missing post.
+- **Runtime pinned in code** for the 1 vCPU, 2 GB box: `GOMAXPROCS=1`, GC off until a 768 MiB `GOMEMLIMIT`
+  (the live heap is tiny, so GC rarely takes the only core), and 4 reader connections.
 - **Keep-alive**: 120 s idle timeout, above Nginx's 65 s.
 
 ## Known gaps

@@ -106,7 +106,6 @@ func (s *Api) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				r.Pattern = "GET /posts/{id}"
-				r.SetPathValue("id", path)
 				postEnvelope, err = s.FeedApi.Get(r.Context(), path)
 				if err != nil {
 					handleError(r.Context(), w, err)
@@ -129,7 +128,6 @@ func (s *Api) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				r.Pattern = "POST /posts/{id}/like"
-				r.SetPathValue("id", s1)
 				if !requireUser(r.Context(), w) {
 					return
 				}

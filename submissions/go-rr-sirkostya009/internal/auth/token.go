@@ -1,7 +1,7 @@
 // Package auth verifies the HS256 JWTs the challenge hands out.
 package auth
 
-//go:generate go tool ggen .
+//go:generate go tool ggen -simd off .
 
 import (
 	"crypto/hmac"

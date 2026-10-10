@@ -1,6 +1,6 @@
 package domain
 
-//go:generate go tool ggen .
+//go:generate go tool ggen -simd avx2 .
 
 // Post is a post as the api answers with it. Keys go out in declaration
 // order, which the spec fixes.

@@ -10,7 +10,7 @@
 | **Nginx or direct** | **Direct**: serves `HOST:PORT` itself (not yet confirmed with a 1-CPU k6 run) |
 
 All Go dependencies are pinned in `go.mod`/`go.sum`. The generated router (`internal/httpapi/api_gen.go`) and
-codecs (`*_ggen.go`) are committed, so `build.sh` only compiles; `go generate ./...` rebuilds them.
+codecs (`*_ggen.go`) are committed, so `build.sh` only compiles; `GOEXPERIMENT=simd go generate ./...` rebuilds them.
 
 ## Running it
 
@@ -34,6 +34,10 @@ The layers of the goserver project it is adapted from:
 
 - **Codegen routing and JSON.** rr compiles the five routes into a switch, and ggen encodes responses into
   pooled buffers with no reflection. Output keys keep declaration order (`nosortkeys`) to match the spec.
+- **AVX2 JSON codecs.** The `domain` codecs are generated with `ggen -simd avx2` and built with `GOEXPERIMENT=simd`:
+  string and escape scans run 32 bytes at a time, about 2x faster on feed encoding and post decoding. AVX2 is on
+  every Basic droplet host, AVX-512 isn't. The JWT codecs stay scalar (`-simd off`): token parts are too short
+  for vectors to pay off.
 - **Validation at decode time.** `CreatePost.Body` is `required trim notempty maxrunes=500`. Its non-string JSON
   shapes (number, bool, object, null) are accepted by converters that fail with `ErrBodyNotString`, so a wrong-type
   body and malformed JSON come back as different errors without reading the body twice.

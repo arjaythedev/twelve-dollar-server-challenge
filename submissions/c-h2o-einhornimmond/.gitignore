@@ -1,0 +1,3 @@
+bin/
+zig-out/
+.zig-cache/

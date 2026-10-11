@@ -27,10 +27,6 @@ type Feed struct {
 // FeedSize is how many posts the feed holds.
 const FeedSize = 20
 
-// MaxBody is the most characters a post body may hold, after trimming. The
-// schema's CHECK counts characters too, so this is runes, not bytes.
-const MaxBody = 500
-
 // CreatePost is the body of POST /posts.
 //
 //ggen:generate ignoreunknown allowdups

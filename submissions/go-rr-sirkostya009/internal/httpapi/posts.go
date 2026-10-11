@@ -24,8 +24,9 @@ func (a *FeedApi) Get(ctx context.Context, id int64) (domain.PostEnvelope, error
 	return domain.PostEnvelope{Post: p}, err
 }
 
-// PostsApi is the writes. requireUser runs before the body is decoded and
-// before the id is read, which is the spec's "auth first" order.
+// PostsApi is the writes. requireUser runs before the body is decoded, which
+// is the spec's "auth first" order. A bad id fails routing first and gets the
+// same check in notFound.
 //
 //rr:pre @requireUser
 type PostsApi struct {

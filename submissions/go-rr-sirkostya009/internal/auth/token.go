@@ -35,7 +35,6 @@ type claims struct {
 // signature anew; nothing is remembered between requests.
 type Verifier struct {
 	macs sync.Pool // of *signer
-	now  func() time.Time
 }
 
 // signer is a keyed HMAC and the array it sums into. The sum goes through
@@ -50,7 +49,6 @@ func NewVerifier(secret []byte) *Verifier {
 	key := append([]byte(nil), secret...)
 	return &Verifier{
 		macs: sync.Pool{New: func() any { return &signer{mac: hmac.New(sha256.New, key)} }},
-		now:  time.Now,
 	}
 }
 
@@ -109,7 +107,7 @@ func (v *Verifier) Verify(token string) (domain.Principal, error) {
 		return domain.Principal{}, domain.ErrInvalidToken
 	}
 	exp, ok := c.Exp.(float64)
-	if !ok || float64(v.now().Unix()) >= exp {
+	if !ok || float64(time.Now().Unix()) >= exp {
 		return domain.Principal{}, domain.ErrInvalidToken
 	}
 

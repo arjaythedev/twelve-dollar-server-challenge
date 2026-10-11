@@ -22,8 +22,8 @@ import (
 
 // tuned for the 1 vCPU, 2 GB RAM droplet
 const (
-	// the live heap is a few MiB: GC stays cheap, and reused spans beat the
-	// fresh zeroed memory GC off takes for every allocation
+	// the live heap is small: GC stays cheap, and reused spans beat the fresh
+	// zeroed memory GC off takes for every allocation
 	gcPercent = 400
 	// the heap never grows past this, leaving the rest of RAM to the OS and
 	// SQLite's page cache and mmap

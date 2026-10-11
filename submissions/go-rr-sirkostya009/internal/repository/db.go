@@ -66,7 +66,7 @@ func (db *DB) acquire(ctx context.Context) (*sqlite.Conn, error) {
 
 func (db *DB) release() { db.mu.Unlock() }
 
-// Ping runs SELECT 1 on a reader.
+// Ping runs SELECT 1 on the connection.
 func (db *DB) Ping(ctx context.Context) error {
 	c, err := db.acquire(ctx)
 	if err != nil {

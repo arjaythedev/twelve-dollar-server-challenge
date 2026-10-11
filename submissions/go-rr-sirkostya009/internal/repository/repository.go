@@ -26,12 +26,11 @@ type PostRepository interface {
 // Container is every repository there is, built on one database.
 type Container struct {
 	Posts PostRepository
-	DB    Pinger
 }
 
 // New wires the data layer over db. It does no I/O.
 func New(db *DB) Container {
-	return Container{Posts: &postRepository{db}, DB: db}
+	return Container{Posts: &postRepository{db}}
 }
 
 const postColumns = `SELECT p.id, p.body, p.created_at, u.username,

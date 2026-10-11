@@ -17,7 +17,7 @@ type HealthApi struct {
 //rr:route GET /health
 func (h *HealthApi) Health(ctx context.Context, w http.ResponseWriter) domain.Health {
 	if err := h.DB.Ping(ctx); err != nil {
-		w.Header()["Content-Type"] = jsonCT
+		w.Header()["Content-Type"] = __jsonCT
 		w.WriteHeader(http.StatusServiceUnavailable)
 		return domain.Health{Status: "degraded", DB: "unreachable", Error: err.Error()}
 	}

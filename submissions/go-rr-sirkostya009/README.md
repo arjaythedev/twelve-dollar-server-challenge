@@ -54,11 +54,14 @@ The layers of the goserver project it is adapted from:
 - **SQLite**: crawshaw.io/sqlite, no `database/sql`. One connection behind a mutex, in `locking_mode=EXCLUSIVE`:
   on one core a reader pool never runs in parallel, and exclusive mode keeps the WAL index in heap memory instead
   of the `-shm` file, so a read takes no file locks (about 40% more throughput than 4 shared-mode readers in a 1-core
-  run). The connection keeps its prepared statements, prepared once at startup. WAL, `synchronous=NORMAL` (rule 6), 1 GiB `mmap_size`, 32 MiB page cache. A like is
+  run). The connection keeps its prepared statements, prepared once at startup. WAL, `synchronous=NORMAL` (rule 6), 1 GiB `mmap_size`, 32 MiB page cache. A checkpoint every 10,000 WAL pages
+  instead of 1,000: each one fsyncs twice while holding the connection, and fewer of them took p99 from 21 to 15 ms
+  in a 1-core run. A like is
   one statement (`INSERT ... SELECT ... WHERE EXISTS ... ON CONFLICT DO NOTHING`); a post-existence check runs only
   when it inserted nothing, to tell a repeat from a missing post.
-- **Runtime pinned in code** for the 1 vCPU, 2 GB box: `GOMAXPROCS=1`, GC off until a 768 MiB `GOMEMLIMIT`
-  (the live heap is tiny, so GC rarely takes the only core).
+- **Runtime pinned in code** for the 1 vCPU, 2 GB box: `GOMAXPROCS=1`, `GOGC=400` under a 768 MiB `GOMEMLIMIT`.
+  The live heap is a few MiB, so GC runs rarely and cheaply, and reusing swept spans beats GC off, which takes fresh,
+  zeroed memory for every allocation: about 5% more throughput and 700 MB less RSS in a 1-core run.
 - **Keep-alive**: 120 s idle timeout, above Nginx's 65 s.
 
 ## Known gaps

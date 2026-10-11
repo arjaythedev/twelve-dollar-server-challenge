@@ -70,6 +70,6 @@ func (a *PostsApi) Like(ctx context.Context, w http.ResponseWriter, id string) (
 // created sends a 201. The generated code sets Content-Type after the handler
 // returns, too late once the status is out, so it is set here first.
 func created(w http.ResponseWriter) {
-	w.Header()["Content-Type"] = jsonCT
+	w.Header()["Content-Type"] = __jsonCT
 	w.WriteHeader(http.StatusCreated)
 }

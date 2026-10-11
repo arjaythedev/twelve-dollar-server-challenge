@@ -39,6 +39,8 @@ func Open(path string) (*DB, error) {
 		`PRAGMA temp_store = MEMORY`,
 		`PRAGMA mmap_size = 1073741824`,
 		`PRAGMA cache_size = -32768`,
+		// ~40 MB of WAL per checkpoint: each one fsyncs with the connection held
+		`PRAGMA wal_autocheckpoint = 10000`,
 	} {
 		if err := sqlitex.ExecTransient(c, pragma, nil); err != nil {
 			db.Close()

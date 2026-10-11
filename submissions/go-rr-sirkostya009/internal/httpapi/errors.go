@@ -11,8 +11,6 @@ import (
 	"feed/domain"
 )
 
-var jsonCT = []string{"application/json"}
-
 // handleError is the central onerror: domain sentinels map to statuses,
 // anything else is a logged 500.
 func handleError(ctx context.Context, w http.ResponseWriter, err error) {
@@ -74,7 +72,7 @@ func unauthorized(w http.ResponseWriter, err error) {
 
 // writeError writes {"error":"<err>"} with status.
 func writeError(w http.ResponseWriter, status int, err error) {
-	w.Header()["Content-Type"] = jsonCT
+	w.Header()["Content-Type"] = __jsonCT
 	w.WriteHeader(status)
 	_ = ggen.WriteTo(w, domain.ErrorBody{Error: err.Error()})
 }

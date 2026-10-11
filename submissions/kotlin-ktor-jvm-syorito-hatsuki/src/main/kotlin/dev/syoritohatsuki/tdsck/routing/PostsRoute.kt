@@ -10,7 +10,6 @@ import io.ktor.server.auth.jwt.*
 import io.ktor.server.request.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
-import kotlinx.serialization.Serializable
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
@@ -26,9 +25,6 @@ private fun parsePostId(raw: String?): Int? {
 }
 
 private fun String.trimJsWhitespace(): String = trim { it in JS_WHITESPACES }
-
-@Serializable
-data class CreatePostRequest(val body: String? = null)
 
 fun Route.postsRoute() {
     route("posts") {

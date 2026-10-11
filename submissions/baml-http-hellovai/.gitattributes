@@ -1,0 +1,2 @@
+# Unified diff context lines include a single space for blank source lines.
+sqlite.patch whitespace=-blank-at-eol

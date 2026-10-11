@@ -1,0 +1,223 @@
+diff --git a/baml_language/Cargo.lock b/baml_language/Cargo.lock
+index 5794cd91f0..6592ce5f40 100644
+--- a/baml_language/Cargo.lock
++++ b/baml_language/Cargo.lock
+@@ -7506,6 +7506,7 @@ dependencies = [
+  "once_cell",
+  "prost",
+  "reqwest",
++ "rusqlite",
+  "rustls",
+  "rustls-pemfile",
+  "serde_json",
+diff --git a/baml_language/crates/baml_builtins2/src/lib.rs b/baml_language/crates/baml_builtins2/src/lib.rs
+index cb057ec4d8..ccfc99abac 100644
+--- a/baml_language/crates/baml_builtins2/src/lib.rs
++++ b/baml_language/crates/baml_builtins2/src/lib.rs
+@@ -146,6 +146,7 @@ pub const ALL: &[BuiltinFile] = &[
+     builtin!("baml", "ns_errors/error_context.baml"),
+     builtin!("baml", "ns_panics/panics.baml"),
+     builtin!("baml", "ns_env/env.baml"),
++    builtin!("baml", "ns_sqlite/sqlite.baml"),
+     builtin!("baml", "ns_io/io.baml"),
+     builtin!("baml", "ns_io/read.baml"),
+     builtin!("baml", "ns_io/write.baml"),
+diff --git a/baml_language/crates/sys_native/Cargo.toml b/baml_language/crates/sys_native/Cargo.toml
+index 0933114cb8..b0e677d36d 100644
+--- a/baml_language/crates/sys_native/Cargo.toml
++++ b/baml_language/crates/sys_native/Cargo.toml
+@@ -36,6 +36,7 @@ bundle-http = [
+ ]
+ 
+ [dependencies]
++rusqlite = { workspace = true }
+ baml_env = { workspace = true }
+ baml_type = { workspace = true }
+ bex_external_types = { workspace = true }
+diff --git a/baml_language/crates/sys_native/src/lib.rs b/baml_language/crates/sys_native/src/lib.rs
+index 09c02bbfad..35360b5e02 100644
+--- a/baml_language/crates/sys_native/src/lib.rs
++++ b/baml_language/crates/sys_native/src/lib.rs
+@@ -21,6 +21,7 @@ mod host_impls;
+ #[cfg(feature = "bundle-http")]
+ mod http_server;
+ mod io_impls;
++mod sqlite;
+ pub mod registry;
+ pub mod shell;
+ 
+diff --git a/baml_language/crates/sys_ops/src/lib.rs b/baml_language/crates/sys_ops/src/lib.rs
+index ed78e406bf..2b64f0bcc0 100644
+--- a/baml_language/crates/sys_ops/src/lib.rs
++++ b/baml_language/crates/sys_ops/src/lib.rs
+@@ -3188,3 +3188,12 @@ mod tests {
+         assert!(matches!(result, SysOpResult::Ready(Err(_))));
+     }
+ }
++
++impl io::IoNamespaceSqlite for DefaultIoOps {
++    fn query(&self, _h: &Arc<BexHeap>, _c: CallId, _path: String,
++        _sql: String, _params_json: String, _ctx: &SysOpContext) -> SysOpOutput<String> {
++        SysOpOutput::err(VmPanic::HostUnavailable {
++            resource: "sqlite".to_string(), message: "SQLite is unavailable on this host".to_string(),
++        })
++    }
++}
+diff --git a/baml_language/crates/baml_builtins2/baml_std/baml/ns_sqlite/sqlite.baml b/baml_language/crates/baml_builtins2/baml_std/baml/ns_sqlite/sqlite.baml
+new file mode 100644
+index 0000000000..dee49c5400
+--- /dev/null
++++ b/baml_language/crates/baml_builtins2/baml_std/baml/ns_sqlite/sqlite.baml
+@@ -0,0 +1,8 @@
++/// Execute one statement against an in-process SQLite connection. Parameters
++/// are a JSON array of null, integer, float or string. Returns compact JSON
++/// {"rows": [[...]], "changes": int}; statements are stepped to completion
++/// before returning, including INSERT ... RETURNING (autocommit is durable).
++/// Connections and prepared statements are reused, never query results.
++function query(path: string, sql: string, params_json: string) -> string throws root.errors.Io {
++    $rust_io_function
++}
+diff --git a/baml_language/crates/sys_native/src/sqlite.rs b/baml_language/crates/sys_native/src/sqlite.rs
+new file mode 100644
+index 0000000000..2307a0e5f0
+--- /dev/null
++++ b/baml_language/crates/sys_native/src/sqlite.rs
+@@ -0,0 +1,138 @@
++//! Minimal native SQLite provider. No request data is cached.
++use crate::NativeSysOps;
++use bex_heap::BexHeap;
++use rusqlite::{
++    Connection, OpenFlags,
++    types::{Value, ValueRef},
++};
++use std::{
++    collections::HashMap,
++    sync::{Arc, Mutex, OnceLock},
++    time::Duration,
++};
++use sys_ops::io::{self, CallId, SysOpContext, SysOpOutput, VmBamlError};
++
++static CONNECTIONS: OnceLock<Mutex<HashMap<String, Connection>>> = OnceLock::new();
++
++fn query(path: &str, sql: &str, params_json: &str) -> Result<String, Box<dyn std::error::Error>> {
++    let params: Vec<serde_json::Value> = serde_json::from_str(params_json)?;
++    let params = params
++        .into_iter()
++        .map(|v| match v {
++            serde_json::Value::Null => Ok(Value::Null),
++            serde_json::Value::String(s) => Ok(Value::Text(s)),
++            serde_json::Value::Number(n) => {
++                if let Some(i) = n.as_i64() {
++                    Ok(Value::Integer(i))
++                } else if let Some(f) = n.as_f64() {
++                    Ok(Value::Real(f))
++                } else {
++                    Err("number outside SQLite range")
++                }
++            }
++            _ => Err("parameters must be null, number or string"),
++        })
++        .collect::<Result<Vec<_>, _>>()?;
++    let mut connections = CONNECTIONS
++        .get_or_init(Default::default)
++        .lock()
++        .map_err(|_| "SQLite connection lock poisoned")?;
++    if !connections.contains_key(path) {
++        // Do not silently create a missing benchmark database.
++        let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
++        conn.busy_timeout(Duration::from_secs(5))?;
++        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON; PRAGMA cache_size=-65536;")?;
++        conn.set_prepared_statement_cache_capacity(32);
++        connections.insert(path.to_owned(), conn);
++    }
++    let conn = connections.get_mut(path).ok_or("connection missing")?;
++    let mut stmt = conn.prepare_cached(sql)?;
++    let columns = stmt.column_count();
++    let mut rows = stmt.query(rusqlite::params_from_iter(params))?;
++    let mut result = Vec::new();
++    while let Some(row) = rows.next()? {
++        let mut values = Vec::with_capacity(columns);
++        for i in 0..columns {
++            values.push(match row.get_ref(i)? {
++                ValueRef::Null => serde_json::Value::Null,
++                ValueRef::Integer(v) => v.into(),
++                ValueRef::Real(v) => serde_json::json!(v),
++                ValueRef::Text(v) => std::str::from_utf8(v)?.into(),
++                ValueRef::Blob(_) => return Err("blob results are not supported".into()),
++            });
++        }
++        result.push(values);
++    }
++    drop(rows);
++    drop(stmt); // finalize/reset RETURNING before reporting a committed write
++    Ok(serde_json::json!({"rows": result, "changes": conn.changes()}).to_string())
++}
++
++impl io::IoNamespaceSqlite for NativeSysOps {
++    fn query(
++        &self,
++        _heap: &Arc<BexHeap>,
++        _call_id: CallId,
++        path: String,
++        sql: String,
++        params_json: String,
++        _ctx: &SysOpContext,
++    ) -> SysOpOutput<String> {
++        match query(&path, &sql, &params_json) {
++            Ok(value) => SysOpOutput::ok(value),
++            Err(error) => SysOpOutput::err(VmBamlError::Io {
++                message: error.to_string(),
++            }),
++        }
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn parameters_returning_commit_and_fresh_reads() {
++        let filename = std::env::temp_dir().join(format!(
++            "baml-sqlite-{}-{}.db",
++            std::process::id(),
++            std::time::SystemTime::now()
++                .duration_since(std::time::UNIX_EPOCH)
++                .unwrap()
++                .as_nanos()
++        ));
++        let observer = Connection::open(&filename).unwrap();
++        observer
++            .execute_batch("CREATE TABLE items(id INTEGER PRIMARY KEY, body TEXT NOT NULL)")
++            .unwrap();
++        let path = filename.to_str().unwrap();
++        let body = "quote ' and \"; DROP TABLE items; --";
++        let params = serde_json::json!([body]).to_string();
++        let result: serde_json::Value = serde_json::from_str(
++            &query(
++                path,
++                "INSERT INTO items(body) VALUES (?) RETURNING id,body",
++                &params,
++            )
++            .unwrap(),
++        )
++        .unwrap();
++        assert_eq!(result["rows"][0][1], body);
++        assert_eq!(result["changes"], 1);
++        // A separate connection sees the write before query() returns.
++        let seen: String = observer
++            .query_row("SELECT body FROM items", [], |r| r.get(0))
++            .unwrap();
++        assert_eq!(seen, body);
++        observer
++            .execute("UPDATE items SET body='updated'", [])
++            .unwrap();
++        let result: serde_json::Value =
++            serde_json::from_str(&query(path, "SELECT body FROM items", "[]").unwrap()).unwrap();
++        assert_eq!(result["rows"][0][0], "updated");
++        assert!(query(path, "SELECT ?", "[{}]").is_err());
++        assert!(query(path, "SELECT ?", "not JSON").is_err());
++        drop(observer);
++        std::fs::remove_file(filename).unwrap();
++    }
++}

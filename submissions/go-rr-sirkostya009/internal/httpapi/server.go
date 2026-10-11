@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"time"
 
+	fibhttp "github.com/lesismal/fib/http"
+
 	"feed/domain"
 	"feed/internal/auth"
 	"feed/internal/repository"
@@ -23,22 +25,20 @@ type Server struct {
 // New wires the http layer. It does no I/O.
 func New(db repository.Pinger, services service.Container, jwtSecret string) *Server {
 	return &Server{
-		DB: db, Started: time.Now(),
+		DB:       db,
+		Started:  time.Now(),
 		FeedApi:  FeedApi{Posts: services.Posts},
 		PostsApi: PostsApi{Posts: services.Posts},
 		tokens:   auth.NewVerifier([]byte(jwtSecret)),
 	}
 }
 
-func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (s *Server) ServeHTTP(c *fibhttp.Context) {
 	defer func() {
 		if rec := recover(); rec != nil {
-			if rec == http.ErrAbortHandler {
-				panic(rec)
-			}
-			slog.Error("panic", slog.String("err", fmt.Sprint(rec)), slog.String("path", r.URL.Path))
-			writeError(w, http.StatusInternalServerError, domain.ErrInternal)
+			slog.Error("panic", slog.String("err", fmt.Sprint(rec)), slog.String("path", c.Request.URL.Path))
+			writeError(c, http.StatusInternalServerError, domain.ErrInternal)
 		}
 	}()
-	s.Api.ServeHTTP(w, s.authenticate(r))
+	s.Api.ServeHTTP(c, s.authenticate(c.Request))
 }

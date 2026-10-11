@@ -2,16 +2,17 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"os"
 	"os/signal"
 	"runtime"
 	"runtime/debug"
 	"syscall"
 	"time"
+
+	"github.com/lesismal/fib"
+	fibhttp "github.com/lesismal/fib/http"
 
 	"feed/internal/config"
 	"feed/internal/httpapi"
@@ -49,26 +50,28 @@ func run() error {
 	}
 	defer db.Close()
 
-	srv := &http.Server{
-		Addr:              cfg.Addr,
-		Handler:           httpapi.New(db, service.New(repository.New(db)), cfg.JWTSecret),
-		ReadHeaderTimeout: 10 * time.Second,
-		// longer than Nginx's 65 s keepalive, so it never reuses a socket
-		// we just closed
-		IdleTimeout: 120 * time.Second,
+	srv := httpapi.New(db, service.New(repository.New(db)), cfg.JWTSecret)
+	hc := fibhttp.DefaultConfig()
+	hc.ReadHeaderTimeout = 10 * time.Second
+	hc.IdleTimeout = 120 * time.Second
+	ec := fib.DefaultConfig()
+	ec.Addr = cfg.Addr
+	// fib's event loops hold idle connections without a goroutine or buffers
+	engine, err := fib.Bind(ec, fibhttp.NewHandlerWithConfig(hc, srv))
+	if err != nil {
+		return fmt.Errorf("listen: %w", err)
 	}
+	defer engine.Close()
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	go func() {
 		<-ctx.Done()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = srv.Shutdown(shutdownCtx) //nolint:contextcheck
+		engine.Stop()
 	}()
 
 	slog.Info("listening", slog.String("addr", cfg.Addr))
-	if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+	if err := engine.Run(); err != nil {
 		return fmt.Errorf("serve: %w", err)
 	}
 	return nil

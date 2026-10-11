@@ -18,16 +18,9 @@ func (a *FeedApi) Feed(ctx context.Context) (domain.Feed, error) {
 	return a.Posts.Feed(ctx)
 }
 
-// Get takes the id as a string so a bad one is a 400, not the 404 a typed
-// path param would fall through to.
-//
-//rr:route GET /posts/{id}
-func (a *FeedApi) Get(ctx context.Context, id string) (domain.PostEnvelope, error) {
-	pid, err := domain.ParsePostID(id)
-	if err != nil {
-		return domain.PostEnvelope{}, err
-	}
-	p, err := a.Posts.Get(ctx, pid)
+//rr:route GET /posts/{id=@domain.ParsePostID}
+func (a *FeedApi) Get(ctx context.Context, id int64) (domain.PostEnvelope, error) {
+	p, err := a.Posts.Get(ctx, id)
 	return domain.PostEnvelope{Post: p}, err
 }
 
@@ -50,14 +43,10 @@ func (a *PostsApi) Create(ctx context.Context, w http.ResponseWriter, body domai
 	return domain.PostEnvelope{Post: p}, nil
 }
 
-//rr:route POST /posts/{id}/like
-func (a *PostsApi) Like(ctx context.Context, w http.ResponseWriter, id string) (domain.Like, error) {
-	pid, err := domain.ParsePostID(id)
-	if err != nil {
-		return domain.Like{}, err
-	}
+//rr:route POST /posts/{id=@domain.ParsePostID}/like
+func (a *PostsApi) Like(ctx context.Context, w http.ResponseWriter, id int64) (domain.Like, error) {
 	by, _ := domain.PrincipalFrom(ctx)
-	l, err := a.Posts.Like(ctx, by, pid)
+	l, err := a.Posts.Like(ctx, by, id)
 	if err != nil {
 		return domain.Like{}, err
 	}

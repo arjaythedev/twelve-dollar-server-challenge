@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/sirkostya009/ggen"
 
@@ -17,12 +18,8 @@ func handleError(ctx context.Context, w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, domain.ErrPostNotFound):
 		writeError(w, http.StatusNotFound, domain.ErrPostNotFound)
-	case errors.Is(err, domain.ErrInvalidPostID):
-		writeError(w, http.StatusBadRequest, domain.ErrInvalidPostID)
 	default:
-		// ctx is r.Context(), cancelled when the client goes away; the error
-		// still deserves its log line
-		slog.ErrorContext(context.WithoutCancel(ctx), "handler", slog.Any("err", err))
+		slog.ErrorContext(ctx, "handler", slog.Any("err", err))
 		writeError(w, http.StatusInternalServerError, domain.ErrInternal)
 	}
 }
@@ -55,7 +52,16 @@ func bodyError(err error) error {
 	}
 }
 
-func notFound(w http.ResponseWriter) {
+// notFound gets the error of a path id that failed ParsePostID: that is the
+// spec's 400, after auth on the like.
+func notFound(w http.ResponseWriter, r *http.Request, err error) {
+	if errors.Is(err, domain.ErrInvalidPostID) {
+		if strings.HasSuffix(r.URL.Path, "/like") && !requireUser(r.Context(), w) {
+			return
+		}
+		writeError(w, http.StatusBadRequest, domain.ErrInvalidPostID)
+		return
+	}
 	writeError(w, http.StatusNotFound, domain.ErrNotFound)
 }
 

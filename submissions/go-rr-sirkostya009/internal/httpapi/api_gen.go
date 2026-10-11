@@ -27,13 +27,16 @@ func readJSON[T ggen.StreamDecoder[T]](r *http.Request) (T, error) {
 
 func (s *Api) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var err error
+	var i1 int
+	var s1 string
 	var feed domain.Feed
-	var createPost domain.CreatePost
+	var createPostBody domain.CreatePost
 	var postEnvelope domain.PostEnvelope
+	var int64Val int64
 	var like domain.Like
 	path := r.URL.Path
 	if len(path) < 1 || path[:1] != "/" {
-		notFound(w)
+		notFound(w, r, nil)
 		return
 	}
 	path = path[1:]
@@ -51,7 +54,7 @@ func (s *Api) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.Header()["Content-Type"] = __jsonCT
-		if err := ggen.WriteTo(w, feed); err != nil {
+		if err = ggen.WriteTo(w, feed); err != nil {
 			handleError(r.Context(), w, err)
 			return
 		}
@@ -64,7 +67,7 @@ func (s *Api) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		r.Pattern = "GET /health"
 		w.Header()["Content-Type"] = __jsonCT
-		if err := ggen.WriteTo(w, s.HealthApi.Health(r.Context(), w)); err != nil {
+		if err = ggen.WriteTo(w, s.HealthApi.Health(r.Context(), w)); err != nil {
 			handleError(r.Context(), w, err)
 			return
 		}
@@ -79,18 +82,18 @@ func (s *Api) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if !requireUser(r.Context(), w) {
 			return
 		}
-		createPost, err = readJSON[domain.CreatePost](r)
+		createPostBody, err = readJSON[domain.CreatePost](r)
 		if err != nil {
 			badRequest(w, err)
 			return
 		}
-		postEnvelope, err = s.PostsApi.Create(r.Context(), w, createPost)
+		postEnvelope, err = s.PostsApi.Create(r.Context(), w, createPostBody)
 		if err != nil {
 			handleError(r.Context(), w, err)
 			return
 		}
 		w.Header()["Content-Type"] = __jsonCT
-		if err := ggen.WriteTo(w, postEnvelope); err != nil {
+		if err = ggen.WriteTo(w, postEnvelope); err != nil {
 			handleError(r.Context(), w, err)
 			return
 		}
@@ -98,52 +101,54 @@ func (s *Api) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(path) >= 6 && path[:6] == "posts/" {
 		path = path[6:]
-		if i := strings.IndexByte(path, '/'); i < 0 {
-			if path != "" {
+		if i1 = strings.IndexByte(path, '/'); i1 < 0 {
+			if int64Val, err = domain.ParsePostID(path); err == nil {
 				if r.Method != "GET" {
 					w.Header().Set("Allow", "GET")
 					methodNotAllowed(w)
 					return
 				}
 				r.Pattern = "GET /posts/{id}"
-				postEnvelope, err = s.FeedApi.Get(r.Context(), path)
+				postEnvelope, err = s.FeedApi.Get(r.Context(), int64Val)
 				if err != nil {
 					handleError(r.Context(), w, err)
 					return
 				}
 				w.Header()["Content-Type"] = __jsonCT
-				if err := ggen.WriteTo(w, postEnvelope); err != nil {
+				if err = ggen.WriteTo(w, postEnvelope); err != nil {
 					handleError(r.Context(), w, err)
 					return
 				}
 				return
 			}
-		} else if i > 0 {
-			s1 := path[:i]
-			path = path[i+1:]
-			if path == "like" {
-				if r.Method != "POST" {
-					w.Header().Set("Allow", "POST")
-					methodNotAllowed(w)
+		} else if i1 > 0 {
+			s1 = path[:i1]
+			if int64Val, err = domain.ParsePostID(s1); err == nil {
+				path = path[i1+1:]
+				if path == "like" {
+					if r.Method != "POST" {
+						w.Header().Set("Allow", "POST")
+						methodNotAllowed(w)
+						return
+					}
+					r.Pattern = "POST /posts/{id}/like"
+					if !requireUser(r.Context(), w) {
+						return
+					}
+					like, err = s.PostsApi.Like(r.Context(), w, int64Val)
+					if err != nil {
+						handleError(r.Context(), w, err)
+						return
+					}
+					w.Header()["Content-Type"] = __jsonCT
+					if err = ggen.WriteTo(w, like); err != nil {
+						handleError(r.Context(), w, err)
+						return
+					}
 					return
 				}
-				r.Pattern = "POST /posts/{id}/like"
-				if !requireUser(r.Context(), w) {
-					return
-				}
-				like, err = s.PostsApi.Like(r.Context(), w, s1)
-				if err != nil {
-					handleError(r.Context(), w, err)
-					return
-				}
-				w.Header()["Content-Type"] = __jsonCT
-				if err := ggen.WriteTo(w, like); err != nil {
-					handleError(r.Context(), w, err)
-					return
-				}
-				return
 			}
 		}
 	}
-	notFound(w)
+	notFound(w, r, err)
 }

@@ -3,3 +3,4 @@ seed/tokens.json
 seed/tsv/
 results/
 .DS_Store
+.idea

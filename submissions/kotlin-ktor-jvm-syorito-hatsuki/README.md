@@ -1,38 +1,63 @@
-# tdsck
+# Kotlin + Ktor JVM
 
-This project was created using the [Ktor Project Generator](https://start.ktor.io).
+|                     |                                                                                                                                                           |
+|---------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Language            | Kotlin 2.4.0                                                                                                                                              |
+| Runtime             | JVM 21                                                                                                                                                    |
+| Framework           | Ktor 3.6.0                                                                                                                                                |
+| Server              | Ktor CIO                                                                                                                                                  |
+| SQLite driver       | xerial sqlite-jdbc 3.53.4.0                                                                                                                               |
+| Connection pool     | HikariCP 7.1.0                                                                                                                                            |
+| JSON                | kotlinx.serialization through Ktor content negotiation                                                                                                    |
+| **Nginx or direct** | **Direct preferred**: serves `0.0.0.0:80` when configured that way;<br>But can be tested over Nginx too by changing `PORT` environment variable to `3000` |
 
-Here are some useful links to get you started:
- * [Ktor Documentation](https://ktor.io/docs/home.html)
- * [Ktor GitHub page](https://github.com/ktorio/ktor)
- * [Ktor Slack chat](https://app.slack.com/client/T09229ZC6/C0A974TJ9). [Request an invite](https://surveys.jetbrains.com/s3/kotlin-slack-sign-up).
+Dependency versions are pinned in `gradle/libs.versions.toml`
 
+## Running it
 
-## Features
-Here's a list of features included in this project:
-
-| Name | Description |
-|------|-------------|
-| [Authentication](https://start.ktor.io/p/io.ktor/server-auth) | Provides extension point for handling the Authorization header |
-| [Authentication JWT](https://start.ktor.io/p/io.ktor/server-auth-jwt) | Handles JSON Web Token (JWT) bearer authentication scheme |
-| [Status Pages](https://start.ktor.io/p/io.ktor/server-status-pages) | Provides exception handling for routes |
-| [kotlinx.serialization](https://start.ktor.io/p/io.ktor/server-kotlinx-serialization) | Handles JSON serialization using kotlinx.serialization library |
-| [Content Negotiation](https://start.ktor.io/p/io.ktor/server-content-negotiation) | Provides automatic content conversion according to Content-Type and Accept headers |
-| [Exposed](https://start.ktor.io/p/org.jetbrains/server-exposed) | Adds Exposed database to your application |
-
-
-## Building & Running
-To build or run the project, use one of the following tasks:
-
-
-| Task | Description |
-|------|-------------|
-| `./gradlew test`    | Run the tests     |
-| `./gradlew build`   | Build the project |
-| `./gradlew run`     | Run the server    |
-
-If the server starts successfully, you'll see the following output:
+```bash
+sudo bash install.sh 
+bash build.sh
+SQLITE_PATH=... JWT_SECRET=.. HOST=0.0.0.0 PORT=80 bash start.sh
 ```
-2024-12-04 14:32:45.584 [main] INFO  Application - Application started in 0.303 seconds.
-2024-12-04 14:32:45.682 [main] INFO  Application - Responding at http://0.0.0.0:8080
+
+For local development, use a non-privileged port:
+```bash
+bash SQLITE_PATH=... JWT_SECRET=... HOST=127.0.0.1 PORT=3000 bash start.sh
 ```
+
+The server reads all runtime configuration from the challenge environment variables:
+
+| Variable      | Purpose              | Default                   |
+|---------------|----------------------|---------------------------|
+| `SQLITE_PATH` | SQLite database path | `<project_dir>/sqlite.db` |
+| `JWT_SECRET`  | HS256 JWT secret     | `twelve-dollar-challenge` |
+| `HOST`        | HTTP bind host       | `127.0.0.1`               |
+| `PORT`        | HTTP bind port       | `80`                      |
+
+Defaults are provided only for local development.
+
+## Build output
+
+`build.sh` uses Gradle's `installDist` task. `start.sh` then runs the generated application script in the foreground:
+
+```bash
+bash build/install/tdsck/bin/tdsck
+```
+
+This avoids depending on a plain `build/libs/*.jar`, which may not contain all runtime dependencies.
+
+## Optimizations, and why
+
+- **Direct mode preferred.** The app can bind to `0.0.0.0:80` when the benchmark environment provides the required capability. This avoids spending CPU on Nginx on a one-vCPU machine. For development, `PORT=3000` can be used to avoid privileged-port binding issues.
+- **Ktor CIO.** CIO is a coroutine-based HTTP engine and keeps the stack simple without an external servlet container.
+- **SQLite through JDBC with HikariCP.** Connections are reused instead of opening a new SQLite connection from scratch for every request.
+- **SQLite pragmas set on connections.** The app enables WAL mode, `synchronous=NORMAL`, a busy timeout, mmap, a larger page cache, and in-memory temporary storage. WAL plus `synchronous=NORMAL` keeps writes durable enough for the challenge rules while improving read/write behavior.
+- **Reference-style SQL.** Feed and post reads use the challenge's join plus per-post like-count query shape. Post creation uses `INSERT ... RETURNING`. Likes use one insert statement with `ON CONFLICT DO NOTHING`, followed by a post-existence check only when needed to distinguish an existing like from a missing post.
+- **No cross-request response cache.** Requests read from SQLite while being served. Prepared statements and SQLite's own page cache are the only caching-like behavior used.
+- **JWT auth uses Ktor's JWT support.** Tokens are verified on authenticated requests using the configured `JWT_SECRET`; token results are not cached across requests.
+- **Compact JSON via kotlinx.serialization.** Response objects are serialized by Ktor content negotiation with stable field order from the Kotlin serializable models.
+
+## License
+
+MIT, under the repo's [license](../../LICENSE).

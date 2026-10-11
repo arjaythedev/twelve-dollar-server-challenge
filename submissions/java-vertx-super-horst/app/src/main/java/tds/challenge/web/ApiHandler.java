@@ -119,7 +119,7 @@ public class ApiHandler {
 
         long id;
         try {
-            id = Integer.parseInt(ctx.pathParam("id"));
+            id = Long.parseLong(ctx.pathParam("id"));
         } catch (NumberFormatException e) {
             Routes.error(ctx, 400, "invalid post id");
             return;

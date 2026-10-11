@@ -48,6 +48,10 @@
             <groupId>io.vertx</groupId>
             <artifactId>vertx-auth-jwt</artifactId>
         </dependency>
+        <dependency>
+            <groupId>io.netty</groupId>
+            <artifactId>netty-transport-native-epoll</artifactId>
+        </dependency>
 
         <!-- Database -->
         <dependency>

@@ -1,6 +1,7 @@
 package tds.challenge;
 
 import io.vertx.core.Vertx;
+import io.vertx.core.VertxOptions;
 
 public final class Main {
 
@@ -8,7 +9,7 @@ public final class Main {
     }
 
     public static void main(String[] args) {
-        Vertx vertx = Vertx.vertx();
+        Vertx vertx = Vertx.vertx(new VertxOptions().setPreferNativeTransport(true));
 
         vertx.deployVerticle(new MainVerticle())
                 .onSuccess(id -> System.out.printf("Deployed MainVerticle [%s]%n", id))

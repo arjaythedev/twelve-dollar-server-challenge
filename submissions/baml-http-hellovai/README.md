@@ -6,29 +6,25 @@ JWT verification, and JSON responses are implemented in `server.baml`.
 
 ## Stack and build
 
-- BAML source: BoundaryML/baml commit `99edb5d249850ed92db987148feb78f551a93250`
-  (development runtime, not a published BAML release).
+- BAML source: BoundaryML/baml commit `596a64e69d51dd5c893300642e289238bbd7ccf2`.
 - Rust toolchain: `1.98.0`.
 - HTTP: BAML's native `baml.http.Server` (Hyper/Tokio); dependencies pinned by
   the upstream Cargo.lock.
-- SQLite: `rusqlite 0.37.0`, linked to Ubuntu 24.04's system SQLite.
-- `sqlite.patch` adds a minimal `baml.sqlite.query(path, sql, params_json)` API
-  to that pinned runtime, including the native provider and lockfile change.
-  The patch is included here so CI and the benchmark can build it from source
-  without needing a separately merged BAML change or a local checkout.
+- SQLite: `rusqlite 0.37.0`, with bundled SQLite.
+- Database access uses BAML's native `baml.sqlite.query` API.
 
 **Run behind Nginx**, listening on `HOST:PORT` (normally `127.0.0.1:3000`).
-HTTP/1.1 keep-alive is enabled, with a 75-second header timeout. The server uses
-one Tokio worker thread for the single-vCPU box.
+HTTP/1.1 keep-alive is enabled, with a 75-second header timeout.
+Tokio uses its default worker count, based on the available CPU cores.
 
 ```bash
 sudo bash submissions/baml-http-hellovai/install.sh
 bash test/run.sh submissions/baml-http-hellovai
 ```
 
-`build.sh` fetches the pinned source, applies the patch, builds both `baml-cli`
-and `baml-pack-host` in release mode, and packs the application using that local
-host. The native SQLite binding is therefore present in the packed binary.
+`build.sh` fetches the pinned source and builds `baml-cli`
+and `baml-pack-host` in release mode, then packs the application using that local
+host. The native SQLite binding is included in the packed binary.
 Compilation is serial with LTO disabled and 16 codegen units to reduce build
 memory on the 2 GB VM; runtime optimization remains `opt-level=3`.
 Build artifacts stay in ignored `.build/` and `bin/` directories.
@@ -53,15 +49,23 @@ so a missing post is distinguished from a duplicate without relying on a cached
 post list. HMAC-SHA256 is computed in BAML using the native SHA-256 primitive;
 every request checks the signature, algorithm, expiry, and token payload.
 
+## Telemetry
+
+The packed application keeps BAML's automatic telemetry policy (the runtime's
+`medium` default) and records locally. No external telemetry service participates
+in the benchmark. The manifest explicitly permits `BAML_TELEMETRY` overrides, so
+`BAML_TELEMETRY=off` can be used for comparisons. `start.sh` does not set a worker
+count or disable telemetry.
+
 ## Validation
 
-The repository's 42 correctness checks pass against the packed executable on a
+The repository's 42 correctness checks pass against the release-packed executable on a
 fresh seed database. The native provider also has a Rust regression test for
 parameter binding, externally visible commits after `RETURNING`, fresh reads after
 another connection updates a row, and invalid parameter input:
 
 ```bash
-# From the patched source's baml_language directory:
+# From BAML's baml_language directory:
 cargo test --locked -p sys_native --lib sqlite::tests --features bundle-http
 ```
 

@@ -1,2 +1,5 @@
 [package]
 name = "feed_benchmark"
+
+[pack.env_var_names]
+BAML_TELEMETRY = "BAML_TELEMETRY"

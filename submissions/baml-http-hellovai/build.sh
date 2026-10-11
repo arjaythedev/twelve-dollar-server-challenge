@@ -1,18 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")"
-BAML_REV=99edb5d249850ed92db987148feb78f551a93250
+BAML_REV=596a64e69d51dd5c893300642e289238bbd7ccf2
 mkdir -p .build bin
 if [ ! -d .build/baml/.git ]; then
   git init .build/baml
   git -C .build/baml remote add origin https://github.com/BoundaryML/baml.git
 fi
-if [ ! -f .build/baml/.sqlite-patched ]; then
-  git -C .build/baml fetch --depth 1 origin "$BAML_REV"
-  git -C .build/baml checkout --detach "$BAML_REV"
-  git -C .build/baml apply "$PWD/sqlite.patch"
-  touch .build/baml/.sqlite-patched
-fi
+git -C .build/baml fetch --depth 1 origin "$BAML_REV"
+git -C .build/baml checkout --detach "$BAML_REV"
 export RUSTUP_HOME=/opt/baml-rust/rustup
 export PATH="/opt/baml-rust/cargo/bin:$PATH"
 # Serial compilation and no LTO keep the build usable on the 2 GB benchmark VM.

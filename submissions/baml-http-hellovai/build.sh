@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")"
-BAML_REV=596a64e69d51dd5c893300642e289238bbd7ccf2
+BAML_REV=e7eb62db5d430e89806cc01e467d1726dd279eb9
 mkdir -p .build bin
 if [ ! -d .build/baml/.git ]; then
   git init .build/baml

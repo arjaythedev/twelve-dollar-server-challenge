@@ -6,7 +6,7 @@ JWT verification, and JSON responses are implemented in `server.baml`.
 
 ## Stack and build
 
-- BAML source: BoundaryML/baml commit `596a64e69d51dd5c893300642e289238bbd7ccf2`.
+- BAML source: BoundaryML/baml commit `e7eb62db5d430e89806cc01e467d1726dd279eb9`.
 - Rust toolchain: `1.98.0`.
 - HTTP: BAML's native `baml.http.Server` (Hyper/Tokio); dependencies pinned by
   the upstream Cargo.lock.

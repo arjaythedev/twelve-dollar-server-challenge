@@ -9,7 +9,7 @@ group = "dev.syorito-hatsuki"
 version = "2026.10.1"
 
 application {
-    mainClass = "dev.syorito-hatsuki.MainKt"
+    mainClass = "dev.syoritohatsuki.tdsck.MainKt"
 }
 
 kotlin {

@@ -1,7 +1,6 @@
 package tds.challenge.web;
 
 import io.vertx.ext.auth.User;
-import tds.challenge.model.Post;
 import tds.challenge.repository.PostRepository;
 import io.vertx.core.json.DecodeException;
 import io.vertx.core.json.JsonArray;
@@ -23,7 +22,7 @@ public class ApiHandler {
         posts.feed()
                 .onSuccess(items -> {
                     JsonArray arr = new JsonArray();
-                    items.stream().map(Post::toJson).forEach(arr::add);
+                    items.forEach(arr::add);
                     JsonObject posts = new JsonObject()
                             .put("posts", arr);
 
@@ -52,7 +51,7 @@ public class ApiHandler {
                 .onSuccess(results -> {
                     if (!results.isEmpty()) {
                         JsonObject post = new JsonObject()
-                                .put("post", results.getFirst().toJson());
+                                .put("post", results.getFirst());
 
                         Routes.json(ctx, 200, post);
                     } else {
@@ -100,11 +99,10 @@ public class ApiHandler {
         final long userId = Long.parseLong(user.get("sub"));
 
         posts.insertPost(userId, username, postBody)
-                .onSuccess((Post insertedPost) -> {
+                .onSuccess((JsonObject insertedPost) -> {
                     JsonObject post = new JsonObject()
-                            .put("post", insertedPost.toJson());
+                            .put("post", insertedPost);
 
-                    ctx.response().putHeader("Location", "/posts/" + insertedPost.id());
                     Routes.json(ctx, 201, post);
                 })
                 .onFailure(ctx::fail);

@@ -2,8 +2,8 @@ package tds.challenge.repository;
 
 import io.vertx.core.Future;
 import io.vertx.core.WorkerExecutor;
+import io.vertx.core.json.JsonObject;
 import tds.challenge.db.RowMapper;
-import tds.challenge.model.Post;
 
 import javax.sql.DataSource;
 import java.sql.Connection;
@@ -18,8 +18,13 @@ import java.util.List;
  */
 public class PostRepository {
 
-    private static final RowMapper<Post> POST_MAPPER = rs ->
-            new Post(rs.getLong(1), rs.getString(2), rs.getString(3), rs.getString(4), rs.getLong(5));
+    private static final RowMapper<JsonObject> POST_MAPPER = rs ->
+            new JsonObject()
+                    .put("id", rs.getLong(1))
+                    .put("body", rs.getString(2))
+                    .put("created_at", rs.getString(3))
+                    .put("author", rs.getString(4))
+                    .put("like_count", rs.getLong(5));
 
     private static final String POST_SELECT = """
             SELECT p.id, p.body, p.created_at, u.username,
@@ -42,7 +47,7 @@ public class PostRepository {
         this.executor = executor;
     }
 
-    public Future<List<Post>> feed() {
+    public Future<List<JsonObject>> feed() {
         return executor.executeBlocking(() -> {
             try (Connection c = ds.getConnection();
                  PreparedStatement ps = c.prepareStatement(FEED_SQL);
@@ -53,7 +58,7 @@ public class PostRepository {
         }, false);
     }
 
-    public Future<List<Post>> findById(long id) {
+    public Future<List<JsonObject>> findById(long id) {
         return executor.executeBlocking(() -> {
             try (Connection c = ds.getConnection()) {
                 return findById(c, id);
@@ -61,7 +66,7 @@ public class PostRepository {
         }, false);
     }
 
-    public Future<Post> insertPost(long userId, String username, String postBody) {
+    public Future<JsonObject> insertPost(long userId, String username, String postBody) {
         return executor.executeBlocking(() -> {
             try (Connection c = ds.getConnection();
                  PreparedStatement ps = c.prepareStatement(INSERT_POST)) {
@@ -75,7 +80,12 @@ public class PostRepository {
                     long id = keys.getLong(1);
                     String createdAt = keys.getString(2);
 
-                    return new Post(id, postBody, createdAt, username, 0);
+                    return new JsonObject()
+                            .put("id", id)
+                            .put("body", postBody)
+                            .put("created_at", createdAt)
+                            .put("author", username)
+                            .put("like_count", 0);
                 }
             }
         }, false);
@@ -93,7 +103,7 @@ public class PostRepository {
         }, false);
     }
 
-    private static List<Post> findById(Connection c, long id) throws SQLException {
+    private static List<JsonObject> findById(Connection c, long id) throws SQLException {
         try (PreparedStatement ps = c.prepareStatement(SINGLE_POST_SQL)) {
             ps.setLong(1, id);
             try (ResultSet rs = ps.executeQuery()) {

@@ -42,7 +42,7 @@ public final class Database implements AutoCloseable {
 
         // sqlite-jdbc driver properties (per connection)
         hc.addDataSourceProperty("journal_mode", "WAL");
-        hc.addDataSourceProperty("busy_timeout", "5000");
+        hc.addDataSourceProperty("busy_timeout", "500");
         hc.addDataSourceProperty("foreign_keys", "true");
         hc.addDataSourceProperty("synchronous", "NORMAL");
 

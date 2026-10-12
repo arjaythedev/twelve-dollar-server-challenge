@@ -9,7 +9,7 @@ public final class Main {
     }
 
     public static void main(String[] args) {
-        Vertx vertx = Vertx.vertx(new VertxOptions().setPreferNativeTransport(true));
+        Vertx vertx = Vertx.vertx(new VertxOptions().setPreferNativeTransport(true).setEventLoopPoolSize(1).setWorkerPoolSize(2));
 
         vertx.deployVerticle(new MainVerticle())
                 .onSuccess(id -> System.out.printf("Deployed MainVerticle [%s]%n", id))

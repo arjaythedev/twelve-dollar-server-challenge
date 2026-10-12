@@ -1,13 +1,15 @@
 package tds.challenge;
 
-import tds.challenge.db.Database;
+import io.vertx.core.Future;
+import io.vertx.core.http.HttpServer;
+import io.vertx.core.json.JsonObject;
+import tds.challenge.db.DbThread;
 import tds.challenge.repository.PostRepository;
 import tds.challenge.web.ApiHandler;
 import tds.challenge.web.Routes;
 import io.vertx.core.AbstractVerticle;
 import io.vertx.core.Handler;
 import io.vertx.core.Promise;
-import io.vertx.core.WorkerExecutor;
 import io.vertx.ext.web.Router;
 import io.vertx.ext.web.RoutingContext;
 
@@ -15,8 +17,9 @@ import java.util.Optional;
 
 public class MainVerticle extends AbstractVerticle {
 
-    private Database database;
-    private WorkerExecutor dbExecutor;
+    private DbThread writer;
+    private DbThread reader;
+    private HttpServer server;
 
     @Override
     public void start(Promise<Void> startPromise) {
@@ -26,40 +29,58 @@ public class MainVerticle extends AbstractVerticle {
         final String jwtSecret = Optional.ofNullable(System.getenv("JWT_SECRET")).orElseThrow(() -> new IllegalStateException("Require JWT_SECRET env-var"));
 
         try {
-            // One-time, blocking startup work; acceptable before the server begins listening.
-            database = Database.create(sqlitePath);
+            // specify a write and read thread
+            writer = DbThread.writer(sqlitePath, context);
+            reader = DbThread.reader(sqlitePath, context);
         } catch (Exception e) {
+            closeDb();
             startPromise.fail(e);
             return;
         }
 
-        // dedicated worker pool same size of the Hikari pool so blocking JDBC calls
-        // never run on (and never block) the event loop.
-        dbExecutor = vertx.createSharedWorkerExecutor("db-worker", Database.DB_POOL_SIZE);
-
         // wonky lambda construction, to at least pretend there is some abstraction between db and router
-        Handler<RoutingContext> dbHealthHandler = ctx -> dbExecutor.executeBlocking(() -> {
-            database.verityConnection(ctx);
-            return null;
-        }, false);
+        Handler<RoutingContext> dbHealthHandler = ctx -> {
+            reader.verifyConnection()
+                    .onSuccess(fill -> {
+                        JsonObject json = new JsonObject();
+                        fill.accept(json);
+                        Routes.json(ctx, 200, json);
+                    });
+        };
 
-        PostRepository postRepository = new PostRepository(database.dataSource(), dbExecutor);
-        ApiHandler apiHandler = new ApiHandler(postRepository);
+        PostRepository posts = new PostRepository(reader, writer);
+        ApiHandler apiHandler = new ApiHandler(posts);
         Router router = Routes.build(vertx, apiHandler, dbHealthHandler, jwtSecret);
 
-        vertx.createHttpServer().requestHandler(router).listen(port, host).onSuccess(server -> {
-            System.out.printf("HTTP server listening on port %s%n", server.actualPort());
-            startPromise.complete();
-        }).onFailure(startPromise::fail);
+        vertx.createHttpServer()
+                .requestHandler(router)
+                .listen(port, host)
+                .onSuccess(s -> {
+                    server = s;
+                    System.out.printf("HTTP server listening on port %s%n", server.actualPort());
+                    startPromise.complete();
+                })
+                .onFailure(err -> {
+                    closeDb();
+                    startPromise.fail(err);
+                });
     }
 
     @Override
-    public void stop() {
-        if (dbExecutor != null) {
-            dbExecutor.close();
-        }
-        if (database != null) {
-            database.close();
-        }
+    public void stop(Promise<Void> stopPromise) {
+        // 1) stop accepting requests, 2) then stop the DB threads (blocking join -> off the event loop)
+        Future<Void> serverClosed = server != null ? server.close() : Future.succeededFuture();
+        serverClosed
+                .compose(v -> vertx.<Void>executeBlocking(() -> {
+                    closeDb();
+                    return null;
+                }))
+                .onComplete(stopPromise);
     }
+
+    private void closeDb() {
+        if (reader != null) reader.close();
+        if (writer != null) writer.close();
+    }
+
 }

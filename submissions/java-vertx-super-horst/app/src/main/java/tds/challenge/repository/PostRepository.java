@@ -1,12 +1,10 @@
 package tds.challenge.repository;
 
 import io.vertx.core.Future;
-import io.vertx.core.WorkerExecutor;
 import io.vertx.core.json.JsonObject;
+import tds.challenge.db.DbThread;
 import tds.challenge.db.RowMapper;
 
-import javax.sql.DataSource;
-import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
@@ -39,76 +37,62 @@ public class PostRepository {
 
     private static final String INSERT_LIKE = "INSERT INTO likes (user_id, post_id) VALUES (?, ?) ON CONFLICT (user_id, post_id) DO NOTHING";
 
-    private final DataSource ds;
-    private final WorkerExecutor executor;
+    private final DbThread reader;
+    private final DbThread writer;
 
-    public PostRepository(DataSource ds, WorkerExecutor executor) {
-        this.ds = ds;
-        this.executor = executor;
+    public PostRepository(DbThread reader, DbThread writer) {
+        this.reader = reader;
+        this.writer = writer;
     }
 
     public Future<List<JsonObject>> feed() {
-        return executor.executeBlocking(() -> {
-            try (Connection c = ds.getConnection();
-                 PreparedStatement ps = c.prepareStatement(FEED_SQL);
-                 ResultSet rs = ps.executeQuery()) {
-
+        return reader.submit(s -> {
+            try (ResultSet rs = s.prepare(FEED_SQL).executeQuery()) {
                 return RowMapper.stream(rs, POST_MAPPER).toList();
             }
-        }, false);
+        });
     }
 
     public Future<List<JsonObject>> findById(long id) {
-        return executor.executeBlocking(() -> {
-            try (Connection c = ds.getConnection()) {
-                return findById(c, id);
-            }
-        }, false);
-    }
-
-    public Future<JsonObject> insertPost(long userId, String username, String postBody) {
-        return executor.executeBlocking(() -> {
-            try (Connection c = ds.getConnection();
-                 PreparedStatement ps = c.prepareStatement(INSERT_POST)) {
-                ps.setLong(1, userId);
-                ps.setString(2, postBody);
-
-                try (ResultSet keys = ps.executeQuery()) {
-                    if (!keys.next()) {
-                        throw new SQLException("Insert succeeded but no generated key was returned");
-                    }
-                    long id = keys.getLong(1);
-                    String createdAt = keys.getString(2);
-
-                    return new JsonObject()
-                            .put("id", id)
-                            .put("body", postBody)
-                            .put("created_at", createdAt)
-                            .put("author", username)
-                            .put("like_count", 0);
-                }
-            }
-        }, false);
-    }
-
-    public Future<Boolean> likePost(long userId, long postId) {
-        return executor.executeBlocking(() -> {
-            try (Connection c = ds.getConnection();
-                 PreparedStatement ps = c.prepareStatement(INSERT_LIKE)) {
-                ps.setLong(1, userId);
-                ps.setLong(2, postId);
-
-                return ps.executeUpdate() != 0;
-            }
-        }, false);
-    }
-
-    private static List<JsonObject> findById(Connection c, long id) throws SQLException {
-        try (PreparedStatement ps = c.prepareStatement(SINGLE_POST_SQL)) {
+        return reader.submit(s -> {
+            PreparedStatement ps = s.prepare(SINGLE_POST_SQL);
             ps.setLong(1, id);
             try (ResultSet rs = ps.executeQuery()) {
                 return RowMapper.stream(rs, POST_MAPPER).toList();
             }
-        }
+        });
+    }
+
+    public Future<JsonObject> insertPost(long userId, String username, String postBody) {
+        return writer.submit(s -> {
+            PreparedStatement ps = s.prepare(INSERT_POST);
+            ps.setLong(1, userId);
+            ps.setString(2, postBody);
+
+            try (ResultSet keys = ps.executeQuery()) {
+                if (!keys.next()) {
+                    throw new SQLException("Insert succeeded but no generated key was returned");
+                }
+                long id = keys.getLong(1);
+                String createdAt = keys.getString(2);
+
+                return new JsonObject()
+                        .put("id", id)
+                        .put("body", postBody)
+                        .put("created_at", createdAt)
+                        .put("author", username)
+                        .put("like_count", 0);
+            }
+        });
+    }
+
+    public Future<Boolean> likePost(long userId, long postId) {
+        return writer.submit(s -> {
+            PreparedStatement ps = s.prepare(INSERT_LIKE);
+            ps.setLong(1, userId);
+            ps.setLong(2, postId);
+
+            return ps.executeUpdate() != 0;
+        });
     }
 }

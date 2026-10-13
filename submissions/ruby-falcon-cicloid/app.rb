@@ -1,0 +1,315 @@
+# frozen_string_literal: true
+
+require "async"
+require "async/promise"
+require "extralite"
+require "json"
+require "rbnacl"
+require "protocol/http/response"
+require "protocol/http/body/buffered"
+
+# libsodium's one-shot HMAC-SHA256 and constant-time compare, bound through rbnacl's FFI layer.
+module Sodium
+  extend RbNaCl::Sodium
+
+  sodium_function :hmac_sha256, :crypto_auth_hmacsha256, %i[pointer pointer ulong_long pointer]
+  sodium_function :verify32, :crypto_verify_32, %i[pointer pointer]
+end
+
+# One SQLite connection, owned by the single reactor thread. SQLite renders every response
+# document, so Ruby only routes, verifies the JWT and hands bytes to Falcon.
+#
+# Group commit: the first write in a reactor pass opens BEGIN IMMEDIATE and schedules one COMMIT
+# for the next pass. Every write in between joins that transaction, and every response waits for
+# the COMMIT. Reads that run while a batch is open may have seen its rows, so they wait too.
+class Store
+  POST_JSON = "json_object('id',p.id,'body',p.body,'created_at',p.created_at,'author',u.username," \
+              "'like_count',(SELECT count(*) FROM likes l WHERE l.post_id=p.id))"
+  FEED = "SELECT '{\"posts\":['||coalesce(group_concat(doc,',' ORDER BY created_at DESC,id DESC),'')||']}' " \
+         "FROM (SELECT #{POST_JSON} AS doc,p.created_at,p.id FROM posts p JOIN users u ON u.id=p.user_id " \
+         "ORDER BY p.created_at DESC,p.id DESC LIMIT 20)"
+  POST = "SELECT '{\"post\":'||#{POST_JSON}||'}' FROM posts p JOIN users u ON u.id=p.user_id WHERE p.id=?"
+  CREATE = "INSERT INTO posts(user_id,body) VALUES(?1,?2) RETURNING '{\"post\":'||json_object('id',id," \
+           "'body',body,'created_at',created_at,'author',?3,'like_count',0)||'}'"
+  LIKE = "INSERT INTO likes(user_id,post_id) SELECT ?1,?2 WHERE EXISTS(SELECT 1 FROM posts WHERE id=?2) " \
+         "ON CONFLICT(user_id,post_id) DO NOTHING"
+  EXISTS = "SELECT 1 FROM posts WHERE id=?"
+
+  def initialize(path)
+    @db = Extralite::Database.new(path)
+    @db.gvl_release_threshold = -1 # one thread: never release the GVL around queries
+    # locking_mode=EXCLUSIVE first, so the WAL index lives in heap memory rather than the -shm file.
+    @db.execute("PRAGMA locking_mode=EXCLUSIVE")
+    @db.execute("PRAGMA journal_mode=WAL")
+    @db.execute("PRAGMA synchronous=NORMAL")
+    @db.execute("PRAGMA foreign_keys=ON")
+    @db.execute("PRAGMA wal_autocheckpoint=0") # checkpoints run on a timer, off the commit path
+    @db.execute("PRAGMA mmap_size=1073741824")
+    @db.execute("PRAGMA cache_size=-65536")
+    @db.execute("PRAGMA temp_store=MEMORY")
+    @feed = @db.prepare_splat(FEED)
+    @post = @db.prepare_splat(POST)
+    @create = @db.prepare_splat(CREATE)
+    @like = @db.prepare_splat(LIKE)
+    @exists = @db.prepare_splat(EXISTS)
+    @ping = @db.prepare_splat("SELECT 1")
+    @batch = nil
+  end
+
+  def feed
+    document = @feed.reset.next
+    @batch&.wait
+    document
+  end
+
+  def post(id)
+    document = @post.reset.bind(id).next
+    @batch&.wait
+    document
+  end
+
+  def create(user_id, username, body)
+    batch = begin_batch
+    document = @create.reset.bind(user_id, body, username).next
+    @create.reset # finish the statement so COMMIT doesn't see it in progress
+    batch.wait
+    document
+  end
+
+  # Returns :liked, :already_liked or :missing.
+  def like(user_id, post_id)
+    batch = begin_batch
+    outcome = if @like.execute(user_id, post_id) == 1 then :liked
+              elsif @exists.reset.bind(post_id).next then :already_liked
+              else :missing
+              end
+    batch.wait
+    outcome
+  end
+
+  def ping
+    @ping.reset.next
+  end
+
+  def checkpoint
+    @db.execute("PRAGMA wal_checkpoint(PASSIVE)") unless @batch
+  rescue Extralite::Error
+    nil # retried on the next tick
+  end
+
+  private
+
+  # Synchronous, so nothing else runs between BEGIN and joining the batch.
+  def begin_batch
+    return @batch if @batch
+
+    @db.execute("BEGIN IMMEDIATE")
+    batch = @batch = Async::Promise.new
+    Async do |task|
+      task.yield # let every request that is ready in this pass join the batch
+      commit(batch)
+    end
+    batch
+  end
+
+  def commit(batch)
+    @batch = nil
+    begin
+      @db.execute("COMMIT")
+    rescue Extralite::Error => error
+      @db.execute("ROLLBACK") if @db.transaction_active?
+      return batch.reject(error)
+    end
+    batch.resolve(true)
+  end
+end
+
+class App
+  JSON_TYPE = "application/json"
+  HS256_HEADER = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9" # {"alg":"HS256","typ":"JWT"}
+  BASE64URL = /\A[A-Za-z0-9_-]+\z/
+  POST_PATH = %r{\A/posts/([^/]*)(/like)?\z}
+  POSITIVE_ID = /\A[0-9]+\z/
+  MAX_ID = 9_223_372_036_854_775_807
+  # JavaScript's String#trim set, so trimming matches the reference implementations.
+  SPACE = "\u0009-\u000d    -     　﻿"
+  TRIM = /\A[#{SPACE}]+|[#{SPACE}]+\z/
+
+  NOT_FOUND = '{"error":"not found"}'
+  INVALID_ID = '{"error":"invalid post id"}'
+  POST_NOT_FOUND = '{"error":"post not found"}'
+  MISSING_TOKEN = '{"error":"missing bearer token"}'
+  INVALID_TOKEN = '{"error":"invalid or expired token"}'
+  INVALID_PAYLOAD = '{"error":"invalid token payload"}'
+  MALFORMED = '{"error":"malformed JSON body"}'
+  BODY_REQUIRED = '{"error":"body is required"}'
+  BODY_TOO_LONG = '{"error":"body must be at most 500 characters"}'
+  INTERNAL = '{"error":"internal server error"}'
+
+  # Thrown with [status, document] to answer early.
+  class Halt < StandardError
+    attr_reader :status, :document
+
+    def initialize(status, document)
+      super()
+      @status = status
+      @document = document
+    end
+  end
+
+  def initialize(store, secret, pressure)
+    @store = store
+    @key = secret.b.ljust(32, "\0") # HMAC zero-pads keys up to the block size: same MAC
+    raise ArgumentError, "JWT_SECRET longer than 32 bytes is not supported" if @key.bytesize > 32
+
+    @mac = String.new("\0" * 32, encoding: Encoding::BINARY)
+    @pressure = pressure
+    @started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+  end
+
+  def call(request)
+    path = request.path
+    if (query = path.index("?"))
+      path = path[0, query]
+    end
+    method = request.method
+
+    if method == "GET"
+      return respond(200, @store.feed) if path == "/feed"
+      return health if path == "/health"
+    elsif method == "POST" && path == "/posts"
+      return create(request)
+    end
+
+    if (route = POST_PATH.match(path))
+      if method == "GET" && !route[2]
+        id = post_id(route[1])
+        document = @store.post(id) or raise Halt.new(404, POST_NOT_FOUND)
+        return respond(200, document)
+      elsif method == "POST" && route[2]
+        user_id, = authenticate(request)
+        return like(user_id, post_id(route[1]))
+      end
+    end
+    respond(404, NOT_FOUND)
+  rescue Halt => halt
+    respond(halt.status, halt.document)
+  rescue StandardError => error
+    Console.error(self, error)
+    respond(500, INTERNAL)
+  end
+
+  private
+
+  def respond(status, document)
+    headers = Protocol::HTTP::Headers.new([["content-type", JSON_TYPE]])
+    headers.add("connection", "close") if @pressure.strained
+    Protocol::HTTP::Response.new(nil, status, headers, Protocol::HTTP::Body::Buffered.new([document], document.bytesize))
+  end
+
+  def health
+    @store.ping
+    uptime = (Process.clock_gettime(Process::CLOCK_MONOTONIC) - @started).to_i
+    respond(200, %({"status":"ok","db":"ok","uptime_s":#{uptime}}))
+  rescue Extralite::Error => error
+    respond(503, JSON.generate({ status: "degraded", db: "unreachable", error: error.message }))
+  end
+
+  def create(request)
+    user_id, username = authenticate(request)
+    raw = request.read.to_s.force_encoding(Encoding::UTF_8)
+    raise Halt.new(400, MALFORMED) unless raw.valid_encoding?
+
+    payload = begin
+      JSON.parse(raw)
+    rescue JSON::ParserError
+      raise Halt.new(400, MALFORMED)
+    end
+    body = payload["body"] if payload.is_a?(Hash)
+    raise Halt.new(400, BODY_REQUIRED) unless body.is_a?(String)
+
+    body = body.gsub(TRIM, "")
+    raise Halt.new(400, BODY_REQUIRED) if body.empty?
+    raise Halt.new(400, BODY_TOO_LONG) if body.length > 500
+
+    respond(201, @store.create(user_id, username, body))
+  end
+
+  def like(user_id, id)
+    case @store.like(user_id, id)
+    when :liked then respond(201, %({"liked":true,"already_liked":false,"post_id":#{id}}))
+    when :already_liked then respond(200, %({"liked":true,"already_liked":true,"post_id":#{id}}))
+    else respond(404, POST_NOT_FOUND)
+    end
+  end
+
+  def post_id(text)
+    raise Halt.new(400, INVALID_ID) unless POSITIVE_ID.match?(text)
+
+    id = text.to_i
+    raise Halt.new(400, INVALID_ID) if id.zero?
+    raise Halt.new(404, POST_NOT_FOUND) if id > MAX_ID
+
+    id
+  end
+
+  # Verifies the HS256 signature and expiry on every request. Returns [user_id, username].
+  def authenticate(request)
+    header = request.headers["authorization"]
+    raise Halt.new(401, MISSING_TOKEN) unless header&.start_with?("Bearer ")
+
+    token = header.byteslice(7, header.bytesize - 7)
+    first = token.index(".")
+    last = token.rindex(".")
+    raise Halt.new(401, INVALID_TOKEN) unless first && first != last
+
+    head = token.byteslice(0, first)
+    payload = token.byteslice(first + 1, last - first - 1)
+    signature = token.byteslice(last + 1, token.bytesize - last - 1)
+    raise Halt.new(401, INVALID_TOKEN) unless signature.bytesize == 43 && BASE64URL.match?(signature)
+
+    signing_input = token.byteslice(0, last).b
+    Sodium.hmac_sha256(@mac, signing_input, signing_input.bytesize, @key)
+    raise Halt.new(401, INVALID_TOKEN) unless Sodium.verify32(@mac, decode64(signature))
+
+    unless head == HS256_HEADER
+      fields = parse_segment(head)
+      raise Halt.new(401, INVALID_TOKEN) unless fields.is_a?(Hash) && fields["alg"] == "HS256"
+    end
+
+    claims = parse_segment(payload)
+    raise Halt.new(401, INVALID_TOKEN) unless claims.is_a?(Hash)
+
+    now = Time.now.to_f
+    exp = claims["exp"]
+    raise Halt.new(401, INVALID_TOKEN) unless exp.is_a?(Numeric) && exp > now
+
+    nbf = claims["nbf"]
+    raise Halt.new(401, INVALID_TOKEN) if nbf && !(nbf.is_a?(Numeric) && nbf <= now)
+
+    sub = claims["sub"]
+    username = claims["username"]
+    unless sub.is_a?(String) && POSITIVE_ID.match?(sub) && username.is_a?(String) &&
+           (user_id = sub.to_i).positive? && user_id <= MAX_ID
+      raise Halt.new(401, INVALID_PAYLOAD)
+    end
+
+    [user_id, username]
+  end
+
+  def parse_segment(segment)
+    raise Halt.new(401, INVALID_TOKEN) unless BASE64URL.match?(segment) && segment.bytesize % 4 != 1
+
+    JSON.parse(decode64(segment).force_encoding(Encoding::UTF_8))
+  rescue JSON::ParserError, ArgumentError, EncodingError
+    raise Halt.new(401, INVALID_TOKEN)
+  end
+
+  def decode64(segment)
+    padded = segment.tr("-_", "+/")
+    padded << ("=" * (-segment.bytesize % 4))
+    padded.unpack1("m0")
+  rescue ArgumentError
+    raise Halt.new(401, INVALID_TOKEN)
+  end
+end

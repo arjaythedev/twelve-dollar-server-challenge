@@ -5,11 +5,16 @@ holds the reasoning, test results and next steps.
 
 ## Status (2026-10-13)
 
-- Passes `test/test.sh`: 42/42, run with `test/run.sh` in an Ubuntu 24.04 **arm64** container.
-- Not yet run on **x86_64**. The amd64 branch of `install.sh` (JDK URL and sha256 from Adoptium's
-  API) has never run. CI on the PR will be its first run.
+- Passes `test/test.sh`: 42/42, run with `test/run.sh` on Ubuntu 24.04 on **arm64** (native) and on
+  **x86_64** (amd64 container under OrbStack's Rosetta emulation).
+- x86_64: the amd64 branch of `install.sh` ran clean (JDK 25 and Maven checksums verified), `build.sh`
+  fetched the `linux-x86_64` epoll jar, and the server started on epoll, not the NIO fallback. The
+  emulated run says nothing about speed. CI on the PR will be the first native x86_64 run.
+- Load tested on arm64 up to 60k users with 0 failures (see Results). Not yet run on a real droplet,
+  and no 5-minute hold yet.
 - Branch `java-netty-lfeagan` is pushed to `origin` (the fork `lfeagan/twelve-dollar-server-challenge`).
-  There is no PR upstream yet.
+  There is no PR upstream yet. Before opening one: add real numbers to `README.md`, and decide
+  whether to leave this file out of the PR (it's working notes, not a required file).
 
 ## The numbers that drive the design
 
@@ -86,45 +91,68 @@ hold with p95 < 500 ms, p99 < 1 s and < 1% errors.
 
 ## Local dev setup (macOS)
 
-The Mac has JDK 17 only and no epoll, so everything runs in Docker on Ubuntu 24.04.
+The Mac has JDK 17 only and no epoll, so everything runs in Docker on Ubuntu 24.04. Docker here is
+OrbStack (`brew install --cask orbstack`); its VM memory cap is `orbctl config show | grep memory_mib`
+(16 GB now). Node isn't installed on the Mac, so the seed is generated inside the container.
 
 ```bash
-bash seed/make-seed.sh                                  # seed/feed.db + tokens.json (needs node, sqlite3)
 docker run -d --name tds -v "$PWD":/repo ubuntu:24.04 sleep infinity
-# Corporate network only (Zscaler TLS inspection): trust the Koch root CA in the container
-security find-certificate -a -c "Koch Industries Inc RootCA-2014" -p > /tmp/koch-root.pem
-docker cp /tmp/koch-root.pem tds:/usr/local/share/ca-certificates/koch-root.crt
-docker exec tds update-ca-certificates
+docker exec tds bash -c 'apt-get update -qq && apt-get install -y -qq nodejs sqlite3 jq openssl curl ca-certificates && useradd -m dev'
+docker exec -u dev -w /repo tds bash seed/make-seed.sh  # seed/feed.db + tokens.json (about a minute)
 docker exec tds bash /repo/submissions/java-netty-lfeagan/install.sh
-docker exec tds /opt/jdk-25/bin/keytool -importcert -noprompt -cacerts -storepass changeit \
-  -alias koch-root -file /usr/local/share/ca-certificates/koch-root.crt   # so Maven trusts it too
-docker exec tds bash -c 'apt-get install -y jq openssl sqlite3 && useradd -m dev'
 docker exec -u dev -w /repo tds bash test/run.sh submissions/java-netty-lfeagan
 ```
-
-The CA steps are only for the corporate network. Don't put them in `install.sh`.
 
 Load testing locally (the server container capped like the droplet, k6 in a second container):
 
 ```bash
 docker network create tdsnet; docker network connect tdsnet tds
 docker update --cpus 1 --memory 2g --memory-swap 2g tds
-# start the server inside tds with HOST=0.0.0.0 PORT=3000 on a fresh copy of feed.db, then:
-docker run --rm --network tdsnet -v "$PWD":/repo -w /repo/bench --ulimit nofile=200000:200000 \
-  grafana/k6:latest run -e BASE_URL=http://tds:3000 -e VUS=10000 -e RAMP_UP=30s -e DURATION=90s \
+# start the server inside tds on a fresh copy of feed.db (run test/run.sh first so target/ is built):
+docker exec tds bash -c 'cp /repo/seed/feed.db /tmp/bench.db && chown dev /tmp/bench.db'
+docker exec -d -u dev -w /repo/submissions/java-netty-lfeagan tds bash -c 'ulimit -n 65535; \
+  SQLITE_PATH=/tmp/bench.db JWT_SECRET=twelve-dollar-challenge HOST=0.0.0.0 PORT=3000 exec bash start.sh > /tmp/server.log 2>&1'
+# then k6:
+docker run --rm --network tdsnet --sysctl net.ipv4.ip_local_port_range="1024 65535" \
+  -v "$PWD":/repo -w /repo/bench --ulimit nofile=200000:200000 \
+  grafana/k6:latest run -e BASE_URL=http://tds:3000 -e VUS=30000 -e RAMP_UP=60s -e DURATION=90s \
   -e TOKENS=/repo/seed/tokens.json load.js
 ```
 
+Two things bit us, and both are in the load generator, not the server:
+- **k6 memory**: about 190 KB per user (5.8 GB at 30k, so about 12 GB at 60k). The Docker VM needs
+  more than that, plus 2 GB for the server container.
+- **Source ports**: the default range (32768-60999) holds about 28k connections to one address and
+  port. Past that, k6 logs `cannot assign requested address` and `GET /feed` fails. The `--sysctl`
+  above widens it to about 64.5k, which is the most one k6 container can reach. Beyond that, use a
+  second client address or several k6 containers (each slice of `tokens.json` must differ).
+
+Restart the server on a fresh database copy between runs, so writes from one run don't carry over.
+
 ## Results so far (Docker on an M-series Mac, so only a rough signal)
 
-| Users | Result |
-|---|---|
-| 10,000 | 848 req/s, **0 errors** out of 135,674, p95 0.54 ms, p99 2.1 ms. The server used about 7% of its core and about 630 MB RSS. |
-| 30,000 | Failed (3.6% errors, p99 of minutes), **caused by the load generator**. |
+Server container capped at 1 CPU, 2 GB, no swap, arm64, epoll, 90 s hold. k6 shares the Mac's CPU.
+All runs: **0 failed requests**, every threshold passed.
 
-At 30k, k6 used 5.8 GB of the Docker VM's 7.7 GB and thrashed, while the server sat at 0.4–2% CPU
-and stayed healthy. This laptop can't generate more than about 10–15k users, so real numbers need
-real hardware.
+| Users | Ramp | Requests/s | p95 | p99 | Server peak CPU | Server RSS | Open fds |
+|---|---|---|---|---|---|---|---|
+| 10,000 | 30 s | 848 | 0.54 ms | 2.1 ms | ~7% | ~630 MB | |
+| 30,000 | 30 s | 2,536 | 1.43 ms | 2.25 ms | 37% | 617 MB | |
+| 40,000 | 60 s | 3,181 | 1.68 ms | 2.58 ms | 39% | 624 MB | 40,023 |
+| 50,000 | 60 s | 3,979 | 1.90 ms | 2.92 ms | 43% | 617 MB | 50,023 |
+| 60,000 | 60 s | 4,766 | 1.91 ms | 8.66 ms | 46% | 619 MB | 60,023 |
+
+- **Memory is flat**: about 600-620 MB from 30k to 60k users, so heap and buffer tuning isn't needed
+  yet. Extra connections cost almost nothing.
+- **CPU is not the wall**: 46% of one core at 60k.
+- **File descriptors are the first hard ceiling**: 60,023 of 65,535 at 60k (about 92%). 80k users
+  can't fit, whatever else is true. Rule 11 means we can't raise `LimitNOFILE`.
+- **p99 rose from 2.9 ms to 8.7 ms at 60k.** Still far below the 1 s limit; the cause isn't
+  confirmed (60k sockets sharing the core with k6 and the OS is the guess).
+- **Earlier failed runs were the load generator**: the first 30k run (7.7% errors, all
+  `cannot assign requested address`) was source-port exhaustion in k6, and the run before that
+  (3.6% errors) was k6 running out of VM memory. See the local setup section for the fixes.
+- Not yet done: the real 5-minute hold, x86_64, a real droplet. Longer runs are planned later.
 
 ## Next steps
 
@@ -142,8 +170,8 @@ real hardware.
    - The receive buffer allocator size per connection.
    - Whether group commit actually helps compared with autocommit (measure p99).
    - `cache_size` and `mmap_size`.
-4. **Confirm x86_64** with a clean `install.sh`, `build.sh` and `test/run.sh` on the droplet (CI
-   will do this too).
+4. **Confirm x86_64 natively** with a clean `install.sh`, `build.sh` and `test/run.sh` on the droplet
+   (CI will do this too). An emulated amd64 run already passed 42/42.
 5. **Open the PR** to the upstream challenge repo (`origin` is the fork) once the README has real
    numbers. CI must be green, and the PR must not touch files outside this folder.
 

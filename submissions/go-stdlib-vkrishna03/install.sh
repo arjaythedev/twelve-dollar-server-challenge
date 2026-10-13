@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Runs once as root on a clean Ubuntu 24.04: a C toolchain and the SQLite headers for cgo (Ubuntu's
-# libsqlite3-dev, SQLite 3.45.1), and Go from the official tarball, checked against its sha256.
+# Runs once as root on a clean Ubuntu 24.04: a C toolchain for cgo (SQLite itself is compiled in by
+# build.sh), and Go from the official tarball, checked against its sha256.
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 GO_VERSION=1.27.2
 apt-get update
-apt-get install -y --no-install-recommends build-essential libsqlite3-dev curl ca-certificates
+apt-get install -y --no-install-recommends build-essential curl ca-certificates
 
 arch="$(dpkg --print-architecture)" # amd64 on the benchmark box; arm64 for local testing
 case "$arch" in

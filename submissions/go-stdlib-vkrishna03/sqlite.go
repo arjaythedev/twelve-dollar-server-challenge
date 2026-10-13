@@ -1,9 +1,18 @@
 package main
 
 /*
-#cgo LDFLAGS: -lsqlite3
+// SQLite 3.53.4, compiled into the binary from the amalgamation that build.sh downloads into
+// sqlite/ (sqlite_amalgamation.c includes it). Options from SQLite's "recommended compile-time
+// options": one thread uses SQLite (THREADSAFE=0: no mutexes), no memory statistics, and
+// features this server never uses left out.
+#cgo CFLAGS: -I${SRCDIR}/sqlite -O2 -DSQLITE_THREADSAFE=0 -DSQLITE_DEFAULT_MEMSTATUS=0
+#cgo CFLAGS: -DSQLITE_DEFAULT_WAL_SYNCHRONOUS=1 -DSQLITE_DQS=0 -DSQLITE_LIKE_DOESNT_MATCH_BLOBS
+#cgo CFLAGS: -DSQLITE_MAX_EXPR_DEPTH=0 -DSQLITE_OMIT_DECLTYPE -DSQLITE_OMIT_DEPRECATED
+#cgo CFLAGS: -DSQLITE_OMIT_PROGRESS_CALLBACK -DSQLITE_OMIT_SHARED_CACHE -DSQLITE_OMIT_LOAD_EXTENSION
+#cgo CFLAGS: -DSQLITE_OMIT_AUTOINIT -DSQLITE_USE_ALLOCA -DSQLITE_STRICT_SUBTYPE=1
+#cgo LDFLAGS: -lm
 #include <stdlib.h>
-#include <sqlite3.h>
+#include "sqlite3.h"
 
 // One result row, filled by a single step_row call, so a row costs one cgo call instead of one
 // per column.
@@ -14,11 +23,7 @@ typedef struct {
 } row;
 
 static int setup(void) {
-	// Every connection is used by one goroutine at a time and nobody reads memory statistics, so
-	// SQLite can skip its per-connection mutexes and the global memstat mutex.
-	sqlite3_config(SQLITE_CONFIG_MULTITHREAD);
-	sqlite3_config(SQLITE_CONFIG_MEMSTATUS, 0);
-	return sqlite3_initialize();
+	return sqlite3_initialize(); // required with SQLITE_OMIT_AUTOINIT
 }
 
 // Steps s once. On SQLITE_ROW, column c goes to r->t/r->n if bit c of text is set, else to r->i.

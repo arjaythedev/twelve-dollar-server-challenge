@@ -4,7 +4,7 @@
 |---|---|
 | Language | Go 1.27.2 (official tarball, checksum verified in `install.sh`) |
 | Server | One epoll event loop and a small HTTP/1.1 parser, Go standard library only |
-| SQLite | 3.45.1, Ubuntu 24.04's `libsqlite3-dev` |
+| SQLite | 3.53.4, compiled in from the official amalgamation (`build.sh` downloads it and checks its sha256) |
 | SQLite binding | A thin cgo layer (`sqlite.go`), no `database/sql` |
 | Dependencies | None beyond the Go standard library and SQLite (no `go.sum`) |
 | **Nginx or direct** | **Direct**: serves `0.0.0.0:80` itself |
@@ -12,8 +12,8 @@
 ## Running it
 
 ```bash
-sudo bash install.sh   # apt: build-essential, libsqlite3-dev; Go 1.27.2 into /usr/local/go
-bash build.sh          # bin/server
+sudo bash install.sh   # apt: build-essential, curl; Go 1.27.2 into /usr/local/go
+bash build.sh          # downloads SQLite 3.53.4, builds bin/server
 SQLITE_PATH=... JWT_SECRET=... HOST=0.0.0.0 PORT=80 bash start.sh
 ```
 
@@ -39,26 +39,39 @@ idle connection is a ~100-byte struct with no buffers: requests are parsed in pl
   ~65.5k users. When `accept` fails with `EMFILE`, the loop stops watching the listener until a
   connection closes. Otherwise the listener would stay readable and spin the loop at 100% CPU.
 
-**SQLite through a thin cgo layer** (`sqlite.go`, ~140 lines):
+**SQLite: about half the server's CPU, so most of the tuning is here.**
 
+- **Compiled in, not Ubuntu's library.** SQLite 3.53.4 is built with the recommended compile-time
+  options: `THREADSAFE=0` (one thread uses it, so no mutexes at all), `DEFAULT_MEMSTATUS=0`, and
+  the `OMIT_*` options for unused features. **About 20% less CPU** per query than Ubuntu's 3.45.1.
+- **The feed as three range scans.** Ids and `created_at` are both assigned at insert, so the 20
+  newest posts almost always have adjacent ids. Then three range scans replace the reference
+  query's 60 lookups (20 each for the post, its author and its like count):
+  1. the 20 ids from the `created_at` index
+  2. posts with their authors in `[lo, hi]`
+  3. like counts in `[lo, hi]` from `likes_post_id_idx`
+
+  That's a third less CPU per feed. If the ids are more than 64 apart, or a post has no author
+  row, the reference query answers instead. The three scans see the same data, because this
+  connection is the only writer and nothing runs in between. The output is byte-identical; the
+  golden tests check it.
+- `locking_mode=EXCLUSIVE`: this process is the database's only user, so the WAL index lives in
+  heap memory instead of the `-shm` file, and queries take no file locks. **17% less CPU per
+  request** on the mixed workload.
+- **Checkpoints every 10,000 WAL pages (40 MB) instead of 1,000.** A checkpoint copies each
+  changed page once however often it changed, and fsyncs twice on the event loop. So fewer, larger
+  checkpoints cost less CPU, and a like or post blocks the loop for half as long.
+- **No mmap**, a 16 MiB page cache. A 1 GiB mmap measured 6% slower per request.
 - Statements are prepared once (`SQLITE_PREPARE_PERSISTENT`) and reset right after each use, so no
   read transaction outlives its request. That caches query plans, not data (rule 5).
 - One cgo call steps a row *and* reads all its columns into a C struct, instead of one call per
   column. Text comes back as zero-copy views into SQLite's memory and is escaped straight into the
-  response buffer. A feed costs 21 cgo calls and allocates nothing.
-- `locking_mode=EXCLUSIVE`: this process is the database's only user, so the WAL index lives in
-  heap memory instead of the `-shm` file, and queries take no file locks. **17% less CPU per
-  request** on the mixed workload.
-- `SQLITE_CONFIG_MULTITHREAD` and `SQLITE_CONFIG_MEMSTATUS=0` drop SQLite's per-connection and
-  memory-statistics mutexes.
-- Pragmas: WAL, `synchronous=NORMAL` (rule 6), 1 GiB `mmap_size`, 16 MiB page cache,
-  `temp_store=MEMORY`. SQLite's default auto-checkpoint (1000 pages) runs on the loop. A checkpoint
-  only copies pages that are already committed.
-- SQL: the reference queries; their plans are already index-only lookups. A like is one statement
-  (`INSERT ... SELECT ... WHERE EXISTS (post) ON CONFLICT DO NOTHING`). A post-existence check runs
-  only when nothing was inserted, to tell "already liked" (200) from "no such post" (404).
-- Writes autocommit. `INSERT ... RETURNING` is stepped to `SQLITE_DONE`, which commits it, before
-  a 201 is written.
+  response buffer. Request handling allocates nothing.
+- A like is one statement (`INSERT ... SELECT ... WHERE EXISTS (post) ON CONFLICT DO NOTHING`). A
+  post-existence check runs only when nothing was inserted, to tell "already liked" (200) from
+  "no such post" (404).
+- Writes autocommit with WAL and `synchronous=NORMAL` (rule 6). `INSERT ... RETURNING` is stepped
+  to `SQLITE_DONE`, which commits it, before a 201 is written.
 
 **JWT verified on every request** (rule 5): HS256 only, signature checked with `hmac.Equal` using
 a reused HMAC, `exp` and `nbf` checked. `sub` must be a positive integer string and
@@ -68,54 +81,65 @@ request body. It is strict and simple, and fast enough there.
 **Small things:** the `Date` header is formatted once per second, response bodies are built in
 reused buffers, and `GOGC=400` because the heap stays at a few MB.
 
-**Tried and rejected:**
+**Tried and rejected.** Each was measured as server CPU during a 60k-user hold; the noise is about
+±2 points.
 
-- Building the JSON in SQL (`json_object` + `group_concat`). Measured **43% more CPU** per feed
-  than one-call-per-row plus Go encoding.
-- Multiple event loops with `SO_REUSEPORT`, and a separate connection that checkpoints off the
-  loop. Exclusive locking is faster and needs a single connection, and the box has one vCPU.
+| Idea | Result |
+|---|---|
+| **io_uring** instead of epoll (multishot accept and recv, buffer rings, direct descriptors), written in pure Go | Passes every test, but **the same CPU as epoll**. The kernel's time goes to TCP work, not syscalls |
+| Batching wake-ups (wait 1–4 ms to collect more events), with epoll and with io_uring | No CPU saved; median latency +4–7 ms |
+| Two processes with `SO_REUSEPORT` (each process gets its own 65,535 descriptors) | Works, but +12% CPU (no exclusive locking, two loops) |
+| Small socket buffers, `TCP_DEFER_ACCEPT` | Within noise |
+| Building the JSON in SQL (`json_object` + `group_concat`) | 43% *more* CPU per feed than Go encoding |
+| A background checkpointer connection | Needs shared locking, which costs more than inline checkpoints |
 
 ## Measurements
 
 Local, not the droplet: Ubuntu 24.04 arm64 in Docker on an Apple M3. The server container was
 pinned to one core with 2 GB RAM, no swap and `nofile=65535`. The load came from separate
-containers on the other cores, over Docker's bridge network.
+containers on the other cores.
+
+**Calibrating against the droplet.** The official run of `python-fastapi-cknutson12` on the
+droplet was 12,000 users at 84% CPU. The same server under the same load used 49% of an M3 core
+here. `go-gnet-Haris0059` reports 62,500 users at 79% on a droplet, and used about 50% here (estimated from its whole-run average). So a
+droplet vCPU is about **0.6 of this core** for this workload. "Droplet mode" below throttles the
+server to that.
 
 Max throughput with no think time (wrk, 64 connections):
 
 | Workload | req/s | Server CPU per request |
 |---|---:|---:|
-| `GET /feed` | 44,900 | 22.6 µs |
-| `GET /posts/:id` | 279,000 | 3.6 µs |
-| Mix of `bench/load.js` (100 feed : 100 post : 15 like : 2 create) | 76,200 | 11.2 µs |
+| `GET /feed` | 49,200 | 20.6 µs |
+| `GET /posts/:id` | 288,800 | 3.5 µs |
+| Mix of `bench/load.js` (100 feed : 100 post : 15 like : 2 create) | 125,900 | 7.5 µs |
 
-`bench/load.js` with k6 1.8.2, 10,000 VUs (30 s ramp, 60 s hold): 103,642 requests, **0 errors**,
-p95 1.6 ms, p99 10.5 ms, ~9% CPU, 35 MB.
+`bench/load.js` with k6 1.8.2, 10,000 VUs: 0 errors, p95 1.6 ms, p99 10.5 ms.
 
-k6 needs ~280 KB per VU, so higher counts used a small load generator that runs the same user loop
-and think times (users split over several containers so no source address runs out of ports):
+Higher counts used a small load generator that runs the same user loop and think times. k6 needs
+~280 KB per VU, so it couldn't reach these counts here.
 
-| Users | Hold | Requests | Errors | p95 | p99 | Server CPU | Server memory |
-|---:|---:|---:|---:|---:|---:|---:|---:|
-| 20,000 | 60 s | 168,593 | 0 | 1.7 ms | 22 ms | ~25% | ~70 MB |
-| 60,000 | 5 min | 2,123,544 | 0 | 28 ms | 190 ms | ~42% (half of it kernel) | ~75 MB |
-| 65,000 | 90 s | 859,530 | 0 | 11 ms | 31 ms | ~45% | ~70 MB |
+| Users | Server | Errors | p95 | p99 | Server CPU |
+|---:|---|---:|---:|---:|---:|
+| 60,000 (90 s hold) | one full core | 0 | 2.3–2.7 ms | 18–30 ms | ~47% |
+| 64,000 (90 s hold) | **droplet mode, 0.5 core** (harsher than the ~0.6 calibration) | 0 | 159–598 ms | 253–917 ms | 94–97% of the quota |
 
-Tail latency on this setup is noisy: identical 60k runs gave p99 between 31 and 206 ms. With a
-server instrumented to log slow work, no request took over 5 ms and no loop pass over 10 ms. The
-tail comes from waiting for the CPU, not from the handlers or SQLite.
-
-At 66,000 users, about 470 users got no descriptor and timed out (0.07% of requests). The server
-kept serving everyone else at the same latency and CPU.
+At 64,000 users in 0.5 core, the previous version of this server (Ubuntu SQLite, reference feed
+query, 1,000-page checkpoints) failed twice: p95 1.3–2.4 s. This version passed one run and was
+borderline in the other. Both ran out of CPU, so this is about where a droplet's limit is. Above
+65,535 users, the descriptor limit decides.
 
 ## Correctness
 
-`test/run.sh` passes 42/42. A separate raw-socket suite (not part of this folder) checks the cases
-above: pipelining, 7-byte packets, output backpressure, `100-continue`, HTTP/1.0, oversized and
-conflicting headers, 405s, trailing garbage and non-object JSON bodies, JavaScript-whitespace
-trimming, the 500-character limit with multi-byte characters, control-character escaping
-round-trips, JWT `nbf`/`alg`/claim types, pipelined duplicate likes, 500 concurrent connections, and
-keep-alive surviving 66 s idle.
+`test/run.sh` passes 42/42 on x86_64 and arm64. A separate raw-socket suite (not part of this
+folder) checks a further 58 cases:
+- HTTP framing: pipelining, 7-byte packets, output backpressure, `100-continue`, HTTP/1.0,
+  oversized and conflicting headers, 405s
+- JSON bodies: trailing garbage, non-object bodies, JavaScript-whitespace trimming, the
+  500-character limit with multi-byte characters, control-character escaping round-trips
+- JWT: `nbf`, `alg` and claim types
+- Concurrency: pipelined duplicate likes, 500 concurrent connections, keep-alive surviving 66 s idle
+
+`PRAGMA integrity_check` is `ok` after 60k-user runs.
 
 ## License
 

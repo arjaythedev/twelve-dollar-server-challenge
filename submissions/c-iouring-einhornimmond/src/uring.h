@@ -23,10 +23,12 @@ typedef struct uring {
     /* completions */
     unsigned *cq_head, *cq_tail, cq_mask;
     struct io_uring_cqe *cqes;
-    /* provided buffers: `buf_count` buffers of `buf_size` bytes, lent to receives */
+    /* provided buffers: `buf_count` buffers of `buf_size` bytes, lent to receives. The kernel
+     * is offered `buf_spare` bytes less of each, so that many stay free behind whatever it
+     * puts there. */
     struct io_uring_buf_ring *br;
     uint8_t *buf_base;
-    unsigned buf_count, buf_size, br_tail;
+    unsigned buf_count, buf_size, buf_spare, br_tail;
 } uring;
 
 static inline int uring_enter_raw(int fd, unsigned submit, unsigned wait, unsigned flags,
@@ -139,14 +141,15 @@ static inline void uring_buffer_return(uring *r, unsigned id)
     struct io_uring_buf *buf = &r->br->bufs[r->br_tail & (r->buf_count - 1)];
 
     buf->addr = (uint64_t)(uintptr_t)(r->buf_base + (size_t)id * r->buf_size);
-    buf->len = r->buf_size;
+    buf->len = r->buf_size - r->buf_spare;
     buf->bid = (uint16_t)id;
     r->br_tail++;
     __atomic_store_n(&r->br->tail, (uint16_t)r->br_tail, __ATOMIC_RELEASE);
 }
 
-/* Buffer group 0: @p count (a power of two, at most 32768) buffers of @p size bytes. */
-static inline int uring_register_buffers(uring *r, unsigned count, unsigned size)
+/* Buffer group 0: @p count (a power of two, at most 32768) buffers of @p size bytes, of which
+ * the last @p spare are never received into. */
+static inline int uring_register_buffers(uring *r, unsigned count, unsigned size, unsigned spare)
 {
     struct io_uring_buf_reg reg = {.ring_entries = count, .bgid = 0};
 
@@ -160,6 +163,7 @@ static inline int uring_register_buffers(uring *r, unsigned count, unsigned size
         return -1;
     r->buf_count = count;
     r->buf_size = size;
+    r->buf_spare = spare;
     r->br_tail = 0;
     for (unsigned i = 0; i < count; i++)
         uring_buffer_return(r, i);

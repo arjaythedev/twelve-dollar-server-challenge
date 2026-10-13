@@ -67,9 +67,12 @@
 
 #define SQ_ENTRIES 4096
 #define CQ_ENTRIES 16384
-/* Buffers lent to receives. A request fits one; a longer one arrives in several. */
+/* Buffers lent to receives. A request fits one; a longer one arrives in several. The kernel
+ * is offered all of a buffer but its last bytes: the JSON reader parses a request body where it
+ * arrived and wants that much room behind it. */
 #define RECV_BUFFERS 4096
 #define RECV_BUFFER_SIZE 2048
+#define RECV_BUFFER_SPARE ARNM_JSON_READER_INSITU_PADDING
 /* Under load the loop waits for this many completions or this long, whichever comes first.
  * Measured: without the wait a request costs a little more, with a longer one no less. */
 #define WAIT_COMPLETIONS 32
@@ -85,8 +88,8 @@
 /* Arenas kept in stock per size once they have been used; more than that many of one size
  * lent out at once are served by the host and given back to it. */
 #define ARENAS_SPARE 64u
-/* The sizes a lent arena comes in. Two things ask for one: a response on its way out, and a
- * parsed request body, see post_create. */
+/* The sizes a lent arena comes in. Two things ask for one: a response on its way out, and the
+ * document of a parsed request body, see post_create. */
 static const uint32_t arena_sizes[] = {1024u, 4096u, 16384u, 65536u, 262144u};
 /* The status line and the two headers of a response. */
 #define HEAD_MAX 128
@@ -118,9 +121,12 @@ typedef struct slot {
     conn *conn;
     uint32_t author_len;
     char author[JWT_NAME_MAX];
-    /* A create's parsed request body: the job's `body` points into it, so it is held until the
-     * writer is done with the job and the answer is written. NULL for a like. */
+    /* A create's request body, parsed where it lay: the job's `body` points into it, so it is
+     * held until the writer is done with the job and the answer is written. That is the buffer
+     * the request was received in, or -1 when the body had to be copied first -- into
+     * `body_arena`, which holds the parsed document in either case. NULL for a like. */
     arnm *body_arena;
+    int recv_buffer;
     struct slot *next; /* in the free list, or in the list of finished writes */
 } slot;
 
@@ -133,6 +139,10 @@ static struct {
     bool accepting;
     db_reader *db;
     slot *slots, *free_slots;
+    /* The buffer the input being served was received in, and where that input ends; -1 when
+     * there is none, or a parked write has taken it over. */
+    int lent;
+    const char *lent_end;
     /* One writer, used for every response. Its arena holds the document while it is built;
      * the release after each write gives that back. */
     arnm writer_arena;
@@ -140,14 +150,14 @@ static struct {
     /* Where a document's text is rendered; started over with every response. */
     arnm text_arena;
     /* Arenas lent for as long as one piece of work needs them: a response until it has been
-     * sent, a parsed request body for as long as its write is parked. */
+     * sent, the document of a request body for as long as its write is parked. */
     arnm_graded_arena_pool arenas;
     /* Writes the writer thread has finished, and what wakes the loop for them. */
     pthread_mutex_t done_mu;
     slot *done_head, *done_tail;
     int done_fd;
     uint64_t done_count;
-} L = {.done_mu = PTHREAD_MUTEX_INITIALIZER};
+} L = {.done_mu = PTHREAD_MUTEX_INITIALIZER, .lent = -1};
 
 static arnm_mono_timer started;
 
@@ -393,6 +403,7 @@ static slot *park(conn *c)
     L.free_slots = s->next;
     s->conn = c;
     s->body_arena = NULL;
+    s->recv_buffer = -1;
     c->parked = true;
     return s;
 }
@@ -476,6 +487,8 @@ static void on_writes_done(void)
             answer_write(s);
         if (s->body_arena != NULL)
             (void)arnm_graded_arena_pool_free(&L.arenas, s->body_arena);
+        if (s->recv_buffer >= 0)
+            uring_buffer_return(&L.ring, (unsigned)s->recv_buffer);
         s->next = L.free_slots;
         L.free_slots = s;
         close_if_idle(c);
@@ -520,7 +533,7 @@ static void trim(const unsigned char **start, const unsigned char **end)
 }
 
 /* One request, as the parser found it in the connection's input. Nothing here outlives the
- * handler: what a parked write needs is copied by the handler that parks it. */
+ * handler: what a parked write needs, the handler that parks it copies or takes over. */
 typedef struct {
     const char *path, *auth, *body;
     size_t path_len, auth_len, body_len;
@@ -598,41 +611,34 @@ static void post_like(conn *c, int64_t uid, int64_t id)
     db_writer_submit(&s->job);
 }
 
-/* Parses the request body into a lent arena of at least @p size bytes, which is the caller's
- * to give back whatever this answers. */
-static arnm_result parse_body(const request *req, uint32_t size, arnm **arena, arnm_json_value **root)
-{
-    arnm_json_reader reader;
-    arnm_result result = arnm_graded_arena_pool_alloc(&L.arenas, size, arena);
-
-    if (result != ARNM_SUCCESS)
-        return result;
-    if ((result = arnm_json_reader_init(&reader, *arena)) != ARNM_SUCCESS)
-        return result;
-    return arnm_json_reader_parse(&reader, req->body, (uint32_t)req->body_len, false, root);
-}
-
 /*
- * The request body is copied once. The parser copies its input before reading it, and the
- * arena it is given for that comes from the pool and stays with the write: the `body` string
- * the parser hands back lies in that copy, the writer thread reads it from there, and the
- * arena goes back when the slot does. Nothing the writer thread touches belongs to the ring:
- * the buffer the request arrived in is back with the kernel by then.
+ * The request body is parsed in place: the reader unescapes its strings into the bytes they
+ * arrived in, and the `body` string it hands back lies there.
  *
- * The arena is sized by the parser's own estimate: the copy of the input, and sixteen bytes for
- * each of the values it expects, one in six bytes. A document of denser values -- a long array
- * of single digits -- outgrows that, the parser says it ran out of memory, and the body is
- * parsed again with room for the densest there is, one value in two bytes.
+ * Nearly always those bytes are the end of what one receive brought, in a buffer of the ring
+ * with room behind them that the kernel was never offered. Then nothing is copied at all: the
+ * parked write keeps the buffer, the writer thread reads the post's text from it, and it goes
+ * back to the kernel when the write has been answered.
+ *
+ * A body that arrived in pieces lies in the connection's own memory, which moves, and one with
+ * the next request behind it has no room for the reader's padding. Those are copied once, into
+ * the arena of their document, and parsed there.
+ *
+ * The arena is sized for the densest document there is, one value of sixteen bytes in two bytes
+ * of input: the reader writes through its input, so there is no second attempt with more room.
  */
 static void post_create(conn *c, const request *req, int64_t uid, const char *name, size_t name_len)
 {
+    const uint32_t len = (uint32_t)req->body_len;
+    const bool in_place = L.lent >= 0 && req->body + len == L.lent_end;
+    char *text = (char *)(uintptr_t)req->body;
     arnm *arena = NULL;
+    arnm_json_reader reader;
     arnm_json_value *root = NULL;
     arnm_memory_block body = {0};
     arnm_json_field fields[1] = {ARNM_JSON_FIELD_STRING("body", &body)};
     uint64_t found = 0;
     const unsigned char *p, *e;
-    const uint32_t len = (uint32_t)req->body_len;
     arnm_result parsed;
     size_t chars = 0;
     slot *s;
@@ -641,18 +647,24 @@ static void post_create(conn *c, const request *req, int64_t uid, const char *na
         REPLY_ERROR(c, 400, "malformed JSON body");
         return;
     }
-    parsed = parse_body(req, 4u * len + 512u, &arena, &root);
-    if (parsed == ARNM_ERROR_OUT_OF_MEMORY) {
-        if (arena != NULL)
-            (void)arnm_graded_arena_pool_free(&L.arenas, arena);
-        arena = NULL;
-        parsed = parse_body(req, 10u * len + 1024u, &arena, &root);
-    }
+    parsed = arnm_graded_arena_pool_alloc(
+        &L.arenas, 9u * len + 1024u + (in_place ? 0u : len + ARNM_JSON_READER_INSITU_PADDING), &arena);
+    if (parsed == ARNM_SUCCESS && !in_place) {
+        uint8_t *copy = NULL;
 
-    if (parsed == ARNM_ERROR_OUT_OF_MEMORY || arena == NULL) {
-        REPLY_ERROR(c, 500, "internal server error");
-    } else if (parsed != ARNM_SUCCESS) {
+        if ((parsed = arnm_alloc(&copy, len + ARNM_JSON_READER_INSITU_PADDING, arena)) == ARNM_SUCCESS) {
+            memcpy(copy, req->body, len);
+            text = (char *)copy;
+        }
+    }
+    if (parsed == ARNM_SUCCESS && (parsed = arnm_json_reader_init(&reader, arena)) == ARNM_SUCCESS)
+        parsed = arnm_json_reader_parse_insitu(&reader, text, len, len + ARNM_JSON_READER_INSITU_PADDING,
+                                               false, &root);
+
+    if (parsed == ARNM_ERROR_DECODE_FAILED) {
         REPLY_ERROR(c, 400, "malformed JSON body");
+    } else if (parsed != ARNM_SUCCESS) {
+        REPLY_ERROR(c, 500, "internal server error");
     } else {
         /* One field, so the table matches at the first key of the body the clients send. */
         arnm_json_read_object(root, fields, 1, &found);
@@ -677,6 +689,11 @@ static void post_create(conn *c, const request *req, int64_t uid, const char *na
             memcpy(s->author, name, name_len);
             s->author_len = (uint32_t)name_len;
             s->body_arena = arena;
+            if (in_place) {
+                /* The write keeps the buffer the body lies in. */
+                s->recv_buffer = L.lent;
+                L.lent = -1;
+            }
             db_writer_submit(&s->job);
             return;
         }
@@ -931,10 +948,17 @@ static void on_recv(conn *c, const struct io_uring_cqe *cqe)
     if (cqe->flags & IORING_CQE_F_BUFFER) {
         const unsigned id = cqe->flags >> IORING_CQE_BUFFER_SHIFT;
 
+        const char *data = (const char *)L.ring.buf_base + (size_t)id * L.ring.buf_size;
+
+        L.lent = (int)id;
+        L.lent_end = data + (cqe->res > 0 ? cqe->res : 0);
         if (cqe->res > 0 && !c->closing)
-            on_input(c, (const char *)L.ring.buf_base + (size_t)id * L.ring.buf_size, (uint32_t)cqe->res);
-        /* Whatever of it is still needed has been copied. */
-        uring_buffer_return(&L.ring, id);
+            on_input(c, data, (uint32_t)cqe->res);
+        /* Whatever of it is still needed has been copied -- unless a write was parked with its
+         * body in there, and then the buffer comes back with the write. */
+        if (L.lent >= 0)
+            uring_buffer_return(&L.ring, id);
+        L.lent = -1;
     }
     if (cqe->res <= 0 && cqe->res != -ENOBUFS) {
         /* The client closed, or the connection broke, or the receive was called back. */
@@ -1075,7 +1099,7 @@ int server_run(const char *host, uint16_t port, const char *path)
         return 1;
     }
     if (uring_init(&L.ring, SQ_ENTRIES, CQ_ENTRIES) != 0 || uring_register_table(&L.ring, L.max_conns) != 0 ||
-        uring_register_buffers(&L.ring, RECV_BUFFERS, RECV_BUFFER_SIZE) != 0) {
+        uring_register_buffers(&L.ring, RECV_BUFFERS, RECV_BUFFER_SIZE, RECV_BUFFER_SPARE) != 0) {
         perror("io_uring (Linux 6.1 or later is needed)");
         return 1;
     }

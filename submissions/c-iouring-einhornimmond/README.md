@@ -64,6 +64,12 @@ read connection were tried as well and cost more (26%), so they are not in.
 - **Requests are served from the buffer they arrived in.** picohttpparser reads it in place and
   the buffer goes back to the kernel when the handler returns. Only a request that arrives in
   pieces, or ahead of the answer to the one before, is copied into memory of the connection.
+- **A request body is parsed where it arrived.** arnm's reader parses in place: it unescapes the
+  strings into the bytes of the receive buffer, and the post's text is read from there by the
+  writer thread, so it is not copied between the socket and SQLite. The reader wants four bytes
+  of room behind its input, so the kernel is offered every buffer four bytes short. A parked
+  write keeps its buffer and gives it back with its answer. A body that arrived in pieces, or
+  with the next request behind it, is copied once and parsed in the copy.
 - **A response leaves in one piece**, head and text in one `send`, from an arena lent from a
   graded pool that gets it back when the send has completed. The constant error responses are
   put together once and sent from where they lie.

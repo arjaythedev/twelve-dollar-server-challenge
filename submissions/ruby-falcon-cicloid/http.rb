@@ -1,0 +1,233 @@
+# frozen_string_literal: true
+
+require "socket"
+require_relative "epoll"
+
+# A small HTTP/1.1 server on the Async reactor (io-event: io_uring or epoll), specialised for this API:
+# it parses the request line and the four headers the API needs, and writes each response with one
+# write. Requests are handled in order per connection (pipelining works); bodies use Content-Length.
+#
+# Idle keep-alive connections own no fiber: they sit in a kernel epoll set (one-shot). One Async task
+# waits for that set to become readable through the reactor, and a pool of worker fibers serves the
+# connections that are ready, then re-arms them. A fiber per connection would keep the stack pages
+# each one touched while serving (deep SQLite calls), which costs ~70 KB per idle connection.
+class HTTPServer
+  READ_SIZE = 8192
+  MAX_HEAD = 16 * 1024
+  MAX_BODY = 1024 * 1024
+  WORKERS = 256
+  MAX_EVENTS = 1024
+
+  REASONS = {
+    200 => "OK", 201 => "Created", 400 => "Bad Request", 401 => "Unauthorized", 404 => "Not Found",
+    411 => "Length Required", 413 => "Content Too Large", 431 => "Request Header Fields Too Large",
+    500 => "Internal Server Error", 503 => "Service Unavailable"
+  }.freeze
+  # Response heads up to "content-length: "; the length, a blank line and the body follow.
+  def self.heads(extra)
+    REASONS.to_h { |code, reason| [code, "HTTP/1.1 #{code} #{reason}\r\n#{extra}content-type: application/json\r\ncontent-length: ".freeze] }.freeze
+  end
+  KEEP = heads("")
+  KEEP_10 = heads("connection: keep-alive\r\n") # HTTP/1.0 clients that asked for keep-alive
+  CLOSE = heads("connection: close\r\n")
+  END_HEAD = "\r\n\r\n"
+  CRLF = "\r\n"
+  # The only request headers the API needs. Names are told apart by length.
+  HEADER = /\r\n(content-length|transfer-encoding|connection|authorization)[ \t]*:[ \t]*([^\r\n]*?)[ \t]*(?=\r\n|\z)/i
+  DIGITS = /\A[0-9]+\z/
+  CLOSE_TOKEN = /\bclose\b/i
+  KEEP_ALIVE_TOKEN = /\bkeep-alive\b/i
+  HTTP_11 = "HTTP/1.1"
+  HTTP_10 = "HTTP/1.0"
+  EMPTY = ""
+
+  def initialize(app, host, port, connection_budget: nil)
+    @app = app
+    @server = TCPServer.new(host, port)
+    @server.listen(65_535) # the kernel caps this at net.core.somaxconn
+    soft = Process.getrlimit(:NOFILE).first
+    # Last-resort guard: only close to the descriptor limit do responses carry `Connection: close`.
+    @budget = connection_budget || [soft - 256, soft * 9 / 10].max
+    @open = 0
+  end
+
+  attr_reader :open
+
+  def run(task)
+    @task = task
+    @epfd = Epoll.create
+    @event = Epoll.event(Epoll::IN | Epoll::RDHUP | Epoll::ONESHOT)
+    @sockets = [] # by descriptor
+    @partial = {} # descriptor => bytes of a request that hasn't fully arrived
+    @ready = Thread::Queue.new
+    WORKERS.times { task.async { work } }
+    task.async { dispatch }
+    task.async { accept_loop }
+  end
+
+  private
+
+  def accept_loop
+    loop do
+      socket = @server.accept_nonblock(exception: false)
+      if socket == :wait_readable
+        @server.wait_readable
+        next
+      end
+      socket.setsockopt(Socket::IPPROTO_TCP, Socket::TCP_NODELAY, 1)
+      @open += 1
+      fd = socket.fileno
+      @sockets[fd] = socket
+      Epoll.control(@epfd, Epoll::CTL_ADD, fd, @event)
+    rescue Errno::EMFILE, Errno::ENFILE, Errno::ENOBUFS, Errno::ENOMEM
+      sleep 0.01 # out of descriptors: let responses retire connections, then accept again
+    rescue Errno::ECONNABORTED, Errno::EPROTO
+      next
+    end
+  end
+
+  # --- connections ----------------------------------------------------------------------
+
+  # Waits (through the reactor) for the epoll set to have ready connections, then queues them.
+  def dispatch
+    poller = IO.for_fd(@epfd, autoclose: false)
+    events = Epoll.events(MAX_EVENTS)
+    loop do
+      poller.wait_readable
+      Epoll.ready(@epfd, events, MAX_EVENTS) { |fd| @ready.push(fd) }
+    end
+  end
+
+  def work
+    loop do
+      service(@ready.pop)
+    rescue StandardError => error
+      Console.error(self, error)
+    end
+  end
+
+  def service(fd)
+    socket = @sockets[fd] or return
+    buffer = @partial.delete(fd)
+    loop do
+      data = socket.read_nonblock(READ_SIZE, exception: false)
+      break if data == :wait_readable
+      return disconnect(fd, socket) unless data
+
+      buffer = buffer ? buffer << data : data
+      break if data.bytesize < READ_SIZE
+    end
+
+    if buffer
+      rest = drain(socket, buffer) or return disconnect(fd, socket)
+      @partial[fd] = rest unless rest.empty?
+    end
+    Epoll.control(@epfd, Epoll::CTL_MOD, fd, @event) # one-shot: re-arm for the next request
+  rescue IOError, SystemCallError
+    disconnect(fd, socket)
+  end
+
+  def disconnect(fd, socket)
+    @sockets[fd] = nil
+    @partial.delete(fd)
+    @open -= 1
+    socket.close unless socket.closed?
+  end
+
+  # --- HTTP/1.1 ---------------------------------------------------------------------------
+
+  # Answers every complete request in `buffer`, in order. Returns the unconsumed tail (possibly
+  # empty), or nil when the connection must be closed.
+  def drain(socket, buffer)
+    position = 0
+    size = buffer.bytesize
+    while position < size
+      head_end = buffer.byteindex(END_HEAD, position)
+      unless head_end
+        return reject(socket, 431) if size - position > MAX_HEAD
+
+        break
+      end
+
+      line_end = buffer.byteindex(CRLF, position)
+      space = buffer.byteindex(" ", position)
+      space2 = space && buffer.byteindex(" ", space + 1)
+      return reject(socket, 400) unless space2 && space > position && space2 < line_end
+
+      version = buffer.byteslice(space2 + 1, line_end - space2 - 1)
+      http10 = version == HTTP_10
+      return reject(socket, 400) unless http10 || version == HTTP_11
+
+      method = buffer.byteslice(position, space - position)
+      query = buffer.byteindex("?", space + 1)
+      path_end = query && query < space2 ? query : space2
+      path = buffer.byteslice(space + 1, path_end - space - 1)
+
+      length = 0
+      authorization = nil
+      close = http10
+      if line_end < head_end
+        buffer.byteslice(line_end, head_end - line_end).scan(HEADER) do
+          name = Regexp.last_match(1)
+          value = Regexp.last_match(2)
+          case name.bytesize
+          when 14 # content-length
+            return reject(socket, 400) unless DIGITS.match?(value)
+
+            length = value.to_i
+          when 17 # transfer-encoding: request bodies must use Content-Length
+            return reject(socket, 411)
+          when 10 # connection
+            if CLOSE_TOKEN.match?(value) then close = true
+            elsif http10 && KEEP_ALIVE_TOKEN.match?(value) then close = false
+            end
+          else # authorization
+            authorization = value
+          end
+        end
+      end
+      return reject(socket, 413) if length > MAX_BODY
+
+      body_start = head_end + 4
+      break if size < body_start + length # the body hasn't fully arrived yet
+
+      body = buffer.byteslice(body_start, length) if length.positive?
+      status, document = @app.call(method, path, authorization, body)
+      close ||= @open > @budget
+      respond(socket, close ? CLOSE : (http10 ? KEEP_10 : KEEP), status, document)
+      return nil if close
+
+      position = body_start + length
+    end
+
+    if position.zero? then buffer
+    elsif position >= size then EMPTY
+    else buffer.byteslice(position, size - position)
+    end
+  end
+
+  def reject(socket, status)
+    respond(socket, CLOSE, status, %({"error":"#{REASONS[status].downcase}"}))
+    nil
+  end
+
+  def respond(socket, heads, status, document)
+    head = heads[status] || heads[500]
+    out = String.new(head, capacity: head.bytesize + 8 + document.bytesize)
+    out << document.bytesize.to_s << END_HEAD << document
+    write(socket, out)
+  end
+
+  def write(socket, data)
+    loop do
+      written = socket.write_nonblock(data, exception: false)
+      if written == :wait_writable
+        socket.wait_writable
+      elsif written == data.bytesize
+        return
+      else
+        data = data.byteslice(written, data.bytesize - written)
+      end
+    end
+  end
+end

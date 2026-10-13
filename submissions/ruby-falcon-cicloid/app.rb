@@ -5,8 +5,6 @@ require "async/promise"
 require "extralite"
 require "json"
 require "rbnacl"
-require "protocol/http/response"
-require "protocol/http/body/buffered"
 
 # libsodium's one-shot HMAC-SHA256 and constant-time compare, bound through rbnacl's FFI layer.
 module Sodium
@@ -17,7 +15,7 @@ module Sodium
 end
 
 # One SQLite connection, owned by the single reactor thread. SQLite renders every response
-# document, so Ruby only routes, verifies the JWT and hands bytes to Falcon.
+# document, so Ruby only routes, verifies the JWT and hands the bytes to the HTTP layer.
 #
 # Group commit: the first write in a reactor pass opens BEGIN IMMEDIATE and schedules one COMMIT
 # for the next pass. Every write in between joins that transaction, and every response waits for
@@ -124,8 +122,8 @@ class Store
   end
 end
 
+# The API: routes a parsed request and returns [status, json_document]. Transport-free.
 class App
-  JSON_TYPE = "application/json"
   HS256_HEADER = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9" # {"alg":"HS256","typ":"JWT"}
   BASE64URL = /\A[A-Za-z0-9_-]+\z/
   POSTS_PREFIX = "/posts/"
@@ -158,33 +156,22 @@ class App
     end
   end
 
-  # Shared, never mutated by the server (it only marks where trailers would start), so responses
-  # don't allocate their own header lists.
-  HEADERS = Protocol::HTTP::Headers.new([["content-type", JSON_TYPE]])
-  CLOSE_HEADERS = Protocol::HTTP::Headers.new([["content-type", JSON_TYPE], ["connection", "close"]])
-
-  def initialize(store, secret, pressure)
+  def initialize(store, secret)
     @store = store
     @key = secret.b.ljust(32, "\0") # HMAC zero-pads keys up to the block size: same MAC
     raise ArgumentError, "JWT_SECRET longer than 32 bytes is not supported" if @key.bytesize > 32
 
     @mac = String.new("\0" * 32, encoding: Encoding::BINARY)
-    @pressure = pressure
     @started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
   end
 
-  def call(request)
-    path = request.path
-    if (query = path.index("?"))
-      path = path[0, query]
-    end
-    method = request.method
-
+  # `path` excludes the query string; `authorization` is the raw header value or nil.
+  def call(method, path, authorization, body)
     if method == "GET"
-      return respond(200, @store.feed) if path == "/feed"
+      return [200, @store.feed] if path == "/feed"
       return health if path == "/health"
     elsif method == "POST" && path == "/posts"
-      return create(request)
+      return create(authorization, body)
     end
 
     # /posts/:id and /posts/:id/like
@@ -195,39 +182,34 @@ class App
         if method == "GET" && !liking
           id = post_id(path.byteslice(POSTS_PREFIX.bytesize, last - POSTS_PREFIX.bytesize))
           document = @store.post(id) or raise Halt.new(404, POST_NOT_FOUND)
-          return respond(200, document)
+          return [200, document]
         elsif method == "POST" && liking
-          user_id, = authenticate(request)
+          user_id, = authenticate(authorization)
           return like(user_id, post_id(path.byteslice(POSTS_PREFIX.bytesize, last - POSTS_PREFIX.bytesize)))
         end
       end
     end
-    respond(404, NOT_FOUND)
+    [404, NOT_FOUND]
   rescue Halt => halt
-    respond(halt.status, halt.document)
+    [halt.status, halt.document]
   rescue StandardError => error
     Console.error(self, error)
-    respond(500, INTERNAL)
+    [500, INTERNAL]
   end
 
   private
 
-  def respond(status, document)
-    headers = @pressure.strained ? CLOSE_HEADERS : HEADERS
-    Protocol::HTTP::Response.new(nil, status, headers, Protocol::HTTP::Body::Buffered.new([document], document.bytesize))
-  end
-
   def health
     @store.ping
     uptime = (Process.clock_gettime(Process::CLOCK_MONOTONIC) - @started).to_i
-    respond(200, %({"status":"ok","db":"ok","uptime_s":#{uptime}}))
+    [200, %({"status":"ok","db":"ok","uptime_s":#{uptime}})]
   rescue Extralite::Error => error
-    respond(503, JSON.generate({ status: "degraded", db: "unreachable", error: error.message }))
+    [503, JSON.generate({ status: "degraded", db: "unreachable", error: error.message })]
   end
 
-  def create(request)
-    user_id, username = authenticate(request)
-    raw = request.read.to_s.force_encoding(Encoding::UTF_8)
+  def create(authorization, raw)
+    user_id, username = authenticate(authorization)
+    raw = raw.to_s.dup.force_encoding(Encoding::UTF_8)
     raise Halt.new(400, MALFORMED) unless raw.valid_encoding?
 
     payload = begin
@@ -242,14 +224,14 @@ class App
     raise Halt.new(400, BODY_REQUIRED) if body.empty?
     raise Halt.new(400, BODY_TOO_LONG) if body.length > 500
 
-    respond(201, @store.create(user_id, username, body))
+    [201, @store.create(user_id, username, body)]
   end
 
   def like(user_id, id)
     case @store.like(user_id, id)
-    when :liked then respond(201, %({"liked":true,"already_liked":false,"post_id":#{id}}))
-    when :already_liked then respond(200, %({"liked":true,"already_liked":true,"post_id":#{id}}))
-    else respond(404, POST_NOT_FOUND)
+    when :liked then [201, %({"liked":true,"already_liked":false,"post_id":#{id}})]
+    when :already_liked then [200, %({"liked":true,"already_liked":true,"post_id":#{id}})]
+    else [404, POST_NOT_FOUND]
     end
   end
 
@@ -264,8 +246,7 @@ class App
   end
 
   # Verifies the HS256 signature and expiry on every request. Returns [user_id, username].
-  def authenticate(request)
-    header = request.headers["authorization"]
+  def authenticate(header)
     raise Halt.new(401, MISSING_TOKEN) unless header&.start_with?("Bearer ")
 
     token = header.byteslice(7, header.bytesize - 7)

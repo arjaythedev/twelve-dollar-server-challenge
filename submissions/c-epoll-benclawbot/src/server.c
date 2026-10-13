@@ -173,3 +173,178 @@ static char *feed_range(int *status){
 }
 
 static char *post(long long id,int *status){
+    sqlite3_bind_int64(S.post,1,id);int rc=sqlite3_step(S.post);
+    if(rc==SQLITE_ROW){JBuf b=jb_new(2048);JB(&b,"{\"post\":");jb_post(&b,S.post,0,0);JB(&b,"}");sqlite3_reset(S.post);sqlite3_clear_bindings(S.post);return jb_take(&b);}
+    sqlite3_reset(S.post);sqlite3_clear_bindings(S.post);
+    *status=rc==SQLITE_DONE?404:500;return error(rc==SQLITE_DONE?"post not found":"internal server error");
+}
+static int fromb64(char *dst,size_t cap,const char *src,size_t slen){
+    if(slen>3072||slen==0)return -1;
+    size_t n=((slen+3)/4)*4;if(n+1>cap)return -1;
+    char tmp[4096];memcpy(tmp,src,slen);for(size_t i=0;i<slen;i++){if(tmp[i]=='-')tmp[i]='+';else if(tmp[i]=='_')tmp[i]='/';else if(!(isalnum((unsigned char)tmp[i])||tmp[i]=='+'||tmp[i]=='/'))return -1;}
+    for(size_t i=slen;i<n;i++)tmp[i]='=';
+    int k=EVP_DecodeBlock((unsigned char*)dst,(unsigned char*)tmp,(int)n);
+    if(k<0)return -1;k-=(int)(n-slen);if(k<0||(size_t)k>=cap)return -1;dst[k]=0;return k;
+}
+static json_object *parsejson(const char *text,size_t len){
+    struct json_tokener *tok=json_tokener_new();json_tokener_set_flags(tok,JSON_TOKENER_VALIDATE_UTF8);
+    json_object *j=json_tokener_parse_ex(tok,text,(int)len);
+    if(json_tokener_get_error(tok)!=json_tokener_success || json_tokener_get_parse_end(tok)!=len){if(j)json_object_put(j);j=NULL;}
+    json_tokener_free(tok);return j;
+}
+// 0 valid; 1 malformed/expired/incorrect signature; 2 invalid semantic claims.
+static int auth(const char *token,Claims *claims){
+    const char *p=strchr(token,'.');if(!p)return 1;
+    const char *q=strchr(p+1,'.');if(!q||strchr(q+1,'.'))return 1;
+    size_t a=p-token,b=q-p-1,c=strlen(q+1);if(!a||!b||!c||a>512||b>2048||c>256)return 1;
+    char h[1024],payload[4096],sig[128];
+    int hl=fromb64(h,sizeof(h),token,a),pl=fromb64(payload,sizeof(payload),p+1,b),sl=fromb64(sig,sizeof(sig),q+1,c);
+    if(hl<0||pl<0||sl!=32)return 1;
+    json_object *jh=parsejson(h,(size_t)hl);
+    json_object *alg=NULL;
+    int ok=jh && json_object_get_type(jh)==json_type_object && json_object_object_get_ex(jh,"alg",&alg)&&json_object_get_type(alg)==json_type_string&&!strcmp(json_object_get_string(alg),"HS256");
+    if(jh)json_object_put(jh);if(!ok)return 1;
+    unsigned char expected[EVP_MAX_MD_SIZE];unsigned n=0;
+    if(!HMAC(EVP_sha256(),S.secret,(int)S.secret_len,(const unsigned char*)token,(int)(q-token),expected,&n)||n!=32||CRYPTO_memcmp(sig,expected,32))return 1;
+    json_object *j=parsejson(payload,(size_t)pl);if(!j||json_object_get_type(j)!=json_type_object){if(j)json_object_put(j);return 1;}
+    json_object *exp=NULL,*sub=NULL,*name=NULL;
+    if(!json_object_object_get_ex(j,"exp",&exp)||!json_object_is_type(exp,json_type_int)||json_object_get_int64(exp)<=time(NULL)){json_object_put(j);return 1;}
+    if(!json_object_object_get_ex(j,"sub",&sub)||!json_object_is_type(sub,json_type_string)||!json_object_object_get_ex(j,"username",&name)||!json_object_is_type(name,json_type_string)){json_object_put(j);return 2;}
+    const char *s=json_object_get_string(sub),*u=json_object_get_string(name);if(!s||!*s||strlen(u)>=sizeof(claims->username)){json_object_put(j);return 2;}
+    uint64_t val=0;for(;*s;s++){if(*s<'0'||*s>'9'||val>UINT32_MAX/10){json_object_put(j);return 2;}val=val*10+(*s-'0');}if(!val||val>UINT32_MAX){json_object_put(j);return 2;}
+    claims->uid=(unsigned)val;strcpy(claims->username,u);json_object_put(j);return 0;
+}
+static int utf8chars(const char *s,size_t n){int k=0;for(size_t i=0;i<n;i++)if(((unsigned char)s[i]&0xc0)!=0x80)k++;return k;}
+static char *createpost(Request *r,Claims *claims,int *status){
+    json_object *j=parsejson(r->body,r->blen);
+    if(!j){*status=400;return error("malformed JSON body");}
+    json_object *b=NULL;
+    if(!json_object_is_type(j,json_type_object)||!json_object_object_get_ex(j,"body",&b)||!json_object_is_type(b,json_type_string)){
+        json_object_put(j);*status=400;return error("body is required");
+    }
+    const char *raw=json_object_get_string(b);size_t n=(size_t)json_object_get_string_len(b),lo=0,hi=n;
+    while(lo<hi&&isspace((unsigned char)raw[lo]))lo++;
+    while(hi>lo&&isspace((unsigned char)raw[hi-1]))hi--;
+    if(hi==lo){json_object_put(j);*status=400;return error("body is required");}
+    if(utf8chars(raw+lo,hi-lo)>500){json_object_put(j);*status=400;return error("body must be at most 500 characters");}
+    sqlite3_bind_int(S.create,1,(int)claims->uid);
+    sqlite3_bind_text(S.create,2,raw+lo,(int)(hi-lo),SQLITE_TRANSIENT);
+    if(ensure_write_batch()){json_object_put(j);*status=500;return error("internal server error");}
+    int rc=sqlite3_step(S.create);
+    if(rc!=SQLITE_ROW){sqlite3_reset(S.create);sqlite3_clear_bindings(S.create);json_object_put(j);*status=500;return error("internal server error");}
+    long long id=sqlite3_column_int64(S.create,0);
+    const char *dt=(const char*)sqlite3_column_text(S.create,1);
+    char timestamp[64];snprintf(timestamp,sizeof(timestamp),"%s",dt?dt:"");
+    rc=sqlite3_step(S.create);
+    sqlite3_reset(S.create);sqlite3_clear_bindings(S.create);
+    if(rc!=SQLITE_DONE){json_object_put(j);*status=500;return error("internal server error");}
+    json_object *o=json_object_new_object(),*p=json_object_new_object();
+    json_object_object_add(p,"id",json_object_new_int64(id));
+    json_object_object_add(p,"body",json_object_new_string_len(raw+lo,(int)(hi-lo)));
+    json_object_object_add(p,"created_at",json_object_new_string(timestamp));
+    json_object_object_add(p,"author",json_object_new_string(claims->username));
+    json_object_object_add(p,"like_count",json_object_new_int(0));
+    json_object_object_add(o,"post",p);
+    char *out=jstring(o);json_object_put(j);*status=201;return out;
+}
+static char *likepost(long long id,Claims *claims,int *status){
+    sqlite3_bind_int64(S.exists,1,id);int ex=sqlite3_step(S.exists);sqlite3_reset(S.exists);sqlite3_clear_bindings(S.exists);
+    if(ex!=SQLITE_ROW){*status=ex==SQLITE_DONE?404:500;return error(ex==SQLITE_DONE?"post not found":"internal server error");}
+    sqlite3_bind_int64(S.like,1,(sqlite3_int64)claims->uid);sqlite3_bind_int64(S.like,2,id);
+    if(ensure_write_batch()){*status=500;return error("internal server error");}
+    int rc=sqlite_done(S.like);
+    if(rc!=SQLITE_DONE){*status=500;return error("internal server error");}
+    int changed=sqlite3_changes(S.db);*status=changed?201:200;
+    json_object *j=json_object_new_object();json_object_object_add(j,"liked",json_object_new_boolean(true));
+    json_object_object_add(j,"already_liked",json_object_new_boolean(!changed));
+    json_object_object_add(j,"post_id",json_object_new_int64(id));return jstring(j);
+}
+static int parseid(const char *p,long long *id){
+    if(!*p)return -1;uint64_t v=0;
+    for(;*p;p++){if(*p<'0'||*p>'9'||v>((uint64_t)INT64_MAX-(unsigned)(*p-'0'))/10)return -1;v=v*10+(*p-'0');}
+    if(!v)return -1;*id=(long long)v;return 0;
+}
+static char *serve(Request *r,int *status){
+    *status=200;
+    if(!strcmp(r->method,"GET")&&!strcmp(r->path,"/health")){
+        if(sqlite_done(S.health)!=SQLITE_ROW){*status=503;return strdup("{\"status\":\"degraded\",\"db\":\"unreachable\",\"error\":\"database unavailable\"}");}
+        json_object *j=json_object_new_object();json_object_object_add(j,"status",json_object_new_string("ok"));
+        json_object_object_add(j,"db",json_object_new_string("ok"));json_object_object_add(j,"uptime_s",json_object_new_int64((int64_t)(nowmono()-S.started_s)));return jstring(j);
+    }
+    if(!strcmp(r->method,"GET")&&!strcmp(r->path,"/feed"))return S.range_feed?feed_range(status):feed(status);
+    if(!strcmp(r->method,"GET")&&!strncmp(r->path,"/posts/",7)){
+        long long id;if(parseid(r->path+7,&id)){*status=400;return error("invalid post id");}return post(id,status);
+    }
+    if(!strcmp(r->method,"POST")&&(!strcmp(r->path,"/posts")||(!strncmp(r->path,"/posts/",7)&&strlen(r->path)>12&& !strcmp(r->path+strlen(r->path)-5,"/like")))){
+        if(!r->bearer[0]){*status=401;return error("missing bearer token");}
+        Claims claims;int a=auth(r->bearer,&claims);
+        if(a){*status=401;return error(a==1?"invalid or expired token":"invalid token payload");}
+        if(!strcmp(r->path,"/posts"))return createpost(r,&claims,status);
+        char idbuf[256];size_t ilen=strlen(r->path)-7-5;if(ilen>=sizeof(idbuf)){*status=400;return error("invalid post id");}
+        memcpy(idbuf,r->path+7,ilen);idbuf[ilen]=0;long long id;
+        if(parseid(idbuf,&id)){*status=400;return error("invalid post id");}return likepost(id,&claims,status);
+    }
+    *status=404;return error("not found");
+}
+static void closeconn(Conn *c){int fd=c->fd;if(fd<0)return;
+#ifndef USE_IO_URING
+ epoll_ctl(g_epfd,EPOLL_CTL_DEL,fd,NULL);
+#endif
+close(fd);free(c->input);free(c->output);memset(c,0,sizeof(*c));c->fd=-1;}
+static int updateev(Conn *c){
+#ifdef USE_IO_URING
+ (void)c;return 0;
+#else
+ struct epoll_event ev={.events=EPOLLIN|EPOLLRDHUP|EPOLLET|(c->output?EPOLLOUT:0),.data.fd=c->fd};return epoll_ctl(g_epfd,EPOLL_CTL_MOD,c->fd,&ev);
+#endif
+}
+static int flush(Conn *c){
+    if(!c->output)return 0;
+    while(c->sent<c->total){ssize_t n=send(c->fd,c->output+c->sent,c->total-c->sent,MSG_NOSIGNAL);if(n<0){if(errno==EINTR)continue;if(errno==EAGAIN||errno==EWOULDBLOCK)return 0;return -1;}if(!n)return -1;c->sent+=(size_t)n;}
+    free(c->output);c->output=NULL;c->sent=c->total=0;
+    if(c->closing)return -1;
+    return updateev(c);
+}
+static int respond(Conn *c,int status,char *body,bool closing){
+    const char *reason=status==200?"OK":status==201?"Created":status==400?"Bad Request":status==401?"Unauthorized":status==404?"Not Found":status==503?"Service Unavailable":"Internal Server Error";
+    char header[256];size_t n=strlen(body);
+    int h=snprintf(header,sizeof(header),"HTTP/1.1 %d %s\r\nContent-Type: application/json\r\nContent-Length: %zu\r\nConnection: %s\r\n\r\n",status,reason,n,closing?"close":"keep-alive");
+    if(h<0||h>=(int)sizeof(header)){free(body);return -1;}
+    c->output=malloc((size_t)h+n);if(!c->output){free(body);return -1;}
+    memcpy(c->output,header,(size_t)h);memcpy(c->output+h,body,n);c->total=(size_t)h+n;c->sent=0;c->closing=closing;free(body);
+    if(g_write_tx_active){if(g_staged_n>=EVENTS)return -1;g_staged[g_staged_n++]=c->fd;return 0;}
+    if(flush(c))return -1;
+    if(c->output&&updateev(c))return -1;
+    return 0;
+}
+static int parse(Conn *c){
+    while(!c->output){
+        if(c->used==0){free(c->input);c->input=NULL;c->cap=0;return 0;}
+        char *end=memmem(c->input,c->used,"\r\n\r\n",4);
+        if(!end){if(c->used>=MAX_REQ)return -1;return 0;}
+        size_t hsize=(size_t)(end-c->input)+4;
+        char *lineend=memmem(c->input,hsize,"\r\n",2);if(!lineend)return -1;
+        Request req={0};size_t first_len=(size_t)(lineend-c->input);if(first_len>512)return -1;
+        char first[520]={0};memcpy(first,c->input,first_len);
+        if(sscanf(first,"%8s %255s",req.method,req.path)!=2)return -1;
+        size_t clen=0;
+        for(char *p=lineend+2;p<end;){char *stop=memmem(p,(size_t)(end-p),"\r\n",2);if(!stop)stop=end;
+            size_t ln=(size_t)(stop-p);char *colon=memchr(p,':',ln);
+            if(colon){size_t k=(size_t)(colon-p);char *v=colon+1;while(v<stop&&(*v==' '||*v=='\t'))v++;
+                size_t nv=(size_t)(stop-v);
+                if(k==14&&!strncasecmp(p,"Content-Length",k)){char num[32];if(nv>=sizeof(num))return -1;memcpy(num,v,nv);num[nv]=0;char *tail=NULL;errno=0;unsigned long l=strtoul(num,&tail,10);if(errno||!tail||*tail||l>MAX_BODY)return -1;clen=(size_t)l;}
+                else if(k==13&&!strncasecmp(p,"Authorization",k)){
+                    if(nv>=7&&!strncmp(v,"Bearer ",7)&&nv-7<sizeof(req.bearer)){memcpy(req.bearer,v+7,nv-7);req.bearer[nv-7]=0;}
+                }else if(k==10&&!strncasecmp(p,"Connection",k)&&nv==5&&!strncasecmp(v,"close",5))req.closing=true;
+                else if(k==17&&!strncasecmp(p,"Transfer-Encoding",k))return -1;
+            }
+            p=stop+2;
+        }
+        size_t total=hsize+clen;if(total>MAX_REQ)return -1;
+        if(c->used<total)return 0;
+        req.body=c->input+hsize;req.blen=clen;
+        int status;char *body=serve(&req,&status);if(!body)return -1;
+        size_t left=c->used-total;
+        // Do not free/reuse input until the response is ready.
+        if(respond(c,status,body,req.closing))return -1;
+        if(left)memmove(c->input,c->input+total,left);

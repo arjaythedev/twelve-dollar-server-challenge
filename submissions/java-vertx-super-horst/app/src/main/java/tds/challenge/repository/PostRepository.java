@@ -10,10 +10,6 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.List;
 
-/**
- * JDBC access via HikariCP. Every call is pushed onto a worker executor so the
- * event loop is never blocked; returns Vert.x Futures.
- */
 public class PostRepository {
 
     private static final RowMapper<JsonObject> POST_MAPPER = rs ->

@@ -27,8 +27,6 @@ import java.util.function.Consumer;
  */
 public final class DbThread implements AutoCloseable {
 
-    private static final long SLOW_EXEC_MS = 200;
-    private static final long SLOW_WAIT_MS = 500;
     private static final int MAX_CACHED_STATEMENTS = 64;
 
     @FunctionalInterface
@@ -144,7 +142,7 @@ public final class DbThread implements AutoCloseable {
     }
 
     public static DbThread reader(String dbFilePath, Context ctx) throws SQLException {
-        return start(new DbThread("db-reader", false, openConnection(dbFilePath, false), ctx, 2048, 16));
+        return start(new DbThread("db-reader", false, openConnection(dbFilePath, false), ctx, 8192, 16));
     }
 
     private static DbThread start(DbThread t) {
@@ -251,7 +249,6 @@ public final class DbThread implements AutoCloseable {
             batch.add(first);
             queue.drainTo(batch, maxBatch - 1);     // take what is already waiting, never wait for more
 
-            long start = System.nanoTime();
             try {
                 if (writer) {
                     runWriteBatch(batch);
@@ -272,7 +269,6 @@ public final class DbThread implements AutoCloseable {
                 }
             }
 
-            logIfSlow(batch, start);
             dispatch(batch);
         }
 
@@ -322,15 +318,6 @@ public final class DbThread implements AutoCloseable {
         while ((t = queue.poll()) != null) {
             t.fail(closed);
             t.complete();
-        }
-    }
-
-    private void logIfSlow(List<Task<?>> batch, long startNanos) {
-        long execMs = (System.nanoTime() - startNanos) / 1_000_000;
-        long waitMs = (startNanos - batch.get(0).enqueuedNanos) / 1_000_000;
-        if (execMs > SLOW_EXEC_MS || waitMs > SLOW_WAIT_MS) {
-            System.out.printf("%s: slow batch size=%s exec=%sms oldestWait=%sms queueDepth=%s",
-                    name, batch.size(), execMs, waitMs, queue.size());
         }
     }
 

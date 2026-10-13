@@ -348,3 +348,126 @@ static int parse(Conn *c){
         // Do not free/reuse input until the response is ready.
         if(respond(c,status,body,req.closing))return -1;
         if(left)memmove(c->input,c->input+total,left);
+        c->used=left;
+        if(c->closing)return c->output?0:-1;
+        if(c->output)return 0;
+    }
+    return 0;
+}
+static int readable(Conn *c){
+    for(;;){
+        if(c->output)return 0;
+        if(c->cap-c->used<2048){size_t cap=c->cap?c->cap*2:4096;if(cap>MAX_REQ)cap=MAX_REQ;if(cap<=c->cap)return -1;char *p=realloc(c->input,cap);if(!p)return -1;c->input=p;c->cap=cap;}
+        ssize_t n=recv(c->fd,c->input+c->used,c->cap-c->used,0);
+        if(n<0){if(errno==EAGAIN||errno==EWOULDBLOCK)return 0;if(errno==EINTR)continue;return -1;}
+        if(n==0)return -1;
+        c->used+=(size_t)n;if(parse(c))return -1;
+    }
+}
+static int nonblock(int fd){int flags=fcntl(fd,F_GETFL,0);return flags>=0?fcntl(fd,F_SETFL,flags|O_NONBLOCK):-1;}
+static void dbinit(void){
+    const char *path=getenv("SQLITE_PATH");if(!path||!path[0]){fprintf(stderr,"SQLITE_PATH required\n");exit(1);}
+    if(sqlite3_open_v2(path,&S.db,SQLITE_OPEN_READWRITE|SQLITE_OPEN_NOMUTEX,NULL)!=SQLITE_OK){fprintf(stderr,"sqlite open: %s\n",sqlite3_errmsg(S.db));exit(1);}
+    // All tuning is process-local, schema-preserving and independent of the load generator.
+    const char *cache_env=getenv("DB_CACHE_KIB"),*mmap_env=getenv("DB_MMAP_MIB");
+    unsigned cache_kib=cache_env?(unsigned)strtoul(cache_env,NULL,10):8192;
+    unsigned mmap_mib=mmap_env?(unsigned)strtoul(mmap_env,NULL,10):0;
+    if(cache_kib<128 || cache_kib>131072 || mmap_mib>2048){fprintf(stderr,"bad cache/mmap settings\n");exit(2);}
+    char pragmas[360];
+    snprintf(pragmas,sizeof(pragmas),"PRAGMA journal_mode=WAL;PRAGMA synchronous=NORMAL;PRAGMA foreign_keys=ON;PRAGMA locking_mode=EXCLUSIVE;PRAGMA cache_size=-%u;PRAGMA mmap_size=%llu;",cache_kib,(unsigned long long)mmap_mib*1024*1024);
+    char *err=NULL;if(sqlite3_exec(S.db,pragmas,NULL,NULL,&err)!=SQLITE_OK){fprintf(stderr,"pragmas: %s\n",err);exit(1);}
+    fprintf(stderr,"cache=%uKiB mmap=%uMiB\n",cache_kib,mmap_mib);
+    const char *feed="SELECT p.id,p.body,p.created_at,u.username,(SELECT count(*) FROM likes l WHERE l.post_id=p.id) AS like_count FROM posts p JOIN users u ON u.id=p.user_id ORDER BY p.created_at DESC,p.id DESC LIMIT 20";
+    const char *post="SELECT p.id,p.body,p.created_at,u.username,(SELECT count(*) FROM likes l WHERE l.post_id=p.id) AS like_count FROM posts p JOIN users u ON u.id=p.user_id WHERE p.id=?1";
+    const char *like="INSERT INTO likes (user_id,post_id) VALUES(?1,?2) ON CONFLICT(user_id,post_id) DO NOTHING";
+    if(prep(&S.feed,feed)||prep(&S.post,post)||prep(&S.create,"INSERT INTO posts(user_id,body) VALUES(?1,?2) RETURNING id,created_at")||prep(&S.exists,"SELECT 1 FROM posts WHERE id=?1")||prep(&S.like,like)||prep(&S.health,"SELECT 1")||prep(&S.ids,"SELECT id FROM posts ORDER BY created_at DESC,id DESC LIMIT 20")||prep(&S.counts,"SELECT post_id,count(*) FROM likes WHERE post_id BETWEEN ?1 AND ?2 GROUP BY post_id")||prep(&S.range_rows,"SELECT p.id,p.body,p.created_at,u.username FROM posts p JOIN users u ON u.id=p.user_id WHERE p.id BETWEEN ?1 AND ?2 ORDER BY p.id DESC")||prep(&S.begin,"BEGIN")||prep(&S.commit,"COMMIT")){fprintf(stderr,"prepare: %s\n",sqlite3_errmsg(S.db));exit(1);}
+    S.secret=getenv("JWT_SECRET");if(!S.secret)S.secret="twelve-dollar-challenge";S.secret_len=strlen(S.secret);S.started_s=nowmono();S.range_feed=!(getenv("FEED_IMPL")&&!strcmp(getenv("FEED_IMPL"),"reference"));S.group_mode=getenv("GROUP_COMMIT")?atoi(getenv("GROUP_COMMIT")):1;
+    if(S.group_mode<0||S.group_mode>2){fprintf(stderr,"invalid GROUP_COMMIT\n");exit(2);}
+}
+int main(void){
+    signal(SIGPIPE,SIG_IGN);dbinit();
+    const char *host=getenv("HOST"),*port=getenv("PORT");if(!host)host="127.0.0.1";if(!port)port="3000";
+    int listener=socket(AF_INET,SOCK_STREAM|SOCK_NONBLOCK|SOCK_CLOEXEC,0);if(listener<0)die("socket");int yes=1;setsockopt(listener,SOL_SOCKET,SO_REUSEADDR,&yes,sizeof(yes));
+    const char *sock_env=getenv("SOCKET_BUF_KIB");int socket_buf_kib=sock_env?atoi(sock_env):0;
+    if(socket_buf_kib<0||socket_buf_kib>256){fprintf(stderr,"bad socket buffer settings\n");exit(2);}
+    struct sockaddr_in addr={.sin_family=AF_INET,.sin_port=htons((uint16_t)atoi(port))};if(inet_pton(AF_INET,host,&addr.sin_addr)!=1)die("inet_pton");
+    if(bind(listener,(void*)&addr,sizeof(addr)))die("bind");if(listen(listener,4096))die("listen");
+    struct rlimit limit;if(getrlimit(RLIMIT_NOFILE,&limit))die("getrlimit");g_cap=(size_t)limit.rlim_cur;
+    if(g_cap>131072)g_cap=131072;
+    g_conn=calloc(g_cap,sizeof(*g_conn));if(!g_conn)die("calloc");for(size_t i=0;i<g_cap;i++)g_conn[i].fd=-1;
+#ifdef USE_IO_URING
+ g_generation=calloc(g_cap,sizeof(*g_generation));if(!g_generation)die("generation allocation");
+#endif
+    #ifndef USE_IO_URING
+ g_epfd=epoll_create1(EPOLL_CLOEXEC);if(g_epfd<0)die("epoll_create1");struct epoll_event e={.events=EPOLLIN,.data.fd=listener};if(epoll_ctl(g_epfd,EPOLL_CTL_ADD,listener,&e))die("epoll_ctl");
+#else
+ if(ring_init(2048))die("io_uring_setup");if(ring_poll_add(listener,POLLIN,UINT64_MAX))die("listener poll");
+#endif
+    fprintf(stderr,"experimental C/epoll server listening at %s:%s; sqlite=%s, descriptors=%zu\n",host,port,sqlite3_libversion(),g_cap);
+    struct epoll_event events[EVENTS];
+#ifdef USE_IO_URING
+ struct TdEvent completions[EVENTS];
+#endif
+    for(;;){
+#ifndef USE_IO_URING
+ int n=epoll_wait(g_epfd,events,EVENTS,50);
+#else
+ int n=ring_wait(completions,EVENTS);
+ for(int i=0;i<n;i++){struct TdEvent v=completions[i];events[i]=(struct epoll_event){.events=((v.flags&POLLIN)?EPOLLIN:0)|((v.flags&POLLOUT)?EPOLLOUT:0)|((v.flags&POLLERR)?EPOLLERR:0)|((v.flags&POLLHUP)?EPOLLHUP:0)|((v.flags&POLLRDHUP)?EPOLLRDHUP:0),.data.fd=(v.fd==-2?listener:v.fd)};}
+#endif
+if(n<0){if(errno==EINTR)continue;die("epoll_wait");}
+        if(n>0 && S.group_mode){
+            g_batch_active=true;g_staged_n=0;g_write_tx_active=false;
+            // Mode 1 is original eager group commit; mode 2 lazily begins on the first write.
+            if(S.group_mode==1 && ensure_write_batch()){
+                fprintf(stderr,"batch BEGIN failed: %s\n",sqlite3_errmsg(S.db));exit(1);
+            }
+        }
+        for(int i=0;i<n;i++){int fd=events[i].data.fd;
+#ifdef USE_IO_URING
+ if(fd!=listener && (fd<0||(size_t)fd>=g_cap||g_generation[fd]!=completions[i].generation))continue;
+#endif
+            if(fd==listener){for(;;){int client=accept4(listener,NULL,NULL,SOCK_NONBLOCK|SOCK_CLOEXEC);if(client<0){if(errno==EAGAIN||errno==EWOULDBLOCK)break;if(errno==EINTR)continue;break;}if((size_t)client>=g_cap){close(client);continue;}if(socket_buf_kib){int bytes=socket_buf_kib*1024;setsockopt(client,SOL_SOCKET,SO_RCVBUF,&bytes,sizeof(bytes));setsockopt(client,SOL_SOCKET,SO_SNDBUF,&bytes,sizeof(bytes));}Conn *c=&g_conn[client];c->fd=client;struct epoll_event ev={.events=EPOLLIN|EPOLLET|EPOLLRDHUP,.data.fd=client};
+#ifndef USE_IO_URING
+ if(epoll_ctl(g_epfd,EPOLL_CTL_ADD,client,&ev)){closeconn(c);continue;}
+#else
+ (void)ev;g_generation[client]++;if(ring_poll_add(client,POLLIN|POLLRDHUP,((uint64_t)g_generation[client]<<32)|(unsigned)client)){closeconn(c);continue;}
+#endif
+}}
+            else if(fd>=0&&(size_t)fd<g_cap){Conn *c=&g_conn[fd];if(c->fd!=fd)continue;
+                if((events[i].events&(EPOLLERR|EPOLLHUP))||((events[i].events&EPOLLRDHUP)&&!c->output)){closeconn(c);continue;}
+                if((events[i].events&EPOLLOUT)&&c->output){if(flush(c)){closeconn(c);continue;}if(!c->output&&parse(c)){closeconn(c);continue;}}
+                if((events[i].events&EPOLLIN)&&!c->output){if(readable(c)){closeconn(c);continue;}}
+            }
+        }
+        if(g_batch_active){
+            int rc=g_write_tx_active?sqlite_done(S.commit):SQLITE_DONE;
+            if(rc!=SQLITE_DONE)sqlite3_exec(S.db,"ROLLBACK",NULL,NULL,NULL);
+            g_batch_active=false;g_write_tx_active=false;
+            for(int i=0;i<g_staged_n;i++){
+                int fd=g_staged[i];if(fd<0||(size_t)fd>=g_cap)continue;
+                Conn *c=&g_conn[fd];if(c->fd!=fd || !c->output)continue;
+                if(rc!=SQLITE_DONE){
+                    bool closing=c->closing;free(c->output);c->output=NULL;
+                    if(respond(c,500,strdup("{\"error\":\"internal server error\"}"),closing)){closeconn(c);continue;}
+                }else if(flush(c)){closeconn(c);continue;}
+                if(c->fd==fd && !c->output){
+                    if(parse(c)){closeconn(c);continue;}
+                    if(c->fd==fd && !c->output && readable(c)){closeconn(c);continue;}
+                }
+            }
+        }
+#ifdef USE_IO_URING
+        // One-shot polls: re-arm only after requests/commit/flush have finished.
+        for(int i=0;i<n;i++){
+            int fd=events[i].data.fd;
+            if(fd==listener){if(ring_poll_add(listener,POLLIN,UINT64_MAX))die("listener rearm");continue;}
+            if(fd<0||(size_t)fd>=g_cap)continue;
+            if(g_generation[fd]!=completions[i].generation)continue;
+            Conn *c=&g_conn[fd];if(c->fd!=fd)continue;
+            unsigned mask=POLLIN|POLLRDHUP|(c->output?POLLOUT:0);
+            if(ring_poll_add(fd,mask,((uint64_t)g_generation[fd]<<32)|(unsigned)fd))die("client rearm");
+        }
+#endif
+    }
+}

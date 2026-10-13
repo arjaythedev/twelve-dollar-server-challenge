@@ -421,6 +421,7 @@
       }
     },
     "memory_peak_bytes": 1850036224,
-    "oom_killed": false
+    "oom_killed": false,
+    "node_version": "26.11.1"
   }
 }

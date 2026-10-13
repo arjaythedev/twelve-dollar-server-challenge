@@ -78,12 +78,15 @@ the measured revision, before formatting.
 
 ## Correctness evidence
 
-- The source-built Ubuntu 24.04 image passed **42/42 official checks**.
-- Additional checks passed: fresh external database changes, invalid tokens,
+- On Node 26.11.1, `install.sh` and `test/run.sh` passed in a clean Ubuntu
+  24.04 container, including the native binding build, TypeScript compilation
+  and **42/42 official checks**. GitHub Actions requires upstream approval
+  before its own jobs can run.
+- Earlier Node 24.15.0 regression checks passed: fresh external database changes, invalid tokens,
   Unicode lengths, concurrent duplicate likes, empty JSON-typed like requests,
   mixed successful/failed batches, independently visible committed writes,
   acknowledged-write persistence across SIGKILL/restart and unchanged schema.
-- At `nofile=256`, a fragmented Unicode upload finished while connection
+- On Node 24.15.0 at `nofile=256`, a fragmented Unicode upload finished while connection
   pressure rose; its complete 201 response closed gracefully and the committed
   post could be read back. Ordinary original-socket reuse passed after 66 seconds.
 - TypeScript checking passed. These local checks do not establish remote CI or an official droplet score.

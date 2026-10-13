@@ -128,7 +128,8 @@ class App
   JSON_TYPE = "application/json"
   HS256_HEADER = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9" # {"alg":"HS256","typ":"JWT"}
   BASE64URL = /\A[A-Za-z0-9_-]+\z/
-  POST_PATH = %r{\A/posts/([^/]*)(/like)?\z}
+  POSTS_PREFIX = "/posts/"
+  LIKE_SUFFIX = "/like"
   POSITIVE_ID = /\A[0-9]+\z/
   MAX_ID = 9_223_372_036_854_775_807
   # JavaScript's String#trim set, so trimming matches the reference implementations.
@@ -157,6 +158,11 @@ class App
     end
   end
 
+  # Shared, never mutated by the server (it only marks where trailers would start), so responses
+  # don't allocate their own header lists.
+  HEADERS = Protocol::HTTP::Headers.new([["content-type", JSON_TYPE]])
+  CLOSE_HEADERS = Protocol::HTTP::Headers.new([["content-type", JSON_TYPE], ["connection", "close"]])
+
   def initialize(store, secret, pressure)
     @store = store
     @key = secret.b.ljust(32, "\0") # HMAC zero-pads keys up to the block size: same MAC
@@ -181,14 +187,19 @@ class App
       return create(request)
     end
 
-    if (route = POST_PATH.match(path))
-      if method == "GET" && !route[2]
-        id = post_id(route[1])
-        document = @store.post(id) or raise Halt.new(404, POST_NOT_FOUND)
-        return respond(200, document)
-      elsif method == "POST" && route[2]
-        user_id, = authenticate(request)
-        return like(user_id, post_id(route[1]))
+    # /posts/:id and /posts/:id/like
+    if path.start_with?(POSTS_PREFIX)
+      liking = path.bytesize >= POSTS_PREFIX.bytesize + LIKE_SUFFIX.bytesize && path.end_with?(LIKE_SUFFIX)
+      last = liking ? path.bytesize - LIKE_SUFFIX.bytesize : path.bytesize
+      unless path.index("/", POSTS_PREFIX.bytesize)&.< last
+        if method == "GET" && !liking
+          id = post_id(path.byteslice(POSTS_PREFIX.bytesize, last - POSTS_PREFIX.bytesize))
+          document = @store.post(id) or raise Halt.new(404, POST_NOT_FOUND)
+          return respond(200, document)
+        elsif method == "POST" && liking
+          user_id, = authenticate(request)
+          return like(user_id, post_id(path.byteslice(POSTS_PREFIX.bytesize, last - POSTS_PREFIX.bytesize)))
+        end
       end
     end
     respond(404, NOT_FOUND)
@@ -202,8 +213,7 @@ class App
   private
 
   def respond(status, document)
-    headers = Protocol::HTTP::Headers.new([["content-type", JSON_TYPE]])
-    headers.add("connection", "close") if @pressure.strained
+    headers = @pressure.strained ? CLOSE_HEADERS : HEADERS
     Protocol::HTTP::Response.new(nil, status, headers, Protocol::HTTP::Body::Buffered.new([document], document.bytesize))
   end
 

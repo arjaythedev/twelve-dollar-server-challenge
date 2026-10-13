@@ -28,6 +28,8 @@ public final class FastJsonWriter {
 
     private static final byte[] TRUE_BYTES = "true".getBytes(StandardCharsets.US_ASCII);
     private static final byte[] FALSE_BYTES = "false".getBytes(StandardCharsets.US_ASCII);
+    private static final byte[] NULL_BYTES = "null".getBytes(StandardCharsets.US_ASCII);
+    private static final byte[] MIN_VALUE_BYTES = "-9223372036854775808".getBytes(StandardCharsets.US_ASCII);
 
     private static final byte[] ESCAPED_QUOTE = "\\\"".getBytes(StandardCharsets.US_ASCII);
     private static final byte[] ESCAPED_BACKSLASH = "\\\\".getBytes(StandardCharsets.US_ASCII);
@@ -38,6 +40,8 @@ public final class FastJsonWriter {
     private static final byte[] ESCAPED_T = "\\t".getBytes(StandardCharsets.US_ASCII);
     private static final byte[] UNICODE_PREFIX = "\\u00".getBytes(StandardCharsets.US_ASCII);
     private static final byte[] HEX_CHARS = "0123456789abcdef".getBytes(StandardCharsets.US_ASCII);
+
+    private static final ThreadLocal<byte[]> DIGITS_BUF = ThreadLocal.withInitial(() -> new byte[32]);
 
     public static void writeHealth(ByteBuf buf, int uptimeSeconds) {
         buf.writeBytes(HEALTH_PREFIX);
@@ -63,7 +67,7 @@ public final class FastJsonWriter {
         buf.writeBytes(BODY_PREFIX);
         writeJsonString(buf, body);
         buf.writeBytes(CREATED_PREFIX);
-        writeJsonString(buf, createdAt);
+        writeAsciiQuoted(buf, createdAt);
         buf.writeBytes(AUTHOR_PREFIX);
         writeJsonString(buf, author);
         buf.writeBytes(LIKE_PREFIX);
@@ -101,7 +105,7 @@ public final class FastJsonWriter {
 
     public static void writeLong(ByteBuf buf, long v) {
         if (v == Long.MIN_VALUE) {
-            buf.writeBytes("-9223372036854775808".getBytes(StandardCharsets.US_ASCII));
+            buf.writeBytes(MIN_VALUE_BYTES);
             return;
         }
         if (v < 0) {
@@ -112,20 +116,30 @@ public final class FastJsonWriter {
             buf.writeByte((byte) ('0' + v));
             return;
         }
-        byte[] digits = new byte[20];
-        int charPos = 20;
+        byte[] digits = DIGITS_BUF.get();
+        int charPos = 32;
         while (v >= 10) {
             long q = v / 10;
             digits[--charPos] = (byte) ('0' + (v - q * 10));
             v = q;
         }
         digits[--charPos] = (byte) ('0' + v);
-        buf.writeBytes(digits, charPos, 20 - charPos);
+        buf.writeBytes(digits, charPos, 32 - charPos);
+    }
+
+    public static void writeAsciiQuoted(ByteBuf buf, String s) {
+        if (s == null) {
+            buf.writeBytes(NULL_BYTES);
+            return;
+        }
+        buf.writeByte('"');
+        ByteBufUtil.writeAscii(buf, s);
+        buf.writeByte('"');
     }
 
     public static void writeJsonString(ByteBuf buf, String s) {
         if (s == null) {
-            buf.writeBytes("null".getBytes(StandardCharsets.US_ASCII));
+            buf.writeBytes(NULL_BYTES);
             return;
         }
         buf.writeByte('"');
@@ -135,7 +149,7 @@ public final class FastJsonWriter {
             char c = s.charAt(i);
             if (c == '"' || c == '\\' || c < 0x20) {
                 if (i > mark) {
-                    ByteBufUtil.writeUtf8(buf, s.subSequence(mark, i));
+                    ByteBufUtil.writeUtf8(buf, s, mark, i);
                 }
                 switch (c) {
                     case '"' -> buf.writeBytes(ESCAPED_QUOTE);
@@ -155,7 +169,7 @@ public final class FastJsonWriter {
             }
         }
         if (len > mark) {
-            ByteBufUtil.writeUtf8(buf, s.subSequence(mark, len));
+            ByteBufUtil.writeUtf8(buf, s, mark, len);
         }
         buf.writeByte('"');
     }

@@ -10,11 +10,15 @@ public final class BodyParser {
         record BodyTooLong() implements ParseResult {}
     }
 
+    public static final ParseResult.MalformedJson MALFORMED = new ParseResult.MalformedJson();
+    public static final ParseResult.BodyRequired BODY_REQUIRED = new ParseResult.BodyRequired();
+    public static final ParseResult.BodyTooLong BODY_TOO_LONG = new ParseResult.BodyTooLong();
+
     public static ParseResult parsePostBody(String json) {
-        if (json == null) return new ParseResult.MalformedJson();
+        if (json == null) return MALFORMED;
         String text = json.trim();
         if (!text.startsWith("{") || !text.endsWith("}")) {
-            return new ParseResult.MalformedJson();
+            return MALFORMED;
         }
 
         int len = text.length();
@@ -35,7 +39,7 @@ public final class BodyParser {
 
             // Key must be a quoted string
             if (text.charAt(i) != '"') {
-                return new ParseResult.MalformedJson();
+                return MALFORMED;
             }
             int keyStart = ++i;
             while (i < len - 1 && text.charAt(i) != '"') {
@@ -43,26 +47,30 @@ public final class BodyParser {
                 i++;
             }
             if (i >= len - 1 || text.charAt(i) != '"') {
-                return new ParseResult.MalformedJson();
+                return MALFORMED;
             }
-            String key = text.substring(keyStart, i);
+            int keyLen = i - keyStart;
+            boolean isBodyKey = (keyLen == 4
+                    && text.charAt(keyStart) == 'b'
+                    && text.charAt(keyStart + 1) == 'o'
+                    && text.charAt(keyStart + 2) == 'd'
+                    && text.charAt(keyStart + 3) == 'y');
             i++; // skip closing quote
 
             // Expect ':'
             while (i < len - 1 && Character.isWhitespace(text.charAt(i))) i++;
             if (i >= len - 1 || text.charAt(i) != ':') {
-                return new ParseResult.MalformedJson();
+                return MALFORMED;
             }
             i++; // skip ':'
 
             // Value
             while (i < len - 1 && Character.isWhitespace(text.charAt(i))) i++;
             if (i >= len - 1) {
-                return new ParseResult.MalformedJson();
+                return MALFORMED;
             }
 
             char c = text.charAt(i);
-            boolean isBodyKey = "body".equals(key);
             if (isBodyKey) {
                 bodyFieldFound = true;
             }
@@ -70,53 +78,40 @@ public final class BodyParser {
             if (c == '"') {
                 // String value
                 if (isBodyKey) bodyIsString = true;
-                i++; // skip opening quote
-                StringBuilder sb = new StringBuilder();
-                boolean escaped = false;
+                int valStart = ++i; // skip opening quote
+                boolean hasEscape = false;
                 boolean closed = false;
+
                 while (i < len - 1) {
                     char sc = text.charAt(i);
-                    if (escaped) {
-                        switch (sc) {
-                            case '"' -> sb.append('"');
-                            case '\\' -> sb.append('\\');
-                            case '/' -> sb.append('/');
-                            case 'b' -> sb.append('\b');
-                            case 'f' -> sb.append('\f');
-                            case 'n' -> sb.append('\n');
-                            case 'r' -> sb.append('\r');
-                            case 't' -> sb.append('\t');
-                            case 'u' -> {
-                                if (i + 4 < len - 1) {
-                                    try {
-                                        sb.append((char) Integer.parseInt(text.substring(i + 1, i + 5), 16));
-                                        i += 4;
-                                    } catch (NumberFormatException e) {
-                                        return new ParseResult.MalformedJson();
-                                    }
-                                } else {
-                                    return new ParseResult.MalformedJson();
-                                }
-                            }
-                            default -> sb.append(sc);
-                        }
-                        escaped = false;
-                    } else if (sc == '\\') {
-                        escaped = true;
-                    } else if (sc == '"') {
+                    if (sc == '\\') {
+                        hasEscape = true;
+                        i += 2; // skip escape character and escaped char
+                        continue;
+                    }
+                    if (sc == '"') {
                         closed = true;
-                        i++;
                         break;
-                    } else {
-                        sb.append(sc);
                     }
                     i++;
                 }
+
                 if (!closed) {
-                    return new ParseResult.MalformedJson();
+                    return MALFORMED;
                 }
+
+                int valEnd = i++; // point past closing quote
+
                 if (isBodyKey) {
-                    bodyVal = sb.toString();
+                    if (!hasEscape) {
+                        bodyVal = text.substring(valStart, valEnd);
+                    } else {
+                        // Decode escaped string
+                        bodyVal = decodeEscapes(text, valStart, valEnd);
+                        if (bodyVal == null) {
+                            return MALFORMED;
+                        }
+                    }
                 }
             } else if (c == '{' || c == '[') {
                 // Object or Array - skip nested structure
@@ -138,49 +133,89 @@ public final class BodyParser {
                     i++;
                 }
                 if (depth != 0) {
-                    return new ParseResult.MalformedJson();
+                    return MALFORMED;
                 }
-            } else if (Character.isDigit(c) || c == '-' || c == 't' || c == 'f' || c == 'n') {
-                // Number or boolean/null
+            } else {
+                // Number, true, false, null
                 int valStart = i;
                 while (i < len - 1 && text.charAt(i) != ',' && text.charAt(i) != '}' && !Character.isWhitespace(text.charAt(i))) {
                     i++;
                 }
-                String val = text.substring(valStart, i);
-                if (!"true".equals(val) && !"false".equals(val) && !"null".equals(val)) {
-                    // verify number
-                    try {
-                        Double.parseDouble(val);
-                    } catch (NumberFormatException e) {
-                        return new ParseResult.MalformedJson();
-                    }
+                String literal = text.substring(valStart, i);
+                if (!isValidLiteralOrNumber(literal)) {
+                    return MALFORMED;
                 }
-            } else {
-                return new ParseResult.MalformedJson();
-            }
-
-            // Skip whitespace up to next ',' or '}'
-            while (i < len - 1 && Character.isWhitespace(text.charAt(i))) i++;
-            if (i < len - 1 && text.charAt(i) == ',') {
-                i++;
-            } else if (i < len - 1 && text.charAt(i) != '}') {
-                return new ParseResult.MalformedJson();
             }
         }
 
-        if (!bodyFieldFound || !bodyIsString) {
-            return new ParseResult.BodyRequired();
+        if (!bodyFieldFound) {
+            return BODY_REQUIRED;
         }
 
+        if (!bodyIsString) {
+            return BODY_REQUIRED;
+        }
+
+        // Apply JS trim
         String trimmed = StringUtil.trimJs(bodyVal);
         if (trimmed == null || trimmed.isEmpty()) {
-            return new ParseResult.BodyRequired();
+            return BODY_REQUIRED;
         }
 
+        // Check length limit of 500 characters
         if (trimmed.length() > 500) {
-            return new ParseResult.BodyTooLong();
+            return BODY_TOO_LONG;
         }
 
         return new ParseResult.Success(trimmed);
+    }
+
+    private static String decodeEscapes(String text, int start, int end) {
+        StringBuilder sb = new StringBuilder(end - start);
+        for (int i = start; i < end; i++) {
+            char c = text.charAt(i);
+            if (c == '\\') {
+                if (i + 1 >= end) return null;
+                char next = text.charAt(++i);
+                switch (next) {
+                    case '"' -> sb.append('"');
+                    case '\\' -> sb.append('\\');
+                    case '/' -> sb.append('/');
+                    case 'b' -> sb.append('\b');
+                    case 'f' -> sb.append('\f');
+                    case 'n' -> sb.append('\n');
+                    case 'r' -> sb.append('\r');
+                    case 't' -> sb.append('\t');
+                    case 'u' -> {
+                        if (i + 4 < end) {
+                            try {
+                                sb.append((char) Integer.parseInt(text.substring(i + 1, i + 5), 16));
+                                i += 4;
+                            } catch (NumberFormatException e) {
+                                return null;
+                            }
+                        } else {
+                            return null;
+                        }
+                    }
+                    default -> sb.append(next);
+                }
+            } else {
+                sb.append(c);
+            }
+        }
+        return sb.toString();
+    }
+
+    private static boolean isValidLiteralOrNumber(String literal) {
+        if ("true".equals(literal) || "false".equals(literal) || "null".equals(literal)) {
+            return true;
+        }
+        try {
+            Double.parseDouble(literal);
+            return true;
+        } catch (NumberFormatException e) {
+            return false;
+        }
     }
 }

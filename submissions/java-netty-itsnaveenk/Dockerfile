@@ -14,8 +14,14 @@ EXPOSE 80
 
 ENTRYPOINT ["java", \
     "-XX:+UseSerialGC", \
-    "-Xms384m", \
+    "-Xms512m", \
     "-Xmx512m", \
+    "-Xmn384m", \
     "-XX:+AlwaysPreTouch", \
+    "-XX:CompileThreshold=1500", \
     "-Dio.netty.allocator.type=pooled", \
+    "-Dio.netty.allocator.numDirectArenas=1", \
+    "-Dio.netty.allocator.numHeapArenas=0", \
+    "-Dio.netty.buffer.checkBounds=false", \
+    "-Dio.netty.buffer.checkAccessible=false", \
     "-jar", "/app/server.jar"]

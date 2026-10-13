@@ -1,6 +1,7 @@
 package server;
 
 import io.netty.bootstrap.ServerBootstrap;
+import io.netty.buffer.PooledByteBufAllocator;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.ChannelOption;
@@ -18,6 +19,8 @@ import io.netty.handler.codec.http.HttpObjectAggregator;
 import io.netty.handler.codec.http.HttpServerCodec;
 import server.db.Database;
 import server.util.FastJwt;
+
+import java.util.concurrent.TimeUnit;
 
 public final class HttpServer {
 
@@ -62,7 +65,7 @@ public final class HttpServer {
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             try {
-                group.shutdownGracefully().sync();
+                group.shutdownGracefully(0, 1, TimeUnit.SECONDS).sync();
                 db.close();
             } catch (Exception ignored) {}
         }));
@@ -72,13 +75,15 @@ public final class HttpServer {
             b.group(group)
              .channel(channelClass)
              .option(ChannelOption.SO_BACKLOG, 8192)
+             .childOption(ChannelOption.ALLOCATOR, PooledByteBufAllocator.DEFAULT)
              .childOption(ChannelOption.TCP_NODELAY, true)
              .childOption(ChannelOption.SO_KEEPALIVE, true)
              .childOption(ChannelOption.SO_RCVBUF, 4096)
-             .childOption(ChannelOption.SO_SNDBUF, 8192);
+             .childOption(ChannelOption.SO_SNDBUF, 16384);
 
             if (Epoll.isAvailable()) {
                 b.option(EpollChannelOption.SO_REUSEPORT, true);
+                b.childOption(EpollChannelOption.TCP_QUICKACK, true);
             }
 
             RequestHandler requestHandler = new RequestHandler(db, jwt, startTime);
@@ -97,7 +102,7 @@ public final class HttpServer {
             System.out.println("Java Netty server listening on " + host + ":" + port + " (epoll=" + Epoll.isAvailable() + ")");
             ch.closeFuture().sync();
         } finally {
-            group.shutdownGracefully();
+            group.shutdownGracefully(0, 1, TimeUnit.SECONDS);
             db.close();
         }
     }

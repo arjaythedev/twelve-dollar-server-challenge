@@ -1,6 +1,7 @@
 package server;
 
 import io.netty.buffer.ByteBuf;
+import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelHandlerContext;
@@ -14,6 +15,7 @@ import io.netty.handler.codec.http.HttpMethod;
 import io.netty.handler.codec.http.HttpResponseStatus;
 import io.netty.handler.codec.http.HttpUtil;
 import io.netty.handler.codec.http.HttpVersion;
+import io.netty.util.AsciiString;
 import server.db.Database;
 import server.json.FastJsonWriter;
 import server.util.BodyParser;
@@ -21,7 +23,6 @@ import server.util.FastJwt;
 import server.util.StringUtil;
 
 import java.nio.charset.StandardCharsets;
-import java.util.List;
 
 @ChannelHandler.Sharable
 public final class RequestHandler extends SimpleChannelInboundHandler<FullHttpRequest> {
@@ -29,6 +30,18 @@ public final class RequestHandler extends SimpleChannelInboundHandler<FullHttpRe
     private final Database db;
     private final FastJwt jwt;
     private final long startTime;
+
+    private static final AsciiString APPLICATION_JSON = HttpHeaderValues.APPLICATION_JSON;
+
+    // Pre-encoded static error response bodies
+    private static final byte[] ERR_NOT_FOUND_BYTES = "{\"error\":\"not found\"}".getBytes(StandardCharsets.US_ASCII);
+    private static final byte[] ERR_INVALID_POST_ID_BYTES = "{\"error\":\"invalid post id\"}".getBytes(StandardCharsets.US_ASCII);
+    private static final byte[] ERR_POST_NOT_FOUND_BYTES = "{\"error\":\"post not found\"}".getBytes(StandardCharsets.US_ASCII);
+    private static final byte[] ERR_INTERNAL_SERVER_ERROR_BYTES = "{\"error\":\"internal server error\"}".getBytes(StandardCharsets.US_ASCII);
+    private static final byte[] ERR_MALFORMED_JSON_BYTES = "{\"error\":\"malformed JSON body\"}".getBytes(StandardCharsets.US_ASCII);
+    private static final byte[] ERR_BODY_REQUIRED_BYTES = "{\"error\":\"body is required\"}".getBytes(StandardCharsets.US_ASCII);
+    private static final byte[] ERR_BODY_TOO_LONG_BYTES = "{\"error\":\"body must be at most 500 characters\"}".getBytes(StandardCharsets.US_ASCII);
+    private static final byte[] ERR_DB_UNHEALTHY_BYTES = "{\"status\":\"degraded\",\"db\":\"unreachable\",\"error\":\"database unhealthy\"}".getBytes(StandardCharsets.US_ASCII);
 
     public RequestHandler(Database db, FastJwt jwt, long startTime) {
         this.db = db;
@@ -42,52 +55,126 @@ public final class RequestHandler extends SimpleChannelInboundHandler<FullHttpRe
         HttpMethod method = req.method();
 
         try {
+            // Hot path 1: GET /feed (~46% of all traffic)
+            if ("/feed".equals(uri)) {
+                handleFeed(ctx, req, method);
+                return;
+            }
+
+            // Hot path 2: /posts/... (~46% GET /posts/:id, ~7% POST /posts/:id/like)
+            if (uri.startsWith("/posts/")) {
+                handlePostsParameterized(ctx, req, method, uri);
+                return;
+            }
+
+            // Write path: POST /posts (~1% of traffic)
+            if ("/posts".equals(uri)) {
+                handleCreatePost(ctx, req, method);
+                return;
+            }
+
+            // Health check (<0.01% of traffic)
             if ("/health".equals(uri)) {
                 handleHealth(ctx, req, method);
-            } else if ("/feed".equals(uri)) {
-                handleFeed(ctx, req, method);
-            } else if ("/posts".equals(uri)) {
-                handleCreatePost(ctx, req, method);
-            } else if (uri.startsWith("/posts/")) {
-                handlePostsParameterized(ctx, req, method, uri);
-            } else {
-                sendError(ctx, req, HttpResponseStatus.NOT_FOUND, "not found");
+                return;
             }
+
+            sendStaticError(ctx, req, HttpResponseStatus.NOT_FOUND, ERR_NOT_FOUND_BYTES);
         } catch (Exception e) {
-            sendError(ctx, req, HttpResponseStatus.INTERNAL_SERVER_ERROR, "internal server error");
+            sendStaticError(ctx, req, HttpResponseStatus.INTERNAL_SERVER_ERROR, ERR_INTERNAL_SERVER_ERROR_BYTES);
         }
     }
 
-    private void handleHealth(ChannelHandlerContext ctx, FullHttpRequest req, HttpMethod method) {
-        if (method != HttpMethod.GET) {
-            sendError(ctx, req, HttpResponseStatus.NOT_FOUND, "not found");
-            return;
-        }
-        ByteBuf buf = ctx.alloc().buffer();
-        if (db.checkHealth()) {
-            int uptimeSeconds = (int) ((System.currentTimeMillis() - startTime) / 1000L);
-            FastJsonWriter.writeHealth(buf, uptimeSeconds);
-            sendResponse(ctx, req, HttpResponseStatus.OK, buf);
-        } else {
-            sendError(ctx, req, HttpResponseStatus.INTERNAL_SERVER_ERROR, "database unhealthy");
-        }
+    @Override
+    public void channelReadComplete(ChannelHandlerContext ctx) {
+        ctx.flush();
     }
 
     private void handleFeed(ChannelHandlerContext ctx, FullHttpRequest req, HttpMethod method) throws Exception {
         if (method != HttpMethod.GET) {
-            sendError(ctx, req, HttpResponseStatus.NOT_FOUND, "not found");
+            sendStaticError(ctx, req, HttpResponseStatus.NOT_FOUND, ERR_NOT_FOUND_BYTES);
             return;
         }
 
-        List<Database.Post> posts = db.getFeed();
-        ByteBuf buf = ctx.alloc().buffer();
-        FastJsonWriter.writeFeedResponse(buf, posts);
+        ByteBuf buf = ctx.alloc().buffer(8192);
+        db.writeFeedJson(buf);
         sendResponse(ctx, req, HttpResponseStatus.OK, buf);
+    }
+
+    private void handlePostsParameterized(ChannelHandlerContext ctx, FullHttpRequest req, HttpMethod method, String uri) throws Exception {
+        int slashIndex = uri.indexOf('/', 7);
+        if (slashIndex >= 0) {
+            // Check if subpath is exactly "/like"
+            int uriLen = uri.length();
+            if (slashIndex + 5 == uriLen
+                    && uri.charAt(slashIndex + 1) == 'l'
+                    && uri.charAt(slashIndex + 2) == 'i'
+                    && uri.charAt(slashIndex + 3) == 'k'
+                    && uri.charAt(slashIndex + 4) == 'e') {
+
+                // POST /posts/:id/like
+                if (method != HttpMethod.POST) {
+                    sendStaticError(ctx, req, HttpResponseStatus.NOT_FOUND, ERR_NOT_FOUND_BYTES);
+                    return;
+                }
+
+                // SPEC Check 22: Auth FIRST before ID!
+                FastJwt.AuthResult auth = jwt.authenticate(req.headers().get(HttpHeaderNames.AUTHORIZATION));
+                if (auth instanceof FastJwt.AuthResult.Failure f) {
+                    sendError(ctx, req, HttpResponseStatus.valueOf(f.statusCode()), f.errorMessage());
+                    return;
+                }
+                FastJwt.AuthResult.Success user = (FastJwt.AuthResult.Success) auth;
+
+                long postId = StringUtil.parsePositiveId(uri, 7, slashIndex);
+                if (postId <= 0) {
+                    sendStaticError(ctx, req, HttpResponseStatus.BAD_REQUEST, ERR_INVALID_POST_ID_BYTES);
+                    return;
+                }
+
+                Database.LikeResult likeRes = db.likePost(user.userId(), postId);
+                if (likeRes == Database.LikeResult.CREATED) {
+                    ByteBuf buf = ctx.alloc().buffer(64);
+                    FastJsonWriter.writeLikeResponse(buf, false, postId);
+                    sendResponse(ctx, req, HttpResponseStatus.CREATED, buf);
+                } else if (likeRes == Database.LikeResult.ALREADY_LIKED) {
+                    ByteBuf buf = ctx.alloc().buffer(64);
+                    FastJsonWriter.writeLikeResponse(buf, true, postId);
+                    sendResponse(ctx, req, HttpResponseStatus.OK, buf);
+                } else {
+                    sendStaticError(ctx, req, HttpResponseStatus.NOT_FOUND, ERR_POST_NOT_FOUND_BYTES);
+                }
+            } else {
+                // Unknown path after /posts/
+                sendStaticError(ctx, req, HttpResponseStatus.NOT_FOUND, ERR_NOT_FOUND_BYTES);
+            }
+        } else {
+            // GET /posts/:id
+            if (method != HttpMethod.GET) {
+                sendStaticError(ctx, req, HttpResponseStatus.NOT_FOUND, ERR_NOT_FOUND_BYTES);
+                return;
+            }
+
+            long postId = StringUtil.parsePositiveId(uri, 7, uri.length());
+            if (postId <= 0) {
+                sendStaticError(ctx, req, HttpResponseStatus.BAD_REQUEST, ERR_INVALID_POST_ID_BYTES);
+                return;
+            }
+
+            ByteBuf buf = ctx.alloc().buffer(1024);
+            if (!db.writePostByIdJson(buf, postId)) {
+                buf.release();
+                sendStaticError(ctx, req, HttpResponseStatus.NOT_FOUND, ERR_POST_NOT_FOUND_BYTES);
+                return;
+            }
+
+            sendResponse(ctx, req, HttpResponseStatus.OK, buf);
+        }
     }
 
     private void handleCreatePost(ChannelHandlerContext ctx, FullHttpRequest req, HttpMethod method) {
         if (method != HttpMethod.POST) {
-            sendError(ctx, req, HttpResponseStatus.NOT_FOUND, "not found");
+            sendStaticError(ctx, req, HttpResponseStatus.NOT_FOUND, ERR_NOT_FOUND_BYTES);
             return;
         }
 
@@ -102,145 +189,73 @@ public final class RequestHandler extends SimpleChannelInboundHandler<FullHttpRe
         String content = req.content().toString(StandardCharsets.UTF_8);
         BodyParser.ParseResult parseRes = BodyParser.parsePostBody(content);
         if (parseRes instanceof BodyParser.ParseResult.MalformedJson) {
-            sendError(ctx, req, HttpResponseStatus.BAD_REQUEST, "malformed JSON body");
+            sendStaticError(ctx, req, HttpResponseStatus.BAD_REQUEST, ERR_MALFORMED_JSON_BYTES);
             return;
         }
         if (parseRes instanceof BodyParser.ParseResult.BodyRequired) {
-            sendError(ctx, req, HttpResponseStatus.BAD_REQUEST, "body is required");
+            sendStaticError(ctx, req, HttpResponseStatus.BAD_REQUEST, ERR_BODY_REQUIRED_BYTES);
             return;
         }
         if (parseRes instanceof BodyParser.ParseResult.BodyTooLong) {
-            sendError(ctx, req, HttpResponseStatus.BAD_REQUEST, "body must be at most 500 characters");
+            sendStaticError(ctx, req, HttpResponseStatus.BAD_REQUEST, ERR_BODY_TOO_LONG_BYTES);
             return;
         }
 
         String body = ((BodyParser.ParseResult.Success) parseRes).body();
-        boolean keepAlive = HttpUtil.isKeepAlive(req);
-        boolean isKeepAliveDefault = req.protocolVersion().isKeepAliveDefault();
 
-        db.submitPost(user.userId(), body).whenComplete((created, err) -> {
-            ctx.executor().execute(() -> {
-                if (!ctx.channel().isActive()) {
-                    return;
-                }
-                if (err != null) {
-                    sendErrorDirect(ctx, HttpResponseStatus.INTERNAL_SERVER_ERROR, "internal server error", keepAlive, isKeepAliveDefault);
-                    return;
-                }
-                ByteBuf buf = ctx.alloc().buffer();
-                FastJsonWriter.writePostResponse(buf, created.id(), body, created.createdAt(), user.username(), 0);
-                sendResponseDirect(ctx, HttpResponseStatus.CREATED, buf, keepAlive, isKeepAliveDefault);
-            });
-        });
-    }
-
-    private void handlePostsParameterized(ChannelHandlerContext ctx, FullHttpRequest req, HttpMethod method, String uri) throws Exception {
-        int slashIndex = uri.indexOf('/', 7);
-        if (slashIndex >= 0) {
-            // There is a slash after /posts/
-            if ("/like".equals(uri.substring(slashIndex))) {
-                // POST /posts/:id/like
-                if (method != HttpMethod.POST) {
-                    sendError(ctx, req, HttpResponseStatus.NOT_FOUND, "not found");
-                    return;
-                }
-
-                // SPEC Check 22: Auth FIRST before ID!
-                FastJwt.AuthResult auth = jwt.authenticate(req.headers().get(HttpHeaderNames.AUTHORIZATION));
-                if (auth instanceof FastJwt.AuthResult.Failure f) {
-                    sendError(ctx, req, HttpResponseStatus.valueOf(f.statusCode()), f.errorMessage());
-                    return;
-                }
-                FastJwt.AuthResult.Success user = (FastJwt.AuthResult.Success) auth;
-
-                String idStr = uri.substring(7, slashIndex);
-                Long postId = StringUtil.parsePositiveId(idStr);
-                if (postId == null) {
-                    sendError(ctx, req, HttpResponseStatus.BAD_REQUEST, "invalid post id");
-                    return;
-                }
-
-                boolean keepAlive = HttpUtil.isKeepAlive(req);
-                boolean isKeepAliveDefault = req.protocolVersion().isKeepAliveDefault();
-
-                db.submitLike(user.userId(), postId).whenComplete((likeRes, err) -> {
-                    ctx.executor().execute(() -> {
-                        if (!ctx.channel().isActive()) {
-                            return;
-                        }
-                        if (err != null) {
-                            sendErrorDirect(ctx, HttpResponseStatus.INTERNAL_SERVER_ERROR, "internal server error", keepAlive, isKeepAliveDefault);
-                            return;
-                        }
-                        if (likeRes == Database.LikeResult.CREATED) {
-                            ByteBuf buf = ctx.alloc().buffer();
-                            FastJsonWriter.writeLikeResponse(buf, false, postId);
-                            sendResponseDirect(ctx, HttpResponseStatus.CREATED, buf, keepAlive, isKeepAliveDefault);
-                        } else if (likeRes == Database.LikeResult.ALREADY_LIKED) {
-                            ByteBuf buf = ctx.alloc().buffer();
-                            FastJsonWriter.writeLikeResponse(buf, true, postId);
-                            sendResponseDirect(ctx, HttpResponseStatus.OK, buf, keepAlive, isKeepAliveDefault);
-                        } else {
-                            sendErrorDirect(ctx, HttpResponseStatus.NOT_FOUND, "post not found", keepAlive, isKeepAliveDefault);
-                        }
-                    });
-                });
-            } else {
-                // Unknown path after /posts/
-                sendError(ctx, req, HttpResponseStatus.NOT_FOUND, "not found");
-            }
-        } else {
-            // GET /posts/:id
-            if (method != HttpMethod.GET) {
-                sendError(ctx, req, HttpResponseStatus.NOT_FOUND, "not found");
-                return;
-            }
-            String idStr = uri.substring(7);
-            Long postId = StringUtil.parsePositiveId(idStr);
-            if (postId == null) {
-                sendError(ctx, req, HttpResponseStatus.BAD_REQUEST, "invalid post id");
-                return;
-            }
-
-            Database.Post post = db.getPostById(postId);
-            if (post == null) {
-                sendError(ctx, req, HttpResponseStatus.NOT_FOUND, "post not found");
-                return;
-            }
-
-            ByteBuf buf = ctx.alloc().buffer();
-            FastJsonWriter.writePostResponse(buf, post.id(), post.body(), post.createdAt(), post.author(), post.likeCount());
-            sendResponse(ctx, req, HttpResponseStatus.OK, buf);
+        try {
+            Database.InsertPostResult created = db.createPost(user.userId(), body);
+            ByteBuf buf = ctx.alloc().buffer(1024);
+            FastJsonWriter.writePostResponse(buf, created.id(), body, created.createdAt(), user.username(), 0);
+            sendResponse(ctx, req, HttpResponseStatus.CREATED, buf);
+        } catch (Exception e) {
+            sendStaticError(ctx, req, HttpResponseStatus.INTERNAL_SERVER_ERROR, ERR_INTERNAL_SERVER_ERROR_BYTES);
         }
     }
 
+    private void handleHealth(ChannelHandlerContext ctx, FullHttpRequest req, HttpMethod method) {
+        if (method != HttpMethod.GET) {
+            sendStaticError(ctx, req, HttpResponseStatus.NOT_FOUND, ERR_NOT_FOUND_BYTES);
+            return;
+        }
+        if (db.checkHealth()) {
+            ByteBuf buf = ctx.alloc().buffer(128);
+            int uptimeSeconds = (int) ((System.currentTimeMillis() - startTime) / 1000L);
+            FastJsonWriter.writeHealth(buf, uptimeSeconds);
+            sendResponse(ctx, req, HttpResponseStatus.OK, buf);
+        } else {
+            ByteBuf buf = Unpooled.wrappedBuffer(ERR_DB_UNHEALTHY_BYTES);
+            sendResponse(ctx, req, HttpResponseStatus.SERVICE_UNAVAILABLE, buf);
+        }
+    }
+
+    private void sendStaticError(ChannelHandlerContext ctx, FullHttpRequest req, HttpResponseStatus status, byte[] errorBytes) {
+        ByteBuf buf = Unpooled.wrappedBuffer(errorBytes);
+        sendResponse(ctx, req, status, buf);
+    }
+
     private void sendError(ChannelHandlerContext ctx, FullHttpRequest req, HttpResponseStatus status, String message) {
-        sendErrorDirect(ctx, status, message, HttpUtil.isKeepAlive(req), req.protocolVersion().isKeepAliveDefault());
+        ByteBuf buf = ctx.alloc().buffer(128);
+        FastJsonWriter.writeError(buf, message);
+        sendResponse(ctx, req, status, buf);
     }
 
     private void sendResponse(ChannelHandlerContext ctx, FullHttpRequest req, HttpResponseStatus status, ByteBuf content) {
-        sendResponseDirect(ctx, status, content, HttpUtil.isKeepAlive(req), req.protocolVersion().isKeepAliveDefault());
-    }
+        boolean keepAlive = HttpUtil.isKeepAlive(req);
+        boolean isKeepAliveDefault = req.protocolVersion().isKeepAliveDefault();
 
-    private void sendErrorDirect(ChannelHandlerContext ctx, HttpResponseStatus status, String message, boolean keepAlive, boolean isKeepAliveDefault) {
-        ByteBuf buf = ctx.alloc().buffer();
-        FastJsonWriter.writeError(buf, message);
-        sendResponseDirect(ctx, status, buf, keepAlive, isKeepAliveDefault);
-    }
-
-    private void sendResponseDirect(ChannelHandlerContext ctx, HttpResponseStatus status, ByteBuf content, boolean keepAlive, boolean isKeepAliveDefault) {
-        FullHttpResponse response = new DefaultFullHttpResponse(HttpVersion.HTTP_1_1, status, content);
-        response.headers().set(HttpHeaderNames.CONTENT_TYPE, "application/json");
+        FullHttpResponse response = new DefaultFullHttpResponse(HttpVersion.HTTP_1_1, status, content, false);
+        response.headers().set(HttpHeaderNames.CONTENT_TYPE, APPLICATION_JSON);
         response.headers().setInt(HttpHeaderNames.CONTENT_LENGTH, content.readableBytes());
 
         if (keepAlive) {
             if (!isKeepAliveDefault) {
                 response.headers().set(HttpHeaderNames.CONNECTION, HttpHeaderValues.KEEP_ALIVE);
             }
-            ctx.writeAndFlush(response);
+            ctx.write(response);
         } else {
             response.headers().set(HttpHeaderNames.CONNECTION, HttpHeaderValues.CLOSE);
-            ctx.writeAndFlush(response).addListener(ChannelFutureListener.CLOSE);
+            ctx.write(response).addListener(ChannelFutureListener.CLOSE);
         }
     }
 }

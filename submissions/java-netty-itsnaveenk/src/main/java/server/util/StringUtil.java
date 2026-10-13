@@ -37,20 +37,30 @@ public final class StringUtil {
     }
 
     /**
+     * Parses a positive integer from a CharSequence between start (inclusive) and end (exclusive).
+     * Returns -1L if invalid or not a positive integer (zero-allocation).
+     */
+    public static long parsePositiveId(CharSequence seq, int start, int end) {
+        if (seq == null || start >= end) return -1L;
+        int len = end - start;
+        if (len > 19) return -1L; // Avoid overflow
+        long val = 0;
+        for (int i = start; i < end; i++) {
+            char c = seq.charAt(i);
+            if (c < '0' || c > '9') return -1L;
+            val = val * 10 + (c - '0');
+            if (val < 0) return -1L; // Overflow
+        }
+        return val > 0 ? val : -1L;
+    }
+
+    /**
      * Parses a positive integer string in plain decimal digits.
      * Returns null if not a positive integer (e.g. "0", "-1", "abc", "1.5", empty).
      */
     public static Long parsePositiveId(String raw) {
-        if (raw == null || raw.isEmpty()) return null;
-        int len = raw.length();
-        if (len > 19) return null; // Avoid overflow
-        long val = 0;
-        for (int i = 0; i < len; i++) {
-            char c = raw.charAt(i);
-            if (c < '0' || c > '9') return null;
-            val = val * 10 + (c - '0');
-            if (val < 0) return null; // Overflow
-        }
+        if (raw == null) return null;
+        long val = parsePositiveId(raw, 0, raw.length());
         return val > 0 ? val : null;
     }
 }

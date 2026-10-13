@@ -4,7 +4,6 @@ import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.util.Base64;
 
 public final class FastJwt {
@@ -14,8 +13,15 @@ public final class FastJwt {
         record Failure(int statusCode, String errorMessage) implements AuthResult {}
     }
 
+    private static final AuthResult.Failure MISSING_BEARER = new AuthResult.Failure(401, "missing bearer token");
+    private static final AuthResult.Failure INVALID_TOKEN = new AuthResult.Failure(401, "invalid or expired token");
+    private static final AuthResult.Failure INVALID_PAYLOAD = new AuthResult.Failure(401, "invalid token payload");
+
+    private static final String STANDARD_HEADER_B64 = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9";
+
     private final SecretKeySpec secretKeySpec;
     private final ThreadLocal<Mac> threadLocalMac;
+    private final ThreadLocal<byte[]> asciiScratch = ThreadLocal.withInitial(() -> new byte[512]);
 
     public FastJwt(String secret) {
         byte[] secretBytes = secret.getBytes(StandardCharsets.UTF_8);
@@ -33,80 +39,106 @@ public final class FastJwt {
 
     public AuthResult authenticate(String authHeader) {
         if (authHeader == null || !authHeader.startsWith("Bearer ")) {
-            return new AuthResult.Failure(401, "missing bearer token");
+            return MISSING_BEARER;
         }
 
-        String token = authHeader.substring(7);
-        int dot1 = token.indexOf('.');
-        if (dot1 < 0) return new AuthResult.Failure(401, "invalid or expired token");
-        int dot2 = token.indexOf('.', dot1 + 1);
-        if (dot2 < 0 || token.indexOf('.', dot2 + 1) >= 0) {
-            return new AuthResult.Failure(401, "invalid or expired token");
+        int tokenStart = 7;
+        int len = authHeader.length();
+        int dot1 = authHeader.indexOf('.', tokenStart);
+        if (dot1 < 0) return INVALID_TOKEN;
+        int dot2 = authHeader.indexOf('.', dot1 + 1);
+        if (dot2 < 0 || authHeader.indexOf('.', dot2 + 1) >= 0) {
+            return INVALID_TOKEN;
         }
 
-        String headB64 = token.substring(0, dot1);
-        String payloadB64 = token.substring(dot1 + 1, dot2);
-        String sigB64 = token.substring(dot2 + 1);
+        int signableLen = dot2 - tokenStart;
+        byte[] scratch = asciiScratch.get();
+        if (scratch.length < signableLen) {
+            scratch = new byte[signableLen + 64];
+            asciiScratch.set(scratch);
+        }
+        for (int i = 0; i < signableLen; i++) {
+            scratch[i] = (byte) authHeader.charAt(tokenStart + i);
+        }
 
-        byte[] headBytes;
-        byte[] payloadBytes;
+        // Decode signature
+        String sigB64 = authHeader.substring(dot2 + 1);
         byte[] sigBytes;
         try {
-            headBytes = Base64.getUrlDecoder().decode(headB64);
-            payloadBytes = Base64.getUrlDecoder().decode(payloadB64);
             sigBytes = Base64.getUrlDecoder().decode(sigB64);
         } catch (IllegalArgumentException e) {
-            return new AuthResult.Failure(401, "invalid or expired token");
+            return INVALID_TOKEN;
         }
 
         // Verify HMAC-SHA256 signature
         try {
             Mac mac = threadLocalMac.get();
             mac.reset();
-            mac.update(token.substring(0, dot2).getBytes(StandardCharsets.US_ASCII));
+            mac.update(scratch, 0, signableLen);
             byte[] expectedSig = mac.doFinal();
             if (!MessageDigest.isEqual(expectedSig, sigBytes)) {
-                return new AuthResult.Failure(401, "invalid or expired token");
+                return INVALID_TOKEN;
             }
         } catch (Exception e) {
-            return new AuthResult.Failure(401, "invalid or expired token");
+            return INVALID_TOKEN;
         }
 
         // Verify header
-        String headJson = new String(headBytes, StandardCharsets.UTF_8);
-        String alg = extractStringField(headJson, "alg");
-        if (!"HS256".equals(alg)) {
-            return new AuthResult.Failure(401, "invalid or expired token");
+        int headLen = dot1 - tokenStart;
+        boolean standardHeader = (headLen == STANDARD_HEADER_B64.length()
+                && authHeader.regionMatches(tokenStart, STANDARD_HEADER_B64, 0, headLen));
+
+        if (!standardHeader) {
+            String headB64 = authHeader.substring(tokenStart, dot1);
+            byte[] headBytes;
+            try {
+                headBytes = Base64.getUrlDecoder().decode(headB64);
+            } catch (IllegalArgumentException e) {
+                return INVALID_TOKEN;
+            }
+            String headJson = new String(headBytes, StandardCharsets.UTF_8);
+            String alg = extractStringField(headJson, "alg");
+            if (!"HS256".equals(alg)) {
+                return INVALID_TOKEN;
+            }
         }
 
         // Verify payload
+        String payloadB64 = authHeader.substring(dot1 + 1, dot2);
+        byte[] payloadBytes;
+        try {
+            payloadBytes = Base64.getUrlDecoder().decode(payloadB64);
+        } catch (IllegalArgumentException e) {
+            return INVALID_TOKEN;
+        }
+
         String payloadJson = new String(payloadBytes, StandardCharsets.UTF_8);
         long now = System.currentTimeMillis() / 1000L;
 
         Long exp = extractNumberField(payloadJson, "exp");
         if (exp != null && now >= exp) {
-            return new AuthResult.Failure(401, "invalid or expired token");
+            return INVALID_TOKEN;
         }
 
         Long nbf = extractNumberField(payloadJson, "nbf");
         if (nbf != null && now < nbf) {
-            return new AuthResult.Failure(401, "invalid or expired token");
+            return INVALID_TOKEN;
         }
 
         // SPEC: sub must be a positive integer STRING
         String subStr = extractStringField(payloadJson, "sub");
         if (subStr == null) {
-            return new AuthResult.Failure(401, "invalid token payload");
+            return INVALID_PAYLOAD;
         }
-        Long userId = StringUtil.parsePositiveId(subStr);
-        if (userId == null) {
-            return new AuthResult.Failure(401, "invalid token payload");
+        long userId = StringUtil.parsePositiveId(subStr, 0, subStr.length());
+        if (userId <= 0) {
+            return INVALID_PAYLOAD;
         }
 
         // SPEC: username must be a string
         String username = extractStringField(payloadJson, "username");
         if (username == null) {
-            return new AuthResult.Failure(401, "invalid token payload");
+            return INVALID_PAYLOAD;
         }
 
         return new AuthResult.Success(userId, username);
@@ -147,19 +179,6 @@ public final class FastJwt {
                     case 'n' -> sb.append('\n');
                     case 'r' -> sb.append('\r');
                     case 't' -> sb.append('\t');
-                    case 'u' -> {
-                        if (i + 4 < json.length()) {
-                            try {
-                                int code = Integer.parseInt(json.substring(i + 1, i + 5), 16);
-                                sb.append((char) code);
-                                i += 4;
-                            } catch (NumberFormatException e) {
-                                sb.append('u');
-                            }
-                        } else {
-                            sb.append('u');
-                        }
-                    }
                     default -> sb.append(c);
                 }
                 escaped = false;
@@ -171,11 +190,11 @@ public final class FastJwt {
                 sb.append(c);
             }
         }
-        return null; // unclosed string
+        return null; // Unclosed string
     }
 
     /**
-     * Extracts a top-level numeric field: "key": 123456
+     * Extracts a top-level numeric field: "key":123
      */
     static Long extractNumberField(String json, String key) {
         String pattern = "\"" + key + "\"";
@@ -189,11 +208,9 @@ public final class FastJwt {
             valStart++;
         }
         if (valStart >= json.length()) return null;
-        if (json.charAt(valStart) == '"') return null; // It's a string, not a number
 
         int valEnd = valStart;
-        if (json.charAt(valEnd) == '-') valEnd++;
-        while (valEnd < json.length() && Character.isDigit(json.charAt(valEnd))) {
+        while (valEnd < json.length() && (Character.isDigit(json.charAt(valEnd)) || json.charAt(valEnd) == '-')) {
             valEnd++;
         }
         if (valEnd == valStart) return null;

@@ -342,5 +342,85 @@
     },
     "memory_peak_bytes": 1795899392,
     "oom_killed": false
+  },
+  "node26_90000_5m_hold": {
+    "vus": 90000,
+    "hold": "5m",
+    "ramp": "60s",
+    "warmup": "2m",
+    "image": "sha256:985d630ce12132b42c4f26b78a50c89fff7b780dd953c65afae272397bb20181",
+    "source_sha256": "1891ebf087afa52bbb73e1a0f919a39ff6298254b36fe2510b785eb78a19f6c3",
+    "workload_sha256": "14fbbe36a7bef2cc803c8c2309b8b93d6e6ec9c2b6aba78ebe3b9a95ebf85972",
+    "server_cpu_quota": 1,
+    "server_memory_bytes": 2147483648,
+    "server_swap_bytes": 0,
+    "nofile": 65535,
+    "network": "host",
+    "generator": "grafana/k6:1.4.2",
+    "source_addresses": "127.0.0.2-127.0.0.17",
+    "warmup_result": {
+      "exit_code": 0,
+      "duration_ms": {
+        "avg": 0.19475724842519715,
+        "med": 0.15169850000000001,
+        "p(95)": 0.37507694999999996,
+        "p(99)": 0.5891069200000005,
+        "max": 17.615053,
+        "thresholds": {
+          "p(99)<1000": false,
+          "p(95)<500": false
+        }
+      },
+      "failures": {
+        "passes": 0,
+        "fails": 15240,
+        "thresholds": {
+          "rate<0.01": false
+        },
+        "value": 0
+      },
+      "checks": {
+        "passes": 15240,
+        "fails": 0,
+        "value": 1
+      },
+      "requests": {
+        "count": 15240,
+        "rate": 94.69332684196063
+      }
+    },
+    "result": {
+      "exit_code": 0,
+      "duration_ms": {
+        "avg": 38.12775392676105,
+        "med": 0.375966,
+        "p(95)": 323.8886108999997,
+        "p(99)": 732.64472072,
+        "max": 1333.84582,
+        "thresholds": {
+          "p(95)<500": false,
+          "p(99)<1000": false
+        }
+      },
+      "failures": {
+        "passes": 0,
+        "fails": 3348999,
+        "thresholds": {
+          "rate<0.01": false
+        },
+        "value": 0
+      },
+      "checks": {
+        "passes": 3348999,
+        "fails": 0,
+        "value": 1
+      },
+      "requests": {
+        "count": 3348999,
+        "rate": 8370.265823848402
+      }
+    },
+    "memory_peak_bytes": 1850036224,
+    "oom_killed": false
   }
 }

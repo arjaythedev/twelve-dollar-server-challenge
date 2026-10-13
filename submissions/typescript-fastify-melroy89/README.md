@@ -83,8 +83,8 @@ five-minute hold and the workload's 30-second ramp-down. Each invocation starts
 with a fresh seed copy. Raw summaries, logs, source/workload hashes and peak
 cgroup memory are written to ignored `results/`.
 
-The final local 90,000-user five-minute hold passed: p95 **377 ms**, p99
-**830 ms**, **0 errors** across **3,346,076 requests**, peak container memory
-**1,734.9 MiB**. This is a selected passing load on a Threadripper host, not
-maximum capacity or an official DigitalOcean droplet score. See
+The Node.js 26.11.1 local 90,000-user five-minute hold passed: p95 **323.9 ms**,
+p99 **732.6 ms**, **0 errors** across **3,348,999 requests**, peak container
+memory **1,764.3 MiB**. This is a selected passing load on a Threadripper host,
+not maximum capacity or an official DigitalOcean droplet score. See
 `PERFORMANCE.md` for the measured comparisons and qualification boundaries.

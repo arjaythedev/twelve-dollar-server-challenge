@@ -59,12 +59,16 @@ failures fail the whole batch. This is group commit permitted by rule 6.
 These trials have different hold lengths; they do not establish a percentage
 capacity improvement.
 
-The final grouped implementation passed a **90,000-user five-minute hold** after
+The earlier Node 24.15.0 run passed a **90,000-user five-minute hold** after
 warm-up: **p95 377.4 ms**, **p99 830.1 ms**, **0 failed requests out of 3,346,076**,
-and **1,734.9 MiB peak cgroup memory**, with no OOM kill. Its two-minute
-1,000-user warm-up also passed. This is a selected passing local load, not the
-maximum capacity or an official droplet score. The final source and image hashes
-and the failed trials are retained in `performance-results.json`.
+and **1,734.9 MiB peak cgroup memory**, with no OOM kill.
+
+After upgrading, Node 26.11.1 passed the same **90,000-user five-minute hold**:
+**p95 323.9 ms**, **p99 732.6 ms**, **0 failed requests out of 3,348,999**, and
+**1,764.3 MiB peak cgroup memory**, with no OOM kill. The two-minute 1,000-user
+warm-up passed. This is a selected passing local load, not the maximum capacity
+or an official droplet score. Runtime, image, source, workload, and raw k6
+evidence are recorded in `performance-results.json`.
 
 A subsequent Prettier formatting pass changed source layout only. The emitted
 JavaScript AST matched the benchmarked version after excluding source-position

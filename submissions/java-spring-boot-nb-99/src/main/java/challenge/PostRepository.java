@@ -10,16 +10,21 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Repository;
 import org.sqlite.SQLiteConfig;
 import org.sqlite.SQLiteDataSource;
+import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Scheduler;
+import reactor.core.scheduler.Schedulers;
 
 /**
  * Owns a fixed set of SQLite connections, each with its statements prepared once. A request borrows
  * one connection and its statements exclusively, so statements are never shared between threads.
- * Statements cache query plans, never results.
+ * Statements cache query plans, never results. SQLite calls block, so they run on one dedicated
+ * thread per connection instead of Netty's event loops.
  */
 @Repository
 class PostRepository implements AutoCloseable {
@@ -34,6 +39,11 @@ class PostRepository implements AutoCloseable {
 
     private final List<Session> sessions = new ArrayList<>();
     private final BlockingQueue<Session> idle = new ArrayBlockingQueue<>(CONNECTIONS);
+    private final Scheduler scheduler =
+            Schedulers.fromExecutorService(
+                    Executors.newFixedThreadPool(
+                            CONNECTIONS, Thread.ofPlatform().name("sqlite-", 1).factory()),
+                    "sqlite");
 
     PostRepository(@Value("${SQLITE_PATH}") String path) throws SQLException {
         if (!Files.isRegularFile(Path.of(path))) {
@@ -58,37 +68,36 @@ class PostRepository implements AutoCloseable {
         }
     }
 
-    void checkHealth() {
-        use(
-                session -> {
+    Mono<Void> checkHealth() {
+        return call(session -> {
                     try (ResultSet rows = session.health.executeQuery()) {
                         if (!rows.next()) {
                             throw new SQLException("SELECT 1 returned no row");
                         }
                     }
                     return null;
+                })
+                .then();
+    }
+
+    Mono<List<Responses.Post>> feed() {
+        return call(session -> posts(session.feed));
+    }
+
+    Mono<Responses.Post> get(long id) {
+        return call(
+                session -> {
+                    session.post.setLong(1, id);
+                    List<Responses.Post> posts = posts(session.post);
+                    if (posts.isEmpty()) {
+                        throw new ApiException(404, "post not found");
+                    }
+                    return posts.getFirst();
                 });
     }
 
-    List<Responses.Post> feed() {
-        return use(session -> posts(session.feed));
-    }
-
-    Responses.Post get(long id) {
-        List<Responses.Post> posts =
-                use(
-                        session -> {
-                            session.post.setLong(1, id);
-                            return posts(session.post);
-                        });
-        if (posts.isEmpty()) {
-            throw new ApiException(404, "post not found");
-        }
-        return posts.getFirst();
-    }
-
-    Responses.Post create(Authentication.User user, String body) {
-        return use(
+    Mono<Responses.Post> create(Authentication.User user, String body) {
+        return call(
                 session -> {
                     session.create.setLong(1, user.id());
                     session.create.setString(2, body);
@@ -104,8 +113,9 @@ class PostRepository implements AutoCloseable {
                 });
     }
 
-    boolean like(long userId, long postId) {
-        return use(
+    /** Emits whether the user had already liked the post. */
+    Mono<Boolean> like(long userId, long postId) {
+        return call(
                 session -> {
                     session.postExists.setLong(1, postId);
                     try (ResultSet row = session.postExists.executeQuery()) {
@@ -126,6 +136,7 @@ class PostRepository implements AutoCloseable {
 
     @Override
     public void close() {
+        scheduler.dispose();
         for (Session session : sessions) {
             try {
                 session.connection.close();
@@ -133,6 +144,10 @@ class PostRepository implements AutoCloseable {
                 // Closing is best effort during shutdown.
             }
         }
+    }
+
+    private <T> Mono<T> call(Work<T> work) {
+        return Mono.fromCallable(() -> use(work)).subscribeOn(scheduler);
     }
 
     private <T> T use(Work<T> work) {

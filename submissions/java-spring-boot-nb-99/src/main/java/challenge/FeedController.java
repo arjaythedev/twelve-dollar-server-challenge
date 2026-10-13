@@ -1,18 +1,23 @@
 package challenge;
 
-import jakarta.servlet.http.HttpServletRequest;
-import java.io.IOException;
 import java.util.Map;
+import org.springframework.core.io.buffer.DataBuffer;
+import org.springframework.core.io.buffer.DataBufferLimitException;
+import org.springframework.core.io.buffer.DataBufferUtils;
 import org.springframework.http.ResponseEntity;
+import org.springframework.http.server.reactive.ServerHttpRequest;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RestController;
+import reactor.core.publisher.Mono;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
 
 @RestController
 final class FeedController {
+    private static final int MAX_BODY_BYTES = 16 * 1024;
+
     private final PostRepository posts;
     private final Authentication authentication;
     private final JsonMapper json;
@@ -25,45 +30,73 @@ final class FeedController {
     }
 
     @GetMapping("/health")
-    ResponseEntity<?> health() {
-        try {
-            posts.checkHealth();
-            return ResponseEntity.ok(
-                    new Responses.Health(
-                            "ok", "ok", (System.nanoTime() - started) / 1_000_000_000));
-        } catch (RuntimeException exception) {
-            return ResponseEntity.status(503)
-                    .body(
-                            new Responses.DegradedHealth(
-                                    "degraded", "unreachable", "database unavailable"));
-        }
+    Mono<ResponseEntity<Object>> health() {
+        return posts.checkHealth()
+                .then(
+                        Mono.fromSupplier(
+                                () ->
+                                        ResponseEntity.<Object>ok(
+                                                new Responses.Health(
+                                                        "ok",
+                                                        "ok",
+                                                        (System.nanoTime() - started)
+                                                                / 1_000_000_000))))
+                .onErrorResume(
+                        RuntimeException.class,
+                        exception ->
+                                Mono.just(
+                                        ResponseEntity.status(503)
+                                                .body(
+                                                        new Responses.DegradedHealth(
+                                                                "degraded",
+                                                                "unreachable",
+                                                                "database unavailable"))));
     }
 
     @GetMapping("/feed")
-    Map<String, ?> feed() {
-        return Map.of("posts", posts.feed());
+    Mono<Map<String, ?>> feed() {
+        return posts.feed().map(feed -> Map.of("posts", feed));
     }
 
     @GetMapping("/posts/{id}")
-    Map<String, ?> get(@PathVariable String id) {
-        return Map.of("post", posts.get(postId(id)));
+    Mono<Map<String, ?>> get(@PathVariable String id) {
+        return posts.get(postId(id)).map(post -> Map.of("post", post));
     }
 
     @PostMapping("/posts")
-    ResponseEntity<?> create(HttpServletRequest request) {
-        Authentication.User user = authentication.authenticate(request.getHeader("Authorization"));
+    Mono<ResponseEntity<Map<String, ?>>> create(ServerHttpRequest request) {
+        Authentication.User user =
+                authentication.authenticate(request.getHeaders().getFirst("Authorization"));
+        return DataBufferUtils.join(request.getBody(), MAX_BODY_BYTES)
+                .map(FeedController::bytes)
+                .defaultIfEmpty(new byte[0])
+                .onErrorMap(
+                        DataBufferLimitException.class,
+                        exception -> new ApiException(413, "request body too large"))
+                .flatMap(encoded -> posts.create(user, body(encoded)))
+                .map(post -> ResponseEntity.status(201).body(Map.of("post", post)));
+    }
+
+    @PostMapping("/posts/{id}/like")
+    Mono<ResponseEntity<Responses.Like>> like(@PathVariable String id, ServerHttpRequest request) {
+        Authentication.User user =
+                authentication.authenticate(request.getHeaders().getFirst("Authorization"));
+        long postId = postId(id);
+        return posts.like(user.id(), postId)
+                .map(
+                        alreadyLiked ->
+                                ResponseEntity.status(alreadyLiked ? 200 : 201)
+                                        .body(new Responses.Like(true, alreadyLiked, postId)));
+    }
+
+    private String body(byte[] encoded) {
         JsonNode payload;
         try {
-            byte[] encoded = request.getInputStream().readNBytes(16 * 1024 + 1);
-            if (encoded.length > 16 * 1024) {
-                return ResponseEntity.status(413)
-                        .body(new Responses.Error("request body too large"));
-            }
             payload = json.readTree(encoded);
             if (payload == null || payload.isMissingNode()) {
                 throw new IllegalArgumentException();
             }
-        } catch (IOException | RuntimeException exception) {
+        } catch (RuntimeException exception) {
             throw new ApiException(400, "malformed JSON body");
         }
         JsonNode value = payload.path("body");
@@ -77,16 +110,17 @@ final class FeedController {
         if (body.codePointCount(0, body.length()) > 500) {
             throw new ApiException(400, "body must be at most 500 characters");
         }
-        return ResponseEntity.status(201).body(Map.of("post", posts.create(user, body)));
+        return body;
     }
 
-    @PostMapping("/posts/{id}/like")
-    ResponseEntity<?> like(@PathVariable String id, HttpServletRequest request) {
-        Authentication.User user = authentication.authenticate(request.getHeader("Authorization"));
-        long postId = postId(id);
-        boolean alreadyLiked = posts.like(user.id(), postId);
-        return ResponseEntity.status(alreadyLiked ? 200 : 201)
-                .body(new Responses.Like(true, alreadyLiked, postId));
+    private static byte[] bytes(DataBuffer buffer) {
+        try {
+            byte[] bytes = new byte[buffer.readableByteCount()];
+            buffer.read(bytes);
+            return bytes;
+        } finally {
+            DataBufferUtils.release(buffer);
+        }
     }
 
     private long postId(String text) {

@@ -1,6 +1,6 @@
 # Java 25 and Spring Boot 4 submission
 
-A simple Spring MVC implementation that serves clients directly, without Nginx
+A simple Spring WebFlux implementation that serves clients directly, without Nginx
 (challenge rule 9). SQLite is mandatory under challenge rule 2. PostgreSQL and
 external cache services are not allowed.
 
@@ -13,7 +13,7 @@ external cache services are not allowed.
 | SQLite JDBC | Xerial 3.53.4.0 |
 | Maven | 3.9.11 |
 
-Spring Boot's dependency management pins Tomcat, Jackson 3, and test
+Spring Boot's dependency management pins Reactor Netty, Jackson 3, and test
 dependencies. The POM pins the formatter and its Java formatter engine.
 `install.sh` verifies the pinned Java and Maven archives against embedded checksums.
 
@@ -241,14 +241,16 @@ The app does not create or migrate the production schema. `JWT_SECRET` is requir
 
 ## Design decisions
 
-- Spring MVC handles routing and Jackson writes compact JSON. Explicit property
-  order preserves the exact challenge response bytes.
-- The app serves clients directly on Tomcat instead of behind Nginx, which saves
+- Spring WebFlux on Reactor Netty handles routing and Jackson writes compact JSON.
+  Explicit property order preserves the exact challenge response bytes.
+- The app serves clients directly on Netty instead of behind Nginx, which saves
   Nginx's CPU and a second HTTP hop. Each client holds its own keep-alive
-  connection. Tomcat accepts up to 60,000 connections, below the VPS's 65,535 open
-  files, and closes idle ones after 70 seconds. Tomcat allocates a read and a write
-  buffer on the heap for every open connection; the read buffer is 4 KiB instead of
-  8 KiB because requests are small.
+  connection, and Netty closes connections idle for 70 seconds. Netty holds no
+  buffers for an idle connection, so the VPS's 65,535 open files bound the number
+  of clients rather than memory.
+- SQLite calls block, so they never run on Netty's event loops. Four dedicated
+  threads, one per SQLite connection, run them, and handlers continue when a
+  result is ready.
 - The repository owns four SQLite connections and prepares its statements once per
   connection. A request borrows one connection and its statements exclusively.
   Statements cache query plans, never results, which rule 5 allows. The SQL is the
@@ -269,12 +271,11 @@ The app does not create or migrate the production schema. `JWT_SECRET` is requir
 - After authentication, the app reads at most 16 KiB of a post request plus one
   byte. It returns compact JSON with status 413 for larger bodies, which the
   challenge leaves out of scope.
-- The Java heap is capped at 1.25 GiB, enough for the buffers of 60,000 open
-  connections. That leaves room for native memory, SQLite, kernel socket memory,
-  the page cache, and the OS. The heap grows only as connections need it. This is
-  not a total process memory cap. `start.sh` selects the Serial collector
-  explicitly: on one CPU it has the lowest overhead, and JDK 27 would otherwise
-  default to G1.
+- The Java heap is capped at 1.25 GiB. That leaves room for native memory, Netty's
+  pooled direct buffers, SQLite, kernel socket memory, the page cache, and the OS.
+  The heap grows only as needed. This is not a total process memory cap.
+  `start.sh` selects the Serial collector explicitly: on one CPU it has the lowest
+  overhead, and JDK 27 would otherwise default to G1.
 
 See [OPTIMIZATIONS.md](OPTIMIZATIONS.md) for possible later changes. None of those
 ideas is a measured performance claim.

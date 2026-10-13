@@ -13,8 +13,8 @@ external cache services are not allowed.
 | SQLite JDBC | Xerial 3.53.4.0 |
 | Maven | 3.9.11 |
 
-Spring Boot's dependency management pins Tomcat, Jackson 3, HikariCP, Spring JDBC,
-and test dependencies. The POM pins the formatter and its Java formatter engine.
+Spring Boot's dependency management pins Tomcat, Jackson 3, and test
+dependencies. The POM pins the formatter and its Java formatter engine.
 `install.sh` verifies the pinned Java and Maven archives against embedded checksums.
 
 ## Make workflow
@@ -268,9 +268,10 @@ The app does not create or migrate the production schema. `JWT_SECRET` is requir
   challenge leaves out of scope.
 - The Java heap is capped at 1.25 GiB, enough for the buffers of 60,000 open
   connections. That leaves room for native memory, SQLite, kernel socket memory,
-  the page cache, and the OS. The heap grows only as connections need it. This is not a total process
-  memory cap. `start.sh` selects the Serial collector explicitly: on one CPU it has
-  the lowest overhead, and JDK 27 would otherwise default to G1.
+  the page cache, and the OS. The heap grows only as connections need it. This is
+  not a total process memory cap. `start.sh` selects the Serial collector
+  explicitly: on one CPU it has the lowest overhead, and JDK 27 would otherwise
+  default to G1.
 
 See [OPTIMIZATIONS.md](OPTIMIZATIONS.md) for possible later changes. None of those
 ideas is a measured performance claim.

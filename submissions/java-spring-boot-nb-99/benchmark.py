@@ -283,7 +283,7 @@ class CgroupProbe:
         self.cpu = None
 
     def limits(self):
-        """Record the enforced limits, e.g. the shared VPS budget of app and Nginx."""
+        """Record the enforced limits, e.g. the challenge VPS budget."""
         script = "cd /sys/fs/cgroup && cat cpu.max memory.max && (cat memory.swap.max || echo n/a)"
         cpu, memory, swap = execute(
             [*self.prefixes[0], "sh", "-c", script]
@@ -380,6 +380,59 @@ class Sampler:
         }
 
 
+class FlightRecorder:
+    """Records each run with Java Flight Recorder through jcmd in the app container."""
+
+    REMOTE_DIRECTORY = "/tmp"
+
+    def __init__(self, prefix):
+        self.prefix = shlex.split(prefix)
+        self.pid = None
+
+    def start(self, name):
+        if self.pid is None:
+            # jcmd -l lists "<pid> <main class or JAR>", including jcmd itself.
+            listing = execute([*self.prefix, "jcmd", "-l"])
+            pids = [
+                line.split()[0]
+                for line in listing.splitlines()
+                if line.split()[1:2] and line.split()[1].endswith("server.jar")
+            ]
+            if len(pids) != 1:
+                raise ExecutionError(
+                    f"Expected one server.jar JVM, jcmd -l listed: {listing}"
+                )
+            self.pid = pids[0]
+        self._jcmd(
+            "JFR.start",
+            f"name={name}",
+            "settings=profile",
+            f"filename={self.REMOTE_DIRECTORY}/{name}.jfr",
+        )
+
+    def stop(self, name, destination):
+        remote = f"{self.REMOTE_DIRECTORY}/{name}.jfr"
+        self._jcmd("JFR.stop", f"name={name}")
+        destination.parent.mkdir(exist_ok=True)
+        with open(destination, "wb") as stream:
+            result = subprocess.run(
+                [*self.prefix, "cat", remote],
+                stdin=subprocess.DEVNULL,
+                stdout=stream,
+                stderr=subprocess.PIPE,
+                timeout=600,
+                check=False,
+            )
+        if result.returncode:
+            raise ExecutionError(
+                f"Cannot copy {remote}: {result.stderr.decode().strip()}"
+            )
+        execute([*self.prefix, "rm", "-f", remote])
+
+    def _jcmd(self, *command):
+        execute([*self.prefix, "jcmd", self.pid, *command])
+
+
 def k6_command(args, output, container, vus, hold, stem):
     variables = {
         "BASE_URL": args.k6_url or args.url,
@@ -450,6 +503,12 @@ def arguments(argv=None):
         type=json.loads,
         help="Enforced limits as JSON, when the probe cannot read them",
     )
+    parser.add_argument(
+        "--jfr-exec",
+        help="Record each run with Java Flight Recorder through this command prefix, "
+        'e.g. "kubectl exec -n NS server -c app --". The container needs jcmd, cat, '
+        "and rm on its PATH and a writable /tmp.",
+    )
     parser.add_argument("--output", type=Path, help="New report directory")
     parser.add_argument("--wait-seconds", type=int, default=120)
     parser.add_argument("--warmup-vus", type=int, default=1000)
@@ -503,6 +562,7 @@ def main(argv=None):
         if args.app_pid
         else (CgroupProbe(args.app_exec) if args.app_exec else None)
     )
+    recorder = FlightRecorder(args.jfr_exec) if args.jfr_exec else None
     workload_sha = sha256(WORKLOAD)
     state = {
         "status": "starting",
@@ -594,7 +654,12 @@ def main(argv=None):
             print(f"Run {identifier}: {phase}, {vus} users, {hold}s hold", flush=True)
             started = time.monotonic()
             sampler = Sampler(probe) if probe else None
+            recording = None
+            profile = output / "jfr" / f"{stem}.jfr"
             try:
+                if recorder:
+                    recorder.start(stem)
+                    recording = stem
                 if sha256(WORKLOAD) != workload_sha:
                     raise ExecutionError("The workload changed during the search")
                 if args.k6 == "exec":
@@ -642,6 +707,10 @@ def main(argv=None):
                 )
                 if not healthy(args.url):
                     raise ExecutionError("The app is unhealthy after the run")
+                if recording:
+                    recording = None
+                    recorder.stop(stem, profile)
+                    item["profile"] = f"jfr/{stem}.jfr"
             except KeyboardInterrupt:
                 item.update(status="interrupted", error="Interrupted during this run")
                 raise
@@ -662,6 +731,13 @@ def main(argv=None):
             finally:
                 if sampler:
                     sampler.stopped.set()
+                if recording:
+                    # A failed run keeps its recording when the app still answers jcmd.
+                    try:
+                        recorder.stop(stem, profile)
+                        item["profile"] = f"jfr/{stem}.jfr"
+                    except (ExecutionError, OSError, subprocess.SubprocessError):
+                        pass
                 item["wall_seconds"] = time.monotonic() - started
                 report(output, state)
             metrics = item["metrics"]

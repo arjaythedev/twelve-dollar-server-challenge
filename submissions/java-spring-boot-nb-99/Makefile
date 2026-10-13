@@ -22,12 +22,14 @@ K8S_REGISTRY ?=
 # Existing namespace for MODE=k8s, and an optional image pull secret in it.
 K8S_NAMESPACE ?= twelve-dollar-challenge
 K8S_PULL_SECRET ?=
-export BUILD_IMAGES WAIT_TIMEOUT BENCH_K6 K8S_REGISTRY K8S_NAMESPACE K8S_PULL_SECRET
+# true records each benchmark run with Java Flight Recorder (MODE=docker or k8s).
+PROFILE ?= false
+export BUILD_IMAGES WAIT_TIMEOUT BENCH_K6 K8S_REGISTRY K8S_NAMESPACE K8S_PULL_SECRET PROFILE
 
 BENCH_WARMUP_VUS ?= 1000
 BENCH_WARMUP_SECONDS ?= 120
 BENCH_START_VUS ?= 2500
-BENCH_MAX_VUS ?= 40000
+BENCH_MAX_VUS ?= 60000
 BENCH_STEP ?= 250
 BENCH_PROBE_SECONDS ?= 60
 BENCH_CONFIRM_SECONDS ?= 300
@@ -59,16 +61,18 @@ help:
 	  'make up / down / logs Regular Docker stack on LOCAL_PORT (default 3000)' \
 	  'make run              Run the JAR; requires SQLITE_PATH and JWT_SECRET' \
 	  '' \
-	  'MODE=docker runs the app and Nginx in one container limited to 1 vCPU and 2 GiB,' \
+	  'The app serves clients directly, without Nginx.' \
+	  'MODE=docker runs the app in one container limited to 1 vCPU and 2 GiB,' \
 	  'like the challenge VPS. BENCH_K6=local runs k6 on this host instead of in Docker.' \
-	  'MODE=direct runs Java, Nginx, and k6 on this host and downloads missing tools' \
+	  'MODE=direct runs Java and k6 on this host and downloads missing tools' \
 	  'to a temporary directory.' \
-	  'MODE=k8s pushes images to K8S_REGISTRY and runs Nginx and the app as two containers' \
-	  'of one pod sharing 1 vCPU and 2 GiB in namespace K8S_NAMESPACE of the current' \
-	  'kubectl context, pulling with K8S_PULL_SECRET if set. k6 runs in its own pod on' \
-	  'another node.' \
+	  'MODE=k8s pushes images to K8S_REGISTRY and runs the app in a pod limited to' \
+	  '1 vCPU and 2 GiB in namespace K8S_NAMESPACE of the current kubectl context,' \
+	  'pulling with K8S_PULL_SECRET if set. k6 runs in its own pod on another node.' \
+	  'PROFILE=true saves a Java Flight Recorder profile of each benchmark run' \
+	  '(MODE=docker or k8s).' \
 	  'Benchmark settings: BENCH_WARMUP_VUS=1000 BENCH_WARMUP_SECONDS=120' \
-	  'BENCH_START_VUS=2500 BENCH_MAX_VUS=20000 BENCH_STEP=250 BENCH_PROBE_SECONDS=60' \
+	  'BENCH_START_VUS=2500 BENCH_MAX_VUS=60000 BENCH_STEP=250 BENCH_PROBE_SECONDS=60' \
 	  'BENCH_CONFIRM_SECONDS=300 BENCH_CONFIRM_RUNS=1 BENCH_RAMP_SECONDS=60' \
 	  'BENCH_BUDGET_SECONDS=3600 BENCH_OUTPUT=<new directory> BENCH_ARGS="..."'
 
@@ -120,5 +124,4 @@ logs:
 	$(COMPOSE) logs --follow server seed
 
 run: $(JAR)
-	: "$${SQLITE_PATH:?SQLITE_PATH is required}" "$${JWT_SECRET:?JWT_SECRET is required}" && \
-	  exec "$(JAVA)" -Xmx512m -jar "$(JAR)"
+	JAVA="$(JAVA)" exec bash "$(DIR)/start.sh"

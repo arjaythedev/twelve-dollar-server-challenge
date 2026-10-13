@@ -12,7 +12,10 @@ spec:
   affinity:
     podAntiAffinity:
       requiredDuringSchedulingIgnoredDuringExecution:
+        # No app pod of any benchmark namespace shares this node, so parallel
+        # runs in separate namespaces measure separate machines.
         - topologyKey: kubernetes.io/hostname
+          namespaceSelector: {}
           labelSelector:
             matchLabels:
               app.kubernetes.io/name: server

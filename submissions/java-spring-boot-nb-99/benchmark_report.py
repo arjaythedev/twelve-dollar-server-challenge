@@ -205,6 +205,7 @@ def report(directory, state):
                 ("Console log", "log"),
                 ("Raw k6 summary", "summary"),
                 ("Structured k6 events", "events"),
+                ("Java Flight Recorder profile", "profile"),
             )
             if run.get(key)
         ]

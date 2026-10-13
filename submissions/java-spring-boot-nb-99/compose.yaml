@@ -10,8 +10,8 @@ services:
     volumes:
       - database:/data
 
-  # The app and Nginx share one container, so they share the challenge VPS's
-  # 1 vCPU and 2 GiB of memory without swap.
+  # The app serves clients directly and is limited to the challenge VPS's
+  # 1 vCPU and 2 GiB of memory without swap, and its 65,535 open files.
   server:
     image: twelve-dollar-java-app:latest
     build:
@@ -25,8 +25,8 @@ services:
     environment:
       SQLITE_PATH: /data/feed.db
       JWT_SECRET: twelve-dollar-challenge
-      HOST: 127.0.0.1
-      PORT: "3000"
+      HOST: 0.0.0.0
+      PORT: "80"
     volumes:
       - database:/data
     ports:
@@ -42,6 +42,8 @@ services:
     cpus: 1.0
     mem_limit: 2g
     memswap_limit: 2g
+    ulimits:
+      nofile: 65535
 
   test:
     image: twelve-dollar-java-test:latest

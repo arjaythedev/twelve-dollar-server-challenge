@@ -2,8 +2,9 @@
 # Run the challenge suite or benchmark against the app on this host.
 #   scripts/direct.sh test
 #   scripts/direct.sh benchmark [benchmark.py options]
-# Uses installed Java 25, Nginx, and k6 v2 when present. Missing tools are
-# downloaded or built in a temporary directory that is deleted afterwards.
+# The app serves k6 directly, as on the challenge VPS. Uses installed Java 25 and
+# k6 v2 when present. Missing tools are downloaded to a temporary directory that
+# is deleted afterwards.
 set -euo pipefail
 action=${1:?usage: direct.sh test|benchmark [benchmark.py options]}
 shift
@@ -57,26 +58,6 @@ ensure_java() {
   [ -x "$JAVA" ] || JAVA=$work/jdk/Contents/Home/bin/java
 }
 
-ensure_nginx() {
-  NGINX=${NGINX:-$(command -v nginx || true)}
-  [ -n "$NGINX" ] || [ ! -x /usr/sbin/nginx ] || NGINX=/usr/sbin/nginx
-  if [ -n "$NGINX" ]; then return; fi
-  need cc
-  need make
-  echo "Nginx not found; building Nginx 1.28.0 in $work (about a minute)"
-  fetch https://nginx.org/download/nginx-1.28.0.tar.gz c6b5c6b086c0df9d3ca3ff5e084c1d0ef909e6038279c71c1c3e985f576ff76a "$work/nginx.tar.gz"
-  fetch https://zlib.net/fossils/zlib-1.3.1.tar.gz 9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23 "$work/zlib.tar.gz"
-  tar -xzf "$work/nginx.tar.gz" -C "$work"
-  tar -xzf "$work/zlib.tar.gz" -C "$work"
-  if ! (cd "$work/nginx-1.28.0" &&
-    ./configure --without-http_rewrite_module --without-pcre --with-zlib=../zlib-1.3.1 &&
-    make -j4) >"$work/nginx-build.log" 2>&1; then
-    tail -n 30 "$work/nginx-build.log" >&2
-    exit 1
-  fi
-  NGINX=$work/nginx-1.28.0/objs/nginx
-}
-
 [ -f "$here/target/server.jar" ] || { echo "target/server.jar is missing; run make build" >&2; exit 1; }
 need curl
 need python3
@@ -89,12 +70,16 @@ if [ ! -f "$root/seed/feed.db" ] || [ ! -f "$root/seed/tokens.json" ]; then
 fi
 cp "$root/seed/feed.db" "$work/feed.db"
 
-app_port=$(free_port)
-SQLITE_PATH=$work/feed.db JWT_SECRET=twelve-dollar-challenge HOST=127.0.0.1 PORT=$app_port \
-  "$JAVA" -Xmx512m -jar "$here/target/server.jar" >"$work/app.log" 2>&1 &
+[ "${PROFILE:-false}" = false ] || { echo "PROFILE=true needs MODE=docker or MODE=k8s" >&2; exit 2; }
+# The app holds one keep-alive connection per k6 user, so both need many open files.
+raise_file_limit
+port=$(free_port)
+url=http://127.0.0.1:$port
+JAVA=$JAVA SQLITE_PATH=$work/feed.db JWT_SECRET=twelve-dollar-challenge HOST=127.0.0.1 PORT=$port \
+  bash "$here/start.sh" >"$work/app.log" 2>&1 &
 app_pid=$!
 pids+=("$app_pid")
-if ! wait_healthy "http://127.0.0.1:$app_port" "$app_pid"; then
+if ! wait_healthy "$url" "$app_pid"; then
   echo "The app did not become healthy. Last log lines:" >&2
   tail -n 40 "$work/app.log" >&2
   exit 1
@@ -104,37 +89,11 @@ case "$action" in
   test)
     need jq
     need openssl
-    NO_PROXY='*' no_proxy='*' bash "$root/test/test.sh" "http://127.0.0.1:$app_port"
+    NO_PROXY='*' no_proxy='*' bash "$root/test/test.sh" "$url"
     ;;
   benchmark)
-    ensure_nginx
     ensure_k6
-    raise_file_limit
-    port=$(free_port)
-    mkdir "$work/nginx"
-    # The challenge's site config inside the main settings described in its header.
-    {
-      echo "worker_processes 1; worker_rlimit_nofile $files; pid $work/nginx/nginx.pid;"
-      echo "events { worker_connections 16384; }"
-      echo "http {"
-      for kind in client_body proxy fastcgi uwsgi scgi; do
-        echo "${kind}_temp_path $work/nginx/$kind;"
-      done
-      sed -e "s/127.0.0.1:3000;/127.0.0.1:$app_port;/" \
-        -e "s/listen 80 default_server;/listen 127.0.0.1:$port default_server;/" \
-        -e "s#/var/log/nginx/#$work/nginx/#" "$root/bench/nginx.conf"
-      echo "}"
-    } >"$work/nginx/nginx.conf"
-    "$NGINX" -p "$work/nginx/" -c "$work/nginx/nginx.conf" -e "$work/nginx/error.log" \
-      -g "daemon off;" &
-    nginx_pid=$!
-    pids+=("$nginx_pid")
-    if ! wait_healthy "http://127.0.0.1:$port" "$nginx_pid"; then
-      echo "Nginx did not proxy a healthy app. Error log:" >&2
-      tail -n 40 "$work/nginx/error.log" >&2 || true
-      exit 1
-    fi
-    python3 "$here/benchmark.py" --mode direct --url "http://127.0.0.1:$port" \
+    python3 "$here/benchmark.py" --mode direct --url "$url" \
       --k6 local --k6-bin "$K6_BIN" --tokens "$root/seed/tokens.json" --app-pid "$app_pid" "$@" &
     child=$!
     wait "$child"

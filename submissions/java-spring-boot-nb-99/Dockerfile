@@ -27,24 +27,21 @@ RUN bash build.sh
 
 FROM ubuntu:24.04@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55 AS runtime
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl libstdc++6 nginx zlib1g \
+    && apt-get install -y --no-install-recommends ca-certificates curl libstdc++6 zlib1g \
     && rm -rf /var/lib/apt/lists/* \
-    && useradd --uid 10001 --create-home app \
-    && rm /etc/nginx/sites-enabled/default \
-    && sed -i -e 's/^worker_processes auto;/worker_processes 1;\nworker_rlimit_nofile 65535;/' \
-        -e 's/worker_connections 768;/worker_connections 16384;/' \
-        -e 's|^pid /run/nginx.pid;|pid /run/nginx/nginx.pid;|' /etc/nginx/nginx.conf \
-    && mkdir /run/nginx \
-    && ln -sf /dev/stderr /var/log/nginx/bench.error.log
-COPY bench/nginx.conf /etc/nginx/sites-enabled/bench.conf
-# Kubernetes runs Nginx as www-data, so it must own its runtime files.
-RUN nginx -t && chown -R www-data /run/nginx /var/log/nginx
+    && useradd --uid 10001 --create-home app
 COPY --from=jdk /opt/java-challenge-25.0.1 /opt/java-challenge-25.0.1
+# jcmd on the PATH lets the benchmark tool record the app with Java Flight Recorder.
+ENV PATH="/opt/java-challenge-25.0.1/bin:${PATH}"
 WORKDIR /app
 COPY --from=build /app/target/server.jar ./target/server.jar
-COPY submissions/java-spring-boot-nb-99/start.sh submissions/java-spring-boot-nb-99/container-start.sh ./
+COPY submissions/java-spring-boot-nb-99/start.sh ./
+# The app serves clients directly on port 80, as on the challenge VPS. Docker and
+# the Kubernetes pod allow unprivileged processes to bind it.
+ENV HOST=0.0.0.0 PORT=80
+USER 10001
 EXPOSE 80
-ENTRYPOINT ["bash", "/app/container-start.sh"]
+ENTRYPOINT ["bash", "/app/start.sh"]
 
 FROM ubuntu:24.04@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55 AS checks
 RUN apt-get update \

@@ -51,7 +51,7 @@ ensure_k6() {
   K6_BIN=$(echo "$work"/k6/*/k6)
 }
 
-# Raises the open-file limit for k6 and Nginx as far as the OS allows; sets $files.
+# Raises the open-file limit for k6 and the app as far as the OS allows; sets $files.
 raise_file_limit() {
   files=$(ulimit -Hn)
   if [ "$files" = unlimited ] || [ "$files" -gt 65535 ]; then files=65535; fi

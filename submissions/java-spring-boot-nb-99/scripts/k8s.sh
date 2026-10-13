@@ -105,7 +105,7 @@ deployed=true
 echo "Waiting for image pulls, seeding, and readiness"
 deadline=$((SECONDS + 600))
 until "${kube[@]}" wait --for=condition=Ready "${pods[@]}" --timeout=5s >/dev/null 2>&1; do
-  # Nginx keeps the pod running after the app exits, so look for failed containers.
+  # The pod has no restarting container, so look for failed containers.
   states=$("${kube[@]}" get pods -l "$selector" -o jsonpath='{range .items[*]}{range .status.initContainerStatuses[*]}{.state.terminated.exitCode} {.state.waiting.reason} {end}{range .status.containerStatuses[*]}{.state.terminated.exitCode} {.state.waiting.reason} {end}{end}')
   if [[ $states =~ [1-9]|Err|BackOff ]] || [ "$SECONDS" -ge "$deadline" ]; then
     echo "The pods did not become ready." >&2
@@ -135,10 +135,14 @@ case "$action" in
     ;;
   benchmark)
     printf -v exec_prefix 'kubectl --context %q -n %q exec' "$context" "$ns"
-    python3 "$here/benchmark.py" --mode k8s --url "$url" \
-      --k6 exec --k6-exec "$exec_prefix k6 -c k6 --" --k6-url http://server \
-      --app-exec "$exec_prefix server -c nginx --" --app-exec "$exec_prefix server -c app --" \
-      --app-limits "$("${kube[@]}" get pod server -o jsonpath='{.spec.resources.limits}')" "$@" &
+    options=(--mode k8s --url "$url"
+      --k6 exec --k6-exec "$exec_prefix k6 -c k6 --" --k6-url http://server
+      --app-exec "$exec_prefix server -c app --"
+      --app-limits "$("${kube[@]}" get pod server -o jsonpath='{.spec.resources.limits}')")
+    if [ "${PROFILE:-false}" = true ]; then
+      options+=(--jfr-exec "$exec_prefix server -c app --")
+    fi
+    python3 "$here/benchmark.py" "${options[@]}" "$@" &
     child=$!
     wait "$child"
     ;;

@@ -1,7 +1,8 @@
 # Java 25 and Spring Boot 4 submission
 
-A simple Spring MVC implementation behind Nginx. SQLite is mandatory under
-challenge rule 2. PostgreSQL and external cache services are not allowed.
+A simple Spring MVC implementation that serves clients directly, without Nginx
+(challenge rule 9). SQLite is mandatory under challenge rule 2. PostgreSQL and
+external cache services are not allowed.
 
 ## Versions
 
@@ -44,10 +45,9 @@ make all MODE=direct
 ### Modes
 
 `MODE=docker` starts a disposable Compose project. A seed container creates a
-fresh database. The app and Nginx run in one `server` container limited to 1 vCPU
-and 2 GiB of memory without swap, the budget of the challenge VPS. Nginx uses the
-challenge's `bench/nginx.conf` and reaches the app at `127.0.0.1:3000`, as on the
-VPS. The challenge suite and k6 run in separate containers on the same network,
+fresh database. The app runs in one `server` container limited to 1 vCPU, 2 GiB
+of memory without swap, and 65,535 open files, the budget of the challenge VPS.
+It serves port 80 directly, as on the VPS. The challenge suite and k6 run in separate containers on the same network,
 outside that limit. Docker uses images for its own architecture. Each run deletes
 only its own containers, network, and volume. Set `BUILD_IMAGES=false` to reuse
 images from `make image`; `make all` does this.
@@ -60,11 +60,9 @@ Docker's port forwarding, which adds some latency on macOS.
 
 `MODE=direct` runs the built JAR on this host against a fresh copy of
 `seed/feed.db`. If the seed is missing, Node and sqlite3 generate it. The
-challenge suite calls the app directly and needs curl, jq, and openssl. The
-benchmark puts Nginx with the challenge's `bench/nginx.conf` in front of the app
-and runs k6 on the host. Installed Java 25, Nginx, and k6 v2 are used when present.
-Otherwise the script downloads Java 25.0.1 and k6 2.2.0, or builds Nginx 1.28.0
-with the system C compiler, into a temporary directory. Every download is
+challenge suite needs curl, jq, and openssl. The benchmark runs k6 on the host
+against the app. Installed Java 25 and k6 v2 are used when present. Otherwise the
+script downloads Java 25.0.1 and k6 2.2.0 into a temporary directory. Every download is
 checked against a pinned SHA-256. The script deletes that directory and stops
 its processes afterwards. Direct mode does not limit the app's CPU or memory.
 
@@ -73,8 +71,8 @@ of the current kubectl context. The cluster needs pod-level resources (Kubernete
 1.34 or later). The
 script builds the app and seed images for the nodes' architectures, pushes them to
 `K8S_REGISTRY`, and applies `k8s/` with the images pinned by digest. A `server` pod
-runs Nginx and the app as separate containers, with the seed step as an init
-container. A pod-level limit makes all of them share 1 vCPU and 2 GiB. k6 runs in
+runs the app, with the seed step as an init container. A pod-level limit makes
+both share 1 vCPU and 2 GiB. k6 runs in
 its own pod on a different node and reaches the pod through the `server` Service.
 That pod's init container takes `load.js` and the deterministic seed tokens from
 the seed image, so no files are sent through `kubectl exec`.
@@ -83,7 +81,10 @@ runs on this host and needs curl, jq, and openssl. Each run replaces the pods, s
 it starts from a fresh database, and deletes them afterwards. The namespace must
 already exist. For a private registry, set `K8S_PULL_SECRET` to an image pull
 secret in that namespace; the script checks for it. It never deletes the
-namespace or the secret. Run `docker login` for the registry first:
+namespace or the secret. Parallel runs need one namespace each. Scheduling rules
+give every app pod a node without another benchmark pod from any namespace, and
+keep load generators off app nodes; a run stops after 10 minutes when no such node
+is free. Load generators of parallel runs may share a node. Run `docker login` for the registry first:
 
 ```bash
 make benchmark MODE=k8s K8S_REGISTRY=<registry host>/<owner> K8S_PULL_SECRET=<secret>
@@ -101,7 +102,7 @@ The mode script deploys the app and passes its URL to `benchmark.py`. The tool
 waits for `/health`, then runs:
 
 1. A warm-up of the running app with 1,000 users for 2 minutes, excluded from the score.
-2. 1-minute probes from 2,500 users, doubling until a failure or 20,000 users.
+2. 1-minute probes from 2,500 users, doubling until a failure or 60,000 users.
 3. Refinement between the last pass and the first failure to within 250 users.
 4. A 5-minute confirmation. A failed confirmation steps down 250 users.
 
@@ -123,10 +124,9 @@ make report REPORT_DIR=benchmark-results/my-run
 `python3 benchmark.py --help`.
 
 The tool samples the app every 2 seconds during each run. Docker mode reads the
-`server` container's cgroup CPU, memory, and OOM kills, so the numbers cover the
-app and Nginx together, and records the enforced limits in the report. Kubernetes
-mode sums the cgroups of the Nginx and app containers and records the pod-level
-limits. That sum leaves out the seed step's page cache, which still counts toward
+`server` container's cgroup CPU, memory, and OOM kills, and records the enforced
+limits in the report. Kubernetes mode reads the app container's cgroup and records
+the pod-level limits. That sum leaves out the seed step's page cache, which still counts toward
 the pod's 2 GiB. Direct mode reads the Java process's CPU time and resident
 memory. An app exit, restart, or OOM kill stops the search as an execution error,
 not a capacity failure. So do k6 errors, k6 being killed for lack of memory,
@@ -140,13 +140,18 @@ ignores. The files update after every run:
 - `results.json`: the data that `make report` renders.
 - `run-*.log`, `k6/run-*.json`, and `k6/run-*.events.jsonl`: raw k6 output.
 - `p95.svg`, `p99.svg`, `throughput.svg`, and `errors.svg`: charts.
+- `jfr/run-*.jfr`: with `PROFILE=true` in Docker or Kubernetes mode, a Java Flight
+  Recorder profile of each run, started and stopped with `jcmd`. The recording
+  adds a little CPU load. Inspect it with `jfr view hot-methods <file>` or JDK
+  Mission Control.
 
 The exit code is 0 for a confirmed result, including a capped lower bound, 1
 when no candidate passes, 2 for an execution error or exhausted budget, and 130
 when interrupted. Ctrl-C keeps finished results and still removes the deployment.
 
-A local result is not a challenge score. k6, Nginx, and the app share your
-machine, and a Mac measures its own CPU or Docker VM.
+A local result is not a challenge score. k6 and the app share your
+machine, and a Mac measures its own CPU or Docker VM. Compose does not run k6
+inside the app's limits either.
 
 ### Run the app yourself
 
@@ -169,16 +174,15 @@ docker compose --profile test run --rm test
 
 The seed container generates the repository's deterministic seed and verifies its
 content checksum. It installs a fresh copy and the seed tokens in a named volume.
-The app opens that SQLite file in-process. The `server` container runs Nginx
-with the challenge's `bench/nginx.conf` and the app as UID 10001. Only Nginx's
-port 80 is published, on localhost port 3000. Both processes share 1 vCPU and
-2 GiB of memory without swap.
+The app opens that SQLite file in-process. The `server` container runs the app
+as UID 10001 on port 80, published on localhost port 3000. It is limited to 1 vCPU
+and 2 GiB of memory without swap.
 The Compose JWT secret is the public challenge secret. This is not a production
 authentication setup. Do not expose it publicly with that secret.
 
 The image build runs formatting checks, compilation, HTTP integration tests, and
 JAR packaging. The optional `test` service runs the unchanged repository
-`test/test.sh` against Nginx. Run it once per fresh database, since the golden
+`test/test.sh` against the app. Run it once per fresh database, since the golden
 checks expect the original seed and the suite writes posts and likes.
 
 The database survives container restarts. Stop the stack without deleting it:
@@ -196,9 +200,7 @@ docker compose up --build -d --wait
 docker compose --profile test run --rm test
 ```
 
-Read logs with `docker compose logs server seed`. Nginx's error log goes to the
-container log; its access log stays at `/var/log/nginx/bench.access.log` inside
-the container, as on the VPS.
+Read logs with `docker compose logs server seed`.
 Compose is a development setup, not evidence of a benchmark score.
 
 If your network requires an HTTP proxy, Maven does not read `HTTPS_PROXY` itself.
@@ -228,22 +230,32 @@ The challenge runs the required scripts on Ubuntu 24.04 x86_64 without Docker:
 3. Set `SQLITE_PATH`, `JWT_SECRET`, `HOST`, and `PORT` from `SPEC.md`.
 4. Run `bash start.sh`. It replaces the shell with the foreground Java process.
 
-Use `HOST=127.0.0.1` and `PORT=3000` behind the provided benchmark Nginx.
+Use `HOST=0.0.0.0` and `PORT=80`: the app serves clients directly, without Nginx.
+It needs `CAP_NET_BIND_SERVICE` for port 80 and `LimitNOFILE=65535`, which the
+challenge's service provides.
 `SQLITE_PATH` must name an existing copy of the seed, not the original seed file.
 The app does not create or migrate the production schema. `JWT_SECRET` is required.
 
-## First-draft decisions
+## Design decisions
 
 - Spring MVC handles routing and Jackson writes compact JSON. Explicit property
   order preserves the exact challenge response bytes.
-- `JdbcTemplate` executes the reference SQL with bound parameters. The like route
-  first checks whether the post exists, so it runs two statements. There is no ORM,
-  application cache, table copy, or schema change.
-- The pool reuses up to four SQLite connections and keeps at least one idle.
-  Each connection enables foreign keys, WAL, `synchronous=NORMAL`, and a five-second
+- The app serves clients directly on Tomcat instead of behind Nginx, which saves
+  Nginx's CPU and a second HTTP hop. Each client holds its own keep-alive
+  connection. Tomcat accepts up to 60,000 connections, below the VPS's 65,535 open
+  files, and closes idle ones after 70 seconds. Tomcat allocates a read and a write
+  buffer on the heap for every open connection; the read buffer is 4 KiB instead of
+  8 KiB because requests are small.
+- The repository owns four SQLite connections and prepares its statements once per
+  connection. A request borrows one connection and its statements exclusively.
+  Statements cache query plans, never results, which rule 5 allows. The SQL is the
+  reference SQL with bound parameters. The like route first checks whether the
+  post exists, so it runs two statements. There is no ORM, application cache, table
+  copy, or schema change.
+- Each connection enables foreign keys, WAL, `synchronous=NORMAL`, and a five-second
   busy timeout. SQLite still serializes writers.
-- Each insert uses auto-commit. JDBC closes the statement and its `RETURNING`
-  result before the handler returns, so a success response follows its commit.
+- Each insert uses auto-commit. The repository closes the `RETURNING` result, which
+  resets the statement and completes the commit, before the handler returns.
   The existing unique constraint and `ON CONFLICT DO NOTHING` make likes idempotent.
 - Every authenticated request verifies its JWT with JDK HMAC-SHA256 and a
   constant-time signature comparison. It accepts only HS256 and validates
@@ -254,17 +266,19 @@ The app does not create or migrate the production schema. `JWT_SECRET` is requir
 - After authentication, the app reads at most 16 KiB of a post request plus one
   byte. It returns compact JSON with status 413 for larger bodies, which the
   challenge leaves out of scope.
-- Tomcat keeps idle upstream connections for 70 seconds, above the required
-  65 seconds. The Java heap is capped at 512 MiB, leaving room for native memory,
-  SQLite, threads, Nginx, and the OS. This is not a total process memory cap.
+- The Java heap is capped at 1.25 GiB, enough for the buffers of 60,000 open
+  connections. That leaves room for native memory, SQLite, kernel socket memory,
+  the page cache, and the OS. The heap grows only as connections need it. This is not a total process
+  memory cap. `start.sh` selects the Serial collector explicitly: on one CPU it has
+  the lowest overhead, and JDK 27 would otherwise default to G1.
 
 See [OPTIMIZATIONS.md](OPTIMIZATIONS.md) for possible later changes. None of those
-ideas is a measured performance claim or part of this first draft.
+ideas is a measured performance claim.
 
 ## Verification
 
-The first draft passes all 42 checks in the unchanged challenge suite through
-Compose's Nginx. The source-built container also passes 25 HTTP integration tests,
+The app passes all 42 checks in the unchanged challenge suite in its Compose
+container. The source-built container also passes 25 HTTP integration tests,
 including tied feed timestamps, Unicode length limits, concurrent duplicate likes,
 independent-connection commit checks, connection pragmas, and degraded health.
-Formatting checks and ShellCheck pass. No load-test score has been measured.
+Formatting checks and ShellCheck pass.

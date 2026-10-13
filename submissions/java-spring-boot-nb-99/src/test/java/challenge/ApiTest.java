@@ -2,7 +2,6 @@ package challenge;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-import com.zaxxer.hikari.HikariDataSource;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -18,7 +17,6 @@ import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
-import javax.sql.DataSource;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -39,7 +37,7 @@ class ApiTest {
 
     @LocalServerPort int port;
     @Autowired JsonMapper json;
-    @Autowired DataSource dataSource;
+    @Autowired PostRepository posts;
 
     @DynamicPropertySource
     static void configuration(DynamicPropertyRegistry properties) {
@@ -226,27 +224,23 @@ class ApiTest {
 
     @Test
     void enablesRequiredDatabasePragmas() throws Exception {
-        try (var first = dataSource.getConnection();
-                var second = dataSource.getConnection();
-                var third = dataSource.getConnection();
-                var fourth = dataSource.getConnection()) {
-            for (var connection : List.of(first, second, third, fourth)) {
-                for (var pragma :
-                        java.util.Map.of(
-                                        "journal_mode",
-                                        "wal",
-                                        "synchronous",
-                                        "1",
-                                        "foreign_keys",
-                                        "1",
-                                        "busy_timeout",
-                                        "5000")
-                                .entrySet()) {
-                    try (var statement = connection.createStatement();
-                            var rows = statement.executeQuery("PRAGMA " + pragma.getKey())) {
-                        assertTrue(rows.next());
-                        assertEquals(pragma.getValue(), rows.getString(1), pragma.getKey());
-                    }
+        assertEquals(4, posts.connections().size());
+        for (var connection : posts.connections()) {
+            for (var pragma :
+                    java.util.Map.of(
+                                    "journal_mode",
+                                    "wal",
+                                    "synchronous",
+                                    "1",
+                                    "foreign_keys",
+                                    "1",
+                                    "busy_timeout",
+                                    "5000")
+                            .entrySet()) {
+                try (var statement = connection.createStatement();
+                        var rows = statement.executeQuery("PRAGMA " + pragma.getKey())) {
+                    assertTrue(rows.next());
+                    assertEquals(pragma.getValue(), rows.getString(1), pragma.getKey());
                 }
             }
         }
@@ -289,7 +283,7 @@ class ApiTest {
     @Test
     @DirtiesContext
     void unhealthyDatabaseReturns503() throws Exception {
-        ((HikariDataSource) dataSource).close();
+        posts.close();
         expect(
                 request("GET", "/health", null, null),
                 503,

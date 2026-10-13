@@ -1,16 +1,9 @@
 package challenge;
 
-import com.zaxxer.hikari.HikariConfig;
-import com.zaxxer.hikari.HikariDataSource;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import javax.sql.DataSource;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.boot.tomcat.TomcatConnectorCustomizer;
 import org.springframework.context.annotation.Bean;
-import org.sqlite.SQLiteConfig;
-import org.sqlite.SQLiteDataSource;
 
 @SpringBootApplication
 public class Application {
@@ -18,25 +11,14 @@ public class Application {
         SpringApplication.run(Application.class, args);
     }
 
+    /**
+     * Tomcat allocates a read and a write buffer on the heap for every open connection, and serving
+     * directly means one keep-alive connection per client. Requests are far below 4 KiB, so a
+     * smaller read buffer leaves heap room for more idle clients. Responses keep the 8 KiB write
+     * buffer, so a feed response still leaves in one write.
+     */
     @Bean
-    DataSource dataSource(@Value("${SQLITE_PATH}") String path) {
-        if (!Files.isRegularFile(Path.of(path))) {
-            throw new IllegalArgumentException("SQLITE_PATH must name an existing database file");
-        }
-        SQLiteConfig sqlite = new SQLiteConfig();
-        sqlite.setJournalMode(SQLiteConfig.JournalMode.WAL);
-        sqlite.setSynchronous(SQLiteConfig.SynchronousMode.NORMAL);
-        sqlite.enforceForeignKeys(true);
-        sqlite.setBusyTimeout(5000);
-        SQLiteDataSource source = new SQLiteDataSource(sqlite);
-        source.setUrl("jdbc:sqlite:" + Path.of(path).toAbsolutePath());
-
-        HikariConfig pool = new HikariConfig();
-        pool.setDataSource(source);
-        pool.setMaximumPoolSize(4);
-        pool.setMinimumIdle(1);
-        pool.setAutoCommit(true);
-        pool.setConnectionTimeout(10000);
-        return new HikariDataSource(pool);
+    TomcatConnectorCustomizer socketBuffers() {
+        return connector -> connector.setProperty("socket.appReadBufSize", "4096");
     }
 }

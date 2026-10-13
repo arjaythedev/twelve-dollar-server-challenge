@@ -56,6 +56,9 @@ case "$action" in
     docker cp "$("${compose[@]}" ps -aq seed):/data/tokens.json" "$work/tokens.json"
     options=(--mode docker --url "$url" --tokens "$work/tokens.json"
       --app-exec "docker exec $("${compose[@]}" ps -q server)")
+    if [ "${PROFILE:-false}" = true ]; then
+      options+=(--jfr-exec "docker exec $("${compose[@]}" ps -q server)")
+    fi
     case "${BENCH_K6:-docker}" in
       docker) options+=(--k6 docker --k6-url http://server --docker-network "${project}_default") ;;
       local)

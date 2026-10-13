@@ -6,7 +6,7 @@ in-process SQLite connection. The application reads only `SQLITE_PATH`,
 
 ## Stack
 
-- Node.js **24.15.0** (official x86_64 archive, SHA-256 checked by `install.sh`).
+- Node.js **26.11.1** (official x86_64 archive, SHA-256 checked by `install.sh`).
 - Fastify **5.12.7**, `@fastify/jwt` **10.2.4**.
 - `better-sqlite3` **13.0.3** / SQLite **3.53.4**, compiled from source by
   `build.sh`. The application explicitly loads that build rather than the

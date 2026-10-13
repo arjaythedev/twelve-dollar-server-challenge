@@ -9,6 +9,7 @@ public final class Main {
     }
 
     public static void main(String[] args) {
+        System.out.printf("Running on %d CPU%n", Runtime.getRuntime().availableProcessors());
         Vertx vertx = Vertx.vertx(new VertxOptions().setPreferNativeTransport(true).setEventLoopPoolSize(1).setWorkerPoolSize(2));
 
         vertx.deployVerticle(new MainVerticle())

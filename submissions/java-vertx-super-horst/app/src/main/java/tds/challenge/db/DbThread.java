@@ -37,7 +37,7 @@ public final class DbThread implements AutoCloseable {
     }
 
     /**
-     * Queue is full: map to HTTP 503. No stack trace, it is a control-flow signal.
+     * Queue is full
      */
     public static final class OverloadedException extends RuntimeException {
         OverloadedException(String message) {
@@ -86,13 +86,6 @@ public final class DbThread implements AutoCloseable {
             return ps;
         }
 
-        /**
-         * Escape hatch (e.g. for JDBC batches). Don't close it, commit or change autocommit.
-         */
-        public Connection connection() {
-            return conn;
-        }
-
         void close() {
             cache.values().forEach(DbThread::closeQuietly);
             cache.clear();
@@ -136,15 +129,10 @@ public final class DbThread implements AutoCloseable {
 
     // ---------------------------------------------------------------- factories
 
-    public static DbThread writer(String dbFilePath, Context ctx) throws SQLException {
-        return writer(dbFilePath, ctx, 1024, 128);
-    }
-
     /**
-     * Opens the writer connection, applies the schema (one statement per list entry) and starts the
-     * thread. Create the writer BEFORE the reader: it creates the file and switches it to WAL.
+     * Open writer connection and starts the thread.
      */
-    public static DbThread writer(String dbFilePath, Context ctx, int queueCapacity, int maxBatch) throws SQLException {
+    public static DbThread writer(String dbFilePath, Context ctx) throws SQLException {
         Connection c = openConnection(dbFilePath, true);
         try {
             c.setAutoCommit(false);          // writer works in explicit transactions, one per batch
@@ -152,15 +140,11 @@ public final class DbThread implements AutoCloseable {
             closeQuietly(c);
             throw e;
         }
-        return start(new DbThread("db-writer", true, c, ctx, queueCapacity, maxBatch));
+        return start(new DbThread("db-writer", true, c, ctx, 1024, 128));
     }
 
     public static DbThread reader(String dbFilePath, Context ctx) throws SQLException {
-        return reader(dbFilePath, ctx, 2048, 16);
-    }
-
-    public static DbThread reader(String dbFilePath, Context ctx, int queueCapacity, int maxBatch) throws SQLException {
-        return start(new DbThread("db-reader", false, openConnection(dbFilePath, false), ctx, queueCapacity, maxBatch));
+        return start(new DbThread("db-reader", false, openConnection(dbFilePath, false), ctx, 2048, 16));
     }
 
     private static DbThread start(DbThread t) {

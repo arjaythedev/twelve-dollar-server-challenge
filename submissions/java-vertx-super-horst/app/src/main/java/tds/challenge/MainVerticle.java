@@ -68,7 +68,6 @@ public class MainVerticle extends AbstractVerticle {
 
     @Override
     public void stop(Promise<Void> stopPromise) {
-        // 1) stop accepting requests, 2) then stop the DB threads (blocking join -> off the event loop)
         Future<Void> serverClosed = server != null ? server.close() : Future.succeededFuture();
         serverClosed
                 .compose(v -> vertx.<Void>executeBlocking(() -> {

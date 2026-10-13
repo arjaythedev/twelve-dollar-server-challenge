@@ -247,6 +247,48 @@ class ApiTest {
     }
 
     @Test
+    void readsBackEscapedAndUnicodeTextInPostAndFeed() throws Exception {
+        String body = "\"quoted\" \\ back\tslash </script> line\nbreak é 😀 \u0001";
+        HttpResponse<String> created =
+                request(
+                        "POST",
+                        "/posts",
+                        json.writeValueAsString(java.util.Map.of("body", body)),
+                        token());
+        assertEquals(201, created.statusCode());
+        var post = json.readTree(created.body()).path("post");
+        // Reads name the author from the database, creation from the token.
+        String expected =
+                "{\"id\":"
+                        + post.path("id").asLong()
+                        + ",\"body\":"
+                        + json.writeValueAsString(body)
+                        + ",\"created_at\":\""
+                        + post.path("created_at").asString()
+                        + "\",\"author\":\"database-name\",\"like_count\":0}";
+        HttpResponse<String> read =
+                request("GET", "/posts/" + post.path("id").asLong(), null, null);
+        assertEquals(200, read.statusCode());
+        assertEquals(json.readTree("{\"post\":" + expected + "}"), json.readTree(read.body()));
+        HttpResponse<String> feed = request("GET", "/feed", null, null);
+        assertEquals(200, feed.statusCode());
+        assertEquals(json.readTree(expected), json.readTree(feed.body()).path("posts").get(0));
+    }
+
+    @Test
+    void onlyTheWriterConnectionCanWrite() throws Exception {
+        List<String> queryOnly = new ArrayList<>();
+        for (var connection : posts.connections()) {
+            try (var statement = connection.createStatement();
+                    var rows = statement.executeQuery("PRAGMA query_only")) {
+                assertTrue(rows.next());
+                queryOnly.add(rows.getString(1));
+            }
+        }
+        assertEquals(List.of("1", "1", "1", "0"), queryOnly);
+    }
+
+    @Test
     void feedOrdersTimestampThenIdAndLimitsToTwenty() throws Exception {
         try (var connection = DriverManager.getConnection("jdbc:sqlite:" + DATABASE);
                 var statement =

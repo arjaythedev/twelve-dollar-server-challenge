@@ -3,6 +3,7 @@ package challenge;
 import jakarta.servlet.http.HttpServletRequest;
 import java.io.IOException;
 import java.util.Map;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -40,13 +41,13 @@ final class FeedController {
     }
 
     @GetMapping("/feed")
-    Map<String, ?> feed() {
-        return Map.of("posts", posts.feed());
+    ResponseEntity<byte[]> feed() {
+        return json(posts.feed());
     }
 
     @GetMapping("/posts/{id}")
-    Map<String, ?> get(@PathVariable String id) {
-        return Map.of("post", posts.get(postId(id)));
+    ResponseEntity<byte[]> get(@PathVariable String id) {
+        return json(posts.get(postId(id)));
     }
 
     @PostMapping("/posts")
@@ -87,6 +88,11 @@ final class FeedController {
         boolean alreadyLiked = posts.like(user.id(), postId);
         return ResponseEntity.status(alreadyLiked ? 200 : 201)
                 .body(new Responses.Like(true, alreadyLiked, postId));
+    }
+
+    /** A response whose JSON body SQLite already built. */
+    private static ResponseEntity<byte[]> json(byte[] body) {
+        return ResponseEntity.ok().contentType(MediaType.APPLICATION_JSON).body(body);
     }
 
     private long postId(String text) {

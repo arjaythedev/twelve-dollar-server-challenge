@@ -66,6 +66,12 @@ and **1,734.9 MiB peak cgroup memory**, with no OOM kill. Its two-minute
 maximum capacity or an official droplet score. The final source and image hashes
 and the failed trials are retained in `performance-results.json`.
 
+A subsequent Prettier formatting pass changed source layout only. The emitted
+JavaScript AST matched the benchmarked version after excluding source-position
+and comment metadata. All 42 official checks and the additional regression
+checks passed again. The recorded benchmark source hash remains the hash of
+the measured revision, before formatting.
+
 ## Correctness evidence
 
 - The source-built Ubuntu 24.04 image passed **42/42 official checks**.

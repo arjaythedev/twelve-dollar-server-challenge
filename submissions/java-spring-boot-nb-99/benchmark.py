@@ -42,6 +42,14 @@ RAMP_DOWN_SECONDS = 30
 # Covers k6's graceful stop plus process or container startup.
 RUN_ALLOWANCE_SECONDS = 60
 SAMPLE_SECONDS = 2
+# k6 closes its connections when a run ends, and Linux keeps each closed
+# connection's local port in TIME_WAIT for 60 seconds. A persistent k6 container
+# that starts the next run sooner can run out of ports and fail to connect.
+TIME_WAIT_SCRIPT = (
+    "cat /proc/net/tcp /proc/net/tcp6 2>/dev/null | awk '$4 == \"06\"' | wc -l"
+)
+TIME_WAIT_LIMIT = 100
+TIME_WAIT_TIMEOUT_SECONDS = 120
 
 
 class ExecutionError(Exception):
@@ -227,6 +235,24 @@ def wait_healthy(url, seconds):
         if time.monotonic() > deadline:
             raise ExecutionError(f"{url}/health was not healthy within {seconds}s")
         time.sleep(1)
+
+
+def wait_for_ports(remote):
+    """Wait until the previous run's closed k6 connections release their ports."""
+    deadline = time.monotonic() + TIME_WAIT_TIMEOUT_SECONDS
+    announced = False
+    while (
+        count := int(execute([*remote, "sh", "-c", TIME_WAIT_SCRIPT]))
+    ) > TIME_WAIT_LIMIT:
+        if time.monotonic() > deadline:
+            raise ExecutionError(f"k6 still holds {count} ports in TIME_WAIT")
+        if not announced:
+            print(
+                f"  Waiting for {count} closed k6 connections to release their ports",
+                flush=True,
+            )
+            announced = True
+        time.sleep(5)
 
 
 def cpu_seconds(text):
@@ -633,6 +659,8 @@ def main(argv=None):
             hold = {"warmup": args.warmup_seconds, "confirm": args.confirm_seconds}.get(
                 phase, args.probe_seconds
             )
+            if args.k6 == "exec":
+                wait_for_ports(remote)
             needed = (
                 args.ramp_seconds + hold + RAMP_DOWN_SECONDS + RUN_ALLOWANCE_SECONDS
             )

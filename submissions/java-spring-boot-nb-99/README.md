@@ -106,11 +106,14 @@ waits for `/health`, then runs:
 3. Refinement between the last pass and the first failure to within 250 users.
 4. A 5-minute confirmation. A failed confirmation steps down 250 users.
 
-Each run adds a 60-second ramp-up and the workload's 30-second ramp-down. The
-search budget is one hour after the app is healthy. The tool never starts a run
-that cannot finish within the budget. A run passes with p95 below 500 ms, p99
-below 1,000 ms, and fewer than 1% failed requests. A pass at the user cap is a
-lower bound, not a maximum.
+Each run adds a 60-second ramp-up and the workload's 30-second ramp-down. In
+Kubernetes mode, the k6 pod persists between runs, so each run first waits until
+the previous run's closed connections release their local ports, which Linux
+holds for 60 seconds. Otherwise two consecutive runs above about 32,000 users
+exhaust k6's 64,511 ports and fail to connect. The search budget is one hour after
+the app is healthy. The tool never starts a run that cannot finish within the
+budget. A run passes with p95 below 500 ms, p99 below 1,000 ms, and fewer than 1%
+failed requests. A pass at the user cap is a lower bound, not a maximum.
 
 Override the defaults shown by `make help`:
 

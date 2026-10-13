@@ -18,16 +18,15 @@ bottleneck. Do not accept faster runs that skip work or return errors.
 
 | Change | What to measure | Cost or risk |
 | --- | --- | --- |
-| Change the number of SQLite connections | Connection wait time, writer contention, latency, and memory | More connections do not create more SQLite writers and each connection has a page cache. |
+| Change the number of reader connections | Read queue time, latency, and memory | Extra readers cannot add CPU on one vCPU, and each connection has a page cache. |
 | Tune Netty's event-loop count or the SQLite thread count | CPU, context switches, queue time, throughput, and tail latency | Extra threads cannot add CPU and can increase the SQLite wait queue on one CPU. |
 | Tune SQLite page cache and `mmap_size` | Read I/O, resident memory, page faults, and feed latency | The JVM, its connection buffers, and the OS also need part of the 2 GiB budget. |
 | Tune WAL checkpoints | WAL growth, checkpoint time, and write tail latency | Delayed checkpoints need more disk space and can cause later latency spikes. |
-| Separate readers from a serialized writer connection | Busy failures, queue time, and read latency during writes | Adds scheduling and connection ownership code. Each response must wait for commit. |
 | Group several writes into a transaction | Commit cost, queue delay, and p99 write latency | Adds cancellation and failure handling. Respond only after the shared transaction commits. |
 | Compare other equivalent feed and like-count queries | Query plans and elapsed SQL time on fresh and grown data | Cannot add indexes or store derived counts. Every request must read current SQLite data. |
 | Combine the like's existence check and insert into one statement | SQL call overhead and write latency | Must distinguish a missing post from a repeated like and preserve 404, 200, and 201 responses. |
 | Tune JVM heap and garbage collection | GC pauses, allocation rate, RSS, and OOM risk | A larger heap can take memory from SQLite and the OS. The heap limit does not bound native memory. |
-| Reduce JSON or authentication allocation | Allocation profiles and CPU time after SQL bottlenecks are ruled out | Must preserve exact JSON ordering, escaping, expiration checks, and per-request signature verification. |
+| Reduce authentication or remaining JSON allocation | Allocation profiles and CPU time for likes, posts, and errors | Must preserve exact JSON ordering, escaping, expiration checks, and per-request signature verification. |
 
 WAL with `synchronous=NORMAL` or stronger is non-negotiable. Do not add response
 caches, query-result caches, remembered JWT verifications, in-memory table copies,

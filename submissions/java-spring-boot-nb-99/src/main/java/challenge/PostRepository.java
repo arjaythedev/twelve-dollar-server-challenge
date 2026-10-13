@@ -6,12 +6,14 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Stream;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Repository;
 import org.sqlite.SQLiteConfig;
@@ -21,29 +23,43 @@ import reactor.core.scheduler.Scheduler;
 import reactor.core.scheduler.Schedulers;
 
 /**
- * Owns a fixed set of SQLite connections, each with its statements prepared once. A request borrows
- * one connection and its statements exclusively, so statements are never shared between threads.
- * Statements cache query plans, never results. SQLite calls block, so they run on one dedicated
- * thread per connection instead of Netty's event loops.
+ * Owns the SQLite connections, each with its statements prepared once. Statements cache query
+ * plans, never results. SQLite calls block, so each connection runs on its own thread instead of
+ * Netty's event loops.
+ *
+ * <p>Three read-only connections serve reads. One writer connection serves every write, so writes
+ * queue in Java instead of colliding in SQLite, where a waiting writer sleeps and retries.
  */
 @Repository
 class PostRepository implements AutoCloseable {
-    private static final int CONNECTIONS = 4;
+    private static final int READERS = 3;
     private static final long BORROW_TIMEOUT_MILLIS = 10_000;
-    private static final String SELECT_POST =
+    private static final String POST_JSON =
             """
-            SELECT p.id, p.body, p.created_at, u.username,
-                   (SELECT count(*) FROM likes l WHERE l.post_id = p.id) AS like_count
-              FROM posts p JOIN users u ON u.id = p.user_id
+            json_object('id', p.id, 'body', p.body, 'created_at', p.created_at,
+                        'author', u.username,
+                        'like_count', (SELECT count(*) FROM likes l WHERE l.post_id = p.id))
             """;
+    // The response is built in SQLite and sent as is. The aggregate's ORDER BY fixes the order
+    // of the posts in the array.
+    private static final String FEED =
+            """
+            SELECT json_object('posts', json_group_array(json(post) ORDER BY created_at DESC, id DESC))
+              FROM (SELECT p.id, p.created_at, %s AS post
+                      FROM posts p JOIN users u ON u.id = p.user_id
+                     ORDER BY p.created_at DESC, p.id DESC LIMIT 20)
+            """
+                    .formatted(POST_JSON);
+    private static final String POST =
+            """
+            SELECT json_object('post', %s)
+              FROM posts p JOIN users u ON u.id = p.user_id
+             WHERE p.id = ?
+            """
+                    .formatted(POST_JSON);
 
-    private final List<Session> sessions = new ArrayList<>();
-    private final BlockingQueue<Session> idle = new ArrayBlockingQueue<>(CONNECTIONS);
-    private final Scheduler scheduler =
-            Schedulers.fromExecutorService(
-                    Executors.newFixedThreadPool(
-                            CONNECTIONS, Thread.ofPlatform().name("sqlite-", 1).factory()),
-                    "sqlite");
+    private final Lane<ReadSession> readers;
+    private final Lane<WriteSession> writer;
 
     PostRepository(@Value("${SQLITE_PATH}") String path) throws SQLException {
         if (!Files.isRegularFile(Path.of(path))) {
@@ -54,50 +70,58 @@ class PostRepository implements AutoCloseable {
         sqlite.setSynchronous(SQLiteConfig.SynchronousMode.NORMAL);
         sqlite.enforceForeignKeys(true);
         sqlite.setBusyTimeout(5000);
+        // Otherwise every insert runs and prepares an extra SELECT last_insert_rowid().
+        sqlite.setGetGeneratedKeys(false);
         SQLiteDataSource source = new SQLiteDataSource(sqlite);
         source.setUrl("jdbc:sqlite:" + Path.of(path).toAbsolutePath());
+        List<ReadSession> readSessions = new ArrayList<>();
+        List<WriteSession> writeSessions = new ArrayList<>();
         try {
-            for (int i = 0; i < CONNECTIONS; i++) {
-                Session session = new Session(source.getConnection());
-                sessions.add(session);
-                idle.add(session);
+            for (int i = 0; i < READERS; i++) {
+                readSessions.add(new ReadSession(source.getConnection()));
             }
+            writeSessions.add(new WriteSession(source.getConnection()));
         } catch (SQLException | RuntimeException exception) {
-            close();
+            Stream.concat(readSessions.stream(), writeSessions.stream()).forEach(Session::close);
             throw exception;
         }
+        readers = new Lane<>("sqlite-read", readSessions);
+        writer = new Lane<>("sqlite-write", writeSessions);
     }
 
     Mono<Void> checkHealth() {
-        return call(session -> {
-                    try (ResultSet rows = session.health.executeQuery()) {
-                        if (!rows.next()) {
-                            throw new SQLException("SELECT 1 returned no row");
-                        }
-                    }
-                    return null;
-                })
+        return readers.call(
+                        session -> {
+                            try (ResultSet rows = session.health.executeQuery()) {
+                                if (!rows.next()) {
+                                    throw new SQLException("SELECT 1 returned no row");
+                                }
+                            }
+                            return null;
+                        })
                 .then();
     }
 
-    Mono<List<Responses.Post>> feed() {
-        return call(session -> posts(session.feed));
+    /** The feed response body, {"posts":[...]}, as UTF-8 JSON. */
+    Mono<byte[]> feed() {
+        return readers.call(session -> json(session.feed));
     }
 
-    Mono<Responses.Post> get(long id) {
-        return call(
+    /** The post response body, {"post":{...}}, as UTF-8 JSON. */
+    Mono<byte[]> get(long id) {
+        return readers.call(
                 session -> {
                     session.post.setLong(1, id);
-                    List<Responses.Post> posts = posts(session.post);
-                    if (posts.isEmpty()) {
+                    byte[] post = json(session.post);
+                    if (post == null) {
                         throw new ApiException(404, "post not found");
                     }
-                    return posts.getFirst();
+                    return post;
                 });
     }
 
     Mono<Responses.Post> create(Authentication.User user, String body) {
-        return call(
+        return writer.call(
                 session -> {
                     session.create.setLong(1, user.id());
                     session.create.setString(2, body);
@@ -115,7 +139,7 @@ class PostRepository implements AutoCloseable {
 
     /** Emits whether the user had already liked the post. */
     Mono<Boolean> like(long userId, long postId) {
-        return call(
+        return writer.call(
                 session -> {
                     session.postExists.setLong(1, postId);
                     try (ResultSet row = session.postExists.executeQuery()) {
@@ -129,97 +153,138 @@ class PostRepository implements AutoCloseable {
                 });
     }
 
-    /** The pooled connections, for tests that inspect connection settings. */
+    /** All connections, readers first, for tests that inspect connection settings. */
     List<Connection> connections() {
-        return sessions.stream().map(session -> session.connection).toList();
+        return Stream.concat(readers.sessions.stream(), writer.sessions.stream())
+                .map(session -> session.connection)
+                .toList();
     }
 
     @Override
     public void close() {
-        scheduler.dispose();
-        for (Session session : sessions) {
+        readers.close();
+        writer.close();
+    }
+
+    /** The first column of the only row as raw UTF-8 bytes, or null without a row. */
+    private static byte[] json(PreparedStatement statement) throws SQLException {
+        try (ResultSet rows = statement.executeQuery()) {
+            return rows.next() ? rows.getBytes(1) : null;
+        }
+    }
+
+    private interface Work<S, T> {
+        T run(S session) throws SQLException;
+    }
+
+    /** Sessions with one thread each, so a call never waits for a free session. */
+    private static final class Lane<S extends Session> implements AutoCloseable {
+        final List<S> sessions;
+        private final BlockingQueue<S> idle;
+        private final Scheduler scheduler;
+
+        Lane(String name, List<S> sessions) {
+            this.sessions = List.copyOf(sessions);
+            idle = new ArrayBlockingQueue<>(sessions.size(), false, sessions);
+            scheduler =
+                    Schedulers.fromExecutorService(
+                            Executors.newFixedThreadPool(
+                                    sessions.size(),
+                                    Thread.ofPlatform().name(name + "-", 1).factory()),
+                            name);
+        }
+
+        <T> Mono<T> call(Work<S, T> work) {
+            return Mono.fromCallable(() -> use(work)).subscribeOn(scheduler);
+        }
+
+        private <T> T use(Work<S, T> work) {
+            S session;
             try {
-                session.connection.close();
+                session = idle.poll(BORROW_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS);
+            } catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("Interrupted while waiting for a connection");
+            }
+            if (session == null) {
+                throw new IllegalStateException("No database connection became available");
+            }
+            try {
+                return work.run(session);
+            } catch (SQLException exception) {
+                throw new IllegalStateException("Database operation failed", exception);
+            } finally {
+                idle.add(session);
+            }
+        }
+
+        @Override
+        public void close() {
+            scheduler.dispose();
+            sessions.forEach(Session::close);
+        }
+    }
+
+    private abstract static class Session {
+        final Connection connection;
+
+        Session(Connection connection) {
+            this.connection = connection;
+        }
+
+        PreparedStatement prepare(String sql) throws SQLException {
+            try {
+                return connection.prepareStatement(sql);
+            } catch (SQLException exception) {
+                close();
+                throw exception;
+            }
+        }
+
+        void close() {
+            try {
+                connection.close();
             } catch (SQLException ignored) {
                 // Closing is best effort during shutdown.
             }
         }
     }
 
-    private <T> Mono<T> call(Work<T> work) {
-        return Mono.fromCallable(() -> use(work)).subscribeOn(scheduler);
-    }
-
-    private <T> T use(Work<T> work) {
-        Session session;
-        try {
-            session = idle.poll(BORROW_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS);
-        } catch (InterruptedException exception) {
-            Thread.currentThread().interrupt();
-            throw new IllegalStateException("Interrupted while waiting for a connection");
-        }
-        if (session == null) {
-            throw new IllegalStateException("No database connection became available");
-        }
-        try {
-            return work.run(session);
-        } catch (SQLException exception) {
-            throw new IllegalStateException("Database operation failed", exception);
-        } finally {
-            idle.add(session);
-        }
-    }
-
-    private static List<Responses.Post> posts(PreparedStatement statement) throws SQLException {
-        try (ResultSet rows = statement.executeQuery()) {
-            List<Responses.Post> posts = new ArrayList<>(20);
-            while (rows.next()) {
-                posts.add(
-                        new Responses.Post(
-                                rows.getLong(1),
-                                rows.getString(2),
-                                rows.getString(3),
-                                rows.getString(4),
-                                rows.getLong(5)));
-            }
-            return posts;
-        }
-    }
-
-    private interface Work<T> {
-        T run(Session session) throws SQLException;
-    }
-
-    private static final class Session {
-        final Connection connection;
+    private static final class ReadSession extends Session {
         final PreparedStatement health;
         final PreparedStatement feed;
         final PreparedStatement post;
+
+        ReadSession(Connection connection) throws SQLException {
+            super(connection);
+            try (Statement statement = connection.createStatement()) {
+                statement.execute("PRAGMA query_only = 1");
+            } catch (SQLException exception) {
+                close();
+                throw exception;
+            }
+            health = prepare("SELECT 1");
+            feed = prepare(FEED);
+            post = prepare(POST);
+        }
+    }
+
+    private static final class WriteSession extends Session {
         final PreparedStatement create;
         final PreparedStatement postExists;
         final PreparedStatement like;
 
-        Session(Connection connection) throws SQLException {
-            this.connection = connection;
-            try {
-                health = connection.prepareStatement("SELECT 1");
-                feed =
-                        connection.prepareStatement(
-                                SELECT_POST + " ORDER BY p.created_at DESC, p.id DESC LIMIT 20");
-                post = connection.prepareStatement(SELECT_POST + " WHERE p.id = ?");
-                create =
-                        connection.prepareStatement(
-                                "INSERT INTO posts (user_id, body) VALUES (?, ?)"
-                                        + " RETURNING id, created_at");
-                postExists = connection.prepareStatement("SELECT 1 FROM posts WHERE id = ?");
-                like =
-                        connection.prepareStatement(
-                                "INSERT INTO likes (user_id, post_id) VALUES (?, ?)"
-                                        + " ON CONFLICT (user_id, post_id) DO NOTHING");
-            } catch (SQLException exception) {
-                connection.close();
-                throw exception;
-            }
+        WriteSession(Connection connection) throws SQLException {
+            super(connection);
+            create =
+                    prepare(
+                            "INSERT INTO posts (user_id, body) VALUES (?, ?)"
+                                    + " RETURNING id, created_at");
+            postExists = prepare("SELECT 1 FROM posts WHERE id = ?");
+            like =
+                    prepare(
+                            "INSERT INTO likes (user_id, post_id) VALUES (?, ?)"
+                                    + " ON CONFLICT (user_id, post_id) DO NOTHING");
         }
     }
 }

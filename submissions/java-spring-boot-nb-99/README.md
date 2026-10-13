@@ -248,17 +248,22 @@ The app does not create or migrate the production schema. `JWT_SECRET` is requir
   connection, and Netty closes connections idle for 70 seconds. Netty holds no
   buffers for an idle connection, so the VPS's 65,535 open files bound the number
   of clients rather than memory.
-- SQLite calls block, so they never run on Netty's event loops. Four dedicated
-  threads, one per SQLite connection, run them, and handlers continue when a
-  result is ready.
-- The repository owns four SQLite connections and prepares its statements once per
-  connection. A request borrows one connection and its statements exclusively.
-  Statements cache query plans, never results, which rule 5 allows. The SQL is the
-  reference SQL with bound parameters. The like route first checks whether the
-  post exists, so it runs two statements. There is no ORM, application cache, table
-  copy, or schema change.
+- SQLite calls block, so they never run on Netty's event loops. Each SQLite
+  connection has its own thread, and handlers continue when a result is ready.
+- Three read-only connections (`PRAGMA query_only`) serve reads. One writer
+  connection serves every write, so writes queue in Java instead of colliding in
+  SQLite, where a waiting writer sleeps and retries. Each connection prepares its
+  statements once. Statements cache query plans, never results, which rule 5
+  allows. The like route first checks whether the post exists, so it runs two
+  statements. There is no ORM, application cache, table copy, or schema change.
+- SQLite builds the feed and post responses with `json_object` and
+  `json_group_array`, and the app sends those bytes unchanged. SQLite writes compact
+  JSON in the given key order and escapes quotes, backslashes, and control
+  characters. The feed's `ORDER BY` sits inside the aggregate, which fixes the
+  array order. Jackson writes the other responses.
 - Each connection enables foreign keys, WAL, `synchronous=NORMAL`, and a five-second
-  busy timeout. SQLite still serializes writers.
+  busy timeout. sqlite-jdbc's generated-key lookup is off, because the app reads
+  new ids from `RETURNING`.
 - Each insert uses auto-commit. The repository closes the `RETURNING` result, which
   resets the statement and completes the commit, before the handler returns.
   The existing unique constraint and `ON CONFLICT DO NOTHING` make likes idempotent.

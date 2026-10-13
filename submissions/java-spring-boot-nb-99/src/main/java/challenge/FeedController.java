@@ -4,6 +4,7 @@ import java.util.Map;
 import org.springframework.core.io.buffer.DataBuffer;
 import org.springframework.core.io.buffer.DataBufferLimitException;
 import org.springframework.core.io.buffer.DataBufferUtils;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.server.reactive.ServerHttpRequest;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -54,13 +55,13 @@ final class FeedController {
     }
 
     @GetMapping("/feed")
-    Mono<Map<String, ?>> feed() {
-        return posts.feed().map(feed -> Map.of("posts", feed));
+    Mono<ResponseEntity<byte[]>> feed() {
+        return posts.feed().map(FeedController::json);
     }
 
     @GetMapping("/posts/{id}")
-    Mono<Map<String, ?>> get(@PathVariable String id) {
-        return posts.get(postId(id)).map(post -> Map.of("post", post));
+    Mono<ResponseEntity<byte[]>> get(@PathVariable String id) {
+        return posts.get(postId(id)).map(FeedController::json);
     }
 
     @PostMapping("/posts")
@@ -111,6 +112,11 @@ final class FeedController {
             throw new ApiException(400, "body must be at most 500 characters");
         }
         return body;
+    }
+
+    /** A response whose JSON body SQLite already built. */
+    private static ResponseEntity<byte[]> json(byte[] body) {
+        return ResponseEntity.ok().contentType(MediaType.APPLICATION_JSON).body(body);
     }
 
     private static byte[] bytes(DataBuffer buffer) {

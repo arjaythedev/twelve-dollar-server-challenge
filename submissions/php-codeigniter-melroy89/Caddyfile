@@ -1,0 +1,45 @@
+{
+	auto_https off
+	admin off
+	log {
+		level WARN
+	}
+	servers {
+		protocols h1
+		timeouts {
+			idle 5m
+		}
+	}
+	frankenphp {
+		num_threads 2
+		php_ini {
+			opcache.enable 1
+			opcache.jit tracing
+			opcache.jit_buffer_size 64M
+			opcache.validate_timestamps 0
+			opcache.memory_consumption 128
+			opcache.max_accelerated_files 10000
+			realpath_cache_size 4096K
+			realpath_cache_ttl 600
+			memory_limit 128M
+			expose_php 0
+			display_errors 0
+			log_errors 1
+			date.timezone UTC
+			zend.assertions -1
+		}
+		worker {
+			file {$APP_ROOT}/public/frankenphp-worker.php
+			num 2
+		}
+	}
+}
+http://:{$PORT} {
+	bind {$HOST}
+	route {
+		rewrite * frankenphp-worker.php
+		php {
+			root {$APP_ROOT}/public
+		}
+	}
+}

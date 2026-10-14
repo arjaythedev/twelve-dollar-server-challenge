@@ -26,7 +26,9 @@ class Store
   FEED = "SELECT '{\"posts\":['||coalesce(group_concat(doc,',' ORDER BY created_at DESC,id DESC),'')||']}' " \
          "FROM (SELECT #{POST_JSON} AS doc,p.created_at,p.id FROM posts p JOIN users u ON u.id=p.user_id " \
          "ORDER BY p.created_at DESC,p.id DESC LIMIT 20)"
-  POST = "SELECT '{\"post\":'||#{POST_JSON}||'}' FROM posts p JOIN users u ON u.id=p.user_id WHERE p.id=?"
+  # `+?`, not `?`: with the join, SQLite's constant propagation makes the plan depend on the bound
+  # id, so every new id would recompile the statement (twice the cost of running it).
+  POST = "SELECT '{\"post\":'||#{POST_JSON}||'}' FROM posts p JOIN users u ON u.id=p.user_id WHERE p.id=+?"
   CREATE = "INSERT INTO posts(user_id,body) VALUES(?1,?2) RETURNING '{\"post\":'||json_object('id',id," \
            "'body',body,'created_at',created_at,'author',?3,'like_count',0)||'}'"
   LIKE = "INSERT INTO likes(user_id,post_id) SELECT ?1,?2 WHERE EXISTS(SELECT 1 FROM posts WHERE id=?2) " \

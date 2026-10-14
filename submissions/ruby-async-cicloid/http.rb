@@ -7,15 +7,17 @@ require_relative "epoll"
 # it parses the request line and the four headers the API needs, and writes each response with one
 # write. Requests are handled in order per connection (pipelining works); bodies use Content-Length.
 #
-# Idle keep-alive connections own no fiber: they sit in a kernel epoll set (one-shot). One Async task
-# waits for that set to become readable through the reactor, and a pool of worker fibers serves the
-# connections that are ready, then re-arms them. A fiber per connection would keep the stack pages
-# each one touched while serving (deep SQLite calls), which costs ~70 KB per idle connection.
+# Idle keep-alive connections own no fiber: they sit in a kernel epoll set (edge-triggered, so a
+# connection is registered once and never re-armed). One Async task waits for that set to become
+# readable through the reactor, and a pool of worker fibers serves the connections that are ready.
+# A fiber per connection would keep the stack pages each one touched while serving (deep SQLite
+# calls), which costs ~70 KB per idle connection.
 class HTTPServer
   READ_SIZE = 8192
   MAX_HEAD = 16 * 1024
   MAX_BODY = 1024 * 1024
   WORKERS = 256
+  MAX_WORKERS = 4096 # the pool grows past WORKERS only if every worker is busy
   MAX_EVENTS = 1024
 
   REASONS = {
@@ -56,11 +58,13 @@ class HTTPServer
   def run(task)
     @task = task
     @epfd = Epoll.create
-    @event = Epoll.event(Epoll::IN | Epoll::RDHUP | Epoll::ONESHOT)
+    @event = Epoll.event(Epoll::IN | Epoll::RDHUP | Epoll::ET)
     @sockets = [] # by descriptor
+    @state = [] # by descriptor: IDLE, BUSY (queued or being served) or AGAIN (busy, and new data came)
     @partial = {} # descriptor => bytes of a request that hasn't fully arrived
     @ready = Thread::Queue.new
-    WORKERS.times { task.async { work } }
+    @workers = @waiting = 0
+    WORKERS.times { add_worker }
     task.async { dispatch }
     task.async { accept_loop }
   end
@@ -78,6 +82,7 @@ class HTTPServer
       @open += 1
       fd = socket.fileno
       @sockets[fd] = socket
+      @state[fd] = IDLE
       Epoll.control(@epfd, Epoll::CTL_ADD, fd, @event)
     rescue Errno::EMFILE, Errno::ENFILE, Errno::ENOBUFS, Errno::ENOMEM
       sleep 0.01 # out of descriptors: let responses retire connections, then accept again
@@ -88,47 +93,93 @@ class HTTPServer
 
   # --- connections ----------------------------------------------------------------------
 
+  IDLE = 0
+  BUSY = 1
+  AGAIN = 2
+
   # Waits (through the reactor) for the epoll set to have ready connections, then queues them.
+  # A connection that is already queued or being served is only flagged, so one worker serves it
+  # at a time (requests stay in order) and the worker reads it again before letting it go idle.
   def dispatch
     poller = IO.for_fd(@epfd, autoclose: false)
     events = Epoll.events(MAX_EVENTS)
     loop do
       poller.wait_readable
-      Epoll.ready(@epfd, events, MAX_EVENTS) { |fd| @ready.push(fd) }
+      Epoll.ready(@epfd, events, MAX_EVENTS) do |fd|
+        case @state[fd]
+        when IDLE
+          @state[fd] = BUSY
+          @ready.push(fd)
+          add_worker if @waiting < @ready.size && @workers < MAX_WORKERS
+        when BUSY
+          @state[fd] = AGAIN
+        end
+      end
     end
   end
 
+  def add_worker
+    @workers += 1
+    @task.async { work }
+  end
+
   def work
+    io_buffer = IO::Buffer.new(READ_SIZE)
     loop do
-      service(@ready.pop)
+      @waiting += 1
+      fd = @ready.pop
+      @waiting -= 1
+      service(fd, io_buffer)
     rescue StandardError => error
       Console.error(self, error)
     end
   end
 
-  def service(fd)
+  # Edge-triggered: a read shorter than READ_SIZE emptied the socket, and anything that arrives
+  # after it raises a new edge, which `dispatch` turns into AGAIN while this worker still holds fd.
+  #
+  # The first read goes through the scheduler, so with io_uring the reads of every connection that
+  # became ready in a reactor pass are submitted together. That read waits for data, so it is only
+  # used where data is expected: a connection whose new data was already read in an earlier pass
+  # (a stale edge) would hold this worker until its client sends again, which is why the pool can
+  # grow. Re-reads after AGAIN, and reads past a full buffer, don't wait.
+  def service(fd, io_buffer)
     socket = @sockets[fd] or return
-    buffer = @partial.delete(fd)
+    wait = true
     loop do
-      data = socket.read_nonblock(READ_SIZE, exception: false)
-      break if data == :wait_readable
-      return disconnect(fd, socket) unless data
+      @state[fd] = BUSY
+      buffer = @partial.delete(fd)
+      loop do
+        data = if wait
+                 wait = false
+                 length = Fiber.scheduler.io_read(socket, io_buffer, 1, 0)
+                 io_buffer.get_string(0, length) if length.positive?
+               else
+                 socket.read_nonblock(READ_SIZE, exception: false)
+               end
+        break if data == :wait_readable
+        return disconnect(fd, socket) unless data
 
-      buffer = buffer ? buffer << data : data
-      break if data.bytesize < READ_SIZE
-    end
+        buffer = buffer ? buffer << data : data
+        break if data.bytesize < READ_SIZE
+      end
 
-    if buffer
-      rest = drain(socket, buffer) or return disconnect(fd, socket)
-      @partial[fd] = rest unless rest.empty?
+      if buffer
+        rest = drain(socket, buffer) or return disconnect(fd, socket)
+        @partial[fd] = rest unless rest.empty?
+      end
+      next if @state[fd] == AGAIN
+
+      @state[fd] = IDLE
+      return
     end
-    Epoll.control(@epfd, Epoll::CTL_MOD, fd, @event) # one-shot: re-arm for the next request
   rescue IOError, SystemCallError
     disconnect(fd, socket)
   end
 
   def disconnect(fd, socket)
     @sockets[fd] = nil
+    @state[fd] = nil
     @partial.delete(fd)
     @open -= 1
     socket.close unless socket.closed?
@@ -218,16 +269,8 @@ class HTTPServer
     write(socket, out)
   end
 
+  # Through the fiber scheduler: with io_uring, every worker's write is queued and submitted together.
   def write(socket, data)
-    loop do
-      written = socket.write_nonblock(data, exception: false)
-      if written == :wait_writable
-        socket.wait_writable
-      elsif written == data.bytesize
-        return
-      else
-        data = data.byteslice(written, data.bytesize - written)
-      end
-    end
+    socket.write(data)
   end
 end

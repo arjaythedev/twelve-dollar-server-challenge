@@ -3,6 +3,10 @@
 A .NET 10 Minimal API implementing the [challenge API](../../SPEC.md) with
 SQLite. Kestrel serves requests directly, without Nginx.
 
+The goal is to push throughput using optimizations I would keep in a production
+codebase. Each change should earn its place through measurement while keeping
+the code readable, writes durable, authentication correct and failures observable.
+
 ## Stack
 
 | Component | Version |

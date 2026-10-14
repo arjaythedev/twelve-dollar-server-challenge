@@ -5,7 +5,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
-import org.springframework.web.servlet.NoHandlerFoundException;
+import org.springframework.web.server.ResponseStatusException;
 
 @RestControllerAdvice
 final class ErrorHandler {
@@ -17,9 +17,12 @@ final class ErrorHandler {
                 .body(new Responses.Error(exception.getMessage()));
     }
 
-    @ExceptionHandler(NoHandlerFoundException.class)
-    ResponseEntity<Responses.Error> notFound() {
-        return ResponseEntity.status(404).body(new Responses.Error("not found"));
+    /** WebFlux also routes unmatched paths here as a 404 status exception. */
+    @ExceptionHandler(ResponseStatusException.class)
+    ResponseEntity<Responses.Error> status(ResponseStatusException exception) {
+        boolean notFound = exception.getStatusCode().value() == 404;
+        return ResponseEntity.status(notFound ? 404 : 500)
+                .body(new Responses.Error(notFound ? "not found" : "internal server error"));
     }
 
     @ExceptionHandler(Exception.class)

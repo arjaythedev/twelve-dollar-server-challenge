@@ -11,17 +11,21 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Repository;
 import org.sqlite.SQLiteConfig;
 import org.sqlite.SQLiteDataSource;
+import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Scheduler;
+import reactor.core.scheduler.Schedulers;
 
 /**
- * Owns the SQLite connections, each with its statements prepared once. A request borrows one
- * connection and its statements exclusively, so statements are never shared between threads.
- * Statements cache query plans, never results.
+ * Owns the SQLite connections, each with its statements prepared once. Statements cache query
+ * plans, never results. SQLite calls block, so each connection runs on its own thread instead of
+ * Netty's event loops.
  *
  * <p>Three read-only connections serve reads. One writer connection serves every write, so writes
  * queue in Java instead of colliding in SQLite, where a waiting writer sleeps and retries.
@@ -54,8 +58,8 @@ class PostRepository implements AutoCloseable {
             """
                     .formatted(POST_JSON);
 
-    private final Pool<ReadSession> readers;
-    private final Pool<WriteSession> writer;
+    private final Lane<ReadSession> readers;
+    private final Lane<WriteSession> writer;
 
     PostRepository(@Value("${SQLITE_PATH}") String path) throws SQLException {
         if (!Files.isRegularFile(Path.of(path))) {
@@ -81,43 +85,43 @@ class PostRepository implements AutoCloseable {
             Stream.concat(readSessions.stream(), writeSessions.stream()).forEach(Session::close);
             throw exception;
         }
-        readers = new Pool<>(readSessions);
-        writer = new Pool<>(writeSessions);
+        readers = new Lane<>("sqlite-read", readSessions);
+        writer = new Lane<>("sqlite-write", writeSessions);
     }
 
-    void checkHealth() {
-        readers.use(
-                session -> {
-                    try (ResultSet rows = session.health.executeQuery()) {
-                        if (!rows.next()) {
-                            throw new SQLException("SELECT 1 returned no row");
-                        }
-                    }
-                    return null;
-                });
+    Mono<Void> checkHealth() {
+        return readers.call(
+                        session -> {
+                            try (ResultSet rows = session.health.executeQuery()) {
+                                if (!rows.next()) {
+                                    throw new SQLException("SELECT 1 returned no row");
+                                }
+                            }
+                            return null;
+                        })
+                .then();
     }
 
     /** The feed response body, {"posts":[...]}, as UTF-8 JSON. */
-    byte[] feed() {
-        return readers.use(session -> json(session.feed));
+    Mono<byte[]> feed() {
+        return readers.call(session -> json(session.feed));
     }
 
     /** The post response body, {"post":{...}}, as UTF-8 JSON. */
-    byte[] get(long id) {
-        byte[] post =
-                readers.use(
-                        session -> {
-                            session.post.setLong(1, id);
-                            return json(session.post);
-                        });
-        if (post == null) {
-            throw new ApiException(404, "post not found");
-        }
-        return post;
+    Mono<byte[]> get(long id) {
+        return readers.call(
+                session -> {
+                    session.post.setLong(1, id);
+                    byte[] post = json(session.post);
+                    if (post == null) {
+                        throw new ApiException(404, "post not found");
+                    }
+                    return post;
+                });
     }
 
-    Responses.Post create(Authentication.User user, String body) {
-        return writer.use(
+    Mono<Responses.Post> create(Authentication.User user, String body) {
+        return writer.call(
                 session -> {
                     session.create.setLong(1, user.id());
                     session.create.setString(2, body);
@@ -133,9 +137,9 @@ class PostRepository implements AutoCloseable {
                 });
     }
 
-    /** Returns whether the user had already liked the post. */
-    boolean like(long userId, long postId) {
-        return writer.use(
+    /** Emits whether the user had already liked the post. */
+    Mono<Boolean> like(long userId, long postId) {
+        return writer.call(
                 session -> {
                     session.postExists.setLong(1, postId);
                     try (ResultSet row = session.postExists.executeQuery()) {
@@ -173,17 +177,28 @@ class PostRepository implements AutoCloseable {
         T run(S session) throws SQLException;
     }
 
-    /** Sessions that requests borrow in arrival order. */
-    private static final class Pool<S extends Session> implements AutoCloseable {
+    /** Sessions with one thread each, so a call never waits for a free session. */
+    private static final class Lane<S extends Session> implements AutoCloseable {
         final List<S> sessions;
         private final BlockingQueue<S> idle;
+        private final Scheduler scheduler;
 
-        Pool(List<S> sessions) {
+        Lane(String name, List<S> sessions) {
             this.sessions = List.copyOf(sessions);
-            idle = new ArrayBlockingQueue<>(sessions.size(), true, sessions);
+            idle = new ArrayBlockingQueue<>(sessions.size(), false, sessions);
+            scheduler =
+                    Schedulers.fromExecutorService(
+                            Executors.newFixedThreadPool(
+                                    sessions.size(),
+                                    Thread.ofPlatform().name(name + "-", 1).factory()),
+                            name);
         }
 
-        <T> T use(Work<S, T> work) {
+        <T> Mono<T> call(Work<S, T> work) {
+            return Mono.fromCallable(() -> use(work)).subscribeOn(scheduler);
+        }
+
+        private <T> T use(Work<S, T> work) {
             S session;
             try {
                 session = idle.poll(BORROW_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS);
@@ -205,6 +220,7 @@ class PostRepository implements AutoCloseable {
 
         @Override
         public void close() {
+            scheduler.dispose();
             sessions.forEach(Session::close);
         }
     }

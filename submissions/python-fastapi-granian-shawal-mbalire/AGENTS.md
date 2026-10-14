@@ -78,6 +78,23 @@ bench/      linux.py (the bench), loadgen.py, idleconns.py, compare.py  ← a fi
   cap (`--cpus`) doesn't model that (it hurt Python far more than Go). Estimate droplet scores against
   reference entries with known droplet scores, by CPU per request.
 
+## Handoff (2026-10-15)
+
+- **Git:** everything is committed and pushed to `fork` (`shawal-mbalire/twelve-dollar-server-challenge`),
+  branch `python-fastapi-granian-shawal-mbalire`; latest commits `d721dea` (descriptor budget,
+  Terraform bench, honest results) and `eb832d8` (README: #84 and #71). PR #41 updates from it.
+- **PR #41's description** was rewritten to match README "Results". Keep the two in sync whenever
+  the numbers change (`gh pr edit 41 --repo arjaythedev/twelve-dollar-server-challenge --body-file ...`).
+- **Waiting on the owner:** (1) build `--profile` for `just bench linux` (step 2 below; offered, not
+  started); (2) a 5-minute hold at 80k to rule out memory growth (all high-load runs held 120 s);
+  (3) deleting the stopped Colima profiles `bench-server` and `bench-gen`.
+- **The owner's last question was why we fail p99 at 140k.** Measured: CPU 0 is 84–87% busy, the
+  kernel takes 28% of it for ~1.5M reconnects, and one-core queueing makes p99 explode past ~80%
+  (121 ms at 76%, 203 ms at 83%, 1.8 s at 87%). Inferred, not yet profiled: our per-request cost is
+  the Granian → ASGI → Starlette → handler stack (scope dict, awaitables, a task per request, route
+  matching), plus stalls from GC, the 1 s WAL checkpoint and group commits that show up in p99 on a
+  full core. The profile in step 2 should confirm or correct this.
+
 ## Where we stand (2026-10-15)
 
 Every Python entry, plus #71 (Ruby), at 40k users, 120 s hold, 0 errors:

@@ -3,7 +3,17 @@ export interface ServerConfig {
   jwtSecret: Buffer;
   host: string;
   port: number;
+  idleTimeoutSec: number;
   startedAtMs: number;
+}
+
+// Bun sweeps idle sockets every 4 s, so N seconds really closes after 4*ceil(N/4)-4 .. 4*ceil(N/4) s.
+// 13 => 12-16 s: never during the <= 8 s pause before a like/post, which clients don't retry.
+const NGINX_IDLE_TIMEOUT_SEC = 70;
+const DIRECT_IDLE_TIMEOUT_SEC = 13;
+
+function isLoopback(host: string): boolean {
+  return host === "127.0.0.1" || host === "localhost" || host === "::1";
 }
 
 function required(name: string, fallback?: string): string {
@@ -25,6 +35,7 @@ export function loadConfig(): ServerConfig {
     jwtSecret: Buffer.from(secret, "utf8"),
     host,
     port,
+    idleTimeoutSec: isLoopback(host) ? NGINX_IDLE_TIMEOUT_SEC : DIRECT_IDLE_TIMEOUT_SEC,
     startedAtMs: Date.now(),
   };
 }

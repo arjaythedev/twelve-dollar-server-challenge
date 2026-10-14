@@ -47,6 +47,8 @@ export function openDatabase(sqlitePath: string): void {
   db.exec(`PRAGMA mmap_size = 536870912`);
   db.exec(`PRAGMA cache_size = -65536`);
   db.exec(`PRAGMA temp_store = MEMORY`);
+  db.exec(`PRAGMA journal_size_limit = 67108864`);
+  startBackgroundCheckpoints(sqlitePath);
 
   qHealth = db.query(`SELECT 1`);
   qFeed = db.query(FEED_SQL);
@@ -54,6 +56,17 @@ export function openDatabase(sqlitePath: string): void {
   qInsertPost = db.query(INSERT_POST_SQL);
   qInsertLike = db.query(INSERT_LIKE_SQL);
   qPostExists = db.query(POST_EXISTS_SQL);
+}
+
+// Checkpoints (and their fsync) run on a worker thread so they never block the event loop.
+// If the worker dies, fall back to SQLite's own auto-checkpoint so the WAL can't grow unbounded.
+function startBackgroundCheckpoints(sqlitePath: string): void {
+  db.exec(`PRAGMA wal_autocheckpoint = 0`);
+  const worker = new Worker(new URL("./checkpoint.ts", import.meta.url).href);
+  const fallback = () => db.exec(`PRAGMA wal_autocheckpoint = 1000`);
+  worker.addEventListener("error", fallback);
+  worker.addEventListener("close", fallback);
+  worker.postMessage(sqlitePath);
 }
 
 function toFeedPost(row: PostRow): FeedPost {

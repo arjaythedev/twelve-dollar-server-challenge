@@ -97,7 +97,7 @@ app.listen(
   {
     hostname: config.host,
     port: config.port,
-    idleTimeout: 70,
+    idleTimeout: config.idleTimeoutSec,
   } as Parameters<Elysia["listen"]>[0],
   () => {
     console.error(`listening on ${config.host}:${config.port}`);

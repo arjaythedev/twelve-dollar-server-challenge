@@ -60,7 +60,7 @@ int main(int argc, char **argv) {
         "SELECT '{\"posts\":['||coalesce(group_concat(doc,',' ORDER BY created_at DESC,id DESC),'')||']}' "
         "FROM (SELECT " POST_JSON " AS doc,p.created_at,p.id FROM posts p JOIN users u ON u.id=p.user_id "
         "ORDER BY p.created_at DESC,p.id DESC LIMIT 20)");
-    sqlite3_stmt *post = prepare("SELECT '{\"post\":'||" POST_JSON "||'}' FROM posts p JOIN users u ON u.id=p.user_id WHERE p.id=?");
+    sqlite3_stmt *post = prepare("SELECT '{\"post\":'||" POST_JSON "||'}' FROM posts p JOIN users u ON u.id=p.user_id WHERE p.id=+?");
     sqlite3_stmt *create = prepare(
         "INSERT INTO posts(user_id,body) VALUES(?1,?2) RETURNING '{\"post\":'||json_object('id',id,"
         "'body',body,'created_at',created_at,'author',?3,'like_count',0)||'}'");

@@ -25,12 +25,18 @@ function verifySignature(signingInput: string, signatureB64: string, secret: Buf
 
 function isPositiveIntString(value: unknown): value is string {
   if (typeof value !== "string" || value.length === 0) return false;
+  let nonzero = false;
   for (let i = 0; i < value.length; i++) {
     const code = value.charCodeAt(i);
     if (code < 48 || code > 57) return false;
+    if (code !== 48) nonzero = true;
   }
-  return BigInt(value) > 0n;
+  return nonzero;
 }
+
+// b64url('{"alg":"HS256","typ":"JWT"}'): what seed/make-seed.sh and test/test.sh sign with.
+// Matching headers skip a base64 decode + JSON.parse on every authed request.
+const EXPECTED_HEAD_B64 = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9";
 
 export function verifyBearerToken(
   authorization: string | null,
@@ -50,16 +56,22 @@ export function verifyBearerToken(
   const payloadB64 = token.slice(dot1 + 1, dot2);
   const sigB64 = token.slice(dot2 + 1);
 
-  let header: unknown;
   let payload: unknown;
+  if (headB64 !== EXPECTED_HEAD_B64) {
+    let header: unknown;
+    try {
+      header = decodeBase64UrlToJson(headB64);
+    } catch {
+      throw invalidToken();
+    }
+    if (typeof header !== "object" || header === null) throw invalidToken();
+    if ((header as Record<string, unknown>).alg !== "HS256") throw invalidToken();
+  }
   try {
-    header = decodeBase64UrlToJson(headB64);
     payload = decodeBase64UrlToJson(payloadB64);
   } catch {
     throw invalidToken();
   }
-  if (typeof header !== "object" || header === null) throw invalidToken();
-  if ((header as Record<string, unknown>).alg !== "HS256") throw invalidToken();
   if (!verifySignature(`${headB64}.${payloadB64}`, sigB64, secret)) {
     throw invalidToken();
   }

@@ -1,18 +1,23 @@
 import { describe, expect, test } from "bun:test";
-import { parseOpenFilesLimit, shouldRetire } from "../src/connections";
+import { parseOpenFilesLimit, shedForLoad } from "../src/connections";
 
-describe("shouldRetire", () => {
-  test("starts retiring above 92% of the limit", () => {
-    expect(shouldRetire(60_500, 65_535, false)).toBe(true);
+describe("shedForLoad", () => {
+  test("sheds nothing at or below 85% of the limit", () => {
+    expect(shedForLoad(55_000, 65_535)).toBe(0);
+    expect(shedForLoad(55_704, 65_535)).toBe(0);
   });
 
-  test("stops retiring below 88% of the limit", () => {
-    expect(shouldRetire(57_000, 65_535, true)).toBe(false);
+  test("sheds everything at or above 95% of the limit", () => {
+    expect(shedForLoad(62_259, 65_535)).toBe(1);
+    expect(shedForLoad(65_535, 65_535)).toBe(1);
   });
 
-  test("keeps its current state in between", () => {
-    expect(shouldRetire(59_000, 65_535, true)).toBe(true);
-    expect(shouldRetire(59_000, 65_535, false)).toBe(false);
+  test("ramps linearly in between (90% sheds half)", () => {
+    expect(shedForLoad(58_982, 65_535)).toBeCloseTo(0.5, 2);
+  });
+
+  test("returns 0 without a limit", () => {
+    expect(shedForLoad(60_000, 0)).toBe(0);
   });
 });
 

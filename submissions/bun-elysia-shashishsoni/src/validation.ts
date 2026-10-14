@@ -1,6 +1,6 @@
 import { bodyRequired, bodyTooLong, invalidPostId, malformedJson } from "./errors";
 
-const MAX_SQLITE_INT = 9223372036854775807n;
+const MAX_SAFE_INT_STR = "9007199254740991";
 const MISSING_SENTINEL = Number.MAX_SAFE_INTEGER + 1;
 
 function isDigits(value: string): boolean {
@@ -14,11 +14,16 @@ function isDigits(value: string): boolean {
 
 export function parsePostId(raw: string): number {
   if (!isDigits(raw)) throw invalidPostId();
-  const asBig = BigInt(raw);
-  if (asBig <= 0n) throw invalidPostId();
-  if (asBig > MAX_SQLITE_INT) return MISSING_SENTINEL;
-  if (asBig > BigInt(Number.MAX_SAFE_INTEGER)) return MISSING_SENTINEL;
-  return Number(asBig);
+  // Strip leading zeros ("0"/"00" is zero, not positive). Any stripped length
+  // above 16 exceeds MAX_SAFE_INTEGER, so it can only be a 404 sentinel:
+  // 17-19 digits are > 2^53 but <= SQLITE_MAX, 20+ exceed SQLITE_MAX too.
+  let i = 0;
+  while (i < raw.length && raw.charCodeAt(i) === 48) i++;
+  if (i === raw.length) throw invalidPostId();
+  const slen = raw.length - i;
+  if (slen > 16) return MISSING_SENTINEL;
+  if (slen === 16 && raw.slice(i) > MAX_SAFE_INT_STR) return MISSING_SENTINEL;
+  return Number(raw);
 }
 
 export function isMissingSentinel(id: number): boolean {

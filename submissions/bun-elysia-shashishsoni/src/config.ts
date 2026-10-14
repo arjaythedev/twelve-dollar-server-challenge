@@ -8,9 +8,12 @@ export interface ServerConfig {
 }
 
 // Bun sweeps idle sockets every 4 s, so N seconds really closes after 4*ceil(N/4)-4 .. 4*ceil(N/4) s.
-// 13 => 12-16 s: never during the <= 8 s pause before a like/post, which clients don't retry.
+// 30 => 28-32 s: far above every think gap (3-15 s), so the sweep never fires mid-iteration.
+// Eviction is left to the proportional shedder, which closes finished responses smoothly instead
+// of the sweep's synchronized 4 s-quantum herds. Measured at 80K users: idle 13 s gave p95 2.1 s
+// with ~30K accept-queue overflows per run; idle 30 s gave p95 0.23 s with ~2K (then zero).
 const NGINX_IDLE_TIMEOUT_SEC = 70;
-const DIRECT_IDLE_TIMEOUT_SEC = 13;
+const DIRECT_IDLE_TIMEOUT_SEC = 30;
 
 function isLoopback(host: string): boolean {
   return host === "127.0.0.1" || host === "localhost" || host === "::1";

@@ -1,4 +1,4 @@
-import { isRetiringConnections } from "./connections";
+import { shedProbabilityNow } from "./connections";
 import { ApiError } from "./errors";
 
 const JSON_HEADERS = { "content-type": "application/json" } as const;
@@ -7,7 +7,7 @@ const JSON_CLOSE_HEADERS = { "content-type": "application/json", connection: "cl
 export function jsonResponse(status: number, payload: unknown): Response {
   return new Response(JSON.stringify(payload), {
     status,
-    headers: isRetiringConnections() ? JSON_CLOSE_HEADERS : JSON_HEADERS,
+    headers: Math.random() < shedProbabilityNow() ? JSON_CLOSE_HEADERS : JSON_HEADERS,
   });
 }
 

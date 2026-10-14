@@ -1,0 +1,42 @@
+# The "$12 server": 1 vCPU, 2 GB RAM, no swap, nofile 65535, serving directly on :80.
+services:
+  server:
+    build: ..
+    image: twelve-dollar-bun
+    ports: ["${HOST_PORT:-8080}:80"]
+    cpus: 1
+    mem_limit: 2g
+    memswap_limit: 2g            # = mem_limit, i.e. no swap
+    ulimits:
+      nofile: { soft: 65535, hard: 65535 }
+    sysctls:
+      net.ipv4.ip_unprivileged_port_start: "0"   # stands in for CAP_NET_BIND_SERVICE (runs as non-root)
+    volumes:
+      - ../../../seed:/seed:ro
+    environment:
+      JWT_SECRET: twelve-dollar-challenge
+      SQLITE_PATH: /data/feed.db
+      HOST: 0.0.0.0
+      PORT: "80"
+
+
+  # Optional load generator (not part of the solution image). Start only via docker/bench-docker.sh.
+  # Runs inside the Docker network, so it bypasses the macOS<->VM bridge and the Mac's 16k port limit.
+  k6:
+    image: grafana/k6:1.8.2
+    profiles: [bench]
+    cpus: ${K6_CPUS:-2}
+    ulimits:
+      nofile: { soft: 1048576, hard: 1048576 }
+    sysctls:
+      net.ipv4.ip_local_port_range: "1024 65535"   # ~64k client connections to server:80
+    volumes:
+      - ../../../bench:/bench:ro
+      - ../../../seed:/seed:ro
+    environment:
+      BASE_URL: http://server:80
+      TOKENS: /seed/tokens.json
+      VUS: ${VUS:-1000}
+      DURATION: ${DURATION:-1m}
+      RAMP_UP: ${RAMP_UP:-60s}
+    command: ["run", "/bench/load.js"]

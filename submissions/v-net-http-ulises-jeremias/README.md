@@ -1,0 +1,28 @@
+# V + net.http
+
+| | |
+|---|---|
+| Language | V, pinned to `d67ee5500338554f54c7c8ca4cc00df42159577d` |
+| HTTP server | V standard library `net.http` |
+| SQLite | V standard library `db.sqlite`, linked to Ubuntu's SQLite |
+| **Nginx or direct** | **Direct**, listens on `HOST:PORT` |
+
+## Running
+
+```sh
+sudo bash install.sh
+bash build.sh
+SQLITE_PATH=/path/to/feed.db JWT_SECRET=twelve-dollar-challenge HOST=0.0.0.0 PORT=80 bash start.sh
+```
+
+## Design
+
+- The request handler uses `net.http.Server` and keeps route handling in small methods for health, feed, post lookup, post creation, and likes.
+- Database operations use `db.sqlite` calls and parameterized statements. A mutex protects the shared SQLite connection and the insert-plus-change-count sequence.
+- SQLite runs in WAL mode with `synchronous=NORMAL`. Each successful write waits for SQLite before returning its response.
+- JWT validation uses V's `encoding.base64`, `crypto.hmac`, and `crypto.sha256` packages. It verifies HS256 and expiration for every authenticated request.
+- The server listens directly, so it does not need a separate Nginx process.
+
+## License
+
+MIT, under the repository's [license](../../LICENSE).

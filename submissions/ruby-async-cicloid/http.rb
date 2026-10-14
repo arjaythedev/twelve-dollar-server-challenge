@@ -17,6 +17,7 @@ class HTTPServer
   MAX_HEAD = 16 * 1024
   MAX_BODY = 1024 * 1024
   WORKERS = 256
+  MAX_WORKERS = 4096 # the pool grows past WORKERS only if every worker is busy
   MAX_EVENTS = 1024
 
   REASONS = {
@@ -62,7 +63,8 @@ class HTTPServer
     @state = [] # by descriptor: IDLE, BUSY (queued or being served) or AGAIN (busy, and new data came)
     @partial = {} # descriptor => bytes of a request that hasn't fully arrived
     @ready = Thread::Queue.new
-    WORKERS.times { task.async { work } }
+    @workers = @waiting = 0
+    WORKERS.times { add_worker }
     task.async { dispatch }
     task.async { accept_loop }
   end
@@ -108,6 +110,7 @@ class HTTPServer
         when IDLE
           @state[fd] = BUSY
           @ready.push(fd)
+          add_worker if @waiting < @ready.size && @workers < MAX_WORKERS
         when BUSY
           @state[fd] = AGAIN
         end
@@ -115,9 +118,18 @@ class HTTPServer
     end
   end
 
+  def add_worker
+    @workers += 1
+    @task.async { work }
+  end
+
   def work
+    io_buffer = IO::Buffer.new(READ_SIZE)
     loop do
-      service(@ready.pop)
+      @waiting += 1
+      fd = @ready.pop
+      @waiting -= 1
+      service(fd, io_buffer)
     rescue StandardError => error
       Console.error(self, error)
     end
@@ -125,13 +137,26 @@ class HTTPServer
 
   # Edge-triggered: a read shorter than READ_SIZE emptied the socket, and anything that arrives
   # after it raises a new edge, which `dispatch` turns into AGAIN while this worker still holds fd.
-  def service(fd)
+  #
+  # The first read goes through the scheduler, so with io_uring the reads of every connection that
+  # became ready in a reactor pass are submitted together. That read waits for data, so it is only
+  # used where data is expected: a connection whose new data was already read in an earlier pass
+  # (a stale edge) would hold this worker until its client sends again, which is why the pool can
+  # grow. Re-reads after AGAIN, and reads past a full buffer, don't wait.
+  def service(fd, io_buffer)
     socket = @sockets[fd] or return
+    wait = true
     loop do
       @state[fd] = BUSY
       buffer = @partial.delete(fd)
       loop do
-        data = socket.read_nonblock(READ_SIZE, exception: false)
+        data = if wait
+                 wait = false
+                 length = Fiber.scheduler.io_read(socket, io_buffer, 1, 0)
+                 io_buffer.get_string(0, length) if length.positive?
+               else
+                 socket.read_nonblock(READ_SIZE, exception: false)
+               end
         break if data == :wait_readable
         return disconnect(fd, socket) unless data
 

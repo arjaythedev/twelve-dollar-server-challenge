@@ -30,7 +30,7 @@ For development there is a [justfile](https://just.systems) (no uv needed, just 
 | `just test` | unit tests (stdlib `unittest`) |
 | `just check` | the official 42-check suite, exactly as CI runs it |
 | `just bench local [vus] [duration] [ramp]` | k6 against `just run` |
-| `just bench linux <users> [--duration s] [--submission name]`, `just bench ladder` | one run, or the scoring ladder, in Docker with the droplet's limits (see Results). Terraform (`infra/iac/bench/`) creates the server and four load generators for each run and removes them after. `--submission` runs another entry (#1, #10, #13, #18, #84) on the same setup. Needs `terraform`; run `just vm start` first (a Colima VM) |
+| `just bench linux <users> [--duration s] [--submission name]`, `just bench ladder` | one run, or the scoring ladder, in Docker with the droplet's limits (see Results). Terraform (`infra/iac/bench/`) creates the server and four load generators for each run and removes them after. `--submission` runs another entry (#1, #10, #13, #18, #71, #84) on the same setup. Needs `terraform`; run `just vm start` first (a Colima VM) |
 | `just bench compare [rounds]` | head-to-head with `python-fastapi-cknutson12` on this machine: max req/s and server CPU per request |
 | `just profile [pyspy\|cprofile] [duration] [vus]` | fresh DB, server, k6 load, then a speedscope flamegraph (`build/profile.json`) or a cProfile dump (`build/profile.prof`, top 25 printed). py-spy needs sudo on macOS |
 
@@ -126,6 +126,17 @@ load: past the 65,535-descriptor limit every entry turns most requests into new 
 reconnects most cheaply. #84's own README claims 160k users. That was measured over loopback,
 which hides most of the network cost, so this bench can't confirm it, and neither can a droplet
 until one is run.
+
+What each PR measured for this entry on its own setup, and why it differs from the table above:
+
+| | Their setup | Their numbers for this entry | Their numbers for themselves |
+|---|---|---|---|
+| #84 | One 4-vCPU Xeon VM, server pinned to one core, load over loopback, 20k-descriptor limit, 15 s ramp and 45 s hold | 40k users pass, 60k fail | 140k pass (160k with a 5-minute hold) |
+| #71 | Two VMs (server and generator apart), same C generator | 25k: 47% CPU, p99 26 ms. 40k: 70% CPU, p99 1,660 ms | 25k: 27% CPU. 40k: 40% CPU, p99 28 ms |
+
+- **#84's 20k-descriptor limit** made our old code retire connections at about 19k, so from 40k on most of our requests were new connections, which is where Granian is expensive. The version measured here keeps connections open until the real 65,535 limit.
+- **#71's 40k tail** didn't reproduce here (p99 4.0–6.8 ms). Their README attributes part of it to their load generator falling behind. Our earlier code also retired connections at 40k and stalled its event loop for 16 ms every second; both are fixed in this version.
+- **The ranking is the same everywhere:** both entries need less CPU per request than this one.
 
 ### Where this entry gives out
 

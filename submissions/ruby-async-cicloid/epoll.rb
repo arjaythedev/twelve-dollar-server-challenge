@@ -16,6 +16,7 @@ module Epoll
   IN = 0x001
   RDHUP = 0x2000
   ONESHOT = 1 << 30
+  ET = 1 << 31
   CLOEXEC = 0o2000000
   # struct epoll_event is packed on x86_64 (12 bytes) and naturally aligned elsewhere (16 bytes).
   SIZE, DATA = RUBY_PLATFORM.start_with?("x86_64") ? [12, 4] : [16, 8]

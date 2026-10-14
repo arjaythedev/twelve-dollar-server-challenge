@@ -52,16 +52,21 @@ class Store
     @exists = @db.prepare_splat(EXISTS)
     @ping = @db.prepare_splat("SELECT 1")
     @batch = nil
+    @checkpoint_due = false
   end
 
+  # Every statement is reset as soon as its row is taken: a statement left mid-step keeps its read
+  # transaction open, and while it is open no checkpoint can run.
   def feed
     document = @feed.reset.next
+    @feed.reset
     @batch&.wait
     document
   end
 
   def post(id)
     document = @post.reset.bind(id).next
+    @post.reset
     @batch&.wait
     document
   end
@@ -69,7 +74,7 @@ class Store
   def create(user_id, username, body)
     batch = begin_batch
     document = @create.reset.bind(user_id, body, username).next
-    @create.reset # finish the statement so COMMIT doesn't see it in progress
+    @create.reset
     batch.wait
     document
   end
@@ -81,18 +86,25 @@ class Store
               elsif @exists.reset.bind(post_id).next then :already_liked
               else :missing
               end
+    @exists.reset
     batch.wait
     outcome
   end
 
   def ping
-    @ping.reset.next
+    ok = @ping.reset.next
+    @ping.reset
+    ok
   end
 
+  # Called every second. A checkpoint can't run inside a write batch, so then it runs right after
+  # that batch commits.
   def checkpoint
-    @db.execute("PRAGMA wal_checkpoint(PASSIVE)") unless @batch
-  rescue Extralite::Error
-    nil # retried on the next tick
+    if @batch
+      @checkpoint_due = true
+    else
+      checkpoint!
+    end
   end
 
   private
@@ -119,6 +131,14 @@ class Store
       return batch.reject(error)
     end
     batch.resolve(true)
+    checkpoint! if @checkpoint_due
+  end
+
+  def checkpoint!
+    @checkpoint_due = false
+    @db.execute("PRAGMA wal_checkpoint(PASSIVE)")
+  rescue Extralite::Error => error
+    warn "checkpoint failed: #{error.message}" # retried on the next tick
   end
 end
 

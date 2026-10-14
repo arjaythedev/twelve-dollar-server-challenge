@@ -1,0 +1,18 @@
+# Profiling: local-bench/Caddyfile.worker + Excimer (see profile/excimer.php).
+{
+	auto_https off
+	admin off
+
+	frankenphp {
+		php_ini auto_prepend_file /app/local-bench/profile/excimer.php
+		worker {
+			file ./public/index.php
+		}
+	}
+}
+
+http://:{$PORT} {
+	bind {$HOST}
+	root ./public
+	php_server
+}

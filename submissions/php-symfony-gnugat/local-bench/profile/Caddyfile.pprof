@@ -1,0 +1,12 @@
+# Profiling: the submitted Caddyfile with the admin endpoint on, for Go's pprof.
+{
+	auto_https off
+	admin localhost:2019
+}
+
+# Classic mode: Symfony boots on every request, like with PHP-FPM.
+http://:{$PORT} {
+	bind {$HOST}
+	root ./public
+	php_server
+}

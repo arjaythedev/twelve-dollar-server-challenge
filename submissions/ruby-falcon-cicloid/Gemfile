@@ -1,11 +1,7 @@
 source "https://rubygems.org"
 
-gem "falcon", "0.57.0"
 gem "async", "2.46.0"
-gem "async-http", "0.105.0"
 gem "io-event", "1.22.1"
-gem "protocol-http", "0.72.0"
-gem "protocol-http1", "0.41.0"
 gem "extralite", "3.1.3" # built against the SQLite in /opt/sqlite (install.sh)
 gem "rbnacl", "7.1.2"
 gem "json", "3.1.0"

@@ -47,8 +47,10 @@ final class NativeDb implements AutoCloseable {
     NativeDb(String path) throws Throwable {
         try (Arena arena = Arena.ofConfined()) {
             MemorySegment out = arena.allocate(ADDRESS);
+            // unix-excl: one process-wide lock on the file and the WAL index in heap memory, so read transactions
+            // make no fcntl calls; other processes can't open the database while we run.
             int rc = (int) Sqlite.open_v2.invokeExact(arena.allocateFrom(path), out,
-                    Sqlite.OPEN_READWRITE | Sqlite.OPEN_NOMUTEX | Sqlite.OPEN_EXRESCODE, MemorySegment.NULL);
+                    Sqlite.OPEN_READWRITE | Sqlite.OPEN_NOMUTEX | Sqlite.OPEN_EXRESCODE, arena.allocateFrom("unix-excl"));
             db = out.get(ADDRESS, 0);
             if (rc != Sqlite.OK) throw new SqliteException(rc, "cannot open " + path + ": " + errmsg());
             for (String pragma : PRAGMAS) {

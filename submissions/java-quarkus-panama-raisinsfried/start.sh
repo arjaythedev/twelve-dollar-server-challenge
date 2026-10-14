@@ -5,7 +5,7 @@ cd "$(dirname "$0")"
 . ./env.sh
 
 exec java \
-  -Xms256m -Xmx768m \
+  -Xms256m -Xmx1g -Xmn384m \
   -XX:+UseG1GC -XX:MaxGCPauseMillis=100 \
   -XX:MaxDirectMemorySize=128m \
   -Dquarkus.http.host="${HOST:-0.0.0.0}" \

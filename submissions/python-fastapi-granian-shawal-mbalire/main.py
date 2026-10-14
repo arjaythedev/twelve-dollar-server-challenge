@@ -8,7 +8,7 @@ import orjson
 from adapters.asgi_http import create_app
 from adapters.clock import SystemClock
 from adapters.cprofile_profiler import CProfileRecorder
-from adapters.fd_budget import FdBudget
+from adapters.descriptor_budget import DescriptorBudget
 from adapters.jwt_hs256 import Hs256Verifier
 from adapters.sqlite_posts import SqliteConfig, SqlitePostStore
 from domain.workflows import FeedApi
@@ -17,7 +17,7 @@ from infra.config import load_settings
 settings = load_settings(os.environ)
 store = SqlitePostStore(SqliteConfig(path=settings.sqlite_path))
 api = FeedApi(store, Hs256Verifier(settings.jwt_secret), SystemClock(), decode_json=orjson.loads)
-budget = FdBudget()
+budget = DescriptorBudget()
 resources = [store, budget] + ([CProfileRecorder(settings.profile_out)] if settings.profile_out else [])
 app = create_app(api, budget, resources)
 

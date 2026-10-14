@@ -2,3 +2,5 @@
 .devtools/
 __pycache__/
 build/
+.terraform/
+*.tfstate*

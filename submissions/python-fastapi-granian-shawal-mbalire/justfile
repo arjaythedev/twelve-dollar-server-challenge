@@ -43,7 +43,7 @@ check:
     env = dict(os.environ, PYTHON=python)
     raise SystemExit(subprocess.run(["bash", "test/run.sh", "submissions/{{folder}}"], cwd="{{repo}}", env=env).returncode)
 
-# load tests: local [vus dur ramp] (k6 vs `just run`) | linux <users> [--duration s] | ladder | compare [rounds]
+# load tests: local [vus dur ramp] (k6 vs `just run`) | linux <users> [--cpus n] | ladder | calibrate | memory | compare [rounds]
 [group: "perf"]
 bench target="local" *args:
     #!/usr/bin/env python3
@@ -56,14 +56,14 @@ bench target="local" *args:
         resource.setrlimit(resource.RLIMIT_NOFILE, (65535 if hard == resource.RLIM_INFINITY else min(65535, hard), hard))
         cmd = ["k6", "run", "-e", "VUS=" + vus, "-e", "DURATION=" + duration, "-e", "RAMP_UP=" + ramp,
                "-e", "BASE_URL=http://127.0.0.1:3000", "{{repo}}/bench/load.js"]
-    elif target in ("linux", "ladder"):
-        cmd = ["python3", bench + "/linux.py", "run" if target == "linux" else "ladder"] + args
+    elif target in ("linux", "ladder", "calibrate", "memory"):
+        cmd = ["python3", bench + "/linux.py", "run" if target == "linux" else target] + args
     elif target == "compare":
         python = subprocess.run(["just", "_python"], cwd="{{root}}", capture_output=True, text=True, check=True).stdout.strip()
         os.environ["PYTHON"] = python
         cmd = ["python3", bench + "/compare.py"] + args
     else:
-        raise SystemExit("bench target must be local, linux, ladder or compare, got " + target)
+        raise SystemExit("bench target must be local, linux, ladder, calibrate, memory or compare, got " + target)
     raise SystemExit(subprocess.run(cmd).returncode)
 
 # the Docker VM for `just bench linux`: start | stop | status (Colima profile `bench`, 8 CPUs / 8 GB)

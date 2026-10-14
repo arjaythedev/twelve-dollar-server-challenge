@@ -30,7 +30,7 @@ For development there is a [justfile](https://just.systems) (no uv needed, just 
 | `just test` | unit tests (stdlib `unittest`) |
 | `just check` | the official 42-check suite, exactly as CI runs it |
 | `just bench local [vus] [duration] [ramp]` | k6 against `just run` |
-| `just bench linux <users> [--duration s]`, `just bench ladder` | one run, or the scoring ladder, in Docker with the droplet's limits: the server gets 1 CPU, 1792 MiB with no swap and nofile 65535, built with our own `install.sh` and `build.sh` on Ubuntu 24.04. Load comes from `bench/loadgen.py`, a `load.js` clone that scales past 100k users. Run `just vm start` first (a Colima VM) |
+| `just bench linux <users> [--duration s] [--submission name]`, `just bench ladder` | one run, or the scoring ladder, in Docker with the droplet's limits (see Results). Terraform (`infra/iac/bench/`) creates the server and four load generators for each run and removes them after. `--submission` runs another entry (#1, #10, #13, #18, #84) on the same setup. Needs `terraform`; run `just vm start` first (a Colima VM) |
 | `just bench compare [rounds]` | head-to-head with `python-fastapi-cknutson12` on this machine: max req/s and server CPU per request |
 | `just profile [pyspy\|cprofile] [duration] [vus]` | fresh DB, server, k6 load, then a speedscope flamegraph (`build/profile.json`) or a cProfile dump (`build/profile.prof`, top 25 printed). py-spy needs sudo on macOS |
 
@@ -39,7 +39,8 @@ For development there is a [justfile](https://just.systems) (no uv needed, just 
 Hexagonal (ports and adapters). `domain/` holds the rules and the five workflows and imports only the
 standard library. `adapters/` implements the ports (SQLite store, HS256 verifier, clock, cProfile, descriptor guard)
 and the HTTP driving adapter. `infra/` reads settings and runs build/start. `main.py` wires them
-together. `bench/` holds the load-testing tools, and `tests/` the unit tests.
+together. `bench/` holds the load-testing tools, `infra/iac/bench/` the Terraform for the benchmark's
+containers, and `tests/` the unit tests.
 
 ## Optimizations, and where they came from
 
@@ -72,29 +73,71 @@ together. `bench/` holds the load-testing tools, and `tests/` the unit tests.
 - **`--backpressure 65535`**. Granian holds one backpressure permit per open connection, and the default
   is backlog ÷ workers = 4096. In direct mode every user keeps its own connection, so from user 4,097 on,
   connections sat in the kernel queue: at 20k users this gave 22% timeouts with the CPU 7% busy.
-- **Descriptor guard** (PR #13). Once a second the server counts `/proc/self/fd`. Above 40,000 open
-  descriptors, responses carry `Connection: close` and those users reconnect for their next request.
-  This keeps us under `LimitNOFILE=65535` and caps the memory used by idle connections.
+- **Descriptor guard** (PR #13, budget from PR #71). Every 0.25 s one `fstat` checks whether
+  descriptor 65,279 (the limit minus 256) is open. Linux hands out the lowest free descriptor, so it
+  is open only once that many are in use. While it is, responses carry `Connection: close` and
+  those users reconnect for their next request. This keeps us under `LimitNOFILE=65535` without
+  retiring connections early.
 - **Keep-alive**: Granian's header-read timeout is 60 s, its maximum. That is far longer than the load
   script's longest pause between requests (15 s).
 
-## Results (Docker, droplet limits, Apple M-series core, 60 s holds)
+## Results
 
-| Users | Errors | p95 | p99 | Server CPU (run average) | Peak memory |
-|---|---|---|---|---|---|
-| 20,000 | 0% | 0.3 ms | 3.8 ms | 14% | 594 MiB |
-| 40,000 | 0% | 0.8 ms | 9.5 ms | 27% | 872 MiB |
-| 80,000 | 0% | 23 ms | 99 ms | 54% | 931 MiB |
-| 120,000 | fail | 22 s | 26 s | saturated | 1,745 MiB |
+**Not a droplet score.** These come from `just bench linux` on an Apple M-series machine, whose cores
+are faster than a droplet's vCPU. The setup is declared in Terraform (`infra/iac/bench/`): the server
+container gets one CPU, 1792 MiB with no swap and nofile 65535, and is built with our own `install.sh`
+and `build.sh` on Ubuntu 24.04. Four load-generator containers on the other CPUs run PR #14's C
+generator (the `load.js` user loop) over a Docker bridge, not loopback. The kernel's network work for
+the server is steered onto the server's CPU, so the server pays for its own TCP stack, as on a real box.
 
-A droplet's vCPU is slower than this core, so expect a lower real limit.
+### Every Python entry at 40,000 users (60 s ramp, 120 s hold, 0 errors for all)
 
-Against the merged FastAPI entry (`just bench compare`, same Mac, same load):
+| Entry | Server CPU per request | CPU 0 busy | p95 / p99 | Peak memory |
+|---|---|---|---|---|
+| #84 PyPy + raw epoll | **50 µs** | 21% | 1.0 / 3.5 ms | 404 MiB |
+| **this entry (#41)** | **73–81 µs** | 27% | 2.0–2.3 / 4.0–6.8 ms | 900–980 MiB |
+| #10 lean FastAPI on uvicorn | 81 µs | 27% | 1.9 / 6.1 ms | 779 MiB |
+| #13 Granian RSGI | 120 µs | 39% | 18.9 / 22.3 ms | 926 MiB |
+| #1 FastAPI on uvicorn | 130 µs | 41% | 2.7 / 7.3 ms | — |
 
-| | python-fastapi-cknutson12 (uvicorn) | this entry (Granian) |
-|---|---|---|
-| Server CPU per request, saturated | 56 µs | 37 µs (−34%) |
-| Server CPU, `load.js` at 2,000 users | 10.4 s | 7.5 s (−29%) |
+Ranges are repeat runs. CPU per request is the server's cgroup CPU over the run divided by requests.
+This entry ties #10 and uses about 40% less CPU per request than #1 and #13. #84, which uses no
+framework and runs on PyPy, uses about a third less than we do.
+
+### Against the two PRs that benchmarked this one (#84 and #71)
+
+PR #84 (Python on PyPy, raw epoll) and PR #71 (Ruby, async) both compared themselves with this entry
+on their own machines. Here are their current versions and ours on the same bench, at the same loads:
+
+| Users | Entry | Server CPU per request | CPU 0 busy | p99 | Peak memory | Result |
+|---|---|---|---|---|---|---|
+| 40,000 | #84 PyPy + epoll | 50 µs | 21% | 3.5 ms | 404 MiB | pass |
+| | #71 Ruby async | 50 µs | 21% | 4.4 ms | 525 MiB | pass |
+| | **this entry** | **73–81 µs** | **27%** | **4.0–6.8 ms** | **900–980 MiB** | **pass** |
+| 80,000 | #84 | 51 µs | 38% | 8.9 ms | 617 MiB | pass |
+| | #71 | 54 µs | 38% | 13.8 ms | 602 MiB | pass |
+| | **this entry** | **74–75 µs** | **50%** | **15–16 ms** | **1,411–1,422 MiB** | **pass** |
+| 140,000 | #84 | 51 µs | 61% | 17 ms | 460 MiB | pass |
+| | #71 | 69 µs | 79% | 407 ms | 744 MiB | pass |
+| | **this entry** | **73–79 µs** | **84–87%** | **433–1,758 ms** | **1,283–1,474 MiB** | **one pass, one fail** |
+
+Both use about a third less CPU per request than this entry, and less memory. #84's lead grows with
+load: past the 65,535-descriptor limit every entry turns most requests into new connections, and #84
+reconnects most cheaply. #84's own README claims 160k users. That was measured over loopback,
+which hides most of the network cost, so this bench can't confirm it, and neither can a droplet
+until one is run.
+
+### Where this entry gives out
+
+`just bench ladder 160000 --duration 120 --resolution 10000`: the highest passing load here is
+**130,000 users** (p99 203 ms). **CPU fails first**: 83% busy at 130k, 98% at 160k. Past ~65k
+users nearly every request is a new TCP connection, and the kernel's share of the core grows to a
+third. Memory comes second (1.5 of 1.75 GiB at 160k). There were no errors at any load.
+
+**Expected droplet score: about 22,000 users.** #10 costs the same per request and scored 22k on the
+droplet. We have not run on a droplet ourselves. An earlier version of this README claimed 80k from a
+loopback benchmark, which charged most of the server's network work to the load generator. That claim
+was wrong.
 
 ## License
 

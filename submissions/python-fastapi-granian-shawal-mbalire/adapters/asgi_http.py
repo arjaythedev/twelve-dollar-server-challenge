@@ -13,7 +13,7 @@ import orjson
 from fastapi import FastAPI
 from starlette.routing import Route
 
-from adapters.fd_budget import FdBudget
+from adapters.descriptor_budget import DescriptorBudget
 from domain.errors import AppError, ErrorCode
 from domain.models import Err, Ok, Result
 from domain.ports import Resource
@@ -79,7 +79,7 @@ class AsgiEndpoint:
 
     __slots__ = ("_handler", "_budget")
 
-    def __init__(self, handler: Handler, budget: FdBudget):
+    def __init__(self, handler: Handler, budget: DescriptorBudget):
         self._handler = handler
         self._budget = budget
 
@@ -104,7 +104,7 @@ def _document(status: int, result: Result[bytes]) -> tuple[int, bytes]:
             return render_error(error)
 
 
-def build_routes(api: FeedApi, budget: FdBudget) -> list[Route]:
+def build_routes(api: FeedApi, budget: DescriptorBudget) -> list[Route]:
     async def health(scope: Scope, receive: Receive) -> tuple[int, bytes]:
         match api.health():
             case Ok(uptime_s):
@@ -141,7 +141,7 @@ def build_routes(api: FeedApi, budget: FdBudget) -> list[Route]:
     ]
 
 
-def create_app(api: FeedApi, budget: FdBudget, resources: Sequence[Resource]) -> FastAPI:
+def create_app(api: FeedApi, budget: DescriptorBudget, resources: Sequence[Resource]) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         started: list[Resource] = []

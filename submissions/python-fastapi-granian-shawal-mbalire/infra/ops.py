@@ -28,7 +28,7 @@ GRANIAN_FLAGS = [
     "--backlog", "4096",
     # Granian holds one backpressure permit per open connection (default backlog/workers = 4096),
     # so with every user on its own keep-alive socket, connection 4097 onward waited unserved.
-    # The descriptor limit (65535) and adapters/fd_budget.py are the real cap.
+    # The descriptor limit (65535) and adapters/descriptor_budget.py are the real cap.
     "--backpressure", "65535",
     "--http1-header-read-timeout", "60000",  # ms; Granian's maximum
 ]

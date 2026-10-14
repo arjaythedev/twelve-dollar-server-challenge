@@ -15,6 +15,15 @@ mv "$tmp/v-${V_COMMIT}" /opt/vlang
 # the same name as its type. These unused aliases preserve the C ABI and let
 # the generated cache parse correctly.
 sed -i 's/^\([[:space:]]*\)u32 u32$/\1u32_value u32/; s/^\([[:space:]]*\)u64 u64$/\1u64_value u64/' /opt/vlang/vlib/fasthttp/fasthttp_linux.c.v
+# The challenge's headers are small and the largest seeded feed JSON is about
+# 5 KiB. fasthttp grows these buffers when needed, so smaller initial capacities
+# reduce memory held by idle keep-alive connections.
+fasthttp_linux=/opt/vlang/vlib/fasthttp/fasthttp_linux.v
+grep -qFx 'const read_buf_cap = 8 * 1024' "$fasthttp_linux"
+grep -qFx 'const write_buf_cap = 16 * 1024' "$fasthttp_linux"
+sed -i 's/^const read_buf_cap = 8 \* 1024$/const read_buf_cap = 1024/; s/^const write_buf_cap = 16 \* 1024$/const write_buf_cap = 8 * 1024/' "$fasthttp_linux"
+grep -qFx 'const read_buf_cap = 1024' "$fasthttp_linux"
+grep -qFx 'const write_buf_cap = 8 * 1024' "$fasthttp_linux"
 curl -fsSL "https://github.com/vlang/vc/archive/${VC_COMMIT}.tar.gz" | tar -xz -C "$tmp"
 mv "$tmp/vc-${VC_COMMIT}" /opt/vlang/vc
 VJOBS=1 make -C /opt/vlang v

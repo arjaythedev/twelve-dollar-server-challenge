@@ -1,0 +1,16 @@
+spring:
+  application:
+    name: feed
+  main:
+    banner-mode: off
+  jackson:
+    property-naming-strategy: SNAKE_CASE
+server:
+  address: ${HOST:127.0.0.1}
+  port: ${PORT:3000}
+logging:
+  level:
+    root: warn
+feed:
+  sqlite-path: ${SQLITE_PATH}
+  jwt-secret: ${JWT_SECRET}

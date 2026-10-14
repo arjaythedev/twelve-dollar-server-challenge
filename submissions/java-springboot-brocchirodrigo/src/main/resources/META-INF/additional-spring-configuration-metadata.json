@@ -1,0 +1,14 @@
+{
+  "properties": [
+    {
+      "name": "feed.sqlite-path",
+      "type": "java.lang.String",
+      "description": "Path of the SQLite database file, from SQLITE_PATH."
+    },
+    {
+      "name": "feed.jwt-secret",
+      "type": "java.lang.String",
+      "description": "HS256 secret used to verify bearer tokens, from JWT_SECRET."
+    }
+  ]
+}

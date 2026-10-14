@@ -9,19 +9,106 @@
 
 ## Optimizations
 
-- **No `node:http`.** Once SQLite was fast, most CPU went to Node's HTTP layer (request/response objects,
-  streams, events). The server reads raw bytes from each TCP socket, parses the request line and the few
-  headers it needs (`Content-Length`, `Authorization`, `Connection`, `Expect`), and writes each response
-  as one string. Pipelined requests are answered in order, in one write. Measured under the same load:
-  about 18% less CPU per request and half the memory. It speaks keep-alive, HTTP/1.0, `Connection: close`
-  and `Expect: 100-continue`, and closes the connection on malformed or oversized requests (400/413/431).
-  Chunked request bodies get a 411: clients send `Content-Length` for small JSON bodies.
-- Every statement is prepared once at startup and reused.
-- SQLite builds the whole response body for `GET /feed` and `GET /posts/:id`
-  (`json_object` / `json_group_array`, keys in the spec's order), so one string crosses into JS
-  instead of row objects. That's about 10% less CPU per request, mostly from less allocation and GC.
-- Statements return rows as arrays (`setReturnArrays`), not objects.
-- Likes take one statement on the happy path: `INSERT ... SELECT ... FROM posts WHERE id = ? ON CONFLICT DO NOTHING`
-  inserts only when the post exists. The existence check runs only when nothing was inserted.
-- PRAGMAs: WAL, `synchronous=NORMAL`, 64 MB page cache, 256 MB `mmap`.
-- Idle connections are kept for 70 s, longer than any k6 think time, so users keep their connection instead of reconnecting.
+In the order we made them. Each one was measured before and after (see [Measurements](#measurements)).
+
+1. **Prepared statements, sensible PRAGMAs.** Every statement is prepared once at startup and reused.
+   WAL, `synchronous=NORMAL`, 64 MB page cache, 256 MB `mmap`, `temp_store=MEMORY`.
+2. **One statement per like.** `INSERT INTO likes ... SELECT ?, id FROM posts WHERE id = ? ON CONFLICT DO NOTHING`
+   inserts only when the post exists. The extra existence check runs only when nothing was inserted
+   (already liked, or no such post), to tell 200 from 404.
+3. **Rows as arrays.** Statements return rows as arrays (`setReturnArrays`, Node 24), not objects.
+4. **SQLite builds the read responses.** `GET /feed` and `GET /posts/:id` select one string, built with
+   `json_object` / `json_group_array` (keys in the spec's order), so one string crosses into JS instead of
+   20 row objects that JS then serializes. The bytes are identical to the old output (checked against the
+   golden files and 20,000 random posts).
+5. **No `node:http`.** Once SQLite was fast, most CPU went to Node's HTTP layer (request/response
+   objects, streams, events). The server reads raw bytes from each TCP socket, parses the request line
+   and the few headers it needs (`Content-Length`, `Authorization`, `Connection`, `Expect`), and writes
+   each response as one string. Pipelined requests are answered in order, in one write.
+6. **Long keep-alive.** Idle connections are kept for 70 s, longer than any k6 think time, so users keep
+   their connection instead of reconnecting.
+
+### The HTTP layer
+
+It speaks keep-alive, pipelining, HTTP/1.0, `Connection: close` and `Expect: 100-continue`, and sends a
+`Date` header. Malformed requests get a 400, headers over 8 KB a 431, bodies over 64 KB a 413, and the
+connection is closed. Chunked request bodies get a 411: clients send `Content-Length` for small JSON
+bodies. Besides `test/test.sh`, it was tested with raw sockets: requests split into single bytes, bodies
+split across packets, many requests in one packet, and a client that sends without ever reading.
+
+## Measurements
+
+These numbers come from a dev box, not the droplet, so compare them with each other, not with other
+submissions. The server ran in a cgroup like a small VM: pinned to one core of a Ryzen desktop, with a
+CPU quota, 2 GB memory cap and no swap. k6 ran `bench/load.js` on the other cores, never on the server
+core's hyperthread sibling. Each run was a 30 s ramp and a 1 minute hold.
+
+**CPU per request** is the cgroup's CPU time (user + kernel) divided by requests served, so it counts
+the kernel's network work too. It's the number we trusted most: the V8 profiler leaves out kernel time
+and gets skewed when the CPU is throttled.
+
+### CPU and memory per version (10,000 users, no CPU limit)
+
+| Version | CPU per request | user | kernel | Memory peak |
+|---|---:|---:|---:|---:|
+| `node:http`, rows as objects, JSON built in JS | 157 µs | 117 µs | 40 µs | |
+| `node:http`, SQLite builds the JSON (4) | 143 µs | 102 µs | 41 µs | 255 MB |
+| **`node:net`, hand-rolled HTTP (5)** | **120 µs** | **81 µs** | **39 µs** | **113 MB** |
+
+Kernel time barely moves: that's the network stack, the same work for any server. Everything we
+gained came out of user space, where the per-request JS work went from 117 µs to 81 µs (−31%).
+
+### Squeezing the CPU (20,000 users)
+
+The quota is a share of one core. Fewer cores' worth of CPU for the same 20,000 users shows how much
+headroom is left. "Pass" is the challenge's bar: p95 < 500 ms, p99 < 1 s, errors < 1%.
+
+| Version | Quota | p95 | p99 | Errors | CPU per request | Memory peak | Result |
+|---|---|---:|---:|---:|---:|---:|---|
+| `node:http`, JSON in JS | 25% | 266 ms | 444 ms | 0% | | | pass, near its limit |
+| `node:http`, SQLite JSON | 25% | 45 ms | 404 ms | 0% | 115 µs | 471 MB | pass |
+| **`node:net`** | **25%** | **0.7 ms** | **10 ms** | **0%** | **94 µs** | **179 MB** | **pass** |
+| `node:http`, SQLite JSON | 20% | 1.17 s | 2.76 s | 1.72% | 123 µs | 467 MB | **fail** |
+| **`node:net`** | **20%** | **50 ms** | **205 ms** | **0%** | **97 µs** | **187 MB** | **pass** |
+
+Near the limit, latency jumps sharply and varies from run to run (an earlier run of the SQLite JSON
+version at 25% got p95 8.7 ms). Read the pass/fail columns and CPU per request; the latencies only show
+which side of the knee a run was on.
+
+### Where the time went (before the rewrites)
+
+V8 CPU profile of the first `node:http` version (Node 22) at 25% quota and 20,000 users, as a share of
+busy time:
+
+| | Share |
+|---|---:|
+| SQLite reads (the feed was 27%) | 31% |
+| Socket writes (`writev`) | 21% |
+| Garbage collection | 9% |
+| HTTP parsing and routing (Node) | 8% |
+| JSON building | 7% |
+| SQLite writes | 6% |
+| JWT verification | 2% |
+| Event loop, sockets, misc | rest |
+
+That pointed at the feed query and the HTTP layer, in that order. Timing the read paths in isolation
+(Node 24, same data):
+
+| | Rows as objects, JSON in JS | Rows as arrays, JSON in JS | SQLite builds the JSON |
+|---|---:|---:|---:|
+| `GET /feed` | 31.9 µs | 21.6 µs | ~22 µs |
+| `GET /posts/:id` | 6.1 µs | | 4.8 µs |
+
+Arrays and SQLite-built JSON cost about the same here, but SQLite-built JSON leaves no objects behind
+for the garbage collector, which showed up under load.
+
+## Ideas we didn't use
+
+- **Coalescing reads** (one feed query shared by every request in a 100 ms window). That's a
+  query-result cache, which rule 5 forbids, and it adds up to 100 ms of latency. After optimization 4
+  the feed query is only ~10 µs of a request anyway.
+- **Group commit for writes.** Allowed by rule 6, but likes and new posts are under 10% of requests,
+  so it would save a couple of percent at most.
+- **Nginx.** It would cost CPU on the same single vCPU, and Node holds the idle connections fine
+  (113 MB at 10,000 users).
+- **`cluster` / worker threads.** There's one vCPU, so more processes would just take turns on it.

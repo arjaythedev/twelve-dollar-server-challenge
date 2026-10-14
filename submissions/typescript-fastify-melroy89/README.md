@@ -1,5 +1,15 @@
 # TypeScript / Fastify
 
+| | |
+|---|---|
+| Language | TypeScript 7.0.2 on Node.js 26.11.1 (official x86_64 archive) |
+| Framework | Fastify 5.12.7 |
+| Authentication | `@fastify/jwt` 10.2.4 (HS256 verification on every request) |
+| SQLite driver | `better-sqlite3` 13.0.3, compiled from source; SQLite 3.53.4 |
+| **Nginx or direct** | **Direct**: serves `HOST:PORT` itself, without Nginx |
+
+All direct and transitive npm dependencies are pinned in `package-lock.json`.
+
 Direct HTTP/1.1 on `HOST:PORT`, without Nginx. One Node.js process and one
 in-process SQLite connection. The application reads only `SQLITE_PATH`,
 `JWT_SECRET`, `HOST` and `PORT` for configuration.

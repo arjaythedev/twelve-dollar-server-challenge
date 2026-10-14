@@ -1,0 +1,12 @@
+bin/
+*.o
+*.a
+sqlite.zip
+sqlite-amalgamation-*/
+.vscode/
+.idea/
+build/
+*.db
+*.db-wal
+*.db-shm
+server.log

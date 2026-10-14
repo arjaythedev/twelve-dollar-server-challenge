@@ -1,0 +1,13 @@
+includes:
+    - vendor/phpstan/phpstan-doctrine/extension.neon
+    - vendor/phpstan/phpstan-symfony/extension.neon
+
+parameters:
+  level: 10
+  tmpDir: var/phpstan
+  paths:
+    - src/
+  bootstrapFiles:
+    - vendor/autoload.php
+  doctrine:
+    objectManagerLoader: config/phpstan/object-manager.php

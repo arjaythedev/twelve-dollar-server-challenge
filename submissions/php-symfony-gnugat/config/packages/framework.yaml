@@ -1,0 +1,10 @@
+# see https://symfony.com/doc/current/reference/configuration/framework.html
+framework:
+    secret: '%env(APP_SECRET)%'
+
+    # A stateless JSON API: no session.
+    session: false
+
+when@test:
+    framework:
+        test: true

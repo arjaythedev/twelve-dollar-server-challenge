@@ -1,0 +1,18 @@
+security:
+    # Users come from verified JWTs (see App\Security\JwtAccessTokenHandler), they're never loaded.
+    providers:
+        users_in_memory: { memory: null }
+
+    firewalls:
+        main:
+            lazy: true
+            stateless: true
+            provider: users_in_memory
+            access_token:
+                token_handler: App\Security\JwtAccessTokenHandler
+                failure_handler: App\Security\JsonAuthenticationFailureHandler
+            entry_point: App\Security\BearerTokenEntryPoint
+
+    # Checked before the route's {id} is validated: a 401 wins over a 400.
+    access_control:
+        - { path: ^/posts, methods: [POST], roles: IS_AUTHENTICATED }

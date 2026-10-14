@@ -244,16 +244,8 @@ class HTTPServer
     write(socket, out)
   end
 
+  # Through the fiber scheduler: with io_uring, every worker's write is queued and submitted together.
   def write(socket, data)
-    loop do
-      written = socket.write_nonblock(data, exception: false)
-      if written == :wait_writable
-        socket.wait_writable
-      elsif written == data.bytesize
-        return
-      else
-        data = data.byteslice(written, data.bytesize - written)
-      end
-    end
+    socket.write(data)
   end
 end

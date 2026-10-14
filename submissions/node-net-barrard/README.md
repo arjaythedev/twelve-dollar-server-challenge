@@ -38,6 +38,11 @@ split across packets, many requests in one packet, and a client that sends witho
 
 ## Measurements
 
+![p95 response time at 20% of one CPU core, 20,000 users: node:http sits around 1 s, above the 500 ms limit, with 1.38% errors; node:net stays around 1 to 50 ms with 0 errors](charts/latency.svg)
+
+Same load, same squeezed CPU: the `node:http` version spends the run above the challenge's 500 ms limit and
+drops 1.38% of requests. The `node:net` version stays mostly between 1 and 50 ms, with no errors.
+
 These numbers come from a dev box, not the droplet, so compare them with each other, not with other
 submissions. The server ran in a cgroup like a small VM: pinned to one core of a Ryzen desktop, with a
 CPU quota, 2 GB memory cap and no swap. k6 ran `bench/load.js` on the other cores, never on the server
@@ -48,6 +53,8 @@ the kernel's network work too. It's the number we trusted most: the V8 profiler 
 and gets skewed when the CPU is throttled.
 
 ### CPU and memory per version (10,000 users, no CPU limit)
+
+![CPU time per request: 157 µs with node:http and JSON built in JS, 143 µs when SQLite builds the JSON, 120 µs with node:net](charts/cpu-per-request.svg)
 
 | Version | CPU per request | user | kernel | Memory peak |
 |---|---:|---:|---:|---:|
@@ -70,6 +77,13 @@ headroom is left. "Pass" is the challenge's bar: p95 < 500 ms, p99 < 1 s, errors
 | **`node:net`** | **25%** | **0.7 ms** | **10 ms** | **0%** | **94 µs** | **179 MB** | **pass** |
 | `node:http`, SQLite JSON | 20% | 1.17 s | 2.76 s | 1.72% | 123 µs | 467 MB | **fail** |
 | **`node:net`** | **20%** | **50 ms** | **205 ms** | **0%** | **97 µs** | **187 MB** | **pass** |
+| `node:http`, SQLite JSON, 2 min hold (charts) | 20% | 1.08 s | 1.54 s | 1.38% | 116 µs | 460 MB | **fail** |
+| **`node:net`, 2 min hold (charts)** | **20%** | **110 ms** | **462 ms** | **0%** | **92 µs** | **187 MB** | **pass** |
+
+The charts come from the two 2-minute runs. In the same time, the `node:net` version also served 10%
+more requests (333,520 against 301,842), because its users weren't stuck waiting.
+
+![Server memory during the same run: node:http climbs to about 400 MB, node:net levels off under 180 MB](charts/memory.svg)
 
 Near the limit, latency jumps sharply and varies from run to run (an earlier run of the SQLite JSON
 version at 25% got p95 8.7 ms). Read the pass/fail columns and CPU per request; the latencies only show
@@ -90,6 +104,8 @@ busy time:
 | SQLite writes | 6% |
 | JWT verification | 2% |
 | Event loop, sockets, misc | rest |
+
+![V8 CPU profile of the first version: SQLite reads 31%, socket writes 21%, everything else 16%, garbage collection 9%, HTTP parsing 8%, JSON building 7%, SQLite writes 6%, JWT 2%](charts/profile.svg)
 
 That pointed at the feed query and the HTTP layer, in that order. Timing the read paths in isolation
 (Node 24, same data):

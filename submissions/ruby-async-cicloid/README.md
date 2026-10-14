@@ -47,7 +47,7 @@ version keeps the Async reactor and replaces the HTTP server.
   append per batch instead of one per write.
 - **Pragmas**: `locking_mode=EXCLUSIVE`, so the WAL index lives in heap memory rather than the `-shm`
   file; `journal_mode=WAL`; `synchronous=NORMAL` (rule 6); `wal_autocheckpoint=0`, with a passive
-  checkpoint every second on a timer, off the commit path; 1 GiB `mmap_size`; 64 MiB page cache.
+  checkpoint every second, off the commit path. Every statement is reset as soon as its row has been read, because a statement left mid-step holds a read transaction and blocks checkpoints. Before that fix the WAL grew past 300 MB under load, and WAL lookups (`walFindFrame`) took 30% of the CPU; 1 GiB `mmap_size`; 64 MiB page cache.
 - **SQLite compiled for this workload.** It's a static library built with sqlite.org's recommended
   options (`DQS=0`, `DEFAULT_MEMSTATUS=0`, `OMIT_DEPRECATED`, `OMIT_SHARED_CACHE`, `USE_ALLOCA`, and so
   on). It's then profile-guided: `sqlite_train.c` runs the server's own statements in the load test's
@@ -68,14 +68,23 @@ version keeps the Async reactor and replaces the HTTP server.
 ## Results on a 1-vCPU test VM
 
 These ran on a Proxmox VM: 1 dedicated Zen 3 vCPU, 2 GB RAM, Ubuntu 24.04, io_uring. Load came from a
-separate 8-vCPU VM. That vCPU is roughly twice as fast as the droplet's, so treat these as relative
-numbers. Iodine (PR #14), which scored 14k on the droplet, ran on the same VM for comparison.
+separate 8-vCPU VM running the C connection generator from PR #14 (8 processes, 60 s ramp, 120 s
+hold, the `bench/load.js` request mix). That vCPU is roughly twice as fast as the droplet's, so the
+numbers are relative. Other entries ran on the same VM, built with their own scripts. CPU is the whole
+VM, and p95/p99 are the worst across the generator processes.
 
-| Load | This server | Iodine #14, same VM |
-|---|---|---|
-| k6 `bench/load.js`, 30k VUs | p95 2.1 ms, p99 7.9 ms, 0% failed | — |
-| 25k users (C load generator) | 41% CPU, 153 MB, p95 5 ms | 49% CPU, 662 MB, p95 21 ms |
-| 40k users (C load generator) | 75% CPU, 174 MB, p95 14 ms, p99 412 ms | 87% CPU, 990 MB, p95 138 ms, p99 784 ms |
+| Server (droplet score in the video) | 14k users | 25k users | 40k users |
+|---|---|---|---|
+| **This server** | 22% CPU, 125 MB, 1 / 4 ms | 35%, 156 MB, 2 / 12 ms | 53%, 171 MB, 15 / 545 ms |
+| Python + Granian, PR #41 (not in the video) | 31%, 267 MB, 2 / 13 ms | 47%, 428 MB, 5 / 26 ms | 70%, 661 MB, 169 / 1,660 ms |
+| Go net/http, PR #18 (22k) | 23%, 461 MB, 1 / 7 ms | 59%, 536 MB, 7 / 23 ms | 93%, 578 MB, 194 / 1,718 ms |
+| Python lean FastAPI, PR #10 (22k) | 34%, 188 MB, 2 / 6 ms | 58%, 289 MB, 10 / 149 ms | 88%, 421 MB, 370 / 2,887 ms |
+| Python FastAPI, PR #1 (11k) | 48%, 232 MB, 3 / 14 ms | 80%, 367 MB, 82 / 1,436 ms | 99%, 12k failed requests |
+
+At 40k users, the generator itself ran about 1 s late, which inflates every p99 in that column.
+With k6 and the unmodified `bench/load.js` at 30k VUs (the most the load VM could hold), this server
+had p95 2.1 ms, p99 7.9 ms and 0% failed requests. That run was before the checkpoint fix below,
+which cut CPU by a further 15–30%.
 
 Test suite: 42/42 on x86_64.
 

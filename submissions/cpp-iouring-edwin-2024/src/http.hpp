@@ -3,6 +3,7 @@
 #include <string_view>
 #include <cstdint>
 #include <cstring>
+#include <strings.h>
 #include <charconv>
 
 namespace http {
@@ -104,21 +105,21 @@ inline bool parse_request(std::string_view raw, Request& req, size_t& bytes_cons
         std::string_view line = header_section.substr(pos, line_end - pos);
         pos = line_end + 2;
 
-        if (line.size() > 14 && (line.substr(0, 14) == "Authorization:" || line.substr(0, 14) == "authorization:")) {
+        if (line.size() > 14 && (strncasecmp(line.data(), "Authorization:", 14) == 0)) {
             size_t val_start = line.find_first_not_of(" \t", 14);
             if (val_start != std::string_view::npos) {
                 req.auth_header = line.substr(val_start);
             }
-        } else if (line.size() > 15 && (line.substr(0, 15) == "Content-Length:" || line.substr(0, 15) == "content-length:")) {
+        } else if (line.size() > 15 && (strncasecmp(line.data(), "Content-Length:", 15) == 0)) {
             size_t val_start = line.find_first_not_of(" \t", 15);
             if (val_start != std::string_view::npos) {
                 std::from_chars(line.data() + val_start, line.data() + line.size(), req.content_length);
             }
-        } else if (line.size() > 11 && (line.substr(0, 11) == "Connection:" || line.substr(0, 11) == "connection:")) {
+        } else if (line.size() > 11 && (strncasecmp(line.data(), "Connection:", 11) == 0)) {
             size_t val_start = line.find_first_not_of(" \t", 11);
             if (val_start != std::string_view::npos) {
                 std::string_view val = line.substr(val_start);
-                if (val.starts_with("close") || val.starts_with("Close")) {
+                if (val.size() >= 5 && strncasecmp(val.data(), "close", 5) == 0) {
                     req.keep_alive = false;
                 }
             }

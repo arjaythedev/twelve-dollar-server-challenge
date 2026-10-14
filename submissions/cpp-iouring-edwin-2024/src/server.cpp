@@ -25,7 +25,7 @@ constexpr uint16_t BUF_GROUP_ID = 1;
 constexpr uint32_t BUF_COUNT = 4096;
 constexpr size_t BUF_SIZE = 4096;
 constexpr size_t SEND_BUF_SIZE = 16384;
-constexpr uint32_t SEND_BUF_POOL_SIZE = 2048;
+constexpr uint32_t SEND_BUF_POOL_SIZE = 4096;
 
 enum class OpType : uint8_t {
     Accept = 1,
@@ -70,6 +70,11 @@ struct SendItem {
     uint16_t buf_id{0};
     char* buf_ptr{nullptr};
     size_t len{0};
+};
+
+struct DynamicSendBuf {
+    uint16_t id{0};
+    std::unique_ptr<char[]> ptr;
 };
 
 inline struct io_uring_sqe* get_sqe_safe(struct io_uring* ring) {
@@ -157,14 +162,16 @@ void Server::run() {
 
     // Attempt DEFER_TASKRUN + SINGLE_ISSUER + COOP_TASKRUN for optimal single-threaded speed
 #ifdef IORING_SETUP_DEFER_TASKRUN
-    params.flags = IORING_SETUP_COOP_TASKRUN | IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN | IORING_SETUP_CLAMP;
+    params.flags = IORING_SETUP_COOP_TASKRUN | IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN | IORING_SETUP_CLAMP | IORING_SETUP_CQSIZE;
+    params.cq_entries = 16384;
     int ret = io_uring_queue_init_params(8192, &ring, &params);
 #else
     int ret = -1;
 #endif
     if (ret < 0) {
         std::memset(&params, 0, sizeof(params));
-        params.flags = IORING_SETUP_COOP_TASKRUN | IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_CLAMP;
+        params.flags = IORING_SETUP_COOP_TASKRUN | IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_CLAMP | IORING_SETUP_CQSIZE;
+        params.cq_entries = 16384;
         ret = io_uring_queue_init_params(8192, &ring, &params);
         if (ret < 0) {
             std::memset(&params, 0, sizeof(params));
@@ -225,12 +232,14 @@ void Server::run() {
 
     // Arm multishot accept
     struct io_uring_sqe* sqe = get_sqe_safe(&ring);
-    io_uring_prep_multishot_accept(sqe, listen_fd_, nullptr, nullptr, 0);
+    io_uring_prep_multishot_accept(sqe, listen_fd_, nullptr, nullptr, SOCK_NONBLOCK | SOCK_CLOEXEC);
     sqe->user_data = make_user_data(OpType::Accept, 0, 0);
     io_uring_submit(&ring);
 
     std::vector<SendItem> pending_sends;
     pending_sends.reserve(256);
+    std::vector<DynamicSendBuf> dynamic_send_bufs;
+    uint32_t next_dynamic_id = 0;
 
     std::cout << "Server running on http://" << config_.host << ":" << config_.port << "\n";
 
@@ -277,6 +286,15 @@ void Server::run() {
                         uint32_t free_idx = free_slots.back();
                         free_slots.pop_back();
 
+                        // Set TCP options on accepted socket
+                        int one = 1;
+                        setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+                        setsockopt(client_fd, IPPROTO_TCP, TCP_QUICKACK, &one, sizeof(one));
+                        int rcvbuf = 16384;
+                        int sndbuf = 32768;
+                        setsockopt(client_fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
+                        setsockopt(client_fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf));
+
                         ConnSlot& slot = slots[free_idx];
                         slot.active = true;
                         slot.fd = client_fd;
@@ -303,7 +321,7 @@ void Server::run() {
                 if (!(cqe->flags & IORING_CQE_F_MORE)) {
                     struct io_uring_sqe* asqe = get_sqe_safe(&ring);
                     if (asqe) {
-                        io_uring_prep_multishot_accept(asqe, listen_fd_, nullptr, nullptr, 0);
+                        io_uring_prep_multishot_accept(asqe, listen_fd_, nullptr, nullptr, SOCK_NONBLOCK | SOCK_CLOEXEC);
                         asqe->user_data = make_user_data(OpType::Accept, 0, 0);
                     }
                 }
@@ -313,6 +331,12 @@ void Server::run() {
             if (op == OpType::Send) {
                 if (buf_id < SEND_BUF_POOL_SIZE) {
                     free_send_bufs.push_back(buf_id);
+                } else {
+                    auto it = std::find_if(dynamic_send_bufs.begin(), dynamic_send_bufs.end(),
+                        [buf_id](const DynamicSendBuf& b) { return b.id == buf_id; });
+                    if (it != dynamic_send_bufs.end()) {
+                        dynamic_send_bufs.erase(it);
+                    }
                 }
                 if (slot_idx < max_conns) {
                     ConnSlot& slot = slots[slot_idx];
@@ -354,14 +378,14 @@ void Server::run() {
                         req_data = std::string_view(reinterpret_cast<char*>(in_data), res);
                     }
 
-                    http::Request req;
-                    size_t bytes_consumed = 0;
-                    bool parsed = http::parse_request(req_data, req, bytes_consumed);
-
-                    if (parsed) {
-                        if (free_send_bufs.empty()) {
-                            io_uring_submit_and_wait(&ring, 1);
+                    while (!req_data.empty()) {
+                        http::Request req;
+                        size_t bytes_consumed = 0;
+                        bool parsed = http::parse_request(req_data, req, bytes_consumed);
+                        if (!parsed) {
+                            break;
                         }
+
                         uint16_t sbuf_id = 0;
                         char* out_buf = nullptr;
                         if (!free_send_bufs.empty()) {
@@ -369,8 +393,10 @@ void Server::run() {
                             free_send_bufs.pop_back();
                             out_buf = send_bufs_mem.get() + (static_cast<size_t>(sbuf_id) * SEND_BUF_SIZE);
                         } else {
-                            sbuf_id = 0xffff;
-                            out_buf = new char[SEND_BUF_SIZE];
+                            sbuf_id = static_cast<uint16_t>(SEND_BUF_POOL_SIZE + (next_dynamic_id++ & 0x7fff));
+                            auto dyn_buf = std::make_unique<char[]>(SEND_BUF_SIZE);
+                            out_buf = dyn_buf.get();
+                            dynamic_send_bufs.push_back({sbuf_id, std::move(dyn_buf)});
                         }
 
                         slot.keep_alive = req.keep_alive;
@@ -484,27 +510,33 @@ void Server::run() {
                         }
 
                         pending_sends.push_back(item);
+                        req_data.remove_prefix(bytes_consumed);
 
-                        if (bytes_consumed < req_data.size()) {
-                            if (!slot.partial) slot.partial = new std::vector<char>();
-                            slot.partial->assign(req_data.data() + bytes_consumed, req_data.data() + req_data.size());
+                        if (!slot.keep_alive) {
+                            break;
+                        }
+                    }
+
+                    // Compact or update leftover partial data
+                    if (!req_data.empty()) {
+                        if (slot.partial == nullptr) {
+                            slot.partial = new std::vector<char>(req_data.begin(), req_data.end());
                         } else {
-                            if (slot.partial) {
-                                delete slot.partial;
-                                slot.partial = nullptr;
+                            if (req_data.data() != slot.partial->data()) {
+                                std::memmove(slot.partial->data(), req_data.data(), req_data.size());
                             }
+                            slot.partial->resize(req_data.size());
                         }
-                    } else {
-                        // Incomplete request, buffer it
-                        if (!slot.partial) {
-                            slot.partial = new std::vector<char>();
-                            slot.partial->assign(reinterpret_cast<char*>(in_data), reinterpret_cast<char*>(in_data) + res);
-                        }
+
                         if (slot.partial->size() > 16384) {
                             close(slot.fd);
                             slot.fd = -1;
                             cleanup_slot(slot);
                             free_slots.push_back(slot_idx);
+                        }
+                    } else {
+                        if (slot.partial != nullptr) {
+                            slot.partial->clear();
                         }
                     }
 
@@ -537,7 +569,7 @@ void Server::run() {
         for (const auto& item : pending_sends) {
             struct io_uring_sqe* ssqe = get_sqe_safe(&ring);
             if (ssqe) {
-                io_uring_prep_send(ssqe, item.fd, item.buf_ptr, item.len, 0);
+                io_uring_prep_send(ssqe, item.fd, item.buf_ptr, item.len, MSG_NOSIGNAL);
                 ssqe->user_data = make_user_data(OpType::Send, item.slot, item.gen, item.buf_id);
             }
         }

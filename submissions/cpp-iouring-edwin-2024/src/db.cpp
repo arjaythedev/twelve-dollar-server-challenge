@@ -23,6 +23,8 @@ bool Database::open(const char* path) {
     sqlite3_exec(db_, "PRAGMA mmap_size = 2147483648;", nullptr, nullptr, nullptr);
     sqlite3_exec(db_, "PRAGMA cache_size = -64000;", nullptr, nullptr, nullptr);
     sqlite3_exec(db_, "PRAGMA busy_timeout = 5000;", nullptr, nullptr, nullptr);
+    sqlite3_exec(db_, "PRAGMA locking_mode = EXCLUSIVE;", nullptr, nullptr, nullptr);
+    sqlite3_exec(db_, "PRAGMA threads = 0;", nullptr, nullptr, nullptr);
 
     // Prepare statements
     const char* sql_health = "SELECT 1;";

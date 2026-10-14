@@ -67,33 +67,86 @@ inline CreatePostPayload parse_create_post(std::string_view raw) {
         return res;
     }
 
-    if (!s.starts_with("\"body\"")) {
-        // Could have other keys or malformed
-        size_t bpos = s.find("\"body\"");
-        if (bpos == std::string_view::npos) {
-            // If body missing
+    // Fast path: {"body": "..."} (standard case)
+    if (s.starts_with("\"body\"")) {
+        s = trim_whitespace(s.substr(6));
+        if (s.empty() || s.front() != ':') {
+            res.error = ParseError::MalformedJson;
+            return res;
+        }
+        s = trim_whitespace(s.substr(1));
+        if (s.empty()) {
+            res.error = ParseError::MalformedJson;
+            return res;
+        }
+        if (s.front() != '"') {
             res.error = ParseError::BodyRequired;
             return res;
         }
-        s = s.substr(bpos);
-    }
+    } else {
+        // Multi-field or non-"body" first key: parse keys sequentially
+        size_t p = 0;
+        bool found_body = false;
+        while (p < s.size()) {
+            while (p < s.size() && (s[p] == ' ' || s[p] == '\t' || s[p] == '\r' || s[p] == '\n' || s[p] == ',')) p++;
+            if (p >= s.size()) break;
+            if (s[p] != '"') {
+                res.error = ParseError::MalformedJson;
+                return res;
+            }
+            p++;
+            size_t key_start = p;
+            while (p < s.size() && s[p] != '"') {
+                if (s[p] == '\\') p += 2;
+                else p++;
+            }
+            if (p >= s.size()) {
+                res.error = ParseError::MalformedJson;
+                return res;
+            }
+            std::string_view key = s.substr(key_start, p - key_start);
+            p++; // skip closing quote
+            while (p < s.size() && (s[p] == ' ' || s[p] == '\t' || s[p] == '\r' || s[p] == '\n')) p++;
+            if (p >= s.size() || s[p] != ':') {
+                res.error = ParseError::MalformedJson;
+                return res;
+            }
+            p++; // skip ':'
+            while (p < s.size() && (s[p] == ' ' || s[p] == '\t' || s[p] == '\r' || s[p] == '\n')) p++;
+            if (p >= s.size()) {
+                res.error = ParseError::MalformedJson;
+                return res;
+            }
 
-    s = trim_whitespace(s.substr(6)); // after "body"
-    if (s.empty() || s.front() != ':') {
-        res.error = ParseError::MalformedJson;
-        return res;
-    }
-
-    s = trim_whitespace(s.substr(1)); // after ':'
-    if (s.empty()) {
-        res.error = ParseError::MalformedJson;
-        return res;
-    }
-
-    if (s.front() != '"') {
-        // Body is not a string (e.g. number, boolean, null)
-        res.error = ParseError::BodyRequired;
-        return res;
+            if (key == "body") {
+                if (s[p] != '"') {
+                    res.error = ParseError::BodyRequired;
+                    return res;
+                }
+                s = s.substr(p);
+                found_body = true;
+                break;
+            } else {
+                // Skip value
+                if (s[p] == '"') {
+                    p++;
+                    while (p < s.size() && s[p] != '"') {
+                        if (s[p] == '\\') p += 2;
+                        else p++;
+                    }
+                    if (p < s.size()) p++;
+                } else if (s[p] == '{' || s[p] == '[') {
+                    res.error = ParseError::MalformedJson;
+                    return res;
+                } else {
+                    while (p < s.size() && s[p] != ',' && s[p] != '}') p++;
+                }
+            }
+        }
+        if (!found_body) {
+            res.error = ParseError::BodyRequired;
+            return res;
+        }
     }
 
     // Unescape JSON string

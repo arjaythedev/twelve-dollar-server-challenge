@@ -1,11 +1,13 @@
+import { isRetiringConnections } from "./connections";
 import { ApiError } from "./errors";
 
 const JSON_HEADERS = { "content-type": "application/json" } as const;
+const JSON_CLOSE_HEADERS = { "content-type": "application/json", connection: "close" } as const;
 
 export function jsonResponse(status: number, payload: unknown): Response {
   return new Response(JSON.stringify(payload), {
     status,
-    headers: JSON_HEADERS,
+    headers: isRetiringConnections() ? JSON_CLOSE_HEADERS : JSON_HEADERS,
   });
 }
 

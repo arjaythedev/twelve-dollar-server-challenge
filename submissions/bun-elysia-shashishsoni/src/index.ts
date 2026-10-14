@@ -1,6 +1,7 @@
 import { Elysia } from "elysia";
 import { verifyBearerToken } from "./auth";
 import { loadConfig } from "./config";
+import { startDescriptorWatch } from "./connections";
 import {
   checkHealth,
   createLike,
@@ -15,6 +16,7 @@ import { extractTrimmedBody, isMissingSentinel, parsePostId, readJsonBody } from
 
 const config = loadConfig();
 openDatabase(config.sqlitePath);
+startDescriptorWatch();
 
 function uptimeSeconds(): number {
   return Math.floor((Date.now() - config.startedAtMs) / 1000);

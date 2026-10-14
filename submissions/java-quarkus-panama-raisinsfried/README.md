@@ -30,13 +30,17 @@ SQLITE_PATH=... JWT_SECRET=... HOST=0.0.0.0 PORT=80 bash start.sh
   16 KB request body limit.
 - **Pragmas:** WAL, `synchronous=FULL`, 16 MiB page cache, `mmap_size=0`, `temp_store=MEMORY`.
 - **JSON:** Jackson with Blackbird (~2% fewer instructions per request).
-- **JVM:** G1, `-Xmx768m`, `MaxDirectMemorySize=128m`.
+- **JVM:** G1 with a fixed 384 MB young generation (`-Xmx1g -Xmn384m`): ~40% fewer young pauses than G1's own sizing,
+  which halved p99 at 61.5k users; `MaxDirectMemorySize=128m`.
 
 ## Results on a $12 droplet
 
-1 vCPU / 2 GB, load from a second droplet, the scoring procedure:
+1 vCPU / 2 GB (syd1), load from a second droplet, warm-up then 5-minute holds, `synchronous=FULL`:
 
-_(final numbers to be added)_
+| Users | p95 | p99 | Errors | Server CPU busy | Java RSS | Result |
+|---|---|---|---|---|---|---|
+| 61,500 | 199 ms | 400 ms | 0% | 80% | 560 MB | pass |
+| 62,000 | 218 ms | 1.96 s | 0% | 83% | 558 MB | fail (p99) |
 
 ## License
 

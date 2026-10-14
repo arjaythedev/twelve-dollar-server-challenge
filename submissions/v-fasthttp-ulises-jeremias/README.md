@@ -21,6 +21,7 @@ SQLITE_PATH=/path/to/feed.db JWT_SECRET=twelve-dollar-challenge HOST=0.0.0.0 POR
 - One SQLite connection is opened per worker with prepared statements for feed, post lookup, health, post creation, like creation and existence checks. Statements are reused without a lock. WAL and `synchronous=NORMAL` provide durable commits before write responses. Every request obtains current values from SQLite.
 - HS256 signatures and expiration are checked on every authenticated request. No request or token result is cached.
 - Direct serving avoids spending the single core on Nginx. The server's idle timeout is set beyond the required 65 seconds for upstream keep-alive reuse.
+- Responses on descriptors 60,000 and above close that keep-alive connection after the response. This leaves room below the challenge's 65,535 per-process descriptor limit; clients reconnect on a later request, and no in-flight write is dropped.
 
 ## License
 

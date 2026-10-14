@@ -165,8 +165,7 @@ fn append_response(mut out []u8, status int, reason string, body string, close b
 }
 
 fn error_response(mut out []u8, status int, message string, mut ctl fasthttp.ResponseControl) fasthttp.Step {
-	_ = ctl
-	append_response(mut out, status, status_reason(status), json2.encode(ErrorEnvelope{message}, json2.EncoderOptions{}), false)
+	append_response(mut out, status, status_reason(status), json2.encode(ErrorEnvelope{message}, json2.EncoderOptions{}), ctl.should_close)
 	return .done
 }
 
@@ -278,6 +277,11 @@ fn authenticate(req fasthttp.HttpRequest, mut st State) (int, string, string) {
 
 fn handle(req fasthttp.HttpRequest, mut out []u8, worker_state voidptr, mut ctl fasthttp.ResponseControl) fasthttp.Step {
 	mut st := unsafe { &State(worker_state) }
+	// Keep descriptor headroom for SQLite, logs, and transient accepts. The
+	// challenge box uses a 65,535 descriptor limit; clients reconnect on their
+	// next request after the response advertises Connection: close.
+	should_close := req.client_conn_fd >= 60000
+	ctl.should_close = should_close
 	path := bytes(req, req.path)
 	method := bytes(req, req.method)
 	if method == 'GET'.bytes() && path == '/health'.bytes() {
@@ -285,11 +289,11 @@ fn handle(req fasthttp.HttpRequest, mut out []u8, worker_state voidptr, mut ctl 
 		reset(st.health_stmt)
 		if rc != sqlite_row {
 			body := json2.encode(DegradedHealthEnvelope{'degraded', 'unreachable', 'database query failed'}, json2.EncoderOptions{})
-			append_response(mut out, 503, 'Service Unavailable', body, false)
+			append_response(mut out, 503, 'Service Unavailable', body, should_close)
 			return .done
 		}
 		body := json2.encode(HealthEnvelope{'ok', 'ok', time.now().unix() - st.started}, json2.EncoderOptions{})
-		append_response(mut out, 200, 'OK', body, false)
+		append_response(mut out, 200, 'OK', body, should_close)
 		return .done
 	}
 	if method == 'GET'.bytes() && path == '/feed'.bytes() {
@@ -304,7 +308,7 @@ fn handle(req fasthttp.HttpRequest, mut out []u8, worker_state voidptr, mut ctl 
 			posts << column_post(st.feed_stmt)
 		}
 		reset(st.feed_stmt)
-		append_response(mut out, 200, 'OK', json2.encode(FeedEnvelope{posts}, json2.EncoderOptions{}), false)
+		append_response(mut out, 200, 'OK', json2.encode(FeedEnvelope{posts}, json2.EncoderOptions{}), should_close)
 		return .done
 	}
 	if method == 'GET'.bytes() && path.len > 7 && path[..7] == '/posts/'.bytes() {
@@ -319,7 +323,7 @@ fn handle(req fasthttp.HttpRequest, mut out []u8, worker_state voidptr, mut ctl 
 		}
 		post := column_post(st.post_stmt)
 		reset(st.post_stmt)
-		append_response(mut out, 200, 'OK', json2.encode(PostEnvelope{post}, json2.EncoderOptions{}), false)
+		append_response(mut out, 200, 'OK', json2.encode(PostEnvelope{post}, json2.EncoderOptions{}), should_close)
 		return .done
 	}
 	if method == 'POST'.bytes() && path == '/posts'.bytes() {
@@ -352,7 +356,7 @@ fn handle(req fasthttp.HttpRequest, mut out []u8, worker_state voidptr, mut ctl 
 		}
 		reset(st.insert_post)
 		p := Post{id, body_text, created_at, username, 0}
-		append_response(mut out, 201, 'Created', json2.encode(PostEnvelope{p}, json2.EncoderOptions{}), false)
+		append_response(mut out, 201, 'Created', json2.encode(PostEnvelope{p}, json2.EncoderOptions{}), should_close)
 		return .done
 	}
 	if method == 'POST'.bytes() && path.len > 11 && path[path.len - 5..] == '/like'.bytes() {
@@ -371,14 +375,14 @@ fn handle(req fasthttp.HttpRequest, mut out []u8, worker_state voidptr, mut ctl 
 		changed := C.sqlite3_changes(st.db)
 		reset(st.insert_like)
 		if changed > 0 {
-			append_response(mut out, 201, 'Created', json2.encode(LikeEnvelope{true, false, id}, json2.EncoderOptions{}), false)
+			append_response(mut out, 201, 'Created', json2.encode(LikeEnvelope{true, false, id}, json2.EncoderOptions{}), should_close)
 			return .done
 		}
 		C.sqlite3_bind_int64(st.exists_stmt, 1, i64(id))
 		exists := C.sqlite3_step(st.exists_stmt) == sqlite_row
 		reset(st.exists_stmt)
 		if !exists { return error_response(mut out, 404, 'post not found', mut ctl) }
-		append_response(mut out, 200, 'OK', json2.encode(LikeEnvelope{true, true, id}, json2.EncoderOptions{}), false)
+		append_response(mut out, 200, 'OK', json2.encode(LikeEnvelope{true, true, id}, json2.EncoderOptions{}), should_close)
 		return .done
 	}
 	return error_response(mut out, 404, 'not found', mut ctl)

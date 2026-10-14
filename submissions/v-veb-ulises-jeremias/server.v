@@ -65,6 +65,20 @@ struct DegradedHealthResponse {
 	error  string
 }
 
+struct CreatePostPayload {
+	body json2.Any
+}
+
+struct JwtHeader {
+	alg string
+}
+
+struct JwtClaims {
+	exp      json2.Any
+	sub      json2.Any
+	username json2.Any
+}
+
 fn (mut app App) health(mut ctx Context) veb.Result {
 	mut db := app.checkout_db()
 	defer {
@@ -118,12 +132,10 @@ pub fn (mut app App) create_post(mut ctx Context) veb.Result {
 	if auth_error != '' {
 		return app.json_error(mut ctx, .unauthorized, auth_error)
 	}
-	payload := json2.decode[map[string]json2.Any](ctx.req.data, json2.DecoderOptions{}) or {
+	payload := json2.decode[CreatePostPayload](ctx.req.data, json2.DecoderOptions{}) or {
 		return app.json_error(mut ctx, .bad_request, 'malformed JSON body')
 	}
-	body_value := payload['body'] or {
-		return app.json_error(mut ctx, .bad_request, 'body is required')
-	}
+	body_value := payload.body
 	if body_value !is string {
 		return app.json_error(mut ctx, .bad_request, 'body is required')
 	}
@@ -192,11 +204,10 @@ fn (app &App) authenticate(req http.Request) (int, string, string) {
 	if parts.len != 3 || !valid_base64url(parts[0]) || !valid_base64url(parts[1]) || !valid_base64url(parts[2]) {
 		return 0, '', 'invalid or expired token'
 	}
-	header := json2.decode[map[string]json2.Any](base64.url_decode_str(parts[0]), json2.DecoderOptions{}) or {
+	header := json2.decode[JwtHeader](base64.url_decode_str(parts[0]), json2.DecoderOptions{}) or {
 		return 0, '', 'invalid or expired token'
 	}
-	algorithm := header['alg'] or { return 0, '', 'invalid or expired token' }
-	if algorithm !is string || algorithm.str() != 'HS256' {
+	if header.alg != 'HS256' {
 		return 0, '', 'invalid or expired token'
 	}
 	expected := hmac.new(app.secret.bytes(), '${parts[0]}.${parts[1]}'.bytes(), sha256.sum, sha256.block_size)
@@ -204,15 +215,15 @@ fn (app &App) authenticate(req http.Request) (int, string, string) {
 	if !hmac.equal(expected, actual) {
 		return 0, '', 'invalid or expired token'
 	}
-	claims := json2.decode[map[string]json2.Any](base64.url_decode_str(parts[1]), json2.DecoderOptions{}) or {
+	claims := json2.decode[JwtClaims](base64.url_decode_str(parts[1]), json2.DecoderOptions{}) or {
 		return 0, '', 'invalid or expired token'
 	}
-	expiration := claims['exp'] or { return 0, '', 'invalid or expired token' }
+	expiration := claims.exp
 	if !is_number(expiration) || expiration.i64() <= time.now().unix() {
 		return 0, '', 'invalid or expired token'
 	}
-	subject := claims['sub'] or { return 0, '', 'invalid token payload' }
-	username := claims['username'] or { return 0, '', 'invalid token payload' }
+	subject := claims.sub
+	username := claims.username
 	if subject !is string || username !is string {
 		return 0, '', 'invalid token payload'
 	}
@@ -289,6 +300,10 @@ fn main() {
 			db.exec('PRAGMA journal_mode=WAL') or { panic(err) }
 		}
 		db.exec('PRAGMA synchronous=NORMAL') or { panic(err) }
+		// Keep the SQLite page cache bounded while allowing hot indexed pages to
+		// avoid repeated reads from the database file. mmap_size is per connection.
+		db.exec('PRAGMA cache_size=-32768') or { panic(err) }
+		db.exec('PRAGMA mmap_size=1073741824') or { panic(err) }
 		db_pool <- db
 	}
 	mut app := &App{

@@ -13,6 +13,9 @@ trap 'rm -rf "$tmp"' EXIT
 
 curl -fsSL "https://github.com/vlang/v/archive/${V_COMMIT}.tar.gz" | tar -xz -C "$tmp"
 mv "$tmp/v-${V_COMMIT}" /opt/vlang
+# V 0.5.2's V3 cache generator drops names from the duplicate fasthttp C union
+# aliases. Rename the unused aliases without changing their C types.
+sed -i 's/^\([[:space:]]*\)u32 u32$/\1u32_value u32/; s/^\([[:space:]]*\)u64 u64$/\1u64_value u64/' /opt/vlang/vlib/fasthttp/fasthttp_linux.c.v
 curl -fsSL "https://github.com/vlang/vc/archive/${VC_COMMIT}.tar.gz" | tar -xz -C "$tmp"
 mv "$tmp/vc-${VC_COMMIT}" /opt/vlang/vc
 VJOBS=1 make -C /opt/vlang v

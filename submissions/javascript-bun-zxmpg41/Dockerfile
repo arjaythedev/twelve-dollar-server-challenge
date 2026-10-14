@@ -2,7 +2,7 @@
 FROM ubuntu:24.04
 COPY install.sh /tmp/install.sh
 RUN bash /tmp/install.sh && rm -rf /var/lib/apt/lists/* /tmp/install.sh
-RUN useradd -m app && mkdir -p /data && chown app /data
+RUN useradd -m app && mkdir -p /data /app && chown app /data /app
 WORKDIR /app
 COPY --chown=app . /app
 USER app

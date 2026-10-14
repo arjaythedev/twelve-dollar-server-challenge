@@ -1,4 +1,5 @@
 # The "$12 server": 1 vCPU, 2 GB RAM, no swap, nofile 65535, serving directly on :80.
+name: bench-zxmpg41
 services:
   server:
     build: ..

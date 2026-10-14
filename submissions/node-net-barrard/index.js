@@ -91,6 +91,10 @@ function health() {
   return [200, `{"status":"ok","db":"ok","uptime_s":${Math.floor((Date.now() - startedAt) / 1000)}}`];
 }
 
+function feed() {
+  return [200, q.feed.get()[0]];
+}
+
 function getPost(rawId) {
   const id = parseId(rawId);
   if (!id) return error(400, 'invalid post id');
@@ -133,7 +137,7 @@ function route(method, target, auth, body) {
   const path = qs < 0 ? target : target.slice(0, qs);
 
   if (method === 'GET') {
-    if (path === '/feed') return [200, q.feed.get()[0]];
+    if (path === '/feed') return feed();
     if (path === '/health') return health();
     if (path.startsWith('/posts/')) {
       const id = path.slice(7);
@@ -236,7 +240,7 @@ function onConnection(socket) {
   socket.setNoDelay(true);
   socket.setTimeout(IDLE_MS, () => socket.destroy());
   socket.on('error', () => socket.destroy());
-  socket.on('data', (chunk) => {
+  socket.on('data', function onData(chunk) {
     if (closing) return;
     buf = buf === null ? chunk : Buffer.concat([buf, chunk]);
     // Handle every complete request in the buffer (pipelining), then send all responses in one write.

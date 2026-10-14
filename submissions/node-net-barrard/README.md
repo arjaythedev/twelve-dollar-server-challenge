@@ -89,26 +89,14 @@ Near the limit, latency jumps sharply and varies from run to run (an earlier run
 version at 25% got p95 8.7 ms). Read the pass/fail columns and CPU per request; the latencies only show
 which side of the knee a run was on.
 
-### Where the time went (before the rewrites)
+### Read paths in isolation
 
-V8 CPU profile of the first `node:http` version (Node 22) at 25% quota and 20,000 users, as a share of
-busy time:
+A V8 CPU profile of the first version pointed at the feed query first, then Node's HTTP layer. We don't
+publish profile numbers: with the server on one throttled core, the profiler double-counts time when the
+CPU is saturated and misses most of it when it isn't, so two versions can't be compared fairly. CPU per
+request (above) is the comparison.
 
-| | Share |
-|---|---:|
-| SQLite reads (the feed was 27%) | 31% |
-| Socket writes (`writev`) | 21% |
-| Garbage collection | 9% |
-| HTTP parsing and routing (Node) | 8% |
-| JSON building | 7% |
-| SQLite writes | 6% |
-| JWT verification | 2% |
-| Event loop, sockets, misc | rest |
-
-![V8 CPU profile of the first version: SQLite reads 31%, socket writes 21%, everything else 16%, garbage collection 9%, HTTP parsing 8%, JSON building 7%, SQLite writes 6%, JWT 2%](charts/profile.svg)
-
-That pointed at the feed query and the HTTP layer, in that order. Timing the read paths in isolation
-(Node 24, same data):
+Timing the read paths in isolation (Node 24, same data):
 
 | | Rows as objects, JSON in JS | Rows as arrays, JSON in JS | SQLite builds the JSON |
 |---|---:|---:|---:|

@@ -64,15 +64,14 @@ Java Flight Recorder profiles of the load test guided the order.
 ### Local load-test results
 
 These come from a Kubernetes test setup, not the challenge VM. The app pod has a
-1 vCPU and 2 GiB limit, and k6 runs `bench/load.js` from another node. Its numbers
-are higher than the droplet will give. They compare versions with each other.
+1 vCPU and 2 GiB limit, and k6 runs `bench/load.js` from another node. The numbers
+compare the two versions; they do not predict the droplet's score. Both are the
+most recent run of each version, with the same benchmark tool.
 
-| Version | Users |
+| Version | Result |
 | --- | --- |
-| Spring MVC behind Nginx | 28,250, held for 5 minutes |
-| Spring MVC, direct, reused prepared statements | 35,250, held for 5 minutes |
-| Spring MVC with all optimizations above | 31,750, held for 5 minutes |
-| WebFlux with all optimizations above | 38,000 in a 1-minute probe; no 5-minute hold passed yet |
+| Spring MVC with all optimizations above | 31,750 users held for 5 minutes: p95 395 ms, p99 729 ms, no errors |
+| WebFlux with all optimizations above | 38,000 users passed a 1-minute probe: p95 21 ms, p99 46 ms. The 5-minute hold at 38,000 failed (p99 2,972 ms), and the one at 37,750 stopped on a k6 error |
 
 In the WebFlux profile, Spring WebFlux, Reactor, and Netty account for about 90%
 of the Java CPU samples. [OPTIMIZATIONS.md](OPTIMIZATIONS.md) lists the next

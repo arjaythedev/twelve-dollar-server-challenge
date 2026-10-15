@@ -4,7 +4,9 @@
 package sqlite
 
 /*
-#cgo CFLAGS: -O2 -DNDEBUG -DSQLITE_THREADSAFE=2 -DSQLITE_DEFAULT_WAL_SYNCHRONOUS=1 -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_OMIT_SHARED_CACHE -DSQLITE_OMIT_DEPRECATED -DSQLITE_OMIT_PROGRESS_CALLBACK -DSQLITE_DEFAULT_MEMSTATUS=0 -DSQLITE_DQS=0 -DSQLITE_USE_ALLOCA -DSQLITE_LIKE_DOESNT_MATCH_BLOBS -DSQLITE_MAX_EXPR_DEPTH=0
+// SQLITE_ENABLE_QPSG: never re-plan a statement from the values bound to it;
+// without it SQLite 3.54 recompiles a query such as "WHERE p.id = ?" on every rebind.
+#cgo CFLAGS: -O2 -DNDEBUG -DSQLITE_THREADSAFE=2 -DSQLITE_DEFAULT_WAL_SYNCHRONOUS=1 -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_OMIT_SHARED_CACHE -DSQLITE_OMIT_DEPRECATED -DSQLITE_OMIT_PROGRESS_CALLBACK -DSQLITE_DEFAULT_MEMSTATUS=0 -DSQLITE_DQS=0 -DSQLITE_USE_ALLOCA -DSQLITE_LIKE_DOESNT_MATCH_BLOBS -DSQLITE_MAX_EXPR_DEPTH=0 -DSQLITE_ENABLE_QPSG
 #cgo LDFLAGS: -lm
 #include <stdlib.h>
 #include "sqlite3.h"
@@ -169,6 +171,12 @@ func (s *Stmt) Reset() error {
 		return s.conn.err(rc)
 	}
 	return nil
+}
+
+// Reprepares is how many times SQLite has recompiled the statement from its
+// SQL since it was prepared (schema changes, or bind-time re-planning).
+func (s *Stmt) Reprepares() int {
+	return int(C.sqlite3_stmt_status(s.s, C.SQLITE_STMTSTATUS_REPREPARE, 0))
 }
 
 func (s *Stmt) Finalize() {

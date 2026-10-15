@@ -100,3 +100,25 @@ func TestBeginCommitBatch(t *testing.T) {
 		t.Fatal(got)
 	}
 }
+
+// SQLite 3.54 re-plans a statement on the first step after a parameter it
+// compares with a column is rebound, which recompiles the post query on every
+// GET /posts/:id. The loop connection must opt out of that.
+func TestPostStatementNotReprepared(t *testing.T) {
+	s, err := newServer(openTestDB(t), []byte("secret"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.close()
+	st := s.stmts.post
+	for i := 0; i < 30; i++ {
+		st.BindInt64(1, int64(1+i%3))
+		if row, err := st.Step(); err != nil || !row {
+			t.Fatalf("step %d: row=%v err=%v", i, row, err)
+		}
+		st.Reset()
+	}
+	if n := st.Reprepares(); n != 0 {
+		t.Fatalf("post statement re-prepared %d times in 30 runs, want 0", n)
+	}
+}

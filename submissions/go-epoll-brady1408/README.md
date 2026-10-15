@@ -47,6 +47,9 @@ One process, `GOMAXPROCS=1`, two OS threads, each with its own SQLite connection
 - **Pragmas**: `journal_mode=WAL`, `synchronous=NORMAL`, `foreign_keys=ON` (a like on a missing post
   is detected from the foreign-key error, one statement), `busy_timeout=5000`, `temp_store=MEMORY`,
   `mmap_size=256 MiB` (the 250 MB file is read from the page cache without copies), `cache_size=8 MiB`.
+- **`SQLITE_ENABLE_QPSG`** at compile time. Without it SQLite 3.54 re-plans a statement on the first
+  step after a parameter compared with a column is rebound, so `GET /posts/:id` would recompile its
+  query from SQL on every request.
 - Idle connections close after 75 s. Pipelining works, capped at 32 requests per connection per loop
   round so one flooding socket cannot starve the rest. After a `Connection: close` response the
   server half-closes, discards further input and waits for the peer's FIN rather than sending an RST.

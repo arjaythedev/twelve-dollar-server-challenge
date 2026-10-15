@@ -9,21 +9,24 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unsafe"
 )
 
 const (
-	readBufSize   = 64 << 10
-	maxHeaderSize = 16 << 10
-	maxBodySize   = 1 << 20
-	idleTimeout   = 120 // seconds. SPEC: keep idle connections open for at least 65 s
+	maxHeaderSize      = 16 << 10
+	maxBodySize        = 1 << 20
+	initialReadCap     = 1 << 10
+	maxRetainedReadCap = 4 << 10
+	idleTimeout        = 120 // seconds. SPEC: keep idle connections open for at least 65 s
 )
 
 var handlerWorkers = 1
 
-// conn is one client connection. Requests are parsed straight out of the loop's read buffer, so
-// an idle connection holds no buffers at all.
+// conn is one client connection. It retains a small input buffer for keep-alive requests and drops
+// larger buffers after a request so one large body doesn't pin memory for an idle connection.
 type conn struct {
 	fd        int
+	events    uint32 // currently registered epoll interests
 	in        []byte // start of a request that hasn't fully arrived yet
 	pending   []byte // response bytes the socket didn't accept yet
 	closing   bool   // close once pending is written
@@ -48,7 +51,6 @@ type loop struct {
 	notify  int
 	paused  bool    // out of file descriptors: not accepting until a connection closes
 	conns   []*conn // indexed by fd
-	buf     []byte  // read buffer shared by all connections
 	out     []byte  // responses for the connection being served
 	body    []byte  // response body being built
 	ev      syscall.EpollEvent
@@ -154,7 +156,7 @@ func newLoop(lfd int, handler func(http.ResponseWriter, []byte, []byte, []byte, 
 		_ = syscall.Close(ep)
 		return nil, err
 	}
-	l := &loop{ep: ep, lfd: lfd, donefd: pipe[0], notify: pipe[1], conns: make([]*conn, 1024), buf: make([]byte, readBufSize), handler: handler, jobs: make(chan *requestJob, 8192), done: make(chan *requestDone, 8192)}
+	l := &loop{ep: ep, lfd: lfd, donefd: pipe[0], notify: pipe[1], conns: make([]*conn, 1024), handler: handler, jobs: make(chan *requestJob, 8192), done: make(chan *requestDone, 8192)}
 	if err := l.ctl(syscall.EPOLL_CTL_ADD, lfd, syscall.EPOLLIN); err != nil {
 		return nil, err
 	}
@@ -262,7 +264,11 @@ func (l *loop) completions() {
 				continue
 			}
 			if job.used == len(c.in) {
-				c.in = nil
+				if cap(c.in) <= maxRetainedReadCap {
+					c.in = c.in[:0]
+				} else {
+					c.in = nil
+				}
 			} else {
 				c.in = c.in[job.used:]
 			}
@@ -272,13 +278,13 @@ func (l *loop) completions() {
 			if status == 0 {
 				status = http.StatusOK
 			}
-			l.respond(&job.r, status, w.body)
-			w.body = w.body[:0]
-			l.writers.Put(w)
+			l.respondHeader(&job.r, status, len(w.body))
 			if job.r.close {
 				c.in = nil
 			}
-			l.send(c, l.out, job.r.close)
+			l.sendParts(c, l.out, w.body, job.r.close)
+			w.body = w.body[:0]
+			l.writers.Put(w)
 		default:
 			return
 		}
@@ -310,7 +316,7 @@ func (l *loop) accept() {
 		for fd >= len(l.conns) {
 			l.conns = append(l.conns, make([]*conn, len(l.conns))...)
 		}
-		l.conns[fd] = &conn{fd: fd, last: l.now}
+		l.conns[fd] = &conn{fd: fd, events: syscall.EPOLLIN, last: l.now}
 	}
 }
 
@@ -320,6 +326,17 @@ func (l *loop) close(c *conn) {
 	if l.paused && l.ctl(syscall.EPOLL_CTL_MOD, l.lfd, syscall.EPOLLIN) == nil {
 		l.paused = false
 	}
+}
+
+func (l *loop) connEvents(c *conn, events uint32) error {
+	if c.events == events {
+		return nil
+	}
+	if err := l.ctl(syscall.EPOLL_CTL_MOD, c.fd, events); err != nil {
+		return err
+	}
+	c.events = events
+	return nil
 }
 
 // sweep closes connections that have been idle (or stuck writing) for longer than idleTimeout.
@@ -335,15 +352,29 @@ func (l *loop) read(c *conn) {
 	if c.busy {
 		return
 	}
-	n, err := syscall.Read(c.fd, l.buf)
+	if len(c.in) == cap(c.in) {
+		next := cap(c.in) * 2
+		if next < initialReadCap {
+			next = initialReadCap
+		}
+		if next > maxHeaderSize+maxBodySize {
+			next = maxHeaderSize + maxBodySize
+		}
+		buf := make([]byte, len(c.in), next)
+		copy(buf, c.in)
+		c.in = buf
+	}
+	oldLen := len(c.in)
+	readBuf := c.in[:cap(c.in)]
+	n, err := syscall.Read(c.fd, readBuf[oldLen:])
 	if n <= 0 {
 		if err != syscall.EAGAIN && err != syscall.EINTR {
 			l.close(c) // EOF or error
 		}
 		return
 	}
+	c.in = readBuf[:oldLen+n]
 	c.last = l.now
-	c.in = append(c.in, l.buf[:n]...)
 	l.process(c)
 }
 
@@ -366,13 +397,17 @@ func (l *loop) process(c *conn) {
 				return
 			}
 		}
-		_ = l.ctl(syscall.EPOLL_CTL_MOD, c.fd, syscall.EPOLLIN)
+		// A worker disables events while its response is pending. Restore EPOLLIN
+		// there, but skip the redundant MOD after an ordinary partial read.
+		if l.connEvents(c, syscall.EPOLLIN) != nil {
+			l.close(c)
+		}
 		return
 	}
 	c.continued = false
 	c.busy = true
 	job := &requestJob{c: c, r: r, used: n}
-	if l.ctl(syscall.EPOLL_CTL_MOD, c.fd, 0) != nil {
+	if l.connEvents(c, 0) != nil {
 		l.close(c)
 		return
 	}
@@ -403,7 +438,60 @@ func (l *loop) send(c *conn, b []byte, closing bool) bool {
 	// The socket buffer is full: keep the rest and stop reading until it's written.
 	c.pending = append([]byte(nil), b[n:]...)
 	c.closing = closing
-	if l.ctl(syscall.EPOLL_CTL_MOD, c.fd, syscall.EPOLLOUT) != nil {
+	if l.connEvents(c, syscall.EPOLLOUT) != nil {
+		l.close(c)
+		return false
+	}
+	return false
+}
+
+// sendParts writes the response header and body as separate buffers, avoiding the
+// per-response body copy into l.out. The body belongs to the worker writer until
+// this synchronous send returns; if the socket blocks, the remainder is copied
+// into c.pending before the writer is returned to its pool.
+func (l *loop) sendParts(c *conn, header, body []byte, closing bool) bool {
+	vec := []syscall.Iovec{{Base: &header[0]}, {Base: nil}}
+	vec[0].SetLen(len(header))
+	if len(body) > 0 {
+		vec[1].Base = &body[0]
+		vec[1].SetLen(len(body))
+		vec = vec[:2]
+	} else {
+		vec = vec[:1]
+	}
+	msg := syscall.Msghdr{Iov: &vec[0], Iovlen: uint64(len(vec))}
+	r1, _, errno := syscall.RawSyscall(syscall.SYS_SENDMSG, uintptr(c.fd), uintptr(unsafe.Pointer(&msg)), uintptr(syscall.MSG_NOSIGNAL))
+	var n int
+	var err error
+	if errno != 0 {
+		err = errno
+	} else {
+		n = int(r1)
+	}
+	if err != nil {
+		if err != syscall.EAGAIN && err != syscall.EINTR {
+			l.close(c)
+			return false
+		}
+		n = 0
+	}
+	total := len(header) + len(body)
+	if n == total {
+		if closing {
+			l.close(c)
+			return false
+		}
+		l.process(c)
+		return true
+	}
+	if n < len(header) {
+		c.pending = append(c.pending[:0], header[n:]...)
+		c.pending = append(c.pending, body...)
+	} else {
+		c.pending = append(c.pending[:0], body[n-len(header):]...)
+	}
+	c.closing = closing
+	if l.connEvents(c, syscall.EPOLLOUT) != nil {
 		l.close(c)
 		return false
 	}
@@ -595,19 +683,18 @@ func statusLine(code int) string {
 	}
 }
 
-// respond appends a complete response with a JSON body to l.out.
-func (l *loop) respond(r *request, code int, body []byte) {
+// respondHeader appends the response headers to l.out; the JSON body is sent separately.
+func (l *loop) respondHeader(r *request, code, bodyLen int) {
 	l.out = append(l.out, statusLine(code)...)
 	l.out = append(l.out, l.date...)
 	l.out = append(l.out, "Content-Type: application/json\r\nContent-Length: "...)
-	l.out = strconv.AppendInt(l.out, int64(len(body)), 10)
+	l.out = strconv.AppendInt(l.out, int64(bodyLen), 10)
 	if r.close {
 		l.out = append(l.out, "\r\nConnection: close"...)
 	} else if r.keepAlive10 {
 		l.out = append(l.out, "\r\nConnection: keep-alive"...)
 	}
 	l.out = append(l.out, "\r\n\r\n"...)
-	l.out = append(l.out, body...)
 }
 
 // protocolError answers a request that couldn't be parsed, then the connection closes.
@@ -624,5 +711,10 @@ func (l *loop) protocolError(code int) {
 	l.body = append(l.body[:0], `{"error":"`...)
 	l.body = append(l.body, msg...)
 	l.body = append(l.body, `"}`...)
-	l.respond(&request{close: true}, code, l.body)
+	l.out = append(l.out, statusLine(code)...)
+	l.out = append(l.out, l.date...)
+	l.out = append(l.out, "Content-Type: application/json\r\nContent-Length: "...)
+	l.out = strconv.AppendInt(l.out, int64(len(l.body)), 10)
+	l.out = append(l.out, "\r\nConnection: close\r\n\r\n"...)
+	l.out = append(l.out, l.body...)
 }

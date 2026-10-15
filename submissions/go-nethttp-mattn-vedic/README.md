@@ -11,7 +11,8 @@ Go dependencies are pinned in `go.mod`/`go.sum`. The build uses CGO and installs
 
 ## Design
 
-- A single Go process uses a Linux epoll event loop for HTTP/1.1 keep-alive connections. A bounded worker pool runs handlers and database calls, keeping SQLite cgo work off the socket loop. Each connection has at most one request in flight, preserving HTTP response order; later pipelined requests remain buffered until that response is written. The loop reuses its read buffer and retains per-connection bytes only for incomplete or in-flight requests. Idle connections remain open for 120 seconds.
+- A single Go process uses a Linux epoll event loop for HTTP/1.1 keep-alive connections. A bounded worker pool runs handlers and database calls, keeping SQLite cgo work off the socket loop. Each connection has at most one request in flight, preserving HTTP response order; later pipelined requests remain buffered until that response is written. Small per-connection read buffers are reused across requests and oversized buffers are dropped after a request. Epoll interest changes are skipped when the registered events already match. Idle connections remain open for 120 seconds.
+- Response headers and JSON bodies are sent with `sendmsg` as separate buffers, avoiding a response-sized copy. If a socket accepts only part of a response, the unsent bytes are retained until writable.
 - Every handler queries SQLite for its result. No application response or table data is cached.
 - HS256 JWTs are verified on every authenticated request using a constant-time HMAC comparison. Expiration and payload types are validated.
 - SQLite is accessed through the driver's direct connection and statement interfaces, without `database/sql`. A small local `go-sqlite3` fork adds `SQLiteStmt.QueryText`, which resets and binds the prepared statement, steps it, and copies its JSON text into a reusable Go buffer in one cgo call. SQLite's C amalgamation is not vendored; the build links Ubuntu's system SQLite. Writes use autocommit mode with WAL and `synchronous=NORMAL`; a successful write call returns after SQLite commits.
@@ -41,19 +42,36 @@ overhead, so use it to locate hot paths and run performance comparisons with pro
 Requests can queue in the bounded worker channel while the epoll loop continues servicing sockets; the
 per-connection in-flight limit preserves response order.
 
-## Benchmark snapshot
+## Benchmark snapshots
 
-On the local 1-vCPU / 2-GiB server cgroup, a 90,000-VU run with one HTTP worker completed with zero failed
-requests: 7,536 requests/s, p95 424 ms, and p99 1.19 s. This met the p95 target but missed the p99 target.
-The server's measured cgroup memory peak was about 457 MiB. The load generator ran uncapped on the host
-using four loopback aliases. CPU, heap, allocation, and goroutine profiling were enabled, so treat this as
-a profiling run rather than a clean capacity claim.
+All runs used the challenge's request loop and four loopback aliases, with the server limited to 1 CPU and
+2 GiB and k6 running outside the server cgroup. The multi-alias harness is `bench/load-multi.js`.
 
-In the earlier one-worker run, throughput was 7,797 requests/s, p95 472 ms, and p99 1.57 s. This run's
-p95 and p99 were lower, while throughput was about 3% lower. Each result is a single run, so this is a
-directional comparison rather than a conclusive performance gain. A 1/2/4-worker comparison also favored
-one worker for this single-vCPU cgroup; four workers caused substantially more CPU throttling. Tune for
-the actual CPU quota and workload.
+### Current worktree: 20k profiled run
+
+- 20,000 VUs; 30-second ramp, 2-minute hold, 30-second ramp-down; pprof enabled.
+- 334,459 requests, 1,760 req/s, p95 0.269 ms, p99 0.633 ms, and no failed requests.
+- Server cgroup peak memory was about 166 MiB. Profiling was enabled, so this run is for comparison and
+  analysis, not a maximum-capacity claim.
+- The allocation profile showed 35.94 MiB allocated since process start. Retaining small read buffers cut
+  `loop.read` allocation by about 95% compared with the preceding 20k diagnostic run.
+
+### Current worktree: 80k diagnostic profile
+
+- Reached 80,000 VUs; 448,234 requests at about 7,080 req/s during the observed interval, p95 6.56 ms,
+  p99 45.94 ms, and no failed requests.
+- The run was stopped after about 63 seconds when the local k6 process reached roughly 22.4 GiB RSS and
+  host available memory fell below 1 GiB. It did not complete the challenge's five-minute hold and is not
+  an 80k pass claim.
+- The CPU profile attributed 50.8% flat time to `runtime.cgocall` and 34.8% to `Syscall6`; this short
+  profile describes the observed interval only.
+
+### Previously pushed 90k baseline
+
+Commit `5186ac5` completed a profiled 90,000-VU run with zero failed requests: 7,536 requests/s, p95
+423.5 ms, and p99 1.19 s. It met the p95 target but missed p99. The server cgroup peaked at about 457 MiB.
+This is a result for that earlier commit, not the current worktree. Profiling was enabled and the run is
+not a clean capacity claim.
 
 ## License
 

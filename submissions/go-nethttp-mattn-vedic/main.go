@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"log"
 	"math"
@@ -19,6 +20,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -44,6 +46,10 @@ type tokenHeader struct {
 var readerPool *sqlitePool
 var writerPool *sqlitePool
 var secret []byte
+var authScratchPool = sync.Pool{New: func() any {
+	return &authScratch{mac: hmac.New(sha256.New, secret)}
+}}
+var jwtDot = [...]byte{'.'}
 var start = time.Now()
 var feedJSONQuery = `SELECT json_object('posts', json_group_array(json_object(
 	'id', id, 'body', body, 'created_at', created_at, 'author', username, 'like_count', like_count
@@ -74,6 +80,14 @@ type sqliteConn struct {
 type sqlitePool struct {
 	available chan *sqliteConn
 	all       []*sqliteConn
+}
+
+type authScratch struct {
+	header  []byte
+	payload []byte
+	sig     []byte
+	sum     []byte
+	mac     hash.Hash
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -174,26 +188,29 @@ func authenticate(h []byte) (int64, string, int, string) {
 		return 0, "", 401, "invalid or expired token"
 	}
 	headerPart, payloadPart, sigPart := token[:first], rest[:second], rest[second+1:]
-	dec := base64.RawURLEncoding.DecodeString
-	hb, e1 := dec(string(headerPart))
-	pb, e2 := dec(string(payloadPart))
-	sig, e3 := dec(string(sigPart))
+	scratch := authScratchPool.Get().(*authScratch)
+	defer authScratchPool.Put(scratch)
+	var e1, e2, e3 error
+	scratch.header, e1 = decodeBase64(scratch.header, headerPart)
+	scratch.payload, e2 = decodeBase64(scratch.payload, payloadPart)
+	scratch.sig, e3 = decodeBase64(scratch.sig, sigPart)
 	if e1 != nil || e2 != nil || e3 != nil {
 		return 0, "", 401, "invalid or expired token"
 	}
 	var head tokenHeader
-	if json.Unmarshal(hb, &head) != nil || head.Alg != "HS256" {
+	if json.Unmarshal(scratch.header, &head) != nil || head.Alg != "HS256" {
 		return 0, "", 401, "invalid or expired token"
 	}
-	mac := hmac.New(sha256.New, secret)
-	_, _ = mac.Write(headerPart)
-	_, _ = mac.Write([]byte("."))
-	_, _ = mac.Write(payloadPart)
-	if !hmac.Equal(sig, mac.Sum(nil)) {
+	scratch.mac.Reset()
+	_, _ = scratch.mac.Write(headerPart)
+	_, _ = scratch.mac.Write(jwtDot[:])
+	_, _ = scratch.mac.Write(payloadPart)
+	scratch.sum = scratch.mac.Sum(scratch.sum[:0])
+	if !hmac.Equal(scratch.sig, scratch.sum) {
 		return 0, "", 401, "invalid or expired token"
 	}
 	var p tokenPayload
-	if json.Unmarshal(pb, &p) != nil {
+	if json.Unmarshal(scratch.payload, &p) != nil {
 		return 0, "", 401, "invalid or expired token"
 	}
 	if p.Exp != nil && (math.IsNaN(*p.Exp) || float64(time.Now().Unix()) >= *p.Exp) {
@@ -209,6 +226,18 @@ func authenticate(h []byte) (int64, string, int, string) {
 	}
 	return id, name, 0, ""
 }
+
+func decodeBase64(dst, src []byte) ([]byte, error) {
+	need := base64.RawURLEncoding.DecodedLen(len(src))
+	if cap(dst) < need {
+		dst = make([]byte, need)
+	} else {
+		dst = dst[:need]
+	}
+	n, err := base64.RawURLEncoding.Decode(dst, src)
+	return dst[:n], err
+}
+
 func handler(w http.ResponseWriter, method, path, auth, body []byte) {
 	switch {
 	case bytes.Equal(path, []byte("/health")) && bytes.Equal(method, []byte("GET")):

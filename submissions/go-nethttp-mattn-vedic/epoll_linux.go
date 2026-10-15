@@ -18,7 +18,7 @@ const (
 	idleTimeout   = 120 // seconds. SPEC: keep idle connections open for at least 65 s
 )
 
-var handlerWorkers = 4
+var handlerWorkers = 1
 
 // conn is one client connection. Requests are parsed straight out of the loop's read buffer, so
 // an idle connection holds no buffers at all.

@@ -31,6 +31,36 @@ package sqlite3
 #include <stdlib.h>
 #include <string.h>
 
+static int sqlite3_query_text_fast(sqlite3_stmt *stmt, int has_arg,
+                                   sqlite3_int64 arg, unsigned char *dst,
+                                   int dst_cap, int *dst_len) {
+  int rc = sqlite3_reset(stmt);
+  if (rc != SQLITE_OK) return rc;
+  rc = sqlite3_clear_bindings(stmt);
+  if (rc != SQLITE_OK) return rc;
+  if (sqlite3_bind_parameter_count(stmt) != has_arg) return SQLITE_MISUSE;
+  if (has_arg) {
+    rc = sqlite3_bind_int64(stmt, 1, arg);
+    if (rc != SQLITE_OK) return rc;
+  }
+  rc = sqlite3_step(stmt);
+  if (rc == SQLITE_DONE) {
+    int reset_rc = sqlite3_reset(stmt);
+    return reset_rc == SQLITE_OK ? SQLITE_DONE : reset_rc;
+  }
+  if (rc != SQLITE_ROW) return rc;
+  if (sqlite3_column_count(stmt) != 1 ||
+      sqlite3_column_type(stmt, 0) != SQLITE_TEXT) return SQLITE_MISMATCH;
+  int n = sqlite3_column_bytes(stmt, 0);
+  *dst_len = n;
+  if (n > dst_cap) return SQLITE_TOOBIG;
+  const void *text = sqlite3_column_text(stmt, 0);
+  if (n > 0 && text == NULL) return SQLITE_NOMEM;
+  if (n > 0) memcpy(dst, text, (size_t)n);
+  rc = sqlite3_reset(stmt);
+  return rc == SQLITE_OK ? SQLITE_ROW : rc;
+}
+
 #ifdef __CYGWIN__
 # include <errno.h>
 #endif
@@ -2000,6 +2030,61 @@ func (s *SQLiteStmt) Query(args []driver.Value) (driver.Rows, error) {
 	return s.query(context.Background(), list)
 }
 
+// QueryText executes a single-column TEXT query and copies its first row into
+// dst. Reset, parameter binding, stepping, and the column copy happen in one
+// cgo call. The statement is left on its first row and is reset by the next
+// call. Only zero or one int64 parameter is supported.
+func (s *SQLiteStmt) QueryText(dst []byte, args []driver.Value) ([]byte, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed || s.s == nil {
+		return dst, false, errors.New("query on closed SQLite statement")
+	}
+	if len(args) > 1 {
+		return dst, false, errors.New("QueryText supports at most one parameter")
+	}
+	var arg int64
+	if len(args) == 1 {
+		v, ok := args[0].(int64)
+		if !ok {
+			return dst, false, fmt.Errorf("QueryText parameter must be int64, got %T", args[0])
+		}
+		arg = v
+	}
+	if cap(dst) == 0 {
+		dst = make([]byte, 0, 16<<10)
+	}
+	for {
+		buf := dst[:cap(dst)]
+		var n C.int
+		rc := C.sqlite3_query_text_fast(
+			s.s,
+			C.int(len(args)),
+			C.sqlite3_int64(arg),
+			(*C.uchar)(unsafe.Pointer(&buf[0])),
+			C.int(len(buf)),
+			&n,
+		)
+		runtime.KeepAlive(buf)
+		if rc == C.SQLITE_TOOBIG && int(n) > len(buf) {
+			dst = make([]byte, 0, int(n))
+			continue
+		}
+		if rc == C.SQLITE_DONE {
+			return dst[:0], false, nil
+		}
+		if rc != C.SQLITE_ROW {
+			err := s.c.lastError()
+			_ = C.sqlite3_reset(s.s)
+			if err != nil {
+				return dst, false, err
+			}
+			return dst, false, fmt.Errorf("fused SQLite text query failed with result code %d", int(rc))
+		}
+		return buf[:int(n)], true, nil
+	}
+}
+
 func (s *SQLiteStmt) query(ctx context.Context, args []driver.NamedValue) (driver.Rows, error) {
 	if err := s.bind(args); err != nil {
 		return nil, err
@@ -2192,44 +2277,6 @@ func (rc *SQLiteRows) Next(dest []driver.Value) error {
 		}
 		return rc.ctx.Err()
 	}
-}
-
-// NextText advances a single-column TEXT result and appends it directly into dst.
-// It avoids allocating an intermediate Go string for large JSON query results.
-// The returned bytes are Go-owned and remain valid after the next SQLite call.
-func (rc *SQLiteRows) NextText(dst []byte) ([]byte, error) {
-	rc.s.mu.Lock()
-	defer rc.s.mu.Unlock()
-	if rc.s.closed {
-		return dst, io.EOF
-	}
-	if rc.ctx.Done() != nil {
-		return dst, errors.New("NextText requires a non-cancelable query context")
-	}
-	rv := C._sqlite3_step_internal(rc.s.s)
-	if rv == C.SQLITE_DONE {
-		return dst, io.EOF
-	}
-	if rv != C.SQLITE_ROW {
-		rv = C.sqlite3_reset(rc.s.s)
-		if rv != C.SQLITE_OK {
-			return dst, rc.s.c.lastError()
-		}
-		return dst, rc.s.c.lastError()
-	}
-	if rc.nc != 1 || C.sqlite3_column_type(rc.s.s, 0) != C.SQLITE_TEXT {
-		return dst, errors.New("NextText requires exactly one TEXT column")
-	}
-	n := int(C.sqlite3_column_bytes(rc.s.s, 0))
-	if n == 0 {
-		return dst[:0], nil
-	}
-	p := C.sqlite3_column_text(rc.s.s, 0)
-	if p == nil {
-		return dst[:0], nil
-	}
-	dst = append(dst, unsafe.Slice((*byte)(unsafe.Pointer(p)), n)...)
-	return dst, nil
 }
 
 // nextSyncLocked moves cursor to next; must be called with locked mutex.

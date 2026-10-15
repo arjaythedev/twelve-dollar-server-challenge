@@ -139,21 +139,19 @@ func queryOne(stmt driver.Stmt, args []driver.Value, dest []driver.Value) error 
 }
 
 func queryText(conn *sqliteConn, stmt driver.Stmt, args []driver.Value) ([]byte, error) {
-	rows, err := stmt.Query(args)
+	textStmt, ok := stmt.(*sqlite3.SQLiteStmt)
+	if !ok {
+		return nil, errors.New("SQLite driver does not support fused text queries")
+	}
+	conn.jsonBuf = conn.jsonBuf[:0]
+	body, found, err := textStmt.QueryText(conn.jsonBuf, args)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	textRows, ok := rows.(interface{ NextText([]byte) ([]byte, error) })
-	if !ok {
-		return nil, errors.New("SQLite driver does not support direct text reads")
-	}
-	conn.jsonBuf = conn.jsonBuf[:0]
-	body, err := textRows.NextText(conn.jsonBuf)
-	if errors.Is(err, io.EOF) {
+	conn.jsonBuf = body
+	if !found {
 		return nil, errNoRows
 	}
-	conn.jsonBuf = body
 	return conn.jsonBuf, err
 }
 
@@ -496,7 +494,7 @@ func main() {
 	if len(secret) == 0 {
 		log.Fatal("JWT_SECRET is required")
 	}
-	workers, err := poolLimit("HTTP_WORKERS", 4)
+	workers, err := poolLimit("HTTP_WORKERS", 1)
 	if err != nil {
 		log.Fatal(err)
 	}

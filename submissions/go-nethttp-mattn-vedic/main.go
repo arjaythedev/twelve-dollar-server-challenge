@@ -1,9 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
-	"database/sql"
+	"database/sql/driver"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -19,8 +20,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
-	_ "github.com/mattn/go-sqlite3"
+	"github.com/mattn/go-sqlite3"
 )
 
 type post struct {
@@ -39,21 +41,39 @@ type tokenHeader struct {
 	Alg string `json:"alg"`
 }
 
-var readerDB *sql.DB
-var writerDB *sql.DB
-var statements dbStatements
+var readerPool *sqlitePool
+var writerPool *sqlitePool
 var secret []byte
 var start = time.Now()
-var postSelect = `SELECT p.id,p.body,p.created_at,u.username,(SELECT count(*) FROM likes l WHERE l.post_id=p.id) FROM posts p JOIN users u ON u.id=p.user_id`
+var feedJSONQuery = `SELECT json_object('posts', json_group_array(json_object(
+	'id', id, 'body', body, 'created_at', created_at, 'author', username, 'like_count', like_count
+))) FROM (
+	SELECT p.id, p.body, p.created_at, u.username,
+		(SELECT count(*) FROM likes l WHERE l.post_id=p.id) AS like_count
+	FROM posts p JOIN users u ON u.id=p.user_id
+	ORDER BY p.created_at DESC, p.id DESC LIMIT 20
+)`
+var postByIDJSONQuery = `SELECT json_object('post', json_object(
+	'id', p.id, 'body', p.body, 'created_at', p.created_at, 'author', u.username,
+	'like_count', (SELECT count(*) FROM likes l WHERE l.post_id=p.id)
+)) FROM posts p JOIN users u ON u.id=p.user_id WHERE p.id=?`
 var idPattern = regexp.MustCompile(`^[0-9]+$`)
+var errNoRows = errors.New("no rows")
 
-type dbStatements struct {
-	health     *sql.Stmt
-	feed       *sql.Stmt
-	postByID   *sql.Stmt
-	createPost *sql.Stmt
-	createLike *sql.Stmt
-	postExists *sql.Stmt
+type sqliteConn struct {
+	conn       *sqlite3.SQLiteConn
+	jsonBuf    []byte
+	health     driver.Stmt
+	feed       driver.Stmt
+	postByID   driver.Stmt
+	createPost driver.Stmt
+	createLike driver.Stmt
+	postExists driver.Stmt
+}
+
+type sqlitePool struct {
+	available chan *sqliteConn
+	all       []*sqliteConn
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -66,6 +86,12 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.WriteHeader(status)
 	_, _ = w.Write(b)
 }
+func writeRawJSON(w http.ResponseWriter, status int, body []byte) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_, _ = w.Write(body)
+}
+
 func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, struct {
 		Error string `json:"error"`
@@ -78,24 +104,21 @@ func parseID(s string) (int64, bool) {
 	n, e := strconv.ParseInt(s, 10, 64)
 	return n, e == nil && n > 0
 }
-func readPost(row *sql.Row) (post, error) {
-	var p post
-	err := row.Scan(&p.ID, &p.Body, &p.CreatedAt, &p.Author, &p.LikeCount)
-	return p, err
-}
-func readPostRows(rows *sql.Rows) ([]post, error) {
-	out := make([]post, 0, 20)
-	for rows.Next() {
-		var p post
-		if e := rows.Scan(&p.ID, &p.Body, &p.CreatedAt, &p.Author, &p.LikeCount); e != nil {
-			return nil, e
-		}
-		out = append(out, p)
+func parseIDBytes(s []byte) (int64, bool) {
+	if len(s) == 0 {
+		return 0, false
 	}
-	return out, rows.Err()
+	var n int64
+	for _, c := range s {
+		if c < '0' || c > '9' || n > (math.MaxInt64-int64(c-'0'))/10 {
+			return 0, false
+		}
+		n = n*10 + int64(c-'0')
+	}
+	return n, n > 0
 }
 func errorStatus(w http.ResponseWriter, err error) {
-	if errors.Is(err, sql.ErrNoRows) {
+	if errors.Is(err, errNoRows) {
 		writeError(w, 404, "post not found")
 	} else {
 		log.Printf("database error: %v", err)
@@ -103,19 +126,60 @@ func errorStatus(w http.ResponseWriter, err error) {
 	}
 }
 
-func authenticate(r *http.Request) (int64, string, int, string) {
-	h := r.Header.Get("Authorization")
-	if !strings.HasPrefix(h, "Bearer ") {
+func queryOne(stmt driver.Stmt, args []driver.Value, dest []driver.Value) error {
+	rows, err := stmt.Query(args)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	if err = rows.Next(dest); errors.Is(err, io.EOF) {
+		return errNoRows
+	}
+	return err
+}
+
+func queryText(conn *sqliteConn, stmt driver.Stmt, args []driver.Value) ([]byte, error) {
+	rows, err := stmt.Query(args)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	textRows, ok := rows.(interface{ NextText([]byte) ([]byte, error) })
+	if !ok {
+		return nil, errors.New("SQLite driver does not support direct text reads")
+	}
+	conn.jsonBuf = conn.jsonBuf[:0]
+	body, err := textRows.NextText(conn.jsonBuf)
+	if errors.Is(err, io.EOF) {
+		return nil, errNoRows
+	}
+	conn.jsonBuf = body
+	return conn.jsonBuf, err
+}
+
+func queryFeed(conn *sqliteConn) ([]byte, error) {
+	return queryText(conn, conn.feed, nil)
+}
+
+func authenticate(h []byte) (int64, string, int, string) {
+	if !bytes.HasPrefix(h, []byte("Bearer ")) {
 		return 0, "", 401, "missing bearer token"
 	}
-	parts := strings.Split(h[7:], ".")
-	if len(parts) != 3 {
+	token := h[len("Bearer "):]
+	first := bytes.IndexByte(token, '.')
+	if first < 0 {
 		return 0, "", 401, "invalid or expired token"
 	}
+	rest := token[first+1:]
+	second := bytes.IndexByte(rest, '.')
+	if second < 0 || bytes.IndexByte(rest[second+1:], '.') >= 0 {
+		return 0, "", 401, "invalid or expired token"
+	}
+	headerPart, payloadPart, sigPart := token[:first], rest[:second], rest[second+1:]
 	dec := base64.RawURLEncoding.DecodeString
-	hb, e1 := dec(parts[0])
-	pb, e2 := dec(parts[1])
-	sig, e3 := dec(parts[2])
+	hb, e1 := dec(string(headerPart))
+	pb, e2 := dec(string(payloadPart))
+	sig, e3 := dec(string(sigPart))
 	if e1 != nil || e2 != nil || e3 != nil {
 		return 0, "", 401, "invalid or expired token"
 	}
@@ -124,7 +188,9 @@ func authenticate(r *http.Request) (int64, string, int, string) {
 		return 0, "", 401, "invalid or expired token"
 	}
 	mac := hmac.New(sha256.New, secret)
-	_, _ = mac.Write([]byte(parts[0] + "." + parts[1]))
+	_, _ = mac.Write(headerPart)
+	_, _ = mac.Write([]byte("."))
+	_, _ = mac.Write(payloadPart)
 	if !hmac.Equal(sig, mac.Sum(nil)) {
 		return 0, "", 401, "invalid or expired token"
 	}
@@ -145,12 +211,14 @@ func authenticate(r *http.Request) (int64, string, int, string) {
 	}
 	return id, name, 0, ""
 }
-func handler(w http.ResponseWriter, r *http.Request) {
-	path := r.URL.Path
+func handler(w http.ResponseWriter, method, path, auth, body []byte) {
 	switch {
-	case path == "/health" && r.Method == http.MethodGet:
-		var one int
-		if e := statements.health.QueryRow().Scan(&one); e != nil {
+	case bytes.Equal(path, []byte("/health")) && bytes.Equal(method, []byte("GET")):
+		conn := readerPool.acquire()
+		dest := make([]driver.Value, 1)
+		e := queryOne(conn.health, nil, dest)
+		readerPool.release(conn)
+		if e != nil {
 			writeJSON(w, 503, map[string]any{"status": "degraded", "db": "unreachable", "error": e.Error()})
 			return
 		}
@@ -159,69 +227,79 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			DB     string `json:"db"`
 			Uptime int64  `json:"uptime_s"`
 		}{"ok", "ok", int64(time.Since(start).Seconds())})
-	case path == "/feed" && r.Method == http.MethodGet:
-		rows, e := statements.feed.Query()
+	case bytes.Equal(path, []byte("/feed")) && bytes.Equal(method, []byte("GET")):
+		conn := readerPool.acquire()
+		body, e := queryFeed(conn)
 		if e != nil {
+			readerPool.release(conn)
 			errorStatus(w, e)
 			return
 		}
-		defer rows.Close()
-		ps, e := readPostRows(rows)
-		if e != nil {
-			errorStatus(w, e)
-			return
-		}
-		writeJSON(w, 200, struct {
-			Posts []post `json:"posts"`
-		}{ps})
-	case strings.HasPrefix(path, "/posts/") && r.Method == http.MethodGet:
-		id, ok := parseID(strings.TrimPrefix(path, "/posts/"))
+		writeRawJSON(w, 200, body)
+		readerPool.release(conn)
+	case bytes.HasPrefix(path, []byte("/posts/")) && bytes.Equal(method, []byte("GET")):
+		id, ok := parseIDBytes(bytes.TrimPrefix(path, []byte("/posts/")))
 		if !ok {
 			writeError(w, 400, "invalid post id")
 			return
 		}
-		p, e := readPost(statements.postByID.QueryRow(id))
+		conn := readerPool.acquire()
+		body, e := queryText(conn, conn.postByID, []driver.Value{id})
 		if e != nil {
+			readerPool.release(conn)
 			errorStatus(w, e)
 			return
 		}
-		writeJSON(w, 200, struct {
-			Post post `json:"post"`
-		}{p})
-	case path == "/posts" && r.Method == http.MethodPost:
-		uid, name, status, msg := authenticate(r)
+		writeRawJSON(w, 200, body)
+		readerPool.release(conn)
+	case bytes.Equal(path, []byte("/posts")) && bytes.Equal(method, []byte("POST")):
+		uid, name, status, msg := authenticate(auth)
 		if status != 0 {
 			writeError(w, status, msg)
 			return
 		}
-		b, e := io.ReadAll(io.LimitReader(r.Body, 16385))
-		if e != nil {
+		if len(body) > 16385 {
+			body = body[:16385]
+		}
+		var data map[string]json.RawMessage
+		if json.Unmarshal(body, &data) != nil {
 			writeError(w, 400, "malformed JSON body")
 			return
 		}
-		var data map[string]any
-		if json.Unmarshal(b, &data) != nil {
-			writeError(w, 400, "malformed JSON body")
-			return
-		}
-		body, ok := data["body"].(string)
-		if !ok {
+		var postBody string
+		if raw, ok := data["body"]; !ok || json.Unmarshal(raw, &postBody) != nil {
 			writeError(w, 400, "body is required")
 			return
 		}
-		body = strings.TrimSpace(body)
-		if body == "" {
+		postBody = strings.TrimSpace(postBody)
+		if postBody == "" {
 			writeError(w, 400, "body is required")
 			return
 		}
-		if len([]rune(body)) > 500 {
+		if utf8.RuneCountInString(postBody) > 500 {
 			writeError(w, 400, "body must be at most 500 characters")
 			return
 		}
 		var p post
-		p.Body = body
+		p.Body = postBody
 		p.Author = name
-		e = statements.createPost.QueryRow(uid, body).Scan(&p.ID, &p.CreatedAt)
+		conn := writerPool.acquire()
+		rows, e := conn.createPost.Query([]driver.Value{uid, postBody})
+		if e == nil {
+			dest := make([]driver.Value, 2)
+			e = rows.Next(dest)
+			_ = rows.Close()
+			if e == nil {
+				var valid bool
+				p.ID, valid = dest[0].(int64)
+				if !valid {
+					e = fmt.Errorf("SQLite returned %T for inserted post id", dest[0])
+				} else if p.CreatedAt, valid = dest[1].(string); !valid {
+					e = fmt.Errorf("SQLite returned %T for inserted post timestamp", dest[1])
+				}
+			}
+		}
+		writerPool.release(conn)
 		if e != nil {
 			errorStatus(w, e)
 			return
@@ -229,36 +307,42 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 201, struct {
 			Post post `json:"post"`
 		}{p})
-	case strings.HasPrefix(path, "/posts/") && strings.HasSuffix(path, "/like") && r.Method == http.MethodPost:
-		uid, _, status, msg := authenticate(r)
+	case bytes.HasPrefix(path, []byte("/posts/")) && bytes.HasSuffix(path, []byte("/like")) && bytes.Equal(method, []byte("POST")):
+		uid, _, status, msg := authenticate(auth)
 		if status != 0 {
 			writeError(w, status, msg)
 			return
 		}
-		raw := strings.TrimSuffix(strings.TrimPrefix(path, "/posts/"), "/like")
-		raw = strings.TrimSuffix(raw, "/")
-		id, ok := parseID(raw)
+		raw := bytes.TrimSuffix(bytes.TrimPrefix(path, []byte("/posts/")), []byte("/like"))
+		raw = bytes.TrimSuffix(raw, []byte("/"))
+		id, ok := parseIDBytes(raw)
 		if !ok {
 			writeError(w, 400, "invalid post id")
 			return
 		}
-		res, e := statements.createLike.Exec(uid, id, id)
+		conn := writerPool.acquire()
+		res, e := conn.createLike.Exec([]driver.Value{uid, id, id})
 		if e != nil {
+			writerPool.release(conn)
 			errorStatus(w, e)
 			return
 		}
 		n, _ := res.RowsAffected()
+		if n == 0 {
+			dest := make([]driver.Value, 1)
+			e = queryOne(conn.postExists, []driver.Value{id}, dest)
+		}
+		writerPool.release(conn)
+		if e != nil {
+			errorStatus(w, e)
+			return
+		}
 		if n == 1 {
 			writeJSON(w, 201, struct {
 				Liked   bool  `json:"liked"`
 				Already bool  `json:"already_liked"`
 				ID      int64 `json:"post_id"`
 			}{true, false, id})
-			return
-		}
-		var exists int
-		if e = statements.postExists.QueryRow(id).Scan(&exists); e != nil {
-			errorStatus(w, e)
 			return
 		}
 		writeJSON(w, 200, struct {
@@ -317,81 +401,90 @@ func poolLimit(name string, defaultValue int) (int, error) {
 	return limit, nil
 }
 
-func openDatabasePools(path string, readerLimit, writerLimit int) error {
-	baseDSN := fmt.Sprintf("file:%s?_busy_timeout=5000&_cache_size=-65536&_mmap_size=1073741824", path)
+func (c *sqliteConn) prepare(reader bool) error {
 	var err error
-	writerDB, err = sql.Open("sqlite3", baseDSN+"&_journal_mode=WAL&_synchronous=NORMAL")
-	if err != nil {
-		return err
+	if reader {
+		if c.health, err = c.conn.Prepare("SELECT 1"); err == nil {
+			c.feed, err = c.conn.Prepare(feedJSONQuery)
+		}
+		if err == nil {
+			c.postByID, err = c.conn.Prepare(postByIDJSONQuery)
+		}
+		if err == nil {
+			c.postExists, err = c.conn.Prepare("SELECT 1 FROM posts WHERE id=?")
+		}
+	} else {
+		if c.createPost, err = c.conn.Prepare("INSERT INTO posts(user_id,body) VALUES(?,?) RETURNING id,created_at"); err == nil {
+			c.createLike, err = c.conn.Prepare(`INSERT INTO likes(user_id,post_id) SELECT ?,? WHERE EXISTS(SELECT 1 FROM posts WHERE id=?) ON CONFLICT(user_id,post_id) DO NOTHING`)
+		}
+		if err == nil {
+			c.postExists, err = c.conn.Prepare("SELECT 1 FROM posts WHERE id=?")
+		}
 	}
-	writerDB.SetMaxOpenConns(writerLimit)
-	writerDB.SetMaxIdleConns(writerLimit)
-	if err = writerDB.Ping(); err != nil {
-		_ = writerDB.Close()
-		return fmt.Errorf("open SQLite writer pool: %w", err)
-	}
-
-	readerDB, err = sql.Open("sqlite3", baseDSN+"&mode=ro&_query_only=1")
-	if err != nil {
-		_ = writerDB.Close()
-		return err
-	}
-	readerDB.SetMaxOpenConns(readerLimit)
-	readerDB.SetMaxIdleConns(readerLimit)
-	if err = readerDB.Ping(); err != nil {
-		_ = readerDB.Close()
-		_ = writerDB.Close()
-		return fmt.Errorf("open SQLite reader pool: %w", err)
-	}
-	statements.health, err = readerDB.Prepare("SELECT 1")
-	if err == nil {
-		statements.feed, err = readerDB.Prepare(postSelect + " ORDER BY p.created_at DESC,p.id DESC LIMIT 20")
-	}
-	if err == nil {
-		statements.postByID, err = readerDB.Prepare(postSelect + " WHERE p.id=?")
-	}
-	if err == nil {
-		statements.postExists, err = readerDB.Prepare("SELECT 1 FROM posts WHERE id=?")
-	}
-	if err == nil {
-		statements.createPost, err = writerDB.Prepare("INSERT INTO posts(user_id,body) VALUES(?,?) RETURNING id,created_at")
-	}
-	if err == nil {
-		statements.createLike, err = writerDB.Prepare(`INSERT INTO likes(user_id,post_id) SELECT ?,? WHERE EXISTS(SELECT 1 FROM posts WHERE id=?) ON CONFLICT(user_id,post_id) DO NOTHING`)
-	}
-	if err != nil {
-		closeStatements()
-		_ = readerDB.Close()
-		_ = writerDB.Close()
-		return fmt.Errorf("prepare SQLite statements: %w", err)
-	}
-	return nil
+	return err
 }
 
-func closeStatements() {
-	for _, stmt := range []*sql.Stmt{statements.health, statements.feed, statements.postByID, statements.postExists, statements.createPost, statements.createLike} {
+func (c *sqliteConn) close() {
+	for _, stmt := range []driver.Stmt{c.health, c.feed, c.postByID, c.createPost, c.createLike, c.postExists} {
 		if stmt != nil {
 			_ = stmt.Close()
 		}
 	}
-	statements = dbStatements{}
+	if c.conn != nil {
+		_ = c.conn.Close()
+	}
 }
 
-func logPoolStats() {
-	ticker := time.NewTicker(10 * time.Second)
-	go func() {
-		defer ticker.Stop()
-		var prevReader, prevWriter sql.DBStats
-		for range ticker.C {
-			reader, writer := readerDB.Stats(), writerDB.Stats()
-			log.Printf("sqlite pools: reader open=%d in_use=%d idle=%d wait_count_10s=%d wait_duration_10s=%s; writer open=%d in_use=%d idle=%d wait_count_10s=%d wait_duration_10s=%s",
-				reader.OpenConnections, reader.InUse, reader.Idle,
-				reader.WaitCount-prevReader.WaitCount, (reader.WaitDuration - prevReader.WaitDuration).Round(time.Millisecond),
-				writer.OpenConnections, writer.InUse, writer.Idle,
-				writer.WaitCount-prevWriter.WaitCount, (writer.WaitDuration - prevWriter.WaitDuration).Round(time.Millisecond))
-			prevReader, prevWriter = reader, writer
+func (p *sqlitePool) acquire() *sqliteConn     { return <-p.available }
+func (p *sqlitePool) release(conn *sqliteConn) { p.available <- conn }
+func (p *sqlitePool) close() {
+	for _, conn := range p.all {
+		conn.close()
+	}
+}
+
+func openPool(size int, dsn string, reader bool) (*sqlitePool, error) {
+	p := &sqlitePool{available: make(chan *sqliteConn, size), all: make([]*sqliteConn, 0, size)}
+	sqliteDriver := &sqlite3.SQLiteDriver{}
+	for i := 0; i < size; i++ {
+		opened, err := sqliteDriver.Open(dsn)
+		if err != nil {
+			p.close()
+			return nil, err
 		}
-	}()
+		conn := &sqliteConn{conn: opened.(*sqlite3.SQLiteConn)}
+		if err = conn.prepare(reader); err != nil {
+			conn.close()
+			p.close()
+			return nil, err
+		}
+		if reader {
+			dest := make([]driver.Value, 1)
+			if err = queryOne(conn.health, nil, dest); err != nil {
+				conn.close()
+				p.close()
+				return nil, err
+			}
+		}
+		p.all = append(p.all, conn)
+		p.available <- conn
+	}
+	return p, nil
+}
+
+func openDatabasePools(path string, readerLimit, writerLimit int) error {
+	baseDSN := fmt.Sprintf("file:%s?_busy_timeout=5000&_cache_size=-65536&_mmap_size=1073741824", path)
+	var err error
+	writerPool, err = openPool(writerLimit, baseDSN+"&_journal_mode=WAL&_synchronous=NORMAL", false)
+	if err != nil {
+		return fmt.Errorf("open SQLite writer pool: %w", err)
+	}
+	readerPool, err = openPool(readerLimit, baseDSN+"&mode=ro&_query_only=1", true)
+	if err != nil {
+		writerPool.close()
+		return fmt.Errorf("open SQLite reader pool: %w", err)
+	}
+	return nil
 }
 
 func main() {
@@ -403,7 +496,12 @@ func main() {
 	if len(secret) == 0 {
 		log.Fatal("JWT_SECRET is required")
 	}
-	readerLimit, err := poolLimit("DB_READERS", 8)
+	workers, err := poolLimit("HTTP_WORKERS", 4)
+	if err != nil {
+		log.Fatal(err)
+	}
+	handlerWorkers = workers
+	readerLimit, err := poolLimit("DB_READERS", handlerWorkers)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -414,8 +512,7 @@ func main() {
 	if err = openDatabasePools(path, readerLimit, writerLimit); err != nil {
 		log.Fatal(err)
 	}
-	log.Printf("SQLite pools ready: readers=%d writers=%d", readerLimit, writerLimit)
-	logPoolStats()
+	log.Printf("Server pools ready: workers=%d readers=%d writers=%d", handlerWorkers, readerLimit, writerLimit)
 	if err = startProfiler(); err != nil {
 		log.Fatal(err)
 	}
@@ -427,6 +524,5 @@ func main() {
 	if port == "" {
 		port = "3000"
 	}
-	s := &http.Server{Addr: host + ":" + port, Handler: http.HandlerFunc(handler), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 75 * time.Second, MaxHeaderBytes: 16 << 10}
-	log.Fatal(s.ListenAndServe())
+	log.Fatal(serveEpoll(host, port, handler))
 }

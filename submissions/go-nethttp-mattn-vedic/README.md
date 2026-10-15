@@ -1,25 +1,25 @@
-# Go net/http + SQLite
+# Go epoll + SQLite
 
 | | |
 |---|---|
 | Language | Go (Ubuntu 24.04 `golang-go`) |
-| HTTP server | Go standard library `net/http` |
-| SQLite driver | `github.com/mattn/go-sqlite3` v1.14.24, linked with system SQLite |
+| HTTP server | Linux epoll with raw syscalls and direct endpoint dispatch |
+| SQLite driver | Local `go-sqlite3` v1.14.24 fork with the bundled SQLite amalgamation |
 | Nginx or direct | Direct: listens on `HOST:PORT` |
 
 Dependencies are pinned in `go.mod`/`go.sum`. The build uses CGO and installs GCC on the clean Ubuntu host.
 
 ## Design
 
-- A single Go process uses separate SQLite reader and writer pools. Reader connections open the database read-only; writes use a WAL-enabled pool. The standard server uses goroutines and supports keep-alive; idle connections remain open for 75 seconds.
+- A single Go process uses a Linux epoll event loop for HTTP/1.1 keep-alive connections. A bounded worker pool runs handlers and database calls, keeping SQLite cgo work off the socket loop. Each connection has at most one request in flight, preserving HTTP response order; later pipelined requests remain buffered until that response is written. The loop reuses its read buffer and retains per-connection bytes only for incomplete or in-flight requests. Idle connections remain open for 120 seconds.
 - Every handler queries SQLite for its result. No application response or table data is cached.
 - HS256 JWTs are verified on every authenticated request using a constant-time HMAC comparison. Expiration and payload types are validated.
-- `database/sql` executes writes in autocommit mode with SQLite WAL and `synchronous=NORMAL`; a successful write call returns after SQLite commits.
-- Feed and post reads use a single query with a correlated count, and writes use `RETURNING` and `INSERT ... ON CONFLICT`.
-- Constant SQL statements are prepared once per pool and reused. SQLite's query plan uses `posts_created_at_id_idx` for feed ordering, primary-key lookups for posts/users, and the covering `likes_post_id_idx` for each correlated like count. The correlated count is retained so the feed can stop after its 20 indexed posts instead of aggregating likes for the whole database.
+- SQLite is accessed through `go-sqlite3`'s direct connection and statement interfaces, without `database/sql`. Its small local fork adds `SQLiteRows.NextText`, which copies SQLite's JSON text into a per-reader reusable byte buffer without allocating a Go string per result. Writes use autocommit mode with WAL and `synchronous=NORMAL`; a successful write call returns after SQLite commits.
+- Post reads use a single query with a correlated count. Each feed request runs one prepared SQLite query that returns the newest posts and like counts as JSON. Writes use `RETURNING` and `INSERT ... ON CONFLICT`.
+- Constant SQL statements are prepared once per connection and reused. SQLite's query plan uses `posts_created_at_id_idx` for feed ordering and primary-key lookups for posts/users. The feed fast path uses the covering `likes_post_id_idx` over only the selected ID range; post-by-ID reads keep the indexed correlated count.
 - Direct serving avoids a separate Nginx process on the single vCPU host.
 
-Set `DB_READERS` and `DB_WRITERS` to positive integers to cap the open and idle connections in each pool. Defaults are 8 readers and 1 writer. SQLite still serializes writes to a database file, so increasing `DB_WRITERS` allows more concurrent write attempts but does not make SQLite perform those writes in parallel; tune it with the benchmark. The read-only pool runs in `mode=ro` and cannot issue writes.
+Set `HTTP_WORKERS` to a positive integer to set the handler worker count (default 4). `DB_READERS` defaults to the worker count; `DB_WRITERS` defaults to 1. SQLite serializes writes to a database file, so additional writer connections do not make writes execute in parallel. The read-only pool runs in `mode=ro` and cannot issue writes. The worker count is configurable because the best setting depends on the CPU quota and workload.
 
 Run `sudo bash install.sh`, `bash build.sh`, then set `SQLITE_PATH`, `JWT_SECRET`, `HOST`, and `PORT` before `bash start.sh`.
 
@@ -38,10 +38,21 @@ The profile attributes sampled CPU time to functions and call stacks. The same l
 goroutine, allocation, block, mutex, and runtime trace profiles under `/debug/pprof/`. Profiling adds
 overhead, so use it to locate hot paths and run performance comparisons with profiling disabled.
 
-Every 10 seconds, the process logs reader and writer pool open/in-use/idle connection counts and the change
-in `database/sql` wait count and cumulative wait duration over that interval. A nonzero wait delta means
-requests queued for a pool connection; compare the reader and writer deltas before changing `DB_READERS`
-or `DB_WRITERS`.
+Requests can queue in the bounded worker channel while the epoll loop continues servicing sockets; the
+per-connection in-flight limit preserves response order.
+
+## Benchmark snapshot
+
+On the local 1-vCPU / 2-GiB server cgroup, a 90,000-VU run with one HTTP worker completed with no failed
+requests: 7,797 requests/s, p95 472 ms, and p99 1.57 s. This met the p95 target but did not meet the p99
+target. The load generator ran uncapped on the host, using four loopback aliases; it reached roughly 24 GiB
+RSS and drove host swap during the run, so these figures describe this test setup rather than a clean,
+production-grade capacity claim. The server's measured cgroup memory peak was about 443 MiB.
+
+The same comparison measured one, two, and four workers. One worker had the best measured throughput and
+tail latency on this single-vCPU cgroup; the four-worker run consumed more CPU and was heavily throttled.
+Run-to-run p99 results were noisy under host memory pressure. These measurements are useful for tuning the
+worker count, not a guarantee for different hardware or load generators.
 
 ## License
 

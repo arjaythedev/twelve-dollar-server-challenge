@@ -11,11 +11,12 @@ var checkpointEvery = 2 * time.Second // a variable so tests can tick faster
 
 // runCheckpointer copies WAL frames back into the main file on its own thread
 // and connection, so the fsync never stalls the loop. Only PASSIVE mode is
-// used: it never takes a lock a reader or writer waits on. RESTART/TRUNCATE
-// hold the write lock while they wait for readers, which stalls the loop for
-// the whole busy timeout. Once a PASSIVE checkpoint has caught up and no
-// reader is inside the WAL, SQLite's next writer restarts the WAL from the
-// beginning by itself, so the file stays bounded without a blocking mode.
+// used here: it never takes a lock a reader or writer waits on. RESTART and
+// TRUNCATE hold the write lock while they wait for readers, which stalls the
+// loop for the whole busy timeout when run from another thread. Bounding the
+// WAL file is the loop's own job (server.boundWAL): it runs a TRUNCATE between
+// batches, when there is nothing to wait for, and this thread's passes keep
+// that cheap.
 func runCheckpointer(db *sqlite.Conn, stop <-chan struct{}, done chan<- struct{}) {
 	runtime.LockOSThread()
 	defer close(done)
@@ -31,8 +32,10 @@ func runCheckpointer(db *sqlite.Conn, stop <-chan struct{}, done chan<- struct{}
 		case <-stop:
 			return
 		case <-tick.C:
+			checkpointMu.Lock()
 			passive.Step()
 			passive.Reset()
+			checkpointMu.Unlock()
 		}
 	}
 }

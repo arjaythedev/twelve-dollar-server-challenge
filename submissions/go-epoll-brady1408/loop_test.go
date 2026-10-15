@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"io"
 	"net"
@@ -124,5 +125,71 @@ func TestRewriteHeld(t *testing.T) {
 	}
 	if c.flags&connCloseAfter == 0 || c.flags&connHeld != 0 {
 		t.Fatalf("flags %b", c.flags)
+	}
+}
+
+// A client that half-closes right after sending still gets its response, and
+// a write it made is committed before the socket closes.
+func TestHalfCloseStillGetsResponse(t *testing.T) {
+	l := startLoop(t, -1)
+	c := dial(t, l).(*net.TCPConn)
+	tok := token(t, "1")
+	payload := `{"body":"halfclose"}`
+	c.Write([]byte(fmt.Sprintf("POST /posts HTTP/1.1\r\nAuthorization: Bearer %s\r\nContent-Length: %d\r\n\r\n%s", tok, len(payload), payload)))
+	c.CloseWrite()
+	r := bufio.NewReader(c)
+	resp, body := readResponse(t, r)
+	if resp.StatusCode != 201 || !strings.Contains(body, `"body":"halfclose"`) {
+		t.Fatalf("%d %s", resp.StatusCode, body)
+	}
+	if _, err := r.ReadByte(); err != io.EOF {
+		t.Fatalf("want EOF after the response, got %v", err)
+	}
+}
+
+// After a request with Connection: close, nothing pipelined behind it is
+// processed (RFC 9112 §9.6): no second response, and no committed write.
+func TestNoProcessingAfterConnectionClose(t *testing.T) {
+	l := startLoop(t, -1)
+	c := dial(t, l)
+	tok := token(t, "1")
+	// The POST is padded past one read buffer so it is parsed on a later read.
+	payload := `{"body":"after-close"` + strings.Repeat(" ", 6000) + `}`
+	c.Write([]byte("GET /posts/1 HTTP/1.1\r\nConnection: close\r\n\r\n" +
+		fmt.Sprintf("POST /posts HTTP/1.1\r\nAuthorization: Bearer %s\r\nContent-Length: %d\r\n\r\n%s", tok, len(payload), payload)))
+	r := bufio.NewReader(c)
+	if resp, _ := readResponse(t, r); resp.StatusCode != 200 || !resp.Close {
+		t.Fatalf("%d close=%v", resp.StatusCode, resp.Close)
+	}
+	if _, err := r.ReadByte(); err != io.EOF {
+		t.Fatalf("want EOF after Connection: close, got %v", err)
+	}
+	c2 := dial(t, l)
+	c2.Write([]byte("GET /feed HTTP/1.1\r\n\r\n"))
+	if _, body := readResponse(t, bufio.NewReader(c2)); strings.Contains(body, "after-close") {
+		t.Fatal("a request pipelined after Connection: close was processed and committed")
+	}
+}
+
+// One socket that pipelines requests without ever reading must not starve
+// other connections: the loop caps work per connection per round.
+func TestFloodingClientCannotStarveOthers(t *testing.T) {
+	l := startLoop(t, -1)
+	flood := dial(t, l)
+	chunk := bytes.Repeat([]byte("GET /feed HTTP/1.1\r\n\r\n"), 4000) // ~88 KB per write
+	go func() {
+		for i := 0; i < 200; i++ { // ~17 MB, far more than the loop should accept unread
+			if _, err := flood.Write(chunk); err != nil {
+				return
+			}
+		}
+	}()
+	time.Sleep(300 * time.Millisecond)
+	c := dial(t, l)
+	t0 := time.Now()
+	c.Write([]byte("GET /health HTTP/1.1\r\n\r\n"))
+	resp, _ := readResponse(t, bufio.NewReader(c))
+	if d := time.Since(t0); resp.StatusCode != 200 || d > 300*time.Millisecond {
+		t.Fatalf("health took %v (status %d) while another socket flooded", d, resp.StatusCode)
 	}
 }

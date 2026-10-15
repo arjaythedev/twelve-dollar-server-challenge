@@ -24,13 +24,16 @@ One process, `GOMAXPROCS=1`, two OS threads, each with its own SQLite connection
   verifies the bearer token and runs every query, reads and writes alike, on one connection with
   prepared statements. There is no goroutine per connection: an idle socket costs one ~100-byte
   struct, so 60,000 keep-alive connections are a few megabytes of heap and the GC has nothing to scan.
-- **Group commit.** Writes that arrive in the same epoll batch share one transaction. Their 201s are
-  held in the socket's write buffer until `COMMIT` returns, then flushed; a failed commit turns them
-  into 500s. A lone write is a plain autocommit.
+- **Group commit.** Writes that arrive in the same epoll batch share one `BEGIN IMMEDIATE … COMMIT`.
+  Their 201s are held in the socket's write buffer until `COMMIT` returns, then flushed; a failed
+  commit turns them into 500s.
 - **Checkpointer thread.** `wal_autocheckpoint` is off on the loop connection. The second connection
-  runs `PRAGMA wal_checkpoint(PASSIVE)` every 2 s and `RESTART` once the WAL passes 32 MB, so the
-  fsync of a checkpoint never stalls the loop. At 60k users the WAL would otherwise hit the default
-  autocheckpoint about once a second.
+  runs `PRAGMA wal_checkpoint(PASSIVE)` every 2 s, so the fsync of a checkpoint never stalls the
+  loop (at 60k users the WAL would otherwise hit the default autocheckpoint about once a second).
+  PASSIVE alone never resets the WAL while writes keep coming, so every 10 s the loop itself runs a
+  `TRUNCATE` checkpoint once the file passes 32 MB: with the backlog already copied, that is a few
+  frames plus one sync, done between batches with nothing to wait for. RESTART/TRUNCATE from the
+  other thread would hold the write lock while waiting on readers and stall the loop.
 - **Connection budget.** Above 60,000 open connections (or `RLIMIT_NOFILE − 128` if smaller),
   completed responses carry `Connection: close`; the client reconnects for its next request. This
   keeps the process under the 65,535-descriptor limit with room for the database, WAL and epoll.
@@ -39,7 +42,10 @@ One process, `GOMAXPROCS=1`, two OS threads, each with its own SQLite connection
 - **Pragmas**: `journal_mode=WAL`, `synchronous=NORMAL`, `foreign_keys=ON` (a like on a missing post
   is detected from the foreign-key error, one statement), `busy_timeout=5000`, `temp_store=MEMORY`,
   `mmap_size=256 MiB` (the 250 MB file is read from the page cache without copies), `cache_size=8 MiB`.
-- Idle connections close after 75 s. Pipelining works. Chunked uploads get 411, bodies over 16 KB 413.
+- Idle connections close after 75 s. Pipelining works, capped at 32 requests per connection per loop
+  round so one flooding socket cannot starve the rest. After a `Connection: close` response the
+  server half-closes, discards further input and waits for the peer's FIN rather than sending an RST.
+  Chunked uploads get 411, bodies over 16 KB 413.
 
 ## Why
 

@@ -47,6 +47,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("prepare statements: %v", err)
 	}
+	srv.walPath = sqlitePath + "-wal"
 	l, err := newLoop(srv, host, port)
 	if err != nil {
 		log.Fatalf("listen %s:%d: %v", host, port, err)

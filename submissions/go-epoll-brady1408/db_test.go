@@ -1,8 +1,10 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"feedapi/internal/sqlite"
@@ -98,5 +100,56 @@ func TestBeginCommitBatch(t *testing.T) {
 	}
 	if got := pragmaInt(t, s.db, "user_version"); got != 0 { // connection still usable
 		t.Fatal(got)
+	}
+}
+
+func dbPathOf(t *testing.T, db *sqlite.Conn) string {
+	t.Helper()
+	st, err := db.Prepare("PRAGMA database_list")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Finalize()
+	st.Step()
+	return st.ColumnText(2)
+}
+
+// boundWAL truncates the WAL once it passes the limit, and does nothing below it.
+func TestBoundWALTruncates(t *testing.T) {
+	db := openTestDB(t)
+	s, err := newServer(db, testSecret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.close()
+	s.walPath = dbPathOf(t, db) + "-wal"
+	if s.boundWAL(1 << 20) {
+		t.Fatal("boundWAL ran on an empty WAL")
+	}
+	for i := 0; i < 1500; i++ { // one small committed transaction each: at least one 4 KiB frame
+		if err := s.beginTx(); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.Exec(fmt.Sprintf("INSERT INTO posts (user_id, body) VALUES (1, 'wal %d')", i)); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.commitBatch(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before, err := os.Stat(s.walPath)
+	if err != nil || before.Size() < 1<<20 {
+		t.Fatalf("WAL should exceed 1 MiB before the test: %v %v", before, err)
+	}
+	if !s.boundWAL(1 << 20) {
+		t.Fatal("boundWAL should have run")
+	}
+	after, _ := os.Stat(s.walPath)
+	if after.Size() != 0 {
+		t.Fatalf("WAL is %d bytes after truncation, want 0", after.Size())
+	}
+	// The connection still works and the rows are there.
+	if _, body, _ := do(t, s, "GET /posts/1503 HTTP/1.1\r\n\r\n"); !strings.Contains(body, `"body":"wal 1499"`) {
+		t.Fatal(body)
 	}
 }

@@ -10,17 +10,19 @@ import (
 )
 
 const (
-	idleTimeout   = 75 // seconds
-	sweepInterval = 10 * time.Second
-	readBufSize   = 4096
-	maxReadBuf    = 32768 // headers (8K) + body (16K) always fit
-	maxConnBudget = 60000
-	fdReserve     = 128
-	maxEvents     = 1024
-	poolLimit     = 2048
-	listenBacklog = 4096
-	evRead        = unix.EPOLLIN | unix.EPOLLRDHUP | unix.EPOLLET
-	evReadWrite   = evRead | unix.EPOLLOUT
+	idleTimeout     = 75 // seconds
+	sweepInterval   = 10 * time.Second
+	readBufSize     = 4096
+	maxReadBuf      = 32768 // headers (8K) + body (16K) always fit
+	maxConnBudget   = 60000
+	fdReserve       = 128
+	maxEvents       = 1024
+	maxReqsPerRound = 32 // pipelined requests one connection may run per loop round
+	poolLimit       = 2048
+	listenBacklog   = 4096
+	walLimitBytes   = 32 << 20 // sweep-time TRUNCATE threshold
+	evRead          = unix.EPOLLIN | unix.EPOLLRDHUP | unix.EPOLLET
+	evReadWrite     = evRead | unix.EPOLLOUT
 )
 
 const (
@@ -29,6 +31,8 @@ const (
 	connCloseAfter                   // close once wbuf drains
 	connHeld                         // wbuf[holdFrom:] waits for commitBatch
 	connSent100                      // 100 Continue already sent for the pending request
+	connPaused                       // hit maxReqsPerRound; queued on l.again for the next round
+	connDraining                     // final response sent and SHUT_WR done; discarding input until the peer's FIN
 )
 
 // conn is one client socket. Buffers are nil while the connection is idle.
@@ -56,6 +60,8 @@ type loop struct {
 	events  []unix.EpollEvent
 	dirty   []*conn
 	held    []*conn
+	again   []*conn // paused conns with buffered input, serviced next round
+	againNx []*conn
 	rpool   [][]byte
 	wpool   [][]byte
 	done    chan struct{} // closed when run returns
@@ -151,7 +157,7 @@ func (l *loop) run() {
 	nextSweep := time.Now().Add(sweepInterval)
 	for {
 		timeout := int(time.Until(nextSweep) / time.Millisecond)
-		if timeout < 0 {
+		if timeout < 0 || len(l.again) > 0 {
 			timeout = 0
 		}
 		n, err := unix.EpollWait(l.epfd, l.events, timeout)
@@ -188,6 +194,7 @@ func (l *loop) run() {
 				}
 			}
 		}
+		l.serviceAgain()
 		l.finishBatch()
 		if now := time.Now(); !now.Before(nextSweep) {
 			l.sweep()
@@ -233,10 +240,31 @@ func (l *loop) acceptAll() {
 	}
 }
 
-func (l *loop) readAll(c *conn) {
-	for c.flags&connOpen != 0 {
+// serviceAgain gives paused connections their next slice of work. A conn that
+// is also waiting on EPOLLOUT stays paused; flush re-queues it when drained.
+func (l *loop) serviceAgain() {
+	l.again, l.againNx = l.againNx[:0], l.again
+	for _, c := range l.againNx {
+		if c.flags&connOpen == 0 || c.flags&connPaused == 0 {
+			continue
+		}
 		if c.flags&connWantWrite != 0 {
-			return // backpressure: flush resumes reading when the socket drains
+			continue
+		}
+		c.flags &^= connPaused
+		l.process(c)
+		l.readAll(c)
+	}
+}
+
+func (l *loop) readAll(c *conn) {
+	if c.flags&connDraining != 0 {
+		l.drain(c)
+		return
+	}
+	for c.flags&connOpen != 0 {
+		if c.flags&(connWantWrite|connPaused|connCloseAfter) != 0 {
+			return // backpressure, round cap, or a close already decided: stop reading
 		}
 		if c.rbuf == nil {
 			c.rbuf = l.getRead()
@@ -257,8 +285,19 @@ func (l *loop) readAll(c *conn) {
 		if err == unix.EINTR {
 			continue
 		}
-		if err != nil || n == 0 {
+		if err != nil {
 			l.closeConn(c)
+			return
+		}
+		if n == 0 {
+			// Peer half-closed. Anything already queued (including a held 201)
+			// is still delivered; the socket closes once it drains.
+			if len(c.wbuf) > 0 {
+				c.flags |= connCloseAfter
+				l.markDirty(c)
+			} else {
+				l.closeConn(c)
+			}
 			return
 		}
 		c.rbuf = c.rbuf[:len(c.rbuf)+n]
@@ -273,7 +312,13 @@ func (l *loop) readAll(c *conn) {
 
 // process handles every complete request at the front of c.rbuf.
 func (l *loop) process(c *conn) {
-	for c.flags&connOpen != 0 && len(c.rbuf) > 0 {
+	handled := 0
+	for c.flags&connOpen != 0 && c.flags&connCloseAfter == 0 && len(c.rbuf) > 0 {
+		if handled == maxReqsPerRound {
+			c.flags |= connPaused
+			l.again = append(l.again, c)
+			return
+		}
 		req, n, st := parseRequest(c.rbuf)
 		switch st {
 		case parseNeedMore:
@@ -300,6 +345,7 @@ func (l *loop) process(c *conn) {
 		before := len(c.wbuf)
 		var held bool
 		c.wbuf, held = l.srv.handle(&req, c.wbuf, closeConn, l.nowUnix)
+		handled++
 		c.flags &^= connSent100
 		c.rbuf = c.rbuf[:copy(c.rbuf, c.rbuf[n:])]
 		if held && c.flags&connHeld == 0 {
@@ -381,7 +427,7 @@ func (l *loop) flush(c *conn) {
 	l.putWrite(c.wbuf)
 	c.wbuf = nil
 	if c.flags&connCloseAfter != 0 {
-		l.closeConn(c)
+		l.lingerClose(c)
 		return
 	}
 	if c.flags&connWantWrite != 0 {
@@ -389,7 +435,40 @@ func (l *loop) flush(c *conn) {
 		unix.EpollCtl(l.epfd, unix.EPOLL_CTL_MOD, int(c.fd), &unix.EpollEvent{Events: evRead, Fd: c.fd})
 		// Reads were paused while output was pending; the socket may hold data
 		// that edge-triggered epoll will not announce again.
-		l.readAll(c)
+		if c.flags&connPaused != 0 {
+			l.again = append(l.again, c)
+		} else {
+			l.readAll(c)
+		}
+	}
+}
+
+// lingerClose ends a connection after its last response has been written.
+// Closing with unread input queued makes the kernel send an RST, which can
+// destroy the response still in flight; instead half-close, discard whatever
+// the peer sends, and close on its FIN (or at the idle sweep).
+func (l *loop) lingerClose(c *conn) {
+	l.putRead(c.rbuf)
+	c.rbuf = nil
+	c.flags |= connDraining
+	unix.Shutdown(int(c.fd), unix.SHUT_WR)
+	l.drain(c)
+}
+
+func (l *loop) drain(c *conn) {
+	var sink [4096]byte
+	for c.flags&connOpen != 0 {
+		n, err := unix.Read(int(c.fd), sink[:])
+		if err == unix.EAGAIN {
+			return
+		}
+		if err == unix.EINTR {
+			continue
+		}
+		if err != nil || n == 0 {
+			l.closeConn(c)
+			return
+		}
 	}
 }
 
@@ -411,6 +490,7 @@ func (l *loop) sweep() {
 			l.closeConn(c)
 		}
 	}
+	l.srv.boundWAL(walLimitBytes)
 }
 
 func (l *loop) shutdown() {

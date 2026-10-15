@@ -2,7 +2,7 @@
 
 from domain.constants import BEARER_PREFIX, JS_WHITESPACE, MAX_BODY_CHARS, MAX_ROW_ID
 from domain.errors import AppError, ErrorCode
-from domain.models import Err, Ok, Principal, Result
+from domain.models import Err, LikeOutcome, LikeReceipt, Ok, Principal, Result
 
 # Failures carry no per-request data, so each is built once and shared.
 FAIL = {code: Err(AppError(code)) for code in ErrorCode}
@@ -14,6 +14,17 @@ def parse_post_id(raw: str) -> int | None:
         return None
     n = int(raw)
     return n if n > 0 else None
+
+
+def checked_post_id(raw: str) -> Result[int]:
+    post_id = parse_post_id(raw)
+    return FAIL[ErrorCode.INVALID_POST_ID] if post_id is None else Ok(post_id)
+
+
+def like_receipt(post_id: int, outcome: LikeOutcome) -> Result[LikeReceipt]:
+    if outcome is LikeOutcome.POST_MISSING:
+        return FAIL[ErrorCode.POST_NOT_FOUND]
+    return Ok(LikeReceipt(post_id, already_liked=outcome is LikeOutcome.ALREADY_LIKED))
 
 
 def bearer_token(authorization: str | None) -> str | None:

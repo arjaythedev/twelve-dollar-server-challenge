@@ -8,3 +8,4 @@ class SystemClock:
 
     wall = staticmethod(time.time)
     monotonic = staticmethod(time.monotonic)
+    perf_ns = staticmethod(time.perf_counter_ns)

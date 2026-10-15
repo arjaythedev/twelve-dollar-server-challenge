@@ -64,6 +64,20 @@ class SqlitePostStoreTest(unittest.IsolatedAsyncioTestCase):
         self.store = reopened
         self.assertIn(b'"like_count":1', await reopened.post(2))
 
+    async def test_commits_are_recorded_as_background_spans(self):
+        recorded = []
+
+        class Sink:
+            def record(self, endpoint, spans):
+                recorded.extend((endpoint, span.name) for span in spans)
+
+        await self.store.close()
+        ticks = iter(range(0, 10**9, 1000))
+        self.store = SqlitePostStore(SqliteConfig(path=str(self.path)), Sink(), lambda: next(ticks))
+        await self.store.start()
+        await self.store.like(2, 3)
+        self.assertEqual(recorded, [("background", "group commit")])
+
     async def test_ping(self):
         self.store.ping()
 

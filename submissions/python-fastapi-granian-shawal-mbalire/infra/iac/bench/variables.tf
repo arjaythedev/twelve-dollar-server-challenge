@@ -14,6 +14,12 @@ variable "server_command" {
   default     = []
 }
 
+variable "server_env" {
+  description = "Extra environment for the server, as NAME=value (--profile sets PYTHONPERFSUPPORT=1)"
+  type        = list(string)
+  default     = []
+}
+
 variable "server_cpu_quota" {
   description = "Server CPU time per 10 ms period, in microseconds; 0 leaves it uncapped"
   type        = number
@@ -28,7 +34,7 @@ variable "generator_image" {
 variable "generator_cpu_sets" {
   description = "One generator container per entry, pinned to these CPUs"
   type        = list(string)
-  default     = ["1-2", "3-4", "5-6", "7"]
+  default     = ["1-2", "3-4", "5-6", "7"] # CPU 7 also runs bench/linux.py's SCHED_IDLE clock keeper
 }
 
 variable "subnet" {

@@ -55,12 +55,18 @@ class FixedClock:
     def __init__(self, wall: float = 1_000_000.0, monotonic: float = 50.0):
         self.now = wall
         self.mono = monotonic
+        self.ticks = 0
 
     def wall(self) -> float:
         return self.now
 
     def monotonic(self) -> float:
         return self.mono
+
+    def perf_ns(self) -> int:
+        """Advances 1 µs per read, so every timed step lasts exactly 1000 ns."""
+        self.ticks += 1000
+        return self.ticks
 
 
 def bearer(claims: dict) -> str:

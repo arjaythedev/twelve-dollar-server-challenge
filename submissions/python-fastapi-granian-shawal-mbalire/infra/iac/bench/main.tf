@@ -3,7 +3,8 @@
 # bench/linux.py builds the images, applies this with -var, measures, then destroys it.
 #
 # CPU 0 is the server's vCPU. The generators split CPUs 1-7, and each has its own address, so each
-# gets its own ~64k ports to the server's port: 4 generators reach about 256k connections.
+# gets its own ~64k ports to the server's port: 4 generators reach about 256k connections. CPU 7 also
+# runs bench/linux.py's SCHED_IDLE clock keeper.
 
 provider "docker" {
   host = var.docker_host
@@ -20,6 +21,7 @@ resource "docker_container" "server" {
   name        = "twelve-server"
   image       = var.server_image
   command     = length(var.server_command) > 0 ? var.server_command : null
+  env         = var.server_env
   working_dir = "/app"
   cpu_set     = "0"
   # a 10 ms period, not Docker's 100 ms: at a 15% cap that would stall the server ~85 ms at a time

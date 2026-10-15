@@ -2,7 +2,7 @@
 
 from typing import Protocol
 
-from domain.models import Document, LikeOutcome, Principal
+from domain.models import Document, LikeOutcome, Principal, Span
 
 
 class PostStore(Protocol):
@@ -28,10 +28,17 @@ class TokenVerifier(Protocol):
 
 
 class Clock(Protocol):
-    """TimePort: wall time for token expiry, monotonic time for durations."""
+    """TimePort: wall time for token expiry, monotonic time for uptime, perf_ns for hop spans."""
 
     def wall(self) -> float: ...
     def monotonic(self) -> float: ...
+    def perf_ns(self) -> int: ...  # high-resolution monotonic nanoseconds
+
+
+class SpanSink(Protocol):
+    """TracerPort: receives each request's hop spans while hop profiling is on."""
+
+    def record(self, endpoint: str, spans: tuple[Span, ...]) -> None: ...
 
 
 class Resource(Protocol):

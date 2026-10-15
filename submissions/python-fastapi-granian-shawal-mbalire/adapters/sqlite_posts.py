@@ -4,14 +4,21 @@ Group commit: the first write in an event-loop pass opens a transaction (BEGIN I
 schedules one COMMIT with loop.call_soon. Every write made in that pass joins the transaction and
 its response awaits the batch's future, so nothing is acknowledged before it is durable. Reads made
 while a batch is open may have seen its uncommitted rows, so they await the same future.
+
+Both the commit and the periodic WAL checkpoint run on the event loop, so a slow one stalls every
+request. With a SpanSink (hop profiling), each is recorded as a "background" span.
 """
 
 import asyncio
 import sqlite3
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from domain.errors import StoreUnavailable
-from domain.models import Document, LikeOutcome, Principal
+from domain.models import Document, LikeOutcome, Principal, Span
+from domain.ports import SpanSink
+
+BACKGROUND = "background"  # the SpanSink endpoint for work no request asked for
 
 _POST_JSON = (
     "json_object('id', p.id, 'body', p.body, 'created_at', p.created_at, 'author', u.username,"
@@ -61,8 +68,13 @@ class SqliteConfig:
 class SqlitePostStore:
     """Implements PostStore and Resource."""
 
-    def __init__(self, config: SqliteConfig):
+    def __init__(self, config: SqliteConfig, spans: SpanSink | None = None,
+                 perf_ns: Callable[[], int] | None = None):
+        if spans is not None and perf_ns is None:
+            raise ValueError("recording spans needs a clock")
         self._config = config
+        self._spans = spans
+        self._perf_ns = perf_ns
         self._db = sqlite3.connect(
             config.path, isolation_level=None, check_same_thread=False, cached_statements=32
         )
@@ -143,6 +155,7 @@ class SqlitePostStore:
         batch, self._batch = self._batch, None
         if batch is None:
             return
+        began = self._perf_ns() if self._spans is not None else 0
         try:
             self._db.execute("COMMIT")
         except sqlite3.Error as exc:
@@ -151,14 +164,19 @@ class SqlitePostStore:
             batch.set_exception(exc)  # every response in the batch becomes a 500
         else:
             batch.set_result(None)
+        if self._spans is not None:
+            self._spans.record(BACKGROUND, (Span("group commit", self._perf_ns() - began),))
 
     def _schedule_checkpoint(self) -> None:
         self._timer = self._loop.call_later(self._config.checkpoint_every_s, self._checkpoint)
 
     def _checkpoint(self) -> None:
         if self._batch is None:
+            began = self._perf_ns() if self._spans is not None else 0
             try:
                 self._db.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchall()
             except sqlite3.Error:
                 pass  # retried on the next tick
+            if self._spans is not None:
+                self._spans.record(BACKGROUND, (Span("wal checkpoint", self._perf_ns() - began),))
         self._schedule_checkpoint()

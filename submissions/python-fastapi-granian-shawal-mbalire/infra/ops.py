@@ -5,16 +5,33 @@ build.sh and start.sh are required by the challenge and run with bash, so each i
 into this file (install.sh is a single apt-get line, since it has to install python3 first).
 Stdlib only, and Python 3.9 compatible: it runs before the venv exists.
 
-    python3 infra/ops.py build     # normal user: .venv with the pinned requirements (PYTHON picks the interpreter)
+    python3 infra/ops.py build     # normal user: .venv with the pinned requirements (see build())
     python3 infra/ops.py start     # foreground: exec Granian. Env: SQLITE_PATH, JWT_SECRET, HOST, PORT
 """
 
+import hashlib
 import os
+import platform
 import subprocess
 import sys
+import tarfile
+import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+
+# The server's interpreter: CPython from python-build-standalone (clang, PGO + LTO, the tail-call
+# interpreter, and SQLite 3.53 instead of Ubuntu's 3.45). In-process, the request mix ran ~15% faster
+# than Ubuntu's 3.12 (13.0-13.5 vs 15.4-16.1 µs per request). Pinned by release and SHA-256.
+PYTHON_RELEASE = "20261013"
+PYTHON_VERSION = "3.15.0"
+PYTHON_SHA256 = {
+    "aarch64": "26a54e8fbde81bcc39ba35ad855a6a573295c023793c20fff1670a560649bcd7",
+    "x86_64": "e02a368dd5dc76ffe0599e5109ad6c1ee84e597910758b0e006bab25372a8921",
+}
+PYTHON_URL = ("https://github.com/astral-sh/python-build-standalone/releases/download/{release}/"
+              "cpython-{version}+{release}-{arch}-unknown-linux-gnu-install_only.tar.gz")
+PYTHON_HOME = ROOT / ".python"
 
 # One worker on a single-threaded runtime: the box has 1 vCPU and SQLite has one connection.
 GRANIAN_FLAGS = [
@@ -39,8 +56,42 @@ def run(*cmd: str, **env: str) -> None:
     subprocess.run(cmd, check=True, env={**os.environ, **env})
 
 
+def standalone_python() -> str:
+    """Downloads and unpacks the pinned interpreter into .python/ (once); returns its python3."""
+    python = PYTHON_HOME / "python" / "bin" / "python3"
+    marker = PYTHON_HOME / (PYTHON_VERSION + "+" + PYTHON_RELEASE)
+    if marker.exists() and python.exists():
+        return str(python)
+    arch = platform.machine()
+    if arch not in PYTHON_SHA256:
+        raise SystemExit("no pinned python-build-standalone build for " + arch)
+    url = PYTHON_URL.format(release=PYTHON_RELEASE, version=PYTHON_VERSION, arch=arch)
+    print("+ download", url, flush=True)
+    archive = urllib.request.urlopen(url, timeout=120).read()
+    if hashlib.sha256(archive).hexdigest() != PYTHON_SHA256[arch]:
+        raise SystemExit("the downloaded interpreter does not match its pinned SHA-256")
+    subprocess.run(["rm", "-rf", str(PYTHON_HOME)], check=True)
+    PYTHON_HOME.mkdir()
+    archive_path = PYTHON_HOME / "python.tar.gz"
+    archive_path.write_bytes(archive)
+    with tarfile.open(archive_path) as tar:
+        if hasattr(tarfile, "tar_filter"):  # 3.12+: refuse paths outside .python/
+            tar.extractall(PYTHON_HOME, filter="tar")
+        else:
+            tar.extractall(PYTHON_HOME)
+    archive_path.unlink()
+    marker.touch()
+    return str(python)
+
+
 def build() -> None:
-    python = os.environ.get("PYTHON") or sys.executable
+    """.venv from the pinned interpreter on Linux; PYTHON (or this interpreter) elsewhere, e.g. a Mac."""
+    if os.environ.get("PYTHON"):
+        python = os.environ["PYTHON"]
+    elif sys.platform == "linux":
+        python = standalone_python()
+    else:
+        python = sys.executable
     run(python, "-m", "venv", "--clear", str(ROOT / ".venv"))
     run(str(ROOT / ".venv/bin/pip"), "install", "--disable-pip-version-check", "--no-input", "--quiet",
         "--only-binary=:all:", "-r", str(ROOT / "requirements.txt"))

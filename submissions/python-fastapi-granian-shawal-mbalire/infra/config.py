@@ -9,6 +9,7 @@ class Settings:
     sqlite_path: str
     jwt_secret: bytes
     profile_out: str | None = None  # PROFILE_OUT: write a cProfile dump here on shutdown
+    profile_hops_out: str | None = None  # PROFILE_HOPS_OUT: time every request hop, write JSON here
 
 
 def load_settings(env: Mapping[str, str]) -> Settings:
@@ -19,4 +20,5 @@ def load_settings(env: Mapping[str, str]) -> Settings:
         sqlite_path=env["SQLITE_PATH"],
         jwt_secret=env["JWT_SECRET"].encode(),
         profile_out=env.get("PROFILE_OUT") or None,
+        profile_hops_out=env.get("PROFILE_HOPS_OUT") or None,
     )

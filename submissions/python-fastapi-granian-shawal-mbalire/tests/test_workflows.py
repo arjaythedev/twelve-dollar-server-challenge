@@ -29,32 +29,32 @@ class Workflows(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((code(result), result.error.detail), (ErrorCode.STORE_UNREACHABLE, "disk on fire"))
 
     async def test_post(self):
-        self.assertEqual(await self.api.post("5"), Ok(b'{"post":5}'))
-        self.assertEqual(code(await self.api.post("6")), ErrorCode.POST_NOT_FOUND)
-        self.assertEqual(code(await self.api.post(str(2**63))), ErrorCode.POST_NOT_FOUND)
-        self.assertEqual(code(await self.api.post("x")), ErrorCode.INVALID_POST_ID)
+        self.assertEqual((await self.api.post("5")).value, Ok(b'{"post":5}'))
+        self.assertEqual(code((await self.api.post("6")).value), ErrorCode.POST_NOT_FOUND)
+        self.assertEqual(code((await self.api.post(str(2**63))).value), ErrorCode.POST_NOT_FOUND)
+        self.assertEqual(code((await self.api.post("x")).value), ErrorCode.INVALID_POST_ID)
 
     async def test_create_checks_auth_then_json_then_body(self):
-        self.assertEqual(code(await self.api.create_post(None, b"{bad")), ErrorCode.MISSING_TOKEN)
-        self.assertEqual(code(await self.api.create_post("Bearer nope", b"{bad")), ErrorCode.INVALID_TOKEN)
-        self.assertEqual(code(await self.api.create_post(GOOD, b"{bad")), ErrorCode.MALFORMED_JSON)
-        self.assertEqual(code(await self.api.create_post(GOOD, b"{}")), ErrorCode.BODY_REQUIRED)
+        self.assertEqual(code((await self.api.create_post(None, b"{bad")).value), ErrorCode.MISSING_TOKEN)
+        self.assertEqual(code((await self.api.create_post("Bearer nope", b"{bad")).value), ErrorCode.INVALID_TOKEN)
+        self.assertEqual(code((await self.api.create_post(GOOD, b"{bad")).value), ErrorCode.MALFORMED_JSON)
+        self.assertEqual(code((await self.api.create_post(GOOD, b"{}")).value), ErrorCode.BODY_REQUIRED)
         self.assertEqual(self.store.created, [])
 
     async def test_create(self):
-        result = await self.api.create_post(GOOD, b'{"body":"  hello "}')
+        result = (await self.api.create_post(GOOD, b'{"body":"  hello "}')).value
         self.assertEqual(result, Ok(b'{"post":"new"}'))
         self.assertEqual(self.store.created, [(Principal(1, "alice"), "hello")])
 
     async def test_like_checks_auth_before_id(self):
-        self.assertEqual(code(await self.api.like(None, "abc")), ErrorCode.MISSING_TOKEN)
-        self.assertEqual(code(await self.api.like(GOOD, "abc")), ErrorCode.INVALID_POST_ID)
+        self.assertEqual(code((await self.api.like(None, "abc")).value), ErrorCode.MISSING_TOKEN)
+        self.assertEqual(code((await self.api.like(GOOD, "abc")).value), ErrorCode.INVALID_POST_ID)
 
     async def test_like(self):
-        self.assertEqual(await self.api.like(GOOD, "5"), Ok(LikeReceipt(5, already_liked=False)))
-        self.assertEqual(await self.api.like(GOOD, "5"), Ok(LikeReceipt(5, already_liked=True)))
-        self.assertEqual(code(await self.api.like(GOOD, "6")), ErrorCode.POST_NOT_FOUND)
-        self.assertEqual(code(await self.api.like(GOOD, str(2**63))), ErrorCode.POST_NOT_FOUND)
+        self.assertEqual((await self.api.like(GOOD, "5")).value, Ok(LikeReceipt(5, already_liked=False)))
+        self.assertEqual((await self.api.like(GOOD, "5")).value, Ok(LikeReceipt(5, already_liked=True)))
+        self.assertEqual(code((await self.api.like(GOOD, "6")).value), ErrorCode.POST_NOT_FOUND)
+        self.assertEqual(code((await self.api.like(GOOD, str(2**63))).value), ErrorCode.POST_NOT_FOUND)
 
 
 if __name__ == "__main__":

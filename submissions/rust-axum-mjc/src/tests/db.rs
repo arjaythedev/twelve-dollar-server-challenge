@@ -1,3 +1,14 @@
+const FEED_REFERENCE_QUERY: &str = "WITH feed AS (
+    SELECT p.id, p.body, p.created_at, u.username
+    FROM posts p JOIN users u ON u.id = p.user_id
+    ORDER BY p.created_at DESC, p.id DESC
+    LIMIT 20
+)
+SELECT f.id, f.body, f.created_at, f.username,
+    (SELECT count(*) FROM likes l WHERE l.post_id = f.id)
+FROM feed f
+ORDER BY f.created_at DESC, f.id DESC";
+
 mod tests {
     use super::*;
 
@@ -16,7 +27,7 @@ mod tests {
         let path = directory.path().join("feed.db");
         let connection = Connection::open(&path).unwrap();
         connection
-            .execute_batch(include_str!("../../../schema.sql"))
+            .execute_batch(include_str!("../../../../schema.sql"))
             .unwrap();
         connection
             .execute(

@@ -23,17 +23,6 @@ const FEED_QUERY: &str = "SELECT p.id, p.body, p.created_at, u.username,
     (SELECT count(*) FROM likes l WHERE l.post_id = p.id)
     FROM posts p JOIN users u ON u.id = p.user_id
     ORDER BY p.created_at DESC, p.id DESC LIMIT 20";
-#[cfg(test)]
-const FEED_REFERENCE_QUERY: &str = "WITH feed AS (
-    SELECT p.id, p.body, p.created_at, u.username
-    FROM posts p JOIN users u ON u.id = p.user_id
-    ORDER BY p.created_at DESC, p.id DESC
-    LIMIT 20
-)
-SELECT f.id, f.body, f.created_at, f.username,
-    (SELECT count(*) FROM likes l WHERE l.post_id = f.id)
-FROM feed f
-ORDER BY f.created_at DESC, f.id DESC";
 const CREATE_POST_QUERY: &str =
     "INSERT INTO posts (user_id, body) VALUES (?1, ?2) RETURNING id, created_at";
 const POST_EXISTS_QUERY: &str = "SELECT EXISTS (SELECT 1 FROM posts WHERE id = ?1)";
@@ -401,7 +390,7 @@ struct WorkerStatements<'connection> {
     rollback_savepoint: rusqlite::Statement<'connection>,
     release_savepoint: rusqlite::Statement<'connection>,
     health: rusqlite::Statement<'connection>,
-    feed: rusqlite::Statement<'connection>,
+    feed: FeedStatements<'connection>,
     post: rusqlite::Statement<'connection>,
     create_post: rusqlite::Statement<'connection>,
     post_exists: rusqlite::Statement<'connection>,
@@ -436,8 +425,7 @@ impl<'connection> WorkerStatements<'connection> {
                 .prepare_with_flags("RELEASE request_item", PrepFlags::SQLITE_PREPARE_PERSISTENT)?,
             health: connection
                 .prepare_with_flags("SELECT 1", PrepFlags::SQLITE_PREPARE_PERSISTENT)?,
-            feed: connection
-                .prepare_with_flags(FEED_QUERY, PrepFlags::SQLITE_PREPARE_PERSISTENT)?,
+            feed: FeedStatements::prepare(connection)?,
             post: connection
                 .prepare_with_flags(POST_QUERY, PrepFlags::SQLITE_PREPARE_PERSISTENT)?,
             create_post: connection
@@ -446,6 +434,39 @@ impl<'connection> WorkerStatements<'connection> {
                 .prepare_with_flags(POST_EXISTS_QUERY, PrepFlags::SQLITE_PREPARE_PERSISTENT)?,
             insert_like: connection
                 .prepare_with_flags(INSERT_LIKE_QUERY, PrepFlags::SQLITE_PREPARE_PERSISTENT)?,
+        })
+    }
+}
+
+struct FeedStatements<'connection> {
+    fallback: rusqlite::Statement<'connection>,
+    ids: rusqlite::Statement<'connection>,
+    likes: rusqlite::Statement<'connection>,
+    rows: rusqlite::Statement<'connection>,
+    scratch: Vec<u8>,
+}
+
+impl<'connection> FeedStatements<'connection> {
+    fn prepare(connection: &'connection Connection) -> Result<Self, DbError> {
+        Ok(Self {
+            fallback: connection
+                .prepare_with_flags(FEED_QUERY, PrepFlags::SQLITE_PREPARE_PERSISTENT)?,
+            ids: connection.prepare_with_flags(
+                "SELECT id FROM posts ORDER BY created_at DESC, id DESC LIMIT 20",
+                PrepFlags::SQLITE_PREPARE_PERSISTENT,
+            )?,
+            likes: connection.prepare_with_flags(
+                "SELECT post_id, count(*) FROM likes WHERE post_id BETWEEN ?1 AND ?2
+                 GROUP BY post_id",
+                PrepFlags::SQLITE_PREPARE_PERSISTENT,
+            )?,
+            rows: connection.prepare_with_flags(
+                "SELECT p.id, p.body, p.created_at, u.username
+                 FROM posts p JOIN users u ON u.id = p.user_id
+                 WHERE p.id BETWEEN ?1 AND ?2",
+                PrepFlags::SQLITE_PREPARE_PERSISTENT,
+            )?,
+            scratch: Vec::new(),
         })
     }
 }
@@ -1348,20 +1369,34 @@ fn configure_mmap_size(connection: &Connection, requested_bytes: u64) -> Result<
 }
 
 fn decode_post<'a>(row: &'a rusqlite::Row<'_>) -> rusqlite::Result<Post<'a>> {
+    decode_post_with_likes(row, row.get(4)?)
+}
+
+fn decode_post_with_likes<'a>(
+    row: &'a rusqlite::Row<'_>,
+    like_count: i64,
+) -> rusqlite::Result<Post<'a>> {
     Ok(Post {
         id: row.get(0)?,
         body: row.get_ref(1)?.as_str()?,
         created_at: row.get_ref(2)?.as_str()?,
         author: row.get_ref(3)?.as_str()?,
-        like_count: row.get(4)?,
+        like_count,
     })
 }
 
-fn read_feed(
-    statement: &mut rusqlite::Statement<'_>,
-    capacity: &mut usize,
-) -> Result<Bytes, DbError> {
-    let mut rows = statement.query([])?;
+fn read_feed(statements: &mut FeedStatements<'_>, capacity: &mut usize) -> Result<Bytes, DbError> {
+    let ranged = read_range_feed(statements, capacity);
+    // Reuse allocation capacity, never logical results between requests. Bound
+    // idle scratch retention even when a database contains unusually large text.
+    statements.scratch.clear();
+    if statements.scratch.capacity() > 64 * 1024 {
+        statements.scratch = Vec::new();
+    }
+    if let Some(output) = ranged? {
+        return Ok(output);
+    }
+    let mut rows = statements.fallback.query([])?;
     let mut output = Vec::with_capacity(*capacity);
     output.extend_from_slice(b"{\"posts\":[");
     let mut first = true;
@@ -1376,6 +1411,88 @@ fn read_feed(
     output.extend_from_slice(b"]}");
     *capacity = output.capacity();
     Ok(Bytes::from(output))
+}
+
+fn read_range_feed(
+    statements: &mut FeedStatements<'_>,
+    capacity: &mut usize,
+) -> Result<Option<Bytes>, DbError> {
+    const MAX_ID_SPAN: usize = 256;
+    let mut ids = [0_i64; 20];
+    let mut len = 0;
+    {
+        let mut rows = statements.ids.query([])?;
+        while let Some(row) = rows.next()? {
+            ids[len] = row.get(0)?;
+            len += 1;
+        }
+    }
+    if len == 0 {
+        return Ok(Some(Bytes::from_static(b"{\"posts\":[]}")));
+    }
+    let ids = &ids[..len];
+    let minimum = *ids.iter().min().expect("nonempty feed IDs");
+    let maximum = *ids.iter().max().expect("nonempty feed IDs");
+    let Some(span) = maximum
+        .checked_sub(minimum)
+        .and_then(|span| usize::try_from(span).ok())
+        .filter(|&span| span < MAX_ID_SPAN)
+    else {
+        return Ok(None);
+    };
+    let mut slots = [None; MAX_ID_SPAN];
+    let slots = &mut slots[..=span];
+    for (index, &id) in ids.iter().enumerate() {
+        // The checked span proves each selected ID's subtraction and conversion.
+        let offset = usize::try_from(id - minimum).expect("feed ID within checked span");
+        slots[offset] = Some(index);
+    }
+    let selected_slot = |id: i64| {
+        id.checked_sub(minimum)
+            .and_then(|offset| usize::try_from(offset).ok())
+            .and_then(|offset| slots.get(offset))
+            .copied()
+            .flatten()
+    };
+    let mut likes = [0_i64; 20];
+    {
+        // Aggregate inside SQLite: the bounded ID range returns at most 256 groups.
+        let mut rows = statements.likes.query(params![minimum, maximum])?;
+        while let Some(row) = rows.next()? {
+            if let Some(slot) = selected_slot(row.get(0)?) {
+                likes[slot] = row.get(1)?;
+            }
+        }
+    }
+    statements.scratch.clear();
+    let mut segments = [None; 20];
+    {
+        let mut rows = statements.rows.query(params![minimum, maximum])?;
+        while let Some(row) = rows.next()? {
+            if let Some(slot) = selected_slot(row.get(0)?) {
+                let start = statements.scratch.len();
+                decode_post_with_likes(row, likes[slot])?.write_json(&mut statements.scratch)?;
+                segments[slot] = Some((start, statements.scratch.len()));
+            }
+        }
+    }
+    if segments[..len].iter().any(Option::is_none) {
+        // LIMIT in the original query follows the users join. A missing author
+        // can admit a later post, so a posts-only ID scan must fall back exactly.
+        return Ok(None);
+    }
+    let mut output = Vec::with_capacity(*capacity);
+    output.extend_from_slice(b"{\"posts\":[");
+    for (index, segment) in segments[..len].iter().enumerate() {
+        if index != 0 {
+            output.push(b',');
+        }
+        let (start, end) = segment.expect("joined feed row");
+        output.extend_from_slice(&statements.scratch[start..end]);
+    }
+    output.extend_from_slice(b"]}");
+    *capacity = output.capacity();
+    Ok(Some(Bytes::from(output)))
 }
 
 fn read_post(

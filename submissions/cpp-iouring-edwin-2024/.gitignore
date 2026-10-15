@@ -3,6 +3,8 @@ bin/
 *.a
 sqlite.zip
 sqlite-amalgamation-*/
+src/sqlite3.c
+src/sqlite3.h
 .vscode/
 .idea/
 build/

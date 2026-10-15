@@ -1,34 +1,29 @@
 package main
 
 import (
-	"os"
 	"runtime"
 	"time"
 
 	"feedapi/internal/sqlite"
 )
 
-const (
-	checkpointEvery = 2 * time.Second
-	walRestartBytes = 32 << 20
-)
+var checkpointEvery = 2 * time.Second // a variable so tests can tick faster
 
 // runCheckpointer copies WAL frames back into the main file on its own thread
-// and connection, so the fsync never stalls the loop. PASSIVE never blocks a
-// writer; RESTART (when the WAL is large) waits briefly for them, and on BUSY
-// simply tries again next tick.
-func runCheckpointer(db *sqlite.Conn, walPath string, stop <-chan struct{}, done chan<- struct{}) {
+// and connection, so the fsync never stalls the loop. Only PASSIVE mode is
+// used: it never takes a lock a reader or writer waits on. RESTART/TRUNCATE
+// hold the write lock while they wait for readers, which stalls the loop for
+// the whole busy timeout. Once a PASSIVE checkpoint has caught up and no
+// reader is inside the WAL, SQLite's next writer restarts the WAL from the
+// beginning by itself, so the file stays bounded without a blocking mode.
+func runCheckpointer(db *sqlite.Conn, stop <-chan struct{}, done chan<- struct{}) {
 	runtime.LockOSThread()
 	defer close(done)
 	passive, err := db.Prepare("PRAGMA wal_checkpoint(PASSIVE)")
 	if err != nil {
 		return
 	}
-	restart, err := db.Prepare("PRAGMA wal_checkpoint(RESTART)")
-	if err != nil {
-		return
-	}
-	defer func() { passive.Finalize(); restart.Finalize(); db.Close() }()
+	defer func() { passive.Finalize(); db.Close() }()
 	tick := time.NewTicker(checkpointEvery)
 	defer tick.Stop()
 	for {
@@ -36,12 +31,8 @@ func runCheckpointer(db *sqlite.Conn, walPath string, stop <-chan struct{}, done
 		case <-stop:
 			return
 		case <-tick.C:
-			st := passive
-			if fi, err := os.Stat(walPath); err == nil && fi.Size() > walRestartBytes {
-				st = restart
-			}
-			st.Step()
-			st.Reset()
+			passive.Step()
+			passive.Reset()
 		}
 	}
 }

@@ -53,7 +53,7 @@ func main() {
 	}
 
 	stop, done := make(chan struct{}), make(chan struct{})
-	go runCheckpointer(cpdb, sqlitePath+"-wal", stop, done)
+	go runCheckpointer(cpdb, stop, done)
 
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)

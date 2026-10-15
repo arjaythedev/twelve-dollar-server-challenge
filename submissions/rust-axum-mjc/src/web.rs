@@ -44,11 +44,14 @@ fn error(status: StatusCode, message: &str) -> Response {
     (status, Json(ErrorBody { error: message })).into_response()
 }
 
-fn encoded_json(status: StatusCode, body: Vec<u8>) -> Response {
-    (status, [(CONTENT_TYPE, "application/json")], body).into_response()
+fn encoded_json(status: StatusCode, body: impl Into<Bytes>) -> Response {
+    (status, [(CONTENT_TYPE, "application/json")], body.into()).into_response()
 }
 
 fn internal_error(error_value: DbError) -> Response {
+    if matches!(&error_value, DbError::WorkerBusy) {
+        return error(StatusCode::SERVICE_UNAVAILABLE, "database busy");
+    }
     eprintln!("database request failed: {error_value}");
     error(StatusCode::INTERNAL_SERVER_ERROR, "internal server error")
 }

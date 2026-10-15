@@ -3,3 +3,4 @@ rustflags = ["-C", "force-frame-pointers=yes"]
 
 [env]
 CFLAGS = "-fno-omit-frame-pointer"
+LIBSQLITE3_FLAGS = { value = "-USQLITE_ENABLE_MEMORY_MANAGEMENT", force = false }

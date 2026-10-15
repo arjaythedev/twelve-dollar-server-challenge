@@ -27,7 +27,7 @@ const CREATE_POST_QUERY: &str =
     "INSERT INTO posts (user_id, body) VALUES (?1, ?2) RETURNING id, created_at";
 const POST_EXISTS_QUERY: &str = "SELECT EXISTS (SELECT 1 FROM posts WHERE id = ?1)";
 const INSERT_LIKE_QUERY: &str = "INSERT INTO likes (user_id, post_id) VALUES (?1, ?2) ON CONFLICT (user_id, post_id) DO NOTHING";
-pub const DEFAULT_PAGE_CACHE_KIB: u64 = 256 * 1024;
+pub const DEFAULT_PAGE_CACHE_KIB: u64 = 32 * 1024;
 const CHECKPOINT_IDLE_INTERVAL: Duration = Duration::from_secs(1);
 const REQUEST_CAPACITY: usize = 4096;
 // Match the benchmark p99 ceiling; admission and execution both count toward latency.

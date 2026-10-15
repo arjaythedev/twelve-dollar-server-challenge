@@ -1,8 +1,6 @@
 package main
 
 import (
-	"os"
-	"sync"
 	"time"
 
 	"feedapi/internal/sqlite"
@@ -28,12 +26,14 @@ PRAGMA foreign_keys=ON;
 PRAGMA temp_store=MEMORY;`
 
 // Loop connection: the 250 MB file is read through mmap, an 8 MiB page cache
-// covers the hot index pages, and checkpoints are left to the checkpointer thread.
+// covers the hot index pages, checkpoints are left to the checkpointer thread,
+// and the WAL file is cut back to 64 MiB whenever it restarts.
 const loopPragmas = commonPragmas + `
 PRAGMA busy_timeout=5000;
 PRAGMA mmap_size=268435456;
 PRAGMA cache_size=-8192;
-PRAGMA wal_autocheckpoint=0;`
+PRAGMA wal_autocheckpoint=0;
+PRAGMA journal_size_limit=67108864;`
 
 // Checkpointer: a short busy timeout so it never lingers on a lock; a missed
 // pass is simply retried on the next tick.
@@ -61,7 +61,7 @@ func openWith(path, pragmas string) (*sqlite.Conn, error) {
 }
 
 type statements struct {
-	feed, post, create, like, health, begin, commit, rollback, truncate *sqlite.Stmt
+	feed, post, create, like, health, begin, commit, rollback *sqlite.Stmt
 }
 
 type server struct {
@@ -71,12 +71,7 @@ type server struct {
 	start   time.Time
 	inTx    bool
 	scratch []byte
-	walPath string // SQLITE_PATH + "-wal"; empty disables boundWAL
 }
-
-// checkpointMu serialises the checkpointer's PASSIVE checkpoints with the
-// loop's TRUNCATE so the loop never waits in SQLite's busy handler for one.
-var checkpointMu sync.Mutex
 
 func newServer(db *sqlite.Conn, secret []byte) (*server, error) {
 	s := &server{db: db, auth: newVerifier(secret), start: time.Now(), scratch: make([]byte, 0, 16384)}
@@ -95,7 +90,6 @@ func newServer(db *sqlite.Conn, secret []byte) (*server, error) {
 	prep(&s.stmts.begin, `BEGIN IMMEDIATE`)
 	prep(&s.stmts.commit, `COMMIT`)
 	prep(&s.stmts.rollback, `ROLLBACK`)
-	prep(&s.stmts.truncate, `PRAGMA wal_checkpoint(TRUNCATE)`)
 	if err != nil {
 		s.close()
 		return nil, err
@@ -134,31 +128,8 @@ func (s *server) commitBatch() error {
 	return nil
 }
 
-// boundWAL truncates the WAL from the loop thread once the file passes limit
-// bytes. SQLite only restarts a WAL when a writer begins while the checkpoint
-// has fully caught up, which never happens while every batch commits; the
-// checkpointer's PASSIVE passes keep the backlog tiny, so this TRUNCATE copies
-// a few frames, syncs, and zeroes the file. It is skipped (and retried on the
-// next sweep) if the checkpointer is mid-pass.
-func (s *server) boundWAL(limit int64) bool {
-	if s.walPath == "" || s.inTx {
-		return false
-	}
-	fi, err := os.Stat(s.walPath)
-	if err != nil || fi.Size() < limit {
-		return false
-	}
-	if !checkpointMu.TryLock() {
-		return false
-	}
-	defer checkpointMu.Unlock()
-	s.stmts.truncate.Step()
-	s.stmts.truncate.Reset()
-	return true
-}
-
 func (s *server) close() {
-	for _, st := range []*sqlite.Stmt{s.stmts.feed, s.stmts.post, s.stmts.create, s.stmts.like, s.stmts.health, s.stmts.begin, s.stmts.commit, s.stmts.rollback, s.stmts.truncate} {
+	for _, st := range []*sqlite.Stmt{s.stmts.feed, s.stmts.post, s.stmts.create, s.stmts.like, s.stmts.health, s.stmts.begin, s.stmts.commit, s.stmts.rollback} {
 		if st != nil {
 			st.Finalize()
 		}

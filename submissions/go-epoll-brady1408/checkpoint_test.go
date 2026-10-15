@@ -52,18 +52,27 @@ func TestCheckpointerNeverBlocksWriters(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	stop, done := make(chan struct{}), make(chan struct{})
-	old := checkpointEvery
-	checkpointEvery = 5 * time.Millisecond
-	defer func() { checkpointEvery = old }()
-	go runCheckpointer(cp, stop, done)
-	defer func() { close(stop); <-done }()
+	reqs, done := make(chan struct{}, 1), make(chan struct{}, 1)
+	stop, exited := make(chan struct{}), make(chan struct{})
+	go runCheckpointer(cp, reqs, done, nil, stop, exited)
+	defer func() { close(stop); <-exited }()
+	go func() { // keep asking for passes as fast as it will take them
+		for {
+			select {
+			case <-stop:
+				return
+			case reqs <- struct{}{}:
+				time.Sleep(time.Millisecond)
+			}
+		}
+	}()
 	time.Sleep(20 * time.Millisecond)
 
 	s, err := newServer(db, testSecret)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer s.close()
 	var worst time.Duration
 	for i := 0; i < 40; i++ {
 		t0 := time.Now()

@@ -15,6 +15,16 @@ import (
 // startLoop runs a loop on a random port. budget < 0 keeps the default.
 func startLoop(t *testing.T, budget int) *loop {
 	t.Helper()
+	return startLoopWith(t, func(l *loop) {
+		if budget >= 0 {
+			l.budget = budget
+		}
+	})
+}
+
+// startLoopWith runs a loop on a random port after setup has adjusted it.
+func startLoopWith(t *testing.T, setup func(*loop)) *loop {
+	t.Helper()
 	s, err := newServer(openTestDB(t), testSecret) // closed by the loop's shutdown
 	if err != nil {
 		t.Fatal(err)
@@ -23,9 +33,7 @@ func startLoop(t *testing.T, budget int) *loop {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if budget >= 0 {
-		l.budget = budget
-	}
+	setup(l)
 	go l.run()
 	t.Cleanup(func() { l.stop(); <-l.done })
 	return l
@@ -191,5 +199,36 @@ func TestFloodingClientCannotStarveOthers(t *testing.T) {
 	resp, _ := readResponse(t, bufio.NewReader(c))
 	if d := time.Since(t0); resp.StatusCode != 200 || d > 300*time.Millisecond {
 		t.Fatalf("health took %v (status %d) while another socket flooded", d, resp.StatusCode)
+	}
+}
+
+// While a finishing checkpoint runs, writes are parked (their bytes stay in
+// the read buffer) and reads are served; releasing the pause answers the write.
+func TestWritesParkedDuringCheckpointFinish(t *testing.T) {
+	reqs, done := make(chan struct{}, 1), make(chan struct{}, 1)
+	l := startLoopWith(t, func(l *loop) {
+		// As checkpointTick leaves things while the finishing pass runs.
+		l.ckptReq, l.ckptDone = reqs, done
+		l.ckptState, l.writesPaused, l.pausedSince = ckptFinish, true, time.Now()
+	})
+	w := dial(t, l)
+	tok := token(t, "1")
+	payload := `{"body":"parked"}`
+	w.Write([]byte(fmt.Sprintf("POST /posts HTTP/1.1\r\nAuthorization: Bearer %s\r\nContent-Length: %d\r\n\r\n%s", tok, len(payload), payload)))
+	rd := dial(t, l)
+	rd.Write([]byte("GET /posts/1 HTTP/1.1\r\n\r\n"))
+	if resp, _ := readResponse(t, bufio.NewReader(rd)); resp.StatusCode != 200 {
+		t.Fatalf("reads must not wait on the pause: %d", resp.StatusCode)
+	}
+	w.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+	if _, err := w.Read(make([]byte, 1)); err == nil {
+		t.Fatal("the write was answered while writes were paused")
+	}
+	w.SetReadDeadline(time.Now().Add(5 * time.Second))
+	done <- struct{}{} // the checkpointer reports the finishing pass complete
+	l.wake()
+	resp, body := readResponse(t, bufio.NewReader(w))
+	if resp.StatusCode != 201 || !strings.Contains(body, `"body":"parked"`) {
+		t.Fatalf("%d %s", resp.StatusCode, body)
 	}
 }

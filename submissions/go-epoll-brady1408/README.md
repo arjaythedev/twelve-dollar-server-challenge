@@ -27,13 +27,18 @@ One process, `GOMAXPROCS=1`, two OS threads, each with its own SQLite connection
 - **Group commit.** Writes that arrive in the same epoll batch share one `BEGIN IMMEDIATE … COMMIT`.
   Their 201s are held in the socket's write buffer until `COMMIT` returns, then flushed; a failed
   commit turns them into 500s.
-- **Checkpointer thread.** `wal_autocheckpoint` is off on the loop connection. The second connection
-  runs `PRAGMA wal_checkpoint(PASSIVE)` every 2 s, so the fsync of a checkpoint never stalls the
-  loop (at 60k users the WAL would otherwise hit the default autocheckpoint about once a second).
-  PASSIVE alone never resets the WAL while writes keep coming, so every 10 s the loop itself runs a
-  `TRUNCATE` checkpoint once the file passes 32 MB: with the backlog already copied, that is a few
-  frames plus one sync, done between batches with nothing to wait for. RESTART/TRUNCATE from the
-  other thread would hold the write lock while waiting on readers and stall the loop.
+- **Checkpointer thread.** `wal_autocheckpoint` is off on the loop connection, because at 60k users
+  the WAL would hit the default autocheckpoint about once a second and each one fsyncs on the loop.
+  Instead the loop asks a second thread, with its own connection, for a `PASSIVE` checkpoint every
+  2 s; that copies the bulk of the frames and syncs without ever blocking a reader or writer. SQLite
+  only restarts a WAL when a writer begins while every frame is backfilled and no reader is inside
+  it, which never happens by itself while the loop keeps committing during each pass. So once the
+  file passes 64 MB the loop parks incoming writes (their bytes stay in the socket buffer; reads are
+  still served) and asks for one more pass: with no new frames arriving it copies only the handful
+  committed during the bulk pass and syncs, in tens of milliseconds. The loop then releases the
+  writes and the first one restarts the WAL at frame 0; `journal_size_limit` truncates the file.
+  The loop itself never fsyncs. RESTART or TRUNCATE from the other thread would instead hold the
+  write lock while waiting on readers and stall every request for the whole busy timeout.
 - **Connection budget.** Above 60,000 open connections (or `RLIMIT_NOFILE − 128` if smaller),
   completed responses carry `Connection: close`; the client reconnects for its next request. This
   keeps the process under the 65,535-descriptor limit with room for the database, WAL and epoll.

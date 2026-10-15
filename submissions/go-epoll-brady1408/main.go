@@ -47,14 +47,16 @@ func main() {
 	if err != nil {
 		log.Fatalf("prepare statements: %v", err)
 	}
-	srv.walPath = sqlitePath + "-wal"
 	l, err := newLoop(srv, host, port)
 	if err != nil {
 		log.Fatalf("listen %s:%d: %v", host, port, err)
 	}
 
-	stop, done := make(chan struct{}), make(chan struct{})
-	go runCheckpointer(cpdb, stop, done)
+	reqs, done := make(chan struct{}, 1), make(chan struct{}, 1)
+	stop, exited := make(chan struct{}), make(chan struct{})
+	go runCheckpointer(cpdb, reqs, done, l.wake, stop, exited)
+	l.ckptReq, l.ckptDone = reqs, done
+	l.walPath = sqlitePath + "-wal"
 
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
@@ -63,5 +65,5 @@ func main() {
 	log.Printf("listening on %s:%d (budget %d connections)", host, l.port(), l.budget)
 	l.run()
 	close(stop)
-	<-done
+	<-exited
 }

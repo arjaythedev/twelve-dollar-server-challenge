@@ -3,6 +3,7 @@ package main
 import (
 	"log"
 	"net"
+	"os"
 	"runtime"
 	"time"
 
@@ -20,7 +21,9 @@ const (
 	maxReqsPerRound = 32 // pipelined requests one connection may run per loop round
 	poolLimit       = 2048
 	listenBacklog   = 4096
-	walLimitBytes   = 32 << 20 // sweep-time TRUNCATE threshold
+	walLimitBytes   = 64 << 20        // park writes for a finishing pass once the WAL is this big
+	checkpointEvery = 2 * time.Second // how often the loop asks the checkpointer for a bulk pass
+	pauseLimit      = 5 * time.Second // never keep writes parked longer than this (checkpointer stuck)
 	evRead          = unix.EPOLLIN | unix.EPOLLRDHUP | unix.EPOLLET
 	evReadWrite     = evRead | unix.EPOLLOUT
 )
@@ -46,25 +49,34 @@ type conn struct {
 }
 
 type loop struct {
-	srv     *server
-	epfd    int
-	lfd     int
-	stopfd  int // eventfd; any write wakes the loop and shuts it down
-	spare   int // /dev/null, closed and reopened to drain accepts when fds run out
-	conns   []*conn
-	open    int
-	budget  int
-	start   time.Time
-	nowSec  uint32
-	nowUnix int64
-	events  []unix.EpollEvent
-	dirty   []*conn
-	held    []*conn
-	again   []*conn // paused conns with buffered input, serviced next round
-	againNx []*conn
-	rpool   [][]byte
-	wpool   [][]byte
-	done    chan struct{} // closed when run returns
+	srv          *server
+	epfd         int
+	lfd          int
+	stopfd       int // eventfd; any write wakes the loop and shuts it down
+	wakefd       int // eventfd; the checkpointer pokes it so a done signal is seen at once
+	spare        int // /dev/null, closed and reopened to drain accepts when fds run out
+	conns        []*conn
+	open         int
+	budget       int
+	start        time.Time
+	nowSec       uint32
+	nowUnix      int64
+	events       []unix.EpollEvent
+	dirty        []*conn
+	held         []*conn
+	again        []*conn // paused conns with buffered input, serviced next round
+	againNx      []*conn
+	ckptReq      chan<- struct{} // ask the checkpointer for a pass (cap 1)
+	ckptDone     <-chan struct{} // the checkpointer finished a pass (cap 1)
+	ckptState    uint8
+	nextCkpt     time.Time
+	walPath      string
+	writesPaused bool // a finishing pass is running: POSTs are parked, GETs served
+	pausedSince  time.Time
+	writeWait    []*conn // conns parked on a write
+	rpool        [][]byte
+	wpool        [][]byte
+	done         chan struct{} // closed when run returns
 }
 
 func newLoop(srv *server, host string, port int) (*loop, error) {
@@ -93,12 +105,16 @@ func newLoop(srv *server, host string, port int) (*loop, error) {
 	if err != nil {
 		return nil, err
 	}
+	wakefd, err := unix.Eventfd(0, unix.EFD_CLOEXEC|unix.EFD_NONBLOCK)
+	if err != nil {
+		return nil, err
+	}
 	spare, err := unix.Open("/dev/null", unix.O_RDONLY|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, err
 	}
 	l := &loop{
-		srv: srv, epfd: epfd, lfd: lfd, stopfd: stopfd, spare: spare,
+		srv: srv, epfd: epfd, lfd: lfd, stopfd: stopfd, wakefd: wakefd, spare: spare,
 		conns: make([]*conn, rl.Cur), budget: budget, start: time.Now(),
 		events: make([]unix.EpollEvent, maxEvents), done: make(chan struct{}),
 	}
@@ -107,6 +123,9 @@ func newLoop(srv *server, host string, port int) (*loop, error) {
 		return nil, err
 	}
 	if err := unix.EpollCtl(epfd, unix.EPOLL_CTL_ADD, stopfd, &unix.EpollEvent{Events: unix.EPOLLIN, Fd: int32(stopfd)}); err != nil {
+		return nil, err
+	}
+	if err := unix.EpollCtl(epfd, unix.EPOLL_CTL_ADD, wakefd, &unix.EpollEvent{Events: unix.EPOLLIN, Fd: int32(wakefd)}); err != nil {
 		return nil, err
 	}
 	return l, nil
@@ -151,6 +170,13 @@ func (l *loop) stop() {
 	unix.Write(l.stopfd, one[:])
 }
 
+// wake makes the loop run one round now. Safe from any goroutine.
+func (l *loop) wake() {
+	var one [8]byte
+	one[0] = 1
+	unix.Write(l.wakefd, one[:])
+}
+
 func (l *loop) run() {
 	runtime.LockOSThread()
 	defer close(l.done)
@@ -159,6 +185,9 @@ func (l *loop) run() {
 		timeout := int(time.Until(nextSweep) / time.Millisecond)
 		if timeout < 0 || len(l.again) > 0 {
 			timeout = 0
+		}
+		if l.writesPaused && timeout > 100 {
+			timeout = 100 // so an overrunning finishing pass is noticed
 		}
 		n, err := unix.EpollWait(l.epfd, l.events, timeout)
 		if err != nil {
@@ -177,6 +206,9 @@ func (l *loop) run() {
 			case l.stopfd:
 				l.shutdown()
 				return
+			case l.wakefd:
+				var buf [8]byte
+				unix.Read(l.wakefd, buf[:])
 			default:
 				c := l.conns[fd]
 				if c == nil {
@@ -196,6 +228,7 @@ func (l *loop) run() {
 		}
 		l.serviceAgain()
 		l.finishBatch()
+		l.checkpointTick()
 		if now := time.Now(); !now.Before(nextSweep) {
 			l.sweep()
 			nextSweep = now.Add(sweepInterval)
@@ -336,6 +369,13 @@ func (l *loop) process(c *conn) {
 			return
 		case parseBodyTooLarge:
 			l.respondAndClose(c, 413, "request body too large")
+			return
+		}
+		if l.writesPaused && req.method == methodPOST {
+			// A finishing checkpoint is in flight; this write waits for it
+			// (its bytes stay in rbuf) so the WAL can restart. Reads go on.
+			c.flags |= connPaused
+			l.writeWait = append(l.writeWait, c)
 			return
 		}
 		closeConn := req.connClose || l.open > l.budget
@@ -490,7 +530,83 @@ func (l *loop) sweep() {
 			l.closeConn(c)
 		}
 	}
-	l.srv.boundWAL(walLimitBytes)
+}
+
+const (
+	ckptIdle   uint8 = iota
+	ckptBulk         // a routine pass is running; the loop keeps writing
+	ckptFinish       // a finishing pass is running; writes are parked
+)
+
+// checkpointTick drives WAL maintenance from the loop so nothing ever races
+// it. Every checkpointEvery it asks the checkpointer for a bulk PASSIVE pass,
+// which never blocks anyone. SQLite only restarts a WAL when a writer begins
+// while every frame is backfilled and no reader is inside it, and the loop
+// commits again before any bulk pass ends, so that never happens by itself.
+// When the file has grown past walLimitBytes, the loop therefore parks its
+// writes and asks for one more pass: with no new frames arriving it copies
+// only the few committed during the bulk pass, syncs, and reports done; the
+// loop releases the writes and the first of them restarts the WAL at frame 0
+// (journal_size_limit then truncates the file). Reads are never held, and
+// the loop itself never syncs anything.
+func (l *loop) checkpointTick() {
+	if l.ckptReq == nil {
+		return
+	}
+	now := time.Now()
+	select {
+	case <-l.ckptDone:
+		switch l.ckptState {
+		case ckptBulk:
+			if l.walLarge() && l.requestPass() {
+				l.ckptState = ckptFinish
+				l.writesPaused = true
+				l.pausedSince = now
+			} else {
+				l.ckptState = ckptIdle
+			}
+		case ckptFinish:
+			l.ckptState = ckptIdle
+			l.releaseWrites()
+		}
+	default:
+	}
+	if l.writesPaused && now.Sub(l.pausedSince) > pauseLimit {
+		log.Printf("checkpoint finishing pass overran %s; releasing writes", pauseLimit)
+		l.ckptState = ckptIdle
+		l.releaseWrites()
+	}
+	if l.ckptState == ckptIdle && !now.Before(l.nextCkpt) {
+		if l.requestPass() {
+			l.ckptState = ckptBulk
+		}
+		l.nextCkpt = now.Add(checkpointEvery)
+	}
+}
+
+func (l *loop) requestPass() bool {
+	select {
+	case l.ckptReq <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func (l *loop) walLarge() bool {
+	fi, err := os.Stat(l.walPath)
+	return err == nil && fi.Size() >= walLimitBytes
+}
+
+// releaseWrites ends a pause: parked connections get serviced next round.
+func (l *loop) releaseWrites() {
+	l.writesPaused = false
+	for _, c := range l.writeWait {
+		if c.flags&connOpen != 0 && c.flags&connPaused != 0 {
+			l.again = append(l.again, c)
+		}
+	}
+	l.writeWait = l.writeWait[:0]
 }
 
 func (l *loop) shutdown() {

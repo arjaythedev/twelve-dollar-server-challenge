@@ -2,40 +2,43 @@ package main
 
 import (
 	"runtime"
-	"time"
 
 	"feedapi/internal/sqlite"
 )
 
-var checkpointEvery = 2 * time.Second // a variable so tests can tick faster
-
-// runCheckpointer copies WAL frames back into the main file on its own thread
-// and connection, so the fsync never stalls the loop. Only PASSIVE mode is
-// used here: it never takes a lock a reader or writer waits on. RESTART and
-// TRUNCATE hold the write lock while they wait for readers, which stalls the
-// loop for the whole busy timeout when run from another thread. Bounding the
-// WAL file is the loop's own job (server.boundWAL): it runs a TRUNCATE between
-// batches, when there is nothing to wait for, and this thread's passes keep
-// that cheap.
-func runCheckpointer(db *sqlite.Conn, stop <-chan struct{}, done chan<- struct{}) {
+// runCheckpointer does the bulk of WAL checkpointing on its own thread and
+// connection, so the fsync never stalls the loop. It works only on request:
+// the loop asks for a pass every couple of seconds, a PASSIVE checkpoint
+// copies every frame committed so far (never blocking a reader or writer), and
+// done is signalled. The loop then finishes the job itself (server.boundWAL):
+// a second PASSIVE on its own connection copies only the frames committed
+// during this pass, which is cheap, and leaves the WAL fully backfilled with
+// no reader inside it, so the loop's next write transaction restarts the WAL
+// from the beginning. RESTART/TRUNCATE from this thread would instead hold
+// the write lock while waiting on readers and stall the loop. wake pokes the
+// loop so it notices done without waiting for the next socket event.
+func runCheckpointer(db *sqlite.Conn, reqs <-chan struct{}, done chan<- struct{}, wake func(), stop <-chan struct{}, exited chan<- struct{}) {
 	runtime.LockOSThread()
-	defer close(done)
+	defer close(exited)
 	passive, err := db.Prepare("PRAGMA wal_checkpoint(PASSIVE)")
 	if err != nil {
 		return
 	}
 	defer func() { passive.Finalize(); db.Close() }()
-	tick := time.NewTicker(checkpointEvery)
-	defer tick.Stop()
 	for {
 		select {
 		case <-stop:
 			return
-		case <-tick.C:
-			checkpointMu.Lock()
+		case <-reqs:
 			passive.Step()
 			passive.Reset()
-			checkpointMu.Unlock()
+			select {
+			case done <- struct{}{}:
+			default:
+			}
+			if wake != nil {
+				wake()
+			}
 		}
 	}
 }

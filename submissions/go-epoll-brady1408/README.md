@@ -50,6 +50,9 @@ One process, `GOMAXPROCS=1`, two OS threads, each with its own SQLite connection
 - **`SQLITE_ENABLE_QPSG`** at compile time. Without it SQLite 3.54 re-plans a statement on the first
   step after a parameter compared with a column is rebound, so `GET /posts/:id` would recompile its
   query from SQL on every request.
+- **One read per request.** The loop stops reading a socket after a short read instead of reading
+  again for the EAGAIN: a short read means the receive queue was empty at that moment, and a packet
+  arriving later raises a new edge. That is one syscall fewer for nearly every request.
 - Idle connections close after 75 s. Pipelining works, capped at 32 requests per connection per loop
   round so one flooding socket cannot starve the rest. After a `Connection: close` response the
   server half-closes, discards further input and waits for the peer's FIN rather than sending an RST.

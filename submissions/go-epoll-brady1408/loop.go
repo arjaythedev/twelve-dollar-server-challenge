@@ -76,6 +76,7 @@ type loop struct {
 	writeWait    []*conn // conns parked on a write
 	rpool        [][]byte
 	wpool        [][]byte
+	reads        uint64        // read syscalls on client sockets
 	done         chan struct{} // closed when run returns
 }
 
@@ -311,7 +312,9 @@ func (l *loop) readAll(c *conn) {
 			copy(nb, c.rbuf)
 			c.rbuf = nb
 		}
+		want := cap(c.rbuf) - len(c.rbuf)
 		n, err := unix.Read(int(c.fd), c.rbuf[len(c.rbuf):cap(c.rbuf)])
+		l.reads++
 		if err == unix.EAGAIN {
 			break
 		}
@@ -336,6 +339,11 @@ func (l *loop) readAll(c *conn) {
 		c.rbuf = c.rbuf[:len(c.rbuf)+n]
 		c.lastSeen = l.nowSec
 		l.process(c)
+		if n < want {
+			// The receive queue was empty when read returned, so a further read
+			// would only cost an EAGAIN. A packet arriving later raises a new edge.
+			break
+		}
 	}
 	if c.flags&connOpen != 0 && c.rbuf != nil && len(c.rbuf) == 0 {
 		l.putRead(c.rbuf)

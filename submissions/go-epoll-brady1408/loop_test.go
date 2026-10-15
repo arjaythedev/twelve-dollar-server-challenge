@@ -232,3 +232,31 @@ func TestWritesParkedDuringCheckpointFinish(t *testing.T) {
 		t.Fatalf("%d %s", resp.StatusCode, body)
 	}
 }
+
+// A request that arrives in one packet costs one read: a short read means the
+// socket was drained, and the next packet raises a new edge.
+func TestOneReadPerRequest(t *testing.T) {
+	l := startLoop(t, -1)
+	c := dial(t, l)
+	c.Write([]byte("GET /posts/1 HTTP/1.1\r\n\r\n"))
+	if resp, _ := readResponse(t, bufio.NewReader(c)); resp.StatusCode != 200 {
+		t.Fatal(resp.StatusCode)
+	}
+	l.stop()
+	<-l.done
+	if l.reads != 1 {
+		t.Fatalf("read syscalls for one request: %d, want 1", l.reads)
+	}
+}
+
+// A request larger than one read buffer keeps being read until it is complete.
+func TestRequestLargerThanReadBuffer(t *testing.T) {
+	l := startLoop(t, -1)
+	c := dial(t, l)
+	payload := `{"body":"big","pad":"` + strings.Repeat("x", 3*readBufSize) + `"}`
+	c.Write([]byte(fmt.Sprintf("POST /posts HTTP/1.1\r\nAuthorization: Bearer %s\r\nContent-Length: %d\r\n\r\n%s", token(t, "1"), len(payload), payload)))
+	resp, body := readResponse(t, bufio.NewReader(c))
+	if resp.StatusCode != 201 || !strings.Contains(body, `"body":"big"`) {
+		t.Fatalf("%d %s", resp.StatusCode, body)
+	}
+}

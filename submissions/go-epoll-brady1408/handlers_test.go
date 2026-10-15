@@ -125,3 +125,21 @@ func TestTransportErrors(t *testing.T) {
 		t.Fatal(string(res))
 	}
 }
+
+// The feed and the post endpoint must encode a post identically, whatever is in it.
+func TestFeedEncodesLikePostEndpoint(t *testing.T) {
+	s := testServer(t)
+	body := "quote \" backslash \\ slash / apostrophe ' tab \t nl \n cr \r bs \b ff \f ctl \x01\x1f del \x7f ünïcödé 日本 emoji 😀 <&>"
+	if err := s.db.Exec(`INSERT INTO posts (id, user_id, body, created_at) VALUES (4, 2, '` + strings.ReplaceAll(body, "'", "''") + `', '2025-01-01T00:00:04.000Z')`); err != nil {
+		t.Fatal(err)
+	}
+	_, feed, _ := do(t, s, "GET /feed HTTP/1.1\r\n\r\n")
+	_, post, _ := do(t, s, "GET /posts/4 HTTP/1.1\r\n\r\n")
+	wantObj := strings.TrimSuffix(strings.TrimPrefix(post, `{"post":`), `}`)
+	if !strings.HasPrefix(feed, `{"posts":[`+wantObj+`,`) {
+		t.Fatalf("feed starts %q\nwant object %q", feed, wantObj)
+	}
+	if !strings.Contains(post, `"author":"other_user"`) || !strings.Contains(post, "\\u0001\\u001f del \x7f") {
+		t.Fatalf("post encoding changed: %q", post)
+	}
+}

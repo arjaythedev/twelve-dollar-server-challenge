@@ -539,7 +539,8 @@ func main() {
 	if err = openDatabasePools(path, readerLimit, writerLimit); err != nil {
 		log.Fatal(err)
 	}
-	log.Printf("Server pools ready: workers=%d readers=%d writers=%d", handlerWorkers, readerLimit, writerLimit)
+	inline := handlerWorkers == 1
+	log.Printf("Server pools ready: workers=%d readers=%d writers=%d inline=%t", handlerWorkers, readerLimit, writerLimit, inline)
 	if err = startProfiler(); err != nil {
 		log.Fatal(err)
 	}
@@ -551,5 +552,5 @@ func main() {
 	if port == "" {
 		port = "3000"
 	}
-	log.Fatal(serveEpoll(host, port, handler))
+	log.Fatal(serveEpoll(host, port, handler, inline))
 }

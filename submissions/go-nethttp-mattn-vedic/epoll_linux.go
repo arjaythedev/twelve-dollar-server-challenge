@@ -43,6 +43,8 @@ type request struct {
 	expect                   bool // Expect: 100-continue
 }
 
+// Inline runs handlers on the loop goroutine instead of the worker pool. It removes the job channel,
+// the completion pipe, and the goroutine handoff from every request.
 // loop owns sockets and protocol state. A bounded worker pool runs handlers so cgo and database
 // calls cannot stall readiness processing for unrelated connections.
 type loop struct {
@@ -61,6 +63,7 @@ type loop struct {
 	done    chan *requestDone
 	queued  []*requestJob
 	writers sync.Pool
+	inline  bool // handlers run on the loop goroutine (see serveInline)
 }
 
 type requestJob struct {
@@ -101,12 +104,12 @@ func (w *captureWriter) WriteString(s string) (int, error) {
 	return len(s), nil
 }
 
-func serveEpoll(host, port string, handler func(http.ResponseWriter, []byte, []byte, []byte, []byte)) error {
+func serveEpoll(host, port string, handler func(http.ResponseWriter, []byte, []byte, []byte, []byte), inline bool) error {
 	lfd, err := listen(host, port)
 	if err != nil {
 		return err
 	}
-	ep, err := newLoop(lfd, handler)
+	ep, err := newLoop(lfd, handler, inline)
 	if err != nil {
 		_ = syscall.Close(lfd)
 		return err
@@ -146,7 +149,7 @@ func listen(host, port string) (int, error) {
 	return fd, nil
 }
 
-func newLoop(lfd int, handler func(http.ResponseWriter, []byte, []byte, []byte, []byte)) (*loop, error) {
+func newLoop(lfd int, handler func(http.ResponseWriter, []byte, []byte, []byte, []byte), inline bool) (*loop, error) {
 	ep, err := syscall.EpollCreate1(syscall.EPOLL_CLOEXEC)
 	if err != nil {
 		return nil, err
@@ -156,15 +159,17 @@ func newLoop(lfd int, handler func(http.ResponseWriter, []byte, []byte, []byte, 
 		_ = syscall.Close(ep)
 		return nil, err
 	}
-	l := &loop{ep: ep, lfd: lfd, donefd: pipe[0], notify: pipe[1], conns: make([]*conn, 1024), handler: handler, jobs: make(chan *requestJob, 8192), done: make(chan *requestDone, 8192)}
+	l := &loop{ep: ep, lfd: lfd, donefd: pipe[0], notify: pipe[1], conns: make([]*conn, 1024), handler: handler, jobs: make(chan *requestJob, 8192), done: make(chan *requestDone, 8192), inline: inline}
 	if err := l.ctl(syscall.EPOLL_CTL_ADD, lfd, syscall.EPOLLIN); err != nil {
 		return nil, err
 	}
 	if err := l.ctl(syscall.EPOLL_CTL_ADD, l.donefd, syscall.EPOLLIN); err != nil {
 		return nil, err
 	}
-	for i := 0; i < handlerWorkers; i++ {
-		go l.worker()
+	if !inline {
+		for i := 0; i < handlerWorkers; i++ {
+			go l.worker()
+		}
 	}
 	l.tick()
 	return l, nil
@@ -222,21 +227,25 @@ func (l *loop) tick() {
 
 func (l *loop) worker() {
 	for job := range l.jobs {
-		v := l.writers.Get()
-		var w *captureWriter
-		if v == nil {
-			w = &captureWriter{header: make(http.Header)}
-		} else {
-			w = v.(*captureWriter)
-		}
-		w.status, w.body = 0, w.body[:0]
-		for key := range w.header {
-			delete(w.header, key)
-		}
+		w := l.getWriter()
 		l.handler(w, job.r.method, job.r.path, job.r.auth, job.r.body)
 		l.done <- &requestDone{job: job, w: w}
 		_, _ = syscall.Write(l.notify, []byte{1})
 	}
+}
+
+// getWriter returns a reset response buffer from the pool.
+func (l *loop) getWriter() *captureWriter {
+	v := l.writers.Get()
+	if v == nil {
+		return &captureWriter{header: make(http.Header)}
+	}
+	w := v.(*captureWriter)
+	w.status, w.body = 0, w.body[:0]
+	for key := range w.header {
+		delete(w.header, key)
+	}
+	return w
 }
 
 func (l *loop) completions() {
@@ -257,38 +266,55 @@ func (l *loop) completions() {
 				default:
 				}
 			}
-			c, job, w := result.job.c, result.job, result.w
-			if c == nil || l.conns[c.fd] != c {
-				w.body = w.body[:0]
-				l.writers.Put(w)
-				continue
+			if l.finish(result) {
+				l.process(result.job.c)
 			}
-			if job.used == len(c.in) {
-				if cap(c.in) <= maxRetainedReadCap {
-					c.in = c.in[:0]
-				} else {
-					c.in = nil
-				}
-			} else {
-				c.in = c.in[job.used:]
-			}
-			c.busy = false
-			l.out = l.out[:0]
-			status := w.status
-			if status == 0 {
-				status = http.StatusOK
-			}
-			l.respondHeader(&job.r, status, len(w.body))
-			if job.r.close {
-				c.in = nil
-			}
-			l.sendParts(c, l.out, w.body, job.r.close)
-			w.body = w.body[:0]
-			l.writers.Put(w)
 		default:
 			return
 		}
 	}
+}
+
+// finish sends the response held in d and reports whether the connection can go on to its next
+// pipelined request now.
+func (l *loop) finish(d *requestDone) bool {
+	c, job, w := d.job.c, d.job, d.w
+	if c == nil || l.conns[c.fd] != c {
+		w.body = w.body[:0]
+		l.writers.Put(w)
+		return false
+	}
+	if job.used == len(c.in) {
+		if cap(c.in) <= maxRetainedReadCap {
+			c.in = c.in[:0]
+		} else {
+			c.in = nil
+		}
+	} else {
+		c.in = c.in[job.used:]
+	}
+	c.busy = false
+	l.out = l.out[:0]
+	status := w.status
+	if status == 0 {
+		status = http.StatusOK
+	}
+	l.respondHeader(&job.r, status, len(w.body))
+	if job.r.close {
+		c.in = nil
+	}
+	ok := l.sendParts(c, l.out, w.body, job.r.close)
+	w.body = w.body[:0]
+	l.writers.Put(w)
+	return ok
+}
+
+// serveInline runs the handler on the loop goroutine and sends its response. It reports whether the
+// connection can continue with its next pipelined request now.
+func (l *loop) serveInline(c *conn, r *request, used int) bool {
+	d := &requestDone{job: &requestJob{c: c, r: *r, used: used}, w: l.getWriter()}
+	l.handler(d.w, r.method, r.path, r.auth, r.body)
+	return l.finish(d)
 }
 
 func (l *loop) accept() {
@@ -378,46 +404,59 @@ func (l *loop) read(c *conn) {
 	l.process(c)
 }
 
+// process handles every complete request at the start of c.in. Inline requests are served in a loop, so
+// pipelined requests don't nest calls. A worker request ends the loop until its completion arrives.
 func (l *loop) process(c *conn) {
-	if c.busy || c.pending != nil || l.conns[c.fd] != c {
-		return
-	}
-	var r request
-	n, status := parse(c.in, &r)
-	if status != 0 {
-		l.out = l.out[:0]
-		l.protocolError(status)
-		l.send(c, l.out, true)
-		return
-	}
-	if n == 0 {
-		if r.expect && !c.continued {
-			c.continued = true
-			if !l.send(c, []byte("HTTP/1.1 100 Continue\r\n\r\n"), false) {
+	for {
+		if c.busy || c.pending != nil || l.conns[c.fd] != c {
+			return
+		}
+		var r request
+		n, status := parse(c.in, &r)
+		if status != 0 {
+			l.out = l.out[:0]
+			l.protocolError(status)
+			l.send(c, l.out, true)
+			return
+		}
+		if n == 0 {
+			if r.expect && !c.continued {
+				c.continued = true
+				if !l.send(c, []byte("HTTP/1.1 100 Continue\r\n\r\n"), false) {
+					return
+				}
+			}
+			// A worker disables events while its response is pending. Restore EPOLLIN
+			// there, but skip the redundant MOD after an ordinary partial read.
+			if l.connEvents(c, syscall.EPOLLIN) != nil {
+				l.close(c)
+			}
+			return
+		}
+		c.continued = false
+		if l.inline {
+			if !l.serveInline(c, &r, n) {
 				return
 			}
+			continue
 		}
-		// A worker disables events while its response is pending. Restore EPOLLIN
-		// there, but skip the redundant MOD after an ordinary partial read.
-		if l.connEvents(c, syscall.EPOLLIN) != nil {
+		c.busy = true
+		job := &requestJob{c: c, r: r, used: n}
+		if l.connEvents(c, 0) != nil {
 			l.close(c)
+			return
+		}
+		select {
+		case l.jobs <- job:
+		default:
+			l.queued = append(l.queued, job)
 		}
 		return
-	}
-	c.continued = false
-	c.busy = true
-	job := &requestJob{c: c, r: r, used: n}
-	if l.connEvents(c, 0) != nil {
-		l.close(c)
-		return
-	}
-	select {
-	case l.jobs <- job:
-	default:
-		l.queued = append(l.queued, job)
 	}
 }
 
+// send writes b and reports whether it was fully written on a connection that stays open. The caller
+// decides what happens next.
 func (l *loop) send(c *conn, b []byte, closing bool) bool {
 	n, err := syscall.Write(c.fd, b)
 	if err != nil {
@@ -432,7 +471,6 @@ func (l *loop) send(c *conn, b []byte, closing bool) bool {
 			l.close(c)
 			return false
 		}
-		l.process(c)
 		return true
 	}
 	// The socket buffer is full: keep the rest and stop reading until it's written.
@@ -448,7 +486,8 @@ func (l *loop) send(c *conn, b []byte, closing bool) bool {
 // sendParts writes the response header and body as separate buffers, avoiding the
 // per-response body copy into l.out. The body belongs to the worker writer until
 // this synchronous send returns; if the socket blocks, the remainder is copied
-// into c.pending before the writer is returned to its pool.
+// into c.pending before the writer is returned to its pool. It reports whether the
+// response was fully written on a connection that stays open.
 func (l *loop) sendParts(c *conn, header, body []byte, closing bool) bool {
 	vec := []syscall.Iovec{{Base: &header[0]}, {Base: nil}}
 	vec[0].SetLen(len(header))
@@ -481,7 +520,6 @@ func (l *loop) sendParts(c *conn, header, body []byte, closing bool) bool {
 			l.close(c)
 			return false
 		}
-		l.process(c)
 		return true
 	}
 	if n < len(header) {

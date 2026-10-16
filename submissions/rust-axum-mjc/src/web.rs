@@ -12,7 +12,7 @@ use axum::{
     response::{IntoResponse, Response as AxumResponse},
 };
 use futures_util::FutureExt;
-use http_body_util::{BodyExt, Full};
+use http_body_util::{BodyExt, Full, Limited};
 use hyper::{body::Incoming as HyperIncoming, service::Service as HyperService};
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
@@ -20,6 +20,8 @@ use std::{borrow::Cow, convert::Infallible, sync::Arc, time::Instant};
 use tower::{Service, service_fn};
 
 pub type Response = AxumResponse<Full<Bytes>>;
+
+const CREATE_BODY_LIMIT: usize = 64 * 1024;
 
 struct AppState {
     db: Db,
@@ -129,7 +131,7 @@ where
         },
         Route::Like(raw_id) => like_post(State(state), raw_id, &mut headers).await,
         Route::Create => {
-            let mut request = Request::new(Body::new(body));
+            let mut request = Request::new(Body::new(Limited::new(body, CREATE_BODY_LIMIT)));
             *request.extensions_mut() = std::mem::take(&mut parts.extensions);
             match Bytes::from_request(request, &state).await {
                 Ok(bytes) => create_post(State(state), &mut headers, bytes).await,

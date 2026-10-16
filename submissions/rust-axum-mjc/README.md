@@ -188,6 +188,9 @@ The profiling tasks can request a range with `BENCH_PORT=3100` and
 health probe use the first port. A single `BENCH_PORT` keeps one listener.
 
 `READ_BATCHING` accepts `true` or `false` and defaults to `true`.
+`POST /posts` accepts at most 64 KiB of request-body bytes, including JSON
+whitespace and extra fields, and returns HTTP 413 above that limit. The decoded,
+trimmed post text still has its separate 500-character limit.
 `SQLITE_MMAP_SIZE` sets the request connection's mmap size in bytes and defaults
 to `0`; startup reports both the requested and effective sizes.
 `SQLITE_PAGE_CACHE_KIB` sets the request connection's page-cache target in KiB

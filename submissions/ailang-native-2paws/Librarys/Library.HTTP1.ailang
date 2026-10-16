@@ -1,0 +1,844 @@
+// Library.HTTP1.ailang — keep-alive HTTP/1.1 server on epoll
+//
+// Single-threaded. Handler is AddressOf(fn) taking the connection pointer.
+// Path and method are NUL-terminated in the request buffer after parse.
+//
+// Copyright (c) 2026 Sean Collins, 2 Paws Machine and Engineering.
+// Released under the MIT License, as required for submissions to this challenge.
+
+LibraryImport.Arena
+LibraryImport.Socket
+
+FixedPool.HTTP1Off {
+    "FD": Initialize=0
+    "STATE": Initialize=8
+    "BUF": Initialize=16
+    "CAP": Initialize=24
+    "FILL": Initialize=32
+    "METHOD": Initialize=40
+    "PATH": Initialize=48
+    "PATH_LEN": Initialize=56
+    "CLEN": Initialize=64
+    "BODY": Initialize=72
+    "BODY_LEN": Initialize=80
+    "BEARER": Initialize=88
+    "BEARER_LEN": Initialize=96
+    "KEEP": Initialize=104
+    "OUT": Initialize=112
+    "OUT_LEN": Initialize=120
+    "OUT_SENT": Initialize=128
+    "HDR_END": Initialize=136
+    "DEFER": Initialize=144
+    "SLOT": Initialize=256
+}
+
+FixedPool.HTTP1St {
+    "listen": Initialize=0, CanChange=True
+    "epfd": Initialize=0, CanChange=True
+    "slots": Initialize=0, CanChange=True
+    "nslot": Initialize=64, CanChange=True
+    "handler": Initialize=0, CanChange=True
+    "cur": Initialize=0, CanChange=True
+    "evbuf": Initialize=0, CanChange=True
+    "evmax": Initialize=64, CanChange=True
+    "bufsz": Initialize=8192, CanChange=True
+    "hint": Initialize=0, CanChange=True
+    "isget": Initialize=0, CanChange=True
+    "outp": Initialize=0, CanChange=True
+    "ol": Initialize=0, CanChange=True
+    "defer_list": Initialize=0, CanChange=True
+    "defer_n": Initialize=0, CanChange=True
+    "defer_cap": Initialize=512, CanChange=True
+    "commit_fn": Initialize=0, CanChange=True
+}
+
+Function.HTTP1.ConnAt {
+    Input: i: Integer
+    Output: Address
+    Body: {
+        ReturnValue(Add(HTTP1St.slots, Multiply(i, HTTP1Off.SLOT)))
+    }
+}
+
+Function.HTTP1.CGet {
+    Input: conn: Address
+    Input: off: Integer
+    Output: Integer
+    Body: {
+        ReturnValue(Dereference(Add(conn, off)))
+    }
+}
+
+Function.HTTP1.CSet {
+    Input: conn: Address
+    Input: off: Integer
+    Input: val: Integer
+    Body: {
+        StoreValue(Add(conn, off), val)
+    }
+}
+
+Function.HTTP1.ClearConn {
+    Input: conn: Address
+    Body: {
+        HTTP1.CSet(conn, HTTP1Off.STATE, 0)
+        HTTP1.CSet(conn, HTTP1Off.FILL, 0)
+        HTTP1.CSet(conn, HTTP1Off.METHOD, 0)
+        HTTP1.CSet(conn, HTTP1Off.PATH, 0)
+        HTTP1.CSet(conn, HTTP1Off.PATH_LEN, 0)
+        HTTP1.CSet(conn, HTTP1Off.CLEN, 0)
+        HTTP1.CSet(conn, HTTP1Off.BODY, 0)
+        HTTP1.CSet(conn, HTTP1Off.BODY_LEN, 0)
+        HTTP1.CSet(conn, HTTP1Off.BEARER, 0)
+        HTTP1.CSet(conn, HTTP1Off.BEARER_LEN, 0)
+        HTTP1.CSet(conn, HTTP1Off.KEEP, 1)
+        HTTP1.CSet(conn, HTTP1Off.OUT_LEN, 0)
+        HTTP1.CSet(conn, HTTP1Off.OUT_SENT, 0)
+        HTTP1.CSet(conn, HTTP1Off.HDR_END, 0)
+        HTTP1.CSet(conn, HTTP1Off.DEFER, 0)
+        fd = HTTP1.CGet(conn, HTTP1Off.FD)
+        IfCondition GreaterThan(fd, 0) ThenBlock: {
+            Epoll.Del(HTTP1St.epfd, fd)
+            Socket.Close(fd)
+        }
+        HTTP1.CSet(conn, HTTP1Off.FD, -1)
+    }
+}
+
+Function.HTTP1.ResetParse {
+    Input: conn: Address
+    Body: {
+        HTTP1.CSet(conn, HTTP1Off.KEEP, 1)
+        HTTP1.CSet(conn, HTTP1Off.OUT_LEN, 0)
+        HTTP1.CSet(conn, HTTP1Off.OUT_SENT, 0)
+        HTTP1.CSet(conn, HTTP1Off.HDR_END, 0)
+        HTTP1.CSet(conn, HTTP1Off.CLEN, 0)
+        HTTP1.CSet(conn, HTTP1Off.BEARER, 0)
+        HTTP1.CSet(conn, HTTP1Off.DEFER, 0)
+        HTTP1.CSet(conn, HTTP1Off.STATE, 1)
+    }
+}
+
+Function.HTTP1.Listen {
+    Input: host: Address
+    Input: port: Integer
+    Output: Integer
+    Body: {
+        fd = Socket.Create(2, 1)
+        IfCondition LessThan(fd, 0) ThenBlock: { ReturnValue(-1) }
+        Socket.SetReuseAddr(fd)
+        bn = Socket.BindInet(fd, host, port)
+        IfCondition LessThan(bn, 0) ThenBlock: {
+            Socket.Close(fd)
+            ReturnValue(-1)
+        }
+        ln = Socket.Listen(fd, 16384)
+        IfCondition LessThan(ln, 0) ThenBlock: {
+            Socket.Close(fd)
+            ReturnValue(-1)
+        }
+        Socket.SetNonBlock(fd)
+        epfd = Epoll.Create()
+        IfCondition LessThan(epfd, 0) ThenBlock: {
+            Socket.Close(fd)
+            ReturnValue(-1)
+        }
+        ad = Epoll.Add(epfd, fd, 1, 0)
+        IfCondition LessThan(ad, 0) ThenBlock: {
+            Socket.Close(fd)
+            ReturnValue(-1)
+        }
+        HTTP1St.listen = fd
+        HTTP1St.epfd = epfd
+        nslot = HTTP1St.nslot
+        HTTP1St.slots = Allocate(Multiply(nslot, HTTP1Off.SLOT))
+        i = 0
+        WhileLoop LessThan(i, nslot) {
+            conn = HTTP1.ConnAt(i)
+            HTTP1.CSet(conn, HTTP1Off.FD, -1)
+            HTTP1.CSet(conn, HTTP1Off.STATE, 0)
+            HTTP1.CSet(conn, HTTP1Off.BUF, Allocate(HTTP1St.bufsz))
+            HTTP1.CSet(conn, HTTP1Off.CAP, HTTP1St.bufsz)
+            HTTP1.CSet(conn, HTTP1Off.OUT, Allocate(HTTP1St.bufsz))
+            HTTP1.CSet(conn, HTTP1Off.FILL, 0)
+            i = Add(i, 1)
+        }
+        HTTP1St.evbuf = Allocate(Multiply(HTTP1St.evmax, 12))
+        HTTP1St.defer_list = Allocate(4096)
+        HTTP1St.defer_n = 0
+        HTTP1St.defer_cap = 512
+        ReturnValue(fd)
+    }
+}
+
+Function.HTTP1.FindFree {
+    Output: Integer
+    Body: {
+        nslot = HTTP1St.nslot
+        i = HTTP1St.hint
+        n = 0
+        WhileLoop LessThan(n, nslot) {
+            IfCondition GreaterEqual(i, nslot) ThenBlock: { i = 0 }
+            conn = HTTP1.ConnAt(i)
+            st = HTTP1.CGet(conn, HTTP1Off.STATE)
+            IfCondition EqualTo(st, 0) ThenBlock: {
+                HTTP1St.hint = Add(i, 1)
+                ReturnValue(i)
+            }
+            i = Add(i, 1)
+            n = Add(n, 1)
+        }
+        ReturnValue(-1)
+    }
+}
+
+Function.HTTP1.Accept {
+    Body: {
+        n = 0
+        WhileLoop LessThan(n, 256) {
+            cli = Socket.Accept4(HTTP1St.listen)
+            IfCondition LessThan(cli, 0) ThenBlock: { ReturnValue(n) }
+            Socket.SetTcpNoDelay(cli)
+            Socket.SetKeepAlive(cli)
+            idx = HTTP1.FindFree()
+            IfCondition LessThan(idx, 0) ThenBlock: {
+                Socket.Close(cli)
+                ReturnValue(n)
+            }
+            conn = HTTP1.ConnAt(idx)
+            HTTP1.CSet(conn, HTTP1Off.FD, cli)
+            HTTP1.ResetParse(conn)
+            HTTP1.CSet(conn, HTTP1Off.FILL, 0)
+            data = Add(idx, 1)
+            Epoll.Add(HTTP1St.epfd, cli, 1, data)
+            n = Add(n, 1)
+        }
+        ReturnValue(n)
+    }
+}
+
+Function.HTTP1.LowerEq {
+    Input: p: Address
+    Input: n: Integer
+    Input: want: Address
+    Output: Integer
+    Body: {
+        i = 0
+        WhileLoop LessThan(i, n) {
+            c = GetByte(p, i)
+            IfCondition GreaterEqual(c, 65) ThenBlock: {
+                IfCondition LessEqual(c, 90) ThenBlock: {
+                    c = Add(c, 32)
+                }
+            }
+            w = GetByte(want, i)
+            IfCondition EqualTo(w, 0) ThenBlock: { ReturnValue(0) }
+            IfCondition NotEqual(c, w) ThenBlock: { ReturnValue(0) }
+            i = Add(i, 1)
+        }
+        wend = GetByte(want, n)
+        IfCondition NotEqual(wend, 0) ThenBlock: { ReturnValue(0) }
+        ReturnValue(1)
+    }
+}
+
+Function.HTTP1.FindCRLFCRLF {
+    Input: buf: Address
+    Input: n: Integer
+    Output: Integer
+    Body: {
+        IfCondition LessThan(n, 4) ThenBlock: { ReturnValue(-1) }
+        i = 0
+        lim = Subtract(n, 3)
+        WhileLoop LessThan(i, lim) {
+            IfCondition EqualTo(GetByte(buf, i), 13) ThenBlock: {
+                IfCondition EqualTo(GetByte(buf, Add(i, 1)), 10) ThenBlock: {
+                    IfCondition EqualTo(GetByte(buf, Add(i, 2)), 13) ThenBlock: {
+                        IfCondition EqualTo(GetByte(buf, Add(i, 3)), 10) ThenBlock: {
+                            ReturnValue(i)
+                        }
+                    }
+                }
+            }
+            i = Add(i, 1)
+        }
+        ReturnValue(-1)
+    }
+}
+
+Function.HTTP1.ParseInt {
+    Input: p: Address
+    Input: n: Integer
+    Output: Integer
+    Body: {
+        v = 0
+        i = 0
+        WhileLoop LessThan(i, n) {
+            c = GetByte(p, i)
+            IfCondition Or(LessThan(c, 48), GreaterThan(c, 57)) ThenBlock: {
+                ReturnValue(v)
+            }
+            v = Add(Multiply(v, 10), Subtract(c, 48))
+            i = Add(i, 1)
+        }
+        ReturnValue(v)
+    }
+}
+
+Function.HTTP1.Parse {
+    Input: conn: Address
+    Output: Integer
+    Body: {
+        buf = HTTP1.CGet(conn, HTTP1Off.BUF)
+        fill = HTTP1.CGet(conn, HTTP1Off.FILL)
+        hdr = HTTP1.FindCRLFCRLF(buf, fill)
+        IfCondition LessThan(hdr, 0) ThenBlock: { ReturnValue(0) }
+        HTTP1.CSet(conn, HTTP1Off.HDR_END, hdr)
+        sp1 = -1
+        sp2 = -1
+        i = 0
+        cr = 0
+        WhileLoop LessThan(i, hdr) {
+            b = GetByte(buf, i)
+            IfCondition EqualTo(b, 32) ThenBlock: {
+                IfCondition EqualTo(sp1, -1) ThenBlock: {
+                    sp1 = i
+                } ElseBlock: {
+                    IfCondition EqualTo(sp2, -1) ThenBlock: {
+                        sp2 = i
+                    }
+                }
+            }
+            IfCondition EqualTo(b, 10) ThenBlock: {
+                cr = Add(i, 1)
+                BreakLoop
+            }
+            i = Add(i, 1)
+        }
+        IfCondition LessThan(sp1, 1) ThenBlock: { ReturnValue(-1) }
+        IfCondition LessThan(sp2, Add(sp1, 2)) ThenBlock: { ReturnValue(-1) }
+        HTTP1.CSet(conn, HTTP1Off.CLEN, 0)
+        HTTP1.CSet(conn, HTTP1Off.BEARER, 0)
+        HTTP1.CSet(conn, HTTP1Off.KEEP, 1)
+        HTTP1St.isget = 0
+        IfCondition EqualTo(sp1, 3) ThenBlock: {
+            IfCondition EqualTo(GetByte(buf, 0), 71) ThenBlock: {
+                IfCondition EqualTo(GetByte(buf, 1), 69) ThenBlock: {
+                    IfCondition EqualTo(GetByte(buf, 2), 84) ThenBlock: {
+                        HTTP1St.isget = 1
+                    }
+                }
+            }
+        }
+        WhileLoop LessThan(cr, hdr) {
+            nl = cr
+            WhileLoop LessThan(nl, hdr) {
+                IfCondition EqualTo(GetByte(buf, nl), 10) ThenBlock: { BreakLoop }
+                nl = Add(nl, 1)
+            }
+            hlen = Subtract(nl, cr)
+            IfCondition GreaterThan(hlen, 0) ThenBlock: {
+                IfCondition EqualTo(GetByte(buf, Subtract(nl, 1)), 13) ThenBlock: {
+                    hlen = Subtract(hlen, 1)
+                }
+            }
+            colon = -1
+            hi = 0
+            WhileLoop LessThan(hi, hlen) {
+                IfCondition EqualTo(GetByte(buf, Add(cr, hi)), 58) ThenBlock: {
+                    colon = hi
+                    BreakLoop
+                }
+                hi = Add(hi, 1)
+            }
+            IfCondition GreaterThan(colon, 0) ThenBlock: {
+                name_p = Add(buf, cr)
+                c0 = GetByte(buf, cr)
+                IfCondition EqualTo(c0, 67) ThenBlock: { c0 = 99 }
+                IfCondition EqualTo(c0, 65) ThenBlock: { c0 = 97 }
+                need = 0
+                IfCondition EqualTo(c0, 99) ThenBlock: { need = 1 }
+                IfCondition EqualTo(c0, 97) ThenBlock: {
+                    IfCondition EqualTo(HTTP1St.isget, 0) ThenBlock: { need = 1 }
+                }
+                IfCondition EqualTo(need, 1) ThenBlock: {
+                    vs = Add(colon, 1)
+                    WhileLoop LessThan(vs, hlen) {
+                        vc = GetByte(buf, Add(cr, vs))
+                        IfCondition EqualTo(vc, 32) ThenBlock: {
+                            vs = Add(vs, 1)
+                        } ElseBlock: {
+                            IfCondition EqualTo(vc, 9) ThenBlock: {
+                                vs = Add(vs, 1)
+                            } ElseBlock: {
+                                BreakLoop
+                            }
+                        }
+                    }
+                    vlen = Subtract(hlen, vs)
+                    IfCondition EqualTo(c0, 99) ThenBlock: {
+                        IfCondition EqualTo(HTTP1St.isget, 0) ThenBlock: {
+                            is_cl = HTTP1.LowerEq(name_p, colon, "content-length")
+                            IfCondition EqualTo(is_cl, 1) ThenBlock: {
+                                cl = HTTP1.ParseInt(Add(buf, Add(cr, vs)), vlen)
+                                HTTP1.CSet(conn, HTTP1Off.CLEN, cl)
+                            }
+                        }
+                        is_co = HTTP1.LowerEq(name_p, colon, "connection")
+                        IfCondition EqualTo(is_co, 1) ThenBlock: {
+                            is_close = HTTP1.LowerEq(Add(buf, Add(cr, vs)), vlen, "close")
+                            IfCondition EqualTo(is_close, 1) ThenBlock: {
+                                HTTP1.CSet(conn, HTTP1Off.KEEP, 0)
+                            }
+                        }
+                    }
+                    IfCondition EqualTo(c0, 97) ThenBlock: {
+                        is_au = HTTP1.LowerEq(name_p, colon, "authorization")
+                        IfCondition EqualTo(is_au, 1) ThenBlock: {
+                            HTTP1.CSet(conn, HTTP1Off.BEARER, Add(buf, Add(cr, vs)))
+                            HTTP1.CSet(conn, HTTP1Off.BEARER_LEN, vlen)
+                            SetByte(buf, Add(cr, hlen), 0)
+                        }
+                    }
+                }
+            }
+            cr = Add(nl, 1)
+        }
+        clen = HTTP1.CGet(conn, HTTP1Off.CLEN)
+        need = Add(Add(hdr, 4), clen)
+        IfCondition LessThan(fill, need) ThenBlock: { ReturnValue(0) }
+        SetByte(buf, sp1, 0)
+        SetByte(buf, sp2, 0)
+        HTTP1.CSet(conn, HTTP1Off.METHOD, buf)
+        path = Add(buf, Add(sp1, 1))
+        HTTP1.CSet(conn, HTTP1Off.PATH, path)
+        HTTP1.CSet(conn, HTTP1Off.PATH_LEN, Subtract(sp2, Add(sp1, 1)))
+        HTTP1.CSet(conn, HTTP1Off.BODY, Add(buf, Add(hdr, 4)))
+        HTTP1.CSet(conn, HTTP1Off.BODY_LEN, clen)
+        ReturnValue(1)
+    }
+}
+
+Function.HTTP1.Consume {
+    Input: conn: Address
+    Body: {
+        buf = HTTP1.CGet(conn, HTTP1Off.BUF)
+        fill = HTTP1.CGet(conn, HTTP1Off.FILL)
+        hdr = HTTP1.CGet(conn, HTTP1Off.HDR_END)
+        clen = HTTP1.CGet(conn, HTTP1Off.CLEN)
+        used = Add(Add(hdr, 4), clen)
+        IfCondition GreaterThan(fill, used) ThenBlock: {
+            left = Subtract(fill, used)
+            MemoryCopy(buf, Add(buf, used), left)
+            HTTP1.CSet(conn, HTTP1Off.FILL, left)
+        } ElseBlock: {
+            HTTP1.CSet(conn, HTTP1Off.FILL, 0)
+        }
+    }
+}
+
+Function.HTTP1.Append {
+    Input: conn: Address
+    Input: src: Address
+    Input: n: Integer
+    Body: {
+        out = HTTP1.CGet(conn, HTTP1Off.OUT)
+        ol = HTTP1.CGet(conn, HTTP1Off.OUT_LEN)
+        cap = HTTP1St.bufsz
+        IfCondition GreaterThan(Add(ol, n), cap) ThenBlock: {
+            n = Subtract(cap, ol)
+        }
+        IfCondition GreaterThan(n, 0) ThenBlock: {
+            MemoryCopy(Add(out, ol), src, n)
+            HTTP1.CSet(conn, HTTP1Off.OUT_LEN, Add(ol, n))
+        }
+    }
+}
+
+Function.HTTP1.AppendZ {
+    Input: conn: Address
+    Input: s: Address
+    Body: {
+        n = StringLength(s)
+        HTTP1.Append(conn, s, n)
+    }
+}
+
+Function.HTTP1.AppendInt {
+    Input: conn: Address
+    Input: v: Integer
+    Body: {
+        out = HTTP1.CGet(conn, HTTP1Off.OUT)
+        ol = HTTP1.CGet(conn, HTTP1Off.OUT_LEN)
+        cap = HTTP1St.bufsz
+        IfCondition EqualTo(v, 0) ThenBlock: {
+            IfCondition LessThan(ol, cap) ThenBlock: {
+                SetByte(out, ol, 48)
+                HTTP1.CSet(conn, HTTP1Off.OUT_LEN, Add(ol, 1))
+            }
+            ReturnValue(0)
+        }
+        x = v
+        IfCondition LessThan(x, 0) ThenBlock: {
+            IfCondition LessThan(ol, cap) ThenBlock: {
+                SetByte(out, ol, 45)
+                ol = Add(ol, 1)
+            }
+            x = Subtract(0, x)
+        }
+        n = 0
+        t = x
+        WhileLoop GreaterThan(t, 0) {
+            n = Add(n, 1)
+            t = Divide(t, 10)
+        }
+        IfCondition GreaterThan(Add(ol, n), cap) ThenBlock: {
+            n = Subtract(cap, ol)
+        }
+        IfCondition LessEqual(n, 0) ThenBlock: {
+            HTTP1.CSet(conn, HTTP1Off.OUT_LEN, ol)
+            ReturnValue(0)
+        }
+        i = Subtract(n, 1)
+        WhileLoop GreaterEqual(i, 0) {
+            d = Modulo(x, 10)
+            SetByte(out, Add(ol, i), Add(48, d))
+            x = Divide(x, 10)
+            i = Subtract(i, 1)
+        }
+        HTTP1.CSet(conn, HTTP1Off.OUT_LEN, Add(ol, n))
+    }
+}
+
+Function.HTTP1.Reply {
+    Input: conn: Address
+    Input: status: Integer
+    Input: body: Address
+    Input: body_len: Integer
+    Body: {
+        HTTP1St.cur = conn
+        st = status
+        bl = body_len
+        bp = body
+        keep = HTTP1.CGet(HTTP1St.cur, HTTP1Off.KEEP)
+        HTTP1St.outp = HTTP1.CGet(HTTP1St.cur, HTTP1Off.OUT)
+        cap = HTTP1St.bufsz
+        MemoryCopy(HTTP1St.outp, "HTTP/1.1 ", 9)
+        HTTP1St.ol = 9
+        h = Divide(st, 100)
+        tens = Divide(st, 10)
+        t = Subtract(tens, Multiply(h, 10))
+        o = Subtract(st, Multiply(tens, 10))
+        SetByte(HTTP1St.outp, HTTP1St.ol, Add(48, h))
+        SetByte(HTTP1St.outp, Add(HTTP1St.ol, 1), Add(48, t))
+        SetByte(HTTP1St.outp, Add(HTTP1St.ol, 2), Add(48, o))
+        HTTP1St.ol = Add(HTTP1St.ol, 3)
+        IfCondition EqualTo(st, 200) ThenBlock: {
+            MemoryCopy(Add(HTTP1St.outp, HTTP1St.ol), " OK\r\n", 5)
+            HTTP1St.ol = Add(HTTP1St.ol, 5)
+        }
+        IfCondition EqualTo(st, 201) ThenBlock: {
+            MemoryCopy(Add(HTTP1St.outp, HTTP1St.ol), " Created\r\n", 10)
+            HTTP1St.ol = Add(HTTP1St.ol, 10)
+        }
+        IfCondition EqualTo(st, 400) ThenBlock: {
+            MemoryCopy(Add(HTTP1St.outp, HTTP1St.ol), " Bad Request\r\n", 14)
+            HTTP1St.ol = Add(HTTP1St.ol, 14)
+        }
+        IfCondition EqualTo(st, 401) ThenBlock: {
+            MemoryCopy(Add(HTTP1St.outp, HTTP1St.ol), " Unauthorized\r\n", 15)
+            HTTP1St.ol = Add(HTTP1St.ol, 15)
+        }
+        IfCondition EqualTo(st, 404) ThenBlock: {
+            MemoryCopy(Add(HTTP1St.outp, HTTP1St.ol), " Not Found\r\n", 12)
+            HTTP1St.ol = Add(HTTP1St.ol, 12)
+        }
+        IfCondition EqualTo(st, 500) ThenBlock: {
+            MemoryCopy(Add(HTTP1St.outp, HTTP1St.ol), " Internal Server Error\r\n", 24)
+            HTTP1St.ol = Add(HTTP1St.ol, 24)
+        }
+        IfCondition EqualTo(st, 503) ThenBlock: {
+            MemoryCopy(Add(HTTP1St.outp, HTTP1St.ol), " Service Unavailable\r\n", 22)
+            HTTP1St.ol = Add(HTTP1St.ol, 22)
+        }
+        MemoryCopy(Add(HTTP1St.outp, HTTP1St.ol), "Content-Type: application/json\r\nContent-Length: ", 48)
+        HTTP1St.ol = Add(HTTP1St.ol, 48)
+        IfCondition EqualTo(bl, 0) ThenBlock: {
+            SetByte(HTTP1St.outp, HTTP1St.ol, 48)
+            HTTP1St.ol = Add(HTTP1St.ol, 1)
+        }
+        IfCondition GreaterThan(bl, 0) ThenBlock: {
+            x = bl
+            n = 0
+            t2 = x
+            WhileLoop GreaterThan(t2, 0) {
+                n = Add(n, 1)
+                t2 = Divide(t2, 10)
+            }
+            ol = HTTP1St.ol
+            IfCondition GreaterThan(Add(ol, n), cap) ThenBlock: {
+                n = Subtract(cap, ol)
+            }
+            IfCondition GreaterThan(n, 0) ThenBlock: {
+                i = Subtract(n, 1)
+                WhileLoop GreaterEqual(i, 0) {
+                    d = Modulo(x, 10)
+                    SetByte(HTTP1St.outp, Add(HTTP1St.ol, i), Add(48, d))
+                    x = Divide(x, 10)
+                    i = Subtract(i, 1)
+                }
+                HTTP1St.ol = Add(HTTP1St.ol, n)
+            }
+        }
+        IfCondition EqualTo(keep, 1) ThenBlock: {
+            MemoryCopy(Add(HTTP1St.outp, HTTP1St.ol), "\r\nConnection: keep-alive\r\n\r\n", 28)
+            HTTP1St.ol = Add(HTTP1St.ol, 28)
+        }
+        IfCondition NotEqual(keep, 1) ThenBlock: {
+            MemoryCopy(Add(HTTP1St.outp, HTTP1St.ol), "\r\nConnection: close\r\n\r\n", 23)
+            HTTP1St.ol = Add(HTTP1St.ol, 23)
+        }
+        IfCondition GreaterThan(bl, 0) ThenBlock: {
+            ol2 = HTTP1St.ol
+            room = Subtract(cap, ol2)
+            IfCondition GreaterThan(bl, room) ThenBlock: { bl = room }
+            IfCondition GreaterThan(bl, 0) ThenBlock: {
+                MemoryCopy(Add(HTTP1St.outp, HTTP1St.ol), bp, bl)
+                HTTP1St.ol = Add(HTTP1St.ol, bl)
+            }
+        }
+        HTTP1.CSet(HTTP1St.cur, HTTP1Off.OUT_LEN, HTTP1St.ol)
+        HTTP1.CSet(HTTP1St.cur, HTTP1Off.OUT_SENT, 0)
+        HTTP1.CSet(HTTP1St.cur, HTTP1Off.STATE, 3)
+    }
+}
+
+Function.HTTP1.Flush {
+    Input: conn: Address
+    Output: Integer
+    Body: {
+        fd = HTTP1.CGet(conn, HTTP1Off.FD)
+        out = HTTP1.CGet(conn, HTTP1Off.OUT)
+        ol = HTTP1.CGet(conn, HTTP1Off.OUT_LEN)
+        sent = HTTP1.CGet(conn, HTTP1Off.OUT_SENT)
+        left = Subtract(ol, sent)
+        IfCondition LessEqual(left, 0) ThenBlock: { ReturnValue(1) }
+        n = Socket.SendNB(fd, Add(out, sent), left)
+        IfCondition EqualTo(n, Subtract(0, 11)) ThenBlock: { ReturnValue(0) }
+        IfCondition LessEqual(n, 0) ThenBlock: { ReturnValue(-1) }
+        sent = Add(sent, n)
+        HTTP1.CSet(conn, HTTP1Off.OUT_SENT, sent)
+        IfCondition GreaterEqual(sent, ol) ThenBlock: { ReturnValue(1) }
+        ReturnValue(0)
+    }
+}
+
+Function.HTTP1.Method {
+    Input: conn: Address
+    Output: Address
+    Body: {
+        ReturnValue(HTTP1.CGet(conn, HTTP1Off.METHOD))
+    }
+}
+
+Function.HTTP1.Path {
+    Input: conn: Address
+    Output: Address
+    Body: {
+        ReturnValue(HTTP1.CGet(conn, HTTP1Off.PATH))
+    }
+}
+
+Function.HTTP1.Bearer {
+    Input: conn: Address
+    Output: Address
+    Body: {
+        ReturnValue(HTTP1.CGet(conn, HTTP1Off.BEARER))
+    }
+}
+
+Function.HTTP1.Body {
+    Input: conn: Address
+    Output: Address
+    Body: {
+        ReturnValue(HTTP1.CGet(conn, HTTP1Off.BODY))
+    }
+}
+
+Function.HTTP1.BodyLen {
+    Input: conn: Address
+    Output: Integer
+    Body: {
+        ReturnValue(HTTP1.CGet(conn, HTTP1Off.BODY_LEN))
+    }
+}
+
+Function.HTTP1.FlushDeferred {
+    Body: {
+        n = HTTP1St.defer_n
+        i = 0
+        WhileLoop LessThan(i, n) {
+            conn = Dereference(Add(HTTP1St.defer_list, Multiply(i, 8)))
+            HTTP1.CSet(conn, HTTP1Off.DEFER, 0)
+            fd = HTTP1.CGet(conn, HTTP1Off.FD)
+            IfCondition GreaterThan(fd, 0) ThenBlock: {
+                fr = HTTP1.Flush(conn)
+                IfCondition EqualTo(fr, -1) ThenBlock: {
+                    HTTP1.ClearConn(conn)
+                }
+                IfCondition EqualTo(fr, 1) ThenBlock: {
+                    keep = HTTP1.CGet(conn, HTTP1Off.KEEP)
+                    IfCondition EqualTo(keep, 0) ThenBlock: {
+                        HTTP1.ClearConn(conn)
+                    } ElseBlock: {
+                        HTTP1.ResetParse(conn)
+                    }
+                }
+            }
+            i = Add(i, 1)
+        }
+        HTTP1St.defer_n = 0
+    }
+}
+
+Function.HTTP1.Defer {
+    Input: conn: Address
+    Body: {
+        IfCondition GreaterEqual(HTTP1St.defer_n, HTTP1St.defer_cap) ThenBlock: {
+            fn = HTTP1St.commit_fn
+            IfCondition NotEqual(fn, 0) ThenBlock: {
+                CallIndirect(fn, conn)
+            }
+            HTTP1.FlushDeferred()
+        }
+        i = HTTP1St.defer_n
+        StoreValue(Add(HTTP1St.defer_list, Multiply(i, 8)), conn)
+        HTTP1St.defer_n = Add(i, 1)
+        HTTP1.CSet(conn, HTTP1Off.DEFER, 1)
+    }
+}
+
+Function.HTTP1.HandleReady {
+    Input: conn: Address
+    Body: {
+        HTTP1St.cur = conn
+        h = HTTP1St.handler
+        CallIndirect(h, conn)
+        HTTP1.Consume(conn)
+    }
+}
+
+Function.HTTP1.OnConn {
+    Input: idx: Integer
+    Body: {
+        conn = HTTP1.ConnAt(idx)
+        fd = HTTP1.CGet(conn, HTTP1Off.FD)
+        st = HTTP1.CGet(conn, HTTP1Off.STATE)
+        IfCondition EqualTo(st, 3) ThenBlock: {
+            fr = HTTP1.Flush(conn)
+            IfCondition EqualTo(fr, -1) ThenBlock: {
+                HTTP1.ClearConn(conn)
+                ReturnValue(0)
+            }
+            IfCondition EqualTo(fr, 1) ThenBlock: {
+                keep = HTTP1.CGet(conn, HTTP1Off.KEEP)
+                IfCondition EqualTo(keep, 0) ThenBlock: {
+                    HTTP1.ClearConn(conn)
+                    ReturnValue(0)
+                }
+                HTTP1.ResetParse(conn)
+            }
+            ReturnValue(0)
+        }
+        buf = HTTP1.CGet(conn, HTTP1Off.BUF)
+        fill = HTTP1.CGet(conn, HTTP1Off.FILL)
+        cap = HTTP1.CGet(conn, HTTP1Off.CAP)
+        room = Subtract(cap, fill)
+        IfCondition LessEqual(room, 0) ThenBlock: {
+            HTTP1.ClearConn(conn)
+            ReturnValue(0)
+        }
+        n = Socket.RecvNB(fd, Add(buf, fill), room)
+        IfCondition EqualTo(n, 0) ThenBlock: {
+            HTTP1.ClearConn(conn)
+            ReturnValue(0)
+        }
+        IfCondition EqualTo(n, Subtract(0, 11)) ThenBlock: { ReturnValue(0) }
+        IfCondition LessThan(n, 0) ThenBlock: {
+            HTTP1.ClearConn(conn)
+            ReturnValue(0)
+        }
+        HTTP1.CSet(conn, HTTP1Off.FILL, Add(fill, n))
+        looping = 1
+        WhileLoop EqualTo(looping, 1) {
+            pr = HTTP1.Parse(conn)
+            IfCondition EqualTo(pr, 0) ThenBlock: {
+                looping = 0
+            } ElseBlock: {
+                IfCondition EqualTo(pr, -1) ThenBlock: {
+                    HTTP1.ClearConn(conn)
+                    looping = 0
+                } ElseBlock: {
+                    HTTP1.HandleReady(conn)
+                    df = HTTP1.CGet(conn, HTTP1Off.DEFER)
+                    IfCondition EqualTo(df, 1) ThenBlock: {
+                        looping = 0
+                    } ElseBlock: {
+                        fr = HTTP1.Flush(conn)
+                        IfCondition EqualTo(fr, 0) ThenBlock: {
+                            fr = HTTP1.Flush(conn)
+                        }
+                        IfCondition EqualTo(fr, -1) ThenBlock: {
+                            HTTP1.ClearConn(conn)
+                            looping = 0
+                        } ElseBlock: {
+                            IfCondition EqualTo(fr, 1) ThenBlock: {
+                                keep = HTTP1.CGet(conn, HTTP1Off.KEEP)
+                                IfCondition EqualTo(keep, 0) ThenBlock: {
+                                    HTTP1.ClearConn(conn)
+                                    looping = 0
+                                } ElseBlock: {
+                                    HTTP1.ResetParse(conn)
+                                }
+                            } ElseBlock: {
+                                looping = 0
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+Function.HTTP1.Serve {
+    Input: handler: Address
+    Body: {
+        HTTP1St.handler = handler
+        running = 1
+        WhileLoop EqualTo(running, 1) {
+            n = Epoll.Wait(HTTP1St.epfd, HTTP1St.evbuf, HTTP1St.evmax, 1000)
+            IfCondition LessThan(n, 0) ThenBlock: {
+                running = 0
+            }
+            i = 0
+            WhileLoop LessThan(i, n) {
+                slot = Epoll.Slot(HTTP1St.evbuf, i)
+                data = Epoll.DataAt(slot)
+                IfCondition EqualTo(data, 0) ThenBlock: {
+                    HTTP1.Accept()
+                } ElseBlock: {
+                    HTTP1.OnConn(Subtract(data, 1))
+                }
+                i = Add(i, 1)
+            }
+            IfCondition GreaterThan(HTTP1St.defer_n, 0) ThenBlock: {
+                fn = HTTP1St.commit_fn
+                IfCondition NotEqual(fn, 0) ThenBlock: {
+                    CallIndirect(fn, HTTP1St.slots)
+                }
+                HTTP1.FlushDeferred()
+            }
+        }
+    }
+}

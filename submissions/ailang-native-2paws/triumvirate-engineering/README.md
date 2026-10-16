@@ -1,0 +1,1 @@
+This is a basic engineering road map to maximize productivity and code quality using ai agents. customize for your own needs. 

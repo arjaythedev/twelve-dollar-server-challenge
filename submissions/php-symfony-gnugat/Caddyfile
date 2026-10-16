@@ -1,9 +1,16 @@
 {
 	auto_https off
 	admin off
+
+	frankenphp {
+		# Worker mode: Symfony boots once per thread, then handles requests in a loop.
+		# Defaults: 2 workers (2 per CPU), restarted every 500 requests by symfony/runtime.
+		worker {
+			file ./public/index.php
+		}
+	}
 }
 
-# Classic mode: Symfony boots on every request, like with PHP-FPM.
 http://:{$PORT} {
 	bind {$HOST}
 	root ./public

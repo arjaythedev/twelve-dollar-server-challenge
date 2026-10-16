@@ -1,4 +1,4 @@
-# Profiling: local-bench/Caddyfile.worker with the admin endpoint on, for Go's pprof (see profile/memory.sh).
+# Profiling: the submitted Caddyfile (worker mode) with the admin endpoint on, for Go's pprof (see profile/memory.sh).
 {
 	auto_https off
 	admin localhost:2019

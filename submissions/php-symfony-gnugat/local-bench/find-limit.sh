@@ -4,7 +4,7 @@
 # The starting level is only a guess (the previous step's limit): if the first try fails, it is checked too, and the
 # search steps down from it (doubling the step) until a run passes.
 #   bash local-bench/find-limit.sh <label> <expected passing users> [first users to try]
-#   SERVE_ARGS="-v $PWD/local-bench/Caddyfile.worker:/app/Caddyfile:ro" bash local-bench/find-limit.sh c0-worker 10000 20000
+#   SERVE_ARGS="-v $PWD/local-bench/Caddyfile.classic:/app/Caddyfile:ro" bash local-bench/find-limit.sh classic 5000 10000
 # MAX caps the search (one k6 container runs out of TCP ports near 64,000 users): passing it ends the search.
 set -uo pipefail
 bench="$(cd "$(dirname "$0")" && pwd)/bench.sh"

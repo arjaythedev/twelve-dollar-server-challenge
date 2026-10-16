@@ -1,4 +1,4 @@
-# Profiling: the submitted Caddyfile with the admin endpoint on, for Go's pprof.
+# Profiling: local-bench/Caddyfile.classic with the admin endpoint on, for Go's pprof.
 {
 	auto_https off
 	admin localhost:2019

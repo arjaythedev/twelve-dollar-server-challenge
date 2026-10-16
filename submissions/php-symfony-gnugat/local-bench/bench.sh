@@ -15,7 +15,7 @@
 #      NOFILE: the server's open-files limit (default 65535, as the rules give it: one per keep-alive connection)
 #      K6_CONTAINERS: k6 containers sharing the users (default 1, 2 above 60,000 users: one runs out of ports near 64,000)
 #      SERVE_ARGS: extra `docker run` args for start, e.g. to try another Caddyfile:
-#      SERVE_ARGS="-v $PWD/local-bench/Caddyfile.worker:/app/Caddyfile:ro" bash local-bench/bench.sh start
+#      SERVE_ARGS="-v $PWD/local-bench/Caddyfile.classic:/app/Caddyfile:ro" bash local-bench/bench.sh start
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 APP="$(cd "$HERE/.." && pwd)"

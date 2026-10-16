@@ -1,4 +1,4 @@
-# Profiling: the submitted Caddyfile + Excimer (see profile/excimer.php).
+# Profiling: local-bench/Caddyfile.classic + Excimer (see profile/excimer.php).
 {
 	auto_https off
 	admin off

@@ -14,5 +14,6 @@
 http://:{$PORT} {
 	bind {$HOST}
 	root ./public
-	php_server
+	rewrite * /index.php
+	php
 }

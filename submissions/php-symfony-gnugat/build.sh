@@ -6,6 +6,6 @@ export APP_ENV=prod APP_DEBUG=0
 # Warming up the cache creates the Doctrine connection service, which needs the env var, but never connects.
 export SQLITE_PATH=/nonexistent/feed.db
 
-composer install --no-dev --optimize-autoloader --no-interaction --no-progress
+composer install --no-dev --classmap-authoritative --no-interaction --no-progress
 composer dump-env prod
 bin/console cache:warmup

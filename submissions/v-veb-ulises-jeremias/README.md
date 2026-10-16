@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Language | V, pinned to `d67ee5500338554f54c7c8ca4cc00df42159577d` |
+| Language | V, pinned to `c36172591e766668cf8aa7cc307f05764b6a0d49` |
 | HTTP server | V standard library `veb` |
 | SQLite | V standard library `db.sqlite`, linked to Ubuntu's SQLite |
 | **Nginx or direct** | **Direct**, listens on `HOST:PORT` |

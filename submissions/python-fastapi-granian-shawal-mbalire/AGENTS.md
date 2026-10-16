@@ -11,6 +11,7 @@ concurrent k6 users held for 5 minutes (p95 < 500 ms, p99 < 1 s, < 1% errors). O
 - **The owner's target: hold 140k–160k users on the bench.** Only the API container is droplet-limited
   (CPU 0, 1792 MiB, no swap, nofile 65535); the owner confirmed these limits and wants no limits adapter.
 - **FastAPI served by Granian. Keep this design**, even to chase other entries.
+  Exception: the owner's standard-library HTTP experiment (see "Next step" at the end).
 - **SQLite builds the response JSON**; Python only joins byte strings.
 - **Hexagonal architecture** (the owner's `hexagonal-architecture` skill): four root folders, IaC in
   `infra/`, logic in named steps and pure rules, ports for anything with side effects.
@@ -239,22 +240,68 @@ load: the server runs cache-cold with 40k connections, which roughly doubles eve
 | Checkpoint every 5 s instead of 1 s (fewer ~20 ms stalls) | 130k A/B, 3 rounds, 2026-10-16 (`build/linuxbench/ab/20261016-163410.json`): 2 of 3 passes vs 3 of 3; p99 49.8–2,141 (881) vs 27.6–765 (329) ms; peak 1,528–1,586 vs 1,399–1,460 MiB (the bigger WAL is charged to the cgroup); µs/request equal (67.1 vs 66.1). Each stall grows with the WAL, so fewer, longer stalls hurt more. Not adopted |
 | Python GC as the 130k pause | every GC pass logged in a 130k run: none > 5 ms, no full collection. That run passed, so it rules GC out only for a run without the pause |
 
-## Next: toward 140k–160k (in order)
+## Next step (owner, 2026-10-16): a standard-library HTTP server, no FastAPI, no Granian
 
-1. **Make 130k hold for 5 minutes.** It is CPU headroom now, not a stall bug (timelines above). Cut
-   per-connection CPU (accept/close is most of it past 65k users: Granian's threads and the kernel) or
-   smooth bursts. Read `just bench samples` for each try; `--profile layers` at 130k shows the split.
-2. **Fewer reconnects or cheaper accepts.** ~85% of requests reconnect past 65k users. Granian gives
-   Python no handle on idle sockets, so "close the idlest connection" can't be done in the app.
-   Options: a smaller per-connection memory footprint does not help (descriptors cap it); Granian
-   flags for the accept path are worth reading in its source.
-3. **Memory**: 1.6 of 1.75 GiB peak in the 140k hold. `MALLOC_ARENA_MAX=2` and a smaller
-   `--http1-buffer-size` did nothing at 40k (~15 KB per open connection, steady).
-4. **Per-request CPU** (what decides the droplet score): #84 is ~34% cheaper, #71 ~39% (2026-10-16 entries run, on 3.15).
-   Python 3.11 + Rust tasks is adopted; still the owner's call: the feed `ORDER BY` trick (unspecified order; not recommended).
-5. Rule 10 risk: python-build-standalone is a prebuilt runtime fetched by build.sh; ask the maintainer
-   on PR #41 before relying on it.
-6. Two real droplets would turn the estimate into a score (costs money; the owner's call).
+PR #41 (FastAPI + Granian) is concluded and pushed; leave its design alone. The owner's next step is
+an experiment: serve the same five endpoints with the **Python standard library only**, to see how
+close plain CPython gets to #84 (PyPy + raw epoll, ~34% cheaper) and #71. This lifts the "FastAPI
+served by Granian" rule **for the experiment only**; every other rule above still holds (SQLite builds
+the JSON, hexagonal, justfile, no uv, no shell scripts, spelled-out names, honest claims, ask before
+committing or pushing, Mac idle during bench runs).
+
+**Decisions** (ask the owner about the open ones first):
+- **Decided (owner, 2026-10-16): a new submission folder** with its own branch and PR, e.g.
+  `submissions/python-stdlib-shawal-mbalire/`. Copy what it reuses (domain, store, JWT, descriptor
+  budget, tests, justfile, infra) from this folder; don't import across folders. The bench lives here:
+  add the new folder to `REFS` in `bench/linux.py` so `just bench entries` can alternate it with `ours`.
+- **Decided (owner, 2026-10-16): the latest Python and its features.** Pin python-build-standalone
+  3.15.0, release 20261013 (SHA-256s in commit `5111391`'s `infra/ops.py`: aarch64 `26a54e8f…bcd7`,
+  x86_64 `e02a368d…8921`; check for a newer release first). Write modern Python (PEP 695 type
+  parameters and `type` aliases, `match`, dataclasses with slots). Re-measure the runtime features
+  here, since the earlier "no gain" was under Granian: the JIT (`PYTHON_JIT=1`), `PYTHONMALLOC=mimalloc`,
+  and the tail-call interpreter (already in this build). The free-threaded build doesn't help on one vCPU.
+- Open: whether uvloop counts as allowed (it is not stdlib; it was ~free speed under Granian).
+
+**What "standard http lib" can mean, and what to expect:**
+1. `http.server.ThreadingHTTPServer`: one thread per connection. Every user holds a keep-alive socket,
+   so 40k users = 40k threads (stacks, GIL hand-offs); it will not reach 40k in 1.75 GiB. Worth one
+   small run (e.g. 2k–5k users) as a baseline only, and it parses headers with `email.parser` (slow).
+2. **`asyncio` + `asyncio.Protocol`** with a hand-written HTTP/1.1 parser: the realistic option. One
+   thread, `data_received` splits the request line and headers with `bytes.find`/`split`, answers with
+   `transport.write(prebuilt header + body)`. This is roughly #84's design on CPython. Study #84
+   (`pypy-pranavds` in `bench/linux.py` `REFS`) and #71 for their parsers, keep-alive and close
+   handling, and TCP_DEFER_ACCEPT on the listener (no gain under Granian, may help here).
+3. `selectors`/raw `epoll` loop by hand: the fastest stdlib path, more code; try only if 2 is close.
+
+**How to build it here (hexagonal):** the domain, workflows, `adapters/sqlite_posts.py`,
+`adapters/jwt_hs256.py`, `adapters/descriptor_budget.py` and the clock are framework-free; reuse them.
+Only the driving adapter changes: a new `adapters/stdlib_http.py` (protocol + parser) with the
+same `Handlers`/route table and renderers as `adapters/asgi_http.py`. The lifespan becomes plain `start()`/`close()` calls around
+`loop.create_server(...)`; `main.py` picks the adapter. Group commit already runs on the event loop
+and needs no change. Things Granian did for us that the new adapter must do itself:
+- HTTP/1.1 keep-alive, `Content-Length` bodies (POST /posts), pipelined requests in one read, 400 on
+  garbage, `Connection: close` when the descriptor budget is strained (then close after the write).
+- Idle connections stay open ≥ 65 s (SPEC); backlog 4096 (`create_server(backlog=4096)`).
+- Descriptor limit 65535: accept errors (EMFILE) must not kill the server; asyncio logs and retries.
+- All 42 checks byte for byte (`just check`), plus unit tests for the parser with fakes.
+
+**Measure it the usual way:** `just test`, `just check`, then `just bench entries 40000 ours stdlib pypy-pranavds
+ruby-cicloid --rounds 3` (with the new folder in `REFS`)
+for the gap, then the 130k/ladder runs. Record every result in this file's tables.
+
+## Still open for the FastAPI + Granian build (PR #41)
+
+1. **130k for 5 minutes**: CPU headroom, not a stall bug. Past 65k users ~85% of requests reconnect,
+   and accepting them (Granian's threads + kernel) is most of the CPU; Granian gives Python no handle on
+   idle sockets. Checkpoint stalls (~20 ms each second, two fsyncs) remain; every 5 s was worse;
+   every 0.5 s is untested (measure stall sizes with `--profile hops` first).
+2. **Memory**: 1.56 GiB peak at 120k. `MALLOC_ARENA_MAX=2` and a smaller `--http1-buffer-size` did
+   nothing (~15 KB per open connection, steady).
+3. **Per-request CPU**: rerun `just bench entries` on the submitted build before quoting a gap to #84
+   (the table is from the 3.15 build). The feed `ORDER BY` trick is the owner's call (not recommended).
+4. **Maintainer**: PR #41's description asks whether a prebuilt python-build-standalone runtime is OK
+   (rule 10). Watch for the answer; CI on the fork needs a maintainer to approve the workflow run.
+5. Two real droplets would turn the estimate into a score (costs money; the owner's call).
 
 ## Environment (owner's Mac)
 

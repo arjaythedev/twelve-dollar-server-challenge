@@ -3,6 +3,7 @@
 | | |
 |---|---|
 | Language | V, pinned to `c36172591e766668cf8aa7cc307f05764b6a0d49` |
+| Compiler backend | VC `bcfdc7f33e7b7908ee40f76d059c0e2894fb4a3b`; TCC bundle `d6e7ac1b1bcc98aed734a6ecbfa8509f24606c74` |
 | HTTP server | V standard library `fasthttp` (Linux epoll) |
 | SQLite | Prepared SQLite C API statements, linked against Ubuntu's SQLite |
 | **Nginx or direct** | **Direct**, listens on `HOST:PORT` |

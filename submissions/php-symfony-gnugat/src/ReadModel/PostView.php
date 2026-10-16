@@ -5,20 +5,22 @@ declare(strict_types=1);
 namespace App\ReadModel;
 
 use App\Entity\Post;
-use Symfony\Component\Serializer\Attribute\SerializedName;
+use Symfony\Component\JsonStreamer\Attribute\JsonStreamable;
+use Symfony\Component\JsonStreamer\Attribute\StreamedName;
 
 /**
- * The post object of the API: properties are serialized in this order.
+ * The post object of the API: properties are written in this order.
  */
+#[JsonStreamable]
 final readonly class PostView
 {
     public function __construct(
         public int $id,
         public string $body,
-        #[SerializedName('created_at')]
+        #[StreamedName('created_at')]
         public string $createdAt,
         public string $author,
-        #[SerializedName('like_count')]
+        #[StreamedName('like_count')]
         public int $likeCount,
     ) {
     }

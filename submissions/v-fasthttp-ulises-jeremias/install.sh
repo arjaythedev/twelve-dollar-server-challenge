@@ -5,7 +5,7 @@ apt-get update
 apt-get install -y --no-install-recommends build-essential ca-certificates curl git libsqlite3-dev pkg-config
 
 # Pin both repositories: V's default Makefile otherwise pulls a moving vc branch.
-V_COMMIT=d67ee5500338554f54c7c8ca4cc00df42159577d
+V_COMMIT=c36172591e766668cf8aa7cc307f05764b6a0d49
 VC_COMMIT=bcfdc7f33e7b7908ee40f76d059c0e2894fb4a3b
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT

@@ -1,16 +1,26 @@
 use crate::web::Response;
 use axum::http::Request;
+#[cfg(not(target_os = "linux"))]
 use futures_util::FutureExt;
-use hyper::{body::Incoming, server::conn::http1, service::Service};
+#[cfg(not(target_os = "linux"))]
+use hyper::server::conn::http1;
+use hyper::{body::Incoming, service::Service};
+#[cfg(not(target_os = "linux"))]
 use hyper_util::{rt::TokioIo, server::graceful::GracefulShutdown};
+#[cfg(any(test, not(target_os = "linux")))]
+use std::time::Duration;
 use std::{
     convert::Infallible,
     future::{Future, poll_fn},
     io,
     task::Poll,
-    time::Duration,
 };
 use tokio::net::TcpListener;
+
+#[cfg(target_os = "linux")]
+mod idle;
+#[cfg(target_os = "linux")]
+mod socket;
 
 pub async fn serve<S, F>(listener: TcpListener, service: S, shutdown: F) -> io::Result<()>
 where
@@ -39,6 +49,24 @@ where
         ));
     }
 
+    #[cfg(target_os = "linux")]
+    return idle::serve_many(listeners, service, shutdown).await;
+
+    #[cfg(not(target_os = "linux"))]
+    serve_many_registered(listeners, service, shutdown).await
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn serve_many_registered<S, F>(
+    listeners: Vec<TcpListener>,
+    service: S,
+    shutdown: F,
+) -> io::Result<()>
+where
+    S: Service<Request<Incoming>, Response = Response, Error = Infallible> + Clone + Send + 'static,
+    S::Future: Send + 'static,
+    F: Future<Output = ()>,
+{
     let mut http = http1::Builder::new();
     // Match Axum's timer-free HTTP/1 configuration and avoid vectored writes.
     http.header_read_timeout(None).writev(false);
@@ -137,6 +165,7 @@ fn accept_error_action(error: &io::Error) -> AcceptErrorAction {
     AcceptErrorAction::Backoff
 }
 
+#[cfg(any(test, not(target_os = "linux")))]
 async fn wait_for_accept_backoff_or_shutdown<F>(shutdown: &mut F) -> bool
 where
     F: Future<Output = ()> + Unpin,

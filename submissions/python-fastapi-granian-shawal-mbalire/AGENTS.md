@@ -1,7 +1,7 @@
 # AGENTS.md: python-fastapi-granian-shawal-mbalire
 
 Handoff notes. The source is the source of truth; this file holds the rules, the why, the verified
-numbers and what's next. Read it in full before touching code. Last updated 2026-10-16.
+numbers and what's next. Read it in full before touching code. Last updated 2026-10-16 (submission concluded).
 
 ## Goal and owner's rules
 
@@ -14,13 +14,14 @@ concurrent k6 users held for 5 minutes (p95 < 500 ms, p99 < 1 s, < 1% errors). O
 - **SQLite builds the response JSON**; Python only joins byte strings.
 - **Hexagonal architecture** (the owner's `hexagonal-architecture` skill): four root folders, IaC in
   `infra/`, logic in named steps and pure rules, ports for anything with side effects.
-- **Latest Python**: the owner asked for it; we run python-build-standalone 3.15.0 (see below).
+- **Python 3.11.17 + `--task-impl rust`** (owner's call, 2026-10-16, replacing the earlier latest-Python
+  rule): Granian's Rust tasks only run on 3.11 and cost 3–7% less per request than 3.15 (Tried table).
 - **justfile** per the `justfile` skill. **No uv** (`python3 -m venv` + pip). **No shell scripts**: logic is
   Python; the required `.sh` files stay one line each.
 - **Spell names out** (`descriptor`, not `fd`).
 - **Claims must be honest.** Every number in README.md comes from the fixed `just bench linux` and says so.
 - Don't commit, push or open PRs until the owner asks. Ask before A/B experiments that change the
-  design (`asginl`, `--task-impl rust`, SQL JSON vs orjson, group commit, locking mode, workers).
+  design (`asginl`, task implementation, Python version, SQL JSON vs orjson, group commit, locking mode, workers).
 
 ## Challenge rules (summary of SPEC.md)
 
@@ -32,24 +33,27 @@ healthy within 60 s. We serve **direct** on `0.0.0.0:80`.
 
 ## State of the tree
 
-The 2026-10-15/16 sessions are committed locally (see `git log`), **not pushed**. Earlier commits
-`03cd105`, `eb832d8`, `d721dea` are on `fork`, branch `python-fastapi-granian-shawal-mbalire`. Tested:
-`just test` 50 pass, `just check` 42/42 (CI's `test/run.sh` 42/42 in a clean Ubuntu 24.04 container
-with the downloaded Python, 2026-10-15). What the sessions added:
+All sessions through 2026-10-16 are committed and pushed to `fork`, branch
+`python-fastapi-granian-shawal-mbalire` (PR #41, description synced 2026-10-16). Tested: `just test` 50 pass,
+`just check` 42/42, CI's `test/run.sh` 42/42 in a clean Ubuntu 24.04 container with the downloaded
+Python 3.11.17 (2026-10-16). Submitted build: Python 3.11.17 + `--task-impl rust`, `FeedApp`; it held
+120k for 5 minutes (p95 15 ms, p99 107 ms, 65% CPU 0, 56.0 µs/request, peak 1,560 MiB, 2026-10-16 18:09).
+What the sessions added:
 
-- Python 3.15.0 build (`infra/ops.py`), `ca-certificates` in `install.sh`, `.python/` ignored.
-- Dispatcher instead of Starlette routing (`adapters/asgi_http.py`, `tests/test_asgi_http.py`).
+- Python build from python-build-standalone (`infra/ops.py`; 3.15.0 at first, 3.11.17 + Rust tasks
+  since 2026-10-16), `ca-certificates` in `install.sh`, `.python/` ignored.
+- Dispatcher instead of Starlette routing, `FeedApp` (`adapters/asgi_http.py`, `tests/test_asgi_http.py`).
 - Step chains + `Timed` monad (`domain/models.py`, `domain/railway.py`, `domain/workflows.py`,
   `domain/rules.py`, `domain/ports.py`), span recorder (`adapters/span_recorder.py`), background spans
   in `adapters/sqlite_posts.py`, `PROFILE_HOPS_OUT` (`infra/config.py`, `main.py`), `tests/test_railway.py`.
 - Bench: clock keeper, guest-agent stop, idle check, `--repeat`, `--profile layers|python|hops`
   (`bench/linux.py`, `bench/profiling.py`, `infra/iac/bench/*.tf`).
-- 2026-10-15/16: descriptor budget counts sockets (sockstat), reserve 4,096, every 50 ms
+- Descriptor budget counts sockets (sockstat), reserve 4,096, every 50 ms
   (`adapters/descriptor_budget.py`); bench: layered image, cached generator source, sampler + timelines
-  (`bench/samples.py`), 120 s / scaled-ramp defaults, ladder `--upper`, `snapshot` / `ab` / `results`
-  modes; justfile targets for all of it; README Supported users.
-- README.md rewritten with fixed-bench numbers only. **PR #41's description still has the old numbers**;
-  sync it when the owner asks to push (`gh pr edit 41 --repo arjaythedev/twelve-dollar-server-challenge --body-file ...`).
+  (`bench/samples.py`), 120 s / scaled-ramp defaults, ladder `--upper`, `snapshot` / `ab` / `entries` / `results`
+  modes, saved server logs and memory timelines; justfile targets for all of it.
+- README.md with fixed-bench numbers only. The entries comparison in it (and in Verified numbers) is
+  from the 3.15 build; rerun `just bench entries` before quoting a gap to #84 for the current build.
 
 ## Decisions that are easy to break
 
@@ -116,7 +120,9 @@ bench/      linux.py (the bench), samples.py, profiling.py, journey.py, loadgen.
   descriptors that made a generator run 0.6 s late.
 - **A/B method**: `just bench snapshot a`, change the code, `just bench snapshot b`, then
   `just bench ab 40000 a b [--rounds 3]`: runs alternate (A B A B …) and it prints both sides; saved
-  under `build/linuxbench/ab/`. Snapshots are images `twelve-ab-NAME`; after `ab`, `twelve-server-ours`
+  under `build/linuxbench/ab/`.
+- **Entries**: `just bench entries 40000 ours cknutson12 tejasnafde ... [--rounds 3] [--no-build]`
+  alternates whole entries the same way and prints one row each; saved under `build/linuxbench/entries/`. Snapshots are images `twelve-ab-NAME`; after `ab`, `twelve-server-ours`
   is the last variant, so rebuild (plain `just bench linux`) before other runs.
 - `just bench results [n]`: last runs as a table. `just bench samples [file] [--bucket s]`: one run's
   timeline (default newest): dropped connections, CPU 0, open/orphan/TIME_WAIT sockets per bucket.
@@ -150,22 +156,36 @@ bench/      linux.py (the bench), samples.py, profiling.py, journey.py, loadgen.
   cap (`--cpus`) distorts Python more than Go. Estimate droplet scores by CPU per request against
   entries with known droplet scores (#1 11k, #10 22k, #18 22k).
 
-## Verified numbers (fixed bench, 2026-10-15)
+## Verified numbers (fixed bench, 2026-10-15/16)
 
-40k users, 120 s hold, 0 errors everywhere (README has the full table):
+Six entries, same session, `just bench entries` (alternating; 20 s ramp at 40k, 60 s at 130k; 120 s
+hold), 2026-10-16. Logs in `build/linuxbench/entries/`. 40k, 3 rounds, 0 errors, range (mean):
 
 | Entry | server µs/request | `core0_util` | p99 ms |
 |---|---|---|---|
-| #71 Ruby | 44.5–46.5 | 17% | 3.9–4.7 |
-| #84 PyPy (alternated with ours) | 49.4–53.6 | 20–21% | 3.2–4.4 |
-| **ours** | **63.4–75.2** (69.7–72.8 when alternated) | 21–25% | 4.7–8.0 |
-| #18 Go (droplet 22k) | 80.1–90.0 | 29–31% | 8.7–20 |
-| #10 lean FastAPI (droplet 22k) | 98.8–114.9 | 33–37% | 12–1,619 |
-| #1 FastAPI + uvicorn (droplet 11k) | 123.4–133.9 | 40–43% | 11–561 |
-| #13 Granian RSGI | 112.1–160.4 | 37–54% | 24–62 |
+| #71 Ruby | 36.9–39.0 (37.9) | 17–18% | 3.5–4.2 |
+| #84 PyPy | 39.2–42.6 (41.1) | 20–21% | 3.2–8.4 |
+| **ours** | **59.5–66.2 (62.4)** | 24–26% | 6.4–10.8 |
+| #10 lean FastAPI (droplet 22k) | 66.4–77.1 (71.2) | 25–30% | 4.1–13.5 |
+| #13 Granian RSGI | 90.7–102.8 (97.9) | 36–40% | 19.9–24.4 |
+| #1 FastAPI + uvicorn (droplet 11k) | 107.6–114.1 (110.6) | 41–43% | 6.9–11.4 |
 
-**Supported users (5-minute hold): 120k.** 130k is the edge (passes every 120 s run, 1 of 3 five-minute
-holds); 140k fails. 5-minute holds, single runs:
+130k, 1 run each: pass #84 (50.6 µs, 56%, p99 15 ms) and #13 (87.2, 91%, p99 595); fail #10 (0.65%
+errors), #71 (p99 1,059), **ours (77.0 µs, 82%, p95 419, p99 1,805, 0 dropped)**, #1 (94%, 0.63% errors).
+130k, ours vs #13 alternating, 3 rounds, 120 s hold (2026-10-16 05:42–06:01, log
+`build/linuxbench/entries/20261016-060136.json`): both 3/3 pass. Ours 61.5–63.1 µs (CPU 0 66–69%,
+p99 23–28 ms, peak MiB 1,412–1,732); #13 79.7–82.1 µs (85–88%, p99 36–120 ms). None of ours hit the
+pause seen earlier that day (2 of 4 runs failed at 75–80% CPU), and those earlier runs measured 77 µs, so
+the early-morning Mac was ~20% faster: the pause seems to need CPU 0 near saturation. Those runs had
+a stall logger (below): **every PASSIVE checkpoint blocks the event loop 13–37 ms (mean ~20 ms), once a
+second**; one took 72.5 ms and matched the only loop lag > 50 ms; no group commit took > 10 ms. The
+fsync is in the VM's virtio disk, so a droplet may differ.
+Versus the 2026-10-15 batch (60 s ramp, separate batches) every entry is 10–20% cheaper and #10 ~35%
+cheaper (was 98.8–114.9): our margin over #10 shrank from ~35% to ~12%. #18 Go (droplet 22k) was only in
+the old batch: 80.1–90.0 µs when ours was 63.4–75.2.
+
+**Supported users (5-minute hold): 120k.** 130k is the edge (1 of 3 five-minute holds; failed the
+2026-10-16 120 s entries run); 140k fails. 5-minute holds, single runs:
 
 | Users | Build | Pass | `core0_util` | p95 | p99 | `listen_overflows` | Connects | Peak MiB |
 |---|---|---|---|---|---|---|---|---|
@@ -200,7 +220,7 @@ load: the server runs cache-cold with 40k connections, which roughly doubles eve
 | JIT (`PYTHON_JIT=1`), `PYTHONMALLOC=mimalloc` | nothing measurable |
 | `--task-impl rust` | falls back to asyncio on Python ≥ 3.12 (needs 3.11) |
 | `--loop rloop` (0.5.0) | 40k, alternating: 50.5 vs 51.4 µs in the one clean pair; other pairs disturbed. No clear gain, reverted |
-| Python 3.11.17 + `--task-impl rust` (same standalone release) | 40k, alternating: 53.4–54.8 vs 55.2–55.6 µs (one 64.6 outlier left out): ~2–3% cheaper, "experimental" per Granian, breaks the latest-Python rule. Not adopted |
+| Python 3.11.17 + `--task-impl rust` (same standalone release) | 40k, alternating: 53.4–54.8 vs 55.2–55.6 µs (one 64.6 outlier left out): ~2–3% cheaper, "experimental" per Granian; not adopted then (latest-Python rule). Re-run 2026-10-16 (3 rounds each, alternating): 40k 47.9–53.4 (49.9) vs 50.8–57.0 (53.6) µs, ~7%; 130k 63.3–66.8 (65.3) vs 65.7–68.2 (67.1), ~3%, both 3/3 pass, p99 170 vs 228 ms mean. 42/42 on 3.11.17 (SQLite 3.53.1, same release; SHA-256 aarch64 `643954c0…ac24`, x86_64 `846bf682…644c`). **Adopted by the owner, 2026-10-16** (in `infra/ops.py`); the Verified numbers above were measured on 3.15 |
 | Descriptor reserve 256 / 0.25 s | replaced by 4,096 / 50 ms: accept-queue overflows at 120k+ (see Decisions) |
 | HMAC one-shot in the JWT verifier | saves 0.17 µs of a 2.6 µs verify |
 | Feed SQL: concat instead of `json_object`, rows + Python join | slower / equal |
@@ -208,6 +228,16 @@ load: the server runs cache-cold with 40k connections, which roughly doubles eve
 | Checkpoint on its own thread + connection (no EXCLUSIVE) | +15% CPU (75.6–83.5 vs 60.8–69.5 µs); stalls remained (commits stalled ≤ 25 ms) |
 | Same + `--workers 2` | p99 better (2.6–5.0 vs 4.8–8.4 ms) but CPU 63–86 µs (mean 74): worse at the limit |
 | 3 generators + dedicated keeper CPU | generators 37–60 s late at 140k+; reverted to 4 + SCHED_IDLE keeper |
+| Descriptor budget at 40,000 open (as #13 does) instead of 61,439 | 130k A/B, alternating, 2026-10-16: 0 of 2 passes (p99 2.0 and 5.3 s). Closing earlier only adds reconnects |
+| TCP_DEFER_ACCEPT (as #84) on Granian's listening socket, set from the lifespan | 130k A/B, 3 rounds: 60.0 vs 59.5 µs, same connects (1.077M), no overflows either way; one p99 of 357 ms. Granian's accept path doesn't gain. Note: Granian's worker gets the listening socket only after the lifespan starts |
+| Uvicorn 0.54 (uvloop, httptools, #10's settings) instead of Granian, same app (an `HTTP_SERVER=uvicorn` switch in `infra/ops.py`, removed again) | 40k A/B, 2026-10-16. Clean first pair 51.2 vs 45.9 µs (Granian 45.3 in round 2), so uvicorn costs ~12% more per request; ~200 MiB less memory. Later rounds were 35 min apart with p99 300–480 ms (Mac disturbed), same direction: 53.7–55.4 vs 54.1. Not run at 130k |
+| Granian on PyPy 3.11 (7.3.23; build path removed from the tree on the owner's call, 2026-10-16) | 42/42 and 50 tests pass, but **OOM-killed in every 40k round**: the worker grows ~6 KB per request, outside PyPy's GC heap (`PYPY_GC_MAX=400MB` was passed without a MemoryError; `gc.collect()` every 0.5–1 s reclaims nothing and takes ~70 ms). Bisected in a container with a bare ASGI app: leaks with Granian's asyncio tasks always; with `--task-impl rust` only once the live heap is bigger (importing FastAPI, or 40 MiB of plain objects, triggers it). Same in Granian 2.7.3, 2.8.0, 2.8.4: a Granian/PyO3-on-PyPy bug. Also: PyPy 8.0 has wheel ABI pp80 (no Granian wheel); rloop's PyPy wheel fails to import (`_PyBytes_Resize`); in-process journey 15.3 vs 13.3 µs (CPython). Repro: a 10-line ASGI app that answers `{"ok":true}`, plus `BALLAST = [str(i) * 3 for i in range(800000)]` at import, under `granian --interface asgi --loop asyncio --task-impl rust`; one keep-alive `http.client` loop; worker VmRSS before/after 30k requests |
+| Constant response-start messages without our `content-length` (Granian adds it) + `FeedApp` (below) | 40k A/B, 4 rounds, 2026-10-16: 51.6–64.8 (57.8) vs 52.8–57.5 (54.6) µs, worse in 3 of 4 pairs, p99 5.4 vs ~3.7 ms. Granian's path without a content-length header is slower; `_send` reverted. `FeedApp` (FastAPI subclass sending HTTP straight to the Dispatcher; profile: FastAPI+Starlette `__call__` ≈ 1 µs/request) kept: measured on its own below |
+| `FeedApp` alone, **kept** (`adapters/asgi_http.py`: HTTP goes straight to the Dispatcher, skipping FastAPI's and Starlette's `__call__`) | 40k A/B, 8 rounds, 2026-10-16 14:43–15:24, 3.11 + Rust tasks (`build/linuxbench/ab/20261016-152408.json`): 50.8–62.7 (55.2) vs plain `FastAPI` 53.2–64.6 (58.4) µs, cheaper in 7 of 8 pairs, p99 3.7–6.4 vs 3.6–273.6 ms (one plain-FastAPI run had a late generator). More than the ~1 µs the profile predicted; read it as ≥ 2% |
+| `MALLOC_ARENA_MAX=2` (set in `start()` before exec) | 40k A/B, 4 rounds, 2026-10-16 (`build/linuxbench/ab/20261016-154626.json`): 50.8–54.2 (53.2) vs default 50.8–60.3 (53.5) µs, peak 986 vs 988 MiB, steady 624–627 MiB both. No effect on CPU or memory; not adopted. Not run at 130k, where memory is tight |
+| `--http1-buffer-size 8192` (default 417,792) | 40k A/B, 2 rounds, 2026-10-16 (`build/linuxbench/ab/20261016-161347.json`): steady memory 624–625 vs 624–626 MiB, 48.3–63.9 vs 53.2–60.9 µs. It caps the read buffer's growth; it isn't the initial allocation, so it saves nothing. Not adopted |
+| Checkpoint every 5 s instead of 1 s (fewer ~20 ms stalls) | 130k A/B, 3 rounds, 2026-10-16 (`build/linuxbench/ab/20261016-163410.json`): 2 of 3 passes vs 3 of 3; p99 49.8–2,141 (881) vs 27.6–765 (329) ms; peak 1,528–1,586 vs 1,399–1,460 MiB (the bigger WAL is charged to the cgroup); µs/request equal (67.1 vs 66.1). Each stall grows with the WAL, so fewer, longer stalls hurt more. Not adopted |
+| Python GC as the 130k pause | every GC pass logged in a 130k run: none > 5 ms, no full collection. That run passed, so it rules GC out only for a run without the pause |
 
 ## Next: toward 140k–160k (in order)
 
@@ -218,10 +248,10 @@ load: the server runs cache-cold with 40k connections, which roughly doubles eve
    Python no handle on idle sockets, so "close the idlest connection" can't be done in the app.
    Options: a smaller per-connection memory footprint does not help (descriptors cap it); Granian
    flags for the accept path are worth reading in its source.
-3. **Memory**: 1.6 of 1.75 GiB peak in the 140k hold. Try `MALLOC_ARENA_MAX=2` and a smaller
-   `--http1-buffer-size` before going higher.
-4. **Per-request CPU** (what decides the droplet score): #84 is ~27% cheaper. Owner's calls: Python 3.11
-   + `--task-impl rust`, the feed `ORDER BY` trick (unspecified order; not recommended).
+3. **Memory**: 1.6 of 1.75 GiB peak in the 140k hold. `MALLOC_ARENA_MAX=2` and a smaller
+   `--http1-buffer-size` did nothing at 40k (~15 KB per open connection, steady).
+4. **Per-request CPU** (what decides the droplet score): #84 is ~34% cheaper, #71 ~39% (2026-10-16 entries run, on 3.15).
+   Python 3.11 + Rust tasks is adopted; still the owner's call: the feed `ORDER BY` trick (unspecified order; not recommended).
 5. Rule 10 risk: python-build-standalone is a prebuilt runtime fetched by build.sh; ask the maintainer
    on PR #41 before relying on it.
 6. Two real droplets would turn the estimate into a score (costs money; the owner's call).

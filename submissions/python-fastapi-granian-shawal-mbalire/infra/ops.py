@@ -20,14 +20,16 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
-# The server's interpreter: CPython from python-build-standalone (clang, PGO + LTO, the tail-call
-# interpreter, and SQLite 3.53 instead of Ubuntu's 3.45). In-process, the request mix ran ~15% faster
-# than Ubuntu's 3.12 (13.0-13.5 vs 15.4-16.1 µs per request). Pinned by release and SHA-256.
+# The server's interpreter: CPython from python-build-standalone (clang, PGO + LTO, and SQLite 3.53
+# instead of Ubuntu's 3.45). Its 3.15 ran the request mix ~15% faster in-process than Ubuntu's 3.12
+# (13.0-13.5 vs 15.4-16.1 µs per request). Pinned by release and SHA-256.
+# 3.11, not the latest (3.15): Granian's Rust task implementation (--task-impl rust) only runs on
+# 3.11, and the pair cost 3-7% less per request on the bench (2026-10-16; AGENTS.md). Owner's choice.
 PYTHON_RELEASE = "20261013"
-PYTHON_VERSION = "3.15.0"
+PYTHON_VERSION = "3.11.17"
 PYTHON_SHA256 = {
-    "aarch64": "26a54e8fbde81bcc39ba35ad855a6a573295c023793c20fff1670a560649bcd7",
-    "x86_64": "e02a368dd5dc76ffe0599e5109ad6c1ee84e597910758b0e006bab25372a8921",
+    "aarch64": "643954c07b04c18e215f812691cd5fa15d924fec1f3a5fdd9c1789484382ac24",
+    "x86_64": "846bf682e2b67393f2affa5e5c0994e446abc3a7cc5bb699890c36346823644c",
 }
 PYTHON_URL = ("https://github.com/astral-sh/python-build-standalone/releases/download/{release}/"
               "cpython-{version}+{release}-{arch}-unknown-linux-gnu-install_only.tar.gz")
@@ -39,6 +41,7 @@ GRANIAN_FLAGS = [
     "--workers", "1",
     "--runtime-mode", "st",
     "--loop", "uvloop",
+    "--task-impl", "rust",  # Granian's "experimental" Rust tasks; on Python >= 3.12 it falls back to asyncio
     "--http", "1",
     "--no-ws",
     "--no-access-log",

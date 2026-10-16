@@ -238,6 +238,20 @@ class Dispatcher:
         self._spans.record(endpoint, (Span("route", routed - began),) + timed.spans)
 
 
+class FeedApp(FastAPI):
+    """FastAPI, with HTTP requests handed straight to the Dispatcher (its middleware_stack).
+
+    FastAPI.__call__ and Starlette.__call__ cost two coroutine frames and a telemetry check per
+    request (~1 µs at 40k users, profiled 2026-10-16); returning the Dispatcher's coroutine skips
+    both. Everything else (the lifespan) still goes through them.
+    """
+
+    def __call__(self, scope: Scope, receive: Receive, send: Send) -> Awaitable[None]:
+        if scope["type"] == "http":
+            return self.middleware_stack(scope, receive, send)
+        return super().__call__(scope, receive, send)
+
+
 def create_app(api: FeedApi, budget: DescriptorBudget, resources: Sequence[Resource],
                spans: SpanSink | None = None, clock: Clock | None = None) -> FastAPI:
     @asynccontextmanager
@@ -252,7 +266,7 @@ def create_app(api: FeedApi, budget: DescriptorBudget, resources: Sequence[Resou
             for resource in reversed(started):
                 await resource.close()
 
-    app = FastAPI(
+    app = FeedApp(
         lifespan=lifespan,
         redirect_slashes=False,
         docs_url=None,

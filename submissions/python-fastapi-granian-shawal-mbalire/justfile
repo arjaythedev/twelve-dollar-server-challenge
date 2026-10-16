@@ -48,12 +48,13 @@ check:
 #   ladder <start> [--upper n] [--resolution n]    limit search      calibrate | memory   see bench/linux.py
 #   snapshot <name>                                build this tree into variant image twelve-ab-<name>
 #   ab <users> <a> <b> [--rounds 3]                alternate two snapshots, then a side-by-side summary
+#   entries <users> <name>... [--rounds 3]         alternate whole entries (ours + REFS in bench/linux.py)
 #   results [n]                                    the last n runs, one line each (default 10)
 #   samples [file] [--bucket 5]                    a run's timeline: drops, CPU 0, sockets (default newest)
 #   journey [name]                                 µs per request in-process, in the server image (or snapshot)
 #   local [vus dur ramp] | compare [rounds]        k6 against `just run` on the Mac (not capacity numbers)
 [group: "perf"]
-[doc("load tests: linux | ladder | snapshot | ab | results | samples | journey | calibrate | memory | local | compare (details in the justfile)")]
+[doc("load tests: linux | ladder | snapshot | ab | entries | results | samples | journey | calibrate | memory | local | compare (details in the justfile)")]
 bench target="local" *args:
     #!/usr/bin/env python3
     import os, resource, subprocess, sys
@@ -68,7 +69,7 @@ bench target="local" *args:
         resource.setrlimit(resource.RLIMIT_NOFILE, (65535 if hard == resource.RLIM_INFINITY else min(65535, hard), hard))
         cmd = ["k6", "run", "-e", "VUS=" + vus, "-e", "DURATION=" + duration, "-e", "RAMP_UP=" + ramp,
                "-e", "BASE_URL=http://127.0.0.1:3000", "{{repo}}/bench/load.js"]
-    elif target in ("linux", "ladder", "calibrate", "memory", "snapshot", "ab", "results"):
+    elif target in ("linux", "ladder", "calibrate", "memory", "snapshot", "ab", "entries", "results"):
         cmd = ["python3", bench + "/linux.py", "run" if target == "linux" else target] + args
     elif target == "samples":
         cmd = ["python3", bench + "/samples.py"] + args
@@ -83,7 +84,7 @@ bench target="local" *args:
         os.environ["PYTHON"] = python
         cmd = ["python3", bench + "/compare.py"] + args
     else:
-        raise SystemExit("bench target must be linux, ladder, calibrate, memory, snapshot, ab, results, samples, "
+        raise SystemExit("bench target must be linux, ladder, calibrate, memory, snapshot, ab, entries, results, samples, "
                          "journey, local or compare, got " + target)
     raise SystemExit(subprocess.run(cmd).returncode)
 

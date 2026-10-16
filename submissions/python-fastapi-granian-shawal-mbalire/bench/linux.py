@@ -644,11 +644,16 @@ def run(name: str, vus: int, ramp: int, duration: int, gen: str, cpus, granian_f
     result["server_oom_killed"] = sh("docker", "inspect", "-f", "{{.State.OOMKilled}}", SERVER,
                                      capture=True).stdout.strip() == "true"
     result["server_samples"] = samples[-2:]
+    result["server_memory_timeline"] = samples  # docker stats every 5 s, from the start of the ramp
     result["guest_agent_cpu_s"] = round(guest_agent_cpu_s() - agent_before, 1)
     result["hold_s"] = duration
     result.update(sampler_summary(hold_from, WORK / "samples" / (stamp + ".jsonl")))
     logs = sh("docker", "logs", SERVER, check=False, capture=True)
     result["server_log_emfile"] = (logs.stdout + logs.stderr).count("Too many open files")
+    server_log = WORK / "server-logs" / (stamp + ".log")  # the container goes away with stop_all()
+    server_log.parent.mkdir(parents=True, exist_ok=True)
+    server_log.write_text(logs.stdout + logs.stderr)
+    result["server_log"] = str(server_log)
     if result["server_oom_killed"] or not result["pass"]:
         result["pass"] = False
         print(sh("docker", "logs", "--tail", "15", SERVER, check=False, capture=True).stderr, file=sys.stderr)
@@ -810,29 +815,65 @@ def per_request_us(result: dict) -> float:
     return round(result["server_cpu_s"] / result["requests"] * 1e6, 1) if result.get("requests") else 0.0
 
 
+def side_by_side(title: str, by_label: dict) -> None:
+    """One row per entry or variant: min-max (mean) of each number over its runs."""
+    def span(values, digits=1, suffix=""):
+        if not values:
+            return "-"
+        mean = sum(values) / len(values)
+        low, high = min(values), max(values)
+        fmt = lambda x: f"{x:,.{digits}f}{suffix}"
+        return f"{fmt(low)}-{fmt(high)} ({fmt(mean)})" if len(values) > 1 else fmt(low)
+    print(f"\n== {title}")
+    print(f"   {'':16} {'µs/request':22} {'CPU 0':18} {'p95 ms':20} {'p99 ms':22} {'peak MiB':22} pass")
+    for label, rows in by_label.items():
+        print(f"   {label:16} {span([per_request_us(r) for r in rows]):22} "
+              f"{span([r['core0_util'] * 100 for r in rows], 0, '%'):18} "
+              f"{span([r['p95_ms'] for r in rows]):20} {span([r['p99_ms'] for r in rows]):22} "
+              f"{span([r['server_mem_peak_mib'] or 0 for r in rows], 0):22} "
+              f"{sum(r['pass'] for r in rows)}/{len(rows)}")
+
+
+def alternate(vus: int, labels: list, rounds: int, ramp, duration: int, gen: str, start) -> dict:
+    """Runs every label once per round, in order (A B C A B C ...), so the Mac's drift hits all alike.
+    `start(label)` readies the image and returns (submission, granian flags) for run()."""
+    by_label = {label: [] for label in labels}
+    for _ in range(rounds):
+        for label in labels:
+            name, flags = start(label)
+            by_label[label].append(run(name, vus, ramp, duration, gen, None, flags, label=label))
+    return by_label
+
+
+def save(kind: str, vus: int, rounds: int, by_label: dict) -> Path:
+    out = WORK / kind
+    out.mkdir(parents=True, exist_ok=True)
+    path = out / (time.strftime("%Y%m%d-%H%M%S") + ".json")
+    path.write_text(json.dumps({"vus": vus, "rounds": rounds, "runs": by_label}, indent=1) + "\n")
+    return path
+
+
 def ab(vus: int, variants: list, rounds: int, ramp, duration: int, gen: str, granian_flags) -> None:
-    """Alternates the snapshot images run by run (A B A B ...), so the Mac's drift hits both alike."""
+    """Alternates snapshot images of this entry run by run (A B A B ...)."""
     for variant in variants:
         if sh("docker", "image", "inspect", AB_PREFIX + variant, check=False, capture=True).returncode != 0:
             raise SystemExit(f"no image {AB_PREFIX + variant}: run `just bench snapshot {variant}` first")
-    by_variant = {variant: [] for variant in variants}
-    for _ in range(rounds):
-        for variant in variants:
-            sh("docker", "tag", AB_PREFIX + variant, server_image("ours"))
-            by_variant[variant].append(run("ours", vus, ramp, duration, gen, None, granian_flags, label=variant))
-    columns = [("µs/req", per_request_us), ("core0", lambda r: f"{r['core0_util']:.0%}"),
-               ("p95 ms", lambda r: round(r["p95_ms"])), ("p99 ms", lambda r: round(r["p99_ms"])),
-               ("connects", lambda r: r["connects"]), ("dropped", lambda r: r.get("listen_overflows", "-")),
-               ("pass", lambda r: "yes" if r["pass"] else "no")]
-    print(f"\n== A/B at {vus} users, {rounds} rounds (runs listed in order)")
-    for name, value in columns:
-        print(f"   {name:9}" + "".join(f"  {variant}: " + " / ".join(str(value(r)) for r in results)
-                                      for variant, results in by_variant.items()))
-    out = WORK / "ab"
-    out.mkdir(parents=True, exist_ok=True)
-    path = out / (time.strftime("%Y%m%d-%H%M%S") + ".json")
-    path.write_text(json.dumps({"vus": vus, "rounds": rounds, "runs": by_variant}, indent=1) + "\n")
-    print(f"== saved {path}; {server_image('ours')} is now {AB_PREFIX + variants[-1]}", flush=True)
+
+    def start(variant):
+        sh("docker", "tag", AB_PREFIX + variant, server_image("ours"))
+        return "ours", granian_flags
+
+    by_variant = alternate(vus, variants, rounds, ramp, duration, gen, start)
+    side_by_side(f"A/B at {vus} users, {rounds} rounds", by_variant)
+    print(f"== saved {save('ab', vus, rounds, by_variant)}; {server_image('ours')} is now "
+          f"{AB_PREFIX + variants[-1]}", flush=True)
+
+
+def entries(vus: int, names: list, rounds: int, ramp, duration: int, gen: str) -> None:
+    """Alternates whole entries (this one and REFS) run by run: the same-conditions comparison."""
+    by_entry = alternate(vus, names, rounds, ramp, duration, gen, lambda name: (name, ()))
+    side_by_side(f"entries at {vus} users, {rounds} rounds", by_entry)
+    print(f"== saved {save('entries', vus, rounds, by_entry)}", flush=True)
 
 
 def results(count: int) -> None:
@@ -852,10 +893,10 @@ def results(count: int) -> None:
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("mode", choices=["run", "ladder", "calibrate", "memory", "snapshot", "ab", "results"])
+    p.add_argument("mode", choices=["run", "ladder", "calibrate", "memory", "snapshot", "ab", "entries", "results"])
     p.add_argument("targets", nargs="*", help="run/ladder: users (ladder: where to start); snapshot: NAME; "
-                   "ab: USERS A B; results: how many (10)")
-    p.add_argument("--rounds", type=int, default=3, help="ab: runs per variant")
+                   "ab: USERS A B; entries: USERS NAME...; results: how many (10)")
+    p.add_argument("--rounds", type=int, default=3, help="ab, entries: runs per variant or entry")
     p.add_argument("--submission", default="ours", choices=["ours", *REFS])
     p.add_argument("--ramp", type=int, default=None, help="seconds (default: users / 2000, 20-60)")
     p.add_argument("--duration", type=int, default=None, help="hold in seconds (120; calibrate: 60)")
@@ -876,6 +917,10 @@ def main() -> None:
     if expected is not None and len(args.targets) != expected:
         raise SystemExit({"snapshot": "usage: snapshot NAME", "ab": "usage: ab USERS A B"}[args.mode])
     args.vus = int(args.targets[0]) if args.targets and args.mode not in ("snapshot",) else 2500
+    if args.mode == "entries":
+        unknown = [name for name in args.targets[1:] if name not in ("ours", *REFS)]
+        if len(args.targets) < 3 or unknown:
+            raise SystemExit("usage: entries USERS NAME NAME... with names from: ours " + " ".join(REFS))
     if args.mode == "results":
         results(int(args.targets[0]) if args.targets else 10)
         return
@@ -891,7 +936,8 @@ def main() -> None:
         build_gen_image()
         if args.profile:
             build_profiler_image()
-        for name in [] if args.mode == "ab" else (["ours", *REFS] if quick else [args.submission]):
+        names = {"ab": [], "entries": args.targets[1:]}.get(args.mode, ["ours", *REFS] if quick else [args.submission])
+        for name in names:
             build_server_image(name)
     with guest_agent_stopped():
         dispatch(args, duration, resolution)
@@ -903,6 +949,8 @@ def dispatch(args, duration: int, resolution: int) -> None:
                  args.profile)
     elif args.mode == "ladder":
         ladder(args.submission, args.ramp, duration, args.gen, args.cpus, resolution, start=args.vus, upper=args.upper)
+    elif args.mode == "entries":
+        entries(args.vus, args.targets[1:], args.rounds, args.ramp, duration, args.gen)
     elif args.mode == "ab":
         ab(args.vus, args.targets[1:], args.rounds, args.ramp, duration, args.gen, args.granian)
     elif args.mode == "calibrate":

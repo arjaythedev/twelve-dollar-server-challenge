@@ -27,7 +27,7 @@ PRAGMA temp_store=MEMORY;`
 
 // Loop connection: the 250 MB file is read through mmap, an 8 MiB page cache
 // covers the hot index pages, checkpoints are left to the checkpointer thread,
-// and the WAL file is cut back to 64 MiB whenever it restarts.
+// and the WAL file is held at 64 MiB once it has grown that far (see loop.checkpointTick).
 const loopPragmas = commonPragmas + `
 PRAGMA busy_timeout=5000;
 PRAGMA mmap_size=268435456;

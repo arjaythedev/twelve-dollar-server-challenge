@@ -23,7 +23,7 @@ const (
 	maxReqsPerRound = 32 // pipelined requests one connection may run per loop round
 	poolLimit       = 2048
 	listenBacklog   = 4096
-	walLimitBytes   = 64 << 20        // park writes for a finishing pass once the WAL is this big
+	walLimitBytes   = 64 << 20        // WAL file size at which every bulk pass ends in a restart (see checkpointTick)
 	checkpointEvery = 2 * time.Second // how often the loop asks the checkpointer for a bulk pass
 	pauseLimit      = 5 * time.Second // never keep writes parked longer than this (checkpointer stuck)
 	evRead          = unix.EPOLLIN | unix.EPOLLRDHUP | unix.EPOLLET
@@ -587,12 +587,15 @@ const (
 // which never blocks anyone. SQLite only restarts a WAL when a writer begins
 // while every frame is backfilled and no reader is inside it, and the loop
 // commits again before any bulk pass ends, so that never happens by itself.
-// When the file has grown past walLimitBytes, the loop therefore parks its
-// writes and asks for one more pass: with no new frames arriving it copies
-// only the few committed during the bulk pass, syncs, and reports done; the
-// loop releases the writes and the first of them restarts the WAL at frame 0
-// (journal_size_limit then truncates the file). Reads are never held, and
-// the loop itself never syncs anything.
+// Once the file has reached walLimitBytes, the loop therefore parks its
+// writes after each bulk pass and asks for one more: with no new frames
+// arriving it copies only the few committed during the bulk pass, syncs, and
+// reports done; the loop releases the writes and the first of them restarts
+// the WAL at frame 0. The file grows to the limit once; journal_size_limit
+// then holds it at exactly that size, so from there on every pass ends in a
+// restart and the wal-index hash chains that every page lookup walks stay a
+// couple of seconds deep. Reads are never held, and the loop itself never
+// syncs anything.
 func (l *loop) checkpointTick() {
 	if l.ckptReq == nil {
 		return

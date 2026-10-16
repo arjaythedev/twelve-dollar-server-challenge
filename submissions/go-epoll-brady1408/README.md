@@ -32,13 +32,18 @@ One process, `GOMAXPROCS=2`, two OS threads, each with its own SQLite connection
   Instead the loop asks a second thread, with its own connection, for a `PASSIVE` checkpoint every
   2 s; that copies the bulk of the frames and syncs without ever blocking a reader or writer. SQLite
   only restarts a WAL when a writer begins while every frame is backfilled and no reader is inside
-  it, which never happens by itself while the loop keeps committing during each pass. So once the
-  file passes 64 MB the loop parks incoming writes (their bytes stay in the socket buffer; reads are
-  still served) and asks for one more pass: with no new frames arriving it copies only the handful
-  committed during the bulk pass and syncs, in tens of milliseconds. The loop then releases the
-  writes and the first one restarts the WAL at frame 0; `journal_size_limit` truncates the file.
-  The loop itself never fsyncs. RESTART or TRUNCATE from the other thread would instead hold the
-  write lock while waiting on readers and stall every request for the whole busy timeout.
+  it, which never happens by itself while the loop keeps committing during each pass. So after a
+  bulk pass, if the WAL file is at its 64 MiB limit, the loop parks incoming writes (their bytes
+  stay in the socket buffer; reads are still served) and asks for one more pass: with no new frames
+  arriving it copies only the handful committed during the bulk pass and syncs, in tens of
+  milliseconds. The loop then releases the writes and the first one restarts the WAL at frame 0.
+  The file is left to grow to 64 MiB once, early in the run; `journal_size_limit` then holds it at
+  exactly that size, so from there on every 2 s pass ends with a restart. That cadence is what keeps
+  reads cheap: a page written on every commit leaves one entry per commit in the wal-index hash
+  table, and every lookup walks the chain, so a WAL that restarts every 2 s stays a few thousand
+  frames deep instead of filling 4,096-frame tables. The loop itself never fsyncs. RESTART or
+  TRUNCATE from the other thread would instead hold the write lock while waiting on readers and
+  stall every request for the whole busy timeout.
 - **Connection budget.** Above 60,000 open connections (or `RLIMIT_NOFILE − 128` if smaller),
   completed responses carry `Connection: close`; the client reconnects for its next request. This
   keeps the process under the 65,535-descriptor limit with room for the database, WAL and epoll.

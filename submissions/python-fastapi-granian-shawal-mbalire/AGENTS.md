@@ -249,7 +249,7 @@ served by Granian" rule **for the experiment only**; every other rule above stil
 the JSON, hexagonal, justfile, no uv, no shell scripts, spelled-out names, honest claims, ask before
 committing or pushing, Mac idle during bench runs).
 
-**Decisions** (ask the owner about the open ones first):
+**Decisions** (all made by the owner):
 - **Decided (owner, 2026-10-16): a new submission folder** with its own branch and PR, e.g.
   `submissions/python-stdlib-shawal-mbalire/`. Copy what it reuses (domain, store, JWT, descriptor
   budget, tests, justfile, infra) from this folder; don't import across folders. The bench lives here:
@@ -260,7 +260,11 @@ committing or pushing, Mac idle during bench runs).
   parameters and `type` aliases, `match`, dataclasses with slots). Re-measure the runtime features
   here, since the earlier "no gain" was under Granian: the JIT (`PYTHON_JIT=1`), `PYTHONMALLOC=mimalloc`,
   and the tail-call interpreter (already in this build). The free-threaded build doesn't help on one vCPU.
-- Open: whether uvloop counts as allowed (it is not stdlib; it was ~free speed under Granian).
+- **Decided (owner, 2026-10-16): no uvloop; the standard library as much as possible; hexagonal
+  architecture** (the owner's `hexagonal-architecture` skill, as in this folder). So: stdlib `asyncio`
+  event loop, stdlib `json` instead of orjson (JWT parts, request bodies; SQLite still renders every
+  response), stdlib `sqlite3`, `hmac`/`hashlib`. `requirements.txt` should end up empty or gone; any
+  third-party package needs a measured reason and the owner's OK.
 
 **What "standard http lib" can mean, and what to expect:**
 1. `http.server.ThreadingHTTPServer`: one thread per connection. Every user holds a keep-alive socket,

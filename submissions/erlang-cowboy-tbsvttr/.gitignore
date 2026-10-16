@@ -1,0 +1,5 @@
+/.deps/
+/ebin/
+/bin/
+erl_crash.dump
+__pycache__/

@@ -8,6 +8,7 @@ apt-get install -y --no-install-recommends build-essential ca-certificates curl 
 # Pin V and its C backend so clean builds use the same compiler sources.
 V_COMMIT=c36172591e766668cf8aa7cc307f05764b6a0d49
 VC_COMMIT=bcfdc7f33e7b7908ee40f76d059c0e2894fb4a3b
+TCC_COMMIT=d6e7ac1b1bcc98aed734a6ecbfa8509f24606c74
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
@@ -26,6 +27,9 @@ grep -qFx 'const read_buf_cap = 1024' "$fasthttp_linux"
 grep -qFx 'const write_buf_cap = 8 * 1024' "$fasthttp_linux"
 curl -fsSL "https://github.com/vlang/vc/archive/${VC_COMMIT}.tar.gz" | tar -xz -C "$tmp"
 mv "$tmp/vc-${VC_COMMIT}" /opt/vlang/vc
+curl -fsSL "https://github.com/vlang/tccbin/archive/${TCC_COMMIT}.tar.gz" | tar -xz -C "$tmp"
+mkdir -p /opt/vlang/thirdparty
+mv "$tmp/tccbin-${TCC_COMMIT}" /opt/vlang/thirdparty/tcc
 VJOBS=1 make -f Makefile -C /opt/vlang v
 ln -sf /opt/vlang/v /usr/local/bin/v
 v version

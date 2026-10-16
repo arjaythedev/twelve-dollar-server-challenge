@@ -26,6 +26,6 @@ grep -qFx 'const read_buf_cap = 1024' "$fasthttp_linux"
 grep -qFx 'const write_buf_cap = 8 * 1024' "$fasthttp_linux"
 curl -fsSL "https://github.com/vlang/vc/archive/${VC_COMMIT}.tar.gz" | tar -xz -C "$tmp"
 mv "$tmp/vc-${VC_COMMIT}" /opt/vlang/vc
-VJOBS=1 make -C /opt/vlang v
+VJOBS=1 make -f Makefile -C /opt/vlang v
 ln -sf /opt/vlang/v /usr/local/bin/v
 v version

@@ -4,7 +4,11 @@ security:
         users_in_memory: { memory: null }
 
     firewalls:
+        # Only writes are authenticated: reads (GET) don't go through the firewall at all.
+        # (`methods` is ignored unless `pattern` or `host` is set too.)
         main:
+            pattern: ^/posts
+            methods: [POST]
             lazy: true
             stateless: true
             provider: users_in_memory

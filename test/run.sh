@@ -11,7 +11,18 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 [ -f "$ROOT/seed/feed.db" ] || { echo "no seed/feed.db — run: bash seed/make-seed.sh"; exit 1; }
 for f in build.sh start.sh; do [ -f "$DIR/$f" ] || { echo "missing $DIR/$f"; exit 1; }; done
 
-export JWT_SECRET=twelve-dollar-challenge HOST=127.0.0.1 PORT="${PORT:-3000}"
+export JWT_SECRET=twelve-dollar-challenge HOST=127.0.0.1
+if [ -z "${PORT:-}" ]; then
+    PORT="$(python3 - <<'PY'
+import socket
+s = socket.socket()
+s.bind(("127.0.0.1", 0))
+print(s.getsockname()[1])
+s.close()
+PY
+)"
+fi
+export PORT
 export SQLITE_PATH="$(mktemp -d)/feed.db"
 cp "$ROOT/seed/feed.db" "$SQLITE_PATH"
 

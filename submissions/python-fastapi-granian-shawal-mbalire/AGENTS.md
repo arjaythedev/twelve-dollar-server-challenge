@@ -242,6 +242,10 @@ load: the server runs cache-cold with 40k connections, which roughly doubles eve
 
 ## Next step (owner, 2026-10-16): a standard-library HTTP server, no FastAPI, no Granian
 
+**Status (2026-10-17): underway in `../python-stdlib-shawal-mbalire/`; its AGENTS.md has the state,
+numbers and next steps** (epoll server adopted; 180k passed a 2-minute ladder run). The `bench/linux.py`
+changes for it (REFS `stdlib`, `STDLIB_DOCKERFILE`, REFS `env`) are committed here (2026-10-17).
+
 PR #41 (FastAPI + Granian) is concluded and pushed; leave its design alone. The owner's next step is
 an experiment: serve the same five endpoints with the **Python standard library only**, to see how
 close plain CPython gets to #84 (PyPy + raw epoll, ~34% cheaper) and #71. This lifts the "FastAPI

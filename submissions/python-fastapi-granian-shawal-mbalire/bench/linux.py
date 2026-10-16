@@ -101,6 +101,11 @@ REFS = {
                       "sha": "87b92833c14d2a993b65a38c429512200dbb4fc5"},
     "ruby-cicloid": {"folder": "ruby-async-cicloid", "pr": 71, "droplet": None,
                      "sha": "469957f2bbdd6e7483d567c860378031154e6ac9"},
+    # The owner's standard-library entry (asyncio + a hand-written HTTP/1.1 parser), from this checkout.
+    "stdlib": {"folder": "python-stdlib-shawal-mbalire", "pr": None, "droplet": None, "sha": None,
+               "layered": True},
+    # Optional "env": ("NAME=value", ...) is added to the server's environment, so one folder can be
+    # benched as several entries (used 2026-10-16 to alternate the stdlib entry's HTTP servers).
 }
 
 SERVER_DOCKERFILE = """\
@@ -122,6 +127,22 @@ COPY app/install.sh /app/install.sh
 RUN bash /app/install.sh && useradd --create-home runner && chown -R runner /app
 USER runner
 COPY --chown=runner app/build.sh app/requirements.txt /app/
+COPY --chown=runner app/infra/ops.py /app/infra/ops.py
+RUN bash /app/build.sh
+COPY --chown=runner feed.db /home/runner/feed.db
+COPY --chown=runner app /app
+ENV SQLITE_PATH=/home/runner/feed.db JWT_SECRET=twelve-dollar-challenge HOST=0.0.0.0 PORT=3000
+CMD ["bash", "/app/start.sh"]
+"""
+
+# The stdlib entry, layered the same way: build.sh downloads the pinned interpreter (no requirements),
+# so that layer stays cached until infra/ops.py changes instead of re-downloading ~35 MB per code change.
+STDLIB_DOCKERFILE = """\
+FROM ubuntu:24.04
+COPY app/install.sh /app/install.sh
+RUN bash /app/install.sh && useradd --create-home runner && chown -R runner /app
+USER runner
+COPY --chown=runner app/build.sh /app/
 COPY --chown=runner app/infra/ops.py /app/infra/ops.py
 RUN bash /app/build.sh
 COPY --chown=runner feed.db /home/runner/feed.db
@@ -202,7 +223,13 @@ def build_server_image(name: str) -> None:
     shutil.rmtree(ctx / "app", ignore_errors=True)
     shutil.copytree(submission_dir(name), ctx / "app", ignore=SKIP)
     link_seed(ctx / "feed.db")
-    (ctx / "Dockerfile").write_text(OURS_DOCKERFILE if name == "ours" else SERVER_DOCKERFILE)
+    if name == "ours":
+        dockerfile = OURS_DOCKERFILE
+    elif REFS[name].get("layered"):
+        dockerfile = STDLIB_DOCKERFILE
+    else:
+        dockerfile = SERVER_DOCKERFILE
+    (ctx / "Dockerfile").write_text(dockerfile)
     print(f"== building {name}", flush=True)
     sh("docker", "build", "-q", "-t", server_image(name), str(ctx), capture=True)
 
@@ -594,7 +621,8 @@ def run(name: str, vus: int, ramp: int, duration: int, gen: str, cpus, granian_f
     stop_all()
     require_idle_vm()
     agent_before = guest_agent_cpu_s()
-    start_all(name, cpus, granian_flags, PROFILE_MODES[profile_mode] if profile_mode else ())
+    server_env = (PROFILE_MODES[profile_mode] if profile_mode else ()) + REFS.get(name, {}).get("env", ())
+    start_all(name, cpus, granian_flags, server_env)
     start_sampler()
     hold_from = time.time() + ramp
     samples, stop = [], threading.Event()

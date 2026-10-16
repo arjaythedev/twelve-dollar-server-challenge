@@ -18,7 +18,7 @@ SQLITE_PATH=... JWT_SECRET=... HOST=0.0.0.0 PORT=80 bash start.sh
 
 ## How it works
 
-One process, `GOMAXPROCS=1`, two OS threads, each with its own SQLite connection.
+One process, `GOMAXPROCS=2`, two OS threads, each with its own SQLite connection.
 
 - **Loop thread.** Edge-triggered epoll owns the listener and every socket. It parses HTTP/1.1,
   verifies the bearer token and runs every query, reads and writes alike, on one connection with
@@ -52,7 +52,20 @@ One process, `GOMAXPROCS=1`, two OS threads, each with its own SQLite connection
   query from SQL on every request.
 - **One read per request.** The loop stops reading a socket after a short read instead of reading
   again for the EAGAIN: a short read means the receive queue was empty at that moment, and a packet
-  arriving later raises a new edge. That is one syscall fewer for nearly every request.
+  arriving later raises a new edge. That is one syscall fewer for nearly every request. A FIN that
+  lands in the same edge as the request is the exception: once EPOLLRDHUP has been seen the loop
+  reads on until the read that returns 0, so a half-closing client still gets its response and a
+  prompt close.
+- **The scheduler never sees the loop block.** epoll_wait goes through a raw syscall. Through the
+  ordinary wrapper, Go's sysmon retakes the P from any goroutine blocked longer than 20 µs and the
+  loop then buys it back with a futex hand-off on every return, several thousand extra syscalls a
+  second under load, for nothing, since nobody else wants that P: the second P is where the
+  checkpointer, the garbage collector and signal delivery run, so none of them waits on sysmon to
+  notice a blocked thread (with a single P the checkpointer's own cgo calls stalled the loop by up
+  to sysmon's 10 ms poll, and p99 showed it). The wait is still capped at 10 ms and the loop yields
+  when it expires, so the design also holds with one P. An EINTR returns to the loop instead of
+  retrying, because that signal is usually the scheduler asking for a preemption point; retrying in
+  place would spin in the syscall while a stop-the-world waits on this P.
 - Idle connections close after 75 s. Pipelining works, capped at 32 requests per connection per loop
   round so one flooding socket cannot starve the rest. After a `Connection: close` response the
   server half-closes, discards further input and waits for the peer's FIN rather than sending an RST.

@@ -7,9 +7,14 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
+	"os/exec"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // startLoop runs a loop on a random port. budget < 0 keeps the default.
@@ -258,5 +263,78 @@ func TestRequestLargerThanReadBuffer(t *testing.T) {
 	resp, body := readResponse(t, bufio.NewReader(c))
 	if resp.StatusCode != 201 || !strings.Contains(body, `"body":"big"`) {
 		t.Fatalf("%d %s", resp.StatusCode, body)
+	}
+}
+
+// With one P, a goroutine readied while the loop waits for sockets must get to
+// run within a few milliseconds, even with async preemption off: the loop never
+// keeps the only P in epoll_wait longer than its wait cap. The body runs in a
+// child process so GODEBUG can be set.
+func TestLoopYieldsTheOnlyP(t *testing.T) {
+	if os.Getenv("TDSC_INNER") == "" {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestLoopYieldsTheOnlyP$", "-test.timeout=20s")
+		cmd.Env = append(os.Environ(), "TDSC_INNER=1", "GODEBUG=asyncpreemptoff=1")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%v\n%s", err, out)
+		}
+		return
+	}
+	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(1))
+	startLoop(t, -1)
+	for i := 0; i < 5; i++ {
+		start := time.Now()
+		time.Sleep(time.Millisecond)
+		if d := time.Since(start); d > 100*time.Millisecond {
+			t.Fatalf("1 ms sleep took %s: the loop is holding the only P", d)
+		}
+	}
+}
+
+// A FIN that lands in the same edge as the request must still be seen, or the
+// socket stays open until the idle sweep. TestHalfCloseStillGetsResponse only
+// catches this when the FIN happens to arrive before the loop reads.
+func TestFinInSameEdgeAsRequest(t *testing.T) {
+	s, err := newServer(openTestDB(t), testSecret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l, err := newLoop(s, "127.0.0.1", 0) // never run: the event is delivered by hand
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(l.shutdown)
+	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM|unix.SOCK_NONBLOCK|unix.SOCK_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(fds[1])
+	c := &conn{fd: int32(fds[0]), flags: connOpen, holdFrom: -1}
+	l.conns[fds[0]] = c
+	l.open++
+	unix.Write(fds[1], []byte("GET /posts/1 HTTP/1.1\r\n\r\n"))
+	unix.Shutdown(fds[1], unix.SHUT_WR)
+	l.handleEvent(c, unix.EPOLLIN|unix.EPOLLRDHUP)
+	if c.flags&connOpen != 0 && c.flags&connCloseAfter == 0 {
+		t.Fatal("the FIN delivered with the request was not seen")
+	}
+}
+
+// A stop-the-world must not be held up by the loop waiting for sockets. The
+// scheduler can only interrupt a raw epoll_wait with a signal, so the wait has
+// to come back to Go code where the preemption can happen.
+func TestStopTheWorldWhileWaiting(t *testing.T) {
+	if runtime.GOMAXPROCS(0) < 2 {
+		t.Skip("needs a P the loop does not own")
+	}
+	startLoop(t, -1)
+	time.Sleep(20 * time.Millisecond) // the loop is idle in epoll_wait
+	for i := 0; i < 20; i++ {
+		done := make(chan struct{})
+		go func() { runtime.GC(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("GC %d did not finish in 2 s: stop-the-world is stuck on the loop", i)
+		}
 	}
 }

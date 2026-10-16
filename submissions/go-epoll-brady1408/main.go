@@ -20,7 +20,10 @@ func envOr(name, fallback string) string {
 }
 
 func main() {
-	runtime.GOMAXPROCS(1)
+	// The loop keeps one P for itself (see loop.wait); the checkpointer, the
+	// garbage collector and signal delivery share the other, so none of them
+	// waits on sysmon to notice a blocked P.
+	runtime.GOMAXPROCS(2)
 	debug.SetMemoryLimit(1 << 30)
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 

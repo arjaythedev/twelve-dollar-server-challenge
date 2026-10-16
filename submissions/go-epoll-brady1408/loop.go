@@ -6,6 +6,7 @@ import (
 	"os"
 	"runtime"
 	"time"
+	"unsafe"
 
 	"golang.org/x/sys/unix"
 )
@@ -18,6 +19,7 @@ const (
 	maxConnBudget   = 60000
 	fdReserve       = 128
 	maxEvents       = 1024
+	waitCap         = 10 // ms; longest the loop keeps the only P in epoll_wait
 	maxReqsPerRound = 32 // pipelined requests one connection may run per loop round
 	poolLimit       = 2048
 	listenBacklog   = 4096
@@ -36,6 +38,7 @@ const (
 	connSent100                      // 100 Continue already sent for the pending request
 	connPaused                       // hit maxReqsPerRound; queued on l.again for the next round
 	connDraining                     // final response sent and SHUT_WR done; discarding input until the peer's FIN
+	connPeerFin                      // EPOLLRDHUP seen: read past a short read until read returns 0
 )
 
 // conn is one client socket. Buffers are nil while the connection is idle.
@@ -190,13 +193,7 @@ func (l *loop) run() {
 		if l.writesPaused && timeout > 100 {
 			timeout = 100 // so an overrunning finishing pass is noticed
 		}
-		n, err := unix.EpollWait(l.epfd, l.events, timeout)
-		if err != nil {
-			if err == unix.EINTR {
-				continue
-			}
-			log.Fatalf("epoll_wait: %v", err)
-		}
+		n := l.wait(timeout)
 		l.nowSec = uint32(time.Since(l.start) / time.Second)
 		l.nowUnix = time.Now().Unix()
 		for i := 0; i < n; i++ {
@@ -211,19 +208,8 @@ func (l *loop) run() {
 				var buf [8]byte
 				unix.Read(l.wakefd, buf[:])
 			default:
-				c := l.conns[fd]
-				if c == nil {
-					continue
-				}
-				if ev.Events&(unix.EPOLLERR|unix.EPOLLHUP) != 0 {
-					l.closeConn(c)
-					continue
-				}
-				if ev.Events&unix.EPOLLOUT != 0 {
-					l.flush(c)
-				}
-				if c.flags&connOpen != 0 && ev.Events&(unix.EPOLLIN|unix.EPOLLRDHUP) != 0 {
-					l.readAll(c)
+				if c := l.conns[fd]; c != nil {
+					l.handleEvent(c, ev.Events)
 				}
 			}
 		}
@@ -234,6 +220,54 @@ func (l *loop) run() {
 			l.sweep()
 			nextSweep = now.Add(sweepInterval)
 		}
+	}
+}
+
+// wait blocks in epoll_pwait through a raw syscall, so the scheduler never
+// sees the loop as blocked. Through unix.EpollWait, sysmon retakes the P from a
+// loop blocked for more than 20 µs and the loop buys it back with a futex
+// hand-off on every return: thousands of extra syscalls a second under load,
+// for nothing, since nobody else wants this P (main gives the checkpointer and
+// the runtime a second one). The wait is still capped at waitCap and the loop
+// yields when it expires, so that with a single P the checkpointer, the garbage
+// collector and signal delivery never wait longer than that while the loop is
+// idle.
+func (l *loop) wait(timeout int) int {
+	if timeout < 0 || timeout > waitCap {
+		timeout = waitCap
+	}
+	n, _, errno := unix.RawSyscall6(unix.SYS_EPOLL_PWAIT, uintptr(l.epfd),
+		uintptr(unsafe.Pointer(&l.events[0])), uintptr(len(l.events)), uintptr(timeout), 0, 0)
+	switch errno {
+	case 0:
+		if n == 0 && timeout == waitCap {
+			runtime.Gosched()
+		}
+	case unix.EINTR:
+		// Usually the scheduler asking for a preemption point, so give it one:
+		// back in the loop the next call honours it. Retrying here would spin
+		// in the syscall while a stop-the-world waits on this P.
+		return 0
+	default:
+		log.Fatalf("epoll_wait: %v", errno)
+	}
+	return int(n)
+}
+
+// handleEvent services one epoll event on a client socket.
+func (l *loop) handleEvent(c *conn, events uint32) {
+	if events&(unix.EPOLLERR|unix.EPOLLHUP) != 0 {
+		l.closeConn(c)
+		return
+	}
+	if events&unix.EPOLLOUT != 0 {
+		l.flush(c)
+	}
+	if events&unix.EPOLLRDHUP != 0 {
+		c.flags |= connPeerFin
+	}
+	if c.flags&connOpen != 0 && events&(unix.EPOLLIN|unix.EPOLLRDHUP) != 0 {
+		l.readAll(c)
 	}
 }
 
@@ -339,9 +373,11 @@ func (l *loop) readAll(c *conn) {
 		c.rbuf = c.rbuf[:len(c.rbuf)+n]
 		c.lastSeen = l.nowSec
 		l.process(c)
-		if n < want {
+		if n < want && c.flags&connPeerFin == 0 {
 			// The receive queue was empty when read returned, so a further read
-			// would only cost an EAGAIN. A packet arriving later raises a new edge.
+			// would only cost an EAGAIN. A packet arriving later raises a new
+			// edge. A FIN does not: once RDHUP has been seen, keep reading until
+			// the read that returns 0.
 			break
 		}
 	}

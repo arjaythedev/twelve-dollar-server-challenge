@@ -13,12 +13,18 @@ spec:
     podAntiAffinity:
       requiredDuringSchedulingIgnoredDuringExecution:
         # No app pod of any benchmark namespace shares this node, so parallel
-        # runs in separate namespaces measure separate machines.
+        # runs in separate namespaces measure separate machines. The part-of
+        # label keeps other workloads' "server" pods out of it.
         - topologyKey: kubernetes.io/hostname
           namespaceSelector: {}
           labelSelector:
-            matchLabels:
-              app.kubernetes.io/name: server
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values: [server]
+              - key: app.kubernetes.io/part-of
+                operator: In
+                values: [twelve-dollar-java, twelve-dollar-go]
   securityContext:
     runAsNonRoot: true
     # The k6 image's user, so both containers can use /work.

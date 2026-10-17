@@ -1,0 +1,3 @@
+# The benchmark box runs these with bash on Linux: keep LF even on Windows checkouts.
+*.sh text eol=lf
+mvnw text eol=lf

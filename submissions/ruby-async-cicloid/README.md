@@ -37,7 +37,16 @@ version keeps the Async reactor and replaces the HTTP server.
 - **A minimal HTTP/1.1 parser.** It reads the request line and the four headers the API uses:
   `Content-Length`, `Transfer-Encoding`, `Connection` and `Authorization`. It supports keep-alive,
   pipelining, partial reads, HTTP/1.0 and `Connection: close`. Chunked request bodies get a 411.
-  Response heads are prebuilt frozen strings.
+  Response heads are prebuilt frozen strings. The header regex takes each value greedily and trims
+  trailing blanks afterwards: the lazy form with a lookahead backtracked along the 200-byte bearer
+  token and cost 5.7 µs per POST head against 2.9 µs now.
+- **YJIT is warm before the first request.** At startup the server runs the feed, a single post, a
+  JWT verification with a body parse, and a like with an invalid id 300 times each through its own
+  parser and app over a socket pair, so the whole request path is compiled before it listens. Nothing
+  is written: the body fails validation after it is parsed. About 100 iseqs are compiled by the time
+  the "listening" line prints (148 with the lower threshold), and the first real requests don't pay
+  for compilation. `start.sh` also sets `--yjit-call-threshold=5` (default 30), so paths the warm-up
+  doesn't cover, such as error responses, are compiled after a handful of calls.
 - **io_uring for socket reads and writes.** io-event picks io_uring on the droplet's kernel. Reads
   and writes go through the fiber scheduler, so io_uring submits them in batches instead of one
   syscall each. Together with edge-triggered epoll, that cut CPU at 40k users from about 46% to 40%

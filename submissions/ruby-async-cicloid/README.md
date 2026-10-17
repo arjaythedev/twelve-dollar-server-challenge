@@ -40,13 +40,14 @@ version keeps the Async reactor and replaces the HTTP server.
   Response heads are prebuilt frozen strings. The header regex takes each value greedily and trims
   trailing blanks afterwards: the lazy form with a lookahead backtracked along the 200-byte bearer
   token and cost 5.7 µs per POST head against 2.9 µs now.
-- **YJIT is warm before the first request.** At startup the server runs the feed, a single post, a
-  JWT verification with a body parse, and a like with an invalid id 300 times each through its own
-  parser and app over a socket pair, so the whole request path is compiled before it listens. Nothing
-  is written: the body fails validation after it is parsed. About 100 iseqs are compiled by the time
-  the "listening" line prints (148 with the lower threshold), and the first real requests don't pay
-  for compilation. `start.sh` also sets `--yjit-call-threshold=5` (default 30), so paths the warm-up
-  doesn't cover, such as error responses, are compiled after a handful of calls.
+- **YJIT is warm before the first request.** `start.sh` sets `--yjit-call-threshold=5` (default 30),
+  and at startup the server runs the feed, a single post, a JWT verification with a body parse, and a
+  like with an invalid id 50 times each through its own parser and app over a socket pair, so the
+  whole request path is compiled before it listens. Nothing is written: the body fails validation
+  after it is parsed. About 140 iseqs are compiled by the time the "listening" line prints, and the
+  first real requests don't pay for compilation. The warm-up token is signed with libsodium, which is
+  loaded anyway; loading `openssl` for it cost 8 MB of RSS, and 300 iterations instead of 50 left
+  another 27 MB of garbage resident. Idle RSS is 36 MB either way now.
 - **io_uring for socket reads and writes.** io-event picks io_uring on the droplet's kernel. Reads
   and writes go through the fiber scheduler, so io_uring submits them in batches instead of one
   syscall each. Together with edge-triggered epoll, that cut CPU at 40k users from about 46% to 40%
@@ -79,15 +80,8 @@ version keeps the Async reactor and replaces the HTTP server.
 - **Direct instead of Nginx.** On one core, Nginx's CPU comes out of Ruby's budget, and the provided
   `nginx.conf` caps out near 16k connections. Responses switch to `Connection: close` only within 256
   descriptors of the process's file limit, so clients aren't forced to reconnect under normal load.
-- **New connections skip epoll.** The listener sets `TCP_DEFER_ACCEPT`, so `accept` returns a connection
-  only once its request bytes have arrived. The accept loop reads them at once and hands the connection
-  to a worker; it is registered in epoll only when it goes idle afterwards. A connection that is answered
-  and closed (the descriptor guard, or `Connection: close`) therefore costs accept, read, write and
-  close, with no `epoll_ctl` or `epoll_wait`. Accepted sockets inherit `TCP_NODELAY` from the listener on
-  Linux, so there is no `setsockopt` per connection either. In a Docker container (arm64, io_uring), a
-  request on a fresh connection cost 2 to 8 µs less server CPU across paired runs (about 64 against
-  59 µs); keep-alive requests stayed at about 51 µs. This matters past 65k users, where PR #41's benchmark found every entry reconnecting on
-  nearly every request. Idea from PR #84.
+- **TCP_NODELAY is set on the listener** and inherited by accepted sockets on Linux, so there is
+  no `setsockopt` per connection.
 
 ## Results on a 1-vCPU test VM
 
@@ -108,6 +102,37 @@ VM, and p95/p99 are the worst across the generator processes.
 At 40k users, the generator itself ran up to 1 s late, which inflates every p99 in that column
 (about 0.3 s for this server's run). At 60k users this server used 56% CPU and 166 MB with no
 errors; the generator lagged too much there for its latencies to mean anything.
+
+### What we tried and reverted: serving a new connection's first request from the accept loop
+
+PR #41's benchmark found that past the 65,535-descriptor limit every request arrives on a fresh
+connection, and there our CPU per request rose from 50 to 69 µs while PR #84 (PyPy, raw epoll)
+stayed at 51. PR #84 sets `TCP_DEFER_ACCEPT`, reads the first request right after `accept`, and
+closes a retiring connection without ever registering it in epoll. We implemented the same (queued
+to a worker with its bytes, registered in epoll only once idle) and measured it paired against this
+tree, on the same two VMs with the target capped at half a core, the C generator at 60 s ramp and
+120 s hold, CPU per request being the server process's `utime+stime` over the run divided by requests:
+
+| Regime | before | with the accept path |
+|---|---|---|
+| 40,000 users, keep-alive | 119.0 µs/req, p99 268 ms | 114.7 µs/req, p99 117 ms |
+| 20,000 users, file limit 8,192 (72% of requests reconnect, ~1,000 connects/s) | 209.7 µs/req | 202.3 µs/req |
+| 512 clients reconnecting with no think time (~2,300 connects/s, core saturated) | 391 µs/req | 441 µs/req |
+| 40,000 users, file limit 8,192 (~2,100 connects/s, overloaded) | fails, 3,114 errors | fails, 13,659 errors |
+
+It wins 3–4% at moderate reconnect rates and loses 13% once the core is saturated by reconnects,
+which is the regime it was meant for. Perf put the difference in user space: SQLite's share of
+samples rose from 18% to 22% of a larger total, so the same feed query costs more when served in
+smaller batches straight from the accept loop than in the cache-hot runs the epoll pass delivers.
+`TCP_DEFER_ACCEPT` alone cost 6% in that regime. Two side findings are worth keeping: `TCP_NODELAY` is
+inherited from the listener (kept), and a `read_nonblock` on a Ruby socket allocates a 4 KB IO buffer that
+lives as long as the connection (`recv_nonblock` doesn't); the scheduler's `io_read` with an
+`IO::Buffer` avoids it, which is why memory per connection stays at 3–5 KB.
+
+A perf profile at 40k users: 40% of samples in the kernel (TCP transmit, virtio), about 15% in
+SQLite, 1.3% in the regex engine, and only 15k `epoll_wait` calls against 84k requests in 20 s, so
+moving the idle set from epoll to io_uring multishot polls would save a few percent at most and
+needs a C extension; not done.
 
 ### k6 with the unmodified `bench/load.js`
 

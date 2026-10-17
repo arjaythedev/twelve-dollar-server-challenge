@@ -10,20 +10,21 @@ store = Store.new(ENV.fetch("SQLITE_PATH"))
 app = App.new(store, ENV.fetch("JWT_SECRET"))
 server = HTTPServer.new(app, host, port)
 
-# Warm YJIT before listening: reads, a JWT verification and a body parse, 300 times each. Nothing is
-# written: the post body fails validation after it is parsed, and the like has an invalid id.
-require "openssl"
-secret = ENV.fetch("JWT_SECRET")
+# Warm YJIT before listening: reads, a JWT verification and a body parse, 50 times each (the call
+# threshold is 5). Nothing is written: the post body fails validation after it is parsed, and the
+# like has an invalid id. The token is signed with libsodium, which is loaded anyway.
+key = ENV.fetch("JWT_SECRET").b.ljust(32, "\0")
 claims = [{ sub: "1", username: "warmup", exp: Time.now.to_i + 3600 }.to_json].pack("m0").tr("+/", "-_").delete("=")
-signing_input = "#{App::HS256_HEADER}.#{claims}"
-signature = [OpenSSL::HMAC.digest("SHA256", secret, signing_input)].pack("m0").tr("+/", "-_").delete("=")
-auth = "Authorization: Bearer #{signing_input}.#{signature}\r\n"
+signing_input = "#{App::HS256_HEADER}.#{claims}".b
+mac = String.new("\0" * 32, encoding: Encoding::BINARY)
+Sodium.hmac_sha256(mac, signing_input, signing_input.bytesize, key)
+auth = "Authorization: Bearer #{signing_input}.#{[mac].pack("m0").tr("+/", "-_").delete("=")}\r\n"
 server.warm([
   "GET /feed HTTP/1.1\r\nHost: x\r\n\r\n",
   "GET /posts/1 HTTP/1.1\r\nHost: x\r\n\r\n",
   "POST /posts HTTP/1.1\r\nHost: x\r\n#{auth}Content-Length: 11\r\n\r\n{\"body\":\"\"}",
   "POST /posts/0/like HTTP/1.1\r\nHost: x\r\n#{auth}\r\n"
-], 300)
+], 50)
 
 GC.compact
 Process.warmup if Process.respond_to?(:warmup)

@@ -52,9 +52,6 @@ class HTTPServer
     @server.listen(65_535) # the kernel caps this at net.core.somaxconn
     # Accepted sockets inherit TCP_NODELAY from the listener on Linux: no setsockopt per connection.
     @server.setsockopt(Socket::IPPROTO_TCP, Socket::TCP_NODELAY, 1)
-    # Accept only once the request's first bytes are there (up to 2 s), so the read right after
-    # accept finds them and the connection goes straight to a worker, bypassing epoll.
-    @server.setsockopt(Socket::IPPROTO_TCP, Socket::TCP_DEFER_ACCEPT, 2) if Socket.const_defined?(:TCP_DEFER_ACCEPT)
     soft = Process.getrlimit(:NOFILE).first
     # Last-resort guard: only close to the descriptor limit do responses carry `Connection: close`.
     @budget = connection_budget || [soft - 256, soft * 9 / 10].max
@@ -100,7 +97,11 @@ class HTTPServer
         @server.wait_readable
         next
       end
-      accepted(socket)
+      @open += 1
+      fd = socket.fileno
+      @sockets[fd] = socket
+      @state[fd] = IDLE
+      Epoll.control(@epfd, Epoll::CTL_ADD, fd, @event)
     rescue Errno::EMFILE, Errno::ENFILE, Errno::ENOBUFS, Errno::ENOMEM
       sleep 0.01 # out of descriptors: let responses retire connections, then accept again
     rescue Errno::ECONNABORTED, Errno::EPROTO
@@ -108,37 +109,11 @@ class HTTPServer
     end
   end
 
-  # A new connection usually arrives with its first request (TCP_DEFER_ACCEPT), so it is read here
-  # and queued for a worker as FRESH. It only enters epoll once it goes idle, so a connection that
-  # is answered and closed (the descriptor guard, or `Connection: close`) costs accept, read, write
-  # and close, and no epoll_ctl or epoll_wait.
-  def accepted(socket)
-    @open += 1
-    fd = socket.fileno
-    @sockets[fd] = socket
-    data = socket.read_nonblock(READ_SIZE, exception: false)
-    if data == :wait_readable
-      @state[fd] = IDLE
-      Epoll.control(@epfd, Epoll::CTL_ADD, fd, @event)
-    elsif data
-      # Queued without growing the pool: this work is ready now, and a burst of connects would
-      # otherwise add a fiber per connection, which the GC then scans on every pass.
-      @partial[fd] = data
-      @state[fd] = FRESH
-      @ready.push(fd)
-    else
-      disconnect(fd, socket) # closed without sending anything
-    end
-  rescue IOError, SystemCallError
-    disconnect(fd, socket)
-  end
-
   # --- connections ----------------------------------------------------------------------
 
   IDLE = 0
   BUSY = 1
   AGAIN = 2
-  FRESH = 3 # just accepted, first bytes already read, not in epoll yet
 
   # Waits (through the reactor) for the epoll set to have ready connections, then queues them.
   # A connection that is already queued or being served is only flagged, so one worker serves it
@@ -188,30 +163,24 @@ class HTTPServer
   # grow. Re-reads after AGAIN, and reads past a full buffer, don't wait.
   def service(fd, io_buffer)
     socket = @sockets[fd] or return
-    fresh = @state[fd] == FRESH # its first bytes were read by accept, and it is not in epoll yet
-    wait = !fresh
-    preread = fresh
+    wait = true
     loop do
       @state[fd] = BUSY
       buffer = @partial.delete(fd)
-      # The bytes that came with accept are served without a read, unless they filled the buffer.
-      unless preread && buffer.bytesize < READ_SIZE
-        loop do
-          data = if wait
-                   wait = false
-                   length = Fiber.scheduler.io_read(socket, io_buffer, 1, 0)
-                   io_buffer.get_string(0, length) if length.positive?
-                 else
-                   socket.read_nonblock(READ_SIZE, exception: false)
-                 end
-          break if data == :wait_readable
-          return disconnect(fd, socket) unless data
+      loop do
+        data = if wait
+                 wait = false
+                 length = Fiber.scheduler.io_read(socket, io_buffer, 1, 0)
+                 io_buffer.get_string(0, length) if length.positive?
+               else
+                 socket.read_nonblock(READ_SIZE, exception: false)
+               end
+        break if data == :wait_readable
+        return disconnect(fd, socket) unless data
 
-          buffer = buffer ? buffer << data : data
-          break if data.bytesize < READ_SIZE
-        end
+        buffer = buffer ? buffer << data : data
+        break if data.bytesize < READ_SIZE
       end
-      preread = false
 
       if buffer
         rest = drain(socket, buffer) or return disconnect(fd, socket)
@@ -220,8 +189,6 @@ class HTTPServer
       next if @state[fd] == AGAIN
 
       @state[fd] = IDLE
-      # Registering reports the descriptor at once if more data arrived in the meantime.
-      Epoll.control(@epfd, Epoll::CTL_ADD, fd, @event) if fresh
       return
     end
   rescue IOError, SystemCallError

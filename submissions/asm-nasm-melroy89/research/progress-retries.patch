@@ -1,0 +1,145 @@
+--- a/src/experiments.inc
++++ b/src/experiments.inc
+@@ -16,6 +16,8 @@
+ arg_wait_6000: db '--wait-us=6000',0
+ arg_nodelay_on: db '--nodelay=on',0
+ arg_nodelay_off: db '--nodelay=off',0
++arg_retry_empty: db '--retry=cq-empty',0
++arg_retry_progress: db '--retry=progress',0
+ arg_enobuf_defer: db '--enobuf=defer',0
+ arg_enobuf_immediate: db '--enobuf=immediate',0
+ arg_send_first: db '--completion-order=send-first',0
+@@ -48,6 +50,7 @@
+ recv_mode: dd 0
+ completion_order: dd 1
+ enobuf_mode: dd 1
++retry_progress: dd 0 ; opt-in experiment, default remains CQ-empty control
+ query_mode: dd 0
+ json_mode: dd 1
+ savepoints_enabled: dd 0
+@@ -131,6 +134,8 @@
+  dq arg_wait_6000,wait_us,6000
+  dq arg_nodelay_on,nodelay,1
+  dq arg_nodelay_off,nodelay,0
++ dq arg_retry_empty,retry_progress,0
++ dq arg_retry_progress,retry_progress,1
+  dq arg_enobuf_defer,enobuf_mode,1
+  dq arg_enobuf_immediate,enobuf_mode,0
+  dq arg_send_first,completion_order,1
+--- a/src/uring.inc
++++ b/src/uring.inc
+@@ -86,6 +86,8 @@
+ ring_slots: resd 1
+ ; Bounded generation-tagged retry FIFO: 65,536 entries per ring.
+ enobuf_queue: resq RINGS*65536
++; Ring offsets128/132: retry FIFO head/tail;136: reclaimed-buffer credits.
++; Offset136 is outside pointers/counters0..135 and setup params256..375.
+ ring_contexts: resb RINGS*RSTRIDE
+ rlimits: resq 2
+ sparse_reg: resb 32
+@@ -130,6 +132,7 @@
+  xor eax,eax
+  mov ecx,15
+  rep stosq
++ mov dword [r12+136],0 ; also BSS-zeroed; no reinitialisation in live loop
+  mov dword [r12+264],0x1100 ; SINGLE_ISSUER | COOP_TASKRUN (no DEFER)
+  mov eax,425
+  mov edi,SQSIZE
+@@ -506,10 +509,18 @@
+  mov [r8+112],edx
+  mov rax,[r8+96]
+  mov [rax+14],dx
+- ret
++ cmp dword [retry_progress],0
++ je .done
++ ; Publish before crediting. Each real buffer return, including stale-generation
++ ; CQEs, passes here once; FIFO skip markers do not call this function again.
++ cmp dword [r8+136],NBUFS
++ jae .done
++ inc dword [r8+136]
++.done: ret
+ ; ENOBUFS retry entries retain no pointers or kernel ownership. One entry per
+ ; paused connection, tagged with its generation; stale entries are harmless.
+-; Only rearm after consuming the frozen CQ, outside all SQLite transactions.
++; Rearm after the processed frozen batch commits, outside SQLite transactions.
++; The default control additionally requires the entire live CQ to be empty.
+ uring_enobuf_drain:
+  ENTER
+  xor ebp,ebp
+@@ -518,18 +529,38 @@
+  shl r12,9
+  lea rax,[ring_contexts]
+  add r12,rax
++ mov dword [rsp],128 ; bounded queue visits, not successful rearms
++ cmp dword [retry_progress],0
++ je .require_empty
++ mov eax,[r12+128]
++ cmp eax,[r12+132]
++ je .clear_credits
++ mov eax,[r12+136]
++ test eax,eax
++ jnz .credit_budget
++ ; Small restart allowance only when no CQ work remains. Never invent restart
++ ; credit while a live CQ backlog can still contain selected-buffer completions.
++ mov dword [rsp],32
++ jmp .require_empty
++.credit_budget:
++ cmp eax,128
++ jbe .set_budget
++ mov eax,128
++.set_budget:
++ mov [rsp],eax
++ jmp .loop
++.require_empty:
+  mov rax,[r12+64]
+  mov edx,[rax]
+  mov rax,[r12+72]
+  cmp edx,[rax]
+  jne .done
+- xor ebp,ebp
+ .loop:
+- cmp ebp,128
++ cmp ebp,[rsp]
+  jae .done
+  mov eax,[r12+128]
+  cmp eax,[r12+132]
+- je .done
++ je .clear_credits
+  mov ecx,eax
+  and ecx,65535
+  mov edx,ebx
+@@ -540,6 +571,14 @@
+  inc eax
+  mov [r12+128],eax
+  inc ebp
++ ; Stale entries also consume the visit/credit budget, preventing an unbounded
++ ; cleanup scan; keep excess real progress for the next bounded pass.
++ cmp dword [retry_progress],0
++ je .credit_used
++ cmp dword [r12+136],0
++ je .credit_used
++ dec dword [r12+136]
++.credit_used:
+  mov r13d,r14d
+  lea rax,[generations]
+  shr r14,32
+@@ -555,8 +594,18 @@
+  mov edi,r13d
+  call uring_recv
+  jmp .loop
++.clear_credits:
++ ; No paused connections: historical returns cannot fund a later depletion.
++ mov dword [r12+136],0
+ .done:
+- mov eax,ebp
++ cmp dword [retry_progress],0
++ je .result
++ mov eax,[r12+128]
++ cmp eax,[r12+132]
++ jne .result
++ mov dword [r12+136],0 ; includes exact-budget empty transitions
++.result:
++ mov eax,ebp ; visits count as runnable work even if generations were stale
+  LEAVE
+ uring_enobuf_pause:
+  ENTER

@@ -1,0 +1,170 @@
+{
+  "vus": 275000,
+  "hold": "5m",
+  "ramp": "60s",
+  "warmup": "2m",
+  "image": "sha256:4438adff52e1ed4db5e941ae1f3ab5ee0b64d4cfd6ae850694969e4d7186fb16",
+  "source_sha256": {
+    "src/crypto.asm": "51fcd12cdf8e4ed19e55aa7c1b9fa78777e329f3789b3ec6cec058d054c577a1",
+    "src/experiments.inc": "9f0943787615f008b6993446a14d78b18ee3000096d1a40c32227e05d59d7a1c",
+    "src/json.asm": "ae7737d67b1c09e780970656fd5414c6f8abd4bbdf66b975b86747da0496527f",
+    "src/ranges.inc": "bdc9190217a10725e0a1ca871c6cb7d3e5813bec9411e4aa20bcee6d8f3acd32",
+    "src/server.asm": "00ec4b07d190687fb18e0fbe3030f09ee76d3447ca8e304fd08814b82595de47",
+    "src/sql.inc": "4952971a0df086a24b2d923414fcca67abbf3eeec4bfeb3608c0a2d0dac47fb0",
+    "src/train-sql.inc": "cc4b8af0d3c3dcdc60b56f51a104ab860c8b272663b202180f4d5e13b1a1f418",
+    "src/train.asm": "0cff004c542203302f7d702c5e04d5f028cdda22ebf6aacd4c7c7b56de3dac39",
+    "src/uring.inc": "e58c1f33c22680d1c650280d90995ea54b60143c7cba442f813e5ec72fd9c5ac"
+  },
+  "build_identity": {
+    "io_stats": false,
+    "sqlite": "3.54.0",
+    "archive_sha3_256": "7b670a62fdfbd672b75fef004cb703c8a3e87d3a5cc7d675b4a08337004a2d93",
+    "mode": "release",
+    "compiler": "gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0",
+    "flags": [
+      "-O3",
+      "-march=native",
+      "-flto",
+      "-fno-plt",
+      "-g",
+      "-DSQLITE_THREADSAFE=0",
+      "-DSQLITE_DEFAULT_MEMSTATUS=0",
+      "-DSQLITE_DQS=0",
+      "-DSQLITE_OMIT_LOAD_EXTENSION",
+      "-DSQLITE_OMIT_DEPRECATED",
+      "-DSQLITE_OMIT_SHARED_CACHE",
+      "-DSQLITE_OMIT_PROGRESS_CALLBACK",
+      "-DHAVE_FDATASYNC=1"
+    ],
+    "sqlite_build_identity": "9b407e483becf2d1472bd3e28e8c8dc4f64b294af02720821333214b02c0a1e5",
+    "source_sha256": {
+      "src/crypto.asm": "51fcd12cdf8e4ed19e55aa7c1b9fa78777e329f3789b3ec6cec058d054c577a1",
+      "src/experiments.inc": "9f0943787615f008b6993446a14d78b18ee3000096d1a40c32227e05d59d7a1c",
+      "src/json.asm": "ae7737d67b1c09e780970656fd5414c6f8abd4bbdf66b975b86747da0496527f",
+      "src/ranges.inc": "bdc9190217a10725e0a1ca871c6cb7d3e5813bec9411e4aa20bcee6d8f3acd32",
+      "src/server.asm": "00ec4b07d190687fb18e0fbe3030f09ee76d3447ca8e304fd08814b82595de47",
+      "src/sql.inc": "4952971a0df086a24b2d923414fcca67abbf3eeec4bfeb3608c0a2d0dac47fb0",
+      "src/train-sql.inc": "cc4b8af0d3c3dcdc60b56f51a104ab860c8b272663b202180f4d5e13b1a1f418",
+      "src/train.asm": "0cff004c542203302f7d702c5e04d5f028cdda22ebf6aacd4c7c7b56de3dac39",
+      "src/uring.inc": "e58c1f33c22680d1c650280d90995ea54b60143c7cba442f813e5ec72fd9c5ac"
+    },
+    "binary_sha256": "e511302626f6f0e06c2981aeb19e4d90923afeebf497ff711373d791f9a8491e"
+  },
+  "runtime_binary_sha256": "e511302626f6f0e06c2981aeb19e4d90923afeebf497ff711373d791f9a8491e",
+  "start_script_mode": true,
+  "healthy_seconds": 0.29015319400059525,
+  "host_kernel": "7.0.0-38-generic",
+  "host_cpu_model": "AMD Ryzen Threadripper 7960X 24-Cores",
+  "host_logical_cpus": 48,
+  "local_seccomp_exception": "unconfined: default Docker seccomp blocks io_uring",
+  "workload_sha256": "14fbbe36a7bef2cc803c8c2309b8b93d6e6ec9c2b6aba78ebe3b9a95ebf85972",
+  "server_cpu_quota": 1,
+  "server_memory_bytes": 2147483648,
+  "server_swap_bytes": 0,
+  "nofile": 65535,
+  "network": "private-shared-loopback",
+  "generator": "grafana/k6:1.4.2",
+  "source_addresses": "127.0.0.2-127.0.0.17",
+  "warmup_result": {
+    "exit_code": 0,
+    "duration_ms": {
+      "med": 0.38581600000000005,
+      "p(95)": 0.5758265499999999,
+      "p(99)": 0.6656667099999999,
+      "max": 7.860871,
+      "avg": 0.4060502824572912,
+      "thresholds": {
+        "p(95)<500": false,
+        "p(99)<1000": false
+      }
+    },
+    "failures": {
+      "passes": 0,
+      "fails": 15220,
+      "thresholds": {
+        "rate<0.01": false
+      },
+      "value": 0
+    },
+    "checks": {
+      "passes": 15220,
+      "fails": 0,
+      "value": 1
+    },
+    "requests": {
+      "count": 15220,
+      "rate": 94.53371465095205
+    },
+    "accepted": true,
+    "all_status_checks_pass": true
+  },
+  "result": {
+    "exit_code": 0,
+    "duration_ms": {
+      "avg": 7.569971772052793,
+      "med": 3.751016,
+      "p(95)": 16.2334134,
+      "p(99)": 65.39380591999968,
+      "max": 2436.598898,
+      "thresholds": {
+        "p(95)<500": false,
+        "p(99)<1000": false
+      }
+    },
+    "failures": {
+      "passes": 0,
+      "fails": 10264833,
+      "thresholds": {
+        "rate<0.01": false
+      },
+      "value": 0
+    },
+    "checks": {
+      "passes": 10264833,
+      "fails": 0,
+      "value": 1
+    },
+    "requests": {
+      "count": 10264833,
+      "rate": 25639.113416741115
+    },
+    "accepted": true,
+    "all_status_checks_pass": true
+  },
+  "elapsed_seconds_including_warmup": 578.3987033320009,
+  "memory_peak_bytes": 1516208128,
+  "oom_killed": false,
+  "generator_memory_limit": "92 GiB",
+  "generator_memory_peak_bytes": 91419131904,
+  "script_provenance": [
+    {
+      "host_path": "install.sh",
+      "image_path": "/tmp/install.sh",
+      "host_sha256": "f13c49c369632f320d48a0fc7f559e5f99ad3d146307e7567ab23110d7a328bc",
+      "image_sha256": "f13c49c369632f320d48a0fc7f559e5f99ad3d146307e7567ab23110d7a328bc",
+      "equal": true
+    },
+    {
+      "host_path": "build.sh",
+      "image_path": "/app/build.sh",
+      "host_sha256": "9bc62326ee8c8699838292257986a8769f494e5bdb63196791deb843b3396468",
+      "image_sha256": "9bc62326ee8c8699838292257986a8769f494e5bdb63196791deb843b3396468",
+      "equal": true
+    },
+    {
+      "host_path": "start.sh",
+      "image_path": "/app/start.sh",
+      "host_sha256": "8742d39196b740703d4f017f6875477f49c18f4c9fd28ecb27784170d25dc9ac",
+      "image_sha256": "8742d39196b740703d4f017f6875477f49c18f4c9fd28ecb27784170d25dc9ac",
+      "equal": true
+    },
+    {
+      "host_path": "tools/build.py",
+      "image_path": "/app/tools/build.py",
+      "host_sha256": "d4a1db9961cbab11a428f3e5aad874b921eda14122890142c68a384924e4f38a",
+      "image_sha256": "d4a1db9961cbab11a428f3e5aad874b921eda14122890142c68a384924e4f38a",
+      "equal": true
+    }
+  ],
+  "boundary": "Selected-count local five-minute confirmation; same-host generator; not a maximum, organizer score or whole-field ranking. k6 checks cover statuses; JSON/persistence validation is separate."
+}

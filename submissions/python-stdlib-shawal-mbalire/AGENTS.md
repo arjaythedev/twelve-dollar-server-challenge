@@ -9,7 +9,7 @@ numbers and what's next. Read it in full before touching code. Started 2026-10-1
 **180k users in 2-minute holds** (CPU 0 at 92%) and costs ~11% more CPU per request than #84 PyPy at
 130k. **No 5-minute hold has been run yet**: that is the next step and the only number to claim.
 README.md is written with the 2-minute numbers, labelled as such. Committed and pushed to `fork`,
-branch `python-stdlib-shawal-mbalire` (2026-10-17); no PR yet.
+branch `python-stdlib-shawal-mbalire` (2026-10-17); PR #118.
 
 ## Goal and owner's rules
 
@@ -23,8 +23,13 @@ how close plain CPython gets to #84 (PyPy + raw epoll) and #71 (Ruby). Rules (al
 - **Standard library only.** stdlib `asyncio` event loop (no uvloop) with an epoll loop nested in it, a hand-written
   HTTP/1.1 parser, stdlib `json` (not orjson), `sqlite3`, `hmac`/`hashlib`. No `requirements.txt`. Any
   third-party package needs a measured reason and the owner's OK.
-- **The latest Python and its features**: CPython 3.15.0 from python-build-standalone (release
-  20261013, the newest on 2026-10-16), pinned by SHA-256 in `infra/ops.py`. Modern syntax: PEP 695
+- **The latest Python and its features**: CPython 3.15.0, **compiled from python.org's source by
+  `build.sh`** (owner, 2026-10-17: rule 10 says "built from source on the box … don't ship prebuilt
+  binaries", which python-build-standalone broke). clang 19 from apt, PGO + ThinLTO, the tail-call
+  interpreter, linked statically against SQLite 3.53.1 compiled from sqlite.org's amalgamation; both
+  tarballs pinned by SHA-256 in `infra/ops.py` (Python's matches its `.sigstore` digest). The server runs
+  from `.venv/` (no pip, no packages; the owner wanted a venv). The numbers below until the next
+  entry in "Verified numbers" were measured on python-build-standalone 3.15.0 (release 20261013). Modern syntax: PEP 695
   (`type` aliases, `class Ok[T]`), `match`, slots dataclasses, deferred annotations (so ≥ 3.14 locally).
 - **SQLite builds the response JSON**; Python only joins byte strings.
 - **Hexagonal architecture** (the owner's `hexagonal-architecture` skill): domain / adapters / infra /
@@ -44,7 +49,7 @@ waits). All 42 checks of `test/test.sh` byte for byte. `install.sh` / `build.sh`
 ## State of the tree
 
 Committed on branch `python-stdlib-shawal-mbalire` (from `origin/main`, only this folder), pushed to
-`fork` 2026-10-17; no PR yet. The FastAPI entry's bench builds this folder from whatever is checked
+`fork` 2026-10-17; PR #118 opened the same day. The FastAPI entry's bench builds this folder from whatever is checked
 out (`REFS` name `stdlib`, `sha: None`), so check out this branch's folder there (or keep it in the
 working tree) before benching it. The bench changes (REFS `stdlib`, `STDLIB_DOCKERFILE`, REFS `"env"`)
 are committed on the FastAPI branch.
@@ -53,6 +58,10 @@ Tested 2026-10-17 (epoll server): `just test` 78 pass and `just check` 42/42 on 
 fallback) and in a Linux container with 3.15.0 (epoll, TCP_DEFER_ACCEPT), the server exiting cleanly on
 SIGTERM. The full CI `test/run.sh` (clean Ubuntu 24.04, downloads 3.15.0) on the epoll server,
 2026-10-17: 42/42.
+Again after the switch to compiling CPython from source (2026-10-17 03:07): 42/42; install + build +
+start + tests took 2 min 46 s in the Colima VM (8 CPUs, `make -j8`, PGO profile run ~30 s). Expect far
+longer on a 1-vCPU droplet. **Not benched yet on the source build**: A/B it against the standalone build
+(`just bench snapshot`) before quoting numbers for it.
 
 ## Layout
 
@@ -111,8 +120,9 @@ tests/      stdlib unittest; fakes in fixtures.py; test_http1 (parser), test_std
 FastAPI entry: `just bench ...` here forwards to its justfile (see its AGENTS.md "Commands"), e.g.
 `just bench linux 40000 --submission stdlib`, `just bench entries 40000 ours stdlib pypy-pranavds ruby-cicloid --rounds 3`.
 The stdlib entry builds with a layered Dockerfile (`STDLIB_DOCKERFILE`, REFS `"layered": True`, added
-2026-10-16 after a 16-minute stall: GitHub served the 35 MB interpreter at ~18 KB/s), so the download is
-cached until `infra/ops.py` changes. The first layered build still downloads once. If GitHub is slow,
+2026-10-16 after a 16-minute stall: GitHub served the 35 MB interpreter at ~18 KB/s), so the compiled
+interpreter is cached until `install.sh` or `infra/ops.py` changes. Then the PGO compile runs again (see
+"State of the tree" for how long). If GitHub is slow,
 `--no-build` reuses the last images (check their dates against your last code change).
 
 ## Verified numbers (fixed bench)
@@ -232,6 +242,6 @@ Single runs before that (not alternated; 40k users, 20 s ramp, 120 s hold, 3.15.
    `test/`, `schema.sql`, `seed/feed.db` and this folder into `build/ci/repo/`), 42/42.
 5. Runtime knobs to A/B (owner's list, ask first): `PYTHON_JIT=1`, `PYTHONMALLOC=mimalloc`. A REFS entry
    may carry `"env": (...)` to bench the same folder with extra environment (see `bench/linux.py`).
-6. Keep README.md in step with the numbers (fixed bench only). Branch pushed; open the PR **only when
-   the owner asks** (after the 5-minute holds, so it can quote them).
+6. Keep README.md in step with the numbers (fixed bench only). PR #118 is open with the 2-minute numbers
+   (labelled); update its description once the 5-minute holds are in.
 7. Possible cleanup (owner's OK first): the stopped Colima profiles `bench-server` and `bench-gen`.

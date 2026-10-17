@@ -11,16 +11,16 @@ fastapi := repo / "submissions" / "python-fastapi-granian-shawal-mbalire"
 default:
     @just --list
 
-# check the interpreter (Python >= 3.14; on Linux, download the pinned 3.15 into .python/). No venv: nothing to install
+# .venv/ (no packages) on the first Python >= 3.14 on PATH; build.sh without PYTHON compiles the pinned 3.15 instead
 [group: "dev"]
 setup:
     @PYTHON="$(just _python)" python3 {{root}}/infra/ops.py build
 
 # serve on 127.0.0.1:3000 against build/feed.db (copied from the seed on first run)
 [group: "dev"]
-run:
+run: setup
     @mkdir -p build && { [ -f build/feed.db ] || cp {{repo}}/seed/feed.db build/feed.db; }
-    @ulimit -n 65535 2>/dev/null || true; PYTHON="$(just _python)" SQLITE_PATH={{root}}/build/feed.db JWT_SECRET={{secret}} HOST=127.0.0.1 PORT=3000 exec python3 {{root}}/infra/ops.py start
+    @ulimit -n 65535 2>/dev/null || true; SQLITE_PATH={{root}}/build/feed.db JWT_SECRET={{secret}} HOST=127.0.0.1 PORT=3000 exec python3 {{root}}/infra/ops.py start
 
 # unit tests (stdlib unittest)
 [group: "test"]

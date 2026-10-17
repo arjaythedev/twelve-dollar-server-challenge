@@ -2,32 +2,33 @@
 
 | | |
 |---|---|
-| Language | Python 3.15.0 ([python-build-standalone](https://github.com/astral-sh/python-build-standalone) 20261013: clang, PGO + LTO, tail-call interpreter), pinned by SHA-256 |
+| Language | Python 3.15.0, compiled from python.org's source by `build.sh` (clang 19, PGO + ThinLTO, tail-call interpreter), pinned by SHA-256 |
 | Framework | none: a hand-written HTTP/1.1 parser and router |
 | Server | a hand-written `select.epoll` loop, nested in the standard `asyncio` event loop (no uvloop) |
-| SQLite driver | the standard library `sqlite3` module, with the SQLite 3.53.1 built into that Python |
+| SQLite driver | the standard library `sqlite3` module, linked statically against SQLite 3.53.1 compiled from sqlite.org's source |
 | JSON | SQLite's `json_object` renders every response; the standard `json` module only decodes request bodies and JWT parts |
-| Third-party packages | **none** (no `requirements.txt`, no venv) |
+| Third-party packages | **none** (no `requirements.txt`; the venv has no pip and only pins the interpreter) |
 | **Nginx or direct** | **Direct**: serves `0.0.0.0:80` itself |
 
 ## Running it
 
 ```bash
-sudo bash install.sh   # apt: ca-certificates, python3
-bash build.sh          # downloads the pinned Python 3.15 into .python/ and checks its SHA-256
+sudo bash install.sh   # apt: ca-certificates, python3, make, clang/lld/llvm 19
+bash build.sh          # compiles the pinned SQLite and CPython 3.15 into .python/, then makes .venv/
 SQLITE_PATH=... JWT_SECRET=... HOST=0.0.0.0 PORT=80 bash start.sh
 ```
 
 `install.sh` is a single `apt-get` line. `build.sh` and `start.sh` are one-line shims into `infra/ops.py`;
-all of the logic is Python. On Linux, `build` downloads python-build-standalone 3.15.0 for the machine's
-architecture and checks its SHA-256. Elsewhere, or with `PYTHON=` set, it uses the local interpreter
-(3.14 or newer).
+all of the logic is Python. On Linux, `build` downloads the CPython 3.15.0 and SQLite 3.53.1 source
+tarballs, checks their SHA-256 and compiles them (no prebuilt binaries, per rule 10). Elsewhere, or with
+`PYTHON=` set, it uses the local interpreter (3.14 or newer). Either way it then creates `.venv/`,
+which `start` runs.
 
 For development there is a [justfile](https://just.systems):
 
 | Command | What it does |
 |---|---|
-| `just setup` | check the interpreter (on Linux, download the pinned 3.15) |
+| `just setup` | create `.venv/` on the local Python (3.14 or newer) |
 | `just run` | serve on `127.0.0.1:3000` against `build/feed.db` |
 | `just test` | unit tests (stdlib `unittest`) |
 | `just check` | the official 42-check suite, exactly as CI runs it |
@@ -72,6 +73,10 @@ HTTP driving adapter:
 
 **Not a droplet score.** These numbers come from `just bench linux` on an Apple M-series Mac, whose
 cores are faster than a droplet's vCPU.
+
+They were measured on the same CPython 3.15.0 built by python-build-standalone (clang, PGO + LTO,
+tail-call interpreter, SQLite 3.53.1), before `build.sh` compiled it from source with the same
+features. They haven't been re-run on the source build yet.
 
 The bench setup (in the FastAPI entry, declared in Terraform):
 - The server gets CPU 0, 1792 MiB and no swap, with nofile 65535.

@@ -121,10 +121,11 @@ class HTTPServer
       @state[fd] = IDLE
       Epoll.control(@epfd, Epoll::CTL_ADD, fd, @event)
     elsif data
+      # Queued without growing the pool: this work is ready now, and a burst of connects would
+      # otherwise add a fiber per connection, which the GC then scans on every pass.
       @partial[fd] = data
       @state[fd] = FRESH
       @ready.push(fd)
-      add_worker if @waiting < @ready.size && @workers < MAX_WORKERS
     else
       disconnect(fd, socket) # closed without sending anything
     end

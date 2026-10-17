@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Runs once as root on a clean Ubuntu 24.04: a C compiler (SQLite amalgamation), git (the TrikeShed subrepo),
-# Oracle GraalVM for JDK 25.0.4 and Gradle 9.6.1, both from their official archives, checked against pinned SHA-256 sums.
+# Oracle GraalVM 25.4.4.1.1 (JDK 25.0.4.1.1, the latest release on graalvm.org) and Gradle 9.6.1, both from their
+# official archives, checked against pinned SHA-256 sums. gds.oracle.com publishes no .sha256 for the GraalVM archive;
+# its sum is of the archive as downloaded on 2026-10-16 (384,644,784 bytes).
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
@@ -13,15 +15,15 @@ fetch() { # fetch <url> <sha256> <file>
 
 cd "$(mktemp -d)"
 # Each toolchain lands under a temporary name and is renamed into place once complete.
-if [ ! -x /opt/graalvm-jdk-25.0.4/bin/java ]; then
-  fetch https://download.oracle.com/graalvm/25/archive/graalvm-jdk-25.0.4_linux-x64_bin.tar.gz \
-    76007c309f821aaf435bce63162ea0395587fc77350801c81643fe7feea37276 graalvm.tar.gz
-  rm -rf /opt/graalvm-jdk-25.0.4 /opt/.graalvm-jdk-25.0.4 && mkdir -p /opt/.graalvm-jdk-25.0.4
-  tar -xzf graalvm.tar.gz -C /opt/.graalvm-jdk-25.0.4 --strip-components=1
-  mv /opt/.graalvm-jdk-25.0.4 /opt/graalvm-jdk-25.0.4
+if [ ! -x /opt/graalvm-25.4.4.1.1/bin/java ]; then
+  fetch https://gds.oracle.com/download/graal/25i4/archive/graalvm-jdk-25i4-25.0.4.1.1_linux-x64_bin.tar.gz \
+    4fcc632cfc68e98f49f9316f8a3588bafe4f5289f120104e2d290a75cf33e28e graalvm.tar.gz
+  rm -rf /opt/graalvm-25.4.4.1.1 /opt/.graalvm-25.4.4.1.1 && mkdir -p /opt/.graalvm-25.4.4.1.1
+  tar -xzf graalvm.tar.gz -C /opt/.graalvm-25.4.4.1.1 --strip-components=1
+  mv /opt/.graalvm-25.4.4.1.1 /opt/graalvm-25.4.4.1.1
   rm -f graalvm.tar.gz
 fi
-ln -sfn /opt/graalvm-jdk-25.0.4 /opt/graalvm
+ln -sfn /opt/graalvm-25.4.4.1.1 /opt/graalvm
 
 if [ ! -x /opt/gradle-9.6.1/bin/gradle ]; then
   fetch https://services.gradle.org/distributions/gradle-9.6.1-bin.zip \

@@ -5,8 +5,8 @@ Kotlin with no framework: RelaxFactory's `one.xio` NIO reactor, monomorphized, o
 
 | | |
 |---|---|
-| Language | Kotlin 2.4.21-RC (Kotlin Multiplatform Gradle project, JVM target 25) |
-| Runtime | Oracle GraalVM for JDK 25.0.4 (Graal JIT), from download.oracle.com, installed by `install.sh` |
+| Language | Kotlin 2.4.21 (Kotlin Multiplatform Gradle project, JVM target 25) |
+| Runtime | Oracle GraalVM 25.4.4.1.1 (JDK 25.0.4.1.1, Graal JIT), the latest release on graalvm.org (25.4), from gds.oracle.com, installed by `install.sh` |
 | Build | Gradle 9.6.1, official distribution, installed by `install.sh` |
 | HTTP | own: RelaxFactory's `one.xio` selector loop with a single visitor class, on `java.nio` (epoll) |
 | SQLite | 3.54.0 amalgamation, compiled by `build.sh`; the download is checked against the SHA3-256 sqlite.org publishes |

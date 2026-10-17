@@ -6,7 +6,7 @@
 | Framework | [async](https://github.com/socketry/async) 2.46.0 reactor on io-event 1.22.1 (io_uring selector, epoll fallback); the HTTP/1.1 layer is our own (`http.rb`, `epoll.rb`) |
 | SQLite driver | extralite 3.1.3, statically linked to SQLite 3.54.0, built from the amalgamation with profile-guided optimization |
 | JWT | HMAC-SHA256 from libsodium 1.0.22, called through rbnacl 7.1.2's FFI bindings |
-| JSON | built by SQLite (`json_object`); json 3.1.0 parses request bodies and JWT claims |
+| JSON | built by SQLite (`json_object`); json 3.1.0 parses request bodies and JWT claims through one prebuilt `JSON::Coder` |
 | **Nginx or direct** | **Direct**: serves `0.0.0.0:80` itself |
 
 Ruby, SQLite and libsodium are downloaded at pinned versions and checked against their SHA-256 sums.
@@ -70,6 +70,15 @@ version keeps the Async reactor and replaces the HTTP server.
 - **Direct instead of Nginx.** On one core, Nginx's CPU comes out of Ruby's budget, and the provided
   `nginx.conf` caps out near 16k connections. Responses switch to `Connection: close` only within 256
   descriptors of the process's file limit, so clients aren't forced to reconnect under normal load.
+- **New connections skip epoll.** The listener sets `TCP_DEFER_ACCEPT`, so `accept` returns a connection
+  only once its request bytes have arrived. The accept loop reads them at once and hands the connection
+  to a worker; it is registered in epoll only when it goes idle afterwards. A connection that is answered
+  and closed (the descriptor guard, or `Connection: close`) therefore costs accept, read, write and
+  close, with no `epoll_ctl` or `epoll_wait`. Accepted sockets inherit `TCP_NODELAY` from the listener on
+  Linux, so there is no `setsockopt` per connection either. In a Docker container (arm64, io_uring), a
+  request on a fresh connection cost 2 to 8 µs less server CPU across paired runs (about 64 against
+  59 µs); keep-alive requests stayed at about 51 µs. This matters past 65k users, where PR #41's benchmark found every entry reconnecting on
+  nearly every request. Idea from PR #84.
 
 ## Results on a 1-vCPU test VM
 

@@ -1,0 +1,18 @@
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "Preserve",
+    "moduleResolution": "bundler",
+    "lib": ["ESNext"],
+    "types": ["bun"],
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "verbatimModuleSyntax": true,
+    "paths": {
+      "@server/*": ["./src/server/*"],
+      "@modules/*": ["./src/modules/*"]
+    }
+  },
+  "include": ["src"]
+}

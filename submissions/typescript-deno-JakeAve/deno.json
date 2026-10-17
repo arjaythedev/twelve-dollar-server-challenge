@@ -1,0 +1,6 @@
+{
+  "tasks": {
+    "check": "deno fmt --check && deno lint && deno check server.ts sqlite.ts bench/pgo.ts render.test.ts",
+    "test": "deno test --allow-ffi --allow-read --allow-write render.test.ts && bash ../../test/run.sh ."
+  }
+}

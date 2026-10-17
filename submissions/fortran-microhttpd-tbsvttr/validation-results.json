@@ -1,0 +1,17 @@
+{
+  "platform": "Ubuntu 24.04 Linux ARM64, Docker Desktop",
+  "official_checks": 42,
+  "extra_http_checks": 62,
+  "concurrent_duplicate_likes": 16,
+  "acknowledged_creates_and_likes_after_sigkill": 192,
+  "failed_fk_writes": 32,
+  "transport_and_correctness_output": ".deps/sqlite.zip: OK\n.deps/microhttpd.tar.gz: OK\n.deps/fio-stl.h: OK\nTesting http://127.0.0.1:19800\n-- golden reads (fresh database)\n  ok   GET /feed == golden -> 200\n  ok   GET /feed content-type (application/json)\n  ok   GET /posts/1 == golden -> 200\n  ok   GET /posts/250000 == golden -> 200\n  ok   GET /posts/500000 == golden -> 200\n  ok   GET /posts/:id content-type (application/json)\n-- health, 404s, id validation\n  ok   GET /health -> 200 {\"status\":\"ok\",\"db\":\"ok\",\"uptime_s\":0}\n  ok   GET /nope -> 404\n  ok   GET /posts/0 -> 400\n  ok   GET /posts/-1 -> 400\n  ok   GET /posts/abc -> 400\n  ok   GET /posts/1.5 -> 400\n  ok   GET /posts/999999999 -> 404\n-- auth\n  ok   POST /posts, no token -> 401\n  ok   POST /posts, Basic auth -> 401\n  ok   POST /posts, garbage token -> 401\n  ok   POST /posts, bad signature -> 401\n  ok   POST /posts, alg=none -> 401\n  ok   POST /posts, expired token -> 401\n  ok   POST /posts, sub not an integer -> 401\n  ok   POST /posts, no username -> 401\n  ok   POST /posts/abc/like, no token (auth before id) -> 401\n-- create validation\n  ok   empty body -> 400\n  ok   whitespace body -> 400\n  ok   numeric body -> 400\n  ok   missing body -> 400\n  ok   malformed JSON -> 400\n  ok   501-char body -> 400\n-- create, like, read back\n  ok   special characters round-trip (trimmed) -> 201\n  ok   create 500-char post -> 201\n  ok   POST /posts content-type (application/json)\n  ok   created_at format 2026-10-06T09:55:22.409Z\n  ok   created_at is now (UTC, 0s)\n  ok   like (first) -> 201\n  ok   like (repeat) -> 200\n  ok   like missing post -> 404\n  ok   like bad id (with token) -> 400\n  ok   read back, like_count 1 -> 200\n  ok   like on a seeded post is counted at once (12)\n  ok   feed has 20 posts\n  ok   new post is at the top of the feed\n  ok   feed entry matches the post\npassed=42 failed=0\n  ok   strict JSON, Unicode boundaries, trimming and embedded NUL\n  ok   16 concurrent duplicate likes insert one row and update reads\n  ok   signed invalid algorithms, claims, JSON and UTF-8 JWT segments\n  ok   previously accepted JWT is rejected after expiry\n  ok   feed reflects concurrent creates in timestamp/id order\nExtra checks passed (62 HTTP checks plus 16 concurrent likes). Post 500014 contains 500 emoji and one like.\nOpened keep-alive socket for 66-second reuse check\nPASS fragmented and chunked POST, owned headers, empty-body reuse\nPASS 100 aborted partial uploads\nPASS 100 reset connections after complete write uploads\nPASS 1,800 pipelined responses under backpressure\nPASS same-socket HTTP keep-alive after 66 idle seconds\nPASS 192 acknowledged creates and likes survive SIGKILL; 32 failed writes remain isolated\n",
+  "commit_fault_test": "Passed: failed commit returns 500, inserted row rolled back, blocked commit withholds response, next write succeeds.",
+  "fresh_normal_user_build": {
+    "user": "nobody (UID 65534)",
+    "install_scripts": "all three completed as root on Ubuntu 24.04",
+    "source": "clean source copy, no bin/.deps/target caches",
+    "official_checks_passed": 42,
+    "failed": 0
+  }
+}

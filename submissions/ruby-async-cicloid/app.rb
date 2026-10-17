@@ -166,6 +166,9 @@ class App
   BODY_REQUIRED = '{"error":"body is required"}'
   BODY_TOO_LONG = '{"error":"body must be at most 500 characters"}'
   INTERNAL = '{"error":"internal server error"}'
+  # Parser options are resolved once here, not on every parse.
+  CODER = JSON::Coder.new
+  EMPTY = ""
 
   # Thrown with [status, document] to answer early.
   class Halt < StandardError
@@ -231,11 +234,11 @@ class App
 
   def create(authorization, raw)
     user_id, username = authenticate(authorization)
-    raw = raw.to_s.dup.force_encoding(Encoding::UTF_8)
-    raise Halt.new(400, MALFORMED) unless raw.valid_encoding?
+    raw = raw ? raw.force_encoding(Encoding::UTF_8) : EMPTY
+    raise Halt.new(400, MALFORMED) unless raw.valid_encoding? # the parser does not check UTF-8 itself
 
     payload = begin
-      JSON.parse(raw)
+      CODER.load(raw)
     rescue JSON::ParserError
       raise Halt.new(400, MALFORMED)
     end
@@ -313,7 +316,7 @@ class App
   def parse_segment(segment)
     raise Halt.new(401, INVALID_TOKEN) unless BASE64URL.match?(segment) && segment.bytesize % 4 != 1
 
-    JSON.parse(decode64(segment).force_encoding(Encoding::UTF_8))
+    CODER.load(decode64(segment)) # a BINARY source is read as UTF-8
   rescue JSON::ParserError, ArgumentError, EncodingError
     raise Halt.new(401, INVALID_TOKEN)
   end

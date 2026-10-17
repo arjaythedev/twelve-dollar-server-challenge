@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>feed</AssemblyName>
+    <RootNamespace>Feed</RootNamespace>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+
+    <!-- One native binary, compiled on the box for the box's CPU. -->
+    <PublishAot>true</PublishAot>
+    <RuntimeIdentifier>linux-x64</RuntimeIdentifier>
+    <IlcInstructionSet>native</IlcInstructionSet>
+    <OptimizationPreference>Speed</OptimizationPreference>
+    <InvariantGlobalization>true</InvariantGlobalization>
+
+    <!-- One thread does all the work: no background GC thread competing with it. -->
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+    <ConcurrentGarbageCollection>false</ConcurrentGarbageCollection>
+
+    <!-- There are no package references; the lock file pins the SDK's ILCompiler packages. -->
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- build.sh compiles SQLite from source into this static library. Both it and libc are called directly, without a runtime lookup. -->
+    <DirectPInvoke Include="sqlite3" />
+    <NativeLibrary Include="obj/sqlite/libsqlite3.a" />
+    <DirectPInvoke Include="libc" />
+  </ItemGroup>
+
+</Project>

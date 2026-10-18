@@ -1,5 +1,8 @@
 package borg.trikeshed.feed
 
+import borg.trikeshed.parse.confix.KnownSchema
+import borg.trikeshed.parse.confix.KnownShape
+
 /**
  * The SQLite side of the API. Writes join the store's open transaction (group commit): the reactor commits
  * once per pass and only then sends the responses of that pass.
@@ -64,10 +67,13 @@ val PATH_POSTS: ByteArray = "/posts".encodeToByteArray()
 val PATH_LIKE: ByteArray = "/like".encodeToByteArray()
 val BODY_KEYS: Array<String> = arrayOf("body")
 
+/** The POST /posts body's one member, as a known-schema plan. */
+val BODY_SCHEMA: KnownSchema = KnownSchema(*BODY_KEYS)
+
 /** Routes one framed request and appends its whole HTTP response to [send]. */
 class Feed(val store: FeedStore, val bearer: Bearer, val startedSeconds: Long) {
     val body = Out()
-    val members = arrayOfNulls<Any>(1)
+    private val bodyReader = BODY_SCHEMA.reader()
 
     fun respond(src: ByteArray, r: Request, send: Out) {
         body.size = 0
@@ -134,9 +140,8 @@ class Feed(val store: FeedStore, val bearer: Bearer, val startedSeconds: Long) {
 
     fun create(src: ByteArray, r: Request): ByteArray {
         authorize(src, r)?.let { return it }
-        val shape = JsonScan(src, r.bodyFrom, r.bodyTo).members(BODY_KEYS, members)
-        if (shape == JsonShape.MALFORMED) return body(MALFORMED, S400)
-        val text = (members[0] as? String)?.ecmaTrim()
+        if (bodyReader.scan(src, r.bodyFrom, r.bodyTo) == KnownShape.MALFORMED) return body(MALFORMED, S400)
+        val text = bodyReader.text(0)?.ecmaTrim()
         if (text.isNullOrEmpty()) return body(BODY_REQUIRED, S400)
         if (text.codePointLength() > 500) return body(BODY_TOO_LONG, S400)
         store.create(bearer.user, bearer.name, text, body)

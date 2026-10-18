@@ -1,6 +1,9 @@
 package borg.trikeshed.feed
 
 import borg.trikeshed.job.hmacSha256
+import borg.trikeshed.parse.confix.KnownKind
+import borg.trikeshed.parse.confix.KnownSchema
+import borg.trikeshed.parse.confix.KnownShape
 
 /** Bearer verification outcome. */
 enum class BearerState { VALID, MISSING, INVALID, PAYLOAD }
@@ -8,11 +11,17 @@ enum class BearerState { VALID, MISSING, INVALID, PAYLOAD }
 val HEADER_KEYS: Array<String> = arrayOf("alg")
 val PAYLOAD_KEYS: Array<String> = arrayOf("sub", "username", "exp")
 
+/** The JWT header and payload members read, as known-schema plans: one strict pass each, no generic values. */
+val HEADER_SCHEMA: KnownSchema = KnownSchema(*HEADER_KEYS)
+val PAYLOAD_SCHEMA: KnownSchema = KnownSchema(*PAYLOAD_KEYS)
+val HS256: ByteArray = "HS256".encodeToByteArray()
+
 /** HS256 JWT verification, every token, every request: signature, alg, exp, then sub and username. */
 class Bearer(val secret: ByteArray) {
     var user: Long = 0
     var name: String = ""
-    val members = arrayOfNulls<Any>(3)
+    private val header = HEADER_SCHEMA.reader()
+    private val claims = PAYLOAD_SCHEMA.reader()
 
     /** The Authorization value at [from, to) of [src]; null range for an absent header. */
     fun verify(src: ByteArray, from: Int, to: Int, nowSeconds: Long): BearerState {
@@ -22,8 +31,7 @@ class Bearer(val secret: ByteArray) {
         val d2 = if (d1 < 0) -1 else src.indexOf('.'.code.toByte(), d1 + 1, to)
         if (d2 < 0 || src.indexOf('.'.code.toByte(), d2 + 1, to) >= 0) return BearerState.INVALID
         val head = base64Url(src, t, d1) ?: return BearerState.INVALID
-        if (JsonScan(head, 0, head.size).members(HEADER_KEYS, members) != JsonShape.OBJECT || members[0] != "HS256")
-            return BearerState.INVALID
+        if (header.scan(head) != KnownShape.OBJECT || !header.textEquals(0, HS256)) return BearerState.INVALID
         val signature = base64Url(src, d2 + 1, to) ?: return BearerState.INVALID
         val expected = hmacSha256(secret, src.copyOfRange(t, d2))
         if (signature.size != expected.size) return BearerState.INVALID
@@ -31,14 +39,17 @@ class Bearer(val secret: ByteArray) {
         for (i in expected.indices) diff = diff or (expected[i].toInt() xor signature[i].toInt())
         if (diff != 0) return BearerState.INVALID
         val payload = base64Url(src, d1 + 1, d2) ?: return BearerState.INVALID
-        if (JsonScan(payload, 0, payload.size).members(PAYLOAD_KEYS, members) != JsonShape.OBJECT) return BearerState.INVALID
-        val exp = members[2]
-        if (exp != null && (exp !is Double || nowSeconds >= exp)) return BearerState.INVALID
-        val sub = members[0] as? String ?: return BearerState.PAYLOAD
-        val username = members[1] as? String ?: return BearerState.PAYLOAD
-        user = positiveId(sub)
+        if (claims.scan(payload) != KnownShape.OBJECT) return BearerState.INVALID
+        // exp is optional; when present it must be a JSON number (fraction and exponent allowed) not yet reached.
+        when (claims.kind(2)) {
+            KnownKind.ABSENT -> {}
+            KnownKind.NUMBER -> if (nowSeconds >= claims.number(2)) return BearerState.INVALID
+            else -> return BearerState.INVALID
+        }
+        if (claims.kind(0) != KnownKind.STRING || claims.kind(1) != KnownKind.STRING) return BearerState.PAYLOAD
+        user = claims.positiveDecimal(0)
         if (user <= 0) return BearerState.PAYLOAD
-        name = username
+        name = claims.text(1)!!
         return BearerState.VALID
     }
 }

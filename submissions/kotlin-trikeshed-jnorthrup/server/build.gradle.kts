@@ -23,6 +23,9 @@ kotlin {
         val commonMain by getting {
             dependencies { implementation(project(":trikeshed")) }
         }
+        val jvmTest by getting {
+            dependencies { implementation(kotlin("test")) }
+        }
     }
 }
 
@@ -65,4 +68,13 @@ val sqliteLib = tasks.register<Exec>("sqliteLib") {
     workingDir(dir)
     commandLine(listOf("cc", "-O2", "-fPIC", if (macHost) "-dynamiclib" else "-shared") + sqliteOptions +
         listOf("sqlite3.c", "-o", lib.path) + (if (macHost) emptyList() else listOf("-lm")))
+}
+
+// RingServerTest: the built libsqlite3 and the challenge's seed database and tokens.
+tasks.withType<Test>().configureEach {
+    dependsOn(sqliteLib)
+    jvmArgs("--enable-native-access=ALL-UNNAMED")
+    systemProperty("sqlite.lib", File(sqliteDir.get().asFile, if (macHost) "libsqlite3.dylib" else "libsqlite3.so").path)
+    systemProperty("feed.seed", rootProject.file("../../seed").path)
+    testLogging { showStandardStreams = true }
 }

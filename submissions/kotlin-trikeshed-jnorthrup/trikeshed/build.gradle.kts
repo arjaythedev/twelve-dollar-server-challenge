@@ -8,6 +8,7 @@ import org.jetbrains.kotlin.gradle.plugin.mpp.TestExecutable
 
 plugins {
     kotlin("multiplatform")
+    kotlin("plugin.serialization")
 }
 
 // Opt-in targets for the leaf permutation, -Ptrike.targets=linuxX64,linuxArm64,macosArm64,wasmWasi; the box builds the
@@ -87,9 +88,19 @@ kotlin {
     }
 
     sourceSets {
-        val commonMain by getting
+        // The userspace ring, reactor TLS and Confix closure: the versions TrikeShed's own build pins.
+        val commonMain by getting {
+            dependencies {
+                implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0")
+                implementation("org.jetbrains.kotlinx:kotlinx-serialization-core:1.11.0")
+                implementation("org.jetbrains.kotlinx:kotlinx-datetime:0.8.0-0.6.x-compat")
+            }
+        }
         val commonTest by getting {
-            dependencies { implementation(kotlin("test")) }
+            dependencies {
+                implementation(kotlin("test"))
+                implementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.11.0")
+            }
         }
         val nonPosixMain by creating { dependsOn(commonMain) }
         val jvmMain by getting { dependsOn(nonPosixMain) }

@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace App\Controller;
 
-use App\Api\FeedOutput;
 use App\Api\LikeOutput;
 use App\Api\PostOutput;
 use App\Entity\Post;
@@ -42,18 +41,20 @@ final class PostController extends AbstractController
     #[Route('/feed', methods: ['GET'])]
     public function feed(): JsonResponse
     {
-        return $this->writeJson(new FeedOutput(
-            $this->posts->findLatestViews(self::FEED_SIZE),
-        ));
+        return new JsonResponse(
+            $this->posts->findFeedJson(self::FEED_SIZE),
+            json: true,
+        );
     }
 
     #[Route('/posts/{id}', methods: ['GET'])]
     public function show(#[ValueResolver(PostId::class)] int $id): JsonResponse
     {
-        return $this->writeJson(new PostOutput(
-            $this->posts->findView($id)
+        return new JsonResponse(
+            $this->posts->findPostJson($id)
                 ?? throw new NotFoundHttpException('post not found'),
-        ));
+            json: true,
+        );
     }
 
     #[Route('/posts', methods: ['POST'])]
@@ -115,7 +116,8 @@ final class PostController extends AbstractController
     }
 
     /**
-     * JsonStreamer writes the JSON with PHP code generated for each output class at cache warmup.
+     * For the writes (the reads get their JSON from SQLite): JsonStreamer writes the JSON with PHP code generated for
+     * each output class at cache warmup.
      */
     private function writeJson(object $output, int $status = Response::HTTP_OK): JsonResponse
     {

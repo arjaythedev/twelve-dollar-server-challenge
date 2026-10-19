@@ -1,17 +1,15 @@
--- Authentication: bearer-token verification through lunet.security's
--- HS256 decoder (RFC 7518 compliant since v0.14.1: the HMAC key is the raw
--- secret octets, so tokens signed by standard libraries verify unchanged).
--- The structural failures (format, base64, signature, header, expired) are
--- one error to the caller; payload TYPE failures are the caller's distinct
--- reason, checked below, per the SPEC's contract.
+-- Bearer-token authentication over lunet.security's HS256 decoder.
 
 local config = require("config")
 local security = require("lunet.security")
 
 local auth = {}
 
--- authenticate(ctx) returns the token owner ({ id, username }) or nil plus
--- the rejection reason for error_body.
+---Verify the context's bearer token against JWT_SECRET.
+---@param ctx table Request context; reads ctx.headers["authorization"]
+---@return table|nil owner The token owner as { id = integer, username = string }, nil when rejected
+---@return string|nil reason The rejection reason for error_body:
+---"missing bearer token", "invalid or expired token", or "invalid token payload"
 function auth.authenticate(ctx)
     local authorization = ctx.headers["authorization"]
     if not authorization then

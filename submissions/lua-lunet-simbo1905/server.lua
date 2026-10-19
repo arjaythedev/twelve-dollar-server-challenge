@@ -24,6 +24,9 @@ require("health")
 -- load under live worker threads can deadlock (examples/08 guidance).
 json.decode("{}")
 
+---Serve one accepted connection: read requests, dispatch, write responses,
+---until the client closes or the request stream breaks.
+---@param client userdata The accepted socket handle
 local function handle_client(client)
     while true do
         local request, parse_err, parse_status = http.read_request(function()
@@ -42,11 +45,6 @@ local function handle_client(client)
             return
         end
 
-        -- A request declaring "Connection: close" gets one, and the
-        -- connection stops being served; responses are HTTP/1.1 persistent
-        -- by default (the SPEC contract: nginx's idle upstream connections
-        -- survive >= 65 s). Note: `not declared_close` yields boolean false
-        -- (never nil), which is what response()'s contract needs.
         local declared_close = request.headers["connection"] == "close"
         local persistent = not declared_close
 

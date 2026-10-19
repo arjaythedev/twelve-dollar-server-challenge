@@ -1,23 +1,28 @@
 -- Feed API - the $12 Server Challenge submission
 -- Built with lunet (libuv + LuaJIT coroutine runtime)
 
-package.path = "./app/?.lua;./lib/?.lua;./?.lua;" .. package.path
+package.path = "./app/?.lua;./?.lua;" .. package.path
 
 io.stdout:setvbuf("no")
 
 local lunet = require("lunet")
 local socket = require("lunet.socket")
-local http = require("http")
+local http = require("lunet.http")
+local http_context = require("lunet.http_context")
+local router = require("lunet.http_router")
 
+local json = require("lunet.jsonic")
 local config = require("config")
 local db = require("db")
-local router = require("router")
-require("routes")
 
-local function handle_request(request, persistent)
-    local status, body = router.handle(request)
-    return http.response(status, nil, body, persistent)
-end
+-- Route modules register themselves on require.
+require("auth")
+require("posts")
+require("health")
+
+-- Warm up jsonic's native decoder before the event loop starts: a lazy FFI
+-- load under live worker threads can deadlock (examples/08 guidance).
+json.decode("{}")
 
 local function handle_client(client)
     while true do
@@ -30,14 +35,34 @@ local function handle_client(client)
             return
         end
         if not request then
-            socket.write(client, http.json_response(parse_status or 400, { error = parse_err }))
+            -- Broken framing: the connection state is untrustworthy, close
+            -- after the one response.
+            socket.write(client, http.json_response(parse_status or 400, { error = parse_err }, nil, false))
             socket.close(client)
             return
         end
 
-        local response = handle_request(request, true)
+        -- A request declaring "Connection: close" gets one, and the
+        -- connection stops being served; responses are HTTP/1.1 persistent
+        -- by default (the SPEC contract: nginx's idle upstream connections
+        -- survive >= 65 s). Note: `not declared_close` yields boolean false
+        -- (never nil), which is what response()'s contract needs.
+        local declared_close = request.headers["connection"] == "close"
+        local persistent = not declared_close
 
-        socket.write(client, response)
+        local ctx = http_context.new(request)
+        ctx.env_config = config
+
+        -- The SPEC's byte shape for an unmatched path; the router's own
+        -- built-in 404 body is its JSON shape, not the SPEC's.
+        if not router.match(ctx.method, ctx.path) then
+            socket.write(client, http.response(404, nil, '{"error":"not found"}', nil, persistent))
+            if declared_close then socket.close(client) return end
+        else
+            router.handle(ctx)
+            socket.write(client, http.response(ctx.status, ctx.res_headers, ctx.response_body(), nil, persistent))
+            if declared_close then socket.close(client) return end
+        end
     end
 end
 

@@ -8,4 +8,9 @@ cd "$(dirname "$0")"
 # grant instead of running into the 1024 default.
 ulimit -n 65535 2>/dev/null || ulimit -n "$(ulimit -Hn)" 2>/dev/null || true
 
+# One background thread: the only threadpool consumer in this app is the sqlite3
+# rw write path (no httpc, no fs, no DNS), already serialized by the connection
+# mutex — the pool's spare threads could never be used.
+export UV_THREADPOOL_SIZE=1
+
 exec ./.lunet/lunet-run server.lua

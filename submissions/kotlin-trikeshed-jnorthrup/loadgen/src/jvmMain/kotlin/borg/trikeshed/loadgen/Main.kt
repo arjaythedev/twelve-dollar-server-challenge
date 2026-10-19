@@ -183,7 +183,8 @@ fun runLoad(o: Map<String, String>): Boolean {
         (o["ramp"] ?: "60").toLong() * 1_000_000_000L, (o["hold"] ?: "300").toLong() * 1_000_000_000L,
         (o["threads"] ?: "4").toInt(), (o["entries"] ?: "4096").toInt(), o["mode"]?.let(UringBackendMode::parse), users,
         (o["seed"] ?: "1").toLong(), (o["timeout"] ?: "60").toLong() * 1_000_000_000L,
-        (o["sources"] ?: "").split(',').filter { it.isNotBlank() }, (o["parkMicros"] ?: "0").toLong() * 1000L)
+        (o["sources"] ?: "").split(',').filter { it.isNotBlank() }, (o["parkMicros"] ?: "0").toLong() * 1000L,
+        (o["rxWindows"] ?: "256").toInt())
     val serverStats = o["serverStats"]?.let(::File)
     val establishNanos = (o["establish"] ?: "120").toLong() * 1_000_000_000L
     val drainNanos = (o["drain"] ?: "15").toLong() * 1_000_000_000L

@@ -24,8 +24,18 @@ class Request {
      * needed, -1 when the bytes are not an HTTP/1.x request.
      */
     fun frame(src: ByteArray, from: Int, to: Int): Int {
+        val at = frameHead(src, from, to)
+        return if (at <= 0) at else if (bodyTo <= to) bodyTo else 0
+    }
+
+    /**
+     * Parses the request head starting at [from]: [bodyFrom] when the head is complete, with [bodyTo] where the body
+     * ends (possibly past [to]), 0 when more head bytes are needed, -1 when the bytes are not an HTTP/1.x request.
+     */
+    fun frameHead(src: ByteArray, from: Int, to: Int): Int {
         val headEnd = headerEnd(src, from, to)
         if (headEnd < 0) return if (to - from > MAX_HEAD) -1 else 0
+        if (headEnd + 4 - from > MAX_HEAD) return -1
         val sp1 = src.indexOf(' '.code.toByte(), from, headEnd)
         if (sp1 < 0) return -1
         method = when {
@@ -76,9 +86,23 @@ class Request {
             }
             line = eol + 2
         }
+        if (length > MAX_BODY) return -1
         bodyFrom = headEnd + 4
         bodyTo = bodyFrom + length.toInt()
-        return if (bodyTo <= to) bodyTo else 0
+        return bodyFrom
+    }
+
+    /** Becomes [o] as read from bytes that start [base] later: every offset moves down by [base]. */
+    fun copyFrom(o: Request, base: Int) {
+        method = o.method
+        pathFrom = o.pathFrom - base
+        pathTo = o.pathTo - base
+        authFrom = if (o.authFrom < 0) -1 else o.authFrom - base
+        authTo = if (o.authTo < 0) -1 else o.authTo - base
+        bodyFrom = o.bodyFrom - base
+        bodyTo = o.bodyTo - base
+        close = o.close
+        keepAlive = o.keepAlive
     }
 }
 

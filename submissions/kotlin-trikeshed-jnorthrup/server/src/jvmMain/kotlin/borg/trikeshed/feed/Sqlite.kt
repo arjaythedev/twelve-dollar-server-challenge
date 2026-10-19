@@ -27,6 +27,8 @@ object Sqlite3 {
     val columnBytes: MethodHandle = handle("sqlite3_column_bytes", FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_INT))
     val changes: MethodHandle = handle("sqlite3_changes", FunctionDescriptor.of(JAVA_INT, ADDRESS))
     val errmsg: MethodHandle = handle("sqlite3_errmsg", FunctionDescriptor.of(ADDRESS, ADDRESS))
+    val finalize: MethodHandle = handle("sqlite3_finalize", FunctionDescriptor.of(JAVA_INT, ADDRESS))
+    val closeV2: MethodHandle = handle("sqlite3_close_v2", FunctionDescriptor.of(JAVA_INT, ADDRESS))
 }
 
 const val SQLITE_ROW: Int = 100
@@ -50,8 +52,11 @@ val FEED_OPEN: ByteArray = "{\"posts\":[".encodeToByteArray()
 val FEED_CLOSE: ByteArray = "]}".encodeToByteArray()
 val POST_OPEN: ByteArray = "{\"post\":".encodeToByteArray()
 
-/** One connection, prepared statements reused for the process lifetime, one thread. */
-class SqliteStore(path: String) : FeedStore {
+/**
+ * One connection, prepared statements reused for the process lifetime, one thread. The server never closes it (the
+ * process exit does); [close] is for owners that end sooner, such as tests.
+ */
+class SqliteStore(path: String) : FeedStore, AutoCloseable {
     val db: MemorySegment
     val feedStmt: MemorySegment
     val postStmt: MemorySegment
@@ -92,6 +97,24 @@ class SqliteStore(path: String) : FeedStore {
     }
 
     fun message(): String = (Sqlite3.errmsg.invokeExact(db) as MemorySegment).reinterpret(4096).getString(0)
+
+    private var open = true
+
+    /** Rolls back an open transaction, finalizes the statements and closes the connection; idempotent. */
+    override fun close() {
+        if (!open) return
+        open = false
+        if (pending) {
+            step(rollbackStmt)
+            reset(rollbackStmt)
+            pending = false
+        }
+        for (stmt in arrayOf(feedStmt, postStmt, createStmt, likeStmt, existsStmt, pingStmt, beginStmt, commitStmt, rollbackStmt)) {
+            val rc = Sqlite3.finalize.invokeExact(stmt) as Int
+        }
+        val rc = Sqlite3.closeV2.invokeExact(db) as Int
+        check(rc == 0) { "sqlite3_close_v2: rc $rc" }
+    }
 
     fun exec(sql: String) = Arena.ofConfined().use { a ->
         val rc = Sqlite3.exec.invokeExact(db, a.allocateFrom(sql), MemorySegment.NULL, MemorySegment.NULL, MemorySegment.NULL) as Int

@@ -209,6 +209,8 @@ class RingServer(
     /** Stages the ring refused until a submit and reap made room; of those, the ones outside a CQE handler. */
     var fullRing = 0L; private set
     var fullRingOutsideHandler = 0L; private set
+    /** Loop turns that found CQEs queued (reaped by a stage outside a handler) right before they would have waited. */
+    var queuedBeforeWait = 0L; private set
 
     /** What executes the SQEs, as the ring describes its backend. */
     val backend: String get() = ring.availability
@@ -276,6 +278,11 @@ class RingServer(
             // No CQE waits: waiting handshakes take the loop (their probes complete at once, the handshakes follow).
             if (handshakes.isNotEmpty()) admitHandshakes(MAX_PROBES)
             ring.submit().getOrThrow()
+            // A stage() above that found the ring full reaped CQEs into the queue: handle them before any wait.
+            if (batchHead < batchCount) {
+                queuedBeforeWait++
+                continue
+            }
             val now = System.nanoTime()
             val timeout = if (windowOpen) maxOf(100_000L, openedAt + commitWindowNanos - now) else 250_000_000L
             val first = ring.waitCqeTimeout(timeout).getOrThrow()
@@ -358,6 +365,7 @@ class RingServer(
         "inFlight" to inFlight, "occupied" to occupied.toLong(), "unfinished" to unfinished.toLong(),
         "rxFree" to rxTop.toLong(), "txFree" to txTop.toLong(), "rxWaiting" to waitingRx.size.toLong(),
         "txWaiting" to waitingTx.size.toLong(), "fullRing" to fullRing, "fullRingOutsideHandler" to fullRingOutsideHandler,
+        "queuedBeforeWait" to queuedBeforeWait,
         "acceptPauses" to acceptPauses, "handshaking" to (live - established).toLong(), "handshakeQueue" to handshakes.size.toLong(),
         "handshakesStarted" to handshakesStarted, "abandoned" to abandoned, "probes" to probes.toLong(), "maxQueued" to maxQueued, "rxGuarded" to rxGuarded, "maxBatch" to maxBatch, "maxBatchMicros" to maxBatchNanos / 1000, "commitLateMaxMicros" to commitLateMaxNanos / 1000,
     ) + ring.counters()

@@ -24,10 +24,19 @@ kotlin {
         val jvmMain by getting {
             dependencies { implementation(project(":trikeshed")) }
         }
+        val jvmTest by getting {
+            dependencies { implementation(kotlin("test")) }
+        }
     }
 }
 
 // The generator's jars, flat in build/app.
+// RxPlacesTest, TinyRxReconnectTest: the client ring is FFM where the kernel's io_uring is available.
+tasks.withType<Test>().configureEach {
+    jvmArgs("--enable-native-access=ALL-UNNAMED")
+    testLogging { showStandardStreams = true }
+}
+
 tasks.register<Sync>("app") {
     from(tasks.named("jvmJar"))
     from(configurations.named("jvmRuntimeClasspath"))

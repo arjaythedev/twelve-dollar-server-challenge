@@ -1,6 +1,7 @@
 package borg.trikeshed.feed
 
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.CountDownLatch
 import borg.trikeshed.lib.j
 import borg.trikeshed.reactor.JvmTlsCodecBackend
@@ -35,29 +36,42 @@ class RingServerTest {
     private val seed = File(System.getProperty("feed.seed"))
     private val dir = Files.createTempDirectory("ringserver").toFile()
     private val token = Regex("\"token\":\"([^\"]+)\"").find(File(seed, "tokens.json").readText())!!.groupValues[1]
-    /** Everything a test opens, closed on every exit by [clean]: peers, then servers (stopped and joined). */
-    private val peers = ArrayList<Socket>()
-    private val servers = ArrayList<Running>()
-    private val helpers = ArrayList<Thread>()
+    /**
+     * Everything a test opens, closed on every exit by [clean] (an assertion failure included): peers, then helper
+     * threads (joined), then servers (stopped and joined), then the stores no live server thread still uses. Client
+     * threads of a test add to these at once, so they are concurrent collections.
+     */
+    private val peers = ConcurrentLinkedQueue<Socket>()
+    private val servers = ConcurrentLinkedQueue<Running>()
+    private val helpers = ConcurrentLinkedQueue<Thread>()
+    private val stores = ConcurrentLinkedQueue<SqliteStore>()
 
     @AfterTest
     fun clean() {
         for (p in peers) runCatching { p.close() }
         for (t in helpers) t.join(10_000)
         for (s in servers) s.stop()
+        // A store is closed only when no server thread may still use it: a never-started server's store included.
+        val inUse = servers.filter { it.thread.isAlive }.map { it.store }
+        for (st in stores) if (inUse.none { it === st }) runCatching { st.close() }
         dir.deleteRecursively()
         for (s in servers) assertFalse(s.thread.isAlive, "server thread ${s.thread.name} ended")
+        for (t in helpers) assertFalse(t.isAlive, "helper thread ${t.name} ended")
     }
 
     private fun store(): SqliteStore {
         val db = File(dir, "feed-${System.nanoTime()}.db")
         File(seed, "feed.db").copyTo(db)
-        return SqliteStore(db.path)
+        return SqliteStore(db.path).also(stores::add)
     }
+
+    /** A test's client thread, joined by [clean] on every exit. */
+    private fun helper(name: String, body: () -> Unit): Thread =
+        Thread(body, name).apply { isDaemon = true; helpers.add(this); start() }
 
     private fun freePort(): Int = ServerSocket(0).use { it.localPort }
 
-    private class Running(val server: RingServer, val port: Int, val thread: Thread) {
+    private class Running(val server: RingServer, val port: Int, val thread: Thread, val store: FeedStore) {
         @Volatile var failure: Throwable? = null
 
         /** Idempotent: true once the server's run has returned. */
@@ -79,7 +93,7 @@ class RingServerTest {
                 holder[0]!!.failure = error
             }
         }, "ring-$port")
-        val running = Running(server, port, t)
+        val running = Running(server, port, t, store)
         holder[0] = running
         servers.add(running)
         t.start()
@@ -88,20 +102,52 @@ class RingServerTest {
     }
 
     /**
-     * The kernel frees a closed io_uring's memory asynchronously, against the locked-memory limit: a test opening its
-     * ring right after earlier tests closed theirs can see io_uring_setup fail with ENOMEM (errno 12, seen on Kali
-     * after 17 native tests). That one setup failure is retried for up to 5 s; any other failure is the test's.
+     * Kali run k12: the 18th native test's io_uring_setup failed with ENOMEM (errno 12) while the 17 before it passed;
+     * afterwards the user had a 64 MiB locked-memory limit and 14.8 GiB was available. The cause is NOT established.
+     * Hypothesis under test: the kernel releases a closed ring's memory asynchronously, so a setup right after earlier
+     * rings closed can fail transiently. Only that failure (the native probe's "io_uring_setup failed: errno 12") is
+     * retried, for up to 5 s, and every attempt prints the process's memory facts, so a recovered retry is evidence for
+     * the hypothesis and a final failure carries the facts (the original failure is the one thrown). Any other failure
+     * is the test's at once.
      */
     private fun <T> openWithRetry(open: () -> T): T {
         val deadline = System.nanoTime() + 5_000_000_000L
+        var attempts = 0
         while (true) {
             try {
-                return open()
+                val opened = open()
+                if (attempts > 0) println("io_uring_setup ENOMEM retry: recovered after $attempts failed attempts; ${memoryFacts()}")
+                return opened
             } catch (failure: IllegalStateException) {
-                if (failure.message?.contains("errno 12") != true || System.nanoTime() > deadline) throw failure
+                if (failure.message?.contains("io_uring_setup failed: errno 12") != true) throw failure
+                attempts++
+                val facts = memoryFacts()
+                println("io_uring_setup ENOMEM retry: attempt $attempts failed; $facts")
+                if (System.nanoTime() > deadline) {
+                    failure.addSuppressed(IllegalStateException("unrecovered after $attempts attempts in 5 s; $facts"))
+                    throw failure
+                }
                 Thread.sleep(100)
             }
         }
+    }
+
+    /** The facts that bear on an io_uring ENOMEM, from /proc (Linux); what cannot be read says so. */
+    private fun memoryFacts(): String {
+        fun read(path: String) = runCatching { File(path).readLines() }.getOrElse { listOf("unreadable: $it") }
+        val limits = read("/proc/self/limits").filter { it.startsWith("Max locked memory") || it.startsWith("unreadable") }
+        val status = read("/proc/self/status").filter { it.startsWith("VmLck") || it.startsWith("VmPin") || it.startsWith("unreadable") }
+        val meminfo = read("/proc/meminfo").filter { it.startsWith("MemAvailable") || it.startsWith("unreadable") }
+        val rings = runCatching {
+            File("/proc/self/fd").listFiles()!!.count { runCatching { Files.readSymbolicLink(it.toPath()).toString() == "anon_inode:[io_uring]" }.getOrDefault(false) }
+        }.getOrElse { -1 }
+        val cgroup = read("/proc/self/cgroup").firstOrNull { it.startsWith("0::") }?.substringAfter("0::")
+        val memcg = cgroup?.let { g ->
+            listOf("memory.current", "memory.max", "memory.events").joinToString(" ") { f -> "$f=" + read("/sys/fs/cgroup$g/$f").joinToString("|") }
+        }
+        val liveServers = Thread.getAllStackTraces().keys.count { it.name.startsWith("ring-") && it.isAlive }
+        return "limits=${limits.map { it.replace(Regex(" +"), " ") }} status=$status meminfo=$meminfo openIoUringFds=$rings " +
+            "liveServerThreads=$liveServers cgroup=$cgroup $memcg"
     }
 
     private fun connect(port: Int): Socket = Socket().apply {
@@ -163,7 +209,7 @@ class RingServerTest {
     private fun stall(port: Int, count: Int): Socket {
         val s = connect(port)
         val many = "GET /feed HTTP/1.1\r\nHost: t\r\n\r\n".repeat(count).toByteArray()
-        helpers.add(Thread { runCatching { s.getOutputStream().write(many) } }.apply { isDaemon = true; start() })
+        helper("stall-${s.localPort}") { runCatching { s.getOutputStream().write(many) } }
         return s
     }
 
@@ -411,6 +457,28 @@ class RingServerTest {
     }
 
     @Test
+    fun completionsReapedWhileAdmittingHandshakesAreHandledBeforeTheLoopWaits() {
+        // An 8-entry ring and 40 first flights at once: admitting up to 16 probes per turn overfills the ring, so the
+        // stage reaps CQEs outside any handler, right before the loop would wait. They must be handled first.
+        val hellos = AtomicInteger()
+        val started = CountDownLatch(1)
+        val running = start(store()) { RingOptions(ports = listOf(it), entries = 8, sessions = { SlowHello(hellos, started, 1) }) }
+        val clients = List(40) { connect(running.port) }
+        val began = System.nanoTime()
+        for (c in clients) c.getOutputStream().write("h".toByteArray())
+        for ((i, c) in clients.withIndex()) assertEquals("OK", readExactly(c, 2), "client $i's handshake ran")
+        val millis = (System.nanoTime() - began) / 1_000_000
+        val s = running.server
+        println("queued before wait: ${s.queuedBeforeWait} turns, full ring outside a handler ${s.fullRingOutsideHandler}, 40 handshakes in $millis ms")
+        assertEquals(40, hellos.get())
+        assertTrue(s.fullRingOutsideHandler > 0, "admitting probes overfilled the ring outside a handler")
+        assertTrue(s.queuedBeforeWait > 0, "the loop found the reaped CQEs before waiting")
+        assertTrue(running.stop())
+        assertNull(running.failure)
+        assertEquals(0, running.server.unfinished)
+    }
+
+    @Test
     fun aClientThatLeavesWhileItsHandshakeWaitsCostsNoHandshake() {
         val hellos = AtomicInteger()
         val started = CountDownLatch(1)
@@ -484,7 +552,7 @@ class RingServerTest {
         repeat(3) { round ->
             val outcomes = arrayOfNulls<String>(peers)
             val threads = (0 until peers).map { i ->
-                Thread {
+                helper("tinyrx-$round-$i") {
                     outcomes[i] = runCatching {
                         val s = connect(running.port)
                         s.getOutputStream().write("GET /health HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n".toByteArray())
@@ -495,7 +563,7 @@ class RingServerTest {
                         s.getOutputStream().write("2".toByteArray())
                         "$status ${String(drain(s))}"
                     }.getOrElse { "failed: $it" }
-                }.apply { start() }
+                }
             }
             for (t in threads) t.join(30_000)
             assertNull(running.failure, "the server loop kept one watch, read or queued wait per connection")
@@ -516,8 +584,8 @@ class RingServerTest {
         val go = java.util.concurrent.atomic.AtomicBoolean(true)
         val answered = java.util.concurrent.atomic.AtomicLong()
         val burst = "GET /health HTTP/1.1\r\nHost: t\r\n\r\n".repeat(32).toByteArray()
-        val clients = (0 until 16).map {
-            Thread {
+        val clients = (0 until 16).map { i ->
+            helper("sustained-$i") {
                 runCatching {
                     val s = connect(running.port)
                     val buffer = ByteArray(65536)
@@ -532,14 +600,20 @@ class RingServerTest {
                         answered.addAndGet(32)
                     }
                 }
-            }.apply { isDaemon = true; start() }
+            }
         }
-        Thread.sleep(1500)
-        assertTrue(answered.get() > 0, "load reached the server")
-        val began = System.nanoTime()
-        assertTrue(running.stop(), "the loop stopped while completions kept arriving")
+        var began = 0L
+        var stopped = false
+        try {
+            Thread.sleep(1500)
+            assertTrue(answered.get() > 0, "load reached the server")
+            began = System.nanoTime()
+            stopped = running.stop()
+        } finally {
+            go.set(false)
+        }
+        assertTrue(stopped, "the loop stopped while completions kept arriving")
         val stopMillis = (System.nanoTime() - began) / 1_000_000
-        go.set(false)
         for (c in clients) c.join(10_000)
         assertNull(running.failure)
         assertTrue(running.server.drained)

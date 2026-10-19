@@ -137,6 +137,8 @@ class Plan(
     val seed: Long, val timeoutNanos: Long, val sources: List<String>,
     /** 0: wait for completions in io_uring_enter. Else park in user space for at most this long between peeks. */
     val parkNanos: Long = 0L,
+    /** Receive windows per worker (the tiny-pool regression uses 1). */
+    val rxWindows: Int = WINDOWS,
 ) {
     val started = System.nanoTime() + 1_000_000_000L
     val canonicalStart get() = started + rampNanos
@@ -214,7 +216,38 @@ class Vu(val index: Int, val local: Int, val user: Int, val port: Int) {
     var sendDone = 0
     var polling = false
     var receiving = false
+    /** Holding a place in its worker's window queue ([RxPlaces]); like the watch and the RECV, one at most. */
+    var rxQueued = false
     var request: ByteArray? = null
+}
+
+/**
+ * Users waiting for a receive window, in order. A place names the user's connection generation, so a place left by a
+ * connection that closed (a timeout, a reset) is void: a reconnected user never inherits it, and never gets a RECV on
+ * its new socket while that socket's watch is armed. A user holds at most one place, and none while it watches or
+ * reads.
+ */
+class RxPlaces(private val users: Array<Vu>) {
+    private val places = ArrayDeque<Long>()
+    val size: Int get() = places.size
+
+    fun queue(v: Vu) {
+        check(!v.rxQueued && !v.polling && !v.receiving) { "user ${v.index}: a second place, watch or read" }
+        v.rxQueued = true
+        places.addLast((v.local.toLong() shl 28) or v.gen.toLong())
+    }
+
+    /** The next user whose place is still its own and who may read now, or null; void places are dropped. */
+    fun next(): Vu? {
+        while (places.isNotEmpty()) {
+            val place = places.removeFirst()
+            val v = users[(place ushr 28).toInt()]
+            if (v.gen != (place and 0x0FFFFFFFL).toInt() || !v.rxQueued) continue
+            v.rxQueued = false
+            if (v.connected && !v.receiving && !v.polling) return v
+        }
+        return null
+    }
 }
 
 /**
@@ -229,14 +262,14 @@ class Worker(val plan: Plan, val id: Int, val vus: Array<Vu>) : Runnable {
     private val ring: LiburingFacade = openLiburingFacade(plan.entries, plan.mode)
     val backend: String = ring.availability
     private val arena = Arena.ofShared()
-    private val rx = arena.allocate((RX * WINDOWS).toLong(), 64)
+    private val rx = arena.allocate((RX * plan.rxWindows).toLong(), 64)
     private val tx = arena.allocate((TX * WINDOWS).toLong(), 64)
-    private val rxFree = IntArray(WINDOWS) { it }
-    private var rxTop = WINDOWS
+    private val rxFree = IntArray(plan.rxWindows) { it }
+    private var rxTop = plan.rxWindows
     private val txFree = IntArray(WINDOWS) { it }
     private var txTop = WINDOWS
     private val txOf = IntArray(vus.size) { -1 }
-    private val waitRx = ArrayDeque<Vu>()
+    private val waitRx = RxPlaces(vus)
     private val waitTx = ArrayDeque<Vu>()
     private val rxHeap = ByteArray(RX)
     private val addresses = HashMap<Int, MemorySegment>()
@@ -577,7 +610,7 @@ class Worker(val plan: Plan, val id: Int, val vus: Array<Vu>) : Runnable {
     }
 
     private fun pollIn(v: Vu) {
-        if (v.polling || v.receiving || !v.connected) return
+        if (v.polling || v.receiving || v.rxQueued || !v.connected) return
         v.polling = true
         stage { ring.prepPollAdd(v.fd, 1, token(v, OP_POLL_IN)) }
     }
@@ -662,7 +695,8 @@ class Worker(val plan: Plan, val id: Int, val vus: Array<Vu>) : Runnable {
             OP_POLL_IN -> if (current && v.connected && v.polling) {
                 v.polling = false
                 if (res < 0) { errno(res); lost(v, Reason.RECV); return }
-                if (rxTop == 0) waitRx.addLast(v) else recv(v, rxFree[--rxTop])
+                if (v.receiving || v.rxQueued) return
+                if (rxTop == 0) waitRx.queue(v) else recv(v, rxFree[--rxTop])
             }
             OP_CLOSE -> {}
         }
@@ -686,16 +720,15 @@ class Worker(val plan: Plan, val id: Int, val vus: Array<Vu>) : Runnable {
     }
 
     private fun recv(v: Vu, window: Int) {
+        check(!v.receiving && !v.polling && !v.rxQueued) { "user ${v.index}: a second read" }
         v.receiving = true
         stage { ring.prepRecv(v.fd, rx.address() + window.toLong() * RX, RX, 0, token(v, OP_RECV, window)) }
     }
 
     /** A window back from its CQE goes to the next user waiting for one, else to the pool. */
     private fun releaseRx(window: Int) {
-        while (waitRx.isNotEmpty()) {
-            val next = waitRx.removeFirst()
-            if (next.connected && !next.receiving) { recv(next, window); return }
-        }
+        val next = waitRx.next()
+        if (next != null) { recv(next, window); return }
         rxFree[rxTop++] = window
     }
 
@@ -857,6 +890,7 @@ class Worker(val plan: Plan, val id: Int, val vus: Array<Vu>) : Runnable {
         v.responseSize = 0
         v.polling = false
         v.receiving = false
+        v.rxQueued = false
         v.sending = false
         txOf[v.local] = -1
         // SQEs still in flight for this connection carry its generation; their CQEs return their windows.

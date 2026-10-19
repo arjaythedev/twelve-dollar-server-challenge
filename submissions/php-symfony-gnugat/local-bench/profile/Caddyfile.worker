@@ -4,6 +4,7 @@
 	admin off
 
 	frankenphp {
+		max_threads 8
 		php_ini auto_prepend_file /app/local-bench/profile/excimer.php
 		worker {
 			file ./public/index.php

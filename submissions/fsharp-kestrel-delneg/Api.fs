@@ -1,21 +1,17 @@
-/// The whole API as Kestrel's IHttpApplication: Kestrel parses HTTP and gives us its feature collection.
-/// There is no middleware, no HttpContext and no routing table. The path is matched by hand.
-/// Reads run start to finish on the socket thread: SQLite is in-process and every query is an index lookup.
-module App
+/// The five endpoints. Each handler writes one whole HTTP/1.1 response (status line, headers, JSON body) into the
+/// connection's output pipe. Reads run start to finish on the socket thread: SQLite is in-process and every query
+/// is an index lookup, so nothing waits.
+module Api
 
 #nowarn "9"
 
 open System
 open System.Buffers
-open System.Globalization
-open System.IO.Pipelines
+open System.Buffers.Text
 open System.Text
 open System.Text.Encodings.Web
 open System.Text.Json
 open System.Threading.Tasks
-open Microsoft.AspNetCore.Hosting.Server
-open Microsoft.AspNetCore.Http.Features
-open Microsoft.Extensions.Primitives
 
 let NotFound = """{"error":"not found"}"""B
 let InvalidId = """{"error":"invalid post id"}"""B
@@ -25,10 +21,68 @@ let BodyRequired = """{"error":"body is required"}"""B
 let BodyTooLong = """{"error":"body must be at most 500 characters"}"""B
 let Internal = """{"error":"internal server error"}"""B
 
-let private jsonType = StringValues "application/json"
 let private startedAt = Environment.TickCount64
 
-// One JSON buffer, used only while `Db.gate` is held, and copied into Kestrel's pipe before the lock is released.
+// ---- HTTP framing ------------------------------------------------------------------------------------------------
+
+let private statusLine (status: int) : byte[] =
+    match status with
+    | 200 -> "HTTP/1.1 200 OK\r\n"B
+    | 201 -> "HTTP/1.1 201 Created\r\n"B
+    | 400 -> "HTTP/1.1 400 Bad Request\r\n"B
+    | 401 -> "HTTP/1.1 401 Unauthorized\r\n"B
+    | 404 -> "HTTP/1.1 404 Not Found\r\n"B
+    | 503 -> "HTTP/1.1 503 Service Unavailable\r\n"B
+    | _ -> "HTTP/1.1 500 Internal Server Error\r\n"B
+
+let private headers1 = "Content-Type: application/json\r\nDate: "B
+let private headers2 = "\r\nContent-Length: "B
+let private closeHeader = "\r\nConnection: close"B
+let private crlf2 = "\r\n\r\n"B
+
+/// The Date header value (RFC 1123, 29 bytes), formatted again only when the second changes.
+let private date = Array.zeroCreate<byte> 29
+let mutable private dateSecond = 0L
+
+let private refreshDate () =
+    let now = DateTime.UtcNow
+    let s = now.Ticks / TimeSpan.TicksPerSecond
+    if s <> dateSecond then
+        let mutable n = 0
+        Utf8Formatter.TryFormat(now, Span date, &n, StandardFormat 'R') |> ignore
+        dateSecond <- s
+
+/// Writes a whole response into the pipe: status line, Content-Type, Date, Content-Length, then the body.
+let respond (w: IBufferWriter<byte>) (status: int) (close: bool) (body: ReadOnlySpan<byte>) =
+    refreshDate ()
+    let line = statusLine status
+    let size = line.Length + headers1.Length + 29 + headers2.Length + 11 + closeHeader.Length + 4 + body.Length
+    let span = w.GetSpan size
+    let mutable i = 0
+    line.CopyTo(span)
+    i <- line.Length
+    headers1.CopyTo(span.Slice i)
+    i <- i + headers1.Length
+    date.CopyTo(span.Slice i)
+    i <- i + 29
+    headers2.CopyTo(span.Slice i)
+    i <- i + headers2.Length
+    let mutable n = 0
+    Utf8Formatter.TryFormat(body.Length, span.Slice i, &n) |> ignore
+    i <- i + n
+    if close then
+        closeHeader.CopyTo(span.Slice i)
+        i <- i + closeHeader.Length
+    crlf2.CopyTo(span.Slice i)
+    i <- i + 4
+    body.CopyTo(span.Slice i)
+    w.Advance(i + body.Length)
+
+let send (w: IBufferWriter<byte>) (status: int) (close: bool) (body: byte[]) = respond w status close (ReadOnlySpan body)
+
+// ---- JSON --------------------------------------------------------------------------------------------------------
+
+// One JSON buffer, used only while `Db.gate` is held, and copied into the pipe before the lock is released.
 let private buffer = ArrayBufferWriter<byte>(16384)
 let private json =
     new Utf8JsonWriter(
@@ -59,29 +113,10 @@ let private jsWhitespace =
     "\t\n\u000b\u000c\r                  　﻿"
         .ToCharArray()
 
-// Kestrel's request object implements all these features itself, so a cast finds them. Get<T> is the fallback.
-let inline private feature<'T when 'T: null> (f: IFeatureCollection) : 'T =
-    match box f with
-    | :? 'T as x -> x
-    | _ -> f.Get<'T>()
-
-/// Sets the status and headers and copies the body into Kestrel's pipe. Kestrel flushes it when the request ends.
-let private write (f: IFeatureCollection) (status: int) (body: ReadOnlySpan<byte>) =
-    let r = feature<IHttpResponseFeature> f
-    r.StatusCode <- status
-    let h = r.Headers
-    h.ContentType <- jsonType
-    h.ContentLength <- Nullable(int64 body.Length)
-    (feature<IHttpResponseBodyFeature> f).Writer.Write(body)
-
-let private send (f: IFeatureCollection) (status: int) (body: byte[]) : Task =
-    write f status (ReadOnlySpan body)
-    Task.CompletedTask
-
-/// Call with `Db.gate` held: sends what the JSON writer holds and clears it.
-let private writeJson (f: IFeatureCollection) (status: int) =
+/// Call with `Db.gate` held: sends what the JSON writer holds as the response body, and clears it.
+let private writeJson (w: IBufferWriter<byte>) (status: int) (close: bool) =
     json.Flush()
-    write f status buffer.WrittenSpan
+    respond w status close buffer.WrittenSpan
     json.Reset(buffer)
     buffer.ResetWrittenCount()
 
@@ -99,13 +134,9 @@ let private writePost (st: nativeint) =
     json.WriteNumber(pLikeCount, Sqlite.column_int64(st, 4))
     json.WriteEndObject()
 
-/// A post id: ASCII digits only, no sign or separators, above zero. 0 means invalid.
-let private parseId (s: ReadOnlySpan<char>) =
-    let mutable id = 0L
-    if s.Length > 0 && s.Length <= 18 && Int64.TryParse(s, NumberStyles.None, CultureInfo.InvariantCulture, &id) && id > 0L then id
-    else 0L
+// ---- Endpoints ---------------------------------------------------------------------------------------------------
 
-let private health (f: IFeatureCollection) : Task =
+let health (w: IBufferWriter<byte>) (close: bool) =
     lock Db.gate (fun () ->
         try
             try
@@ -118,7 +149,7 @@ let private health (f: IFeatureCollection) : Task =
             json.WriteString(pDb, vOk)
             json.WriteNumber(pUptime, (Environment.TickCount64 - startedAt) / 1000L)
             json.WriteEndObject()
-            writeJson f 200
+            writeJson w 200 close
         with e ->
             clear ()
             json.WriteStartObject()
@@ -126,10 +157,9 @@ let private health (f: IFeatureCollection) : Task =
             json.WriteString(pDb, vUnreachable)
             json.WriteString(pError, e.Message)
             json.WriteEndObject()
-            writeJson f 503)
-    Task.CompletedTask
+            writeJson w 503 close)
 
-let private feed (f: IFeatureCollection) : Task =
+let feed (w: IBufferWriter<byte>) (close: bool) =
     lock Db.gate (fun () ->
         let st = Db.feed
         try
@@ -141,10 +171,9 @@ let private feed (f: IFeatureCollection) : Task =
             json.WriteEndObject()
         finally
             Sqlite.reset st |> ignore
-        writeJson f 200)
-    Task.CompletedTask
+        writeJson w 200 close)
 
-let private getPost (f: IFeatureCollection) (id: int64) : Task =
+let getPost (w: IBufferWriter<byte>) (close: bool) (id: int64) =
     let found =
         lock Db.gate (fun () ->
             let st = Db.post
@@ -155,13 +184,13 @@ let private getPost (f: IFeatureCollection) (id: int64) : Task =
                     json.WritePropertyName(pPost)
                     writePost st
                     json.WriteEndObject()
-                    writeJson f 200
+                    writeJson w 200 close
                     true
                 else
                     false
             finally
                 Sqlite.reset st |> ignore)
-    if found then Task.CompletedTask else send f 404 PostNotFound
+    if not found then send w 404 close PostNotFound
 
 let private postExists (id: int64) =
     let st = Db.postExists
@@ -171,7 +200,8 @@ let private postExists (id: int64) =
     finally
         Sqlite.reset st |> ignore
 
-let private like (f: IFeatureCollection) (userId: int64) (id: int64) : Task =
+/// Returns null when the response is written, or a Task that writes it (only while a WAL catch-up holds writes).
+let like (w: IBufferWriter<byte>) (close: bool) (userId: int64) (id: int64) : Task =
     let likeIt () =
         lock Db.gate (fun () ->
             let st = Db.insertLike
@@ -192,23 +222,23 @@ let private like (f: IFeatureCollection) (userId: int64) (id: int64) : Task =
                 json.WriteBoolean(pAlreadyLiked, not inserted)
                 json.WriteNumber(pPostId, id)
                 json.WriteEndObject()
-                writeJson f (if inserted then 201 else 200)
+                writeJson w (if inserted then 201 else 200) close
                 true
             else
                 false)
-    let finish found = if found then Task.CompletedTask else send f 404 PostNotFound
     let r = Db.runWrite likeIt
     if r.IsCompletedSuccessfully then
-        finish r.Result
+        if not r.Result then send w 404 close PostNotFound
+        null
     else
         task {
             let! found = r
-            return! finish found
+            if not found then send w 404 close PostNotFound
         }
         :> Task
 
 /// The 400 body, or null when the post body is valid. Reads the whole document, so trailing junk is an error.
-let private parseBody (data: ReadOnlySequence<byte>) (body: byref<string>) : byte[] =
+let private parseBody (data: ReadOnlySpan<byte>) (body: byref<string>) : byte[] =
     let mutable value: string = null
     let mutable isObject = false
     let mutable malformed = false
@@ -236,7 +266,7 @@ let private parseBody (data: ReadOnlySequence<byte>) (body: byref<string>) : byt
             body <- trimmed
             null
 
-let private insertPost (f: IFeatureCollection) (userId: int64) (username: string) (body: string) =
+let private insertPost (w: IBufferWriter<byte>) (close: bool) (userId: int64) (username: string) (body: string) =
     let utf8 = Encoding.UTF8.GetBytes body
     lock Db.gate (fun () ->
         let st = Db.insertPost
@@ -260,100 +290,18 @@ let private insertPost (f: IFeatureCollection) (userId: int64) (username: string
                 clear ()
                 raise (Db.failure ())
             Db.writes <- Db.writes + 1
-            writeJson f 201
+            writeJson w 201 close
         finally
             Sqlite.reset st |> ignore)
 
-let private createWith (f: IFeatureCollection) (userId: int64) (username: string) (data: ReadOnlySequence<byte>) : Task =
+/// Returns null when the response is written, or a Task that writes it.
+let createPost (w: IBufferWriter<byte>) (close: bool) (userId: int64) (username: string) (data: ReadOnlySpan<byte>) : Task =
     let mutable body: string = null
     match parseBody data &body with
     | null ->
-        let r = Db.runWrite (fun () -> insertPost f userId username body)
-        if r.IsCompletedSuccessfully then Task.CompletedTask else r.AsTask() :> Task
-    | error -> send f 400 error
-
-let private createPost (f: IFeatureCollection) (userId: int64) (username: string) : Task =
-    let reader = (feature<IRequestBodyPipeFeature> f).Reader
-    let mutable result = Unchecked.defaultof<ReadResult>
-    // The body of a small POST is almost always in Kestrel's buffer already: then no async state machine runs.
-    let got = reader.TryRead(&result)
-    if got && result.IsCompleted then
-        let t = createWith f userId username result.Buffer
-        reader.AdvanceTo(result.Buffer.End)
-        t
-    else
-        if got then
-            reader.AdvanceTo(result.Buffer.Start, result.Buffer.End)
-        task {
-            let mutable reading = true
-            while reading do
-                let! r = reader.ReadAsync()
-                result <- r
-                if r.IsCompleted then reading <- false
-                else reader.AdvanceTo(r.Buffer.Start, r.Buffer.End)
-            let t = createWith f userId username result.Buffer
-            reader.AdvanceTo(result.Buffer.End)
-            return! t
-        }
-        :> Task
-
-let private authorization (req: IHttpRequestFeature) : string =
-    let v = req.Headers.Authorization
-    if v.Count = 0 then null else v.[0]
-
-let private handle (f: IFeatureCollection) : Task =
-    let req = feature<IHttpRequestFeature> f
-    let path = req.Path
-    let m = req.Method
-    if String.Equals(m, "GET", StringComparison.Ordinal) then
-        if path = "/feed" then feed f
-        elif path.StartsWith("/posts/", StringComparison.Ordinal) && path.IndexOf('/', 7) < 0 then
-            let id = parseId (path.AsSpan 7)
-            if id = 0L then send f 400 InvalidId else getPost f id
-        elif path = "/health" then health f
-        else send f 404 NotFound
-    elif String.Equals(m, "POST", StringComparison.Ordinal) then
-        if path = "/posts" then
-            let mutable userId = 0L
-            let mutable username: string = null
-            match Auth.verify (authorization req) &userId &username with
-            | null -> createPost f userId username
-            | authError -> send f 401 authError
-        elif path.StartsWith("/posts/", StringComparison.Ordinal) && path.EndsWith("/like", StringComparison.Ordinal)
-             && path.Length > 12 && path.IndexOf('/', 7) = path.Length - 5 then
-            // Auth first, then the id (SPEC).
-            let mutable userId = 0L
-            let mutable username: string = null
-            match Auth.verify (authorization req) &userId &username with
-            | null ->
-                let id = parseId (path.AsSpan(7, path.Length - 12))
-                if id = 0L then send f 400 InvalidId else like f userId id
-            | authError -> send f 401 authError
-        else send f 404 NotFound
-    else
-        send f 404 NotFound
-
-let private fail (f: IFeatureCollection) =
-    if not (feature<IHttpResponseFeature> f).HasStarted then
-        send f 500 Internal
-    else
-        Task.CompletedTask
-
-/// Any exception before the response starts becomes the spec's 500 body.
-let private run (f: IFeatureCollection) : Task =
-    let t =
-        try handle f
-        with _ -> fail f
-    if t.IsCompletedSuccessfully then t
-    else
-        task {
-            try do! t
-            with _ -> do! fail f
-        }
-        :> Task
-
-type Application() =
-    interface IHttpApplication<IFeatureCollection> with
-        member _.CreateContext(features) = features
-        member _.ProcessRequestAsync(f) = run f
-        member _.DisposeContext(_, _) = ()
+        let body = body
+        let r = Db.runWrite (fun () -> insertPost w close userId username body)
+        if r.IsCompletedSuccessfully then null else r.AsTask() :> Task
+    | error ->
+        send w 400 close error
+        null

@@ -19,7 +19,8 @@
     <Compile Include="Sqlite.fs" />
     <Compile Include="Db.fs" />
     <Compile Include="Auth.fs" />
-    <Compile Include="App.fs" />
+    <Compile Include="Api.fs" />
+    <Compile Include="Conn.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
   <ItemGroup>

@@ -1,13 +1,12 @@
-/// HS256 JWT check by hand. The signature and exp are verified on every request (rule 5: nothing is remembered).
+/// HS256 JWT check by hand, on the raw header bytes. The signature and exp are verified on every request
+/// (rule 5: nothing is remembered).
 module Auth
 
 #nowarn "9"
 
 open System
 open System.Buffers.Text
-open System.Globalization
 open System.Security.Cryptography
-open System.Text
 open System.Text.Json
 open Microsoft.FSharp.NativeInterop
 
@@ -32,10 +31,6 @@ let inline private stackSpan<'T when 'T: unmanaged> (n: int) =
 
 let inline private ro (s: Span<byte>) : ReadOnlySpan<byte> = Span<byte>.op_Implicit s
 
-let inline private part (token: ReadOnlySpan<char>) (r: Range) =
-    let struct (offset, length) = r.GetOffsetAndLength(token.Length)
-    token.Slice(offset, length)
-
 let private isHs256 (json: ReadOnlySpan<byte>) =
     try
         let mutable r = Utf8JsonReader(json)
@@ -55,10 +50,17 @@ let private isHs256 (json: ReadOnlySpan<byte>) =
 
 /// The payload's `sub`: a string of ASCII digits, a positive integer.
 let private parseSub (r: byref<Utf8JsonReader>) (id: byref<int64>) =
-    if r.TokenType <> JsonTokenType.String || r.ValueIsEscaped || r.ValueSpan.Length > 19 then
+    if r.TokenType <> JsonTokenType.String || r.ValueIsEscaped || r.ValueSpan.Length > 18 || r.ValueSpan.Length = 0 then
         false
     else
-        Int64.TryParse(r.ValueSpan, NumberStyles.None, CultureInfo.InvariantCulture, &id) && id > 0L
+        let s = r.ValueSpan
+        let mutable v = 0L
+        let mutable ok = true
+        for i in 0 .. s.Length - 1 do
+            let c = s.[i]
+            if c < '0'B || c > '9'B then ok <- false else v <- v * 10L + int64 (c - '0'B)
+        id <- v
+        ok && v > 0L
 
 let private readPayload (json: ReadOnlySpan<byte>) (userId: byref<int64>) (username: byref<string>) : byte[] =
     let mutable subOk = false
@@ -92,36 +94,36 @@ let private readPayload (json: ReadOnlySpan<byte>) (userId: byref<int64>) (usern
         username <- name
         null
 
-/// Checks the Authorization header. Returns the 401 body, or null when the token is valid.
-let verify (header: string) (userId: byref<int64>) (username: byref<string>) : byte[] =
-    if isNull header || not (header.StartsWith("Bearer ", StringComparison.Ordinal)) then
+/// Checks the Authorization header value (raw bytes; empty when there is none).
+/// Returns the 401 body, or null when the token is valid.
+let verify (header: ReadOnlySpan<byte>) (userId: byref<int64>) (username: byref<string>) : byte[] =
+    if not (header.StartsWith("Bearer "B)) then
         MissingBearer
     else
-        let token = header.AsSpan(7)
-        let parts = stackSpan<Range> 4
-        if token.Length > 2048 || MemoryExtensions.Split(token, parts, '.') <> 3 then
+        let token = header.Slice 7
+        let d1 = token.IndexOf '.'B
+        let d2 = if d1 < 0 then -1 else (let j = token.Slice(d1 + 1).IndexOf '.'B in if j < 0 then -1 else d1 + 1 + j)
+        if token.Length > 2048 || d1 < 0 || d2 < 0 || token.Slice(d2 + 1).IndexOf '.'B >= 0 then
             InvalidToken
         else
             let json = stackSpan<byte> 1536
+            let mutable consumed = 0
             let mutable n = 0
-            if not (Base64Url.TryDecodeFromChars(part token parts.[0], json, &n))
+            if Base64Url.DecodeFromUtf8(token.Slice(0, d1), json, &consumed, &n) <> Buffers.OperationStatus.Done
                || not (isHs256 (ro (json.Slice(0, n)))) then
                 InvalidToken
             else
-                let signingEnd = parts.[1].End.GetOffset(token.Length)
-                let input = stackSpan<byte> 2048
-                let inputLength = Encoding.ASCII.GetBytes(token.Slice(0, signingEnd), input)
                 let expected = stackSpan<byte> 32
                 let hmac = Hmac.Get()
-                hmac.AppendData(ro (input.Slice(0, inputLength)))
+                hmac.AppendData(token.Slice(0, d2))
                 hmac.GetHashAndReset(expected) |> ignore
                 let signature = stackSpan<byte> 64
                 let mutable sigLength = 0
-                if not (Base64Url.TryDecodeFromChars(part token parts.[2], signature, &sigLength))
+                if Base64Url.DecodeFromUtf8(token.Slice(d2 + 1), signature, &consumed, &sigLength) <> Buffers.OperationStatus.Done
                    || sigLength <> 32
                    || not (CryptographicOperations.FixedTimeEquals(ro (signature.Slice(0, 32)), ro expected)) then
                     InvalidToken
-                elif not (Base64Url.TryDecodeFromChars(part token parts.[1], json, &n)) then
+                elif Base64Url.DecodeFromUtf8(token.Slice(d1 + 1, d2 - d1 - 1), json, &consumed, &n) <> Buffers.OperationStatus.Done then
                     InvalidToken
                 else
                     readPayload (ro (json.Slice(0, n))) &userId &username

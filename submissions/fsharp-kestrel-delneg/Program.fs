@@ -4,10 +4,11 @@ open System
 open System.Net
 open System.Text
 open System.Threading
+open System.Threading.Tasks
 open Microsoft.AspNetCore.Builder
+open Microsoft.AspNetCore.Connections
 open Microsoft.AspNetCore.Hosting
 open Microsoft.AspNetCore.Hosting.Server
-open Microsoft.AspNetCore.Server.Kestrel.Core
 open Microsoft.Extensions.DependencyInjection
 
 let env name fallback =
@@ -15,6 +16,14 @@ let env name fallback =
     | null
     | "" -> fallback
     | v -> v
+
+/// Kestrel needs an IHttpApplication to start, but the connection handler answers every request itself,
+/// so Kestrel's HTTP layer never calls this.
+type private Unused() =
+    interface IHttpApplication<obj> with
+        member _.CreateContext(_) = null
+        member _.ProcessRequestAsync(_) = Task.CompletedTask
+        member _.DisposeContext(_, _) = ()
 
 [<EntryPoint>]
 let main _ =
@@ -32,13 +41,12 @@ let main _ =
             o.Backlog <- 65535) // the kernel caps it at somaxconn; a ramp of new users should not overflow it
         .ConfigureKestrel(fun o ->
             o.AddServerHeader <- false
-            o.Limits.KeepAliveTimeout <- TimeSpan.FromSeconds 120.0 // SPEC: keep idle connections at least 65 s
-            o.Limits.MinRequestBodyDataRate <- null
-            o.Listen(IPAddress.Parse(env "HOST" "127.0.0.1"), int (env "PORT" "3000"), fun l -> l.Protocols <- HttpProtocols.Http1))
+            // Our connection handler goes first and never calls the next one (Kestrel's HTTP layer).
+            o.Listen(IPAddress.Parse(env "HOST" "127.0.0.1"), int (env "PORT" "3000"), fun l ->
+                l.Use(fun (_: ConnectionDelegate) -> ConnectionDelegate Conn.run) |> ignore))
     |> ignore
     let app = builder.Build()
-    // Kestrel with our IHttpApplication: no middleware pipeline, no HttpContext, no routing.
     let server = app.Services.GetRequiredService<IServer>()
-    server.StartAsync(App.Application(), CancellationToken.None).GetAwaiter().GetResult()
+    server.StartAsync(Unused(), CancellationToken.None).GetAwaiter().GetResult()
     Thread.Sleep Timeout.Infinite
     0

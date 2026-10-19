@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# Fetches the pinned lunet v0.13.0 release archive and stages it into .lunet/.
 # This is an install of a pinned official release, not a source build. Run as a
 # normal user; re-running is safe.
 set -euo pipefail

@@ -6,15 +6,9 @@ namespace App\Controller;
 
 use App\Api\LikeOutput;
 use App\Api\PostOutput;
-use App\Entity\Post;
-use App\Entity\PostLike;
-use App\Entity\User;
-use App\ReadModel\PostView;
 use App\Repository\PostLikeRepository;
 use App\Repository\PostRepository;
 use App\Security\JwtUser;
-use Doctrine\DBAL\Exception\UniqueConstraintViolationException;
-use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Response;
@@ -33,7 +27,6 @@ final class PostController extends AbstractController
     public function __construct(
         private readonly PostRepository $posts,
         private readonly PostLikeRepository $likes,
-        private readonly EntityManagerInterface $entityManager,
         private readonly JsonStreamWriter $jsonStreamWriter,
     ) {
     }
@@ -64,15 +57,8 @@ final class PostController extends AbstractController
         #[MapRequestPayload(validationFailedStatusCode: Response::HTTP_BAD_REQUEST)]
         CreatePostPayload $payload,
     ): JsonResponse {
-        $author = $this->entityManager->getReference(User::class, $user->id)
-            ?? throw new \LogicException('user reference not available');
-
-        $post = Post::fromPayload($author, $payload);
-        $this->entityManager->persist($post);
-        $this->entityManager->flush();
-
         return $this->writeJson(
-            new PostOutput(PostView::fromPost($post, $user->username)),
+            new PostOutput($this->posts->create($user, $payload)),
             Response::HTTP_CREATED,
         );
     }
@@ -84,34 +70,18 @@ final class PostController extends AbstractController
         #[ValueResolver(PostId::class)]
         int $id,
     ): JsonResponse {
-        $post = $this->posts->find($id)
-            ?? throw new NotFoundHttpException('post not found');
-        $liker = $this->entityManager->getReference(User::class, $user->id)
-            ?? throw new \LogicException('user reference not available');
-
-        $alreadyLiked = null !== $this->likes->findOneBy([
-            'user' => $liker,
-            'post' => $post,
-        ]);
-        if (!$alreadyLiked) {
-            try {
-                $this->entityManager->persist(new PostLike(
-                    $liker,
-                    $post,
-                ));
-                $this->entityManager->flush();
-            } catch (UniqueConstraintViolationException) {
-                $alreadyLiked = true; // liked by a concurrent request
-            }
+        $added = $this->likes->add($user->id, $id);
+        if (!$added && !$this->posts->exists($id)) {
+            throw new NotFoundHttpException('post not found');
         }
 
         return $this->writeJson(
             new LikeOutput(
                 true,
-                $alreadyLiked,
+                !$added,
                 $id,
             ),
-            $alreadyLiked ? Response::HTTP_OK : Response::HTTP_CREATED,
+            $added ? Response::HTTP_CREATED : Response::HTTP_OK,
         );
     }
 

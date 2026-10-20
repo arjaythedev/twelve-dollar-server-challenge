@@ -51,13 +51,15 @@ SQLITE_PATH=... JWT_SECRET=... HOST=0.0.0.0 PORT=80 bash start.sh
   slices written directly.
 - **Gin in release mode, no middleware but recovery.** No logger means nothing written to stdout
   per request, and trusted proxies are off. Unknown paths hit `NoRoute` and return a real 404.
-- **Pragmas**: `journal_mode=WAL`, `synchronous=NORMAL` (rule 6), 5 s busy timeout,
-  `locking_mode=EXCLUSIVE`, and a 64 MiB page cache via mattn/go-sqlite3 DSN keys
-  (`_journal_mode`, `_synchronous`, `_busy_timeout`, `_locking_mode`, `_cache_size`), plus
+- **Pragmas**: `journal_mode=WAL`, `synchronous=NORMAL` (rule 6), a 5 s busy timeout,
+  and a 64 MiB page cache via mattn/go-sqlite3 DSN keys
+  (`_journal_mode`, `_synchronous`, `_busy_timeout`, `_cache_size`), plus
   `temp_store=MEMORY` and a 256 MiB `mmap_size` through a `ConnectHook` so every pooled connection
   gets them. Note the driver has no generic `_pragma=` DSN syntax — that's modernc.org/sqlite.
 - **Connection pool capped at 16.** One vCPU can't usefully run more SQLite work in parallel; the
   cap bounds memory and file handles under load.
+- **`GOGC=300` by default.** A controlled one-core load run reduced garbage-collection work without
+  materially increasing RSS; set `GOGC` explicitly to override it.
 - **The schema is used exactly as given.** `created_at` comes from the column default
   (`strftime('%Y-%m-%dT%H:%M:%fZ','now')`), read back in the same statement via
   `INSERT ... RETURNING`.

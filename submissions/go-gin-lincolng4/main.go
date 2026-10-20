@@ -46,7 +46,7 @@ func init() {
 }
 
 func connect(path string) *sql.DB {
-	dsn := "file:" + path + "?_journal_mode=WAL&_synchronous=NORMAL&_busy_timeout=5000&_cache_size=-65536&_locking_mode=EXCLUSIVE"
+	dsn := "file:" + path + "?_journal_mode=WAL&_synchronous=NORMAL&_busy_timeout=5000&_cache_size=-65536"
 	db, err := sql.Open("sqlite3_feed", dsn)
 	if err != nil {
 		log.Fatal(err)

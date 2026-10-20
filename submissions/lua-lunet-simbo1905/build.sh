@@ -3,13 +3,13 @@
 # normal user; re-running is safe.
 set -euo pipefail
 
-LUNET_VERSION=v0.14.1
+LUNET_VERSION=v0.14.2
 BASE_URL="https://github.com/lua-lunet/lunet/releases/download/$LUNET_VERSION"
 
 case "$(uname -s)-$(uname -m)" in
-    Darwin-*)            ASSET=lunet-macos.tar.gz ;      DIGEST=8aab3d7807f7f5875b5642324031fc1c270aeb9c6f193b0a07cc8dfb27972131 ;;
-    Linux-x86_64)        ASSET=lunet-linux-amd64.tar.gz; DIGEST=03aa9a1e717f8873eddc54e6cb8e35aad8beb7565cc1e5b4ff8f8aa7345d7bfd ;;
-    Linux-aarch64)       ASSET=lunet-linux-arm64.tar.gz; DIGEST=d01c31acc7f3e3135cd268409584d579da1e48180f5f3bfd7d068d7c83356778 ;;
+    Darwin-*)            ASSET=lunet-macos.tar.gz ;      DIGEST=221d825cb16ad50593266e6f44ceccbeceaa2212bbd10cf45445fc02ec896bd1 ;;
+    Linux-x86_64)        ASSET=lunet-linux-amd64.tar.gz; DIGEST=09955f35860a1a9fe4e4bda5269f782415cd1d60e6b8d7d1df0878464a9f685e ;;
+    Linux-aarch64)       ASSET=lunet-linux-arm64.tar.gz; DIGEST=809863e44927e119f30662fc85c4a9ebc5ff950a8e231e657ebed42d2cf38c18 ;;
     *) echo "build.sh: unsupported platform $(uname -s)-$(uname -m)" >&2; exit 1 ;;
 esac
 

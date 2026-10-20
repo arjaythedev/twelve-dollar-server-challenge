@@ -14,14 +14,9 @@ import vibe.http.server :
 import d2sqlite3;
 import std.datetime : Clock, SysTime;
 import std.process : environment;
-import std.string : strip, startsWith, endsWith, split;
+import std.string : strip, startsWith;
 import std.conv : to;
-import std.typecons : Nullable;
-import std.sumtype;
-import std.algorithm : canFind;
 import std.stdio : writeln;
-import std.exception : enforce;
-import std.array : appender;
 import std.uni : byCodePoint;
 
 struct Post
@@ -64,46 +59,17 @@ struct LikeResponse
     long post_id;
 }
 
-struct CreatePostInput
+enum AuthResult
 {
-    string body;
+    ok,
+    invalidToken,
+    invalidPayload
 }
-
-struct JWTHeader
-{
-    string alg;
-}
-
-struct JWTClaimsStringSub
-{
-    string sub;
-    string username;
-    double exp;
-    Nullable!double nbf;
-}
-
-struct JWTClaimsNumberSub
-{
-    long sub;
-    string username;
-    double exp;
-}
-
-alias JWTClaims = SumType!(
-    JWTClaimsStringSub,
-    JWTClaimsNumberSub
-);
 
 struct AuthClaims
 {
     long uid;
     string username;
-}
-
-bool validNbf(Nullable!double nbf)
-{
-    return nbf.isNull ||
-        Clock.currTime.toUnixTime >= nbf.get;
 }
 
 string envOr(string key, string fallback)
@@ -159,84 +125,85 @@ bool parsePostID(string value, out long id)
 
 /*
  * JWT verification is performed by jwtlited's HS256 handler.
- * ASDF is used for decoding the verified JWT header and claims.
+ * The verified payload is read as an ASDF document so that the
+ * difference between a bad token and a bad payload can be reported.
  */
-bool authenticate(
+AuthResult authenticate(
     ref HS256Handler jwt,
     string token,
     out AuthClaims auth
 )
 {
-    if (!jwt.validate(token))
-        return false;
-
-    char[4096] headerBuffer;
-    char[16384] payloadBuffer;
-
-    if (!jwt.decode(token, headerBuffer[], payloadBuffer[]))
-        return false;
-
-    string headerJSON;
-    string payloadJSON;
-
-    /*
-     * jwtlited writes decoded JSON into the provided buffers.
-     * Find the JSON document terminator withoutValue treating the
-     * entire fixed-size buffer as input.
-     */
-    auto headerEnd = headerBuffer[].length;
-    auto payloadEnd = payloadBuffer[].length;
-
-    while (headerEnd > 0 && headerBuffer[headerEnd - 1] == '\0')
-        --headerEnd;
-    while (payloadEnd > 0 && payloadBuffer[payloadEnd - 1] == '\0')
-        --payloadEnd;
-
-    headerJSON = headerBuffer[0 .. headerEnd].idup;
-    payloadJSON = payloadBuffer[0 .. payloadEnd].idup;
-
     try
     {
-        auto header = headerJSON.deserialize!JWTHeader;
-        if (header.alg != "HS256")
-            return false;
+        if (!jwt.validate(token))
+            return AuthResult.invalidToken;
+
+        char[4096] headerBuffer;
+        char[16384] payloadBuffer;
+
+        if (!jwt.decode(token, headerBuffer[], payloadBuffer[]))
+            return AuthResult.invalidToken;
+
+        /*
+         * jwtlited writes decoded JSON into the provided buffers.
+         * Find the JSON document terminator without treating the
+         * entire fixed-size buffer as input.
+         */
+        auto payloadEnd = payloadBuffer[].length;
+
+        while (payloadEnd > 0 && payloadBuffer[payloadEnd - 1] == '\0')
+            --payloadEnd;
+
+        Asdf claims;
+
+        try
+            claims = payloadBuffer[0 .. payloadEnd].parseJson;
+        catch (Exception)
+            return AuthResult.invalidPayload;
+
+        if (claims.kind != Asdf.Kind.object)
+            return AuthResult.invalidPayload;
+
+        auto sub = claims["sub"];
+        auto username = claims["username"];
+        auto exp = claims["exp"];
+
+        if (!sub.data.length || sub.kind != Asdf.Kind.string ||
+            !username.data.length || username.kind != Asdf.Kind.string)
+            return AuthResult.invalidPayload;
+
+        long uid;
+
+        try
+            uid = to!long(cast(string) sub);
+        catch (Exception)
+            return AuthResult.invalidPayload;
+
+        if (uid <= 0)
+            return AuthResult.invalidPayload;
+
+        if (!exp.data.length || exp.kind != Asdf.Kind.number)
+            return AuthResult.invalidToken;
+
+        double expSeconds;
+
+        try
+            expSeconds = cast(double) exp;
+        catch (Exception)
+            return AuthResult.invalidToken;
+
+        if (expSeconds <= cast(double) Clock.currTime.toUnixTime)
+            return AuthResult.invalidToken;
+
+        auth.uid = uid;
+        auth.username = (cast(string) username).idup;
+        return AuthResult.ok;
     }
     catch (Exception)
     {
-        return false;
+        return AuthResult.invalidToken;
     }
-
-    long uid;
-    string username;
-    double exp;
-    bool nbfValid;
-
-    JWTClaims claims = payloadJSON.deserialize!JWTClaims;
-
-    claims.match!(
-        (JWTClaimsStringSub c) {
-            username = c.username;
-            exp = c.exp;
-            uid = to!long(c.sub);
-            nbfValid = validNbf(c.nbf);
-        },
-        (JWTClaimsNumberSub c) {
-            username = c.username;
-            exp = c.exp;
-            uid = c.sub;
-            nbfValid = true;
-        }
-    );
-
-    if (uid <= 0 || exp <= cast(double) Clock.currTime.toUnixTime)
-        return false;
-
-    if (!nbfValid)
-        return false;
-
-    auth.uid = uid;
-    auth.username = username;
-    return true;
 }
 
 struct FeedServer
@@ -293,205 +260,254 @@ struct FeedServer
         return false;
     }
 
-    void handle(
+    void internalError(
+        scope HTTPServerResponse res,
+        Exception e
+    )
+    {
+        writeln("request error: ", e.msg);
+        fail(res, 500, "internal server error");
+    }
+
+    bool requireAuth(
+        scope HTTPServerRequest req,
+        scope HTTPServerResponse res,
+        out AuthClaims auth
+    )
+    {
+        auto authHeader = req.headers.get("Authorization", "");
+
+        if (!authHeader.startsWith("Bearer "))
+        {
+            fail(res, 401, "missing bearer token");
+            return false;
+        }
+
+        auto result =
+            authenticate(jwt, authHeader["Bearer ".length .. $], auth);
+
+        if (result == AuthResult.ok)
+            return true;
+
+        if (result == AuthResult.invalidPayload)
+            fail(res, 401, "invalid token payload");
+        else
+            fail(res, 401, "invalid or expired token");
+
+        return false;
+    }
+
+    void notFound(
+        scope HTTPServerRequest req,
+        scope HTTPServerResponse res
+    )
+    {
+        fail(res, 404, "not found");
+    }
+
+    void health(
+        scope HTTPServerRequest req,
+        scope HTTPServerResponse res
+    )
+    {
+        try
+        {
+            db.execute("SELECT 1").oneValue!long;
+
+            HealthOK outValue;
+            outValue.status = "ok";
+            outValue.db = "ok";
+            outValue.uptime_s =
+                (Clock.currTime - started).total!"seconds";
+
+            respond(res, 200, outValue);
+        }
+        catch (Exception e)
+        {
+            HealthDegraded outValue;
+            outValue.status = "degraded";
+            outValue.db = "unreachable";
+            outValue.error = e.msg;
+            respond(res, 503, outValue);
+        }
+    }
+
+    void feed(
+        scope HTTPServerRequest req,
+        scope HTTPServerResponse res
+    )
+    {
+        try
+        {
+            auto stmt = db.prepare(
+                postQuery() ~
+                " ORDER BY p.created_at DESC, p.id DESC LIMIT 20"
+            );
+
+            FeedEnvelope outValue;
+            auto rows = stmt.execute();
+
+            foreach (row; rows)
+                outValue.posts ~= readPost(row);
+
+            respond(res, 200, outValue);
+        }
+        catch (Exception e)
+        {
+            internalError(res, e);
+        }
+    }
+
+    void getPost(
+        scope HTTPServerRequest req,
+        scope HTTPServerResponse res
+    )
+    {
+        try
+        {
+            long id;
+            if (!parsePostID(req.params["id"], id))
+            {
+                fail(res, 400, "invalid post id");
+                return;
+            }
+
+            Post p;
+            if (!findPost(id, p))
+            {
+                fail(res, 404, "post not found");
+                return;
+            }
+
+            PostEnvelope outValue;
+            outValue.post = p;
+            respond(res, 200, outValue);
+        }
+        catch (Exception e)
+        {
+            internalError(res, e);
+        }
+    }
+
+    void createPost(
         scope HTTPServerRequest req,
         scope HTTPServerResponse res
     )
     {
         import vibe.stream.operations : readAllUTF8;
 
-        auto path = req.requestURL.to!string;
-        auto method = req.method.to!string;
-
         try
         {
-            // GET /health
-            if (method == "GET" && path == "/health")
-            {
-                try
-                {
-                    db.execute("SELECT 1").oneValue!long;
-
-                    HealthOK outValue;
-                    outValue.status = "ok";
-                    outValue.db = "ok";
-                    outValue.uptime_s =
-                        (Clock.currTime - started).total!"seconds";
-
-                    respond(res, 200, outValue);
-                }
-                catch (Exception e)
-                {
-                    HealthDegraded outValue;
-                    outValue.status = "degraded";
-                    outValue.db = "unreachable";
-                    outValue.error = e.msg;
-                    respond(res, 503, outValue);
-                }
-                return;
-            }
-
-            // GET /feed
-            if (method == "GET" && path == "/feed")
-            {
-                auto stmt = db.prepare(
-                    postQuery() ~
-                    " ORDER BY p.created_at DESC, p.id DESC LIMIT 20"
-                );
-
-                FeedEnvelope outValue;
-                auto rows = stmt.execute();
-
-                foreach (row; rows)
-                    outValue.posts ~= readPost(row);
-
-                respond(res, 200, outValue);
-                return;
-            }
-
-            // GET /posts/:id
-            if (method == "GET" && path.startsWith("/posts/"))
-            {
-                auto suffix = path["/posts/".length .. $];
-
-                if (suffix.canFind("/"))
-                {
-                    fail(res, 404, "not found");
-                    return;
-                }
-
-                long id;
-                if (!parsePostID(suffix, id))
-                {
-                    fail(res, 400, "invalid post id");
-                    return;
-                }
-
-                Post p;
-                if (!findPost(id, p))
-                {
-                    fail(res, 404, "post not found");
-                    return;
-                }
-
-                PostEnvelope outValue;
-                outValue.post = p;
-                respond(res, 200, outValue);
-                return;
-            }
-
-            bool createPost =
-                method == "POST" && path == "/posts";
-
-            bool likePost =
-                method == "POST" &&
-                path.startsWith("/posts/") &&
-                path.endsWith("/like");
-
-            if (!createPost && !likePost)
-            {
-                fail(res, 404, "not found");
-                return;
-            }
-
-            // Protected routValuees require a Bearer JWT.
-            auto authHeader = req.headers.get("Authorization", "");
-
-            if (!authHeader.startsWith("Bearer "))
-            {
-                fail(res, 401, "missing bearer token");
-                return;
-            }
-
             AuthClaims auth;
-            if (!authenticate(jwt, authHeader["Bearer ".length .. $], auth))
+            if (!requireAuth(req, res, auth))
+                return;
+
+            string requestBody;
+
+            try
             {
-                fail(res, 401, "invalid or expired token");
+                requestBody = req.bodyReader.readAllUTF8();
+            }
+            catch (Exception)
+            {
+                fail(res, 400, "malformed JSON body");
                 return;
             }
 
-            // POST /posts
-            if (createPost)
+            Asdf input;
+            try
             {
-                string requestBody;
-
-                try
-                {
-                    requestBody = req.bodyReader.readAllUTF8();
-                }
-                catch (Exception)
-                {
-                    fail(res, 400, "malformed JSON body");
-                    return;
-                }
-
-                CreatePostInput input;
-                try
-                {
-                    input = requestBody.deserialize!CreatePostInput;
-                }
-                catch (Exception)
-                {
-                    fail(res, 400, "malformed JSON body");
-                    return;
-                }
-
-                auto body = strip(input.body).idup;
-                if (body.length == 0)
-                {
-                    fail(res, 400, "body is required");
-                    return;
-                }
-
-                size_t characterCount;
-                foreach (dchar ch; body.byCodePoint)
-                    ++characterCount;
-
-                if (characterCount > 500)
-                {
-                    fail(res, 400,
-                        "body must be at most 500 characters");
-                    return;
-                }
-
-                auto stmt = db.prepare(
-                    "INSERT INTO posts (user_id, body) "
-                    ~ "VALUES (?, ?) RETURNING id, created_at"
-                );
-
-                stmt.bind(1, auth.uid);
-                stmt.bind(2, body);
-
-                long id;
-                string createdAt;
-                auto rows = stmt.execute();
-
-                foreach (row; rows)
-                {
-                    id = row.peek!long(0);
-                    createdAt = row.peek!string(1);
-                    break;
-                }
-
-                Post p;
-                p.id = id;
-                p.body = body;
-                p.created_at = createdAt;
-                p.author = auth.username;
-                p.like_count = 0;
-
-                PostEnvelope outValue;
-                outValue.post = p;
-                respond(res, 201, outValue);
+                input = requestBody.parseJson;
+            }
+            catch (Exception)
+            {
+                fail(res, 400, "malformed JSON body");
                 return;
             }
 
-            // POST /posts/:id/like
-            auto suffix = path["/posts/".length .. $];
-            suffix = suffix[0 .. $ - "/like".length];
+            if (!input.data.length ||
+                input.kind != Asdf.Kind.object)
+            {
+                fail(res, 400, "body is required");
+                return;
+            }
+
+            auto bodyValue = input["body"];
+
+            if (!bodyValue.data.length ||
+                bodyValue.kind != Asdf.Kind.string)
+            {
+                fail(res, 400, "body is required");
+                return;
+            }
+
+            auto body = strip(cast(string) bodyValue).idup;
+            if (body.length == 0)
+            {
+                fail(res, 400, "body is required");
+                return;
+            }
+
+            size_t characterCount;
+            foreach (dchar ch; body.byCodePoint)
+                ++characterCount;
+
+            if (characterCount > 500)
+            {
+                fail(res, 400,
+                    "body must be at most 500 characters");
+                return;
+            }
+
+            auto stmt = db.prepare(
+                "INSERT INTO posts (user_id, body) "
+                ~ "VALUES (?, ?) RETURNING id, created_at"
+            );
+
+            stmt.bind(1, auth.uid);
+            stmt.bind(2, body);
 
             long id;
-            if (!parsePostID(suffix, id))
+            string createdAt;
+            auto rows = stmt.execute();
+
+            foreach (row; rows)
+            {
+                id = row.peek!long(0);
+                createdAt = row.peek!string(1);
+                break;
+            }
+
+            Post p;
+            p.id = id;
+            p.body = body;
+            p.created_at = createdAt;
+            p.author = auth.username;
+            p.like_count = 0;
+
+            PostEnvelope outValue;
+            outValue.post = p;
+            respond(res, 201, outValue);
+        }
+        catch (Exception e)
+        {
+            internalError(res, e);
+        }
+    }
+
+    void likePost(
+        scope HTTPServerRequest req,
+        scope HTTPServerResponse res
+    )
+    {
+        try
+        {
+            AuthClaims auth;
+            if (!requireAuth(req, res, auth))
+                return;
+
+            long id;
+            if (!parsePostID(req.params["id"], id))
             {
                 fail(res, 400, "invalid post id");
                 return;
@@ -537,8 +553,7 @@ struct FeedServer
         }
         catch (Exception e)
         {
-            writeln("request error: ", e.msg);
-            fail(res, 500, "internal server error");
+            internalError(res, e);
         }
     }
 }
@@ -555,35 +570,12 @@ void main()
     settings.bindAddresses = [envOr("HOST", "0.0.0.0")];
 
     auto router = new URLRouter;
-    router.get("/health", (scope HTTPServerRequest req,
-                           scope HTTPServerResponse res)
-    {
-        app.handle(req, res);
-    });
-
-    router.get("/feed", (scope HTTPServerRequest req,
-                         scope HTTPServerResponse res)
-    {
-        app.handle(req, res);
-    });
-
-    router.get("/posts/:id", (scope HTTPServerRequest req,
-                              scope HTTPServerResponse res)
-    {
-        app.handle(req, res);
-    });
-
-    router.post("/posts", (scope HTTPServerRequest req,
-                           scope HTTPServerResponse res)
-    {
-        app.handle(req, res);
-    });
-
-    router.post("/posts/:id/like", (scope HTTPServerRequest req,
-                                    scope HTTPServerResponse res)
-    {
-        app.handle(req, res);
-    });
+    router.get("/health", &app.health);
+    router.get("/feed", &app.feed);
+    router.get("/posts/:id", &app.getPost);
+    router.post("/posts", &app.createPost);
+    router.post("/posts/:id/like", &app.likePost);
+    router.any("*", &app.notFound);
 
     writeln("Listening on ",
         envOr("HOST", "0.0.0.0"), ":", settings.port);

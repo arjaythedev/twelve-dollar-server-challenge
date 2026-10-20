@@ -3,5 +3,3 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 dub build --build=release --compiler=ldc2
-mkdir -p bin
-cp -f feed-server bin/server

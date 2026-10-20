@@ -858,6 +858,7 @@ begin
     raise Exception.Create('JWT_SECRET is required');
   if Host = '' then Host := '127.0.0.1';
   StartedAt := GetTickCount64;
+  THorse.UseRadixRouter;
   RegisterRoutes;
   THorse.Listen(Port, Host);
 end.

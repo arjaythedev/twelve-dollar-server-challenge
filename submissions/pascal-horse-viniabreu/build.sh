@@ -10,6 +10,7 @@ rm -rf build bin modules
 mkdir -p build/units bin modules
 git clone --depth 1 --branch "$HORSE_VERSION" https://github.com/HashLoad/horse.git modules/horse
 test "$(git -C modules/horse rev-parse HEAD)" = "$HORSE_COMMIT"
+git -C modules/horse apply --whitespace=nowarn "$PWD/horse-epoll-timeout.patch"
 
 fpc \
   -Mdelphi -O3 -OoREGVAR -Xs -XX -CX \

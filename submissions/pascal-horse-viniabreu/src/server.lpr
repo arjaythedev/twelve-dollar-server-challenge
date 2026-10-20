@@ -2,6 +2,7 @@ program TwelveDollarServer;
 
 {$MODE DELPHI}{$H+}
 {$APPTYPE CONSOLE}
+{$POINTERMATH ON}
 
 uses
   {$IFDEF UNIX}
@@ -14,8 +15,7 @@ uses
   DateUtils,
   fpjson,
   jsonparser,
-  sqldb,
-  sqlite3conn,
+  sqlite3,
   Horse;
 
 const
@@ -27,11 +27,137 @@ var
   StartedAt: QWord;
 
 threadvar
-  DbConnection: TSQLite3Connection;
-  DbTransaction: TSQLTransaction;
+  DbHandle: PSQLite3;
+  FeedStatement: PSQLite3_Stmt;
+  PostStatement: PSQLite3_Stmt;
+  CreatePostStatement: PSQLite3_Stmt;
+  LikeStatement: PSQLite3_Stmt;
+  PostExistsStatement: PSQLite3_Stmt;
+  HealthStatement: PSQLite3_Stmt;
 
 type
   TAuthResult = (arOK, arMissingBearer, arInvalidToken, arInvalidPayload);
+
+  TStringBuffer = record
+    Data: RawByteString;
+    Used: SizeInt;
+    procedure Init(const InitialCapacity: SizeInt);
+    procedure AppendChar(const Value: AnsiChar); inline;
+    procedure AppendText(const Value: string); inline;
+    procedure AppendJsonString(const Value: string);
+    procedure AppendJsonUtf8(const Value: PAnsiChar; const ValueLength: SizeInt);
+    function Finish: string;
+  end;
+
+procedure TStringBuffer.Init(const InitialCapacity: SizeInt);
+begin
+  Used := 0;
+  SetLength(Data, InitialCapacity);
+end;
+
+procedure TStringBuffer.AppendChar(const Value: AnsiChar);
+begin
+  if Used = Length(Data) then
+  begin
+    if Used = 0 then
+      SetLength(Data, 64)
+    else
+      SetLength(Data, Used * 2);
+  end;
+  Inc(Used);
+  Data[Used] := Value;
+end;
+
+procedure TStringBuffer.AppendText(const Value: string);
+var
+  Required, Capacity: SizeInt;
+begin
+  if Value = '' then
+    Exit;
+  Required := Used + Length(Value);
+  if Required > Length(Data) then
+  begin
+    Capacity := Length(Data);
+    if Capacity < 64 then Capacity := 64;
+    while Capacity < Required do
+      Capacity := Capacity * 2;
+    SetLength(Data, Capacity);
+  end;
+  Move(Value[1], Data[Used + 1], Length(Value));
+  Used := Required;
+end;
+
+procedure TStringBuffer.AppendJsonString(const Value: string);
+const
+  Hex: array[0..15] of Char = '0123456789abcdef';
+var
+  I: Integer;
+  B: Byte;
+begin
+  AppendChar('"');
+  for I := 1 to Length(Value) do
+  begin
+    B := Ord(Value[I]);
+    case B of
+      8: AppendText('\b');
+      9: AppendText('\t');
+      10: AppendText('\n');
+      12: AppendText('\f');
+      13: AppendText('\r');
+      Ord('"'): AppendText('\"');
+      Ord('\'): AppendText('\\');
+    else
+      if B < 32 then
+      begin
+        AppendText('\u00');
+        AppendChar(Hex[B shr 4]);
+        AppendChar(Hex[B and $0F]);
+      end
+      else
+        AppendChar(AnsiChar(Value[I]));
+    end;
+  end;
+  AppendChar('"');
+end;
+
+procedure TStringBuffer.AppendJsonUtf8(const Value: PAnsiChar; const ValueLength: SizeInt);
+const
+  Hex: array[0..15] of Char = '0123456789abcdef';
+var
+  I: SizeInt;
+  B: Byte;
+begin
+  AppendChar('"');
+  for I := 0 to ValueLength - 1 do
+  begin
+    B := Ord(Value[I]);
+    case B of
+      8: AppendText('\b');
+      9: AppendText('\t');
+      10: AppendText('\n');
+      12: AppendText('\f');
+      13: AppendText('\r');
+      Ord('"'): AppendText('\"');
+      Ord('\'): AppendText('\\');
+    else
+      if B < 32 then
+      begin
+        AppendText('\u00');
+        AppendChar(Hex[B shr 4]);
+        AppendChar(Hex[B and $0F]);
+      end
+      else
+        AppendChar(AnsiChar(B));
+    end;
+  end;
+  AppendChar('"');
+end;
+
+function TStringBuffer.Finish: string;
+begin
+  SetLength(Data, Used);
+  Result := string(Data);
+end;
 
 function RotateRight(Value: LongWord; Count: Byte): LongWord; inline;
 begin
@@ -140,13 +266,15 @@ end;
 
 function Base64UrlDecode(const Value: string; out Decoded: RawByteString): Boolean;
 var
-  I, Bits, Accumulator, Code, ByteValue: Integer;
+  I, Bits, Accumulator, Code, ByteValue, Used: Integer;
   Ch: Char;
 begin
   Result := False;
   Decoded := '';
   if (Length(Value) = 0) or ((Length(Value) mod 4) = 1) then
     Exit;
+  SetLength(Decoded, ((Length(Value) * 3) div 4) + 2);
+  Used := 0;
   Bits := 0;
   Accumulator := 0;
   for I := 1 to Length(Value) do
@@ -164,13 +292,15 @@ begin
     begin
       Dec(Bits, 8);
       ByteValue := (Accumulator shr Bits) and $FF;
-      Decoded := Decoded + AnsiChar(ByteValue);
+      Inc(Used);
+      Decoded[Used] := AnsiChar(ByteValue);
     end;
     if Bits = 0 then
       Accumulator := 0
     else
       Accumulator := Accumulator and ((1 shl Bits) - 1);
   end;
+  SetLength(Decoded, Used);
   Result := True;
 end;
 
@@ -188,39 +318,61 @@ begin
 end;
 
 function JsonString(const Value: string): string;
-const
-  Hex: array[0..15] of Char = '0123456789abcdef';
 var
-  I: Integer;
-  B: Byte;
+  Buffer: TStringBuffer;
 begin
-  Result := '"';
-  for I := 1 to Length(Value) do
-  begin
-    B := Ord(Value[I]);
-    case B of
-      8: Result := Result + '\b';
-      9: Result := Result + '\t';
-      10: Result := Result + '\n';
-      12: Result := Result + '\f';
-      13: Result := Result + '\r';
-      Ord('"'): Result := Result + '\"';
-      Ord('\'): Result := Result + '\\';
-    else
-      if B < 32 then
-        Result := Result + '\u00' + Hex[B shr 4] + Hex[B and $0F]
-      else
-        Result := Result + Value[I];
-    end;
-  end;
-  Result := Result + '"';
+  Buffer.Init(Length(Value) + 2);
+  Buffer.AppendJsonString(Value);
+  Result := Buffer.Finish;
+end;
+
+procedure AppendPostJson(var Buffer: TStringBuffer; const Id: Int64;
+  const Body, CreatedAt, Author: string; const LikeCount: Int64);
+begin
+  Buffer.AppendText('{"id":');
+  Buffer.AppendText(IntToStr(Id));
+  Buffer.AppendText(',"body":');
+  Buffer.AppendJsonString(Body);
+  Buffer.AppendText(',"created_at":');
+  Buffer.AppendJsonString(CreatedAt);
+  Buffer.AppendText(',"author":');
+  Buffer.AppendJsonString(Author);
+  Buffer.AppendText(',"like_count":');
+  Buffer.AppendText(IntToStr(LikeCount));
+  Buffer.AppendChar('}');
+end;
+
+procedure AppendPostJsonFromStatement(var Buffer: TStringBuffer;
+  Statement: PSQLite3_Stmt);
+var
+  Column: Integer;
+begin
+  Buffer.AppendText('{"id":');
+  Buffer.AppendText(IntToStr(sqlite3_column_int64(Statement, 0)));
+  Buffer.AppendText(',"body":');
+  Column := 1;
+  Buffer.AppendJsonUtf8(sqlite3_column_text(Statement, Column),
+    sqlite3_column_bytes(Statement, Column));
+  Buffer.AppendText(',"created_at":');
+  Column := 2;
+  Buffer.AppendJsonUtf8(sqlite3_column_text(Statement, Column),
+    sqlite3_column_bytes(Statement, Column));
+  Buffer.AppendText(',"author":');
+  Column := 3;
+  Buffer.AppendJsonUtf8(sqlite3_column_text(Statement, Column),
+    sqlite3_column_bytes(Statement, Column));
+  Buffer.AppendText(',"like_count":');
+  Buffer.AppendText(IntToStr(sqlite3_column_int64(Statement, 4)));
+  Buffer.AppendChar('}');
 end;
 
 function PostJson(const Id: Int64; const Body, CreatedAt, Author: string; const LikeCount: Int64): string;
+var
+  Buffer: TStringBuffer;
 begin
-  Result := '{"id":' + IntToStr(Id) + ',"body":' + JsonString(Body) +
-    ',"created_at":' + JsonString(CreatedAt) + ',"author":' + JsonString(Author) +
-    ',"like_count":' + IntToStr(LikeCount) + '}';
+  Buffer.Init(Length(Body) + Length(CreatedAt) + Length(Author) + 96);
+  AppendPostJson(Buffer, Id, Body, CreatedAt, Author, LikeCount);
+  Result := Buffer.Finish;
 end;
 
 procedure SendJson(Res: THorseResponse; StatusCode: Integer; const Payload: string);
@@ -264,201 +416,202 @@ begin
   end;
 end;
 
-function GetDatabase: TSQLite3Connection;
+procedure CheckSqlite(const Code: Integer);
 begin
-  if DbConnection = nil then
-  begin
-    DbTransaction := TSQLTransaction.Create(nil);
-    DbConnection := TSQLite3Connection.Create(nil);
-    DbConnection.DatabaseName := DatabasePath;
-    DbConnection.Transaction := DbTransaction;
-    DbTransaction.Database := DbConnection;
-    DbConnection.Open;
-    DbConnection.ExecuteDirect('PRAGMA journal_mode=WAL');
-    DbConnection.ExecuteDirect('PRAGMA synchronous=NORMAL');
-    DbConnection.ExecuteDirect('PRAGMA busy_timeout=5000');
-    DbConnection.ExecuteDirect('PRAGMA mmap_size=1073741824');
-    DbConnection.ExecuteDirect('PRAGMA cache_size=-65536');
-  end;
-  Result := DbConnection;
+  if Code <> SQLITE_OK then
+    raise Exception.Create(string(sqlite3_errmsg(DbHandle)));
 end;
 
-procedure BeginDatabaseTransaction;
+procedure ExecuteDirect(const Sql: string);
+begin
+  CheckSqlite(sqlite3_exec(DbHandle, PAnsiChar(Sql), nil, nil, nil));
+end;
+
+function GetDatabase: PSQLite3;
+var
+  Code: Integer;
+begin
+  if DbHandle = nil then
+  begin
+    Code := sqlite3_open_v2(PAnsiChar(DatabasePath), @DbHandle,
+      SQLITE_OPEN_READWRITE or SQLITE_OPEN_NOMUTEX, nil);
+    if Code <> SQLITE_OK then
+      raise Exception.Create('unable to open SQLite database');
+    try
+      ExecuteDirect('PRAGMA journal_mode=WAL');
+      ExecuteDirect('PRAGMA synchronous=NORMAL');
+      CheckSqlite(sqlite3_busy_timeout(DbHandle, 5000));
+      ExecuteDirect('PRAGMA mmap_size=1073741824');
+      ExecuteDirect('PRAGMA cache_size=-65536');
+    except
+      sqlite3_close(DbHandle);
+      DbHandle := nil;
+      raise;
+    end;
+  end;
+  Result := DbHandle;
+end;
+
+function CachedStatement(var Statement: PSQLite3_Stmt;
+  const Sql: string): PSQLite3_Stmt;
 begin
   GetDatabase;
-  if not DbTransaction.Active then
-    DbTransaction.StartTransaction;
+  if Statement = nil then
+    CheckSqlite(sqlite3_prepare_v2(DbHandle, PAnsiChar(Sql), Length(Sql),
+      @Statement, nil));
+  Result := Statement;
 end;
 
-procedure CommitDatabaseTransaction;
+procedure ResetStatement(const Statement: PSQLite3_Stmt); inline;
 begin
-  if (DbTransaction <> nil) and DbTransaction.Active then
-    DbTransaction.Commit;
-end;
-
-procedure RollbackDatabaseTransaction;
-begin
-  if (DbTransaction <> nil) and DbTransaction.Active then
-    DbTransaction.Rollback;
-end;
-
-function NewQuery(const SQL: string): TSQLQuery;
-begin
-  Result := TSQLQuery.Create(nil);
-  Result.DataBase := GetDatabase;
-  Result.Transaction := DbTransaction;
-  Result.SQL.Text := SQL;
-end;
-
-function ReadPostFromQuery(Query: TSQLQuery): string;
-begin
-  Result := PostJson(Query.FieldByName('id').AsLargeInt,
-    Query.FieldByName('body').AsString,
-    Query.FieldByName('created_at').AsString,
-    Query.FieldByName('username').AsString,
-    Query.FieldByName('like_count').AsLargeInt);
+  CheckSqlite(sqlite3_reset(Statement));
 end;
 
 function GetPostJson(const Id: Int64; out Payload: string): Boolean;
 var
-  Query: TSQLQuery;
+  Statement: PSQLite3_Stmt;
+  Code: Integer;
+  Buffer: TStringBuffer;
 begin
-  Query := NewQuery('SELECT p.id, p.body, p.created_at, u.username, ' +
-    '(SELECT count(*) FROM likes l WHERE l.post_id = p.id) AS like_count ' +
-    'FROM posts p JOIN users u ON u.id = p.user_id WHERE p.id = :id');
+  Statement := CachedStatement(PostStatement,
+    'SELECT p.id, p.body, p.created_at, u.username, ' +
+    '(SELECT count(*) FROM likes l WHERE l.post_id = p.id) ' +
+    'FROM posts p JOIN users u ON u.id = p.user_id WHERE p.id = ?');
+  CheckSqlite(sqlite3_bind_int64(Statement, 1, Id));
+  Code := sqlite3_step(Statement);
   try
-    try
-      BeginDatabaseTransaction;
-      Query.ParamByName('id').AsLargeInt := Id;
-      Query.Open;
-      Result := not Query.EOF;
-      if Result then Payload := ReadPostFromQuery(Query);
-      Query.Close;
-      CommitDatabaseTransaction;
-    except
-      RollbackDatabaseTransaction;
-      raise;
-    end;
+    Result := Code = SQLITE_ROW;
+    if Result then
+    begin
+      Buffer.Init(512);
+      AppendPostJsonFromStatement(Buffer, Statement);
+      Payload := Buffer.Finish;
+    end
+    else if Code <> SQLITE_DONE then
+      CheckSqlite(Code);
   finally
-    Query.Free;
+    ResetStatement(Statement);
   end;
 end;
 
 function GetFeedJson: string;
 var
-  Query: TSQLQuery;
+  Statement: PSQLite3_Stmt;
+  Code: Integer;
   First: Boolean;
+  Buffer: TStringBuffer;
 begin
-  Query := NewQuery('SELECT p.id, p.body, p.created_at, u.username, ' +
-    '(SELECT count(*) FROM likes l WHERE l.post_id = p.id) AS like_count ' +
+  Statement := CachedStatement(FeedStatement,
+    'SELECT p.id, p.body, p.created_at, u.username, ' +
+    '(SELECT count(*) FROM likes l WHERE l.post_id = p.id) ' +
     'FROM posts p JOIN users u ON u.id = p.user_id ' +
     'ORDER BY p.created_at DESC, p.id DESC LIMIT 20');
+  Buffer.Init(12288);
+  Buffer.AppendText('{"posts":[');
+  First := True;
+  Code := sqlite3_step(Statement);
   try
-    try
-      BeginDatabaseTransaction;
-      Query.Open;
-      Result := '{"posts":[';
-      First := True;
-      while not Query.EOF do
-      begin
-        if not First then Result := Result + ',';
-        Result := Result + ReadPostFromQuery(Query);
-        First := False;
-        Query.Next;
-      end;
-      Result := Result + ']}';
-      Query.Close;
-      CommitDatabaseTransaction;
-    except
-      RollbackDatabaseTransaction;
-      raise;
+    while Code = SQLITE_ROW do
+    begin
+      if not First then Buffer.AppendChar(',');
+      AppendPostJsonFromStatement(Buffer, Statement);
+      First := False;
+      Code := sqlite3_step(Statement);
     end;
+    if Code <> SQLITE_DONE then
+      CheckSqlite(Code);
+    Buffer.AppendText(']}');
+    Result := Buffer.Finish;
   finally
-    Query.Free;
+    ResetStatement(Statement);
   end;
 end;
 
 function CreatePostJson(const UserId: Int64; const Body, Username: string): string;
 var
-  Query: TSQLQuery;
+  Statement: PSQLite3_Stmt;
+  Code: Integer;
+  Buffer: TStringBuffer;
 begin
-  Query := NewQuery('INSERT INTO posts (user_id, body) VALUES (:user_id, :body)');
+  Statement := CachedStatement(CreatePostStatement,
+    'INSERT INTO posts (user_id, body) VALUES (?, ?) RETURNING id, created_at');
+  CheckSqlite(sqlite3_bind_int64(Statement, 1, UserId));
+  CheckSqlite(sqlite3_bind_text(Statement, 2, PAnsiChar(Body), Length(Body),
+    sqlite3_destructor_type(SQLITE_TRANSIENT)));
+  Code := sqlite3_step(Statement);
   try
-    try
-      BeginDatabaseTransaction;
-      Query.ParamByName('user_id').AsLargeInt := UserId;
-      Query.ParamByName('body').AsString := Body;
-      Query.ExecSQL;
-      Query.Close;
-      Query.SQL.Text := 'SELECT id, created_at FROM posts WHERE id = last_insert_rowid()';
-      Query.Open;
-      Result := '{"post":' + PostJson(Query.FieldByName('id').AsLargeInt, Body,
-        Query.FieldByName('created_at').AsString, Username, 0) + '}';
-      Query.Close;
-      CommitDatabaseTransaction;
-    except
-      RollbackDatabaseTransaction;
-      raise;
-    end;
+    if Code <> SQLITE_ROW then
+      CheckSqlite(Code);
+    Buffer.Init(Length(Body) + Length(Username) + 128);
+    Buffer.AppendText('{"post":{"id":');
+    Buffer.AppendText(IntToStr(sqlite3_column_int64(Statement, 0)));
+    Buffer.AppendText(',"body":');
+    Buffer.AppendJsonString(Body);
+    Buffer.AppendText(',"created_at":');
+    Buffer.AppendJsonUtf8(sqlite3_column_text(Statement, 1),
+      sqlite3_column_bytes(Statement, 1));
+    Buffer.AppendText(',"author":');
+    Buffer.AppendJsonString(Username);
+    Buffer.AppendText(',"like_count":0}}');
+    Result := Buffer.Finish;
+    Code := sqlite3_step(Statement);
+    if Code <> SQLITE_DONE then
+      CheckSqlite(Code);
   finally
-    Query.Free;
+    ResetStatement(Statement);
   end;
 end;
 
 function LikePost(const UserId, PostId: Int64; out AlreadyLiked: Boolean): Boolean;
 var
-  Query: TSQLQuery;
+  Statement: PSQLite3_Stmt;
+  Code: Integer;
 begin
   Result := False;
   AlreadyLiked := False;
-  Query := NewQuery('INSERT INTO likes (user_id, post_id) ' +
-    'SELECT :user_id, :post_id WHERE EXISTS (SELECT 1 FROM posts WHERE id = :post_id) ' +
+  Statement := CachedStatement(LikeStatement,
+    'INSERT INTO likes (user_id, post_id) ' +
+    'SELECT ?, ? WHERE EXISTS (SELECT 1 FROM posts WHERE id = ?) ' +
     'ON CONFLICT(user_id, post_id) DO NOTHING');
+  CheckSqlite(sqlite3_bind_int64(Statement, 1, UserId));
+  CheckSqlite(sqlite3_bind_int64(Statement, 2, PostId));
+  CheckSqlite(sqlite3_bind_int64(Statement, 3, PostId));
+  Code := sqlite3_step(Statement);
   try
-    try
-      BeginDatabaseTransaction;
-      Query.ParamByName('user_id').AsLargeInt := UserId;
-      Query.ParamByName('post_id').AsLargeInt := PostId;
-      Query.ExecSQL;
-      if Query.RowsAffected = 1 then
-        Result := True
-      else
-      begin
-        Query.Close;
-        Query.SQL.Text := 'SELECT 1 FROM posts WHERE id = :post_id';
-        Query.ParamByName('post_id').AsLargeInt := PostId;
-        Query.Open;
-        Result := not Query.EOF;
-        AlreadyLiked := Result;
-        Query.Close;
-      end;
-      CommitDatabaseTransaction;
-    except
-      RollbackDatabaseTransaction;
-      raise;
-    end;
+    if Code <> SQLITE_DONE then
+      CheckSqlite(Code);
+    if sqlite3_changes(DbHandle) = 1 then
+      Exit(True);
   finally
-    Query.Free;
+    ResetStatement(Statement);
+  end;
+
+  Statement := CachedStatement(PostExistsStatement,
+    'SELECT 1 FROM posts WHERE id = ?');
+  CheckSqlite(sqlite3_bind_int64(Statement, 1, PostId));
+  Code := sqlite3_step(Statement);
+  try
+    Result := Code = SQLITE_ROW;
+    if not Result and (Code <> SQLITE_DONE) then
+      CheckSqlite(Code);
+    AlreadyLiked := Result;
+  finally
+    ResetStatement(Statement);
   end;
 end;
 
 procedure CheckDatabase;
 var
-  Query: TSQLQuery;
+  Statement: PSQLite3_Stmt;
+  Code: Integer;
 begin
-  Query := NewQuery('SELECT 1');
+  Statement := CachedStatement(HealthStatement, 'SELECT 1');
+  Code := sqlite3_step(Statement);
   try
-    try
-      BeginDatabaseTransaction;
-      Query.Open;
-      Query.Close;
-      CommitDatabaseTransaction;
-    except
-      RollbackDatabaseTransaction;
-      raise;
-    end;
+    if Code <> SQLITE_ROW then
+      CheckSqlite(Code);
   finally
-    Query.Free;
+    ResetStatement(Statement);
   end;
 end;
 

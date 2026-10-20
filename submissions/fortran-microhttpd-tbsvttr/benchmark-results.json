@@ -1,0 +1,1305 @@
+{
+  "configuration": {
+    "date": "2026-10-06",
+    "batch": "L1",
+    "host": "Apple M2 Pro / Docker Desktop / Ubuntu 24.04 Linux ARM64",
+    "server_cpu_set": "0",
+    "server_memory_bytes": 2147483648,
+    "server_memory_plus_swap_bytes": 2147483648,
+    "nofile_soft_hard": [
+      65535,
+      65535
+    ],
+    "loadgen_cpu_set": "1-9",
+    "network": "shared server network namespace / loopback",
+    "wrk_threads": 2,
+    "connections": 64,
+    "warmup_seconds": 2,
+    "mixed_trials": 5,
+    "mixed_seconds": 15,
+    "read_trials_per_endpoint": 3,
+    "read_seconds": 8,
+    "idle_trials": 1,
+    "idle_connections": 15000,
+    "idle_mixed_seconds": 8,
+    "fresh_seed_per_run": true,
+    "weights": {
+      "throughput": 0.4,
+      "app_loc": 0.2,
+      "dependencies": 0.2,
+      "rss_mib": 0.2
+    },
+    "caveat": "Not official challenge user capacity; only the four L1 rows were measured together. Other historical score inputs span batches."
+  },
+  "summary": [
+    {
+      "name": "C++ / uWebSockets group commit",
+      "pr": 15,
+      "throughput": 55771.64,
+      "rss_mib": 41.55859375,
+      "app_loc": 424,
+      "dependencies": 4,
+      "batch": "L1, fresh four-stack comparison",
+      "components": {
+        "throughput": 81.37545568187024,
+        "app_loc": 74.4595676541233,
+        "dependencies": 95.50561797752809,
+        "rss_mib": 99.18993519481559
+      },
+      "score": 86.3812064380415,
+      "language": "cpp",
+      "mixed_p99_ms": 15.71,
+      "mixed_rps_range": [
+        55341.1,
+        62490.82
+      ],
+      "idle_15000_rss_mib": 43.28125,
+      "idle_15000_rps": 57719.91,
+      "read_rps": {
+        "feed": 38868.12,
+        "post": 177185.81
+      },
+      "http_socket_errors": 0,
+      "mixed_cpu_percent": 89.68729208250166
+    },
+    {
+      "name": "Fortran / libmicrohttpd",
+      "language": "fortran",
+      "pr": null,
+      "throughput": 24130.08,
+      "rss_mib": 39.9765625,
+      "app_loc": 731,
+      "dependencies": 3,
+      "batch": "L1, fresh four-stack comparison",
+      "components": {
+        "throughput": 32.06884633520671,
+        "app_loc": 49.879903923138514,
+        "dependencies": 96.62921348314607,
+        "rss_mib": 100.0
+      },
+      "score": 62.1293620153396,
+      "mixed_p99_ms": 15.17,
+      "mixed_rps_range": [
+        23887.13,
+        26368.25
+      ],
+      "idle_15000_rss_mib": 517.3984375,
+      "idle_15000_rps": 23882.57,
+      "read_rps": {
+        "feed": 14694.68,
+        "post": 100742.3
+      },
+      "http_socket_errors": 0,
+      "mixed_cpu_percent": 95.89131875414182
+    },
+    {
+      "name": "Rust / Axum",
+      "language": "rust",
+      "pr": null,
+      "throughput": 45628.64,
+      "rss_mib": 41.75390625,
+      "app_loc": 393,
+      "dependencies": 62,
+      "batch": "L1, fresh four-stack comparison",
+      "components": {
+        "throughput": 65.5697577768615,
+        "app_loc": 76.94155324259407,
+        "dependencies": 30.337078651685392,
+        "rss_mib": 99.08992719417553
+      },
+      "score": 67.5016149284356,
+      "mixed_p99_ms": 14.45,
+      "mixed_rps_range": [
+        44027.65,
+        49174.32
+      ],
+      "idle_15000_rss_mib": 282.98828125,
+      "idle_15000_rps": 43844.58,
+      "read_rps": {
+        "feed": 32621.42,
+        "post": 141368.93
+      },
+      "http_socket_errors": 0,
+      "mixed_cpu_percent": 92.57786613651425
+    },
+    {
+      "name": "Go / net/http",
+      "language": "go",
+      "pr": null,
+      "throughput": 25928.66,
+      "rss_mib": 52.03125,
+      "app_loc": 391,
+      "dependencies": 2,
+      "batch": "L1, fresh four-stack comparison",
+      "components": {
+        "throughput": 34.87154890229638,
+        "app_loc": 77.10168134507606,
+        "dependencies": 97.75280898876404,
+        "rss_mib": 93.82750620049605
+      },
+      "score": 67.68501886778579,
+      "mixed_p99_ms": 14.73,
+      "mixed_rps_range": [
+        24804.2,
+        27121.52
+      ],
+      "idle_15000_rss_mib": 536.1953125,
+      "idle_15000_rps": 24790.54,
+      "read_rps": {
+        "feed": 16993.29,
+        "post": 52590.2
+      },
+      "http_socket_errors": 0,
+      "mixed_cpu_percent": 95.89403973509935
+    }
+  ],
+  "metadata": {
+    "platform": "Linux b0ffe87f380b 7.0.14-linuxkit #1 SMP PREEMPT Fri Sep 18 10:19:32 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux",
+    "toolchains": {
+      "gfortran": "GNU Fortran (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0",
+      "cc": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0",
+      "clang": "Ubuntu clang version 18.1.3 (1ubuntu1)",
+      "/usr/local/go/bin/go": "go version go1.27.1 linux/arm64",
+      "/root/.cargo/bin/rustc": "rustc 1.93.0 (254b59607 2026-01-19)"
+    },
+    "submissions": {
+      "cpp": {
+        "source_sha256": {
+          "auth.h": "f7b173e75e64904158ff01965033c584dfc89a59462a4444593a5a2c3426f424",
+          "build.sh": "9c38daf613f996b990a3040740eb7515a8f25297d2598dcac17bfc76c45e50fc",
+          "install.sh": "37b46871db4d50615cd51e9db6a08a0317f0819046760158e22c0e400b9a7b72",
+          "server.cpp": "4d3c967f6750adcb28dedf80c8099f3417bb387adee183333ebcb9db0e422388",
+          "start.sh": "8742d39196b740703d4f017f6875477f49c18f4c9fd28ecb27784170d25dc9ac",
+          "tests/commit_check.sh": "6249aaa37e5958f95b7e86c36e6b2fcd62652d0154301f5d32e5573223c0b04c",
+          "tests/commit_fault.cpp": "0dfd8de022cd1a02f89ce0a674870da9d465864cc6e1115239f585db89aab142",
+          "unicode.h": "22e2e0be55d30c7b1b2df4b8060f107794de123d6b6531b8544bc85a8b3ebb15"
+        },
+        "binary_sha256": "3b3fcb36808bd179b2ca8fb9ceb992af8aaa7c54d07fe0d93b731757ae8adf42",
+        "linked": "\tlinux-vdso.so.1 (0x0000ffff8d30c000)\n\tlibm.so.6 => /lib/aarch64-linux-gnu/libm.so.6 (0x0000ffff8d090000)\n\tlibstdc++.so.6 => /lib/aarch64-linux-gnu/libstdc++.so.6 (0x0000ffff8ce00000)\n\tlibgcc_s.so.1 => /lib/aarch64-linux-gnu/libgcc_s.so.1 (0x0000ffff8cdc0000)\n\tlibc.so.6 => /lib/aarch64-linux-gnu/libc.so.6 (0x0000ffff8cc00000)\n\t/lib/ld-linux-aarch64.so.1 (0x0000ffff8d2c0000)\n"
+      },
+      "fortran": {
+        "source_sha256": {
+          "bindings.f90": "adcc98de84cd4e04d2ca6c346815284a21c56bc1123a59cb362e4475549fb114",
+          "bridge.c": "9e81467d23855af6ab1e6c619d4213e93e5e4a9e89f4b87a9dd231279c2bb2af",
+          "build.sh": "0217972df8c5e01ebbbeb74008e59e6a71e48ce7f48c64fbcc354567bec99ab1",
+          "install.sh": "51ba3a19b01de40e6521690b5b2a4e5f2927dd97bdca55b2214d66f4eb27589a",
+          "server.f90": "eb15c82db1690d4c2417fdaa746c7560cd6e9f63365b4054982acbceeec28256",
+          "sqlite-build.sh": "932f680fd2cc0736c0c8ceddcbdb342945542fd492673d73205bbccf27ac8bf7",
+          "start.sh": "8742d39196b740703d4f017f6875477f49c18f4c9fd28ecb27784170d25dc9ac",
+          "tests/commit_check.sh": "4feed555577e598ac1727f758109aa38ef967d25e93cd952b842a804fc9f76cc",
+          "tests/commit_fault.c": "7bf9337f310a0d38c36fd4f4f0719f11f4f9ce38319d84d393840921e3e1621a",
+          "unicode.f90": "de996317443e51cdba2c9813f9f81cd408ec7645be6fd88ac5dcc0b4948f3d8a"
+        },
+        "binary_sha256": "1ed1c421c88b8075565e23725ec58ea99e43477971f951bb4d5b6dd0f9c2fa75",
+        "linked": "\tlinux-vdso.so.1 (0x0000ffff9073c000)\n\tlibgfortran.so.5 => /lib/aarch64-linux-gnu/libgfortran.so.5 (0x0000ffff903d0000)\n\tlibc.so.6 => /lib/aarch64-linux-gnu/libc.so.6 (0x0000ffff90210000)\n\t/lib/ld-linux-aarch64.so.1 (0x0000ffff90700000)\n\tlibm.so.6 => /lib/aarch64-linux-gnu/libm.so.6 (0x0000ffff90160000)\n\tlibgcc_s.so.1 => /lib/aarch64-linux-gnu/libgcc_s.so.1 (0x0000ffff90120000)\n"
+      },
+      "rust": {
+        "source_sha256": {
+          "Cargo.lock": "9cfec114f24a6d903522f4eac3bc0fb3af84a54ffb8488e49b33f189259bec65",
+          "Cargo.toml": "dc4fde2e324d920bf09cf4ad8dfcda72b8a795d6d3648958ece229679a7d0707",
+          "build.sh": "3bdbb827af73167162716fff8bfcf15fb40a566b3828c34ce7c62de3e3a53003",
+          "install.sh": "34c38b335c5c9edf2c49e0322f2ff1890c24d23adc98c468dd103f87fb3defad",
+          "rust-toolchain.toml": "14c89c1fa4ec11e07caf45ad22d84d59915fa08f002b904f950722aff4f924d7",
+          "sqlite-build.sh": "932f680fd2cc0736c0c8ceddcbdb342945542fd492673d73205bbccf27ac8bf7",
+          "src/main.rs": "e07d7ac7ff697d8a053e3fb293dc025d0bca0936aae035642355c3e86f4ed775",
+          "start.sh": "8742d39196b740703d4f017f6875477f49c18f4c9fd28ecb27784170d25dc9ac",
+          "tests/commit_check.sh": "9a9397a8f91401f985ff45bafb77bcc14c11ccf7ee7d1937f1aef15c6d7dab94",
+          "tests/commit_fault.c": "7bf9337f310a0d38c36fd4f4f0719f11f4f9ce38319d84d393840921e3e1621a"
+        },
+        "binary_sha256": "d74eb04386192aed1e9393f4145ebfddfb74a6e91b5ff553a62db47fd263c922",
+        "linked": "\tlinux-vdso.so.1 (0x0000ffff9a658000)\n\tlibgcc_s.so.1 => /lib/aarch64-linux-gnu/libgcc_s.so.1 (0x0000ffff9a3b0000)\n\tlibc.so.6 => /lib/aarch64-linux-gnu/libc.so.6 (0x0000ffff9a1f0000)\n\t/lib/ld-linux-aarch64.so.1 (0x0000ffff9a610000)\n"
+      },
+      "go": {
+        "source_sha256": {
+          "build.sh": "584c74b7261eed4207c052bc0de114807a61876522fa48b679178acd9916c24d",
+          "go.mod": "2b5c8debe1ecc129b7041ad1195b956978cd0edeeec1e10cfb2773556e10c346",
+          "go.sum": "be57ada047258b490f90c820fd3f469bda6511d31b80aa4790bbbd6fd37a4ac9",
+          "install.sh": "5fc4010bf87222b42d6a224d1780fe71e7661d5f616ece38844036fa84632eb5",
+          "main.go": "7ca1689d3032477c3d1fcf79127d70f5bf3d76986908e4ab86a4d3f26abbd2d6",
+          "sqlite-build.sh": "932f680fd2cc0736c0c8ceddcbdb342945542fd492673d73205bbccf27ac8bf7",
+          "start.sh": "8742d39196b740703d4f017f6875477f49c18f4c9fd28ecb27784170d25dc9ac",
+          "tests/commit_check.sh": "093eb0080a3a661ae737d2cd27ee5dd04a17fae61e4087e2cb1ffae74065070f",
+          "tests/commit_fault.c": "7bf9337f310a0d38c36fd4f4f0719f11f4f9ce38319d84d393840921e3e1621a"
+        },
+        "binary_sha256": "f439769e0812d34f005363f4cc24b4b66d9afc78acf6d4d0c64cae700aeb2fa9",
+        "linked": "\tlinux-vdso.so.1 (0x0000ffff8b13b000)\n\tlibc.so.6 => /lib/aarch64-linux-gnu/libc.so.6 (0x0000ffff8af30000)\n\t/lib/ld-linux-aarch64.so.1 (0x0000ffff8b0f0000)\n"
+      }
+    }
+  },
+  "mixed": {
+    "configuration": {
+      "command": "run",
+      "binaries": "cpp=/work/submissions/cpp-uwebsockets-v2-tbsvttr/bin/server,fortran=/work/submissions/fortran-microhttpd-tbsvttr/bin/server,rust=/work/submissions/rust-axum-tbsvttr/bin/server,go=/work/submissions/go-nethttp-tbsvttr/bin/server",
+      "server_container": "twelve-language-server",
+      "load_container": "twelve-language-loadgen",
+      "workloads": "mixed",
+      "trials": 5,
+      "seconds": 15,
+      "port_base": 20000,
+      "output": "results/language-comparison/mixed.json"
+    },
+    "runs": [
+      {
+        "name": "cpp",
+        "workload": "mixed",
+        "trial": 1,
+        "before": {
+          "VmHWM": 37824,
+          "VmRSS": 37824,
+          "Threads": 1,
+          "cpu_seconds": 1.74
+        },
+        "metrics": {
+          "VmHWM": 43000,
+          "VmRSS": 43000,
+          "Threads": 1,
+          "cpu_seconds": 15.29
+        },
+        "binary_sha256": "3b3fcb36808bd179b2ca8fb9ceb992af8aaa7c54d07fe0d93b731757ae8adf42",
+        "host_elapsed": 15.220926375011913,
+        "wrk_duration": 15.09,
+        "requests_per_second": 62490.82,
+        "output": "Running 15s test @ http://127.0.0.1:20000/feed\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     1.62ms    2.61ms  22.90ms   91.08%\n    Req/Sec    31.47k     2.04k   47.98k    85.05%\n  Latency Distribution\n     50%    0.86ms\n     75%    1.13ms\n     90%    3.08ms\n     99%   13.20ms\n  942941 requests in 15.09s, 1.57GB read\nRequests/sec:  62490.82\nTransfer/sec:    106.87MB\n"
+      },
+      {
+        "name": "fortran",
+        "workload": "mixed",
+        "trial": 1,
+        "before": {
+          "VmHWM": 37736,
+          "VmRSS": 37736,
+          "Threads": 1,
+          "cpu_seconds": 1.86
+        },
+        "metrics": {
+          "VmHWM": 41072,
+          "VmRSS": 41072,
+          "Threads": 1,
+          "cpu_seconds": 16.33
+        },
+        "binary_sha256": "1ed1c421c88b8075565e23725ec58ea99e43477971f951bb4d5b6dd0f9c2fa75",
+        "host_elapsed": 15.224137041019276,
+        "wrk_duration": 15.09,
+        "requests_per_second": 26368.25,
+        "output": "Running 15s test @ http://127.0.0.1:20001/feed\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     2.66ms    2.10ms  19.36ms   93.85%\n    Req/Sec    13.27k     1.14k   23.08k    77.08%\n  Latency Distribution\n     50%    2.33ms\n     75%    2.76ms\n     90%    3.35ms\n     99%   14.13ms\n  397906 requests in 15.09s, 676.80MB read\nRequests/sec:  26368.25\nTransfer/sec:     44.85MB\n"
+      },
+      {
+        "name": "rust",
+        "workload": "mixed",
+        "trial": 1,
+        "before": {
+          "VmHWM": 38520,
+          "VmRSS": 38520,
+          "Threads": 1,
+          "cpu_seconds": 1.85
+        },
+        "metrics": {
+          "VmHWM": 42876,
+          "VmRSS": 42876,
+          "Threads": 1,
+          "cpu_seconds": 15.78
+        },
+        "binary_sha256": "d74eb04386192aed1e9393f4145ebfddfb74a6e91b5ff553a62db47fd263c922",
+        "host_elapsed": 15.233552582998527,
+        "wrk_duration": 15.1,
+        "requests_per_second": 49174.32,
+        "output": "Running 15s test @ http://127.0.0.1:20002/feed\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     1.79ms    2.58ms  19.30ms   92.10%\n    Req/Sec    24.77k     1.97k   40.06k    75.08%\n  Latency Distribution\n     50%    1.09ms\n     75%    1.26ms\n     90%    1.93ms\n     99%   13.98ms\n  742392 requests in 15.10s, 1.24GB read\nRequests/sec:  49174.32\nTransfer/sec:     84.03MB\n"
+      },
+      {
+        "name": "go",
+        "workload": "mixed",
+        "trial": 1,
+        "before": {
+          "VmHWM": 49596,
+          "VmRSS": 49596,
+          "Threads": 5,
+          "cpu_seconds": 1.78
+        },
+        "metrics": {
+          "VmHWM": 53444,
+          "VmRSS": 53280,
+          "Threads": 5,
+          "cpu_seconds": 16.26
+        },
+        "binary_sha256": "f439769e0812d34f005363f4cc24b4b66d9afc78acf6d4d0c64cae700aeb2fa9",
+        "host_elapsed": 15.211051458027214,
+        "wrk_duration": 15.09,
+        "requests_per_second": 27121.52,
+        "output": "Running 15s test @ http://127.0.0.1:20003/feed\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     2.59ms    2.10ms  23.57ms   93.31%\n    Req/Sec    13.66k     1.29k   25.66k    70.43%\n  Latency Distribution\n     50%    2.27ms\n     75%    2.85ms\n     90%    3.63ms\n     99%   13.69ms\n  409170 requests in 15.09s, 696.36MB read\nRequests/sec:  27121.52\nTransfer/sec:     46.16MB\n"
+      },
+      {
+        "name": "cpp",
+        "workload": "mixed",
+        "trial": 2,
+        "before": {
+          "VmHWM": 37744,
+          "VmRSS": 37744,
+          "Threads": 1,
+          "cpu_seconds": 1.73
+        },
+        "metrics": {
+          "VmHWM": 42384,
+          "VmRSS": 42384,
+          "Threads": 1,
+          "cpu_seconds": 14.86
+        },
+        "binary_sha256": "3b3fcb36808bd179b2ca8fb9ceb992af8aaa7c54d07fe0d93b731757ae8adf42",
+        "host_elapsed": 15.173346499999752,
+        "wrk_duration": 15.04,
+        "requests_per_second": 55341.1,
+        "output": "Running 15s test @ http://127.0.0.1:20004/feed\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     2.22ms    4.09ms  37.12ms   90.28%\n    Req/Sec    27.81k     2.23k   35.72k    73.00%\n  Latency Distribution\n     50%    0.95ms\n     75%    1.26ms\n     90%    5.98ms\n     99%   20.98ms\n  832127 requests in 15.04s, 1.39GB read\nRequests/sec:  55341.10\nTransfer/sec:     94.62MB\n"
+      },
+      {
+        "name": "go",
+        "workload": "mixed",
+        "trial": 2,
+        "before": {
+          "VmHWM": 49532,
+          "VmRSS": 49532,
+          "Threads": 5,
+          "cpu_seconds": 1.94
+        },
+        "metrics": {
+          "VmHWM": 53476,
+          "VmRSS": 53076,
+          "Threads": 5,
+          "cpu_seconds": 16.42
+        },
+        "binary_sha256": "f439769e0812d34f005363f4cc24b4b66d9afc78acf6d4d0c64cae700aeb2fa9",
+        "host_elapsed": 15.226744040992344,
+        "wrk_duration": 15.1,
+        "requests_per_second": 24804.2,
+        "output": "Running 15s test @ http://127.0.0.1:20005/feed\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     2.87ms    2.45ms  22.28ms   94.12%\n    Req/Sec    12.49k     1.25k   24.38k    71.76%\n  Latency Distribution\n     50%    2.46ms\n     75%    3.10ms\n     90%    3.99ms\n     99%   15.75ms\n  374427 requests in 15.10s, 636.60MB read\nRequests/sec:  24804.20\nTransfer/sec:     42.17MB\n"
+      },
+      {
+        "name": "rust",
+        "workload": "mixed",
+        "trial": 2,
+        "before": {
+          "VmHWM": 38492,
+          "VmRSS": 38492,
+          "Threads": 1,
+          "cpu_seconds": 1.88
+        },
+        "metrics": {
+          "VmHWM": 42752,
+          "VmRSS": 42752,
+          "Threads": 1,
+          "cpu_seconds": 15.85
+        },
+        "binary_sha256": "d74eb04386192aed1e9393f4145ebfddfb74a6e91b5ff553a62db47fd263c922",
+        "host_elapsed": 15.216670082998462,
+        "wrk_duration": 15.09,
+        "requests_per_second": 46084.67,
+        "output": "Running 15s test @ http://127.0.0.1:20006/feed\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     1.88ms    2.64ms  21.75ms   92.30%\n    Req/Sec    23.19k     1.84k   31.31k    68.11%\n  Latency Distribution\n     50%    1.17ms\n     75%    1.35ms\n     90%    1.96ms\n     99%   14.45ms\n  695363 requests in 15.09s, 1.16GB read\nRequests/sec:  46084.67\nTransfer/sec:     78.70MB\n"
+      },
+      {
+        "name": "fortran",
+        "workload": "mixed",
+        "trial": 2,
+        "before": {
+          "VmHWM": 37592,
+          "VmRSS": 37592,
+          "Threads": 1,
+          "cpu_seconds": 1.9
+        },
+        "metrics": {
+          "VmHWM": 41020,
+          "VmRSS": 41020,
+          "Threads": 1,
+          "cpu_seconds": 16.36
+        },
+        "binary_sha256": "1ed1c421c88b8075565e23725ec58ea99e43477971f951bb4d5b6dd0f9c2fa75",
+        "host_elapsed": 15.22299804200884,
+        "wrk_duration": 15.09,
+        "requests_per_second": 24546.79,
+        "output": "Running 15s test @ http://127.0.0.1:20007/feed\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     2.86ms    2.30ms  23.46ms   94.09%\n    Req/Sec    12.35k     1.10k   19.13k    68.11%\n  Latency Distribution\n     50%    2.49ms\n     75%    2.96ms\n     90%    3.61ms\n     99%   15.21ms\n  370319 requests in 15.09s, 629.41MB read\nRequests/sec:  24546.79\nTransfer/sec:     41.72MB\n"
+      },
+      {
+        "name": "rust",
+        "workload": "mixed",
+        "trial": 3,
+        "before": {
+          "VmHWM": 38560,
+          "VmRSS": 38560,
+          "Threads": 1,
+          "cpu_seconds": 1.88
+        },
+        "metrics": {
+          "VmHWM": 42756,
+          "VmRSS": 42756,
+          "Threads": 1,
+          "cpu_seconds": 15.85
+        },
+        "binary_sha256": "d74eb04386192aed1e9393f4145ebfddfb74a6e91b5ff553a62db47fd263c922",
+        "host_elapsed": 15.222524124983465,
+        "wrk_duration": 15.09,
+        "requests_per_second": 44027.65,
+        "output": "Running 15s test @ http://127.0.0.1:20008/feed\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     1.98ms    2.79ms  20.79ms   92.20%\n    Req/Sec    22.16k     1.94k   36.33k    71.10%\n  Latency Distribution\n     50%    1.22ms\n     75%    1.41ms\n     90%    2.16ms\n     99%   15.29ms\n  664385 requests in 15.09s, 1.11GB read\nRequests/sec:  44027.65\nTransfer/sec:     75.20MB\n"
+      },
+      {
+        "name": "go",
+        "workload": "mixed",
+        "trial": 3,
+        "before": {
+          "VmHWM": 49944,
+          "VmRSS": 49944,
+          "Threads": 5,
+          "cpu_seconds": 1.93
+        },
+        "metrics": {
+          "VmHWM": 53496,
+          "VmRSS": 53244,
+          "Threads": 5,
+          "cpu_seconds": 16.39
+        },
+        "binary_sha256": "f439769e0812d34f005363f4cc24b4b66d9afc78acf6d4d0c64cae700aeb2fa9",
+        "host_elapsed": 15.220337542006746,
+        "wrk_duration": 15.09,
+        "requests_per_second": 25928.66,
+        "output": "Running 15s test @ http://127.0.0.1:20009/feed\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     2.75ms    2.41ms  42.20ms   94.47%\n    Req/Sec    13.05k     1.24k   21.18k    74.09%\n  Latency Distribution\n     50%    2.36ms\n     75%    2.96ms\n     90%    3.82ms\n     99%   14.73ms\n  391381 requests in 15.09s, 665.73MB read\nRequests/sec:  25928.66\nTransfer/sec:     44.10MB\n"
+      },
+      {
+        "name": "cpp",
+        "workload": "mixed",
+        "trial": 3,
+        "before": {
+          "VmHWM": 37768,
+          "VmRSS": 37768,
+          "Threads": 1,
+          "cpu_seconds": 1.8
+        },
+        "metrics": {
+          "VmHWM": 42444,
+          "VmRSS": 42444,
+          "Threads": 1,
+          "cpu_seconds": 15.22
+        },
+        "binary_sha256": "3b3fcb36808bd179b2ca8fb9ceb992af8aaa7c54d07fe0d93b731757ae8adf42",
+        "host_elapsed": 15.228908082994167,
+        "wrk_duration": 15.1,
+        "requests_per_second": 55632.61,
+        "output": "Running 15s test @ http://127.0.0.1:20010/feed\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     2.04ms    3.54ms  31.01ms   90.45%\n    Req/Sec    27.99k     2.51k   39.32k    81.73%\n  Latency Distribution\n     50%    0.95ms\n     75%    1.26ms\n     90%    5.04ms\n     99%   17.24ms\n  840062 requests in 15.10s, 1.40GB read\nRequests/sec:  55632.61\nTransfer/sec:     95.11MB\n"
+      },
+      {
+        "name": "fortran",
+        "workload": "mixed",
+        "trial": 3,
+        "before": {
+          "VmHWM": 37728,
+          "VmRSS": 37728,
+          "Threads": 1,
+          "cpu_seconds": 1.95
+        },
+        "metrics": {
+          "VmHWM": 40936,
+          "VmRSS": 40936,
+          "Threads": 1,
+          "cpu_seconds": 16.45
+        },
+        "binary_sha256": "1ed1c421c88b8075565e23725ec58ea99e43477971f951bb4d5b6dd0f9c2fa75",
+        "host_elapsed": 15.220985541003756,
+        "wrk_duration": 15.09,
+        "requests_per_second": 23887.13,
+        "output": "Running 15s test @ http://127.0.0.1:20011/feed\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     2.90ms    2.19ms  19.48ms   93.42%\n    Req/Sec    12.02k     1.01k   16.80k    66.11%\n  Latency Distribution\n     50%    2.55ms\n     75%    3.05ms\n     90%    3.71ms\n     99%   14.87ms\n  360478 requests in 15.09s, 612.55MB read\nRequests/sec:  23887.13\nTransfer/sec:     40.59MB\n"
+      },
+      {
+        "name": "rust",
+        "workload": "mixed",
+        "trial": 4,
+        "before": {
+          "VmHWM": 38588,
+          "VmRSS": 38588,
+          "Threads": 1,
+          "cpu_seconds": 1.82
+        },
+        "metrics": {
+          "VmHWM": 42784,
+          "VmRSS": 42784,
+          "Threads": 1,
+          "cpu_seconds": 15.78
+        },
+        "binary_sha256": "d74eb04386192aed1e9393f4145ebfddfb74a6e91b5ff553a62db47fd263c922",
+        "host_elapsed": 15.238852207985474,
+        "wrk_duration": 15.09,
+        "requests_per_second": 45628.64,
+        "output": "Running 15s test @ http://127.0.0.1:20012/feed\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     1.92ms    2.73ms  24.30ms   92.23%\n    Req/Sec    22.97k     2.12k   36.79k    71.10%\n  Latency Distribution\n     50%    1.18ms\n     75%    1.37ms\n     90%    2.10ms\n     99%   14.87ms\n  688627 requests in 15.09s, 1.15GB read\nRequests/sec:  45628.64\nTransfer/sec:     77.93MB\n"
+      },
+      {
+        "name": "fortran",
+        "workload": "mixed",
+        "trial": 4,
+        "before": {
+          "VmHWM": 37616,
+          "VmRSS": 37616,
+          "Threads": 1,
+          "cpu_seconds": 1.95
+        },
+        "metrics": {
+          "VmHWM": 40868,
+          "VmRSS": 40868,
+          "Threads": 1,
+          "cpu_seconds": 16.34
+        },
+        "binary_sha256": "1ed1c421c88b8075565e23725ec58ea99e43477971f951bb4d5b6dd0f9c2fa75",
+        "host_elapsed": 15.217804332991363,
+        "wrk_duration": 15.11,
+        "requests_per_second": 24130.08,
+        "output": "Running 15s test @ http://127.0.0.1:20013/feed\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     2.98ms    2.61ms  32.89ms   94.19%\n    Req/Sec    12.15k     1.34k   23.78k    80.40%\n  Latency Distribution\n     50%    2.51ms\n     75%    3.00ms\n     90%    3.73ms\n     99%   16.63ms\n  364489 requests in 15.11s, 619.41MB read\nRequests/sec:  24130.08\nTransfer/sec:     41.01MB\n"
+      },
+      {
+        "name": "cpp",
+        "workload": "mixed",
+        "trial": 4,
+        "before": {
+          "VmHWM": 37816,
+          "VmRSS": 37816,
+          "Threads": 1,
+          "cpu_seconds": 1.81
+        },
+        "metrics": {
+          "VmHWM": 42556,
+          "VmRSS": 42556,
+          "Threads": 1,
+          "cpu_seconds": 15.33
+        },
+        "binary_sha256": "3b3fcb36808bd179b2ca8fb9ceb992af8aaa7c54d07fe0d93b731757ae8adf42",
+        "host_elapsed": 15.155819959007204,
+        "wrk_duration": 15.02,
+        "requests_per_second": 55771.64,
+        "output": "Running 15s test @ http://127.0.0.1:20014/feed\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     1.91ms    3.19ms  28.97ms   90.70%\n    Req/Sec    28.02k     1.54k   34.99k    76.33%\n  Latency Distribution\n     50%    0.96ms\n     75%    1.25ms\n     90%    4.21ms\n     99%   15.71ms\n  837769 requests in 15.02s, 1.40GB read\nRequests/sec:  55771.64\nTransfer/sec:     95.35MB\n"
+      },
+      {
+        "name": "go",
+        "workload": "mixed",
+        "trial": 4,
+        "before": {
+          "VmHWM": 49516,
+          "VmRSS": 49516,
+          "Threads": 5,
+          "cpu_seconds": 1.95
+        },
+        "metrics": {
+          "VmHWM": 53592,
+          "VmRSS": 53308,
+          "Threads": 5,
+          "cpu_seconds": 16.23
+        },
+        "binary_sha256": "f439769e0812d34f005363f4cc24b4b66d9afc78acf6d4d0c64cae700aeb2fa9",
+        "host_elapsed": 15.237523624993628,
+        "wrk_duration": 15.1,
+        "requests_per_second": 25346.3,
+        "output": "Running 15s test @ http://127.0.0.1:20015/feed\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     3.08ms    4.12ms  75.31ms   94.78%\n    Req/Sec    12.76k     1.71k   26.74k    78.74%\n  Latency Distribution\n     50%    2.39ms\n     75%    3.03ms\n     90%    4.02ms\n     99%   18.99ms\n  382648 requests in 15.10s, 650.83MB read\nRequests/sec:  25346.30\nTransfer/sec:     43.11MB\n"
+      },
+      {
+        "name": "cpp",
+        "workload": "mixed",
+        "trial": 5,
+        "before": {
+          "VmHWM": 37904,
+          "VmRSS": 37904,
+          "Threads": 1,
+          "cpu_seconds": 1.81
+        },
+        "metrics": {
+          "VmHWM": 42700,
+          "VmRSS": 42700,
+          "Threads": 1,
+          "cpu_seconds": 15.29
+        },
+        "binary_sha256": "3b3fcb36808bd179b2ca8fb9ceb992af8aaa7c54d07fe0d93b731757ae8adf42",
+        "host_elapsed": 15.158102957997471,
+        "wrk_duration": 15.03,
+        "requests_per_second": 58170.4,
+        "output": "Running 15s test @ http://127.0.0.1:20016/feed\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     1.82ms    3.02ms  26.66ms   90.77%\n    Req/Sec    29.24k     1.36k   34.16k    73.67%\n  Latency Distribution\n     50%    0.93ms\n     75%    1.21ms\n     90%    3.94ms\n     99%   15.04ms\n  874300 requests in 15.03s, 1.46GB read\nRequests/sec:  58170.40\nTransfer/sec:     99.42MB\n"
+      },
+      {
+        "name": "fortran",
+        "workload": "mixed",
+        "trial": 5,
+        "before": {
+          "VmHWM": 37508,
+          "VmRSS": 37508,
+          "Threads": 1,
+          "cpu_seconds": 1.93
+        },
+        "metrics": {
+          "VmHWM": 40884,
+          "VmRSS": 40884,
+          "Threads": 1,
+          "cpu_seconds": 16.44
+        },
+        "binary_sha256": "1ed1c421c88b8075565e23725ec58ea99e43477971f951bb4d5b6dd0f9c2fa75",
+        "host_elapsed": 15.216241332993377,
+        "wrk_duration": 15.08,
+        "requests_per_second": 23945.61,
+        "output": "Running 15s test @ http://127.0.0.1:20017/feed\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     2.91ms    2.23ms  20.39ms   93.65%\n    Req/Sec    12.05k     1.10k   20.39k    68.77%\n  Latency Distribution\n     50%    2.55ms\n     75%    3.05ms\n     90%    3.70ms\n     99%   15.17ms\n  361080 requests in 15.08s, 613.52MB read\nRequests/sec:  23945.61\nTransfer/sec:     40.69MB\n"
+      },
+      {
+        "name": "rust",
+        "workload": "mixed",
+        "trial": 5,
+        "before": {
+          "VmHWM": 38436,
+          "VmRSS": 38436,
+          "Threads": 1,
+          "cpu_seconds": 1.87
+        },
+        "metrics": {
+          "VmHWM": 42640,
+          "VmRSS": 42640,
+          "Threads": 1,
+          "cpu_seconds": 15.86
+        },
+        "binary_sha256": "d74eb04386192aed1e9393f4145ebfddfb74a6e91b5ff553a62db47fd263c922",
+        "host_elapsed": 15.22656412498327,
+        "wrk_duration": 15.08,
+        "requests_per_second": 45590.99,
+        "output": "Running 15s test @ http://127.0.0.1:20018/feed\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     1.85ms    2.56ms  31.31ms   92.57%\n    Req/Sec    22.95k     1.81k   35.66k    72.09%\n  Latency Distribution\n     50%    1.19ms\n     75%    1.37ms\n     90%    1.90ms\n     99%   13.99ms\n  687709 requests in 15.08s, 1.15GB read\nRequests/sec:  45590.99\nTransfer/sec:     77.87MB\n"
+      },
+      {
+        "name": "go",
+        "workload": "mixed",
+        "trial": 5,
+        "before": {
+          "VmHWM": 50372,
+          "VmRSS": 50372,
+          "Threads": 5,
+          "cpu_seconds": 1.95
+        },
+        "metrics": {
+          "VmHWM": 53704,
+          "VmRSS": 53704,
+          "Threads": 5,
+          "cpu_seconds": 16.44
+        },
+        "binary_sha256": "f439769e0812d34f005363f4cc24b4b66d9afc78acf6d4d0c64cae700aeb2fa9",
+        "host_elapsed": 15.217335708002793,
+        "wrk_duration": 15.09,
+        "requests_per_second": 26027.85,
+        "output": "Running 15s test @ http://127.0.0.1:20019/feed\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     2.71ms    2.22ms  23.17ms   93.62%\n    Req/Sec    13.10k     1.21k   23.27k    73.09%\n  Latency Distribution\n     50%    2.36ms\n     75%    2.96ms\n     90%    3.81ms\n     99%   14.41ms\n  392712 requests in 15.09s, 667.96MB read\nRequests/sec:  26027.85\nTransfer/sec:     44.27MB\n"
+      }
+    ]
+  },
+  "reads": {
+    "configuration": {
+      "command": "run",
+      "binaries": "cpp=/work/submissions/cpp-uwebsockets-v2-tbsvttr/bin/server,fortran=/work/submissions/fortran-microhttpd-tbsvttr/bin/server,rust=/work/submissions/rust-axum-tbsvttr/bin/server,go=/work/submissions/go-nethttp-tbsvttr/bin/server",
+      "server_container": "twelve-language-server",
+      "load_container": "twelve-language-loadgen",
+      "workloads": "feed,post",
+      "trials": 3,
+      "seconds": 8,
+      "port_base": 22000,
+      "output": "results/language-comparison/reads.json"
+    },
+    "runs": [
+      {
+        "name": "cpp",
+        "workload": "feed",
+        "trial": 1,
+        "before": {
+          "VmHWM": 6272,
+          "VmRSS": 6272,
+          "Threads": 1,
+          "cpu_seconds": 2.09
+        },
+        "metrics": {
+          "VmHWM": 6272,
+          "VmRSS": 6272,
+          "Threads": 1,
+          "cpu_seconds": 10.1
+        },
+        "binary_sha256": "3b3fcb36808bd179b2ca8fb9ceb992af8aaa7c54d07fe0d93b731757ae8adf42",
+        "host_elapsed": 8.06230904199765,
+        "wrk_duration": 8.01,
+        "requests_per_second": 36594.01,
+        "output": "Running 8s test @ http://127.0.0.1:22000/feed\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     1.75ms  248.09us   4.21ms   96.02%\n    Req/Sec    18.41k   591.86    20.74k    75.00%\n  Latency Distribution\n     50%    1.75ms\n     75%    1.80ms\n     90%    1.84ms\n     99%    3.39ms\n  293031 requests in 8.01s, 1.42GB read\nRequests/sec:  36594.01\nTransfer/sec:    181.89MB\n"
+      },
+      {
+        "name": "fortran",
+        "workload": "feed",
+        "trial": 1,
+        "before": {
+          "VmHWM": 7348,
+          "VmRSS": 7348,
+          "Threads": 1,
+          "cpu_seconds": 1.99
+        },
+        "metrics": {
+          "VmHWM": 7356,
+          "VmRSS": 7356,
+          "Threads": 1,
+          "cpu_seconds": 9.99
+        },
+        "binary_sha256": "1ed1c421c88b8075565e23725ec58ea99e43477971f951bb4d5b6dd0f9c2fa75",
+        "host_elapsed": 8.063479459000519,
+        "wrk_duration": 8.01,
+        "requests_per_second": 14921.38,
+        "output": "Running 8s test @ http://127.0.0.1:22001/feed\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     4.28ms  194.33us  10.58ms   88.02%\n    Req/Sec     7.51k   158.33     7.76k    72.50%\n  Latency Distribution\n     50%    4.23ms\n     75%    4.34ms\n     90%    4.49ms\n     99%    4.71ms\n  119493 requests in 8.01s, 593.95MB read\nRequests/sec:  14921.38\nTransfer/sec:     74.17MB\n"
+      },
+      {
+        "name": "rust",
+        "workload": "feed",
+        "trial": 1,
+        "before": {
+          "VmHWM": 8052,
+          "VmRSS": 7492,
+          "Threads": 1,
+          "cpu_seconds": 2.0
+        },
+        "metrics": {
+          "VmHWM": 8420,
+          "VmRSS": 7692,
+          "Threads": 1,
+          "cpu_seconds": 10.0
+        },
+        "binary_sha256": "d74eb04386192aed1e9393f4145ebfddfb74a6e91b5ff553a62db47fd263c922",
+        "host_elapsed": 8.068846624984872,
+        "wrk_duration": 8.01,
+        "requests_per_second": 32621.42,
+        "output": "Running 8s test @ http://127.0.0.1:22002/feed\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     1.95ms  189.79us   6.80ms   91.47%\n    Req/Sec    16.41k   584.23    17.67k    79.38%\n  Latency Distribution\n     50%    1.91ms\n     75%    1.96ms\n     90%    2.09ms\n     99%    2.53ms\n  261434 requests in 8.01s, 1.27GB read\nRequests/sec:  32621.42\nTransfer/sec:    162.15MB\n"
+      },
+      {
+        "name": "go",
+        "workload": "feed",
+        "trial": 1,
+        "before": {
+          "VmHWM": 19288,
+          "VmRSS": 18720,
+          "Threads": 5,
+          "cpu_seconds": 2.0
+        },
+        "metrics": {
+          "VmHWM": 19304,
+          "VmRSS": 18980,
+          "Threads": 5,
+          "cpu_seconds": 10.01
+        },
+        "binary_sha256": "f439769e0812d34f005363f4cc24b4b66d9afc78acf6d4d0c64cae700aeb2fa9",
+        "host_elapsed": 8.069775250012754,
+        "wrk_duration": 8.01,
+        "requests_per_second": 17059.62,
+        "output": "Running 8s test @ http://127.0.0.1:22003/feed\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     3.75ms    1.35ms  17.96ms   72.52%\n    Req/Sec     8.57k   393.05     9.26k    71.25%\n  Latency Distribution\n     50%    3.77ms\n     75%    4.51ms\n     90%    5.39ms\n     99%    7.13ms\n  136650 requests in 8.01s, 679.23MB read\nRequests/sec:  17059.62\nTransfer/sec:     84.80MB\n"
+      },
+      {
+        "name": "cpp",
+        "workload": "feed",
+        "trial": 2,
+        "before": {
+          "VmHWM": 6268,
+          "VmRSS": 6268,
+          "Threads": 1,
+          "cpu_seconds": 2.09
+        },
+        "metrics": {
+          "VmHWM": 6268,
+          "VmRSS": 6268,
+          "Threads": 1,
+          "cpu_seconds": 10.1
+        },
+        "binary_sha256": "3b3fcb36808bd179b2ca8fb9ceb992af8aaa7c54d07fe0d93b731757ae8adf42",
+        "host_elapsed": 8.068994291999843,
+        "wrk_duration": 8.01,
+        "requests_per_second": 38868.12,
+        "output": "Running 8s test @ http://127.0.0.1:22004/feed\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     1.65ms  355.17us  14.67ms   97.76%\n    Req/Sec    19.56k   596.49    20.21k    90.00%\n  Latency Distribution\n     50%    1.59ms\n     75%    1.62ms\n     90%    1.72ms\n     99%    3.19ms\n  311222 requests in 8.01s, 1.51GB read\nRequests/sec:  38868.12\nTransfer/sec:    193.20MB\n"
+      },
+      {
+        "name": "go",
+        "workload": "feed",
+        "trial": 2,
+        "before": {
+          "VmHWM": 19308,
+          "VmRSS": 18576,
+          "Threads": 5,
+          "cpu_seconds": 2.01
+        },
+        "metrics": {
+          "VmHWM": 19308,
+          "VmRSS": 19220,
+          "Threads": 5,
+          "cpu_seconds": 10.02
+        },
+        "binary_sha256": "f439769e0812d34f005363f4cc24b4b66d9afc78acf6d4d0c64cae700aeb2fa9",
+        "host_elapsed": 8.081540875020437,
+        "wrk_duration": 8.02,
+        "requests_per_second": 16893.97,
+        "output": "Running 8s test @ http://127.0.0.1:22005/feed\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     3.79ms    1.35ms  10.75ms   71.05%\n    Req/Sec     8.50k   364.15     9.16k    69.38%\n  Latency Distribution\n     50%    3.79ms\n     75%    4.56ms\n     90%    5.48ms\n     99%    7.24ms\n  135458 requests in 8.02s, 673.30MB read\nRequests/sec:  16893.97\nTransfer/sec:     83.97MB\n"
+      },
+      {
+        "name": "rust",
+        "workload": "feed",
+        "trial": 2,
+        "before": {
+          "VmHWM": 7932,
+          "VmRSS": 7676,
+          "Threads": 1,
+          "cpu_seconds": 2.0
+        },
+        "metrics": {
+          "VmHWM": 8456,
+          "VmRSS": 7952,
+          "Threads": 1,
+          "cpu_seconds": 10.01
+        },
+        "binary_sha256": "d74eb04386192aed1e9393f4145ebfddfb74a6e91b5ff553a62db47fd263c922",
+        "host_elapsed": 8.080192958004773,
+        "wrk_duration": 8.02,
+        "requests_per_second": 32583.6,
+        "output": "Running 8s test @ http://127.0.0.1:22006/feed\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     1.96ms  217.13us   8.95ms   91.70%\n    Req/Sec    16.38k   564.43    17.77k    82.50%\n  Latency Distribution\n     50%    1.91ms\n     75%    1.96ms\n     90%    2.10ms\n     99%    2.59ms\n  261299 requests in 8.02s, 1.27GB read\nRequests/sec:  32583.60\nTransfer/sec:    161.96MB\n"
+      },
+      {
+        "name": "fortran",
+        "workload": "feed",
+        "trial": 2,
+        "before": {
+          "VmHWM": 7332,
+          "VmRSS": 7332,
+          "Threads": 1,
+          "cpu_seconds": 2.0
+        },
+        "metrics": {
+          "VmHWM": 7348,
+          "VmRSS": 7348,
+          "Threads": 1,
+          "cpu_seconds": 10.11
+        },
+        "binary_sha256": "1ed1c421c88b8075565e23725ec58ea99e43477971f951bb4d5b6dd0f9c2fa75",
+        "host_elapsed": 8.15907220900408,
+        "wrk_duration": 8.1,
+        "requests_per_second": 14584.69,
+        "output": "Running 8s test @ http://127.0.0.1:22007/feed\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     4.36ms  359.16us  10.67ms   93.75%\n    Req/Sec     7.38k   544.86    13.91k    96.27%\n  Latency Distribution\n     50%    4.33ms\n     75%    4.39ms\n     90%    4.53ms\n     99%    4.93ms\n  118142 requests in 8.10s, 587.23MB read\nRequests/sec:  14584.69\nTransfer/sec:     72.49MB\n"
+      },
+      {
+        "name": "rust",
+        "workload": "feed",
+        "trial": 3,
+        "before": {
+          "VmHWM": 8012,
+          "VmRSS": 7492,
+          "Threads": 1,
+          "cpu_seconds": 2.0
+        },
+        "metrics": {
+          "VmHWM": 8412,
+          "VmRSS": 7740,
+          "Threads": 1,
+          "cpu_seconds": 10.0
+        },
+        "binary_sha256": "d74eb04386192aed1e9393f4145ebfddfb74a6e91b5ff553a62db47fd263c922",
+        "host_elapsed": 8.068689000006998,
+        "wrk_duration": 8.02,
+        "requests_per_second": 33051.96,
+        "output": "Running 8s test @ http://127.0.0.1:22008/feed\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     1.93ms  211.07us   7.56ms   94.42%\n    Req/Sec    16.63k   635.68    17.43k    84.38%\n  Latency Distribution\n     50%    1.88ms\n     75%    1.93ms\n     90%    2.03ms\n     99%    2.52ms\n  264994 requests in 8.02s, 1.29GB read\nRequests/sec:  33051.96\nTransfer/sec:    164.29MB\n"
+      },
+      {
+        "name": "go",
+        "workload": "feed",
+        "trial": 3,
+        "before": {
+          "VmHWM": 19300,
+          "VmRSS": 19300,
+          "Threads": 5,
+          "cpu_seconds": 2.01
+        },
+        "metrics": {
+          "VmHWM": 19380,
+          "VmRSS": 18716,
+          "Threads": 5,
+          "cpu_seconds": 10.02
+        },
+        "binary_sha256": "f439769e0812d34f005363f4cc24b4b66d9afc78acf6d4d0c64cae700aeb2fa9",
+        "host_elapsed": 8.079993999999715,
+        "wrk_duration": 8.01,
+        "requests_per_second": 16993.29,
+        "output": "Running 8s test @ http://127.0.0.1:22009/feed\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     3.77ms    1.39ms  19.65ms   72.72%\n    Req/Sec     8.55k   439.17     9.40k    65.00%\n  Latency Distribution\n     50%    3.74ms\n     75%    4.54ms\n     90%    5.50ms\n     99%    7.28ms\n  136174 requests in 8.01s, 676.86MB read\nRequests/sec:  16993.29\nTransfer/sec:     84.47MB\n"
+      },
+      {
+        "name": "cpp",
+        "workload": "feed",
+        "trial": 3,
+        "before": {
+          "VmHWM": 6304,
+          "VmRSS": 6304,
+          "Threads": 1,
+          "cpu_seconds": 2.09
+        },
+        "metrics": {
+          "VmHWM": 6304,
+          "VmRSS": 6304,
+          "Threads": 1,
+          "cpu_seconds": 10.19
+        },
+        "binary_sha256": "3b3fcb36808bd179b2ca8fb9ceb992af8aaa7c54d07fe0d93b731757ae8adf42",
+        "host_elapsed": 8.154549667000538,
+        "wrk_duration": 8.1,
+        "requests_per_second": 39503.83,
+        "output": "Running 8s test @ http://127.0.0.1:22010/feed\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     1.61ms  222.31us   5.68ms   96.97%\n    Req/Sec    19.98k     1.52k   38.42k    98.14%\n  Latency Distribution\n     50%    1.59ms\n     75%    1.61ms\n     90%    1.64ms\n     99%    3.16ms\n  319971 requests in 8.10s, 1.55GB read\nRequests/sec:  39503.83\nTransfer/sec:    196.36MB\n"
+      },
+      {
+        "name": "fortran",
+        "workload": "feed",
+        "trial": 3,
+        "before": {
+          "VmHWM": 7344,
+          "VmRSS": 7344,
+          "Threads": 1,
+          "cpu_seconds": 2.0
+        },
+        "metrics": {
+          "VmHWM": 7360,
+          "VmRSS": 7360,
+          "Threads": 1,
+          "cpu_seconds": 10.1
+        },
+        "binary_sha256": "1ed1c421c88b8075565e23725ec58ea99e43477971f951bb4d5b6dd0f9c2fa75",
+        "host_elapsed": 8.160988124989672,
+        "wrk_duration": 8.1,
+        "requests_per_second": 14694.68,
+        "output": "Running 8s test @ http://127.0.0.1:22011/feed\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     4.33ms  356.68us  12.12ms   93.76%\n    Req/Sec     7.43k   576.84    14.24k    98.14%\n  Latency Distribution\n     50%    4.30ms\n     75%    4.35ms\n     90%    4.51ms\n     99%    4.88ms\n  119026 requests in 8.10s, 591.62MB read\nRequests/sec:  14694.68\nTransfer/sec:     73.04MB\n"
+      },
+      {
+        "name": "cpp",
+        "workload": "post",
+        "trial": 1,
+        "before": {
+          "VmHWM": 5144,
+          "VmRSS": 5144,
+          "Threads": 1,
+          "cpu_seconds": 2.09
+        },
+        "metrics": {
+          "VmHWM": 5144,
+          "VmRSS": 5144,
+          "Threads": 1,
+          "cpu_seconds": 10.08
+        },
+        "binary_sha256": "3b3fcb36808bd179b2ca8fb9ceb992af8aaa7c54d07fe0d93b731757ae8adf42",
+        "host_elapsed": 8.067846582998754,
+        "wrk_duration": 8.01,
+        "requests_per_second": 184266.6,
+        "output": "Running 8s test @ http://127.0.0.1:22012/posts/500000\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency   349.05us  167.95us   7.95ms   95.15%\n    Req/Sec    92.71k    10.54k  116.74k    63.75%\n  Latency Distribution\n     50%  312.00us\n     75%  396.00us\n     90%  445.00us\n     99%  778.00us\n  1475723 requests in 8.01s, 609.39MB read\nRequests/sec: 184266.60\nTransfer/sec:     76.09MB\n"
+      },
+      {
+        "name": "fortran",
+        "workload": "post",
+        "trial": 1,
+        "before": {
+          "VmHWM": 6108,
+          "VmRSS": 6108,
+          "Threads": 1,
+          "cpu_seconds": 2.0
+        },
+        "metrics": {
+          "VmHWM": 6136,
+          "VmRSS": 6136,
+          "Threads": 1,
+          "cpu_seconds": 10.0
+        },
+        "binary_sha256": "1ed1c421c88b8075565e23725ec58ea99e43477971f951bb4d5b6dd0f9c2fa75",
+        "host_elapsed": 8.066834915982326,
+        "wrk_duration": 8.01,
+        "requests_per_second": 105173.8,
+        "output": "Running 8s test @ http://127.0.0.1:22013/posts/500000\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency   605.19us   70.41us   1.04ms   68.76%\n    Req/Sec    52.93k     2.94k   60.09k    63.12%\n  Latency Distribution\n     50%  583.00us\n     75%  663.00us\n     90%  699.00us\n     99%  785.00us\n  842608 requests in 8.01s, 347.95MB read\nRequests/sec: 105173.80\nTransfer/sec:     43.43MB\n"
+      },
+      {
+        "name": "rust",
+        "workload": "post",
+        "trial": 1,
+        "before": {
+          "VmHWM": 6112,
+          "VmRSS": 6084,
+          "Threads": 1,
+          "cpu_seconds": 1.99
+        },
+        "metrics": {
+          "VmHWM": 6496,
+          "VmRSS": 6408,
+          "Threads": 1,
+          "cpu_seconds": 10.0
+        },
+        "binary_sha256": "d74eb04386192aed1e9393f4145ebfddfb74a6e91b5ff553a62db47fd263c922",
+        "host_elapsed": 8.06316879199585,
+        "wrk_duration": 8.01,
+        "requests_per_second": 141368.93,
+        "output": "Running 8s test @ http://127.0.0.1:22014/posts/500000\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency   446.21us   73.93us   1.24ms   77.54%\n    Req/Sec    71.13k     5.23k   80.27k    61.88%\n  Latency Distribution\n     50%  416.00us\n     75%  501.00us\n     90%  543.00us\n     99%  665.00us\n  1131996 requests in 8.01s, 467.45MB read\nRequests/sec: 141368.93\nTransfer/sec:     58.38MB\n"
+      },
+      {
+        "name": "go",
+        "workload": "post",
+        "trial": 1,
+        "before": {
+          "VmHWM": 17984,
+          "VmRSS": 17524,
+          "Threads": 5,
+          "cpu_seconds": 2.1
+        },
+        "metrics": {
+          "VmHWM": 17984,
+          "VmRSS": 17536,
+          "Threads": 5,
+          "cpu_seconds": 10.1
+        },
+        "binary_sha256": "f439769e0812d34f005363f4cc24b4b66d9afc78acf6d4d0c64cae700aeb2fa9",
+        "host_elapsed": 8.06168675000663,
+        "wrk_duration": 8.01,
+        "requests_per_second": 52590.2,
+        "output": "Running 8s test @ http://127.0.0.1:22015/posts/500000\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     1.22ms  535.24us  12.33ms   71.62%\n    Req/Sec    26.46k     1.55k   29.95k    73.12%\n  Latency Distribution\n     50%    1.19ms\n     75%    1.53ms\n     90%    1.85ms\n     99%    2.53ms\n  421123 requests in 8.01s, 173.90MB read\nRequests/sec:  52590.20\nTransfer/sec:     21.72MB\n"
+      },
+      {
+        "name": "cpp",
+        "workload": "post",
+        "trial": 2,
+        "before": {
+          "VmHWM": 5100,
+          "VmRSS": 5100,
+          "Threads": 1,
+          "cpu_seconds": 1.99
+        },
+        "metrics": {
+          "VmHWM": 5100,
+          "VmRSS": 5100,
+          "Threads": 1,
+          "cpu_seconds": 9.99
+        },
+        "binary_sha256": "3b3fcb36808bd179b2ca8fb9ceb992af8aaa7c54d07fe0d93b731757ae8adf42",
+        "host_elapsed": 8.060523207997903,
+        "wrk_duration": 8.01,
+        "requests_per_second": 177185.81,
+        "output": "Running 8s test @ http://127.0.0.1:22016/posts/500000\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency   359.05us  105.67us   3.75ms   88.62%\n    Req/Sec    89.24k     9.12k  115.42k    65.00%\n  Latency Distribution\n     50%  335.00us\n     75%  406.00us\n     90%  460.00us\n     99%  783.00us\n  1418778 requests in 8.01s, 585.87MB read\nRequests/sec: 177185.81\nTransfer/sec:     73.17MB\n"
+      },
+      {
+        "name": "go",
+        "workload": "post",
+        "trial": 2,
+        "before": {
+          "VmHWM": 15896,
+          "VmRSS": 15896,
+          "Threads": 5,
+          "cpu_seconds": 1.99
+        },
+        "metrics": {
+          "VmHWM": 15984,
+          "VmRSS": 15420,
+          "Threads": 5,
+          "cpu_seconds": 10.1
+        },
+        "binary_sha256": "f439769e0812d34f005363f4cc24b4b66d9afc78acf6d4d0c64cae700aeb2fa9",
+        "host_elapsed": 8.157288875023369,
+        "wrk_duration": 8.1,
+        "requests_per_second": 53532.56,
+        "output": "Running 8s test @ http://127.0.0.1:22017/posts/500000\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     1.19ms  475.84us   4.26ms   66.51%\n    Req/Sec    27.07k     2.70k   56.68k    94.41%\n  Latency Distribution\n     50%    1.17ms\n     75%    1.50ms\n     90%    1.80ms\n     99%    2.40ms\n  433625 requests in 8.10s, 179.06MB read\nRequests/sec:  53532.56\nTransfer/sec:     22.11MB\n"
+      },
+      {
+        "name": "rust",
+        "workload": "post",
+        "trial": 2,
+        "before": {
+          "VmHWM": 6172,
+          "VmRSS": 6172,
+          "Threads": 1,
+          "cpu_seconds": 1.99
+        },
+        "metrics": {
+          "VmHWM": 6624,
+          "VmRSS": 6420,
+          "Threads": 1,
+          "cpu_seconds": 10.0
+        },
+        "binary_sha256": "d74eb04386192aed1e9393f4145ebfddfb74a6e91b5ff553a62db47fd263c922",
+        "host_elapsed": 8.069058291992405,
+        "wrk_duration": 8.01,
+        "requests_per_second": 156608.62,
+        "output": "Running 8s test @ http://127.0.0.1:22018/posts/500000\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency   406.20us  113.61us   5.68ms   94.18%\n    Req/Sec    78.78k     4.17k   85.52k    93.12%\n  Latency Distribution\n     50%  390.00us\n     75%  400.00us\n     90%  426.00us\n     99%  623.00us\n  1254231 requests in 8.01s, 517.92MB read\nRequests/sec: 156608.62\nTransfer/sec:     64.67MB\n"
+      },
+      {
+        "name": "fortran",
+        "workload": "post",
+        "trial": 2,
+        "before": {
+          "VmHWM": 6108,
+          "VmRSS": 6108,
+          "Threads": 1,
+          "cpu_seconds": 1.99
+        },
+        "metrics": {
+          "VmHWM": 6136,
+          "VmRSS": 6136,
+          "Threads": 1,
+          "cpu_seconds": 9.99
+        },
+        "binary_sha256": "1ed1c421c88b8075565e23725ec58ea99e43477971f951bb4d5b6dd0f9c2fa75",
+        "host_elapsed": 8.072232915990753,
+        "wrk_duration": 8.01,
+        "requests_per_second": 100742.3,
+        "output": "Running 8s test @ http://127.0.0.1:22019/posts/500000\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency   634.12us  119.78us   5.97ms   95.48%\n    Req/Sec    50.70k     2.76k   58.07k    75.00%\n  Latency Distribution\n     50%  625.00us\n     75%  675.00us\n     90%  720.00us\n     99%  834.00us\n  807029 requests in 8.01s, 333.26MB read\nRequests/sec: 100742.30\nTransfer/sec:     41.60MB\n"
+      },
+      {
+        "name": "rust",
+        "workload": "post",
+        "trial": 3,
+        "before": {
+          "VmHWM": 6112,
+          "VmRSS": 6104,
+          "Threads": 1,
+          "cpu_seconds": 2.09
+        },
+        "metrics": {
+          "VmHWM": 6496,
+          "VmRSS": 6380,
+          "Threads": 1,
+          "cpu_seconds": 10.19
+        },
+        "binary_sha256": "d74eb04386192aed1e9393f4145ebfddfb74a6e91b5ff553a62db47fd263c922",
+        "host_elapsed": 8.190047790994868,
+        "wrk_duration": 8.1,
+        "requests_per_second": 128106.78,
+        "output": "Running 8s test @ http://127.0.0.1:22020/posts/500000\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency   489.40us   74.04us   2.03ms   75.78%\n    Req/Sec    64.81k     4.80k  119.66k    97.52%\n  Latency Distribution\n     50%  486.00us\n     75%  532.00us\n     90%  567.00us\n     99%  700.00us\n  1037667 requests in 8.10s, 428.50MB read\nRequests/sec: 128106.78\nTransfer/sec:     52.90MB\n"
+      },
+      {
+        "name": "go",
+        "workload": "post",
+        "trial": 3,
+        "before": {
+          "VmHWM": 15888,
+          "VmRSS": 15452,
+          "Threads": 5,
+          "cpu_seconds": 2.0
+        },
+        "metrics": {
+          "VmHWM": 15956,
+          "VmRSS": 15464,
+          "Threads": 5,
+          "cpu_seconds": 10.01
+        },
+        "binary_sha256": "f439769e0812d34f005363f4cc24b4b66d9afc78acf6d4d0c64cae700aeb2fa9",
+        "host_elapsed": 8.065928374999203,
+        "wrk_duration": 8.01,
+        "requests_per_second": 50103.3,
+        "output": "Running 8s test @ http://127.0.0.1:22021/posts/500000\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     1.28ms  514.37us   6.37ms   66.96%\n    Req/Sec    25.21k     1.04k   27.85k    75.00%\n  Latency Distribution\n     50%    1.26ms\n     75%    1.62ms\n     90%    1.93ms\n     99%    2.59ms\n  401108 requests in 8.01s, 165.63MB read\nRequests/sec:  50103.30\nTransfer/sec:     20.69MB\n"
+      },
+      {
+        "name": "cpp",
+        "workload": "post",
+        "trial": 3,
+        "before": {
+          "VmHWM": 5100,
+          "VmRSS": 5100,
+          "Threads": 1,
+          "cpu_seconds": 2.09
+        },
+        "metrics": {
+          "VmHWM": 5100,
+          "VmRSS": 5100,
+          "Threads": 1,
+          "cpu_seconds": 10.09
+        },
+        "binary_sha256": "3b3fcb36808bd179b2ca8fb9ceb992af8aaa7c54d07fe0d93b731757ae8adf42",
+        "host_elapsed": 8.061147500004154,
+        "wrk_duration": 8.0,
+        "requests_per_second": 157721.03,
+        "output": "Running 8s test @ http://127.0.0.1:22022/posts/500000\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency   399.91us  105.79us   1.58ms   82.47%\n    Req/Sec    79.36k     4.42k   93.34k    68.12%\n  Latency Distribution\n     50%  385.00us\n     75%  436.00us\n     90%  498.00us\n     99%  828.00us\n  1262534 requests in 8.00s, 521.35MB read\nRequests/sec: 157721.03\nTransfer/sec:     65.13MB\n"
+      },
+      {
+        "name": "fortran",
+        "workload": "post",
+        "trial": 3,
+        "before": {
+          "VmHWM": 6088,
+          "VmRSS": 6088,
+          "Threads": 1,
+          "cpu_seconds": 1.99
+        },
+        "metrics": {
+          "VmHWM": 6116,
+          "VmRSS": 6116,
+          "Threads": 1,
+          "cpu_seconds": 10.09
+        },
+        "binary_sha256": "1ed1c421c88b8075565e23725ec58ea99e43477971f951bb4d5b6dd0f9c2fa75",
+        "host_elapsed": 8.157360416982556,
+        "wrk_duration": 8.1,
+        "requests_per_second": 98478.25,
+        "output": "Running 8s test @ http://127.0.0.1:22023/posts/500000\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency   642.78us   81.33us   2.57ms   77.24%\n    Req/Sec    49.79k     4.92k  104.97k    96.89%\n  Latency Distribution\n     50%  651.00us\n     75%  692.00us\n     90%  724.00us\n     99%  818.00us\n  797658 requests in 8.10s, 329.39MB read\nRequests/sec:  98478.25\nTransfer/sec:     40.67MB\n"
+      }
+    ]
+  },
+  "idle_15000": [
+    {
+      "name": "cpp",
+      "workload": "mixed",
+      "trial": 1,
+      "idle_connections": 15000,
+      "active_connections": 64,
+      "metrics": {
+        "VmHWM": 44320,
+        "VmRSS": 44320,
+        "Threads": 1,
+        "cpu_seconds": 9.3
+      },
+      "verification": {
+        "verified": 15000,
+        "same_sockets": true
+      },
+      "host_elapsed": 8.180721998214722,
+      "output": "Running 8s test @ http://127.0.0.1:21200/feed\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     1.86ms    3.11ms  22.12ms   90.71%\n    Req/Sec    29.08k     1.72k   37.11k    76.88%\n  Latency Distribution\n     50%    0.94ms\n     75%    1.22ms\n     90%    4.04ms\n     99%   15.40ms\n  463551 requests in 8.03s, 789.41MB read\nRequests/sec:  57719.91\nTransfer/sec:     98.30MB\n"
+    },
+    {
+      "name": "fortran",
+      "workload": "mixed",
+      "trial": 1,
+      "idle_connections": 15000,
+      "active_connections": 64,
+      "metrics": {
+        "VmHWM": 529816,
+        "VmRSS": 529816,
+        "Threads": 1,
+        "cpu_seconds": 9.94
+      },
+      "verification": {
+        "verified": 15000,
+        "same_sockets": true
+      },
+      "host_elapsed": 8.1818208694458,
+      "output": "Running 8s test @ http://127.0.0.1:21201/feed\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     3.34ms    3.90ms  42.62ms   93.46%\n    Req/Sec    12.03k     1.40k   14.65k    62.50%\n  Latency Distribution\n     50%    2.50ms\n     75%    3.01ms\n     90%    3.89ms\n     99%   23.17ms\n  191902 requests in 8.04s, 325.26MB read\nRequests/sec:  23882.57\nTransfer/sec:     40.48MB\n"
+    },
+    {
+      "name": "rust",
+      "workload": "mixed",
+      "trial": 1,
+      "idle_connections": 15000,
+      "active_connections": 64,
+      "metrics": {
+        "VmHWM": 289780,
+        "VmRSS": 289780,
+        "Threads": 1,
+        "cpu_seconds": 9.65
+      },
+      "verification": {
+        "verified": 15000,
+        "same_sockets": true
+      },
+      "host_elapsed": 8.175347805023193,
+      "output": "Running 8s test @ http://127.0.0.1:21202/feed\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     2.03ms    2.98ms  33.66ms   92.08%\n    Req/Sec    22.10k     1.97k   27.17k    68.12%\n  Latency Distribution\n     50%    1.22ms\n     75%    1.42ms\n     90%    2.37ms\n     99%   15.74ms\n  352432 requests in 8.04s, 598.53MB read\nRequests/sec:  43844.58\nTransfer/sec:     74.46MB\n"
+    },
+    {
+      "name": "go",
+      "workload": "mixed",
+      "trial": 1,
+      "idle_connections": 15000,
+      "active_connections": 64,
+      "metrics": {
+        "VmHWM": 549064,
+        "VmRSS": 549064,
+        "Threads": 5,
+        "cpu_seconds": 10.25
+      },
+      "verification": {
+        "verified": 15000,
+        "same_sockets": true
+      },
+      "host_elapsed": 8.180714130401611,
+      "output": "Running 8s test @ http://127.0.0.1:21203/feed\n  2 threads and 64 connections\n  Thread Stats   Avg      Stdev     Max   +/- Stdev\n    Latency     2.93ms    2.58ms  28.77ms   91.43%\n    Req/Sec    12.50k     2.22k   17.14k    69.38%\n  Latency Distribution\n     50%    2.33ms\n     75%    3.15ms\n     90%    4.60ms\n     99%   15.19ms\n  199170 requests in 8.03s, 337.61MB read\nRequests/sec:  24790.54\nTransfer/sec:     42.02MB\n"
+    }
+  ]
+}

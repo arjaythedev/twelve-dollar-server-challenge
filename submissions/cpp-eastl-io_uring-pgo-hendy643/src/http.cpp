@@ -1,6 +1,6 @@
 #include "http.hpp"
 
-#include <emmintrin.h>
+#include "simd.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -37,11 +37,9 @@ View trim(View v) {
 }
 
 const char *find_byte(const char *p, const char *e, char c) {
-    const __m128i needle = _mm_set1_epi8(c);
-    while (e - p >= 16) {
-        int mask = _mm_movemask_epi8(_mm_cmpeq_epi8(_mm_loadu_si128(reinterpret_cast<const __m128i *>(p)), needle));
-        if (mask) return p + __builtin_ctz(mask);
-        p += 16;
+    while (e - p >= static_cast<ptrdiff_t>(simd::kWidth)) {
+        if (simd::Mask mask = simd::find(p, c)) return p + simd::first(mask);
+        p += simd::kWidth;
     }
     while (p < e && *p != c) ++p;
     return p;

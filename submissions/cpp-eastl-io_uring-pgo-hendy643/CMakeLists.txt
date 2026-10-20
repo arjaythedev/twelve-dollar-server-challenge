@@ -71,6 +71,10 @@ add_dependencies(core sqlite_pgo)
 target_include_directories(core PUBLIC ${URING_INCLUDE_DIR})
 target_compile_options(core PRIVATE -Wall -Wextra)
 target_compile_definitions(core PUBLIC OPENSSL_SUPPRESS_DEPRECATED)
+option(SRV_SIMD_SCALAR "Use the portable scalar scans instead of SSE2/NEON" OFF)
+if(SRV_SIMD_SCALAR)
+    target_compile_definitions(core PUBLIC SRV_SIMD_SCALAR)
+endif()
 
 add_executable(server src/main.cpp)
 target_link_libraries(server PRIVATE core)
@@ -86,6 +90,7 @@ target_sources(unit_tests
         tests/json_fuzz_test.cpp
         tests/json_test.cpp
         tests/server_test.cpp
+        tests/simd_test.cpp
         tests/jwt_test.cpp
         tests/sqlite_build_test.cpp
         tests/writer_test.cpp

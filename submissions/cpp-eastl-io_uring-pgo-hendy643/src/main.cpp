@@ -71,5 +71,9 @@ int main() {
         std::fprintf(stderr, "cannot start: %s\n", server.error());
         return 1;
     }
+    struct sigaction on_stop{};
+    on_stop.sa_handler = [](int) { srv::Server::stop(); };
+    sigaction(SIGTERM, &on_stop, nullptr);
+    sigaction(SIGINT, &on_stop, nullptr);
     server.run();
 }

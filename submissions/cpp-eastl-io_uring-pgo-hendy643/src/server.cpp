@@ -6,9 +6,12 @@
 #include <unistd.h>
 
 #include <cerrno>
+#include <csignal>
 #include <cstdio>
 #include <cstring>
 #include <new>
+
+#include <EASTL/algorithm.h>
 
 #include "response.hpp"
 #include "writer.hpp"
@@ -16,6 +19,8 @@
 namespace srv {
 
 namespace {
+
+volatile sig_atomic_t g_stop = 0;
 
 enum Op : uint64_t { kAccept = 1, kRecv = 2, kSend = 3, kIgnore = 4, kAcceptDirect = 5, kCloseDirect = 6 };
 
@@ -33,6 +38,10 @@ constexpr unsigned kEvictScan = 8;
 constexpr long kIdleManyRingsNanos = 2000000;
 constexpr unsigned kBusyCompletions = 4;
 constexpr unsigned kWaitCompletions = 128;
+// The batch target is capped at 40% of open connections. With few connections in a
+// closed loop (wrk -c64) 128 completions never arrive and every pass would sit out
+// kWaitNanos (9k req/s instead of 59k); throughput fell off between 50% and 62%.
+constexpr size_t kWaitOpenPercent = 40;
 constexpr long kWaitNanos = 6000000;
 constexpr size_t kHeadRoom = 512;
 constexpr uintptr_t kTagMask = 0xfff;
@@ -598,18 +607,21 @@ void Server::drain(unsigned index) {
     }
 }
 
+void Server::stop() { g_stop = 1; }
+
 void Server::run() {
     for (unsigned i = 0; i < kAcceptDepth; ++i) arm_accept();
     __kernel_timespec idle{1, 0};
     __kernel_timespec idle_many{0, kIdleManyRingsNanos};
     __kernel_timespec batch{0, kWaitNanos};
     io_uring_cqe *first = nullptr;
-    for (;;) {
+    while (!g_stop) {
         bool busy = handled_ >= kBusyCompletions;
+        unsigned target = static_cast<unsigned>(eastl::clamp<size_t>(open_count_ * kWaitOpenPercent / 100, 1, kWaitCompletions));
         bool many = ring_count_ > 1 && rings_[1].reserved > 0;
         handled_ = 0;
         for (unsigned i = 1; i < ring_count_; ++i) io_uring_submit(&rings_[i].ring);
-        io_uring_submit_and_wait_timeout(&rings_[0].ring, &first, busy ? kWaitCompletions : 1, busy ? &batch : many ? &idle_many : &idle, nullptr);
+        io_uring_submit_and_wait_timeout(&rings_[0].ring, &first, busy ? target : 1, busy ? &batch : many ? &idle_many : &idle, nullptr);
         for (unsigned i = 1; i < ring_count_; ++i) pull(rings_[i]);
         refresh_clock();
         for (unsigned n = accept_deficit_; n > 0; --n) {

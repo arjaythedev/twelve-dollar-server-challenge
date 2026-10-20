@@ -1,6 +1,6 @@
 #include "json.hpp"
 
-#include <emmintrin.h>
+#include "simd.hpp"
 
 #include <cstring>
 
@@ -16,9 +16,9 @@ int hex_value(char c) { return c <= '9' ? c - '0' : (c | 32) - 'a' + 10; }
 
 bool ascii_only(const char *p, size_t n) {
     const char *e = p + n;
-    while (e - p >= 16) {
-        if (_mm_movemask_epi8(_mm_loadu_si128(reinterpret_cast<const __m128i *>(p)))) return false;
-        p += 16;
+    while (e - p >= static_cast<ptrdiff_t>(simd::kWidth)) {
+        if (simd::any_high(p)) return false;
+        p += simd::kWidth;
     }
     while (p < e) {
         if (static_cast<unsigned char>(*p++) >= 0x80) return false;
@@ -41,17 +41,12 @@ struct Scanner {
         bool escaped = false;
         for (;;) {
             for (;;) {
-                if (e - p >= 16) {
-                    __m128i v = _mm_loadu_si128(reinterpret_cast<const __m128i *>(p));
-                    __m128i quote = _mm_cmpeq_epi8(v, _mm_set1_epi8('"'));
-                    __m128i slash = _mm_cmpeq_epi8(v, _mm_set1_epi8('\\'));
-                    __m128i ctrl = _mm_cmpeq_epi8(_mm_min_epu8(v, _mm_set1_epi8(0x1f)), v);
-                    int mask = _mm_movemask_epi8(_mm_or_si128(_mm_or_si128(quote, slash), ctrl));
-                    if (mask) {
-                        p += __builtin_ctz(mask);
+                if (e - p >= static_cast<ptrdiff_t>(simd::kWidth)) {
+                    if (simd::Mask mask = simd::escape(p)) {
+                        p += simd::first(mask);
                         break;
                     }
-                    p += 16;
+                    p += simd::kWidth;
                     continue;
                 }
                 if (p >= e) return false;
@@ -252,8 +247,8 @@ bool valid_utf8(const char *s, size_t n) {
     const unsigned char *p = reinterpret_cast<const unsigned char *>(s);
     const unsigned char *e = p + n;
     while (p < e) {
-        if (e - p >= 16 && !_mm_movemask_epi8(_mm_loadu_si128(reinterpret_cast<const __m128i *>(p)))) {
-            p += 16;
+        if (e - p >= static_cast<ptrdiff_t>(simd::kWidth) && !simd::any_high(reinterpret_cast<const char *>(p))) {
+            p += simd::kWidth;
             continue;
         }
         unsigned char c = *p;

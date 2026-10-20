@@ -25,7 +25,9 @@ public:
 
     bool init();
     const char *error() const { return error_; }
+    // Serves until stop() is called (async-signal-safe), then returns.
     void run();
+    static void stop();
 
 private:
     bool process(Conn &c, char *buf, size_t have, bool shared);

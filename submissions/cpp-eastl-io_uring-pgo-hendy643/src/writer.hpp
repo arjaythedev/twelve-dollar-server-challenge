@@ -1,7 +1,8 @@
 #pragma once
 
 #include <EASTL/string_view.h>
-#include <emmintrin.h>
+
+#include "simd.hpp"
 
 #include <charconv>
 #include <cstddef>
@@ -50,22 +51,13 @@ public:
         const char *p = s.data();
         const char *e = p + s.size();
         while (p < e) {
-            if (e - p >= 16) {
-                __m128i v = _mm_loadu_si128(reinterpret_cast<const __m128i *>(p));
-                __m128i quote = _mm_cmpeq_epi8(v, _mm_set1_epi8('"'));
-                __m128i slash = _mm_cmpeq_epi8(v, _mm_set1_epi8('\\'));
-                __m128i ctrl = _mm_cmpeq_epi8(_mm_min_epu8(v, _mm_set1_epi8(0x1f)), v);
-                int mask = _mm_movemask_epi8(_mm_or_si128(_mm_or_si128(quote, slash), ctrl));
-                if (!mask) {
-                    _mm_storeu_si128(reinterpret_cast<__m128i *>(o), v);
-                    o += 16;
-                    p += 16;
-                    continue;
-                }
-                int k = __builtin_ctz(mask);
-                _mm_storeu_si128(reinterpret_cast<__m128i *>(o), v);
+            if (e - p >= static_cast<ptrdiff_t>(simd::kWidth)) {
+                simd::Mask mask = simd::escape(p);
+                memcpy(o, p, simd::kWidth);
+                size_t k = mask ? simd::first(mask) : simd::kWidth;
                 o += k;
                 p += k;
+                if (!mask) continue;
             }
             unsigned char c = static_cast<unsigned char>(*p);
             if (c >= 0x20 && c != '"' && c != '\\') {

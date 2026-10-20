@@ -34,11 +34,16 @@ let main _ =
     Auth.key <- Encoding.UTF8.GetBytes(env "JWT_SECRET" "twelve-dollar-challenge")
 
     let builder = WebApplication.CreateEmptyBuilder(WebApplicationOptions())
-    builder.WebHost
-        .UseKestrelCore()
-        .UseSockets(fun o ->
+    builder.WebHost.UseKestrelCore() |> ignore
+    if Transport.supported then
+        // Our epoll transport (Transport.fs) replaces Kestrel's socket transport.
+        builder.Services.AddSingleton<IConnectionListenerFactory, Transport.EpollTransportFactory>() |> ignore
+    else
+        builder.WebHost.UseSockets(fun o ->
             o.UnsafePreferInlineScheduling <- true // Kestrel's continuations stay on the socket thread
             o.Backlog <- 65535) // the kernel caps it at somaxconn; a ramp of new users should not overflow it
+        |> ignore
+    builder.WebHost
         .ConfigureKestrel(fun o ->
             o.AddServerHeader <- false
             // Our connection handler goes first and never calls the next one (Kestrel's HTTP layer).

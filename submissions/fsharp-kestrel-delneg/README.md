@@ -3,7 +3,7 @@
 | Item | Value |
 |---|---|
 | Language | F# 10 on .NET 10 (SDK 10.0.401, pinned in `global.json`) |
-| Server | Kestrel (ASP.NET Core 10) with a connection handler. No web framework. |
+| Server | Kestrel (ASP.NET Core 10) with its own epoll transport and a connection handler. No web framework. |
 | Database driver | SQLite 3.53.4 from source, called through `DllImport` (`Sqlite.fs`) |
 | JSON | `System.Text.Json` (`Utf8JsonWriter`, `Utf8JsonReader`) |
 | Build | ReadyToRun with TieredPGO. Workstation GC, not concurrent. |
@@ -11,11 +11,12 @@
 
 ## How it works
 
-1. Kestrel accepts the connections. A connection handler (`Conn.fs`) receives the bytes of each connection. The handler does not call the next handler, so Kestrel's HTTP layer does not run.
-2. The handler parses HTTP/1.1 itself. It finds the method, the path and three headers: `Authorization`, `Content-Length` and `Connection`. Routes are in code.
-3. Each endpoint (`Api.fs`) writes the full response into the output pipe: the status line, the headers and the JSON body. The handler sends all the responses of one read with one flush.
-4. One SQLite connection serves all requests. A lock serializes the requests. The server prepares each statement one time at start.
-5. The JWT check (`Auth.fs`) runs on each request. It decodes the header and the payload, computes HMAC-SHA256 over the token bytes and compares the signature in fixed time. Then it checks `sub`, `username` and `exp`.
+1. Kestrel uses our transport (`Transport.fs`) on Linux x86-64. One thread waits on an epoll set. When a socket has data, the thread reads it with one `recv` call into the input pipe of the connection. On other platforms, Kestrel uses its socket transport.
+2. A connection handler (`Conn.fs`) runs in that same call. The handler does not call the next handler, so Kestrel's HTTP layer does not run.
+3. The handler parses HTTP/1.1 itself. It finds the method, the path and three headers: `Authorization`, `Content-Length` and `Connection`. Routes are in code.
+4. Each endpoint (`Api.fs`) writes the full response into the output pipe: the status line, the headers and the JSON body. The handler flushes one time for each read, and the transport sends the bytes with one `send` call.
+5. One SQLite connection serves all requests. A lock serializes the requests. The server prepares each statement one time at start.
+6. The JWT check (`Auth.fs`) runs on each request. It decodes the header and the payload, computes HMAC-SHA256 over the token bytes and compares the signature in fixed time. Then it checks `sub`, `username` and `exp`.
 
 ## Rules
 
@@ -30,6 +31,7 @@
 |---|---|---|
 | Own HTTP/1.1 parser in a Kestrel connection handler. One response write, one flush for each read. | CPU per request -9.6%. RSS 748 MB to 490 MB at 64,000 users. | #74 (own parser, one response buffer), #27 (raw Kestrel, no `HttpContext`) |
 | `locking_mode=EXCLUSIVE`. SQLite takes the file lock one time, not around each statement. | CPU per request -8.4%. Hold p99 rose from 2 ms to 10 ms (checkpoints on the request thread). | #77, #27, #74 |
+| Own epoll transport for Kestrel. One `recv` and one `send` for each request. Kestrel's socket transport did one more `recv` after each request. | CPU per request -4.5%. RSS 497 MB to 376 MB. | #74 (own epoll loop) |
 | SQLite from source with `THREADSAFE=2` and SQLite's recommended options | No mutex calls in SQLite | #77, #108 |
 | `mmap_size` 1 GB, `cache_size` 32 MB | Reads use memory, not `read` calls | #108 |
 | JSON from the SQLite UTF-8 bytes, no .NET strings for rows | Less allocation | #77 |
@@ -61,5 +63,8 @@ These numbers come from one local machine, not from the official box. Use them t
 | First version (Kestrel HTTP layer) | 68.09 µs | 46.1% | 3.7 ms | 0 | 748 MB |
 | Own parser | 61.56 µs | 41.7% | 1.9 ms | 0 | 490 MB |
 | `locking_mode=EXCLUSIVE` | 56.37 µs | 38.2% | 9.7 ms | 0 | 496 MB |
+| Own epoll transport | 53.55 µs (see note) | 37.3% | 10.3 ms | 0 | 376 MB |
+
+Note: the machine became slower after a restart. The epoll transport and the version before it ran in turns, two times each. The epoll transport used 2.8 µs less for each request in both pairs. The table shows 56.37 µs minus 2.8 µs.
 
 `test/test.sh`: 42/42.

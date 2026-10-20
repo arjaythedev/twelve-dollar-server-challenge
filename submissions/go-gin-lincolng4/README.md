@@ -56,8 +56,8 @@ SQLITE_PATH=... JWT_SECRET=... HOST=0.0.0.0 PORT=80 bash start.sh
   (`_journal_mode`, `_synchronous`, `_busy_timeout`, `_cache_size`), plus
   `temp_store=MEMORY` and a 256 MiB `mmap_size` through a `ConnectHook` so every pooled connection
   gets them. Note the driver has no generic `_pragma=` DSN syntax — that's modernc.org/sqlite.
-- **Connection pool capped at 16.** One vCPU can't usefully run more SQLite work in parallel; the
-  cap bounds memory and file handles under load.
+- **One SQLite connection.** On one vCPU, serializing database work avoids SQLite lock/pool
+  contention and measured faster than a 16-connection pool for the mixed workload.
 - **`GOGC=300` by default.** A controlled one-core load run reduced garbage-collection work without
   materially increasing RSS; set `GOGC` explicitly to override it.
 - **The schema is used exactly as given.** `created_at` comes from the column default

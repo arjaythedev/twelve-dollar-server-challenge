@@ -51,8 +51,8 @@ func connect(path string) *sql.DB {
 	if err != nil {
 		log.Fatal(err)
 	}
-	db.SetMaxOpenConns(16)
-	db.SetMaxIdleConns(16)
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
 	return db
 }
 

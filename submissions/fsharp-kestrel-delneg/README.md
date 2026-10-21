@@ -50,6 +50,7 @@ Changes that did not help (discarded):
 | Native AOT | CPU +2%, RSS -93 MB | #77, #74 |
 | `DOTNET_ReadyToRun=0` (the JIT compiles all code with dynamic PGO) | Same CPU | TechEmpower ASP.NET settings |
 | SQLite with `-O3 -march=native` | Same CPU | #60 |
+| `mmap_size=0`: pages from the SQLite page cache, not from `mmap` | CPU -0.7% (less than the noise), RSS -24 MB | — |
 | `wal_autocheckpoint=200` | Same CPU, hold p99 6 ms | — |
 | Checkpoints on a second connection in a background thread, normal locking | CPU +8%, hold p99 0.9 ms | #108 |
 | `wal_autocheckpoint=8000` | CPU +4%, hold p99 72 ms | — |

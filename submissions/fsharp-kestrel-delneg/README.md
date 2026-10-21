@@ -11,7 +11,7 @@
 
 ## How it works
 
-1. Kestrel uses our transport (`Transport.fs`) on Linux x86-64. One thread waits on an epoll set. When a socket has data, the thread reads it with one `recv` call into the receive buffer of the thread. On other platforms, Kestrel uses its socket transport, and `Conn.run` reads the pipes of the connection.
+1. Kestrel uses our transport (`Transport.fs`) on Linux x86-64. One thread waits on an epoll set. When a socket has data, the thread reads it with one `recv` call into the receive buffer of the thread. When one `epoll_wait` returns fewer than 32 events, the thread sleeps 1 ms before the next wait. Thus one wake-up serves more sockets. On other platforms, Kestrel uses its socket transport, and `Conn.run` reads the pipes of the connection.
 2. The thread gives the bytes to the handler (`Conn.direct`). Kestrel's HTTP layer does not run. The connections have no pipes and no send task. A connection keeps a buffer only for a request that is not complete, or for bytes that the socket did not take.
 3. The handler parses HTTP/1.1 itself. It finds the method, the path and three headers: `Authorization`, `Content-Length` and `Connection`. Routes are in code.
 4. Each endpoint (`Api.fs`) writes the full response into one buffer of the thread: the status line, the headers and the JSON body. Then the thread sends all the responses for that read with one `send` call.
@@ -34,7 +34,8 @@
 | Own epoll transport for Kestrel. One `recv` and one `send` for each request. Kestrel's socket transport did one more `recv` after each request. | CPU per request -4.5%. RSS 497 MB to 376 MB. | #74 (own epoll loop) |
 | Profile-guided SQLite build. A perf profile showed SQLite at 36% of the server CPU. | CPU per request -4.5% | #60 |
 | The epoll thread calls the HTTP handler directly on its receive buffer. No pipes and no send task for each connection. | CPU per request -7.9%. RSS 376 MB to 263 MB. | #74 (own loop calls the parser) |
-| The loop finds a connection by its fd in an array, not in a dictionary. The database calls do not take a lock when the loop thread runs every request. | CPU per request -1.8%. RSS +36 MB (cause not known). | perf profile |
+| The loop finds a connection by its fd in an array, not in a dictionary. The database calls do not take a lock when the loop thread runs every request. | CPU per request -1.8%. RSS +36 MB, from the GC timing during the ramp. | perf profile |
+| The loop sleeps 1 ms after an `epoll_wait` with fewer than 32 events. A perf profile showed about 7 µs of kernel time for each wake-up of the thread. | CPU per request -9.9%. Hold p95 0.3 ms to 1.8 ms. | perf profile (interrupt coalescing) |
 | SQLite from source with `THREADSAFE=2` and SQLite's recommended options | No mutex calls in SQLite | #77, #108 |
 | `mmap_size` 1 GB, `cache_size` 32 MB | Reads use memory, not `read` calls | #108 |
 | JSON from the SQLite UTF-8 bytes, no .NET strings for rows | Less allocation | #77 |
@@ -75,7 +76,8 @@ These numbers come from one local machine, not from the official box. Use them t
 | Profile-guided SQLite | 51.14 µs (see note) | 34.5% | 9.2 ms | 0 | 376 MB |
 | Handler called from the epoll thread | 47.18 µs (see note) | 31.4% | 8.4 ms | 0 | 263 MB |
 | Connection array, no database lock | 46.32 µs (see note) | 31.2% | 7.8 to 9.0 ms | 0 | 301 MB |
+| 1 ms wake-up coalescing | 41.73 µs (see note) | 28.6% | 10.0 to 10.8 ms | 0 | 297 MB |
 
-Note: the machine became slower after a restart. From the epoll transport on, each new version and the version before it ran in turns, two times each. The table shows the earlier value minus the mean difference of the two pairs. The mean differences were: epoll transport 2.8 µs, profile-guided SQLite 2.4 µs, direct handler call 4.0 µs, connection array 0.9 µs.
+Note: the machine became slower after a restart. From the epoll transport on, each new version and the version before it ran in turns, two times each. The table shows the earlier value minus the mean difference of the two pairs. The mean differences were: epoll transport 2.8 µs, profile-guided SQLite 2.4 µs, direct handler call 4.0 µs, connection array 0.9 µs, coalescing 4.6 µs.
 
 `test/test.sh`: 42/42.

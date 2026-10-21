@@ -3,7 +3,7 @@
 | Item | Value |
 |---|---|
 | Language | F# 10 on .NET 10 (SDK 10.0.401, pinned in `global.json`) |
-| Server | Kestrel (ASP.NET Core 10) with its own epoll transport and a connection handler. No web framework. |
+| Server | Kestrel (ASP.NET Core 10) with its own epoll transport. The transport calls the HTTP handler directly. No web framework. |
 | Database driver | SQLite 3.53.4 from source with a profile-guided gcc build, called through `DllImport` (`Sqlite.fs`) |
 | JSON | `System.Text.Json` (`Utf8JsonWriter`, `Utf8JsonReader`) |
 | Build | ReadyToRun with TieredPGO. Workstation GC, not concurrent. |
@@ -11,10 +11,10 @@
 
 ## How it works
 
-1. Kestrel uses our transport (`Transport.fs`) on Linux x86-64. One thread waits on an epoll set. When a socket has data, the thread reads it with one `recv` call into the input pipe of the connection. On other platforms, Kestrel uses its socket transport.
-2. A connection handler (`Conn.fs`) runs in that same call. The handler does not call the next handler, so Kestrel's HTTP layer does not run.
+1. Kestrel uses our transport (`Transport.fs`) on Linux x86-64. One thread waits on an epoll set. When a socket has data, the thread reads it with one `recv` call into the receive buffer of the thread. On other platforms, Kestrel uses its socket transport, and `Conn.run` reads the pipes of the connection.
+2. The thread gives the bytes to the handler (`Conn.direct`). Kestrel's HTTP layer does not run. The connections have no pipes and no send task. A connection keeps a buffer only for a request that is not complete, or for bytes that the socket did not take.
 3. The handler parses HTTP/1.1 itself. It finds the method, the path and three headers: `Authorization`, `Content-Length` and `Connection`. Routes are in code.
-4. Each endpoint (`Api.fs`) writes the full response into the output pipe: the status line, the headers and the JSON body. The handler flushes one time for each read, and the transport sends the bytes with one `send` call.
+4. Each endpoint (`Api.fs`) writes the full response into one buffer of the thread: the status line, the headers and the JSON body. Then the thread sends all the responses for that read with one `send` call.
 5. One SQLite connection serves all requests. A lock serializes the requests. The server prepares each statement one time at start.
 6. The JWT check (`Auth.fs`) runs on each request. It decodes the header and the payload, computes HMAC-SHA256 over the token bytes and compares the signature in fixed time. Then it checks `sub`, `username` and `exp`.
 
@@ -33,6 +33,7 @@
 | `locking_mode=EXCLUSIVE`. SQLite takes the file lock one time, not around each statement. | CPU per request -8.4%. Hold p99 rose from 2 ms to 10 ms (checkpoints on the request thread). | #77, #27, #74 |
 | Own epoll transport for Kestrel. One `recv` and one `send` for each request. Kestrel's socket transport did one more `recv` after each request. | CPU per request -4.5%. RSS 497 MB to 376 MB. | #74 (own epoll loop) |
 | Profile-guided SQLite build. A perf profile showed SQLite at 36% of the server CPU. | CPU per request -4.5% | #60 |
+| The epoll thread calls the HTTP handler directly on its receive buffer. No pipes and no send task for each connection. | CPU per request -7.9%. RSS 376 MB to 263 MB. | #74 (own loop calls the parser) |
 | SQLite from source with `THREADSAFE=2` and SQLite's recommended options | No mutex calls in SQLite | #77, #108 |
 | `mmap_size` 1 GB, `cache_size` 32 MB | Reads use memory, not `read` calls | #108 |
 | JSON from the SQLite UTF-8 bytes, no .NET strings for rows | Less allocation | #77 |
@@ -69,7 +70,8 @@ These numbers come from one local machine, not from the official box. Use them t
 | `locking_mode=EXCLUSIVE` | 56.37 µs | 38.2% | 9.7 ms | 0 | 496 MB |
 | Own epoll transport | 53.55 µs (see note) | 37.3% | 10.3 ms | 0 | 376 MB |
 | Profile-guided SQLite | 51.14 µs (see note) | 34.5% | 9.2 ms | 0 | 376 MB |
+| Handler called from the epoll thread | 47.18 µs (see note) | 31.4% | 8.4 ms | 0 | 263 MB |
 
-Note: the machine became slower after a restart. From the epoll transport on, each new version and the version before it ran in turns, two times each. The table shows the earlier value minus the mean difference of the two pairs. The difference was 2.8 µs for the epoll transport and 2.4 µs for the profile-guided SQLite.
+Note: the machine became slower after a restart. From the epoll transport on, each new version and the version before it ran in turns, two times each. The table shows the earlier value minus the mean difference of the two pairs. The difference was 2.8 µs for the epoll transport, 2.4 µs for the profile-guided SQLite and 4.0 µs for the direct handler call.
 
 `test/test.sh`: 42/42.

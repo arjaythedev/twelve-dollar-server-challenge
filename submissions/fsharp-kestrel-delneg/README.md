@@ -54,6 +54,7 @@ Changes that did not help (discarded):
 | `DOTNET_ReadyToRun=0` (the JIT compiles all code with dynamic PGO) | Same CPU | TechEmpower ASP.NET settings |
 | `DOTNET_EnableWriteXorExecute=0` | Same CPU | TechEmpower ASP.NET settings |
 | `DOTNET_GCgen0size` 64 MB (fewer GCs) | Same CPU, RSS +36 MB | perf profile |
+| `usleep` in place of `Thread.Sleep`, no GC transition for `recv`, `send` and `epoll_ctl` | CPU -0.9% (less than the noise) | perf profile |
 | SQLite with `-O3 -march=native` | Same CPU | #60 |
 | `mmap_size=0`: pages from the SQLite page cache, not from `mmap` | CPU -0.7% (less than the noise), RSS -24 MB | — |
 | `wal_autocheckpoint=200` | Same CPU, hold p99 6 ms | — |

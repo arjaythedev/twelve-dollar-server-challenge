@@ -15,7 +15,7 @@
 2. The thread gives the bytes to the handler (`Conn.direct`). Kestrel's HTTP layer does not run. The connections have no pipes and no send task. A connection keeps a buffer only for a request that is not complete, or for bytes that the socket did not take.
 3. The handler parses HTTP/1.1 itself. It finds the method, the path and three headers: `Authorization`, `Content-Length` and `Connection`. Routes are in code.
 4. Each endpoint (`Api.fs`) writes the full response into one buffer of the thread: the status line, the headers and the JSON body. Then the thread sends all the responses for that read with one `send` call.
-5. One SQLite connection serves all requests. A lock serializes the requests. The server prepares each statement one time at start.
+5. One SQLite connection serves all requests. With the epoll transport, one thread runs all requests, so it needs no lock. With the socket transport, a lock serializes the requests. The server prepares each statement one time at start.
 6. The JWT check (`Auth.fs`) runs on each request. It decodes the header and the payload, computes HMAC-SHA256 over the token bytes and compares the signature in fixed time. Then it checks `sub`, `username` and `exp`.
 
 ## Rules
@@ -34,6 +34,7 @@
 | Own epoll transport for Kestrel. One `recv` and one `send` for each request. Kestrel's socket transport did one more `recv` after each request. | CPU per request -4.5%. RSS 497 MB to 376 MB. | #74 (own epoll loop) |
 | Profile-guided SQLite build. A perf profile showed SQLite at 36% of the server CPU. | CPU per request -4.5% | #60 |
 | The epoll thread calls the HTTP handler directly on its receive buffer. No pipes and no send task for each connection. | CPU per request -7.9%. RSS 376 MB to 263 MB. | #74 (own loop calls the parser) |
+| The loop finds a connection by its fd in an array, not in a dictionary. The database calls do not take a lock when the loop thread runs every request. | CPU per request -1.8%. RSS +36 MB (cause not known). | perf profile |
 | SQLite from source with `THREADSAFE=2` and SQLite's recommended options | No mutex calls in SQLite | #77, #108 |
 | `mmap_size` 1 GB, `cache_size` 32 MB | Reads use memory, not `read` calls | #108 |
 | JSON from the SQLite UTF-8 bytes, no .NET strings for rows | Less allocation | #77 |
@@ -73,7 +74,8 @@ These numbers come from one local machine, not from the official box. Use them t
 | Own epoll transport | 53.55 µs (see note) | 37.3% | 10.3 ms | 0 | 376 MB |
 | Profile-guided SQLite | 51.14 µs (see note) | 34.5% | 9.2 ms | 0 | 376 MB |
 | Handler called from the epoll thread | 47.18 µs (see note) | 31.4% | 8.4 ms | 0 | 263 MB |
+| Connection array, no database lock | 46.32 µs (see note) | 31.2% | 7.8 to 9.0 ms | 0 | 301 MB |
 
-Note: the machine became slower after a restart. From the epoll transport on, each new version and the version before it ran in turns, two times each. The table shows the earlier value minus the mean difference of the two pairs. The difference was 2.8 µs for the epoll transport, 2.4 µs for the profile-guided SQLite and 4.0 µs for the direct handler call.
+Note: the machine became slower after a restart. From the epoll transport on, each new version and the version before it ran in turns, two times each. The table shows the earlier value minus the mean difference of the two pairs. The mean differences were: epoll transport 2.8 µs, profile-guided SQLite 2.4 µs, direct handler call 4.0 µs, connection array 0.9 µs.
 
 `test/test.sh`: 42/42.

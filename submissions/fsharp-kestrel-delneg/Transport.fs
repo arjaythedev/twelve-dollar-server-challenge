@@ -134,11 +134,13 @@ and [<AllowNullLiteral>] EConn(id: int64, fd: int, loop: ILoop) =
 
     member _.Id = id
     member _.Fd = fd
+    /// The epoll data of this socket: the fd in the low 32 bits, the low 32 bits of the id above them.
+    member _.Key = (uint64 (uint32 id) <<< 32) ||| uint64 (uint32 fd)
 
-    member private _.Ctl(op: int, events: uint32) =
+    member private this.Ctl(op: int, events: uint32) =
         let mutable ev = EpollEvent()
         ev.Events <- events
-        ev.Data <- uint64 id
+        ev.Data <- this.Key
         Libc.epoll_ctl(loop.Epfd, op, fd, &ev) |> ignore
 
     /// The loop calls this for every event on the socket.
@@ -292,7 +294,9 @@ and [<AllowNullLiteral>] EConn(id: int64, fd: int, loop: ILoop) =
 type private Loop(listenFd: int) as this =
     let epfd = Libc.epoll_create1 SOCK_CLOEXEC
     let efd = Libc.eventfd(0u, SOCK_NONBLOCK ||| SOCK_CLOEXEC)
-    let conns = Dictionary<int64, EConn>()
+    /// Connections by fd. An event carries the fd and the connection's id, so an event for a closed socket
+    /// never reaches a new connection that got the same fd.
+    let mutable conns: EConn[] = Array.zeroCreate 1024
     let recvBuffer = GC.AllocateUninitializedArray<byte>(65536, pinned = true)
     let recvAddress = Marshal.UnsafeAddrOfPinnedArrayElement(recvBuffer, 0)
     let out = ArrayBufferWriter<byte>(65536)
@@ -301,7 +305,7 @@ type private Loop(listenFd: int) as this =
         Channel.CreateUnbounded<ConnectionContext>(
             UnboundedChannelOptions(SingleReader = true, SingleWriter = true, AllowSynchronousContinuations = true)
         )
-    let mutable nextId = 2L // 0 = listening socket, 1 = eventfd
+    let mutable nextId = 1L // a socket's key is >= 2^32; epoll data 0 = listening socket, 1 = eventfd
     let mutable thread: Thread = null
 
     do
@@ -329,18 +333,21 @@ type private Loop(listenFd: int) as this =
                 let id = nextId
                 nextId <- nextId + 1L
                 let c = new EConn(id, fd, this)
-                conns.[id] <- c
+                if fd >= conns.Length then
+                    let bigger = Array.zeroCreate (max (fd + 1) (conns.Length * 2))
+                    Array.blit conns 0 bigger 0 conns.Length
+                    conns <- bigger
+                conns.[fd] <- c
                 let mutable ev = EpollEvent()
                 ev.Events <- EPOLLIN
-                ev.Data <- uint64 id
+                ev.Data <- c.Key
                 Libc.epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &ev) |> ignore
                 accepted.Writer.TryWrite c |> ignore
 
-    member private _.Drain() =
+    member private this.Drain() =
         let mutable c: EConn = null
         while toClose.TryDequeue(&c) do
-            conns.Remove c.Id |> ignore
-            c.CloseNow()
+            this.Forget c
 
     member private this.Run() =
         let events = Array.zeroCreate<EpollEvent> 256
@@ -357,13 +364,19 @@ type private Loop(listenFd: int) as this =
                     | 1UL ->
                         use p = fixed &buf
                         Libc.read(efd, NativePtr.toNativeInt p, 8n) |> ignore
-                    | id ->
-                        match conns.TryGetValue(int64 id) with
-                        | true, c -> c.OnEvent ev.Events
-                        | _ -> ()
+                    | key ->
+                        let fd = int (uint32 key)
+                        if fd < conns.Length then
+                            let c = conns.[fd]
+                            if not (isNull c) && c.Key = key then c.OnEvent ev.Events
                 with _ ->
                     ()
             if not toClose.IsEmpty then this.Drain()
+
+    /// Loop thread only.
+    member private _.Forget(c: EConn) =
+        if c.Fd < conns.Length && obj.ReferenceEquals(conns.[c.Fd], c) then conns.[c.Fd] <- null
+        c.CloseNow()
 
     interface ILoop with
         member _.Epfd = epfd
@@ -372,8 +385,7 @@ type private Loop(listenFd: int) as this =
         member _.Out = out
         member _.Close c =
             if Thread.CurrentThread = thread then
-                conns.Remove c.Id |> ignore
-                c.CloseNow()
+                this.Forget c
             else
                 toClose.Enqueue c
                 let mutable one = 1UL
@@ -400,10 +412,15 @@ type private Listener(endpoint: EndPoint, loop: Loop) =
         member _.UnbindAsync(_) = ValueTask.CompletedTask
         member _.DisposeAsync() = ValueTask.CompletedTask
 
-/// Register as Kestrel's IConnectionListenerFactory. IPv4 endpoints only.
+/// Register as Kestrel's IConnectionListenerFactory. IPv4 endpoints only, and one endpoint: its loop thread runs
+/// every request, so the database needs no lock (`Db.singleThread`).
 type EpollTransportFactory() =
+    let mutable bound = 0
     interface IConnectionListenerFactory with
         member _.BindAsync(endpoint, _) =
+            if Interlocked.Exchange(&bound, 1) <> 0 then
+                raise (NotSupportedException "epoll transport: one endpoint only")
+            Db.singleThread <- true
             let ip =
                 match endpoint with
                 | :? IPEndPoint as ip when ip.AddressFamily = AddressFamily.InterNetwork -> ip

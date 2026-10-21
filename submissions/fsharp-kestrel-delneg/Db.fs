@@ -1,4 +1,4 @@
-/// The request connection: every read and write runs on it under `gate`, start to finish. Writes are autocommit,
+/// The request connection: every read and write runs on it under `gate` (or on the one loop thread), start to finish. Writes are autocommit,
 /// so a 201 goes out only after its COMMIT, which is durable in the WAL (synchronous=NORMAL).
 /// The connection holds the database file lock for its whole life (locking_mode=EXCLUSIVE).
 /// SQLite is built with SQLITE_THREADSAFE=2: a connection is never used by two threads at once.
@@ -11,6 +11,14 @@ open System.Threading
 open System.Threading.Tasks
 
 let gate = obj ()
+
+/// True when one thread runs every request (the epoll transport has one loop thread). Then `serialized` needs
+/// no lock. Set once at start, before the first request.
+let mutable singleThread = false
+
+/// Runs `f` with the connection to itself: under `gate`, or directly when one thread runs every request.
+let inline serialized ([<InlineIfLambda>] f: unit -> 'T) : 'T =
+    if singleThread then f () else lock gate f
 let mutable private db = 0n
 let mutable feed = 0n
 let mutable post = 0n

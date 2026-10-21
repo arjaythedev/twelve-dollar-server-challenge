@@ -82,7 +82,7 @@ let send (w: IBufferWriter<byte>) (status: int) (close: bool) (body: byte[]) = r
 
 // ---- JSON --------------------------------------------------------------------------------------------------------
 
-// One JSON buffer, used only while `Db.gate` is held, and copied into the pipe before the lock is released.
+// One JSON buffer, used only inside `Db.serialized`, and copied into the pipe before the lock is released.
 let private buffer = ArrayBufferWriter<byte>(16384)
 let private json =
     new Utf8JsonWriter(
@@ -113,7 +113,7 @@ let private jsWhitespace =
     "\t\n\u000b\u000c\r                  　﻿"
         .ToCharArray()
 
-/// Call with `Db.gate` held: sends what the JSON writer holds as the response body, and clears it.
+/// Call inside `Db.serialized`: sends what the JSON writer holds as the response body, and clears it.
 let private writeJson (w: IBufferWriter<byte>) (status: int) (close: bool) =
     json.Flush()
     respond w status close buffer.WrittenSpan
@@ -137,7 +137,7 @@ let private writePost (st: nativeint) =
 // ---- Endpoints ---------------------------------------------------------------------------------------------------
 
 let health (w: IBufferWriter<byte>) (close: bool) =
-    lock Db.gate (fun () ->
+    Db.serialized (fun () ->
         try
             try
                 if not (Db.stepRow Db.ping) then
@@ -160,7 +160,7 @@ let health (w: IBufferWriter<byte>) (close: bool) =
             writeJson w 503 close)
 
 let feed (w: IBufferWriter<byte>) (close: bool) =
-    lock Db.gate (fun () ->
+    Db.serialized (fun () ->
         let st = Db.feed
         try
             json.WriteStartObject()
@@ -175,7 +175,7 @@ let feed (w: IBufferWriter<byte>) (close: bool) =
 
 let getPost (w: IBufferWriter<byte>) (close: bool) (id: int64) =
     let found =
-        lock Db.gate (fun () ->
+        Db.serialized (fun () ->
             let st = Db.post
             try
                 Sqlite.bind_int64(st, 1, id) |> ignore
@@ -203,7 +203,7 @@ let private postExists (id: int64) =
 /// Returns null when the response is written, or a Task that writes it (only while a WAL catch-up holds writes).
 let like (w: IBufferWriter<byte>) (close: bool) (userId: int64) (id: int64) : Task =
     let likeIt () =
-        lock Db.gate (fun () ->
+        Db.serialized (fun () ->
             let st = Db.insertLike
             let inserted =
                 try
@@ -268,7 +268,7 @@ let private parseBody (data: ReadOnlySpan<byte>) (body: byref<string>) : byte[] 
 
 let private insertPost (w: IBufferWriter<byte>) (close: bool) (userId: int64) (username: string) (body: string) =
     let utf8 = Encoding.UTF8.GetBytes body
-    lock Db.gate (fun () ->
+    Db.serialized (fun () ->
         let st = Db.insertPost
         try
             Sqlite.bind_int64(st, 1, userId) |> ignore

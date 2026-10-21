@@ -4,7 +4,7 @@
 |---|---|
 | Language | F# 10 on .NET 10 (SDK 10.0.401, pinned in `global.json`) |
 | Server | Kestrel (ASP.NET Core 10) with its own epoll transport and a connection handler. No web framework. |
-| Database driver | SQLite 3.53.4 from source, called through `DllImport` (`Sqlite.fs`) |
+| Database driver | SQLite 3.53.4 from source with a profile-guided gcc build, called through `DllImport` (`Sqlite.fs`) |
 | JSON | `System.Text.Json` (`Utf8JsonWriter`, `Utf8JsonReader`) |
 | Build | ReadyToRun with TieredPGO. Workstation GC, not concurrent. |
 | **Nginx or direct** | **Direct**: the server listens on `HOST:PORT` (`0.0.0.0:80`) itself |
@@ -23,7 +23,7 @@
 - Writes: WAL with `synchronous=NORMAL`. Each write is an autocommit statement. The statement commits before the server sends the response.
 - No cache: each request runs its SQL. The server keeps no copy of rows, responses or JWT results.
 - `install.sh` (root) installs gcc, libicu and the .NET SDK from the official tarball with a SHA-512 check.
-- `build.sh` (normal user) gets the SQLite source with a SHA-256 check, compiles it with gcc, and publishes the server.
+- `build.sh` (normal user) gets the SQLite source with a SHA-256 check and compiles it with gcc two times. Between the two compiles, `sqlite-train.c` runs the server's statements on a synthetic database, and gcc records a profile. Then `build.sh` publishes the server.
 
 ## Optimizations
 
@@ -32,6 +32,7 @@
 | Own HTTP/1.1 parser in a Kestrel connection handler. One response write, one flush for each read. | CPU per request -9.6%. RSS 748 MB to 490 MB at 64,000 users. | #74 (own parser, one response buffer), #27 (raw Kestrel, no `HttpContext`) |
 | `locking_mode=EXCLUSIVE`. SQLite takes the file lock one time, not around each statement. | CPU per request -8.4%. Hold p99 rose from 2 ms to 10 ms (checkpoints on the request thread). | #77, #27, #74 |
 | Own epoll transport for Kestrel. One `recv` and one `send` for each request. Kestrel's socket transport did one more `recv` after each request. | CPU per request -4.5%. RSS 497 MB to 376 MB. | #74 (own epoll loop) |
+| Profile-guided SQLite build. A perf profile showed SQLite at 36% of the server CPU. | CPU per request -4.5% | #60 |
 | SQLite from source with `THREADSAFE=2` and SQLite's recommended options | No mutex calls in SQLite | #77, #108 |
 | `mmap_size` 1 GB, `cache_size` 32 MB | Reads use memory, not `read` calls | #108 |
 | JSON from the SQLite UTF-8 bytes, no .NET strings for rows | Less allocation | #77 |
@@ -47,6 +48,8 @@ Changes that did not help (discarded):
 | Own JSON writer | Same CPU | #74 |
 | Native AOT | CPU +2%, RSS -93 MB | #77, #74 |
 | SQLite with `-O3 -march=native` | Same CPU | #60 |
+| `wal_autocheckpoint=200` | Same CPU, hold p99 6 ms | — |
+| Checkpoints on a second connection in a background thread, normal locking | CPU +8%, hold p99 0.9 ms | #108 |
 | `wal_autocheckpoint=8000` | CPU +4%, hold p99 72 ms | — |
 
 ## Local results (diagnostics, not an official score)
@@ -64,7 +67,8 @@ These numbers come from one local machine, not from the official box. Use them t
 | Own parser | 61.56 µs | 41.7% | 1.9 ms | 0 | 490 MB |
 | `locking_mode=EXCLUSIVE` | 56.37 µs | 38.2% | 9.7 ms | 0 | 496 MB |
 | Own epoll transport | 53.55 µs (see note) | 37.3% | 10.3 ms | 0 | 376 MB |
+| Profile-guided SQLite | 51.14 µs (see note) | 34.5% | 9.2 ms | 0 | 376 MB |
 
-Note: the machine became slower after a restart. The epoll transport and the version before it ran in turns, two times each. The epoll transport used 2.8 µs less for each request in both pairs. The table shows 56.37 µs minus 2.8 µs.
+Note: the machine became slower after a restart. From the epoll transport on, each new version and the version before it ran in turns, two times each. The table shows the earlier value minus the mean difference of the two pairs. The difference was 2.8 µs for the epoll transport and 2.4 µs for the profile-guided SQLite.
 
 `test/test.sh`: 42/42.

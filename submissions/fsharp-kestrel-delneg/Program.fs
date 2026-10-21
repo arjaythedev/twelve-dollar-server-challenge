@@ -51,7 +51,8 @@ let main _ =
                 l.Use(fun (_: ConnectionDelegate) ->
                     ConnectionDelegate(fun c ->
                         match c with
-                        | :? Transport.EConn as e -> e.Closed // the epoll loop runs the handler itself
+                        // The epoll loop runs the handler itself and closes the socket.
+                        | :? Transport.EConn as e -> if e.Detach() then Task.CompletedTask else e.Closed
                         | _ -> Conn.run c))
                 |> ignore))
     |> ignore

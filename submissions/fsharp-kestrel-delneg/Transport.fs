@@ -113,8 +113,10 @@ type ILoop =
 /// no buffer: a partial request or a response that the socket did not take goes into a pooled array.
 and [<AllowNullLiteral>] EConn(id: int64, fd: int, loop: ILoop) =
     inherit ConnectionContext()
-    let features = FeatureCollection(4)
+    let mutable features: IFeatureCollection = FeatureCollection(4)
     let finished = TaskCompletionSource()
+    /// 0: Kestrel owns the connection. 1: detached, the loop owns it. 2: finished while Kestrel owned it.
+    let mutable owner = 0
     let mutable transport: IDuplexPipe = null
     let mutable items: IDictionary<obj, obj> = null
     let mutable connectionId: string = null
@@ -135,6 +137,11 @@ and [<AllowNullLiteral>] EConn(id: int64, fd: int, loop: ILoop) =
 
     /// Completes when the connection stops reading. Kestrel then disposes it, and the loop closes the socket.
     member _.Closed = finished.Task
+
+    /// The connection handler calls this. Kestrel then ends its part of the connection at once (its heartbeat
+    /// stops visiting it, and its per-connection objects can go), and the loop closes the socket when it is done.
+    /// False when the connection already finished: then Kestrel disposes it as usual.
+    member _.Detach() = Interlocked.CompareExchange(&owner, 1, 0) = 0
 
     member _.Id = id
     member _.Fd = fd
@@ -251,7 +258,8 @@ and [<AllowNullLiteral>] EConn(id: int64, fd: int, loop: ILoop) =
             release &inBuf
             inLen <- 0
             release &outBuf
-            finished.TrySetResult() |> ignore
+            if Interlocked.CompareExchange(&owner, 2, 0) = 0 then finished.TrySetResult() |> ignore
+            else loop.Close this
 
     /// Loop thread only: forget the socket and close it.
     member _.CloseNow() =
@@ -289,9 +297,10 @@ and [<AllowNullLiteral>] EConn(id: int64, fd: int, loop: ILoop) =
     override _.Abort(_: ConnectionAbortedException) =
         if Volatile.Read(&closed) = 0 then Libc.shutdown(fd, 2) |> ignore
 
-    /// Kestrel calls this after the handler ends: close the socket on the loop thread.
+    /// Kestrel calls this after the handler ends. A detached connection only drops Kestrel's features, which
+    /// point to Kestrel's connection objects. Otherwise close the socket on the loop thread.
     override this.DisposeAsync() =
-        loop.Close this
+        if Volatile.Read(&owner) = 1 then features <- FeatureCollection(0) else loop.Close this
         ValueTask.CompletedTask
 
 /// Below this many events from one epoll_wait, the loop sleeps 2 ms before it waits again.

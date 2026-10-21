@@ -290,7 +290,7 @@ and [<AllowNullLiteral>] EConn(id: int64, fd: int, loop: ILoop) =
         loop.Close this
         ValueTask.CompletedTask
 
-/// Below this many events from one epoll_wait, the loop sleeps 1 ms before it waits again.
+/// Below this many events from one epoll_wait, the loop sleeps 2 ms before it waits again.
 [<Literal>]
 let private CoalesceBelow = 32
 
@@ -376,9 +376,9 @@ type private Loop(listenFd: int) as this =
                 with _ ->
                     ()
             if not toClose.IsEmpty then this.Drain()
-            // Few events: wait 1 ms before the next epoll_wait, so that one wake-up serves more sockets. On a
+            // Few events: wait 2 ms before the next epoll_wait, so that one wake-up serves more sockets. On a
             // single core each wake-up of this thread costs a context switch and more; a busy loop does not sleep.
-            if n < CoalesceBelow then Thread.Sleep 1
+            if n < CoalesceBelow then Thread.Sleep 2
 
     /// Loop thread only.
     member private _.Forget(c: EConn) =

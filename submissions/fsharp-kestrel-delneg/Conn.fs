@@ -41,7 +41,7 @@ let private parseId (s: ReadOnlySpan<byte>) =
                 i <- s.Length
         v
 
-let private dispatch (w: PipeWriter) (close: bool) (meth: ReadOnlySpan<byte>) (path: ReadOnlySpan<byte>)
+let private dispatch (w: IBufferWriter<byte>) (close: bool) (meth: ReadOnlySpan<byte>) (path: ReadOnlySpan<byte>)
                      (auth: ReadOnlySpan<byte>) (body: ReadOnlySpan<byte>) : Task =
     if meth.SequenceEqual("GET"B) then
         if path.SequenceEqual("/feed"B) then
@@ -91,7 +91,7 @@ let private dispatch (w: PipeWriter) (close: bool) (meth: ReadOnlySpan<byte>) (p
 
 /// Parses and answers every complete request in `s`. Stops early at a request whose response is still pending
 /// (a Task), or at a request that closes the connection.
-let private processSpan (s: ReadOnlySpan<byte>) (w: PipeWriter) (continueSent: bool)
+let private processSpan (s: ReadOnlySpan<byte>) (w: IBufferWriter<byte>) (continueSent: bool)
                         (consumed: byref<int>) (pending: byref<Task>) (flags: byref<int>) =
     let mutable off = 0
     let mutable stop = false
@@ -181,7 +181,7 @@ let private processSpan (s: ReadOnlySpan<byte>) (w: PipeWriter) (continueSent: b
     consumed <- off
 
 /// One pass over what the transport has read. Returns (bytes consumed, pending response or null, flags).
-let private step (buf: ReadOnlySequence<byte>) (w: PipeWriter) (continueSent: bool) : struct (int * Task * int) =
+let private step (buf: ReadOnlySequence<byte>) (w: IBufferWriter<byte>) (continueSent: bool) : struct (int * Task * int) =
     let mutable consumed = 0
     let mutable pending: Task = null
     let mutable flags = if continueSent then ContinueSent else 0
@@ -199,7 +199,32 @@ let private step (buf: ReadOnlySequence<byte>) (w: PipeWriter) (continueSent: bo
         ArrayPool<byte>.Shared.Return arr
     struct (consumed, pending, flags)
 
-/// The connection loop: read, answer every complete request, flush once per read.
+/// For the epoll transport: answers every complete request in `s` into `w`, in order. A pending response (only
+/// possible if a write did not finish at once) is waited for in place. Returns the bytes consumed; sets `close` when
+/// the connection must close after the responses are sent, and `continueSent` as for the next read.
+let direct (s: ReadOnlySpan<byte>) (w: IBufferWriter<byte>) (close: byref<bool>) (continueSent: byref<bool>) : int =
+    let mutable off = 0
+    let mutable go = true
+    while go do
+        let mutable consumed = 0
+        let mutable pending: Task = null
+        let mutable flags = if continueSent then ContinueSent else 0
+        processSpan (s.Slice off) w continueSent &consumed &pending &flags
+        off <- off + consumed
+        continueSent <- flags &&& ContinueSent <> 0
+        if not (isNull pending) then
+            try
+                pending.GetAwaiter().GetResult()
+            with _ ->
+                Api.send w 500 (flags &&& Close <> 0) Api.Internal
+        if flags &&& Close <> 0 then
+            close <- true
+            go <- false
+        elif isNull pending then
+            go <- false
+    off
+
+/// The connection loop on Kestrel's pipes (socket transport): read, answer every complete request, flush once per read.
 let run (conn: ConnectionContext) : Task =
     let input = conn.Transport.Input
     let output = conn.Transport.Output
@@ -211,7 +236,7 @@ let run (conn: ConnectionContext) : Task =
                 while go do
                     let! r = input.ReadAsync()
                     let buf = r.Buffer
-                    let struct (consumed, pending, flags) = step buf output continueSent
+                    let struct (consumed, pending, flags) = step buf (output :> IBufferWriter<byte>) continueSent
                     continueSent <- flags &&& ContinueSent <> 0
                     if flags &&& NeedMore <> 0 then
                         input.AdvanceTo(buf.GetPosition(int64 consumed), buf.End)

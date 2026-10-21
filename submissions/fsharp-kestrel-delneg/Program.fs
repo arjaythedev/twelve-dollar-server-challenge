@@ -48,7 +48,12 @@ let main _ =
             o.AddServerHeader <- false
             // Our connection handler goes first and never calls the next one (Kestrel's HTTP layer).
             o.Listen(IPAddress.Parse(env "HOST" "127.0.0.1"), int (env "PORT" "3000"), fun l ->
-                l.Use(fun (_: ConnectionDelegate) -> ConnectionDelegate Conn.run) |> ignore))
+                l.Use(fun (_: ConnectionDelegate) ->
+                    ConnectionDelegate(fun c ->
+                        match c with
+                        | :? Transport.EConn as e -> e.Closed // the epoll loop runs the handler itself
+                        | _ -> Conn.run c))
+                |> ignore))
     |> ignore
     let app = builder.Build()
     let server = app.Services.GetRequiredService<IServer>()

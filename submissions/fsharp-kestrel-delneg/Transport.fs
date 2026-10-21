@@ -1,6 +1,6 @@
 /// A Kestrel transport (IConnectionListenerFactory) on Linux epoll. One thread waits on a level-triggered epoll set:
-/// a readable socket gets exactly one recv, and the bytes go into the connection's input pipe. Both pipes use the
-/// inline scheduler, so the connection handler runs in that same call, and its response goes out with one send.
+/// a readable socket gets exactly one recv into the loop's buffer, the HTTP handler (`Conn.direct`) answers every
+/// complete request in it, and the responses go out with one send. No pipes and no task per request.
 /// Compared with Kestrel's socket transport, this saves the speculative read that ends in EAGAIN after every
 /// request. Idea: #74 (own epoll loop), here kept inside Kestrel as its transport. x86-64 Linux only.
 module Transport
@@ -88,16 +88,6 @@ let supported =
 
 let private errno () = Marshal.GetLastPInvokeError()
 
-let private pipeOptions =
-    PipeOptions(
-        readerScheduler = PipeScheduler.Inline,
-        writerScheduler = PipeScheduler.Inline,
-        pauseWriterThreshold = 0L, // the handler limits request size itself; FlushAsync never waits
-        resumeWriterThreshold = 0L,
-        minimumSegmentSize = 4096,
-        useSynchronizationContext = false
-    )
-
 type private Duplex(input: PipeReader, output: PipeWriter) =
     interface IDuplexPipe with
         member _.Input = input
@@ -108,27 +98,42 @@ type private Duplex(input: PipeReader, output: PipeWriter) =
 type ILoop =
     abstract Epfd: int
     abstract Close: EConn -> unit
+    /// The loop's receive buffer (pinned) and its address.
+    abstract RecvBuffer: byte[]
+    abstract RecvAddress: nativeint
+    /// The loop's response buffer: empty between events.
+    abstract Out: ArrayBufferWriter<byte>
 
-/// One accepted socket. Only the loop thread reads it; the send loop writes it.
+/// One accepted socket. Only the loop thread reads and writes it. The loop thread calls the HTTP handler
+/// (`Conn.direct`) on the received bytes, and sends all its responses with one `send`. An idle connection holds
+/// no buffer: a partial request or a response that the socket did not take goes into a pooled array.
 and [<AllowNullLiteral>] EConn(id: int64, fd: int, loop: ILoop) =
     inherit ConnectionContext()
-    let input = Pipe(pipeOptions)
-    let output = Pipe(pipeOptions)
     let features = FeatureCollection(4)
-    let mutable transport: IDuplexPipe = Duplex(input.Reader, output.Writer)
+    let finished = TaskCompletionSource()
+    let mutable transport: IDuplexPipe = null
     let mutable items: IDictionary<obj, obj> = null
     let mutable connectionId: string = null
-    let mutable readOpen = true // registered for EPOLLIN, input pipe open
-    let mutable writeWait: TaskCompletionSource = null
+    let mutable readOpen = true // registered for EPOLLIN, more requests can come
     let mutable closed = 0
-    let mutable sendTask: Task = null
+    let mutable continueSent = false
+    let mutable inBuf: byte[] = null // the start of a request that is not complete yet
+    let mutable inLen = 0
+    let mutable outBuf: byte[] = null // response bytes that wait for EPOLLOUT
+    let mutable outOff = 0
+    let mutable outLen = 0
+    let mutable closeAfterSend = false
 
-    /// Starts the send loop (it waits on the output pipe).
-    member this.Start() = sendTask <- this.SendLoop()
+    let release (a: byref<byte[]>) =
+        if not (isNull a) then
+            ArrayPool<byte>.Shared.Return a
+            a <- null
+
+    /// Completes when the connection stops reading. Kestrel then disposes it, and the loop closes the socket.
+    member _.Closed = finished.Task
 
     member _.Id = id
     member _.Fd = fd
-    member _.IsClosed = Volatile.Read(&closed) <> 0
 
     member private _.Ctl(op: int, events: uint32) =
         let mutable ev = EpollEvent()
@@ -138,75 +143,109 @@ and [<AllowNullLiteral>] EConn(id: int64, fd: int, loop: ILoop) =
 
     /// The loop calls this for every event on the socket.
     member this.OnEvent(events: uint32) =
-        if events &&& (EPOLLOUT ||| EPOLLERR ||| EPOLLHUP) <> 0u && not (isNull writeWait) then
-            let w = writeWait
-            writeWait <- null
-            this.Ctl(EPOLL_CTL_MOD, (if readOpen then EPOLLIN else 0u))
-            w.TrySetResult() |> ignore
-        if readOpen && events &&& (EPOLLIN ||| EPOLLERR ||| EPOLLHUP) <> 0u then
+        if not (isNull outBuf) then
+            if events &&& (EPOLLOUT ||| EPOLLERR ||| EPOLLHUP) <> 0u then
+                this.SendRest()
+        elif readOpen && events &&& (EPOLLIN ||| EPOLLERR ||| EPOLLHUP) <> 0u then
             this.Receive()
 
     member private this.Receive() =
-        let w = input.Writer
-        let mem = w.GetMemory 4096
-        let n =
-            use p = fixed &MemoryMarshal.GetReference(mem.Span)
-            Libc.recv(fd, NativePtr.toNativeInt p, nativeint mem.Length, 0)
+        let buf = loop.RecvBuffer
+        let n = Libc.recv(fd, loop.RecvAddress, nativeint buf.Length, 0)
         if n > 0n then
-            w.Advance(int n)
-            // Inline scheduler: the connection handler runs inside this call, and its flush sends the response.
-            let r = w.FlushAsync().GetAwaiter().GetResult()
-            if r.IsCompleted then this.StopReading null
+            let n = int n
+            let mutable data = ReadOnlySpan<byte>(buf, 0, n)
+            if inLen > 0 then
+                if inBuf.Length - inLen < n then
+                    let bigger = ArrayPool<byte>.Shared.Rent(inLen + n)
+                    Buffer.BlockCopy(inBuf, 0, bigger, 0, inLen)
+                    ArrayPool<byte>.Shared.Return inBuf
+                    inBuf <- bigger
+                Buffer.BlockCopy(buf, 0, inBuf, inLen, n)
+                inLen <- inLen + n
+                data <- ReadOnlySpan<byte>(inBuf, 0, inLen)
+            let out = loop.Out
+            let mutable close = false
+            let mutable ok = true
+            let mutable consumed = 0
+            try
+                consumed <- Conn.direct data out &close &continueSent
+            with _ ->
+                ok <- false
+            if not ok then
+                out.ResetWrittenCount()
+                this.Finish()
+            else
+                let rest = data.Length - consumed
+                if close || rest = 0 then
+                    release &inBuf
+                    inLen <- 0
+                elif inLen > 0 then
+                    if consumed > 0 then Buffer.BlockCopy(inBuf, consumed, inBuf, 0, rest)
+                    inLen <- rest
+                else
+                    inBuf <- ArrayPool<byte>.Shared.Rent(max 4096 rest)
+                    data.Slice(consumed).CopyTo(Span inBuf)
+                    inLen <- rest
+                this.Send close
         elif n = 0n then
-            this.StopReading null
+            this.Finish()
         else
             let e = errno ()
             if e <> EAGAIN && e <> EINTR then
-                this.StopReading(SocketException(e))
+                this.Finish()
 
-    /// End of input (peer closed, error, or the handler is done): stop polling, complete the input pipe.
-    member private this.StopReading(error: exn) =
-        if readOpen then
-            readOpen <- false
-            this.Ctl(EPOLL_CTL_MOD, (if isNull writeWait then 0u else EPOLLOUT))
-            input.Writer.Complete error
+    /// Sends the loop's response buffer. What the socket does not take waits for EPOLLOUT; reading stops until then.
+    member private this.Send(close: bool) =
+        let out = loop.Out
+        let len = out.WrittenCount
+        let sent = if len > 0 then this.TrySend(out.WrittenSpan) else 0
+        if sent < 0 then
+            out.ResetWrittenCount()
+            this.Finish()
+        elif sent < len then
+            outLen <- len - sent
+            outOff <- 0
+            outBuf <- ArrayPool<byte>.Shared.Rent outLen
+            out.WrittenSpan.Slice(sent).CopyTo(Span outBuf)
+            out.ResetWrittenCount()
+            closeAfterSend <- close
+            this.Ctl(EPOLL_CTL_MOD, EPOLLOUT)
+        else
+            out.ResetWrittenCount()
+            if close then this.Finish()
 
-    /// Sends what the handler writes, in order. Waits for EPOLLOUT only when the socket buffer is full.
-    member private this.SendLoop() : Task =
-        task {
-            let reader = output.Reader
-            try
-                try
-                    let mutable go = true
-                    while go do
-                        let! r = reader.ReadAsync()
-                        let mutable rest = r.Buffer
-                        while not rest.IsEmpty do
-                            let sent = this.TrySend rest.First
-                            if sent > 0 then
-                                rest <- rest.Slice(int64 sent)
-                            else
-                                let tcs = TaskCompletionSource()
-                                writeWait <- tcs
-                                this.Ctl(EPOLL_CTL_MOD, (if readOpen then EPOLLIN ||| EPOLLOUT else EPOLLOUT))
-                                do! tcs.Task
-                        reader.AdvanceTo(r.Buffer.End)
-                        if r.IsCompleted || r.IsCanceled then go <- false
-                with _ ->
-                    ()
-            finally
-                reader.Complete()
-        }
+    member private this.SendRest() =
+        let sent = this.TrySend(ReadOnlySpan<byte>(outBuf, outOff, outLen))
+        if sent < 0 then
+            release &outBuf
+            this.Finish()
+        else
+            outOff <- outOff + sent
+            outLen <- outLen - sent
+            if outLen = 0 then
+                release &outBuf
+                if closeAfterSend then this.Finish() else this.Ctl(EPOLL_CTL_MOD, EPOLLIN)
 
-    /// Bytes sent, 0 when the socket buffer is full. Throws on a socket error.
-    member private _.TrySend(m: ReadOnlyMemory<byte>) : int =
+    /// Bytes sent, 0 when the socket buffer is full, -1 on a socket error.
+    member private _.TrySend(m: ReadOnlySpan<byte>) : int =
         let n =
-            use p = fixed &MemoryMarshal.GetReference(m.Span)
+            use p = fixed &MemoryMarshal.GetReference(m)
             Libc.send(fd, NativePtr.toNativeInt p, nativeint m.Length, MSG_NOSIGNAL)
         if n >= 0n then int n
         else
             let e = errno ()
-            if e = EAGAIN || e = EINTR then 0 else raise (SocketException(e))
+            if e = EAGAIN || e = EINTR then 0 else -1
+
+    /// No more requests (peer closed, error, or "Connection: close"): stop polling and end the connection.
+    member private this.Finish() =
+        if readOpen then
+            readOpen <- false
+            this.Ctl(EPOLL_CTL_MOD, 0u)
+            release &inBuf
+            inLen <- 0
+            release &outBuf
+            finished.TrySetResult() |> ignore
 
     /// Loop thread only: forget the socket and close it.
     member _.CloseNow() =
@@ -215,12 +254,9 @@ and [<AllowNullLiteral>] EConn(id: int64, fd: int, loop: ILoop) =
             Libc.epoll_ctl(loop.Epfd, EPOLL_CTL_DEL, fd, &ev) |> ignore
             Libc.close fd |> ignore
             readOpen <- false
-            input.Writer.Complete()
-            match writeWait with
-            | null -> ()
-            | w ->
-                writeWait <- null
-                w.TrySetException(ConnectionAbortedException()) |> ignore
+            release &inBuf
+            release &outBuf
+            finished.TrySetResult() |> ignore
 
     override _.ConnectionId
         with get () =
@@ -236,34 +272,30 @@ and [<AllowNullLiteral>] EConn(id: int64, fd: int, loop: ILoop) =
             items
         and set v = items <- v
 
+    /// Not used: the handler gets the bytes from the loop. Kestrel's API needs a value, so make one on demand.
     override _.Transport
-        with get () = transport
+        with get () =
+            if isNull transport then
+                transport <- Duplex(Pipe().Reader, Pipe().Writer)
+            transport
         and set v = transport <- v
 
     override _.Abort(_: ConnectionAbortedException) =
         if Volatile.Read(&closed) = 0 then Libc.shutdown(fd, 2) |> ignore
 
-    /// Kestrel calls this after the handler ends: let the send loop finish, then close the socket.
+    /// Kestrel calls this after the handler ends: close the socket on the loop thread.
     override this.DisposeAsync() =
-        if sendTask.IsCompleted then
-            loop.Close this
-            ValueTask.CompletedTask
-        else
-            ValueTask(
-                task {
-                    try
-                        do! sendTask
-                    with _ ->
-                        ()
-                    loop.Close this
-                }
-            )
+        loop.Close this
+        ValueTask.CompletedTask
 
 /// The epoll loop for one listening socket.
 type private Loop(listenFd: int) as this =
     let epfd = Libc.epoll_create1 SOCK_CLOEXEC
     let efd = Libc.eventfd(0u, SOCK_NONBLOCK ||| SOCK_CLOEXEC)
     let conns = Dictionary<int64, EConn>()
+    let recvBuffer = GC.AllocateUninitializedArray<byte>(65536, pinned = true)
+    let recvAddress = Marshal.UnsafeAddrOfPinnedArrayElement(recvBuffer, 0)
+    let out = ArrayBufferWriter<byte>(65536)
     let toClose = ConcurrentQueue<EConn>()
     let accepted =
         Channel.CreateUnbounded<ConnectionContext>(
@@ -297,7 +329,6 @@ type private Loop(listenFd: int) as this =
                 let id = nextId
                 nextId <- nextId + 1L
                 let c = new EConn(id, fd, this)
-                c.Start()
                 conns.[id] <- c
                 let mutable ev = EpollEvent()
                 ev.Events <- EPOLLIN
@@ -336,6 +367,9 @@ type private Loop(listenFd: int) as this =
 
     interface ILoop with
         member _.Epfd = epfd
+        member _.RecvBuffer = recvBuffer
+        member _.RecvAddress = recvAddress
+        member _.Out = out
         member _.Close c =
             if Thread.CurrentThread = thread then
                 conns.Remove c.Id |> ignore

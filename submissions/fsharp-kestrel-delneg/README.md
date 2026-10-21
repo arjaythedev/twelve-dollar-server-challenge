@@ -54,6 +54,7 @@ Changes that did not help (discarded):
 | Own JSON writer, tried two times | Same CPU at first. Later, CPU -0.9% (less than the noise). | #74 |
 | Native AOT | CPU +2%, RSS -93 MB | #77, #74 |
 | Byte strings made one time, not in each call. An F# `"..."B` literal in a function makes a new array each time. Allocation for each feed request fell from 221 bytes to 4 bytes. | CPU -1.0% (less than the noise), RSS -15 MB | allocation counters |
+| Own JSON writer and byte strings made one time, together | CPU -1.1% (less than the noise) | #74, allocation counters |
 | `DOTNET_ReadyToRun=0` (the JIT compiles all code with dynamic PGO) | Same CPU | TechEmpower ASP.NET settings |
 | `DOTNET_EnableWriteXorExecute=0` | Same CPU | TechEmpower ASP.NET settings |
 | `DOTNET_GCgen0size` 64 MB (fewer GCs) | Same CPU, RSS +36 MB | perf profile |

@@ -80,6 +80,6 @@ These numbers come from one local machine, not from the official box. Use them t
 | 1 ms wake-up coalescing | 41.73 µs (see note) | 28.6% | 10.0 to 10.8 ms | 0 | 297 MB |
 | 2 ms wake-up coalescing | 40.50 µs (see note) | 28.0% | 12.4 to 23.2 ms | 0 | 297 MB |
 
-Note: the machine became slower after a restart. From the epoll transport on, each new version and the version before it ran in turns, two times each. The table shows the earlier value minus the mean difference of the two pairs. The mean differences were: epoll transport 2.8 µs, profile-guided SQLite 2.4 µs, direct handler call 4.0 µs, connection array 0.9 µs, coalescing 4.6 µs, 2 ms sleep 1.2 µs.
+Note: the machine became slower after a restart. From the epoll transport on, each new version and the version before it ran in turns, two times each. The table shows the earlier value minus the mean difference of the two pairs. The optimizations table gives each difference as a percentage.
 
 `test/test.sh`: 42/42.

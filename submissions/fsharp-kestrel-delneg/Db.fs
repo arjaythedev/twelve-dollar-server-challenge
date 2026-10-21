@@ -112,6 +112,9 @@ let openDb (path: string) =
     // header. A page read through mmap is looked up in the WAL index and parsed again on every fetch.
     exec "PRAGMA mmap_size = 0"
     exec "PRAGMA cache_size = -32768"
+    // Statement journals in memory: inside a group-commit transaction, SQLite keeps one for each write statement.
+    // On disk it costs one more file write for each changed page.
+    exec "PRAGMA temp_store = MEMORY"
     let postSelect =
         "SELECT p.id, p.body, p.created_at, u.username, \
                 (SELECT count(*) FROM likes l WHERE l.post_id = p.id) \

@@ -40,6 +40,7 @@
 | Two small changes together. `mmap_size=0`: SQLite reads pages from its page cache. The loop sleeps with `usleep`, and `recv`, `send` and `epoll_ctl` skip the GC transition. Each change alone was less than the noise. | CPU per request -3.6%. RSS 297 MB to 268 MB. | perf profile |
 | Kestrel gives each connection to the loop and then forgets it. Kestrel's timer no longer visits 64,000 connections each second, and the GC frees Kestrel's objects for each connection. | CPU per request -1.5% (three pairs: -0.79, -0.22, -0.74 µs). RSS 273 MB to 170 MB. | perf profile (Kestrel timer at 1.7% of CPU) |
 | Group commit: one transaction for the writes of one wake-up of the loop. The responses wait for the commit. | CPU per request -11.3% in pair 2. Pair 1 gave -6.33 µs, but the old version had slow disk flushes in that pair. | #74 (group commit for each epoll batch), #60 |
+| `temp_store=MEMORY`. In a group-commit transaction, SQLite keeps a statement journal for each write. On disk, the journal wrote one more 4 KB page for each changed page. | CPU per request -1.9%. `pwrite` calls for each request 1.17 to 0.64 at 3,000 requests per second. | the task's list of known tricks, `strace` |
 | SQLite from source with `THREADSAFE=2` and SQLite's recommended options | No mutex calls in SQLite | #77, #108 |
 | `cache_size` 32 MB | The SQLite page cache is 16 times the default size (2 MB) | #108 |
 | JSON from the SQLite UTF-8 bytes, no .NET strings for rows | Less allocation | #77 |
@@ -89,6 +90,7 @@ These numbers come from one local machine, not from the official box. Use them t
 | No `mmap`, `usleep`, no GC transition | 39.02 µs (see note) | 26.8% | 12.1 to 22.7 ms | 0 | 269 MB |
 | Kestrel forgets the connection | 38.44 µs (see note) | 26.5% | 11.5 to 21.9 ms | 0 | 171 MB |
 | Group commit for each wake-up | 33.05 µs (see note) | 23.6% | 12.5 ms | 0 | 170 MB |
+| Statement journal in memory | 32.38 µs (see note) | 23.5% | 12.1 to 12.4 ms | 0 | 170 MB |
 
 Note: the machine became slower after a restart. From the epoll transport on, each new version and the version before it ran in turns, two times each. The table shows the earlier value minus the mean difference of the two pairs. The optimizations table gives each difference as a percentage.
 

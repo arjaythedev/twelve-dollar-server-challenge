@@ -66,6 +66,7 @@ Changes that did not help (discarded):
 | `wal_autocheckpoint=200` | Same CPU, hold p99 6 ms | — |
 | Checkpoints on a second connection in a background thread, normal locking | CPU +8%, hold p99 0.9 ms | #108 |
 | `wal_autocheckpoint=8000` | CPU +4%, hold p99 72 ms | — |
+| `wal_autocheckpoint=4000`, with group commit and no `mmap` | Same CPU | — |
 
 ## Local results (diagnostics, not an official score)
 

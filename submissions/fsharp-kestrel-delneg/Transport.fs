@@ -43,13 +43,14 @@ module private Libc =
     extern int accept4(int fd, nativeint addr, nativeint len, int flags)
     [<DllImport(L, SetLastError = true)>]
     extern int epoll_create1(int flags)
-    [<DllImport(L, SetLastError = true)>]
+    // epoll_ctl, recv and send never block here (non-blocking sockets), so they skip the GC transition.
+    [<DllImport(L, SetLastError = true); SuppressGCTransition>]
     extern int epoll_ctl(int epfd, int op, int fd, EpollEvent& ev)
     [<DllImport(L, SetLastError = true)>]
     extern int epoll_wait(int epfd, nativeint events, int maxEvents, int timeout)
-    [<DllImport(L, SetLastError = true)>]
+    [<DllImport(L, SetLastError = true); SuppressGCTransition>]
     extern nativeint recv(int fd, nativeint buf, nativeint len, int flags)
-    [<DllImport(L, SetLastError = true)>]
+    [<DllImport(L, SetLastError = true); SuppressGCTransition>]
     extern nativeint send(int fd, nativeint buf, nativeint len, int flags)
     [<DllImport(L, SetLastError = true)>]
     extern int close(int fd)
@@ -61,6 +62,9 @@ module private Libc =
     extern nativeint write(int fd, nativeint buf, nativeint len)
     [<DllImport(L, SetLastError = true)>]
     extern nativeint read(int fd, nativeint buf, nativeint len)
+    /// A plain nanosleep: Thread.Sleep on Linux waits on a condition variable through the runtime.
+    [<DllImport(L)>]
+    extern int usleep(uint32 microseconds)
 
 let private AF_INET = 2
 let private SOCK_STREAM = 1
@@ -378,7 +382,7 @@ type private Loop(listenFd: int) as this =
             if not toClose.IsEmpty then this.Drain()
             // Few events: wait 2 ms before the next epoll_wait, so that one wake-up serves more sockets. On a
             // single core each wake-up of this thread costs a context switch and more; a busy loop does not sleep.
-            if n < CoalesceBelow then Thread.Sleep 2
+            if n < CoalesceBelow then Libc.usleep 2000u |> ignore
 
     /// Loop thread only.
     member private _.Forget(c: EConn) =

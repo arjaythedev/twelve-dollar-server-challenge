@@ -78,7 +78,7 @@ int main(int argc, char **argv) {
   /* The server's connection: same pragmas and statements as Db.fs. */
   ok(sqlite3_open_v2(path, &db, SQLITE_OPEN_READWRITE, 0), "reopen");
   run("PRAGMA locking_mode = EXCLUSIVE"); run("PRAGMA journal_mode = WAL"); run("PRAGMA synchronous = NORMAL");
-  run("PRAGMA busy_timeout = 5000"); run("PRAGMA mmap_size = 1073741824"); run("PRAGMA cache_size = -32768");
+  run("PRAGMA busy_timeout = 5000"); run("PRAGMA mmap_size = 0"); run("PRAGMA cache_size = -32768");
   const char *sel = "SELECT p.id, p.body, p.created_at, u.username, (SELECT count(*) FROM likes l WHERE l.post_id = p.id)"
                     " FROM posts p JOIN users u ON u.id = p.user_id";
   snprintf(b, sizeof b, "%s ORDER BY p.created_at DESC, p.id DESC LIMIT 20", sel);

@@ -80,7 +80,9 @@ let openDb (path: string) =
     exec "PRAGMA journal_mode = WAL"
     exec "PRAGMA synchronous = NORMAL" // rule 6; autocommit, so each write commits before its response
     exec "PRAGMA busy_timeout = 5000"
-    exec "PRAGMA mmap_size = 1073741824"
+    // No mmap: a page that stays in SQLite's page cache is found with one hash lookup and keeps its parsed b-tree
+    // header. A page read through mmap is looked up in the WAL index and parsed again on every fetch.
+    exec "PRAGMA mmap_size = 0"
     exec "PRAGMA cache_size = -32768"
     let postSelect =
         "SELECT p.id, p.body, p.created_at, u.username, \

@@ -37,8 +37,9 @@
 | The loop finds a connection by its fd in an array, not in a dictionary. The database calls do not take a lock when the loop thread runs every request. | CPU per request -1.8%. RSS +36 MB, from the GC timing during the ramp. | perf profile |
 | The loop sleeps 1 ms after an `epoll_wait` with fewer than 32 events. A perf profile showed about 7 µs of kernel time for each wake-up of the thread. | CPU per request -9.9%. Hold p95 0.3 ms to 1.8 ms. | perf profile (interrupt coalescing) |
 | The sleep is 2 ms, not 1 ms | CPU per request -3.0%. Hold p95 1.9 ms to 3.6 ms. | — |
+| Two small changes together. `mmap_size=0`: SQLite reads pages from its page cache. The loop sleeps with `usleep`, and `recv`, `send` and `epoll_ctl` skip the GC transition. Each change alone was less than the noise. | CPU per request -3.6%. RSS 297 MB to 268 MB. | perf profile |
 | SQLite from source with `THREADSAFE=2` and SQLite's recommended options | No mutex calls in SQLite | #77, #108 |
-| `mmap_size` 1 GB, `cache_size` 32 MB | Reads use memory, not `read` calls | #108 |
+| `cache_size` 32 MB | The SQLite page cache is 16 times the default size (2 MB) | #108 |
 | JSON from the SQLite UTF-8 bytes, no .NET strings for rows | Less allocation | #77 |
 | HMAC on the token bytes with a reused `IncrementalHash` for each thread | No allocation for each request | #108 |
 | Inline socket completions, inline scheduling in Kestrel | No thread switch for each request | #77, #108 |
@@ -54,9 +55,9 @@ Changes that did not help (discarded):
 | `DOTNET_ReadyToRun=0` (the JIT compiles all code with dynamic PGO) | Same CPU | TechEmpower ASP.NET settings |
 | `DOTNET_EnableWriteXorExecute=0` | Same CPU | TechEmpower ASP.NET settings |
 | `DOTNET_GCgen0size` 64 MB (fewer GCs) | Same CPU, RSS +36 MB | perf profile |
-| `usleep` in place of `Thread.Sleep`, no GC transition for `recv`, `send` and `epoll_ctl` | CPU -0.9% (less than the noise) | perf profile |
+| `usleep` in place of `Thread.Sleep`, no GC transition for `recv`, `send` and `epoll_ctl`, alone | CPU -0.9% (less than the noise). Kept later with `mmap_size=0`. | perf profile |
 | SQLite with `-O3 -march=native` | Same CPU | #60 |
-| `mmap_size=0`: pages from the SQLite page cache, not from `mmap` | CPU -0.7% (less than the noise), RSS -24 MB | — |
+| `mmap_size=0` alone | CPU -0.7% (less than the noise), RSS -24 MB. Kept later with the change above. | — |
 | `wal_autocheckpoint=200` | Same CPU, hold p99 6 ms | — |
 | Checkpoints on a second connection in a background thread, normal locking | CPU +8%, hold p99 0.9 ms | #108 |
 | `wal_autocheckpoint=8000` | CPU +4%, hold p99 72 ms | — |
@@ -81,6 +82,7 @@ These numbers come from one local machine, not from the official box. Use them t
 | Connection array, no database lock | 46.32 µs (see note) | 31.2% | 7.8 to 9.0 ms | 0 | 301 MB |
 | 1 ms wake-up coalescing | 41.73 µs (see note) | 28.6% | 10.0 to 10.8 ms | 0 | 297 MB |
 | 2 ms wake-up coalescing | 40.50 µs (see note) | 28.0% | 12.4 to 23.2 ms | 0 | 297 MB |
+| No `mmap`, `usleep`, no GC transition | 39.02 µs (see note) | 26.8% | 12.1 to 22.7 ms | 0 | 269 MB |
 
 Note: the machine became slower after a restart. From the epoll transport on, each new version and the version before it ran in turns, two times each. The table shows the earlier value minus the mean difference of the two pairs. The optimizations table gives each difference as a percentage.
 

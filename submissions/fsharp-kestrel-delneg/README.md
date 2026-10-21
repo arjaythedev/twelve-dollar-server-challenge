@@ -51,7 +51,7 @@ Changes that did not help (discarded):
 | Change | Result | Idea from |
 |---|---|---|
 | `WaitForDataBeforeAllocatingBuffer=false` | Same CPU, RSS +237 MB | #77 |
-| Own JSON writer | Same CPU | #74 |
+| Own JSON writer, tried two times | Same CPU at first. Later, CPU -0.9% (less than the noise). | #74 |
 | Native AOT | CPU +2%, RSS -93 MB | #77, #74 |
 | `DOTNET_ReadyToRun=0` (the JIT compiles all code with dynamic PGO) | Same CPU | TechEmpower ASP.NET settings |
 | `DOTNET_EnableWriteXorExecute=0` | Same CPU | TechEmpower ASP.NET settings |

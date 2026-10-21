@@ -107,6 +107,8 @@ type ILoop =
     abstract RecvAddress: nativeint
     /// The loop's response buffer: empty between events.
     abstract Out: ArrayBufferWriter<byte>
+    /// Holds the connection's response until the loop commits the open write transaction.
+    abstract Defer: EConn -> unit
 
 /// One accepted socket. Only the loop thread reads and writes it. The loop thread calls the HTTP handler
 /// (`Conn.direct`) on the received bytes, and sends all its responses with one `send`. An idle connection holds
@@ -212,21 +214,31 @@ and [<AllowNullLiteral>] EConn(id: int64, fd: int, loop: ILoop) =
     member private this.Send(close: bool) =
         let out = loop.Out
         let len = out.WrittenCount
-        let sent = if len > 0 then this.TrySend(out.WrittenSpan) else 0
-        if sent < 0 then
-            out.ResetWrittenCount()
-            this.Finish()
-        elif sent < len then
-            outLen <- len - sent
+        if Db.inTxn && len > 0 then
+            // A write transaction is open: this response waits for its COMMIT (Flush).
+            outLen <- len
             outOff <- 0
-            outBuf <- ArrayPool<byte>.Shared.Rent outLen
-            out.WrittenSpan.Slice(sent).CopyTo(Span outBuf)
+            outBuf <- ArrayPool<byte>.Shared.Rent len
+            out.WrittenSpan.CopyTo(Span outBuf)
             out.ResetWrittenCount()
             closeAfterSend <- close
-            this.Ctl(EPOLL_CTL_MOD, EPOLLOUT)
+            loop.Defer this
         else
-            out.ResetWrittenCount()
-            if close then this.Finish()
+            let sent = if len > 0 then this.TrySend(out.WrittenSpan) else 0
+            if sent < 0 then
+                out.ResetWrittenCount()
+                this.Finish()
+            elif sent < len then
+                outLen <- len - sent
+                outOff <- 0
+                outBuf <- ArrayPool<byte>.Shared.Rent outLen
+                out.WrittenSpan.Slice(sent).CopyTo(Span outBuf)
+                out.ResetWrittenCount()
+                closeAfterSend <- close
+                this.Ctl(EPOLL_CTL_MOD, EPOLLOUT)
+            else
+                out.ResetWrittenCount()
+                if close then this.Finish()
 
     member private this.SendRest() =
         let sent = this.TrySend(ReadOnlySpan<byte>(outBuf, outOff, outLen))
@@ -239,6 +251,27 @@ and [<AllowNullLiteral>] EConn(id: int64, fd: int, loop: ILoop) =
             if outLen = 0 then
                 release &outBuf
                 if closeAfterSend then this.Finish() else this.Ctl(EPOLL_CTL_MOD, EPOLLIN)
+
+    /// After the loop's COMMIT: sends the held response, or drops it and closes when the commit failed.
+    member this.Flush(committed: bool) =
+        if isNull outBuf then
+            ()
+        elif not committed then
+            release &outBuf
+            this.Finish()
+        else
+            let sent = this.TrySend(ReadOnlySpan<byte>(outBuf, outOff, outLen))
+            if sent < 0 then
+                release &outBuf
+                this.Finish()
+            else
+                outOff <- outOff + sent
+                outLen <- outLen - sent
+                if outLen = 0 then
+                    release &outBuf
+                    if closeAfterSend then this.Finish()
+                else
+                    this.Ctl(EPOLL_CTL_MOD, EPOLLOUT)
 
     /// Bytes sent, 0 when the socket buffer is full, -1 on a socket error.
     member private _.TrySend(m: ReadOnlySpan<byte>) : int =
@@ -318,6 +351,7 @@ type private Loop(listenFd: int) as this =
     let recvAddress = Marshal.UnsafeAddrOfPinnedArrayElement(recvBuffer, 0)
     let out = ArrayBufferWriter<byte>(65536)
     let toClose = ConcurrentQueue<EConn>()
+    let deferred = List<EConn>(64)
     let accepted =
         Channel.CreateUnbounded<ConnectionContext>(
             UnboundedChannelOptions(SingleReader = true, SingleWriter = true, AllowSynchronousContinuations = true)
@@ -388,10 +422,18 @@ type private Loop(listenFd: int) as this =
                             if not (isNull c) && c.Key = key then c.OnEvent ev.Events
                 with _ ->
                     ()
+            if Db.inTxn then this.CommitAndFlush()
             if not toClose.IsEmpty then this.Drain()
             // Few events: wait 2 ms before the next epoll_wait, so that one wake-up serves more sockets. On a
             // single core each wake-up of this thread costs a context switch and more; a busy loop does not sleep.
             if n < CoalesceBelow then Libc.usleep 2000u |> ignore
+
+    /// Commits the writes of this wake-up, then sends the responses that waited for it.
+    member private _.CommitAndFlush() =
+        let committed = Db.commit ()
+        for c in deferred do
+            try c.Flush committed with _ -> ()
+        deferred.Clear()
 
     /// Loop thread only.
     member private _.Forget(c: EConn) =
@@ -403,6 +445,7 @@ type private Loop(listenFd: int) as this =
         member _.RecvBuffer = recvBuffer
         member _.RecvAddress = recvAddress
         member _.Out = out
+        member _.Defer c = deferred.Add c
         member _.Close c =
             if Thread.CurrentThread = thread then
                 this.Forget c
@@ -441,6 +484,7 @@ type EpollTransportFactory() =
             if Interlocked.Exchange(&bound, 1) <> 0 then
                 raise (NotSupportedException "epoll transport: one endpoint only")
             Db.singleThread <- true
+            Db.batching <- true
             let ip =
                 match endpoint with
                 | :? IPEndPoint as ip when ip.AddressFamily = AddressFamily.InterNetwork -> ip

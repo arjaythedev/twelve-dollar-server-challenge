@@ -61,6 +61,34 @@ let changes () = Sqlite.changes db
 /// Writes since the start (diagnostics only).
 let mutable writes = 0
 
+/// Group commit (epoll transport only). The first write of one epoll wake-up opens a transaction; the loop commits
+/// it after the last request of that wake-up, and only then sends the responses of that wake-up. So each response
+/// still goes out only after the COMMIT that holds its write.
+let mutable batching = false
+let mutable inTxn = false
+let mutable private beginStmt = 0n
+let mutable private commitStmt = 0n
+let mutable private rollbackStmt = 0n
+
+/// Call before each write statement.
+let beginWrite () =
+    if batching && not inTxn then
+        if Sqlite.step beginStmt <> Sqlite.Done then
+            Sqlite.reset beginStmt |> ignore
+            raise (failure ())
+        Sqlite.reset beginStmt |> ignore
+        inTxn <- true
+
+/// Commits the open transaction. False when the commit failed: then the transaction is rolled back.
+let commit () : bool =
+    inTxn <- false
+    let ok = Sqlite.step commitStmt = Sqlite.Done
+    Sqlite.reset commitStmt |> ignore
+    if not ok then
+        Sqlite.step rollbackStmt |> ignore
+        Sqlite.reset rollbackStmt |> ignore
+    ok
+
 /// Runs a write on the request thread. SQLite's automatic checkpoint runs inside the commit that fills the WAL
 /// to 1,000 frames, so a write never waits for another thread.
 let runWrite (f: unit -> 'T) : ValueTask<'T> = ValueTask<'T>(f ())
@@ -98,3 +126,6 @@ let openDb (path: string) =
              ON CONFLICT (user_id, post_id) DO NOTHING"
     postExists <- prepare "SELECT 1 FROM posts WHERE id = ?1"
     ping <- prepare "SELECT 1"
+    beginStmt <- prepare "BEGIN"
+    commitStmt <- prepare "COMMIT"
+    rollbackStmt <- prepare "ROLLBACK"

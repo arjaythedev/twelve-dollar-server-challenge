@@ -15,12 +15,12 @@
 2. The thread gives the bytes to the handler (`Conn.direct`). Kestrel's HTTP layer does not run. Kestrel calls our connection handler one time for each new connection. The handler gives the connection to the loop and returns, so Kestrel keeps no state for the connection. The connections have no pipes and no send task. A connection keeps a buffer only for a request that is not complete, or for bytes that the socket did not take.
 3. The handler parses HTTP/1.1 itself. It finds the method, the path and three headers: `Authorization`, `Content-Length` and `Connection`. Routes are in code.
 4. Each endpoint (`Api.fs`) writes the full response into one buffer of the thread: the status line, the headers and the JSON body. Then the thread sends all the responses for that read with one `send` call.
-5. One SQLite connection serves all requests. With the epoll transport, one thread runs all requests, so it needs no lock. With the socket transport, a lock serializes the requests. The server prepares each statement one time at start.
+5. One SQLite transaction holds all the writes of one wake-up of the loop (group commit). The first write opens it. After the last request of the wake-up, the loop commits it and then sends the responses. Thus each response goes out after the commit of its write. One SQLite connection serves all requests. With the epoll transport, one thread runs all requests, so it needs no lock. With the socket transport, a lock serializes the requests. The server prepares each statement one time at start.
 6. The JWT check (`Auth.fs`) runs on each request. It decodes the header and the payload, computes HMAC-SHA256 over the token bytes and compares the signature in fixed time. Then it checks `sub`, `username` and `exp`.
 
 ## Rules
 
-- Writes: WAL with `synchronous=NORMAL`. Each write is an autocommit statement. The statement commits before the server sends the response.
+- Writes: WAL with `synchronous=NORMAL`. The writes of one wake-up of the loop share one transaction. The server sends a response only after the commit of that transaction. With the socket transport, each write is an autocommit statement.
 - No cache: each request runs its SQL. The server keeps no copy of rows, responses or JWT results.
 - `install.sh` (root) installs gcc, libicu and the .NET SDK from the official tarball with a SHA-512 check.
 - `build.sh` (normal user) gets the SQLite source with a SHA-256 check and compiles it with gcc two times. Between the two compiles, `sqlite-train.c` runs the server's statements on a synthetic database, and gcc records a profile. Then `build.sh` publishes the server.
@@ -39,6 +39,7 @@
 | The sleep is 2 ms, not 1 ms | CPU per request -3.0%. Hold p95 1.9 ms to 3.6 ms. | — |
 | Two small changes together. `mmap_size=0`: SQLite reads pages from its page cache. The loop sleeps with `usleep`, and `recv`, `send` and `epoll_ctl` skip the GC transition. Each change alone was less than the noise. | CPU per request -3.6%. RSS 297 MB to 268 MB. | perf profile |
 | Kestrel gives each connection to the loop and then forgets it. Kestrel's timer no longer visits 64,000 connections each second, and the GC frees Kestrel's objects for each connection. | CPU per request -1.5% (three pairs: -0.79, -0.22, -0.74 µs). RSS 273 MB to 170 MB. | perf profile (Kestrel timer at 1.7% of CPU) |
+| Group commit: one transaction for the writes of one wake-up of the loop. The responses wait for the commit. | CPU per request -11.3% in pair 2. Pair 1 gave -6.33 µs, but the old version had slow disk flushes in that pair. | #74 (group commit for each epoll batch), #60 |
 | SQLite from source with `THREADSAFE=2` and SQLite's recommended options | No mutex calls in SQLite | #77, #108 |
 | `cache_size` 32 MB | The SQLite page cache is 16 times the default size (2 MB) | #108 |
 | JSON from the SQLite UTF-8 bytes, no .NET strings for rows | Less allocation | #77 |
@@ -87,6 +88,7 @@ These numbers come from one local machine, not from the official box. Use them t
 | 2 ms wake-up coalescing | 40.50 µs (see note) | 28.0% | 12.4 to 23.2 ms | 0 | 297 MB |
 | No `mmap`, `usleep`, no GC transition | 39.02 µs (see note) | 26.8% | 12.1 to 22.7 ms | 0 | 269 MB |
 | Kestrel forgets the connection | 38.44 µs (see note) | 26.5% | 11.5 to 21.9 ms | 0 | 171 MB |
+| Group commit for each wake-up | 33.05 µs (see note) | 23.6% | 12.5 ms | 0 | 170 MB |
 
 Note: the machine became slower after a restart. From the epoll transport on, each new version and the version before it ran in turns, two times each. The table shows the earlier value minus the mean difference of the two pairs. The optimizations table gives each difference as a percentage.
 

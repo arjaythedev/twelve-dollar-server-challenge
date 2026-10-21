@@ -205,11 +205,12 @@ let like (w: IBufferWriter<byte>) (close: bool) (userId: int64) (id: int64) : Ta
     let likeIt () =
         Db.serialized (fun () ->
             let st = Db.insertLike
+            Db.beginWrite ()
             let inserted =
                 try
                     Sqlite.bind_int64(st, 1, userId) |> ignore
                     Sqlite.bind_int64(st, 2, id) |> ignore
-                    // Stepping to DONE finishes the autocommit statement: the row is committed.
+                    // Stepping to DONE finishes the statement. With group commit, the loop sends the response after the COMMIT.
                     if Sqlite.step st <> Sqlite.Done then
                         raise (Db.failure ())
                     Db.writes <- Db.writes + 1
@@ -270,6 +271,7 @@ let private insertPost (w: IBufferWriter<byte>) (close: bool) (userId: int64) (u
     let utf8 = Encoding.UTF8.GetBytes body
     Db.serialized (fun () ->
         let st = Db.insertPost
+        Db.beginWrite ()
         try
             Sqlite.bind_int64(st, 1, userId) |> ignore
             use p = fixed utf8
@@ -285,7 +287,7 @@ let private insertPost (w: IBufferWriter<byte>) (close: bool) (userId: int64) (u
             json.WriteNumber(pLikeCount, 0)
             json.WriteEndObject()
             json.WriteEndObject()
-            // Stepping to DONE finishes the autocommit statement: the row is committed before we respond.
+            // Stepping to DONE finishes the statement. With group commit, the loop sends the response after the COMMIT.
             if Sqlite.step st <> Sqlite.Done then
                 clear ()
                 raise (Db.failure ())

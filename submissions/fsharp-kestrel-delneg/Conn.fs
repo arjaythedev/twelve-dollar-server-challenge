@@ -168,6 +168,7 @@ let private processSpan (s: ReadOnlySpan<byte>) (w: IBufferWriter<byte>) (contin
                         let t =
                             try dispatch w close meth path auth body
                             with _ ->
+                                Api.discardJson ()
                                 Api.send w 500 close Api.Internal
                                 null
                         off <- off + total

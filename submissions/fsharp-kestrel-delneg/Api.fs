@@ -124,6 +124,9 @@ let private clear () =
     json.Reset(buffer)
     buffer.ResetWrittenCount()
 
+/// Drops what a failed handler left in the JSON writer (call before the 500), so the next response starts clean.
+let discardJson () = clear ()
+
 /// `created_at` is stored in the wire format, so every column is sent as stored, straight from SQLite's UTF-8 bytes.
 let private writePost (st: nativeint) =
     json.WriteStartObject()

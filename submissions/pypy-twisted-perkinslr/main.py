@@ -86,7 +86,7 @@ def makeFeed(cur):
 class SQLite:
   "Queues and deduplicates database queries, remembering the request that generated them so the response gets back to the correct client"
   def __init__(self, path):
-    db = sqlite3.connect(path, check_same_thread=False, cached_statements=QUEUE_DEPTH * 3+30)
+    db = sqlite3.connect(path, isolation_level=None, check_same_thread=False, cached_statements=QUEUE_DEPTH * 3+30)
     db.execute("PRAGMA journal_mode = WAL")
     db.execute("PRAGMA synchronous = NORMAL")
     db.execute("PRAGMA mmap_size = 1073741824")

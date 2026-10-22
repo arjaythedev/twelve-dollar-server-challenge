@@ -139,16 +139,30 @@ needs a C extension; not done.
 Same VMs, 60 s ramp and a 2 min hold (the load VM was raised to 16 GB for the runs above 30k VUs).
 Uncapped, at 25k VUs: p95 1.3 ms, p99 10.7 ms, 0 failed of 458,135 requests.
 
-To approximate the droplet's slower core, we then capped the target VM at half a core (Proxmox
-`cpulimit=0.5`) and stepped the VU count until a threshold broke:
+To approximate the droplet's slower core, we capped the target VM at half a core (a CFS quota of
+5 ms per 10 ms) and ran the official protocol: 60 s ramp, then a 5-minute hold. k6 was split across
+three load VMs (8, 2 and 2 vCPUs) with execution segments, so the generators stayed over 80% idle:
 
-| VUs | p95 | p99 | Failed | req/s | RSS | k6 thresholds |
+| VUs | p95 | p99 | Failed | CPU per request | Peak RSS | Thresholds |
 |---|---|---|---|---|---|---|
-| 35,000 | 16 ms | 48 ms | 0 of 640,662 | 2,911 | 137 MB | pass |
-| 40,000 | 216 ms | 526 ms | 0 of 729,584 | 3,315 | 159 MB | pass |
-| 45,000 | 1.15 s | 1.96 s | 0 of 776,390 | 3,528 | 201 MB | fail (p95, p99) |
+| 45,000 | 38 ms | 105 ms | 0% | 154 µs | 179 MB | pass |
+| 48,000 | 110 ms | 993 ms | 0% | 156 µs | 199 MB | pass |
+| 51,000 | 204 ms | 567 ms | 0% | 157 µs | 212 MB | pass |
+| 54,000 | 406 ms | 841 ms | 0% | 156 µs | 235 MB | pass |
+| 57,000 | 1.57 s | 1.87 s | 0% | 174 µs | 278 MB | fail (p95, p99) |
+| 60,000 | 2.41 s | 2.59 s | 0% | 180 µs | 279 MB | fail (p95, p99) |
 
-A half-core cap is only a stand-in for a droplet vCPU, so treat 40k as an estimate, not a score.
+The latency comes from the server: its half core had no idle time, while all three load VMs reported
+the same percentiles. Past the knee each request costs more CPU (156 → 180 µs), so the queue never
+drains. Near the knee single runs vary; other runs of this tree failed at 46k–48k. A half-core cap is
+only a stand-in for a droplet vCPU, so treat 54k as an estimate, not a score.
+
+With the cap lifted (one full core), the same protocol passes the video's largest test easily:
+
+| VUs | p95 | p99 | Failed | CPU per request | Peak RSS | Thresholds |
+|---|---|---|---|---|---|---|
+| 60,000 | 12 ms | 35 ms | 0% | 112 µs | 184 MB | pass |
+| 64,000 | 17 ms | 39 ms | 0% | 113 µs | 188 MB | pass |
 
 Test suite: 42/42 on x86_64.
 

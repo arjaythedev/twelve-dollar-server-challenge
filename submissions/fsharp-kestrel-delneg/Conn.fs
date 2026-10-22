@@ -91,7 +91,8 @@ let private dispatch (w: IBufferWriter<byte>) (close: bool) (meth: ReadOnlySpan<
 
 /// Parses and answers every complete request in `s`. Stops early at a request whose response is still pending
 /// (a Task), or at a request that closes the connection.
-let private processSpan (s: ReadOnlySpan<byte>) (w: IBufferWriter<byte>) (continueSent: bool)
+/// `flags` comes in with ContinueSent set when the request at the start of `s` already got its 100 Continue.
+let private processSpan (s: ReadOnlySpan<byte>) (w: IBufferWriter<byte>)
                         (consumed: byref<int>) (pending: byref<Task>) (flags: byref<int>) =
     let mutable off = 0
     let mutable stop = false
@@ -158,7 +159,8 @@ let private processSpan (s: ReadOnlySpan<byte>) (w: IBufferWriter<byte>) (contin
                 else
                     let total = headEnd + 4 + contentLength
                     if rest.Length < total then
-                        if expect && not continueSent then
+                        // ContinueSent is cleared after each complete request, so a pipelined request gets its own 100.
+                        if expect && flags &&& ContinueSent = 0 then
                             w.Write(ReadOnlySpan continue100)
                             flags <- flags ||| Wrote ||| ContinueSent
                         flags <- flags ||| NeedMore
@@ -187,7 +189,7 @@ let private step (buf: ReadOnlySequence<byte>) (w: IBufferWriter<byte>) (continu
     let mutable pending: Task = null
     let mutable flags = if continueSent then ContinueSent else 0
     if buf.IsSingleSegment then
-        processSpan buf.FirstSpan w continueSent &consumed &pending &flags
+        processSpan buf.FirstSpan w &consumed &pending &flags
     elif buf.Length > int64 (MaxHeaderBytes + MaxBodyBytes) then
         Api.send w 400 true Api.Malformed
         flags <- Wrote ||| Close
@@ -196,7 +198,7 @@ let private step (buf: ReadOnlySequence<byte>) (w: IBufferWriter<byte>) (continu
         let len = int buf.Length
         let arr = ArrayPool<byte>.Shared.Rent len
         buf.CopyTo(Span arr)
-        processSpan (ReadOnlySpan(arr, 0, len)) w continueSent &consumed &pending &flags
+        processSpan (ReadOnlySpan(arr, 0, len)) w &consumed &pending &flags
         ArrayPool<byte>.Shared.Return arr
     struct (consumed, pending, flags)
 
@@ -210,7 +212,7 @@ let direct (s: ReadOnlySpan<byte>) (w: IBufferWriter<byte>) (close: byref<bool>)
         let mutable consumed = 0
         let mutable pending: Task = null
         let mutable flags = if continueSent then ContinueSent else 0
-        processSpan (s.Slice off) w continueSent &consumed &pending &flags
+        processSpan (s.Slice off) w &consumed &pending &flags
         off <- off + consumed
         continueSent <- flags &&& ContinueSent <> 0
         if not (isNull pending) then

@@ -13,7 +13,7 @@
 
 1. Kestrel uses our transport (`Transport.fs`) on Linux x86-64. One thread waits on an epoll set. When a socket has data, the thread reads it with one `recv` call into the receive buffer of the thread. When one `epoll_wait` returns fewer than 32 events, the thread sleeps 2 ms before the next wait. Thus one wake-up serves more sockets. On other platforms, Kestrel uses its socket transport, and `Conn.run` reads the pipes of the connection.
 2. The thread gives the bytes to the handler (`Conn.direct`). Kestrel's HTTP layer does not run. Kestrel calls our connection handler one time for each new connection. The handler gives the connection to the loop and returns, so Kestrel keeps no state for the connection. The connections have no pipes and no send task. A connection keeps a buffer only for a request that is not complete, or for bytes that the socket did not take.
-3. The handler parses HTTP/1.1 itself. It finds the method, the path and three headers: `Authorization`, `Content-Length` and `Connection`. Routes are in code.
+3. The handler parses HTTP/1.1 itself. It reads the method, the path and these headers: `Authorization`, `Content-Length`, `Connection` and `Expect` (it answers `100 Continue`). A request with `Transfer-Encoding` gets 400. Routes are in code.
 4. Each endpoint (`Api.fs`) writes the full response into one buffer of the thread: the status line, the headers and the JSON body. Then the thread sends all the responses for that read with one `send` call.
 5. One SQLite transaction holds all the writes of one wake-up of the loop (group commit). The first write opens it. After the last request of the wake-up, the loop commits it and then sends the responses. Thus each response goes out after the commit of its write. One SQLite connection serves all requests. With the epoll transport, one thread runs all requests, so it needs no lock. With the socket transport, a lock serializes the requests. The server prepares each statement one time at start.
 6. The JWT check (`Auth.fs`) runs on each request. It decodes the header and the payload, computes HMAC-SHA256 over the token bytes and compares the signature in fixed time. Then it checks `sub`, `username` and `exp`.
@@ -24,6 +24,11 @@
 - No cache: each request runs its SQL. The server keeps no copy of rows, responses or JWT results.
 - `install.sh` (root) installs gcc, libicu and the .NET SDK from the official tarball with a SHA-512 check.
 - `build.sh` (normal user) gets the SQLite source with a SHA-256 check and compiles it with gcc two times. Between the two compiles, `sqlite-train.c` runs the server's statements on a synthetic database, and gcc records a profile. Then `build.sh` publishes the server.
+- Nothing on the box is tuned. All settings are inside the process: SQLite pragmas, GC mode, the listen backlog.
+
+## Trade-off: slow disks
+
+The connection holds the database lock for its whole life (`locking_mode=EXCLUSIVE`), so SQLite's automatic checkpoint runs on the loop thread, inside the commit that fills the WAL to 1,000 frames. A checkpoint calls `fsync` two times, and every request waits for it. This saves about 8% CPU against a checkpoint thread on a second connection (measured on the machine below), and it is fine when `fsync` takes a few milliseconds. On a disk where `fsync` takes 80 ms, the tail latency grows a lot (see the second table below).
 
 ## Optimizations
 
@@ -45,7 +50,7 @@
 | `cache_size` 32 MB | The SQLite page cache is 16 times the default size (2 MB) | #108 |
 | JSON from the SQLite UTF-8 bytes, no .NET strings for rows | Less allocation | #77 |
 | HMAC on the token bytes with a reused `IncrementalHash` for each thread | No allocation for each request | #108 |
-| Inline socket completions, inline scheduling in Kestrel | No thread switch for each request | #77, #108 |
+| Inline socket completions, inline scheduling in Kestrel (only for the socket transport on other platforms) | No thread switch for each request | #77, #108 |
 | Workstation GC, not concurrent. ReadyToRun with TieredPGO. | Less CPU and memory on one core | #108 |
 
 Changes that did not help (discarded):
@@ -95,4 +100,15 @@ These numbers come from one local machine, not from the official box. Use them t
 
 Note: the machine became slower after a restart. From the epoll transport on, each new version and the version before it ran in turns, two times each. The table shows the earlier value minus the mean difference of the two pairs. The optimizations table gives each difference as a percentage.
 
-`test/test.sh`: 42/42.
+Final check of this version (commit `aba8cf9`) on another machine: a VM with 4 vCPUs of an Intel Core i5-11400F and 3.9 GB of RAM, server with `--cpus=1 --memory=2g --memory-swap=2g` and `nofile` 65535, direct, kload on the other 3 vCPUs. 15,000 users, 60 s ramp. The disk of this VM is slow: a 4 KB write with `O_DSYNC` takes about 80 ms.
+
+| Database on | Hold | Requests in the hold | Failed | Hold p95 / p99 | Max (whole run) | CPU in the hold | Peak anonymous RSS |
+|---|---|---|---|---|---|---|---|
+| VM disk (slow `fsync`) | 5 min | 473,086 | 0 | 440 / 578 ms | 1,278 ms | 9.2% | 52 MB |
+| tmpfs | 1 min | 95,264 | 0 | 2.8 / 3.3 ms | 18 ms | 8.8% | 50 MB |
+
+## Checks
+
+- `test/test.sh`: 42/42, also in a clean `ubuntu:24.04` container with 1 CPU, 2 GB and no swap, after `install.sh` (61 s) and `test/run.sh` (77 s).
+- HTTP edge cases: 30 pipelined requests in one write, a request sent 7 bytes at a time, `Connection: close`, HTTP/1.0, a bad request line, a 20 KB header, `Transfer-Encoding: chunked`, a 501-character body, 2,000 open connections (no file descriptor leak), a client that closes in the middle of a body.
+- Writes: 100 clients sent likes and new posts, and the server was killed with `SIGKILL` during the load. After the restart, all 1,379 rows that got a 201 were in the database. With the database on a full disk, the server sent no 201 for a write that did not commit: it closed those connections, and `/health` still answered 200.

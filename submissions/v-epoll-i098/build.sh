@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds the server as a normal user: the pinned SQLite 3.54.0 amalgamation, then the V program.
+# Builds the pinned SQLite and liburing libraries, then the V server.
 set -euo pipefail
 cd "$(dirname "$0")"
 SQLITE=sqlite-autoconf-3540000
@@ -15,4 +15,15 @@ if [ ! -f build/sqlite3.o ]; then
     -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_OMIT_DEPRECATED -DSQLITE_OMIT_SHARED_CACHE \
     -DSQLITE_LIKE_DOESNT_MATCH_BLOBS
 fi
+LIBURING_COMMIT=08468cc3830185c75f9e7edefd88aa01e5c2f8ab # liburing 2.9
+LIBURING_SHA256=1679f29b086a7c1cf217aff92bc192dae9f3ed3de82a70848b93dc82494c75b8
+if [ ! -f build/liburing/src/liburing.a ]; then
+  mkdir -p build/liburing
+  curl -fsSL "https://codeload.github.com/axboe/liburing/tar.gz/$LIBURING_COMMIT" -o build/liburing.tar.gz
+  echo "$LIBURING_SHA256  build/liburing.tar.gz" | sha256sum -c -
+  tar -xzf build/liburing.tar.gz -C build/liburing --strip-components=1
+  (cd build/liburing && ./configure --use-libc && make -C src liburing.a)
+fi
+cc -O3 -g -fno-omit-frame-pointer -I build/liburing/src/include \
+  -c uring_bridge.c -o build/uring_bridge.o
 /opt/v/v -prod -cc cc -o bin/server .

@@ -1,6 +1,5 @@
-// A single-threaded epoll HTTP/1.1 server for the $12 challenge feed API.
-// Every epoll_wait batch runs inside one SQLite transaction (group commit):
-// responses are queued while the batch is processed and written only after COMMIT.
+// One thread owns the io_uring rings and the request SQLite connection.
+// Responses enter the transport only after the batch transaction commits.
 module main
 
 import net
@@ -10,12 +9,14 @@ import x.json2
 
 #flag -I @DIR/build
 #flag @DIR/build/sqlite3.o
+#flag -I @DIR
+#flag @DIR/build/uring_bridge.o
+#flag @DIR/build/liburing/src/liburing.a
 #flag -lm -lcrypto
+#include "uring_bridge.h"
 #include <openssl/hmac.h>
 #include "sqlite3.h"
-#include <sys/epoll.h>
 #include <sys/resource.h>
-#include <netinet/tcp.h>
 #include <sys/eventfd.h>
 
 struct C.sqlite3 {}
@@ -41,40 +42,33 @@ fn C.eventfd(u32, i32) i32
 fn C.sqlite3_wal_checkpoint_v2(&C.sqlite3, &char, i32, &i32, &i32) i32
 fn C.EVP_sha256() voidptr
 
-// Only the fd member is declared: a pointer member makes V's GC scan every event in the array.
-union C.epoll_data {
-mut:
-	fd i32
-}
-
-@[packed]
-struct C.epoll_event {
-mut:
-	events u32
-	data   C.epoll_data
-}
-
 struct C.rlimit {
 mut:
 	rlim_cur u64
 	rlim_max u64
 }
 
-fn C.epoll_create1(i32) i32
-fn C.epoll_ctl(i32, i32, i32, &C.epoll_event) i32
-fn C.epoll_wait(i32, &C.epoll_event, i32, i32) i32
-fn C.accept4(i32, voidptr, voidptr, i32) i32
-fn C.setsockopt(i32, i32, i32, voidptr, u32) i32
+struct C.td_net {}
+
+struct C.td_event {
+	kind   int
+	id     int
+	data   &u8
+	len    int
+	buffer int
+}
+
+fn C.td_net_new(int, int) &C.td_net
+fn C.td_net_next(&C.td_net, &C.td_event, int, int) int
+fn C.td_net_release(&C.td_net, &C.td_event)
+fn C.td_net_send(&C.td_net, int, &u8, int)
+fn C.td_net_resume(&C.td_net, int, int)
+fn C.td_net_abort(&C.td_net, int)
 fn C.getrlimit(i32, &C.rlimit) i32
 fn C.setrlimit(i32, &C.rlimit) i32
 
 const sqlite_row = 100
 const sqlite_done = 101
-const ep_in = u32(0x001)
-const ep_out = u32(0x004)
-const ep_err = u32(0x008)
-const ep_hup = u32(0x010)
-const ep_et = u32(0x80000000)
 const max_events = 1024
 const max_request = 65536
 
@@ -84,20 +78,16 @@ const feed_span = 64 // feed_range handles the newest 20 ids when they span fewe
 const ckpt_frames = 1000 // WAL size that starts a checkpoint (SQLite's default auto-checkpoint)
 const ckpt_max_frames = 16000 // past this WAL size, phase B holds writes until the WAL is copied
 const max_pause_ms = u64(20) // longest hold on write requests while the WAL can restart
-const keepalive_budget = 60000 // connections past this get one response with `Connection: close`
 
 struct Conn {
 mut:
-	inbuf       []u8 // bytes of a request that has not fully arrived
-	pending     []u8 // response bytes the socket did not take yet
+	inbuf       []u8 // Only partial or deferred requests retain an allocation.
 	close_after bool
-	oneshot     bool // accepted past keepalive_budget: one response, then close
-	queued      bool // already in this batch's flush list
+	queued      bool
 	open        bool
-	deferred    bool // holds a write request until the running checkpoint finishes
-	want_out    bool // registered for EPOLLOUT
-	prev        int = -1 // neighbours in the least-recently-active list
-	next        int = -1
+	ready       bool // The transport holds no operation for this connection.
+	deferred    bool
+	has_output  bool
 }
 
 struct Seg {
@@ -124,23 +114,14 @@ mut:
 	in_txn    bool
 	secret    []u8
 	started   i64
-	max_open  int // descriptor budget for client connections
-	n_open    int
-	lru_head  int = -1 // least recently active connection
-	lru_tail  int = -1
+	transport &C.td_net = unsafe { nil }
 	conns     []Conn
-	rbuf      []u8
 	out       []u8 // all responses of the current batch
 	body      []u8 // scratch for one response body
 	rows      []u8 // scratch for feed rows before they are put in feed order
 	segs      []Seg
 	flush     []int
 	cur_close bool
-	// Keep-alive budget: see accept_all.
-	cur_oneshot bool
-	n_keep      int // open connections inside keepalive_budget
-	lfd         int
-	listen_off  bool // listener out of epoll until a connection closes
 	// Cooperative checkpoint: see checkpointer.
 	wal_frames    int
 	ckpt_phase    int // 0 idle, 1 checkpoint with writes going on, 2 checkpoint with writes held
@@ -148,7 +129,6 @@ mut:
 	pause_until   u64 // monotonic ns when held writes go on anyway (0: wait for the checkpoint)
 	ckpt_req      chan bool = chan bool{cap: 1}
 	ckpt_efd      int
-	epfd          int
 	deferring     bool // set by parse when it stops at a write request
 	deferred      []int
 }
@@ -157,11 +137,10 @@ fn main() {
 	mut s := &Server{
 		secret:  os.getenv('JWT_SECRET').bytes()
 		started: time.now().unix()
-		rbuf:    []u8{len: max_request}
 		out:     []u8{cap: 1 << 20}
 		body:    []u8{cap: 16384}
 		rows:    []u8{cap: 16384}
-		conns:   []Conn{len: 1024}
+		conns:   []Conn{len: int(C.TD_CAPACITY)}
 	}
 	path := os.getenv('SQLITE_PATH')
 	s.open_db(path)
@@ -172,7 +151,9 @@ fn main() {
 	rl.rlim_cur = rl.rlim_max
 	C.setrlimit(C.RLIMIT_NOFILE, &rl)
 	C.getrlimit(C.RLIMIT_NOFILE, &rl)
-	s.max_open = int(rl.rlim_cur) - 64 // leave descriptors for SQLite, epoll and the listener
+	if rl.rlim_cur < 65535 {
+		panic('io_uring requires a process descriptor limit of at least 65535')
+	}
 	host := os.getenv_opt('HOST') or { '0.0.0.0' }
 	port := os.getenv_opt('PORT') or { '3000' }
 	mut l := net.listen_tcp(.ip, '${host}:${port}', backlog: 65535) or { panic(err) }
@@ -244,10 +225,13 @@ fn (mut s Server) prepare(query string) &C.sqlite3_stmt {
 	return st
 }
 
-// txn opens the batch transaction on the first statement of a batch.
+// A failed BEGIN must not let later statements run in auto-commit mode.
 fn (mut s Server) txn() {
 	if !s.in_txn {
-		s.in_txn = run_once(s.st_begin)
+		if !run_once(s.st_begin) {
+			panic('cannot begin request transaction')
+		}
+		s.in_txn = true
 	}
 }
 
@@ -258,158 +242,49 @@ fn run_once(st &C.sqlite3_stmt) bool {
 }
 
 fn (mut s Server) run(lfd int) {
-	C.fcntl(lfd, C.F_SETFL, C.fcntl(lfd, C.F_GETFL, 0) | C.O_NONBLOCK)
-	epfd := C.epoll_create1(0)
-	s.epfd = epfd
-	s.lfd = lfd
-	mut ev := C.epoll_event{
-		events: ep_in
-	}
-	ev.data.fd = lfd
-	C.epoll_ctl(epfd, C.EPOLL_CTL_ADD, lfd, &ev)
-	ev.data.fd = s.ckpt_efd
-	C.epoll_ctl(epfd, C.EPOLL_CTL_ADD, s.ckpt_efd, &ev)
-	mut events := []C.epoll_event{len: max_events}
+	s.transport = C.td_net_new(lfd, s.ckpt_efd)
+	mut events := []C.td_event{len: max_events}
 	for {
-		n := C.epoll_wait(epfd, events.data, max_events, s.pause_timeout())
+		n := C.td_net_next(s.transport, events.data, max_events, s.pause_timeout())
 		if s.writes_paused && s.pause_until > 0 && time.sys_mono_now() >= s.pause_until {
-			s.resume_writes() // the disk is slow: let writes go on, try the restart later
+			s.resume_writes()
 		}
 		for i in 0 .. n {
-			fd := unsafe { events[i].data.fd }
-			if fd == lfd {
-				s.accept_all(lfd, epfd)
-				continue
+			event := events[i]
+			fd := event.id
+			match event.kind {
+				1 {
+					s.conns[fd] = Conn{
+						open:  true
+						ready: true
+					}
+					s.queue(fd)
+				}
+				2 {
+					s.conns[fd].ready = true
+					s.read_conn(fd, event.data, event.len)
+				}
+				3 {
+					s.conns[fd] = Conn{}
+				}
+				4 {
+					s.conns[fd].ready = true
+					if !s.conns[fd].deferred {
+						s.read_conn(fd, unsafe { nil }, 0)
+					}
+				}
+				5 {
+					s.checkpoint_done()
+				}
+				else {
+					panic('invalid transport event')
+				}
 			}
-			if fd == s.ckpt_efd {
-				s.checkpoint_done()
-				continue
-			}
-			flags := events[i].events
-			if flags & (ep_in | ep_err | ep_hup) != 0 {
-				s.read_conn(fd)
-			}
-			if flags & ep_out != 0 && s.conns[fd].pending.len > 0 {
-				s.queue(fd)
-			}
+
+			C.td_net_release(s.transport, &event)
 		}
 		s.finish_batch()
 	}
-}
-
-fn (mut s Server) accept_all(lfd int, epfd int) {
-	one := 1
-	for {
-		if s.n_open >= s.max_open && !s.evict_idle() {
-			s.pause_listener()
-			return
-		}
-		fd := C.accept4(lfd, unsafe { nil }, unsafe { nil }, C.SOCK_NONBLOCK | C.SOCK_CLOEXEC)
-		if fd < 0 {
-			if C.errno == C.EMFILE || C.errno == C.ENFILE {
-				if s.evict_idle() {
-					continue
-				}
-				s.pause_listener()
-			}
-			return
-		}
-		C.setsockopt(fd, C.IPPROTO_TCP, C.TCP_NODELAY, &one, 4)
-		for fd >= s.conns.len {
-			s.conns << Conn{}
-		}
-		oneshot := s.n_keep >= keepalive_budget
-		if !oneshot {
-			s.n_keep++
-		}
-		s.conns[fd] = Conn{
-			open:    true
-			oneshot: oneshot
-		}
-		s.n_open++
-		s.touch(fd)
-		mut ev := C.epoll_event{
-			events: ep_in | ep_et
-		}
-		ev.data.fd = fd
-		C.epoll_ctl(epfd, C.EPOLL_CTL_ADD, fd, &ev)
-	}
-}
-
-// pause_listener takes the listener out of epoll while no descriptor is free, so the loop does not
-// spin on it; close_conn puts it back. New clients wait in the kernel's accept queue meanwhile.
-fn (mut s Server) pause_listener() {
-	if !s.listen_off {
-		s.listen_off = true
-		C.epoll_ctl(s.epfd, C.EPOLL_CTL_DEL, s.lfd, unsafe { nil })
-	}
-}
-
-// touch moves fd to the most recently active end of the list.
-fn (mut s Server) touch(fd int) {
-	if s.lru_tail == fd {
-		return
-	}
-	s.unlink(fd)
-	s.conns[fd].prev = s.lru_tail
-	if s.lru_tail >= 0 {
-		s.conns[s.lru_tail].next = fd
-	} else {
-		s.lru_head = fd
-	}
-	s.lru_tail = fd
-}
-
-fn (mut s Server) unlink(fd int) {
-	mut c := &s.conns[fd]
-	if c.prev >= 0 {
-		s.conns[c.prev].next = c.next
-	} else if s.lru_head == fd {
-		s.lru_head = c.next
-	}
-	if c.next >= 0 {
-		s.conns[c.next].prev = c.prev
-	} else if s.lru_tail == fd {
-		s.lru_tail = c.prev
-	}
-	c.prev = -1
-	c.next = -1
-}
-
-fn (mut s Server) close_conn(fd int) {
-	s.unlink(fd)
-	if !s.conns[fd].oneshot {
-		s.n_keep--
-	}
-	s.conns[fd] = Conn{}
-	s.n_open--
-	C.close(fd)
-	if s.listen_off {
-		s.listen_off = false
-		mut ev := C.epoll_event{
-			events: ep_in
-		}
-		ev.data.fd = s.lfd
-		C.epoll_ctl(s.epfd, C.EPOLL_CTL_ADD, s.lfd, &ev)
-	}
-}
-
-// evict_idle closes the least recently active connection that has no work in flight,
-// so the descriptor budget is never a hard cap on users. The client reconnects on its next request.
-fn (mut s Server) evict_idle() bool {
-	mut fd := s.lru_head
-	for _ in 0 .. 64 {
-		if fd < 0 {
-			return false
-		}
-		c := s.conns[fd]
-		if !c.queued && c.pending.len == 0 && c.inbuf.len == 0 {
-			s.close_conn(fd)
-			return true
-		}
-		fd = c.next
-	}
-	return false
 }
 
 fn (mut s Server) queue(fd int) {
@@ -419,48 +294,40 @@ fn (mut s Server) queue(fd int) {
 	}
 }
 
-// read_conn drains the socket (edge-triggered) and answers every complete request in it.
-fn (mut s Server) read_conn(fd int) {
+fn (mut s Server) read_conn(fd int, data &u8, n int) {
 	start := s.out.len
 	s.cur_close = s.conns[fd].close_after
-	s.cur_oneshot = s.conns[fd].oneshot
-	if !s.conns[fd].open {
+	if s.cur_close {
+		s.queue(fd)
 		return
 	}
-	s.touch(fd)
-	mut closed := false
-	for {
-		r := C.read(fd, s.rbuf.data, max_request)
-		if r <= 0 {
-			if r == 0 || C.errno != C.EAGAIN {
-				closed = true
-			}
-			break
+	if s.conns[fd].inbuf.len == 0 && n > 0 {
+		buf := unsafe { data.vbytes(n) }
+		used := s.parse(buf, n)
+		if used < n && !s.cur_close {
+			s.conns[fd].inbuf = buf[used..].clone()
 		}
-		if s.conns[fd].inbuf.len == 0 {
-			used := s.parse(s.rbuf, r)
-			if used < r {
-				s.conns[fd].inbuf = s.rbuf[used..r].clone()
-			}
+	} else if s.conns[fd].inbuf.len > 0 {
+		if n > 0 {
+			unsafe { s.conns[fd].inbuf.push_many(data, n) }
+		}
+		buf := s.conns[fd].inbuf
+		used := s.parse(buf, buf.len)
+		s.conns[fd].inbuf = if used < buf.len && !s.cur_close {
+			buf[used..].clone()
 		} else {
-			unsafe { s.conns[fd].inbuf.push_many(&s.rbuf[0], r) }
-			buf := s.conns[fd].inbuf
-			used := s.parse(buf, buf.len)
-			s.conns[fd].inbuf = if used < buf.len { buf[used..].clone() } else { []u8{} }
-		}
-		if s.conns[fd].inbuf.len > max_request {
-			closed = true
-			break
-		}
-		if r < max_request {
-			break // a short read means the socket is drained
+			[]u8{}
 		}
 	}
-	s.after_parse(fd, start, closed)
+	if s.conns[fd].inbuf.len > max_request {
+		s.cur_close = true
+		s.error(400, 'request is too large')
+	}
+	s.after_parse(fd, start)
 }
 
 // after_parse queues what parse produced for fd: responses, a close, or a deferred write request.
-fn (mut s Server) after_parse(fd int, start int, closed bool) {
+fn (mut s Server) after_parse(fd int, start int) {
 	if s.deferring {
 		s.deferring = false
 		if !s.conns[fd].deferred {
@@ -470,13 +337,12 @@ fn (mut s Server) after_parse(fd int, start int, closed bool) {
 	}
 	if s.out.len > start {
 		s.segs << Seg{fd, start, s.out.len}
+		s.conns[fd].has_output = true
 	}
-	if closed || s.cur_close || (s.cur_oneshot && s.out.len > start) {
+	if s.cur_close {
 		s.conns[fd].close_after = true
 	}
-	if s.out.len > start || closed || s.cur_close {
-		s.queue(fd)
-	}
+	s.queue(fd)
 }
 
 fn (mut s Server) pause_timeout() int {
@@ -521,79 +387,60 @@ fn (mut s Server) resume_writes() {
 		mut c := &s.conns[fd]
 		was_deferred := c.deferred
 		c.deferred = false
-		if !c.open || !was_deferred || c.inbuf.len == 0 {
+		if !c.open || !was_deferred || !c.ready || c.inbuf.len == 0 {
 			continue
 		}
 		start := s.out.len
 		s.cur_close = c.close_after
-		s.cur_oneshot = c.oneshot
 		buf := c.inbuf
 		used := s.parse(buf, buf.len)
 		s.conns[fd].inbuf = if used < buf.len { buf[used..].clone() } else { []u8{} }
-		s.after_parse(fd, start, false)
+		s.after_parse(fd, start)
 	}
 	s.deferred.clear()
 }
 
-// finish_batch commits the batch transaction, then writes every queued response.
+// No response, including a read of a same-batch write, reaches C before COMMIT.
 fn (mut s Server) finish_batch() {
+	mut committed := true
 	if s.in_txn {
 		s.in_txn = false
-		if !run_once(s.st_commit) {
+		committed = run_once(s.st_commit)
+		if !committed {
 			run_once(s.st_back)
 			for seg in s.segs {
 				s.conns[seg.fd].close_after = true
+				s.conns[seg.fd].deferred = false
 			}
-			s.segs.clear()
 		}
 	}
 	if s.wal_frames >= ckpt_frames && s.ckpt_phase == 0 {
 		s.ckpt_phase = 1
 		s.ckpt_req <- true
 	}
-	for seg in s.segs {
-		mut c := &s.conns[seg.fd]
-		if c.pending.len > 0 {
-			unsafe { c.pending.push_many(&s.out[seg.start], seg.end - seg.start) }
-			continue
-		}
-		// A closing connection's last response goes out with MSG_MORE and the close follows in the
-		// flush loop, so the FIN rides with the data and TIME_WAIT stays on the server.
-		w := if c.close_after {
-			int(C.send(seg.fd, unsafe { &s.out[seg.start] }, usize(seg.end - seg.start), C.MSG_MORE))
-		} else {
-			int(C.write(seg.fd, unsafe { &s.out[seg.start] }, seg.end - seg.start))
-		}
-		if w < seg.end - seg.start {
-			start := seg.start + if w > 0 { w } else { 0 }
-			c.pending = s.out[start..seg.end].clone()
+	if committed {
+		for seg in s.segs {
+			C.td_net_send(s.transport, seg.fd, unsafe { &s.out[seg.start] }, seg.end - seg.start)
 		}
 	}
 	for fd in s.flush {
 		mut c := &s.conns[fd]
 		c.queued = false
-		if c.pending.len > 0 {
-			w := C.write(fd, c.pending.data, c.pending.len)
-			if w == c.pending.len {
-				c.pending = []u8{}
-			} else if w > 0 {
-				c.pending = c.pending[w..].clone()
-			} else if C.errno != C.EAGAIN {
-				c.pending = []u8{}
-				c.close_after = true
-			}
+		if !c.ready {
+			continue
 		}
-		if c.close_after && c.pending.len == 0 {
-			s.close_conn(fd)
-		} else if (c.pending.len > 0) != c.want_out {
-			// Watch for writability only while output is pending: no wakeup per completed write.
-			c.want_out = c.pending.len > 0
-			mut ev := C.epoll_event{
-				events: if c.want_out { ep_in | ep_out | ep_et } else { ep_in | ep_et }
-			}
-			ev.data.fd = fd
-			C.epoll_ctl(s.epfd, C.EPOLL_CTL_MOD, fd, &ev)
+		if !committed && c.close_after {
+			C.td_net_abort(s.transport, fd)
+			c.ready = false
+			c.has_output = false
+			continue
 		}
+		if c.deferred && !c.has_output {
+			continue
+		}
+		C.td_net_resume(s.transport, fd, if c.close_after { 1 } else { 0 })
+		c.ready = false
+		c.has_output = false
 	}
 	s.segs.clear()
 	s.flush.clear()
@@ -621,8 +468,10 @@ fn find_crlf(buf []u8, from int, end int) int {
 	return -1
 }
 
-// parse answers every complete request in buf[0..n] and returns the bytes consumed.
+// parse limits each turn to 64 requests or 64 KiB of output and returns the bytes consumed.
 fn (mut s Server) parse(buf []u8, n int) int {
+	batch_start := s.out.len
+	mut count := 0
 	mut pos := 0
 	for pos < n {
 		line_end := find_crlf(buf, pos, n)
@@ -655,10 +504,19 @@ fn (mut s Server) parse(buf []u8, n int) int {
 			}
 			name_len := colon - h
 			if name_len == 14 && eq_ci(buf, h, 'content-length') {
+				if v >= e {
+					s.cur_close = true
+					s.error(400, 'invalid content length')
+					return n
+				}
 				for j in v .. e {
-					if buf[j] >= `0` && buf[j] <= `9` {
-						clen = clen * 10 + int(buf[j] - `0`)
+					digit := int(buf[j]) - int(`0`)
+					if digit < 0 || digit > 9 || clen > (max_request - digit) / 10 {
+						s.cur_close = true
+						s.error(400, 'invalid content length')
+						return n
 					}
+					clen = clen * 10 + digit
 				}
 			} else if name_len == 13 && eq_ci(buf, h, 'authorization') {
 				auth_start = v
@@ -667,6 +525,11 @@ fn (mut s Server) parse(buf []u8, n int) int {
 				close = e - v == 5 && eq_ci(buf, v, 'close')
 			}
 			h = e + 2
+		}
+		if hdr_end >= 0 && hdr_end - pos + clen > max_request {
+			s.cur_close = true
+			s.error(400, 'request is too large')
+			return n
 		}
 		if hdr_end < 0 || hdr_end + clen > n {
 			return pos // request not complete yet
@@ -691,6 +554,10 @@ fn (mut s Server) parse(buf []u8, n int) int {
 		}
 		s.route(is_post, path, buf, auth_start, auth_end, hdr_end, hdr_end + clen)
 		pos = hdr_end + clen
+		count++
+		if s.cur_close || count >= 64 || s.out.len - batch_start >= 65536 {
+			return pos
+		}
 	}
 	return pos
 }
@@ -1139,6 +1006,7 @@ fn (mut s Server) error(status int, msg string) {
 }
 
 fn (mut s Server) respond(status int) {
+	s.txn()
 	put(mut s.out, match status {
 		200 { 'HTTP/1.1 200 OK\r\n' }
 		201 { 'HTTP/1.1 201 Created\r\n' }
@@ -1148,7 +1016,7 @@ fn (mut s Server) respond(status int) {
 		503 { 'HTTP/1.1 503 Service Unavailable\r\n' }
 		else { 'HTTP/1.1 500 Internal Server Error\r\n' }
 	})
-	if s.cur_oneshot {
+	if s.cur_close {
 		put(mut s.out, 'Connection: close\r\n')
 	}
 	put(mut s.out, 'Content-Type: application/json\r\nContent-Length: ')

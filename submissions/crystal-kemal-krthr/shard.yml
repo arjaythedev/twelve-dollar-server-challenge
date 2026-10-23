@@ -1,0 +1,21 @@
+name: crystal-kemal-krthr
+version: 0.1.0
+
+authors:
+  - Wilson Tovar <wtovaragudelo@gmail.com>
+
+targets:
+  server:
+    main: src/server.cr
+
+crystal: '= 1.21.1'
+
+license: MIT
+
+dependencies:
+  kemal:
+    github: kemalcr/kemal
+    version: 1.15.0
+  sqlite3:
+    github: crystal-lang/crystal-sqlite3
+    version: 0.24.0

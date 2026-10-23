@@ -75,10 +75,40 @@ OBJC_FLAGS="-fobjc-runtime=gnustep-2.2 -fno-objc-arc -fobjc-exceptions -I$OBJC_P
 INC="-I$SQLITE_DIR -I$URING_PREFIX/include"
 WARN="-Wall -Wextra -Wno-unused-parameter -Wno-objc-root-class"
 
-$CC $OPT $SQLITE_FLAGS -c "$SQLITE_DIR/sqlite3.c" -o "$BUILD/sqlite3.o"
-for f in src/*.m; do
-    $CC $OPT $OBJC_FLAGS $INC $WARN -c "$f" -o "$BUILD/$(basename "${f%.m}").o"
-done
-$CC $OPT -fuse-ld=lld-$LLVM_MAJOR -o bin/server "$BUILD"/*.o \
-    -L"$OBJC_PREFIX/lib" -lobjc -Wl,-rpath,"\$ORIGIN/../deps/objc/lib" "$URING_PREFIX/lib/liburing.a" -lpthread -lm
-log "built bin/server"
+PROFDATA=llvm-profdata-$LLVM_MAJOR
+compile_all() { # compile_all <extra flags>
+    rm -f "$BUILD"/*.o
+    $CC $OPT $SQLITE_FLAGS $1 -c "$SQLITE_DIR/sqlite3.c" -o "$BUILD/sqlite3.o"
+    for f in src/*.m; do
+        $CC $OPT $OBJC_FLAGS $INC $WARN $1 -c "$f" -o "$BUILD/$(basename "${f%.m}").o"
+    done
+}
+link_server() { # link_server <extra flags>
+    $CC $OPT $1 -fuse-ld=lld-$LLVM_MAJOR -o bin/server "$BUILD"/*.o \
+        -L"$OBJC_PREFIX/lib" -lobjc -Wl,-rpath,"\$ORIGIN/../deps/objc/lib" "$URING_PREFIX/lib/liburing.a" -lpthread -lm
+}
+
+# PGO: an instrumented trainer drives the store/JSON/JWT code on a synthetic
+# database (pgo/train.m, no seed data), then everything is rebuilt with the profile.
+pgo_build() (
+    set -euo pipefail
+    rm -rf "$BUILD/prof" "$BUILD/train.db"*
+    GEN="-fprofile-generate=$PWD/$BUILD/prof"
+    compile_all "$GEN"
+    $CC $OPT $OBJC_FLAGS $INC $WARN $GEN -o "$BUILD/train" pgo/train.m \
+        "$BUILD/sqlite3.o" "$BUILD/store.o" "$BUILD/util.o" "$BUILD/auth.o" -L"$OBJC_PREFIX/lib" -lobjc \
+        -Wl,-rpath,"$OBJC_PREFIX/lib" -fuse-ld=lld-$LLVM_MAJOR -lpthread -lm
+    "$BUILD/train" "$BUILD/train.db" 300000
+    $PROFDATA merge -o "$BUILD/prof.profdata" "$BUILD"/prof/*.profraw
+    compile_all "-fprofile-use=$PWD/$BUILD/prof.profdata -Wno-profile-instr-unprofiled -Wno-profile-instr-out-of-date -Wno-backend-plugin"
+    link_server "-fprofile-use=$PWD/$BUILD/prof.profdata"
+    rm -f "$BUILD/train.db"*
+)
+set +e; pgo_build; PGO_RC=$?; set -e
+if [ $PGO_RC = 0 ]; then log "built bin/server (PGO)"
+else
+    log "PGO failed; plain build"
+    compile_all ""
+    link_server ""
+    log "built bin/server"
+fi

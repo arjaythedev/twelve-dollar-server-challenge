@@ -12,5 +12,5 @@ curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | gpg --dearmor --yes -o /
 echo "deb [signed-by=/etc/apt/keyrings/apt.llvm.org.gpg] http://apt.llvm.org/noble/ llvm-toolchain-noble-$LLVM_MAJOR main" \
   > /etc/apt/sources.list.d/llvm-$LLVM_MAJOR.list
 apt-get update -qq
-apt-get install -y -qq --no-install-recommends clang-$LLVM_MAJOR lld-$LLVM_MAJOR llvm-$LLVM_MAJOR
+apt-get install -y -qq --no-install-recommends clang-$LLVM_MAJOR lld-$LLVM_MAJOR llvm-$LLVM_MAJOR libclang-rt-$LLVM_MAJOR-dev
 clang-$LLVM_MAJOR --version | head -1

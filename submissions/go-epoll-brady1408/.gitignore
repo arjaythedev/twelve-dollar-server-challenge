@@ -1,0 +1,4 @@
+bin/
+.deps/
+internal/sqlite/sqlite3.c
+internal/sqlite/sqlite3.h

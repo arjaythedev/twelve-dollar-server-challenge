@@ -61,7 +61,7 @@ stamp=/usr/local/lib/trux-compiler-commit
 if [[ ! -x /usr/local/bin/trux || "$(cat "$stamp" 2>/dev/null || true)" != "$trux_commit" ]]; then
   src="$(mktemp -d)"
   git -C "$src" init
-  git -C "$src" remote add origin https://github.com/claudioscheer/trux.git
+  git -C "$src" remote add origin https://github.com/thea1lab/trux.git
   git -C "$src" fetch --depth 1 origin "$trux_commit"
   git -C "$src" checkout --detach FETCH_HEAD
   test "$(git -C "$src" rev-parse HEAD)" = "$trux_commit"

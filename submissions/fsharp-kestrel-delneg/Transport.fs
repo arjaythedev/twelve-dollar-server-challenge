@@ -90,6 +90,7 @@ let private EMFILE = 24
 let private ENOBUFS = 105
 let private ENOMEM = 12
 let private MSG_NOSIGNAL = 0x4000
+let private MSG_MORE = 0x8000
 
 /// True where this transport works: x86-64 Linux (the epoll_event layout above).
 let supported =
@@ -233,7 +234,7 @@ and [<AllowNullLiteral>] EConn(id: int64, fd: int, loop: ILoop) =
             closeAfterSend <- close
             loop.Defer this
         else
-            let sent = if len > 0 then this.TrySend(out.WrittenSpan) else 0
+            let sent = if len > 0 then this.TrySend(out.WrittenSpan, close) else 0
             if sent < 0 then
                 out.ResetWrittenCount()
                 this.Finish()
@@ -250,7 +251,7 @@ and [<AllowNullLiteral>] EConn(id: int64, fd: int, loop: ILoop) =
                 if close then this.Finish()
 
     member private this.SendRest() =
-        let sent = this.TrySend(ReadOnlySpan<byte>(outBuf, outOff, outLen))
+        let sent = this.TrySend(ReadOnlySpan<byte>(outBuf, outOff, outLen), closeAfterSend)
         if sent < 0 then
             release &outBuf
             this.Finish()
@@ -269,7 +270,7 @@ and [<AllowNullLiteral>] EConn(id: int64, fd: int, loop: ILoop) =
             release &outBuf
             this.Finish()
         else
-            let sent = this.TrySend(ReadOnlySpan<byte>(outBuf, outOff, outLen))
+            let sent = this.TrySend(ReadOnlySpan<byte>(outBuf, outOff, outLen), closeAfterSend)
             if sent < 0 then
                 release &outBuf
                 this.Finish()
@@ -282,11 +283,16 @@ and [<AllowNullLiteral>] EConn(id: int64, fd: int, loop: ILoop) =
                 else
                     this.Ctl(EPOLL_CTL_MOD, EPOLLOUT)
 
-    /// Bytes sent, 0 when the socket buffer is full, -1 on a socket error.
-    member private _.TrySend(m: ReadOnlySpan<byte>) : int =
+    /// Bytes sent, 0 when the socket buffer is full, -1 on a socket error. `last`: the connection closes right after
+    /// this response. If the loop owns the connection, the close follows at once on this thread, so MSG_MORE holds
+    /// the data back and the close puts the FIN on the same segment (from #117): the client sees data and FIN
+    /// together, closes second, and keeps no TIME_WAIT on its side. While Kestrel still owns the connection the
+    /// close comes later from Kestrel, and data held by MSG_MORE would wait up to 200 ms, so then no MSG_MORE.
+    member private _.TrySend(m: ReadOnlySpan<byte>, last: bool) : int =
+        let flags = if last && Volatile.Read(&owner) = 1 then MSG_NOSIGNAL ||| MSG_MORE else MSG_NOSIGNAL
         let n =
             use p = fixed &MemoryMarshal.GetReference(m)
-            Libc.send(fd, NativePtr.toNativeInt p, nativeint m.Length, MSG_NOSIGNAL)
+            Libc.send(fd, NativePtr.toNativeInt p, nativeint m.Length, flags)
         if n >= 0n then int n
         else
             let e = errno ()

@@ -53,7 +53,7 @@ struct C.td_net {}
 struct C.td_event {
 	kind   int
 	id     int
-	data   &u8
+	data   usize // C owns these receive buffers; the GC must not scan the event array.
 	len    int
 	buffer int
 }
@@ -262,16 +262,13 @@ fn (mut s Server) run(lfd int) {
 				}
 				2 {
 					s.conns[fd].ready = true
-					s.read_conn(fd, event.data, event.len)
+					s.read_conn(fd, unsafe { &u8(event.data) }, event.len)
 				}
 				3 {
 					s.conns[fd] = Conn{}
 				}
 				4 {
-					s.conns[fd].ready = true
-					if !s.conns[fd].deferred {
-						s.read_conn(fd, unsafe { nil }, 0)
-					}
+					s.output_drained(fd)
 				}
 				5 {
 					s.checkpoint_done()
@@ -291,6 +288,14 @@ fn (mut s Server) queue(fd int) {
 	if !s.conns[fd].queued {
 		s.conns[fd].queued = true
 		s.flush << fd
+	}
+}
+
+fn (mut s Server) output_drained(fd int) {
+	s.conns[fd].ready = true
+	if !s.conns[fd].deferred || !s.writes_paused {
+		s.conns[fd].deferred = false
+		s.read_conn(fd, unsafe { nil }, 0)
 	}
 }
 

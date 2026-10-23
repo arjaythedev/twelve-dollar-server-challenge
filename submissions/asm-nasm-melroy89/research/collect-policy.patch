@@ -1,0 +1,73 @@
+--- a/src/experiments.inc
++++ b/src/experiments.inc
+@@ -5,6 +5,9 @@
+ single_prefix: db '{"post":',0
+ id_prefix: db '{"id":',0
+ likes_prefix: db ',"like_count":',0
++arg_collect_baseline: db '--collect=baseline',0
++arg_collect_ready: db '--collect=ready',0
++arg_collect_round: db '--collect=round',0
+ arg_batch_1: db '--batch=1',0
+ arg_batch_32: db '--batch=32',0
+ arg_batch_64: db '--batch=64',0
+@@ -42,6 +45,7 @@
+ section .data
+ requested_rings: dd 8
+ transaction_mode: dd 2
++collect_policy: dd 0 ; baseline unchanged;1 ready-CQ,2 one wait per round
+ completion_target: dd 32
+ wait_us: dd 250
+ nodelay: dd 0
+@@ -103,6 +107,9 @@
+ .done: LEAVE
+ section .data
+ option_table:
++ dq arg_collect_baseline,collect_policy,0
++ dq arg_collect_ready,collect_policy,1
++ dq arg_collect_round,collect_policy,2
+  dq arg_epoll,force_epoll,1
+  dq arg_request,transaction_mode,0
+  dq arg_writes,transaction_mode,1
+--- a/src/uring.inc
++++ b/src/uring.inc
+@@ -83,6 +83,7 @@
+ uring_enabled: resd 1
+ force_epoll: resd 1
+ uring_count: resd 1
++collect_wait_used: resd 1
+ ring_slots: resd 1
+ ; Bounded generation-tagged retry FIFO: 65,536 entries per ring.
+ enobuf_queue: resq RINGS*65536
+@@ -676,6 +677,7 @@
+  IO_HIGH output_allocated,12
+  call io_dump
+ %endif
++ mov dword [collect_wait_used],0
+  mov qword [rsp],0 ; completed this round
+  xor ebx,ebx
+ .ring:
+@@ -715,6 +717,24 @@
+  mov eax,[wait_us]
+  test eax,eax
+  jz .immediate
++ cmp dword [collect_policy],0
++ je .timed_wait
++ ; Existing CQ work is already eligible: submit SQEs/service cooperative task
++ ; work without delaying for additional completions. No SQLite TX is open here.
++ mov rax,[r12+72]
++ mov edx,[rax]
++ mov rax,[r12+64]
++ cmp edx,[rax]
++ jne .immediate
++ cmp dword [collect_policy],2
++ jne .timed_wait
++ ; One owner cannot overlap waits across rings. Bound collection delay to one
++ ; configured timeout per complete ring sweep, retaining per-ring task service.
++ cmp dword [collect_wait_used],0
++ jne .immediate
++ mov dword [collect_wait_used],1
++.timed_wait:
++ mov eax,[wait_us]
+  imul rax,rax,1000
+  mov [wait_time+8],rax
+  lea rax,[wait_time]

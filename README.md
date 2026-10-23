@@ -106,3 +106,7 @@ separate machine. Every implementation in the video ran behind Nginx.
 
 **After your pull request is merged**, it waits for the next benchmark batch. I run merged submissions in batches,
 not one at a time, on no fixed schedule, and share the results once a batch is done.
+
+## Results
+
+- [Batch 2](benchmarks/batch-2.md) (2026-10-20/21, Synteq 1 vCPU / 2 GB VPS): 26 new submissions + 3 anchors; top score 264,000 users (Rust io_uring, #82)

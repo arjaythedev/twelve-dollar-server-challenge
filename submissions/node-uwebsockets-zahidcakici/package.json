@@ -1,0 +1,11 @@
+{
+  "name": "node-uwebsockets-zahidcakici",
+  "private": true,
+  "description": "The $12 server challenge: Node.js + uWebSockets.js + better-sqlite3",
+  "license": "MIT",
+  "main": "server.js",
+  "engines": { "node": ">=24" },
+  "dependencies": {
+    "better-sqlite3": "13.0.3"
+  }
+}

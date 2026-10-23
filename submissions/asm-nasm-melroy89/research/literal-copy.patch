@@ -1,0 +1,145 @@
+--- a/src/server.asm
++++ b/src/server.asm
+@@ -23,10 +23,7 @@
+  pop rbp
+  ret
+ %endmacro
+-%macro APPEND 1
+- lea rsi,[%1]
+- call append_z
+-%endmacro
++%include "literals.inc"
+ extern sqlite3_open_v2,sqlite3_prepare_v3,sqlite3_step,sqlite3_reset,sqlite3_finalize
+ extern sqlite3_column_text,sqlite3_column_bytes,sqlite3_column_int64,sqlite3_bind_int64,sqlite3_bind_text
+ extern sqlite3_close,sqlite3_errmsg,sqlite3_exec,sqlite3_changes,sqlite3_get_autocommit,sqlite3_wal_hook,sqlite3_wal_checkpoint_v2
+@@ -70,7 +67,7 @@
+ status_413: db 'HTTP/1.1 413 Payload Too Large',13,10,0
+ status_500: db 'HTTP/1.1 500 Internal Server Error',13,10,0
+ status_503: db 'HTTP/1.1 503 Service Unavailable',13,10,0
+-content_header: db 'Content-Type: application/json',13,10,'Content-Length: ',0
++LITERAL content_header
+ keep_header: db 13,10,'Connection: keep-alive',13,10,13,10,0
+ close_header: db 13,10,'Connection: close',13,10,13,10,0
+ err_notfound: db '{"error":"not found"}',0
+@@ -85,12 +82,12 @@
+ err_internal: db '{"error":"internal server error"}',0
+ err_busy: db '{"error":"server busy"}',0
+ err_health: db '{"status":"degraded","db":"unreachable","error":"SQLite SELECT 1 failed"}',0
+-health_prefix: db '{"status":"ok","db":"ok","uptime_s":',0
+-post_prefix: db '{"post":{"id":',0
+-body_prefix: db ',"body":',0
+-created_prefix: db ',"created_at":',0
+-author_prefix: db ',"author":',0
+-post_end: db ',"like_count":0}}',0
++LITERAL health_prefix
++LITERAL post_prefix
++LITERAL body_prefix
++LITERAL created_prefix
++LITERAL author_prefix
++LITERAL post_end
+ like_first: db '{"liked":true,"already_liked":false,"post_id":',0
+ like_repeat: db '{"liked":true,"already_liked":true,"post_id":',0
+ section .data
+--- a/src/experiments.inc
++++ b/src/experiments.inc
+@@ -1,10 +1,12 @@
+ ; SPDX-License-Identifier: MIT
+ ; Diagnostic CLI controls do not add runtime environment variables.
+ section .rodata
+-feed_prefix: db '{"posts":[',0
+-single_prefix: db '{"post":',0
+-id_prefix: db '{"id":',0
+-likes_prefix: db ',"like_count":',0
++LITERAL feed_prefix
++LITERAL single_prefix
++LITERAL id_prefix
++LITERAL likes_prefix
++arg_literal_scalar: db '--literal-copy=scalar',0
++arg_literal_inline: db '--literal-copy=inline',0
+ arg_batch_1: db '--batch=1',0
+ arg_batch_32: db '--batch=32',0
+ arg_batch_64: db '--batch=64',0
+@@ -40,6 +42,7 @@
+ arg_json_hybrid: db '--json=hybrid',0
+ arg_eight_rings: db '--rings=8',0
+ section .data
++literal_copy_inline: dd 0
+ requested_rings: dd 8
+ transaction_mode: dd 2
+ completion_target: dd 32
+@@ -103,6 +106,8 @@
+ .done: LEAVE
+ section .data
+ option_table:
++ dq arg_literal_scalar,literal_copy_inline,0
++ dq arg_literal_inline,literal_copy_inline,1
+  dq arg_epoll,force_epoll,1
+  dq arg_request,transaction_mode,0
+  dq arg_writes,transaction_mode,1
+--- /dev/null
++++ b/src/literals.inc
+@@ -0,0 +1,64 @@
++; Experimental known-length APPEND copies; literals and lengths share one source.
++%define health_prefix_TEXT '{"status":"ok","db":"ok","uptime_s":'
++%strlen health_prefix_LEN health_prefix_TEXT
++%define post_prefix_TEXT '{"post":{"id":'
++%strlen post_prefix_LEN post_prefix_TEXT
++%define body_prefix_TEXT ',"body":'
++%strlen body_prefix_LEN body_prefix_TEXT
++%define created_prefix_TEXT ',"created_at":'
++%strlen created_prefix_LEN created_prefix_TEXT
++%define author_prefix_TEXT ',"author":'
++%strlen author_prefix_LEN author_prefix_TEXT
++%define post_end_TEXT ',"like_count":0}}'
++%strlen post_end_LEN post_end_TEXT
++%define feed_prefix_TEXT '{"posts":['
++%strlen feed_prefix_LEN feed_prefix_TEXT
++%define single_prefix_TEXT '{"post":'
++%strlen single_prefix_LEN single_prefix_TEXT
++%define id_prefix_TEXT '{"id":'
++%strlen id_prefix_LEN id_prefix_TEXT
++%define likes_prefix_TEXT ',"like_count":'
++%strlen likes_prefix_LEN likes_prefix_TEXT
++%define content_header_TEXT `Content-Type: application/json\r\nContent-Length: `
++%strlen content_header_LEN content_header_TEXT
++%macro LITERAL 1
++%1: db %1 %+ _TEXT,0
++%endmacro
++%macro APPEND 1
++ cmp dword [literal_copy_inline],0
++ je %%scalar
++ lea rsi,[%1]
++ %assign %%offset 0
++ %assign %%remaining %1 %+ _LEN
++ %rep %%remaining/8
++  mov rax,[rsi+%%offset]
++  mov [rdi+%%offset],rax
++  %assign %%offset %%offset+8
++ %endrep
++ %assign %%remaining %%remaining % 8
++ %if %%remaining >= 4
++  mov eax,[rsi+%%offset]
++  mov [rdi+%%offset],eax
++  %assign %%offset %%offset+4
++  %assign %%remaining %%remaining-4
++ %endif
++ %if %%remaining >= 2
++  mov ax,[rsi+%%offset]
++  mov [rdi+%%offset],ax
++  %assign %%offset %%offset+2
++  %assign %%remaining %%remaining-2
++ %endif
++ %if %%remaining
++  mov al,[rsi+%%offset]
++  mov [rdi+%%offset],al
++  %assign %%offset %%offset+1
++ %endif
++ lea rdi,[rdi+%%offset]
++ lea rsi,[rsi+%%offset]
++ xor eax,eax
++ jmp %%done
++%%scalar:
++ lea rsi,[%1]
++ call append_z
++%%done:
++%endmacro

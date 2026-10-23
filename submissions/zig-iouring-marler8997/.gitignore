@@ -1,0 +1,7 @@
+# standard zig ignores
+.zig-cache/
+zig-out/
+zig-pkg/
+
+# a copy of anyzig 
+zig

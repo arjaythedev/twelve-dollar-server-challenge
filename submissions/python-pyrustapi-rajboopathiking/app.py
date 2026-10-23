@@ -1,4 +1,5 @@
 """The $12 server challenge API: PyRustAPI (Native Rust Tokio/Hyper Core) on SQLite.
+Tuned for maximum async event-loop throughput with zero spawn_blocking thread hops.
 """
 import base64
 import gc
@@ -7,7 +8,6 @@ import hmac
 import os
 import re
 import sqlite3
-import threading
 import time
 
 import orjson
@@ -21,24 +21,14 @@ MAX_ID = 2**63 - 1  # SQLite's INTEGER range
 
 # --- database ---------------------------------------------------------------------------------
 
-_local = threading.local()
-
-def get_db() -> sqlite3.Connection:
-    """Thread-local SQLite connection with WAL mode and memory pragmas."""
-    conn = getattr(_local, "conn", None)
-    if conn is None:
-        conn = sqlite3.connect(SQLITE_PATH, isolation_level=None, check_same_thread=False, cached_statements=64)
-        conn.execute("PRAGMA journal_mode = WAL")
-        conn.execute("PRAGMA synchronous = NORMAL")  # rule 6: WAL + NORMAL
-        conn.execute("PRAGMA busy_timeout = 5000")
-        conn.execute("PRAGMA mmap_size = 1073741824")  # 1 GiB mmap
-        conn.execute("PRAGMA cache_size = -65536")     # 64 MiB
-        conn.execute("PRAGMA temp_store = MEMORY")
-        _local.conn = conn
-    return conn
-
-# Warm up main thread db
-get_db()
+# Single shared connection running inline on the async loop (exact match to FastAPI design)
+db = sqlite3.connect(SQLITE_PATH, isolation_level=None, check_same_thread=False, cached_statements=64)
+db.execute("PRAGMA journal_mode = WAL")
+db.execute("PRAGMA synchronous = NORMAL")  # rule 6: WAL + NORMAL
+db.execute("PRAGMA busy_timeout = 5000")
+db.execute("PRAGMA mmap_size = 1073741824")  # 1 GiB mmap
+db.execute("PRAGMA cache_size = -65536")     # 64 MiB
+db.execute("PRAGMA temp_store = MEMORY")
 
 # Pre-compiled high performance queries with SQLite-native JSON formatting
 JSON_FEED_SQL = """
@@ -147,9 +137,9 @@ WHITESPACE = "\t\n\v\f\r                 　﻿"
 app = FastAPI(openapi_url=None, docs_url=None, redoc_url=None)
 
 @app.get("/health")
-def health():
+async def health():
     try:
-        get_db().execute("SELECT 1").fetchone()
+        db.execute("SELECT 1").fetchone()
     except Exception as exc:
         return Response(
             orjson.dumps({"status": "degraded", "db": "unreachable", "error": str(exc)}),
@@ -164,23 +154,23 @@ def health():
     )
 
 @app.get("/feed")
-def feed():
-    row = get_db().execute(JSON_FEED_SQL).fetchone()
+async def feed():
+    row = db.execute(JSON_FEED_SQL).fetchone()
     return Response(row[0].encode("utf-8"), status_code=200, headers=JSON_HEADER)
 
 @app.get("/posts/{post_id}")
-def get_post(post_id: str):
+async def get_post(post_id: str):
     pid = parse_id(post_id)
     if pid is None:
         return ERR_400_INVALID_ID
     if pid <= MAX_ID:
-        row = get_db().execute(JSON_POST_SQL, (pid,)).fetchone()
+        row = db.execute(JSON_POST_SQL, (pid,)).fetchone()
         if row is not None and row[0] is not None:
             return Response(row[0].encode("utf-8"), status_code=200, headers=JSON_HEADER)
     return ERR_404_POST_NOT_FOUND
 
 @app.post("/posts")
-def create_post(request: Request):
+async def create_post(request: Request):
     user = authenticate(request)
     if isinstance(user, Response):
         return user
@@ -201,7 +191,7 @@ def create_post(request: Request):
     if len(body) > 500:
         return ERR_400_BODY_TOO_LONG
     
-    rows = get_db().execute(INSERT_POST_SQL, (user_id, body)).fetchall()
+    rows = db.execute(INSERT_POST_SQL, (user_id, body)).fetchall()
     post_id, created_at = rows[0]
     res_bytes = orjson.dumps({
         "post": {
@@ -215,7 +205,7 @@ def create_post(request: Request):
     return Response(res_bytes, status_code=201, headers=JSON_HEADER)
 
 @app.post("/posts/{post_id}/like")
-def like_post(post_id: str, request: Request):
+async def like_post(post_id: str, request: Request):
     user = authenticate(request)  # auth before id per SPEC
     if isinstance(user, Response):
         return user
@@ -223,7 +213,6 @@ def like_post(post_id: str, request: Request):
     if pid is None:
         return ERR_400_INVALID_ID
     if pid <= MAX_ID:
-        db = get_db()
         cursor = db.execute(INSERT_LIKE_SQL, (user[0], pid))
         if cursor.rowcount == 1:
             return Response(
@@ -240,11 +229,11 @@ def like_post(post_id: str, request: Request):
     return ERR_404_POST_NOT_FOUND
 
 @app.get("/{full_path}")
-def catch_all_get(full_path: str):
+async def catch_all_get(full_path: str):
     return ERR_404_NOT_FOUND
 
 @app.post("/{full_path}")
-def catch_all_post(full_path: str):
+async def catch_all_post(full_path: str):
     return ERR_404_NOT_FOUND
 
 # Freeze startup memory to minimize cyclic GC overhead during high concurrency

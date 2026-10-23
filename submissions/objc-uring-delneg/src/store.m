@@ -5,6 +5,8 @@
 
 @implementation TDStore {
     sqlite3 *db;
+    sqlite3_stmt *sFeedIds, *sFeedRange, *sLikeRange;
+    TDBuf rows;
     sqlite3_stmt *sHealth, *sFeed, *sPost, *sCreate, *sLike, *sExists, *sBegin, *sCommit, *sRollback;
 }
 
@@ -43,6 +45,10 @@ static void exec(sqlite3 *db, const char *sql) {
     sHealth = prep(db, "SELECT 1");
     sFeed = prep(db, POST_COLS "ORDER BY p.created_at DESC, p.id DESC LIMIT 20");
     sPost = prep(db, POST_COLS "WHERE p.id = ?1");
+    sFeedIds = prep(db, "SELECT id FROM posts ORDER BY created_at DESC, id DESC LIMIT 20");
+    sFeedRange = prep(db, "SELECT p.id, p.body, p.created_at, u.username FROM posts p "
+                          "JOIN users u ON u.id = p.user_id WHERE p.id BETWEEN ?1 AND ?2");
+    sLikeRange = prep(db, "SELECT post_id, count(*) FROM likes WHERE post_id BETWEEN ?1 AND ?2 GROUP BY post_id");
     sCreate = prep(db, "INSERT INTO posts (user_id, body) VALUES (?1, ?2) RETURNING id, created_at");
     sLike = prep(db, "INSERT INTO likes (user_id, post_id) SELECT ?1, ?2 "
                      "WHERE EXISTS (SELECT 1 FROM posts WHERE id = ?2) ON CONFLICT DO NOTHING");
@@ -102,7 +108,8 @@ static int fail(TDBuf *b) {
     return 503;
 }
 
-- (int)feed:(TDBuf *)b {
+// The general feed query: one correlated count per post.
+- (int)feedGeneral:(TDBuf *)b TD_DIRECT {
     sqlite3_stmt *s = sFeed;
     td_buf_lit(b, "{\"posts\":[");
     int rc, n = 0;
@@ -112,6 +119,79 @@ static int fail(TDBuf *b) {
     }
     sqlite3_reset(s);
     if (rc != SQLITE_DONE) return fail(b);
+    td_buf_lit(b, "]}");
+    return 200;
+}
+
+#define FEED_SPAN 256
+typedef struct { uint32_t body, bodyLen, ca, caLen, au, auLen; int64_t likes; bool seen; } FeedRow;
+
+// Finds the 20 newest ids from the (created_at, id) index. When they sit in a
+// narrow id range, fetches their rows with one rowid range scan and their like
+// counts with one grouped index range scan, then restores the index order.
+// All three statements run in the batch's transaction, so they see one snapshot.
+- (int)feed:(TDBuf *)b {
+    int64_t ids[20];
+    int n = 0, rc;
+    sqlite3_stmt *s = sFeedIds;
+    while (n < 20 && (rc = sqlite3_step(s)) == SQLITE_ROW) ids[n++] = sqlite3_column_int64(s, 0);
+    sqlite3_reset(s);
+    if (n == 0) { td_buf_lit(b, "{\"posts\":[]}"); return 200; }
+    int64_t lo = ids[0], hi = ids[0];
+    for (int i = 1; i < n; i++) { if (ids[i] < lo) lo = ids[i]; if (ids[i] > hi) hi = ids[i]; }
+    if (hi - lo >= FEED_SPAN) return [self feedGeneral:b];
+    int8_t pos[FEED_SPAN];
+    memset(pos, -1, sizeof pos);
+    for (int i = 0; i < n; i++) pos[ids[i] - lo] = (int8_t)i;
+    FeedRow row[20];
+    memset(row, 0, sizeof row);
+    rows.len = 0;
+    s = sFeedRange;
+    sqlite3_bind_int64(s, 1, lo);
+    sqlite3_bind_int64(s, 2, hi);
+    while ((rc = sqlite3_step(s)) == SQLITE_ROW) {
+        int64_t id = sqlite3_column_int64(s, 0);
+        int k = pos[id - lo];
+        if (k < 0) continue;
+        FeedRow *r = &row[k];
+        r->seen = true;
+        r->bodyLen = (uint32_t)sqlite3_column_bytes(s, 1);
+        r->body = rows.len; td_buf_put(&rows, sqlite3_column_text(s, 1), r->bodyLen);
+        r->caLen = (uint32_t)sqlite3_column_bytes(s, 2);
+        r->ca = rows.len; td_buf_put(&rows, sqlite3_column_text(s, 2), r->caLen);
+        r->auLen = (uint32_t)sqlite3_column_bytes(s, 3);
+        r->au = rows.len; td_buf_put(&rows, sqlite3_column_text(s, 3), r->auLen);
+    }
+    sqlite3_reset(s);
+    if (rc != SQLITE_DONE) return fail(b);
+    s = sLikeRange;
+    sqlite3_bind_int64(s, 1, lo);
+    sqlite3_bind_int64(s, 2, hi);
+    while ((rc = sqlite3_step(s)) == SQLITE_ROW) {
+        int k = pos[sqlite3_column_int64(s, 0) - lo];
+        if (k >= 0) row[k].likes = sqlite3_column_int64(s, 1);
+    }
+    sqlite3_reset(s);
+    if (rc != SQLITE_DONE) return fail(b);
+    td_buf_lit(b, "{\"posts\":[");
+    bool first = true;
+    for (int i = 0; i < n; i++) {
+        FeedRow *r = &row[i];
+        if (!r->seen) continue;
+        if (!first) td_buf_ch(b, ',');
+        first = false;
+        td_buf_lit(b, "{\"id\":");
+        td_buf_int(b, ids[i]);
+        td_buf_lit(b, ",\"body\":\"");
+        td_buf_json_str(b, rows.p + r->body, r->bodyLen);
+        td_buf_lit(b, "\",\"created_at\":\"");
+        td_buf_put(b, rows.p + r->ca, r->caLen);
+        td_buf_lit(b, "\",\"author\":\"");
+        td_buf_json_str(b, rows.p + r->au, r->auLen);
+        td_buf_lit(b, "\",\"like_count\":");
+        td_buf_int(b, r->likes);
+        td_buf_ch(b, '}');
+    }
     td_buf_lit(b, "]}");
     return 200;
 }

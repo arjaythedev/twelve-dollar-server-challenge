@@ -42,9 +42,11 @@ SQLITE_PATH=... JWT_SECRET=... HOST=0.0.0.0 PORT=80 bash start.sh
 - **Every token is verified.** HS256 only, signature compared in constant time, then `exp`, `sub` and
   `username` are checked on each request.
 - **Many users on 65,535 descriptors.** In direct mode every k6 user holds its own keep-alive connection.
-  Connections are kept in a least-recently-active list. When the descriptor budget is used up, the
-  longest-idle connection with no work in flight is closed, and a new one is accepted. That client
-  reconnects on its next request. This keeps `accept` working past 65k users instead of failing with `EMFILE`.
+  The first 60,000 connections stay keep-alive. A connection accepted past that budget gets one response
+  with `Connection: close`, sent with `MSG_MORE` and closed right after, so the FIN rides with the data and
+  `TIME_WAIT` stays on the server. The client knows not to reuse it, so no request races a close.
+  Only at the descriptor limit is the longest-idle connection closed; if none is idle, the listener leaves
+  epoll until a connection closes, so `EMFILE` never spins the loop.
 - **No GC scan of the event array.** The `epoll_data` union is declared with its `fd` member only.
   With a pointer member, V's Boehm GC support scans the 1,024-entry event array in every loop pass.
 - **Edge-triggered sockets, one write per connection per batch**, `TCP_NODELAY`, partial writes kept

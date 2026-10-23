@@ -84,12 +84,14 @@ const feed_span = 64 // feed_range handles the newest 20 ids when they span fewe
 const ckpt_frames = 1000 // WAL size that starts a checkpoint (SQLite's default auto-checkpoint)
 const ckpt_max_frames = 16000 // past this WAL size, phase B holds writes until the WAL is copied
 const max_pause_ms = u64(20) // longest hold on write requests while the WAL can restart
+const keepalive_budget = 60000 // connections past this get one response with `Connection: close`
 
 struct Conn {
 mut:
 	inbuf       []u8 // bytes of a request that has not fully arrived
 	pending     []u8 // response bytes the socket did not take yet
 	close_after bool
+	oneshot     bool // accepted past keepalive_budget: one response, then close
 	queued      bool // already in this batch's flush list
 	open        bool
 	deferred    bool // holds a write request until the running checkpoint finishes
@@ -134,6 +136,11 @@ mut:
 	segs      []Seg
 	flush     []int
 	cur_close bool
+	// Keep-alive budget: see accept_all.
+	cur_oneshot bool
+	n_keep      int // open connections inside keepalive_budget
+	lfd         int
+	listen_off  bool // listener out of epoll until a connection closes
 	// Cooperative checkpoint: see checkpointer.
 	wal_frames    int
 	ckpt_phase    int // 0 idle, 1 checkpoint with writes going on, 2 checkpoint with writes held
@@ -254,6 +261,7 @@ fn (mut s Server) run(lfd int) {
 	C.fcntl(lfd, C.F_SETFL, C.fcntl(lfd, C.F_GETFL, 0) | C.O_NONBLOCK)
 	epfd := C.epoll_create1(0)
 	s.epfd = epfd
+	s.lfd = lfd
 	mut ev := C.epoll_event{
 		events: ep_in
 	}
@@ -293,12 +301,16 @@ fn (mut s Server) accept_all(lfd int, epfd int) {
 	one := 1
 	for {
 		if s.n_open >= s.max_open && !s.evict_idle() {
+			s.pause_listener()
 			return
 		}
 		fd := C.accept4(lfd, unsafe { nil }, unsafe { nil }, C.SOCK_NONBLOCK | C.SOCK_CLOEXEC)
 		if fd < 0 {
-			if (C.errno == C.EMFILE || C.errno == C.ENFILE) && s.evict_idle() {
-				continue
+			if C.errno == C.EMFILE || C.errno == C.ENFILE {
+				if s.evict_idle() {
+					continue
+				}
+				s.pause_listener()
 			}
 			return
 		}
@@ -306,8 +318,13 @@ fn (mut s Server) accept_all(lfd int, epfd int) {
 		for fd >= s.conns.len {
 			s.conns << Conn{}
 		}
+		oneshot := s.n_keep >= keepalive_budget
+		if !oneshot {
+			s.n_keep++
+		}
 		s.conns[fd] = Conn{
-			open: true
+			open:    true
+			oneshot: oneshot
 		}
 		s.n_open++
 		s.touch(fd)
@@ -316,6 +333,15 @@ fn (mut s Server) accept_all(lfd int, epfd int) {
 		}
 		ev.data.fd = fd
 		C.epoll_ctl(epfd, C.EPOLL_CTL_ADD, fd, &ev)
+	}
+}
+
+// pause_listener takes the listener out of epoll while no descriptor is free, so the loop does not
+// spin on it; close_conn puts it back. New clients wait in the kernel's accept queue meanwhile.
+fn (mut s Server) pause_listener() {
+	if !s.listen_off {
+		s.listen_off = true
+		C.epoll_ctl(s.epfd, C.EPOLL_CTL_DEL, s.lfd, unsafe { nil })
 	}
 }
 
@@ -352,9 +378,20 @@ fn (mut s Server) unlink(fd int) {
 
 fn (mut s Server) close_conn(fd int) {
 	s.unlink(fd)
+	if !s.conns[fd].oneshot {
+		s.n_keep--
+	}
 	s.conns[fd] = Conn{}
 	s.n_open--
 	C.close(fd)
+	if s.listen_off {
+		s.listen_off = false
+		mut ev := C.epoll_event{
+			events: ep_in
+		}
+		ev.data.fd = s.lfd
+		C.epoll_ctl(s.epfd, C.EPOLL_CTL_ADD, s.lfd, &ev)
+	}
 }
 
 // evict_idle closes the least recently active connection that has no work in flight,
@@ -386,6 +423,7 @@ fn (mut s Server) queue(fd int) {
 fn (mut s Server) read_conn(fd int) {
 	start := s.out.len
 	s.cur_close = s.conns[fd].close_after
+	s.cur_oneshot = s.conns[fd].oneshot
 	if !s.conns[fd].open {
 		return
 	}
@@ -433,7 +471,7 @@ fn (mut s Server) after_parse(fd int, start int, closed bool) {
 	if s.out.len > start {
 		s.segs << Seg{fd, start, s.out.len}
 	}
-	if closed || s.cur_close {
+	if closed || s.cur_close || (s.cur_oneshot && s.out.len > start) {
 		s.conns[fd].close_after = true
 	}
 	if s.out.len > start || closed || s.cur_close {
@@ -488,6 +526,7 @@ fn (mut s Server) resume_writes() {
 		}
 		start := s.out.len
 		s.cur_close = c.close_after
+		s.cur_oneshot = c.oneshot
 		buf := c.inbuf
 		used := s.parse(buf, buf.len)
 		s.conns[fd].inbuf = if used < buf.len { buf[used..].clone() } else { []u8{} }
@@ -518,7 +557,13 @@ fn (mut s Server) finish_batch() {
 			unsafe { c.pending.push_many(&s.out[seg.start], seg.end - seg.start) }
 			continue
 		}
-		w := C.write(seg.fd, unsafe { &s.out[seg.start] }, seg.end - seg.start)
+		// A closing connection's last response goes out with MSG_MORE and the close follows in the
+		// flush loop, so the FIN rides with the data and TIME_WAIT stays on the server.
+		w := if c.close_after {
+			int(C.send(seg.fd, unsafe { &s.out[seg.start] }, usize(seg.end - seg.start), C.MSG_MORE))
+		} else {
+			int(C.write(seg.fd, unsafe { &s.out[seg.start] }, seg.end - seg.start))
+		}
 		if w < seg.end - seg.start {
 			start := seg.start + if w > 0 { w } else { 0 }
 			c.pending = s.out[start..seg.end].clone()
@@ -1103,6 +1148,9 @@ fn (mut s Server) respond(status int) {
 		503 { 'HTTP/1.1 503 Service Unavailable\r\n' }
 		else { 'HTTP/1.1 500 Internal Server Error\r\n' }
 	})
+	if s.cur_oneshot {
+		put(mut s.out, 'Connection: close\r\n')
+	}
 	put(mut s.out, 'Content-Type: application/json\r\nContent-Length: ')
 	put_int(mut s.out, s.body.len)
 	put(mut s.out, '\r\n\r\n')

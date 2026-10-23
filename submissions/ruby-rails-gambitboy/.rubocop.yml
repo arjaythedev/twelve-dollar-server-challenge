@@ -1,0 +1,9 @@
+# Omakase Ruby styling for Rails
+inherit_gem: { rubocop-rails-omakase: rubocop.yml }
+
+Style/WordArray:
+  Enabled: false
+AllCops:
+  StringLiteralsFrozenByDefault: true
+Style/FrozenStringLiteralComment:
+  Enabled: false

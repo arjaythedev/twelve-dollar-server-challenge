@@ -1,37 +1,44 @@
 package feed
 
 import cats.data.Kleisli
-import cats.effect.std.Mutex
+import cats.effect.std.{Mutex, Semaphore}
 import cats.effect.{IO, Resource}
-import com.zaxxer.hikari.HikariConfig
+import com.zaxxer.hikari.{HikariConfig, HikariDataSource}
 import doobie.*
 import doobie.free.KleisliInterpreter
-import doobie.hikari.HikariTransactor
 import doobie.implicits.*
 import doobie.util.transactor.Strategy
 
 /** SQLite through doobie: a pool of read connections and a single write connection.
   *
-  * In WAL mode readers never wait for the writer, and with only one writer, writes never wait on SQLite's lock: they
-  * are queued semantically on a [[Mutex]] instead.
+  * In WAL mode readers never wait for the writer, and with only one writer, writes never wait on SQLite's lock.
+  * Requests wait for a connection on a semaphore, as fibers. They never get as far as Hikari's `getConnection` while
+  * the pool is empty: that call would block the thread, and on one vCPU that is the thread the connection holders need
+  * to finish and give their connection back.
   */
-final class Database private (reader: Transactor[IO], writer: Transactor[IO], writeLock: Mutex[IO]):
-  def read[A](program: ConnectionIO[A]): IO[A] = program.transact(reader)
+final class Database private (
+    reader: Transactor[IO],
+    readers: Semaphore[IO],
+    writer: Transactor[IO],
+    writeLock: Mutex[IO]
+):
+  def read[A](program: ConnectionIO[A]): IO[A] = readers.permit.surround(program.transact(reader))
   def write[A](program: ConnectionIO[A]): IO[A] = writeLock.lock.surround(program.transact(writer))
 
 object Database:
   def resource(path: String): Resource[IO, Database] =
-    val readers = math.max(2, Runtime.getRuntime.availableProcessors)
+    val readPoolSize = math.max(2, Runtime.getRuntime.availableProcessors)
     for
-      ec <- Resource.eval(IO.executionContext)
-      reader <- transactor(path, "reader", readers, ec)
-      writer <- transactor(path, "writer", 1, ec)
+      reader <- transactor(path, "reader", readPoolSize)
+      readers <- Resource.eval(Semaphore[IO](readPoolSize))
+      writer <- transactor(path, "writer", 1)
       writeLock <- Resource.eval(Mutex[IO])
-    yield Database(reader, writer, writeLock)
+    yield Database(reader, readers, writer, writeLock)
 
   /** Doobie runs every JDBC call as `blocking`, because a JDBC call usually waits on a network round trip. SQLite runs
     * in-process on data that is in the page cache (or `mmap`), so its calls are short CPU work: they run as plain
-    * `delay` on the compute pool, without a hand-off to a blocking thread for every `next()` and `getString()`.
+    * `delay` on the compute pool, without a hand-off to a blocking thread for every `next()` and `getString()`. The
+    * same goes for taking a connection from the pool and giving it back (the semaphores make sure one is idle).
     */
   private def interpreter: KleisliInterpreter[IO] =
     new KleisliInterpreter[IO](LogHandler.noop[IO]):
@@ -40,8 +47,7 @@ object Database:
   private def transactor(
       path: String,
       name: String,
-      poolSize: Int,
-      ec: scala.concurrent.ExecutionContext
+      poolSize: Int
   ): Resource[IO, Transactor[IO]] =
     val config = HikariConfig()
     config.setPoolName(name)
@@ -54,12 +60,17 @@ object Database:
     config.addDataSourceProperty("journal_mode", "WAL")
     config.addDataSourceProperty("synchronous", "NORMAL")
     config.addDataSourceProperty("busy_timeout", "5000")
-    config.addDataSourceProperty("cache_size", "-65536") // 64 MiB of page cache per connection
+    config.addDataSourceProperty("cache_size", "-16384") // 16 MiB of page cache per connection, on top of mmap
     config.addDataSourceProperty("mmap_size", "1073741824")
     config.addDataSourceProperty("temp_store", "MEMORY")
-    HikariTransactor
-      .fromHikariConfigCustomEc[IO](config, ec)
-      .map(
-        // Every request runs a single statement in autocommit mode, so there is no transaction to begin or end.
-        _.copy(interpret0 = interpreter.ConnectionInterpreter, strategy0 = Strategy.void)
+    Resource
+      .fromAutoCloseable(IO.blocking(HikariDataSource(config)))
+      .map(dataSource =>
+        Transactor[IO, HikariDataSource](
+          dataSource,
+          ds => Resource.make(IO.delay(ds.getConnection))(connection => IO.delay(connection.close())),
+          interpreter.ConnectionInterpreter,
+          // Every request runs a single statement in autocommit mode, so there is no transaction to begin or end.
+          Strategy.void
+        )
       )

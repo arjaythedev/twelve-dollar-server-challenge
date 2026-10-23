@@ -8,6 +8,11 @@ import scala.concurrent.duration.*
 
 object Main extends IOApp.Simple:
 
+  /** One worker thread per CPU. Cats Effect's default is at least 2, and on one vCPU the two workers spend most of
+    * their time waking each other up to steal work that one of them could just run.
+    */
+  override protected def computeWorkerThreadCount: Int = Runtime.getRuntime.availableProcessors
+
   // Queries run on the compute pool (see Database), so a busy moment can look like starvation to the checker.
   override protected def runtimeConfig: IORuntimeConfig =
     super.runtimeConfig.copy(cpuStarvationCheckInitialDelay = Duration.Inf)
@@ -28,6 +33,9 @@ object Main extends IOApp.Simple:
         // Keep them open until the client closes them, and allow as many as the 65,535 descriptors leave room for.
         .withIdleTimeout(Duration.Inf)
         .withMaxConnections(64000)
+        // Ember reads into a 256 KiB buffer per connection by default: 2.5 GB at 10,000 connections. Requests here
+        // are a few hundred bytes.
+        .withReceiveBufferSize(8 * 1024)
         .withShutdownTimeout(1.second)
         .build
     yield server

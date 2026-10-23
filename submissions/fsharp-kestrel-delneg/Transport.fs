@@ -62,6 +62,8 @@ module private Libc =
     extern nativeint write(int fd, nativeint buf, nativeint len)
     [<DllImport(L, SetLastError = true)>]
     extern nativeint read(int fd, nativeint buf, nativeint len)
+    [<DllImport(L, SetLastError = true)>]
+    extern int getrlimit(int resource, uint64[] rlim)
     /// A plain nanosleep: Thread.Sleep on Linux waits on a condition variable through the runtime.
     [<DllImport(L)>]
     extern int usleep(uint32 microseconds)
@@ -83,6 +85,10 @@ let private EPOLLERR = 0x008u
 let private EPOLLHUP = 0x010u
 let private EAGAIN = 11
 let private EINTR = 4
+let private ENFILE = 23
+let private EMFILE = 24
+let private ENOBUFS = 105
+let private ENOMEM = 12
 let private MSG_NOSIGNAL = 0x4000
 
 /// True where this transport works: x86-64 Linux (the epoll_event layout above).
@@ -295,8 +301,9 @@ and [<AllowNullLiteral>] EConn(id: int64, fd: int, loop: ILoop) =
             else loop.Close this
 
     /// Loop thread only: forget the socket and close it.
-    member _.CloseNow() =
-        if Interlocked.Exchange(&closed, 1) = 0 then
+    member _.CloseNow() : bool =
+        if Interlocked.Exchange(&closed, 1) <> 0 then false
+        else
             let mutable ev = EpollEvent()
             Libc.epoll_ctl(loop.Epfd, EPOLL_CTL_DEL, fd, &ev) |> ignore
             Libc.close fd |> ignore
@@ -304,6 +311,7 @@ and [<AllowNullLiteral>] EConn(id: int64, fd: int, loop: ILoop) =
             release &inBuf
             release &outBuf
             finished.TrySetResult() |> ignore
+            true
 
     override _.ConnectionId
         with get () =
@@ -336,6 +344,17 @@ and [<AllowNullLiteral>] EConn(id: int64, fd: int, loop: ILoop) =
         if Volatile.Read(&owner) = 1 then features <- FeatureCollection(0) else loop.Close this
         ValueTask.CompletedTask
 
+/// The process's fd limit (soft RLIMIT_NOFILE; .NET raises it to the hard limit at start).
+let private FdLimit =
+    let lim = Array.zeroCreate<uint64> 2
+    let soft = if Libc.getrlimit(7 (* RLIMIT_NOFILE *), lim) = 0 then lim.[0] else 65535UL
+    int (min soft 1048576UL)
+
+/// Accept stops while this many client sockets are open, so the process never runs out of fds. The runtime
+/// needs a few free fds at any time: on a full fd table, CoreCLR's memory probe (a pipe) fails and the process
+/// aborts with PAL_SEHException, the crash of #108 at the judge's fd limit.
+let private AcceptLimit = FdLimit - 512
+
 /// Below this many events from one epoll_wait, the loop sleeps 2 ms before it waits again.
 [<Literal>]
 let private CoalesceBelow = 32
@@ -358,6 +377,12 @@ type private Loop(listenFd: int) as this =
         )
     let mutable nextId = 1L // a socket's key is >= 2^32; epoll data 0 = listening socket, 1 = eventfd
     let mutable thread: Thread = null
+    /// False while accept is paused: AcceptLimit client sockets are open, or accept failed for lack of fds or memory
+    /// (EMFILE, ENFILE, ENOBUFS, ENOMEM). The listening socket is then out of the epoll set, so the loop does not
+    /// wake again and again for connections it cannot take. A socket closing below AcceptLimit resumes it.
+    let mutable listening = true
+    /// Open client sockets.
+    let mutable live = 0
 
     do
         let add (fd: int) (data: uint64) =
@@ -372,18 +397,34 @@ type private Loop(listenFd: int) as this =
 
     member _.Accepted = accepted.Reader
 
+    /// Takes the listening socket out of the epoll set until a client socket closes. No allocation and no
+    /// logging on this path: at the fd limit, either could fail too (idea: #117, #83).
+    member private _.PauseAccept() =
+        let mutable ev = EpollEvent()
+        Libc.epoll_ctl(epfd, EPOLL_CTL_MOD, listenFd, &ev) |> ignore
+        listening <- false
+
     member private this.AcceptAll() =
         let mutable go = true
         while go do
-            let fd = Libc.accept4(listenFd, 0n, 0n, SOCK_NONBLOCK ||| SOCK_CLOEXEC)
-            if fd < 0 then
+            let fd = if live >= AcceptLimit then -2 else Libc.accept4(listenFd, 0n, 0n, SOCK_NONBLOCK ||| SOCK_CLOEXEC)
+            if fd = -2 then
+                this.PauseAccept()
                 go <- false
+            elif fd < 0 then
+                let e = errno ()
+                if e = EMFILE || e = ENFILE || e = ENOBUFS || e = ENOMEM then
+                    this.PauseAccept()
+                    go <- false
+                elif e <> EINTR && e <> 103 (* ECONNABORTED *) then
+                    go <- false
             else
                 let mutable one = 1
                 Libc.setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, 4) |> ignore
                 let id = nextId
                 nextId <- nextId + 1L
                 let c = new EConn(id, fd, this)
+                live <- live + 1
                 if fd >= conns.Length then
                     let bigger = Array.zeroCreate (max (fd + 1) (conns.Length * 2))
                     Array.blit conns 0 bigger 0 conns.Length
@@ -438,7 +479,13 @@ type private Loop(listenFd: int) as this =
     /// Loop thread only.
     member private _.Forget(c: EConn) =
         if c.Fd < conns.Length && obj.ReferenceEquals(conns.[c.Fd], c) then conns.[c.Fd] <- null
-        c.CloseNow()
+        if c.CloseNow() then live <- live - 1
+        if not listening && live < AcceptLimit then
+            // A socket closed, so an fd is free: take new connections again.
+            let mutable ev = EpollEvent()
+            ev.Events <- EPOLLIN
+            Libc.epoll_ctl(epfd, EPOLL_CTL_MOD, listenFd, &ev) |> ignore
+            listening <- true
 
     interface ILoop with
         member _.Epfd = epfd

@@ -137,6 +137,8 @@ and [<AllowNullLiteral>] EConn(id: int64, fd: int, loop: ILoop) =
     let mutable outOff = 0
     let mutable outLen = 0
     let mutable closeAfterSend = false
+    /// Over the keep-alive budget at accept: the connection gets one request, "Connection: close", and the FIN.
+    let mutable shed = false
 
     let release (a: byref<byte[]>) =
         if not (isNull a) then
@@ -152,6 +154,7 @@ and [<AllowNullLiteral>] EConn(id: int64, fd: int, loop: ILoop) =
     member _.Detach() = Interlocked.CompareExchange(&owner, 1, 0) = 0
 
     member _.Id = id
+    member _.Shed with get () = shed and set v = shed <- v
     member _.Fd = fd
     /// The epoll data of this socket: the fd in the low 32 bits, the low 32 bits of the id above them.
     member _.Key = (uint64 (uint32 id) <<< 32) ||| uint64 (uint32 fd)
@@ -186,7 +189,7 @@ and [<AllowNullLiteral>] EConn(id: int64, fd: int, loop: ILoop) =
                 inLen <- inLen + n
                 data <- ReadOnlySpan<byte>(inBuf, 0, inLen)
             let out = loop.Out
-            let mutable close = false
+            let mutable close = shed
             let mutable ok = true
             let mutable consumed = 0
             try
@@ -355,6 +358,14 @@ let private FdLimit =
 /// aborts with PAL_SEHException, the crash of #108 at the judge's fd limit.
 let private AcceptLimit = FdLimit - 512
 
+/// Keep-alive budget (idea: #117, #72). Each user holds one keep-alive connection, so past ~65,000 users the
+/// fd limit (LimitNOFILE=65535) would stop accept. A connection accepted while this many sockets are open is
+/// shed: it gets one request, the response says "Connection: close", and the server closes it right after the
+/// send (so the TIME_WAIT is on the server, not on the client's ports). The client connects again for its next
+/// request. The decision is per connection: kept connections stay kept, so the churn is only the users past the
+/// budget. The margin leaves fds for the runtime and for the shed connections in flight.
+let private KeepAliveBudget = FdLimit - 1024
+
 /// Below this many events from one epoll_wait, the loop sleeps 2 ms before it waits again.
 [<Literal>]
 let private CoalesceBelow = 32
@@ -425,6 +436,7 @@ type private Loop(listenFd: int) as this =
                 nextId <- nextId + 1L
                 let c = new EConn(id, fd, this)
                 live <- live + 1
+                if live > KeepAliveBudget then c.Shed <- true
                 if fd >= conns.Length then
                     let bigger = Array.zeroCreate (max (fd + 1) (conns.Length * 2))
                     Array.blit conns 0 bigger 0 conns.Length

@@ -19,6 +19,8 @@ let private Wrote = 1
 let private Close = 2
 let private NeedMore = 4
 let private ContinueSent = 8
+/// The connection answers one request and closes: the transport sheds it (see Transport.KeepAliveBudget).
+let private ForceClose = 16
 
 let private crlf2 = "\r\n\r\n"B
 let private crlf = "\r\n"B
@@ -121,7 +123,8 @@ let private processSpan (s: ReadOnlySpan<byte>) (w: IBufferWriter<byte>)
                 let mutable path = afterMethod.Slice(0, sp2)
                 let q = path.IndexOf '?'B
                 if q >= 0 then path <- path.Slice(0, q)
-                let mutable close = afterMethod.Slice(sp2 + 1).SequenceEqual("HTTP/1.0"B)
+                let force = flags &&& ForceClose <> 0
+                let mutable close = force || afterMethod.Slice(sp2 + 1).SequenceEqual("HTTP/1.0"B)
                 let mutable auth = ReadOnlySpan<byte>.Empty
                 let mutable contentLength = 0
                 let mutable expect = false
@@ -148,7 +151,7 @@ let private processSpan (s: ReadOnlySpan<byte>) (w: IBufferWriter<byte>)
                             contentLength <- int n
                         | 10 when Ascii.EqualsIgnoreCase(name, "connection"B) ->
                             if Ascii.EqualsIgnoreCase(value, "close"B) then close <- true
-                            elif Ascii.EqualsIgnoreCase(value, "keep-alive"B) then close <- false
+                            elif Ascii.EqualsIgnoreCase(value, "keep-alive"B) then close <- force
                         | 17 when Ascii.EqualsIgnoreCase(name, "transfer-encoding"B) -> bad <- true // chunked bodies: not supported
                         | 6 when Ascii.EqualsIgnoreCase(name, "expect"B) -> expect <- true
                         | _ -> ()
@@ -205,13 +208,16 @@ let private step (buf: ReadOnlySequence<byte>) (w: IBufferWriter<byte>) (continu
 /// For the epoll transport: answers every complete request in `s` into `w`, in order. A pending response (only
 /// possible if a write did not finish at once) is waited for in place. Returns the bytes consumed; sets `close` when
 /// the connection must close after the responses are sent, and `continueSent` as for the next read.
+/// `close` set on entry: answer the first request with "Connection: close" and stop there.
 let direct (s: ReadOnlySpan<byte>) (w: IBufferWriter<byte>) (close: byref<bool>) (continueSent: byref<bool>) : int =
     let mutable off = 0
     let mutable go = true
+    let force = if close then ForceClose else 0
+    close <- false // from here on, the output: set only when a request closes the connection
     while go do
         let mutable consumed = 0
         let mutable pending: Task = null
-        let mutable flags = if continueSent then ContinueSent else 0
+        let mutable flags = (if continueSent then ContinueSent else 0) ||| force
         processSpan (s.Slice off) w &consumed &pending &flags
         off <- off + consumed
         continueSent <- flags &&& ContinueSent <> 0

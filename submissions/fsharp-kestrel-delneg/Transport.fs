@@ -452,7 +452,9 @@ type private Loop(listenFd: int) as this =
                 ev.Events <- EPOLLIN
                 ev.Data <- c.Key
                 Libc.epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &ev) |> ignore
-                accepted.Writer.TryWrite c |> ignore
+                // A shed connection serves one request and closes: the loop owns it from accept, and Kestrel never
+                // sees it (Kestrel's dispatch of a connection costs a thread-pool wake-up, ~15 us per connection).
+                if c.Shed then c.Detach() |> ignore else accepted.Writer.TryWrite c |> ignore
 
     member private this.Drain() =
         let mutable c: EConn = null

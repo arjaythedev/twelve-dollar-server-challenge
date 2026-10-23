@@ -1,0 +1,6636 @@
+{
+  "date": "2026-10-09",
+  "scope": "Selected passing local ARM64 diagnostic, not maximum capacity or an official k6/droplet score",
+  "baseline_commit": "9fafb3225f29a83b72ec5f27fb491762aad95eae",
+  "environment": {
+    "server_os": "Ubuntu 24.04 ARM64 Docker VM on Apple M2 Pro",
+    "server_cpu_quota": 1,
+    "server_cpu_set": "0",
+    "server_memory_limit_bytes": 2147483648,
+    "server_swap_limit_bytes": 0,
+    "server_nofile_soft": 65535,
+    "server_nofile_hard": 65535,
+    "client_cpu_set": "1,2",
+    "client_shards": 2,
+    "auxiliary_validation_cpu_set": "3",
+    "network": "Shared Linux network namespace, loopback",
+    "database_seed_posts": 500000,
+    "database_seed_likes": 2016005
+  },
+  "method": {
+    "trials": 1,
+    "request_mix": "bench/load.js feed/post/like/create user loop, probabilities and think-time ranges",
+    "differences_from_k6": "Different PRNG/post text; no separate warm-up or ramp-down; hold-only latency thresholds",
+    "percentiles": "Maximum of the shard percentiles; not pooled percentiles",
+    "memory": "Process RSS/HWM summed over parent and descendants; shared pages may be counted more than once. Container memory includes helper, page cache and kernel; sampled every approximately two seconds",
+    "time_policy": "Fresh process and database, one case at a time",
+    "pass_thresholds": "p95 < 500 ms, p99 < 1 second, errors < 1%"
+  },
+  "pressure_budget": 16000,
+  "pressure_budget_unit": "open process descriptors",
+  "application_physical_lines": 194,
+  "source_sha256": {
+    "check.py": "94e1aed9a85da45c65012c394d780ebb988be7eb8c0df69ebb0dea81cc7e6bcf",
+    "connection_pressure.rb": "c8916d69e6b1a1094f5016fd375e76bd6d0a6e831704febdbe137672008524b7",
+    "install.sh": "1c6b8c1039f9715c9a4549eab2c07487b2f3ca1edc8c1ae960784d4d6991c04e",
+    "app.rb": "bed7800ae28db6ce562a8140f2f89d92a89821b81c85c6c2519a39fa1fe9de70",
+    "puma.rb": "e616b2c5fb3a75693ca8f69a20953b74b2462af237aefb5898885d539e707aff",
+    "build.sh": "f7058e7d8efec4bcad31f21388f0d83985a9f18f517af5395f7eb6d38ff6de79",
+    "verify.py": "f3bee0c79cc90bdfefea3939b88acce56e93c27e1e7419ecd9e0e624ff509e91",
+    "start.sh": "b0890a407f1686796fbf1659dd49bc7e8b358b3850f9d8ebeb6c95f5d1bf3e73"
+  },
+  "generator_source_sha256": "306b28b67bd3a0e724c0f103a15b980e585826a1f167696a91dd495d2943e2b7",
+  "binary_fingerprints": {
+    "install.sh": "1c6b8c1039f9715c9a4549eab2c07487b2f3ca1edc8c1ae960784d4d6991c04e",
+    "connection_pressure.rb": "c8916d69e6b1a1094f5016fd375e76bd6d0a6e831704febdbe137672008524b7",
+    "start.sh": "b0890a407f1686796fbf1659dd49bc7e8b358b3850f9d8ebeb6c95f5d1bf3e73",
+    "puma.rb": "e616b2c5fb3a75693ca8f69a20953b74b2462af237aefb5898885d539e707aff",
+    "check.py": "94e1aed9a85da45c65012c394d780ebb988be7eb8c0df69ebb0dea81cc7e6bcf",
+    "verify.py": "f3bee0c79cc90bdfefea3939b88acce56e93c27e1e7419ecd9e0e624ff509e91",
+    "app.rb": "bed7800ae28db6ce562a8140f2f89d92a89821b81c85c6c2519a39fa1fe9de70",
+    "build.sh": "f7058e7d8efec4bcad31f21388f0d83985a9f18f517af5395f7eb6d38ff6de79"
+  },
+  "measurement": {
+    "family": "ruby-rails",
+    "logical_users": 30000,
+    "hold_seconds": 300,
+    "ramp_seconds": 60,
+    "requests": 949251,
+    "requests_per_second": 3164.17,
+    "errors": 0,
+    "error_percent": 0.0,
+    "worst_shard_p95_ms": 71.399,
+    "worst_shard_p99_ms": 124.33,
+    "worst_shard_end_to_end_p99_ms": 124.345,
+    "sum_process_hwm_peak_mib": 344.98828125,
+    "sampled_peak_summed_process_rss_mib": 344.98828125,
+    "sampled_peak_container_mib": 710.328125,
+    "sampled_peak_fds": 16207,
+    "worst_generator_loop_delay_ms": 16.514,
+    "pass": true
+  },
+  "raw_selected_run": {
+    "family": "ruby-rails",
+    "variant": "candidate",
+    "configuration": {
+      "families": "ruby-rails",
+      "variants": "candidate",
+      "users": 30000,
+      "seconds": 300,
+      "ramp": 60,
+      "timeout": 60,
+      "nofile": 65535,
+      "shards": 2,
+      "generator": "c",
+      "output": "results/capacity-more/sustained-rails-30000.json",
+      "generator_source": null
+    },
+    "samples": [
+      {
+        "alive": true,
+        "elapsed": 1.0561833749961806,
+        "VmRSS": 82380,
+        "VmHWM": 82728,
+        "Threads": 7,
+        "cpu_seconds": 0.85,
+        "fds": 14,
+        "max_process_fds": 14,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 82728,
+            "VmRSS": 82380,
+            "Threads": 7,
+            "cpu_seconds": 0.85,
+            "fds": 14
+          }
+        ],
+        "memory_current": 350732288,
+        "anon": 79761408,
+        "file": 249950208,
+        "sock": 0,
+        "slab": 19097264,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 3.073412500998529,
+        "VmRSS": 102216,
+        "VmHWM": 102216,
+        "Threads": 7,
+        "cpu_seconds": 1.25,
+        "fds": 215,
+        "max_process_fds": 215,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 102216,
+            "VmRSS": 102216,
+            "Threads": 7,
+            "cpu_seconds": 1.25,
+            "fds": 215
+          }
+        ],
+        "memory_current": 370380800,
+        "anon": 98050048,
+        "file": 249950208,
+        "sock": 0,
+        "slab": 20041976,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 5.086917335996986,
+        "VmRSS": 121836,
+        "VmHWM": 121836,
+        "Threads": 7,
+        "cpu_seconds": 1.79,
+        "fds": 781,
+        "max_process_fds": 781,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 121836,
+            "VmRSS": 121836,
+            "Threads": 7,
+            "cpu_seconds": 1.79,
+            "fds": 781
+          }
+        ],
+        "memory_current": 392904704,
+        "anon": 118181888,
+        "file": 249950208,
+        "sock": 8192,
+        "slab": 22731328,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 7.098728420001862,
+        "VmRSS": 129884,
+        "VmHWM": 129884,
+        "Threads": 7,
+        "cpu_seconds": 2.36,
+        "fds": 1720,
+        "max_process_fds": 1720,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 129884,
+            "VmRSS": 129884,
+            "Threads": 7,
+            "cpu_seconds": 2.36,
+            "fds": 1720
+          }
+        ],
+        "memory_current": 405667840,
+        "anon": 126455808,
+        "file": 249950208,
+        "sock": 0,
+        "slab": 27198728,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 9.109223963001568,
+        "VmRSS": 141488,
+        "VmHWM": 141488,
+        "Threads": 7,
+        "cpu_seconds": 2.99,
+        "fds": 2753,
+        "max_process_fds": 2753,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 141488,
+            "VmRSS": 141488,
+            "Threads": 7,
+            "cpu_seconds": 2.99,
+            "fds": 2753
+          }
+        ],
+        "memory_current": 422584320,
+        "anon": 138387456,
+        "file": 249950208,
+        "sock": 0,
+        "slab": 32118096,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 11.122416963997239,
+        "VmRSS": 157536,
+        "VmHWM": 157536,
+        "Threads": 7,
+        "cpu_seconds": 3.69,
+        "fds": 3795,
+        "max_process_fds": 3795,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 157536,
+            "VmRSS": 157536,
+            "Threads": 7,
+            "cpu_seconds": 3.69,
+            "fds": 3795
+          }
+        ],
+        "memory_current": 443224064,
+        "anon": 153661440,
+        "file": 250286080,
+        "sock": 0,
+        "slab": 37085632,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 13.139382880995981,
+        "VmRSS": 164108,
+        "VmHWM": 164108,
+        "Threads": 7,
+        "cpu_seconds": 4.47,
+        "fds": 4803,
+        "max_process_fds": 4803,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 164108,
+            "VmRSS": 164108,
+            "Threads": 7,
+            "cpu_seconds": 4.47,
+            "fds": 4803
+          }
+        ],
+        "memory_current": 454160384,
+        "anon": 158748672,
+        "file": 251138048,
+        "sock": 0,
+        "slab": 41940528,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 15.157589007001661,
+        "VmRSS": 178284,
+        "VmHWM": 178284,
+        "Threads": 7,
+        "cpu_seconds": 5.34,
+        "fds": 5770,
+        "max_process_fds": 5770,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 178284,
+            "VmRSS": 178284,
+            "Threads": 7,
+            "cpu_seconds": 5.34,
+            "fds": 5770
+          }
+        ],
+        "memory_current": 474435584,
+        "anon": 172396544,
+        "file": 253108224,
+        "sock": 4096,
+        "slab": 46563328,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 17.17858313299803,
+        "VmRSS": 183472,
+        "VmHWM": 183472,
+        "Threads": 7,
+        "cpu_seconds": 6.2,
+        "fds": 6816,
+        "max_process_fds": 6816,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 183472,
+            "VmRSS": 183472,
+            "Threads": 7,
+            "cpu_seconds": 6.2,
+            "fds": 6816
+          }
+        ],
+        "memory_current": 485236736,
+        "anon": 176914432,
+        "file": 254447616,
+        "sock": 0,
+        "slab": 51563256,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 19.18975592499919,
+        "VmRSS": 191932,
+        "VmHWM": 191932,
+        "Threads": 7,
+        "cpu_seconds": 7.16,
+        "fds": 7765,
+        "max_process_fds": 7765,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 191932,
+            "VmRSS": 191932,
+            "Threads": 7,
+            "cpu_seconds": 7.16,
+            "fds": 7765
+          }
+        ],
+        "memory_current": 497897472,
+        "anon": 184774656,
+        "file": 254685184,
+        "sock": 24576,
+        "slab": 56074352,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 21.206932884997514,
+        "VmRSS": 202316,
+        "VmHWM": 202316,
+        "Threads": 7,
+        "cpu_seconds": 8.22,
+        "fds": 8812,
+        "max_process_fds": 8812,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 202316,
+            "VmRSS": 202316,
+            "Threads": 7,
+            "cpu_seconds": 8.22,
+            "fds": 8812
+          }
+        ],
+        "memory_current": 512905216,
+        "anon": 194207744,
+        "file": 254906368,
+        "sock": 28672,
+        "slab": 61111448,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 23.223973469001066,
+        "VmRSS": 208520,
+        "VmHWM": 208520,
+        "Threads": 7,
+        "cpu_seconds": 9.33,
+        "fds": 9801,
+        "max_process_fds": 9801,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 208520,
+            "VmRSS": 208520,
+            "Threads": 7,
+            "cpu_seconds": 9.33,
+            "fds": 9801
+          }
+        ],
+        "memory_current": 523694080,
+        "anon": 199950336,
+        "file": 255139840,
+        "sock": 4096,
+        "slab": 65809184,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 25.24176313699718,
+        "VmRSS": 217528,
+        "VmHWM": 217528,
+        "Threads": 7,
+        "cpu_seconds": 10.53,
+        "fds": 10873,
+        "max_process_fds": 10873,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 217528,
+            "VmRSS": 217528,
+            "Threads": 7,
+            "cpu_seconds": 10.53,
+            "fds": 10873
+          }
+        ],
+        "memory_current": 536858624,
+        "anon": 208338944,
+        "file": 255139840,
+        "sock": 4096,
+        "slab": 70895552,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 27.26183838799625,
+        "VmRSS": 226416,
+        "VmHWM": 226416,
+        "Threads": 7,
+        "cpu_seconds": 11.83,
+        "fds": 11811,
+        "max_process_fds": 11811,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 226416,
+            "VmRSS": 226416,
+            "Threads": 7,
+            "cpu_seconds": 11.83,
+            "fds": 11811
+          }
+        ],
+        "memory_current": 549228544,
+        "anon": 215834624,
+        "file": 255324160,
+        "sock": 77824,
+        "slab": 75332128,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 29.279569888996775,
+        "VmRSS": 240628,
+        "VmHWM": 240628,
+        "Threads": 7,
+        "cpu_seconds": 13.31,
+        "fds": 12870,
+        "max_process_fds": 12870,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 240628,
+            "VmRSS": 240628,
+            "Threads": 7,
+            "cpu_seconds": 13.31,
+            "fds": 12870
+          }
+        ],
+        "memory_current": 567910400,
+        "anon": 229322752,
+        "file": 255561728,
+        "sock": 40960,
+        "slab": 80381920,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 32.12719918199582,
+        "VmRSS": 247716,
+        "VmHWM": 247716,
+        "Threads": 7,
+        "cpu_seconds": 15.54,
+        "fds": 14235,
+        "max_process_fds": 14235,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 247716,
+            "VmRSS": 247716,
+            "Threads": 7,
+            "cpu_seconds": 15.54,
+            "fds": 14235
+          }
+        ],
+        "memory_current": 581390336,
+        "anon": 235737088,
+        "file": 255930368,
+        "sock": 20480,
+        "slab": 86866488,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 34.1420940159951,
+        "VmRSS": 252692,
+        "VmHWM": 252692,
+        "Threads": 7,
+        "cpu_seconds": 17.21,
+        "fds": 15254,
+        "max_process_fds": 15254,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 252692,
+            "VmRSS": 252692,
+            "Threads": 7,
+            "cpu_seconds": 17.21,
+            "fds": 15254
+          }
+        ],
+        "memory_current": 590589952,
+        "anon": 240254976,
+        "file": 256036864,
+        "sock": 24576,
+        "slab": 91708576,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 36.1663870170014,
+        "VmRSS": 253788,
+        "VmHWM": 261332,
+        "Threads": 7,
+        "cpu_seconds": 18.96,
+        "fds": 15873,
+        "max_process_fds": 15873,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 261332,
+            "VmRSS": 253788,
+            "Threads": 7,
+            "cpu_seconds": 18.96,
+            "fds": 15873
+          }
+        ],
+        "memory_current": 594108416,
+        "anon": 240627712,
+        "file": 256147456,
+        "sock": 24576,
+        "slab": 94796984,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 38.185833767995064,
+        "VmRSS": 266124,
+        "VmHWM": 266124,
+        "Threads": 7,
+        "cpu_seconds": 20.7,
+        "fds": 15975,
+        "max_process_fds": 15975,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 266124,
+            "VmRSS": 266124,
+            "Threads": 7,
+            "cpu_seconds": 20.7,
+            "fds": 15975
+          }
+        ],
+        "memory_current": 607019008,
+        "anon": 252841984,
+        "file": 256258048,
+        "sock": 90112,
+        "slab": 95206704,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 40.20121005999681,
+        "VmRSS": 273276,
+        "VmHWM": 273276,
+        "Threads": 7,
+        "cpu_seconds": 22.39,
+        "fds": 16002,
+        "max_process_fds": 16002,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 273276,
+            "VmRSS": 273276,
+            "Threads": 7,
+            "cpu_seconds": 22.39,
+            "fds": 16002
+          }
+        ],
+        "memory_current": 613810176,
+        "anon": 259608576,
+        "file": 256360448,
+        "sock": 0,
+        "slab": 95294440,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 42.225488269999914,
+        "VmRSS": 276140,
+        "VmHWM": 276140,
+        "Threads": 7,
+        "cpu_seconds": 24.11,
+        "fds": 15879,
+        "max_process_fds": 15879,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 276140,
+            "VmRSS": 276140,
+            "Threads": 7,
+            "cpu_seconds": 24.11,
+            "fds": 15879
+          }
+        ],
+        "memory_current": 616452096,
+        "anon": 262287360,
+        "file": 256434176,
+        "sock": 4096,
+        "slab": 94930880,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 44.24768206199951,
+        "VmRSS": 275848,
+        "VmHWM": 276164,
+        "Threads": 7,
+        "cpu_seconds": 25.88,
+        "fds": 15908,
+        "max_process_fds": 15908,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 276164,
+            "VmRSS": 275848,
+            "Threads": 7,
+            "cpu_seconds": 25.88,
+            "fds": 15908
+          }
+        ],
+        "memory_current": 615100416,
+        "anon": 261099520,
+        "file": 256540672,
+        "sock": 0,
+        "slab": 94998760,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 46.26437497900042,
+        "VmRSS": 286404,
+        "VmHWM": 286404,
+        "Threads": 7,
+        "cpu_seconds": 27.56,
+        "fds": 15895,
+        "max_process_fds": 15895,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 286404,
+            "VmRSS": 286404,
+            "Threads": 7,
+            "cpu_seconds": 27.56,
+            "fds": 15895
+          }
+        ],
+        "memory_current": 625553408,
+        "anon": 271384576,
+        "file": 256720896,
+        "sock": 24576,
+        "slab": 94974632,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 48.288823021997814,
+        "VmRSS": 285756,
+        "VmHWM": 286424,
+        "Threads": 7,
+        "cpu_seconds": 29.37,
+        "fds": 15939,
+        "max_process_fds": 15939,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 286424,
+            "VmRSS": 285756,
+            "Threads": 7,
+            "cpu_seconds": 29.37,
+            "fds": 15939
+          }
+        ],
+        "memory_current": 624914432,
+        "anon": 270176256,
+        "file": 256823296,
+        "sock": 65536,
+        "slab": 95206336,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 50.31073448099778,
+        "VmRSS": 289460,
+        "VmHWM": 289460,
+        "Threads": 7,
+        "cpu_seconds": 31.15,
+        "fds": 15949,
+        "max_process_fds": 15949,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 289460,
+            "VmRSS": 289460,
+            "Threads": 7,
+            "cpu_seconds": 31.15,
+            "fds": 15949
+          }
+        ],
+        "memory_current": 628576256,
+        "anon": 273707008,
+        "file": 256909312,
+        "sock": 36864,
+        "slab": 94975328,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 52.34401031599555,
+        "VmRSS": 286440,
+        "VmHWM": 289340,
+        "Threads": 7,
+        "cpu_seconds": 32.97,
+        "fds": 16100,
+        "max_process_fds": 16100,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 289340,
+            "VmRSS": 286440,
+            "Threads": 7,
+            "cpu_seconds": 32.97,
+            "fds": 16100
+          }
+        ],
+        "memory_current": 626270208,
+        "anon": 270110720,
+        "file": 257064960,
+        "sock": 311296,
+        "slab": 95760880,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 54.36007127499761,
+        "VmRSS": 292876,
+        "VmHWM": 292876,
+        "Threads": 7,
+        "cpu_seconds": 34.76,
+        "fds": 16120,
+        "max_process_fds": 16120,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 292876,
+            "VmRSS": 292876,
+            "Threads": 7,
+            "cpu_seconds": 34.76,
+            "fds": 16120
+          }
+        ],
+        "memory_current": 632352768,
+        "anon": 276185088,
+        "file": 257142784,
+        "sock": 135168,
+        "slab": 95887296,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 56.38841323399538,
+        "VmRSS": 294184,
+        "VmHWM": 296220,
+        "Threads": 7,
+        "cpu_seconds": 36.57,
+        "fds": 15895,
+        "max_process_fds": 15895,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 296220,
+            "VmRSS": 294184,
+            "Threads": 7,
+            "cpu_seconds": 36.57,
+            "fds": 15895
+          }
+        ],
+        "memory_current": 632020992,
+        "anon": 276815872,
+        "file": 257331200,
+        "sock": 49152,
+        "slab": 95077720,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 58.414233192997926,
+        "VmRSS": 295676,
+        "VmHWM": 304624,
+        "Threads": 7,
+        "cpu_seconds": 38.36,
+        "fds": 16059,
+        "max_process_fds": 16059,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 304624,
+            "VmRSS": 295676,
+            "Threads": 7,
+            "cpu_seconds": 38.36,
+            "fds": 16059
+          }
+        ],
+        "memory_current": 634019840,
+        "anon": 277962752,
+        "file": 257433600,
+        "sock": 118784,
+        "slab": 95669280,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 60.43965531900176,
+        "VmRSS": 298344,
+        "VmHWM": 304624,
+        "Threads": 7,
+        "cpu_seconds": 40.18,
+        "fds": 16026,
+        "max_process_fds": 16026,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 304624,
+            "VmRSS": 298344,
+            "Threads": 7,
+            "cpu_seconds": 40.18,
+            "fds": 16026
+          }
+        ],
+        "memory_current": 635977728,
+        "anon": 280039424,
+        "file": 257589248,
+        "sock": 229376,
+        "slab": 95550632,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 63.13185544600128,
+        "VmRSS": 301408,
+        "VmHWM": 306756,
+        "Threads": 7,
+        "cpu_seconds": 42.57,
+        "fds": 16013,
+        "max_process_fds": 16013,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 306756,
+            "VmRSS": 301408,
+            "Threads": 7,
+            "cpu_seconds": 42.57,
+            "fds": 16013
+          }
+        ],
+        "memory_current": 638595072,
+        "anon": 282644480,
+        "file": 257773568,
+        "sock": 114688,
+        "slab": 95539568,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 65.15474886300217,
+        "VmRSS": 304284,
+        "VmHWM": 306756,
+        "Threads": 7,
+        "cpu_seconds": 44.44,
+        "fds": 16095,
+        "max_process_fds": 16095,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 306756,
+            "VmRSS": 304284,
+            "Threads": 7,
+            "cpu_seconds": 44.44,
+            "fds": 16095
+          }
+        ],
+        "memory_current": 641347584,
+        "anon": 285069312,
+        "file": 257810432,
+        "sock": 45056,
+        "slab": 95794160,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 67.17985323900211,
+        "VmRSS": 297496,
+        "VmHWM": 306756,
+        "Threads": 7,
+        "cpu_seconds": 46.22,
+        "fds": 15865,
+        "max_process_fds": 15865,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 306756,
+            "VmRSS": 297496,
+            "Threads": 7,
+            "cpu_seconds": 46.22,
+            "fds": 15865
+          }
+        ],
+        "memory_current": 633368576,
+        "anon": 277790720,
+        "file": 257966080,
+        "sock": 163840,
+        "slab": 95101704,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 69.20285507399967,
+        "VmRSS": 303840,
+        "VmHWM": 306756,
+        "Threads": 7,
+        "cpu_seconds": 47.98,
+        "fds": 15906,
+        "max_process_fds": 15906,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 306756,
+            "VmRSS": 303840,
+            "Threads": 7,
+            "cpu_seconds": 47.98,
+            "fds": 15906
+          }
+        ],
+        "memory_current": 640053248,
+        "anon": 283926528,
+        "file": 258088960,
+        "sock": 69632,
+        "slab": 95209608,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 71.23149161599576,
+        "VmRSS": 301732,
+        "VmHWM": 306756,
+        "Threads": 7,
+        "cpu_seconds": 49.78,
+        "fds": 15962,
+        "max_process_fds": 15962,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 306756,
+            "VmRSS": 301732,
+            "Threads": 7,
+            "cpu_seconds": 49.78,
+            "fds": 15962
+          }
+        ],
+        "memory_current": 637435904,
+        "anon": 281436160,
+        "file": 258224128,
+        "sock": 8192,
+        "slab": 95369592,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 73.25383332600177,
+        "VmRSS": 300628,
+        "VmHWM": 306756,
+        "Threads": 7,
+        "cpu_seconds": 51.52,
+        "fds": 15939,
+        "max_process_fds": 15939,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 306756,
+            "VmRSS": 300628,
+            "Threads": 7,
+            "cpu_seconds": 51.52,
+            "fds": 15939
+          }
+        ],
+        "memory_current": 636887040,
+        "anon": 280236032,
+        "file": 258297856,
+        "sock": 61440,
+        "slab": 95279616,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 75.28284382700076,
+        "VmRSS": 302180,
+        "VmHWM": 306756,
+        "Threads": 7,
+        "cpu_seconds": 53.36,
+        "fds": 15992,
+        "max_process_fds": 15992,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 306756,
+            "VmRSS": 302180,
+            "Threads": 7,
+            "cpu_seconds": 53.36,
+            "fds": 15992
+          }
+        ],
+        "memory_current": 638763008,
+        "anon": 281796608,
+        "file": 258326528,
+        "sock": 135168,
+        "slab": 95526616,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 77.30785749299685,
+        "VmRSS": 300280,
+        "VmHWM": 306756,
+        "Threads": 7,
+        "cpu_seconds": 55.13,
+        "fds": 15951,
+        "max_process_fds": 15951,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 306756,
+            "VmRSS": 300280,
+            "Threads": 7,
+            "cpu_seconds": 55.13,
+            "fds": 15951
+          }
+        ],
+        "memory_current": 636420096,
+        "anon": 279805952,
+        "file": 258371584,
+        "sock": 65536,
+        "slab": 95303744,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 79.3298417440019,
+        "VmRSS": 302668,
+        "VmHWM": 306756,
+        "Threads": 7,
+        "cpu_seconds": 56.92,
+        "fds": 16049,
+        "max_process_fds": 16049,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 306756,
+            "VmRSS": 302668,
+            "Threads": 7,
+            "cpu_seconds": 56.92,
+            "fds": 16049
+          }
+        ],
+        "memory_current": 639238144,
+        "anon": 282230784,
+        "file": 258392064,
+        "sock": 176128,
+        "slab": 95692320,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 81.35574407799868,
+        "VmRSS": 300196,
+        "VmHWM": 306756,
+        "Threads": 7,
+        "cpu_seconds": 58.78,
+        "fds": 15911,
+        "max_process_fds": 15911,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 306756,
+            "VmRSS": 300196,
+            "Threads": 7,
+            "cpu_seconds": 58.78,
+            "fds": 15911
+          }
+        ],
+        "memory_current": 636264448,
+        "anon": 279650304,
+        "file": 258441216,
+        "sock": 180224,
+        "slab": 95249248,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 83.37766057899717,
+        "VmRSS": 300156,
+        "VmHWM": 307416,
+        "Threads": 7,
+        "cpu_seconds": 60.55,
+        "fds": 15964,
+        "max_process_fds": 15964,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 307416,
+            "VmRSS": 300156,
+            "Threads": 7,
+            "cpu_seconds": 60.55,
+            "fds": 15964
+          }
+        ],
+        "memory_current": 636325888,
+        "anon": 279547904,
+        "file": 258457600,
+        "sock": 49152,
+        "slab": 95401512,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 85.40456537199498,
+        "VmRSS": 300160,
+        "VmHWM": 307416,
+        "Threads": 7,
+        "cpu_seconds": 62.39,
+        "fds": 15972,
+        "max_process_fds": 15972,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 307416,
+            "VmRSS": 300160,
+            "Threads": 7,
+            "cpu_seconds": 62.39,
+            "fds": 15972
+          }
+        ],
+        "memory_current": 636485632,
+        "anon": 279494656,
+        "file": 258510848,
+        "sock": 196608,
+        "slab": 95473792,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 87.43960833099845,
+        "VmRSS": 298800,
+        "VmHWM": 307416,
+        "Threads": 7,
+        "cpu_seconds": 64.24,
+        "fds": 15908,
+        "max_process_fds": 15908,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 307416,
+            "VmRSS": 298800,
+            "Threads": 7,
+            "cpu_seconds": 64.24,
+            "fds": 15908
+          }
+        ],
+        "memory_current": 634814464,
+        "anon": 278052864,
+        "file": 258560000,
+        "sock": 380928,
+        "slab": 95149040,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 89.46105791599985,
+        "VmRSS": 301608,
+        "VmHWM": 307416,
+        "Threads": 7,
+        "cpu_seconds": 66.04,
+        "fds": 15910,
+        "max_process_fds": 15910,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 307416,
+            "VmRSS": 301608,
+            "Threads": 7,
+            "cpu_seconds": 66.04,
+            "fds": 15910
+          }
+        ],
+        "memory_current": 637227008,
+        "anon": 280907776,
+        "file": 258580480,
+        "sock": 24576,
+        "slab": 95173504,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 92.13884658399911,
+        "VmRSS": 302672,
+        "VmHWM": 307416,
+        "Threads": 7,
+        "cpu_seconds": 68.42,
+        "fds": 15890,
+        "max_process_fds": 15890,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 307416,
+            "VmRSS": 302672,
+            "Threads": 7,
+            "cpu_seconds": 68.42,
+            "fds": 15890
+          }
+        ],
+        "memory_current": 638509056,
+        "anon": 281931776,
+        "file": 258646016,
+        "sock": 180224,
+        "slab": 95101216,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 94.1600072930014,
+        "VmRSS": 301804,
+        "VmHWM": 307416,
+        "Threads": 7,
+        "cpu_seconds": 70.26,
+        "fds": 15986,
+        "max_process_fds": 15986,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 307416,
+            "VmRSS": 301804,
+            "Threads": 7,
+            "cpu_seconds": 70.26,
+            "fds": 15986
+          }
+        ],
+        "memory_current": 638042112,
+        "anon": 281042944,
+        "file": 258662400,
+        "sock": 90112,
+        "slab": 95471136,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 96.19032296099613,
+        "VmRSS": 305604,
+        "VmHWM": 307416,
+        "Threads": 7,
+        "cpu_seconds": 72.13,
+        "fds": 15993,
+        "max_process_fds": 15993,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 307416,
+            "VmRSS": 305604,
+            "Threads": 7,
+            "cpu_seconds": 72.13,
+            "fds": 15993
+          }
+        ],
+        "memory_current": 641708032,
+        "anon": 284880896,
+        "file": 258703360,
+        "sock": 45056,
+        "slab": 95521352,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 98.214284210997,
+        "VmRSS": 300992,
+        "VmHWM": 307416,
+        "Threads": 7,
+        "cpu_seconds": 73.99,
+        "fds": 16030,
+        "max_process_fds": 16030,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 307416,
+            "VmRSS": 300992,
+            "Threads": 7,
+            "cpu_seconds": 73.99,
+            "fds": 16030
+          }
+        ],
+        "memory_current": 637251584,
+        "anon": 280133632,
+        "file": 258748416,
+        "sock": 258048,
+        "slab": 95636432,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 100.247143003995,
+        "VmRSS": 299484,
+        "VmHWM": 307416,
+        "Threads": 7,
+        "cpu_seconds": 75.85,
+        "fds": 15816,
+        "max_process_fds": 15816,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 307416,
+            "VmRSS": 299484,
+            "Threads": 7,
+            "cpu_seconds": 75.85,
+            "fds": 15816
+          }
+        ],
+        "memory_current": 635060224,
+        "anon": 278556672,
+        "file": 258764800,
+        "sock": 176128,
+        "slab": 94907744,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 102.26276900499943,
+        "VmRSS": 297552,
+        "VmHWM": 307416,
+        "Threads": 7,
+        "cpu_seconds": 77.74,
+        "fds": 16065,
+        "max_process_fds": 16065,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 307416,
+            "VmRSS": 297552,
+            "Threads": 7,
+            "cpu_seconds": 77.74,
+            "fds": 16065
+          }
+        ],
+        "memory_current": 633905152,
+        "anon": 276533248,
+        "file": 258809856,
+        "sock": 8192,
+        "slab": 95780944,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 104.2939129639999,
+        "VmRSS": 297096,
+        "VmHWM": 307416,
+        "Threads": 7,
+        "cpu_seconds": 79.57,
+        "fds": 15971,
+        "max_process_fds": 15971,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 307416,
+            "VmRSS": 297096,
+            "Threads": 7,
+            "cpu_seconds": 79.57,
+            "fds": 15971
+          }
+        ],
+        "memory_current": 631136256,
+        "anon": 273444864,
+        "file": 258830336,
+        "sock": 585728,
+        "slab": 95385552,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 106.32026267299807,
+        "VmRSS": 301068,
+        "VmHWM": 307416,
+        "Threads": 7,
+        "cpu_seconds": 81.41,
+        "fds": 15774,
+        "max_process_fds": 15774,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 307416,
+            "VmRSS": 301068,
+            "Threads": 7,
+            "cpu_seconds": 81.41,
+            "fds": 15774
+          }
+        ],
+        "memory_current": 634400768,
+        "anon": 277966848,
+        "file": 258879488,
+        "sock": 73728,
+        "slab": 94736376,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 108.3457850909981,
+        "VmRSS": 300108,
+        "VmHWM": 307416,
+        "Threads": 7,
+        "cpu_seconds": 83.21,
+        "fds": 15936,
+        "max_process_fds": 15936,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 307416,
+            "VmRSS": 300108,
+            "Threads": 7,
+            "cpu_seconds": 83.21,
+            "fds": 15936
+          }
+        ],
+        "memory_current": 636129280,
+        "anon": 279064576,
+        "file": 258895872,
+        "sock": 204800,
+        "slab": 95314464,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 110.38028638399555,
+        "VmRSS": 295216,
+        "VmHWM": 307416,
+        "Threads": 7,
+        "cpu_seconds": 85.0,
+        "fds": 15980,
+        "max_process_fds": 15980,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 307416,
+            "VmRSS": 295216,
+            "Threads": 7,
+            "cpu_seconds": 85.0,
+            "fds": 15980
+          }
+        ],
+        "memory_current": 631554048,
+        "anon": 274030592,
+        "file": 258936832,
+        "sock": 204800,
+        "slab": 95502032,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 112.40076188500097,
+        "VmRSS": 300820,
+        "VmHWM": 307416,
+        "Threads": 7,
+        "cpu_seconds": 86.83,
+        "fds": 15924,
+        "max_process_fds": 15924,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 307416,
+            "VmRSS": 300820,
+            "Threads": 7,
+            "cpu_seconds": 86.83,
+            "fds": 15924
+          }
+        ],
+        "memory_current": 636624896,
+        "anon": 279719936,
+        "file": 258977792,
+        "sock": 86016,
+        "slab": 95236376,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 114.4222051359975,
+        "VmRSS": 297520,
+        "VmHWM": 307416,
+        "Threads": 7,
+        "cpu_seconds": 88.66,
+        "fds": 15978,
+        "max_process_fds": 15978,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 307416,
+            "VmRSS": 297520,
+            "Threads": 7,
+            "cpu_seconds": 88.66,
+            "fds": 15978
+          }
+        ],
+        "memory_current": 633466880,
+        "anon": 276324352,
+        "file": 259002368,
+        "sock": 0,
+        "slab": 95430640,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 116.44783313699736,
+        "VmRSS": 300900,
+        "VmHWM": 307416,
+        "Threads": 7,
+        "cpu_seconds": 90.45,
+        "fds": 15895,
+        "max_process_fds": 15895,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 307416,
+            "VmRSS": 300900,
+            "Threads": 7,
+            "cpu_seconds": 90.45,
+            "fds": 15895
+          }
+        ],
+        "memory_current": 636534784,
+        "anon": 279732224,
+        "file": 259047424,
+        "sock": 20480,
+        "slab": 95114112,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 118.47201234599925,
+        "VmRSS": 301156,
+        "VmHWM": 307416,
+        "Threads": 7,
+        "cpu_seconds": 92.3,
+        "fds": 15973,
+        "max_process_fds": 15973,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 307416,
+            "VmRSS": 301156,
+            "Threads": 7,
+            "cpu_seconds": 92.3,
+            "fds": 15973
+          }
+        ],
+        "memory_current": 637026304,
+        "anon": 279982080,
+        "file": 259072000,
+        "sock": 32768,
+        "slab": 95380432,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 120.51106197199988,
+        "VmRSS": 294784,
+        "VmHWM": 307416,
+        "Threads": 7,
+        "cpu_seconds": 94.15,
+        "fds": 15908,
+        "max_process_fds": 15908,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 307416,
+            "VmRSS": 294784,
+            "Threads": 7,
+            "cpu_seconds": 94.15,
+            "fds": 15908
+          }
+        ],
+        "memory_current": 630075392,
+        "anon": 273416192,
+        "file": 259112960,
+        "sock": 32768,
+        "slab": 95074168,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 123.13883551499748,
+        "VmRSS": 300520,
+        "VmHWM": 307416,
+        "Threads": 7,
+        "cpu_seconds": 96.52,
+        "fds": 16018,
+        "max_process_fds": 16018,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 307416,
+            "VmRSS": 300520,
+            "Threads": 7,
+            "cpu_seconds": 96.52,
+            "fds": 16018
+          }
+        ],
+        "memory_current": 636805120,
+        "anon": 279261184,
+        "file": 259149824,
+        "sock": 102400,
+        "slab": 95604048,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 125.15418572400085,
+        "VmRSS": 299068,
+        "VmHWM": 307416,
+        "Threads": 7,
+        "cpu_seconds": 98.38,
+        "fds": 15977,
+        "max_process_fds": 15977,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 307416,
+            "VmRSS": 299068,
+            "Threads": 7,
+            "cpu_seconds": 98.38,
+            "fds": 15977
+          }
+        ],
+        "memory_current": 634880000,
+        "anon": 277733376,
+        "file": 259194880,
+        "sock": 4096,
+        "slab": 95318184,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 127.19085389199608,
+        "VmRSS": 294284,
+        "VmHWM": 307416,
+        "Threads": 7,
+        "cpu_seconds": 100.22,
+        "fds": 16059,
+        "max_process_fds": 16059,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 307416,
+            "VmRSS": 294284,
+            "Threads": 7,
+            "cpu_seconds": 100.22,
+            "fds": 16059
+          }
+        ],
+        "memory_current": 630497280,
+        "anon": 272437248,
+        "file": 259211264,
+        "sock": 73728,
+        "slab": 95817776,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 129.215176892998,
+        "VmRSS": 296632,
+        "VmHWM": 307416,
+        "Threads": 7,
+        "cpu_seconds": 102.08,
+        "fds": 16056,
+        "max_process_fds": 16056,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 307416,
+            "VmRSS": 296632,
+            "Threads": 7,
+            "cpu_seconds": 102.08,
+            "fds": 16056
+          }
+        ],
+        "memory_current": 633233408,
+        "anon": 275173376,
+        "file": 259256320,
+        "sock": 229376,
+        "slab": 95735184,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 131.23571547699976,
+        "VmRSS": 296360,
+        "VmHWM": 307416,
+        "Threads": 7,
+        "cpu_seconds": 103.93,
+        "fds": 16038,
+        "max_process_fds": 16038,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 307416,
+            "VmRSS": 296360,
+            "Threads": 7,
+            "cpu_seconds": 103.93,
+            "fds": 16038
+          }
+        ],
+        "memory_current": 632115200,
+        "anon": 274845696,
+        "file": 259305472,
+        "sock": 61440,
+        "slab": 95587088,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 133.26589139499993,
+        "VmRSS": 297916,
+        "VmHWM": 307416,
+        "Threads": 7,
+        "cpu_seconds": 105.77,
+        "fds": 16078,
+        "max_process_fds": 16078,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 307416,
+            "VmRSS": 297916,
+            "Threads": 7,
+            "cpu_seconds": 105.77,
+            "fds": 16078
+          }
+        ],
+        "memory_current": 634122240,
+        "anon": 276422656,
+        "file": 259325952,
+        "sock": 94208,
+        "slab": 95845792,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 135.2970585619987,
+        "VmRSS": 301976,
+        "VmHWM": 307416,
+        "Threads": 7,
+        "cpu_seconds": 107.66,
+        "fds": 16032,
+        "max_process_fds": 16032,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 307416,
+            "VmRSS": 301976,
+            "Threads": 7,
+            "cpu_seconds": 107.66,
+            "fds": 16032
+          }
+        ],
+        "memory_current": 638763008,
+        "anon": 281161728,
+        "file": 259375104,
+        "sock": 69632,
+        "slab": 95667376,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 137.32225506300165,
+        "VmRSS": 298780,
+        "VmHWM": 307416,
+        "Threads": 7,
+        "cpu_seconds": 109.52,
+        "fds": 15966,
+        "max_process_fds": 15966,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 307416,
+            "VmRSS": 298780,
+            "Threads": 7,
+            "cpu_seconds": 109.52,
+            "fds": 15966
+          }
+        ],
+        "memory_current": 634843136,
+        "anon": 277229568,
+        "file": 259411968,
+        "sock": 180224,
+        "slab": 95448208,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 139.34466881299886,
+        "VmRSS": 299648,
+        "VmHWM": 307416,
+        "Threads": 7,
+        "cpu_seconds": 111.34,
+        "fds": 16077,
+        "max_process_fds": 16077,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 307416,
+            "VmRSS": 299648,
+            "Threads": 7,
+            "cpu_seconds": 111.34,
+            "fds": 16077
+          }
+        ],
+        "memory_current": 636370944,
+        "anon": 278093824,
+        "file": 259436544,
+        "sock": 274432,
+        "slab": 95860440,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 141.37825010599772,
+        "VmRSS": 300324,
+        "VmHWM": 307416,
+        "Threads": 7,
+        "cpu_seconds": 113.23,
+        "fds": 16011,
+        "max_process_fds": 16011,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 307416,
+            "VmRSS": 300324,
+            "Threads": 7,
+            "cpu_seconds": 113.23,
+            "fds": 16011
+          }
+        ],
+        "memory_current": 636657664,
+        "anon": 278740992,
+        "file": 259481600,
+        "sock": 106496,
+        "slab": 95594528,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 143.4034412319961,
+        "VmRSS": 299312,
+        "VmHWM": 307416,
+        "Threads": 7,
+        "cpu_seconds": 115.04,
+        "fds": 15966,
+        "max_process_fds": 15966,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 307416,
+            "VmRSS": 299312,
+            "Threads": 7,
+            "cpu_seconds": 115.04,
+            "fds": 15966
+          }
+        ],
+        "memory_current": 635764736,
+        "anon": 277688320,
+        "file": 259497984,
+        "sock": 294912,
+        "slab": 95419256,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 145.43091835799714,
+        "VmRSS": 302224,
+        "VmHWM": 307416,
+        "Threads": 7,
+        "cpu_seconds": 116.93,
+        "fds": 15835,
+        "max_process_fds": 15835,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 307416,
+            "VmRSS": 302224,
+            "Threads": 7,
+            "cpu_seconds": 116.93,
+            "fds": 15835
+          }
+        ],
+        "memory_current": 637636608,
+        "anon": 280625152,
+        "file": 259543040,
+        "sock": 77824,
+        "slab": 94922256,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 147.4571222759987,
+        "VmRSS": 297036,
+        "VmHWM": 307416,
+        "Threads": 7,
+        "cpu_seconds": 118.78,
+        "fds": 15788,
+        "max_process_fds": 15788,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 307416,
+            "VmRSS": 297036,
+            "Threads": 7,
+            "cpu_seconds": 118.78,
+            "fds": 15788
+          }
+        ],
+        "memory_current": 628162560,
+        "anon": 270622720,
+        "file": 259563520,
+        "sock": 344064,
+        "slab": 94793472,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 149.47983427700092,
+        "VmRSS": 301632,
+        "VmHWM": 307416,
+        "Threads": 7,
+        "cpu_seconds": 120.58,
+        "fds": 15848,
+        "max_process_fds": 15848,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 307416,
+            "VmRSS": 301632,
+            "Threads": 7,
+            "cpu_seconds": 120.58,
+            "fds": 15848
+          }
+        ],
+        "memory_current": 637419520,
+        "anon": 279953408,
+        "file": 259608576,
+        "sock": 81920,
+        "slab": 95020896,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 152.1428681949983,
+        "VmRSS": 295500,
+        "VmHWM": 307416,
+        "Threads": 7,
+        "cpu_seconds": 123.01,
+        "fds": 15966,
+        "max_process_fds": 15966,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 307416,
+            "VmRSS": 295500,
+            "Threads": 7,
+            "cpu_seconds": 123.01,
+            "fds": 15966
+          }
+        ],
+        "memory_current": 631263232,
+        "anon": 273739776,
+        "file": 259645440,
+        "sock": 135168,
+        "slab": 95367200,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 154.1720113209958,
+        "VmRSS": 301624,
+        "VmHWM": 307416,
+        "Threads": 7,
+        "cpu_seconds": 124.92,
+        "fds": 15972,
+        "max_process_fds": 15972,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 307416,
+            "VmRSS": 301624,
+            "Threads": 7,
+            "cpu_seconds": 124.92,
+            "fds": 15972
+          }
+        ],
+        "memory_current": 637440000,
+        "anon": 279875584,
+        "file": 259682304,
+        "sock": 4096,
+        "slab": 95398032,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 156.20683948799706,
+        "VmRSS": 299960,
+        "VmHWM": 307416,
+        "Threads": 7,
+        "cpu_seconds": 126.78,
+        "fds": 16144,
+        "max_process_fds": 16144,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 307416,
+            "VmRSS": 299960,
+            "Threads": 7,
+            "cpu_seconds": 126.78,
+            "fds": 16144
+          }
+        ],
+        "memory_current": 637206528,
+        "anon": 278147072,
+        "file": 259706880,
+        "sock": 630784,
+        "slab": 96081632,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 158.22584298899892,
+        "VmRSS": 311144,
+        "VmHWM": 311144,
+        "Threads": 7,
+        "cpu_seconds": 128.57,
+        "fds": 15861,
+        "max_process_fds": 15861,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 311144,
+            "VmRSS": 311144,
+            "Threads": 7,
+            "cpu_seconds": 128.57,
+            "fds": 15861
+          }
+        ],
+        "memory_current": 647716864,
+        "anon": 289992704,
+        "file": 259756032,
+        "sock": 114688,
+        "slab": 95194216,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 160.25922994800203,
+        "VmRSS": 301356,
+        "VmHWM": 311408,
+        "Threads": 7,
+        "cpu_seconds": 130.44,
+        "fds": 15761,
+        "max_process_fds": 15761,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 311408,
+            "VmRSS": 301356,
+            "Threads": 7,
+            "cpu_seconds": 130.44,
+            "fds": 15761
+          }
+        ],
+        "memory_current": 636719104,
+        "anon": 279506944,
+        "file": 259776512,
+        "sock": 233472,
+        "slab": 94698752,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 162.2869536579965,
+        "VmRSS": 305940,
+        "VmHWM": 311408,
+        "Threads": 7,
+        "cpu_seconds": 132.29,
+        "fds": 16150,
+        "max_process_fds": 16150,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 311408,
+            "VmRSS": 305940,
+            "Threads": 7,
+            "cpu_seconds": 132.29,
+            "fds": 16150
+          }
+        ],
+        "memory_current": 643166208,
+        "anon": 284180480,
+        "file": 259821568,
+        "sock": 262144,
+        "slab": 96224272,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 164.31884069999796,
+        "VmRSS": 305128,
+        "VmHWM": 311408,
+        "Threads": 7,
+        "cpu_seconds": 134.16,
+        "fds": 16034,
+        "max_process_fds": 16034,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 311408,
+            "VmRSS": 305128,
+            "Threads": 7,
+            "cpu_seconds": 134.16,
+            "fds": 16034
+          }
+        ],
+        "memory_current": 641404928,
+        "anon": 283287552,
+        "file": 259862528,
+        "sock": 4096,
+        "slab": 95701096,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 166.34389757600002,
+        "VmRSS": 304524,
+        "VmHWM": 311408,
+        "Threads": 7,
+        "cpu_seconds": 136.01,
+        "fds": 16009,
+        "max_process_fds": 16009,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 311408,
+            "VmRSS": 304524,
+            "Threads": 7,
+            "cpu_seconds": 136.01,
+            "fds": 16009
+          }
+        ],
+        "memory_current": 641126400,
+        "anon": 282652672,
+        "file": 259878912,
+        "sock": 245760,
+        "slab": 95587088,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 168.3760270349958,
+        "VmRSS": 299656,
+        "VmHWM": 311408,
+        "Threads": 7,
+        "cpu_seconds": 137.87,
+        "fds": 16002,
+        "max_process_fds": 16002,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 311408,
+            "VmRSS": 299656,
+            "Threads": 7,
+            "cpu_seconds": 137.87,
+            "fds": 16002
+          }
+        ],
+        "memory_current": 636006400,
+        "anon": 277635072,
+        "file": 259923968,
+        "sock": 32768,
+        "slab": 95593632,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 170.39652128599846,
+        "VmRSS": 301852,
+        "VmHWM": 311408,
+        "Threads": 7,
+        "cpu_seconds": 139.69,
+        "fds": 16087,
+        "max_process_fds": 16087,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 311408,
+            "VmRSS": 301852,
+            "Threads": 7,
+            "cpu_seconds": 139.69,
+            "fds": 16087
+          }
+        ],
+        "memory_current": 639082496,
+        "anon": 279863296,
+        "file": 259944448,
+        "sock": 704512,
+        "slab": 95869360,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 172.41773732900037,
+        "VmRSS": 309348,
+        "VmHWM": 311408,
+        "Threads": 7,
+        "cpu_seconds": 141.6,
+        "fds": 15780,
+        "max_process_fds": 15780,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 311408,
+            "VmRSS": 309348,
+            "Threads": 7,
+            "cpu_seconds": 141.6,
+            "fds": 15780
+          }
+        ],
+        "memory_current": 644632576,
+        "anon": 287375360,
+        "file": 259989504,
+        "sock": 40960,
+        "slab": 94702496,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 174.44861341299838,
+        "VmRSS": 300120,
+        "VmHWM": 311408,
+        "Threads": 7,
+        "cpu_seconds": 143.47,
+        "fds": 15873,
+        "max_process_fds": 15873,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 311408,
+            "VmRSS": 300120,
+            "Threads": 7,
+            "cpu_seconds": 143.47,
+            "fds": 15873
+          }
+        ],
+        "memory_current": 635817984,
+        "anon": 277897216,
+        "file": 260005888,
+        "sock": 0,
+        "slab": 95091120,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 176.46968803899654,
+        "VmRSS": 305500,
+        "VmHWM": 311408,
+        "Threads": 7,
+        "cpu_seconds": 145.35,
+        "fds": 16068,
+        "max_process_fds": 16068,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 311408,
+            "VmRSS": 305500,
+            "Threads": 7,
+            "cpu_seconds": 145.35,
+            "fds": 16068
+          }
+        ],
+        "memory_current": 641974272,
+        "anon": 283369472,
+        "file": 260046848,
+        "sock": 102400,
+        "slab": 95850808,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 178.50183716500032,
+        "VmRSS": 304236,
+        "VmHWM": 311408,
+        "Threads": 7,
+        "cpu_seconds": 147.22,
+        "fds": 16011,
+        "max_process_fds": 16011,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 311408,
+            "VmRSS": 304236,
+            "Threads": 7,
+            "cpu_seconds": 147.22,
+            "fds": 16011
+          }
+        ],
+        "memory_current": 640647168,
+        "anon": 282025984,
+        "file": 260091904,
+        "sock": 176128,
+        "slab": 95613368,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 180.52886549899995,
+        "VmRSS": 305804,
+        "VmHWM": 311408,
+        "Threads": 7,
+        "cpu_seconds": 149.07,
+        "fds": 15986,
+        "max_process_fds": 15986,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 311408,
+            "VmRSS": 305804,
+            "Threads": 7,
+            "cpu_seconds": 149.07,
+            "fds": 15986
+          }
+        ],
+        "memory_current": 642338816,
+        "anon": 283615232,
+        "file": 260112384,
+        "sock": 479232,
+        "slab": 95501232,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 183.1552528339962,
+        "VmRSS": 304920,
+        "VmHWM": 311408,
+        "Threads": 7,
+        "cpu_seconds": 151.51,
+        "fds": 16011,
+        "max_process_fds": 16011,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 311408,
+            "VmRSS": 304920,
+            "Threads": 7,
+            "cpu_seconds": 151.51,
+            "fds": 16011
+          }
+        ],
+        "memory_current": 641847296,
+        "anon": 282681344,
+        "file": 260153344,
+        "sock": 581632,
+        "slab": 95594792,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 185.18084312699648,
+        "VmRSS": 302692,
+        "VmHWM": 311408,
+        "Threads": 7,
+        "cpu_seconds": 153.38,
+        "fds": 16084,
+        "max_process_fds": 16084,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 311408,
+            "VmRSS": 302692,
+            "Threads": 7,
+            "cpu_seconds": 153.38,
+            "fds": 16084
+          }
+        ],
+        "memory_current": 639401984,
+        "anon": 280342528,
+        "file": 260198400,
+        "sock": 258048,
+        "slab": 95902416,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 187.2091272530015,
+        "VmRSS": 300136,
+        "VmHWM": 311408,
+        "Threads": 7,
+        "cpu_seconds": 155.26,
+        "fds": 15754,
+        "max_process_fds": 15754,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 311408,
+            "VmRSS": 300136,
+            "Threads": 7,
+            "cpu_seconds": 155.26,
+            "fds": 15754
+          }
+        ],
+        "memory_current": 635289600,
+        "anon": 277700608,
+        "file": 260218880,
+        "sock": 114688,
+        "slab": 94635032,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 189.23094525399938,
+        "VmRSS": 308540,
+        "VmHWM": 311408,
+        "Threads": 7,
+        "cpu_seconds": 157.1,
+        "fds": 15851,
+        "max_process_fds": 15851,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 311408,
+            "VmRSS": 308540,
+            "Threads": 7,
+            "cpu_seconds": 157.1,
+            "fds": 15851
+          }
+        ],
+        "memory_current": 644186112,
+        "anon": 286257152,
+        "file": 260268032,
+        "sock": 98304,
+        "slab": 95015328,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 191.26084158799495,
+        "VmRSS": 309412,
+        "VmHWM": 311408,
+        "Threads": 7,
+        "cpu_seconds": 158.94,
+        "fds": 15817,
+        "max_process_fds": 15817,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 311408,
+            "VmRSS": 309412,
+            "Threads": 7,
+            "cpu_seconds": 158.94,
+            "fds": 15817
+          }
+        ],
+        "memory_current": 645308416,
+        "anon": 287133696,
+        "file": 260284416,
+        "sock": 131072,
+        "slab": 94917344,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 193.29084971400152,
+        "VmRSS": 304120,
+        "VmHWM": 311408,
+        "Threads": 7,
+        "cpu_seconds": 160.79,
+        "fds": 16086,
+        "max_process_fds": 16086,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 311408,
+            "VmRSS": 304120,
+            "Threads": 7,
+            "cpu_seconds": 160.79,
+            "fds": 16086
+          }
+        ],
+        "memory_current": 641110016,
+        "anon": 281669632,
+        "file": 260329472,
+        "sock": 585728,
+        "slab": 95885416,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 195.32023404799838,
+        "VmRSS": 303316,
+        "VmHWM": 311408,
+        "Threads": 7,
+        "cpu_seconds": 162.68,
+        "fds": 15977,
+        "max_process_fds": 15977,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 311408,
+            "VmRSS": 303316,
+            "Threads": 7,
+            "cpu_seconds": 162.68,
+            "fds": 15977
+          }
+        ],
+        "memory_current": 639692800,
+        "anon": 280821760,
+        "file": 260370432,
+        "sock": 163840,
+        "slab": 95510472,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 197.34684150700195,
+        "VmRSS": 303900,
+        "VmHWM": 311408,
+        "Threads": 7,
+        "cpu_seconds": 164.52,
+        "fds": 16029,
+        "max_process_fds": 16029,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 311408,
+            "VmRSS": 303900,
+            "Threads": 7,
+            "cpu_seconds": 164.52,
+            "fds": 16029
+          }
+        ],
+        "memory_current": 640704512,
+        "anon": 281382912,
+        "file": 260390912,
+        "sock": 577536,
+        "slab": 95743152,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 199.37271575799969,
+        "VmRSS": 306568,
+        "VmHWM": 311408,
+        "Threads": 7,
+        "cpu_seconds": 166.38,
+        "fds": 15997,
+        "max_process_fds": 15997,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 311408,
+            "VmRSS": 306568,
+            "Threads": 7,
+            "cpu_seconds": 166.38,
+            "fds": 15997
+          }
+        ],
+        "memory_current": 642863104,
+        "anon": 284073984,
+        "file": 260431872,
+        "sock": 61440,
+        "slab": 95602296,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 201.40520596699935,
+        "VmRSS": 305936,
+        "VmHWM": 311408,
+        "Threads": 7,
+        "cpu_seconds": 168.25,
+        "fds": 15947,
+        "max_process_fds": 15947,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 311408,
+            "VmRSS": 305936,
+            "Threads": 7,
+            "cpu_seconds": 168.25,
+            "fds": 15947
+          }
+        ],
+        "memory_current": 642162688,
+        "anon": 283406336,
+        "file": 260476928,
+        "sock": 8192,
+        "slab": 95352952,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 203.4355840520002,
+        "VmRSS": 306652,
+        "VmHWM": 311408,
+        "Threads": 7,
+        "cpu_seconds": 170.08,
+        "fds": 15942,
+        "max_process_fds": 15942,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 311408,
+            "VmRSS": 306652,
+            "Threads": 7,
+            "cpu_seconds": 170.08,
+            "fds": 15942
+          }
+        ],
+        "memory_current": 643047424,
+        "anon": 284094464,
+        "file": 260501504,
+        "sock": 102400,
+        "slab": 95367120,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 205.4655939689983,
+        "VmRSS": 307980,
+        "VmHWM": 311408,
+        "Threads": 7,
+        "cpu_seconds": 171.98,
+        "fds": 16110,
+        "max_process_fds": 16110,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 311408,
+            "VmRSS": 307980,
+            "Threads": 7,
+            "cpu_seconds": 171.98,
+            "fds": 16110
+          }
+        ],
+        "memory_current": 644771840,
+        "anon": 285421568,
+        "file": 260534272,
+        "sock": 36864,
+        "slab": 96005680,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 207.49109734499507,
+        "VmRSS": 302800,
+        "VmHWM": 311408,
+        "Threads": 7,
+        "cpu_seconds": 173.86,
+        "fds": 15751,
+        "max_process_fds": 15751,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 311408,
+            "VmRSS": 302800,
+            "Threads": 7,
+            "cpu_seconds": 173.86,
+            "fds": 15751
+          }
+        ],
+        "memory_current": 638390272,
+        "anon": 280096768,
+        "file": 260554752,
+        "sock": 307200,
+        "slab": 94635632,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 209.51484117999644,
+        "VmRSS": 305244,
+        "VmHWM": 311408,
+        "Threads": 7,
+        "cpu_seconds": 175.69,
+        "fds": 15912,
+        "max_process_fds": 15912,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 311408,
+            "VmRSS": 305244,
+            "Threads": 7,
+            "cpu_seconds": 175.69,
+            "fds": 15912
+          }
+        ],
+        "memory_current": 641228800,
+        "anon": 282558464,
+        "file": 260595712,
+        "sock": 61440,
+        "slab": 95237096,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 212.15575143099704,
+        "VmRSS": 303916,
+        "VmHWM": 311408,
+        "Threads": 7,
+        "cpu_seconds": 178.08,
+        "fds": 16032,
+        "max_process_fds": 16032,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 311408,
+            "VmRSS": 303916,
+            "Threads": 7,
+            "cpu_seconds": 178.08,
+            "fds": 16032
+          }
+        ],
+        "memory_current": 640335872,
+        "anon": 281161728,
+        "file": 260640768,
+        "sock": 86016,
+        "slab": 95721456,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 214.18655397399561,
+        "VmRSS": 304412,
+        "VmHWM": 311408,
+        "Threads": 7,
+        "cpu_seconds": 179.94,
+        "fds": 15991,
+        "max_process_fds": 15991,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 311408,
+            "VmRSS": 304412,
+            "Threads": 7,
+            "cpu_seconds": 179.94,
+            "fds": 15991
+          }
+        ],
+        "memory_current": 641040384,
+        "anon": 281645056,
+        "file": 260657152,
+        "sock": 266240,
+        "slab": 95557728,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 216.21583718300099,
+        "VmRSS": 310544,
+        "VmHWM": 311408,
+        "Threads": 7,
+        "cpu_seconds": 181.77,
+        "fds": 16176,
+        "max_process_fds": 16176,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 311408,
+            "VmRSS": 310544,
+            "Threads": 7,
+            "cpu_seconds": 181.77,
+            "fds": 16176
+          }
+        ],
+        "memory_current": 648118272,
+        "anon": 287879168,
+        "file": 260706304,
+        "sock": 667648,
+        "slab": 96238376,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 218.23883976700017,
+        "VmRSS": 308988,
+        "VmHWM": 311408,
+        "Threads": 7,
+        "cpu_seconds": 183.68,
+        "fds": 16008,
+        "max_process_fds": 16008,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 311408,
+            "VmRSS": 308988,
+            "Threads": 7,
+            "cpu_seconds": 183.68,
+            "fds": 16008
+          }
+        ],
+        "memory_current": 645586944,
+        "anon": 286240768,
+        "file": 260751360,
+        "sock": 368640,
+        "slab": 95618176,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 220.26836630999605,
+        "VmRSS": 305432,
+        "VmHWM": 315532,
+        "Threads": 7,
+        "cpu_seconds": 185.67,
+        "fds": 15638,
+        "max_process_fds": 15638,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 315532,
+            "VmRSS": 305432,
+            "Threads": 7,
+            "cpu_seconds": 185.67,
+            "fds": 15638
+          }
+        ],
+        "memory_current": 640262144,
+        "anon": 282587136,
+        "file": 260767744,
+        "sock": 102400,
+        "slab": 94337728,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 222.30286039399653,
+        "VmRSS": 312308,
+        "VmHWM": 315532,
+        "Threads": 7,
+        "cpu_seconds": 187.54,
+        "fds": 16086,
+        "max_process_fds": 16086,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 315532,
+            "VmRSS": 312308,
+            "Threads": 7,
+            "cpu_seconds": 187.54,
+            "fds": 16086
+          }
+        ],
+        "memory_current": 649207808,
+        "anon": 289570816,
+        "file": 260820992,
+        "sock": 204800,
+        "slab": 96089848,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 224.33535443699657,
+        "VmRSS": 309236,
+        "VmHWM": 315532,
+        "Threads": 7,
+        "cpu_seconds": 189.45,
+        "fds": 15866,
+        "max_process_fds": 15866,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 315532,
+            "VmRSS": 309236,
+            "Threads": 7,
+            "cpu_seconds": 189.45,
+            "fds": 15866
+          }
+        ],
+        "memory_current": 644968448,
+        "anon": 286408704,
+        "file": 260837376,
+        "sock": 0,
+        "slab": 95157824,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 226.35783681199973,
+        "VmRSS": 311496,
+        "VmHWM": 315532,
+        "Threads": 7,
+        "cpu_seconds": 191.33,
+        "fds": 15903,
+        "max_process_fds": 15903,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 315532,
+            "VmRSS": 311496,
+            "Threads": 7,
+            "cpu_seconds": 191.33,
+            "fds": 15903
+          }
+        ],
+        "memory_current": 647933952,
+        "anon": 288673792,
+        "file": 260886528,
+        "sock": 147456,
+        "slab": 95308872,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 228.37700731299992,
+        "VmRSS": 306248,
+        "VmHWM": 315532,
+        "Threads": 7,
+        "cpu_seconds": 193.21,
+        "fds": 16024,
+        "max_process_fds": 16024,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 315532,
+            "VmRSS": 306248,
+            "Threads": 7,
+            "cpu_seconds": 193.21,
+            "fds": 16024
+          }
+        ],
+        "memory_current": 642936832,
+        "anon": 283291648,
+        "file": 260902912,
+        "sock": 212992,
+        "slab": 95676368,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 230.40254968899535,
+        "VmRSS": 306104,
+        "VmHWM": 315532,
+        "Threads": 7,
+        "cpu_seconds": 195.09,
+        "fds": 16041,
+        "max_process_fds": 16041,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 315532,
+            "VmRSS": 306104,
+            "Threads": 7,
+            "cpu_seconds": 195.09,
+            "fds": 16041
+          }
+        ],
+        "memory_current": 642457600,
+        "anon": 283095040,
+        "file": 260952064,
+        "sock": 53248,
+        "slab": 95765296,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 232.4318359819954,
+        "VmRSS": 310080,
+        "VmHWM": 315532,
+        "Threads": 7,
+        "cpu_seconds": 196.96,
+        "fds": 16022,
+        "max_process_fds": 16022,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 315532,
+            "VmRSS": 310080,
+            "Threads": 7,
+            "cpu_seconds": 196.96,
+            "fds": 16022
+          }
+        ],
+        "memory_current": 646672384,
+        "anon": 287158272,
+        "file": 260988928,
+        "sock": 4096,
+        "slab": 95703624,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 234.45536060800077,
+        "VmRSS": 304740,
+        "VmHWM": 315532,
+        "Threads": 7,
+        "cpu_seconds": 198.82,
+        "fds": 15993,
+        "max_process_fds": 15993,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 315532,
+            "VmRSS": 304740,
+            "Threads": 7,
+            "cpu_seconds": 198.82,
+            "fds": 15993
+          }
+        ],
+        "memory_current": 641081344,
+        "anon": 281653248,
+        "file": 261005312,
+        "sock": 36864,
+        "slab": 95653648,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 236.47684523399948,
+        "VmRSS": 305228,
+        "VmHWM": 315532,
+        "Threads": 7,
+        "cpu_seconds": 200.62,
+        "fds": 15854,
+        "max_process_fds": 15854,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 315532,
+            "VmRSS": 305228,
+            "Threads": 7,
+            "cpu_seconds": 200.62,
+            "fds": 15854
+          }
+        ],
+        "memory_current": 641069056,
+        "anon": 282112000,
+        "file": 261046272,
+        "sock": 155648,
+        "slab": 95130880,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 238.50484106799559,
+        "VmRSS": 308512,
+        "VmHWM": 315532,
+        "Threads": 7,
+        "cpu_seconds": 202.52,
+        "fds": 16103,
+        "max_process_fds": 16103,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 315532,
+            "VmRSS": 308512,
+            "Threads": 7,
+            "cpu_seconds": 202.52,
+            "fds": 16103
+          }
+        ],
+        "memory_current": 645246976,
+        "anon": 285454336,
+        "file": 261066752,
+        "sock": 73728,
+        "slab": 96075328,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 240.52533781899547,
+        "VmRSS": 307100,
+        "VmHWM": 315532,
+        "Threads": 7,
+        "cpu_seconds": 204.35,
+        "fds": 16028,
+        "max_process_fds": 16028,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 315532,
+            "VmRSS": 307100,
+            "Threads": 7,
+            "cpu_seconds": 204.35,
+            "fds": 16028
+          }
+        ],
+        "memory_current": 643657728,
+        "anon": 283967488,
+        "file": 261107712,
+        "sock": 180224,
+        "slab": 95777200,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 243.1648370699986,
+        "VmRSS": 307336,
+        "VmHWM": 315532,
+        "Threads": 7,
+        "cpu_seconds": 206.72,
+        "fds": 16116,
+        "max_process_fds": 16116,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 315532,
+            "VmRSS": 307336,
+            "Threads": 7,
+            "cpu_seconds": 206.72,
+            "fds": 16116
+          }
+        ],
+        "memory_current": 644227072,
+        "anon": 284164096,
+        "file": 261152768,
+        "sock": 167936,
+        "slab": 96125272,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 245.1938386959955,
+        "VmRSS": 306696,
+        "VmHWM": 315532,
+        "Threads": 7,
+        "cpu_seconds": 208.54,
+        "fds": 16003,
+        "max_process_fds": 16003,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 315532,
+            "VmRSS": 306696,
+            "Threads": 7,
+            "cpu_seconds": 208.54,
+            "fds": 16003
+          }
+        ],
+        "memory_current": 643260416,
+        "anon": 283488256,
+        "file": 261201920,
+        "sock": 282624,
+        "slab": 95706144,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 247.22283619699738,
+        "VmRSS": 305012,
+        "VmHWM": 315532,
+        "Threads": 7,
+        "cpu_seconds": 210.43,
+        "fds": 15974,
+        "max_process_fds": 15974,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 315532,
+            "VmRSS": 305012,
+            "Threads": 7,
+            "cpu_seconds": 210.43,
+            "fds": 15974
+          }
+        ],
+        "memory_current": 641277952,
+        "anon": 281718784,
+        "file": 261222400,
+        "sock": 155648,
+        "slab": 95580936,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 249.25181119799527,
+        "VmRSS": 306688,
+        "VmHWM": 315532,
+        "Threads": 7,
+        "cpu_seconds": 212.27,
+        "fds": 15973,
+        "max_process_fds": 15973,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 315532,
+            "VmRSS": 306688,
+            "Threads": 7,
+            "cpu_seconds": 212.27,
+            "fds": 15973
+          }
+        ],
+        "memory_current": 643141632,
+        "anon": 283394048,
+        "file": 261263360,
+        "sock": 40960,
+        "slab": 95662720,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 251.27899407399673,
+        "VmRSS": 308628,
+        "VmHWM": 315532,
+        "Threads": 7,
+        "cpu_seconds": 214.17,
+        "fds": 15830,
+        "max_process_fds": 15830,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 315532,
+            "VmRSS": 308628,
+            "Threads": 7,
+            "cpu_seconds": 214.17,
+            "fds": 15830
+          }
+        ],
+        "memory_current": 644579328,
+        "anon": 285360128,
+        "file": 261283840,
+        "sock": 225280,
+        "slab": 94978984,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 253.30058024200116,
+        "VmRSS": 309696,
+        "VmHWM": 315532,
+        "Threads": 7,
+        "cpu_seconds": 216.03,
+        "fds": 15818,
+        "max_process_fds": 15818,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 315532,
+            "VmRSS": 309696,
+            "Threads": 7,
+            "cpu_seconds": 216.03,
+            "fds": 15818
+          }
+        ],
+        "memory_current": 645689344,
+        "anon": 286593024,
+        "file": 261332992,
+        "sock": 77824,
+        "slab": 94993064,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 255.33186070100055,
+        "VmRSS": 306072,
+        "VmHWM": 315532,
+        "Threads": 7,
+        "cpu_seconds": 217.92,
+        "fds": 16045,
+        "max_process_fds": 16045,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 315532,
+            "VmRSS": 306072,
+            "Threads": 7,
+            "cpu_seconds": 217.92,
+            "fds": 16045
+          }
+        ],
+        "memory_current": 642945024,
+        "anon": 282841088,
+        "file": 261373952,
+        "sock": 303104,
+        "slab": 96006024,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 257.3651016590011,
+        "VmRSS": 305180,
+        "VmHWM": 315532,
+        "Threads": 7,
+        "cpu_seconds": 219.76,
+        "fds": 15984,
+        "max_process_fds": 15984,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 315532,
+            "VmRSS": 305180,
+            "Threads": 7,
+            "cpu_seconds": 219.76,
+            "fds": 15984
+          }
+        ],
+        "memory_current": 641458176,
+        "anon": 281907200,
+        "file": 261394432,
+        "sock": 102400,
+        "slab": 95632112,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 259.3965905770019,
+        "VmRSS": 308176,
+        "VmHWM": 315532,
+        "Threads": 7,
+        "cpu_seconds": 221.64,
+        "fds": 15867,
+        "max_process_fds": 15867,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 315532,
+            "VmRSS": 308176,
+            "Threads": 7,
+            "cpu_seconds": 221.64,
+            "fds": 15867
+          }
+        ],
+        "memory_current": 644374528,
+        "anon": 284938240,
+        "file": 261435392,
+        "sock": 49152,
+        "slab": 95127112,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 261.43484791099763,
+        "VmRSS": 306412,
+        "VmHWM": 315532,
+        "Threads": 7,
+        "cpu_seconds": 223.54,
+        "fds": 16105,
+        "max_process_fds": 16105,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 315532,
+            "VmRSS": 306412,
+            "Threads": 7,
+            "cpu_seconds": 223.54,
+            "fds": 16105
+          }
+        ],
+        "memory_current": 643477504,
+        "anon": 283131904,
+        "file": 261480448,
+        "sock": 139264,
+        "slab": 96094440,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 263.46576020399516,
+        "VmRSS": 307664,
+        "VmHWM": 315532,
+        "Threads": 7,
+        "cpu_seconds": 225.38,
+        "fds": 16207,
+        "max_process_fds": 16207,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 315532,
+            "VmRSS": 307664,
+            "Threads": 7,
+            "cpu_seconds": 225.38,
+            "fds": 16207
+          }
+        ],
+        "memory_current": 645316608,
+        "anon": 284368896,
+        "file": 261496832,
+        "sock": 368640,
+        "slab": 96475952,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 265.4888739129965,
+        "VmRSS": 306576,
+        "VmHWM": 315532,
+        "Threads": 7,
+        "cpu_seconds": 227.26,
+        "fds": 15874,
+        "max_process_fds": 15874,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 315532,
+            "VmRSS": 306576,
+            "Threads": 7,
+            "cpu_seconds": 227.26,
+            "fds": 15874
+          }
+        ],
+        "memory_current": 642703360,
+        "anon": 283197440,
+        "file": 261541888,
+        "sock": 204800,
+        "slab": 95205256,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 267.5087571219992,
+        "VmRSS": 307780,
+        "VmHWM": 315532,
+        "Threads": 7,
+        "cpu_seconds": 229.2,
+        "fds": 15665,
+        "max_process_fds": 15665,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 315532,
+            "VmRSS": 307780,
+            "Threads": 7,
+            "cpu_seconds": 229.2,
+            "fds": 15665
+          }
+        ],
+        "memory_current": 644263936,
+        "anon": 284413952,
+        "file": 261566464,
+        "sock": 1306624,
+        "slab": 94424656,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 269.53883470699657,
+        "VmRSS": 304160,
+        "VmHWM": 315532,
+        "Threads": 7,
+        "cpu_seconds": 231.11,
+        "fds": 15996,
+        "max_process_fds": 15996,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 315532,
+            "VmRSS": 304160,
+            "Threads": 7,
+            "cpu_seconds": 231.11,
+            "fds": 15996
+          }
+        ],
+        "memory_current": 640692224,
+        "anon": 280662016,
+        "file": 261611520,
+        "sock": 114688,
+        "slab": 95732960,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 272.1628403750001,
+        "VmRSS": 311672,
+        "VmHWM": 315532,
+        "Threads": 7,
+        "cpu_seconds": 233.59,
+        "fds": 15951,
+        "max_process_fds": 15951,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 315532,
+            "VmRSS": 311672,
+            "Threads": 7,
+            "cpu_seconds": 233.59,
+            "fds": 15951
+          }
+        ],
+        "memory_current": 647958528,
+        "anon": 288305152,
+        "file": 261660672,
+        "sock": 12288,
+        "slab": 95504808,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 274.1890844590016,
+        "VmRSS": 303736,
+        "VmHWM": 315532,
+        "Threads": 7,
+        "cpu_seconds": 235.4,
+        "fds": 15814,
+        "max_process_fds": 15814,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 315532,
+            "VmRSS": 303736,
+            "Threads": 7,
+            "cpu_seconds": 235.4,
+            "fds": 15814
+          }
+        ],
+        "memory_current": 639549440,
+        "anon": 280133632,
+        "file": 261705728,
+        "sock": 94208,
+        "slab": 94978960,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 276.21495070999663,
+        "VmRSS": 312028,
+        "VmHWM": 315532,
+        "Threads": 7,
+        "cpu_seconds": 237.26,
+        "fds": 16077,
+        "max_process_fds": 16077,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 315532,
+            "VmRSS": 312028,
+            "Threads": 7,
+            "cpu_seconds": 237.26,
+            "fds": 16077
+          }
+        ],
+        "memory_current": 649170944,
+        "anon": 288604160,
+        "file": 261726208,
+        "sock": 143360,
+        "slab": 95997160,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 278.2437020860016,
+        "VmRSS": 304560,
+        "VmHWM": 315532,
+        "Threads": 7,
+        "cpu_seconds": 239.12,
+        "fds": 16014,
+        "max_process_fds": 16014,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 315532,
+            "VmRSS": 304560,
+            "Threads": 7,
+            "cpu_seconds": 239.12,
+            "fds": 16014
+          }
+        ],
+        "memory_current": 641392640,
+        "anon": 280920064,
+        "file": 261763072,
+        "sock": 229376,
+        "slab": 95753056,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 280.2649562529987,
+        "VmRSS": 304980,
+        "VmHWM": 315532,
+        "Threads": 7,
+        "cpu_seconds": 240.96,
+        "fds": 15915,
+        "max_process_fds": 15915,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 315532,
+            "VmRSS": 304980,
+            "Threads": 7,
+            "cpu_seconds": 240.96,
+            "fds": 15915
+          }
+        ],
+        "memory_current": 641323008,
+        "anon": 281329664,
+        "file": 261783552,
+        "sock": 61440,
+        "slab": 95382424,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 282.28888937900047,
+        "VmRSS": 303872,
+        "VmHWM": 315532,
+        "Threads": 7,
+        "cpu_seconds": 242.8,
+        "fds": 15924,
+        "max_process_fds": 15924,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 315532,
+            "VmRSS": 303872,
+            "Threads": 7,
+            "cpu_seconds": 242.8,
+            "fds": 15924
+          }
+        ],
+        "memory_current": 639967232,
+        "anon": 280150016,
+        "file": 261832704,
+        "sock": 69632,
+        "slab": 95561480,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 284.3218433389993,
+        "VmRSS": 306596,
+        "VmHWM": 315532,
+        "Threads": 7,
+        "cpu_seconds": 244.65,
+        "fds": 16065,
+        "max_process_fds": 16065,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 315532,
+            "VmRSS": 306596,
+            "Threads": 7,
+            "cpu_seconds": 244.65,
+            "fds": 16065
+          }
+        ],
+        "memory_current": 644456448,
+        "anon": 283967488,
+        "file": 261869568,
+        "sock": 36864,
+        "slab": 95949576,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 286.35583758899884,
+        "VmRSS": 307096,
+        "VmHWM": 315532,
+        "Threads": 7,
+        "cpu_seconds": 246.45,
+        "fds": 15885,
+        "max_process_fds": 15885,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 315532,
+            "VmRSS": 307096,
+            "Threads": 7,
+            "cpu_seconds": 246.45,
+            "fds": 15885
+          }
+        ],
+        "memory_current": 643334144,
+        "anon": 283394048,
+        "file": 261890048,
+        "sock": 262144,
+        "slab": 95261720,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 288.37368758999946,
+        "VmRSS": 307136,
+        "VmHWM": 315532,
+        "Threads": 7,
+        "cpu_seconds": 248.32,
+        "fds": 16075,
+        "max_process_fds": 16075,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 315532,
+            "VmRSS": 307136,
+            "Threads": 7,
+            "cpu_seconds": 248.32,
+            "fds": 16075
+          }
+        ],
+        "memory_current": 643772416,
+        "anon": 283394048,
+        "file": 261931008,
+        "sock": 8192,
+        "slab": 96000416,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 290.39945121599885,
+        "VmRSS": 305196,
+        "VmHWM": 315532,
+        "Threads": 7,
+        "cpu_seconds": 250.11,
+        "fds": 15926,
+        "max_process_fds": 15926,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 315532,
+            "VmRSS": 305196,
+            "Threads": 7,
+            "cpu_seconds": 250.11,
+            "fds": 15926
+          }
+        ],
+        "memory_current": 641277952,
+        "anon": 281395200,
+        "file": 261951488,
+        "sock": 61440,
+        "slab": 95378904,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 292.4268457579965,
+        "VmRSS": 304032,
+        "VmHWM": 315532,
+        "Threads": 7,
+        "cpu_seconds": 251.97,
+        "fds": 15895,
+        "max_process_fds": 15895,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 315532,
+            "VmRSS": 304032,
+            "Threads": 7,
+            "cpu_seconds": 251.97,
+            "fds": 15895
+          }
+        ],
+        "memory_current": 640253952,
+        "anon": 280150016,
+        "file": 261996544,
+        "sock": 200704,
+        "slab": 95306848,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 294.4518331759973,
+        "VmRSS": 306704,
+        "VmHWM": 315532,
+        "Threads": 7,
+        "cpu_seconds": 253.82,
+        "fds": 15763,
+        "max_process_fds": 15763,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 315532,
+            "VmRSS": 306704,
+            "Threads": 7,
+            "cpu_seconds": 253.82,
+            "fds": 15763
+          }
+        ],
+        "memory_current": 642342912,
+        "anon": 282836992,
+        "file": 262045696,
+        "sock": 77824,
+        "slab": 94802248,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 296.4752286349976,
+        "VmRSS": 305676,
+        "VmHWM": 315532,
+        "Threads": 7,
+        "cpu_seconds": 255.63,
+        "fds": 15910,
+        "max_process_fds": 15910,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 315532,
+            "VmRSS": 305676,
+            "Threads": 7,
+            "cpu_seconds": 255.63,
+            "fds": 15910
+          }
+        ],
+        "memory_current": 641970176,
+        "anon": 281747456,
+        "file": 262090752,
+        "sock": 77824,
+        "slab": 95378312,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 298.5014490530011,
+        "VmRSS": 304780,
+        "VmHWM": 315532,
+        "Threads": 7,
+        "cpu_seconds": 257.49,
+        "fds": 15916,
+        "max_process_fds": 15916,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 315532,
+            "VmRSS": 304780,
+            "Threads": 7,
+            "cpu_seconds": 257.49,
+            "fds": 15916
+          }
+        ],
+        "memory_current": 640921600,
+        "anon": 280809472,
+        "file": 262111232,
+        "sock": 36864,
+        "slab": 95509712,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 300.5329555540011,
+        "VmRSS": 305524,
+        "VmHWM": 315532,
+        "Threads": 7,
+        "cpu_seconds": 259.27,
+        "fds": 16164,
+        "max_process_fds": 16164,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 315532,
+            "VmRSS": 305524,
+            "Threads": 7,
+            "cpu_seconds": 259.27,
+            "fds": 16164
+          }
+        ],
+        "memory_current": 642740224,
+        "anon": 281550848,
+        "file": 262131712,
+        "sock": 163840,
+        "slab": 96349080,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 303.1624161799991,
+        "VmRSS": 304928,
+        "VmHWM": 315532,
+        "Threads": 7,
+        "cpu_seconds": 261.64,
+        "fds": 16096,
+        "max_process_fds": 16096,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 315532,
+            "VmRSS": 304928,
+            "Threads": 7,
+            "cpu_seconds": 261.64,
+            "fds": 16096
+          }
+        ],
+        "memory_current": 642084864,
+        "anon": 280875008,
+        "file": 262197248,
+        "sock": 299008,
+        "slab": 96076448,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 305.1860381389997,
+        "VmRSS": 301536,
+        "VmHWM": 315532,
+        "Threads": 7,
+        "cpu_seconds": 263.48,
+        "fds": 15894,
+        "max_process_fds": 15894,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 315532,
+            "VmRSS": 301536,
+            "Threads": 7,
+            "cpu_seconds": 263.48,
+            "fds": 15894
+          }
+        ],
+        "memory_current": 637960192,
+        "anon": 277442560,
+        "file": 262221824,
+        "sock": 167936,
+        "slab": 95328584,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 307.2119061400008,
+        "VmRSS": 303028,
+        "VmHWM": 315532,
+        "Threads": 7,
+        "cpu_seconds": 265.33,
+        "fds": 16010,
+        "max_process_fds": 16010,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 315532,
+            "VmRSS": 303028,
+            "Threads": 7,
+            "cpu_seconds": 265.33,
+            "fds": 16010
+          }
+        ],
+        "memory_current": 640327680,
+        "anon": 279388160,
+        "file": 262258688,
+        "sock": 126976,
+        "slab": 95758584,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 309.2393727250019,
+        "VmRSS": 307004,
+        "VmHWM": 315532,
+        "Threads": 7,
+        "cpu_seconds": 267.15,
+        "fds": 15905,
+        "max_process_fds": 15905,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 315532,
+            "VmRSS": 307004,
+            "Threads": 7,
+            "cpu_seconds": 267.15,
+            "fds": 15905
+          }
+        ],
+        "memory_current": 643346432,
+        "anon": 282923008,
+        "file": 262283264,
+        "sock": 32768,
+        "slab": 95368680,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 311.25983964199986,
+        "VmRSS": 304000,
+        "VmHWM": 315532,
+        "Threads": 7,
+        "cpu_seconds": 268.96,
+        "fds": 15803,
+        "max_process_fds": 15803,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 315532,
+            "VmRSS": 304000,
+            "Threads": 7,
+            "cpu_seconds": 268.96,
+            "fds": 15803
+          }
+        ],
+        "memory_current": 639873024,
+        "anon": 279797760,
+        "file": 262332416,
+        "sock": 122880,
+        "slab": 95047064,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 313.28086426799564,
+        "VmRSS": 302216,
+        "VmHWM": 315532,
+        "Threads": 7,
+        "cpu_seconds": 270.75,
+        "fds": 15975,
+        "max_process_fds": 15975,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 315532,
+            "VmRSS": 302216,
+            "Threads": 7,
+            "cpu_seconds": 270.75,
+            "fds": 15975
+          }
+        ],
+        "memory_current": 638783488,
+        "anon": 277925888,
+        "file": 262381568,
+        "sock": 249856,
+        "slab": 95628216,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 315.30983776899666,
+        "VmRSS": 306116,
+        "VmHWM": 315532,
+        "Threads": 7,
+        "cpu_seconds": 272.6,
+        "fds": 16035,
+        "max_process_fds": 16035,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 315532,
+            "VmRSS": 306116,
+            "Threads": 7,
+            "cpu_seconds": 272.6,
+            "fds": 16035
+          }
+        ],
+        "memory_current": 643059712,
+        "anon": 281890816,
+        "file": 262402048,
+        "sock": 147456,
+        "slab": 95857536,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 317.33820122799807,
+        "VmRSS": 303604,
+        "VmHWM": 315532,
+        "Threads": 7,
+        "cpu_seconds": 274.41,
+        "fds": 16102,
+        "max_process_fds": 16102,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 315532,
+            "VmRSS": 303604,
+            "Threads": 7,
+            "cpu_seconds": 274.41,
+            "fds": 16102
+          }
+        ],
+        "memory_current": 640872448,
+        "anon": 279277568,
+        "file": 262443008,
+        "sock": 299008,
+        "slab": 96097568,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 319.3689241460015,
+        "VmRSS": 306436,
+        "VmHWM": 315532,
+        "Threads": 7,
+        "cpu_seconds": 276.24,
+        "fds": 15928,
+        "max_process_fds": 15928,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 315532,
+            "VmRSS": 306436,
+            "Threads": 7,
+            "cpu_seconds": 276.24,
+            "fds": 15928
+          }
+        ],
+        "memory_current": 642711552,
+        "anon": 282152960,
+        "file": 262467584,
+        "sock": 0,
+        "slab": 95450840,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 321.3858371879978,
+        "VmRSS": 302280,
+        "VmHWM": 315532,
+        "Threads": 7,
+        "cpu_seconds": 278.06,
+        "fds": 15987,
+        "max_process_fds": 15987,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 315532,
+            "VmRSS": 302280,
+            "Threads": 7,
+            "cpu_seconds": 278.06,
+            "fds": 15987
+          }
+        ],
+        "memory_current": 638529536,
+        "anon": 277860352,
+        "file": 262504448,
+        "sock": 73728,
+        "slab": 95689664,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 323.4128621889977,
+        "VmRSS": 306228,
+        "VmHWM": 315532,
+        "Threads": 7,
+        "cpu_seconds": 279.87,
+        "fds": 15975,
+        "max_process_fds": 15975,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 315532,
+            "VmRSS": 306228,
+            "Threads": 7,
+            "cpu_seconds": 279.87,
+            "fds": 15975
+          }
+        ],
+        "memory_current": 643223552,
+        "anon": 281878528,
+        "file": 262553600,
+        "sock": 401408,
+        "slab": 95642328,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 325.4414547740016,
+        "VmRSS": 305484,
+        "VmHWM": 315532,
+        "Threads": 7,
+        "cpu_seconds": 281.69,
+        "fds": 16047,
+        "max_process_fds": 16047,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 315532,
+            "VmRSS": 305484,
+            "Threads": 7,
+            "cpu_seconds": 281.69,
+            "fds": 16047
+          }
+        ],
+        "memory_current": 642498560,
+        "anon": 281071616,
+        "file": 262578176,
+        "sock": 323584,
+        "slab": 95903992,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 327.46483769099723,
+        "VmRSS": 313712,
+        "VmHWM": 315532,
+        "Threads": 7,
+        "cpu_seconds": 283.47,
+        "fds": 15875,
+        "max_process_fds": 15875,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 315532,
+            "VmRSS": 313712,
+            "Threads": 7,
+            "cpu_seconds": 283.47,
+            "fds": 15875
+          }
+        ],
+        "memory_current": 650006528,
+        "anon": 289447936,
+        "file": 262627328,
+        "sock": 45056,
+        "slab": 95246936,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 329.48685031700006,
+        "VmRSS": 313756,
+        "VmHWM": 315532,
+        "Threads": 7,
+        "cpu_seconds": 285.28,
+        "fds": 15947,
+        "max_process_fds": 15947,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 315532,
+            "VmRSS": 313756,
+            "Threads": 7,
+            "cpu_seconds": 285.28,
+            "fds": 15947
+          }
+        ],
+        "memory_current": 650268672,
+        "anon": 289447936,
+        "file": 262672384,
+        "sock": 45056,
+        "slab": 95540952,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 332.16784702699806,
+        "VmRSS": 313792,
+        "VmHWM": 315532,
+        "Threads": 7,
+        "cpu_seconds": 287.66,
+        "fds": 15825,
+        "max_process_fds": 15825,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 315532,
+            "VmRSS": 313792,
+            "Threads": 7,
+            "cpu_seconds": 287.66,
+            "fds": 15825
+          }
+        ],
+        "memory_current": 650219520,
+        "anon": 289447936,
+        "file": 262709248,
+        "sock": 159744,
+        "slab": 95105752,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 334.19286144500074,
+        "VmRSS": 313812,
+        "VmHWM": 315532,
+        "Threads": 7,
+        "cpu_seconds": 289.51,
+        "fds": 15978,
+        "max_process_fds": 15978,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 315532,
+            "VmRSS": 313812,
+            "Threads": 7,
+            "cpu_seconds": 289.51,
+            "fds": 15978
+          }
+        ],
+        "memory_current": 650674176,
+        "anon": 289447936,
+        "file": 262733824,
+        "sock": 20480,
+        "slab": 95652968,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 336.2242614459974,
+        "VmRSS": 313852,
+        "VmHWM": 315532,
+        "Threads": 7,
+        "cpu_seconds": 291.29,
+        "fds": 15977,
+        "max_process_fds": 15977,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 315532,
+            "VmRSS": 313852,
+            "Threads": 7,
+            "cpu_seconds": 291.29,
+            "fds": 15977
+          }
+        ],
+        "memory_current": 651218944,
+        "anon": 289447936,
+        "file": 262770688,
+        "sock": 450560,
+        "slab": 95647000,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 338.25784211300197,
+        "VmRSS": 313872,
+        "VmHWM": 315532,
+        "Threads": 7,
+        "cpu_seconds": 293.12,
+        "fds": 15901,
+        "max_process_fds": 15901,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 315532,
+            "VmRSS": 313872,
+            "Threads": 7,
+            "cpu_seconds": 293.12,
+            "fds": 15901
+          }
+        ],
+        "memory_current": 650620928,
+        "anon": 289447936,
+        "file": 262791168,
+        "sock": 126976,
+        "slab": 95373264,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 340.28852594699856,
+        "VmRSS": 313920,
+        "VmHWM": 315532,
+        "Threads": 7,
+        "cpu_seconds": 294.96,
+        "fds": 15927,
+        "max_process_fds": 15927,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 315532,
+            "VmRSS": 313920,
+            "Threads": 7,
+            "cpu_seconds": 294.96,
+            "fds": 15927
+          }
+        ],
+        "memory_current": 650149888,
+        "anon": 289447936,
+        "file": 262844416,
+        "sock": 49152,
+        "slab": 95454928,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 342.3188312819984,
+        "VmRSS": 313960,
+        "VmHWM": 315532,
+        "Threads": 7,
+        "cpu_seconds": 296.75,
+        "fds": 15957,
+        "max_process_fds": 15957,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 315532,
+            "VmRSS": 313960,
+            "Threads": 7,
+            "cpu_seconds": 296.75,
+            "fds": 15957
+          }
+        ],
+        "memory_current": 650629120,
+        "anon": 289447936,
+        "file": 262885376,
+        "sock": 57344,
+        "slab": 95569288,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 344.3407063659979,
+        "VmRSS": 313988,
+        "VmHWM": 315532,
+        "Threads": 7,
+        "cpu_seconds": 298.64,
+        "fds": 15867,
+        "max_process_fds": 15867,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 315532,
+            "VmRSS": 313988,
+            "Threads": 7,
+            "cpu_seconds": 298.64,
+            "fds": 15867
+          }
+        ],
+        "memory_current": 650264576,
+        "anon": 289456128,
+        "file": 262905856,
+        "sock": 0,
+        "slab": 95321384,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 346.36428632499883,
+        "VmRSS": 314032,
+        "VmHWM": 315532,
+        "Threads": 7,
+        "cpu_seconds": 300.41,
+        "fds": 16018,
+        "max_process_fds": 16018,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 315532,
+            "VmRSS": 314032,
+            "Threads": 7,
+            "cpu_seconds": 300.41,
+            "fds": 16018
+          }
+        ],
+        "memory_current": 651161600,
+        "anon": 289456128,
+        "file": 262950912,
+        "sock": 176128,
+        "slab": 95821256,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 348.39583574300195,
+        "VmRSS": 314048,
+        "VmHWM": 315532,
+        "Threads": 7,
+        "cpu_seconds": 302.27,
+        "fds": 15935,
+        "max_process_fds": 15935,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 315532,
+            "VmRSS": 314048,
+            "Threads": 7,
+            "cpu_seconds": 302.27,
+            "fds": 15935
+          }
+        ],
+        "memory_current": 650772480,
+        "anon": 289456128,
+        "file": 262967296,
+        "sock": 147456,
+        "slab": 95431768,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 350.41884420199494,
+        "VmRSS": 314104,
+        "VmHWM": 315532,
+        "Threads": 7,
+        "cpu_seconds": 304.09,
+        "fds": 15970,
+        "max_process_fds": 15970,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 315532,
+            "VmRSS": 314104,
+            "Threads": 7,
+            "cpu_seconds": 304.09,
+            "fds": 15970
+          }
+        ],
+        "memory_current": 650903552,
+        "anon": 289456128,
+        "file": 263024640,
+        "sock": 282624,
+        "slab": 95620328,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 352.44737457799783,
+        "VmRSS": 314140,
+        "VmHWM": 315532,
+        "Threads": 7,
+        "cpu_seconds": 305.9,
+        "fds": 16007,
+        "max_process_fds": 16007,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 315532,
+            "VmRSS": 314140,
+            "Threads": 7,
+            "cpu_seconds": 305.9,
+            "fds": 16007
+          }
+        ],
+        "memory_current": 651034624,
+        "anon": 289456128,
+        "file": 263073792,
+        "sock": 155648,
+        "slab": 95764416,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 354.4793912870009,
+        "VmRSS": 314180,
+        "VmHWM": 315532,
+        "Threads": 7,
+        "cpu_seconds": 307.73,
+        "fds": 15971,
+        "max_process_fds": 15971,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 315532,
+            "VmRSS": 314180,
+            "Threads": 7,
+            "cpu_seconds": 307.73,
+            "fds": 15971
+          }
+        ],
+        "memory_current": 650801152,
+        "anon": 289456128,
+        "file": 263114752,
+        "sock": 102400,
+        "slab": 95629232,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 356.5027820799951,
+        "VmRSS": 314180,
+        "VmHWM": 315532,
+        "Threads": 7,
+        "cpu_seconds": 309.52,
+        "fds": 15793,
+        "max_process_fds": 15793,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 315532,
+            "VmRSS": 314180,
+            "Threads": 7,
+            "cpu_seconds": 309.52,
+            "fds": 15793
+          }
+        ],
+        "memory_current": 650489856,
+        "anon": 289456128,
+        "file": 263131136,
+        "sock": 155648,
+        "slab": 94950368,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 358.52675178899517,
+        "VmRSS": 314228,
+        "VmHWM": 315532,
+        "Threads": 7,
+        "cpu_seconds": 311.36,
+        "fds": 15959,
+        "max_process_fds": 15959,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 315532,
+            "VmRSS": 314228,
+            "Threads": 7,
+            "cpu_seconds": 311.36,
+            "fds": 15959
+          }
+        ],
+        "memory_current": 650735616,
+        "anon": 289456128,
+        "file": 263172096,
+        "sock": 12288,
+        "slab": 95591352,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 360.55608324799687,
+        "VmRSS": 314772,
+        "VmHWM": 315532,
+        "Threads": 7,
+        "cpu_seconds": 313.18,
+        "fds": 15939,
+        "max_process_fds": 15939,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 315532,
+            "VmRSS": 314772,
+            "Threads": 7,
+            "cpu_seconds": 313.18,
+            "fds": 15939
+          }
+        ],
+        "memory_current": 651448320,
+        "anon": 289996800,
+        "file": 263196672,
+        "sock": 278528,
+        "slab": 95406664,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      },
+      {
+        "alive": true,
+        "elapsed": 361.4470277069995,
+        "VmRSS": 353268,
+        "VmHWM": 353268,
+        "Threads": 7,
+        "cpu_seconds": 314.0,
+        "fds": 14560,
+        "max_process_fds": 14560,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 353268,
+            "VmRSS": 353268,
+            "Threads": 7,
+            "cpu_seconds": 314.0,
+            "fds": 14560
+          }
+        ],
+        "memory_current": 744833024,
+        "anon": 329392128,
+        "file": 263213056,
+        "sock": 59478016,
+        "slab": 90141176,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        },
+        "database": {
+          "quick_check": [
+            "ok"
+          ],
+          "created_posts": 9466,
+          "inserted_likes": 71638
+        }
+      }
+    ],
+    "progress": [
+      {
+        "progress_seconds": 30,
+        "requests": 0,
+        "errors": 0,
+        "connections": 6855,
+        "connects": 6855,
+        "retired_connections": 0,
+        "shard": 0
+      },
+      {
+        "progress_seconds": 30,
+        "requests": 0,
+        "errors": 0,
+        "connections": 6913,
+        "connects": 6913,
+        "retired_connections": 0,
+        "shard": 1
+      },
+      {
+        "progress_seconds": 60,
+        "requests": 0,
+        "errors": 0,
+        "connections": 8018,
+        "connects": 21409,
+        "retired_connections": 13391,
+        "shard": 1
+      },
+      {
+        "progress_seconds": 60,
+        "requests": 0,
+        "errors": 0,
+        "connections": 7860,
+        "connects": 21479,
+        "retired_connections": 13619,
+        "shard": 0
+      },
+      {
+        "progress_seconds": 90,
+        "requests": 47523,
+        "errors": 0,
+        "connections": 7935,
+        "connects": 43891,
+        "retired_connections": 35956,
+        "shard": 0
+      },
+      {
+        "progress_seconds": 90,
+        "requests": 47702,
+        "errors": 0,
+        "connections": 7881,
+        "connects": 43832,
+        "retired_connections": 35951,
+        "shard": 1
+      },
+      {
+        "progress_seconds": 120,
+        "requests": 94851,
+        "errors": 0,
+        "connections": 8030,
+        "connects": 65976,
+        "retired_connections": 57946,
+        "shard": 0
+      },
+      {
+        "progress_seconds": 120,
+        "requests": 95195,
+        "errors": 0,
+        "connections": 8010,
+        "connects": 66132,
+        "retired_connections": 58122,
+        "shard": 1
+      },
+      {
+        "progress_seconds": 150,
+        "requests": 142766,
+        "errors": 0,
+        "connections": 8059,
+        "connects": 88440,
+        "retired_connections": 80381,
+        "shard": 1
+      },
+      {
+        "progress_seconds": 150,
+        "requests": 142473,
+        "errors": 0,
+        "connections": 7974,
+        "connects": 88263,
+        "retired_connections": 80289,
+        "shard": 0
+      },
+      {
+        "progress_seconds": 180,
+        "requests": 189916,
+        "errors": 0,
+        "connections": 7946,
+        "connects": 110584,
+        "retired_connections": 102638,
+        "shard": 0
+      },
+      {
+        "progress_seconds": 180,
+        "requests": 190121,
+        "errors": 0,
+        "connections": 7937,
+        "connects": 110493,
+        "retired_connections": 102556,
+        "shard": 1
+      },
+      {
+        "progress_seconds": 210,
+        "requests": 237328,
+        "errors": 0,
+        "connections": 7987,
+        "connects": 132861,
+        "retired_connections": 124874,
+        "shard": 0
+      },
+      {
+        "progress_seconds": 210,
+        "requests": 237706,
+        "errors": 0,
+        "connections": 7929,
+        "connects": 132853,
+        "retired_connections": 124924,
+        "shard": 1
+      },
+      {
+        "progress_seconds": 240,
+        "requests": 284630,
+        "errors": 0,
+        "connections": 7946,
+        "connects": 155009,
+        "retired_connections": 147063,
+        "shard": 0
+      },
+      {
+        "progress_seconds": 240,
+        "requests": 285038,
+        "errors": 0,
+        "connections": 7953,
+        "connects": 155187,
+        "retired_connections": 147234,
+        "shard": 1
+      },
+      {
+        "progress_seconds": 270,
+        "requests": 332162,
+        "errors": 0,
+        "connections": 7858,
+        "connects": 177417,
+        "retired_connections": 169559,
+        "shard": 0
+      },
+      {
+        "progress_seconds": 270,
+        "requests": 332484,
+        "errors": 0,
+        "connections": 7958,
+        "connects": 177430,
+        "retired_connections": 169472,
+        "shard": 1
+      },
+      {
+        "progress_seconds": 300,
+        "requests": 379572,
+        "errors": 0,
+        "connections": 8010,
+        "connects": 199627,
+        "retired_connections": 191617,
+        "shard": 0
+      },
+      {
+        "progress_seconds": 300,
+        "requests": 379996,
+        "errors": 0,
+        "connections": 7868,
+        "connects": 199698,
+        "retired_connections": 191830,
+        "shard": 1
+      },
+      {
+        "progress_seconds": 330,
+        "requests": 426992,
+        "errors": 0,
+        "connections": 7858,
+        "connects": 221881,
+        "retired_connections": 214023,
+        "shard": 0
+      },
+      {
+        "progress_seconds": 330,
+        "requests": 427356,
+        "errors": 0,
+        "connections": 8023,
+        "connects": 221860,
+        "retired_connections": 213837,
+        "shard": 1
+      }
+    ],
+    "clients": [
+      {
+        "diagnostic": "C epoll mixed user loop; not an official k6 score",
+        "configuration": {
+          "users": 15000,
+          "offset": 15000,
+          "seconds": 300,
+          "ramp": 60,
+          "timeout": 60
+        },
+        "requests": 474823,
+        "errors": {
+          "failed_requests": 0
+        },
+        "error_rate": 0.0,
+        "successful_users": 15000,
+        "p50_ms": 12.033,
+        "p95_ms": 71.066,
+        "p99_ms": 123.433,
+        "end_to_end_p99_ms": 123.495,
+        "event_loop_delay_ms": 16.514,
+        "peak_connections": 8214,
+        "connects": 244050,
+        "retired_connections": 236073,
+        "elapsed_seconds": 360.269,
+        "created_posts": 4707,
+        "inserted_likes": 35860,
+        "requests_per_second": 1582.743,
+        "load_generator_peak_rss_kib": 47188,
+        "load_generator_cpu_seconds": 14.368,
+        "pass": true,
+        "shard": 1
+      },
+      {
+        "diagnostic": "C epoll mixed user loop; not an official k6 score",
+        "configuration": {
+          "users": 15000,
+          "offset": 0,
+          "seconds": 300,
+          "ramp": 60,
+          "timeout": 60
+        },
+        "requests": 474428,
+        "errors": {
+          "failed_requests": 0
+        },
+        "error_rate": 0.0,
+        "successful_users": 15000,
+        "p50_ms": 11.998,
+        "p95_ms": 71.399,
+        "p99_ms": 124.33,
+        "end_to_end_p99_ms": 124.345,
+        "event_loop_delay_ms": 16.491,
+        "peak_connections": 8185,
+        "connects": 244133,
+        "retired_connections": 236114,
+        "elapsed_seconds": 360.269,
+        "created_posts": 4759,
+        "inserted_likes": 35778,
+        "requests_per_second": 1581.427,
+        "load_generator_peak_rss_kib": 47004,
+        "load_generator_cpu_seconds": 14.375,
+        "pass": true,
+        "shard": 0
+      }
+    ],
+    "generator_sha256": "306b28b67bd3a0e724c0f103a15b980e585826a1f167696a91dd495d2943e2b7",
+    "load_memory_events_before": {
+      "low": 0,
+      "high": 0,
+      "max": 0,
+      "oom": 0,
+      "oom_kill": 0,
+      "oom_group_kill": 0,
+      "sock_throttled": 0
+    },
+    "server": {
+      "ready": true,
+      "pid": 311,
+      "hashes": {
+        "install.sh": "1c6b8c1039f9715c9a4549eab2c07487b2f3ca1edc8c1ae960784d4d6991c04e",
+        "connection_pressure.rb": "c8916d69e6b1a1094f5016fd375e76bd6d0a6e831704febdbe137672008524b7",
+        "start.sh": "b0890a407f1686796fbf1659dd49bc7e8b358b3850f9d8ebeb6c95f5d1bf3e73",
+        "puma.rb": "e616b2c5fb3a75693ca8f69a20953b74b2462af237aefb5898885d539e707aff",
+        "check.py": "94e1aed9a85da45c65012c394d780ebb988be7eb8c0df69ebb0dea81cc7e6bcf",
+        "verify.py": "f3bee0c79cc90bdfefea3939b88acce56e93c27e1e7419ecd9e0e624ff509e91",
+        "app.rb": "bed7800ae28db6ce562a8140f2f89d92a89821b81c85c6c2519a39fa1fe9de70",
+        "build.sh": "f7058e7d8efec4bcad31f21388f0d83985a9f18f517af5395f7eb6d38ff6de79"
+      },
+      "seed_counts": {
+        "posts": 500000,
+        "likes": 2016005
+      },
+      "metrics": {
+        "alive": true,
+        "elapsed": 1.0561833749961806,
+        "VmRSS": 82380,
+        "VmHWM": 82728,
+        "Threads": 7,
+        "cpu_seconds": 0.85,
+        "fds": 14,
+        "max_process_fds": 14,
+        "processes": [
+          {
+            "pid": 311,
+            "VmHWM": 82728,
+            "VmRSS": 82380,
+            "Threads": 7,
+            "cpu_seconds": 0.85,
+            "fds": 14
+          }
+        ],
+        "memory_current": 350732288,
+        "anon": 79761408,
+        "file": 249950208,
+        "sock": 0,
+        "slab": 19097264,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        }
+      }
+    },
+    "client_exit_codes": [
+      0,
+      0
+    ],
+    "load_memory_events_after": {
+      "low": 0,
+      "high": 0,
+      "max": 0,
+      "oom": 0,
+      "oom_kill": 0,
+      "oom_group_kill": 0,
+      "sock_throttled": 0
+    },
+    "server_log": "Puma starting in single mode...\n* Puma version: 8.0.2 (\"Into the Arena\")\n* Ruby version: ruby 4.0.5 (2026-05-20 revision 64336ffd0e) +YJIT +PRISM [aarch64-linux]\n*  Min threads: 2\n*  Max threads: 2\n*  Environment: production\n*          PID: 311\n* Listening on http://127.0.0.1:32100\nUse Ctrl-C to stop\n- Gracefully stopping, waiting for requests to finish\n",
+    "pass": true,
+    "database_check": true
+  },
+  "validation": {
+    "official_api": "42/42",
+    "additional_http": 70,
+    "duplicate_likes": 16,
+    "transport": "Fragmented/chunked uploads, 100 aborted uploads, 100 resets after completed uploads, 1800 backpressured pipelined responses, 66-second original-socket reuse",
+    "crash_recovery": "192 acknowledged creates and likes survive process-group SIGKILL; 32 failed FK writes remain isolated",
+    "log_sha256": "94327ac7445299128441ad843ddba8e7183b44e08419d59f9895bb6d62767c45",
+    "log": "Testing http://127.0.0.1:19930\n-- golden reads (fresh database)\n  ok   GET /feed == golden -> 200\n  ok   GET /feed content-type (application/json; charset=utf-8)\n  ok   GET /posts/1 == golden -> 200\n  ok   GET /posts/250000 == golden -> 200\n  ok   GET /posts/500000 == golden -> 200\n  ok   GET /posts/:id content-type (application/json; charset=utf-8)\n-- health, 404s, id validation\n  ok   GET /health -> 200 {\"status\":\"ok\",\"db\":\"ok\",\"uptime_s\":0}\n  ok   GET /nope -> 404\n  ok   GET /posts/0 -> 400\n  ok   GET /posts/-1 -> 400\n  ok   GET /posts/abc -> 400\n  ok   GET /posts/1.5 -> 400\n  ok   GET /posts/999999999 -> 404\n-- auth\n  ok   POST /posts, no token -> 401\n  ok   POST /posts, Basic auth -> 401\n  ok   POST /posts, garbage token -> 401\n  ok   POST /posts, bad signature -> 401\n  ok   POST /posts, alg=none -> 401\n  ok   POST /posts, expired token -> 401\n  ok   POST /posts, sub not an integer -> 401\n  ok   POST /posts, no username -> 401\n  ok   POST /posts/abc/like, no token (auth before id) -> 401\n-- create validation\n  ok   empty body -> 400\n  ok   whitespace body -> 400\n  ok   numeric body -> 400\n  ok   missing body -> 400\n  ok   malformed JSON -> 400\n  ok   501-char body -> 400\n-- create, like, read back\n  ok   special characters round-trip (trimmed) -> 201\n  ok   create 500-char post -> 201\n  ok   POST /posts content-type (application/json; charset=utf-8)\n  ok   created_at format 2026-10-09T13:34:44.178Z\n  ok   created_at is now (UTC, 0s)\n  ok   like (first) -> 201\n  ok   like (repeat) -> 200\n  ok   like missing post -> 404\n  ok   like bad id (with token) -> 400\n  ok   read back, like_count 1 -> 200\n  ok   like on a seeded post is counted at once (12)\n  ok   feed has 20 posts\n  ok   new post is at the top of the feed\n  ok   feed entry matches the post\npassed=42 failed=0\n  ok   strict JSON, Unicode boundaries, trimming and embedded NUL\n  ok   16 concurrent duplicate likes insert one row and update reads\n  ok   signed invalid algorithms, claims, JSON and UTF-8 JWT segments\n  ok   previously accepted JWT is rejected after expiry\n  ok   feed reflects concurrent creates in timestamp/id order\nExtra checks passed (64 HTTP checks plus 16 concurrent likes). Post 500014 contains 500 emoji and one like.\nRails extra checks passed (70 HTTP checks plus 16 concurrent likes).\nOpened keep-alive socket for 66-second reuse check\nPASS fragmented and chunked POST, owned headers, empty-body reuse\nPASS 100 aborted partial uploads\nPASS 100 reset connections after complete write uploads\nPASS 1,800 pipelined responses under backpressure\nPASS same-socket HTTP keep-alive after 66 idle seconds\nPASS 192 acknowledged creates and likes survive SIGKILL; 32 failed writes remain isolated\n",
+    "pressure_regression": {
+      "family": "ruby-rails",
+      "pass": true,
+      "ready": {
+        "ready": true,
+        "pid": 183,
+        "hashes": {
+          "install.sh": "1c6b8c1039f9715c9a4549eab2c07487b2f3ca1edc8c1ae960784d4d6991c04e",
+          "connection_pressure.rb": "c8916d69e6b1a1094f5016fd375e76bd6d0a6e831704febdbe137672008524b7",
+          "start.sh": "b0890a407f1686796fbf1659dd49bc7e8b358b3850f9d8ebeb6c95f5d1bf3e73",
+          "puma.rb": "e616b2c5fb3a75693ca8f69a20953b74b2462af237aefb5898885d539e707aff",
+          "check.py": "94e1aed9a85da45c65012c394d780ebb988be7eb8c0df69ebb0dea81cc7e6bcf",
+          "verify.py": "f3bee0c79cc90bdfefea3939b88acce56e93c27e1e7419ecd9e0e624ff509e91",
+          "app.rb": "bed7800ae28db6ce562a8140f2f89d92a89821b81c85c6c2519a39fa1fe9de70",
+          "build.sh": "f7058e7d8efec4bcad31f21388f0d83985a9f18f517af5395f7eb6d38ff6de79"
+        },
+        "seed_counts": {
+          "posts": 500000,
+          "likes": 2016005
+        },
+        "metrics": {
+          "alive": true,
+          "elapsed": 0.9767875010002172,
+          "VmRSS": 82348,
+          "VmHWM": 82716,
+          "Threads": 7,
+          "cpu_seconds": 0.78,
+          "fds": 14,
+          "max_process_fds": 14,
+          "processes": [
+            {
+              "pid": 183,
+              "VmHWM": 82716,
+              "VmRSS": 82348,
+              "Threads": 7,
+              "cpu_seconds": 0.78,
+              "fds": 14
+            }
+          ],
+          "memory_current": 350736384,
+          "anon": 79720448,
+          "file": 249913344,
+          "sock": 0,
+          "slab": 19046624,
+          "memory_events": {
+            "low": "0",
+            "high": "0",
+            "max": "0",
+            "oom": "0",
+            "oom_kill": "0",
+            "oom_group_kill": "0",
+            "sock_throttled": "0"
+          }
+        }
+      },
+      "stdout": "PASS 64 retired connections, 32 committed writes/readbacks, fragmented upload and keep-alive recovery\n",
+      "stderr": "",
+      "final": {
+        "alive": true,
+        "elapsed": 1.8854315429998678,
+        "VmRSS": 111616,
+        "VmHWM": 111616,
+        "Threads": 7,
+        "cpu_seconds": 0.96,
+        "fds": 14,
+        "max_process_fds": 14,
+        "processes": [
+          {
+            "pid": 183,
+            "VmHWM": 111616,
+            "VmRSS": 111616,
+            "Threads": 7,
+            "cpu_seconds": 0.96,
+            "fds": 14
+          }
+        ],
+        "memory_current": 379797504,
+        "anon": 108261376,
+        "file": 250425344,
+        "sock": 0,
+        "slab": 19233904,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        },
+        "database": {
+          "quick_check": [
+            "ok"
+          ],
+          "created_posts": 33,
+          "inserted_likes": 0
+        }
+      },
+      "server_log": "Puma starting in single mode...\n* Puma version: 8.0.2 (\"Into the Arena\")\n* Ruby version: ruby 4.0.5 (2026-05-20 revision 64336ffd0e) +YJIT +PRISM [aarch64-linux]\n*  Min threads: 2\n*  Max threads: 2\n*  Environment: production\n*          PID: 183\n* Listening on http://127.0.0.1:32100\nUse Ctrl-C to stop\n- Gracefully stopping, waiting for requests to finish\n"
+    },
+    "descriptor_exhaustion": {
+      "family": "ruby-rails",
+      "pass": true,
+      "ready": {
+        "ready": true,
+        "pid": 112,
+        "hashes": {
+          "install.sh": "1c6b8c1039f9715c9a4549eab2c07487b2f3ca1edc8c1ae960784d4d6991c04e",
+          "connection_pressure.rb": "c8916d69e6b1a1094f5016fd375e76bd6d0a6e831704febdbe137672008524b7",
+          "start.sh": "b0890a407f1686796fbf1659dd49bc7e8b358b3850f9d8ebeb6c95f5d1bf3e73",
+          "puma.rb": "e616b2c5fb3a75693ca8f69a20953b74b2462af237aefb5898885d539e707aff",
+          "check.py": "94e1aed9a85da45c65012c394d780ebb988be7eb8c0df69ebb0dea81cc7e6bcf",
+          "verify.py": "f3bee0c79cc90bdfefea3939b88acce56e93c27e1e7419ecd9e0e624ff509e91",
+          "app.rb": "bed7800ae28db6ce562a8140f2f89d92a89821b81c85c6c2519a39fa1fe9de70",
+          "build.sh": "f7058e7d8efec4bcad31f21388f0d83985a9f18f517af5395f7eb6d38ff6de79"
+        },
+        "seed_counts": {
+          "posts": 500000,
+          "likes": 2016005
+        },
+        "metrics": {
+          "alive": true,
+          "elapsed": 0.9637055419989338,
+          "VmRSS": 82336,
+          "VmHWM": 82716,
+          "Threads": 7,
+          "cpu_seconds": 0.82,
+          "fds": 14,
+          "max_process_fds": 14,
+          "processes": [
+            {
+              "pid": 112,
+              "VmHWM": 82716,
+              "VmRSS": 82336,
+              "Threads": 7,
+              "cpu_seconds": 0.82,
+              "fds": 14
+            }
+          ],
+          "memory_current": 350617600,
+          "anon": 79712256,
+          "file": 249888768,
+          "sock": 0,
+          "slab": 19030256,
+          "memory_events": {
+            "low": "0",
+            "high": "0",
+            "max": "0",
+            "oom": "0",
+            "oom_kill": "0",
+            "oom_group_kill": "0",
+            "sock_throttled": "0"
+          }
+        }
+      },
+      "stdout": "PASS response drains and closes after a descriptor-exhausting raw-socket burst\n",
+      "stderr": "",
+      "final": {
+        "alive": true,
+        "elapsed": 1.3949000430002343,
+        "VmRSS": 113252,
+        "VmHWM": 113252,
+        "Threads": 7,
+        "cpu_seconds": 1.17,
+        "fds": 174,
+        "max_process_fds": 174,
+        "processes": [
+          {
+            "pid": 112,
+            "VmHWM": 113252,
+            "VmRSS": 113252,
+            "Threads": 7,
+            "cpu_seconds": 1.17,
+            "fds": 174
+          }
+        ],
+        "memory_current": 388091904,
+        "anon": 111374336,
+        "file": 254095360,
+        "sock": 651264,
+        "slab": 19993360,
+        "memory_events": {
+          "low": "0",
+          "high": "0",
+          "max": "0",
+          "oom": "0",
+          "oom_kill": "0",
+          "oom_group_kill": "0",
+          "sock_throttled": "0"
+        },
+        "database": {
+          "quick_check": [
+            "ok"
+          ],
+          "created_posts": 0,
+          "inserted_likes": 0
+        }
+      },
+      "server_log": " files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n2026-10-09 13:34:42 +0000 Listen loop: #<Errno::EMFILE: Too many open files - accept(2)>\n- Gracefully stopping, waiting for requests to finish\n"
+    }
+  },
+  "deployment": "Direct Puma; earlier throughput comparisons measured Nginx and are retained as historical evidence"
+}

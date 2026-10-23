@@ -163,10 +163,16 @@ const REASON: Record<number, string> = {
   500: "500 Internal Server Error",
   503: "503 Service Unavailable",
 };
+// Poller: near the fd limit (px_crowded, checked once per batch), this batch's responses close their
+// connection, so users past the limit reconnect per request instead of waiting in the listen queue. Which
+// users hold a connection rotates; about (users - limit) / users of requests pay a reconnect either way.
+// ponytail: closes every responder in a crowded batch, so open connections dip up to a batch below the
+// limit; a per-batch budget (px_crowded returning the excess) if that ever shows up.
+let crowded = false;
 const head = (status: number, n: number) =>
-  `HTTP/1.1 ${
-    REASON[status]
-  }\r\ncontent-type: application/json\r\ncontent-length: ${n}\r\n\r\n`;
+  `HTTP/1.1 ${REASON[status]}\r\ncontent-type: application/json\r\n${
+    crowded ? "connection: close\r\n" : ""
+  }content-length: ${n}\r\n\r\n`;
 // A handler's result: the response, or (poller, db busy) a thunk that runs the write's statements later and
 // returns it.
 type Resp = Uint8Array | (() => Uint8Array);
@@ -514,7 +520,8 @@ function servePoller(): never {
       result: "i32",
     },
     px_wait: { parameters: ["i32"], result: "i32" },
-    px_send: { parameters: ["i32", "buffer", "i32"], result: "i32" },
+    px_send: { parameters: ["i32", "buffer", "i32", "i32"], result: "i32" },
+    px_crowded: { parameters: [], result: "i32" },
     px_wake_open: { parameters: [], result: "i32" },
     px_gen: { parameters: ["i32"], result: "u32" },
     px_close: { parameters: ["i32"], result: "void" },
@@ -547,6 +554,7 @@ function servePoller(): never {
     seq: number;
     resp: Uint8Array | null;
     exec: (() => Uint8Array) | null;
+    close: boolean; // resp says connection: close (crowded when it was built)
   };
   const held: Held[] = [];
   let first = 0, deepest = 0;
@@ -567,7 +575,7 @@ function servePoller(): never {
       heldGen[fd] = gen;
       heldOn[fd] = 0;
     }
-    held.push({ fd, gen, seq: s, resp, exec });
+    held.push({ fd, gen, seq: s, resp, exec, close: crowded });
     heldOn[fd]++;
     if (held.length - first > deepest) deepest = held.length - first;
   };
@@ -578,7 +586,9 @@ function servePoller(): never {
       first++;
       if (h.gen === heldGen[h.fd]) heldOn[h.fd]--;
       // Reused fd: the old connection is gone, never send. Closed and not reused: px_send returns -1.
-      if (px.px_gen(h.fd) === h.gen) px.px_send(h.fd, h.resp, h.resp.length);
+      if (px.px_gen(h.fd) === h.gen) {
+        px.px_send(h.fd, h.resp, h.resp.length, h.close ? 1 : 0);
+      }
     }
     if (first === held.length) held.length = first = 0;
     else if (first > 4096 && 2 * first > held.length) {
@@ -591,12 +601,13 @@ function servePoller(): never {
     if (typeof r === "function") hold(fd, 0, null, r); // db busy: runs once it is back
     else if (writes !== seenWrites) hold(fd, seq + 1, r, null); // a write: waits for this batch's COMMIT
     else if (isHeld(fd)) hold(fd, 0, r, null);
-    else px.px_send(fd, r, r.length);
+    else px.px_send(fd, r, r.length, crowded ? 1 : 0);
     seenWrites = writes;
   };
   for (;;) {
     const n = px.px_wait(1000); // 0 on timeout, or when only the commit thread woke us
     if (n < 0) throw new Error("epoll_wait failed");
+    crowded = px.px_crowded() === 1;
     if (inFlight && wrDone() >= seq) { // the COMMIT landed: db is ours again, rdb can see it
       done = seq;
       inFlight = false;
@@ -643,6 +654,7 @@ function servePoller(): never {
           h.resp = json(500, '{"error":"internal server error"}');
         }
         h.exec = null;
+        h.close = crowded;
         h.seq = seq + 1;
       }
       seenWrites = writes;

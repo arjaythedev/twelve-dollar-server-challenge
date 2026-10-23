@@ -62,7 +62,7 @@ fn C.td_net_new(int, int) &C.td_net
 fn C.td_net_next(&C.td_net, &C.td_event, int, int) int
 fn C.td_net_release(&C.td_net, &C.td_event)
 fn C.td_net_send(&C.td_net, int, &u8, int)
-fn C.td_net_resume(&C.td_net, int, int)
+fn C.td_net_resume(&C.td_net, int, int, int)
 fn C.td_net_abort(&C.td_net, int)
 fn C.getrlimit(i32, &C.rlimit) i32
 fn C.setrlimit(i32, &C.rlimit) i32
@@ -443,7 +443,8 @@ fn (mut s Server) finish_batch() {
 		if c.deferred && !c.has_output {
 			continue
 		}
-		C.td_net_resume(s.transport, fd, if c.close_after { 1 } else { 0 })
+		C.td_net_resume(s.transport, fd, if c.close_after { 1 } else { 0 },
+			if c.inbuf.len > 0 || c.deferred { 1 } else { 0 })
 		c.ready = false
 		c.has_output = false
 	}

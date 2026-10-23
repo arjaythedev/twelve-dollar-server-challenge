@@ -21,6 +21,7 @@
 #define ACCEPT_DEPTH 64
 #define SQ_SIZE 2048
 #define CQ_SIZE 8192
+#define BATCH_NS 200000 /* Bound completion coalescing before one SQLite transaction. */
 
 enum { FREE, ACCEPT, RECV, SEND, CLOSE, APPLICATION };
 
@@ -29,7 +30,7 @@ struct td_client {
     unsigned output_len, sent;
     unsigned generation;
     int next;
-    unsigned char operation, queued, busy, close_after;
+    unsigned char operation, queued, busy, close_after, notify_drain;
 };
 
 struct td_ring {
@@ -46,7 +47,7 @@ struct td_ring {
 struct td_net {
     struct td_ring rings[RINGS];
     struct pollfd polls[RINGS + 1];
-    int listener, cursor;
+    int listener, cursor, checkpoint_waiting;
 };
 
 _Static_assert(TD_CAPACITY == RINGS * SLOTS, "capacity mismatch");
@@ -119,6 +120,14 @@ static void td_schedule(struct td_ring *r, uint64_t now)
 
 static void td_submit(struct td_net *net, struct td_ring *r)
 {
+    if (r == &net->rings[0] && !net->checkpoint_waiting) {
+        struct io_uring_sqe *sqe = io_uring_get_sqe(&r->ring);
+        if (sqe) {
+            io_uring_prep_poll_add(sqe, net->polls[RINGS].fd, POLLIN);
+            sqe->user_data = UINT64_MAX;
+            net->checkpoint_waiting = 1;
+        }
+    }
     while (r->ready_head >= 0) {
         struct io_uring_sqe *sqe = io_uring_get_sqe(&r->ring);
         if (!sqe) break;
@@ -179,7 +188,10 @@ struct td_net *td_net_new(int listener, int checkpoint)
     for (int i = 0; i < RINGS; ++i) {
         struct td_ring *r = &net->rings[i];
         r->ready_head = r->ready_tail = r->retry_head = r->retry_tail = -1;
-        struct io_uring_params params = { .flags = IORING_SETUP_CQSIZE, .cq_entries = CQ_SIZE };
+        struct io_uring_params params = {
+            .flags = IORING_SETUP_CQSIZE | IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_COOP_TASKRUN,
+            .cq_entries = CQ_SIZE
+        };
         int rc = io_uring_queue_init_params(SQ_SIZE, &r->ring, &params);
         if (rc < 0) td_fail("create ring", rc);
         if (!(params.features & IORING_FEAT_NODROP)) td_fail("NODROP is required", ENOTSUP);
@@ -288,11 +300,11 @@ static int td_complete(struct td_ring *r, int ring_index, const struct io_uring_
         c->output = NULL;
         c->output_len = c->sent = 0;
         if (c->close_after) td_enqueue(r, slot, CLOSE);
-        else {
+        else if (c->notify_drain) {
             c->operation = APPLICATION;
             event->kind = 4;
             return 1;
-        }
+        } else td_enqueue(r, slot, RECV);
     }
     return 0;
 }
@@ -301,9 +313,11 @@ int td_net_next(struct td_net *net, struct td_event *events, int capacity, int t
 {
     assert(capacity > 0);
     uint64_t deadline = timeout_ms < 0 ? UINT64_MAX : td_now() + timeout_ms;
+    int count = 0;
+    uint64_t flush_at = 0;
     for (;;) {
         uint64_t now = td_now();
-        int count = 0, internal = 0, pending = 0;
+        int internal = 0, pending = 0;
         uint64_t wake = deadline;
         for (int j = 0; j < RINGS; ++j) {
             int i = (net->cursor + j) % RINGS;
@@ -314,7 +328,11 @@ int td_net_next(struct td_net *net, struct td_event *events, int capacity, int t
             unsigned head, consumed = 0;
             io_uring_for_each_cqe(&r->ring, head, cqe) {
                 if (count == capacity || consumed == CQ_SIZE) break;
-                count += td_complete(r, i, cqe, &events[count]);
+                if (cqe->user_data == UINT64_MAX) {
+                    if (cqe->res < 0 || !(cqe->res & POLLIN))
+                        td_fail("checkpoint completion", cqe->res < 0 ? cqe->res : EIO);
+                    events[count++] = (struct td_event){ .kind = 5, .id = -1, .buffer = -1 };
+                } else count += td_complete(r, i, cqe, &events[count]);
                 ++consumed;
             }
             io_uring_cq_advance(&r->ring, consumed);
@@ -325,22 +343,26 @@ int td_net_next(struct td_net *net, struct td_event *events, int capacity, int t
                 wake = r->accept_at;
         }
         net->cursor = (net->cursor + 1) % RINGS;
-        /* Check this fd even when every socket is idle or the CQ batch is full. */
-        struct pollfd checkpoint = net->polls[RINGS];
-        int rc = poll(&checkpoint, 1, 0);
-        if (rc < 0 && errno != EINTR) td_fail("poll checkpoint", errno);
-        if (count < capacity && (checkpoint.revents & POLLIN))
-            events[count++] = (struct td_event){ .kind = 5, .id = -1, .buffer = -1 };
-        if (count) return count;
+        if (count) {
+            struct timespec clock;
+            if (clock_gettime(CLOCK_MONOTONIC, &clock)) td_fail("batch clock", errno);
+            uint64_t nanos = (uint64_t)clock.tv_sec * 1000000000 + clock.tv_nsec;
+            if (!flush_at) flush_at = nanos + BATCH_NS;
+            if (count == capacity || nanos >= flush_at || td_now() >= deadline) return count;
+            struct timespec pause = { .tv_nsec = (long)(flush_at - nanos) };
+            int rc = ppoll(net->polls, RINGS, &pause, NULL);
+            if (rc < 0 && errno != EINTR) td_fail("batch poll", errno);
+            continue;
+        }
         now = td_now();
         if (now >= deadline) return 0;
         if (internal) continue;
         /* A transient submit error must not strand unsent SQEs in poll forever. */
         if (pending && wake > now + 1) wake = now + 1;
         int wait = wake == UINT64_MAX ? -1 : (wake <= now ? 0 : (int)(wake - now > INT_MAX ? INT_MAX : wake - now));
-        rc = poll(net->polls, RINGS + 1, wait);
+        int rc = poll(net->polls, RINGS, wait);
         if (rc < 0 && errno != EINTR) td_fail("poll rings", errno);
-        for (int i = 0; i <= RINGS; ++i)
+        for (int i = 0; i < RINGS; ++i)
             if (net->polls[i].revents & (POLLERR | POLLHUP | POLLNVAL))
                 td_fail("ring or checkpoint fd failed", EIO);
     }
@@ -348,6 +370,7 @@ int td_net_next(struct td_net *net, struct td_event *events, int capacity, int t
 
 void td_net_release(struct td_net *net, const struct td_event *event)
 {
+    if (event->kind == 5) net->checkpoint_waiting = 0;
     if (event->buffer >= 0) td_recycle(&net->rings[event->id / SLOTS], event->buffer);
 }
 
@@ -365,13 +388,14 @@ void td_net_send(struct td_net *net, int id, const unsigned char *data, int len)
     c->output_len = size;
 }
 
-void td_net_resume(struct td_net *net, int id, int close_after)
+void td_net_resume(struct td_net *net, int id, int close_after, int notify_drain)
 {
     assert(id >= 0 && id < TD_CAPACITY);
     struct td_ring *r = &net->rings[id / SLOTS];
     struct td_client *c = &r->clients[id % SLOTS];
     assert(c->operation == APPLICATION && !c->busy && !c->queued);
     c->close_after = close_after != 0;
+    c->notify_drain = notify_drain != 0;
     td_enqueue(r, id % SLOTS, c->output_len ? SEND : (c->close_after ? CLOSE : RECV));
 }
 

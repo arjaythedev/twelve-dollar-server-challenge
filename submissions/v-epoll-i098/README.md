@@ -27,7 +27,8 @@ The C transport keeps debug symbols and frame pointers for local profiles.
 - **One event loop, one SQLite connection for requests.** The box has one vCPU. One thread owns the
   socket table and runs every query, so there are no mutexes, no thread hand-offs and no lock waits
   between requests. SQLite is compiled with `SQLITE_THREADSAFE=2` (each connection stays on its thread).
-- **Group commit per completion batch.** Responses enter the transport only after `COMMIT` succeeds.
+- **Group commit per completion batch.** Completions collect for at most 200 microseconds before
+  one SQLite transaction. Responses enter the transport only after `COMMIT` succeeds.
   This also holds read responses that observe a write from the same batch.
   A failed commit discards the tentative responses and closes their connections.
   SQLite retains WAL mode with `synchronous=NORMAL`.
@@ -35,7 +36,7 @@ The C transport keeps debug symbols and frame pointers for local profiles.
   `COMMIT` and does two `fsync`s, which stalls every connection on a single loop (8 ms to 4 s each on a
   busy disk). Here a `sqlite3_wal_hook` only records the WAL size; at 1,000 frames (SQLite's default) a
   checkpointer thread with its own connection runs a PASSIVE checkpoint and reports through an `eventfd`
-  watched beside all eight rings. Checkpoint completion wakes an otherwise idle server.
+  watched by a one-shot ring poll. Checkpoint completion wakes an otherwise idle server.
   A follow-up checkpoint can pause writes for 20 ms, or until completion above 16,000 WAL frames.
   The existing request connection and background checkpoint connection keep separate thread owners.
 - **Feed in three small queries.** The newest 20 ids come from the `(created_at, id)` index. When those
@@ -55,11 +56,12 @@ The C transport keeps debug symbols and frame pointers for local profiles.
 - **Shared receive buffers.** Each ring has 1,024 buffers of 2,048 bytes.
   Idle connections have no input or output allocation.
   Partial requests use bounded input buffers. Pending sends retain stable storage until completion.
-  The server stops receiving during a send and resumes pipelined requests after the send completes.
-- **Bounded queues, no SQPOLL.** The server submits within the SQ limit and consumes bounded CQ batches.
+  The transport resumes reads directly after a send unless V has buffered or deferred work to process.
+- **Bounded queues, no SQPOLL.** Rings use single-issuer cooperative task execution. The server
+  submits within the SQ limit and consumes bounded CQ batches.
   `NODROP` protects overflow completions. `ENOBUFS` retries wait for buffer recycling.
   Resource failures delay retries. Full fixed tables pause accepts without closing idle clients.
-  The loop blocks on the ring descriptors and the checkpoint eventfd when no work is ready.
+  The loop blocks on ring descriptors, including the ring that reports checkpoint completion.
 - **Idle connections stay open** with no timeout, so keep-alive works for Nginx or k6.
 
 Nothing on the box is tuned: the process only raises its own soft `RLIMIT_NOFILE` to the hard limit.

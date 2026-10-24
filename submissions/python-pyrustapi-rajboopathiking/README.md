@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | Language | Python 3.12 (CPython) |
-| Framework | PyRustAPI 1.9.0b6 (Tokio / Hyper Core) |
+| Framework | PyRustAPI 1.9.0b10 (Tokio / Hyper Core) |
 | Server | Native Rust Tokio/Hyper multithreaded runtime |
 | SQLite driver | standard library `sqlite3` module (in-process autocommit WAL) |
 | JSON | SQLite `json_object` / `json_group_array` + `orjson` 3.12.0 |

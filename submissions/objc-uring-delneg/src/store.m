@@ -69,11 +69,11 @@ static void exec(sqlite3 *db, const char *sql) {
     sFeedIds = prep(db, "SELECT id FROM posts ORDER BY created_at DESC, id DESC LIMIT 20");
     sFeedRange = prep(db, "SELECT p.id, p.body, p.created_at, u.username FROM posts p "
                           "JOIN users u ON u.id = p.user_id WHERE p.id BETWEEN ?1 AND ?2");
-    sLikeRange = prep(db, "SELECT post_id, count(*) FROM likes WHERE post_id BETWEEN ?1 AND ?2 GROUP BY post_id");
+    sLikeRange = prep(db, "SELECT post_id FROM likes WHERE post_id BETWEEN ?1 AND ?2");
     // No RETURNING: it buffers rows in an ephemeral table (a page cache built and
     // torn down per insert). created_at is written in the schema default's format.
     sCreate = prep(db, "INSERT INTO posts (user_id, body, created_at) VALUES (?1, ?2, ?3)");
-    sLike = prep(db, "INSERT INTO likes (user_id, post_id) SELECT ?1, ?2 "
+    sLike = prep(db, "INSERT INTO likes (user_id, post_id, created_at) SELECT ?1, ?2, ?3 "
                      "WHERE EXISTS (SELECT 1 FROM posts WHERE id = ?2) ON CONFLICT DO NOTHING");
     sExists = prep(db, "SELECT 1 FROM posts WHERE id = ?1");
     sBegin = prep(db, "BEGIN");
@@ -179,7 +179,7 @@ typedef struct { uint32_t body, bodyLen, ca, caLen, au, auLen; int64_t likes; bo
 
 // Finds the 20 newest ids from the (created_at, id) index. When they sit in a
 // narrow id range, fetches their rows with one rowid range scan and their like
-// counts with one grouped index range scan, then restores the index order.
+// counts by tallying one likes_post_id_idx range scan, then restores the index order.
 // All three statements run in the batch's transaction, so they see one snapshot.
 - (int)feed:(TDBuf *)b {
     int64_t ids[20];
@@ -220,7 +220,7 @@ typedef struct { uint32_t body, bodyLen, ca, caLen, au, auLen; int64_t likes; bo
     sqlite3_bind_int64(s, 2, hi);
     while ((rc = sqlite3_step(s)) == SQLITE_ROW) {
         int k = pos[sqlite3_column_int64(s, 0) - lo];
-        if (k >= 0) row[k].likes = sqlite3_column_int64(s, 1);
+        if (k >= 0) row[k].likes++;
     }
     sqlite3_reset(s);
     if (rc != SQLITE_DONE) return fail(b);
@@ -291,6 +291,9 @@ typedef struct { uint32_t body, bodyLen, ca, caLen, au, auLen; int64_t likes; bo
     sqlite3_stmt *s = sLike;
     sqlite3_bind_int64(s, 1, uid);
     sqlite3_bind_int64(s, 2, pid);
+    char ts[24];
+    iso_now(ts);
+    sqlite3_bind_text(s, 3, ts, 24, SQLITE_STATIC);
     int rc = sqlite3_step(s);
     sqlite3_reset(s);
     if (rc != SQLITE_DONE) return fail(b);

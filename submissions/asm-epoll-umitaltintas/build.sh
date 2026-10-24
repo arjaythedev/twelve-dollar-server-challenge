@@ -13,8 +13,8 @@ if [ ! -f build/sqlite3.c ]; then
   cp "build/sqlite-amalgamation-${SQLITE_VER}/sqlite3.c" build/sqlite3.c
 fi
 if [ ! -f build/sqlite3.o ]; then
-  gcc -O2 -march=x86-64-v2 -fno-plt -c build/sqlite3.c -o build/sqlite3.o \
-    -DSQLITE_THREADSAFE=2 -DSQLITE_DEFAULT_MEMSTATUS=0 -DSQLITE_DQS=0 \
+  gcc -O3 -march=native -fno-plt -c build/sqlite3.c -o build/sqlite3.o \
+    -DSQLITE_THREADSAFE=0 -DSQLITE_DEFAULT_MEMSTATUS=0 -DSQLITE_DQS=0 \
     -DSQLITE_DEFAULT_WAL_SYNCHRONOUS=1 -DSQLITE_LIKE_DOESNT_MATCH_BLOBS \
     -DSQLITE_MAX_EXPR_DEPTH=0 -DSQLITE_OMIT_DEPRECATED -DSQLITE_OMIT_PROGRESS_CALLBACK \
     -DSQLITE_OMIT_SHARED_CACHE -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_OMIT_AUTOINIT \

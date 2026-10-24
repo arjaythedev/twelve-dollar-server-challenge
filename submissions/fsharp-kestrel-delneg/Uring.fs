@@ -77,6 +77,7 @@ let private OP_CLOSE = 19uy
 let private OP_SEND = 26uy
 let private OP_RECV = 27uy
 let private OP_SHUTDOWN = 34uy
+let private OP_PROVIDE_BUFFERS = 31uy
 // sqe flags
 let private SQE_FIXED_FILE = 1uy
 let private SQE_IO_HARDLINK = 1uy <<< 3
@@ -107,7 +108,17 @@ let private TCP_NODELAY = 1
 let private SqEntries = 4096u
 let private CqEntries = 16384u
 /// Provided receive buffers per ring: 2,048 x 2 KB. A request is a few hundred bytes; a bigger one arrives in parts.
-let private NBufs = 2048
+/// Tuning knobs for experiments (the defaults are the measured best): FS3_NBUFS (buffers per ring, a power of 2),
+/// FS3_WAIT_N (completions the loop waits for) and FS3_WAIT_US (the longest wait).
+let private envInt name dflt =
+    match Int32.TryParse(Environment.GetEnvironmentVariable(name: string)) with
+    | true, v when v > 0 -> v
+    | _ -> dflt
+let private NBufs =
+    let n = envInt "FS3_NBUFS" 2048
+    if n &&& (n - 1) = 0 && n <= 32768 then n else 2048
+let private WaitN = uint32 (envInt "FS3_WAIT_N" 32)
+let private WaitNs = int64 (envInt "FS3_WAIT_US" 2000) * 1000L
 let private BufSize = 2048
 let private BufGroup = 0us
 let private MaxRings = 8
@@ -236,13 +247,28 @@ type private Ring(index: int) =
     let bufMask = uint16 (NBufs - 1)
     let mutable bufTail = 0us
     let mutable publishedTail = 0us
-    do
-        let reg = Marshal.AllocHGlobal 40
-        NativeMemory.Clear(NativePtr.toVoidPtr (NativePtr.ofNativeInt<byte> reg), unativeint 40)
-        NativePtr.write (NativePtr.ofNativeInt<uint64> reg) (uint64 bufRing)
-        NativePtr.write (NativePtr.ofNativeInt<uint32> (reg + 8n)) (uint32 NBufs)
-        NativePtr.write (NativePtr.ofNativeInt<uint16> (reg + 12n)) BufGroup
-        try register REGISTER_PBUF_RING reg 1L finally Marshal.FreeHGlobal reg
+    /// Some 6.8 builds refuse buffer rings (#152: Ubuntu's 6.8.0-147 answers EINVAL). Then the buffers go to the
+    /// kernel with IORING_OP_PROVIDE_BUFFERS instead: all at start, then each one again after use.
+    /// FS3_LEGACY_BUFS=1 forces this path (tests).
+    let legacy =
+        if Environment.GetEnvironmentVariable "FS3_LEGACY_BUFS" = "1" then true
+        else
+            let reg = Marshal.AllocHGlobal 40
+            NativeMemory.Clear(NativePtr.toVoidPtr (NativePtr.ofNativeInt<byte> reg), unativeint 40)
+            NativePtr.write (NativePtr.ofNativeInt<uint64> reg) (uint64 bufRing)
+            NativePtr.write (NativePtr.ofNativeInt<uint32> (reg + 8n)) (uint32 NBufs)
+            NativePtr.write (NativePtr.ofNativeInt<uint16> (reg + 12n)) BufGroup
+            try
+                try
+                    register REGISTER_PBUF_RING reg 1L
+                    false
+                with e ->
+                    if index = 0 then eprintfn "io_uring buffer ring refused (%s): using IORING_OP_PROVIDE_BUFFERS" e.Message
+                    true
+            finally
+                Marshal.FreeHGlobal reg
+    /// Legacy mode: buffers used since the last PublishBuffers.
+    let returnedBids = List<int>()
 
     // Per-slot state.
     let gen = Array.zeroCreate<uint32> slots
@@ -292,6 +318,8 @@ type private Ring(index: int) =
 
     /// Gives a receive buffer back to the kernel (published by PublishBuffers).
     member _.Recycle(bid: int) =
+      if legacy then returnedBids.Add bid
+      else
         let e = bufRing + nativeint (int (bufTail &&& bufMask) * 16)
         NativePtr.write (NativePtr.ofNativeInt<uint64> e) (uint64 (bufMem + nativeint (bid * BufSize)))
         NativePtr.write (NativePtr.ofNativeInt<uint32> (e + 8n)) (uint32 BufSize)
@@ -299,11 +327,38 @@ type private Ring(index: int) =
         bufTail <- bufTail + 1us
 
     /// Buffers given back since the last PublishBuffers.
-    member _.Returned = int (bufTail - publishedTail)
+    member _.Returned = if legacy then returnedBids.Count else int (bufTail - publishedTail)
 
-    member _.PublishBuffers() =
-        publishedTail <- bufTail
-        storeRelease (NativePtr.ofNativeInt<uint16> (bufRing + 14n)) bufTail
+    member this.PublishBuffers() =
+        if legacy then
+            // One PROVIDE_BUFFERS for each run of consecutive buffer ids.
+            let mutable i = 0
+            while i < returnedBids.Count do
+                let first = returnedBids.[i]
+                let mutable n = 1
+                while i + n < returnedBids.Count && returnedBids.[i + n] = first + n do
+                    n <- n + 1
+                this.Provide(first, n)
+                i <- i + n
+            returnedBids.Clear()
+        else
+            publishedTail <- bufTail
+            storeRelease (NativePtr.ofNativeInt<uint16> (bufRing + 14n)) bufTail
+
+    /// Legacy mode: hands `count` buffers from id `first` to the kernel (no completion unless it fails).
+    member this.Provide(first: int, count: int) =
+        let s = this.Sqe()
+        NativePtr.write (NativePtr.ofNativeInt<byte> s) OP_PROVIDE_BUFFERS
+        NativePtr.write (NativePtr.ofNativeInt<byte> (s + 1n)) SQE_CQE_SKIP_SUCCESS
+        NativePtr.write (NativePtr.ofNativeInt<int> (s + 4n)) count
+        NativePtr.write (NativePtr.ofNativeInt<uint64> (s + 8n)) (uint64 first)
+        NativePtr.write (NativePtr.ofNativeInt<uint64> (s + 16n)) (uint64 (bufMem + nativeint (first * BufSize)))
+        NativePtr.write (NativePtr.ofNativeInt<uint32> (s + 24n)) (uint32 BufSize)
+        NativePtr.write (NativePtr.ofNativeInt<uint64> (s + 32n)) OpIgnore
+        NativePtr.write (NativePtr.ofNativeInt<uint16> (s + 40n)) BufGroup
+
+    /// Called once after construction: in legacy mode, queues all buffers for the kernel.
+    member this.StartBuffers() = if legacy then this.Provide(0, NBufs)
 
     /// The next free SQE, zeroed. Submits first when the SQ is full.
     member this.Sqe() : nativeint =
@@ -505,7 +560,7 @@ type private Loop(listenFd: int) as this =
     do
         NativeMemory.Clear(NativePtr.toVoidPtr (NativePtr.ofNativeInt<byte> waitArg), unativeint 40)
         NativePtr.write (NativePtr.ofNativeInt<uint64> (waitArg + 16n)) (uint64 (waitArg + 24n)) // ts pointer
-        NativePtr.write (NativePtr.ofNativeInt<int64> (waitArg + 32n)) 2_000_000L // 2 ms
+        NativePtr.write (NativePtr.ofNativeInt<int64> (waitArg + 32n)) WaitNs // 2 ms by default
         thread <- Thread((fun () -> this.Run()), 512 * 1024, IsBackground = true, Name = "io_uring")
         thread.Start()
         ready.Wait()
@@ -778,6 +833,7 @@ type private Loop(listenFd: int) as this =
 
     member private this.AddRing() =
         let r = Ring(rings.Count)
+        r.StartBuffers()
         rings.Add r
         r
 
@@ -821,7 +877,7 @@ type private Loop(listenFd: int) as this =
                     if openTotal = 0 && rings.Count = 1 then
                         r0.Enter(1u, ENTER_GETEVENTS, 0n) |> ignore
                     else
-                        r0.Enter(32u, ENTER_GETEVENTS ||| ENTER_EXT_ARG, waitArg) |> ignore
+                        r0.Enter(WaitN, ENTER_GETEVENTS ||| ENTER_EXT_ARG, waitArg) |> ignore
                 else
                     r0.Enter(0u, ENTER_GETEVENTS, 0n) |> ignore
                 for i in 1 .. rings.Count - 1 do

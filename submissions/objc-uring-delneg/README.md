@@ -41,6 +41,7 @@ Server in Docker capped at 1 CPU / 2 GB (`--cpuset-cpus=0`, host network), wrk w
 | Checkpointer process with stop-the-world WAL rewind (see Design) | DB on a real disk, 40k users: 50.5k → 81.8k req/s served (p50 324 → 1.8 ms, p99 490 → 92 ms); in-loop checkpoint fsyncs had made the server disk-bound. tmpfs: CPU equal |
 | `INSERT` without `RETURNING` (`RETURNING` buffers its rows in an ephemeral table, a page cache set up and torn down per insert); `created_at` written in the schema default's format, id from `sqlite3_last_insert_rowid` | create-only wrk: 85–89k → 104k req/s (11.5 → 9.6 µs/req); realistic mix −0.5% CPU |
 | Feed like counts tallied in C from a plain `post_id` index range scan instead of `GROUP BY post_id`; like insert binds `created_at` (no per-row `strftime`) | feed-only wrk 12.6 → 11.5 µs/req (+10%), like-only 5.7 → 5.26 µs/req (+7%); realistic mix −1% CPU |
+| JSON string escaper checks 8 bytes at a time (SWAR test for `< 0x20`, `"`, `\`) before falling back to bytes | feed-only wrk 11.4 → 10.6 µs/req (+7%); realistic mix −0.5% CPU |
 
 Final: about 131k rps at 7.6 µs/req on the mix. Per route: `/health` 3.2 µs (kernel and loop floor), `GET /posts/:id` 4.0, like 5.9, create 12.1, `/feed` 12.6. For reference, Rust io_uring #82 built from its own scripts on the same harness: 115k rps, 8.7 µs/req (this entry before the mmap change: 127k, 7.9 µs/req).
 

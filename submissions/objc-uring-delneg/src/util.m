@@ -25,10 +25,22 @@ static const uint8_t esc_tab[256] = {
     0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,
 };
 
+// SWAR: nonzero when one of the 8 bytes of v is < 0x20, '"' or '\\'.
+TD_INLINE uint64_t esc8(uint64_t v) {
+    const uint64_t ones = 0x0101010101010101ull, high = 0x8080808080808080ull;
+    uint64_t q = v ^ (ones * '"'), k = v ^ (ones * '\\');
+    return (((v - ones * 0x20) & ~v) | ((q - ones) & ~q) | ((k - ones) & ~k)) & high;
+}
+
 void td_buf_json_str(TDBuf *b, const char *s, uint32_t n) {
     td_buf_reserve(b, n);
     uint32_t i = 0, start = 0;
     for (; i < n; i++) {
+        if (TD_LIKELY(i + 8 <= n)) {
+            uint64_t v;
+            memcpy(&v, s + i, 8);
+            if (!esc8(v)) { i += 7; continue; }
+        }
         uint8_t c = (uint8_t)s[i];
         if (TD_LIKELY(!esc_tab[c])) continue;
         td_buf_put(b, s + start, i - start);

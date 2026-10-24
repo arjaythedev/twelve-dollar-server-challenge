@@ -9,7 +9,6 @@ open System
 open System.Buffers
 open System.Buffers.Text
 open System.Text
-open System.Text.Encodings.Web
 open System.Text.Json
 open System.Threading.Tasks
 
@@ -82,60 +81,116 @@ let send (w: IBufferWriter<byte>) (status: int) (close: bool) (body: byte[]) = r
 
 // ---- JSON --------------------------------------------------------------------------------------------------------
 
-// One JSON buffer, used only inside `Db.serialized`, and copied into the pipe before the lock is released.
-let private buffer = ArrayBufferWriter<byte>(16384)
-let private json =
-    new Utf8JsonWriter(
-        buffer,
-        JsonWriterOptions(Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping, SkipValidation = true) // escaping <>&/ and non-ASCII is optional (SPEC)
-    )
+// The JSON body being written: one buffer, used only inside `Db.serialized`, and copied into the pipe before the lock
+// is released. Every value comes from SQLite or the token as UTF-8 and goes out as those bytes, with only the
+// escapes JSON requires (SPEC: escaping <>&/ and non-ASCII is optional).
+let mutable private buf = Array.zeroCreate<byte> 16384
+let mutable private pos = 0
 
-let private pId = JsonEncodedText.Encode "id"
-let private pBody = JsonEncodedText.Encode "body"
-let private pCreatedAt = JsonEncodedText.Encode "created_at"
-let private pAuthor = JsonEncodedText.Encode "author"
-let private pLikeCount = JsonEncodedText.Encode "like_count"
-let private pPosts = JsonEncodedText.Encode "posts"
-let private pPost = JsonEncodedText.Encode "post"
-let private pStatus = JsonEncodedText.Encode "status"
-let private pDb = JsonEncodedText.Encode "db"
-let private pUptime = JsonEncodedText.Encode "uptime_s"
-let private pError = JsonEncodedText.Encode "error"
-let private pLiked = JsonEncodedText.Encode "liked"
-let private pAlreadyLiked = JsonEncodedText.Encode "already_liked"
-let private pPostId = JsonEncodedText.Encode "post_id"
-let private vOk = JsonEncodedText.Encode "ok"
-let private vDegraded = JsonEncodedText.Encode "degraded"
-let private vUnreachable = JsonEncodedText.Encode "unreachable"
+let private ensure (n: int) =
+    if pos + n > buf.Length then
+        let b = Array.zeroCreate<byte> (max (buf.Length * 2) (pos + n))
+        Buffer.BlockCopy(buf, 0, b, 0, pos)
+        buf <- b
+
+let private copy (s: ReadOnlySpan<byte>) =
+    ensure s.Length
+    s.CopyTo(Span<byte>(buf, pos, s.Length))
+    pos <- pos + s.Length
+
+let private raw (s: byte[]) = copy (ReadOnlySpan s)
+
+let private put (b: byte) =
+    ensure 1
+    buf.[pos] <- b
+    pos <- pos + 1
+
+let private num (v: int64) =
+    ensure 20
+    let mutable n = 0
+    Utf8Formatter.TryFormat(v, Span<byte>(buf, pos, 20), &n) |> ignore
+    pos <- pos + n
+
+/// The bytes a JSON string must escape: the quote, the backslash and the control characters.
+let private special = SearchValues.Create(ReadOnlySpan(Array.append [| byte '"'; byte '\\' |] [| 0uy .. 31uy |]))
+let private hex = "0123456789abcdef"B
+
+/// A JSON string, quotes included, from UTF-8 bytes. Bytes from 0x80 up pass unchanged: SQLite holds the UTF-8 that
+/// `Encoding.UTF8` produced, so it is valid.
+let private str (s: ReadOnlySpan<byte>) =
+    put '"'B
+    let mutable rest = s
+    let mutable i = rest.IndexOfAny special
+    while i >= 0 do
+        copy (rest.Slice(0, i))
+        let c = rest.[i]
+        ensure 6
+        buf.[pos] <- '\\'B
+        match c with
+        | '"'B | '\\'B -> buf.[pos + 1] <- c; pos <- pos + 2
+        | '\n'B -> buf.[pos + 1] <- 'n'B; pos <- pos + 2
+        | '\r'B -> buf.[pos + 1] <- 'r'B; pos <- pos + 2
+        | '\t'B -> buf.[pos + 1] <- 't'B; pos <- pos + 2
+        | '\b'B -> buf.[pos + 1] <- 'b'B; pos <- pos + 2
+        | 12uy -> buf.[pos + 1] <- 'f'B; pos <- pos + 2
+        | _ ->
+            buf.[pos + 1] <- 'u'B
+            buf.[pos + 2] <- '0'B
+            buf.[pos + 3] <- '0'B
+            buf.[pos + 4] <- hex.[int c >>> 4]
+            buf.[pos + 5] <- hex.[int c &&& 15]
+            pos <- pos + 6
+        rest <- rest.Slice(i + 1)
+        i <- rest.IndexOfAny special
+    copy rest
+    put '"'B
+
+let private strOf (s: string) = str (ReadOnlySpan(Encoding.UTF8.GetBytes s))
 
 /// JavaScript's String.prototype.trim() set, so bodies are trimmed exactly like the reference servers.
 let private jsWhitespace =
     "\t\n\u000b\u000c\r                  　﻿"
         .ToCharArray()
 
-/// Call inside `Db.serialized`: sends what the JSON writer holds as the response body, and clears it.
+/// Call inside `Db.serialized`: sends the JSON body as the response, and clears it.
 let private writeJson (w: IBufferWriter<byte>) (status: int) (close: bool) =
-    json.Flush()
-    respond w status close buffer.WrittenSpan
-    json.Reset(buffer)
-    buffer.ResetWrittenCount()
+    respond w status close (ReadOnlySpan<byte>(buf, 0, pos))
+    pos <- 0
 
-let private clear () =
-    json.Reset(buffer)
-    buffer.ResetWrittenCount()
+let private clear () = pos <- 0
 
-/// Drops what a failed handler left in the JSON writer (call before the 500), so the next response starts clean.
+/// Drops what a failed handler left in the JSON buffer (call before the 500), so the next response starts clean.
 let discardJson () = clear ()
 
-/// `created_at` is stored in the wire format, so every column is sent as stored, straight from SQLite's UTF-8 bytes.
-let private writePost (st: nativeint) =
-    json.WriteStartObject()
-    json.WriteNumber(pId, Sqlite.column_int64(st, 0))
-    json.WriteString(pBody, Sqlite.text st 1)
-    json.WriteString(pCreatedAt, Sqlite.text st 2)
-    json.WriteString(pAuthor, Sqlite.text st 3)
-    json.WriteNumber(pLikeCount, Sqlite.column_int64(st, 4))
-    json.WriteEndObject()
+let private kId = "{\"id\":"B
+let private kBody = ",\"body\":"B
+let private kCreatedAt = ",\"created_at\":"B
+let private kAuthor = ",\"author\":"B
+let private kLikeCount = ",\"like_count\":"B
+let private kPosts = "{\"posts\":["B
+let private kPostsEnd = "]}"B
+let private kPost = "{\"post\":"B
+let private kHealthOk = "{\"status\":\"ok\",\"db\":\"ok\",\"uptime_s\":"B
+let private kHealthDown = "{\"status\":\"degraded\",\"db\":\"unreachable\",\"error\":"B
+let private kLiked = "{\"liked\":true,\"already_liked\":false,\"post_id\":"B
+let private kAlreadyLiked = "{\"liked\":true,\"already_liked\":true,\"post_id\":"B
+
+/// One post object. `created_at` is stored in the wire format, so every column goes out as stored.
+let private writePost (id: int64) (body: ReadOnlySpan<byte>) (createdAt: ReadOnlySpan<byte>) (author: ReadOnlySpan<byte>) (likes: int64) =
+    raw kId
+    num id
+    raw kBody
+    str body
+    raw kCreatedAt
+    str createdAt
+    raw kAuthor
+    str author
+    raw kLikeCount
+    num likes
+    put '}'B
+
+let private writePostRow (st: nativeint) =
+    writePost (Sqlite.column_int64(st, 0)) (Sqlite.text st 1) (Sqlite.text st 2) (Sqlite.text st 3) (Sqlite.column_int64(st, 4))
 
 // ---- Endpoints ---------------------------------------------------------------------------------------------------
 
@@ -148,19 +203,15 @@ let health (w: IBufferWriter<byte>) (close: bool) =
                     raise (Db.failure ())
             finally
                 Sqlite.reset Db.ping |> ignore
-            json.WriteStartObject()
-            json.WriteString(pStatus, vOk)
-            json.WriteString(pDb, vOk)
-            json.WriteNumber(pUptime, (Environment.TickCount64 - startedAt) / 1000L)
-            json.WriteEndObject()
+            raw kHealthOk
+            num ((Environment.TickCount64 - startedAt) / 1000L)
+            put '}'B
             writeJson w 200 close
         with e ->
             clear ()
-            json.WriteStartObject()
-            json.WriteString(pStatus, vDegraded)
-            json.WriteString(pDb, vUnreachable)
-            json.WriteString(pError, e.Message)
-            json.WriteEndObject()
+            raw kHealthDown
+            strOf e.Message
+            put '}'B
             writeJson w 503 close)
 
 /// The posts of a fast feed: ids (newest first) and their like counts.
@@ -189,22 +240,15 @@ let private feedRange (n: int) =
     try
         Sqlite.bind_int64(st, 1, lo) |> ignore
         Sqlite.bind_int64(st, 2, hi) |> ignore
-        json.WriteStartObject()
-        json.WriteStartArray(pPosts)
+        raw kPosts
         while ok && Db.stepRow st do
             if k < n && Sqlite.column_int64(st, 0) = feedIds.[k] then
-                json.WriteStartObject()
-                json.WriteNumber(pId, feedIds.[k])
-                json.WriteString(pBody, Sqlite.text st 1)
-                json.WriteString(pCreatedAt, Sqlite.text st 2)
-                json.WriteString(pAuthor, Sqlite.text st 3)
-                json.WriteNumber(pLikeCount, feedCounts.[k])
-                json.WriteEndObject()
+                if k > 0 then put ','B
+                writePost feedIds.[k] (Sqlite.text st 1) (Sqlite.text st 2) (Sqlite.text st 3) feedCounts.[k]
                 k <- k + 1
             else
                 ok <- false
-        json.WriteEndArray()
-        json.WriteEndObject()
+        raw kPostsEnd
     finally
         Sqlite.reset st |> ignore
     if ok && k = n then true
@@ -229,12 +273,13 @@ let feed (w: IBufferWriter<byte>) (close: bool) =
         if not (run && feedRange n) then
             let st = Db.feed
             try
-                json.WriteStartObject()
-                json.WriteStartArray(pPosts)
+                raw kPosts
+                let mutable first = true
                 while Db.stepRow st do
-                    writePost st
-                json.WriteEndArray()
-                json.WriteEndObject()
+                    if not first then put ','B
+                    first <- false
+                    writePostRow st
+                raw kPostsEnd
             finally
                 Sqlite.reset st |> ignore
         writeJson w 200 close)
@@ -247,10 +292,9 @@ let getPost (w: IBufferWriter<byte>) (close: bool) (id: int64) =
             try
                 Sqlite.bind_int64(st, 1, id) |> ignore
                 if Db.stepRow st then
-                    json.WriteStartObject()
-                    json.WritePropertyName(pPost)
-                    writePost st
-                    json.WriteEndObject()
+                    raw kPost
+                    writePostRow st
+                    put '}'B
                     writeJson w 200 close
                     true
                 else
@@ -285,11 +329,9 @@ let like (w: IBufferWriter<byte>) (close: bool) (userId: int64) (id: int64) : Ta
                 finally
                     Sqlite.reset st |> ignore
             if inserted || postExists id then
-                json.WriteStartObject()
-                json.WriteBoolean(pLiked, true)
-                json.WriteBoolean(pAlreadyLiked, not inserted)
-                json.WriteNumber(pPostId, id)
-                json.WriteEndObject()
+                raw (if inserted then kLiked else kAlreadyLiked)
+                num id
+                put '}'B
                 writeJson w (if inserted then 201 else 200) close
                 true
             else
@@ -345,15 +387,9 @@ let private insertPost (w: IBufferWriter<byte>) (close: bool) (userId: int64) (u
             Sqlite.bind_text(st, 2, NativeInterop.NativePtr.toNativeInt p, utf8.Length, Sqlite.Transient) |> ignore
             if Sqlite.step st <> Sqlite.Row then
                 raise (Db.failure ())
-            json.WriteStartObject()
-            json.WriteStartObject(pPost)
-            json.WriteNumber(pId, Sqlite.column_int64(st, 0))
-            json.WriteString(pBody, body)
-            json.WriteString(pCreatedAt, Sqlite.text st 1)
-            json.WriteString(pAuthor, username)
-            json.WriteNumber(pLikeCount, 0)
-            json.WriteEndObject()
-            json.WriteEndObject()
+            raw kPost
+            writePost (Sqlite.column_int64(st, 0)) (ReadOnlySpan utf8) (Sqlite.text st 1) (ReadOnlySpan(Encoding.UTF8.GetBytes username)) 0L
+            put '}'B
             // Stepping to DONE finishes the statement. With group commit, the loop sends the response after the COMMIT.
             if Sqlite.step st <> Sqlite.Done then
                 clear ()

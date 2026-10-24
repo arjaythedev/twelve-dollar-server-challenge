@@ -5,7 +5,7 @@
 | Language | F# 10 on .NET 10 (SDK 10.0.401, pinned in `global.json`) |
 | Server | Kestrel (ASP.NET Core 10) with its own io_uring transport (its own epoll transport when io_uring is not allowed). The transport calls the HTTP handler directly. No web framework. |
 | Database driver | SQLite 3.53.4 from source with a profile-guided gcc build, called through `DllImport` (`Sqlite.fs`) |
-| JSON | `System.Text.Json` (`Utf8JsonWriter`, `Utf8JsonReader`) |
+| JSON | Own writer (`Api.fs`); `System.Text.Json`'s `Utf8JsonReader` for request bodies |
 | Build | ReadyToRun with TieredPGO. Workstation GC, not concurrent. |
 | **Nginx or direct** | **Direct**: the server listens on `HOST:PORT` (`0.0.0.0:80`) itself |
 
@@ -15,7 +15,7 @@
    The epoll transport (`Transport.fs`): one thread waits on an epoll set. When a socket has data, the thread reads it with one `recv` call into the receive buffer of the thread. When one `epoll_wait` returns fewer than 32 events, the thread sleeps 2 ms before the next wait. Thus one wake-up serves more sockets. On other platforms, Kestrel uses its socket transport, and `Conn.run` reads the pipes of the connection.
 2. The thread gives the bytes to the handler (`Conn.direct`). Kestrel's HTTP layer does not run. Kestrel calls our connection handler one time for each new keep-alive connection. The handler gives the connection to the loop and returns, so Kestrel keeps no state for the connection. With epoll only: past the keep-alive budget (the fd limit minus 1,024), a new connection is shed: it gets one request, a `Connection: close` response and the close. Kestrel never sees a shed connection: the loop keeps it from accept to close. The connections have no pipes and no send task. A connection keeps a buffer only for a request that is not complete, or for bytes that the socket did not take.
 3. The handler parses HTTP/1.1 itself. It reads the method, the path and these headers: `Authorization`, `Content-Length`, `Connection` and `Expect` (it answers `100 Continue`). A request with `Transfer-Encoding` gets 400. Routes are in code.
-4. Each endpoint (`Api.fs`) writes the full response into one buffer of the thread: the status line, the headers and the JSON body. Then the thread sends the responses of each connection with one send.
+4. Each endpoint (`Api.fs`) writes the full response into one buffer of the thread: the status line, the headers and the JSON body. The JSON writer copies the keys as fixed bytes and the column values as SQLite's UTF-8 bytes. It escapes only what JSON requires (`"`, `\` and control characters, found with one vectorized search). Then the thread sends the responses of each connection with one send.
 5. One SQLite transaction holds all the writes of one wake-up of the loop (group commit). With io_uring it holds the reads of the pass too, so SQLite takes its WAL locks once per pass. The first write opens it. After the last request of the wake-up, the loop commits it and then sends the responses. Thus each response goes out after the commit of its write. One SQLite connection serves all requests. With the epoll transport, one thread runs all requests, so it needs no lock. With the socket transport, a lock serializes the requests. The server prepares each statement one time at start.
 6. The JWT check (`Auth.fs`) runs on each request. It decodes the header and the payload, computes HMAC-SHA256 over the token bytes and compares the signature in fixed time. Then it checks `sub`, `username` and `exp`.
 
@@ -59,6 +59,7 @@ With the epoll transport, the connection holds the database lock for its whole l
 | io_uring: checkpoints on a second connection in a background thread, one transaction per loop pass (reads too), writes held at 4,096 WAL frames until the checkpoint catches up | 160,000 users: hold p95 79 to 6 ms, p99 110-198 to 33-35 ms; CPU per request +2.5% (30.1 to 30.72 and 30.93 µs). 320,000 users: 25,568 to 31,967 requests per second (Synteq box) | #141, #82 (one read transaction per batch), perf (`fsync` on the loop thread) |
 | `/feed` by id range: when the 20 newest posts are one run of consecutive ids (the usual case, since posts are created in id order), one rowid range scan reads the posts and one range scan of `likes_post_id_idx` counts all 20 posts' likes, in the transaction of the id query. Else the plain query. | 160,000 users: CPU per request -14% (30.72 and 30.93 to 26.34 and 26.39 µs). `/feed` at saturation: instructions -11% (Synteq box) | #154, #152, #82 (tried in round 1 on wsl26: CPU the same) |
 | The PGO training run (`sqlite-train.c`) does what the io_uring mode does: normal locking, one transaction for each 16 statements, `PASSIVE` checkpoints on a second connection, the feed by id range | 160,000 users: CPU per request -2.1% (four pairs: -1.37, -0.01, -0.76, +0.04 µs). `/feed` at saturation: cycles -4.5% in 6 of 6 rounds, same instructions | #60 (PGO build) |
+| Own JSON writer instead of `Utf8JsonWriter` (third try; the first two ran on WSL2, where syscalls hid it): keys as fixed bytes, values as SQLite's UTF-8 bytes, one vectorized search for the bytes to escape | 160,000 users: CPU per request -3.3% (two pairs: -0.44, -1.20 µs). `/feed` at saturation: instructions -5.6% | #74 |
 | SQLite from source with `THREADSAFE=2` and SQLite's recommended options | No mutex calls in SQLite | #77, #108 |
 | `cache_size` 32 MB | The SQLite page cache is 16 times the default size (2 MB) | #108 |
 | JSON from the SQLite UTF-8 bytes, no .NET strings for rows | Less allocation | #77 |
@@ -71,7 +72,7 @@ Changes that did not help (discarded):
 | Change | Result | Idea from |
 |---|---|---|
 | `WaitForDataBeforeAllocatingBuffer=false` | Same CPU, RSS +237 MB | #77 |
-| Own JSON writer, tried two times | Same CPU at first. Later, CPU -0.9% (less than the noise). | #74 |
+| Own JSON writer, tried two times on WSL2 (kept on the third try, above) | Same CPU at first. Later, CPU -0.9% (less than the noise). | #74 |
 | Native AOT | CPU +2%, RSS -93 MB | #77, #74 |
 | Byte strings made one time, not in each call. An F# `"..."B` literal in a function makes a new array each time. Allocation for each feed request fell from 221 bytes to 4 bytes. | CPU -1.0% (less than the noise), RSS -15 MB | allocation counters |
 | Own JSON writer and byte strings made one time, together | CPU -1.1% (less than the noise) | #74, allocation counters |
@@ -166,6 +167,7 @@ With io_uring the cgroup holds the kernel's memory for every open socket (about 
 - `test/test.sh`: 42/42, also in a clean `ubuntu:24.04` container with 1 CPU, 2 GB and no swap, after `install.sh` (61 s) and `test/run.sh` (77 s).
 - io_uring transport: 5,000 keep-alive connections over rings of 1,100 slots (`nofile` 1100, so 5 rings): two rounds of requests on each, a pipelined pair, a request split in two writes, `Connection: close` with the FIN, half the clients closing first: 0 failed.
 - io_uring with the older buffer API (`FS3_LEGACY_BUFS=1` forces it): `test/test.sh` 42/42, the 5,000-connection test and the io_uring write test below: 0 failed.
+- JSON escaping: posts with quotes, backslashes, control characters, emoji, CJK, `</script>`, DEL, a no-break space and 500 characters, read back by id and in the feed: the parsed responses are the same as from the old `Utf8JsonWriter` version.
 - HTTP edge cases: 30 pipelined requests in one write, a request sent 7 bytes at a time, `Connection: close`, HTTP/1.0, a bad request line, a 20 KB header, `Transfer-Encoding: chunked`, a 501-character body, 2,000 open connections (no file descriptor leak), a client that closes in the middle of a body.
 - Writes with io_uring and frequent holds (`FS3_HOLD_FRAMES=16`): 64 clients each created 40 posts, liked each one twice (201, then 200 `already_liked`), read it back, and sent a pipelined create and read. 0 failed, 5,120 posts. After `kill -9` and a restart on the same files, all 5,120 posts read back.
 - Writes: 100 clients sent likes and new posts, and the server was killed with `SIGKILL` during the load. After the restart, all 1,379 rows that got a 201 were in the database. With the database on a full disk, the server sent no 201 for a write that did not commit: it closed those connections, and `/health` still answered 200.

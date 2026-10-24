@@ -13,8 +13,12 @@ CC="${CC:-cc}"
 # compatibility compiler would only hide the real error.
 export V_MACOS_V3_NO_FALLBACK=1
 PGO="${PGO:-1}"
+# URING=0 builds the plain epoll backend instead of io_uring (Linux only either way).
+URING="${URING:-1}"
+VDEFS=""
 [ "${1:-}" = "--no-pgo" ] && PGO=0
 [ "$(uname -s)" = "Linux" ] || PGO=0
+if [ "$(uname -s)" = "Linux" ] && [ "$URING" = "1" ]; then VDEFS="-d uring"; fi
 
 SQLITE=sqlite-autoconf-3530400
 SQLITE_SHA256=0e9483900e92cd5de8fd48d16bf9200145a61f7fd5be542a5ac81d8a9516eb9c
@@ -54,7 +58,7 @@ if [ "$PGO" = "1" ]; then
   rm -rf "$PROF" build/tmp bin/server bin/.server.v3cc.* build/cgen
   mkdir -p "$PROF" build/tmp build/cgen
   build_sqlite ""
-  TMPDIR="$PWD/build/tmp" "$VBIN" -prod -nocache -keepc -showcc -cc "$CC" -o bin/server src \
+  TMPDIR="$PWD/build/tmp" "$VBIN" -prod -nocache -keepc -showcc -cc "$CC" $VDEFS -o bin/server src \
     > build/showcc.log 2>&1 || { cat build/showcc.log; exit 1; }
   build_sqlite "-fprofile-generate=$PROF"
   ccline="$(grep -E '^\s*> ' build/showcc.log | tail -1 | sed -E 's/^\s*> //')"
@@ -78,6 +82,6 @@ else
   if [ ! -f build/sqlite3.o ] || [ build/sqlite3.c -nt build/sqlite3.o ]; then
     build_sqlite ""
   fi
-  "$VBIN" -prod -cc "$CC" -o bin/server src
+  "$VBIN" -prod -cc "$CC" $VDEFS -o bin/server src
   echo "built bin/server with $("$VBIN" version)"
 fi

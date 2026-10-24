@@ -2,6 +2,21 @@ module main
 
 import os
 
+// serve runs the backend this build was made for: io_uring (`-d uring`), the epoll loop
+// (Linux), or vlib's fasthttp reactor (everywhere, and Linux with `-d use_fasthttp`).
+fn serve(host string, port int) ! {
+	$if linux && uring ? {
+		run_uring(host, port) or {
+			eprintln('${err}; using the epoll backend')
+			run_epoll(host, port)!
+		}
+	} $else $if linux && !use_fasthttp ? {
+		run_epoll(host, port)!
+	} $else {
+		run_fasthttp(host, port)!
+	}
+}
+
 fn main() {
 	if os.args.len == 3 && os.args[1] == '--train' {
 		$if linux {
@@ -21,15 +36,8 @@ fn main() {
 		eprintln('fatal: bad PORT')
 		exit(1)
 	}
-	$if linux && !use_fasthttp ? {
-		run_epoll(host, port) or {
-			eprintln('fatal: ${err}')
-			exit(1)
-		}
-	} $else {
-		run_fasthttp(host, port) or {
-			eprintln('fatal: ${err}')
-			exit(1)
-		}
+	serve(host, port) or {
+		eprintln('fatal: ${err}')
+		exit(1)
 	}
 }

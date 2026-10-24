@@ -64,43 +64,6 @@ const max_requests_per_pass = 64
 const listen_backlog = 4096
 const stall_timeout_s = u32(120)
 const sweep_every_s = u32(10)
-const pool_max = 256
-const pool_buf_max = u32(16 * 1024)
-
-// Buf is a malloc'd byte range owned by one connection; ptr is nil while idle.
-struct Buf {
-mut:
-	ptr &u8 = unsafe { nil }
-	len u32
-	cap u32
-}
-
-enum CState as u32 {
-	free
-	open    // reading requests
-	parked  // a response did not fit the socket buffer: waiting for EPOLLOUT, not reading
-	closing // flush what is pending, then close
-}
-
-// Conn is the whole per-connection state: 64 bytes, one cache line.
-struct Conn {
-mut:
-	input      Buf // bytes of a request that has not fully arrived
-	output     Buf // response bytes the socket has not taken yet
-	flight     Buf // reserved for the io_uring backend (buffer handed to the kernel)
-	sent       u32 // bytes of output already written
-	generation u32
-	touched    u32 // seconds since start when the connection last made progress
-	state      CState
-}
-
-// Seg is one response in the batch arena, owned by connection fd.
-struct Seg {
-	fd    int
-	start int
-	end   int
-	wrote bool
-}
 
 struct Loop {
 mut:
@@ -114,77 +77,14 @@ mut:
 	scratch    []u8
 	out        []u8 // every response of the current batch
 	segs       []Seg
-	pool       []Buf
+	pool       BufPool
+	pending    []int // connections with complete requests still waiting in input
 	start_ns   i64
 	last_sweep u32
 }
 
 fn (l &Loop) seconds() u32 {
 	return u32((time.sys_mono_now() - l.start_ns) / time.second)
-}
-
-// buf_take returns a buffer of at least need bytes, from the pool when one fits.
-fn (mut l Loop) buf_take(need u32) Buf {
-	for i := l.pool.len - 1; i >= 0; i-- {
-		if l.pool[i].cap >= need {
-			b := l.pool[i]
-			l.pool.delete_last()
-			return Buf{
-				ptr: b.ptr
-				cap: b.cap
-			}
-		}
-	}
-	mut cap := u32(4096)
-	for cap < need {
-		cap *= 2
-	}
-	return Buf{
-		ptr: unsafe { &u8(C.malloc(cap)) }
-		cap: cap
-	}
-}
-
-// buf_give returns a buffer to the pool (or frees it when the pool is full or it is large).
-fn (mut l Loop) buf_give(b Buf) {
-	if b.ptr == unsafe { nil } {
-		return
-	}
-	if l.pool.len < pool_max && b.cap <= pool_buf_max {
-		l.pool << Buf{
-			ptr: b.ptr
-			cap: b.cap
-		}
-		return
-	}
-	unsafe { C.free(b.ptr) }
-}
-
-// buf_append grows b as needed and appends n bytes from p.
-fn (mut l Loop) buf_append(mut b Buf, p &u8, n int) {
-	need := b.len + u32(n)
-	if b.ptr == unsafe { nil } {
-		nb := l.buf_take(need)
-		b.ptr = nb.ptr
-		b.cap = nb.cap
-		b.len = 0
-	} else if need > b.cap {
-		mut cap := b.cap
-		for cap < need {
-			cap *= 2
-		}
-		b.ptr = unsafe { &u8(C.realloc(b.ptr, cap)) }
-		b.cap = cap
-	}
-	unsafe { vmemcpy(b.ptr + b.len, p, n) }
-	b.len = need
-}
-
-fn (mut l Loop) buf_drop(mut b Buf) {
-	l.buf_give(b)
-	b.ptr = unsafe { nil }
-	b.len = 0
-	b.cap = 0
 }
 
 fn set_nonblocking(fd int) {
@@ -259,7 +159,6 @@ fn run_epoll(host string, port int) ! {
 		scratch:   []u8{len: scratch_size}
 		out:       []u8{cap: 1 << 20}
 		segs:      []Seg{cap: 1024}
-		pool:      []Buf{cap: pool_max}
 		start_ns:  time.sys_mono_now()
 	}
 	if l.epfd < 0 {
@@ -277,7 +176,8 @@ fn run_epoll(host string, port int) ! {
 fn (mut l Loop) run() {
 	mut events := [max_events]C.epoll_event{}
 	for {
-		n := C.epoll_wait(l.epfd, &events[0], max_events, 1000)
+		wait_ms := if l.pending.len > 0 { 0 } else { 1000 }
+		n := C.epoll_wait(l.epfd, &events[0], max_events, wait_ms)
 		if n < 0 {
 			if C.errno == C.EINTR {
 				continue
@@ -287,6 +187,17 @@ fn (mut l Loop) run() {
 		}
 		l.app.tick()
 		now := l.seconds()
+		if l.pending.len > 0 {
+			// pipelined requests left over from an earlier pass (the per-pass cap): the socket
+			// is drained, so no event will come for them
+			pending := l.pending.clone()
+			l.pending.clear()
+			for fd in pending {
+				if fd < l.conns.len && l.conns[fd].state == .open && l.conns[fd].input.len > 0 {
+					l.read_conn(fd, now)
+				}
+			}
+		}
 		for i in 0 .. n {
 			fd := unsafe { events[i].data.fd }
 			flags := unsafe { events[i].events }
@@ -382,8 +293,8 @@ fn (mut l Loop) close_conn(fd int) {
 		return
 	}
 	C.close(fd) // also removes fd from the epoll set
-	l.buf_drop(mut c.input)
-	l.buf_drop(mut c.output)
+	l.pool.drop(mut c.input)
+	l.pool.drop(mut c.output)
 	c.sent = 0
 	c.state = .free
 	l.n_open--
@@ -456,16 +367,19 @@ fn (mut l Loop) read_conn(fd int, now u32) {
 		}
 		if pos > 0 || c.input.len == 0 {
 			c.input.len = 0
-			l.buf_append(mut c.input, unsafe { &u8(l.scratch.data) + pos }, rest)
+			l.pool.append(mut c.input, unsafe { &u8(l.scratch.data) + pos }, rest)
 		} else {
 			// nothing new was consumed: the old tail is already in input; append the new bytes
 			old := int(c.input.len)
 			if have > old {
-				l.buf_append(mut c.input, unsafe { &u8(l.scratch.data) + old }, have - old)
+				l.pool.append(mut c.input, unsafe { &u8(l.scratch.data) + old }, have - old)
 			}
 		}
+		if served >= max_requests_per_pass && c.state == .open {
+			l.pending << fd // complete requests may be left: serve them on the next pass
+		}
 	} else if c.input.len > 0 {
-		l.buf_drop(mut c.input)
+		l.pool.drop(mut c.input)
 	}
 	if eof {
 		if l.segs.len > 0 && l.segs[l.segs.len - 1].fd == fd {
@@ -488,7 +402,7 @@ fn (mut l Loop) bad_request(fd int) {
 		end:   l.out.len
 	}
 	c.state = .closing
-	l.buf_drop(mut c.input)
+	l.pool.drop(mut c.input)
 }
 
 // finish_batch commits the batch, then sends every response of the batch.
@@ -506,7 +420,7 @@ fn (mut l Loop) finish_batch(now u32) {
 			// The batch was rolled back: a 201 would be a lie, and a read in the same batch may
 			// have seen the rolled-back rows, so no response of this batch leaves the process.
 			c.state = .closing
-			l.buf_drop(mut c.output)
+			l.pool.drop(mut c.output)
 			c.sent = 0
 			l.close_conn(seg.fd)
 			continue
@@ -514,7 +428,7 @@ fn (mut l Loop) finish_batch(now u32) {
 		p := unsafe { &u8(l.out.data) + seg.start }
 		n := seg.end - seg.start
 		if c.output.len > 0 {
-			l.buf_append(mut c.output, p, n)
+			l.pool.append(mut c.output, p, n)
 			continue
 		}
 		w := C.send(seg.fd, p, usize(n), C.MSG_NOSIGNAL)
@@ -526,7 +440,7 @@ fn (mut l Loop) finish_batch(now u32) {
 			continue
 		}
 		done := if w > 0 { int(w) } else { 0 }
-		l.buf_append(mut c.output, unsafe { p + done }, n - done)
+		l.pool.append(mut c.output, unsafe { p + done }, n - done)
 		c.sent = 0
 		if c.state == .open {
 			c.state = .parked
@@ -563,7 +477,7 @@ fn (mut l Loop) push_output(fd int) {
 		l.close_conn(fd)
 		return
 	}
-	l.buf_drop(mut c.output)
+	l.pool.drop(mut c.output)
 	c.sent = 0
 	c.touched = l.seconds()
 	if c.state == .closing {

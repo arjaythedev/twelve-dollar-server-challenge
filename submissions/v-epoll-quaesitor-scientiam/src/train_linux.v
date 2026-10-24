@@ -95,7 +95,7 @@ fn train_token(secret []u8, user int) string {
 
 fn train_server(db string) {
 	os.setenv('SQLITE_PATH', db, true)
-	run_epoll('127.0.0.1', train_port) or {
+	serve('127.0.0.1', train_port) or {
 		eprintln('train server: ${err}')
 		exit(1)
 	}

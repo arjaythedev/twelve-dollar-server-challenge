@@ -4,7 +4,7 @@
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get install -y --no-install-recommends build-essential git curl ca-certificates
+apt-get install -y --no-install-recommends build-essential git curl ca-certificates liburing-dev
 
 V_COMMIT_FULL=b5bcdbb224752525c0a38aaccd3487a78641e269  # vlang/v master, 2026-10-23
 

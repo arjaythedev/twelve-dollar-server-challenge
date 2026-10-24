@@ -55,12 +55,16 @@ The C transport keeps debug symbols and frame pointers for local profiles.
 - **524,280 fixed slots.** One thread owns eight sparse tables with 65,535 slots each.
   Direct accepts never install client sockets in the process descriptor table.
   The listener supplies `TCP_NODELAY` to accepted sockets.
-  Each slot has at most one outstanding operation and a generation-tagged completion.
+  Each slot has at most one outstanding accept, send or close and a generation-tagged completion.
   The allocator cannot reuse a slot until the server consumes its direct-close completion.
+- **One multishot receive per connection.** A request costs no receive submission or poll re-arm.
+  Input that arrives while V is still busy with the connection is held, and the receive is cancelled
+  until V asks for input again, so pipelined clients keep backpressure in their socket.
+  A server close cancels the armed receive first, then closes the direct descriptor.
 - **Shared receive buffers.** Each ring has 1,024 buffers of 2,048 bytes.
   Idle connections have no input or output allocation.
   Partial requests use bounded input buffers. Pending sends retain stable storage until completion.
-  The transport resumes reads directly after a send unless V has buffered or deferred work to process.
+  The transport delivers input directly after a send unless V has buffered or deferred work to process.
 - **Bounded queues, no SQPOLL.** Rings use single-issuer cooperative task execution. The server
   submits within the SQ limit and consumes bounded CQ batches.
   `NODROP` protects overflow completions. `ENOBUFS` retries wait for buffer recycling.

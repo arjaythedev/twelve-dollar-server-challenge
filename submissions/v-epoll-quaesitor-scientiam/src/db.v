@@ -165,9 +165,15 @@ fn (mut d Db) commit() bool {
 	return false
 }
 
-// close releases the connection (its prepared statements are finalized with it).
+// close finalizes every statement and closes the connection, releasing its locks (a close
+// with statements still alive would only leave a zombie that keeps the exclusive lock).
 fn (mut d Db) close() {
-	C.sqlite3_close_v2(d.conn)
+	for st in [d.st_feed, d.st_post, d.st_health, d.st_insert, d.st_created, d.st_like,
+		d.st_exists, d.st_ids, d.st_likes, d.st_rows, d.st_begin, d.st_commit, d.st_back] {
+		C.sqlite3_finalize(st)
+	}
+	rc := C.sqlite3_close(d.conn)
+	assert rc == sqlite_ok
 	d.conn = unsafe { nil }
 }
 

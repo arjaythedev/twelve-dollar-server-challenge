@@ -14,9 +14,11 @@ import time
 //
 // Per-connection flow control: while a send is in flight, later responses are queued
 // behind it. Once more than ur_park_output is queued the connection is parked: its receive
-// is cancelled (bytes already on the way are kept, up to ur_max_input) until the queue has
-// drained, then the receive is armed again. ur_max_output is the hard cap after which the
-// connection is closed instead.
+// is cancelled (bytes already on the way are kept, up to ur_parked_input) until the queue
+// has drained; then up to ur_max_requests_per_pass of the kept requests are served per pass
+// and the receive is armed again. ur_max_output is the hard cap after which the connection
+// is closed instead. Each batch's response arena is bounded by ur_max_arena: when it is
+// reached the remaining completions wait for the next pass.
 
 #flag -I@VMODROOT/src
 #flag @VMODROOT/src/uring_shim.c
@@ -56,14 +58,16 @@ const ur_batch = u32(32)
 const ur_wait_busy_us = 250
 const ur_wait_idle_us = 1_000_000
 const ur_max_cqes = 512
-// A connection is parked once ur_park_output is queued behind its send; what is already in
-// flight through the parser can still add up to the responses of two ur_max_input windows
-// of pipelined requests (a 16 KiB window of tiny requests is ~450 feeds, ~2.7 MiB), so the
-// hard cap after which the connection is closed sits above that.
+// A connection is parked once ur_park_output is queued behind its send. Before the parking
+// takes effect one batch (bounded by ur_max_arena) plus one receive buffer of responses can
+// still be queued, so the hard cap sits above that.
 const ur_max_output = u32(4 << 20)
 const ur_park_output = u32(64 * 1024)
-const ur_max_input = u32(16 * 1024) // no request of this API comes near it
+const ur_max_arena = 2 << 20
+const ur_max_input = u32(16 * 1024) // a single request larger than this is refused
+const ur_parked_input = u32(1 << 20) // bytes kept while parked (the kernel had them already)
 const ur_max_requests_per_pass = 64
+const ur_unlimited = int(0x7fffffff)
 
 const op_accept = u8(1)
 const op_recv = u8(2)
@@ -266,14 +270,19 @@ fn (mut r Ring) run() {
 			}
 			r.sh.mu.lock()
 			r.sh.app.tick()
+			mut done := 0
 			for i in 0 .. n {
 				r.dispatch(r.cqes[i], now)
+				done++
+				if r.out.len >= ur_max_arena {
+					break // bound the batch; the remaining completions are peeked again
+				}
 			}
 			r.finish_batch()
 			r.sh.mu.unlock()
-			C.us_advance(r.ring, u32(n))
-			total += n
-			if n < r.cqes.len {
+			C.us_advance(r.ring, u32(done))
+			total += done
+			if done == n && n < r.cqes.len {
 				break
 			}
 		}
@@ -287,7 +296,7 @@ fn (mut r Ring) run() {
 				slot := tag_slot(t)
 				mut c := r.conn(slot)
 				if c.state == .open && c.generation == tag_gen(t) && c.input.len > 0 {
-					r.on_data(slot, mut c, unsafe { nil }, 0, now, false)
+					r.on_data(slot, mut c, unsafe { nil }, 0, now, ur_max_requests_per_pass)
 				}
 			}
 			r.finish_batch()
@@ -401,7 +410,7 @@ fn (mut r Ring) dispatch(cqe C.us_cqe, now u32) {
 				// EOF. The cancellation itself (res < 0) needs nothing.
 				if cqe.res > 0 {
 					bid := cqe.flags >> 16
-					if c.input.len + u32(cqe.res) > ur_max_input {
+					if c.input.len + u32(cqe.res) > ur_parked_input {
 						r.close(slot, mut c)
 					} else {
 						r.pool.append(mut c.input, unsafe { C.us_buf(r.ring, bid) }, cqe.res)
@@ -418,7 +427,9 @@ fn (mut r Ring) dispatch(cqe C.us_cqe, now u32) {
 			if cqe.res > 0 {
 				bid := cqe.flags >> 16
 				data := unsafe { C.us_buf(r.ring, bid) }
-				r.on_data(slot, mut c, data, cqe.res, now, false)
+				// everything complete in the buffer is served: a buffer is 2 KiB, and the batch
+				// arena and parking bound what a burst can do
+				r.on_data(slot, mut c, data, cqe.res, now, ur_unlimited)
 				C.us_buf_return(r.ring, bid)
 				if cqe.flags & us_f_more == 0 && c.state == .open {
 					r.n_ms_end++
@@ -432,6 +443,10 @@ fn (mut r Ring) dispatch(cqe C.us_cqe, now u32) {
 			} else if cqe.res == -C.ENOBUFS {
 				r.n_enobufs++
 				r.rearm << cqe.user_data
+			} else if cqe.res == -C.ECANCELED {
+				// the parked receive's cancellation, completed after the send that unparked the
+				// connection (the kernel posts it from deferred task work): the live receive is
+				// the one armed at the unpark
 			} else {
 				r.close(slot, mut c)
 			}
@@ -461,7 +476,7 @@ fn (mut r Ring) dispatch(cqe C.us_cqe, now u32) {
 				// receive is gone: its cancel was submitted before this completion was waited for)
 				c.state = .open
 				if c.input.len > 0 {
-					r.on_data(slot, mut c, unsafe { nil }, 0, now, false)
+					r.on_data(slot, mut c, unsafe { nil }, 0, now, ur_max_requests_per_pass)
 				}
 				r.rearm << tag(op_recv, slot, c.generation)
 				return
@@ -505,17 +520,13 @@ fn (mut r Ring) close(slot int, mut c Conn) {
 	C.us_close(r.ring, slot, tag(op_close, slot, c.generation))
 }
 
-// on_data answers every complete request in the received bytes (plus any tail kept from
-// earlier receives) into the batch arena and keeps an incomplete tail in input. With n == 0
-// it serves requests still waiting in input (see Ring.more); with all set the per-pass cap
-// does not apply (used at EOF, when no further receive will come).
-fn (mut r Ring) on_data(slot int, mut c Conn, data &u8, n int, now u32, all bool) {
+// on_data answers up to limit complete requests from the received bytes (plus whatever is
+// kept in input from earlier receives) into the batch arena and keeps the rest in input:
+// an incomplete request, or complete requests beyond the limit, which Ring.more serves on
+// the next pass. With n == 0 it serves from input alone.
+fn (mut r Ring) on_data(slot int, mut c Conn, data &u8, n int, now u32, limit int) {
 	mut buf := []u8{}
 	if c.input.len > 0 {
-		if c.input.len + u32(n) > ur_max_input {
-			r.bad_request(slot, mut c)
-			return
-		}
 		if n > 0 {
 			r.pool.append(mut c.input, data, n)
 		}
@@ -539,7 +550,7 @@ fn (mut r Ring) on_data(slot int, mut c Conn, data &u8, n int, now u32, all bool
 	}
 	mut pos := 0
 	mut served := 0
-	for pos < buf.len && (all || served < ur_max_requests_per_pass) {
+	for pos < buf.len && served < limit {
 		total := fasthttp.frame_request_length(buf[pos..]) or {
 			r.bad_request(slot, mut c)
 			return
@@ -570,6 +581,10 @@ fn (mut r Ring) on_data(slot int, mut c Conn, data &u8, n int, now u32, all bool
 	}
 	c.touched = now
 	rest := buf.len - pos
+	if rest > 0 && pos == 0 && served == 0 && u32(rest) > ur_max_input {
+		r.bad_request(slot, mut c) // a single request larger than any this API takes
+		return
+	}
 	if rest > 0 && c.state == .open {
 		if c.input.len > 0 {
 			// the tail is already in input: move it to the front
@@ -580,8 +595,8 @@ fn (mut r Ring) on_data(slot int, mut c Conn, data &u8, n int, now u32, all bool
 		} else {
 			r.pool.append(mut c.input, unsafe { data + pos }, rest)
 		}
-		if !all && served >= ur_max_requests_per_pass {
-			// the cap stopped the loop with complete requests left: no receive completion
+		if served >= limit {
+			// the limit stopped the loop with complete requests left: no receive completion
 			// will come for them, so serve them on the next pass
 			r.more << tag(op_recv, slot, c.generation)
 		}
@@ -599,7 +614,7 @@ fn (mut r Ring) on_eof(slot int, mut c Conn, now u32) {
 		return
 	}
 	if c.input.len > 0 {
-		r.on_data(slot, mut c, unsafe { nil }, 0, now, true)
+		r.on_data(slot, mut c, unsafe { nil }, 0, now, ur_unlimited)
 		r.pool.drop(mut c.input)
 		if c.state == .closing || c.state == .closed {
 			return // a bad request already decided the close

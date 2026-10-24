@@ -65,8 +65,8 @@ without it the server prints why and runs the epoll loop.
 - **Backpressure**: a connection whose responses are not being read is parked, that is no longer
   read, until its queue drains (epoll: wait for `EPOLLOUT`; io_uring: one send in flight, later
   responses queued behind it, and past 64 KiB of queue the receive is cancelled until the send
-  completions catch up). Unparsed input is capped at 16 KiB per connection, queued output at
-  4 MiB. Connections stalled mid-request or mid-response for 120 s are closed; idle
+  completions catch up). A single request is refused past 16 KiB, queued output past 4 MiB,
+  and a batch's response arena is capped at 2 MiB (what is left waits for the next pass). Connections stalled mid-request or mid-response for 120 s are closed; idle
   keep-alive connections are never timed out. When a ring's slots run out it cancels its accept
   until a connection closes.
 - Nothing on the box is tuned: the process only raises its own soft `RLIMIT_NOFILE` to the hard

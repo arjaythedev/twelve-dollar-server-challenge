@@ -61,7 +61,9 @@ const ev_err = u32(C.EPOLLERR) | u32(C.EPOLLHUP)
 const max_events = 256
 const accept_burst = 64
 const scratch_size = 64 * 1024
-const max_input = 16 * 1024 // unparsed bytes kept per connection; no request comes near it
+const max_input = 16 * 1024 // a single request larger than this is refused
+const max_output = u32(4 << 20) // queued response bytes after which a connection is closed
+const max_arena = 2 << 20 // response bytes per batch; further events wait for the next pass
 const max_requests_per_pass = 64
 const listen_backlog = 4096
 const stall_timeout_s = u32(120)
@@ -201,6 +203,9 @@ fn (mut l Loop) run() {
 			}
 		}
 		for i in 0 .. n {
+			if l.out.len >= max_arena {
+				break // bound the batch; level-triggered events come back on the next wait
+			}
 			fd := unsafe { events[i].data.fd }
 			flags := unsafe { events[i].events }
 			if fd == l.lfd {
@@ -211,7 +216,11 @@ fn (mut l Loop) run() {
 				continue
 			}
 			if flags & ev_err != 0 && flags & ev_in == 0 {
-				l.close_conn(fd)
+				if l.owed_in_batch(fd) {
+					l.conns[fd].state = .closing // its responses are sent (or fail) in finish_batch
+				} else {
+					l.close_conn(fd)
+				}
 				continue
 			}
 			if flags & ev_out != 0 && (l.conns[fd].state == .parked || l.conns[fd].state == .closing) {
@@ -334,9 +343,7 @@ fn (mut l Loop) read_conn(fd int, now u32) {
 	}
 	mut pos := 0
 	mut served := 0
-	// at EOF no more bytes will come: the per-pass cap does not apply, everything complete
-	// is answered now
-	for pos < have && (eof || served < max_requests_per_pass) {
+	for pos < have && served < max_requests_per_pass {
 		total := fasthttp.frame_request_length(l.scratch[pos..have]) or {
 			l.bad_request(fd)
 			return
@@ -364,8 +371,9 @@ fn (mut l Loop) read_conn(fd int, now u32) {
 	}
 	c.touched = now
 	rest := have - pos
-	if rest > 0 && c.state != .closing && !eof {
-		if rest > max_input {
+	if rest > 0 && c.state != .closing && !(eof && served == 0) {
+		// (at EOF with nothing served the rest is one incomplete request: forgotten below)
+		if pos == 0 && rest > max_input {
 			l.bad_request(fd) // a single request larger than any this API takes
 			return
 		}
@@ -386,18 +394,29 @@ fn (mut l Loop) read_conn(fd int, now u32) {
 		l.pool.drop(mut c.input)
 	}
 	if eof {
+		if c.input.len > 0 && c.state == .open {
+			// complete requests are still buffered (the per-pass cap): a half-closed socket
+			// stays readable, so the next pass comes back here and serves the next ones
+			return
+		}
 		// close once everything owed has been sent: responses of this batch (possibly produced
 		// by the pending pass, before other connections' responses), or a parked remainder
-		mut owed := c.output.len > 0
-		for i := l.segs.len - 1; i >= 0 && !owed; i-- {
-			owed = l.segs[i].fd == fd
-		}
-		if owed {
+		if c.output.len > 0 || l.owed_in_batch(fd) {
 			c.state = .closing // flush, then close
 		} else {
 			l.close_conn(fd)
 		}
 	}
+}
+
+// owed_in_batch reports whether the current batch holds a response for fd.
+fn (l &Loop) owed_in_batch(fd int) bool {
+	for i := l.segs.len - 1; i >= 0; i-- {
+		if l.segs[i].fd == fd {
+			return true
+		}
+	}
+	return false
 }
 
 fn (mut l Loop) bad_request(fd int) {
@@ -435,6 +454,10 @@ fn (mut l Loop) finish_batch(now u32) {
 		}
 		p := unsafe { &u8(l.out.data) + seg.start }
 		n := seg.end - seg.start
+		if c.output.len + u32(n) > max_output {
+			l.close_conn(seg.fd) // the peer is not reading and keeps asking
+			continue
+		}
 		if c.output.len > 0 {
 			l.pool.append(mut c.output, p, n)
 			continue

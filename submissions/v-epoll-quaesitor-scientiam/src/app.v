@@ -171,14 +171,20 @@ fn (mut app App) feed(mut out []u8) {
 	put(mut app.body, '{"posts":[')
 	st := app.db.st_feed
 	mut n := 0
-	for C.sqlite3_step(st) == sqlite_row {
+	mut rc := C.sqlite3_step(st)
+	for rc == sqlite_row {
 		if n > 0 {
 			app.body << `,`
 		}
 		json_post_row(mut app.body, st)
 		n++
+		rc = C.sqlite3_step(st)
 	}
 	C.sqlite3_reset(st)
+	if rc != sqlite_done {
+		put_error(mut out, status_500, 'internal server error', false) // a step error, not "no rows"
+		return
+	}
 	put(mut app.body, ']}')
 	put_response(mut out, status_200, app.body, false)
 }
@@ -192,11 +198,16 @@ fn (mut app App) feed_by_range() bool {
 	mut ids := [20]i64{}
 	mut n := 0
 	st := app.db.st_ids
-	for n < 20 && C.sqlite3_step(st) == sqlite_row {
+	mut rc := C.sqlite3_step(st)
+	for n < 20 && rc == sqlite_row {
 		ids[n] = C.sqlite3_column_int64(st, 0)
 		n++
+		rc = C.sqlite3_step(st)
 	}
 	C.sqlite3_reset(st)
+	if rc != sqlite_row && rc != sqlite_done {
+		return false // a step error: the reference query reports it
+	}
 	if n == 0 {
 		put(mut app.body, '{"posts":[]}')
 		return true
@@ -224,33 +235,39 @@ fn (mut app App) feed_by_range() bool {
 	lk := app.db.st_likes
 	C.sqlite3_bind_int64(lk, 1, lo)
 	C.sqlite3_bind_int64(lk, 2, hi)
-	for C.sqlite3_step(lk) == sqlite_row {
+	rc = C.sqlite3_step(lk)
+	for rc == sqlite_row {
 		p := slot[int(C.sqlite3_column_int64(lk, 0) - lo)]
 		if p >= 0 {
 			likes[p]++
 		}
+		rc = C.sqlite3_step(lk)
 	}
 	C.sqlite3_reset(lk)
+	if rc != sqlite_done {
+		return false
+	}
 	rw := app.db.st_rows
 	C.sqlite3_bind_int64(rw, 1, lo)
 	C.sqlite3_bind_int64(rw, 2, hi)
 	app.rows.clear()
 	mut matched := 0
-	for C.sqlite3_step(rw) == sqlite_row {
+	rc = C.sqlite3_step(rw)
+	for rc == sqlite_row {
 		id := C.sqlite3_column_int64(rw, 0)
 		p := slot[int(id - lo)]
-		if p < 0 {
-			continue
+		if p >= 0 {
+			seg_start[p] = app.rows.len
+			json_post(mut app.rows, id, C.sqlite3_column_text(rw, 1), C.sqlite3_column_bytes(rw, 1),
+				C.sqlite3_column_text(rw, 2), C.sqlite3_column_bytes(rw, 2),
+				C.sqlite3_column_text(rw, 3), C.sqlite3_column_bytes(rw, 3), likes[p])
+			seg_end[p] = app.rows.len
+			matched++
 		}
-		seg_start[p] = app.rows.len
-		json_post(mut app.rows, id, C.sqlite3_column_text(rw, 1), C.sqlite3_column_bytes(rw, 1),
-			C.sqlite3_column_text(rw, 2), C.sqlite3_column_bytes(rw, 2), C.sqlite3_column_text(rw, 3),
-			C.sqlite3_column_bytes(rw, 3), likes[p])
-		seg_end[p] = app.rows.len
-		matched++
+		rc = C.sqlite3_step(rw)
 	}
 	C.sqlite3_reset(rw)
-	if matched != n {
+	if rc != sqlite_done || matched != n {
 		return false
 	}
 	put(mut app.body, '{"posts":[')
@@ -268,7 +285,8 @@ fn (mut app App) post(id i64, mut out []u8) {
 	app.db.begin()
 	st := app.db.st_post
 	C.sqlite3_bind_int64(st, 1, id)
-	if C.sqlite3_step(st) == sqlite_row {
+	rc := C.sqlite3_step(st)
+	if rc == sqlite_row {
 		app.body.clear()
 		put(mut app.body, '{"post":')
 		json_post_row(mut app.body, st)
@@ -278,6 +296,10 @@ fn (mut app App) post(id i64, mut out []u8) {
 		return
 	}
 	C.sqlite3_reset(st)
+	if rc != sqlite_done {
+		put_error(mut out, status_500, 'internal server error', false) // a step error, not "no rows"
+		return
+	}
 	put_error(mut out, status_404, 'post not found', false)
 }
 
@@ -432,10 +454,14 @@ fn (mut app App) like(req Req, id_start int, id_end int, mut out []u8) Outcome {
 	if C.sqlite3_changes(app.db.conn) != 1 {
 		ex := app.db.st_exists
 		C.sqlite3_bind_int64(ex, 1, id)
-		exists := C.sqlite3_step(ex) == sqlite_row
+		rc := C.sqlite3_step(ex)
 		C.sqlite3_reset(ex)
-		if !exists {
+		if rc == sqlite_done {
 			put_error(mut out, status_404, 'post not found', false)
+			return Outcome{}
+		}
+		if rc != sqlite_row {
+			put_error(mut out, status_500, 'internal server error', false)
 			return Outcome{}
 		}
 		already = true

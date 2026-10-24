@@ -21,8 +21,9 @@ fn fh_handle(req fasthttp.HttpRequest, mut out []u8, worker_state voidptr, mut c
 	app.tick()
 	start := out.len
 	oc := app.handle(req, mut out)
-	if !app.batch_end() && oc.wrote {
-		// the write was rolled back: the tentative 201 must not leave the process
+	if !app.batch_end() {
+		// rolled back: a tentative 201 would be a lie, and a read may have seen rolled-back
+		// rows or a failed statement
 		unsafe {
 			out.len = start
 		}

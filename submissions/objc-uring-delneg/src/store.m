@@ -29,6 +29,17 @@ static sqlite3_stmt *prep(sqlite3 *db, const char *sql) {
     return s;
 }
 
+// Feed like tally: pos[post_id - lo] is the post's slot in cnt, or -1.
+typedef struct { int64_t lo; const int8_t *pos; int64_t *cnt; } TDTally;
+static TDTally tally;
+static void tally_step(sqlite3_context *c, int n, sqlite3_value **v) {
+    (void)n;
+    TDTally *t = sqlite3_user_data(c);
+    uint64_t k = (uint64_t)(sqlite3_value_int64(v[0]) - t->lo);
+    if (k < 256 && t->pos[k] >= 0) t->cnt[t->pos[k]]++;
+}
+static void tally_final(sqlite3_context *c) { sqlite3_result_null(c); }
+
 static int wal_frames_hook(void *p, sqlite3 *d, const char *name, int frames) {
     (void)d; (void)name;
     ((TDStore *)p)->walFrames = frames;
@@ -69,7 +80,11 @@ static void exec(sqlite3 *db, const char *sql) {
     sFeedIds = prep(db, "SELECT id FROM posts ORDER BY created_at DESC, id DESC LIMIT 20");
     sFeedRange = prep(db, "SELECT p.id, p.body, p.created_at, u.username FROM posts p "
                           "JOIN users u ON u.id = p.user_id WHERE p.id BETWEEN ?1 AND ?2");
-    sLikeRange = prep(db, "SELECT post_id FROM likes WHERE post_id BETWEEN ?1 AND ?2");
+    // td_tally(post_id) counts the feed's likes inside one sqlite3_step instead of
+    // returning every likes_post_id_idx entry as a row (~40 ns per row saved).
+    sqlite3_create_function_v2(db, "td_tally", 1, SQLITE_UTF8 | SQLITE_DIRECTONLY, &tally, NULL,
+                               tally_step, tally_final, NULL);
+    sLikeRange = prep(db, "SELECT td_tally(post_id) FROM likes WHERE post_id BETWEEN ?1 AND ?2");
     // No RETURNING: it buffers rows in an ephemeral table (a page cache built and
     // torn down per insert). created_at is written in the schema default's format.
     sCreate = prep(db, "INSERT INTO posts (user_id, body, created_at) VALUES (?1, ?2, ?3)");
@@ -215,15 +230,17 @@ typedef struct { uint32_t body, bodyLen, ca, caLen, au, auLen; int64_t likes; bo
     }
     sqlite3_reset(s);
     if (rc != SQLITE_DONE) return fail(b);
+    int64_t cnt[20] = {0};
+    tally.lo = lo;
+    tally.pos = pos;
+    tally.cnt = cnt;
     s = sLikeRange;
     sqlite3_bind_int64(s, 1, lo);
     sqlite3_bind_int64(s, 2, hi);
-    while ((rc = sqlite3_step(s)) == SQLITE_ROW) {
-        int k = pos[sqlite3_column_int64(s, 0) - lo];
-        if (k >= 0) row[k].likes++;
-    }
+    while ((rc = sqlite3_step(s)) == SQLITE_ROW) {}
     sqlite3_reset(s);
     if (rc != SQLITE_DONE) return fail(b);
+    for (int i = 0; i < n; i++) row[i].likes = cnt[i];
     td_buf_lit(b, "{\"posts\":[");
     bool first = true;
     for (int i = 0; i < n; i++) {

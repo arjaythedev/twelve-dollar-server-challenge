@@ -42,7 +42,7 @@ typedef struct conn {
 
 typedef struct ring {
   int fd, efd, lfd, idx;
-  u32 *sq_khead, *sq_ktail, *sq_array, sq_mask, sq_entries, sq_tail, to_submit;
+  u32 *sq_khead, *sq_ktail, *sq_kflags, *sq_array, sq_mask, sq_entries, sq_tail, to_submit;
   struct io_uring_sqe *sqes;
   u32 *cq_khead, *cq_ktail, cq_mask;
   struct io_uring_cqe *cqes;
@@ -357,7 +357,8 @@ static int listen_socket(const char *host, int port) {
 static void ring_init(ring *r, int idx, u32 slots, const char *host, int port) {
   struct io_uring_params p;
   memset(&p, 0, sizeof p);
-  p.flags = IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN | IORING_SETUP_CQSIZE | IORING_SETUP_SUBMIT_ALL;
+  p.flags = IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN | IORING_SETUP_CQSIZE | IORING_SETUP_SUBMIT_ALL |
+            IORING_SETUP_TASKRUN_FLAG;
   p.cq_entries = CQ_ENTRIES;
   int fd = sys_setup(SQ_ENTRIES, &p);
   if (fd < 0) { perror("io_uring_setup"); exit(1); }
@@ -370,6 +371,7 @@ static void ring_init(ring *r, int idx, u32 slots, const char *host, int port) {
   if (m == MAP_FAILED) { perror("mmap sq"); exit(1); }
   r->sq_khead = (u32 *)(m + p.sq_off.head);
   r->sq_ktail = (u32 *)(m + p.sq_off.tail);
+  r->sq_kflags = (u32 *)(m + p.sq_off.flags);
   r->sq_mask = *(u32 *)(m + p.sq_off.ring_mask);
   r->sq_entries = *(u32 *)(m + p.sq_off.ring_entries);
   r->sq_array = (u32 *)(m + p.sq_off.array);
@@ -465,31 +467,65 @@ static void release_holds(void) {
   }
 }
 
+#ifndef COALESCE_US
+#define COALESCE_US 250     /* after a light iteration, let requests accumulate this long */
+#endif
+#ifndef COALESCE_JOBS
+#define COALESCE_JOBS 64    /* an iteration with at least this many requests does not wait */
+#endif
+#ifdef STATS
+static u64 st_iters, st_enters, st_cqes, st_jobs, st_sleeps, st_waits;
+static void stats_tick(void) {
+  static i64 last;
+  if (now_s - last < 10) return;
+  if (last) fprintf(stderr, "stats: iters %llu enters %llu cqes %llu jobs %llu sleeps %llu waits %llu | jobs/iter %.1f enters/job %.2f\n",
+                    st_iters, st_enters, st_cqes, st_jobs, st_sleeps, st_waits, st_iters ? (double)st_jobs / st_iters : 0,
+                    st_jobs ? (double)st_enters / st_jobs : 0);
+  last = now_s;
+  st_iters = st_enters = st_cqes = st_jobs = st_sleeps = st_waits = 0;
+}
+#define STAT(x) (x)
+#else
+#define STAT(x) ((void)0)
+#endif
+
+/* A ring needs an io_uring_enter if it has submissions, deferred completions waiting to run
+ * (IORING_SQ_TASKRUN), CQEs not yet reaped, or its eventfd fired. */
+static inline int ring_pending(ring *r) {
+  return r->to_submit || r->hot ||
+         (__atomic_load_n(r->sq_kflags, __ATOMIC_ACQUIRE) & (IORING_SQ_TASKRUN | IORING_SQ_CQ_OVERFLOW)) ||
+         *r->cq_khead != __atomic_load_n(r->cq_ktail, __ATOMIC_ACQUIRE);
+}
+
 static void transport_run(void) {
   struct epoll_event evs[MAX_RINGS];
   for (;;) {
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME_COARSE, &ts);
     now_s = ts.tv_sec;
-    int got = 0;
+    int got = 0, served = 0;
+    STAT(st_iters++);
     for (int i = 0; i < nrings; i++) {
       ring *r = &rings[i];
-      if (!r->hot && !r->to_submit) continue;
+      if (!ring_pending(r)) continue;
       int rc;
       do rc = sys_enter(r->fd, r->to_submit, 0, IORING_ENTER_GETEVENTS);
       while (rc < 0 && errno == EINTR);
       if (rc < 0) { perror("io_uring_enter"); exit(1); }
+      STAT(st_enters++);
       r->to_submit -= (u32)rc;
-      int n = reap(r);
-      r->hot = n > 0;
-      got += n;
+      r->hot = 0;
+      got += reap(r);
     }
-    /* clear holds from the previous batch first so request order per connection is kept */
+    STAT(st_cqes += (u64)got);
     for (int i = 0; i < nrings; i++) if (!rings[i].accept_armed) arm_accept(&rings[i]);
+    STAT(st_jobs += (u64)njobs);
+    served += njobs;
     if (njobs) app_batch(jobs, njobs);
     deliver();
+    /* connections held at a write continue now, after their batch committed */
     release_holds();
-    if (njobs) { app_batch(jobs, njobs); deliver(); }
+    if (njobs) { STAT(st_jobs += (u64)njobs); served += njobs; app_batch(jobs, njobs); deliver(); }
     for (int i = 0; i < nrearm; i++) {
       ring *r = &rings[rearm[i] >> 16];
       u32 slot = rearm[i] & 0xffff;
@@ -498,16 +534,28 @@ static void transport_run(void) {
     }
     nrearm = 0;
     for (int i = 0; i < nrings; i++) buf_publish(&rings[i]);
+#ifdef STATS
+    stats_tick();
+#endif
     if (got || npend) {
-      for (int i = 0; i < nrings; i++) if (rings[i].to_submit) ring_flush(&rings[i]);
-      int n = epoll_wait(epfd, evs, MAX_RINGS, 0);
-      for (int i = 0; i < n; i++) rings[evs[i].data.u32].hot = 1;
+      /* Busy: the queued sends go out with the next io_uring_enter of their ring. After a
+       * light iteration, sleeping briefly first lets more requests arrive, so each enter,
+       * SQLite transaction and wakeup serves a batch rather than one or two requests. A
+       * heavy iteration continues at once: then the work itself is the batching interval. */
+#if COALESCE_US > 0
+      if (served < COALESCE_JOBS) {
+        struct timespec q = {0, COALESCE_US * 1000};
+        nanosleep(&q, 0);
+        STAT(st_sleeps++);
+      }
+#endif
       continue;
     }
-    for (int i = 0; i < nrings; i++) if (rings[i].to_submit) ring_flush(&rings[i]);
+    for (int i = 0; i < nrings; i++) if (rings[i].to_submit) { ring_flush(&rings[i]); STAT(st_enters++); }
     int n;
     do n = epoll_wait(epfd, evs, MAX_RINGS, -1);
     while (n < 0 && errno == EINTR);
+    STAT(st_waits++);
     for (int i = 0; i < n; i++) rings[evs[i].data.u32].hot = 1;
   }
 }

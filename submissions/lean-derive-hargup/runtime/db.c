@@ -56,7 +56,7 @@ static void db_open(const char *path) {
   db_exec("PRAGMA journal_mode = WAL");
   db_exec("PRAGMA synchronous = NORMAL");
   db_exec("PRAGMA temp_store = MEMORY");
-  db_exec("PRAGMA cache_size = -65536");
+  db_exec("PRAGMA cache_size = -4096");   /* reads come from the mmap; the cache holds pages being written */
   db_exec("PRAGMA mmap_size = 1073741824");
   db_exec("PRAGMA wal_autocheckpoint = 4000");
   db_bt = db->aDb[0].pBt;

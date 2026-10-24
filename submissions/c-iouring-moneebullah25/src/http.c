@@ -1,6 +1,8 @@
 #include "http.h"
 
+#include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #include "util.h"
 
@@ -42,11 +44,11 @@ static void connection_tokens(const char *v, size_t len, int *close_seen, int *k
 
 enum http_parse_status http_parse(const char *buf, uint32_t len, uint32_t max_head, uint32_t max_body,
                                   struct http_req *req) {
+    memset(req, 0, sizeof *req); /* every return path leaves a defined struct */
     uint32_t head_len = find_head_end(buf, len);
     if (!head_len) return len >= max_head ? HTTP_TOO_LARGE : HTTP_PARTIAL;
     if (head_len > max_head) return HTTP_TOO_LARGE;
 
-    memset(req, 0, sizeof *req);
     const char *p = buf;
     const char *end = buf + head_len;
 
@@ -168,12 +170,31 @@ static const char *reason(int status) {
     }
 }
 
-size_t http_write_head(char *out, size_t cap, int status, size_t content_length, int close_after) {
+const char *http_date_now(void) {
+    static const char *const DAYS[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+    static const char *const MONTHS[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                                         "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+    static char cached[HTTP_DATE_LEN + 1];
+    static time_t cached_s;
+    time_t now = time(NULL);
+    if (now != cached_s || !cached[0]) {
+        struct tm tm;
+        gmtime_r(&now, &tm);
+        snprintf(cached, sizeof cached, "%s, %02d %s %04d %02d:%02d:%02d GMT", DAYS[tm.tm_wday], tm.tm_mday,
+                 MONTHS[tm.tm_mon], tm.tm_year + 1900, tm.tm_hour, tm.tm_min, tm.tm_sec);
+        cached_s = now;
+    }
+    return cached;
+}
+
+size_t http_write_head(char *out, size_t cap, int status, size_t content_length, enum http_conn conn,
+                       const char *date) {
     static const char ctype[] = "\r\nContent-Type: application/json\r\nContent-Length: ";
     static const char close_hdr[] = "Connection: close\r\n";
+    static const char keep_hdr[] = "Connection: keep-alive\r\n";
     const char *r = reason(status);
     size_t rlen = strlen(r);
-    size_t need = 9 + 3 + 1 + rlen + sizeof ctype - 1 + 20 + 2 + sizeof close_hdr - 1 + 2;
+    size_t need = 9 + 3 + 1 + rlen + sizeof ctype - 1 + 20 + 2 + sizeof keep_hdr - 1 + 6 + HTTP_DATE_LEN + 2 + 2;
     if (cap < need) return 0;
     char *o = out;
     memcpy(o, "HTTP/1.1 ", 9);
@@ -191,9 +212,21 @@ size_t http_write_head(char *out, size_t cap, int status, size_t content_length,
     o[0] = '\r';
     o[1] = '\n';
     o += 2;
-    if (close_after) {
+    if (conn == HTTP_CONN_CLOSE) {
         memcpy(o, close_hdr, sizeof close_hdr - 1);
         o += sizeof close_hdr - 1;
+    } else if (conn == HTTP_CONN_KEEP_ALIVE) {
+        memcpy(o, keep_hdr, sizeof keep_hdr - 1);
+        o += sizeof keep_hdr - 1;
+    }
+    if (date) {
+        memcpy(o, "Date: ", 6);
+        o += 6;
+        memcpy(o, date, HTTP_DATE_LEN);
+        o += HTTP_DATE_LEN;
+        o[0] = '\r';
+        o[1] = '\n';
+        o += 2;
     }
     o[0] = '\r';
     o[1] = '\n';

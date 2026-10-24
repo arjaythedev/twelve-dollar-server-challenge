@@ -21,7 +21,8 @@ struct app_resp {
     size_t cap;
     size_t off;
     size_t len;
-    uint8_t close_after; /* in: the request asked to close; out: forced by the app on protocol errors */
+    uint8_t close_after;        /* in: the request asked to close; out: forced by the app on protocol errors */
+    uint8_t announce_keepalive; /* in: HTTP/1.0 request that asked for keep-alive */
 };
 
 enum app_result {

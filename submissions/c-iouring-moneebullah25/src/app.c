@@ -8,7 +8,7 @@
 #include "jwt.h"
 #include "util.h"
 
-#define HEAD_RESERVE   128 /* room for the status line and headers before the body */
+#define HEAD_RESERVE   256 /* room for the status line and headers before the body */
 #define BODY_MAX_CHARS 500
 #define BODY_MAX_BYTES 2000
 
@@ -65,7 +65,10 @@ void app_free(struct app *app) {
 
 static void finish(struct app_resp *resp, int status, size_t body_len) {
     char head[HEAD_RESERVE];
-    size_t hl = http_write_head(head, sizeof head, status, body_len, resp->close_after);
+    enum http_conn conn = resp->close_after          ? HTTP_CONN_CLOSE
+                          : resp->announce_keepalive ? HTTP_CONN_KEEP_ALIVE
+                                                     : HTTP_CONN_DEFAULT;
+    size_t hl = http_write_head(head, sizeof head, status, body_len, conn, http_date_now());
     resp->off = HEAD_RESERVE - hl;
     memcpy(resp->buf + resp->off, head, hl);
     resp->len = hl + body_len;
@@ -157,9 +160,29 @@ static int validate_body(struct app *app, const struct http_req *req, const char
         *msg = "body is required";
         return 400;
     }
+    /* Count characters the way SQLite's length() and the CHECK constraint
+     * do for well-formed text, and refuse what they would count differently:
+     * invalid UTF-8 is not JSON (RFC 8259), a NUL would end the text early. */
     size_t chars = 0;
-    for (size_t i = 0; i < len; i++) {
-        if (((unsigned char)b[i] & 0xc0) != 0x80) chars++;
+    for (size_t i = 0; i < len;) {
+        unsigned char ch = (unsigned char)b[i];
+        size_t n = ch < 0x80 ? 1 : (ch & 0xe0) == 0xc0 ? 2 : (ch & 0xf0) == 0xe0 ? 3 : (ch & 0xf8) == 0xf0 ? 4 : 0;
+        if (ch == 0) {
+            *msg = "body is required";
+            return 400;
+        }
+        if (n == 0 || i + n > len) {
+            *msg = "malformed JSON body";
+            return 400;
+        }
+        for (size_t k = 1; k < n; k++) {
+            if (((unsigned char)b[i + k] & 0xc0) != 0x80) {
+                *msg = "malformed JSON body";
+                return 400;
+            }
+        }
+        i += n;
+        chars++;
     }
     if (chars > BODY_MAX_CHARS || len > BODY_MAX_BYTES) {
         *msg = "body must be at most 500 characters";
@@ -319,6 +342,8 @@ static enum app_result not_found(struct app *app, struct app_resp *resp) {
 enum app_result app_handle(struct app *app, const struct http_req *req, struct app_resp *resp) {
     const char *p = req->path;
     size_t n = req->path_len;
+    const char *q = memchr(p, '?', n); /* a query string does not change the route */
+    if (q) n = (size_t)(q - p);
     if (req->method == HTTP_GET) {
         if (n == 7 && memcmp(p, "/health", 7) == 0) return handle_health(app, resp);
         if (n == 5 && memcmp(p, "/feed", 5) == 0) return handle_feed(app, resp);

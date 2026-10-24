@@ -32,8 +32,15 @@ enum http_parse_status {
 enum http_parse_status http_parse(const char *buf, uint32_t len, uint32_t max_head, uint32_t max_body,
                                   struct http_req *req);
 
+#define HTTP_DATE_LEN 29 /* "Sun, 06 Nov 1994 08:49:37 GMT" */
+
+enum http_conn { HTTP_CONN_DEFAULT, HTTP_CONN_CLOSE, HTTP_CONN_KEEP_ALIVE };
+
+/* The current time as an RFC 9110 Date value, cached per second. */
+const char *http_date_now(void);
+
 /* Writes "HTTP/1.1 <status> <reason>\r\nContent-Type: application/json\r\n
- * Content-Length: N\r\n[Connection: close\r\n]\r\n". Returns the length. */
-size_t http_write_head(char *out, size_t cap, int status, size_t content_length, int close_after);
+ * Content-Length: N\r\n[Connection: ...\r\n][Date: ...\r\n]\r\n". Returns the length. */
+size_t http_write_head(char *out, size_t cap, int status, size_t content_length, enum http_conn conn, const char *date);
 
 #endif

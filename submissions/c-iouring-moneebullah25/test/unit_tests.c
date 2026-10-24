@@ -310,11 +310,19 @@ static void test_http(void) {
     CHECK(http_parse(q, (uint32_t)strlen(q), 8192, 16384, &r) == HTTP_COMPLETE && r.method == HTTP_OTHER);
     /* response head */
     char h[256];
-    size_t n = http_write_head(h, sizeof h, 201, 1234, 0);
+    size_t n = http_write_head(h, sizeof h, 201, 1234, HTTP_CONN_DEFAULT, NULL);
     CHECK(n == strlen("HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: 1234\r\n\r\n"));
     CHECK(memcmp(h, "HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: 1234\r\n\r\n", n) == 0);
-    n = http_write_head(h, sizeof h, 400, 7, 1);
+    n = http_write_head(h, sizeof h, 400, 7, HTTP_CONN_CLOSE, NULL);
     CHECK(memcmp(h + n - 21, "Connection: close\r\n\r\n", 21) == 0);
+    n = http_write_head(h, sizeof h, 200, 7, HTTP_CONN_KEEP_ALIVE, "Sun, 06 Nov 1994 08:49:37 GMT");
+    CHECK(strstr(h, "Connection: keep-alive\r\nDate: Sun, 06 Nov 1994 08:49:37 GMT\r\n\r\n") != NULL);
+    const char *d = http_date_now();
+    CHECK(strlen(d) == HTTP_DATE_LEN && d[3] == ',' && memcmp(d + 25, " GMT", 4) == 0);
+    struct http_req pr;
+    memset(&pr, 0x55, sizeof pr);
+    CHECK(http_parse("GET /x HTTP/1.1\r\nHost: a", 23, 8192, 16384, &pr) == HTTP_PARTIAL);
+    CHECK(pr.head_len == 0 && pr.expect_100 == 0 && pr.body == NULL);
 }
 
 static void test_util(void) {

@@ -6,18 +6,19 @@ namespace Feed;
 /// Watches the box's usable memory so the server degrades instead of being OOM-killed: 2 GB is
 /// shared with the kernel's socket buffers, and those grow with the number of connections.
 /// Usable = MemAvailable − SReclaimable − CmaFree (as in the C io_uring entry, PR #112).
-/// Level 1 (below 192 MB): stop accepting. Level 2 (below 96 MB): also answer with
-/// Connection: close so clients release sockets. Back to 0 above 288 MB (hysteresis).
+/// Below 192 MB the rings stop accepting; above 288 MB they accept again (hysteresis).
+/// It deliberately never closes established connections: when memory runs short it is because
+/// the CPU fell behind and unread requests pile up in socket buffers, and forcing clients to
+/// reconnect then costs more CPU (a reconnect storm, seen in a 1 vCPU / 2 GB VM).
 /// </summary>
 internal static unsafe class MemGuard {
     private const long StopKb = 192 * 1024;
-    private const long ShedKb = 96 * 1024;
     private const long ResumeKb = 288 * 1024;
 
     private static int _fd = -2;
     private static readonly byte[] Buf = new byte[4096];
 
-    /// <summary>0 = normal, 1 = don't accept, 2 = don't accept and close connections after their response.</summary>
+    /// <summary>0 = normal, 1 = don't accept new connections.</summary>
     public static volatile int Level;
 
     /// <summary>Re-reads /proc/meminfo and updates Level. Called by one worker a few times a second.</summary>
@@ -47,10 +48,8 @@ internal static unsafe class MemGuard {
 
         long usable = avail - Math.Max(0, Field(text, "SReclaimable:"u8)) - Math.Max(0, Field(text, "CmaFree:"u8));
         int level = Level;
-        if (usable < ShedKb) {
-            level = 2;
-        } else if (usable < StopKb) {
-            level = Math.Max(level, 1);
+        if (usable < StopKb) {
+            level = 1;
         } else if (usable > ResumeKb) {
             level = 0;
         }

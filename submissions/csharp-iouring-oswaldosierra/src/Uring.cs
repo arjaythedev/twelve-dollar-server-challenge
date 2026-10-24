@@ -284,30 +284,55 @@ internal sealed unsafe class Ring {
 }
 
 /// <summary>
-/// A provided-buffer ring (IORING_REGISTER_PBUF_RING): the kernel picks a free buffer for each
-/// multishot receive, and buffers go back into the ring once their bytes have been consumed.
-/// Idle connections therefore own no receive memory at all.
+/// Receive buffers the kernel picks from for each multishot receive, so idle connections own no
+/// receive memory at all. Buffers go back to the kernel once their bytes have been consumed.
+///
+/// Normally this is a provided-buffer ring (IORING_REGISTER_PBUF_RING): returning a buffer is a
+/// plain memory write. Some kernels refuse to register one: Ubuntu 24.04's 6.8.0-147 answers
+/// EINVAL for every variant while the rest of io_uring works. Then it falls back to classic
+/// provided buffers (IORING_OP_PROVIDE_BUFFERS), where returned buffers are handed back by SQEs,
+/// one per run of consecutive buffer ids.
 /// </summary>
 internal sealed unsafe class BufRing {
+    private const byte OP_PROVIDE_BUFFERS = 31;
+    private const ulong ProvideUserData = 0xFF; // op 255: the workers ignore its (failure-only) completions
+
     public readonly int Count;
     public readonly int Size;
     public readonly byte* Slab;
+    private readonly Ring _uring;
+    private readonly ushort _group;
+    private readonly bool _classic;
     private readonly byte* _ring;
     private readonly int _mask;
     private ushort _tail;
     private int _added;
+    private readonly int[] _returned; // classic mode: buffer ids waiting to be provided again
 
     public BufRing(Ring ring, int count, int size, ushort group) {
         Count = count;
         Size = size;
+        _uring = ring;
+        _group = group;
         _mask = count - 1;
-        _ring = (byte*)mmap(null, count * 16, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
         Slab = (byte*)mmap(null, (nint)count * size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        _ring = (byte*)mmap(null, count * 16, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
         if (_ring == (byte*)-1 || Slab == (byte*)-1) {
             throw new OutOfMemoryException("buffer ring");
         }
 
-        ring.RegisterBufRing(_ring, (uint)count, group);
+        try {
+            ring.RegisterBufRing(_ring, (uint)count, group);
+        } catch (InvalidOperationException ex) {
+            Log($"{ex.Message}; using classic provided buffers");
+            munmap(_ring, count * 16);
+            _ring = null;
+            _classic = true;
+            _returned = new int[count];
+            Provide(0, count);
+            return;
+        }
+        _returned = [];
         for (int i = 0; i < count; i++) {
             Return(i);
         }
@@ -321,6 +346,10 @@ internal sealed unsafe class BufRing {
     /// <summary>Queues buffer <paramref name="bid"/> to be handed back to the kernel on the next Publish.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void Return(int bid) {
+        if (_classic) {
+            _returned[_added++] = bid;
+            return;
+        }
         byte* e = _ring + (((_tail + _added) & _mask) * 16);
         *(ulong*)e = (ulong)Buffer(bid);
         *(uint*)(e + 8) = (uint)Size;
@@ -331,14 +360,45 @@ internal sealed unsafe class BufRing {
     /// <summary>Buffers returned since the last Publish.</summary>
     public int Added => _added;
 
-    /// <summary>Makes the returned buffers visible to the kernel.</summary>
+    /// <summary>Hands the returned buffers back to the kernel.</summary>
     public void Publish() {
         if (_added == 0) {
+            return;
+        }
+
+        if (_classic) {
+            Span<int> ids = _returned.AsSpan(0, _added);
+            ids.Sort();
+            int start = 0;
+            for (int i = 1; i <= ids.Length; i++) {
+                if (i == ids.Length || ids[i] != ids[i - 1] + 1) {
+                    Provide(ids[start], i - start);
+                    start = i;
+                }
+            }
+            _added = 0;
             return;
         }
 
         _tail = (ushort)(_tail + _added);
         _added = 0;
         Volatile.Write(ref *(ushort*)(_ring + 14), _tail);
+    }
+
+    /// <summary>Classic mode: provides buffers [first, first + n) to the group with one SQE.</summary>
+    private void Provide(int first, int n) {
+        Sqe* s = _uring.Get();
+        while (s == null) {
+            _uring.Submit();
+            s = _uring.Get();
+        }
+        s->Opcode = OP_PROVIDE_BUFFERS;
+        s->Flags = Ring.IOSQE_CQE_SKIP_SUCCESS;
+        s->Fd = n;                     // number of buffers
+        s->Addr = (ulong)Buffer(first);
+        s->Len = (uint)Size;           // size of each
+        s->Off = (ulong)first;         // first buffer id
+        s->BufGroup = _group;
+        s->UserData = ProvideUserData;
     }
 }

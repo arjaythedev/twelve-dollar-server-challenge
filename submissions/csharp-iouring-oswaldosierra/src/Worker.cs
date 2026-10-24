@@ -528,7 +528,6 @@ internal sealed unsafe class Worker {
             }
 
             c.Flags &= ~FContinueSent;
-            close |= MemGuard.Level >= 2;
             Api api = _app.Api;
             api.Owner = this;
             api.Slot = slot;

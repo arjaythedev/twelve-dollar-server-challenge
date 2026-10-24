@@ -22,6 +22,11 @@ accept on one shared listening socket. A ring stops accepting while fewer than 1
 resumes at 2,048.
 
 **No memory per idle connection.** Receives are multishot into a provided-buffer ring (2,048 × 2 KiB per ring).
+Some kernels refuse to register a buffer ring. Ubuntu 24.04's `6.8.0-147-generic` answers `EINVAL` to every
+`IORING_REGISTER_PBUF_RING` variant, while direct descriptors and multishot accept/receive still work. On such a
+kernel the server falls back to classic provided buffers (`IORING_OP_PROVIDE_BUFFERS`), handing returned buffers
+back with one SQE per run of consecutive ids. It logs the switch and passes `test/run.sh` 42/42 that way, checked
+in a 1 vCPU / 2 GB Ubuntu 24.04 VM on that kernel.
 The kernel picks a buffer only when bytes arrive, and the buffer goes back as soon as they are parsed. An idle
 keep-alive connection costs one 88-byte record. Output buffers come from a pool and are held only while a
 response is in flight.
@@ -86,7 +91,9 @@ time to spare.
 The verifier also requires `alg` to be `HS256`, rejects expired tokens and **rejects tokens without `exp`**.
 
 **Overload behaviour instead of a crash.** Worker 0 reads `/proc/meminfo` four times a second. Below 192 MB usable
-it stops accepting, and below 96 MB it also answers with `Connection: close`. Running out of slots or memory never
+it stops accepting, and it accepts again above 288 MB. It never forces established clients to reconnect. When
+memory runs short it is because the CPU fell behind and unread requests are piling up in socket buffers. A
+reconnect storm then costs even more CPU; a 1 vCPU / 2 GB VM showed exactly that. Running out of slots or memory never
 aborts the process. Connections whose partial input or blocked output is older than 120 s are closed. Idle
 keep-alives are left open.
 

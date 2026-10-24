@@ -31,6 +31,8 @@ The C transport keeps debug symbols and frame pointers for local profiles.
   one SQLite transaction. Responses enter the transport only after `COMMIT` succeeds.
   This also holds read responses that observe a write from the same batch.
   A failed commit discards the tentative responses and closes their connections.
+  After a commit that wrote to the WAL, new write requests wait 5 ms (reads go on), so later writes
+  share one commit. Each commit rewrites the same hot pages, so this cuts WAL frames and checkpoints.
   SQLite retains WAL mode with `synchronous=NORMAL`.
 - **WAL checkpoints on a second thread, never on the event loop.** SQLite's auto-checkpoint runs inside
   `COMMIT` and does two `fsync`s, which stalls every connection on a single loop (8 ms to 4 s each on a

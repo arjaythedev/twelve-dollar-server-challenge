@@ -78,6 +78,7 @@ const feed_span = 64 // feed_range handles the newest 20 ids when they span fewe
 const ckpt_frames = 1000 // WAL size that starts a checkpoint (SQLite's default auto-checkpoint)
 const ckpt_max_frames = 16000 // past this WAL size, phase B holds writes until the WAL is copied
 const max_pause_ms = u64(20) // longest hold on write requests while the WAL can restart
+const write_window_ns = u64(5_000_000) // after a commit that wrote, hold new writes this long to group them
 
 struct Conn {
 mut:
@@ -124,6 +125,7 @@ mut:
 	cur_close bool
 	// Cooperative checkpoint: see checkpointer.
 	wal_frames    int
+	wal_written   bool // the current batch's COMMIT appended WAL frames
 	ckpt_frames_at_start int // WAL size when phase A started; more frames afterwards block a restart
 	ckpt_phase    int // 0 idle, 1 checkpoint with writes going on, 2 checkpoint with writes held
 	writes_paused bool
@@ -186,6 +188,7 @@ fn checkpointer(path string, req chan bool, efd int) {
 fn wal_hook(arg voidptr, _ &C.sqlite3, _ &char, frames i32) i32 {
 	mut s := unsafe { &Server(arg) }
 	s.wal_frames = frames
+	s.wal_written = true
 	return 0
 }
 
@@ -421,6 +424,13 @@ fn (mut s Server) finish_batch() {
 			}
 		}
 	}
+	// Group commit: each committing batch rewrites the same hot pages into the WAL, so a short hold
+	// on later writes cuts WAL frames, checkpoint copies, and commits. Reads go on.
+	if s.wal_written && !s.writes_paused {
+		s.writes_paused = true
+		s.pause_until = time.sys_mono_now() + write_window_ns
+	}
+	s.wal_written = false
 	if s.wal_frames >= ckpt_frames && s.ckpt_phase == 0 {
 		s.ckpt_phase = 1
 		s.ckpt_frames_at_start = s.wal_frames

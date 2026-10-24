@@ -86,9 +86,19 @@ fn open_db(path string, group bool, exclusive bool) !&Db {
 	}
 	pragmas := db_pragmas(exclusive)
 	if C.sqlite3_exec(d.conn, &char(pragmas.str), unsafe { nil }, unsafe { nil }, unsafe { nil }) != sqlite_ok {
-		return error('sqlite pragmas: ${d.errmsg()}')
+		msg := d.errmsg()
+		d.close() // the pragmas may already hold the exclusive lock
+		return error('sqlite pragmas: ${msg}')
 	}
 	C.sqlite3_wal_hook(d.conn, wal_hook, d)
+	d.prepare_all() or {
+		d.close()
+		return err
+	}
+	return d
+}
+
+fn (mut d Db) prepare_all() ! {
 	d.st_feed = d.prepare(sql_feed)!
 	d.st_post = d.prepare(sql_post)!
 	d.st_health = d.prepare(sql_health)!
@@ -102,7 +112,6 @@ fn open_db(path string, group bool, exclusive bool) !&Db {
 	d.st_begin = d.prepare('BEGIN')!
 	d.st_commit = d.prepare('COMMIT')!
 	d.st_back = d.prepare('ROLLBACK')!
-	return d
 }
 
 fn (d &Db) errmsg() string {
@@ -165,8 +174,9 @@ fn (mut d Db) commit() bool {
 	return false
 }
 
-// close finalizes every statement and closes the connection, releasing its locks (a close
-// with statements still alive would only leave a zombie that keeps the exclusive lock).
+// close finalizes every statement (a nil one is skipped by SQLite) and closes the connection,
+// releasing its locks (a close with statements still alive would only leave a zombie that
+// keeps the exclusive lock).
 fn (mut d Db) close() {
 	for st in [d.st_feed, d.st_post, d.st_health, d.st_insert, d.st_created, d.st_like,
 		d.st_exists, d.st_ids, d.st_likes, d.st_rows, d.st_begin, d.st_commit, d.st_back] {

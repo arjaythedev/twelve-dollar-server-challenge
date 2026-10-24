@@ -287,12 +287,16 @@ fn (mut r Ring) run() {
 			}
 		}
 		if r.more.len > 0 {
-			// pipelined requests left over from an earlier pass (the per-pass cap)
+			// pipelined requests left over from an earlier pass (the per-pass cap), within the
+			// same arena bound as a batch of completions; the rest waits for the next pass
 			pending := r.more.clone()
 			r.more.clear()
 			r.sh.mu.lock()
 			r.sh.app.tick()
-			for t in pending {
+			mut i := 0
+			for i < pending.len && r.out.len < ur_max_arena {
+				t := pending[i]
+				i++
 				slot := tag_slot(t)
 				mut c := r.conn(slot)
 				if c.state == .open && c.generation == tag_gen(t) && c.input.len > 0 {
@@ -301,6 +305,9 @@ fn (mut r Ring) run() {
 			}
 			r.finish_batch()
 			r.sh.mu.unlock()
+			if i < pending.len {
+				r.more << pending[i..]
+			}
 		}
 		r.busy = total >= 4 || r.rearm.len > 0
 		free_slots := r.slots - r.n_open
@@ -427,9 +434,11 @@ fn (mut r Ring) dispatch(cqe C.us_cqe, now u32) {
 			if cqe.res > 0 {
 				bid := cqe.flags >> 16
 				data := unsafe { C.us_buf(r.ring, bid) }
-				// everything complete in the buffer is served: a buffer is 2 KiB, and the batch
-				// arena and parking bound what a burst can do
-				_ = r.on_data(slot, mut c, data, cqe.res, now, ur_unlimited)
+				// everything complete in the buffer is served (a buffer is 2 KiB; the batch arena
+				// and parking bound what a burst can do), unless a backlog kept from a parked
+				// phase is waiting in input: that is drained a pass at a time
+				limit := if c.input.len > 0 { ur_max_requests_per_pass } else { ur_unlimited }
+				_ = r.on_data(slot, mut c, data, cqe.res, now, limit)
 				C.us_buf_return(r.ring, bid)
 				if cqe.flags & us_f_more == 0 && c.state == .open {
 					r.n_ms_end++

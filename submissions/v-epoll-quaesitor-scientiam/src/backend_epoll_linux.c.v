@@ -83,6 +83,7 @@ mut:
 	segs       []Seg
 	pool       BufPool
 	pending    []int // connections with complete requests still waiting in input
+	pass       int   // rotates the order events are served in when the arena fills up
 	start_ns   i64
 	last_sweep u32
 }
@@ -193,23 +194,42 @@ fn (mut l Loop) run() {
 		now := l.seconds()
 		if l.pending.len > 0 {
 			// pipelined requests left over from an earlier pass (the per-pass cap): the socket
-			// is drained, so no event will come for them
+			// is drained, so no event will come for them. They get at most half the arena, so
+			// the events of this pass always get the other half; the rest waits.
 			pending := l.pending.clone()
 			l.pending.clear()
-			for fd in pending {
+			mut i := 0
+			for i < pending.len && l.out.len < max_arena / 2 {
+				fd := pending[i]
+				i++
 				if fd < l.conns.len && l.conns[fd].state == .open && l.conns[fd].input.len > 0 {
 					l.read_conn(fd, now)
 				}
 			}
+			if i < pending.len {
+				l.pending << pending[i..]
+			}
 		}
-		for i in 0 .. n {
+		// the listener first, then the connections from a rotating start: when the arena
+		// fills up before every event is served, the ones left over are not always the same
+		// (the kernel reports still-ready level-triggered descriptors in a stable order)
+		l.pass++
+		for k in 0 .. n {
+			i := (k + l.pass) % n
+			fd := unsafe { events[i].data.fd }
+			if fd == l.lfd {
+				l.accept_burst()
+				break
+			}
+		}
+		for k in 0 .. n {
 			if l.out.len >= max_arena {
 				break // bound the batch; level-triggered events come back on the next wait
 			}
+			i := (k + l.pass) % n
 			fd := unsafe { events[i].data.fd }
 			flags := unsafe { events[i].events }
 			if fd == l.lfd {
-				l.accept_burst()
 				continue
 			}
 			if fd >= l.conns.len || l.conns[fd].state == .free {

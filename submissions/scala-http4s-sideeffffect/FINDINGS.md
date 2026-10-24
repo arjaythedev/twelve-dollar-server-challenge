@@ -16,9 +16,9 @@ JVM entries do exactly that.
 - The box's **1,967 MB of RAM emulated with a cgroup limit** (`systemd-run --scope -p MemoryMax=1967M`): the JVM sizes
   its heap from it. (`-XX:MaxRAM` can't do this any more: JDK 27 removed it.)
 - App CPU from `/proc/<pid>/stat` over a 40 s steady window; profiles with async-profiler (`itimer`).
-- Laptop: i7-11800H. Caveat found late: CPUs 8-15 are the hyper-thread siblings of 0-7, and k6 also ran on CPU 8,
-  the sibling of the app's CPU 0. Every configuration below had the same handicap, so the comparisons hold; the
-  absolute numbers are pessimistic.
+- Laptop: i7-11800H. Caveat found late: CPUs 8-15 are the hyper-thread siblings of 0-7, and in the comparisons below
+  k6 also ran on CPU 8, the sibling of the app's CPU 0. Every configuration had the same handicap, so the comparisons
+  hold; their absolute numbers are pessimistic. The final numbers (last section) were measured with CPU 8 left idle.
 
 ## Front: Nginx, not direct
 
@@ -83,6 +83,20 @@ would make direct mode viable). The brief was Ember; it is the obvious next expe
 | `busy_timeout=5000` on the only worker thread | 1,000 ms: nothing should wait for a lock with WAL, one writer and PASSIVE checkpoints, but if something ever does, it stalls every request |
 | Waiting for a pooled connection couldn't be cancelled | `Resource.makeFull` with `poll` around the queue's `take` |
 | `token.split('.')` drops trailing empty parts, so a token with trailing dots was accepted | `split("\\.", -1)`: exactly three parts, or 401 |
+
+## Final numbers
+
+The final code (all of the above, including the robustness fixes), app and Nginx on physical core 0 with its
+hyper-thread sibling idle, k6 on the other cores, nothing else running:
+
+| Users | Result | app CPU | p95 / p99 | errors | RSS | WAL at the end |
+|---|---|---|---|---|---|---|
+| 28,000 | pass | 42% | 5 ms / 151 ms | 0 | 1.28 GB | 8 MB |
+| **32,000** | **pass** | 48% | 147 ms / 688 ms | 0 | 1.36 GB | 10 MB |
+| 36,000 | fail (p99) | 53% | 672 ms / 2.33 s | 0 | 1.36 GB | 12 MB |
+
+The WAL staying at 8-12 MB shows the background checkpoints keep up: the WAL restarts from the beginning, and the
+10,000-page backstop (~40 MB) never fires. App CPU stays around 50% because Nginx shares the core.
 
 ## Considered and not adopted
 

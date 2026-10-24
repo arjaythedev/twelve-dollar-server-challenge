@@ -51,8 +51,8 @@ SQLITE_PATH=... JWT_SECRET=... HOST=127.0.0.1 PORT=3000 bash start.sh
   fsyncs never stall a request.
 - **Parallel GC with a fixed heap of 60% of RAM**, chosen by measurement against Serial, G1, ZGC and Shenandoah.
 
-Locally (app and Nginx pinned to one core, the box's 1,967 MB emulated with a cgroup limit) it holds 32,000 users
-(p95 187 ms, p99 841 ms, 0 errors).
+Locally (app and Nginx pinned to one physical core, the box's 1,967 MB emulated with a cgroup limit, k6 on the other
+cores) it holds **32,000 users** (p95 147 ms, p99 688 ms, 0 errors, RSS 1.36 GB); 36,000 fail on latency.
 
 ## License
 

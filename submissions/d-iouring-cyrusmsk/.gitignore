@@ -1,0 +1,3 @@
+bin/
+.pgo-build/
+sqlite_lib/sqlite3.o

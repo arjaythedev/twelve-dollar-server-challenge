@@ -124,6 +124,7 @@ mut:
 	cur_close bool
 	// Cooperative checkpoint: see checkpointer.
 	wal_frames    int
+	ckpt_frames_at_start int // WAL size when phase A started; more frames afterwards block a restart
 	ckpt_phase    int // 0 idle, 1 checkpoint with writes going on, 2 checkpoint with writes held
 	writes_paused bool
 	pause_until   u64 // monotonic ns when held writes go on anyway (0: wait for the checkpoint)
@@ -358,15 +359,16 @@ fn (mut s Server) pause_timeout() int {
 	return if left <= 0 { 0 } else { int(left / 1_000_000) + 1 }
 }
 
-// The loop starts a checkpoint (phase A) when the WAL reaches ckpt_frames; writes go on. If that
-// checkpoint could not copy the whole WAL, phase B holds write requests (reads go on) and runs one
-// more checkpoint, which only copies the frames appended during phase A. Phase B ends when that
-// checkpoint finishes or after max_pause_ms, whichever is first; past ckpt_max_frames it waits.
-// checkpoint_done runs when the checkpointer signals the end of a checkpoint.
+// The loop starts a checkpoint (phase A) when the WAL reaches ckpt_frames; writes go on. A PASSIVE
+// checkpoint copies only the frames present when it starts, so if it could not copy them all, or
+// writes appended frames meanwhile, the WAL cannot restart. Then phase B holds write requests
+// (reads go on) and runs one more checkpoint, which only copies the frames appended during phase A.
+// Phase B ends when that checkpoint finishes or after max_pause_ms, whichever is first; past
+// ckpt_max_frames it waits. checkpoint_done runs when the checkpointer signals the end of a checkpoint.
 fn (mut s Server) checkpoint_done() {
 	mut v := u64(0)
 	C.read(s.ckpt_efd, &v, 8)
-	if s.ckpt_phase == 1 && v != 1 {
+	if s.ckpt_phase == 1 && (v != 1 || s.wal_frames > s.ckpt_frames_at_start) {
 		s.ckpt_phase = 2
 		s.writes_paused = true
 		s.pause_until = if s.wal_frames >= ckpt_max_frames {
@@ -421,6 +423,7 @@ fn (mut s Server) finish_batch() {
 	}
 	if s.wal_frames >= ckpt_frames && s.ckpt_phase == 0 {
 		s.ckpt_phase = 1
+		s.ckpt_frames_at_start = s.wal_frames
 		s.ckpt_req <- true
 	}
 	if committed {

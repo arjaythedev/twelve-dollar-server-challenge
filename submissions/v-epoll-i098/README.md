@@ -38,6 +38,8 @@ The C transport keeps debug symbols and frame pointers for local profiles.
   checkpointer thread with its own connection runs a PASSIVE checkpoint and reports through an `eventfd`
   watched by a one-shot ring poll. Checkpoint completion wakes an otherwise idle server.
   A follow-up checkpoint can pause writes for 20 ms, or until completion above 16,000 WAL frames.
+  It runs whenever writes appended frames during the first checkpoint, because the WAL can restart
+  only when every frame is copied. Without it, steady writes can grow the WAL without a limit.
   The existing request connection and background checkpoint connection keep separate thread owners.
 - **Feed in three small queries.** The newest 20 ids come from the `(created_at, id)` index. When those
   ids span fewer than 64 ids (they do, because ids grow with time), one range scan reads the posts and

@@ -56,7 +56,7 @@ if [[ ! -f ${libjwt_prefix}/lib/libjwt.a || "$(cat "${libjwt_prefix}/.pin" 2>/de
 fi
 
 # Feed responses and the 23-byte challenge secret need this compiler.
-trux_commit=aefc5e2a1f0ebb24fa7476ba703377b3cf9e8357
+trux_commit=653ea863797985a76056dfe4edd40ae4c0129777
 stamp=/usr/local/lib/trux-compiler-commit
 if [[ ! -x /usr/local/bin/trux || "$(cat "$stamp" 2>/dev/null || true)" != "$trux_commit" ]]; then
   src="$(mktemp -d)"

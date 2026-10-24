@@ -15,7 +15,7 @@ func openDB() (*sqlite.DB, error) {
   if err != nil {
     return db, err
   }
-  let perr error = sqlite.exec(db, "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA mmap_size=268435456; PRAGMA cache_size=-32768;")
+  let perr error = sqlite.exec(db, "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=5000; PRAGMA mmap_size=268435456; PRAGMA cache_size=-32768;")
   if perr != nil {
     return db, perr
   }

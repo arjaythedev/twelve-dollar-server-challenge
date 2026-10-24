@@ -84,7 +84,9 @@ struct conn {
     uint16_t partial_len; /* bytes in `partial` */
     char *partial;        /* heap copy of an incomplete request (rare) */
     uint32_t partial_cap;
-    uint32_t sent_100; /* a 100 Continue went out for the current request */
+    uint8_t sent_100; /* a 100 Continue went out for the current request */
+    uint8_t eof;      /* the peer half-closed; serve what is parked, then close */
+    uint16_t pad;
 };
 
 struct chunk_meta {
@@ -367,8 +369,8 @@ static void chunk_free(struct net *n, uint32_t id) {
         if (c->state == ST_OPEN && !(c->flags & CF_IN_QUEUE)) {
             c->flags |= CF_IN_QUEUE;
             fifo_push(&n->ready, idx);
+            break; /* one chunk, one waiter; stale entries do not use it up */
         }
-        break;
     }
 }
 
@@ -463,6 +465,7 @@ static void on_accepted(struct net *n, struct ring *rg, uint32_t slot) {
     c->partial = NULL;
     c->partial_cap = 0;
     c->sent_100 = 0;
+    c->eof = 0;
     rg->used++;
     n->open_conns++;
     if (n->open_conns > n->st.max_open) n->st.max_open = n->open_conns;
@@ -481,12 +484,14 @@ static void queue_ready(struct net *n, uint32_t idx) {
  * returns the buffer to the pool. Returns -1 on allocation failure. */
 static int move_to_partial(struct net *n, struct conn *c) {
     struct ring *rg = ring_of(n, c);
-    c->partial_cap = n->cfg->max_head + n->cfg->max_body;
+    uint32_t have = c->in_bid != NONE16 ? (uint32_t)c->in_len - c->in_off : 0;
+    /* sized to what is held (a slowloris pays for its bytes, not 24 KiB) */
+    c->partial_cap = have * 2 < 1024 ? 1024 : have * 2;
+    if (c->partial_cap > n->cfg->max_head + n->cfg->max_body) c->partial_cap = n->cfg->max_head + n->cfg->max_body;
     c->partial = malloc(c->partial_cap);
     if (!c->partial) return -1;
     c->partial_len = 0;
     if (c->in_bid != NONE16) {
-        uint32_t have = (uint32_t)c->in_len - c->in_off;
         memcpy(c->partial, recv_buf(n, rg, c->in_bid) + c->in_off, have);
         c->partial_len = (uint16_t)have;
         buf_return(n, rg, c->in_bid);
@@ -513,9 +518,18 @@ static int append_input(struct net *n, uint32_t idx, uint16_t bid, uint32_t len)
         buf_return(n, rg, bid);
         return -1;
     }
+    uint32_t limit = n->cfg->max_head + n->cfg->max_body;
     if ((uint32_t)c->partial_len + len > c->partial_cap) {
-        buf_return(n, rg, bid);
-        return -1;
+        uint32_t want = c->partial_cap * 2;
+        if (want < (uint32_t)c->partial_len + len) want = (uint32_t)c->partial_len + len;
+        if (want > limit) want = limit;
+        char *grown = (uint32_t)c->partial_len + len <= limit ? realloc(c->partial, want) : NULL;
+        if (!grown) {
+            buf_return(n, rg, bid);
+            return -1;
+        }
+        c->partial = grown;
+        c->partial_cap = want;
     }
     memcpy(c->partial + c->partial_len, recv_buf(n, rg, bid), len);
     c->partial_len = (uint16_t)(c->partial_len + len);
@@ -577,6 +591,10 @@ static void process_conn(struct net *n, uint32_t idx) {
     struct http_req req;
     enum http_parse_status ps = http_parse(data, len, n->cfg->max_head, n->cfg->max_body, &req);
     if (ps == HTTP_PARTIAL) {
+        if (c->eof) { /* the peer sent its FIN: this request can never complete */
+            conn_close(n, idx);
+            return;
+        }
         /* keep a private copy so the receive buffer goes back to the pool */
         if (!c->partial && move_to_partial(n, c)) {
             conn_close(n, idx);
@@ -599,6 +617,7 @@ static void process_conn(struct net *n, uint32_t idx) {
 
     if (ps != HTTP_COMPLETE) {
         resp->close_after = 1;
+        resp->announce_keepalive = 0;
         if (ps == HTTP_BAD) {
             n->st.bad_requests++;
             app_error_response(resp, 400, "bad request");
@@ -608,7 +627,8 @@ static void process_conn(struct net *n, uint32_t idx) {
         }
         release_input(n, c);
     } else {
-        resp->close_after = !req.keep_alive;
+        resp->close_after = !req.keep_alive || c->eof;
+        resp->announce_keepalive = !req.version_11 && req.keep_alive && !c->eof;
         n->st.requests++;
         enum app_result r = app_handle(n->app, &req, resp);
         if (r == APP_HELD) {
@@ -699,6 +719,14 @@ static void on_recv_cqe(struct net *n, struct io_uring_cqe *cqe) {
             c->flags |= CF_IN_REARM;
             fifo_push(&rg->rearm, idx);
         }
+        return;
+    }
+    if (cqe->res == 0 && (c->flags & CF_HAS_INPUT)) {
+        /* half-close with a request still parked (data and FIN in one batch):
+         * serve it, then close (RFC 9112 s9.6) */
+        c->eof = 1;
+        c->flags |= CF_CLOSE_AFTER_SEND;
+        queue_ready(n, idx);
         return;
     }
     if (cqe->res == 0 || cqe->res < 0) {
@@ -877,11 +905,14 @@ static void memory_guard(struct net *n) {
     if (mb < n->cfg->mem_shed_mb) shed_idle(n);
 }
 
+/* Closes connections that have left a request incomplete, or a response
+ * unread (a peer that stops reading would otherwise pin a send buffer), for
+ * longer than the timeout. */
 static void sweep_partials(struct net *n) {
     for (uint32_t i = 0; i < n->nconns; i++) {
         struct conn *c = conn_at(n, i);
-        if (c->state == ST_OPEN && (c->flags & CF_HAS_INPUT) && !(c->flags & (CF_HELD | CF_WAIT_OUT)) &&
-            c->last_active + n->cfg->partial_timeout_s < n->now_s) {
+        if (c->state == ST_OPEN && (c->flags & (CF_HAS_INPUT | CF_SEND_INFLIGHT)) &&
+            !(c->flags & (CF_HELD | CF_WAIT_OUT)) && c->last_active + n->cfg->partial_timeout_s < n->now_s) {
             n->st.partial_timeouts++;
             conn_close(n, i);
         }
@@ -954,6 +985,13 @@ static int open_listener(const struct config *cfg) {
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
     /* Accepted sockets inherit TCP_NODELAY; direct descriptors cannot run setsockopt. */
     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+    /* Peers that vanish without a FIN would hold a slot forever; keep-alive
+     * probes (inherited too) reclaim them after ~4 minutes. */
+    int keep_idle = 120, keep_intvl = 30, keep_cnt = 4;
+    setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &one, sizeof one);
+    setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &keep_idle, sizeof keep_idle);
+    setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &keep_intvl, sizeof keep_intvl);
+    setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &keep_cnt, sizeof keep_cnt);
     /* The previous instance's rings may still be tearing down after a restart. */
     for (int attempt = 0; attempt < 200; attempt++) {
         if (bind(fd, ai->ai_addr, ai->ai_addrlen) == 0) break;
@@ -1159,7 +1197,7 @@ static void rearm_enobufs(struct net *n, struct ring *rg) {
         struct conn *c = conn_at(n, idx);
         if (!(c->flags & CF_IN_REARM)) continue;
         c->flags &= (uint8_t)~CF_IN_REARM;
-        if (c->state != ST_OPEN || (c->flags & CF_RECV_ARMED)) continue;
+        if (c->state != ST_OPEN || (c->flags & CF_RECV_ARMED) || c->eof) continue;
         arm_recv(n, idx);
         n->st.rearms++;
         budget--;

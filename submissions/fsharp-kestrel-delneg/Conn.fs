@@ -21,6 +21,11 @@ let private NeedMore = 4
 let private ContinueSent = 8
 /// The connection answers one request and closes: the transport sheds it (see Transport.KeepAliveBudget).
 let private ForceClose = 16
+/// A write request was left unanswered and unconsumed because `Db.holdWrites` is set.
+let private Held = 32
+
+/// Set by `direct` when it stopped at a write request held by `Db.holdWrites` (io_uring loop: answer it later).
+let mutable held = false
 
 let private crlf2 = "\r\n\r\n"B
 let private crlf = "\r\n"B
@@ -168,6 +173,10 @@ let private processSpan (s: ReadOnlySpan<byte>) (w: IBufferWriter<byte>)
                             flags <- flags ||| Wrote ||| ContinueSent
                         flags <- flags ||| NeedMore
                         stop <- true
+                    elif Db.holdWrites && meth.SequenceEqual("POST"B) then
+                        // While the WAL catches up, writes wait in the input; the loop runs them again later.
+                        flags <- flags ||| Held
+                        stop <- true
                     else
                         let body = rest.Slice(headEnd + 4, contentLength)
                         let t =
@@ -214,6 +223,7 @@ let direct (s: ReadOnlySpan<byte>) (w: IBufferWriter<byte>) (close: byref<bool>)
     let mutable go = true
     let force = if close then ForceClose else 0
     close <- false // from here on, the output: set only when a request closes the connection
+    held <- false
     while go do
         let mutable consumed = 0
         let mutable pending: Task = null
@@ -228,6 +238,9 @@ let direct (s: ReadOnlySpan<byte>) (w: IBufferWriter<byte>) (close: byref<bool>)
                 Api.send w 500 (flags &&& Close <> 0) Api.Internal
         if flags &&& Close <> 0 then
             close <- true
+            go <- false
+        elif flags &&& Held <> 0 then
+            held <- true
             go <- false
         elif isNull pending then
             go <- false

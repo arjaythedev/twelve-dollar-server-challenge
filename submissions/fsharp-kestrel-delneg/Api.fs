@@ -143,6 +143,7 @@ let health (w: IBufferWriter<byte>) (close: bool) =
     Db.serialized (fun () ->
         try
             try
+                Db.beginRead ()
                 if not (Db.stepRow Db.ping) then
                     raise (Db.failure ())
             finally
@@ -165,6 +166,7 @@ let health (w: IBufferWriter<byte>) (close: bool) =
 let feed (w: IBufferWriter<byte>) (close: bool) =
     Db.serialized (fun () ->
         let st = Db.feed
+        Db.beginRead ()
         try
             json.WriteStartObject()
             json.WriteStartArray(pPosts)
@@ -180,6 +182,7 @@ let getPost (w: IBufferWriter<byte>) (close: bool) (id: int64) =
     let found =
         Db.serialized (fun () ->
             let st = Db.post
+            Db.beginRead ()
             try
                 Sqlite.bind_int64(st, 1, id) |> ignore
                 if Db.stepRow st then

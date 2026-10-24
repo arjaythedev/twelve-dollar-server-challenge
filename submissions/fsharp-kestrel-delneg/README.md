@@ -16,20 +16,24 @@
 2. The thread gives the bytes to the handler (`Conn.direct`). Kestrel's HTTP layer does not run. Kestrel calls our connection handler one time for each new keep-alive connection. The handler gives the connection to the loop and returns, so Kestrel keeps no state for the connection. With epoll only: past the keep-alive budget (the fd limit minus 1,024), a new connection is shed: it gets one request, a `Connection: close` response and the close. Kestrel never sees a shed connection: the loop keeps it from accept to close. The connections have no pipes and no send task. A connection keeps a buffer only for a request that is not complete, or for bytes that the socket did not take.
 3. The handler parses HTTP/1.1 itself. It reads the method, the path and these headers: `Authorization`, `Content-Length`, `Connection` and `Expect` (it answers `100 Continue`). A request with `Transfer-Encoding` gets 400. Routes are in code.
 4. Each endpoint (`Api.fs`) writes the full response into one buffer of the thread: the status line, the headers and the JSON body. Then the thread sends the responses of each connection with one send.
-5. One SQLite transaction holds all the writes of one wake-up of the loop (group commit). The first write opens it. After the last request of the wake-up, the loop commits it and then sends the responses. Thus each response goes out after the commit of its write. One SQLite connection serves all requests. With the epoll transport, one thread runs all requests, so it needs no lock. With the socket transport, a lock serializes the requests. The server prepares each statement one time at start.
+5. One SQLite transaction holds all the writes of one wake-up of the loop (group commit). With io_uring it holds the reads of the pass too, so SQLite takes its WAL locks once per pass. The first write opens it. After the last request of the wake-up, the loop commits it and then sends the responses. Thus each response goes out after the commit of its write. One SQLite connection serves all requests. With the epoll transport, one thread runs all requests, so it needs no lock. With the socket transport, a lock serializes the requests. The server prepares each statement one time at start.
 6. The JWT check (`Auth.fs`) runs on each request. It decodes the header and the payload, computes HMAC-SHA256 over the token bytes and compares the signature in fixed time. Then it checks `sub`, `username` and `exp`.
 
 ## Rules
 
-- Writes: WAL with `synchronous=NORMAL`. The writes of one wake-up of the loop share one transaction. The server sends a response only after the commit of that transaction. With the socket transport, each write is an autocommit statement.
+- Writes: WAL with `synchronous=NORMAL` on both connections. The writes of one wake-up of the loop share one transaction. The server sends a response only after the commit of that transaction. With the socket transport, each write is an autocommit statement.
 - No cache: each request runs its SQL. The server keeps no copy of rows, responses or JWT results.
 - `install.sh` (root) installs gcc, libicu and the .NET SDK from the official tarball with a SHA-512 check.
 - `build.sh` (normal user) gets the SQLite source with a SHA-256 check and compiles it with gcc two times. Between the two compiles, `sqlite-train.c` runs the server's statements on a synthetic database, and gcc records a profile. Then `build.sh` publishes the server.
 - Nothing on the box is tuned. All settings are inside the process: SQLite pragmas, GC mode, the listen backlog.
 
-## Trade-off: slow disks
+## Checkpoints and slow disks
 
-The connection holds the database lock for its whole life (`locking_mode=EXCLUSIVE`), so SQLite's automatic checkpoint runs on the loop thread, inside the commit that fills the WAL to 1,000 frames. A checkpoint calls `fsync` two times, and every request waits for it. This saves about 8% CPU against a checkpoint thread on a second connection (measured on the machine below), and it is fine when `fsync` takes a few milliseconds. On a disk where `fsync` takes 80 ms, the tail latency grows a lot (see the second table below).
+With io_uring, a second SQLite connection on its own thread runs the checkpoints (`PASSIVE`, every 50 ms when there were commits), so their `fsync` calls never stop the loop thread. The request connection has `wal_autocheckpoint=0` and normal locking. A `PASSIVE` checkpoint never blocks writes, so under steady writes it never finds the whole WAL copied, and SQLite would never start the WAL again from the beginning. So at 4,096 frames (16 MB) the loop holds writes: a `POST` stays in the connection's input while reads go on, until the checkpoint thread has copied every frame (about 80 to 170 ms on the box below). Then the held requests run, and the first write starts the WAL again. If that takes over 500 ms, writes go on and the next hold comes 4,096 frames later.
+
+On the Synteq box below, SQLite's automatic checkpoint inside the commit (the old design) kept the loop thread waiting for the disk 22% of the time at 320,000 users (`fsync`, then the block layer's writeback throttling): the server sat idle while requests queued. With the checkpoint thread, the hold p95 at 160,000 users fell from 79 ms to 6 ms.
+
+With the epoll transport, the connection holds the database lock for its whole life (`locking_mode=EXCLUSIVE`), so SQLite's automatic checkpoint runs on the loop thread, inside the commit that fills the WAL to 1,000 frames. A checkpoint calls `fsync` two times, and every request waits for it. That saves about 8% CPU against a checkpoint thread on a second connection with a transaction per statement (measured on the machine below), and it is fine when `fsync` takes a few milliseconds. On a disk where `fsync` takes 80 ms, the tail latency grows a lot (see the second table below).
 
 ## Optimizations
 
@@ -52,6 +56,7 @@ The connection holds the database lock for its whole life (`locking_mode=EXCLUSI
 | The last send before a close that the loop owns has `MSG_MORE`, so the FIN goes on the segment with the response | 160,000 users: CPU per request -4.6% (38.35 to 36.58 µs, two runs each), hold p99 24.6 to 18.7 ms (wsl26 x86) | #117 |
 | A shed connection never goes to Kestrel: the loop keeps it from accept to close. Kestrel's dispatch of a connection costs a thread-pool wake-up. | 160,000 users: CPU per request -12% (36.58 to 32.2 µs). Shed connections only: 35.1 to 20.5 µs per request (wsl26 x86) | consult (DeepSeek), perf |
 | Own io_uring transport (above): fixed files past the fd limit, multishot accept and receive, provided buffers, sends that finish inside `io_uring_enter`. No keep-alive budget: every connection stays open. | 160,000 users: CPU per request -18% (36.85 to 30.15 and 30.08 µs), 727 new connections per second (was 7,372: the shed users). 240,000 users pass at 72% CPU (Synteq box, below). `GET /posts/:id` at saturation: 3.0 to 1.0 syscalls per request. | #152, #82, #148, #154 |
+| io_uring: checkpoints on a second connection in a background thread, one transaction per loop pass (reads too), writes held at 4,096 WAL frames until the checkpoint catches up | 160,000 users: hold p95 79 to 6 ms, p99 110-198 to 33-35 ms; CPU per request +2.5% (30.1 to 30.72 and 30.93 µs). 320,000 users: 25,568 to 31,967 requests per second (Synteq box) | #141, #82 (one read transaction per batch), perf (`fsync` on the loop thread) |
 | SQLite from source with `THREADSAFE=2` and SQLite's recommended options | No mutex calls in SQLite | #77, #108 |
 | `cache_size` 32 MB | The SQLite page cache is 16 times the default size (2 MB) | #108 |
 | JSON from the SQLite UTF-8 bytes, no .NET strings for rows | Less allocation | #77 |
@@ -75,7 +80,7 @@ Changes that did not help (discarded):
 | SQLite with `-O3 -march=native` | Same CPU | #60 |
 | `mmap_size=0` alone | CPU -0.7% (less than the noise), RSS -24 MB. Kept later with the change above. | — |
 | `wal_autocheckpoint=200` | Same CPU, hold p99 6 ms | — |
-| Checkpoints on a second connection in a background thread, normal locking | CPU +8%, hold p99 0.9 ms | #108 |
+| Checkpoints on a second connection in a background thread, normal locking, a transaction per statement (epoll transport) | CPU +8%, hold p99 0.9 ms. Kept later for io_uring, with a transaction per loop pass. | #108 |
 | `wal_autocheckpoint=8000` | CPU +4%, hold p99 72 ms | — |
 | `wal_autocheckpoint=4000`, with group commit and no `mmap` | Same CPU | — |
 | Feed in three statements: the 20 ids, then the like counts and the posts by id range | `/feed` CPU the same (instructions -9%, cycles +2%) (wsl26 x86) | #72, #82 |
@@ -148,6 +153,8 @@ A Synteq VPS with 8 shared vCPUs of the grader's CPU (Intel Xeon Platinum 8260),
 | io_uring | 160,000 | pass, 0 failed | 30.15, 30.08 µs | 51% | 77 to 79 / 110 to 198 ms | 380 MB |
 | io_uring | 240,000 | pass, 0 failed | 28.69 µs | 72% | 127 / 161 ms | 510 MB |
 | io_uring | 320,000 | **fails**: p95 14.7 s, 0 failed | 30.05 µs | 77% | 14.7 / 15.4 s | 968 MB |
+| + checkpoint thread | 160,000 | pass, 0 failed | 30.72, 30.93 µs | 52% | 5.8 to 5.9 / 33 to 35 ms | 385 MB |
+| + checkpoint thread | 320,000 | **fails**: p95 1.8 s, 0 failed (CPU-bound) | 31.04 µs | 99% | 1.8 / 4.4 s | 760 MB |
 
 With io_uring the cgroup holds the kernel's memory for every open socket (about 2.4 KB each), so it grows with the users: the server process itself stays near 150 MB.
 
@@ -156,4 +163,5 @@ With io_uring the cgroup holds the kernel's memory for every open socket (about 
 - `test/test.sh`: 42/42, also in a clean `ubuntu:24.04` container with 1 CPU, 2 GB and no swap, after `install.sh` (61 s) and `test/run.sh` (77 s).
 - io_uring transport: 5,000 keep-alive connections over rings of 1,100 slots (`nofile` 1100, so 5 rings): two rounds of requests on each, a pipelined pair, a request split in two writes, `Connection: close` with the FIN, half the clients closing first: 0 failed.
 - HTTP edge cases: 30 pipelined requests in one write, a request sent 7 bytes at a time, `Connection: close`, HTTP/1.0, a bad request line, a 20 KB header, `Transfer-Encoding: chunked`, a 501-character body, 2,000 open connections (no file descriptor leak), a client that closes in the middle of a body.
+- Writes with io_uring and frequent holds (`FS3_HOLD_FRAMES=16`): 64 clients each created 40 posts, liked each one twice (201, then 200 `already_liked`), read it back, and sent a pipelined create and read. 0 failed, 5,120 posts. After `kill -9` and a restart on the same files, all 5,120 posts read back.
 - Writes: 100 clients sent likes and new posts, and the server was killed with `SIGKILL` during the load. After the restart, all 1,379 rows that got a 201 were in the database. With the database on a full disk, the server sent no 201 for a write that did not commit: it closed those connections, and `/health` still answered 200.

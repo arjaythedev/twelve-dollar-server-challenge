@@ -1,6 +1,11 @@
-/// The request connection: every read and write runs on it under `gate` (or on the one loop thread), start to finish. Writes are autocommit,
-/// so a 201 goes out only after its COMMIT, which is durable in the WAL (synchronous=NORMAL).
-/// The connection holds the database file lock for its whole life (locking_mode=EXCLUSIVE).
+/// The request connection: every read and write runs on it under `gate` (or on the one loop thread), start to finish.
+/// A 201 goes out only after its COMMIT, which is durable in the WAL (synchronous=NORMAL).
+/// Two modes, chosen by the transport before the first request (`start`):
+/// - exclusive (epoll transport, Kestrel sockets): the connection holds the database file lock for its whole life
+///   (locking_mode=EXCLUSIVE) and SQLite's automatic checkpoint runs inside the commit that fills the WAL;
+/// - background checkpoints (io_uring transport): normal locking, so a second connection on its own thread can run
+///   the PASSIVE checkpoints and their fsyncs; the loop thread never waits for the disk. Each loop pass runs in one
+///   transaction (reads and writes), so the WAL locks are taken once per pass, not per statement.
 /// SQLite is built with SQLITE_THREADSAFE=2: a connection is never used by two threads at once.
 module Db
 
@@ -70,7 +75,10 @@ let mutable private beginStmt = 0n
 let mutable private commitStmt = 0n
 let mutable private rollbackStmt = 0n
 
-/// Call before each write statement.
+/// True in background-checkpoint mode (see the top of this file).
+let mutable bgCheckpoint = false
+
+/// Call before each write statement. Opens the pass transaction (group commit) if none is open.
 let beginWrite () =
     if batching && not inTxn then
         if Sqlite.step beginStmt <> Sqlite.Done then
@@ -79,10 +87,17 @@ let beginWrite () =
         Sqlite.reset beginStmt |> ignore
         inTxn <- true
 
+/// Call before each read statement: in background-checkpoint mode the reads of a pass share its transaction.
+let inline beginRead () = if bgCheckpoint then beginWrite ()
+
+/// Successful commits since the start (read by the checkpoint thread).
+let mutable commits = 0
+
 /// Commits the open transaction. False when the commit failed: then the transaction is rolled back.
 let commit () : bool =
     inTxn <- false
     let ok = Sqlite.step commitStmt = Sqlite.Done
+    if ok then Volatile.Write(&commits, commits + 1)
     Sqlite.reset commitStmt |> ignore
     if not ok then
         Sqlite.step rollbackStmt |> ignore
@@ -93,8 +108,57 @@ let commit () : bool =
 /// to 1,000 frames, so a write never waits for another thread.
 let runWrite (f: unit -> 'T) : ValueTask<'T> = ValueTask<'T>(f ())
 
-let openDb (path: string) =
+// ---- WAL size bound (background-checkpoint mode) -------------------------------------------------------------------
+// A PASSIVE checkpoint never blocks writes, so under steady writes it never finds every frame copied, and the request
+// connection never starts the WAL again from the beginning: the WAL would grow without limit. So at `holdFrames`
+// the loop holds writes (reads go on): the checkpoint thread then copies the last frames, and the first write after
+// the hold starts the WAL again (SQLite does this when a transaction starts with every frame copied).
+
+/// WAL size in frames, and frames copied, after the last checkpoint (written by the checkpoint thread).
+let mutable walFrames = 0
+let mutable walCopied = 0
+/// Set by the loop: hold new writes until the checkpoint thread has copied every frame.
+let mutable holdWrites = false
+/// Set by the checkpoint thread when, with writes held, every frame is copied.
+let mutable caughtUp = false
+/// FS3_HOLD_FRAMES overrides it (tests only: a small value makes holds frequent).
+let holdFrames =
+    match Int32.TryParse(Environment.GetEnvironmentVariable "FS3_HOLD_FRAMES") with
+    | true, n when n > 0 -> n
+    | _ -> 4096
+
+let mutable private path = ""
+
+let private startCheckpointer () =
+    let p = Marshal.StringToCoTaskMemUTF8 path
+    let mutable cdb = 0n
+    try check (Sqlite.open_v2(p, &cdb, 0x02, 0n)) finally Marshal.FreeCoTaskMem p
+    let cdb = cdb
+    // Read the database once, so this connection is in WAL mode. Until then, a checkpoint here does nothing.
+    for sql in [ "PRAGMA journal_mode = WAL"; "PRAGMA busy_timeout = 5000" ] do
+        let q = Marshal.StringToCoTaskMemUTF8 sql
+        try check (Sqlite.exec(cdb, q, 0n, 0n, 0n)) finally Marshal.FreeCoTaskMem q
+    let loop () =
+        let mutable seen = -1
+        while true do
+            // While writes are held, go on at once: the loop waits for this checkpoint.
+            if Volatile.Read &holdWrites then Thread.Sleep 1 else Thread.Sleep 50
+            let held = Volatile.Read &holdWrites
+            let now = Volatile.Read &commits
+            if now <> seen || held then
+                seen <- now
+                let mutable logFrames = 0
+                let mutable copied = 0
+                // PASSIVE: copies the WAL into the database file and fsyncs both, without blocking reads or writes.
+                Sqlite.wal_checkpoint_v2(cdb, 0n, 0, &logFrames, &copied) |> ignore
+                Volatile.Write(&walFrames, logFrames)
+                Volatile.Write(&walCopied, copied)
+                if held && copied >= logFrames then Volatile.Write(&caughtUp, true)
+    Thread(loop, IsBackground = true, Name = "sqlite-checkpoint").Start()
+
+let openDb (p: string) =
     check (Sqlite.initialize ()) // required: SQLite is built with SQLITE_OMIT_AUTOINIT
+    path <- p
     let p = Marshal.StringToCoTaskMemUTF8 path
     try
         let mutable h = 0n
@@ -102,11 +166,24 @@ let openDb (path: string) =
         db <- h
     finally
         Marshal.FreeCoTaskMem p
-    // One process, one connection: take the file lock once, not around every statement. Set before WAL is first
-    // used, so the WAL index lives in memory. SQLite's automatic checkpoint (1,000 frames) runs on this connection.
-    exec "PRAGMA locking_mode = EXCLUSIVE"
-    exec "PRAGMA journal_mode = WAL"
-    exec "PRAGMA synchronous = NORMAL" // rule 6; autocommit, so each write commits before its response
+
+let mutable private started = false
+
+/// Sets the mode and prepares the statements. Called once, by the transport, before the first request.
+let start (background: bool) =
+  if not started then
+    started <- true
+    bgCheckpoint <- background
+    if background then
+        exec "PRAGMA journal_mode = WAL"
+        exec "PRAGMA wal_autocheckpoint = 0" // the checkpoint thread does it
+        exec "PRAGMA journal_size_limit = 67108864" // a WAL that grew past 64 MB shrinks when it starts again
+    else
+        // One process, one connection: take the file lock once, not around every statement. Set before WAL is first
+        // used, so the WAL index lives in memory. SQLite's automatic checkpoint (1,000 frames) runs on this connection.
+        exec "PRAGMA locking_mode = EXCLUSIVE"
+        exec "PRAGMA journal_mode = WAL"
+    exec "PRAGMA synchronous = NORMAL" // rule 6
     exec "PRAGMA busy_timeout = 5000"
     // No mmap: a page that stays in SQLite's page cache is found with one hash lookup and keeps its parsed b-tree
     // header. A page read through mmap is looked up in the WAL index and parsed again on every fetch.
@@ -132,3 +209,4 @@ let openDb (path: string) =
     beginStmt <- prepare "BEGIN"
     commitStmt <- prepare "COMMIT"
     rollbackStmt <- prepare "ROLLBACK"
+    if background then startCheckpointer ()

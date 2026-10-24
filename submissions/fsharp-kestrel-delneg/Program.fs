@@ -43,6 +43,7 @@ let main _ =
         // Our epoll transport (Transport.fs) replaces Kestrel's socket transport.
         builder.Services.AddSingleton<IConnectionListenerFactory, Transport.EpollTransportFactory>() |> ignore
     else
+        Db.start false
         builder.WebHost.UseSockets(fun o ->
             o.UnsafePreferInlineScheduling <- true // Kestrel's continuations stay on the socket thread
             o.Backlog <- 65535) // the kernel caps it at somaxconn; a ramp of new users should not overflow it

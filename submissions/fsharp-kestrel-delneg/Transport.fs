@@ -552,6 +552,7 @@ type EpollTransportFactory() =
                 raise (NotSupportedException "epoll transport: one endpoint only")
             Db.singleThread <- true
             Db.batching <- true
+            Db.start false
             let ip =
                 match endpoint with
                 | :? IPEndPoint as ip when ip.AddressFamily = AddressFamily.InterNetwork -> ip

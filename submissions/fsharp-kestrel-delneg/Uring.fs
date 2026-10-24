@@ -139,6 +139,8 @@ let private CloseAfter = 8uy // close when the in-flight send is done
 let private ContinueSent = 16uy
 let private Closing = 32uy
 let private Done = 64uy // answered a request with "Connection: close": later bytes are ignored
+/// A write request waits in the input while Db.holdWrites is set; the slot is in `held`.
+let private HeldW = 128uy
 
 let private errno () = Marshal.GetLastPInvokeError()
 
@@ -492,6 +494,10 @@ type private Loop(listenFd: int) as this =
     let mutable acceptBroken = false
     /// Buffers of sends still in flight for connections that closed meanwhile, by (ring, slot, generation).
     let zombies = Dictionary<uint64, byte[]>()
+    /// Slots whose next request is a write held by Db.holdWrites, by (ring, slot, generation).
+    let held = List<struct (int * int * uint32)>()
+    let mutable holdAt = Db.holdFrames
+    let mutable holdSince = 0L
     let ready = new ManualResetEventSlim(false)
     let mutable initError: exn = null
     let mutable thread: Thread = null
@@ -580,6 +586,9 @@ type private Loop(listenFd: int) as this =
         let mutable consumed = 0
         try
             consumed <- Conn.direct data arena &close &cont
+            if Conn.held && r.State.[slot] &&& HeldW = 0uy then
+                r.State.[slot] <- r.State.[slot] ||| HeldW
+                held.Add(struct (r.Index, slot, r.Gen.[slot]))
         with _ ->
             ok <- false
         if not ok then
@@ -748,6 +757,25 @@ type private Loop(listenFd: int) as this =
                 elif rc.Close then
                     this.CloseSlot(r, slot)
 
+    /// Ends a write hold once the checkpoint thread has copied every frame (or after 500 ms: then the WAL goes on
+    /// growing and the next hold comes 4,096 frames later), and runs the held requests in this pass.
+    member private this.MaybeResume() =
+        let caught = Volatile.Read &Db.caughtUp
+        if caught || Environment.TickCount64 - holdSince > 500L then
+            holdAt <- if caught then Db.holdFrames else holdAt + Db.holdFrames
+            Volatile.Write(&Db.walFrames, 0)
+            Volatile.Write(&Db.caughtUp, false)
+            Volatile.Write(&Db.holdWrites, false)
+            if stats then eprintfn "hold end caught=%b ms=%d slots=%d" caught (Environment.TickCount64 - holdSince) held.Count
+            for i in 0 .. held.Count - 1 do
+                let struct (ri, slot, g) = held.[i]
+                let r = rings.[ri]
+                if r.Gen.[slot] = g && r.State.[slot] &&& HeldW <> 0uy then
+                    r.State.[slot] <- r.State.[slot] &&& ~~~HeldW
+                    if r.State.[slot] &&& (Live ||| Done) = Live then
+                        try this.Process(r, slot, 0n, 0) with _ -> ()
+            held.Clear()
+
     member private this.AddRing() =
         let r = Ring(rings.Count)
         rings.Add r
@@ -777,6 +805,9 @@ type private Loop(listenFd: int) as this =
                 this.AddRing() |> ignore
                 rings.[0].Accept listenFd
                 rings.[0].Submit() |> ignore
+                // Last step that can fail is done: from here on there is no fallback to epoll. This thread handles
+                // its first request only after this line.
+                Db.start true
             with e ->
                 initError <- e
         finally
@@ -798,6 +829,7 @@ type private Loop(listenFd: int) as this =
                 // 2. Handle the completions: new connections, received requests (responses into the arena).
                 pass <- pass + 1
                 let t0 = if stats then Diagnostics.Stopwatch.GetTimestamp() else 0L
+                if Db.holdWrites then this.MaybeResume()
                 if stats && carry.Count > stCarryMax then stCarryMax <- carry.Count
                 cqes.Clear()
                 cqes.AddRange carry
@@ -825,6 +857,10 @@ type private Loop(listenFd: int) as this =
                     budget <- budget - 1
                 // 3. Commit the pass's writes, then send the responses.
                 let committed = if Db.inTxn then Db.commit () else true
+                if Db.bgCheckpoint && not Db.holdWrites && Volatile.Read &Db.walFrames >= holdAt then
+                    Volatile.Write(&Db.caughtUp, false)
+                    Volatile.Write(&Db.holdWrites, true)
+                    holdSince <- Environment.TickCount64
                 (try this.Flush committed with _ -> ())
                 (try this.ManageAccept() with _ -> ())
                 // 4. Submit (the sends finish inside io_uring_enter), and handle their completions while the arena

@@ -362,8 +362,10 @@ let private parseBody (data: ReadOnlySpan<byte>) (body: byref<string>) : byte[] 
                 value <- if r.TokenType = JsonTokenType.String then r.GetString() else null
                 if r.TokenType = JsonTokenType.StartObject || r.TokenType = JsonTokenType.StartArray then
                     r.Skip()
-    with :? JsonException ->
-        malformed <- true
+    // GetString throws InvalidOperationException for a lone surrogate escape (\ud800): not valid UTF-16, so 400 too.
+    with
+    | :? JsonException
+    | :? InvalidOperationException -> malformed <- true
     if malformed then
         Malformed
     elif not isObject || isNull value then

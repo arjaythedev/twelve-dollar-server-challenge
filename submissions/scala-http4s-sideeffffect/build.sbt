@@ -20,9 +20,7 @@ lazy val root = project
       "io.circe" %% "circe-core" % circeVersion,
       "io.circe" %% "circe-parser" % circeVersion,
       "org.tpolecat" %% "doobie-core" % doobieVersion,
-      "com.zaxxer" % "HikariCP" % "7.1.0",
-      "org.xerial" % "sqlite-jdbc" % "3.53.4.0",
-      "org.slf4j" % "slf4j-nop" % "2.0.20" // HikariCP logs through SLF4J
+      "org.xerial" % "sqlite-jdbc" % "3.53.4.0"
     ),
     writeClasspath := {
       val converter = fileConverter.value

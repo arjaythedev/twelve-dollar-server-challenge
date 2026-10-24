@@ -20,17 +20,20 @@ ARCH=${ARCH:--march=native}
 . config/compile.sh
 
 log() { echo "[build $(date +%T)] $*"; }
+# GNU sha256sum on Linux; macOS's BSD sha256sum lacks -c --quiet, so fall back to shasum there
+sha256() { if sha256sum --version > /dev/null 2>&1; then sha256sum "$@"; else shasum -a 256 "$@"; fi; }
+sha256_ok() { [ "$(sha256 "$2" | cut -d' ' -f1)" = "$1" ]; }
 mkdir -p deps build bin
 log "options: $CURSED_SUMMARY parsers=${PARSER_FAST:-batch}+${PARSER_SLOW:-fb}"
 
 # 1. SQLite (cached in deps/ until the version or the patch set changes)
-stamp="$SQLITE_VERSION $SQLITE_SHA256 [$SQLITE_PATCHES] $(cat patches/sqlite/*.patch | sha256sum | cut -c1-16)"
+stamp="$SQLITE_VERSION $SQLITE_SHA256 [$SQLITE_PATCHES] $(cat patches/sqlite/*.patch | sha256 | cut -c1-16)"
 if [ "$(cat deps/sqlite/STAMP 2> /dev/null)" != "$stamp" ]; then
   # reuse a cached zip only if it's there and matches; otherwise download (and the check below must pass)
-  if ! { [ -f deps/sqlite.zip ] && echo "$SQLITE_SHA256  deps/sqlite.zip" | sha256sum -c --quiet > /dev/null 2>&1; }; then
+  if ! { [ -f deps/sqlite.zip ] && sha256_ok "$SQLITE_SHA256" deps/sqlite.zip; }; then
     log "fetch SQLite $SQLITE_VERSION"
     curl -fsSL --retry 3 -o deps/sqlite.zip "$SQLITE_URL"
-    echo "$SQLITE_SHA256  deps/sqlite.zip" | sha256sum -c --quiet
+    sha256_ok "$SQLITE_SHA256" deps/sqlite.zip || { log "deps/sqlite.zip: sha256 mismatch"; exit 1; }
   fi
   rm -rf deps/sqlite "deps/sqlite-amalgamation-$SQLITE_VERSION"
   unzip -q deps/sqlite.zip -d deps
@@ -53,7 +56,9 @@ plain() {
   log "plain -O3 build"
   compile_units build deps/sqlite $ARCH -O3 && link_server build bin/server $ARCH -O3
 }
-if [ "${PGO:-1}" = 0 ]; then
+if [ "${PGO:-1}" = 0 ] || $CC --version 2> /dev/null | grep -q clang; then
+  # the PGO flags below are gcc's; clang (e.g. macOS's cc/gcc) gets a plain build
+  [ "${PGO:-1}" = 0 ] || log "PGO skipped: $CC is clang"
   plain
   log "done (no PGO)"
   exit 0

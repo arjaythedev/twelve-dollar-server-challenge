@@ -133,7 +133,7 @@ void eng_format_ts(char o[24], int64_t ms) {
   time_t s = (time_t)(ms / 1000);
   struct tm t;
   gmtime_r(&s, &t);
-  char b[32];
+  char b[80];  // gcc's -Wformat-truncation bound for any int fields; real timestamps are 24 bytes
   snprintf(b, sizeof b, "%04d-%02d-%02dT%02d:%02d:%02d.%03dZ", t.tm_year + 1900, t.tm_mon + 1, t.tm_mday, t.tm_hour,
            t.tm_min, t.tm_sec, (int)(ms % 1000));
   memcpy(o, b, 24);

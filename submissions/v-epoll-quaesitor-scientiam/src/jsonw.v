@@ -70,7 +70,8 @@ fn json_str(mut out []u8, p &u8, n int) {
 	for i := 0; i < n; i++ {
 		// skip 8 bytes at a time while none of them is a quote, a backslash or a control
 		for i + 8 <= n {
-			w := unsafe { *(&u64(p + i)) }
+			mut w := u64(0)
+			unsafe { vmemcpy(&w, p + i, 8) } // an unaligned load, as one instruction
 			if has_json_special(w) {
 				break
 			}

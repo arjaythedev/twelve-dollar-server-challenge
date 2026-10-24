@@ -369,6 +369,14 @@ fn (mut r Ring) dispatch(cqe C.us_cqe, now u32) {
 	}
 	match op {
 		op_recv {
+			if c.state != .open {
+				// closing: whatever else the peer sends is not served (the epoll loop stops
+				// reading such a connection too); its send completion will close it
+				if cqe.flags & us_f_buffer != 0 {
+					C.us_buf_return(r.ring, cqe.flags >> 16)
+				}
+				return
+			}
 			if cqe.res > 0 {
 				bid := cqe.flags >> 16
 				data := unsafe { C.us_buf(r.ring, bid) }

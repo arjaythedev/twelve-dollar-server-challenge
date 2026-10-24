@@ -45,9 +45,13 @@ if [ ! -f build/sqlite3.c ]; then
   rm -f build/sqlite.tar.gz
 fi
 
+# The object is reused across builds, but only one made on this OS/arch with these flags: the
+# same tree is built from macOS and from Linux containers during development.
+SQLITE_STAMP="$(uname -sm) $CC $SQLITE_CFLAGS"
 build_sqlite() { # build_sqlite <extra cflags>
   # shellcheck disable=SC2086
   "$CC" $SQLITE_CFLAGS $1 -c build/sqlite3.c -o build/sqlite3.o
+  if [ -z "$1" ]; then echo "$SQLITE_STAMP" > build/sqlite3.stamp; else rm -f build/sqlite3.stamp; fi
 }
 if [ "$PGO" = "1" ]; then
   # gcc keys profile data on the object's path, and V names its build directory with a
@@ -79,7 +83,8 @@ if [ "$PGO" = "1" ]; then
   cc_pass "-fprofile-use=$PROF -fprofile-correction -Wno-missing-profile"
   echo "built bin/server (PGO) with $("$VBIN" version)"
 else
-  if [ ! -f build/sqlite3.o ] || [ build/sqlite3.c -nt build/sqlite3.o ]; then
+  if [ ! -f build/sqlite3.o ] || [ build/sqlite3.c -nt build/sqlite3.o ] \
+     || [ "$(cat build/sqlite3.stamp 2>/dev/null)" != "$SQLITE_STAMP" ]; then
     build_sqlite ""
   fi
   "$VBIN" -prod -cc "$CC" $VDEFS -o bin/server src

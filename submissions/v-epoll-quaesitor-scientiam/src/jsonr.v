@@ -75,8 +75,43 @@ fn put_utf8(mut dst []u8, cp int) {
 	}
 }
 
+// utf8_len returns the length of the well-formed UTF-8 sequence starting at b[i] (whose
+// first byte is >= 0x80), or 0 when it is malformed: a stray continuation byte, an overlong
+// form, a surrogate, a code point above U+10FFFF or a truncated sequence.
+fn utf8_len(b []u8, i int) int {
+	c := b[i]
+	n := if c < 0xC2 {
+		0
+	} else if c < 0xE0 {
+		2
+	} else if c < 0xF0 {
+		3
+	} else if c < 0xF5 {
+		4
+	} else {
+		0
+	}
+	if n == 0 || i + n > b.len {
+		return 0
+	}
+	for k in 1 .. n {
+		if b[i + k] & 0xC0 != 0x80 {
+			return 0
+		}
+	}
+	c1 := b[i + 1]
+	if (c == 0xE0 && c1 < 0xA0) || (c == 0xF0 && c1 < 0x90) {
+		return 0 // overlong
+	}
+	if (c == 0xED && c1 >= 0xA0) || (c == 0xF4 && c1 >= 0x90) {
+		return 0 // surrogate / above U+10FFFF
+	}
+	return n
+}
+
 // string_into reads a JSON string (r.i at the opening quote) and appends its decoded
-// bytes to dst. With dst unset (nil data) the string is only validated.
+// bytes to dst. With dst unset (nil data) the string is only validated. Raw bytes must be
+// well-formed UTF-8 (RFC 8259 §8.1); anything else is not JSON.
 fn (mut r JsonReader) string_into(mut dst []u8, decode bool) ! {
 	if r.peek() != `"` {
 		return error('string')
@@ -97,6 +132,14 @@ fn (mut r JsonReader) string_into(mut dst []u8, decode bool) ! {
 		}
 		if c < 0x20 {
 			return error('control')
+		}
+		if c >= 0x80 {
+			n := utf8_len(r.b, r.i)
+			if n == 0 {
+				return error('utf8')
+			}
+			r.i += n
+			continue
 		}
 		if c != `\\` {
 			r.i++

@@ -1,8 +1,8 @@
 ; The $12 server challenge in x86-64 assembly (NASM, Linux).
 ;
-; One thread, one epoll loop, one SQLite connection, raw syscalls for all I/O.
-; Each epoll batch is processed like this:
-;   1. read every ready socket and parse/handle the requests in it
+; One thread, io_uring for all socket I/O, one SQLite connection.
+; Each pass over the completion queues is processed like this:
+;   1. handle the data of every completed receive: parse and handle the requests in it
 ;   2. writes (POST /posts, likes) run inside one transaction opened by the first write
 ;   3. every response of the batch is built into one arena
 ;   4. COMMIT, then send all responses (so nobody sees a write before it is committed)
@@ -13,7 +13,7 @@ bits 64
 
 %include "defs.inc"
 
-extern getenv, malloc, realloc, free, time, exit, strlen, atoi, pthread_create, usleep
+extern getenv, malloc, realloc, free, time, exit, strlen, atoi, usleep, clock_gettime
 extern sqlite3_initialize, sqlite3_open_v2, sqlite3_exec, sqlite3_prepare_v3, sqlite3_step
 extern sqlite3_reset, sqlite3_bind_int64, sqlite3_bind_text, sqlite3_column_int64
 extern sqlite3_column_text, sqlite3_column_bytes, sqlite3_changes, sqlite3_errmsg
@@ -24,7 +24,8 @@ global main
 section .bss
 alignb 64
 conns:      resb MAXCONN << CONN_SHIFT
-events:     resb MAXEV * 12
+dq_buf:     resb DQ_CAP * 16       ; completions set aside while sending
+wlist:      resd MAXCONN           ; connections whose socket became writable
 recs:       resb MAXREC * 16
 scratch:    resb SCRATCH_SZ + 64
 bodybuf:    resb BODY_SZ
@@ -34,11 +35,18 @@ plbuf:      resb 4096             ; decoded JWT payload
 subbuf:     resb 4096
 namebuf:    resb 4096             ; decoded username
 arena:      resb ARENA_SZ
+fbuf:       resb 131072           ; feed: each post's JSON up to its like count
+fcnt:       resd FEED_WIN         ; feed: like counts by post id - lowest id
+alignb 8
+fid:        resq 32
+foff:       resd 32
+fend:       resd 32
 
 alignb 8
 db:         resq 1
-ckpt_db:    resq 1
 st_feed:    resq 1
+st_lrange:  resq 1
+st_cnt:     resq 1
 st_post:    resq 1
 st_ins:     resq 1
 st_like:    resq 1
@@ -50,16 +58,36 @@ start_time: resq 1
 now:        resq 1
 arena_used: resq 1
 nrec:       resd 1
-epfd:       resd 1
 lfd:        resd 1
-cur_fd:     resd 1
+cur_fd:     resd 1                ; connection id of the request being handled
 cur_flags:  resd 1                ; RF_* for the response being built
 nconn:      resd 1                ; open client connections
-ipcnt:      resd IP_BUCKETS       ; open connections per client-address bucket
-acc_addr:   resb 16               ; sockaddr_in from accept4
-acc_alen:   resd 1
-accept_off: resd 1                ; 1 while the listen socket is out of epoll (fd table full)
+last_all:   resq 1                ; when every ring was last entered (µs)
+dq_head:    resd 1
+dq_tail:    resd 1
+wcount:     resd 1
+sends_out:  resd 1                ; sends submitted whose result hasn't been seen yet
+acc_ring:   resd 1                ; ring that accepts new connections
+acc_armed:  resd 1
+acc_seq:    resd 1
+acc_ud:     resq 1                ; user_data of the armed accept
 in_txn:     resd 1
+st_dqfull:  resd 1                ; problem counters, printed every 10 s when not all zero
+st_flushbound: resd 1
+st_recverr: resd 1
+st_nobufs:  resd 1                ; receives that found no free buffer
+st_lasterr: resd 1
+st_cqover:  resd 1
+st_switch:  resd 1
+st_enfile:  resd 1
+st_next:    resq 1
+st_t0:      resq 1                ; start of the current pass (µs)
+st_maxpass: resq 1                ; longest pass in this 10 s window (µs)
+st_maxckpt: resq 1                ; longest checkpoint in this window (µs)
+st_ckpts:   resd 1
+st_ts:      resq 2
+statbuf:    resb 256
+fslow:      resd 1                ; feed: count likes post by post
 wal_frames: resd 1                ; frames in the WAL after the last commit (from the WAL hook)
 req_method: resd 1                ; 1 GET, 2 POST, 0 other
 req_path:   resq 1
@@ -71,7 +99,6 @@ req_alen:   resq 1
 jwt_uid:    resq 1
 jwt_name:   resq 1
 jwt_nlen:   resq 1
-epev:       resb 16
 db_path:    resq 1
 
 section .data
@@ -127,14 +154,14 @@ env_host:    db 'HOST', 0
 env_port:    db 'PORT', 0
 def_secret:  db 'twelve-dollar-challenge', 0
 
-sql_pragmas: db 'PRAGMA journal_mode=WAL;PRAGMA synchronous=NORMAL;PRAGMA mmap_size=1073741824;'
-             db 'PRAGMA cache_size=-8000;PRAGMA temp_store=MEMORY;PRAGMA busy_timeout=5000;'
+sql_pragmas: db 'PRAGMA locking_mode=EXCLUSIVE;PRAGMA journal_mode=WAL;PRAGMA synchronous=NORMAL;PRAGMA mmap_size=0;'
+             db 'PRAGMA cache_size=-16384;PRAGMA temp_store=MEMORY;PRAGMA busy_timeout=5000;'
              db 'PRAGMA wal_autocheckpoint=0;PRAGMA journal_size_limit=67108864;', 0
-sql_ckpt_pragmas: db 'PRAGMA busy_timeout=5000;PRAGMA mmap_size=1073741824;', 0
-sql_feed:    db 'SELECT p.id,p.body,p.created_at,u.username,'
-             db '(SELECT count(*) FROM likes l WHERE l.post_id=p.id) '
+sql_feed:    db 'SELECT p.id,p.body,p.created_at,u.username '
              db 'FROM posts p JOIN users u ON u.id=p.user_id '
              db 'ORDER BY p.created_at DESC,p.id DESC LIMIT 20', 0
+sql_lrange:  db 'SELECT post_id FROM likes WHERE post_id BETWEEN ?1 AND ?2', 0
+sql_cnt:     db 'SELECT count(*) FROM likes WHERE post_id=?1', 0
 sql_post:    db 'SELECT p.id,p.body,p.created_at,u.username,'
              db '(SELECT count(*) FROM likes l WHERE l.post_id=p.id) '
              db 'FROM posts p JOIN users u ON u.id=p.user_id WHERE p.id=?1', 0
@@ -159,6 +186,7 @@ nl:          db `\n`, 0
 section .text
 %include "sha256.inc"
 %include "json.inc"
+%include "uring.inc"
 section .text
 
 ; ---------------------------------------------------------------------------
@@ -205,26 +233,6 @@ prep:
   add rsp, 16
   pop rbx
   ret
-
-; ep_ctl(edi = op, esi = fd, edx = events)
-ep_ctl:
-  mov [epev], edx
-  mov [epev+4], esi
-  mov dword [epev+8], 0
-  mov edx, esi
-  mov esi, edi
-  mov edi, [epfd]
-  lea r10, [epev]
-  SYSCALL SYS_epoll_ctl
-  ret
-
-; conn_ptr: eax = fd -> rax = &conns[fd]
-%macro CONN 2                      ; dest reg, fd reg (32-bit)
-  mov %1, %2
-  shl %1, CONN_SHIFT
-  lea r11, [conns]
-  add %1, r11
-%endmacro
 
 ; ---------------------------------------------------------------------------
 ; startup
@@ -310,15 +318,10 @@ main:
   xchg al, ah
   mov [sa_port], ax
   call net_init
-
-  ; checkpoints run on their own thread and connection, off the request path
-  sub rsp, 16
-  lea rdi, [rsp]
-  xor esi, esi
-  lea rdx, [ckpt_thread]
-  xor ecx, ecx
-  call pthread_create
-  add rsp, 16
+  call uring_init
+  call ring_create            ; ring 0
+  mov dword [acc_ring], 0
+  call arm_accept
 
   lea rdi, [msg_ready]
   call puts2
@@ -361,6 +364,12 @@ db_init:
   lea rdi, [sql_feed]
   call prep
   mov [st_feed], rax
+  lea rdi, [sql_lrange]
+  call prep
+  mov [st_lrange], rax
+  lea rdi, [sql_cnt]
+  call prep
+  mov [st_cnt], rax
   lea rdi, [sql_post]
   call prep
   mov [st_post], rax
@@ -400,26 +409,33 @@ net_init:
   lea r10, [one]
   mov r8d, 4
   SYSCALL SYS_setsockopt
+  mov ebx, 100
+.bind:
   mov edi, [lfd]
   lea rsi, [sockaddr]
   mov edx, 16
   SYSCALL SYS_bind
   test eax, eax
-  jnz .err
+  jz .bound
+  ; a previous instance's rings can hold the port for a few seconds after it exits, while the
+  ; kernel closes their sockets: retry for up to 50 s
+  dec ebx
+  jz .err
+  mov edi, 500000
+  call usleep
+  jmp .bind
+.bound:
+  mov edi, [lfd]
+  mov esi, 6                  ; IPPROTO_TCP
+  mov edx, 1                  ; TCP_NODELAY (accepted sockets inherit it)
+  lea r10, [one]
+  mov r8d, 4
+  SYSCALL SYS_setsockopt
   mov edi, [lfd]
   mov esi, 65535
   SYSCALL SYS_listen
   test eax, eax
   jnz .err
-  xor edi, edi
-  SYSCALL SYS_epoll_create1
-  test eax, eax
-  js .err
-  mov [epfd], eax
-  mov edi, EPOLL_CTL_ADD
-  mov esi, [lfd]
-  mov edx, EPOLLIN
-  call ep_ctl
   pop rbx
   ret
 .err:
@@ -434,183 +450,340 @@ wal_cb:
   xor eax, eax
   ret
 
-; Checkpoint thread: its own connection; copies WAL pages back into the database file
-; (and fsyncs it) in the background, so the event loop does not pay for that.
-; Under constant writes a background checkpoint never quite reaches the end of the WAL, and
-; SQLite only rewinds the WAL after a complete one, so flush() finishes the last few frames itself.
-ckpt_thread:
-  push rbx
-  mov rdi, [db_path]
-  lea rsi, [ckpt_db]
-  mov edx, 0x8002
-  xor ecx, ecx
-  call sqlite3_open_v2
-  test eax, eax
-  jnz .out
-  mov rdi, [ckpt_db]
-  lea rsi, [sql_ckpt_pragmas]
-  xor edx, edx
-  xor ecx, ecx
-  xor r8d, r8d
-  call sqlite3_exec
-.loop:
-  mov edi, 50000              ; 50 ms
-  call usleep
-  cmp dword [wal_frames], CKPT_BG_FRAMES
-  jb .loop
-  mov rdi, [ckpt_db]
-  xor esi, esi                ; main database
-  xor edx, edx                ; SQLITE_CHECKPOINT_PASSIVE
-  xor ecx, ecx
-  xor r8d, r8d
-  call sqlite3_wal_checkpoint_v2
-  jmp .loop
-.out:
-  xor eax, eax
-  pop rbx
+; conn: CONN dest, id (64-bit register holding a connection id) -> dest = &conns[id]
+%macro CONN 2
+  mov %1, %2
+  shl %1, CONN_SHIFT
+  lea r11, [conns]
+  add %1, r11
+%endmacro
+
+; mk_ud(edi = op, esi = connection id) -> rax = user_data: op | ring << 8 | gen << 16 | slot << 32
+; Clobbers rcx, rdx, r11.
+mk_ud:
+  mov eax, esi
+  shl rax, CONN_SHIFT
+  lea r11, [conns]
+  movzx edx, word [r11+rax+C_GEN]
+  shl edx, 16
+  mov eax, esi
+  and eax, 0xFFFF
+  shl rax, 32
+  or rax, rdx
+  mov ecx, esi
+  shr ecx, 16
+  shl ecx, 8
+  or rax, rcx
+  or rax, rdi
+  ret
+
+; ud_conn(rdi = user_data) -> eax = connection id, ZF=1 if it still names a live connection
+; (same generation). Clobbers rcx, rdx, r11.
+ud_conn:
+  mov rax, rdi
+  shr rax, 32                 ; slot
+  mov ecx, edi
+  shr ecx, 8
+  and ecx, 0xFF               ; ring
+  shl ecx, 16
+  or eax, ecx                 ; id
+  mov ecx, eax
+  shl rcx, CONN_SHIFT
+  lea r11, [conns]
+  add rcx, r11
+  test dword [rcx+C_FLAGS], F_ALIVE
+  jz .dead
+  movzx edx, word [rcx+C_GEN]
+  mov ecx, edi
+  shr ecx, 16
+  cmp cx, dx
+  ret
+.dead:
+  or ecx, 1                   ; ZF=0
+  ret
+
+; dq_push(rax = user_data, edx = res, ecx = flags): queue a completion for the event loop
+dq_push:
+  mov r8d, [dq_tail]
+  mov r9d, r8d
+  sub r9d, [dq_head]
+  cmp r9d, DQ_CAP
+  jb .room
+  inc dword [st_dqfull]       ; never expected (DQ_CAP > all completion queues together)
+  ret
+.room:
+  and r8d, DQ_CAP - 1
+  shl r8, 4
+  lea r9, [dq_buf]
+  add r8, r9
+  mov [r8], rax
+  mov [r8+8], edx
+  mov [r8+12], ecx
+  inc dword [dq_tail]
+  ret
+
+; next_event -> rax = user_data, edx = res, ecx = flags; CF=1 when there is nothing to do.
+; Completions set aside while sending (dq) come first, so per-connection order is kept.
+next_event:
+  mov eax, [dq_head]
+  cmp eax, [dq_tail]
+  je .empty
+  and eax, DQ_CAP - 1
+  shl rax, 4
+  lea r8, [dq_buf]
+  add r8, rax
+  mov rax, [r8]
+  mov edx, [r8+8]
+  mov ecx, [r8+12]
+  inc dword [dq_head]
+  clc
+  ret
+.empty:
+  xor eax, eax                ; start over at the front: only the deepest the queue ever got
+  mov [dq_head], eax          ; is touched, not all DQ_CAP entries
+  mov [dq_tail], eax
+.rings:
+  xor r9d, r9d
+.rl:
+  cmp r9d, [nrings]
+  jae .none
+  RING r8, r9
+  inc r9d
+  mov rsi, [r8+RG_CQHEAD]
+  mov r10d, [rsi]
+  mov rdi, [r8+RG_CQTAIL]
+  cmp r10d, [rdi]
+  je .rl
+  and r10d, [r8+RG_CQMASK]
+  shl r10, 4
+  add r10, [r8+RG_CQES]
+  mov rax, [r10]
+  mov edx, [r10+8]
+  mov ecx, [r10+12]
+  inc dword [rsi]             ; consume (after reading the entry)
+  clc
+  ret
+.none:
+  stc
+  ret
+
+; dispatch(rax = user_data, edx = res, ecx = flags)
+dispatch:
+  mov rdi, rax
+  mov esi, edx
+  mov edx, ecx
+  movzx eax, dil
+  cmp eax, OP_RECV
+  je on_recv
+  cmp eax, OP_ACCEPT
+  je on_accept_cqe
+  cmp eax, OP_SEND
+  je on_send
+  cmp eax, OP_POLL
+  je on_poll
+  cmp eax, OP_RESUME
+  je on_resume
+  cmp eax, OP_RPOLL
+  je on_rpoll
+  ret                         ; cancel/close results need nothing
+
+; on_rpoll(rdi = user_data, edx = flags): ring 0's poll on another ring. Its completions are read
+; by the loop anyway; only re-arm the poll if the kernel ended it.
+on_rpoll:
+  test edx, CQE_F_MORE
+  jnz .ret
+  shr edi, 8
+  and edi, 0xFF
+  jmp arm_rpoll
+.ret:
   ret
 
 ; ---------------------------------------------------------------------------
-; event loop
+; accepting
 
-event_loop:
-  push rbp
-  mov rbp, rsp
-  push rbx
-  push r12
-  push r13
-  push r14
-.wait:
-  mov edi, [epfd]
-  lea rsi, [events]
-  mov edx, MAXEV
-  mov r10d, -1
-  SYSCALL SYS_epoll_wait
-  test eax, eax
-  jle .wait
-  mov r12d, eax
-  xor edi, edi
-  call time
-  mov [now], rax
-  xor r13d, r13d
-.ev:
-  cmp r13d, r12d
-  jae .done
-  ; a full batch takes a while under load: take new connections every 128 events too,
-  ; so the kernel's accept queue (somaxconn, 4096) doesn't overflow and drop SYNs
-  test r13d, 127
-  jnz .one
-  test r13d, r13d
-  jz .one
-  cmp dword [accept_off], 0
-  jne .one
-  call do_accept
-.one:
-  lea eax, [r13d + r13d*2]
-  lea rbx, [events]
-  lea rbx, [rbx + rax*4]
-  inc r13d
-  mov r14d, [rbx]             ; event mask
-  mov edi, [rbx+4]            ; fd
-  cmp edi, [lfd]
-  je .accept
-  test r14d, EPOLLOUT
-  jz .read
-  call on_writable
-  jmp .ev
-.read:
-  call on_readable
-  jmp .ev
-.accept:
-  call do_accept
-  jmp .ev
-.done:
-  call flush
-  jmp .wait
-
-do_accept:
-  push rbx
-  push r12
-  push r13
-  mov r12d, 1024              ; per call, so a connect storm can't starve requests
+; pick_accept_ring -> eax = ring to accept on, or -1 if every ring is (nearly) full
+pick_accept_ring:
+  xor eax, eax
 .l:
-  mov edi, [lfd]
-  lea rsi, [acc_addr]
-  mov dword [acc_alen], 16
-  lea rdx, [acc_alen]
-  mov r10d, SOCK_NONBLOCK
-  SYSCALL SYS_accept4
-  test rax, rax
-  js .err
-  mov ebx, eax
-  cmp ebx, MAXCONN
-  jae .reject
-  mov edi, ebx
-  mov esi, 6                  ; IPPROTO_TCP
-  mov edx, 1                  ; TCP_NODELAY
-  lea r10, [one]
-  mov r8d, 4
-  SYSCALL SYS_setsockopt
-  CONN rax, rbx
-  xor ecx, ecx
-  mov [rax], rcx
-  mov [rax+8], rcx
-  mov [rax+16], rcx
-  mov [rax+24], rcx
-  ; Keep-alive has two budgets. Past KA_LIMIT open connections in total, or KA_PER_IP from
-  ; one client address, new connections are answered with "Connection: close" (one request
-  ; each). The first keeps idle clients from running the fd table out. The second keeps one
-  ; address (a NAT, a proxy, a load generator) under the ~28k local ports a Linux client has
-  ; by default: a keep-alive connection pins a client port, while one the server closes first
-  ; frees it at once.
-  mov ecx, [acc_addr+4]       ; IPv4 address
-  imul ecx, ecx, 0x9E3779B1
-  shr ecx, 16                 ; bucket 0..65535
-  mov [rax+C_IPB], ecx
-  lea rdx, [ipcnt]
-  lea rdx, [rdx + rcx*4]
-  mov ecx, F_ALIVE
-  cmp dword [nconn], KA_LIMIT
-  jae .noka
-  cmp dword [rdx], KA_PER_IP
-  jb .ka
-.noka:
-  mov ecx, F_ALIVE | F_NOKA
-.ka:
-  inc dword [rdx]
-  mov [rax+C_FLAGS], ecx
-  inc dword [nconn]
-  mov edi, EPOLL_CTL_ADD
-  mov esi, ebx
-  mov edx, EPOLLIN
-  call ep_ctl
-  dec r12d
+  cmp eax, [nrings]
+  jae .new
+  RING rcx, rax
+  mov edx, [slots]
+  sub edx, ACC_LOW
+  cmp [rcx+RG_NOPEN], edx
+  jb .ret
+  inc eax
+  jmp .l
+.new:
+  cmp eax, MAXRINGS
+  jae .full
+  call ring_create
+.ret:
+  ret
+.full:
+  mov eax, -1
+  ret
+
+; arm_accept: start accepting on ring [acc_ring]: ACC_K single-shot accepts in flight, each
+; straight into the ring's fixed-file table. (Multishot accept was seen to stop delivering on
+; Linux 6.8 under load; a single-shot accept is re-armed by the loop as each one completes.)
+arm_accept:
+  push rbx
+  mov ecx, [acc_seq]
+  movzx ecx, cx
+  shl ecx, 16
+  mov edx, [acc_ring]
+  shl edx, 8
+  or ecx, edx
+  or ecx, OP_ACCEPT
+  mov [acc_ud], rcx
+  mov dword [acc_armed], 1
+  mov ebx, ACC_K
+.l:
+  call arm_one_accept
+  dec ebx
   jnz .l
+  pop rbx
+  ret
+
+; arm_one_accept: one more single-shot accept with user_data [acc_ud] on ring [acc_ring]
+arm_one_accept:
+  mov edi, [acc_ring]
+  RING rdi, rdi
+  call get_sqe
+  mov byte [rax+SQE_OPCODE], OPC_ACCEPT
+  mov ecx, [lfd]
+  mov [rax+SQE_FD], ecx
+  mov dword [rax+SQE_FILE_INDEX], FILE_INDEX_ALLOC
+  mov rcx, [acc_ud]
+  mov [rax+SQE_USER_DATA], rcx
+  ret
+
+; accept_elsewhere: cancel the accepts on [acc_ring] and continue on a ring with room
+accept_elsewhere:
+  push rbx
+  inc dword [st_switch]
+  mov edi, [acc_ring]
+  RING rdi, rdi
+  call get_sqe
+  mov byte [rax+SQE_OPCODE], OPC_ASYNC_CANCEL
+  mov dword [rax+SQE_FD], -1
+  mov dword [rax+SQE_OPFLAGS], CANCEL_ALL
+  mov rcx, [acc_ud]
+  mov [rax+SQE_ADDR], rcx     ; every request with this user_data
+  mov qword [rax+SQE_USER_DATA], OP_CANCEL
+  mov dword [acc_armed], 0
+  call rearm_accept
+  pop rbx
+  ret
+
+; rearm_accept: start accepting on the first ring with room, if not accepting already
+rearm_accept:
+  cmp dword [acc_armed], 0
+  jne .ret
+  call pick_accept_ring
+  test eax, eax
+  js .ret
+  mov [acc_ring], eax
+  inc dword [acc_seq]
+  call arm_accept
+.ret:
+  ret
+
+; on_accept_cqe(rdi = user_data, esi = res, edx = flags)
+on_accept_cqe:
+  push rbx
+  push r12
+  push r13
+  mov rbx, rdi
+  mov r12d, esi
+  test esi, esi
+  js .done
+  mov edi, ebx
+  shr edi, 8
+  and edi, 0xFF
+  call on_accept              ; (may move accepting to another ring)
+.done:
+  cmp rbx, [acc_ud]           ; an accept of the current set: replace it
+  jne .ret
+  cmp dword [acc_armed], 0
+  je .ret
+  cmp r12d, -ENFILE
+  je .full
+  cmp r12d, -ECANCELED
+  je .ret
+  call arm_one_accept
+  jmp .ret
+.full:
+  inc dword [st_enfile]
+  call accept_elsewhere
 .ret:
   pop r13
   pop r12
   pop rbx
   ret
-.err:
-  cmp rax, -EMFILE
-  je .full
-  cmp rax, -ENFILE
-  jne .ret
-.full:
-  ; no fd left: stop polling the listen socket (it would stay readable and spin the loop)
-  ; until a connection closes. New clients wait in the kernel's accept queue meanwhile.
-  mov dword [accept_off], 1
-  mov edi, EPOLL_CTL_MOD
-  mov esi, [lfd]
-  xor edx, edx
-  call ep_ctl
-  jmp .ret
-.reject:
-  mov edi, ebx
-  SYSCALL SYS_close
-  jmp .l
 
-; close_conn(edi = fd)
+; on_accept(edi = ring, esi = slot)
+on_accept:
+  push rbx
+  push r12
+  push r13
+  mov r13d, edi
+  mov ebx, edi
+  shl ebx, 16
+  or ebx, esi                 ; connection id
+  CONN r12, rbx
+  xor eax, eax
+  mov [r12+C_INBUF], rax
+  mov [r12+C_INLEN], eax
+  mov dword [r12+C_FLAGS], F_ALIVE
+  mov [r12+C_OUTBUF], rax
+  mov [r12+C_OUTLEN], rax
+  RING rdi, r13
+  inc dword [rdi+RG_NOPEN]
+  inc dword [nconn]
+  mov esi, ebx
+  call arm_recv
+  ; keep a reserve of free slots for accepts already in flight: move on before the table fills
+  cmp r13d, [acc_ring]
+  jne .ret
+  cmp dword [acc_armed], 0
+  je .ret
+  RING rdi, r13
+  mov eax, [slots]
+  sub eax, ACC_RESERVE
+  cmp [rdi+RG_NOPEN], eax
+  jb .ret
+  call accept_elsewhere
+.ret:
+  pop r13
+  pop r12
+  pop rbx
+  ret
+
+; arm_recv(esi = connection id): multishot receive into the ring's provided buffers (re-armed when
+; a completion comes without IORING_CQE_F_MORE)
+arm_recv:
+  push rbx
+  mov ebx, esi
+  mov edi, OP_RECV
+  call mk_ud
+  push rax
+  mov ecx, ebx
+  shr ecx, 16
+  RING rdi, rcx
+  call get_sqe
+  pop rcx
+  mov [rax+SQE_USER_DATA], rcx
+  mov byte [rax+SQE_OPCODE], OPC_RECV
+  mov byte [rax+SQE_FLAGS], IOSQE_FIXED_FILE | IOSQE_BUFFER_SELECT
+  mov word [rax+SQE_IOPRIO], RECV_MULTISHOT
+  movzx ecx, bx
+  mov [rax+SQE_FD], ecx
+  pop rbx
+  ret
+
+; close_conn(edi = connection id)
 close_conn:
   push rbx
   push r12
@@ -619,20 +792,8 @@ close_conn:
   CONN r12, rbx
   test dword [r12+C_FLAGS], F_ALIVE
   jz .ret
-  mov edi, ebx
-  SYSCALL SYS_close
-  dec dword [nconn]
-  mov eax, [r12+C_IPB]
-  lea rcx, [ipcnt]
-  dec dword [rcx + rax*4]
-  cmp dword [accept_off], 0
-  je .accepting
-  mov dword [accept_off], 0   ; an fd is free again: resume accepting
-  mov edi, EPOLL_CTL_MOD
-  mov esi, [lfd]
-  mov edx, EPOLLIN
-  call ep_ctl
-.accepting:
+  inc word [r12+C_GEN]        ; completions still on their way are now stale
+  mov dword [r12+C_FLAGS], 0
   mov rdi, [r12+C_INBUF]
   test rdi, rdi
   jz .noin
@@ -644,17 +805,205 @@ close_conn:
   call free
 .noout:
   xor eax, eax
-  mov [r12], rax
-  mov [r12+8], rax
-  mov [r12+16], rax
-  mov [r12+24], rax
+  mov [r12+C_INBUF], rax
+  mov [r12+C_INLEN], eax
+  mov [r12+C_OUTBUF], rax
+  mov [r12+C_OUTLEN], rax
+  dec dword [nconn]
+  mov ecx, ebx
+  shr ecx, 16
+  RING r13, rcx
+  dec dword [r13+RG_NOPEN]
+  ; shut the socket down, then free the slot. The shutdown sends the FIN now (on Linux 6.8 the
+  ; close only releases the socket once every older request on the ring has finished, which can
+  ; take minutes) and ends whatever is armed on the socket: the multishot receive sees EOF, a
+  ; POLLOUT poll sees POLLHUP. Their completions find a new generation and are dropped. (An
+  ; ASYNC_CANCEL by fd would scan every armed poll on the ring, accepts included, per close.)
+  mov rdi, r13
+  call get_sqe
+  mov byte [rax+SQE_OPCODE], OPC_SHUTDOWN
+  mov byte [rax+SQE_FLAGS], IOSQE_FIXED_FILE | IOSQE_IO_HARDLINK | IOSQE_CQE_SKIP_SUCCESS
+  movzx ecx, bx
+  mov [rax+SQE_FD], ecx
+  mov dword [rax+SQE_LEN], 2  ; SHUT_RDWR
+  mov qword [rax+SQE_USER_DATA], OP_CLOSE
+  mov rdi, r13
+  call get_sqe
+  mov byte [rax+SQE_OPCODE], OPC_CLOSE
+  mov byte [rax+SQE_FLAGS], IOSQE_CQE_SKIP_SUCCESS
+  movzx ecx, bx
+  inc ecx
+  mov [rax+SQE_FILE_INDEX], ecx
+  mov qword [rax+SQE_USER_DATA], OP_CLOSE
+  call rearm_accept
 .ret:
   pop r13
   pop r12
   pop rbx
   ret
 
-; stash(edi = fd, rsi = data, edx = len): keep a partial request for the next read
+; ---------------------------------------------------------------------------
+; receiving
+
+; on_recv(rdi = user_data, esi = res, edx = flags)
+on_recv:
+  push rbx
+  push r12
+  push r13
+  push r14
+  push r15
+  mov r15, rdi
+  mov r12d, esi               ; res
+  mov r13d, edx               ; flags
+  mov r14d, -1                ; buffer id, if any
+  test r13d, CQE_F_BUFFER
+  jz .nobuf
+  mov r14d, r13d
+  shr r14d, 16
+.nobuf:
+  call ud_conn
+  mov ebx, eax                ; connection id
+  jnz .done                   ; stale
+  test r12d, r12d
+  jle .noread
+  mov ecx, r15d
+  shr ecx, 8
+  and ecx, 0xFF
+  RING rdi, rcx
+  mov esi, r14d
+  shl rsi, BUF_SHIFT
+  add rsi, [rdi+RG_BUFBASE]
+  mov edx, r12d
+  mov edi, ebx
+  call on_data
+  test r13d, CQE_F_MORE
+  jnz .done
+.rearm:
+  mov rdi, r15
+  call ud_conn                ; still open after handling the data?
+  jnz .done
+  mov esi, ebx
+  call arm_recv
+  jmp .done
+.noread:
+  cmp r12d, -ENOBUFS
+  jne .notnobufs
+  inc dword [st_nobufs]
+  jmp .rearm                  ; every buffer was in use: try again
+.notnobufs:
+  test r12d, r12d
+  jz .eof
+  inc dword [st_recverr]
+  mov [st_lasterr], r12d
+.eof:
+  mov edi, ebx                ; end of stream or an error
+  call close_conn
+.done:
+  test r14d, r14d
+  js .ret
+  mov ecx, r15d
+  shr ecx, 8
+  and ecx, 0xFF
+  RING rdi, rcx
+  mov esi, r14d
+  call put_buf
+.ret:
+  pop r15
+  pop r14
+  pop r13
+  pop r12
+  pop rbx
+  ret
+
+; on_data(edi = connection id, rsi = data, edx = length)
+on_data:
+  push rbx
+  push r12
+  push r13
+  push r14
+  push r15
+  mov ebx, edi
+  CONN r12, rbx
+  mov r13, rsi
+  mov r14d, edx
+  test dword [r12+C_FLAGS], F_CLOSING
+  jnz .ret                    ; a "Connection: close" response is on its way: ignore the rest
+  cmp dword [r12+C_OUTLEN], 0
+  jne .hold
+  mov rdi, [r12+C_INBUF]
+  test rdi, rdi
+  jnz .join
+  mov edi, ebx
+  mov rsi, r13
+  mov edx, r14d
+  call process_data
+  jmp .ret
+.join:                        ; the start of this request came earlier: stash + new data
+  mov r15d, [r12+C_INLEN]
+  lea eax, [r15d + r14d]
+  cmp eax, SCRATCH_SZ
+  ja .close
+  call take_stash
+  lea rdi, [scratch]
+  add rdi, r15
+  mov rsi, r13
+  mov ecx, r14d
+  rep movsb
+  mov edi, ebx
+  lea rsi, [scratch]
+  lea edx, [r15d + r14d]
+  call process_data
+  jmp .ret
+.hold:                        ; output is backed up: keep the input until it drains
+  mov r15d, [r12+C_INLEN]
+  lea esi, [r15d + r14d]
+  cmp esi, MAX_REQ * 2
+  ja .close
+  mov rdi, [r12+C_INBUF]
+  call realloc
+  mov [r12+C_INBUF], rax
+  lea rdi, [rax + r15]
+  mov rsi, r13
+  mov ecx, r14d
+  rep movsb
+  add [r12+C_INLEN], r14d
+  jmp .ret
+.close:
+  mov edi, ebx
+  call close_conn
+.ret:
+  pop r15
+  pop r14
+  pop r13
+  pop r12
+  pop rbx
+  ret
+
+; on_resume(rdi = user_data): output drained; handle the input that waited for it
+on_resume:
+  push rbx
+  push r12
+  push r13
+  call ud_conn
+  jnz .ret
+  mov ebx, eax
+  CONN r12, rbx
+  cmp dword [r12+C_OUTLEN], 0
+  jne .ret
+  call take_stash
+  test eax, eax
+  jz .ret
+  mov edi, ebx
+  lea rsi, [scratch]
+  mov edx, eax
+  call process_data
+.ret:
+  pop r13
+  pop r12
+  pop rbx
+  ret
+
+; stash(edi = connection id, rsi = data, edx = len): keep a partial request for the next read
 stash:
   push rbx
   push r12
@@ -703,146 +1052,293 @@ take_stash:
   pop rbx
   ret
 
-; on_readable(edi = fd)
-on_readable:
-  push rbx
-  push r12
-  push r13
-  mov ebx, edi
-  CONN r12, rbx
-  test dword [r12+C_FLAGS], F_ALIVE
-  jz .ret
-  cmp dword [r12+C_OUTLEN], 0
-  jne .ret
-  call take_stash
-  mov r13d, eax
-  mov edi, ebx
-  lea rsi, [scratch]
-  add rsi, r13
-  mov edx, SCRATCH_SZ
-  sub edx, r13d
-  SYSCALL SYS_read
-  test rax, rax
-  jg .got
-  cmp rax, -EAGAIN
-  je .again
-  cmp rax, -EINTR
-  je .again
-  mov edi, ebx
-  call close_conn
-  jmp .ret
-.again:
-  test r13d, r13d
-  jz .ret
-  mov edi, ebx
-  lea rsi, [scratch]
-  mov edx, r13d
-  call stash
-  jmp .ret
-.got:
-  add r13d, eax
-  mov edi, ebx
-  mov esi, r13d
-  call process_data
-.ret:
-  pop r13
-  pop r12
-  pop rbx
-  ret
+; ---------------------------------------------------------------------------
+; sending
 
-; on_writable(edi = fd): continue sending pending output
-on_writable:
+; queue_send(edi = connection id, rsi = data, edx = length): a non-blocking send. It completes
+; while io_uring_enter submits it (MSG_DONTWAIT), so the data only has to live until then.
+queue_send:
   push rbx
   push r12
   push r13
   mov ebx, edi
-  CONN r12, rbx
-  test dword [r12+C_FLAGS], F_ALIVE
-  jz .ret
-  mov ecx, [r12+C_OUTLEN]
-  test ecx, ecx
-  jz .asread
-  mov edi, ebx
-  mov rsi, [r12+C_OUTBUF]
-  mov eax, [r12+C_OUTOFF]
-  add rsi, rax
-  mov edx, ecx
-  sub edx, eax
-  mov r10d, MSG_NOSIGNAL
-  xor r8d, r8d
-  xor r9d, r9d
-  SYSCALL SYS_sendto
-  cmp rax, -EAGAIN
-  je .ret
-  test rax, rax
-  js .close
-  add [r12+C_OUTOFF], eax
-  mov eax, [r12+C_OUTOFF]
-  cmp eax, [r12+C_OUTLEN]
-  jb .ret
-  mov rdi, [r12+C_OUTBUF]
-  call free
-  mov qword [r12+C_OUTBUF], 0
-  mov qword [r12+C_OUTLEN], 0
-  test dword [r12+C_FLAGS], F_CLOSE_AFTER
-  jnz .close
-  mov edi, EPOLL_CTL_MOD
+  mov r12, rsi
+  mov r13d, edx
+  CONN rax, rbx
+  or dword [rax+C_FLAGS], F_SENDING
+  mov [rax+C_SPTR], r12
+  mov [rax+C_SLEN], r13d
+  mov edi, OP_SEND
   mov esi, ebx
-  mov edx, EPOLLIN
-  call ep_ctl
-  call take_stash             ; requests that arrived while we were blocked
-  test eax, eax
-  jz .ret
-  mov edi, ebx
-  mov esi, eax
-  call process_data
-  jmp .ret
-.asread:
-  mov edi, ebx
-  call on_readable
-  jmp .ret
-.close:
-  mov edi, ebx
-  call close_conn
-.ret:
+  call mk_ud
+  push rax
+  mov ecx, ebx
+  shr ecx, 16
+  RING rdi, rcx
+  call get_sqe
+  pop rcx
+  mov [rax+SQE_USER_DATA], rcx
+  mov byte [rax+SQE_OPCODE], OPC_SEND
+  mov byte [rax+SQE_FLAGS], IOSQE_FIXED_FILE
+  movzx ecx, bx
+  mov [rax+SQE_FD], ecx
+  mov [rax+SQE_ADDR], r12
+  mov [rax+SQE_LEN], r13d
+  mov dword [rax+SQE_OPFLAGS], MSG_DONTWAIT | MSG_NOSIGNAL
+  inc dword [sends_out]
+  ; the last response of a closing connection: the FIN follows in the same segment, before the
+  ; client is done reading. (If the client closed first, its port would sit in TIME_WAIT for 60 s.)
+  ; Up to 16 KB always fits in a fresh socket's send buffer, so the send is never partial here.
+  CONN rcx, rbx
+  test dword [rcx+C_FLAGS], F_CLOSE_AFTER
+  jz .done
+  cmp r13d, 16384
+  ja .done
+  or byte [rax+SQE_FLAGS], IOSQE_IO_LINK
+  or dword [rax+SQE_OPFLAGS], MSG_MORE
+  mov ecx, ebx
+  shr ecx, 16
+  RING rdi, rcx
+  call get_sqe
+  mov byte [rax+SQE_OPCODE], OPC_SHUTDOWN
+  mov byte [rax+SQE_FLAGS], IOSQE_FIXED_FILE | IOSQE_CQE_SKIP_SUCCESS
+  movzx ecx, bx
+  mov [rax+SQE_FD], ecx
+  mov dword [rax+SQE_LEN], 1  ; SHUT_WR
+  mov qword [rax+SQE_USER_DATA], OP_CLOSE
+.done:
   pop r13
   pop r12
   pop rbx
   ret
 
-; store_pending(edi = fd, rsi = record, edx = bytes already sent)
-store_pending:
+; send_out(edi = connection id): send the connection's pending output buffer
+send_out:
+  CONN rax, rdi
+  or dword [rax+C_FLAGS], F_SEND_OUT
+  mov rsi, [rax+C_OUTBUF]
+  mov ecx, [rax+C_OUTOFF]
+  add rsi, rcx
+  mov edx, [rax+C_OUTLEN]
+  sub edx, ecx
+  jmp queue_send
+
+; append_out(edi = connection id, rsi = data, edx = length): add to the pending output
+append_out:
+  push rbx
+  push r12
+  push r13
+  push r14
+  sub rsp, 8
+  mov ebx, edi
+  CONN r12, rbx
+  mov r13, rsi
+  mov r14d, edx
+  mov rdi, [r12+C_OUTBUF]
+  mov esi, [r12+C_OUTLEN]
+  add esi, r14d
+  call realloc
+  mov [r12+C_OUTBUF], rax
+  mov edi, [r12+C_OUTLEN]
+  add rdi, rax
+  mov rsi, r13
+  mov ecx, r14d
+  rep movsb
+  add [r12+C_OUTLEN], r14d
+  add rsp, 8
+  pop r14
+  pop r13
+  pop r12
+  pop rbx
+  ret
+
+; arm_pollout(edi = connection id): get a completion when the socket can take more data
+arm_pollout:
+  push rbx
+  mov ebx, edi
+  CONN rax, rbx
+  test dword [rax+C_FLAGS], F_POLLING
+  jnz .ret
+  or dword [rax+C_FLAGS], F_POLLING
+  mov edi, OP_POLL
+  mov esi, ebx
+  call mk_ud
+  push rax
+  mov ecx, ebx
+  shr ecx, 16
+  RING rdi, rcx
+  call get_sqe
+  pop rcx
+  mov [rax+SQE_USER_DATA], rcx
+  mov byte [rax+SQE_OPCODE], OPC_POLL_ADD
+  mov byte [rax+SQE_FLAGS], IOSQE_FIXED_FILE
+  movzx ecx, bx
+  mov [rax+SQE_FD], ecx
+  mov dword [rax+SQE_OPFLAGS], POLLOUT
+.ret:
+  pop rbx
+  ret
+
+; on_poll(rdi = user_data, esi = res): the socket is writable again; send at the next flush
+on_poll:
+  push rbx
+  mov ebx, esi
+  call ud_conn
+  jnz .ret
+  CONN rcx, rax
+  and dword [rcx+C_FLAGS], ~F_POLLING
+  test ebx, ebx
+  js .err
+  test dword [rcx+C_FLAGS], F_WRITABLE
+  jnz .ret
+  or dword [rcx+C_FLAGS], F_WRITABLE
+  mov edx, [wcount]
+  lea r8, [wlist]
+  mov [r8+rdx*4], eax
+  inc dword [wcount]
+  jmp .ret
+.err:
+  mov edi, eax
+  call close_conn
+.ret:
+  pop rbx
+  ret
+
+; on_send(rdi = user_data, esi = res): result of a send submitted by flush
+on_send:
   push rbx
   push r12
   push r13
   push r14
   push r15
-  mov ebx, edi
+  dec dword [sends_out]
+  mov r13d, esi
+  call ud_conn
+  jnz .ret
+  mov ebx, eax
   CONN r12, rbx
-  mov r13d, [rsi+R_START]
-  add r13d, edx               ; arena offset of the unsent part
-  mov r14d, [rsi+R_LEN]
-  sub r14d, edx               ; unsent length
-  mov r15d, [r12+C_OUTLEN]    ; already pending
+  and dword [r12+C_FLAGS], ~F_SENDING
+  test r13d, r13d
+  jns .sent
+  cmp r13d, -EAGAIN
+  jne .close
+  xor r13d, r13d
+.sent:
+  test dword [r12+C_FLAGS], F_SEND_OUT
+  jz .arena
+  add [r12+C_OUTOFF], r13d
+  mov eax, [r12+C_OUTOFF]
+  cmp eax, [r12+C_OUTLEN]
+  jb .wait
+  and dword [r12+C_FLAGS], ~F_SEND_OUT
   mov rdi, [r12+C_OUTBUF]
-  lea esi, [r15d + r14d]
-  call realloc                ; realloc(NULL, n) == malloc(n)
-  mov [r12+C_OUTBUF], rax
-  lea rdi, [rax + r15]
-  lea rsi, [arena]
+  call free
+  mov qword [r12+C_OUTBUF], 0
+  mov qword [r12+C_OUTLEN], 0
+  jmp .drained
+.arena:
+  cmp r13d, [r12+C_SLEN]
+  jae .full
+  ; short send: the rest goes in front of anything already pending
+  mov r14d, [r12+C_SLEN]
+  sub r14d, r13d              ; unsent bytes
+  mov r15d, [r12+C_OUTLEN]
+  sub r15d, [r12+C_OUTOFF]    ; pending bytes
+  lea edi, [r14d + r15d]
+  call malloc
+  mov rdi, rax
+  mov rsi, [r12+C_SPTR]
   add rsi, r13
   mov ecx, r14d
   rep movsb
-  add [r12+C_OUTLEN], r14d
-  test r15d, r15d
-  jnz .ret
-  mov edi, EPOLL_CTL_MOD
+  mov rsi, [r12+C_OUTBUF]
+  test rsi, rsi
+  jz .nopend
+  mov ecx, [r12+C_OUTOFF]
+  add rsi, rcx
+  mov ecx, r15d
+  rep movsb
+.nopend:
+  push rax
+  push rax
+  mov rdi, [r12+C_OUTBUF]
+  call free
+  pop rax
+  pop rax
+  mov [r12+C_OUTBUF], rax
+  lea eax, [r14d + r15d]
+  mov [r12+C_OUTLEN], eax
+  mov dword [r12+C_OUTOFF], 0
+.wait:
+  mov edi, ebx
+  call arm_pollout
+  jmp .ret
+.full:
+  cmp dword [r12+C_OUTLEN], 0
+  je .drained
+  mov edi, ebx                ; later responses for this connection were held back: send them
+  call send_out
+  jmp .ret
+.drained:
+  test dword [r12+C_FLAGS], F_CLOSE_AFTER
+  jnz .close
+  cmp qword [r12+C_INBUF], 0
+  je .ret
+  mov edi, OP_RESUME          ; input waited for this: handle it in the event loop
   mov esi, ebx
-  mov edx, EPOLLOUT
-  call ep_ctl
+  call mk_ud
+  xor edx, edx
+  xor ecx, ecx
+  call dq_push
+  jmp .ret
+.close:
+  mov edi, ebx
+  call close_conn
 .ret:
   pop r15
   pop r14
+  pop r13
+  pop r12
+  pop rbx
+  ret
+
+; reap: take every completion off the rings. Send results are handled now (their data may live
+; in the arena); everything else is queued for the event loop, in order.
+reap:
+  push rbx
+  push r12
+  push r13
+  xor r12d, r12d
+.ring:
+  cmp r12d, [nrings]
+  jae .ret
+  RING rbx, r12
+.l:
+  mov rsi, [rbx+RG_CQHEAD]
+  mov r10d, [rsi]
+  mov rdi, [rbx+RG_CQTAIL]
+  cmp r10d, [rdi]
+  je .next
+  and r10d, [rbx+RG_CQMASK]
+  shl r10, 4
+  add r10, [rbx+RG_CQES]
+  mov rax, [r10]
+  mov edx, [r10+8]
+  mov ecx, [r10+12]
+  inc dword [rsi]
+  cmp al, OP_SEND
+  je .send
+  call dq_push
+  jmp .l
+.send:
+  mov rdi, rax
+  mov esi, edx
+  call on_send
+  jmp .l
+.next:
+  inc r12d
+  jmp .ring
+.ret:
   pop r13
   pop r12
   pop rbx
@@ -877,7 +1373,7 @@ flush:
   xor r12d, r12d
 .rl:
   cmp r12d, [nrec]
-  jae .done
+  jae .writable
   mov eax, r12d
   shl rax, 4
   lea r13, [recs]
@@ -887,6 +1383,11 @@ flush:
   CONN r14, rbx
   test dword [r14+C_FLAGS], F_ALIVE
   jz .rl
+  movzx eax, word [r14+C_GEN]
+  mov ecx, [r13+R_FLAGS]
+  shr ecx, 16
+  cmp eax, ecx
+  jne .rl                     ; closed (and the slot reused) since the request
   test r15d, r15d
   jz .ok
   test dword [r13+R_FLAGS], RF_WRITE
@@ -895,63 +1396,76 @@ flush:
   call close_conn
   jmp .rl
 .ok:
-  xor edx, edx
-  cmp dword [r14+C_OUTLEN], 0
-  jne .pending
-  mov edi, ebx
+  test dword [r13+R_FLAGS], RF_CLOSE
+  jz .noclose
+  or dword [r14+C_FLAGS], F_CLOSE_AFTER
+.noclose:
   lea rsi, [arena]
   mov eax, [r13+R_START]
   add rsi, rax
   mov edx, [r13+R_LEN]
-  mov r10d, MSG_NOSIGNAL
-  test dword [r13+R_FLAGS], RF_CLOSE
-  jz .sflags
-  ; the connection closes right after this send: hold the data back (MSG_MORE) so close()
-  ; puts the FIN on the same segment. The client then always sees data and FIN together,
-  ; closes second, and keeps no TIME_WAIT on its side (it would pin one of its ports for 60 s).
-  mov r10d, MSG_NOSIGNAL | MSG_MORE
-.sflags:
-  xor r8d, r8d
-  xor r9d, r9d
-  SYSCALL SYS_sendto
-  cmp rax, -EAGAIN
-  je .zero
-  test rax, rax
-  js .close
-  jmp .chk
-.zero:
-  xor eax, eax
-.chk:
-  cmp eax, [r13+R_LEN]
+  mov edi, ebx
+  test dword [r14+C_FLAGS], F_SENDING
+  jnz .append
+  cmp dword [r14+C_OUTLEN], 0
+  jne .append
+  call queue_send
+  jmp .rl
+.append:
+  call append_out
+  jmp .rl
+.writable:                    ; connections whose socket drained since the last flush
+  xor r12d, r12d
+.wl:
+  cmp r12d, [wcount]
+  jae .submit
+  lea rax, [wlist]
+  mov ebx, [rax+r12*4]
+  inc r12d
+  CONN r14, rbx
+  test dword [r14+C_FLAGS], F_WRITABLE
+  jz .wl
+  and dword [r14+C_FLAGS], ~F_WRITABLE
+  test dword [r14+C_FLAGS], F_SENDING | F_POLLING
+  jnz .wl
+  mov eax, [r14+C_OUTLEN]
+  cmp eax, [r14+C_OUTOFF]
+  jbe .wl
+  mov edi, ebx
+  call send_out
+  jmp .wl
+.submit:
+  mov dword [wcount], 0
+  mov r12d, 64                ; sends finish inside io_uring_enter; this is only a safety bound
+.sl:
+  xor esi, esi
+  call enter_all
+  call reap
+  cmp dword [sends_out], 0
   je .sent
-  mov edx, eax
-.pending:
-  mov edi, ebx
-  mov rsi, r13
-  call store_pending
-  test dword [r13+R_FLAGS], RF_CLOSE
-  jz .rl
-  or dword [r14+C_FLAGS], F_CLOSE_AFTER
-  jmp .rl
+  dec r12d
+  jnz .sl
+  inc dword [st_flushbound]   ; never expected: a send did not complete inside io_uring_enter
 .sent:
-  test dword [r13+R_FLAGS], RF_CLOSE
-  jz .rl
-.close:
-  mov edi, ebx
-  call close_conn
-  jmp .rl
-.done:
   mov qword [arena_used], 0
   mov dword [nrec], 0
   cmp dword [wal_frames], CKPT_MAIN_FRAMES
   jb .nockpt
   mov dword [wal_frames], 0
+  call now_us
+  mov rbx, rax
   mov rdi, [db]               ; nothing is writing now, so this checkpoint completes
   xor esi, esi                ; and the next commit starts the WAL from the beginning
   xor edx, edx                ; SQLITE_CHECKPOINT_PASSIVE
   xor ecx, ecx
   xor r8d, r8d
   call sqlite3_wal_checkpoint_v2
+  call now_us
+  sub rax, rbx
+  inc dword [st_ckpts]
+  cmp rax, [st_maxckpt]
+  jbe .nockpt
+  mov [st_maxckpt], rax
 .nockpt:
   pop r15
   pop r14
@@ -959,6 +1473,211 @@ flush:
   pop r12
   pop rbx
   ret
+
+; now_us -> rax = monotonic clock in microseconds
+now_us:
+  sub rsp, 8
+  mov edi, 1                  ; CLOCK_MONOTONIC
+  lea rsi, [st_ts]
+  call clock_gettime
+  mov rax, [st_ts]
+  imul rax, rax, 1000000
+  mov rcx, rax
+  mov rax, [st_ts+8]
+  xor edx, edx
+  mov r8d, 1000
+  div r8
+  add rax, rcx
+  add rsp, 8
+  ret
+
+; print_stats: one line on stderr if anything unexpected happened (counters are cumulative)
+print_stats:
+  push rbx
+  push r12
+  sub rsp, 8
+  ; completions the kernel had to drop because a completion queue overflowed
+  xor ecx, ecx
+  xor ebx, ebx
+.ov:
+  cmp ecx, [nrings]
+  jae .ovd
+  RING rdx, rcx
+  mov rax, [rdx+RG_CQOVF]
+  add ebx, [rax]
+  inc ecx
+  jmp .ov
+.ovd:
+  mov [st_cqover], ebx
+  mov eax, [st_dqfull]
+  or eax, [st_flushbound]
+  or eax, [st_recverr]
+  or eax, [st_nobufs]
+  or eax, ebx
+  jnz .print
+  cmp qword [st_maxpass], 50000
+  jb .reset
+.print:
+  lea rdi, [statbuf]
+  W_LIT 'stats: recv errors '
+  mov eax, [st_recverr]
+  call w_u64
+  W_LIT ' (last '
+  mov eax, [st_lasterr]
+  neg eax
+  call w_u64
+  W_LIT '), no buffer '
+  mov eax, [st_nobufs]
+  call w_u64
+  W_LIT ', cq overflow '
+  mov eax, [st_cqover]
+  call w_u64
+  W_LIT ', dq full '
+  mov eax, [st_dqfull]
+  call w_u64
+  W_LIT ', flush bound '
+  mov eax, [st_flushbound]
+  call w_u64
+  W_LIT ', connections '
+  mov eax, [nconn]
+  call w_u64
+  W_LIT ', rings '
+  mov eax, [nrings]
+  call w_u64
+  W_LIT ', accept moves '
+  mov eax, [st_switch]
+  call w_u64
+  W_LIT ' (table full '
+  mov eax, [st_enfile]
+  call w_u64
+  W_LIT ')' 
+  W_LIT ', longest pass us '
+  mov rax, [st_maxpass]
+  call w_u64
+  W_LIT ', longest checkpoint us '
+  mov rax, [st_maxckpt]
+  call w_u64
+  W_LIT ', checkpoints '
+  mov eax, [st_ckpts]
+  call w_u64
+  mov byte [rdi], 10
+  inc rdi
+  lea rsi, [statbuf]
+  mov rdx, rdi
+  sub rdx, rsi
+  mov edi, 2
+  SYSCALL SYS_write
+.reset:
+  xor eax, eax
+  mov [st_maxpass], rax
+  mov [st_maxckpt], rax
+  mov [st_ckpts], eax
+.ret:
+  add rsp, 8
+  pop r12
+  pop rbx
+  ret
+
+; ---------------------------------------------------------------------------
+; event loop
+
+event_loop:
+  push rbp
+  mov rbp, rsp
+  push rbx
+  push r12
+.pass:
+  call now_us
+  mov [st_t0], rax
+  xor esi, esi
+  cmp dword [nrings], 1
+  jbe .enter
+  mov rcx, rax
+  sub rcx, [last_all]
+  cmp rcx, 1000
+  jb .enter
+  mov [last_all], rax
+  mov esi, 1                  ; every ring, once a millisecond
+.enter:
+  call enter_all              ; submit queued sqes; post completions waiting in the kernel
+  xor edi, edi
+  call time
+  mov [now], rax
+  cmp rax, [st_next]
+  jb .ev0
+  add rax, 10
+  mov [st_next], rax
+  call print_stats
+.ev0:
+  xor r12d, r12d              ; events handled in this pass
+.ev:
+  cmp r12d, PASS_MAX          ; a long pass delays every response in it: flush now and then
+  jae .end
+  call next_event
+  jc .end
+  inc r12d
+  call dispatch
+  jmp .ev
+.end:
+  cmp dword [nrec], 0
+  jne .flush
+  cmp dword [in_txn], 0
+  jne .flush
+  cmp dword [wcount], 0
+  je .noflush
+.flush:
+  call flush
+.noflush:
+  ; more to do right away? (completions set aside, or already posted on a ring)
+  mov eax, [dq_head]
+  cmp eax, [dq_tail]
+  jne .pass
+  xor ebx, ebx
+.cq:
+  cmp ebx, [nrings]
+  jae .wait
+  RING rdi, rbx
+  inc ebx
+  mov rax, [rdi+RG_CQHEAD]
+  mov eax, [rax]
+  mov rcx, [rdi+RG_CQTAIL]
+  cmp eax, [rcx]
+  jne .pass
+  jmp .cq
+.wait:
+  call now_us
+  sub rax, [st_t0]
+  cmp rax, [st_maxpass]
+  jbe .wt
+  mov [st_maxpass], rax
+.wt:
+  test r12d, r12d
+  jz .idle
+  ; busy: let a batch build up (bigger group commits, fewer trips into the kernel)
+  mov esi, BATCH_N
+  lea rdx, [ts_batch]
+  call ring_wait
+  jmp .pass
+.idle:
+  ; nothing happened: sleep, unless a ring still has work for the kernel
+  xor ebx, ebx
+.chk:
+  cmp ebx, [nrings]
+  jae .sleep
+  RING rdi, rbx
+  inc ebx
+  call ring_needs_enter
+  jnz .pass
+  jmp .chk
+.sleep:
+  mov esi, 1
+  xor edx, edx
+  cmp dword [nrings], 1
+  jbe .forever
+  lea rdx, [ts_idle]
+.forever:
+  call ring_wait
+  jmp .pass
 
 ; emit(ecx = status index, rdx = end of the body in bodybuf): queue one response
 emit:
@@ -983,6 +1702,10 @@ emit:
   test dword [cur_flags], RF_CLOSE
   jz .ka
   W_LIT `\r\nConnection: close`
+  mov eax, [cur_fd]
+  shl rax, CONN_SHIFT
+  lea rsi, [conns]
+  or dword [rsi+rax+C_FLAGS], F_CLOSING
 .ka:
   W_LIT `\r\n\r\n`
   mov rsi, r12
@@ -1019,7 +1742,12 @@ emit:
   mov [r9+R_FD], r8d
   mov [r9+R_START], edx
   mov [r9+R_LEN], ecx
-  mov dword [r9+R_FLAGS], 0
+  mov r10d, r8d
+  shl r10, CONN_SHIFT
+  lea r11, [conns]
+  movzx r10d, word [r11+r10+C_GEN]
+  shl r10d, 16                ; the connection's generation: a reused slot gets nothing of this
+  mov [r9+R_FLAGS], r10d
   inc dword [nrec]
 .flags:
   mov eax, [cur_flags]
@@ -1046,7 +1774,7 @@ ci_eq:
 .ret:
   ret
 
-; process_data(edi = fd, esi = bytes in scratch): handle every complete request
+; process_data(edi = connection id, rsi = data, edx = length): handle every complete request
 process_data:
   push rbp
   mov rbp, rsp
@@ -1058,8 +1786,8 @@ process_data:
   sub rsp, 8
   mov ebx, edi
   mov [cur_fd], edi
-  lea r12, [scratch]          ; r12 = start of the next request
-  lea r13, [r12 + rsi]        ; r13 = end of data
+  mov r12, rsi                ; r12 = start of the next request
+  lea r13, [rsi + rdx]        ; r13 = end of data
 .next:
   cmp r12, r13
   jae .ret
@@ -1076,13 +1804,7 @@ process_data:
 .found:
   lea r14, [rdi+4]            ; r14 = body start
   lea r15, [rdi+2]            ; r15 = end of the last header line (incl. CRLF)
-  CONN rax, rbx
-  xor ecx, ecx
-  test dword [rax+C_FLAGS], F_NOKA
-  jz .ka_ok
-  mov ecx, RF_CLOSE
-.ka_ok:
-  mov [cur_flags], ecx
+  mov dword [cur_flags], 0
   xor eax, eax
   mov [req_blen], rax
   mov [req_auth], rax
@@ -1262,6 +1984,7 @@ process_data:
   mov [req_body], r14
   push rax
   push rax
+  call txn_begin              ; every request of the pass shares one transaction (one set of locks)
   call route
   pop rax
   pop rax
@@ -1605,10 +2328,10 @@ auth_check:
   jc .invalid
   test eax, eax
   jz .invalid
-  ; exp (optional): a number in the future
+  ; exp (required): a number in the future
   mov rsi, [PL_EXP]
   test rsi, rsi
-  jz .sub
+  jz .invalid
   movzx eax, byte [rsi]
   cmp al, '-'
   je .invalid
@@ -1742,37 +2465,223 @@ write_post:
   pop r14
   ret
 
+; col_jstr(rdi = statement, esi = column, rdx = out) -> rax = end of the JSON string written
+col_jstr:
+  push rbx
+  push r12
+  push r13
+  push r14
+  sub rsp, 8
+  mov rbx, rdi
+  mov r12d, esi
+  mov r13, rdx
+  call sqlite3_column_text
+  mov r14, rax
+  mov rdi, rbx
+  mov esi, r12d
+  call sqlite3_column_bytes
+  mov edx, eax
+  mov rsi, r14
+  mov rdi, r13
+  call w_jstr
+  mov rax, rdi
+  add rsp, 8
+  pop r14
+  pop r13
+  pop r12
+  pop rbx
+  ret
+
+; count_likes(rdi = post id) -> rax = like count, or -1 on an error
+count_likes:
+  push rbx
+  push r12
+  sub rsp, 8
+  mov rdx, rdi
+  mov r12, [st_cnt]
+  mov rdi, r12
+  mov esi, 1
+  call sqlite3_bind_int64
+  mov rdi, r12
+  call sqlite3_step
+  mov rbx, -1
+  cmp eax, SQLITE_ROW
+  jne .reset
+  mov rdi, r12
+  xor esi, esi
+  call sqlite3_column_int64
+  mov rbx, rax
+.reset:
+  mov rdi, r12
+  call sqlite3_reset
+  mov rax, rbx
+  add rsp, 8
+  pop r12
+  pop rbx
+  ret
+
+; GET /feed. The 20 newest posts come from one index scan joined to users. Their like counts
+; come from one range scan of likes_post_id_idx over [lowest id, highest id] (the newest posts
+; have nearly consecutive ids), counted here, instead of one count(*) lookup per post.
 h_feed:
   push rbx
   push r12
   push r13
+  push r14
+  push r15
   mov r12, [st_feed]
-  lea rdi, [bodybuf]
-  W_LIT '{"posts":['
-  mov rbx, rdi
-  xor r13d, r13d
+  lea rbx, [fbuf]             ; write position
+  xor r13d, r13d              ; posts so far
 .row:
   mov rdi, r12
   call sqlite3_step
   cmp eax, SQLITE_ROW
-  jne .end
+  jne .rows_done
+  cmp r13d, 32
+  jae .row
+  lea rax, [fbuf]
+  mov rcx, rbx
+  sub rcx, rax
+  lea rdx, [foff]
+  mov [rdx+r13*4], ecx
+  mov rdi, r12
+  xor esi, esi
+  call sqlite3_column_int64
+  lea rdx, [fid]
+  mov [rdx+r13*8], rax
+  mov rdi, rbx
+  W_LIT '{"id":'
+  call w_u64
+  W_LIT ',"body":'
+  mov rdx, rdi
+  mov rdi, r12
+  mov esi, 1
+  call col_jstr
+  mov rdi, rax
+  W_LIT ',"created_at":'
+  mov rdx, rdi
+  mov rdi, r12
+  mov esi, 2
+  call col_jstr
+  mov rdi, rax
+  W_LIT ',"author":'
+  mov rdx, rdi
+  mov rdi, r12
+  mov esi, 3
+  call col_jstr
+  mov rbx, rax
+  lea rax, [fbuf]
+  mov rcx, rbx
+  sub rcx, rax
+  lea rdx, [fend]
+  mov [rdx+r13*4], ecx
+  inc r13d
+  jmp .row
+.rows_done:
+  mov r14d, eax
+  mov rdi, r12
+  call sqlite3_reset
+  cmp r14d, SQLITE_DONE
+  jne .err
+  ; lowest and highest id
+  mov dword [fslow], 1
   test r13d, r13d
+  jz .assemble
+  lea rdx, [fid]
+  mov r14, [rdx]              ; min
+  mov r15, r14                ; max
+  xor ecx, ecx
+.mm:
+  mov rax, [rdx+rcx*8]
+  cmp rax, r14
+  cmovb r14, rax
+  cmp rax, r15
+  cmova r15, rax
+  inc ecx
+  cmp ecx, r13d
+  jb .mm
+  mov rax, r15
+  sub rax, r14
+  cmp rax, FEED_WIN
+  jae .assemble               ; ids too far apart: count each post on its own
+  lea rdi, [fcnt]
+  lea ecx, [eax+1]
+  xor eax, eax
+  rep stosd
+  mov r12, [st_lrange]
+  mov rdi, r12
+  mov esi, 1
+  mov rdx, r14
+  call sqlite3_bind_int64
+  mov rdi, r12
+  mov esi, 2
+  mov rdx, r15
+  call sqlite3_bind_int64
+.like:
+  mov rdi, r12
+  call sqlite3_step
+  cmp eax, SQLITE_ROW
+  jne .likes_done
+  mov rdi, r12
+  xor esi, esi
+  call sqlite3_column_int64
+  sub rax, r14
+  cmp rax, FEED_WIN
+  jae .like
+  lea rdx, [fcnt]
+  inc dword [rdx+rax*4]
+  jmp .like
+.likes_done:
+  mov ebx, eax
+  mov rdi, r12
+  call sqlite3_reset
+  cmp ebx, SQLITE_DONE
+  jne .err
+  mov dword [fslow], 0
+.assemble:
+  lea rdi, [bodybuf]
+  W_LIT '{"posts":['
+  mov rbx, rdi
+  xor r12d, r12d
+.post:
+  cmp r12d, r13d
+  jae .close
+  test r12d, r12d
   jz .first
   mov byte [rbx], ','
   inc rbx
 .first:
-  inc r13d
-  mov rdi, r12
-  mov rsi, rbx
-  call write_post
-  mov rbx, rax
-  jmp .row
-.end:
-  mov r13d, eax
-  mov rdi, r12
-  call sqlite3_reset
-  cmp r13d, SQLITE_DONE
-  jne .err
+  lea rdx, [foff]
+  mov esi, [rdx+r12*4]
+  lea rdx, [fend]
+  mov ecx, [rdx+r12*4]
+  sub ecx, esi
+  lea rax, [fbuf]
+  add rsi, rax
+  mov rdi, rbx
+  rep movsb
+  mov rbx, rdi
+  lea rdx, [fid]
+  mov rdi, [rdx+r12*8]
+  cmp dword [fslow], 0
+  jne .slow
+  sub rdi, r14
+  lea rdx, [fcnt]
+  mov eax, [rdx+rdi*4]
+  jmp .count
+.slow:
+  call count_likes
+  test rax, rax
+  js .err
+.count:
+  mov rdi, rbx
+  W_LIT ',"like_count":'
+  call w_u64
+  mov byte [rdi], '}'
+  lea rbx, [rdi+1]
+  inc r12d
+  jmp .post
+.close:
   mov rdi, rbx
   W_LIT ']}'
   mov rdx, rdi
@@ -1782,6 +2691,8 @@ h_feed:
 .err:
   REPLY ST_500, '{"error":"internal server error"}'
 .ret:
+  pop r15
+  pop r14
   pop r13
   pop r12
   pop rbx

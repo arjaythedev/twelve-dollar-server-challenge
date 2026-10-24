@@ -11,7 +11,8 @@ import java.sql.Connection
   * the life of the process, which is what lets it keep its prepared statements.
   */
 final class ConnectionPool private (connections: Queue[IO, Connection]):
-  val borrow: Resource[IO, Connection] = Resource.make(connections.take)(connections.offer)
+  val borrow: Resource[IO, Connection] =
+    Resource.makeFull[IO, Connection](poll => poll(connections.take))(connections.offer)
 
 object ConnectionPool:
   def apply(size: Int, open: IO[Connection]): Resource[IO, ConnectionPool] =

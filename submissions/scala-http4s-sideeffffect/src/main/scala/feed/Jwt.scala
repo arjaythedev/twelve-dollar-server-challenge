@@ -42,7 +42,7 @@ final class Jwt(secret: String):
 
   /** The payload of a well-formed, correctly signed, unexpired HS256 token. */
   private def claims(token: String, nowSeconds: Long): Option[Json] =
-    token.split('.') match
+    token.split("\\.", -1) match
       case Array(header, payload, signature) =>
         for
           headerJson <- decodeJson(header)

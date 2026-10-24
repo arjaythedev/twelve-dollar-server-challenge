@@ -1,6 +1,7 @@
 package feed
 
 import cats.data.Kleisli
+import cats.effect.std.Console
 import cats.effect.{IO, Resource}
 import doobie.*
 import doobie.free.KleisliInterpreter
@@ -26,8 +27,8 @@ object Database:
   def resource(path: String): Resource[IO, Database] =
     val readers = math.max(2, Runtime.getRuntime.availableProcessors)
     for
-      reader <- ConnectionPool(readers, open(path)).map(onComputePool)
-      writer <- ConnectionPool(1, open(path)).map(onComputePool)
+      reader <- ConnectionPool(readers, open(path).map(StatementCachingConnection(_))).map(onComputePool)
+      writer <- ConnectionPool(1, open(path).map(StatementCachingConnection(_))).map(onComputePool)
       _ <- checkpointer(path)
     yield Database(reader, writer)
 
@@ -37,18 +38,21 @@ object Database:
     // WAL with synchronous=NORMAL is the weakest durability rule 6 allows; a 201 still means the row is committed.
     p.setProperty("journal_mode", "WAL")
     p.setProperty("synchronous", "NORMAL")
-    p.setProperty("busy_timeout", "5000")
+    // With WAL, one writer and PASSIVE checkpoints nothing should wait for a lock; if something ever does, it holds
+    // the only worker thread, so give up after a second rather than five.
+    p.setProperty("busy_timeout", "1000")
     p.setProperty("cache_size", "-16384") // 16 MiB of page cache per connection, on top of mmap
     p.setProperty("mmap_size", "1073741824")
     p.setProperty("temp_store", "MEMORY")
-    // No checkpoint inside a request: the background checkpointer does them (see below).
-    p.setProperty("wal_autocheckpoint", "0")
+    // Checkpoints run in the background (see below). SQLite's own, inside a request, only as a backstop: at 10,000
+    // pages (~40 MB of WAL) instead of 1,000, in case the background checkpointer falls behind or fails.
+    p.setProperty("wal_autocheckpoint", "10000")
     // Otherwise sqlite-jdbc runs `SELECT last_insert_rowid()` after every INSERT, for getGeneratedKeys.
     p.setProperty("jdbc.get_generated_keys", "false")
     p
 
   private def open(path: String): IO[Connection] =
-    IO.blocking(StatementCachingConnection(JDBC.createConnection(s"jdbc:sqlite:$path", properties)))
+    IO.blocking(JDBC.createConnection(s"jdbc:sqlite:$path", properties))
 
   /** doobie runs every JDBC call as `blocking`, because a JDBC call usually waits on a network round trip. SQLite runs
     * in-process on data that is in the page cache (or `mmap`), so its calls are short CPU work: they run as plain
@@ -66,7 +70,8 @@ object Database:
     * happens inside whichever write crosses 1,000 WAL pages, and on one vCPU its two fsyncs stall every request. Here a
     * background fiber runs a PASSIVE checkpoint every second, on its own connection, with doobie's default interpreter:
     * every call is `blocking`, so the fsyncs wait on a blocking thread. PASSIVE never waits for readers or the writer;
-    * once it has copied everything, the next write starts the WAL from the beginning again.
+    * once it has copied everything, the next write starts the WAL from the beginning again. A failure is reported and
+    * the next second tries again; the 10,000-page autocheckpoint above is the backstop.
     */
   private def checkpointer(path: String): Resource[IO, Unit] =
     val checkpoint = sql"PRAGMA wal_checkpoint(PASSIVE)".query[(Int, Int, Int)].unique
@@ -78,5 +83,11 @@ object Database:
         KleisliInterpreter[IO](LogHandler.noop[IO]).ConnectionInterpreter,
         Strategy.void
       )
-      _ <- Stream.fixedDelay[IO](1.second).evalMap(_ => checkpoint.transact(xa).attempt).compile.drain.background
+      report = (e: Throwable) => Console[IO].errorln(s"checkpoint failed: $e")
+      _ <- Stream
+        .fixedDelay[IO](1.second)
+        .evalMap(_ => checkpoint.transact(xa).void.handleErrorWith(report))
+        .compile
+        .drain
+        .background
     yield ()

@@ -74,6 +74,16 @@ would make direct mode viable). The brief was Ember; it is the obvious next expe
   it fits. A bigger heap would starve the page cache; behind Nginx the live set is small, and the extra heap only
   makes young collections rarer.
 
+## Robustness (from an independent code review)
+
+| Finding | Fix |
+|---|---|
+| sqlite-jdbc finalizes a statement itself after most errors (I/O, disk full) without marking it closed; the statement cache would have kept handing out the dead statement, so one transient error on the single write connection broke every later write | `ReusablePreparedStatement.close()` notices (clearing the parameters of a finalized statement throws), and the connection prepares the SQL again next time |
+| The checkpointer swallowed its errors, ran through the statement cache, and `wal_autocheckpoint=0` left no backstop: a failing checkpointer would have let the WAL grow without bound | Failures are reported to stderr and retried every second, on a plain connection; SQLite's own autocheckpoint stays on as a backstop at 10,000 pages (~40 MB) instead of 1,000 |
+| `busy_timeout=5000` on the only worker thread | 1,000 ms: nothing should wait for a lock with WAL, one writer and PASSIVE checkpoints, but if something ever does, it stalls every request |
+| Waiting for a pooled connection couldn't be cancelled | `Resource.makeFull` with `poll` around the queue's `take` |
+| `token.split('.')` drops trailing empty parts, so a token with trailing dots was accepted | `split("\\.", -1)`: exactly three parts, or 401 |
+
 ## Considered and not adopted
 
 | Idea | Why not |

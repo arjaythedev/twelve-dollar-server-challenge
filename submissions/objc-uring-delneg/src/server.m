@@ -3,6 +3,7 @@
 // submitted after COMMIT.
 #include "server.h"
 #include <errno.h>
+#include <poll.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -14,7 +15,8 @@
 #define POOL_CAP 16384u        // pooled output buffer size
 #define POOL_MAX 1024u
 
-enum { UD_ACCEPT = 1, UD_RECV, UD_SEND, UD_CLOSE };
+enum { UD_ACCEPT = 1, UD_RECV, UD_SEND, UD_CLOSE, UD_POLL };
+#define MAX_RINGS 16
 #define UD(t, slot, gen) ((uint64_t)(t) << 56 | (uint64_t)((gen) & 0xFFFFFFu) << 32 | (uint64_t)(slot))
 #define UD_T(u) ((uint32_t)((u) >> 56))
 #define UD_GEN(u) ((uint32_t)(((u) >> 32) & 0xFFFFFFu))
@@ -123,11 +125,19 @@ static const char *status_line(int st, uint32_t *len) {
 }
 
 // ---------------------------------------------------------------- worker
-@implementation TDWorker {
+// One io_uring per fixed-file table. All rings are driven by this one thread:
+// ring 0 waits, and holds a multishot poll on every other active ring's fd.
+typedef struct {
     struct io_uring ring;
     struct io_uring_buf_ring *br;
     char *bufs;
-    uint32_t brMask;
+    uint32_t brMask, live;
+    bool acceptArmed, full, active, pollArmed;
+} TDRingState;
+
+@implementation TDWorker {
+    TDRingState R[MAX_RINGS];
+    int nrings;
     char *slab;                 // TDConn instances
     size_t stride;
     Class connClass;
@@ -135,7 +145,6 @@ static const char *status_line(int st, uint32_t *len) {
     int listenFd;
     TDAuth *auth;
     int64_t started, now;
-    bool acceptArmed, acceptBlocked;
     // batch
     TDReq *reqs;
     uint32_t nreq, reqCap;
@@ -149,9 +158,12 @@ static const char *status_line(int st, uint32_t *len) {
     SEL handleSel;
 }
 
+// A connection id is ring * slots + fixed-file slot.
 TD_INLINE TDConn *conn_at(TDWorker *w, uint32_t slot) {
     return (TDConn *)(void *)(w->slab + (size_t)slot * w->stride);
 }
+TD_INLINE struct io_uring *ring_of(TDWorker *w, uint32_t cid) { return &w->R[cid / w->slots].ring; }
+TD_INLINE int fslot(TDWorker *w, uint32_t cid) { return (int)(cid % w->slots); }
 
 static struct io_uring_sqe *sqe_get(struct io_uring *r) {
     struct io_uring_sqe *s = io_uring_get_sqe(r);
@@ -168,14 +180,15 @@ static struct io_uring_sqe *sqe_get(struct io_uring *r) {
     started = cfg->started;
     slots = cfg->slots;
     listenFd = cfg->listenFd;
+    nrings = cfg->rings < 1 ? 1 : cfg->rings > MAX_RINGS ? MAX_RINGS : cfg->rings;
     connClass = objc_getClass("TDConn");
     stride = (class_getInstanceSize(connClass) + 15) & ~(size_t)15;
-    slab = mmap(NULL, stride * slots, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    slab = mmap(NULL, stride * slots * (size_t)nrings, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
     if (slab == MAP_FAILED) { perror("mmap slab"); exit(1); }
     reqCap = 1024;
     reqs = malloc(sizeof(TDReq) * reqCap);
-    dirty = malloc(sizeof(uint32_t) * slots);
-    rearm = malloc(sizeof(uint32_t) * slots);
+    dirty = malloc(sizeof(uint32_t) * slots * (size_t)nrings);
+    rearm = malloc(sizeof(uint32_t) * slots * (size_t)nrings);
     pool = malloc(sizeof(char *) * POOL_MAX);
     handleSel = sel_registerName("handle:worker:body:");
     const char *names[R_COUNT] = {
@@ -190,48 +203,61 @@ static struct io_uring_sqe *sqe_get(struct io_uring *r) {
     return self;
 }
 
-- (void)setupRing TD_DIRECT {
+- (void)setupRing:(int)k TD_DIRECT {
+    TDRingState *rs = &R[k];
     struct io_uring_params p;
     memset(&p, 0, sizeof p);
-    p.flags = IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN | IORING_SETUP_COOP_TASKRUN |
-              IORING_SETUP_SUBMIT_ALL | IORING_SETUP_CQSIZE;
+    // Ring 0 is the one we wait on: completions run as deferred task work in
+    // batches. The other rings post completions directly so that ring 0's poll
+    // on their fds sees them.
+    p.flags = IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_COOP_TASKRUN | IORING_SETUP_SUBMIT_ALL | IORING_SETUP_CQSIZE;
+    if (k == 0) p.flags |= IORING_SETUP_DEFER_TASKRUN;
     p.cq_entries = 16384;
-    int ret = io_uring_queue_init_params(4096, &ring, &p);
+    int ret = io_uring_queue_init_params(4096, &rs->ring, &p);
     if (ret < 0) {
         memset(&p, 0, sizeof p);
         p.flags = IORING_SETUP_CQSIZE;
         p.cq_entries = 16384;
-        ret = io_uring_queue_init_params(4096, &ring, &p);
+        ret = io_uring_queue_init_params(4096, &rs->ring, &p);
     }
     if (ret < 0) { fprintf(stderr, "io_uring_queue_init: %s\n", strerror(-ret)); exit(1); }
-    ret = io_uring_register_files_sparse(&ring, slots);
+    ret = io_uring_register_files_sparse(&rs->ring, slots);
     if (ret < 0) { fprintf(stderr, "register_files_sparse(%u): %s\n", slots, strerror(-ret)); exit(1); }
     int err = 0;
-    br = io_uring_setup_buf_ring(&ring, BUF_COUNT, BUF_GROUP, 0, &err);
-    if (!br) { fprintf(stderr, "setup_buf_ring: %s\n", strerror(-err)); exit(1); }
-    bufs = mmap(NULL, (size_t)BUF_SIZE * BUF_COUNT, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (bufs == MAP_FAILED) { perror("mmap bufs"); exit(1); }
-    brMask = io_uring_buf_ring_mask(BUF_COUNT);
+    rs->br = io_uring_setup_buf_ring(&rs->ring, BUF_COUNT, BUF_GROUP, 0, &err);
+    if (!rs->br) { fprintf(stderr, "setup_buf_ring: %s\n", strerror(-err)); exit(1); }
+    rs->bufs = mmap(NULL, (size_t)BUF_SIZE * BUF_COUNT, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (rs->bufs == MAP_FAILED) { perror("mmap bufs"); exit(1); }
+    rs->brMask = io_uring_buf_ring_mask(BUF_COUNT);
     for (uint32_t i = 0; i < BUF_COUNT; i++)
-        io_uring_buf_ring_add(br, bufs + (size_t)i * BUF_SIZE, BUF_SIZE, (unsigned short)i, brMask, (int)i);
-    io_uring_buf_ring_advance(br, BUF_COUNT);
+        io_uring_buf_ring_add(rs->br, rs->bufs + (size_t)i * BUF_SIZE, BUF_SIZE, (unsigned short)i, rs->brMask, (int)i);
+    io_uring_buf_ring_advance(rs->br, BUF_COUNT);
 }
 
-TD_INLINE void buf_recycle(TDWorker *w, uint32_t bid) {
-    io_uring_buf_ring_add(w->br, w->bufs + (size_t)bid * BUF_SIZE, BUF_SIZE, (unsigned short)bid, w->brMask, 0);
-    io_uring_buf_ring_advance(w->br, 1);
+TD_INLINE void buf_recycle(TDRingState *rs, uint32_t bid) {
+    io_uring_buf_ring_add(rs->br, rs->bufs + (size_t)bid * BUF_SIZE, BUF_SIZE, (unsigned short)bid, rs->brMask, 0);
+    io_uring_buf_ring_advance(rs->br, 1);
 }
 
-- (void)armAccept TD_DIRECT {
-    struct io_uring_sqe *s = sqe_get(&ring);
+// Accept goes to one ring at a time, filling ring 0 first: below one table's
+// worth of connections only ring 0 is in use.
+- (void)armAccept:(int)k TD_DIRECT {
+    TDRingState *rs = &R[k];
+    struct io_uring_sqe *s = sqe_get(&rs->ring);
     io_uring_prep_multishot_accept_direct(s, listenFd, NULL, NULL, 0);
-    io_uring_sqe_set_data64(s, UD(UD_ACCEPT, 0, 0));
-    acceptArmed = true;
+    io_uring_sqe_set_data64(s, UD(UD_ACCEPT, k, 0));
+    rs->acceptArmed = true;
+    rs->active = true;
+}
+
+- (bool)acceptArmedAnywhere TD_DIRECT {
+    for (int k = 0; k < nrings; k++) if (R[k].acceptArmed) return true;
+    return false;
 }
 
 TD_INLINE void arm_recv(TDWorker *w, TDConn *c, uint32_t slot) {
-    struct io_uring_sqe *s = sqe_get(&w->ring);
-    io_uring_prep_recv_multishot(s, (int)slot, NULL, 0, 0);
+    struct io_uring_sqe *s = sqe_get(ring_of(w, slot));
+    io_uring_prep_recv_multishot(s, fslot(w, slot), NULL, 0, 0);
     s->flags |= IOSQE_FIXED_FILE | IOSQE_BUFFER_SELECT;
     s->buf_group = BUF_GROUP;
     io_uring_sqe_set_data64(s, UD(UD_RECV, slot, c->gen));
@@ -262,13 +288,13 @@ TD_INLINE void pool_give(TDWorker *w, TDBuf *b) {
     struct io_uring_sqe *s;
     if (c->recvArmed) {
         // wake the pending multishot recv so the socket is released now
-        s = sqe_get(&ring);
-        io_uring_prep_shutdown(s, (int)slot, SHUT_RDWR);
+        s = sqe_get(ring_of(self, slot));
+        io_uring_prep_shutdown(s, fslot(self, slot), SHUT_RDWR);
         s->flags |= IOSQE_FIXED_FILE | IOSQE_IO_HARDLINK | IOSQE_CQE_SKIP_SUCCESS;
         io_uring_sqe_set_data64(s, UD(UD_CLOSE, slot, 0xFFFFFF));
     }
-    s = sqe_get(&ring);
-    io_uring_prep_close_direct(s, slot);
+    s = sqe_get(ring_of(self, slot));
+    io_uring_prep_close_direct(s, (unsigned)fslot(self, slot));
     io_uring_sqe_set_data64(s, UD(UD_CLOSE, slot, c->gen));
 }
 
@@ -288,8 +314,8 @@ TD_INLINE void pool_give(TDWorker *w, TDBuf *b) {
     if (c->out.p && c->out.cap != POOL_CAP) pool_give(self, &c->out);
     c->wireOff = 0;
     c->sending = true;
-    struct io_uring_sqe *s = sqe_get(&ring);
-    io_uring_prep_send(s, (int)slot, c->wire.p, c->wire.len, MSG_NOSIGNAL);
+    struct io_uring_sqe *s = sqe_get(ring_of(self, slot));
+    io_uring_prep_send(s, fslot(self, slot), c->wire.p, c->wire.len, MSG_NOSIGNAL);
     s->flags |= IOSQE_FIXED_FILE;
     io_uring_sqe_set_data64(s, UD(UD_SEND, slot, c->gen));
 }
@@ -529,7 +555,7 @@ TD_INLINE void req_err(TDReq *r, int st, const char *msg) {
 }
 
 // ---------------------------------------------------------------- completions
-- (void)onCQE:(struct io_uring_cqe *)cqe TD_DIRECT {
+- (void)onCQE:(struct io_uring_cqe *)cqe ring:(int)k TD_DIRECT {
     uint64_t ud = cqe->user_data;
     int res = cqe->res;
     uint32_t flags = cqe->flags;
@@ -539,11 +565,12 @@ TD_INLINE void req_err(TDReq *r, int st, const char *msg) {
         TDConn *c = conn_at(self, slot);
         bool hasBuf = flags & IORING_CQE_F_BUFFER;
         uint32_t bid = flags >> IORING_CQE_BUFFER_SHIFT;
-        if (c->gen != UD_GEN(ud)) { if (hasBuf) buf_recycle(self, bid); break; }
+        TDRingState *rs = &R[k];
+        if (c->gen != UD_GEN(ud)) { if (hasBuf) buf_recycle(rs, bid); break; }
         if (!(flags & IORING_CQE_F_MORE)) c->recvArmed = false;
         if (res > 0) {
-            if (c->live) [self onData:c slot:slot data:bufs + (size_t)bid * BUF_SIZE length:(uint32_t)res];
-            buf_recycle(self, bid);
+            if (c->live) [self onData:c slot:slot data:rs->bufs + (size_t)bid * BUF_SIZE length:(uint32_t)res];
+            buf_recycle(rs, bid);
             if (!c->recvArmed && c->live) arm_recv(self, c, slot);
         } else if (res == -ENOBUFS) {
             if (c->live && !c->needRearm) { c->needRearm = true; rearm[nrearm++] = slot; }
@@ -558,8 +585,8 @@ TD_INLINE void req_err(TDReq *r, int st, const char *msg) {
         if (c->gen != UD_GEN(ud)) break;
         if (res > 0 && c->wireOff + (uint32_t)res < c->wire.len) {
             c->wireOff += (uint32_t)res;
-            struct io_uring_sqe *s = sqe_get(&ring);
-            io_uring_prep_send(s, (int)slot, c->wire.p + c->wireOff, c->wire.len - c->wireOff, MSG_NOSIGNAL);
+            struct io_uring_sqe *s = sqe_get(ring_of(self, slot));
+            io_uring_prep_send(s, fslot(self, slot), c->wire.p + c->wireOff, c->wire.len - c->wireOff, MSG_NOSIGNAL);
             s->flags |= IOSQE_FIXED_FILE;
             io_uring_sqe_set_data64(s, UD(UD_SEND, slot, c->gen));
             break;
@@ -578,44 +605,68 @@ TD_INLINE void req_err(TDReq *r, int st, const char *msg) {
         break;
     }
     case UD_ACCEPT: {
+        TDRingState *rs = &R[k];
         if (!(flags & IORING_CQE_F_MORE)) {
-            acceptArmed = false;
-            if (res == -ENFILE || res == -EMFILE) acceptBlocked = true;
+            rs->acceptArmed = false;
+            if (res == -ENFILE || res == -EMFILE) {
+                // this ring's table is full: move accept to the next ring with room
+                rs->full = true;
+                for (int j = 1; j <= nrings; j++) {
+                    int q = (k + j) % nrings;
+                    if (!R[q].full) { [self armAccept:q]; break; }
+                }
+            }
         }
         if (res >= 0) {
-            TDConn *c = conn_at(self, (uint32_t)res);
+            uint32_t cid = (uint32_t)k * slots + (uint32_t)res;
+            TDConn *c = conn_at(self, cid);
             uint32_t g = c->gen + 1;
             memset((char *)c, 0, stride);
             c->isa = connClass;
             c->gen = g & 0xFFFFFF;
             c->live = true;
-            arm_recv(self, c, (uint32_t)res);
+            rs->live++;
+            arm_recv(self, c, cid);
         }
         break;
     }
     case UD_CLOSE:
-        if (UD_GEN(ud) != 0xFFFFFF) acceptBlocked = false;
+        if (UD_GEN(ud) != 0xFFFFFF) {
+            TDRingState *rs = &R[k];
+            rs->live--;
+            rs->full = false;
+        }
+        break;
+    case UD_POLL:
+        if (!(flags & IORING_CQE_F_MORE)) R[slot].pollArmed = false;
         break;
     }
 }
 
+- (void)reap:(int)k TD_DIRECT {
+    struct io_uring *r = &R[k].ring;
+    unsigned head, n = 0;
+    struct io_uring_cqe *cqe;
+    io_uring_for_each_cqe(r, head, cqe) {
+        n++;
+        [self onCQE:cqe ring:k];
+    }
+    io_uring_cq_advance(r, n);
+}
+
 - (void)run {
-    [self setupRing];
-    [self armAccept];
+    for (int k = 0; k < nrings; k++) [self setupRing:k];
+    [self armAccept:0];
     for (;;) {
-        int ret = io_uring_submit_and_wait(&ring, 1);
+        for (int k = 1; k < nrings; k++)
+            if (R[k].active && io_uring_sq_ready(&R[k].ring)) io_uring_submit(&R[k].ring);
+        int ret = io_uring_submit_and_wait(&R[0].ring, 1);
         if (ret < 0 && ret != -EINTR && ret != -ETIME && ret != -EBUSY && ret != -EAGAIN) {
             fprintf(stderr, "io_uring_submit_and_wait: %s\n", strerror(-ret));
             exit(1);
         }
         now = time(NULL);
-        unsigned head, n = 0;
-        struct io_uring_cqe *cqe;
-        io_uring_for_each_cqe(&ring, head, cqe) {
-            n++;
-            [self onCQE:cqe];
-        }
-        io_uring_cq_advance(&ring, n);
+        for (int k = 0; k < nrings; k++) if (k == 0 || R[k].active) [self reap:k];
         if (nreq) [self flush];
         if (nrearm) {
             for (uint32_t i = 0; i < nrearm; i++) {
@@ -625,7 +676,16 @@ TD_INLINE void req_err(TDReq *r, int st, const char *msg) {
             }
             nrearm = 0;
         }
-        if (!acceptArmed && !acceptBlocked) [self armAccept];
+        if (![self acceptArmedAnywhere])
+            for (int k = 0; k < nrings; k++) if (!R[k].full) { [self armAccept:k]; break; }
+        for (int k = 1; k < nrings; k++) {
+            if (R[k].active && !R[k].pollArmed) {
+                struct io_uring_sqe *sq = sqe_get(&R[0].ring);
+                io_uring_prep_poll_multishot(sq, R[k].ring.ring_fd, POLLIN);
+                io_uring_sqe_set_data64(sq, UD(UD_POLL, k, 0));
+                R[k].pollArmed = true;
+            }
+        }
     }
 }
 @end

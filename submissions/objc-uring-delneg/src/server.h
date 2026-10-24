@@ -28,7 +28,7 @@ typedef struct {
     int64_t started;
     uint32_t slots;           // fixed-file slots per ring
     int listenFd;
-    int index;
+    int rings;
 } TDWorkerConfig;
 
 @interface TDWorker : TDObject {

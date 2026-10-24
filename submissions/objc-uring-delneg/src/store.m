@@ -1,5 +1,7 @@
 #include "store.h"
 
+int td_opt_ckpt = 1000;   // wal_autocheckpoint pages (--ckpt=N)
+
 #define POST_COLS "SELECT p.id, p.body, p.created_at, u.username, " \
     "(SELECT count(*) FROM likes l WHERE l.post_id = p.id) FROM posts p JOIN users u ON u.id = p.user_id "
 
@@ -41,6 +43,9 @@ static void exec(sqlite3 *db, const char *sql) {
     exec(db, "PRAGMA mmap_size=1073741824");
     exec(db, "PRAGMA cache_size=-32768");
     exec(db, "PRAGMA temp_store=MEMORY");
+    char ck[64];
+    snprintf(ck, sizeof ck, "PRAGMA wal_autocheckpoint=%d", td_opt_ckpt);
+    exec(db, ck);
     exec(db, "SELECT count(*) FROM sqlite_schema"); // takes the exclusive lock now
     sHealth = prep(db, "SELECT 1");
     sFeed = prep(db, POST_COLS "ORDER BY p.created_at DESC, p.id DESC LIMIT 20");

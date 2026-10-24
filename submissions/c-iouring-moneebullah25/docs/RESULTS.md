@@ -27,11 +27,11 @@ fresh copy of `seed/feed.db` for every run (`tools/bench_local.sh` does that).
 
 | What | Measured | Target in the exploration report |
 |---|---|---|
-| Correctness | 42/42 official, 148/148 own, unit + fuzz clean, ASAN/UBSAN clean | 42/42 |
-| CPU per request, batched (64 VUs, no think time, ~23k req/s) | **29.8-31.1 us** (user+sys, loopback) | <= 20 us on a Xeon 8260 for 350k; best entry 30 us |
-| CPU per request, 100k users at ~10k req/s (batches of 2-4) | **36-39 us** | |
-| CPU per request, 10k users at 1k req/s (one request per wake-up) | **60 us** | |
-| Server RSS | 95 MB idle (prefaulted pools), 117 MB at 100k connections | ~40 MB app |
+| Correctness | 42/42 official, 166/166 own (148 + 18 review regressions), unit + fuzz clean, ASAN/UBSAN clean | 42/42 |
+| CPU per request, batched (64 VUs, no think time, ~23-29k req/s) | **29.8-31.1 us** before, **26.9 us** after the review fixes (user+sys, loopback) | <= 20 us on a Xeon 8260 for 350k; best entry 30 us |
+| CPU per request, 100k users at ~10k req/s (batches of 2-4) | **36-39 us** before, **33.8 us** after | |
+| CPU per request, 10k users at 1k req/s (one request per wake-up) | **60 us** before, **59 us** after | |
+| Server RSS (after the review fixes, 72 MiB send pool) | 137 MB idle (prefaulted pools), 141 MB at 10k, 157 MB at 100k connections | ~40 MB app |
 | User-space state per connection | 48 B record; 22 B/conn amortized RSS growth 10k -> 100k | 64 B |
 | MemAvailable per loopback connection pair incl. generator | ~12-17 KB | 8.3 KB kernel per pair (exploration) |
 | Connections held locally | 100k (2 rings) and 200k (4 rings), see below | 300-400k on the box |
@@ -136,7 +136,29 @@ Write holds (WAL >= 8,192 frames): 2-5 per 90 s run at ~600 writes/s, longest
 suite's burst test (16 writers, 2,400 creates, `--hold-frames 300
 --ckpt-frames 100`) completes with p99 < 1 s and no errors.
 
-## 5. Build reproducibility
+## 5. Re-measurement after the review fixes (2026-10-24, same commands)
+
+The independent review (3 major, 9 minor findings) led to: a 72 KiB send
+buffer sized for the largest legal feed (pool 1,024 x 72 KiB instead of 2,048
+x 16 KiB), half-close handling, a zeroed `http_req` on every parse path,
+strict UTF-8/NUL body validation, `Date` and HTTP/1.0 keep-alive headers,
+stalled sends swept, partial buffers sized on demand, TCP keep-alive on the
+listener, a nice-10 checkpointer instead of `SCHED_IDLE`, and a 50 ms busy
+timeout. Re-measured with the release build of that tree:
+
+| Run | CPU us/req | RSS | notes |
+|---|---|---|---|
+| 64 VUs tight loop, 20 s | 26.9 | 137 MB | 29.3k req/s, mload p99 5.1 ms, probe p99 10.5 ms |
+| 10k users, 60 s | 59.4 (50.9 in the steady window) | 141 MB | mload p99 0.6 ms, probe p99 0.5 ms, longest iteration 24 ms |
+| 100k users, 90 s | 38.6 (33.8 in the steady window) | 157 MB | 39 checkpoints (avg 155 ms, max 1.9 s), 5 holds (max 509 ms), longest iteration 215 ms; probe p99 58 ms but max 8.6 s during a generator stall at 65-80 s, mload p99 10 s (generator-bound as before) |
+
+The 2-4 us drop in CPU per request between the two measurement sets is
+within the run-to-run spread seen earlier and is not attributed to any one
+change. Official suite 42/42 through `test/run.sh`, own suite 166 checks
+(148 + 18 review regressions) under ASAN and UBSAN, unit tests, 500k fuzz
+iterations with the new PARTIAL contract: all clean.
+
+## 6. Build reproducibility
 
 `fetch-deps.sh` verifies SQLite's zip against the SHA3-256 published on
 sqlite.org (`92281c86...8e30`) and liburing's tarball against its SHA-256

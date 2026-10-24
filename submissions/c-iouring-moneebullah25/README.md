@@ -21,7 +21,8 @@ the LTO release build (`make release`); `start.sh` runs
   process fds. Multishot accept hands over to bounded one-shot accepts near the
   end of a table so no accepted socket is lost to `-ENFILE`.
 - **Multishot receive from provided buffers**, 2 KiB each; an idle connection
-  owns no buffer and costs 48 bytes of user-space state. `ENOBUFS` victims are
+  owns no buffer and costs 48 bytes of user-space state. Responses go into a
+  pool of 1,024 x 72 KiB send buffers, sized for the largest legal feed. `ENOBUFS` victims are
   re-armed only after buffers return, bounded by how many returned.
 - **One batch per wake-up**: wait for 32 completions or 250 us, handle up to
   256 requests, run all reads in one deferred transaction, all writes in one
@@ -41,9 +42,10 @@ the LTO release build (`make release`); `start.sh` runs
 - **Memory guard**: pauses accepting below 192 MB `MemAvailable` (or cgroup
   headroom) and sheds idle keep-alives below 96 MB, so running out of memory
   becomes a failed probe instead of an OOM kill.
-- HTTP/1.1 keep-alive with pipelining, partial requests, `Expect:
-  100-continue`, 8 KiB / 16 KiB limits (413), 30 s timeout for incomplete
-  requests, idle connections never timed out.
+- HTTP/1.1 keep-alive with pipelining, partial requests, half-close after a
+  request, `Expect: 100-continue`, `Date` header, 8 KiB / 16 KiB limits (413),
+  30 s timeout for incomplete requests and unread responses, TCP keep-alive
+  probes for vanished peers, idle connections never timed out.
 
 `docs/DESIGN.md` explains each decision and the rule it respects.
 

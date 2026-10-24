@@ -9,7 +9,8 @@ on a 1 vCPU / 2 GB droplet. See RESULTS.md for the numbers.
 - The challenge suite `test/test.sh`: 42/42, with the ASAN/UBSAN build and the
   release build, started through the upstream `test/run.sh` (build.sh +
   start.sh).
-- `test/http_tests.py`: 148 checks, all passing under ASAN/UBSAN: exact bytes
+- `test/http_tests.py`: 166 checks (148 plus 18 regressions from the
+  independent review), all passing under ASAN and under UBSAN: exact bytes
   and key order, auth-before-id ordering, pipelining (including POST then GET
   on one connection), byte-by-byte and split requests, `Expect: 100-continue`,
   keep-alive reuse (3 s; 66 s with `--long`), 500 idle connections, malformed
@@ -26,6 +27,12 @@ on a 1 vCPU / 2 GB droplet. See RESULTS.md for the numbers.
   table served once slots free up, 2,400 creates through write holds and
   checkpoints with p99 < 1 s, and identical feeds from the range-scan and the
   reference query.
+- Regression checks from the independent review, in `test/http_tests.py`
+  ("regressions from the review"): feeds of 20 maximal posts (emoji, quotes,
+  control characters), 192 request+`shutdown(SHUT_WR)` clients all answered,
+  no spurious `100 Continue` on incomplete headers, invalid UTF-8 and NUL
+  bodies answered 400 (never a CHECK-constraint 500), HTTP/1.0 keep-alive
+  announced, `Date` header, query strings ignored for routing.
 - Unit tests (`make check`) for SHA-256 (FIPS vectors), HMAC (RFC 4231),
   base64url, JSON, JWT, HTTP; a 300k-iteration mutation fuzz pass over the
   three parsers under ASAN/UBSAN (`make fuzz`), no findings.
@@ -101,6 +108,25 @@ on a 1 vCPU / 2 GB droplet. See RESULTS.md for the numbers.
 - Tokens with `exp` in the past by less than clock skew are rejected (no
   leeway), as the SPEC reads.
 
+## Review findings deliberately left as they are
+
+- **Pipelined input beyond 24 KiB** (unprocessed bytes on one connection) is
+  closed without a 413. Only `max_head + max_body` of a connection's unread
+  input is buffered; a client that pipelines a hundred requests in one write
+  gets cut off at that point. k6 and curl never pipeline; answering 413 there
+  would need a response while another may be in flight.
+- **Send-pool exhaustion** by peers that stop reading is bounded by the 30 s
+  sweep (a stalled send now counts like an incomplete request) rather than a
+  per-send deadline, and parked connections wait rather than get an error.
+  Under `tcp_mem` pressure at 300k+ sockets this is still the one mechanism
+  that can slow every connection at once; untested here.
+- **Write holds at 5k writes/s** are unmeasured (local runs reached ~600
+  writes/s). The checkpointer now runs at nice 10 instead of `SCHED_IDLE` so a
+  saturated loop cannot starve it completely; a hold still gives up after
+  500 ms and the WAL keeps growing until the next successful hold.
+- **A 5xx on a failed `COMMIT`** after a 50 ms busy wait (was 2 s): the loop
+  never waits long; with PASSIVE checkpoints the write lock is never contended.
+
 ## Root-only steps on the benchmark box (not needed here, listed for completeness)
 
 Nothing in this entry needs root beyond what the harness already does:
@@ -109,9 +135,10 @@ Nothing in this entry needs root beyond what the harness already does:
 local load tests on a box of your own:
 
 ```
-# allow 400k local connections for the load generator (per shell)
-ulimit -n 1048576                      # only up to the hard limit; raise it in /etc/security/limits.conf
-# the server does not need a higher limit: it uses fixed-file tables sized by the hard limit
+# the load generator raises its own soft RLIMIT_NOFILE to the hard limit (1,048,576 on this
+# workstation, so no root was needed here); on a box whose hard limit is lower, raise it in
+# /etc/security/limits.conf. The server never needs a higher limit: its fixed-file tables are
+# sized from the hard limit it inherits.
 # optional: emulate the 2 GB box for the server process without root
 systemd-run --user --scope -p MemoryMax=2G -- env SQLITE_PATH=... ./bin/server
 ```

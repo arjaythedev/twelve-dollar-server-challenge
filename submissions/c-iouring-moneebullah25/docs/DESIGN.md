@@ -37,20 +37,29 @@ Accepted sockets never become process file descriptors, which is the only legal
 way past the limit without closing clients' connections (rule 11 forbids
 raising it for us).
 
-Ring 0 is where the thread blocks (`io_uring_submit_and_wait_timeout`). The
-other rings' fds are watched from ring 0 with multishot `POLL_ADD`; when one
-fires, that ring gets `io_uring_get_events` and its CQ is drained. All rings use
-`SINGLE_ISSUER | DEFER_TASKRUN | COOP_TASKRUN | SUBMIT_ALL`, with a fallback
-chain to plain flags on older kernels. Polling a `DEFER_TASKRUN` ring's fd was
-verified to work on this kernel (6.3+ has the lazy `poll_wq`); the poll must be
-re-armed whenever a CQE arrives without `IORING_CQE_F_MORE`, which happens.
+Ring 0 is where the thread blocks (`io_uring_submit_and_wait_timeout`); it
+uses `SINGLE_ISSUER | DEFER_TASKRUN | COOP_TASKRUN | SUBMIT_ALL`. The other
+rings' fds are watched from ring 0 with multishot `POLL_ADD`; when one fires,
+that ring gets `io_uring_get_events` and its CQ is drained. Those rings use
+`SINGLE_ISSUER | COOP_TASKRUN | SUBMIT_ALL` **without** `DEFER_TASKRUN`: a
+deferred ring posts its CQEs only when its own task work runs, and only a
+posted CQE wakes the poll (queued-but-deferred work does not), so a deferred
+secondary ring went silent after its first event in testing. With
+`COOP_TASKRUN` their work runs whenever the thread crosses the kernel boundary,
+including inside ring 0's wait. Both have a fallback chain to plainer flags on
+older kernels. The poll must be re-armed whenever a CQE arrives without
+`IORING_CQE_F_MORE`, which happens.
 
-**Accept.** One multishot accept (`IORING_FILE_INDEX_ALLOC`) is armed at a time,
-on the ring with the most free slots. When that ring is within 64 slots of
-full the accept is cancelled and re-armed elsewhere. `-ENFILE` (table full)
-terminates the multishot; it is re-armed when a close frees a slot. The listen
-backlog (4,096, the kernel default `somaxconn`) absorbs the gap, so clients wait
-rather than get refused.
+**Accept.** Exactly one ring accepts at a time, the one with the most free
+slots. While it has more than 4,096 free slots (slots/4 for smaller tables) it
+runs a multishot accept (`IORING_FILE_INDEX_ALLOC`). A multishot accept that
+finds the table full fails with `-ENFILE` *after* accepting the socket, which
+the kernel then drops, and it drains a deep backlog faster than a cancel can
+land, so for the last 4,096 slots the ring switches to one-shot accepts, at most
+64 in flight and never more than the free slots; tables of 1,024 slots or less
+use one-shots only. When the ring is full the next one takes over; when every
+table is full nothing is armed and the listen backlog (4,096, the kernel
+default `somaxconn`) holds clients until a close frees a slot.
 
 **Receive.** One multishot `RECV` per connection with `IOSQE_BUFFER_SELECT`
 from a pool of provided buffers per ring (2,048 x 2 KiB). An idle connection
@@ -82,21 +91,32 @@ activity, send chunk, parked receive buffer (id/offset/length), and a pointer
 to a heap copy that only exists while a request is incomplete. Generations tag
 every SQE so a completion for a slot that was closed and re-used is ignored.
 
-**Send buffers.** A bounded pool of 2,048 x 16 KiB chunks (32 MiB, prefaulted).
-A response is written straight into a chunk, the head is placed right before
-the body, and the chunk is returned on the send completion (short sends resend
-the remainder). When the pool is empty the connection parks with its input
-until a chunk frees up; nothing is dropped.
+**Send buffers.** A bounded pool of 1,024 x 72 KiB chunks (72 MiB, prefaulted);
+72 KiB holds the largest legal feed (20 posts of 500 characters that each
+escape to 6 bytes, plus the envelope), and the writers check the actual
+escaped length rather than a worst-case bound. A response is written straight
+into a chunk, the head (status, `Content-Type`, `Content-Length`, `Connection`
+when it is not the version's default, `Date` cached per second) is placed right
+before the body, and the chunk is returned on the send completion (short sends
+resend the remainder). When the pool is empty the connection parks with its
+input until a chunk frees up; nothing is dropped. A peer that stops reading
+pins its chunk only until the 30 s sweep closes it.
 
 **Pipelining and partial requests.** One request per connection per batch;
 remaining bytes stay parked until the send completes, then the connection is
-re-queued. Incomplete requests move into a per-connection heap buffer (24 KiB
-cap: 8 KiB head + 16 KiB body) so the shared receive buffer is not held. Headers
+re-queued. Incomplete requests move into a per-connection heap buffer (sized to
+the bytes held, growing to a 24 KiB cap: 8 KiB head + 16 KiB body) so the
+shared receive buffer is not held. A peer that half-closes right after its
+request (data and FIN in one batch) still gets its response, then the close. Headers
 over 8 KiB answer 413 and close; bodies over 16 KiB too. `Expect: 100-continue`
 gets its interim response. Connections that leave a request incomplete for 30 s
 are closed by a 10 s sweep; idle keep-alives are never timed out (the Nginx
 contract asks for 65 s minimum, and the direct k6 users idle up to 15 s plus
 latency).
+
+**Dead peers.** `SO_KEEPALIVE` with a 120 s idle / 30 s interval / 4 probes is
+set on the listener and inherited, so a peer that vanished without a FIN frees
+its slot after about four minutes instead of never.
 
 **Closing.** `shutdown(SHUT_RDWR)` first so the armed multishot receive
 terminates, then `close_direct` from its final completion. A send still in
@@ -166,7 +186,7 @@ the reference query runs. `--feed-reference` forces the reference query; the
 black-box suite checks both strategies produce identical feeds. Every value is
 read on the request that serves it (rule 5).
 
-**Checkpoints off the loop.** A second connection on a `SCHED_IDLE` thread runs
+**Checkpoints off the loop.** A second connection on a nice-10 thread runs
 `PASSIVE` checkpoints whenever the WAL (reported by the WAL hook after every
 commit) exceeds 4,000 frames not yet backfilled, so the loop never waits for an `fsync`. PASSIVE
 checkpoints alone never let the WAL restart under continuous writes (the Zig
@@ -198,8 +218,13 @@ decides 201 or 200.
   top-level string members we need and unescapes them, including surrogate
   pairs. Output escapes `"`, `\`, and control characters; non-ASCII passes
   through (allowed by the SPEC).
-- Body rules: trim ASCII whitespace, then count UTF-8 code points: empty is
-  "body is required", more than 500 is "body must be at most 500 characters".
+- Body rules: trim ASCII whitespace, then count UTF-8 code points exactly as
+  SQLite's `length()` would for well-formed text: empty is "body is required",
+  more than 500 is "body must be at most 500 characters". Invalid UTF-8 is
+  "malformed JSON body" (JSON is UTF-8) and a NUL is "body is required"
+  (SQLite's `length()` stops there), so the schema CHECK can never fail.
+- A query string is ignored for routing (`/feed?page=2` is the feed); a
+  post id with leading zeros (`007`) is the number 7, like `Number()`.
 
 ## What was deliberately not done
 

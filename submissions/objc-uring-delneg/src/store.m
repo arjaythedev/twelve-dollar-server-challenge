@@ -1,6 +1,6 @@
 #include "store.h"
 
-int td_opt_ckpt = 1000;   // wal_autocheckpoint pages (--ckpt=N)
+int td_opt_ckpt = 250;    // wal_autocheckpoint pages (--ckpt=N): smaller, more frequent checkpoint stalls
 long long td_opt_mmap = 0; // mmap_size bytes (--mmap=N); 0: page cache reads beat per-page mmap objects
 
 #define POST_COLS "SELECT p.id, p.body, p.created_at, u.username, " \

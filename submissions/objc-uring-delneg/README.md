@@ -36,9 +36,10 @@ Server in Docker capped at 1 CPU / 2 GB (`--cpuset-cpus=0`, host network), wrk w
 | Accept leaves a ring at a high-water mark | 140,000 held connections: 0 dropped (2 before) |
 | No SQLite mmap | +3.4% rps (7.85 → 7.60 µs/req on the corrected mix) |
 | Batching window: after a pass with 8+ requests, wait for up to 128 completions or 1 ms | −5.3% CPU per request at 42k req/s from 20k users (10.53 → 9.96 µs/req), p99 1.0 → 2.1 ms |
+| `wal_autocheckpoint` 1000 → 250 pages | DB on a real disk (fsync ~11 ms), 42k req/s: p99 46 → 27 ms (the in-loop checkpoint's stalls get shorter); 100 is fsync-bound, 4096+ much worse; CPU equal |
 
 Final: about 131k rps at 7.6 µs/req on the mix. Per route: `/health` 3.2 µs (kernel and loop floor), `GET /posts/:id` 4.0, like 5.9, create 12.1, `/feed` 12.6. For reference, Rust io_uring #82 built from its own scripts on the same harness: 115k rps, 8.7 µs/req (this entry before the mmap change: 127k, 7.9 µs/req).
 
-Did not help (reverted): `wal_autocheckpoint` 200/500 (noise) and 4096 (−4%); response header written into the body's headroom (+0.5%, noise); AVX2 scan in the JSON escaper (−2%: bodies are short); streaming feed rows without the row copy (noise); a 256 MB page cache (more CPU than 32 MB); extra SQLite `OMIT_*`/`UNTESTABLE` compile options (noise); PGO that also profiles the running server over loopback (noise).
+Did not help (reverted): bigger `wal_autocheckpoint` (4096: −4% CPU on tmpfs, double the p99 on disk); response header written into the body's headroom (+0.5%, noise); AVX2 scan in the JSON escaper (−2%: bodies are short); streaming feed rows without the row copy (noise); a 256 MB page cache (more CPU than 32 MB); extra SQLite `OMIT_*`/`UNTESTABLE` compile options (noise); PGO that also profiles the running server over loopback (noise).
 
 Memory: at 100,000 idle connections the cgroup holds 407 MB, of which 20 MB is the process (anon) and the rest kernel socket and io_uring memory (~3.9 KB per connection), so 2 GB holds more connections than the 8 × 65,535 slots.

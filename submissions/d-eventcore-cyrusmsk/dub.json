@@ -1,0 +1,26 @@
+{
+  "name": "feed-server-eventcore",
+  "targetType": "executable",
+  "targetPath": "bin",
+  "targetName": "server",
+  "description": "The $12 server challenge API on eventcore/epoll, in-tree SQLite and a hand-written JSON path",
+  "license": "MIT",
+  "dependencies": {
+    "eventcore": {
+      "version": "~>0.9.39",
+      "configuration": "epoll"
+    }
+  },
+  "sourcePaths": [
+    "source"
+  ],
+  "dflags": [
+    "-mcpu=native",
+    "-O3",
+    "-release",
+    "-boundscheck=off"
+  ],
+  "lflags": [
+    "sqlite_lib/sqlite3.o"
+  ]
+}

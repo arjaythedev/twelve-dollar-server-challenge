@@ -26,6 +26,9 @@ let inline serialized ([<InlineIfLambda>] f: unit -> 'T) : 'T =
     if singleThread then f () else lock gate f
 let mutable private db = 0n
 let mutable feed = 0n
+let mutable feedIds = 0n
+let mutable feedRange = 0n
+let mutable likeRange = 0n
 let mutable post = 0n
 let mutable insertPost = 0n
 let mutable insertLike = 0n
@@ -198,6 +201,12 @@ let start (background: bool) =
            FROM posts p JOIN users u ON u.id = p.user_id"
     feed <- prepare (postSelect + " ORDER BY p.created_at DESC, p.id DESC LIMIT 20")
     post <- prepare (postSelect + " WHERE p.id = ?1")
+    feedIds <- prepare "SELECT id FROM posts ORDER BY created_at DESC, id DESC LIMIT 20"
+    feedRange <-
+        prepare
+            "SELECT p.id, p.body, p.created_at, u.username FROM posts p JOIN users u ON u.id = p.user_id \
+             WHERE p.id BETWEEN ?1 AND ?2 ORDER BY p.id DESC"
+    likeRange <- prepare "SELECT post_id, count(*) FROM likes WHERE post_id BETWEEN ?1 AND ?2 GROUP BY post_id"
     insertPost <- prepare "INSERT INTO posts (user_id, body) VALUES (?1, ?2) RETURNING id, created_at"
     // Inserts only if the post exists. No change means "already liked" or "no such post".
     insertLike <-

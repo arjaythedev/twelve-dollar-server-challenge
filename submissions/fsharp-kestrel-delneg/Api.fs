@@ -163,19 +163,80 @@ let health (w: IBufferWriter<byte>) (close: bool) =
             json.WriteEndObject()
             writeJson w 503 close)
 
+/// The posts of a fast feed: ids (newest first) and their like counts.
+let private feedIds = Array.zeroCreate<int64> 20
+let private feedCounts = Array.zeroCreate<int64> 20
+
+/// The feed when its 20 posts are one run of consecutive ids, newest first (the usual case: posts are created in
+/// id order): one rowid range scan for the posts and one range scan of the likes index for all 20 counts, instead
+/// of 20 lookups of each (source: #154, #152, #82). Same transaction as the id query, so one snapshot.
+/// False (and nothing written) if the rows do not match the ids; then the caller runs the plain query.
+let private feedRange (n: int) =
+    let hi = feedIds.[0]
+    let lo = feedIds.[n - 1]
+    Array.Clear(feedCounts, 0, n)
+    let lr = Db.likeRange
+    try
+        Sqlite.bind_int64(lr, 1, lo) |> ignore
+        Sqlite.bind_int64(lr, 2, hi) |> ignore
+        while Db.stepRow lr do
+            feedCounts.[int (hi - Sqlite.column_int64(lr, 0))] <- Sqlite.column_int64(lr, 1)
+    finally
+        Sqlite.reset lr |> ignore
+    let st = Db.feedRange
+    let mutable k = 0
+    let mutable ok = true
+    try
+        Sqlite.bind_int64(st, 1, lo) |> ignore
+        Sqlite.bind_int64(st, 2, hi) |> ignore
+        json.WriteStartObject()
+        json.WriteStartArray(pPosts)
+        while ok && Db.stepRow st do
+            if k < n && Sqlite.column_int64(st, 0) = feedIds.[k] then
+                json.WriteStartObject()
+                json.WriteNumber(pId, feedIds.[k])
+                json.WriteString(pBody, Sqlite.text st 1)
+                json.WriteString(pCreatedAt, Sqlite.text st 2)
+                json.WriteString(pAuthor, Sqlite.text st 3)
+                json.WriteNumber(pLikeCount, feedCounts.[k])
+                json.WriteEndObject()
+                k <- k + 1
+            else
+                ok <- false
+        json.WriteEndArray()
+        json.WriteEndObject()
+    finally
+        Sqlite.reset st |> ignore
+    if ok && k = n then true
+    else
+        clear ()
+        false
+
 let feed (w: IBufferWriter<byte>) (close: bool) =
     Db.serialized (fun () ->
-        let st = Db.feed
         Db.beginRead ()
+        let ids = Db.feedIds
+        let mutable n = 0
         try
-            json.WriteStartObject()
-            json.WriteStartArray(pPosts)
-            while Db.stepRow st do
-                writePost st
-            json.WriteEndArray()
-            json.WriteEndObject()
+            while n < 20 && Db.stepRow ids do
+                feedIds.[n] <- Sqlite.column_int64(ids, 0)
+                n <- n + 1
         finally
-            Sqlite.reset st |> ignore
+            Sqlite.reset ids |> ignore
+        let mutable run = n > 0
+        for i in 1 .. n - 1 do
+            if feedIds.[i] <> feedIds.[i - 1] - 1L then run <- false
+        if not (run && feedRange n) then
+            let st = Db.feed
+            try
+                json.WriteStartObject()
+                json.WriteStartArray(pPosts)
+                while Db.stepRow st do
+                    writePost st
+                json.WriteEndArray()
+                json.WriteEndObject()
+            finally
+                Sqlite.reset st |> ignore
         writeJson w 200 close)
 
 let getPost (w: IBufferWriter<byte>) (close: bool) (id: int64) =

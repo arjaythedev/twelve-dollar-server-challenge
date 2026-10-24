@@ -57,6 +57,7 @@ With the epoll transport, the connection holds the database lock for its whole l
 | A shed connection never goes to Kestrel: the loop keeps it from accept to close. Kestrel's dispatch of a connection costs a thread-pool wake-up. | 160,000 users: CPU per request -12% (36.58 to 32.2 µs). Shed connections only: 35.1 to 20.5 µs per request (wsl26 x86) | consult (DeepSeek), perf |
 | Own io_uring transport (above): fixed files past the fd limit, multishot accept and receive, provided buffers, sends that finish inside `io_uring_enter`. No keep-alive budget: every connection stays open. | 160,000 users: CPU per request -18% (36.85 to 30.15 and 30.08 µs), 727 new connections per second (was 7,372: the shed users). 240,000 users pass at 72% CPU (Synteq box, below). `GET /posts/:id` at saturation: 3.0 to 1.0 syscalls per request. | #152, #82, #148, #154 |
 | io_uring: checkpoints on a second connection in a background thread, one transaction per loop pass (reads too), writes held at 4,096 WAL frames until the checkpoint catches up | 160,000 users: hold p95 79 to 6 ms, p99 110-198 to 33-35 ms; CPU per request +2.5% (30.1 to 30.72 and 30.93 µs). 320,000 users: 25,568 to 31,967 requests per second (Synteq box) | #141, #82 (one read transaction per batch), perf (`fsync` on the loop thread) |
+| `/feed` by id range: when the 20 newest posts are one run of consecutive ids (the usual case, since posts are created in id order), one rowid range scan reads the posts and one range scan of `likes_post_id_idx` counts all 20 posts' likes, in the transaction of the id query. Else the plain query. | 160,000 users: CPU per request -14% (30.72 and 30.93 to 26.34 and 26.39 µs). `/feed` at saturation: instructions -11% (Synteq box) | #154, #152, #82 (tried in round 1 on wsl26: CPU the same) |
 | SQLite from source with `THREADSAFE=2` and SQLite's recommended options | No mutex calls in SQLite | #77, #108 |
 | `cache_size` 32 MB | The SQLite page cache is 16 times the default size (2 MB) | #108 |
 | JSON from the SQLite UTF-8 bytes, no .NET strings for rows | Less allocation | #77 |
@@ -83,7 +84,7 @@ Changes that did not help (discarded):
 | Checkpoints on a second connection in a background thread, normal locking, a transaction per statement (epoll transport) | CPU +8%, hold p99 0.9 ms. Kept later for io_uring, with a transaction per loop pass. | #108 |
 | `wal_autocheckpoint=8000` | CPU +4%, hold p99 72 ms | — |
 | `wal_autocheckpoint=4000`, with group commit and no `mmap` | Same CPU | — |
-| Feed in three statements: the 20 ids, then the like counts and the posts by id range | `/feed` CPU the same (instructions -9%, cycles +2%) (wsl26 x86) | #72, #82 |
+| Feed in three statements: the 20 ids, then the like counts and the posts by id range | `/feed` CPU the same (instructions -9%, cycles +2%) (wsl26 x86). Kept later with io_uring: -14% on the Synteq box. | #72, #82 |
 | `TCP_NODELAY` on the listening socket (accepted sockets inherit it), not on each socket | Less than the noise (wsl26 x86) | #112 |
 | No `epoll_ctl` before `close` of a connection the loop owns | Less than the noise (wsl26 x86) | consult (DeepSeek) |
 | The first `recv` right after `accept` | Slower (wsl26 x86) | consult (DeepSeek), #117 |
@@ -155,6 +156,7 @@ A Synteq VPS with 8 shared vCPUs of the grader's CPU (Intel Xeon Platinum 8260),
 | io_uring | 320,000 | **fails**: p95 14.7 s, 0 failed | 30.05 µs | 77% | 14.7 / 15.4 s | 968 MB |
 | + checkpoint thread | 160,000 | pass, 0 failed | 30.72, 30.93 µs | 52% | 5.8 to 5.9 / 33 to 35 ms | 385 MB |
 | + checkpoint thread | 320,000 | **fails**: p95 1.8 s, 0 failed (CPU-bound) | 31.04 µs | 99% | 1.8 / 4.4 s | 760 MB |
+| + `/feed` by id range | 160,000 | pass, 0 failed | 26.34, 26.39 µs | 45% | 5.1 to 5.2 / 24 to 29 ms | 379 MB |
 
 With io_uring the cgroup holds the kernel's memory for every open socket (about 2.4 KB each), so it grows with the users: the server process itself stays near 150 MB.
 

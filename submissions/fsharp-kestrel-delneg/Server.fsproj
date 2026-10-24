@@ -22,6 +22,7 @@
     <Compile Include="Api.fs" />
     <Compile Include="Conn.fs" />
     <Compile Include="Transport.fs" />
+    <Compile Include="Uring.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
   <ItemGroup>

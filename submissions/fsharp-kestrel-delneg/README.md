@@ -3,7 +3,7 @@
 | Item | Value |
 |---|---|
 | Language | F# 10 on .NET 10 (SDK 10.0.401, pinned in `global.json`) |
-| Server | Kestrel (ASP.NET Core 10) with its own epoll transport. The transport calls the HTTP handler directly. No web framework. |
+| Server | Kestrel (ASP.NET Core 10) with its own io_uring transport (its own epoll transport when io_uring is not allowed). The transport calls the HTTP handler directly. No web framework. |
 | Database driver | SQLite 3.53.4 from source with a profile-guided gcc build, called through `DllImport` (`Sqlite.fs`) |
 | JSON | `System.Text.Json` (`Utf8JsonWriter`, `Utf8JsonReader`) |
 | Build | ReadyToRun with TieredPGO. Workstation GC, not concurrent. |
@@ -11,10 +11,11 @@
 
 ## How it works
 
-1. Kestrel uses our transport (`Transport.fs`) on Linux x86-64. One thread waits on an epoll set. When a socket has data, the thread reads it with one `recv` call into the receive buffer of the thread. When one `epoll_wait` returns fewer than 32 events, the thread sleeps 2 ms before the next wait. Thus one wake-up serves more sockets. On other platforms, Kestrel uses its socket transport, and `Conn.run` reads the pipes of the connection.
-2. The thread gives the bytes to the handler (`Conn.direct`). Kestrel's HTTP layer does not run. Kestrel calls our connection handler one time for each new keep-alive connection. The handler gives the connection to the loop and returns, so Kestrel keeps no state for the connection. Past the keep-alive budget (the fd limit minus 1,024), a new connection is shed: it gets one request, a `Connection: close` response and the close. Kestrel never sees a shed connection: the loop keeps it from accept to close. The connections have no pipes and no send task. A connection keeps a buffer only for a request that is not complete, or for bytes that the socket did not take.
+1. Kestrel uses our io_uring transport (`Uring.fs`) on Linux x86-64. One thread owns the rings and calls `io_uring_enter` through `syscall`; there is no liburing. Accept is one multishot accept that puts each new socket into the ring's table of fixed files (`IORING_FILE_INDEX_ALLOC`), not into the process fd table, so `LimitNOFILE=65535` does not cap the connections: a ring has as many slots as the fd limit (at most 65,535), and the thread opens up to 8 rings. Accept moves to the next ring when a ring has fewer than 4,096 free slots (a full table makes the kernel drop the socket it just accepted). Each connection has one multishot receive into a ring of 2,048 provided 2 KB buffers. The thread waits for 32 completions or 2 ms, handles every completion of that wait, commits, then queues one send per connection with `MSG_DONTWAIT` (it completes inside the next `io_uring_enter`). A send the socket does not take whole goes on from a buffer of the connection. A close is a `SHUTDOWN` linked to the `CLOSE` of the fixed file (on kernel 6.8 the `CLOSE` alone sends the FIN late). The rings use `SINGLE_ISSUER`, `DEFER_TASKRUN` and `COOP_TASKRUN`. If the kernel refuses any of it (old kernel, seccomp), the server uses the epoll transport below.
+   The epoll transport (`Transport.fs`): one thread waits on an epoll set. When a socket has data, the thread reads it with one `recv` call into the receive buffer of the thread. When one `epoll_wait` returns fewer than 32 events, the thread sleeps 2 ms before the next wait. Thus one wake-up serves more sockets. On other platforms, Kestrel uses its socket transport, and `Conn.run` reads the pipes of the connection.
+2. The thread gives the bytes to the handler (`Conn.direct`). Kestrel's HTTP layer does not run. Kestrel calls our connection handler one time for each new keep-alive connection. The handler gives the connection to the loop and returns, so Kestrel keeps no state for the connection. With epoll only: past the keep-alive budget (the fd limit minus 1,024), a new connection is shed: it gets one request, a `Connection: close` response and the close. Kestrel never sees a shed connection: the loop keeps it from accept to close. The connections have no pipes and no send task. A connection keeps a buffer only for a request that is not complete, or for bytes that the socket did not take.
 3. The handler parses HTTP/1.1 itself. It reads the method, the path and these headers: `Authorization`, `Content-Length`, `Connection` and `Expect` (it answers `100 Continue`). A request with `Transfer-Encoding` gets 400. Routes are in code.
-4. Each endpoint (`Api.fs`) writes the full response into one buffer of the thread: the status line, the headers and the JSON body. Then the thread sends all the responses for that read with one `send` call.
+4. Each endpoint (`Api.fs`) writes the full response into one buffer of the thread: the status line, the headers and the JSON body. Then the thread sends the responses of each connection with one send.
 5. One SQLite transaction holds all the writes of one wake-up of the loop (group commit). The first write opens it. After the last request of the wake-up, the loop commits it and then sends the responses. Thus each response goes out after the commit of its write. One SQLite connection serves all requests. With the epoll transport, one thread runs all requests, so it needs no lock. With the socket transport, a lock serializes the requests. The server prepares each statement one time at start.
 6. The JWT check (`Auth.fs`) runs on each request. It decodes the header and the payload, computes HMAC-SHA256 over the token bytes and compares the signature in fixed time. Then it checks `sub`, `username` and `exp`.
 
@@ -50,6 +51,7 @@ The connection holds the database lock for its whole life (`locking_mode=EXCLUSI
 | Keep-alive budget. A connection accepted while the fd limit minus 1,024 sockets are open is shed: one request, `Connection: close`, then the server closes it. Kept connections stay kept. | 130,000 and 160,000 users pass with 0 failed (wsl26 x86, and agent-box arm64) | #117, #72 |
 | The last send before a close that the loop owns has `MSG_MORE`, so the FIN goes on the segment with the response | 160,000 users: CPU per request -4.6% (38.35 to 36.58 µs, two runs each), hold p99 24.6 to 18.7 ms (wsl26 x86) | #117 |
 | A shed connection never goes to Kestrel: the loop keeps it from accept to close. Kestrel's dispatch of a connection costs a thread-pool wake-up. | 160,000 users: CPU per request -12% (36.58 to 32.2 µs). Shed connections only: 35.1 to 20.5 µs per request (wsl26 x86) | consult (DeepSeek), perf |
+| Own io_uring transport (above): fixed files past the fd limit, multishot accept and receive, provided buffers, sends that finish inside `io_uring_enter`. No keep-alive budget: every connection stays open. | 160,000 users: CPU per request -18% (36.85 to 30.15 and 30.08 µs), 727 new connections per second (was 7,372: the shed users). 240,000 users pass at 72% CPU (Synteq box, below). `GET /posts/:id` at saturation: 3.0 to 1.0 syscalls per request. | #152, #82, #148, #154 |
 | SQLite from source with `THREADSAFE=2` and SQLite's recommended options | No mutex calls in SQLite | #77, #108 |
 | `cache_size` 32 MB | The SQLite page cache is 16 times the default size (2 MB) | #108 |
 | JSON from the SQLite UTF-8 bytes, no .NET strings for rows | Less allocation | #77 |
@@ -136,8 +138,22 @@ Final check of this version (commit `aba8cf9`) on another machine: a VM with 4 v
 | VM disk (slow `fsync`) | 5 min | 473,086 | 0 | 440 / 578 ms | 1,278 ms | 9.2% | 52 MB |
 | tmpfs | 1 min | 95,264 | 0 | 2.8 / 3.3 ms | 18 ms | 8.8% | 50 MB |
 
+### On a box like the grader's (Synteq)
+
+A Synteq VPS with 8 shared vCPUs of the grader's CPU (Intel Xeon Platinum 8260), Ubuntu 24.04, kernel 6.8.0-117. Server in Docker with `--cpus=1 --memory=2g --memory-swap=2g`, `nofile` 65535, pinned to one vCPU, seccomp off (Docker's default profile blocks io_uring; the grader runs the server under systemd without one), direct. kload (#87) on 4 other vCPUs over loopback, 60 s ramp, 120 s hold. Connection tracking off for loopback (Docker's `nf_conntrack` table filled at 160,000 users and dropped connections). Loopback is not the grader's network: the server's CPU also pays for some of the client side of each packet, so compare these numbers with each other only.
+
+| Version | Users | Result | CPU per request | CPU in the hold | Hold p95 / p99 | Peak cgroup memory |
+|---|---|---|---|---|---|---|
+| `80f7274` (epoll) | 160,000 | pass, 0 failed | 36.85 µs | 62% | 77 / 220 ms | 236 MB |
+| io_uring | 160,000 | pass, 0 failed | 30.15, 30.08 µs | 51% | 77 to 79 / 110 to 198 ms | 380 MB |
+| io_uring | 240,000 | pass, 0 failed | 28.69 µs | 72% | 127 / 161 ms | 510 MB |
+| io_uring | 320,000 | **fails**: p95 14.7 s, 0 failed | 30.05 µs | 77% | 14.7 / 15.4 s | 968 MB |
+
+With io_uring the cgroup holds the kernel's memory for every open socket (about 2.4 KB each), so it grows with the users: the server process itself stays near 150 MB.
+
 ## Checks
 
 - `test/test.sh`: 42/42, also in a clean `ubuntu:24.04` container with 1 CPU, 2 GB and no swap, after `install.sh` (61 s) and `test/run.sh` (77 s).
+- io_uring transport: 5,000 keep-alive connections over rings of 1,100 slots (`nofile` 1100, so 5 rings): two rounds of requests on each, a pipelined pair, a request split in two writes, `Connection: close` with the FIN, half the clients closing first: 0 failed.
 - HTTP edge cases: 30 pipelined requests in one write, a request sent 7 bytes at a time, `Connection: close`, HTTP/1.0, a bad request line, a 20 KB header, `Transfer-Encoding: chunked`, a 501-character body, 2,000 open connections (no file descriptor leak), a client that closes in the middle of a body.
 - Writes: 100 clients sent likes and new posts, and the server was killed with `SIGKILL` during the load. After the restart, all 1,379 rows that got a 201 were in the database. With the database on a full disk, the server sent no 201 for a write that did not commit: it closed those connections, and `/health` still answered 200.

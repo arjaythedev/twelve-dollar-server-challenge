@@ -35,7 +35,11 @@ let main _ =
 
     let builder = WebApplication.CreateEmptyBuilder(WebApplicationOptions())
     builder.WebHost.UseKestrelCore() |> ignore
-    if Transport.supported then
+    if Uring.supported && env "FS3_TRANSPORT" "uring" = "uring" then
+        // Our io_uring transport (Uring.fs) replaces Kestrel's socket transport; it falls back to epoll when the
+        // kernel does not allow io_uring.
+        builder.Services.AddSingleton<IConnectionListenerFactory, Uring.UringTransportFactory>() |> ignore
+    elif Transport.supported then
         // Our epoll transport (Transport.fs) replaces Kestrel's socket transport.
         builder.Services.AddSingleton<IConnectionListenerFactory, Transport.EpollTransportFactory>() |> ignore
     else
@@ -53,6 +57,8 @@ let main _ =
                         match c with
                         // The epoll loop runs the handler itself and closes the socket.
                         | :? Transport.EConn as e -> if e.Detach() then Task.CompletedTask else e.Closed
+                        // The io_uring loop owns the socket from accept to close.
+                        | :? Uring.UConn -> Task.CompletedTask
                         | _ -> Conn.run c))
                 |> ignore))
     |> ignore

@@ -29,6 +29,7 @@ static const char *json_seeds[] = {
     "{\"a\":[1,2.5e-3,true,false,null,{\"b\":\"c\"}],\"body\":\"x\",\"n\":-0}",
     "[1,2,3]",
     "{\"sub\":\"42\",\"username\":\"name\",\"iat\":1700000000,\"exp\":2000000000}",
+    "{\"body\":\"caf\xc3\xa9 \x80 \xf0\x9f\x98\x80 \\u0000\"}",
 };
 
 static void mutate(char *buf, size_t *len, size_t cap) {
@@ -85,6 +86,10 @@ int main(int argc, char **argv) {
             for (int m = (int)(next() % 4); m >= 0; m--) mutate(buf, &len, sizeof buf);
             struct http_req req;
             enum http_parse_status st = http_parse(buf, (uint32_t)len, 2048, 2048, &req);
+            if (st == HTTP_PARTIAL && (req.head_len > len || req.body)) {
+                fprintf(stderr, "http PARTIAL contract violated at iteration %ld\n", it);
+                return 1;
+            }
             if (st == HTTP_COMPLETE) {
                 if (req.total_len > len || req.head_len > req.total_len || req.path_len > len ||
                     (req.auth && req.auth_len > len) || req.body_len > 2048) {
@@ -94,7 +99,7 @@ int main(int argc, char **argv) {
                 ok_http++;
             }
         } else if (which == 1) {
-            const char *s = json_seeds[next() % 4];
+            const char *s = json_seeds[next() % 5];
             len = strlen(s);
             memcpy(buf, s, len);
             for (int m = (int)(next() % 4); m >= 0; m--) mutate(buf, &len, sizeof buf);

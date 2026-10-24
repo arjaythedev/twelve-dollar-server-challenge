@@ -112,6 +112,9 @@ class Server:
             except subprocess.TimeoutExpired:
                 self.proc.kill()
                 self.proc.wait()
+        log = self.logtail(200000)
+        if "runtime error:" in log or "AddressSanitizer" in log or "LeakSanitizer" in log:
+            bad("sanitizer report in server log", log[-1500:])
         return self.proc.returncode
 
     def cleanup(self):
@@ -119,9 +122,9 @@ class Server:
         self.log.close()
         shutil.rmtree(self.dir, ignore_errors=True)
 
-    def logtail(self):
+    def logtail(self, n=3000):
         with open(os.path.join(self.dir, "server.log")) as f:
-            return f.read()[-3000:]
+            return f.read()[-n:]
 
 
 def free_port():
@@ -235,7 +238,6 @@ def test_routing(srv):
         ("GET", "/posts", 404, b'{"error":"not found"}'),
         ("GET", "/posts/", 404, b'{"error":"not found"}'),
         ("GET", "/feed/", 404, b'{"error":"not found"}'),
-        ("GET", "/feed?x=1", 404, b'{"error":"not found"}'),
         ("GET", "/FEED", 404, b'{"error":"not found"}'),
         ("DELETE", "/feed", 404, b'{"error":"not found"}'),
         ("POST", "/feed", 404, b'{"error":"not found"}'),
@@ -816,6 +818,110 @@ def test_feed_fallback(binary, seed):
         srv_rng.cleanup()
 
 
+def test_review_regressions(srv):
+    print("-- regressions from the review")
+    A = {"Authorization": "Bearer " + token()}
+    # M1: the feed must fit whatever 20 legal posts contain
+    for i in range(8):
+        st, _, _ = request(srv.port, "POST", "/posts", A, body=json.dumps({"body": "\U0001F600" * 500}))
+        check(st == 201, f"post {i} of 500 emoji -> 201") if i == 0 else None
+    st, h, b = request(srv.port, "GET", "/feed")
+    check(st == 200 and len(json.loads(b)["posts"]) == 20, "feed with 8 x 500-emoji posts -> 200", f"{st} {b[:80]!r}")
+    for i in range(20):
+        request(srv.port, "POST", "/posts", A, body=json.dumps({"body": '"' * 500}))
+    st, h, b = request(srv.port, "GET", "/feed")
+    check(st == 200 and all(p["body"] == '"' * 500 for p in json.loads(b)["posts"]), "feed with 20 x 500 quotes -> 200",
+          f"{st} {b[:80]!r}")
+    for i in range(20):
+        request(srv.port, "POST", "/posts", A, body=json.dumps({"body": "\u0001" * 500}))
+    st, h, b = request(srv.port, "GET", "/feed")
+    check(st == 200 and len(b) > 20 * 3000, "feed with 20 x 500 control characters (6 bytes each) -> 200", f"{st} {len(b)}")
+    st, h, b = request(srv.port, "POST", "/posts", {"Authorization": "Bearer " + token(username="u" * 1000)},
+                       body='{"body":"x"}')
+    check(st == 201 and json.loads(b)["post"]["author"] == "u" * 1000, "create with a 1000-byte username -> 201")
+    # M2: request followed by a half-close in the same batch must still be answered
+    results = []
+    lock = threading.Lock()
+
+    def half_close():
+        s = connect(srv.port)
+        s.sendall(build("GET", "/health"))
+        s.shutdown(socket.SHUT_WR)
+        try:
+            st2, h2, b2, _ = read_response(s)
+            closed = is_closed(s, 2.0)
+            with lock:
+                results.append((st2, h2.get("connection"), closed))
+        except Exception as e:
+            with lock:
+                results.append(("err", str(e), False))
+        s.close()
+
+    for _ in range(3):
+        ts = [threading.Thread(target=half_close) for _ in range(64)]
+        [t.start() for t in ts]
+        [t.join() for t in ts]
+    # the FIN may land in the same batch as the request (answered with
+    # Connection: close) or after the response went out (closed on EOF)
+    good = sum(1 for r in results if r[0] == 200 and r[2])
+    check(good == 192, "192 request+shutdown(SHUT_WR) clients all answered, then closed", str(results[:3]))
+    # M3: no 100 Continue for a client that is still sending headers
+    s = connect(srv.port)
+    s.sendall(build("POST", "/posts", {"Expect": "100-continue", "Content-Length": "2"}))
+    s.settimeout(3)
+    got = s.recv(100)
+    check(got.startswith(b"HTTP/1.1 100 Continue"), "100 Continue for a real Expect request", got[:40])
+    s.sendall(b"{}")
+    read_response(s, got[len(b"HTTP/1.1 100 Continue\r\n\r\n"):])
+    s.close()
+    s2 = connect(srv.port)
+    s2.sendall(b"GET /health HTTP/1.1\r\nHost: x\r\n")
+    s2.settimeout(0.7)
+    try:
+        spurious = s2.recv(100)
+    except socket.timeout:
+        spurious = b""
+    check(spurious == b"", "no spurious 100 Continue while headers are incomplete", spurious[:40])
+    s2.sendall(b"\r\n")
+    st, _, _, _ = read_response(s2)
+    check(st == 200, "the completed request is answered normally")
+    s2.close()
+    # m1: invalid UTF-8 and NUL never reach the CHECK constraint as a 500
+    s = connect(srv.port)
+    s.sendall(build("POST", "/posts", A, b'{"body":"' + b"a" * 500 + b'\x80"}'))
+    st, _, b, _ = read_response(s)
+    check(st == 400 and b == b'{"error":"malformed JSON body"}', "stray continuation byte -> 400", f"{st} {b!r}")
+    s.close()
+    st, _, b = request(srv.port, "POST", "/posts", A, body='{"body":"\\u0000abc"}')
+    check(st == 400 and b == b'{"error":"body is required"}', "NUL in body -> 400", f"{st} {b!r}")
+    st, _, b = request(srv.port, "POST", "/posts", A, body='{"body":"ab\\u0000c"}')
+    check(st == 400, "embedded NUL -> 400", f"{st} {b!r}")
+    s = connect(srv.port)
+    s.sendall(build("POST", "/posts", A, b'{"body":"\xf0\x9f\x98"}'))
+    st, _, b, _ = read_response(s)
+    check(st == 400 and b == b'{"error":"malformed JSON body"}', "truncated 4-byte sequence -> 400", f"{st} {b!r}")
+    s.close()
+    # m7, m8: HTTP/1.0 keep-alive announced; Date header present
+    s = connect(srv.port)
+    s.sendall(b"GET /health HTTP/1.0\r\nConnection: keep-alive\r\n\r\n")
+    st, h, b, _ = read_response(s)
+    check(h.get("connection") == "keep-alive", "HTTP/1.0 keep-alive is announced", str(h))
+    import re
+    check(re.match(r"^[A-Z][a-z]{2}, \d{2} [A-Z][a-z]{2} \d{4} \d{2}:\d{2}:\d{2} GMT$", h.get("date", "")) is not None,
+          "Date header present and well-formed", h.get("date"))
+    st, h, b, _ = read_response(s) if False else (None, None, None, None)
+    s.close()
+    st, h, b = request(srv.port, "GET", "/health", version="1.1")
+    check("connection" not in h and "date" in h, "HTTP/1.1 keep-alive stays implicit, Date present")
+    # n4: query strings do not change the route
+    st, _, b = request(srv.port, "GET", "/posts/1?x=1")
+    check(st == 200 and json.loads(b)["post"]["id"] == 1, "GET /posts/1?x=1 -> post 1")
+    st, _, b = request(srv.port, "GET", "/feed?page=2")
+    check(st == 200 and len(json.loads(b)["posts"]) == 20, "GET /feed?page=2 -> feed")
+    st, _, b = request(srv.port, "GET", "/health?")
+    check(st == 200, "GET /health? -> 200")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--server", required=True)
@@ -848,6 +954,7 @@ def main():
         run("keepalive", test_keepalive, srv, args.long)
         run("likes", test_likes_and_concurrency, srv)
         run("churn", test_churn, srv)
+        run("review", test_review_regressions, srv)
         rc = srv.stop()
         check(rc == 0, "server exits cleanly on SIGTERM", f"rc={rc}\n{srv.logtail()[-500:]}")
     finally:

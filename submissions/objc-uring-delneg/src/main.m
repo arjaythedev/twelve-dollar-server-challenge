@@ -10,7 +10,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-extern int td_opt_ckpt;
+extern int td_opt_ckpt, td_opt_batch, td_opt_bwait, td_opt_bthresh;
 extern long long td_opt_mmap;
 
 static int listen_on(const char *host, int port) {
@@ -38,6 +38,9 @@ int main(int argc, char **argv) {
     for (int i = 1; i < argc; i++)
         if (!strncmp(argv[i], "--rings=", 8)) rings = atoi(argv[i] + 8);
         else if (!strncmp(argv[i], "--ckpt=", 7)) td_opt_ckpt = atoi(argv[i] + 7);
+        else if (!strncmp(argv[i], "--batch=", 8)) td_opt_batch = atoi(argv[i] + 8);
+        else if (!strncmp(argv[i], "--bwait=", 8)) td_opt_bwait = atoi(argv[i] + 8);
+        else if (!strncmp(argv[i], "--bthresh=", 10)) td_opt_bthresh = atoi(argv[i] + 10);
         else if (!strncmp(argv[i], "--mmap=", 7)) td_opt_mmap = atoll(argv[i] + 7);
     signal(SIGPIPE, SIG_IGN);
 

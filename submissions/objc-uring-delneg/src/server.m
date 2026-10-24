@@ -676,19 +676,30 @@ TD_INLINE void req_err(TDReq *r, int st, const char *msg) {
     io_uring_cq_advance(r, n);
 }
 
+int td_opt_batch = 128, td_opt_bwait = 1000, td_opt_bthresh = 8;   // --batch=N --bwait=us --bthresh=N
+
 - (void)run {
+    uint32_t lastReq = 0;
     for (int k = 0; k < nrings; k++) [self setupRing:k];
     [self armAccept:0];
     for (;;) {
         for (int k = 1; k < nrings; k++)
             if (R[k].active && io_uring_sq_ready(&R[k].ring)) io_uring_submit(&R[k].ring);
-        int ret = io_uring_submit_and_wait(&R[0].ring, 1);
+        int ret;
+        // Under load, wait a little for more completions: bigger batches mean
+        // fewer io_uring_enter calls, one commit for more writes, warmer caches.
+        if (td_opt_batch > 1 && lastReq >= td_opt_bthresh) {
+            struct __kernel_timespec ts = { .tv_sec = 0, .tv_nsec = (long long)td_opt_bwait * 1000 };
+            struct io_uring_cqe *cq;
+            ret = io_uring_submit_and_wait_timeout(&R[0].ring, &cq, (unsigned)td_opt_batch, &ts, NULL);
+        } else ret = io_uring_submit_and_wait(&R[0].ring, 1);
         if (ret < 0 && ret != -EINTR && ret != -ETIME && ret != -EBUSY && ret != -EAGAIN) {
             fprintf(stderr, "io_uring_submit_and_wait: %s\n", strerror(-ret));
             exit(1);
         }
         now = time(NULL);
         for (int k = 0; k < nrings; k++) if (k == 0 || R[k].active) [self reap:k];
+        lastReq = nreq;
         if (nreq) [self flush];
         if (nrearm) {
             for (uint32_t i = 0; i < nrearm; i++) {

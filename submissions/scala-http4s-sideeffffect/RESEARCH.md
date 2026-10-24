@@ -250,3 +250,44 @@ Avoid:
 1. FFM SQLite / custom-compiled SQLite / hand-written HTTP / SQL-built JSON: fast (top JVM entries) but replaces the Typelevel stack.
 2. Reads joining the write transaction, time-window batching, or own `created_at` timestamps (rule-6/7 flags; Deno/Zig flagged).
 3. Native-image (can't build on the box; slower than Graal JIT), two-JVM `SO_REUSEPORT`, and gzip-dodging headers.
+
+## The challenge owner's videos
+
+Arjay McCandless ([YouTube](https://www.youtube.com/channel/UCdSsl5RM4Tne4MhDRz2HjWw)) runs both challenges. His
+videos on them, transcribed and read for this submission (one transcript from YouTube's captions, the rest from the
+audio with Whisper `small.en`):
+
+| Date | Video | What it is |
+|---|---|---|
+| 2026-09-25 | [How Many Users Can a $12 Server Handle?](https://www.youtube.com/watch?v=GFtFIxrAjIs) | Node + Postgres + Nginx on the $12 box; the limit is CPU; caching took it from 2,500 to 5,200 users |
+| 2026-10-02 | [Which Programming Language Can Handle the Most Users on a $12 Server?](https://www.youtube.com/watch?v=sQXFhh_PiG4) | 8 stacks, one query per endpoint, no caching; Spring Boot 5,100 users on Postgres, 10,250 on SQLite; the $12 challenge's origin |
+| 2026-10-09 | [I Ran 4 Databases on the Same $12 Server](https://www.youtube.com/watch?v=_M2-Dw4DpsE) | Postgres, MySQL, MariaDB, SQLite; durability: SQLite `synchronous=FULL` collapses on writes without group commit |
+| 2026-10-13 | [I Asked Expert Programmers to Max Out a $12 Server](https://www.youtube.com/watch?v=QGWKCaglSBI) | Batch 1 results, the common tricks, and the trade-offs he wouldn't ship |
+| 2026-10-16 | [More CPUs = Better? I tested 4 Programming Languages](https://www.youtube.com/watch?v=pG3xXuNdL34) | 1/2/4/8 vCPUs, Postgres; the multicore challenge's origin |
+| 2026-10-23 | [I Asked Developers to Max Out a $12 Server (again)](https://www.youtube.com/watch?v=-BFt49ula08) | Batch 2 results, entry by entry, including the Scala/Netty one |
+
+### What he measures and values
+
+- **The limit is CPU** for this workload (his first video: 80% CPU at 2,500 users, 99% at 4,000; disk, RAM and network
+  were fine; CPU steal 0-2% even on a shared droplet). Under a write-heavy load it moves to **disk**.
+- **vCPUs are hyper-threads**, and per-core speed differs between machines sold under the same label (up to 20% in
+  his tests); batch 2 moved to a different provider and scores doubled with the same code.
+- His **load generators** became the limit twice (k6 memory, then source ports at ~240,000 connections per target IP);
+  batch 2 used mload, replaying the k6 user model (one request per ~10 s per user).
+- **The tricks the fastest entries shared** (batch 1): no Nginx, statements prepared once on one connection, JSON built
+  by SQLite, group commit, frameworks replaced by hand-written servers. Batch 2 added io_uring with registered file
+  tables (to get past the 65,535-descriptor limit), evicting idle connections near the limit, range-scan feeds, PGO.
+- **What stopped entries** in batch 2: CPU, memory (Go net/http and Haskell were OOM-killed, the winner at 360k), the
+  descriptor limit (four entries tied at 71,000), storage waits (Quarkus at `synchronous=FULL` with per-request commits:
+  20-39% iowait; F#'s checkpointing), and a crash in an error handler (C#).
+- **What he would not ship**: "I probably wouldn't ship most of these implementations or approve these PRs" (1,300-line
+  single-file servers, unsafe Rust, partial HTTP), coupling to SQLite internals, and **durability**: "many of the
+  fastest entries use SQLite's write-ahead log with synchronous set to normal ... a write could still be lost if the
+  machine loses power ... a trade-off I would not use in production". His database video shows the alternative: the
+  server databases fsync every commit and use group commit to share the flush; SQLite at `FULL` without it fell from
+  6,800 to 1,550 users on a write-heavy load.
+- **Design details he called out as good**: a busy SQLite call must not put an event loop to sleep (Kotlin's
+  zero-busy-timeout writer), idle timeouts too short turn keep-alive into reconnect churn (Node), reads on a pool and
+  writes through one serial writer (Swift, Go), statements prepared once, constant error responses built ahead (Swift),
+  a background checkpointer must be able to finish or the WAL grows (assembly, F#).
+- **The Scala entry** (Netty, one event loop, FFM SQLite, idle eviction): 90,000 users on the batch-2 machine, p95 484 ms.

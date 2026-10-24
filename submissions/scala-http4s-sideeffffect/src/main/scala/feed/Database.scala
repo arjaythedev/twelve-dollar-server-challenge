@@ -2,7 +2,7 @@ package feed
 
 import cats.data.Kleisli
 import cats.effect.std.{Console, Queue}
-import cats.effect.{Deferred, IO, Ref, Resource}
+import cats.effect.{Deferred, IO, Resource}
 import cats.syntax.all.*
 import doobie.*
 import doobie.free.KleisliInterpreter
@@ -38,9 +38,8 @@ object Database:
     for
       reader <- ConnectionPool(readers, open(path).map(StatementCachingConnection(_)))
       writer <- ConnectionPool(1, open(path).map(StatementCachingConnection(_)))
-      walPages <- Resource.eval(Ref[IO].of(0))
-      writes <- groupCommit(writer, walPages)
-      _ <- checkpointer(path, walPages)
+      writes <- groupCommit(writer)
+      _ <- checkpointer(path)
     yield Database(onComputePool(reader), writes)
 
   /** A write waiting for its group commit. `run` executes the statement inside the group's transaction and returns what
@@ -55,18 +54,16 @@ object Database:
     * under load, the writes that arrive while one group commits form the next group.
     *
     * A failing statement doesn't abort an SQLite transaction, so each write's own error goes to its own caller; only a
-    * failed commit fails the whole group. Disk work (a commit, a WAL restart) must not hold the compute thread, but a
+    * failed commit fails the whole group. Disk work (a commit, a checkpoint) must not hold the compute thread, but a
     * thread hand-off per JDBC call (doobie's default interpreter) costs more than the writes themselves on one vCPU. So
     * the whole group runs, call by call as plain `delay`, on a dedicated writer thread: one hand-off per group.
     *
-    * Between two groups is also the one moment no write is in flight, so that is where the WAL gets restarted when it
-    * has grown (see [[checkpointer]]).
+    * It also keeps SQLite's own checkpoints off the request path: when the WAL reaches the autocheckpoint size, the
+    * commit that crosses it does the checkpoint, and that commit now runs on the writer thread.
     */
-  private def groupCommit(writer: ConnectionPool, walPages: Ref[IO, Int]): Resource[IO, Queue[IO, PendingWrite[?]]] =
+  private def groupCommit(writer: ConnectionPool): Resource[IO, Queue[IO, PendingWrite[?]]] =
     val xa =
       Transactor[IO, ConnectionPool](writer, _.borrow, computeInterpreter.ConnectionInterpreter, Strategy.default)
-    val outsideTransaction = Transactor.strategy.set(xa, Strategy.void)
-    val restartWal = sql"PRAGMA wal_checkpoint(RESTART)".query[(Int, Int, Int)].unique.transact(outsideTransaction)
     for
       thread <- Resource
         .make(IO(Executors.newSingleThreadExecutor(Thread.ofPlatform.name("sqlite-writer").factory)))(pool =>
@@ -78,14 +75,11 @@ object Database:
           case Right(answers) => answers.sequence_
           case Left(error)    => group.traverse_(_.fail(error))
         }
-      restartIfLarge = walPages.get.flatMap(pages =>
-        IO.whenA(pages > RestartWalAt)(restartWal.evalOn(thread).attempt *> walPages.set(0))
-      )
       queue <- Resource.eval(Queue.unbounded[IO, PendingWrite[?]])
       _ <- Stream
         .fromQueueUnterminated(queue, 256)
         .chunks
-        .evalMap(group => commit(group) *> restartIfLarge)
+        .evalMap(commit)
         .compile
         .drain
         .background
@@ -126,21 +120,15 @@ object Database:
     // Every read is a single statement in autocommit mode, so there is no transaction to begin or end.
     Transactor[IO, ConnectionPool](pool, _.borrow, computeInterpreter.ConnectionInterpreter, Strategy.void)
 
-  /** Checkpoints copy the WAL back into the database file and fsync it. With SQLite's automatic checkpoints, that
-    * happens inside whichever write crosses 1,000 WAL pages. Here a background fiber runs a PASSIVE checkpoint every
-    * second, on its own connection, with doobie's default interpreter: every call is `blocking`, so the fsyncs wait on
-    * a blocking thread. PASSIVE never waits for readers or the writer.
-    *
-    * PASSIVE alone isn't enough on a real disk: with reads arriving all the time, some reader always holds a snapshot
-    * that still needs the WAL, so the WAL is never restarted and keeps growing until SQLite's own checkpoint fires
-    * inside a request. So the checkpointer reports the WAL's size, and once it passes [[RestartWalAt]] pages the writer
-    * runs a RESTART checkpoint between two groups: it waits for the readers of the moment (milliseconds), and the next
-    * write starts the WAL from the beginning. A failure is reported and retried; the 10,000-page autocheckpoint is the
-    * backstop.
+  /** Checkpoints copy the WAL back into the database file and fsync it. A background fiber runs a PASSIVE checkpoint
+    * every second, on its own connection, with doobie's default interpreter: every call is `blocking`, so the fsyncs
+    * wait on a blocking thread, and PASSIVE never waits for readers or the writer. On a real disk, with reads arriving
+    * all the time, it can't always let the WAL start over, so the WAL can still reach the 10,000-page autocheckpoint;
+    * that one runs in the writer's commit, on the writer thread (see [[groupCommit]]). Restarting the WAL explicitly
+    * between groups (`wal_checkpoint(RESTART)`) was tried and measured worse: the writes queued behind it waited for
+    * the readers and the fsyncs (FINDINGS.md). A failure is reported and the next second tries again.
     */
-  private val RestartWalAt = 4000
-
-  private def checkpointer(path: String, walPages: Ref[IO, Int]): Resource[IO, Unit] =
+  private def checkpointer(path: String): Resource[IO, Unit] =
     val checkpoint = sql"PRAGMA wal_checkpoint(PASSIVE)".query[(Int, Int, Int)].unique
     for
       pool <- ConnectionPool(1, open(path))
@@ -153,7 +141,7 @@ object Database:
       report = (e: Throwable) => Console[IO].errorln(s"checkpoint failed: $e")
       _ <- Stream
         .fixedDelay[IO](1.second)
-        .evalMap(_ => checkpoint.transact(xa).flatMap((_, pages, _) => walPages.set(pages)).handleErrorWith(report))
+        .evalMap(_ => checkpoint.transact(xa).void.handleErrorWith(report))
         .compile
         .drain
         .background

@@ -296,7 +296,7 @@ fn (mut r Ring) run() {
 				slot := tag_slot(t)
 				mut c := r.conn(slot)
 				if c.state == .open && c.generation == tag_gen(t) && c.input.len > 0 {
-					r.on_data(slot, mut c, unsafe { nil }, 0, now, ur_max_requests_per_pass)
+					_ = r.on_data(slot, mut c, unsafe { nil }, 0, now, ur_max_requests_per_pass)
 				}
 			}
 			r.finish_batch()
@@ -429,7 +429,7 @@ fn (mut r Ring) dispatch(cqe C.us_cqe, now u32) {
 				data := unsafe { C.us_buf(r.ring, bid) }
 				// everything complete in the buffer is served: a buffer is 2 KiB, and the batch
 				// arena and parking bound what a burst can do
-				r.on_data(slot, mut c, data, cqe.res, now, ur_unlimited)
+				_ = r.on_data(slot, mut c, data, cqe.res, now, ur_unlimited)
 				C.us_buf_return(r.ring, bid)
 				if cqe.flags & us_f_more == 0 && c.state == .open {
 					r.n_ms_end++
@@ -476,7 +476,7 @@ fn (mut r Ring) dispatch(cqe C.us_cqe, now u32) {
 				// receive is gone: its cancel was submitted before this completion was waited for)
 				c.state = .open
 				if c.input.len > 0 {
-					r.on_data(slot, mut c, unsafe { nil }, 0, now, ur_max_requests_per_pass)
+					_ = r.on_data(slot, mut c, unsafe { nil }, 0, now, ur_max_requests_per_pass)
 				}
 				r.rearm << tag(op_recv, slot, c.generation)
 				return
@@ -523,8 +523,8 @@ fn (mut r Ring) close(slot int, mut c Conn) {
 // on_data answers up to limit complete requests from the received bytes (plus whatever is
 // kept in input from earlier receives) into the batch arena and keeps the rest in input:
 // an incomplete request, or complete requests beyond the limit, which Ring.more serves on
-// the next pass. With n == 0 it serves from input alone.
-fn (mut r Ring) on_data(slot int, mut c Conn, data &u8, n int, now u32, limit int) {
+// the next pass. With n == 0 it serves from input alone. It returns the number served.
+fn (mut r Ring) on_data(slot int, mut c Conn, data &u8, n int, now u32, limit int) int {
 	mut buf := []u8{}
 	if c.input.len > 0 {
 		if n > 0 {
@@ -553,14 +553,14 @@ fn (mut r Ring) on_data(slot int, mut c Conn, data &u8, n int, now u32, limit in
 	for pos < buf.len && served < limit {
 		total := fasthttp.frame_request_length(buf[pos..]) or {
 			r.bad_request(slot, mut c)
-			return
+			return served
 		}
 		if total < 0 {
 			break
 		}
 		req := fasthttp.decode_http_request(buf[pos..pos + total]) or {
 			r.bad_request(slot, mut c)
-			return
+			return served
 		}
 		if r.trace {
 			r.trace_req(slot, buf[pos..pos + total])
@@ -583,9 +583,9 @@ fn (mut r Ring) on_data(slot int, mut c Conn, data &u8, n int, now u32, limit in
 	rest := buf.len - pos
 	if rest > 0 && pos == 0 && served == 0 && u32(rest) > ur_max_input {
 		r.bad_request(slot, mut c) // a single request larger than any this API takes
-		return
+		return served
 	}
-	if rest > 0 && c.state == .open {
+	if rest > 0 && (c.state == .open || c.state == .parked) {
 		if c.input.len > 0 {
 			// the tail is already in input: move it to the front
 			if pos > 0 {
@@ -595,29 +595,41 @@ fn (mut r Ring) on_data(slot int, mut c Conn, data &u8, n int, now u32, limit in
 		} else {
 			r.pool.append(mut c.input, unsafe { data + pos }, rest)
 		}
-		if served >= limit {
+		if served >= limit && c.state == .open {
 			// the limit stopped the loop with complete requests left: no receive completion
-			// will come for them, so serve them on the next pass
+			// will come for them, so serve them on the next pass (a parked connection's are
+			// served when it drains)
 			r.more << tag(op_recv, slot, c.generation)
 		}
 	} else if c.input.len > 0 {
 		r.pool.drop(mut c.input)
 	}
+	return served
 }
 
-// on_eof serves whatever complete requests are still buffered (no more bytes will come, so
-// the per-pass cap no longer applies and an incomplete tail is forgotten), then closes the
-// connection once everything it is owed has been sent: responses still in this batch (its
-// receive completions can be interleaved with other connections'), in flight, or queued.
+// on_eof serves the next requests still buffered (a pass at a time, so a backlog cannot
+// overflow the output queue), coming back for the rest through a re-armed receive, which
+// reports the EOF again, or through the unpark of a parked connection; an incomplete tail
+// is forgotten. Once nothing is buffered it closes the connection as soon as everything it
+// is owed has been sent: responses still in this batch (its receive completions can be
+// interleaved with other connections'), in flight, or queued.
 fn (mut r Ring) on_eof(slot int, mut c Conn, now u32) {
 	if c.state != .open && c.state != .parked {
 		return
 	}
 	if c.input.len > 0 {
-		r.on_data(slot, mut c, unsafe { nil }, 0, now, ur_unlimited)
-		r.pool.drop(mut c.input)
+		served := r.on_data(slot, mut c, unsafe { nil }, 0, now, ur_max_requests_per_pass)
 		if c.state == .closing || c.state == .closed {
 			return // a bad request already decided the close
+		}
+		if c.input.len > 0 {
+			if served > 0 {
+				if c.state == .open {
+					r.rearm << tag(op_recv, slot, c.generation)
+				}
+				return
+			}
+			r.pool.drop(mut c.input) // only an incomplete request is left
 		}
 	}
 	if c.flight.len > 0 || c.output.len > 0 || r.owed_in_batch(slot) {

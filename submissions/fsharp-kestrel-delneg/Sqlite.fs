@@ -40,6 +40,9 @@ extern int step(nativeint stmt)
 [<DllImport(Lib, EntryPoint = "sqlite3_reset")>]
 extern int reset(nativeint stmt)
 
+[<DllImport(Lib, EntryPoint = "sqlite3_finalize")>]
+extern int finalize(nativeint stmt)
+
 [<DllImport(Lib, EntryPoint = "sqlite3_bind_text")>]
 extern int bind_text(nativeint stmt, int index, nativeint text, int length, nativeint destructor)
 

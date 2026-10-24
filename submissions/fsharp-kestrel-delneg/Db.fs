@@ -107,15 +107,16 @@ let commit () : bool =
         Sqlite.reset rollbackStmt |> ignore
     ok
 
-/// Runs a write on the request thread. SQLite's automatic checkpoint runs inside the commit that fills the WAL
-/// to 1,000 frames, so a write never waits for another thread.
+/// Runs a write on the request thread. In EXCLUSIVE mode SQLite's automatic checkpoint runs inside the commit that
+/// fills the WAL to 1,000 frames; in background-checkpoint mode the checkpoint thread copies the WAL. Either way a
+/// write never waits for another thread.
 let runWrite (f: unit -> 'T) : ValueTask<'T> = ValueTask<'T>(f ())
 
 // ---- WAL size bound (background-checkpoint mode) -------------------------------------------------------------------
 // A PASSIVE checkpoint never blocks writes, so under steady writes it never finds every frame copied, and the request
 // connection never starts the WAL again from the beginning: the WAL would grow without limit. So at `holdFrames`
-// the loop holds writes (reads go on): the checkpoint thread then copies the last frames, and the first write after
-// the hold starts the WAL again (SQLite does this when a transaction starts with every frame copied).
+// the loop holds writes (reads go on): the checkpoint thread then copies the last frames and starts the WAL again
+// itself (below), and the writes after the hold go into the new WAL.
 
 /// WAL size in frames, and frames copied, after the last checkpoint (written by the checkpoint thread).
 let mutable walFrames = 0
@@ -124,6 +125,9 @@ let mutable walCopied = 0
 let mutable holdWrites = false
 /// Set by the checkpoint thread when, with writes held, every frame is copied.
 let mutable caughtUp = false
+/// 1 while the checkpoint thread starts the WAL again, 2 while the loop ends a hold that timed out: so the loop never
+/// lets writes go while that thread holds the write lock, and that thread never starts the WAL after a hold ended.
+let mutable restartGate = 0
 /// FS3_HOLD_FRAMES overrides it (tests only: a small value makes holds frequent).
 let holdFrames =
     match Int32.TryParse(Environment.GetEnvironmentVariable "FS3_HOLD_FRAMES") with
@@ -141,6 +145,23 @@ let private startCheckpointer () =
     for sql in [ "PRAGMA journal_mode = WAL"; "PRAGMA busy_timeout = 5000" ] do
         let q = Marshal.StringToCoTaskMemUTF8 sql
         try check (Sqlite.exec(cdb, q, 0n, 0n, 0n)) finally Marshal.FreeCoTaskMem q
+    // The first frame after the WAL starts again makes SQLite write the WAL header and fsync the WAL
+    // (synchronous=NORMAL; SQLite ticket ff5be73dee). That fsync waits for the file system journal, which can wait
+    // seconds behind the database writeback of the checkpoints. On the loop thread it stopped every request (5-min
+    // holds at 380,000 users: p99 4-8 s). So this thread takes it: with writes held and every frame copied, it commits
+    // one write of its own (user_version, unchanged), which starts the WAL again here. Reads go on meanwhile.
+    let userVersion =
+        let q = Marshal.StringToCoTaskMemUTF8 "PRAGMA user_version"
+        let mutable st = 0n
+        try
+            check (Sqlite.prepare_v3(cdb, q, -1, 0u, &st, 0n))
+            let v = if Sqlite.step st = Sqlite.Row then Sqlite.column_int64(st, 0) else 0L
+            Sqlite.finalize st |> ignore
+            v
+        finally
+            Marshal.FreeCoTaskMem q
+    let restartSql = Marshal.StringToCoTaskMemUTF8(sprintf "BEGIN IMMEDIATE; PRAGMA user_version = %d; COMMIT" userVersion)
+    let rollbackSql = Marshal.StringToCoTaskMemUTF8 "ROLLBACK"
     let loop () =
         let mutable seen = -1
         while true do
@@ -148,7 +169,10 @@ let private startCheckpointer () =
             if Volatile.Read &holdWrites then Thread.Sleep 1 else Thread.Sleep 50
             let held = Volatile.Read &holdWrites
             let now = Volatile.Read &commits
-            if now <> seen || held then
+            // Caught up and the loop has not ended the hold yet: nothing to do. (A checkpoint now would copy the frame
+            // that started the WAL again, and the loop's next write would start it once more.)
+            if held && Volatile.Read &caughtUp then ()
+            elif now <> seen || held then
                 seen <- now
                 let mutable logFrames = 0
                 let mutable copied = 0
@@ -156,7 +180,19 @@ let private startCheckpointer () =
                 Sqlite.wal_checkpoint_v2(cdb, 0n, 0, &logFrames, &copied) |> ignore
                 Volatile.Write(&walFrames, logFrames)
                 Volatile.Write(&walCopied, copied)
-                if held && copied >= logFrames then Volatile.Write(&caughtUp, true)
+                if held && copied >= logFrames then
+                    if logFrames = 0 then
+                        Volatile.Write(&caughtUp, true) // empty
+                    elif Interlocked.CompareExchange(&restartGate, 1, 0) = 0 then
+                        if Volatile.Read &holdWrites then
+                            // That frame stays uncopied until the next round: with every frame copied, the loop's next
+                            // write would start the WAL again itself, with the fsync. If a reader still used the old
+                            // frames, the WAL did not start again: it goes on growing until the next hold.
+                            if Sqlite.exec(cdb, restartSql, 0n, 0n, 0n) = Sqlite.Ok then
+                                Volatile.Write(&caughtUp, true)
+                            else
+                                Sqlite.exec(cdb, rollbackSql, 0n, 0n, 0n) |> ignore
+                        Volatile.Write(&restartGate, 0)
     Thread(loop, IsBackground = true, Name = "sqlite-checkpoint").Start()
 
 let openDb (p: string) =

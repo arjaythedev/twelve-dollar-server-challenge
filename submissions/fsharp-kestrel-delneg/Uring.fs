@@ -812,11 +812,15 @@ type private Loop(listenFd: int) as this =
                 elif rc.Close then
                     this.CloseSlot(r, slot)
 
-    /// Ends a write hold once the checkpoint thread has copied every frame (or after 500 ms: then the WAL goes on
-    /// growing and the next hold comes 4,096 frames later), and runs the held requests in this pass.
+    /// Ends a write hold once the checkpoint thread has copied every frame and started the WAL again (or after 500 ms,
+    /// unless that thread is starting the WAL right now: then the WAL goes on growing and the next hold comes 4,096
+    /// frames later), and runs the held requests in this pass.
     member private this.MaybeResume() =
         let caught = Volatile.Read &Db.caughtUp
-        if caught || Environment.TickCount64 - holdSince > 500L then
+        let timedOut =
+            not caught && Environment.TickCount64 - holdSince > 500L
+            && Interlocked.CompareExchange(&Db.restartGate, 2, 0) = 0
+        if caught || timedOut then
             holdAt <- if caught then Db.holdFrames else holdAt + Db.holdFrames
             Volatile.Write(&Db.walFrames, 0)
             Volatile.Write(&Db.caughtUp, false)
@@ -830,6 +834,7 @@ type private Loop(listenFd: int) as this =
                     if r.State.[slot] &&& (Live ||| Done) = Live then
                         try this.Process(r, slot, 0n, 0) with _ -> ()
             held.Clear()
+            if timedOut then Volatile.Write(&Db.restartGate, 0)
 
     member private this.AddRing() =
         let r = Ring(rings.Count)
@@ -943,9 +948,11 @@ type private Loop(listenFd: int) as this =
                     if t1 - stLast > 5L * Diagnostics.Stopwatch.Frequency then
                         let ms (t: int64) = float t * 1000.0 / float Diagnostics.Stopwatch.Frequency
                         let opens = String.Join(",", rings |> Seq.map (fun r -> string r.Open))
-                        eprintfn "stats passes=%d cqes=%d maxcqes=%d maxpass=%.1fms nobufs=%d carrymax=%d rearmmax=%d rearmq=%d spills=%d zombies=%d open=%s gc=%d/%d/%d"
+                        eprintfn "stats passes=%d cqes=%d maxcqes=%d maxpass=%.1fms nobufs=%d carrymax=%d rearmmax=%d rearmq=%d spills=%d zombies=%d open=%s gc=%d/%d/%d heap=%dMB committed=%dMB allocated=%dMB"
                             stPasses stCqes stMaxCqes (ms stMaxPassTicks) stNoBufs stCarryMax stRearmMax rearm.Count stSpills zombies.Count opens
                             (GC.CollectionCount 0) (GC.CollectionCount 1) (GC.CollectionCount 2)
+                            (GC.GetGCMemoryInfo().HeapSizeBytes >>> 20) (GC.GetGCMemoryInfo().TotalCommittedBytes >>> 20)
+                            (GC.GetTotalAllocatedBytes() >>> 20)
                         stPasses <- 0L; stCqes <- 0L; stMaxCqes <- 0; stMaxPassTicks <- 0L; stNoBufs <- 0L
                         stCarryMax <- 0; stRearmMax <- 0; stSpills <- 0L; stLast <- t1
 

@@ -82,7 +82,10 @@ fn open_db(path string, group bool, exclusive bool) !&Db {
 	}
 	if C.sqlite3_open_v2(&char(path.str), &d.conn, sqlite_open_readwrite | sqlite_open_nomutex,
 		unsafe { nil }) != sqlite_ok {
-		return error('sqlite open ${path}: ${d.errmsg()}')
+		msg := d.errmsg()
+		C.sqlite3_close(d.conn) // SQLite hands out a handle even on failure
+		d.conn = unsafe { nil }
+		return error('sqlite open ${path}: ${msg}')
 	}
 	pragmas := db_pragmas(exclusive)
 	if C.sqlite3_exec(d.conn, &char(pragmas.str), unsafe { nil }, unsafe { nil }, unsafe { nil }) != sqlite_ok {

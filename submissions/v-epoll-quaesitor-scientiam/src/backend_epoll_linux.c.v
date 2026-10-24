@@ -83,7 +83,7 @@ mut:
 	segs       []Seg
 	pool       BufPool
 	pending    []int // connections with complete requests still waiting in input
-	pass       int   // rotates the order events are served in when the arena fills up
+	pass       u32   // rotates the order events are served in when the arena fills up
 	start_ns   i64
 	last_sweep u32
 }
@@ -207,7 +207,11 @@ fn (mut l Loop) run() {
 				}
 			}
 			if i < pending.len {
-				l.pending << pending[i..]
+				// the leftover goes first, ahead of what the served connections re-queued, so
+				// a connection waiting its turn is not passed over pass after pass
+				mut next := pending[i..].clone()
+				next << l.pending
+				l.pending = next
 			}
 		}
 		// the listener first, then the connections from a rotating start: when the arena
@@ -215,7 +219,7 @@ fn (mut l Loop) run() {
 		// (the kernel reports still-ready level-triggered descriptors in a stable order)
 		l.pass++
 		for k in 0 .. n {
-			i := (k + l.pass) % n
+			i := int((u32(k) + l.pass) % u32(n))
 			fd := unsafe { events[i].data.fd }
 			if fd == l.lfd {
 				l.accept_burst()
@@ -226,7 +230,7 @@ fn (mut l Loop) run() {
 			if l.out.len >= max_arena {
 				break // bound the batch; level-triggered events come back on the next wait
 			}
-			i := (k + l.pass) % n
+			i := int((u32(k) + l.pass) % u32(n))
 			fd := unsafe { events[i].data.fd }
 			flags := unsafe { events[i].events }
 			if fd == l.lfd {

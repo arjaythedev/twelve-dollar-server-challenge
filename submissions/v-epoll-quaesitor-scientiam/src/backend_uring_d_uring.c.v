@@ -306,7 +306,10 @@ fn (mut r Ring) run() {
 			r.finish_batch()
 			r.sh.mu.unlock()
 			if i < pending.len {
-				r.more << pending[i..]
+				// the leftover goes first, ahead of what the served connections re-queued
+				mut next := pending[i..].clone()
+				next << r.more
+				r.more = next
 			}
 		}
 		r.busy = total >= 4 || r.rearm.len > 0

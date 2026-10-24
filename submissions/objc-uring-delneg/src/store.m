@@ -1,6 +1,7 @@
 #include "store.h"
 
 int td_opt_ckpt = 1000;   // wal_autocheckpoint pages (--ckpt=N)
+long long td_opt_mmap = 0; // mmap_size bytes (--mmap=N); 0: page cache reads beat per-page mmap objects
 
 #define POST_COLS "SELECT p.id, p.body, p.created_at, u.username, " \
     "(SELECT count(*) FROM likes l WHERE l.post_id = p.id) FROM posts p JOIN users u ON u.id = p.user_id "
@@ -40,7 +41,9 @@ static void exec(sqlite3 *db, const char *sql) {
     exec(db, "PRAGMA locking_mode=EXCLUSIVE");
     exec(db, "PRAGMA journal_mode=WAL");
     exec(db, "PRAGMA synchronous=NORMAL");
-    exec(db, "PRAGMA mmap_size=1073741824");
+    char mm[64];
+    snprintf(mm, sizeof mm, "PRAGMA mmap_size=%lld", td_opt_mmap);
+    exec(db, mm);
     exec(db, "PRAGMA cache_size=-32768");
     exec(db, "PRAGMA temp_store=MEMORY");
     char ck[64];

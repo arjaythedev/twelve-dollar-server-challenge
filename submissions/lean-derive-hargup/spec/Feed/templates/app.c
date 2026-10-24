@@ -11,15 +11,18 @@
 static Pgno ROOT_posts, ROOT_users, ROOT_likes_post_id_idx;
 static KeyInfo *KI_likes_post_id_idx;
 static cursor C_posts, C_users, C_likes_post_id_idx;
-static sqlite3_stmt *Q_feed_sql, *Q_health, *Q_like_insert, *Q_post_insert;
+static sqlite3_stmt *Q_feed_sql, *Q_post_sql, *Q_post_exists, *Q_health, *Q_like_insert, *Q_post_insert;
 static i64 started_at;
 
 @{SCHEMA_CHECK}
-/* Feed.Db.Inv holds for the current database. Established by app_check_inv (Feed.Db.checkInv,
- * sound by Feed.Db.checkInv_sound) and kept by the check after every insert (Feed.Db.insertOk,
- * Feed.Db.inv_addPost). This process is the only writer (exclusive locking). While it holds,
- * GET /feed uses feed_tail (Feed.Db.feedPlan, equal to the feed by Feed.Db.feedPlan_eq). */
-static int inv_ok;
+/* native_ok: the stored layout is the one the B-tree plans were derived for (schema_ok), and no
+ * other connection has written since startup (db_foreign_write). Otherwise every read uses SQL.
+ * inv_ok: Feed.Db.Inv holds for the current database. Established by app_check_inv
+ * (Feed.Db.checkInv, sound by Feed.Db.checkInv_sound) and kept by the check after every insert
+ * (Feed.Db.insertOk, Feed.Db.inv_addPost); that covers every write while this process is the
+ * only writer, which native_ok confirms each batch. While it holds, GET /feed uses feed_tail
+ * (Feed.Db.feedPlan, equal to the feed by Feed.Db.feedPlan_eq). */
+static int native_ok, inv_ok;
 
 enum { K_NONE = 0, K_HEALTH, K_FEED, K_POST, K_LIKE, K_CREATE };
 
@@ -29,6 +32,8 @@ static void app_init(void) {
   ROOT_likes_post_id_idx = db_rootpage(@{ROOT_LIKES_BY_POST});
   KI_likes_post_id_idx = db_keyinfo(@{LIKES_BY_POST_KEYS}, 1);
   Q_feed_sql = db_prepare(@{SQL_FEED});
+  Q_post_sql = db_prepare(@{SQL_POST});
+  Q_post_exists = db_prepare(@{SQL_POST_EXISTS});
   Q_health = db_prepare("SELECT 1");
   Q_like_insert = db_prepare(@{SQL_LIKE});
   Q_post_insert = db_prepare(@{SQL_CREATE});
@@ -55,10 +60,11 @@ static inline int text_le(const u8 *a, u32 an, const u8 *b, u32 bn) {
 /* Feed.Db.checkFrom over the posts B-tree in rowid order. */
 static void app_check_inv(void) {
   if (!schema_ok()) {
-    inv_ok = 0;
+    native_ok = inv_ok = 0;
     fprintf(stderr, "schema differs from Feed.Schema: native plans disabled\n");
     return;
   }
+  native_ok = 1;
   db_batch_begin();
   cursors_open();
   int ok = 1;
@@ -260,19 +266,45 @@ static int post_by_id(out_t *o, i64 id) {
   return 0;
 }
 
+/* GET /posts/:id without native plans: the definition, in SQL. 0 ok, 1 not found, -1 error */
+static int post_sql(out_t *o, i64 id) {
+  sqlite3_bind_int64(Q_post_sql, 1, id);
+  int rc = sqlite3_step(Q_post_sql);
+  if (rc == SQLITE_ROW) {
+    @{POST_BEFORE}
+    put_post(o, sqlite3_column_int64(Q_post_sql, 0),
+             sqlite3_column_text(Q_post_sql, 1), (u32)sqlite3_column_bytes(Q_post_sql, 1),
+             sqlite3_column_text(Q_post_sql, 2), (u32)sqlite3_column_bytes(Q_post_sql, 2),
+             sqlite3_column_text(Q_post_sql, 3), (u32)sqlite3_column_bytes(Q_post_sql, 3),
+             sqlite3_column_int64(Q_post_sql, 4));
+    @{POST_AFTER}
+  }
+  sqlite3_reset(Q_post_sql);
+  return rc == SQLITE_ROW ? 0 : rc == SQLITE_DONE ? 1 : -1;
+}
+/* Does the post exist? 0 yes, 1 no, -1 error */
+static int post_exists(i64 id) {
+  if (native_ok) return cur_seek(&C_posts, id);
+  sqlite3_bind_int64(Q_post_exists, 1, id);
+  int rc = sqlite3_step(Q_post_exists);
+  sqlite3_reset(Q_post_exists);
+  return rc == SQLITE_ROW ? 0 : rc == SQLITE_DONE ? 1 : -1;
+}
+
 static void exec_read(job_t *j) {
   out_t o0, *o = &o0;
   out_begin(o);
   int rc;
   switch (j->kind) {
   case K_FEED:
-    rc = inv_ok ? feed_tail(o) : -1;
+    rc = native_ok && inv_ok ? feed_tail(o) : -1;
     if (rc) { out_abort(o); out_begin(o); rc = feed_sql(o); }
     if (rc) { out_abort(o); j->resp = ERR(@{ERR_INTERNAL}); return; }
     j->resp = out_finish(o, @{HDR_OK}, sizeof @{HDR_OK} - 1);
     return;
   case K_POST:
-    rc = post_by_id(o, j->id);
+    rc = native_ok ? post_by_id(o, j->id) : -1;
+    if (rc < 0) { out_abort(o); out_begin(o); rc = post_sql(o, j->id); }
     if (rc) { out_abort(o); j->resp = rc > 0 ? ERR(@{ERR_NO_POST}) : ERR(@{ERR_INTERNAL}); return; }
     j->resp = out_finish(o, @{HDR_OK}, sizeof @{HDR_OK} - 1);
     return;
@@ -300,7 +332,7 @@ static void exec_write(job_t *j) {
   int rc;
   switch (j->kind) {
   case K_LIKE: {                                                 /* Feed.Db.like */
-    rc = cur_seek(&C_posts, j->id);
+    rc = post_exists(j->id);
     if (rc) { j->resp = rc > 0 ? ERR(@{ERR_NO_POST}) : ERR(@{ERR_INTERNAL}); return; }
     sqlite3_bind_int64(Q_like_insert, 1, j->uid);
     sqlite3_bind_int64(Q_like_insert, 2, j->id);
@@ -355,6 +387,7 @@ static void app_batch(job_t *js, int n) {
   for (int i = 0; i < n; i++) if (js[i].kind) { if (js[i].is_write) writes++; else reads++; }
   if (reads || writes) {
     db_batch_begin();
+    if (db_foreign_write) native_ok = inv_ok = 0;
     cursors_open();
     for (int i = 0; i < n; i++) if (js[i].kind && !js[i].is_write) exec_read(&js[i]);
     for (int i = 0; i < n; i++) if (js[i].kind && js[i].is_write) exec_write(&js[i]);

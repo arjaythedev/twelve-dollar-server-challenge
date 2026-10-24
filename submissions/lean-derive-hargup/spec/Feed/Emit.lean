@@ -145,6 +145,11 @@ def emitSchemaCheck : String :=
 def sqlFeed : String :=
   s!"SELECT p.id, p.body, p.created_at, u.username, (SELECT count(*) FROM likes l WHERE l.post_id = p.id) " ++
   s!"FROM posts p JOIN users u ON u.id = p.user_id ORDER BY p.created_at DESC, p.id DESC LIMIT {feedSize}"
+/-- The post object for one id, as in `SPEC.md`. -/
+def sqlPost : String :=
+  s!"SELECT p.id, p.body, p.created_at, u.username, (SELECT count(*) FROM likes l WHERE l.post_id = p.id) " ++
+  s!"FROM posts p JOIN users u ON u.id = p.user_id WHERE p.id = ?1"
+def sqlPostExists : String := "SELECT 1 FROM posts WHERE id = ?1"
 def sqlLike : String :=
   let k := ", ".intercalate likesKey
   s!"INSERT INTO likes ({k}) VALUES (?1, ?2) ON CONFLICT ({k}) DO NOTHING"
@@ -200,6 +205,8 @@ def appGen : String :=
     ("HEADERS", emitHeaders),
     ("SCHEMA_CHECK", emitSchemaCheck),
     ("SQL_FEED", cstr sqlFeed),
+    ("SQL_POST", cstr sqlPost),
+    ("SQL_POST_EXISTS", cstr sqlPostExists),
     ("SQL_LIKE", cstr sqlLike),
     ("SQL_CREATE", cstr sqlCreate),
     ("PUT_POST", emitPutPost),

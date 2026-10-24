@@ -27,8 +27,8 @@ if ! cmp -s build/app_gen.c gen/app_gen.c; then
 fi
 
 echo "== cc"
-cc -O2 -march=native -fno-plt -o bin/server \
-  -DSQLITE_THREADSAFE=0 -DSQLITE_DEFAULT_MEMSTATUS=0 -DSQLITE_OMIT_DEPRECATED -DSQLITE_OMIT_SHARED_CACHE \
+cc -O2 -march=native -fno-plt -pthread -o bin/server \
+  -DSQLITE_THREADSAFE=2 -DSQLITE_DEFAULT_MEMSTATUS=0 -DSQLITE_OMIT_DEPRECATED -DSQLITE_OMIT_SHARED_CACHE \
   -DSQLITE_USE_ALLOCA -DSQLITE_DQS=0 -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_DEFAULT_WAL_SYNCHRONOUS=1 \
   -Iruntime -Ibuild -I"vendor/$SQLITE" runtime/server.c -lm
 echo "built bin/server"

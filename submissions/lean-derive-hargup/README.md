@@ -63,10 +63,14 @@ Proved in Lean (kernel-checked on every build; no `sorry`, only the standard axi
 | `Db.inv_like` | likes preserve `Inv` |
 
 At startup the server runs `checkInv` once, a single pass over posts. After every insert it
-runs `insertOk` on the new row. Exclusive locking makes it the only writer, so these checks
-cover every write. If the stored layout differs from `Schema.lean`, or a check ever fails
-(say the clock steps back), the feed falls back to the specification's SQL
-(`ORDER BY created_at DESC, id DESC LIMIT 20`) for good. The plans are proved against the
+runs `insertOk` on the new row. These checks cover every write as long as this process is the
+only writer. That is verified at the start of every batch: SQLite's data version changes only
+when another connection commits.
+
+The server switches to the specification's SQL for good when:
+* the stored layout differs from `Schema.lean`;
+* the invariant check ever fails (say the clock steps back): the feed switches;
+* another connection writes: every read switches. The plans are proved against the
 model; the C emitted for them is tested, not proved (see Tests).
 
 ### Native read plans on SQLite's B-tree layer
@@ -94,7 +98,17 @@ results): feed 16.7 µs with the reference SQL → 5.4 µs.
     see uncommitted rows;
   * after a light round the loop sleeps 250 µs so that the next round is a batch rather than a
     single request.
-* **SQLite.** WAL, `synchronous=NORMAL`, `locking_mode=EXCLUSIVE`, 1 GiB mmap, small page cache.
+* **SQLite.** WAL, `synchronous=NORMAL`, 1 GiB mmap, small page cache. Built multi-threaded
+  (`SQLITE_THREADSAFE=2`); each connection is used by one thread.
+  * Requests run on the main connection, whose automatic checkpoints are off. When the log
+    passes 1,000 frames, a WAL hook wakes a second thread, which runs `PASSIVE` checkpoints on
+    its own connection.
+  * Checkpoints copy the log into the database and fsync it, so a slow disk now stalls only
+    that thread, never responses. A commit's durability does not depend on checkpoints (WAL,
+    `synchronous=NORMAL`). Every response still waits for its commit.
+  * The log starts over only when a write begins after every frame has been checkpointed. If
+    it still grows past 64 MB, the request thread checkpoints the remainder between batches.
+    That is one fsync stall, so it is a last resort; in the measured run it never ran.
 * **JWT.** HS256 is verified on every request (signature, `alg`, `exp` required and in the
   future). The HMAC key pads are computed once from `JWT_SECRET`; that is the key schedule,
   not a verification result.
@@ -109,8 +123,9 @@ indexes or triggers are added.
 4. `test/test.sh`: 42/42 (CI flow, run in a clean Ubuntu 24.04 container).
 
 5. No caching across requests. Every response is built from SQLite pages read while the request is
-being served. The only state kept between batches is whether the invariant still holds, which
-records a property of the data, not data.
+being served. The only state kept between batches is two facts about the data, not data: whether the
+invariant still holds, and whether another connection has written (SQLite's data version
+number).
 
 6. WAL + `synchronous=NORMAL`; group commit; each response waits for its commit.
 
@@ -141,18 +156,29 @@ Both servers ran in the same harness on a shared machine (Xeon E-2176G, Ubuntu 2
 * **Run:** 300,000 users, 60 s ramp, 90–120 s hold.
 * **CPU per request:** the server cgroup's CPU time (user + system) divided by requests served.
 
-| Server | Runs | CPU per request | Peak memory (cgroup) | Hold p95 / p99 | Errors |
-|---|---:|---|---|---|---:|
-| Rust io_uring, #82 (batch 2: 264,000 users) | 2 | 21.3, 19.3 µs | 676–713 MB | 6.4–7.0 / 22–24 ms | 0 |
-| this submission | 4 | 15.4, 15.7, 16.6, 17.1 µs | 858–965 MB | 6.9–10.8 / 21–25 ms | 0 |
+The ramp-down column matters for peak memory. "30 s" ramps down as `load.js` does. "none" drops
+every connection at once, which briefly queues one FIN packet per socket and inflates the peak.
+
+| Server | Ramp-down | Runs | CPU per request | Peak memory (cgroup) | Errors |
+|---|---|---:|---|---|---:|
+| this submission | 30 s | 1 | 18.7 µs | 579 MB | 0 |
+| this submission, checkpoints in the event loop | none | 4 | 15.4, 15.7, 16.6, 17.1 µs | 858–965 MB | 0 |
+| Rust io_uring, #82 (batch 2: 264,000 users) | 30 s | 1 | 23.8 µs | 616 MB | 0 |
+| Rust io_uring, #82 | none | 2 | 21.3, 19.3 µs | 676–713 MB | 0 |
+
+Tail latency, for this submission at 30 s ramp-down:
+* overall hold p95 2.4 ms and p99 13 ms;
+* worst 10-second window p99 54 ms;
+* WAL at most 13 MB.
+
+With checkpoints inside the event loop, this machine's busy disk occasionally stalled
+responses; the worst 10-second window reached a p99 of 1,045 ms.
 
 Caveats:
 * **Loopback.** The client's CPU does part of the kernel's receive work that a real NIC would
   put on the server.
 * **Faster core.** This core is much faster than the benchmark's 2.4 GHz VPS.
 * **Noise.** The machine is shared; repeated runs vary by about ±1 µs per request.
-* **Peak memory.** It includes database pages that the startup invariant scan brings into the
-  page cache; those pages are reclaimable.
 * **Not a capacity search.** This is a same-harness comparison, not a search for the maximum
   number of users and not an official score.
 

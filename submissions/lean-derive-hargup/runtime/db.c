@@ -47,38 +47,113 @@ static KeyInfo *db_keyinfo(int nkey, int nextra) {
   return k;
 }
 
+/* ---- checkpoints ------------------------------------------------------------------------
+ * WAL checkpoints copy committed pages into the database file and fsync it. Run inside the
+ * event loop they stall every connection for as long as the disk takes, so they run on a
+ * thread with its own connection (SQLite is built multi-thread: each connection is used by one
+ * thread). A commit's durability does not depend on them (WAL, synchronous=NORMAL); the WAL
+ * hook wakes the thread once the log passes CKPT_FRAMES. */
+#include <pthread.h>
+#define CKPT_FRAMES 1000
+#define WAL_HIGH 16384      /* see db_wal_bound */
+
+static sqlite3 *ckpt_db;
+static pthread_mutex_t ckpt_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t ckpt_cv = PTHREAD_COND_INITIALIZER;
+static int ckpt_wanted;
+static int wal_frames;      /* frames in the log after the last commit */
+
+static int wal_hook(void *arg, sqlite3 *d, const char *name, int frames) {
+  (void)arg; (void)d; (void)name;
+  wal_frames = frames;
+  if (frames >= CKPT_FRAMES && !__atomic_load_n(&ckpt_wanted, __ATOMIC_RELAXED)) {
+    pthread_mutex_lock(&ckpt_mu);
+    ckpt_wanted = 1;
+    pthread_cond_signal(&ckpt_cv);
+    pthread_mutex_unlock(&ckpt_mu);
+  }
+  return SQLITE_OK;
+}
+static void *ckpt_main(void *arg) {
+  (void)arg;
+  for (;;) {
+    pthread_mutex_lock(&ckpt_mu);
+    while (!ckpt_wanted) pthread_cond_wait(&ckpt_cv, &ckpt_mu);
+    pthread_mutex_unlock(&ckpt_mu);
+    int nlog = 0, ndone = 0;
+    int rc = sqlite3_wal_checkpoint_v2(ckpt_db, "main", SQLITE_CHECKPOINT_PASSIVE, &nlog, &ndone);
+    if (rc != SQLITE_OK && rc != SQLITE_BUSY) fprintf(stderr, "checkpoint: %s\n", sqlite3_errmsg(ckpt_db));
+    __atomic_store_n(&ckpt_wanted, 0, __ATOMIC_RELEASE);
+  }
+  return 0;
+}
+static void ckpt_start(const char *path) {
+  if (sqlite3_open_v2(path, &ckpt_db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX, 0) != SQLITE_OK) db_die("open (checkpointer)");
+  sqlite3_exec(ckpt_db, "PRAGMA synchronous = NORMAL", 0, 0, 0);
+  pthread_t t;
+  if (pthread_create(&t, 0, ckpt_main, 0)) { perror("pthread_create"); exit(1); }
+  pthread_detach(t);
+}
+
 static void db_open(const char *path) {
   if (sqlite3_open_v2(path, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX, 0) != SQLITE_OK) db_die("open");
-  /* Exclusive locking before the first read: the WAL index lives in heap memory, no shared
-   * memory locks per transaction, and no other process can write while we run. That makes
-   * this process the only writer, which the startup invariant check relies on. */
-  db_exec("PRAGMA locking_mode = EXCLUSIVE");
   db_exec("PRAGMA journal_mode = WAL");
   db_exec("PRAGMA synchronous = NORMAL");
   db_exec("PRAGMA temp_store = MEMORY");
   db_exec("PRAGMA cache_size = -4096");   /* reads come from the mmap; the cache holds pages being written */
   db_exec("PRAGMA mmap_size = 1073741824");
-  db_exec("PRAGMA wal_autocheckpoint = 4000");
+  sqlite3_wal_hook(db, wal_hook, 0);      /* replaces automatic checkpoints */
   db_bt = db->aDb[0].pBt;
   st_begin = db_prepare("BEGIN");
   st_commit = db_prepare("COMMIT");
   st_rollback = db_prepare("ROLLBACK");
+  ckpt_start(path);
 }
 
 /* ---- batches --------------------------------------------------------------------------- */
+
+/* Commits by any other connection. SQLite's data version (BTREE_DATA_VERSION) changes only
+ * when another connection commits; this server's own commits and checkpoints leave it alone.
+ * The invariant checks assume this process is the only writer, so a change here turns off
+ * every plan that relies on them (see app_batch). */
+static u32 db_version;
+static int db_version_known, db_foreign_write;
 
 /* A batch is one transaction: reads first (from the snapshot at batch start), then writes,
  * then COMMIT. Responses are released only after the batch ends. */
 static void db_batch_begin(void) {
   if (step_reset(st_begin) != SQLITE_DONE) db_die("BEGIN");
   if (sqlite3BtreeBeginTrans(db_bt, 0, 0) != SQLITE_OK) db_die("read transaction");
+  u32 v;
+  sqlite3BtreeGetMeta(db_bt, BTREE_DATA_VERSION, &v);
+  if (db_version_known && v != db_version && !db_foreign_write) {
+    db_foreign_write = 1;
+    fprintf(stderr, "another connection wrote to the database: native read plans disabled\n");
+  }
+  db_version = v;
+  db_version_known = 1;
   db_in_batch = 1;
   db_wrote = 0;
 }
+/* The log starts over only when a write begins after every frame has been checkpointed. With
+ * commits arriving continuously, the background checkpoints can keep missing that moment and
+ * the log keeps growing. Past WAL_HIGH frames, while the background thread is idle, this
+ * thread checkpoints the remainder itself between batches (it cannot be inside a transaction
+ * here), so the next write restarts the log. That stalls the loop for one fsync, only in this
+ * case. */
+static void db_wal_bound(void) {
+  if (wal_frames < WAL_HIGH || __atomic_load_n(&ckpt_wanted, __ATOMIC_ACQUIRE)) return;
+  int nlog = 0, ndone = 0;
+  int rc = sqlite3_wal_checkpoint_v2(db, "main", SQLITE_CHECKPOINT_PASSIVE, &nlog, &ndone);
+  if (rc == SQLITE_OK) wal_frames = 0;
+  static i64 last;
+  if (time(0) != last) { last = time(0); fprintf(stderr, "wal: %d frames, checkpointed in the request thread (%s)\n", nlog, rc == SQLITE_OK ? "ok" : sqlite3_errmsg(db)); }
+}
+
 /* Returns 0 if the batch committed. */
 static int db_batch_end(void) {
   db_in_batch = 0;
-  if (step_reset(st_commit) == SQLITE_DONE) return 0;
+  if (step_reset(st_commit) == SQLITE_DONE) { db_wal_bound(); return 0; }
   step_reset(st_rollback);
   return -1;
 }

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Builds bin/server as a normal user: fetches the pinned SQLite amalgamation
-# and liburing (checksums verified), then a PGO+LTO release build trained on
-# a synthetic database. Falls back to a plain -O3 build if PGO fails.
+# and liburing (checksums verified), then an -O3 -march=native LTO build.
+# (PGO is available as `make pgo`; it measured no gain, see docs/RESULTS.md.)
 set -euo pipefail
 cd "$(dirname "$0")"
 ./fetch-deps.sh

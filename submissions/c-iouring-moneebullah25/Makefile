@@ -1,8 +1,9 @@
 # Builds bin/server from src/ plus the pinned SQLite amalgamation and liburing
 # in third_party/ (fetched by `make deps`, which build.sh runs first).
 #
-#   make            release build with LTO and PGO (trained on a synthetic DB)
-#   make plain      release build without PGO
+#   make            release build: -O3 -march=native, LTO (what build.sh ships)
+#   make pgo        the same with PGO trained on a synthetic DB (opt-in: measured
+#                   no CPU gain and lower throughput here, see docs/RESULTS.md)
 #   make debug      -O0 -g
 #   make asan       AddressSanitizer + UndefinedBehaviorSanitizer
 #   make ubsan      UndefinedBehaviorSanitizer only
@@ -43,7 +44,7 @@ OPT   := -O3 -march=native -fno-plt
 LTO   := -flto=auto -fuse-linker-plugin
 PROF  := build/prof
 
-.PHONY: all release plain debug asan ubsan check fuzz tools format lint clean deps
+.PHONY: all release plain pgo debug asan ubsan check fuzz tools format lint clean deps
 
 all: release
 
@@ -55,7 +56,9 @@ $(SQLITE_SRC) $(URING_LIB):
 build:
 	mkdir -p build bin
 
-# ---------------------------------------------------------------- plain release
+# ---------------------------------------------------------------- release
+
+release: plain
 
 plain: deps build
 	$(CC) $(STD) $(OPT) $(LTO) $(SQLITE_DEFS) -w -c $(SQLITE_SRC) -o build/sqlite3.o
@@ -66,7 +69,7 @@ plain: deps build
 # database (never the seed, rule 7) under the load generator, stage 3 rebuilds
 # with the profile. Any failure falls back to the plain build.
 
-release: deps build tools
+pgo: deps build tools
 	@set -e; \
 	rm -rf $(PROF); mkdir -p $(PROF); \
 	GEN="-fprofile-generate -fprofile-dir=$(PROF) -fprofile-update=atomic"; \

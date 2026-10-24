@@ -27,7 +27,7 @@ void config_defaults(struct config *c) {
     c->mem_stop_accept_mb = 192;
     c->mem_shed_mb = 96;
     c->sqlite_cache_kib = 32768;
-    c->ckpt_frames = 1000;
+    c->ckpt_frames = 4000;
     c->hold_frames = 8192;
     c->hold_timeout_ms = 500;
 }

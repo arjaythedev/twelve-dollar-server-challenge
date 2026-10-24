@@ -10,7 +10,7 @@
 #define APP_DB_VFS 1
 #endif
 #ifndef APP_DB_CKPT
-#define APP_DB_CKPT 3  // 3 uring, 2 thread, 1 inline, 0 SQLite autocheckpoint
+#define APP_DB_CKPT 2  // 2 thread, 3 uring, 1 inline, 0 SQLite autocheckpoint
 #endif
 #ifndef APP_DB_EXCL
 #define APP_DB_EXCL 1
@@ -121,5 +121,12 @@ SLOW_SIG(hx_parse_request);
 #endif
 #ifndef APP_BP_MIN
 #define APP_BP_MIN 8  // measured on a 1-vCPU Xeon: +10% at N=1, ±0 at 8, −4/−5% at 16/32
+#endif
+// ---------------------------------------------------------------- batch bounds (app.c)
+#ifndef APP_RELEASE_CHUNK
+#define APP_RELEASE_CHUNK 1024  // held POST connections re-presented per loop tick once the WAL has drained
+#endif
+#ifndef APP_ARENA_KEEP
+#define APP_ARENA_KEEP (8u << 20)  // a reply arena grown past this by one batch is freed after it (next starts at 1 MiB)
 #endif
 #endif

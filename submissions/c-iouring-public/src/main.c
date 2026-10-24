@@ -57,14 +57,14 @@ static void on_tick(loop_t *L, void *ud) {
               (unsigned long long)es.wal_resets, (unsigned long long)(es.wal_dropped_bytes >> 20),
               (unsigned long long)es.wal_flushes, (unsigned long long)es.commits_failed);
       fprintf(stderr,
-              "stats open=%u acc=%llu req=%llu batches=%llu lanes=%llu slow=%llu slow_checked=%llu jwt=%llu held=%llu "
-              "cfail=%llu deadline_503=%llu "
+              "stats open=%u acc=%llu req=%llu batches=%llu max_batch=%u lanes=%llu slow=%llu slow_checked=%llu jwt=%llu "
+              "held=%llu held_now=%u cfail=%llu deadline_503=%llu "
               "hint_closes=%llu close_frac=%.2f cap=%u busy=%.2f avail=%uMB orphans=%u listen_overflows=%llu "
               "listen_drops=%llu "
               "backlog=%u busy_src=%d utime=%ld.%06ld stime=%ld.%06ld maxrss=%ldKB\n",
               s->open, (unsigned long long)s->accepted, (unsigned long long)a->requests, (unsigned long long)a->batches,
-              (unsigned long long)a->lanes, (unsigned long long)a->slow, (unsigned long long)a->slow_checked,
-              (unsigned long long)a->jwts, (unsigned long long)a->held, (unsigned long long)a->commit_failures,
+              a->max_batch, (unsigned long long)a->lanes, (unsigned long long)a->slow, (unsigned long long)a->slow_checked,
+              (unsigned long long)a->jwts, (unsigned long long)a->held, a->nheld, (unsigned long long)a->commit_failures,
               (unsigned long long)a->deadline_503, (unsigned long long)s->hint_closes, s->close_frac, s->cap, s->busy,
               s->avail_mb, s->tcp_orphans, (unsigned long long)s->listen_overflows, (unsigned long long)s->listen_drops,
               s->backlog_now, s->busy_src, (long)ru.ru_utime.tv_sec, (long)ru.ru_utime.tv_usec,

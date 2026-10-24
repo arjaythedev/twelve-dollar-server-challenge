@@ -190,6 +190,7 @@ void app_close(void) {
 }
 
 const app_stats *app_get_stats(void) {
+  A.st.nheld = (uint32_t)A.nheld;
   return &A.st;
 }
 
@@ -395,8 +396,11 @@ int app_batch(loop_t *L, loop_in *in, int n) {
   A.n = 0;
   A.aused = 0;
   A.had_batch = 1;
-  int paused = A.nheld ? 1 : writes_paused();  // with POSTs already held, keep holding until on_tick re-presents
+  // Only the write gate decides. Held connections come back through app_tick in arrival order, a chunk per tick;
+  // each connection's input stays one unconsumed stream until processed, so its own order is kept.
+  int paused = writes_paused();
   A.st.batches++;
+  if ((uint32_t)n > A.st.max_batch) A.st.max_batch = (uint32_t)n;
 
   // 1. PARSE: first request of every connection as lanes, the rest per connection
   enum { BPN = 256 };
@@ -560,6 +564,11 @@ int app_batch(loop_t *L, loop_in *in, int n) {
     loop_write(L, s->conn, dst, hl + s->len);
     if (s->close) loop_close(L, s->conn);
   }
+  if (A.acap > APP_ARENA_KEEP) {  // loop_write copied the replies: give a burst's arena back (glibc keeps big chunks)
+    free(A.arena);
+    A.arena = 0;
+    A.acap = 0;
+  }
   return LOOP_COMMITTED;
 }
 
@@ -589,10 +598,12 @@ void app_tick(loop_t *L) {
   if (!fileops_set) eng_set_fileops(A.e, file_submit, L), fileops_set = 1;  // until now the ops ran synchronously
   eng_tick(A.e);
 #endif
-  if (A.nheld && !writes_paused()) {  // the WAL drained: bring the held POSTs back
-    for (int i = 0; i < A.nheld; i++)
+  if (A.nheld && !writes_paused()) {  // the WAL drained: bring the held POSTs back, oldest first, a chunk per tick
+    int k = A.nheld < APP_RELEASE_CHUNK ? A.nheld : APP_RELEASE_CHUNK;  // all at once was one giant batch
+    for (int i = 0; i < k; i++)
       loop_represent(L, A.held[i]);
-    A.nheld = 0;
+    A.nheld -= k;
+    memmove(A.held, A.held + k, (size_t)A.nheld * sizeof *A.held);
   }
   if (A.had_batch)
     eng_after_batch(A.e);

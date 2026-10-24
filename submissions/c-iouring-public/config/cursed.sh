@@ -11,10 +11,10 @@
 #                   DB_WAL_DROP=keep, and build.sh checks the objects use only public sqlite3_* symbols)
 #   DB_READS        direct: reads through SQLite's B-tree cursors           sql: the spec's prepared SELECTs
 #   DB_VFS          cursed: WAL write-coalescing + file-size cache shim     stock: SQLite's unix VFS
-#   DB_CKPT         uring (max's default): the engine's own checkpoint as   sqlite: SQLite's autocheckpoint
-#                   a state machine on the event loop's io_uring, same write gate, SQLITE_THREADSAFE=0, exclusive;
-#                   thread: checkpoint thread + write gate; inline: PASSIVE after the replies, every 16,384 frames.
-#                   CURSED=boring refuses uring.
+#   DB_CKPT         thread: checkpoint thread + write gate                  sqlite: SQLite's autocheckpoint
+#                   (or uring: the engine's own checkpoint as a state machine on the event loop's io_uring, same
+#                   write gate, SQLITE_THREADSAFE=0, exclusive; or inline: PASSIVE after the replies, every 16,384
+#                   frames). CURSED=boring refuses uring.
 #   DB_WAL_DROP     drop: checkpointed WAL pages leave the page cache       keep
 #   DB_LOCKING      exclusive (thread mode always uses unix-excl + NORMAL)  normal
 #   JWT             simd: multi-buffer batch HMAC (AVX-512VL / AVX2)        scalar
@@ -24,7 +24,7 @@
 # for its batch's COMMIT.
 
 case ${CURSED:-max} in
-  max) : "${DB_CKPT:=uring}" ;;
+  max) ;;
   boring)
     : "${SQLITE_PATCHES:=none}" "${SQLITE_LINK:=separate}" "${DB_READS:=sql}" "${DB_VFS:=stock}" "${DB_CKPT:=sqlite}" "${DB_WAL_DROP:=keep}"
     : "${DB_LOCKING:=normal}" "${JWT:=scalar}" "${PARSER_FAST:=slow}" "${PARSER_SLOW:=pico}"

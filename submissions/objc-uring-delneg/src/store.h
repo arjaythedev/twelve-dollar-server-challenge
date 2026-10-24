@@ -7,10 +7,14 @@
 #include <pthread.h>
 #include "sqlite3.h"
 
+void td_ckpt_child(const char *path, int req, int done);
+
 @interface TDStore : TDObject {
 @public
     pthread_mutex_t lock;
+    int walFrames;            // frames in the WAL after the last commit (wal hook; checkpointer mode)
 }
+- (void)useInlineCheckpoints TD_DIRECT;   // checkpointer process gone: SQLite's own autocheckpoint
 - (instancetype)initWithPath:(const char *)path TD_DIRECT;
 - (bool)begin TD_DIRECT;
 - (bool)commit TD_DIRECT;

@@ -29,6 +29,7 @@ typedef struct {
     uint32_t slots;           // fixed-file slots per ring
     int listenFd;
     int rings;
+    int ckptReq, ckptDone;    // pipes to the checkpointer process, or -1
 } TDWorkerConfig;
 
 @interface TDWorker : TDObject {

@@ -15,7 +15,7 @@
 #define POOL_CAP 16384u        // pooled output buffer size
 #define POOL_MAX 1024u
 
-enum { UD_ACCEPT = 1, UD_RECV, UD_SEND, UD_CLOSE, UD_POLL };
+enum { UD_ACCEPT = 1, UD_RECV, UD_SEND, UD_CLOSE, UD_POLL, UD_CKPT };
 #define MAX_RINGS 16
 #define UD(t, slot, gen) ((uint64_t)(t) << 56 | (uint64_t)((gen) & 0xFFFFFFu) << 32 | (uint64_t)(slot))
 #define UD_T(u) ((uint32_t)((u) >> 56))
@@ -142,6 +142,10 @@ typedef struct {
     size_t stride;
     Class connClass;
     uint32_t slots, highWater, lowGap;
+    int ckReq, ckDone, ckFrom, ckBackfilled;   // checkpointer process state
+    bool ckBusy, ckHold;
+    double ckHoldT;
+    int ckRes[3];             // rc, frames in WAL, frames backfilled
     int listenFd;
     TDAuth *auth;
     int64_t started, now;
@@ -179,6 +183,8 @@ static struct io_uring_sqe *sqe_get(struct io_uring *r) {
     auth = cfg->auth;
     started = cfg->started;
     slots = cfg->slots;
+    ckReq = cfg->ckptReq;
+    ckDone = cfg->ckptDone;
     uint32_t margin = slots / 4 < 4096 ? slots / 4 : 4096;   // > a listen backlog's burst (somaxconn 4096)
     highWater = slots - margin;
     lowGap = margin / 2;
@@ -659,6 +665,9 @@ TD_INLINE void req_err(TDReq *r, int st, const char *msg) {
             if (rs->high && rs->live + lowGap < highWater) rs->high = false;
         }
         break;
+    case UD_CKPT:
+        [self ckptDone:res];
+        break;
     case UD_POLL:
         if (!(flags & IORING_CQE_F_MORE)) R[slot].pollArmed = false;
         break;
@@ -676,12 +685,68 @@ TD_INLINE void req_err(TDReq *r, int st, const char *msg) {
     io_uring_cq_advance(r, n);
 }
 
+extern int td_opt_ckpt;
+int td_opt_hold = 8192;   // --hold=N: WAL frames at which writes wait for one checkpoint pass so the WAL rewinds
+
+static double mono_s(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec + t.tv_nsec / 1e9; }
+
+// ---------------------------------------------------------------- checkpointer
+// A child process runs PASSIVE checkpoints (copy + 2 fsyncs) so the loop never
+// waits on them. The loop asks for a pass every td_opt_ckpt new frames. Under
+// constant writes a pass never ends with the WAL fully copied, so the WAL can't
+// rewind; past td_opt_hold frames the loop stops flushing (requests queue up)
+// for one pass, after which the next write rewinds the WAL.
+- (void)ckptGone TD_DIRECT {
+    if (ckReq >= 0) close(ckReq);
+    ckReq = -1;
+    ckBusy = ckHold = false;
+    [store useInlineCheckpoints];
+}
+
+- (void)ckptRequest TD_DIRECT {
+    char c = 'p';
+    if (write(ckReq, &c, 1) != 1) { [self ckptGone]; return; }
+    ckBusy = true;
+    ckFrom = store->walFrames;
+}
+
+- (void)ckptArmRead TD_DIRECT {
+    struct io_uring_sqe *s = sqe_get(&R[0].ring);
+    io_uring_prep_read(s, ckDone, ckRes, sizeof ckRes, 0);
+    io_uring_sqe_set_data64(s, UD(UD_CKPT, 0, 0));
+}
+
+- (void)ckptAfterFlush TD_DIRECT {
+    if (ckReq < 0) return;
+    int f = store->walFrames;
+    if (f < ckBackfilled) ckBackfilled = 0;          // the WAL rewound
+    if (!ckHold && f >= td_opt_hold) {
+        ckHold = true;
+        ckHoldT = mono_s();
+        if (!ckBusy) [self ckptRequest];
+        return;
+    }
+    if (!ckBusy && f - ckBackfilled >= td_opt_ckpt) [self ckptRequest];
+}
+
+- (void)ckptDone:(int)res TD_DIRECT {
+    if (res != (int)sizeof ckRes) { [self ckptGone]; return; }
+    ckBusy = false;
+    if (ckRes[0] == SQLITE_OK && ckRes[2] >= 0) ckBackfilled = ckRes[2];
+    if (ckHold) {
+        if (store->walFrames != ckFrom) [self ckptRequest];   // frames were added during the pass: one more
+        else { ckHold = false; if (getenv("TD_CKLOG")) fprintf(stderr, "hold %.1f ms frames %d rc %d log %d ck %d\n", (mono_s() - ckHoldT) * 1e3, store->walFrames, ckRes[0], ckRes[1], ckRes[2]); }
+    }
+    if (ckReq >= 0) [self ckptArmRead];
+}
+
 int td_opt_batch = 128, td_opt_bwait = 1000, td_opt_bthresh = 8;   // --batch=N --bwait=us --bthresh=N
 
 - (void)run {
     uint32_t lastReq = 0;
     for (int k = 0; k < nrings; k++) [self setupRing:k];
     [self armAccept:0];
+    if (ckReq >= 0) [self ckptArmRead];
     for (;;) {
         for (int k = 1; k < nrings; k++)
             if (R[k].active && io_uring_sq_ready(&R[k].ring)) io_uring_submit(&R[k].ring);
@@ -700,7 +765,8 @@ int td_opt_batch = 128, td_opt_bwait = 1000, td_opt_bthresh = 8;   // --batch=N 
         now = time(NULL);
         for (int k = 0; k < nrings; k++) if (k == 0 || R[k].active) [self reap:k];
         lastReq = nreq;
-        if (nreq) [self flush];
+        if (TD_UNLIKELY(ckHold) && mono_s() - ckHoldT > 0.25) ckHold = false;   // child stuck: don't wait longer
+        if (nreq && !ckHold) { [self flush]; [self ckptAfterFlush]; }
         if (nrearm) {
             for (uint32_t i = 0; i < nrearm; i++) {
                 TDConn *c = conn_at(self, rearm[i]);

@@ -1,6 +1,11 @@
 #include "store.h"
+#include <errno.h>
+#include <signal.h>
+#include <sys/prctl.h>
+#include <unistd.h>
 
 int td_opt_ckpt = 250;    // wal_autocheckpoint pages (--ckpt=N): smaller, more frequent checkpoint stalls
+int td_opt_ckptproc = 1; // --ckptproc=0: inline autocheckpoint, EXCLUSIVE locking
 long long td_opt_mmap = 0; // mmap_size bytes (--mmap=N); 0: page cache reads beat per-page mmap objects
 
 #define POST_COLS "SELECT p.id, p.body, p.created_at, u.username, " \
@@ -22,6 +27,12 @@ static sqlite3_stmt *prep(sqlite3 *db, const char *sql) {
     return s;
 }
 
+static int wal_frames_hook(void *p, sqlite3 *d, const char *name, int frames) {
+    (void)d; (void)name;
+    ((TDStore *)p)->walFrames = frames;
+    return SQLITE_OK;
+}
+
 static void exec(sqlite3 *db, const char *sql) {
     char *err = NULL;
     if (sqlite3_exec(db, sql, NULL, NULL, &err) != SQLITE_OK) {
@@ -36,9 +47,10 @@ static void exec(sqlite3 *db, const char *sql) {
         fprintf(stderr, "open %s: %s\n", path, db ? sqlite3_errmsg(db) : "?");
         exit(1);
     }
-    // EXCLUSIVE before the first read: the WAL index then lives in heap memory
-    // and transactions take no file locks.
-    exec(db, "PRAGMA locking_mode=EXCLUSIVE");
+    // Inline mode: EXCLUSIVE before the first read, so the WAL index lives in heap
+    // memory and transactions take no file locks. Checkpointer mode: NORMAL
+    // locking (shared-memory WAL index), since a second process checkpoints.
+    if (!td_opt_ckptproc) exec(db, "PRAGMA locking_mode=EXCLUSIVE");
     exec(db, "PRAGMA journal_mode=WAL");
     exec(db, "PRAGMA synchronous=NORMAL");
     char mm[64];
@@ -46,9 +58,8 @@ static void exec(sqlite3 *db, const char *sql) {
     exec(db, mm);
     exec(db, "PRAGMA cache_size=-32768");
     exec(db, "PRAGMA temp_store=MEMORY");
-    char ck[64];
-    snprintf(ck, sizeof ck, "PRAGMA wal_autocheckpoint=%d", td_opt_ckpt);
-    exec(db, ck);
+    if (td_opt_ckptproc) sqlite3_wal_hook(db, wal_frames_hook, self);   // replaces autocheckpoint
+    else sqlite3_wal_autocheckpoint(db, td_opt_ckpt);
     exec(db, "SELECT count(*) FROM sqlite_schema"); // takes the exclusive lock now
     sHealth = prep(db, "SELECT 1");
     sFeed = prep(db, POST_COLS "ORDER BY p.created_at DESC, p.id DESC LIMIT 20");
@@ -65,6 +76,10 @@ static void exec(sqlite3 *db, const char *sql) {
     sCommit = prep(db, "COMMIT");
     sRollback = prep(db, "ROLLBACK");
     return self;
+}
+
+- (void)useInlineCheckpoints {
+    sqlite3_wal_autocheckpoint(db, td_opt_ckpt);
 }
 
 TD_INLINE bool run1(sqlite3_stmt *s) {
@@ -271,3 +286,27 @@ typedef struct { uint32_t body, bodyLen, ca, caLen, au, auLen; int64_t likes; bo
     return added ? 201 : 200;
 }
 @end
+
+// ---------------------------------------------------------------- checkpointer process
+// Runs in a child forked before SQLite or io_uring exist in the parent. For each
+// request byte it runs one PASSIVE checkpoint on its own connection (NORMAL
+// locking, never writes) and answers {rc, frames in WAL, frames backfilled}.
+void td_ckpt_child(const char *path, int req, int done) {
+    prctl(PR_SET_PDEATHSIG, SIGKILL);
+    sqlite3 *cdb = NULL;
+    char c;
+    for (;;) {
+        ssize_t n = read(req, &c, 1);
+        if (n == 0) _exit(0);
+        if (n < 0) { if (errno == EINTR) continue; _exit(1); }
+        if (!cdb) {
+            if (sqlite3_open_v2(path, &cdb, SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX, NULL) != SQLITE_OK) _exit(1);
+            sqlite3_busy_timeout(cdb, 0);
+            exec(cdb, "PRAGMA synchronous=NORMAL");
+            sqlite3_wal_autocheckpoint(cdb, 0);
+        }
+        int r[3] = { 0, -1, -1 };
+        r[0] = sqlite3_wal_checkpoint_v2(cdb, "main", SQLITE_CHECKPOINT_PASSIVE, &r[1], &r[2]);
+        if (write(done, r, sizeof r) != (ssize_t)sizeof r) _exit(1);
+    }
+}

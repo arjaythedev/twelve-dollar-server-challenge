@@ -155,7 +155,7 @@ env_port:    db 'PORT', 0
 def_secret:  db 'twelve-dollar-challenge', 0
 
 sql_pragmas: db 'PRAGMA locking_mode=EXCLUSIVE;PRAGMA journal_mode=WAL;PRAGMA synchronous=NORMAL;PRAGMA mmap_size=0;'
-             db 'PRAGMA cache_size=-32768;PRAGMA temp_store=MEMORY;PRAGMA busy_timeout=5000;'
+             db 'PRAGMA cache_size=-16384;PRAGMA temp_store=MEMORY;PRAGMA busy_timeout=5000;'
              db 'PRAGMA wal_autocheckpoint=0;PRAGMA journal_size_limit=67108864;', 0
 sql_feed:    db 'SELECT p.id,p.body,p.created_at,u.username '
              db 'FROM posts p JOIN users u ON u.id=p.user_id '

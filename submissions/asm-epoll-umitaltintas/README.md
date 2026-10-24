@@ -52,15 +52,20 @@ Version 2 removes both:
 - **Fixed files instead of fds.** Accepted sockets go straight into io_uring's fixed-file table
   (`IORING_FILE_INDEX_ALLOC`) and never get an fd, so `LimitNOFILE` does not apply to them. One
   ring holds ~65k connections. When it fills up, the next ring is created (up to 8), and the
-  accepts move there. 340k open keep-alive connections work. No user gets `Connection: close`
+  accepts move there. 350k open keep-alive connections work. No user gets `Connection: close`
   unless they ask for it.
 - **Fewer syscalls.** Receiving uses multishot `recv` into a provided buffer ring. Sending uses
   `send` with `MSG_DONTWAIT` and completes inside the same `io_uring_enter` call. Waiting happens
-  in that call too. Measured: **~1.2 syscalls per request** (0.57 `io_uring_enter`, the rest is
-  SQLite's WAL `pwrite`), against more than 3 before.
-- **The rings use `DEFER_TASKRUN | SINGLE_ISSUER | COOP_TASKRUN`.** Completion work runs only
-  when the loop asks for it, in its own context, without interrupting it. Under load the loop
-  waits for 32 completions or 250 µs, whichever comes first, so each pass has a decent batch.
+  in that call too. Measured: **~0.9–1.1 syscalls per request** (0.3–0.45 `io_uring_enter`, the
+  rest is SQLite's WAL `pwrite`), against more than 3 before.
+- **Ring 0 uses `DEFER_TASKRUN`, the others don't.** The loop waits on ring 0, whose completion
+  work runs only when the loop asks for it, in one batch. Under load the wait returns after 32
+  completions or 250 µs, so each pass has a decent batch. The other rings (`COOP_TASKRUN`) post
+  their completions as task work on the way back from any syscall, so they need an
+  `io_uring_enter` only to submit. Ring 0 has a multishot poll on each of their fds, so their
+  completions also wake the wait. (With `DEFER_TASKRUN` on every ring, each ring needed its own
+  enter per pass, and data waited in the sockets until then: at 335k connections that was 72 MB
+  of socket buffers during the ramp. The idea is from the Objective-C entry, #154.)
 
 ### Kernel 6.8 details that mattered
 
@@ -79,8 +84,11 @@ Version 2 removes both:
   on 6.8.0-147 (it works on 6.8.0-117). The server then falls back to
   `IORING_OP_PROVIDE_BUFFERS`. Both paths are tested.
 - **An eventfd doesn't help with `DEFER_TASKRUN`.** It woke the loop several milliseconds late,
-  so the loop waits in `io_uring_enter` on ring 0 instead. Other rings are checked each pass.
-  When idle with several rings, the wait times out after 1 ms.
+  so the loop waits in `io_uring_enter` on ring 0 instead. When idle with several rings, the wait
+  also times out after 1 ms.
+- **Receive buffers: 2,048 of 1 KB per ring.** With 512 per ring, connect bursts ran out
+  (`ENOBUFS`), and the data waited in the sockets. 1 KB is larger than a request here; a longer
+  one spans buffers.
 - **Multishot accept stalled under bursts**, so there are 256 single-shot accepts in flight
   per ring. Fewer than that let the listen queue overflow when 300k clients connect within a
   minute.
@@ -92,7 +100,7 @@ Version 2 removes both:
 
 - **Pragmas** (all allowed by rule 6): `journal_mode=WAL`, `synchronous=NORMAL`,
   `locking_mode=EXCLUSIVE` (one connection in one process: no `fcntl` lock syscalls per
-  transaction), `mmap_size=0` with a 32 MB page cache, `wal_autocheckpoint=0`,
+  transaction), `mmap_size=0` with a 16 MB page cache, `wal_autocheckpoint=0`,
   `journal_size_limit=64 MB`.
 - **Checkpoints run in the loop, right after a pass's responses are sent.** Once the WAL
   reaches 4,096 frames, a `PASSIVE` checkpoint runs. Nothing is writing at that point, so it
@@ -125,22 +133,25 @@ absolute numbers will differ.
 
 | | v1 (epoll, batch 2) | v2 (io_uring) |
 |---|---|---|
-| server CPU per request | 40–52 µs | ~15.5 µs |
-| syscalls per request | > 3 | ~1.2 |
+| server CPU per request | 40–52 µs | 16–19 µs |
+| syscalls per request | > 3 | 0.9–1.1 |
 | 155k users, 2 min hold | fails: p95 3.5 s, p99 5.4 s | passes |
 | 300k users, 120 s ramp, 5 min hold | — | passes: p95 10.5 ms, p99 21 ms |
-| **340k users, 120 s ramp, 5 min hold** | — | **passes**: p50 0.5 ms, p95 20.6 ms, p99 51 ms, 0 failed of 10.8 M requests |
+| 340k users, 120 s ramp, 5 min hold | — | passes: p95 20.6 ms, p99 51 ms, 0 failed of 10.8 M requests |
+| **350k users, 130 s ramp, 5 min hold** | — | **passes**: p50 0.6 ms, p95 31 ms, p99 143 ms, 0 failed of 11.1 M requests |
 
-At 340k users (~36,000 requests/s) the server process uses 56% of the vCPU (15.7 µs per
-request). Most of the rest is the kernel's TCP stack and network interrupts.
+At 350k users (~37,000 requests/s) the server process uses 69% of the vCPU (18.7 µs per
+request, 0.9 syscalls). Most of the rest is the kernel's TCP stack and network interrupts.
+(Per-request CPU moved by ±1.5 µs between VM boots, for the same build.)
 
 **The limit on this box is memory, not CPU.** Every open TCP connection costs the kernel about
 4.2 KB, whether it is busy or idle: the socket (2.3 KB), its inode, file and dentry (1.3 KB),
-the armed multishot receive (0.35 KB). At 340k that is 1.47 GB of slab on a 1.97 GB machine. The
-server itself adds about 65 MB (connection table, receive buffers, SQLite's 32 MB cache). The
-app's cgroup peaked at 940 MB: it is charged for part of the kernel memory and for the pages of
-the database it writes. 370k users ran the machine out of memory during the ramp (at ~342k
-connections), and the kernel killed the server.
+the armed multishot receive (0.35 KB). At 350k that is about 1.5 GB of slab on a 1.97 GB
+machine. The server itself adds about 50–80 MB (connection table, receive buffers, SQLite's
+16 MB cache). The app's cgroup peaked at about 1 GB: it is charged for part of the kernel memory
+and for the pages of the database it writes. 360k and 370k passed one-minute holds right after
+a VM boot, and ran the machine out of memory during the ramp in later runs (the kernel's slabs
+fragment over repeated runs), so 350k is the dependable limit here.
 
 With a 60 s ramp, some runs had a few failed load processes at the end of the ramp. In those
 runs the host running the load generators was at ~90% CPU. The server's longest pass stayed

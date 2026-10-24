@@ -105,7 +105,7 @@
 %define SQ_ENTRIES        4096
 %define CQ_ENTRIES        32768
 %define NBUF              2048           ; provided receive buffers per ring (4 MB; 512 ran out in connect bursts)
-%define BUF_SHIFT         11
+%define BUF_SHIFT         10             ; 1 KB: requests here are smaller; a longer one spans buffers
 %define BUF_SZ            (1 << BUF_SHIFT)
 
 ; ring record (128 bytes)

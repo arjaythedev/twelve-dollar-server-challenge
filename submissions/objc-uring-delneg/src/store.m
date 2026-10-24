@@ -1,7 +1,9 @@
 #include "store.h"
 #include <errno.h>
 #include <signal.h>
+#include <stdio.h>
 #include <sys/prctl.h>
+#include <time.h>
 #include <unistd.h>
 
 int td_opt_ckpt = 250;    // wal_autocheckpoint pages (--ckpt=N): smaller, more frequent checkpoint stalls
@@ -68,7 +70,9 @@ static void exec(sqlite3 *db, const char *sql) {
     sFeedRange = prep(db, "SELECT p.id, p.body, p.created_at, u.username FROM posts p "
                           "JOIN users u ON u.id = p.user_id WHERE p.id BETWEEN ?1 AND ?2");
     sLikeRange = prep(db, "SELECT post_id, count(*) FROM likes WHERE post_id BETWEEN ?1 AND ?2 GROUP BY post_id");
-    sCreate = prep(db, "INSERT INTO posts (user_id, body) VALUES (?1, ?2) RETURNING id, created_at");
+    // No RETURNING: it buffers rows in an ephemeral table (a page cache built and
+    // torn down per insert). created_at is written in the schema default's format.
+    sCreate = prep(db, "INSERT INTO posts (user_id, body, created_at) VALUES (?1, ?2, ?3)");
     sLike = prep(db, "INSERT INTO likes (user_id, post_id) SELECT ?1, ?2 "
                      "WHERE EXISTS (SELECT 1 FROM posts WHERE id = ?2) ON CONFLICT DO NOTHING");
     sExists = prep(db, "SELECT 1 FROM posts WHERE id = ?1");
@@ -80,6 +84,30 @@ static void exec(sqlite3 *db, const char *sql) {
 
 - (void)useInlineCheckpoints {
     sqlite3_wal_autocheckpoint(db, td_opt_ckpt);
+}
+
+// UTC "YYYY-MM-DDTHH:MM:SS.mmmZ" (24 bytes, no NUL), as strftime('%Y-%m-%dT%H:%M:%fZ','now').
+static void iso_now(char *o) {
+    static time_t lastSec = -1;
+    static char head[20];               // "YYYY-MM-DDTHH:MM:SS"
+    struct timespec t;
+    clock_gettime(CLOCK_REALTIME, &t);
+    if (t.tv_sec != lastSec) {
+        struct tm g;
+        gmtime_r(&t.tv_sec, &g);
+        char tmp[32];
+        snprintf(tmp, sizeof tmp, "%04d-%02d-%02dT%02d:%02d:%02d", g.tm_year + 1900, g.tm_mon + 1, g.tm_mday,
+                 g.tm_hour, g.tm_min, g.tm_sec);
+        memcpy(head, tmp, 19);
+        lastSec = t.tv_sec;
+    }
+    memcpy(o, head, 19);
+    unsigned ms = (unsigned)(t.tv_nsec / 1000000);
+    o[19] = '.';
+    o[20] = (char)('0' + ms / 100);
+    o[21] = (char)('0' + ms / 10 % 10);
+    o[22] = (char)('0' + ms % 10);
+    o[23] = 'Z';
 }
 
 TD_INLINE bool run1(sqlite3_stmt *s) {
@@ -239,23 +267,23 @@ typedef struct { uint32_t body, bodyLen, ca, caLen, au, auLen; int64_t likes; bo
 - (int)create:(int64_t)uid name:(const char *)name length:(uint32_t)nl
           body:(const char *)body length:(uint32_t)bl into:(TDBuf *)b {
     sqlite3_stmt *s = sCreate;
+    char ts[24];
+    iso_now(ts);
     sqlite3_bind_int64(s, 1, uid);
     sqlite3_bind_text(s, 2, body, (int)bl, SQLITE_STATIC);
+    sqlite3_bind_text(s, 3, ts, 24, SQLITE_STATIC);
     int rc = sqlite3_step(s);
-    if (rc != SQLITE_ROW) { sqlite3_reset(s); return fail(b); }
+    sqlite3_reset(s);
+    if (rc != SQLITE_DONE) return fail(b);
     td_buf_lit(b, "{\"post\":{\"id\":");
-    td_buf_int(b, sqlite3_column_int64(s, 0));
+    td_buf_int(b, sqlite3_last_insert_rowid(db));
     td_buf_lit(b, ",\"body\":\"");
     td_buf_json_str(b, body, bl);
     td_buf_lit(b, "\",\"created_at\":\"");
-    td_buf_put(b, sqlite3_column_text(s, 1), (uint32_t)sqlite3_column_bytes(s, 1));
+    td_buf_put(b, ts, 24);
     td_buf_lit(b, "\",\"author\":\"");
     td_buf_json_str(b, name, nl);
     td_buf_lit(b, "\",\"like_count\":0}}");
-    rc = sqlite3_step(s); // finish the RETURNING statement so the insert completes
-    sqlite3_reset(s);
-    sqlite3_clear_bindings(s);
-    if (rc != SQLITE_DONE) return fail(b);
     return 201;
 }
 

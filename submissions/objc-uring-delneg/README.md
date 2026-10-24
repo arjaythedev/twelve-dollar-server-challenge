@@ -39,6 +39,7 @@ Server in Docker capped at 1 CPU / 2 GB (`--cpuset-cpus=0`, host network), wrk w
 | Batching window: after a pass with 8+ requests, wait for up to 128 completions or 1 ms | −5.3% CPU per request at 42k req/s from 20k users (10.53 → 9.96 µs/req), p99 1.0 → 2.1 ms |
 | `wal_autocheckpoint` 1000 → 250 pages | DB on a real disk (fsync ~11 ms), 42k req/s: p99 46 → 27 ms (the in-loop checkpoint's stalls get shorter); 100 is fsync-bound, 4096+ much worse; CPU equal |
 | Checkpointer process with stop-the-world WAL rewind (see Design) | DB on a real disk, 40k users: 50.5k → 81.8k req/s served (p50 324 → 1.8 ms, p99 490 → 92 ms); in-loop checkpoint fsyncs had made the server disk-bound. tmpfs: CPU equal |
+| `INSERT` without `RETURNING` (`RETURNING` buffers its rows in an ephemeral table, a page cache set up and torn down per insert); `created_at` written in the schema default's format, id from `sqlite3_last_insert_rowid` | create-only wrk: 85–89k → 104k req/s (11.5 → 9.6 µs/req); realistic mix −0.5% CPU |
 
 Final: about 131k rps at 7.6 µs/req on the mix. Per route: `/health` 3.2 µs (kernel and loop floor), `GET /posts/:id` 4.0, like 5.9, create 12.1, `/feed` 12.6. For reference, Rust io_uring #82 built from its own scripts on the same harness: 115k rps, 8.7 µs/req (this entry before the mmap change: 127k, 7.9 µs/req).
 

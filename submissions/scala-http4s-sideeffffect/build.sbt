@@ -10,7 +10,7 @@ lazy val root = project
   .in(file("."))
   .settings(
     name := "feed-server",
-    scalacOptions ++= Seq("-release", "25", "-deprecation", "-feature", "-Wunused:all"),
+    scalacOptions ++= Seq("-release", "27", "-deprecation", "-feature", "-Wunused:all"),
     libraryDependencies ++= Seq(
       "org.typelevel" %% "cats-effect" % "3.7.1",
       "co.fs2" %% "fs2-core" % "3.14.0",
@@ -25,7 +25,10 @@ lazy val root = project
       "org.slf4j" % "slf4j-nop" % "2.0.20" // HikariCP logs through SLF4J
     ),
     writeClasspath := {
-      val cp = (Runtime / fullClasspath).value.files.map(_.getAbsolutePath).mkString(java.io.File.pathSeparator)
-      IO.write(target.value / "classpath.txt", cp)
+      val converter = fileConverter.value
+      val cp = (Runtime / fullClasspath).value
+        .map(entry => converter.toPath(entry.data).toAbsolutePath)
+        .mkString(java.io.File.pathSeparator)
+      IO.write(baseDirectory.value / "target" / "classpath.txt", cp)
     }
   )

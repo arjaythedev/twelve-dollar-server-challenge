@@ -31,6 +31,14 @@ let inline private stackSpan<'T when 'T: unmanaged> (n: int) =
 
 let inline private ro (s: Span<byte>) : ReadOnlySpan<byte> = Span<byte>.op_Implicit s
 
+// Byte strings made once: an F# "..."B literal inside a function allocates a new array each time it runs.
+let private kAlg = "alg"B
+let private vHs256 = "HS256"B
+let private kSub = "sub"B
+let private kUsername = "username"B
+let private kExp = "exp"B
+let private bBearer = "Bearer "B
+
 let private isHs256 (json: ReadOnlySpan<byte>) =
     try
         let mutable r = Utf8JsonReader(json)
@@ -39,10 +47,10 @@ let private isHs256 (json: ReadOnlySpan<byte>) =
         else
             let mutable hs256 = false
             while r.Read() && r.TokenType = JsonTokenType.PropertyName do
-                let isAlg = r.ValueTextEquals("alg"B)
+                let isAlg = r.ValueTextEquals(kAlg)
                 r.Read() |> ignore
                 if isAlg then
-                    hs256 <- r.TokenType = JsonTokenType.String && r.ValueTextEquals("HS256"B)
+                    hs256 <- r.TokenType = JsonTokenType.String && r.ValueTextEquals(vHs256)
                 r.Skip() // past a nested value, so its own properties are not read as top-level ones
             hs256
     with :? JsonException ->
@@ -73,9 +81,9 @@ let private readPayload (json: ReadOnlySpan<byte>) (userId: byref<int64>) (usern
             bad <- true
         else
             while not bad && r.Read() && r.TokenType = JsonTokenType.PropertyName do
-                let isSub = r.ValueTextEquals("sub"B)
-                let isName = not isSub && r.ValueTextEquals("username"B)
-                let isExp = not isSub && not isName && r.ValueTextEquals("exp"B)
+                let isSub = r.ValueTextEquals(kSub)
+                let isName = not isSub && r.ValueTextEquals(kUsername)
+                let isExp = not isSub && not isName && r.ValueTextEquals(kExp)
                 r.Read() |> ignore
                 if isSub then
                     subOk <- parseSub &r &userId
@@ -97,7 +105,7 @@ let private readPayload (json: ReadOnlySpan<byte>) (userId: byref<int64>) (usern
 /// Checks the Authorization header value (raw bytes; empty when there is none).
 /// Returns the 401 body, or null when the token is valid.
 let verify (header: ReadOnlySpan<byte>) (userId: byref<int64>) (username: byref<string>) : byte[] =
-    if not (header.StartsWith("Bearer "B)) then
+    if not (header.StartsWith(bBearer)) then
         MissingBearer
     else
         let token = header.Slice 7

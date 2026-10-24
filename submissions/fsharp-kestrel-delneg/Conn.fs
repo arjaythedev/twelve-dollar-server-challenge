@@ -48,24 +48,42 @@ let private parseId (s: ReadOnlySpan<byte>) =
                 i <- s.Length
         v
 
+// Byte strings made once: an F# "..."B literal inside a function allocates a new array each time it runs.
+let private bGet = "GET"B
+let private bPost = "POST"B
+let private bFeed = "/feed"B
+let private bPostsSlash = "/posts/"B
+let private bHealth = "/health"B
+let private bPosts = "/posts"B
+let private bLike = "/like"B
+let private bHttp1 = "HTTP/1."B
+let private bHttp10 = "HTTP/1.0"B
+let private hAuthorization = "authorization"B
+let private hContentLength = "content-length"B
+let private hConnection = "connection"B
+let private vClose = "close"B
+let private vKeepAlive = "keep-alive"B
+let private hTransferEncoding = "transfer-encoding"B
+let private hExpect = "expect"B
+
 let private dispatch (w: IBufferWriter<byte>) (close: bool) (meth: ReadOnlySpan<byte>) (path: ReadOnlySpan<byte>)
                      (auth: ReadOnlySpan<byte>) (body: ReadOnlySpan<byte>) : Task =
-    if meth.SequenceEqual("GET"B) then
-        if path.SequenceEqual("/feed"B) then
+    if meth.SequenceEqual(bGet) then
+        if path.SequenceEqual(bFeed) then
             Api.feed w close
             null
-        elif path.StartsWith("/posts/"B) && path.Slice(7).IndexOf('/'B) < 0 then
+        elif path.StartsWith(bPostsSlash) && path.Slice(7).IndexOf('/'B) < 0 then
             let id = parseId (path.Slice 7)
             if id = 0L then Api.send w 400 close Api.InvalidId else Api.getPost w close id
             null
-        elif path.SequenceEqual("/health"B) then
+        elif path.SequenceEqual(bHealth) then
             Api.health w close
             null
         else
             Api.send w 404 close Api.NotFound
             null
-    elif meth.SequenceEqual("POST"B) then
-        if path.SequenceEqual("/posts"B) then
+    elif meth.SequenceEqual(bPost) then
+        if path.SequenceEqual(bPosts) then
             let mutable userId = 0L
             let mutable username: string = null
             match Auth.verify auth &userId &username with
@@ -73,7 +91,7 @@ let private dispatch (w: IBufferWriter<byte>) (close: bool) (meth: ReadOnlySpan<
             | authError ->
                 Api.send w 401 close authError
                 null
-        elif path.Length > 12 && path.StartsWith("/posts/"B) && path.EndsWith("/like"B)
+        elif path.Length > 12 && path.StartsWith(bPostsSlash) && path.EndsWith(bLike)
              && path.Slice(7, path.Length - 12).IndexOf('/'B) < 0 then
             // Auth first, then the id (SPEC).
             let mutable userId = 0L
@@ -119,7 +137,7 @@ let private processSpan (s: ReadOnlySpan<byte>) (w: IBufferWriter<byte>)
             let sp1 = line.IndexOf ' 'B
             let afterMethod = if sp1 < 0 then ReadOnlySpan.Empty else line.Slice(sp1 + 1)
             let sp2 = afterMethod.IndexOf ' 'B
-            if sp1 <= 0 || sp2 <= 0 || not (afterMethod.Slice(sp2 + 1).StartsWith("HTTP/1."B)) then
+            if sp1 <= 0 || sp2 <= 0 || not (afterMethod.Slice(sp2 + 1).StartsWith(bHttp1)) then
                 Api.send w 400 true Api.NotFound
                 flags <- flags ||| Wrote ||| Close
                 stop <- true
@@ -129,7 +147,7 @@ let private processSpan (s: ReadOnlySpan<byte>) (w: IBufferWriter<byte>)
                 let q = path.IndexOf '?'B
                 if q >= 0 then path <- path.Slice(0, q)
                 let force = flags &&& ForceClose <> 0
-                let mutable close = force || afterMethod.Slice(sp2 + 1).SequenceEqual("HTTP/1.0"B)
+                let mutable close = force || afterMethod.Slice(sp2 + 1).SequenceEqual(bHttp10)
                 let mutable auth = ReadOnlySpan<byte>.Empty
                 let mutable contentLength = 0
                 let mutable expect = false
@@ -144,8 +162,8 @@ let private processSpan (s: ReadOnlySpan<byte>) (w: IBufferWriter<byte>)
                         let name = h.Slice(0, colon)
                         let value = h.Slice(colon + 1).Trim(ReadOnlySpan ows)
                         match name.Length with
-                        | 13 when Ascii.EqualsIgnoreCase(name, "authorization"B) -> auth <- value
-                        | 14 when Ascii.EqualsIgnoreCase(name, "content-length"B) ->
+                        | 13 when Ascii.EqualsIgnoreCase(name, hAuthorization) -> auth <- value
+                        | 14 when Ascii.EqualsIgnoreCase(name, hContentLength) ->
                             let mutable n = 0L
                             let mutable i = 0
                             if value.Length = 0 || value.Length > 9 then bad <- true
@@ -154,11 +172,11 @@ let private processSpan (s: ReadOnlySpan<byte>) (w: IBufferWriter<byte>)
                                 if c >= '0'B && c <= '9'B then n <- n * 10L + int64 (c - '0'B) else bad <- true
                                 i <- i + 1
                             contentLength <- int n
-                        | 10 when Ascii.EqualsIgnoreCase(name, "connection"B) ->
-                            if Ascii.EqualsIgnoreCase(value, "close"B) then close <- true
-                            elif Ascii.EqualsIgnoreCase(value, "keep-alive"B) then close <- force
-                        | 17 when Ascii.EqualsIgnoreCase(name, "transfer-encoding"B) -> bad <- true // chunked bodies: not supported
-                        | 6 when Ascii.EqualsIgnoreCase(name, "expect"B) -> expect <- true
+                        | 10 when Ascii.EqualsIgnoreCase(name, hConnection) ->
+                            if Ascii.EqualsIgnoreCase(value, vClose) then close <- true
+                            elif Ascii.EqualsIgnoreCase(value, vKeepAlive) then close <- force
+                        | 17 when Ascii.EqualsIgnoreCase(name, hTransferEncoding) -> bad <- true // chunked bodies: not supported
+                        | 6 when Ascii.EqualsIgnoreCase(name, hExpect) -> expect <- true
                         | _ -> ()
                 if bad || contentLength > MaxBodyBytes then
                     Api.send w 400 true Api.Malformed
@@ -173,7 +191,7 @@ let private processSpan (s: ReadOnlySpan<byte>) (w: IBufferWriter<byte>)
                             flags <- flags ||| Wrote ||| ContinueSent
                         flags <- flags ||| NeedMore
                         stop <- true
-                    elif Db.holdWrites && meth.SequenceEqual("POST"B) then
+                    elif Db.holdWrites && meth.SequenceEqual(bPost) then
                         // While the WAL catches up, writes wait in the input; the loop runs them again later.
                         flags <- flags ||| Held
                         stop <- true

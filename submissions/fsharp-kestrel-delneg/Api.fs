@@ -24,15 +24,24 @@ let private startedAt = Environment.TickCount64
 
 // ---- HTTP framing ------------------------------------------------------------------------------------------------
 
+let private s200 = "HTTP/1.1 200 OK\r\n"B
+let private s201 = "HTTP/1.1 201 Created\r\n"B
+let private s400 = "HTTP/1.1 400 Bad Request\r\n"B
+let private s401 = "HTTP/1.1 401 Unauthorized\r\n"B
+let private s404 = "HTTP/1.1 404 Not Found\r\n"B
+let private s503 = "HTTP/1.1 503 Service Unavailable\r\n"B
+let private s500 = "HTTP/1.1 500 Internal Server Error\r\n"B
+
+/// The status line. The arrays are made once (an F# "..."B literal in a function makes a new array each call).
 let private statusLine (status: int) : byte[] =
     match status with
-    | 200 -> "HTTP/1.1 200 OK\r\n"B
-    | 201 -> "HTTP/1.1 201 Created\r\n"B
-    | 400 -> "HTTP/1.1 400 Bad Request\r\n"B
-    | 401 -> "HTTP/1.1 401 Unauthorized\r\n"B
-    | 404 -> "HTTP/1.1 404 Not Found\r\n"B
-    | 503 -> "HTTP/1.1 503 Service Unavailable\r\n"B
-    | _ -> "HTTP/1.1 500 Internal Server Error\r\n"B
+    | 200 -> s200
+    | 201 -> s201
+    | 400 -> s400
+    | 401 -> s401
+    | 404 -> s404
+    | 503 -> s503
+    | _ -> s500
 
 let private headers1 = "Content-Type: application/json\r\nDate: "B
 let private headers2 = "\r\nContent-Length: "B
@@ -347,6 +356,9 @@ let like (w: IBufferWriter<byte>) (close: bool) (userId: int64) (id: int64) : Ta
         }
         :> Task
 
+// Byte strings made once: an F# "..."B literal inside a function allocates a new array each time it runs.
+let private kBodyName = "body"B
+
 /// The 400 body, or null when the post body is valid. Reads the whole document, so trailing junk is an error.
 let private parseBody (data: ReadOnlySpan<byte>) (body: byref<string>) : byte[] =
     let mutable value: string = null
@@ -357,7 +369,7 @@ let private parseBody (data: ReadOnlySpan<byte>) (body: byref<string>) : byte[] 
         while r.Read() do
             if r.CurrentDepth = 0 && r.TokenType = JsonTokenType.StartObject then
                 isObject <- true
-            elif r.CurrentDepth = 1 && r.TokenType = JsonTokenType.PropertyName && r.ValueTextEquals("body"B) then
+            elif r.CurrentDepth = 1 && r.TokenType = JsonTokenType.PropertyName && r.ValueTextEquals(kBodyName) then
                 r.Read() |> ignore
                 value <- if r.TokenType = JsonTokenType.String then r.GetString() else null
                 if r.TokenType = JsonTokenType.StartObject || r.TokenType = JsonTokenType.StartArray then

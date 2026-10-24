@@ -1,0 +1,8 @@
+{
+  "compilerOptions": {
+    "target": "ES2023", "module": "NodeNext", "moduleResolution": "NodeNext",
+    "strict": true, "outDir": "dist", "skipLibCheck": true, "noEmitOnError": true,
+    "noUncheckedIndexedAccess": true
+  },
+  "include": ["server.ts"]
+}

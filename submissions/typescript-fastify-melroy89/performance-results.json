@@ -1,0 +1,427 @@
+{
+  "host": {
+    "cpu": "AMD Ryzen Threadripper 7960X",
+    "physical_cores": 24,
+    "hardware_threads": 48,
+    "os_memory_gib": 125.3,
+    "kernel": "7.0.0-38-generic"
+  },
+  "comparison": {
+    "generator": "autocannon 8.0.0",
+    "connections": 100,
+    "seconds_per_trial": 10,
+    "trials": [
+      {
+        "variant": "source-baseline",
+        "endpoint": "feed",
+        "trial": "1",
+        "requests_per_second": 20107.28,
+        "p99_ms": 9,
+        "errors": 0,
+        "non_2xx": 0
+      },
+      {
+        "variant": "source-baseline",
+        "endpoint": "feed",
+        "trial": "2",
+        "requests_per_second": 19180,
+        "p99_ms": 8,
+        "errors": 0,
+        "non_2xx": 0
+      },
+      {
+        "variant": "source-baseline",
+        "endpoint": "post",
+        "trial": "1",
+        "requests_per_second": 44539.64,
+        "p99_ms": 2,
+        "errors": 0,
+        "non_2xx": 0
+      },
+      {
+        "variant": "source-baseline",
+        "endpoint": "post",
+        "trial": "2",
+        "requests_per_second": 43896.73,
+        "p99_ms": 3,
+        "errors": 0,
+        "non_2xx": 0
+      },
+      {
+        "variant": "source-optimized",
+        "endpoint": "feed",
+        "trial": "1",
+        "requests_per_second": 23670.55,
+        "p99_ms": 6,
+        "errors": 0,
+        "non_2xx": 0
+      },
+      {
+        "variant": "source-optimized",
+        "endpoint": "feed",
+        "trial": "2",
+        "requests_per_second": 23158.55,
+        "p99_ms": 6,
+        "errors": 0,
+        "non_2xx": 0
+      },
+      {
+        "variant": "source-optimized",
+        "endpoint": "post",
+        "trial": "1",
+        "requests_per_second": 42898.91,
+        "p99_ms": 3,
+        "errors": 0,
+        "non_2xx": 0
+      },
+      {
+        "variant": "source-optimized",
+        "endpoint": "post",
+        "trial": "2",
+        "requests_per_second": 40816,
+        "p99_ms": 3,
+        "errors": 0,
+        "non_2xx": 0
+      }
+    ]
+  },
+  "screening": {
+    "vus": 150000,
+    "hold": "1m",
+    "ramp": "60s",
+    "warmup": "0",
+    "image": "sha256:84ceacdafb220da60a533510ec190ff05adbbe8f4448b59499c73287e09a37d1",
+    "source_sha256": "e9d2d2dbd0a6512e0e0dfbe78c700f274baff86db28ccdafd284a924a214ba04",
+    "workload_sha256": "14fbbe36a7bef2cc803c8c2309b8b93d6e6ec9c2b6aba78ebe3b9a95ebf85972",
+    "server_cpu_quota": 1,
+    "server_memory_bytes": 2147483648,
+    "server_swap_bytes": 0,
+    "nofile": 65535,
+    "network": "host",
+    "generator": "grafana/k6:1.4.2",
+    "source_addresses": "127.0.0.2-127.0.0.17",
+    "result": {
+      "exit_code": 99,
+      "duration_ms": {
+        "avg": 464.793462649303,
+        "med": 0.525191,
+        "p(95)": 246.43724425,
+        "p(99)": 6693.839963200004,
+        "max": 60000.789812,
+        "thresholds": {
+          "p(95)<500": false,
+          "p(99)<1000": true
+        }
+      },
+      "failures": {
+        "fails": 1309591,
+        "passes": 91905,
+        "thresholds": {
+          "rate<0.01": true
+        },
+        "value": 0.0655763555514964
+      },
+      "checks": {
+        "passes": 1309591,
+        "fails": 91905,
+        "value": 0.9344236444485036
+      },
+      "requests": {
+        "count": 1401496,
+        "rate": 8748.550057937591
+      }
+    },
+    "memory_peak_bytes": 1705156608,
+    "oom_killed": false
+  },
+  "final_confirmation": {
+    "vus": 90000,
+    "hold": "5m",
+    "ramp": "60s",
+    "warmup": "2m",
+    "image": "sha256:760a0aae9c934aad5b1a22b6fd2a2cbe9c478b54c1f3659b227a71e0c26611e5",
+    "source_sha256": "77719ba6948df5bfe10222f1d5e42cee35c7d9ecc16887b0c02cfe82031e40ce",
+    "workload_sha256": "14fbbe36a7bef2cc803c8c2309b8b93d6e6ec9c2b6aba78ebe3b9a95ebf85972",
+    "server_cpu_quota": 1,
+    "server_memory_bytes": 2147483648,
+    "server_swap_bytes": 0,
+    "nofile": 65535,
+    "network": "host",
+    "generator": "grafana/k6:1.4.2",
+    "source_addresses": "127.0.0.2-127.0.0.17",
+    "warmup_result": {
+      "exit_code": 0,
+      "duration_ms": {
+        "p(99)": 0.6423960899999992,
+        "max": 8.584084,
+        "avg": 0.2673332246559032,
+        "med": 0.24278100000000002,
+        "p(95)": 0.46769394999999986,
+        "thresholds": {
+          "p(95)<500": false,
+          "p(99)<1000": false
+        }
+      },
+      "failures": {
+        "passes": 0,
+        "fails": 15112,
+        "thresholds": {
+          "rate<0.01": false
+        },
+        "value": 0
+      },
+      "checks": {
+        "passes": 15112,
+        "fails": 0,
+        "value": 1
+      },
+      "requests": {
+        "count": 15112,
+        "rate": 93.86249680041176
+      }
+    },
+    "result": {
+      "exit_code": 0,
+      "duration_ms": {
+        "p(99)": 830.12505925,
+        "max": 1553.732162,
+        "avg": 44.476362119175164,
+        "med": 0.427073,
+        "p(95)": 377.35749999999996,
+        "thresholds": {
+          "p(95)<500": false,
+          "p(99)<1000": false
+        }
+      },
+      "failures": {
+        "passes": 0,
+        "fails": 3346076,
+        "thresholds": {
+          "rate<0.01": false
+        },
+        "value": 0
+      },
+      "checks": {
+        "passes": 3346076,
+        "fails": 0,
+        "value": 1
+      },
+      "requests": {
+        "count": 3346076,
+        "rate": 8362.761707475456
+      }
+    },
+    "memory_peak_bytes": 1819127808,
+    "oom_killed": false
+  },
+  "unbatched_100000": {
+    "vus": 100000,
+    "hold": "5m",
+    "ramp": "60s",
+    "warmup": "2m",
+    "image": "sha256:92329c7cedb35fc2508c69876f31057ff746854dc3408932677c668eed01de10",
+    "source_sha256": "bc11bf0c2230dce7cfecd2f5f3789a072651568f771e8c136fd2070e5dbb6168",
+    "workload_sha256": "14fbbe36a7bef2cc803c8c2309b8b93d6e6ec9c2b6aba78ebe3b9a95ebf85972",
+    "server_cpu_quota": 1,
+    "server_memory_bytes": 2147483648,
+    "server_swap_bytes": 0,
+    "nofile": 65535,
+    "network": "host",
+    "generator": "grafana/k6:1.4.2",
+    "source_addresses": "127.0.0.2-127.0.0.17",
+    "warmup_result": {
+      "exit_code": 0,
+      "duration_ms": {
+        "avg": 0.23932673781048644,
+        "med": 0.20524399999999998,
+        "p(95)": 0.43513399999999997,
+        "p(99)": 0.66962533,
+        "max": 17.430745,
+        "thresholds": {
+          "p(95)<500": false,
+          "p(99)<1000": false
+        }
+      },
+      "failures": {
+        "passes": 0,
+        "fails": 15218,
+        "thresholds": {
+          "rate<0.01": false
+        },
+        "value": 0
+      },
+      "checks": {
+        "passes": 15218,
+        "fails": 0,
+        "value": 1
+      },
+      "requests": {
+        "count": 15218,
+        "rate": 94.521008915719
+      }
+    },
+    "result": {
+      "exit_code": 99,
+      "duration_ms": {
+        "avg": 181.00763187204794,
+        "med": 0.589398,
+        "p(95)": 988.1787237499998,
+        "p(99)": 1518.4885363299998,
+        "max": 52672.113723,
+        "thresholds": {
+          "p(95)<500": true,
+          "p(99)<1000": true
+        }
+      },
+      "failures": {
+        "passes": 34607,
+        "fails": 3506871,
+        "thresholds": {
+          "rate<0.01": false
+        },
+        "value": 0.009771908790623576
+      },
+      "checks": {
+        "passes": 3506871,
+        "fails": 34607,
+        "value": 0.9902280912093764
+      },
+      "requests": {
+        "count": 3541478,
+        "rate": 8850.727635331372
+      }
+    },
+    "memory_peak_bytes": 1820274688,
+    "oom_killed": false
+  },
+  "grouped_100000_screen": {
+    "vus": 100000,
+    "hold": "1m",
+    "ramp": "60s",
+    "warmup": "0",
+    "image": "sha256:97a0e9a2d57e71973a3748e5ae8329d30d4f7b0f199fa96bf0d3094d3d0b13be",
+    "source_sha256": "a4fab4f1a7e601b2d2c4929512ee7acbbfa97ced82144603b55af78f006f899a",
+    "workload_sha256": "14fbbe36a7bef2cc803c8c2309b8b93d6e6ec9c2b6aba78ebe3b9a95ebf85972",
+    "server_cpu_quota": 1,
+    "server_memory_bytes": 2147483648,
+    "server_swap_bytes": 0,
+    "nofile": 65535,
+    "network": "host",
+    "generator": "grafana/k6:1.4.2",
+    "source_addresses": "127.0.0.2-127.0.0.17",
+    "result": {
+      "exit_code": 99,
+      "duration_ms": {
+        "med": 0.427405,
+        "p(95)": 657.7938167499998,
+        "p(99)": 959.0348537799991,
+        "max": 1555.483895,
+        "avg": 82.62290013287259,
+        "thresholds": {
+          "p(95)<500": true,
+          "p(99)<1000": false
+        }
+      },
+      "failures": {
+        "passes": 0,
+        "fails": 1184712,
+        "thresholds": {
+          "rate<0.01": false
+        },
+        "value": 0
+      },
+      "checks": {
+        "fails": 0,
+        "passes": 1184712,
+        "value": 1
+      },
+      "requests": {
+        "count": 1184712,
+        "rate": 7398.555359254117
+      }
+    },
+    "memory_peak_bytes": 1795899392,
+    "oom_killed": false
+  },
+  "node26_90000_5m_hold": {
+    "vus": 90000,
+    "hold": "5m",
+    "ramp": "60s",
+    "warmup": "2m",
+    "image": "sha256:985d630ce12132b42c4f26b78a50c89fff7b780dd953c65afae272397bb20181",
+    "source_sha256": "1891ebf087afa52bbb73e1a0f919a39ff6298254b36fe2510b785eb78a19f6c3",
+    "workload_sha256": "14fbbe36a7bef2cc803c8c2309b8b93d6e6ec9c2b6aba78ebe3b9a95ebf85972",
+    "server_cpu_quota": 1,
+    "server_memory_bytes": 2147483648,
+    "server_swap_bytes": 0,
+    "nofile": 65535,
+    "network": "host",
+    "generator": "grafana/k6:1.4.2",
+    "source_addresses": "127.0.0.2-127.0.0.17",
+    "warmup_result": {
+      "exit_code": 0,
+      "duration_ms": {
+        "avg": 0.19475724842519715,
+        "med": 0.15169850000000001,
+        "p(95)": 0.37507694999999996,
+        "p(99)": 0.5891069200000005,
+        "max": 17.615053,
+        "thresholds": {
+          "p(99)<1000": false,
+          "p(95)<500": false
+        }
+      },
+      "failures": {
+        "passes": 0,
+        "fails": 15240,
+        "thresholds": {
+          "rate<0.01": false
+        },
+        "value": 0
+      },
+      "checks": {
+        "passes": 15240,
+        "fails": 0,
+        "value": 1
+      },
+      "requests": {
+        "count": 15240,
+        "rate": 94.69332684196063
+      }
+    },
+    "result": {
+      "exit_code": 0,
+      "duration_ms": {
+        "avg": 38.12775392676105,
+        "med": 0.375966,
+        "p(95)": 323.8886108999997,
+        "p(99)": 732.64472072,
+        "max": 1333.84582,
+        "thresholds": {
+          "p(95)<500": false,
+          "p(99)<1000": false
+        }
+      },
+      "failures": {
+        "passes": 0,
+        "fails": 3348999,
+        "thresholds": {
+          "rate<0.01": false
+        },
+        "value": 0
+      },
+      "checks": {
+        "passes": 3348999,
+        "fails": 0,
+        "value": 1
+      },
+      "requests": {
+        "count": 3348999,
+        "rate": 8370.265823848402
+      }
+    },
+    "memory_peak_bytes": 1850036224,
+    "oom_killed": false,
+    "node_version": "26.11.1"
+  }
+}

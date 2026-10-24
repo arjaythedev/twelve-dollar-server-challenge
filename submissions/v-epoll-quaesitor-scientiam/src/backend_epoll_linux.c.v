@@ -5,9 +5,10 @@ import net
 import os
 import time
 
-// The scored backend: one thread, one epoll set, one SQLite connection. Every epoll_wait
-// batch is served, committed once, and only then flushed, so a 201 always means the row is
-// on disk. Idle connections cost one 64-byte record and nothing else.
+// The fallback backend (and the only one with `URING=0`): one thread, one epoll set, one
+// SQLite connection. Every epoll_wait batch is served, committed once, and only then
+// flushed, so a 201 always means the row is committed. Idle connections cost one 64-byte
+// record and nothing else.
 
 #flag linux -D_GNU_SOURCE
 #include <errno.h>
@@ -60,6 +61,7 @@ const ev_err = u32(C.EPOLLERR) | u32(C.EPOLLHUP)
 const max_events = 256
 const accept_burst = 64
 const scratch_size = 64 * 1024
+const max_input = 16 * 1024 // unparsed bytes kept per connection; no request comes near it
 const max_requests_per_pass = 64
 const listen_backlog = 4096
 const stall_timeout_s = u32(120)
@@ -332,7 +334,9 @@ fn (mut l Loop) read_conn(fd int, now u32) {
 	}
 	mut pos := 0
 	mut served := 0
-	for pos < have && served < max_requests_per_pass {
+	// at EOF no more bytes will come: the per-pass cap does not apply, everything complete
+	// is answered now
+	for pos < have && (eof || served < max_requests_per_pass) {
 		total := fasthttp.frame_request_length(l.scratch[pos..have]) or {
 			l.bad_request(fd)
 			return
@@ -360,9 +364,9 @@ fn (mut l Loop) read_conn(fd int, now u32) {
 	}
 	c.touched = now
 	rest := have - pos
-	if rest > 0 && c.state != .closing {
-		if rest >= scratch_size {
-			l.bad_request(fd) // a single request larger than the scratch buffer
+	if rest > 0 && c.state != .closing && !eof {
+		if rest > max_input {
+			l.bad_request(fd) // a single request larger than any this API takes
 			return
 		}
 		if pos > 0 || c.input.len == 0 {
@@ -382,12 +386,16 @@ fn (mut l Loop) read_conn(fd int, now u32) {
 		l.pool.drop(mut c.input)
 	}
 	if eof {
-		if l.segs.len > 0 && l.segs[l.segs.len - 1].fd == fd {
-			c.state = .closing // flush the answers of this batch, then close
-		} else if c.output.len == 0 {
-			l.close_conn(fd)
+		// close once everything owed has been sent: responses of this batch (possibly produced
+		// by the pending pass, before other connections' responses), or a parked remainder
+		mut owed := c.output.len > 0
+		for i := l.segs.len - 1; i >= 0 && !owed; i-- {
+			owed = l.segs[i].fd == fd
+		}
+		if owed {
+			c.state = .closing // flush, then close
 		} else {
-			c.state = .closing
+			l.close_conn(fd)
 		}
 	}
 }
@@ -486,6 +494,10 @@ fn (mut l Loop) push_output(fd int) {
 	}
 	c.state = .open
 	epoll_mod(l.epfd, fd, ev_in)
+	if c.input.len > 0 {
+		// requests buffered while the connection was parked get no event: serve them next pass
+		l.pending << fd
+	}
 }
 
 // sweep closes connections that have been stuck mid-request or mid-response for too long.

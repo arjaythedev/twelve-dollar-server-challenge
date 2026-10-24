@@ -11,6 +11,12 @@ import time
 // kernel-provided buffers, and batched completions. All rings share one App (one SQLite
 // connection, exclusive locking) under a mutex: a ring's completion batch is handled,
 // committed and only then flushed, exactly like the epoll backend.
+//
+// Per-connection flow control: while a send is in flight, later responses are queued
+// behind it. Once more than ur_park_output is queued the connection is parked: its receive
+// is cancelled (bytes already on the way are kept, up to ur_max_input) until the queue has
+// drained, then the receive is armed again. ur_max_output is the hard cap after which the
+// connection is closed instead.
 
 #flag -I@VMODROOT/src
 #flag @VMODROOT/src/uring_shim.c
@@ -50,7 +56,13 @@ const ur_batch = u32(32)
 const ur_wait_busy_us = 250
 const ur_wait_idle_us = 1_000_000
 const ur_max_cqes = 512
-const ur_max_output = u32(1 << 20)
+// A connection is parked once ur_park_output is queued behind its send; what is already in
+// flight through the parser can still add up to the responses of two ur_max_input windows
+// of pipelined requests (a 16 KiB window of tiny requests is ~450 feeds, ~2.7 MiB), so the
+// hard cap after which the connection is closed sits above that.
+const ur_max_output = u32(4 << 20)
+const ur_park_output = u32(64 * 1024)
+const ur_max_input = u32(16 * 1024) // no request of this API comes near it
 const ur_max_requests_per_pass = 64
 
 const op_accept = u8(1)
@@ -138,7 +150,11 @@ fn run_uring(host string, port int) ! {
 		return error('io_uring unavailable (errno ${-perr})')
 	}
 	C.us_free(probe)
-	mut app := new_app(true, true)!
+	// one process owns the file exclusively; with SERVER_PROCS > 1 (see run_epoll) each
+	// statement autocommits and the busy timeout covers contention
+	procs := os.getenv('SERVER_PROCS').int()
+	single := procs <= 1 && os.getenv('DB_EXCLUSIVE') != '0'
+	mut app := new_app(single, single)!
 	mut rl := C.rlimit{}
 	C.getrlimit(C.RLIMIT_NOFILE, &rl)
 	rl.rlim_cur = rl.rlim_max
@@ -159,7 +175,10 @@ fn run_uring(host string, port int) ! {
 			rings = 1
 		}
 	}
-	lfd := create_listener(host, port)!
+	lfd := create_listener(host, port) or {
+		app.db.close() // the fallback opens the file again
+		return err
+	}
 	mut sh := &Shared{
 		app: app
 		mu:  sync.new_mutex()
@@ -268,7 +287,7 @@ fn (mut r Ring) run() {
 				slot := tag_slot(t)
 				mut c := r.conn(slot)
 				if c.state == .open && c.generation == tag_gen(t) && c.input.len > 0 {
-					r.on_data(slot, mut c, unsafe { nil }, 0, now)
+					r.on_data(slot, mut c, unsafe { nil }, 0, now, false)
 				}
 			}
 			r.finish_batch()
@@ -369,18 +388,37 @@ fn (mut r Ring) dispatch(cqe C.us_cqe, now u32) {
 	}
 	match op {
 		op_recv {
-			if c.state != .open {
-				// closing: whatever else the peer sends is not served (the epoll loop stops
-				// reading such a connection too); its send completion will close it
+			if c.state == .closing {
+				// whatever else the peer sends is not served (the epoll loop stops reading such
+				// a connection too); its send completion will close it
 				if cqe.flags & us_f_buffer != 0 {
 					C.us_buf_return(r.ring, cqe.flags >> 16)
+				}
+				return
+			}
+			if c.state == .parked {
+				// the receive is being cancelled; keep what still arrives for later, and note an
+				// EOF. The cancellation itself (res < 0) needs nothing.
+				if cqe.res > 0 {
+					bid := cqe.flags >> 16
+					if c.input.len + u32(cqe.res) > ur_max_input {
+						r.close(slot, mut c)
+					} else {
+						r.pool.append(mut c.input, unsafe { C.us_buf(r.ring, bid) }, cqe.res)
+					}
+					C.us_buf_return(r.ring, bid)
+				} else if cqe.res == 0 {
+					if cqe.flags & us_f_buffer != 0 {
+						C.us_buf_return(r.ring, cqe.flags >> 16)
+					}
+					r.on_eof(slot, mut c, now)
 				}
 				return
 			}
 			if cqe.res > 0 {
 				bid := cqe.flags >> 16
 				data := unsafe { C.us_buf(r.ring, bid) }
-				r.on_data(slot, mut c, data, cqe.res, now)
+				r.on_data(slot, mut c, data, cqe.res, now, false)
 				C.us_buf_return(r.ring, bid)
 				if cqe.flags & us_f_more == 0 && c.state == .open {
 					r.n_ms_end++
@@ -390,7 +428,7 @@ fn (mut r Ring) dispatch(cqe C.us_cqe, now u32) {
 				if cqe.flags & us_f_buffer != 0 {
 					C.us_buf_return(r.ring, cqe.flags >> 16)
 				}
-				r.on_eof(slot, mut c)
+				r.on_eof(slot, mut c, now)
 			} else if cqe.res == -C.ENOBUFS {
 				r.n_enobufs++
 				r.rearm << cqe.user_data
@@ -418,12 +456,34 @@ fn (mut r Ring) dispatch(cqe C.us_cqe, now u32) {
 				r.send_flight(slot, mut c)
 				return
 			}
-			if c.state == .closing {
+			if c.state == .parked {
+				// drained: serve what arrived meanwhile, then receive again (the cancelled
+				// receive is gone: its cancel was submitted before this completion was waited for)
+				c.state = .open
+				if c.input.len > 0 {
+					r.on_data(slot, mut c, unsafe { nil }, 0, now, false)
+				}
+				r.rearm << tag(op_recv, slot, c.generation)
+				return
+			}
+			if c.state == .closing && !r.owed_in_batch(slot) {
+				// nothing left to send (responses of the current batch, if any, are still in
+				// r.segs; finish_batch sends them and their completion closes the connection)
 				r.close(slot, mut c)
 			}
 		}
 		else {}
 	}
+}
+
+// owed_in_batch reports whether the current batch holds a response for slot.
+fn (r &Ring) owed_in_batch(slot int) bool {
+	for i := r.segs.len - 1; i >= 0; i-- {
+		if r.segs[i].fd == slot {
+			return true
+		}
+	}
+	return false
 }
 
 fn (mut r Ring) send_flight(slot int, mut c Conn) {
@@ -447,11 +507,12 @@ fn (mut r Ring) close(slot int, mut c Conn) {
 
 // on_data answers every complete request in the received bytes (plus any tail kept from
 // earlier receives) into the batch arena and keeps an incomplete tail in input. With n == 0
-// it serves requests still waiting in input (see Ring.more).
-fn (mut r Ring) on_data(slot int, mut c Conn, data &u8, n int, now u32) {
+// it serves requests still waiting in input (see Ring.more); with all set the per-pass cap
+// does not apply (used at EOF, when no further receive will come).
+fn (mut r Ring) on_data(slot int, mut c Conn, data &u8, n int, now u32, all bool) {
 	mut buf := []u8{}
 	if c.input.len > 0 {
-		if c.input.len + u32(n) > ur_max_output {
+		if c.input.len + u32(n) > ur_max_input {
 			r.bad_request(slot, mut c)
 			return
 		}
@@ -478,7 +539,7 @@ fn (mut r Ring) on_data(slot int, mut c Conn, data &u8, n int, now u32) {
 	}
 	mut pos := 0
 	mut served := 0
-	for pos < buf.len && served < ur_max_requests_per_pass {
+	for pos < buf.len && (all || served < ur_max_requests_per_pass) {
 		total := fasthttp.frame_request_length(buf[pos..]) or {
 			r.bad_request(slot, mut c)
 			return
@@ -519,7 +580,7 @@ fn (mut r Ring) on_data(slot int, mut c Conn, data &u8, n int, now u32) {
 		} else {
 			r.pool.append(mut c.input, unsafe { data + pos }, rest)
 		}
-		if served >= ur_max_requests_per_pass {
+		if !all && served >= ur_max_requests_per_pass {
 			// the cap stopped the loop with complete requests left: no receive completion
 			// will come for them, so serve them on the next pass
 			r.more << tag(op_recv, slot, c.generation)
@@ -529,18 +590,22 @@ fn (mut r Ring) on_data(slot int, mut c Conn, data &u8, n int, now u32) {
 	}
 }
 
-// on_eof closes the connection once everything it is owed has been sent: responses still in
-// this batch (its receive completions can be interleaved with other connections'), in flight,
-// or queued.
-fn (mut r Ring) on_eof(slot int, mut c Conn) {
-	if c.state != .open {
+// on_eof serves whatever complete requests are still buffered (no more bytes will come, so
+// the per-pass cap no longer applies and an incomplete tail is forgotten), then closes the
+// connection once everything it is owed has been sent: responses still in this batch (its
+// receive completions can be interleaved with other connections'), in flight, or queued.
+fn (mut r Ring) on_eof(slot int, mut c Conn, now u32) {
+	if c.state != .open && c.state != .parked {
 		return
 	}
-	mut owed := c.flight.len > 0 || c.output.len > 0
-	for i := r.segs.len - 1; i >= 0 && !owed; i-- {
-		owed = r.segs[i].fd == slot
+	if c.input.len > 0 {
+		r.on_data(slot, mut c, unsafe { nil }, 0, now, true)
+		r.pool.drop(mut c.input)
+		if c.state == .closing || c.state == .closed {
+			return // a bad request already decided the close
+		}
 	}
-	if owed {
+	if c.flight.len > 0 || c.output.len > 0 || r.owed_in_batch(slot) {
 		c.state = .closing
 	} else {
 		r.close(slot, mut c)
@@ -587,6 +652,12 @@ fn (mut r Ring) finish_batch() {
 			}
 			r.pool.append(mut c.output, p, n)
 			r.n_queued++
+			if c.state == .open && c.output.len > ur_park_output {
+				// the peer is not reading: stop receiving until the queue has drained
+				c.state = .parked
+				C.us_cancel(r.ring, tag(op_recv, seg.fd, c.generation), tag(op_cancel, seg.fd,
+					c.generation))
+			}
 			continue
 		}
 		if c.output.len > 0 {
@@ -613,7 +684,7 @@ fn (mut r Ring) sweep(now u32) {
 	}
 	for slot in 0 .. r.conns.len {
 		mut c := &r.conns[slot]
-		if c.state != .open && c.state != .closing {
+		if c.state == .free || c.state == .closed {
 			continue
 		}
 		if (c.input.len > 0 || c.output.len > 0 || c.flight.len > 0)

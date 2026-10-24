@@ -16,7 +16,7 @@ mut:
 enum CState as u32 {
 	free
 	open    // reading requests
-	parked  // epoll: a response did not fit the socket buffer; waiting for EPOLLOUT, not reading
+	parked  // output is backed up: not reading (epoll: waiting for EPOLLOUT; io_uring: receive cancelled until the queue drains)
 	closing // flush what is pending, then close
 	closed  // io_uring: the close is submitted; waiting for its completion
 }

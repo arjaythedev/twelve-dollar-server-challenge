@@ -36,8 +36,10 @@ without it the server prints why and runs the epoll loop.
   vCPU, so the rings mostly take turns anyway, and the database never sees two writers.
 - **One transaction per completion batch.** Every request of a batch runs inside one deferred
   transaction. `COMMIT` runs once, and only then are the batch's responses sent, so a 201 always
-  means the row is on disk (rule 6). If the commit fails, none of the batch's responses is sent
-  and its connections are closed instead of being told a lie. WAL, `synchronous=NORMAL`.
+  means the row is committed (rule 6; WAL with `synchronous=NORMAL`, so it survives a server
+  crash, and the next checkpoint makes it survive a power loss). If the commit fails, or SQLite
+  rolled the transaction back on its own, none of the batch's responses is sent and its
+  connections are closed instead of being told a lie.
 - **epoll fallback.** If `io_uring_setup` fails (an old kernel, a seccomp sandbox), the same
   binary runs its single-threaded epoll loop: one `epoll_wait` batch per transaction, the same
   handlers and the same connection records.
@@ -60,19 +62,21 @@ without it the server prints why and runs the epoll loop.
 - **Profile-guided build.** `build.sh` compiles SQLite and the server instrumented, lets the server
   serve a synthetic database to itself over loopback (`bin/server --train`; the challenge seed is
   never used), then rebuilds both with that profile. `bash build.sh --no-pgo` skips it.
-- **Backpressure**: a connection whose response did not fit is not read again until the send
-  completes (io_uring: one send in flight per connection, later output queued behind it; epoll:
-  wait for `EPOLLOUT`); connections stalled mid-request or mid-response for 120 s are closed; idle
+- **Backpressure**: a connection whose responses are not being read is parked, that is no longer
+  read, until its queue drains (epoll: wait for `EPOLLOUT`; io_uring: one send in flight, later
+  responses queued behind it, and past 64 KiB of queue the receive is cancelled until the send
+  completions catch up). Unparsed input is capped at 16 KiB per connection, queued output at
+  4 MiB. Connections stalled mid-request or mid-response for 120 s are closed; idle
   keep-alive connections are never timed out. When a ring's slots run out it cancels its accept
   until a connection closes.
 - Nothing on the box is tuned: the process only raises its own soft `RLIMIT_NOFILE` to the hard
   limit.
 
 `SERVER_PROCS=n` in `start.sh` (default 1) runs n processes sharing the port (`SO_REUSEPORT`)
-and the database (normal locking, autocommit per statement, busy timeout). It is the epoll
-build's only way past the `LimitNOFILE` ceiling and it is not free: locally one process costs
-47 µs/request, the same process without `locking_mode=EXCLUSIVE` 51, and two processes 59. The
-io_uring build does not need it.
+and the database (normal locking, autocommit per statement, busy timeout), with either
+backend. It is the epoll build's only way past the `LimitNOFILE` ceiling and it is not free:
+locally one process costs 47 µs/request, the same process without `locking_mode=EXCLUSIVE` 51,
+and two processes 59. The io_uring build does not need it.
 
 ## Tests and local measurements
 

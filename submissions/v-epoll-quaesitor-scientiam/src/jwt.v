@@ -33,12 +33,10 @@ fn build_b64url_table() [256]i16 {
 	return t
 }
 
-// b64url_decode appends the decoded bytes of src (base64url, padding optional) to dst.
+// b64url_decode appends the decoded bytes of src (base64url without padding, as RFC 7515
+// §2 defines JWT segments; a `=` is rejected like any other byte outside the alphabet) to dst.
 fn b64url_decode(src []u8, mut dst []u8) bool {
-	mut n := src.len
-	for n > 0 && src[n - 1] == `=` {
-		n--
-	}
+	n := src.len
 	if n % 4 == 1 {
 		return false
 	}

@@ -42,7 +42,8 @@ mut:
 	// commit() (once per event batch). With group off each statement autocommits.
 	group      bool
 	in_txn     bool
-	wal_frames int // frames in the WAL after the last commit, from the wal hook
+	aborted    bool // SQLite rolled the batch transaction back by itself (see begin)
+	wal_frames int  // frames in the WAL after the last commit, from the wal hook
 	exclusive  bool
 }
 
@@ -126,25 +127,48 @@ fn run_once(st &C.sqlite3_stmt) bool {
 
 // begin opens the batch transaction if grouping is on and none is open.
 fn (mut d Db) begin() {
-	if d.group && !d.in_txn {
-		if run_once(d.st_begin) {
-			d.in_txn = true
+	if !d.group {
+		return
+	}
+	if d.in_txn {
+		if C.sqlite3_get_autocommit(d.conn) == 0 {
+			return
 		}
+		// SQLite rolled the batch transaction back on its own (an I/O error, a full disk, out
+		// of memory): the earlier statements of this batch are gone, so nothing of the batch
+		// may commit. What follows runs in a fresh transaction that commit() rolls back.
+		d.aborted = true
+	}
+	if run_once(d.st_begin) {
+		d.in_txn = true
 	}
 }
 
-// commit ends the batch transaction. It returns false when COMMIT failed (the transaction
-// is then rolled back), so the caller can replace tentative write responses with errors.
+// commit ends the batch transaction. It returns false when nothing of the batch was
+// committed (COMMIT failed, or SQLite had already rolled the transaction back), so the
+// caller can drop every tentative response of the batch.
 fn (mut d Db) commit() bool {
 	if !d.in_txn {
 		return true
 	}
 	d.in_txn = false
+	aborted := d.aborted
+	d.aborted = false
+	if aborted || C.sqlite3_get_autocommit(d.conn) != 0 {
+		run_once(d.st_back)
+		return false
+	}
 	if run_once(d.st_commit) {
 		return true
 	}
 	run_once(d.st_back)
 	return false
+}
+
+// close releases the connection (its prepared statements are finalized with it).
+fn (mut d Db) close() {
+	C.sqlite3_close_v2(d.conn)
+	d.conn = unsafe { nil }
 }
 
 // checkpoint copies the WAL into the database once it holds ckpt_frames frames.

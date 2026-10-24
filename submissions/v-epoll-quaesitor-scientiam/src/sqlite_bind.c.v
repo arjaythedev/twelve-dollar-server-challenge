@@ -27,6 +27,8 @@ fn C.sqlite3_errmsg(&C.sqlite3) &char
 fn C.sqlite3_wal_hook(&C.sqlite3, voidptr, voidptr) voidptr
 fn C.sqlite3_wal_checkpoint_v2(&C.sqlite3, &char, int, &int, &int) int
 fn C.sqlite3_close(&C.sqlite3) int
+fn C.sqlite3_close_v2(&C.sqlite3) int
+fn C.sqlite3_get_autocommit(&C.sqlite3) int
 
 const sqlite_ok = 0
 const sqlite_row = 100

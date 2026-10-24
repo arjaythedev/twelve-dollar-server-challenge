@@ -46,6 +46,10 @@ The connection holds the database lock for its whole life (`locking_mode=EXCLUSI
 | Kestrel gives each connection to the loop and then forgets it. Kestrel's timer no longer visits 64,000 connections each second, and the GC frees Kestrel's objects for each connection. | CPU per request -1.5% (three pairs: -0.79, -0.22, -0.74 µs). RSS 273 MB to 170 MB. | perf profile (Kestrel timer at 1.7% of CPU) |
 | Group commit: one transaction for the writes of one wake-up of the loop. The responses wait for the commit. | CPU per request -11.3% in pair 2. Pair 1 gave -6.33 µs, but the old version had slow disk flushes in that pair. | #74 (group commit for each epoll batch), #60 |
 | `temp_store=MEMORY`. In a group-commit transaction, SQLite keeps a statement journal for each write. On disk, the journal wrote one more 4 KB page for each changed page. | CPU per request -1.9%. `pwrite` calls for each request 1.17 to 0.64 at 3,000 requests per second. | the task's list of known tricks, `strace` |
+| Accept stops while the fd limit minus 512 client sockets are open. With the fd table full, the .NET runtime's own `pipe2` calls fail, and the process aborts with `PAL_SEHException` (the crash of #108 at the judge's fd limit). | 80,000 users: the old version aborted (11.1% failed), this one passes with 0 failed (wsl26 x86) | `gdb` on the crash, #117, #83 |
+| Keep-alive budget. A connection accepted while the fd limit minus 1,024 sockets are open is shed: one request, `Connection: close`, then the server closes it. Kept connections stay kept. | 130,000 and 160,000 users pass with 0 failed (wsl26 x86, and agent-box arm64) | #117, #72 |
+| The last send before a close that the loop owns has `MSG_MORE`, so the FIN goes on the segment with the response | 160,000 users: CPU per request -4.6% (38.35 to 36.58 µs, two runs each), hold p99 24.6 to 18.7 ms (wsl26 x86) | #117 |
+| A shed connection never goes to Kestrel: the loop keeps it from accept to close. Kestrel's dispatch of a connection costs a thread-pool wake-up. | 160,000 users: CPU per request -12% (36.58 to 32.2 µs). Shed connections only: 35.1 to 20.5 µs per request (wsl26 x86) | consult (DeepSeek), perf |
 | SQLite from source with `THREADSAFE=2` and SQLite's recommended options | No mutex calls in SQLite | #77, #108 |
 | `cache_size` 32 MB | The SQLite page cache is 16 times the default size (2 MB) | #108 |
 | JSON from the SQLite UTF-8 bytes, no .NET strings for rows | Less allocation | #77 |
@@ -72,6 +76,11 @@ Changes that did not help (discarded):
 | Checkpoints on a second connection in a background thread, normal locking | CPU +8%, hold p99 0.9 ms | #108 |
 | `wal_autocheckpoint=8000` | CPU +4%, hold p99 72 ms | — |
 | `wal_autocheckpoint=4000`, with group commit and no `mmap` | Same CPU | — |
+| Feed in three statements: the 20 ids, then the like counts and the posts by id range | `/feed` CPU the same (instructions -9%, cycles +2%) (wsl26 x86) | #72, #82 |
+| `TCP_NODELAY` on the listening socket (accepted sockets inherit it), not on each socket | Less than the noise (wsl26 x86) | #112 |
+| No `epoll_ctl` before `close` of a connection the loop owns | Less than the noise (wsl26 x86) | consult (DeepSeek) |
+| The first `recv` right after `accept` | Slower (wsl26 x86) | consult (DeepSeek), #117 |
+| The loop sleeps out the rest of a 2 ms cycle when one wake-up has 32 or more events | 160,000 users -0.6 µs, but 64,000 users +0.3 µs and hold p99 worse (wsl26 x86) | — |
 
 ## Local results (diagnostics, not an official score)
 
@@ -99,6 +108,26 @@ These numbers come from one local machine, not from the official box. Use them t
 | Statement journal in memory | 32.38 µs (see note) | 23.5% | 12.1 to 12.4 ms | 0 | 170 MB |
 
 Note: the machine became slower after a restart. From the epoll transport on, each new version and the version before it ran in turns, two times each. The table shows the earlier value minus the mean difference of the two pairs. The optimizations table gives each difference as a percentage.
+
+### Past the fd limit (users held)
+
+Each user keeps one connection, so past about 65,000 users the server runs out of fds (`LimitNOFILE=65535`). The numbers below come from the same WSL2 machine (Ryzen 9 7900X3D, x86-64), with the server on one core and kload on other cores, 60 s ramp and 120 s hold. They show CPU per request, CPU in the hold and hold p95 / p99. All runs had 0 failed requests unless the table says otherwise.
+
+| Users | `4e7e309` (before) | `3b5782d` (fd guard, keep-alive budget) | `5141d7f` (+ `MSG_MORE`) | `c8ef1f2` (+ shed connections skip Kestrel) |
+|---|---|---|---|---|
+| 64,000 | — | 34.69 µs, 23%, 3.2 to 3.4 / 13.9 to 33.0 ms (4 runs) | 33.55 µs, 23%, 3.1 / 12.1 ms | 33.32 µs, 22%, 3.1 / 11.2 to 12.2 ms (2 runs) |
+| 80,000 | **aborted** (`PAL_SEHException`), 11.1% failed | 41.78 µs, 35%, 6.1 to 6.4 ms p95 (2 runs) | — | — |
+| 160,000 | — | 38.29 µs, 64%, 13.9 to 16.3 / 24.4 to 35.1 ms (3 runs) | 36.58 µs, 62%, 11.1 / 18.7 ms (2 runs) | 32.2 µs, 55%, 10.3 to 13.6 / 18.0 to 28.8 ms (4 runs). A fifth run failed: the server stalled for about 5 s (p99 4.2 s, 3 failed). Not seen again in the 4 runs. |
+| 200,000 | — | 36.29 µs, 77%, 15.4 / 21.1 ms | 34.94 µs, 74%, 14.4 / 20.4 ms | 30.95 µs, 65%, 13.5 / 19.6 ms |
+| 250,000 | — | 34.01 µs, 90%, 116 / 144 ms | 32.31 µs, 85%, 17.5 / 22.4 ms | 29.35 µs, 78%, 16.2 / 20.9 ms |
+| 300,000 | — | — | — | 28.21 µs, 88%, 204 / 586 ms (one 107 ms stall of the load generator) |
+| 350,000 | — | — | — | **fails**: p95 1.0 s, 0.7% failed |
+
+The 64,000-user numbers here are higher than in the table above (32.38 µs) because they ran on another day: compare numbers inside one table only.
+
+On this machine, Docker's connection tracking (`nf_conntrack`, 262,144 entries) filled up at 130,000 users and dropped new connections. For the runs above, connection tracking was off for loopback traffic on the bench machine (`iptables -t raw ... -j NOTRACK`). That is a setting of the bench machine, not of the submission.
+
+The first tests of the fd guard and the keep-alive budget ran on agent-box, an OrbStack arm64 VM on an Apple CPU (a draft of the keep-alive budget passed 130,000 and 160,000 users there, 0 failed). That VM was noisy, so the table uses only the x86 numbers. All numbers in the optimizations table marked "wsl26 x86" come from the machine above.
 
 Final check of this version (commit `aba8cf9`) on another machine: a VM with 4 vCPUs of an Intel Core i5-11400F and 3.9 GB of RAM, server with `--cpus=1 --memory=2g --memory-swap=2g` and `nofile` 65535, direct, kload on the other 3 vCPUs. 15,000 users, 60 s ramp. The disk of this VM is slow: a 4 KB write with `O_DSYNC` takes about 80 ms.
 

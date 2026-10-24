@@ -26,7 +26,8 @@ The C transport keeps debug symbols and frame pointers for local profiles.
 
 - **One event loop, one SQLite connection for requests.** The box has one vCPU. One thread owns the
   socket table and runs every query, so there are no mutexes, no thread hand-offs and no lock waits
-  between requests. SQLite is compiled with `SQLITE_THREADSAFE=2` (each connection stays on its thread).
+  between requests. SQLite is compiled with `SQLITE_THREADSAFE=2` (each connection stays on its thread)
+  and the other options from SQLite's recommended compile-time list that the server does not need.
 - **Group commit per completion batch.** Completions collect for at most 200 microseconds before
   one SQLite transaction. Responses enter the transport only after `COMMIT` succeeds.
   This also holds read responses that observe a write from the same batch.
@@ -63,7 +64,8 @@ The C transport keeps debug symbols and frame pointers for local profiles.
   A server close cancels the armed receive first, then closes the direct descriptor.
 - **Shared receive buffers.** Each ring has 1,024 buffers of 2,048 bytes.
   Idle connections have no input or output allocation.
-  Partial requests use bounded input buffers. Pending sends retain stable storage until completion.
+  Partial requests use bounded input buffers. Pending sends retain stable storage until completion:
+  output of up to 8 KiB uses a block from a per-ring pool of up to 1,024 blocks, larger output its own allocation.
   The transport delivers input directly after a send unless V has buffered or deferred work to process.
 - **Bounded queues, no SQPOLL.** Rings use single-issuer cooperative task execution. The server
   submits within the SQ limit and consumes bounded CQ batches.

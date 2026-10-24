@@ -1,0 +1,15 @@
+# perfscale config for load.yaml: the same schedule and pass criteria as load.js.
+# Edit `target` in the first two stages for the VU count (k6: -e VUS=...).
+allow_file_actions: true   # std/pick reads seed/tokens.json
+
+stages:
+  - { duration: 60s, target: 100 }   # RAMP_UP
+  - { duration: 5m,  target: 100 }   # DURATION (the scored hold)
+  - { duration: 30s, target: 0 }
+
+after:
+  - name: pass criteria
+    use: std/thresholds@v1
+    with:
+      http_req_duration: ["p99<1000", "p95<500"]
+      http_req_failed: ["rate<0.01"]

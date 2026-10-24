@@ -1,0 +1,86 @@
+# perfscale port of load.js: the same user loop, think times and probabilities.
+#
+#   perfscale run -f bench/load.yaml -c bench/load.config.yaml
+#   BASE_URL=http://10.0.0.5 perfscale run -f bench/load.yaml -c bench/load.config.yaml
+#
+# VUs, ramp and hold live in load.config.yaml (stages + thresholds).
+# Run from the repo root: seed/tokens.json is read once per process and cached.
+#
+# User loop: GET /feed -> think 3-7 s -> GET /posts/:id (one from the feed) -> think 3-8 s
+#   -> like it (15% chance) -> write a post (2% chance) -> idle 5-15 s -> repeat.
+steps:
+  # One token per VU, wrapping over tokens.json like load.js
+  # (__vu__ is 1-based, so VU 1 gets tokens[1] where k6 takes tokens[0]).
+  - name: user
+    use: std/pick@v1
+    with:
+      file: seed/tokens.json
+      index: "${{ __vu__ }}"
+    outputs: user
+
+  # Spread out VUs that start in the same tick.
+  - name: start jitter
+    use: std/sleep@v1
+    if: "${{ __iter__ }} == 0"
+    with: { ms: "${rand(0,5000)}" }
+
+  - name: GET /feed
+    use: std/http@v1
+    with: { url: "${{ env.BASE_URL }}/feed" }
+    check: { status: 200 }
+    outputs: feed
+
+  # Feed failed: think and start over (load.js returns early).
+  - name: feed failed
+    use: std/sleep@v1
+    if: "${{ feed.status }} != 200"
+    with: { ms: "${rand(3000,7000)}" }
+
+  - name: pick post
+    use: std/pick@v1
+    if: "${{ feed.status }} == 200"
+    with: { from: "${{ feed.body.posts }}" }
+    outputs: post
+
+  - name: think
+    use: std/sleep@v1
+    if: "${{ feed.status }} == 200"
+    with: { ms: "${rand(3000,7000)}" }
+
+  - name: GET /posts/:id
+    use: std/http@v1
+    if: "${{ feed.status }} == 200"
+    with: { url: "${{ env.BASE_URL }}/posts/${{ post.id }}" }
+    check: { status: 200 }
+
+  - name: read
+    use: std/sleep@v1
+    if: "${{ feed.status }} == 200"
+    with: { ms: "${rand(3000,8000)}" }
+
+  - name: POST /posts/:id/like
+    use: std/http@v1
+    if: "${{ feed.status }} == 200 && ${randf(0,1,4)} < 0.15"
+    with:
+      method: POST
+      url: "${{ env.BASE_URL }}/posts/${{ post.id }}/like"
+      headers:
+        Authorization: "Bearer ${{ user.token }}"
+        Content-Type: application/json
+
+  - name: POST /posts
+    use: std/http@v1
+    if: "${{ feed.status }} == 200 && ${randf(0,1,4)} < 0.02"
+    with:
+      method: POST
+      url: "${{ env.BASE_URL }}/posts"
+      headers:
+        Authorization: "Bearer ${{ user.token }}"
+      body:
+        body: "${{ user.username }} says hi at ${now_iso} (VU ${{ __vu__ }}, iter ${{ __iter__ }})"
+    check: { status: 201 }
+
+  - name: idle
+    use: std/sleep@v1
+    if: "${{ feed.status }} == 200"
+    with: { ms: "${rand(5000,15000)}" }

@@ -1,5 +1,6 @@
 package feed
 
+import cats.effect.std.Console
 import cats.effect.unsafe.IORuntimeConfig
 import cats.effect.{IO, IOApp, Resource}
 import org.http4s.ember.server.EmberServerBuilder
@@ -29,14 +30,15 @@ object Main extends IOApp.Simple:
         .withPort(config.port)
         .withHttpApp(routes.httpApp)
         .withErrorHandler(_ => IO.pure(Routes.internalError))
-        // Direct: every load-test user holds its own keep-alive connection, idle between requests for up to ~30 s.
-        // Keep them open until the client closes them, and allow as many as the 65,535 descriptors leave room for.
+        // Behind Nginx: it closes idle upstream connections after 60 s, so never close them first (SPEC: >= 65 s).
         .withIdleTimeout(Duration.Inf)
-        .withMaxConnections(64000)
-        // Ember reads into a 256 KiB buffer per connection by default: 2.5 GB at 10,000 connections. Requests here
-        // are a few hundred bytes.
+        // Nginx opens a new upstream connection for every request in flight beyond its 64 idle ones.
+        .withMaxConnections(16384)
+        // Ember reads into a 256 KiB buffer per connection by default. Requests here are a few hundred bytes.
         .withReceiveBufferSize(8 * 1024)
         .withShutdownTimeout(1.second)
         .build
+      raised <- Resource.eval(ListenBacklog.raise(config.port.value, 65535))
+      _ <- Resource.eval(IO.unlessA(raised)(Console[IO].errorln("could not raise the listen backlog")))
     yield server
     server.useForever

@@ -51,8 +51,11 @@ SQLITE_PATH=... JWT_SECRET=... HOST=0.0.0.0 PORT=80 bash start.sh
 - Nothing on the box is tuned: the process only raises its own soft `RLIMIT_NOFILE` to the hard
   limit.
 
-`SERVER_PROCS=n` (not used by `start.sh`) starts the listener with `SO_REUSEPORT` and normal
-SQLite locking so several processes can share the port.
+`SERVER_PROCS=n` in `start.sh` (default 1) runs n processes sharing the port (`SO_REUSEPORT`)
+and the database (normal locking, autocommit per statement, busy timeout). Each process has
+its own 65,535-descriptor table, which is the only way past the `LimitNOFILE` ceiling without
+io_uring, but it is not free: locally one process costs 47 µs/request, the same process
+without `locking_mode=EXCLUSIVE` 51, and two processes 59.
 
 ## Tests and local measurements
 

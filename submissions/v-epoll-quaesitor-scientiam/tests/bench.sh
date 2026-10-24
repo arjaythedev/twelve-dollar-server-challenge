@@ -25,7 +25,7 @@ docker rm -f twelve-srv >/dev/null 2>&1 || true
 docker run -d --name twelve-srv --cpus=1 --memory=2g --memory-swap=2g \
   --ulimit nofile=65535:65535 -v "$ROOT":/work -w "/work/$SUB" "$IMAGE" \
   bash -c "cp /work/seed/feed.db /tmp/feed.db && exec env ${SERVER_ENV:-} SQLITE_PATH=/tmp/feed.db \
-    JWT_SECRET=twelve-dollar-challenge HOST=0.0.0.0 PORT=3000 bin/server" >/dev/null
+    JWT_SECRET=twelve-dollar-challenge HOST=0.0.0.0 PORT=3000 bash start.sh" >/dev/null
 for _ in $(seq 1 60); do
   docker exec twelve-srv bash -c 'exec 3<>/dev/tcp/127.0.0.1/3000 && printf "GET /health HTTP/1.1\r\nHost: x\r\n\r\n" >&3 && head -c 12 <&3 | grep -q "200"' 2>/dev/null && break
   sleep 1
@@ -42,7 +42,7 @@ docker run --rm --network container:twelve-srv --ulimit nofile=65535:65535 \
 cpu1=$(docker exec twelve-srv awk '/usage_usec/{print $2}' /sys/fs/cgroup/cpu.stat)
 usr1=$(docker exec twelve-srv awk '/user_usec/{print $2}' /sys/fs/cgroup/cpu.stat)
 peak=$(docker exec twelve-srv cat /sys/fs/cgroup/memory.peak 2>/dev/null || echo 0)
-rss=$(docker exec twelve-srv bash -c 'awk "/VmRSS/{print \$2}" /proc/1/status')
+rss=$(docker exec twelve-srv bash -c 't=0; for p in $(pgrep -x server); do r=$(awk "/VmRSS/{print \$2}" /proc/$p/status); t=$((t+r)); done; echo $t')
 J="$HERE/../build/k6-$LABEL.json"
 reqs=$(jq -r '.metrics.http_reqs.count' "$J")
 p95=$(jq -r '.metrics.http_req_duration["p(95)"]' "$J")

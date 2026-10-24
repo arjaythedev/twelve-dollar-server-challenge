@@ -237,7 +237,12 @@ fn create_listener(host string, port int) !int {
 // run_epoll serves HOST:PORT on this thread until the process is stopped.
 fn run_epoll(host string, port int) ! {
 	procs := os.getenv('SERVER_PROCS').int()
-	mut app := new_app(true, procs <= 1)!
+	// One process owns the file exclusively and groups each batch into one transaction. With
+	// several processes a grouped batch that reads first and writes later can hit
+	// SQLITE_BUSY_SNAPSHOT on the upgrade (not retried by the busy handler), so each
+	// statement autocommits there and the busy timeout covers write contention.
+	single := procs <= 1 && os.getenv('DB_EXCLUSIVE') != '0'
+	mut app := new_app(single, single)!
 	mut rl := C.rlimit{}
 	C.getrlimit(C.RLIMIT_NOFILE, &rl)
 	rl.rlim_cur = rl.rlim_max
@@ -497,8 +502,9 @@ fn (mut l Loop) finish_batch(now u32) {
 		if c.state == .free {
 			continue
 		}
-		if !committed && seg.wrote {
-			// the write was rolled back: do not answer with a 201 that is not true
+		if !committed {
+			// The batch was rolled back: a 201 would be a lie, and a read in the same batch may
+			// have seen the rolled-back rows, so no response of this batch leaves the process.
 			c.state = .closing
 			l.buf_drop(mut c.output)
 			c.sent = 0

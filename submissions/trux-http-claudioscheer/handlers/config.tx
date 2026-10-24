@@ -1,0 +1,22 @@
+package handlers
+
+import "io"
+import "time"
+
+pub func prepare() (string, int, bool) {
+  let env map[string]string = io.env()
+  let path string = env["SQLITE_PATH"]
+  let secret string = env["JWT_SECRET"]
+  let host string = env["HOST"]
+  let port int = parseInt(env["PORT"])
+  if len(path) == 0 || len(secret) == 0 || len(host) == 0 || port < 1 {
+    print("SQLITE_PATH, JWT_SECRET, HOST and PORT are required")
+    return "", 0, false
+  }
+  let terr error = io.writeFile("/tmp/trux-feed-started", intToString(time.monotonicNanos()))
+  if terr != nil {
+    print("cannot write runtime files")
+    return "", 0, false
+  }
+  return host, port, true
+}

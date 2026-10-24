@@ -156,6 +156,8 @@ struct loop {
     vec_t fop_done;                 /* readiness backends: completed file ops (fop_rec*) awaiting callbacks */
     int engaged, cap_parked, tick4;
     float f_ceiling;
+    float h_ewma;                   /* shed_headroom: available memory, EWMA ~1 s (MiB) */
+    uint32_t slots_cap;             /* descriptor slots we can hold */
     uint64_t cpu_us_last, wall_ns_last;   /* cpu_us_last holds /proc/stat total ticks in 1-CPU mode */
     long idle_last;
     uint64_t closed_last;
@@ -948,6 +950,7 @@ static void housekeeping(loop_t *L)
 #ifdef BE_URING
             if (!L->epoll) slots = (uint64_t)L->nrings * (L->ring_per - 16);   /* rings are added on demand */
 #endif
+            L->slots_cap = (uint32_t)slots;
             if (L->st.cap > slots) L->st.cap = (uint32_t)slots;
             if (L->cfg.cap_ceiling && L->st.cap > L->cfg.cap_ceiling) L->st.cap = L->cfg.cap_ceiling;
         }
@@ -973,7 +976,17 @@ static void housekeeping(loop_t *L)
     }
     float f = 0;
     uint32_t cap = L->st.cap;
-    if (L->cfg.conn_policy && cap) {
+    if (L->cfg.conn_policy && L->cfg.shed_headroom && a >= 0) {
+        /* static f(headroom), every 250 ms tick on an EWMA of ~1 s. Shedding trades CPU for memory, so only
+         * memory moves it; the 100/60 MB floors below stay the backstop. Park only at the descriptor limit. */
+        L->h_ewma = L->h_ewma > 0 ? 0.75f * L->h_ewma + 0.25f * (float)a : (float)a;
+        float hi = (float)L->cfg.shed_hi_mb, lo = (float)L->cfg.shed_lo_mb;
+        if (L->h_ewma < hi) f = L->cfg.shed_fmax * (hi - L->h_ewma) / (hi > lo ? hi - lo : 1);
+        f = f < 0 ? 0 : f > L->cfg.shed_fmax ? L->cfg.shed_fmax : f;
+        cap = L->st.cap = L->slots_cap;
+        int park = cap && L->st.open >= cap;
+        if (park != L->cap_parked) { L->cap_parked = park; if (L->mem_state == 0) be_accept_ctl(L, !park); }
+    } else if (L->cfg.conn_policy && cap) {
         float lo = L->cfg.policy_release * (float)cap, open = (float)L->st.open;
         if (!L->engaged && open >= L->cfg.policy_engage * (float)cap) L->engaged = 1;
         if (L->engaged && open < lo) L->engaged = 0;
@@ -1066,6 +1079,9 @@ loop_t *loop_new(const loop_cfg *in)
     if (!c->linger_s) c->linger_s = 5;
     if (!c->policy_engage) c->policy_engage = 0.85f;
     if (!c->policy_release) c->policy_release = 0.75f;
+    if (!c->shed_hi_mb) c->shed_hi_mb = 400;
+    if (!c->shed_lo_mb) c->shed_lo_mb = 200;
+    if (!c->shed_fmax) c->shed_fmax = 0.5f;   /* never shed more than half: a deficit shedding can't fix pinned f at 1 and emptied the server (exp71); the 100/60 MB floors handle real emergencies */
     if (!c->guard_freeze) c->guard_freeze = 0.92f;
     if (!c->guard_relax) c->guard_relax = 0.85f;
     if (c->conn_cap) c->conn_policy = 1;

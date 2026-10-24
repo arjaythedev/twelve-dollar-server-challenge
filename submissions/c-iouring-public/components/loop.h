@@ -106,6 +106,11 @@ typedef struct {
                                             its cpuN line; cgroup quota <= 1.5 CPU -> cpu.stat/quota; else rusage),
                                             1 getrusage (process only), 2 /proc/stat whole box, 3 cgroup quota,
                                             4 the pinned CPU's line */
+    int shed_headroom;                   /* 1: f is a static function of memory headroom, not of open/cap (conn-policy
+                                            hband): f = 0 while headroom >= shed_hi_mb, rising linearly to shed_fmax at
+                                            shed_lo_mb; no integrator, no CPU input, no cap ceiling or band parking */
+    unsigned shed_hi_mb, shed_lo_mb;     /* defaults 400 / 200 MB (the 100 / 60 MB floors sit below) */
+    float shed_fmax;                     /* default 0.5 */
     float guard_freeze, guard_relax;     /* CPU guard: freeze f above guard_freeze busy, relax below guard_relax.
                                             Default 0.92 / 0.85 */
     int backlog_parked_dynamic;          /* 1: while parked at the cap, listen() with a backlog of clamp(closes/s x

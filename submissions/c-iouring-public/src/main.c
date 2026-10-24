@@ -8,6 +8,8 @@ const char *sqlite3_libversion(void);
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+static const char *g_shed_mode = "band";  // stats line: which shedding law runs
 #include <sys/resource.h>
 #include <time.h>
 
@@ -57,12 +59,12 @@ static void on_tick(loop_t *L, void *ud) {
               (unsigned long long)es.wal_resets, (unsigned long long)(es.wal_dropped_bytes >> 20),
               (unsigned long long)es.wal_flushes, (unsigned long long)es.commits_failed);
       fprintf(stderr,
-              "stats open=%u acc=%llu req=%llu batches=%llu lanes=%llu slow=%llu slow_checked=%llu jwt=%llu held=%llu "
+              "stats shed=%s open=%u acc=%llu req=%llu batches=%llu lanes=%llu slow=%llu slow_checked=%llu jwt=%llu held=%llu "
               "cfail=%llu deadline_503=%llu "
               "hint_closes=%llu close_frac=%.2f cap=%u busy=%.2f avail=%uMB orphans=%u listen_overflows=%llu "
               "listen_drops=%llu "
               "backlog=%u busy_src=%d utime=%ld.%06ld stime=%ld.%06ld maxrss=%ldKB\n",
-              s->open, (unsigned long long)s->accepted, (unsigned long long)a->requests, (unsigned long long)a->batches,
+              g_shed_mode, s->open, (unsigned long long)s->accepted, (unsigned long long)a->requests, (unsigned long long)a->batches,
               (unsigned long long)a->lanes, (unsigned long long)a->slow, (unsigned long long)a->slow_checked,
               (unsigned long long)a->jwts, (unsigned long long)a->held, (unsigned long long)a->commit_failures,
               (unsigned long long)a->deadline_503, (unsigned long long)s->hint_closes, s->close_frac, s->cap, s->busy,
@@ -114,6 +116,11 @@ int main(int argc, char **argv) {
       .conn_cap = envu("CURSED_CONN_CAP", 0),
       .reserve_mb = envu("CURSED_RESERVE_MB", 0),
       // shed band (permille of the cap) and the cap's hard ceiling; a fixed CURSED_CONN_CAP is clamped by the ceiling too
+      // shedding law: headroom (default: f from memory headroom alone, no cap ceiling; explore/conn-policy/hband) or band
+      .shed_headroom = !getenv("CURSED_SHED_MODE") || !*getenv("CURSED_SHED_MODE") || !strcmp(getenv("CURSED_SHED_MODE"), "headroom"),
+      .shed_hi_mb = envu("CURSED_SHED_HI_MB", 400),
+      .shed_lo_mb = envu("CURSED_SHED_LO_MB", 200),
+      .shed_fmax = permille(envu("CURSED_SHED_FMAX", 500)),
       .cap_ceiling = envu("CURSED_CAP_CEILING", 380000),
       .policy_engage = permille(envu("CURSED_SHED_ENGAGE", 950)),
       .policy_release = permille(envu("CURSED_SHED_RELEASE", 880)),
@@ -134,6 +141,7 @@ int main(int argc, char **argv) {
       .on_batch = on_batch,
       .on_tick = on_tick,
   };
+  if (cfg.shed_headroom) g_shed_mode = "headroom";
   stats_every = (int)envu("CURSED_STATS", 0);
   gL = loop_new(&cfg);
   if (!gL) {

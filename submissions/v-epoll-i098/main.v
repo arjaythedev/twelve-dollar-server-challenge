@@ -203,7 +203,7 @@ fn (mut s Server) open_db(path string) {
 	// bound id, because the id is compared with p.id inside the correlated like count.
 	C.sqlite3_db_config(s.db, C.SQLITE_DBCONFIG_ENABLE_QPSG, 1, unsafe { nil })
 	C.sqlite3_exec(s.db,
-		c'PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=1000; PRAGMA cache_size=-65536; PRAGMA mmap_size=1073741824; PRAGMA temp_store=MEMORY',
+		c'PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=1000; PRAGMA cache_size=-65536; PRAGMA temp_store=MEMORY',
 		unsafe { nil }, unsafe { nil }, unsafe { nil })
 	// Replaces SQLite's inline auto-checkpoint: checkpoints run on the checkpointer thread.
 	C.sqlite3_wal_hook(s.db, wal_hook, s)

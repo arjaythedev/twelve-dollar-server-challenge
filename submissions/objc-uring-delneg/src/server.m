@@ -132,7 +132,7 @@ typedef struct {
     struct io_uring_buf_ring *br;
     char *bufs;
     uint32_t brMask, live;
-    bool acceptArmed, full, active, pollArmed;
+    bool acceptArmed, full, active, pollArmed, high; // high: above the high-water mark
 } TDRingState;
 
 @implementation TDWorker {
@@ -141,7 +141,7 @@ typedef struct {
     char *slab;                 // TDConn instances
     size_t stride;
     Class connClass;
-    uint32_t slots;
+    uint32_t slots, highWater, lowGap;
     int listenFd;
     TDAuth *auth;
     int64_t started, now;
@@ -179,6 +179,9 @@ static struct io_uring_sqe *sqe_get(struct io_uring *r) {
     auth = cfg->auth;
     started = cfg->started;
     slots = cfg->slots;
+    uint32_t margin = slots / 4 < 4096 ? slots / 4 : 4096;   // > a listen backlog's burst (somaxconn 4096)
+    highWater = slots - margin;
+    lowGap = margin / 2;
     listenFd = cfg->listenFd;
     nrings = cfg->rings < 1 ? 1 : cfg->rings > MAX_RINGS ? MAX_RINGS : cfg->rings;
     connClass = objc_getClass("TDConn");
@@ -248,6 +251,16 @@ TD_INLINE void buf_recycle(TDRingState *rs, uint32_t bid) {
     io_uring_sqe_set_data64(s, UD(UD_ACCEPT, k, 0));
     rs->acceptArmed = true;
     rs->active = true;
+}
+
+// A full fixed-file table makes the kernel drop the connection it just accepted
+// (ENFILE). So accept leaves a ring at a high-water mark, while other rings have
+// room below theirs; the slots above the mark absorb the burst still in flight and
+// are used last, once every ring is above its mark.
+- (int)acceptTarget TD_DIRECT {
+    for (int q = 0; q < nrings; q++) if (!R[q].full && !R[q].high) return q;
+    for (int q = 0; q < nrings; q++) if (!R[q].full) return q;
+    return -1;
 }
 
 - (bool)acceptArmedAnywhere TD_DIRECT {
@@ -611,10 +624,8 @@ TD_INLINE void req_err(TDReq *r, int st, const char *msg) {
             if (res == -ENFILE || res == -EMFILE) {
                 // this ring's table is full: move accept to the next ring with room
                 rs->full = true;
-                for (int j = 1; j <= nrings; j++) {
-                    int q = (k + j) % nrings;
-                    if (!R[q].full) { [self armAccept:q]; break; }
-                }
+                int q = [self acceptTarget];
+                if (q >= 0) [self armAccept:q];
             }
         }
         if (res >= 0) {
@@ -627,6 +638,16 @@ TD_INLINE void req_err(TDReq *r, int st, const char *msg) {
             c->live = true;
             rs->live++;
             arm_recv(self, c, cid);
+            if (TD_UNLIKELY(rs->live >= highWater) && !rs->high) {
+                rs->high = true;
+                int q = [self acceptTarget];
+                if (q >= 0 && R[q].high == false && rs->acceptArmed) {
+                    struct io_uring_sqe *cs = sqe_get(&rs->ring);
+                    io_uring_prep_cancel64(cs, UD(UD_ACCEPT, k, 0), 0);
+                    io_uring_sqe_set_data64(cs, UD(UD_CLOSE, 0, 0xFFFFFF));
+                    if (!R[q].acceptArmed) [self armAccept:q];
+                }
+            }
         }
         break;
     }
@@ -635,6 +656,7 @@ TD_INLINE void req_err(TDReq *r, int st, const char *msg) {
             TDRingState *rs = &R[k];
             rs->live--;
             rs->full = false;
+            if (rs->high && rs->live + lowGap < highWater) rs->high = false;
         }
         break;
     case UD_POLL:
@@ -676,8 +698,10 @@ TD_INLINE void req_err(TDReq *r, int st, const char *msg) {
             }
             nrearm = 0;
         }
-        if (![self acceptArmedAnywhere])
-            for (int k = 0; k < nrings; k++) if (!R[k].full) { [self armAccept:k]; break; }
+        if (![self acceptArmedAnywhere]) {
+            int q = [self acceptTarget];
+            if (q >= 0) [self armAccept:q];
+        }
         for (int k = 1; k < nrings; k++) {
             if (R[k].active && !R[k].pollArmed) {
                 struct io_uring_sqe *sq = sqe_get(&R[0].ring);

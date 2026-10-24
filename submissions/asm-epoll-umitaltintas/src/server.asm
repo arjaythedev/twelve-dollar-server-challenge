@@ -75,6 +75,7 @@ in_txn:     resd 1
 st_dqfull:  resd 1                ; problem counters, printed every 10 s when not all zero
 st_flushbound: resd 1
 st_recverr: resd 1
+st_nobufs:  resd 1                ; receives that found no free buffer
 st_lasterr: resd 1
 st_cqover:  resd 1
 st_switch:  resd 1
@@ -582,7 +583,20 @@ dispatch:
   je on_poll
   cmp eax, OP_RESUME
   je on_resume
+  cmp eax, OP_RPOLL
+  je on_rpoll
   ret                         ; cancel/close results need nothing
+
+; on_rpoll(rdi = user_data, edx = flags): ring 0's poll on another ring. Its completions are read
+; by the loop anyway; only re-arm the poll if the kernel ended it.
+on_rpoll:
+  test edx, CQE_F_MORE
+  jnz .ret
+  shr edi, 8
+  and edi, 0xFF
+  jmp arm_rpoll
+.ret:
+  ret
 
 ; ---------------------------------------------------------------------------
 ; accepting
@@ -873,7 +887,10 @@ on_recv:
   jmp .done
 .noread:
   cmp r12d, -ENOBUFS
-  je .rearm                   ; every buffer was in use: try again
+  jne .notnobufs
+  inc dword [st_nobufs]
+  jmp .rearm                  ; every buffer was in use: try again
+.notnobufs:
   test r12d, r12d
   jz .eof
   inc dword [st_recverr]
@@ -1495,6 +1512,7 @@ print_stats:
   mov eax, [st_dqfull]
   or eax, [st_flushbound]
   or eax, [st_recverr]
+  or eax, [st_nobufs]
   or eax, ebx
   jnz .print
   cmp qword [st_maxpass], 50000
@@ -1508,7 +1526,10 @@ print_stats:
   mov eax, [st_lasterr]
   neg eax
   call w_u64
-  W_LIT '), cq overflow '
+  W_LIT '), no buffer '
+  mov eax, [st_nobufs]
+  call w_u64
+  W_LIT ', cq overflow '
   mov eax, [st_cqover]
   call w_u64
   W_LIT ', dq full '

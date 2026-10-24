@@ -2,10 +2,12 @@
 ;
 ; Every client socket lives in a ring's fixed-file table instead of the process fd table, so the
 ; 65,535-fd limit applies per ring, not per process. A ring holds up to [slots] sockets; more rings
-; are created as earlier ones fill up (MAXRINGS in all). The rings use DEFER_TASKRUN: completions
-; are posted only when this thread enters the kernel for them, in one batch. When idle, the loop
-; waits inside io_uring_enter on ring 0 (an eventfd wakeup was measured to arrive milliseconds late
-; with DEFER_TASKRUN).
+; are created as earlier ones fill up (MAXRINGS in all). Ring 0 uses DEFER_TASKRUN: its
+; completions are posted only when this thread enters the kernel for them, in one batch, and the
+; loop waits inside io_uring_enter on it (an eventfd wakeup was measured to arrive milliseconds
+; late with DEFER_TASKRUN). The other rings don't: their completions are posted as task work on
+; the way back from any syscall, so they need an io_uring_enter only to submit. Ring 0 polls their
+; fds (multishot), which wakes the wait when one of them gets completions.
 
 %define SYS_mmap              9
 %define SYS_eventfd2          290
@@ -39,6 +41,7 @@
 %define SETUP_DEFER_TASKRUN   (1 << 13)
 %define SETUP_NO_SQARRAY      (1 << 16)
 %define RING_FLAGS (SETUP_CQSIZE | SETUP_SUBMIT_ALL | SETUP_COOP_TASKRUN | SETUP_TASKRUN_FLAG | SETUP_SINGLE_ISSUER | SETUP_DEFER_TASKRUN)
+%define RING_FLAGS_K (SETUP_CQSIZE | SETUP_SUBMIT_ALL | SETUP_COOP_TASKRUN | SETUP_SINGLE_ISSUER)   ; rings 1..
 
 %define ENTER_GETEVENTS       1
 %define ENTER_EXT_ARG         8
@@ -74,6 +77,8 @@
 %define CQE_F_MORE            2
 %define MSG_DONTWAIT          0x40
 %define POLLOUT               4
+%define POLLIN                1
+%define POLL_ADD_MULTI        1
 
 ; sqe fields
 %define SQE_OPCODE        0
@@ -99,7 +104,7 @@
 %define MAXRINGS          8
 %define SQ_ENTRIES        4096
 %define CQ_ENTRIES        32768
-%define NBUF              512            ; provided receive buffers per ring (all get touched: 1 MB)
+%define NBUF              2048           ; provided receive buffers per ring (4 MB; 512 ran out in connect bursts)
 %define BUF_SHIFT         11
 %define BUF_SZ            (1 << BUF_SHIFT)
 
@@ -194,13 +199,19 @@ ring_create:
   push r15
   mov r12d, [nrings]
   RING rbx, r12
+  mov r15d, RING_FLAGS
+  test r12d, r12d
+  jz .flags
+  mov r15d, RING_FLAGS_K
+.flags:
   ; io_uring_setup
   lea rdi, [uparams]
   xor eax, eax
   mov ecx, 16
   rep stosq
   mov dword [uparams+P_CQ_ENTRIES], CQ_ENTRIES
-  mov dword [uparams+P_FLAGS], RING_FLAGS | SETUP_NO_SQARRAY
+  mov [uparams+P_FLAGS], r15d
+  or dword [uparams+P_FLAGS], SETUP_NO_SQARRAY
   mov edi, SQ_ENTRIES
   lea rsi, [uparams]
   SYSCALL SYS_io_uring_setup
@@ -212,7 +223,7 @@ ring_create:
   mov ecx, 16
   rep stosq
   mov dword [uparams+P_CQ_ENTRIES], CQ_ENTRIES
-  mov dword [uparams+P_FLAGS], RING_FLAGS
+  mov [uparams+P_FLAGS], r15d
   mov edi, SQ_ENTRIES
   lea rsi, [uparams]
   SYSCALL SYS_io_uring_setup
@@ -389,6 +400,11 @@ ring_create:
   mov [rbx+RG_EFD], eax
   mov dword [rbx+RG_EFLAGS], ENTER_REGISTERED_RING
 .noreg:
+  test r12d, r12d
+  jz .first
+  mov edi, r12d
+  call arm_rpoll
+.first:
   inc dword [nrings]
   mov eax, r12d
   pop r15
@@ -445,10 +461,38 @@ ring_needs_enter:
   cmp eax, [rcx]
   jne .yes
   mov rax, [rdi+RG_SQFLAGS]
+  lea rcx, [rings]
+  cmp rdi, rcx
+  jne .other
   test dword [rax], SQ_TASKRUN | SQ_CQ_OVERFLOW
+  ret
+.other:                       ; no deferred task work on the other rings
+  test dword [rax], SQ_CQ_OVERFLOW
   ret
 .yes:
   or eax, 1                   ; ZF=0
+  ret
+
+; arm_rpoll(edi = ring k > 0): a multishot poll on ring 0 for ring k's fd. It completes (on ring 0,
+; which the loop waits on) whenever ring k has completions. Keeps rbx, r12-r15.
+arm_rpoll:
+  mov ecx, edi
+  RING rdx, rcx
+  push rdx
+  push rcx
+  RING rdi, 0
+  call get_sqe
+  pop rcx
+  pop rdx
+  mov byte [rax+SQE_OPCODE], OPC_POLL_ADD
+  mov ecx, ecx
+  shl ecx, 8
+  or ecx, OP_RPOLL
+  mov [rax+SQE_USER_DATA], rcx
+  mov ecx, [rdx+RG_FD]
+  mov [rax+SQE_FD], ecx
+  mov dword [rax+SQE_LEN], POLL_ADD_MULTI
+  mov dword [rax+SQE_OPFLAGS], POLLIN
   ret
 
 ; enter_all(esi = 1: every ring): io_uring_enter every ring that has sqes or completions waiting.

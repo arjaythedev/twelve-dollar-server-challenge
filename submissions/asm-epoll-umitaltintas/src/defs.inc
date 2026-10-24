@@ -45,6 +45,7 @@
 %define OP_CANCEL         5
 %define OP_CLOSE          6
 %define OP_RESUME         7              ; not from the kernel: handle input held while output drained
+%define OP_RPOLL          8              ; ring 0's poll on another ring's fd
 
 ; Connection record (64 bytes, indexed by connection id)
 %define C_INBUF           0              ; leftover partial request (malloc) or 0

@@ -13,6 +13,7 @@ not in hand-written replacements for them.
 | Database | doobie 1.0.0-RC12 over sqlite-jdbc 3.53.4.0 (bundles SQLite 3.53.4) |
 | JSON / JWT | circe 0.14.17 (through `http4s-circe`); HS256 verified with the JDK's `Mac` |
 | GC / heap | Parallel GC, 60% of RAM, pre-touched |
+| Durability | SQLite WAL with `synchronous=FULL` and group commit: a 201 survives a power loss |
 | **Nginx or direct** | **Nginx**: listens on `HOST:PORT` (`127.0.0.1:3000`) behind [`bench/nginx.conf`](../../bench/nginx.conf) |
 
 **[FINDINGS.md](FINDINGS.md)** has every decision with its measurements, and the ideas that were rejected.
@@ -51,13 +52,13 @@ SQLITE_PATH=... JWT_SECRET=... HOST=127.0.0.1 PORT=3000 bash start.sh
   writes, runs them in one transaction on a dedicated writer thread, commits, and only then answers each request.
   Checkpoints run in a **background fiber**, and any checkpoint SQLite does at a commit happens on the writer thread,
   so disk work never stalls the thread that serves requests.
-- **`synchronous=NORMAL`**, as rule 6 allows: a commit survives a crash, not a power loss. `FULL` was measured (it
-  doubled p95 and quadrupled p99 at the limit) and not taken; see FINDINGS.md.
+- **Writes survive a power loss** (`synchronous=FULL`, stricter than rule 6 asks): a commit fsyncs the WAL before the
+  requests in it are answered, and the group commit makes that one fsync per group.
 - **Parallel GC with a fixed heap of 60% of RAM**, chosen by measurement against Serial, G1, ZGC and Shenandoah.
 
 Locally (app and Nginx pinned to one physical core, the box's 1,967 MB emulated with a cgroup limit, k6 on the other
 cores) it holds about **32,000 users** with the database on tmpfs (p95 147 ms, p99 688 ms, 0 errors, RSS 1.36 GB),
-and is right at the limit at **30,000** with it on the laptop's real disk, where runs vary a lot (FINDINGS.md).
+and the durable final build holds **28,000** with it on the laptop's real disk (FINDINGS.md).
 
 ## License
 

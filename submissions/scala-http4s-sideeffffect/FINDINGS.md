@@ -95,7 +95,7 @@ The six videos behind the challenges are summarised at the end of [RESEARCH.md](
 - **Durability.** He calls `synchronous=NORMAL` (which most of the fastest entries use, and so did we) "a trade-off I
   would not use in production": a commit survives a crash but not a power loss. His database video shows the server
   databases fsync every commit and share the flush through group commit, while SQLite at `FULL` without it collapsed
-  from 6,800 to 1,550 users on a write-heavy load. That led to the group-commit work below, and to measuring `FULL`.
+  from 6,800 to 1,550 users on a write-heavy load. That led to the group-commit work below, and to `FULL`.
 - **Checkpoints on a real disk.** He traced F#'s failure to checkpoint I/O, and described the assembly entry's
   background checkpoint that "can't fully catch up" under continuous writes. Measuring on a real disk (above) showed
   the same in ours.
@@ -127,12 +127,17 @@ readers and the fsyncs, and p99 is made of writes (8% of requests). At 32,000 us
 failed (p95 583 ms, p99 4.5 s); the group commit build that still had the restart passed once (p95 206 ms, p99 816 ms)
 and failed once (p99 1.22 s).
 
-**`synchronous=FULL` was measured and not adopted.** With group commit, a commit fsyncs the WAL once per group, so
-every 201 would survive a power loss. At 32,000 users on the disk (both on the build with the WAL restart, so a fair
-pair) it cost p95 755 ms and p99 4.3 s (fail), against p95 206 ms and p99 816 ms at `NORMAL`. Rule 6 asks for `NORMAL` or stronger, and the box's disk is unlikely to sync
-faster than a laptop NVMe, so the submission stays at `NORMAL`: committed before the response, safe from a crash of
-the process, not from a power cut. Switching is one line (`synchronous` in `Database.properties`) for anyone who
-wants it.
+**Writes survive a power loss: `synchronous=FULL`.** Rule 6 would allow `NORMAL`, but a 201 should mean the row is on
+disk, not just committed in the process. With group commit, a commit fsyncs the WAL once per group. A first
+measurement, on the build that still had the WAL restart, looked prohibitive (p99 4.3 s at 32,000 users); on the
+final build, interleaved at 28,000 users on the real disk, `FULL` is as good as `NORMAL`:
+
+| 28,000 users, real disk | p95 / p99, run 1 | p95 / p99, run 2 | app CPU |
+|---|---|---|---|
+| `NORMAL` | 265 ms / 1.06 s | 34 ms / 477 ms | 46-48% |
+| **`FULL`** | **8.7 ms / 87 ms** | **61 ms / 474 ms** | 51-53% |
+
+The price is ~5 points of app CPU (the fsync calls), so a little less headroom at the very top.
 
 ## Final numbers
 
@@ -146,10 +151,12 @@ App and Nginx on physical core 0 with its hyper-thread sibling idle, k6 on the o
 | before group commit | tmpfs | **32,000** | **pass** | 147 ms / 688 ms |
 | before group commit | tmpfs | 36,000 | fail | 672 ms / 2.33 s |
 | before group commit | real disk | 30,000 | pass once, fail once | 12 ms / 324 ms; 411 ms / 1.59 s |
-| **final (group commit)** | real disk | 30,000 | **pass once, fail once** | **7.5 ms / 201 ms; 59 ms / 1.15 s** |
+| group commit, `NORMAL` | real disk | 30,000 | pass once, fail once | 7.5 ms / 201 ms; 59 ms / 1.15 s |
+| **final (group commit, `FULL`)** | real disk | **28,000** | **pass, twice** | **8.7 ms / 87 ms; 61 ms / 474 ms** |
 
-So: about **32,000 users when fsync is cheap, and right at the limit at 30,000 on this laptop's real disk**, where
-runs vary a lot and group commit had the better tail in every pair. App CPU is ~50% of the core (Nginx takes most of
+So: about **32,000 users when fsync is cheap; on this laptop's real disk the durable final build holds 28,000**, and
+30,000 is at the edge, where runs vary a lot. The disk is btrfs, whose fsync is known to be slower and spikier than
+ext4's, the usual filesystem on a VPS. App CPU is ~50% of the core (Nginx takes most of
 the rest), RSS ~1.36 GB, and no run had errors.
 
 ## Considered and not adopted

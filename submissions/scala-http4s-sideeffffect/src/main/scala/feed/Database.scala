@@ -21,7 +21,9 @@ import scala.concurrent.duration.*
   * checkpointer.
   *
   * In WAL mode readers never wait for the writer. Writes go through [[Database.groupCommit]]: each request's write runs
-  * in the next group's transaction, and the request is answered only after that transaction commits (rule 6).
+  * in the next group's transaction, and the request is answered only after that transaction is **on disk**. With
+  * `synchronous=FULL` a commit fsyncs the WAL before it returns, so a 201 survives a power loss, not just a crash of
+  * the process; the group commit makes that one fsync per group instead of one per request.
   */
 final class Database private (reader: Transactor[IO], writes: Queue[IO, Database.PendingWrite[?]]):
   def read[A](program: ConnectionIO[A]): IO[A] = program.transact(reader)
@@ -50,13 +52,15 @@ object Database:
     def fail(error: Throwable): IO[Unit] = result.complete(Left(error)).void
 
   /** Group commit: one stream takes whatever writes are queued, runs them in one transaction on the write connection,
-    * commits, and only then answers each request. There is no timer: an idle server commits a group of one at once;
-    * under load, the writes that arrive while one group commits form the next group.
+    * commits (one fsync of the WAL for the whole group), and only then answers each request. There is no timer: an idle
+    * server commits a group of one at once; under load, the writes that arrive during one group's fsync form the next
+    * group, so the fsyncs per second stay bounded by the disk, not by the request rate.
     *
     * A failing statement doesn't abort an SQLite transaction, so each write's own error goes to its own caller; only a
-    * failed commit fails the whole group. Disk work (a commit, a checkpoint) must not hold the compute thread, but a
-    * thread hand-off per JDBC call (doobie's default interpreter) costs more than the writes themselves on one vCPU. So
-    * the whole group runs, call by call as plain `delay`, on a dedicated writer thread: one hand-off per group.
+    * failed commit fails the whole group. Disk work (a commit's fsync, a checkpoint) must not hold the compute thread,
+    * but a thread hand-off per JDBC call (doobie's default interpreter) costs more than the writes themselves on one
+    * vCPU. So the whole group runs, call by call as plain `delay`, on a dedicated writer thread: one hand-off per
+    * group.
     *
     * It also keeps SQLite's own checkpoints off the request path: when the WAL reaches the autocheckpoint size, the
     * commit that crosses it does the checkpoint, and that commit now runs on the writer thread.
@@ -88,10 +92,10 @@ object Database:
   /** Settings for every connection. sqlite-jdbc applies them as PRAGMAs when it opens the connection. */
   private def properties: Properties =
     val p = Properties()
-    // WAL with synchronous=NORMAL, the setting rule 6 asks for at least: a commit survives the process crashing, but
-    // not a power loss. FULL (an fsync per commit) cost p99 4.3 s at 32,000 users even with group commit (FINDINGS.md).
+    // WAL with synchronous=FULL: every commit fsyncs the WAL, so a committed write survives a power loss. (Rule 6 would
+    // allow NORMAL, which survives only a crash of the process.) Readers never commit, so for them it changes nothing.
     p.setProperty("journal_mode", "WAL")
-    p.setProperty("synchronous", "NORMAL")
+    p.setProperty("synchronous", "FULL")
     // With WAL, one writer and PASSIVE checkpoints nothing should wait for a lock; if something ever does, it holds
     // a thread, so give up after a second rather than five.
     p.setProperty("busy_timeout", "1000")

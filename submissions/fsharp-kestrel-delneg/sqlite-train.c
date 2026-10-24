@@ -1,6 +1,7 @@
 /* Training run for SQLite's profile-guided build (build.sh). It makes a synthetic database with the challenge
  * schema in a scratch file, then runs the server's statements with the server's pragmas: feed, one post, like,
- * new post. gcc records which branches run, and the second compile of sqlite3.c uses that profile. */
+ * new post, in pass transactions, with PASSIVE checkpoints on a second connection (the io_uring mode of Db.fs).
+ * gcc records which branches run, and the second compile of sqlite3.c uses that profile. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -75,10 +76,14 @@ int main(int argc, char **argv) {
   sqlite3_finalize(u); sqlite3_finalize(p); sqlite3_finalize(l);
   sqlite3_close(db);
 
-  /* The server's connection: same pragmas and statements as Db.fs. */
+  /* The server's connection: same pragmas and statements as Db.fs (background-checkpoint mode). */
   ok(sqlite3_open_v2(path, &db, SQLITE_OPEN_READWRITE, 0), "reopen");
-  run("PRAGMA locking_mode = EXCLUSIVE"); run("PRAGMA journal_mode = WAL"); run("PRAGMA synchronous = NORMAL");
-  run("PRAGMA busy_timeout = 5000"); run("PRAGMA mmap_size = 0"); run("PRAGMA cache_size = -32768");
+  run("PRAGMA journal_mode = WAL"); run("PRAGMA wal_autocheckpoint = 0"); run("PRAGMA journal_size_limit = 67108864");
+  run("PRAGMA synchronous = NORMAL"); run("PRAGMA busy_timeout = 5000"); run("PRAGMA mmap_size = 0");
+  run("PRAGMA cache_size = -32768"); run("PRAGMA temp_store = MEMORY");
+  sqlite3 *ck; /* the checkpoint connection */
+  ok(sqlite3_open_v2(path, &ck, SQLITE_OPEN_READWRITE, 0), "checkpoint open");
+  sqlite3_exec(ck, "PRAGMA journal_mode = WAL", 0, 0, 0);
   const char *sel = "SELECT p.id, p.body, p.created_at, u.username, (SELECT count(*) FROM likes l WHERE l.post_id = p.id)"
                     " FROM posts p JOIN users u ON u.id = p.user_id";
   snprintf(b, sizeof b, "%s ORDER BY p.created_at DESC, p.id DESC LIMIT 20", sel);
@@ -90,11 +95,32 @@ int main(int argc, char **argv) {
                             " ON CONFLICT (user_id, post_id) DO NOTHING");
   sqlite3_stmt *exists = prep("SELECT 1 FROM posts WHERE id = ?1");
   sqlite3_stmt *ping = prep("SELECT 1");
+  sqlite3_stmt *ids = prep("SELECT id FROM posts ORDER BY created_at DESC, id DESC LIMIT 20");
+  sqlite3_stmt *range = prep("SELECT p.id, p.body, p.created_at, u.username FROM posts p JOIN users u ON u.id = p.user_id"
+                             " WHERE p.id BETWEEN ?1 AND ?2 ORDER BY p.id DESC");
+  sqlite3_stmt *likes = prep("SELECT post_id, count(*) FROM likes WHERE post_id BETWEEN ?1 AND ?2 GROUP BY post_id");
+  sqlite3_stmt *begin = prep("BEGIN"), *commit = prep("COMMIT");
   long long sum = 0;
   for (int r = 0; r < ROUNDS; r++) {
+    if (r % 16 == 0) { ok(sqlite3_step(begin), "begin"); sqlite3_reset(begin); } /* one transaction per loop pass */
     unsigned x = rnd() % 217; /* the shares of bench/load.js: feed, post, like 15%, new post 2% */
     sqlite3_stmt *s = x < 100 ? feed : x < 200 ? post : 0;
-    if (s) {
+    if (s == feed && x % 8) { /* the feed's range path (Api.feed), the plain query now and then */
+      long long hi = 0, lo = 0; int n = 0;
+      while (sqlite3_step(ids) == SQLITE_ROW) { lo = sqlite3_column_int64(ids, 0); if (!n++) hi = lo; }
+      sqlite3_reset(ids);
+      sqlite3_bind_int64(likes, 1, lo); sqlite3_bind_int64(likes, 2, hi);
+      while (sqlite3_step(likes) == SQLITE_ROW) sum += sqlite3_column_int64(likes, 1);
+      sqlite3_reset(likes);
+      sqlite3_bind_int64(range, 1, lo); sqlite3_bind_int64(range, 2, hi);
+      while (sqlite3_step(range) == SQLITE_ROW) {
+        sum += sqlite3_column_int64(range, 0);
+        sum += sqlite3_column_bytes(range, 1) + (long long)(size_t)sqlite3_column_text(range, 1);
+        sum += sqlite3_column_bytes(range, 2) + (long long)(size_t)sqlite3_column_text(range, 2);
+        sum += sqlite3_column_bytes(range, 3) + (long long)(size_t)sqlite3_column_text(range, 3);
+      }
+      sqlite3_reset(range);
+    } else if (s) {
       if (s == post) sqlite3_bind_int64(post, 1, 1 + rnd() % (POSTS + 1000));
       while (sqlite3_step(s) == SQLITE_ROW) {
         sum += sqlite3_column_int64(s, 0) + sqlite3_column_int64(s, 4);
@@ -118,7 +144,11 @@ int main(int argc, char **argv) {
       ok(sqlite3_step(ins), "insert done"); sqlite3_reset(ins);
     }
     if (r % 1000 == 0) { sum += sqlite3_step(ping); sqlite3_reset(ping); }
+    if (r % 16 == 15) { ok(sqlite3_step(commit), "commit"); sqlite3_reset(commit); }
+    if (r % 400 == 399) { int lf = 0, cp = 0; sqlite3_wal_checkpoint_v2(ck, 0, SQLITE_CHECKPOINT_PASSIVE, &lf, &cp); }
   }
+  if (ROUNDS % 16) { ok(sqlite3_step(commit), "commit"); sqlite3_reset(commit); }
+  sqlite3_close_v2(ck);
   sqlite3_close_v2(db);
   remove(path);
   printf("train: %d rounds (%lld)\n", (int)ROUNDS, sum & 0xff);

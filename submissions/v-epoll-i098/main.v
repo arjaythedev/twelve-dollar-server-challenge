@@ -71,6 +71,7 @@ const sqlite_row = 100
 const sqlite_done = 101
 const max_events = 1024
 const max_request = 65536
+const header_room = 128 // fits the longest response header (36 + 19 + 48 + 10 + 4 bytes)
 
 const sql_post = 'SELECT p.id, p.body, p.created_at, u.username, (SELECT count(*) FROM likes l WHERE l.post_id = p.id) FROM posts p JOIN users u ON u.id = p.user_id'
 
@@ -92,7 +93,8 @@ mut:
 }
 
 struct Seg {
-	fd    int
+mut:
+	fd    int // -1 until after_parse assigns the connection
 	start int
 	end   int
 }
@@ -118,7 +120,8 @@ mut:
 	transport &C.td_net = unsafe { nil }
 	conns     []Conn
 	out       []u8 // all responses of the current batch
-	body      []u8 // scratch for one response body
+	body_start int = -1 // where the current response body starts in out; -1 when none is open
+	head      []u8 // scratch for one response header
 	rows      []u8 // scratch for feed rows before they are put in feed order
 	segs      []Seg
 	flush     []int
@@ -141,7 +144,7 @@ fn main() {
 		secret:  os.getenv('JWT_SECRET').bytes()
 		started: time.now().unix()
 		out:     []u8{cap: 1 << 20}
-		body:    []u8{cap: 16384}
+		head:    []u8{cap: header_room}
 		rows:    []u8{cap: 16384}
 		conns:   []Conn{len: int(C.TD_CAPACITY)}
 	}
@@ -304,7 +307,7 @@ fn (mut s Server) output_drained(fd int) {
 }
 
 fn (mut s Server) read_conn(fd int, data &u8, n int) {
-	start := s.out.len
+	start := s.segs.len
 	s.cur_close = s.conns[fd].close_after
 	if s.cur_close {
 		s.queue(fd)
@@ -335,7 +338,8 @@ fn (mut s Server) read_conn(fd int, data &u8, n int) {
 	s.after_parse(fd, start)
 }
 
-// after_parse queues what parse produced for fd: responses, a close, or a deferred write request.
+// after_parse queues what parse produced for fd: responses (segments from index start on), a close,
+// or a deferred write request.
 fn (mut s Server) after_parse(fd int, start int) {
 	if s.deferring {
 		s.deferring = false
@@ -344,8 +348,10 @@ fn (mut s Server) after_parse(fd int, start int) {
 			s.deferred << fd
 		}
 	}
-	if s.out.len > start {
-		s.segs << Seg{fd, start, s.out.len}
+	if s.segs.len > start {
+		for i in start .. s.segs.len {
+			s.segs[i].fd = fd
+		}
 		s.conns[fd].has_output = true
 	}
 	if s.cur_close {
@@ -400,7 +406,7 @@ fn (mut s Server) resume_writes() {
 		if !c.open || !was_deferred || !c.ready || c.inbuf.len == 0 {
 			continue
 		}
-		start := s.out.len
+		start := s.segs.len
 		s.cur_close = c.close_after
 		buf := c.inbuf
 		used := s.parse(buf, buf.len)
@@ -816,16 +822,16 @@ fn (mut s Server) create(user_id i64, username string, raw string) {
 		s.error(500, 'internal server error')
 		return
 	}
-	s.body.clear()
-	put(mut s.body, '{"post":{"id":')
-	put_int(mut s.body, C.sqlite3_column_int64(st, 0))
-	put(mut s.body, ',"body":')
-	put_json(mut s.body, text.str, text.len)
-	put(mut s.body, ',"created_at":')
-	put_json(mut s.body, C.sqlite3_column_text(st, 1), C.sqlite3_column_bytes(st, 1))
-	put(mut s.body, ',"author":')
-	put_json(mut s.body, username.str, username.len)
-	put(mut s.body, ',"like_count":0}}')
+	s.start_body()
+	put(mut s.out, '{"post":{"id":')
+	put_int(mut s.out, C.sqlite3_column_int64(st, 0))
+	put(mut s.out, ',"body":')
+	put_json(mut s.out, text.str, text.len)
+	put(mut s.out, ',"created_at":')
+	put_json(mut s.out, C.sqlite3_column_text(st, 1), C.sqlite3_column_bytes(st, 1))
+	put(mut s.out, ',"author":')
+	put_json(mut s.out, username.str, username.len)
+	put(mut s.out, ',"like_count":0}}')
 	C.sqlite3_reset(st)
 	s.respond(201)
 }
@@ -848,14 +854,14 @@ fn (mut s Server) like(user_id i64, post_id i64) {
 		return
 	}
 	created := C.sqlite3_changes(s.db) == 1
-	s.body.clear()
-	put(mut s.body, if created {
+	s.start_body()
+	put(mut s.out, if created {
 		'{"liked":true,"already_liked":false,"post_id":'
 	} else {
 		'{"liked":true,"already_liked":true,"post_id":'
 	})
-	put_int(mut s.body, post_id)
-	s.body << `}`
+	put_int(mut s.out, post_id)
+	s.out << `}`
 	s.respond(if created { 201 } else { 200 })
 }
 
@@ -914,22 +920,22 @@ fn (mut s Server) feed_range(ids [20]i64, n int, lo i64, hi i64) bool {
 	if rc != sqlite_done {
 		return false
 	}
-	s.body.clear()
-	put(mut s.body, '{"posts":[')
+	s.start_body()
+	put(mut s.out, '{"posts":[')
 	for k in 0 .. n {
 		off := ids[k] - lo
 		if start[off] < 0 {
 			return false
 		}
 		if k > 0 {
-			s.body << `,`
+			s.out << `,`
 		}
-		unsafe { s.body.push_many(&s.rows[start[off]], end[off] - start[off]) }
-		put(mut s.body, ',"like_count":')
-		put_int(mut s.body, likes[off])
-		s.body << `}`
+		append(mut s.out, &s.rows[start[off]], end[off] - start[off])
+		put(mut s.out, ',"like_count":')
+		put_int(mut s.out, likes[off])
+		s.out << `}`
 	}
-	put(mut s.body, ']}')
+	put(mut s.out, ']}')
 	s.respond(200)
 	return true
 }
@@ -937,12 +943,12 @@ fn (mut s Server) feed_range(ids [20]i64, n int, lo i64, hi i64) bool {
 // feed_full is the plain feed query, for ids too far apart for feed_range.
 fn (mut s Server) feed_full() {
 	st := s.st_feed
-	s.body.clear()
-	put(mut s.body, '{"posts":[')
+	s.start_body()
+	put(mut s.out, '{"posts":[')
 	mut rc := C.sqlite3_step(st)
 	for rc == sqlite_row {
-		if s.body.len > 10 {
-			s.body << `,`
+		if s.out.len - s.body_start > 10 {
+			s.out << `,`
 		}
 		s.put_post(st)
 		rc = C.sqlite3_step(st)
@@ -952,7 +958,7 @@ fn (mut s Server) feed_full() {
 		s.error(500, 'internal server error')
 		return
 	}
-	put(mut s.body, ']}')
+	put(mut s.out, ']}')
 	s.respond(200)
 }
 
@@ -962,10 +968,10 @@ fn (mut s Server) post(id i64) {
 	C.sqlite3_bind_int64(st, 1, id)
 	rc := C.sqlite3_step(st)
 	if rc == sqlite_row {
-		s.body.clear()
-		put(mut s.body, '{"post":')
+		s.start_body()
+		put(mut s.out, '{"post":')
 		s.put_post(st)
-		s.body << `}`
+		s.out << `}`
 		C.sqlite3_reset(st)
 		s.respond(200)
 		return
@@ -979,10 +985,10 @@ fn (mut s Server) post(id i64) {
 }
 
 fn (mut s Server) put_post(st &C.sqlite3_stmt) {
-	put_post_head(mut s.body, st)
-	put(mut s.body, ',"like_count":')
-	put_int(mut s.body, C.sqlite3_column_int64(st, 4))
-	s.body << `}`
+	put_post_head(mut s.out, st)
+	put(mut s.out, ',"like_count":')
+	put_int(mut s.out, C.sqlite3_column_int64(st, 4))
+	s.out << `}`
 }
 
 // put_post_head writes a post object up to (not including) its like_count.
@@ -1001,32 +1007,53 @@ fn (mut s Server) health() {
 	s.txn()
 	rc := C.sqlite3_step(s.st_health)
 	C.sqlite3_reset(s.st_health)
-	s.body.clear()
+	s.start_body()
 	if rc != sqlite_row {
-		put(mut s.body, '{"status":"degraded","db":"unreachable","error":')
+		put(mut s.out, '{"status":"degraded","db":"unreachable","error":')
 		msg := unsafe { cstring_to_vstring(C.sqlite3_errmsg(s.db)) }
-		put_json(mut s.body, msg.str, msg.len)
-		s.body << `}`
+		put_json(mut s.out, msg.str, msg.len)
+		s.out << `}`
 		s.respond(503)
 		return
 	}
-	put(mut s.body, '{"status":"ok","db":"ok","uptime_s":')
-	put_int(mut s.body, time.now().unix() - s.started)
-	s.body << `}`
+	put(mut s.out, '{"status":"ok","db":"ok","uptime_s":')
+	put_int(mut s.out, time.now().unix() - s.started)
+	s.out << `}`
 	s.respond(200)
 }
 
 fn (mut s Server) error(status int, msg string) {
-	s.body.clear()
-	put(mut s.body, '{"error":"')
-	put(mut s.body, msg)
-	put(mut s.body, '"}')
+	s.start_body()
+	put(mut s.out, '{"error":"')
+	put(mut s.out, msg)
+	put(mut s.out, '"}')
 	s.respond(status)
 }
 
+// start_body opens a response body in out after room for its header. Called again before
+// respond, it drops what the open body has so far.
+fn (mut s Server) start_body() {
+	if s.body_start >= 0 {
+		unsafe {
+			s.out.len = s.body_start
+		}
+		return
+	}
+	if s.out.len + header_room > s.out.cap {
+		s.out.ensure_cap(s.out.len + header_room)
+	}
+	unsafe {
+		s.out.len += header_room
+	}
+	s.body_start = s.out.len
+}
+
+// respond puts the header right before the open body, so the body is never copied, and queues
+// the response as a segment for after_parse to assign to its connection.
 fn (mut s Server) respond(status int) {
 	s.txn()
-	put(mut s.out, match status {
+	s.head.clear()
+	put(mut s.head, match status {
 		200 { 'HTTP/1.1 200 OK\r\n' }
 		201 { 'HTTP/1.1 201 Created\r\n' }
 		400 { 'HTTP/1.1 400 Bad Request\r\n' }
@@ -1036,12 +1063,15 @@ fn (mut s Server) respond(status int) {
 		else { 'HTTP/1.1 500 Internal Server Error\r\n' }
 	})
 	if s.cur_close {
-		put(mut s.out, 'Connection: close\r\n')
+		put(mut s.head, 'Connection: close\r\n')
 	}
-	put(mut s.out, 'Content-Type: application/json\r\nContent-Length: ')
-	put_int(mut s.out, s.body.len)
-	put(mut s.out, '\r\n\r\n')
-	append(mut s.out, s.body.data, s.body.len)
+	put(mut s.head, 'Content-Type: application/json\r\nContent-Length: ')
+	put_int(mut s.head, s.out.len - s.body_start)
+	put(mut s.head, '\r\n\r\n')
+	at := s.body_start - s.head.len
+	unsafe { vmemcpy(&u8(s.out.data) + at, s.head.data, s.head.len) }
+	s.segs << Seg{-1, at, s.out.len}
+	s.body_start = -1
 }
 
 // append copies n bytes to the end of b; it skips push_many's per-call checks on the hot path.

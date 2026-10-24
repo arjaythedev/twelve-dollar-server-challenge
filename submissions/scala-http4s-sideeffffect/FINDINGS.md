@@ -19,6 +19,10 @@ JVM entries do exactly that.
 - Laptop: i7-11800H. Caveat found late: CPUs 8-15 are the hyper-thread siblings of 0-7, and in the comparisons below
   k6 also ran on CPU 8, the sibling of the app's CPU 0. Every configuration had the same handicap, so the comparisons
   hold; their absolute numbers are pessimistic. The final numbers (last section) were measured with CPU 8 left idle.
+- A second caveat found late: until the last round, the test database lived on `/tmp`, which is **tmpfs, where fsync
+  is a no-op**, so checkpoints were free. The last round (group commit, durability) moved it to the laptop's real disk
+  (btrfs on NVMe, fsync 0.56 ms median), and that changed the picture (below). Runs on that disk vary a lot from one
+  to the next, so those comparisons interleave the variants and repeat them.
 
 ## Front: Nginx, not direct
 
@@ -84,19 +88,69 @@ would make direct mode viable). The brief was Ember; it is the obvious next expe
 | Waiting for a pooled connection couldn't be cancelled | `Resource.makeFull` with `poll` around the queue's `take` |
 | `token.split('.')` drops trailing empty parts, so a token with trailing dots was accepted | `split("\\.", -1)`: exactly three parts, or 401 |
 
+## Lessons from the challenge owner's videos
+
+The six videos behind the challenges are summarised at the end of [RESEARCH.md](RESEARCH.md). What they changed here:
+
+- **Durability.** He calls `synchronous=NORMAL` (which most of the fastest entries use, and so did we) "a trade-off I
+  would not use in production": a commit survives a crash but not a power loss. His database video shows the server
+  databases fsync every commit and share the flush through group commit, while SQLite at `FULL` without it collapsed
+  from 6,800 to 1,550 users on a write-heavy load. That led to the group-commit work below, and to measuring `FULL`.
+- **Checkpoints on a real disk.** He traced F#'s failure to checkpoint I/O, and described the assembly entry's
+  background checkpoint that "can't fully catch up" under continuous writes. Measuring on a real disk (above) showed
+  the same in ours.
+- **Confirmed rather than changed**: the limit is CPU on this workload; one serial writer with a read pool and
+  statements prepared once (his Swift and Go examples); no busy waits on the thread that serves requests (Kotlin);
+  never time out idle connections first (Node).
+- **Not taken**: JSON built by SQLite, one of the batch-1 tricks he highlighted. It would turn the Scala code into a
+  pipe for SQL-built strings, and circe is only ~8% of the CPU.
+
+## Group commit and durability
+
+On the real disk, the background PASSIVE checkpoints couldn't let the WAL start over (some reader always held a
+snapshot), so it grew to SQLite's autocheckpoint size (10,000 pages, ~40 MB) and that checkpoint ran **inside a
+request, on the only worker thread**. Writes now go through a **group commit** (`Database.groupCommit`): a request
+puts its write and a `Deferred` in a Cats Effect `Queue`; one fs2 stream takes whatever is queued, runs it in one
+transaction on a dedicated writer thread (one thread hand-off per group, not per JDBC call), commits, and only then
+completes each request's `Deferred` (rule 6). Any checkpoint SQLite does at a commit now happens on the writer thread.
+
+At 30,000 users on the real disk, two interleaved runs each:
+
+| Variant | p95 / p99, run 1 | p95 / p99, run 2 | app CPU |
+|---|---|---|---|
+| per-request commits (previous version) | 12 ms / 324 ms | 411 ms / 1.59 s | 47-49% |
+| **group commit** | **7.5 ms / 201 ms** | **59 ms / 1.15 s** | 49% |
+| group commit + `wal_checkpoint(RESTART)` between groups once the WAL passed 4,000 pages | 103 ms / 664 ms | 884 ms / 5.43 s | 48-50% |
+
+The explicit WAL restart (what the assembly entry does) was dropped: the writes queued behind it waited for the
+readers and the fsyncs, and p99 is made of writes (8% of requests). At 32,000 users on the disk the previous version
+failed (p95 583 ms, p99 4.5 s); the group commit build that still had the restart passed once (p95 206 ms, p99 816 ms)
+and failed once (p99 1.22 s).
+
+**`synchronous=FULL` was measured and not adopted.** With group commit, a commit fsyncs the WAL once per group, so
+every 201 would survive a power loss. At 32,000 users on the disk (both on the build with the WAL restart, so a fair
+pair) it cost p95 755 ms and p99 4.3 s (fail), against p95 206 ms and p99 816 ms at `NORMAL`. Rule 6 asks for `NORMAL` or stronger, and the box's disk is unlikely to sync
+faster than a laptop NVMe, so the submission stays at `NORMAL`: committed before the response, safe from a crash of
+the process, not from a power cut. Switching is one line (`synchronous` in `Database.properties`) for anyone who
+wants it.
+
 ## Final numbers
 
-The final code (all of the above, including the robustness fixes), app and Nginx on physical core 0 with its
-hyper-thread sibling idle, k6 on the other cores, nothing else running:
+App and Nginx on physical core 0 with its hyper-thread sibling idle, k6 on the other cores:
 
-| Users | Result | app CPU | p95 / p99 | errors | RSS | WAL at the end |
-|---|---|---|---|---|---|---|
-| 28,000 | pass | 42% | 5 ms / 151 ms | 0 | 1.28 GB | 8 MB |
-| **32,000** | **pass** | 48% | 147 ms / 688 ms | 0 | 1.36 GB | 10 MB |
-| 36,000 | fail (p99) | 53% | 672 ms / 2.33 s | 0 | 1.36 GB | 12 MB |
+| Database on | Users | Result | p95 / p99 |
+|---|---|---|---|
+| Build | Database on | Users | Result | p95 / p99 |
+|---|---|---|---|---|
+| before group commit | tmpfs (fsync free) | 28,000 | pass | 5 ms / 151 ms |
+| before group commit | tmpfs | **32,000** | **pass** | 147 ms / 688 ms |
+| before group commit | tmpfs | 36,000 | fail | 672 ms / 2.33 s |
+| before group commit | real disk | 30,000 | pass once, fail once | 12 ms / 324 ms; 411 ms / 1.59 s |
+| **final (group commit)** | real disk | 30,000 | **pass once, fail once** | **7.5 ms / 201 ms; 59 ms / 1.15 s** |
 
-The WAL staying at 8-12 MB shows the background checkpoints keep up: the WAL restarts from the beginning, and the
-10,000-page backstop (~40 MB) never fires. App CPU stays around 50% because Nginx shares the core.
+So: about **32,000 users when fsync is cheap, and right at the limit at 30,000 on this laptop's real disk**, where
+runs vary a lot and group commit had the better tail in every pair. App CPU is ~50% of the core (Nginx takes most of
+the rest), RSS ~1.36 GB, and no run had errors.
 
 ## Considered and not adopted
 
@@ -105,7 +159,6 @@ The WAL staying at 8-12 MB shows the background checkpoints keep up: the WAL res
 | Oracle GraalVM (Graal JIT; one entry measured 6-20% less CPU than C2) | The brief is the newest stable OpenJDK. Worth trying as a drop-in later. |
 | GraalVM native-image | Needs ~1.8 GB to build (the box has 2 GB), and was slower than Graal JIT in another entry. |
 | One SQLite connection for everything, `locking_mode=EXCLUSIVE` (+5% in the Node entry) | Conflicts with the background checkpointer's own connection; the read pool keeps reads independent of a write in progress. |
-| Group commit (an fs2 `Queue` of writes, `Deferred` per request) | Writes are ~8% of requests; other entries measured ≤ 3%. Not worth the code. |
 | jsoniter-scala instead of circe | circe is ~8% of app CPU in the profile; the gain would be a few percent. circe stays, as the ordinary choice. |
 | `query_only` reader connections, pre-warming the JIT before binding | Small or startup-only effects. |
 | Closing idle connections under fd pressure (`Connection: close` near the limit) | Only matters when serving directly. |

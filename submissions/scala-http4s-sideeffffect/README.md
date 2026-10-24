@@ -33,7 +33,7 @@ SQLITE_PATH=... JWT_SECRET=... HOST=127.0.0.1 PORT=3000 bash start.sh
 | `Main.scala` | `IOApp`, the Ember server |
 | `Routes.scala` | the five endpoints and the error bodies, with `http4s-dsl` |
 | `Repository.scala` | the SQL, as doobie `ConnectionIO` programs (the reference queries from SPEC.md) |
-| `Database.scala` | the transactors (a read pool and a single writer) and the background checkpointer |
+| `Database.scala` | the read pool, the group commit on a single writer, and the background checkpointer |
 | `ConnectionPool.scala` | a fixed set of connections lent from a Cats Effect `Queue` |
 | `Jdbc.scala` | a connection that prepares each SQL string once (Scala 3 `export` does the delegation) |
 | `Jwt.scala` | HS256 verification, every request (no cache, rule 5) |
@@ -47,12 +47,17 @@ SQLITE_PATH=... JWT_SECRET=... HOST=127.0.0.1 PORT=3000 bash start.sh
   pages in memory, so its calls are short CPU work, and a thread hand-off per JDBC call cost more than the call.
 - **A `Queue` of connections as the pool**: a request that finds it empty waits as a fiber; each connection keeps its
   **prepared statements** for the life of the process.
-- **WAL with one writer and a few readers**; checkpoints run in a **background fiber** on a blocking thread, so their
-  fsyncs never stall a request.
+- **WAL with one writer and a few readers.** Writes go through a **group commit**: an fs2 stream takes the queued
+  writes, runs them in one transaction on a dedicated writer thread, commits, and only then answers each request.
+  Checkpoints run in a **background fiber**, and any checkpoint SQLite does at a commit happens on the writer thread,
+  so disk work never stalls the thread that serves requests.
+- **`synchronous=NORMAL`**, as rule 6 allows: a commit survives a crash, not a power loss. `FULL` was measured (it
+  doubled p95 and quadrupled p99 at the limit) and not taken; see FINDINGS.md.
 - **Parallel GC with a fixed heap of 60% of RAM**, chosen by measurement against Serial, G1, ZGC and Shenandoah.
 
 Locally (app and Nginx pinned to one physical core, the box's 1,967 MB emulated with a cgroup limit, k6 on the other
-cores) it holds **32,000 users** (p95 147 ms, p99 688 ms, 0 errors, RSS 1.36 GB); 36,000 fail on latency.
+cores) it holds about **32,000 users** with the database on tmpfs (p95 147 ms, p99 688 ms, 0 errors, RSS 1.36 GB),
+and is right at the limit at **30,000** with it on the laptop's real disk, where runs vary a lot (FINDINGS.md).
 
 ## License
 

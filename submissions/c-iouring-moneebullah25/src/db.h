@@ -1,5 +1,5 @@
 /* SQLite access: one connection on the event loop thread for all requests,
- * one more on a SCHED_IDLE thread that only runs passive checkpoints.
+ * one more on a nice-10 thread that only runs passive checkpoints.
  *
  * Rule 2: in-process SQLite only. Rule 5: every call reads from SQLite; the
  * only reuse is of prepared statements. Rule 6: WAL + synchronous=NORMAL, and

@@ -6,7 +6,7 @@
 | Framework | none: liburing 2.15 (static, built from the pinned release tarball) |
 | Database | SQLite 3.54.1 amalgamation, `THREADSAFE=2`, in-process |
 | Nginx or direct | **Direct** on `HOST:PORT` (`0.0.0.0:80` on the box) |
-| Threads | one event-loop thread plus one `SCHED_IDLE` checkpoint thread |
+| Threads | one event-loop thread plus one nice-10 checkpoint thread |
 
 `install.sh` installs build-essential, curl, unzip and openssl; `build.sh`
 fetches and checksum-verifies SQLite and liburing into `third_party/` and runs

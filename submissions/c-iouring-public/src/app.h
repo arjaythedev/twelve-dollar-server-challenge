@@ -6,7 +6,6 @@
 #include "loop.h"
 typedef struct {
   uint64_t batches, requests, lanes, slow, slow_checked, jwts, held, commit_failures, deadline_503;
-  uint32_t max_batch, nheld;  // largest batch so far (connections); connections held now
 } app_stats;
 int app_init(const char *db_path, const char *secret, char *err, size_t errn);  // 0 or -1 (message in err)
 void app_close(void);

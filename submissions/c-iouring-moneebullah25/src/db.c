@@ -2,12 +2,14 @@
 
 #include <errno.h>
 #include <pthread.h>
-#include <sched.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/resource.h>
+#include <sys/syscall.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "json.h"
 #include "sqlite3.h"
@@ -132,7 +134,10 @@ static sqlite3 *open_conn(const struct config *cfg, int is_ckpt, char *err, size
         if (conn) sqlite3_close(conn);
         return NULL;
     }
-    sqlite3_busy_timeout(conn, is_ckpt ? 0 : 2000);
+    /* A busy wait on the loop thread would stall every connection; nothing
+     * should ever be busy (PASSIVE checkpoints do not take the write lock),
+     * so keep it short and let the batch fail with 500s instead. */
+    sqlite3_busy_timeout(conn, is_ckpt ? 0 : 50);
     char buf[128];
     snprintf(buf, sizeof buf, "PRAGMA cache_size=-%u", is_ckpt ? 2048u : cfg->sqlite_cache_kib);
     const char *pragmas[] = {
@@ -209,10 +214,10 @@ void db_close(struct db *db) {
 
 static void *ckpt_main(void *arg) {
     struct db *db = arg;
-    struct sched_param sp = {0};
-    /* SCHED_IDLE: the loop thread always wins the single CPU; only I/O waits
-     * move off the loop. */
-    pthread_setschedparam(pthread_self(), SCHED_IDLE, &sp);
+    /* Low priority, not SCHED_IDLE: the loop thread still wins most of the
+     * single CPU, but a loop at 100% would starve an idle-class thread and
+     * the WAL could never be backfilled. */
+    setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), 10);
     for (;;) {
         pthread_mutex_lock(&db->mu);
         if (!db->ckpt_stop) {
@@ -388,24 +393,28 @@ int db_txn_active(struct db *db) {
 
 size_t db_write_post_json(char *out, size_t cap, int64_t id, const char *body, size_t body_len, const char *created_at,
                           size_t created_len, const char *author, size_t author_len, int64_t like_count) {
-    /* {"id":N,"body":S,"created_at":"T","author":S,"like_count":N} */
-    size_t need =
-        6 + 20 + 8 + json_string_max(body_len) + 15 + created_len + 10 + json_string_max(author_len) + 14 + 20 + 1;
-    if (cap < need) return 0;
+    /* {"id":N,"body":S,"created_at":"T","author":S,"like_count":N}; the two
+     * strings check their own fit as they are written (0 = did not fit). */
+    size_t fixed = 6 + 20 + 8 + 15 + created_len + 11 + 14 + 20 + 1;
+    if (cap < fixed) return 0;
     char *o = out;
     memcpy(o, "{\"id\":", 6);
     o += 6;
     o += fmt_i64(o, id);
     memcpy(o, ",\"body\":", 8);
     o += 8;
-    o += json_write_string(o, cap, body, body_len);
+    size_t w = json_write_string(o, cap - fixed - (size_t)(o - out), body, body_len);
+    if (!w) return 0;
+    o += w;
     memcpy(o, ",\"created_at\":\"", 15);
     o += 15;
     memcpy(o, created_at, created_len);
     o += created_len;
     memcpy(o, "\",\"author\":", 11);
     o += 11;
-    o += json_write_string(o, cap, author, author_len);
+    w = json_write_string(o, cap - fixed - (size_t)(o - out), author, author_len);
+    if (!w) return 0;
+    o += w;
     memcpy(o, ",\"like_count\":", 14);
     o += 14;
     o += fmt_i64(o, like_count);

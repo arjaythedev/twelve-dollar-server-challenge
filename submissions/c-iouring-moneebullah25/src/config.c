@@ -16,8 +16,8 @@ void config_defaults(struct config *c) {
     c->ring_slots = 0;
     c->recv_bufs = 2048;
     c->recv_buf_size = 2048;
-    c->out_chunks = 2048;
-    c->out_chunk_size = 16384;
+    c->out_chunks = 1024;
+    c->out_chunk_size = 73728; /* the largest feed: 20 x 500 fully escaped characters */
     c->batch_cqes = 32;
     c->batch_wait_us = 250;
     c->work_budget = 256;

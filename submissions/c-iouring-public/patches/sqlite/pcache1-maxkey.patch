@@ -1,0 +1,43 @@
+--- orig/a/sqlite3.c	2026-10-24 11:49:49
++++ new/a/sqlite3.c	2026-10-24 11:49:49
+@@ -57185,6 +57185,7 @@
+   unsigned int nMax;                  /* Configured "cache_size" value */
+   unsigned int n90pct;                /* nMax*9/10 */
+   unsigned int iMaxKey;               /* Largest key seen since xTruncate() */
++  unsigned int iMaxKeyB4Rekey;        /* iMaxKey before a rekey raised it, or 0 */
+   unsigned int nPurgeableDummy;       /* pnPurgeable points here when not used*/
+ 
+   /* Hash table of all pages. The following variables may only be accessed
+@@ -57934,6 +57935,9 @@
+     pCache->apHash[h] = pPage;
+     if( iKey>pCache->iMaxKey ){
+       pCache->iMaxKey = iKey;
++    }
++    if( iKey>pCache->iMaxKeyB4Rekey && pCache->iMaxKeyB4Rekey ){
++      pCache->iMaxKeyB4Rekey = iKey;
+     }
+   }
+   return pPage;
+@@ -58143,7 +58147,14 @@
+   pPage->pNext = pCache->apHash[hNew];
+   pCache->apHash[hNew] = pPage;
+   if( iNew>pCache->iMaxKey ){
++    pCache->iMaxKeyB4Rekey = pCache->iMaxKey ? pCache->iMaxKey : 1;
+     pCache->iMaxKey = iNew;
++  }else if( iOld==pCache->iMaxKey && pCache->iMaxKeyB4Rekey ){
++    /* The temporary key used by balance_nonroot() is released again. */
++    pCache->iMaxKey = iNew>pCache->iMaxKeyB4Rekey ? iNew : pCache->iMaxKeyB4Rekey;
++    pCache->iMaxKeyB4Rekey = 0;
++  }else if( pCache->iMaxKeyB4Rekey && iNew>pCache->iMaxKeyB4Rekey ){
++    pCache->iMaxKeyB4Rekey = iNew;
+   }
+ 
+   pcache1LeaveMutex(pCache->pGroup);
+@@ -58163,6 +58174,7 @@
+     pcache1TruncateUnsafe(pCache, iLimit);
+     pCache->iMaxKey = iLimit-1;
+   }
++  pCache->iMaxKeyB4Rekey = 0;
+   pcache1LeaveMutex(pCache->pGroup);
+ }
+ 

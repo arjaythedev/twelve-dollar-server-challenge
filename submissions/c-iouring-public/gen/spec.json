@@ -1,0 +1,15 @@
+{
+  "name": "twelve-dollar-challenge",
+  "source": "challenge/SPEC.md (endpoints table, errors table, auth section)",
+  "http_version": "1.1",
+  "params": {
+    "id": {"type": "positive-int", "max_digits": 16, "invalid": "400 invalid post id"}
+  },
+  "routes": [
+    {"name": "FEED",    "method": "GET",  "path": "/feed"},
+    {"name": "HEALTH",  "method": "GET",  "path": "/health"},
+    {"name": "GETPOST", "method": "GET",  "path": "/posts/{id}"},
+    {"name": "CREATE",  "method": "POST", "path": "/posts",           "auth": "bearer", "body": "json"},
+    {"name": "LIKE",    "method": "POST", "path": "/posts/{id}/like", "auth": "bearer"}
+  ]
+}

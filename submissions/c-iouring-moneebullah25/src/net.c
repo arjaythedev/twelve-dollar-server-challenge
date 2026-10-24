@@ -106,7 +106,7 @@ struct ring {
     uint32_t slots;
     uint32_t used;
     char *bufs;
-    uint16_t *ret_bids;
+    uint64_t *ret_bitmap; /* buffer ids returned this iteration */
     uint32_t ret_n;
     uint32_t returned_this_iter;
     struct fifo rearm;
@@ -156,6 +156,8 @@ struct net {
         uint64_t accepts, closes, requests, iterations, wakeups, cqes, enobufs, rearms, short_sends, send_errors,
             bad_requests, too_large, partial_timeouts, shed, accept_errors, mem_pauses, buffers_returned, provide_sqes;
         uint64_t max_open;
+        uint64_t iter_ns_max, iters_over_20ms, commit_ns_max, batch_ns_max;
+        uint32_t batch_max;
     } st;
 };
 
@@ -220,36 +222,41 @@ static inline char *recv_buf(struct net *n, struct ring *rg, uint16_t bid) {
 }
 
 static void buf_return(struct net *n, struct ring *rg, uint16_t bid) {
-    rg->ret_bids[rg->ret_n++] = bid;
+    rg->ret_bitmap[bid >> 6] |= 1ull << (bid & 63);
+    rg->ret_n++;
     rg->returned_this_iter++;
     n->st.buffers_returned++;
 }
 
-/* Gives buffers back to the kernel: consecutive ids coalesce into one SQE. */
+static void provide_run(struct net *n, struct ring *rg, uint32_t start, uint32_t len) {
+    struct io_uring_sqe *sqe = sqe_get(rg);
+    io_uring_prep_provide_buffers(sqe, recv_buf(n, rg, (uint16_t)start), (int)n->cfg->recv_buf_size, (int)len, 0,
+                                  (int)start);
+    sqe->user_data = ud(OP_PROVIDE, 0, rg->idx);
+    n->st.provide_sqes++;
+}
+
+/* Gives buffers back to the kernel: runs of consecutive ids become one SQE. */
 static void flush_returned_buffers(struct net *n, struct ring *rg) {
     if (!rg->ret_n) return;
-    uint16_t *b = rg->ret_bids;
-    uint32_t cnt = rg->ret_n;
-    for (uint32_t i = 1; i < cnt; i++) { /* insertion sort: lists are short */
-        uint16_t v = b[i];
-        uint32_t j = i;
-        while (j && b[j - 1] > v) {
-            b[j] = b[j - 1];
-            j--;
+    uint32_t words = (n->cfg->recv_bufs + 63) / 64;
+    uint32_t run_start = 0, run_len = 0;
+    for (uint32_t w = 0; w < words; w++) {
+        uint64_t bits = rg->ret_bitmap[w];
+        if (!bits && !run_len) continue;
+        rg->ret_bitmap[w] = 0;
+        for (uint32_t b = 0; b < 64; b++) {
+            uint32_t bid = w * 64 + b;
+            if (bits & (1ull << b)) {
+                if (!run_len) run_start = bid;
+                run_len++;
+            } else if (run_len) {
+                provide_run(n, rg, run_start, run_len);
+                run_len = 0;
+            }
         }
-        b[j] = v;
     }
-    uint32_t i = 0;
-    while (i < cnt) {
-        uint32_t j = i;
-        while (j + 1 < cnt && b[j + 1] == b[j] + 1) j++;
-        struct io_uring_sqe *sqe = sqe_get(rg);
-        io_uring_prep_provide_buffers(sqe, recv_buf(n, rg, b[i]), (int)n->cfg->recv_buf_size, (int)(j - i + 1), 0,
-                                      b[i]);
-        sqe->user_data = ud(OP_PROVIDE, 0, rg->idx);
-        n->st.provide_sqes++;
-        i = j + 1;
-    }
+    if (run_len) provide_run(n, rg, run_start, run_len);
     rg->ret_n = 0;
 }
 
@@ -728,7 +735,9 @@ static void on_accept_cqe(struct net *n, struct io_uring_cqe *cqe, int oneshot) 
         }
         return;
     }
-    if (!more) update_accept(n);
+    /* a multishot accept keeps going; check after each one whether this ring
+     * is close enough to full that the one-shot window must take over */
+    update_accept(n);
 }
 
 static void handle_cqe(struct net *n, struct ring *rg, struct io_uring_cqe *cqe) {
@@ -892,25 +901,32 @@ static void print_stats(struct net *n) {
     app_get_stats(n->app, &as);
     uint32_t held_now = fifo_len(&n->held);
     log_msg(
-        "stats: open=%u max=%llu req=%llu (+%llu) cpu_us/req=%.1f rss=%ld MB avail=%llu MB iters=%llu wakeups=%llu "
+        "stats: open=%u max=%llu req=%llu (+%llu) cpu_us/req=%.1f (total %.1f) rss=%ld MB avail=%llu MB iters=%llu "
+        "wakeups=%llu "
         "cqes=%llu enobufs=%llu rearms=%llu short=%llu senderr=%llu bad=%llu big=%llu shed=%llu "
         "accerr=%llu chunks_free=%u held=%u wal=%u ckpts=%llu ckpt_avg_ms=%.1f ckpt_max_ms=%.1f holds=%llu "
         "hold_max_ms=%.1f hold_to=%llu fallback=%llu batches=%llu writes=%llu cfail=%llu "
-        "feed=%llu post=%llu like=%llu create=%llu health=%llu 2xx=%llu 4xx=%llu 5xx=%llu",
+        "feed=%llu post=%llu like=%llu create=%llu health=%llu 2xx=%llu 4xx=%llu 5xx=%llu "
+        "iter_max_ms=%.1f iters_over_20ms=%llu batch_max=%u batch_max_ms=%.1f endbatch_max_ms=%.1f",
         n->open_conns, (unsigned long long)n->st.max_open, (unsigned long long)n->st.requests, (unsigned long long)dreq,
-        dreq ? (double)dcpu / (double)dreq : 0.0, ru.ru_maxrss / 1024, (unsigned long long)available_mb(n),
-        (unsigned long long)n->st.iterations, (unsigned long long)n->st.wakeups, (unsigned long long)n->st.cqes,
-        (unsigned long long)n->st.enobufs, (unsigned long long)n->st.rearms, (unsigned long long)n->st.short_sends,
-        (unsigned long long)n->st.send_errors, (unsigned long long)n->st.bad_requests,
-        (unsigned long long)n->st.too_large, (unsigned long long)n->st.shed, (unsigned long long)n->st.accept_errors,
-        n->nchunk_free, held_now, ds.wal_frames, (unsigned long long)ds.checkpoints,
+        dreq ? (double)dcpu / (double)dreq : 0.0, n->st.requests ? (double)cpu_us / (double)n->st.requests : 0.0,
+        ru.ru_maxrss / 1024, (unsigned long long)available_mb(n), (unsigned long long)n->st.iterations,
+        (unsigned long long)n->st.wakeups, (unsigned long long)n->st.cqes, (unsigned long long)n->st.enobufs,
+        (unsigned long long)n->st.rearms, (unsigned long long)n->st.short_sends, (unsigned long long)n->st.send_errors,
+        (unsigned long long)n->st.bad_requests, (unsigned long long)n->st.too_large, (unsigned long long)n->st.shed,
+        (unsigned long long)n->st.accept_errors, n->nchunk_free, held_now, ds.wal_frames,
+        (unsigned long long)ds.checkpoints,
         ds.checkpoints ? (double)ds.checkpoint_ns_total / (double)ds.checkpoints / 1e6 : 0.0,
         (double)ds.checkpoint_ns_max / 1e6, (unsigned long long)ds.holds, (double)ds.hold_ns_max / 1e6,
         (unsigned long long)ds.hold_timeouts, (unsigned long long)ds.feed_fallbacks,
         (unsigned long long)as.write_batches, (unsigned long long)as.writes, (unsigned long long)as.commit_failures,
         (unsigned long long)as.feed, (unsigned long long)as.post_get, (unsigned long long)as.like,
         (unsigned long long)as.post_create, (unsigned long long)as.health, (unsigned long long)as.status_2xx,
-        (unsigned long long)as.status_4xx, (unsigned long long)as.status_5xx);
+        (unsigned long long)as.status_4xx, (unsigned long long)as.status_5xx, (double)n->st.iter_ns_max / 1e6,
+        (unsigned long long)n->st.iters_over_20ms, n->st.batch_max, (double)n->st.batch_ns_max / 1e6,
+        (double)n->st.commit_ns_max / 1e6);
+    n->st.iter_ns_max = n->st.batch_ns_max = n->st.commit_ns_max = 0;
+    n->st.batch_max = 0;
     last_req = n->st.requests;
     last_cpu_us = cpu_us;
 }
@@ -994,8 +1010,8 @@ static int ring_init(struct net *n, struct ring *rg, uint32_t idx) {
     }
     size_t bufs_size = (size_t)cfg->recv_bufs * cfg->recv_buf_size;
     rg->bufs = aligned_alloc(4096, (bufs_size + 4095) & ~(size_t)4095);
-    rg->ret_bids = malloc((size_t)cfg->recv_bufs * sizeof *rg->ret_bids);
-    if (!rg->bufs || !rg->ret_bids || fifo_init(&rg->rearm, rg->slots)) {
+    rg->ret_bitmap = calloc((cfg->recv_bufs + 63) / 64, sizeof *rg->ret_bitmap);
+    if (!rg->bufs || !rg->ret_bitmap || fifo_init(&rg->rearm, rg->slots)) {
         log_msg("ring %u: out of memory", idx);
         return -1;
     }
@@ -1090,7 +1106,7 @@ static void net_destroy(struct net *n) {
         struct ring *rg = &n->rings[i];
         if (rg->r.ring_fd > 0) io_uring_queue_exit(&rg->r);
         free(rg->bufs);
-        free(rg->ret_bids);
+        free(rg->ret_bitmap);
         free(rg->rearm.v);
     }
     if (n->listen_fd >= 0) close(n->listen_fd);
@@ -1115,7 +1131,11 @@ static void run_batch(struct net *n) {
     n->nresps = 0;
     app_begin_batch(n->app);
     while (budget-- && !fifo_empty(&n->ready)) process_conn(n, fifo_pop(&n->ready));
+    int64_t t_commit = now_ns();
     app_end_batch(n->app); /* commits every write of the batch before anything is sent */
+    int64_t d = now_ns() - t_commit;
+    if ((uint64_t)d > n->st.commit_ns_max) n->st.commit_ns_max = (uint64_t)d;
+    if (n->nresps > n->st.batch_max) n->st.batch_max = n->nresps;
     for (uint32_t i = 0; i < n->nresps; i++) {
         uint32_t idx = n->resp_conn[i];
         struct conn *c = conn_at(n, idx);
@@ -1224,13 +1244,19 @@ int net_run(const struct config *cfg, struct app *app, struct db *db) {
         }
         n->last_cqes = 0;
 
+        int64_t t_iter = now_ns();
         reap(n, r0);
         for (uint32_t i = 1; i < n->nrings; i++) {
             if (n->rings[i].needs_reap || io_uring_cq_ready(&n->rings[i].r)) reap(n, &n->rings[i]);
         }
         n->st.iterations++;
 
-        if (!fifo_empty(&n->ready)) run_batch(n);
+        if (!fifo_empty(&n->ready)) {
+            int64_t t_batch = now_ns();
+            run_batch(n);
+            int64_t d = now_ns() - t_batch;
+            if ((uint64_t)d > n->st.batch_ns_max) n->st.batch_ns_max = (uint64_t)d;
+        }
 
         for (uint32_t i = 0; i < n->nrings; i++) {
             struct ring *rg = &n->rings[i];
@@ -1242,6 +1268,9 @@ int net_run(const struct config *cfg, struct app *app, struct db *db) {
                 if (io_uring_cq_ready(&rg->r)) rg->needs_reap = 1;
             }
         }
+        int64_t d_iter = now_ns() - t_iter;
+        if ((uint64_t)d_iter > n->st.iter_ns_max) n->st.iter_ns_max = (uint64_t)d_iter;
+        if (d_iter > 20000000) n->st.iters_over_20ms++;
     }
     log_msg("exiting: open=%u accepts=%llu requests=%llu", n->open_conns, (unsigned long long)n->st.accepts,
             (unsigned long long)n->st.requests);

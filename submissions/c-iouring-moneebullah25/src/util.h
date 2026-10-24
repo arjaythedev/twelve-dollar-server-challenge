@@ -66,7 +66,7 @@ static inline int64_t wall_s(void) {
 
 /* Logging goes to stderr with a monotonic timestamp; the hot path never logs. */
 __attribute__((format(printf, 1, 2))) static inline void log_msg(const char *fmt, ...) {
-    char buf[512];
+    char buf[1024];
     va_list ap;
     va_start(ap, fmt);
     int n = vsnprintf(buf, sizeof buf, fmt, ap);

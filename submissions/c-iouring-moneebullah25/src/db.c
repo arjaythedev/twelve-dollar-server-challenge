@@ -83,6 +83,7 @@ struct db {
     int ckpt_started;
     int ckpt_stop;
     _Atomic uint32_t wal_frames; /* from the WAL hook, after each commit */
+    uint32_t backfilled;         /* frames the last checkpoint copied into the database (checkpointer only) */
     _Atomic int hold;            /* 1 while writes wait for the WAL to be fully backfilled */
     int64_t hold_since_ns;
     uint32_t hold_retry_frames; /* no new hold until the WAL has this many frames */
@@ -231,7 +232,12 @@ static void *ckpt_main(void *arg) {
 
         uint32_t frames = atomic_load_explicit(&db->wal_frames, memory_order_relaxed);
         int hold = atomic_load_explicit(&db->hold, memory_order_acquire);
-        if (frames < db->cfg->ckpt_frames && !hold) continue;
+        /* The WAL restarted since the last checkpoint: nothing is backfilled. */
+        if (frames < db->backfilled) db->backfilled = 0;
+        /* Only frames that are not yet in the database file count; the WAL
+         * total stays high until it restarts, which would otherwise trigger a
+         * checkpoint (two fsyncs) on every wake-up. */
+        if (frames - db->backfilled < db->cfg->ckpt_frames && !hold) continue;
 
         int64_t t0 = now_ns();
         int n_log = -1, n_ckpt = -1;
@@ -243,6 +249,7 @@ static void *ckpt_main(void *arg) {
         if ((uint64_t)dt > db->stats.checkpoint_ns_max) db->stats.checkpoint_ns_max = (uint64_t)dt;
         pthread_mutex_unlock(&db->stats_mu);
         if (rc != SQLITE_OK && rc != SQLITE_BUSY) log_msg("checkpoint: %s", sqlite3_errstr(rc));
+        if (rc == SQLITE_OK && n_ckpt >= 0) db->backfilled = (uint32_t)n_ckpt;
         /* Fully backfilled while writes were held: the next write transaction
          * restarts the WAL from frame 1, so the hold can end. */
         if (hold && rc == SQLITE_OK && n_log >= 0 && n_log == n_ckpt) {

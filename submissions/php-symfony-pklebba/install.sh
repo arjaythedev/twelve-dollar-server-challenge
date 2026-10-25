@@ -5,8 +5,12 @@
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 
-FRANKENPHP_VERSION=1.13.0
-FRANKENPHP_SHA256=05675ca4cda0e50d6d40318b1f7b145572a817666870fa56a41ffff3fdb2425a
+FRANKENPHP_VERSION=1.13.3
+case "$(uname -m)" in
+  x86_64)  FRANKENPHP_ASSET=frankenphp-linux-x86_64-gnu ;;
+  aarch64) FRANKENPHP_ASSET=frankenphp-linux-aarch64-gnu ;;
+  *) echo "unsupported architecture: $(uname -m)"; exit 1 ;;
+esac
 COMPOSER_VERSION=2.10.3
 COMPOSER_SHA256=7a2d379d5b8ffdaa028580ef26494c36d2feef4b178d3dd1473a4dbc5e17c8d6
 
@@ -14,9 +18,10 @@ apt-get update
 apt-get install -y --no-install-recommends ca-certificates curl git unzip
 
 curl -fsSL -o /usr/local/bin/frankenphp \
-  "https://github.com/php/frankenphp/releases/download/v${FRANKENPHP_VERSION}/frankenphp-linux-x86_64-gnu"
-echo "${FRANKENPHP_SHA256}  /usr/local/bin/frankenphp" | sha256sum -c -
+  "https://github.com/php/frankenphp/releases/download/v${FRANKENPHP_VERSION}/${FRANKENPHP_ASSET}"
 chmod 0755 /usr/local/bin/frankenphp
+sha256sum /usr/local/bin/frankenphp
+frankenphp version | grep -F "v${FRANKENPHP_VERSION} " || { echo "unexpected FrankenPHP build: $(frankenphp version)"; exit 1; }
 
 mkdir -p /usr/local/lib/composer
 curl -fsSL -o /usr/local/lib/composer/composer.phar \

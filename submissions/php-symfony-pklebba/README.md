@@ -1,13 +1,13 @@
 # PHP + Symfony on FrankenPHP
 
-| | |
-|---|---|
-| Language | PHP 8.5.11, the interpreter embedded in the official FrankenPHP static build (glibc variant) |
-| Framework | Symfony 8.1.8: FrameworkBundle + SecurityBundle, nothing else |
-| Server | FrankenPHP 1.13.0 (Caddy 2.11.7) in worker mode |
-| SQLite driver | `pdo_sqlite` through Doctrine DBAL 4.5, SQLite 3.45.2 as bundled in the binary |
-| JSON | `json_encode` |
-| **Nginx or direct** | **Direct**: serves `0.0.0.0:80` itself |
+| |                                                                                              |
+|---|----------------------------------------------------------------------------------------------|
+| Language | PHP 8.5.12, the interpreter embedded in the official FrankenPHP static build (glibc variant) |
+| Framework | Symfony 8.1.8: FrameworkBundle + SecurityBundle, nothing else                                |
+| Server | FrankenPHP 1.13.0 (Caddy 2.11.7) in worker mode                                              |
+| SQLite driver | `pdo_sqlite` through Doctrine DBAL 4.5, SQLite 3.45.2 as bundled in the binary               |
+| JSON | `json_encode`                                                                                |
+| **Nginx or direct** | **Direct**: serves `0.0.0.0:80` itself                                                       |
 
 ## Running it
 

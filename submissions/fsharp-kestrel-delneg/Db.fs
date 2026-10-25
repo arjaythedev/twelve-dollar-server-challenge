@@ -128,11 +128,14 @@ let mutable caughtUp = false
 /// 1 while the checkpoint thread starts the WAL again, 2 while the loop ends a hold that timed out: so the loop never
 /// lets writes go while that thread holds the write lock, and that thread never starts the WAL after a hold ended.
 let mutable restartGate = 0
+/// 15,000 frames: a hold lasts as long as the checkpoint's fsyncs, not as long as its copying, so a big WAL means
+/// fewer holds, not longer ones (4,096 frames: three times the holds, each 70 ms shorter). 15,000 frames of
+/// 4,120 bytes stay under the 64 MB `journal_size_limit`.
 /// FS3_HOLD_FRAMES overrides it (tests only: a small value makes holds frequent).
 let holdFrames =
     match Int32.TryParse(Environment.GetEnvironmentVariable "FS3_HOLD_FRAMES") with
     | true, n when n > 0 -> n
-    | _ -> 4096
+    | _ -> 15000
 
 let mutable private path = ""
 

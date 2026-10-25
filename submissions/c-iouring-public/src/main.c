@@ -63,13 +63,14 @@ static void on_tick(loop_t *L, void *ud) {
               "cfail=%llu deadline_503=%llu press_503=%llu sock_pressure=%u/%llu "
               "hint_closes=%llu close_frac=%.2f cap=%u busy=%.2f avail=%uMB orphans=%u listen_overflows=%llu "
               "listen_drops=%llu "
-              "backlog=%u busy_src=%d utime=%ld.%06ld stime=%ld.%06ld maxrss=%ldKB\n",
+              "backlog=%u busy_src=%d enobufs=%llu rearms=%llu loop_drains=%llu tcp_mem=%u utime=%ld.%06ld stime=%ld.%06ld maxrss=%ldKB\n",
               g_shed_mode, s->open, (unsigned long long)s->accepted, (unsigned long long)a->requests, (unsigned long long)a->batches,
               (unsigned long long)a->lanes, (unsigned long long)a->slow, (unsigned long long)a->slow_checked,
               (unsigned long long)a->jwts, (unsigned long long)a->held, (unsigned long long)a->commit_failures,
               (unsigned long long)a->deadline_503, (unsigned long long)a->press_503, s->sock_pressure, (unsigned long long)s->sock_pressure_events, (unsigned long long)s->hint_closes, s->close_frac, s->cap, s->busy,
               s->avail_mb, s->tcp_orphans, (unsigned long long)s->listen_overflows, (unsigned long long)s->listen_drops,
-              s->backlog_now, s->busy_src, (long)ru.ru_utime.tv_sec, (long)ru.ru_utime.tv_usec,
+              s->backlog_now, s->busy_src, (unsigned long long)s->enobufs, (unsigned long long)s->rearms,
+              (unsigned long long)s->drains, s->tcp_mem_pages, (long)ru.ru_utime.tv_sec, (long)ru.ru_utime.tv_usec,
               (long)ru.ru_stime.tv_sec, (long)ru.ru_stime.tv_usec, ru.ru_maxrss);
     }
   }
@@ -123,6 +124,8 @@ int main(int argc, char **argv) {
       .shed_fmax = permille(envu("CURSED_SHED_FMAX", 500)),
       .sock503_mbps = envu("CURSED_SOCK503_MBPS", 50) ? envu("CURSED_SOCK503_MBPS", 50) : (unsigned)-1,
       .sock503_avail_mb = envu("CURSED_SOCK503_AVAIL_MB", 450),
+      .press_pending = envu("CURSED_PRESS_PENDING", 20000),
+      .press_age_ms = envu("CURSED_PRESS_AGE_MS", 300),
       .cap_ceiling = envu("CURSED_CAP_CEILING", 380000),
       .policy_engage = permille(envu("CURSED_SHED_ENGAGE", 950)),
       .policy_release = permille(envu("CURSED_SHED_RELEASE", 880)),
@@ -130,6 +133,11 @@ int main(int argc, char **argv) {
       .guard_freeze = permille(envu("CURSED_GUARD_FREEZE", 920)),
       .guard_relax = permille(envu("CURSED_GUARD_RELAX", 850)),
       .busy_source = (int)envu("CURSED_BUSY_SRC", 0),
+      // drain_first (arena drain tag, off by default): copy recv data out of the kernel at once and drain the
+      // rings between batch chunks, so a lagging loop holds ~0.5 KB per pending request instead of a ~4 KB skb
+      .drain_first = (int)envu("CURSED_DRAIN", 1),   // conn-policy combined tag: drain-first on by default
+      .drain_chunk = (unsigned)envu("CURSED_DRAIN_CHUNK", 0),
+      .drain_budget = (unsigned)envu("CURSED_DRAIN_BUDGET", 0),
       .rx_timestamps = (int)envu("CURSED_RX_TS", (unsigned)deadline_on),
       // recv_mode: LOOP_RECV_AUTO (0) = multishot recv. Poll mode (2) holds less kernel memory per idle connection but
       // keeps every FIN skb charged until its poll CQE is reaped, so a mass close at 300k costs +631 MB (measured).

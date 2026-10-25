@@ -137,6 +137,8 @@ struct loop {
 
     /* batch */
     vec_t vin, vmeta;               /* loop_in[], bmeta[] */
+    vec_t cv, ci;                   /* per-callback scratch: live entries of the chunk, their vin index */
+    uint32_t chunk_end;             /* vin index after the chunk being processed (loop_backlog) */
     vec_t touched, staged, ready, closing, rearm;
     uint32_t staged_head;
     uint64_t seq;
@@ -157,7 +159,10 @@ struct loop {
     int engaged, cap_parked, tick4;
     float f_ceiling;
     float h_ewma;                   /* shed_headroom: available memory, EWMA ~1 s (MiB) */
-    long sock_hist[4]; unsigned sock_i;   /* sock pressure: socket-buffer MiB over the last 4 ticks (1 s) */
+    long sock_hist[8]; uint64_t sock_t[8]; unsigned sock_i;   /* sock pressure: samples >= 125 ms apart (~1 s) */
+    uint64_t sock_chk_ns;           /* last sock_check() */
+    long last_avail;                /* available MiB at the last sock_check() (-1 unknown) */
+    int bl_press;                   /* drain_first: pressure flagged on our own backlog */
     uint32_t slots_cap;             /* descriptor slots we can hold */
     uint64_t cpu_us_last, wall_ns_last;   /* cpu_us_last holds /proc/stat total ticks in 1-CPU mode */
     long idle_last;
@@ -266,6 +271,7 @@ static void be_resume(loop_t *L, uint32_t id, conn_t *c);
 static int  be_wait_and_reap(loop_t *L);
 static void be_after_batch(loop_t *L);
 static void be_accept_ctl(loop_t *L, int on);
+static void be_drain(loop_t *L);
 static void be_shutdown_wr(loop_t *L, uint32_t id, conn_t *c);
 
 /* ------------------------------------------------------------------ core: close / send */
@@ -419,6 +425,13 @@ static int conn_data(loop_t *L, uint32_t id, const char *p, uint32_t n, uint8_t 
         m->src = 0;
         return 0;
     }
+    if (L->cfg.drain_first && src == 1) {
+        /* drain_first: copy out now and give the provided buffer back, so pending requests never pin
+         * buffers (no ENOBUFS stall leaving data in the kernel) and cost ~0.5 KB instead of a ~4 KB skb */
+        c->in = buf_append(L, c->in, p, n);
+        m->src = 0;
+        return 0;
+    }
     e->data = p; e->len = n;
     m->src = src; m->ring = ring; m->bid = bid;
     return src == 1;
@@ -475,81 +488,115 @@ static void run_batch(loop_t *L)
     }
     L->ready.n = 0;
 
-    uint32_t n = L->vin.n;
-    if (!n) return;
-    loop_in *v = L->vin.p;
-    bmeta *m = L->vmeta.p;
-    /* drop dead conns; point stitched entries at conn->in */
-    uint32_t k = 0;
-    for (uint32_t i = 0; i < n; i++) {
-        conn_t *c = C(L, v[i].conn);
-        if (c->fl & F_DEAD) {
+    if (!L->vin.n) return;
+    /* Process the batch. Normally one callback with every entry. With drain_first, at most drain_chunk entries
+     * per callback, entering every ring between chunks: pending recvs complete (bytes leave the kernel) and
+     * queued sends go out; new entries append to vin and are handled in later chunks, until drain_budget. Each
+     * chunk's live entries are copied into a scratch array for the callback, so vin is never compacted while
+     * drains append to it or stitch into entries not yet processed. */
+    uint32_t done = 0, processed = 0;
+    for (;;) {
+        uint32_t total = L->vin.n;
+        if (done >= total) break;
+        uint32_t end = total;
+        if (L->cfg.drain_first && end - done > L->cfg.drain_chunk) end = done + L->cfg.drain_chunk;
+        loop_in *vv = L->vin.p;
+        bmeta *mm = L->vmeta.p;
+        /* live entries of [done, end) -> scratch; dead ones release their buffers */
+        L->cv.n = L->ci.n = 0;
+        for (uint32_t i = done; i < end; i++) {
+            conn_t *c = C(L, vv[i].conn);
+            if (c->fl & F_DEAD) {
+                c->fl &= ~F_INB;
+                if (mm[i].src == 1) return_pbuf(L, mm[i].ring, mm[i].bid);
+                continue;
+            }
+            if (mm[i].src == 0) { vv[i].data = c->in->d; vv[i].len = c->in->len; }
+            vv[i].qdelay_us = L->real_ns > mm[i].t ? (uint32_t)((L->real_ns - mm[i].t) / 1000) : 0;
+            *(loop_in *)vpush(&L->cv) = vv[i];
+            *(uint32_t *)vpush(&L->ci) = i;
+        }
+        uint32_t n = L->cv.n;
+        loop_in *v = L->cv.p;
+        uint32_t *ix = L->ci.p;
+        L->st.batches++; L->st.batch_items += n;
+
+        L->chunk_end = end;
+        L->in_batch = 1;
+        int r = n ? L->cfg.on_batch(L, v, (int)n, L->cfg.ud) : LOOP_COMMITTED;
+        L->in_batch = 0;
+
+        /* consumption: keep leftovers, return provided buffers */
+        for (uint32_t j = 0; j < n; j++) {
+            bmeta *m = &((bmeta *)L->vmeta.p)[ix[j]];
+            uint32_t id = v[j].conn;
+            conn_t *c = C(L, id);
             c->fl &= ~F_INB;
-            if (m[i].src == 1) return_pbuf(L, m[i].ring, m[i].bid);
-            continue;
+            uint32_t used = v[j].consumed < v[j].len ? v[j].consumed : v[j].len;
+            uint32_t rem = v[j].len - used;
+            if (m->src) {
+                if (rem && !(c->fl & (F_CLOSE_AFTER | F_EOF))) c->in = buf_append(L, c->in, v[j].data + used, rem);
+                if (m->src == 1) return_pbuf(L, m->ring, m->bid);
+            } else if (c->in) {
+                if (rem && !(c->fl & (F_CLOSE_AFTER | F_EOF))) {
+                    if (used) memmove(c->in->d, c->in->d + used, rem);
+                    c->in->len = rem;
+                } else { buf_put(L, c->in); c->in = NULL; }
+            }
+            if (c->in && c->in->len > L->cfg.max_in) {
+                /* unconsumed input over the limit: the app may be holding a request (write gate) with
+                 * pipelined ones behind it, so pause reading; only a runaway backlog is fatal */
+                if (c->in->len > 4 * L->cfg.max_in) { conn_kill(L, id); continue; }
+                if (!(c->fl & F_PAUSED)) { c->fl |= F_PAUSED; L->st.refused_pause++; be_pause(L, id, c); }
+            } else if ((c->fl & F_PAUSED) && (!c->in || c->in->len <= L->cfg.max_in / 2) && out_unsent(c) <= L->cfg.out_hiwat / 2) {
+                c->fl &= ~F_PAUSED;                               /* backlog consumed: read again */
+                be_resume(L, id, c);
+            }
+            if (c->in && used && !(c->fl & F_READY)) {          /* app stopped early: re-present */
+                c->fl |= F_READY;
+                cref *q = vpush(&L->ready); q->conn = id; q->gen = c->gen;
+            }
         }
-        if (m[i].src == 0) { v[i].data = c->in->d; v[i].len = c->in->len; }
-        v[i].qdelay_us = L->real_ns > m[i].t ? (uint32_t)((L->real_ns - m[i].t) / 1000) : 0;
-        if (k != i) { v[k] = v[i]; m[k] = m[i]; }
-        c->bidx = k + 1;
-        k++;
-    }
-    n = k;
-    L->st.batches++; L->st.batch_items += n;
 
-    L->in_batch = 1;
-    int r = n ? L->cfg.on_batch(L, v, (int)n, L->cfg.ud) : LOOP_COMMITTED;
-    L->in_batch = 0;
-
-    /* consumption: keep leftovers, return provided buffers */
-    for (uint32_t i = 0; i < n; i++) {
-        uint32_t id = v[i].conn;
-        conn_t *c = C(L, id);
-        c->fl &= ~F_INB;
-        uint32_t used = v[i].consumed < v[i].len ? v[i].consumed : v[i].len;
-        uint32_t rem = v[i].len - used;
-        if (m[i].src) {
-            if (rem && !(c->fl & (F_CLOSE_AFTER | F_EOF))) c->in = buf_append(L, c->in, v[i].data + used, rem);
-            if (m[i].src == 1) return_pbuf(L, m[i].ring, m[i].bid);
-        } else if (c->in) {
-            if (rem && !(c->fl & (F_CLOSE_AFTER | F_EOF))) {
-                if (used) memmove(c->in->d, c->in->d + used, rem);
-                c->in->len = rem;
-            } else { buf_put(L, c->in); c->in = NULL; }
+        /* staging / group commit (one unit per callback) */
+        cref *t = L->touched.p;
+        for (uint32_t i = 0; i < L->touched.n; i++) {
+            conn_t *c = C(L, t[i].conn);
+            c->fl &= ~F_TOUCHED;
+            if (!(c->fl & F_OPEN) || c->gen != t[i].gen || !c->out) continue;
+            staged_t *s = vpush(&L->staged);
+            s->seq = L->seq; s->conn = t[i].conn; s->gen = c->gen; s->end = c->out->base + c->out->len;
         }
-        if (c->in && c->in->len > L->cfg.max_in) {
-            /* unconsumed input over the limit: the app may be holding a request (write gate) with
-             * pipelined ones behind it, so pause reading; only a runaway backlog is fatal */
-            if (c->in->len > 4 * L->cfg.max_in) { conn_kill(L, id); continue; }
-            if (!(c->fl & F_PAUSED)) { c->fl |= F_PAUSED; L->st.refused_pause++; be_pause(L, id, c); }
-        } else if ((c->fl & F_PAUSED) && (!c->in || c->in->len <= L->cfg.max_in / 2) && out_unsent(c) <= L->cfg.out_hiwat / 2) {
-            c->fl &= ~F_PAUSED;                               /* backlog consumed: read again */
-            be_resume(L, id, c);
-        }
-        if (c->in && used && !(c->fl & F_READY)) {          /* app stopped early: re-present */
-            c->fl |= F_READY;
-            cref *q = vpush(&L->ready); q->conn = id; q->gen = c->gen;
-        }
-    }
+        L->touched.n = 0;
+        uint64_t seq = L->seq++;
+        if (r == LOOP_COMMITTED) release_staged(L, seq);
 
-    /* staging / group commit */
-    cref *t = L->touched.p;
-    for (uint32_t i = 0; i < L->touched.n; i++) {
-        conn_t *c = C(L, t[i].conn);
-        c->fl &= ~F_TOUCHED;
-        if (!(c->fl & F_OPEN) || c->gen != t[i].gen || !c->out) continue;
-        staged_t *s = vpush(&L->staged);
-        s->seq = L->seq; s->conn = t[i].conn; s->gen = c->gen; s->end = c->out->base + c->out->len;
-    }
-    L->touched.n = 0;
-    uint64_t seq = L->seq++;
-    if (r == LOOP_COMMITTED) release_staged(L, seq);
-
-    for (uint32_t i = 0; i < n; i++) {
-        conn_t *c = C(L, v[i].conn);
-        if (c->fl & (F_EOF | F_CLOSE_AFTER)) maybe_finish(L, v[i].conn, c);
+        for (uint32_t j = 0; j < n; j++) {
+            conn_t *c = C(L, v[j].conn);
+            if (c->fl & (F_EOF | F_CLOSE_AFTER)) maybe_finish(L, v[j].conn, c);
+        }
+        processed += end - done;
+        done = end;
+        if (L->cfg.drain_first && processed < L->cfg.drain_budget) {
+            be_drain(L);
+            L->st.drains++;
+            struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts);   /* ages of later chunks stay honest */
+            L->real_ns = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+        }
     }
     L->vin.n = L->vmeta.n = 0;
+    L->chunk_end = 0;
+}
+
+void loop_backlog(loop_t *L, uint32_t *pending, uint32_t *oldest_age_us)
+{
+    uint32_t p = L->vin.n > L->chunk_end ? L->vin.n - L->chunk_end : 0;
+    *pending = p;
+    *oldest_age_us = 0;
+    if (p) {
+        uint64_t t = ((bmeta *)L->vmeta.p)[L->chunk_end].t;
+        if (L->real_ns > t) *oldest_age_us = (uint32_t)((L->real_ns - t) / 1000);
+    }
 }
 
 static void process_closing(loop_t *L)
@@ -721,6 +768,32 @@ static long avail_mb(void)
     }
 #endif
     return best;
+}
+
+/* socket-memory pressure: a saturated loop's unread requests pile up in the kernel (~4 KB skb each; pending
+ * ~ rate x latency), 100-200 MB/s, and reached the OOM in ~2 s at 425k (arena). Raise a flag on the rise
+ * (> sock503_mbps over ~1 s, from time-stamped samples) while available memory is < sock503_avail_mb, or on the
+ * level (> 160 MB there); the app then answers queued requests with a fast 503 (no DB work, keep-alive), which
+ * drains the backlog without reconnect cost. Passing 400k runs' spikes all came with >= 558 MB free. Off once
+ * sock is back under 32 MB or memory recovers. Called from the tick and before each batch (<= every 50 ms). */
+static void sock_check(loop_t *L, long a)
+{
+    L->sock_chk_ns = mono_ns();
+    L->last_avail = a;
+    if (a < 0 || L->cfg.sock503_mbps == 0 || L->cfg.sock503_mbps == (unsigned)-1) return;
+    long sk = g_sock_mb >= 0 ? g_sock_mb : (long)L->st.tcp_mem_pages * 4 / 1024;
+    /* ring of 8 samples taken >= 125 ms apart: the oldest is ~1 s old */
+    unsigned last = (L->sock_i + 7) % 8;
+    if (!L->sock_i || L->sock_chk_ns - L->sock_t[last] >= 125000000ull) {
+        unsigned j = L->sock_i % 8; L->sock_t[j] = L->sock_chk_ns; L->sock_hist[j] = sk; L->sock_i++;
+    }
+    long base = L->sock_i >= 8 ? L->sock_hist[L->sock_i % 8] : L->sock_hist[0];
+    long rise = sk - base, gate = (long)L->cfg.sock503_avail_mb;
+    /* a rise only counts above 64 MB: a ramp-end blip to ~30 MB that drained by itself fired the valve and cost
+     * 79k 503s (1.36%, arena v18 425k); both real runaways passed 95 MB within a second. Off below 48 MB */
+    if (!L->st.sock_pressure && a < gate && ((rise > (long)L->cfg.sock503_mbps && sk > 64) || sk > 160)) {
+        L->st.sock_pressure = 1; L->st.sock_pressure_events++;
+    } else if (L->st.sock_pressure && (sk < 48 || a >= gate + 100)) L->st.sock_pressure = 0;
 }
 
 /* TCP memory in pages (/proc/net/sockstat "TCP: ... mem N"), -1 if unavailable. */
@@ -1033,24 +1106,27 @@ static void housekeeping(loop_t *L)
         L->mem_state = st;
         if (st == 2) loop_shed_idle(L, L->st.open / 50 + 1);
     }
-    /* socket-memory pressure: a saturated loop's unread requests pile up in the kernel (~4 KB skb each; pending
-     * ~ rate x latency), 100-200 MB/s, and reached the OOM in ~2 s at 425k (arena). Raise a flag on the rise
-     * (> sock503_mbps over the last second) while available memory is < sock503_avail_mb, or on the level (> 160 MB
-     * there); the app then answers queued requests with a fast 503 (no DB work, keep-alive), which drains the
-     * backlog without reconnect cost. Passing 400k runs' spikes all came with >= 558 MB free. Off once sock is
-     * back under 32 MB or memory recovers. */
-    if (a >= 0 && L->cfg.sock503_mbps > 0 && L->cfg.sock503_mbps != (unsigned)-1) {   /* -1: CURSED_SOCK503_MBPS=0, off */
-        long sk = g_sock_mb >= 0 ? g_sock_mb : (long)L->st.tcp_mem_pages * 4 / 1024;
-        unsigned j = L->sock_i % 4; long old = L->sock_hist[j];
-        L->sock_hist[j] = sk; L->sock_i++;
-        long rise = L->sock_i > 4 ? sk - old : 0, gate = (long)L->cfg.sock503_avail_mb;
-        if (!L->st.sock_pressure && a < gate && (rise > (long)L->cfg.sock503_mbps || sk > 160)) {
-            L->st.sock_pressure = 1; L->st.sock_pressure_events++;
-        } else if (L->st.sock_pressure && (sk < 32 || a >= gate + 100)) L->st.sock_pressure = 0;
-    }
+    sock_check(L, a);
     L->st.accepting = L->mem_state == 0 && !L->cap_parked;
 }
-int loop_sock_pressure(loop_t *L) { return L->st.sock_pressure; }
+int loop_sock_pressure(loop_t *L)
+{
+    /* also checked here, at the start of every batch (at most every 50 ms): a saturated loop reaches its 250 ms
+     * housekeeping tick late or not at all, so a tick-only check missed a +95 MB/s rise at 450k (arena) */
+    uint64_t t = mono_ns();
+    if (t - L->sock_chk_ns >= 50000000ull) sock_check(L, avail_mb());
+    /* with drain_first the backlog sits in our own compact buffers, not in skbs, so sock stays low: flag pressure
+     * on the loop's own backlog too (same memory gate), and release it once that backlog is mostly gone */
+    if (L->cfg.drain_first && L->cfg.press_pending) {
+        uint32_t pend = 0, age = 0;
+        loop_backlog(L, &pend, &age);
+        int over = pend > L->cfg.press_pending || age > L->cfg.press_age_ms * 1000u;
+        if (!L->bl_press && over && L->last_avail >= 0 && L->last_avail < (long)L->cfg.sock503_avail_mb) {
+            L->bl_press = 1; L->st.sock_pressure_events++;
+        } else if (L->bl_press && pend < L->cfg.press_pending / 2 && age < L->cfg.press_age_ms * 500u) L->bl_press = 0;   /* half: less 503 volume per episode */
+    }
+    return L->st.sock_pressure || L->bl_press;
+}
 
 /* ------------------------------------------------------------------ listen socket */
 
@@ -1104,11 +1180,15 @@ loop_t *loop_new(const loop_cfg *in)
     if (!c->reserve_mb) c->reserve_mb = 250;
     if (!c->cap_ceiling) c->cap_ceiling = 380000;
     if (!c->linger_s) c->linger_s = 5;
+    if (!c->drain_chunk) c->drain_chunk = 256;
+    if (!c->drain_budget) c->drain_budget = 8192;
     if (!c->policy_engage) c->policy_engage = 0.85f;
     if (!c->policy_release) c->policy_release = 0.75f;
     if (!c->shed_hi_mb) c->shed_hi_mb = 400;
     if (!c->shed_lo_mb) c->shed_lo_mb = 200;
     if (!c->sock503_mbps) c->sock503_mbps = 50;
+    if (!c->press_pending) c->press_pending = 20000;
+    if (!c->press_age_ms) c->press_age_ms = 300;
     if (!c->sock503_avail_mb) c->sock503_avail_mb = 450;
     if (!c->shed_fmax) c->shed_fmax = 0.5f;   /* never shed more than half: a deficit shedding can't fix pinned f at 1 and emptied the server (exp71); the 100/60 MB floors handle real emergencies */
     if (!c->guard_freeze) c->guard_freeze = 0.92f;
@@ -1117,6 +1197,7 @@ loop_t *loop_new(const loop_cfg *in)
     if (!c->poll_wait_us) c->poll_wait_us = 1000;
     if (!c->max_cqes) c->max_cqes = 2048;
     L->vin.sz = sizeof(loop_in); L->vmeta.sz = sizeof(bmeta);
+    L->cv.sz = sizeof(loop_in); L->ci.sz = sizeof(uint32_t);
     L->touched.sz = L->ready.sz = L->closing.sz = L->rearm.sz = sizeof(cref);
     L->staged.sz = sizeof(staged_t);
     L->fop_done.sz = sizeof(fop_rec *);
@@ -1124,6 +1205,7 @@ loop_t *loop_new(const loop_cfg *in)
     L->rng = 0x9e3779b9u;
     L->rst_ok = 1;
     L->f_ceiling = 1;
+    L->last_avail = -1;
 #ifdef __linux__
     {   /* tcp_mem is only visible in the initial network namespace; 0 = unknown */
         int fd = open("/proc/sys/net/ipv4/tcp_mem", O_RDONLY | O_CLOEXEC);
@@ -1214,7 +1296,7 @@ void loop_free(loop_t *L)
     for (uint32_t i = 0; i < L->hi; i++) { buf_put(L, L->tab[i].in); buf_put(L, L->tab[i].out); }
     for (int k = 0; k < NCLS; k++) while (L->pool[k]) { buf_t *b = L->pool[k]; L->pool[k] = b->next; free(b); }
     if (L->tab) munmap(L->tab, L->tab_bytes);
-    free(L->vin.p); free(L->vmeta.p); free(L->touched.p); free(L->staged.p);
+    free(L->vin.p); free(L->vmeta.p); free(L->cv.p); free(L->ci.p); free(L->touched.p); free(L->staged.p);
     free(L->ready.p); free(L->closing.p); free(L->rearm.p);
     free(L);
 }
@@ -1505,6 +1587,20 @@ static void ur_shutdown_wr(loop_t *L, uint32_t id, conn_t *c)
     s->fd = (int)id_slot(L, id);
     s->flags = IOSQE_FIXED_FILE;
     s->user_data = ud_mk(OP_IGN, id_ring(L, id), id_slot(L, id), GEN_FDINSTALL);
+}
+
+/* drain_first, between chunks: submit what's queued (sends) and run each ring's deferred task work so
+ * pending recvs copy their bytes out of the kernel; reap; give provided buffers back at once */
+static unsigned reap(loop_t *L, unsigned ri);
+static void ur_drain(loop_t *L)
+{
+    for (unsigned k = 0; k < L->nlive; k++) {
+        ring_t *r = &L->rings[k];
+        if (r->br_dirty && !r->legacy) { __atomic_store_n(&r->br->tail, r->br_tail, __ATOMIC_RELEASE); r->br_dirty = 0; }
+        ring_enter(L, r, 0, IORING_ENTER_GETEVENTS, 0);
+        reap(L, k);
+        if (r->br_dirty && !r->legacy) { __atomic_store_n(&r->br->tail, r->br_tail, __ATOMIC_RELEASE); r->br_dirty = 0; }
+    }
 }
 
 static int ur_file_submit(loop_t *L, const loop_fop *ops, int n)
@@ -2146,6 +2242,7 @@ static void be_resume(loop_t *L, uint32_t id, conn_t *c) { if (L->epoll) ep_resu
 static int  be_wait_and_reap(loop_t *L) { return L->epoll ? ep_wait_and_reap(L) : ur_wait_and_reap(L); }
 static void be_after_batch(loop_t *L) { if (L->epoll) ep_after_batch(L); else ur_after_batch(L); }
 static void be_accept_ctl(loop_t *L, int on) { if (L->epoll) ep_accept_ctl(L, on); else ur_accept_ctl(L, on); }
+static void be_drain(loop_t *L) { if (!L->epoll) ur_drain(L); }
 static void be_shutdown_wr(loop_t *L, uint32_t id, conn_t *c) { if (L->epoll) ep_shutdown_wr(L, id, c); else ur_shutdown_wr(L, id, c); }
 static void return_pbuf(loop_t *L, uint16_t ring, uint16_t bid) { if (!L->epoll) ur_return_pbuf(L, ring, bid); }
 
@@ -2215,6 +2312,7 @@ static void be_close(loop_t *L, uint32_t id, conn_t *c)
 }
 
 static void be_pause(loop_t *L, uint32_t id, conn_t *c) { (void)c; kchg(L, (int)id, EVFILT_READ, EV_DISABLE, NULL); }
+static void be_drain(loop_t *L) { (void)L; }
 static void be_shutdown_wr(loop_t *L, uint32_t id, conn_t *c) { (void)L; (void)c; shutdown((int)id, SHUT_WR); }
 static void be_resume(loop_t *L, uint32_t id, conn_t *c)
 {

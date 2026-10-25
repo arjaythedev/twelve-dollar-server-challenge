@@ -113,6 +113,16 @@ typedef struct {
     float shed_fmax;                     /* default 0.5 */
     unsigned sock503_mbps, sock503_avail_mb; /* socket-memory pressure flag (loop_sock_pressure): rise per second / memory gate,
                                             default 50 / 450 MB; the app answers queued requests with 503 while it is set */
+    unsigned press_pending, press_age_ms;    /* drain_first: also flag pressure (same memory gate) once the loop's own backlog
+                                            (loop_backlog) exceeds this many requests or its oldest is older than this.
+                                            Default 20000 / 300 ms */
+    int drain_first;                     /* 1: under load, keep request bytes out of the kernel: copy recv data into compact
+                                            per-conn buffers right away (provided buffers return at once), and hand the
+                                            app at most drain_chunk entries per callback, entering every ring between
+                                            chunks so pending recvs complete and sends go out. A request queued in a
+                                            socket costs a ~4 KB skb; copied out it costs ~0.5 KB (arena 425k OOM) */
+    unsigned drain_chunk;                /* default 256 */
+    unsigned drain_budget;               /* entries per pass before draining stops (the pass must end), default 8192 */
     float guard_freeze, guard_relax;     /* CPU guard: freeze f above guard_freeze busy, relax below guard_relax.
                                             Default 0.92 / 0.85 */
     int backlog_parked_dynamic;          /* 1: while parked at the cap, listen() with a backlog of clamp(closes/s x
@@ -140,6 +150,7 @@ typedef struct {
 typedef struct {
     uint64_t accepted, closed, batches, batch_items, recvs, sends, send_bytes;
     uint64_t enobufs, rearms, partial_sends, shed, refused_pause, enters, wakeups;
+    uint64_t drains;                     /* drain_first: between-chunk ring drains */
     uint64_t file_ops;                   /* loop_file_submit ops completed */
     uint64_t rst, hint_closes, stranded;   /* stranded: recvs re-armed by the watchdog (should stay 0) */
     uint32_t open;
@@ -199,6 +210,11 @@ typedef struct {
 int loop_file_submit(loop_t *, const loop_fop *ops, int n);   /* 0, or -errno (nothing submitted) */
 /* Shutdown with file ops in flight: completions are only reaped while loop_run() runs, so drain first,
  * e.g. from on_tick: if (stopping && nothing_in_flight) loop_stop(L). */
+
+/* Backlog of this pass (meaningful inside the batch callback; with drain_first, chunks drained later in the pass
+ * accumulate here instead of in kernel socket buffers): requests reaped but not yet handed to the app after the
+ * current chunk, and the age of the oldest of them (us, from its receive time). Both 0 when empty. */
+void loop_backlog(loop_t *, uint32_t *pending, uint32_t *oldest_age_us);
 
 /* --- any time on the loop thread --- */
 void  loop_commit(loop_t *, uint64_t seq);                  /* release all staged output of batches <= seq */

@@ -104,7 +104,12 @@ the code by `tools/knobs.py`; the `CURSED_*` and `LOOP_TEST_*` variables exist f
 | `CURSED_SHED_MODE` | headroom | `headroom`: the close fraction is a function of available memory alone; `band`: the older cap-and-band rule (the cap knobs, band and CPU guard below apply only to it) |
 | `CURSED_SHED_HI_MB` | 400 | headroom: no shedding while available memory (~1 s average) is at least this (MB) |
 | `CURSED_SHED_LO_MB` | 200 | headroom: the close fraction reaches its maximum at this much available memory (MB) |
-| `CURSED_SOCK503_MBPS` | 50 | socket-memory pressure valve: if socket-buffer memory rises more than this (MB) within 1 s, or exceeds 160 MB, while available memory is under CURSED_SOCK503_AVAIL_MB, queued requests get a fast 503 (keep-alive, no DB work) until it drains below 32 MB (0: off) |
+| `CURSED_SOCK503_MBPS` | 50 | socket-memory pressure valve: if socket-buffer memory rises more than this (MB) within 1 s while above 64 MB, or exceeds 160 MB, while available memory is under CURSED_SOCK503_AVAIL_MB, queued requests get a fast 503 (keep-alive, no DB work) until it drains below 48 MB (0: off) |
+| `CURSED_PRESS_PENDING` | 20000 | with CURSED_DRAIN=1: also raise the pressure valve (same memory gate) once the loop's own backlog exceeds this many requests; it releases below half |
+| `CURSED_PRESS_AGE_MS` | 300 | with CURSED_DRAIN=1: ...or once its oldest queued request has waited longer than this (ms); it releases below half |
+| `CURSED_DRAIN` | 1 | 1: drain-first receive: requests are copied out of the kernel's socket buffers into compact buffers at once and handled in chunks; 0: the earlier receive path |
+| `CURSED_DRAIN_CHUNK` | 0 | drain-first: most requests handed to one batch (0: the loop default, 256) |
+| `CURSED_DRAIN_BUDGET` | 0 | drain-first: most completions drained per loop pass (0: the loop default, 8192) |
 | `CURSED_SOCK503_AVAIL_MB` | 450 | socket-memory pressure valve: only below this much available memory (MB) |
 | `CURSED_SHED_FMAX` | 500 | headroom: the maximum close fraction, permille |
 | `CURSED_CONN_CAP` | 0 | band mode: fixed connection cap instead of the memory-derived one (0: derive) |
@@ -122,7 +127,7 @@ the code by `tools/knobs.py`; the `CURSED_*` and `LOOP_TEST_*` variables exist f
 | Variable | Default | What it does |
 |---|---|---|
 | `CURSED_CACHE_KIB` | 8192 | SQLite page cache (KiB) |
-| `CURSED_CKPT_FRAMES` | 4096 (uring, thread) / 16384 (inline) | checkpoint pass size in WAL frames |
+| `CURSED_CKPT_FRAMES` | 4096 (uring, thread, bounded) / 16384 (inline) | checkpoint pass size in WAL frames |
 | `CURSED_CKPT_THREAD` | 1 in thread mode | thread mode only. 1: checkpoint from the background thread; 0: inline |
 | `CURSED_CKPT_RESTART` | 32768 | the write gate's drain mark (WAL frames), from the engine's Xeon sweep |
 | `CURSED_CKPT_NICE` | 0 | nice level of the checkpoint thread (lower = drains finish sooner at a pegged CPU, but take more CPU from reads) |
@@ -157,8 +162,11 @@ sources, so they keep their owners' style.
 ## Design
 One process, one thread: the event loop, which also drives the WAL checkpoint's file I/O. Every loop wakeup is one batch:
 1. **Receive.** io_uring rings of 65,535 direct descriptors each (created on demand), 256 single-shot accepts in
-   flight. Each connection has an armed multishot recv into a provided-buffer ring. Up to 128 completions or 2 ms per wakeup. If
-   io_uring is unavailable, the loop falls back to epoll.
+   flight. Each connection has an armed multishot recv into a provided-buffer ring. Up to 128 completions or 2 ms per
+   wakeup. If io_uring is unavailable, the loop falls back to epoll. With drain-first (on by default), each wakeup
+   copies the received bytes out of the kernel's socket buffers into compact per-connection buffers at once and hands
+   them to the app in chunks of up to 256, so a busy loop holds its backlog in ~0.5 KB per request instead of a ~4 KB
+   kernel buffer.
 2. **Parse.** The parser matches the API's request lines from the first bytes and finds the headers it needs with
    SIMD masks. It's generated from the API spec; a traffic profile only orders the templates and enables paths, it
    contributes no bytes. When a wakeup has 8 or more connections, their first requests are parsed lane-parallel.
@@ -232,15 +240,23 @@ Each item, and how it stays within the rules:
   uses stock SQLite's autocheckpoint (it refuses `uring`).
 - **Write hold during checkpoints.** POSTs wait unread (≤ ~1 s, typically tens of ms) while a checkpoint drains
   the WAL. They are then processed and committed normally.
-- **Socket-pressure 503s, a separate memory valve** (`CURSED_SOCK503_MBPS=50`, on; `0` turns it off). When the event
-  loop falls behind, unread requests pile up in the kernel's socket buffers (~4 KB each), and at the CPU limit that
-  can reach the OOM killer within seconds. So while available memory is under 450 MB, if the socket-buffer memory
-  charged to the server's cgroup (`memory.stat` `sock`) rises by more than 50 MB within a second, or passes 160 MB,
-  the server answers queued requests, oldest first in arrival order, with an immediate `503 {"error":"overloaded"}` on
-  the same keep-alive connection, without JWT or database work. It stops once socket memory is back under 32 MB or
-  memory recovers. It looks only at memory, never at the route, the client or the request's content, and it never
-  fires under normal load: in the local runs up to 400k users it sent zero 503s, and at 425k it turned what would have
-  been an OOM into 0.79% fast 503s.
+- **Drain-first receive** (`CURSED_DRAIN=1`, on; `0` restores the earlier path). Received bytes are copied out of the
+  kernel's socket buffers into compact application buffers right away, and the requests are then processed in chunks
+  of up to 256 per batch. It is an I/O change only: every request is parsed, authenticated, committed and answered
+  exactly as before, in the same per-connection order, and each response still waits for its batch's `COMMIT`. Its
+  effect is that a backlog costs ~0.5 KB per request in our buffers instead of a ~4 KB socket buffer in the kernel.
+- **Socket-pressure 503s, a separate memory valve** (on; `CURSED_SOCK503_MBPS=0` turns off the socket trigger, and
+  `CURSED_DRAIN=0` the backlog trigger with drain-first). When the event loop falls behind, unread requests pile up,
+  and at the CPU limit that can reach the OOM killer within seconds. So while available memory is under 450 MB, the
+  server raises a pressure flag if the socket-buffer memory charged to its cgroup (`memory.stat` `sock`) rises by more
+  than 50 MB within a second while above 64 MB, or passes 160 MB (sampled before each batch, at most every 50 ms), or,
+  with drain-first, if its own backlog passes 20,000 requests or its oldest queued request has waited 300 ms (checked
+  before each batch). While the flag is up, queued requests, oldest first in arrival order, get an immediate `503
+  {"error":"overloaded"}` on the same keep-alive connection, without JWT or database work. It drops once socket memory
+  is under 48 MB (or memory recovers) and the backlog is under half those limits. It looks only at memory and queue
+  length, never at the route, the client or the request's content, and it doesn't fire under normal load: it sent no
+  503s in the local runs at 400k and 425k users, where drain-first alone kept memory in bounds. It is the backstop for
+  overload beyond that.
 - **Deadline shedding exists but is off** (`CURSED_DEADLINE_MS`, default 0). When on, a request whose bytes waited
   in the kernel's receive queue longer than the deadline gets an immediate `503 {"error":"overloaded"}` instead of
   a slow answer. It looks only at that queue delay, never at the route, the client or the request's content.

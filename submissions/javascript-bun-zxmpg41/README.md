@@ -11,13 +11,25 @@
 
 - **One process, one connection.** There is 1 vCPU, so more processes or threads would only add context switches and duplicate page caches.
 - **JSON is built inside SQLite.** `json_object`/`json_group_array` produce the exact response body in key order, and the server sends that string as is. No row objects are created and nothing is serialized in JS on the read path.
-- **Group commit (rule 6).** Write requests are queued and flushed once per event-loop turn (`setImmediate`) inside a single `BEGIN IMMEDIATE … COMMIT`. Each response is sent only after its commit has finished.
+- **Bounded group commit (rule 6).** The first queued write starts a 5 ms collection window; reaching 64 queued writes schedules an earlier flush. Each `BEGIN IMMEDIATE … COMMIT` handles at most 64 writes and stops collecting work after 5 ms of execution, checked between writes. Individual statements and the commit can exceed that budget. Backlogs continue via `setImmediate`, yielding between transactions without another collection delay so reads can make progress. Each response is sent only after its commit has finished. These are conservative starting defaults, not benchmark-proven optimal settings.
 - **Pragmas.**
   - WAL with `synchronous=NORMAL`.
   - 64 MB `cache_size`, 512 MB `mmap_size`, `temp_store=MEMORY`.
 - **Prepared statements, reused.** Each statement is prepared once at startup and reused, as rule 5 allows.
 
+## Publish the Docker image (GHCR)
+
+In GitHub Actions, select **publish Bun image** → **Run workflow**, choose the branch to build, and enter an image tag such as `v1.0.0`. The workflow builds this folder's Dockerfile for `linux/amd64` and pushes to GitHub Container Registry using `GITHUB_TOKEN`; no additional secret is needed. Repository policy must allow Actions to write packages.
+
+```bash
+docker pull ghcr.io/zxmpg41/twelve-dollar-server-challenge/javascript-bun-zxmpg41:v1.0.0
+```
+
+Only the entered tag is published; `latest` is not updated unless you enter `latest`. The workflow must be present on the default branch for GitHub to offer the manual trigger. New GHCR packages are private by default: change the package visibility to public for anonymous pulls, or authenticate with a token that has `read:packages`. The image does not include seed data; the existing Docker entrypoint still requires `/seed/feed.db` to be mounted.
+
 ## Local "$12 server" simulation (Docker)
+
+Run the write-batching regression tests with `bun test ./submissions/javascript-bun-zxmpg41/db.test.js` from the repo root. They use a temporary on-disk SQLite database and do not need the seed data.
 
 ```bash
 bash seed/make-seed.sh                                     # once, from the repo root

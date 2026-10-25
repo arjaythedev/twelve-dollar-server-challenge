@@ -39,38 +39,55 @@ export function post(id) {
 }
 
 // ---- group commit: queue writes, flush them in one transaction, resolve after COMMIT ----
+const MAX_BATCH_WAIT_MS = 5;
+const MAX_BATCH_WRITES = 64;
+const MAX_BATCH_EXEC_MS = 5;
 let queue = [];
 let scheduled = false;
+let timer = null;
 
 function enqueue(run) {
   return new Promise((resolve, reject) => {
     queue.push({ run, resolve, reject });
     if (!scheduled) {
       scheduled = true;
+      timer = setTimeout(flush, MAX_BATCH_WAIT_MS);
+    }
+    if (timer !== null && queue.length >= MAX_BATCH_WRITES) {
+      clearTimeout(timer);
+      timer = null;
       setImmediate(flush);
     }
   });
 }
 
 function flush() {
-  const batch = queue;
-  queue = [];
-  scheduled = false;
+  timer = null;
+  const batch = queue.splice(0, MAX_BATCH_WRITES);
   const results = new Array(batch.length);
+  let count = 0;
   try {
     begin.run();
-    for (let i = 0; i < batch.length; i++) {
+    const deadline = performance.now() + MAX_BATCH_EXEC_MS;
+    while (count < batch.length) {
+      const i = count++;
       // A failing statement only rolls back itself, not the surrounding transaction.
       try { results[i] = { ok: true, v: batch[i].run() }; }
       catch (e) { results[i] = { ok: false, e }; }
+      // Individual SQLite statements and COMMIT cannot be interrupted by this budget.
+      if (performance.now() >= deadline) break;
     }
     commit.run();
   } catch (e) {
     try { rollback.run(); } catch {}
-    for (const item of batch) item.reject(e);
-    return;
+    count = batch.length;
+    for (let i = 0; i < count; i++) results[i] = { ok: false, e };
   }
-  for (let i = 0; i < batch.length; i++) {
+  if (count < batch.length) queue.unshift(...batch.slice(count));
+  // Drain backlogs without another collection delay, yielding between transactions.
+  if (queue.length > 0) setImmediate(flush);
+  else scheduled = false;
+  for (let i = 0; i < count; i++) {
     const r = results[i];
     r.ok ? batch[i].resolve(r.v) : batch[i].reject(r.e);
   }

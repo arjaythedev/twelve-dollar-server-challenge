@@ -51,6 +51,8 @@
 #define FB_BACKEND 2
 #elif defined(__aarch64__) && defined(__ARM_NEON)
 #define FB_BACKEND 1
+#elif (defined(__x86_64__) || defined(__i386__)) && defined(__SSE2__)
+#define FB_BACKEND 4   // the x86-64 baseline: 16-byte SSE2
 #else
 #define FB_BACKEND 0
 #endif
@@ -62,6 +64,8 @@
 #include <arm_neon.h>
 #elif defined(FP_AVX512_EMU)
 #include "fb_avx512_emu.h"
+#elif FB_BACKEND == 4
+#include <emmintrin.h>
 #elif FB_BACKEND >= 2
 #include <immintrin.h>
 #endif
@@ -72,6 +76,8 @@
 #define FB_BACKEND_NAME "neon"
 #elif FB_BACKEND == 2
 #define FB_BACKEND_NAME "avx2"
+#elif FB_BACKEND == 4
+#define FB_BACKEND_NAME "sse2"
 #elif defined(FP_USE_ZMM)
 #define FB_BACKEND_NAME "avx512bw-zmm" FB_EMU_TAG
 #else
@@ -339,6 +345,63 @@ FB_INLINE void fb_all64_simd(const char *p, uint64_t *m) { m[0] = fb_nt64_simd(p
 #undef FB_EQ
 #undef FB_LE
 #undef FB_NTM
+#elif FB_BACKEND == 4
+// SSE2 (the x86-64 baseline): four 16-byte vectors per 64-byte block, one movemask each. There is no pshufb,
+// so "not a token character" is the complement of pico's token_char_map as its nine ranges: 0x21,
+// 0x23-0x27, 0x2a-0x2b, 0x2d-0x2e, 0x30-0x39, 0x41-0x5a, 0x5e-0x7a, 0x7c, 0x7e.
+FB_INLINE uint64_t fb_mm4(__m128i a, __m128i b, __m128i c, __m128i d) {
+  return (uint64_t)(uint16_t)_mm_movemask_epi8(a) | (uint64_t)(uint16_t)_mm_movemask_epi8(b) << 16 |
+         (uint64_t)(uint16_t)_mm_movemask_epi8(c) << 32 | (uint64_t)(uint16_t)_mm_movemask_epi8(d) << 48;
+}
+// lo <= x <= hi (unsigned) <=> min(x - lo, hi - lo) == x - lo
+#define FB_IN16(v, lo, hi) _mm_cmpeq_epi8(_mm_min_epu8(_mm_sub_epi8(v, _mm_set1_epi8(lo)), _mm_set1_epi8((hi) - (lo))), _mm_sub_epi8(v, _mm_set1_epi8(lo)))
+#define FB_EQ16(v, c) _mm_cmpeq_epi8(v, _mm_set1_epi8(c))
+FB_INLINE __m128i fb_nt16(__m128i v) {
+  __m128i t = _mm_or_si128(_mm_or_si128(FB_EQ16(v, 0x21), FB_IN16(v, 0x23, 0x27)), _mm_or_si128(FB_IN16(v, 0x2a, 0x2b), FB_IN16(v, 0x2d, 0x2e)));
+  t = _mm_or_si128(t, _mm_or_si128(_mm_or_si128(FB_IN16(v, 0x30, 0x39), FB_IN16(v, 0x41, 0x5a)), FB_IN16(v, 0x5e, 0x7a)));
+  t = _mm_or_si128(t, _mm_or_si128(FB_EQ16(v, 0x7c), FB_EQ16(v, 0x7e)));
+  return _mm_cmpeq_epi8(t, _mm_setzero_si128());
+}
+FB_INLINE __m128i fb_le16(__m128i v, char c) { return _mm_cmpeq_epi8(_mm_min_epu8(v, _mm_set1_epi8(c)), v); }
+FB_INLINE __m128i fb_ct16(__m128i v) { return _mm_or_si128(_mm_andnot_si128(FB_EQ16(v, '\t'), fb_le16(v, 0x1f)), FB_EQ16(v, 0x7f)); }
+FB_INLINE __m128i fb_pe16(__m128i v) { return _mm_or_si128(fb_le16(v, 0x20), FB_EQ16(v, 0x7f)); }
+FB_INLINE __m128i fb_lf16(__m128i v) { return FB_EQ16(v, '\n'); }
+#define FB_LD4 __m128i v0 = _mm_loadu_si128((const __m128i *)p), v1 = _mm_loadu_si128((const __m128i *)(p + 16)), \
+                       v2 = _mm_loadu_si128((const __m128i *)(p + 32)), v3 = _mm_loadu_si128((const __m128i *)(p + 48))
+#define FB_M4(P) fb_mm4(P(v0), P(v1), P(v2), P(v3))
+FB_INLINE uint64_t fb_nt64_simd(const char *p) { FB_LD4; return FB_M4(fb_nt16); }
+FB_INLINE uint64_t fb_ct64_simd(const char *p) { FB_LD4; return FB_M4(fb_ct16); }
+FB_INLINE uint64_t fb_pe64_simd(const char *p) { FB_LD4; return FB_M4(fb_pe16); }
+FB_INLINE uint64_t fb_lf64_simd(const char *p) { FB_LD4; return FB_M4(fb_lf16); }
+FB_INLINE void fb_ntct64_simd(const char *p, uint64_t *nt, uint64_t *ct) { FB_LD4; *nt = FB_M4(fb_nt16); *ct = FB_M4(fb_ct16); }
+FB_INLINE void fb_lfct64_simd(const char *p, uint64_t *lf, uint64_t *ct) { FB_LD4; *lf = FB_M4(fb_lf16); *ct = FB_M4(fb_ct16); }
+FB_INLINE void fb_all64_simd(const char *p, uint64_t *m) { FB_LD4; m[0] = FB_M4(fb_nt16); m[1] = FB_M4(fb_ct16); m[2] = FB_M4(fb_pe16); m[3] = FB_M4(fb_lf16); }
+#undef FB_LD4
+#undef FB_M4
+#undef FB_IN16
+#undef FB_EQ16
+#ifndef FB_NO_CTANY
+// the long-value skip test (see the NEON one above), SSE2 has no signed byte min: OR of (0x21 > (int8)(x + 1))
+#define FB_HAVE_CTANY 1
+#ifndef FB_CTANY_BLOCKS
+#define FB_CTANY_BLOCKS 8
+#endif
+#ifndef FB_CTANY_AFTER
+#define FB_CTANY_AFTER 2
+#endif
+#ifndef FB_CTANY_PREFETCH
+#define FB_CTANY_PREFETCH 3072
+#endif
+FB_INLINE int fb_ctany_simd(const char *p, const int nb) {
+  const __m128i ONE = _mm_set1_epi8(1), LIM = _mm_set1_epi8(0x21);
+  __m128i h0 = _mm_setzero_si128(), h1 = h0;
+  for (int i = 0; i < 4 * nb; i += 2) {
+    h0 = _mm_or_si128(h0, _mm_cmpgt_epi8(LIM, _mm_add_epi8(_mm_loadu_si128((const __m128i *)(p + 16 * i)), ONE)));
+    h1 = _mm_or_si128(h1, _mm_cmpgt_epi8(LIM, _mm_add_epi8(_mm_loadu_si128((const __m128i *)(p + 16 * i + 16)), ONE)));
+  }
+  return _mm_movemask_epi8(_mm_or_si128(h0, h1)) != 0;
+}
+#endif
 #endif
 
 #if (FB_BACKEND == 2 || FB_BACKEND == 3) && !defined(FP_AVX512_EMU) && !defined(FB_NO_CTANY)
@@ -514,7 +577,7 @@ static inline int fb_is_complete(const char *b, int len, size_t last_len) {
 }
 
 // What happens to each header: mode 0 = store into fb_header[] (the pico API); mode 1 = the req_t adapter.
-typedef struct { void *req; int route_auth, have_auth, have_cl, cl, flags, auth; const char *tok; int tok_len; int minor, lite, skip; } fb_ax_t;
+typedef struct { void *req; int route_auth, have_auth, have_cl, cl, flags, auth; const char *tok; int tok_len; int minor, lite, skip, close; } fb_ax_t;
 // req: the req_t; minor: set before on_reqline; lite: the caller only needs the verdict for minor != 1, so skip = 1 then
 // (no routing, no header work: the request falls back whatever its headers say)
 enum { FB_TE = 1, FB_BADCL = 2, FB_MINOR = 4 };   // fb_info_t.flags: why fb_parse_req said FP_FALLBACK
@@ -646,6 +709,117 @@ static inline int fb_parse_request_loop(int walk, const char *buf, size_t len, c
   return fb_core(buf, (int)len, method, method_len, path, path_len, minor_version, headers, num_headers, last_len, 0, NULL, NULL, 0, FB_BACKEND != 0);
 }
 
+// ---------------- Transfer-Encoding: chunked bodies (RFC 9112 7.1) ----------------
+// fb_decode_chunked(b, len, out, max_body, &body_len): the chunked body that starts at b (right after the head).
+//   > 0                  bytes the chunked body occupies, final CRLF included (a pipelined next request starts
+//                        there); the decoded body, *body_len bytes, is in out. out is either b (in place) or a
+//                        buffer of max_body bytes that doesn't overlap b; its contents are unspecified unless > 0
+//   FB_CHUNK_NEED_MORE   (0) incomplete: call again with more bytes (stateless; in place, b is only rewritten once
+//                        the body is complete, so the retry sees the original bytes)
+//   FB_CHUNK_INVALID     (-2) not a valid chunked body: answer 400 and close
+//   FB_CHUNK_TOO_LARGE   (-3) the decoded body would exceed max_body bytes: answer 413 and close
+// Strict where request smuggling lives:
+//   - chunk sizes are 1-16 hex digits;
+//   - every line ends in CRLF (a bare LF or a CR without LF is invalid);
+//   - each chunk's data is followed by exactly CRLF;
+//   - a chunk extension is ";..." directly after the size, or after spaces/tabs, and is ignored. It may hold
+//     visible ASCII, SP, HTAB and bytes >= 0x80, nothing else;
+//   - no trailer fields: the last chunk's line is followed by CRLF.
+// Everything it accepts, picohttpparser's phr_decode_chunked accepts with the same body and length
+// (tests/test_chunked.c). No padding is read: b[0..len) only. Each call is O(len) (stateless, like the head parsers).
+enum { FB_CHUNK_NEED_MORE = 0, FB_CHUNK_INVALID = -2, FB_CHUNK_TOO_LARGE = -3 };
+static inline int fb_chunk_hex(unsigned char c) {
+  return (unsigned)(c - '0') < 10u ? c - '0' : (unsigned)((c | 0x20) - 'a') < 6u ? (c | 0x20) - 'a' + 10 : -1;
+}
+// n bytes from s to d, d <= s or no overlap. Chunks are usually short, so no memmove call up to 256 bytes:
+// 16-byte blocks forward, the last 16 bytes loaded before any store (in place, a block store can land on them).
+// Forward blocks are safe in place: with d <= s a store never reaches bytes a later block still has to load.
+static inline void fb_chunk_copy(char *d, const char *s, int n) {
+  if (n > 256) { memmove(d, s, (size_t)n); return; }
+  if (n >= 16) {
+    char t[16]; memcpy(t, s + n - 16, 16);
+    for (int i = 0; i + 16 < n; i += 16) { char v[16]; memcpy(v, s + i, 16); memcpy(d + i, v, 16); }
+    memcpy(d + n - 16, t, 16);
+    return;
+  }
+  if (n >= 8) { uint64_t a, z; memcpy(&a, s, 8); memcpy(&z, s + n - 8, 8); memcpy(d, &a, 8); memcpy(d + n - 8, &z, 8); return; }
+  for (int i = 0; i < n; i++) d[i] = s[i];
+}
+#define FB_CHUNK_SPANS 128   // in place: chunk positions remembered by the validating pass (more: a second parse)
+typedef struct { int off, size; } fb_chunk_span_t;
+// one pass. write = 1: copy each chunk to out as it is validated (out != b, or a second in-place pass after a
+// validating one); write = 0: validate only, remembering up to FB_CHUNK_SPANS chunk positions in sp
+static inline int fb_chunked_pass(const char *b, int len, char *out, int max_body, int *body_len, const int write,
+                                  fb_chunk_span_t *sp, int *nsp) {
+  int p = 0, total = 0;
+  for (;;) {
+    // chunk-size
+    int64_t size = 0; int nd = 0, h;
+    while (p < len && (h = fb_chunk_hex((unsigned char)b[p])) >= 0) {
+      if (++nd > 16) return FB_CHUNK_INVALID;
+      size = size * 16 + h;
+      if (size > (int64_t)max_body - total) return FB_CHUNK_TOO_LARGE;
+      p++;
+    }
+    if (p >= len) return FB_CHUNK_NEED_MORE;
+    if (nd == 0) return FB_CHUNK_INVALID;
+    // [BWS ";" chunk-ext] CRLF
+    int q = p;
+    while (q < len && (b[q] == ' ' || b[q] == '\t')) q++;
+    if (q >= len) return FB_CHUNK_NEED_MORE;
+    if (b[q] == ';') {   // the extension: 8 bytes at a time, the first control byte must be the CR that ends it
+      for (q++; q + 8 <= len; q += 8) {
+        uint64_t w = fb_ld64(b + q), m = (fb_swar_le(w, 0x1f) & ~fb_swar_eq(w, '\t' * FB_ONES)) | fb_swar_eq(w, 0x7f * FB_ONES);
+        if (m) { q += __builtin_ctzll(m) >> 3; if (b[q] != '\r') return FB_CHUNK_INVALID; break; }
+      }
+      for (; q < len && b[q] != '\r'; q++) {
+        unsigned char c = (unsigned char)b[q];
+        if ((c < 0x20 && c != '\t') || c == 0x7f) return FB_CHUNK_INVALID;
+      }
+    } else if (q != p) return FB_CHUNK_INVALID;   // whitespace after the size only before a ";"
+    if (q >= len) return FB_CHUNK_NEED_MORE;
+    if (b[q] != '\r') return FB_CHUNK_INVALID;
+    if (q + 1 >= len) return FB_CHUNK_NEED_MORE;
+    if (b[q + 1] != '\n') return FB_CHUNK_INVALID;
+    p = q + 2;
+    if (size == 0) {   // last-chunk: then the empty line that ends the (empty) trailer section
+      if (p >= len) return FB_CHUNK_NEED_MORE;
+      if (b[p] != '\r') return FB_CHUNK_INVALID;    // a trailer field, or a bare LF
+      if (p + 1 >= len) return FB_CHUNK_NEED_MORE;
+      if (b[p + 1] != '\n') return FB_CHUNK_INVALID;
+      *body_len = total;
+      return p + 2;
+    }
+    // chunk-data CRLF
+    if ((int64_t)len - p < size + 2) {
+      // incomplete, but a wrong byte already in place is invalid now
+      if ((int64_t)len - p >= size + 1 && b[p + size] != '\r') return FB_CHUNK_INVALID;
+      return FB_CHUNK_NEED_MORE;
+    }
+    if (b[p + size] != '\r' || b[p + size + 1] != '\n') return FB_CHUNK_INVALID;
+    if (write) fb_chunk_copy(out + total, b + p, (int)size);   // out + total <= b + p: in place works
+    else if (*nsp < FB_CHUNK_SPANS) { sp[*nsp].off = p; sp[*nsp].size = (int)size; ++*nsp; } else *nsp = FB_CHUNK_SPANS + 1;
+    total += (int)size; p += (int)size + 2;
+  }
+}
+static inline int fb_decode_chunked(const char *b, int len, char *out, int max_body, int *body_len) {
+  int n = 0, ns = 0, r;
+  fb_chunk_span_t sp[FB_CHUNK_SPANS];
+  if (max_body < 0) max_body = 0;
+  if (out != b) {   // a separate buffer: one pass, copying as it goes
+    r = fb_chunked_pass(b, len, out, max_body, &n, 1, sp, &ns);
+    if (r > 0) *body_len = n;
+    return r;
+  }
+  // in place: validate first (a NEED_MORE retry must see the original bytes), then compact the chunks
+  r = fb_chunked_pass(b, len, out, max_body, &n, 0, sp, &ns);
+  if (r <= 0) return r;
+  if (ns <= FB_CHUNK_SPANS) { int t = 0; for (int i = 0; i < ns; i++) { fb_chunk_copy(out + t, b + sp[i].off, sp[i].size); t += sp[i].size; } }
+  else fb_chunked_pass(b, len, out, max_body, &n, 1, sp, &ns);
+  *body_len = n;
+  return r;
+}
+
 // ---------------- req_t adapter (needs fastparse.h included first) ----------------
 #if defined(FP_MAXHDR)
 // lowercase ASCII compare for names already validated as tchars: x | 0x20 only maps 'A'-'Z' onto
@@ -668,6 +842,14 @@ FB_INLINE void fb_ax_header(fb_ax_t *a, const char *n, int nl, const char *v, in
       a->cl = x; a->have_cl = 1;
     }
   } else if (nl >= 16 && fb_name_is(n, "transfer-encodin", 16)) a->flags |= FB_TE;
+  else if (nl == 10 && fb_name_is(n, "connection", 10)) {   // a "close" token in the list (RFC 9112 9.6)
+    for (int i = 0; i < vl; ) {
+      while (i < vl && (v[i] == ' ' || v[i] == '\t' || v[i] == ',')) i++;
+      int t = i; while (i < vl && v[i] != ',' && v[i] != ' ' && v[i] != '\t') i++;
+      if (i - t == 5 && (v[t] | 0x20) == 'c' && (v[t + 1] | 0x20) == 'l' && (v[t + 2] | 0x20) == 'o' && (v[t + 3] | 0x20) == 's' &&
+          (v[t + 4] | 0x20) == 'e') a->close = 1;
+    }
+  }
 }
 FB_INLINE void fb_ax_reqline(fb_ax_t *a, const char *m, int ml, const char *p, int pl) {
   if (a->lite && a->minor != 1) { a->skip = 1; return; }   // fb_parse_req: falls back anyway, as ref_parse does
@@ -679,13 +861,15 @@ FB_INLINE void fb_ax_reqline(fb_ax_t *a, const char *m, int ml, const char *p, i
 // NEED_MORE from the head). flags = why FP_FALLBACK. With flags == FB_MINOR only (HTTP/1.0 etc.), r is filled
 // as for a success (route, id, auth, body_off/len) and total = head + body bytes, which may exceed len (then
 // wait for more): enough to serve an HTTP/1.0 client instead of answering 400.
-typedef struct { int minor, flags, total; } fb_info_t;
+// close: the Connection header lists "close" (RFC 9112 9.6: answer, then close). HTTP/1.0 closes by default unless
+// it asks for keep-alive, which close does not report: check minor for that.
+typedef struct { int minor, flags, total, close; } fb_info_t;
 FB_INLINE int fb_req_core(const char *b, int len, req_t *r, fb_info_t *info, const int walk, const int simd, const int lite) {
   fb_ax_t a; memset(&a, 0, sizeof a); a.req = r; a.lite = lite;
   int minor = -1;
   r->route = R_NOTFOUND; r->id_ok = 0; r->id = 0;
   int ret = fb_core(b, len, NULL, NULL, NULL, NULL, &minor, NULL, NULL, 0, 1, &a, fb_ax_reqline, walk, simd);
-  info->minor = minor; info->flags = a.flags | (minor != 1 ? FB_MINOR : 0); info->total = 0;
+  info->minor = minor; info->flags = a.flags | (minor != 1 ? FB_MINOR : 0); info->total = 0; info->close = a.close;
   if (ret == -2) return FP_NEED_MORE;
   if (ret < 0) return -2;
   r->auth = 0; r->tok = 0; r->tok_len = 0;

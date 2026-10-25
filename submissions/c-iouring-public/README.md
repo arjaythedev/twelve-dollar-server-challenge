@@ -179,7 +179,11 @@ One process, one thread: the event loop, which also runs the WAL checkpoints. Ev
 2. **Parse.** The parser matches the API's request lines from the first bytes and finds the headers it needs with
    SIMD masks. It's generated from the API spec; a traffic profile only orders the templates and enables paths, it
    contributes no bytes. When a wakeup has 8 or more connections, their first requests are parsed lane-parallel.
-   Anything unusual (HTTP/1.0, `Connection` headers, odd framing) goes to the general parser `fbparse.h` (cursed-http-parser).
+   Anything unusual (HTTP/1.0, a `Connection` header other than `keep-alive`, odd framing) goes to the general parser
+   `fbparse.h` (cursed-http-parser), which also honours `Connection: close`. Chunked request bodies are decoded there
+   too, by the library's strict `fb_decode_chunked` (no trailers, CRLF only), into a buffer of their own: over 64 KiB
+   decoded gets 413 and a close; `Content-Length` together with `Transfer-Encoding`, chunked that isn't the final
+   coding, or bad framing gets 400 and a close; any other transfer coding 501 and a close (RFC 9112 6.1, 6.3, 7.1).
 3. **Authenticate.** All Bearer tokens of the batch are verified in one multi-buffer HMAC call. Every signature is
    recomputed, and `exp` is required.
 4. **Database.** All requests of the batch run in one SQLite transaction (group commit), in arrival order:

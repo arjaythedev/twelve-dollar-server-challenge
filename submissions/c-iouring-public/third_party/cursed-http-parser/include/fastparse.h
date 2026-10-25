@@ -2,7 +2,8 @@
 // Part of cursed-http-parser. MIT licence, see LICENSE.
 //
 // Backends: aarch64 NEON, x86-64 AVX2, AVX-512BW/VL (opt-in with -DFP_USE_AVX512, ymm by default,
-// -DFP_USE_ZMM for zmm) and a plain scalar fallback. Picked at compile time (FP_BACKEND, FP_BACKEND_NAME);
+// -DFP_USE_ZMM for zmm), SSE2 (any x86-64 build without -mavx2) and a plain scalar fallback. Picked at compile
+// time (FP_BACKEND, FP_BACKEND_NAME); for one binary that picks at load time, see include/chp.h;
 // -DFP_FORCE_SCALAR forces scalar, -DFP_WALK_ONLY makes SIMD backends use core 2 only (an A/B knob).
 //
 // Contract:
@@ -42,6 +43,8 @@
 #define FP_BACKEND 2
 #elif defined(__aarch64__) && defined(__ARM_NEON)
 #define FP_BACKEND 1
+#elif (defined(__x86_64__) || defined(__i386__)) && defined(__SSE2__)
+#define FP_BACKEND 4   // the x86-64 baseline: 16-byte SSE2 (no pshufb, no 256-bit ops)
 #else
 #define FP_BACKEND 0
 #endif
@@ -53,6 +56,8 @@
 #include <arm_neon.h>
 #elif defined(FP_AVX512_EMU)
 #include "avx512_emu.h"
+#elif FP_BACKEND == 4
+#include <emmintrin.h>
 #elif FP_BACKEND >= 2
 #include <immintrin.h>
 #endif
@@ -63,6 +68,8 @@
 #define FP_BACKEND_NAME "neon"
 #elif FP_BACKEND == 2
 #define FP_BACKEND_NAME "avx2"
+#elif FP_BACKEND == 4
+#define FP_BACKEND_NAME "sse2"
 #elif defined(FP_USE_ZMM)
 #define FP_BACKEND_NAME "avx512bw-zmm" FP_EMU_TAG
 #else
@@ -187,6 +194,39 @@ FP_INLINE fp_crv_t fp_crbad_simd(fp_crv_t acc, const char *p, int n) {
   return vorrq_u8(acc, vorrq_u8(vorrq_u8(b0, b1), vorrq_u8(b2, b3)));
 }
 FP_INLINE int fp_crany_simd(fp_crv_t acc) { return vmaxvq_u8(acc) != 0; }
+#elif FP_BACKEND == 4
+// SSE2, the x86-64 baseline: the AVX2 predicates on four 16-byte vectors, four movemasks per mask.
+FP_INLINE uint64_t fp_mm4(__m128i a, __m128i b, __m128i c, __m128i d) {
+  return (uint64_t)(uint16_t)_mm_movemask_epi8(a) | (uint64_t)(uint16_t)_mm_movemask_epi8(b) << 16 |
+         (uint64_t)(uint16_t)_mm_movemask_epi8(c) << 32 | (uint64_t)(uint16_t)_mm_movemask_epi8(d) << 48;
+}
+#define FP_LD16(i) _mm_loadu_si128((const __m128i *)(p + 16 * (i)))
+FP_INLINE uint64_t fp_lf64_simd(const char *p) {
+  const __m128i LF = _mm_set1_epi8('\n');
+  return fp_mm4(_mm_cmpeq_epi8(FP_LD16(0), LF), _mm_cmpeq_epi8(FP_LD16(1), LF), _mm_cmpeq_epi8(FP_LD16(2), LF), _mm_cmpeq_epi8(FP_LD16(3), LF));
+}
+FP_INLINE __m128i fp_ct16(__m128i v) {   // c/t line start (either case) or <= 0x20 (unsigned: min(x, 0x20) == x)
+  const __m128i F = _mm_set1_epi8(0x20); __m128i f = _mm_or_si128(v, F);
+  return _mm_or_si128(_mm_or_si128(_mm_cmpeq_epi8(f, _mm_set1_epi8('c')), _mm_cmpeq_epi8(f, _mm_set1_epi8('t'))), _mm_cmpeq_epi8(_mm_min_epu8(v, F), v));
+}
+FP_INLINE void fp_cls64_simd(const char *p, uint64_t *lf, uint64_t *ct) {
+  const __m128i LF = _mm_set1_epi8('\n');
+  __m128i v0 = FP_LD16(0), v1 = FP_LD16(1), v2 = FP_LD16(2), v3 = FP_LD16(3);
+  *lf = fp_mm4(_mm_cmpeq_epi8(v0, LF), _mm_cmpeq_epi8(v1, LF), _mm_cmpeq_epi8(v2, LF), _mm_cmpeq_epi8(v3, LF));
+  *ct = fp_mm4(fp_ct16(v0), fp_ct16(v1), fp_ct16(v2), fp_ct16(v3));
+}
+typedef __m128i fp_crv_t;
+FP_INLINE fp_crv_t fp_crv0(void) { return _mm_setzero_si128(); }
+FP_INLINE fp_crv_t fp_crbad_simd(fp_crv_t acc, const char *p, int n) {   // CR not followed by LF, within [0, n)
+  const __m128i CR = _mm_set1_epi8('\r'), LF = _mm_set1_epi8('\n'), N = _mm_set1_epi8((char)n);
+  for (int i = 0; i < 4; i++) {
+    __m128i bad = _mm_andnot_si128(_mm_cmpeq_epi8(_mm_loadu_si128((const __m128i *)(p + 16 * i + 1)), LF), _mm_cmpeq_epi8(FP_LD16(i), CR));
+    acc = _mm_or_si128(acc, n >= 64 ? bad : _mm_and_si128(bad, _mm_cmpgt_epi8(N, _mm_loadu_si128((const __m128i *)(fp_iota + 16 * i)))));
+  }
+  return acc;
+}
+FP_INLINE int fp_crany_simd(fp_crv_t acc) { return _mm_movemask_epi8(_mm_cmpeq_epi8(acc, _mm_setzero_si128())) != 0xffff; }
+#undef FP_LD16
 #elif FP_BACKEND >= 2
 // AVX2 (and, compiled the same way, the AVX-512 builds: there the compares go to mask registers anyway)
 #if FP_BACKEND == 2
@@ -454,6 +494,13 @@ FP_INLINE int fp_hdr_ct(const char *b, int s, int end, int *cl, int *have_cl) {
       if (!ok || ve - v > 9 || *have_cl) return FP_FALLBACK;   // odd or duplicate CL -> slow path
       *cl = (int)x; *have_cl = 1;
       return 0;
+    }
+    // Connection (RFC 9112 9.6): only "keep-alive" stays here (browsers send it on every request). "close", token
+    // lists, upgrades and anything else go to the general parser, whose caller sees them (fb_info_t.close).
+    if (end - s >= 10 && FP_HNAME(b + s, "connecti", "on\0\0\0\0\0\0", 2)) {
+      if (end - s < 11 || b[s + 10] != ':') return FP_FALLBACK;   // "Connection :" and other names starting so
+      int v = s + 11, ve = end; fp_trim(b, &v, &ve);
+      return ve - v == 10 && FP_HNAME(b + v, "keep-ali", "ve\0\0\0\0\0\0", 2) ? 0 : FP_FALLBACK;
     }
   } else if (end - s >= 8 && FP_HNAME(b + s, "transfer", "\0\0\0\0\0\0\0\0", 0)) return FP_FALLBACK;
   return FP_LIKELY(fp_has_colon(b, s, end)) ? 0 : FP_FALLBACK;
@@ -725,6 +772,8 @@ static inline int fp_layout_build(const char *b, int l0, int hend, int route, fp
       t.cl_i = t.n;
     }
     if (c == 't' && e - s >= 8 && FP_HNAME(b + s, "transfer", "\0\0\0\0\0\0\0\0", 0)) return 0;
+    // a Connection line's verdict depends on its whole value, but a layout only compares a line's first 16 bytes
+    if (c == 'c' && e - s >= 10 && FP_HNAME(b + s, "connecti", "on\0\0\0\0\0\0", 2)) return 0;
     if (c == 'a' && t.auth_i < 0 && e - s >= 14 && FP_HNAME(b + s, "authoriz", "ation:\0\0", 6)) t.auth_i = t.n;
     t.n++; s = p + 1;
   }

@@ -122,4 +122,7 @@ SLOW_SIG(hx_parse_request);
 #ifndef APP_BP_MIN
 #define APP_BP_MIN 8  // measured on a 1-vCPU Xeon: +10% at N=1, ±0 at 8, −4/−5% at 16/32
 #endif
+#ifndef APP_MAX_BODY
+#define APP_MAX_BODY 65536  // largest decoded chunked body (413 above): the loop's per-connection input limit (max_in)
+#endif
 #endif

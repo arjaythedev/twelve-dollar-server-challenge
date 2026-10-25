@@ -17,6 +17,7 @@
 #include "body.h"
 #include "jwt.h"
 #include "config.h"
+#include "fbparse.h"  // fb_decode_chunked (chunked request bodies), whichever slow parser is built
 #if APP_FAST == 3
 static fp_learn_t app_learn;  // fast_parse_learn's learned layouts
 #endif
@@ -87,6 +88,8 @@ static struct {
   // of a run to burst + rate x requests, i.e. error % <= rate + burst / requests.
   double b503_rate, b503_tok, b503_burst;
   app_stats st;
+  char **chunked;  // decoded chunked request bodies of this batch (freed when the next batch starts)
+  int nchunked, chunkedcap;
 } A;
 
 // one 503 from the error budget: always yes when no budget is set
@@ -152,6 +155,8 @@ static void slot_const(slot_t *s, int status, const char *body) {
 #define E_TOOLONG    "{\"error\":\"body must be at most 500 characters\"}"
 #define E_INTERNAL   "{\"error\":\"internal server error\"}"
 #define E_BADREQ     "{\"error\":\"bad request\"}"
+#define E_NOTIMPL    "{\"error\":\"not implemented\"}"
+#define E_TOOLARGE   "{\"error\":\"request body too large\"}"
 #define E_OVERLOADED "{\"error\":\"overloaded\"}"
 
 int app_init(const char *db_path, const char *secret, char *err, size_t errn) {
@@ -223,8 +228,45 @@ struct eng *app_engine(void) {
 }
 
 // ---------------------------------------------------------------- slow path (SLOW_PARSE)
-// Returns bytes consumed (>0), 0 = need more, -1 = unparseable. Fills r like fast_parse and sets *close.
-static int slow_parse(const char *b, int len, req_t *r, int *close) {
+// Transfer-Encoding (RFC 9112 6.1, 6.3, 7.1): the value is a list of codings, over one or more header lines.
+// Returns 1: exactly "chunked"; -1: chunked isn't the final coding (or an empty list): 400 and close, the body length
+// can't be known; -3: other codings before the final chunked: 501 and close.
+static int te_codings(const char *v, size_t vl, int *n, int *last_chunked, int *unknown) {
+  size_t i = 0;
+  while (i < vl) {
+    while (i < vl && (v[i] == ' ' || v[i] == '\t' || v[i] == ',')) i++;
+    size_t s = i;
+    while (i < vl && v[i] != ',' && v[i] != ';') i++;
+    size_t e = i;
+    while (e > s && (v[e - 1] == ' ' || v[e - 1] == '\t')) e--;
+    if (i < vl && v[i] == ';') return -1;  // transfer parameters: none are defined for chunked
+    if (e == s) continue;
+    (*n)++;
+    *last_chunked = e - s == 7 && !strncasecmp(v + s, "chunked", 7);
+    if (!*last_chunked) *unknown = 1;
+  }
+  return 0;
+}
+
+// Connection (RFC 9112 9.6): 1 if the comma-separated list holds the token tok (case-insensitive, OWS trimmed)
+static int conn_has(const char *v, size_t vl, const char *tok, size_t tl) {
+  size_t i = 0;
+  while (i < vl) {
+    while (i < vl && (v[i] == ' ' || v[i] == '\t' || v[i] == ',')) i++;
+    size_t s = i;
+    while (i < vl && v[i] != ',') i++;
+    size_t e = i;
+    while (e > s && (v[e - 1] == ' ' || v[e - 1] == '\t')) e--;
+    if (e - s == tl && !strncasecmp(v + s, tok, tl)) return 1;
+  }
+  return 0;
+}
+
+// Returns bytes consumed (>0), 0 = need more, -1 = unparseable (400 and close), -3 = unsupported transfer coding
+// (501 and close), -4 = chunked body over APP_MAX_BODY (413 and close). Fills r like fast_parse and sets *close; a
+// chunked body is decoded into a buffer of its own (*body, freed when the next batch starts), r->body_len is its
+// decoded length.
+static int slow_parse(const char *b, int len, req_t *r, int *close, const char **body) {
   const char *m, *p;
   size_t ml, pl, nh = 32;
   int minor;
@@ -257,6 +299,8 @@ static int slow_parse(const char *b, int len, req_t *r, int *close) {
   fp_route(m, (int)ml, p, (int)pl, r);
   int64_t cl = 0;
   int have_cl = 0, keep = minor >= 1, want_auth = fp_route_auth(r->route), have_auth = 0;
+  int have_te = 0, te_n = 0, te_last_chunked = 0, te_unknown = 0, close_seen = 0;
+  *body = 0;
   for (size_t i = 0; i < nh; i++) {
     const char *n = h[i].name, *v = h[i].value;
     size_t nl = h[i].name_len, vl = h[i].value_len;
@@ -269,12 +313,13 @@ static int slow_parse(const char *b, int len, req_t *r, int *close) {
         cl = cl * 10 + (v[k] - '0');
       }
       have_cl = 1;
-    } else if (nl == 17 && !strncasecmp(n, "transfer-encoding", 17))
-      return -1;  // chunked bodies: out of scope
-    else if (nl == 10 && !strncasecmp(n, "connection", 10)) {
-      if (vl >= 5 && memmem(v, vl, "close", 5))
-        keep = 0;  // close wins; "keep-alive" upgrades HTTP/1.0
-      else if (vl >= 10 && !strncasecmp(v, "keep-alive", 10))
+    } else if (nl == 17 && !strncasecmp(n, "transfer-encoding", 17)) {
+      have_te = 1;
+      if (te_codings(v, vl, &te_n, &te_last_chunked, &te_unknown)) return -1;
+    } else if (nl == 10 && !strncasecmp(n, "connection", 10)) {
+      if (conn_has(v, vl, "close", 5))
+        keep = 0, close_seen = 1;  // close wins, over any other line too; "keep-alive" upgrades HTTP/1.0
+      else if (!close_seen && conn_has(v, vl, "keep-alive", 10))
         keep = 1;
     } else if (want_auth && !have_auth && nl == 13 && !strncasecmp(n, "authorization", 13)) {
       have_auth = 1;
@@ -285,6 +330,29 @@ static int slow_parse(const char *b, int len, req_t *r, int *close) {
       }
     }
   }
+  if (have_te) {
+    // both framings at once is request smuggling's signature; HTTP/1.0 has no transfer codings (RFC 9112 6.1)
+    if (have_cl || minor < 1 || !te_n || !te_last_chunked) return -1;
+    if (te_unknown) return -3;
+    // the chunked body, decoded by cursed-http-parser's strict fb_decode_chunked (stateless: it reads the whole body
+    // so far on each call) into a buffer of its own, so the loop's input buffer stays as received and a pipelined
+    // request after it is parsed in place as usual. Need more bytes until the zero chunk has arrived; the loop's
+    // per-connection input limit bounds the raw body as it does a Content-Length one
+    char *d = malloc(APP_MAX_BODY);
+    if (!d) return -1;
+    int dl = 0, used = fb_decode_chunked(b + hl, len - hl, d, APP_MAX_BODY, &dl);
+    if (used <= 0) {
+      free(d);
+      return used == FB_CHUNK_NEED_MORE ? 0 : used == FB_CHUNK_TOO_LARGE ? -4 : -1;  // else invalid framing: 400
+    }
+    A.chunked = xgrow(A.chunked, &A.chunkedcap, A.nchunked + 1, sizeof *A.chunked);
+    A.chunked[A.nchunked++] = d;
+    *body = d;
+    r->body_off = hl;
+    r->body_len = dl;
+    *close = !keep;
+    return hl + used;
+  }
   if (hl + cl > len) return 0;
   r->body_off = hl;
   r->body_len = (int)cl;
@@ -293,7 +361,7 @@ static int slow_parse(const char *b, int len, req_t *r, int *close) {
 }
 
 // ---------------------------------------------------------------- the batch
-static void add_req(loop_conn c, const char *base, const req_t *r, int close) {
+static void add_req(loop_conn c, const char *base, const req_t *r, int close, const char *body) {
   A.s = xgrow(A.s, &A.scap, A.n + 1, sizeof *A.s);
   slot_t *s = &A.s[A.n++];
   memset(s, 0, sizeof *s);
@@ -304,7 +372,7 @@ static void add_req(loop_conn c, const char *base, const req_t *r, int close) {
   s->auth = r->auth;
   s->tok = r->tok;
   s->tok_len = r->tok_len;
-  s->body = base + r->body_off;
+  s->body = body ? body : base + r->body_off;
   s->body_len = r->body_len;
   switch (r->route) {
     case R_FEED: s->op = OP_FEED; break;
@@ -335,6 +403,7 @@ static uint32_t parse_conn(loop_in *in, const req_t *first, int fret, int paused
   for (int k = 0; pos < len && k < MAX_PIPE; k++) {
     req_t r;
     int ret, close = 0;
+    const char *cbody = 0;  // a decoded chunked body (slow path only)
     if (k == 0 && first) {  // lane-parsed already
       r = *first;
       ret = fret;
@@ -343,8 +412,8 @@ static uint32_t parse_conn(loop_in *in, const req_t *first, int fret, int paused
     }
     if (ret == FP_FALLBACK) {
       A.st.slow++;
-      ret = slow_parse(d + pos, len - pos, &r, &close);
-      if (ret < 0) {  // unparseable: 400 and close
+      ret = slow_parse(d + pos, len - pos, &r, &close, &cbody);
+      if (ret < 0) {  // unparseable: 400 and close; an unsupported transfer coding: 501 and close
         A.s = xgrow(A.s, &A.scap, A.n + 1, sizeof *A.s);
         slot_t *s = &A.s[A.n++];
         memset(s, 0, sizeof *s);
@@ -352,7 +421,12 @@ static uint32_t parse_conn(loop_in *in, const req_t *first, int fret, int paused
         s->close = 1;
         s->last = 1;
         s->jwt = -1;
-        slot_const(s, 400, E_BADREQ);
+        if (ret == -3)
+          slot_const(s, 501, E_NOTIMPL);
+        else if (ret == -4)
+          slot_const(s, 413, E_TOOLARGE);
+        else
+          slot_const(s, 400, E_BADREQ);
         return (uint32_t)len;
       }
     }
@@ -385,7 +459,7 @@ static uint32_t parse_conn(loop_in *in, const req_t *first, int fret, int paused
       A.st.held++;
       break;
     }
-    add_req(in->conn, d + pos, &r, close);
+    add_req(in->conn, d + pos, &r, close, cbody);
     pos += ret;
     if (close) {  // nothing after a close is answered
       A.s[A.n - 1].last = 1;
@@ -403,6 +477,8 @@ static const char *reason(int st) {
     case 400: return "400 Bad Request";
     case 401: return "401 Unauthorized";
     case 404: return "404 Not Found";
+    case 413: return "413 Content Too Large";
+    case 501: return "501 Not Implemented";
     case 503: return "503 Service Unavailable";
     default: return "500 Internal Server Error";
   }
@@ -421,6 +497,9 @@ static char *put_u(char *p, uint32_t v) {
 }
 
 int app_batch(loop_t *L, loop_in *in, int n) {
+  for (int i = 0; i < A.nchunked; i++)  // the last batch's replies are written (loop_write copies): drop its bodies
+    free(A.chunked[i]);
+  A.nchunked = 0;
   A.n = 0;
   A.aused = 0;
   A.had_batch = 1;

@@ -127,7 +127,7 @@ the code by `tools/knobs.py`; the `CURSED_*` and `LOOP_TEST_*` variables exist f
 | Variable | Default | What it does |
 |---|---|---|
 | `CURSED_CACHE_KIB` | 8192 | SQLite page cache (KiB) |
-| `CURSED_CKPT_FRAMES` | 4096 (uring, thread, bounded) / 16384 (inline) | checkpoint pass size in WAL frames |
+| `CURSED_CKPT_FRAMES` | 4096 (uring, thread) / 16384 (inline) | checkpoint pass size in WAL frames |
 | `CURSED_CKPT_THREAD` | 1 in thread mode | thread mode only. 1: checkpoint from the background thread; 0: inline |
 | `CURSED_CKPT_RESTART` | 32768 | the write gate's drain mark (WAL frames), from the engine's Xeon sweep |
 | `CURSED_CKPT_NICE` | 0 | nice level of the checkpoint thread (lower = drains finish sooner at a pegged CPU, but take more CPU from reads) |

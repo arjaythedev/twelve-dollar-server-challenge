@@ -104,6 +104,8 @@ the code by `tools/knobs.py`; the `CURSED_*` and `LOOP_TEST_*` variables exist f
 | `CURSED_SHED_MODE` | headroom | `headroom`: the close fraction is a function of available memory alone; `band`: the older cap-and-band rule (the cap knobs, band and CPU guard below apply only to it) |
 | `CURSED_SHED_HI_MB` | 400 | headroom: no shedding while available memory (~1 s average) is at least this (MB) |
 | `CURSED_SHED_LO_MB` | 200 | headroom: the close fraction reaches its maximum at this much available memory (MB) |
+| `CURSED_SOCK503_MBPS` | 50 | socket-memory pressure valve: if socket-buffer memory rises more than this (MB) within 1 s, or exceeds 160 MB, while available memory is under CURSED_SOCK503_AVAIL_MB, queued requests get a fast 503 (keep-alive, no DB work) until it drains below 32 MB (0: off) |
+| `CURSED_SOCK503_AVAIL_MB` | 450 | socket-memory pressure valve: only below this much available memory (MB) |
 | `CURSED_SHED_FMAX` | 500 | headroom: the maximum close fraction, permille |
 | `CURSED_CONN_CAP` | 0 | band mode: fixed connection cap instead of the memory-derived one (0: derive) |
 | `CURSED_RESERVE_MB` | 0 | band mode: memory kept free for everything else in the cap formula (0: the loop's 250 MB) |
@@ -177,9 +179,11 @@ One process, one thread: the event loop, which also drives the WAL checkpoint's 
    handed to the kernel until the batch's `COMMIT` has returned. If the commit fails, every reply that touched the
    database becomes a 500.
 6. **Memory valve.** While available memory (a ~1 s average) stays above 400 MB, nothing is shed. Below that, a
-   fraction of responses carry `Connection: close` (the server closes first), rising linearly to half of them at
-   200 MB. Accepts pause only at the descriptor limit. (`CURSED_SHED_MODE=band` keeps the older rule: a connection
-   cap derived from memory, ~4.4 KB per connection, with shedding near the cap and accepts paused at it.)
+   fraction of responses carry `Connection: close` (the server closes first), rising linearly to half of them at 200
+   MB. Accepts pause only at the descriptor limit. If the kernel's socket buffers suddenly fill with unread requests
+   while memory is short, queued requests get a fast 503 until they drain (see the rules disclosure).
+   (`CURSED_SHED_MODE=band` keeps the older rule: a connection cap derived from memory, ~4.4 KB per connection, with
+   shedding near the cap and accepts paused at it.)
 
 ## Rules disclosure
 Each item, and how it stays within the rules:
@@ -228,6 +232,15 @@ Each item, and how it stays within the rules:
   uses stock SQLite's autocheckpoint (it refuses `uring`).
 - **Write hold during checkpoints.** POSTs wait unread (≤ ~1 s, typically tens of ms) while a checkpoint drains
   the WAL. They are then processed and committed normally.
+- **Socket-pressure 503s, a separate memory valve** (`CURSED_SOCK503_MBPS=50`, on; `0` turns it off). When the event
+  loop falls behind, unread requests pile up in the kernel's socket buffers (~4 KB each), and at the CPU limit that
+  can reach the OOM killer within seconds. So while available memory is under 450 MB, if the socket-buffer memory
+  charged to the server's cgroup (`memory.stat` `sock`) rises by more than 50 MB within a second, or passes 160 MB,
+  the server answers queued requests, oldest first in arrival order, with an immediate `503 {"error":"overloaded"}` on
+  the same keep-alive connection, without JWT or database work. It stops once socket memory is back under 32 MB or
+  memory recovers. It looks only at memory, never at the route, the client or the request's content, and it never
+  fires under normal load: in the local runs up to 400k users it sent zero 503s, and at 425k it turned what would have
+  been an OOM into 0.79% fast 503s.
 - **Deadline shedding exists but is off** (`CURSED_DEADLINE_MS`, default 0). When on, a request whose bytes waited
   in the kernel's receive queue longer than the deadline gets an immediate `503 {"error":"overloaded"}` instead of
   a slow answer. It looks only at that queue delay, never at the route, the client or the request's content.

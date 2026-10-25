@@ -60,14 +60,14 @@ static void on_tick(loop_t *L, void *ud) {
               (unsigned long long)es.wal_flushes, (unsigned long long)es.commits_failed);
       fprintf(stderr,
               "stats shed=%s open=%u acc=%llu req=%llu batches=%llu lanes=%llu slow=%llu slow_checked=%llu jwt=%llu held=%llu "
-              "cfail=%llu deadline_503=%llu "
+              "cfail=%llu deadline_503=%llu press_503=%llu sock_pressure=%u/%llu "
               "hint_closes=%llu close_frac=%.2f cap=%u busy=%.2f avail=%uMB orphans=%u listen_overflows=%llu "
               "listen_drops=%llu "
               "backlog=%u busy_src=%d utime=%ld.%06ld stime=%ld.%06ld maxrss=%ldKB\n",
               g_shed_mode, s->open, (unsigned long long)s->accepted, (unsigned long long)a->requests, (unsigned long long)a->batches,
               (unsigned long long)a->lanes, (unsigned long long)a->slow, (unsigned long long)a->slow_checked,
               (unsigned long long)a->jwts, (unsigned long long)a->held, (unsigned long long)a->commit_failures,
-              (unsigned long long)a->deadline_503, (unsigned long long)s->hint_closes, s->close_frac, s->cap, s->busy,
+              (unsigned long long)a->deadline_503, (unsigned long long)a->press_503, s->sock_pressure, (unsigned long long)s->sock_pressure_events, (unsigned long long)s->hint_closes, s->close_frac, s->cap, s->busy,
               s->avail_mb, s->tcp_orphans, (unsigned long long)s->listen_overflows, (unsigned long long)s->listen_drops,
               s->backlog_now, s->busy_src, (long)ru.ru_utime.tv_sec, (long)ru.ru_utime.tv_usec,
               (long)ru.ru_stime.tv_sec, (long)ru.ru_stime.tv_usec, ru.ru_maxrss);
@@ -121,6 +121,8 @@ int main(int argc, char **argv) {
       .shed_hi_mb = envu("CURSED_SHED_HI_MB", 400),
       .shed_lo_mb = envu("CURSED_SHED_LO_MB", 200),
       .shed_fmax = permille(envu("CURSED_SHED_FMAX", 500)),
+      .sock503_mbps = envu("CURSED_SOCK503_MBPS", 50) ? envu("CURSED_SOCK503_MBPS", 50) : (unsigned)-1,
+      .sock503_avail_mb = envu("CURSED_SOCK503_AVAIL_MB", 450),
       .cap_ceiling = envu("CURSED_CAP_CEILING", 380000),
       .policy_engage = permille(envu("CURSED_SHED_ENGAGE", 950)),
       .policy_release = permille(envu("CURSED_SHED_RELEASE", 880)),

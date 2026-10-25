@@ -79,6 +79,7 @@ static struct {
   int had_batch;
   int test_hold_ms;      // test only (CURSED_TEST_HOLD_MS): also hold writes N ms of every 200 ms
   uint32_t deadline_us;  // deadline shedding threshold (0: off)
+  int press;             // socket-memory pressure flagged by the loop for this batch
   app_stats st;
 } A;
 
@@ -334,7 +335,9 @@ static uint32_t parse_conn(loop_in *in, const req_t *first, int fret, int paused
     if (ret <= 0) break;  // need more bytes
     // deadline shedding (CURSED_DEADLINE_MS, off by default): bytes that waited longer than the deadline (kernel
     // receive timestamp to now) get an immediate 503 instead of a slow answer. Keyed only on queue delay.
-    if (A.deadline_us && in->qdelay_us > A.deadline_us) {
+    // also while the loop flags socket-memory pressure: queued requests (oldest first, in arrival order) get the
+    // same fast 503, which drains the kernel backlog without reconnects (conn-policy, sock503)
+    if ((A.deadline_us && in->qdelay_us > A.deadline_us) || A.press) {
       A.s = xgrow(A.s, &A.scap, A.n + 1, sizeof *A.s);
       slot_t *s = &A.s[A.n++];
       memset(s, 0, sizeof *s);
@@ -343,6 +346,7 @@ static uint32_t parse_conn(loop_in *in, const req_t *first, int fret, int paused
       s->jwt = -1;
       slot_const(s, 503, E_OVERLOADED);
       A.st.deadline_503++;
+      if (A.press) A.st.press_503++;
       pos += ret;
       if (close) {
         s->last = 1;
@@ -395,6 +399,7 @@ int app_batch(loop_t *L, loop_in *in, int n) {
   A.n = 0;
   A.aused = 0;
   A.had_batch = 1;
+  A.press = loop_sock_pressure(L);
   int paused = A.nheld ? 1 : writes_paused();  // with POSTs already held, keep holding until on_tick re-presents
   A.st.batches++;
 

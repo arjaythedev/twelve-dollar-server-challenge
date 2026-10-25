@@ -157,6 +157,7 @@ struct loop {
     int engaged, cap_parked, tick4;
     float f_ceiling;
     float h_ewma;                   /* shed_headroom: available memory, EWMA ~1 s (MiB) */
+    long sock_hist[4]; unsigned sock_i;   /* sock pressure: socket-buffer MiB over the last 4 ticks (1 s) */
     uint32_t slots_cap;             /* descriptor slots we can hold */
     uint64_t cpu_us_last, wall_ns_last;   /* cpu_us_last holds /proc/stat total ticks in 1-CPU mode */
     long idle_last;
@@ -669,6 +670,8 @@ static long read_num(const char *path)
 #endif
 
 /* Available memory in MiB: min(host MemAvailable, cgroup headroom incl. reclaimable file pages). */
+static long g_sock_mb = -1;   /* MiB in socket buffers at the last avail_mb() (memory.stat sock), -1 unknown */
+
 static long avail_mb(void)
 {
     long best = -1;
@@ -689,6 +692,14 @@ static long avail_mb(void)
             long sr = q ? atol(q + 13) : 0;
             if (sr0 < 0) sr0 = sr;
             if (p) best = (atol(p + 13) - (sr > sr0 ? sr - sr0 : 0)) / 1024;
+        }
+    }
+    {   /* socket buffer memory charged to our cgroup (memory.stat "sock"): unread requests queue here */
+        int sfd = open("/sys/fs/cgroup/memory.stat", O_RDONLY | O_CLOEXEC);
+        g_sock_mb = -1;
+        if (sfd >= 0) {
+            ssize_t n = read(sfd, b, sizeof b - 1); close(sfd);
+            if (n > 0) { b[n] = 0; char *p = strstr(b, "\nsock "); if (p) g_sock_mb = atol(p + 6) / (1024 * 1024); }
         }
     }
     long max = read_num("/sys/fs/cgroup/memory.max"), cur = read_num("/sys/fs/cgroup/memory.current");
@@ -1022,8 +1033,24 @@ static void housekeeping(loop_t *L)
         L->mem_state = st;
         if (st == 2) loop_shed_idle(L, L->st.open / 50 + 1);
     }
+    /* socket-memory pressure: a saturated loop's unread requests pile up in the kernel (~4 KB skb each; pending
+     * ~ rate x latency), 100-200 MB/s, and reached the OOM in ~2 s at 425k (arena). Raise a flag on the rise
+     * (> sock503_mbps over the last second) while available memory is < sock503_avail_mb, or on the level (> 160 MB
+     * there); the app then answers queued requests with a fast 503 (no DB work, keep-alive), which drains the
+     * backlog without reconnect cost. Passing 400k runs' spikes all came with >= 558 MB free. Off once sock is
+     * back under 32 MB or memory recovers. */
+    if (a >= 0 && L->cfg.sock503_mbps > 0 && L->cfg.sock503_mbps != (unsigned)-1) {   /* -1: CURSED_SOCK503_MBPS=0, off */
+        long sk = g_sock_mb >= 0 ? g_sock_mb : (long)L->st.tcp_mem_pages * 4 / 1024;
+        unsigned j = L->sock_i % 4; long old = L->sock_hist[j];
+        L->sock_hist[j] = sk; L->sock_i++;
+        long rise = L->sock_i > 4 ? sk - old : 0, gate = (long)L->cfg.sock503_avail_mb;
+        if (!L->st.sock_pressure && a < gate && (rise > (long)L->cfg.sock503_mbps || sk > 160)) {
+            L->st.sock_pressure = 1; L->st.sock_pressure_events++;
+        } else if (L->st.sock_pressure && (sk < 32 || a >= gate + 100)) L->st.sock_pressure = 0;
+    }
     L->st.accepting = L->mem_state == 0 && !L->cap_parked;
 }
+int loop_sock_pressure(loop_t *L) { return L->st.sock_pressure; }
 
 /* ------------------------------------------------------------------ listen socket */
 
@@ -1081,6 +1108,8 @@ loop_t *loop_new(const loop_cfg *in)
     if (!c->policy_release) c->policy_release = 0.75f;
     if (!c->shed_hi_mb) c->shed_hi_mb = 400;
     if (!c->shed_lo_mb) c->shed_lo_mb = 200;
+    if (!c->sock503_mbps) c->sock503_mbps = 50;
+    if (!c->sock503_avail_mb) c->sock503_avail_mb = 450;
     if (!c->shed_fmax) c->shed_fmax = 0.5f;   /* never shed more than half: a deficit shedding can't fix pinned f at 1 and emptied the server (exp71); the 100/60 MB floors handle real emergencies */
     if (!c->guard_freeze) c->guard_freeze = 0.92f;
     if (!c->guard_relax) c->guard_relax = 0.85f;

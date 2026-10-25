@@ -111,6 +111,8 @@ typedef struct {
                                             shed_lo_mb; no integrator, no CPU input, no cap ceiling or band parking */
     unsigned shed_hi_mb, shed_lo_mb;     /* defaults 400 / 200 MB (the 100 / 60 MB floors sit below) */
     float shed_fmax;                     /* default 0.5 */
+    unsigned sock503_mbps, sock503_avail_mb; /* socket-memory pressure flag (loop_sock_pressure): rise per second / memory gate,
+                                            default 50 / 450 MB; the app answers queued requests with 503 while it is set */
     float guard_freeze, guard_relax;     /* CPU guard: freeze f above guard_freeze busy, relax below guard_relax.
                                             Default 0.92 / 0.85 */
     int backlog_parked_dynamic;          /* 1: while parked at the cap, listen() with a backlog of clamp(closes/s x
@@ -149,6 +151,8 @@ typedef struct {
     float busy;                          /* fraction of the last second spent on CPU (source: busy_src) */
     int busy_src;                        /* -1 whole box (/proc/stat), N pinned CPU N, -3 cgroup quota, -2 rusage */
     uint64_t listen_overflows, listen_drops;   /* TcpExt ListenOverflows / ListenDrops (box-wide, conn_policy only) */
+    uint32_t sock_pressure;              /* 1 while socket-memory pressure is flagged */
+    uint64_t sock_pressure_events;
     uint32_t backlog_now;                /* backlog currently applied to the listener */
     int accepting;
 } loop_stats;
@@ -168,6 +172,7 @@ void  loop_close(loop_t *, loop_conn);                     /* close after releas
 int   loop_close_hint(loop_t *, loop_conn);                /* 1: this response should carry "Connection: close"
                                                               (then call loop_close). Ask only for a complete
                                                               response with no pipelined bytes after it. */
+int   loop_sock_pressure(loop_t *);                       /* 1: socket buffers are filling with queued data; answer cheaply */
 uint64_t loop_now_ns(loop_t *);                            /* CLOCK_MONOTONIC_COARSE at this pass */
 
 /* --- file I/O on the loop's ring (e.g. a checkpoint driven as io_uring batches) ---

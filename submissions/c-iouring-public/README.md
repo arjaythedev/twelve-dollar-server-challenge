@@ -100,7 +100,7 @@ the code by `tools/knobs.py`; the `CURSED_*` and `LOOP_TEST_*` variables exist f
 | `CURSED_EPOLL` | 0 | 1: use the epoll backend even when io_uring is available (it's also the automatic fallback) |
 | `CURSED_RX_TS` | 0 (1 when CURSED_DEADLINE_MS is set) | 1: kernel receive timestamps, so queue delay includes time spent in socket buffers |
 | `CURSED_DEADLINE_MS` | 0 (off) | deadline shedding: a request whose bytes waited longer than this in the kernel's receive queue gets an immediate 503 (turns on receive timestamps) |
-| `CURSED_CONN_POLICY` | 0 | 0: no `Connection: close` shedding (the emergency floors stay on); 1: close a fraction of replies under memory pressure |
+| `CURSED_CONN_POLICY` | 0 | 0: no `Connection: close` shedding (the memory floors stay on); 1: close a fraction of replies under memory pressure |
 | `CURSED_SHED_MODE` | headroom | `headroom`: the close fraction is a function of available memory alone; `band`: the older cap-and-band rule (the cap knobs, band and CPU guard below apply only to it) |
 | `CURSED_SHED_HI_MB` | 400 | headroom: no shedding while available memory (~1 s average) is at least this (MB) |
 | `CURSED_SHED_LO_MB` | 200 | headroom: the close fraction reaches its maximum at this much available memory (MB) |
@@ -119,8 +119,8 @@ the code by `tools/knobs.py`; the `CURSED_*` and `LOOP_TEST_*` variables exist f
 | `CURSED_CAP_CEILING` | 380000 | band mode: hard ceiling on open connections, also for a fixed CURSED_CONN_CAP (the Xeon OOMs at ~450k sockets) |
 | `CURSED_SHED_ENGAGE` | 950 | band mode: shed band, permille of the cap: start Connection: close shedding at this fill |
 | `CURSED_SHED_RELEASE` | 880 | band mode: shed band, permille of the cap: stop below this fill (must be below ENGAGE) |
-| `CURSED_MEM_ACCEPT_MB` | 100 | emergency floor: stop accepting below this much available memory (MB) |
-| `CURSED_MEM_SHED_MB` | 60 | emergency floor: close long-idle keep-alives below this much available memory (MB) |
+| `CURSED_MEM_ACCEPT_MB` | 200 | memory floor: stop accepting below this much available memory (MB); new users wait in the SYN queue |
+| `CURSED_MEM_SHED_MB` | 120 | memory floor: close long-idle keep-alives below this much available memory (MB) |
 | `CURSED_SHED_FIN` | 1 | 1: emergency closes use FIN; 0: RST |
 | `CURSED_STATS` | 0 | print loop, app and engine stats every N seconds to stderr (0: off) |
 
@@ -190,8 +190,8 @@ One process, one thread: the event loop, which also runs the WAL checkpoints. Ev
    handed to the kernel until the batch's `COMMIT` has returned. If the commit fails, every reply that touched the
    database becomes a 500.
 6. **Memory valve.** Connections are never closed to save memory. If a backlog of unread requests builds up while
-   memory is short, queued requests get a fast 503 until it drains (see the rules disclosure). Accepts pause only at
-   the descriptor limit. (`CURSED_CONN_POLICY=1` brings back `Connection: close` shedding: a fraction of replies,
+   memory is short, queued requests get a fast 503 until it drains (see the rules disclosure). Accepts pause below
+   200 MB of available memory (new users wait to connect) and at the descriptor limit. (`CURSED_CONN_POLICY=1` brings back `Connection: close` shedding: a fraction of replies,
    rising from none at 400 MB available to half at 200 MB. Each close costs a reconnect, and in our load tests that
    cost more than it saved.)
 
@@ -230,10 +230,15 @@ Each item, and how it stays within the rules:
   and its cgroup's headroom), averaged over about a second. While at least 400 MB is available it sheds nothing.
   Below that it closes first on a fraction of complete responses (`Connection: close`, nothing pipelined behind
   them), rising linearly to half of them at 200 MB, so clients reconnect instead of the OOM killer ending every
-  connection. It looks only at memory, never at who the client is or at CPU. Two emergency floors sit below it and
-  are never reached in a passing run: under 100 MB it stops accepting, and under 60 MB it FIN-closes keep-alives
-  idle for 20 s or more. `CURSED_SHED_MODE=band` restores the earlier rule (a memory-derived connection cap with a
+  connection. It looks only at memory, never at who the client is or at CPU. `CURSED_SHED_MODE=band` restores the earlier rule (a memory-derived connection cap with a
   shedding band near it), and `CURSED_CONN_POLICY=0` turns shedding off.
+- **Memory floors** (on; `CURSED_MEM_ACCEPT_MB`, `CURSED_MEM_SHED_MB`). Each open connection costs ~3.7–4.3 KB of
+  kernel memory, so near the 2 GB limit the connections themselves are the risk. Under 200 MB available the server
+  stops accepting: new users wait in the kernel's SYN queue (their connect time counts as latency, and a connect that
+  times out counts as an error), and accepts resume once memory recovers by 32 MB. Under 120 MB it FIN-closes
+  keep-alives idle for 20 s or more. In the local runs the accept floor never engaged up to 475k; at 500k it parked
+  accepts at ~490k, leaving 1.7–2.8 % of users waiting, and both runs passed instead of being OOM-killed. It looks only
+  at memory, never at who the client is.
 - **Bounded checkpoints** (`DB_CKPT=bounded`, the default in `CURSED=max`). SQLite's own `sqlite3_wal_checkpoint_v2`
   in RESTART mode, called on the event loop every 4,096 WAL frames after the batch's replies are submitted, like Rust
   #82's checkpoint. Nothing is held or reordered: requests that arrive during a pass wait in the loop like any other

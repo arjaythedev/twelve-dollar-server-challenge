@@ -145,11 +145,12 @@ int main(int argc, char **argv) {
       // recv_mode: LOOP_RECV_AUTO (0) = multishot recv. Poll mode (2) holds less kernel memory per idle connection but
       // keeps every FIN skb charged until its poll CQE is reaped, so a mass close at 300k costs +631 MB (measured).
       .recv_mode = (int)envu("CURSED_RECV_MODE", LOOP_RECV_AUTO),
-      // emergency floors below the cap policy: under 100 MB available stop arming accepts (excess SYNs
-      // wait as connect time); under 60 MB FIN-close keep-alives idle >= 20 s, 2% per tick. Both with 32 MB hysteresis,
-      // on MemAvailable - SReclaimable. They shouldn't trigger in a passing run; the alternative is the OOM killer.
-      .mem_shed_floor_mb = envu("CURSED_MEM_SHED_MB", 60),
-      .mem_accept_floor_mb = envu("CURSED_MEM_ACCEPT_MB", 100),
+      // memory floors: under 200 MB available stop arming accepts (excess SYNs wait as connect time); under 120 MB
+      // FIN-close keep-alives idle >= 20 s, 2% per tick. Both with 32 MB hysteresis, on MemAvailable - SReclaimable.
+      // At 100/60 the kernel's per-connection memory outran them at 500k (OOM); at 200/120 accepts park at ~490k and
+      // 500k passed 2 of 2 in the arena, with no refusals at 475k. The alternative is the OOM killer.
+      .mem_shed_floor_mb = envu("CURSED_MEM_SHED_MB", 120),
+      .mem_accept_floor_mb = envu("CURSED_MEM_ACCEPT_MB", 200),
       .shed_fin = (int)envu("CURSED_SHED_FIN", 1),
       .on_batch = on_batch,
       .on_tick = on_tick,

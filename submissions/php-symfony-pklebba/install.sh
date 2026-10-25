@@ -44,4 +44,5 @@ SH
 chmod 0755 /usr/local/bin/composer
 
 frankenphp version
-composer --version
+# install.sh runs as root, which Composer refuses unless told so...
+COMPOSER_ALLOW_SUPERUSER=1 composer --no-plugins --version

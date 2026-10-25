@@ -5,7 +5,7 @@
 #include <stdint.h>
 #include "loop.h"
 typedef struct {
-  uint64_t batches, requests, lanes, slow, slow_checked, jwts, held, commit_failures, deadline_503, press_503;
+  uint64_t batches, requests, lanes, slow, slow_checked, jwts, held, commit_failures, deadline_503, press_503, all_503, b503_skipped, b503_tokens;
 } app_stats;
 int app_init(const char *db_path, const char *secret, char *err, size_t errn);  // 0 or -1 (message in err)
 void app_close(void);

@@ -100,7 +100,7 @@ the code by `tools/knobs.py`; the `CURSED_*` and `LOOP_TEST_*` variables exist f
 | `CURSED_EPOLL` | 0 | 1: use the epoll backend even when io_uring is available (it's also the automatic fallback) |
 | `CURSED_RX_TS` | 0 (1 when CURSED_DEADLINE_MS is set) | 1: kernel receive timestamps, so queue delay includes time spent in socket buffers |
 | `CURSED_DEADLINE_MS` | 0 (off) | deadline shedding: a request whose bytes waited longer than this in the kernel's receive queue gets an immediate 503 (turns on receive timestamps) |
-| `CURSED_CONN_POLICY` | 1 | 1: Connection: close shedding under memory pressure (0: off; the emergency floors stay on) |
+| `CURSED_CONN_POLICY` | 0 | 0: no `Connection: close` shedding (the emergency floors stay on); 1: close a fraction of replies under memory pressure |
 | `CURSED_SHED_MODE` | headroom | `headroom`: the close fraction is a function of available memory alone; `band`: the older cap-and-band rule (the cap knobs, band and CPU guard below apply only to it) |
 | `CURSED_SHED_HI_MB` | 400 | headroom: no shedding while available memory (~1 s average) is at least this (MB) |
 | `CURSED_SHED_LO_MB` | 200 | headroom: the close fraction reaches its maximum at this much available memory (MB) |
@@ -111,6 +111,8 @@ the code by `tools/knobs.py`; the `CURSED_*` and `LOOP_TEST_*` variables exist f
 | `CURSED_DRAIN_CHUNK` | 0 | drain-first: most requests handed to one batch (0: the loop default, 256) |
 | `CURSED_DRAIN_BUDGET` | 0 | drain-first: most completions drained per loop pass (0: the loop default, 8192) |
 | `CURSED_SOCK503_AVAIL_MB` | 450 | socket-memory pressure valve: only below this much available memory (MB) |
+| `CURSED_SOCK503_BUDGET` | 0.006 | the valve's error budget, a fraction: it answers 503 only while a token bucket allows it. The bucket earns this many tokens per request answered, starts full and holds at most `CURSED_SOCK503_BURST`; when it's empty, requests are served normally. Bounds a run's 503s to burst + budget × requests (0: no cap) |
+| `CURSED_SOCK503_BURST` | 20000 | the error budget's bucket size: enough to drain the largest backlog seen in our load tests (~19k requests) |
 | `CURSED_SHED_FMAX` | 500 | headroom: the maximum close fraction, permille |
 | `CURSED_CONN_CAP` | 0 | band mode: fixed connection cap instead of the memory-derived one (0: derive) |
 | `CURSED_RESERVE_MB` | 0 | band mode: memory kept free for everything else in the cap formula (0: the loop's 250 MB) |
@@ -187,12 +189,11 @@ One process, one thread: the event loop, which also runs the WAL checkpoints. Ev
 5. **Reply.** Responses are built in a per-batch arena, with headers written in front of each body. Nothing is
    handed to the kernel until the batch's `COMMIT` has returned. If the commit fails, every reply that touched the
    database becomes a 500.
-6. **Memory valve.** While available memory (a ~1 s average) stays above 400 MB, nothing is shed. Below that, a
-   fraction of responses carry `Connection: close` (the server closes first), rising linearly to half of them at 200
-   MB. Accepts pause only at the descriptor limit. If the kernel's socket buffers suddenly fill with unread requests
-   while memory is short, queued requests get a fast 503 until they drain (see the rules disclosure).
-   (`CURSED_SHED_MODE=band` keeps the older rule: a connection cap derived from memory, ~4.4 KB per connection, with
-   shedding near the cap and accepts paused at it.)
+6. **Memory valve.** Connections are never closed to save memory. If a backlog of unread requests builds up while
+   memory is short, queued requests get a fast 503 until it drains (see the rules disclosure). Accepts pause only at
+   the descriptor limit. (`CURSED_CONN_POLICY=1` brings back `Connection: close` shedding: a fraction of replies,
+   rising from none at 400 MB available to half at 200 MB. Each close costs a reconnect, and in our load tests that
+   cost more than it saved.)
 
 ## Rules disclosure
 Each item, and how it stays within the rules:
@@ -223,7 +224,8 @@ Each item, and how it stays within the rules:
   - *What we did:* we ship `pcache1-maxkey`, which fixes the same thing from the pcache side and passes the full suite.
   - *Lesson:* a gate proves equivalence only for the configurations it exercises.
 - **Group commit** (rule 6 allows it): every response waits for its batch's commit.
-- **Memory valve** (`CURSED_CONN_POLICY=1`, on). On a 2 GB box the kernel's ~4.3 KB per open TCP connection is
+- **`Connection: close` shedding** (`CURSED_CONN_POLICY=1`, **off** by default: at 450k
+  it caused ~80k reconnects and a worse tail; with it off the server held 475k). When on: on a 2 GB box the kernel's ~4.3 KB per open TCP connection is
   the real limit, so the server watches the memory the kernel reports (`/proc/meminfo` MemAvailable − SReclaimable,
   and its cgroup's headroom), averaged over about a second. While at least 400 MB is available it sheds nothing.
   Below that it closes first on a fraction of complete responses (`Connection: close`, nothing pipelined behind
@@ -250,7 +252,7 @@ Each item, and how it stays within the rules:
   of up to 256 per batch. It is an I/O change only: every request is parsed, authenticated, committed and answered
   exactly as before, in the same per-connection order, and each response still waits for its batch's `COMMIT`. Its
   effect is that a backlog costs ~0.5 KB per request in our buffers instead of a ~4 KB socket buffer in the kernel.
-- **Socket-pressure 503s, a separate memory valve** (on; `CURSED_SOCK503_MBPS=0` turns off the socket trigger, and
+- **Socket-pressure 503s, the memory valve** (on; `CURSED_SOCK503_MBPS=0` turns off the socket trigger, and
   `CURSED_DRAIN=0` the backlog trigger with drain-first). When the event loop falls behind, unread requests pile up,
   and at the CPU limit that can reach the OOM killer within seconds. So while available memory is under 450 MB, the
   server raises a pressure flag if the socket-buffer memory charged to its cgroup (`memory.stat` `sock`) rises by more
@@ -260,8 +262,11 @@ Each item, and how it stays within the rules:
   {"error":"overloaded"}` on the same keep-alive connection, without JWT or database work. It drops once socket memory
   is under 48 MB (or memory recovers) and the backlog is under half those limits. It looks only at memory and queue
   length, never at the route, the client or the request's content, and it doesn't fire under normal load: it sent no
-  503s in the local runs at 400k and 425k users, where drain-first alone kept memory in bounds. It is the backstop for
-  overload beyond that.
+  503s in the local runs at 400k and 425k users. At 450k–475k it does real work, and without it 475k runs out of
+  memory. Its 503s are capped by an error budget (`CURSED_SOCK503_BUDGET`, 0.6 % of requests answered, plus a
+  20,000-request burst): once the bucket is empty, the valve stops and requests are served normally, so it can never
+  turn an overload into more errors than that. Uncapped, it sent up to 1.9 % in 450k runs on a slower CPU; capped, it
+  sent ~0.3 % in every run, with the rest of the backlog absorbed by drain-first's buffers.
 - **Deadline shedding exists but is off** (`CURSED_DEADLINE_MS`, default 0). When on, a request whose bytes waited
   in the kernel's receive queue longer than the deadline gets an immediate `503 {"error":"overloaded"}` instead of
   a slow answer. It looks only at that queue delay, never at the route, the client or the request's content.

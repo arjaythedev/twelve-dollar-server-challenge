@@ -81,8 +81,21 @@ static struct {
   int test_hold_ms;      // test only (CURSED_TEST_HOLD_MS): also hold writes N ms of every 200 ms
   uint32_t deadline_us;  // deadline shedding threshold (0: off)
   int press;             // socket-memory pressure flagged by the loop for this batch
+  // 503 error budget (CURSED_SOCK503_BUDGET, 0.6% by default): a token bucket that earns `b503_rate` tokens per
+  // request answered, starts full and holds at most `b503_burst`; each 503 costs one. When it's empty the valve
+  // stops answering 503 and requests are served normally (the drain-first backlog absorbs them). Bounds the 503s
+  // of a run to burst + rate x requests, i.e. error % <= rate + burst / requests.
+  double b503_rate, b503_tok, b503_burst;
   app_stats st;
 } A;
+
+// one 503 from the error budget: always yes when no budget is set
+static int b503_take(void) {
+  if (A.b503_rate <= 0) return 1;
+  if (A.b503_tok >= 1) { A.b503_tok -= 1; return 1; }
+  A.st.b503_skipped++;
+  return 0;
+}
 
 static void *xgrow(void *p, int *cap, int need, size_t elt) {
   if (need <= *cap) return p;
@@ -175,6 +188,12 @@ int app_init(const char *db_path, const char *secret, char *err, size_t errn) {
   if ((v = getenv("CURSED_COALESCE"))) eng_set_coalesce(A.e, atoi(v));
   if ((v = getenv("CURSED_TEST_HOLD_MS"))) A.test_hold_ms = atoi(v);
   if ((v = getenv("CURSED_DEADLINE_MS"))) A.deadline_us = (uint32_t)atoi(v) * 1000u;  // 0: off (default)
+  // the burst covers draining the largest in-hold backlog seen with the valve on (sock <= 76 MB ~ 19k queued
+  // requests at ~4 KB each, arena hb12b 450k/475k); 20k at rate 0.006 keeps a 60 s-hold arena run (~6M requests)
+  // under 0.6% + 0.33%
+  A.b503_rate = (v = getenv("CURSED_SOCK503_BUDGET")) ? atof(v) : 0.006;  // 0: no cap
+  A.b503_burst = (v = getenv("CURSED_SOCK503_BURST")) ? atof(v) : 20000;
+  A.b503_tok = A.b503_burst;
   jwt_key_init(&A.key, secret, strlen(secret));
   struct timespec t;
   clock_gettime(CLOCK_MONOTONIC, &t);
@@ -342,7 +361,7 @@ static uint32_t parse_conn(loop_in *in, const req_t *first, int fret, int paused
     // receive timestamp to now) get an immediate 503 instead of a slow answer. Keyed only on queue delay.
     // also while the loop flags socket-memory pressure: queued requests (oldest first, in arrival order) get the
     // same fast 503, which drains the kernel backlog without reconnects (conn-policy, sock503)
-    if ((A.deadline_us && in->qdelay_us > A.deadline_us) || A.press) {
+    if (((A.deadline_us && in->qdelay_us > A.deadline_us) || A.press) && b503_take()) {
       A.s = xgrow(A.s, &A.scap, A.n + 1, sizeof *A.s);
       slot_t *s = &A.s[A.n++];
       memset(s, 0, sizeof *s);
@@ -350,8 +369,9 @@ static uint32_t parse_conn(loop_in *in, const req_t *first, int fret, int paused
       s->close = (uint8_t)close;
       s->jwt = -1;
       slot_const(s, 503, E_OVERLOADED);
-      A.st.deadline_503++;
-      if (A.press) A.st.press_503++;
+      // each 503 is counted under the reason that fired it: the deadline (queue delay) wins if both did
+      if (A.deadline_us && in->qdelay_us > A.deadline_us) A.st.deadline_503++;
+      else A.st.press_503++;
       pos += ret;
       if (close) {
         s->last = 1;
@@ -447,6 +467,11 @@ int app_batch(loop_t *L, loop_in *in, int n) {
       in[base + i].consumed = parse_conn(&in[base + i], lanes ? &bo[i] : NULL, lanes ? br[i] : 0, paused);
   }
   A.st.requests += (uint64_t)A.n;
+  if (A.b503_rate > 0) {
+    A.b503_tok += A.b503_rate * A.n;
+    if (A.b503_tok > A.b503_burst) A.b503_tok = A.b503_burst;
+    A.st.b503_tokens = (uint64_t)A.b503_tok;
+  }
 
   // 2. AUTH: every token of the batch in one call (every signature recomputed: rule 5)
   int nt = 0;
@@ -549,6 +574,7 @@ int app_batch(loop_t *L, loop_in *in, int n) {
   // 6. EMIT: headers in front of each body, then hand the bytes to the loop (already committed)
   for (int i = 0; i < A.n; i++) {
     slot_t *s = &A.s[i];
+    if (s->status == 503) A.st.all_503++;  // every 503 we send, whatever its source
     if (s->last && !s->close && loop_close_hint(L, s->conn)) s->close = 1;
     char h[HDR_ROOM], *p = h;
 #define PUT(lit) (memcpy(p, lit, sizeof lit - 1), p += sizeof lit - 1)

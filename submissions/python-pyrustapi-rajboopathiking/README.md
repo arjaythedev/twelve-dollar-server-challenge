@@ -3,8 +3,8 @@
 | | |
 |---|---|
 | Language | Python 3.12 (CPython) |
-| Framework | PyRustAPI 1.9.0b11 (Tokio / Hyper Core) |
-| Server | Native Rust Tokio/Hyper multithreaded runtime |
+| Framework | PyRustAPI 1.9.0b13 (Tokio / Hyper Core) |
+| Server | Native Rust Tokio/Hyper runtime (single worker, matching the 1 vCPU target) |
 | SQLite driver | standard library `sqlite3` module (in-process autocommit WAL) |
 | JSON | SQLite `json_object` / `json_group_array` + `orjson` 3.12.0 |
 | **Nginx or direct** | **Direct**: serves `0.0.0.0:80` directly |
@@ -55,15 +55,34 @@ SQLITE_PATH=... JWT_SECRET=... HOST=0.0.0.0 PORT=80 bash start.sh
 
 ## 📊 Empirical Performance Results (k6 Load Test)
 
-Under identical load test conditions on the challenge seed database:
+### Sustained challenge workload
+
+6,000 VUs, 60s ramp-up, 5-minute hold, each framework run in isolation on the same
+machine and seed database (macOS, 8 logical cores):
 
 | Metric | FastAPI (Uvicorn + uvloop) | PyRustAPI (Native Tokio/Hyper) | Performance Delta |
 | :--- | :---: | :---: | :---: |
-| **Throughput** | 21.2 req/s | **21.5 req/s** | **+1.4% higher RPS** |
-| **Average Latency** | 1.26 ms | **0.95 ms** | **⚡ 24.3% faster (Sub-ms)** |
-| **p95 Latency** | 2.03 ms | **1.48 ms** | **⚡ 27.2% lower latency** |
-| **p99 Latency** | 3.30 ms | **2.09 ms** | **⚡ 36.7% lower latency** |
-| **Error Rate** | 0.00% | **0.00%** | **0.00% (42/42 Tests Passed)** |
+| **Throughput** | 560.6 req/s | **561.1 req/s** | **+0.1% (closed-loop)** |
+| **Average Latency** | 1.04 ms | **0.79 ms** | **⚡ 24% faster** |
+| **p95 Latency** | 1.92 ms | **1.53 ms** | **⚡ 20% lower latency** |
+| **p99 Latency** | 3.15 ms | **2.72 ms** | **⚡ 14% lower latency** |
+| **Error Rate** | 0.00% | **0.00%** | **42/42 Spec Tests Passed** |
+
+### CPU saturation (open-loop, 3,000 req/s constant arrival)
+
+The closed-loop test is think-time-bound; both servers keep up. Pushing a fixed
+3,000 req/s exposes the per-request CPU cost:
+
+| Metric | FastAPI (Uvicorn + uvloop) | PyRustAPI (Native Tokio/Hyper) | Performance Delta |
+| :--- | :---: | :---: | :---: |
+| **Achieved Throughput** | 2,975 req/s | **3,000 req/s** | **100.8% of target** |
+| **Average Latency** | 46.01 ms | **0.56 ms** | **⚡ 82x lower** |
+| **p95 Latency** | 129.05 ms | **0.85 ms** | **⚡ 152x lower** |
+| **p99 Latency** | 217.70 ms | **2.81 ms** | **⚡ 77x lower** |
+| **Error Rate** | 0.03% | **0.00%** | **Zero errors** |
+
+At a 6,000 req/s target, PyRustAPI sustained **5,500 req/s with 0% errors**;
+FastAPI collapsed to **2,222 req/s with 3.3% errors**.
 
 ---
 

@@ -50,7 +50,7 @@ SELECT json_object('post', json_object(
   'like_count', (SELECT count(*) FROM likes l WHERE l.post_id = p.id)
 ))
 FROM posts p JOIN users u ON u.id = p.user_id
-WHERE p.id = ?
+WHERE p.id = :post_id
 """
 
 INSERT_POST_SQL = "INSERT INTO posts (user_id, body) VALUES (?, ?) RETURNING id, created_at"
@@ -136,6 +136,9 @@ WHITESPACE = "\t\n\v\f\r                 　﻿"
 
 app = FastAPI(openapi_url=None, docs_url=None, redoc_url=None)
 
+# Native Rust/SQL route tier: the two read-heavy endpoints never enter CPython.
+app.connect_db(f"sqlite:///{os.path.abspath(SQLITE_PATH)}")
+
 @app.get("/health")
 async def health():
     try:
@@ -153,21 +156,22 @@ async def health():
         headers=JSON_HEADER,
     )
 
-@app.get("/feed")
+@app.get("/feed", sql=JSON_FEED_SQL, raw=True)
 async def feed():
-    row = db.execute(JSON_FEED_SQL).fetchone()
-    return Response(row[0].encode("utf-8"), status_code=200, headers=JSON_HEADER)
+    """Served by the Rust native SQL tier; SQLite builds the JSON document."""
 
-@app.get("/posts/{post_id}")
+@app.get(
+    "/posts/{post_id}",
+    sql=JSON_POST_SQL,
+    raw=True,
+    param_types={"post_id": "posint"},
+    missing_status=404,
+    missing_body='{"error":"post not found"}',
+    invalid_status=400,
+    invalid_body='{"error":"invalid post id"}',
+)
 async def get_post(post_id: str):
-    pid = parse_id(post_id)
-    if pid is None:
-        return ERR_400_INVALID_ID
-    if pid <= MAX_ID:
-        row = db.execute(JSON_POST_SQL, (pid,)).fetchone()
-        if row is not None and row[0] is not None:
-            return Response(row[0].encode("utf-8"), status_code=200, headers=JSON_HEADER)
-    return ERR_404_POST_NOT_FOUND
+    """Served by the Rust native SQL tier with bound, validated parameters."""
 
 @app.post("/posts")
 async def create_post(request: Request):

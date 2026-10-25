@@ -13,7 +13,3 @@ sqlite3.h
 .deps/
 # Stray binary: "go build" with no -o names the output after the package directory.
 go-iouring-pmatteo
-# Go unit tests: local only. The scoring harness runs the repo's own test/run.sh against the
-# running server, which is what validates the submission; these pin internals (the two-phase
-# close, the idle wheel, the accept handoff) and are kept out of the submitted tree.
-*_test.go

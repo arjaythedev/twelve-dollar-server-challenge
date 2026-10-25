@@ -219,6 +219,7 @@ void loop_backlog(loop_t *, uint32_t *pending, uint32_t *oldest_age_us);
 /* --- any time on the loop thread --- */
 void  loop_commit(loop_t *, uint64_t seq);                  /* release all staged output of batches <= seq */
 void  loop_represent(loop_t *, loop_conn);                 /* re-present unconsumed input next pass, no new bytes needed */
+void  loop_flush(loop_t *);                                /* submit queued sends now, without waiting (before a stall) */
 unsigned loop_shed_idle(loop_t *, unsigned n);              /* close up to n idle keep-alive conns */
 const loop_stats *loop_get_stats(loop_t *);
 

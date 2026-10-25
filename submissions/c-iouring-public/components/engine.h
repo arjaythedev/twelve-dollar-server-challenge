@@ -94,6 +94,7 @@ int eng_feed_body(eng *e, eng_body **body);   // status as eng_feed; *body is a 
 void eng_body_unref(eng_body *b);
 int eng_commit_batch(eng *e);    // 0: every write of the batch is committed to the WAL. -1: rolled back
 void eng_after_batch(eng *e);    // runs the checkpoint policy (never inside a batch)
+int eng_ckpt_due(eng *e);        // 1: the next eng_after_batch runs a checkpoint inline (submit the replies first)
 void eng_idle(eng *e);           // call when the event loop has nothing to do: deferred checkpoints run here
 // File ops for ckpt_async. The engine submits arrays; link=1 chains op i to op i+1 (which then runs only if op i
 // succeeded in full, otherwise completes with -ECANCELED). cb runs once per op, on the loop thread. Without

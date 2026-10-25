@@ -113,6 +113,9 @@ int main(int argc, char **argv) {
       .linger_close = (int)strtol(getenv("CURSED_LINGER") ? getenv("CURSED_LINGER") : "0", 0, 10),
       .batch = envu("CURSED_BATCH", 128),
       .wait_us = envu("CURSED_WAIT_US", 2000),
+      // with 2+ rings (65,535 connections each) ring 0's wait is capped at poll_wait_us and counts only its own
+      // completions, so this, not CURSED_BATCH, sets the batch size at 130k+ connections (~24 requests at 400k)
+      .poll_wait_us = envu("CURSED_POLL_WAIT_US", 1000),
       .conn_policy = (int)envu("CURSED_CONN_POLICY", 1),
       .conn_cap = envu("CURSED_CONN_CAP", 0),
       .reserve_mb = envu("CURSED_RESERVE_MB", 0),

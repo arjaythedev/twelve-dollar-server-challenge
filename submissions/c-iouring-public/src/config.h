@@ -10,7 +10,7 @@
 #define APP_DB_VFS 1
 #endif
 #ifndef APP_DB_CKPT
-#define APP_DB_CKPT 3  // 3 uring, 2 thread, 1 inline, 0 SQLite autocheckpoint
+#define APP_DB_CKPT 3  // 4 bounded, 3 uring, 2 thread, 1 inline, 0 SQLite autocheckpoint
 #endif
 #ifndef APP_DB_EXCL
 #define APP_DB_EXCL 1

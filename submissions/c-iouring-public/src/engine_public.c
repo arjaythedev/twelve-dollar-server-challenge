@@ -264,6 +264,8 @@ void eng_after_batch(eng *e) {
   }
 }
 
+int eng_ckpt_due(eng *e) { return !e->in_batch && e->o.ckpt_frames > 0 && e->wal_frames >= e->o.ckpt_frames; }
+
 void eng_idle(eng *e) {
   (void)e;
 }

@@ -11,10 +11,13 @@
 #                   DB_WAL_DROP=keep, and build.sh checks the objects use only public sqlite3_* symbols)
 #   DB_READS        direct: reads through SQLite's B-tree cursors           sql: the spec's prepared SELECTs
 #   DB_VFS          cursed: WAL write-coalescing + file-size cache shim     stock: SQLite's unix VFS
-#   DB_CKPT         uring (max's default): the engine's own checkpoint as   sqlite: SQLite's autocheckpoint
+#   DB_CKPT         bounded (max's default; below) or uring: the engine's   sqlite: SQLite's autocheckpoint
+#                   own checkpoint as
 #                   a state machine on the event loop's io_uring, same write gate, SQLITE_THREADSAFE=0, exclusive;
-#                   thread: checkpoint thread + write gate; inline: PASSIVE after the replies, every 16,384 frames.
-#                   CURSED=boring refuses uring.
+#                   thread: checkpoint thread + write gate; inline: PASSIVE after the replies, every 16,384 frames;
+#                   bounded: RESTART on the loop thread every 4,096 frames once the batch's replies are submitted,
+#                   WAL rewritten in place (DB_WAL_DROP defaults to keep), no write gate, SQLITE_THREADSAFE=0
+#                   (the checkpoint style of Rust #82). CURSED=boring refuses uring.
 #   DB_WAL_DROP     drop: checkpointed WAL pages leave the page cache       keep
 #   DB_LOCKING      exclusive (thread mode always uses unix-excl + NORMAL)  normal
 #   JWT             simd: multi-buffer batch HMAC (AVX-512VL / AVX2)        scalar
@@ -24,7 +27,7 @@
 # for its batch's COMMIT.
 
 case ${CURSED:-max} in
-  max) : "${DB_CKPT:=uring}" ;;
+  max) : "${DB_CKPT:=bounded}" ;;
   boring)
     : "${SQLITE_PATCHES:=none}" "${SQLITE_LINK:=separate}" "${DB_READS:=sql}" "${DB_VFS:=stock}" "${DB_CKPT:=sqlite}" "${DB_WAL_DROP:=keep}"
     : "${DB_LOCKING:=normal}" "${JWT:=scalar}" "${PARSER_FAST:=slow}" "${PARSER_SLOW:=pico}"
@@ -59,7 +62,8 @@ choose() {
 }
 D=$(choose DB_READS "${DB_READS:-direct}" direct=1 sql=0) || exit 2
 V=$(choose DB_VFS "${DB_VFS:-cursed}" cursed=1 stock=0) || exit 2
-K=$(choose DB_CKPT "${DB_CKPT:-thread}" thread=2 inline=1 sqlite=0 uring=3) || exit 2
+K=$(choose DB_CKPT "${DB_CKPT:-thread}" thread=2 inline=1 sqlite=0 uring=3 bounded=4) || exit 2
+[ "$K" = 4 ] && : "${DB_WAL_DROP:=keep}" # bounded: a 4,096-frame WAL reused in place stays small and hot
 WD=$(choose DB_WAL_DROP "${DB_WAL_DROP:-drop}" drop=1 keep=0) || exit 2
 X=$(choose DB_LOCKING "${DB_LOCKING:-exclusive}" exclusive=1 normal=0) || exit 2
 J=$(choose JWT "${JWT:-simd}" simd=0 scalar=1) || exit 2
@@ -73,7 +77,7 @@ if [ "$L" = 1 ]; then # separate: the public API has no B-tree cursors, VFS shim
   bad=""
   [ "$D" = 0 ] || bad="$bad DB_READS=sql"
   [ "$V" = 0 ] || bad="$bad DB_VFS=stock"
-  [ "$K" -lt 2 ] || bad="$bad DB_CKPT=sqlite|inline"
+  case $K in 0 | 1 | 4) ;; *) bad="$bad DB_CKPT=sqlite|inline|bounded" ;; esac
   [ "$WD" = 0 ] || bad="$bad DB_WAL_DROP=keep"
   if [ -n "$bad" ]; then
     echo "SQLITE_LINK=separate uses only SQLite's public API, so it also needs:$bad" >&2
@@ -83,6 +87,9 @@ fi
 
 if [ "$K" = 3 ]; then # uring: no checkpoint thread, so no SQLite mutexes; the engine needs exclusive locking
   [ "$X" = 1 ] || { echo "DB_CKPT=uring needs DB_LOCKING=exclusive" >&2; exit 2; }
+  SQLOPTS="${SQLOPTS/-DSQLITE_THREADSAFE=2/-DSQLITE_THREADSAFE=0}"
+fi
+if [ "$K" = 4 ]; then # bounded: one thread, one connection
   SQLOPTS="${SQLOPTS/-DSQLITE_THREADSAFE=2/-DSQLITE_THREADSAFE=0}"
 fi
 

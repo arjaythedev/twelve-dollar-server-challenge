@@ -26,7 +26,8 @@ const char *app_parsers(void) {
 
 const char *app_db_mode(void) {
   static char m[256];
-  const char *ckpt = APP_DB_CKPT == 3   ? "io_uring"
+  const char *ckpt = APP_DB_CKPT == 4   ? "bounded inline"
+                     : APP_DB_CKPT == 3 ? "io_uring"
                      : APP_DB_CKPT == 2 ? "thread"
                      : APP_DB_CKPT == 1 ? "inline"
                                         : "sqlite-auto";
@@ -152,6 +153,10 @@ int app_init(const char *db_path, const char *secret, char *err, size_t errn) {
   if (APP_DB_CKPT == 0) o.ckpt_frames = 0;      // 0: SQLite's own wal_autocheckpoint (1000 frames)
   o.ckpt_async = APP_DB_CKPT == 3;              // 3: the engine's checkpoint on the loop's io_uring (app_tick),
   if (APP_DB_CKPT == 3) o.ckpt_frames = 4096;   //    in the thread's pass size (as in the engine's Xeon A/B)
+  if (APP_DB_CKPT == 4) {                       // 4: Rust #82's checkpoint on our one thread: RESTART every 4,096 frames,
+    o.ckpt_frames = 4096;                       //    after the batch's replies are submitted (app_tick), WAL reused in
+    o.ckpt_mode = 2;                            //    place (2 = SQLITE_CHECKPOINT_RESTART); no backlog, so no write gate
+  }
   o.wal_fadvise =
       APP_DB_WAL_DROP;  // drop checkpointed WAL pages from the page cache (~256 -> <=20 MiB measured on a 1-vCPU Xeon)
   // page cache (default 8 MiB instead of the engine's 16: memory is the wall; measured 0.056 vs 0.022
@@ -599,8 +604,12 @@ void app_tick(loop_t *L) {
       loop_represent(L, A.held[i]);
     A.nheld = 0;
   }
-  if (A.had_batch)
+  if (A.had_batch) {
+#if APP_DB_CKPT == 4
+    if (eng_ckpt_due(A.e)) loop_flush(L);  // the replies leave before the checkpoint, not after it
+#endif
     eng_after_batch(A.e);
+  }
   else
     eng_idle(A.e);
   A.had_batch = 0;

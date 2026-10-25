@@ -971,6 +971,11 @@ void eng_after_batch(eng *e) {
   if ((u64)e->wal_frames > e->st.wal_max) e->st.wal_max = (u64)e->wal_frames;
   if (e->wal_frames >= (e->o.ckpt_defer ? e->o.ckpt_hard : lim)) ckpt_inline(e);
 }
+int eng_ckpt_due(eng *e) {
+  if (e->in_batch || e->o.ckpt_thread || e->ack || (e->o.ckpt_frames <= 0 && !e->o.direct_writes)) return 0;
+  int lim = e->o.ckpt_frames > 0 ? e->o.ckpt_frames : 1000;
+  return e->wal_frames >= (e->o.ckpt_defer ? e->o.ckpt_hard : lim);
+}
 int eng_writes_paused(eng *e) {
   if (!e->drain) return 0;
   u32 mx, pend; wal_state(e, &mx, &pend);

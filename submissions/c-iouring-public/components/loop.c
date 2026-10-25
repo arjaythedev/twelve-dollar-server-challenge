@@ -2248,6 +2248,15 @@ static void return_pbuf(loop_t *L, uint16_t ring, uint16_t bid) { if (!L->epoll)
 
 const char *loop_backend(loop_t *L) { return L->epoll ? "epoll" : "io_uring"; }
 
+/* Sends of committed batches sit in the SQ until the next wait; a non-blocking send on a socket with room completes
+ * inside this submit, so the replies leave before whatever stall the caller is about to run. */
+void loop_flush(loop_t *L)
+{
+    if (L->epoll) return;
+    for (unsigned k = 0; k < L->nlive; k++)
+        if (L->rings[k].to_submit) ring_enter(L, &L->rings[k], 0, 0, 0);
+}
+
 int loop_file_submit(loop_t *L, const loop_fop *ops, int n)
 {
     if (n <= 0) return 0;
@@ -2413,6 +2422,7 @@ static void be_free(loop_t *L)
 }
 
 const char *loop_backend(loop_t *L) { (void)L; return "kqueue"; }
+void loop_flush(loop_t *L) { (void)L; }
 
 int loop_file_submit(loop_t *L, const loop_fop *ops, int n)
 {

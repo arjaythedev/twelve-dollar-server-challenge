@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>FeedApi</RootNamespace>
+    <AssemblyName>FeedApi</AssemblyName>
+
+    <!-- No culture-sensitive code anywhere (ids, JSON, JS-style trim are all ordinal). -->
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- No hot-reload machinery in production. -->
+    <MetadataUpdaterSupport>false</MetadataUpdaterSupport>
+    <!-- The Web SDK defaults to server GC; on a single core with a tiny allocation rate the
+         workstation collector is right — and non-concurrent, so no background GC thread
+         competes with the I/O thread that now serves requests inline. Collections are rare
+         either way (the hot path allocates almost nothing). -->
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+    <ConcurrentGarbageCollection>false</ConcurrentGarbageCollection>
+    <!-- Stackalloc buffers (the JWT hot path) are not zero-initialized. -->
+    <SkipLocalsInit>true</SkipLocalsInit>
+
+    <!-- Exact NuGet versions, transitive ones included, are pinned in packages.lock.json. -->
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <RestoreLockedMode>false</RestoreLockedMode>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.12" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,314 @@
+{
+  "method": "Observed min-max over 17 rows; original 40/20/20/20 weights. Replace #15 throughput and RSS with fresh L1 medians; preserve the other 13 historical rows; add Fortran, Rust and Go.",
+  "weights": {
+    "throughput": 0.4,
+    "app_loc": 0.2,
+    "dependencies": 0.2,
+    "rss_mib": 0.2
+  },
+  "bounds": {
+    "throughput": [
+      3550.52,
+      67723.58
+    ],
+    "app_loc": [
+      105,
+      1354
+    ],
+    "dependencies": [
+      0,
+      89
+    ],
+    "rss_mib": [
+      39.9765625,
+      235.2734375
+    ]
+  },
+  "limitations": [
+    "Scores compare concrete implementations, not intrinsic language speed or quality.",
+    "Other historical rows use different batches; only the four L1 rows share this measurement environment.",
+    "A changed cohort or new measurements change scores, including existing solutions. The earlier 94.0 is not directly comparable.",
+    "Rust dependency count is 61 Linux production-graph crates plus explicitly linked SQLite. Include three build-only crates for 65, or all-target lockfile crates for 86. Package boundaries differ across ecosystems.",
+    "RSS is post-load process memory, including mapped pages; kernel socket memory is excluded.",
+    "Local ARM64 throughput index, not the official x86_64 five-minute k6 user score."
+  ],
+  "source_reference": "C++ #15 scoring.json at 69c1ed23d9e467f74c6d1a121f1bcbcefda15094",
+  "rows": [
+    {
+      "name": "#1 Python / FastAPI (cknutson12)",
+      "pr": 1,
+      "throughput": 12212.74,
+      "rss_mib": 92.96875,
+      "app_loc": 235,
+      "dependencies": 17,
+      "batch": "U3",
+      "components": {
+        "throughput": 13.498218722934512,
+        "app_loc": 89.59167333867094,
+        "dependencies": 80.89887640449439,
+        "rss_mib": 72.86582926634131
+      },
+      "score": 54.07056329107513
+    },
+    {
+      "name": "#2 Ruby / Rails (gambitboy)",
+      "pr": 2,
+      "throughput": 3550.52,
+      "rss_mib": 216.34375,
+      "app_loc": 286,
+      "dependencies": 89,
+      "batch": "U2",
+      "components": {
+        "throughput": 0.0,
+        "app_loc": 85.50840672538031,
+        "dependencies": 0.0,
+        "rss_mib": 9.692775422033762
+      },
+      "score": 19.040236429482814
+    },
+    {
+      "name": "#3 TypeScript / Bun.listen",
+      "pr": 3,
+      "throughput": 30337.69,
+      "rss_mib": null,
+      "app_loc": 354,
+      "dependencies": 0,
+      "batch": "M1",
+      "components": {
+        "throughput": 41.742079931983916,
+        "app_loc": 80.0640512409928,
+        "dependencies": 100.0,
+        "rss_mib": null
+      },
+      "score": null
+    },
+    {
+      "name": "#4 TypeScript / Bun.serve",
+      "pr": 4,
+      "throughput": 33351.01,
+      "rss_mib": 86.828125,
+      "app_loc": 105,
+      "dependencies": 0,
+      "batch": "M2",
+      "components": {
+        "throughput": 46.437695194837204,
+        "app_loc": 100.0,
+        "dependencies": 100.0,
+        "rss_mib": 76.01008080646452
+      },
+      "score": 73.77709423922778
+    },
+    {
+      "name": "#5 C / fio-stl",
+      "pr": 5,
+      "throughput": 43534.4,
+      "rss_mib": 51.671875,
+      "app_loc": 351,
+      "dependencies": 2,
+      "batch": "M2",
+      "components": {
+        "throughput": 62.30633228336003,
+        "app_loc": 80.30424339471577,
+        "dependencies": 97.75280898876404,
+        "rss_mib": 94.01152092167374
+      },
+      "score": 79.33624757437472
+    },
+    {
+      "name": "#6 C++ / uWebSockets",
+      "pr": 6,
+      "throughput": 59471.8,
+      "rss_mib": 60.140625,
+      "app_loc": 384,
+      "dependencies": 4,
+      "batch": "V2, fresh paired comparison",
+      "components": {
+        "throughput": 87.14136430458514,
+        "app_loc": 77.66212970376301,
+        "dependencies": 95.50561797752809,
+        "rss_mib": 89.67517401392111
+      },
+      "score": 87.42513006087651
+    },
+    {
+      "name": "#8 C++ / epoll",
+      "pr": 8,
+      "throughput": 59359.96,
+      "rss_mib": 53.21484375,
+      "app_loc": 1237,
+      "dependencies": 2,
+      "batch": "U1",
+      "components": {
+        "throughput": 86.96708556518888,
+        "app_loc": 9.367493995196156,
+        "dependencies": 97.75280898876404,
+        "rss_mib": 93.22145771661732
+      },
+      "score": 74.85518636619106
+    },
+    {
+      "name": "#9 C++ / epoll v2",
+      "pr": 9,
+      "throughput": 67723.58,
+      "rss_mib": 235.2734375,
+      "app_loc": 1354,
+      "dependencies": 2,
+      "batch": "U1",
+      "components": {
+        "throughput": 100.0,
+        "app_loc": 0.0,
+        "dependencies": 97.75280898876404,
+        "rss_mib": 0.0
+      },
+      "score": 59.550561797752806
+    },
+    {
+      "name": "#10 Python / optimized FastAPI",
+      "pr": 10,
+      "throughput": 19533.74,
+      "rss_mib": 92.87890625,
+      "app_loc": 312,
+      "dependencies": 17,
+      "batch": "U3",
+      "components": {
+        "throughput": 24.90643269932897,
+        "app_loc": 83.4267413931145,
+        "dependencies": 80.89887640449439,
+        "rss_mib": 72.91183294663573
+      },
+      "score": 57.41006322858051
+    },
+    {
+      "name": "#11 Erlang / Cowboy",
+      "pr": 11,
+      "throughput": 13095.92,
+      "rss_mib": 106.1328125,
+      "app_loc": 261,
+      "dependencies": 5,
+      "batch": "D1",
+      "components": {
+        "throughput": 14.874466014243358,
+        "app_loc": 87.51000800640513,
+        "dependencies": 94.38202247191012,
+        "rss_mib": 66.12529002320186
+      },
+      "score": 55.553250506000765
+    },
+    {
+      "name": "#12 Ruby / Rails Metal",
+      "pr": 12,
+      "throughput": 11580.93,
+      "rss_mib": 183.82421875,
+      "app_loc": 164,
+      "dependencies": 68,
+      "batch": "U4",
+      "components": {
+        "throughput": 12.51367785796719,
+        "app_loc": 95.27622097678143,
+        "dependencies": 23.59550561797753,
+        "rss_mib": 26.344107528602287
+      },
+      "score": 34.04863796785913
+    },
+    {
+      "name": "#13 Python / Granian RSGI",
+      "pr": 13,
+      "throughput": 30380.22,
+      "rss_mib": 93.9453125,
+      "app_loc": 156,
+      "dependencies": 3,
+      "batch": "U4",
+      "components": {
+        "throughput": 41.80835384817242,
+        "app_loc": 95.91673338670937,
+        "dependencies": 96.62921348314607,
+        "rss_mib": 72.36578926314105
+      },
+      "score": 69.70568876586827
+    },
+    {
+      "name": "#14 Ruby / Iodine",
+      "pr": 14,
+      "throughput": 35056.16,
+      "rss_mib": 80.99609375,
+      "app_loc": 150,
+      "dependencies": 3,
+      "batch": "U4",
+      "components": {
+        "throughput": 49.0948070732485,
+        "app_loc": 96.39711769415533,
+        "dependencies": 96.62921348314607,
+        "rss_mib": 78.99631970557644
+      },
+      "score": 74.04245300587498
+    },
+    {
+      "name": "C++ / uWebSockets group commit",
+      "pr": 15,
+      "throughput": 55771.64,
+      "rss_mib": 41.55859375,
+      "app_loc": 424,
+      "dependencies": 4,
+      "batch": "L1, fresh four-stack comparison",
+      "components": {
+        "throughput": 81.37545568187024,
+        "app_loc": 74.4595676541233,
+        "dependencies": 95.50561797752809,
+        "rss_mib": 99.18993519481559
+      },
+      "score": 86.3812064380415,
+      "language": "cpp"
+    },
+    {
+      "name": "Fortran / libmicrohttpd",
+      "language": "fortran",
+      "pr": null,
+      "throughput": 24130.08,
+      "rss_mib": 39.9765625,
+      "app_loc": 731,
+      "dependencies": 3,
+      "batch": "L1, fresh four-stack comparison",
+      "components": {
+        "throughput": 32.06884633520671,
+        "app_loc": 49.879903923138514,
+        "dependencies": 96.62921348314607,
+        "rss_mib": 100.0
+      },
+      "score": 62.1293620153396
+    },
+    {
+      "name": "Rust / Axum",
+      "language": "rust",
+      "pr": null,
+      "throughput": 45628.64,
+      "rss_mib": 41.75390625,
+      "app_loc": 393,
+      "dependencies": 62,
+      "batch": "L1, fresh four-stack comparison",
+      "components": {
+        "throughput": 65.5697577768615,
+        "app_loc": 76.94155324259407,
+        "dependencies": 30.337078651685392,
+        "rss_mib": 99.08992719417553
+      },
+      "score": 67.5016149284356
+    },
+    {
+      "name": "Go / net/http",
+      "language": "go",
+      "pr": null,
+      "throughput": 25928.66,
+      "rss_mib": 52.03125,
+      "app_loc": 391,
+      "dependencies": 2,
+      "batch": "L1, fresh four-stack comparison",
+      "components": {
+        "throughput": 34.87154890229638,
+        "app_loc": 77.10168134507606,
+        "dependencies": 97.75280898876404,
+        "rss_mib": 93.82750620049605
+      },
+      "score": 67.68501886778579
+    }
+  ]
+}

@@ -32,7 +32,7 @@ internal sealed class Jwt(byte[] secret) {
 
     /// <summary>
     /// Checks an Authorization header value: a "Bearer " token that is a three-part HS256 JWT with a valid
-    /// signature and time claims, and a usable <c>sub</c> and <c>username</c>.
+    /// signature, a required finite future expiration, and a usable <c>sub</c> and <c>username</c>.
     /// </summary>
     /// <param name="present">Whether the request had an Authorization header at all.</param>
     public AuthStatus Verify(ReadOnlySpan<byte> authorization, bool present) {
@@ -83,7 +83,7 @@ internal sealed class Jwt(byte[] secret) {
         return ParsePayload(payload[..payloadLen]);
     }
 
-    /// <summary>True when the header is a JSON object whose <c>alg</c> is the string "HS256".</summary>
+    /// <summary>True when the whole header is a JSON object with the string algorithm "HS256".</summary>
     private static bool IsHs256Header(ReadOnlySpan<byte> json) {
         try {
             Utf8JsonReader reader = new(json);
@@ -91,22 +91,32 @@ internal sealed class Jwt(byte[] secret) {
                 return false;
             }
 
+            bool sawAlgorithm = false;
             while (reader.Read()) {
+                if (reader.TokenType == JsonTokenType.EndObject) {
+                    return sawAlgorithm && !reader.Read();
+                }
+
                 if (reader.TokenType != JsonTokenType.PropertyName) {
                     return false;
                 }
 
-                if (reader.ValueTextEquals("alg"u8)) {
-                    return reader.Read()
-                        && reader.TokenType == JsonTokenType.String
-                        && reader.ValueTextEquals("HS256"u8);
-                }
+                bool isAlgorithm = reader.ValueTextEquals("alg"u8);
                 if (!reader.Read()) {
                     return false;
                 }
 
-                reader.Skip();
+                if (isAlgorithm) {
+                    if (reader.TokenType != JsonTokenType.String || !reader.ValueTextEquals("HS256"u8)) {
+                        return false;
+                    }
+
+                    sawAlgorithm = true;
+                } else {
+                    reader.Skip();
+                }
             }
+
             return false;
         } catch (JsonException) {
             return false;
@@ -114,11 +124,11 @@ internal sealed class Jwt(byte[] secret) {
     }
 
     /// <summary>
-    /// Reads <c>exp</c>, <c>nbf</c>, <c>sub</c> and <c>username</c> from the payload and skips other claims.
-    /// Sets UserId and Username as it goes.
+    /// Requires a finite future <c>exp</c>, checks optional <c>nbf</c>, and reads the identity claims.
+    /// Sets UserId and Username as it goes; callers use them only after verification succeeds.
     /// </summary>
     private AuthStatus ParsePayload(ReadOnlySpan<byte> json) {
-        bool sawSub = false, sawUsername = false;
+        bool sawSub = false, sawUsername = false, sawExpiration = false;
         Span<byte> sub = stackalloc byte[768]; // as large as the whole payload
         long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
         try {
@@ -129,6 +139,10 @@ internal sealed class Jwt(byte[] secret) {
 
             while (reader.Read()) {
                 if (reader.TokenType == JsonTokenType.EndObject) {
+                    if (reader.Read()) {
+                        return AuthStatus.InvalidToken;
+                    }
+
                     break;
                 }
 
@@ -147,7 +161,7 @@ internal sealed class Jwt(byte[] secret) {
 
                 JsonTokenType kind = reader.TokenType;
                 if (isExp || isNbf) {
-                    if (kind == JsonTokenType.Null) {
+                    if (isNbf && kind == JsonTokenType.Null) {
                         continue; // treated as absent
                     }
 
@@ -155,10 +169,11 @@ internal sealed class Jwt(byte[] secret) {
                         return AuthStatus.InvalidToken;
                     }
 
-                    double moment = reader.GetDouble();
-                    if (isExp ? now >= moment : now < moment) {
+                    if (!reader.TryGetDouble(out double moment) || !double.IsFinite(moment)
+                        || (isExp ? now >= moment : now < moment)) {
                         return AuthStatus.InvalidToken;
                     }
+                    sawExpiration |= isExp;
                 } else if (isSub) {
                     if (kind != JsonTokenType.String || reader.ValueSpan.Length > sub.Length) {
                         return AuthStatus.BadPayload;
@@ -185,6 +200,10 @@ internal sealed class Jwt(byte[] secret) {
         } catch (JsonException) {
             return AuthStatus.InvalidToken;
         }
+        if (!sawExpiration) {
+            return AuthStatus.InvalidToken;
+        }
+
         return sawSub && sawUsername ? AuthStatus.Ok : AuthStatus.BadPayload;
     }
 

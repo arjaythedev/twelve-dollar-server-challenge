@@ -284,16 +284,19 @@ dotnet_naming_style.pascal_case.capitalization = pascal_case
 dotnet_analyzer_diagnostic.category-CodeQuality.severity = warning
 
 # ============================================================
-# Shell scripts: always LF; bash on Linux fails on carriage returns
+# Always LF: bash on Linux fails on carriage returns, the C
+# trainer is compiled there, and dotnet writes the lock file
+# with LF
 # ============================================================
 
-[*.sh]
+[*.{sh,c,json}]
 end_of_line = lf
 
 
 # ============================================================
 # Native.cs: constants keep their Linux and SQLite names
-# (AF_INET, EPOLLIN, SQLITE_OK), so they match the man pages
+# (AF_INET, IORING_OP_SEND, SQLITE_OK), so they match the man
+# pages
 # ============================================================
 
 [Native.cs]

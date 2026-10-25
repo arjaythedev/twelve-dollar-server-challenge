@@ -1,5 +1,4 @@
-/* jwt/jwt.c (sha256 3e1c2ebb91de), developed separately for this entry. */
-/* jwt.c — see jwt.h.  Sections:
+/* jwt.c — see jwt.h.  Part of cursed-jwt, MIT licence (see LICENSE).  Sections:
  *   1. SHA-256 constants, HMAC message plans, key setup
  *   2. SHA-256 engines: scalar / NEON 4-lane / AVX2 8-lane / AVX-512VL 8-lane (all from jwt_mb.inc),
  *      ARMv8 SHA2 instructions with 1/2/4 interleaved streams
@@ -10,17 +9,109 @@
 #include "jwt.h"
 
 #include <stdlib.h>
+#include <stddef.h>
 #include <string.h>
 
 #if defined(__aarch64__) || defined(_M_ARM64)
 #include <arm_neon.h>
 #define JWT_HAVE_NEON 1
 #endif
-#if defined(__AVX2__)
+#if defined(__x86_64__) || defined(__AVX2__)
 #include <immintrin.h>
 #endif
 
 #define JWT_INLINE static inline __attribute__((always_inline))
+
+/* ---- run-time CPU dispatch ----
+ * The library is compiled for the baseline ISA (x86-64, ARMv8-A) and carries every engine the architecture can
+ * have: the AVX2 and AVX-512VL engines are compiled inside target regions on x86-64, the SHA2 engine inside one on
+ * AArch64.  jwt_cpu (filled by a constructor from CPUID + XGETBV, or HWCAP / sysctl) picks the best one the
+ * machine has at every entry point, falling back down to scalar.  Building with -march=native still works: the
+ * regions are then no-ops, and dispatch still checks the CPU. */
+#if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+#define JWT_X86 1
+#if defined(__clang__)
+#define JWT_BEGIN_AVX2 _Pragma("clang attribute push (__attribute__((target(\"avx2,bmi,bmi2\"))), apply_to = function)")
+/* tune=skylake-avx512 carries "prefer 256-bit vectors": without it the compiler auto-vectorises copies and memsets in
+ * this region with zmm, and one zmm instruction drops the core's frequency licence (19% slower for 0.5-1 ms on a
+ * Cascade Lake; measured 29% slower full verify) -- exactly what the ymm-only design avoids. */
+#define JWT_BEGIN_AVX512 \
+    _Pragma("clang attribute push (__attribute__((target(\"avx512f,avx512vl,avx512bw,avx512dq,avx512cd,avx2,bmi,bmi2,tune=skylake-avx512\"))), apply_to = function)")
+#define JWT_END_TARGET _Pragma("clang attribute pop")
+#else
+#define JWT_BEGIN_AVX2 _Pragma("GCC push_options") _Pragma("GCC target(\"avx2,bmi,bmi2\")")
+#define JWT_BEGIN_AVX512 \
+    _Pragma("GCC push_options") _Pragma("GCC target(\"avx512f,avx512vl,avx512bw,avx512dq,avx512cd,avx2,bmi,bmi2,tune=skylake-avx512,prefer-vector-width=256\")")
+#define JWT_END_TARGET _Pragma("GCC pop_options")
+#endif
+#endif
+#if defined(__aarch64__) && (defined(__GNUC__) || defined(__clang__))
+#define JWT_ARM_SHA2 1 /* the SHA2-instruction engine is always compiled on AArch64 */
+#if defined(__ARM_FEATURE_SHA2)
+#define JWT_BEGIN_SHA2
+#define JWT_END_SHA2
+#elif defined(__clang__)
+#define JWT_BEGIN_SHA2 _Pragma("clang attribute push (__attribute__((target(\"sha2\"))), apply_to = function)")
+#define JWT_END_SHA2 _Pragma("clang attribute pop")
+#else
+#define JWT_BEGIN_SHA2 _Pragma("GCC push_options") _Pragma("GCC target(\"+crypto\")")
+#define JWT_END_SHA2 _Pragma("GCC pop_options")
+#endif
+#if defined(__APPLE__)
+#include <sys/sysctl.h>
+#elif defined(__linux__)
+#include <sys/auxv.h>
+#endif
+#endif
+
+#define JWT_CPU_DETECTED (1u << 31) /* the JWT_CPU_* bits are in jwt.h */
+static unsigned jwt_cpu_bits;
+#if defined(JWT_X86)
+#include <cpuid.h>
+#endif
+__attribute__((constructor)) static void jwt_cpu_init(void) {
+    unsigned f = JWT_CPU_DETECTED;
+#if defined(JWT_X86)
+    unsigned a, b, c, d, ecx1 = 0, ebx7 = 0;
+    if (__get_cpuid(1, &a, &b, &c, &d)) ecx1 = c;
+    if (__get_cpuid_count(7, 0, &a, &b, &c, &d)) ebx7 = b;
+    unsigned xcr0 = 0;
+    if (ecx1 & (1u << 27)) { /* OSXSAVE: the OS manages the vector state that XCR0 lists */
+        unsigned hi;
+        __asm__("xgetbv" : "=a"(xcr0), "=d"(hi) : "c"(0));
+    }
+    int ymm = (xcr0 & 6) == 6, zmm = ymm && (xcr0 & 0xE0) == 0xE0;
+    if (ymm && (ebx7 & (1u << 5)) && (ebx7 & (1u << 3)) && (ebx7 & (1u << 8))) f |= JWT_CPU_AVX2; /* + BMI1, BMI2 */
+    if ((f & JWT_CPU_AVX2) && zmm && (ebx7 & (1u << 16)) && (ebx7 & (1u << 31)) && (ebx7 & (1u << 30)) && (ebx7 & (1u << 17)) &&
+        (ebx7 & (1u << 28)))
+        f |= JWT_CPU_AVX512VL; /* F, VL, BW, DQ, CD */
+    if ((f & JWT_CPU_AVX512VL) && (ebx7 & (1u << 21))) f |= JWT_CPU_IFMA;
+    if ((ebx7 & (1u << 8)) && (ebx7 & (1u << 19))) f |= JWT_CPU_BMI2_ADX;
+    if (ebx7 & (1u << 29)) f |= JWT_CPU_SHANI;
+#elif defined(JWT_ARM_SHA2)
+#if defined(__APPLE__)
+    int v = 0;
+    size_t vl = sizeof v;
+    if (!sysctlbyname("hw.optional.arm.FEAT_SHA256", &v, &vl, NULL, 0) && v) f |= JWT_CPU_SHA2;
+    v = 0, vl = sizeof v;
+    if (!sysctlbyname("hw.optional.arm.FEAT_SHA512", &v, &vl, NULL, 0) && v) f |= JWT_CPU_SHA512;
+#elif defined(__linux__)
+    unsigned long hw = getauxval(AT_HWCAP);
+    if (hw & (1ul << 6)) f |= JWT_CPU_SHA2;    /* HWCAP_SHA2 */
+    if (hw & (1ul << 21)) f |= JWT_CPU_SHA512; /* HWCAP_SHA512 */
+#elif defined(__ARM_FEATURE_SHA2)
+    f |= JWT_CPU_SHA2;
+#endif
+#endif
+    const char *mask = getenv("JWT_CPU_MASK"); /* tests and benchmarks: pretend features are missing */
+    if (mask && *mask) f &= (unsigned)strtoul(mask, NULL, 0) | JWT_CPU_DETECTED;
+    jwt_cpu_bits = f;
+}
+static unsigned jwt_cpu(void) {
+    if (!jwt_cpu_bits) jwt_cpu_init(); /* a caller that runs before constructors */
+    return jwt_cpu_bits;
+}
+unsigned jwt_cpu_features(void) { return jwt_cpu() & ~JWT_CPU_DETECTED; }
 
 /* ======================================================================================
  * 1. constants, plans, key
@@ -54,9 +145,10 @@ typedef struct {
     uint8_t tail[128];
 } hplan_t;
 
-static void hplan_init(hplan_t *p, const uint8_t *m, int L) {
+/* off = bytes already hashed before m: 64 (the ipad block) for HMAC, 0 for a plain SHA-256 */
+JWT_INLINE void hplan_init_off(hplan_t *p, const uint8_t *m, int L, int off) {
     int nf = L >> 6, rem = L & 63, nt = rem + 9 > 64 ? 2 : 1;
-    uint64_t bits = (uint64_t)(64 + L) * 8;
+    uint64_t bits = (uint64_t)(off + L) * 8;
     p->m = m, p->nf = nf, p->nb = nf + nt;
 #ifdef JWT_INPUT_PADDED
     /* Caller guarantees >= 64 readable bytes after each token (padded recv buffers): fixed-size
@@ -76,11 +168,16 @@ static void hplan_init(hplan_t *p, const uint8_t *m, int L) {
 #endif
 }
 
+static void hplan_init(hplan_t *p, const uint8_t *m, int L) { hplan_init_off(p, m, L, 64); }
+
 JWT_INLINE const uint8_t *hplan_block(const hplan_t *p, int b) {
     return b < p->nf ? p->m + (b << 6) : p->tail + ((b - p->nf) << 6);
 }
 
 static void hmac1_scalar(const jwt_key_t *k, const hplan_t *p, uint32_t mac[8]);
+static void sha1_raw(const hplan_t *p, uint32_t dig[8]);
+/* plain SHA-256 runs the HMAC machinery from the IV, with no ipad block and no outer hash (raw mode) */
+static const jwt_key_t sha_iv_key = {{0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19}, {0}};
 
 /* ======================================================================================
  * 2. SHA-256 engines
@@ -134,10 +231,64 @@ static void hmac1_scalar(const jwt_key_t *k, const hplan_t *p, uint32_t mac[8]);
 #undef MB_STORE8
 #undef MB_MIN_LANES
 
+#if defined(JWT_OSSL_SHA256) && defined(__x86_64__) && defined(__ELF__)
+/* ---- single-stream x86-64: OpenSSL's sha256_block_data_order, extracted (src/sha256_x86_64_ossl.S) ----
+ * Batch 1 and the lanes a vector group leaves over run one message at a time, where OpenSSL's hand-scheduled
+ * AVX2+BMI2 code (2 blocks interleaved, rorx) beats the compiled scalar template: 763 vs 1,015 ns per HMAC on a
+ * Xeon Platinum 8260.  It dispatches on jwt_ossl_ia32cap_P, laid out like OpenSSL's OPENSSL_ia32cap_P for the bits
+ * that code reads: word 0 bit 30 "Intel CPU", word 1 = CPUID.1:ECX (SSSE3, AVX), word 2 = CPUID.7.0:EBX (BMI1,
+ * AVX2, BMI2, SHA).  AVX and AVX2 are cleared unless the OS saves ymm state (XCR0). */
+#include <cpuid.h>
+void jwt_ossl_sha256_block(uint32_t h[8], const void *blocks, size_t n);
+__attribute__((visibility("hidden"))) unsigned int jwt_ossl_ia32cap_P[4];
+__attribute__((constructor)) static void jwt_ossl_cap_init(void) {
+    unsigned a, b, c, d, w0 = 0, w1 = 0, w2 = 0;
+    if (__get_cpuid(0, &a, &b, &c, &d) && b == 0x756e6547 && d == 0x49656e69 && c == 0x6c65746e) w0 |= 1u << 30;
+    if (__get_cpuid(1, &a, &b, &c, &d)) w1 = c;
+    if (__get_cpuid_count(7, 0, &a, &b, &c, &d)) w2 = b;
+    int ymm = 0;
+    if (w1 & (1u << 27)) { /* OSXSAVE: XCR0 bits 1 (SSE) and 2 (AVX) */
+        unsigned lo, hi;
+        __asm__("xgetbv" : "=a"(lo), "=d"(hi) : "c"(0));
+        ymm = (lo & 6) == 6;
+    }
+    if (!ymm) w1 &= ~(1u << 28), w2 &= ~(1u << 5);
+    jwt_ossl_ia32cap_P[0] = w0, jwt_ossl_ia32cap_P[1] = w1, jwt_ossl_ia32cap_P[2] = w2;
+}
+static void hmac1_scalar(const jwt_key_t *k, const hplan_t *p, uint32_t mac[8]) {
+    uint32_t st[8];
+    uint8_t ob[64] = {0};
+    memcpy(st, k->ih, 32);
+    if (p->nf) jwt_ossl_sha256_block(st, p->m, (size_t)p->nf);
+    jwt_ossl_sha256_block(st, p->tail, (size_t)(p->nb - p->nf));
+    for (int i = 0; i < 8; i++) ob[4 * i] = st[i] >> 24, ob[4 * i + 1] = st[i] >> 16, ob[4 * i + 2] = st[i] >> 8, ob[4 * i + 3] = st[i];
+    ob[32] = 0x80, ob[62] = ((64 + 32) * 8) >> 8, ob[63] = (uint8_t)((64 + 32) * 8);
+    memcpy(mac, k->oh, 32);
+    jwt_ossl_sha256_block(mac, ob, 1);
+}
+static void sha1_raw(const hplan_t *p, uint32_t dig[8]) {
+    memcpy(dig, sha_iv_key.ih, 32);
+    if (p->nf) jwt_ossl_sha256_block(dig, p->m, (size_t)p->nf);
+    jwt_ossl_sha256_block(dig, p->tail, (size_t)(p->nb - p->nf));
+}
+/* every message one at a time through the extracted block function (tests, benchmarks) */
+void jwt_hmac_ossl(const jwt_key_t *k, int n, const uint8_t *const *msg, const int *len, uint32_t (*mac)[8]) {
+    for (int i = 0; i < n; i++) {
+        hplan_t p;
+        hplan_init(&p, msg[i], len[i]);
+        hmac1_scalar(k, &p, mac[i]);
+    }
+}
+#else
 static void hmac1_scalar(const jwt_key_t *k, const hplan_t *p, uint32_t mac[8]) {
     const hplan_t *pp = p;
     lanes_scalar(k, 1, &pp, (uint32_t(*)[8])mac);
 }
+static void sha1_raw(const hplan_t *p, uint32_t dig[8]) {
+    const hplan_t *pp = p;
+    lanes_raw_scalar(1, &pp, (uint32_t(*)[8])dig);
+}
+#endif
 
 void jwt_key_init(jwt_key_t *k, const void *secret, size_t len) {
     uint8_t key[64] = {0}, blk[64];
@@ -241,7 +392,8 @@ JWT_INLINE void neon_tr4(uint32x4_t r0, uint32x4_t r1, uint32x4_t r2, uint32x4_t
 #endif /* NEON */
 
 /* ---- AVX2 8 lanes, and the AVX-512VL flavour of the very same code ---- */
-#if defined(__AVX2__)
+#if defined(JWT_X86)
+JWT_BEGIN_AVX2
 JWT_INLINE void avx2_tr8(const __m256i *r, __m256i *o) {
     __m256i t0 = _mm256_unpacklo_epi32(r[0], r[1]), t1 = _mm256_unpackhi_epi32(r[0], r[1]);
     __m256i t2 = _mm256_unpacklo_epi32(r[2], r[3]), t3 = _mm256_unpackhi_epi32(r[2], r[3]);
@@ -284,7 +436,16 @@ JWT_INLINE void avx2_tr8(const __m256i *r, __m256i *o) {
 #ifndef JWT_AVX_MIN_LANES
 #define JWT_AVX_MIN_LANES 2
 #endif
-#define MB_MIN_LANES JWT_AVX_MIN_LANES
+/* AVX2 alone: with OpenSSL's single-stream code for leftovers, 2 messages one at a time (2 x 753 ns) beat one
+ * 2-lane AVX2 group (822 ns) on a Xeon Platinum 8260; from 3 lanes the vector wins (555 ns) */
+#ifndef JWT_AVX2_MIN_LANES
+#if defined(JWT_OSSL_SHA256) && defined(__x86_64__) && defined(__ELF__)
+#define JWT_AVX2_MIN_LANES 3
+#else
+#define JWT_AVX2_MIN_LANES JWT_AVX_MIN_LANES
+#endif
+#endif
+#define MB_MIN_LANES JWT_AVX2_MIN_LANES
 
 #define MB(name) name##_avx2
 #define VROR(x, n) _mm256_or_si256(_mm256_srli_epi32(x, n), _mm256_slli_epi32(x, 32 - (n)))
@@ -302,11 +463,15 @@ JWT_INLINE void avx2_tr8(const __m256i *r, __m256i *o) {
 #undef VMAJ
 #undef VSEL
 
-#if defined(JWT_AVX512) && defined(__AVX512VL__)
-/* UNTESTED ON HARDWARE.  Identical to the AVX2 instantiation except for these five macros.
+#if 1 /* AVX-512VL, compiled in its own target region */
+JWT_END_TARGET
+JWT_BEGIN_AVX512
+/* Identical to the AVX2 instantiation except for these five macros (tested on a Xeon Platinum 8260).
  * vpternlogd immediates (truth table index = a<<2 | b<<1 | c):
  *   0x96 = a^b^c, 0xCA = a ? b : c (Ch, and the lane select), 0xE8 = majority.
- * test.c runs the template with a scalar ternlog emulation using these same constants. */
+ * tests/test_jwt.c runs the template with a scalar ternlog emulation using these same constants. */
+#undef MB_MIN_LANES
+#define MB_MIN_LANES JWT_AVX_MIN_LANES
 #define MB(name) name##_avx512
 #define VROR(x, n) _mm256_ror_epi32(x, n) /* vprord */
 #define VXOR3(a, b, c) _mm256_ternarylogic_epi32(a, b, c, JWT_TL_XOR3)
@@ -320,6 +485,8 @@ JWT_INLINE void avx2_tr8(const __m256i *r, __m256i *o) {
 #undef VCH
 #undef VMAJ
 #undef VSEL
+JWT_END_TARGET
+JWT_BEGIN_AVX2
 #endif
 
 #undef MB_LANES
@@ -428,7 +595,9 @@ V2OP3(v2_sel_avx2, A2_SEL)
 #undef VMAJ
 #undef VSEL
 
-#if defined(JWT_AVX512) && defined(__AVX512VL__)
+#if 1 /* AVX-512VL, compiled in its own target region */
+JWT_END_TARGET
+JWT_BEGIN_AVX512
 #define T2_XOR3(x, y, z) _mm256_ternarylogic_epi32(x, y, z, JWT_TL_XOR3)
 #define T2_CH(x, y, z) _mm256_ternarylogic_epi32(x, y, z, JWT_TL_CH)
 #define T2_MAJ(x, y, z) _mm256_ternarylogic_epi32(x, y, z, JWT_TL_MAJ)
@@ -448,6 +617,8 @@ V2OP3(v2_maj_512, T2_MAJ)
 #undef VCH
 #undef VMAJ
 #undef VSEL
+JWT_END_TARGET
+JWT_BEGIN_AVX2
 #endif
 #undef MB_NO_DRIVER
 #undef MB_LANES
@@ -499,13 +670,15 @@ static void x2_drive(lanes_fn *l16, lanes_fn *l8, const jwt_key_t *k, int n, con
 void jwt_hmac_avx2x2(const jwt_key_t *k, int n, const uint8_t *const *msg, const int *len, uint32_t (*mac)[8]) {
     x2_drive(lanes_avx2x2, lanes_avx2, k, n, msg, len, mac);
 }
-#if defined(JWT_AVX512) && defined(__AVX512VL__)
+#if 1 /* AVX-512VL, compiled in its own target region */
+JWT_END_TARGET
+JWT_BEGIN_AVX512
 void jwt_hmac_avx512x2(const jwt_key_t *k, int n, const uint8_t *const *msg, const int *len, uint32_t (*mac)[8]) {
     x2_drive(lanes_avx512x2, lanes_avx512, k, n, msg, len, mac);
 }
 
 /* ---- zmm, 16 lanes: NOT the default.  Fewest cycles per lane, but heavy 512-bit integer work can
- * drop the core's frequency licence for everything that runs after it; bench/licence.c measures
+ * drop the core's frequency licence for everything that runs after it; bench/licence_probe.c measures
  * that on real hardware.  Loads/stores reuse the ymm 8x8 transposes and glue the halves. */
 #define MB(name) name##_zmm
 #define MB_LANES 16
@@ -566,11 +739,13 @@ void jwt_hmac_avx512x2(const jwt_key_t *k, int n, const uint8_t *const *msg, con
 void jwt_hmac_zmm(const jwt_key_t *k, int n, const uint8_t *const *msg, const int *len, uint32_t (*mac)[8]) {
     x2_drive(lanes_zmm, lanes_avx512, k, n, msg, len, mac);
 }
+JWT_END_TARGET /* the AVX-512 region ends the AVX2 one too */
 #endif
 #endif /* AVX2 */
 
 /* ---- ARMv8 SHA2 instructions: S independent streams interleaved for latency hiding ---- */
-#if defined(__ARM_FEATURE_SHA2)
+#if defined(JWT_ARM_SHA2)
+JWT_BEGIN_SHA2
 /* 64 rounds on S streams; m[s][0..3] are the 16 message words (host order) of stream s. */
 JWT_INLINE void ce_compress(int S, uint32x4_t *st0, uint32x4_t *st1, uint32x4_t (*m)[4]) {
     uint32x4_t a0[4], a1[4];
@@ -594,8 +769,8 @@ JWT_INLINE void ce_compress(int S, uint32x4_t *st0, uint32x4_t *st1, uint32x4_t 
     for (int s = 0; s < S; s++) st0[s] = vaddq_u32(st0[s], a0[s]), st1[s] = vaddq_u32(st1[s], a1[s]);
 }
 
-/* S plans with identical nb */
-JWT_INLINE void ce_hmac(int S, const jwt_key_t *k, const hplan_t *const *p, uint32_t *const *mac) {
+/* S plans with identical nb; raw: plain SHA-256 (k = sha_iv_key, no outer hash) */
+JWT_INLINE void ce_hmac(int S, int raw, const jwt_key_t *k, const hplan_t *const *p, uint32_t *const *mac) {
     uint32x4_t st0[4], st1[4], m[4][4];
     uint32x4_t ih0 = vld1q_u32(k->ih), ih1 = vld1q_u32(k->ih + 4);
     for (int s = 0; s < S; s++) st0[s] = ih0, st1[s] = ih1;
@@ -606,6 +781,10 @@ JWT_INLINE void ce_hmac(int S, const jwt_key_t *k, const hplan_t *const *p, uint
         }
         ce_compress(S, st0, st1, m);
     }
+    if (raw) {
+        for (int s = 0; s < S; s++) vst1q_u32(mac[s], st0[s]), vst1q_u32(mac[s] + 4, st1[s]);
+        return;
+    }
     const uint32_t pad2[4] = {0x80000000u, 0, 0, 0}, pad3[4] = {0, 0, 0, (64 + 32) * 8};
     for (int s = 0; s < S; s++) {
         m[s][0] = st0[s], m[s][1] = st1[s], m[s][2] = vld1q_u32(pad2), m[s][3] = vld1q_u32(pad3);
@@ -615,14 +794,14 @@ JWT_INLINE void ce_hmac(int S, const jwt_key_t *k, const hplan_t *const *p, uint
     for (int s = 0; s < S; s++) vst1q_u32(mac[s], st0[s]), vst1q_u32(mac[s] + 4, st1[s]);
 }
 
-static void ce_drive(int S, const jwt_key_t *k, int n, const uint8_t *const *msg, const int *len,
-                     uint32_t (*mac)[8]) {
+JWT_INLINE void ce_drive_x(int S, int raw, const jwt_key_t *k, int n, const uint8_t *const *msg, const int *len,
+                          uint32_t (*mac)[8]) {
     enum { CH = 64 };
     hplan_t plan[CH];
     const hplan_t *pp[CH];
     for (int base = 0; base < n; base += CH) {
         int m = n - base < CH ? n - base : CH;
-        for (int i = 0; i < m; i++) hplan_init(&plan[i], msg[base + i], len[base + i]);
+        for (int i = 0; i < m; i++) hplan_init_off(&plan[i], msg[base + i], len[base + i], raw ? 0 : 64);
         for (int i = 0; i < m; i++) { /* sort by nb so groups of S share a block count */
             const hplan_t *p = &plan[i];
             int j = i;
@@ -638,14 +817,20 @@ static void ce_drive(int S, const jwt_key_t *k, int n, const uint8_t *const *msg
             uint32_t *out[4];
             for (int i = 0; i < s; i++) out[i] = mac[base + (int)(pp[g + i] - plan)];
             switch (s) { /* constant S per call so ce_hmac fully specialises */
-            case 4: ce_hmac(4, k, pp + g, out); break;
-            case 3: ce_hmac(2, k, pp + g, out); ce_hmac(1, k, pp + g + 2, out + 2); break;
-            case 2: ce_hmac(2, k, pp + g, out); break;
-            default: ce_hmac(1, k, pp + g, out); break;
+            case 4: ce_hmac(4, raw, k, pp + g, out); break;
+            case 3: ce_hmac(2, raw, k, pp + g, out); ce_hmac(1, raw, k, pp + g + 2, out + 2); break;
+            case 2: ce_hmac(2, raw, k, pp + g, out); break;
+            default: ce_hmac(1, raw, k, pp + g, out); break;
             }
             g += s;
         }
     }
+}
+static void ce_drive(int S, const jwt_key_t *k, int n, const uint8_t *const *msg, const int *len, uint32_t (*mac)[8]) {
+    ce_drive_x(S, 0, k, n, msg, len, mac);
+}
+void jwt_sha256_sha2(int n, const uint8_t *const *msg, const int *len, uint32_t (*dig)[8]) {
+    ce_drive_x(4, 1, &sha_iv_key, n, msg, len, dig);
 }
 
 void jwt_hmac_sha2_1(const jwt_key_t *k, int n, const uint8_t *const *msg, const int *len, uint32_t (*mac)[8]) {
@@ -663,6 +848,7 @@ void jwt_hmac_sha2_2(const jwt_key_t *k, int n, const uint8_t *const *msg, const
 void jwt_hmac_sha2_4(const jwt_key_t *k, int n, const uint8_t *const *msg, const int *len, uint32_t (*mac)[8]) {
     ce_drive(4, k, n, msg, len, mac);
 }
+JWT_END_SHA2
 #endif /* SHA2 */
 
 /* ======================================================================================
@@ -756,7 +942,8 @@ int jwt_b64url_decode(uint8_t *dst, const char *src, int n) {
     int r = b64u_tail(dst + o, src + i, n - i);
     return r < 0 ? -1 : o + r;
 }
-#elif defined(__AVX2__)
+#elif defined(JWT_X86)
+JWT_BEGIN_AVX2
 /* 32 chars -> 24 bytes (Muła/Lemire packing; base64url translation via range compares).
  * Stores 32 bytes per block: dst needs the 32 bytes of slack jwt.h asks for. */
 JWT_INLINE __m256i avx2_b64_32(const char *src, uint8_t *dst) {
@@ -781,7 +968,7 @@ JWT_INLINE __m256i avx2_b64_32(const char *src, uint8_t *dst) {
     _mm256_storeu_si256((__m256i *)dst, x);
     return _mm256_xor_si256(ok, _mm256_set1_epi8(-1)); /* 0xFF where invalid */
 }
-int jwt_b64url_decode(uint8_t *dst, const char *src, int n) {
+static int b64url_decode_avx2(uint8_t *dst, const char *src, int n) {
     int i = 0, o = 0;
     __m256i bad = _mm256_setzero_si256();
     for (; i + 32 <= n; i += 32, o += 24) bad = _mm256_or_si256(bad, avx2_b64_32(src + i, dst + o));
@@ -797,6 +984,10 @@ int jwt_b64url_decode(uint8_t *dst, const char *src, int n) {
     int r = b64u_tail(dst + o, src + i, n - i);
     return r < 0 ? -1 : o + r;
 }
+JWT_END_TARGET
+int jwt_b64url_decode(uint8_t *dst, const char *src, int n) {
+    return jwt_cpu() & JWT_CPU_AVX2 ? b64url_decode_avx2(dst, src, n) : jwt_b64url_decode_scalar(dst, src, n);
+}
 #else
 int jwt_b64url_decode(uint8_t *dst, const char *src, int n) { return jwt_b64url_decode_scalar(dst, src, n); }
 #endif
@@ -805,7 +996,7 @@ int jwt_b64url_decode(uint8_t *dst, const char *src, int n) { return jwt_b64url_
  * 4. strict JSON
  *
  * Grammar is RFC 8259 exactly (no comments, no trailing commas, no NaN, UTF-8 validated
- * inside strings, nesting depth <= 32).  Choices for claims (see RESULTS.md):
+ * inside strings, nesting depth <= 32).  Choices for claims (see README.md):
  *   - a repeated sub / username / exp / nbf (or alg in the header) -> INVALID (JSON.parse would
  *     silently take the last one; we refuse to guess)
  *   - keys are compared after unescaping, so "sub" is "sub"
@@ -1102,8 +1293,8 @@ JWT_INLINE int jkey(const uint8_t *s, int n, int esc) {
     }
 }
 
-/* Header: an object whose "alg" is exactly "HS256". */
-static int header_ok(const uint8_t *h, int n) {
+/* Header: an object whose "alg" is exactly `want` (5 characters, e.g. "HS256"). */
+static int header_ok(const uint8_t *h, int n, const char *want) {
     jcur_t c = {h, h + n};
     const uint8_t *s;
     int len, esc, alg = 0;
@@ -1125,7 +1316,7 @@ static int header_ok(const uint8_t *h, int n) {
                 len = junescape(v, sizeof v, s, len);
                 s = v;
             }
-            if (len != 5 || memcmp(s, "HS256", 5)) return 0;
+            if (len != 5 || memcmp(s, want, 5)) return 0;
         } else if (!jskip(&c, 1)) {
             return 0;
         }
@@ -1243,8 +1434,8 @@ static int payload_check(const uint8_t *pl, int n, const jnow_t *now, jwt_result
  * operators, opening quotes and the first byte of each scalar.  Stage 2 walks those bits once,
  * checking the object grammar and the claims as it goes.
  *
- * Opt-in (-DJWT_FAST_JSON): on the real Xeon it measured 3-4% slower end to end than the strict
- * parser (exp21), and a wash on the M5, so the strict parser is the default.
+ * Opt-in (-DJWT_FAST_JSON): on a Xeon Platinum 8260 it measured 3-4% slower end to end than the
+ * strict parser, and a wash on an Apple M5, so the strict parser is the default.
  *
  * It covers only the common subset: <= 256 bytes, ASCII, no backslashes, no nested containers,
  * no control characters.  Anything else, including anything malformed, returns -1 and the strict
@@ -1446,12 +1637,12 @@ static int payload_fast(const uint8_t *pl, int n, const jnow_t *now, jwt_result_
 /* ======================================================================================
  * 4c. shape-matched fast path (default; -DJWT_NO_SHAPE_JSON turns it off)
  *
- * The spec defines the payload as {"sub":"<id>","username":"<name>","iat":<n>,"exp":<n>}, and every
- * token the challenge mints (seed/generate.mjs, test.sh) is JSON.stringify output in exactly that
- * order with no whitespace.  This matcher accepts only that exact byte shape: literal separators,
+ * The common payload is {"sub":"<id>","username":"<name>","iat":<n>,"exp":<n>}, and minting code
+ * (JSON.stringify, Python's json.dumps with compact separators, ...) emits exactly that order with
+ * no whitespace.  This matcher accepts only that exact byte shape: literal separators,
  * ASCII digits, a username with no '"', '\\', control or non-ASCII bytes, integers without leading
  * zeros.  Anything else, a reordered or extra claim included, returns -1 and the strict parser
- * decides, so results are identical for every input (test.c fuzzes the two against each other).
+ * decides, so results are identical for every input (tests/test_jwt.c fuzzes the two against each other).
  * Needs 16 readable bytes past n (padded decode buffers).
  * ====================================================================================== */
 
@@ -1539,7 +1730,7 @@ static int payload_shape(const uint8_t *pl, int n, const jnow_t *now, jwt_result
  * zeros, malformed) is flagged and goes to the strict parser instead.  Cost is per batch, not per
  * token: it only pays when batches are large.
  *
- * Opt-in (-DJWT_LANE_JSON), NOT recommended: on the real Xeon (exp24) a 32-lane batch costs ~3 us of
+ * Opt-in (-DJWT_LANE_JSON), NOT recommended: on a Xeon Platinum 8260 a 32-lane batch costs ~3 us of
  * JSON (93 ns/token at batch 32) vs 35 ns/token for the shape matcher at any batch size.
  * ====================================================================================== */
 #define JL_MAXN 240 /* byte positions must fit in a byte lane */
@@ -1757,6 +1948,23 @@ static int json_lane_claims(const uint8_t *pl, const jlane_t *o, const jnow_t *n
 
 static const char canon_hdr[] = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"; /* {"alg":"HS256","typ":"JWT"} */
 
+/* Payload of a token whose signature checked out: base64url-decode, JSON, claims -> r->status. */
+static void claims_one(jwt_result_t *r, const uint8_t *p64, int n64, const jnow_t *jn) {
+    uint8_t pb[JWT_TOKEN_MAX * 3 / 4 + 64];
+    int pn = jwt_b64url_decode(pb, (const char *)p64, n64);
+    if (pn < 0) return;
+#if defined(JWT_FAST_JSON) /* opt-in: measured 3-4% slower end to end on a Xeon Platinum 8260 */
+    int st = payload_fast(pb, pn, jn, r);
+#elif !defined(JWT_NO_SHAPE_JSON) /* default: JSON 131 -> 37 ns/token on a Xeon Platinum 8260 */
+    int st = payload_shape(pb, pn, jn, r);
+#else
+    int st = -1;
+#endif
+    if (st < 0) st = payload_check(pb, pn, jn, r);
+    r->status = (uint8_t)st;
+    if (r->status != JWT_OK) r->uid = 0, r->username_len = 0, r->ubuf[0] = 0;
+}
+
 static void verify_impl(const jwt_key_t *k, int n, const char *const *tok, const int *len, int64_t now,
                         jwt_result_t *out, jwt_hmac_fn *hmac) {
     enum { CH = 64 };
@@ -1783,7 +1991,7 @@ static void verify_impl(const jwt_key_t *k, int n, const char *const *tok, const
             if (!(hl == 36 && !memcmp(t, canon_hdr, 36))) {
                 uint8_t hb[JWT_TOKEN_MAX * 3 / 4 + 64];
                 int hn = jwt_b64url_decode(hb, t, hl);
-                if (hn < 0 || !header_ok(hb, hn)) continue;
+                if (hn < 0 || !header_ok(hb, hn, "HS256")) continue;
             }
             uint8_t sb[64];
             if (jwt_b64url_decode(sb, d2 + 1, 43) != 32) continue;
@@ -1836,20 +2044,7 @@ static void verify_impl(const jwt_key_t *k, int n, const char *const *tok, const
 #endif
         for (int g = 0; g < ng; g++) {
             int j = good[g];
-            jwt_result_t *r = &out[base + idx[j]];
-            uint8_t pb[JWT_TOKEN_MAX * 3 / 4 + 64];
-            int pn = jwt_b64url_decode(pb, (const char *)msg[j] + poff[j], mlen[j] - poff[j]);
-            if (pn < 0) continue;
-#if defined(JWT_FAST_JSON) /* opt-in: measured 3-4% slower end to end on the Xeon (exp21) */
-            int st = payload_fast(pb, pn, &jn, r);
-#elif !defined(JWT_NO_SHAPE_JSON) /* default: JSON 131 -> 37 ns/token on the Xeon (exp24) */
-            int st = payload_shape(pb, pn, &jn, r);
-#else
-            int st = -1;
-#endif
-            if (st < 0) st = payload_check(pb, pn, &jn, r);
-            r->status = (uint8_t)st;
-            if (r->status != JWT_OK) r->uid = 0, r->username_len = 0, r->ubuf[0] = 0;
+            claims_one(&out[base + idx[j]], msg[j] + poff[j], mlen[j] - poff[j], &jn);
         }
     }
 }
@@ -1864,36 +2059,81 @@ void jwt_verify_batch_neon(const jwt_key_t *k, int n, const char *const *tok, co
     verify_impl(k, n, tok, len, now, out, jwt_hmac_neon);
 }
 #endif
-#if defined(__ARM_FEATURE_SHA2)
+#if defined(JWT_ARM_SHA2)
 void jwt_verify_batch_sha2(const jwt_key_t *k, int n, const char *const *tok, const int *len, int64_t now,
                            jwt_result_t *out) {
     verify_impl(k, n, tok, len, now, out, jwt_hmac_sha2);
 }
 #endif
-#if defined(__AVX2__)
+#if defined(JWT_X86)
 void jwt_verify_batch_avx2(const jwt_key_t *k, int n, const char *const *tok, const int *len, int64_t now,
                            jwt_result_t *out) {
     verify_impl(k, n, tok, len, now, out, jwt_hmac_avx2);
 }
-#endif
-#if defined(JWT_AVX512) && defined(__AVX512VL__)
 void jwt_verify_batch_avx512(const jwt_key_t *k, int n, const char *const *tok, const int *len, int64_t now,
                              jwt_result_t *out) {
     verify_impl(k, n, tok, len, now, out, jwt_hmac_avx512);
 }
 #endif
 
-void jwt_verify_batch(const jwt_key_t *k, int n, const char *const *tok, const int *len, int64_t now,
-                      jwt_result_t *out) {
-#if defined(__ARM_FEATURE_SHA2)
-    verify_impl(k, n, tok, len, now, out, jwt_hmac_sha2);
-#elif defined(JWT_AVX512) && defined(__AVX512VL__)
-    verify_impl(k, n, tok, len, now, out, jwt_hmac_avx512);
-#elif defined(__AVX2__)
-    verify_impl(k, n, tok, len, now, out, jwt_hmac_avx2);
-#elif defined(JWT_HAVE_NEON)
-    verify_impl(k, n, tok, len, now, out, jwt_hmac_neon);
+/* the best engine this CPU has (run-time dispatch; see the top of the file) */
+static jwt_hmac_fn *hmac_default(void) {
+    unsigned f = jwt_cpu();
+    (void)f;
+#if defined(JWT_ARM_SHA2)
+    if (f & JWT_CPU_SHA2) return jwt_hmac_sha2;
+#endif
+#if defined(JWT_X86)
+    if (f & JWT_CPU_AVX512VL) return jwt_hmac_avx512;
+    if (f & JWT_CPU_AVX2) return jwt_hmac_avx2;
+#endif
+#if defined(JWT_HAVE_NEON)
+    return jwt_hmac_neon;
 #else
-    verify_impl(k, n, tok, len, now, out, jwt_hmac_scalar);
+    return jwt_hmac_scalar;
 #endif
 }
+static jwt_sha256_fn *sha256_default(void) {
+    unsigned f = jwt_cpu();
+    (void)f;
+#if defined(JWT_ARM_SHA2)
+    if (f & JWT_CPU_SHA2) return jwt_sha256_sha2;
+#endif
+#if defined(JWT_X86)
+    if (f & JWT_CPU_AVX512VL) return jwt_sha256_avx512;
+    if (f & JWT_CPU_AVX2) return jwt_sha256_avx2;
+#endif
+#if defined(JWT_HAVE_NEON)
+    return jwt_sha256_neon;
+#else
+    return jwt_sha256_scalar;
+#endif
+}
+const char *jwt_engine(void) {
+    jwt_hmac_fn *h = hmac_default();
+#if defined(JWT_ARM_SHA2)
+    if (h == jwt_hmac_sha2) return "sha2";
+#endif
+#if defined(JWT_X86)
+    if (h == jwt_hmac_avx512) return "avx512vl";
+    if (h == jwt_hmac_avx2) return "avx2";
+#endif
+#if defined(JWT_HAVE_NEON)
+    if (h == jwt_hmac_neon) return "neon";
+#endif
+    return "scalar";
+}
+
+void jwt_verify_batch(const jwt_key_t *k, int n, const char *const *tok, const int *len, int64_t now,
+                      jwt_result_t *out) {
+    verify_impl(k, n, tok, len, now, out, hmac_default());
+}
+
+/* plain SHA-256 of n messages on the default engine (the RS256 / ES256 signing inputs) */
+void jwt_sha256_batch(int n, const uint8_t *const *msg, const int *len, uint32_t (*dig)[8]) {
+    sha256_default()(n, msg, len, dig);
+}
+
+#ifdef JWT_PK
+#include "jwt_pk.inc"
+#endif

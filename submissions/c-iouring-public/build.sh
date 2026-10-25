@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # build.sh — builds bin/server as a normal user.
 #   1. SQLite 3.54.1: the pinned amalgamation (sha256-checked) plus our patches (config/cursed.sh picks which)
-#   2. the HTTP parser, generated from the API spec (gen/)
-#   3. the server, with PGO: an instrumented build trains on a synthetic database (no seed data), then the final
+#   2. our HTTP parser and JWT libraries, vendored in third_party/ at pinned commits: checked against third_party/PINS
+#   3. the HTTP parser, generated from the API spec (gen/) on top of the parser library's fastparse.h
+#   4. the server, with PGO: an instrumented build trains on a synthetic database (no seed data), then the final
 #      build uses that profile. Any PGO failure falls back to a plain -O3 build. PGO=0 skips it.
 # Build-time options (parsers, how cursed the SQLite side is) are documented in config/*.sh and the README.
 set -euo pipefail
@@ -48,10 +49,17 @@ if [ "$(cat deps/sqlite/STAMP 2> /dev/null)" != "$stamp" ]; then
   echo "$stamp" > deps/sqlite/STAMP
 fi
 
-# 2. the HTTP parser
+# 2. our parser and JWT libraries (third_party/, re-vendored with tools/sync-libs.sh): the copies must match PINS
+while read -r lib commit sum; do
+  got=$(cd "third_party/$lib" && find . -type f | LC_ALL=C sort | while read -r f; do sha256 "$f"; done | sha256 | cut -d' ' -f1)
+  [ "$got" = "$sum" ] || { log "third_party/$lib differs from its pin (${commit:0:12}): run tools/sync-libs.sh"; exit 1; }
+done < third_party/PINS
+log "libraries: $(awk '{ printf "%s%s %.7s", (NR > 1 ? ", " : ""), $1, $2 }' third_party/PINS)"
+
+# 3. the HTTP parser
 generate_parser build
 
-# 3. the server
+# 4. the server
 plain() {
   log "plain -O3 build"
   compile_units build deps/sqlite $ARCH -O3 && link_server build bin/server $ARCH -O3

@@ -60,7 +60,7 @@
 #undef APP_LANE_PARSE
 #define APP_LANE_PARSE (APP_FAST == 2)
 #if APP_LANE_PARSE
-#include "bp.h"
+#include "batchparse.h"
 #else
 #include BP_HTTP_H
 #endif

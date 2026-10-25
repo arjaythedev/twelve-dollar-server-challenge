@@ -13,17 +13,19 @@
 #     src/engine_public.c  engine.h over sqlite3.h only; check_public_api fails the build on any other SQLite symbol
 #   both
 #     src/unit_body.c      components/body.c (own unit: its static helpers share names with jwt.c's)
-#     src/unit_server.c    everything else: loop, JWT, parsers, app, main
+#     src/unit_server.c    everything else: loop, JWT (third_party/cursed-jwt), parsers (third_party/cursed-http-parser + the generated one), app, main
 # WARN adds warning flags (tools/dev.sh: -Wall); format errors are always fatal. REUSE_SQLITE=1 keeps an existing
 # sqlite.o built from the same SQLite directory (dev only: that unit is ~30-100 s to compile).
 
-INCLUDES="-Isrc -Icomponents -Ithird_party/parsers/pico"
+# third_party/cursed-http-parser and third_party/cursed-jwt: our libraries, vendored at pinned commits (PINS)
+HP=third_party/cursed-http-parser
+INCLUDES="-Isrc -Icomponents -I$HP/include -I$HP/vendor/pico -Ithird_party/cursed-jwt/include"
 
 generate_parser() {
-  python3 gen/httpgen.py gen gen/spec.json --base components/http.h -o "$1/http_gen.h" \
+  python3 $HP/gen/httpgen.py gen gen/spec.json --base $HP/include/fastparse.h -o "$1/http_gen.h" \
     --profile gen/profile_mload.json > /dev/null && return 0
-  echo "parser generator failed: using components/http.h" >&2
-  cp components/http.h "$1/http_gen.h"
+  echo "parser generator failed: using the library's fastparse.h" >&2
+  cp $HP/include/fastparse.h "$1/http_gen.h"
 }
 
 compile_units() {
@@ -50,6 +52,10 @@ compile_units() {
   fi
   $cc "$@" $warn $INCLUDES -c src/unit_body.c -o "$out/body.o" || return 1
   $cc "$@" $warn $APPOPTS $INCLUDES -I"$out" -c src/unit_server.c -o "$out/server.o" || return 1
+  if [ -n "${JWT_ASM:-}" ]; then # OpenSSL's x86-64 SHA-256 block function, cursed-jwt's batch-1 path (sqlite.sh)
+    $cc "$@" -c "$JWT_ASM" -o "$out/jwt_sha256.o" || return 1
+    EXTRA_OBJS="$EXTRA_OBJS $out/jwt_sha256.o"
+  fi
   parser_objs "$out" "$@" || return 1
   if [ "${SQLITE_LINK:-unity}" = separate ]; then check_public_api "$sq" "$out/engine.o" "$out/server.o"; fi
 }

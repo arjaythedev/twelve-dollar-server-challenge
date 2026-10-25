@@ -11,8 +11,11 @@ if [ "$(uname -s)" = Linux ]; then
   SQLOPTS="$SQLOPTS -DHAVE_FDATASYNC=1"
 fi
 
-# JWT: the receive buffers are padded (LOOP_SLACK), and the AVX-512VL ymm engine is used where the CPU has it (exp2).
+# JWT (cursed-jwt): the receive buffers are padded (LOOP_SLACK). The library picks its SHA-256 engine at run time
+# (AVX-512VL, AVX2, ARMv8 SHA2, NEON or scalar); on x86-64 Linux, single tokens use OpenSSL's block function.
 APPOPTS="-DJWT_INPUT_PADDED"
-if grep -qw avx512vl /proc/cpuinfo 2> /dev/null; then
-  APPOPTS="$APPOPTS -DJWT_AVX512"
+JWT_ASM=""
+if [ "$(uname -s)" = Linux ] && [ "$(uname -m)" = x86_64 ]; then
+  APPOPTS="$APPOPTS -DJWT_OSSL_SHA256"
+  JWT_ASM=third_party/cursed-jwt/src/sha256_x86_64_ossl.S
 fi

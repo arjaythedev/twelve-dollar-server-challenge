@@ -1,4 +1,3 @@
-/* picohttpparser, unmodified upstream (see COMMIT); sha256 648068971199. */
 /*
  * Copyright (c) 2009-2014 Kazuho Oku, Tokuhiro Matsuno, Daisuke Murase,
  *                         Shigeo Mitsunari

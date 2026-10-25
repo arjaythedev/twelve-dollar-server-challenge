@@ -1,8 +1,7 @@
-# parser/gen/httpgen.py, developed separately for this entry.
 #!/usr/bin/env python3
-"""httpgen: generate the API-specific part of http.h from an API spec, optionally profile-guided.
+"""httpgen: generate the API-specific part of fastparse.h from an API spec, optionally profile-guided.
 
-  httpgen.py gen SPEC.json --base ../http.h -o http_gen.h [--profile PROFILE.json]
+  httpgen.py gen SPEC.json --base include/fastparse.h -o fastparse_gen.h [--profile PROFILE.json]
   httpgen.py profile SPEC.json CAPTURE > PROFILE.json
 
 `gen` copies --base and replaces the region between "==== BEGIN API SPEC ====" and
@@ -243,7 +242,7 @@ def cmd_gen(argv):
     i, j = base.index("// ==== BEGIN API SPEC ===="), base.index("// ==== END API SPEC ====")
     j = base.index("\n", j) + 1
     out = base[:i] + gen_spec_region(spec, routes, prof) + base[j:]
-    out = out.replace("// http.h - HTTP/1.1 request parser", "// http_gen.h (GENERATED from " + a.spec.split("/")[-1] + (" + " + a.profile.split("/")[-1] if a.profile else "") + " by gen/httpgen.py) - HTTP/1.1 request parser", 1)
+    out = out.replace("// fastparse.h - SIMD fast-path HTTP/1.1 request parser", "// fastparse_gen.h (GENERATED from " + a.spec.split("/")[-1] + (" + " + a.profile.split("/")[-1] if a.profile else "") + " by gen/httpgen.py) - SIMD fast-path HTTP/1.1 request parser", 1)
     open(a.o, "w").write(out)
 
 

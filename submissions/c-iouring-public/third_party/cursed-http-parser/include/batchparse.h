@@ -1,37 +1,42 @@
-/* batch-parse/bp.h (sha256 45b4ce352957), developed separately for this entry. */
-// bp.h - lane-parallel HTTP request parsing: N requests from N different connections at once.
-// Builds on explore/parser/http.h (included, never modified): every lane returns exactly what
-// fast_parse() returns for that buffer (same ret, same req_t), including NEED_MORE / FALLBACK.
+// batchparse.h - lane-parallel HTTP request parsing: N requests from N different connections at once.
+// Part of cursed-http-parser. MIT licence, see LICENSE.
+// Builds on fastparse.h (included, never modified): every lane returns exactly what fast_parse()
+// returns for that buffer (same ret, same req_t), including NEED_MORE / FALLBACK.
 //
 //   const char *buf[n]; int len[n];  req_t out[n]; int ret[n];
 //   bp_parse(n, buf, len, out, ret);    // ret[i] = fast_parse(buf[i], len[i], &out[i]), any n >= 0
 //
-// Same padding contract as http.h: >= 64 readable bytes after buf[i][len[i]]. Lanes may alias.
+// Same padding contract as fastparse.h: >= 64 readable bytes after buf[i][len[i]]. Lanes may alias.
 //
-// How (details in RESULTS.md):
-//   A. request line, W lanes per vector: the first 24 bytes of W requests are gathered into u64
-//      lanes (vpgatherqq with a NULL base: the "index" is the pointer itself), compared against every
-//      canonical route prefix at once, the id digits of all lanes are counted (psadbw / vplzcntq) and
-//      converted (pmaddubsw -> pmaddwd -> pmuludq), and a second gather at the per-lane offset
-//      p + ndigits checks the " HTTP/1.1\r\n" / "/like HTTP/1.1\r\n" tails. Out: route, l0, id.
+// How (details in README.md):
+//   A. request line of every lane: by default fastparse.h's own fp_reqline_canon per lane. The vector
+//      variants gather the first 24 bytes of W requests into u64 lanes (vpgatherqq with a NULL base: the
+//      "index" is the pointer itself), compare them against every canonical route prefix at once, count
+//      the id digits of all lanes (psadbw / vplzcntq), convert them (pmaddubsw -> pmaddwd -> pmuludq), and
+//      check the " HTTP/1.1\r\n" / "/like HTTP/1.1\r\n" tails with a second gather at the per-lane offset
+//      p + ndigits. Out: route, l0, id.
 //   B. lanes are bucketed by route class (GET / POST / non-canonical) with branch-free appends, so
 //      every per-lane loop below runs one route shape only (predictable branches over a random mix).
-//   C. GET lanes: http.h's fp_quick_get claims the trivial case (end within 128 B, nothing for the cand
-//      core to look at); POST lanes and every declined GET lane run http.h's own core with l0 known
-//      (FP_CORE_L); non-canonical lanes run fast_parse. Needs http.h >= 049a66bdf1d9 (fp_quick_get).
-//      No header rule lives here, so every lane is identical by construction.
+//   C. GET lanes: fastparse.h's fp_quick_get claims the trivial case (end within 128 B, nothing for the
+//      cand core to look at); POST lanes and every declined GET lane run fastparse.h's own core with l0
+//      known (FP_CORE_L); non-canonical lanes run fast_parse. No header rule lives here, so every lane is
+//      identical by construction.
 //
 // Phase A backends (BP_RL_*), chosen per call site so one binary can benchmark them all:
-//   BP_RL_C       portable scalar-per-lane, branch-free (the reference)
-//   BP_RL_CANON   http.h's own fp_reqline_canon per lane (branchy; THE DEFAULT: fastest on the Xeon)
+//   BP_RL_CANON   fastparse.h's own fp_reqline_canon per lane (branchy; THE DEFAULT: fastest on a Xeon
+//                 Platinum 8260, and the only one that follows any generated spec)
+//   BP_RL_C       portable scalar-per-lane, branch-free
 //   BP_RL_AVX2    4 lanes / ymm, vpgatherqq                       (needs -mavx2)
 //   BP_RL_AVX2I   4 lanes / ymm, loads + vpinsrq instead of gathers
 //   BP_RL_Z       8 lanes / zmm, AVX-512F/BW/CD: k-mask compares, masked gathers, vplzcntq.
 //                 -DBP_AVX512 (+ -march=cascadelake); -DBP_AVX512_EMU runs
 //                 the same code on plain-C stand-ins (bp_emu512.h) for logic testing anywhere.
+// BP_RL_C, _AVX2, _AVX2I and _Z are hand-specialised to the example spec's routes (gen/example_spec.json).
+// For any other spec, build with -DBP_CANON_ONLY: those variants are left out and every BP_RL_* value
+// runs BP_RL_CANON.
 #pragma once
 #ifndef BP_HTTP_H
-#define BP_HTTP_H "../parser/http.h"
+#define BP_HTTP_H "fastparse.h"
 #endif
 #include BP_HTTP_H
 
@@ -39,10 +44,13 @@
 
 enum { BP_RL_C = 0, BP_RL_AVX2 = 1, BP_RL_AVX2I = 2, BP_RL_Z = 3, BP_RL_CANON = 4 };
 
-#if defined(__AVX2__)
+#if defined(BP_CANON_ONLY)
+// vector request-line variants left out (see the top of this file)
+#elif defined(__AVX2__)
 #define BP_HAVE_AVX2 1
 #endif
-#if defined(BP_AVX512_EMU)
+#if defined(BP_CANON_ONLY)
+#elif defined(BP_AVX512_EMU)
 #include "bp_emu512.h"
 #define BP_HAVE_Z 1
 #define BP_ZTAG " (C-emulated)"
@@ -58,12 +66,13 @@ enum { BP_RL_C = 0, BP_RL_AVX2 = 1, BP_RL_AVX2I = 2, BP_RL_Z = 3, BP_RL_CANON = 
 #include <immintrin.h>
 #endif
 
-// default phase-A backend for bp_parse(): canon on every platform. On the real Xeon (exp5) it beat the
+// default phase-A backend for bp_parse(): canon on every platform. On a Xeon Platinum 8260 it beat the
 // AVX2 gather/insert and zmm variants at every batch size; those stay selectable (bp_parse_rl / -DBP_RL_DEFAULT).
 #ifndef BP_RL_DEFAULT
 #define BP_RL_DEFAULT BP_RL_CANON
 #endif
 
+#ifndef BP_CANON_ONLY
 // constants of the canonical request lines (as fp_reqline_canon)
 #define BP_C8(s) ((uint64_t)fp_c8(s, sizeof(s) - 1))
 #define BP_GETFEE  BP_C8("GET /fee")
@@ -84,6 +93,10 @@ enum { BP_RL_C = 0, BP_RL_AVX2 = 1, BP_RL_AVX2I = 2, BP_RL_Z = 3, BP_RL_CANON = 
 // Output per lane: rt = route if canonical else 0 (R_NOTFOUND is never canonical), l0 = index of the
 // request line's LF (0 = not canonical), id = the id (0 unless GETPOST/LIKE). Exactly fp_reqline_canon.
 
+#if defined(__clang__)   // the & on comparisons below is deliberate (branch-free)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wbitwise-instead-of-logical"
+#endif
 // Portable reference: one lane, no branches on the data.
 FP_INLINE void bp_rl_c1(const char *b, int64_t *rt, int64_t *l0, int64_t *id) {
   uint64_t w0 = fp_ld64(b), w1 = fp_ld64(b + 8), w2 = fp_ld64(b + 16);
@@ -104,6 +117,9 @@ FP_INLINE void bp_rl_c1(const char *b, int64_t *rt, int64_t *l0, int64_t *id) {
   *l0 = F * 19 + C * 21 + Gk * (21 + n) + Lk * (27 + n);
   *id = (Gk | Lk) ? v : 0;
 }
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
 
 #ifdef BP_HAVE_AVX2
 // 4 lanes. gather = vpgatherqq of the u64 at pp[i] + off[i], NULL base (the index is the address);
@@ -210,10 +226,12 @@ FP_INLINE void bp_rl_z(const char *const *pp, int64_t *rt, int64_t *l0, int64_t 
 #undef ZS
 #endif
 
+#endif   // !BP_CANON_ONLY
+
 // ---------------- phase C: one GET lane's headers (canonical request line already known) ----------------
-// http.h's fp_quick_get claims the common shape (headers end within 128 B, CRLF-clean, nothing for the
-// cand core to look at) and returns hend, exactly what fast_parse returns; anything else runs http.h's
-// own core with l0 known (FP_CORE_L). The header rules live in http.h only (since 049a66bdf1d9).
+// fastparse.h's fp_quick_get claims the common shape (headers end within 128 B, CRLF-clean, nothing for the
+// cand core to look at) and returns hend, exactly what fast_parse returns; anything else runs fastparse.h's
+// own core with l0 known (FP_CORE_L). The header rules live in fastparse.h only.
 FP_INLINE int bp_get2(const char *b, int len, req_t *r, int l0) {
   int h = fp_quick_get(b, len, FP_BACKEND != 0);
   if (FP_LIKELY(h > 0)) { r->body_off = h; r->body_len = 0; return h; }
@@ -227,7 +245,15 @@ static bp_stats_t bp_stats;              // optional counters (BP_STATS)
 
 FP_INLINE void bp_chunk(int n, const char *const *buf, const int *len, req_t *out, int *ret, const int rl) {
   const char *P[BP_CHUNK + 8]; int64_t rt[BP_CHUNK + 8], l0[BP_CHUNK + 8], id[BP_CHUNK + 8];
-  int W = rl == BP_RL_Z ? 8 : (rl == BP_RL_C || rl == BP_RL_CANON) ? 1 : 4, nv = (n + W - 1) / W * W;
+  (void)rl;
+  int W = 1;   // lanes per phase-A step; a variant this build lacks runs per lane (BP_RL_C, or canon)
+#ifdef BP_HAVE_Z
+  if (rl == BP_RL_Z) W = 8;
+#endif
+#ifdef BP_HAVE_AVX2
+  if (rl == BP_RL_AVX2 || rl == BP_RL_AVX2I) W = 4;
+#endif
+  int nv = (n + W - 1) / W * W;
   for (int i = 0; i < n; i++) { P[i] = buf[i]; __builtin_prefetch(buf[i] + 64); }
   for (int i = n; i < nv; i++) P[i] = bp_dummy;
   // A. request lines
@@ -238,8 +264,10 @@ FP_INLINE void bp_chunk(int n, const char *const *buf, const int *len, req_t *ou
 #ifdef BP_HAVE_AVX2
     if (rl == BP_RL_AVX2 || rl == BP_RL_AVX2I) { bp_rl_avx2(P + i, rt + i, l0 + i, id + i, rl == BP_RL_AVX2); continue; }
 #endif
-    if (rl == BP_RL_CANON) { req_t t; l0[i] = fp_reqline_canon(P[i], &t); rt[i] = t.route; id[i] = t.id; continue; }
-    bp_rl_c1(P[i], rt + i, l0 + i, id + i);
+#ifndef BP_CANON_ONLY
+    if (rl != BP_RL_CANON) { bp_rl_c1(P[i], rt + i, l0 + i, id + i); continue; }
+#endif
+    { req_t t; l0[i] = fp_reqline_canon(P[i], &t); rt[i] = t.route; id[i] = t.id; }
   }
   // B. buckets: GET-shaped canonical, POST-shaped canonical, the rest (branch-free appends)
   int gl[BP_CHUNK], pl[BP_CHUNK], xl[BP_CHUNK], ng = 0, np = 0, nx = 0;
@@ -265,7 +293,7 @@ FP_INLINE void bp_chunk(int n, const char *const *buf, const int *len, req_t *ou
   for (int j = 0; j < np; j++) {
     int i = pl[j]; req_t *r = &out[i];
     r->route = (int)rt[i]; r->id = id[i]; r->id_ok = id[i] > 0; r->auth = 0; r->tok = 0; r->tok_len = 0;
-    int c = FP_CORE_L(buf[i], len[i], r, (int)l0[i]);   // http.h's own core: POST lanes walk every line
+    int c = FP_CORE_L(buf[i], len[i], r, (int)l0[i]);   // fastparse.h's own core: POST lanes walk every line
     ret[i] = c;
   }
 #ifdef BP_STATS

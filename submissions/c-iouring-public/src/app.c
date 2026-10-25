@@ -1,4 +1,4 @@
-// app.c — the API on top of loop.c (I/O), http_gen.h + bp.h (parsing), jwt.c (auth), body.c and engine.c (SQLite).
+// app.c — the API on top of loop.c (I/O), http_gen.h + batchparse.h (parsing), cursed-jwt (auth), body.c and engine.c (SQLite).
 //
 // One loop wakeup = one batch = one call of app_batch():
 //   1. PARSE     first request of every connection lane-parallel (bp_parse), pipelined rest with fast_parse;
@@ -35,7 +35,7 @@ const char *app_db_mode(void) {
   snprintf(m, sizeof m, "%s reads, %s VFS, %s checkpoints%s, %s locking, cache %d KiB, %s JWT, SQLite +%d patches (%s)",
            APP_DB_DIRECT ? "direct" : "SQL", APP_DB_VFS ? "cursed-wal" : "stock", ckpt,
            APP_DB_WAL_DROP ? " + WAL page drop" : "", locking, (int)APP_DB_CACHE_KIB,
-           APP_JWT_SCALAR ? "scalar" : "simd", (int)APP_SQLITE_NPATCH,
+           APP_JWT_SCALAR ? "scalar" : jwt_engine(), (int)APP_SQLITE_NPATCH,
            APP_SQLITE_LINK ? "separate unit, public API only" : "one unit with the engine");
   return m;
 }

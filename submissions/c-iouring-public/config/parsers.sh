@@ -1,7 +1,7 @@
 # parsers.sh — which HTTP parsers are compiled in. Sourced by build.sh and tools/dev.sh, after cursed.sh.
 #   PARSER_FAST  batch (default: bp_parse lanes + fast_parse) | single (fast_parse) | learn (fast_parse_learn)
 #                | slow (no fast path)
-#   PARSER_SLOW  fb (default: components/fbparse.h) | pico | llhttp | uws (C++) | hparse (needs zig 0.15)
+#   PARSER_SLOW  fb (default: cursed-http-parser's fbparse.h) | pico | llhttp | uws (C++) | hparse (needs zig 0.15)
 #                | httparse (needs rustc)
 # The default (batch + fb) is plain C and needs nothing beyond build-essential. The others live in
 # third_party/parsers/, each behind picohttpparser's phr_parse_request signature (third_party/parsers/adapters/).

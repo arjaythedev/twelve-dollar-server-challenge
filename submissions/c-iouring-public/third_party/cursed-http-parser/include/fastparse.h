@@ -1,35 +1,33 @@
-/* parser/http.h (sha256 3db1fb0cf380), developed separately for this entry. */
-// http.h - HTTP/1.1 request parser for the $12 server challenge API.
-// Port of ideas/fastparse.h fast_parse3 to aarch64 NEON, x86-64 AVX2, AVX-512BW/VL (opt-in with
-// -DFP_USE_AVX512; UNTESTED on real AVX-512 hardware) and a plain scalar fallback.
+// fastparse.h - SIMD fast-path HTTP/1.1 request parser for a known API (routes generated from a spec).
+// Part of cursed-http-parser. MIT licence, see LICENSE.
 //
-// Contract (as fast_parse3):
+// Backends: aarch64 NEON, x86-64 AVX2, AVX-512BW/VL (opt-in with -DFP_USE_AVX512, ymm by default,
+// -DFP_USE_ZMM for zmm) and a plain scalar fallback. Picked at compile time (FP_BACKEND, FP_BACKEND_NAME);
+// -DFP_FORCE_SCALAR forces scalar, -DFP_WALK_ONLY makes SIMD backends use core 2 only (an A/B knob).
+//
+// Contract:
 //   - the caller guarantees >= 64 readable bytes after buf[len] (contents ignored);
 //   - fast_parse() returns >0 = bytes consumed (headers + body), FP_NEED_MORE (0) or
-//     FP_FALLBACK (-1: unusual or invalid -> hand the request to a full parser);
+//     FP_FALLBACK (-1: unusual or invalid -> hand the request to a full parser, e.g. fbparse.h);
 //   - req_t.tok points into buf; body_off is relative to the buf pointer passed in.
 //   - fast_parse_many(): pipelined batch, see the bottom of this file.
 //   - fast_parse_learn(): same results, plus a fast path for the most common header layout per
 //     route, learned at runtime into a caller-owned fp_learn_t (see "learned header layout").
 //
-// Backend is picked at compile time (FP_BACKEND, FP_BACKEND_NAME); -DFP_FORCE_SCALAR forces scalar,
-// -DFP_WALK_ONLY makes SIMD backends use core 2 only (an A/B knob for x86, see RESULTS.md).
-//
 // Two cores, both always compiled and required to agree on every input:
 //   fp_core_cand  (SIMD backends): per 64-byte block, one ISA-specific classify step yields two
 //                 bitmasks: LF and "c/t" (case-folded). On GET routes only header lines starting with
 //                 c/t (Content-Length, Transfer-Encoding) are visited, found straight from the masks:
-//                 a k6 GET never touches a header line. POST routes (which need Authorization too)
+//                 a typical GET never touches a header line. POST routes (which need Authorization too)
 //                 walk every line start, like core 2; fast_parse() sends requests starting with
 //                 "POST" straight to core 2 (with the SIMD LF mask) since the c/t mask is wasted there.
 //   fp_core_walk  (scalar backend / fast_parse_scalar): LF mask only, then a walk over every line
 //                 start. Without SIMD the extra mask costs more than it saves.
 // Everything except the classify step is shared portable code (64-bit masks, SWAR words).
 //
-// Stable internal API: explore/batch-parse/bp.h builds on these. Don't change their signatures or meaning
-// without telling that session; `make test` here also runs its tests (make lockstep):
+// Stable internal API: batchparse.h builds on these, and `make test` runs its tests too:
 //   fp_quick_get, fp_reqline_canon, fp_route_auth, FP_CORE_L(b, len, r, l0), FP_BACKEND, FP_INLINE, FP_LIKELY,
-//   fp_ctz, fp_ld64, fp_c8, fp_nondigit, fp_swar8 (the last three only in bp's SIMD request-line variants).
+//   fp_ctz, fp_ld64, fp_c8, fp_nondigit, fp_swar8 (the last three only in batchparse's SIMD request-line variants).
 #pragma once
 #include <stdint.h>
 #include <string.h>
@@ -342,7 +340,7 @@ FP_INLINE int fp_eq(const char *a, const char *b, int n) { return memcmp(a, b, n
 // canonical request-line templates and three policy hooks. gen/httpgen.py regenerates exactly this
 // region from an API spec (+ optional traffic profile); the rest of the file is generic.
 enum { R_NOTFOUND, R_FEED, R_HEALTH, R_GETPOST, R_CREATE, R_LIKE, FP_NROUTES };
-#define FP_SPEC_NAME "hand-written (challenge API)"
+#define FP_SPEC_NAME "hand-written (example API)"
 // route needs the Authorization bearer token
 FP_INLINE int fp_route_auth(int route) { return route == R_CREATE || route == R_LIKE; }
 // before scanning: 1 = use the walk core (requests that will need Authorization: "POST")
@@ -350,7 +348,7 @@ FP_INLINE int fp_spec_walk(const char *b) { return fp_ld32(b) == 0x54534f50u; }
 // learned-layout fast path worth attempting for this route
 FP_INLINE int fp_spec_learn(int route) { (void)route; return 1; }
 
-// Routing (same semantics as fastparse.h fp_route).
+// Routing: methods and paths of the spec, first match wins.
 FP_INLINE void fp_route(const char *m, int ml, const char *p, int pl, req_t *r) {
   r->route = R_NOTFOUND; r->id_ok = 0; r->id = 0;
   if (ml == 3 && fp_eq(m, "GET", 3)) {
@@ -585,12 +583,12 @@ FP_INLINE int fp_core_walk_l(const char *b, int len, req_t *r, const int simd, i
   return hend + cl;
 }
 
-// Stable entry for callers that do their own request-line work (explore/batch-parse): the common GET
+// Stable entry for callers that do their own request-line work (batchparse.h): the common GET
 // shape in one shot. Precondition: the request line is canonical with a route that needs no Authorization
 // (fp_reqline_canon returned l0 > 0 and !fp_route_auth). Returns hend > 0 iff the headers end within the
 // first 128 bytes, the whole block is CRLF-clean (no bare CR, no bare-LF end) and no header line is one the
 // candidate core would look at (c/t/<= 0x20 start); fast_parse() then returns exactly hend with body_len 0.
-// Returns 0 otherwise: use fast_parse / FP_CORE_L. This keeps the header rules in http.h only.
+// Returns 0 otherwise: use fast_parse / FP_CORE_L. This keeps the header rules in fastparse.h only.
 FP_INLINE int fp_quick_get(const char *b, int len, const int simd) {
   const int lim = len < FP_MAXHDR ? len : FP_MAXHDR;
   if (lim > 128) return 0;
@@ -633,7 +631,6 @@ FP_INLINE int fp_core_simd(const char *b, int len, req_t *r, int l0c) {
 #define FP_CORE(b, len, r) FP_CORE_L(b, len, r, -1)
 static inline int fast_parse(const char *b, int len, req_t *r) { return FP_CORE(b, len, r); }
 static inline int fast_parse_scalar(const char *b, int len, req_t *r) { return fp_core_walk(b, len, r, 0); }
-static inline int fast_parse3(const char *b, int len, req_t *r) { return fast_parse(b, len, r); }   // old name
 
 // ---------------- learned header layout (opt-in: fast_parse_learn) ----------------
 // Per route, remember the most common header layout seen at runtime (majority vote): the LF positions

@@ -10,9 +10,9 @@ the same 42 checks. Everything is built from source on the box.
 |---|---|
 | Language / compiler | C11, gcc 13 (Ubuntu 24.04 `build-essential`), `-O3 -march=native`, PGO |
 | Database | SQLite **3.54.1** amalgamation, downloaded and sha256-pinned by `build.sh`, plus one small patch (below), compiled into the binary |
-| HTTP | own parsers: `components/http.h` (regenerated from `gen/spec.json` by `gen/httpgen.py`), `components/bp.h` (lane-parallel batch parsing) and `components/fbparse.h` (SIMD general parser with picohttpparser `465a7ff`'s API and identical validation) as the slow path; others selectable at build time (below) |
+| HTTP | our [cursed-http-parser](https://github.com/public/cursed-http-parser) at commit `3be7fd3` (MIT), vendored in `third_party/` and checked against its pin by `build.sh`: `fastparse.h` regenerated from `gen/spec.json` by its `gen/httpgen.py`, `batchparse.h` (lane-parallel batch parsing) and `fbparse.h` (SIMD general parser with picohttpparser `465a7ff`'s API and identical validation) as the slow path; others selectable at build time (below) |
 | Event loop | own, io_uring via raw syscalls (no liburing). Needs Linux ≥ 6.1; 6.8 is the target |
-| JWT | own HS256, AVX-512VL (ymm) 8-lane HMAC-SHA256 on CPUs with AVX-512VL, AVX2 otherwise |
+| JWT | our [cursed-jwt](https://github.com/public/cursed-jwt) at commit `6f92f71` (MIT), vendored in `third_party/` and checked against its pin by `build.sh`: batch HS256, multi-buffer HMAC-SHA256 with the engine picked at run time (AVX-512VL on ymm, AVX2, ARMv8 SHA2, NEON or scalar); on x86-64 Linux single tokens use OpenSSL's extracted SHA-256 block function (Apache-2.0, in that repo) |
 
 **Direct mode: no Nginx.** Listen on `HOST:PORT` (e.g. `0.0.0.0:80`).
 
@@ -67,8 +67,9 @@ In every mode, writes are prepared SQL `INSERT`s, one transaction covers each ba
 its `COMMIT`. The server prints the mode it was built with at startup.
 
 All 24 parser combinations pass the 42-check suite (Linux arm64, gcc 13; `tools/matrix.sh`). The default uses only
-`build-essential`. The optional parsers' sources are in `third_party/parsers/` (llhttp v9.4.3, uWebSockets v20.80.0, hparse
-`4fb3d83`, httparse v1.10.1, each with its licence), wrapped behind picohttpparser's `phr_parse_request` signature.
+`build-essential`. picohttpparser (`465a7ff`, MIT) comes with cursed-http-parser (`third_party/cursed-http-parser/vendor/pico`). The optional
+parsers' sources are in `third_party/parsers/` (llhttp v9.4.3, uWebSockets v20.80.0, hparse `4fb3d83`, httparse v1.10.1,
+each with its licence), wrapped behind picohttpparser's `phr_parse_request` signature.
 
 ## Runtime knobs
 `start.sh` sets none of these, so the scored server runs on the compiled defaults below. The table is generated from
@@ -149,14 +150,20 @@ the code by `tools/knobs.py`; the `CURSED_*` and `LOOP_TEST_*` variables exist f
 install.sh build.sh start.sh   the challenge's three entry points
 config/                        build time: compiler flags (sqlite.sh), how cursed (cursed.sh), which HTTP parsers
                                (parsers.sh), and the compile/link recipe (compile.sh)
-gen/                           the HTTP parser generator and the API spec it reads
+gen/                           the API spec and traffic profile the HTTP parser is generated from (the generator
+                               itself comes with cursed-http-parser)
 patches/sqlite/                our SQLite patches, applied by build.sh to the pinned amalgamation (one)
 src/                           run time, our glue: app.c (the batch pipeline), main.c (process setup), train.c (PGO
                                driver, build time only), config.h (every compile-time choice), unit_*.c (the three
                                translation units)
 components/                    our components, each from its own exploration: event loop (loop.c), SQLite engine
-                               (engine.c), POST body parser (body.c), JWT (jwt.c), HTTP parsers (http.h, bp.h, fbparse.h)
-third_party/parsers/           picohttpparser and the optional slow parsers, with their licences
+                               (engine.c), POST body parser (body.c)
+third_party/cursed-http-parser our HTTP parser library
+third_party/cursed-jwt         our JWT library. Each holds only the files the build needs, unchanged at the commit in
+                               third_party/PINS (repo, commit, sha256 over the copy); build.sh refuses to build if a
+                               copy differs. tools/sync-libs.sh re-vendors one from its repo and rewrites its pin
+third_party/parsers/           the optional slow parsers, with their licences
+deps/                          created by build.sh: the pinned SQLite amalgamation
 ```
 Everything in `src/` follows `.clang-format`. `components/` and `third_party/` are kept byte-identical to their
 sources, so they keep their owners' style.
@@ -172,7 +179,7 @@ One process, one thread: the event loop, which also runs the WAL checkpoints. Ev
 2. **Parse.** The parser matches the API's request lines from the first bytes and finds the headers it needs with
    SIMD masks. It's generated from the API spec; a traffic profile only orders the templates and enables paths, it
    contributes no bytes. When a wakeup has 8 or more connections, their first requests are parsed lane-parallel.
-   Anything unusual (HTTP/1.0, `Connection` headers, odd framing) goes to the general parser `components/fbparse.h`.
+   Anything unusual (HTTP/1.0, `Connection` headers, odd framing) goes to the general parser `fbparse.h` (cursed-http-parser).
 3. **Authenticate.** All Bearer tokens of the batch are verified in one multi-buffer HMAC call. Every signature is
    recomputed, and `exp` is required.
 4. **Database.** All requests of the batch run in one SQLite transaction (group commit), in arrival order:

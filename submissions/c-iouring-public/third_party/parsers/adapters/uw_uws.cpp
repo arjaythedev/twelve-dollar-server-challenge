@@ -10,7 +10,7 @@
 #include "../uws/src/HttpParser.h"
 #undef private
 extern "C" {
-#include "../pico/picohttpparser.h"
+#include "../../cursed-http-parser/vendor/pico/picohttpparser.h"
 
 static inline __attribute__((always_inline)) int uw_core(const char *buf, size_t len, const char **method, size_t *method_len,
     const char **path, size_t *path_len, int *minor, struct phr_header *headers, size_t *num_headers, int fence) {

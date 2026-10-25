@@ -4,7 +4,7 @@
 // and the pause position is the header length (what pico returns). The body is left to the logic.
 #include <stddef.h>
 #include "../llhttp/include/llhttp.h"
-#include "../pico/picohttpparser.h"
+#include "../../cursed-http-parser/vendor/pico/picohttpparser.h"
 
 typedef struct { llhttp_t p; const char *url; size_t url_len; struct phr_header *h; size_t nh, max; int field_open, overflow; } lx_t;
 

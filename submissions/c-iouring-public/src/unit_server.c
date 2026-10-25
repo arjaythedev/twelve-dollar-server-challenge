@@ -6,7 +6,7 @@
 #endif
 #define BP_HTTP_H "http_gen.h"  // the parser generated from the API spec (build/http_gen.h)
 #include "loop.c"
-#include "jwt.c"
+#include "../third_party/cursed-jwt/src/jwt.c"
 #if (defined(APP_SLOW) && APP_SLOW == 1) || defined(APP_PICO) || defined(APP_CHECK_SLOW)
 #include "picohttpparser.c"
 #endif

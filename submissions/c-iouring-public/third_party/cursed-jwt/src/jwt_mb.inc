@@ -1,4 +1,3 @@
-/* jwt/jwt_mb.inc (sha256 fc1162b151bb), developed separately for this entry. */
 /* jwt_mb.inc — multi-buffer HMAC-SHA256 "template", #included by jwt.c once per ISA.
  *
  * The includer defines:
@@ -63,8 +62,9 @@ static inline void MB(compress)(V s[8], V w[16]) {
     s[4] = VADD(s[4], e), s[5] = VADD(s[5], f), s[6] = VADD(s[6], g), s[7] = VADD(s[7], h);
 }
 
-/* One vector's worth of HMACs: nl <= MB_LANES plans, absent lanes run on a dummy zero block. */
-static void MB(lanes)(const jwt_key_t *k, int nl, const hplan_t *const *pl, uint32_t (*mac)[8]) {
+/* One vector's worth of HMACs: nl <= MB_LANES plans, absent lanes run on a dummy zero block.  raw (a constant at
+ * each call): plain SHA-256, k = sha_iv_key and plans built with offset 0, no outer hash. */
+JWT_INLINE void MB(lanes_x)(int raw, const jwt_key_t *k, int nl, const hplan_t *const *pl, uint32_t (*mac)[8]) {
     V st[8];
     int nb[MB_LANES], maxnb = 0, ragged = 0;
     for (int i = 0; i < 8; i++) st[i] = VSET1(k->ih[i]);
@@ -91,6 +91,7 @@ static void MB(lanes)(const jwt_key_t *k, int nl, const hplan_t *const *pl, uint
             for (int i = 0; i < 8; i++) st[i] = s[i];
         }
     }
+    if (raw) goto store;
     /* outer hash: one block = inner digest || 0x80 || zeros || bitlen(64 + 32) */
     V w[16];
     for (int i = 0; i < 8; i++) w[i] = st[i];
@@ -99,6 +100,7 @@ static void MB(lanes)(const jwt_key_t *k, int nl, const hplan_t *const *pl, uint
     w[15] = VSET1((64 + 32) * 8);
     for (int i = 0; i < 8; i++) st[i] = VSET1(k->oh[i]);
     MB(compress)(st, w);
+store:
     if (nl == MB_LANES) {
         MB_STORE8(st, mac);
     } else {
@@ -108,17 +110,25 @@ static void MB(lanes)(const jwt_key_t *k, int nl, const hplan_t *const *pl, uint
     }
 }
 
+static void MB(lanes)(const jwt_key_t *k, int nl, const hplan_t *const *pl, uint32_t (*mac)[8]) {
+    MB(lanes_x)(0, k, nl, pl, mac);
+}
+static void MB(lanes_raw)(int nl, const hplan_t *const *pl, uint32_t (*dig)[8]) {
+    MB(lanes_x)(1, &sha_iv_key, nl, pl, dig);
+}
+
 #ifndef MB_NO_DRIVER
-/* n messages, any lengths: plan, sort by block count so vectors are rarely ragged, run groups. */
-void MB(jwt_hmac)(const jwt_key_t *k, int n, const uint8_t *const *msg, const int *len,
-                  uint32_t (*mac)[8]) {
+/* n messages, any lengths: plan, sort by block count so vectors are rarely ragged, run groups.  raw: plain SHA-256
+ * of each message (the RS256 / ES256 signing inputs) instead of HMAC. */
+JWT_INLINE void MB(drive)(int raw, const jwt_key_t *k, int n, const uint8_t *const *msg, const int *len,
+                          uint32_t (*mac)[8]) {
     enum { CH = 64 };
     hplan_t plan[CH];
     const hplan_t *pp[CH];
     uint32_t tmp[MB_LANES][8];
     for (int base = 0; base < n; base += CH) {
         int m = n - base < CH ? n - base : CH;
-        for (int i = 0; i < m; i++) hplan_init(&plan[i], msg[base + i], len[base + i]);
+        for (int i = 0; i < m; i++) hplan_init_off(&plan[i], msg[base + i], len[base + i], raw ? 0 : 64);
         /* insertion sort of plan pointers by nb (m <= 64, nearly always already uniform) */
         for (int i = 0; i < m; i++) {
             const hplan_t *p = &plan[i];
@@ -131,13 +141,22 @@ void MB(jwt_hmac)(const jwt_key_t *k, int n, const uint8_t *const *msg, const in
             if (nl < MB_MIN_LANES) {
                 for (int l = 0; l < nl; l++) {
                     const hplan_t *p = pp[g + l];
-                    hmac1_scalar(k, p, mac[base + (int)(p - plan)]);
+                    if (raw) sha1_raw(p, mac[base + (int)(p - plan)]);
+                    else hmac1_scalar(k, p, mac[base + (int)(p - plan)]);
                 }
                 continue;
             }
-            MB(lanes)(k, nl, &pp[g], tmp);
+            if (raw) MB(lanes_raw)(nl, &pp[g], tmp);
+            else MB(lanes)(k, nl, &pp[g], tmp);
             for (int l = 0; l < nl; l++) memcpy(mac[base + (int)(pp[g + l] - plan)], tmp[l], 32);
         }
     }
+}
+void MB(jwt_hmac)(const jwt_key_t *k, int n, const uint8_t *const *msg, const int *len, uint32_t (*mac)[8]) {
+    MB(drive)(0, k, n, msg, len, mac);
+}
+/* dig[i] = SHA-256(msg[i]) as 8 big-endian-interpreted words */
+void MB(jwt_sha256)(int n, const uint8_t *const *msg, const int *len, uint32_t (*dig)[8]) {
+    MB(drive)(1, &sha_iv_key, n, msg, len, dig);
 }
 #endif

@@ -230,20 +230,19 @@ Nothing on the benchmark hardware yet. These come from an arm64 Docker container
 with 2 GB and no swap, so they are **relative measurements**: not comparable to the x86-64 box, and
 not the challenge's µs/req budget.
 
-30 s ramp, 90 s hold, 4,000 VUs across four load generators, against the fastest Go entry from the
-last published batch built and run on the same rig:
+60 s ramp, 5 minute hold, 8,000 VUs across four load generators:
 
-| | this server | `go-epoll-MegaPanchamZ` |
-|---|---:|---:|
-| µs/req | 156.7 | 133.3 |
-| p95 | 0.6 ms | 0.5 ms |
-| p99 | 0.8 ms | 0.9 ms |
-| errors | 0 | 0 |
-| peak RSS | 412 MB | 256 MB |
+| | |
+|---|---:|
+| µs/req | 120.2 |
+| p95 / p99 | 0.6 / 2.3 ms |
+| errors | 0 |
+| peak cgroup memory | 361 MB |
+
+At 10,000 VUs: 122.2 µs/req, p99 1.7 ms, 0 errors.
 
 µs/req counts the ramp and the start-up as well as the hold, so only runs with the same ramp and
-hold compare at all. Run-to-run spread on this rig reaches 16% on an identical configuration, so
-the figure above is the median of three runs (156.0, 156.7, 163.9) rather than a single one.
+hold compare at all, and run-to-run spread on this rig reaches 16% on an identical configuration.
 
 The loop's own counters over those runs report no pressure anywhere: no response buffer
 exhaustion, no submission-queue overflow, no provided-buffer starvation, no stalled accept, and no

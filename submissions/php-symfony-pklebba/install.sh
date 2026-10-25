@@ -31,10 +31,18 @@ cat > /usr/local/lib/composer/run.php <<'PHP'
 <?php
 // `frankenphp php-cli` puts the binary in $argv[0] and the script in $argv[1]; Composer expects
 // $argv[0] to be the script. Shift once, then hand over to the pinned composer.phar.
-$_SERVER['argv'] = array_slice($_SERVER['argv'], 1);
-$_SERVER['argc'] = count($_SERVER['argv']);
-$argv = $_SERVER['argv'];
-$argc = $_SERVER['argc'];
+foreach ($_SERVER['argv'] as $i => $arg) {
+    if ($i > 0 && realpath($arg) === __FILE__) {
+        $_SERVER['argv'] = array_slice($_SERVER['argv'], $i);
+        $_SERVER['argc'] = count($_SERVER['argv']);
+        $argv = $_SERVER['argv'];
+        $argc = $_SERVER['argc'];
+        break;
+    }
+    if ($i > 1) {
+        break;
+    }
+}
 require __DIR__.'/composer.phar';
 PHP
 cat > /usr/local/bin/composer <<'SH'

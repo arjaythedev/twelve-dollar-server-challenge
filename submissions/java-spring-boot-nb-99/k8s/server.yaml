@@ -1,0 +1,95 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: server
+  labels:
+    app.kubernetes.io/name: server
+spec:
+  # A crash must fail the run instead of being restarted between samples.
+  restartPolicy: Never
+  # Service links would set SERVER_PORT=tcp://..., which Spring reads as server.port.
+  enableServiceLinks: false
+  affinity:
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        # The app gets a node without another benchmark's app or load generator,
+        # also from parallel runs in other namespaces.
+        - topologyKey: kubernetes.io/hostname
+          namespaceSelector: {}
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/part-of: twelve-dollar-java
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+    seccompProfile:
+      type: RuntimeDefault
+    # Lets the unprivileged app listen on port 80, like CAP_NET_BIND_SERVICE on the VPS.
+    sysctls:
+      - name: net.ipv4.ip_unprivileged_port_start
+        value: "0"
+  # Pod-level resources: the app and the seed step share the challenge VPS's
+  # 1 vCPU and 2 GiB, like processes on one machine.
+  resources:
+    requests:
+      cpu: "1"
+      memory: 2Gi
+    limits:
+      cpu: "1"
+      memory: 2Gi
+  initContainers:
+    - name: seed
+      image: twelve-dollar-java-seed
+      command: ["bash", "/challenge/seed-local.sh"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
+      volumeMounts:
+        - name: data
+          mountPath: /data
+  containers:
+    - name: app
+      image: twelve-dollar-java-app
+      command: ["bash", "/app/start.sh"]
+      env:
+        - name: SQLITE_PATH
+          value: /data/feed.db
+        - name: JWT_SECRET
+          value: twelve-dollar-challenge
+        - name: HOST
+          value: 0.0.0.0
+        - name: PORT
+          value: "80"
+      ports:
+        - name: http
+          containerPort: 80
+      readinessProbe:
+        httpGet:
+          path: /health
+          port: http
+        periodSeconds: 2
+        failureThreshold: 3
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
+      volumeMounts:
+        - name: data
+          mountPath: /data
+  volumes:
+    - name: data
+      emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: server
+spec:
+  selector:
+    app.kubernetes.io/name: server
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

@@ -1,0 +1,75 @@
+# Load generator; benchmark.py runs each k6 run through kubectl exec. Its inputs
+# come from the seed image, because kubectl exec stdin uploads proved unreliable.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: k6
+  labels:
+    app.kubernetes.io/name: k6
+spec:
+  # sleep ignores SIGTERM as PID 1.
+  terminationGracePeriodSeconds: 0
+  affinity:
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        # No app pod of any benchmark namespace shares this node, so parallel
+        # runs in separate namespaces measure separate machines. The part-of
+        # label keeps other workloads' "server" pods out of it.
+        - topologyKey: kubernetes.io/hostname
+          namespaceSelector: {}
+          labelSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values: [server]
+              - key: app.kubernetes.io/part-of
+                operator: In
+                values: [twelve-dollar-java, twelve-dollar-go]
+  securityContext:
+    runAsNonRoot: true
+    # The k6 image's user, so both containers can use /work.
+    runAsUser: 12345
+    runAsGroup: 12345
+    seccompProfile:
+      type: RuntimeDefault
+    # One source port per user; the default range is about 28,000 ports.
+    sysctls:
+      - name: net.ipv4.ip_local_port_range
+        value: "1024 65535"
+  initContainers:
+    # The seed is deterministic, so these tokens match the server's database.
+    - name: inputs
+      image: twelve-dollar-java-seed
+      command:
+        - bash
+        - -c
+        - >-
+          node /challenge/seed/generate.mjs /tmp/seed >/dev/null &&
+          mkdir /work/results &&
+          cp /tmp/seed/tokens.json /challenge/bench/load.js /work/
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
+      volumeMounts:
+        - name: work
+          mountPath: /work
+  containers:
+    - name: k6
+      # Keep in sync with K6_IMAGE in benchmark.py.
+      image: grafana/k6:2.2.0@sha256:9bd01d6941fca969cb61bb57d2da5ee9b385fe2aa8881df3798c196564d6ace6
+      command: ["sleep", "infinity"]
+      resources:
+        requests:
+          cpu: "2"
+          memory: 2Gi
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
+      volumeMounts:
+        - name: work
+          mountPath: /work
+  volumes:
+    - name: work
+      emptyDir: {}

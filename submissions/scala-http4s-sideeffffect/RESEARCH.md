@@ -60,7 +60,7 @@ Closest idiomatic JVM data points from open PRs (local/DO numbers, not batch 2):
 | Tokens without `exp` accepted | asm-epoll #117, java-nio #88, quarkus #67, kotlin #83, scala-netty #107 (fixed in https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/149), node-uws #102, dart #46, go-champ3oy #76, pypy #84, csharp #74, bash #89 | OK: `Jwt.scala` requires `exp` (`get[Long]("exp")` must succeed). Keep a test for a no-`exp` token. |
 | Reads see uncommitted writes in the same batch | Deno #119, Zig #125 | Risk if we add group commit and let reads join the write txn. Keep reads off the write txn, or hold their responses until COMMIT. |
 | start.sh restart loops | Deno #119, c-epoll #64 | OK: `exec java`. |
-| Unchecksummed toolchain downloads | Deno, Go #72, Haskell, Swift, .NET, rustup, Zig | OK: JDK + sbt checksum-verified. Keep it so if we switch to GraalVM JDK. sbt dependency fetch is pinned by version (fine). |
+| Unchecksummed toolchain downloads | Deno, Go #72, Haskell, Swift, .NET, rustup, Zig | OK: JDK + Scala CLI checksum-verified. Keep it so if we switch to GraalVM JDK. Dependency fetch is pinned by version (fine). |
 | SQL by string concat | bash #89 | OK: doobie fragments. |
 | README ≠ code | c-iouring #112 | Keep README in sync. |
 | Crash at fd limit (EMFILE) | F# #108, C# #74 | Relevant only if we go direct. Ember: check accept-loop behaviour on EMFILE (must not spin or die). |

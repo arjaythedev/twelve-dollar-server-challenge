@@ -1,9 +1,6 @@
 target/
-project/target/
-project/project/
+.scala-build/
 .bsp/
 .metals/
 .bloop/
 .vscode/
-metals.sbt
-local.sbt

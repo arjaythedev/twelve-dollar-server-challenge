@@ -7,7 +7,7 @@ not in hand-written replacements for them.
 | | |
 |---|---|
 | Language | Scala 3.10.0 on Temurin JDK 27 (the newest OpenJDK release; official tarball, checksum-verified) |
-| Build | sbt 2.0.11 (official tarball, checksum-verified) |
+| Build | Scala CLI 1.18.0 (official release binary, checksum-verified); build definition in `project.scala` |
 | Effect / streaming | Cats Effect 3.7.1, fs2 3.14.0 |
 | HTTP server | http4s 0.23.38, Ember backend, `http4s-dsl` routes |
 | Database | doobie 1.0.0-RC12 over sqlite-jdbc 3.53.4.0 (bundles SQLite 3.53.4) |
@@ -22,8 +22,8 @@ not in hand-written replacements for them.
 ## Running it
 
 ```bash
-sudo bash install.sh   # JDK 27 and sbt tarballs into /opt
-bash build.sh          # sbt compile, writes target/classpath.txt
+sudo bash install.sh   # JDK 27 and Scala CLI into /opt
+bash build.sh          # scala-cli compile, writes target/classpath.txt
 SQLITE_PATH=... JWT_SECRET=... HOST=127.0.0.1 PORT=3000 bash start.sh
 ```
 

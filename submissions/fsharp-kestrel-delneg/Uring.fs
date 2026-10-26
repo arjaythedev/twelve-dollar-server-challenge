@@ -107,7 +107,9 @@ let private TCP_NODELAY = 1
 /// Ring sizes. CQ 4x the SQ: a pass can take many completions.
 let private SqEntries = 4096u
 let private CqEntries = 16384u
-/// Provided receive buffers per ring: 2,048 x 2 KB. A request is a few hundred bytes; a bigger one arrives in parts.
+/// Provided receive buffers per ring: 8,192 x 2 KB (16 MB; the ring hands them out in turn, so all of it gets
+/// touched). A request is a few hundred bytes; a bigger one arrives in parts. With 2,048, a saturated loop ran out of
+/// buffers (ENOBUFS, receives armed again and again) and fell behind: 400,000 users passed half as often.
 /// Tuning knobs for experiments (the defaults are the measured best): FS3_NBUFS (buffers per ring, a power of 2),
 /// FS3_WAIT_N (completions the loop waits for) and FS3_WAIT_US (the longest wait).
 let private envInt name dflt =
@@ -115,8 +117,8 @@ let private envInt name dflt =
     | true, v when v > 0 -> v
     | _ -> dflt
 let private NBufs =
-    let n = envInt "FS3_NBUFS" 2048
-    if n &&& (n - 1) = 0 && n <= 32768 then n else 2048
+    let n = envInt "FS3_NBUFS" 8192
+    if n &&& (n - 1) = 0 && n <= 32768 then n else 8192
 let private WaitN = uint32 (envInt "FS3_WAIT_N" 32)
 let private WaitNs = int64 (envInt "FS3_WAIT_US" 2000) * 1000L
 let private BufSize = 2048

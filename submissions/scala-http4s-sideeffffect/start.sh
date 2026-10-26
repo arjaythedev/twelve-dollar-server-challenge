@@ -12,8 +12,9 @@ if [ -x /opt/jdk-27/bin/java ]; then JAVA_HOME=/opt/jdk-27; fi
 # Fiber tracing off: it keeps a ring buffer of events in every fiber.
 SCALA_CLI=/opt/scala-cli/scala-cli; [ -x "$SCALA_CLI" ] || SCALA_CLI=scala-cli
 # scala-cli runs the classes build.sh compiled (target/classpath.txt) without compiling them again: --java because
-# the Scala library is already on that class path. It replaces itself with the JVM, so the server keeps its PID.
-exec "$SCALA_CLI" run --server=false --java-home "$JAVA_HOME" --java -cp "$(cat target/classpath.txt)" \
+# the Scala library is already on that class path. --offline: nothing is fetched, only build.sh downloads. It replaces
+# itself with the JVM, so the server keeps its PID.
+exec "$SCALA_CLI" run --server=false --offline --java-home "$JAVA_HOME" --java -cp "$(cat target/classpath.txt)" \
   --main-class feed.Main \
   --java-opt=-XX:+UseParallelGC --java-opt=-XX:MaxRAMPercentage=60 --java-opt=-XX:InitialRAMPercentage=60 \
   --java-opt=-XX:+AlwaysPreTouch --java-opt=-Xss512k --java-opt=-XX:MaxDirectMemorySize=128m \

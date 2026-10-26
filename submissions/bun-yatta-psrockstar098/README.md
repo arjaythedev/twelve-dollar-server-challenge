@@ -56,12 +56,31 @@ A 5-endpoint feed API (see `SPEC.md`) implemented with
 - Single SQLite connection, synchronous queries, no awaits between a
   request's queries: no interleaving, no pool, no lock contention on one
   core.
-- Compact JSON via `JSON.stringify` with spec-ordered keys, so golden
-  responses match byte-for-byte with no post-processing.
+- Fast JWT verify: base64url decoding uses `Buffer.from(..., "base64url")`
+  natively instead of manual char replacement + padding, the token is
+  split with `indexOf` instead of `split`, and the HMAC digest bytes are
+  compared directly instead of being re-encoded to a string first. Same
+  checks, same order, same error strings — about 30% faster on the
+  crypto portion in micro-benchmarks, confirmed in both JIT and compiled
+  runs.
 - `idleTimeout: 120` so keep-alive connections survive the load test's
   think/idle gaps without reconnect churn.
 - Compiled binary (`bun build --compile`): the server starts in well
   under the 60 s health window with no module-resolution cost at boot.
+
+Measured, not claimed: the feed SQL already uses the
+`posts_created_at_id_idx` index plus covering-index like counts, so a
+JOIN + GROUP BY rewrite was tried and rejected — it drops the index,
+full-scans 500k posts and sorts, ~200x slower. Cache/mmap pragmas were
+tried and dropped (no stable, repeatable gain: results swung from -20%
+to +80% between runs on the same box). A raw `bun:sqlite` switch was
+considered and rejected (Yatta's `rawAll` is a thin statement-cache
+lookup, not a bottleneck). Hand-built JSON for the read paths was tried
+and REVERTED: it looked ~19% faster in JIT micro-benchmarks but measured
+~16% slower end-to-end than `API.json` in an 8-round alternating A/B
+with warmup (orig mean ~7070 req/s vs hand-built ~6080 req/s on a
+feed-only loader), so it does not ship. Multi-process was rejected (the
+scoring box has 1 vCPU, so extra processes add nothing there).
 
 ## Scripts
 

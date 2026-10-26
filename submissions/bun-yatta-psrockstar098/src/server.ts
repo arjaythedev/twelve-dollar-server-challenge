@@ -83,24 +83,6 @@ const POST_SELECT = `
 // any id validation on routes that take both (SPEC.md ordering rule).
 // ---------------------------------------------------------------------------
 
-function b64urlDecode(input: string): Buffer | null {
-  try {
-    const padded = input.replace(/-/g, "+").replace(/_/g, "/");
-    const pad = (4 - (padded.length % 4)) % 4;
-    return Buffer.from(padded + "=".repeat(pad), "base64");
-  } catch {
-    return null;
-  }
-}
-
-function b64urlEncode(buf: Buffer): string {
-  return buf
-    .toString("base64")
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/g, "");
-}
-
 type AuthOk = { ok: true; userId: number; username: string };
 type AuthFail = { ok: false; error: string };
 type AuthResult = AuthOk | AuthFail;
@@ -111,22 +93,30 @@ function verifyAuth(req: Request): AuthResult {
     return { ok: false, error: "missing bearer token" };
   }
   const token = header.slice("Bearer ".length);
-  const parts = token.split(".");
-  if (parts.length !== 3) {
+  // Split without allocating a parts array; exactly 3 segments required.
+  const i1 = token.indexOf(".");
+  const i2 = i1 < 0 ? -1 : token.indexOf(".", i1 + 1);
+  if (
+    i1 < 0 ||
+    i2 < 0 ||
+    token.indexOf(".", i2 + 1) >= 0
+  ) {
     return { ok: false, error: "invalid or expired token" };
   }
-  const [headerB64, payloadB64, signatureB64] = parts;
+  const headerB64 = token.slice(0, i1);
+  const payloadB64 = token.slice(i1 + 1, i2);
+  const signatureB64 = token.slice(i2 + 1);
 
-  const headerJson = b64urlDecode(headerB64)?.toString("utf8");
-  const payloadJson = b64urlDecode(payloadB64)?.toString("utf8");
-  if (headerJson === undefined || payloadJson === undefined) {
-    return { ok: false, error: "invalid or expired token" };
-  }
+  // Bun/Node decode base64url natively — no manual char replace + padding.
   let headerObj: unknown;
   let payloadObj: unknown;
   try {
-    headerObj = JSON.parse(headerJson);
-    payloadObj = JSON.parse(payloadJson);
+    headerObj = JSON.parse(
+      Buffer.from(headerB64, "base64url").toString("utf8"),
+    );
+    payloadObj = JSON.parse(
+      Buffer.from(payloadB64, "base64url").toString("utf8"),
+    );
   } catch {
     return { ok: false, error: "invalid or expired token" };
   }
@@ -139,16 +129,19 @@ function verifyAuth(req: Request): AuthResult {
   }
 
   // Signature first (a forged token must not reach payload checks).
-  const expected = b64urlEncode(
-    createHmac("sha256", JWT_SECRET)
-      .update(`${headerB64}.${payloadB64}`)
-      .digest(),
-  );
-  const expectedBuf = Buffer.from(expected, "utf8");
-  const givenBuf = Buffer.from(signatureB64, "utf8");
+  // Compare digest bytes directly instead of re-encoding to a string.
+  const digest = createHmac("sha256", JWT_SECRET)
+    .update(`${headerB64}.${payloadB64}`)
+    .digest();
+  let givenSig: Buffer;
+  try {
+    givenSig = Buffer.from(signatureB64, "base64url");
+  } catch {
+    return { ok: false, error: "invalid or expired token" };
+  }
   if (
-    expectedBuf.length !== givenBuf.length ||
-    !timingSafeEqual(expectedBuf, givenBuf)
+    digest.length !== givenSig.length ||
+    !timingSafeEqual(digest, givenSig)
   ) {
     return { ok: false, error: "invalid or expired token" };
   }

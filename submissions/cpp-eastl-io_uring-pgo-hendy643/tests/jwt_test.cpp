@@ -34,17 +34,17 @@ TEST(Jwt, ValidToken) {
 
 TEST(Jwt, AcceptsNonCanonicalButValidHeader) {
     srv::Identity id;
-    EXPECT_EQ(check(token(R"({ "typ": "JWT", "alg": "HS256" })", R"({"sub":"1","username":"a"})"), id), AuthStatus::Ok);
+    EXPECT_EQ(check(token(R"({ "typ": "JWT", "alg": "HS256" })", R"({"sub":"1","username":"a","exp":1700003600})"), id), AuthStatus::Ok);
 }
 
-TEST(Jwt, MissingExpIsAccepted) {
+TEST(Jwt, MissingExpIsRejected) {
     srv::Identity id;
-    EXPECT_EQ(check(token(kHeader, R"({"sub":"1","username":"a"})"), id), AuthStatus::Ok);
+    EXPECT_EQ(check(token(kHeader, R"({"sub":"1","username":"a"})"), id), AuthStatus::InvalidPayload);
 }
 
 TEST(Jwt, DecodesEscapedUsername) {
     srv::Identity id;
-    ASSERT_EQ(check(token(kHeader, R"({"sub":"1","username":"caf\u00e9 \"x\""})"), id), AuthStatus::Ok);
+    ASSERT_EQ(check(token(kHeader, R"({"sub":"1","username":"caf\u00e9 \"x\"","exp":1700003600})"), id), AuthStatus::Ok);
     EXPECT_TRUE(View(id.username.data(), id.username.size()) == View("caf\xC3\xA9 \"x\""));
 }
 
@@ -94,8 +94,8 @@ TEST(Jwt, InvalidPayloads) {
 
 TEST(Jwt, OverlongUsernameIsRejected) {
     srv::Identity id;
-    EXPECT_EQ(check(token(kHeader, R"({"sub":"1","username":")" + std::string(254, 'a') + R"("})"), id), AuthStatus::Ok);
-    EXPECT_EQ(check(token(kHeader, R"({"sub":"1","username":")" + std::string(255, 'a') + R"("})"), id), AuthStatus::InvalidPayload);
+    EXPECT_EQ(check(token(kHeader, R"({"sub":"1","username":")" + std::string(254, 'a') + R"(","exp":1700003600})"), id), AuthStatus::Ok);
+    EXPECT_EQ(check(token(kHeader, R"({"sub":"1","username":")" + std::string(255, 'a') + R"(","exp":1700003600})"), id), AuthStatus::InvalidPayload);
 }
 
 TEST(Base64Url, RoundTripsAndRejectsGarbage) {

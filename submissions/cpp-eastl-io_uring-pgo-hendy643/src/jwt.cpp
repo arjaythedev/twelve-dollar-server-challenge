@@ -76,12 +76,10 @@ AuthStatus JwtVerifier::verify(eastl::string_view authorization, int64_t now, Id
     JsonFields fields;
     if (!scan_json({payload, payload_len}, fields) || !fields.top_is_object) return AuthStatus::InvalidPayload;
 
-    if (fields.exp.kind != 0) {
-        double exp = 0;
-        if (fields.exp.kind != 'n') return AuthStatus::InvalidPayload;
-        if (std::from_chars(fields.exp.p, fields.exp.p + fields.exp.n, exp).ec != std::errc{}) return AuthStatus::InvalidPayload;
-        if (exp <= static_cast<double>(now)) return AuthStatus::InvalidToken;
-    }
+    if (fields.exp.kind != 'n') return AuthStatus::InvalidPayload;
+    double exp = 0;
+    if (std::from_chars(fields.exp.p, fields.exp.p + fields.exp.n, exp).ec != std::errc{}) return AuthStatus::InvalidPayload;
+    if (exp <= static_cast<double>(now)) return AuthStatus::InvalidToken;
 
     if (fields.sub.kind != 's' || fields.sub.escaped || fields.sub.n == 0) return AuthStatus::InvalidPayload;
     int64_t user_id = 0;

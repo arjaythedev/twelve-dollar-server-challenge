@@ -13,8 +13,10 @@ if [ -x /opt/jdk-27/bin/java ]; then JAVA_HOME=/opt/jdk-27; fi
 SCALA_CLI=/opt/scala-cli/scala-cli; [ -x "$SCALA_CLI" ] || SCALA_CLI=scala-cli
 # scala-cli runs the classes build.sh compiled (target/classpath.txt) without compiling them again: --java because
 # the Scala library is already on that class path. --offline (needs --power): nothing is fetched, only build.sh
-# downloads. It replaces itself with the JVM, so the server keeps its PID.
-exec "$SCALA_CLI" --power run --server=false --offline --java-home "$JAVA_HOME" --java -cp "$(cat target/classpath.txt)" \
+# downloads. --scala: the version project.scala uses, which build.sh fetched (scala-cli loads that compiler even with
+# nothing to compile, and its default version isn't in the cache). It replaces itself with the JVM, so the server keeps
+# its PID.
+exec "$SCALA_CLI" --power run --server=false --offline --scala 3.10.0 --java-home "$JAVA_HOME" --java -cp "$(cat target/classpath.txt)" \
   --main-class feed.Main \
   --java-opt=-XX:+UseParallelGC --java-opt=-XX:MaxRAMPercentage=60 --java-opt=-XX:InitialRAMPercentage=60 \
   --java-opt=-XX:+AlwaysPreTouch --java-opt=-Xss512k --java-opt=-XX:MaxDirectMemorySize=128m \

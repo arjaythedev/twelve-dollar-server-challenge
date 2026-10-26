@@ -1,3 +1,3 @@
-pyrustapi==1.9.0b13
+pyrustapi==2.0.0
 orjson==3.12.0
 uvloop==0.23.0

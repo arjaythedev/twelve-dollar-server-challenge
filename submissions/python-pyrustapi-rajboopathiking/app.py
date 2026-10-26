@@ -33,12 +33,12 @@ db.execute("PRAGMA temp_store = MEMORY")
 # Pre-compiled high performance queries with SQLite-native JSON formatting
 JSON_FEED_SQL = """
 SELECT json_object('posts', json_group_array(
-  json_object('id', p.id, 'body', p.body, 'created_at', p.created_at, 'author', u.username, 'like_count', (SELECT count(*) FROM likes l WHERE l.post_id = p.id))
+  json_object('id', p.id, 'body', p.body, 'created_at', p.created_at, 'author', p.username, 'like_count', (SELECT count(*) FROM likes l WHERE l.post_id = p.id))
 )) FROM (
   SELECT p.id, p.body, p.created_at, u.username
   FROM posts p JOIN users u ON u.id = p.user_id
   ORDER BY p.created_at DESC, p.id DESC LIMIT 20
-) p JOIN users u ON u.username = p.username
+) p
 """
 
 JSON_POST_SQL = """

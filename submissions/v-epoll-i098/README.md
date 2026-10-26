@@ -44,6 +44,9 @@ The C transport keeps debug symbols and frame pointers for local profiles.
   It runs whenever writes appended frames during the first checkpoint, because the WAL can restart
   only when every frame is copied. Without it, steady writes can grow the WAL without a limit.
   The existing request connection and background checkpoint connection keep separate thread owners.
+- **SQLite page cache, no mmap.** Pages come from a 64 MiB page cache (`cache_size=-65536`), which holds
+  the hot pages of this workload. With `mmap_size` set, each page fetch costs SQLite more instructions:
+  turning it off cut server instructions per request by 3.8% in a local profile.
 - **Feed in three small queries.** The newest 20 ids come from the `(created_at, id)` index. When those
   ids span fewer than 64 ids (they do, because ids grow with time), one range scan reads the posts and
   authors, and one range scan on `likes_post_id_idx` counts the likes. Else the reference query runs.
@@ -76,16 +79,20 @@ The C transport keeps debug symbols and frame pointers for local profiles.
 
 Nothing on the box is tuned: the process only raises its own soft `RLIMIT_NOFILE` to the hard limit.
 
-## Earlier epoll local load test
+## Local load tests
 
-Unchanged `bench/load.js` (k6 v2.3.0) with the README protocol, server in a Docker `ubuntu:24.04` container
-(`--cpus=1 --memory=2g --memory-swap=2g --ulimit nofile=65535:65535`, direct mode), k6 on other cores of a shared
-x86_64 host. Not the droplet score.
+Local only, not a benchmark-box score. The server ran in a Docker container with `--cpus=1 --cpuset-cpus=<one core>
+--memory=2g --memory-swap=2g --ulimit nofile=65535:65535 --ulimit memlock=-1:-1 --security-opt seccomp=unconfined`
+(io_uring needs the last two in Docker), direct mode, on a shared 96-core x86_64 host, fresh seed copy each run.
 
-These historical measurements do not measure the fixed-file implementation above.
+| Build | Load | Users (5-min hold) | p95 | p99 | Errors | Server CPU per request | Peak memory |
+|---|---|---:|---:|---:|---:|---:|---:|
+| this build, run 1 | native C++ port of `bench/load.js`, 8 cores | **270,000** | 24.6 ms | 46.6 ms | 0.00% | 32.1 µs | 1,351 MiB |
+| this build, run 2 | same | **270,000** | 52.5 ms | 124.7 ms | 0.00% | 32.9 µs | 1,406 MiB |
+| earlier epoll build | `bench/load.js` on k6 v2.3.0 | 81,250 | 498 ms | 695 ms | 0.00% | - | 125 MiB RSS |
 
-| Build | Users (5-min hold) | p95 | p99 | Errors | Peak RSS |
-|---|---:|---:|---:|---:|---:|
-| earlier epoll build | **81,250** | 498 ms | 695 ms | 0.00% | 125 MiB |
+The native generator keeps the `bench/load.js` user model (feed, think, post, think, 15% like, 2% post),
+because local k6 was killed at its 40 GB memory limit while holding 120,000 users. Both 270,000-user runs
+passed `PRAGMA integrity_check`, and every acknowledged post and like was in the database afterwards.
 
 `bash test/run.sh submissions/v-epoll-i098`: 42 passed, 0 failed.

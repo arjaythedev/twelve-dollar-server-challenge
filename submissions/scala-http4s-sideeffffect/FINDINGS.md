@@ -48,7 +48,7 @@ would make direct mode viable). The brief was Ember; it is the obvious next expe
 | Requests wait for a connection as fibers, never in Hikari's blocking `getConnection` | fixed a deadlock: with one thread, a blocked `getConnection` stops the very fibers that would return a connection (30 s stalls) |
 | Ember read buffer 8 KiB instead of 256 KiB per connection | an `OutOfMemoryError` at 10,000 direct connections went away |
 | Fiber tracing off (`-Dcats.effect.tracing.mode=none`) | ~800 B less per fiber, ~10 fibers per connection |
-| **Listen backlog 4,096 instead of 50**, raised with `listen()` through the JDK's FFM API (fs2 binds with Java's default and has no setting) | 976 → 0 accept-queue overflows per run behind Nginx, and no more 1-3 s SYN-retransmit tails |
+| **Listen backlog raised from 50** (it asks for 65,535; the kernel caps it at `somaxconn`, 4,096 on the box), raised with `listen()` through the JDK's FFM API (fs2 binds with Java's default and has no setting) | 976 → 0 accept-queue overflows per run behind Nginx, and no more 1-3 s SYN-retransmit tails |
 | Nginx front (above) | 20,000 → 30,000+ users |
 | **Prepared statements reused**: a Cats Effect `Queue` of fixed connections replaces HikariCP, and each connection keeps one `PreparedStatement` per SQL string (`Jdbc.scala`, delegation by Scala 3 `export`) | preparing went from ~15% of app CPU to ~1% |
 | **`jdbc.get_generated_keys=false`**: sqlite-jdbc otherwise runs `SELECT last_insert_rowid()` after every INSERT (read in its source) | one statement less per write |

@@ -29,9 +29,12 @@ SQLITE_PATH=... JWT_SECRET=... HOST=127.0.0.1 PORT=3000 bash start.sh
 
 ## Code
 
+The sources are in `src/`. `project.scala` holds the Scala version, the compiler options and the pinned dependencies.
+
 | File | |
 |---|---|
 | `Main.scala` | `IOApp`, the Ember server |
+| `Config.scala` | the settings from the environment |
 | `Routes.scala` | the five endpoints and the error bodies, with `http4s-dsl` |
 | `Repository.scala` | the SQL, as doobie `ConnectionIO` programs (the reference queries from SPEC.md) |
 | `Database.scala` | the read pool, the group commit on a single writer, and the background checkpointer |

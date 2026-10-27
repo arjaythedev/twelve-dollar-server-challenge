@@ -45,6 +45,6 @@ app.MapPostEndpoints();
 RequestDelegate notFound = context => ApiResults.Error(404, "not found").ExecuteAsync(context);
 app.MapFallback("/{**path}", notFound);
 app.Lifetime.ApplicationStarted.Register(() =>
-    app.Logger.LogWarning("Feed API listening on {Host}:{Port}; SQLite {Version}; WAL, synchronous=NORMAL",
+    app.Logger.LogWarning("Feed API listening on {Host}:{Port}; SQLite {Version}; WAL, synchronous=NORMAL, locking=EXCLUSIVE",
         options.Host, options.Port, sqliteVersion));
 await app.RunAsync();

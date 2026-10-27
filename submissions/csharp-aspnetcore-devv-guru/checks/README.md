@@ -13,9 +13,14 @@ are pinned; restore uses the updated lock file.
 
 The final native publish completed with warnings treated as errors under a
 one-core CPU quota, 2 GiB memory limit and no swap. Its observed build cgroup
-peak was 1,154,244,608 bytes. The executable was about 12 MB, plus the SQLite
+peak was 1,251,532,800 bytes. The executable was about 12 MB, plus the SQLite
 native library; separate debug symbols remain available in the publish folder.
-The Linux executable passed the 42 official and 46 additional checks.
+The Linux executable passed the 42 official and 49 exclusive-access checks.
+The preserved PR #195 baseline also passed its original 46 shared-access checks
+with `integration.py --database-access shared`. The exclusive profile checks
+live API freshness and rejected external access, and stops the server for SQL
+inspection, external edits and backup. Acknowledged creates are checked after
+an immediate process kill, before graceful shutdown can affect the result.
 
 Use fresh database copies. Do not overwrite an open database or reuse an
 unrelated WAL/SHM pair. Bash scripts need LF line endings in WSL. The Windows
@@ -74,14 +79,63 @@ with existing loopback addresses. It changes no OS settings. At 30,000 users, a
 mid-hold snapshot confirmed 15,000 connections from each of the two addresses.
 An earlier single-address attempt was stopped during warm-up and excluded.
 
-### Local comparison: 2026-10-27
+### Single-connection comparison: 2026-10-27
+
+The candidate uses one prepared connection under a repository lock with SQLite
+exclusive ownership. The preserved baseline is the initial PR #195 executable,
+commit `eadcc59472f2be3783676d45741b50b64cd99b88`.
+
+Both runs imported the unchanged challenge workload: fresh server/database,
+two-minute 1,000-VU warm-up, 60-second ramp, five-minute hold, 30-second ramp-down
+and ten-second graceful stop. Both used the same counters, two loopback source
+IPs and client GOGC=100 / GOMEMLIMIT=12GiB. The candidate ran first, then baseline.
+Neither had observed app/client swapping or OOM kills.
+
+| Measurement | Preserved pooled baseline | Single connection / EXCLUSIVE |
+|---|---:|---:|
+| Users | 45,000 | 45,000 |
+| Challenge thresholds | Fail (p99) | Pass |
+| Requests | 1,666,427 | 1,670,166 |
+| Requests/sec including ramps | 3,926 | 3,986 |
+| HTTP p95 / p99, ms | 464.10 / 1,257.75 | 357.68 / 700.80 |
+| HTTP errors | 0 | 0 |
+| Central-hold CPU, one-core scale | 82.9% | 81.5% |
+| Peak server cgroup, including cache | 1,429 MiB | 1,440 MiB |
+| Observed process RSS peak | 723 MiB | 728 MiB |
+| Client mean CPU, cores | 4.02 | 4.28 |
+| Observed client RSS peak | 11,629 MiB | 11,758 MiB |
+
+This single pair supports keeping the observed tail-latency improvement. It
+does not establish a portable capacity ceiling or a large throughput, CPU or
+memory gain. Three short saturation probes per variant were inconclusive:
+64 constant VUs without think time, ten-second warm-up and 30-second measure,
+fresh server/database and the same server limits. Mean RPS was 8,416 versus
+8,541 (+1.48%); median RPS was 8,415 versus 8,423 (+0.09%). Paired differences
+were +4.46%, -4.49% and +4.90%, with zero HTTP errors in all six measurements.
+
+The full runs are `results/performance-20261027T215559Z-f8094b` (candidate) and
+`results/performance-20261027T220715Z-d50c0e` (baseline). Reports are
+`results/single-connection-full-comparison.json` and
+`results/single-connection-probes.json`. These generated files remain ignored.
+
+The baseline binary hash matches both the preserved executable and the earlier
+40k run. Its metadata's source hashes describe the candidate workspace because
+`--publish` selects an external executable; they are not the baseline's source
+provenance. The baseline's source reference is the commit above.
+
+Both stopped databases passed `quick_check`, foreign-key checks and successful
+create reconciliation. The candidate had 515,315 posts (500,000 + 126 warm-up +
+15,189 measured); baseline had 515,599 (500,000 + 167 + 15,432). Reports are
+`results/single-{candidate,baseline}-45000-integrity.json`.
+
+### Earlier comparisons: 2026-10-27
 
 The merged PR #95 build was republished from its unchanged sources. Each run used
 a fresh database/server, two-minute 1,000-VU warm-up, 60-second ramp, five-minute
 hold, 30-second ramp-down and ten-second graceful stop. All three collected the
 same runtime/database counters. Rates and latency include ramp/drain.
 
-| Measurement | FULL baseline, 30k | Final build, 40k | Before socket tuning, 50k |
+| Measurement | FULL baseline, 30k | Pooled/socket-tuned, 40k | Before socket tuning, 50k |
 |---|---:|---:|---:|
 | Challenge thresholds | Fail | Pass | Fail |
 | Requests | 1,089,167 | 1,489,414 | 1,767,437 |
@@ -116,7 +170,7 @@ is `results/performance-20261027T211013Z-3b611f`. A separate 64-VU saturation
 probe increased from about 7,704 to 8,335 requests/sec with the socket settings;
 that short, no-think-time probe is diagnostic and is not a challenge score.
 
-At 40k, the final run used 81.1% of one core versus 88.9% before socket tuning,
+At 40k, the socket-tuned pooled run used 81.1% of one core versus 88.9% before socket tuning,
 with 661 versus 523 MiB observed process RSS. Its p95 increased, while p99
 was similar. This single pair supports a CPU/memory tradeoff, not an exact speedup.
 
@@ -161,6 +215,11 @@ The analyzer uses central-hold CPU and allocation samples. Histogram rows are
 two-second interval quantiles; averaging them does not yield a whole-run p99.
 Runtime UpDownCounter rates are not absolute thread/queue counts, so the analyzer
 uses the explicit gauges above.
+
+With the single-connection implementation, write-queue gauges measure admission
+to the write permit. They do not include time waiting for the connection lock;
+operation durations include that wait. All SQLite work, recovery and disposal
+use that same lock.
 
 ## Original optimization comparisons
 

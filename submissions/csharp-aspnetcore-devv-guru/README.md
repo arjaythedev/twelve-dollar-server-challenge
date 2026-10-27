@@ -61,12 +61,15 @@ Native build details and local benchmark setup are in the
 
 ## Implementation
 
-- **Prepared SQLite sessions.** Read-only sessions and their commands are leased
-  from the framework's `ObjectPool`. It retains two to eight idle sessions,
-  depending on CPU count; excess sessions close when returned. A separate writer
-  is used under one exclusive permit. Provider connection pooling is disabled
-  because these sessions already own their connections. Readers close before a
-  session returns to the pool, and failed sessions are discarded.
+- **One prepared SQLite connection.** The singleton repository owns one open
+  connection and all prepared commands. A short lock serializes database access;
+  authentication, body parsing and response writes run outside it. Readers and
+  transactions finish before releasing the lock. A failed session is discarded
+  and recreated with the same settings on the next request.
+- **Exclusive database ownership.** `locking_mode=EXCLUSIVE` is set before the
+  first WAL access. SQLite retains its file locks instead of reacquiring them
+  around each transaction. Other connections cannot access the database while
+  the server owns it; stop the server for inspection, external edits or backups.
 - **WAL with `synchronous=NORMAL`.** Every write commits its transaction before
   returning success. This removes the extra WAL flush on each commit, as allowed
   by rule 6. Acknowledged writes can be lost after a power failure or system
@@ -114,9 +117,10 @@ Challenge tokens have no issuer or audience.
 ## Verification
 
 On 2026-10-27, the Native AOT build passed the official **42/42** checks and
-the additional **46/46** checks on Linux. They cover JSON escaping and ordering,
-Unicode, concurrent writes, external updates, rollback, contention, commit
-visibility, process-kill recovery and backup/restore. The publish completed with
+the additional **49/49** exclusive-access checks on Linux. They cover JSON
+escaping and ordering, Unicode, concurrent writes, fresh API reads, exclusive
+ownership, rollback, commit visibility after an immediate process kill, restart
+and offline backup/restore. The publish completed with
 warnings treated as errors under a one-core / 2 GiB / no-swap build limit.
 The same-day NuGet audit reported no known vulnerable direct or transitive
 packages; whitespace verification passed.
@@ -126,7 +130,8 @@ Run the additional checks after building, from the repository root:
 ```bash
 python3 submissions/csharp-aspnetcore-devv-guru/checks/integration.py \
   --seed seed/feed.db \
-  --server submissions/csharp-aspnetcore-devv-guru/bin/publish/FeedApi
+  --server submissions/csharp-aspnetcore-devv-guru/bin/publish/FeedApi \
+  --database-access exclusive
 ```
 
 ### Original submission
@@ -144,23 +149,27 @@ limit and no swap. Rates and latency include ramp/drain.
 
 | Build | Virtual users | Requests/sec | HTTP p95 / p99 | HTTP errors | Thresholds |
 |---|---:|---:|---:|---:|---|
-| PR #95, FULL | 30,000 | 2,598 | 1,846.67 / 3,049.09 ms | 8,902 (0.817%) | Fail |
-| Final build, including socket tuning | 40,000 | 3,523 | 225.95 / 455.24 ms | 0 | Pass |
-| Before socket tuning | 50,000 | 4,199 | 1,383.32 / 2,370.65 ms | 0 | Fail |
+| Pooled readers, initial PR #195 | 40,000 | 3,523 | 225.95 / 455.24 ms | 0 | Pass |
+| Same preserved build | 45,000 | 3,926 | 464.10 / 1,257.75 ms | 0 | Fail |
+| One connection, exclusive ownership | 45,000 | 3,986 | 357.68 / 700.80 ms | 0 | Pass |
 
-**40,000 passed the challenge thresholds locally with the final build.** The
-earlier 50,000-user run completed without errors but exceeded the latency limits.
-At 40,000, central-hold server CPU averaged 81.1% of one core; peak cgroup
-memory was 1,350 MiB, including charged page cache, and observed process RSS
-peaked at 661 MiB. The load generator peaked at 11,135 MiB RSS, with
-no observed swap or OOM kills. Post-load consistency and foreign-key checks passed;
-every acknowledged create was present.
+**The single-connection build passed 45,000 users locally.** The matched 45k
+baseline failed the p99 threshold. This is one full-duration pair: it supports
+retaining the change for its observed tail latency, without establishing an
+exact capacity ceiling or a large throughput improvement.
+
+Central-hold server CPU averaged 82.9% for the baseline and 81.5% for the candidate.
+Observed process RSS peaks were 723 and 728 MiB; cgroup peaks, including charged
+page cache, were 1,429 and 1,440 MiB. Both had zero HTTP errors, swap and OOM kills.
+Both databases passed post-load consistency/foreign-key checks and acknowledged
+create reconciliation. The candidate contained all 15,315 acknowledged warm-up
+and measured creates on top of the 500,000 seed posts.
 
 These are same-host WSL diagnostics with k6 outside the server cgroup. The OS is
 outside that memory limit, and CPU quotas/loopback traffic differ from the
-target VM. They establish neither an official score nor an exact improvement
-percentage. [Benchmark details and reproduction](checks/README.md#load-testing)
-include per-endpoint results and the load generator's resource use.
+target VM. Official scoring remains pending. The
+[verification guide](checks/README.md#load-testing) includes the client resource
+use, inconclusive short probes and earlier comparisons.
 
 ## License
 

@@ -16,7 +16,7 @@ fi
 
 echo "Compiling HolyC server with performance optimizations..."
 
-cd /holyc-server
+cd "$(dirname "$0")"
 
 # Compile with hcc using optimization flags
 # -DHCC_LINK_SQLITE3=1 for SQLite support

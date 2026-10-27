@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | Language | Ruby 4.0.7 with YJIT, built from source with jemalloc and `-march=native` |
-| Framework | [async](https://github.com/socketry/async) 2.46.0 reactor on io-event 1.22.1 (io_uring selector, epoll fallback); the HTTP/1.1 layer is our own (`http.rb`, `epoll.rb`) |
+| Framework | [async](https://github.com/socketry/async) 2.46.0 reactor on io-event 1.22.1 (io_uring selector, epoll fallback); the HTTP/1.1 layer is our own (`http.rb`), over client connections held as io_uring direct descriptors (`uring_server.rb`, `uring.rb`) with an epoll fallback (`epoll_server.rb`, `epoll.rb`) |
 | SQLite driver | extralite 3.1.3, statically linked to SQLite 3.54.0, built from the amalgamation with profile-guided optimization |
 | JWT | HMAC-SHA256 from libsodium 1.0.22, called through rbnacl 7.1.2's FFI bindings |
 | JSON | built by SQLite (`json_object`); json 3.1.0 parses request bodies and JWT claims through one prebuilt `JSON::Coder` |
@@ -20,6 +20,50 @@ bash build.sh          # gems into vendor/bundle
 SQLITE_PATH=... JWT_SECRET=... HOST=0.0.0.0 PORT=80 bash start.sh
 ```
 
+### Connection layer: io_uring, with an automatic epoll fallback
+
+The server holds client connections as io_uring *direct descriptors* when the kernel allows it, and
+falls back to epoll by itself when it doesn't. Nothing needs configuring; the startup line says which
+layer is running:
+
+```
+listening on 0.0.0.0:80 (UringServer, 143 iseqs compiled)
+```
+
+or, after the fallback:
+
+```
+io_uring connections unavailable (Operation not permitted - io_uring_queue_init); using epoll
+listening on 0.0.0.0:80 (EpollServer, 141 iseqs compiled)
+```
+
+What the io_uring layer needs, all of which a stock Ubuntu 24.04 has:
+
+- **liburing 2.4 or newer**, for `liburing-ffi.so.2` (liburing's inline helpers as exported
+  functions, which `uring.rb` binds through the `ffi` gem; nothing is compiled). `install.sh` installs
+  `liburing-dev`, which pulls in `liburing2`. Ubuntu 24.04 ships 2.5.
+- **Linux 6.0 or newer**, for multishot receive (multishot accept into direct descriptors needs 5.19).
+  Tested on Ubuntu's 6.8.
+- **io_uring not blocked.** `sysctl kernel.io_uring_disabled` must be 0 (the default), and no seccomp
+  filter or systemd `SystemCallFilter` may deny `io_uring_setup`. Docker's default seccomp profile
+  denies it, so in Docker add `--security-opt seccomp=unconfined` or the server runs on epoll.
+
+If any of these is missing, starting the rings raises (`LoadError` when liburing-ffi isn't found,
+`SystemCallError` when io_uring is refused) before the listener is bound, and `server.rb` starts the
+epoll layer instead, which is the previous, fully tested version of this server. We checked the
+fallback by running the server under a systemd unit with `SystemCallFilter=~io_uring_setup`: it
+logged the line above and passed `/health`. The test suite passes 42/42 in both modes.
+
+Settings (environment variables, both optional):
+
+| Variable | Default | Effect |
+|---|---|---|
+| `CONNECTIONS` | unset | `epoll` forces the fallback layer |
+| `URING_RINGS` | `2` | io_uring rings; each holds up to the soft `RLIMIT_NOFILE` (at most 65,535) connections |
+
+With `LimitNOFILE=65535` and two rings, the server can hold 131,070 connections while the process
+itself keeps about 15 descriptors open.
+
 ## Optimizations, and why
 
 The first version ran on Falcon. Under load, its fiber per connection and the objects async-http
@@ -27,8 +71,21 @@ keeps for each one cost about 40 KB per connection, and garbage collection had t
 At 20k connections each GC paused for about 150 ms, and that pause set the latency floor. This
 version keeps the Async reactor and replaces the HTTP server.
 
-- **Idle connections own no fiber.** An idle keep-alive connection sits in a kernel epoll set and
-  owns no Ruby fiber. Each connection is registered once, edge-triggered, so there is no `epoll_ctl`
+- **Connections live outside the descriptor table.** With the scoring box's 65,535-descriptor
+  limit, an epoll server can't hold more keep-alive users than that: past it, it has to close idle
+  connections so clients reconnect, and each reconnect cost us about twice as much CPU as a request.
+  `uring_server.rb` accepts every connection straight into a slot of an io_uring ring's registered
+  file table (multishot accept with `IORING_FILE_INDEX_ALLOC`). Those slots aren't process
+  descriptors, so they don't count against `RLIMIT_NOFILE`. The kernel caps each ring's table at
+  that limit, but every ring has its own table, so two rings hold 131,070 connections. Each
+  connection has one multishot receive armed for its whole life, filled from a group of provided
+  buffers, so there is no `epoll_wait`, no per-read syscall, and no Ruby `Socket` object per
+  connection. One Async task per ring waits on the ring's eventfd through the reactor. Responses are
+  queued as sends, in order per connection, and handed to the kernel together. Ubuntu's 6.8 kernel
+  rejects registering a buffer ring (`IORING_REGISTER_PBUF_RING`) with `EINVAL`, even from C, so the
+  buffers use the older `IORING_OP_PROVIDE_BUFFERS`.
+- **Idle connections own no fiber.** In either layer an idle keep-alive connection owns no Ruby
+  fiber. In the epoll fallback it sits in a kernel epoll set. Each connection is registered once, edge-triggered, so there is no `epoll_ctl`
   per request. One Async task waits on that epoll descriptor through the reactor. A pool of 256
   worker fibers (it grows, up to 4096, only when every worker is busy) reads each ready connection,
   answers every complete request in its buffer in order, and writes each response with one `write`.
@@ -48,10 +105,15 @@ version keeps the Async reactor and replaces the HTTP server.
   first real requests don't pay for compilation. The warm-up token is signed with libsodium, which is
   loaded anyway; loading `openssl` for it cost 8 MB of RSS, and 300 iterations instead of 50 left
   another 27 MB of garbage resident. Idle RSS is 36 MB either way now.
-- **io_uring for socket reads and writes.** io-event picks io_uring on the droplet's kernel. Reads
-  and writes go through the fiber scheduler, so io_uring submits them in batches instead of one
-  syscall each. Together with edge-triggered epoll, that cut CPU at 40k users from about 46% to 40%
-  on our test VM.
+- **io_uring for socket reads and writes in the epoll fallback.** io-event picks io_uring where it
+  can. Reads and writes go through the fiber scheduler, so io_uring submits them in batches instead
+  of one syscall each. Together with edge-triggered epoll, that cut CPU at 40k users from about 46%
+  to 40% on our test VM.
+- **No `IO#write`.** `socket.write` holds the socket's write lock while the scheduler's write is in
+  flight, and Ruby 4.0 keeps every mutex a thread holds in one linked list that it walks on every
+  unlock (`thread_mutex_remove`). With thousands of writes in flight under overload, unlocking took
+  11% of the CPU. The epoll layer calls the scheduler's `io_write` directly, and the io_uring layer
+  never creates Ruby IO objects for clients.
 - **SQLite builds every response.** `json_object` and `group_concat` produce the exact response bytes,
   so Ruby never allocates a hash per row or serializes JSON on reads. All statements are prepared once.
   The single-post query binds its id as `p.id=+?`: with a plain `?` in that join, SQLite treated the
@@ -78,8 +140,11 @@ version keeps the Async reactor and replaces the HTTP server.
 - **Likes in one statement**: `INSERT ... SELECT ... WHERE EXISTS (post) ON CONFLICT DO NOTHING`. A
   post-existence check runs only when nothing was inserted, to tell "already liked" from "no such post".
 - **Direct instead of Nginx.** On one core, Nginx's CPU comes out of Ruby's budget, and the provided
-  `nginx.conf` caps out near 16k connections. Responses switch to `Connection: close` only within 256
-  descriptors of the process's file limit, so clients aren't forced to reconnect under normal load.
+  `nginx.conf` caps out near 16k connections. Responses switch to `Connection: close` only near the
+  connection layer's capacity, so clients aren't forced to reconnect under normal load: past it less
+  1,280, responses other than the feed close (a client thinks longest after a post, so its slot stays
+  free longest), and past it less 256, every response closes. With io_uring that capacity is
+  131,070; with epoll it's the descriptor limit.
 - **TCP_NODELAY is set on the listener** and inherited by accepted sockets on Linux, so there is
   no `setsockopt` per connection.
 
@@ -131,8 +196,9 @@ lives as long as the connection (`recv_nonblock` doesn't); the scheduler's `io_r
 
 A perf profile at 40k users: 40% of samples in the kernel (TCP transmit, virtio), about 15% in
 SQLite, 1.3% in the regex engine, and only 15k `epoll_wait` calls against 84k requests in 20 s, so
-moving the idle set from epoll to io_uring multishot polls would save a few percent at most and
-needs a C extension; not done.
+moving the idle set from epoll to io_uring multishot polls would save a few percent at most. That
+was true at 40k users. Past the descriptor limit, reconnects dominate instead, which is what the
+io_uring layer removes (below).
 
 ### k6 with the unmodified `bench/load.js`
 
@@ -164,16 +230,39 @@ With the cap lifted (one full core), the same protocol passes the video's larges
 | 60,000 | 12 ms | 35 ms | 0% | 112 µs | 184 MB | pass |
 | 64,000 | 17 ms | 39 ms | 0% | 113 µs | 188 MB | pass |
 
-Test suite: 42/42 on x86_64.
+### Past the descriptor limit: io_uring direct descriptors
+
+The scored run (LEADERBOARD.md, Synteq 1 vCPU) gave the epoll version 71,000 users at 111 µs per
+request and 83% CPU. On our VM with one full core, the same protocol with the descriptor limit at
+65,535 (k6 split 60/20/20 over three load VMs):
+
+| VUs | Epoll layer | io_uring layer |
+|---|---|---|
+| 69,000 | pass: 101 / 582 ms, 122 µs, 180k accepts | pass: 76 / 717 ms, 117 µs, 69k accepts |
+| 72,000 | fail: 1.27 s / 2.10 s, 128 µs, 255k accepts | **pass: 76 / 565 ms, 115 µs, 72k accepts** |
+| 75,000 | fail: 1.26 s / 1.65 s, 134 µs, 334k accepts | fail by 32 ms: 254 ms / 1.03 s on the 60% load VM (690 ms on the others), 116 µs |
+
+With io_uring every user connects once, CPU per request stays flat at 115–117 µs instead of climbing
+as the server overloads, and the process holds 15 descriptors with 75,000 connections open (RSS
+196 MB). At 80,000 VUs the server held all connections (215 MB) but k6 on the largest load VM ran out
+of memory, so we have no result past 75k.
+
+Test suite: 42/42 on x86_64, with either connection layer.
 
 ## Trade-offs
 
-- Linux only, because epoll is bound through FFI.
-- No idle timeout. Connections stay open until the client closes them, and the descriptor guard
-  covers the extreme case. A worker that picks up a stale edge-triggered event waits on that
-  connection until the client sends or closes; the growable pool keeps that from starving others.
-- Reads call io-event's scheduler `io_read` directly with an `IO::Buffer`, which Ruby still marks
-  experimental (it prints a warning at startup). On an epoll-only kernel it still works, unbatched.
+- Linux only, because io_uring and epoll are bound through FFI.
+- Two connection layers to maintain. The epoll layer is kept because io_uring is often blocked in
+  containers and sandboxes, and a server that fails to start scores nothing.
+- No idle timeout. Connections stay open until the client closes them, and the capacity guard
+  covers the extreme case. In the epoll layer, a worker that picks up a stale edge-triggered event
+  waits on that connection until the client sends or closes; the growable pool keeps that from
+  starving others. The io_uring layer has no stale events.
+- Each response is copied once into FFI memory for its send, and each receive is copied out of its
+  provided buffer into a Ruby string.
+- The epoll layer calls io-event's scheduler `io_read` and `io_write` directly with an `IO::Buffer`,
+  which Ruby still marks experimental (it prints a warning at startup). On an epoll-only kernel it
+  still works, unbatched.
 - The parser covers what this API needs: no chunked request bodies and no `Expect: 100-continue`.
 
 ## License

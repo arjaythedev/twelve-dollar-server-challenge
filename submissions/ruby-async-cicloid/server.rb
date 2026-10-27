@@ -2,13 +2,23 @@
 
 require "async"
 require_relative "app"
-require_relative "http"
 
 host = ENV.fetch("HOST", "127.0.0.1")
 port = Integer(ENV.fetch("PORT", "3000"))
 store = Store.new(ENV.fetch("SQLITE_PATH"))
 app = App.new(store, ENV.fetch("JWT_SECRET"))
-server = HTTPServer.new(app, host, port)
+# Client connections as io_uring direct descriptors where the kernel allows it, else in epoll.
+# CONNECTIONS=epoll forces the fallback.
+server = begin
+  raise LoadError, "CONNECTIONS=epoll" if ENV["CONNECTIONS"] == "epoll"
+
+  require_relative "uring_server"
+  UringServer.new(app, host, port)
+rescue LoadError, SystemCallError => error
+  $stderr.puts "io_uring connections unavailable (#{error.message}); using epoll"
+  require_relative "epoll_server"
+  EpollServer.new(app, host, port)
+end
 
 # Warm YJIT before listening: reads, a JWT verification and a body parse, 50 times each (the call
 # threshold is 5). Nothing is written: the post body fails validation after it is parsed, and the
@@ -39,5 +49,5 @@ Async do |task|
 
   server.run(task)
   compiled = RubyVM::YJIT.enabled? ? "#{RubyVM::YJIT.runtime_stats[:compiled_iseq_count]} iseqs compiled" : "YJIT off"
-  $stderr.puts "listening on #{host}:#{port} (#{compiled})"
+  $stderr.puts "listening on #{host}:#{port} (#{server.class}, #{compiled})"
 end

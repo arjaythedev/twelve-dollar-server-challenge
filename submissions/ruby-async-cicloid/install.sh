@@ -8,6 +8,7 @@ apt-get update
 apt-get install -y --no-install-recommends build-essential curl ca-certificates pkg-config \
   libssl-dev libyaml-dev zlib1g-dev libffi-dev libgmp-dev libjemalloc-dev rustc \
   liburing-dev unzip
+# liburing-dev pulls in liburing2, whose liburing-ffi.so.2 the server loads at runtime (uring.rb).
 
 here="$(cd "$(dirname "$0")" && pwd)"
 # Tune for the CPU it is built on (the benchmark droplet is x86_64). On arm64 -march=native combines

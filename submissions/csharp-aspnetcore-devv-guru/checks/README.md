@@ -13,9 +13,16 @@ are pinned; restore uses the updated lock file.
 
 The final native publish completed with warnings treated as errors under a
 one-core CPU quota, 2 GiB memory limit and no swap. Its observed build cgroup
-peak was 1,251,532,800 bytes. The executable was about 12 MB, plus the SQLite
+peak was 1,102,098,432 bytes. The executable was about 12 MB, plus the SQLite
 native library; separate debug symbols remain available in the publish folder.
-The Linux executable passed the 42 official and 49 exclusive-access checks.
+The measured executable SHA-256 is
+`51517c3bd97d35d23bb235f08aed9e6d381182f20f249e4948ca147d36c6ac71`;
+the bundled `libe_sqlite3.so` SHA-256 is
+`4dc77b4c5c49be108470ada98911a5db7af9be23e923fdc2d00e2b93f55d70ac`.
+Source, project and lock-file hashes match the measured build's manifest.
+
+The Linux executable passed the 42 official and 52 exclusive-access checks,
+including a complete escaped/Unicode feed over 60 KB with exact Content-Length.
 The preserved PR #195 baseline also passed its original 46 shared-access checks
 with `integration.py --database-access shared`. The exclusive profile checks
 live API freshness and rejected external access, and stops the server for SQL
@@ -78,6 +85,99 @@ rejects loads exceeding that range unless enough source IPs are specified.
 with existing loopback addresses. It changes no OS settings. At 30,000 users, a
 mid-hold snapshot confirmed 15,000 connections from each of the two addresses.
 An earlier single-address attempt was stopped during warm-up and excluded.
+
+### Final read-path build: confirmation hold
+
+The final Native AOT executable passed the unchanged challenge thresholds at
+45,000 VUs, with a fresh database, two-minute 1,000-VU warm-up, 60-second ramp,
+five-minute hold, 30-second ramp-down and ten-second graceful stop. Runtime/DB
+counters were enabled. Client GOGC=100 / GOMEMLIMIT=12GiB and two loopback source
+IPs match the earlier higher-load setup.
+
+| Measurement | Final build |
+|---|---:|
+| Requests | 1,678,637 |
+| Requests/sec including ramps | 3,957.44 |
+| HTTP p95 / p99 | 43.96 / 106.93 ms |
+| HTTP errors | 0 |
+| Central-hold server CPU, one-core scale | 63.87% |
+| Server cgroup / observed process RSS peak | 1,031 / 699 MiB |
+| Client observed RSS peak | 11,866 MiB |
+
+No observed client/server swapping or OOM kills. The stopped database passed
+quick_check and foreign-key checks; its 515,691 posts reconcile to
+500,000 seed plus 164 warm-up and
+15,527 measured acknowledged creates. This is
+one local hold and does not establish the target VM's score or an exact ceiling.
+The earlier exclusive build at 45k averaged 81.46% CPU and 700.80 ms p99;
+overall throughput was similar at 3,986 req/s. This is one full comparison,
+with the changes combined and no isolation of their individual contributions.
+
+Both higher-load attempts had zero HTTP errors but failed p99:
+
+| Users | Requests/sec | p95 / p99 | Thresholds |
+|---|---:|---:|---|
+| 47,500 | 4,122.98 | 425.04 / 1,076.27 ms | Fail (p99) |
+| 50,000 | 4,350.82 | 334.16 / 1,042.58 ms | Fail (p99) |
+
+The lower-load retry had worse p99, demonstrating local variability. These
+runs do not establish a capacity increase over the earlier 45k build. Both
+stopped databases passed consistency, foreign-key and acknowledged-create
+reconciliation checks. Raw failed runs are
+`results/performance-20261027T225949Z-2244cf` (50k) and
+`results/performance-20261027T231033Z-fba98e` (47.5k).
+Raw final run: `results/performance-20261027T232131Z-4ef71b`.
+Final reports are `results/native-read-final-analysis.json` and
+`results/native-read-final-integrity.json`. Generated reports remain ignored.
+
+### Profiling and read-path changes: 2026-10-27
+
+GNU gprofng sampled the native executable with its debug symbols during a
+30-second, 64-VU diagnostic workload under the same one-core/2 GiB/no-swap
+server limits. The original profile attributed 12.12% inclusive sampled CPU to
+`sqlite3RunParser`, reached through `sqlite3Reprepare` during `sqlite3_step`.
+With QPSG and immediate write-permit acquisition, parser samples fell to 0.31%
+and the reprepare frame had no samples. These overlapping inclusive frames must
+not be added, and no samples is not proof of zero calls.
+
+A separate native statement-counter diagnostic using the actual bundled
+SQLite 3.54.0 changed QPSG only: 26 ID lookups produced five automatic reprepares
+with it off and zero with it on. Response BLOB bytes, missing-ID behavior and
+the tested EXPLAIN QUERY PLAN rows matched. `ENABLE_STAT4` was false in this
+library; the evidence establishes suppressed bound-value replanning, without
+claiming a STAT4 cause. QPSG retains query plans, not results.
+
+Two balanced short pairs per change used fresh servers/databases, 64 constant
+VUs without think time, ten-second warm-up and 30-second measure. All measured
+runs had zero HTTP errors. These are diagnostic rates, not leaderboard scores.
+
+| Change | Baseline mean req/s | Candidate mean req/s | Paired changes | Decision |
+|---|---:|---:|---|---|
+| Remove write limiter entirely | 8,235 | 7,055 | -16.60%, -12.11% | Rejected |
+| Immediate permit acquisition + QPSG | 8,376 | 11,023 | +29.18%, +34.41% | Retained |
+| Raw UTF-8 reads after the preceding changes | 11,147 | 11,552 | +4.09%, +3.12% | Retained |
+
+The plan-stability candidate combines two changes; the throughput comparison
+does not isolate their contributions. The raw-reader comparison uses that
+candidate as its baseline. It removes intermediate managed response arrays and
+ADO.NET reader machinery. Kestrel can copy pre-header memory into its output
+pipe, so this is not described as zero-copy. SQLite memory is copied while valid;
+the statement reaches DONE and resets before the destination advances, and the
+network flush is outside the database lock.
+
+A separate sequential allocation pair attached the pinned System.Runtime
+collector before traffic (1s sampling), then stopped each server and waited for
+export. Summed allocation increments divided by warm-up+measured request counts
+were 3,636.06 bytes/request for plan-only versus 1,720.73 for direct reads
+(-52.68%). Both had zero HTTP errors/failed checks and identical SQLite library
+hashes. This approximate allocation comparison is not a resident-memory claim;
+sampling boundaries and background/startup work can affect the totals. The
+report is `results/raw-allocation-comparison.json`.
+
+Local sources/reports are ignored: `results/qpsg-diagnostic.py` and `.json`,
+`results/next-optimization-probes.json`, and
+`results/profile-{current,plan}-functions.txt`. The profile is for locating work;
+the unprofiled pairs are used for throughput comparisons.
 
 ### Single-connection comparison: 2026-10-27
 
@@ -183,7 +283,7 @@ and foreign-key checks, and reconciles post counts with successful create
 requests from warm-up and measurement. The integration suite separately verifies
 the 201 response contract. This is a post-load check, not a power-failure test.
 
-All four completed load-test databases passed these checks. The final 40k
+All four earlier pooled/socket comparison databases passed these checks. That 40k
 database had 513,878 posts: 500,000 seed rows plus 170 warm-up and 13,708 measured
 successful creates.
 The final report is `results/followup-final-40000-integrity.json`.

@@ -1,4 +1,5 @@
 using Microsoft.Data.Sqlite;
+using SQLitePCL;
 
 namespace FeedApi.Data;
 
@@ -6,11 +7,12 @@ namespace FeedApi.Data;
 internal sealed class FeedSession : IDisposable
 {
     private readonly List<SqliteCommand> _commands = [];
+    private readonly List<SqliteJsonStatement> _jsonStatements = [];
     public SqliteConnection Connection { get; }
     public string SqliteVersion { get; }
     public SqliteCommand Health { get; }
-    public SqliteCommand Feed { get; }
-    public SqliteCommand Post { get; }
+    public SqliteJsonStatement Feed { get; }
+    public SqliteJsonStatement Post { get; }
     public SqliteCommand CreatePost { get; }
     public SqliteCommand Like { get; }
     public SqliteCommand PostExists { get; }
@@ -42,8 +44,13 @@ internal sealed class FeedSession : IDisposable
             if (Convert.ToInt64(setup.ExecuteScalar()) != 1)
                 throw new InvalidOperationException("SQLite foreign key enforcement is required.");
 
+            // These indexed lookups do not need a new plan when only an ID changes.
+            var result = raw.sqlite3_db_config(Connection.Handle!, raw.SQLITE_DBCONFIG_ENABLE_QPSG, 1, out var enabled);
+            if (result != raw.SQLITE_OK || enabled != 1)
+                throw new InvalidOperationException("SQLite query planner stability is required.");
+
             Health = Prepare("SELECT 1");
-            Feed = Prepare("""
+            Feed = PrepareJson("""
                 SELECT CAST(json_object('posts', json_group_array(json_object(
                     'id', p.id, 'body', p.body, 'created_at', p.created_at,
                     'author', p.author, 'like_count', p.like_count))) AS BLOB)
@@ -54,14 +61,14 @@ internal sealed class FeedSession : IDisposable
                      ORDER BY p.created_at DESC, p.id DESC LIMIT 20
                   ) p
                 """);
-            Post = Prepare("""
+            Post = PrepareJson("""
                 SELECT CAST(json_object('post', json_object(
                     'id', p.id, 'body', p.body, 'created_at', p.created_at,
                     'author', u.username,
                     'like_count', (SELECT count(*) FROM likes l WHERE l.post_id = p.id))) AS BLOB)
                   FROM posts p JOIN users u ON u.id = p.user_id
                  WHERE p.id = $id
-                """, ("$id", SqliteType.Integer));
+                """);
             CreatePost = Prepare("INSERT INTO posts (user_id, body) VALUES ($user, $body) RETURNING id, created_at",
                 ("$user", SqliteType.Integer), ("$body", SqliteType.Text));
             Like = Prepare("""
@@ -76,6 +83,13 @@ internal sealed class FeedSession : IDisposable
             Dispose();
             throw;
         }
+    }
+
+    private SqliteJsonStatement PrepareJson(string sql)
+    {
+        var statement = new SqliteJsonStatement(Connection, sql);
+        _jsonStatements.Add(statement);
+        return statement;
     }
 
     private SqliteCommand Prepare(string sql, params (string Name, SqliteType Type)[] parameters)
@@ -98,6 +112,8 @@ internal sealed class FeedSession : IDisposable
 
     public void Dispose()
     {
+        foreach (var statement in _jsonStatements)
+            statement.Dispose();
         foreach (var command in _commands)
             command.Dispose();
         Connection.Dispose();

@@ -328,6 +328,32 @@ def main():
                 check(status == 201, "standard IdentityModel validation accepts a stronger secret")
                 check(server.request("POST", "/posts", valid, {"body": "wrong key"})[0] == 401,
                       "old challenge signature rejected with stronger secret")
+
+                # Escaping valid control characters expands this feed to about 60 KB.
+                large_token = token(server.secret)
+                large_creates = []
+                for index in range(20):
+                    prefix = f"large-{index:02d}:\U0001f642"
+                    text = prefix + "\x01" * (500 - len(prefix))
+                    status, payload, _ = server.request("POST", "/posts", large_token, {"body": text})
+                    large_creates.append((status, payload, text))
+                check(all(status == 201 and payload["post"]["body"] == text
+                          for status, payload, text in large_creates),
+                      "20 posts with 500-codepoint escaped control-character bodies are accepted")
+                expected_large_posts = sorted((payload["post"] for _, payload, _ in large_creates),
+                                              key=lambda post: (post["created_at"], post["id"]), reverse=True)
+                with urllib.request.urlopen(f"http://127.0.0.1:{server.port}/feed", timeout=15) as response:
+                    large_status = response.status
+                    large_content_length = response.headers.get("Content-Length")
+                    large_raw = response.read()
+                large_feed = json.loads(large_raw)
+                check(large_status == 200 and list(large_feed) == ["posts"] and
+                      large_feed["posts"] == expected_large_posts and
+                      all(list(post) == expected_keys for post in large_feed["posts"]),
+                      "large feed preserves all 20 posts, ordering, escaped bodies and object key order")
+                check(len(large_raw) >= 60_000 and large_content_length is not None and
+                      int(large_content_length) == len(large_raw),
+                      "large feed Content-Length matches its complete UTF-8 body of at least 60 KB")
             except BaseException:
                 server.stop(kill=True)
                 log.flush()

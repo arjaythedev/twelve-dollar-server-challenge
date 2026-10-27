@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Diagnostics;
 using System.Threading.RateLimiting;
 using FeedApi.Data;
@@ -59,14 +60,15 @@ internal sealed class FeedRepository : IDisposable
         }
     }
 
-    public byte[] GetFeedJson()
+    public int CopyFeedJson(IBufferWriter<byte> destination)
     {
         using var duration = _metrics.Measure("feed");
         lock (_database)
         {
             try
             {
-                return (byte[])GetSession().Feed.ExecuteScalar()!;
+                var length = GetSession().Feed.CopyTo(destination);
+                return length >= 0 ? length : throw new InvalidOperationException("The feed query did not return JSON.");
             }
             catch
             {
@@ -76,16 +78,14 @@ internal sealed class FeedRepository : IDisposable
         }
     }
 
-    public byte[]? GetPostJson(long id)
+    public int CopyPostJson(long id, IBufferWriter<byte> destination)
     {
         using var duration = _metrics.Measure("post");
         lock (_database)
         {
             try
             {
-                var command = GetSession().Post;
-                command.Parameters[0].Value = id;
-                return (byte[]?)command.ExecuteScalar();
+                return GetSession().Post.CopyTo(destination, id);
             }
             catch
             {
@@ -197,6 +197,13 @@ internal sealed class FeedRepository : IDisposable
     private async ValueTask<RateLimitLease> AcquireWriteAsync(CancellationToken cancellationToken)
     {
         var start = Stopwatch.GetTimestamp();
+        var immediate = _writes.AttemptAcquire(1);
+        if (immediate.IsAcquired)
+        {
+            _metrics.WriteWait(Stopwatch.GetElapsedTime(start).TotalMilliseconds);
+            return immediate;
+        }
+        immediate.Dispose();
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         deadline.CancelAfter(TimeSpan.FromSeconds(2));
         RateLimitLease lease;

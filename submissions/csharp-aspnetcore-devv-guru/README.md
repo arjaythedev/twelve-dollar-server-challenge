@@ -14,7 +14,7 @@ latency while keeping the required API behavior.
 |---|---|
 | C# / SDK | C# 14 / .NET SDK 10.0.401 |
 | Runtime | .NET / ASP.NET Core 10.0.13, Native AOT Linux x64 |
-| SQLite driver | Microsoft.Data.Sqlite 10.0.13 |
+| SQLite driver | Microsoft.Data.Sqlite 10.0.13; SQLitePCLRaw 2.1.14 for feed/post reads |
 | Native SQLite | SQLitePCLRaw.bundle_e_sqlite3 2.1.14; SQLite 3.54.0 in the tested build |
 | JWT | Microsoft.IdentityModel.JsonWebTokens 8.23.0 |
 | HTTP / JSON | Kestrel HTTP/1.1 / SQLite JSON for reads, System.Text.Json for writes |
@@ -63,7 +63,7 @@ Native build details and local benchmark setup are in the
 
 - **One prepared SQLite connection.** The singleton repository owns one open
   connection and all prepared commands. A short lock serializes database access;
-  authentication, body parsing and response writes run outside it. Readers and
+  authentication, body parsing and network flushing run outside it. Readers and
   transactions finish before releasing the lock. A failed session is discarded
   and recreated with the same settings on the next request.
 - **Exclusive database ownership.** `locking_mode=EXCLUSIVE` is set before the
@@ -74,15 +74,21 @@ Native build details and local benchmark setup are in the
   returning success. This removes the extra WAL flush on each commit, as allowed
   by rule 6. Acknowledged writes can be lost after a power failure or system
   crash. Foreign keys remain enabled. The write limiter queues up to 256 requests
-  with a two-second admission deadline. Queued
-  requests await a permit without holding a database session or worker thread.
+  with a two-second admission deadline. An available permit is acquired without
+  creating a linked cancellation source or timer. Queued requests await a permit
+  without holding a database session or worker thread.
   Queue rejection and other unexpected errors use the spec's generic JSON 500.
 - **SQLite-generated JSON.** Feed and post queries use the existing indexes and
   SQLite's JSON functions to produce the response in UTF-8. Casting the result
-  to a BLOB lets the driver return bytes directly, avoiding per-post .NET
-  objects, UTF-16 strings and a second JSON encoding pass. Every request executes
-  its query against current data; no result bytes are retained between requests.
+  to a BLOB lets a persistent SQLitePCLRaw statement copy UTF-8 into the response
+  buffer, avoiding an intermediate response array, ADO.NET reader and per-post
+  .NET objects. The statement finishes and resets before output is advanced;
+  network flushing happens after releasing the database lock. Every request
+  executes its query against current data; no result bytes are retained between requests.
   Likes use `ON CONFLICT DO NOTHING` for idempotency.
+- **Stable query plans.** `SQLITE_DBCONFIG_ENABLE_QPSG` is enabled on every open
+  connection. It avoids bound-value-driven replanning of the indexed ID lookups.
+  This retains execution plans, not query results; every request reads SQLite.
 - **Framework request handling.** Endpoint modules group the health, feed and
   post routes. Writes, health and errors use explicit generated JSON type
   metadata; read JSON uses the same field order in SQL. Body size is limited to
@@ -117,10 +123,11 @@ Challenge tokens have no issuer or audience.
 ## Verification
 
 On 2026-10-27, the Native AOT build passed the official **42/42** checks and
-the additional **49/49** exclusive-access checks on Linux. They cover JSON
+the additional **52/52** exclusive-access checks on Linux. They cover JSON
 escaping and ordering, Unicode, concurrent writes, fresh API reads, exclusive
 ownership, rollback, commit visibility after an immediate process kill, restart
-and offline backup/restore. The publish completed with
+and offline backup/restore. A feed over 60 KB verifies complete escaped/Unicode
+bodies, ordering and the exact UTF-8 `Content-Length`. The publish completed with
 warnings treated as errors under a one-core / 2 GiB / no-swap build limit.
 The same-day NuGet audit reported no known vulnerable direct or transitive
 packages; whitespace verification passed.
@@ -149,27 +156,33 @@ limit and no swap. Rates and latency include ramp/drain.
 
 | Build | Virtual users | Requests/sec | HTTP p95 / p99 | HTTP errors | Thresholds |
 |---|---:|---:|---:|---:|---|
-| Pooled readers, initial PR #195 | 40,000 | 3,523 | 225.95 / 455.24 ms | 0 | Pass |
-| Same preserved build | 45,000 | 3,926 | 464.10 / 1,257.75 ms | 0 | Fail |
-| One connection, exclusive ownership | 45,000 | 3,986 | 357.68 / 700.80 ms | 0 | Pass |
+| Earlier exclusive-connection build | 45,000 | 3,986 | 357.68 / 700.80 ms | 0 | Pass |
+| Stable plans + direct UTF-8 reads | 45,000 | 3,957 | 43.96 / 106.93 ms | 0 | Pass |
+| Same final build | 47,500 | 4,123 | 425.04 / 1,076.27 ms | 0 | Fail (p99) |
+| Same final build | 50,000 | 4,351 | 334.16 / 1,042.58 ms | 0 | Fail (p99) |
 
-**The single-connection build passed 45,000 users locally.** The matched 45k
-baseline failed the p99 threshold. This is one full-duration pair: it supports
-retaining the change for its observed tail latency, without establishing an
-exact capacity ceiling or a large throughput improvement.
+**45,000 users passed the five-minute hold locally with the final build.**
+The 47,500- and 50,000-user attempts completed without HTTP errors but missed
+the p99 limit. The lower-load retry had worse p99, showing local run variability;
+these attempts do not establish a capacity increase over the earlier build.
+Central-hold server CPU averaged 63.9% of one core; observed process RSS
+peaked at 699 MiB and cgroup memory at 1,031 MiB, including charged page
+cache. The client peaked at 11,866 MiB RSS. No app/client swap or OOM kills
+were observed. The stopped database passed consistency/foreign-key checks and
+contained all acknowledged creates (515,691 posts including the seed).
+The earlier 45k build averaged 81.5% CPU. This single pair shows lower observed
+CPU and tail latency with similar request throughput.
 
-Central-hold server CPU averaged 82.9% for the baseline and 81.5% for the candidate.
-Observed process RSS peaks were 723 and 728 MiB; cgroup peaks, including charged
-page cache, were 1,429 and 1,440 MiB. Both had zero HTTP errors, swap and OOM kills.
-Both databases passed post-load consistency/foreign-key checks and acknowledged
-create reconciliation. The candidate contained all 15,315 acknowledged warm-up
-and measured creates on top of the 500,000 seed posts.
+Separate short probes found +31.6% mean throughput for stable plans plus the
+write fast path, and +3.6% for direct reads against that version. The allocation
+probe recorded approximately 3,636 versus 1,721 managed bytes/request for the
+direct reader. These are small diagnostic comparisons, not capacity predictions.
 
-These are same-host WSL diagnostics with k6 outside the server cgroup. The OS is
-outside that memory limit, and CPU quotas/loopback traffic differ from the
-target VM. Official scoring remains pending. The
-[verification guide](checks/README.md#load-testing) includes the client resource
-use, inconclusive short probes and earlier comparisons.
+These are same-host WSL results with k6 outside the server cgroup and a CPU quota,
+which differ from the target VM and a remote client. They confirm this tested
+load rather than an exact ceiling or an official score. The
+[verification guide](checks/README.md#load-testing) includes the previous matched
+45k comparison, profiling, rejected changes and resource limitations.
 
 ## License
 

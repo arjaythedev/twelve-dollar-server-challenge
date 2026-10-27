@@ -60,3 +60,31 @@ fn test_read_only_batch_leaves_writes_open() {
 
 	assert !s.writes_paused
 }
+
+fn body_of(raw string) ?string {
+	mut key := []u8{}
+	mut body := []u8{}
+	return body_member(raw, mut key, mut body)
+}
+
+fn test_body_member_rejects_unclosed_array_ending_in_number() {
+	// x.json2 never returned on these, which stopped the event loop.
+	for raw in ['[0', '[1,0', '[1.5', '{"body":"x","a":[0'] {
+		assert body_of(raw) == none
+	}
+}
+
+fn test_body_member_decodes_body_string() {
+	assert body_of('{"body":"hi"}')? == 'hi'
+	assert body_of(' { "n" : [1, {"b": null}], "body" : "a\\"b\\u00e9\\ud83d\\ude00" } ')? == 'a"bé😀'
+	assert body_of('{"body":"x","body":"y"}')? == 'y'
+	assert body_of('{"body":"x","body":1}')? == ''
+	assert body_of('[1,2]')? == ''
+}
+
+fn test_body_member_rejects_invalid_json() {
+	for raw in ['', '{', '{"body":"x",', '{"body":"x"}}', '{"body":"x",}', '{"body":"\\q"}', '{"body":"\\ud800"}',
+		'{"body":"x","n":01}', '{"body":"x","n":1.}'] {
+		assert body_of(raw) == none
+	}
+}

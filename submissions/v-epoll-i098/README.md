@@ -5,7 +5,7 @@
 | Language | V 0.5.2 (commit `7647ce1`), built from source by `install.sh` from its pinned C bootstrap (vlang/vc `7eb8c54`) |
 | Framework | none: one V event loop with a C io_uring transport |
 | SQLite driver | the SQLite C API called directly from V, SQLite 3.54.0 amalgamation (SHA-256 checked) compiled by `build.sh` |
-| JWT | HMAC-SHA256 from OpenSSL's libcrypto (Ubuntu `libssl-dev`), JSON claims parsed with V's `x.json2` |
+| JWT | HMAC-SHA256 from OpenSSL's libcrypto (Ubuntu `libssl-dev`); JWT claims and post bodies are parsed by hand in `main.v` |
 | **Nginx or direct** | **Direct**: serves `HOST:PORT` itself (`0.0.0.0:80` on the benchmark box) |
 | Network dependency | liburing 2.9, pinned to `08468cc3830185c75f9e7edefd88aa01e5c2f8ab`, statically linked |
 

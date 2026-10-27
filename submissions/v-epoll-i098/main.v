@@ -5,7 +5,6 @@ module main
 import net
 import os
 import time
-import x.json2
 
 #flag -I @DIR/build
 #flag @DIR/build/sqlite3.o
@@ -123,6 +122,8 @@ mut:
 	body_start int = -1 // where the current response body starts in out; -1 when none is open
 	head      []u8 // scratch for one response header
 	rows      []u8 // scratch for feed rows before they are put in feed order
+	jkey      []u8 // the decoded key of the current JSON member of a post body
+	jbody     []u8 // the decoded "body" member of the current post
 	segs      []Seg
 	flush     []int
 	cur_close bool
@@ -146,6 +147,8 @@ fn main() {
 		out:     []u8{cap: 1 << 20}
 		head:    []u8{cap: header_room}
 		rows:    []u8{cap: 16384}
+		jkey:    []u8{cap: 64}
+		jbody:   []u8{cap: 2048}
 		conns:   []Conn{len: int(C.TD_CAPACITY)}
 	}
 	path := os.getenv('SQLITE_PATH')
@@ -793,18 +796,256 @@ fn json_value_end(src string, from int) ?int {
 	return i
 }
 
+// body_member decodes the "body" member of a post's JSON document (RFC 8259, at most 64 levels,
+// raw control characters allowed in strings as x.json2 allows them). It returns none when raw is
+// not JSON, and '' when the document has no string "body"; a repeated key counts the last time,
+// as in a JSON object decoded to a map. The result points into body_buf.
+// It replaces x.json2, whose decode never returns on input such as `[0`.
+fn body_member(raw string, mut key_buf []u8, mut body_buf []u8) ?string {
+	mut i := skip_ws(raw, 0)
+	mut found := false
+	if i < raw.len && raw[i] == `{` {
+		i = skip_ws(raw, i + 1)
+		if i < raw.len && raw[i] == `}` {
+			i++
+		} else {
+			for {
+				key_buf.clear()
+				i = json_string(raw, i, mut key_buf, true)?
+				i = skip_ws(raw, i)
+				if i >= raw.len || raw[i] != `:` {
+					return none
+				}
+				i = skip_ws(raw, i + 1)
+				is_body := key_buf.len == 4 && unsafe { tos(key_buf.data, 4) } == 'body'
+				if is_body && i < raw.len && raw[i] == `"` {
+					body_buf.clear()
+					i = json_string(raw, i, mut body_buf, true)?
+					found = true
+				} else {
+					found = found && !is_body
+					i = json_value(raw, i, 1, mut key_buf)?
+				}
+				i = skip_ws(raw, i)
+				if i < raw.len && raw[i] == `,` {
+					i = skip_ws(raw, i + 1)
+				} else if i < raw.len && raw[i] == `}` {
+					i++
+					break
+				} else {
+					return none
+				}
+			}
+		}
+	} else {
+		i = json_value(raw, i, 0, mut key_buf)?
+	}
+	if skip_ws(raw, i) != raw.len {
+		return none
+	}
+	return if found { unsafe { tos(body_buf.data, body_buf.len) } } else { '' }
+}
+
+// json_value checks the JSON value at raw[from] and returns the index after it.
+fn json_value(raw string, from int, depth int, mut scratch []u8) ?int {
+	if from >= raw.len || depth > 64 {
+		return none
+	}
+	c := raw[from]
+	if c == `"` {
+		return json_string(raw, from, mut scratch, false)
+	}
+	if c == `t` {
+		return json_literal(raw, from, 'true')
+	}
+	if c == `f` {
+		return json_literal(raw, from, 'false')
+	}
+	if c == `n` {
+		return json_literal(raw, from, 'null')
+	}
+	if c != `{` && c != `[` {
+		return json_number(raw, from)
+	}
+	close := if c == `{` { u8(`}`) } else { u8(`]`) }
+	mut i := skip_ws(raw, from + 1)
+	if i < raw.len && raw[i] == close {
+		return i + 1
+	}
+	for i < raw.len {
+		if c == `{` {
+			i = json_string(raw, i, mut scratch, false)?
+			i = skip_ws(raw, i)
+			if i >= raw.len || raw[i] != `:` {
+				return none
+			}
+			i = skip_ws(raw, i + 1)
+		}
+		i = json_value(raw, i, depth + 1, mut scratch)?
+		i = skip_ws(raw, i)
+		if i < raw.len && raw[i] == close {
+			return i + 1
+		}
+		if i >= raw.len || raw[i] != `,` {
+			return none
+		}
+		i = skip_ws(raw, i + 1)
+	}
+	return none
+}
+
+fn json_literal(raw string, from int, lit string) ?int {
+	if from + lit.len > raw.len || unsafe { raw.substr_unsafe(from, from + lit.len) } != lit {
+		return none
+	}
+	return from + lit.len
+}
+
+// json_number checks -?(0|[1-9][0-9]*)(.[0-9]+)?([eE][+-]?[0-9]+)? at raw[from] and returns the index after it.
+fn json_number(raw string, from int) ?int {
+	mut i := from
+	if i < raw.len && raw[i] == `-` {
+		i++
+	}
+	if i < raw.len && raw[i] == `0` {
+		i++
+	} else {
+		i = json_digits(raw, i)?
+	}
+	if i < raw.len && raw[i] == `.` {
+		i = json_digits(raw, i + 1)?
+	}
+	if i < raw.len && (raw[i] == `e` || raw[i] == `E`) {
+		i++
+		if i < raw.len && (raw[i] == `+` || raw[i] == `-`) {
+			i++
+		}
+		i = json_digits(raw, i)?
+	}
+	return i
+}
+
+fn json_digits(raw string, from int) ?int {
+	mut i := from
+	for i < raw.len && raw[i] >= `0` && raw[i] <= `9` {
+		i++
+	}
+	if i == from {
+		return none
+	}
+	return i
+}
+
+// json_string checks the JSON string at raw[from] and returns the index after its closing quote.
+// With decode it appends the decoded bytes to out.
+fn json_string(raw string, from int, mut out []u8, decode bool) ?int {
+	if from >= raw.len || raw[from] != `"` {
+		return none
+	}
+	mut i := from + 1
+	mut run := i
+	for i < raw.len {
+		c := raw[i]
+		if c != `"` && c != `\\` {
+			i++
+			continue
+		}
+		if decode && i > run {
+			unsafe { out.push_many(raw.str + run, i - run) }
+		}
+		if c == `"` {
+			return i + 1
+		}
+		if i + 1 >= raw.len {
+			return none
+		}
+		e := raw[i + 1]
+		i += 2
+		if e == `u` {
+			mut cp := json_hex4(raw, i)?
+			i += 4
+			if cp >= 0xdc00 && cp <= 0xdfff {
+				return none
+			}
+			if cp >= 0xd800 && cp <= 0xdbff {
+				if i + 1 >= raw.len || raw[i] != `\\` || raw[i + 1] != `u` {
+					return none
+				}
+				lo := json_hex4(raw, i + 2)?
+				if lo < 0xdc00 || lo > 0xdfff {
+					return none
+				}
+				i += 6
+				cp = 0x10000 + ((cp - 0xd800) << 10) + (lo - 0xdc00)
+			}
+			if decode {
+				put_utf8(mut out, cp)
+			}
+		} else {
+			b := match e {
+				`"`, `\\`, `/` { e }
+				`b` { u8(8) }
+				`f` { u8(12) }
+				`n` { u8(10) }
+				`r` { u8(13) }
+				`t` { u8(9) }
+				else { return none }
+			}
+			if decode {
+				out << b
+			}
+		}
+		run = i
+	}
+	return none
+}
+
+fn json_hex4(raw string, from int) ?u32 {
+	if from + 4 > raw.len {
+		return none
+	}
+	mut v := u32(0)
+	for k in from .. from + 4 {
+		c := raw[k]
+		mut d := u32(0)
+		if c >= `0` && c <= `9` {
+			d = u32(c - `0`)
+		} else if c >= `a` && c <= `f` {
+			d = u32(c - `a` + 10)
+		} else if c >= `A` && c <= `F` {
+			d = u32(c - `A` + 10)
+		} else {
+			return none
+		}
+		v = v << 4 | d
+	}
+	return v
+}
+
+fn put_utf8(mut out []u8, cp u32) {
+	if cp < 0x80 {
+		out << u8(cp)
+	} else if cp < 0x800 {
+		out << u8(0xc0 | cp >> 6)
+		out << u8(0x80 | cp & 0x3f)
+	} else if cp < 0x10000 {
+		out << u8(0xe0 | cp >> 12)
+		out << u8(0x80 | (cp >> 6) & 0x3f)
+		out << u8(0x80 | cp & 0x3f)
+	} else {
+		out << u8(0xf0 | cp >> 18)
+		out << u8(0x80 | (cp >> 12) & 0x3f)
+		out << u8(0x80 | (cp >> 6) & 0x3f)
+		out << u8(0x80 | cp & 0x3f)
+	}
+}
+
 fn (mut s Server) create(user_id i64, username string, raw string) {
-	doc := json2.decode[json2.Any](raw) or {
+	body := body_member(raw, mut s.jkey, mut s.jbody) or {
 		s.error(400, 'malformed JSON body')
 		return
 	}
-	mut text := ''
-	if doc is map[string]json2.Any {
-		v := doc['body'] or { json2.Any(json2.null) }
-		if v is string {
-			text = v.trim_space()
-		}
-	}
+	text := body.trim_space()
 	if text.len == 0 {
 		s.error(400, 'body is required')
 		return

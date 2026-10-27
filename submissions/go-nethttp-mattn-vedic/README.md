@@ -30,7 +30,7 @@ Run `sudo bash install.sh` once, then `bash build.sh`. Set `SQLITE_PATH`, `JWT_S
 
 ## Measured
 
-All runs used the challenge's request loop (`bench/load-multi.js`): 50,000 VUs, 30-second ramp, 5-minute hold, four loopback addresses. The server ran as a systemd service limited to 1 CPU, 2 GiB, and no swap. k6 ran on the rest of the same 16-vCPU host, so these are not the official separate-machine numbers. Each configuration ran twice.
+All runs used this submission's request loop (`load-multi.js`): 50,000 VUs, 30-second ramp, 5-minute hold, four loopback addresses. The server ran as a systemd service limited to 1 CPU, 2 GiB, and no swap. k6 ran on the rest of the same 16-vCPU host, so these are not the official separate-machine numbers. Each configuration ran twice.
 
 | Build | µs CPU/request | Server CPU during hold | p99 (ms) | Failed requests |
 |---|---|---|---|---|

@@ -2,8 +2,8 @@
  * The load test. One virtual user (VU) = one person browsing the feed, with think time.
  * A submission's score is the highest VUS that passes a 5-minute hold (see README.md).
  *
- *   k6 run -e VUS=2000 bench/load.js
- *   k6 run -e BASE_URL=http://10.0.0.5 -e VUS=8000 bench/load.js
+ *   k6 run -e VUS=2000 submissions/go-nethttp-mattn-vedic/load-multi.js
+ *   k6 run -e BASE_URL=http://10.0.0.5 -e VUS=8000 submissions/go-nethttp-mattn-vedic/load-multi.js
  *
  * Env: BASE_URL (default http://127.0.0.1:3000), VUS (default 100), DURATION (default 5m),
  *      RAMP_UP (default 60s), TOKENS (default seed/tokens.json).

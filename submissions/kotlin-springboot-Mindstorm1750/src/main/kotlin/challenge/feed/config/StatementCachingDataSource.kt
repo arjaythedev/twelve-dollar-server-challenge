@@ -1,0 +1,174 @@
+package challenge.feed.config
+
+import java.sql.Connection
+import java.sql.ConnectionBuilder
+import java.sql.PreparedStatement
+import java.sql.SQLException
+import java.sql.SQLType
+import java.sql.ShardingKey
+import java.sql.ShardingKeyBuilder
+import javax.sql.DataSource
+
+/**
+ * Keeps each physical connection's compiled statements, so SQLite parses and plans every query once instead of
+ * on every request (in profiles, `prepare` was ~40% of SQLite's time). It caches query plans, never data.
+ *
+ * Sits under the connection pool: Hikari hands a connection to one thread at a time, so the per-connection map
+ * needs no locking. Spring "closes" a statement after each use; here that only clears its parameters, and the
+ * statements are really closed when the pool closes the connection. Only for a fixed set of SQL strings.
+ */
+class StatementCachingDataSource(private val target: DataSource) : DataSource by target {
+    override fun getConnection(): Connection = CachingConnection(target.connection)
+    override fun createConnectionBuilder(): ConnectionBuilder? {
+        return target.createConnectionBuilder()
+    }
+
+    override fun createShardingKeyBuilder(): ShardingKeyBuilder? {
+        return target.createShardingKeyBuilder()
+    }
+
+    companion object {
+        /** The app uses a handful of fixed SQL strings; the bound only guards against accidental dynamic SQL. */
+        const val MAX_STATEMENTS_PER_CONNECTION = 32
+    }
+}
+
+private class CachingConnection(private val delegate: Connection) : Connection by delegate {
+    // Keyed by SQL text, so values must always be bound as parameters, never concatenated into the SQL.
+    // Bounded LRU: a dynamic-SQL mistake costs cache misses, not memory. A statement still in use is not evicted.
+    private val statements = object : LinkedHashMap<String, ReusableStatement>(16, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, ReusableStatement>): Boolean {
+            val evict = size > StatementCachingDataSource.MAX_STATEMENTS_PER_CONNECTION && !eldest.value.inUse
+            if (evict) eldest.value.closeForReal()
+            return evict
+        }
+    }
+
+    override fun prepareStatement(sql: String): PreparedStatement {
+        // sqlite-jdbc frees a statement whose step failed with most errors (I/O, disk full, runtime errors);
+        // prepare a fresh one instead of handing out the dead statement forever.
+        val cached = statements[sql]?.takeUnless { it.broken }
+        val statement = cached ?: ReusableStatement(delegate.prepareStatement(sql)).also { statements.put(sql, it)?.closeForReal() }
+        return statement.also { it.inUse = true }
+    }
+
+    override fun close() {
+        statements.values.forEach(ReusableStatement::closeForReal)
+        statements.clear()
+        delegate.close()
+    }
+
+    override fun beginRequest() {
+        delegate.beginRequest()
+    }
+
+    override fun endRequest() {
+        delegate.endRequest()
+    }
+
+    override fun setShardingKeyIfValid(
+        shardingKey: ShardingKey?,
+        superShardingKey: ShardingKey?,
+        timeout: Int
+    ): Boolean {
+        return delegate.setShardingKeyIfValid(shardingKey, superShardingKey, timeout)
+    }
+
+    override fun setShardingKeyIfValid(shardingKey: ShardingKey?, timeout: Int): Boolean {
+        return delegate.setShardingKeyIfValid(shardingKey, timeout)
+    }
+
+    override fun setShardingKey(shardingKey: ShardingKey?, superShardingKey: ShardingKey?) {
+        delegate.setShardingKey(shardingKey, superShardingKey)
+    }
+
+    override fun setShardingKey(shardingKey: ShardingKey?) {
+        delegate.setShardingKey(shardingKey)
+    }
+}
+
+private class ReusableStatement(private val delegate: PreparedStatement) : PreparedStatement by delegate {
+    /** Between prepareStatement and close; only idle statements may be evicted. */
+    var inUse = false
+
+    /**
+     * The driver freed the native statement after an error. Its `isClosed()` doesn't say so, but any use throws,
+     * so it shows up here when Spring closes the statement after the failed call.
+     */
+    var broken = false
+        private set
+
+    override fun close() {
+        inUse = false
+        try {
+            delegate.clearParameters()
+        } catch (e: SQLException) {
+            broken = true
+        }
+    }
+    override fun getLargeUpdateCount(): Long {
+        return delegate.largeUpdateCount
+    }
+
+    override fun setLargeMaxRows(max: Long) {
+        delegate.largeMaxRows = max
+    }
+
+    override fun getLargeMaxRows(): Long {
+        return delegate.largeMaxRows
+    }
+
+    override fun executeLargeBatch(): LongArray? {
+        return delegate.executeLargeBatch()
+    }
+
+    override fun executeLargeUpdate(sql: String?): Long {
+        return delegate.executeLargeUpdate(sql)
+    }
+
+    override fun executeLargeUpdate(sql: String?, autoGeneratedKeys: Int): Long {
+        return delegate.executeLargeUpdate(sql, autoGeneratedKeys)
+    }
+
+    override fun executeLargeUpdate(sql: String?, columnIndexes: IntArray?): Long {
+        return delegate.executeLargeUpdate(sql, columnIndexes)
+    }
+
+    override fun executeLargeUpdate(sql: String?, columnNames: Array<out String?>?): Long {
+        return delegate.executeLargeUpdate(sql, columnNames)
+    }
+
+    override fun enquoteLiteral(`val`: String?): String? {
+        return delegate.enquoteLiteral(`val`)
+    }
+
+    override fun enquoteIdentifier(identifier: String?, alwaysQuote: Boolean): String? {
+        return delegate.enquoteIdentifier(identifier, alwaysQuote)
+    }
+
+    override fun isSimpleIdentifier(identifier: String?): Boolean {
+        return delegate.isSimpleIdentifier(identifier)
+    }
+
+    override fun enquoteNCharLiteral(`val`: String?): String? {
+        return delegate.enquoteNCharLiteral(`val`)
+    }
+
+    fun closeForReal() = delegate.close()
+    override fun setObject(
+        parameterIndex: Int,
+        x: Any?,
+        targetSqlType: SQLType?,
+        scaleOrLength: Int
+    ) {
+        delegate.setObject(parameterIndex, x, targetSqlType, scaleOrLength)
+    }
+
+    override fun setObject(parameterIndex: Int, x: Any?, targetSqlType: SQLType?) {
+        delegate.setObject(parameterIndex, x, targetSqlType)
+    }
+
+    override fun executeLargeUpdate(): Long {
+        return delegate.executeLargeUpdate()
+    }
+}

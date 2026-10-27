@@ -38,6 +38,8 @@ def main():
     parser.add_argument("--publish", type=Path, help="Linux publish directory on the Windows filesystem; defaults to bin/publish")
     parser.add_argument("--collect-counters", action="store_true", help="Collect runtime and database metrics using pinned Linux dotnet-counters")
     parser.add_argument("--client-ips", help="Comma-separated IPv4 loopback source addresses for k6, e.g. 127.0.0.1,127.0.0.2")
+    parser.add_argument("--client-gogc", type=int, default=50, help="k6 Go GC target; lower values trade client CPU for memory")
+    parser.add_argument("--client-memory-limit", default="10GiB", help="k6 Go soft memory limit")
     parser.add_argument("--seed", help="Linux path to the seed; defaults to the current WSL user's native cache")
     args = parser.parse_args()
     if sys.platform != "win32":
@@ -104,7 +106,8 @@ def main():
         summary_path = output / f"{label}-summary.json"
         environment = dict(os.environ, K6_NO_USAGE_REPORT="true", NO_PROXY="*", no_proxy="*")
         command = ["wsl.exe", "-d", args.distribution, "--exec", "bash", linux_submission + "/checks/run-k6-local.sh",
-                   pid_file, "env", "K6_NO_USAGE_REPORT=true", "NO_PROXY=*", "no_proxy=*", linux_k6,
+                   pid_file, "env", "K6_NO_USAGE_REPORT=true", "NO_PROXY=*", "no_proxy=*",
+                   f"GOGC={args.client_gogc}", f"GOMEMLIMIT={args.client_memory_limit}", linux_k6,
                    "run", "--quiet", "--no-color", *client_network_options, "--env", f"VUS={vus}",
                    "--env", f"DURATION={hold}", "--env", f"RAMP_UP={ramp}", "--env", f"BASE_URL={base_url}",
                    "--env", f"TOKENS={wsl('wslpath', '-u', str(repository / 'seed/tokens.json'))}",
@@ -142,6 +145,9 @@ def main():
     for vus in args.vus:
         output = results / str(vus)
         output.mkdir()
+        published_application = publish / "FeedApi.dll"
+        if not published_application.is_file():
+            published_application = publish / "FeedApi"
         unit = f"tdsc-local-{group_id.lower()}-{vus}"
         native_dir = f"{linux_home}/.cache/twelve-dollar-server-challenge/performance/{group_id}/{vus}"
         database = native_dir + "/feed.db"
@@ -154,11 +160,14 @@ def main():
                     "k6_version": wsl(linux_k6, "version"),
                     "application_source_sha256": application_hashes,
                     "publish_directory": str(publish),
-                    "publish_application_sha256": hashlib.sha256((publish / "FeedApi.dll").read_bytes()).hexdigest(),
+                    "publish_application_file": published_application.name,
+                    "publish_application_sha256": hashlib.sha256(published_application.read_bytes()).hexdigest(),
                     "counter_tool_version": counter_version,
                     "counter_timestamp_timezone": "UTC" if args.collect_counters else None,
                     "client_local_ips": list(map(str, client_ips)) or None,
                     "client_ephemeral_port_range": ephemeral_ports,
+                    "client_gogc": args.client_gogc,
+                    "client_memory_limit": args.client_memory_limit,
                     "workload_sha256": hashlib.sha256((repository / "bench/load.js").read_bytes()).hexdigest(),
                     "limitations": "Linux k6 and server share WSL hardware. CPU quota differs from a 1-vCPU VM. OS outside server cgroup is not included."}
         try:

@@ -17,7 +17,7 @@ internal abstract class PreparedSqliteSession : IDisposable
         {
             connection.Open();
             using var command = connection.CreateCommand();
-            command.CommandText = "PRAGMA synchronous=FULL";
+            command.CommandText = "PRAGMA synchronous=NORMAL";
             command.ExecuteNonQuery();
             return connection;
         }
@@ -59,12 +59,6 @@ internal abstract class PreparedSqliteSession : IDisposable
 
 internal sealed class FeedReadSession : PreparedSqliteSession
 {
-    private const string PostColumns = """
-        SELECT p.id, p.body, p.created_at, u.username,
-               (SELECT count(*) FROM likes l WHERE l.post_id = p.id) AS like_count
-          FROM posts p JOIN users u ON u.id = p.user_id
-        """;
-
     public SqliteCommand Health { get; }
     public SqliteCommand Feed { get; }
     public SqliteCommand Post { get; }
@@ -75,8 +69,25 @@ internal sealed class FeedReadSession : PreparedSqliteSession
         try
         {
             Health = Prepare("SELECT 1");
-            Feed = Prepare(PostColumns + " ORDER BY p.created_at DESC, p.id DESC LIMIT 20");
-            Post = Prepare(PostColumns + " WHERE p.id = $id", ("$id", SqliteType.Integer));
+            Feed = Prepare("""
+                SELECT CAST(json_object('posts', json_group_array(json_object(
+                    'id', p.id, 'body', p.body, 'created_at', p.created_at,
+                    'author', p.author, 'like_count', p.like_count))) AS BLOB)
+                  FROM (
+                    SELECT p.id, p.body, p.created_at, u.username AS author,
+                           (SELECT count(*) FROM likes l WHERE l.post_id = p.id) AS like_count
+                      FROM posts p JOIN users u ON u.id = p.user_id
+                     ORDER BY p.created_at DESC, p.id DESC LIMIT 20
+                  ) p
+                """);
+            Post = Prepare("""
+                SELECT CAST(json_object('post', json_object(
+                    'id', p.id, 'body', p.body, 'created_at', p.created_at,
+                    'author', u.username,
+                    'like_count', (SELECT count(*) FROM likes l WHERE l.post_id = p.id))) AS BLOB)
+                  FROM posts p JOIN users u ON u.id = p.user_id
+                 WHERE p.id = $id
+                """, ("$id", SqliteType.Integer));
         }
         catch
         {

@@ -4,35 +4,23 @@ Run commands from the repository root unless stated otherwise. These tools use
 fresh database copies and leave the seed unchanged. Generated results belong in
 the repository's ignored `results/` directory.
 
-## Windows verification
+## Native build
 
-Generate the seed in WSL with the upstream script first. From the submission
-directory, using .NET SDK 10.0.401:
+The benchmark target is Ubuntu 24.04 x64. Build and test inside Linux/WSL using
+the scripts in the submission README. `install.sh` includes clang and zlib
+development headers for Native AOT. The .NET SDK, ILCompiler and NuGet versions
+are pinned; restore uses the updated lock file.
 
-```powershell
-$feedRunDirectory = Join-Path .\bin ('dev-' + [Guid]::NewGuid().ToString('N'))
-New-Item -ItemType Directory -Force $feedRunDirectory | Out-Null
-Copy-Item ..\..\seed\feed.db (Join-Path $feedRunDirectory 'feed.db')
-$env:SQLITE_PATH = (Resolve-Path (Join-Path $feedRunDirectory 'feed.db')).Path
-$env:JWT_SECRET = 'twelve-dollar-challenge'
-$env:HOST = '127.0.0.1'
-$env:PORT = '3000'
+The final native publish completed with warnings treated as errors under a
+one-core CPU quota, 2 GiB memory limit and no swap. Its observed build cgroup
+peak was 1,154,244,608 bytes. The executable was about 12 MB, plus the SQLite
+native library; separate debug symbols remain available in the publish folder.
+The Linux executable passed the 42 official and 46 additional checks.
 
-dotnet restore --locked-mode
-dotnet publish -c Release -r win-x64 --self-contained true --no-restore -o bin/publish-win
-& .\bin\publish-win\FeedApi.exe
-```
-
-The self-contained publish supplies runtime 10.0.13. Stop the manual server before
-running the integration checks; the checks launch their own instances. From the
-repository root:
-
-```powershell
-python submissions/csharp-aspnetcore-devv-guru/checks/integration.py --seed seed/feed.db --server submissions/csharp-aspnetcore-devv-guru/bin/publish-win/FeedApi.exe
-```
-
-Use a fresh run directory each time. Do not overwrite an open database or reuse
-an unrelated WAL/SHM pair. Bash scripts need LF line endings in WSL.
+Use fresh database copies. Do not overwrite an open database or reuse an
+unrelated WAL/SHM pair. Bash scripts need LF line endings in WSL. The Windows
+performance runner below orchestrates Linux builds; it does not run a Windows
+Native AOT executable.
 
 ## Load testing
 
@@ -56,6 +44,7 @@ From Windows PowerShell:
 ```powershell
 python submissions/csharp-aspnetcore-devv-guru/checks/local-performance.py --vus 25000 --hold 5m --ramp 60s --warmup 2m
 python submissions/csharp-aspnetcore-devv-guru/checks/local-performance.py --vus 30000 --hold 5m --ramp 60s --warmup 2m --client-ips 127.0.0.1,127.0.0.2
+python submissions/csharp-aspnetcore-devv-guru/checks/local-performance.py --vus 40000 --hold 5m --ramp 60s --warmup 2m --client-ips 127.0.0.1,127.0.0.2 --client-memory-limit 12GiB --collect-counters
 python submissions/csharp-aspnetcore-devv-guru/checks/summarize-performance.py results/performance-<run-id> --output results/performance-analysis.json
 ```
 
@@ -69,6 +58,14 @@ retain endpoint summaries without changing scoring thresholds. The original
 20,000-token file is reused cyclically at higher VU counts; virtual users are
 simulated sessions with think times, not distinct accounts or requests/sec.
 
+The k6 child uses `GOGC=50` and `GOMEMLIMIT=10GiB` by default to keep larger
+tests within this WSL host's memory. These affect the client only; the memory
+limit is a Go runtime soft limit, not an application/server setting. Override
+them with `--client-gogc` and `--client-memory-limit`. Both values are recorded
+in run metadata. Reject results affected by client swapping, OOM or saturation.
+Published-code hashing uses the native executable for AOT and the application
+DLL for JIT builds.
+
 This host's ephemeral-port range permits 28,232 source ports per IP. The runner
 rejects loads exceeding that range unless enough source IPs are specified.
 `--client-ips` uses k6's documented
@@ -77,32 +74,51 @@ with existing loopback addresses. It changes no OS settings. At 30,000 users, a
 mid-hold snapshot confirmed 15,000 connections from each of the two addresses.
 An earlier single-address attempt was stopped during warm-up and excluded.
 
-### Results: 2026-10-14
+### Local comparison: 2026-10-27
 
-All three runs used the same published build and the conditions in the
-[submission README](../README.md#local-load-results).
+The merged PR #95 build was republished from its unchanged sources. Each run used
+a fresh database/server, two-minute 1,000-VU warm-up, 60-second ramp, five-minute
+hold, 30-second ramp-down and ten-second graceful stop. All three collected the
+same runtime/database counters. Rates and latency include ramp/drain.
 
-| Measurement | 20,000 VUs | 25,000 VUs | 30,000 VUs |
+| Measurement | FULL baseline, 30k | Final build, 40k | Before socket tuning, 50k |
 |---|---:|---:|---:|
-| Measured requests | 746,431 | 933,311 | 1,119,026 |
-| Central-hold CPU, one-core scale | 74.2% | 82.3% | 85.9% |
-| Peak server cgroup, including charged cache | 970 MiB | 1,044 MiB | 1,130 MiB |
-| Observed process RSS peak | 371 MiB | 436 MiB | 519 MiB |
-| Observed k6 RSS peak | 7.14 GiB | 8.93 GiB | 10.73 GiB |
-| Like HTTP p99 | 417.63 ms | 318.52 ms | 2,011.69 ms |
-| Create HTTP p99 | 362.69 ms | 308.53 ms | 2,010.28 ms |
-| Like failures | 0 | 0 | 6,411 (8.28%) |
-| Create failures | 0 | 0 | 867 (8.47%) |
-| Observed write-queue peak | 68 | 123 | 256 |
+| Challenge thresholds | Fail | Pass | Fail |
+| Requests | 1,089,167 | 1,489,414 | 1,767,437 |
+| Requests/sec | 2,598 | 3,523 | 4,199 |
+| HTTP p95 / p99, ms | 1,846.67 / 3,049.09 | 225.95 / 455.24 | 1,383.32 / 2,370.65 |
+| HTTP errors | 8,902 (0.817%) | 0 | 0 |
+| Central-hold CPU, one-core scale | 83.0% | 81.1% | 97.6% |
+| Peak server cgroup, including cache | 1,154 MiB | 1,350 MiB | 1,311 MiB |
+| Observed process RSS peak | 512 MiB | 661 MiB | 639 MiB |
+| Observed k6 RSS peak | 8,306 MiB | 11,135 MiB | 11,821 MiB |
 
-Reads had zero errors in all three runs. At 30,000, rejection counters recorded
-4,465 full-queue and 2,813 admission-timeout rejections. Typical commit interval
-p50s stayed near 2.1 ms, but the worst observed two-second like-commit p99 reached
-1.86 seconds. This identifies write admission and commit stalls for profiling;
-it does not distinguish storage effects from shared-host scheduling. No swap or
-OOM kills were observed. Memory, queue and WAL samples have two-second resolution.
-Cross-run tail latency varies, so these individual runs do not establish an
-exact capacity ceiling. Official scoring needs the target VM and a remote client.
+The baseline errors were 7,852 likes and 1,050 creates; reads had zero errors.
+The 50k run completed with zero errors but failed both latency thresholds. These
+different loads do not measure each optimization's contribution or establish an
+exact capacity ceiling. The official target VM and a remote load generator are
+needed for a leaderboard score.
+
+The baseline used client GOGC=50 / GOMEMLIMIT=10GiB; 40k used 50 / 12GiB and 50k
+used 100 / 12GiB. Client CPU averaged 2.53, 2.81 and 7.90 cores respectively on
+this 16-logical-CPU WSL host. No swap or OOM kills were observed. An earlier 50k
+attempt with a 10GiB client soft limit saturated the load generator and was
+aborted; it is excluded. Memory and CPU observations have two-second resolution.
+
+Raw runs are in ignored directories `results/performance-20261027T201539Z-62b9f3`,
+`results/performance-20261027T212427Z-27f3de` and
+`results/performance-20261027T205725Z-64b2da`. The combined local report is
+`results/followup-comparison-2026-10-27.json`.
+
+Before socket tuning, the same AOT/NORMAL/SQLite JSON build also passed 40k at
+3,555 requests/sec and 110.76 / 457.68 ms p95/p99, with zero errors. That raw run
+is `results/performance-20261027T211013Z-3b611f`. A separate 64-VU saturation
+probe increased from about 7,704 to 8,335 requests/sec with the socket settings;
+that short, no-think-time probe is diagnostic and is not a challenge score.
+
+At 40k, the final run used 81.1% of one core versus 88.9% before socket tuning,
+with 661 versus 523 MiB observed process RSS. Its p95 increased, while p99
+was similar. This single pair supports a CPU/memory tradeoff, not an exact speedup.
 
 ### Database checks
 
@@ -113,11 +129,10 @@ and foreign-key checks, and reconciles post counts with successful create
 requests from warm-up and measurement. The integration suite separately verifies
 the 201 response contract. This is a post-load check, not a power-failure test.
 
-Both higher-load databases passed: 508,674 posts at 25,000 users (500,000 seed +
-166 warm-up + 8,508 measured creates), and 509,516 at 30,000 (500,000 + 150 +
-9,366). Local reports are `results/performance-higher-capacity-2026-10-14.json`
-and `results/performance-{25000,30000}-integrity-2026-10-14.json`. These generated
-files are not included in the submission.
+All four completed load-test databases passed these checks. The final 40k
+database had 513,878 posts: 500,000 seed rows plus 170 warm-up and 13,708 measured
+successful creates.
+The final report is `results/followup-final-40000-integrity.json`.
 
 ## Diagnostics
 
@@ -133,7 +148,7 @@ Add `--collect-counters` to a performance run to collect `System.Runtime` and
 `DevvGuru.FeedApi`. Collection adds application work, so use the same setting for
 comparisons. CSV timestamps are UTC; the tool exports the file when collection
 ends. `--publish /windows/path/to/linux-publish` selects a comparison build.
-Run metadata includes the actual published DLL hash, source hashes and limits.
+Run metadata includes the actual published executable/DLL hash, source hashes and limits.
 
 | Instruments | Meaning |
 |---|---|
@@ -147,7 +162,7 @@ two-second interval quantiles; averaging them does not yield a whole-run p99.
 Runtime UpDownCounter rates are not absolute thread/queue counts, so the analyzer
 uses the explicit gauges above.
 
-## Optimization comparisons
+## Original optimization comparisons
 
 At 20,000 users, one before/after pair for prepared-session reuse reduced managed
 allocation from 16.55 to 13.18 MiB/s and HTTP p99 from 348.47 to 100.10 ms. Write

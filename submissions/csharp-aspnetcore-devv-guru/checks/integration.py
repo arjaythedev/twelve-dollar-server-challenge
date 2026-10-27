@@ -134,6 +134,19 @@ def main():
                 status, body, _ = server.request("POST", "/posts", valid, {"body": "  " + text + "  "})
                 check(status == 201 and body["post"]["body"] == text, "500 Unicode code points round-trip")
                 post_id = body["post"]["id"]
+                check(server.request("GET", f"/posts/{post_id}")[1]["post"]["body"] == text,
+                      "post JSON preserves 500 Unicode code points")
+                check(server.request("GET", "/feed")[1]["posts"][0]["body"] == text,
+                      "feed JSON preserves 500 Unicode code points")
+                escaped = 'quotes: " \\ /\n\t\x00 and Unicode: \u00e9\U0001f642'
+                escaped_post = server.request("POST", "/posts", valid, {"body": escaped})[1]["post"]
+                observed = server.request("GET", f"/posts/{escaped_post['id']}")[1]["post"]
+                expected_keys = ["id", "body", "created_at", "author", "like_count"]
+                check(observed == escaped_post and list(observed) == expected_keys,
+                      "post JSON escapes text and preserves key order")
+                observed = server.request("GET", "/feed")[1]["posts"][0]
+                check(observed == escaped_post and list(observed) == expected_keys,
+                      "feed JSON escapes text and preserves key order")
                 status, body, _ = server.request("POST", "/posts", valid, {"body": text + "🙂"})
                 check(status == 400 and body == {"error": "body must be at most 500 characters"}, "501 Unicode code points rejected")
 
@@ -185,6 +198,10 @@ def main():
                       "48 concurrent creates have unique committed IDs")
                 persisted_id = posts[-1][1]["post"]["id"]
                 with closing(sqlite3.connect(database)) as connection:
+                    expected_ids = [row[0] for row in connection.execute(
+                        "SELECT id FROM posts ORDER BY created_at DESC, id DESC LIMIT 20")]
+                    check([post["id"] for post in server.request("GET", "/feed")[1]["posts"]] == expected_ids,
+                          "feed JSON preserves timestamp and ID ordering")
                     check(connection.execute("SELECT count(*) FROM posts WHERE id = ?", (persisted_id,)).fetchone()[0] == 1,
                           "201 is visible from a separate database connection")
                     check(connection.execute("PRAGMA foreign_key_check").fetchall() == [], "foreign key integrity holds")

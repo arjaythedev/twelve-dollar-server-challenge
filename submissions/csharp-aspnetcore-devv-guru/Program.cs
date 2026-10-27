@@ -3,6 +3,7 @@ using FeedApi.Endpoints;
 using FeedApi.Middleware;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
 
+Environment.SetEnvironmentVariable("DOTNET_SYSTEM_NET_SOCKETS_INLINE_COMPLETIONS", "1");
 var options = AppOptions.FromEnvironment();
 var builder = WebApplication.CreateSlimBuilder(new WebApplicationOptions
 {
@@ -13,11 +14,17 @@ var builder = WebApplication.CreateSlimBuilder(new WebApplicationOptions
 builder.Logging.ClearProviders();
 builder.Logging.AddSimpleConsole();
 builder.Logging.SetMinimumLevel(LogLevel.Warning);
+builder.WebHost.UseSockets(sockets =>
+{
+    sockets.UnsafePreferInlineScheduling = true;
+    sockets.WaitForDataBeforeAllocatingBuffer = false;
+});
 builder.WebHost.ConfigureKestrel(server =>
 {
     server.AddServerHeader = false;
     server.Limits.KeepAliveTimeout = TimeSpan.FromSeconds(130);
     server.Limits.MaxRequestBodySize = 16 * 1024;
+    server.Limits.MinRequestBodyDataRate = null;
     server.Listen(options.Host, options.Port, listen => listen.Protocols = HttpProtocols.Http1);
 });
 builder.Services.ConfigureHttpJsonOptions(json =>
@@ -38,6 +45,6 @@ app.MapPostEndpoints();
 RequestDelegate notFound = context => ApiResults.Error(404, "not found").ExecuteAsync(context);
 app.MapFallback("/{**path}", notFound);
 app.Lifetime.ApplicationStarted.Register(() =>
-    app.Logger.LogWarning("Feed API listening on {Host}:{Port}; SQLite {Version}; WAL, synchronous=FULL",
+    app.Logger.LogWarning("Feed API listening on {Host}:{Port}; SQLite {Version}; WAL, synchronous=NORMAL",
         options.Host, options.Port, sqliteVersion));
 await app.RunAsync();

@@ -56,8 +56,8 @@ internal sealed class FeedRepository : IDisposable
         if (Version.Parse(version) < new Version(3, 51, 3))
             throw new InvalidOperationException("A SQLite engine with the WAL-reset fix is required (3.51.3 or later).");
         command.CommandText = "PRAGMA synchronous";
-        if (Convert.ToInt64(command.ExecuteScalar()) != 2)
-            throw new InvalidOperationException("SQLite synchronous=FULL is required.");
+        if (Convert.ToInt64(command.ExecuteScalar()) != 1)
+            throw new InvalidOperationException("SQLite synchronous=NORMAL is required.");
         command.CommandText = "PRAGMA foreign_keys";
         if (Convert.ToInt64(command.ExecuteScalar()) != 1)
             throw new InvalidOperationException("SQLite foreign key enforcement is required.");
@@ -87,17 +87,13 @@ internal sealed class FeedRepository : IDisposable
         }
     }
 
-    public List<Post> GetFeed()
+    public byte[] GetFeedJson()
     {
         using var duration = _metrics.Measure("feed");
         var session = _reads.Get();
         try
         {
-            using var reader = session.Feed.ExecuteReader();
-            var posts = new List<Post>(20);
-            while (reader.Read())
-                posts.Add(ReadPost(reader));
-            return posts;
+            return (byte[])session.Feed.ExecuteScalar()!;
         }
         catch
         {
@@ -110,15 +106,14 @@ internal sealed class FeedRepository : IDisposable
         }
     }
 
-    public Post? GetPost(long id)
+    public byte[]? GetPostJson(long id)
     {
         using var duration = _metrics.Measure("post");
         var session = _reads.Get();
         try
         {
             session.Post.Parameters[0].Value = id;
-            using var reader = session.Post.ExecuteReader();
-            return reader.Read() ? ReadPost(reader) : null;
+            return (byte[]?)session.Post.ExecuteScalar();
         }
         catch
         {
@@ -241,9 +236,6 @@ internal sealed class FeedRepository : IDisposable
         // The API contract maps overload failures to a generic 500.
         throw new InvalidOperationException("The database write queue is full.");
     }
-
-    private static Post ReadPost(SqliteDataReader reader) =>
-        new(reader.GetInt64(0), reader.GetString(1), reader.GetString(2), reader.GetString(3), reader.GetInt64(4));
 
     public void Dispose()
     {

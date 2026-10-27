@@ -7,7 +7,6 @@ set -euo pipefail
 export JWT_SECRET=twelve-dollar-challenge
 export HOST=127.0.0.1
 export PORT=3000
-export SQLITE_PATH="/feed.db"
 
 # Verify the server binary exists
 if [ ! -x "./server" ]; then

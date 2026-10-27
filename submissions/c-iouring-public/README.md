@@ -96,6 +96,7 @@ the code by `tools/knobs.py`; the `CURSED_*` and `LOOP_TEST_*` variables exist f
 | `CURSED_LINGER` | 0 | close style: 0 auto (linger only if the peer may still be sending), 1 always linger, -1 never |
 | `CURSED_BATCH` | 128 | completions to wait for per wakeup under load |
 | `CURSED_WAIT_US` | 2000 | longest extra wait for that batch (µs) |
+| `CURSED_POLL_WAIT_US` | 1000 | with 2+ rings (above ~65k connections): ring 0's longest wait for completions (µs); this, not `CURSED_BATCH`, sets the batch size at 130k+ connections (~24 requests at 400k) |
 | `CURSED_BACKLOG` | 4096 | listen backlog (4096 absorbed 100 ms loop stalls at high reconnect rates without overflows, measured on a 1-vCPU Xeon) |
 | `CURSED_RECV_MODE` | 0 | 0 (auto) / 1: armed multishot recv; 2: idle connections hold a multishot poll (less kernel memory per idle connection, but a mass close keeps FIN buffers charged: +631 MB at 300k) |
 | `CURSED_EPOLL` | 0 | 1: use the epoll backend even when io_uring is available (it's also the automatic fallback) |
@@ -176,14 +177,15 @@ One process, one thread: the event loop, which also runs the WAL checkpoints. Ev
    copies the received bytes out of the kernel's socket buffers into compact per-connection buffers at once and hands
    them to the app in chunks of up to 256, so a busy loop holds its backlog in ~0.5 KB per request instead of a ~4 KB
    kernel buffer.
-2. **Parse.** The parser matches the API's request lines from the first bytes and finds the headers it needs with
-   SIMD masks. It's generated from the API spec; a traffic profile only orders the templates and enables paths, it
-   contributes no bytes. When a wakeup has 8 or more connections, their first requests are parsed lane-parallel.
-   Anything unusual (HTTP/1.0, a `Connection` header other than `keep-alive`, odd framing) goes to the general parser
-   `fbparse.h` (cursed-http-parser), which also honours `Connection: close`. Chunked request bodies are decoded there
-   too, by the library's strict `fb_decode_chunked` (no trailers, CRLF only), into a buffer of their own: over 64 KiB
-   decoded gets 413 and a close; `Content-Length` together with `Transfer-Encoding`, chunked that isn't the final
-   coding, or bad framing gets 400 and a close; any other transfer coding 501 and a close (RFC 9112 6.1, 6.3, 7.1).
+2. **Parse.** The parser matches the API's request lines from the first bytes and finds the headers it needs with SIMD
+   masks. It's generated from the API spec; a traffic profile (recorded from a load-generator sample; see the Rules
+   disclosure) only orders the templates and enables paths, it contributes no bytes. When a wakeup has 8 or more
+   connections, their first requests are parsed lane-parallel. Anything unusual (HTTP/1.0, a `Connection` header other
+   than `keep-alive`, odd framing) goes to the general parser `fbparse.h` (cursed-http-parser), which also honours
+   `Connection: close`. Chunked request bodies are decoded there too, by the library's strict `fb_decode_chunked` (no
+   trailers, CRLF only), into a buffer of their own: over 64 KiB decoded gets 413 and a close; `Content-Length`
+   together with `Transfer-Encoding`, chunked that isn't the final coding, or bad framing gets 400 and a close; any
+   other transfer coding 501 and a close (RFC 9112 6.1, 6.3, 7.1).
 3. **Authenticate.** All Bearer tokens of the batch are verified in one multi-buffer HMAC call. Every signature is
    recomputed, and `exp` is required.
 4. **Database.** All requests of the batch run in one SQLite transaction (group commit), in arrival order:
@@ -296,6 +298,11 @@ Each item, and how it stays within the rules:
 - **Cached at open:** schema metadata (root pages, column layout) and prepared statements, which hold query plans,
   not data.
 - **PGO training** uses a synthetic database generated at build time (own random data, no seed data) and tokens
-  signed with a random secret.
+  signed with a random secret. Its request mix follows the challenge's published user model in `bench/load.js`
+  (mostly feed and post reads, some likes and creates) plus the error paths the test suite checks. No profile data
+  is committed: the profile is recorded on the box at build time. `PGO=0 ./build.sh` builds without it.
+- **Parser template order** (`gen/profile_mload.json`): the HTTP parser generator orders its fast-path templates by a
+  route and header-layout frequency profile recorded from a 20k-request load-generator sample. It contributes no
+  bytes: every request still goes through the same checks, and any other layout takes the general parser.
 - **Rule 7:** nothing detects the load generator. The parser's canonical request lines come from the API spec, and
   any other byte layout takes the general path.

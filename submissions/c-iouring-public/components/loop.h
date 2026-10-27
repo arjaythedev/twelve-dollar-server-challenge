@@ -166,6 +166,7 @@ typedef struct {
     uint64_t sock_pressure_events;
     uint32_t backlog_now;                /* backlog currently applied to the listener */
     int accepting;
+    uint32_t mem_state;                  /* 0 ok, 1 accepts parked (accept floor), 2 shedding idle conns (shed floor) */
 } loop_stats;
 
 loop_t *loop_new(const loop_cfg *cfg);   /* NULL + errno/message on failure */

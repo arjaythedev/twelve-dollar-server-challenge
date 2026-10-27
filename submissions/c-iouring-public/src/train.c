@@ -3,8 +3,10 @@
 // 1. Builds a synthetic database in <dir> with the challenge schema but its own random data (generator after
 //    the engine's gen_train.c: own seed, own words, nothing from seed/feed.db).
 // 2. Signs its own tokens with a random secret (the scalar HMAC from jwt.c).
-// 3. Forks the real server on a loopback port and drives it with batched, pipelined traffic in roughly the scored
-//    mix, plus the error paths the test suite hits. The profile records decisions about code paths, never data.
+// 3. Forks the real server on a loopback port and drives it with batched, pipelined traffic
+//    in a read-heavy mix whose weights follow the challenge's published user model (bench/load.js), plus the error
+//    paths the test suite hits. Its database, tokens and secret are generated here; the profile records which code
+//    paths are hot, never data.
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -163,7 +165,8 @@ static int tr_sign(char *out, const jwt_key_t *k, const char *payload) {
 enum { TR_CONNS = 96, TR_ROUNDS = 400 };
 static char tr_tok[64][512];
 
-static int tr_req(char *o, int conn, int i) {  // one request of the scored mix (46/46/7/1) plus some error paths
+static int tr_req(char *o, int conn, int i) {
+  // one request; weights follow bench/load.js's published user model (45/46/6.5/1.3 %), plus error paths
   int r = (int)(tr_rnd() % 1000), u = (int)(tr_rnd() % 64), id = 1 + (int)(tr_rnd() % TR_POSTS);
   (void)conn;
   (void)i;

@@ -1106,6 +1106,7 @@ static void housekeeping(loop_t *L)
         L->mem_state = st;
         if (st == 2) loop_shed_idle(L, L->st.open / 50 + 1);
     }
+    L->st.mem_state = (uint32_t)L->mem_state;
     sock_check(L, a);
     L->st.accepting = L->mem_state == 0 && !L->cap_parked;
 }

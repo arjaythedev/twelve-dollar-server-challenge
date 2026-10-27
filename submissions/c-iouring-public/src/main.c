@@ -63,13 +63,13 @@ static void on_tick(loop_t *L, void *ud) {
               "cfail=%llu deadline_503=%llu press_503=%llu sock_pressure=%u/%llu all_503=%llu b503_skipped=%llu b503_tokens=%llu "
               "hint_closes=%llu close_frac=%.2f cap=%u busy=%.2f avail=%uMB orphans=%u listen_overflows=%llu "
               "listen_drops=%llu "
-              "backlog=%u busy_src=%d enobufs=%llu rearms=%llu loop_drains=%llu tcp_mem=%u utime=%ld.%06ld stime=%ld.%06ld maxrss=%ldKB\n",
+              "backlog=%u busy_src=%d mem_state=%u accepting=%d enobufs=%llu rearms=%llu loop_drains=%llu tcp_mem=%u utime=%ld.%06ld stime=%ld.%06ld maxrss=%ldKB\n",
               g_shed_mode, s->open, (unsigned long long)s->accepted, (unsigned long long)a->requests, (unsigned long long)a->batches,
               (unsigned long long)a->lanes, (unsigned long long)a->slow, (unsigned long long)a->slow_checked,
               (unsigned long long)a->jwts, (unsigned long long)a->held, (unsigned long long)a->commit_failures,
               (unsigned long long)a->deadline_503, (unsigned long long)a->press_503, s->sock_pressure, (unsigned long long)s->sock_pressure_events, (unsigned long long)a->all_503, (unsigned long long)a->b503_skipped, (unsigned long long)a->b503_tokens, (unsigned long long)s->hint_closes, s->close_frac, s->cap, s->busy,
               s->avail_mb, s->tcp_orphans, (unsigned long long)s->listen_overflows, (unsigned long long)s->listen_drops,
-              s->backlog_now, s->busy_src, (unsigned long long)s->enobufs, (unsigned long long)s->rearms,
+              s->backlog_now, s->busy_src, s->mem_state, s->accepting, (unsigned long long)s->enobufs, (unsigned long long)s->rearms,
               (unsigned long long)s->drains, s->tcp_mem_pages, (long)ru.ru_utime.tv_sec, (long)ru.ru_utime.tv_usec,
               (long)ru.ru_stime.tv_sec, (long)ru.ru_stime.tv_usec, ru.ru_maxrss);
     }

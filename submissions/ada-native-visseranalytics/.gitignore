@@ -1,0 +1,12 @@
+/bin/
+/obj/
+/deps/
+/validation-artifacts/
+/benchmark-results/
+*.db
+*.db-*
+*.log
+*.o
+*.ali
+__pycache__/
+.DS_Store

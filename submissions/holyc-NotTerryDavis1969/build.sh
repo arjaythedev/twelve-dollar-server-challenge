@@ -16,14 +16,10 @@ echo "Compiling HolyC server with hcc..."
 
 cd "$(dirname "$0")"
 
-# Compile the HolyC server using hcc
-# hcc compiles HolyC source to an executable
-# Include paths for holyc-lib headers
-$HCC server.HC -o server \
-    -I/usr/local/include \
-    -I/holyc-lang/src \
-    -I/holyc-lang/src/holyc-lib \
-    -DHCC_LINK_SQLITE3=1
+# hcc does not accept GCC-style -I include flags; pass only the source and
+# any supported compiler options. The local headers are included via relative
+# path from the submission directory itself.
+$HCC server.HC -o server -DHCC_LINK_SQLITE3=1
 
 if [ $? -ne 0 ]; then
     echo "Compilation failed!"

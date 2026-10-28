@@ -17,6 +17,7 @@ class UringServer < HTTPServer
   SLOT_MASK = (1 << SLOT_BITS) - 1
   BUFFERS = 4096 # provided receive buffers per ring
   BUFFER_SIZE = 2048
+  SEND_SIZE = 8192 # pooled send buffers fit every response but an unusually large post or feed
   # user_data = connection id << 3 | operation
   ACCEPT = 0
   RECV = 1
@@ -24,8 +25,8 @@ class UringServer < HTTPServer
   CANCEL = 3
   CLOSE_SLOT = 4
   ENOBUFS = 105
-  ENFILE = 23
-
+  ACCEPTS = 64 # accepts kept in flight, spread over the rings
+  POST_REQUEST = "POST "
 
   # Raises LoadError (no liburing-ffi) or SystemCallError (io_uring unavailable or restricted)
   # before the listener is bound, so the caller can fall back to EpollServer.
@@ -46,20 +47,33 @@ class UringServer < HTTPServer
     @send_length = []
     @send_offset = []
     @out = [] # responses waiting for the send in flight
+    @send_pool = [] # free SEND_SIZE buffers
     @closing = [] # close once the sends are done
     @cancelled = [] # the receive was asked to end
     @dead = [] # the receive has ended
-    @accepting = Array.new(RINGS, false)
+    @slots = @rings.first.slots
+    @held = Array.new(RINGS, 0) # by ring: slots taken by connections and by accepts in flight
+    @accepts = 0
     @ready = Thread::Queue.new
     WORKERS.times { add_worker }
+    arm_accepts
     @rings.each_index { |index| task.async { pump(index) } }
   end
 
   private
 
-  def accept(index)
-    @accepting[index] = true
-    @rings[index].accept(@server.fileno, (index << SLOT_BITS) << 3 | ACCEPT)
+  # Keeps ACCEPTS single-shot accepts in flight, each on the ring holding the fewest connections. With
+  # a multishot accept per ring the kernel hands every connection to the first ring until its table
+  # is full, and only then to the next.
+  def arm_accepts
+    while @accepts < ACCEPTS
+      index = @held.index(@held.min)
+      break if @held[index] >= @slots
+
+      @held[index] += 1
+      @accepts += 1
+      @rings[index].accept(@server.fileno, (index << SLOT_BITS) << 3 | ACCEPT)
+    end
   end
 
   # Waits (through the reactor) for the ring's eventfd, then handles every completion and hands the
@@ -67,13 +81,12 @@ class UringServer < HTTPServer
   def pump(index)
     ring = @rings[index]
     eventfd = IO.for_fd(ring.eventfd, autoclose: false)
-    accept(index)
     ring.submit
     loop do
       eventfd.wait_readable
-      eventfd.read_nonblock(8, exception: false)
+      eventfd.read_nonblock(8, nil, exception: false) # the explicit nil keeps YJIT compiling the call
       ring.each_completion { |data, result, flags| complete(ring, index, data >> 3, data & 7, result, flags) }
-      ring.submit
+      flush # accepts are re-armed on whichever ring has room
     rescue StandardError => error
       Console.error(self, error)
     end
@@ -87,8 +100,12 @@ class UringServer < HTTPServer
         if (input = @input[id]) then input << data else @input[id] = data end
         unless @busy[id]
           @busy[id] = true
-          @ready.push(id)
-          add_worker if @waiting < @ready.size && @workers < MAX_WORKERS
+          if reads_only?(@input[id])
+            serve_inline(id)
+          else
+            @ready.push(id)
+            add_worker if @waiting < @ready.size && @workers < MAX_WORKERS
+          end
         end
         ring.receive(id & SLOT_MASK, id << 3 | RECV) if flags.nobits?(Uring::CQE_F_MORE)
       elsif result == -ENOBUFS # out of provided buffers: they come back with this pass's submit
@@ -100,21 +117,37 @@ class UringServer < HTTPServer
     when SEND
       sent(id, result)
     when ACCEPT
+      @accepts -= 1
       if result >= 0
         id = index << SLOT_BITS | result
         @open += 1
         ring.receive(result, id << 3 | RECV)
+      else
+        @held[index] -= 1
       end
-      accept(index) if flags.nobits?(Uring::CQE_F_MORE) && result != -ENFILE
-      @accepting[index] = false if result == -ENFILE
+      arm_accepts
     end
     # CANCEL and CLOSE_SLOT complete only when they fail: the receive ends or the slot is freed anyway.
+  end
+
+  # Only GETs, and no write batch open: serving them can't suspend, so the pump serves them itself
+  # instead of handing the connection to a worker fiber (a queue push, and two fiber switches).
+  def reads_only?(input)
+    input.match?(GET_AT, 0) && !input.include?(POST_REQUEST) && !@app.writing?
+  end
+
+  # Inside the completion loop: an exception must not escape it, or completions already handled
+  # would be handled again.
+  def serve_inline(id)
+    service(id)
+  rescue StandardError => error
+    Console.error(self, error)
   end
 
   def work
     loop do
       @waiting += 1
-      id = @ready.pop
+      id = @ready.pop(false) # explicit: YJIT sends `pop` to the interpreter when its optional argument is left out
       @waiting -= 1
       service(id)
       flush if @ready.empty?
@@ -171,13 +204,28 @@ class UringServer < HTTPServer
     @input[id] = @out[id] = nil
     @closing[id] = @cancelled[id] = @dead[id] = false
     @open -= 1
-    accept(index) unless @accepting[index]
+    @held[index] -= 1
+    arm_accepts
   end
 
+  # The response is copied out of Ruby strings, which the GC may move, into native memory that
+  # stays put until the send completes: a pooled buffer, unless the response is larger.
   def send_now(id, data)
     length = data.bytesize
-    memory = FFI::MemoryPointer.new(:char, length, false)
+    memory = send_buffer(length)
     memory.put_bytes(0, data)
+    start_send(id, memory, length)
+  end
+
+  def send_buffer(length)
+    if length <= SEND_SIZE
+      @send_pool.pop || FFI::MemoryPointer.new(:char, SEND_SIZE, false)
+    else
+      FFI::MemoryPointer.new(:char, length, false)
+    end
+  end
+
+  def start_send(id, memory, length)
     @sending[id] = memory
     @send_length[id] = length
     @send_offset[id] = 0
@@ -187,6 +235,7 @@ class UringServer < HTTPServer
   def sent(id, result)
     memory = @sending[id]
     if result.negative?
+      release(memory)
       @sending[id] = @out[id] = nil
       @closing[id] = true
       return finish(id)
@@ -198,11 +247,17 @@ class UringServer < HTTPServer
       @rings[id >> SLOT_BITS].send_data(id & SLOT_MASK, memory + offset, @send_length[id] - offset, id << 3 | SEND)
     elsif (pending = @out[id])
       @out[id] = nil
+      release(memory)
       send_now(id, pending)
     else
+      release(memory)
       @sending[id] = nil
       finish(id)
     end
+  end
+
+  def release(memory)
+    @send_pool.push(memory) if memory.size == SEND_SIZE
   end
 
   # Responses on one connection go out in order: while a send is in flight, later ones wait in @out.
@@ -215,5 +270,21 @@ class UringServer < HTTPServer
     else
       send_now(id, data)
     end
+  end
+
+  # The usual case, nothing in flight: the parts go straight into the send buffer, with no response
+  # string built in between.
+  def write_response(id, head, length, document)
+    return super if !id.is_a?(Integer) || @sending[id]
+
+    size = head.bytesize + length.bytesize + END_HEAD.bytesize + document.bytesize
+    memory = send_buffer(size)
+    memory.put_bytes(0, head)
+    offset = head.bytesize
+    memory.put_bytes(offset, length)
+    offset += length.bytesize
+    memory.put_bytes(offset, END_HEAD)
+    memory.put_bytes(offset + END_HEAD.bytesize, document)
+    start_send(id, memory, size)
   end
 end

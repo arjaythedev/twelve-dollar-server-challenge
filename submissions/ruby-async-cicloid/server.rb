@@ -38,8 +38,22 @@ server.warm([
 
 GC.compact
 Process.warmup if Process.respond_to?(:warmup)
+# No automatic full GCs while serving: little survives a request, and each full GC stops the
+# reactor for tens of milliseconds. Without them old objects are never freed, so a full GC still
+# runs if they grow past three times what the warm-up left.
+GC.config(rgengc_allow_full_mark: false)
+old_objects_cap = GC.stat(:old_objects) * 3
 
 Async do |task|
+  task.async do
+    loop do
+      sleep 10
+      next if GC.stat(:old_objects) < old_objects_cap
+
+      GC.start
+      old_objects_cap = GC.stat(:old_objects) * 3
+    end
+  end
   task.async do
     loop do
       sleep 1

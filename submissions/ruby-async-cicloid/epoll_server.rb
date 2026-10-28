@@ -79,7 +79,7 @@ class EpollServer < HTTPServer
     io_buffer = IO::Buffer.new(READ_SIZE)
     loop do
       @waiting += 1
-      fd = @ready.pop
+      fd = @ready.pop(false) # explicit: YJIT sends `pop` to the interpreter when its optional argument is left out
       @waiting -= 1
       service(fd, io_buffer)
     rescue StandardError => error
@@ -107,7 +107,7 @@ class EpollServer < HTTPServer
                  length = Fiber.scheduler.io_read(socket, io_buffer, 1, 0)
                  io_buffer.get_string(0, length) if length.positive?
                else
-                 socket.read_nonblock(READ_SIZE, exception: false)
+                 socket.read_nonblock(READ_SIZE, nil, exception: false)
                end
         break if data == :wait_readable
         return disconnect(fd, socket) unless data

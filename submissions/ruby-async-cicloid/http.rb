@@ -40,10 +40,17 @@ class HTTPServer
   DIGITS = /\A[0-9]+\z/
   CLOSE_TOKEN = /\bclose\b/i
   KEEP_ALIVE_TOKEN = /\bkeep-alive\b/i
-  HTTP_11 = "HTTP/1.1"
-  HTTP_10 = "HTTP/1.0"
   EMPTY = ""
   FEED = "/feed"
+  GET = "GET"
+  POST = "POST"
+  # Checked in place (`match?` at an offset allocates nothing), so the common request line costs no
+  # strings: only a path other than the feed is sliced out.
+  HTTP_11_AT = %r{\GHTTP/1\.1\r\n}
+  HTTP_10_AT = %r{\GHTTP/1\.0\r\n}
+  GET_AT = /\GGET /
+  POST_AT = /\GPOST /
+  FEED_AT = %r{\G/feed[ ?]}
 
   # `capacity` is how many connections the subclass can hold at once.
   def initialize(app, host, port, capacity)
@@ -106,37 +113,45 @@ class HTTPServer
       space2 = space && buffer.byteindex(" ", space + 1)
       return reject(socket, 400) unless space2 && space > position && space2 < line_end
 
-      version = buffer.byteslice(space2 + 1, line_end - space2 - 1)
-      http10 = version == HTTP_10
-      return reject(socket, 400) unless http10 || version == HTTP_11
+      version_length = line_end - space2 - 1
+      http10 = version_length == 8 && buffer.match?(HTTP_10_AT, space2 + 1)
+      return reject(socket, 400) unless http10 || (version_length == 8 && buffer.match?(HTTP_11_AT, space2 + 1))
 
-      method = buffer.byteslice(position, space - position)
-      query = buffer.byteindex("?", space + 1)
-      path_end = query && query < space2 ? query : space2
-      path = buffer.byteslice(space + 1, path_end - space - 1)
+      method = if space - position == 3 && buffer.match?(GET_AT, position) then GET
+               elsif space - position == 4 && buffer.match?(POST_AT, position) then POST
+               else buffer.byteslice(position, space - position)
+               end
+      path = if buffer.match?(FEED_AT, space + 1) then FEED
+             else
+               query = buffer.byteindex("?", space + 1)
+               path_end = query && query < space2 ? query : space2
+               buffer.byteslice(space + 1, path_end - space - 1)
+             end
 
       length = 0
       authorization = nil
       close = http10
-      if line_end < head_end
-        buffer.byteslice(line_end, head_end - line_end).scan(HEADER) do
-          name = Regexp.last_match(1)
-          value = Regexp.last_match(2)
-          value = value.sub(TRAILING_BLANKS, "") if value.end_with?(" ", "\t")
-          case name.bytesize
-          when 14 # content-length
-            return reject(socket, 400) unless DIGITS.match?(value)
+      # Searched in place: a head without any of these headers allocates nothing. A match past
+      # head_end belongs to the body or the next request.
+      at = line_end
+      while (at = buffer.byteindex(HEADER, at)) && at < head_end
+        name = Regexp.last_match(1)
+        value = Regexp.last_match(2)
+        at += 2
+        value = value.sub(TRAILING_BLANKS, "") if value.end_with?(" ", "\t")
+        case name.bytesize
+        when 14 # content-length
+          return reject(socket, 400) unless DIGITS.match?(value)
 
-            length = value.to_i
-          when 17 # transfer-encoding: request bodies must use Content-Length
-            return reject(socket, 411)
-          when 10 # connection
-            if CLOSE_TOKEN.match?(value) then close = true
-            elsif http10 && KEEP_ALIVE_TOKEN.match?(value) then close = false
-            end
-          else # authorization
-            authorization = value
+          length = value.to_i
+        when 17 # transfer-encoding: request bodies must use Content-Length
+          return reject(socket, 411)
+        when 10 # connection
+          if CLOSE_TOKEN.match?(value) then close = true
+          elsif http10 && KEEP_ALIVE_TOKEN.match?(value) then close = false
           end
+        else # authorization
+          authorization = value
         end
       end
       return reject(socket, 413) if length > MAX_BODY
@@ -166,8 +181,14 @@ class HTTPServer
 
   def respond(socket, heads, status, document)
     head = heads[status] || heads[500]
-    out = String.new(head, capacity: head.bytesize + 8 + document.bytesize)
-    out << document.bytesize.to_s << END_HEAD << document
+    write_response(socket, head, document.bytesize.to_s, document)
+  end
+
+  # Writes head, length, a blank line and the document. The connection layer may copy the parts
+  # straight to where they are sent from instead.
+  def write_response(socket, head, length, document)
+    out = String.new(head, capacity: head.bytesize + length.bytesize + 4 + document.bytesize)
+    out << length << END_HEAD << document
     write(socket, out)
   end
 end

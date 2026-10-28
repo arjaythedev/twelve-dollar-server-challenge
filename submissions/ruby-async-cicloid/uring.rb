@@ -15,7 +15,7 @@ module Uring
   attach_function :io_uring_register_eventfd, %i[pointer int], :int
   attach_function :io_uring_prep_provide_buffers, %i[pointer pointer int int int int], :void
   attach_function :io_uring_get_sqe, %i[pointer], :pointer
-  attach_function :io_uring_prep_multishot_accept_direct, %i[pointer int pointer pointer int], :void
+  attach_function :io_uring_prep_accept_direct, %i[pointer int pointer pointer int uint], :void
   attach_function :io_uring_prep_recv_multishot, %i[pointer int pointer size_t int], :void
   attach_function :io_uring_prep_send, %i[pointer int pointer size_t int], :void
   attach_function :io_uring_prep_cancel64, %i[pointer uint64 int], :void
@@ -36,6 +36,7 @@ module Uring
   SETUP_CQSIZE = 1 << 3
   SETUP_SUBMIT_ALL = 1 << 7
   SETUP_SINGLE_ISSUER = 1 << 12
+  FILE_INDEX_ALLOC = 0xFFFFFFFF # accept into any free slot of the ring's table
   SQE_FIXED_FILE = 1 << 0
   SQE_BUFFER_SELECT = 1 << 5
   SQE_CQE_SKIP_SUCCESS = 1 << 6
@@ -81,9 +82,10 @@ module Uring
       submit
     end
 
+    # One connection, into a free slot of this ring's table.
     def accept(listener, data)
       sqe = take
-      Uring.io_uring_prep_multishot_accept_direct(sqe, listener, nil, nil, 0)
+      Uring.io_uring_prep_accept_direct(sqe, listener, nil, nil, 0, FILE_INDEX_ALLOC)
       Uring.io_uring_sqe_set_data64(sqe, data)
     end
 

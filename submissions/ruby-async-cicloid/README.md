@@ -42,7 +42,7 @@ What the io_uring layer needs, all of which a stock Ubuntu 24.04 has:
 - **liburing 2.4 or newer**, for `liburing-ffi.so.2` (liburing's inline helpers as exported
   functions, which `uring.rb` binds through the `ffi` gem; nothing is compiled). `install.sh` installs
   `liburing-dev`, which pulls in `liburing2`. Ubuntu 24.04 ships 2.5.
-- **Linux 6.0 or newer**, for multishot receive (multishot accept into direct descriptors needs 5.19).
+- **Linux 6.0 or newer**, for multishot receive (accepting into direct descriptors needs 5.19).
   Tested on Ubuntu's 6.8.
 - **io_uring not blocked.** `sysctl kernel.io_uring_disabled` must be 0 (the default), and no seccomp
   filter or systemd `SystemCallFilter` may deny `io_uring_setup`. Docker's default seccomp profile
@@ -75,7 +75,7 @@ version keeps the Async reactor and replaces the HTTP server.
   limit, an epoll server can't hold more keep-alive users than that: past it, it has to close idle
   connections so clients reconnect, and each reconnect cost us about twice as much CPU as a request.
   `uring_server.rb` accepts every connection straight into a slot of an io_uring ring's registered
-  file table (multishot accept with `IORING_FILE_INDEX_ALLOC`). Those slots aren't process
+  file table (accept with `IORING_FILE_INDEX_ALLOC`). Those slots aren't process
   descriptors, so they don't count against `RLIMIT_NOFILE`. The kernel caps each ring's table at
   that limit, but every ring has its own table, so two rings hold 131,070 connections. Each
   connection has one multishot receive armed for its whole life, filled from a group of provided
@@ -84,6 +84,16 @@ version keeps the Async reactor and replaces the HTTP server.
   queued as sends, in order per connection, and handed to the kernel together. Ubuntu's 6.8 kernel
   rejects registering a buffer ring (`IORING_REGISTER_PBUF_RING`) with `EINVAL`, even from C, so the
   buffers use the older `IORING_OP_PROVIDE_BUFFERS`.
+- **Accepts are spread over the rings.** With one multishot accept per ring, the kernel gave every
+  connection to the first ring until its table was full, and the switch to the second ring came at
+  the end of the load test's ramp, with the core already near saturation: at 80,000 users the event
+  loop stalled for 80–250 ms per pass for about 25 seconds, and p99 reached 2.5 s. Now 64
+  single-shot accepts stay in flight, each on the ring holding the fewest connections, so both
+  tables fill evenly. That run now passes with p99 165 ms.
+- **Reads are served where they arrive.** A GET can only suspend while a write batch is open (it
+  waits for the COMMIT, see Group commit). So when a connection's new bytes hold only GETs and no
+  batch is open, the ring's completion loop serves them itself; everything else goes to a worker
+  fiber. About 75% of requests skip the queue push and the two fiber switches.
 - **Idle connections own no fiber.** In either layer an idle keep-alive connection owns no Ruby
   fiber. In the epoll fallback it sits in a kernel epoll set. Each connection is registered once, edge-triggered, so there is no `epoll_ctl`
   per request. One Async task waits on that epoll descriptor through the reactor. A pool of 256
@@ -109,6 +119,18 @@ version keeps the Async reactor and replaces the HTTP server.
   can. Reads and writes go through the fiber scheduler, so io_uring submits them in batches instead
   of one syscall each. Together with edge-triggered epoll, that cut CPU at 40k users from about 46%
   to 40% on our test VM.
+- **Every hot call stays in YJIT.** `Thread::Queue#pop` and `IO#read_nonblock` are defined in Ruby
+  with optional arguments, and YJIT ran every call that left one out in the interpreter: 1.7 million
+  fallbacks in two minutes at 40,000 users, about two per request. Passing them explicitly
+  (`pop(false)`, `read_nonblock(8, nil, exception: false)`) removed them (`--yjit-stats`).
+- **About 13 objects per request, from 20.** The request line is checked in place (`match?` with
+  `\G` at an offset allocates nothing), so a feed request slices no strings; headers are searched in
+  the buffer rather than in a copy of the head; and a response's head, length and body are copied
+  straight into a pooled native send buffer, with no response string built first.
+- **GC tuned for request garbage.** `start.sh` starts the heap larger and keeps more slots free
+  after each GC, so minor GCs run about every 5 s instead of every second, and `server.rb` turns off
+  automatic full GCs once warm (one still runs if old objects triple). GC went from about 100 to
+  55 ms per 10 s at 72,000 users.
 - **No `IO#write`.** `socket.write` holds the socket's write lock while the scheduler's write is in
   flight, and Ruby 4.0 keeps every mutex a thread holds in one linked list that it walks on every
   unlock (`thread_mutex_remove`). With thousands of writes in flight under overload, unlocking took
@@ -230,6 +252,24 @@ With the cap lifted (one full core), the same protocol passes the video's larges
 | 60,000 | 12 ms | 35 ms | 0% | 112 µs | 184 MB | pass |
 | 64,000 | 17 ms | 39 ms | 0% | 113 µs | 188 MB | pass |
 
+### Scored the way the leaderboard is: mload
+
+`mload` is the scorer's load generator (`bench/mload` in arjaythedev/million-users-challenge): one
+goroutine and one keep-alive connection per user, the `bench/load.js` user model with its think
+times, a 60 s ramp and a 5-minute hold, and every request in the run counted. Three load VMs, results
+merged, descriptor limit 65,535:
+
+| Users | Result | p95 | p99 | Errors | CPU per request | Peak RSS |
+|---|---|---|---|---|---|---|
+| 80,000 | pass | 39 ms | 165 ms | 0% | 102.9 µs | 289 MB |
+| 85,000 | pass | 145 ms | 465 ms | 0% | 101.3 µs | 345 MB |
+| 90,000 | pass | 198 ms | 845 ms | 0% | 101.2 µs | 361 MB |
+
+During the hold at 90,000 users p95 stays at 30–80 ms; the tail comes from the end of the ramp,
+when the core runs connection setup and nearly the full request load at once. Before accepts were
+spread over the rings and reads served inline, 80,000 failed (p99 2.5 s) and 85,000 failed (p99
+2.9 s), with the same p95 in the hold.
+
 ### Past the descriptor limit: io_uring direct descriptors
 
 The scored run (LEADERBOARD.md, Synteq 1 vCPU) gave the epoll version 71,000 users at 111 µs per
@@ -258,8 +298,10 @@ Test suite: 42/42 on x86_64, with either connection layer.
   covers the extreme case. In the epoll layer, a worker that picks up a stale edge-triggered event
   waits on that connection until the client sends or closes; the growable pool keeps that from
   starving others. The io_uring layer has no stale events.
-- Each response is copied once into FFI memory for its send, and each receive is copied out of its
-  provided buffer into a Ruby string.
+- Each response is copied once into native memory for its send, and each receive is copied out of
+  its provided buffer into a Ruby string.
+- The larger GC heap and per-connection state put peak RSS at 290–360 MB at 80,000–90,000 users.
+- Without automatic full GCs, objects that become old and then die stay until old objects triple.
 - The epoll layer calls io-event's scheduler `io_read` and `io_write` directly with an `IO::Buffer`,
   which Ruby still marks experimental (it prints a warning at startup). On an epoll-only kernel it
   still works, unbatched.

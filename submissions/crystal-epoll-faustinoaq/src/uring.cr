@@ -442,7 +442,10 @@ module Uring
           r.enter(0_u32, ENTER_GETEVENTS) # submit, and run the ring's deferred work
         end
         unless ready?
-          LibC.epoll_wait(@@ep, evs, MAX_RINGS, -1)
+          # Bounded wait: on Linux 6.12/6.18 a DEFER_TASKRUN ring's eventfd can stop signalling
+          # (the deferred signal stays marked pending), which would strand this worker. The
+          # single-ring path above waits in io_uring_enter and is not affected.
+          LibC.epoll_wait(@@ep, evs, MAX_RINGS, 1)
           @@nrings.times { |i| @@rings[i].enter(0_u32, ENTER_GETEVENTS) }
         end
       end

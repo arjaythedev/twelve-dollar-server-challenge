@@ -106,5 +106,20 @@ int main(void)
 	CHECK(verify_payload(&v, "{\"sub\":\"1\",\"exp\":1800000001}") == JWT_INVALID_PAYLOAD);
 	CHECK(verify_payload(&v, "{\"sub\":\"1\",\"username\":5,\"exp\":1800000001}") == JWT_INVALID_PAYLOAD);
 	CHECK(verify_payload(&v, "[1,2]") == JWT_INVALID_TOKEN);
+
+	/* the layout the challenge's tokens have is read by a fast path; every deviation must still get the general answer */
+	CHECK(verify_payload(&v, "{\"sub\":\"7\",\"username\":\"a_b_7\",\"iat\":1799999000,\"exp\":1800000001}") == JWT_OK);
+	CHECK(verify_payload(&v, "{\"sub\":\"7\",\"username\":\"a_b_7\",\"iat\":1799999000,\"exp\":1800000000}") == JWT_INVALID_TOKEN);
+	CHECK(verify_payload(&v, "{\"sub\":\"07\",\"username\":\"u\",\"iat\":1,\"exp\":1800000001}") == JWT_INVALID_PAYLOAD);
+	CHECK(verify_payload(&v, "{\"sub\":\"7\",\"username\":\"u\",\"iat\":01,\"exp\":1800000001}") == JWT_INVALID_TOKEN);
+	CHECK(verify_payload(&v, "{\"sub\":\"7\",\"username\":\"u\",\"iat\":1,\"exp\":1800000001 }") == JWT_OK);
+	CHECK(verify_payload(&v, "{\"sub\":\"7\",\"username\":\"u\",\"iat\":1,\"exp\":1800000001,\"nbf\":1800000001}") == JWT_INVALID_TOKEN);
+	CHECK(verify_payload(&v, "{\"sub\":\"7\",\"username\":\"u\",\"iat\":1,\"exp\":1800000001.5}") == JWT_OK);
+	CHECK(verify_payload(&v, "{\"sub\":\"7\",\"username\":\"u\",\"iat\":1,\"exp\":1800000001,\"exp\":1}") == JWT_INVALID_TOKEN); /* last one counts */
+	CHECK(verify_payload(&v, "{\"sub\":\"7\",\"username\":\"\\u0041x\",\"iat\":1,\"exp\":1800000001}") == JWT_OK);
+	CHECK(verify_payload(&v, "{\"sub\":\"7\",\"username\":\"\\\"\",\"iat\":1,\"exp\":1800000001}") == JWT_OK);
+	CHECK(verify_payload(&v, "{\"sub\":\"7\",\"username\":\"u\",\"iat\":1,\"exp\":1800000001}x") == JWT_INVALID_TOKEN);
+	CHECK(verify_payload(&v, "{\"sub\":\"1234567890123456789\",\"username\":\"u\",\"iat\":1,\"exp\":1800000001}") == JWT_INVALID_PAYLOAD);
+	CHECK(verify_payload(&v, "{\"sub\":\"7\",\"username\":\"u\",\"iat\":1,\"exp\":9999999999999999}") == JWT_OK); /* 16 digits: general reader */
 	TEST_MAIN_END();
 }

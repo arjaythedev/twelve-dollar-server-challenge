@@ -32,6 +32,17 @@ static void expand_schedule(uint32_t w[64], const uint8_t block[SHA256_BLOCK_SIZ
 	}
 }
 
+/* One round. The caller rotates the roles of a..h, so no value is moved between registers. */
+#define ROUND(a, b, c, d, e, f, g, h, i)                                                                   \
+	do {                                                                                               \
+		uint32_t t1 = (h) + (rotate_right(e, 6) ^ rotate_right(e, 11) ^ rotate_right(e, 25)) +     \
+		              ((g) ^ ((e) & ((f) ^ (g)))) + round_constants[i] + w[i];                     \
+		uint32_t t2 = (rotate_right(a, 2) ^ rotate_right(a, 13) ^ rotate_right(a, 22)) +           \
+		              (((a) & (b)) | ((c) & ((a) | (b))));                                         \
+		(d) += t1;                                                                                 \
+		(h) = t1 + t2;                                                                             \
+	} while (0)
+
 static void compress_block(uint32_t state[8], const uint8_t block[SHA256_BLOCK_SIZE])
 {
 	uint32_t w[64];
@@ -39,16 +50,15 @@ static void compress_block(uint32_t state[8], const uint8_t block[SHA256_BLOCK_S
 	uint32_t e = state[4], f = state[5], g = state[6], h = state[7];
 
 	expand_schedule(w, block);
-	for (int i = 0; i < 64; i++) {
-		uint32_t big_s1 = rotate_right(e, 6) ^ rotate_right(e, 11) ^ rotate_right(e, 25);
-		uint32_t choose = (e & f) ^ (~e & g);
-		uint32_t t1 = h + big_s1 + choose + round_constants[i] + w[i];
-		uint32_t big_s0 = rotate_right(a, 2) ^ rotate_right(a, 13) ^ rotate_right(a, 22);
-		uint32_t majority = (a & b) ^ (a & c) ^ (b & c);
-		uint32_t t2 = big_s0 + majority;
-
-		h = g; g = f; f = e; e = d + t1;
-		d = c; c = b; b = a; a = t1 + t2;
+	for (int i = 0; i < 64; i += 8) {
+		ROUND(a, b, c, d, e, f, g, h, i);
+		ROUND(h, a, b, c, d, e, f, g, i + 1);
+		ROUND(g, h, a, b, c, d, e, f, i + 2);
+		ROUND(f, g, h, a, b, c, d, e, i + 3);
+		ROUND(e, f, g, h, a, b, c, d, i + 4);
+		ROUND(d, e, f, g, h, a, b, c, i + 5);
+		ROUND(c, d, e, f, g, h, a, b, i + 6);
+		ROUND(b, c, d, e, f, g, h, a, i + 7);
 	}
 	state[0] += a; state[1] += b; state[2] += c; state[3] += d;
 	state[4] += e; state[5] += f; state[6] += g; state[7] += h;

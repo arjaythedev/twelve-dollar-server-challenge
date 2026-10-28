@@ -1,0 +1,5 @@
+[env]
+# Compile-time options for the SQLite that rusqlite builds from source. HAVE_FDATASYNC makes commits
+# use fdatasync() instead of fsync(); the rest are options https://sqlite.org/compile.html
+# recommends, and removing ENABLE_MEMORY_MANAGEMENT drops a mutex taken on every page-cache access.
+LIBSQLITE3_FLAGS = "-DHAVE_FDATASYNC=1 -DSQLITE_DEFAULT_MEMSTATUS=0 -DSQLITE_DQS=0 -DSQLITE_LIKE_DOESNT_MATCH_BLOBS -DSQLITE_USE_ALLOCA -USQLITE_ENABLE_MEMORY_MANAGEMENT"

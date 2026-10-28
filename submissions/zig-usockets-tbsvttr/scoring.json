@@ -1,0 +1,28 @@
+{
+  "batch": "Z1",
+  "weights": {
+    "score_throughput": 0.4,
+    "app_loc": 0.2,
+    "resolved_deps": 0.2,
+    "rss_mib": 0.2
+  },
+  "bounds": {
+    "score_throughput": [
+      3470.09,
+      83948.09
+    ],
+    "app_loc": [
+      105,
+      1357
+    ],
+    "resolved_deps": [
+      0,
+      111
+    ],
+    "rss_mib": [
+      39.84375,
+      237.30859375
+    ]
+  },
+  "normalization": "Published U5 min/max bounds held fixed; each component clipped to [0,100]. All rows freshly measured in Z1; no historic measurements used as row values."
+}

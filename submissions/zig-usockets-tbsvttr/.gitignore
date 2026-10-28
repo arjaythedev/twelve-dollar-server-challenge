@@ -1,0 +1,4 @@
+.deps/
+bin/
+.zig-cache/
+__pycache__/

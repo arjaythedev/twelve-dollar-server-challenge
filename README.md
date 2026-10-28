@@ -2,6 +2,8 @@
 
 How many users can one **$12/month server** (1 vCPU, 2 GB RAM) handle? 
 
+**Leaderboard: [benchmarks.arjaythedev.com/12-dollar-server](https://benchmarks.arjaythedev.com/12-dollar-server)**
+
 I benchmarked 8 languages with basic unoptimized code using language defaults. https://www.youtube.com/watch?v=sQXFhh_PiG4
 
 **Now it's your turn: implement the same API in any language and framework, make it as fast as you can on
@@ -109,4 +111,5 @@ not one at a time, on no fixed schedule, and share the results once a batch is d
 
 ## Results
 
-- [Batch 2](benchmarks/batch-2.md) (2026-10-20/21, Synteq 1 vCPU / 2 GB VPS): 26 new submissions + 3 anchors; top score 264,000 users (Rust io_uring, #82)
+**[Leaderboard](https://benchmarks.arjaythedev.com/12-dollar-server)**: every submission on the same 1 vCPU / 2 GB box, updated as new PRs are benchmarked.
+The same table, with the per-entry notes, is in [LEADERBOARD.md](LEADERBOARD.md).

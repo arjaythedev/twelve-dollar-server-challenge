@@ -81,18 +81,18 @@ print(json.dumps(dict(pid=pid, executable=os.readlink(proc / "exe"),
     done
     ;;
   cost)
+    # CPU per request without the network (parsing, JWT, SQLite, framing).
     docker run --rm --platform linux/amd64 --cpus=1 --memory=2g --memory-swap=2g \
       --mount "type=bind,source=$ROOT,target=/input,readonly" \
       --workdir /work "ada-validation:$ID" bash -euc '
-        cp -R /input/submissions/ada-native-visseranalytics/src .
-        cp /input/submissions/ada-native-visseranalytics/bench/request_cost.adb .
-        cp /input/seed/feed.db .
-        mkdir obj
-        gnatmake-13 -j1 -O2 -gnat2022 -gnatwa -gnatVa -fstack-protector-strong \
-          -D obj -Isrc request_cost.adb -o request_cost -largs -lsqlite3 -lcrypto
-        export SQLITE_PATH=/work/feed.db
+        A=/input/submissions/ada-native-visseranalytics
+        cp -R $A/src $A/build.sh $A/versions.env .
+        bash build.sh >/dev/null
+        gnatmake-13 -q -j1 -O3 -gnatn -gnat2022 -D obj -Iobj -Isrc $A/bench/request_cost.adb \
+          -o request_cost -largs obj/sqlite3.o -lcrypto -lm
         for repeat in 1 2 3; do
-          for mode in headers feed post wire; do ./request_cost "$mode" 50000; done
+          cp /input/seed/feed.db feed.db; rm -f feed.db-*
+          SQLITE_PATH=/work/feed.db ./request_cost 50000 /input/seed/tokens.json
         done
       '
     ;;

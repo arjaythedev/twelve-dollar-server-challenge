@@ -1,11 +1,7 @@
-with Ada.Strings.Fixed;
-
 package body JSON is
-   procedure Decode (Text : String; Position : in out Integer;
-                     Code : out Natural) is
-      First : Natural;
-      Count : Natural;
-      Minimum : Natural;
+   -- Validate one UTF-8 sequence at Position and return its code point.
+   procedure Next_Code (Text : String; Position : in out Integer; Code : out Natural) is
+      First, Count, Minimum : Natural;
    begin
       if Position > Text'Last then
          raise Invalid_JSON;
@@ -38,33 +34,29 @@ package body JSON is
       then
          raise Invalid_JSON;
       end if;
-   end Decode;
+   end Next_Code;
 
-   procedure Encode (Code : Natural; Text : in out Unbounded_String) is
-      procedure Byte (N : Natural) is
-      begin
-         Append (Text, Character'Val (N));
-      end Byte;
+   function Hex_Value (C : Character) return Natural is
+     (case C is
+        when '0' .. '9' => Character'Pos (C) - 48,
+        when 'a' .. 'f' => Character'Pos (C) - 87,
+        when 'A' .. 'F' => Character'Pos (C) - 55,
+        when others => raise Invalid_JSON);
+
+   function Hex4 (Text : String; At_Index : Integer) return Natural is
+      N : Natural := 0;
    begin
-      if Code < 16#80# then
-         Byte (Code);
-      elsif Code < 16#800# then
-         Byte (16#C0# + Code / 64);
-         Byte (16#80# + Code mod 64);
-      elsif Code < 16#10000# then
-         Byte (16#E0# + Code / 4096);
-         Byte (16#80# + Code / 64 mod 64);
-         Byte (16#80# + Code mod 64);
-      else
-         Byte (16#F0# + Code / 262144);
-         Byte (16#80# + Code / 4096 mod 64);
-         Byte (16#80# + Code / 64 mod 64);
-         Byte (16#80# + Code mod 64);
+      if At_Index + 3 > Text'Last then
+         raise Invalid_JSON;
       end if;
-   end Encode;
+      for I in At_Index .. At_Index + 3 loop
+         N := N * 16 + Hex_Value (Text (I));
+      end loop;
+      return N;
+   end Hex4;
 
-   procedure Parse (Source : String; Result : in out Fields;
-                    Root : out Value_Kind) is
+   procedure Parse (Source : String; Names : Name_Array;
+                    Result : out Field_Array; Root : out Value_Kind) is
       type State is (Object_First, Object_Key, Object_Colon, Object_Item,
                      Object_After, Array_First, Array_Item, Array_After);
       -- Iterative parsing bounds nesting memory by input size, without recursion.
@@ -83,83 +75,62 @@ package body JSON is
          end loop;
       end Space;
 
-      function Hex4 return Natural is
-         N : Natural := 0;
-         C : Character;
-      begin
-         for I in 1 .. 4 loop
-            if P > Source'Last then raise Invalid_JSON; end if;
-            C := Source (P); P := P + 1; N := N * 16;
-            case C is
-               when '0' .. '9' => N := N + Character'Pos (C) - 48;
-               when 'a' .. 'f' => N := N + Character'Pos (C) - 87;
-               when 'A' .. 'F' => N := N + Character'Pos (C) - 55;
-               when others => raise Invalid_JSON;
-            end case;
-         end loop;
-         return N;
-      end Hex4;
-
-      function Read_String return Unbounded_String is
-         Text : Unbounded_String;
+      procedure Read_String (First : out Positive; Last : out Natural;
+                             Escaped : out Boolean) is
          Code, Low : Natural;
-         Start : Integer;
          C : Character;
       begin
          if P > Source'Last or else Source (P) /= '"' then
             raise Invalid_JSON;
          end if;
          P := P + 1;
+         First := P;
+         Escaped := False;
          while P <= Source'Last loop
-            C := Source (P); P := P + 1;
-            if C = '"' then return Text;
+            C := Source (P);
+            if C = '"' then
+               Last := P - 1;
+               P := P + 1;
+               return;
             elsif C = '\' then
+               Escaped := True;
+               P := P + 1;
                if P > Source'Last then raise Invalid_JSON; end if;
-               C := Source (P); P := P + 1;
+               C := Source (P);
+               P := P + 1;
                case C is
-                  when '"' | '\' | '/' => Append (Text, C);
-                  when 'b' => Append (Text, ASCII.BS);
-                  when 'f' => Append (Text, ASCII.FF);
-                  when 'n' => Append (Text, ASCII.LF);
-                  when 'r' => Append (Text, ASCII.CR);
-                  when 't' => Append (Text, ASCII.HT);
+                  when '"' | '\' | '/' | 'b' | 'f' | 'n' | 'r' | 't' => null;
                   when 'u' =>
-                     Code := Hex4;
+                     Code := Hex4 (Source, P);
+                     P := P + 4;
                      if Code in 16#D800# .. 16#DBFF# then
-                        if P + 1 > Source'Last or else
-                          Source (P .. P + 1) /= "\u"
+                        if P + 1 > Source'Last or else Source (P) /= '\'
+                          or else Source (P + 1) /= 'u'
                         then
                            raise Invalid_JSON;
                         end if;
-                        P := P + 2;
-                        Low := Hex4;
+                        Low := Hex4 (Source, P + 2);
+                        P := P + 6;
                         if Low not in 16#DC00# .. 16#DFFF# then
                            raise Invalid_JSON;
                         end if;
-                        Code := 16#10000# +
-                          (Code - 16#D800#) * 1024 + Low - 16#DC00#;
                      elsif Code in 16#DC00# .. 16#DFFF# then
                         raise Invalid_JSON;
                      end if;
-                     Encode (Code, Text);
                   when others => raise Invalid_JSON;
                end case;
             elsif Character'Pos (C) < 32 then
                raise Invalid_JSON;
             elsif Character'Pos (C) >= 128 then
-               P := P - 1; Start := P;
-               Decode (Source, P, Code);
-               Append (Text, Source (Start .. P - 1));
+               Next_Code (Source, P, Code);
             else
-               -- Copy an ordinary ASCII run at once. Escapes and UTF-8 still
-               -- take the validating paths above; no parsed data is retained.
-               Start := P - 1;
+               -- An ordinary ASCII run; escapes and UTF-8 take the paths above.
+               P := P + 1;
                while P <= Source'Last and then Source (P) not in '"' | '\'
                  and then Character'Pos (Source (P)) in 32 .. 127
                loop
                   P := P + 1;
                end loop;
-               Append (Text, Source (Start .. P - 1));
             end if;
          end loop;
          raise Invalid_JSON;
@@ -176,8 +147,7 @@ package body JSON is
       end Literal;
 
       procedure Take_Value (Slot : Natural; Kind : out Value_Kind) is
-         Text : Unbounded_String;
-         Start : Integer;
+         Item : Field;
          procedure Consume_Digits is
             Before : constant Integer := P;
          begin
@@ -196,16 +166,21 @@ package body JSON is
             when '[' =>
                Kind := Array_Value; Depth := Depth + 1;
                Stack (Depth) := Array_First; P := P + 1;
-            when '"' => Kind := String_Value; Text := Read_String;
+            when '"' =>
+               Kind := String_Value;
+               Read_String (Item.First, Item.Last, Item.Escaped);
             when 't' => Kind := Boolean_Value; Literal ("true");
             when 'f' => Kind := Boolean_Value; Literal ("false");
             when 'n' => Kind := Null_Value; Literal ("null");
             when '-' | '0' .. '9' =>
-               Kind := Number_Value; Start := P;
+               Kind := Number_Value;
+               Item.First := P;
                if Source (P) = '-' then P := P + 1; end if;
                if P > Source'Last then raise Invalid_JSON; end if;
-               if Source (P) = '0' then P := P + 1;
-               else Consume_Digits;
+               if Source (P) = '0' then
+                  P := P + 1;
+               else
+                  Consume_Digits;
                end if;
                if P <= Source'Last and then Source (P) = '.' then
                   P := P + 1; Consume_Digits;
@@ -217,30 +192,35 @@ package body JSON is
                   end if;
                   Consume_Digits;
                end if;
-               Text := To_Unbounded_String (Source (Start .. P - 1));
+               Item.Last := P - 1;
             when others => raise Invalid_JSON;
          end case;
          if Slot /= 0 then
-            Result (Slot).Kind := Kind;
-            Result (Slot).Text := Text;
+            Item.Kind := Kind;
+            Result (Slot) := Item;
          end if;
       end Take_Value;
 
       procedure Key is
-         Name : constant Unbounded_String := Read_String;
+         First : Positive;
+         Last : Natural;
+         Escaped : Boolean;
       begin
+         Read_String (First, Last, Escaped);
          if Depth = 1 then
             Pending := 0;
-            for I in Result'Range loop
-               if Result (I).Name = Name then Pending := I; end if;
+            for I in Names'Range loop
+               if (if Escaped then Equals (Source, (String_Value, First, Last, True), Names (I).all)
+                   else Source (First .. Last) = Names (I).all)
+               then
+                  Pending := I;
+               end if;
             end loop;
          end if;
          Stack (Depth) := Object_Colon;
       end Key;
    begin
-      for F of Result loop
-         F.Kind := Missing; F.Text := Null_Unbounded_String;
-      end loop;
+      Result := [others => (others => <>)];
       Take_Value (0, Root);
       while Depth > 0 loop
          Space;
@@ -257,15 +237,18 @@ package body JSON is
                P := P + 1; Stack (Depth) := Object_Item;
             when Object_Item =>
                Stack (Depth) := Object_After;
-               if Depth = 1 then Take_Value (Pending, Dummy);
-               else Take_Value (0, Dummy);
+               if Depth = 1 then
+                  Take_Value (Pending, Dummy);
+               else
+                  Take_Value (0, Dummy);
                end if;
             when Object_After =>
                if Source (P) = '}' then
                   Depth := Depth - 1; P := P + 1;
                elsif Source (P) = ',' then
                   Stack (Depth) := Object_Key; P := P + 1;
-               else raise Invalid_JSON;
+               else
+                  raise Invalid_JSON;
                end if;
             when Array_First | Array_Item =>
                if Stack (Depth) = Array_First and then Source (P) = ']' then
@@ -278,7 +261,8 @@ package body JSON is
                   Depth := Depth - 1; P := P + 1;
                elsif Source (P) = ',' then
                   Stack (Depth) := Array_Item; P := P + 1;
-               else raise Invalid_JSON;
+               else
+                  raise Invalid_JSON;
                end if;
          end case;
       end loop;
@@ -286,75 +270,101 @@ package body JSON is
       if P <= Source'Last then raise Invalid_JSON; end if;
    end Parse;
 
-   function Quote (Text : String) return String is
-      Extra : Natural := 0;
-      Hex : constant String := "0123456789abcdef";
-   begin
-      -- Most database strings need no escaping. Size the output first so even
-      -- the escaped path avoids a managed-string append for every input byte.
-      for C of Text loop
-         case C is
-            when '"' | '\' | ASCII.BS | ASCII.FF | ASCII.LF | ASCII.CR | ASCII.HT =>
-               Extra := Extra + 1;
-            when others =>
-               if Character'Pos (C) < 32 then Extra := Extra + 5; end if;
-         end case;
-      end loop;
-      if Extra = 0 then return '"' & Text & '"'; end if;
-      declare
-         Result : String (1 .. Text'Length + Extra + 2);
-         P : Positive := 2;
-         procedure Put (Value : String) is
-         begin
-            Result (P .. P + Value'Length - 1) := Value;
-            P := P + Value'Length;
-         end Put;
+   procedure Decode (Source : String; F : Field; Target : in out String;
+                     Length : out Natural) is
+      I : Integer := F.First;
+      J : Integer;
+      N : Natural := Target'First - 1;
+      Code, Low : Natural;
+
+      procedure Byte (Value : Natural) is
       begin
-         Result (1) := '"';
-         for C of Text loop
-            case C is
-               when '"' => Put ("\""");
-               when '\' => Put ("\\");
-               when ASCII.BS => Put ("\b");
-               when ASCII.FF => Put ("\f");
-               when ASCII.LF => Put ("\n");
-               when ASCII.CR => Put ("\r");
-               when ASCII.HT => Put ("\t");
-               when others =>
-                  if Character'Pos (C) < 32 then
-                     Put ("\u00" & Hex (Character'Pos (C) / 16 + 1) &
-                       Hex (Character'Pos (C) mod 16 + 1));
-                  else
-                     Result (P) := C; P := P + 1;
+         N := N + 1;
+         Target (N) := Character'Val (Value);
+      end Byte;
+   begin
+      while I <= F.Last loop
+         if Source (I) /= '\' then
+            J := I;
+            while J <= F.Last and then Source (J) /= '\' loop
+               J := J + 1;
+            end loop;
+            Target (N + 1 .. N + J - I) := Source (I .. J - 1);
+            N := N + J - I;
+            I := J;
+         else
+            case Source (I + 1) is
+               when '"' | '\' | '/' => Byte (Character'Pos (Source (I + 1)));
+               when 'b' => Byte (8);
+               when 'f' => Byte (12);
+               when 'n' => Byte (10);
+               when 'r' => Byte (13);
+               when 't' => Byte (9);
+               when 'u' =>
+                  Code := Hex4 (Source, I + 2);
+                  if Code in 16#D800# .. 16#DBFF# then
+                     Low := Hex4 (Source, I + 8);
+                     Code := 16#10000# + (Code - 16#D800#) * 1024 + Low - 16#DC00#;
+                     I := I + 6;
                   end if;
+                  if Code < 16#80# then
+                     Byte (Code);
+                  elsif Code < 16#800# then
+                     Byte (16#C0# + Code / 64);
+                     Byte (16#80# + Code mod 64);
+                  elsif Code < 16#10000# then
+                     Byte (16#E0# + Code / 4096);
+                     Byte (16#80# + Code / 64 mod 64);
+                     Byte (16#80# + Code mod 64);
+                  else
+                     Byte (16#F0# + Code / 262144);
+                     Byte (16#80# + Code / 4096 mod 64);
+                     Byte (16#80# + Code / 64 mod 64);
+                     Byte (16#80# + Code mod 64);
+                  end if;
+                  I := I + 4;
+               when others => raise Invalid_JSON;
             end case;
-         end loop;
-         Result (P) := '"';
-         return Result;
+            I := I + 2;
+         end if;
+      end loop;
+      Length := N - Target'First + 1;
+   end Decode;
+
+   function Equals (Source : String; F : Field; Text : String) return Boolean is
+   begin
+      if not F.Escaped then
+         return Source (F.First .. F.Last) = Text;
+      end if;
+      declare
+         Buffer : String (1 .. Natural'Max (F.Last - F.First + 1, 0));
+         N : Natural;
+      begin
+         Decode (Source, F, Buffer, N);
+         return Buffer (1 .. N) = Text;
       end;
-   end Quote;
+   end Equals;
 
    function Is_Space (Code : Natural) return Boolean is
      (Code in 9 .. 13 | 32 | 16#85# | 16#A0# | 16#1680# |
         16#2000# .. 16#200A# | 16#2028# | 16#2029# | 16#202F# |
         16#205F# | 16#3000# | 16#FEFF#);
 
-   function Trim (Text : String) return String is
+   procedure Trim (Text : String; First : out Positive; Last : out Natural) is
       P : Integer := Text'First;
-      First : Integer := Text'Last + 1;
-      Last : Integer := Text'First - 1;
       Start : Integer;
       Code : Natural;
    begin
+      First := Text'Last + 1;
+      Last := Text'First - 1;
       while P <= Text'Last loop
          Start := P;
-         Decode (Text, P, Code);
+         Next_Code (Text, P, Code);
          if not Is_Space (Code) then
             First := Integer'Min (First, Start);
             Last := P - 1;
          end if;
       end loop;
-      return Text (First .. Last);
    end Trim;
 
    function Character_Count (Text : String) return Natural is
@@ -363,7 +373,7 @@ package body JSON is
       Code : Natural;
    begin
       while P <= Text'Last loop
-         Decode (Text, P, Code);
+         Next_Code (Text, P, Code);
          Count := Count + 1;
       end loop;
       return Count;
@@ -381,7 +391,4 @@ package body JSON is
    exception
       when Constraint_Error => return 0;
    end Positive_ID;
-
-   function Number (Value : Long_Long_Integer) return String is
-     (Ada.Strings.Fixed.Trim (Long_Long_Integer'Image (Value), Ada.Strings.Both));
 end JSON;

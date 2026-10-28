@@ -33,7 +33,7 @@ printf 'Validation log: %s\n' "$LOG"
       cp -R /input/test .
       cp /input/schema.sql .
       cp -R /input/submissions/ada-native-visseranalytics/src /input/submissions/ada-native-visseranalytics/tests submissions/ada-native-visseranalytics/
-      cp /input/submissions/ada-native-visseranalytics/build.sh /input/submissions/ada-native-visseranalytics/start.sh submissions/ada-native-visseranalytics/
+      cp /input/submissions/ada-native-visseranalytics/build.sh /input/submissions/ada-native-visseranalytics/start.sh /input/submissions/ada-native-visseranalytics/versions.env submissions/ada-native-visseranalytics/
       chown -R ada:ada /work
       chmod -R u+rwX /work
       chmod u+x submissions/ada-native-visseranalytics/start.sh
@@ -43,9 +43,9 @@ printf 'Validation log: %s\n' "$LOG"
       if [[ $ADA_VALIDATE_DIRECT_ONLY != 1 ]]; then
         runuser -u ada -- python3 submissions/ada-native-visseranalytics/tests/nginx_check.py
       fi
-      runuser -u ada -- python3 submissions/ada-native-visseranalytics/tests/workers.py
+      runuser -u ada -- python3 submissions/ada-native-visseranalytics/tests/lifecycle.py
       runuser -u ada -- python3 submissions/ada-native-visseranalytics/tests/feed_ranges.py
-      dpkg-query -W gnat-13 gcc-13 libgnat-13 libsqlite3-0 libssl3t64
+      dpkg-query -W gnat-13 gcc-13 libgnat-13 libssl3t64
       uname -a
     '
 } 2>&1 | tee "$LOG"

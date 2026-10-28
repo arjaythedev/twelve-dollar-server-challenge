@@ -1,12 +1,13 @@
-with Ada.Strings.Unbounded; use Ada.Strings.Unbounded;
 with Ada.Text_IO;
 with JSON;
+with Output;
 
--- Line-oriented adapter for the independent Python JSON oracle.
+-- Line-oriented adapter for the independent Python JSON oracle: parse the
+-- document, unescape "body" and write it back with the response escaper.
 procedure JSON_Probe is
    use type JSON.Value_Kind;
-   Fields : JSON.Fields :=
-     (1 => (To_Unbounded_String ("body"), JSON.Missing, Null_Unbounded_String));
+   Names : constant JSON.Name_Array := [1 => new String'("body")];
+   Fields : JSON.Field_Array (1 .. 1);
    Root : JSON.Value_Kind;
 begin
    while not Ada.Text_IO.End_Of_File loop
@@ -14,14 +15,18 @@ begin
          -- Exercise non-one-based slices, as used by the request/auth parsers.
          Input : constant String := "prefix" & Ada.Text_IO.Get_Line;
       begin
-         JSON.Parse (Input (7 .. Input'Last), Fields, Root);
+         JSON.Parse (Input (7 .. Input'Last), Names, Fields, Root);
          if Root /= JSON.Object_Value or else Fields (1).Kind /= JSON.String_Value then
             Ada.Text_IO.Put_Line ("INVALID");
          else
             declare
-               Value : constant String := "prefix" & To_String (Fields (1).Text);
+               Value : String (101 .. 100 + Input'Length);
+               Length : Natural;
             begin
-               Ada.Text_IO.Put_Line (JSON.Quote (Value (7 .. Value'Last)));
+               JSON.Decode (Input (7 .. Input'Last), Fields (1), Value, Length);
+               Output.Start;
+               Output.Put_Quoted (Value (101 .. 100 + Length));
+               Ada.Text_IO.Put_Line (Output.Text);
             end;
          end if;
       exception

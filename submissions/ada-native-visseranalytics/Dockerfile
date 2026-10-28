@@ -15,7 +15,7 @@ FROM build AS validation
 USER root
 ARG NGINX_PACKAGE_VERSION=1.24.0-2ubuntu7.19
 RUN . ./versions.env && apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-      "sqlite3=$SQLITE_VERSION" curl jq "openssl=$OPENSSL_VERSION" python3 procps util-linux "nginx=$NGINX_PACKAGE_VERSION" && \
+      sqlite3 curl jq "openssl=$OPENSSL_VERSION" python3 procps util-linux "nginx=$NGINX_PACKAGE_VERSION" && \
     rm -rf /var/lib/apt/lists/*
 
 FROM ${BASE_IMAGE}
@@ -26,7 +26,7 @@ WORKDIR /app
 COPY versions.env /tmp/ada-versions.env
 RUN . /tmp/ada-versions.env && apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-      "libgnat-13=$GNAT_VERSION" "libsqlite3-0=$SQLITE_VERSION" \
+      "libgnat-13=$GNAT_VERSION" \
       "libssl3t64=$OPENSSL_VERSION" "nginx=$NGINX_PACKAGE_VERSION" \
       python3 curl util-linux && \
     groupadd --gid 10001 ada && \

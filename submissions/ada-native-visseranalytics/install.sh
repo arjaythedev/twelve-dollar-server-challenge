@@ -7,8 +7,12 @@ source /etc/os-release
 [[ $EUID == 0 ]] || { echo 'Run install.sh as root' >&2; exit 1; }
 source ./versions.env
 apt-get update
-DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-  "gnat-13=$GNAT_VERSION" "gcc-13=$GNAT_VERSION" "libgnat-13=$GNAT_VERSION" \
-  "libsqlite3-dev=$SQLITE_VERSION" "libsqlite3-0=$SQLITE_VERSION" \
-  "libssl-dev=$OPENSSL_VERSION" "libssl3t64=$OPENSSL_VERSION" \
-  libc6-dev make
+install() { DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$@"; }
+tools=(libc6-dev make curl ca-certificates)
+pinned=("gnat-13=$GNAT_VERSION" "gcc-13=$GNAT_VERSION" "libgnat-13=$GNAT_VERSION"
+        "libssl-dev=$OPENSSL_VERSION" "libssl3t64=$OPENSSL_VERSION")
+if ! install "${pinned[@]}" "${tools[@]}"; then
+  # Security updates replace exact versions in the Ubuntu archive.
+  echo 'Pinned package versions unavailable; installing current Ubuntu 24.04 builds.' >&2
+  install gnat-13 gcc-13 libgnat-13 libssl-dev libssl3t64 "${tools[@]}"
+fi

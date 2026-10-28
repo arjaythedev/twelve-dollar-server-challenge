@@ -1,8 +1,7 @@
-with Ada.Strings.Fixed;
-with Ada.Strings.Unbounded; use Ada.Strings.Unbounded;
 with Interfaces.C; use Interfaces.C;
 with System;
 with JSON;
+with Sys;
 
 package body Auth is
    use type System.Address;
@@ -10,31 +9,51 @@ package body Auth is
 
    function SHA256 return System.Address
      with Import, Convention => C, External_Name => "EVP_sha256";
-   function HMAC (Algorithm, Key : System.Address; Key_Length : int;
-                  Data : System.Address; Data_Length : size_t;
-                  Digest : System.Address; Digest_Length : access unsigned)
-                  return System.Address
-     with Import, Convention => C, External_Name => "HMAC";
+   function HMAC_New return System.Address
+     with Import, Convention => C, External_Name => "HMAC_CTX_new";
+   function HMAC_Init (Context, Key : System.Address; Length : int;
+                       Digest, Engine : System.Address) return int
+     with Import, Convention => C, External_Name => "HMAC_Init_ex";
+   function HMAC_Update (Context, Data : System.Address; Length : size_t) return int
+     with Import, Convention => C, External_Name => "HMAC_Update";
+   function HMAC_Final (Context, Digest : System.Address; Length : access unsigned)
+                        return int
+     with Import, Convention => C, External_Name => "HMAC_Final";
    function Constant_Compare (Left, Right : System.Address; N : size_t) return int
      with Import, Convention => C, External_Name => "CRYPTO_memcmp";
-   type Timespec is record
-      Seconds, Nanoseconds : long;
-   end record with Convention => C;
-   function Get_Time (Clock_ID : int; Stamp : access Timespec) return int
-     with Import, Convention => C, External_Name => "clock_gettime";
 
-   function Unix_Time return Long_Long_Float is
-      Stamp : aliased Timespec;
-      RC : constant int := Get_Time (0, Stamp'Access);
-   begin
-      if RC /= 0 then raise Program_Error with "clock_gettime failed"; end if;
-      return Long_Long_Float (Stamp.Seconds) +
-        Long_Long_Float (Stamp.Nanoseconds) / 1_000_000_000.0;
-   end Unix_Time;
+   -- Keyed once; each verification restarts from the keyed state and
+   -- hashes the whole token again. No verification result is kept.
+   Context : System.Address := System.Null_Address;
+
+   Alg : aliased constant String := "alg";
+   Sub : aliased constant String := "sub";
+   Name : aliased constant String := "username";
+   Exp : aliased constant String := "exp";
+   Nbf : aliased constant String := "nbf";
+   Header_Names : constant JSON.Name_Array := [1 => Alg'Access];
+   Claim_Names : constant JSON.Name_Array :=
+     [Sub'Access, Name'Access, Exp'Access, Nbf'Access];
+
+   -- Decoded JOSE header and claims of the current token.
+   Header_Text : String (1 .. 12_300);
+   Payload_Text : String (1 .. 12_300);
 
    Bad_Token : exception;
-   function Decode (Encoded : String) return String is
-      Buffer : String (1 .. Encoded'Length * 3 / 4 + 1);
+
+   procedure Initialize (Secret : String) is
+      Empty : aliased constant String := " ";
+   begin
+      Context := HMAC_New;
+      if Context = System.Null_Address or else
+        HMAC_Init (Context, (if Secret'Length = 0 then Empty'Address else Secret'Address),
+                   int (Secret'Length), SHA256, System.Null_Address) /= 1
+      then
+         raise Program_Error with "HMAC initialization failed";
+      end if;
+   end Initialize;
+
+   procedure Decode (Encoded : String; Target : in out String; Length : out Natural) is
       Count, Bits, Accumulator, Value : Natural := 0;
    begin
       if Encoded'Length = 0 or else Encoded'Length mod 4 = 1 then
@@ -49,100 +68,121 @@ package body Auth is
             when '_' => Value := 63;
             when others => raise Bad_Token;
          end case;
-         Accumulator := Accumulator * 64 + Value; Bits := Bits + 6;
+         Accumulator := Accumulator * 64 + Value;
+         Bits := Bits + 6;
          if Bits >= 8 then
-            Bits := Bits - 8; Count := Count + 1;
-            Buffer (Count) := Character'Val (Accumulator / 2 ** Bits);
+            Bits := Bits - 8;
+            Target (Target'First + Count) := Character'Val (Accumulator / 2 ** Bits);
+            Count := Count + 1;
             Accumulator := Accumulator mod 2 ** Bits;
          end if;
       end loop;
-      if Accumulator /= 0 then raise Bad_Token; end if;
-      return Buffer (1 .. Count);
+      if Accumulator /= 0 then
+         raise Bad_Token;
+      end if;
+      Length := Count;
    end Decode;
 
-   procedure Verify (Authorization, Secret : String; Result : out Status;
-                     User_ID : out Long_Long_Integer;
-                     Username : out Unbounded_String) is
-      use Ada.Strings.Fixed;
-      Header : JSON.Fields :=
-        (1 => (To_Unbounded_String ("alg"), JSON.Missing, Null_Unbounded_String));
-      Claims : JSON.Fields :=
-        ((To_Unbounded_String ("sub"), JSON.Missing, Null_Unbounded_String),
-         (To_Unbounded_String ("username"), JSON.Missing, Null_Unbounded_String),
-         (To_Unbounded_String ("exp"), JSON.Missing, Null_Unbounded_String),
-         (To_Unbounded_String ("nbf"), JSON.Missing, Null_Unbounded_String));
-      Root : JSON.Value_Kind;
+   function Find_Dot (Text : String; From : Positive) return Natural is
+   begin
+      for I in From .. Text'Last loop
+         if Text (I) = '.' then
+            return I;
+         end if;
+      end loop;
+      return 0;
+   end Find_Dot;
+
+   procedure Verify (Has_Header : Boolean; Header : String; Result : out Status;
+                     User_ID : out Long_Long_Integer) is
       First, Second : Natural;
       Digest : aliased String (1 .. 32);
+      Signature : aliased String (1 .. 33);
       N : aliased unsigned := 0;
-      Pointer : System.Address;
-      Now : constant Long_Long_Float := Unix_Time;
+      Header_Length, Payload_Length, Signature_Length : Natural := 0;
+      Header_Fields : JSON.Field_Array (1 .. 1);
+      Claims : JSON.Field_Array (1 .. 4);
+      Root : JSON.Value_Kind;
+      Now : Long_Long_Float;
    begin
-      User_ID := 0; Username := Null_Unbounded_String;
+      User_ID := 0;
+      Username_Length := 0;
       Result := Missing_Bearer;
-      if Authorization'Length < 7 or else
-        Authorization (Authorization'First .. Authorization'First + 6) /= "Bearer "
+      if not Has_Header or else Header'Length < 7 or else
+        Header (Header'First .. Header'First + 6) /= "Bearer "
       then
          return;
       end if;
       Result := Invalid_Token;
       declare
-         Token : constant String :=
-           Authorization (Authorization'First + 7 .. Authorization'Last);
+         Token : String renames Header (Header'First + 7 .. Header'Last);
       begin
-         First := Index (Token, ".");
+         First := Find_Dot (Token, Token'First);
          if First = 0 then return; end if;
-         Second := Index (Token, ".", First + 1);
-         if Second = 0 or else Second = Token'Last or else
-           Index (Token, ".", Second + 1) /= 0
+         Second := Find_Dot (Token, First + 1);
+         if Second = 0 or else Second = Token'Last or else Find_Dot (Token, Second + 1) /= 0 then
+            return;
+         end if;
+         -- 32 bytes of HS256 signature are exactly 43 base64url characters.
+         if Token'Last - Second /= 43 then return; end if;
+         Decode (Token (Second + 1 .. Token'Last), Signature, Signature_Length);
+         if Signature_Length /= 32 or else
+           HMAC_Init (Context, System.Null_Address, 0, System.Null_Address,
+                      System.Null_Address) /= 1 or else
+           HMAC_Update (Context, Token (Token'First)'Address,
+                        size_t (Second - Token'First)) /= 1 or else
+           HMAC_Final (Context, Digest'Address, N'Access) /= 1 or else
+           N /= 32 or else
+           Constant_Compare (Digest'Address, Signature'Address, 32) /= 0
+         then
+            return;
+         end if;
+         Decode (Token (Token'First .. First - 1), Header_Text, Header_Length);
+         JSON.Parse (Header_Text (1 .. Header_Length), Header_Names, Header_Fields, Root);
+         if Root /= JSON.Object_Value or else
+           Header_Fields (1).Kind /= JSON.String_Value or else
+           not JSON.Equals (Header_Text (1 .. Header_Length), Header_Fields (1), "HS256")
+         then
+            return;
+         end if;
+         Decode (Token (First + 1 .. Second - 1), Payload_Text, Payload_Length);
+      end;
+      declare
+         Payload : String renames Payload_Text (1 .. Payload_Length);
+      begin
+         JSON.Parse (Payload, Claim_Names, Claims, Root);
+         Now := Sys.Unix_Time;
+         if Root /= JSON.Object_Value or else Claims (3).Kind /= JSON.Number_Value
+           or else Long_Long_Float'Value (Payload (Claims (3).First .. Claims (3).Last)) <= Now
+         then
+            return;
+         end if;
+         if Claims (4).Kind /= JSON.Missing and then
+           (Claims (4).Kind /= JSON.Number_Value or else
+            Long_Long_Float'Value (Payload (Claims (4).First .. Claims (4).Last)) > Now)
+         then
+            return;
+         end if;
+         Result := Invalid_Payload;
+         if Claims (1).Kind /= JSON.String_Value or else
+           Claims (2).Kind /= JSON.String_Value
          then
             return;
          end if;
          declare
-            Signature : constant String := Decode (Token (Second + 1 .. Token'Last));
-            Signed : constant String := Token (Token'First .. Second - 1);
+            Subject : String (1 .. Claims (1).Last - Claims (1).First + 1);
+            Subject_Length : Natural;
          begin
-            if Signature'Length /= 32 then return; end if;
-            Pointer := HMAC (SHA256, Secret'Address, int (Secret'Length),
-                             Signed'Address, size_t (Signed'Length),
-                             Digest'Address, N'Access);
-            if Pointer = System.Null_Address or else N /= 32 or else
-              Constant_Compare (Digest'Address, Signature'Address, 32) /= 0
-            then
-               return;
-            end if;
+            JSON.Decode (Payload, Claims (1), Subject, Subject_Length);
+            User_ID := JSON.Positive_ID (Subject (1 .. Subject_Length));
          end;
-         JSON.Parse (Decode (Token (Token'First .. First - 1)), Header, Root);
-         if Root /= JSON.Object_Value or else
-           Header (1).Kind /= JSON.String_Value or else Header (1).Text /= "HS256"
-         then
-            return;
-         end if;
-         JSON.Parse (Decode (Token (First + 1 .. Second - 1)), Claims, Root);
+         if User_ID = 0 then return; end if;
+         JSON.Decode (Payload, Claims (2), Username, Username_Length);
+         Result := Valid;
       end;
-      if Root /= JSON.Object_Value or else Claims (3).Kind /= JSON.Number_Value
-        or else Long_Long_Float'Value (To_String (Claims (3).Text)) <= Now
-      then
-         return;
-      end if;
-      if Claims (4).Kind /= JSON.Missing and then
-        (Claims (4).Kind /= JSON.Number_Value or else
-         Long_Long_Float'Value (To_String (Claims (4).Text)) > Now)
-      then
-         return;
-      end if;
-      Result := Invalid_Payload;
-      if Claims (1).Kind /= JSON.String_Value or else
-        Claims (2).Kind /= JSON.String_Value
-      then
-         return;
-      end if;
-      User_ID := JSON.Positive_ID (To_String (Claims (1).Text));
-      if User_ID = 0 then return; end if;
-      Username := Claims (2).Text;
-      Result := Valid;
    exception
       when Bad_Token | JSON.Invalid_JSON | Constraint_Error =>
          Result := Invalid_Token;
+         User_ID := 0;
    end Verify;
 end Auth;

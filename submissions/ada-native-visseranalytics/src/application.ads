@@ -1,11 +1,9 @@
-with Ada.Strings.Unbounded;
+with HTTP;
 
 package Application is
-   type Response is record
-      Status : Positive := 200;
-      Content : Ada.Strings.Unbounded.Unbounded_String;
-   end record;
-   function Error (Status : Positive; Message : String) return Response;
    procedure Initialize (Secret : String);
-   function Handle (Method, Path, Authorization, Payload : String) return Response;
+   -- Writes the body for one complete request with Output; returns the status.
+   function Handle (Input : String; Item : HTTP.Request) return Positive;
+   -- Writes {"error":Message} with Output.
+   procedure Error_Body (Message : String);
 end Application;

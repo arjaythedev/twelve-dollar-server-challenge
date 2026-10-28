@@ -236,7 +236,7 @@ int parse_request_fast(U8 *req, I64 req_len, U8 *method_buf, I32 method_size,
     U8 *cr_at_path = my_strchr(path_start, '\r');
 
     U8 *path_end;
-    if (space2 && (!cr_at_path || space2 < cr_at_path)) {
+    if (space2 and (!cr_at_path or space2 < cr_at_path)) {
         path_end = space2;
     } else if (cr_at_path) {
         path_end = cr_at_path;
@@ -264,7 +264,7 @@ int parse_request_fast(U8 *req, I64 req_len, U8 *method_buf, I32 method_size,
         while (*cl == ' ') cl++;
         I64 val = atol(cl);
         *body_len_out = val;
-        if (val > 0 && val < 8192 && val < remaining) {
+        if (val > 0 and val < 8192 and val < remaining) {
             my_strcpy(,);
             body_out[val] = '\0';
         }
@@ -377,7 +377,7 @@ public void process_client(int client_sock) {
         
         I32 frc = SqlExecPrepared(stmt_feed, &feed_row, fparams);
 
-        if (!frc || feed_row.col == NULL) {
+        if (!frc or feed_row.col == NULL) {
             /* No posts available */
             U8 *resp = build_response_fast(200, (U8 *)"{\"posts\":[]}", 16);
             /* Add Content-Type header */
@@ -525,7 +525,7 @@ public void process_client(int client_sock) {
     if (my_strcmp(path_clean, "posts") == 0) {
         /* Only create post if body is present */
 
-        if (body_len > 0 && body[0] != '\0') {
+        if (body_len > 0 and body[0] != '\0') {
             /* Validate body */
             if (body_len < 1) {
                 U8 *resp = build_response_fast(400, JSON_BODY_REQ, my_strlen(JSON_BODY_REQ));

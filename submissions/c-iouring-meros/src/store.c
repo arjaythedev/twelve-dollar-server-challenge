@@ -6,11 +6,15 @@
 #include "fatal.h"
 #include <sqlite3.h>
 
+/* Checkpoint when the write-ahead log holds this many pages. */
+#ifndef STORE_CHECKPOINT_FRAMES
+#define STORE_CHECKPOINT_FRAMES 4096
+#endif
+
 enum {
 	FEED_SIZE = 20,
 	FEED_BODY_CAP = 2000,   /* 500 characters of up to 4 bytes */
 	FEED_AUTHOR_CAP = 256,
-	CHECKPOINT_FRAMES = 1000, /* checkpoint when the write-ahead log holds this many pages */
 };
 
 /* One feed post copied out of SQLite, so the whole feed can be checked before anything is returned. */
@@ -138,7 +142,7 @@ static int note_wal_size(void *context, sqlite3 *handle, const char *name, int p
 {
 	(void)handle;
 	(void)name;
-	if (pages >= CHECKPOINT_FRAMES)
+	if (pages >= STORE_CHECKPOINT_FRAMES)
 		((store *)context)->checkpoint_due = true;
 	return SQLITE_OK;
 }

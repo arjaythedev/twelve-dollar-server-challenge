@@ -71,6 +71,8 @@ module Db
   def self.checkpointer(path : UInt8*) : Nil
     db = Pointer(Void).null.as(Sq::DB)
     return if Sq.open_v2(path, pointerof(db), Sq::OPEN_READWRITE | Sq::OPEN_NOMUTEX, Pointer(UInt8).null) != Sq::OK
+    # The pager opens the WAL on its first read; until then a checkpoint is a no-op.
+    Sq.exec(db, "SELECT count(*) FROM sqlite_schema".to_unsafe, Pointer(Void).null, Pointer(Void).null, Pointer(Pointer(UInt8)).null)
     ts = LibC::Timespec.new
     ts.tv_nsec = 20_000_000
     log = 0

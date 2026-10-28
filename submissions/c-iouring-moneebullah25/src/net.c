@@ -1040,23 +1040,18 @@ static int ring_init(struct net *n, struct ring *rg, uint32_t idx) {
          IORING_SETUP_COOP_TASKRUN | IORING_SETUP_SUBMIT_ALL, 0},
     };
     const unsigned *flags = flag_sets[idx == 0 ? 0 : 1];
-    /* A 65,536-entry CQ absorbs a long stall at 65k connections without
-     * overflowing, but ring memory counts against RLIMIT_MEMLOCK on some
-     * kernels and a service's default is 8 MB, so fall back to the smaller
-     * CQ (the overflow path in sqe_get() still keeps the server up). */
-    static const unsigned cq_sizes[2] = {65536, 16384};
+    /* 16,384 CQEs: ring memory counts against RLIMIT_MEMLOCK (8 MB for a
+     * systemd service), about 0.5 MB per ring at these sizes, so seven rings
+     * fit with room to spare. A CQ overflow is not fatal: the kernel queues
+     * the surplus and sqe_get() flushes it (see there). */
     int rc = -EINVAL;
-    for (size_t c = 0; c < 2 && rc < 0; c++) {
-        for (size_t i = 0; i < 3 && rc < 0; i++) {
-            struct io_uring_params p = {.flags = flags[i] | IORING_SETUP_CQSIZE, .cq_entries = cq_sizes[c]};
-            rc = io_uring_queue_init_params(4096, &rg->r, &p);
-            if (rc == -ENOMEM) break; /* memory, not flags: try the smaller CQ */
-            if (rc == 0 && i) log_msg("ring %u: fallback setup flags 0x%x", idx, flags[i]);
-        }
-        if (rc == 0 && c) log_msg("ring %u: fallback to a %u-entry CQ (ENOMEM at 65536)", idx, cq_sizes[c]);
+    for (size_t i = 0; i < 3 && rc < 0; i++) {
+        struct io_uring_params p = {.flags = flags[i] | IORING_SETUP_CQSIZE, .cq_entries = 16384};
+        rc = io_uring_queue_init_params(4096, &rg->r, &p);
+        if (rc == 0 && i) log_msg("ring %u: fallback setup flags 0x%x", idx, flags[i]);
     }
     if (rc < 0) {
-        log_msg("io_uring_queue_init: %s", strerror(-rc));
+        log_msg("ring %u: io_uring_queue_init(sq 4096, cq 16384): %s", idx, strerror(-rc));
         return -1;
     }
     rc = io_uring_register_ring_fd(&rg->r);

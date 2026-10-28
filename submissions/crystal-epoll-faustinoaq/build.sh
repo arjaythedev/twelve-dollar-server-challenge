@@ -11,7 +11,7 @@ if [ ! -f build/libsqlite3.a ]; then
   (cd build && rm -rf $SQ && unzip -q $SQ.zip)
   # Multi-thread mode without mutexes (each connection stays on one thread), no memory statistics,
   # WAL defaults, and the unused features compiled out.
-  FLAGS="-O3 -march=native -fno-plt -DSQLITE_THREADSAFE=2 -DSQLITE_DEFAULT_MEMSTATUS=0
+  FLAGS="-O3 -march=x86-64-v3 -fno-plt -DSQLITE_THREADSAFE=2 -DSQLITE_DEFAULT_MEMSTATUS=0
     -DSQLITE_DEFAULT_WAL_SYNCHRONOUS=1 -DSQLITE_LIKE_DOESNT_MATCH_BLOBS -DSQLITE_MAX_EXPR_DEPTH=0
     -DSQLITE_OMIT_DEPRECATED -DSQLITE_OMIT_PROGRESS_CALLBACK -DSQLITE_OMIT_SHARED_CACHE
     -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_USE_ALLOCA -DSQLITE_DQS=0 -DSQLITE_DEFAULT_FOREIGN_KEYS=1
@@ -33,4 +33,4 @@ if [ ! -f build/libsqlite3.a ]; then
 fi
 # -Dgc_none: no garbage collector at all. The server allocates its buffers once at start-up
 # and the request path never allocates, so there is nothing to collect.
-crystal build --release --no-debug -Dgc_none --mcpu native src/main.cr -o bin/server
+crystal build --release --no-debug -Dgc_none --mcpu x86-64-v3 src/main.cr -o bin/server

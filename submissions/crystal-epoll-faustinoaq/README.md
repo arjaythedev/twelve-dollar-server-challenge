@@ -11,7 +11,7 @@ The Kemal version of the same API is [`crystal-kemal-faustinoaq`](../crystal-kem
 |---|---|
 | Language | Crystal 1.22.1 (official tarball, sha256-checked by `install.sh`), no shards |
 | Framework | none: one thread, io_uring via raw `io_uring_setup`/`enter`/`register` syscalls |
-| SQLite | 3.54.1 amalgamation, sha256-checked, built by `build.sh` with `-O3 -march=native` + PGO |
+| SQLite | 3.54.1 amalgamation, sha256-checked, built by `build.sh` with `-O3 -march=x86-64-v3` + PGO |
 | Crypto | OpenSSL 3 libcrypto (Ubuntu package): `SHA256_Init/Update/Final` for HMAC-SHA256 |
 | Nginx or direct | **Direct**: serves `HOST:PORT` itself (`0.0.0.0:80` on the benchmark box) |
 | Needs | Linux 6.1+ for the io_uring path; anything older (or io_uring disabled) uses epoll |

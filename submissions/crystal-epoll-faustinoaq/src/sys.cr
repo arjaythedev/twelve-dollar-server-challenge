@@ -33,6 +33,7 @@ lib LibSys
   EINTR  = 4
 
   RLIMIT_NOFILE = 7
+  RLIMIT_MEMLOCK = 8
   CLOCK_REALTIME = 0
   CLOCK_MONOTONIC = 1
   CLOCK_REALTIME_COARSE = 5
@@ -57,6 +58,7 @@ lib LibSys
 
   fun writev(fd : Int, iov : Iovec*, n : Int) : SSizeT
   fun setrlimit(res : Int, rl : Rlimit*) : Int
+  fun geteuid : UInt32
   fun calloc(n : SizeT, sz : SizeT) : Void*
   fun memmem(h : Void*, hl : SizeT, n : Void*, nl : SizeT) : Void*
   fun inet_addr(s : UInt8*) : UInt32
@@ -125,6 +127,17 @@ module Sys
     rl.cur = rl.max
     LibSys.setrlimit(RLIMIT_NOFILE, pointerof(rl))
     rl.max
+  end
+
+  # RLIMIT_MEMLOCK raised to its hard limit, three quarters of it as io_uring's budget.
+  # Unlimited for root (CAP_IPC_LOCK: nothing is counted) or an unlimited limit.
+  def self.memlock_budget : UInt64
+    return UInt64::MAX if LibSys.geteuid == 0
+    rl = uninitialized Rlimit
+    LibC.getrlimit(RLIMIT_MEMLOCK, pointerof(rl).as(LibC::Rlimit*))
+    rl.cur = rl.max
+    LibSys.setrlimit(RLIMIT_MEMLOCK, pointerof(rl))
+    rl.max == UInt64::MAX ? UInt64::MAX : rl.max // 4 * 3
   end
 
   def self.listen_tcp(host : String, port : Int32, reuseport : Bool) : Int32

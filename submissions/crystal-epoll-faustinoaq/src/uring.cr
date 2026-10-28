@@ -114,11 +114,11 @@ class Ring
   @retry_cap = 0
 
   # Returns nil when the kernel refuses (no io_uring, or older than 6.1).
-  def self.create(base : Int32, slots : Int32) : Ring?
+  def self.create(base : Int32, slots : Int32, sq : UInt32, cq : UInt32) : Ring?
     pa = LibUring::Params.new
-    pa.cq_entries = Uring::CQ_ENTRIES
+    pa.cq_entries = cq
     pa.flags = Uring::SETUP_CQSIZE | Uring::SETUP_SUBMIT_ALL | Uring::SETUP_SINGLE_ISSUER | Uring::SETUP_DEFER_TASKRUN
-    fd = LibC.syscall(Uring::SYS_SETUP, Uring::SQ_ENTRIES, pointerof(pa)).to_i32
+    fd = LibC.syscall(Uring::SYS_SETUP, sq, pointerof(pa)).to_i32
     return nil if fd < 0
     r = new(fd, base, slots, pointerof(pa))
     r.init ? r : nil
@@ -309,7 +309,7 @@ module Uring
   CQE_F_MORE          = 2_u32
   ENOBUFS             = 105
 
-  SQ_ENTRIES = 4096_u32
+  SQ_ENTRIES = 4096_u32 # largest ring; halved together while it doesn't fit the memlock budget
   CQ_ENTRIES = 32768_u32
   NBUF       = 4096 # provided receive buffers per ring (power of two)
   BUF_SIZE   = 2048
@@ -326,6 +326,8 @@ module Uring
   @@rings = Pointer(Ring).null
   @@nrings = 0
   @@slots = 0
+  @@sq = 0_u32
+  @@cq = 0_u32
   @@lfd = 0
   @@ep = -1
   @@multi = false # some ring other than 0 accepts or holds connections
@@ -337,10 +339,22 @@ module Uring
       slots = {slots, t.to_i}.min
     end
     want = {(TARGET &+ slots &- 1) // slots, MAX_RINGS}.min
+    # Since Linux 6.13 ring memory counts against RLIMIT_MEMLOCK (8 MB by default, per user):
+    # size and count the rings to fit.
+    budget = Sys.memlock_budget
+    sq = SQ_ENTRIES
+    cq = CQ_ENTRIES
+    while sq > 256 && ring_cost(sq, cq) > budget
+      sq >>= 1
+      cq >>= 1
+    end
+    want = (budget // ring_cost(sq, cq)).clamp(1_u64, want.to_u64).to_i32
     @@rings = LibC.malloc(want * sizeof(Ring)).as(Ring*)
     @@slots = slots
+    @@sq = sq
+    @@cq = cq
     want.times do |i|
-      r = Ring.create(i &* slots, slots)
+      r = Ring.create(i &* slots, slots, sq, cq)
       break unless r
       @@rings[i] = r
       @@nrings &+= 1
@@ -353,7 +367,12 @@ module Uring
   end
 
   def self.describe : String
-    "#{@@nrings} ring(s) x #{@@slots} fixed slots"
+    "#{@@nrings} ring(s) x #{@@slots} fixed slots, #{@@sq}/#{@@cq} sq/cq entries"
+  end
+
+  # Bytes a ring pins: SQ array and CQEs, SQEs, provided-buffer ring.
+  private def self.ring_cost(sq : UInt32, cq : UInt32) : UInt64
+    sq.to_u64 * 4 + cq.to_u64 * 16 + sq.to_u64 * 64 + NBUF.to_u64 * 16 + 3 * 4096
   end
 
   @[AlwaysInline]

@@ -89,20 +89,22 @@ int main(void)
 	/* time claims */
 	CHECK(verify_payload(&v, "{\"sub\":\"1\",\"username\":\"u\",\"exp\":1800000000}") == JWT_INVALID_TOKEN);  /* exp == now: expired */
 	CHECK(verify_payload(&v, "{\"sub\":\"1\",\"username\":\"u\",\"exp\":1800000001}") == JWT_OK);
-	CHECK(verify_payload(&v, "{\"sub\":\"1\",\"username\":\"u\",\"nbf\":1800000001}") == JWT_INVALID_TOKEN);  /* not valid yet */
-	CHECK(verify_payload(&v, "{\"sub\":\"1\",\"username\":\"u\",\"nbf\":1800000000}") == JWT_OK);
+	CHECK(verify_payload(&v, "{\"sub\":\"1\",\"username\":\"u\",\"exp\":null}") == JWT_INVALID_TOKEN);
+	CHECK(verify_payload(&v, "{\"sub\":\"1\",\"username\":\"u\",\"nbf\":1800000001,\"exp\":1800000001}") == JWT_INVALID_TOKEN);  /* not valid yet */
+	CHECK(verify_payload(&v, "{\"sub\":\"1\",\"username\":\"u\",\"nbf\":1800000000,\"exp\":1800000001}") == JWT_OK);
 	CHECK(verify_payload(&v, "{\"sub\":\"1\",\"username\":\"u\",\"exp\":\"soon\"}") == JWT_INVALID_TOKEN);
-	CHECK(verify_payload(&v, "{\"sub\":\"1\",\"username\":\"u\"}") == JWT_OK);                                /* exp is optional */
+	CHECK(verify_payload(&v, "{\"sub\":\"1\",\"username\":\"u\"}") == JWT_INVALID_TOKEN);                           /* exp is required */
+	CHECK(verify_payload(&v, "{\"sub\":\"1\",\"username\":\"u\",\"nbf\":1800000000}") == JWT_INVALID_TOKEN);  /* nbf alone is not enough */
 
 	/* payload claims */
-	CHECK(verify_payload(&v, "{\"sub\":\"abc\",\"username\":\"u\"}") == JWT_INVALID_PAYLOAD);
-	CHECK(verify_payload(&v, "{\"sub\":\"0\",\"username\":\"u\"}") == JWT_INVALID_PAYLOAD);
-	CHECK(verify_payload(&v, "{\"sub\":\"-5\",\"username\":\"u\"}") == JWT_INVALID_PAYLOAD);
-	CHECK(verify_payload(&v, "{\"sub\":\"01\",\"username\":\"u\"}") == JWT_INVALID_PAYLOAD);
-	CHECK(verify_payload(&v, "{\"sub\":7,\"username\":\"u\"}") == JWT_INVALID_PAYLOAD);                      /* number, not string */
-	CHECK(verify_payload(&v, "{\"username\":\"u\"}") == JWT_INVALID_PAYLOAD);
-	CHECK(verify_payload(&v, "{\"sub\":\"1\"}") == JWT_INVALID_PAYLOAD);
-	CHECK(verify_payload(&v, "{\"sub\":\"1\",\"username\":5}") == JWT_INVALID_PAYLOAD);
+	CHECK(verify_payload(&v, "{\"sub\":\"abc\",\"username\":\"u\",\"exp\":1800000001}") == JWT_INVALID_PAYLOAD);
+	CHECK(verify_payload(&v, "{\"sub\":\"0\",\"username\":\"u\",\"exp\":1800000001}") == JWT_INVALID_PAYLOAD);
+	CHECK(verify_payload(&v, "{\"sub\":\"-5\",\"username\":\"u\",\"exp\":1800000001}") == JWT_INVALID_PAYLOAD);
+	CHECK(verify_payload(&v, "{\"sub\":\"01\",\"username\":\"u\",\"exp\":1800000001}") == JWT_INVALID_PAYLOAD);
+	CHECK(verify_payload(&v, "{\"sub\":7,\"username\":\"u\",\"exp\":1800000001}") == JWT_INVALID_PAYLOAD);                      /* number, not string */
+	CHECK(verify_payload(&v, "{\"username\":\"u\",\"exp\":1800000001}") == JWT_INVALID_PAYLOAD);
+	CHECK(verify_payload(&v, "{\"sub\":\"1\",\"exp\":1800000001}") == JWT_INVALID_PAYLOAD);
+	CHECK(verify_payload(&v, "{\"sub\":\"1\",\"username\":5,\"exp\":1800000001}") == JWT_INVALID_PAYLOAD);
 	CHECK(verify_payload(&v, "[1,2]") == JWT_INVALID_TOKEN);
 	TEST_MAIN_END();
 }

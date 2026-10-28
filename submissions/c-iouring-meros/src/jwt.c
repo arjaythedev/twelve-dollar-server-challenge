@@ -69,11 +69,11 @@ static bool header_says_hs256(strview header_segment)
 	       !fields[0].truncated && strview_equals(strview_make(algorithm, fields[0].text_len), STRVIEW("HS256"));
 }
 
-/* A claim that is a time must be a JSON number when present. */
-static bool time_claim_ok(const json_field *field, time_t now, bool must_be_future)
+/* A claim that is a time must be a JSON number. An absent claim is accepted only when it is optional. */
+static bool time_claim_ok(const json_field *field, time_t now, bool must_be_future, bool required)
 {
 	if (field->kind == JSON_ABSENT)
-		return true;
+		return !required;
 	if (field->kind != JSON_NUMBER)
 		return false;
 	return must_be_future ? field->number > (double)now : field->number <= (double)now;
@@ -118,7 +118,7 @@ jwt_status jwt_verify(const jwt_verifier *verifier, strview token, time_t now, j
 	enum { SUB, USERNAME, EXP, NBF };
 
 	if (!read_segment(parts.payload, PAYLOAD_CAP, payload, 4) ||
-	    !time_claim_ok(&payload[EXP], now, true) || !time_claim_ok(&payload[NBF], now, false))
+	    !time_claim_ok(&payload[EXP], now, true, true) || !time_claim_ok(&payload[NBF], now, false, false))
 		return JWT_INVALID_TOKEN;
 
 	if (payload[SUB].kind != JSON_STRING || payload[SUB].truncated ||

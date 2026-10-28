@@ -88,3 +88,37 @@ fn test_body_member_rejects_invalid_json() {
 		assert body_of(raw) == none
 	}
 }
+
+fn test_put_int_matches_string_conversion() {
+	for v in [i64(0), 9, 10, 99, 100, 101, 12345, 592594, -1, -10, -4096, 9223372036854775807,
+		-9223372036854775807] {
+		mut b := []u8{}
+		put_int(mut b, v)
+		assert b.bytestr() == v.str()
+	}
+}
+
+fn test_put_json_escapes_at_every_position_and_length() {
+	for n in 0 .. 70 {
+		for ch in [u8(`"`), `\\`, `\n`, 0x01, 0x1f, 0x7f, 0xc3] {
+			for pos in 0 .. n {
+				mut src := []u8{len: n, init: `a`}
+				src[pos] = ch
+				mut got := []u8{}
+				put_json(mut got, src.data, n)
+				mut want := [u8(`"`)]
+				for c in src {
+					match c {
+						`"` { want << [u8(`\\`), `"`] }
+						`\\` { want << [u8(`\\`), `\\`] }
+						`\n` { want << [u8(`\\`), `n`] }
+						0x01, 0x1f { want << '\\u00${hex[c >> 4]:c}${hex[c & 15]:c}'.bytes() }
+						else { want << c }
+					}
+				}
+				want << `"`
+				assert got == want
+			}
+		}
+	}
+}

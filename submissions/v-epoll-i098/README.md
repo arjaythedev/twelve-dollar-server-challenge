@@ -17,7 +17,7 @@ bash build.sh          # builds pinned SQLite and liburing, then bin/server
 SQLITE_PATH=... JWT_SECRET=... HOST=0.0.0.0 PORT=80 bash start.sh
 ```
 
-The transport requires Linux 6.0 or newer and an allowed `io_uring_setup` syscall.
+The transport requires Linux 6.1 or newer (deferred task work) and an allowed `io_uring_setup` syscall.
 Keep the process descriptor limit at 65,535 or higher.
 Provide the same locked-memory allowance for this server and the Rust control.
 The C transport keeps debug symbols and frame pointers for local profiles.
@@ -49,11 +49,12 @@ The C transport keeps debug symbols and frame pointers for local profiles.
   turning it off cut server instructions per request by 3.8% in a local profile.
 - **Feed in three small queries.** The newest 20 ids come from the `(created_at, id)` index. When those
   ids span fewer than 64 ids (they do, because ids grow with time), one range scan reads the posts and
-  authors, and one range scan on `likes_post_id_idx` counts the likes. Else the reference query runs.
+  authors, and one range scan on `likes_post_id_idx` counts the likes. The post scan runs newest id
+  first and writes each row straight into the response; any other order runs the reference query.
   Every value comes from SQLite during the request (rule 5).
 - **Prepared statements** for every query, plus `BEGIN`/`COMMIT`, made once at startup.
-- **JSON written by hand into reused buffers.** The writer skips 8 bytes at a time when no byte needs
-  escaping. Keys come out in the spec order.
+- **JSON written by hand into reused buffers.** The writer checks 16 bytes at a time (SSE2, `json_scan.h`) for
+  a byte that needs escaping, and copies the string whole when none does. Keys come out in the spec order.
 - **Every token is verified.** HS256 only, signature compared in constant time, then `exp`, `sub` and
   `username` are checked on each request.
 - **524,280 fixed slots.** One thread owns eight sparse tables with 65,535 slots each.

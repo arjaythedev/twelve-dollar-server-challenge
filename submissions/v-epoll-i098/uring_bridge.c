@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/eventfd.h>
 #include <sys/utsname.h>
 #include <time.h>
 #include <unistd.h>
@@ -57,7 +58,8 @@ struct td_ring {
 
 struct td_net {
     struct td_ring rings[RINGS];
-    struct pollfd polls[RINGS + 1];
+    struct pollfd polls[RINGS + 1]; /* [RINGS] is the checkpoint eventfd */
+    int wake; /* every ring signals this eventfd when work for the loop arrives */
     int listener, cursor, checkpoint_waiting;
 };
 
@@ -226,22 +228,26 @@ static void td_submit(struct td_net *net, struct td_ring *r)
     if (rc < 0 && rc != -EINTR && rc != -EBUSY && rc != -EAGAIN)
         td_fail("submit", rc);
     if (*r->ring.sq.kdropped) td_fail("dropped SQE", EOVERFLOW);
-    /* NODROP retains overflow completions. Enter the kernel to move them into the CQ. */
-    if (*r->ring.sq.kflags & IORING_SQ_CQ_OVERFLOW) {
+    /* DEFER_TASKRUN posts completions only inside io_uring_enter; the kernel raises
+     * IORING_SQ_TASKRUN when work waits, and IORING_SQ_CQ_OVERFLOW when the CQ spilled. */
+    if (*r->ring.sq.kflags & (IORING_SQ_CQ_OVERFLOW | IORING_SQ_TASKRUN)) {
         rc = io_uring_get_events(&r->ring);
-        if (rc < 0 && rc != -EINTR && rc != -EBUSY) td_fail("flush CQ overflow", rc);
+        if (rc < 0 && rc != -EINTR && rc != -EBUSY) td_fail("flush deferred work", rc);
     }
 }
 
 struct td_net *td_net_new(int listener, int checkpoint)
 {
     struct utsname kernel;
-    int major = 0;
-    if (uname(&kernel) || sscanf(kernel.release, "%d", &major) != 1 || major < 6)
-        td_fail("Linux 6.0 or newer is required", ENOTSUP);
+    int major = 0, minor = 0;
+    if (uname(&kernel) || sscanf(kernel.release, "%d.%d", &major, &minor) != 2 ||
+        major < 6 || (major == 6 && minor < 1))
+        td_fail("Linux 6.1 or newer is required", ENOTSUP);
     struct td_net *net = calloc(1, sizeof(*net));
     if (!net) td_fail("allocate network state", ENOMEM);
     net->listener = listener;
+    net->wake = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    if (net->wake < 0) td_fail("wake eventfd", errno);
     int one = 1;
     /* Accepted sockets inherit TCP_NODELAY without entering the process file table. */
     if (setsockopt(listener, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one)))
@@ -251,7 +257,8 @@ struct td_net *td_net_new(int listener, int checkpoint)
         r->ready_head = r->ready_tail = r->retry_head = r->retry_tail = -1;
         r->deliver_head = r->deliver_tail = -1;
         struct io_uring_params params = {
-            .flags = IORING_SETUP_CQSIZE | IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_COOP_TASKRUN,
+            .flags = IORING_SETUP_CQSIZE | IORING_SETUP_SINGLE_ISSUER |
+                     IORING_SETUP_DEFER_TASKRUN | IORING_SETUP_TASKRUN_FLAG,
             .cq_entries = CQ_SIZE
         };
         int rc = io_uring_queue_init_params(SQ_SIZE, &r->ring, &params);
@@ -270,6 +277,8 @@ struct td_net *td_net_new(int listener, int checkpoint)
             io_uring_buf_ring_add(r->buffers, r->memory + b * BUFFER_SIZE,
                                  BUFFER_SIZE, b, BUFFERS - 1, b);
         io_uring_buf_ring_advance(r->buffers, BUFFERS);
+        rc = io_uring_register_eventfd(&r->ring, net->wake);
+        if (rc < 0) td_fail("register wake eventfd", rc);
         net->polls[i] = (struct pollfd){ .fd = r->ring.ring_fd, .events = POLLIN };
     }
     net->polls[RINGS] = (struct pollfd){ .fd = checkpoint, .events = POLLIN };
@@ -404,6 +413,19 @@ static int td_complete(struct td_ring *r, int ring_index, const struct io_uring_
     return 0;
 }
 
+/* Sleep until a ring has work for the loop or the timeout ends. */
+static void td_sleep(struct td_net *net, const struct timespec *timeout)
+{
+    struct pollfd wake = { .fd = net->wake, .events = POLLIN };
+    int rc = ppoll(&wake, 1, timeout, NULL);
+    if (rc < 0 && errno != EINTR) td_fail("poll wake", errno);
+    if (wake.revents & (POLLERR | POLLHUP | POLLNVAL)) td_fail("wake eventfd failed", EIO);
+    if (rc > 0) {
+        uint64_t count;
+        if (read(net->wake, &count, sizeof(count)) < 0 && errno != EAGAIN) td_fail("drain wake", errno);
+    }
+}
+
 int td_net_next(struct td_net *net, struct td_event *events, int capacity, int timeout_ms)
 {
     assert(capacity > 0);
@@ -460,8 +482,7 @@ int td_net_next(struct td_net *net, struct td_event *events, int capacity, int t
             if (!flush_at) flush_at = nanos + BATCH_NS;
             if (count == capacity || nanos >= flush_at || td_now() >= deadline) return count;
             struct timespec pause = { .tv_nsec = (long)(flush_at - nanos) };
-            int rc = ppoll(net->polls, RINGS, &pause, NULL);
-            if (rc < 0 && errno != EINTR) td_fail("batch poll", errno);
+            td_sleep(net, &pause);
             continue;
         }
         now = td_now();
@@ -470,11 +491,8 @@ int td_net_next(struct td_net *net, struct td_event *events, int capacity, int t
         /* A transient submit error must not strand unsent SQEs in poll forever. */
         if (pending && wake > now + 1) wake = now + 1;
         int wait = wake == UINT64_MAX ? -1 : (wake <= now ? 0 : (int)(wake - now > INT_MAX ? INT_MAX : wake - now));
-        int rc = poll(net->polls, RINGS, wait);
-        if (rc < 0 && errno != EINTR) td_fail("poll rings", errno);
-        for (int i = 0; i < RINGS; ++i)
-            if (net->polls[i].revents & (POLLERR | POLLHUP | POLLNVAL))
-                td_fail("ring or checkpoint fd failed", EIO);
+        struct timespec limit = { .tv_sec = wait / 1000, .tv_nsec = (long)(wait % 1000) * 1000000 };
+        td_sleep(net, wait < 0 ? NULL : &limit);
     }
 }
 

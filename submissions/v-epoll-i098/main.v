@@ -13,6 +13,7 @@ import time
 #flag @DIR/build/liburing/src/liburing.a
 #flag -lm -lcrypto
 #include "uring_bridge.h"
+#include "json_scan.h"
 #include <openssl/hmac.h>
 #include "sqlite3.h"
 #include <sys/resource.h>
@@ -63,6 +64,7 @@ fn C.td_net_release(&C.td_net, &C.td_event)
 fn C.td_net_send(&C.td_net, int, &u8, int)
 fn C.td_net_resume(&C.td_net, int, int, int)
 fn C.td_net_abort(&C.td_net, int)
+fn C.td_json_scan(&u8, int) int
 fn C.getrlimit(i32, &C.rlimit) i32
 fn C.setrlimit(i32, &C.rlimit) i32
 
@@ -121,7 +123,6 @@ mut:
 	out       []u8 // all responses of the current batch
 	body_start int = -1 // where the current response body starts in out; -1 when none is open
 	head      []u8 // scratch for one response header
-	rows      []u8 // scratch for feed rows before they are put in feed order
 	jkey      []u8 // the decoded key of the current JSON member of a post body
 	jbody     []u8 // the decoded "body" member of the current post
 	segs      []Seg
@@ -146,7 +147,6 @@ fn main() {
 		started: time.now().unix()
 		out:     []u8{cap: 1 << 20}
 		head:    []u8{cap: header_room}
-		rows:    []u8{cap: 16384}
 		jkey:    []u8{cap: 64}
 		jbody:   []u8{cap: 2048}
 		conns:   []Conn{len: int(C.TD_CAPACITY)}
@@ -213,7 +213,7 @@ fn (mut s Server) open_db(path string) {
 	s.st_feed = s.prepare(sql_post + ' ORDER BY p.created_at DESC, p.id DESC LIMIT 20')
 	s.st_top = s.prepare('SELECT id FROM posts ORDER BY created_at DESC, id DESC LIMIT 20')
 	s.st_range =
-		s.prepare('SELECT p.id, p.body, p.created_at, u.username FROM posts p JOIN users u ON u.id = p.user_id WHERE p.id BETWEEN ? AND ?')
+		s.prepare('SELECT p.id, p.body, p.created_at, u.username FROM posts p JOIN users u ON u.id = p.user_id WHERE p.id BETWEEN ? AND ? ORDER BY p.id DESC')
 	s.st_counts = s.prepare('SELECT post_id FROM likes WHERE post_id BETWEEN ? AND ?')
 	s.st_post = s.prepare(sql_post + ' WHERE p.id = ?')
 	s.st_exists = s.prepare('SELECT 1 FROM posts WHERE id = ?')
@@ -1131,28 +1131,13 @@ fn (mut s Server) feed() {
 	s.feed_full()
 }
 
+// feed_range scans the rows newest-id first, which is feed order when ids fall with created_at,
+// so each row goes straight into the response; any other order returns false for feed_full.
 fn (mut s Server) feed_range(ids [20]i64, n int, lo i64, hi i64) bool {
-	mut start := [feed_span]int{init: -1}
-	mut end := [feed_span]int{}
 	mut likes := [feed_span]i64{}
-	s.rows.clear()
-	C.sqlite3_bind_int64(s.st_range, 1, lo)
-	C.sqlite3_bind_int64(s.st_range, 2, hi)
-	mut rc := C.sqlite3_step(s.st_range)
-	for rc == sqlite_row {
-		off := C.sqlite3_column_int64(s.st_range, 0) - lo
-		start[off] = s.rows.len
-		put_post_head(mut s.rows, s.st_range)
-		end[off] = s.rows.len
-		rc = C.sqlite3_step(s.st_range)
-	}
-	C.sqlite3_reset(s.st_range)
-	if rc != sqlite_done {
-		return false
-	}
 	C.sqlite3_bind_int64(s.st_counts, 1, lo)
 	C.sqlite3_bind_int64(s.st_counts, 2, hi)
-	rc = C.sqlite3_step(s.st_counts)
+	mut rc := C.sqlite3_step(s.st_counts)
 	for rc == sqlite_row {
 		likes[C.sqlite3_column_int64(s.st_counts, 0) - lo]++
 		rc = C.sqlite3_step(s.st_counts)
@@ -1163,18 +1148,30 @@ fn (mut s Server) feed_range(ids [20]i64, n int, lo i64, hi i64) bool {
 	}
 	s.start_body()
 	put(mut s.out, '{"posts":[')
-	for k in 0 .. n {
-		off := ids[k] - lo
-		if start[off] < 0 {
-			return false
+	C.sqlite3_bind_int64(s.st_range, 1, lo)
+	C.sqlite3_bind_int64(s.st_range, 2, hi)
+	mut k := 0
+	rc = C.sqlite3_step(s.st_range)
+	for rc == sqlite_row && k < n {
+		id := C.sqlite3_column_int64(s.st_range, 0)
+		if id < ids[k] {
+			break
 		}
-		if k > 0 {
-			s.out << `,`
+		if id == ids[k] {
+			if k > 0 {
+				put(mut s.out, ',')
+			}
+			put_post_head(mut s.out, s.st_range, id)
+			put(mut s.out, ',"like_count":')
+			put_int(mut s.out, likes[id - lo])
+			put(mut s.out, '}')
+			k++
 		}
-		append(mut s.out, &s.rows[start[off]], end[off] - start[off])
-		put(mut s.out, ',"like_count":')
-		put_int(mut s.out, likes[off])
-		s.out << `}`
+		rc = C.sqlite3_step(s.st_range)
+	}
+	C.sqlite3_reset(s.st_range)
+	if k < n {
+		return false
 	}
 	put(mut s.out, ']}')
 	s.respond(200)
@@ -1226,20 +1223,23 @@ fn (mut s Server) post(id i64) {
 }
 
 fn (mut s Server) put_post(st &C.sqlite3_stmt) {
-	put_post_head(mut s.out, st)
+	put_post_head(mut s.out, st, C.sqlite3_column_int64(st, 0))
 	put(mut s.out, ',"like_count":')
 	put_int(mut s.out, C.sqlite3_column_int64(st, 4))
-	s.out << `}`
+	put(mut s.out, '}')
 }
 
 // put_post_head writes a post object up to (not including) its like_count.
-fn put_post_head(mut b []u8, st &C.sqlite3_stmt) {
+fn put_post_head(mut b []u8, st &C.sqlite3_stmt, id i64) {
 	put(mut b, '{"id":')
-	put_int(mut b, C.sqlite3_column_int64(st, 0))
+	put_int(mut b, id)
 	put(mut b, ',"body":')
 	put_json(mut b, C.sqlite3_column_text(st, 1), C.sqlite3_column_bytes(st, 1))
 	put(mut b, ',"created_at":')
-	put_json(mut b, C.sqlite3_column_text(st, 2), C.sqlite3_column_bytes(st, 2))
+	// shortcut: created_at is always the schema's 24-byte UTC wire format with nothing to escape; revisit if that format changes
+	append(mut b, c'"', 1)
+	append(mut b, C.sqlite3_column_text(st, 2), 24)
+	append(mut b, c'"', 1)
 	put(mut b, ',"author":')
 	put_json(mut b, C.sqlite3_column_text(st, 3), C.sqlite3_column_bytes(st, 3))
 }
@@ -1332,23 +1332,46 @@ fn put(mut b []u8, s string) {
 	append(mut b, s.str, s.len)
 }
 
+const digit_pairs = '00010203040506070809101112131415161718192021222324252627282930313233343536373839404142434445464748495051525354555657585960616263646566676869707172737475767778798081828384858687888990919293949596979899'
+
 fn put_int(mut b []u8, v i64) {
-	mut tmp := [21]u8{}
-	mut n := if v < 0 { -v } else { v }
-	mut i := 21
-	for {
-		i--
-		tmp[i] = u8(`0` + n % 10)
-		n /= 10
-		if n == 0 {
-			break
-		}
+	if b.len + 21 > b.cap {
+		b.ensure_cap(b.len + 21)
 	}
+	mut n := u64(v)
 	if v < 0 {
-		i--
-		tmp[i] = `-`
+		n = u64(0) - n
 	}
-	append(mut b, &tmp[i], 21 - i)
+	mut digits := 1
+	mut limit := u64(10)
+	for n >= limit {
+		digits++
+		limit *= 10
+	}
+	neg := if v < 0 { 1 } else { 0 }
+	unsafe {
+		mut e := &u8(b.data) + b.len + neg + digits
+		for n >= 100 {
+			r := int(n % 100) * 2
+			n /= 100
+			e -= 2
+			e[0] = digit_pairs.str[r]
+			e[1] = digit_pairs.str[r + 1]
+		}
+		if n >= 10 {
+			r := int(n) * 2
+			e -= 2
+			e[0] = digit_pairs.str[r]
+			e[1] = digit_pairs.str[r + 1]
+		} else {
+			e--
+			e[0] = u8(`0` + int(n))
+		}
+		if neg == 1 {
+			*(&u8(b.data) + b.len) = `-`
+		}
+		b.len += neg + digits
+	}
 }
 
 const b64url = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_'
@@ -1413,25 +1436,26 @@ fn b64url_decode(s string) ?string {
 }
 
 const hex = '0123456789abcdef'
-const ones = u64(0x0101010101010101)
-const highs = u64(0x8080808080808080)
 
 // put_json writes p[0..n] as a JSON string, escaped the way JSON.stringify does.
 fn put_json(mut b []u8, p &u8, n int) {
+	mut i := C.td_json_scan(p, n)
+	if i == n {
+		if b.len + n + 2 > b.cap {
+			b.ensure_cap(b.len + n + 2)
+		}
+		unsafe {
+			d := &u8(b.data) + b.len
+			d[0] = `"`
+			vmemcpy(d + 1, p, n)
+			d[n + 1] = `"`
+			b.len += n + 2
+		}
+		return
+	}
 	append(mut b, c'"', 1)
 	mut from := 0
-	mut i := 0
 	for i < n {
-		if i + 8 <= n {
-			// skip 8 bytes at once when none is a control character, `"` or `\`
-			w := unsafe { *(&u64(voidptr(p + i))) }
-			q := w ^ (ones * 0x22)
-			bs := w ^ (ones * 0x5c)
-			if ((w - ones * 0x20) | (q - ones) | (bs - ones)) & ~w & highs == 0 {
-				i += 8
-				continue
-			}
-		}
 		c := unsafe { p[i] }
 		i++
 		if c >= 0x20 && c != `"` && c != `\\` {

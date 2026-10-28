@@ -166,13 +166,13 @@ U8 *build_create_post_response_fast(int post_id, U8 *author) {
    ================================================================= */
 int set_reuse_addr(I32 sock) {
     int yes = 1;
-    setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(int));
+    setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, yes, sizeof(int));
     return TRUE;
 }
 
 int set_keepalive(I32 sock) {
     I32 yes = 1;
-    setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, &yes, sizeof(int));
+    setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, yes, sizeof(int));
     return TRUE;
 }
 

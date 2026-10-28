@@ -7,10 +7,10 @@ module Feed
   NAME    = Bytes.new(16384)
   SUBJECT = Bytes.new(16384)
   BODY    = Bytes.new(16384)
-  @@database : Database? = nil
+  class_property database : Database? = nil
 
   def self.db
-    @@database ||= Database.new
+    database.not_nil!
   end
 
   def self.error(ctx, code, message)

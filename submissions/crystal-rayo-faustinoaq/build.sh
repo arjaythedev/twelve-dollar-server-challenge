@@ -34,4 +34,4 @@ if [ ! -f build/libsqlite3.a ]; then
 fi
 # -Dgc_none: no garbage collector at all. The server allocates its buffers once at start-up
 # and the request path never allocates, so there is nothing to collect.
-crystal build --release --no-debug -Dgc_none -Dwithout_mt --mcpu x86-64-v3 src/main.cr -o bin/server
+crystal build --release --no-debug -Dgc_none -Dwithout_mt --mcpu x86-64-v3 --link-flags "-L$PWD/build -lm" src/main.cr -o bin/server

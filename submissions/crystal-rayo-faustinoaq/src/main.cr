@@ -1,18 +1,16 @@
 require "./feed"
 
 app = Rayo::App.new
+app.on_worker_start { |_| Feed.database = Feed::Database.new }
 app.get("/health") do |ctx|
-  Feed.db.transaction(ctx)
-  Feed.db.health(ctx)
+  Feed.db.transaction(ctx) { Feed.db.health(ctx) }
 end
 app.get("/feed") do |ctx|
-  Feed.db.transaction(ctx)
-  Feed.db.feed(ctx)
+  Feed.db.transaction(ctx) { Feed.db.feed(ctx) }
 end
 app.get("/posts/:id") do |ctx|
   if id = Feed.id(ctx)
-    Feed.db.transaction(ctx)
-    Feed.db.post(ctx, id)
+    Feed.db.transaction(ctx) { Feed.db.post(ctx, id) }
   end
 end
 app.post("/posts") do |ctx|
@@ -26,8 +24,7 @@ app.post("/posts") do |ctx|
         elsif size > 500
           Feed.error(ctx, 400, "body must be at most 500 characters")
         else
-          Feed.db.transaction(ctx)
-          Feed.db.create(ctx, auth[0], auth[1], body)
+          Feed.db.transaction(ctx) { Feed.db.create(ctx, auth[0], auth[1], body) }
         end
       else
         Feed.error(ctx, 400, "body is required")
@@ -40,8 +37,7 @@ end
 app.post("/posts/:id/like") do |ctx|
   if auth = Feed.auth(ctx)
     if id = Feed.id(ctx)
-      Feed.db.transaction(ctx)
-      Feed.db.like(ctx, auth[0], id)
+      Feed.db.transaction(ctx) { Feed.db.like(ctx, auth[0], id) }
     end
   end
 end

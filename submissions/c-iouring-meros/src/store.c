@@ -166,8 +166,7 @@ store *store_open(const char *path)
 	                         "SELECT p.id, p.body, p.created_at, u.username FROM posts p JOIN users u ON u.id = p.user_id "
 	                         "WHERE p.id BETWEEN ?1 AND ?2 ORDER BY p.id DESC");
 	db->feed_likes = prepare(db->handle,
-	                         "SELECT post_id, count(*) FROM likes WHERE post_id BETWEEN ?1 AND ?2 "
-	                         "GROUP BY post_id ORDER BY post_id DESC");
+	                         "SELECT post_id FROM likes WHERE post_id BETWEEN ?1 AND ?2 ORDER BY post_id DESC");
 	db->find_post = prepare(db->handle, POST_COLUMNS "WHERE p.id = ?1");
 	db->insert_post = prepare(db->handle, "INSERT INTO posts(user_id, body) VALUES(?1, ?2) RETURNING id, created_at");
 	/* Inserting from a SELECT on posts means a missing post inserts nothing, in one statement. */
@@ -306,12 +305,15 @@ static bool collect_feed_rows(store *db, int64_t lowest, int64_t highest, int ex
 		int64_t id = sqlite3_column_int64(db->feed_posts, 0);
 		feed_row *row = &db->feed_rows[count];
 
+		/* One index entry per like, newest post first: skip the entries of posts above this one, then count its own. */
 		while (likes_rc == SQLITE_ROW && sqlite3_column_int64(db->feed_likes, 0) > id)
 			likes_rc = sqlite3_step(db->feed_likes);
 		row->id = id;
-		row->like_count = (likes_rc == SQLITE_ROW && sqlite3_column_int64(db->feed_likes, 0) == id)
-		                      ? sqlite3_column_int64(db->feed_likes, 1)
-		                      : 0;
+		row->like_count = 0;
+		while (likes_rc == SQLITE_ROW && sqlite3_column_int64(db->feed_likes, 0) == id) {
+			row->like_count++;
+			likes_rc = sqlite3_step(db->feed_likes);
+		}
 		if (!copy_text(row->body, sizeof row->body, &row->body_len, column_text(db->feed_posts, COL_BODY)) ||
 		    !copy_text(row->created_at, sizeof row->created_at, &row->created_at_len, column_text(db->feed_posts, COL_CREATED_AT)) ||
 		    !copy_text(row->author, sizeof row->author, &row->author_len, column_text(db->feed_posts, COL_AUTHOR)))

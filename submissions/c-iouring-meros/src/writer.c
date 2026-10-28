@@ -1,5 +1,11 @@
 #include "writer.h"
 
+#include <string.h>
+
+#ifdef __SSE2__
+#include <emmintrin.h>
+#endif
+
 /* Escape-table membership, indexed by byte. Everything else, including UTF-8, passes through. */
 static bool needs_json_escape(unsigned char c)
 {
@@ -51,6 +57,19 @@ void writer_json_escaped(writer *w, strview text)
 	while (pos < text.len) {
 		size_t run_end = pos;
 
+#ifdef __SSE2__
+		/* Post bodies are long and almost always plain text: test 16 bytes at a time for a byte < 0x20, '"' or '\\'. */
+		while (run_end + 16 <= text.len) {
+			__m128i chunk = _mm_loadu_si128((const __m128i *)(const void *)(text.ptr + run_end));
+			__m128i control = _mm_cmpeq_epi8(_mm_min_epu8(chunk, _mm_set1_epi8(0x1f)), chunk); /* unsigned chunk <= 0x1f */
+			__m128i quote = _mm_cmpeq_epi8(chunk, _mm_set1_epi8('"'));
+			__m128i backslash = _mm_cmpeq_epi8(chunk, _mm_set1_epi8('\\'));
+
+			if (_mm_movemask_epi8(_mm_or_si128(control, _mm_or_si128(quote, backslash))) != 0)
+				break;
+			run_end += 16;
+		}
+#endif
 		while (run_end < text.len && !needs_json_escape((unsigned char)text.ptr[run_end]))
 			run_end++;
 		writer_bytes(w, text.ptr + pos, run_end - pos);

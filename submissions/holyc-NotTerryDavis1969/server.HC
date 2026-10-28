@@ -38,10 +38,10 @@ SqlCtx *sql_ctx;
    SQLITE PRAGMA TUNING (safe, compliance-friendly)
    ================================================================= */
 /* After opening database, tune performance:
-   - cache_size: negative means KB, -1024 = 1 MB working set
-   - mmap_size: enable memory-mapped I/O (safe, read-only mapping)
-   - Note: synchronous=OFF is prohibited by SPEC.md rule 6
-   - But we can tune other pragmas for performance */
+    - cache_size: negative means KB, -1024 = 1 MB working set
+    - mmap_size: enable memory-mapped I/O (safe, read-only mapping)
+    - Note: synchronous=OFF is prohibited by SPEC.md rule 6
+    - But we can tune other pragmas for performance */
 public void tune_sqlite_pragmas() {
     /* Set cache size to 1 MB (negative = KB, so -1024) */
     /* Use SqlExecRaw which calls sqlite3_exec internally */
@@ -77,14 +77,14 @@ U8 req_buffer_arr[REQ_BUF_SIZE];
 I64 req_buf_offset = 0;
 
 /* =================================================================
-   NON-BLOCKING I/O SETTINGS
-   ================================================================= */
+    NON-BLOCKING I/O SETTINGS
+    ================================================================= */
 #define MAX_PENDING_CONNS 512
 #define SELECT_TIMEOUT_MS 100
 
 /* =================================================================
-   FAST INTEGER TO STRING - avoids MPrint overhead
-   ================================================================= */
+    FAST INTEGER TO STRING - avoids MPrint overhead
+    ================================================================= */
 U8 *fast_Itoa(int val, U8 *buf) {
     long i = 0;
     if (val == 0) { buf[0] = '0'; buf[1] = '\0'; return buf; }
@@ -97,8 +97,8 @@ U8 *fast_Itoa(int val, U8 *buf) {
 }
 
 /* =================================================================
-   FAST JSON BUILDER - zero-allocation for common patterns
-   ================================================================= */
+    FAST JSON BUILDER - zero-allocation for common patterns
+    ================================================================= */
 #define JSON_TRUE "true"
 #define JSON_FALSE "false"
 #define JSON_NOT_FOUND "{\"error\":\"not found\"}"
@@ -137,8 +137,8 @@ public U8 *build_feed_response_fast() {
 /* Fast: build like response */
 U8 *build_like_response_fast(int post_id, int already_liked) {
     /* Build: "{\"liked\":true,\"already_liked\":false,\"post_id\":N}" */
-    static U8 like_true[] = {"{\"liked\":true,\"already_liked\":false,\"post_id\":";
-    static U8 like_false[] = {"{\"liked\":true,\"already_liked\":true,\"post_id\":";
+    static U8 like_true[] = {"{\"liked\":true,\"already_liked\":false,\"post_id\":"};
+    static U8 like_false[] = {"{\"liked\":true,\"already_liked\":true,\"post_id\":"};
     U8 *base = already_liked ? like_false : like_true;
     size_t base_len = already_liked ? my_strlen(like_false) : my_strlen(like_true);
     
@@ -162,8 +162,8 @@ U8 *build_create_post_response_fast(int post_id, U8 *author) {
 }
 
 /* =================================================================
-   SOCKET UTILITIES
-   ================================================================= */
+    SOCKET UTILITIES
+    ================================================================= */
 int set_reuse_addr(I32 sock) {
     int yes = 1;
     setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(int));
@@ -185,8 +185,8 @@ int set_non_blocking(I32 sock) {
 }
 
 /* =================================================================
-   READ REQUEST - use pre-allocated buffer
-   ================================================================= */
+    READ REQUEST - use pre-allocated buffer
+    ================================================================= */
 long read_request_fast(int sock, U8 *buf, long buf_size) {
     I64 total = 0;
     U8 temp[4096];
@@ -195,7 +195,7 @@ long read_request_fast(int sock, U8 *buf, long buf_size) {
         I64 n = recv(sock, temp, sizeof(temp), 0);
         if (n <= 0) break;
         if (total + n > buf_size - 1) break;
-        my_strcpy(,);
+        memcpy(buf + total, temp, n);
         total += n;
 
         /* Check for \r\n\r\n end of headers */
@@ -208,10 +208,10 @@ long read_request_fast(int sock, U8 *buf, long buf_size) {
 }
 
 /* =================================================================
-   PARSE REQUEST - fast path, extract method, path, body
-   ================================================================= */
+    PARSE REQUEST - fast path, extract method, path, body
+    ================================================================= */
 int parse_request_fast(U8 *req, I64 req_len, U8 *method_buf, I32 method_size,
-                               U8 *path_buf, I32 path_size, U8 *body_out, I64 *body_len_out) {
+                                U8 *path_buf, I32 path_size, U8 *body_out, I64 *body_len_out) {
     /* Find first \r\n */
     U8 *cr = my_strchr(req, '\r');
     if (!cr) return FALSE;
@@ -226,7 +226,7 @@ int parse_request_fast(U8 *req, I64 req_len, U8 *method_buf, I32 method_size,
 
     I64 method_len = space1 - req_start;
     if (method_len >= method_size) return FALSE;
-    my_strcpy(,);
+    memcpy(method_buf, req_start, method_len);
     method_buf[method_len] = '\0';
 
     /* Path starts after first space */
@@ -236,7 +236,7 @@ int parse_request_fast(U8 *req, I64 req_len, U8 *method_buf, I32 method_size,
     U8 *cr_at_path = my_strchr(path_start, '\r');
 
     U8 *path_end;
-    if (space2 and (!cr_at_path or space2 < cr_at_path)) {
+    if (space2 && (!cr_at_path || space2 < cr_at_path)) {
         path_end = space2;
     } else if (cr_at_path) {
         path_end = cr_at_path;
@@ -246,7 +246,7 @@ int parse_request_fast(U8 *req, I64 req_len, U8 *method_buf, I32 method_size,
 
     I64 path_len = path_end - path_start;
     if (path_len >= path_size) return FALSE;
-    my_strcpy(,);
+    memcpy(path_buf, path_start, path_len);
     path_buf[path_len] = '\0';
 
     /* Body: look for Content-Length after headers */
@@ -264,8 +264,8 @@ int parse_request_fast(U8 *req, I64 req_len, U8 *method_buf, I32 method_size,
         while (*cl == ' ') cl++;
         I64 val = atol(cl);
         *body_len_out = val;
-        if (val > 0 and val < 8192 and val < remaining) {
-            my_strcpy(,);
+        if (val > 0 && val < 8192 && val < remaining) {
+            memcpy(body_out, headers_end, val);
             body_out[val] = '\0';
         }
     }
@@ -274,8 +274,8 @@ int parse_request_fast(U8 *req, I64 req_len, U8 *method_buf, I32 method_size,
 }
 
 /* =================================================================
-   ACCEPT WITH NON-BLOCKING QUEUE
-   ================================================================= */
+    ACCEPT WITH NON-BLOCKING QUEUE
+    ================================================================= */
 /* Global connection queue for non-blocking acceptance */
 #define MAX_CONN_QUEUE 512
 I32 conn_queue[MAX_CONN_QUEUE];
@@ -317,8 +317,8 @@ int dequeue_connection() {
 }
 
 /* =================================================================
-   PROCESS A SINGLE CLIENT CONNECTION
-   ================================================================= */
+    PROCESS A SINGLE CLIENT CONNECTION
+    ================================================================= */
 public void process_client(int client_sock) {
     /* Reset request buffer offset */
     req_buf_offset = 0;
@@ -349,9 +349,9 @@ public void process_client(int client_sock) {
     /* Trim leading / from path */
     U8 path_clean[256];
     if (path[0] == '/') {
-        my_strcpy(,));
+        strcpy(path_clean, path + 1);
     } else {
-        my_strcpy(,));
+        strcpy(path_clean, path);
     }
 
     /* === ROUTE REQUESTS === */
@@ -377,7 +377,7 @@ public void process_client(int client_sock) {
         
         I32 frc = SqlExecPrepared(stmt_feed, &feed_row, fparams);
 
-        if (!frc or feed_row.col == NULL) {
+        if (!frc || feed_row.col == NULL) {
             /* No posts available */
             U8 *resp = build_response_fast(200, (U8 *)"{\"posts\":[]}", 16);
             /* Add Content-Type header */
@@ -525,7 +525,7 @@ public void process_client(int client_sock) {
     if (my_strcmp(path_clean, "posts") == 0) {
         /* Only create post if body is present */
 
-        if (body_len > 0 and body[0] != '\0') {
+        if (body_len > 0 && body[0] != '\0') {
             /* Validate body */
             if (body_len < 1) {
                 U8 *resp = build_response_fast(400, JSON_BODY_REQ, my_strlen(JSON_BODY_REQ));
@@ -637,8 +637,8 @@ public void process_client(int client_sock) {
 }
 
 /* =================================================================
-   MAIN - server entry point with select() event loop
-   ================================================================= */
+    MAIN - server entry point with select() event loop
+    ================================================================= */
 int main() {
     /* Initialize SQLite */
     sql_ctx = SqlCtxNew(SQLITE_PATH, TRUE);
@@ -674,7 +674,7 @@ int main() {
 
     U8 host[64] = "127.0.0.1";
     U8 *host_env = getenv("HOST");
-    if (host_env) my_strcpy(,));
+    if (host_env) strcpy(host, host_env);
 
     sockaddr_in addr; memset(&addr,0,sizeof(addr)); addr.sin_family = AF_INET; addr.sin_port = htons(port); addr.sin_addr = inet_addr((char*)host);
 
@@ -694,8 +694,8 @@ int main() {
     "Press Ctrl+C to stop\n";
 
     /* ==============================================================
-       SELECT() EVENT LOOP - non-blocking acceptance
-       ============================================================== */
+        SELECT() EVENT LOOP - non-blocking acceptance
+        ============================================================== */
     fd_set read_fds; FD_ZERO(&read_fds);
     int max_fd = listen_sock;
     

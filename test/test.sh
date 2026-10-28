@@ -78,6 +78,11 @@ req POST /posts "Bearer ${TOKEN%.*}.c2lnbmF0dXJlLWlzLW5vdC12YWxpZC1hdC1hbGwtYXQt
                                                    expect "POST /posts, bad signature" 401 '{"error":"invalid or expired token"}'
 req POST /posts "Bearer $none" '{"body":"x"}';     expect "POST /posts, alg=none" 401 '{"error":"invalid or expired token"}'
 req POST /posts "Bearer $expired" '{"body":"x"}';  expect "POST /posts, expired token" 401 '{"error":"invalid or expired token"}'
+for exp_claim in '' ',"exp":null' ',"exp":"9999999999"' ',"exp":true'; do
+  invalid_exp="$(sign "{\"sub\":\"$USER_ID\",\"username\":\"$USER_NAME\"$exp_claim}")"
+  req POST /posts "Bearer $invalid_exp" '{"body":"x"}'
+  expect "POST /posts, missing or nonnumeric exp ($exp_claim)" 401 '{"error":"invalid or expired token"}'
+done
 req POST /posts "Bearer $bad_sub" '{"body":"x"}';  expect "POST /posts, sub not an integer" 401 '{"error":"invalid token payload"}'
 req POST /posts "Bearer $no_name" '{"body":"x"}';  expect "POST /posts, no username" 401 '{"error":"invalid token payload"}'
 req POST /posts/abc/like -;                        expect "POST /posts/abc/like, no token (auth before id)" 401 '{"error":"missing bearer token"}'

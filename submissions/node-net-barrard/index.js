@@ -69,7 +69,7 @@ function authenticate(header) {
     if (sig.length !== expected.length || !timingSafeEqual(sig, expected)) throw 0;
     payload = JSON.parse(Buffer.from(token.slice(dot1 + 1, dot2), 'base64url'));
     if (payload === null || typeof payload !== 'object') throw 0;
-    if (payload.exp !== undefined && !(typeof payload.exp === 'number' && payload.exp > Date.now() / 1000)) throw 0;
+    if (!(typeof payload.exp === 'number' && payload.exp > Date.now() / 1000)) throw 0;
   } catch {
     return 'invalid or expired token';
   }

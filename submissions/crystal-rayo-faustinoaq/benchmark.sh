@@ -13,8 +13,9 @@ PORT=${PORT:-18373}
 CONNECTIONS=${CONNECTIONS:-256}
 DURATION=${DURATION:-15s}
 [ "$CONNECTIONS" -le 3000 ]
-mkdir -p build/reference measurements
-exec > >(tee "${SESSION_FILE:-measurements/session.txt}") 2>&1
+RESULTS=${RESULTS:-measurements}
+mkdir -p build/reference "$RESULTS"
+exec > >(tee "${SESSION_FILE:-$RESULTS/session.txt}") 2>&1
 date -u +%Y-%m-%dT%H:%M:%SZ
 cp -R "$REFERENCE/src" "$REFERENCE/pgo" build/reference/
 cp "$REFERENCE/build.sh" "$REFERENCE/start.sh" build/reference/
@@ -33,19 +34,19 @@ for workload in ${WORKLOADS:-feed mix users}; do
     SUB=$APP
     [ "$entry" != reference ] || SUB=$APP/build/reference
     export SQLITE_PATH=$APP/build/benchmark.db JWT_SECRET=twelve-dollar-challenge HOST=127.0.0.1 PORT
-    taskset -c "$SERVER_CPU" bash "$SUB/start.sh" > "measurements/$entry-$workload-server.log" 2>&1 &
+    taskset -c "$SERVER_CPU" bash "$SUB/start.sh" > "$RESULTS/$entry-$workload-server.log" 2>&1 &
     PID=$!
     for _ in $(seq 60); do curl -sf "http://127.0.0.1:$PORT/health" >/dev/null && break; sleep 0.5; done
     curl -sf "http://127.0.0.1:$PORT/health" >/dev/null
     if [ "$workload" = users ]; then
       echo "$entry users=1000 think-scale=0.01 cpu=$SERVER_CPU clients=$CLIENT_CPUS"
-      taskset -c "$CLIENT_CPUS" "$FAMILY/bench/ul12/ul12" -port "$PORT" -ips 1 -users 1000 -think-scale 0.01 -ramp 5s -measure 20s -tokens "$SEED/tokens.json" | tee "measurements/$entry-$workload.txt"
-      grep -q "pass=true" "measurements/$entry-$workload.txt"
+      taskset -c "$CLIENT_CPUS" "$FAMILY/bench/ul12/ul12" -port "$PORT" -ips 1 -users 1000 -think-scale 0.01 -ramp 5s -measure 20s -tokens "$SEED/tokens.json" | tee "$RESULTS/$entry-$workload.txt"
+      grep -q "pass=true" "$RESULTS/$entry-$workload.txt"
     else
       echo "$entry $workload connections=$CONNECTIONS cpu=$SERVER_CPU clients=$CLIENT_CPUS"
-      taskset -c "$CLIENT_CPUS" wrk -t2 -c"$CONNECTIONS" -d3s -s "$FAMILY/bench/$workload.lua" "http://127.0.0.1:$PORT/" > "measurements/$entry-$workload-warmup.txt"
+      taskset -c "$CLIENT_CPUS" wrk -t2 -c"$CONNECTIONS" -d3s -s "$FAMILY/bench/$workload.lua" "http://127.0.0.1:$PORT/" > "$RESULTS/$entry-$workload-warmup.txt"
       awk '/Rss:/{print "warm RSS KiB: " $2}' "/proc/$PID/smaps_rollup"
-      taskset -c "$CLIENT_CPUS" wrk --latency -t2 -c"$CONNECTIONS" -d"$DURATION" -s "$FAMILY/bench/$workload.lua" "http://127.0.0.1:$PORT/" | tee "measurements/$entry-$workload.txt"
+      taskset -c "$CLIENT_CPUS" wrk --latency -t2 -c"$CONNECTIONS" -d"$DURATION" -s "$FAMILY/bench/$workload.lua" "http://127.0.0.1:$PORT/" | tee "$RESULTS/$entry-$workload.txt"
     fi
     awk '/Rss:/{print "final RSS KiB: " $2}' "/proc/$PID/smaps_rollup"
     cleanup

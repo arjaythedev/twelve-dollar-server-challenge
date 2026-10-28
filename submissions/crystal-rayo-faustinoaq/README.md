@@ -1,14 +1,15 @@
 # Crystal, Rayo + SQLite, no GC
 
 A normal [Rayo](https://github.com/faustinoaq/rayo) application: five routes,
-`ctx.json` with named fields, borrowed SQLite rows exposed as NamedTuples,
+`ctx.json` with named fields, borrowed SQLite rows with custom `to_json`,
 and `Rayo::JWT` for every authenticated request. Rayo owns HTTP, routing, io_uring,
-connection lifetimes and one worker per available CPU. The application owns SQLite.
+connection lifetimes and one worker per available CPU. Rayo also supplies the
+SQLite adapter and commit-before-response batching.
 
 | | |
 |---|---|
 | Language | Crystal 1.22.1, checksum-pinned official toolchain |
-| Framework | Rayo 0.1.0, commit `e0006c8b773dae7b75d78eedab314419fb08c0e9` |
+| Framework | Rayo 0.1.0, commit `c5358eda5b209dec85eda8dc4ca703e727065b6f` |
 | SQLite | 3.54.1, checksum-pinned amalgamation, static, `-O3 -march=x86-64-v3` + PGO |
 | Crypto | Rayo HS256 JWT through OpenSSL 3 libcrypto |
 | Nginx or direct | **Direct**, configured by `HOST` and `PORT` |
@@ -23,14 +24,15 @@ connection lifetimes and one worker per available CPU. The application owns SQLi
 - The feed uses the hand-rolled entry's three index scans when its newest 20 IDs
   span fewer than 256 IDs, preserving timestamp/ID ordering. A wider range uses
   the original correlated-count query. Both execute inside one transaction.
-- Requests in a Rayo completion turn share a SQLite transaction. `ctx.defer` keeps
-  each response pending; a `Rayo::Uring::Flusher` commits before finishing them.
-  Commit failure replaces the entire batch's responses with 500 errors. Separate
-  handle queues protect pipelined requests dispatched while finishing responses.
+- `Rayo::SQLite::GroupCommit` shares a transaction across requests in one loop
+  turn and defers responses until commit. Failed batches roll back and return 500.
+  The application no longer owns deferred-handle queues or a transaction flusher.
+- `app.on_worker_start` opens SQLite, prepares statements, attaches GroupCommit
+  and starts the checkpoint helper after fork in each worker.
 - WAL, `synchronous=NORMAL`, foreign keys, 1 GiB mmap, a 64 MiB SQLite page cache,
-  and automatic checkpoints every 1,000 WAL pages. SQLite calls run synchronously
-  on the worker; the intended box has one CPU. Multiple workers open independent
-  connections after fork with a five-second busy timeout.
+  and a five-second busy timeout. Like the reference, automatic checkpoints are off;
+  a separate connection on a plain pthread runs PASSIVE checkpoints every 20 ms.
+  Only C calls run on that helper; SQLite queries remain synchronous on the worker.
 - Decoded strings use reusable scratch buffers. Unicode whitespace trimming and
   the 500-code-point limit work without constructing Strings. Usernames are
   decoded from JWT claims and escaped by Rayo when serialized.
@@ -67,55 +69,64 @@ plans compared with live SQLite, including timestamp ties and gaps.
 
 ## Measurements
 
-Local comparison on 2026-10-28: Ryzen 5 3600, Linux 6.6.87.2 WSL2, inside
-`crdev`. Each server runs on CPU 9, with clients on CPUs 10–11. Every case gets
-a fresh seed copy. The reference is the hand-rolled `crystal-epoll-faustinoaq`
-entry from challenge commit `bfedb84069e2a7d7175b70effd7d41e99c294bac`, copied
-into this submission's ignored build directory and rebuilt with its own PGO script.
-Both entries use io_uring and SQLite targeting x86-64-v3.
+Wave 3 sanity comparison on 2026-10-28: Ryzen 5 3600, Linux 6.6.87.2 WSL2,
+inside `crdev`. Each server runs on CPU 9, with clients on CPUs 10–11. Every case
+gets a fresh seed copy. The reference is the hand-rolled
+`crystal-epoll-faustinoaq` entry from challenge commit
+`bfedb84069e2a7d7175b70effd7d41e99c294bac`, copied into this submission's ignored
+build directory and rebuilt with its own PGO script. Both entries use io_uring
+and statically linked SQLite targeting x86-64-v3.
 
-`bench/feed.lua` and `bench/mix.lua` from the shared challenge bench tooling run
-through wrk with two threads, 256 connections, three seconds of warm-up and a
-15-second measurement. The mix is 46% feed, 46% random post, 7% like and 1% create.
-The tooling's `ul12` driver also runs its `bench/load.js` user model with 1,000
-users, think times scaled by 0.01, a five-second ramp and a 20-second measured window (the driver samples on
-ten-second ticks).
-These short, local measurements are not the challenge's five-minute user score.
+The shared `bench/feed.lua` and `bench/mix.lua` scripts run through wrk with two
+threads, 256 connections, three seconds of warm-up and five seconds of measurement.
+The mix is 46% feed, 46% random post, 7% like and 1% create. These are short sanity
+measurements on a shared host. **Final comparison pending a separate clean run.**
 
 | Workload | Rayo req/s | Hand-rolled req/s | Rayo p99 | Hand-rolled p99 |
 |---|---:|---:|---:|---:|
-| Feed, 256 connections | 19,587.54 | 23,023.53 | 646.22 ms | 16.23 ms |
-| Mix, 256 connections | 28,138.19 | 34,325.12 | 654.34 ms | 10.84 ms |
-| Scaled user model, 1,000 users | 10,427 | 9,679 | 16.9 ms | 245.8 ms |
+| Feed, 256 connections | 21,180.49 | 24,907.37 | 18.28 ms | 16.06 ms |
+| Mix, 256 connections | 23,563.48 | 32,143.53 | 17.15 ms | 15.95 ms |
 
-Both user-model runs passed the latency thresholds with **0.000% errors**.
-Neither wrk workload reported HTTP or socket errors. The Rayo runs had occasional
-latency spikes up to about 0.83 seconds; the table includes them. Precise Rayo RSS
-for the read-only feed stayed at **28,352 KiB** after warm-up. Mixed-load RSS went
-from **163,460 to 176,540 KiB**, including SQLite's mapped pages and page cache.
+Neither workload reported HTTP or socket errors. Rayo feed RSS stayed at
+**28,420 KiB** across warm-up and measurement; mixed RSS rose from **156,956 to
+164,716 KiB**, including SQLite mappings and page cache. The earlier large latency
+spikes did not appear in this short session. Throughput remains about 15% below
+the reference for feed and 27% below for mix; the gap is not closed.
+
+Earlier measurements remain in `measurements/`; the current sanity session is in
+`measurements/wave3/`. Historical numbers use an older framework and are not the
+current entry's score.
 
 Reproduce from this folder inside `crdev`, after building the application:
 
 ```bash
-flock /home/user/experiments/crystal-challenges/bench/.lock bash benchmark.sh
+flock /home/user/experiments/crystal-challenges/bench/.lock env \
+  WORKLOADS="feed mix" DURATION=5s RESULTS=measurements/wave3 bash benchmark.sh
 ```
 
-`SERVER_CPU`, `CLIENT_CPUS`, `PORT`, `SEED_DIR`, `REFERENCE_DIR`, `CONNECTIONS`
-`DURATION`, `WORKLOADS` and `SESSION_FILE` can be overridden. Connection counts are capped at 3,000. The
+`SERVER_CPU`, `CLIENT_CPUS`, `PORT`, `SEED_DIR`, `REFERENCE_DIR`, `CONNECTIONS`,
+`DURATION`, `WORKLOADS`, `RESULTS` and `SESSION_FILE` can be overridden. Connection counts are capped at 3,000. The
 wrapper starts and stops only its own recorded server PID and removes its
 scratch database. Raw results and the complete session are in `measurements/`.
 
 ## Rayo gaps
 
-SQLite is not a Rayo component yet. The reusable prepared-statement adapter and
-commit-before-response batching are candidates to upstream. A worker initialization
-hook would let applications open SQLite explicitly after fork; this application
-initializes its connection and registers its flusher on the first database request.
-No Rayo source changes are required.
+The old SQLite FFI adapter, transaction flusher, lazy worker initialization and
+JSON writer workaround have been removed. Custom `Post#to_json` now works for
+single posts and array elements. Application Crystal source (`src/*.cr`, including
+blank/comment lines) shrank from **417 to 362 lines**, including the new 31-line
+checkpoint helper. Gzip and bcrypt are not needed by this API.
 
-At the pinned commit, `src/rayo/json.cr:603` calls `v.to_json(self)` with a copy
-of the Writer struct. Custom serializers used as array elements lose their
-changes to the outer writer's separator state: two items that each serialize
-`{id: 1}` produce `[{"id":1}{"id":1}]`. The minimal application workaround is to
-return row fields as NamedTuples and give those to the writer directly. Both
-feed paths use this form; the wider-range integration check covers the case.
+The remaining generic piece is background WAL checkpointing
+(`src/checkpoint.cr`): Rayo exposes no checkpoint API or helper. It adds one FFI
+symbol and follows the reference's 20 ms PASSIVE policy. This is a candidate to
+upstream. Rayo's normal SQLite adapter remains in use for all queries and both
+connections. The custom SQLite PGO build is retained; `build.sh` puts its archive
+first on the linker's search path, verified by the absence of a dynamic SQLite
+dependency in `ldd bin/server`.
+
+No new Rayo bug was found. Remaining differences from the reference include the
+framework's general JSON/HTTP processing and SQLite column validation, and
+GroupCommit executing BEGIN/COMMIT through `exec` rather than cached statements.
+Their individual performance costs have not been isolated. There is no Postgres
+in this challenge, so the multicore Postgres query-profile issue does not apply.

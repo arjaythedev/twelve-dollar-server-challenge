@@ -99,11 +99,6 @@ class Store
     ok
   end
 
-  # While a write batch is open, reads wait for its COMMIT.
-  def writing?
-    !@batch.nil?
-  end
-
   # Called every second. A checkpoint can't run inside a write batch, so then it runs right after
   # that batch commits.
   def checkpoint
@@ -193,11 +188,6 @@ class App
 
     @mac = String.new("\0" * 32, encoding: Encoding::BINARY)
     @started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-  end
-
-  # True while reads would wait for a write batch to commit; otherwise a GET never suspends its fiber.
-  def writing?
-    @store.writing?
   end
 
   # `path` excludes the query string; `authorization` is the raw header value or nil.

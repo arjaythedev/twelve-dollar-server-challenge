@@ -13,7 +13,7 @@ if [ ! -f native/libsqlite3.so ]; then
   echo "$SQLITE_SHA256  native/sqlite.tar.gz" | sha256sum -c -
   tar -xzf native/sqlite.tar.gz -C native --strip-components=1 "sqlite-autoconf-$SQLITE/sqlite3.c" "sqlite-autoconf-$SQLITE/sqlite3.h"
   # SQLite's recommended compile-time options, but THREADSAFE=2: two connections, each used by one thread at a time.
-  FLAGS="-O2 -fPIC -DSQLITE_DQS=0 -DSQLITE_THREADSAFE=2 -DSQLITE_DEFAULT_MEMSTATUS=0 -DSQLITE_DEFAULT_WAL_SYNCHRONOUS=1
+  FLAGS="-O2 -fPIC -fno-semantic-interposition -DSQLITE_DQS=0 -DSQLITE_THREADSAFE=2 -DSQLITE_DEFAULT_MEMSTATUS=0 -DSQLITE_DEFAULT_WAL_SYNCHRONOUS=1
     -DSQLITE_LIKE_DOESNT_MATCH_BLOBS -DSQLITE_MAX_EXPR_DEPTH=0 -DSQLITE_OMIT_DECLTYPE -DSQLITE_OMIT_DEPRECATED
     -DSQLITE_OMIT_PROGRESS_CALLBACK -DSQLITE_OMIT_SHARED_CACHE -DSQLITE_OMIT_AUTOINIT -DSQLITE_OMIT_LOAD_EXTENSION"
   # Profile-guided build (idea: #60): compile with profiling, run the server's statements on a synthetic database

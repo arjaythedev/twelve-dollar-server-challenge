@@ -264,9 +264,18 @@ type private Ring(index: int) =
                 try
                     register REGISTER_PBUF_RING reg 1L
                     false
-                with e ->
-                    if index = 0 then eprintfn "io_uring buffer ring refused (%s): using IORING_OP_PROVIDE_BUFFERS" e.Message
-                    true
+                with _ ->
+                    // Ubuntu 6.8.0-147 (and other builds of that series) has the check on the struct's reserved words
+                    // inverted: it refuses zeroes and accepts anything else (Launchpad #2162843). A correct kernel refuses
+                    // a non-zero word, so this second try only succeeds where the first one failed for that reason.
+                    NativePtr.write (NativePtr.ofNativeInt<uint64> (reg + 16n)) 1UL
+                    try
+                        register REGISTER_PBUF_RING reg 1L
+                        if index = 0 then eprintfn "io_uring buffer ring registered with resv[0]=1 (inverted check)"
+                        false
+                    with e ->
+                        if index = 0 then eprintfn "io_uring buffer ring refused (%s): using IORING_OP_PROVIDE_BUFFERS" e.Message
+                        true
             finally
                 Marshal.FreeHGlobal reg
     /// Legacy mode: buffers used since the last PublishBuffers.

@@ -174,7 +174,8 @@ let private FdLimit =
     let soft = if Sys.getrlimit(7, lim) = 0 then lim.[0] else 65535UL
     int (min soft 65535UL)
 
-/// The kernel's per-connection objects are 4 KB; when memory gets low, new connections get "Connection: close".
+/// One io_uring instance: a fixed-file table of up to FdLimit sockets, its receive buffers and its slots. (The kernel
+/// keeps about 3.75 KB per connection: socket, inode, file.)
 type private Ring(index: int) =
     let p = Marshal.AllocHGlobal 120
     do
@@ -394,6 +395,11 @@ type private Ring(index: int) =
     member this.Submit() = this.Enter(0u, 0L, 0n)
 
     /// Copies the ready completions into `into` (user_data, res, flags) and frees them in the CQ.
+    /// The CQ tail: how many completions the kernel has posted so far (wraps).
+    member _.CqTail = loadAcquire cqTail
+    /// Completions posted and not reaped yet.
+    member _.CqReady = loadAcquire cqTail - NativePtr.read cqHead
+
     member _.Reap(into: List<struct (uint64 * int * uint32)>, cap: int) =
         let mutable head = NativePtr.read cqHead
         let t = loadAcquire cqTail
@@ -458,7 +464,8 @@ type private Ring(index: int) =
         NativePtr.write (NativePtr.ofNativeInt<uint64> (s + 32n)) OpIgnore
         let c = this.Sqe()
         NativePtr.write (NativePtr.ofNativeInt<byte> c) OP_CLOSE
-        NativePtr.write (NativePtr.ofNativeInt<byte> (c + 1n)) SQE_CQE_SKIP_SUCCESS
+        // The CLOSE posts its completion (ignored): then every deferred completion the loop runs posts one, and the
+        // loop's "enter again until a call adds none" (Run) does not stop while closes wait.
         NativePtr.write (NativePtr.ofNativeInt<uint32> (c + 44n)) (uint32 (slot + 1))
         NativePtr.write (NativePtr.ofNativeInt<uint64> (c + 32n)) OpIgnore
 
@@ -888,16 +895,25 @@ type private Loop(listenFd: int) as this =
             let mutable openTotal = 0
             while true do
                 // 1. Wait in ring 0: for 32 completions or 2 ms while connections are open, else for one completion.
-                let r0 = rings.[0]
-                if carry.Count = 0 then
-                    if openTotal = 0 && rings.Count = 1 then
-                        r0.Enter(1u, ENTER_GETEVENTS, 0n) |> ignore
-                    else
-                        r0.Enter(WaitN, ENTER_GETEVENTS ||| ENTER_EXT_ARG, waitArg) |> ignore
-                else
-                    r0.Enter(0u, ENTER_GETEVENTS, 0n) |> ignore
-                for i in 1 .. rings.Count - 1 do
-                    rings.[i].Enter(0u, ENTER_GETEVENTS, 0n) |> ignore
+                for i in 0 .. rings.Count - 1 do
+                    let r = rings.[i]
+                    if i > 0 || carry.Count > 0 then r.Enter(0u, ENTER_GETEVENTS, 0n) |> ignore
+                    elif openTotal = 0 && rings.Count = 1 then r.Enter(1u, ENTER_GETEVENTS, 0n) |> ignore
+                    else r.Enter(WaitN, ENTER_GETEVENTS ||| ENTER_EXT_ARG, waitArg) |> ignore
+                    // From 6.13 one io_uring_enter runs at most max(20, wait) of the ring's deferred completions
+                    // ("limit local tw done") and keeps the rest for the next call. With one call per ring per pass, 5
+                    // rings gave a pass at most 32 + 4 x 20 of them: 320,000 users got 25,700 requests per second at 66%
+                    // CPU and waited 4.5 s. So enter again, waiting for as many completions as the ring already holds:
+                    // the call runs up to that many and returns at once (they are there). Until a call adds none (6.8
+                    // runs them all in the first call; then the second finds none). Not "until a call adds fewer than
+                    // 16": closes without a completion (CQE_SKIP_SUCCESS) made that stop early, with 4 s waits.
+                    let mutable k = 0
+                    let mutable more = true
+                    while more && k < 64 do
+                        let before = r.CqTail
+                        r.Enter(r.CqReady, ENTER_GETEVENTS, 0n) |> ignore
+                        more <- r.CqTail <> before
+                        k <- k + 1
                 // 2. Handle the completions: new connections, received requests (responses into the arena).
                 pass <- pass + 1
                 let t0 = if stats then Diagnostics.Stopwatch.GetTimestamp() else 0L

@@ -32,7 +32,11 @@ def request(method, path, body=None):
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=15)
     conn.request(method, path, body=body, headers=headers)
     response = conn.getresponse()
-    result = response.status, json.loads(response.read())
+    raw = response.read()
+    try:
+        result = response.status, json.loads(raw)
+    except ValueError:
+        raise AssertionError((response.status, raw))
     conn.close()
     return result
 
@@ -76,3 +80,20 @@ assert len(set(ids)) == 192
 with sqlite3.connect(os.environ["SQLITE_PATH"]) as db:
     assert db.execute("SELECT count(*) FROM posts WHERE body='pipeline commit'").fetchone()[0] == 192
 print("Unicode, escaped JWT claims, independent commit visibility, and 192 pipelined writes passed")
+
+# Compare both feed plans with the straightforward SQL, including ties and gaps.
+select = """SELECT p.id, p.body, p.created_at, u.username,
+ (SELECT count(*) FROM likes l WHERE l.post_id=p.id)
+ FROM posts p JOIN users u ON u.id=p.user_id
+ ORDER BY p.created_at DESC, p.id DESC LIMIT 20"""
+for changes in (
+    [("2099-01-01T00:00:00.000Z", 499998), ("2099-01-01T00:00:00.000Z", 499997)],
+    [("2100-01-01T00:00:00.000Z", 1)],
+):
+    with sqlite3.connect(os.environ["SQLITE_PATH"]) as db:
+        db.executemany("UPDATE posts SET created_at=? WHERE id=?", changes)
+        db.commit()
+        expected = [dict(zip(("id", "body", "created_at", "author", "like_count"), row))
+                    for row in db.execute(select)]
+    assert request("GET", "/feed") == (200, {"posts": expected})
+print("Narrow-range feed with ties/gaps and wide-range fallback match live SQLite")

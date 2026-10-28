@@ -3,4 +3,3 @@ shards:
   rayo:
     git: https://github.com/faustinoaq/rayo.git
     version: 0.1.0+git.commit.e0006c8b773dae7b75d78eedab314419fb08c0e9
-

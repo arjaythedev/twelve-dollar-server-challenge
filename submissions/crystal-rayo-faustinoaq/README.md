@@ -1,7 +1,7 @@
 # Crystal, Rayo + SQLite, no GC
 
 A normal [Rayo](https://github.com/faustinoaq/rayo) application: five routes,
-`ctx.json` with named fields, a SQLite row implementing Rayo's JSON writer protocol,
+`ctx.json` with named fields, borrowed SQLite rows exposed as NamedTuples,
 and `Rayo::JWT` for every authenticated request. Rayo owns HTTP, routing, io_uring,
 connection lifetimes and one worker per available CPU. The application owns SQLite.
 
@@ -18,7 +18,7 @@ connection lifetimes and one worker per available CPU. The application owns SQLi
 ## Implementation
 
 - Prepared statements cache plans; every request reads SQLite live. No response,
-  query-result or JWT verification cache. Per-request feed fragments are cleared
+  query-result or JWT verification cache. Per-request feed scratch buffers are cleared
   before reuse.
 - The feed uses the hand-rolled entry's three index scans when its newest 20 IDs
   span fewer than 256 IDs, preserving timestamp/ID ordering. A wider range uses
@@ -62,7 +62,8 @@ SEED_DIR=/path/to/challenge/seed taskset -c 9 bash check/run.sh
 
 The additional checks cover 500/501 Unicode code points, Unicode whitespace,
 escaped JWT usernames, committed rows visible to an independent SQLite connection,
-and 192 concurrent pipelined writes with distinct, ordered IDs.
+192 concurrent pipelined writes with distinct, ordered IDs, and both feed query
+plans compared with live SQLite, including timestamp ties and gaps.
 
 ## Rayo gaps
 
@@ -71,3 +72,10 @@ commit-before-response batching are candidates to upstream. A worker initializat
 hook would let applications open SQLite explicitly after fork; this application
 initializes its connection and registers its flusher on the first database request.
 No Rayo source changes are required.
+
+At the pinned commit, `src/rayo/json.cr:603` calls `v.to_json(self)` with a copy
+of the Writer struct. Custom serializers used as array elements lose their
+changes to the outer writer's separator state: two items that each serialize
+`{id: 1}` produce `[{"id":1}{"id":1}]`. The minimal application workaround is to
+return row fields as NamedTuples and give those to the writer directly. Both
+feed paths use this form; the wider-range integration check covers the case.

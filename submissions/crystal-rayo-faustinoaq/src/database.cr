@@ -6,9 +6,9 @@ module Feed
     def initialize(@stmt : Sq::Stmt, @likes : Int64? = nil)
     end
 
-    def to_json(j : Rayo::JSON::Writer)
-      j.value({id: Sq.column_int64(@stmt, 0), body: text(1), created_at: text(2),
-               author: text(3), like_count: @likes || Sq.column_int64(@stmt, 4)})
+    def fields
+      {id: Sq.column_int64(@stmt, 0), body: text(1), created_at: text(2),
+       author: text(3), like_count: @likes || Sq.column_int64(@stmt, 4)}
     end
 
     private def text(col)
@@ -31,6 +31,8 @@ module Feed
     @pending = Pointer(Rayo::Context::Deferred).malloc(8192)
     @finishing = Pointer(Rayo::Context::Deferred).malloc(8192)
     @size = 0
+    alias Fields = NamedTuple(id: Int64, body: Bytes, created_at: Bytes, author: Bytes, like_count: Int64)
+    @posts = StaticArray(Fields, 20).new({id: 0_i64, body: Bytes.empty, created_at: Bytes.empty, author: Bytes.empty, like_count: 0_i64})
     @fragments = StaticArray(Rayo::Buf, 20).new { Rayo::Buf.new(1024) }
     @slots = StaticArray(Int32, 256).new(-1)
     @counts = StaticArray(Int64, 256).new(0)
@@ -114,7 +116,7 @@ module Feed
       query(@one) do |st|
         Sq.bind_int64(st, 1, id)
         case Sq.step(st)
-        when Sq::ROW  then ctx.json post: Post.new(st)
+        when Sq::ROW  then ctx.json post: Post.new(st).fields
         when Sq::DONE then Feed.error(ctx, 404, "post not found")
         else               Feed.error(ctx, 500, "internal server error")
         end
@@ -143,7 +145,7 @@ module Feed
               j.array do
                 query(@feed) do |st|
                   while (rc = Sq.step(st)) == Sq::ROW
-                    j.value Post.new(st)
+                    j.value Post.new(st).fields
                   end
                   raise "SQLite read failed" unless rc == Sq::DONE
                 end
@@ -170,19 +172,26 @@ module Feed
         while (rc = Sq.step(st)) == Sq::ROW
           offset = Sq.column_int64(st, 0) - lo
           slot = @slots[offset]
-          Post.new(st, @counts[offset]).to_json(Rayo::JSON::Writer.new(@fragments[slot])) if slot >= 0
+          if slot >= 0
+            buf = @fragments[slot]
+            body_size = Sq.column_bytes(st, 1)
+            time_size = Sq.column_bytes(st, 2)
+            name_size = Sq.column_bytes(st, 3)
+            buf.write(Sq.column_text(st, 1), body_size)
+            buf.write(Sq.column_text(st, 2), time_size)
+            buf.write(Sq.column_text(st, 3), name_size)
+            # Take views only after all writes, which may grow the buffer.
+            @posts[slot] = {id: Sq.column_int64(st, 0), body: Bytes.new(buf.ptr, body_size),
+                            created_at: Bytes.new(buf.ptr + body_size, time_size),
+                            author: Bytes.new(buf.ptr + body_size + time_size, name_size), like_count: @counts[offset]}
+          end
         end
         raise "SQLite read failed" unless rc == Sq::DONE
       end
       ctx.json do |j|
         j.object do
           j.field("posts") do
-            j.array do
-              n.times do |i|
-                buf = @fragments[i]
-                j.raw Bytes.new(buf.ptr, buf.len)
-              end
-            end
+            j.array(0...n) { |i| @posts[i] }
           end
         end
       end

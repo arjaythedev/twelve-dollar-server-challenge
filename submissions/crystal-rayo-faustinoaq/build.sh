@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds SQLite from the pinned amalgamation and the server, both for this CPU.
+# Builds SQLite from the pinned amalgamation and the server, both targeting x86-64-v3.
 set -euo pipefail
 cd "$(dirname "$0")"
 mkdir -p build bin

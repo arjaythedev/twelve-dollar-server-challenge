@@ -77,7 +77,7 @@ void *SqlCtxNew(U8 *path, I32 create) {
 U8 *SqlExecRaw(SqlCtx *ctx, U8 *sql) {
     U8 *err = NULL;
     I32 rc = sqlite3_exec(ctx->db, sql, NULL, NULL, &err);
-    if (rc != 0 && err) {
+    if (rc != 0 and err) {
         return err;
     }
     return NULL;
@@ -100,7 +100,7 @@ I32 SqlExecPrepared(void *stmt, SqlRow *row, SqlParam *params) {
     if (row) {
         row->stmt = stmt;
     }
-    if (rc == 100 || rc == 101) return 1; /* SQLITE_ROW or SQLITE_DONE */
+    if (rc == 100 or rc == 101) return 1; /* SQLITE_ROW or SQLITE_DONE */
     return 0;
 }
 
@@ -128,7 +128,7 @@ I32 verify_jwt_fast(U8 *auth_header, I32 *user_id_out, U8 *username_out, I32 use
     if (!bearer) return FALSE;
     bearer += 7;
     char *end = bearer;
-    while (*end && *end != '\r' && *end != '\n' && *end != ' ' && *end != ',') end++;
+    while (*end and *end != '\r' and *end != '\n' and *end != ' ' and *end != ',') end++;
     *end = 0;
     if (strlen((U8*)bearer) == 0) return FALSE;
     U8 *token = MAlloc(strlen((U8*)bearer)+1);

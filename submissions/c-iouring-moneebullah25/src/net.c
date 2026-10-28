@@ -196,16 +196,25 @@ static inline uint32_t fifo_pop(struct fifo *f) {
 
 /* ------------------------------------------------------------------ sqe helpers */
 
+/* A full SQ is submitted on the spot. -EBUSY means the CQ overflowed and the
+ * kernel will not take new SQEs until the overflow is flushed; flushing needs
+ * an enter with GETEVENTS, after which the submit is retried. The loop never
+ * drops a completion: overflowed CQEs are queued by the kernel and reaped
+ * later like any other. */
 static struct io_uring_sqe *sqe_get(struct ring *rg) {
     struct io_uring_sqe *sqe = io_uring_get_sqe(&rg->r);
-    if (!sqe) {
+    for (int attempt = 0; !sqe && attempt < 8; attempt++) {
         int rc = io_uring_submit(&rg->r);
-        if (rc < 0 && rc != -EBUSY) log_msg("io_uring_submit (full sq): %s", strerror(-rc));
-        sqe = io_uring_get_sqe(&rg->r);
-        if (!sqe) {
-            log_msg("fatal: no sqe after submit");
-            abort();
+        if (rc == -EBUSY) {
+            io_uring_get_events(&rg->r);
+        } else if (rc < 0 && rc != -EAGAIN && rc != -EINTR) {
+            log_msg("io_uring_submit (full sq): %s", strerror(-rc));
         }
+        sqe = io_uring_get_sqe(&rg->r);
+    }
+    if (!sqe) {
+        log_msg("fatal: no sqe after submit");
+        abort();
     }
     return sqe;
 }
@@ -920,19 +929,19 @@ static void sweep_partials(struct net *n) {
 }
 
 static void print_stats(struct net *n) {
-    static uint64_t last_req, last_cpu_us;
+    static uint64_t last_req, last_cpu_us, last_usr_us;
     struct rusage ru;
     getrusage(RUSAGE_SELF, &ru);
-    uint64_t cpu_us = (uint64_t)ru.ru_utime.tv_sec * 1000000 + (uint64_t)ru.ru_utime.tv_usec +
-                      (uint64_t)ru.ru_stime.tv_sec * 1000000 + (uint64_t)ru.ru_stime.tv_usec;
-    uint64_t dreq = n->st.requests - last_req, dcpu = cpu_us - last_cpu_us;
+    uint64_t usr_us = (uint64_t)ru.ru_utime.tv_sec * 1000000 + (uint64_t)ru.ru_utime.tv_usec;
+    uint64_t cpu_us = usr_us + (uint64_t)ru.ru_stime.tv_sec * 1000000 + (uint64_t)ru.ru_stime.tv_usec;
+    uint64_t dreq = n->st.requests - last_req, dcpu = cpu_us - last_cpu_us, dusr = usr_us - last_usr_us;
     struct db_stats ds;
     struct app_stats as;
     db_get_stats(n->db, &ds);
     app_get_stats(n->app, &as);
     uint32_t held_now = fifo_len(&n->held);
     log_msg(
-        "stats: open=%u max=%llu req=%llu (+%llu) cpu_us/req=%.1f (total %.1f) rss=%ld MB avail=%llu MB iters=%llu "
+        "stats: open=%u max=%llu req=%llu (+%llu) cpu_us/req=%.1f (usr %.1f sys %.1f, total %.1f) rss=%ld MB avail=%llu MB iters=%llu "
         "wakeups=%llu "
         "cqes=%llu enobufs=%llu rearms=%llu short=%llu senderr=%llu bad=%llu big=%llu shed=%llu "
         "accerr=%llu chunks_free=%u held=%u wal=%u ckpts=%llu ckpt_avg_ms=%.1f ckpt_max_ms=%.1f holds=%llu "
@@ -940,7 +949,8 @@ static void print_stats(struct net *n) {
         "feed=%llu post=%llu like=%llu create=%llu health=%llu 2xx=%llu 4xx=%llu 5xx=%llu "
         "iter_max_ms=%.1f iters_over_20ms=%llu batch_max=%u batch_max_ms=%.1f endbatch_max_ms=%.1f",
         n->open_conns, (unsigned long long)n->st.max_open, (unsigned long long)n->st.requests, (unsigned long long)dreq,
-        dreq ? (double)dcpu / (double)dreq : 0.0, n->st.requests ? (double)cpu_us / (double)n->st.requests : 0.0,
+        dreq ? (double)dcpu / (double)dreq : 0.0, dreq ? (double)dusr / (double)dreq : 0.0,
+        dreq ? (double)(dcpu - dusr) / (double)dreq : 0.0, n->st.requests ? (double)cpu_us / (double)n->st.requests : 0.0,
         ru.ru_maxrss / 1024, (unsigned long long)available_mb(n), (unsigned long long)n->st.iterations,
         (unsigned long long)n->st.wakeups, (unsigned long long)n->st.cqes, (unsigned long long)n->st.enobufs,
         (unsigned long long)n->st.rearms, (unsigned long long)n->st.short_sends, (unsigned long long)n->st.send_errors,
@@ -960,6 +970,7 @@ static void print_stats(struct net *n) {
     n->st.batch_max = 0;
     last_req = n->st.requests;
     last_cpu_us = cpu_us;
+    last_usr_us = usr_us;
 }
 
 /* ------------------------------------------------------------------ setup */
@@ -1031,7 +1042,7 @@ static int ring_init(struct net *n, struct ring *rg, uint32_t idx) {
     const unsigned *flags = flag_sets[idx == 0 ? 0 : 1];
     int rc = -EINVAL;
     for (size_t i = 0; i < 3 && rc < 0; i++) {
-        struct io_uring_params p = {.flags = flags[i] | IORING_SETUP_CQSIZE, .cq_entries = 16384};
+        struct io_uring_params p = {.flags = flags[i] | IORING_SETUP_CQSIZE, .cq_entries = 65536};
         rc = io_uring_queue_init_params(4096, &rg->r, &p);
         if (rc == 0 && i) log_msg("ring %u: fallback setup flags 0x%x", idx, flags[i]);
     }

@@ -16,6 +16,7 @@ import time
 #include "json_scan.h"
 #include <openssl/hmac.h>
 #include "sqlite3.h"
+#include "ckpt.h"
 #include <sys/resource.h>
 #include <sys/eventfd.h>
 
@@ -39,6 +40,7 @@ fn C.sqlite3_db_config(&C.sqlite3, i32, i32, voidptr) i32
 fn C.HMAC(voidptr, voidptr, i32, &u8, usize, &u8, &u32) &u8
 fn C.sqlite3_wal_hook(&C.sqlite3, voidptr, voidptr) voidptr
 fn C.eventfd(u32, i32) i32
+fn C.td_ckpt_start(&char, int, int)
 fn C.sqlite3_wal_checkpoint_v2(&C.sqlite3, &char, i32, &i32, &i32) i32
 fn C.EVP_sha256() voidptr
 
@@ -65,6 +67,7 @@ fn C.td_net_send(&C.td_net, int, &u8, int)
 fn C.td_net_resume(&C.td_net, int, int, int)
 fn C.td_net_abort(&C.td_net, int)
 fn C.td_json_scan(&u8, int) int
+fn C.memchr(voidptr, int, usize) voidptr
 fn C.getrlimit(i32, &C.rlimit) i32
 fn C.setrlimit(i32, &C.rlimit) i32
 
@@ -128,15 +131,15 @@ mut:
 	segs      []Seg
 	flush     []int
 	cur_close bool
-	// Cooperative checkpoint: see checkpointer.
+	// Cooperative checkpoint: see ckpt.h and checkpoint_done.
 	wal_frames    int
 	wal_written   bool // the current batch's COMMIT appended WAL frames
 	ckpt_frames_at_start int // WAL size when phase A started; more frames afterwards block a restart
 	ckpt_phase    int // 0 idle, 1 checkpoint with writes going on, 2 checkpoint with writes held
 	writes_paused bool
 	pause_until   u64 // monotonic ns when held writes go on anyway (0: wait for the checkpoint)
-	ckpt_req      chan bool = chan bool{cap: 1}
-	ckpt_efd      int
+	ckpt_req      int // eventfd: each write starts one checkpoint on the checkpoint thread
+	ckpt_efd      int // eventfd: the checkpoint thread answers on it
 	deferring     bool // set by parse when it stops at a write request
 	deferred      []int
 }
@@ -154,7 +157,8 @@ fn main() {
 	path := os.getenv('SQLITE_PATH')
 	s.open_db(path)
 	s.ckpt_efd = C.eventfd(0, C.EFD_NONBLOCK | C.EFD_CLOEXEC)
-	spawn checkpointer(path, s.ckpt_req, s.ckpt_efd)
+	s.ckpt_req = C.eventfd(0, C.EFD_CLOEXEC)
+	C.td_ckpt_start(&char(path.str), s.ckpt_req, s.ckpt_efd)
 	mut rl := C.rlimit{}
 	C.getrlimit(C.RLIMIT_NOFILE, &rl)
 	rl.rlim_cur = rl.rlim_max
@@ -169,25 +173,9 @@ fn main() {
 	s.run(int(l.sock.handle))
 }
 
-// checkpointer copies the WAL into the database file on its own connection and thread, so the
-// fsyncs a checkpoint needs never block the event loop. Each request runs one PASSIVE checkpoint
-// and signals the eventfd with 1 when it copied the whole WAL (the next write then restarts the
-// WAL from its beginning) or 2 when frames were appended meanwhile.
-fn checkpointer(path string, req chan bool, efd int) {
-	mut db := &C.sqlite3(unsafe { nil })
-	if C.sqlite3_open_v2(&char(path.str), &db, 2, unsafe { nil }) != 0 {
-		panic('checkpointer: cannot open ${path}')
-	}
-	C.sqlite3_exec(db, c'PRAGMA synchronous=NORMAL; PRAGMA wal_autocheckpoint=0', unsafe { nil },
-		unsafe { nil }, unsafe { nil })
-	for {
-		_ := <-req
-		mut log := i32(0)
-		mut done := i32(0)
-		rc := C.sqlite3_wal_checkpoint_v2(db, unsafe { nil }, 0, &log, &done)
-		result := u64(if rc == 0 && log == done { 1 } else { 2 })
-		C.write(efd, &result, 8)
-	}
+fn (s &Server) request_checkpoint() {
+	one := u64(1)
+	C.write(s.ckpt_req, &one, 8)
 }
 
 // wal_hook runs inside each COMMIT and records the WAL size in frames.
@@ -376,7 +364,8 @@ fn (mut s Server) pause_timeout() int {
 // writes appended frames meanwhile, the WAL cannot restart. Then phase B holds write requests
 // (reads go on) and runs one more checkpoint, which only copies the frames appended during phase A.
 // Phase B ends when that checkpoint finishes or after max_pause_ms, whichever is first; past
-// ckpt_max_frames it waits. checkpoint_done runs when the checkpointer signals the end of a checkpoint.
+// ckpt_max_frames it waits, and so does phase A (finish_batch holds writes as soon as the WAL reaches
+// that size). checkpoint_done runs when the checkpoint thread signals the end of a checkpoint.
 fn (mut s Server) checkpoint_done() {
 	mut v := u64(0)
 	C.read(s.ckpt_efd, &v, 8)
@@ -388,7 +377,7 @@ fn (mut s Server) checkpoint_done() {
 		} else {
 			time.sys_mono_now() + max_pause_ms * 1_000_000
 		}
-		s.ckpt_req <- true
+		s.request_checkpoint()
 		return
 	}
 	s.ckpt_phase = 0
@@ -440,10 +429,16 @@ fn (mut s Server) finish_batch() {
 		s.pause_until = time.sys_mono_now() + write_window_ns
 	}
 	s.wal_written = false
+	if s.ckpt_phase != 0 && s.wal_frames >= ckpt_max_frames {
+		// A slow disk must not let the WAL (and its dirty pages) grow without bound: hold writes until
+		// the checkpoint that is running ends, whichever phase it is in.
+		s.writes_paused = true
+		s.pause_until = 0
+	}
 	if s.wal_frames >= ckpt_frames && s.ckpt_phase == 0 {
 		s.ckpt_phase = 1
 		s.ckpt_frames_at_start = s.wal_frames
-		s.ckpt_req <- true
+		s.request_checkpoint()
 	}
 	if committed {
 		for seg in s.segs {
@@ -488,10 +483,17 @@ fn eq_ci(buf []u8, at int, lit string) bool {
 }
 
 fn find_crlf(buf []u8, from int, end int) int {
-	for i := from; i + 1 < end; i++ {
-		if buf[i] == `\r` && buf[i + 1] == `\n` {
-			return i
+	mut i := from
+	for i + 1 < end {
+		p := unsafe { C.memchr(&u8(buf.data) + i, `\n`, usize(end - i)) }
+		if p == unsafe { nil } {
+			return -1
 		}
+		j := int(usize(p) - usize(buf.data))
+		if j > from && buf[j - 1] == `\r` {
+			return j - 1
+		}
+		i = j + 1
 	}
 	return -1
 }
@@ -522,10 +524,8 @@ fn (mut s Server) parse(buf []u8, n int) int {
 				hdr_end = e + 2
 				break
 			}
-			mut colon := h
-			for colon < e && buf[colon] != `:` {
-				colon++
-			}
+			cp := unsafe { C.memchr(&u8(buf.data) + h, `:`, usize(e - h)) }
+			colon := if cp == unsafe { nil } { e } else { int(usize(cp) - usize(buf.data)) }
 			mut v := colon + 1
 			for v < e && buf[v] == ` ` {
 				v++
@@ -1102,7 +1102,7 @@ fn (mut s Server) like(user_id i64, post_id i64) {
 		'{"liked":true,"already_liked":true,"post_id":'
 	})
 	put_int(mut s.out, post_id)
-	s.out << `}`
+	put_byte(mut s.out, `}`)
 	s.respond(if created { 201 } else { 200 })
 }
 
@@ -1186,7 +1186,7 @@ fn (mut s Server) feed_full() {
 	mut rc := C.sqlite3_step(st)
 	for rc == sqlite_row {
 		if s.out.len - s.body_start > 10 {
-			s.out << `,`
+			put_byte(mut s.out, `,`)
 		}
 		s.put_post(st)
 		rc = C.sqlite3_step(st)
@@ -1209,7 +1209,7 @@ fn (mut s Server) post(id i64) {
 		s.start_body()
 		put(mut s.out, '{"post":')
 		s.put_post(st)
-		s.out << `}`
+		put_byte(mut s.out, `}`)
 		C.sqlite3_reset(st)
 		s.respond(200)
 		return
@@ -1253,13 +1253,13 @@ fn (mut s Server) health() {
 		put(mut s.out, '{"status":"degraded","db":"unreachable","error":')
 		msg := unsafe { cstring_to_vstring(C.sqlite3_errmsg(s.db)) }
 		put_json(mut s.out, msg.str, msg.len)
-		s.out << `}`
+		put_byte(mut s.out, `}`)
 		s.respond(503)
 		return
 	}
 	put(mut s.out, '{"status":"ok","db":"ok","uptime_s":')
 	put_int(mut s.out, time.now().unix() - s.started)
-	s.out << `}`
+	put_byte(mut s.out, `}`)
 	s.respond(200)
 }
 
@@ -1329,7 +1329,33 @@ fn append(mut b []u8, p &u8, n int) {
 
 @[inline]
 fn put(mut b []u8, s string) {
-	append(mut b, s.str, s.len)
+	n := s.len
+	if b.len + n > b.cap {
+		b.ensure_cap(b.len + n)
+	}
+	unsafe {
+		d := &u8(b.data) + b.len
+		if n >= 8 && n <= 16 { // two overlapping 8-byte moves instead of a memcpy call
+			a := *(&u64(voidptr(s.str)))
+			z := *(&u64(voidptr(s.str + n - 8)))
+			*(&u64(voidptr(d))) = a
+			*(&u64(voidptr(d + n - 8))) = z
+		} else {
+			vmemcpy(d, s.str, n)
+		}
+		b.len += n
+	}
+}
+
+@[inline]
+fn put_byte(mut b []u8, c u8) {
+	if b.len + 1 > b.cap {
+		b.ensure_cap(b.len + 1)
+	}
+	unsafe {
+		*(&u8(b.data) + b.len) = c
+		b.len++
+	}
 }
 
 const digit_pairs = '00010203040506070809101112131415161718192021222324252627282930313233343536373839404142434445464748495051525354555657585960616263646566676869707172737475767778798081828384858687888990919293949596979899'
@@ -1457,11 +1483,8 @@ fn put_json(mut b []u8, p &u8, n int) {
 	mut from := 0
 	for i < n {
 		c := unsafe { p[i] }
+		append(mut b, unsafe { p + from }, i - from)
 		i++
-		if c >= 0x20 && c != `"` && c != `\\` {
-			continue
-		}
-		append(mut b, unsafe { p + from }, i - 1 - from)
 		from = i
 		b << `\\`
 		match c {
@@ -1492,6 +1515,7 @@ fn put_json(mut b []u8, p &u8, n int) {
 				b << hex[c & 15]
 			}
 		}
+		i += C.td_json_scan(unsafe { p + i }, n - i)
 	}
 	append(mut b, unsafe { p + from }, n - from)
 	append(mut b, c'"', 1)

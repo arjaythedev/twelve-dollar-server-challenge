@@ -42,7 +42,11 @@ The C transport keeps debug symbols and frame pointers for local profiles.
   watched by a one-shot ring poll. Checkpoint completion wakes an otherwise idle server.
   A follow-up checkpoint can pause writes for 20 ms, or until completion above 16,000 WAL frames.
   It runs whenever writes appended frames during the first checkpoint, because the WAL can restart
-  only when every frame is copied. Without it, steady writes can grow the WAL without a limit.
+  only when every frame is copied. At 16,000 frames, writes wait in either phase until the running
+  checkpoint ends, so a slow disk cannot grow the WAL (and its dirty pages) without a limit.
+  The checkpoint thread is a plain pthread, not a V thread: the garbage collector stops the world
+  by signalling every thread it knows, and a thread stuck in `fsync` cannot answer, so the process
+  aborted with "Signals delivery fails constantly" when the disk stalled.
   The existing request connection and background checkpoint connection keep separate thread owners.
 - **SQLite page cache, no mmap.** Pages come from a 64 MiB page cache (`cache_size=-65536`), which holds
   the hot pages of this workload. With `mmap_size` set, each page fetch costs SQLite more instructions:

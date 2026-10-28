@@ -303,17 +303,15 @@ static void manage_accepts(uring_state *s, time_t now)
 }
 
 /*
- * A new ring joins before the last one fills up, when there is memory for its buffers and sockets. If it
- * cannot open, the connection table's capacity stays as it is and the server's own fallback applies:
- * responses carry "Connection: close" once the open rings are nearly full.
+ * All rings open at start, so the capacity never waits for a ring to open: a ring that joined late (it was
+ * gated on free memory) left a window in which the open rings were full and every response closed its
+ * connection. A ring that could not open is retried here; until then the connection table's capacity stays
+ * as it is and the server's own fallback applies: responses carry "Connection: close" once the open rings
+ * are nearly full.
  */
-static void open_next_ring_if_needed(app *a, uring_state *s)
+static void open_missing_rings(app *a, uring_state *s)
 {
-	const ring_state *last = &s->rings[s->ring_count - 1];
-
-	if (s->ring_count == MAX_RINGS || last->slot_count - last->in_use > 2 * accept_margin(last) || a->memory.level != MEMORY_OK)
-		return;
-	if (a->now < s->next_ring_attempt)
+	if (s->ring_count == MAX_RINGS || a->memory.level == MEMORY_CRITICAL || a->now < s->next_ring_attempt)
 		return;
 	if (open_ring(s, s->ring_count) == 0) {
 		s->ring_count++;
@@ -321,6 +319,21 @@ static void open_next_ring_if_needed(app *a, uring_state *s)
 	} else {
 		s->next_ring_attempt = a->now + RING_RETRY_SECONDS;
 	}
+}
+
+/*
+ * Rings that can have completions: up to the first one without connections. New connections land in the
+ * lowest ring that still accepts, so a ring above that one is idle and not worth a system call per round.
+ */
+static int live_ring_count(const uring_state *s)
+{
+	int highest = -1;
+
+	for (int i = 0; i < s->ring_count; i++) {
+		if (s->rings[i].in_use > 0)
+			highest = i;
+	}
+	return highest + 2 < s->ring_count ? highest + 2 : s->ring_count;
 }
 
 /* ---- completions ---- */
@@ -455,7 +468,7 @@ static unsigned reap(app *a, uring_state *s, int ring_index)
  * Waits for work. Busy: until a batch of completions is ready or one pacer window passed, so the round is
  * large. Idle: until the first completion. The other rings are polled; they only exist above 64k connections.
  */
-static void wait_for_completions(uring_state *s, bool busy, int idle_wait_ms)
+static void wait_for_completions(uring_state *s, int live, bool busy, int idle_wait_ms)
 {
 	struct io_uring_cqe *cqe;
 	struct __kernel_timespec timeout = { .tv_sec = 0, .tv_nsec = PACER_WINDOW_US * 1000L };
@@ -466,12 +479,12 @@ static void wait_for_completions(uring_state *s, bool busy, int idle_wait_ms)
 		timeout.tv_nsec = (long)(idle_wait_ms % 1000) * 1000000L;
 		wanted = 1;
 	}
-	if (s->ring_count > 1) {
+	if (live > 1) {
 		/*
 		 * Completions can arrive on any ring, and only ring 0 is waited on: poll the others. Busy, the pacer
 		 * window bounds the wait anyway. Idle, a short wait keeps latency low without waking up 1,000 times a second.
 		 */
-		for (int i = 1; i < s->ring_count; i++)
+		for (int i = 1; i < live; i++)
 			io_uring_submit_and_get_events(&s->rings[i].ring);
 		if (!busy) {
 			timeout.tv_sec = 0;
@@ -480,7 +493,7 @@ static void wait_for_completions(uring_state *s, bool busy, int idle_wait_ms)
 		wanted = 1;
 	}
 	io_uring_submit_and_wait_timeout(&s->rings[0].ring, &cqe, wanted, &timeout, NULL);
-	for (int i = 1; i < s->ring_count; i++)
+	for (int i = 1; i < live; i++)
 		io_uring_submit_and_get_events(&s->rings[i].ring);
 }
 
@@ -506,6 +519,13 @@ int server_run_uring(app *a, const int *listeners, int listener_count)
 	if (error < 0)
 		return error;
 	s->ring_count = 1;
+	for (int i = 1; i < MAX_RINGS; i++) {
+		if (open_ring(s, i) < 0) {
+			s->next_ring_attempt = a->now + RING_RETRY_SECONDS;
+			break;
+		}
+		s->ring_count++;
+	}
 	conn_table_init(&a->conns, MAX_RINGS << SLOT_BITS, 0, &uring_backend, s);
 	update_capacity(a, s);
 	fprintf(stderr, "server: io_uring with direct descriptors (%u per ring, up to %d rings)\n", s->slots_per_ring, MAX_RINGS);
@@ -516,8 +536,10 @@ int server_run_uring(app *a, const int *listeners, int listener_count)
 		bool busy = pacer_is_busy(&pacer_state);
 		int idle_wait_ms = (s->accept_paused || conn_drain_pending(&a->conns)) ? 50 : IDLE_WAIT_MS;
 
+		int live = live_ring_count(s);
+
 		manage_accepts(s, a->now);
-		wait_for_completions(s, busy, idle_wait_ms);
+		wait_for_completions(s, live, busy, idle_wait_ms);
 
 		a->now = time(NULL);
 		a->now_ns = server_monotonic_ns();
@@ -525,7 +547,7 @@ int server_run_uring(app *a, const int *listeners, int listener_count)
 		server_relieve_memory_if_critical(a);
 		apply_memory_pressure(a, s);
 		conn_drain_expire(&a->conns, a->now_ns);
-		open_next_ring_if_needed(a, s);
+		open_missing_rings(a, s);
 
 		unsigned completions = 0;
 

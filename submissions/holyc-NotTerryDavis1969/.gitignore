@@ -1,0 +1,9 @@
+# HolyC $12 Server Challenge submission
+# Build output
+server
+# Object files
+*.o
+# HolyC compiler temp files
+.hcc*
+# Temporary files
+*.tmp

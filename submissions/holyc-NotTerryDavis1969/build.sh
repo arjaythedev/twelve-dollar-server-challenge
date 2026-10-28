@@ -18,8 +18,9 @@ cd "$(dirname "$0")"
 
 # hcc does not accept GCC-style -I include flags; pass only the source and
 # any supported compiler options. The local headers are included via relative
-# path from the submission directory itself.
-$HCC server.HC -o server -DHCC_LINK_SQLITE3=1 -I/usr/include
+# path from the submission directory itself. System headers (pthread.h etc.)
+# are symlinked into /usr/local/include/ by install.sh.
+$HCC server.HC -o server -DHCC_LINK_SQLITE3=1
 
 if [ $? -ne 0 ]; then
     echo "Compilation failed!"

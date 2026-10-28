@@ -34,10 +34,9 @@ if [ ! -x "$(command -v hcc)" ]; then
 fi
 
 # Ensure pthread.h is available - hcc looks in /usr/local/include/
-# but pthread.h is in /usr/include on Ubuntu
-if [ ! -f /usr/local/include/pthread.h ]; then
+if [ ! -f "/usr/local/include/pthread.h" ]; then
     # Copy or symlink pthread.h to where hcc expects it
-    if [ -f /usr/include/pthread.h ]; then
+    if [ -f "/usr/include/pthread.h" ]; then
         ln -sf /usr/include/pthread.h /usr/local/include/pthread.h
     fi
     # Also make sure other common headers are accessible

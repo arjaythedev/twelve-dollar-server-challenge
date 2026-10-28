@@ -64,7 +64,7 @@ SqlCtx *SqlCtxNew(U8 *path, I32 create) {
 U8 *SqlExecRaw(SqlCtx *ctx, U8 *sql) {
     char *err = NULL;
     int rc = sqlite3_exec(ctx->db, (char*)sql, NULL, NULL, &err);
-    if (rc != SQLITE_OK && err) {
+    if (rc != SQLITE_OK and err) {
         U8 *res = (U8 *)strdup(err);
         sqlite3_free(err);
         return res;
@@ -91,7 +91,7 @@ I32 SqlExecPrepared(sqlite3_stmt *stmt, SqlRow *row, SqlParam *params) {
     if (row) {
         row->stmt = stmt;
     }
-    if (rc == SQLITE_ROW || rc == SQLITE_DONE) return 1;
+    if (rc == SQLITE_ROW or rc == SQLITE_DONE) return 1;
     return 0;
 }
 
@@ -117,7 +117,7 @@ void init_statements() {
 static int b64url_to_b64(const char *in, char *out, int outsize) {
     int len = strlen(in);
     int j = 0;
-    for (int i = 0; i < len && j < outsize - 1; i++) {
+    for (int i = 0; i < len and j < outsize - 1; i++) {
         if (in[i] == '-') out[j++] = '+';
         else if (in[i] == '_') out[j++] = '/';
         else out[j++] = in[i];
@@ -148,7 +148,7 @@ I32 verify_jwt_fast(U8 *auth_header, I32 *user_id_out, U8 *username_out, I32 use
     bearer += 7;
     /* Find end of token */
     char *end = bearer;
-    while (*end && *end != '\r' && *end != '\n' && *end != ' ' && *end != ',') end++;
+    while (*end and *end != '\r' and *end != '\n' and *end != ' ' and *end != ',') end++;
     *end = '\0';
     
     if (strlen(bearer) == 0) return FALSE;
@@ -157,7 +157,7 @@ I32 verify_jwt_fast(U8 *auth_header, I32 *user_id_out, U8 *username_out, I32 use
     char *h = strtok(token, ".");
     char *p = strtok(NULL, ".");
     char *s = strtok(NULL, ".");
-    if (!h || !p || !s) { free(token); return FALSE; }
+    if (!h or !p or !s) { free(token); return FALSE; }
     /* Check for extra parts or alg=none case - alg none would mean header is base64 of {"alg":"none"...} */
     /* Check header */
     
@@ -200,7 +200,7 @@ I32 verify_jwt_fast(U8 *auth_header, I32 *user_id_out, U8 *username_out, I32 use
     char h_b64[512], h_dec[512];
     b64url_to_b64(h, h_b64, sizeof(h_b64));
     b64_decode(h_b64, h_dec, sizeof(h_dec));
-    if (strstr(h_dec, "\"alg\":\"none\"") || strstr(h_dec, "alg\":\"none\"")) {
+    if (strstr(h_dec, "\"alg\":\"none\"") or strstr(h_dec, "alg\":\"none\"")) {
         free(token);
         return FALSE;
     }
@@ -236,9 +236,9 @@ I32 verify_jwt_fast(U8 *auth_header, I32 *user_id_out, U8 *username_out, I32 use
     char *colon = strchr(sub_ptr, ':');
     if (!colon) { free(token); return FALSE; }
     colon++;
-    while (*colon == ' ' || *colon == '"') colon++;
+    while (*colon == ' ' or *colon == '"') colon++;
     char *sub_end = colon;
-    while (*sub_end >= '0' && *sub_end <= '9') sub_end++;
+    while (*sub_end >= '0' and *sub_end <= '9') sub_end++;
     if (sub_end == colon) { free(token); return FALSE; } /* not integer */
     *sub_end = '\0';
     *user_id_out = atoi(colon);
@@ -249,12 +249,12 @@ I32 verify_jwt_fast(U8 *auth_header, I32 *user_id_out, U8 *username_out, I32 use
     colon = strchr(uname_ptr, ':');
     if (!colon) { free(token); return FALSE; }
     colon++;
-    while (*colon == ' ' || *colon == '"') colon++;
+    while (*colon == ' ' or *colon == '"') colon++;
     char *uname_end = colon;
-    while (*uname_end && *uname_end != '"' && (uname_end - colon) < username_size - 1) uname_end++;
+    while (*uname_end and *uname_end != '"' and (uname_end - colon) < username_size - 1) uname_end++;
     if (*uname_end != '"') { /* might be end without quote in some cases */ }
     int uname_len = uname_end - colon;
-    if (uname_len <= 0 || uname_len >= username_size) { free(token); return FALSE; }
+    if (uname_len <= 0 or uname_len >= username_size) { free(token); return FALSE; }
     strncpy((char*)username_out, colon, uname_len);
     username_out[uname_len] = '\0';
     

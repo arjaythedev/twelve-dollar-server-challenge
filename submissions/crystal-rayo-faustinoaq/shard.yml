@@ -8,4 +8,4 @@ targets:
 dependencies:
   rayo:
     github: faustinoaq/rayo
-    commit: c5358eda5b209dec85eda8dc4ca703e727065b6f
+    commit: c9553d94583fe2a56ab299e3788fe40dcd0e72b2

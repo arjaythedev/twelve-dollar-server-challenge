@@ -2,4 +2,5 @@ version: 2.0
 shards:
   rayo:
     git: https://github.com/faustinoaq/rayo.git
-    version: 0.1.0+git.commit.c5358eda5b209dec85eda8dc4ca703e727065b6f
+    version: 0.1.0+git.commit.c9553d94583fe2a56ab299e3788fe40dcd0e72b2
+

@@ -114,7 +114,7 @@ def authenticate(request: Request):
             raise ValueError("payload")
         now = int(time.time())
         exp = payload.get("exp")
-        if exp is not None and (not isinstance(exp, (int, float)) or isinstance(exp, bool) or now >= exp):
+        if exp is None or not isinstance(exp, (int, float)) or isinstance(exp, bool) or now >= exp:
             raise ValueError("exp")
         nbf = payload.get("nbf")
         if nbf is not None and (not isinstance(nbf, (int, float)) or isinstance(nbf, bool) or now < nbf):

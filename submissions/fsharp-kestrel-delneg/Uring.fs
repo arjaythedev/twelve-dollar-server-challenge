@@ -932,6 +932,7 @@ type private Loop(listenFd: int) as this =
                 if Db.bgCheckpoint && not Db.holdWrites && Volatile.Read &Db.walFrames >= holdAt then
                     Volatile.Write(&Db.caughtUp, false)
                     Volatile.Write(&Db.holdWrites, true)
+                    Db.wakeCheckpointer ()
                     holdSince <- Environment.TickCount64
                 (try this.Flush committed with _ -> ())
                 (try this.ManageAccept() with _ -> ())

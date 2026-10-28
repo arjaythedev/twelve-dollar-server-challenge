@@ -9,7 +9,7 @@ SQLite adapter and commit-before-response batching.
 | | |
 |---|---|
 | Language | Crystal 1.22.1, checksum-pinned official toolchain |
-| Framework | Rayo 0.1.0, commit `c5358eda5b209dec85eda8dc4ca703e727065b6f` |
+| Framework | Rayo 0.1.0, commit `c9553d94583fe2a56ab299e3788fe40dcd0e72b2` |
 | SQLite | 3.54.1, checksum-pinned amalgamation, static, `-O3 -march=x86-64-v3` + PGO |
 | Crypto | Rayo HS256 JWT through OpenSSL 3 libcrypto |
 | Nginx or direct | **Direct**, configured by `HOST` and `PORT` |
@@ -80,7 +80,7 @@ and statically linked SQLite targeting x86-64-v3.
 The shared `bench/feed.lua` and `bench/mix.lua` scripts run through wrk with two
 threads, 256 connections, three seconds of warm-up and five seconds of measurement.
 The mix is 46% feed, 46% random post, 7% like and 1% create. These are short sanity
-measurements on a shared host. **Final comparison pending a separate clean run.**
+measurements on a shared host. The final comparison is in the next section.
 
 | Workload | Rayo req/s | Hand-rolled req/s | Rayo p99 | Hand-rolled p99 |
 |---|---:|---:|---:|---:|
@@ -108,6 +108,21 @@ flock /home/user/experiments/crystal-challenges/bench/.lock env \
 `DURATION`, `WORKLOADS`, `RESULTS` and `SESSION_FILE` can be overridden. Connection counts are capped at 3,000. The
 wrapper starts and stops only its own recorded server PID and removes its
 scratch database. Raw results and the complete session are in `measurements/`.
+
+## Final comparison (Rayo c9553d9)
+
+Three alternating rounds, 2026-10-28, against the `crystal-epoll-faustinoaq` build.
+Server pinned to one CPU, wrk on two others (`-t2 -c256 -d12s`, after warm-up),
+fresh copy of the seed database per run. Medians:
+
+| Workload | epoll req/s | Rayo req/s | Rayo vs epoll | epoll p99 | Rayo p99 |
+|---|---:|---:|---:|---:|---:|
+| Mixed | 29,755 | 27,653 | −7% | 11.0 ms | 11.8 ms |
+| Feed | 25,103 | 23,281 | −7% | 15.1 ms | 16.4 ms |
+
+Rayo c9553d9 prepares SQLite transaction control once and writes JSON strings
+without re-validating UTF-8; on the previous revision the gap was −27% (mixed)
+and −15% (feed). Earlier measurements below describe older revisions.
 
 ## Rayo gaps
 

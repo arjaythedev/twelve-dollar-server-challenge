@@ -65,6 +65,46 @@ escaped JWT usernames, committed rows visible to an independent SQLite connectio
 192 concurrent pipelined writes with distinct, ordered IDs, and both feed query
 plans compared with live SQLite, including timestamp ties and gaps.
 
+## Measurements
+
+Local comparison on 2026-10-28: Ryzen 5 3600, Linux 6.6.87.2 WSL2, inside
+`crdev`. Each server runs on CPU 9, with clients on CPUs 10–11. Every case gets
+a fresh seed copy. The reference is the hand-rolled `crystal-epoll-faustinoaq`
+entry from challenge commit `bfedb84069e2a7d7175b70effd7d41e99c294bac`, copied
+into this submission's ignored build directory and rebuilt with its own PGO script.
+Both entries use io_uring and SQLite targeting x86-64-v3.
+
+`bench/feed.lua` and `bench/mix.lua` from the shared challenge bench tooling run
+through wrk with two threads, 256 connections, three seconds of warm-up and a
+15-second measurement. The mix is 46% feed, 46% random post, 7% like and 1% create.
+The tooling's `ul12` driver also runs its `bench/load.js` user model with 1,000
+users, think times scaled by 0.01, a five-second ramp and a 20-second measured window (the driver samples on
+ten-second ticks).
+These short, local measurements are not the challenge's five-minute user score.
+
+| Workload | Rayo req/s | Hand-rolled req/s | Rayo p99 | Hand-rolled p99 |
+|---|---:|---:|---:|---:|
+| Feed, 256 connections | 19,587.54 | 23,023.53 | 646.22 ms | 16.23 ms |
+| Mix, 256 connections | 28,138.19 | 34,325.12 | 654.34 ms | 10.84 ms |
+| Scaled user model, 1,000 users | 10,427 | 9,679 | 16.9 ms | 245.8 ms |
+
+Both user-model runs passed the latency thresholds with **0.000% errors**.
+Neither wrk workload reported HTTP or socket errors. The Rayo runs had occasional
+latency spikes up to about 0.83 seconds; the table includes them. Precise Rayo RSS
+for the read-only feed stayed at **28,352 KiB** after warm-up. Mixed-load RSS went
+from **163,460 to 176,540 KiB**, including SQLite's mapped pages and page cache.
+
+Reproduce from this folder inside `crdev`, after building the application:
+
+```bash
+flock /home/user/experiments/crystal-challenges/bench/.lock bash benchmark.sh
+```
+
+`SERVER_CPU`, `CLIENT_CPUS`, `PORT`, `SEED_DIR`, `REFERENCE_DIR`, `CONNECTIONS`
+`DURATION`, `WORKLOADS` and `SESSION_FILE` can be overridden. Connection counts are capped at 3,000. The
+wrapper starts and stops only its own recorded server PID and removes its
+scratch database. Raw results and the complete session are in `measurements/`.
+
 ## Rayo gaps
 
 SQLite is not a Rayo component yet. The reusable prepared-statement adapter and

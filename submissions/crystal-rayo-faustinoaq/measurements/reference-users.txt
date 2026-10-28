@@ -1,0 +1,1 @@
+users=1000 rps=9679 p50=0.7ms p95=18.4ms p99=245.8ms max=344ms err=0.000% pass=true feed/post/like/new=89185/89166/13465/1773

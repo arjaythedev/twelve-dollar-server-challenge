@@ -171,9 +171,11 @@ int app_init(const char *db_path, const char *secret, char *err, size_t errn) {
   if (APP_DB_CKPT == 0) o.ckpt_frames = 0;      // 0: SQLite's own wal_autocheckpoint (1000 frames)
   o.ckpt_async = APP_DB_CKPT == 3;              // 3: the engine's checkpoint on the loop's io_uring (app_tick),
   if (APP_DB_CKPT == 3) o.ckpt_frames = 4096;   //    in the thread's pass size (as in the engine's Xeon A/B)
-  if (APP_DB_CKPT == 4) {                       // 4: Rust #82's checkpoint on our one thread: RESTART every 4,096 frames,
-    o.ckpt_frames = 4096;                       //    after the batch's replies are submitted (app_tick), WAL reused in
-    o.ckpt_mode = 2;                            //    place (2 = SQLITE_CHECKPOINT_RESTART); no backlog, so no write gate
+  if (APP_DB_CKPT == 4) {                       // 4: Rust #82's checkpoint on our one thread: RESTART every 16,384 frames,
+    o.ckpt_frames = 16384;                      //    after the batch's replies are submitted (app_tick), WAL reused in
+    o.ckpt_mode = 2;                            //    place (2 = SQLITE_CHECKPOINT_RESTART); no backlog, so no write gate.
+                                                //    16,384 not #82's 4,096: each pass stalls the loop about as long at
+                                                //    any mark, so 4x fewer passes held 17.5k vs 15.5k req/s (Xeon, p99 < 1 s)
   }
   o.wal_fadvise =
       APP_DB_WAL_DROP;  // drop checkpointed WAL pages from the page cache (~256 -> <=20 MiB measured on a 1-vCPU Xeon)

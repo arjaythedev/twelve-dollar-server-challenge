@@ -13,7 +13,8 @@ package body Database is
    subtype Handle is System.Address;
    DB : Handle := System.Null_Address;
    type Query is (Health_Query, Feed_Query, Post_Query, Exists_Query,
-                  Create_Query, Like_Query);
+                  Create_Query, Like_Query, Feed_IDs, Feed_Counts, Feed_Rows,
+                  Begin_Read, Commit_Read);
    Statements : array (Query) of Handle := (others => System.Null_Address);
 
    function SQLite_Open (Name : char_array; Result : access Handle;
@@ -157,10 +158,16 @@ package body Database is
       Require (Finalize (S));
       Run ("PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON;" &
            "PRAGMA cache_size=-65536; PRAGMA mmap_size=268435456;" &
-           "PRAGMA wal_autocheckpoint=1000;");
+           "PRAGMA wal_autocheckpoint=4000;");
       Compile (Health_Query, "SELECT 1");
       Compile (Feed_Query, Select_Post &
                " ORDER BY p.created_at DESC,p.id DESC LIMIT 20");
+      Compile (Feed_IDs, "SELECT id FROM posts ORDER BY created_at DESC,id DESC LIMIT 20");
+      Compile (Feed_Counts, "SELECT post_id,count(*) FROM likes WHERE post_id BETWEEN ?1 AND ?2 GROUP BY post_id");
+      Compile (Feed_Rows, "SELECT p.id,p.body,p.created_at,u.username FROM posts p " &
+               "JOIN users u ON u.id=p.user_id WHERE p.id BETWEEN ?1 AND ?2");
+      Compile (Begin_Read, "BEGIN");
+      Compile (Commit_Read, "COMMIT");
       Compile (Post_Query, Select_Post & " WHERE p.id=?1");
       Compile (Exists_Query, "SELECT 1 FROM posts WHERE id=?1");
       Compile (Create_Query, "INSERT INTO posts(user_id,body) VALUES(?1,?2)" &
@@ -175,14 +182,17 @@ package body Database is
       Release (Health_Query);
    end Check;
 
-   function Post_JSON (S : Handle) return String is
+   function Post_JSON (S : Handle; Like_Count : Long_Long_Integer) return String is
      ("{""id"":" & JSON.Number (Col_Int (S, 0)) &
       ",""body"":" & JSON.Quote (Column_Text (S, 1)) &
       ",""created_at"":" & JSON.Quote (Column_Text (S, 2)) &
       ",""author"":" & JSON.Quote (Column_Text (S, 3)) &
-      ",""like_count"":" & JSON.Number (Col_Int (S, 4)) & "}");
+      ",""like_count"":" & JSON.Number (Like_Count) & "}");
 
-   function Feed return String is
+   function Post_JSON (S : Handle) return String is
+     (Post_JSON (S, Col_Int (S, 4)));
+
+   function Original_Feed return String is
       Result : Unbounded_String := To_Unbounded_String ("{""posts"":[");
       S : constant Handle := Statements (Feed_Query);
       RC : int;
@@ -198,6 +208,94 @@ package body Database is
       end loop;
       Release (Feed_Query);
       Append (Result, "]}");
+      return To_String (Result);
+   end Original_Feed;
+
+   function Feed return String is
+      IDs, Likes : array (1 .. 20) of Long_Long_Integer := (others => 0);
+      Rows : Unbounded_String;
+      Starts, Ends : array (1 .. 20) of Natural := (others => 0);
+      Slots : array (0 .. 39) of Natural := (others => 0);
+      Count, Found, Slot : Natural := 0;
+      Minimum, Maximum : Long_Long_Integer;
+      RC : int;
+      S : Handle;
+      Result : Unbounded_String;
+
+      procedure Finish is
+      begin
+         Require (Step (Statements (Commit_Read)), 101);
+         Release (Commit_Read);
+      end Finish;
+   begin
+      -- All three live scans share a request-local SQLite snapshot. Nothing
+      -- survives into another request, including the chosen IDs and counts.
+      Require (Step (Statements (Begin_Read)), 101);
+      Release (Begin_Read);
+      S := Statements (Feed_IDs);
+      loop
+         RC := Step (S);
+         exit when RC = 101;
+         Require (RC, 100);
+         Count := Count + 1;
+         IDs (Count) := Col_Int (S, 0);
+      end loop;
+      Release (Feed_IDs);
+      if Count = 0 then Finish; return "{""posts"":[]}"; end if;
+      Minimum := IDs (1); Maximum := IDs (1);
+      for I in 1 .. Count loop
+         Minimum := Long_Long_Integer'Min (Minimum, IDs (I));
+         Maximum := Long_Long_Integer'Max (Maximum, IDs (I));
+      end loop;
+      -- Bound the extra rows, including sparse/backdated or externally edited
+      -- data. Check the span without overflowing at signed integer extremes.
+      if Minimum <= Long_Long_Integer'Last - 39 and then Maximum > Minimum + 39 then
+         Result := To_Unbounded_String (Original_Feed);
+         Finish;
+         return To_String (Result);
+      end if;
+      for I in 1 .. Count loop
+         Slots (Natural (IDs (I) - Minimum)) := I;
+      end loop;
+      S := Statements (Feed_Counts);
+      Require (Bind_Int (S, 1, Minimum));
+      Require (Bind_Int (S, 2, Maximum));
+      loop
+         RC := Step (S);
+         exit when RC = 101;
+         Require (RC, 100);
+         Slot := Slots (Natural (Col_Int (S, 0) - Minimum));
+         if Slot /= 0 then Likes (Slot) := Col_Int (S, 1); end if;
+      end loop;
+      Release (Feed_Counts);
+      S := Statements (Feed_Rows);
+      Require (Bind_Int (S, 1, Minimum));
+      Require (Bind_Int (S, 2, Maximum));
+      loop
+         RC := Step (S);
+         exit when RC = 101;
+         Require (RC, 100);
+         Slot := Slots (Natural (Col_Int (S, 0) - Minimum));
+         if Slot /= 0 then
+            Starts (Slot) := Length (Rows) + 1;
+            Append (Rows, Post_JSON (S, Likes (Slot)));
+            Ends (Slot) := Length (Rows);
+            Found := Found + 1;
+         end if;
+      end loop;
+      Release (Feed_Rows);
+      if Found /= Count then
+         -- A foreign-key-disabled external editor can leave orphan posts.
+         Result := To_Unbounded_String (Original_Feed);
+      else
+         Result := To_Unbounded_String ("{""posts"":[");
+         for I in 1 .. Count loop
+            if I /= 1 then Append (Result, ","); end if;
+            Append (Result, Slice (Rows, Starts (I), Ends (I)));
+         end loop;
+         Append (Result, "]}");
+      end if;
+      Finish;
       return To_String (Result);
    end Feed;
 

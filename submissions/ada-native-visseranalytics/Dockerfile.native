@@ -1,0 +1,18 @@
+# Diagnostic native-Linux toolchain. ARM timings are not x86 capacity scores.
+FROM ubuntu:24.04@sha256:24737cef17f4e22b1977df7d9a05e77c4e28b7da5b8911f8d8ccda136bf3573c
+WORKDIR /app
+COPY versions.env install.sh ./
+RUN bash install.sh && . ./versions.env && apt-get install -y --no-install-recommends \
+      python3 curl jq util-linux procps "openssl=$OPENSSL_VERSION" && \
+    groupadd --gid 10001 ada && useradd --uid 10001 --gid 10001 --no-create-home ada && \
+    install -d -o ada -g ada /run/ada && rm -rf /var/lib/apt/lists/*
+COPY build.sh start.sh ./
+COPY src ./src
+RUN chown -R ada:ada /app
+USER 10001:10001
+RUN bash build.sh && sha256sum src/* build.sh versions.env > /app/build-sha256.txt
+USER root
+COPY bench/entrypoint.sh bench/monitor.py /app/bench/
+RUN chmod 755 /app/start.sh /app/bench/entrypoint.sh
+ENV HOST=0.0.0.0 PORT=80 SQLITE_PATH=/data/feed.db ADA_SERVE_MODE=direct
+ENTRYPOINT ["/app/bench/entrypoint.sh"]

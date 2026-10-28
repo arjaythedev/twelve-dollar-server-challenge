@@ -9,6 +9,8 @@ with System;
 with Application;
 with Database;
 with HTTP;
+with Workers;
+with Platform;
 
 procedure Server is
    -- Linux libc ABI bindings only. All framing, routing and application logic
@@ -70,7 +72,7 @@ procedure Server is
    end record;
    for IPv4_Address'Size use 128;
 
-   -- Linux x86_64 epoll_event is a packed 12-byte record. The user data
+   -- Linux epoll_event is 12 bytes on x86_64, 16 on AArch64. The user data
    -- carries a slot AND generation so a stale event cannot hit a reused slot.
    type Ready_Event is record
       Events : unsigned := 0;
@@ -79,11 +81,11 @@ procedure Server is
    end record with Convention => C;
    for Ready_Event use record
       Events at 0 range 0 .. 31;
-      Slot at 4 range 0 .. 31;
-      Generation at 8 range 0 .. 31;
+      Slot at Platform.Epoll_Data_Offset range 0 .. 31;
+      Generation at Platform.Epoll_Data_Offset + 4 range 0 .. 31;
    end record;
-   for Ready_Event'Size use 96;
-   for Ready_Event'Alignment use 4;
+   for Ready_Event'Size use Platform.Epoll_Event_Bytes * 8;
+   for Ready_Event'Alignment use Platform.Epoll_Event_Alignment;
 
    Max_Connections : constant := 65_000;
    Readable : constant unsigned := 1;
@@ -91,7 +93,6 @@ procedure Server is
    Broken : constant unsigned := 8 + 16;
    Nonblock_Cloexec : constant int := 2048 + 524288;
    No_Signal : constant int := 16#4000#;
-   Idle_Lifetime : constant Time_Span := Seconds (75);
    Request_Lifetime : constant Time_Span := Seconds (30);
    type String_Access is access String;
    procedure Free_String is new Ada.Unchecked_Deallocation (String, String_Access);
@@ -130,6 +131,20 @@ procedure Server is
    Now, Last_Sweep : Time := Clock;
    Host : constant String := Ada.Environment_Variables.Value ("HOST", "127.0.0.1");
    Port : constant String := Ada.Environment_Variables.Value ("PORT", "3000");
+   Idle_Lifetime : constant Time_Span := Seconds (75);
+   Spare_Input : String_Access := null;
+
+   procedure Release_Input (Input : in out String_Access) is
+   begin
+      -- Reuse storage only. Used is reset before another request can read it.
+      -- Keep just one small buffer per worker; partial requests own theirs.
+      if Input /= null and then Input'Length = 4096 and then Spare_Input = null then
+         Spare_Input := Input;
+         Input := null;
+      else
+         Free_String (Input);
+      end if;
+   end Release_Input;
 
    procedure Drop (I : Positive) is
       Ignored : int;
@@ -137,7 +152,7 @@ procedure Server is
       if Connections (I) /= null then
          Ignored := Epoll_Control (Queue, 2, Connections (I).FD, System.Null_Address);
          Ignored := Close (Connections (I).FD);
-         Free_String (Connections (I).Input);
+         Release_Input (Connections (I).Input);
          Free_String (Connections (I).Output);
          Free_Connection (Connections (I));
          Free_Count := Free_Count + 1;
@@ -152,7 +167,7 @@ procedure Server is
       C.Sent := 0;
    end Queue_Error;
 
-   procedure Try_Request (C : Connection_Access) is
+   procedure Try_Request (C : Connection_Access; At_Time : Time) is
       Item : HTTP.Request;
       Status : HTTP.Parse_Status;
       Consumed : Natural;
@@ -179,7 +194,7 @@ procedure Server is
             C.Sent := 0; C.Continue_Sent := False;
             C.Input (1 .. C.Used - Consumed) := C.Input (Consumed + 1 .. C.Used);
             C.Used := C.Used - Consumed;
-            C.Request_Start := Clock;
+            C.Request_Start := At_Time;
       end case;
    end Try_Request;
 
@@ -187,18 +202,24 @@ procedure Server is
       C : constant Connection_Access := Connections (I);
       Interest : unsigned;
       Change : aliased Ready_Event;
+      At_Time : constant Time := Clock;
    begin
       if (Returned and Readable) /= 0 and then C.Output = null then
-         if C.Used = 0 then C.Request_Start := Clock; end if;
+         if C.Used = 0 then C.Request_Start := At_Time; end if;
          if C.Input = null then
-            C.Input := new String (1 .. 4096);
+            if Spare_Input /= null then
+               C.Input := Spare_Input;
+               Spare_Input := null;
+            else
+               C.Input := new String (1 .. 4096);
+            end if;
          elsif C.Used = C.Input'Length and then C.Used < HTTP.Max_Input then
             declare
                Larger : constant String_Access := new String
                  (1 .. Natural'Min (HTTP.Max_Input, C.Input'Length * 2));
             begin
                Larger (1 .. C.Used) := C.Input (1 .. C.Used);
-               Free_String (C.Input);
+               Release_Input (C.Input);
                C.Input := Larger;
             end;
          end if;
@@ -208,12 +229,12 @@ procedure Server is
          elsif N < 0 then
             if Errno.all not in 4 | 11 then Drop (I); return; end if;
          else
-            C.Used := C.Used + Natural (N); C.Last_Active := Clock;
+            C.Used := C.Used + Natural (N); C.Last_Active := At_Time;
          end if;
       end if;
       -- A bounded pipeline burst prevents one busy client starving its peers.
       for Burst in 1 .. 4 loop
-         if C.Output = null and then C.Used > 0 then Try_Request (C); end if;
+         if C.Output = null and then C.Used > 0 then Try_Request (C, At_Time); end if;
          exit when C.Output = null;
          N := Send (C.FD, C.Output (C.Output'First + C.Sent)'Address,
                     size_t (C.Output'Length - C.Sent), No_Signal);
@@ -222,7 +243,7 @@ procedure Server is
             exit;
          elsif N = 0 then exit;
          end if;
-         C.Sent := C.Sent + Natural (N); C.Last_Active := Clock;
+         C.Sent := C.Sent + Natural (N); C.Last_Active := At_Time;
          exit when C.Sent < C.Output'Length;
          Free_String (C.Output); C.Sent := 0;
          if C.Closing then Drop (I); return; end if;
@@ -235,7 +256,7 @@ procedure Server is
       end loop;
       if (Returned and Broken) /= 0 then Drop (I); return; end if;
       if C.Used = 0 then
-         Free_String (C.Input);
+         Release_Input (C.Input);
       end if;
       -- Level-triggered writable readiness also schedules a bounded pipeline
       -- continuation when the next request is already in our user buffer.
@@ -253,6 +274,9 @@ procedure Server is
          Drop (I);
    end Service;
 begin
+   -- Limits apply per process; the challenge's CPU/RAM budget remains shared.
+   -- Each worker owns its SQLite connection and its reuseport listener.
+   Workers.Start (6);
    RC := Get_Limit (7, File_Limit'Address); -- RLIMIT_NOFILE on Linux
    if RC /= 0 then raise Program_Error with "getrlimit failed"; end if;
    if File_Limit.Soft < 65_535 then
@@ -264,7 +288,11 @@ begin
    for I in Free_Slots'Range loop
       Free_Slots (I) := Max_Connections - I + 1;
    end loop;
+   -- Switching a fresh database into WAL mode must not race other workers.
+   -- Startup uses the same gate as requests from already listening workers.
+   Workers.Acquire;
    Database.Open (Ada.Environment_Variables.Value ("SQLITE_PATH"));
+   Workers.Release;
    Application.Initialize (Ada.Environment_Variables.Value ("JWT_SECRET"));
    Bound.Port := Htons (unsigned_short'Value (Port));
    if Bound.Port = 0 then raise Constraint_Error with "PORT must be positive"; end if;
@@ -275,6 +303,8 @@ begin
    if Listener < 0 then raise Program_Error with "socket failed"; end if;
    RC := Set_Option (Listener, 1, 2, One'Address, 4);
    if RC /= 0 then raise Program_Error with "SO_REUSEADDR failed"; end if;
+   RC := Set_Option (Listener, 1, 15, One'Address, 4); -- SO_REUSEPORT
+   if RC /= 0 then raise Program_Error with "SO_REUSEPORT failed"; end if;
    RC := Bind (Listener, Bound'Address, 16);
    if RC /= 0 then raise Program_Error with "bind failed"; end if;
    RC := Listen (Listener, 1024);
@@ -290,6 +320,7 @@ begin
       if Ready_Count < 0 and then Errno.all /= 4 then
          raise Program_Error with "epoll_wait failed";
       end if;
+      if Ready_Count > 0 then Workers.Acquire; end if;
       for Ready in 1 .. Ready_Count loop
         if Events (Integer (Ready)).Slot = 0 then
          for Burst in 1 .. 64 loop
@@ -326,6 +357,7 @@ begin
            end;
         end if;
       end loop;
+      if Ready_Count > 0 then Workers.Release; end if;
       Now := Clock;
       if Now - Last_Sweep >= Seconds (1) then
          for I in 1 .. Highest loop
@@ -333,7 +365,8 @@ begin
                declare
                   C : constant Connection_Access := Connections (I);
                begin
-                  if Now - C.Last_Active >= Idle_Lifetime or else
+                  if (C.Used = 0 and then C.Output = null and then
+                      Now - C.Last_Active >= Idle_Lifetime) or else
                     ((C.Used > 0 or else C.Output /= null) and then
                      Now - C.Request_Start >= Request_Lifetime)
                   then

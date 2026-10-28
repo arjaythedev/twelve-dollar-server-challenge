@@ -27,7 +27,8 @@ Nginx's small upstream pool.
 
 Not much, on purpose:
 
-- `--release --mcpu native` build.
+- `--release --mcpu x86-64-v3` build (fixed AVX2 baseline; native CPU detection produced
+  SIGILL on some CI runners).
 - One SQLite connection (`max_pool_size=1`). The server runs on one thread and SQLite has one
   writer, so a bigger pool only adds lock handoffs.
 - Pragmas: WAL, `synchronous=NORMAL` (rule 6), foreign keys on, a 1 GB `mmap_size`, a 64 MB page

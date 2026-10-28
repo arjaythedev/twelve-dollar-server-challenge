@@ -33,18 +33,19 @@ if [ ! -x "$(command -v hcc)" ]; then
     ln -sf /usr/local/bin/hcc /usr/bin/hcc
 fi
 
-# Ensure pthread.h is available - hcc looks in /usr/local/include/
-if [ ! -f "/usr/local/include/pthread.h" ]; then
-    # Copy or symlink pthread.h to where hcc expects it
-    if [ -f "/usr/include/pthread.h" ]; then
-        ln -sf /usr/include/pthread.h /usr/local/include/pthread.h
-    fi
-    # Also make sure other common headers are accessible
-    for hdr in stdio.h stdlib.h string.h stdbool.h; do
-        if [ -f "/usr/include/$hdr" ] && [ ! -f "/usr/local/include/$hdr" ]; then
-            ln -sf "/usr/include/$hdr" "/usr/local/include/$hdr"
+# hcc resolves #include <...> against /usr/local/include/ only, but on Ubuntu
+# the glibc headers (pthread.h, features.h, bits/*, sys/*, …) live under
+# /usr/include and the multiarch directory /usr/include/x86_64-linux-gnu.
+# Symlink every system header into /usr/local/include so transitive includes
+# resolve.  We never clobber hcc's own tos.HH (installed just above).
+for d in /usr/include /usr/include/x86_64-linux-gnu; do
+    for item in "$d"/*; do
+        b=$(basename "$item")
+        if [ -e "/usr/local/include/$b" ] || [ -L "/usr/local/include/$b" ]; then
+            continue  # don't overwrite hcc headers like tos.HH
         fi
+        ln -s "$item" "/usr/local/include/$b"
     done
-fi
+done
 
 echo "HolyC compiler installed successfully"

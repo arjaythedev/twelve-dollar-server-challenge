@@ -56,6 +56,11 @@ The C transport keeps debug symbols and frame pointers for local profiles.
   authors, and one range scan on `likes_post_id_idx` counts the likes. The post scan runs newest id
   first and writes each row straight into the response; any other order runs the reference query.
   Every value comes from SQLite during the request (rule 5).
+- **Feed and post reads use SQLite's B-tree layer.** `/feed` and `/posts/:id` read through SQLite's own
+  B-tree cursors, in `td_sqlite.c`, which `build.sh` compiles in the same translation unit as the pinned
+  amalgamation. They read the same database file in the request's read transaction, so they see the same
+  snapshot as SQL. There is no result cache: between requests the code keeps only root page numbers and
+  key descriptions. Unusual cases (overflow pages, wide id spans, unknown ids) run the SQL path.
 - **Prepared statements** for every query, plus `BEGIN`/`COMMIT`, made once at startup.
 - **JSON written by hand into reused buffers.** The writer checks 16 bytes at a time (SSE2, `json_scan.h`) for
   a byte that needs escaping, and copies the string whole when none does. Keys come out in the spec order.

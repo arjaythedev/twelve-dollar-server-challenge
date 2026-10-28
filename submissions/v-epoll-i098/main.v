@@ -17,6 +17,7 @@ import time
 #include <openssl/hmac.h>
 #include "sqlite3.h"
 #include "ckpt.h"
+#include "td_feed.h"
 #include <sys/resource.h>
 #include <sys/eventfd.h>
 
@@ -67,6 +68,25 @@ fn C.td_net_send(&C.td_net, int, &u8, int)
 fn C.td_net_resume(&C.td_net, int, int, int)
 fn C.td_net_abort(&C.td_net, int)
 fn C.td_json_scan(&u8, int) int
+
+struct C.td_feed_row {
+	id       i64
+	likes    i64
+	body     &u8
+	created  &u8
+	user     &u8
+	body_len int
+	user_len int
+}
+
+struct C.td_feed {
+	row [20]C.td_feed_row
+}
+
+fn C.td_feed_init(&C.sqlite3) int
+fn C.td_feed_read(int) int
+fn C.td_post_read(i64) int
+fn C.td_feed_out() &C.td_feed
 fn C.memchr(voidptr, int, usize) voidptr
 fn C.getrlimit(i32, &C.rlimit) i32
 fn C.setrlimit(i32, &C.rlimit) i32
@@ -119,6 +139,7 @@ mut:
 	st_commit &C.sqlite3_stmt = unsafe { nil }
 	st_back   &C.sqlite3_stmt = unsafe { nil }
 	in_txn    bool
+	btree_feed bool // td_feed_init found the schema it reads directly
 	secret    []u8
 	started   i64
 	transport &C.td_net = unsafe { nil }
@@ -198,6 +219,7 @@ fn (mut s Server) open_db(path string) {
 		unsafe { nil }, unsafe { nil }, unsafe { nil })
 	// Replaces SQLite's inline auto-checkpoint: checkpoints run on the checkpointer thread.
 	C.sqlite3_wal_hook(s.db, wal_hook, s)
+	s.btree_feed = C.td_feed_init(s.db) == 1
 	s.st_feed = s.prepare(sql_post + ' ORDER BY p.created_at DESC, p.id DESC LIMIT 20')
 	s.st_top = s.prepare('SELECT id FROM posts ORDER BY created_at DESC, id DESC LIMIT 20')
 	s.st_range =
@@ -1110,6 +1132,13 @@ fn (mut s Server) like(user_id i64, post_id i64) {
 // range scan each when the ids are close together (they are, as ids grow with time).
 fn (mut s Server) feed() {
 	s.txn()
+	if s.btree_feed {
+		n := C.td_feed_read(feed_span)
+		if n > 0 {
+			s.feed_btree(n)
+			return
+		}
+	}
 	mut ids := [20]i64{}
 	mut n := 0
 	mut rc := C.sqlite3_step(s.st_top)
@@ -1129,6 +1158,37 @@ fn (mut s Server) feed() {
 		return
 	}
 	s.feed_full()
+}
+
+// feed_btree answers the feed from rows td_feed_read copied out of the B-trees.
+fn (mut s Server) feed_btree(n int) {
+	out := C.td_feed_out()
+	s.start_body()
+	put(mut s.out, '{"posts":[')
+	for k in 0 .. n {
+		if k > 0 {
+			put(mut s.out, ',')
+		}
+		s.put_feed_row(&out.row[k])
+	}
+	put(mut s.out, ']}')
+	s.respond(200)
+}
+
+fn (mut s Server) put_feed_row(r &C.td_feed_row) {
+	put(mut s.out, '{"id":')
+	put_int(mut s.out, r.id)
+	put(mut s.out, ',"body":')
+	put_json(mut s.out, r.body, r.body_len)
+	put(mut s.out, ',"created_at":')
+	append(mut s.out, c'"', 1)
+	append(mut s.out, r.created, 24)
+	append(mut s.out, c'"', 1)
+	put(mut s.out, ',"author":')
+	put_json(mut s.out, r.user, r.user_len)
+	put(mut s.out, ',"like_count":')
+	put_int(mut s.out, r.likes)
+	put(mut s.out, '}')
 }
 
 // feed_range scans the rows newest-id first, which is feed order when ids fall with created_at,
@@ -1202,6 +1262,15 @@ fn (mut s Server) feed_full() {
 
 fn (mut s Server) post(id i64) {
 	s.txn()
+	if s.btree_feed && C.td_post_read(id) == 1 {
+		s.start_body()
+		put(mut s.out, '{"post":')
+		out := C.td_feed_out()
+		s.put_feed_row(&out.row[0])
+		put_byte(mut s.out, `}`)
+		s.respond(200)
+		return
+	}
 	st := s.st_post
 	C.sqlite3_bind_int64(st, 1, id)
 	rc := C.sqlite3_step(st)

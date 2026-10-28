@@ -11,7 +11,7 @@ if [ ! -f build/sqlite3.o ]; then
   tar -xzf build/sqlite.tar.gz -C build --strip-components=1 "$SQLITE/sqlite3.c" "$SQLITE/sqlite3.h"
   # Each connection is used by one thread (multi-thread mode), no memory statistics, and the
   # remaining options from SQLite's recommended compile-time list that this server does not need.
-  cc -O3 -march=native -fno-stack-protector -fcf-protection=none -U_FORTIFY_SOURCE -c build/sqlite3.c -o build/sqlite3.o \
+  cc -O3 -march=native -fno-stack-protector -fcf-protection=none -U_FORTIFY_SOURCE -c td_sqlite.c -o build/sqlite3.o \
     -DSQLITE_THREADSAFE=2 -DSQLITE_DEFAULT_MEMSTATUS=0 -DSQLITE_DQS=0 \
     -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_OMIT_DEPRECATED -DSQLITE_OMIT_SHARED_CACHE \
     -DSQLITE_LIKE_DOESNT_MATCH_BLOBS -DSQLITE_MAX_EXPR_DEPTH=0 -DSQLITE_OMIT_DECLTYPE \

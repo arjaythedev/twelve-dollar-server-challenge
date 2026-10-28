@@ -2,8 +2,10 @@
 #ifndef MEMORY_HC
 #define MEMORY_HC
 
-#include <stdlib.h>
-#include <string.h>
+extern U8 *malloc(I64 size);
+extern void free(U8 *ptr);
+extern U8 *calloc(I64 count, I64 size);
+extern U8 *realloc(U8 *ptr, I64 size);
 
 #define MAlloc(x) malloc(x)
 #define Free(x) free(x)

@@ -1,3 +1,18 @@
+#include <pthread.h>
+#include <sys/time.h>
+#include <errno.h>
+#include <string.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <unistd.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <sys/select.h>
+#include <sys/time.h>
+#include <errno.h>
+#include <time.h>
 /* HolyC $12 Server Challenge - Maximum Performance with Non-Blocking I/O */
 #include "./net.HC"
 #include "./sqllite.HC"
@@ -13,8 +28,6 @@
 /* Environment variables */
 U8 SQLITE_PATH_BUF[256];
 U8 JWT_SECRET_BUF[256];
-getenv(SQLITE_PATH_BUF);
-getenv(JWT_SECRET_BUF);
 U8 *SQLITE_PATH = SQLITE_PATH_BUF;
 U8 *JWT_SECRET = JWT_SECRET_BUF;
 
@@ -35,7 +48,7 @@ public void tune_sqlite_pragmas() {
     U8 *cmd = (U8 *)"PRAGMA cache_size = -1024";
     U8 *err = SqlExecRaw(sql_ctx, cmd);
     if (err) {
-        "Warning: could not set cache_size pragma\n";
+        printf("Warning: could not set cache_size pragma\n");
         if (err) Free(err);
     }
 
@@ -43,7 +56,7 @@ public void tune_sqlite_pragmas() {
     cmd = (U8 *)"PRAGMA mmap_size = 104857600";
     err = SqlExecRaw(sql_ctx, cmd);
     if (err) {
-        "Warning: could not set mmap_size pragma\n";
+        printf("Warning: could not set mmap_size pragma\n");
         if (err) Free(err);
     }
 
@@ -51,7 +64,7 @@ public void tune_sqlite_pragmas() {
     cmd = (U8 *)"PRAGMA locking_mode = NORMAL";
     err = SqlExecRaw(sql_ctx, cmd);
     if (err) {
-        "Warning: could not set locking_mode pragma\n";
+        printf("Warning: could not set locking_mode pragma\n");
         if (err) Free(err);
     }
 }
@@ -59,6 +72,9 @@ public void tune_sqlite_pragmas() {
 /* Buffer pool sizes - tuned for typical request/response sizes */
 #define REQ_BUF_SIZE 12288  /* 12 KB - typical request + headers */
 #define RESP_BUF_SIZE 8192  /* 8 KB - typical JSON response */
+
+U8 req_buffer_arr[REQ_BUF_SIZE];
+I64 req_buf_offset = 0;
 
 /* =================================================================
    NON-BLOCKING I/O SETTINGS
@@ -69,11 +85,11 @@ public void tune_sqlite_pragmas() {
 /* =================================================================
    FAST INTEGER TO STRING - avoids MPrint overhead
    ================================================================= */
-public U8 *fast Itoa(I32 val, U8 *buf) {
-    I64 i = 0;
+U8 *fast_Itoa(int val, U8 *buf) {
+    long i = 0;
     if (val == 0) { buf[0] = '0'; buf[1] = '\0'; return buf; }
     if (val < 0) { buf[0] = '-'; val = -val; i = 1; }
-    U64 tmp = val;
+    unsigned long tmp = val;
     while (tmp > 0) { i++; tmp /= 10; }
     buf[i] = '\0';
     while (val > 0) { i--; buf[i] = '0' + (val % 10); val /= 10; }
@@ -99,7 +115,7 @@ public U8 *fast Itoa(I32 val, U8 *buf) {
 #define JSON_POST_LIKE_COUNT ",\"like_count\":0}}"
 
 /* Fast: build health check response */
-public U8 *build_health_response_fast(I32 status, I64 uptime) {
+U8 *build_health_response_fast(int status, long uptime) {
     /* Pre-built: "{\"status\":\"ok\",\"db\":\"ok\",\"uptime_s\":42}" */
     static U8 health_ok[] = {"{\"status\":\"ok\",\"db\":\"ok\",\"uptime_s\":42}"};
     static U8 health_degraded[] = {"{\"status\":\"degraded\",\"db\":\"unreachable\",\"error\":\"sqlite error\"}"};
@@ -119,50 +135,50 @@ public U8 *build_feed_response_fast() {
 }
 
 /* Fast: build like response */
-public U8 *build_like_response_fast(I32 post_id, Bool already_liked) {
+U8 *build_like_response_fast(int post_id, int already_liked) {
     /* Build: "{\"liked\":true,\"already_liked\":false,\"post_id\":N}" */
     static U8 like_true[] = {"{\"liked\":true,\"already_liked\":false,\"post_id\":";
     static U8 like_false[] = {"{\"liked\":true,\"already_liked\":true,\"post_id\":";
     U8 *base = already_liked ? like_false : like_true;
-    U64 base_len = already_liked ? my_strlen(like_false) : my_strlen(like_true);
+    size_t base_len = already_liked ? my_strlen(like_false) : my_strlen(like_true);
     
     /* We need to insert the post_id, so we'll use a small MPrint just for the number */
-    U8 *body = MPrint("%s%d}", base, post_id);
+    U8 *body = malloc(256); sprintf((char*)body, "%s%d}", (char*)base, post_id);
     return body;
 }
 
 /* Fast: build post get response */
-public U8 *build_post_response_fast(I32 post_id) {
+U8 *build_post_response_fast(int post_id) {
     /* Build: "{\"post\":{\"id\":N,\"body\":\"test\",\"created_at\":\"2025-01-01T00:00:00Z\",\"author\":\"test_user\",\"like_count\":0}}" */
-    U8 *body = MPrint("{\"post\":{\"id\":%d,\"body\":\"test\",\"created_at\":\"2025-01-01T00:00:00Z\",\"author\":\"test_user\",\"like_count\":0}}", post_id);
+    U8 *body = malloc(512); sprintf((char*)body, "{\"post\":{\"id\":%d,\"body\":\"test\",\"created_at\":\"2025-01-01T00:00:00Z\",\"author\":\"test_user\",\"like_count\":0}}", post_id);
     return body;
 }
 
 /* Fast: build create post response */
-public U8 *build_create_post_response_fast(I32 post_id, U8 *author) {
+U8 *build_create_post_response_fast(int post_id, U8 *author) {
     /* Build: "{\"post\":{\"id\":N,\"body\":\"...\",\"created_at\":\"...\",\"author\":\"...\",\"like_count\":0}}" */
-    U8 *body = MPrint("{\"post\":{\"id\":%d,\"body\":\"test\",\"created_at\":\"2025-01-01T00:00:00Z\",\"author\":\"%s\",\"like_count\":0}}", post_id, author);
+    U8 *body = malloc(512); sprintf((char*)body, "{\"post\":{\"id\":%d,\"body\":\"test\",\"created_at\":\"2025-01-01T00:00:00Z\",\"author\":\"%s\",\"like_count\":0}}", post_id, author);
     return body;
 }
 
 /* =================================================================
    SOCKET UTILITIES
    ================================================================= */
-public I32 set_reuse_addr(I32 sock) {
-    I32 yes = 1;
-    setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(I32));
+int set_reuse_addr(I32 sock) {
+    int yes = 1;
+    setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(int));
     return TRUE;
 }
 
-public I32 set_keepalive(I32 sock) {
+int set_keepalive(I32 sock) {
     I32 yes = 1;
-    setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, &yes, sizeof(I32));
+    setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, &yes, sizeof(int));
     return TRUE;
 }
 
 /* Set socket to non-blocking mode */
-public I32 set_non_blocking(I32 sock) {
-    I32 flags = fcntl(sock, F_GETFL, 0);
+int set_non_blocking(I32 sock) {
+    int flags = fcntl(sock, F_GETFL, 0);
     if (flags == -1) return FALSE;
     if (fcntl(sock, F_SETFL, flags | O_NONBLOCK) == -1) return FALSE;
     return TRUE;
@@ -171,7 +187,7 @@ public I32 set_non_blocking(I32 sock) {
 /* =================================================================
    READ REQUEST - use pre-allocated buffer
    ================================================================= */
-public I64 read_request_fast(I32 sock, U8 *buf, I64 buf_size) {
+long read_request_fast(int sock, U8 *buf, long buf_size) {
     I64 total = 0;
     U8 temp[4096];
 
@@ -179,12 +195,12 @@ public I64 read_request_fast(I32 sock, U8 *buf, I64 buf_size) {
         I64 n = recv(sock, temp, sizeof(temp), 0);
         if (n <= 0) break;
         if (total + n > buf_size - 1) break;
-        my_strcpy(buf + total, temp, n);
+        my_strcpy(,);
         total += n;
 
         /* Check for \r\n\r\n end of headers */
         if (total >= 4) {
-            if (my_strncmp(buf + total - 4, "\r\n\r\n", 4) == 0) break;
+            if (memcmp(buf + total - 4, "\r\n\r\n", 4) == 0) break;
         }
     }
     buf[total] = '\0';
@@ -194,7 +210,7 @@ public I64 read_request_fast(I32 sock, U8 *buf, I64 buf_size) {
 /* =================================================================
    PARSE REQUEST - fast path, extract method, path, body
    ================================================================= */
-public Bool parse_request_fast(U8 *req, I64 req_len, U8 *method_buf, I32 method_size,
+int parse_request_fast(U8 *req, I64 req_len, U8 *method_buf, I32 method_size,
                                U8 *path_buf, I32 path_size, U8 *body_out, I64 *body_len_out) {
     /* Find first \r\n */
     U8 *cr = my_strchr(req, '\r');
@@ -210,7 +226,7 @@ public Bool parse_request_fast(U8 *req, I64 req_len, U8 *method_buf, I32 method_
 
     I64 method_len = space1 - req_start;
     if (method_len >= method_size) return FALSE;
-    my_strcpy(method_buf, req_start, method_len);
+    my_strcpy(,);
     method_buf[method_len] = '\0';
 
     /* Path starts after first space */
@@ -230,7 +246,7 @@ public Bool parse_request_fast(U8 *req, I64 req_len, U8 *method_buf, I32 method_
 
     I64 path_len = path_end - path_start;
     if (path_len >= path_size) return FALSE;
-    my_strcpy(path_buf, path_start, path_len);
+    my_strcpy(,);
     path_buf[path_len] = '\0';
 
     /* Body: look for Content-Length after headers */
@@ -249,7 +265,7 @@ public Bool parse_request_fast(U8 *req, I64 req_len, U8 *method_buf, I32 method_
         I64 val = atol(cl);
         *body_len_out = val;
         if (val > 0 && val < 8192 && val < remaining) {
-            my_strcpy(body_out, headers_end, val);
+            my_strcpy(,);
             body_out[val] = '\0';
         }
     }
@@ -266,9 +282,10 @@ I32 conn_queue[MAX_CONN_QUEUE];
 I64 conn_head = 0, conn_tail = 0;
 Mutex conn_mutex;
 
+
 /* Accept a connection, adding to queue if full */
-public I32 accept_connection(I32 listen_sock) {
-    I32 client_sock = accept4(listen_sock, NULL, NULL, O_NONBLOCK);
+int accept_connection(int listen_sock) {
+    int client_sock = accept(listen_sock, NULL, NULL);
     if (client_sock < 0) return -1;
     
     /* Try to add to queue */
@@ -287,7 +304,7 @@ public I32 accept_connection(I32 listen_sock) {
 }
 
 /* Worker dequeue - gets next connection from queue */
-public I32 dequeue_connection() {
+int dequeue_connection() {
     EnterMutex(conn_mutex);
     if (conn_head == conn_tail) {
         LeaveMutex(conn_mutex);
@@ -302,10 +319,11 @@ public I32 dequeue_connection() {
 /* =================================================================
    PROCESS A SINGLE CLIENT CONNECTION
    ================================================================= */
-public void process_client(I32 client_sock) {
+public void process_client(int client_sock) {
     /* Reset request buffer offset */
     req_buf_offset = 0;
-    my_strcpy(req_buffer, "", REQ_BUF_SIZE);
+    U8 *req_buffer = req_buffer_arr;
+    memset(req_buffer, 0, REQ_BUF_SIZE);
 
     /* Read request into pre-allocated buffer */
     I64 req_len = read_request_fast(client_sock, req_buffer, REQ_BUF_SIZE);
@@ -317,8 +335,7 @@ public void process_client(I32 client_sock) {
     U8 method[128], path[256], body[8192];
     I64 body_len;
 
-    if (!parse_request_fast(req_buffer, req_len, method, sizeof(method),
-                           path, sizeof(path), body, &body_len)) {
+    if (!parse_request_fast(req_buffer, req_len, method, sizeof(method), path, sizeof(path), body, &body_len)) {
         /* 400 Bad Request */
         U8 *resp = build_response_fast(400, JSON_BAD_REQUEST, my_strlen(JSON_BAD_REQUEST));
         /* Add Content-Type header */
@@ -332,9 +349,9 @@ public void process_client(I32 client_sock) {
     /* Trim leading / from path */
     U8 path_clean[256];
     if (path[0] == '/') {
-        my_strcpy(path_clean, path + 1, my_strlen(path + 1));
+        my_strcpy(,));
     } else {
-        my_strcpy(path_clean, path, my_strlen(path));
+        my_strcpy(,));
     }
 
     /* === ROUTE REQUESTS === */
@@ -378,13 +395,13 @@ public void process_client(I32 client_sock) {
             /* TODO: Iterate through feed_row.col and append each post JSON */
             /* The exact iteration depends on HolyC SQL API result format */
             /* For now, include a placeholder that will be populated by proper iteration */
-            U8 *posts_content = MPrint("%s{}]}", resp + 12); /* placeholder */
+            U8 *posts_content = malloc(64); sprintf((char*)posts_content, "{\"posts\":[]}");
             
             /* Build full HTTP response with Content-Type */
             U8 full_resp[RESP_BUF_SIZE];
             my_sprintf(full_resp, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n%s", posts_content);
             send(client_sock, full_resp, my_strlen(full_resp), 0);
-            Free(posts_content);
+            free(posts_content);
         }
         /* Keep-alive: do not close socket, let main loop re-process */
         return;
@@ -396,7 +413,7 @@ public void process_client(I32 client_sock) {
         I32 post_id = atoi(id_str);
 
         /* Check for /like suffix */
-        Bool is_like = FALSE;
+        int is_like = FALSE;
         if (my_strstr(id_str, "/like") != NULL) is_like = TRUE;
 
         if (is_like) {
@@ -442,7 +459,7 @@ public void process_client(I32 client_sock) {
             I32 insert_rc = SqlExecPrepared(stmt_like_insert, &insert_row, like_params);
 
             /* Determine if already liked */
-            Bool already_liked = (insert_rc == 0);
+            int already_liked = (insert_rc == 0);
 
             /* Build like response using fast builder */
             U8 *like_resp = build_like_response_fast(post_id, already_liked);
@@ -451,7 +468,7 @@ public void process_client(I32 client_sock) {
             U8 *resp = build_response_fast(already_liked ? 200 : 201, like_resp, blen);
             send(client_sock, resp, my_strlen(resp), 0);
 
-            Free(like_resp);
+            free(like_resp);
         } else {
             /* GET post by ID */
             if (post_id > 0) {
@@ -488,7 +505,7 @@ public void process_client(I32 client_sock) {
                 my_sprintf(full_resp, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n%s", body);
                 send(client_sock, full_resp, my_strlen(full_resp), 0);
 
-                Free(body);
+                free(body);
             } else {
                 /* Invalid post ID */
                 U8 *resp = build_response_fast(400, JSON_INVALID_ID, my_strlen(JSON_INVALID_ID));
@@ -576,16 +593,13 @@ public void process_client(I32 client_sock) {
                     /* Try to extract id and created_at from col */
                     /* Format depends on HolyC SQL API - this is a best-effort extraction */
                     U8 id_buf[32];
-                    fast Itoa(1, id_buf); /* fallback to 1 */
+                    fast_Itoa(1, id_buf); /* fallback to 1 */
                     U8 created_at_buf[64];
                     my_sprintf(created_at_buf, "\"created_at\":\"2025-01-01T00:00:00Z\""); /* fallback */
                     
                     /* Best-effort: build response with extracted values */
                     /* Note: Full extraction depends on HolyC SQL result format */
-                    body = MPrint("{\"post\":{\"id\":%s,\"body\":%s,\"created_at\":%s,\"author\":\"%s\",\"like_count\":0}}", 
-                                  id_buf, /* body would need escaping */ 
-                                  /* In a full implementation, extract body, created_at, author from insert_row.col */ 
-                                  created_at_buf, username);
+                    body = malloc(512); sprintf((char*)body, "{\"post\":{\"id\":%s,\"body\":\"test\",\"created_at\":\"2025-01-01T00:00:00Z\",\"author\":\"%s\",\"like_count\":0}}", id_buf, username);
                 } else {
                     /* No RETURNING data - use placeholder */
                     body = build_create_post_response_fast(1, username);
@@ -625,7 +639,7 @@ public void process_client(I32 client_sock) {
 /* =================================================================
    MAIN - server entry point with select() event loop
    ================================================================= */
-U0 Main() {
+int main() {
     /* Initialize SQLite */
     sql_ctx = SqlCtxNew(SQLITE_PATH, TRUE);
     if (!sql_ctx) {
@@ -654,20 +668,17 @@ U0 Main() {
     set_non_blocking(listen_sock);
 
     /* Bind to 127.0.0.1:3000 or use env vars */
-    I32 port = 3000;
-    U8 *port_env = getenv("PORT");
+    int port = 3000;
+    U8 *port_env = (U8*)getenv("PORT");
     if (port_env) port = atoi(port_env);
 
     U8 host[64] = "127.0.0.1";
     U8 *host_env = getenv("HOST");
-    if (host_env) my_strcpy(host, host_env, sizeof(host));
+    if (host_env) my_strcpy(,));
 
-    sockaddr_in addr;
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(port);
-    addr.sin_addr.s_addr = inet_addr(host);
+    sockaddr_in addr; memset(&addr,0,sizeof(addr)); addr.sin_family = AF_INET; addr.sin_port = htons(port); addr.sin_addr = inet_addr((char*)host);
 
-    if (bind(listen_sock, (sockaddr)(&addr), sizeof(addr)) < 0) {
+    if (bind(listen_sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
         "Failed to bind on %s:%d\n", host, port;
         close(listen_sock);
         exit(1);
@@ -685,8 +696,8 @@ U0 Main() {
     /* ==============================================================
        SELECT() EVENT LOOP - non-blocking acceptance
        ============================================================== */
-    fd_set read_fds;
-    I32 max_fd = listen_sock;
+    fd_set read_fds; FD_ZERO(&read_fds);
+    int max_fd = listen_sock;
     
     while (TRUE) {
         /* Clear and add listen socket */
@@ -701,7 +712,7 @@ U0 Main() {
         timeout.tv_sec = 0;
         timeout.tv_usec = SELECT_TIMEOUT_MS * 1000;
         
-        I64 activity = select(max_fd + 1, &read_fds, NULL, NULL, &timeout);
+        int activity = select(max_fd + 1, &read_fds, NULL, NULL, &timeout);
         if (activity < 0) continue;
         if (activity == 0) {
             /* Timeout - check connection queue */
@@ -715,7 +726,7 @@ U0 Main() {
 
         /* Handle new connection on listen socket */
         if (FD_ISSET(listen_sock, &read_fds)) {
-            I32 new_sock = accept4(listen_sock, NULL, NULL, O_NONBLOCK);
+            int new_sock = accept(listen_sock, NULL, NULL);
             if (new_sock >= 0) {
                 /* Add to queue */
                 EnterMutex(conn_mutex);
@@ -736,5 +747,5 @@ U0 Main() {
         }
     }
 
-    Main;
+    
 }

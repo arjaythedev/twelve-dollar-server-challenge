@@ -534,6 +534,7 @@ int server_run_uring(app *a, const int *listeners, int listener_count)
 		uint64_t events_done_ns = server_monotonic_ns();
 
 		server_settle(a);
+		store_end_reads(a->db); /* the round's reads shared one transaction */
 		uint64_t settled_ns = server_monotonic_ns();
 
 		store_checkpoint_if_due(a->db);

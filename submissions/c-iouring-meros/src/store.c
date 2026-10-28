@@ -37,6 +37,7 @@ struct store {
 	sqlite3_stmt *feed_likes;     /* like counts of an id range */
 	feed_row feed_rows[FEED_SIZE];
 	bool checkpoint_due;
+	bool reading;                 /* a deferred transaction is open for the reads of the current round */
 	sqlite3_stmt *find_post;
 	sqlite3_stmt *insert_post;
 	sqlite3_stmt *insert_like;
@@ -95,6 +96,27 @@ static bool run_to_completion(sqlite3_stmt *statement)
 	return rc == SQLITE_DONE;
 }
 
+/*
+ * Reads of one event-loop round share a deferred transaction. Without it every statement starts and ends
+ * its own read transaction, which costs SQLite about 1,400 instructions each; a feed runs three statements.
+ * The transaction only holds a snapshot, and nothing else writes to the file while it is open (this process
+ * has it exclusively), so every read still sees the latest committed data.
+ */
+static void begin_reads(store *db)
+{
+	if (!db->reading && sqlite3_get_autocommit(db->handle))
+		db->reading = run_to_completion(db->begin);
+}
+
+void store_end_reads(store *db)
+{
+	if (!db->reading)
+		return;
+	db->reading = false;
+	if (!sqlite3_get_autocommit(db->handle) && !run_to_completion(db->commit))
+		run_to_completion(db->rollback);
+}
+
 #ifndef STORE_MMAP_BYTES
 #define STORE_MMAP_BYTES 1073741824 /* map the whole file */
 #endif
@@ -115,9 +137,9 @@ static void configure(sqlite3 *handle)
 	char script[512];
 
 	snprintf(script, sizeof script,
+	         "PRAGMA locking_mode=EXCLUSIVE;" /* before the first access of the WAL, or the WAL index lives in a locked -shm file */
 	         "PRAGMA journal_mode=WAL;"
 	         "PRAGMA synchronous=NORMAL;"
-	         "PRAGMA locking_mode=EXCLUSIVE;"
 	         "PRAGMA mmap_size=%d;"
 	         "PRAGMA cache_size=-%d;"
 	         "PRAGMA temp_store=MEMORY;"
@@ -197,6 +219,7 @@ void store_close(store *db)
 
 void store_checkpoint(store *db)
 {
+	store_end_reads(db);
 	sqlite3_wal_checkpoint_v2(db->handle, NULL, SQLITE_CHECKPOINT_TRUNCATE, NULL, NULL);
 }
 
@@ -205,6 +228,7 @@ void store_checkpoint_if_due(store *db)
 	if (!db->checkpoint_due)
 		return;
 	db->checkpoint_due = false;
+	store_end_reads(db);
 	sqlite3_wal_checkpoint_v2(db->handle, NULL, SQLITE_CHECKPOINT_PASSIVE, NULL, NULL);
 }
 
@@ -223,6 +247,7 @@ const char *store_error(store *db)
 
 find_result store_find_post(store *db, int64_t post_id, post_visitor visit, void *context)
 {
+	begin_reads(db);
 	sqlite3_bind_int64(db->find_post, 1, post_id);
 	int rc = sqlite3_step(db->find_post);
 
@@ -283,6 +308,16 @@ static bool copy_text(char *destination, size_t capacity, size_t *length, strvie
 	return true;
 }
 
+/* Steps the likes scan and reads the post id of the entry it lands on. */
+static int step_likes(store *db, int64_t *post_id)
+{
+	int rc = sqlite3_step(db->feed_likes);
+
+	if (rc == SQLITE_ROW)
+		*post_id = sqlite3_column_int64(db->feed_likes, 0);
+	return rc;
+}
+
 /*
  * Fills db->feed_rows with the posts of ids [lowest, highest], newest first, merging the posts
  * with their like counts. Both queries walk their index in the same order, so the merge needs
@@ -290,13 +325,14 @@ static bool copy_text(char *destination, size_t capacity, size_t *length, strvie
  */
 static bool collect_feed_rows(store *db, int64_t lowest, int64_t highest, int expected)
 {
-	int count = 0, rc, likes_rc;
+	int count = 0, rc;
+	int64_t like_post = 0;
 
 	sqlite3_bind_int64(db->feed_posts, 1, lowest);
 	sqlite3_bind_int64(db->feed_posts, 2, highest);
 	sqlite3_bind_int64(db->feed_likes, 1, lowest);
 	sqlite3_bind_int64(db->feed_likes, 2, highest);
-	likes_rc = sqlite3_step(db->feed_likes);
+	int likes_rc = step_likes(db, &like_post);
 
 	while ((rc = sqlite3_step(db->feed_posts)) == SQLITE_ROW) {
 		if (count == expected)
@@ -306,13 +342,13 @@ static bool collect_feed_rows(store *db, int64_t lowest, int64_t highest, int ex
 		feed_row *row = &db->feed_rows[count];
 
 		/* One index entry per like, newest post first: skip the entries of posts above this one, then count its own. */
-		while (likes_rc == SQLITE_ROW && sqlite3_column_int64(db->feed_likes, 0) > id)
-			likes_rc = sqlite3_step(db->feed_likes);
+		while (likes_rc == SQLITE_ROW && like_post > id)
+			likes_rc = step_likes(db, &like_post);
 		row->id = id;
 		row->like_count = 0;
-		while (likes_rc == SQLITE_ROW && sqlite3_column_int64(db->feed_likes, 0) == id) {
+		while (likes_rc == SQLITE_ROW && like_post == id) {
 			row->like_count++;
-			likes_rc = sqlite3_step(db->feed_likes);
+			likes_rc = step_likes(db, &like_post);
 		}
 		if (!copy_text(row->body, sizeof row->body, &row->body_len, column_text(db->feed_posts, COL_BODY)) ||
 		    !copy_text(row->created_at, sizeof row->created_at, &row->created_at_len, column_text(db->feed_posts, COL_CREATED_AT)) ||
@@ -334,6 +370,8 @@ static bool collect_feed_rows(store *db, int64_t lowest, int64_t highest, int ex
 bool store_read_feed(store *db, post_visitor visit, void *context)
 {
 	int64_t ids[FEED_SIZE];
+
+	begin_reads(db);
 	int count = read_newest_ids(db, ids);
 
 	if (count < 0)
@@ -358,6 +396,7 @@ bool store_read_feed(store *db, post_visitor visit, void *context)
 
 bool store_begin(store *db)
 {
+	store_end_reads(db);
 	return run_to_completion(db->begin);
 }
 

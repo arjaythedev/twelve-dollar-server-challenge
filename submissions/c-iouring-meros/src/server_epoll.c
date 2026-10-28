@@ -185,6 +185,7 @@ void server_run_epoll(app *a, const int *listening_sockets, int count)
 		uint64_t events_done_ns = server_monotonic_ns();
 
 		server_settle(a);
+		store_end_reads(a->db);
 		resume_listeners_if_possible(a);
 		uint64_t settled_ns = server_monotonic_ns();
 

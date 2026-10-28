@@ -53,6 +53,13 @@ find_result store_find_post(store *db, int64_t post_id, post_visitor visit, void
 /* Calls `visit` for each of the 20 newest posts, newest first. Returns false if the query failed. */
 bool store_read_feed(store *db, post_visitor visit, void *context);
 
+/*
+ * Reads share one transaction until store_end_reads (or store_begin, or a checkpoint) ends it. Call
+ * store_end_reads once per event-loop round: an open read transaction would keep the log from being
+ * copied into the database file.
+ */
+void store_end_reads(store *db);
+
 /* ---- writes: all of them happen between store_begin and store_commit ---- */
 
 bool store_begin(store *db);

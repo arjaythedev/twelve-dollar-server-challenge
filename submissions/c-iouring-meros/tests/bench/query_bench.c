@@ -44,17 +44,27 @@ int main(int argc, char **argv)
 		store_checkpoint_if_due(db); /* the server does this between rounds */
 	}
 
-	enum { POST_CALLS = 400000, FEED_CALLS = 40000 };
+	/* QUERY_BENCH_POSTS and QUERY_BENCH_FEEDS shorten a run, for example under callgrind. */
+	const char *posts_env = getenv("QUERY_BENCH_POSTS"), *feeds_env = getenv("QUERY_BENCH_FEEDS");
+	const int POST_CALLS = posts_env != NULL ? atoi(posts_env) : 400000, FEED_CALLS = feeds_env != NULL ? atoi(feeds_env) : 40000;
+	/* The server ends the shared read transaction once per event-loop round; about this many reads fit in a round. */
+	enum { READS_PER_ROUND = 16 };
 	int64_t newest = 500000 + wal_writes;
 	double start = now_ns();
 
-	for (int i = 0; i < POST_CALLS; i++)
+	for (int i = 0; i < POST_CALLS; i++) {
 		store_find_post(db, newest - i % 20, ignore_post, (void *)&sink);
+		if (i % READS_PER_ROUND == READS_PER_ROUND - 1)
+			store_end_reads(db);
+	}
 	double post_ns = (now_ns() - start) / POST_CALLS;
 
 	start = now_ns();
-	for (int i = 0; i < FEED_CALLS; i++)
+	for (int i = 0; i < FEED_CALLS; i++) {
 		store_read_feed(db, ignore_post, (void *)&sink);
+		if (i % READS_PER_ROUND == READS_PER_ROUND - 1)
+			store_end_reads(db);
+	}
 	double feed_ns = (now_ns() - start) / FEED_CALLS;
 
 	printf("wal_writes=%d  post=%.0f ns  feed=%.0f ns\n", wal_writes, post_ns, feed_ns);

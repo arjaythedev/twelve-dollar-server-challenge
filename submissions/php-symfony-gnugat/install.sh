@@ -3,9 +3,11 @@
 # documented in FrankenPHP's README, and Composer.
 set -euo pipefail
 
-FRANKENPHP_VERSION=1.13.0+php85-1
-PHP_VERSION=8.5.11-2
-PHP_EXT_VERSION=8.5.11-1 # extension packages have their own revisions
+# Upstream versions are pinned, package revisions are not: the repository replaces a revision when it rebuilds
+# (8.5.11-2 became 8.5.11-3), so apt picks the highest revision available.
+FRANKENPHP_VERSION=1.13.0+php85-*
+PHP_VERSION=8.5.11-*
+PHP_EXT_VERSION=8.5.11-*
 COMPOSER_VERSION=2.10.2
 COMPOSER_SHA256=5ee7125f8a30a34d246cefdc0bc85b8a783b28f2aec968994118512350d28027
 

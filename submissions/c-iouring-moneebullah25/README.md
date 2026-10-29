@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Language | C (gnu17), gcc, `-O3 -march=native -flto` (PGO available as `make pgo`, not used: no measured gain) |
+| Language | C (gnu17), gcc, `-O3 -march=native -flto` with PGO trained on a synthetic database at build time (falls back to plain LTO if training fails) |
 | Framework | none: liburing 2.15 (static, built from the pinned release tarball) |
 | Database | SQLite 3.54.1 amalgamation, `THREADSAFE=2`, in-process |
 | Nginx or direct | **Direct** on `HOST:PORT` (`0.0.0.0:80` on the box) |
@@ -10,7 +10,7 @@
 
 `install.sh` installs build-essential, curl, unzip and openssl; `build.sh`
 fetches and checksum-verifies SQLite and liburing into `third_party/` and runs
-the LTO release build (`make release`); `start.sh` runs
+the PGO build (`make pgo`, training on a synthetic database); `start.sh` runs
 `bin/server`, configured only by `SQLITE_PATH`, `JWT_SECRET`, `HOST`, `PORT`.
 
 ## What it does
@@ -20,28 +20,33 @@ the LTO release build (`make release`); `start.sh` runs
   direct descriptors across 7 rings (450k slots by default) and never become
   process fds. Multishot accept hands over to bounded one-shot accepts near the
   end of a table so no accepted socket is lost to `-ENFILE`.
-- **Multishot receive from provided buffers**, 2 KiB each; an idle connection
-  owns no buffer and costs 48 bytes of user-space state. Responses go into a
-  pool of 1,024 x 72 KiB send buffers, sized for the largest legal feed. `ENOBUFS` victims are
-  re-armed only after buffers return, bounded by how many returned.
-- **One batch per wake-up**: wait for 32 completions or 250 us, handle up to
-  256 requests, run all reads in one deferred transaction, all writes in one
-  `BEGIN IMMEDIATE ... COMMIT`, and only then submit the sends (rule 6: a 201
-  is sent after its commit returned; a failed commit turns every write of the
-  batch into a 500).
+- **Multishot receive from provided buffers**, 4,096 x 2 KiB per ring; an idle
+  connection owns no buffer and costs 48 bytes of user-space state. Responses go
+  into a pool of 512 x 72 KiB send buffers, sized for the largest legal feed.
+  `ENOBUFS` victims are re-armed only after buffers return, bounded by how many
+  returned.
+- **Time-paced passes**: once busy, the loop waits for 32 completions or 2 ms,
+  then reaps every ring once and handles up to 256 requests: all reads in one
+  deferred transaction, all writes in one `BEGIN IMMEDIATE ... COMMIT`, and
+  only then the sends (rule 6: a 201 is sent after its commit returned; a
+  failed commit turns every write of the batch into a 500). Secondary rings
+  wake ring 0 through a one-shot poll re-armed only after the ring is drained,
+  so completions on other rings never shorten a pass. (The scored version woke
+  on any ring's completion and ran passes of a few requests once several rings
+  were busy: see `docs/RESULTS.md`.)
 - **Feed as three range scans** (20 newest ids from the covering index, one
-  likes range grouped by post, one posts+users range) with the reference query
-  as the fallback; `GET /posts/:id` is the reference query. Every value is read
-  on the request that serves it; nothing is cached across requests (rule 5),
-  and every token's HMAC is recomputed.
+  likes index range tallied in C, one posts+users range) with the reference
+  query as the fallback; `GET /posts/:id` is the reference query. Every value
+  is read on the request that serves it; nothing is cached across requests
+  (rule 5), and every token's HMAC is recomputed.
 - **SQLite**: WAL, `synchronous=NORMAL`, `mmap_size=0`, 32 MiB page cache,
   `unix-excl` VFS (heap WAL index, no fcntl per transaction),
-  `wal_autocheckpoint=0`; passive checkpoints on the idle thread every 4,000
-  frames, and a short *write hold* (reads continue) every 8,192 frames so the
-  WAL restarts instead of growing without bound.
-- **Memory guard**: pauses accepting below 192 MB `MemAvailable` (or cgroup
-  headroom) and sheds idle keep-alives below 96 MB, so running out of memory
-  becomes a failed probe instead of an OOM kill.
+  `wal_autocheckpoint=0`; passive checkpoints on the nice-10 thread every
+  4,000 frames, and a short *write hold* (reads continue) every 16,384 frames
+  so the WAL restarts instead of growing without bound.
+- **Memory guard**: every 100 ms; pauses accepting below 256 MB `MemAvailable`
+  (or cgroup headroom) and sheds idle keep-alives below 128 MB, so running out
+  of memory becomes a failed probe instead of an OOM kill.
 - HTTP/1.1 keep-alive with pipelining, partial requests, half-close after a
   request, `Expect: 100-continue`, `Date` header, 8 KiB / 16 KiB limits (413),
   30 s timeout for incomplete requests and unread responses, TCP keep-alive

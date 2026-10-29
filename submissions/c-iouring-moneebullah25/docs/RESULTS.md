@@ -165,3 +165,59 @@ sqlite.org (`92281c86...8e30`) and liburing's tarball against its SHA-256
 (`8d052f26...120a`, the same value another entry pinned independently).
 `make release` on this machine takes about 2 minutes (SQLite at -O3 with LTO
 dominates); `make pgo` about 6 minutes including the training run.
+
+## 7. After the scored run: pacing, like tally, SIMD escaping (2026-10-29)
+
+Official result at `065c235`: 209,000 users, 20,460 req/s, 38 us/request at
+83% CPU, p95 51 ms / p99 309 ms, 1,132 MB (organizer's comment on PR #156).
+The box ran four rings at that count; the loop woke on every secondary ring's
+completion and skipped the batch wait whenever any ring held one, so passes
+were a few requests long, the regime that section 3 had measured at 34-39 us.
+
+Local before/after on the same laptop (server on CPU 0, mload on CPU 1, 30-45 s
+runs, desktop load 7-9 so latency is noisy; CPU per request is stable to about
+2 us). "Before" is the scored code; "after" is this follow-up (time-paced
+passes with one-shot ring polls, 2 ms window, likes tallied in C, SSE2 JSON
+escaping, 4,096 receive buffers, 512 send chunks).
+
+| Regime | Before us/req (usr / sys) | After us/req (usr / sys) | Passes per request |
+|---|---|---|---|
+| 64 connections, no think time (batches of ~30) | 33.6 (21.8 / 11.7) | 28.2 (16.5 / 11.6) | 0.05 -> 0.035 |
+| 10k users, think x0.1 (~10k req/s; batches of a few, like the box) | 33.0-34.5 (15-16 / 18) | 29.0-31.4 (12.8-13.7 / 16.4-17.7) | 0.065 -> 0.03 |
+| 10k users, real think times (~1k req/s; one request per wake-up) | 67-77 (32-36 / 36-41) | 68-70 (31-32 / 37-38) | 1.3 -> 0.5 |
+
+Details from the same runs:
+
+- Batch window alone (flag, both binaries): 250 us -> 2,000 us saves about 2 us
+  per request (half user, half system); 1,000 us gets most of it; 64 CQEs is no
+  better than 32. The scored code at 1-2 ms windows ran into ENOBUFS storms
+  (21k-60k per run, throughput down to 4-6k req/s); the follow-up shows zero
+  ENOBUFS at every window and buffer count (the deferred re-arm now runs after
+  a full pass instead of after every wake-up).
+- Syscalls per request at ~10k req/s (`strace -c` as the server's parent):
+  `io_uring_enter` 0.042, `pwrite64` 0.40 (WAL frames), `pread64` 0.071,
+  `fdatasync` 0.00007, `futex` 0.07; the memory guard's `openat`/`read` 0.001;
+  `clock_gettime` is vDSO. Completions per request 2.1-2.2 (receive + send).
+- SQLite cache 256 MiB vs 32 MiB: no change in CPU (0.067 vs 0.071 pread per
+  request); the hot window fits the 32 MiB cache. A separate SQLite-only
+  microbenchmark (same statements, unix-excl) measured the three-range feed at
+  16.5 us vs 28.6 us for the reference query with a 4,000-frame WAL, `mmap`
+  making the feed 1.2-1.8x slower, and the likes scan tallied in C at 11.7 us
+  vs 16.5 us for `GROUP BY count(*)`; `GET /posts/:id` on the newest 2,000 ids
+  3.7 us with zero preads.
+- 16 rings vs 1 ring at 10k users: within noise locally (29.6-31.3 vs
+  29.2-31.7), so the multi-ring cost the box showed is not reproducible on
+  loopback at this request rate; the pacing change removes the mechanism
+  regardless.
+- Where the ~30 us of the box-like regime go locally: user space ~13.5
+  (SQLite and our code), kernel receive/send inside io_uring ~14-15, wake-ups
+  and enters ~1.5-2, WAL writes ~0.5-1, preads ~0.1-0.2 (the kernel figures are
+  estimates from syscall counts; `perf` is not permitted on this machine).
+
+What this predicts for the box, honestly: 10-16% less CPU per request than the
+scored 38 us, i.e. the low thirties, if the loopback ratios transfer; the
+entries at 28-31 us are the ones to beat and this follow-up does not claim to
+reach them. PGO is now part of `build.sh` (trained on a synthetic database on
+the box itself, falling back to the plain build if training fails): the F#
+entry measured 2-4.5% from it on the box; our own laptop measurement was
+inconclusive (section 2).

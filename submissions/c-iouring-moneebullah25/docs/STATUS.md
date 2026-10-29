@@ -1,6 +1,36 @@
 # Status
 
-Last updated: 2026-10-24. Everything here was checked on a 2-core AMD Athlon
+Last updated: 2026-10-29.
+
+## Since the scored run (commit 065c235: 209,000 users, 38 us/request, 83% CPU)
+
+The organizer's result put this entry 8th at 38 us of CPU per request, with the
+best p95 on the board (51 ms) and the entries above it at 28-33 us. Our own
+RESULTS.md had already measured 27-30 us with passes of ~30 requests and 34-39
+us with passes of 2-4, and the box ran four rings at 209k users: the loop was
+waking on every secondary ring's completion (a multishot poll on the ring fd
+fires on every pass while that CQ holds anything) and skipping the batch wait
+whenever any ring had a completion, so it ran passes of a few requests, each
+with an `io_uring_enter` per ring and a read and a write transaction. This
+follow-up changes that and a few things around it:
+
+- Time-paced passes: 32 CQEs or 2 ms once busy; only queued requests skip the
+  wait; one-shot ring polls re-armed after a drain; every ring reaped once per
+  pass. (The entries at 28-31 us pace at 1-2 ms.)
+- Like counts for the feed tallied in C from one index row per like instead
+  of `GROUP BY count(*)`: about 30% off the likes scan locally.
+- SSE2 scan for bytes that need JSON escaping.
+- 4,096 receive buffers per ring; send pool 512 x 72 KiB (36 MiB instead of
+  72); write holds at 16,384 frames; memory guard at 256/128 MB every 100 ms.
+- The SQ-full path recovers from a CQ overflow (`-EBUSY`) instead of aborting.
+- The stats line splits CPU per request into user and system.
+
+Unchanged: everything rule-related (no caching, commit before send, WAL +
+NORMAL, pinned and hash-verified deps, direct on :80, nothing outside the
+entry folder). Unverified on the box: all of the above; local numbers are in
+RESULTS.md section 7. A 65,536-entry CQ was tried and dropped: ring memory
+counts against the 8 MB `RLIMIT_MEMLOCK` a service gets, and seven such rings
+do not fit. Everything here was checked on a 2-core AMD Athlon
 Silver 3050U workstation (Zen1, 14 GB, Ubuntu kernel 6.8.0-147, gcc 13.3), not
 on a 1 vCPU / 2 GB droplet. See RESULTS.md for the numbers.
 
@@ -60,7 +90,7 @@ on a 1 vCPU / 2 GB droplet. See RESULTS.md for the numbers.
 - Kernel 6.8.0-117 on the box versus 6.8.0-147 here: same series. The
   `IORING_REGISTER_PBUF_RING` EINVAL seen here is the reason classic
   `PROVIDE_BUFFERS` is used; both kernels support it.
-- The memory guard thresholds (192 MB / 96 MB) were only exercised by reading
+- The memory guard thresholds (256 MB / 128 MB) were only exercised by reading
   the counters; they never triggered on a 14 GB machine. The cgroup headroom
   check was verified under `systemd-run --user --scope -p MemoryMax=`.
 - Port 80 with `CAP_NET_BIND_SERVICE`: not possible without root here; the

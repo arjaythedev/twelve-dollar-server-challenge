@@ -38,9 +38,11 @@ way past the limit without closing clients' connections (rule 11 forbids
 raising it for us).
 
 Ring 0 is where the thread blocks (`io_uring_submit_and_wait_timeout`); it
-uses `SINGLE_ISSUER | DEFER_TASKRUN | COOP_TASKRUN | SUBMIT_ALL`. The other
-rings' fds are watched from ring 0 with multishot `POLL_ADD`; when one fires,
-that ring gets `io_uring_get_events` and its CQ is drained. Those rings use
+uses `SINGLE_ISSUER | DEFER_TASKRUN | COOP_TASKRUN | SUBMIT_ALL`. Every pass
+reaps every ring. A secondary ring also wakes ring 0 through a *one-shot*
+`POLL_ADD` on its fd, armed only after the ring was drained: a multishot poll
+fires again on every pass while the CQ holds anything, which is what kept the
+scored version from ever waiting for a batch once several rings were busy. Those rings use
 `SINGLE_ISSUER | COOP_TASKRUN | SUBMIT_ALL` **without** `DEFER_TASKRUN`: a
 deferred ring posts its CQEs only when its own task work runs, and only a
 posted CQE wakes the poll (queued-but-deferred work does not), so a deferred
@@ -62,7 +64,8 @@ table is full nothing is armed and the listen backlog (4,096, the kernel
 default `somaxconn`) holds clients until a close frees a slot.
 
 **Receive.** One multishot `RECV` per connection with `IOSQE_BUFFER_SELECT`
-from a pool of provided buffers per ring (2,048 x 2 KiB). An idle connection
+from a pool of provided buffers per ring (4,096 x 2 KiB; the F# entry found a
+saturated loop running dry at 2,048). An idle connection
 owns no buffer. Classic `IORING_OP_PROVIDE_BUFFERS` is used, not the newer
 buffer ring: this kernel rejects `IORING_REGISTER_PBUF_RING` with EINVAL
 (verified with a raw syscall and both struct layouts), and one tested path beats
@@ -82,16 +85,22 @@ are therefore processed before any new request in the next iteration frees
 their resources ("send-first ordering").
 
 **Batching.** After an iteration with 4 or more completions the loop waits for
-32 CQEs or 250 us, whichever first; otherwise it waits for 1 CQE (50 ms
-timeout for the periodic tasks). A 32/250 us batch is what the NASM and Zig
-entries converged on; 128/4 ms starved low connection counts.
+32 CQEs or 2 ms, whichever first; otherwise it waits for 1 CQE (50 ms timeout
+for the periodic tasks). Only requests already queued (a batch that hit its
+budget) skip the wait; completions sitting in a secondary ring's CQ do not,
+because each pass costs an `io_uring_enter` per ring plus a read and a write
+transaction, and the official run showed passes of a few requests at 20k
+req/s over four rings (38 us/request against 27-30 us with passes of 30). The
+F# and C entries ahead on the leaderboard pace at 1-2 ms; the F# author
+measured -9.9% CPU for the window alone. The scored version used 250 us.
 
 **Connection record.** 48 bytes: generation, state, flags, ring, slot, last
 activity, send chunk, parked receive buffer (id/offset/length), and a pointer
 to a heap copy that only exists while a request is incomplete. Generations tag
 every SQE so a completion for a slot that was closed and re-used is ignored.
 
-**Send buffers.** A bounded pool of 1,024 x 72 KiB chunks (72 MiB, prefaulted);
+**Send buffers.** A bounded pool of 512 x 72 KiB chunks (36 MiB, prefaulted;
+a few dozen are in flight at 35k req/s);
 72 KiB holds the largest legal feed (20 posts of 500 characters that each
 escape to 6 bytes, plus the envelope), and the writers check the actual
 escaped length rather than a worst-case bound. A response is written straight
@@ -122,12 +131,14 @@ its slot after about four minutes instead of never.
 terminates, then `close_direct` from its final completion. A send still in
 flight keeps its chunk until it completes; the generation check frees it.
 
-**Memory guard** (rule 8: run out of memory and you lose). Every 250 ms the
+**Memory guard** (rule 8: run out of memory and you lose). Every 100 ms the
 loop reads `MemAvailable` and, when the process runs under a cgroup with
-`memory.max`, the cgroup headroom too. Below 192 MB accepting pauses (the
-multishot accept is cancelled; clients wait in the backlog); below 96 MB up to
-2,000 idle keep-alives per tick are closed, oldest first. Accepting resumes 32 MB
-above the pause line.
+`memory.max`, the cgroup headroom too. Below 256 MB accepting pauses (the
+multishot accept is cancelled; clients wait in the backlog); below 128 MB up
+to 2,000 idle keep-alives per tick are closed, oldest first. Accepting resumes
+32 MB above the pause line. The scored version used 192/96 MB at 250 ms; the
+organizer's notes on other entries show `MemAvailable` falling by ~80 MB in
+four seconds near the wall, and our 240k+ probes were refused connections.
 
 **Prefault.** The connection table, send pool and receive pools are touched at
 startup and the SQLite page cache is warmed with the feed and the 2,000 newest
@@ -179,8 +190,9 @@ partial segment of a feed response would wait on the client's delayed ACK.
 
 **Feed as three range scans.** The 20 newest `(created_at, id)` come from the
 covering index. If the ids span at most 256, one range scan of
-`likes_post_id_idx` grouped by `post_id` and one range scan of `posts JOIN
-users` over the span replace 20 + 20 + 20 point lookups. Rows are copied into
+`likes_post_id_idx` (one row per like, tallied in C: about 30% cheaper than
+`GROUP BY count(*)` for the few hundred likes a feed spans) and one range scan
+of `posts JOIN users` over the span replace 20 + 20 + 20 point lookups. Rows are copied into
 a scratch area and emitted in the index order. Otherwise, or on any anomaly,
 the reference query runs. `--feed-reference` forces the reference query; the
 black-box suite checks both strategies produce identical feeds. Every value is
@@ -190,11 +202,13 @@ read on the request that serves it (rule 5).
 `PASSIVE` checkpoints whenever the WAL (reported by the WAL hook after every
 commit) exceeds 4,000 frames not yet backfilled, so the loop never waits for an `fsync`. PASSIVE
 checkpoints alone never let the WAL restart under continuous writes (the Zig
-entry saw 5 MB/s of unbounded growth). So when the WAL reaches 8,192 frames
-(32 MiB) the loop *holds writes* (reads continue; held requests park with their
+entry saw 5 MB/s of unbounded growth). So when the WAL reaches 16,384 frames
+(64 MiB) the loop *holds writes* (reads continue; held requests park with their
 input) until the checkpointer reports the WAL fully backfilled; the next write
 transaction then restarts the WAL from frame 1. A hold gives up after 500 ms
-and retries 8,192 frames later. Holds are counted and timed in the stats line.
+and retries 16,384 frames later. (8,192 in the scored version; a hold lasts as
+long as the checkpoint's fsyncs, not its copying, so a larger WAL means half
+the holds.) Holds are counted and timed in the stats line.
 
 **Create** uses `INSERT` then `SELECT created_at` by rowid (the column default
 `strftime` produces the timestamp, as the SPEC describes). **Like** checks the

@@ -51,7 +51,15 @@ try {
   assert.equal((await request('/posts/1')).body.post.body, 'external change');
   db.prepare('UPDATE posts SET body = ? WHERE id = 1').run(initial.body.post.body);
   assert.equal((await request('/posts/1/like', 'POST', undefined, token({ sub: '1', username: 'verification', exp: 1 }))).status, 401);
-  assert.equal((await request('/posts', 'POST', { body: 'x' }, token({ sub: '1', username: 'verification' }, 'wrong-secret'))).status, 401);
+  assert.equal((await request('/posts', 'POST', { body: 'x' }, token({ sub: '1', username: 'verification', exp: Math.floor(Date.now() / 1000) + 3600 }, 'wrong-secret'))).status, 401);
+  for (const exp of [undefined, null, '9999999999', 0]) {
+    const claims = { sub: '1', username: 'verification', ...(exp === undefined ? {} : { exp }) };
+    const auth = token(claims);
+    for (const route of ['/posts', '/posts/1/like']) {
+      assert.deepEqual(await request(route, 'POST', route === '/posts' ? { body: 'must reject' } : undefined, auth),
+        { status: 401, body: { error: 'invalid or expired token' } });
+    }
+  }
   const emptyCreate = await fetch(`${base}/posts`, { method: 'POST', headers: {
     authorization: `Bearer ${valid}`, 'content-type': 'application/json'
   } });
@@ -89,9 +97,9 @@ try {
       assert.deepEqual(result.body, { liked: true, already_liked: result.status === 200, post_id: id });
   }
   assert.equal(db.prepare('SELECT count(*) AS n FROM likes WHERE post_id = ?').get(id).n, 2);
-  assert.equal((await request('/posts', 'POST', { body: 'invalid FK' }, token({ sub: '999999999', username: 'unknown' }))).status, 500);
+  assert.equal((await request('/posts', 'POST', { body: 'invalid FK' }, missingUser)).status, 500);
   const mixed = await Promise.all(Array.from({ length: 32 }, (_, i) => request('/posts', 'POST',
-    { body: `mixed ${i}` }, i % 4 ? valid : token({ sub: '999999999', username: 'unknown' }))));
+    { body: `mixed ${i}` }, i % 4 ? valid : missingUser)));
   assert.equal(mixed.filter(r => r.status === 201).length, 24);
   assert.equal(mixed.filter(r => r.status === 500).length, 8);
   for (const result of mixed.filter(r => r.status === 201)) {

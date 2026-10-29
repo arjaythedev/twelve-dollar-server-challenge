@@ -118,7 +118,9 @@ repeatability at this load is not established. This is a higher selected passing
 local load than the earlier 90,000-user result, not a proven maximum, an official
 droplet score, or a controlled estimate of the capacity gain attributable to SQL.
 Full warm-up and scored-run evidence is under
-`like_query_optimization.capacity_trial` in `performance-results.json`.
+`like_query_optimization.capacity_trial` in `performance-results.json`. This
+measurement predates the subsequent required-`exp` and pinned-toolchain fixes;
+the recorded source hash identifies the measured implementation.
 
 The earlier Node 26 qualification included a Prettier formatting pass that
 changed source layout only. The emitted

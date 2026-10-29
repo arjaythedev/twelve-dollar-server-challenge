@@ -48,7 +48,7 @@ No generated binaries or dependency directories are submitted.
   only no-ops need a separate lookup to distinguish duplicates from missing posts.
   The existing unique constraint makes duplicate concurrent likes idempotent.
 - JWT signatures and expiration are verified on every authenticated request,
-  restricted to HS256 with verifier caching explicitly disabled. Authentication
+  restricted to HS256, with `exp` required and verifier caching explicitly disabled. Authentication
   runs before body parsing and ID validation.
 - Ordinary keep-alive lasts 75 seconds. At 60,000 open server connections, or
   a smaller inherited descriptor limit minus 128, completed responses advertise
@@ -101,4 +101,6 @@ only 4.5 ms; repeatability at this load has not been established. This is a
 selected passing load on a Threadripper host, not maximum capacity or an official
 DigitalOcean droplet score. Three-round saturation comparisons also measured
 12.1% higher distributed-like throughput and 10.1% higher duplicate-like throughput.
-See `PERFORMANCE.md` for the comparisons and qualification boundaries.
+See `PERFORMANCE.md` for the comparisons and qualification boundaries. These
+measurements precede the subsequent required-`exp` and pinned-toolchain fixes;
+the full-load measurement has not been repeated for those later changes.

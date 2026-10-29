@@ -151,7 +151,7 @@ app.addHook('onSend', (_request, reply, payload, done) => {
 });
 await app.register(jwt, {
   secret: JWT_SECRET,
-  verify: { algorithms: ['HS256'], cache: false }
+  verify: { algorithms: ['HS256'], cache: false, requiredClaims: ['exp'] }
 });
 const postSchema = {
   type: 'object',

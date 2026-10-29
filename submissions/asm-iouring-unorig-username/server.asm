@@ -19,7 +19,7 @@ default rel
 %define MAXCQE       (MAXRINGS*CQ_ENTRIES)  ; completions per loop iteration, bounds rearm/deferred
 %define NBUF         4096           ; provided receive buffers per ring
 %define BSZ          2048
-%define ACCEPTS      16
+%define ACCEPTS      256  ; rearmed once per loop pass, so this caps accepts per pass (16 held ramps to ~1.7k/s)
 
 ; connection (64 bytes), per ring slot
 %define C_IN      0      ; q: partial request, or input held while a send is in flight

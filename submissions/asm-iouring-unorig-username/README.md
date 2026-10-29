@@ -49,10 +49,12 @@ It mirrors our C io_uring server (`submissions/c-iouring-unorig-username`).
   caps one table at `RLIMIT_NOFILE`, so when a table is full the loop adds another ring (same thread,
   up to 32) and accepts there. With `LimitNOFILE=65535` that is about 2 million clients in one
   process. Extra rings signal an eventfd that ring 0 reads, so one wait covers all of them.
-- **Accepts are single-shot, 16 in flight.** A multishot accept can't be stopped before its table
+- **Accepts are single-shot, 256 in flight.** A multishot accept can't be stopped before its table
   fills, and the accept that finds the table full has already taken the connection off the queue, so
   the kernel can only reset it. Single-shot accepts are only issued while a table has room, and the
-  last 16 slots are never used (closes still in flight may hold them).
+  last 16 slots are never used (closes still in flight may hold them). They are rearmed once per loop
+  pass, so the number in flight caps accepts per pass: with 16, a 330,000-user ramp was accepted at
+  only ~1,700 connections/s.
 - **Multishot receives into provided buffer rings** (4,096 x 2 KB per ring). A receive stays armed for
   the life of the connection; each chunk arrives in a kernel-picked buffer that goes back to the ring as
   soon as it is parsed. Idle clients hold no buffer. A partial request is copied into a per-connection

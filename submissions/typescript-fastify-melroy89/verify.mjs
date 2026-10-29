@@ -71,6 +71,24 @@ try {
   assert.equal(duplicates.filter(r => r.status === 201).length, 1);
   assert.equal(duplicates.filter(r => r.status === 200).length, 31);
   assert.equal((await request(`/posts/${id}`)).body.post.like_count, 1);
+  // A mixed group must distinguish missing posts, duplicate likes and failed FK
+  // writes without poisoning the successful jobs or acknowledging lost writes.
+  const secondUser = token({ sub: '2', username: 'second', exp: Math.floor(Date.now() / 1000) + 3600 });
+  const missingUser = token({ sub: '999999999', username: 'unknown', exp: Math.floor(Date.now() / 1000) + 3600 });
+  const mixedLikes = await Promise.all(Array.from({ length: 30 }, (_, i) =>
+    request(`/posts/${i % 3 === 0 ? 999999999 : id}/like`, 'POST', undefined,
+      i % 3 === 1 ? missingUser : secondUser)));
+  assert.equal(mixedLikes.filter(r => r.status === 404).length, 10);
+  assert.equal(mixedLikes.filter(r => r.status === 500).length, 10);
+  assert.equal(mixedLikes.filter(r => r.status === 201).length, 1);
+  assert.equal(mixedLikes.filter(r => r.status === 200).length, 9);
+  for (const result of mixedLikes) {
+    if (result.status === 404) assert.deepEqual(result.body, { error: 'post not found' });
+    if (result.status === 500) assert.deepEqual(result.body, { error: 'internal server error' });
+    if (result.status === 200 || result.status === 201)
+      assert.deepEqual(result.body, { liked: true, already_liked: result.status === 200, post_id: id });
+  }
+  assert.equal(db.prepare('SELECT count(*) AS n FROM likes WHERE post_id = ?').get(id).n, 2);
   assert.equal((await request('/posts', 'POST', { body: 'invalid FK' }, token({ sub: '999999999', username: 'unknown' }))).status, 500);
   const mixed = await Promise.all(Array.from({ length: 32 }, (_, i) => request('/posts', 'POST',
     { body: `mixed ${i}` }, i % 4 ? valid : token({ sub: '999999999', username: 'unknown' }))));
@@ -84,9 +102,9 @@ try {
   for (const result of created) assert.equal(db.prepare('SELECT body FROM posts WHERE id = ?').get(result.body.post.id).body, result.body.post.body);
   await stop('SIGKILL');
   for (const result of created) assert.equal(db.prepare('SELECT body FROM posts WHERE id = ?').get(result.body.post.id).body, result.body.post.body);
-  assert.equal(db.prepare('SELECT count(*) AS n FROM likes WHERE post_id = ?').get(id).n, 1);
+  assert.equal(db.prepare('SELECT count(*) AS n FROM likes WHERE post_id = ?').get(id).n, 2);
   await start();
-  assert.equal((await request(`/posts/${id}`)).body.post.like_count, 1);
+  assert.equal((await request(`/posts/${id}`)).body.post.like_count, 2);
   assert.deepEqual(db.prepare('SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY name').all(), schema);
   console.log('PASS: fresh reads, uncached JWT checks, Unicode, concurrent duplicate likes, FK recovery, acknowledged-write SIGKILL persistence, restart and unchanged schema');
 } finally {

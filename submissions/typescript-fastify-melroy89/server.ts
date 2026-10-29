@@ -54,8 +54,10 @@ const health = db.prepare('SELECT 1');
 const insert = db.prepare<[number, string], { id: number; created_at: string }>(
   'INSERT INTO posts (user_id, body) VALUES (?, ?) RETURNING id, created_at'
 );
-const like = db.prepare<[number, number]>(
-  'INSERT INTO likes (user_id, post_id) VALUES (?, ?) ON CONFLICT (user_id, post_id) DO NOTHING'
+const like = db.prepare<[number, number, number]>(
+  `INSERT INTO likes (user_id, post_id)
+   SELECT ?, ? WHERE EXISTS (SELECT 1 FROM posts WHERE id = ?)
+   ON CONFLICT (user_id, post_id) DO NOTHING`
 );
 
 type WriteJob = {
@@ -313,13 +315,21 @@ app.post<{ Params: { id: string } }>(
   (request, reply) => {
     const id = idOf(request.params.id);
     if (!id) return error(reply, 400, 'invalid post id');
-    if (!exists.get(id)) return error(reply, 404, 'post not found');
     write(
-      () => like.run(request.identity!.id, id).changes !== 0,
+      () => {
+        // New likes avoid crossing the native boundary for a separate existence
+        // query. Only a no-op needs to distinguish duplicate from missing.
+        if (like.run(request.identity!.id, id, id).changes !== 0) return true;
+        return exists.get(id) ? false : null;
+      },
       (failure, changed) => {
         if (failure) {
           console.error(failure);
           error(reply, 500, 'internal server error');
+          return;
+        }
+        if (changed === null) {
+          error(reply, 404, 'post not found');
           return;
         }
         reply

@@ -423,5 +423,975 @@
     "memory_peak_bytes": 1850036224,
     "oom_killed": false,
     "node_version": "26.11.1"
+  },
+  "like_query_optimization": {
+    "date": "2026-10-30",
+    "baseline_commit": "6ba12bd",
+    "baseline_source_sha256": "1891ebf087afa52bbb73e1a0f919a39ff6298254b36fe2510b785eb78a19f6c3",
+    "candidate_source_sha256": "fb78f28f6b22f6d4698e78453e6e2e19b6b1d74a7023110622b1ca076621e679",
+    "baseline_compiled_sha256": "5fc3441ed85f0c8890a60bcc9ca221a572cce079fbda07468d1b4b2357b82ed6",
+    "candidate_compiled_sha256": "21dfcff82b5bb9cfb4c183b990cc19914be9251f6851e643476671658f77471b",
+    "image": "sha256:9e4eccdf066351849262568ea1e5da69acc08a8e71d6cb4f2866bc3374d1c01c",
+    "environment": {
+      "node": "26.11.1",
+      "fastify": "5.12.7",
+      "better_sqlite3": "13.0.3",
+      "native_binding": "source-built",
+      "server_cpu_quota": 1,
+      "server_memory_bytes": 2147483648,
+      "server_swap_bytes": 0,
+      "nofile": 65535,
+      "network": "host",
+      "generator": "autocannon 8.0.0, Node 24.15.0 outside server quota",
+      "connections": 100,
+      "pipelining": 1,
+      "duration_seconds_per_sample": 10,
+      "trials": 3,
+      "fresh_seed_per_variant_and_trial": true
+    },
+    "method": {
+      "order": [
+        [
+          "baseline",
+          "final"
+        ],
+        [
+          "final",
+          "baseline"
+        ],
+        [
+          "baseline",
+          "final"
+        ]
+      ],
+      "endpoints_in_order": [
+        "feed",
+        "new",
+        "repeat"
+      ],
+      "feed": "GET /feed, unchanged control",
+      "new": "POST /posts/:id/like, valid user 1, incrementing post IDs modulo 500000; mostly new likes, possible seeded duplicates",
+      "repeat": "POST /posts/100000/like, same user, duplicate likes",
+      "authentication": "HS256 signature verified on every authenticated request; no verification cache",
+      "summary": "median of three independent samples per variant/endpoint"
+    },
+    "caveats": [
+      "Short saturation tests, not official workload capacity measurements.",
+      "Host had unrelated active workloads; no CPU affinity or host tuning was changed.",
+      "Initial invalid-target diagnostic samples were discarded before the complete comparisons.",
+      "Three samples do not establish statistical significance."
+    ],
+    "median_requests_per_second": {
+      "baseline": {
+        "feed": 22057.46,
+        "new": 32480.8,
+        "repeat": 38320
+      },
+      "final": {
+        "feed": 22620.37,
+        "new": 36413.6,
+        "repeat": 42192
+      }
+    },
+    "final_code_samples": [
+      {
+        "mode": "feed",
+        "rps": 22057.46,
+        "p99": 8,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "trial": 0,
+        "variant": "baseline"
+      },
+      {
+        "mode": "new",
+        "rps": 32480.8,
+        "p99": 9,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "trial": 0,
+        "variant": "baseline"
+      },
+      {
+        "mode": "repeat",
+        "rps": 38357.82,
+        "p99": 5,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "trial": 0,
+        "variant": "baseline"
+      },
+      {
+        "mode": "feed",
+        "rps": 23663.28,
+        "p99": 7,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "trial": 0,
+        "variant": "final"
+      },
+      {
+        "mode": "new",
+        "rps": 36413.6,
+        "p99": 10,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "trial": 0,
+        "variant": "final"
+      },
+      {
+        "mode": "repeat",
+        "rps": 42371.2,
+        "p99": 5,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "trial": 0,
+        "variant": "final"
+      },
+      {
+        "mode": "feed",
+        "rps": 22339.2,
+        "p99": 8,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "trial": 1,
+        "variant": "final"
+      },
+      {
+        "mode": "new",
+        "rps": 37018.91,
+        "p99": 10,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "trial": 1,
+        "variant": "final"
+      },
+      {
+        "mode": "repeat",
+        "rps": 42192,
+        "p99": 5,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "trial": 1,
+        "variant": "final"
+      },
+      {
+        "mode": "feed",
+        "rps": 21977.46,
+        "p99": 8,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "trial": 1,
+        "variant": "baseline"
+      },
+      {
+        "mode": "new",
+        "rps": 33653.1,
+        "p99": 10,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "trial": 1,
+        "variant": "baseline"
+      },
+      {
+        "mode": "repeat",
+        "rps": 38293.82,
+        "p99": 5,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "trial": 1,
+        "variant": "baseline"
+      },
+      {
+        "mode": "feed",
+        "rps": 22889.46,
+        "p99": 7,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "trial": 2,
+        "variant": "baseline"
+      },
+      {
+        "mode": "new",
+        "rps": 32206.55,
+        "p99": 10,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "trial": 2,
+        "variant": "baseline"
+      },
+      {
+        "mode": "repeat",
+        "rps": 38320,
+        "p99": 5,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "trial": 2,
+        "variant": "baseline"
+      },
+      {
+        "mode": "feed",
+        "rps": 22620.37,
+        "p99": 8,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "trial": 2,
+        "variant": "final"
+      },
+      {
+        "mode": "new",
+        "rps": 34532.37,
+        "p99": 10,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "trial": 2,
+        "variant": "final"
+      },
+      {
+        "mode": "repeat",
+        "rps": 38995.64,
+        "p99": 5,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "trial": 2,
+        "variant": "final"
+      }
+    ],
+    "exploratory_samples": [
+      {
+        "mode": "feed",
+        "rps": 27938.19,
+        "p99": 5,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "trial": 0,
+        "variant": "baseline"
+      },
+      {
+        "mode": "new",
+        "rps": 40000.73,
+        "p99": 9,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "trial": 0,
+        "variant": "baseline"
+      },
+      {
+        "mode": "repeat",
+        "rps": 47704.73,
+        "p99": 4,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "trial": 0,
+        "variant": "baseline"
+      },
+      {
+        "mode": "feed",
+        "rps": 25295.28,
+        "p99": 6,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "trial": 0,
+        "variant": "schema"
+      },
+      {
+        "mode": "new",
+        "rps": 34810.91,
+        "p99": 10,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "trial": 0,
+        "variant": "schema"
+      },
+      {
+        "mode": "repeat",
+        "rps": 39582.55,
+        "p99": 5,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "trial": 0,
+        "variant": "schema"
+      },
+      {
+        "mode": "feed",
+        "rps": 24681.6,
+        "p99": 7,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "trial": 0,
+        "variant": "conditional"
+      },
+      {
+        "mode": "new",
+        "rps": 39130.4,
+        "p99": 9,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "trial": 0,
+        "variant": "conditional"
+      },
+      {
+        "mode": "repeat",
+        "rps": 44198.4,
+        "p99": 4,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "trial": 0,
+        "variant": "conditional"
+      },
+      {
+        "mode": "feed",
+        "rps": 24587.2,
+        "p99": 7,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "trial": 0,
+        "variant": "combined"
+      },
+      {
+        "mode": "new",
+        "rps": 37554.19,
+        "p99": 10,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "trial": 0,
+        "variant": "combined"
+      },
+      {
+        "mode": "repeat",
+        "rps": 43341.1,
+        "p99": 5,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "trial": 0,
+        "variant": "combined"
+      },
+      {
+        "mode": "feed",
+        "rps": 23916.8,
+        "p99": 7,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "trial": 1,
+        "variant": "combined"
+      },
+      {
+        "mode": "new",
+        "rps": 37141.1,
+        "p99": 9,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "trial": 1,
+        "variant": "combined"
+      },
+      {
+        "mode": "repeat",
+        "rps": 45860.37,
+        "p99": 4,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "trial": 1,
+        "variant": "combined"
+      },
+      {
+        "mode": "feed",
+        "rps": 24601.46,
+        "p99": 6,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "trial": 1,
+        "variant": "conditional"
+      },
+      {
+        "mode": "new",
+        "rps": 38634.91,
+        "p99": 10,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "trial": 1,
+        "variant": "conditional"
+      },
+      {
+        "mode": "repeat",
+        "rps": 43634.91,
+        "p99": 5,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "trial": 1,
+        "variant": "conditional"
+      },
+      {
+        "mode": "feed",
+        "rps": 23953.6,
+        "p99": 7,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "trial": 1,
+        "variant": "schema"
+      },
+      {
+        "mode": "new",
+        "rps": 36653.82,
+        "p99": 10,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "trial": 1,
+        "variant": "schema"
+      },
+      {
+        "mode": "repeat",
+        "rps": 45095.28,
+        "p99": 4,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "trial": 1,
+        "variant": "schema"
+      },
+      {
+        "mode": "feed",
+        "rps": 24492.37,
+        "p99": 7,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "trial": 1,
+        "variant": "baseline"
+      },
+      {
+        "mode": "new",
+        "rps": 33523.64,
+        "p99": 10,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "trial": 1,
+        "variant": "baseline"
+      },
+      {
+        "mode": "repeat",
+        "rps": 38349.1,
+        "p99": 5,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "trial": 1,
+        "variant": "baseline"
+      },
+      {
+        "mode": "feed",
+        "rps": 21839.28,
+        "p99": 8,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "trial": 2,
+        "variant": "schema"
+      },
+      {
+        "mode": "new",
+        "rps": 32208,
+        "p99": 10,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "trial": 2,
+        "variant": "schema"
+      },
+      {
+        "mode": "repeat",
+        "rps": 41116.81,
+        "p99": 4,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "trial": 2,
+        "variant": "schema"
+      },
+      {
+        "mode": "feed",
+        "rps": 23738.91,
+        "p99": 7,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "trial": 2,
+        "variant": "baseline"
+      },
+      {
+        "mode": "new",
+        "rps": 33146.19,
+        "p99": 10,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "trial": 2,
+        "variant": "baseline"
+      },
+      {
+        "mode": "repeat",
+        "rps": 38363.64,
+        "p99": 5,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "trial": 2,
+        "variant": "baseline"
+      },
+      {
+        "mode": "feed",
+        "rps": 23567.28,
+        "p99": 7,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "trial": 2,
+        "variant": "combined"
+      },
+      {
+        "mode": "new",
+        "rps": 36269.82,
+        "p99": 10,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "trial": 2,
+        "variant": "combined"
+      },
+      {
+        "mode": "repeat",
+        "rps": 44626.91,
+        "p99": 4,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "trial": 2,
+        "variant": "combined"
+      },
+      {
+        "mode": "feed",
+        "rps": 23510.55,
+        "p99": 7,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "trial": 2,
+        "variant": "conditional"
+      },
+      {
+        "mode": "new",
+        "rps": 37600.73,
+        "p99": 10,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "trial": 2,
+        "variant": "conditional"
+      },
+      {
+        "mode": "repeat",
+        "rps": 44170.19,
+        "p99": 4,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "trial": 2,
+        "variant": "conditional"
+      }
+    ],
+    "gc_samples": [
+      {
+        "mode": "feed",
+        "rps": 24195.64,
+        "p99": 7,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "memory_peak_bytes": 323424256,
+        "trial": 0,
+        "variant": "default"
+      },
+      {
+        "mode": "repeat",
+        "rps": 38323.64,
+        "p99": 5,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "memory_peak_bytes": 338169856,
+        "trial": 0,
+        "variant": "default"
+      },
+      {
+        "mode": "feed",
+        "rps": 23706.91,
+        "p99": 7,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "memory_peak_bytes": 324292608,
+        "trial": 0,
+        "variant": "semi16"
+      },
+      {
+        "mode": "repeat",
+        "rps": 38406.55,
+        "p99": 5,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "memory_peak_bytes": 339697664,
+        "trial": 0,
+        "variant": "semi16"
+      },
+      {
+        "mode": "feed",
+        "rps": 23581.82,
+        "p99": 7,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "memory_peak_bytes": 323338240,
+        "trial": 0,
+        "variant": "semi32"
+      },
+      {
+        "mode": "repeat",
+        "rps": 39480.81,
+        "p99": 5,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "memory_peak_bytes": 364773376,
+        "trial": 0,
+        "variant": "semi32"
+      },
+      {
+        "mode": "feed",
+        "rps": 24488,
+        "p99": 7,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "memory_peak_bytes": 321310720,
+        "trial": 0,
+        "variant": "semi64"
+      },
+      {
+        "mode": "repeat",
+        "rps": 38336.73,
+        "p99": 5,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "memory_peak_bytes": 365682688,
+        "trial": 0,
+        "variant": "semi64"
+      },
+      {
+        "mode": "feed",
+        "rps": 23803.2,
+        "p99": 7,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "memory_peak_bytes": 322093056,
+        "trial": 1,
+        "variant": "semi64"
+      },
+      {
+        "mode": "repeat",
+        "rps": 38744,
+        "p99": 5,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "memory_peak_bytes": 366587904,
+        "trial": 1,
+        "variant": "semi64"
+      },
+      {
+        "mode": "feed",
+        "rps": 23984,
+        "p99": 7,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "memory_peak_bytes": 329584640,
+        "trial": 1,
+        "variant": "semi32"
+      },
+      {
+        "mode": "repeat",
+        "rps": 38128.73,
+        "p99": 5,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "memory_peak_bytes": 366628864,
+        "trial": 1,
+        "variant": "semi32"
+      },
+      {
+        "mode": "feed",
+        "rps": 22312,
+        "p99": 8,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "memory_peak_bytes": 320802816,
+        "trial": 1,
+        "variant": "semi16"
+      },
+      {
+        "mode": "repeat",
+        "rps": 37056.81,
+        "p99": 6,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "memory_peak_bytes": 335609856,
+        "trial": 1,
+        "variant": "semi16"
+      },
+      {
+        "mode": "feed",
+        "rps": 22954.91,
+        "p99": 8,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "memory_peak_bytes": 322265088,
+        "trial": 1,
+        "variant": "default"
+      },
+      {
+        "mode": "repeat",
+        "rps": 37247.2,
+        "p99": 5,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "memory_peak_bytes": 336777216,
+        "trial": 1,
+        "variant": "default"
+      },
+      {
+        "mode": "feed",
+        "rps": 23148.37,
+        "p99": 7,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "memory_peak_bytes": 323678208,
+        "trial": 2,
+        "variant": "semi32"
+      },
+      {
+        "mode": "repeat",
+        "rps": 37795.64,
+        "p99": 6,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "memory_peak_bytes": 370491392,
+        "trial": 2,
+        "variant": "semi32"
+      },
+      {
+        "mode": "feed",
+        "rps": 22310.55,
+        "p99": 7,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "memory_peak_bytes": 320565248,
+        "trial": 2,
+        "variant": "default"
+      },
+      {
+        "mode": "repeat",
+        "rps": 35800.73,
+        "p99": 6,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "memory_peak_bytes": 338583552,
+        "trial": 2,
+        "variant": "default"
+      },
+      {
+        "mode": "feed",
+        "rps": 22197.1,
+        "p99": 8,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "memory_peak_bytes": 324194304,
+        "trial": 2,
+        "variant": "semi64"
+      },
+      {
+        "mode": "repeat",
+        "rps": 36962.4,
+        "p99": 6,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "memory_peak_bytes": 369106944,
+        "trial": 2,
+        "variant": "semi64"
+      },
+      {
+        "mode": "feed",
+        "rps": 22813.82,
+        "p99": 8,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "memory_peak_bytes": 322347008,
+        "trial": 2,
+        "variant": "semi16"
+      },
+      {
+        "mode": "repeat",
+        "rps": 36655.28,
+        "p99": 6,
+        "errors": 0,
+        "non2xx": 0,
+        "timeouts": 0,
+        "memory_peak_bytes": 340553728,
+        "trial": 2,
+        "variant": "semi16"
+      }
+    ],
+    "decisions": {
+      "conditional_insert": "retained; official and expanded correctness checks passed",
+      "compiled_like_response_schema": "not retained; no consistent advantage over conditional insert alone",
+      "max_semi_space_size": "unchanged; small differences overlap variation and 32/64 MiB added about 27 MiB median memory in duplicate-like tests"
+    },
+    "correctness": {
+      "official_passed": 42,
+      "official_failed": 0,
+      "additional_regressions": "passed: mixed missing/duplicate/FK likes, concurrent duplicates, fresh reads, Unicode, FK recovery, acknowledged-write SIGKILL persistence, restart, unchanged schema"
+    },
+    "capacity_trial": {
+      "vus": 95000,
+      "hold": "5m",
+      "ramp": "60s",
+      "warmup": "2m",
+      "image": "sha256:9e4eccdf066351849262568ea1e5da69acc08a8e71d6cb4f2866bc3374d1c01c",
+      "source_sha256": "fb78f28f6b22f6d4698e78453e6e2e19b6b1d74a7023110622b1ca076621e679",
+      "workload_sha256": "14fbbe36a7bef2cc803c8c2309b8b93d6e6ec9c2b6aba78ebe3b9a95ebf85972",
+      "server_cpu_quota": 1,
+      "server_memory_bytes": 2147483648,
+      "server_swap_bytes": 0,
+      "nofile": 65535,
+      "network": "host",
+      "generator": "grafana/k6:1.4.2",
+      "source_addresses": "127.0.0.2-127.0.0.17",
+      "warmup_result": {
+        "exit_code": 0,
+        "duration_ms": {
+          "avg": 0.26250958517589684,
+          "med": 0.221574,
+          "p(95)": 0.497163,
+          "p(99)": 0.725216,
+          "max": 13.73093,
+          "thresholds": {
+            "p(95)<500": false,
+            "p(99)<1000": false
+          }
+        },
+        "failures": {
+          "passes": 0,
+          "fails": 15151,
+          "thresholds": {
+            "rate<0.01": false
+          },
+          "value": 0
+        },
+        "checks": {
+          "passes": 15151,
+          "fails": 0,
+          "value": 1
+        },
+        "requests": {
+          "count": 15151,
+          "rate": 94.12242071184727
+        }
+      },
+      "result": {
+        "exit_code": 0,
+        "duration_ms": {
+          "avg": 62.84707042398843,
+          "med": 0.43765,
+          "p(95)": 495.5217810999994,
+          "p(99)": 885.5889531799999,
+          "max": 1578.31341,
+          "thresholds": {
+            "p(99)<1000": false,
+            "p(95)<500": false
+          }
+        },
+        "failures": {
+          "fails": 3525319,
+          "passes": 0,
+          "thresholds": {
+            "rate<0.01": false
+          },
+          "value": 0
+        },
+        "checks": {
+          "passes": 3525319,
+          "fails": 0,
+          "value": 1
+        },
+        "requests": {
+          "count": 3525319,
+          "rate": 8810.836497481127
+        }
+      },
+      "memory_peak_bytes": 1724968960,
+      "oom_killed": false
+    }
   }
 }

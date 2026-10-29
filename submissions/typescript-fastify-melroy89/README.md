@@ -44,8 +44,9 @@ No generated binaries or dependency directories are submitted.
 - Pending creates and likes share bounded transactions, up to 128 writes per
   batch, flushed on the next event-loop turn. Successful responses are sent
   after COMMIT. Statement constraint errors stay isolated; transaction-level
-  failures fail the whole batch. Likes use
-  the existing unique constraint to make duplicate concurrent likes idempotent.
+  failures fail the whole batch. New likes check post existence within the insert;
+  only no-ops need a separate lookup to distinguish duplicates from missing posts.
+  The existing unique constraint makes duplicate concurrent likes idempotent.
 - JWT signatures and expiration are verified on every authenticated request,
   restricted to HS256 with verifier caching explicitly disabled. Authentication
   runs before body parsing and ID validation.
@@ -81,7 +82,7 @@ For Ubuntu 24.04 qualification and local capacity measurements:
 
 ```bash
 docker build -t twelve-fastify-qualification:local .
-python3 benchmark.py --vus 90000 --label local-90000
+python3 benchmark.py --vus 95000 --label local-95000
 ```
 
 The harness runs the repository's unmodified `bench/load.js` with k6 1.4.2.
@@ -93,8 +94,11 @@ five-minute hold and the workload's 30-second ramp-down. Each invocation starts
 with a fresh seed copy. Raw summaries, logs, source/workload hashes and peak
 cgroup memory are written to ignored `results/`.
 
-The Node.js 26.11.1 local 90,000-user five-minute hold passed: p95 **323.9 ms**,
-p99 **732.6 ms**, **0 errors** across **3,348,999 requests**, peak container
-memory **1,764.3 MiB**. This is a selected passing load on a Threadripper host,
-not maximum capacity or an official DigitalOcean droplet score. See
-`PERFORMANCE.md` for the measured comparisons and qualification boundaries.
+After the like-query optimisation, the Node.js 26.11.1 local **95,000-user**
+five-minute hold passed: p95 **495.5 ms**, p99 **885.6 ms**, **0 errors** across
+**3,525,319 requests**, peak cgroup memory **1,645.1 MiB**. The p95 margin is
+only 4.5 ms; repeatability at this load has not been established. This is a
+selected passing load on a Threadripper host, not maximum capacity or an official
+DigitalOcean droplet score. Three-round saturation comparisons also measured
+12.1% higher distributed-like throughput and 10.1% higher duplicate-like throughput.
+See `PERFORMANCE.md` for the comparisons and qualification boundaries.

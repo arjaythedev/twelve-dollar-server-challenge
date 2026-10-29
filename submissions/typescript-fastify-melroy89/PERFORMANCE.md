@@ -33,6 +33,45 @@ feed throughput. Those exploratory tests used the package's bundled native
 binding. They informed the candidates; the table above was rerun with the
 required source-built binding and host networking.
 
+## Like-query optimisation (2026-10-30)
+
+A new like now checks post existence within `INSERT ... SELECT ... WHERE EXISTS`.
+Only a no-op runs a separate lookup to distinguish a duplicate like from a missing
+post. Both queries execute within the existing group transaction; successful
+responses still wait for COMMIT. No results or JWT verification are cached, and
+the schema is unchanged.
+
+A separate final-code comparison used Node 26.11.1 with the source-built native
+binding, the same one-CPU/2-GiB/no-swap limits, and autocannon 8.0.0 outside the
+server quota. Three rounds alternated baseline/candidate order; each instance
+started from a fresh seed. Each sample used 100 keep-alive connections,
+pipelining 1 and a 10-second duration. Distributed likes incremented post IDs
+using user 1 (mostly new likes, with possible seeded duplicates); duplicate
+likes repeatedly targeted post 100000 after that phase.
+
+| Endpoint / workload | Baseline requests/s | Candidate requests/s | Difference |
+| --- | ---: | ---: | ---: |
+| Feed, unchanged control | 22,057 | 22,620 | +2.6% |
+| Distributed likes | 32,481 | 36,414 | +12.1% |
+| Duplicate likes | 38,320 | 42,192 | +10.1% |
+
+Values are medians of three samples. Every retained sample had zero transport
+errors, timeouts and non-2xx responses. These are local saturation diagnostics,
+not a capacity score or a claim of statistical significance. The host had other
+active workloads; the unchanged feed control helps show the variation. An early
+invalid-target diagnostic was discarded and rerun with valid IDs.
+
+Exploratory trials also tested compiled like-response schemas and V8 semi-space
+limits of 16, 32 and 64 MiB. Neither justified another default change: schema
+results varied, and larger semi-spaces used approximately 27 MiB more median
+memory in duplicate-like tests for a small throughput difference. Final-code,
+exploratory and GC samples, source hashes and environment details are retained
+in `performance-results.json` under `like_query_optimization`.
+
+The candidate passed all 42 official checks after rebuilding the native binding
+from source, plus expanded concurrent mixed-like, failed-write recovery,
+independent visibility, SIGKILL persistence and unchanged-schema checks.
+
 ## Capacity testing
 
 The unmodified official `bench/load.js` drives reads, authenticated likes and
@@ -70,7 +109,19 @@ warm-up passed. This is a selected passing local load, not the maximum capacity
 or an official droplet score. Runtime, image, source, workload, and raw k6
 evidence are recorded in `performance-results.json`.
 
-A subsequent Prettier formatting pass changed source layout only. The emitted
+After the like-query optimisation, the unmodified workload passed a
+**95,000-user five-minute hold**, following its own two-minute 1,000-user warm-up:
+**p95 495.5 ms**, **p99 885.6 ms**, **zero failures across 3,525,319 requests**, and
+**1,645.1 MiB peak cgroup memory**, with no OOM kill. The server retained its
+one-CPU/2-GiB/no-swap limits. The p95 margin is only **4.5 ms below 500 ms**;
+repeatability at this load is not established. This is a higher selected passing
+local load than the earlier 90,000-user result, not a proven maximum, an official
+droplet score, or a controlled estimate of the capacity gain attributable to SQL.
+Full warm-up and scored-run evidence is under
+`like_query_optimization.capacity_trial` in `performance-results.json`.
+
+The earlier Node 26 qualification included a Prettier formatting pass that
+changed source layout only. The emitted
 JavaScript AST matched the benchmarked version after excluding source-position
 and comment metadata. All 42 official checks and the additional regression
 checks passed again. The recorded benchmark source hash remains the hash of
@@ -80,8 +131,11 @@ the measured revision, before formatting.
 
 - On Node 26.11.1, `install.sh` and `test/run.sh` passed in a clean Ubuntu
   24.04 container, including the native binding build, TypeScript compilation
-  and **42/42 official checks**. GitHub Actions requires upstream approval
-  before its own jobs can run.
+  and **42/42 official checks**. Consult the pull request for current CI status.
+- After the like-query change, the Ubuntu 24.04 qualification image rebuilt the
+  native binding from source and passed **42/42 official checks** as its unprivileged
+  runner. Expanded mixed-like/FK/concurrency, independent visibility and SIGKILL
+  persistence checks passed on the final compiled code.
 - Earlier Node 24.15.0 regression checks passed: fresh external database changes, invalid tokens,
   Unicode lengths, concurrent duplicate likes, empty JSON-typed like requests,
   mixed successful/failed batches, independently visible committed writes,
@@ -97,7 +151,7 @@ From the submission directory, with the repository seed generated:
 
 ```bash
 docker build -t twelve-fastify-qualification:local .
-python3 benchmark.py --vus 90000 --label local-90000
+python3 benchmark.py --vus 95000 --label local-95000
 ```
 
 This performs a 1,000-user two-minute warm-up, followed by a 60-second ramp to

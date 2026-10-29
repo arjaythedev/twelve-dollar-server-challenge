@@ -47,7 +47,7 @@ static const char *const SQL[S_COUNT] = {
     [S_COMMIT] = "COMMIT",
     [S_ROLLBACK] = "ROLLBACK",
     [S_FEED_IDS] = "SELECT id, created_at FROM posts ORDER BY created_at DESC, id DESC LIMIT 20",
-    [S_FEED_LIKES] = "SELECT post_id, count(*) FROM likes WHERE post_id BETWEEN ?1 AND ?2 GROUP BY post_id",
+    [S_FEED_LIKES] = "SELECT post_id FROM likes WHERE post_id BETWEEN ?1 AND ?2",
     [S_FEED_POSTS] = "SELECT p.id, p.body, p.created_at, u.username FROM posts p JOIN users u ON u.id = p.user_id "
                      "WHERE p.id BETWEEN ?1 AND ?2",
     [S_FEED_REF] = "SELECT p.id, p.body, p.created_at, u.username, "
@@ -494,12 +494,15 @@ static size_t feed_ranges(struct db *db, char *out, size_t cap) {
     memset(idx, -1, sizeof idx);
     for (int i = 0; i < n; i++) idx[rows[i].id - lo] = (int8_t)i;
 
+    /* One index entry per like, tallied here: cheaper than GROUP BY count(*)
+     * (no aggregate, no group boundaries) for the few hundred likes a feed
+     * spans. Every like is still read on this request. */
     st = db->stmt[S_FEED_LIKES];
     sqlite3_bind_int64(st, 1, lo);
     sqlite3_bind_int64(st, 2, hi);
     while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
         int64_t pid = sqlite3_column_int64(st, 0);
-        if (pid >= lo && pid <= hi && idx[pid - lo] >= 0) rows[idx[pid - lo]].like_count = sqlite3_column_int64(st, 1);
+        if (pid >= lo && pid <= hi && idx[pid - lo] >= 0) rows[idx[pid - lo]].like_count++;
     }
     sqlite3_reset(st);
     if (rc != SQLITE_DONE) {

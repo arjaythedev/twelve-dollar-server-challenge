@@ -1,6 +1,9 @@
 #include "json.h"
 
 #include <string.h>
+#if defined(__SSE2__)
+#include <emmintrin.h>
+#endif
 
 #define JSON_MAX_DEPTH 32
 
@@ -287,12 +290,43 @@ enum json_status json_parse_object(const char *doc, size_t len, struct json_fiel
     return c.p == c.end ? JSON_OK : JSON_MALFORMED;
 }
 
+/* Length of the prefix of s that needs no escaping: bytes >= 0x20 other than
+ * '"' and '\\'. 16 bytes per step with SSE2; the tail and other targets go
+ * byte by byte. */
+static size_t clean_run(const char *s, size_t len) {
+    size_t i = 0;
+#if defined(__SSE2__)
+    const __m128i quote = _mm_set1_epi8('"'), bslash = _mm_set1_epi8('\\'), ctl = _mm_set1_epi8(0x1f);
+    for (; i + 16 <= len; i += 16) {
+        __m128i v = _mm_loadu_si128((const __m128i *)(const void *)(s + i));
+        /* max(v, 0x1f) == 0x1f is an unsigned v <= 0x1f, i.e. a control byte */
+        __m128i bad = _mm_or_si128(_mm_or_si128(_mm_cmpeq_epi8(v, quote), _mm_cmpeq_epi8(v, bslash)),
+                                   _mm_cmpeq_epi8(_mm_max_epu8(v, ctl), ctl));
+        int m = _mm_movemask_epi8(bad);
+        if (m) return i + (size_t)__builtin_ctz((unsigned)m);
+    }
+#endif
+    for (; i < len; i++) {
+        unsigned char ch = (unsigned char)s[i];
+        if (ch < 0x20 || ch == '"' || ch == '\\') break;
+    }
+    return i;
+}
+
 size_t json_write_string(char *out, size_t cap, const char *s, size_t len) {
     static const char HEX[] = "0123456789abcdef";
     size_t o = 0;
     if (cap < 2) return 0;
     out[o++] = '"';
     for (size_t i = 0; i < len; i++) {
+        size_t run = clean_run(s + i, len - i);
+        if (run) {
+            if (o + run >= cap) return 0;
+            memcpy(out + o, s + i, run);
+            o += run;
+            i += run;
+            if (i >= len) break;
+        }
         unsigned char ch = (unsigned char)s[i];
         if (ch >= 0x20 && ch != '"' && ch != '\\') {
             if (o + 1 >= cap) return 0;

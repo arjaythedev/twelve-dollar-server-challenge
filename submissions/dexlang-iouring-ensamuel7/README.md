@@ -2,15 +2,15 @@
 
 | | |
 |---|---|
-| **Language** | [DexLang](https://github.com/ensamuel7/dex) `v0.9.23`: statically typed, compiles to C, which `cc` builds into a native binary |
+| **Language** | [DexLang](https://github.com/ensamuel7/dex) `v0.9.24`: statically typed, compiles to C, which `cc` builds into a native binary |
 | **Framework** | None. DexLang's own `http` and `db` standard library modules |
 | **Server** | The `http` module's io_uring backend (`http.uring()`), with handlers run on the ring's thread |
 | **SQL** | Built with [dexqu](https://github.com/ensamuel7/dex-modules/tree/main/dexqu) `v0.1.0` at startup, prepared once |
-| **SQLite driver** | `libsqlite3` 3.45.1 (Ubuntu 24.04), linked directly by the `db` module |
+| **SQLite driver** | SQLite 3.54.1, the official amalgamation compiled into the binary by the `db` module (`DEX_SQLITE`), pinned and sha256-checked in `build.sh` |
 | **Build toolchain** | Go 1.27.2 to build the compiler, then `cc` (gcc 13) on the C it emits |
 | **Nginx or direct** | **Direct**, on `HOST:PORT` (`0.0.0.0:80` on the benchmark box) |
 
-DexLang compiles to C. What runs is one native binary with `libsqlite3` linked in:
+DexLang compiles to C. What runs is one native binary with SQLite compiled in:
 no interpreter, no garbage collector, no framework. The program is about 360
 lines of DexLang in `server.dx` and `queries.dx`, and everything below it is the
 language's standard library, unmodified for this challenge.
@@ -61,6 +61,12 @@ against slow, oversized, aborted and reset clients, with no findings.
   `journal_size_limit` keeping the WAL file at 64 MB at most.
 - **`ON CONFLICT DO NOTHING ... RETURNING`** answers "liked now" and "already
   liked" in one statement.
+- **SQLite is compiled in, not linked.** `build.sh` downloads the official
+  3.54.1 amalgamation, checks its sha256, and dex compiles it with the program
+  under the same `-O3 -flto`, so calls into SQLite can be inlined. It is built
+  with the same features and limits as Ubuntu's `libsqlite3` (FTS, R-tree,
+  `SECURE_DELETE` and so on) and stays thread-safe. Measured on this workload,
+  about 15% fewer instructions per request than the shared library.
 
 ```
 locking_mode       = EXCLUSIVE
@@ -122,16 +128,24 @@ folder:
   it, which leaked the values they created.
 - `db.openSingleThreaded`, a connection without SQLite's per-call mutex for
   code that only ever uses it from one thread.
+- `DEX_SQLITE`, which compiles a pinned SQLite amalgamation into the binary
+  instead of linking the system library.
+- `db.reset` clears parameters one at a time instead of with
+  `sqlite3_clear_bindings`, which in SQLite 3.54 forces some statements to be
+  re-parsed on every use.
+- A heap overflow in response building when a handler passed a content type
+  longer than about 400 bytes, found while replacing its `snprintf`.
 
 ## Files
 
 ```
 server.dx    routes, handlers, auth, response building
 queries.dx   the six SQL statements, built with dexqu
-dex.mod      module file: dex 0.9.23, dexqu v0.1.0 (pinned in dex.sum)
+dex.mod      module file: dex 0.9.24, dexqu v0.1.0 (pinned in dex.sum)
 install.sh   root, once: build-essential, git, pkg-config, libsqlite3-dev,
              libssl-dev, libcurl, and Go 1.27.2 (sha256-checked)
-build.sh     builds the dex compiler from the pinned v0.9.23 tag through the Go
-             module proxy (checksum-verified), fetches dexqu, compiles server.dx
+build.sh     builds the dex compiler from the pinned v0.9.24 tag through the Go
+             module proxy (checksum-verified), fetches dexqu and the SQLite
+             3.54.1 amalgamation (sha256-checked), compiles server.dx
 start.sh     raises the soft open-file limit to the hard one and runs the server
 ```

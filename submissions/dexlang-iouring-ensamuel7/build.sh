@@ -5,7 +5,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 # The compiler revision this submission was written and tested against.
-DEX_VERSION="${DEX_VERSION:-v0.9.23}"
+DEX_VERSION="${DEX_VERSION:-v0.9.24}"
 
 # DEX_BIN points at an already-built compiler, which is what the local test
 # loop uses. CI and the benchmark box leave it unset and build from the pinned
@@ -26,11 +26,21 @@ else
   DEX="$GOBIN/dex"
 fi
 
+SQLITE_TARBALL=sqlite-autoconf-3540100
+SQLITE_SHA256=926ef8d3eab93fbf6e06011901273eec076b25594a4e1cdadd50c987f4f6d64e
+mkdir -p vendor
+if ! echo "$SQLITE_SHA256  vendor/$SQLITE_TARBALL.tar.gz" | sha256sum -c - >/dev/null 2>&1; then
+  curl -fsSL "https://www.sqlite.org/2026/$SQLITE_TARBALL.tar.gz" -o "vendor/$SQLITE_TARBALL.tar.gz"
+fi
+echo "$SQLITE_SHA256  vendor/$SQLITE_TARBALL.tar.gz" | sha256sum -c -
+rm -rf "vendor/$SQLITE_TARBALL"
+tar -C vendor -xzf "vendor/$SQLITE_TARBALL.tar.gz"
+
 # dex emits C and then invokes cc on it, so the build needs the C toolchain
 # install.sh put there, not just Go.
 "$DEX" version
 "$DEX" mod download
-"$DEX" build server.dx
+DEX_SQLITE="vendor/$SQLITE_TARBALL/sqlite3.c" "$DEX" build server.dx
 
 test -x build/server
 echo "built build/server"

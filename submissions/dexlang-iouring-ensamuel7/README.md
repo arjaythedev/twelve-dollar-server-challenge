@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Language** | [DexLang](https://github.com/ensamuel7/dex) `v0.9.22`: statically typed, compiles to C, which `cc` builds into a native binary |
+| **Language** | [DexLang](https://github.com/ensamuel7/dex) `v0.9.23`: statically typed, compiles to C, which `cc` builds into a native binary |
 | **Framework** | None. DexLang's own `http` and `db` standard library modules |
 | **Server** | The `http` module's io_uring backend (`http.uring()`), with handlers run on the ring's thread |
 | **SQL** | Built with [dexqu](https://github.com/ensamuel7/dex-modules/tree/main/dexqu) `v0.1.0` at startup, prepared once |
@@ -54,9 +54,10 @@ against slow, oversized, aborted and reset clients, with no findings.
   keeps the connection's read transaction open, so an `INSERT` on the same
   connection wouldn't commit until the next reset. Resetting first means a 201
   goes out after its row is committed (rule 6), and lets the WAL checkpoint.
-- **One connection, `locking_mode=EXCLUSIVE`.** Only the ring's thread touches
-  SQLite, so it takes the file lock once instead of a lock round-trip per
-  request. Checkpoints use SQLite's own autocheckpoint, with
+- **One connection, `locking_mode=EXCLUSIVE`, opened with
+  `db.openSingleThreaded`.** Only the ring's thread touches SQLite, so it takes
+  the file lock once instead of a lock round-trip per request, and skips the
+  mutex SQLite otherwise takes on every call. Checkpoints use SQLite's own autocheckpoint, with
   `journal_size_limit` keeping the WAL file at 64 MB at most.
 - **`ON CONFLICT DO NOTHING ... RETURNING`** answers "liked now" and "already
   liked" in one statement.
@@ -90,7 +91,7 @@ return http.response(200, json.encode(PostEnvelope { post: p }), "application/js
 order, which is the order the spec fixes. The compiler generates one encoder per
 struct: keys are literals, numbers go through an integer writer, and a string
 with nothing to escape is copied in one `memcpy`. A 20-post feed page encodes in
-about 2.7 µs.
+about 1.3 µs.
 
 ## Auth
 
@@ -115,19 +116,22 @@ folder:
   struct literal whose fields call functions in a program that throws).
 - Per-request path and query storage instead of 4 KB fixed buffers per
   connection.
-- A generated `json.encode` per struct (4.4x faster than the field-descriptor
-  encoder it replaces, with byte-identical output), and a fix for struct
-  literals passed straight to it, which leaked the values they created.
+- A generated `json.encode` per struct, about 9x faster than the
+  field-descriptor encoder it replaces and as fast as writing the bytes by hand,
+  with byte-identical output; and a fix for struct literals passed straight to
+  it, which leaked the values they created.
+- `db.openSingleThreaded`, a connection without SQLite's per-call mutex for
+  code that only ever uses it from one thread.
 
 ## Files
 
 ```
 server.dx    routes, handlers, auth, response building
 queries.dx   the six SQL statements, built with dexqu
-dex.mod      module file: dex 0.9.22, dexqu v0.1.0 (pinned in dex.sum)
+dex.mod      module file: dex 0.9.23, dexqu v0.1.0 (pinned in dex.sum)
 install.sh   root, once: build-essential, git, pkg-config, libsqlite3-dev,
              libssl-dev, libcurl, and Go 1.27.2 (sha256-checked)
-build.sh     builds the dex compiler from the pinned v0.9.22 tag through the Go
+build.sh     builds the dex compiler from the pinned v0.9.23 tag through the Go
              module proxy (checksum-verified), fetches dexqu, compiles server.dx
 start.sh     raises the soft open-file limit to the hard one and runs the server
 ```

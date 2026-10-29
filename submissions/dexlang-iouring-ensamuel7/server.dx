@@ -252,7 +252,7 @@ fn main(): void {
         jwtSecret = "twelve-dollar-challenge"
     }
 
-    conn = db.open("sqlite", path)
+    conn = db.openSingleThreaded("sqlite", path)
     if (conn == -1) {
         fmt.println("cannot open " + path)
         os.exit(1)

@@ -1,6 +1,6 @@
 # C + io_uring + SQLite B-tree internals (`c-iouring-public`)
 
-A single-threaded C server that treats SQLite as a library of B-trees: raw io_uring syscalls, a SIMD HTTP parser
+A C server on one event-loop thread that treats SQLite as a library of B-trees: raw io_uring syscalls, a SIMD HTTP parser
 generated from the API spec, one multi-buffer HMAC call for a whole batch of JWTs, and reads that walk SQLite's
 tables through SQLite's own cursors. Every curse has an off switch (`CURSED=boring`), and the boring build passes
 the same 42 checks. Everything is built from source on the box.
@@ -48,8 +48,8 @@ locking, scalar JWT, picohttpparser for every request.
 | `SQLITE_LINK` | `unity`: `components/engine.c` `#include`s `sqlite3.c`, one unit, so it can use SQLite's internals | `separate`: `sqlite3.c` is its own unit, and `src/engine_public.c` uses only the public API (`sqlite3.h`). The build checks that no other SQLite symbol is referenced. Works with stock or patched SQLite, and needs the `sql` / `stock` / `sqlite` or `inline` / `keep` values below |
 | `DB_READS` | `direct`: reads through SQLite's own B-tree cursors | `sql`: the spec's prepared SELECTs |
 | `DB_VFS` | `cursed`: WAL write-coalescing and file-size-cache shim | `stock`: SQLite's unix VFS |
-| `DB_CKPT` | `bounded`: SQLite's own RESTART checkpoint on the event loop every 16,384 WAL frames, after the batch's replies are submitted; the WAL is reused in place, no write gate, `SQLITE_THREADSAFE=0` (Rust #82's checkpoint style, with a 4× larger mark). Or `uring`: the engine runs SQLite's checkpoint step itself, as a state machine on the event loop's io_uring, with a write gate; `thread`: a checkpoint thread on a second connection; `inline`: PASSIVE after the replies. `CURSED=boring` refuses `uring` | `sqlite`: SQLite's autocheckpoint |
-| `DB_WAL_DROP` | `keep` with `bounded` (its ~64 MB WAL stays hot); `drop` with `uring` / `thread`: checkpointed WAL pages are dropped from the page cache, and the WAL is truncated at restart | `keep` |
+| `DB_CKPT` | `thread`: SQLite's own `sqlite3_wal_checkpoint_v2` from a checkpoint thread on a second connection, in passes of 4,096 WAL frames, with a write gate; checkpointed WAL pages are dropped from the page cache, `SQLITE_THREADSAFE=2`. Or `bounded`: SQLite's own RESTART checkpoint on the event loop every 16,384 WAL frames, after the batch's replies are submitted; the WAL is reused in place, no write gate, `SQLITE_THREADSAFE=0` (Rust #82's checkpoint style, with a 4× larger mark); `uring`: the engine runs SQLite's checkpoint step itself, as a state machine on the event loop's io_uring, with a write gate; `inline`: PASSIVE after the replies. `CURSED=boring` refuses `uring` | `sqlite`: SQLite's autocheckpoint |
+| `DB_WAL_DROP` | `drop` with `thread` / `uring`: checkpointed WAL pages are dropped from the page cache, and the WAL is truncated at restart; `keep` with `bounded` (its ~64 MB WAL stays hot) | `keep` |
 | `DB_LOCKING` | `exclusive` | `normal` |
 | `JWT` | `simd`: multi-buffer batch HMAC | `scalar` |
 | `PARSER_FAST` / `PARSER_SLOW` | `batch` / `fb` | `slow` / `pico` |
@@ -60,8 +60,8 @@ real workload rather than a separate SQLite benchmark.
 
 `CURSED=lawful` sits in between: stock SQLite as its own unit, used only through its public API (prepared SQL,
 SQLite's VFS, inline checkpoints), with every curse outside SQLite still on (batch HTTP parsing, `fbparse.h`, SIMD
-JWT, exclusive locking). `CURSED=max DB_CKPT=thread` keeps everything else but checkpoints from a thread through
-SQLite's own `sqlite3_wal_checkpoint_v2`.
+JWT, exclusive locking). `CURSED=max DB_CKPT=bounded` keeps everything else but checkpoints on the event loop
+instead, with SQLite's RESTART every 16,384 frames, and runs on a single thread.
 
 In every mode, writes are prepared SQL `INSERT`s, one transaction covers each batch, and every response waits for
 its `COMMIT`. The server prints the mode it was built with at startup.
@@ -131,7 +131,7 @@ the code by `tools/knobs.py`; the `CURSED_*` and `LOOP_TEST_*` variables exist f
 | Variable | Default | What it does |
 |---|---|---|
 | `CURSED_CACHE_KIB` | 8192 | SQLite page cache (KiB) |
-| `CURSED_CKPT_FRAMES` | 16384 (bounded, inline) / 4096 (uring, thread) | checkpoint pass size in WAL frames. Bounded's 16384 (was 4096): each pass stalls the loop about as long whatever the mark, so 4× fewer passes held 17.5k vs 15.5k req/s at p99 < 1 s, loop busy 86–87 vs 93–95 % at 14.5k, p95 98–113 vs 131 ms, p99 ≤ 20 ms worse, same µs/request, +48 MB page cache (Xeon, one CPU) |
+| `CURSED_CKPT_FRAMES` | 4096 (thread, uring) / 16384 (bounded, inline) | checkpoint pass size in WAL frames. Bounded's 16384 (was 4096): each pass stalls the loop about as long whatever the mark, so 4× fewer passes held 17.5k vs 15.5k req/s at p99 < 1 s, loop busy 86–87 vs 93–95 % at 14.5k, p95 98–113 vs 131 ms, p99 ≤ 20 ms worse, same µs/request, +48 MB page cache (Xeon, one CPU) |
 | `CURSED_CKPT_THREAD` | 1 in thread mode | thread mode only. 1: checkpoint from the background thread; 0: inline |
 | `CURSED_CKPT_RESTART` | 32768 | the write gate's drain mark (WAL frames), from the engine's Xeon sweep |
 | `CURSED_CKPT_NICE` | 0 | nice level of the checkpoint thread (lower = drains finish sooner at a pegged CPU, but take more CPU from reads) |
@@ -170,7 +170,8 @@ Everything in `src/` follows `.clang-format`. `components/` and `third_party/` a
 sources, so they keep their owners' style.
 
 ## Design
-One process, one thread: the event loop, which also runs the WAL checkpoints. Every loop wakeup is one batch:
+One process, two threads: the event loop, which does all the request work, and a checkpoint thread. Every loop
+wakeup is one batch:
 1. **Receive.** io_uring rings of 65,535 direct descriptors each (created on demand), 256 single-shot accepts in
    flight. Each connection has an armed multishot recv into a provided-buffer ring. Up to 128 completions or 2 ms per
    wakeup. If io_uring is unavailable, the loop falls back to epoll. With drain-first (on by default), each wakeup
@@ -194,11 +195,13 @@ One process, one thread: the event loop, which also runs the WAL checkpoints. Ev
    - Writes are prepared SQL `INSERT`s.
    - A small VFS shim writes each commit's WAL frames with one `pwrite` and caches the DB file size while the lock
      is held.
-   - Checkpoints run on the event loop: every 16,384 WAL frames (~64 MB), once the batch's replies have been handed
-     to the kernel, SQLite's own RESTART checkpoint copies the WAL into the database file and the WAL is reused in
-     place. Each pass stalls the loop for about the same time whatever the mark (~150–200 ms on the Xeon's disk), so
-     the large mark means few passes. No backlog builds up and no requests are held. (`DB_CKPT=uring` instead copies the frames with the
-     engine's own checkpoint step on io_uring between loop passes, holding POSTs while a large WAL drains.)
+   - Checkpoints run on their own thread with a second SQLite connection: SQLite's own `sqlite3_wal_checkpoint_v2`
+     copies the WAL into the database file in passes of 4,096 frames, and checkpointed WAL pages are dropped from the
+     page cache. The loop never waits for a pass. If the WAL grows past 32,768 frames, new POSTs wait unread until the
+     thread catches up (the write gate). (`DB_CKPT=bounded` instead runs SQLite's RESTART on the loop every 16,384
+     frames; each pass stalls the loop, and over 5-minute Xeon holds at 26k req/s the passes grew to 300–640 ms and
+     set off 503 bursts. `DB_CKPT=uring` copies the frames with the engine's own checkpoint step on io_uring between
+     loop passes.)
 5. **Reply.** Responses are built in a per-batch arena, with headers written in front of each body. Nothing is
    handed to the kernel until the batch's `COMMIT` has returned. If the commit fails, every reply that touched the
    database becomes a 500.
@@ -252,16 +255,20 @@ Each item, and how it stays within the rules:
   keep-alives idle for 20 s or more. In the local runs the accept floor never engaged up to 475k; at 500k it parked
   accepts at ~490k, leaving 1.7–2.8 % of users waiting, and both runs passed instead of being OOM-killed. It looks only
   at memory, never at who the client is.
-- **Bounded checkpoints** (`DB_CKPT=bounded`, the default in `CURSED=max`). SQLite's own `sqlite3_wal_checkpoint_v2`
+- **Checkpoint thread** (`DB_CKPT=thread`, the default in `CURSED=max`). SQLite's own `sqlite3_wal_checkpoint_v2` on a
+  second connection, from a background thread, so the loop never stalls for a pass; checkpointed WAL pages are dropped
+  from the page cache. On the Xeon at 26k req/s over 5-minute holds it gave 0 503s in 5 of 5 runs and p99 65–175 ms,
+  against bounded's 272–294 ms with a 256-request 503 burst after every checkpoint of ~300 ms or more.
+- **Bounded checkpoints** (`DB_CKPT=bounded`, one flag away). SQLite's own `sqlite3_wal_checkpoint_v2`
   in RESTART mode, called on the event loop every 16,384 WAL frames after the batch's replies are submitted, like Rust
   #82's checkpoint but with a 4× larger mark. Nothing is held or reordered: requests that arrive during a pass wait in the loop like any other
   backlog.
-- **Our own checkpoint step** (`DB_CKPT=uring`, the earlier default, one flag away). The engine re-implements SQLite's WAL
+- **Our own checkpoint step** (`DB_CKPT=uring`, an earlier default, one flag away). The engine re-implements SQLite's WAL
   checkpoint: the same steps in the same order (sync the WAL, copy each page's latest committed frame into the
   database file, sync the database, then advance the backfill mark in the WAL index), producing the same file format.
   Only the I/O differs: it's issued as io_uring file operations between loop passes instead of blocking calls.
   It's tested byte-identical against SQLite's own checkpoint, and ~28k kill and power-cut crash images all recover
-  consistently. `DB_CKPT=thread` uses SQLite's `sqlite3_wal_checkpoint_v2` on a thread instead, and `CURSED=boring`
+  consistently. `CURSED=boring`
   uses stock SQLite's autocheckpoint (it refuses `uring`).
 - **Write hold during checkpoints** (`uring` and `thread` only; `bounded` has none). POSTs wait unread (≤ ~1 s, typically tens of ms) while a checkpoint drains
   the WAL. They are then processed and committed normally.

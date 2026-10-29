@@ -11,7 +11,7 @@
 #                   DB_WAL_DROP=keep, and build.sh checks the objects use only public sqlite3_* symbols)
 #   DB_READS        direct: reads through SQLite's B-tree cursors           sql: the spec's prepared SELECTs
 #   DB_VFS          cursed: WAL write-coalescing + file-size cache shim     stock: SQLite's unix VFS
-#   DB_CKPT         bounded (max's default; below) or uring: the engine's   sqlite: SQLite's autocheckpoint
+#   DB_CKPT         thread (max's default; below) or uring: the engine's    sqlite: SQLite's autocheckpoint
 #                   own checkpoint as
 #                   a state machine on the event loop's io_uring, same write gate, SQLITE_THREADSAFE=0, exclusive;
 #                   thread: checkpoint thread + write gate; inline: PASSIVE after the replies, every 16,384 frames;
@@ -27,7 +27,9 @@
 # for its batch's COMMIT.
 
 case ${CURSED:-max} in
-  max) : "${DB_CKPT:=bounded}" ;;
+  # thread, not bounded: bounded's RESTART on the loop grows to 300-640 ms over a 5-min hold and each one fires a
+  # 256-request 503 burst (#158's scored 0.60 %); thread: 0 503s and a lower p99 in 5/5 Xeon runs (exp1000-1017)
+  max) : "${DB_CKPT:=thread}" ;;
   boring)
     : "${SQLITE_PATCHES:=none}" "${SQLITE_LINK:=separate}" "${DB_READS:=sql}" "${DB_VFS:=stock}" "${DB_CKPT:=sqlite}" "${DB_WAL_DROP:=keep}"
     : "${DB_LOCKING:=normal}" "${JWT:=scalar}" "${PARSER_FAST:=slow}" "${PARSER_SLOW:=pico}"

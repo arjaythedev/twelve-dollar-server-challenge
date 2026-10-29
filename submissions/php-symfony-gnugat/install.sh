@@ -27,6 +27,10 @@ apt-get install -y --no-install-recommends \
   "php-zts-pdo-sqlite=${PHP_EXT_VERSION}" \
   "php-zts-sqlite3=${PHP_EXT_VERSION}"
 
+# The frankenphp package enables and starts its own service (default /etc/frankenphp/Caddyfile) on port 80,
+# which would stop the app's server from binding to it.
+systemctl disable --now frankenphp || true
+
 curl -fsSL -o /usr/local/bin/composer "https://getcomposer.org/download/${COMPOSER_VERSION}/composer.phar"
 echo "${COMPOSER_SHA256}  /usr/local/bin/composer" | sha256sum -c -
 chmod +x /usr/local/bin/composer

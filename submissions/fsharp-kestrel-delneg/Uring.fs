@@ -469,41 +469,6 @@ type private Ring(index: int) =
         NativePtr.write (NativePtr.ofNativeInt<uint32> (c + 44n)) (uint32 (slot + 1))
         NativePtr.write (NativePtr.ofNativeInt<uint64> (c + 32n)) OpIgnore
 
-/// What Kestrel gets for each new connection. The loop owns the socket and runs its requests; Kestrel's connection
-/// handler returns at once (Program.fs), so this object lives only for Kestrel's dispatch.
-[<AllowNullLiteral>]
-type UConn(id: int64) =
-    inherit ConnectionContext()
-    let mutable features: IFeatureCollection = FeatureCollection(2)
-    let mutable items: IDictionary<obj, obj> = null
-    let mutable connectionId: string = null
-    let mutable transport: IDuplexPipe = null
-    override _.ConnectionId
-        with get () =
-            if isNull connectionId then connectionId <- "u" + string id
-            connectionId
-        and set v = connectionId <- v
-    override _.Features = features
-    override _.Items
-        with get () =
-            if isNull items then items <- Dictionary<obj, obj>()
-            items
-        and set v = items <- v
-    override _.Transport
-        with get () =
-            if isNull transport then
-                let p = System.IO.Pipelines.Pipe()
-                transport <-
-                    { new IDuplexPipe with
-                        member _.Input = p.Reader
-                        member _.Output = p.Writer }
-            transport
-        and set v = transport <- v
-    override _.Abort(_: ConnectionAbortedException) = ()
-    override _.DisposeAsync() =
-        features <- FeatureCollection(0)
-        ValueTask.CompletedTask
-
 /// The responses of one pass: one pinned buffer, the HTTP handler writes into it.
 type private Arena(initial: int) =
     let mutable buf = GC.AllocateUninitializedArray<byte>(initial, pinned = true)
@@ -562,7 +527,6 @@ type private Loop(listenFd: int) as this =
     let mutable stRearmMax = 0
     let mutable stSpills = 0L
     let mutable stLast = Diagnostics.Stopwatch.GetTimestamp()
-    let mutable nextId = 1L
     let mutable acceptRing = 0
     let mutable acceptBroken = false
     /// Buffers of sends still in flight for connections that closed meanwhile, by (ring, slot, generation).
@@ -623,9 +587,7 @@ type private Loop(listenFd: int) as this =
             r.State.[slot] <- Live
             r.Open <- r.Open + 1
             r.Recv slot
-            let id = nextId
-            nextId <- nextId + 1L
-            accepted.Writer.TryWrite(UConn(id)) |> ignore
+            // Kestrel is not told (see Listener).
 
     member private this.Process(r: Ring, slot: int, src: nativeint, n: int) =
         let mutable data = ReadOnlySpan<byte>(NativePtr.toVoidPtr (NativePtr.ofNativeInt<byte> src), n)
@@ -984,6 +946,9 @@ type private Loop(listenFd: int) as this =
                         stPasses <- 0L; stCqes <- 0L; stMaxCqes <- 0; stMaxPassTicks <- 0L; stNoBufs <- 0L
                         stCarryMax <- 0; stRearmMax <- 0; stSpills <- 0L; stLast <- t1
 
+/// Kestrel's accept never completes: the loop keeps every connection from accept to close. Handing each new
+/// connection to Kestrel (whose handler then returned at once) woke a thread-pool thread that spun with sched_yield
+/// against the loop on the one core: 44 to 32 us of CPU per new connection in a 320,000-user ramp, ~200 us when idle.
 type private Listener(endpoint: EndPoint, loop: Loop) =
     interface IConnectionListener with
         member _.EndPoint = endpoint

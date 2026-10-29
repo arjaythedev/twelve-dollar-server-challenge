@@ -58,8 +58,6 @@ let main _ =
                         match c with
                         // The epoll loop runs the handler itself and closes the socket.
                         | :? Transport.EConn as e -> if e.Detach() then Task.CompletedTask else e.Closed
-                        // The io_uring loop owns the socket from accept to close.
-                        | :? Uring.UConn -> Task.CompletedTask
                         | _ -> Conn.run c))
                 |> ignore))
     |> ignore

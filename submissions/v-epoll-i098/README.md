@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Language | V 0.5.2 (commit `7647ce1`), built from source by `install.sh` from its pinned C bootstrap (vlang/vc `7eb8c54`) |
+| Language | V 0.5.2 (commit `7647ce1`), built by `install.sh` with one `cc -O2` of its pinned C bootstrap (vlang/vc `7eb8c54`, `vc/v.c`; no self-rebuild) |
 | Framework | none: one V event loop with a C io_uring transport |
 | SQLite driver | the SQLite C API called directly from V, SQLite 3.54.0 amalgamation (SHA-256 checked) compiled by `build.sh` |
 | JWT | HMAC-SHA256 from OpenSSL's libcrypto (Ubuntu `libssl-dev`); JWT claims and post bodies are parsed by hand in `main.v` |
@@ -12,7 +12,7 @@
 ## Running it
 
 ```bash
-sudo bash install.sh   # apt packages, then V 0.5.2 from source into /opt/v (a few minutes)
+sudo bash install.sh   # apt packages, then V 0.5.2 into /opt/v (about 3 minutes on 1 vCPU)
 bash build.sh          # builds pinned SQLite and liburing, then bin/server
 SQLITE_PATH=... JWT_SECRET=... HOST=0.0.0.0 PORT=80 bash start.sh
 ```

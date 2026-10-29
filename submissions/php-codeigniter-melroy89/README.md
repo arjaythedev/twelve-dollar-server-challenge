@@ -12,7 +12,8 @@ production bootstrap and its official FrankenPHP worker lifecycle handle every A
 | Build tools | Ubuntu 24.04 PHP 8.3 CLI; Composer 2.8.12 |
 
 **Direct HTTP, without Nginx.** Caddy binds `HOST:PORT` and retains idle HTTP/1.1
-connections for five minutes. Only the five challenge routes are exposed; unknown paths
+connections for five minutes. Buffered JSON responses declare their UTF-8 byte length explicitly,
+including large feeds. Only the five challenge routes are exposed; unknown paths
 return the specified JSON error. There are no application assets or public directory listings.
 
 ## Run
@@ -26,7 +27,11 @@ bash test/run.sh submissions/php-codeigniter-melroy89
 ```
 
 `install.sh` installs Ubuntu build tools and downloads the official pinned runtime and Composer
-with SHA-256 verification. `build.sh` installs locked production dependencies, builds an
+with fixed SHA-256 verification, bounded download retries and timeouts. Both downloads are
+staged and verified before either executable is replaced; each replacement is atomic. A failed
+download or checksum mismatch leaves the existing executables intact and removes staging files.
+Checksum errors print the expected and actual hashes; review the official release before changing
+a pin. `build.sh` installs locked production dependencies, builds an
 authoritative Composer classmap and lints the application. No binaries or vendor code are committed.
 
 For a manual disposable instance:
@@ -82,7 +87,18 @@ python3 submissions/php-codeigniter-melroy89/checks/worker.py http://127.0.0.1:3
 
 This writes posts and likes. It checks sequential identity changes over a reused client connection,
 expired/malformed claims, Unicode limits, 64 concurrent duplicate likes, fresh cross-worker reads
-and recovery after a failed foreign-key write. Run the official suite first against its fresh copy.
+and recovery after a failed foreign-key write. It also checks feed shape, ordering, current like
+counts and byte-accurate response framing with Unicode content. Run the official suite first
+against its fresh copy.
+
+Installer failure-path checks run without root or network access:
+
+```sh
+python3 submissions/php-codeigniter-melroy89/checks/install.py
+```
+
+These exercise partial-download failures, checksum mismatches and successful installation in a
+temporary sandbox, including preservation of existing executables and cleanup of staging files.
 
 ## References
 

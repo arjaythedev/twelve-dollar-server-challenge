@@ -7,6 +7,7 @@ import hmac
 import http.client
 import json
 import os
+import re
 import sys
 import time
 from urllib.parse import urlsplit
@@ -28,7 +29,10 @@ def req(method, path, auth=None, data=None, connection=None):
         headers['Authorization'] = 'Bearer ' + auth
     conn.request(method, path, body=json.dumps(data, ensure_ascii=False).encode() if data is not None else None, headers=headers)
     response = conn.getresponse()
-    result = response.status, json.loads(response.read())
+    raw = response.read()
+    assert response.getheader('Transfer-Encoding') is None, response.getheaders()
+    assert response.getheader('Content-Length') == str(len(raw)), response.getheaders()
+    result = response.status, json.loads(raw)
     if connection is None:
         conn.close()
     return result
@@ -67,7 +71,21 @@ for _ in range(64):
     status, result = req('GET', f'/posts/{post_id}')
     assert status == 200 and result['post']['like_count'] == 1, result
 
+# A large Unicode feed needs byte-accurate framing and the exact ordered post shape.
+status, result = req('GET', '/feed')
+assert status == 200 and list(result) == ['posts'], result
+posts = result['posts']
+assert len(posts) == 20, len(posts)
+assert [(p['created_at'], p['id']) for p in posts] == sorted(
+    [(p['created_at'], p['id']) for p in posts], reverse=True), posts
+for post in posts:
+    assert list(post) == ['id', 'body', 'created_at', 'author', 'like_count'], post
+    assert type(post['id']) is int and type(post['like_count']) is int, post
+    assert all(isinstance(post[key], str) for key in ('body', 'created_at', 'author')), post
+    assert re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z', post['created_at']), post
+assert next(p for p in posts if p['id'] == post_id)['like_count'] == 1, posts
+
 # Failed FK writes must not poison a reused prepared statement/connection.
 assert req('POST', '/posts', token('999999999'), {'body': 'bad FK'}) == (500, {'error': 'internal server error'})
 assert req('POST', '/posts', token(), {'body': 'after failed write'})[0] == 201
-print('PASS: worker isolation, fresh JWT checks, Unicode limits, 64 concurrent duplicate likes, cross-worker visibility, FK failure recovery')
+print('PASS: worker isolation, fresh JWT checks, Unicode limits, 64 concurrent duplicate likes, cross-worker visibility, feed shape/framing, FK failure recovery')

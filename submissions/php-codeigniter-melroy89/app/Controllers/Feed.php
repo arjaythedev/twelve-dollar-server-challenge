@@ -49,9 +49,11 @@ final class Feed extends BaseController
 
     private function json(array $data, int $status = 200): ResponseInterface
     {
-        return $this->response->setStatusCode($status)->setJSON(json_encode(
-            $data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR
-        ));
+        $body = json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
+        // The response is already buffered. Declare its byte length explicitly so large
+        // feeds use the same framing as small responses, including over keep-alive.
+        return $this->response->setStatusCode($status)->setJSON($body)
+            ->setHeader('Content-Length', (string) strlen($body));
     }
 
     private function error(string $message, int $status): ResponseInterface

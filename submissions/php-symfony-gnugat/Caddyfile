@@ -7,9 +7,11 @@
 		# when requests wait for a free one (while others wait on SQLite), and stops them once idle for max_idle_time.
 		max_threads 8
 		# Worker mode: Symfony boots once per thread, then handles requests in a loop.
-		# Defaults: 2 workers (2 per CPU), restarted every 500 requests by symfony/runtime.
+		# 2 workers, FrankenPHP's default on 1 CPU (2 per CPU), set so more CPUs don't reach max_threads (CI has 4).
+		# Restarted every 500 requests by symfony/runtime.
 		worker {
 			file ./public/index.php
+			num 2
 		}
 	}
 }

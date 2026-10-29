@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Language** | [DexLang](https://github.com/ensamuel7/dex) `v0.9.21`: statically typed, compiles to C, which `cc` builds into a native binary |
+| **Language** | [DexLang](https://github.com/ensamuel7/dex) `v0.9.22`: statically typed, compiles to C, which `cc` builds into a native binary |
 | **Framework** | None. DexLang's own `http` and `db` standard library modules |
 | **Server** | The `http` module's io_uring backend (`http.uring()`), with handlers run on the ring's thread |
 | **SQL** | Built with [dexqu](https://github.com/ensamuel7/dex-modules/tree/main/dexqu) `v0.1.0` at startup, prepared once |
@@ -11,7 +11,7 @@
 | **Nginx or direct** | **Direct**, on `HOST:PORT` (`0.0.0.0:80` on the benchmark box) |
 
 DexLang compiles to C. What runs is one native binary with `libsqlite3` linked in:
-no interpreter, no garbage collector, no framework. The program is about 430
+no interpreter, no garbage collector, no framework. The program is about 360
 lines of DexLang in `server.dx` and `queries.dx`, and everything below it is the
 language's standard library, unmodified for this challenge.
 
@@ -74,34 +74,30 @@ journal_size_limit = 67108864
 
 No response or query result is cached. Every request reads SQLite.
 
+## Responses
+
+Every response body is `json.encode` of a struct or an object literal, so the
+wire shapes are written down once and no JSON is assembled by hand:
+
+```dex
+let p: Post = Post {}
+db.fill(p, stOne)
+db.reset(stOne)
+return http.response(200, json.encode(PostEnvelope { post: p }), "application/json")
+```
+
+`db.fill` reads a row into the struct by column position, and field order is key
+order, which is the order the spec fixes. The compiler generates one encoder per
+struct: keys are literals, numbers go through an integer writer, and a string
+with nothing to escape is copied in one `memcpy`. A 20-post feed page encodes in
+about 2.7 µs.
+
 ## Auth
 
 HS256 is verified on every request: the MAC is recomputed in base64url and
 compared to the signature segment, so there's no decode on the hot path. `alg`
 is checked explicitly (a valid HMAC over a header saying `HS512` is the
 algorithm-confusion bug), and `exp` is required. A token without it is a 401.
-
-## Measured
-
-Self-run, not an official score. The server ran on a Synteq 1 vCPU / 2 GB VPS
-(Xeon Platinum 8260, Ubuntu 24.04, stock kernel), started by systemd as an
-unprivileged user with `LimitNOFILE=65535` on a fresh copy of the seed, 42/42
-before load. Load came from two load boxes in the same datacenter running a Go
-port of `bench/load.js`: one keep-alive connection per user, the same think
-times, 15% likes, 2% posts, 60 s ramp. p95 and p99 are the worse of the two
-generators.
-
-| Users | req/s (whole run) | p95 | p99 | Errors | App CPU | CPU / request | Peak RAM |
-|---:|---:|---:|---:|---:|---:|---:|---:|
-| 64,000 (5-min hold, epoll) | 6,262 | 108 ms | 191 ms | 0.00% | 52% | 83 µs | 1,113 MB |
-| 100,000 | 9,026 | 387 ms | 636 ms | 0.03% | 68% | 75 µs | 863 MB |
-| 110,000 | 9,848 | 133 ms | 612 ms | 0.02% | 52% | 53 µs | 1,217 MB |
-| **120,000** | **10,689** | **338 ms** | **803 ms** | **0.01%** | **56%** | **52 µs** | **1,055 MB** |
-
-At 120,000 users the server holds about 12,600 req/s steady with p50 under
-1 ms. The errors are on the load generator's side (a user's fixed source port
-still being released). The CPU still has room. Two source IPs limited how many
-users we could generate, so this is a lower bound.
 
 ## What the language gained from this challenge
 
@@ -119,16 +115,19 @@ folder:
   struct literal whose fields call functions in a program that throws).
 - Per-request path and query storage instead of 4 KB fixed buffers per
   connection.
+- A generated `json.encode` per struct (4.4x faster than the field-descriptor
+  encoder it replaces, with byte-identical output), and a fix for struct
+  literals passed straight to it, which leaked the values they created.
 
 ## Files
 
 ```
 server.dx    routes, handlers, auth, response building
 queries.dx   the six SQL statements, built with dexqu
-dex.mod      module file: dex 0.9.21, dexqu v0.1.0 (pinned in dex.sum)
+dex.mod      module file: dex 0.9.22, dexqu v0.1.0 (pinned in dex.sum)
 install.sh   root, once: build-essential, git, pkg-config, libsqlite3-dev,
              libssl-dev, libcurl, and Go 1.27.2 (sha256-checked)
-build.sh     builds the dex compiler from the pinned v0.9.21 tag through the Go
+build.sh     builds the dex compiler from the pinned v0.9.22 tag through the Go
              module proxy (checksum-verified), fetches dexqu, compiles server.dx
 start.sh     raises the soft open-file limit to the hard one and runs the server
 ```

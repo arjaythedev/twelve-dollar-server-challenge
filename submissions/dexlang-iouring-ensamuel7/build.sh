@@ -5,7 +5,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 # The compiler revision this submission was written and tested against.
-DEX_VERSION="${DEX_VERSION:-v0.9.21}"
+DEX_VERSION="${DEX_VERSION:-v0.9.22}"
 
 # DEX_BIN points at an already-built compiler, which is what the local test
 # loop uses. CI and the benchmark box leave it unset and build from the pinned

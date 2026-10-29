@@ -21,76 +21,20 @@ let stPing: int = -1
 let jwtSecret: string = ""
 let startedAt: long = 0
 
-const HEX: string = "0123456789abcdef"
-
-fn appendEscaped(sb: StringBuilder, s: string): void {
-    let n: int = s.len()
-    let i: int = 0
-    let clean: bool = true
-    while (i < n) {
-        let c: char = s.charAt(i)
-        if (c == '"' || c == '\\' || c < ' ') {
-            clean = false
-            break
-        }
-        i = i + 1
-    }
-    if (clean) {
-        sb.append(s)
-        return
-    }
-
-    if (i > 0) {
-        sb.append(s.substring(0, i))
-    }
-    while (i < n) {
-        let c: char = s.charAt(i)
-        if (c == '"') {
-            sb.append("\\\"")
-        } else if (c == '\\') {
-            sb.append("\\\\")
-        } else if (c < ' ') {
-            let v: int = num.toInt(c)
-            if (v == 10) {
-                sb.append("\\n")
-            } else if (v == 9) {
-                sb.append("\\t")
-            } else if (v == 13) {
-                sb.append("\\r")
-            } else if (v == 8) {
-                sb.append("\\b")
-            } else if (v == 12) {
-                sb.append("\\f")
-            } else {
-                sb.append("\\u00")
-                sb.append(HEX.substring(v / 16, v / 16 + 1))
-                sb.append(HEX.substring(v % 16, v % 16 + 1))
-            }
-        } else {
-            sb.append(c)
-        }
-        i = i + 1
-    }
+struct Post {
+    id: long
+    body: string
+    created_at: string
+    author: string
+    like_count: int
 }
 
-fn appendPost(sb: StringBuilder, stmt: int): void {
-    let id: long = db.col(stmt, 0)
-    let body: string = db.col(stmt, 1)
-    let created: string = db.col(stmt, 2)
-    let author: string = db.col(stmt, 3)
-    let likes: int = db.col(stmt, 4)
+struct FeedPage {
+    posts: Post[]
+}
 
-    sb.append("{\"id\":")
-    sb.append(id)
-    sb.append(",\"body\":\"")
-    appendEscaped(sb, body)
-    sb.append("\",\"created_at\":\"")
-    sb.append(created)
-    sb.append("\",\"author\":\"")
-    appendEscaped(sb, author)
-    sb.append("\",\"like_count\":")
-    sb.append(likes)
-    sb.append("}")
+struct PostEnvelope {
+    post: Post
 }
 
 fn fail(status: int, message: string): http.HttpResponse {
@@ -188,20 +132,14 @@ fn health(req: http.HttpRequest): http.HttpResponse {
 }
 
 fn feed(req: http.HttpRequest): http.HttpResponse {
-    let sb = StringBuilder()
-    sb.append("{\"posts\":[")
+    let posts: Post[] = []
     db.reset(stFeed)
-    let first: bool = true
     while (db.step(stFeed)) {
-        if (!first) {
-            sb.append(",")
-        }
-        first = false
-        appendPost(sb, stFeed)
+        let p: Post = Post {}
+        db.fill(p, stFeed)
+        posts.push(p)
     }
-
-    sb.append("]}")
-    return http.response(200, sb.toString(), "application/json")
+    return http.response(200, json.encode(FeedPage { posts: posts }), "application/json")
 }
 
 fn onePost(req: http.HttpRequest): http.HttpResponse {
@@ -210,21 +148,16 @@ fn onePost(req: http.HttpRequest): http.HttpResponse {
         return fail(400, "invalid post id")
     }
 
-    let sb = StringBuilder()
     db.reset(stOne)
     db.bindLong(stOne, 1, id)
-    let found: bool = db.step(stOne)
-    if (found) {
-        sb.append("{\"post\":")
-        appendPost(sb, stOne)
-        sb.append("}")
-    }
-    db.reset(stOne)
-
-    if (!found) {
+    if (!db.step(stOne)) {
+        db.reset(stOne)
         return fail(404, "post not found")
     }
-    return http.response(200, sb.toString(), "application/json")
+    let p: Post = Post {}
+    db.fill(p, stOne)
+    db.reset(stOne)
+    return http.response(200, json.encode(PostEnvelope { post: p }), "application/json")
 }
 
 fn createPost(req: http.HttpRequest): http.HttpResponse {

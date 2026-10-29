@@ -24,7 +24,8 @@ apt-get install -y --no-install-recommends \
   "php-zts-cli=${PHP_VERSION}" \
   "php-zts-embed=${PHP_VERSION}" \
   "php-zts-pdo=${PHP_EXT_VERSION}" \
-  "php-zts-pdo-sqlite=${PHP_EXT_VERSION}"
+  "php-zts-pdo-sqlite=${PHP_EXT_VERSION}" \
+  "php-zts-sqlite3=${PHP_EXT_VERSION}"
 
 curl -fsSL -o /usr/local/bin/composer "https://getcomposer.org/download/${COMPOSER_VERSION}/composer.phar"
 echo "${COMPOSER_SHA256}  /usr/local/bin/composer" | sha256sum -c -

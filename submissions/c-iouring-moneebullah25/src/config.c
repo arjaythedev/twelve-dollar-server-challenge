@@ -14,21 +14,21 @@ void config_defaults(struct config *c) {
     c->port = 80;
     c->max_conns = 450000;
     c->ring_slots = 0;
-    c->recv_bufs = 2048;
+    c->recv_bufs = 4096;
     c->recv_buf_size = 2048;
-    c->out_chunks = 1024;
+    c->out_chunks = 512;
     c->out_chunk_size = 73728; /* the largest feed: 20 x 500 fully escaped characters */
     c->batch_cqes = 32;
-    c->batch_wait_us = 250;
+    c->batch_wait_us = 2000;
     c->work_budget = 256;
     c->max_head = 8192;
     c->max_body = 16384;
     c->partial_timeout_s = 30;
-    c->mem_stop_accept_mb = 192;
-    c->mem_shed_mb = 96;
+    c->mem_stop_accept_mb = 256;
+    c->mem_shed_mb = 128;
     c->sqlite_cache_kib = 32768;
     c->ckpt_frames = 4000;
-    c->hold_frames = 8192;
+    c->hold_frames = 16384;
     c->hold_timeout_ms = 500;
 }
 

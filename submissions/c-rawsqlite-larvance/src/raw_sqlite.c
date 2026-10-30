@@ -8,6 +8,7 @@
 #include <pthread.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <errno.h>
 #include <time.h>
 
 u32 root_users      = 2;
@@ -1041,7 +1042,17 @@ int raw_sqlite_batch_end(void) {
 
   off_t off = WAL_HDR_SIZE + (off_t)start_slot * sizeof(wal_frame_slot_t);
   size_t total_bytes = (size_t)ndirty * sizeof(wal_frame_slot_t);
-  if (pwrite(wal_fd, &wal_frames_buf[start_slot], total_bytes, off) < 0) {}
+  const u8 *buf = (const u8 *)&wal_frames_buf[start_slot];
+  size_t written = 0;
+  while (written < total_bytes) {
+    ssize_t rc = pwrite(wal_fd, buf + written, total_bytes - written, off + (off_t)written);
+    if (UNLIKELY(rc <= 0)) {
+      if (rc < 0 && errno == EINTR) continue;
+      perror("wal pwrite error");
+      return -1;
+    }
+    written += (size_t)rc;
+  }
 
   wal_mx_frame += (u32)ndirty;
   ndirty = 0;

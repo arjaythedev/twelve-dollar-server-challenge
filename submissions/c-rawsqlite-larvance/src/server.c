@@ -46,7 +46,7 @@ int main(void) {
   app_init();
 
   const char *conns_env = getenv("CONNS");
-  u32 want_conns = conns_env ? (u32)atoi(conns_env) : 131072;
+  u32 want_conns = conns_env ? (u32)atoi(conns_env) : 500000;
   transport_init(host, port ? atoi(port) : 3000, want_conns);
 
   fprintf(stderr, "c-rawsqlite-larvance listening on %s:%s\n", host, port ? port : "3000");

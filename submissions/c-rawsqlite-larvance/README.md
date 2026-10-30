@@ -19,7 +19,7 @@ A pure C99 / GNU C implementation for the Twelve-Dollar Server Challenge with ze
 ## 2. Deployment Mode: Direct (0.0.0.0:80) or Nginx (127.0.0.1:3000)
 
 - Preferred Mode: Direct (HOST=0.0.0.0 PORT=80).
-  - The server natively manages up to 131,072 concurrent keep-alive connections across multiple SO_REUSEPORT io_uring instances using direct (fixed) file descriptors (IORING_REGISTER_FILES2) that bypass the process file table and RLIMIT_NOFILE bottlenecks.
+  - The server natively manages up to 524,288 concurrent keep-alive connections across multiple SO_REUSEPORT io_uring instances (defaulting to 8 rings x 65,472 slots) using direct (fixed) file descriptors (IORING_REGISTER_FILES2) that bypass the process file table and RLIMIT_NOFILE bottlenecks.
   - Running directly on port 80 eliminates Nginx reverse-proxy socket hop and saves about 15-20% CPU on the 2-vCPU Hetzner CPX22 target.
 - Nginx Mode: Also fully supported out of the box (defaults to HOST=127.0.0.1 PORT=3000 when environment variables are unset).
 
@@ -37,11 +37,11 @@ Instead of paying SQLite SQL tokenizer/parser, VDBE bytecode interpreter, B-tree
    - Zero in-memory table or count caches are used; 100% of reads and writes operate directly on SQLite 3 B-tree pages and WAL frames.
    - raw_insert_like performs a single-pass binary search and insert on sqlite_autoindex_likes_1 (root_likes_pk), inserts (post_id, rowid) into likes_post_id_idx (root_likes_pid), and appends (user_id, post_id, created_at) to likes (root_likes), with full 2-level B-tree leaf and interior page splitting.
    - raw_insert_post appends rows to posts (root_posts) using a tracked rightmost B+tree cursor with 2-level page splitting.
-3. True In-Order Index B-Tree Cursor (raw_index_seek_ge, raw_index_next):
-   - Traverses both leaf (0x0a) and interior (0x02) index cells in exact in-order sequence, computing like_count across the 20-post /feed window in a single contiguous index range scan (raw_range_counts).
-4. Contiguous WAL Frame Pool and Single-Syscall Group Commit (wal_frames_buf):
+3. Robust In-Order Index & Table B-Tree Cursors (raw_prev_table, raw_index_seek_ge, raw_index_next):
+   - /feed traverses actual post table B-tree leaf records backwards using raw_prev_table up to 20 posts; when rowids are contiguous, it runs a single-pass range scan over likes_post_id_idx (raw_range_counts) for zero overhead, with an automatic point-seek fallback when non-dense gaps occur.
+4. Contiguous WAL Frame Pool and Error-Handled Group Commit (wal_frames_buf):
    - Dirty pages are modified in-place inside wal_frames_buf[slot] (24B wal_frame_hdr_t + 4096B page).
-   - At the end of each io_uring iteration (raw_sqlite_batch_end), all dirty pages across all writes in the batch are committed to app.db-wal with cumulative big-endian SQLite WAL checksums in one single contiguous pwrite() syscall and zero page copies at commit time.
+   - At the end of each io_uring iteration (raw_sqlite_batch_end), all dirty pages across all writes in the batch are committed to app.db-wal with cumulative big-endian SQLite WAL checksums via a robust pwrite() loop handling EINTR and short writes, failing with HTTP 500 if disk write fails.
    - A background checkpoint thread (checkpoint_thread_main) flushes dirty frames back to the database mapping and runs fdatasync every 1,000 WAL frames off the critical event-loop thread.
 5. Dynamic Schema Root Discovery (discover_schema_roots):
    - Parses Page 1 (sqlite_schema) at startup to dynamically resolve the root pages for users, posts, likes, and their indexes.

@@ -176,19 +176,47 @@ static void exec_read(job_t *j) {
       out_lit(o, "{\"posts\":[", 10);
       raw_table_cursor_t cur;
       if (LIKELY(raw_last_table(&cur, ROOT_POSTS) == 0)) {
-        i64 hi = cur.rowid;
-        i64 lo = hi > 20 ? hi - 19 : 1;
-        i64 counts[20];
-        raw_range_counts(lo, hi, counts);
-        for (i64 k = 0; k <= hi - lo; k++) {
-          i64 uid, id = cur.rowid;
+        struct {
+          i64 id;
+          i64 uid;
           const u8 *body, *created, *author;
           u32 body_len, created_len, author_len;
-          parse_post_cols(cur.payload, &uid, &body, &body_len, &created, &created_len);
-          raw_get_username(uid, &author, &author_len);
-          if (k) { out_need(o, 1); out_lit(o, ",", 1); }
-          put_post(o, id, body, body_len, created, created_len, author, author_len, counts[id - lo]);
-          if (k < hi - lo && raw_prev_table(&cur) != 0) break;
+          i64 likes;
+        } feed[20];
+        int count = 0;
+        for (;;) {
+          feed[count].id = cur.rowid;
+          parse_post_cols(cur.payload, &feed[count].uid, &feed[count].body, &feed[count].body_len,
+                          &feed[count].created, &feed[count].created_len);
+          raw_get_username(feed[count].uid, &feed[count].author, &feed[count].author_len);
+          feed[count].likes = 0;
+          count++;
+          if (count == 20 || raw_prev_table(&cur) != 0) break;
+        }
+
+        if (count > 0) {
+          i64 hi = feed[0].id;
+          i64 lo = feed[count - 1].id;
+          if (LIKELY(hi - lo + 1 == count)) {
+            i64 counts[20];
+            raw_range_counts(lo, hi, counts);
+            for (int k = 0; k < count; k++) feed[k].likes = counts[feed[k].id - lo];
+          } else if (hi - lo + 1 <= 64) {
+            i64 counts[64];
+            raw_range_counts(lo, hi, counts);
+            for (int k = 0; k < count; k++) feed[k].likes = counts[feed[k].id - lo];
+          } else {
+            for (int k = 0; k < count; k++) {
+              raw_range_counts(feed[k].id, feed[k].id, &feed[k].likes);
+            }
+          }
+
+          for (int k = 0; k < count; k++) {
+            if (k) { out_need(o, 1); out_lit(o, ",", 1); }
+            put_post(o, feed[k].id, feed[k].body, feed[k].body_len,
+                     feed[k].created, feed[k].created_len,
+                     feed[k].author, feed[k].author_len, feed[k].likes);
+          }
         }
       }
       out_need(o, 2);
@@ -304,7 +332,14 @@ static void app_batch(job_t *js, int n) {
     for (int i = 0; i < n; i++) {
       if (js[i].kind && js[i].is_write) exec_write(&js[i]);
     }
-    raw_sqlite_batch_end();
+    if (UNLIKELY(raw_sqlite_batch_end() != 0)) {
+      for (int i = 0; i < n; i++) {
+        if (js[i].kind && js[i].is_write) {
+          if (js[i].resp) obuf_release(js[i].resp);
+          js[i].resp = ERR(INTERNAL);
+        }
+      }
+    }
   }
   arena_used = 0;
 }

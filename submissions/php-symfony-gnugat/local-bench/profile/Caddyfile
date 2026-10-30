@@ -1,0 +1,19 @@
+# Profiling: local-bench/Caddyfile.classic + Excimer (see profile/excimer.php).
+{
+	auto_https off
+	admin off
+
+	frankenphp {
+		php_ini {
+			extension /usr/local/lib/php-excimer/excimer.so
+			auto_prepend_file /app/local-bench/profile/excimer.php
+		}
+	}
+}
+
+# Classic mode: Symfony boots on every request, like with PHP-FPM.
+http://:{$PORT} {
+	bind {$HOST}
+	root ./public
+	php_server
+}

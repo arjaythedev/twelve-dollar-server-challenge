@@ -1,2 +1,0 @@
-# Experiment: Go's GC runs at twice the heap growth (default 100)
-GOGC=200

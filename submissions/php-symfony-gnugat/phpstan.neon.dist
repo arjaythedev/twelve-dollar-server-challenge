@@ -9,3 +9,5 @@ parameters:
     - src/
   bootstrapFiles:
     - vendor/autoload.php
+  doctrine:
+    objectManagerLoader: config/phpstan/object-manager.php

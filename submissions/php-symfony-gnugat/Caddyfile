@@ -14,5 +14,7 @@
 http://:{$PORT} {
 	bind {$HOST}
 	root ./public
-	php_server
+	# An API without static files: no try_files filesystem checks, everything goes to Symfony
+	rewrite * /index.php
+	php
 }

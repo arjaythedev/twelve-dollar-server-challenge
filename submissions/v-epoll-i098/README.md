@@ -76,6 +76,8 @@ The C transport keeps debug symbols and frame pointers for local profiles.
   Input that arrives while V is still busy with the connection is held, and the receive is cancelled
   until V asks for input again, so pipelined clients keep backpressure in their socket.
   A server close cancels the armed receive first, then closes the direct descriptor.
+  A reset also notifies V while application work is deferred, so dead sockets do not wait for a checkpoint.
+  A client that only closes its write side can still receive its response.
 - **Shared receive buffers.** Each ring has 1,024 buffers of 2,048 bytes.
   Idle connections have no input or output allocation.
   Partial requests use bounded input buffers. Pending sends retain exact-size storage until completion.
@@ -98,12 +100,21 @@ Local only, not a benchmark-box score. The server ran in a Docker container with
 
 | Build | Load | Users (5-min hold) | p95 | p99 | Errors | Server CPU per request | Peak memory |
 |---|---|---:|---:|---:|---:|---:|---:|
-| this build, run 1 | native C++ port of `bench/load.js`, 8 cores | **270,000** | 24.6 ms | 46.6 ms | 0.00% | 32.1 µs | 1,351 MiB |
-| this build, run 2 | same | **270,000** | 52.5 ms | 124.7 ms | 0.00% | 32.9 µs | 1,406 MiB |
+| earlier io_uring build, run 1 | native C++ port of `bench/load.js`, 8 cores | **270,000** | 24.6 ms | 46.6 ms | 0.00% | 32.1 µs | 1,351 MiB |
+| earlier io_uring build, run 2 | same | **270,000** | 52.5 ms | 124.7 ms | 0.00% | 32.9 µs | 1,406 MiB |
 | earlier epoll build | `bench/load.js` on k6 v2.3.0 | 81,250 | 498 ms | 695 ms | 0.00% | - | 125 MiB RSS |
 
 The native generator keeps the `bench/load.js` user model (feed, think, post, think, 15% like, 2% post),
 because local k6 was killed at its 40 GB memory limit while holding 120,000 users. Both 270,000-user runs
 passed `PRAGMA integrity_check`, and every acknowledged post and like was in the database afterwards.
+These holds predate the response-allocation, socket-buffer, and reset-cleanup changes.
 
 `bash test/run.sh submissions/v-epoll-i098`: 42 passed, 0 failed.
+
+The transport regression checks reset cleanup during deferred work and preserves responses after input half-close:
+
+```sh
+cc -O2 -Wall -Wextra -Werror -I build/liburing/src/include tests/transport_reset.c \
+  build/liburing/src/liburing.a -o build/transport-reset-test
+sudo prlimit --nofile=65535:65535 --memlock=unlimited:unlimited build/transport-reset-test
+```

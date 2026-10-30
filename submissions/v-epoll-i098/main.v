@@ -293,6 +293,10 @@ fn (mut s Server) run(lfd int) {
 				5 {
 					s.checkpoint_done()
 				}
+				6 {
+					C.td_net_abort(s.transport, fd)
+					s.conns[fd] = Conn{}
+				}
 				else {
 					panic('invalid transport event')
 				}
@@ -464,7 +468,9 @@ fn (mut s Server) finish_batch() {
 	}
 	if committed {
 		for seg in s.segs {
-			C.td_net_send(s.transport, seg.fd, unsafe { &s.out[seg.start] }, seg.end - seg.start)
+			if s.conns[seg.fd].open {
+				C.td_net_send(s.transport, seg.fd, unsafe { &s.out[seg.start] }, seg.end - seg.start)
+			}
 		}
 	}
 	for fd in s.flush {

@@ -316,7 +316,13 @@ static int td_received(struct td_ring *r, int ring_index, int slot, const struct
     }
     if (buffer >= 0) td_recycle(r, buffer);
     int transient = result == -ENOBUFS || result == -EAGAIN || result == -EINTR || result == -ENOMEM;
-    if (result != -ECANCELED && !transient) c->eof = 1; /* end of stream or a failed socket */
+    if (result != -ECANCELED && !transient) {
+        c->eof = 1;
+        if (result < 0 && c->operation == APPLICATION) {
+            *event = (struct td_event){ .kind = 6, .id = ring_index * SLOTS + slot, .buffer = -1 };
+            return 1;
+        }
+    }
     if (!waiting || c->armed) return 0;
     if (c->eof) td_enqueue(r, slot, CLOSE);
     else if (transient) td_retry(r, slot);

@@ -68,6 +68,7 @@ From the repository root, after generating the seed:
 ```bash
 bash test/run.sh submissions/typescript-fastify-melroy89
 cd submissions/typescript-fastify-melroy89
+export PATH="/opt/twelve-fastify-node-v26.11.1/bin:$PATH"
 node verify.mjs ../../seed/feed.db
 node verify-sockets.mjs ../../seed/feed.db
 ```

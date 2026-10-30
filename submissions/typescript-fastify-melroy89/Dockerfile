@@ -1,6 +1,7 @@
 # Optional local qualification image; the organiser uses install/build/start.sh.
 FROM ubuntu:24.04
 WORKDIR /app
+ENV PATH="/opt/twelve-fastify-node-v26.11.1/bin:$PATH"
 COPY install.sh /tmp/install.sh
 RUN bash /tmp/install.sh \
     && apt-get install -y --no-install-recommends curl jq openssl sqlite3 \

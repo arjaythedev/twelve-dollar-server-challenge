@@ -3,8 +3,8 @@
 	admin off
 
 	frankenphp {
-		# Worker mode: Symfony boots once per worker, then handles requests in a loop (symfony/runtime's FrankenPHP
-		# runner, which restarts each worker every 500 requests). FrankenPHP's defaults: 2 workers per CPU.
+		# Worker mode: Symfony boots once per worker, then handles requests in a loop (public/index.php, which
+		# restarts each worker every 500 requests). FrankenPHP's defaults: 2 workers per CPU.
 		worker {
 			file ./public/index.php
 		}

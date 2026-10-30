@@ -7,6 +7,6 @@ export APP_ENV=prod APP_DEBUG=0
 export SQLITE_PATH=/nonexistent/feed.db
 
 # FrankenPHP's PHP (see install.sh), not whatever php is on the PATH (GitHub's runner image ships PHP 8.3)
-frankenphp-php /usr/local/bin/composer install --no-dev --optimize-autoloader --no-interaction --no-progress
+frankenphp-php /usr/local/bin/composer install --no-dev --classmap-authoritative --no-interaction --no-progress
 frankenphp-php /usr/local/bin/composer dump-env prod
 frankenphp-php bin/console cache:warmup

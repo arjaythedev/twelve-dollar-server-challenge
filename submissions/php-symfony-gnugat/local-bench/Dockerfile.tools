@@ -1,0 +1,7 @@
+# The dev tools' image (make docker-init): PHP 8.5's command line and Composer, without the app. Not the box's PHP:
+# PHPStan and Rector start PHP again through PHP_BINARY, which for FrankenPHP's release binary is frankenphp itself.
+FROM php:8.5-cli
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends unzip \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=composer:2.10.2 /usr/bin/composer /usr/local/bin/composer

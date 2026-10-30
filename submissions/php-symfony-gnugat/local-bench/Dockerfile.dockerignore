@@ -1,4 +1,0 @@
-vendor/
-var/
-.env.local.php
-local-bench/results/

@@ -2,10 +2,6 @@ doctrine:
     dbal:
         driver: pdo_sqlite
         path: '%env(SQLITE_PATH)%'
-        # Keep the SQLite connection open between requests, one per PHP thread, as worker mode already does:
-        # in classic mode, every request opened the database again (and read its schema).
-        options:
-            !php/const PDO::ATTR_PERSISTENT: true
 
         profiling_collect_backtrace: '%kernel.debug%'
     orm:

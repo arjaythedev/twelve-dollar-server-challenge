@@ -5,7 +5,7 @@ arg ?=
 env ?= dev
 
 # Docker images
-# The `runtime` stage of local-bench/Dockerfile: the box's PHP (8.5 ZTS) and Composer, without the app
+# PHP 8.5 and Composer, without the app (local-bench/Dockerfile.tools)
 TOOLS_IMAGE = twelve-dollar-php-symfony-tools
 TOOLS = docker run --rm --interactive --user $(shell id -u):$(shell id -g) --env HOME=/tmp \
 	--volume $(CURDIR):/app --workdir /app
@@ -38,8 +38,8 @@ help: ## Outputs this help screen
 docker: ## Runs Docker (arg, eg `arg='images'`)
 	@docker $(arg)
 
-docker-init: ## Builds the tools image (PHP 8.5 and Composer, as on the box)
-	@docker build --pull --target runtime --file local-bench/Dockerfile --tag $(TOOLS_IMAGE) .
+docker-init: ## Builds the tools image (PHP 8.5 and Composer)
+	@docker build --pull --file local-bench/Dockerfile.tools --tag $(TOOLS_IMAGE) local-bench
 
 docker-bash: ## Opens a (bash) shell in the tools container
 	@$(TOOLS) --tty $(TOOLS_IMAGE) bash

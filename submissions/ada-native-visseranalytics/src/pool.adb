@@ -18,9 +18,24 @@ package body Pool is
    type Class_Index is range 0 .. 13; -- up to 2 MiB
    Free_List : array (Class_Index) of System.Address := [others => System.Null_Address];
    Free_Count : array (Class_Index) of Natural := [others => 0];
-   -- Keep plenty of small blocks; release rare large ones back to malloc.
+   -- Enough spare blocks for steady traffic (a few hundred responses are in
+   -- flight at once); the surplus left by a burst goes back to malloc, and
+   -- Trim returns it to the kernel.
    Keep : constant array (Class_Index) of Natural :=
-     [0 .. 3 => 16_384, 4 => 8_192, 5 => 4_096, 6 .. 8 => 256, others => 8];
+     [0 .. 5 => 1_024, 6 .. 8 => 64, others => 8];
+   Released : Natural := 0;   -- blocks given back to malloc since the last trim
+
+   function Malloc_Trim (Pad : Interfaces.C.size_t) return Interfaces.C.int
+     with Import, Convention => C, External_Name => "malloc_trim";
+
+   procedure Trim is
+      Ignored : Interfaces.C.int;
+   begin
+      if Released >= 256 then
+         Ignored := Malloc_Trim (0);
+         Released := 0;
+      end if;
+   end Trim;
 
    function Class_Bytes (C : Class_Index) return Natural is (2 ** (Natural (C) + Smallest_Shift));
 
@@ -68,6 +83,7 @@ package body Pool is
          Free_Count (C) := Free_Count (C) + 1;
       else
          Sys.Free (Block);
+         Released := Released + 1;
       end if;
    end Give;
 

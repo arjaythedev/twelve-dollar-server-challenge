@@ -25,9 +25,10 @@ helper (below), which never writes rows.
 **io_uring with direct sockets.** A single process can still hold hundreds of
 thousands of connections: accepted sockets go straight into io_uring
 fixed-file tables instead of the descriptor table, and the server drives six
-rings of 65,535 slots each (393,210 connections) from one thread. Multishot
-accept and multishot receive with provided buffer rings keep one request in
-flight per socket instead of one per read. Rings are set up with
+rings of 65,535 slots each (393,210 connections) from one thread. Accepts are
+multishot, and an idle socket keeps a single multishot readiness watch; when
+it fires, one non-blocking receive into a provided buffer runs in the same
+batch (see "Memory decides the score" below). Rings are set up with
 `SINGLE_ISSUER | DEFER_TASKRUN`, so completions are processed only when the
 loop asks for them; when busy, the loop waits for 64 completions or 2 ms, and
 one wake-up serves a whole batch. The ABI layer (`src/uring.adb`) is about
@@ -78,6 +79,37 @@ WAL-header sync instead of a whole checkpoint. Held writes wait a second at
 most. If the helper is gone, or the WAL still reaches 16,000 frames, the server
 checkpoints inline (PASSIVE), as SQLite would.
 
+**Memory decides the score.** On the benchmark box every entry near the top
+stops between 280,000 and 300,000 users with mass "connection refused": the
+box runs out of memory and the server is killed. The kernel needs about 4.4 KB
+for each open connection (socket, inode, file, dentry, the io_uring request
+watching it), and a request that waits unread in a socket costs about 2.9 KB
+more, so the server's own memory and any stall decide where that happens. This
+version spends its effort there:
+
+- An idle socket keeps a multishot *poll* instead of a parked multishot
+  receive. Both are one io_uring request, but the receive also holds an async
+  poll record, so this saves 96 bytes of kernel memory per connection (26 MB at
+  280,000), at the same CPU per request because the receive runs in the same
+  batch as the poll that announced it.
+- SQLite's cache is 16 MiB instead of 64. Most of what this load keeps hot is
+  the likes primary key (29.5 MB; every like inserts into it at a random
+  place), and 8, 16 and 64 MiB measured the same CPU per request: the rest
+  now sits in the kernel's page cache, which can be reclaimed under pressure,
+  instead of in anonymous memory, which cannot.
+- Connection records are 40 bytes (flags packed into bits), rings have 1,024
+  receive buffers each instead of 2,048, and the response pool keeps at most
+  1,024 spare blocks per size and returns the rest to the kernel
+  (`malloc_trim`).
+- After a stall, every waiting socket wants a receive buffer at once. Sockets
+  that find none now queue up and are served a bounded number per ring per
+  batch; before, every one of them retried on every batch and failed again
+  (about 3.5 failed receives per connection after a 3-second pause at 200,000
+  users), which stretched the backlog that was eating the memory.
+
+Altogether the server's own memory at 280,000 connections went from 77 MB to
+40 MB, and the kernel's from 1,249 MB to 1,220 MB.
+
 **Nothing on the request path allocates.** HTTP requests are parsed in place
 from the kernel's receive buffers into index ranges; there is no
 Unbounded_String or secondary-stack string left in the hot path. Responses are
@@ -88,7 +120,8 @@ branch-free loop that GCC vectorizes, so ordinary text is copied with one
 
 **SQLite built for this job.** SQLite 3.54.1 is downloaded by `build.sh`
 (SHA-256 pinned; it matches sqlite.org's published SHA3-256) and compiled with
-`SQLITE_THREADSAFE=0` and the recommended omissions. Memory-mapped I/O is off:
+`SQLITE_THREADSAFE=0` and the recommended omissions. The page cache is 16 MiB
+(see above). Memory-mapped I/O is off:
 with a single connection SQLite's own page cache stays valid across requests,
 while mmap made every page access probe the WAL index again (11% more
 instructions per request). Feeds find the newest 20 IDs, then read rows and
@@ -97,14 +130,16 @@ orphaned rows fall back to the reference query.
 
 **Connection lifecycle.** Idle keep-alive connections stay open for 75 seconds;
 unfinished requests and responses get 30. Pipelined requests are answered in
-order, one at a time, and a client that sends far ahead without reading has its
-receive paused until its responses drain. Closed sockets are released at a
+order, one at a time, and a socket is not read again while its response is
+being sent, so a client that sends far ahead without reading is held back by
+TCP itself. Closed sockets are released at a
 bounded rate, and SIGTERM stops the listener immediately so a restart can bind
 the port at once (a restart also waits for the port if needed).
 
-Closing is cheap even when every client leaves at once. A socket whose client
-closed first has no receive left to cancel; otherwise the receive is cancelled
-by its user data, which the kernel finds with a hash lookup. (Cancelling by
+Closing is cheap even when every client leaves at once. A socket's watch is
+cancelled by its user data, which the kernel finds with a hash lookup, and a
+client's end of stream is read like any request, a bounded number per ring per
+batch. (Cancelling by
 socket slot, as we first did, makes the kernel scan every pending request on
 the ring for each close: with 250,000 clients leaving together, closing took
 tens of seconds while their unread FIN packets piled up in kernel memory,
@@ -134,9 +169,61 @@ official run (226,000 users), we test on two Linux VMs on Apple Silicon
 and runs the server under systemd as in the benchmark (LimitNOFILE=65535);
 a second VM runs a C load generator that follows the `bench/load.js` user loop
 from 64 source addresses over a virtual network card. Every run starts from a
-fresh copy of the seed. The CPU is faster than the benchmark's vCPU, so the
-memory limit is what these runs share with the real box; CPU numbers only
-compare versions.
+fresh copy of the seed. The CPU is faster than the benchmark's vCPU, so CPU
+numbers only compare versions.
+
+### The memory the benchmark box does not have
+
+The VM has about 450–500 MB more room than the benchmark box under the same
+load: our #211 code held 320,000 users here but stopped at 270,000 there,
+failing 280,000 with refused connections. So we now lock memory away for
+these runs with a small helper (it allocates and `mlock`s N MB and is exempt
+from the OOM killer), calibrated against that official result. With 500 MB
+locked, the #211 code fails 280,000 users the way it did on the box (the
+kernel kills the server about a minute in: 3.2% errors, mostly refused
+connections); with 450 MB it just passes (0 errors, p99 302 ms, 50 MB free).
+500 MB is therefore a slightly pessimistic stand-in for the box.
+
+| Version | Locked | Users, hold | Result |
+| --- | ---: | --- | --- |
+| #211 as benchmarked | 450 MB | 280,000, 2 min | 0 errors, p99 302 ms |
+| #211 as benchmarked | 500 MB | 280,000, 2 min | killed for memory, 3.2% errors |
+| + 16 MiB SQLite cache | 500 MB | 280,000, 2 min | **0 errors, p99 33 ms** |
+| + 40-byte records, 1,024 buffers, bounded re-arm | 500 MB | 290,000, 5 min | killed at the end of the ramp, 4.4% errors |
+| + idle sockets watched by poll (this version) | 500 MB | 290,000, 5 min | clean for 4 minutes, then killed: 1.0% errors |
+| this version | 480 MB | 290,000, 5 min | killed after 2 minutes, 14.5% errors |
+
+So this version moves the edge from about 275,000 to about 285,000 users here;
+290,000 sits right on it, and runs there end either way. What tips it is the
+database growing during the hold (about 50 MB of new posts and likes in five
+minutes): once the hot pages no longer fit, SQLite's reads go to disk, the
+event loop slows, and the requests waiting in the kernel (2.9 KB each) take
+the rest.
+
+Without locked memory, this version held 280,000 users for five minutes with
+the server paused for 3 seconds in the middle (`SIGSTOP`/`SIGCONT`): 0 errors,
+p95 5.0 ms, back to normal latency about a second after the pause, and no
+receive failed for want of a buffer (20,000 sockets per ring waited their
+turn instead). Watch mode measured the same CPU per request as the parked
+receive it replaced (15.0–18.1 µs against 15.9–17.2 µs of VM time in
+alternating runs at 200,000 users).
+
+What did not work:
+
+- Closing idle keep-alive connections early so clients reconnect, as entries
+  limited by the descriptor table do. With an 8-second idle limit at 280,000
+  users, about 10,000 reconnects a second filled the kernel with orphaned
+  sockets until it ran out of TCP memory, and the VM locked up.
+- An 8 MiB cache and 512 buffers per ring saved another 10 MB but did worse at
+  the edge (4.4% errors at 290,000 with 500 MB locked).
+- A 64 MiB cache, as before: the same CPU, 32 MB more anonymous memory.
+
+Most of the CPU at this scale is the kernel's: in a profile at 300,000
+connections, about 28% of the busy time went to finding each packet's socket. A
+2 GB machine gets 16,384 buckets in the TCP established-connection table, so
+every incoming packet walks a chain of about 18 sockets.
+
+### Earlier versions
 
 300,000 users, 60 s ramp, 5-minute hold, about 31,700 requests per second:
 
@@ -217,7 +304,8 @@ copy of the seed database. The challenge service provides
 adversarial feed comparisons against the reference SQL with external writers,
 process lifecycle checks (fresh rollback-mode databases, SIGTERM and SIGKILL
 restarts, durability) and Nginx integration. All of them pass on x86_64 (epoll,
-under Rosetta) and on native arm64 Linux with io_uring and with epoll.
+under Rosetta). The io_uring path (which a container cannot use) is checked in
+the server VM: the official suite and the 139 focused checks pass there too.
 
 `bench/request_cost.adb` measures CPU per request without the network, in the
 load test's request mix. `bash local.sh up` starts a local preview at

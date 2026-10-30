@@ -3,7 +3,7 @@ with System;
 
 -- A minimal io_uring binding written against the kernel ABI (no liburing):
 -- ring setup, submission/completion queues, sparse fixed-file tables and a
--- provided-buffer ring for multishot receives.
+-- provided-buffer ring for receives.
 package Uring is
    type Ring is record
       FD : Integer := -1;
@@ -58,8 +58,12 @@ package Uring is
 
    procedure Prepare_Accept (Entry_Address : System.Address; Listener : Integer;
                              User_Data : Unsigned_64);
-   procedure Prepare_Receive (Entry_Address : System.Address; Slot : Natural;
-                              User_Data : Unsigned_64);
+   -- A multishot readiness watch (POLLIN | POLLRDHUP) on a direct socket.
+   procedure Prepare_Poll (Entry_Address : System.Address; Slot : Natural;
+                           User_Data : Unsigned_64);
+   -- One non-blocking receive into a provided buffer.
+   procedure Prepare_Read (Entry_Address : System.Address; Slot : Natural;
+                           User_Data : Unsigned_64);
    procedure Prepare_Send (Entry_Address : System.Address; Slot : Natural;
                            Data : System.Address; Length : Natural;
                            User_Data : Unsigned_64);

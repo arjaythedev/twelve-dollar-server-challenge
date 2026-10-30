@@ -57,6 +57,7 @@ package body Uring is
       Length | Op_Flags | File_Index => 0,
       Offset | Address | User_Data | Address_3 | Padding => 0);
 
+   Op_Poll_Add : constant := 6;
    Op_Accept : constant := 13;
    Op_Cancel : constant := 14;
    Op_Close : constant := 19;
@@ -313,17 +314,29 @@ package body Uring is
       S.User_Data := User_Data;
    end Prepare_Accept;
 
-   procedure Prepare_Receive (Entry_Address : System.Address; Slot : Natural;
-                              User_Data : Unsigned_64) is
+   procedure Prepare_Poll (Entry_Address : System.Address; Slot : Natural;
+                           User_Data : Unsigned_64) is
+      S : Submission with Import, Address => Entry_Address;
+   begin
+      S.Opcode := Op_Poll_Add;
+      S.Flags := Fixed_File;
+      S.FD := Integer_32 (Slot);
+      S.Length := 1;                      -- IORING_POLL_ADD_MULTI
+      S.Op_Flags := 16#2001#;             -- POLLIN | POLLRDHUP
+      S.User_Data := User_Data;
+   end Prepare_Poll;
+
+   procedure Prepare_Read (Entry_Address : System.Address; Slot : Natural;
+                           User_Data : Unsigned_64) is
       S : Submission with Import, Address => Entry_Address;
    begin
       S.Opcode := Op_Receive;
       S.Flags := Fixed_File + Buffer_Select;
       S.FD := Integer_32 (Slot);
-      S.Priority := 2;                    -- IORING_RECV_MULTISHOT
+      S.Op_Flags := 16#40#;               -- MSG_DONTWAIT: never parks a poll
       S.Buffer_Group := 0;
       S.User_Data := User_Data;
-   end Prepare_Receive;
+   end Prepare_Read;
 
    procedure Prepare_Send (Entry_Address : System.Address; Slot : Natural;
                            Data : System.Address; Length : Natural;

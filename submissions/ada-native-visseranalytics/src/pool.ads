@@ -11,6 +11,8 @@ package Pool is
    -- Returns a block whose data holds at least Bytes. Never null.
    function Take (Bytes : Natural) return System.Address;
    procedure Give (Block : System.Address);
+   -- Returns freed heap memory to the kernel after a burst (call rarely).
+   procedure Trim;
 
    function Data (Block : System.Address) return System.Address;
    function Capacity (Block : System.Address) return Natural;

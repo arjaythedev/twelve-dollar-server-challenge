@@ -25,7 +25,6 @@ package body Engine is
 
    Idle_Seconds : constant := 75;     -- idle keep-alive lifetime
    Request_Seconds : constant := 30;  -- unfinished request or response
-   Pause_Bytes : constant := 65_536;  -- stop receiving past this queued input
    Input_Limit : constant := 1_048_576;
 
    -- Batching: when busy, wait for a few completions or Batch_Nanos so one
@@ -35,27 +34,54 @@ package body Engine is
    Batch_Nanos : constant := 2_000_000;
    Idle_Nanos : constant := 2_000_000;
 
+   -- One per possible connection, so it is kept to 40 bytes.
    type Conn is record
       Gen : Unsigned_32;
       In_Length : Unsigned_32;
       Out_Offset : Unsigned_32;
       Last_Active : Unsigned_32;
       Request_Start : Unsigned_32;
-      Interest : Unsigned_32;
-      Input : System.Address;      -- queued request bytes (pool block)
-      Out_Block : System.Address;  -- response being sent (pool block)
+      Interest : Unsigned_8;       -- epoll events wanted
       Open : Boolean;
       Writing : Boolean;           -- a response is queued or in flight
       Close_After : Boolean;
       Interim : Boolean;           -- the response is a 100 Continue
       Continue_Sent : Boolean;
-      Receiving : Boolean;         -- multishot receive armed
-      Paused : Boolean;            -- receive cancelled for backpressure
+      Watching : Boolean;          -- readiness watch armed (io_uring)
+      Starved : Boolean;           -- waiting for a receive buffer
       Deferred : Boolean;          -- waiting for the batch commit
       In_Flight : Boolean;         -- send submitted to the kernel
       Queued : Boolean;            -- on the end-of-batch work list
       Held : Boolean;              -- a write request waits for the WAL restart
+      Ready : Boolean;             -- readable, not read yet (io_uring)
+      Reading : Boolean;           -- a receive is queued (io_uring)
+      Input : System.Address;      -- queued request bytes (pool block)
+      Out_Block : System.Address;  -- response being sent (pool block)
    end record;
+   for Conn use record
+      Gen at 0 range 0 .. 31;
+      In_Length at 4 range 0 .. 31;
+      Out_Offset at 8 range 0 .. 31;
+      Last_Active at 12 range 0 .. 31;
+      Request_Start at 16 range 0 .. 31;
+      Interest at 20 range 0 .. 7;
+      Open at 21 range 0 .. 0;
+      Writing at 21 range 1 .. 1;
+      Close_After at 21 range 2 .. 2;
+      Interim at 21 range 3 .. 3;
+      Continue_Sent at 21 range 4 .. 4;
+      Watching at 21 range 5 .. 5;
+      Starved at 21 range 7 .. 7;
+      Deferred at 22 range 0 .. 0;
+      In_Flight at 22 range 1 .. 1;
+      Queued at 22 range 2 .. 2;
+      Held at 22 range 3 .. 3;
+      Ready at 22 range 4 .. 4;
+      Reading at 22 range 5 .. 5;
+      Input at 24 range 0 .. 63;
+      Out_Block at 32 range 0 .. 63;
+   end record;
+   for Conn'Size use 320;
 
    -- Untouched pages of an anonymous mapping cost no memory, so the table
    -- is sized for every possible connection and needs no initialization.
@@ -106,13 +132,15 @@ package body Engine is
 
    -- io_uring state.
    Tag_Accept : constant := 1;
-   Tag_Receive : constant := 2;
    Tag_Send : constant := 3;
    Tag_Close : constant := 4;
    Tag_Ignore : constant := 5;
+   Tag_Watch : constant := 2;
+   Tag_Read : constant := 6;
+
    -- Requests are small (a GET is ~100 bytes, a new post with its token
    -- under 1 KB); a larger one simply arrives in several buffers.
-   Buffer_Count : constant := 2_048;
+   Buffer_Count : constant := 1_024;
    Buffer_Size : constant := 1_024;
    Rings : array (0 .. Max_Rings - 1) of Uring.Ring;
    Ring_Count : Natural := 0;
@@ -123,10 +151,19 @@ package body Engine is
    Accept_Ring : Integer := -1;
    Accept_Cancelling : Boolean := False;
    Accept_Retry : Unsigned_32 := 0;     -- after a hard accept error
+
+   -- Receives that ended because the ring ran out of buffers (after a stall,
+   -- every waiting socket asks at once). Re-arming them all at once only
+   -- makes most fail again, so each batch re-arms at most Starve_Budget per
+   -- ring, oldest first, once that batch's buffers are back.
+   Starve_Budget : constant := Buffer_Count / 4;
+   type Starve_Queue is array (0 .. Stride - 1) of Conn_ID;
+   Starved_IDs : array (0 .. Max_Rings - 1) of Starve_Queue;
+   Starved_First, Starved_Count : array (0 .. Max_Rings - 1) of Natural := [others => 0];
    Listen_FD : Integer := -1;
 
    -- Diagnostics, printed every 10 seconds.
-   Stat_Batches, Stat_Completions, Stat_No_Buffers : Natural := 0;
+   Stat_Batches, Stat_Completions, Stat_No_Buffers, Stat_Starved : Natural := 0;
    Stat_Worst_Batch, Stat_Worst_Commit, Stat_Worst_Sweep : Unsigned_64 := 0;
    Stat_Clock : Unsigned_32 := 0;
    -- Loop turns of Slow_Loop_Ms or more, and where the worst one spent its
@@ -164,8 +201,11 @@ package body Engine is
    function To_Address (Value : Unsigned_64) return System.Address is
      (System.Storage_Elements.To_Address (System.Storage_Elements.Integer_Address (Value)));
 
-   function Receive_Data (ID : Conn_ID; Gen : Unsigned_32) return Unsigned_64 is
-     (Tag_Receive + Shift_Left (Unsigned_64 (Gen and 16#0FFF_FFFF#), 4) +
+   function Watch_Data (ID : Conn_ID; Gen : Unsigned_32) return Unsigned_64 is
+     (Tag_Watch + Shift_Left (Unsigned_64 (Gen and 16#0FFF_FFFF#), 4) +
+      Shift_Left (Unsigned_64 (ID), 32));
+   function Read_Data (ID : Conn_ID; Gen : Unsigned_32) return Unsigned_64 is
+     (Tag_Read + Shift_Left (Unsigned_64 (Gen and 16#0FFF_FFFF#), 4) +
       Shift_Left (Unsigned_64 (ID), 32));
    function Accept_Data (R : Natural) return Unsigned_64 is
      (Tag_Accept + Shift_Left (Unsigned_64 (R), 8));
@@ -211,9 +251,9 @@ package body Engine is
       C : Conn renames Table (ID);
       Change : aliased Ready_Event := (Want, Unsigned_32 (ID), C.Gen);
    begin
-      if C.Interest /= Want then
+      if C.Interest /= Unsigned_8 (Want) then
          if Sys.Epoll_Control (Queue, 3, int (ID), Change'Address) = 0 then
-            C.Interest := Want;
+            C.Interest := Unsigned_8 (Want);
          end if;
       end if;
    end Set_Interest;
@@ -283,9 +323,9 @@ package body Engine is
                -- A send may be pending as well: cancel everything (rare).
                E := Next_Entry (R);
                Uring.Prepare_Cancel_Slot (E, ID mod Stride, Tag_Ignore);
-            elsif C.Receiving then
+            elsif C.Watching then
                E := Next_Entry (R);
-               Uring.Prepare_Cancel (E, Receive_Data (ID, C.Gen), Tag_Ignore);
+               Uring.Prepare_Cancel (E, Watch_Data (ID, C.Gen), Tag_Ignore);
             end if;
          end;
          E := Next_Entry (R);
@@ -301,8 +341,8 @@ package body Engine is
             Last_Active => Now, Request_Start => Now, Interest => Readable,
             Input | Out_Block => System.Null_Address, Open => True,
             Queued => C.Queued,
-            Writing | Close_After | Interim | Continue_Sent | Receiving |
-            Paused | Deferred | In_Flight | Held => False);
+            Writing | Close_After | Interim | Continue_Sent | Watching |
+            Starved | Deferred | In_Flight | Held | Ready | Reading => False);
    end Open_Conn;
 
    procedure Start_Send (ID : Conn_ID) is
@@ -485,14 +525,6 @@ package body Engine is
       return True;
    end Append;
 
-   procedure Pause (ID : Conn_ID) is
-      C : Conn renames Table (ID);
-      E : constant System.Address := Next_Entry (ID / Stride);
-   begin
-      C.Paused := True;
-      Uring.Prepare_Cancel (E, Receive_Data (ID, C.Gen), Tag_Ignore);
-   end Pause;
-
    procedure On_Data (ID : Conn_ID; Address : System.Address; Length : Natural) is
       C : Conn renames Table (ID);
    begin
@@ -504,13 +536,13 @@ package body Engine is
          end if;
          if not C.Writing then
             Process_Buffered (ID);
-         elsif C.In_Length >= Pause_Bytes and then C.Receiving and then not C.Paused then
-            Pause (ID);
          end if;
       else
          Process (ID, Address, Length, Shared => True);
       end if;
    end On_Data;
+
+   procedure Issue_Read (ID : Conn_ID);
 
    procedure Complete_Send (ID : Conn_ID) is
       C : Conn renames Table (ID);
@@ -528,11 +560,8 @@ package body Engine is
          if C.In_Length > 0 then
             Process_Buffered (ID);
          end if;
-         if C.Open and then C.Paused and then C.In_Length < Pause_Bytes / 2 then
-            C.Paused := False;
-            if not C.Receiving then
-               Queue_Work (ID);
-            end if;
+         if C.Open and then C.Ready and then not C.Writing and then not C.Reading then
+            Issue_Read (ID);
          end if;
       else
          -- A queued pipelined request continues on the next loop turn.
@@ -602,13 +631,77 @@ package body Engine is
    -- io_uring backend
    ---------------------------------------------------------------------------
 
-   procedure Arm_Receive (ID : Conn_ID) is
+   -- An idle socket keeps one multishot readiness watch: a single io_uring
+   -- request, where a parked multishot receive also needs an async poll
+   -- record (96 bytes of kernel memory per connection). Each request is then
+   -- read with one non-blocking receive in the same batch (Read_Round).
+   procedure Arm_Watch (ID : Conn_ID) is
       C : Conn renames Table (ID);
       E : constant System.Address := Next_Entry (ID / Stride);
    begin
-      Uring.Prepare_Receive (E, ID mod Stride, Receive_Data (ID, C.Gen));
-      C.Receiving := True;
-   end Arm_Receive;
+      Uring.Prepare_Poll (E, ID mod Stride, Watch_Data (ID, C.Gen));
+      C.Watching := True;
+   end Arm_Watch;
+
+   -- Receives queued per ring since its buffers were last published. Each
+   -- takes a buffer when it runs, so more would only fail.
+   Reads_Queued : array (0 .. Max_Rings - 1) of Natural := [others => 0];
+   Reads_Pending : Boolean := False;
+
+   procedure Starve (ID : Conn_ID);
+
+   procedure Issue_Read (ID : Conn_ID) is
+      C : Conn renames Table (ID);
+      R : constant Natural := ID / Stride;
+   begin
+      C.Ready := True;
+      if Reads_Queued (R) >= Buffer_Count then
+         Starve (ID);
+         return;
+      end if;
+      Reads_Queued (R) := Reads_Queued (R) + 1;
+      Reads_Pending := True;
+      Uring.Prepare_Read (Next_Entry (R), ID mod Stride, Read_Data (ID, C.Gen));
+      C.Reading := True;
+      C.Ready := False;
+      C.Starved := False;
+   end Issue_Read;
+
+   procedure Starve (ID : Conn_ID) is
+      C : Conn renames Table (ID);
+      R : constant Natural := ID / Stride;
+   begin
+      if C.Starved then
+         return;
+      elsif Starved_Count (R) = Stride then
+         Queue_Work (ID);   -- cannot happen with one entry per slot; be safe
+         return;
+      end if;
+      C.Starved := True;
+      Starved_IDs (R) ((Starved_First (R) + Starved_Count (R)) mod Stride) := ID;
+      Starved_Count (R) := Starved_Count (R) + 1;
+   end Starve;
+
+   procedure Rearm_Starved (R : Natural) is
+      ID : Conn_ID;
+   begin
+      for N in 1 .. Natural'Min (Starve_Budget, Starved_Count (R)) loop
+         ID := Starved_IDs (R) (Starved_First (R));
+         Starved_First (R) := (Starved_First (R) + 1) mod Stride;
+         Starved_Count (R) := Starved_Count (R) - 1;
+         declare
+            C : Conn renames Table (ID);
+         begin
+            -- A stale entry (the slot was reused) finds Starved clear.
+            if C.Starved then
+               C.Starved := False;
+               if C.Open and then not C.Reading and then not C.Writing then
+                  Issue_Read (ID);
+               end if;
+            end if;
+         end;
+      end loop;
+   end Rearm_Starved;
 
    procedure Try_Send (ID : Conn_ID);
 
@@ -621,8 +714,18 @@ package body Engine is
       if Mode = Use_Uring then
          for R in 0 .. Ring_Count - 1 loop
             Uring.Publish_Buffers (Rings (R));
+            Reads_Queued (R) := 0;
          end loop;
          Release_Closed;
+      end if;
+      if Mode = Use_Uring then
+         -- Oldest first: connections that waited for buffers last batch.
+         for R in 0 .. Ring_Count - 1 loop
+            Stat_Starved := Natural'Max (Stat_Starved, Starved_Count (R));
+            if Starved_Count (R) > 0 then
+               Rearm_Starved (R);
+            end if;
+         end loop;
       end if;
       while I <= Work_Count loop
          declare
@@ -631,8 +734,13 @@ package body Engine is
          begin
             C.Queued := False;
             if Mode = Use_Uring then
-               if C.Open and then not C.Receiving and then not C.Paused then
-                  Arm_Receive (ID);
+               if C.Open and then not C.Watching then
+                  Arm_Watch (ID);
+               end if;
+               if C.Open and then C.Ready and then not C.Reading
+                 and then not C.Writing and then not C.Starved
+               then
+                  Issue_Read (ID);
                end if;
             else
                Try_Send (ID);
@@ -688,7 +796,7 @@ package body Engine is
             Open_Count (R) := Open_Count (R) + 1;
             Highest (R) := Natural'Max (Highest (R), Natural (Result) + 1);
             Open_Conn (ID);
-            Arm_Receive (ID);
+            Arm_Watch (ID);
          end;
       elsif (Flags and Uring.F_More) = 0 and then Result /= -Sys.ECANCELED
         and then Result /= -Sys.EINTR and then Result /= -103  -- ECONNABORTED
@@ -699,8 +807,31 @@ package body Engine is
       end if;
    end On_Accept;
 
-   procedure On_Receive (ID : Conn_ID; Gen : Unsigned_32; Result : Integer_32;
-                         Flags : Unsigned_32) is
+   -- The socket became readable (or hung up, or failed). The receive runs
+   -- in this same batch (Read_Round).
+   procedure On_Watch (ID : Conn_ID; Gen : Unsigned_32; Result : Integer_32;
+                       Flags : Unsigned_32) is
+      C : Conn renames Table (ID);
+   begin
+      if not C.Open or else (C.Gen and 16#0FFF_FFFF#) /= Gen then
+         return;
+      end if;
+      if (Flags and Uring.F_More) = 0 then
+         C.Watching := False;    -- the watch ended: End_Batch re-arms it
+         Queue_Work (ID);
+      end if;
+      if Result /= -Sys.ECANCELED then
+         -- A receive tells data, end of stream and errors apart.
+         if C.Reading or else C.Writing or else C.Starved then
+            C.Ready := True;
+         else
+            Issue_Read (ID);
+         end if;
+      end if;
+   end On_Watch;
+
+   procedure On_Read (ID : Conn_ID; Gen : Unsigned_32; Result : Integer_32;
+                      Flags : Unsigned_32) is
       C : Conn renames Table (ID);
       R : constant Natural := ID / Stride;
       Has_Buffer : constant Boolean := (Flags and Uring.F_Buffer) /= 0;
@@ -712,10 +843,11 @@ package body Engine is
          end if;
          return;
       end if;
-      if (Flags and Uring.F_More) = 0 then
-         C.Receiving := False;
-      end if;
+      C.Reading := False;
       if Result > 0 and then Has_Buffer then
+         if Natural (Result) = Rings (R).Buffer_Size then
+            C.Ready := True;   -- the socket may hold more
+         end if;
          On_Data (ID, Uring.Buffer_Address (Rings (R), Buffer_ID), Natural (Result));
          Uring.Recycle (Rings (R), Buffer_ID);
       else
@@ -724,20 +856,22 @@ package body Engine is
          end if;
          if Result = -Sys.ENOBUFS then
             Stat_No_Buffers := Stat_No_Buffers + 1;
-         end if;
-         if Result /= -Sys.ENOBUFS and then Result /= -Sys.ECANCELED
-           and then Result /= -Sys.EINTR
-         then
-            -- End of stream or a socket error.
-            Close_Conn (ID);
+            C.Ready := True;
+            if not C.Writing then
+               Starve (ID);
+            end if;
+            return;
+         elsif Result /= -Sys.EAGAIN and then Result /= -Sys.EINTR then
+            Close_Conn (ID);   -- end of stream or a socket error
             return;
          end if;
       end if;
-      if C.Open and then not C.Receiving and then not C.Paused then
-         -- Re-arm after this batch has returned its buffers.
-         Queue_Work (ID);
+      if C.Open and then C.Ready and then not C.Writing and then not C.Reading
+        and then not C.Starved
+      then
+         Issue_Read (ID);
       end if;
-   end On_Receive;
+   end On_Read;
 
    procedure On_Send (Block : System.Address; Result : Integer_32) is
       Owner : constant Unsigned_32 := Pool.Owner (Block);
@@ -774,10 +908,14 @@ package body Engine is
    procedure Dispatch (Item : Uring.Completion) is
    begin
       case Item.User_Data and 15 is
-         when Tag_Receive =>
-            On_Receive (Conn_ID (Shift_Right (Item.User_Data, 32)),
-                        Unsigned_32 (Shift_Right (Item.User_Data, 4) and 16#0FFF_FFFF#),
-                        Item.Result, Item.Flags);
+         when Tag_Watch =>
+            On_Watch (Conn_ID (Shift_Right (Item.User_Data, 32)),
+                      Unsigned_32 (Shift_Right (Item.User_Data, 4) and 16#0FFF_FFFF#),
+                      Item.Result, Item.Flags);
+         when Tag_Read =>
+            On_Read (Conn_ID (Shift_Right (Item.User_Data, 32)),
+                     Unsigned_32 (Shift_Right (Item.User_Data, 4) and 16#0FFF_FFFF#),
+                     Item.Result, Item.Flags);
          when Tag_Send =>
             On_Send (To_Address (Item.User_Data and not 15), Item.Result);
          when Tag_Accept =>
@@ -903,6 +1041,20 @@ package body Engine is
          for R in 0 .. Ring_Count - 1 loop
             Drain (R, Handled);
          end loop;
+         -- Read_Round: run the receives the drain queued (they complete
+         -- inline, data being ready) and handle them in this same batch.
+         for Round in 1 .. 2 loop
+            exit when not Reads_Pending;
+            Reads_Pending := False;
+            for R in 0 .. Ring_Count - 1 loop
+               if Reads_Queued (R) > 0 then
+                  Uring.Publish_Buffers (Rings (R));
+                  Reads_Queued (R) := 0;
+                  Check_Enter (Uring.Enter (Rings (R), Get_Events => True));
+                  Drain (R, Handled);
+               end if;
+            end loop;
+         end loop;
          T4 := Sys.Monotonic_Milliseconds;
          End_Batch;
          T5 := Sys.Monotonic_Milliseconds;
@@ -920,7 +1072,8 @@ package body Engine is
                  " batches" & Stat_Batches'Image & " cqes" & Stat_Completions'Image &
                  " worst_batch_ms" & Stat_Worst_Batch'Image & " worst_commit_ms" & Stat_Worst_Commit'Image &
                  " worst_sweep_ms" & Stat_Worst_Sweep'Image &
-                 " enobufs" & Stat_No_Buffers'Image & " closing" & Closing_Count'Image &
+                 " enobufs" & Stat_No_Buffers'Image & " starved_max" & Stat_Starved'Image &
+                 " closing" & Closing_Count'Image &
                  Database.Checkpoint_Stats & " slow_loops" & Stat_Slow_Loops'Image &
                  (if Stat_Slow_Loops = 0 then "" else
                   " worst_loop_ms" & Stat_Worst_Loop'Image & " (submit" & Stat_Worst_Phases (1)'Image &
@@ -930,7 +1083,8 @@ package body Engine is
                Ada.Text_IO.Flush;
             end;
             Stat_Clock := Now;
-            Stat_Batches := 0; Stat_Completions := 0; Stat_No_Buffers := 0;
+            Pool.Trim;
+            Stat_Batches := 0; Stat_Completions := 0; Stat_No_Buffers := 0; Stat_Starved := 0;
             Stat_Worst_Batch := 0; Stat_Worst_Commit := 0; Stat_Worst_Sweep := 0;
             Stat_Slow_Loops := 0; Stat_Worst_Loop := 0;
          end if;

@@ -10,6 +10,8 @@ use Symfony\Component\JsonStreamer\Attribute\StreamedName;
 
 /**
  * The post object of the API: properties are written in this order.
+ *
+ * @phpstan-type PostRow array{id: int, body: string, created_at: string, username: string, like_count: int}
  */
 #[JsonStreamable]
 final readonly class PostView
@@ -23,6 +25,22 @@ final readonly class PostView
         #[StreamedName('like_count')]
         public int $likeCount,
     ) {
+    }
+
+    /**
+     * A row of PostRepository's read model query.
+     *
+     * @param PostRow $row
+     */
+    public static function fromRow(array $row): self
+    {
+        return new self(
+            $row['id'],
+            $row['body'],
+            $row['created_at'],
+            $row['username'],
+            $row['like_count'],
+        );
     }
 
     /**

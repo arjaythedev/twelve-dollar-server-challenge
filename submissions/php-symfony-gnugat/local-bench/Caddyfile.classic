@@ -1,0 +1,12 @@
+# Ladder comparison: the same app in FrankenPHP's classic mode.
+{
+	auto_https off
+	admin off
+}
+
+# Classic mode: Symfony boots on every request, like with PHP-FPM.
+http://:{$PORT} {
+	bind {$HOST}
+	root ./public
+	php_server
+}

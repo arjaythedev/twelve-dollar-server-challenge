@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace App\ReadModel;
 
-use App\Entity\Post;
 use Symfony\Component\JsonStreamer\Attribute\JsonStreamable;
 use Symfony\Component\JsonStreamer\Attribute\StreamedName;
 
@@ -40,21 +39,6 @@ final readonly class PostView
             $row['created_at'],
             $row['username'],
             $row['like_count'],
-        );
-    }
-
-    /**
-     * For a post that was just created, so it has no likes yet.
-     * The author's username is passed in: reading it from the post's User reference would query the users table.
-     */
-    public static function fromPost(Post $post, string $author): self
-    {
-        return new self(
-            $post->getId() ?? throw new \LogicException('post id is set by flush()'),
-            $post->getBody(),
-            $post->getCreatedAt(),
-            $author,
-            0,
         );
     }
 }

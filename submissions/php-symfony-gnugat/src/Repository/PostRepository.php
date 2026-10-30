@@ -74,17 +74,11 @@ final readonly class PostRepository
      */
     public function create(JwtUser $author, CreatePostPayload $payload): PostView
     {
-        if (!\is_string($payload->body)) {
-            throw new \LogicException('body must be validated first');
-        }
-
-        $body = trim($payload->body);
-
         $rows = $this->connection->fetchAllAssociative(
             'INSERT INTO posts (user_id, body) VALUES (?, ?) RETURNING id, created_at',
             [
                 $author->id,
-                $body,
+                $payload->body,
             ],
         );
         $id = $rows[0]['id'] ?? null;
@@ -95,7 +89,7 @@ final readonly class PostRepository
 
         return new PostView(
             $id,
-            $body,
+            $payload->body,
             $createdAt,
             $author->username,
             0,

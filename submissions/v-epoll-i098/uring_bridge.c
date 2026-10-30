@@ -480,7 +480,8 @@ int td_net_next(struct td_net *net, struct td_event *events, int capacity, int t
             if (!flush_at) flush_at = nanos + BATCH_NS;
             if (count == capacity || nanos >= flush_at || td_now() >= deadline) return count;
             struct timespec pause = { .tv_nsec = (long)(flush_at - nanos) };
-            td_sleep(net, &pause);
+            /* Collect until the batch deadline instead of waking for each completion. */
+            if (nanosleep(&pause, NULL) && errno != EINTR) td_fail("batch sleep", errno);
             continue;
         }
         now = td_now();

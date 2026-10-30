@@ -35,6 +35,7 @@ The C transport keeps debug symbols and frame pointers for local profiles.
   After a commit that wrote to the WAL, new write requests wait 5 ms (reads go on), so later writes
   share one commit. Each commit rewrites the same hot pages, so this cuts WAL frames and checkpoints.
   SQLite retains WAL mode with `synchronous=NORMAL`.
+  With a partial batch, the loop sleeps to its deadline instead of waking for each completion.
 - **WAL checkpoints on a second thread, never on the event loop.** SQLite's auto-checkpoint runs inside
   `COMMIT` and does two `fsync`s, which stalls every connection on a single loop (8 ms to 4 s each on a
   busy disk). Here a `sqlite3_wal_hook` only records the WAL size; at 256 frames a

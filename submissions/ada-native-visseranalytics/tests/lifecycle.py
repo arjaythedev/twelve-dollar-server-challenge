@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Black-box process lifecycle checks: one process and one thread, fresh
+"""Black-box process lifecycle checks: one single-threaded server process
+plus its checkpoint helper (which exits with the server), fresh
 rollback-journal databases switch to WAL, SIGTERM/SIGKILL keep committed
 writes, and the descriptor limit stays within the inherited hard limit."""
 import http.client
@@ -73,8 +74,9 @@ with tempfile.TemporaryDirectory(prefix="ada-lifecycle-") as temporary:
                 wait_ready(proc)
                 status = Path(f"/proc/{proc.pid}/status").read_text()
                 assert "Threads:\t1\n" in status, status
-                assert not Path(f"/proc/{proc.pid}/task/{proc.pid}/children").read_text().split(), \
-                    "no child processes"
+                children = Path(f"/proc/{proc.pid}/task/{proc.pid}/children").read_text().split()
+                assert len(children) == 1, f"one child (the checkpoint helper), got {children}"
+                helper = int(children[0])
                 limit = next(line.split() for line in Path(f"/proc/{proc.pid}/limits").read_text().splitlines()
                              if line.startswith("Max open files"))
                 assert int(limit[3]) <= int(limit[4]), limit
@@ -85,6 +87,11 @@ with tempfile.TemporaryDirectory(prefix="ada-lifecycle-") as temporary:
                 assert status == 201
                 proc.send_signal(stop)
                 proc.wait(timeout=10)
+                # The helper notices its parent is gone and exits on its own.
+                deadline = time.monotonic() + 2
+                while Path(f"/proc/{helper}").exists() and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                assert not Path(f"/proc/{helper}").exists(), "checkpoint helper outlived the server"
                 with sqlite3.connect(db) as reader:
                     assert reader.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
                     assert reader.execute("SELECT count(*) FROM likes WHERE post_id=?", (post_id,)).fetchone()[0] == 1

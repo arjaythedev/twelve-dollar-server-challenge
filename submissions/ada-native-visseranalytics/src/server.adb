@@ -4,11 +4,13 @@ with Ada.Text_IO;
 with Interfaces.C; use Interfaces.C;
 with System;
 with Application;
+with Checkpointer;
 with Database;
 with Engine;
 with Sys;
 
--- One process, one thread, one SQLite connection. Sockets, HTTP framing,
+-- One event-loop process with one thread and one SQLite connection, plus a
+-- checkpoint helper process (see Checkpointer). Sockets, HTTP framing,
 -- routing and JSON are handled in Ada; SQLite and OpenSSL are the only
 -- application libraries.
 procedure Server is
@@ -54,6 +56,8 @@ begin
    end if;
    Ada.Text_IO.Put_Line ("Open-file soft limit:" & Limits.Soft'Image);
 
+   -- Fork the checkpoint helper before this process touches SQLite.
+   Checkpointer.Start (Ada.Environment_Variables.Value ("SQLITE_PATH"));
    Database.Open (Ada.Environment_Variables.Value ("SQLITE_PATH"));
    Application.Initialize (Ada.Environment_Variables.Value ("JWT_SECRET"));
 

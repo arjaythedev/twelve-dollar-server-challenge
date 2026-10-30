@@ -1,8 +1,11 @@
 with Ada.Directories;
+with Interfaces; use Interfaces;
 with Interfaces.C; use Interfaces.C;
 with Interfaces.C.Strings;
 with System;
+with Checkpointer;
 with Output;
+with Sys;
 
 package body Database is
    use type System.Address;
@@ -21,6 +24,23 @@ package body Database is
    Active : Boolean := False;   -- BEGIN executed, not yet committed
    Wrote : Boolean := False;    -- the active transaction holds writes
    Lost : Boolean := False;     -- writes of this batch were rolled back
+
+   -- WAL restarts. The checkpoint helper copies WAL frames into the
+   -- database file, but only a writer can restart the WAL, and only when
+   -- every frame has been copied as its read transaction begins. Under a
+   -- steady stream of writes that moment never comes, so past Gate_Frames
+   -- the server holds write requests (reads go on), asks the helper for a
+   -- pass, and releases them once the helper has caught up: the first of
+   -- them then restarts the WAL. Without a responsive helper, or past
+   -- Inline_Frames, the server checkpoints inline as SQLite would.
+   Gate_Frames : constant := 4_000;
+   Inline_Frames : constant := 16_000;
+   Gate_Timeout : constant := 1_000;  -- ms
+   Holding : Boolean := False;
+   Ticket : Unsigned_32 := 0;
+   Gate_Start : Unsigned_64 := 0;
+   Gates, Gate_Timeouts, Inline_Checkpoints : Natural := 0;
+   Worst_Gate : Unsigned_64 := 0;  -- ms writes were held, longest gate
 
    function SQLite_Open (Name : char_array; Result : access Handle;
                          Flags : int; VFS : System.Address) return int
@@ -62,6 +82,37 @@ package body Database is
      with Import, Convention => C, External_Name => "sqlite3_errmsg";
    function Busy_Timeout (Connection : Handle; Milliseconds : int) return int
      with Import, Convention => C, External_Name => "sqlite3_busy_timeout";
+   function Set_WAL_Hook (Connection : Handle; Callback, Arg : System.Address) return System.Address
+     with Import, Convention => C, External_Name => "sqlite3_wal_hook";
+   function Checkpoint (Connection : Handle; Name : System.Address; Mode : int;
+                        Log, Done : access int) return int
+     with Import, Convention => C, External_Name => "sqlite3_wal_checkpoint_v2";
+
+   -- Called by SQLite after each commit that wrote to the WAL.
+   function On_Commit (Arg : System.Address; Connection : Handle;
+                       Name : System.Address; Frames : int) return int
+     with Convention => C;
+
+   function On_Commit (Arg : System.Address; Connection : Handle;
+                       Name : System.Address; Frames : int) return int
+   is
+      pragma Unreferenced (Arg, Name);
+      Log, Done : aliased int := 0;
+      Ignored : int;
+   begin
+      if Frames >= Inline_Frames
+        or else (Frames >= Gate_Frames and then not Checkpointer.Available)
+      then
+         -- PASSIVE, as SQLite's own automatic checkpoint.
+         Inline_Checkpoints := Inline_Checkpoints + 1;
+         Ignored := Checkpoint (Connection, System.Null_Address, 0, Log'Access, Done'Access);
+      elsif Frames >= Gate_Frames and then not Holding then
+         Holding := True;
+         Ticket := Checkpointer.Request_Pass;
+         Gate_Start := Sys.Monotonic_Milliseconds;
+      end if;
+      return 0;
+   end On_Commit;
 
    function Last_Error return String is
    begin
@@ -123,6 +174,7 @@ package body Database is
       Connection : aliased Handle := System.Null_Address;
       S : aliased Handle := System.Null_Address;
       Ignored : int;
+      Ignored_Address : System.Address;
       Select_Post : constant String :=
         "SELECT p.id,p.body,p.created_at,u.username," &
         "(SELECT count(*) FROM likes l WHERE l.post_id=p.id) " &
@@ -150,7 +202,9 @@ package body Database is
       Require (Finalize (S));
       Run ("PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON;" &
            "PRAGMA cache_size=-65536; PRAGMA mmap_size=0;" &
-           "PRAGMA temp_store=MEMORY; PRAGMA wal_autocheckpoint=4000;");
+           "PRAGMA temp_store=MEMORY;");
+      -- Replaces SQLite's automatic checkpoint (see On_Commit).
+      Ignored_Address := Set_WAL_Hook (DB, On_Commit'Address, System.Null_Address);
       Compile (Health_Query, "SELECT 1");
       Compile (Feed_Query, Select_Post &
                " ORDER BY p.created_at DESC,p.id DESC LIMIT 20");
@@ -186,6 +240,40 @@ package body Database is
    end Close;
 
    function In_Transaction return Boolean is (Active);
+
+   function Writes_Held return Boolean is (Holding);
+
+   function Release_Writes return Boolean is
+   begin
+      if Holding then
+         declare
+            Held_For : constant Unsigned_64 := Sys.Monotonic_Milliseconds - Gate_Start;
+         begin
+            if Checkpointer.Caught_Up (Ticket) then
+               Gates := Gates + 1;
+            elsif Held_For >= Gate_Timeout then
+               Gate_Timeouts := Gate_Timeouts + 1;
+            else
+               return False;
+            end if;
+            Worst_Gate := Unsigned_64'Max (Worst_Gate, Held_For);
+         end;
+         Holding := False;
+         return True;
+      end if;
+      return False;
+   end Release_Writes;
+
+   function Checkpoint_Stats return String is
+      Text : constant String := " gates" & Gates'Image & " gate_timeouts" & Gate_Timeouts'Image &
+        " worst_gate_ms" & Worst_Gate'Image & " inline_ckpt" & Inline_Checkpoints'Image;
+   begin
+      Worst_Gate := 0;
+      Gates := 0;
+      Gate_Timeouts := 0;
+      Inline_Checkpoints := 0;
+      return Text;
+   end Checkpoint_Stats;
 
    procedure Ensure_Transaction is
    begin

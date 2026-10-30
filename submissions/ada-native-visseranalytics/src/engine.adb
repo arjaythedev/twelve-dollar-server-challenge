@@ -14,6 +14,7 @@ with Uring;
 
 package body Engine is
    use type System.Address;
+   use type HTTP.Method_Kind;
 
    -- Connection IDs: ring * Stride + slot with io_uring, the descriptor
    -- number with epoll.
@@ -53,6 +54,7 @@ package body Engine is
       Deferred : Boolean;          -- waiting for the batch commit
       In_Flight : Boolean;         -- send submitted to the kernel
       Queued : Boolean;            -- on the end-of-batch work list
+      Held : Boolean;              -- a write request waits for the WAL restart
    end record;
 
    -- Untouched pages of an anonymous mapping cost no memory, so the table
@@ -82,6 +84,16 @@ package body Engine is
    Work : array (1 .. Max_IDs) of Conn_ID;
    Work_Count : Natural := 0;
 
+   -- Write requests waiting for a WAL restart (Database.Writes_Held). If the
+   -- list is full, further writes simply run.
+   type Held_Item is record
+      ID : Conn_ID;
+      Gen : Unsigned_32;
+   end record;
+   Max_Held : constant := 16_384;
+   Held_List : array (1 .. Max_Held) of Held_Item;
+   Held_Count : Natural := 0;
+
    -- io_uring releases closed sockets in bursts, and every FIN pins a page
    -- of socket memory until it is acknowledged. Closing at most a bounded
    -- number per loop turn keeps a mass disconnect from spiking memory.
@@ -98,8 +110,10 @@ package body Engine is
    Tag_Send : constant := 3;
    Tag_Close : constant := 4;
    Tag_Ignore : constant := 5;
+   -- Requests are small (a GET is ~100 bytes, a new post with its token
+   -- under 1 KB); a larger one simply arrives in several buffers.
    Buffer_Count : constant := 2_048;
-   Buffer_Size : constant := 2_048;
+   Buffer_Size : constant := 1_024;
    Rings : array (0 .. Max_Rings - 1) of Uring.Ring;
    Ring_Count : Natural := 0;
    Slots : Natural := 0;
@@ -113,8 +127,15 @@ package body Engine is
 
    -- Diagnostics, printed every 10 seconds.
    Stat_Batches, Stat_Completions, Stat_No_Buffers : Natural := 0;
-   Stat_Worst_Batch, Stat_Worst_Commit : Unsigned_64 := 0;
+   Stat_Worst_Batch, Stat_Worst_Commit, Stat_Worst_Sweep : Unsigned_64 := 0;
    Stat_Clock : Unsigned_32 := 0;
+   -- Loop turns of Slow_Loop_Ms or more, and where the worst one spent its
+   -- time (submit, wait, events, drain, flush, SQL commit; milliseconds).
+   Slow_Loop_Ms : constant := 50;
+   Last_SQL_Ms : Unsigned_64 := 0;
+   Stat_Slow_Loops : Natural := 0;
+   Stat_Worst_Loop : Unsigned_64 := 0;
+   Stat_Worst_Phases : array (1 .. 6) of Unsigned_64 := [others => 0];
 
    -- epoll state.
    -- struct epoll_event is 12 bytes on x86_64 and 16 on AArch64. Its data
@@ -249,8 +270,24 @@ package body Engine is
          Closing_First := (Closing_First + 1) mod Max_IDs;
          Closing_Count := Closing_Count - 1;
          R := ID / Stride;
-         E := Next_Entry (R);
-         Uring.Prepare_Cancel_Slot (E, ID mod Stride, Tag_Ignore);
+         -- A request still holding the socket keeps it open after the slot
+         -- is closed, so cancel it first, but cheaply: cancelling by slot
+         -- makes the kernel scan every pending request on the ring (tens of
+         -- thousands), while cancelling by user data is a hash lookup. When
+         -- the peer closed first, the receive has already ended and there
+         -- is nothing to cancel.
+         declare
+            C : Conn renames Table (ID);
+         begin
+            if C.In_Flight then
+               -- A send may be pending as well: cancel everything (rare).
+               E := Next_Entry (R);
+               Uring.Prepare_Cancel_Slot (E, ID mod Stride, Tag_Ignore);
+            elsif C.Receiving then
+               E := Next_Entry (R);
+               Uring.Prepare_Cancel (E, Receive_Data (ID, C.Gen), Tag_Ignore);
+            end if;
+         end;
          E := Next_Entry (R);
          Uring.Prepare_Close (E, ID mod Stride, Tag_Close + Shift_Left (Unsigned_64 (R), 8));
       end loop;
@@ -265,7 +302,7 @@ package body Engine is
             Input | Out_Block => System.Null_Address, Open => True,
             Queued => C.Queued,
             Writing | Close_After | Interim | Continue_Sent | Receiving |
-            Paused | Deferred | In_Flight => False);
+            Paused | Deferred | In_Flight | Held => False);
    end Open_Conn;
 
    procedure Start_Send (ID : Conn_ID) is
@@ -287,8 +324,10 @@ package body Engine is
    end Start_Send;
 
    procedure Flush_Deferred is
+      SQL_Started : constant Unsigned_64 := Sys.Monotonic_Milliseconds;
       OK : constant Boolean := Database.Finish_Batch;
    begin
+      Last_SQL_Ms := Sys.Monotonic_Milliseconds - SQL_Started;
       for I in 1 .. Deferred_Count loop
          declare
             D : Deferred_Item renames Deferred_List (I);
@@ -371,14 +410,30 @@ package body Engine is
          when HTTP.Too_Large =>
             Respond_Error (ID, 413, "request too large");
          when HTTP.Complete =>
-            declare
-               Code : constant Positive := Application.Handle (Data, Item);
-               Block : constant System.Address := Output.Finish (Code, Item.Close);
-            begin
-               C.Continue_Sent := False;
-               Queue_Response (ID, Block, Item.Close, Defer => Database.In_Transaction);
-            end;
-            Keep := Length - Item.Consumed;
+            if Item.Method = HTTP.Post and then Database.Writes_Held and then
+              (C.Held or else Held_Count < Max_Held)
+            then
+               -- Kept whole until writes are released (Release_Held).
+               if not C.Held then
+                  C.Held := True;
+                  Held_Count := Held_Count + 1;
+                  Held_List (Held_Count) := (ID, C.Gen);
+                  if not C.Writing then
+                     C.Request_Start := Now;
+                  end if;
+               end if;
+               Keep := Length;
+            else
+               declare
+                  Code : constant Positive := Application.Handle (Data, Item);
+                  Block : constant System.Address := Output.Finish (Code, Item.Close);
+               begin
+                  C.Continue_Sent := False;
+                  C.Held := False;
+                  Queue_Response (ID, Block, Item.Close, Defer => Database.In_Transaction);
+               end;
+               Keep := Length - Item.Consumed;
+            end if;
       end case;
       if Shared then
          if Keep > 0 then
@@ -484,6 +539,38 @@ package body Engine is
          Set_Interest (ID, (if C.In_Length > 0 then Writable else Readable));
       end if;
    end Complete_Send;
+
+   -- Runs the held write requests. Called before anything else in a batch,
+   -- so the batch's transaction starts with them and the first one can
+   -- restart the WAL.
+   procedure Release_Held is
+   begin
+      for I in 1 .. Held_Count loop
+         declare
+            H : Held_Item renames Held_List (I);
+            C : Conn renames Table (H.ID);
+         begin
+            if C.Open and then C.Gen = H.Gen and then C.Held then
+               C.Held := False;
+               if not C.Writing and then C.In_Length > 0 then
+                  Process_Buffered (H.ID);
+               end if;
+            end if;
+         end;
+      end loop;
+      Held_Count := 0;
+   end Release_Held;
+
+   procedure Check_Gate is
+   begin
+      if Database.Writes_Held then
+         if Database.Release_Writes then
+            Release_Held;
+         end if;
+      elsif Held_Count > 0 then
+         Release_Held;
+      end if;
+   end Check_Gate;
 
    procedure Sweep is
       procedure Check (ID : Conn_ID) is
@@ -747,6 +834,7 @@ package body Engine is
       Handled : Natural := 0;
       Busy : Boolean;
       Last_Sweep : Unsigned_32;
+      T0, T1, T2, T3, T4, T5, T6 : Unsigned_64 := 0;
 
       function Prepare (R : Natural) return Integer is
          Result : Integer := Uring.Setup (Rings (R), 4_096, 16_384);
@@ -791,30 +879,34 @@ package body Engine is
       Keep_Accepting;
       loop
          exit when Sys.Stop_Requested;
+         T0 := Sys.Monotonic_Milliseconds;
          Busy := Handled >= Busy_Completions;
          Handled := 0;
          for R in 1 .. Ring_Count - 1 loop
             Check_Enter (Uring.Enter (Rings (R), Get_Events => False));
          end loop;
+         T1 := Sys.Monotonic_Milliseconds;
          Check_Enter (Uring.Enter
            (Rings (0), Get_Events => True,
             Wait_For => (if Busy then Wait_Target else 1),
             Timeout => (if Busy then Batch_Nanos
-                        elsif Others_Open or else Closing_Count > 0 then Idle_Nanos
+                        elsif Others_Open or else Closing_Count > 0 or else Database.Writes_Held
+                        then Idle_Nanos
                         else 1_000_000_000)));
+         T2 := Sys.Monotonic_Milliseconds;
          for R in 1 .. Ring_Count - 1 loop
             Check_Enter (Uring.Enter (Rings (R), Get_Events => True));
          end loop;
          Now := Sys.Monotonic_Seconds;
-         declare
-            Started : constant Unsigned_64 := Sys.Monotonic_Milliseconds;
-         begin
-            for R in 0 .. Ring_Count - 1 loop
-               Drain (R, Handled);
-            end loop;
-            End_Batch;
-            Stat_Worst_Batch := Unsigned_64'Max (Stat_Worst_Batch, Sys.Monotonic_Milliseconds - Started);
-         end;
+         T3 := Sys.Monotonic_Milliseconds;
+         Check_Gate;
+         for R in 0 .. Ring_Count - 1 loop
+            Drain (R, Handled);
+         end loop;
+         T4 := Sys.Monotonic_Milliseconds;
+         End_Batch;
+         T5 := Sys.Monotonic_Milliseconds;
+         Stat_Worst_Batch := Unsigned_64'Max (Stat_Worst_Batch, T5 - T3);
          Stat_Batches := Stat_Batches + 1;
          Stat_Completions := Stat_Completions + Handled;
          if Now - Stat_Clock >= 10 then
@@ -827,18 +919,40 @@ package body Engine is
                Ada.Text_IO.Put_Line ("stats: open" & Total'Image & " accept_ring" & Accept_Ring'Image &
                  " batches" & Stat_Batches'Image & " cqes" & Stat_Completions'Image &
                  " worst_batch_ms" & Stat_Worst_Batch'Image & " worst_commit_ms" & Stat_Worst_Commit'Image &
-                 " enobufs" & Stat_No_Buffers'Image & " closing" & Closing_Count'Image);
+                 " worst_sweep_ms" & Stat_Worst_Sweep'Image &
+                 " enobufs" & Stat_No_Buffers'Image & " closing" & Closing_Count'Image &
+                 Database.Checkpoint_Stats & " slow_loops" & Stat_Slow_Loops'Image &
+                 (if Stat_Slow_Loops = 0 then "" else
+                  " worst_loop_ms" & Stat_Worst_Loop'Image & " (submit" & Stat_Worst_Phases (1)'Image &
+                  " wait" & Stat_Worst_Phases (2)'Image & " events" & Stat_Worst_Phases (3)'Image &
+                  " drain" & Stat_Worst_Phases (4)'Image & " flush" & Stat_Worst_Phases (5)'Image &
+                  " sql" & Stat_Worst_Phases (6)'Image & ")"));
                Ada.Text_IO.Flush;
             end;
             Stat_Clock := Now;
             Stat_Batches := 0; Stat_Completions := 0; Stat_No_Buffers := 0;
-            Stat_Worst_Batch := 0; Stat_Worst_Commit := 0;
+            Stat_Worst_Batch := 0; Stat_Worst_Commit := 0; Stat_Worst_Sweep := 0;
+            Stat_Slow_Loops := 0; Stat_Worst_Loop := 0;
          end if;
          if Now /= Last_Sweep then
-            Sweep;
+            declare
+               Started : constant Unsigned_64 := Sys.Monotonic_Milliseconds;
+            begin
+               Sweep;
+               Stat_Worst_Sweep := Unsigned_64'Max (Stat_Worst_Sweep, Sys.Monotonic_Milliseconds - Started);
+            end;
             Last_Sweep := Now;
          end if;
          Keep_Accepting;
+         T6 := Sys.Monotonic_Milliseconds;
+         -- An idle wait is not a slow turn.
+         if T6 - T0 - (if Handled = 0 then T2 - T1 else 0) >= Slow_Loop_Ms then
+            Stat_Slow_Loops := Stat_Slow_Loops + 1;
+            if T6 - T0 > Stat_Worst_Loop then
+               Stat_Worst_Loop := T6 - T0;
+               Stat_Worst_Phases := [T1 - T0, T2 - T1, T3 - T2, T4 - T3, T5 - T4, Last_SQL_Ms];
+            end if;
+         end if;
       end loop;
    end Run_Uring;
 
@@ -958,11 +1072,13 @@ package body Engine is
       Last_Sweep := Now;
       loop
          exit when Sys.Stop_Requested;
-         Count := Sys.Epoll_Wait (Queue, Events'Address, Events'Length, 1_000);
+         Count := Sys.Epoll_Wait (Queue, Events'Address, Events'Length,
+                                  (if Database.Writes_Held then 2 else 1_000));
          if Count < 0 and then Sys.Errno /= Sys.EINTR then
             Fail ("epoll_wait failed");
          end if;
          Now := Sys.Monotonic_Seconds;
+         Check_Gate;
          for I in 1 .. Integer (Count) loop
             if Events (I).Slot = Listener_Mark then
                for Burst in 1 .. 64 loop

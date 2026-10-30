@@ -180,6 +180,15 @@ package body Uring is
       Arg := (To_U64 (R.Buffer_Ring), Unsigned_32 (Count), 0, 0, 0, 0, 0);
       -- IORING_REGISTER_PBUF_RING
       RC := Sys.Syscall (427, long (R.FD), 22, Sys.To_Long (Arg'Address), 1);
+      if RC < 0 and then Sys.Errno = 22 then
+         -- Ubuntu's 6.8.0-136 and later kernels invert the "reserved fields
+         -- must be zero" check (memchr_inv used where mem_is_zero was meant),
+         -- so they reject every valid registration. Such a kernel accepts the
+         -- request with a nonzero reserved field; a correct kernel never gets
+         -- here, because the first attempt succeeds.
+         Arg.Reserved_1 := 1;
+         RC := Sys.Syscall (427, long (R.FD), 22, Sys.To_Long (Arg'Address), 1);
+      end if;
       if RC < 0 then
          return -Integer (Sys.Errno);
       end if;

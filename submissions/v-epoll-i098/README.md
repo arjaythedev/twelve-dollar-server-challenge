@@ -77,8 +77,8 @@ The C transport keeps debug symbols and frame pointers for local profiles.
   A server close cancels the armed receive first, then closes the direct descriptor.
 - **Shared receive buffers.** Each ring has 1,024 buffers of 2,048 bytes.
   Idle connections have no input or output allocation.
-  Partial requests use bounded input buffers. Pending sends retain stable storage until completion:
-  output of up to 8 KiB uses a block from a per-ring pool of up to 1,024 blocks, larger output its own allocation.
+  Partial requests use bounded input buffers. Pending sends retain exact-size storage until completion.
+  A delayed checkpoint can release many short replies at once; they must not each reserve a full feed-sized block.
   The transport delivers input directly after a send unless V has buffered or deferred work to process.
 - **Bounded queues, no SQPOLL.** Rings use single-issuer cooperative task execution. The server
   submits within the SQ limit and consumes bounded CQ batches.

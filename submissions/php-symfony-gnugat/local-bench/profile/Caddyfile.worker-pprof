@@ -1,0 +1,17 @@
+# Profiling: the submitted Caddyfile (worker mode) with the admin endpoint on, for Go's pprof (see profile/memory.sh).
+{
+	auto_https off
+	admin localhost:2019
+
+	frankenphp {
+		worker {
+			file ./public/index.php
+		}
+	}
+}
+
+http://:{$PORT} {
+	bind {$HOST}
+	root ./public
+	php_server
+}

@@ -4,18 +4,13 @@ declare(strict_types=1);
 
 namespace App\Repository;
 
-use App\Entity\PostLike;
-use Doctrine\Bundle\DoctrineBundle\Repository\ServiceEntityRepository;
-use Doctrine\Persistence\ManagerRegistry;
+use Doctrine\DBAL\Connection;
 
-/**
- * @extends ServiceEntityRepository<PostLike>
- */
-class PostLikeRepository extends ServiceEntityRepository
+final readonly class PostLikeRepository
 {
-    public function __construct(ManagerRegistry $registry)
-    {
-        parent::__construct($registry, PostLike::class);
+    public function __construct(
+        private Connection $connection,
+    ) {
     }
 
     /**
@@ -27,7 +22,7 @@ class PostLikeRepository extends ServiceEntityRepository
      */
     public function add(int $userId, int $postId): bool
     {
-        return 1 === $this->getEntityManager()->getConnection()->executeStatement(
+        return 1 === $this->connection->executeStatement(
             'INSERT INTO likes (user_id, post_id) SELECT ?, id FROM posts WHERE id = ? ON CONFLICT DO NOTHING',
             [
                 $userId,

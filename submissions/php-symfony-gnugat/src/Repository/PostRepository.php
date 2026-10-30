@@ -5,20 +5,16 @@ declare(strict_types=1);
 namespace App\Repository;
 
 use App\Controller\CreatePostPayload;
-use App\Entity\Post;
 use App\ReadModel\PostView;
 use App\Security\JwtUser;
-use Doctrine\Bundle\DoctrineBundle\Repository\ServiceEntityRepository;
-use Doctrine\Persistence\ManagerRegistry;
+use Doctrine\DBAL\Connection;
 
 /**
  * Plain SQL through DBAL: the reads are mapped straight to PostView, and the write is one INSERT.
  *
- * @extends ServiceEntityRepository<Post>
- *
  * @phpstan-import-type PostRow from PostView
  */
-class PostRepository extends ServiceEntityRepository
+final readonly class PostRepository
 {
     /**
      * One row per post, with its author and its like count as of now.
@@ -32,9 +28,9 @@ class PostRepository extends ServiceEntityRepository
       JOIN users u ON u.id = p.user_id
     SQL;
 
-    public function __construct(ManagerRegistry $registry)
-    {
-        parent::__construct($registry, Post::class);
+    public function __construct(
+        private Connection $connection,
+    ) {
     }
 
     /**
@@ -43,7 +39,7 @@ class PostRepository extends ServiceEntityRepository
     public function findLatestViews(int $limit): array
     {
         /** @var list<PostRow> $rows */
-        $rows = $this->getEntityManager()->getConnection()->fetchAllAssociative(
+        $rows = $this->connection->fetchAllAssociative(
             self::VIEW_SQL.' ORDER BY p.created_at DESC, p.id DESC LIMIT ?',
             [$limit],
         );
@@ -54,7 +50,7 @@ class PostRepository extends ServiceEntityRepository
     public function findView(int $id): ?PostView
     {
         /** @var PostRow|false $row */
-        $row = $this->getEntityManager()->getConnection()->fetchAssociative(
+        $row = $this->connection->fetchAssociative(
             self::VIEW_SQL.' WHERE p.id = ?',
             [$id],
         );
@@ -64,7 +60,7 @@ class PostRepository extends ServiceEntityRepository
 
     public function exists(int $id): bool
     {
-        return false !== $this->getEntityManager()->getConnection()->fetchOne(
+        return false !== $this->connection->fetchOne(
             'SELECT 1 FROM posts WHERE id = ?',
             [$id],
         );
@@ -84,7 +80,7 @@ class PostRepository extends ServiceEntityRepository
 
         $body = trim($payload->body);
 
-        $rows = $this->getEntityManager()->getConnection()->fetchAllAssociative(
+        $rows = $this->connection->fetchAllAssociative(
             'INSERT INTO posts (user_id, body) VALUES (?, ?) RETURNING id, created_at',
             [
                 $author->id,

@@ -1118,7 +1118,7 @@ int loop_sock_pressure(loop_t *L)
     if (t - L->sock_chk_ns >= 50000000ull) sock_check(L, avail_mb());
     /* with drain_first the backlog sits in our own compact buffers, not in skbs, so sock stays low: flag pressure
      * on the loop's own backlog too (same memory gate), and release it once that backlog is mostly gone */
-    if (L->cfg.drain_first && L->cfg.press_pending) {
+    if (L->cfg.drain_first && L->cfg.press_pending != (unsigned)-1) {   /* (unsigned)-1: off (loop_new maps 0 to 20,000) */
         uint32_t pend = 0, age = 0;
         loop_backlog(L, &pend, &age);
         int over = pend > L->cfg.press_pending || age > L->cfg.press_age_ms * 1000u;

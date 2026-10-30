@@ -115,7 +115,7 @@ typedef struct {
                                             default 50 / 450 MB; the app answers queued requests with 503 while it is set */
     unsigned press_pending, press_age_ms;    /* drain_first: also flag pressure (same memory gate) once the loop's own backlog
                                             (loop_backlog) exceeds this many requests or its oldest is older than this.
-                                            Default 20000 / 300 ms */
+                                            Default 20000 / 300 ms; (unsigned)-1 pending = off (main.c's default) */
     int drain_first;                     /* 1: under load, keep request bytes out of the kernel: copy recv data into compact
                                             per-conn buffers right away (provided buffers return at once), and hand the
                                             app at most drain_chunk entries per callback, entering every ring between

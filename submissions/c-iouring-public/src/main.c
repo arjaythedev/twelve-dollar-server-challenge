@@ -125,9 +125,12 @@ int main(int argc, char **argv) {
       .shed_hi_mb = envu("CURSED_SHED_HI_MB", 400),
       .shed_lo_mb = envu("CURSED_SHED_LO_MB", 200),
       .shed_fmax = permille(envu("CURSED_SHED_FMAX", 500)),
-      .sock503_mbps = envu("CURSED_SOCK503_MBPS", 50) ? envu("CURSED_SOCK503_MBPS", 50) : (unsigned)-1,
+      // no shedding by default (like Lean #153, which holds 280k on the box with none): every error the valve and floors
+      // ever scored was one they sent, and at 285k they turned a survivable hold into 503s plus a 15 s connect tail.
+      // Each knob below turns its part back on.
+      .sock503_mbps = envu("CURSED_SOCK503_MBPS", 0) ? envu("CURSED_SOCK503_MBPS", 0) : (unsigned)-1,
       .sock503_avail_mb = envu("CURSED_SOCK503_AVAIL_MB", 450),
-      .press_pending = envu("CURSED_PRESS_PENDING", 20000),
+      .press_pending = envu("CURSED_PRESS_PENDING", 0) ? envu("CURSED_PRESS_PENDING", 0) : (unsigned)-1,   // 0: off
       .press_age_ms = envu("CURSED_PRESS_AGE_MS", 300),
       .cap_ceiling = envu("CURSED_CAP_CEILING", 380000),
       .policy_engage = permille(envu("CURSED_SHED_ENGAGE", 950)),
@@ -145,12 +148,13 @@ int main(int argc, char **argv) {
       // recv_mode: LOOP_RECV_AUTO (0) = multishot recv. Poll mode (2) holds less kernel memory per idle connection but
       // keeps every FIN skb charged until its poll CQE is reaped, so a mass close at 300k costs +631 MB (measured).
       .recv_mode = (int)envu("CURSED_RECV_MODE", LOOP_RECV_AUTO),
-      // memory floors: under 200 MB available stop arming accepts (excess SYNs wait as connect time); under 120 MB
-      // FIN-close keep-alives idle >= 20 s, 2% per tick. Both with 32 MB hysteresis, on MemAvailable - SReclaimable.
+      // memory floors (CURSED_MEM_ACCEPT_MB=200 CURSED_MEM_SHED_MB=120 restore the old ones): under 200 MB available
+      // stop arming accepts (excess SYNs wait as connect time); under 120 MB FIN-close keep-alives idle >= 20 s, 2% per tick. Both with 32 MB hysteresis, on MemAvailable - SReclaimable.
       // At 100/60 the kernel's per-connection memory outran them at 500k (OOM); at 200/120 accepts park at ~490k and
       // 500k passed 2 of 2 in the arena, with no refusals at 475k. The alternative is the OOM killer.
-      .mem_shed_floor_mb = envu("CURSED_MEM_SHED_MB", 120),
-      .mem_accept_floor_mb = envu("CURSED_MEM_ACCEPT_MB", 200),
+      // Off by default since 1ecaac1's re-score: at 285k on the box the accept floor's parked SYNs made the p99 15 s.
+      .mem_shed_floor_mb = envu("CURSED_MEM_SHED_MB", 0),
+      .mem_accept_floor_mb = envu("CURSED_MEM_ACCEPT_MB", 0),
       .shed_fin = (int)envu("CURSED_SHED_FIN", 1),
       .on_batch = on_batch,
       .on_tick = on_tick,

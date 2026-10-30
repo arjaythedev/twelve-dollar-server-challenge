@@ -102,12 +102,12 @@ the code by `tools/knobs.py`; the `CURSED_*` and `LOOP_TEST_*` variables exist f
 | `CURSED_EPOLL` | 0 | 1: use the epoll backend even when io_uring is available (it's also the automatic fallback) |
 | `CURSED_RX_TS` | 0 (1 when CURSED_DEADLINE_MS is set) | 1: kernel receive timestamps, so queue delay includes time spent in socket buffers |
 | `CURSED_DEADLINE_MS` | 0 (off) | deadline shedding: a request whose bytes waited longer than this in the kernel's receive queue gets an immediate 503 (turns on receive timestamps) |
-| `CURSED_CONN_POLICY` | 0 | 0: no `Connection: close` shedding (the memory floors stay on); 1: close a fraction of replies under memory pressure |
+| `CURSED_CONN_POLICY` | 0 | 0: no `Connection: close` shedding; 1: close a fraction of replies under memory pressure |
 | `CURSED_SHED_MODE` | headroom | `headroom`: the close fraction is a function of available memory alone; `band`: the older cap-and-band rule (the cap knobs, band and CPU guard below apply only to it) |
 | `CURSED_SHED_HI_MB` | 400 | headroom: no shedding while available memory (~1 s average) is at least this (MB) |
 | `CURSED_SHED_LO_MB` | 200 | headroom: the close fraction reaches its maximum at this much available memory (MB) |
-| `CURSED_SOCK503_MBPS` | 50 | socket-memory pressure valve: if socket-buffer memory rises more than this (MB) within 1 s while above 64 MB, or exceeds 160 MB, while available memory is under CURSED_SOCK503_AVAIL_MB, queued requests get a fast 503 (keep-alive, no DB work) until it drains below 48 MB (0: off) |
-| `CURSED_PRESS_PENDING` | 20000 | with CURSED_DRAIN=1: also raise the pressure valve (same memory gate) once the loop's own backlog exceeds this many requests; it releases below half |
+| `CURSED_SOCK503_MBPS` | 0 (off) | socket-memory pressure valve: if socket-buffer memory rises more than this (MB) within 1 s while above 64 MB, or exceeds 160 MB, while available memory is under CURSED_SOCK503_AVAIL_MB, queued requests get a fast 503 (keep-alive, no DB work) until it drains below 48 MB (0: off) |
+| `CURSED_PRESS_PENDING` | 0 (off) | with CURSED_DRAIN=1: also raise the pressure valve (same memory gate) once the loop's own backlog exceeds this many requests; it releases below half (20000 was the old default) |
 | `CURSED_PRESS_AGE_MS` | 300 | with CURSED_DRAIN=1: ...or once its oldest queued request has waited longer than this (ms); it releases below half |
 | `CURSED_DRAIN` | 1 | 1: drain-first receive: requests are copied out of the kernel's socket buffers into compact buffers at once and handled in chunks; 0: the earlier receive path |
 | `CURSED_DRAIN_CHUNK` | 0 | drain-first: most requests handed to one batch (0: the loop default, 256) |
@@ -121,8 +121,8 @@ the code by `tools/knobs.py`; the `CURSED_*` and `LOOP_TEST_*` variables exist f
 | `CURSED_CAP_CEILING` | 380000 | band mode: hard ceiling on open connections, also for a fixed CURSED_CONN_CAP (the Xeon OOMs at ~450k sockets) |
 | `CURSED_SHED_ENGAGE` | 950 | band mode: shed band, permille of the cap: start Connection: close shedding at this fill |
 | `CURSED_SHED_RELEASE` | 880 | band mode: shed band, permille of the cap: stop below this fill (must be below ENGAGE) |
-| `CURSED_MEM_ACCEPT_MB` | 200 | memory floor: stop accepting below this much available memory (MB); new users wait in the SYN queue |
-| `CURSED_MEM_SHED_MB` | 120 | memory floor: close long-idle keep-alives below this much available memory (MB) |
+| `CURSED_MEM_ACCEPT_MB` | 0 | memory floor: stop accepting below this much available memory (MB); new users wait in the SYN queue (200 was the old default) |
+| `CURSED_MEM_SHED_MB` | 0 | memory floor: close long-idle keep-alives below this much available memory (MB) (120 was the old default) |
 | `CURSED_SHED_FIN` | 1 | 1: emergency closes use FIN; 0: RST |
 | `CURSED_STATS` | 0 | print loop, app and engine stats every N seconds to stderr (0: off) |
 
@@ -205,11 +205,11 @@ wakeup is one batch:
 5. **Reply.** Responses are built in a per-batch arena, with headers written in front of each body. Nothing is
    handed to the kernel until the batch's `COMMIT` has returned. If the commit fails, every reply that touched the
    database becomes a 500.
-6. **Memory valve.** Connections are never closed to save memory. If a backlog of unread requests builds up while
-   memory is short, queued requests get a fast 503 until it drains (see the rules disclosure). Accepts pause below
-   200 MB of available memory (new users wait to connect) and at the descriptor limit. (`CURSED_CONN_POLICY=1` brings back `Connection: close` shedding: a fraction of replies,
-   rising from none at 400 MB available to half at 200 MB. Each close costs a reconnect, and in our load tests that
-   cost more than it saved.)
+6. **No shedding.** Connections are never closed to save memory, no request gets a 503 for load, and accepts pause
+   only at the descriptor limit. The memory valve and the memory floors are still in the code but off by default (see
+   the rules disclosure for each and the variable that turns it back on). (`CURSED_CONN_POLICY=1` brings back
+   `Connection: close` shedding: a fraction of replies, rising from none at 400 MB available to half at 200 MB. Each
+   close costs a reconnect, and in our load tests that cost more than it saved.)
 
 ## Rules disclosure
 Each item, and how it stays within the rules:
@@ -248,7 +248,10 @@ Each item, and how it stays within the rules:
   them), rising linearly to half of them at 200 MB, so clients reconnect instead of the OOM killer ending every
   connection. It looks only at memory, never at who the client is or at CPU. `CURSED_SHED_MODE=band` restores the earlier rule (a memory-derived connection cap with a
   shedding band near it), and `CURSED_CONN_POLICY=0` turns shedding off.
-- **Memory floors** (on; `CURSED_MEM_ACCEPT_MB`, `CURSED_MEM_SHED_MB`). Each open connection costs ~3.7–4.3 KB of
+- **Memory floors** (**off** by default; `CURSED_MEM_ACCEPT_MB=200 CURSED_MEM_SHED_MB=120` bring them back). Off
+  since the organizer's re-score of 1ecaac1: it held 271k with 0 errors, but 285k failed with 0.62 % errors (39k
+  valve 503s plus 17k timeouts) and a 15 s p99, which we attribute to SYN retries while the accept floor parked
+  accepts. Lean #153 holds 280k on the same box with no shedding. When on: each open connection costs ~3.7–4.3 KB of
   kernel memory, so near the 2 GB limit the connections themselves are the risk. Under 200 MB available the server
   stops accepting: new users wait in the kernel's SYN queue (their connect time counts as latency, and a connect that
   times out counts as an error), and accepts resume once memory recovers by 32 MB. Under 120 MB it FIN-closes
@@ -277,8 +280,10 @@ Each item, and how it stays within the rules:
   of up to 256 per batch. It is an I/O change only: every request is parsed, authenticated, committed and answered
   exactly as before, in the same per-connection order, and each response still waits for its batch's `COMMIT`. Its
   effect is that a backlog costs ~0.5 KB per request in our buffers instead of a ~4 KB socket buffer in the kernel.
-- **Socket-pressure 503s, the memory valve** (on; `CURSED_SOCK503_MBPS=0` turns off the socket trigger, and
-  `CURSED_DRAIN=0` the backlog trigger with drain-first). When the event loop falls behind, unread requests pile up,
+- **Socket-pressure 503s, the memory valve** (**off** by default; `CURSED_SOCK503_MBPS=50` brings back the socket
+  trigger and `CURSED_PRESS_PENDING=20000` the backlog trigger). Off for the same reason as the memory floors: at 285k
+  on the scored box it sent 39k 503s, and with the checkpoint on its own thread the Xeon runs at 26k req/s gave 0 503s
+  and p99 65–135 ms with no shedding at all. When on: when the event loop falls behind, unread requests pile up,
   and at the CPU limit that can reach the OOM killer within seconds. So while available memory is under 450 MB, the
   server raises a pressure flag if the socket-buffer memory charged to its cgroup (`memory.stat` `sock`) rises by more
   than 50 MB within a second while above 64 MB, or passes 160 MB (sampled before each batch, at most every 50 ms), or,

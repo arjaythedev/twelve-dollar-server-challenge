@@ -4,6 +4,9 @@ declare(strict_types=1);
 
 namespace App\Controller;
 
+use App\Api\FeedOutput;
+use App\Api\LikeOutput;
+use App\Api\PostOutput;
 use App\Entity\Post;
 use App\Entity\PostLike;
 use App\Entity\User;
@@ -19,8 +22,10 @@ use Symfony\Component\HttpFoundation\Response;
 use Symfony\Component\HttpKernel\Attribute\MapRequestPayload;
 use Symfony\Component\HttpKernel\Attribute\ValueResolver;
 use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
+use Symfony\Component\JsonStreamer\JsonStreamWriter;
 use Symfony\Component\Routing\Attribute\Route;
 use Symfony\Component\Security\Http\Attribute\CurrentUser;
+use Symfony\Component\TypeInfo\Type;
 
 final class PostController extends AbstractController
 {
@@ -30,24 +35,25 @@ final class PostController extends AbstractController
         private readonly PostRepository $posts,
         private readonly PostLikeRepository $likes,
         private readonly EntityManagerInterface $entityManager,
+        private readonly JsonStreamWriter $jsonStreamWriter,
     ) {
     }
 
     #[Route('/feed', methods: ['GET'])]
     public function feed(): JsonResponse
     {
-        return $this->json([
-            'posts' => $this->posts->findLatestViews(self::FEED_SIZE),
-        ]);
+        return $this->writeJson(new FeedOutput(
+            $this->posts->findLatestViews(self::FEED_SIZE),
+        ));
     }
 
     #[Route('/posts/{id}', methods: ['GET'])]
     public function show(#[ValueResolver(PostId::class)] int $id): JsonResponse
     {
-        return $this->json([
-            'post' => $this->posts->findView($id)
+        return $this->writeJson(new PostOutput(
+            $this->posts->findView($id)
                 ?? throw new NotFoundHttpException('post not found'),
-        ]);
+        ));
     }
 
     #[Route('/posts', methods: ['POST'])]
@@ -64,9 +70,10 @@ final class PostController extends AbstractController
         $this->entityManager->persist($post);
         $this->entityManager->flush();
 
-        return $this->json([
-            'post' => PostView::fromPost($post, $user->username),
-        ], Response::HTTP_CREATED);
+        return $this->writeJson(
+            new PostOutput(PostView::fromPost($post, $user->username)),
+            Response::HTTP_CREATED,
+        );
     }
 
     #[Route('/posts/{id}/like', methods: ['POST'])]
@@ -97,10 +104,23 @@ final class PostController extends AbstractController
             }
         }
 
-        return $this->json([
-            'liked' => true,
-            'already_liked' => $alreadyLiked,
-            'post_id' => $id,
-        ], $alreadyLiked ? Response::HTTP_OK : Response::HTTP_CREATED);
+        return $this->writeJson(
+            new LikeOutput(
+                true,
+                $alreadyLiked,
+                $id,
+            ),
+            $alreadyLiked ? Response::HTTP_OK : Response::HTTP_CREATED,
+        );
+    }
+
+    /**
+     * JsonStreamer writes the JSON with PHP code generated for each output class at cache warmup.
+     */
+    private function writeJson(object $output, int $status = Response::HTTP_OK): JsonResponse
+    {
+        $json = $this->jsonStreamWriter->write($output, Type::object($output::class));
+
+        return new JsonResponse((string) $json, $status, json: true);
     }
 }

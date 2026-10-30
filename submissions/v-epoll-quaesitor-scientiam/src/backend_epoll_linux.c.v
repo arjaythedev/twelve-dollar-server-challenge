@@ -48,8 +48,8 @@ fn C.socket(int, int, int) int
 fn C.bind(int, voidptr, u32) int
 fn C.listen(int, int) int
 fn C.setsockopt(int, int, int, voidptr, u32) int
-fn C.recv(int, voidptr, usize, int) int
-fn C.send(int, voidptr, usize, int) int
+fn C.recv(int, voidptr, uint, int) int
+fn C.send(int, voidptr, uint, int) int
 fn C.close(int) int
 fn C.getrlimit(int, &C.rlimit) int
 fn C.setrlimit(int, &C.rlimit) int
@@ -350,7 +350,7 @@ fn (mut l Loop) read_conn(fd int, now u32) {
 		if room == 0 {
 			break
 		}
-		n := C.recv(fd, unsafe { &u8(l.scratch.data) + have }, usize(room), 0)
+		n := C.recv(fd, unsafe { &u8(l.scratch.data) + have }, uint(room), 0)
 		if n > 0 {
 			have += int(n)
 			if int(n) < room {
@@ -486,7 +486,7 @@ fn (mut l Loop) finish_batch(now u32) {
 			l.pool.append(mut c.output, p, n)
 			continue
 		}
-		w := C.send(seg.fd, p, usize(n), C.MSG_NOSIGNAL)
+		w := C.send(seg.fd, p, uint(n), C.MSG_NOSIGNAL)
 		if w == n {
 			continue
 		}
@@ -521,7 +521,7 @@ fn (mut l Loop) finish_batch(now u32) {
 fn (mut l Loop) push_output(fd int) {
 	mut c := &l.conns[fd]
 	for c.sent < c.output.len {
-		w := C.send(fd, unsafe { c.output.ptr + c.sent }, usize(c.output.len - c.sent), C.MSG_NOSIGNAL)
+		w := C.send(fd, unsafe { c.output.ptr + c.sent }, uint(c.output.len - c.sent), C.MSG_NOSIGNAL)
 		if w > 0 {
 			c.sent += u32(w)
 			continue

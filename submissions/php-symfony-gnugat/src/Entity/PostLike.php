@@ -20,7 +20,7 @@ class PostLike
         #[ORM\JoinColumn(name: 'user_id')]
         private User $user,
         #[ORM\Id]
-        #[ORM\ManyToOne(inversedBy: 'likes')]
+        #[ORM\ManyToOne]
         #[ORM\JoinColumn(name: 'post_id')]
         private Post $post,
     ) {

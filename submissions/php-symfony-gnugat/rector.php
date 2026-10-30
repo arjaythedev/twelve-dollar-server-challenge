@@ -8,7 +8,6 @@ use Rector\Config\RectorConfig;
 use Rector\Naming\Rector\Assign\RenameVariableToMatchMethodCallReturnTypeRector;
 use Rector\Naming\Rector\Class_\RenamePropertyToMatchTypeRector;
 use Rector\Naming\Rector\ClassMethod\RenameParamToMatchTypeRector;
-use Rector\Php80\Rector\Class_\ClassPropertyAssignToConstructorPromotionRector;
 use Rector\Set\ValueObject\SetList;
 use Rector\Visibility\Rector\ClassConst\ChangeConstantVisibilityRector;
 use Rector\Visibility\Rector\ClassMethod\ChangeMethodVisibilityRector;
@@ -37,11 +36,6 @@ return RectorConfig::configure()
         RenameParamToMatchTypeRector::class,
         RenamePropertyToMatchTypeRector::class,
         RenameVariableToMatchMethodCallReturnTypeRector::class,
-        // [PHP_80]
-        // The Serializer outputs properties in declaration order, promoted ones come last: keep the API's key order
-        ClassPropertyAssignToConstructorPromotionRector::class => [
-            __DIR__.'/src/Entity/Post.php',
-        ],
     ])
     // —— PHP ——————————————————————————————————————————————————————————————————
     // Version picked from composer.json's `require.php`

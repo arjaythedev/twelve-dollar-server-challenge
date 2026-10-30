@@ -7,6 +7,7 @@ namespace App\Controller;
 use App\Entity\Post;
 use App\Entity\PostLike;
 use App\Entity\User;
+use App\ReadModel\PostView;
 use App\Repository\PostLikeRepository;
 use App\Repository\PostRepository;
 use App\Security\JwtUser;
@@ -36,7 +37,7 @@ final class PostController extends AbstractController
     public function feed(): JsonResponse
     {
         return $this->json([
-            'posts' => $this->posts->findLatest(self::FEED_SIZE),
+            'posts' => $this->posts->findLatestViews(self::FEED_SIZE),
         ]);
     }
 
@@ -44,7 +45,7 @@ final class PostController extends AbstractController
     public function show(#[ValueResolver(PostId::class)] int $id): JsonResponse
     {
         return $this->json([
-            'post' => $this->posts->find($id)
+            'post' => $this->posts->findView($id)
                 ?? throw new NotFoundHttpException('post not found'),
         ]);
     }
@@ -64,7 +65,7 @@ final class PostController extends AbstractController
         $this->entityManager->flush();
 
         return $this->json([
-            'post' => $post,
+            'post' => PostView::fromPost($post, $user->username),
         ], Response::HTTP_CREATED);
     }
 

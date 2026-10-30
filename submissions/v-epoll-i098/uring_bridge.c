@@ -238,6 +238,12 @@ struct td_net *td_net_new(int listener, int checkpoint)
     /* Accepted sockets inherit TCP_NODELAY without entering the process file table. */
     if (setsockopt(listener, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one)))
         td_fail("listener TCP_NODELAY", errno);
+    /* Bound queued socket data when a checkpoint or a slow peer delays progress. */
+    int receive_buffer = 4096, send_buffer = 8192;
+    if (setsockopt(listener, SOL_SOCKET, SO_RCVBUF, &receive_buffer, sizeof(receive_buffer)))
+        td_fail("listener SO_RCVBUF", errno);
+    if (setsockopt(listener, SOL_SOCKET, SO_SNDBUF, &send_buffer, sizeof(send_buffer)))
+        td_fail("listener SO_SNDBUF", errno);
     for (int i = 0; i < RINGS; ++i) {
         struct td_ring *r = &net->rings[i];
         r->ready_head = r->ready_tail = r->retry_head = r->retry_tail = -1;

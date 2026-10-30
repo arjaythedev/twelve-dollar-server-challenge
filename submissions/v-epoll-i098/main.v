@@ -100,7 +100,7 @@ const header_room = 128 // fits the longest response header (36 + 19 + 48 + 10 +
 const sql_post = 'SELECT p.id, p.body, p.created_at, u.username, (SELECT count(*) FROM likes l WHERE l.post_id = p.id) FROM posts p JOIN users u ON u.id = p.user_id'
 
 const feed_span = 64 // feed_range handles the newest 20 ids when they span fewer ids than this
-const ckpt_frames = 1000 // WAL size that starts a checkpoint (SQLite's default auto-checkpoint)
+const ckpt_frames = 256 // start writeback earlier to reduce checkpoint bursts
 const ckpt_max_frames = 16000 // past this WAL size, phase B holds writes until the WAL is copied
 const max_pause_ms = u64(20) // longest hold on write requests while the WAL can restart
 const write_window_ns = u64(5_000_000) // after a commit that wrote, hold new writes this long to group them

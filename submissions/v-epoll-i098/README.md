@@ -37,9 +37,10 @@ The C transport keeps debug symbols and frame pointers for local profiles.
   SQLite retains WAL mode with `synchronous=NORMAL`.
 - **WAL checkpoints on a second thread, never on the event loop.** SQLite's auto-checkpoint runs inside
   `COMMIT` and does two `fsync`s, which stalls every connection on a single loop (8 ms to 4 s each on a
-  busy disk). Here a `sqlite3_wal_hook` only records the WAL size; at 1,000 frames (SQLite's default) a
-  checkpointer thread with its own connection runs a PASSIVE checkpoint and reports through an `eventfd`
-  watched by a one-shot ring poll. Checkpoint completion wakes an otherwise idle server.
+  busy disk). Here a `sqlite3_wal_hook` only records the WAL size; at 256 frames a
+  checkpointer thread with its own connection runs a PASSIVE checkpoint and reports through an `eventfd`.
+  This starts writeback earlier than SQLite's default 1,000-frame interval.
+  A one-shot ring poll watches the `eventfd`; checkpoint completion wakes an otherwise idle server.
   A follow-up checkpoint can pause writes for 20 ms, or until completion above 16,000 WAL frames.
   It runs whenever writes appended frames during the first checkpoint, because the WAL can restart
   only when every frame is copied. At 16,000 frames, writes wait in either phase until the running

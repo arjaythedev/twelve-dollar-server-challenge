@@ -1435,6 +1435,7 @@ fn put_byte(mut b []u8, c u8) {
 
 const digit_pairs = '00010203040506070809101112131415161718192021222324252627282930313233343536373839404142434445464748495051525354555657585960616263646566676869707172737475767778798081828384858687888990919293949596979899'
 
+@[inline]
 fn put_int(mut b []u8, v i64) {
 	if b.len + 21 > b.cap {
 		b.ensure_cap(b.len + 21)
@@ -1539,8 +1540,9 @@ fn b64url_decode(s string) ?string {
 const hex = '0123456789abcdef'
 
 // put_json writes p[0..n] as a JSON string, escaped the way JSON.stringify does.
+@[inline]
 fn put_json(mut b []u8, p &u8, n int) {
-	mut i := C.td_json_scan(p, n)
+	i := C.td_json_scan(p, n)
 	if i == n {
 		if b.len + n + 2 > b.cap {
 			b.ensure_cap(b.len + n + 2)
@@ -1554,6 +1556,11 @@ fn put_json(mut b []u8, p &u8, n int) {
 		}
 		return
 	}
+	put_json_escaped(mut b, p, n, i)
+}
+
+fn put_json_escaped(mut b []u8, p &u8, n int, at int) {
+	mut i := at
 	append(mut b, c'"', 1)
 	mut from := 0
 	for i < n {

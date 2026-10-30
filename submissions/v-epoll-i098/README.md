@@ -65,6 +65,8 @@ The C transport keeps debug symbols and frame pointers for local profiles.
 - **Prepared statements** for every query, plus `BEGIN`/`COMMIT`, made once at startup.
 - **JSON written by hand into reused buffers.** The writer checks 16 bytes at a time (SSE2, `json_scan.h`) for
   a byte that needs escaping, and copies the string whole when none does. Keys come out in the spec order.
+  The common string path and integer writer are inlined. The string writer calls a separate
+  escape loop only when the scan finds a byte that needs escaping.
 - **Every token is verified.** HS256 only, signature compared in constant time, then `exp`, `sub` and
   `username` are checked on each request.
 - **524,280 fixed slots.** One thread owns eight sparse tables with 65,535 slots each.

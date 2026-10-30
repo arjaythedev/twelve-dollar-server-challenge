@@ -10,20 +10,25 @@ use App\Security\JwtUser;
 use Doctrine\DBAL\Connection;
 
 /**
- * Plain SQL through DBAL: the reads are mapped straight to PostView, and the write is one INSERT.
- *
- * @phpstan-import-type PostRow from PostView
+ * Plain SQL through DBAL: SQLite writes the response JSON of the reads, and the write is one INSERT.
  */
 final readonly class PostRepository
 {
     /**
-     * One row per post, with its author and its like count as of now.
+     * One row per post: the post object of the API (same keys, in the same order, as PostView), with its author and
+     * its like count as of now.
      *
      * Counting likes.post_id (rather than a non-key column) lets SQLite answer from likes_post_id_idx alone.
      */
-    private const string VIEW_SQL = <<<'SQL'
-    SELECT p.id, p.body, p.created_at, u.username,
-           (SELECT COUNT(l.post_id) FROM likes l WHERE l.post_id = p.id) AS like_count
+    private const string POST_SQL = <<<'SQL'
+    SELECT p.id, p.created_at,
+           json_object(
+               'id', p.id,
+               'body', p.body,
+               'created_at', p.created_at,
+               'author', u.username,
+               'like_count', (SELECT COUNT(l.post_id) FROM likes l WHERE l.post_id = p.id)
+           ) AS post
       FROM posts p
       JOIN users u ON u.id = p.user_id
     SQL;
@@ -34,28 +39,35 @@ final readonly class PostRepository
     }
 
     /**
-     * @return list<PostView>
+     * The response of GET /feed: {"posts":[...]}.
+     *
+     * json() turns the subquery's text back into JSON, so json_group_array() doesn't quote it as a string.
      */
-    public function findLatestViews(int $limit): array
+    public function findFeedJson(int $limit): string
     {
-        /** @var list<PostRow> $rows */
-        $rows = $this->connection->fetchAllAssociative(
-            self::VIEW_SQL.' ORDER BY p.created_at DESC, p.id DESC LIMIT ?',
+        $json = $this->connection->fetchOne(
+            "SELECT json_object('posts', json_group_array(json(post) ORDER BY created_at DESC, id DESC))"
+            .' FROM ('.self::POST_SQL.' ORDER BY p.created_at DESC, p.id DESC LIMIT ?)',
             [$limit],
         );
+        if (!\is_string($json)) {
+            throw new \LogicException('an aggregate query returns one row');
+        }
 
-        return array_map(PostView::fromRow(...), $rows);
+        return $json;
     }
 
-    public function findView(int $id): ?PostView
+    /**
+     * The response of GET /posts/{id}: {"post":{...}}, or null when there is no such post.
+     */
+    public function findPostJson(int $id): ?string
     {
-        /** @var PostRow|false $row */
-        $row = $this->connection->fetchAssociative(
-            self::VIEW_SQL.' WHERE p.id = ?',
+        $json = $this->connection->fetchOne(
+            "SELECT json_object('post', json(post)) FROM (".self::POST_SQL.' WHERE p.id = ?)',
             [$id],
         );
 
-        return false === $row ? null : PostView::fromRow($row);
+        return \is_string($json) ? $json : null;
     }
 
     public function exists(int $id): bool

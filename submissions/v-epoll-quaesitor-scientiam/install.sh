@@ -55,3 +55,5 @@ rm -f v1
 mv v2 v
 chmod -R a+rX /opt/twelve-v
 /opt/twelve-v/v version
+# The archives have no .git, so `v version` cannot show the commit. Record it here instead.
+echo "V source: vlang/v 93ad5d7e5d8f3f135c421af79fbc0b808051886a, vlang/vc a132e47985f9ae8f993469ace72eee9f270972a0" | tee /opt/twelve-v/PINNED

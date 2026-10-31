@@ -1,0 +1,68 @@
+* The board: a ring-oscillator clock, the request chip (Verilog, run by Verilator inside ngspice's d_cosim),
+* a gate-level comparator for the JWT signature, and the network card / storage controller (nic.so, C, also
+* a d_cosim device) that clocks request bytes into the chip and its answers out. @...@ is filled in by
+* build.sh. One ngspice process serves the whole run (start.sh).
+
+* 100 MHz clock: a ring oscillator, one NAND gate with a 5 ns delay feeding itself back. run (power-on)
+* holds it at 1 until t = 6 ns; then clk falls at 11, 21, 31 ... ns and rises at 16, 26 ... ns.
+aosc [run clk] clk nand5
+.model nand5 d_nand(rise_delay=5e-9 fall_delay=5e-9)
+
+
+* power-on: the supply ramps up between 5 and 6 ns, and an ADC bridge turns it into run. This is the board's
+* only analog part.
+vdd vdd 0 pwl(0 0 5n 0 6n 1)
+apwr [vdd] [run] pwradc
+.model pwradc adc_bridge(in_low=0.5 in_high=0.5)
+
+* the network card and storage controller: on each falling edge it reads the chip's output pins and drives
+* the next word of request bytes (wt, wn, wi; ie after the last); rst between jobs power-cycles the chip.
+* Its outputs land one clock (10.005 ns) later, just after the next falling edge and 5 ns before the rising
+* edge the chip reads them on. A shorter delay than the 9.9 ns steps makes d_cosim cut and redo steps, and
+* that loses output changes now and then.
+* While it has no request it blocks, and the simulation (clock included) waits with it. irreversible=2:
+* two d_cosim instances with the same value (the default, 1) crash ngspice 42 in EVTcall_hybrids.
+anic [clk ot @won[3:0]@ @wo[63:0]@ done] [wt @wn[3:0]@ @wi[63:0]@ ie rst] NULL nicm
+.model nicm d_cosim(simulation="@NIC@" delay=10.005e-9 queue_size=1024 irreversible=2)
+
+* the chip (Verilog: top.v and chip.v and the modules they use; 8 core cycles per board clock). d_cosim
+* runs it once per analog timestep, replaying the input events it queued. An output that changes more
+* than `delay` before the end of a step makes d_cosim cut the step short and redo it, and a pin can only
+* change once per step. So: steps of at most 9.9 ns (tran below, under one clock, so a pin changes at
+* most once per step) and outputs that reach the board one clock (10.005 ns) late.
+achip [@IN@] [@OUT@] NULL chipm
+.model chipm d_cosim(simulation="@SO@" delay=10.005e-9 queue_size=1024)
+
+* signature comparator, 12 gates: cbad <= (cclr ? 0 : cbad) | (ca != cb), one byte pair per clock;
+* cack <= cend tells the chip the last pair is in
+ax7 [ca7 cb7] d7 xor1
+ax6 [ca6 cb6] d6 xor1
+ax5 [ca5 cb5] d5 xor1
+ax4 [ca4 cb4] d4 xor1
+ax3 [ca3 cb3] d3 xor1
+ax2 [ca2 cb2] d2 xor1
+ax1 [ca1 cb1] d1 xor1
+ax0 [ca0 cb0] d0 xor1
+aor [d7 d6 d5 d4 d3 d2 d1 d0] ne or1
+ahold [cbad ~cclr] keep and1
+anext [ne keep] cnext or1
+aff cnext clk NULL NULL cbad NULL dff1
+aack cend clk NULL NULL cack NULL dff1
+.model xor1 d_xor(rise_delay=1e-11 fall_delay=1e-11)
+.model or1 d_or(rise_delay=1e-11 fall_delay=1e-11)
+.model and1 d_and(rise_delay=1e-11 fall_delay=1e-11)
+.model dff1 d_dff(clk_delay=1e-11 rise_delay=1e-11 fall_delay=1e-11 ic=0)
+
+* Saved vectors grow with every timestep, so the transient runs in 2 ms slices (200k clocks) and the
+* plots are dropped between them; nic.so keeps its sockets and queue across slices (a job cut off by the
+* end of a slice starts over). Without the reset the ring oscillator stops after one edge in the next
+* slice, and reset forgets esave none (with every event saved, the end of a slice took ~2 s).
+.control
+repeat
+  esave none
+  tran 1n 2m 0 9.9n
+  destroy all
+  reset
+end
+.endc
+.end

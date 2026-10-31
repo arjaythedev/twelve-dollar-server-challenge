@@ -20,12 +20,16 @@ Every user is a keep-alive connection, so the connection count is what the serve
 - Accepted sockets are io_uring direct descriptors, held in each ring's fixed-file table rather than
   the process's descriptor table, so `LimitNOFILE=65535` does not cap them. A table cannot be larger
   than that limit, so the server makes 8 rings of 65,471 slots (over 500,000 connections).
-- Each ring has its own `SO_REUSEPORT` listener with a multishot accept that is always armed, so a
-  full table on one ring never stops accepts on the others.
+- One listening socket. Its multishot accept is armed on the ring being filled, and also on the next
+  ring once the first is within 2,048 slots of full, so rings fill in order and only as many are
+  busy as the connection count needs (2 at 120,000 users instead of 8). Every busy ring costs its
+  own system calls each batch; with one `SO_REUSEPORT` listener per ring the kernel spread
+  connections over all eight. A ring's accept is cancelled 256 slots before its table is full,
+  because an accept that finds the table full makes the kernel reset that client.
 - Each connection has one multishot receive into a shared provided-buffer ring (2,048 × 2 KB per
-  ring); an idle connection holds no buffer and no heap, only a 48-byte record. The kernel's own
+  ring); an idle connection holds no buffer and no heap, only a 40-byte record. The kernel's own
   per-socket memory (~4.3 KB on 6.8, most of it not charged to the process) is the real ceiling on
-  a 2 GB box, and the 48 bytes are what the server adds to it.
+  a 2 GB box, and the 40 bytes are what the server adds to it.
 - Ring 0 is `SINGLE_ISSUER | DEFER_TASKRUN` and is the ring the loop waits on (a timed
   `io_uring_enter`: 64 completions or 2 ms when busy, up to 1 s when idle). The other rings use
   ordinary task work and signal an eventfd that ring 0 polls, so a completion anywhere ends the

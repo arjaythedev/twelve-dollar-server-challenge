@@ -311,6 +311,13 @@ static inline void sqe_send(struct io_uring_sqe *s, unsigned slot, const void *p
   s->msg_flags = MSG_NOSIGNAL | MSG_WAITALL;
   s->user_data = ud;
 }
+/* Cancel the request whose user_data is `target`. */
+static inline void sqe_cancel(struct io_uring_sqe *s, uint64_t target, uint64_t ud) {
+  s->opcode = IORING_OP_ASYNC_CANCEL;
+  s->fd = -1;
+  s->addr = target;
+  s->user_data = ud;
+}
 /* A multishot poll for readability of an ordinary fd (the other rings' eventfds). */
 static inline void sqe_poll_multishot(struct io_uring_sqe *s, int fd, uint64_t ud) {
   s->opcode = IORING_OP_POLL_ADD;

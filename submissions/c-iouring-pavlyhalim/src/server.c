@@ -20,7 +20,7 @@
 #define BATCH_WAIT_MS 2
 #define PEND_MAX (HTTP_MAX_HEAD + HTTP_MAX_BODY)
 
-enum { UD_ACCEPT = 1, UD_RECV = 2, UD_SEND = 3, UD_CLOSE = 4, UD_EVFD = 5 };
+enum { UD_ACCEPT = 1, UD_RECV = 2, UD_SEND = 3, UD_CLOSE = 4, UD_EVFD = 5, UD_CANCEL = 6 };
 #define UD(op, ring, slot, gen) \
   (((uint64_t)(op) << 56) | ((uint64_t)(ring) << 48) | ((uint64_t)(slot) << 32) | (uint64_t)(gen))
 #define UD_OP(u) ((unsigned)((u) >> 56))
@@ -59,11 +59,10 @@ struct conn {
 struct rs {
   struct ring r;
   struct conn *conns;
-  int lfd;
   int efd;          /* rings 1..N-1: signalled by the kernel when the ring has completions */
   unsigned open;
   uint8_t accept_armed;
-  uint8_t need_poll; /* its eventfd fired: enter it to collect completions */
+  uint8_t accept_cancelling;
   struct conn **rearm;
   unsigned nrearm, rearm_cap;
 };
@@ -189,9 +188,37 @@ static void arm_recv(struct conn *c) {
   c->flags &= ~CF_REARM;
 }
 
+/* Accepting. One listening socket; its multishot accept is armed only on the ring being filled,
+ * and on the next one once the first is within ACCEPT_NEXT slots of full, so connections fill the
+ * rings in order and only as many rings are busy as the connection count needs (with one listener
+ * per ring, the kernel spreads connections over all of them and every ring needs its own system
+ * calls each batch). A ring's accept is cancelled ACCEPT_STOP slots before its direct-descriptor
+ * table is full: an accept that finds the table full makes the kernel reset that client. */
+#define ACCEPT_NEXT 2048
+#define ACCEPT_STOP 256
+
+static int LFD = -1;
+
 static void arm_accept(struct rs *rs, unsigned ri) {
-  sqe_accept_multishot(ring_sqe(&rs->r), rs->lfd, UD(UD_ACCEPT, ri, 0, 0));
+  sqe_accept_multishot(ring_sqe(&rs->r), LFD, UD(UD_ACCEPT, ri, 0, 0));
   rs->accept_armed = 1;
+}
+
+static void accept_policy(void) {
+  unsigned lowest = NR;
+  for (unsigned i = 0; i < NR; i++)
+    if (R[i].open + ACCEPT_STOP < R[i].r.nslots) { lowest = i; break; }
+  for (unsigned i = 0; i < NR; i++) {
+    struct rs *rs = &R[i];
+    int room = rs->open + ACCEPT_STOP < rs->r.nslots;
+    int want = room && (i == lowest || (i == lowest + 1 && R[lowest].open + ACCEPT_NEXT >= R[lowest].r.nslots));
+    if (want && !rs->accept_armed) {
+      arm_accept(rs, i);
+    } else if (!room && rs->accept_armed && !rs->accept_cancelling) {
+      sqe_cancel(ring_sqe(&rs->r), UD(UD_ACCEPT, i, 0, 0), UD(UD_CANCEL, i, 0, 0));
+      rs->accept_cancelling = 1;
+    }
+  }
 }
 
 static void stash(struct conn *c, const uint8_t *p, unsigned n) {
@@ -286,7 +313,7 @@ static void conn_feed(struct conn *c, const uint8_t *data, unsigned len) {
 
 static void on_accept(unsigned ri, struct io_uring_cqe *cqe) {
   struct rs *rs = &R[ri];
-  if (!(cqe->flags & IORING_CQE_F_MORE)) rs->accept_armed = 0;
+  if (!(cqe->flags & IORING_CQE_F_MORE)) rs->accept_armed = rs->accept_cancelling = 0;
   if (cqe->res < 0) {
     if (cqe->res != -ENFILE && cqe->res != -EMFILE && cqe->res != -ECANCELED)
       fprintf(stderr, "accept ring %u: %s\n", ri, strerror(-cqe->res));
@@ -366,13 +393,13 @@ static void on_close(unsigned ri, struct io_uring_cqe *cqe) {
   conn_freed(c);
 }
 
-/* A ring's eventfd fired. The counter is not drained: a multishot poll posts one completion per
+/* A ring's eventfd fired. Its only job is to end ring 0's wait: the ring's completions are read
+ * every batch anyway. The counter is not drained: a multishot poll posts one completion per
  * wake-up of the eventfd, not per level, so reading it back would be a system call for nothing
  * (and the 64-bit counter cannot overflow at a few thousand signals a second). */
 static void on_evfd(struct io_uring_cqe *cqe) {
   unsigned ri = UD_RING(cqe->user_data);
   struct rs *rs = &R[ri];
-  rs->need_poll = 1;
   if (!(cqe->flags & IORING_CQE_F_MORE)) sqe_poll_multishot(ring_sqe(&R[0].r), rs->efd, UD(UD_EVFD, ri, 0, 0));
 }
 
@@ -468,6 +495,9 @@ static uint64_t T_reqs, T_accepts, T_closes;
 static void stats(uint64_t dt_ns) {
   unsigned open = 0;
   for (unsigned i = 0; i < NR; i++) open += R[i].open;
+  fprintf(stderr, "rings: open=");
+  for (unsigned i = 0; i < NR; i++) fprintf(stderr, "%s%u%s", i ? "," : "", R[i].open, R[i].accept_armed ? "*" : "");
+  fprintf(stderr, "\n");
   T_reqs += S.reqs_sent;
   T_accepts += S.accepts;
   T_closes += S.closes;
@@ -604,6 +634,14 @@ int main(void) {
   if (app_init(&A, db_path, secret, mmap_bytes, cache_kib) < 0) return 1;
 
   int backlog = (int)env_long("BACKLOG", 4096);
+  {
+    const char *err = "";
+    LFD = listen_socket(host, atoi(port), backlog, &err);
+    if (LFD < 0) {
+      fprintf(stderr, "listen %s:%s: %s: %s\n", host, port, err, strerror(errno));
+      return 1;
+    }
+  }
   for (unsigned i = 0; i < NR; i++) {
     const char *err = "";
     if (ring_init(&R[i].r, 4096, 32768, nslots, nbufs, bufsz, i == 0, &err) < 0) {
@@ -613,12 +651,6 @@ int main(void) {
     R[i].conns = calloc(nslots, sizeof(struct conn));
     if (!R[i].conns) { perror("calloc"); return 1; }
     madvise(R[i].conns, (size_t)nslots * sizeof(struct conn), MADV_HUGEPAGE);
-    R[i].lfd = listen_socket(host, atoi(port), backlog, &err);
-    if (R[i].lfd < 0) {
-      fprintf(stderr, "listen %s:%s: %s: %s\n", host, port, err, strerror(errno));
-      return 1;
-    }
-    arm_accept(&R[i], i);
     if (i > 0) {
       R[i].efd = ring_register_eventfd(&R[i].r);
       if (R[i].efd < 0) { perror("register eventfd"); return 1; }
@@ -628,6 +660,8 @@ int main(void) {
   fprintf(stderr, "listening on %s:%s: %u rings x %u direct descriptors, %u x %u B receive buffers per ring, "
                   "mmap %lld MB, cache %d KiB\n",
           host, port, NR, nslots, nbufs, bufsz, mmap_bytes >> 20, cache_kib);
+  for (unsigned i = 0; i < NR; i++) fprintf(stderr, "ring %u: io_uring fd %d\n", i, R[i].r.fd);
+  accept_policy();
 
   uint64_t t0 = now_ns(), last_sweep = t0, last_stats = t0;
   unsigned last_cqes = 0;
@@ -637,8 +671,7 @@ int main(void) {
       if (ring_pending_submit(&R[i].r)) ring_submit(&R[i].r, 0, 0, NULL, 0);
 
     /* 2. wait on ring 0. The other rings' eventfds are polled from ring 0, so a completion
-     * anywhere ends the wait; with DEFER_TASKRUN a ring's completions only appear when it is
-     * entered, which happens below for the rings that signalled. */
+     * anywhere ends the wait. */
     unsigned min = last_cqes >= 8 ? BATCH_WAIT : 1;
     unsigned ms = (last_cqes >= 8 || nheld || nready) ? BATCH_WAIT_MS : 1000;
     long rc = ring_wait(&R[0].r, min, ms);
@@ -652,13 +685,12 @@ int main(void) {
     now_s = (uint32_t)(t / 1000000000ULL);
     A.now = (int64_t)time(NULL);
     writes_ok = db_writes_allowed(&A.db);
+    /* Rings 1..N do not defer their task work, so the kernel has already posted their
+     * completions into their queues while this thread was in the wait above: they are read
+     * straight from shared memory, without entering those rings (that was 4.7 system calls
+     * per batch with all 8 rings busy). */
     unsigned ncq = reap(0);
-    for (unsigned i = 1; i < NR; i++) {
-      if (!R[i].need_poll && !ring_pending_submit(&R[i].r)) continue;
-      R[i].need_poll = 0;
-      ring_poll(&R[i].r);
-      ncq += reap(i);
-    }
+    for (unsigned i = 1; i < NR; i++) ncq += reap(i);
     run_lists();
     uint64_t tc = now_ns();
     int failed = db_commit(&A.db) < 0;
@@ -673,8 +705,8 @@ int main(void) {
         if ((c->flags & (CF_OPEN | CF_CLOSING | CF_REARM)) == (CF_OPEN | CF_REARM)) { arm_recv(c); S.rearms++; }
       }
       rs->nrearm = 0;
-      if (!rs->accept_armed && rs->open + 16 < rs->r.nslots) arm_accept(rs, i);
     }
+    accept_policy();
     last_cqes = ncq;
     S.batches++;
     S.cqes += ncq;

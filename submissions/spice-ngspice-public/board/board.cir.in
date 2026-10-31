@@ -16,12 +16,14 @@ apwr [vdd] [run] pwradc
 .model pwradc adc_bridge(in_low=0.5 in_high=0.5)
 
 * the network card and storage controller: on each falling edge it reads the chip's output pins and drives
-* the next word of request bytes (wt, wn, wi; ie after the last), 2 ns later; rst between jobs power-cycles
-* the chip.
+* the next word of request bytes (wt, wn, wi; ie after the last); rst between jobs power-cycles the chip.
+* Its outputs land one clock (10.005 ns) later, just after the next falling edge and 5 ns before the rising
+* edge the chip reads them on. A shorter delay than the 9.9 ns steps makes d_cosim cut and redo steps, and
+* that loses output changes now and then.
 * While it has no request it blocks, and the simulation (clock included) waits with it. irreversible=2:
 * two d_cosim instances with the same value (the default, 1) crash ngspice 42 in EVTcall_hybrids.
 anic [clk ot @won[3:0]@ @wo[63:0]@ done] [wt @wn[3:0]@ @wi[63:0]@ ie rst] NULL nicm
-.model nicm d_cosim(simulation="@NIC@" delay=2e-9 queue_size=1024 irreversible=2)
+.model nicm d_cosim(simulation="@NIC@" delay=10.005e-9 queue_size=1024 irreversible=2)
 
 * the chip (Verilog: top.v and chip.v and the modules they use; 8 core cycles per board clock). d_cosim
 * runs it once per analog timestep, replaying the input events it queued. An output that changes more
@@ -52,16 +54,15 @@ aack cend clk NULL NULL cack NULL dff1
 .model dff1 d_dff(clk_delay=1e-11 rise_delay=1e-11 fall_delay=1e-11 ic=0)
 
 * Saved vectors grow with every timestep, so the transient runs in 2 ms slices (200k clocks) and the
-* plots are dropped between them; nic.so keeps its sockets and queue across slices. Without the reset the
-* ring oscillator stops after one edge in the second slice. reset also forgets esave none, and with every
-* event saved, the end of a slice took ~2 s.
+* plots are dropped between them; nic.so keeps its sockets and queue across slices (a job cut off by the
+* end of a slice starts over). Without the reset the ring oscillator stops after one edge in the next
+* slice, and reset forgets esave none (with every event saved, the end of a slice took ~2 s).
 .control
-esave none
 repeat
+  esave none
   tran 1n 2m 0 9.9n
   destroy all
   reset
-  esave none
 end
 .endc
 .end

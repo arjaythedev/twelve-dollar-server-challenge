@@ -87,7 +87,10 @@ extern "C" void Cosim_setup(struct co_info *pinfo)
 {
   Verilated::debug(0);
   if (!ctx) ctx = new VerilatedContext;
-  for (unsigned int i = 0; i < outs; i++) previous_output[i] = 0;
+  // After ngspice's reset, d_cosim can still hold a pin's last value from the previous run while the node
+  // starts at 0, and then a 1 on that pin is never sent. Claiming every pin is 1 makes the first step
+  // send an explicit 0 for each pin that is 0, which puts d_cosim back in step.
+  for (unsigned int i = 0; i < outs; i++) previous_output[i] = 1;
   rst_prev = clk_prev = 0;
   pinfo->handle = new Vlng{ctx};
   pinfo->step = step;

@@ -113,6 +113,13 @@ At that point almost all of the time is ngspice's own event processing per times
   `-z nodelete`, so its sockets and queue survive `d_cosim` reloading it each slice. Without `reset`
   between slices the ring oscillator stops after one edge in the second slice, and `reset` forgets
   `esave none`: with every event saved, each slice ended in a ~2 s stall.
+- **`reset` leaves `d_cosim`'s idea of its output pins behind.** After a reset, a pin that ended the last
+  slice at 1 starts the next at 0, but `d_cosim` still thinks it is 1, so the next 1 on it is never sent
+  (the network card saw bytes with bits missing). Both devices send an explicit 0 on every pin at the start
+  of each slice.
+- **Output delay shorter than a timestep loses changes.** With the network card's `delay` at 2 ns
+  (below the 9.9 ns steps), `d_cosim` cut and redid steps for its outputs, and now and then a change was
+  lost. Both devices now use one clock (10.005 ns).
 - **Two `d_cosim` instances with the same `irreversible` value** (the default, 1) crash ngspice 42 in
   `EVTcall_hybrids`; the network card uses 2.
 - **Analog loads on fast pins are expensive.** A DAC bridge on a pin that toggles every clock costs ~10 µs
@@ -136,8 +143,10 @@ with a 60 s ramp. Other sessions' containers were busy on the same host, so trea
 | now (one long-running board) | 500 | fail | 41.6 | 12 ms | 665 ms | 1.23 s | 0.04% | 40% | 36 MB |
 
 At 500 users the median is 12 ms, and the server is busy well under half the time; the tail comes from rare
-stalls of up to ~1.5 s (the server at 100% for a moment). I am still chasing those, and three responses in
-that run were malformed (nginx: "upstream sent no valid HTTP/1.0 header"), which looks like the same fault.
+stalls of up to ~1.5 s (the server at 100% for a moment), and three responses in that run were
+malformed (nginx: "upstream sent no valid HTTP/1.0 header"). Both came from slice restarts: a job cut off
+by the end of a slice started over, and lost output bits (the two `d_cosim` findings above) either garbled
+it or left it waiting for the next slice. Fixed since; new numbers below as I get them.
 An average user costs ~0.6 ms of CPU per second now (a feed is ~22 ms, the rest 1–4 ms).
 
 ## Files

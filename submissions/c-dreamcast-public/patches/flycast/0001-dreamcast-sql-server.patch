@@ -1,0 +1,333 @@
+Flycast patches for dreamcast-sql (applied by build.sh to flyinghead/flycast 1b63c8a)
+
+- reios/hostfs.cpp: a "BIOS" syscall at 0x8C00100A that gives the guest page I/O on
+  $HOSTFS_PATH (+ -wal/-journal), two allow-listed env vars and the host clock.
+- picoppp.cpp: FLYCAST_TCP_FORWARD / FLYCAST_TCP_BIND forward inbound host TCP ports to
+  the emulated Broadband Adapter for any program, not just the games in its table; loopback
+  clients appear to the guest as 198.18.0.1 (KallistiOS answers 127/8 on its own loopback);
+  closed sockets are pruned from the acceptor; no public-IP / game-server DNS lookups.
+
+diff --git a/core/network/picoppp.cpp b/core/network/picoppp.cpp
+index 52cfc91..0fbd7e5 100644
+--- a/core/network/picoppp.cpp
++++ b/core/network/picoppp.cpp
+@@ -54,6 +54,7 @@ extern "C" {
+ #include "hw/bba/bba.h"
+ 
+ #include <unordered_map>
++#include <algorithm>
+ #include <deque>
+ #include <mutex>
+ #include <future>
+@@ -266,7 +267,12 @@ public:
+ 		attachPicoSocket();
+ 		const auto& endpoint = socket.remote_endpoint();
+ 		setName(endpoint);
+-		memcpy(&pico_sock->local_addr.ip4.addr, endpoint.address().to_v4().to_bytes().data(), 4);
++		auto peer = endpoint.address().to_v4();
++		// The guest would answer 127.0.0.1 on its own loopback, so a local client
++		// shows up as 198.18.0.1 (RFC 2544 benchmarking range) instead.
++		if (peer.is_loopback())
++			peer = asio::ip::make_address_v4("198.18.0.1");
++		memcpy(&pico_sock->local_addr.ip4.addr, peer.to_bytes().data(), 4);
+ 		pico_sock->local_port = htons(endpoint.port());
+ 		if (pico_socket_connect(pico_sock, &dcaddr.addr, htons(socket.local_endpoint().port())) != 0)
+ 		{
+@@ -282,6 +288,11 @@ public:
+ 		return socket;
+ 	}
+ 
++	// Safe to drop: picotcp has deleted its socket (no more callbacks) and asio is closed
++	bool isClosed() const {
++		return pico_sock == nullptr && !socket.is_open();
++	}
++
+ 	void close() {
+ 		closeAll();
+ 		directPlay.reset();
+@@ -576,6 +587,15 @@ private:
+ 	friend super;
+ };
+ 
++// FLYCAST_TCP_BIND chooses the host address the forwarded ports listen on
++static asio::ip::address_v4 bindAddress()
++{
++	const char *env = getenv("FLYCAST_TCP_BIND");
++	asio::error_code ec;
++	asio::ip::address_v4 addr = asio::ip::make_address_v4(env != nullptr ? env : "0.0.0.0", ec);
++	return ec ? asio::ip::address_v4::any() : addr;
++}
++
+ // Handles inbound tcp connections
+ class TcpAcceptor : public SharedThis<TcpAcceptor>
+ {
+@@ -583,6 +603,8 @@ public:
+ 	void start()
+ 	{
+ 		TcpSocket::Ptr newSock = TcpSocket::create(io_context, directPlay);
++		sockets.erase(std::remove_if(sockets.begin(), sockets.end(),
++				[](const TcpSocket::Ptr& s) { return s->isClosed(); }), sockets.end());
+ 		sockets.push_back(newSock);
+ 
+ 		acceptor.async_accept(newSock->getSocket(),
+@@ -601,7 +623,7 @@ private:
+ 	TcpAcceptor(asio::io_context& io_context, u16 port, std::shared_ptr<DirectPlay> directPlay)
+ 		: io_context(io_context),
+ 		  acceptor(asio::ip::tcp::acceptor(io_context,
+-				asio::ip::tcp::endpoint(asio::ip::tcp::v4(), port))),
++				asio::ip::tcp::endpoint(bindAddress(), port))),
+ 		  directPlay(directPlay)
+ 	{
+ 	}
+@@ -1280,6 +1302,29 @@ void PicoThread::run()
+ 			}
+ 		}
+ 	}
++	// FLYCAST_TCP_FORWARD=port[,port...] forwards inbound host TCP connections on
++	// those ports to the same ports on the Dreamcast, whatever the game is.
++	static GamePortList envPorts;
++	if (const char *env = getenv("FLYCAST_TCP_FORWARD"))
++	{
++		envPorts = {};
++		u32 n = 0;
++		for (const char *p = env; *p != '\0' && n < std::size(envPorts.tcpPorts) - 1; )
++		{
++			char *end;
++			unsigned long port = strtoul(p, &end, 10);
++			if (end == p)
++				break;
++			if (port > 0 && port < 65536)
++				envPorts.tcpPorts[n++] = (uint16_t)port;
++			p = *end == ',' ? end + 1 : end;
++		}
++		if (n > 0)
++		{
++			NOTICE_LOG(NETWORK, "Forwarding TCP ports from FLYCAST_TCP_FORWARD=%s", env);
++			ports = &envPorts;
++		}
++	}
+ 	// Web TV requires the VJ compression option, which picotcp doesn't support.
+ 	// This hack allows WebTV to connect although the correct fix would
+ 	// be to implement VJ compression.
+@@ -1341,7 +1386,9 @@ void PicoThread::run()
+ 			WARN_LOG(NETWORK, "Can't resolve dns.flyca.st. Using default 46.101.91.123");
+ 		}
+ 	}
+-	resolveDns(*io_context);
++	// A server (FLYCAST_TCP_FORWARD) has no use for the public IP or game server lookups
++	if (getenv("FLYCAST_TCP_FORWARD") == nullptr)
++		resolveDns(*io_context);
+ 
+ 	pico_stack_init();
+ 
+diff --git a/core/reios/CMakeLists.txt b/core/reios/CMakeLists.txt
+index bd40efd..62d20ad 100644
+--- a/core/reios/CMakeLists.txt
++++ b/core/reios/CMakeLists.txt
+@@ -3,6 +3,8 @@ target_sources(${PROJECT_NAME} PRIVATE
+         descrambl.h
+         gdrom_hle.cpp
+         gdrom_hle.h
++        hostfs.cpp
++        hostfs.h
+         reios.cpp
+         reios.h
+         reios_elf.cpp
+diff --git a/core/reios/hostfs.cpp b/core/reios/hostfs.cpp
+new file mode 100644
+index 0000000..8419b82
+--- /dev/null
++++ b/core/reios/hostfs.cpp
+@@ -0,0 +1,148 @@
++/*
++	hostfs: a tiny "BIOS" syscall that lets a guest program do page I/O on
++	one host file (and its -wal/-journal siblings), plus read two allow-listed
++	environment variables and the host clock.
++
++	Added for the dreamcast-sql joke entry of the $12 server challenge. The
++	guest calls 0x8C00100A with r4 = op and r5 = pointer to a u32 block:
++	  OPEN     blk[0]=suffix ptr, blk[1]=create          -> fd or -errno
++	  CLOSE    blk[0]=fd
++	  PREAD    blk[0]=fd blk[1]=buf blk[2]=len blk[3]=off -> bytes or -errno
++	  PWRITE   same as PREAD
++	  SIZE     blk[0]=fd                                -> size or -errno
++	  TRUNCATE blk[0]=fd blk[1]=size
++	  SYNC     blk[0]=fd
++	  DELETE   blk[0]=suffix ptr
++	  ACCESS   blk[0]=suffix ptr                         -> 1 if it exists
++	  GETENV   blk[0]=name ptr blk[1]=buf blk[2]=len    -> length or -1
++	  TIME     blk[0..1] <- unix time in ms (lo, hi)
++	  LOG      blk[0]=string ptr
++	The file is $HOSTFS_PATH; the suffix may only be "", "-wal" or "-journal".
++*/
++#include "hostfs.h"
++#include "hw/sh4/sh4_mem.h"
++#include "hw/sh4/sh4_if.h"
++
++#include <cerrno>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <string>
++#include <fcntl.h>
++#include <sys/stat.h>
++#include <sys/time.h>
++#include <unistd.h>
++
++enum { HFS_OPEN, HFS_CLOSE, HFS_PREAD, HFS_PWRITE, HFS_SIZE, HFS_TRUNCATE, HFS_SYNC,
++	HFS_DELETE, HFS_ACCESS, HFS_GETENV, HFS_TIME, HFS_LOG };
++
++static bool guestString(u32 addr, std::string& out, size_t max)
++{
++	out.clear();
++	for (size_t i = 0; i < max; i++)
++	{
++		u8 *p = GetMemPtr(addr + i, 1);
++		if (p == nullptr)
++			return false;
++		if (*p == 0)
++			return true;
++		out += (char)*p;
++	}
++	return false;
++}
++
++static bool hostPath(u32 suffixAddr, std::string& path)
++{
++	std::string suffix;
++	const char *base = getenv("HOSTFS_PATH");
++	if (base == nullptr || !guestString(suffixAddr, suffix, 16))
++		return false;
++	if (suffix != "" && suffix != "-wal" && suffix != "-journal")
++		return false;
++	path = std::string(base) + suffix;
++	return true;
++}
++
++static s32 hostfs_call(u32 op, u32 *blk)
++{
++	std::string path;
++	switch (op)
++	{
++	case HFS_OPEN:
++	{
++		if (!hostPath(blk[0], path))
++			return -EACCES;
++		int fd = open(path.c_str(), O_RDWR | (blk[1] ? O_CREAT : 0), 0644);
++		return fd < 0 ? -errno : fd;
++	}
++	case HFS_CLOSE:
++		return close((int)blk[0]) < 0 ? -errno : 0;
++	case HFS_PREAD:
++	case HFS_PWRITE:
++	{
++		u8 *buf = GetMemPtr(blk[1], blk[2]);
++		if (buf == nullptr)
++			return -EFAULT;
++		ssize_t n = op == HFS_PREAD ? pread((int)blk[0], buf, blk[2], (off_t)blk[3])
++				: pwrite((int)blk[0], buf, blk[2], (off_t)blk[3]);
++		return n < 0 ? -errno : (s32)n;
++	}
++	case HFS_SIZE:
++	{
++		struct stat st;
++		if (fstat((int)blk[0], &st) < 0)
++			return -errno;
++		return st.st_size > 0x7fffffff ? -EFBIG : (s32)st.st_size;
++	}
++	case HFS_TRUNCATE:
++		return ftruncate((int)blk[0], (off_t)blk[1]) < 0 ? -errno : 0;
++	case HFS_SYNC:
++		return fsync((int)blk[0]) < 0 ? -errno : 0;
++	case HFS_DELETE:
++		if (!hostPath(blk[0], path))
++			return -EACCES;
++		return unlink(path.c_str()) < 0 && errno != ENOENT ? -errno : 0;
++	case HFS_ACCESS:
++		if (!hostPath(blk[0], path))
++			return -EACCES;
++		return access(path.c_str(), F_OK) == 0 ? 1 : 0;
++	case HFS_GETENV:
++	{
++		std::string name;
++		if (!guestString(blk[0], name, 32) || (name != "JWT_SECRET" && name != "PORT"))
++			return -1;
++		const char *v = getenv(name.c_str());
++		u8 *buf = GetMemPtr(blk[1], blk[2]);
++		if (v == nullptr || buf == nullptr || strlen(v) >= blk[2])
++			return -1;
++		memcpy(buf, v, strlen(v) + 1);
++		return (s32)strlen(v);
++	}
++	case HFS_TIME:
++	{
++		timeval tv;
++		gettimeofday(&tv, nullptr);
++		u64 ms = (u64)tv.tv_sec * 1000 + tv.tv_usec / 1000;
++		blk[0] = (u32)ms;
++		blk[1] = (u32)(ms >> 32);
++		return 0;
++	}
++	case HFS_LOG:
++	{
++		std::string s;
++		guestString(blk[0], s, 4096);
++		fprintf(stdout, "[dreamcast] %s\n", s.c_str());
++		fflush(stdout);
++		return 0;
++	}
++	default:
++		return -ENOSYS;
++	}
++}
++
++void hostfs_syscall()
++{
++	Sh4Context& ctx = p_sh4rcb->cntx;
++	u32 *blk = (u32 *)GetMemPtr(ctx.r[5], 16);
++	ctx.r[0] = blk == nullptr ? (u32)-EFAULT : (u32)hostfs_call(ctx.r[4], blk);
++}
+diff --git a/core/reios/hostfs.h b/core/reios/hostfs.h
+new file mode 100644
+index 0000000..6d827ce
+--- /dev/null
++++ b/core/reios/hostfs.h
+@@ -0,0 +1,8 @@
++#pragma once
++
++// Guest entry point of the hostfs syscall (see hostfs.cpp)
++#define HOSTFS_ENTRY 0x8C00100A
++// 'HFS1' at HOSTFS_ENTRY + 2 tells the guest the syscall is there
++#define HOSTFS_MAGIC 0x31534648
++
++void hostfs_syscall();
+diff --git a/core/reios/reios.cpp b/core/reios/reios.cpp
+index 0ecde79..2b82fb5 100644
+--- a/core/reios/reios.cpp
++++ b/core/reios/reios.cpp
+@@ -13,6 +13,7 @@
+ #include "reios_elf.h"
+ 
+ #include "gdrom_hle.h"
++#include "hostfs.h"
+ #include "descrambl.h"
+ 
+ #include "hw/sh4/sh4_if.h"
+@@ -651,6 +652,9 @@ static void reios_boot()
+ 	setup_syscall(0x8C001006, dc_bios_syscall_gd);
+ 	setup_syscall(dc_bios_entrypoint_gd2, dc_bios_syscall_gd2);
+ 	setup_syscall(0x8C001008, dc_bios_syscall_misc);
++	WriteMem16(HOSTFS_ENTRY, REIOS_OPCODE);
++	WriteMem16(HOSTFS_ENTRY + 2, 0x0009);	// nop
++	WriteMem32(HOSTFS_ENTRY + 6, HOSTFS_MAGIC);
+ 
+ 	//Infinite loop for arm !
+ 	WriteMem32(0x80800000, 0xEAFFFFFE);
+@@ -707,6 +711,7 @@ static const std::map<u32, hook_fp*> hooks = {
+ 		{ SYSCALL_ADDR(0x8C001004), reios_sys_flashrom },
+ 		{ SYSCALL_ADDR(0x8C001006), gdrom_hle_op },
+ 		{ SYSCALL_ADDR(0x8C001008), reios_sys_misc },
++		{ SYSCALL_ADDR(HOSTFS_ENTRY), hostfs_syscall },
+ 
+ 		{ SYSCALL_ADDR(dc_bios_entrypoint_gd2), gdrom_hle_op },
+ };

@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# Runs the server in the foreground: Flycast boots the Dreamcast program (build/dreamcast-sql.elf)
+# with the HLE BIOS and an emulated Broadband Adapter. Our Flycast patches read:
+#   HOSTFS_PATH          the host file the guest's SQLite VFS reads and writes ($SQLITE_PATH)
+#   FLYCAST_TCP_FORWARD  host ports forwarded to the same ports on the Dreamcast ($PORT)
+#   FLYCAST_TCP_BIND     the host address they listen on ($HOST)
+# The guest reads JWT_SECRET and PORT through the same syscall. Without a display (the scoring
+# box), Flycast draws the request dashboard into its own Xvfb; DREAMCAST_SCREEN=1 skips that.
+set -euo pipefail
+D="$(cd "$(dirname "$0")" && pwd)"
+B="${DREAMCAST_BUILD:-$D/build}"
+: "${SQLITE_PATH:?}" "${JWT_SECRET:?}"
+export PORT="${PORT:-3000}" HOST="${HOST:-0.0.0.0}"
+
+run="$(mktemp -d)"
+mkdir -p "$run/flycast"
+cat > "$run/flycast/emu.cfg" << 'EOF'
+[config]
+UseReios = yes
+Dynarec.Enabled = yes
+Dreamcast.AutoLoadState = no
+Dreamcast.AutoSaveState = no
+PerGameVmu = no
+Debug.SerialConsoleEnabled = yes
+
+[audio]
+backend = null
+
+[network]
+EmulateBBA = yes
+DCNet = no
+EnableUPnP = no
+DNS = 127.0.0.1
+EOF
+
+export XDG_CONFIG_HOME="$run" XDG_DATA_HOME="$run"
+export HOSTFS_PATH="$SQLITE_PATH" FLYCAST_TCP_FORWARD="$PORT" FLYCAST_TCP_BIND="$HOST"
+
+cmd=("$B/flycast/flycast" "$B/dreamcast-sql.elf")
+xpid=0
+child=0
+wdog=0
+cleanup() {
+  kill "$wdog" "$child" 2> /dev/null; wait "$child" 2> /dev/null
+  [ "$xpid" = 0 ] || kill "$xpid" 2> /dev/null
+  rm -rf "$run"
+}
+trap 'cleanup; exit 0' TERM INT
+if [ "$(uname)" = Linux ] && [ -z "${DISPLAY:-}" ] && [ "${DREAMCAST_SCREEN:-0}" != 1 ]; then
+  Xvfb -displayfd 3 -nolisten tcp -screen 0 640x480x24 3> "$run/display" > /dev/null 2>&1 &
+  xpid=$!
+  for _ in $(seq 50); do [ -s "$run/display" ] && break; sleep 0.1; done
+  export DISPLAY=":$(cat "$run/display")"
+fi
+
+# Flycast's network bridge occasionally crashes under heavy connection churn. A real Dreamcast
+# gets its power button pressed; so does this one. Committed rows are already in the host file
+# (the WAL is written through), so a reboot loses only the requests in flight.
+# The guest can also wedge under load; if /health stops answering for 30 s, same treatment.
+watchdog() {
+  local misses=0
+  sleep 20
+  while kill -0 "$1" 2> /dev/null; do
+    if curl -sf -m 10 -o /dev/null "http://127.0.0.1:$PORT/health"; then misses=0; else misses=$((misses + 1)); fi
+    if [ "$misses" -ge 3 ]; then
+      echo "dreamcast-sql: /health stopped answering, rebooting the Dreamcast" >&2
+      kill "$1" 2> /dev/null; sleep 3; kill -9 "$1" 2> /dev/null
+      return
+    fi
+    sleep 5
+  done
+}
+while :; do
+  "${cmd[@]}" &
+  child=$!
+  watchdog "$child" &
+  wdog=$!
+  wait "$child" || true
+  kill "$wdog" 2> /dev/null || true
+  echo "dreamcast-sql: Flycast exited, rebooting the Dreamcast" >&2
+  sleep 1
+done

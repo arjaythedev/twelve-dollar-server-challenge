@@ -2,11 +2,17 @@
  *   dbtest <db>            full run: plan, reads, selfcheck, writes, data_version
  *   dbtest <db> dump <dir> write feed.json, post-{1,250000,500000}.json (no newline)
  *   dbtest <db> bench      checkInv/open time + us per feed render for each plan
+ *   dbtest --pcache        page-cache wrapper test on a small DB it creates
+ *                          (and deletes) in a new directory under $TMPDIR or /tmp
+ * Build by hand (same SQLite flags as build.sh):
+ *   gcc -O2 -std=gnu11 -w <build.sh SQLITE_FLAGS> -c src/db.c -o /tmp/db.o
+ *   gcc -O2 -std=gnu11 -Wall -Wextra src/dbtest.c /tmp/db.o -o /tmp/dbtest -lm
  */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 #include "db.h"
 #include "../deps/sqlite3.h"
 
@@ -89,8 +95,103 @@ static void bench(db_t *d) {
   db_force_plan(d, 0);
 }
 
+static int64_t q1(sqlite3 *h, const char *sql) {
+  sqlite3_stmt *s; int64_t v = -1;
+  if (sqlite3_prepare_v2(h, sql, -1, &s, 0) != SQLITE_OK) return -1;
+  if (sqlite3_step(s) == SQLITE_ROW) v = sqlite3_column_int64(s, 0);
+  sqlite3_finalize(s);
+  return v;
+}
+
+/* Page-cache wrapper: random index inserts (balance_nonroot rekeys pages
+ * through the lock-page key) must leave COMMIT's truncate skipped; a ROLLBACK
+ * of appended pages must still forward a real truncate; the data must stay
+ * intact. Returns 0 on success. */
+static int pcache_test(void) {
+  enum { NUSERS = 300, NPOSTS = 4000, NLIKES = 15000, CYCLES = 3000, LIKES_PER = 6 };
+  const char *tmp = getenv("TMPDIR");
+  char dir[512], path[600], side[640], err[512];
+  snprintf(dir, sizeof dir, "%s/dbtest-pcache.XXXXXX", tmp && *tmp ? tmp : "/tmp");
+  if (!mkdtemp(dir)) { perror("mkdtemp"); return 1; }
+  snprintf(path, sizeof path, "%s/t.db", dir);
+  int fail = 0;
+  unsigned long s0, f0, s1, f1, s2, f2;
+  if (db_pgo_make(path, NUSERS, NPOSTS, NLIKES, err, sizeof err)) { printf("pgo_make: %s\n", err); fail = 1; goto rm; }
+  db_t *d = db_open(path, err, sizeof err);
+  if (!d) { printf("open: %s\n", err); fail = 1; goto rm; }
+  printf("%s\n", db_plan_line(d));
+  sqlite3 *h;
+  if (sqlite3_open_v2(path, &h, SQLITE_OPEN_READWRITE, NULL) != SQLITE_OK) { printf("open h\n"); fail = 1; db_close(d); goto rm; }
+  int64_t posts0 = q1(h, "SELECT count(*) FROM posts"), likes0 = q1(h, "SELECT count(*) FROM likes");
+
+  /* 1. batches of random likes + one post each */
+  db_pcache_stats(&s0, &f0);
+  uint64_t x = 12345;
+  int64_t maxid = posts0, new_posts = 0, new_likes = 0;
+  char body[64];
+  for (int c = 0; c < CYCLES && !fail; c++) {
+    db_batch_begin(d);
+    for (int k = 0; k < LIKES_PER; k++) {
+      x = x * 6364136223846793005ull + 1442695040888963407ull;
+      int64_t uid = 1 + (int64_t)((x >> 33) % NUSERS);
+      x = x * 6364136223846793005ull + 1442695040888963407ull;
+      int64_t pid = 1 + (int64_t)((x >> 33) % (uint64_t)maxid);
+      int al = -1, r = db_like(d, uid, pid, &al);
+      if (r != 1) { printf("like rc=%d\n", r); fail = 1; break; }
+      if (!al) new_likes++;
+    }
+    int bl = snprintf(body, sizeof body, "pcache test post %d", c);
+    int n = db_insert_post(d, 1 + c % NUSERS, "u", 1, body, (size_t)bl, buf, sizeof buf);
+    if (n <= 0) { printf("insert_post rc=%d\n", n); fail = 1; }
+    if (db_batch_commit(d) != 0) { printf("commit failed\n"); fail = 1; }
+    if (!fail) { new_posts++; maxid++; }
+    db_maybe_checkpoint(d, 1000);
+  }
+  db_pcache_stats(&s1, &f1);
+  printf("cycles: skipped %lu forwarded %lu truncates\n", s1 - s0, f1 - f0);
+  if (s1 == s0) { printf("FAIL no truncate was skipped\n"); fail = 1; }
+
+  /* 2. a real truncate: appended pages rolled back (other connection, same
+   *    process-wide wrapper) */
+  int rc = sqlite3_exec(h, "BEGIN; WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM c WHERE i<3000) "
+                           "INSERT INTO posts (user_id, body) SELECT 1 + i % 300, 'rolled back ' || i FROM c", 0, 0, 0);
+  int64_t posts_in_txn = q1(h, "SELECT count(*) FROM posts");
+  int rc2 = sqlite3_exec(h, "ROLLBACK", 0, 0, 0);
+  db_pcache_stats(&s2, &f2);
+  printf("rollback (rc=%d,%d, %lld posts inside the txn): forwarded %lu skipped %lu\n", rc, rc2,
+         (long long)posts_in_txn, f2 - f1, s2 - s1);
+  if (rc || rc2 || posts_in_txn != posts0 + new_posts + 3000) { printf("FAIL rollback txn\n"); fail = 1; }
+  if (f2 == f1) { printf("FAIL rollback forwarded no truncate\n"); fail = 1; }
+
+  /* 3. data intact: integrity_check, counts, both read plans agree */
+  sqlite3_stmt *s; char ic[64] = "";
+  if (sqlite3_prepare_v2(h, "PRAGMA integrity_check", -1, &s, 0) == SQLITE_OK) {
+    if (sqlite3_step(s) == SQLITE_ROW) snprintf(ic, sizeof ic, "%s", (const char *)sqlite3_column_text(s, 0));
+    sqlite3_finalize(s);
+  }
+  int64_t posts1 = q1(h, "SELECT count(*) FROM posts"), likes1 = q1(h, "SELECT count(*) FROM likes");
+  printf("integrity_check=%s posts %lld->%lld (+%lld) likes %lld->%lld (+%lld)\n", ic,
+         (long long)posts0, (long long)posts1, (long long)new_posts,
+         (long long)likes0, (long long)likes1, (long long)new_likes);
+  if (strcmp(ic, "ok") || posts1 != posts0 + new_posts || likes1 != likes0 + new_likes) {
+    printf("FAIL integrity/counts\n"); fail = 1;
+  }
+  sqlite3_close(h);
+  db_close(d);
+  if (db_selfcheck(path, 7) != 0) { printf("FAIL selfcheck\n"); fail = 1; }
+  if (!fail) printf("pcache test ok skipped=%lu forwarded=%lu\n", s1 - s0, f2 - f1);
+rm:
+  {
+    const char *sfx[] = {"", "-wal", "-shm", "-journal"};
+    for (int i = 0; i < 4; i++) { snprintf(side, sizeof side, "%s%s", path, sfx[i]); unlink(side); }
+    rmdir(dir);
+  }
+  return fail;
+}
+
 int main(int argc, char **argv) {
-  if (argc < 2) { fprintf(stderr, "usage: dbtest <db> [dump <dir> | bench]\n"); return 2; }
+  if (argc >= 2 && !strcmp(argv[1], "--pcache")) return pcache_test();
+  if (argc < 2) { fprintf(stderr, "usage: dbtest <db> [dump <dir> | bench] | dbtest --pcache\n"); return 2; }
   db_t *d = open_or_die(argv[1]);
   if (argc >= 4 && !strcmp(argv[2], "dump")) { dump(d, argv[3]); db_close(d); return 0; }
   if (argc >= 3 && !strcmp(argv[2], "bench")) { bench(d); db_close(d); return 0; }

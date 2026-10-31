@@ -16,6 +16,13 @@
  * The data_version is checked at the start of every batch. Any failure
  * switches the connection to plan=sql for the rest of its life (never back).
  *
+ * Page cache. Before the first sqlite3_initialize(), db.c installs a thin
+ * SQLITE_CONFIG_PCACHE2 wrapper that forwards every call to SQLite's built-in
+ * page cache but skips xTruncate when a per-cache bitmap of possibly-cached
+ * keys shows no page at or above the limit. That avoids the full hash-table
+ * walk pcache1 does on every COMMIT after a B-tree balance rekeys a page
+ * through the lock-page number (which leaves pcache1's iMaxKey at 262145).
+ *
  * Responses are written as compact JSON bodies into caller buffers.
  * Every function returns 0 on success unless documented otherwise; -1 is an
  * internal error (the server answers 500).
@@ -101,5 +108,10 @@ int db_selfcheck(const char *path, unsigned seed);
  * through 2025, existing authors), about nlikes likes, then ANALYZE.
  * Used by `bin/server --pgo-train`. 0 ok, -1 error (message in err). */
 int db_pgo_make(const char *path, int nusers, int nposts, int nlikes, char *err, size_t errlen);
+
+/* --- page-cache wrapper counters (tests) -----------------------------------------
+ * xTruncate calls skipped as no-ops / forwarded to SQLite's built-in cache,
+ * process-wide since start. */
+void db_pcache_stats(unsigned long *skipped, unsigned long *forwarded);
 
 #endif

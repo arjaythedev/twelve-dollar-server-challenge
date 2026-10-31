@@ -902,6 +902,149 @@ static Pgno root_of(sqlite3 *h, const char *name) {
   return v > 0 && v < 0x7fffffff ? (Pgno)v : 0;
 }
 
+/* ------------------------------------------------------- page-cache wrapper */
+/* Installed with the public sqlite3_config(SQLITE_CONFIG_PCACHE2) before the
+ * first sqlite3_initialize(); wraps SQLite's built-in page cache (pcache1,
+ * fetched with SQLITE_CONFIG_GETPCACHE2) and forwards every method, except
+ * that xTruncate(iLimit) is skipped when no cached page can have a key >=
+ * iLimit (the call is then a no-op by its contract).
+ * Why: balance_nonroot swaps sibling page numbers through the lock-page key
+ * (PENDING_BYTE/pageSize)+1 = 262145 with sqlite3PagerRekey; pcache1Rekey
+ * raises pcache1's iMaxKey to it and only a truncate lowers it again, so the
+ * next COMMIT's pcache1Truncate(dbSize+1) walks the whole hash table (every
+ * cached page header) to drop nothing.
+ * Each cache keeps a bitmap of keys that MAY be in the inner cache: a
+ * superset, set on every successful xFetch and on xRekey's new key, cleared on
+ * xRekey's old key and above iLimit after a forwarded xTruncate; eviction
+ * inside the inner cache only shrinks the real set. If the bitmap cannot grow,
+ * that cache forwards everything. Single thread (SQLITE_THREADSAFE=0). */
+typedef struct pcw {
+  sqlite3_pcache *inner;
+  uint64_t *bits;     /* bit k set: key k may be in the inner cache */
+  uint64_t nbits;     /* bits allocated (multiple of 64); 0 in passthrough */
+  uint64_t top;       /* every set bit is < top; top <= nbits */
+  int passthrough;    /* bitmap growth failed: forward every xTruncate */
+} pcw_t;
+
+static sqlite3_pcache_methods2 pcw_inner;   /* the built-in cache's methods */
+static struct { unsigned long skipped, forwarded; } pcw_stats;
+
+void db_pcache_stats(unsigned long *skipped, unsigned long *forwarded) {
+  if (skipped) *skipped = pcw_stats.skipped;
+  if (forwarded) *forwarded = pcw_stats.forwarded;
+}
+
+__attribute__((noinline, cold)) static int pcw_grow(pcw_t *w, unsigned key) {
+  uint64_t n = w->nbits ? w->nbits : 4096;
+  while (n <= key) n *= 2;
+  uint64_t *b = realloc(w->bits, (size_t)(n / 8));
+  if (!b) {
+    free(w->bits);
+    w->bits = NULL; w->nbits = 0; w->top = 0; w->passthrough = 1;
+    return 0;
+  }
+  memset(b + w->nbits / 64, 0, (size_t)((n - w->nbits) / 8));
+  w->bits = b; w->nbits = n;
+  return 1;
+}
+
+static inline void pcw_set(pcw_t *w, unsigned key) {
+  if (__builtin_expect(key >= w->nbits, 0) && (w->passthrough || !pcw_grow(w, key))) return;
+  w->bits[key >> 6] |= 1ull << (key & 63);
+  if (key >= w->top) w->top = (uint64_t)key + 1;
+}
+
+/* 1 if any bit >= from is set. Bits >= top are all clear. */
+static int pcw_any_from(const pcw_t *w, unsigned from) {
+  if (from >= w->top) return 0;
+  uint64_t i = from >> 6, end = (w->top + 63) >> 6;
+  if (w->bits[i] & (~0ull << (from & 63))) return 1;
+  for (i++; i < end; i++) if (w->bits[i]) return 1;
+  return 0;
+}
+
+static sqlite3_pcache *pcw_create(int szPage, int szExtra, int bPurgeable) {
+  sqlite3_pcache *in = pcw_inner.xCreate(szPage, szExtra, bPurgeable);
+  if (!in) return NULL;
+  pcw_t *w = calloc(1, sizeof *w);
+  if (!w) { pcw_inner.xDestroy(in); return NULL; }
+  w->inner = in;
+  return (sqlite3_pcache *)w;
+}
+
+static sqlite3_pcache_page *pcw_fetch(sqlite3_pcache *p, unsigned key, int create) {
+  pcw_t *w = (pcw_t *)p;
+  sqlite3_pcache_page *r = pcw_inner.xFetch(w->inner, key, create);
+  if (r) pcw_set(w, key);
+  return r;
+}
+
+static void pcw_rekey(sqlite3_pcache *p, sqlite3_pcache_page *pg, unsigned oldk, unsigned newk) {
+  pcw_t *w = (pcw_t *)p;
+  pcw_inner.xRekey(w->inner, pg, oldk, newk);
+  if (oldk < w->nbits) w->bits[oldk >> 6] &= ~(1ull << (oldk & 63));
+  pcw_set(w, newk);
+}
+
+static void pcw_truncate(sqlite3_pcache *p, unsigned iLimit) {
+  pcw_t *w = (pcw_t *)p;
+  if (!w->passthrough && !pcw_any_from(w, iLimit)) {
+    pcw_stats.skipped++;
+    if (w->top > iLimit) w->top = iLimit;
+    return;
+  }
+  pcw_stats.forwarded++;
+  pcw_inner.xTruncate(w->inner, iLimit);
+  if (!w->passthrough && w->top > iLimit) {
+    uint64_t i = iLimit >> 6, end = (w->top + 63) >> 6;
+    w->bits[i] &= (1ull << (iLimit & 63)) - 1;
+    memset(w->bits + i + 1, 0, (size_t)(end - i - 1) * 8);
+    w->top = iLimit;
+  }
+}
+
+static void pcw_destroy(sqlite3_pcache *p) {
+  pcw_t *w = (pcw_t *)p;
+  pcw_inner.xDestroy(w->inner);
+  free(w->bits);
+  free(w);
+}
+
+static void pcw_cachesize(sqlite3_pcache *p, int n) { pcw_inner.xCachesize(((pcw_t *)p)->inner, n); }
+static int pcw_pagecount(sqlite3_pcache *p) { return pcw_inner.xPagecount(((pcw_t *)p)->inner); }
+static void pcw_unpin(sqlite3_pcache *p, sqlite3_pcache_page *pg, int discard) {
+  pcw_inner.xUnpin(((pcw_t *)p)->inner, pg, discard);
+}
+static void pcw_shrink(sqlite3_pcache *p) {
+  if (pcw_inner.xShrink) pcw_inner.xShrink(((pcw_t *)p)->inner);
+}
+static int pcw_init(void *arg) {
+  (void)arg;
+  return pcw_inner.xInit ? pcw_inner.xInit(pcw_inner.pArg) : SQLITE_OK;
+}
+static void pcw_shutdown(void *arg) {
+  (void)arg;
+  if (pcw_inner.xShutdown) pcw_inner.xShutdown(pcw_inner.pArg);
+}
+
+/* Call right before every sqlite3_initialize() in this file. On failure the
+ * default cache stays in place (one line on stderr). */
+static void pcache_install_once(void) {
+  static int done;
+  if (done) return;
+  done = 1;
+  if (sqlite3_config(SQLITE_CONFIG_GETPCACHE2, &pcw_inner) != SQLITE_OK || !pcw_inner.xCreate) {
+    fprintf(stderr, "db: SQLITE_CONFIG_GETPCACHE2 failed; using the default page cache\n");
+    return;
+  }
+  sqlite3_pcache_methods2 m = {   /* sqlite3_config copies it */
+    pcw_inner.iVersion, NULL, pcw_init, pcw_shutdown, pcw_create, pcw_cachesize,
+    pcw_pagecount, pcw_fetch, pcw_unpin, pcw_rekey, pcw_truncate, pcw_destroy, pcw_shrink,
+  };
+  if (sqlite3_config(SQLITE_CONFIG_PCACHE2, &m) != SQLITE_OK)
+    fprintf(stderr, "db: SQLITE_CONFIG_PCACHE2 failed; using the default page cache\n");
+}
+
 void db_close(db_t *d) {
   if (!d) return;
   if (d->h) {
@@ -924,6 +1067,7 @@ db_t *db_open(const char *path, char *err, size_t errlen) {
   if (err && errlen) err[0] = 0;
   char dummy[8];
   if (!err) { err = dummy; errlen = sizeof dummy; }
+  pcache_install_once();
   if (sqlite3_initialize() != SQLITE_OK) { snprintf(err, errlen, "sqlite3_initialize failed"); return NULL; }
   db_t *d = calloc(1, sizeof *d);
   if (!d) { snprintf(err, errlen, "out of memory"); return NULL; }
@@ -1141,6 +1285,7 @@ int db_pgo_make(const char *path, int nusers, int nposts, int nlikes, char *err,
   char ts[40], name[64], body[700];
   int rc = -1;
   if (nusers < 1 || nposts < 1 || nlikes < 0) { snprintf(err, errlen, "bad sizes"); return -1; }
+  pcache_install_once();
   if (sqlite3_initialize() != SQLITE_OK) { snprintf(err, errlen, "sqlite3_initialize failed"); return -1; }
   if (sqlite3_open_v2(path, &h, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, NULL) != SQLITE_OK) goto out;
   /* Like seed/make-seed.sh: no journal while loading, WAL at the end. */

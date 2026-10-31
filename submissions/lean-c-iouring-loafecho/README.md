@@ -65,7 +65,7 @@ cd spec && lake build && lake env lean Spec/Axioms.lean
   split across reads are handled, and `Expect: 100-continue` is answered. Bodies are checked by a strict RFC 8259
   validator that decodes `\uXXXX` and surrogate pairs. Responses are written straight into the connection's send buffer
   with an exact `Content-Length`.
-- No response caches, no table copies in memory: every request reads SQLite (page cache and mmap only).
+- No response caches, no table copies in memory: every request reads SQLite through its own 128 MiB page cache (`cache_size=-131072`, `mmap_size=0`), so hot B-tree pages keep their parsed headers between fetches.
 
 ## Scripts
 

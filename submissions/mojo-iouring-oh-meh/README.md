@@ -74,8 +74,10 @@ SQLITE_PATH=... JWT_SECRET=... HOST=0.0.0.0 PORT=80 bash start.sh
   the organizer allowed for the Lean entry. Record decoding is `src/record.mojo`.
 - The feed plan is only right when post ids are dense and `created_at` never decreases with id
   (then `ORDER BY created_at DESC, id DESC` is reverse rowid order). The server checks both with
-  SQL at startup and after every insert, and switches to the reference SQL query for good if either
-  ever fails. Nothing is remembered across requests.
+  SQL at startup, and after every insert by reading the previous row back from SQLite and
+  comparing it with the `RETURNING` values. The only thing kept between requests is one boolean
+  saying which plan to use; it flips to the reference SQL query for good if a check ever fails.
+  No data is remembered across requests.
 - **Writes** are the reference `INSERT ... RETURNING` and `INSERT ... ON CONFLICT DO NOTHING`,
   group-committed per batch.
 - **Checkpoints.** The checkpoint thread runs `PASSIVE` every 250 ms on its own connection (which

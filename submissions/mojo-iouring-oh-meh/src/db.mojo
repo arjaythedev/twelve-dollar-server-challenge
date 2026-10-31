@@ -167,10 +167,9 @@ struct Db:
     var st_begin: Int
     var st_commit: Int
     var st_rollback: Int
+    var st_prev: Int
     var tail_ok: Bool
     var wal_skip: Int
-    var max_id: Int64
-    var max_created: Bytes
     var scratch: Bytes
     var rec: Rec
     var urec: Rec
@@ -198,10 +197,9 @@ struct Db:
         self.st_begin = 0
         self.st_commit = 0
         self.st_rollback = 0
+        self.st_prev = 0
         self.tail_ok = False
         self.wal_skip = 0
-        self.max_id = 0
-        self.max_created = balloc(64)
         self.scratch = balloc(1 << 16)
         self.rec = Rec(self.scratch)
         self.urec = Rec(self.scratch)
@@ -231,7 +229,8 @@ struct Db:
         self.st_begin = sq_prepare(self.h, "BEGIN")
         self.st_commit = sq_prepare(self.h, "COMMIT")
         self.st_rollback = sq_prepare(self.h, "ROLLBACK")
-        if self.st_insert_post == 0 or self.st_insert_like == 0 or self.st_post_exists == 0 or self.st_health == 0 or self.st_feed_sql == 0 or self.st_begin == 0 or self.st_commit == 0 or self.st_rollback == 0:
+        self.st_prev = sq_prepare(self.h, "SELECT created_at FROM posts WHERE id = ?")
+        if self.st_insert_post == 0 or self.st_insert_like == 0 or self.st_post_exists == 0 or self.st_health == 0 or self.st_feed_sql == 0 or self.st_begin == 0 or self.st_commit == 0 or self.st_rollback == 0 or self.st_prev == 0:
             raise Error("prepare failed: " + sq_errmsg(self.h))
 
     # Startup: scan on the plain connection, drop the page cache, reopen for real.
@@ -245,6 +244,7 @@ struct Db:
         _ = external_call["sq_finalize", c_int](self.st_begin)
         _ = external_call["sq_finalize", c_int](self.st_commit)
         _ = external_call["sq_finalize", c_int](self.st_rollback)
+        _ = external_call["sq_finalize", c_int](self.st_prev)
         _ = external_call["sq_close", c_int](self.h)
         var p = path
         external_call["sh_drop_file_cache", NoneType](p.as_c_string_span())
@@ -268,22 +268,15 @@ struct Db:
 
     # The tail plan is valid iff post ids are dense (1..n) and created_at never
     # decreases with id. Then "ORDER BY created_at DESC, id DESC LIMIT 20" is
-    # exactly the last 20 rows of the posts B-tree. Checked once here and after
-    # every insert; the SQL plan takes over for good if it ever fails.
+    # exactly the last 20 rows of the posts B-tree. Checked once here by SQL, and
+    # after every insert by reading the previous row back from SQLite (nothing
+    # about the data is remembered: tail_ok only says which plan to use, and the
+    # SQL plan takes over for good if the check ever fails).
     def check_invariant(mut self):
         var dense = self._scalar("SELECT max(id) = count(*) FROM posts")
         var mono_bad = self._scalar(
             "SELECT count(*) FROM (SELECT created_at < lag(created_at) OVER (ORDER BY id) AS bad FROM posts) WHERE bad"
         )
-        var st = sq_prepare(self.h, "SELECT id, created_at FROM posts ORDER BY id DESC LIMIT 1")
-        if sq_step(st) == SQLITE_ROW:
-            self.max_id = sq_col_int(st, 0)
-            var n = sq_col_bytes(st, 1)
-            if n == CREATED_LEN:
-                bcopy(self.max_created, sq_col_text(st, 1), n)
-            else:
-                dense = 0
-        _ = external_call["sq_finalize", c_int](st)
         self.tail_ok = dense == 1 and mono_bad == 0
 
     # ---- transactions
@@ -483,13 +476,17 @@ struct Db:
             return False
         bcopy(created, sq_col_text(self.st_insert_post, 1), n)
         _ = sq_reset(self.st_insert_post)
-        # keep the tail-plan invariant honest
+        # keep the tail-plan invariant honest: the row before this one must exist
+        # (dense ids) and must not be newer (monotonic created_at); read it back
         if self.tail_ok:
-            var mono = bcmp(created, self.max_created, CREATED_LEN) >= 0
-            if id != self.max_id + 1 or not mono:
+            _ = sq_bind_int(self.st_prev, 1, id - 1)
+            var ok = False
+            if sq_step(self.st_prev) == SQLITE_ROW:
+                var pn = sq_col_bytes(self.st_prev, 0)
+                ok = pn == CREATED_LEN and bcmp(created, sq_col_text(self.st_prev, 0), CREATED_LEN) >= 0
+            _ = sq_reset(self.st_prev)
+            if not ok:
                 self.tail_ok = False
-        self.max_id = id
-        bcopy(self.max_created, created, CREATED_LEN)
         return True
 
     # LIKE_MISSING, LIKE_NEW, LIKE_DUP or LIKE_ERR

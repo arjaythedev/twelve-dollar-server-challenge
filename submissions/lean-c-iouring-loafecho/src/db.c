@@ -91,6 +91,7 @@ struct db {
   KeyInfo *likes_ki;
   UnpackedRecord *likes_key;
   BtCursor *cur_posts, *cur_users, *cur_likes;
+  int cur_open;          /* the three cursors are open (inside a batch txn) */
   unsigned char *scratch;
   /* insertOk state */
   int64_t max_id;
@@ -98,8 +99,9 @@ struct db {
   int64_t saved_max_id; char saved_ts[64]; int saved_ts_len;
   /* data_version */
   int64_t data_version;
-  /* batch state */
-  int in_write, batch_failed;
+  /* batch state: in_batch = db_batch_begin opened the batch txn (BEGIN +
+   * read snapshot); in_write = a write ran in it */
+  int in_batch, in_write, batch_failed;
   /* WAL frames reported by the wal hook */
   int wal_frames;
   /* statements */
@@ -117,7 +119,10 @@ static void set_line(db_t *d, const char *reason) {
     snprintf(d->line, sizeof d->line, "invariant=violated plan=sql reason=%s", reason);
 }
 
+static void bt_close_cursors(db_t *d);
+
 static void to_sql(db_t *d, const char *reason) {
+  bt_close_cursors(d);   /* no B-tree cursor outlives the btree plan */
   if (d->plan == PLAN_SQL) return;
   d->plan = PLAN_SQL;
   set_line(d, reason);
@@ -133,6 +138,10 @@ void db_force_plan(db_t *d, int which) { d->force = which; }
 /* Test-only (not in db.h): current PRAGMA data_version of this connection. */
 static int read_data_version(db_t *d, int64_t *v);
 int64_t db_data_version(db_t *d) { int64_t v = -1; read_data_version(d, &v); return v; }
+
+/* Test-only (not in db.h): B-tree txn state (SQLITE_TXN_*) and autocommit. */
+int db_txn_state(db_t *d) { return sqlite3BtreeTxnState(d->bt); }
+int db_autocommit(db_t *d) { return sqlite3_get_autocommit(d->h); }
 
 static int use_btree(const db_t *d) {
   if (d->force == FORCE_BTREE) return 1;
@@ -364,6 +373,29 @@ static int bt_open(db_t *d, BtCursor *c, Pgno root, KeyInfo *ki) {
   return sqlite3BtreeCursor(d->bt, root, 0, ki, c);
 }
 
+/* Open the three read cursors (all or none). 0 ok, else an SQLite code. */
+static int bt_open_cursors(db_t *d) {
+  int rc;
+  if ((rc = bt_open(d, d->cur_posts, d->root_posts, 0)) != SQLITE_OK) return rc;
+  if ((rc = bt_open(d, d->cur_users, d->root_users, 0)) != SQLITE_OK) goto close1;
+  if ((rc = bt_open(d, d->cur_likes, d->root_likes_idx, d->likes_ki)) != SQLITE_OK) goto close2;
+  d->cur_open = 1;
+  return SQLITE_OK;
+close2:
+  sqlite3BtreeCloseCursor(d->cur_users);
+close1:
+  sqlite3BtreeCloseCursor(d->cur_posts);
+  return rc;
+}
+
+static void bt_close_cursors(db_t *d) {
+  if (!d->cur_open) return;
+  sqlite3BtreeCloseCursor(d->cur_likes);
+  sqlite3BtreeCloseCursor(d->cur_users);
+  sqlite3BtreeCloseCursor(d->cur_posts);
+  d->cur_open = 0;
+}
+
 /* Render the post the posts cursor points at. Uses cur_users and cur_likes,
  * which must be open. 0 ok, -1 unexpected. */
 static int bt_render_current(db_t *d, out_t *o) {
@@ -428,11 +460,32 @@ counted:
 
 /* Run fn inside the right snapshot with the three cursors open.
  * Returns fn's result, or -1 on error, or -2 when the data_version moved
- * under us (caller re-serves with SQL; the plan has been switched). */
+ * under us (caller re-serves with SQL; the plan has been switched).
+ *
+ * Inside a batch (db_batch_begin opened the batch txn and it is still live)
+ * the batch's snapshot is used and the cursors are opened on the first call
+ * and kept open until db_batch_commit; the data_version was checked against
+ * this same snapshot by db_batch_begin. fn re-positions every cursor it uses
+ * (Last / TableMoveto / IndexMoveto), so no request depends on where the
+ * previous one left a cursor; a write in between saves the cursors on the
+ * written tree (CURSOR_REQUIRESEEK) and the next moveto re-seeks.
+ * Outside a batch (selfcheck, dbtest, a failed db_batch_begin) the call runs
+ * its own read txn (unless one is open) with its own cursors. */
 typedef int (*bt_fn)(db_t *d, void *arg);
 
 static int bt_run(db_t *d, bt_fn fn, void *arg) {
-  int own_txn = 0, rc, out = -1;
+  int own_txn = 0, out = -1;
+  if (d->in_batch) {
+    if (!sqlite3_get_autocommit(d->h) && sqlite3BtreeTxnState(d->bt) != SQLITE_TXN_NONE) {
+      if (!d->cur_open && bt_open_cursors(d) != SQLITE_OK) return -1;
+      out = fn(d, arg);
+      if (out != 0) bt_close_cursors(d);
+      return out;
+    }
+    /* the batch txn was rolled back under us: drop the cursor set and serve
+     * this request in its own read txn */
+    bt_close_cursors(d);
+  }
   int st = sqlite3BtreeTxnState(d->bt);
   if (st == SQLITE_TXN_NONE) {
     if (sqlite3BtreeBeginTrans(d->bt, 0, 0) != SQLITE_OK) return -1;
@@ -447,15 +500,9 @@ static int bt_run(db_t *d, bt_fn fn, void *arg) {
       goto done;
     }
   }
-  if ((rc = bt_open(d, d->cur_posts, d->root_posts, 0)) != SQLITE_OK) goto done;
-  if ((rc = bt_open(d, d->cur_users, d->root_users, 0)) != SQLITE_OK) goto close1;
-  if ((rc = bt_open(d, d->cur_likes, d->root_likes_idx, d->likes_ki)) != SQLITE_OK) goto close2;
+  if (bt_open_cursors(d) != SQLITE_OK) goto done;
   out = fn(d, arg);
-  sqlite3BtreeCloseCursor(d->cur_likes);
-close2:
-  sqlite3BtreeCloseCursor(d->cur_users);
-close1:
-  sqlite3BtreeCloseCursor(d->cur_posts);
+  bt_close_cursors(d);
 done:
   if (own_txn && sqlite3BtreeCommit(d->bt) != SQLITE_OK) out = -1;
   return out;
@@ -581,18 +628,32 @@ static int read_data_version(db_t *d, int64_t *v) {
   return rc == SQLITE_ROW ? 0 : -1;
 }
 
-int db_batch_begin(db_t *d) {
-  int64_t v;
-  d->batch_failed = 0;
-  if (read_data_version(d, &v)) return -1;
-  if (v != d->data_version) { d->data_version = v; to_sql(d, "data_version"); }
-  return 0;
-}
-
 static int step_once(sqlite3_stmt *s) {
   int rc = sqlite3_step(s);
   sqlite3_reset(s);
   return rc;
+}
+
+/* One transaction per batch: a deferred BEGIN turns autocommit off (so no
+ * statement halt ends the txn), then the read snapshot is taken here, once,
+ * and its data_version (the same value PRAGMA data_version reports) is
+ * compared with the last one seen. The first write in the batch upgrades
+ * the txn to a write txn; db_batch_commit always ends it. */
+int db_batch_commit(db_t *d);
+
+int db_batch_begin(db_t *d) {
+  if (d->in_batch || d->in_write) db_batch_commit(d);   /* unpaired begin */
+  d->batch_failed = 0;
+  if (step_once(d->st_begin) != SQLITE_DONE) return -1;
+  if (sqlite3BtreeBeginTrans(d->bt, 0, 0) != SQLITE_OK) {
+    if (!sqlite3_get_autocommit(d->h)) step_once(d->st_rollback);
+    return -1;
+  }
+  u32 v = 0;
+  sqlite3BtreeGetMeta(d->bt, BTREE_DATA_VERSION, &v);
+  d->in_batch = 1;
+  if ((int64_t)v != d->data_version) { d->data_version = (int64_t)v; to_sql(d, "data_version"); }
+  return 0;
 }
 
 static void restore_ins_state(db_t *d) {
@@ -610,7 +671,11 @@ static int ensure_write(db_t *d) {
     }
     return 0;
   }
-  if (step_once(d->st_begin) != SQLITE_DONE) return -1;
+  /* The batch txn is already open (deferred BEGIN in db_batch_begin); the
+   * first write statement upgrades it to a write txn. Only if no batch txn
+   * is open (db_batch_begin failed, or it was rolled back under us) is a
+   * BEGIN run here. */
+  if (sqlite3_get_autocommit(d->h) && step_once(d->st_begin) != SQLITE_DONE) return -1;
   d->in_write = 1;
   d->saved_max_id = d->max_id;
   memcpy(d->saved_ts, d->last_ts, sizeof d->saved_ts);
@@ -619,13 +684,19 @@ static int ensure_write(db_t *d) {
 }
 
 int db_batch_commit(db_t *d) {
-  if (!d->in_write) { d->batch_failed = 0; return 0; }
-  int ok = !d->batch_failed && !sqlite3_get_autocommit(d->h) &&
-           step_once(d->st_commit) == SQLITE_DONE;
-  if (!ok) {
-    if (!sqlite3_get_autocommit(d->h)) step_once(d->st_rollback);
-    restore_ins_state(d);
+  bt_close_cursors(d);   /* COMMIT/ROLLBACK with no B-tree cursor open → TXN_NONE */
+  d->in_batch = 0;
+  int ok = 1;
+  if (d->in_write) {
+    ok = !d->batch_failed && !sqlite3_get_autocommit(d->h) &&
+         step_once(d->st_commit) == SQLITE_DONE;
+    if (!ok) restore_ins_state(d);
+  } else if (!sqlite3_get_autocommit(d->h)) {
+    /* read-only batch: end the snapshot (nothing to fail for callers) */
+    if (step_once(d->st_commit) == SQLITE_DONE) goto done;
   }
+  if (!sqlite3_get_autocommit(d->h)) step_once(d->st_rollback);
+done:
   d->in_write = 0;
   d->batch_failed = 0;
   return ok ? 0 : -1;
@@ -832,7 +903,8 @@ static Pgno root_of(sqlite3 *h, const char *name) {
 void db_close(db_t *d) {
   if (!d) return;
   if (d->h) {
-    if (d->in_write && !sqlite3_get_autocommit(d->h)) exec(d->h, "ROLLBACK");
+    bt_close_cursors(d);
+    if (!sqlite3_get_autocommit(d->h)) exec(d->h, "ROLLBACK");
     sqlite3_stmt **all[] = {&d->st_feed, &d->st_post, &d->st_begin, &d->st_commit, &d->st_rollback,
                             &d->st_ins_post, &d->st_ins_like, &d->st_post_exists, &d->st_user_exists,
                             &d->st_dver, &d->st_health};
@@ -877,7 +949,7 @@ db_t *db_open(const char *path, char *err, size_t errlen) {
                  "FROM posts p JOIN users u ON u.id = p.user_id "
   if (prep(d, &d->st_feed, POST_SQL "ORDER BY p.created_at DESC, p.id DESC LIMIT 20", err, errlen) ||
       prep(d, &d->st_post, POST_SQL "WHERE p.id = ?", err, errlen) ||
-      prep(d, &d->st_begin, "BEGIN IMMEDIATE", err, errlen) ||
+      prep(d, &d->st_begin, "BEGIN", err, errlen) ||
       prep(d, &d->st_commit, "COMMIT", err, errlen) ||
       prep(d, &d->st_rollback, "ROLLBACK", err, errlen) ||
       prep(d, &d->st_ins_post, "INSERT INTO posts (user_id, body) VALUES (?, ?) RETURNING id, created_at", err, errlen) ||

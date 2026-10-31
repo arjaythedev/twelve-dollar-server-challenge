@@ -47,12 +47,15 @@ const char *db_plan_line(const db_t *db);
 /* --- batching -------------------------------------------------------------
  * The server wraps every completion batch:
  *   db_batch_begin(db);  ...reads/writes...  rc = db_batch_commit(db);
- * db_batch_begin checks PRAGMA data_version (a change → plan=sql) and starts
- * no transaction. The first write inside the batch runs BEGIN IMMEDIATE;
- * db_batch_commit runs COMMIT if a write happened (0 = committed or nothing
- * to commit, -1 = commit failed, the transaction was rolled back and every
- * write response of this batch must become a 500). Write responses may only
- * be sent after db_batch_commit returned 0. Read responses may be sent at once. */
+ * db_batch_begin runs a deferred BEGIN and takes ONE read snapshot for the
+ * whole batch, checking its data_version (a change → plan=sql). B-tree reads
+ * in the batch share that snapshot and one set of cursors (opened on the
+ * first read, closed by db_batch_commit). The first write inside the batch
+ * upgrades the transaction to a write transaction. db_batch_commit always
+ * ends the transaction: COMMIT (0 = committed or nothing to commit), or on a
+ * failed write ROLLBACK (-1: every write response of this batch must become
+ * a 500). Write responses may only be sent after db_batch_commit returned 0.
+ * Read responses may be sent at once. */
 int db_batch_begin(db_t *db);
 int db_batch_commit(db_t *db);
 

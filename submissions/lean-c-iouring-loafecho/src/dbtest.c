@@ -13,6 +13,20 @@
 /* test-only helpers exported by db.c (not in db.h) */
 void db_force_plan(db_t *d, int which);       /* 0 none, 1 btree, 2 sql */
 int64_t db_data_version(db_t *d);
+int db_txn_state(db_t *d);                    /* SQLITE_TXN_* of the main btree */
+int db_autocommit(db_t *d);
+
+/* After every db_batch_commit the batch txn must be fully ended. */
+static int idle_bad = 0, idle_checks = 0;
+static int commit_idle(db_t *d) {
+  int rc = db_batch_commit(d);
+  idle_checks++;
+  if (db_txn_state(d) != SQLITE_TXN_NONE || db_autocommit(d) != 1) {
+    printf("NOT IDLE after commit: txn_state=%d autocommit=%d\n", db_txn_state(d), db_autocommit(d));
+    idle_bad++;
+  }
+  return rc;
+}
 
 static char buf[1 << 20];
 
@@ -84,7 +98,7 @@ int main(int argc, char **argv) {
   if (argc >= 3 && !strcmp(argv[2], "badinsert")) {  /* author 999999 does not exist */
     db_batch_begin(d);
     int m = db_insert_post(d, 999999, "ghost", 5, "boo", 3, buf, sizeof buf);
-    printf("insert -> %d commit=%d\n%s\n", m, db_batch_commit(d), db_plan_line(d));
+    printf("insert -> %d commit=%d\n%s\n", m, commit_idle(d), db_plan_line(d));
     m = db_feed_json(d, buf, sizeof buf);
     printf("feed -> %d: %.60s...\n", m, buf);
     db_close(d); return 0;
@@ -95,7 +109,15 @@ int main(int argc, char **argv) {
   printf("db_selfcheck rc=%d\n", db_selfcheck(argv[1], 42));
 
   int64_t v0 = db_data_version(d);
+  /* read-only batch: one snapshot, cursors kept open across requests */
   db_batch_begin(d);
+  int f1 = db_feed_json(d, buf, sizeof buf);
+  show_post(d, 1); show_post(d, 250000);
+  int f2 = db_feed_json(d, buf, sizeof buf);
+  printf("read-only batch: feed %d, feed again %d, commit rc=%d\n", f1, f2, commit_idle(d));
+  db_batch_begin(d);
+  /* read first: the cursor set is open across the writes below */
+  printf("in-txn read before write (%s): ", db_plan(d)); show_post(d, 500000);
   n = db_insert_post(d, 1, "golden_ember_1", 14, "hello", 5, buf, sizeof buf);
   printf("insert -> %d: %.*s\n", n, n > 0 ? n : 0, buf);
   int64_t newid = 0;
@@ -107,7 +129,9 @@ int main(int argc, char **argv) {
   int r3 = db_like(d, 1, 999999999, &al);
   printf("like missing post rc=%d\n", r3);
   printf("in-txn read (%s): ", db_plan(d)); show_post(d, newid);
-  printf("commit rc=%d\n", db_batch_commit(d));
+  n = db_feed_json(d, buf, sizeof buf);
+  printf("in-txn feed -> %d: %.60s...\n", n, buf);
+  printf("commit rc=%d\n", commit_idle(d));
   int64_t v1 = db_data_version(d);
   n = db_feed_json(d, buf, sizeof buf);
   printf("feed after -> %d: %.200s...\n", n, buf);
@@ -117,16 +141,17 @@ int main(int argc, char **argv) {
   shm_info(argv[1], "after checkpoint");
   int64_t v2 = db_data_version(d);
   db_batch_begin(d);
-  db_batch_commit(d);
+  commit_idle(d);
   printf("data_version start=%lld after-own-commit=%lld after-own-passive-checkpoint=%lld\n",
          (long long)v0, (long long)v1, (long long)v2);
   db_batch_begin(d);
   db_like(d, 3, 1, &al);
-  db_batch_commit(d);
+  commit_idle(d);
   shm_info(argv[1], "after post-checkpoint write (WAL restart)");
   printf("data_version after own write that restarted the WAL=%lld\n", (long long)db_data_version(d));
   db_batch_begin(d);
   printf("%s\n", db_plan_line(d));
+  commit_idle(d);
 
   /* control: a write from another connection must flip the plan */
   sqlite3 *h2;
@@ -134,9 +159,11 @@ int main(int argc, char **argv) {
   int erc = sqlite3_exec(h2, "INSERT INTO likes (user_id, post_id) VALUES (2, 1)", 0, 0, 0);
   sqlite3_close(h2);
   db_batch_begin(d);
-  db_batch_commit(d);
+  commit_idle(d);
   printf("after foreign write (rc=%d): data_version=%lld %s\n", erc,
          (long long)db_data_version(d), db_plan_line(d));
+  printf("idle after commit: %d/%d checks ok (txn_state=NONE autocommit=1)\n",
+         idle_checks - idle_bad, idle_checks);
   db_close(d);
-  return 0;
+  return idle_bad ? 1 : 0;
 }

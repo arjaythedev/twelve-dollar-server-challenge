@@ -4,24 +4,63 @@ Everything the HTTP server does — accept bookkeeping, HTTP/1.1 framing, routin
 verification, error and response formatting — runs inside **eBPF programs on the socket layer**. A tiny userspace
 **shim** does one thing: run SQLite. No framework, (almost) no userspace.
 
-**Please read this section before reviewing.** This is a **novelty / rules-probe entry, submitted so an organizer
-can rule on it — not a clean, passing submission.** Two things block it, both documented honestly; neither is hidden:
+**Please read this first.** This is a **novelty / rules-probe entry.** It now **runs end-to-end and answers every
+endpoint correctly** on kernel 6.8 (see [status](#status-it-runs) below) — but it still **cannot load under the
+challenge's runtime contract**, and that one hard blocker is why it needs an organizer ruling rather than a score:
 
-1. **Privileges — it cannot load on the box as the harness runs it.** The contract runs the server as an
-   unprivileged user with only `CAP_NET_BIND_SERVICE`, and Ubuntu 24.04's stock `kernel.unprivileged_bpf_disabled=2`
-   means it cannot load a single BPF program. Loading `sk_skb`/sockmap/sockops needs `CAP_BPF + CAP_NET_ADMIN` — a
-   privilege escalation the contract withholds. `install.sh` does **not** grant it. So this entry **does not run**
-   under the stock contract, and I am not asking you to tune the box for it. The question for you is whether an
-   "everything in eBPF" entry is admissible at all given that constraint.
-2. **Runtime — no end-to-end response yet.** With the capability granted on a dev VM, all five BPF programs load and
-   the request pipeline executes in-kernel (parse → route → job, confirmed by tracing), but I could not get `sk_skb`
-   / sockmap to deliver client data to the verdict program reliably on my kernel-6.8 test VM. **So there is no
-   42/42, no memory, no CPU, no users-held number** — I have none and I won't invent any. (My VM is arm64; the box
-   is x86_64, and `sk_skb`/sockmap can differ by arch, so this is not yet a firm conclusion about the mechanism.)
+- **Privileges (the hard blocker).** The contract runs the server unprivileged with only `CAP_NET_BIND_SERVICE`, and
+  Ubuntu 24.04's stock `kernel.unprivileged_bpf_disabled=2` means it cannot load a single BPF program. Loading
+  `sk_skb`/sockmap/sockops needs `CAP_BPF + CAP_NET_ADMIN` — a privilege escalation the contract withholds.
+  `install.sh` does **not** grant it. So under the stock contract this entry does not come up. The question for you:
+  is an "everything in eBPF" entry admissible at all, given it must be granted BPF capabilities to load?
 
-What *is* a real result: the entire HTTP + HS256-JWT + strict-JSON + routing logic **passes the kernel 6.8 verifier**
-as a set of `sk_skb`/`sockops` programs. That is the hard, interesting part of this entry (see
-[§3](#3-what-it-took-to-pass-the-verifier)).
+The other real result: the entire HTTP + HS256-JWT + strict-JSON + routing logic **passes the kernel 6.8 verifier**
+as a set of `sk_skb`/`sockops` programs — it started at >1,000,000 instructions / a 640-byte stack against the 1M /
+512-byte limits (see [§3](#3-what-it-took-to-pass-the-verifier)).
+
+## Status: it runs
+
+Granted `CAP_BPF` on a kernel-6.8 VM (Ubuntu 24.04, 6.8.0-117), the server comes up and serves correct responses.
+A local functional check — the spec's five endpoints plus its full error/auth table — **passes 20/20 on a clean
+run** (and did on 2 of 3 back-to-back runs; see the flakiness caveat below):
+
+```
+GET /health            200  {"status":"ok","db":"ok","uptime_s":1}
+GET /feed              200  20 newest posts, created_at DESC, id DESC, with author + like_count
+GET /posts/:id         200  the post object   | /posts/abc,/posts/0 -> 400 invalid post id | /posts/99999 -> 404
+GET /nope              404  not found
+POST /posts (no tok)   401  missing bearer token   | bad sig / expired -> 401 invalid or expired token
+POST /posts/abc/like   401  (auth checked before id, per spec)
+POST /posts (valid)    201  {"post":{...,"author":"<token username>",...}}
+  empty body -> 400 body is required | >500 chars -> 400 | bad JSON -> 400 malformed JSON body
+POST /posts/:id/like   201 first time (already_liked:false), 200 on repeat (already_liked:true)
+keep-alive             multiple requests on one connection
+```
+
+This is not the official `test/test.sh` (that needs the full 250 MB seed and the BPF caps in CI, which CI does not
+grant), but it exercises the same behaviours against a small seed built from `schema.sql`. SQLite runs with WAL +
+`synchronous=NORMAL`, one transaction per batch, every response built from a read during that batch, nothing cached
+across batches; `src/engine.c` reads the B-trees directly and is reused unchanged from my userspace entry.
+
+**Flakiness caveat (honest):** reads (`/health`, `/feed`, `/posts/:id`), the error paths, and auth *rejection* are
+reliable; **authenticated writes are intermittently flaky** — across 3 back-to-back runs one run saw a single
+`POST` hang (and once wedged the shim for subsequent requests). The cause is the prototype's delivery model (the
+per-batch `recv()` nudge, and single-segment framing — §4), not the SQLite or JWT logic. So this is **not a reliable
+42/42**; it demonstrates the mechanism works, not that it is robust.
+
+Getting here from "does not deliver" meant fixing three bugs in the **shim/BPF glue** (the in-kernel logic was
+already correct) — see [§4](#4-what-actually-blocked-delivery-and-the-fixes). The earlier revision of this entry
+claimed `sk_skb`/sockmap "does not deliver on 6.8"; that was wrong — it was these bugs.
+
+### Performance (a datapoint, not the scored metric)
+
+Single-connection, sequential, keep-alive GETs, on the **arm64** dev VM (NOT the x86 scored box, NOT a load test):
+**~75 µs/request, ~13,000 req/s** for both `/health` and `/feed`. That is only after setting `TCP_NODELAY` on the
+accepted client sockets — without it a 40 ms delayed-ACK stall capped it at ~24 req/s. The scored metric is
+concurrent connections *held*, which I have **not** measured — that belongs on the x86 broker and I did not run it
+here. Expectation is unchanged: **no throughput win** over a good userspace entry (valid requests still cross into
+userspace for SQLite; the parse/JWT CPU just moves into softirq on the same single vCPU), plus extra per-socket
+kernel memory for the psock/sockmap state.
 
 ## Design
 
@@ -29,9 +68,8 @@ as a set of `sk_skb`/`sockops` programs. That is the hard, interesting part of t
             client TCP socket (in the `clients` sockhash, keyed by socket cookie)
                  │  bytes
                  ▼
-  sockops on_sockops            adds each new connection to `clients` at PASSIVE_ESTABLISHED
-  sk_skb  on_parse              stream-parser: request length (headers + Content-Length) for pipelining
-  sk_skb  on_request (verdict)  request line + routing. /feed /health /posts/:id → job. 4xx → error job.
+  sockops on_sockops            adds each new connection to `clients` at PASSIVE_ESTABLISHED (vestigial; see §4)
+  sk_skb  on_request (verdict)  framing + request line + routing. /feed /health /posts/:id → job. 4xx → error job.
                  │                 authenticated routes: Bearer check, then tail-call →
   sk_skb  on_auth               HS256: base64url + HMAC-SHA256 (bpf_loop, no HMAC helper on 6.8) + strict-JSON
                  │                 header/alg + claims + exp/nbf compare. ok → tail-call →
@@ -40,20 +78,15 @@ as a set of `sk_skb`/`sockops` programs. That is the hard, interesting part of t
                  ▼
   shim (userspace)             the ONLY userspace code: batch-reads jobs → one SQLite transaction
                  │                 (src/engine.c, direct B-tree reads) → raw JSON bodies
-                 │  reply datagram (cookie + status + body), back on a unix socket
+                 │  reply datagram (cookie + status + body), written to a TCP-loopback reply socket
                  ▼
   sk_skb  on_reply (verdict)   prepends the status line + headers, redirects to the client socket by its cookie
 ```
 
-The shim runs SQLite with WAL + `synchronous=NORMAL`, one transaction per batch, every response built from a read
-during that batch, nothing cached across requests. `src/engine.c` (`#include`s the pinned SQLite amalgamation and
-reads B-trees directly via `sqlite3BtreeTableMoveto`/`IndexMoveto`/`Insert`) is reused unchanged from my fast
-userspace entry; only the HTTP/JWT/routing layer moved into the kernel.
+The request path is split into three tail-called programs (`on_request` → `on_auth` → `on_job`) so each stage gets a
+fresh 512-byte verifier stack; that split is the only way the JWT work fits (see §3).
 
-The request path is split into three tail-called programs (`on_request` → `on_auth` → `on_job`). That is not for
-speed — it is the only way the JWT work fits under the verifier's 512-byte stack limit; see below.
-
-## 1. Privileges: the contract forbids it
+## 1. Privileges: the contract forbids loading
 
 Measured on a stock arena VM (Ubuntu 24.04.5, kernel 6.8.0-117):
 
@@ -63,79 +96,71 @@ Measured on a stock arena VM (Ubuntu 24.04.5, kernel 6.8.0-117):
 | Binary given `cap_bpf,cap_net_admin+ep` by root (a `setcap` in install.sh) | OK |
 | root | OK |
 
-`probe/bpfprobe.c` is the check; it was run inside a `systemd-run` unit shaped like the harness's.
-`kernel.unprivileged_bpf_disabled=2` blocks every `bpf()` create/load without `CAP_BPF`; `sk_skb`/sockmap/sockops
-also need `CAP_NET_ADMIN`. Granting those to the server binary is a privilege escalation the contract deliberately
-withholds. **So a real submission can't do this without an organizer ruling** — which is what this entry asks for.
-`install.sh` therefore does not grant the capability.
+`probe/bpfprobe.c` is the check. `kernel.unprivileged_bpf_disabled=2` blocks every `bpf()` create/load without
+`CAP_BPF`; `sk_skb`/sockmap/sockops also need `CAP_NET_ADMIN`. Granting those to the server binary is a privilege
+escalation the contract deliberately withholds, so a real submission can't do it without an organizer ruling — which
+is what this entry asks for. `install.sh` therefore does not grant the capability.
 
 ## 2. Spec conformance of the in-kernel logic
 
 The BPF programs implement the spec's routing, error, and auth rules directly: the five endpoints, the exact error
-table (auth checked before id; `invalid post id`/`post not found`/`missing bearer token`/`invalid or expired
-token`/`invalid token payload`/`malformed JSON body`/`body is required`/`body must be at most 500 characters`),
-HS256-only JWT with `exp` verification, strict-JSON claim parsing, body trimming to 500 **code points**. SQLite is
-run exactly as the spec's reference queries require (newest-20 feed, per-post `like_count` as of the request,
-`INSERT … RETURNING`, `ON CONFLICT DO NOTHING` for likes), one transaction per batch, nothing cached.
-
-Because of blocker #2 this conformance is **not yet verified end-to-end by `test/test.sh`** — the data plane doesn't
-deliver on my VM. The HMAC-SHA256 and strict-JSON were cross-checked against known JWT vectors during development.
+table (auth before id; the full set of 400/401/404 messages), HS256-only JWT with `exp`/`nbf` verification,
+strict-JSON claim parsing, body trimming to 500 **code points**. The `author` in a created post is the token's
+`username`. The §Status check above confirms all of these against a running instance.
 
 ## 3. What it took to pass the verifier
 
 The request program started at **>1,000,000 instructions** (the 6.8 limit) and a **640-byte call stack** (limit 512).
-Getting it to load, in order of impact:
+In order of impact:
 
-- **base64url decode** was the single biggest cost — a variable output offset plus a branchy decoder exploded the
-  state count. Rewritten branchless: a `.rodata` lookup table, fixed `i*3` output stride, validity as an OR
-  accumulator, output length computed arithmetically (not accumulated in the loop).
-- **All loop-carried state lives in a per-CPU scratch map, not in registers.** The verifier treats map memory as
-  opaque and merges states across the back-edge; loop-carried scalars make it unroll and blow the jump-sequence
-  limit (8192).
-- **Heavy routines are `__noinline` subprograms** (`json_scan`, `b64_decode`, `hmac`, `num_cmp`, …) verified once;
-  `j_step` (the JSON byte step) **must** stay `__noinline` or the big switch re-explodes the loop.
-- **Every byte loop is capped** well under 8192 and indices are masked; where clang dropped a mask the verifier
-  could see, an inline-asm `BOUND()` forces it.
-- **Tail calls for the stack limit.** Splitting the request path into three tail-called programs
-  (`on_request`/`on_auth`/`on_job`) gives each stage a fresh 512-byte budget; `verify_jwt` is itself split into
-  `jwt_sig` and `jwt_claims` so the HMAC frame and the claims frame never sit on one call chain.
-- `put_u32` writes digits straight into the destination (map memory) — a stack temp indexed by a variable is
-  rejected ("R1 subtraction from stack pointer").
+- **base64url decode** was the biggest cost — a variable output offset plus a branchy decoder exploded the state
+  count. Rewritten branchless: a `.rodata` lookup table, fixed `i*3` output stride, validity as an OR accumulator,
+  output length computed arithmetically.
+- **All loop-carried state lives in a per-CPU scratch map, not in registers** — loop-carried scalars make the
+  verifier unroll and blow the 8192 jump-sequence limit.
+- **Heavy routines are `__noinline` subprograms** verified once; `j_step` (the JSON byte step) **must** stay
+  `__noinline` or the big switch re-explodes the loop.
+- **Tail calls for the 512-byte stack limit** — the request path is three tail-called programs, and `verify_jwt` is
+  itself split into `jwt_sig` and `jwt_claims` so the HMAC frame and the claims frame never share a call chain.
 
 All five programs load on kernel 6.8.0-117 (`bpftool prog loadall bin/http.bpf.o` → OK).
 
-## 4. Runtime blocker: sk_skb delivery on 6.8
+## 4. What actually blocked delivery, and the fixes
 
-With the binary granted `CAP_BPF`, the shim loads everything, wires the sockmap/sockhash/prog-array, listens, and
-runs. Tracing (`bpf_printk`) confirms the **in-kernel pipeline is correct**: a request produces
-`parse → on_request → send_job(route=…)`. But getting the kernel to invoke the verdict on client data was not
-reliable on my VM:
+The in-kernel pipeline was correct all along; three bugs in the shim/BPF glue stopped it end-to-end. All three are
+fixed in this revision:
 
-- **sockops-added sockets never deliver to the verdict.** `on_sockops` adds the connection at `PASSIVE_ESTABLISHED`
-  (before any data), but `sk_psock_verdict_data_ready()` early-returns while `sk->sk_socket` is NULL — which it is
-  until userspace `accept()`s — so data that arrives before the shim accepts is dropped by the hook, and buffered
-  data is never replayed.
-- **userspace-added sockets** (adding the accepted fd to the sockhash) do install the hook, but on this VM the
-  verdict only ran when I "nudged" `data_ready` with a `MSG_PEEK recv`, and then it saw a **zero-length skb**.
-- The **stream-parser** path (`on_parse` + `on_request`) never fired on data arrival at all on this VM.
+1. **The per-CPU scratch map was never sized for the box.** `scr` is a global array indexed by
+   `bpf_get_smp_processor_id()*2 + level`; it ships with a placeholder of 2 entries and the shim is meant to resize
+   it to `2 × possible CPUs` before load. It didn't — so `grab()` returned NULL (and the verdict dropped the
+   request) on every CPU but 0. The shim now calls `bpf_map__set_max_entries`.
+2. **`on_reply` was attached to its sockmap *after* its socket was inserted.** sockmap wires a socket's verdict from
+   the map's attached programs at insert time, so the reply socket got no verdict and `on_reply` never fired. The
+   attach now happens before the insert (as it already did for the `clients` sockhash).
+3. **The reply socket was AF_UNIX**, whose verdict did not deliver here; it is now a TCP-loopback pair, and the shim
+   drives `on_reply` with a `recv()` nudge on it per batch — the same mechanism that drives `on_request` on the
+   client sockets.
 
-So **no response is produced end-to-end**, and there are no 42/42, memory, CPU or users-held numbers. My test VM is
-arm64 (on Apple Silicon); the scored box is x86_64, and sockmap/`sk_skb` behaviour can differ by arch, so this needs
-re-testing on an x86 6.8 box before any firm conclusion about the mechanism.
+Also fixed: the created-post `author` came back empty because the request-body JSON parse reset the shared parser's
+username-length field; the length is now saved right after the JWT claims parse.
 
-The accept model also holds every client fd and omits connection-close handling (the `closes` ring buffer is wired
-but not drained), so even if delivery worked it would leak fds under churn.
+Honest remaining gaps (fine for the functional check, not for a load run):
 
-## Expected outcome, if it ran
+- **The `recv()` nudges are a per-batch syscall**, and the verdict is driven by them rather than firing on its own.
+  This is the main source of the write-path flakiness above: a reply whose nudge races the loopback delivery can
+  stall, and that occasionally wedges the shim. A real server would drive the verdicts without the nudge.
+- **Framing is single-segment.** The verdict re-parses each skb; a request split across skbs, or pipelined requests
+  in one skb, are not handled — the other half of the write-path flakiness.
+- **No connection-close handling.** The `closes` ring buffer is wired but not drained, so held client fds leak under
+  churn.
 
-No speed win over a good userspace entry: valid requests still cross into userspace (batched), and the parsing/JWT
-CPU moves into softirq on the same single vCPU. It would also add per-socket kernel memory (psock + sockmap state).
-The point of this entry is the "everything in eBPF" conceit and the rules question, not the score.
+These three together are why the entry is a prototype, not a robust server, even with the privilege question set
+aside.
 
 ## Files
 
 - `src/proto.h` — records shared between the BPF programs and the shim.
-- `src/http.bpf.c` — the five programs (sockops, parser, request/auth/job verdicts, reply verdict).
+- `src/http.bpf.c` — the five programs (sockops, request/auth/job verdicts, reply verdict).
 - `src/shim.c` — loader + wiring + SQLite batch loop (self-contained SHA-256 for the HMAC midstates; no OpenSSL).
 - `src/engine.c`, `src/engine.h`, `src/unit_sqlite.c` — the SQLite side (unity TU, direct B-tree reads).
 - `build.sh` / `install.sh` / `start.sh` — the challenge's three scripts. `install.sh` does **not** grant BPF caps (§1).

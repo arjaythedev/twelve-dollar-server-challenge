@@ -114,6 +114,7 @@ struct scratch {
   s64 uid;
   u32 trim_s, trim_e, units, sc_i, sc_k;
   u32 want_like;
+  u32 uname_keep;  // username length from jwt_claims, saved before check_body's parser reset clobbers j_uname_len
   u64 cookie;
   struct job_hdr jh;
   struct job_like jl;
@@ -1119,6 +1120,7 @@ int on_auth(struct __sk_buff *skb) {
   u64 cookie = s->cookie;
   u32 e = jwt_sig(s, c);
   if (!e) e = jwt_claims(s, c);
+  s->uname_keep = s->j_uname_len;  // preserve across the request-body parse in on_job (shared parser resets j_uname_len)
   if (e) {
     int v = fail(skb, s, e, &cookie);
     drop_slot(slot);
@@ -1152,7 +1154,7 @@ int on_job(struct __sk_buff *skb) {
     if (e) {
       v = fail(skb, s, e, &cookie);
     } else {
-      u32 un = s->j_uname_len, bn = s->trim_e - s->trim_s;
+      u32 un = s->uname_keep, bn = s->trim_e - s->trim_s;
       if (un > UNAME_MAX || bn > BODY_CAP || s->trim_e < s->trim_s) {
         v = fail(skb, s, E_BAD_REQUEST, &cookie);
       } else {

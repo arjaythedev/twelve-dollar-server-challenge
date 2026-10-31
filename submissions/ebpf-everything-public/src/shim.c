@@ -124,6 +124,35 @@ static int prog_fd(struct bpf_object *o, const char *name) {
   return bpf_program__fd(p);
 }
 
+// A connected TCP loopback socket pair. The sk_skb verdict is driven on a TCP psock by a recv() on the socket in the
+// sockmap; an AF_UNIX pair's verdict did not fire the same way on 6.8. sv[0] is the accepted end (it goes in the
+// shim_reply sockmap and the verdict runs on it); sv[1] is the end the shim writes replies to.
+static int tcp_pair(int sv[2]) {
+  int ls = socket(AF_INET, SOCK_STREAM, 0);
+  if (ls < 0) return -1;
+  int one = 1;
+  setsockopt(ls, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+  struct sockaddr_in a;
+  memset(&a, 0, sizeof a);
+  a.sin_family = AF_INET;
+  a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  a.sin_port = 0;  // ephemeral
+  socklen_t al = sizeof a;
+  if (bind(ls, (struct sockaddr *)&a, sizeof a) || listen(ls, 1) ||
+      getsockname(ls, (struct sockaddr *)&a, &al)) { close(ls); return -1; }
+  int c = socket(AF_INET, SOCK_STREAM, 0);
+  if (c < 0) { close(ls); return -1; }
+  setsockopt(c, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+  if (connect(c, (struct sockaddr *)&a, sizeof a)) { close(ls); close(c); return -1; }
+  int s0 = accept(ls, NULL, NULL);
+  close(ls);
+  if (s0 < 0) { close(c); return -1; }
+  setsockopt(s0, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+  sv[0] = s0;
+  sv[1] = c;
+  return 0;
+}
+
 int main(void) {
   const char *path = getenv("SQLITE_PATH");
   const char *secret = getenv("JWT_SECRET");
@@ -147,6 +176,15 @@ int main(void) {
   // --- load BPF ---
   struct bpf_object *obj = bpf_object__open_file("http.bpf.o", NULL);
   if (!obj || libbpf_get_error(obj)) return die("open http.bpf.o");
+  // scr is a global ARRAY indexed by bpf_get_smp_processor_id()*2 + nesting level (task/softirq), so it needs
+  // 2 * possible CPUs entries. It is declared with 2 as a placeholder; size it for this box before load, or grab()
+  // returns NULL (and the verdict drops the request) on every CPU but 0.
+  {
+    struct bpf_map *scrm = bpf_object__find_map_by_name(obj, "scr");
+    int ncpu = libbpf_num_possible_cpus();
+    if (ncpu < 1) ncpu = 1;
+    if (scrm && bpf_map__set_max_entries(scrm, (unsigned)(2 * ncpu))) return die("size scr");
+  }
   if (bpf_object__load(obj)) return die("load bpf");
 
   int cfg = map_fd(obj, "cfg");
@@ -184,16 +222,22 @@ int main(void) {
   // job socket: a stream socketpair; one end goes in `shim`, the shim reads the other end's data via the first.
   int jp[2];
   if (socketpair(AF_UNIX, SOCK_STREAM, 0, jp)) return die("job socketpair");
-  // reply socket: the shim writes replies to rp[1]; rp[0] is in shim_reply with on_reply attached.
+  // reply socket: the shim writes replies to rp[1]; rp[0] is in shim_reply with on_reply attached. It is a TCP
+  // loopback pair, not AF_UNIX, so the on_reply verdict fires when the shim nudges rp[0] with a recv (same as the
+  // client sockets); an AF_UNIX pair's verdict did not deliver on 6.8.
   int rp[2];
-  if (socketpair(AF_UNIX, SOCK_STREAM, 0, rp)) return die("reply socketpair");
+  if (tcp_pair(rp)) return die("reply tcp pair");
+
+  // Attach on_reply to the shim_reply sockmap BEFORE adding rp[0]: sockmap wires a socket's verdict from the map's
+  // attached programs at insert time, so a socket added before the attach gets no verdict (that was why on_reply
+  // never fired). The `clients` sockhash is already attached (above) before any client is inserted.
+  if (bpf_prog_attach(prog_fd(obj, "on_reply"), shim_reply, BPF_SK_SKB_VERDICT, 0)) return die("attach reply");
 
   u32 zero = 0;
   u64 jv = jp[0];
   if (bpf_map_update_elem(shim, &zero, &jv, BPF_ANY)) return die("shim map");
   u64 rv = rp[0];
   if (bpf_map_update_elem(shim_reply, &zero, &rv, BPF_ANY)) return die("shim_reply map");
-  if (bpf_prog_attach(prog_fd(obj, "on_reply"), shim_reply, BPF_SK_SKB_STREAM_VERDICT, 0)) return die("attach reply");
 
   // listen
   int ls = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
@@ -234,6 +278,7 @@ int main(void) {
       for (int i = 0; i < 1024; i++) {
         int c = accept4(ls, NULL, NULL, SOCK_NONBLOCK);
         if (c < 0) break;
+        setsockopt(c, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);  // small responses must not wait on Nagle
         u64 cookie = 0; socklen_t cl = sizeof cookie;
         getsockopt(c, SOL_SOCKET, SO_COOKIE, &cookie, &cl);
         u64 cv = c; bpf_map_update_elem(clients, &cookie, &cv, BPF_ANY);
@@ -320,6 +365,13 @@ int main(void) {
           mh.msg_iov = iov;
           mh.msg_iovlen = 3;
           sendmsg(rp[1], &mh, MSG_NOSIGNAL);
+        }
+        // drive on_reply: a recv on the sockmap'd reply socket runs the verdict on each queued reply skb, which
+        // formats the response and redirects it out to the client. The verdict consumes the data, so recv returns 0.
+        for (int spins = nrep + 4; spins > 0; spins--) {
+          char nb[512];
+          ssize_t g = recv(rp[0], nb, sizeof nb, MSG_DONTWAIT);
+          if (g <= 0) break;
         }
         eng_after_batch(e);
         // shift any partial job record to the front

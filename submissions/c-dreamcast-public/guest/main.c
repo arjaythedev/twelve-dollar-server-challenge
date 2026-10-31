@@ -364,6 +364,8 @@ int main(int argc, char **argv) {
         if (now >= next_draw) {
             if (next_draw) tick();
             draw();
+            /* start.sh's watchdog: proof that this loop, not just the emulator, is running */
+            if (next_draw / 1000 % 5 == 0) hostfs_log("heartbeat");
             next_draw = (next_draw ? next_draw : now) + 1000;
             for (int i = nconns - 1; i >= 0; i--)
                 if (now - conns[i].last_ms > IDLE_MS) drop(i);

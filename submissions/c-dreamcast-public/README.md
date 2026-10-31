@@ -53,9 +53,11 @@ k6 ─► Nginx ─► 127.0.0.1:$PORT ─► Flycast (host process)
   from SPEC.md; `POST /posts` uses `INSERT ... RETURNING`; likes use `ON CONFLICT DO NOTHING`.
 - **Clock.** `created_at` comes from SQLite's `strftime('%f')`, and the VFS gets the host's clock
   through the same syscall, so timestamps are real UTC with milliseconds. JWT `exp` uses it too.
-- **Reboots.** `start.sh` reboots the Dreamcast if Flycast exits, and a watchdog does the same if
-  `/health` stops answering for about 30 s. Committed rows are already in the host file, so a reboot
-  loses only the requests in flight. With the fixes below, neither has fired in our runs.
+- **Reboots.** `start.sh` reboots the Dreamcast if Flycast exits, and a watchdog does the same if the
+  guest's main loop stops logging its 5-second heartbeat for 30 s. (Polling `/health` instead rebooted
+  a Dreamcast that was merely overloaded, since the probe waits in line with everyone else.)
+  Committed rows are already in the host file, so a reboot loses only the requests in flight. With
+  the fixes below, neither has fired in our runs.
 
 ### The bugs it took
 
@@ -117,14 +119,11 @@ k6 run -e BASE_URL=http://127.0.0.1 -e VUS=2500 -e RAMP_UP=20s -e DURATION=60s b
 | VUs | requests/s | median | p95 | p99 | errors |
 |---|---|---|---|---|---|
 | 2,500 | 206 | 11 ms | 20 ms | 28 ms | 0 % |
-| 5,000 | 312 | | 30 s | 30 s | 21.8 % |
+| 5,000 | 346 | | 30 s | 30 s | 12.0 % |
 
 So it **passes the thresholds at 2,500 users**, where the scoring starts, and falls over somewhere
 before 5,000: the emulated SH-4 tops out at roughly 300 requests/s. Before the fixes above it failed
 at 150 users (p95 2.02 s, from KOS 0006) and froze or crashed soon after.
-
-**Known problem:** past saturation, `/health` takes longer than the watchdog's 10 s, so the watchdog
-reboots a Dreamcast that was only overloaded (4 times in the 5,000-VU run), which makes things worse.
 
 ## Files
 

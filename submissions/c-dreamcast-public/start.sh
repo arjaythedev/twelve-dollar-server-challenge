@@ -55,22 +55,29 @@ fi
 
 # A safety net: if Flycast exits, a real Dreamcast would get its power button pressed; so does
 # this one. Committed rows are already in the host file (the WAL is written through), so a
-# reboot loses only the requests in flight. If /health stops answering for 30 s, same treatment.
+# reboot loses only the requests in flight. Same if the guest's main loop stops: it logs
+# "heartbeat" every 5 s (swallowed here). /health would be the wrong probe, since under
+# overload it waits in line behind everyone else and a busy Dreamcast is not a stuck one.
+heartbeats() {
+  local line
+  while IFS= read -r line; do
+    if [ "$line" = "[dreamcast] heartbeat" ]; then echo "$SECONDS" > "$run/heartbeat"; else printf '%s\n' "$line"; fi
+  done
+}
 watchdog() {
-  local misses=0
-  sleep 20
-  while kill -0 "$1" 2> /dev/null; do
-    if curl -sf -m 10 -o /dev/null "http://127.0.0.1:$PORT/health"; then misses=0; else misses=$((misses + 1)); fi
-    if [ "$misses" -ge 3 ]; then
-      echo "dreamcast-sql: /health stopped answering, rebooting the Dreamcast" >&2
+  local hb
+  while sleep 5 && kill -0 "$1" 2> /dev/null; do
+    hb="$(cat "$run/heartbeat" 2> /dev/null)"
+    if [ -n "$hb" ] && [ $((SECONDS - hb)) -gt 30 ]; then
+      echo "dreamcast-sql: no heartbeat for 30 s, rebooting the Dreamcast" >&2
       kill "$1" 2> /dev/null; sleep 3; kill -9 "$1" 2> /dev/null
       return
     fi
-    sleep 5
   done
 }
 while :; do
-  "${cmd[@]}" &
+  echo "$((SECONDS + 30))" > "$run/heartbeat" # 30 s more to boot
+  "${cmd[@]}" > >(heartbeats) &
   child=$!
   watchdog "$child" &
   wdog=$!

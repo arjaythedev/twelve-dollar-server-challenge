@@ -34,9 +34,10 @@
 
 typedef struct db db_t;
 
-/* Open $SQLITE_PATH. Sets journal_mode=WAL, synchronous=NORMAL, a large
- * mmap_size, wal_autocheckpoint=0 (db_maybe_checkpoint() does it), prepares
- * every statement, runs checkInv. On failure returns NULL and writes a
+/* Open $SQLITE_PATH. Sets journal_mode=WAL, synchronous=NORMAL,
+ * mmap_size=0 with a 256 MiB page cache (cache_size=-262144),
+ * wal_autocheckpoint=0 (db_maybe_checkpoint() does it), prepares every
+ * statement, runs checkInv. On failure returns NULL and writes a
  * message into err. */
 db_t *db_open(const char *path, char *err, size_t errlen);
 void  db_close(db_t *db);

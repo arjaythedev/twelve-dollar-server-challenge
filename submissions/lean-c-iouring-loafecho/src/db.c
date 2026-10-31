@@ -1079,7 +1079,7 @@ db_t *db_open(const char *path, char *err, size_t errlen) {
   sqlite3_busy_timeout(d->h, 5000);
   static const char *pragmas[] = {
     "PRAGMA journal_mode=WAL", "PRAGMA synchronous=NORMAL", "PRAGMA mmap_size=0",
-    "PRAGMA cache_size=-131072", "PRAGMA temp_store=memory", "PRAGMA wal_autocheckpoint=0",
+    "PRAGMA cache_size=-262144", "PRAGMA temp_store=memory", "PRAGMA wal_autocheckpoint=0",
     "PRAGMA foreign_keys=OFF",
   };
   for (size_t i = 0; i < sizeof pragmas / sizeof pragmas[0]; i++) {

@@ -65,7 +65,7 @@ cd spec && lake build && lake env lean Spec/Axioms.lean
   split across reads are handled, and `Expect: 100-continue` is answered. Bodies are checked by a strict RFC 8259
   validator that decodes `\uXXXX` and surrogate pairs. Responses are written straight into the connection's send buffer
   with an exact `Content-Length`.
-- No response caches, no table copies in memory: every request reads SQLite through its own 128 MiB page cache (`cache_size=-131072`, `mmap_size=0`), so hot B-tree pages keep their parsed headers between fetches.
+- No response caches, no table copies in memory: every request reads SQLite through its own 256 MiB page cache (`cache_size=-262144`, `mmap_size=0`), so hot B-tree pages keep their parsed headers between fetches.
 - **A pass-through wrapper around SQLite's own page cache** (public `SQLITE_CONFIG_PCACHE2`; it forwards everything and stores no data itself) skips a COMMIT's page-cache truncate when its per-cache bitmap of page numbers shows nothing to drop: after a B-tree split moves a page through page number 262,145, the built-in cache otherwise walks its whole hash table on every COMMIT to drop nothing (`dbtest --pcache` tests it).
 
 ## Scripts

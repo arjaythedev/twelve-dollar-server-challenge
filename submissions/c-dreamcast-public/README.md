@@ -124,9 +124,9 @@ server answers `/health` a few seconds after `start.sh`.
 
 ![The Dreamcast's video output during a k6 run](dashboard.png)
 
-*The Dreamcast's screen during the 2,500-VU run below (at 200 MHz and 16 MB): requests per second for the last 100 seconds
-by endpoint (blue `/feed`, green `/posts/:id`, pink likes, orange creates), 47 of 48 connection slots
-in use, 489 KB of the 16 MB free.*
+*The Dreamcast's screen during the 5,000-VU run below, at 3,200 MHz with 32 MB: requests per second
+for the last 100 seconds by endpoint (blue `/feed`, green `/posts/:id`, pink likes, orange creates),
+47 of 48 connection slots in use.*
 
 Measured locally in Docker on an Apple-silicon Mac (arm64 Linux, so Flycast's arm64 dynarec, not the
 scoring box's x86-64 one), through `start.sh`, behind the challenge's `bench/nginx.conf`, with its own
@@ -145,11 +145,12 @@ Those two rows are at the stock 200 MHz and 16 MB, where the emulated SH-4 tops 
 requests/s. That turned out to be the only limit: the host CPU was mostly idle, and a faster network
 tick changed nothing. So `start.sh` now runs the SH-4 at 3,200 MHz (`SH4_CLOCK`; our Flycast patch
 stops Flycast resetting it to 200 MHz when the network adapter comes up) with the 32 MB RAM mod and
-a 16 MB page cache. With Flycast pinned to a single core, at 800 MHz (not yet re-run at 3,200):
+a 16 MB page cache. With Flycast pinned to a single core:
 
 | VUs | requests/s | p95 | p99 | errors |
 |---|---|---|---|---|
 | 5,000 (800 MHz, 32 MB) | 409 | 26 ms | 140 ms | 0.02 % |
+| 5,000 (3,200 MHz, 32 MB) | 410 | 19 ms | 24 ms | 0 % |
 
 On keep-alive connections straight to the guest (one core), throughput by SH-4 clock was 317 req/s
 at 200 MHz, 965 at 800, 1,137 at 1,600 and 1,328 at 3,200. Before the fixes above it failed at 150

@@ -4,6 +4,6 @@ set -euo pipefail
 cd "$(dirname "$0")"
 mkdir -p lib
 Rscript -e '
-options(repos = c(CRAN = "https://packagemanager.posit.co/cran/__linux__/noble/2026-10-07"))
-install.packages(c("plumber2", "yyjsonr", "DBI", "RSQLite", "jose", "rlang"), lib = "lib")
+options(repos = c(CRAN = "https://p3m.dev/cran/__linux__/noble/2026-10-07"))
+install.packages(c("plumber2", "yyjsonr", "DBI", "RSQLite", "jose", "b64", "rlang"), lib = "lib")
 '

@@ -27,6 +27,9 @@
 
 secret <- charToRaw(Sys.getenv("JWT_SECRET"))
 
+# base64url engine for reading the JWT header
+b64_url <- b64::engine("url_safe_no_pad")
+
 # returns the user claim
 authorize <- function(request, response, secret = Sys.getenv("JWT_SECRET")) {
     auth_header <- request$get_header("authorization")
@@ -43,9 +46,17 @@ authorize <- function(request, response, secret = Sys.getenv("JWT_SECRET")) {
     # extract the payload
     payload <- substr(auth_header, 8, nchar(auth_header))
 
-    # get the claim
+    # get the claim. We reject every alg except HS256 (per SPEC.md) before
+    # verifying, since we would otherwise accept HS384 and HS512 too.
     claim <- rlang::try_fetch(
-        jose::jwt_decode_hmac(payload, secret),
+        {
+            header <- strsplit(payload, ".", fixed = TRUE)[[1]][1]
+            alg <- yyjsonr::read_json_raw(b64::decode(header, b64_url)[[1]])$alg
+            if (!identical(alg, "HS256")) {
+                stop("not an HS256 token")
+            }
+            jose::jwt_decode_hmac(payload, secret)
+        },
         error = \(err) {
             response$status <- 401L
             list(error = "invalid or expired token")

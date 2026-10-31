@@ -8,6 +8,8 @@ apt-get install -y --no-install-recommends curl ca-certificates
 curl -fsSLo /tmp/r.deb "https://cdn.posit.co/r/ubuntu-2404/pkgs/r-${R_VERSION}_1_$(dpkg --print-architecture).deb"
 apt-get install -y --no-install-recommends /tmp/r.deb
 rm -f /tmp/r.deb
+# Install the shared libraries for the prebuilt xml2, ragg, sodium and fs binaries from PPM.
+apt-get install -y --no-install-recommends libxml2 libwebpmux3 libsodium23 libuv1t64
 ln -sf "/opt/R/${R_VERSION}/bin/R" /usr/local/bin/R
 ln -sf "/opt/R/${R_VERSION}/bin/Rscript" /usr/local/bin/Rscript
 Rscript --version

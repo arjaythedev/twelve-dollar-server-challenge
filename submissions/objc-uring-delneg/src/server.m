@@ -212,6 +212,31 @@ static struct io_uring_sqe *sqe_get(struct io_uring *r) {
     return self;
 }
 
+// The provided-buffer ring. Ubuntu's 6.8.0-147 kernel refuses the registration
+// when its reserved words are all zero (the check is inverted, Launchpad
+// #2162843), so a refused registration is asked once more with resv[0]=1: a
+// correct kernel refuses that too, the affected one takes it.
+static struct io_uring_buf_ring *setup_buf_ring(struct io_uring *ring, int k) {
+    size_t sz = (size_t)BUF_COUNT * sizeof(struct io_uring_buf);
+    struct io_uring_buf_ring *br = mmap(NULL, sz, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+    if (br == MAP_FAILED) { perror("mmap buf ring"); exit(1); }
+    struct io_uring_buf_reg reg;
+    memset(&reg, 0, sizeof reg);
+    reg.ring_addr = (unsigned long)br;
+    reg.ring_entries = BUF_COUNT;
+    reg.bgid = BUF_GROUP;
+    int ret = io_uring_register_buf_ring(ring, &reg, 0);
+    if (ret < 0) {
+        int first = ret;
+        reg.resv[0] = 1;
+        ret = io_uring_register_buf_ring(ring, &reg, 0);
+        if (ret == 0 && k == 0) fprintf(stderr, "io_uring buffer ring registered with resv[0]=1 (inverted kernel check)\n");
+        if (ret < 0) { fprintf(stderr, "register_buf_ring: %s\n", strerror(-first)); exit(1); }
+    }
+    io_uring_buf_ring_init(br);
+    return br;
+}
+
 - (void)setupRing:(int)k TD_DIRECT {
     TDRingState *rs = &R[k];
     struct io_uring_params p;
@@ -232,9 +257,7 @@ static struct io_uring_sqe *sqe_get(struct io_uring *r) {
     if (ret < 0) { fprintf(stderr, "io_uring_queue_init: %s\n", strerror(-ret)); exit(1); }
     ret = io_uring_register_files_sparse(&rs->ring, slots);
     if (ret < 0) { fprintf(stderr, "register_files_sparse(%u): %s\n", slots, strerror(-ret)); exit(1); }
-    int err = 0;
-    rs->br = io_uring_setup_buf_ring(&rs->ring, BUF_COUNT, BUF_GROUP, 0, &err);
-    if (!rs->br) { fprintf(stderr, "setup_buf_ring: %s\n", strerror(-err)); exit(1); }
+    rs->br = setup_buf_ring(&rs->ring, k);
     rs->bufs = mmap(NULL, (size_t)BUF_SIZE * BUF_COUNT, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (rs->bufs == MAP_FAILED) { perror("mmap bufs"); exit(1); }
     rs->brMask = io_uring_buf_ring_mask(BUF_COUNT);

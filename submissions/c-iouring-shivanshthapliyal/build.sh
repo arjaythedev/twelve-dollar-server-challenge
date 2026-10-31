@@ -10,10 +10,10 @@ if [ ! -f "build/$SQ/sqlite3.c" ]; then
   echo "$SQ_SHA  build/$SQ.zip" | sha256sum -c -
   (cd build && unzip -q -o "$SQ.zip")
 fi
-SQLITE_DEFS="-DSQLITE_THREADSAFE=0 -DSQLITE_DEFAULT_MEMSTATUS=0 -DSQLITE_OMIT_DEPRECATED -DSQLITE_OMIT_SHARED_CACHE
+SQLITE_DEFS="-DSQLITE_THREADSAFE=2 -DSQLITE_DEFAULT_MEMSTATUS=0 -DSQLITE_OMIT_DEPRECATED -DSQLITE_OMIT_SHARED_CACHE
   -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_USE_ALLOCA -DSQLITE_DQS=0 -DSQLITE_DEFAULT_WAL_SYNCHRONOUS=1
   -DSQLITE_MAX_EXPR_DEPTH=0 -DSQLITE_OMIT_PROGRESS_CALLBACK -DSQLITE_OMIT_AUTOINIT -DSQLITE_LIKE_DOESNT_MATCH_BLOBS"
 CFLAGS="-O2 -march=native -flto -fno-plt"
 [ build/sqlite3.o -nt build.sh ] || gcc $CFLAGS $SQLITE_DEFS -c "build/$SQ/sqlite3.c" -o build/sqlite3.o
 gcc $CFLAGS -Wall -Wextra -I"build/$SQ" -c src/server.c -o build/server.o
-gcc $CFLAGS -o bin/server build/server.o build/sqlite3.o -luring -lm
+gcc $CFLAGS -o bin/server build/server.o build/sqlite3.o -luring -lm -pthread

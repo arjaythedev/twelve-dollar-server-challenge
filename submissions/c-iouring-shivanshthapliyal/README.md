@@ -1,6 +1,6 @@
 # c-iouring-shivanshthapliyal
 
-One thread of C on raw io_uring, with SQLite compiled into the same binary.
+One event-loop thread of C on raw io_uring, with SQLite compiled into the same binary, plus a checkpoint thread.
 
 | | |
 |---|---|
@@ -12,21 +12,23 @@ One thread of C on raw io_uring, with SQLite compiled into the same binary.
 
 ## Design
 
-- **One thread, no locks.** The event loop, HTTP, JSON, JWT checks and SQLite all run on one thread. SQLite is built with `SQLITE_THREADSAFE=0`.
+- **One event-loop thread.** HTTP, JSON, JWT checks and all request SQL run on it. A second, low-traffic thread only runs WAL checkpoints on its own connection (see below). SQLite is built with `SQLITE_THREADSAFE=2`: each connection is used by one thread only.
 - **Rings.** Each io_uring ring has a sparse direct-descriptor table of `LimitNOFILE` slots (65,535). A new ring starts when the current one is close to full, up to 8 rings (about 520k connections). Ring flags: `SINGLE_ISSUER`, `DEFER_TASKRUN`, `SUBMIT_ALL`, `CQSIZE`.
 - **Accept** is multishot with `IORING_FILE_INDEX_ALLOC`, on one ring at a time. It moves to the next ring 512 slots before the table is full, so the kernel never accepts and closes a connection for lack of a slot.
 - **Receive** is multishot into a provided-buffer ring (1,024 × 2 KB per ring). The request is parsed in place and the buffer goes back at once. Idle connections hold no buffer. A connection record is 56 bytes.
 - **Send** is one `SEND` per response, headers and body in one buffer. Two writes would hit Nagle and the 40 ms delayed ACK.
 - **Batches.** All requests from one loop pass form a batch, capped at 1,024. Writes run first in one `BEGIN IMMEDIATE … COMMIT`. No write response leaves before its commit (rule 6). Reads then run in one read transaction, so they see the batch's writes. If the commit fails, every write in the batch gets a 500.
+- The loop enters the kernel only for a ring that has submissions, completions waiting (`IORING_SETUP_TASKRUN_FLAG`) or a CQ overflow. It handles at most 2,048 completions per ring per pass, so one backlog cannot hold the loop.
+- Response buffers are reused 8 KB blocks; JSON strings are escaped 8 bytes at a time.
 - **Keep-alive** connections stay open until the client closes them. The server never closes a healthy connection and never sheds load.
 
 ## SQLite
 
-- Pragmas: `journal_mode=WAL`, `synchronous=NORMAL`, `locking_mode=EXCLUSIVE`, `cache_size=-65536` (64 MiB), `mmap_size=0`, `temp_store=MEMORY`, `wal_autocheckpoint=0`, `journal_size_limit=64 MiB`.
-- `locking_mode=EXCLUSIVE` keeps the WAL index in heap memory, so a read costs no shared-memory locks. It is still WAL with `synchronous=NORMAL`.
-- **Checkpoints** run on the loop thread: `wal_checkpoint_v2(RESTART)` once the WAL passes 4,096 frames (16 MiB). The WAL stays small, so reads stay fast and the page cache stays small. A background checkpoint thread under constant writes never lets the WAL reset.
+- Both connections use the `unix-excl` VFS: an exclusive file lock for this process, with the WAL index in heap memory shared by the two connections.
+- Pragmas: `journal_mode=WAL`, `synchronous=NORMAL`, `cache_size=-65536` (64 MiB), `mmap_size=0`, `temp_store=MEMORY`, `wal_autocheckpoint=0`, `journal_size_limit=64 MiB`.
+- **Checkpoints never fsync on the loop.** When the WAL passes 8,192 frames, the checkpoint thread runs a passive checkpoint (pass 1: the bulk copy and its fsyncs). It then asks the loop to hold writes; reads go on. Pass 2 copies the few frames written meanwhile. The thread then makes the first commit into the fresh WAL, `PRAGMA user_version` set to its current value (no table or row changes), because that commit fsyncs the new WAL header. The hold ends and the loop commits into a WAL that is already synced. A hold lasts at most 250 ms (never cut during that last transaction). The WAL stays under about 36 MB.
 - All statements are prepared once (`SQLITE_PREPARE_PERSISTENT`) and reused.
-- Build flags: `THREADSAFE=0 DEFAULT_MEMSTATUS=0 OMIT_DEPRECATED OMIT_SHARED_CACHE OMIT_LOAD_EXTENSION USE_ALLOCA DQS=0 DEFAULT_WAL_SYNCHRONOUS=1 MAX_EXPR_DEPTH=0 OMIT_PROGRESS_CALLBACK OMIT_AUTOINIT LIKE_DOESNT_MATCH_BLOBS`.
+- Build flags: `THREADSAFE=2 DEFAULT_MEMSTATUS=0 OMIT_DEPRECATED OMIT_SHARED_CACHE OMIT_LOAD_EXTENSION USE_ALLOCA DQS=0 DEFAULT_WAL_SYNCHRONOUS=1 MAX_EXPR_DEPTH=0 OMIT_PROGRESS_CALLBACK OMIT_AUTOINIT LIKE_DOESNT_MATCH_BLOBS`.
 
 ## Queries
 

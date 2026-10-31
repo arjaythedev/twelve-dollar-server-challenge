@@ -5,7 +5,7 @@ Direct HTTP/1.1 on `$HOST:$PORT` (no Nginx), written in plain Objective-C on the
 ## Versions
 
 - Objective-C, clang 23.1.4 (official LLVM release tarball, pinned by sha256; `install.sh` unpacks only clang, lld, llvm-profdata and clang's runtime), `-fobjc-runtime=gnustep-2.2`, manual memory management
-- libobjc2 2.3 (GNUstep runtime), robin-map 1.4.0, liburing 2.15, SQLite 3.54.1 amalgamation: all pinned by sha256 and built from source by `build.sh` (SQLite with a one-line page-numbering patch, see the optimizations table)
+- libobjc2 2.3 (GNUstep runtime), robin-map 1.4.0, liburing 2.15, SQLite 3.54.1 amalgamation: all pinned by sha256 and built from source by `build.sh` (SQLite is stock, unpatched)
 - Needs Linux 6.1+ (DEFER_TASKRUN); the grader's 6.8 kernel is fine
 
 ## Design
@@ -43,10 +43,11 @@ Server in Docker capped at 1 CPU / 2 GB (`--cpuset-cpus=0`, host network), wrk w
 | Feed like counts tallied in C from a plain `post_id` index range scan instead of `GROUP BY post_id`; like insert binds `created_at` (no per-row `strftime`) | feed-only wrk 12.6 → 11.5 µs/req (+10%), like-only 5.7 → 5.26 µs/req (+7%); realistic mix −1% CPU |
 | Feed likes tallied by an app-defined aggregate, `SELECT td_tally(post_id) FROM likes WHERE post_id BETWEEN ?1 AND ?2`, inside one `sqlite3_step` instead of one returned row per like (statement: 3.69 → 2.56 µs for 87 likes) | feed-only wrk 10.7 → 10.3 µs/req (−3.5%), wrk mix −1.5%; realistic mix −0.2% |
 | JSON string escaper checks 8 bytes at a time (SWAR test for `< 0x20`, `"`, `\`) before falling back to bytes | feed-only wrk 11.4 → 10.6 µs/req (+7%); realistic mix −0.5% CPU |
-| One-line SQLite patch, applied by build.sh to the downloaded amalgamation: `balance_nonroot` parks a page under `nPage+1` instead of the 1 GB pending-byte page number while it sorts a split's pages. Stock SQLite's choice makes the next commit's page-cache truncate scan the whole hash table (measured: 2,290 of 4,982 commits on a write-heavy mix; 0 after). No change to what is stored or read | create-only wrk 9.6–9.9 → 9.0–9.1 µs/req (+8%); realistic mix −0.5% CPU, more as the cache fills |
 
-Final (`e23849b`): wrk mix 6.80–6.85 µs/req, about 146k rps. This was measured after an opt-box reboot that shifted every number (the baseline went from 9.9 to 12.1 µs/req on the userload metric), so compare it only with runs from the same session. Before the round-2 changes (`4db6b5a`): about 131k rps at 7.6 µs/req; per route `/health` 3.2 µs (kernel and loop floor), `GET /posts/:id` 4.0, like 5.9, create 12.1, `/feed` 12.6. For reference, Rust io_uring #82 built from its own scripts on the same harness: 115k rps, 8.7 µs/req (this entry at that time: 127k, 7.9 µs/req).
+Final (`e23849b`, still with the SQLite patch that was later removed, see below): wrk mix 6.80–6.85 µs/req, about 146k rps. This was measured after an opt-box reboot that shifted every number (the baseline went from 9.9 to 12.1 µs/req on the userload metric), so compare it only with runs from the same session. Before the round-2 changes (`4db6b5a`): about 131k rps at 7.6 µs/req; per route `/health` 3.2 µs (kernel and loop floor), `GET /posts/:id` 4.0, like 5.9, create 12.1, `/feed` 12.6. For reference, Rust io_uring #82 built from its own scripts on the same harness: 115k rps, 8.7 µs/req (this entry at that time: 127k, 7.9 µs/req).
 
 Did not help (reverted): bigger `wal_autocheckpoint` (4096: −4% CPU on tmpfs, double the p99 on disk); response header written into the body's headroom (+0.5%, noise); AVX2 scan in the JSON escaper (−2%: bodies are short); streaming feed rows without the row copy (noise); a 256 MB page cache (more CPU than 32 MB); extra SQLite `OMIT_*`/`UNTESTABLE` compile options (noise); PGO that also profiles the running server over loopback (noise).
+
+Removed after review: a one-line patch to the SQLite amalgamation (`balance_nonroot` parked a page under `nPage+1` instead of the pending-byte page number; create-only wrk +8%, realistic mix −0.5% CPU). Arjay ruled on 2026-10-31 that the engine has to be stock SQLite (rule 2), so build.sh no longer edits it.
 
 Memory: at 100,000 idle connections the cgroup holds 407 MB, of which 20 MB is the process (anon) and the rest kernel socket and io_uring memory (~3.9 KB per connection), so 2 GB holds more connections than the 8 × 65,535 slots.

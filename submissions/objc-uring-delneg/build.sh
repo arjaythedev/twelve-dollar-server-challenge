@@ -65,19 +65,8 @@ SQLITE_DIR="$DEPS/sqlite-amalgamation-$SQLITE_VER"
 [ -f "$SQLITE_DIR/sqlite3.c" ] || unzip -q -o "$DEPS/sqlite-amalgamation-$SQLITE_VER.zip" -d "$DEPS"
 log "deps ready"
 
-# One-line SQLite patch (see README): when balance_nonroot sorts the pages of a
-# split it parks one page under a temporary page number. Stock SQLite uses the
-# 1 GB "pending byte" page (262145), which raises the page cache's largest-key
-# mark so the next commit's cache truncate scans the whole page hash table.
-# nPage+1 is just as unused and keeps that truncate to one hash slot.
-mkdir -p "$BUILD"
-SQLITE_SRC="$BUILD/sqlite3.c"
-sed 's|Pgno pgnoTemp = (PENDING_BYTE/pBt->pageSize)+1;|Pgno pgnoTemp = pBt->nPage+1; /* objc-uring patch */|' \
-    "$SQLITE_DIR/sqlite3.c" > "$SQLITE_SRC"
-if [ "$(grep -c 'objc-uring patch' "$SQLITE_SRC")" != 1 ]; then
-    log "SQLite patch did not apply; building stock SQLite"
-    SQLITE_SRC="$SQLITE_DIR/sqlite3.c"
-fi
+# Stock SQLite, unpatched (rule 2).
+SQLITE_SRC="$SQLITE_DIR/sqlite3.c"
 
 # One SQLite connection, used by one thread at a time under the server's mutex.
 SQLITE_FLAGS="-DSQLITE_THREADSAFE=0 -DSQLITE_DEFAULT_MEMSTATUS=0 -DSQLITE_DQS=0 \

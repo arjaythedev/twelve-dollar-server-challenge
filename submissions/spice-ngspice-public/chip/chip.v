@@ -1,27 +1,28 @@
 /* verilator lint_off WIDTH */
 /* verilator lint_off CASEINCOMPLETE */
-// The request chip. ngspice clocks it as a d_cosim element (Verilator); see ../board/board.cir.
+// The request chip's core. It runs at 8 cycles per board clock (top.v: the pins, the FIFOs and the
+// clock multiplier; shim.cpp: the core clock).
 //
-// Input: one byte per clock on i7..i0 while iv is high, then ie (end of input) for one clock.
+// Input: one byte per clock on ib while iv is high, then ie (end of input) for one clock.
 // Two kinds of job, picked by the first line:
 //   phase A  "A\n<now>\n<boot>\n<secret>\n<the HTTP request as received: request line, headers, body>"
 //            -> "!<HTTP response>"                (an error decided without the database), or
 //            -> "?<kind line>\n<SQL>"             (the statements SQLite should run)
 //   phase B  "B\n<kind line>\n<sqlite3 exit code>\n<sqlite3 -ascii stdout>\x1d<stderr>"
 //            -> "<HTTP response>"
-// An HTTP response is emitted twice over: a dry run of the body program counts its bytes for
-// Content-Length, then the header goes out, then the body program runs again for real.
+// An HTTP response: the body program runs first, counting its bytes for Content-Length, and its
+// bytes go to the body buffer in top.v (osel high); then the header goes out, and top.v sends the
+// buffered body after it.
 // Output: one byte per change of ot, on ob; done goes high when the job is finished.
 // The HMAC tag and the token's signature leave the chip on ca/cb (cclr marks the first byte) for
-// the gate-level comparator on the board, whose answer comes back on cbad. ngspice delivers the
-// chip's outputs a clock late (d_cosim's delay), so the chip raises cend after the last pair and
-// waits for the board to clock it back on cack before it reads cbad.
-module chip(input clk, input iv, input ie,
-            input i7, input i6, input i5, input i4, input i3, input i2, input i1, input i0,
+// the gate-level comparator on the board, whose answer comes back on cbad. The comparator is clocked
+// by the board, so the pairs advance on tick (once per board clock). ngspice delivers the chip's
+// outputs a clock late (d_cosim's delay), so the core raises cend after the last pair and waits for
+// the board to clock it back on cack before it reads cbad.
+module core(input clk, input tick, input iv, input ie, input [7:0] ib,
             input cbad, input cack,
-            output reg ot, output reg [7:0] ob, output reg done,
+            output reg ot, output reg [7:0] ob, output reg osel, output reg done,
             output reg [7:0] ca, output reg [7:0] cb, output reg cclr, output reg cend);
-  wire [7:0] ib = {i7, i6, i5, i4, i3, i2, i1, i0};
 
   // ---------------------------------------------------------------- strings and programs
   // Program bytes: printable text and CR/LF are emitted as is; 0x00 ends; others are ops:
@@ -171,7 +172,7 @@ module chip(input clk, input iv, input ie,
   wire pay_inv = !(sub_has && sub_str && !sub_bad && sub_nz && u_has && u_str && !u_long);
 
   always @(posedge clk) begin
-    hv <= 0; he <= 0; pv <= 0; pe <= 0; yv <= 0; ye <= 0; mgo <= 0; mv <= 0; mend <= 0; cclr <= 0; cend <= 0;
+    hv <= 0; he <= 0; pv <= 0; pe <= 0; yv <= 0; ye <= 0; mgo <= 0; mv <= 0; mend <= 0; if (tick) begin cclr <= 0; cend <= 0; end
     case (st)
     // ------------------------------------------------------------ load the input, parse fields on the fly
     LOAD: begin
@@ -316,8 +317,8 @@ module chip(input clk, input iv, input ie,
       if (part != 2) begin tbad <= 1; st <= TVERD; end
       else if (mdone) begin macr <= mac; cmi <= 0; st <= TCMP; end
     end
-    // the gate-level comparator sees one (tag, signature) byte pair per clock
-    TCMP: begin
+    // the gate-level comparator sees one (tag, signature) byte pair per board clock
+    TCMP: if (tick) begin
       if (cmi < 32) begin
         ca <= macr[255 - 8 * cmi -: 8]; cb <= sig[255 - 8 * cmi -: 8]; cclr <= cmi == 0;
       end
@@ -391,8 +392,8 @@ module chip(input clk, input iv, input ie,
                if (rp < out_e) begin emit_ = 1; oc = ","; pc <= 0; end
                else begin in_row <= 0; prog <= sprog; pc <= spc + 1; end
              end else case (pass)   // end of a program
-               0: begin upt <= {24'b0, clen}; udn <= 0; conv_hdr <= 1; st <= UPT; end   // dry run done: Content-Length
-               1: begin pass <= 2; prog <= bprog; pc <= 0; end                         // header done: the body
+               0: begin upt <= {24'b0, clen}; udn <= 0; conv_hdr <= 1; st <= UPT; end   // body done: Content-Length
+               1: st <= FIN;                                                           // header done (top.v sends the body)
                default: st <= FIN;
              endcase
           1: begin op <= 1; rp <= a_s; rq <= a_e; end
@@ -411,7 +412,7 @@ module chip(input clk, input iv, input ie,
           default: begin emit_ = 1; oc = x; pc <= pc + 1; end
         endcase
       end
-      if (emit_) begin if (pass == 0) clen <= clen + 1; else begin ob <= oc; ot <= ~ot; end end
+      if (emit_) begin if (pass == 0) clen <= clen + 1; ob <= oc; osel <= pass == 0; ot <= ~ot; end
     end
     FIN: done <= 1;
     default: ;

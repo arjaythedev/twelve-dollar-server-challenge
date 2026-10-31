@@ -1,6 +1,7 @@
 # d-iouring-cyrusmsk
 
-A single-threaded Linux io_uring feed server written in D.
+A single-threaded Linux io_uring feed server written in D. It serves the
+internet directly on `0.0.0.0:80`, with no Nginx in front.
 
 - `during` io_uring event loop with multishot accept and one completion wait
   (submit + wait in a single `io_uring_enter`) per completion batch.

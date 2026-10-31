@@ -27,7 +27,6 @@ private enum int IPPROTO_TCP = 6;
 private enum int TCP_NODELAY = 1;
 private enum size_t IN_CAP = 4096;
 private enum size_t OUT_CAP = 32768;
-private enum size_t FEED_CACHE_CAP = 32768;
 private enum uint RING_ENTRIES = 32768;
 private enum size_t PENDING_CAP = 2048;
 private enum size_t HEADER_MAX = 3072;
@@ -142,9 +141,6 @@ private struct App
     bool inTransaction;
     bool acceptActive;
     int acceptMode;
-    ubyte[FEED_CACHE_CAP] feedCache;
-    size_t feedCacheLen;
-    bool feedCacheValid;
 }
 
 private __gshared App app;
@@ -821,12 +817,6 @@ private void handleHealth(Conn* c)
 
 private void handleFeed(Conn* c)
 {
-    if (app.feedCacheValid)
-    {
-        sendJson(c, 200, cast(const(char)[]) app.feedCache[0 .. app.feedCacheLen]);
-        return;
-    }
-
     ubyte[32768] storage;
     Buf dest;
     dest.init(storage[]);
@@ -851,12 +841,6 @@ private void handleFeed(Conn* c)
     }
 
     dest.put(`]}`);
-    if (dest.len <= FEED_CACHE_CAP)
-    {
-        memcpy(app.feedCache.ptr, dest.data, dest.len);
-        app.feedCacheLen = dest.len;
-        app.feedCacheValid = true;
-    }
     sendJson(c, 200, cast(const(char)[]) dest.data[0 .. dest.len]);
 }
 
@@ -973,8 +957,6 @@ private void handleCreate(Conn* c, const(ubyte)[] requestBody, ref AuthClaims au
         return;
     }
 
-    app.feedCacheValid = false;
-
     ubyte[2048] outStorage;
     Buf dest;
     dest.init(outStorage[]);
@@ -1032,7 +1014,6 @@ private void handleLike(Conn* c, const(ubyte)[] idText, ref AuthClaims auth)
 
     if (changes == 1)
     {
-        app.feedCacheValid = false;
         ubyte[128] storage;
         Buf dest;
         dest.init(storage[]);

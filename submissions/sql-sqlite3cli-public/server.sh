@@ -73,15 +73,21 @@ serve() {
 worker() {
 	local fd
 	IFS= read -r -N 1 -u "$TOK" _ || exit 1
+	printf . >&"$ACK"
 	until accept -b "$HOST" -v fd "$PORT" 2>/dev/null; do sleep 0.01; done
 	printf . >&"$TOK"
 	printf . >&"$SPAWN"
+	# wait until the next worker is about to listen: otherwise this one keeps the CPU while it reads its
+	# request, nothing listens, and Nginx's connections meet a refusal or (queued behind
+	# listen(fd, 1), which `accept` then closes) a reset: 502s
+	IFS= read -r -N 1 -u "$ACK" _
 	serve "$fd"
 	exit 0
 }
 
-mkfifo "$RUN/token" "$RUN/spawn" && exec {TOK}<>"$RUN/token" {SPAWN}<>"$RUN/spawn" || exit 1
+mkfifo "$RUN/token" "$RUN/ack" "$RUN/spawn" && exec {TOK}<>"$RUN/token" {ACK}<>"$RUN/ack" {SPAWN}<>"$RUN/spawn" || exit 1
 for ((i = 0; i < IDLE; i++)); do worker & done
 printf . >&"$TOK"
+IFS= read -r -N 1 -u "$ACK" _
 # a 1 s timeout, so a TERM trap runs promptly: Bash runs traps only once a read returns
 while :; do IFS= read -r -N 1 -t 1 -u "$SPAWN" _ && { worker & }; done

@@ -2,6 +2,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -10,7 +11,9 @@ import (
 	"encoding/json"
 	"io"
 	"log"
+	"net"
 	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"strconv"
 	"strings"
@@ -29,15 +32,44 @@ type post struct {
 	LikeCount int64
 }
 
+type writeKind int
+
+const (
+	writeCreate writeKind = iota
+	writeLike
+)
+
+type writeJob struct {
+	kind     writeKind
+	userID   int64
+	username string
+	body     string
+	postID   int64
+	reply    chan writeResult
+}
+
+type writeResult struct {
+	post     post
+	already  bool
+	notFound bool
+	failed   bool
+}
+
 type app struct {
-	db         *sql.DB
-	secret     []byte
-	started    time.Time
-	feed       *sql.Stmt
-	getPost    *sql.Stmt
+	readDB  *sql.DB
+	writeDB *sql.DB
+	secret  []byte
+	started time.Time
+
+	feed    *sql.Stmt
+	getPost *sql.Stmt
+
 	insertPost *sql.Stmt
 	postExists *sql.Stmt
 	insertLike *sql.Stmt
+
+	writeCh     chan *writeJob
+	batchWindow time.Duration
 }
 
 // Reused by every response; the buffer is only returned to the pool after the
@@ -62,19 +94,37 @@ func main() {
 	dsn := "file:" + os.Getenv("SQLITE_PATH") +
 		"?_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL" +
 		"&_cache_size=-16384&_mmap_size=268435456"
-	db, err := sql.Open("sqlite3", dsn)
+
+	readDB, err := sql.Open("sqlite3", dsn)
 	if err != nil {
 		log.Fatal(err)
 	}
-	db.SetMaxOpenConns(8)
-	db.SetMaxIdleConns(8)
+	readDB.SetMaxOpenConns(4)
+	readDB.SetMaxIdleConns(4)
+
+	writeDB, err := sql.Open("sqlite3", dsn)
+	if err != nil {
+		log.Fatal(err)
+	}
+	writeDB.SetMaxOpenConns(1)
+	writeDB.SetMaxIdleConns(1)
+
+	batchMS := 100
+	if v := os.Getenv("WRITE_BATCH_MS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			batchMS = n
+		}
+	}
 
 	a := &app{
-		db:      db,
-		secret:  []byte(os.Getenv("JWT_SECRET")),
-		started: time.Now(),
+		readDB:      readDB,
+		writeDB:     writeDB,
+		secret:      []byte(os.Getenv("JWT_SECRET")),
+		started:     time.Now(),
+		writeCh:     make(chan *writeJob, 256),
+		batchWindow: time.Duration(batchMS) * time.Millisecond,
 	}
-	a.feed, err = db.Prepare(`
+	a.feed, err = readDB.Prepare(`
 		SELECT p.id, p.body, p.created_at, u.username,
 		       (SELECT count(*) FROM likes l WHERE l.post_id = p.id)
 		  FROM posts p JOIN users u ON u.id = p.user_id
@@ -83,7 +133,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	a.getPost, err = db.Prepare(`
+	a.getPost, err = readDB.Prepare(`
 		SELECT p.id, p.body, p.created_at, u.username,
 		       (SELECT count(*) FROM likes l WHERE l.post_id = p.id)
 		  FROM posts p JOIN users u ON u.id = p.user_id
@@ -91,27 +141,207 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	a.insertPost, err = db.Prepare(
+	a.insertPost, err = writeDB.Prepare(
 		"INSERT INTO posts (user_id, body) VALUES (?, ?) RETURNING id, created_at")
 	if err != nil {
 		log.Fatal(err)
 	}
-	a.postExists, err = db.Prepare("SELECT 1 FROM posts WHERE id = ?")
+	a.postExists, err = writeDB.Prepare("SELECT 1 FROM posts WHERE id = ?")
 	if err != nil {
 		log.Fatal(err)
 	}
-	a.insertLike, err = db.Prepare(
+	a.insertLike, err = writeDB.Prepare(
 		"INSERT INTO likes (user_id, post_id) VALUES (?, ?) ON CONFLICT (user_id, post_id) DO NOTHING")
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	srv := &http.Server{
-		Addr:              host + ":" + port,
-		Handler:           a,
-		ReadHeaderTimeout: 10 * time.Second,
+	go a.writeLoop()
+
+	// Opt-in profiling listener; unused in the benchmark runs.
+	if addr := os.Getenv("PPROF_ADDR"); addr != "" {
+		go func() {
+			log.Println("pprof listening on", addr)
+			log.Println(http.ListenAndServe(addr, nil))
+		}()
 	}
-	log.Fatal(srv.ListenAndServe())
+
+	ln, err := net.Listen("tcp", host+":"+port)
+	if err != nil {
+		log.Fatal(err)
+	}
+	for {
+		c, err := ln.Accept()
+		if err != nil {
+			log.Print(err)
+			continue
+		}
+		go a.serveConn(c)
+	}
+}
+
+// serveConn is net/http's connection loop with an 8 KiB write buffer. The
+// stock server hardcodes 4 KiB (newBufioWriterSize(..., 4<<10)), which forces
+// the 5 KiB feed response into two write syscalls.
+func (a *app) serveConn(c net.Conn) {
+	defer c.Close()
+	if tc, ok := c.(*net.TCPConn); ok {
+		tc.SetNoDelay(true)
+	}
+	br := bufio.NewReaderSize(c, 4096)
+	bw := bufio.NewWriterSize(c, 8192)
+	for {
+		req, err := http.ReadRequest(br)
+		if err != nil {
+			return
+		}
+		resp := &capture{status: http.StatusOK}
+		a.ServeHTTP(resp, req)
+		if req.Body != nil {
+			req.Body.Close()
+		}
+		bw.WriteString("HTTP/1.1 ")
+		bw.WriteString(strconv.Itoa(resp.status))
+		bw.WriteByte(' ')
+		bw.WriteString(http.StatusText(resp.status))
+		bw.WriteString("\r\nContent-Type: application/json\r\nContent-Length: ")
+		bw.WriteString(strconv.Itoa(len(resp.body)))
+		if req.Close {
+			bw.WriteString("\r\nConnection: close")
+		}
+		bw.WriteString("\r\n\r\n")
+		if _, err := bw.Write(resp.body); err != nil {
+			return
+		}
+		if err := bw.Flush(); err != nil {
+			return
+		}
+		if req.Close {
+			return
+		}
+	}
+}
+
+type capture struct {
+	status int
+	body   []byte
+	hdr    http.Header
+}
+
+func (c *capture) Header() http.Header {
+	if c.hdr == nil {
+		c.hdr = make(http.Header)
+	}
+	return c.hdr
+}
+
+func (c *capture) WriteHeader(status int) { c.status = status }
+
+func (c *capture) Write(p []byte) (int, error) {
+	c.body = append(c.body, p...)
+	return len(p), nil
+}
+
+// writeLoop batches create/like jobs into one transaction. Every response waits
+// for the commit, so a 201/200 is still only sent for durable rows.
+func (a *app) writeLoop() {
+	for first := range a.writeCh {
+		jobs := make([]*writeJob, 1, 64)
+		jobs[0] = first
+
+		if a.batchWindow > 0 {
+			timer := time.NewTimer(a.batchWindow)
+		collect:
+			for len(jobs) < cap(jobs) {
+				select {
+				case j := <-a.writeCh:
+					jobs = append(jobs, j)
+				case <-timer.C:
+					break collect
+				}
+			}
+			timer.Stop()
+		} else {
+		drain:
+			for len(jobs) < cap(jobs) {
+				select {
+				case j := <-a.writeCh:
+					jobs = append(jobs, j)
+				default:
+					break drain
+				}
+			}
+		}
+		a.runBatch(jobs)
+	}
+}
+
+func (a *app) runBatch(jobs []*writeJob) {
+	tx, err := a.writeDB.Begin()
+	if err != nil {
+		failJobs(jobs)
+		return
+	}
+	insertPost := tx.Stmt(a.insertPost)
+	postExists := tx.Stmt(a.postExists)
+	insertLike := tx.Stmt(a.insertLike)
+
+	results := make([]writeResult, len(jobs))
+	ok := true
+run:
+	for i, j := range jobs {
+		switch j.kind {
+		case writeCreate:
+			var p post
+			p.Body, p.Author = j.body, j.username
+			if err := insertPost.QueryRow(j.userID, j.body).Scan(&p.ID, &p.CreatedAt); err != nil {
+				ok = false
+				break run
+			}
+			results[i].post = p
+		case writeLike:
+			var one int
+			err := postExists.QueryRow(j.postID).Scan(&one)
+			if err == sql.ErrNoRows {
+				results[i].notFound = true
+				continue
+			}
+			if err != nil {
+				ok = false
+				break run
+			}
+			res, err := insertLike.Exec(j.userID, j.postID)
+			if err != nil {
+				ok = false
+				break run
+			}
+			n, err := res.RowsAffected()
+			if err != nil {
+				ok = false
+				break run
+			}
+			results[i].already = n == 0
+		}
+	}
+
+	if ok {
+		err = tx.Commit()
+	} else {
+		tx.Rollback()
+	}
+	if !ok || err != nil {
+		failJobs(jobs)
+		return
+	}
+	for i, j := range jobs {
+		j.reply <- results[i]
+	}
+}
+
+func failJobs(jobs []*writeJob) {
+	for _, j := range jobs {
+		j.reply <- writeResult{failed: true}
+	}
 }
 
 func (a *app) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -143,7 +373,7 @@ func (a *app) health(w http.ResponseWriter, r *http.Request) {
 	var one int
 	bp := bufPool.Get().(*[]byte)
 	b := (*bp)[:0]
-	if err := a.db.QueryRowContext(ctx, "SELECT 1").Scan(&one); err != nil {
+	if err := a.readDB.QueryRowContext(ctx, "SELECT 1").Scan(&one); err != nil {
 		b = append(b, `{"status":"degraded","db":"unreachable","error":`...)
 		b = appendString(b, err.Error())
 		b = append(b, '}')
@@ -233,14 +463,15 @@ func (a *app) createPost(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(data, &raw); err != nil {
+	var payload struct {
+		Body json.RawMessage `json:"body"`
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
 		writeError(w, http.StatusBadRequest, "malformed JSON body")
 		return
 	}
-	rawBody, ok := raw["body"]
 	var body string
-	if !ok || json.Unmarshal(rawBody, &body) != nil {
+	if payload.Body == nil || json.Unmarshal(payload.Body, &body) != nil {
 		writeError(w, http.StatusBadRequest, "body is required")
 		return
 	}
@@ -254,15 +485,22 @@ func (a *app) createPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	p := post{Body: body, Author: username}
-	err = a.insertPost.QueryRowContext(r.Context(), userID, body).Scan(&p.ID, &p.CreatedAt)
-	if err != nil {
+	job := &writeJob{
+		kind:     writeCreate,
+		userID:   userID,
+		username: username,
+		body:     body,
+		reply:    make(chan writeResult, 1),
+	}
+	a.writeCh <- job
+	result := <-job.reply
+	if result.failed {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
 	bp := bufPool.Get().(*[]byte)
 	b := append((*bp)[:0], `{"post":`...)
-	b = appendPost(b, p)
+	b = appendPost(b, result.post)
 	b = append(b, '}')
 	*bp = b
 	writeBody(w, http.StatusCreated, b)
@@ -281,35 +519,29 @@ func (a *app) likePost(w http.ResponseWriter, r *http.Request, idStr string) {
 		return
 	}
 
-	var one int
-	err := a.postExists.QueryRowContext(r.Context(), id).Scan(&one)
-	if err == sql.ErrNoRows {
+	job := &writeJob{
+		kind:   writeLike,
+		userID: userID,
+		postID: id,
+		reply:  make(chan writeResult, 1),
+	}
+	a.writeCh <- job
+	result := <-job.reply
+	if result.failed {
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	if result.notFound {
 		writeError(w, http.StatusNotFound, "post not found")
 		return
 	}
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
-		return
-	}
-
-	res, err := a.insertLike.ExecContext(r.Context(), userID, id)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
-		return
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
-		return
-	}
-	already := n == 0
 	status := http.StatusCreated
-	if already {
+	if result.already {
 		status = http.StatusOK
 	}
 	bp := bufPool.Get().(*[]byte)
 	b := append((*bp)[:0], `{"liked":true,"already_liked":`...)
-	b = strconv.AppendBool(b, already)
+	b = strconv.AppendBool(b, result.already)
 	b = append(b, `,"post_id":`...)
 	b = strconv.AppendInt(b, id, 10)
 	b = append(b, '}')
@@ -362,17 +594,17 @@ func (a *app) authenticate(r *http.Request) (int64, string, string) {
 	if err != nil {
 		return 0, "", invalid
 	}
-	var claims map[string]json.RawMessage
-	if json.Unmarshal(claimsJSON, &claims) != nil {
-		return 0, "", invalid
+	var claims struct {
+		Sub      json.RawMessage `json:"sub"`
+		Username json.RawMessage `json:"username"`
+		Exp      int64           `json:"exp"`
 	}
-	var exp int64
-	if json.Unmarshal(claims["exp"], &exp) != nil || exp <= time.Now().Unix() {
+	if json.Unmarshal(claimsJSON, &claims) != nil || claims.Exp <= time.Now().Unix() {
 		return 0, "", invalid
 	}
 
 	var sub string
-	if json.Unmarshal(claims["sub"], &sub) != nil {
+	if json.Unmarshal(claims.Sub, &sub) != nil {
 		return 0, "", payload
 	}
 	userID, ok := parsePositiveInt(sub)
@@ -380,7 +612,7 @@ func (a *app) authenticate(r *http.Request) (int64, string, string) {
 		return 0, "", payload
 	}
 	var username string
-	if json.Unmarshal(claims["username"], &username) != nil {
+	if json.Unmarshal(claims.Username, &username) != nil {
 		return 0, "", payload
 	}
 	return userID, username, ""
@@ -426,7 +658,7 @@ func appendPost(dst []byte, p post) []byte {
 func appendString(dst []byte, s string) []byte {
 	dst = append(dst, '"')
 	start := 0
-	for i := 0; i < len(s); i++ {
+	for i := range len(s) {
 		c := s[i]
 		if c >= 0x20 && c != '"' && c != '\\' {
 			continue
@@ -464,9 +696,6 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 }
 
 func writeBody(w http.ResponseWriter, status int, body []byte) {
-	h := w.Header()
-	h.Set("Content-Type", "application/json")
-	h.Set("Content-Length", strconv.Itoa(len(body)))
 	w.WriteHeader(status)
 	w.Write(body)
 }

@@ -42,6 +42,7 @@ K6_BIN=${K6_BIN:?set K6_BIN to a static linux amd64 k6 binary}
 SCRIPT=${SCRIPT:-"$REPO/bench/load.js"}
 NET=twelve-bench
 PORT=3910
+PPROF_PORT=${PPROF_PORT:-6060}
 
 [ -x "$K6_BIN" ] || { echo "K6_BIN is not executable: $K6_BIN" >&2; exit 1; }
 [ -f "$REPO/seed/feed.db" ] || { echo "run: bash seed/make-seed.sh" >&2; exit 1; }
@@ -55,10 +56,11 @@ docker network inspect "$NET" >/dev/null 2>&1 || docker network create "$NET" >/
 docker rm -f twelve-server >/dev/null 2>&1 || true
 
 docker run -d --name twelve-server --network "$NET" -p "127.0.0.1:$PORT:3000" \
+  -p "127.0.0.1:$PPROF_PORT:6060" \
   --cpus=1 --cpuset-cpus="$SERVER_CPUSET" --memory=2g --memory-swap=2g \
   --ulimit nofile=65535:65535 \
   -e SQLITE_PATH=/data/feed.db -e JWT_SECRET=twelve-dollar-challenge \
-  -e HOST=0.0.0.0 -e PORT=3000 -e GOMAXPROCS=1 \
+  -e HOST=0.0.0.0 -e PORT=3000 -e GOMAXPROCS=1 -e PPROF_ADDR=0.0.0.0:6060 \
   -v "$TMP:/data" -v "$SUBMISSION_DIR/bin/server:/server:ro" \
   ubuntu:24.04 /server >/dev/null
 
@@ -87,8 +89,8 @@ echo "limits: $(docker inspect -f 'cpus={{.HostConfig.NanoCpus}} mem={{.HostConf
 if [ -z "$K6_MEMORY" ]; then
   VM_MEM_MB=$(docker info --format '{{.MemTotal}}' 2>/dev/null | awk '{printf "%d", $1/1048576}')
   [ -n "$VM_MEM_MB" ] || VM_MEM_MB=7800
-  K6_MEM_MB=$(( (VM_MEM_MB - 2048 - 512) / PROCS ))
-  [ "$K6_MEM_MB" -gt 3072 ] && K6_MEM_MB=3072
+  K6_MEM_MB=$(( (VM_MEM_MB - 1024 - 512) / PROCS ))
+  [ "$K6_MEM_MB" -gt 3584 ] && K6_MEM_MB=3584
   [ "$K6_MEM_MB" -lt 512 ] && K6_MEM_MB=512
   K6_MEM_LABEL="${K6_MEM_MB}m"
   echo "k6 memory cap: $K6_MEM_LABEL each (Docker VM ${VM_MEM_MB} MiB, K6_PROCS=$PROCS)"

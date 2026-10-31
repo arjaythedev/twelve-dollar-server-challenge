@@ -1,6 +1,7 @@
 # d-eventcore-cyrusmsk
 
-A single-threaded Linux eventcore feed server written in D.
+A single-threaded Linux eventcore feed server written in D. It serves the
+internet directly on `0.0.0.0:80`, with no Nginx in front.
 
 - `eventcore` epoll driver for accept/read/write readiness, with one event-loop
   batch followed by response writes and a shared commit where needed.

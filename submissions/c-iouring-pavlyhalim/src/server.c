@@ -63,6 +63,7 @@ struct rs {
   unsigned open;
   uint8_t accept_armed;
   uint8_t accept_cancelling;
+  uint8_t populated; /* conns, receive buffers and rearm list faulted in (on the first arm) */
   struct conn **rearm;
   unsigned nrearm, rearm_cap;
 };
@@ -136,6 +137,31 @@ static uint8_t *arena_reserve(unsigned n) {
   return cur->data + cur->used;
 }
 
+/* Startup: the arenas a normal batch uses, touched, in the pool, and the per-batch lists sized for
+ * a batch larger than any seen (20,303 completions after a stall), so that neither grows at the
+ * moment memory is shortest: right after a stall, when the batch is largest. */
+#define ARENA_PREWARM 8
+#define LIST_PREWARM 32768
+static void prewarm_batch_memory(void) {
+  for (unsigned i = 0; i < ARENA_PREWARM; i++) {
+    struct arena *a = malloc(sizeof *a + ARENA_CAP);
+    if (!a) { perror("malloc arena"); exit(1); }
+    memset(a, 0, sizeof *a + ARENA_CAP);
+    a->cap = ARENA_CAP;
+    a->next = pool;
+    pool = a;
+    pool_n++;
+  }
+  rep_cap = ready_cap = held_cap = LIST_PREWARM;
+  replies = malloc(rep_cap * sizeof *replies);
+  ready = malloc(ready_cap * sizeof *ready);
+  held = malloc(held_cap * sizeof *held);
+  if (!replies || !ready || !held) { perror("malloc"); exit(1); }
+  memset(replies, 0, rep_cap * sizeof *replies);
+  memset(ready, 0, ready_cap * sizeof *ready);
+  memset(held, 0, held_cap * sizeof *held);
+}
+
 /* ---------- lists ---------- */
 
 static void reply_push(struct conn *c, struct arena *a, uint32_t off, uint32_t len, int db, int close) {
@@ -200,7 +226,23 @@ static void arm_recv(struct conn *c) {
 
 static int LFD = -1;
 
+/* A ring's connection table and receive buffers (6.6 MB) are faulted in when the ring first takes
+ * connections, ACCEPT_NEXT connections before it is needed, so rings that never fill cost nothing. */
+static void ring_populate(struct rs *rs) {
+  uint64_t t = now_ns();
+  size_t nc = (size_t)rs->r.nslots * sizeof(struct conn), nb = (size_t)rs->r.br_entries * rs->r.buf_size;
+  prefault(rs->conns, nc);
+  prefault(rs->r.bufs, nb);
+  rs->rearm_cap = 4096;
+  rs->rearm = malloc(rs->rearm_cap * sizeof *rs->rearm);
+  if (!rs->rearm) { perror("malloc"); exit(1); }
+  memset(rs->rearm, 0, rs->rearm_cap * sizeof *rs->rearm);
+  rs->populated = 1;
+  fprintf(stderr, "ring %u: %zu KiB faulted in (%.1f ms)\n", (unsigned)(rs - R), (nc + nb) >> 10, (double)(now_ns() - t) / 1e6);
+}
+
 static void arm_accept(struct rs *rs, unsigned ri) {
+  if (!rs->populated) ring_populate(rs);
   sqe_accept_multishot(ring_sqe(&rs->r), LFD, UD(UD_ACCEPT, ri, 0, 0));
   rs->accept_armed = 1;
 }
@@ -510,9 +552,9 @@ static void stats(uint64_t dt_ns) {
   sqlite3_db_status(A.db.c, SQLITE_DBSTATUS_CACHE_MISS, &c_miss, &hw, 1);
   sqlite3_db_status(A.db.c, SQLITE_DBSTATUS_CACHE_WRITE, &c_write, &hw, 1);
   sqlite3_db_status(A.db.c, SQLITE_DBSTATUS_CACHE_USED, &c_used, &hw, 0);
-  fprintf(stderr, "sqlite: cache_hit=%d cache_miss=%d cache_write=%d cache_used=%dKB truncates=%llu skipped=%llu wal_frames_joined=%llu\n",
+  fprintf(stderr, "sqlite: cache_hit=%d cache_miss=%d cache_write=%d cache_used=%dKB truncates=%llu skipped=%llu wal_frames=%llu wal_writes=%llu\n",
           c_hit, c_miss, c_write, c_used / 1024, (unsigned long long)pcache_truncates,
-          (unsigned long long)pcache_truncates_skipped, (unsigned long long)wal_frames_joined);
+          (unsigned long long)pcache_truncates_skipped, (unsigned long long)wal_frames, (unsigned long long)wal_writes);
   double dt = (double)dt_ns / 1e9;
   struct rusage ru;
   getrusage(RUSAGE_SELF, &ru);
@@ -601,6 +643,38 @@ static void on_term(int sig) {
   exit(0);
 }
 
+/* Keeps the server's code and data in RAM. They are file-backed, so when memory runs short the
+ * kernel evicts them like any cached file (with no swap, file pages are all reclaim can take, and
+ * Ubuntu's multi-generational LRU gives code pages no extra pass), and the event loop then stalls
+ * on major faults that read its own code back from disk while every connection's next request
+ * waits in the kernel. The binary is static, so its own mappings are all of it; locking the
+ * writable one turns its untouched pages into private memory. Best effort: if RLIMIT_MEMLOCK
+ * (8 MB under systemd) is too small, the server runs unlocked. Returns bytes locked. */
+static size_t lock_code(void) {
+  char exe[512];
+  ssize_t n = readlink("/proc/self/exe", exe, sizeof exe - 1);
+  FILE *f = fopen("/proc/self/maps", "r");
+  if (n <= 0 || !f) {
+    if (f) fclose(f);
+    return 0;
+  }
+  exe[n] = 0;
+  char line[1024];
+  size_t locked = 0;
+  while (fgets(line, sizeof line, f)) {
+    unsigned long lo, hi;
+    char perms[8];
+    int path = 0;
+    if (sscanf(line, "%lx-%lx %7s %*s %*s %*s %n", &lo, &hi, perms, &path) < 3 || !path) continue;
+    line[strcspn(line, "\n")] = 0;
+    if (strcmp(line + path, exe)) continue;
+    if (mlock((void *)lo, hi - lo) == 0) locked += hi - lo;
+    else fprintf(stderr, "mlock %s: %s\n", perms, strerror(errno));
+  }
+  fclose(f);
+  return locked;
+}
+
 int main(void) {
   signal(SIGPIPE, SIG_IGN);
   signal(SIGTERM, on_term);
@@ -649,9 +723,8 @@ int main(void) {
       fprintf(stderr, "ring %u: %s: %s\n", i, err, strerror(errno));
       return 1;
     }
-    R[i].conns = calloc(nslots, sizeof(struct conn));
-    if (!R[i].conns) { perror("calloc"); return 1; }
-    madvise(R[i].conns, (size_t)nslots * sizeof(struct conn), MADV_HUGEPAGE);
+    R[i].conns = mmap(NULL, (size_t)nslots * sizeof(struct conn), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (R[i].conns == MAP_FAILED) { perror("mmap conns"); return 1; }
     if (i > 0) {
       R[i].efd = ring_register_eventfd(&R[i].r);
       if (R[i].efd < 0) { perror("register eventfd"); return 1; }
@@ -662,6 +735,10 @@ int main(void) {
                   "mmap %lld MB, cache %d KiB\n",
           host, port, NR, nslots, nbufs, bufsz, mmap_bytes >> 20, cache_kib);
   for (unsigned i = 0; i < NR; i++) fprintf(stderr, "ring %u: io_uring fd %d\n", i, R[i].r.fd);
+  /* after the rings, so the code lock can never take memlock room a ring needs */
+  fprintf(stderr, "code locked in RAM: %zu KiB\n", lock_code() >> 10);
+  prewarm_batch_memory();
+  prefault_stack(256 << 10);
   accept_policy();
 
   uint64_t t0 = now_ns(), last_sweep = t0, last_stats = t0;

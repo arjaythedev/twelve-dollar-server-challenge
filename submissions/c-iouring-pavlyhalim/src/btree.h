@@ -262,6 +262,125 @@ static int bt_user_name(struct bt *b, i64 uid, const u8 **name, u32 *len) {
   return 0;
 }
 
+/* ---- several rowid lookups in one table, one level at a time ----
+ * The same descent as sqlite3BtreeTableMoveto, through the same pager calls, for up to FEED_N keys
+ * together: every key's child page is chosen on one level before any page of the next level is
+ * fetched, and the pages are prefetched as they are fetched, so the cache misses of different
+ * keys overlap instead of queueing; keys that share a page fetch it once. Inside a page the search
+ * starts at an interpolated guess: table rowids are dense (users 1..N), so the key is usually at
+ * or next to where a straight line through the page's first and last keys puts it, where a plain
+ * binary search reads 7-9 cells, each on its own cache line. */
+struct bt_hit {
+  MemPage *pg; /* the leaf holding the key, referenced; NULL if the key is absent */
+  int ix;
+};
+
+static inline i64 bt_cell_key(MemPage *pg, int i) {
+  u8 *c = findCellPastPtr(pg, i);
+  if (pg->intKeyLeaf)
+    while (0x80 <= *(c++))
+      if (c >= pg->aDataEnd) return INT64_MAX; /* corrupt: steers the search; the caller rechecks */
+  return sqlite3VarintValue(c);
+}
+/* the first cell whose key is >= k (nCell if none) */
+static int bt_lower_bound(MemPage *pg, i64 k) {
+  int n = pg->nCell;
+  i64 k0 = bt_cell_key(pg, 0), kn = bt_cell_key(pg, n - 1);
+  if (k <= k0) return 0;
+  if (k > kn) return n;
+  int lo = 1, hi = n - 1; /* the answer is in [lo, hi]: key(lo-1) < k <= key(hi) */
+  int g = lo + (int)((double)(k - k0) / (double)(kn - k0) * (double)(n - 1) - 0.5);
+  if (g < lo) g = lo;
+  if (g > hi) g = hi;
+  for (int probe = 0; lo < hi; probe++) {
+    if (bt_cell_key(pg, g) >= k) hi = g;
+    else lo = g + 1;
+    if (probe < 2 && lo < hi) g = hi == g ? g - 1 : g + 1; /* two steps next to the guess, then halve */
+    else g = lo + ((hi - lo) >> 1);
+    if (g < lo) g = lo;
+    if (g > hi) g = hi;
+  }
+  return lo;
+}
+static void bt_release_hits(struct bt_hit *h, int n) {
+  for (int i = 0; i < n; i++)
+    if (h[i].pg) releasePageNotNull(h[i].pg);
+}
+/* 0 with every hit set (pg NULL for an absent key), -1 on an error (no pages held) */
+static int bt_seek_many(struct bt *b, Pgno root, const i64 *key, int n, struct bt_hit *hit) {
+  BtShared *bs = b->bt->pBt;
+  MemPage *pg[FEED_N];
+  Pgno next[FEED_N];
+  if (n < 1 || n > FEED_N) return -1;
+  for (int i = 0; i < n; i++) next[i] = root;
+  for (int depth = 0;; depth++) {
+    /* fetch this level's pages, once each, and start loading their cell pointers */
+    for (int i = 0; i < n; i++) {
+      int j = i - 1;
+      while (j >= 0 && next[j] != next[i]) j--;
+      if (j >= 0) {
+        pg[i] = pg[j];
+        sqlite3PagerRef(pg[i]->pDbPage);
+      } else if (getAndInitPage(bs, next[i], &pg[i], PAGER_GET_READONLY) != SQLITE_OK) {
+        pg[i] = NULL;
+      } else {
+        __builtin_prefetch(pg[i]->aCellIdx);
+        __builtin_prefetch(pg[i]->aCellIdx + 2 * (pg[i]->nCell - 1));
+      }
+      /* what moveToRoot and moveToChild check before they search a page */
+      if (!pg[i] || !pg[i]->intKey || pg[i]->nCell == 0 || pg[i]->nOverflow || depth >= BTCURSOR_MAX_DEPTH ||
+          (i > 0 && pg[i]->leaf != pg[0]->leaf)) {
+        for (int k = 0; k <= i; k++)
+          if (pg[k]) releasePageNotNull(pg[k]);
+        return -1;
+      }
+    }
+    if (pg[0]->leaf) break;
+    for (int i = 0; i < n; i++) {
+      int lw = bt_lower_bound(pg[i], key[i]); /* key <= cell key: that cell's left child */
+      next[i] = lw >= pg[i]->nCell ? get4byte(&pg[i]->aData[pg[i]->hdrOffset + 8]) : get4byte(findCell(pg[i], lw));
+    }
+    for (int i = 0; i < n; i++) releasePageNotNull(pg[i]);
+  }
+  for (int i = 0; i < n; i++) {
+    int ix = bt_lower_bound(pg[i], key[i]);
+    if (ix < pg[i]->nCell && bt_cell_key(pg[i], ix) == key[i]) {
+      hit[i].pg = pg[i];
+      hit[i].ix = ix;
+    } else {
+      releasePageNotNull(pg[i]);
+      hit[i].pg = NULL;
+    }
+  }
+  return 0;
+}
+/* the record of a hit's cell, when it fits on its page (users rows always do) */
+static int bt_hit_record(struct bt_hit *h, struct rec *r) {
+  CellInfo info;
+  h->pg->xParseCell(h->pg, findCell(h->pg, h->ix), &info);
+  if (info.nLocal != info.nPayload) return -1;
+  r->p = info.pPayload;
+  r->n = info.nPayload;
+  return 0;
+}
+/* usernames for n user ids: 0 with every name found (the hits hold the pages the names point
+ * into: release them after use), 1 if one is absent, -1 if the caller must use the cursors */
+static int bt_user_names(struct bt *b, const i64 *uid, int n, struct bt_hit *hit, const u8 **name, u32 *len) {
+  if (bt_seek_many(b, b->root_users, uid, n, hit)) return -1;
+  for (int i = 0; i < n; i++) {
+    struct rec r;
+    struct col c[2];
+    int rc = !hit[i].pg ? 1 : bt_hit_record(&hit[i], &r) || rec_cols(&r, 2, c) || !col_is_text(&c[1]) ? -1 : 0;
+    if (rc) {
+      bt_release_hits(hit, n);
+      return rc;
+    }
+    name[i] = c[1].p;
+    len[i] = col_len(&c[1]);
+  }
+  return 0;
+}
+
 /* One post row by rowid, written as a post object. 0 ok, 1 absent, -1 error. */
 static int bt_post_obj(struct bt *b, struct ob *o, i64 id, i64 likes) {
   int rc = cur_seek(&b->posts, id);
@@ -278,9 +397,16 @@ static int bt_post_obj(struct bt *b, struct ob *o, i64 id, i64 likes) {
   memcpy(created, c[3].p, cl);
   const u8 *name;
   u32 nl;
-  rc = bt_user_name(b, col_int(&c[1]), &name, &nl);
-  if (rc) return -1;
+  i64 uid = col_int(&c[1]);
+  struct bt_hit h;
+  rc = bt_user_names(b, &uid, 1, &h, &name, &nl);
+  if (rc > 0) return -1;
+  if (rc < 0) {
+    if (bt_user_name(b, uid, &name, &nl)) return -1;
+    h.pg = NULL;
+  }
   ob_post_obj(o, id, body, (int)bl, created, (int)cl, name, (int)nl, likes);
+  bt_release_hits(&h, 1);
   return 0;
 }
 
@@ -352,16 +478,24 @@ static int bt_feed(struct bt *b, struct ob *o) {
   }
   if (rc < 0 || found != n) return -1; /* a row the index named is missing: the SQL path decides */
 
-  /* the authors, and the JSON in feed order */
+  /* the authors, all together, and the JSON in feed order */
+  struct bt_hit hits[FEED_N];
+  const u8 *names[FEED_N];
+  u32 name_len[FEED_N];
+  rc = bt_user_names(b, uids, n, hits, names, name_len);
+  if (rc > 0) return -1; /* an author is missing: the SQL path decides */
   ob_lit(o, "{\"posts\":[");
   for (int i = 0; i < n; i++) {
-    const u8 *name;
-    u32 nl;
-    if (bt_user_name(b, uids[i], &name, &nl)) return -1;
+    if (rc < 0) { /* the batched seek declined: one cursor seek each */
+      hits[i].pg = NULL;
+      if (bt_user_name(b, uids[i], &names[i], &name_len[i])) return -1;
+    }
     if (i) ob_char(o, ',');
-    ob_post_obj(o, ids[i], bodies[i], (int)body_len[i], created[i], (int)created_len[i], name, (int)nl, counts[ids[i] - lo]);
+    ob_post_obj(o, ids[i], bodies[i], (int)body_len[i], created[i], (int)created_len[i], names[i], (int)name_len[i],
+                counts[ids[i] - lo]);
   }
   ob_lit(o, "]}");
+  if (rc == 0) bt_release_hits(hits, n);
   return 0;
 }
 

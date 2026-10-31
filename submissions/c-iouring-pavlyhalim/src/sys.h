@@ -18,6 +18,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <alloca.h>
 #include <sys/mman.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
@@ -367,6 +368,22 @@ static inline uint64_t now_ns(void) {
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
   return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
+/* Memory the server will need, made to exist while memory is still plentiful. At the memory wall a
+ * first touch means a page allocation, which can mean direct reclaim on the event loop, the stall
+ * that lets requests pile up in the kernel. */
+#ifndef MADV_POPULATE_WRITE
+#define MADV_POPULATE_WRITE 23
+#endif
+static void prefault(void *p, size_t n) { /* p page-aligned */
+  if (madvise(p, n, MADV_POPULATE_WRITE) == 0) return;
+  for (size_t i = 0; i < n; i += 4096) ((volatile uint8_t *)p)[i] = ((volatile uint8_t *)p)[i];
+}
+/* the calling thread's stack, n bytes below the caller (stack pages are never given back) */
+static __attribute__((noinline)) void prefault_stack(size_t n) {
+  volatile uint8_t *p = alloca(n);
+  for (size_t i = 0; i < n; i += 4096) p[i] = 0;
 }
 
 #endif

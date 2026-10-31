@@ -81,6 +81,7 @@ static int db_wal_hook(void *ud, sqlite3 *c, const char *name, int frames) {
 
 static void *db_ckpt_thread(void *ud) {
   struct db *d = ud;
+  prefault_stack(128 << 10);
   for (;;) {
     pthread_mutex_lock(&d->mu);
     while (!d->wanted && !d->stop) {
@@ -236,33 +237,40 @@ static int pcache_install(void) {
 }
 
 /* ---- WAL writes ----
- * SQLite writes each WAL frame with two calls on the WAL file: the 24-byte frame header, then the
- * page right after it (walWriteOneFrame). This VFS, a shim over unix-excl in the usual SQLite
- * pattern, joins them: a 24-byte write to the WAL is held until the next call on that file; if
- * that call writes the page at the next offset, header and page go out as one write, otherwise the
- * header goes out first. The page always follows its header within the same SQLite function, and
- * readers find a frame only after the wal-index is updated, which happens after both writes, so
- * nothing is held past a frame and no reader can see half of one. Every other call on a WAL file
- * writes a held header before it runs. One pwrite per frame instead of two. */
+ * SQLite writes a transaction's WAL frames one after another, each as two calls (the 24-byte
+ * frame header, then the page: walWriteOneFrame), and the last frame of a commit carries the
+ * database size in its header. This VFS, a shim over unix-excl in the usual SQLite pattern, keeps
+ * writes that continue exactly where the previous write on that file ended in a buffer, and
+ * writes the buffer with one pwrite when the commit frame's page arrives, so a commit is one
+ * system call instead of two per frame. Any other write (the WAL header after a restart, a page
+ * rewritten in place, the checksum rewrite at commit) writes the buffer first and then goes
+ * straight through, as does every other call on the file, so what reaches the kernel and its
+ * order are unchanged, and the commit frame is in the kernel before SQLite updates the wal-index
+ * and before COMMIT returns. Readers find frames only through the wal-index, so none can see a
+ * buffered one; frames of a transaction that has not committed may wait in the buffer until the
+ * commit or the next other call on the file. */
 #define WAL_FRAME_HDR 24
+#define WAL_BUF_CAP 0x1ffff /* the unix VFS passes at most 17 bits of a write's length (seekAndWriteFd) */
 
 struct wfile {
   sqlite3_file base; /* must be first */
   sqlite3_file *real;
   int is_wal;
-  int has_hdr;
-  sqlite3_int64 hdr_off;
-  unsigned char hdr[WAL_FRAME_HDR];
-  unsigned char *buf; /* header + page */
-  int buf_cap;
+  int commit;               /* the buffer ends with a commit frame's header: write it after the page */
+  int len;                  /* bytes in buf */
+  sqlite3_int64 off;        /* file offset of buf[0] */
+  sqlite3_int64 last_end;   /* where the previous write on this file ended */
+  unsigned char *buf;       /* WAL_BUF_CAP bytes, allocated with the first buffered write */
 };
 static sqlite3_vfs *vfs_real;
-static uint64_t wal_frames_joined;
+static uint64_t wal_frames, wal_writes;
 
 static int wf_flush(struct wfile *f) {
-  if (!f->has_hdr) return SQLITE_OK;
-  f->has_hdr = 0;
-  return f->real->pMethods->xWrite(f->real, f->hdr, WAL_FRAME_HDR, f->hdr_off);
+  if (!f->len) return SQLITE_OK;
+  int n = f->len;
+  f->len = 0;
+  wal_writes++;
+  return f->real->pMethods->xWrite(f->real, f->buf, n, f->off);
 }
 #define WF(p) ((struct wfile *)(p))
 #define WF_FLUSH(p) do { int rc_ = wf_flush(WF(p)); if (rc_ != SQLITE_OK) return rc_; } while (0)
@@ -281,30 +289,29 @@ static int wf_read(sqlite3_file *p, void *b, int n, sqlite3_int64 off) {
 }
 static int wf_write(sqlite3_file *p, const void *b, int n, sqlite3_int64 off) {
   struct wfile *f = WF(p);
-  if (f->is_wal) {
-    if (f->has_hdr && off == f->hdr_off + WAL_FRAME_HDR) {
-      int total = WAL_FRAME_HDR + n;
-      if (total > f->buf_cap) {
-        unsigned char *nb = sqlite3_realloc(f->buf, total);
-        if (!nb) return SQLITE_NOMEM;
-        f->buf = nb;
-        f->buf_cap = total;
-      }
-      memcpy(f->buf, f->hdr, WAL_FRAME_HDR);
-      memcpy(f->buf + WAL_FRAME_HDR, b, (size_t)n);
-      f->has_hdr = 0;
-      wal_frames_joined++;
-      return f->real->pMethods->xWrite(f->real, f->buf, total, f->hdr_off);
-    }
+  if (!f->is_wal) return f->real->pMethods->xWrite(f->real, b, n, off);
+  int append = off == f->last_end;
+  f->last_end = off + n;
+  if (f->len + n > WAL_BUF_CAP) WF_FLUSH(p); /* full: write what is held, keep going */
+  if (!append || n > WAL_BUF_CAP || (!f->buf && !(f->buf = sqlite3_malloc(WAL_BUF_CAP)))) {
     WF_FLUSH(p);
-    if (n == WAL_FRAME_HDR) {
-      memcpy(f->hdr, b, WAL_FRAME_HDR);
-      f->hdr_off = off;
-      f->has_hdr = 1;
-      return SQLITE_OK;
-    }
+    f->commit = 0;
+    return f->real->pMethods->xWrite(f->real, b, n, off);
   }
-  return f->real->pMethods->xWrite(f->real, b, n, off);
+  if (!f->len) f->off = off;
+  memcpy(f->buf + f->len, b, (size_t)n);
+  f->len += n;
+  if (n == WAL_FRAME_HDR) { /* bytes 4-7: the database size after a commit, 0 on other frames */
+    const unsigned char *h = b;
+    f->commit = (h[4] | h[5] | h[6] | h[7]) != 0;
+    wal_frames++;
+    return SQLITE_OK;
+  }
+  if (f->commit) {
+    f->commit = 0;
+    return wf_flush(f);
+  }
+  return SQLITE_OK;
 }
 static int wf_truncate(sqlite3_file *p, sqlite3_int64 size) {
   WF_FLUSH(p);
@@ -363,6 +370,7 @@ static int wv_open(sqlite3_vfs *vfs, sqlite3_filename name, sqlite3_file *p, int
   (void)vfs;
   struct wfile *f = WF(p);
   memset(f, 0, sizeof *f);
+  f->last_end = -1;
   f->real = (sqlite3_file *)((char *)p + WF_REAL_OFFSET);
   int rc = vfs_real->xOpen(vfs_real, name, f->real, flags, out_flags);
   if (f->real->pMethods == NULL) return rc; /* the open failed: SQLite will not call xClose */

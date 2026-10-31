@@ -48,6 +48,25 @@ Every user is a keep-alive connection, so the connection count is what the serve
 - Idle keep-alives are closed after 90 s without a request; closes are a shutdown hard-linked to a
   close of the slot.
 
+## At the memory wall
+
+On the 2 GB box the server is not stopped by CPU but by memory: the kernel's per-socket memory runs
+the machine out, the event loop stalls, every connection's next request waits unread in the kernel,
+and the OOM killer ends it. Nothing the loop needs is left to be found at that moment:
+
+- The binary's code and data (2.1 MB, static) are locked in RAM with `mlock` at startup. File-backed
+  pages are what reclaim takes when there is no swap, and Ubuntu's multi-generational LRU gives code
+  no extra pass, so without the lock the loop can stall on major faults reading its own code back
+  from disk. It fits the 8 MB `RLIMIT_MEMLOCK` systemd gives a service (io_uring's rings and buffer
+  rings are charged to the memory cgroup on 6.8, not to that limit); if locking fails the server
+  runs unlocked.
+- Memory is faulted in while there is plenty: 256 KB of the loop's stack and 128 KB of the
+  checkpoint thread's, 8 response arenas (8 MB, enough for a batch of about 2,000 requests) and the
+  per-batch lists sized for 32,768 entries (the largest batch seen after a stall was 20,303). Each
+  ring's connection table and receive buffers (6.6 MB) are faulted in when the ring first takes
+  connections, 8,192 connections before it is needed (2.6–4.4 ms, logged), so rings that never fill
+  cost nothing.
+
 ## A batch
 
 Each wake-up of the loop is one batch:
@@ -68,25 +87,43 @@ Each wake-up of the loop is one batch:
   feed takes the 20 newest ids off `posts_created_at_id_idx`, counts all 20 posts' likes with one
   range scan of `likes_post_id_idx`, reads the rows with one range scan of `posts` (a single seek
   to the lowest id, then `sqlite3BtreeNext`, as the bytecode engine runs `WHERE id BETWEEN`), then
-  each author by rowid. Every page comes
+  the 20 authors by rowid in one descent of `users` (below). Every page comes
   through SQLite's pager, WAL and page cache; what is skipped is the bytecode interpreter, since
   both queries are known ahead of time. The stored layout is checked at startup against the schema
   the plans were written for, and any surprise during a read falls back to the reference SQL. The
   organiser allowed this reading of rules 3/5 on 2026-10-30 (PR #153).
+- The authors' lookup goes down the `users` B-tree one level at a time for all 20 keys together,
+  through the same pager calls as `sqlite3BtreeTableMoveto`: every key's child page is chosen
+  before any page of the next level is fetched, pages shared by several keys are fetched once, and
+  each page's cell pointers are prefetched as it arrives, so the cache misses of different keys
+  overlap (group prefetching: Chen et al., ICDE 2004; Psaropoulos et al., VLDB 2017). Inside a page
+  the search starts where a straight line through the first and last rowid puts the key, since
+  rowids are dense, instead of reading 7–9 cells for a binary search. `GET /posts/:id` uses it for
+  its one author. A test compares it with `sqlite3BtreeTableMoveto` for every rowid of `users` and
+  `posts` and for random batches (4.7 million lookups, same page and cell every time). In
+  cpu-clock profiles at 120,000 users the author lookups went from 1.25–1.31 to 0.88–0.97 µs per
+  request and the feed from 2.12–2.22 to 1.84–1.96 µs.
 - Writes are prepared SQL. `INSERT` + `last_insert_rowid` + `SELECT created_at` is cheaper than
   `RETURNING`; likes are `INSERT … SELECT … WHERE EXISTS … ON CONFLICT DO NOTHING`.
 - `unix-excl` VFS: this process is the only one that opens the file, so the wal-index lives in heap
   memory and no `fcntl()` lock is taken per transaction. The checkpoint thread's second connection
   shares it (same process).
 - A small VFS shim over `unix-excl` (the pattern of SQLite's own `vfstrace`/`multiplex` shims,
-  public API only) writes each WAL frame with one `pwrite` instead of two: SQLite writes a frame's
-  24-byte header and then its page at the next offset, and the shim holds the header for that one
-  call and sends both together. Any other call on the WAL file writes a held header first, and a
-  reader finds a frame only after the wal-index is updated, after both halves are written. WAL
-  `pwrite`s on the request thread: 0.32 → 0.16 per request.
-- System calls per request on the request thread, counted with kernel tracepoints at 120,000
-  users: 0.44 (`io_uring_enter` 0.28, WAL `pwrite` 0.16, everything else ≈ 0). The checkpoint
-  thread adds 0.17, off the request path.
+  public API only) writes each commit to the WAL with one `pwrite`. SQLite writes a transaction's
+  frames one after another, header then page, and the commit frame's header carries the database
+  size; the shim keeps writes that continue exactly where the previous one ended in a buffer and
+  writes it when the commit frame's page arrives, inside SQLite's own call, so the commit is in the
+  kernel before the wal-index is updated and before `COMMIT` returns. Any other write (the WAL
+  header after a restart, a page rewritten in place, the checksum rewrite SQLite does after the
+  commit frame) writes the buffer and then goes straight through, as does every other call on the
+  file, so the bytes and their order are SQLite's. The buffer is capped at 131,071 bytes, the
+  most the unix VFS passes in one write. A crash test kills the server with `SIGKILL` at a random
+  moment under 32 writing connections, 40 rounds on the same file: 401,838 acknowledged posts and
+  401,222 acknowledged likes, none lost, `integrity_check` ok every round. Commits average 6.6
+  frames, and `pwrite`s per request (whole process, kernel tracepoints, 120,000 users) went from
+  0.24 to 0.095.
+- System calls per request, whole process, at 120,000 users: 0.23 (`io_uring_enter` 0.05, `pwrite`
+  0.095 including the checkpoint thread's, everything else ≈ 0.08).
 - WAL, `synchronous=NORMAL`, `wal_autocheckpoint=0`. A WAL hook wakes a checkpoint thread past
   1,000 frames (PASSIVE, on its own connection, never on the loop). Past 4,000 frames, writes are
   held until the thread reports the log fully copied (at most 1 s; reads go on), so the next write
@@ -97,7 +134,10 @@ Each wake-up of the loop is one batch:
   120,000 users: 17.6 → 15.5 µs per request). SQLite's own counters (`SQLITE_DBSTATUS_CACHE_*`,
   logged every 10 s) put the working set at about 34 MB: at 120,000 users a 32 MB and a 64 MB cache
   both miss only on first load after startup (~4,300 misses in 55 million lookups) and cost the
-  same CPU within noise, so the smaller one is kept for the memory it leaves to connections.
+  same CPU within noise, so the smaller one is kept for the memory it leaves to connections. Smaller
+  caches were measured too: misses per request were 0.0017 at 32 MB, 0.020 at 16 MB, 0.053 at 8 MB
+  and 0.071 at 4 MB, each miss a `pread` on the event loop that turns into a disk read once memory
+  is short, which is the stall the server is built to avoid; 32 MB stays.
   `THREADSAFE=2` with `OPEN_NOMUTEX`; memory statistics, the progress-callback check per opcode,
   shared cache and unused features compiled out.
 - SQLite's default page cache sits behind its plugin interface (`SQLITE_CONFIG_PCACHE2`) with one
@@ -179,7 +219,12 @@ kernel tracepoints on the request thread.
 ¹ one 0.9 s pause of the whole VM (the load generator stalled at the same moment); the other runs'
 p99 is 12–30 ms.
 
-- System calls per request on the request thread: 0.21 (`io_uring_enter` 0.05, WAL `pwrite` 0.16).
+- The table was measured before the batched author lookup, the one-write commits and the memory
+  locking (commit eaac1bc). Against that commit, interleaved cpu-clock profiles of the loop thread
+  at 120,000 users: 12.30 / 12.88 µs per request before, 11.17 / 11.55 after (the two runs before
+  each had a 1.4–2.3 s pause of the whole VM, so part of that difference is noise); per request,
+  author lookups 1.25–1.31 → 0.88–0.97 µs, the feed 2.12–2.22 → 1.84–1.96 µs, WAL `pwrite` in the
+  kernel 0.32–0.35 → 0.27–0.28 µs.
 - Memory: the cgroup grows by about 2.1 KB per connection, nearly all of it the kernel's socket
   objects; the server's own heap stays near 60 MB.
 - Above 40,000 requests/s the two load-generator vCPUs fell behind (the server was at 56% with

@@ -14,6 +14,7 @@ import time
 #flag -lm -lcrypto
 #include "uring_bridge.h"
 #include "json_scan.h"
+#include "row_out.h"
 #include <openssl/hmac.h>
 #include "sqlite3.h"
 #include "ckpt.h"
@@ -87,6 +88,7 @@ fn C.td_feed_init(&C.sqlite3) int
 fn C.td_feed_read(int) int
 fn C.td_post_read(i64) int
 fn C.td_feed_out() &C.td_feed
+fn C.td_put_row(&u8, &C.td_feed_row) &u8
 fn C.memchr(voidptr, int, usize) voidptr
 fn C.getrlimit(i32, &C.rlimit) i32
 fn C.setrlimit(i32, &C.rlimit) i32
@@ -1182,19 +1184,15 @@ fn (mut s Server) feed_btree(n int) {
 }
 
 fn (mut s Server) put_feed_row(r &C.td_feed_row) {
-	put(mut s.out, '{"id":')
-	put_int(mut s.out, r.id)
-	put(mut s.out, ',"body":')
-	put_json(mut s.out, r.body, r.body_len)
-	put(mut s.out, ',"created_at":')
-	append(mut s.out, c'"', 1)
-	append(mut s.out, r.created, 24)
-	append(mut s.out, c'"', 1)
-	put(mut s.out, ',"author":')
-	put_json(mut s.out, r.user, r.user_len)
-	put(mut s.out, ',"like_count":')
-	put_int(mut s.out, r.likes)
-	put(mut s.out, '}')
+	room := r.body_len * 6 + r.user_len * 6 + 160 // worst case, see td_put_row
+	if s.out.len + room > s.out.cap {
+		s.out.ensure_cap(s.out.len + room)
+	}
+	unsafe {
+		start := &u8(s.out.data)
+		end := C.td_put_row(start + s.out.len, r)
+		s.out.len = int(usize(end) - usize(start))
+	}
 }
 
 // feed_range scans the rows newest-id first, which is feed order when ids fall with created_at,

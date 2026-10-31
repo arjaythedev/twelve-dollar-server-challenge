@@ -64,10 +64,10 @@ The C transport keeps debug symbols and frame pointers for local profiles.
   snapshot as SQL. There is no result cache: between requests the code keeps only root page numbers and
   key descriptions. Unusual cases (overflow pages, wide id spans, unknown ids) run the SQL path.
 - **Prepared statements** for every query, plus `BEGIN`/`COMMIT`, made once at startup.
-- **JSON written by hand into reused buffers.** The writer checks 16 bytes at a time (SSE2, `json_scan.h`) for
-  a byte that needs escaping, and copies the string whole when none does. Keys come out in the spec order.
-  The common string path and integer writer are inlined. The string writer calls a separate
-  escape loop only when the scan finds a byte that needs escaping.
+- **JSON written by hand into reused buffers.** A feed or post row is written by one C function
+  (`row_out.h`) straight into the response buffer. It copies each string 16 bytes at a time (SSE2) while
+  it checks for a byte that needs escaping, and finishes that string bytewise only after the first such
+  byte. Keys come out in the spec order. `tests/row_out.c` compares it with a plain reference writer.
 - **Every token is verified.** HS256 only, signature compared in constant time, then `exp`, `sub` and
   `username` are checked on each request.
 - **524,280 fixed slots.** One thread owns eight sparse tables with 65,535 slots each.

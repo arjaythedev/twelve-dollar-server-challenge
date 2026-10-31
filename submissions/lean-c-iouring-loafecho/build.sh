@@ -30,11 +30,17 @@ SQLITE_FLAGS="-DSQLITE_THREADSAFE=0 -DSQLITE_DEFAULT_MEMSTATUS=0 -DSQLITE_DQS=0
   -DSQLITE_LIKE_DOESNT_MATCH_BLOBS -DSQLITE_MAX_EXPR_DEPTH=0 -DSQLITE_OMIT_DEPRECATED
   -DSQLITE_OMIT_PROGRESS_CALLBACK -DSQLITE_OMIT_SHARED_CACHE -DSQLITE_OMIT_LOAD_EXTENSION
   -DSQLITE_USE_ALLOCA -DSQLITE_TEMP_STORE=3 -DHAVE_USLEEP=1 -DHAVE_FDATASYNC=1
-  -DSQLITE_OMIT_AUTOINIT"
+  -DSQLITE_OMIT_AUTOINIT -DSQLITE_OMIT_DECLTYPE -DSQLITE_DEFAULT_WAL_SYNCHRONOUS=1
+  -DSQLITE_STRICT_SUBTYPE=1 -DSQLITE_OMIT_AUTHORIZATION
+  -DSQLITE_OMIT_TRACE -DSQLITE_OMIT_COMPLETE -DSQLITE_OMIT_GET_TABLE
+  -DSQLITE_OMIT_TCL_VARIABLE -DSQLITE_OMIT_EXPLAIN -DSQLITE_OMIT_JSON"
 
 CC="${CC:-gcc}"
 # db.c #includes deps/sqlite3.c (one translation unit), so it gets -w.
-$CC -O2 -std=gnu11 -w $SQLITE_FLAGS -c src/db.c -o obj/db.o
-$CC -O2 -std=gnu11 -Wall -Wextra -c src/server.c -o obj/server.o
-$CC -O2 -o bin/server obj/server.o obj/db.o -luring -lm -lpthread -ldl
+# Built on the target machine itself, so -march=native is safe.
+CFLAGS="-O3 -flto=auto -march=native -fno-plt -fomit-frame-pointer
+  -fno-semantic-interposition -DNDEBUG"
+$CC $CFLAGS -std=gnu11 -w $SQLITE_FLAGS -c src/db.c -o obj/db.o
+$CC $CFLAGS -std=gnu11 -Wall -Wextra -c src/server.c -o obj/server.o
+$CC $CFLAGS -o bin/server obj/server.o obj/db.o -luring -lm -lpthread -ldl
 echo "build.sh: built bin/server"

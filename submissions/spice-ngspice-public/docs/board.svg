@@ -17,27 +17,33 @@
   <text x="95" y="310" text-anchor="middle" font-size="11">keep-alive</text>
 
   <!-- NIC -->
-  <rect x="190" y="150" width="190" height="270" rx="8" fill="#e8eef8" stroke="#3a5a8c" stroke-width="1.5"/>
+  <rect x="190" y="150" width="190" height="200" rx="8" fill="#e8eef8" stroke="#3a5a8c" stroke-width="1.5"/>
   <text x="285" y="174" text-anchor="middle" font-weight="bold">network card +</text>
   <text x="285" y="190" text-anchor="middle" font-weight="bold">storage controller</text>
   <text x="285" y="206" text-anchor="middle" font-size="11">nic.so (C), a d_cosim device</text>
   <text x="204" y="234" font-size="11">• epoll socket, frames requests</text>
   <text x="204" y="252" font-size="11">  (headers + Content-Length)</text>
   <text x="204" y="270" font-size="11">• bytes → pins, pins → bytes</text>
-  <text x="204" y="288" font-size="11">• runs the chip's SQL</text>
+  <text x="204" y="288" font-size="11">• hands the chip's SQL to SQLite</text>
   <text x="204" y="306" font-size="11">• pulses rst between jobs</text>
   <text x="204" y="324" font-size="11">• branches only on the chip's</text>
   <text x="204" y="342" font-size="11">  first byte: ! answer, ? SQL</text>
-  <rect x="215" y="360" width="140" height="44" rx="5" fill="#ffffff" stroke="#3a5a8c"/>
-  <text x="285" y="380" text-anchor="middle" font-weight="bold">SQLite</text>
-  <text x="285" y="396" text-anchor="middle" font-size="11">feed.db (library)</text>
+
+  <!-- SQLite: its own box, outside the chip -->
+  <rect x="40" y="370" width="200" height="74" rx="8" fill="#f0eaf6" stroke="#6b4a8c" stroke-width="1.5"/>
+  <text x="140" y="392" text-anchor="middle" font-weight="bold">SQLite (feed.db)</text>
+  <text x="140" y="409" text-anchor="middle" font-size="11">C library linked into nic.so</text>
+  <text x="140" y="425" text-anchor="middle" font-size="11" font-weight="bold" fill="#6b4a8c">not part of the chip</text>
+  <text x="140" y="439" text-anchor="middle" font-size="10" fill="#555">runs the SQL the chip wrote</text>
+  <line x1="285" y1="352" x2="210" y2="368" stroke="#6b4a8c" stroke-width="1.5" marker-end="url(#a)" marker-start="url(#a)"/>
+  <text x="270" y="376" font-size="10" fill="#6b4a8c">SQL text / rows</text>
 
   <line x1="150" y1="285" x2="188" y2="285" stroke="#333" stroke-width="1.5" marker-end="url(#a)" marker-start="url(#a)"/>
 
   <!-- chip -->
   <rect x="440" y="80" width="300" height="480" rx="8" fill="#fbf1e6" stroke="#a5631f" stroke-width="1.5"/>
-  <text x="590" y="104" text-anchor="middle" font-weight="bold">the chip: top.v (Verilog, Verilator)</text>
-  <text x="590" y="120" text-anchor="middle" font-size="11">a d_cosim device · core clock = 8 × board clock</text>
+  <text x="590" y="104" text-anchor="middle" font-weight="bold">THE CHIP: top.v (Verilog, Verilator)</text>
+  <text x="590" y="120" text-anchor="middle" font-size="11">a d_cosim device · core clock = 8 × board clock · no database inside</text>
 
   <rect x="460" y="134" width="120" height="44" rx="5" fill="#ffffff" stroke="#a5631f"/>
   <text x="520" y="153" text-anchor="middle" font-size="12">input FIFO</text>
@@ -111,6 +117,6 @@
   <!-- clock lines -->
   <path d="M380,500 L760,500 L760,560 L850,560 L850,432" stroke="#4a6b3a" stroke-width="1.5" fill="none" stroke-dasharray="5,3" marker-end="url(#a)"/>
   <path d="M590,500 L590,488" stroke="#4a6b3a" stroke-width="1.5" fill="none" stroke-dasharray="5,3"/>
-  <path d="M285,460 L285,422" stroke="#4a6b3a" stroke-width="1.5" fill="none" stroke-dasharray="5,3" marker-end="url(#a)"/>
+  <path d="M300,460 L300,354" stroke="#4a6b3a" stroke-width="1.5" fill="none" stroke-dasharray="5,3" marker-end="url(#a)"/>
   <text x="770" y="552" font-size="11" fill="#2f4a24">clk</text>
 </svg>

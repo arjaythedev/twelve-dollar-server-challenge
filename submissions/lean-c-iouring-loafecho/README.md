@@ -68,10 +68,9 @@ cd spec && lake build && lake env lean Spec/Axioms.lean
 - **Hand-rolled HTTP and JSON.** Requests are parsed in place from the receive buffer. Pipelined requests and requests
   split across reads are handled, and `Expect: 100-continue` is answered. Bodies are checked by a strict RFC 8259
   validator that decodes `\uXXXX` and surrogate pairs. Responses are written straight into the connection's send buffer
-  with an exact `Content-Length`. That buffer is taken from a shared free list of 8 KB buffers (kept up to 1,024, i.e.
-  the peak number of responses in flight; raw memory only, never read before the next response overwrites it, so not a
-  cache) and returned when its send completes, and a partial request's buffer is freed once the request is complete, so
-  an idle keep-alive connection holds no heap beyond its 112-byte slot.
+  with an exact `Content-Length`. That buffer is allocated per response (one malloc) and freed when its send completes,
+  and a partial request's buffer is freed once the request is complete, so an idle keep-alive connection holds no heap
+  beyond its 112-byte slot.
 - No response caches, no table copies in memory: every request reads SQLite through its own 256 MiB page cache (`cache_size=-262144`, `mmap_size=0`), so hot B-tree pages keep their parsed headers between fetches.
 - **A pass-through wrapper around SQLite's own page cache** (public `SQLITE_CONFIG_PCACHE2`; it forwards everything and stores no data itself) skips a COMMIT's page-cache truncate when its per-cache bitmap of page numbers shows nothing to drop: after a B-tree split moves a page through page number 262,145, the built-in cache otherwise walks its whole hash table on every COMMIT to drop nothing (`dbtest --pcache` tests it).
 

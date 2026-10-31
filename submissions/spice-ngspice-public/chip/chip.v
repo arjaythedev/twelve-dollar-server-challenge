@@ -167,7 +167,7 @@ module chip(input clk, input iv, input ie,
   reg [7:0] x, oc; reg [12:0] w; reg st_, emit_;
   reg [6:0] bv; reg [11:0] t12; reg [12:0] cnt;
   wire tok_inv = tbad || part != 2 || cbad || sign != 32 || sigc != 43 || h_err || !h_top || !alg_ok || p_err || !p_top ||
-                 (e_has && (!e_num || e_bad || expv <= now));
+                 (!e_has || !e_num || e_bad || expv <= now);
   wire pay_inv = !(sub_has && sub_str && !sub_bad && sub_nz && u_has && u_str && !u_long);
 
   always @(posedge clk) begin

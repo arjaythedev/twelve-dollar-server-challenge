@@ -16,6 +16,10 @@
 #include <time.h>
 #include <unistd.h>
 #include <emmintrin.h>
+#include <linux/io_uring.h>
+#include <poll.h>
+#include <sys/mman.h>
+#include <sys/syscall.h>
 #include "sqlite3.h"
 
 /* ---------------------------------------------------------------- SHA-256 / HMAC */
@@ -575,6 +579,21 @@ static void emit(int st, int close_after) {
   obuf.n = (size_t)(o - obuf.p);
 }
 
+/* Answer every complete request in buf[0..total) into obuf. *used = bytes consumed; returns 1 if the connection must close. */
+static int run_requests(const char *buf, size_t total, size_t *used) {
+  size_t pos = 0; int closing = 0;
+  obuf.n = 0;
+  while (pos < total) {
+    req r; long u = parse_req(buf + pos, total - pos, &r);
+    if (u == 0) break;
+    if (u < 0) { err(400, "bad request"); emit(400, 1); closing = 1; break; }
+    int st = handle(&r); emit(st, r.close); pos += (size_t)u;
+    if (r.close) { closing = 1; break; }
+  }
+  *used = pos;
+  return closing;
+}
+
 /* ---------------------------------------------------------------- connections / epoll */
 typedef struct { char *pend; uint32_t plen; char *wbuf; uint32_t wlen, woff; uint8_t closing; } conn;
 static conn *conns; static int maxfd, ep;
@@ -593,15 +612,8 @@ static void on_readable(int fd) {
   ssize_t n = read(fd, rbuf + off, RBUF_SZ - off);
   if (n < 0 && (errno == EAGAIN || errno == EINTR)) return;
   if (n <= 0) { close_conn(fd); return; }
-  size_t total = off + (size_t)n, pos = 0; int closing = 0;
-  obuf.n = 0;
-  while (pos < total) {
-    req r; long used = parse_req(rbuf + pos, total - pos, &r);
-    if (used == 0) break;
-    if (used < 0) { err(400, "bad request"); emit(400, 1); closing = 1; break; }
-    int st = handle(&r); emit(st, r.close); pos += (size_t)used;
-    if (r.close) { closing = 1; break; }
-  }
+  size_t total = off + (size_t)n, pos = 0;
+  int closing = run_requests(rbuf, total, &pos);
   if (!closing && pos < total) {
     size_t rem = total - pos;
     c->pend = realloc(c->pend, rem); memcpy(c->pend, rbuf + pos, rem); c->plen = (uint32_t)rem;
@@ -628,6 +640,265 @@ static void on_writable(int fd) {
   set_events(fd, EPOLLIN);
 }
 
+/* ---------------------------------------------------------------- io_uring front end */
+#define UR_NB 256                                   /* pooled receive buffers (RBUF_SZ each, touched lazily) */
+enum { U_ACCEPT = 1, U_POLL, U_RECV, U_SEND, U_CLOSE, U_CANCEL, U_RINGPOLL };
+enum { S_FREE = 0, S_IDLE, S_RECV, S_SEND, S_CLOSING };
+/* user_data: type (4 bits) | slot (20 bits) | generation (32 bits); the generation drops late CQEs of a reused slot */
+#define UD(t, s, g) ((uint64_t)(t) | ((uint64_t)(s) << 4) | ((uint64_t)(g) << 24))
+
+typedef struct {
+  int fd;
+  unsigned *sq_head, *sq_tail, *cq_head, *cq_tail;
+  unsigned sq_mask, cq_mask, sq_entries, sq_local, to_submit;
+  struct io_uring_sqe *sqes; struct io_uring_cqe *cqes;
+  int accept_armed, accept_cancel, want_accept, accept_errs; unsigned nconn;
+} uring;
+typedef struct {
+  char *pend, *wbuf; uint32_t plen, wlen, woff, gen, wnext;
+  int32_t rb; uint8_t state, closing, ready;
+} uconn;
+
+static uring *rg; static int NR; static unsigned NT, NMARGIN;
+static uconn *U;
+static char rslots[UR_NB][RBUF_SZ];
+static int ur_free[UR_NB], ur_nfree;
+static uint32_t wq_head, wq_tail;                   /* FIFO of connections waiting for a buffer (global id + 1) */
+
+static int sys_setup(unsigned n, struct io_uring_params *p) { return (int)syscall(__NR_io_uring_setup, n, p); }
+static int sys_enter(int fd, unsigned submit, unsigned wait, unsigned flags) {
+  return (int)syscall(__NR_io_uring_enter, fd, submit, wait, flags, NULL, 0);
+}
+static int sys_register(int fd, unsigned op, void *arg, unsigned n) { return (int)syscall(__NR_io_uring_register, fd, op, arg, n); }
+
+static int ring_init(uring *r, unsigned sq, unsigned cq, unsigned nslots) {
+  struct io_uring_params p; int fd;
+  memset(&p, 0, sizeof p);
+  p.flags = IORING_SETUP_CQSIZE | IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_COOP_TASKRUN; p.cq_entries = cq;
+  fd = sys_setup(sq, &p);
+  if (fd < 0) { memset(&p, 0, sizeof p); p.flags = IORING_SETUP_CQSIZE; p.cq_entries = cq; fd = sys_setup(sq, &p); }
+  if (fd < 0) return -1;
+  if (!(p.features & IORING_FEAT_SINGLE_MMAP) || !(p.features & IORING_FEAT_NODROP)) { close(fd); errno = ENOSYS; return -1; }
+  size_t sz = p.sq_off.array + p.sq_entries * sizeof(unsigned);
+  size_t cz = p.cq_off.cqes + p.cq_entries * sizeof(struct io_uring_cqe);
+  if (cz > sz) sz = cz;
+  char *m = mmap(NULL, sz, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_POPULATE, fd, IORING_OFF_SQ_RING);
+  if (m == MAP_FAILED) { int e = errno; close(fd); errno = e; return -1; }
+  void *sqes = mmap(NULL, p.sq_entries * sizeof(struct io_uring_sqe), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_POPULATE, fd, IORING_OFF_SQES);
+  if (sqes == MAP_FAILED) { int e = errno; close(fd); errno = e; return -1; }
+  r->fd = fd; r->sqes = sqes; r->sq_entries = p.sq_entries;
+  r->sq_head = (unsigned *)(m + p.sq_off.head); r->sq_tail = (unsigned *)(m + p.sq_off.tail);
+  r->sq_mask = *(unsigned *)(m + p.sq_off.ring_mask);
+  unsigned *arr = (unsigned *)(m + p.sq_off.array);
+  for (unsigned i = 0; i < p.sq_entries; i++) arr[i] = i;
+  r->cq_head = (unsigned *)(m + p.cq_off.head); r->cq_tail = (unsigned *)(m + p.cq_off.tail);
+  r->cq_mask = *(unsigned *)(m + p.cq_off.ring_mask); r->cqes = (struct io_uring_cqe *)(m + p.cq_off.cqes);
+  struct io_uring_rsrc_register rr; memset(&rr, 0, sizeof rr);
+  rr.nr = nslots; rr.flags = IORING_RSRC_REGISTER_SPARSE;
+  if (sys_register(fd, IORING_REGISTER_FILES2, &rr, sizeof rr) < 0) { int e = errno; close(fd); errno = e; return -1; }
+  return 0;
+}
+static void ring_flush(uring *r) {                  /* submit everything queued, without waiting */
+  __atomic_store_n(r->sq_tail, r->sq_local, __ATOMIC_RELEASE);
+  while (r->to_submit) {
+    int n = sys_enter(r->fd, r->to_submit, 0, 0);
+    if (n < 0) { if (errno == EINTR) continue; if (errno == EBUSY || errno == EAGAIN) return; perror("io_uring_enter"); exit(1); }
+    if (n == 0) return;
+    r->to_submit -= (unsigned)n;
+  }
+}
+static struct io_uring_sqe *get_sqe(uring *r) {
+  if (r->sq_local - __atomic_load_n(r->sq_head, __ATOMIC_ACQUIRE) >= r->sq_entries) {
+    ring_flush(r);
+    if (r->sq_local - __atomic_load_n(r->sq_head, __ATOMIC_ACQUIRE) >= r->sq_entries) { fprintf(stderr, "io_uring: submission queue full\n"); exit(1); }
+  }
+  struct io_uring_sqe *s = &r->sqes[r->sq_local & r->sq_mask];
+  memset(s, 0, sizeof *s); r->sq_local++; r->to_submit++;
+  return s;
+}
+static void sq_accept(uring *r, int lfd) {
+  struct io_uring_sqe *s = get_sqe(r);
+  s->opcode = IORING_OP_ACCEPT; s->fd = lfd; s->ioprio = IORING_ACCEPT_MULTISHOT;
+  s->file_index = IORING_FILE_INDEX_ALLOC; s->user_data = UD(U_ACCEPT, 0, 0);
+}
+static void sq_cancel(uring *r, uint64_t target) {
+  struct io_uring_sqe *s = get_sqe(r);
+  s->opcode = IORING_OP_ASYNC_CANCEL; s->addr = target; s->user_data = UD(U_CANCEL, 0, 0);
+}
+static void sq_poll(uring *r, unsigned slot, uint32_t gen) {
+  struct io_uring_sqe *s = get_sqe(r);
+  s->opcode = IORING_OP_POLL_ADD; s->fd = (int)slot; s->flags = IOSQE_FIXED_FILE;
+  s->len = IORING_POLL_ADD_MULTI; s->poll32_events = POLLIN | POLLRDHUP; s->user_data = UD(U_POLL, slot, gen);
+}
+static void sq_recv(uring *r, unsigned slot, uint32_t gen, char *buf, size_t len) {
+  struct io_uring_sqe *s = get_sqe(r);
+  s->opcode = IORING_OP_RECV; s->fd = (int)slot; s->flags = IOSQE_FIXED_FILE;
+  s->addr = (uint64_t)(uintptr_t)buf; s->len = (uint32_t)len; s->msg_flags = MSG_DONTWAIT; s->user_data = UD(U_RECV, slot, gen);
+}
+static void sq_send(uring *r, unsigned slot, uint32_t gen, const char *buf, size_t len) {
+  struct io_uring_sqe *s = get_sqe(r);
+  s->opcode = IORING_OP_SEND; s->fd = (int)slot; s->flags = IOSQE_FIXED_FILE;
+  s->addr = (uint64_t)(uintptr_t)buf; s->len = (uint32_t)len; s->msg_flags = MSG_NOSIGNAL; s->user_data = UD(U_SEND, slot, gen);
+}
+
+static uconn *uc(int ri, unsigned slot) { return &U[(size_t)ri * NT + slot]; }
+
+static void u_close(int ri, unsigned slot) {
+  uring *r = &rg[ri]; uconn *c = uc(ri, slot); uint32_t gen = c->gen;
+  free(c->pend); free(c->wbuf); c->pend = c->wbuf = NULL; c->plen = c->wlen = c->woff = 0;
+  if (c->rb >= 0) { ur_free[ur_nfree++] = c->rb; c->rb = -1; }
+  c->state = S_CLOSING;
+  sq_cancel(r, UD(U_POLL, slot, gen));              /* the multishot poll holds a reference to the socket */
+  struct io_uring_sqe *s = get_sqe(r);
+  s->opcode = IORING_OP_CLOSE; s->file_index = slot + 1; s->user_data = UD(U_CLOSE, slot, gen);
+}
+static void issue_recv(int ri, unsigned slot) {     /* needs a free buffer; conn is in S_RECV */
+  uconn *c = uc(ri, slot);
+  int b = ur_free[--ur_nfree]; char *buf = rslots[b]; size_t off = c->plen;
+  if (off >= RBUF_SZ) { ur_free[ur_nfree++] = b; u_close(ri, slot); return; }
+  if (off) memcpy(buf, c->pend, off);
+  c->rb = b;
+  sq_recv(&rg[ri], slot, c->gen, buf + off, RBUF_SZ - off);
+}
+static void start_recv(int ri, unsigned slot) {
+  uconn *c = uc(ri, slot);
+  c->state = S_RECV; c->ready = 0; c->rb = -1;
+  if (ur_nfree) { issue_recv(ri, slot); return; }
+  uint32_t g = (uint32_t)((size_t)ri * NT + slot) + 1; c->wnext = 0;
+  if (wq_tail) U[wq_tail - 1].wnext = g; else wq_head = g;
+  wq_tail = g;
+}
+static void dispatch_waiters(void) {
+  while (wq_head && ur_nfree) {
+    uint32_t g = wq_head - 1; uconn *c = &U[g];
+    wq_head = c->wnext; if (!wq_head) wq_tail = 0;
+    c->wnext = 0;
+    issue_recv((int)(g / NT), g % NT);
+  }
+}
+
+static void on_cqe(int ri, uint64_t ud, int res, unsigned fl) {
+  uring *r = &rg[ri];
+  unsigned type = (unsigned)(ud & 15), slot = (unsigned)((ud >> 4) & 0xFFFFF); uint32_t gen = (uint32_t)(ud >> 24);
+  uconn *c = (type >= U_POLL && type <= U_CLOSE && slot < NT) ? uc(ri, slot) : NULL;
+  switch (type) {
+  case U_ACCEPT:
+    if (res >= 0) {
+      slot = (unsigned)res; c = uc(ri, slot);
+      uint32_t g = c->gen + 1; memset(c, 0, sizeof *c); c->gen = g; c->rb = -1; c->state = S_IDLE;
+      r->nconn++; sq_poll(r, slot, g);
+    }
+    if (!(fl & IORING_CQE_F_MORE)) {
+      r->accept_armed = 0; r->accept_cancel = 0; r->want_accept = 1;
+      if (res < 0 && res != -ECANCELED && res != -ENFILE && ++r->accept_errs > 1000) { fprintf(stderr, "io_uring accept failing: %d\n", res); exit(1); }
+    }
+    break;
+  case U_POLL:
+    if (c->gen != gen || c->state == S_CLOSING || c->state == S_FREE) break;
+    if (res < 0) { if (c->state == S_IDLE) u_close(ri, slot); else c->closing = 1; break; }
+    if (!(fl & IORING_CQE_F_MORE)) sq_poll(r, slot, gen);         /* the kernel ended the multishot: re-arm */
+    if (c->state == S_IDLE) start_recv(ri, slot); else c->ready = 1;
+    break;
+  case U_RECV: {
+    if (c->gen != gen || c->state != S_RECV || c->rb < 0) break;
+    int b = c->rb; char *buf = rslots[b]; size_t off = c->plen;
+    if (res <= 0) {
+      ur_free[ur_nfree++] = b; c->rb = -1;
+      if (res == -EAGAIN || res == -EINTR) { c->state = S_IDLE; if (c->ready) start_recv(ri, slot); }
+      else u_close(ri, slot);
+      break;
+    }
+    size_t total = off + (size_t)res, pos = 0;
+    int closing = run_requests(buf, total, &pos);
+    if ((size_t)res == RBUF_SZ - off) c->ready = 1;                 /* buffer was full: more may be waiting in the socket */
+    if (!closing && pos < total) {
+      size_t rem = total - pos; c->pend = realloc(c->pend, rem); memcpy(c->pend, buf + pos, rem); c->plen = (uint32_t)rem;
+    } else { free(c->pend); c->pend = NULL; c->plen = 0; }
+    ur_free[ur_nfree++] = b; c->rb = -1;
+    if (obuf.n) {
+      c->wbuf = malloc(obuf.n); if (!c->wbuf) abort();
+      memcpy(c->wbuf, obuf.p, obuf.n);
+      c->wlen = (uint32_t)obuf.n; c->woff = 0; c->closing |= (uint8_t)closing; c->state = S_SEND;
+      sq_send(r, slot, gen, c->wbuf, c->wlen);
+    } else if (closing || c->closing) u_close(ri, slot);
+    else { c->state = S_IDLE; if (c->ready) start_recv(ri, slot); }
+    break;
+  }
+  case U_SEND:
+    if (c->gen != gen || c->state != S_SEND) break;
+    if (res == -EINTR) { sq_send(r, slot, gen, c->wbuf + c->woff, c->wlen - c->woff); break; }
+    if (res <= 0) { u_close(ri, slot); break; }
+    c->woff += (uint32_t)res;
+    if (c->woff < c->wlen) { sq_send(r, slot, gen, c->wbuf + c->woff, c->wlen - c->woff); break; }
+    free(c->wbuf); c->wbuf = NULL; c->wlen = c->woff = 0;
+    if (c->closing) u_close(ri, slot);
+    else { c->state = S_IDLE; if (c->ready) start_recv(ri, slot); }
+    break;
+  case U_CLOSE:
+    r->nconn--; r->want_accept = 1;
+    if (c->gen == gen && c->state == S_CLOSING) c->state = S_FREE;
+    break;
+  case U_RINGPOLL:
+    if (!(fl & IORING_CQE_F_MORE)) {
+      struct io_uring_sqe *s = get_sqe(&rg[0]);
+      s->opcode = IORING_OP_POLL_ADD; s->fd = rg[slot].fd; s->len = IORING_POLL_ADD_MULTI;
+      s->poll32_events = POLLIN; s->user_data = UD(U_RINGPOLL, slot, 0);
+    }
+    break;
+  default: break;                                    /* U_CANCEL: nothing to do */
+  }
+  dispatch_waiters();
+}
+static void reap(int ri) {
+  uring *r = &rg[ri];
+  unsigned head = *r->cq_head, tail = __atomic_load_n(r->cq_tail, __ATOMIC_ACQUIRE), n = 0;
+  while (head != tail && n < 2048) {
+    struct io_uring_cqe e = r->cqes[head & r->cq_mask];
+    head++; n++;
+    on_cqe(ri, e.user_data, e.res, e.flags);
+  }
+  __atomic_store_n(r->cq_head, head, __ATOMIC_RELEASE);
+}
+
+/* Returns only if io_uring cannot be used (the caller then falls back to epoll). */
+static int uring_serve(int lfd, unsigned nofile, const char *host, const char *port) {
+  const char *e;
+  NT = nofile < 65535 ? nofile : 65535; NR = 6;
+  if ((e = getenv("URING_SLOTS")) && atoi(e) > 0 && (unsigned)atoi(e) < NT) NT = (unsigned)atoi(e);
+  if ((e = getenv("URING_RINGS")) && atoi(e) > 0 && atoi(e) <= 64) NR = atoi(e);
+  if (NT < 16) return -1;
+  /* accepted-but-unplaceable sockets would be dropped, so stop accepting a ring before its table fills:
+     a whole listen backlog can be accepted in one go */
+  NMARGIN = NT / 8 > 4608 ? 4608 : NT / 8;
+  rg = calloc((size_t)NR, sizeof *rg);
+  for (int i = 0; i < NR; i++)
+    if (ring_init(&rg[i], 8192, 32768, NT) < 0) { fprintf(stderr, "io_uring unavailable (%s), using epoll\n", strerror(errno)); return -1; }
+  U = calloc((size_t)NR * NT, sizeof(uconn));
+  if (!U) return -1;
+  for (int i = 0; i < UR_NB; i++) ur_free[ur_nfree++] = i;
+  for (int i = 0; i < NR; i++) { rg[i].want_accept = 1; }
+  for (int i = 1; i < NR; i++) {                     /* ring 0 sleeps for everyone: it watches the other rings */
+    struct io_uring_sqe *s = get_sqe(&rg[0]);
+    s->opcode = IORING_OP_POLL_ADD; s->fd = rg[i].fd; s->len = IORING_POLL_ADD_MULTI;
+    s->poll32_events = POLLIN; s->user_data = UD(U_RINGPOLL, (unsigned)i, 0);
+  }
+  fprintf(stderr, "listening on %s:%s io_uring: %d rings of %u direct sockets\n", host, port, NR, NT);
+  for (;;) {
+    for (int i = 0; i < NR; i++) {
+      uring *r = &rg[i];
+      if (!r->accept_armed && r->want_accept && r->nconn + NMARGIN < NT) { sq_accept(r, lfd); r->accept_armed = 1; r->want_accept = 0; }
+      else if (r->accept_armed && !r->accept_cancel && r->nconn + NMARGIN >= NT) { sq_cancel(r, UD(U_ACCEPT, 0, 0)); r->accept_cancel = 1; }
+    }
+    for (int i = 1; i < NR; i++) ring_flush(&rg[i]);
+    uring *r0 = &rg[0];
+    __atomic_store_n(r0->sq_tail, r0->sq_local, __ATOMIC_RELEASE);
+    int n = sys_enter(r0->fd, r0->to_submit, 1, IORING_ENTER_GETEVENTS);
+    if (n < 0) { if (errno != EINTR && errno != EBUSY && errno != EAGAIN) { perror("io_uring_enter"); exit(1); } }
+    else r0->to_submit -= (unsigned)n;
+    for (int i = 0; i < NR; i++) reap(i);
+  }
+}
+
 int main(void) {
   signal(SIGPIPE, SIG_IGN);
   const char *path = getenv("SQLITE_PATH"), *secret = getenv("JWT_SECRET");
@@ -650,6 +921,8 @@ int main(void) {
   if (inet_pton(AF_INET, host, &a.sin_addr) != 1) { fprintf(stderr, "bad HOST\n"); return 1; }
   if (bind(lfd, (struct sockaddr *)&a, sizeof a) < 0) { perror("bind"); return 1; }
   if (listen(lfd, 4096) < 0) { perror("listen"); return 1; }
+  setsockopt(lfd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);   /* accepted sockets inherit it */
+  if (!getenv("NO_URING")) uring_serve(lfd, (unsigned)rl.rlim_cur, host, port);
   ep = epoll_create1(EPOLL_CLOEXEC);
   struct epoll_event ev = {.events = EPOLLIN, .data.fd = lfd};
   epoll_ctl(ep, EPOLL_CTL_ADD, lfd, &ev);

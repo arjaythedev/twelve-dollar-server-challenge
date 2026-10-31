@@ -1,0 +1,648 @@
+// $12 Server Challenge: baseline. Single-threaded epoll, hand-rolled HTTP/JSON/JWT, SQLite in-process.
+#define _GNU_SOURCE
+#include <arpa/inet.h>
+#include <ctype.h>
+#include <errno.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <signal.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/epoll.h>
+#include <sys/resource.h>
+#include <sys/socket.h>
+#include <time.h>
+#include <unistd.h>
+#include "sqlite3.h"
+
+/* ---------------------------------------------------------------- SHA-256 / HMAC */
+typedef struct { uint32_t h[8]; uint8_t b[64]; uint64_t len; size_t bl; } sha_ctx;
+static const uint32_t K[64] = {
+ 0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+ 0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+ 0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+ 0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+ 0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+ 0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+ 0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+ 0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2};
+static inline uint32_t ror(uint32_t x, int n) { return (x >> n) | (x << (32 - n)); }
+static void sha_block(uint32_t h[8], const uint8_t *p) {
+  uint32_t w[64];
+  for (int i = 0; i < 16; i++)
+    w[i] = (uint32_t)p[4*i] << 24 | (uint32_t)p[4*i+1] << 16 | (uint32_t)p[4*i+2] << 8 | p[4*i+3];
+  for (int i = 16; i < 64; i++) {
+    uint32_t s0 = ror(w[i-15], 7) ^ ror(w[i-15], 18) ^ (w[i-15] >> 3);
+    uint32_t s1 = ror(w[i-2], 17) ^ ror(w[i-2], 19) ^ (w[i-2] >> 10);
+    w[i] = w[i-16] + s0 + w[i-7] + s1;
+  }
+  uint32_t a=h[0],b=h[1],c=h[2],d=h[3],e=h[4],f=h[5],g=h[6],hh=h[7];
+  for (int i = 0; i < 64; i++) {
+    uint32_t S1 = ror(e,6) ^ ror(e,11) ^ ror(e,25), ch = (e & f) ^ (~e & g);
+    uint32_t t1 = hh + S1 + ch + K[i] + w[i];
+    uint32_t S0 = ror(a,2) ^ ror(a,13) ^ ror(a,22), mj = (a & b) ^ (a & c) ^ (b & c);
+    uint32_t t2 = S0 + mj;
+    hh = g; g = f; f = e; e = d + t1; d = c; c = b; b = a; a = t1 + t2;
+  }
+  h[0]+=a; h[1]+=b; h[2]+=c; h[3]+=d; h[4]+=e; h[5]+=f; h[6]+=g; h[7]+=hh;
+}
+static void sha_init(sha_ctx *c) {
+  static const uint32_t iv[8] = {0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19};
+  memcpy(c->h, iv, sizeof iv); c->len = 0; c->bl = 0;
+}
+static void sha_update(sha_ctx *c, const uint8_t *p, size_t n) {
+  c->len += n;
+  if (c->bl) {
+    size_t t = 64 - c->bl; if (t > n) t = n;
+    memcpy(c->b + c->bl, p, t); c->bl += t; p += t; n -= t;
+    if (c->bl < 64) return;
+    sha_block(c->h, c->b); c->bl = 0;
+  }
+  while (n >= 64) { sha_block(c->h, p); p += 64; n -= 64; }
+  if (n) { memcpy(c->b, p, n); c->bl = n; }
+}
+static void sha_final(sha_ctx *c, uint8_t out[32]) {
+  uint64_t bits = c->len * 8;
+  uint8_t pad[72] = {0x80};
+  size_t padn = (c->bl < 56) ? 56 - c->bl : 120 - c->bl;
+  for (int i = 0; i < 8; i++) pad[padn + i] = (uint8_t)(bits >> (56 - 8*i));
+  sha_update(c, pad, padn + 8);
+  for (int i = 0; i < 8; i++) {
+    out[4*i] = c->h[i] >> 24; out[4*i+1] = c->h[i] >> 16; out[4*i+2] = c->h[i] >> 8; out[4*i+3] = c->h[i];
+  }
+}
+static sha_ctx hm_in, hm_out;   /* midstates after ipad / opad: one block saved per verification */
+static void hmac_init(const uint8_t *key, size_t kl) {
+  uint8_t k[64] = {0}, pad[64];
+  if (kl > 64) { sha_ctx c; sha_init(&c); sha_update(&c, key, kl); sha_final(&c, k); }
+  else memcpy(k, key, kl);
+  for (int i = 0; i < 64; i++) pad[i] = k[i] ^ 0x36;
+  sha_init(&hm_in); sha_update(&hm_in, pad, 64);
+  for (int i = 0; i < 64; i++) pad[i] = k[i] ^ 0x5c;
+  sha_init(&hm_out); sha_update(&hm_out, pad, 64);
+}
+static void hmac(const uint8_t *m, size_t n, uint8_t out[32]) {
+  sha_ctx c = hm_in; uint8_t in[32];
+  sha_update(&c, m, n); sha_final(&c, in);
+  c = hm_out; sha_update(&c, in, 32); sha_final(&c, out);
+}
+
+/* ---------------------------------------------------------------- base64url */
+static int8_t b64t[256];
+static void b64_init(void) {
+  memset(b64t, -1, sizeof b64t);
+  for (int i = 0; i < 26; i++) { b64t['A'+i] = i; b64t['a'+i] = 26 + i; }
+  for (int i = 0; i < 10; i++) b64t['0'+i] = 52 + i;
+  b64t['-'] = 62; b64t['_'] = 63;
+}
+static long b64_dec(const char *s, size_t n, uint8_t *out, size_t cap) {
+  if (n % 4 == 1) return -1;
+  size_t o = 0; uint32_t acc = 0; int bits = 0;
+  for (size_t i = 0; i < n; i++) {
+    int v = b64t[(uint8_t)s[i]]; if (v < 0) return -1;
+    acc = (acc << 6) | (uint32_t)v; bits += 6;
+    if (bits >= 8) { bits -= 8; if (o >= cap) return -1; out[o++] = (uint8_t)(acc >> bits); }
+  }
+  return (long)o;
+}
+
+/* ---------------------------------------------------------------- JSON (validating, zero-alloc) */
+typedef struct { const char *p, *e; } jc;
+enum { J_MISSING = 0, J_STR, J_NUM, J_OTHER };
+static void jws(jc *c) { while (c->p < c->e && (*c->p == ' ' || *c->p == '\t' || *c->p == '\n' || *c->p == '\r')) c->p++; }
+static int jstr(jc *c) {            /* c->p at opening quote */
+  c->p++;
+  while (c->p < c->e) {
+    unsigned char ch = (unsigned char)*c->p;
+    if (ch == '"') { c->p++; return 0; }
+    if (ch < 0x20) return -1;
+    if (ch == '\\') {
+      c->p++; if (c->p >= c->e) return -1;
+      ch = (unsigned char)*c->p;
+      if (ch && strchr("\"\\/bfnrt", ch)) { c->p++; continue; }
+      if (ch == 'u') {
+        if (c->e - c->p < 5) return -1;
+        for (int i = 1; i <= 4; i++) if (!isxdigit((unsigned char)c->p[i])) return -1;
+        c->p += 5; continue;
+      }
+      return -1;
+    }
+    c->p++;
+  }
+  return -1;
+}
+static int jdig(jc *c) { return c->p < c->e && *c->p >= '0' && *c->p <= '9'; }
+static int jnum(jc *c) {
+  if (*c->p == '-') c->p++;
+  if (c->p >= c->e) return -1;
+  if (*c->p == '0') c->p++;
+  else if (jdig(c)) while (jdig(c)) c->p++;
+  else return -1;
+  if (c->p < c->e && *c->p == '.') { c->p++; if (!jdig(c)) return -1; while (jdig(c)) c->p++; }
+  if (c->p < c->e && (*c->p == 'e' || *c->p == 'E')) {
+    c->p++; if (c->p < c->e && (*c->p == '+' || *c->p == '-')) c->p++;
+    if (!jdig(c)) return -1;
+    while (jdig(c)) c->p++;
+  }
+  return 0;
+}
+static int jlit(jc *c, const char *l) {
+  size_t n = strlen(l);
+  if ((size_t)(c->e - c->p) >= n && !memcmp(c->p, l, n)) { c->p += n; return 0; }
+  return -1;
+}
+static int jval(jc *c, int d) {
+  if (d > 32 || c->p >= c->e) return -1;
+  switch (*c->p) {
+  case '"': return jstr(c);
+  case 't': return jlit(c, "true");
+  case 'f': return jlit(c, "false");
+  case 'n': return jlit(c, "null");
+  case '{':
+    c->p++; jws(c);
+    if (c->p < c->e && *c->p == '}') { c->p++; return 0; }
+    for (;;) {
+      jws(c); if (c->p >= c->e || *c->p != '"' || jstr(c)) return -1;
+      jws(c); if (c->p >= c->e || *c->p != ':') return -1;
+      c->p++; jws(c); if (jval(c, d + 1)) return -1;
+      jws(c); if (c->p >= c->e) return -1;
+      if (*c->p == ',') { c->p++; continue; }
+      if (*c->p == '}') { c->p++; return 0; }
+      return -1;
+    }
+  case '[':
+    c->p++; jws(c);
+    if (c->p < c->e && *c->p == ']') { c->p++; return 0; }
+    for (;;) {
+      jws(c); if (jval(c, d + 1)) return -1;
+      jws(c); if (c->p >= c->e) return -1;
+      if (*c->p == ',') { c->p++; continue; }
+      if (*c->p == ']') { c->p++; return 0; }
+      return -1;
+    }
+  default: return jnum(c);
+  }
+}
+/* 0 ok, -1 malformed, -2 valid JSON but not an object. Last duplicate key wins. */
+static int jget(const char *s, size_t n, const char *key, int *type, const char **v, size_t *vl) {
+  jc c = {s, s + n};
+  *type = J_MISSING; *v = NULL; *vl = 0;
+  jws(&c); if (c.p >= c.e) return -1;
+  if (*c.p != '{') { if (jval(&c, 0)) return -1; jws(&c); return c.p == c.e ? -2 : -1; }
+  size_t kl = strlen(key);
+  c.p++; jws(&c);
+  if (c.p < c.e && *c.p == '}') c.p++;
+  else for (;;) {
+    jws(&c); if (c.p >= c.e || *c.p != '"') return -1;
+    const char *ks = c.p + 1; if (jstr(&c)) return -1;
+    size_t kn = (size_t)(c.p - 1 - ks);
+    jws(&c); if (c.p >= c.e || *c.p != ':') return -1;
+    c.p++; jws(&c);
+    const char *vs = c.p; if (jval(&c, 1)) return -1;
+    size_t vn = (size_t)(c.p - vs);
+    if (kn == kl && !memcmp(ks, key, kl)) {
+      if (*vs == '"') { *type = J_STR; *v = vs + 1; *vl = vn - 2; }
+      else if (*vs == '-' || (*vs >= '0' && *vs <= '9')) { *type = J_NUM; *v = vs; *vl = vn; }
+      else { *type = J_OTHER; *v = vs; *vl = vn; }
+    }
+    jws(&c); if (c.p >= c.e) return -1;
+    if (*c.p == ',') { c.p++; continue; }
+    if (*c.p == '}') { c.p++; break; }
+    return -1;
+  }
+  jws(&c); return c.p == c.e ? 0 : -1;
+}
+static int hv(int c) {
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+  return 0;
+}
+static uint32_t hex4(const char *s) { return (uint32_t)(hv(s[0]) << 12 | hv(s[1]) << 8 | hv(s[2]) << 4 | hv(s[3])); }
+static int u8enc(uint32_t c, char *o) {
+  if (c < 0x80) { o[0] = (char)c; return 1; }
+  if (c < 0x800) { o[0] = (char)(0xC0 | (c >> 6)); o[1] = (char)(0x80 | (c & 63)); return 2; }
+  if (c < 0x10000) { o[0] = (char)(0xE0 | (c >> 12)); o[1] = (char)(0x80 | ((c >> 6) & 63)); o[2] = (char)(0x80 | (c & 63)); return 3; }
+  o[0] = (char)(0xF0 | (c >> 18)); o[1] = (char)(0x80 | ((c >> 12) & 63)); o[2] = (char)(0x80 | ((c >> 6) & 63)); o[3] = (char)(0x80 | (c & 63));
+  return 4;
+}
+/* decode a validated JSON string span; output is never longer than input */
+static size_t jdec(const char *s, size_t n, char *out) {
+  char *o = out; const char *e = s + n;
+  while (s < e) {
+    unsigned char ch = (unsigned char)*s++;
+    if (ch != '\\') { *o++ = (char)ch; continue; }
+    ch = (unsigned char)*s++;
+    switch (ch) {
+    case 'n': *o++ = '\n'; break;
+    case 'r': *o++ = '\r'; break;
+    case 't': *o++ = '\t'; break;
+    case 'b': *o++ = '\b'; break;
+    case 'f': *o++ = '\f'; break;
+    case 'u': {
+      uint32_t cp = hex4(s); s += 4;
+      if (cp >= 0xD800 && cp < 0xDC00) {
+        if (e - s >= 6 && s[0] == '\\' && s[1] == 'u') {
+          uint32_t lo = hex4(s + 2);
+          if (lo >= 0xDC00 && lo < 0xE000) { cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00); s += 6; }
+          else cp = 0xFFFD;
+        } else cp = 0xFFFD;
+      } else if (cp >= 0xDC00 && cp < 0xE000) cp = 0xFFFD;
+      o += u8enc(cp, o); break;
+    }
+    default: *o++ = (char)ch; break;   /* " \ / */
+    }
+  }
+  return (size_t)(o - out);
+}
+
+/* ---------------------------------------------------------------- output buffers */
+typedef struct { char *p; size_t n, cap; } buf;
+static buf obuf, body;
+static void bres(buf *b, size_t add) {
+  if (b->n + add <= b->cap) return;
+  size_t nc = b->cap ? b->cap : 4096;
+  while (nc < b->n + add) nc *= 2;
+  b->p = realloc(b->p, nc); if (!b->p) abort();
+  b->cap = nc;
+}
+static void bput(buf *b, const void *s, size_t n) { bres(b, n); memcpy(b->p + b->n, s, n); b->n += n; }
+static void bstr(buf *b, const char *s) { bput(b, s, strlen(s)); }
+static void bint(buf *b, long long v) { char t[24]; int l = snprintf(t, sizeof t, "%lld", v); bput(b, t, (size_t)l); }
+static void besc(buf *b, const char *s, size_t n) {
+  bres(b, n * 6 + 1);
+  char *o = b->p + b->n;
+  for (size_t i = 0; i < n; i++) {
+    unsigned char c = (unsigned char)s[i];
+    if (c == '"') { *o++ = '\\'; *o++ = '"'; }
+    else if (c == '\\') { *o++ = '\\'; *o++ = '\\'; }
+    else if (c < 0x20) {
+      switch (c) {
+      case '\n': *o++ = '\\'; *o++ = 'n'; break;
+      case '\r': *o++ = '\\'; *o++ = 'r'; break;
+      case '\t': *o++ = '\\'; *o++ = 't'; break;
+      default: o += sprintf(o, "\\u%04x", c);
+      }
+    } else *o++ = (char)c;
+  }
+  b->n = (size_t)(o - b->p);
+}
+
+/* ---------------------------------------------------------------- DB */
+static sqlite3 *db;
+static sqlite3_stmt *st_feed, *st_one, *st_ins, *st_exists, *st_like, *st_health;
+static time_t t_start;
+#define POST_SQL "SELECT p.id,p.body,p.created_at,u.username,(SELECT count(*) FROM likes l WHERE l.post_id=p.id) FROM posts p JOIN users u ON u.id=p.user_id "
+static sqlite3_stmt *prep(const char *sql) {
+  sqlite3_stmt *s;
+  if (sqlite3_prepare_v3(db, sql, -1, SQLITE_PREPARE_PERSISTENT, &s, NULL) != SQLITE_OK) {
+    fprintf(stderr, "prepare failed: %s\n  %s\n", sqlite3_errmsg(db), sql); exit(1);
+  }
+  return s;
+}
+static void db_open(const char *path) {
+  if (sqlite3_open_v2(path, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX, NULL) != SQLITE_OK) {
+    fprintf(stderr, "open %s: %s\n", path, sqlite3_errmsg(db)); exit(1);
+  }
+  char *em = NULL;
+  if (sqlite3_exec(db, "PRAGMA journal_mode=WAL;PRAGMA synchronous=NORMAL;PRAGMA temp_store=MEMORY;"
+                       "PRAGMA mmap_size=1073741824;PRAGMA cache_size=-65536;PRAGMA busy_timeout=5000;",
+                   NULL, NULL, &em) != SQLITE_OK) { fprintf(stderr, "pragma: %s\n", em); exit(1); }
+  st_feed = prep(POST_SQL "ORDER BY p.created_at DESC, p.id DESC LIMIT 20");
+  st_one = prep(POST_SQL "WHERE p.id=?");
+  st_ins = prep("INSERT INTO posts(user_id,body) VALUES(?,?) RETURNING id,created_at");
+  st_exists = prep("SELECT 1 FROM posts WHERE id=?");
+  st_like = prep("INSERT INTO likes(user_id,post_id) VALUES(?,?) ON CONFLICT(user_id,post_id) DO NOTHING");
+  st_health = prep("SELECT 1");
+}
+static void put_post_row(buf *b, sqlite3_stmt *s) {
+  bstr(b, "{\"id\":"); bint(b, sqlite3_column_int64(s, 0));
+  bstr(b, ",\"body\":\""); besc(b, (const char *)sqlite3_column_text(s, 1), (size_t)sqlite3_column_bytes(s, 1));
+  bstr(b, "\",\"created_at\":\""); besc(b, (const char *)sqlite3_column_text(s, 2), (size_t)sqlite3_column_bytes(s, 2));
+  bstr(b, "\",\"author\":\""); besc(b, (const char *)sqlite3_column_text(s, 3), (size_t)sqlite3_column_bytes(s, 3));
+  bstr(b, "\",\"like_count\":"); bint(b, sqlite3_column_int64(s, 4)); bstr(b, "}");
+}
+
+/* ---------------------------------------------------------------- HTTP request parsing */
+#define RBUF_SZ 65536
+#define MAX_BODY 32768
+enum { M_OTHER = 0, M_GET, M_POST };
+typedef struct {
+  int method; const char *path; size_t plen;
+  const char *auth; size_t authlen; const char *body; size_t blen; int close;
+} req;
+static int ieq(const char *a, size_t n, const char *lit) {
+  if (strlen(lit) != n) return 0;
+  for (size_t i = 0; i < n; i++) if (tolower((unsigned char)a[i]) != lit[i]) return 0;
+  return 1;
+}
+/* >0 bytes consumed, 0 need more, -1 bad request */
+static long parse_req(const char *b, size_t n, req *r) {
+  const char *he = memmem(b, n, "\r\n\r\n", 4);
+  if (!he) return n > 16384 ? -1 : 0;
+  size_t hl = (size_t)(he - b) + 4;
+  memset(r, 0, sizeof *r);
+  const char *sp1 = memchr(b, ' ', hl); if (!sp1) return -1;
+  size_t ml = (size_t)(sp1 - b);
+  r->method = (ml == 3 && !memcmp(b, "GET", 3)) ? M_GET : (ml == 4 && !memcmp(b, "POST", 4)) ? M_POST : M_OTHER;
+  const char *t = sp1 + 1;
+  const char *sp2 = memchr(t, ' ', (size_t)(he - t)); if (!sp2) return -1;
+  const char *q = memchr(t, '?', (size_t)(sp2 - t));
+  r->path = t; r->plen = (size_t)((q ? q : sp2) - t);
+  const char *ln = memchr(sp2, '\n', (size_t)(he - sp2) + 2); if (!ln) return -1;
+  const char *p = ln + 1;
+  size_t clen = 0;
+  while (p < he) {
+    const char *eol = memchr(p, '\r', (size_t)(he - p) + 1);
+    const char *colon = memchr(p, ':', (size_t)(eol - p));
+    if (colon) {
+      size_t nl = (size_t)(colon - p);
+      const char *v = colon + 1, *ve = eol;
+      while (v < ve && (*v == ' ' || *v == '\t')) v++;
+      while (ve > v && (ve[-1] == ' ' || ve[-1] == '\t')) ve--;
+      size_t vl = (size_t)(ve - v);
+      if (ieq(p, nl, "content-length")) {
+        if (!vl || vl > 9) return -1;
+        clen = 0;
+        for (size_t i = 0; i < vl; i++) { if (v[i] < '0' || v[i] > '9') return -1; clen = clen * 10 + (size_t)(v[i] - '0'); }
+      } else if (ieq(p, nl, "authorization")) { r->auth = v; r->authlen = vl; }
+      else if (ieq(p, nl, "connection")) { if (ieq(v, vl, "close")) r->close = 1; }
+      else if (ieq(p, nl, "transfer-encoding")) return -1;
+    }
+    p = eol + 2;
+  }
+  if (clen > MAX_BODY || hl + clen > RBUF_SZ) return -1;
+  if (n < hl + clen) return 0;
+  r->body = b + hl; r->blen = clen;
+  return (long)(hl + clen);
+}
+
+/* ---------------------------------------------------------------- JWT */
+static char g_uname[1100]; static size_t g_ulen;
+/* 0 ok, 1 invalid or expired, 2 invalid payload */
+static int jwt_verify(const char *tok, size_t n, long long *uid) {
+  const char *d1 = memchr(tok, '.', n); if (!d1) return 1;
+  const char *d2 = memchr(d1 + 1, '.', (size_t)(tok + n - (d1 + 1))); if (!d2) return 1;
+  if (memchr(d2 + 1, '.', (size_t)(tok + n - (d2 + 1)))) return 1;
+  size_t hl = (size_t)(d1 - tok), pl = (size_t)(d2 - d1 - 1), sl = (size_t)(tok + n - d2 - 1);
+  if (sl != 43 || hl > 200 || pl > 1000 || !hl || !pl) return 1;
+  uint8_t sig[48], mac[32];
+  if (b64_dec(d2 + 1, sl, sig, sizeof sig) != 32) return 1;
+  hmac((const uint8_t *)tok, (size_t)(d2 - tok), mac);
+  uint8_t diff = 0; for (int i = 0; i < 32; i++) diff |= mac[i] ^ sig[i];
+  if (diff) return 1;
+  char hb[256], pb[1100]; long hn, pn; int ty; const char *v; size_t vl;
+  hn = b64_dec(tok, hl, (uint8_t *)hb, 255); if (hn < 0) return 1;
+  if (jget(hb, (size_t)hn, "alg", &ty, &v, &vl) != 0 || ty != J_STR || vl != 5 || memcmp(v, "HS256", 5)) return 1;
+  pn = b64_dec(d1 + 1, pl, (uint8_t *)pb, 1099); if (pn < 0) return 1;
+  pb[pn] = 0;
+  if (jget(pb, (size_t)pn, "exp", &ty, &v, &vl) != 0) return 1;
+  if (ty != J_MISSING) {
+    if (ty != J_NUM) return 1;
+    if (strtod(v, NULL) <= (double)time(NULL)) return 1;
+  }
+  if (jget(pb, (size_t)pn, "sub", &ty, &v, &vl) != 0 || ty != J_STR) return 2;
+  if (!vl || vl > 15) return 2;
+  long long id = 0;
+  for (size_t i = 0; i < vl; i++) { if (v[i] < '0' || v[i] > '9') return 2; id = id * 10 + (v[i] - '0'); }
+  if (id <= 0) return 2;
+  if (jget(pb, (size_t)pn, "username", &ty, &v, &vl) != 0 || ty != J_STR) return 2;
+  g_ulen = jdec(v, vl, g_uname);
+  *uid = id;
+  return 0;
+}
+
+/* ---------------------------------------------------------------- handlers */
+static int err(int st, const char *msg) {
+  body.n = 0; bstr(&body, "{\"error\":\""); bstr(&body, msg); bstr(&body, "\"}"); return st;
+}
+static int do_auth(const req *r, long long *uid) {   /* 0 ok, else error status (body set) */
+  if (!r->auth || r->authlen < 7 || memcmp(r->auth, "Bearer ", 7)) return err(401, "missing bearer token");
+  int rc = jwt_verify(r->auth + 7, r->authlen - 7, uid);
+  if (rc == 1) return err(401, "invalid or expired token");
+  if (rc == 2) return err(401, "invalid token payload");
+  return 0;
+}
+/* 0 ok, -1 invalid, -2 positive digits but too large to exist */
+static int parse_id(const char *s, size_t n, long long *out) {
+  if (!n) return -1;
+  for (size_t i = 0; i < n; i++) if (s[i] < '0' || s[i] > '9') return -1;
+  size_t i = 0; while (i < n - 1 && s[i] == '0') i++;
+  if (n - i > 15) return -2;
+  long long v = 0; for (; i < n; i++) v = v * 10 + (s[i] - '0');
+  if (v <= 0) return -1;
+  *out = v; return 0;
+}
+static int h_health(void) {
+  body.n = 0;
+  int rc = sqlite3_step(st_health); sqlite3_reset(st_health);
+  if (rc == SQLITE_ROW) {
+    bstr(&body, "{\"status\":\"ok\",\"db\":\"ok\",\"uptime_s\":"); bint(&body, (long long)(time(NULL) - t_start)); bstr(&body, "}");
+    return 200;
+  }
+  const char *m = sqlite3_errmsg(db);
+  bstr(&body, "{\"status\":\"degraded\",\"db\":\"unreachable\",\"error\":\""); besc(&body, m, strlen(m)); bstr(&body, "\"}");
+  return 503;
+}
+static int h_feed(void) {
+  body.n = 0; bstr(&body, "{\"posts\":[");
+  int first = 1, rc;
+  while ((rc = sqlite3_step(st_feed)) == SQLITE_ROW) {
+    if (!first) bstr(&body, ",");
+    first = 0;
+    put_post_row(&body, st_feed);
+  }
+  sqlite3_reset(st_feed);
+  if (rc != SQLITE_DONE) return err(500, "internal server error");
+  bstr(&body, "]}"); return 200;
+}
+static int id_error(int rc) { return rc == -1 ? err(400, "invalid post id") : err(404, "post not found"); }
+static int h_get(const char *s, size_t n) {
+  long long id; int rc = parse_id(s, n, &id);
+  if (rc) return id_error(rc);
+  sqlite3_bind_int64(st_one, 1, id);
+  rc = sqlite3_step(st_one);
+  int st;
+  if (rc == SQLITE_ROW) { body.n = 0; bstr(&body, "{\"post\":"); put_post_row(&body, st_one); bstr(&body, "}"); st = 200; }
+  else if (rc == SQLITE_DONE) st = err(404, "post not found");
+  else st = err(500, "internal server error");
+  sqlite3_reset(st_one);
+  return st;
+}
+static char dec[RBUF_SZ + 8];
+static int h_create(const req *r) {
+  long long uid; int s;
+  if ((s = do_auth(r, &uid))) return s;
+  int ty; const char *v; size_t vl;
+  int rc = jget(r->body, r->blen, "body", &ty, &v, &vl);
+  if (rc == -1) return err(400, "malformed JSON body");
+  if (rc == -2 || ty != J_STR) return err(400, "body is required");
+  size_t dn = jdec(v, vl, dec);
+  size_t a = 0, e = dn;
+  while (a < e && (dec[a] == ' ' || (dec[a] >= 9 && dec[a] <= 13))) a++;
+  while (e > a && (dec[e-1] == ' ' || (dec[e-1] >= 9 && dec[e-1] <= 13))) e--;
+  if (a == e) return err(400, "body is required");
+  size_t chars = 0; for (size_t i = a; i < e; i++) if (((unsigned char)dec[i] & 0xC0) != 0x80) chars++;
+  if (chars > 500) return err(400, "body must be at most 500 characters");
+  sqlite3_bind_int64(st_ins, 1, uid);
+  sqlite3_bind_text(st_ins, 2, dec + a, (int)(e - a), SQLITE_STATIC);
+  long long id = 0; char ca[48] = {0};
+  rc = sqlite3_step(st_ins);
+  if (rc == SQLITE_ROW) {
+    id = sqlite3_column_int64(st_ins, 0);
+    snprintf(ca, sizeof ca, "%s", (const char *)sqlite3_column_text(st_ins, 1));
+    rc = sqlite3_step(st_ins);              /* run to DONE: this is the commit */
+  }
+  sqlite3_reset(st_ins);
+  if (rc != SQLITE_DONE) return err(500, "internal server error");
+  body.n = 0; bstr(&body, "{\"post\":{\"id\":"); bint(&body, id);
+  bstr(&body, ",\"body\":\""); besc(&body, dec + a, e - a);
+  bstr(&body, "\",\"created_at\":\""); bstr(&body, ca);
+  bstr(&body, "\",\"author\":\""); besc(&body, g_uname, g_ulen);
+  bstr(&body, "\",\"like_count\":0}}");
+  return 201;
+}
+static int h_like(const req *r, const char *ids, size_t idn) {
+  long long uid, pid; int s;
+  if ((s = do_auth(r, &uid))) return s;
+  int rc = parse_id(ids, idn, &pid);
+  if (rc) return id_error(rc);
+  sqlite3_bind_int64(st_exists, 1, pid);
+  rc = sqlite3_step(st_exists); sqlite3_reset(st_exists);
+  if (rc == SQLITE_DONE) return err(404, "post not found");
+  if (rc != SQLITE_ROW) return err(500, "internal server error");
+  sqlite3_bind_int64(st_like, 1, uid); sqlite3_bind_int64(st_like, 2, pid);
+  rc = sqlite3_step(st_like);
+  int changed = sqlite3_changes(db);
+  sqlite3_reset(st_like);
+  if (rc != SQLITE_DONE) return err(500, "internal server error");
+  body.n = 0; bstr(&body, "{\"liked\":true,\"already_liked\":"); bstr(&body, changed ? "false" : "true");
+  bstr(&body, ",\"post_id\":"); bint(&body, pid); bstr(&body, "}");
+  return changed ? 201 : 200;
+}
+static int handle(const req *r) {
+  const char *p = r->path; size_t n = r->plen;
+  if (r->method == M_GET && n == 7 && !memcmp(p, "/health", 7)) return h_health();
+  if (r->method == M_GET && n == 5 && !memcmp(p, "/feed", 5)) return h_feed();
+  if (r->method == M_POST && n == 6 && !memcmp(p, "/posts", 6)) return h_create(r);
+  if (n > 7 && !memcmp(p, "/posts/", 7)) {
+    const char *id = p + 7; size_t il = n - 7;
+    const char *sl = memchr(id, '/', il);
+    if (!sl) { if (r->method == M_GET) return h_get(id, il); }
+    else if (r->method == M_POST && (size_t)(p + n - sl) == 5 && !memcmp(sl, "/like", 5)) return h_like(r, id, (size_t)(sl - id));
+  }
+  return err(404, "not found");
+}
+static void emit(int st, int close_after) {
+  const char *t = st == 200 ? "OK" : st == 201 ? "Created" : st == 400 ? "Bad Request" : st == 401 ? "Unauthorized" :
+                  st == 404 ? "Not Found" : st == 503 ? "Service Unavailable" : "Internal Server Error";
+  char h[192];
+  int hl = snprintf(h, sizeof h, "HTTP/1.1 %d %s\r\nContent-Type: application/json\r\nContent-Length: %zu\r\n%s\r\n",
+                    st, t, body.n, close_after ? "Connection: close\r\n" : "");
+  bput(&obuf, h, (size_t)hl); bput(&obuf, body.p, body.n);
+}
+
+/* ---------------------------------------------------------------- connections / epoll */
+typedef struct { char *pend; uint32_t plen; char *wbuf; uint32_t wlen, woff; uint8_t closing; } conn;
+static conn *conns; static int maxfd, ep;
+static char rbuf[RBUF_SZ];
+static void close_conn(int fd) {
+  free(conns[fd].pend); free(conns[fd].wbuf); memset(&conns[fd], 0, sizeof(conn)); close(fd);
+}
+static void set_events(int fd, uint32_t ev) {
+  struct epoll_event e = {.events = ev, .data.fd = fd}; epoll_ctl(ep, EPOLL_CTL_MOD, fd, &e);
+}
+static void on_readable(int fd) {
+  conn *c = &conns[fd];
+  size_t off = c->plen;
+  if (off >= RBUF_SZ) { close_conn(fd); return; }
+  if (off) memcpy(rbuf, c->pend, off);
+  ssize_t n = read(fd, rbuf + off, RBUF_SZ - off);
+  if (n < 0 && (errno == EAGAIN || errno == EINTR)) return;
+  if (n <= 0) { close_conn(fd); return; }
+  size_t total = off + (size_t)n, pos = 0; int closing = 0;
+  obuf.n = 0;
+  while (pos < total) {
+    req r; long used = parse_req(rbuf + pos, total - pos, &r);
+    if (used == 0) break;
+    if (used < 0) { err(400, "bad request"); emit(400, 1); closing = 1; break; }
+    int st = handle(&r); emit(st, r.close); pos += (size_t)used;
+    if (r.close) { closing = 1; break; }
+  }
+  if (!closing && pos < total) {
+    size_t rem = total - pos;
+    c->pend = realloc(c->pend, rem); memcpy(c->pend, rbuf + pos, rem); c->plen = (uint32_t)rem;
+  } else { free(c->pend); c->pend = NULL; c->plen = 0; }
+  if (!obuf.n) { if (closing) close_conn(fd); return; }
+  ssize_t w = send(fd, obuf.p, obuf.n, MSG_NOSIGNAL);
+  if (w < 0) { if (errno != EAGAIN && errno != EINTR) { close_conn(fd); return; } w = 0; }
+  if ((size_t)w < obuf.n) {
+    size_t left = obuf.n - (size_t)w;
+    c->wbuf = malloc(left); memcpy(c->wbuf, obuf.p + w, left);
+    c->wlen = (uint32_t)left; c->woff = 0; c->closing = (uint8_t)closing;
+    set_events(fd, EPOLLOUT); return;
+  }
+  if (closing) close_conn(fd);
+}
+static void on_writable(int fd) {
+  conn *c = &conns[fd];
+  ssize_t w = send(fd, c->wbuf + c->woff, c->wlen - c->woff, MSG_NOSIGNAL);
+  if (w < 0) { if (errno == EAGAIN || errno == EINTR) return; close_conn(fd); return; }
+  c->woff += (uint32_t)w;
+  if (c->woff < c->wlen) return;
+  free(c->wbuf); c->wbuf = NULL; c->wlen = c->woff = 0;
+  if (c->closing) { close_conn(fd); return; }
+  set_events(fd, EPOLLIN);
+}
+
+int main(void) {
+  signal(SIGPIPE, SIG_IGN);
+  const char *path = getenv("SQLITE_PATH"), *secret = getenv("JWT_SECRET");
+  const char *host = getenv("HOST"), *port = getenv("PORT");
+  if (!path || !secret) { fprintf(stderr, "SQLITE_PATH and JWT_SECRET are required\n"); return 1; }
+  if (!host) host = "0.0.0.0";
+  if (!port) port = "3000";
+  b64_init(); hmac_init((const uint8_t *)secret, strlen(secret));
+  t_start = time(NULL);
+  db_open(path);
+
+  struct rlimit rl;
+  if (getrlimit(RLIMIT_NOFILE, &rl) == 0) { rl.rlim_cur = rl.rlim_max; setrlimit(RLIMIT_NOFILE, &rl); getrlimit(RLIMIT_NOFILE, &rl); }
+  maxfd = rl.rlim_cur > 262144 ? 262144 : (int)rl.rlim_cur;
+  conns = calloc((size_t)maxfd, sizeof(conn));
+
+  int lfd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+  int one = 1; setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+  struct sockaddr_in a = {.sin_family = AF_INET, .sin_port = htons((uint16_t)atoi(port))};
+  if (inet_pton(AF_INET, host, &a.sin_addr) != 1) { fprintf(stderr, "bad HOST\n"); return 1; }
+  if (bind(lfd, (struct sockaddr *)&a, sizeof a) < 0) { perror("bind"); return 1; }
+  if (listen(lfd, 4096) < 0) { perror("listen"); return 1; }
+  ep = epoll_create1(EPOLL_CLOEXEC);
+  struct epoll_event ev = {.events = EPOLLIN, .data.fd = lfd};
+  epoll_ctl(ep, EPOLL_CTL_ADD, lfd, &ev);
+  fprintf(stderr, "listening on %s:%s (maxfd %d)\n", host, port, maxfd);
+
+  struct epoll_event evs[512];
+  for (;;) {
+    int n = epoll_wait(ep, evs, 512, -1);
+    for (int i = 0; i < n; i++) {
+      int fd = evs[i].data.fd;
+      if (fd == lfd) {
+        for (int k = 0; k < 256; k++) {
+          int cfd = accept4(lfd, NULL, NULL, SOCK_NONBLOCK | SOCK_CLOEXEC);
+          if (cfd < 0) break;
+          if (cfd >= maxfd) { close(cfd); continue; }
+          setsockopt(cfd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+          struct epoll_event ce = {.events = EPOLLIN, .data.fd = cfd};
+          epoll_ctl(ep, EPOLL_CTL_ADD, cfd, &ce);
+        }
+        continue;
+      }
+      if (evs[i].events & (EPOLLERR | EPOLLHUP) && !(evs[i].events & EPOLLIN)) { close_conn(fd); continue; }
+      if (evs[i].events & EPOLLOUT) on_writable(fd);
+      else if (evs[i].events & EPOLLIN) on_readable(fd);
+    }
+  }
+}

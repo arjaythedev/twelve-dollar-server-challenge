@@ -140,7 +140,7 @@ the code by `tools/knobs.py`; the `CURSED_*` and `LOOP_TEST_*` variables exist f
 | `CURSED_CKPT_FRAMES` | 1024 (thread) / 4096 (uring) / 16384 (bounded, inline) | checkpoint pass size in WAL frames. Bounded's 16384 (was 4096): each pass stalls the loop about as long whatever the mark, so 4× fewer passes held 17.5k vs 15.5k req/s at p99 < 1 s, loop busy 86–87 vs 93–95 % at 14.5k, p95 98–113 vs 131 ms, p99 ≤ 20 ms worse, same µs/request, +48 MB page cache (Xeon, one CPU) |
 | `CURSED_CKPT_THREAD` | 1 in thread mode | thread mode only. 1: checkpoint from the background thread; 0: inline |
 | `CURSED_CKPT_RESTART` | 8192 (thread) / 32768 (uring) | the write gate's drain mark (WAL frames): new POSTs wait while the WAL is past it. Thread mode's 8192 (32 MB, was 32768): every frame past the restart is a fresh page-cache page at the box's memory wall; on the Xeon at ~24k req/s, 4096 held writes 8× as often (p99 131 vs 77 ms) |
-| `CURSED_CKPT_NICE` | 0 | nice level of the checkpoint thread (lower = drains finish sooner at a pegged CPU, but take more CPU from reads) |
+| `CURSED_CKPT_NICE` | 19 (thread) | nice level of the checkpoint thread. 19: at the memory wall a nice-0 thread took half the single vCPU from the loop for each 300-430 ms pass, and that stall turned fatal (edge holds: 2 of 3 died at 0, 3 of 3 held at 19) |
 | `CURSED_COALESCE` | 0 | 1: share one feed computation between the feed requests of a batch. Off until the organizer rules on whether that counts as caching (rule 5) |
 
 **Test-only**

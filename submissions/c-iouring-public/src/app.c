@@ -170,6 +170,11 @@ int app_init(const char *db_path, const char *secret, char *err, size_t errn) {
   if (o.ckpt_thread) {                          //    WAL restarted at 8,192 (32 MB; was 4,096 / 32,768 = 128 MB). Every
     o.ckpt_frames = 1024;                       //    frame past the restart is a fresh page-cache page, and at the box's
     o.ckpt_restart = 8192;                      //    memory wall the OOM killer fired on such a WAL write. Xeon at ~24k
+    // nice 19: on 1 vCPU a nice-0 thread takes half the CPU from the loop for each 300-430 ms pass; at the memory
+    // wall that stall left every connection's next request unread in the kernel and the OOM killer took the server
+    // (2 of 5 and 2 of 3 five-minute edge holds, 8 rings, ~29k req/s; nice 19: 3 of 3 held, TCP memory <= 2 MB,
+    // p99 60-177 ms; wall-280k). Costs held writes instead (drains up to ~1.1 s), which stay inside p99 < 1 s
+    o.ckpt_nice = 19;
   }                                             //    req/s: 4,096 held writes 8x as often, p99 131 ms; 8,192: 77 (exp1132/1140)
   if (APP_DB_CKPT == 1) o.ckpt_frames = 16384;  // 1: inline PASSIVE after the replies
   if (APP_DB_CKPT == 0) o.ckpt_frames = 0;      // 0: SQLite's own wal_autocheckpoint (1000 frames)

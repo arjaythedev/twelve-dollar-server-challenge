@@ -999,7 +999,11 @@ static __noinline u32 check_body(struct scratch *s) {
 // Request verdict
 // ===================================================================================================================
 static __always_inline int send_job(struct __sk_buff *skb, struct scratch *s, struct job_hdr *h) {
-  h->len = s->len;
+  // The job occupies exactly the bytes we redirect (this whole skb), so the shim frames records by skb->len.
+  // Using s->len (the full HTTP request length) would exceed the bytes actually sent if the request was delivered
+  // in fewer bytes than its Content-Length implied, and the shim would then wait forever for bytes that never come.
+  h->len = skb->len;
+  (void)s;
   if (bpf_skb_store_bytes(skb, 0, h, sizeof *h, 0)) return SK_DROP;
   return bpf_sk_redirect_map(skb, &shim, 0, 0);
 }

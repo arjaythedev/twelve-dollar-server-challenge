@@ -213,11 +213,12 @@ int main(void) {
   if (bpf_map_update_elem(progs, &k1, &fa, BPF_ANY) || bpf_map_update_elem(progs, &k2, &fj, BPF_ANY))
     return die("prog_array");
 
-  // userspace add after accept (so sk->sk_socket is set; sockops-add leaves it NULL pre-accept and the verdict
-  // data_ready no-ops). attach sk_skb verdict to the clients sockhash
-  // verdict-only mode on this kernel (stream_parser never delivers via sockmap here); the verdict re-parses
-  // the whole skb, so single-segment requests work. Pipelining/segmentation handling is a known gap (README).
-  if (bpf_prog_attach(prog_fd(obj, "on_request"), clients, BPF_SK_SKB_VERDICT, 0)) return die("attach verdict");
+  // Client sockets get a stream PARSER (on_parse, returns the full message length = headers + Content-Length) plus a
+  // stream VERDICT (on_request). The parser makes the kernel buffer until a whole message has arrived, then hands one
+  // complete message to the verdict — so a request split across TCP segments (headers in one skb, body in the next)
+  // is reassembled, not dropped. Both are attached before any client is inserted, so inserted sockets pick them up.
+  if (bpf_prog_attach(prog_fd(obj, "on_parse"), clients, BPF_SK_SKB_STREAM_PARSER, 0)) return die("attach parser");
+  if (bpf_prog_attach(prog_fd(obj, "on_request"), clients, BPF_SK_SKB_STREAM_VERDICT, 0)) return die("attach verdict");
 
   // job socket: a stream socketpair; one end goes in `shim`, the shim reads the other end's data via the first.
   int jp[2];

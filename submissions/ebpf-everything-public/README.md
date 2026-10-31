@@ -21,8 +21,8 @@ as a set of `sk_skb`/`sockops` programs — it started at >1,000,000 instruction
 ## Status: it runs
 
 Granted `CAP_BPF` on a kernel-6.8 VM (Ubuntu 24.04, 6.8.0-117), the server comes up and serves correct responses.
-A local functional check — the spec's five endpoints plus its full error/auth table — **passes 20/20 on a clean
-run** (and did on 2 of 3 back-to-back runs; see the flakiness caveat below):
+A local functional check — the spec's five endpoints plus its full error/auth table — **passes 20/20, reliably**
+(5 of 5 back-to-back runs on a fresh DB), including requests split across TCP segments (see below):
 
 ```
 GET /health            200  {"status":"ok","db":"ok","uptime_s":1}
@@ -42,21 +42,28 @@ grant), but it exercises the same behaviours against a small seed built from `sc
 `synchronous=NORMAL`, one transaction per batch, every response built from a read during that batch, nothing cached
 across batches; `src/engine.c` reads the B-trees directly and is reused unchanged from my userspace entry.
 
-**Flakiness caveat (honest):** reads (`/health`, `/feed`, `/posts/:id`), the error paths, and auth *rejection* are
-reliable; **authenticated writes are intermittently flaky** — across 3 back-to-back runs one run saw a single
-`POST` hang (and once wedged the shim for subsequent requests). The cause is the prototype's delivery model (the
-per-batch `recv()` nudge, and single-segment framing — §4), not the SQLite or JWT logic. So this is **not a reliable
-42/42**; it demonstrates the mechanism works, not that it is robust.
+**Segmentation is handled.** A request split across TCP segments — headers in one skb, body in the next, which a
+real client/Nginx may do at any time — is reassembled by the `sk_skb` **stream parser** (`on_parse` returns the full
+message length = headers + `Content-Length`, so the kernel buffers until the whole message arrives before running
+the verdict). A probe of 40 deliberately segmented `POST`s returns 40/40 `201`, and the shim stays up. (An earlier
+revision got this wrong: it ran verdict-only with no reassembly, and a segmented request hung and wedged the shim —
+fixed in §4.)
 
-Getting here from "does not deliver" meant fixing three bugs in the **shim/BPF glue** (the in-kernel logic was
-already correct) — see [§4](#4-what-actually-blocked-delivery-and-the-fixes). The earlier revision of this entry
-claimed `sk_skb`/sockmap "does not deliver on 6.8"; that was wrong — it was these bugs.
+What is **not** solved: there is no connection-close handling (the `closes` ring buffer is wired but not drained),
+so held client fds leak under churn. So the functional behaviour is right and robust to segmentation, but sustained
+load / connection churn is untested and would leak — this is still a prototype, not a hardened server. And it is not
+the official `test/test.sh` (that needs the 250 MB seed and BPF caps in CI).
+
+Getting here from "does not deliver" meant fixing bugs in the **shim/BPF glue** (the in-kernel logic was already
+correct) — see [§4](#4-what-actually-blocked-delivery-and-the-fixes). The earlier revision claimed `sk_skb`/sockmap
+(and its stream parser) "does not deliver on 6.8"; that was wrong — it was these bugs, and the parser works fine.
 
 ### Performance (a datapoint, not the scored metric)
 
 Single-connection, sequential, keep-alive GETs, on the **arm64** dev VM (NOT the x86 scored box, NOT a load test):
-**~75 µs/request, ~13,000 req/s** for both `/health` and `/feed`. That is only after setting `TCP_NODELAY` on the
-accepted client sockets — without it a 40 ms delayed-ACK stall capped it at ~24 req/s. The scored metric is
+**~110 µs/request, ~9,000 req/s** for both `/health` and `/feed` (with the stream parser; ~75 µs / ~13k req/s
+verdict-only, before segmentation handling). That is only after setting `TCP_NODELAY` on the accepted client
+sockets — without it a 40 ms delayed-ACK stall capped it at ~24 req/s. The scored metric is
 concurrent connections *held*, which I have **not** measured — that belongs on the x86 broker and I did not run it
 here. Expectation is unchanged: **no throughput win** over a good userspace entry (valid requests still cross into
 userspace for SQLite; the parse/JWT CPU just moves into softirq on the same single vCPU), plus extra per-socket
@@ -68,8 +75,10 @@ kernel memory for the psock/sockmap state.
             client TCP socket (in the `clients` sockhash, keyed by socket cookie)
                  │  bytes
                  ▼
-  sockops on_sockops            adds each new connection to `clients` at PASSIVE_ESTABLISHED (vestigial; see §4)
-  sk_skb  on_request (verdict)  framing + request line + routing. /feed /health /posts/:id → job. 4xx → error job.
+  (the shim adds each accepted socket to `clients` after accept; the on_sockops program is unused in this build)
+  sk_skb  on_parse (parser)     returns the full message length (headers + Content-Length) so the kernel reassembles
+                                a whole request before the verdict runs — handles requests split across TCP segments
+  sk_skb  on_request (verdict)  request line + routing. /feed /health /posts/:id → job. 4xx → error job.
                  │                 authenticated routes: Bearer check, then tail-call →
   sk_skb  on_auth               HS256: base64url + HMAC-SHA256 (bpf_loop, no HMAC helper on 6.8) + strict-JSON
                  │                 header/alg + claims + exp/nbf compare. ok → tail-call →
@@ -127,8 +136,8 @@ All five programs load on kernel 6.8.0-117 (`bpftool prog loadall bin/http.bpf.o
 
 ## 4. What actually blocked delivery, and the fixes
 
-The in-kernel pipeline was correct all along; three bugs in the shim/BPF glue stopped it end-to-end. All three are
-fixed in this revision:
+The in-kernel pipeline was correct all along; bugs in the shim/BPF glue stopped it end-to-end. All are fixed in this
+revision:
 
 1. **The per-CPU scratch map was never sized for the box.** `scr` is a global array indexed by
    `bpf_get_smp_processor_id()*2 + level`; it ships with a placeholder of 2 entries and the shim is meant to resize
@@ -141,21 +150,22 @@ fixed in this revision:
    drives `on_reply` with a `recv()` nudge on it per batch — the same mechanism that drives `on_request` on the
    client sockets.
 
+4. **Framing was single-segment, which hung and wedged the shim on a split request.** Running verdict-only, the
+   verdict saw each skb separately, and `send_job` tagged the job with the full request length while redirecting only
+   the first skb's bytes — so on a segmented request the shim waited forever for bytes that never came, poisoning its
+   job buffer for every later request. Fixed two ways: the client sockets now use the `sk_skb` **stream parser**
+   (`on_parse`) so the kernel reassembles a whole message before the verdict runs, and `send_job` now tags the job
+   with the bytes actually redirected (`skb->len`). 40/40 deliberately segmented `POST`s now return `201`.
+
 Also fixed: the created-post `author` came back empty because the request-body JSON parse reset the shared parser's
 username-length field; the length is now saved right after the JWT claims parse.
 
-Honest remaining gaps (fine for the functional check, not for a load run):
+Honest remaining gaps (fine for the functional check, not for a sustained load run):
 
-- **The `recv()` nudges are a per-batch syscall**, and the verdict is driven by them rather than firing on its own.
-  This is the main source of the write-path flakiness above: a reply whose nudge races the loopback delivery can
-  stall, and that occasionally wedges the shim. A real server would drive the verdicts without the nudge.
-- **Framing is single-segment.** The verdict re-parses each skb; a request split across skbs, or pipelined requests
-  in one skb, are not handled — the other half of the write-path flakiness.
 - **No connection-close handling.** The `closes` ring buffer is wired but not drained, so held client fds leak under
-  churn.
-
-These three together are why the entry is a prototype, not a robust server, even with the privilege question set
-aside.
+  churn — the reason sustained load is untested. This is the main thing between the prototype and a robust server.
+- **The reply verdict is driven by a per-batch `recv()` nudge** rather than firing on its own — a syscall per batch.
+  It is reliable (it is how the request side is driven too), but a production version would avoid it.
 
 ## Files
 

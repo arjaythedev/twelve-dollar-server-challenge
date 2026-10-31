@@ -290,12 +290,29 @@ static inline void ob_u64(struct ob *o, uint64_t v) {
 
 /* Escapes a JSON string body: only `"`, `\` and control characters. Scans 8 bytes at a time and
  * copies clean runs with one memcpy, which is the common case for every post in the seed. */
+/* 16 bytes at a time: does any byte need escaping (< 0x20, '"' or '\\')? GCC vector extensions,
+ * so this is SSE2 on x86-64 and NEON on arm64 with no intrinsics. */
+typedef unsigned char u8x16 __attribute__((vector_size(16)));
+static inline int needs_escape16(const uint8_t *p) {
+  u8x16 v;
+  memcpy(&v, p, 16);
+  const u8x16 ctl = {0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20};
+  const u8x16 quo = {'"', '"', '"', '"', '"', '"', '"', '"', '"', '"', '"', '"', '"', '"', '"', '"'};
+  const u8x16 bsl = {'\\', '\\', '\\', '\\', '\\', '\\', '\\', '\\', '\\', '\\', '\\', '\\', '\\', '\\', '\\', '\\'};
+  __typeof__(v < ctl) m = (v < ctl) | (v == quo) | (v == bsl);
+  uint64_t a, b;
+  memcpy(&a, &m, 8);
+  memcpy(&b, (const char *)&m + 8, 8);
+  return (a | b) != 0;
+}
+
 static void ob_json_str(struct ob *o, const uint8_t *s, size_t n) {
   if (o->n + n + 2 > o->cap) { o->err = 1; return; }
   o->b[o->n++] = '"';
   size_t i = 0;
   while (i < n) {
     size_t run = i;
+    while (run + 16 <= n && !needs_escape16(s + run)) run += 16;
     while (run + 8 <= n) {
       uint64_t w;
       memcpy(&w, s + run, 8);

@@ -15,16 +15,24 @@ SQLite bindings are written in this repository.
 ## Files
 
 - `src/main.rs` - configuration, epoll transport, worker processes (`FEED_WORKERS`, default 5),
-  event-loop pass = one transaction (write lock taken up front when the pass contains a POST)
-- `src/net_uring.rs`, `src/uring.rs` - io_uring transport: six rings of 65,535 direct
-  descriptors, multishot accept and receive, provided-buffer rings. Used only after a
-  live self test (`self_test`) succeeds; otherwise the epoll transport serves.
+  event-loop pass = one transaction (write lock taken up front when the pass contains a POST),
+  accept backpressure on system-wide low memory
+- `src/net_uring.rs`, `src/uring.rs` - io_uring transport: up to eight rings, each sized to
+  the process descriptor limit; the accepting ring hands the listener to the next ring
+  before its slots run out. Accepts are one-shot and armed only while slots remain
+  (multishot accept can be handed more connections than slots hold), receives are
+  multishot with buffer selection, and buffers move through
+  `IORING_OP_PROVIDE_BUFFERS`, which every Linux 5.7+ kernel accepts. Used only after a
+  live self test (`self_test`) — which drives real concurrent, pipelined, split and
+  closing clients through a ring boundary — succeeds; where the kernel refuses
+  `io_uring_setup` the server serves on epoll. The same guard stops and resumes
+  accepting on system-wide memory thresholds.
 - `src/app.rs` - routes, validation, JWT verification, response framing
 - `src/db.rs` - SQLite connection, SQL statements, batch transaction, startup checks
 - `src/btree.rs`, `src/sqlite_shim.c` - B-tree read plans for `/feed` and `/posts/:id`
   (the shim is compiled into the same translation unit as the unmodified amalgamation)
-- `src/uring.rs` - raw kernel UAPI bindings, with byte-level checks for every
-  submission entry the server uses (`rustc --test src/main.rs`, 6 tests)
+- `src/uring.rs` - raw kernel UAPI bindings, with byte-level and constant checks for
+  everything the server submits (`rustc --test src/main.rs`, 13 tests)
 - `src/http.rs`, `src/json.rs`, `src/crypto.rs`, `src/sys.rs` - protocol primitives
 - `src/pgo_train.c` - build-time profile training on a synthetic database (not the seed)
 - `tests/oracle.sh` - differential test: B-tree plans vs pure SQL, byte-identical, before and after writes
@@ -57,7 +65,9 @@ they differ.
   shipped worker count (so writes by other processes are inside the comparison).
 - `tests/protocol.sh`: pipelined write ordering, split requests, `Connection: close`, and 40/40
   acknowledged writes surviving a `kill -9`.
-- `rustc --test src/main.rs`: six byte-level tests of the io_uring submission entries.
+- `rustc --test src/main.rs`: byte-level tests of every io_uring submission entry, the
+  register-opcode constants against the uapi, the ring handover watermark, and the
+  memory guard (13 tests).
 - The B-tree plan checks the schema layout and the feed invariant (dense rowids,
   non-decreasing `created_at`) at startup and after every insert. Any violation, foreign
   write, or unreadable record disables the plan permanently and reads use SQL.
@@ -85,10 +95,23 @@ per-request allocator and buffer fixes was 20.5 us/request on `/feed`:
 
 | endpoint | app CPU per request |
 |---|---|
-| `GET /health` | 3.4 us |
-| `GET /posts/250000` | 3.6 us (277,000 req/s on one core) |
-| `GET /feed` | 9.2 us |
+| `GET /health` | 3.4 us at 64 conns, 4.4 us at 512 |
+| `GET /posts/250000` | 3.6 us (277,000 req/s on one core); a random id in 1..500,000 costs 8.0 us with the token attached |
+| `GET /feed` | 9.2 us at 64 conns, 12.1 us at 512 |
 | `GET /feed`, `FEED_NO_PLAN=1` | 15.9 us |
+| full 46/46/7/1 mix | 12.5–13.1 us/request at 68–78k req/s on one pinned core |
+| one JWT verification | 0.73 us (measured on the mac function, 200k iterations) |
+
+Serving shape rehearsal (300,000 keep-alive connections held from 38 loopback source
+addresses, requests paced at about 29,000 req/s for 60 s, 1.7M requests, 0 failed):
+
+| transport | app CPU at that load |
+|---|---|
+| one process | 43–49% of the core (14.7–17.5 us/request) |
+| `FEED_WORKERS=5` (epoll fallback) | 60% of the core (20.5 us/request) |
+
+p50 stayed at or below 1 ms. Server RSS held near 40 MB; the remaining memory term at
+300k sockets is kernel-side (a leaderboard peer measured 773 MB total at 290,000 users).
 
 `strace -c` on the serving thread shows one `recvfrom` and one `sendto` per request
 and nothing else per request.
@@ -133,9 +156,8 @@ concurrent, pipelined, split and closing clients correctly; where the kernel ref
 ## Limitations
 
 - The io_uring transport is unverified on a kernel that permits it. Its self test is the
-  guard: if it fails, the server keeps serving on epoll.
-- Writes in one worker make the B-tree plan of the other workers stop (their
-  `data_version` changes). They then read through SQL, which is correct but slower.
-  Re-validating the feed tail after a foreign write is the next optimisation.
+  guard: if it fails, the server keeps serving on epoll. The self test now also crosses
+  a ring boundary (a forced 32-slot table, watermark 8, 64 concurrent clients) so the
+  handover path is executed before the public listener exists.
 - No official leaderboard score exists for this build. Ranking is decided by the maintainer's
   benchmark on the 1 vCPU / 2 GB box.

@@ -68,6 +68,10 @@ struct Server {
     /// every accept from then on. Without this a full worker would keep winning
     /// the exclusive wakeup and refuse every connection.
     accepting: bool,
+    /// Accept backpressure on system-wide free memory: with "MemAvailable"
+    /// below the stop threshold this worker leaves the epoll set like an
+    /// EMFILE'd one, and rejoins above the resume threshold.
+    mem: sys::MemGuard,
     /// Response buffers taken back from connections after their send completed.
     /// A feed response is a few KB; keeping one per connection would cost
     /// gigabytes at 300k sockets, and freeing one per request costs syscalls.
@@ -353,7 +357,21 @@ impl Server {
                 let fd = sys::event_fd(&events[i]);
                 let mask = sys::event_mask(&events[i]);
                 if fd == lfd {
-                    self.accept_all(lfd);
+                    if self.mem.allows_accepts() {
+                        if !self.accepting {
+                            self.accepting = true;
+                            let ev = sys::event_for(lfd, sys::EPOLL_IN_FOR_LISTENER);
+                            let _ = unsafe {
+                                sys::epoll_ctl(self.ep, sys::EPOLL_CTL_ADD, lfd, &ev)
+                            };
+                        }
+                        self.accept_all(lfd);
+                    } else if self.accepting {
+                        self.accepting = false;
+                        let ev = sys::event_for(lfd, 0);
+                        let _ = unsafe { sys::epoll_ctl(self.ep, sys::EPOLL_CTL_DEL, lfd, &ev) };
+                        eprintln!("accept held: MemAvailable below the stop threshold");
+                    }
                     continue;
                 }
                 let idx = fd as usize;
@@ -473,8 +491,9 @@ fn main() {
         conns: Vec::new(),
         app,
         pending: Vec::with_capacity(512),
-        pool: Vec::new(),
         accepting: true,
+        mem: sys::MemGuard::new(),
+        pool: Vec::new(),
     };
     let _ = std::io::stderr().write_all(format!("listening on {host}:{port}\n").as_bytes());
     server.run(lfd);

@@ -25,19 +25,26 @@ use crate::http;
 use crate::sys;
 use crate::uring::{
     new_eventfd, read_eventfd, Ring, Sqe, IORING_CQE_F_MORE, IORING_CQE_BUFFER_SHIFT,
-    IORING_ENTER_GETEVENTS, IORING_SETUP_CQSIZE, IORING_SETUP_DEFER_TASKRUN,
-    IORING_SETUP_SINGLE_ISSUER, IORING_SETUP_TASKRUN_FLAG,
+    IORING_ENTER_GETEVENTS, IORING_SETUP_CLAMP, IORING_SETUP_CQSIZE, IORING_SETUP_DEFER_TASKRUN,
+    IORING_SETUP_SINGLE_ISSUER, IORING_SETUP_SUBMIT_ALL, IORING_SETUP_TASKRUN_FLAG,
 };
 
 /// Ring 0 plus seven more, each with the process's descriptor limit.
 const MAX_LANES: usize = 8;
-const SLOTS: u32 = 65535;
 const SQ_ENTRIES: u32 = 2048;
 const BUF_COUNT: u32 = 2048;
 const BUF_SIZE: usize = 2048;
 /// Accepts in flight per lane, and the free-slot level that triggers handover.
 const ACCEPTS: u32 = 32;
 const HANDOVER_FREE: u32 = 4096;
+
+/// Self-test forces: a far smaller table and watermark so the driver crosses
+/// ring boundaries for real before the public listener exists. A value of the
+/// `FEED_TABLE` / `FEED_HANDOVER` environment overrides them; unset means the
+/// process limit and the default.
+fn env_u32(name: &str) -> Option<u32> {
+    std::env::var(name).ok().and_then(|s| s.parse().ok())
+}
 
 const K_ACCEPT: u64 = 1;
 const K_RECV: u64 = 2;
@@ -163,6 +170,20 @@ impl Lane {
     }
 }
 
+/// The next ring that may take accepts, or None when every ring is at or below
+/// the handover watermark (so a new one has to be opened).
+fn handover_target(free: &[u32], from: usize, hwm: u32) -> Option<usize> {
+    // Every ring but `from` itself: the caller only gets here when `from` is at
+    // or below the watermark, so it must never be chosen.
+    for step in 1..MAX_LANES {
+        let next = (from + step) % MAX_LANES;
+        if next < free.len() && free[next] > hwm {
+            return Some(next);
+        }
+    }
+    None
+}
+
 #[inline]
 fn bit_set(pending: &[u64], i: u32) -> bool {
     let w = i as usize >> 6;
@@ -175,6 +196,14 @@ pub struct UringServer {
     listen_fd: c_int,
     accept_lane: usize,
     app: App,
+    /// Free-slot level that moves accepting to the next ring.
+    hwm: u32,
+    /// Forced per-ring table size (self test); None = the process fd limit.
+    table_override: Option<u32>,
+    /// Accept backpressure on system-wide free memory.
+    mem: sys::MemGuard,
+    /// Set while a memory-pressure hold is active on the accepting lane.
+    mem_holding: bool,
 }
 
 impl UringServer {
@@ -213,11 +242,21 @@ impl UringServer {
 
     /// Opens ring `i` with a fixed-file table sized to this process's limit.
     fn open_lane(&mut self, i: usize) -> bool {
-        let table = unsafe { sys::nofile_limit() }.saturating_sub(64).max(64);
+        let table = match self.table_override {
+            Some(t) => t.min(MAX_LANES as u32),
+            None => sys::nofile_limit()
+                .saturating_sub(64)
+                .max(64)
+                // The classic register_files table is capped in the kernel; stay
+                // inside it so a large nofile limit cannot fail the whole lane.
+                .min(1 << 20),
+        };
         let flags = IORING_SETUP_SINGLE_ISSUER
             | IORING_SETUP_DEFER_TASKRUN
             | IORING_SETUP_TASKRUN_FLAG
-            | IORING_SETUP_CQSIZE;
+            | IORING_SETUP_CQSIZE
+            | IORING_SETUP_CLAMP
+            | IORING_SETUP_SUBMIT_ALL;
         let mut ring = match Ring::new(SQ_ENTRIES, SQ_ENTRIES * 4, flags) {
             Some(r) => r,
             None => {
@@ -581,20 +620,15 @@ impl UringServer {
     /// Hands the listener to a ring with free slots, opening the next ring when
     /// none has room yet.
     fn advance_accept(&mut self, from: usize) {
-        for step in 1..=MAX_LANES {
-            let next = (from + step) % MAX_LANES;
-            if next >= self.lanes.len() {
-                if self.lanes.len() < MAX_LANES && self.open_lane(self.lanes.len()) {
-                    let new = self.lanes.len() - 1;
-                    self.start_accepting(new);
-                    return;
-                }
-                continue;
-            }
-            if self.lanes[next].free_slots > HANDOVER_FREE {
-                self.start_accepting(next);
-                return;
-            }
+        let free: Vec<u32> = self.lanes.iter().map(|l| l.free_slots).collect();
+        if let Some(next) = handover_target(&free, from, self.hwm) {
+            self.start_accepting(next);
+            return;
+        }
+        if self.lanes.len() < MAX_LANES && self.open_lane(self.lanes.len()) {
+            let new = self.lanes.len() - 1;
+            self.start_accepting(new);
+            return;
         }
         // Every ring is nearly full: keep accepting on the current one. A
         // failed accept is retried, not lost.
@@ -724,11 +758,32 @@ impl UringServer {
             self.retry_deferred(lane);
             let _ = self.lanes[lane].ring.submit(0, 0);
         }
-        // Keep the accepting ring stocked.
-        let cur = self.accept_lane;
+        // Accept backpressure on system-wide free memory: an out-of-memory kill
+        // scores zero, a short hold only delays connects. Polled at most every
+        // 100 ms. In-flight accepts are installed either way.
+        let mem_ok = self.mem.allows_accepts();
+        let mut cur = self.accept_lane;
+        if cur < self.lanes.len() {
+            let holding = self.lanes[cur].accepting;
+            if !mem_ok && holding {
+                self.lanes[cur].accepting = false;
+                self.mem_holding = true;
+                eprintln!("accept held: MemAvailable below the stop threshold");
+            } else if mem_ok && !holding && self.mem_holding {
+                self.mem_holding = false;
+                self.lanes[cur].accepting = true;
+            }
+        }
         if cur < self.lanes.len() && self.lanes[cur].accepting {
-            self.arm_accepts(cur);
-            let _ = self.lanes[cur].ring.submit(0, 0);
+            if self.lanes[cur].free_slots <= self.hwm {
+                self.lanes[cur].accepting = false;
+                self.advance_accept(cur);
+                cur = self.accept_lane;
+            }
+            if cur < self.lanes.len() && self.lanes[cur].accepting {
+                self.arm_accepts(cur);
+                let _ = self.lanes[cur].ring.submit(0, 0);
+            }
         }
         done.len()
     }
@@ -768,6 +823,10 @@ pub fn self_test(secret: &str, db_path: &str) -> bool {
         listen_fd: lfd,
         accept_lane: 0,
         app: App::new(db_path, secret),
+        hwm: HANDOVER_FREE,
+        table_override: None,
+        mem: sys::MemGuard::new(),
+        mem_holding: false,
     };
     if !server.open_lane(0) {
         return false;
@@ -852,7 +911,119 @@ pub fn self_test(secret: &str, db_path: &str) -> bool {
         ok &= h.join().unwrap_or(false);
     }
     drop(server);
+
+    // Ring-boundary stage: a small per-ring table plus a small watermark force
+    // the ignored listener to cross from ring 0 to ring 1 while clients are
+    // still arriving. Every client must be served after the handover.
+    if ok {
+        ok &= self_test_boundary(secret, db_path, port, lfd);
+    }
     ok
+}
+
+/// 64 clients against a 32-slot table with a watermark of 8: ring 0 stops
+/// accepting at 24 lands, ring 1 (or later) takes the rest. The handover and
+/// the small-table pump paths must keep every client correct.
+fn self_test_boundary(secret: &str, db_path: &str, port: u16, lfd: c_int) -> bool {
+    let ep = unsafe { sys::epoll_create1(0x80000) };
+    if ep < 0 {
+        return false;
+    }
+    let mut server = UringServer {
+        lanes: Vec::new(),
+        ep,
+        listen_fd: lfd,
+        accept_lane: 0,
+        app: App::new(db_path, secret),
+        hwm: 8,
+        table_override: Some(32),
+        mem: sys::MemGuard::new(),
+        mem_holding: false,
+    };
+    if !server.open_lane(0) {
+        return false;
+    }
+    server.start_accepting(0);
+
+    const CLIENTS: usize = 64;
+    let mut handles = Vec::new();
+    for _c in 0..CLIENTS {
+        handles.push(std::thread::spawn(move || -> bool {
+            use std::io::{Read, Write};
+            let mut s = match std::net::TcpStream::connect(("127.0.0.1", port)) {
+                Ok(s) => s,
+                Err(_) => return false,
+            };
+            let _ = s.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+            let mut buf = [0u8; 4096];
+            // One keep-alive, then one close-after so rings free their slots too.
+            if s.write_all(b"GET /health HTTP/1.1\r\nHost: x\r\n\r\n").is_err() {
+                return false;
+            }
+            let n = s.read(&mut buf).unwrap_or(0);
+            if !buf[..n].starts_with(b"HTTP/1.1 200") {
+                return false;
+            }
+            if s.write_all(b"GET /posts/3 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+                .is_err()
+            {
+                return false;
+            }
+            let mut tail = Vec::new();
+            let n = s.read_to_end(&mut tail).unwrap_or(0);
+            n > 0
+        }));
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        server.pump(false);
+        if handles.iter().all(|h| h.is_finished()) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_micros(200));
+    }
+    let mut ok = true;
+    for h in handles {
+        ok &= h.join().unwrap_or(false);
+    }
+    // The handover itself must have happened; otherwise table 32 could not hold
+    // 64 concurrent clients and the test would be measuring nothing.
+    ok &= server.lanes.len() >= 2;
+    ok
+}
+
+/// The next ring with room is chosen in ring order and skips the current one,
+/// so a full ring cannot keep the listener.
+#[cfg(test)]
+mod handover_tests {
+    use super::*;
+
+    #[test]
+    fn picks_the_next_ring_with_room() {
+        assert_eq!(handover_target(&[1, 100_000], 0, HANDOVER_FREE), Some(1));
+        assert_eq!(handover_target(&[100_000, 1], 1, HANDOVER_FREE), Some(0));
+        assert_eq!(handover_target(&[1, 1, 100_000], 0, HANDOVER_FREE), Some(2));
+    }
+
+    #[test]
+    fn ignores_rings_at_or_below_the_watermark() {
+        assert_eq!(handover_target(&[100_000, HANDOVER_FREE], 0, HANDOVER_FREE), None);
+        assert_eq!(handover_target(&[1, 1, 1], 0, HANDOVER_FREE), None);
+        assert_eq!(handover_target(&[], 0, HANDOVER_FREE), None);
+    }
+
+    #[test]
+    fn wraps_past_the_last_ring() {
+        assert_eq!(handover_target(&[100_000, 0, 0], 2, HANDOVER_FREE), Some(0));
+    }
+
+    #[test]
+    fn honors_a_forced_watermark() {
+        // Self test: watermark 8 means lanes at exactly 8 free slots are done;
+        // a lane above the watermark is the handover target.
+        assert_eq!(handover_target(&[8, 32], 0, 8), Some(1));
+        assert_eq!(handover_target(&[8, 8], 0, 8), None);
+    }
 }
 
 /// Serves forever on `listen_fd` using io_uring. Returns the app back only if
@@ -867,6 +1038,10 @@ pub fn serve(app: App, listen_fd: c_int) -> App {
         listen_fd,
         accept_lane: 0,
         app,
+        hwm: env_u32("FEED_HANDOVER").unwrap_or(HANDOVER_FREE),
+        table_override: env_u32("FEED_TABLE"),
+        mem: sys::MemGuard::new(),
+        mem_holding: false,
     };
     if !server.open_lane(0) {
         for lane in server.lanes.iter() {

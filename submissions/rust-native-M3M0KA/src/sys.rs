@@ -142,6 +142,110 @@ pub fn fork_process() -> c_int {
     pid
 }
 
+/// Stops and resumes accepting on system-wide free memory ("MemAvailable").
+///
+/// An out-of-memory kill scores zero; a short hold only delays new connects.
+/// `MemAvailable` is read at most every ~100 ms, so a hot loop pays one branch
+/// per pass and one `open`+parse per hundred. Failure to read counts as "no
+/// constraint": guard only what can be measured.
+pub struct MemGuard {
+    stop_kib: u64,
+    resume_kib: u64,
+    holding: bool,
+    last: std::time::Instant,
+}
+
+impl MemGuard {
+    /// Threshold defaults: holds below ~160 MB of free memory, resumes above
+    /// ~240 MB (hysteresis so a borderline value does not flap the listener).
+    pub fn new() -> Self {
+        let stop = std::env::var("FEED_MEM_STOP_KIB")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(163_840);
+        let resume = std::env::var("FEED_MEM_RESUME_KIB")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(245_760);
+        MemGuard {
+            stop_kib: stop,
+            resume_kib: resume,
+            holding: false,
+            last: std::time::Instant::now(),
+        }
+    }
+
+    fn available_kib() -> Option<u64> {
+        let s = std::fs::read_to_string("/proc/meminfo").ok()?;
+        for line in s.lines() {
+            let head = "MemAvailable:";
+            if line.starts_with(head) {
+                let rest = line[head.len()..].trim_start();
+                return rest.split(' ').next()?.parse().ok();
+            }
+        }
+        None
+    }
+
+    /// Whether accepts may be armed right now.
+    pub fn allows_accepts(&mut self) -> bool {
+        let now = std::time::Instant::now();
+        if now.duration_since(self.last) >= std::time::Duration::from_millis(100) {
+            self.last = now;
+            let avail = Self::available_kib();
+            self.apply(avail);
+        }
+        !self.holding
+    }
+
+    /// Updates the hold state from a `MemAvailable` reading in kB. An
+    /// unreadable value keeps the previous state.
+    fn apply(&mut self, avail: Option<u64>) {
+        if let Some(avail) = avail {
+            if avail <= self.stop_kib {
+                self.holding = true;
+            } else if avail >= self.resume_kib {
+                self.holding = false;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod mem_tests {
+    use super::*;
+
+    fn guard() -> MemGuard {
+        MemGuard {
+            stop_kib: 100,
+            resume_kib: 200,
+            holding: false,
+            last: std::time::Instant::now(),
+        }
+    }
+
+    #[test]
+    fn holds_low_recovers_high_keeps_between() {
+        let mut g = guard();
+        g.apply(Some(50));
+        assert!(g.holding);
+        g.apply(Some(150));
+        assert!(g.holding, "between thresholds: keep holding");
+        g.apply(Some(300));
+        assert!(!g.holding);
+    }
+
+    #[test]
+    fn unreadable_keeps_state() {
+        let mut g = guard();
+        g.apply(None);
+        assert!(!g.holding);
+        g.apply(Some(50));
+        g.apply(None);
+        assert!(g.holding, "not even an error can lift a hold");
+    }
+}
+
 /// Drains a counter-style descriptor (eventfd). Reads fail harmlessly with
 /// EAGAIN when the counter is already zero.
 pub fn drain_counter(fd: c_int) {

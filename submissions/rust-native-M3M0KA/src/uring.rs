@@ -21,13 +21,17 @@ pub const IORING_SETUP_DEFER_TASKRUN: u32 = 1 << 13;
 pub const IORING_SETUP_COOP_TASKRUN: u32 = 1 << 8;
 pub const IORING_SETUP_TASKRUN_FLAG: u32 = 1 << 14;
 pub const IORING_SETUP_CQSIZE: u32 = 1 << 3;
+/// Tolerate unknown setup bits (5.5+), and don't drop the rest of a batch when
+/// one SQE is refused (5.19+; this ring needs 6.0+ for DEFER_TASKRUN anyway).
+pub const IORING_SETUP_CLAMP: u32 = 1 << 4;
+pub const IORING_SETUP_SUBMIT_ALL: u32 = 1 << 7;
 
 pub const IORING_ENTER_GETEVENTS: u32 = 1;
 pub const IORING_ENTER_SQ_WAKEUP: u32 = 2;
 
 pub const IORING_REGISTER_FILES: u32 = 2;
 pub const IORING_UNREGISTER_FILES: u32 = 3;
-pub const IORING_REGISTER_EVENTFD_ASYNC: u32 = 20;
+pub const IORING_REGISTER_EVENTFD_ASYNC: u32 = 7;
 pub const IORING_REGISTER_PBUF_RING: u32 = 22;
 
 pub const IORING_OP_NOP: u8 = 0;
@@ -701,5 +705,21 @@ mod abi_tests {
         assert_eq!(std::mem::size_of::<BufEntry>(), 16);
         assert_eq!(SQE_SIZE, 64);
         assert_eq!(CQE_SIZE, 16);
+    }
+
+    /// Register opcodes are fixed uapi numbers; a wrong one makes the lane fail
+    /// silently on a kernel where ring setup itself was fine.
+    #[test]
+    fn register_opcodes_match_the_uapi() {
+        assert_eq!(IORING_REGISTER_FILES, 2);
+        assert_eq!(IORING_UNREGISTER_FILES, 3);
+        assert_eq!(IORING_REGISTER_EVENTFD_ASYNC, 7, "20 is RING_FDS, not eventfd");
+        assert_eq!(IORING_REGISTER_PBUF_RING, 22);
+        assert_eq!(IORING_SETUP_CQSIZE, 1 << 3);
+        assert_eq!(IORING_SETUP_CLAMP, 1 << 4);
+        assert_eq!(IORING_SETUP_SUBMIT_ALL, 1 << 7);
+        assert_eq!(IORING_SETUP_SINGLE_ISSUER, 1 << 12);
+        assert_eq!(IORING_SETUP_DEFER_TASKRUN, 1 << 13);
+        assert_eq!(IORING_SETUP_TASKRUN_FLAG, 1 << 14);
     }
 }

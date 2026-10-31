@@ -371,18 +371,50 @@ static void bad_request(conn_t *c, int st, const char *body, size_t blen) {
     c->close_after = 1;
 }
 
+/* First "\r\n" fully inside b[0..n), or NULL (same result as memmem). */
+static inline const char *find_crlf(const char *b, size_t n) {
+    if (n < 2) return NULL;
+    const char *p = b, *last = b + n - 1;          /* candidate starts < last */
+    while (p < last) {
+        p = memchr(p, '\r', (size_t)(last - p));
+        if (!p) return NULL;
+        if (p[1] == '\n') return p;
+        p++;
+    }
+    return NULL;
+}
+
+/* First "\r\n\r\n" fully inside b[0..n), or NULL (same result as memmem).
+ * When found, *first_crlf is the first "\r\n" in b (at or before it). */
+static inline const char *find_hdr_end(const char *b, size_t n, const char **first_crlf) {
+    const char *fc = NULL;
+    if (n < 4) return NULL;
+    const char *p = b, *last = b + n - 3;          /* candidate starts < last */
+    while (p < last) {
+        p = memchr(p, '\r', (size_t)(last - p));
+        if (!p) return NULL;
+        if (p[1] == '\n') {
+            if (!fc) fc = p;
+            if (p[2] == '\r' && p[3] == '\n') { *first_crlf = fc; return p; }
+            p += 2;
+        } else p++;
+    }
+    return NULL;
+}
+
 /* Parse and serve one request at buf[0..len). Returns bytes consumed,
  * 0 if incomplete (c->need set when the total size is known), -1 after
  * answering a malformed request (connection will close). */
 static long parse_one(uint32_t slot, conn_t *c, const char *buf, size_t len) {
     size_t scan = len < MAX_HDR ? len : MAX_HDR;
-    const char *he = memmem(buf, scan, "\r\n\r\n", 4);
+    const char *le = NULL;
+    const char *he = find_hdr_end(buf, scan, &le);
     if (!he) {
         if (len >= MAX_HDR) { bad_request(c, 400, LIT(E_TOOLARGE)); return -1; }
         return 0;
     }
     size_t hlen = (size_t)(he - buf) + 4;
-    const char *p = buf, *le = memmem(buf, hlen, "\r\n", 2);
+    const char *p = buf;
     req_t rq = {0};
     /* request line */
     const char *sp1 = memchr(p, ' ', (size_t)(le - p));
@@ -404,7 +436,7 @@ static long parse_one(uint32_t slot, conn_t *c, const char *buf, size_t len) {
     uint64_t clen = 0;
     p = le + 2;
     while (p < he + 2) {
-        le = memmem(p, (size_t)(he + 2 - p), "\r\n", 2);
+        le = find_crlf(p, (size_t)(he + 2 - p));
         const char *colon = memchr(p, ':', (size_t)(le - p));
         if (!colon || colon == p) goto bad;
         size_t nl = (size_t)(colon - p);

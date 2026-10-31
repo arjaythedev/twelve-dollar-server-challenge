@@ -151,48 +151,121 @@ static inline void put(out_t *o, const void *s, size_t n) {
 }
 #define PUTS(o, lit) put((o), (lit), sizeof(lit) - 1)
 
-static void put_i64(out_t *o, int64_t v) {
+static const char digits2[201] =
+  "00010203040506070809101112131415161718192021222324252627282930313233343536373839"
+  "40414243444546474849505152535455565758596061626364656667686970717273747576777879"
+  "8081828384858687888990919293949596979899";
+
+/* Decimal int64, two digits per division step. */
+static inline void put_i64(out_t *o, int64_t v) {
+  if ((uint64_t)v < 10) { char ch = (char)('0' + v); put(o, &ch, 1); return; }
   char tmp[24]; int i = 24; uint64_t u = v < 0 ? (uint64_t)0 - (uint64_t)v : (uint64_t)v;
-  do { tmp[--i] = (char)('0' + u % 10); u /= 10; } while (u);
+  while (u >= 100) {
+    unsigned r = (unsigned)(u % 100); u /= 100;
+    i -= 2; memcpy(tmp + i, digits2 + 2 * r, 2);
+  }
+  if (u >= 10) { i -= 2; memcpy(tmp + i, digits2 + 2 * u, 2); }
+  else tmp[--i] = (char)('0' + u);
   if (v < 0) tmp[--i] = '-';
   put(o, tmp + i, (size_t)(24 - i));
 }
 
-static void put_str(out_t *o, const unsigned char *s, size_t n) {
+/* 1 for bytes JSON strings must escape: controls, '"', '\\'. */
+static const unsigned char needs_escape[256] = {
+  [0x00 ... 0x1f] = 1, ['"'] = 1, ['\\'] = 1,
+};
+
+/* Write the escape for one byte c (needs_escape[c] == 1); returns new end. */
+static inline char *esc_byte(char *w, unsigned char c) {
   static const char hex[] = "0123456789abcdef";
+  switch (c) {
+    case '"':  w[0] = '\\'; w[1] = '"';  return w + 2;
+    case '\\': w[0] = '\\'; w[1] = '\\'; return w + 2;
+    case '\n': w[0] = '\\'; w[1] = 'n';  return w + 2;
+    case '\r': w[0] = '\\'; w[1] = 'r';  return w + 2;
+    case '\t': w[0] = '\\'; w[1] = 't';  return w + 2;
+    case '\b': w[0] = '\\'; w[1] = 'b';  return w + 2;
+    case '\f': w[0] = '\\'; w[1] = 'f';  return w + 2;
+    default:
+      w[0] = '\\'; w[1] = 'u'; w[2] = '0'; w[3] = '0'; w[4] = hex[c >> 4]; w[5] = hex[c & 15];
+      return w + 6;
+  }
+}
+
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+#define PUT_STR_SWAR 1
+/* Exact per-byte mask: 0x80 in each byte of x that is < 0x20, '"' or '\\'. */
+static inline uint64_t esc_mask8(uint64_t x) {
+  const uint64_t L7 = 0x7f7f7f7f7f7f7f7fULL;
+#define ZMASK(v) (~((((v) & L7) + L7) | (v) | L7))
+  uint64_t a = x & 0xe0e0e0e0e0e0e0e0ULL;   /* byte zero iff < 0x20 */
+  uint64_t b = x ^ 0x2222222222222222ULL;   /* '"'  */
+  uint64_t c = x ^ 0x5c5c5c5c5c5c5c5cULL;   /* '\\' */
+  return ZMASK(a) | ZMASK(b) | ZMASK(c);
+#undef ZMASK
+}
+#endif
+
+/* Bounds-checked path: used only when the worst case (6 bytes per input
+ * byte + 2 quotes) might not fit, so o->bad ends up exactly as if every
+ * piece had gone through put(). */
+static void put_str_slow(out_t *o, const unsigned char *s, size_t n) {
   PUTS(o, "\"");
   size_t run = 0;
   for (size_t i = 0; i < n; i++) {
     unsigned char c = s[i];
-    if (c >= 0x20 && c != '"' && c != '\\') continue;
+    if (!needs_escape[c]) continue;
     put(o, s + run, i - run);
     run = i + 1;
-    switch (c) {
-      case '"':  PUTS(o, "\\\""); break;
-      case '\\': PUTS(o, "\\\\"); break;
-      case '\n': PUTS(o, "\\n"); break;
-      case '\r': PUTS(o, "\\r"); break;
-      case '\t': PUTS(o, "\\t"); break;
-      case '\b': PUTS(o, "\\b"); break;
-      case '\f': PUTS(o, "\\f"); break;
-      default: { char u[6] = {'\\', 'u', '0', '0', hex[c >> 4], hex[c & 15]}; put(o, u, 6); }
-    }
+    char e[6];
+    put(o, e, (size_t)(esc_byte(e, c) - e));
   }
   put(o, s + run, n - run);
   PUTS(o, "\"");
 }
 
+static inline void put_str(out_t *o, const unsigned char *s, size_t n) {
+  if (__builtin_expect(o->bad || n > (SIZE_MAX - 2) / 6 || o->cap - o->n < 6 * n + 2, 0)) {
+    put_str_slow(o, s, n);
+    return;
+  }
+  char *w = o->p + o->n;
+  *w++ = '"';
+  size_t i = 0, run = 0;
+  for (;;) {
+#ifdef PUT_STR_SWAR
+    while (i + 8 <= n) {
+      uint64_t x; memcpy(&x, s + i, 8);
+      uint64_t m = esc_mask8(x);
+      if (m) { i += (size_t)__builtin_ctzll(m) >> 3; goto esc; }
+      i += 8;
+    }
+#endif
+    while (i < n && !needs_escape[s[i]]) i++;
+    if (i >= n) break;
+#ifdef PUT_STR_SWAR
+  esc:
+#endif
+    memcpy(w, s + run, i - run); w += i - run;
+    w = esc_byte(w, s[i]);
+    run = ++i;
+  }
+  memcpy(w, s + run, n - run); w += n - run;
+  *w++ = '"';
+  o->n = (size_t)(w - o->p);
+}
+
 /* {"id":..,"body":..,"created_at":..,"author":..,"like_count":..} pieces */
-static void put_post_head(out_t *o, int64_t id, const unsigned char *body, size_t bl,
+static inline void put_post_head(out_t *o, int64_t id, const unsigned char *body, size_t bl,
                           const unsigned char *ts, size_t tl) {
   PUTS(o, "{\"id\":"); put_i64(o, id);
   PUTS(o, ",\"body\":"); put_str(o, body, bl);
   PUTS(o, ",\"created_at\":"); put_str(o, ts, tl);
 }
-static void put_post_author(out_t *o, const unsigned char *a, size_t al) {
+static inline void put_post_author(out_t *o, const unsigned char *a, size_t al) {
   PUTS(o, ",\"author\":"); put_str(o, a, al);
 }
-static void put_post_tail(out_t *o, int64_t likes) {
+static inline void put_post_tail(out_t *o, int64_t likes) {
   PUTS(o, ",\"like_count\":"); put_i64(o, likes); PUTS(o, "}");
 }
 
@@ -212,7 +285,7 @@ static inline int rd_varint(const unsigned char *p, const unsigned char *end, ui
 /* One decoded column. kind: 0 null, 1 int, 2 text, 3 other (real/blob/reserved). */
 typedef struct { int kind; int64_t i; const unsigned char *z; uint32_t n; } col_t;
 
-static uint32_t serial_len(uint64_t t) {
+static inline uint32_t serial_len(uint64_t t) {
   static const uint8_t L[10] = {0, 1, 2, 3, 4, 6, 8, 8, 0, 0};
   if (t < 10) return L[t];
   if (t < 12) return 0xffffffffu;           /* reserved: invalid */
@@ -220,7 +293,7 @@ static uint32_t serial_len(uint64_t t) {
   return (uint32_t)((t - 12) / 2);
 }
 
-static int64_t rd_int(const unsigned char *p, uint64_t t) {
+static inline int64_t rd_int(const unsigned char *p, uint64_t t) {
   switch (t) {
     case 8: return 0;
     case 9: return 1;
@@ -243,20 +316,26 @@ static int64_t rd_int(const unsigned char *p, uint64_t t) {
 
 /* Decode the first ncol columns of a record. Returns 0 on success, -1 on any
  * malformation or if the record has fewer than ncol columns. */
-static int decode_record(const unsigned char *rec, uint32_t len, col_t *cols, int ncol) {
+static inline int decode_record(const unsigned char *rec, uint32_t len, col_t *cols, int ncol) {
   const unsigned char *end = rec + len;
   uint64_t hdr;
-  int k = rd_varint(rec, end, &hdr);
-  if (!k || hdr > len || hdr < (uint64_t)k) return -1;
+  int k;
+  /* one-byte varint fast path: same result rd_varint gives for p[0] < 0x80 */
+  if (__builtin_expect(len > 0 && rec[0] < 0x80, 1)) { hdr = rec[0]; k = 1; }
+  else k = rd_varint(rec, end, &hdr);
+  if (__builtin_expect(!k || hdr > len || hdr < (uint64_t)k, 0)) return -1;
   const unsigned char *hp = rec + k, *hend = rec + hdr, *dp = hend;
   for (int c = 0; c < ncol; c++) {
     uint64_t t;
-    if (hp >= hend) return -1;
-    int m = rd_varint(hp, hend, &t);
-    if (!m) return -1;
-    hp += m;
+    if (__builtin_expect(hp >= hend, 0)) return -1;
+    if (__builtin_expect(hp[0] < 0x80, 1)) { t = hp[0]; hp++; }
+    else {
+      int m = rd_varint(hp, hend, &t);
+      if (!m) return -1;
+      hp += m;
+    }
     uint32_t sl = serial_len(t);
-    if (sl == 0xffffffffu || (uint64_t)(end - dp) < sl) return -1;
+    if (__builtin_expect(sl == 0xffffffffu || (uint64_t)(end - dp) < sl, 0)) return -1;
     if (t == 0) cols[c].kind = 0;
     else if (t <= 6 || t == 8 || t == 9) { cols[c].kind = 1; cols[c].i = rd_int(dp, t); }
     else if (t >= 13 && (t & 1)) { cols[c].kind = 2; cols[c].z = dp; cols[c].n = sl; }
@@ -268,10 +347,10 @@ static int decode_record(const unsigned char *rec, uint32_t len, col_t *cols, in
 
 /* Full payload of the cursor's current entry: zero-copy when local, else
  * copied into scratch (only one overflow payload may be live at a time). */
-static int cursor_payload(db_t *d, BtCursor *c, const unsigned char **p, uint32_t *n) {
+static inline int cursor_payload(db_t *d, BtCursor *c, const unsigned char **p, uint32_t *n) {
   uint32_t total = sqlite3BtreePayloadSize(c), amt = 0;
   const void *loc = sqlite3BtreePayloadFetch(c, &amt);
-  if (loc && amt >= total) { *p = loc; *n = total; return 0; }
+  if (__builtin_expect(loc && amt >= total, 1)) { *p = loc; *n = total; return 0; }
   if (total > SCRATCH_CAP) return -1;
   if (sqlite3BtreePayload(c, 0, total, d->scratch) != SQLITE_OK) return -1;
   *p = d->scratch; *n = total;

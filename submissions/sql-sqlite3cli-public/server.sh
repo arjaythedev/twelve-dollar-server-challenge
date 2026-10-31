@@ -23,10 +23,10 @@ shopt -u patsub_replacement  # "&" in a ${x//a/b} replacement would otherwise me
 DIR=$(cd "$(dirname "$0")" && pwd)
 HOST=${HOST:-0.0.0.0} PORT=${PORT:-80} POOL=${POOL:-2} IDLE=${IDLE:-4}
 : "${SQLITE_PATH:?}" "${JWT_SECRET:?}"
-enable -f accept accept && enable -f mkfifo mkfifo && enable -f rm rm && enable -f sleep sleep || exit 1
+enable -f accept accept && enable -f mkfifo mkfifo && enable -f rm rm && enable -f sleep sleep && enable -f tee tee || exit 1
 
 RUN=$(mktemp -d -p /dev/shm 2>/dev/null || mktemp -d)
-trap 'kill 0; rm -rf "$RUN"' EXIT
+trap 'kill $(jobs -p) 2>/dev/null; rm -rf "$RUN"' EXIT  # our children only: `kill 0` would also hit whoever started us
 trap 'exit 0' TERM INT
 printf ".output /dev/null\nPRAGMA busy_timeout=5000;\nPRAGMA temp_store=MEMORY;\nCREATE TEMP TABLE cfg AS SELECT '%s' AS secret, %d AS boot;\n.read app.sql\n" \
 	"${JWT_SECRET//\'/\'\'}" "$EPOCHSECONDS" > "$RUN/boot.sql"
@@ -57,7 +57,8 @@ serve() {
 			"${head//\'/\'\'}" "${body//\'/\'\'}" "$RUN/p$k" "$RUN/p$k" "$RUN/r$me" > "$RUN/c$me.sql"
 		printf '.read %s\n' "$RUN/c$me.sql" >&"${Q[k]}"
 		IFS= read -r -u "$res" len && IFS= read -r -N "$((len + 1))" -u "$res" resp || break
-		printf '%s' "$resp" >&"$fd" || break
+		tee <<< "${resp%$'\n'}" >&"$fd" || break  # one write (tee copies 8 KB at a time); printf writes each line
+		# separately, and on a reused connection Nagle + delayed ACK then hold the rest for 40 ms
 	done
 	rm -f "$RUN/r$me" "$RUN/c$me.sql"
 }

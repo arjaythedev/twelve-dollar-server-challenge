@@ -7,7 +7,7 @@
 # Convention: opaque C handles (ring, db, cursor) travel as Int addresses, which
 # is ABI-identical to void* and sidesteps origin typing for memory Mojo never owns.
 from std.ffi import c_int, external_call
-from bytes import Bytes, balloc, bcopy, bat, eqlit, Out, parse_pos_int, calloc_t, leak_string
+from bytes import Bytes, balloc, bcopy, bmove, bat, eqlit, Out, parse_pos_int, calloc_t, leak_string
 from uring import *
 from resp import Arenas, Resp, const_resp, POST_MAX, FEED_MAX, CREATE_MAX
 from db import Db, CREATED_LEN, LIKE_MISSING, LIKE_NEW, LIKE_DUP
@@ -21,6 +21,7 @@ comptime OP_ACCEPT: UInt64 = 1
 comptime OP_RECV: UInt64 = 2
 comptime OP_SEND: UInt64 = 3
 comptime OP_CLOSE: UInt64 = 4
+comptime OP_SHUTDOWN: UInt64 = 5   # the shutdown linked before a close; its completion is ignored
 comptime MAX_RINGS = 16
 
 comptime SQ_ENTRIES = 4096
@@ -85,6 +86,8 @@ struct WriteReq(ImplicitlyCopyable, Copyable, Movable):
     var body_len: Int
     var result: Int        # W_LIKE: a LIKE_* code; W_POST: 1 ok / 0 fail
     var created: Int       # address of 24 bytes in scratch (W_POST)
+    var node: Int          # the response-queue placeholder reserved at parse time
+    var gen: UInt32        # the connection's generation then (slot reuse check)
 
 
 # Per-batch bump allocator for bodies and usernames that outlive the receive buffer.
@@ -158,6 +161,7 @@ struct Server:
     var r_too_large: Resp
     var r_degraded: Resp
     var last_tick: Int
+    var efd0_ready: Bool
 
     def __init__(out self, db_path: String, secret: String, host: String, port: Int) raises:
         self.db = Db(db_path)
@@ -217,6 +221,7 @@ struct Server:
         self.r_too_large = const_resp(413, '{"error":"request too large"}')
         self.r_degraded = const_resp(503, '{"status":"degraded","db":"unreachable","error":"SELECT 1 failed"}')
         self.last_tick = self.start_ms
+        self.efd0_ready = False
         if ring_open(0) != 0:
             raise Error("ring 0 open failed")
         self.nrings = 1
@@ -305,30 +310,24 @@ struct Server:
         if (f & F_CLOSING) != 0:
             return
         self.conns[unsafe_offset=conn].flags = f | F_CLOSING
-        _ = prep_close(ring, slot, mk_ud(OP_CLOSE, ring, self.conns[unsafe_offset=conn].gen, slot))
+        var g = self.conns[unsafe_offset=conn].gen
+        _ = prep_close(ring, slot, mk_ud(OP_SHUTDOWN, ring, g, slot), mk_ud(OP_CLOSE, ring, g, slot))
 
-    # Queue a response for a connection: send now, or append behind the sends in flight
-    # (pipelined requests are answered in order, one send at a time).
-    def respond(mut self, ring: Int, slot: Int, conn: Int, var r: Resp, close: Bool):
-        var f = self.conns[unsafe_offset=conn].flags
-        if close:
-            f |= F_CLOSE_AFTER
-            self.conns[unsafe_offset=conn].flags = f
-        if (f & F_SENDING) == 0:
-            self.start_send(ring, slot, conn, r.ptr, r.len, r.arena)
-            return
+    # Append a queue node for conn (ptr == 0 is a placeholder for a write whose
+    # response is built after COMMIT). Returns the node index.
+    def enqueue(mut self, conn: Int, ptr: Int, n: Int, arena: Int) -> Int:
         var node: Int
         if len(self.qn_free) > 0:
             node = self.qn_free.pop()
-            self.qn_ptr[node] = r.ptr
-            self.qn_len[node] = r.len
-            self.qn_arena[node] = r.arena
+            self.qn_ptr[node] = ptr
+            self.qn_len[node] = n
+            self.qn_arena[node] = arena
             self.qn_next[node] = 0
         else:
             node = len(self.qn_ptr)
-            self.qn_ptr.append(r.ptr)
-            self.qn_len.append(r.len)
-            self.qn_arena.append(r.arena)
+            self.qn_ptr.append(ptr)
+            self.qn_len.append(n)
+            self.qn_arena.append(arena)
             self.qn_next.append(0)
         var tail = Int(self.conns[unsafe_offset=conn].q_tail)
         if tail == 0:
@@ -336,13 +335,35 @@ struct Server:
         else:
             self.qn_next[tail - 1] = node + 1
         self.conns[unsafe_offset=conn].q_tail = Int32(node + 1)
+        return node
 
-    # Pop the next queued response for conn and start sending it; False if none.
+    # Queue a response for a connection: send now if nothing is ahead of it, else
+    # append (pipelined requests are answered in order, one send in flight).
+    def respond(mut self, ring: Int, slot: Int, conn: Int, var r: Resp, close: Bool):
+        var f = self.conns[unsafe_offset=conn].flags
+        if (f & F_CLOSING) != 0:
+            self.arenas.release(r.arena)   # a close is already on its way; nothing more goes out
+            return
+        if close:
+            f |= F_CLOSE_AFTER
+            self.conns[unsafe_offset=conn].flags = f
+        if (f & F_SENDING) == 0 and self.conns[unsafe_offset=conn].q_head == 0:
+            self.start_send(ring, slot, conn, r.ptr, r.len, r.arena)
+            return
+        _ = self.enqueue(conn, r.ptr, r.len, r.arena)
+
+    # Start the next queued response; False if none, or if the head is a write still
+    # waiting for its commit.
     def send_next(mut self, ring: Int, slot: Int, conn: Int) -> Bool:
+        if (self.conns[unsafe_offset=conn].flags & F_CLOSING) != 0:
+            self.drop_queue(conn)
+            return False
         var head = Int(self.conns[unsafe_offset=conn].q_head)
         if head == 0:
             return False
         var node = head - 1
+        if self.qn_ptr[node] == 0:
+            return False
         var nxt = self.qn_next[node]
         self.conns[unsafe_offset=conn].q_head = Int32(nxt)
         if nxt == 0:
@@ -350,6 +371,14 @@ struct Server:
         self.start_send(ring, slot, conn, self.qn_ptr[node], self.qn_len[node], self.qn_arena[node])
         self.qn_free.append(node)
         return True
+
+    # A placeholder got its response: send it if the connection is idle.
+    def kick(mut self, conn: Int):
+        var f = self.conns[unsafe_offset=conn].flags
+        if (f & F_SENDING) == 0 and (f & F_CLOSING) == 0:
+            if not self.send_next(conn // self.table, conn % self.table, conn):
+                if (f & F_CLOSE_AFTER) != 0 and self.conns[unsafe_offset=conn].q_head == 0:
+                    self.do_close(conn // self.table, conn % self.table, conn)
 
     # Drop everything queued for a connection that is going away.
     def drop_queue(mut self, conn: Int):
@@ -419,7 +448,8 @@ struct Server:
                 if id <= 0:
                     self.respond(ring, slot, conn, self.r_bad_id, close)
                     return
-                self.writes.append(WriteReq(conn, W_LIKE, self.jwt.user_id, id, 0, 0, 0, 0, 0, 0))
+                var node = self.enqueue(conn, 0, 0, -1)
+                self.writes.append(WriteReq(conn, W_LIKE, self.jwt.user_id, id, 0, 0, 0, 0, 0, 0, node, self.conns[unsafe_offset=conn].gen))
                 if close:
                     self.conns[unsafe_offset=conn].flags |= F_CLOSE_AFTER
                 return
@@ -440,7 +470,8 @@ struct Server:
             bcopy(name, self.jwt.name_ptr, self.jwt.name_len)
             var body = self.scratch.take(blen)
             bcopy(body, self.body_buf, blen)
-            self.writes.append(WriteReq(conn, W_POST, self.jwt.user_id, 0, Int(name), self.jwt.name_len, Int(body), blen, 0, 0))
+            var node = self.enqueue(conn, 0, 0, -1)
+            self.writes.append(WriteReq(conn, W_POST, self.jwt.user_id, 0, Int(name), self.jwt.name_len, Int(body), blen, 0, 0, node, self.conns[unsafe_offset=conn].gen))
             if close:
                 self.conns[unsafe_offset=conn].flags |= F_CLOSE_AFTER
             return
@@ -462,25 +493,31 @@ struct Server:
                 return -1
         return off
 
-    # Keep `rest` bytes of an incomplete request for the connection, sized to fit.
-    def keep_partial(mut self, conn: Int, src: Bytes, rest: Int) -> Bool:
-        var pbuf = self.conns[unsafe_offset=conn].partial
-        var cap = Int(self.conns[unsafe_offset=conn].pcap)
-        if rest > PARTIAL_MAX:
+    # Make the connection's partial-request buffer hold `need` bytes (realloc keeps
+    # what is already there). False past the cap.
+    def grow_partial(mut self, conn: Int, need: Int) -> Bool:
+        if need > PARTIAL_MAX:
             return False
-        if pbuf == 0 or cap < rest:
-            var want = PARTIAL_MIN
-            while want < rest:
-                want *= 2
-            if want > PARTIAL_MAX:
-                want = PARTIAL_MAX
-            pbuf = realloc_bytes(pbuf, want) if pbuf != 0 else malloc_bytes(want)
-            self.conns[unsafe_offset=conn].partial = pbuf
-            self.conns[unsafe_offset=conn].pcap = Int32(want)
-        if Int(src) != pbuf:
-            bcopy(bat(pbuf), src, rest)
-        self.conns[unsafe_offset=conn].plen = Int32(rest)
+        var pbuf = self.conns[unsafe_offset=conn].partial
+        if pbuf != 0 and Int(self.conns[unsafe_offset=conn].pcap) >= need:
+            return True
+        var want = PARTIAL_MIN
+        while want < need:
+            want *= 2
+        if want > PARTIAL_MAX:
+            want = PARTIAL_MAX
+        pbuf = realloc_bytes(pbuf, want) if pbuf != 0 else malloc_bytes(want)
+        self.conns[unsafe_offset=conn].partial = pbuf
+        self.conns[unsafe_offset=conn].pcap = Int32(want)
         return True
+
+    def free_partial(mut self, conn: Int):
+        var pbuf = self.conns[unsafe_offset=conn].partial
+        if pbuf != 0:
+            free_addr(pbuf)
+            self.conns[unsafe_offset=conn].partial = 0
+            self.conns[unsafe_offset=conn].plen = 0
+            self.conns[unsafe_offset=conn].pcap = 0
 
     def on_recv(mut self, ring: Int, slot: Int, conn: Int, res: Int, cflags: UInt32) raises:
         var f = self.conns[unsafe_offset=conn].flags
@@ -496,38 +533,36 @@ struct Server:
             if res == ENOBUFS:
                 self.rearm.append(conn)
                 return
-            # EOF or error: close once any send in flight is done
-            if (f & F_SENDING) != 0:
+            # EOF or error: let anything queued (including writes waiting for their
+            # commit) go out first, then close
+            if (f & F_SENDING) != 0 or self.conns[unsafe_offset=conn].q_head != 0:
                 self.conns[unsafe_offset=conn].flags = f | F_CLOSE_AFTER
             else:
                 self.do_close(ring, slot, conn)
             return
         var data = buf_base(ring).unsafe_offset(bid * BUFSIZE)
         var n = res
-        var pbuf = self.conns[unsafe_offset=conn].partial
         var consumed = 0
-        if pbuf != 0:
+        if self.conns[unsafe_offset=conn].partial != 0:
             # continue a request that spans receives: append, then parse the whole
             var have = Int(self.conns[unsafe_offset=conn].plen)
-            if not self.keep_partial(conn, bat(pbuf), have + n):
+            if not self.grow_partial(conn, have + n):
                 buf_return(ring, bid)
                 self.respond(ring, slot, conn, self.r_too_large, True)
                 return
-            pbuf = self.conns[unsafe_offset=conn].partial
+            var pbuf = self.conns[unsafe_offset=conn].partial
             bcopy(bat(pbuf + have), data, n)
-            have += n
-            consumed = self.consume(ring, slot, conn, bat(pbuf), have)
             buf_return(ring, bid)
+            have += n
+            self.conns[unsafe_offset=conn].plen = Int32(have)
+            consumed = self.consume(ring, slot, conn, bat(pbuf), have)
             if consumed < 0:
                 return
             if consumed == have:
-                free_addr(pbuf)
-                self.conns[unsafe_offset=conn].partial = 0
-                self.conns[unsafe_offset=conn].plen = 0
-                self.conns[unsafe_offset=conn].pcap = 0
+                self.free_partial(conn)
             elif consumed > 0:
                 var rest = have - consumed
-                bcopy(bat(pbuf), bat(pbuf + consumed), rest)
+                bmove(bat(pbuf), bat(pbuf + consumed), rest)
                 self.conns[unsafe_offset=conn].plen = Int32(rest)
         else:
             consumed = self.consume(ring, slot, conn, data, n)
@@ -535,10 +570,13 @@ struct Server:
                 buf_return(ring, bid)
                 return
             if consumed < n:
-                if not self.keep_partial(conn, data.unsafe_offset(consumed), n - consumed):
+                var rest = n - consumed
+                if not self.grow_partial(conn, rest):
                     buf_return(ring, bid)
                     self.respond(ring, slot, conn, self.r_too_large, True)
                     return
+                bcopy(bat(self.conns[unsafe_offset=conn].partial), data.unsafe_offset(consumed), rest)
+                self.conns[unsafe_offset=conn].plen = Int32(rest)
             buf_return(ring, bid)
         if (cflags & CQE_F_MORE) == 0:
             self.rearm.append(conn)
@@ -573,12 +611,7 @@ struct Server:
         self.conns[unsafe_offset=conn].flags = 0
         self.conns[unsafe_offset=conn].gen += 1
         self.ring_live[unsafe_offset=conn // self.table] -= 1
-        var pbuf = self.conns[unsafe_offset=conn].partial
-        if pbuf != 0:
-            free_addr(pbuf)
-            self.conns[unsafe_offset=conn].partial = 0
-            self.conns[unsafe_offset=conn].plen = 0
-            self.conns[unsafe_offset=conn].pcap = 0
+        self.free_partial(conn)
 
     # ---- the write phase
 
@@ -599,41 +632,42 @@ struct Server:
         for i in range(len(self.writes)):
             var w = self.writes[i]
             var conn = w.conn
-            var ring = conn // self.table
-            var slot = conn % self.table
-            var f = self.conns[unsafe_offset=conn].flags
-            var close = (f & F_CLOSE_AFTER) != 0
-            if (f & F_OPEN) == 0:
+            # the connection may have closed (and its slot been reused) since the parse
+            if (self.conns[unsafe_offset=conn].flags & F_OPEN) == 0 or self.conns[unsafe_offset=conn].gen != w.gen:
                 continue
+            var r: Resp
             if not committed or w.result < 0 or (w.kind == W_POST and w.result == 0):
-                self.respond(ring, slot, conn, self.r_internal, close)
-                continue
-            if w.kind == W_LIKE:
+                r = self.r_internal
+            elif w.kind == W_LIKE:
                 if w.result == LIKE_MISSING:
-                    self.respond(ring, slot, conn, self.r_post_missing, close)
-                    continue
-                var o = self.arenas.begin(128)
-                o.put_lit('{"liked":true,"already_liked":')
-                if w.result == LIKE_DUP:
-                    o.put_lit("true")
+                    r = self.r_post_missing
                 else:
-                    o.put_lit("false")
-                o.put_lit(',"post_id":')
+                    var o = self.arenas.begin(128)
+                    o.put_lit('{"liked":true,"already_liked":')
+                    if w.result == LIKE_DUP:
+                        o.put_lit("true")
+                    else:
+                        o.put_lit("false")
+                    o.put_lit(',"post_id":')
+                    o.put_int(w.post_id)
+                    o.put(0x7D)
+                    r = self.arenas.finish(201 if w.result == LIKE_NEW else 200, o)
+            else:
+                var o = self.arenas.begin(CREATE_MAX)
+                o.put_lit('{"post":{"id":')
                 o.put_int(w.post_id)
-                o.put(0x7D)
-                self.respond(ring, slot, conn, self.arenas.finish(201 if w.result == LIKE_NEW else 200, o), close)
-                continue
-            var o = self.arenas.begin(CREATE_MAX)
-            o.put_lit('{"post":{"id":')
-            o.put_int(w.post_id)
-            o.put_lit(',"body":"')
-            o.put_json(bat(w.body), w.body_len)
-            o.put_lit('","created_at":"')
-            o.put_bytes(bat(w.created), CREATED_LEN)
-            o.put_lit('","author":"')
-            o.put_json(bat(w.name), w.name_len)
-            o.put_lit('","like_count":0}}')
-            self.respond(ring, slot, conn, self.arenas.finish(201, o), close)
+                o.put_lit(',"body":"')
+                o.put_json(bat(w.body), w.body_len)
+                o.put_lit('","created_at":"')
+                o.put_bytes(bat(w.created), CREATED_LEN)
+                o.put_lit('","author":"')
+                o.put_json(bat(w.name), w.name_len)
+                o.put_lit('","like_count":0}}')
+                r = self.arenas.finish(201, o)
+            self.qn_ptr[w.node] = r.ptr
+            self.qn_len[w.node] = r.len
+            self.qn_arena[w.node] = r.arena
+            self.kick(conn)
         self.writes.clear()
 
     # ---- the loop
@@ -653,6 +687,8 @@ struct Server:
             # a completion for an earlier life of this slot
             if op == OP_RECV and (c.flags & CQE_F_BUFFER) != 0:
                 buf_return(ring, Int(c.flags >> CQE_BUFFER_SHIFT))
+            return
+        if op == OP_SHUTDOWN:
             return
         if op == OP_RECV:
             self.on_recv(ring, slot, conn, res, c.flags)
@@ -687,6 +723,9 @@ struct Server:
                     log("wait_one failed: " + String(rc) + "; using epoll waits")
                     self.single_wait_ok = False
             else:
+                if not self.efd0_ready:
+                    _ = ring_enable_efd(0)
+                    self.efd0_ready = True
                 _ = wait(1000)
             self.now = unix_time()
             self.scratch.reset()

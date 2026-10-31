@@ -289,7 +289,8 @@ struct JsonScan:
                 i += 1
                 continue
             if self.p[unsafe_offset=i] == 0x7D:
-                return found
+                # the object must be the whole document
+                return found and skip_ws(self.p, self.n, i + 1) == self.n
             return False
 
     def value_is_string(self) -> Bool:

@@ -87,6 +87,8 @@ static int ring_register_efd(struct ring *r) {
   return rc;
 }
 
+int sh_ring_enable_efd(int i) { return ring_register_efd(&rings[i]); }
+
 // Create ring i (lazily). Returns 0 or -errno; a failed ring stays dead.
 int sh_ring_open(int i) {
   if (i < 0 || i >= MAX_RINGS) return -EINVAL;
@@ -265,10 +267,23 @@ int sh_prep_send(int i, int slot, const void *buf, unsigned len, uint64_t ud) {
   io_uring_sqe_set_data64(s, ud);
   return 0;
 }
-int sh_prep_close(int i, int slot, uint64_t ud) {
-  SQE_OR_FAIL(i);
-  io_uring_prep_close_direct(s, slot);
-  io_uring_sqe_set_data64(s, ud);
+// Shutdown both directions, hard-linked to the close: the outstanding multishot
+// receive then completes (with EOF or an error) instead of pinning the socket open
+// past the close. The shutdown's own completion carries `ud_shutdown` and is ignored.
+int sh_prep_close(int i, int slot, uint64_t ud_shutdown, uint64_t ud) {
+  struct io_uring_sqe *s1 = io_uring_get_sqe(&rings[i].ring);
+  struct io_uring_sqe *s2 = s1 ? io_uring_get_sqe(&rings[i].ring) : NULL;
+  if (!s2) {
+    io_uring_submit(&rings[i].ring);
+    s1 = io_uring_get_sqe(&rings[i].ring);
+    s2 = s1 ? io_uring_get_sqe(&rings[i].ring) : NULL;
+    if (!s2) return -1;
+  }
+  io_uring_prep_shutdown(s1, slot, SHUT_RDWR);
+  s1->flags |= IOSQE_FIXED_FILE | IOSQE_IO_HARDLINK;
+  io_uring_sqe_set_data64(s1, ud_shutdown);
+  io_uring_prep_close_direct(s2, slot);
+  io_uring_sqe_set_data64(s2, ud);
   return 0;
 }
 
@@ -409,8 +424,9 @@ void *bt_cursor_alloc(void *db, int nkey) {
   sqlite3BtreeCursorZero(k->c);
   if (nkey > 0) {
     k->ki = sqlite3KeyInfoAlloc(d, nkey, 1);  // nkey key columns + rowid; BINARY collation, ASC
+    if (!k->ki) return NULL;
     k->rec = sqlite3VdbeAllocUnpackedRecord(k->ki);
-    if (!k->ki || !k->rec) return NULL;
+    if (!k->rec) return NULL;
     k->rec->nField = 1;
     k->rec->default_rc = 1;  // SeekGE: entries equal on the prefix compare as "greater", so the
                              // cursor lands just before the first of them (then bt_next if res<0)
@@ -476,12 +492,20 @@ static void *ck_main(void *arg) {
     return NULL;
   }
   sqlite3_busy_timeout(db, 50);
-  int last_log = -1, idle = 0;
+  // A connection that has never run a statement has not opened the WAL, and a
+  // checkpoint on it is a no-op (frame counts come back -1). One read fixes that.
+  sqlite3_exec(db, "SELECT 1 FROM sqlite_master LIMIT 1", 0, 0, 0);
+  int last_log = -1, idle = 0, reported = 0;
   for (;;) {
     // back off to 10x the interval when the WAL hasn't changed (idle server)
     usleep((useconds_t)ck.interval_ms * 1000 * (idle > 5 ? 10 : 1));
     int log = 0, done = 0;
-    sqlite3_wal_checkpoint_v2(db, NULL, SQLITE_CHECKPOINT_PASSIVE, &log, &done);
+    int rc = sqlite3_wal_checkpoint_v2(db, NULL, SQLITE_CHECKPOINT_PASSIVE, &log, &done);
+    if (!reported && log > 0) {
+      fprintf(stderr, "checkpointer: first passive checkpoint rc=%d wal_frames=%d backfilled=%d\n", rc, log, done);
+      fflush(stderr);
+      reported = 1;
+    }
     if (log == last_log) idle++; else idle = 0;
     last_log = log;
   }

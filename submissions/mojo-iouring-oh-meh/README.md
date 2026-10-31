@@ -50,9 +50,15 @@ SQLITE_PATH=... JWT_SECRET=... HOST=0.0.0.0 PORT=80 bash start.sh
   ring signals it when work arrives) and runs the task work of the rings that fired.
 - **Batches.** Everything from one wake-up is one batch: reads are answered from one `BEGIN`, with
   B-tree cursors opened once per batch; then cursors close, writes run as prepared statements, then
-  `COMMIT`, then every send is submitted. No 201 leaves before its commit; a failed commit turns the
+  `COMMIT`, then the sends are submitted (read responses can go out earlier if the submission queue
+  fills mid-batch; they are built from committed state either way). A write's response is only built
+  after the commit, and it holds its place in the connection's response queue from the moment it is
+  parsed, so a pipelined write and read are answered in request order. A failed commit turns the
   batch's writes into 500s.
-- **Keep-alive** connections are never closed by the server. A guard pauses accepting when
+- **Closing.** Healthy keep-alive connections are never closed by the server. When it does close
+  (HTTP/1.0, `Connection: close`, a bad request, or after the peer's EOF once queued responses are
+  out), it is a `SHUTDOWN` hard-linked to the direct-descriptor `CLOSE`, so the outstanding
+  multishot receive completes instead of keeping the socket alive. A guard pauses accepting when
   `MemAvailable` drops under 160 MB and resumes above 256 MB.
 
 ## SQLite
@@ -72,10 +78,12 @@ SQLITE_PATH=... JWT_SECRET=... HOST=0.0.0.0 PORT=80 bash start.sh
   ever fails. Nothing is remembered across requests.
 - **Writes** are the reference `INSERT ... RETURNING` and `INSERT ... ON CONFLICT DO NOTHING`,
   group-committed per batch.
-- **Checkpoints.** The checkpoint thread runs `PASSIVE` every 250 ms. SQLite only restarts a WAL on
-  its own during a write lull, and group commit never leaves one, so the writer runs a `TRUNCATE`
-  checkpoint once the WAL passes 8,192 frames (32 MiB). Before that fix the WAL reached 600 MB in
-  a saturation test and `walFindFrame` was a quarter of all CPU.
+- **Checkpoints.** The checkpoint thread runs `PASSIVE` every 250 ms on its own connection (which
+  runs one read first: a connection that has never run a statement has not opened the WAL, and a
+  checkpoint on it is a no-op; the thread logs its first real checkpoint at startup). SQLite only
+  restarts a WAL on its own during a write lull, and group commit never leaves one, so the writer
+  runs a `TRUNCATE` checkpoint once the WAL passes 8,192 frames (32 MiB). Before that fix the WAL
+  reached 600 MB in a saturation test and `walFindFrame` was a quarter of all CPU.
 - `mmap_size=0` on purpose: with mmap on, SQLite skips its page cache for mapped pages and consults
   the WAL index on every page touch, which was 12 % of CPU. With a 32 MiB page cache the hot set
   (users, the tails of posts and of the likes index) is a cache hit.
@@ -91,8 +99,9 @@ SQLITE_PATH=... JWT_SECRET=... HOST=0.0.0.0 PORT=80 bash start.sh
   request. The self-test (`src/selftest.mojo`) checks SHA-256 and HMAC against the RFC 4231 vector
   and a token signed the way `test/test.sh` signs one.
 - The parser reads the request line, `Authorization`, `Content-Length` and `Connection`; everything
-  else is skipped. Requests that span receives are completed in a per-connection buffer (16 KB cap,
-  413 past it). HTTP/1.0 or `Connection: close` closes after the response.
+  else is skipped. Requests that span receives are completed in a per-connection buffer that grows
+  by `realloc` from 512 bytes to a 16 KB cap (413 past it). HTTP/1.0 or `Connection: close` closes
+  after the response.
 
 ## Measurements
 
@@ -131,6 +140,11 @@ onto eight 64-slot rings.
   real connections. The table limit itself is the kernel's `RLIMIT_NOFILE` check in
   `io_sqe_files_register`.
 - Nothing above 20,000 simultaneous connections has been run.
+- An independent review (a second model, read-only) of the first committed version found a
+  use-after-realloc on fragmented requests, reversed responses when a write and a read were
+  pipelined together, and a leaked response arena on EOF with a write queued. All three are fixed
+  and have probes in the submission's history; the suite never caught them because loopback
+  delivers every test request in one segment and the suite never pipelines.
 - The Mojo runtime starts a few worker threads at startup. The server never gives them work.
 - The B-tree calls are to SQLite's own layer and stay inside its transactions. The amalgamation is
   not modified.

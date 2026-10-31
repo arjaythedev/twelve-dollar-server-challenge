@@ -34,6 +34,12 @@ def ring_open(i: Int) -> Int:
     return Int(external_call["sh_ring_open", c_int](c_int(i)))
 
 
+# Register ring i's eventfd with io_uring (needed before the loop can sleep in epoll on it).
+@always_inline
+def ring_enable_efd(i: Int) -> Int:
+    return Int(external_call["sh_ring_enable_efd", c_int](c_int(i)))
+
+
 @always_inline
 def buf_base(i: Int) -> Bytes:
     return Bytes(unsafe_from_address=external_call["sh_buf_base", Int](c_int(i)))
@@ -92,8 +98,8 @@ def prep_send(i: Int, slot: Int, buf: Int, n: Int, ud: UInt64) -> Int:
 
 
 @always_inline
-def prep_close(i: Int, slot: Int, ud: UInt64) -> Int:
-    return Int(external_call["sh_prep_close", c_int](c_int(i), c_int(slot), ud))
+def prep_close(i: Int, slot: Int, ud_shutdown: UInt64, ud: UInt64) -> Int:
+    return Int(external_call["sh_prep_close", c_int](c_int(i), c_int(slot), ud_shutdown, ud))
 
 
 @always_inline

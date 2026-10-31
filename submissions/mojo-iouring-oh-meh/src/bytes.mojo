@@ -31,6 +31,12 @@ def bcopy(dst: Bytes, src: Bytes, n: Int):
     _ = external_call["memcpy", Int](dst, src, n)
 
 
+# Overlap-safe copy (memmove), for compacting a buffer in place.
+@always_inline
+def bmove(dst: Bytes, src: Bytes, n: Int):
+    _ = external_call["memmove", Int](dst, src, n)
+
+
 @always_inline
 def bat(addr: Int) -> Bytes:
     return Bytes(unsafe_from_address=addr)

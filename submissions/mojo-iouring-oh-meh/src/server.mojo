@@ -380,14 +380,19 @@ struct Server:
                 if (f & F_CLOSE_AFTER) != 0 and self.conns[unsafe_offset=conn].q_head == 0:
                     self.do_close(conn // self.table, conn % self.table, conn)
 
-    # Drop everything queued for a connection that is going away.
+    # Drop everything queued for a connection that is going away. A placeholder
+    # still waiting for its write is not freed: run_writes owns it until it has
+    # resolved the write, and sees the -1 (orphan) mark then.
     def drop_queue(mut self, conn: Int):
         var head = Int(self.conns[unsafe_offset=conn].q_head)
         while head != 0:
             var node = head - 1
-            self.arenas.release(self.qn_arena[node])
             head = self.qn_next[node]
-            self.qn_free.append(node)
+            if self.qn_ptr[node] == 0:
+                self.qn_ptr[node] = -1
+            else:
+                self.arenas.release(self.qn_arena[node])
+                self.qn_free.append(node)
         self.conns[unsafe_offset=conn].q_head = 0
         self.conns[unsafe_offset=conn].q_tail = 0
 
@@ -603,7 +608,9 @@ struct Server:
         self.conns[unsafe_offset=conn].flags = f
         if self.send_next(ring, slot, conn):
             return
-        if (f & F_CLOSE_AFTER) != 0:
+        # not sent: either nothing is queued, or the head is a write still waiting
+        # for its commit; only the first case may close
+        if (f & F_CLOSE_AFTER) != 0 and self.conns[unsafe_offset=conn].q_head == 0:
             self.do_close(ring, slot, conn)
 
     def on_close(mut self, conn: Int):
@@ -632,8 +639,10 @@ struct Server:
         for i in range(len(self.writes)):
             var w = self.writes[i]
             var conn = w.conn
-            # the connection may have closed (and its slot been reused) since the parse
-            if (self.conns[unsafe_offset=conn].flags & F_OPEN) == 0 or self.conns[unsafe_offset=conn].gen != w.gen:
+            if self.qn_ptr[w.node] == -1:
+                # the connection dropped its queue (close, send error) since the parse;
+                # the write still ran, but nobody is waiting for the response
+                self.qn_free.append(w.node)
                 continue
             var r: Resp
             if not committed or w.result < 0 or (w.kind == W_POST and w.result == 0):
@@ -711,12 +720,17 @@ struct Server:
             log("MemAvailable low; accepting paused")
             self.accept_paused = True
 
+    # One ring and nothing paused: submit and wait in a single enter. Otherwise:
+    # submit each ring, then epoll on their eventfds.
+    def single_mode(self) -> Bool:
+        return self.nrings == 1 and self.single_wait_ok and not self.accept_paused
+
     def run(mut self) raises:
-        var single = True
+        var single = self.single_mode()
+        if not single:
+            for r in range(self.nrings):
+                _ = submit(r)
         while True:
-            # Sleep. One ring: submit and wait in a single enter. Several rings:
-            # submit each, then epoll on their eventfds.
-            single = self.nrings == 1 and self.single_wait_ok and not self.accept_paused
             if single:
                 var rc = wait_one(0)
                 if rc < 0 and rc != EAGAIN and rc != -4:
@@ -724,9 +738,11 @@ struct Server:
                     self.single_wait_ok = False
             else:
                 if not self.efd0_ready:
-                    _ = ring_enable_efd(0)
-                    self.efd0_ready = True
-                _ = wait(1000)
+                    if ring_enable_efd(0) == 0:
+                        self.efd0_ready = True
+                    else:
+                        log("eventfd registration failed; epoll waits will time out instead")
+                _ = wait(100 if not self.efd0_ready else 1000)
             self.now = unix_time()
             self.scratch.reset()
             for r in range(self.nrings):
@@ -751,10 +767,11 @@ struct Server:
                         self.arm_recv(conn // self.table, conn % self.table, conn)
                 self.rearm.clear()
             self.pump_accepts()
-            if not (self.nrings == 1 and self.single_wait_ok and not self.accept_paused):
+            self.tick()
+            single = self.single_mode()
+            if not single:
                 for r in range(self.nrings):
                     _ = submit(r)
-            self.tick()
 
 
 def main() raises:

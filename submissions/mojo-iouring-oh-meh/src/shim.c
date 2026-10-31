@@ -271,14 +271,15 @@ int sh_prep_send(int i, int slot, const void *buf, unsigned len, uint64_t ud) {
 // receive then completes (with EOF or an error) instead of pinning the socket open
 // past the close. The shutdown's own completion carries `ud_shutdown` and is ignored.
 int sh_prep_close(int i, int slot, uint64_t ud_shutdown, uint64_t ud) {
-  struct io_uring_sqe *s1 = io_uring_get_sqe(&rings[i].ring);
-  struct io_uring_sqe *s2 = s1 ? io_uring_get_sqe(&rings[i].ring) : NULL;
-  if (!s2) {
-    io_uring_submit(&rings[i].ring);
-    s1 = io_uring_get_sqe(&rings[i].ring);
-    s2 = s1 ? io_uring_get_sqe(&rings[i].ring) : NULL;
-    if (!s2) return -1;
+  struct io_uring *r = &rings[i].ring;
+  // Both entries or neither: an SQE taken and not prepared would be submitted as
+  // whatever it held last time.
+  if (io_uring_sq_space_left(r) < 2) {
+    io_uring_submit(r);
+    if (io_uring_sq_space_left(r) < 2) return -1;
   }
+  struct io_uring_sqe *s1 = io_uring_get_sqe(r);
+  struct io_uring_sqe *s2 = io_uring_get_sqe(r);
   io_uring_prep_shutdown(s1, slot, SHUT_RDWR);
   s1->flags |= IOSQE_FIXED_FILE | IOSQE_IO_HARDLINK;
   io_uring_sqe_set_data64(s1, ud_shutdown);

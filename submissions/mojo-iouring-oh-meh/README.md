@@ -140,11 +140,13 @@ onto eight 64-slot rings.
   real connections. The table limit itself is the kernel's `RLIMIT_NOFILE` check in
   `io_sqe_files_register`.
 - Nothing above 20,000 simultaneous connections has been run.
-- An independent review (a second model, read-only) of the first committed version found a
-  use-after-realloc on fragmented requests, reversed responses when a write and a read were
-  pipelined together, and a leaked response arena on EOF with a write queued. All three are fixed
-  and have probes in the submission's history; the suite never caught them because loopback
-  delivers every test request in one segment and the suite never pipelines.
+- Two rounds of independent review (a second model, read-only) found six lifecycle defects the
+  suite cannot see, because loopback delivers every test request in one segment and the suite
+  never pipelines: a use-after-realloc on fragmented requests, reversed responses when a write and
+  a read were pipelined, a leaked response arena on EOF with a write queued, a close that could
+  pre-empt a pipelined write's response, a freed queue node that a later write could fill, and a
+  stale submission-queue entry when the close helper found only one free slot. Each has a probe
+  (fragmented POST, mixed pipelines, half-close, pipelined `Connection: close`) that now passes.
 - The Mojo runtime starts a few worker threads at startup. The server never gives them work.
 - The B-tree calls are to SQLite's own layer and stay inside its transactions. The amalgamation is
   not modified.

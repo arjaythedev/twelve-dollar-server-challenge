@@ -45,7 +45,8 @@ cd spec && lake build && lake env lean Spec/Axioms.lean
   The ring uses `SINGLE_ISSUER | DEFER_TASKRUN | COOP_TASKRUN`, so completions are handled in batches with no
   interrupts in between.
 - **Direct descriptors, multishot accept and recv, provided buffers.** Accepted sockets go straight into the ring's
-  fixed-file table (up to 65,536 slots), so there is no fd per connection and no per-request file lookup. Each connection has
+  fixed-file table, so there is no fd per connection and no per-request file lookup. Every k6 user holds one connection,
+  so the table is sized from the hard `RLIMIT_NOFILE`, up to the kernel's maximum of 1,048,576 slots. Each connection has
   one multishot recv, re-armed only when the kernel ends it. Data lands in a shared ring of 4096 × 2 KB buffers
   instead of a buffer per connection, so ~15,000 idle keep-alive connections cost almost no memory. Ubuntu's 6.8 kernel
   rejects a normal buffer-ring registration with EINVAL (Launchpad #2162843; the reserved-field check is inverted).

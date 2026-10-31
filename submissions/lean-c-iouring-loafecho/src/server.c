@@ -39,6 +39,7 @@
 #define SCRATCH_CAP   (512 * 1024)
 #define SQ_ENTRIES    4096
 #define CQ_ENTRIES    65536
+#define MAX_FIXED     (1u << 20)   /* the kernel's IORING_MAX_FIXED_FILES */
 
 enum { UD_ACCEPT = 1, UD_RECV, UD_SEND, UD_CANCEL, UD_CLOSE };
 
@@ -1109,7 +1110,11 @@ int main(int argc, char **argv) {
     getrlimit(RLIMIT_NOFILE, &rl);
     rl.rlim_cur = rl.rlim_max;
     setrlimit(RLIMIT_NOFILE, &rl);
-    nconns = rl.rlim_max == RLIM_INFINITY || rl.rlim_max > 65536 ? 65536 : (uint32_t)rl.rlim_max;
+    /* One fixed-file slot per connection, and each k6 user holds one connection,
+     * so the table is as large as the kernel allows: <= the soft RLIMIT_NOFILE
+     * (just raised to the hard limit) and <= IORING_MAX_FIXED_FILES. Untouched
+     * slots of conns[] and dirty[] cost no resident memory. */
+    nconns = rl.rlim_max == RLIM_INFINITY || rl.rlim_max > MAX_FIXED ? MAX_FIXED : (uint32_t)rl.rlim_max;
     if (nconns < 1024) nconns = 1024;
 
     char err[512] = {0};

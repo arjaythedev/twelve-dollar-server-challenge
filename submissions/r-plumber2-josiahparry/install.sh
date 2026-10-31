@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# Runs once as root on a clean Ubuntu 24.04: installs R 4.6.1 from Posit's r-builds.
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 R_VERSION=4.6.1

@@ -3,7 +3,6 @@ name: test submissions
 on:
   pull_request:
   push:
-    branches: [main]
   workflow_dispatch:   # re-tests every submission
 permissions:
   contents: read

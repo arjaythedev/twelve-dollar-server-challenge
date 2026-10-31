@@ -573,7 +573,7 @@ package body Database is
       end if;
       Require (Finalize (S));
       Run ("PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON;" &
-           "PRAGMA cache_size=-16384; PRAGMA mmap_size=0;" &
+           "PRAGMA cache_size=-32768; PRAGMA mmap_size=0;" &
            "PRAGMA temp_store=MEMORY;");
       -- Replaces SQLite's automatic checkpoint (see On_Commit).
       Ignored_Address := Set_WAL_Hook (DB, On_Commit'Address, System.Null_Address);

@@ -59,6 +59,14 @@ the row is committed, and no read can ever be answered with data that might
 still roll back (if a commit fails, every response from it becomes a 500).
 This is also group commit: one WAL append per batch instead of one per write.
 
+**The loop does not sleep while requests are waiting.** After a heavy turn (64
+completions or more) the loop goes straight back to the kernel for the next
+batch without waiting: the work itself is the batching interval. After a
+lighter busy turn it waits for 64 completions or 250 µs, whichever comes first,
+and an idle loop sleeps until something arrives. Earlier versions waited up to
+2 ms for 64 completions on every busy turn, which put the vCPU to sleep between
+batches while requests queued.
+
 **Checkpoints happen off the event loop.** A WAL checkpoint copies committed
 pages into the database file and syncs both files; done inside a commit (as
 SQLite's automatic checkpoint does), every request in flight waits for it. A
@@ -85,19 +93,28 @@ stops between 280,000 and 300,000 users with mass "connection refused": the
 box runs out of memory and the server is killed. The kernel needs about 4.4 KB
 for each open connection (socket, inode, file, dentry, the io_uring request
 watching it), and a request that waits unread in a socket costs about 2.9 KB
-more, so the server's own memory and any stall decide where that happens. This
-version spends its effort there:
+more, so the server's own memory and any stall decide where that happens. #216
+spent its effort there:
 
 - An idle socket keeps a multishot *poll* instead of a parked multishot
   receive. Both are one io_uring request, but the receive also holds an async
   poll record, so this saves 96 bytes of kernel memory per connection (26 MB at
   280,000), at the same CPU per request because the receive runs in the same
   batch as the poll that announced it.
-- SQLite's cache is 16 MiB instead of 64. Most of what this load keeps hot is
-  the likes primary key (29.5 MB; every like inserts into it at a random
-  place), and 8, 16 and 64 MiB measured the same CPU per request: the rest
-  now sits in the kernel's page cache, which can be reclaimed under pressure,
-  instead of in anonymous memory, which cannot.
+- SQLite's cache is 32 MiB (64 in #211, 16 in #216 and #223). Most of what
+  this load keeps hot is the likes primary key (29.5 MB; every like inserts
+  into it at a random place). Whatever does not fit sits in the kernel's page
+  cache, which can be reclaimed under pressure, while SQLite's cache is
+  anonymous memory, which cannot; but a page the kernel has dropped is read
+  back from disk inside the event loop. #211 (64 MiB) was the smoothest of our
+  runs on the box at 270,000 users and the one killed for memory at 280,000;
+  32 MiB sits between the two.
+- A memory guard. While the kernel reports less than 160 MB available
+  (`MemAvailable`, read once a second), the server stops accepting: new
+  connections wait in the listen queue while the open ones are served, and
+  accepting resumes above 256 MB. Near the edge, a server that is OOM-killed
+  loses every connection at once, while one that pauses only delays the
+  newest.
 - Connection records are 40 bytes (flags packed into bits), rings have 1,024
   receive buffers each instead of 2,048, and the response pool keeps at most
   1,024 spare blocks per size and returns the rest to the kernel
@@ -193,10 +210,39 @@ from 64 source addresses over a virtual network card. Every run starts from a
 fresh copy of the seed. The CPU is faster than the benchmark's vCPU, so CPU
 numbers only compare versions.
 
-### Less CPU per request (this version)
+### The tail at the edge (this version)
+
+#223 (below) cut CPU per request, and on the box it did: 26 µs per request
+against #216's 30. But it scored 257,000: 270,000 passed the 2-minute probe and
+then failed the 5-minute hold on p99 (1.89 s at only 80% CPU), and 280,000
+failed on p99 (2.3 s at 84%). The limit had moved from CPU to the tail. This
+version changes how the loop waits (see Design), raises SQLite's cache from
+16 to 32 MiB, and adds the memory guard.
+
+Locally, with 480 MB locked away and a CPU spinner sharing the vCPU equally
+with the server (as below), 2-minute holds:
+
+| Version | 280,000 users | 290,000 users |
+| --- | --- | --- |
+| #223 | 2 of 3 passed (p99 9–20 ms); one ran out of memory | latency spike at the end of the ramp, then killed for memory |
+| this version | **4 of 4 passed, p99 4.5–7.2 ms** | **2 of 3 passed (p95 7.5–12 ms, p99 17–23 ms)**; the third was killed for memory at the end of the ramp |
+
+What we tried and left out:
+
+- Checkpointing every 2 s instead of every 250 ms, with the WAL restarting at
+  16,000 frames instead of 4,000: 41% fewer disk writes, but 0 of 2 passes at
+  280,000 (a bigger WAL in memory, bigger bursts of copying).
+- Restarting the WAL from the event loop between batches (copying the last
+  frames itself) instead of briefly holding writes: no held writes, but every
+  request then waits for those copies and syncs (p99 34 ms instead of 7 ms).
+- Going back to a parked multishot receive for idle sockets: 96 more bytes of
+  kernel memory per connection, and one of two runs at 280,000 ran out of
+  memory.
+
+### Less CPU per request (#223)
 
 On the box, #216 held 270,000 users at 86% CPU and failed 280,000 on CPU
-(p99 7.7 s at 97%), so this version goes after CPU per request. Reading the two
+(p99 7.7 s at 97%), so #223 went after CPU per request. Reading the two
 hot routes through SQLite's B-tree cursors does most of it; building with
 GNAT's default validity checks instead of `-gnatVa` (every check on) does the
 rest.
@@ -215,7 +261,7 @@ The whole server at 280,000 users, 2-minute holds, alternating runs:
 | Version | VM CPU per request | Server process alone |
 | --- | ---: | ---: |
 | #216 | 16.5–17.4 µs | 10.2–11.0 µs |
-| this version | 15.2–15.9 µs | 8.9–9.6 µs |
+| #223 | 15.2–15.9 µs | 8.9–9.6 µs |
 
 To see what that buys on a box short of both memory and CPU, we also ran
 with 480 MB locked (see below) and a CPU spinner sharing the vCPU equally with
@@ -225,14 +271,15 @@ the server:
 | --- | --- | --- |
 | #216 | 270,000 | 0 errors, p99 10 ms |
 | #216 | 280,000 | latency spike at the end of the ramp, killed for memory: 71% errors |
-| this version | 280,000 | **0 errors, p95 6.4 ms, p99 11.8 ms** |
-| this version | 290,000 | latency spike at the end of the ramp, killed for memory: 71% errors |
+| #223 | 280,000 | 0 errors, p95 6.4 ms, p99 11.8 ms |
+| #223 | 290,000 | latency spike at the end of the ramp, killed for memory: 71% errors |
 
 #216 behaves here as it did on the box (270,000 passes, 280,000 fails), and
-this version moves that edge up one step. Going back to a parked multishot
-receive for idle sockets, as in #211, measured the same CPU as the poll watch
-in six alternating runs (17.0–17.6 against 16.8–18.7 µs), so idle sockets keep
-the poll and its smaller memory footprint.
+#223 moved that edge up one step here (on the box it scored 257,000; see
+above). Going back to a parked multishot receive for idle sockets, as in #211,
+measured the same CPU as the poll watch in six alternating runs (17.0–17.6
+against 16.8–18.7 µs), so idle sockets keep the poll and its smaller memory
+footprint.
 
 ### The memory the benchmark box does not have (#216)
 

@@ -75,6 +75,24 @@ Each was found under load, then confirmed with the instrument in brackets.
 | Flycast | host crash, "jump to heap address" | picoTCP's timer heap holds ~1,000 timers; when it ran out, `socket_del()` freed a socket that `pico_tcp_input()` was still using (AddressSanitizer) | room for ~67,000 timers |
 | Flycast | Flycast terminated ("shutdown: Transport endpoint is not connected") | the bridge called asio's throwing `shutdown()` on a host socket whose client had already gone | use the non-throwing overloads |
 
+### Sent upstream
+
+The fixes are also proposed upstream, rebased onto current KallistiOS `master` and Flycast
+`dev`, where they were retested. Two bugs only exist on Flycast `dev` and turned up there: a
+double free racing `pico_enqueue()` against the pico thread, and the asio shutdown crash,
+which our older pinned commit also has.
+
+- KallistiOS: [#1582](https://github.com/KallistiOS/KallistiOS/pull/1582) (LAST-ACK),
+  [#1583](https://github.com/KallistiOS/KallistiOS/pull/1583) (SYNs during `accept()`),
+  [#1584](https://github.com/KallistiOS/KallistiOS/pull/1584) (TIME-WAIT buffers),
+  [#1585](https://github.com/KallistiOS/KallistiOS/pull/1585) (listen backlog),
+  [#1586](https://github.com/KallistiOS/KallistiOS/pull/1586) (send on ACK). The `poll()`
+  deadlock is already fixed on `master`.
+- Flycast: [#2592](https://github.com/flyinghead/flycast/pull/2592) (`pico_enqueue()` double free),
+  [#2593](https://github.com/flyinghead/flycast/pull/2593) (asio shutdown),
+  [#2594](https://github.com/flyinghead/flycast/pull/2594) (duplicate connect),
+  [#2595](https://github.com/flyinghead/flycast/pull/2595) (timer heap).
+
 ## Build
 
 `install.sh` (root, once) installs the host compiler, CMake/Ninja, SDL2/Mesa, Xvfb and the

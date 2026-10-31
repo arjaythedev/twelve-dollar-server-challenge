@@ -863,7 +863,7 @@ static void reap(int ri) {
 /* Returns only if io_uring cannot be used (the caller then falls back to epoll). */
 static int uring_serve(int lfd, unsigned nofile, const char *host, const char *port) {
   const char *e;
-  NT = nofile < 65535 ? nofile : 65535; NR = 6;
+  NT = nofile < 400000 ? nofile : 400000; NR = 6;
   if ((e = getenv("URING_SLOTS")) && atoi(e) > 0 && (unsigned)atoi(e) < NT) NT = (unsigned)atoi(e);
   if ((e = getenv("URING_RINGS")) && atoi(e) > 0 && atoi(e) <= 64) NR = atoi(e);
   if (NT < 16) return -1;
@@ -912,7 +912,7 @@ int main(void) {
 
   struct rlimit rl;
   if (getrlimit(RLIMIT_NOFILE, &rl) == 0) { rl.rlim_cur = rl.rlim_max; setrlimit(RLIMIT_NOFILE, &rl); getrlimit(RLIMIT_NOFILE, &rl); }
-  maxfd = rl.rlim_cur > 262144 ? 262144 : (int)rl.rlim_cur;
+  maxfd = rl.rlim_cur > 2097152 ? 2097152 : (int)rl.rlim_cur;
   conns = calloc((size_t)maxfd, sizeof(conn));
 
   int lfd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
@@ -920,7 +920,7 @@ int main(void) {
   struct sockaddr_in a = {.sin_family = AF_INET, .sin_port = htons((uint16_t)atoi(port))};
   if (inet_pton(AF_INET, host, &a.sin_addr) != 1) { fprintf(stderr, "bad HOST\n"); return 1; }
   if (bind(lfd, (struct sockaddr *)&a, sizeof a) < 0) { perror("bind"); return 1; }
-  if (listen(lfd, 4096) < 0) { perror("listen"); return 1; }
+  if (listen(lfd, 65535) < 0) { perror("listen"); return 1; }
   setsockopt(lfd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);   /* accepted sockets inherit it */
   if (!getenv("NO_URING")) uring_serve(lfd, (unsigned)rl.rlim_cur, host, port);
   ep = epoll_create1(EPOLL_CLOEXEC);

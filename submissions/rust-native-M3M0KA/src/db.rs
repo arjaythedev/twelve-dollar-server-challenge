@@ -144,13 +144,20 @@ impl Db {
             plan: None,
             plan_ok: false,
         };
+        // A PASSIVE checkpoint copies the accumulated frames into the database
+        // file inside the statement that crosses the threshold. Smaller means a
+        // shorter stall but more often; the total bytes copied are the same.
+        let ac: i64 = std::env::var("FEED_WAL_AC")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(512);
         for pragma in [
             String::from("PRAGMA journal_mode = WAL"),
             String::from("PRAGMA synchronous = NORMAL"),
             String::from("PRAGMA temp_store = MEMORY"),
             format!("PRAGMA cache_size = -{cache_kb}"),
             String::from("PRAGMA mmap_size = 0"),
-            String::from("PRAGMA wal_autocheckpoint = 4096"),
+            format!("PRAGMA wal_autocheckpoint = {ac}"),
         ] {
             db.exec(&pragma);
         }

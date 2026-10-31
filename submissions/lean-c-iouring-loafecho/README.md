@@ -56,7 +56,7 @@ cd spec && lake build && lake env lean Spec/Axioms.lean
   commit returns, so a 201 always means the row is committed. If the commit fails, every write response in that batch
   becomes a 500. WAL checkpoints run between batches (`wal_autocheckpoint=0`, passive checkpoint past 1000 frames).
 - **B-tree read plans.** The feed is 20 rows walked back from the end of the `posts` B-tree, and a post is a rowid seek.
-  Each plan adds an author rowid lookup and a like count from `likes_post_id_idx`. That avoids sorting 500k rows by
+  Each plan adds an author rowid lookup and a like count from `likes_post_id_idx` (index entries are matched by their raw key bytes; anything unusual is decoded). That avoids sorting 500k rows by
   `created_at`. The plans are correct under Inv (proved above), and the server falls back to SQL whenever Inv can't be
   shown.
 - **JWT: the HMAC pads are computed once.** The SHA-256 states after `key⊕ipad` and `key⊕opad` are built at startup, so

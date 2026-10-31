@@ -2,6 +2,8 @@
  *   dbtest <db>            full run: plan, reads, selfcheck, writes, data_version
  *   dbtest <db> dump <dir> write feed.json, post-{1,250000,500000}.json (no newline)
  *   dbtest <db> bench      checkInv/open time + us per feed render for each plan
+ *   dbtest --bench <db> [n] n/5 feeds then n posts (LCG ids 1..500000), batches
+ *                          of 4 reads per db_batch_begin/commit; ns per call
  *   dbtest --pcache        page-cache wrapper test on a small DB it creates
  *                          (and deletes) in a new directory under $TMPDIR or /tmp
  * Build by hand (same SQLite flags as build.sh):
@@ -93,6 +95,50 @@ static void bench(db_t *d) {
     printf("feed %s: %.2f us/render (10000 iters)\n", p == 1 ? "btree" : "sql", dt / 1e4);
   }
   db_force_plan(d, 0);
+}
+
+/* --bench: the server's call pattern (batches of 4 reads between
+ * db_batch_begin/db_batch_commit) — ns per db_feed_json, then ns per
+ * db_post_json on ids from a fixed-seed LCG over 1..500000. */
+static int bench2(const char *path, long iters) {
+  char err[512];
+  db_t *d = db_open(path, err, sizeof err);
+  if (!d) { fprintf(stderr, "open: %s\n", err); return 1; }
+  long nfeed = iters / 5, npost = iters;
+  uint64_t x = 0x9e3779b97f4a7c15ull, sum = 0;
+  for (int w = 0; w < 400; w++) {          /* warm-up: feed + a few posts */
+    db_batch_begin(d);
+    sum += (uint64_t)db_feed_json(d, buf, sizeof buf);
+    db_batch_commit(d);
+  }
+  double t0 = now_us();
+  for (long i = 0; i < nfeed; i += 4) {
+    db_batch_begin(d);
+    for (int k = 0; k < 4 && i + k < nfeed; k++) {
+      int n = db_feed_json(d, buf, sizeof buf);
+      if (n <= 0) { printf("feed failed\n"); return 1; }
+      sum += (uint64_t)n;
+    }
+    db_batch_commit(d);
+  }
+  double t1 = now_us();
+  for (long i = 0; i < npost; i += 4) {
+    db_batch_begin(d);
+    for (int k = 0; k < 4 && i + k < npost; k++) {
+      x = x * 6364136223846793005ull + 1442695040888963407ull;
+      int64_t id = 1 + (int64_t)((x >> 33) % 500000);
+      int n = db_post_json(d, id, buf, sizeof buf);
+      if (n < 0) { printf("post %lld failed\n", (long long)id); return 1; }
+      sum += (uint64_t)n;
+    }
+    db_batch_commit(d);
+  }
+  double t2 = now_us();
+  printf("bench plan=%s feed %.0f ns (%ld) post %.0f ns (%ld) bytes=%llu\n", db_plan(d),
+         (t1 - t0) * 1e3 / (double)nfeed, nfeed, (t2 - t1) * 1e3 / (double)npost, npost,
+         (unsigned long long)sum);
+  db_close(d);
+  return 0;
 }
 
 static int64_t q1(sqlite3 *h, const char *sql) {
@@ -191,7 +237,8 @@ rm:
 
 int main(int argc, char **argv) {
   if (argc >= 2 && !strcmp(argv[1], "--pcache")) return pcache_test();
-  if (argc < 2) { fprintf(stderr, "usage: dbtest <db> [dump <dir> | bench] | dbtest --pcache\n"); return 2; }
+  if (argc >= 3 && !strcmp(argv[1], "--bench")) return bench2(argv[2], argc >= 4 ? atol(argv[3]) : 100000);
+  if (argc < 2) { fprintf(stderr, "usage: dbtest <db> [dump <dir> | bench] | dbtest --bench <db> [n] | dbtest --pcache\n"); return 2; }
   db_t *d = open_or_die(argv[1]);
   if (argc >= 4 && !strcmp(argv[2], "dump")) { dump(d, argv[3]); db_close(d); return 0; }
   if (argc >= 3 && !strcmp(argv[2], "bench")) { bench(d); db_close(d); return 0; }

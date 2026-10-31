@@ -7,8 +7,14 @@ so a run cannot take the whole host down.
 | Process | CPU | Memory | Other |
 |---|---|---|---|
 | `twelve-server` | CPU 0, 1.0 CPU quota | 2 GiB, no swap | 65,535 fds |
-| `twelve-k6-*` | CPUs `1..nproc-3` | 3 GiB each | `K6_PROCS` containers |
+| `twelve-k6-*` | CPUs `1..nproc-3` | computed, max 3 GiB each | `K6_PROCS` containers |
 | WSL / Docker daemon | last two CPUs | — | reserved |
+
+The k6 cap is `(Docker VM memory - 2 GiB server - 512 MiB headroom) / K6_PROCS`,
+capped at 3 GiB. It is a hard ceiling, not a reservation. Note that the physical
+host may have 16 GiB while Docker Desktop's VM only has ~7.7 GiB; the budget uses
+the VM size, because that is the limit containers can actually exceed. Set
+`K6_MEMORY` to override (e.g. `K6_MEMORY=2g`).
 
 On a 12-vCPU host that means server on CPU 0, k6 on 1–9, and CPUs 10–11 left for
 WSL/Docker. A cgroup quota alone does not guarantee a core: without pinning, k6

@@ -6,10 +6,11 @@
 # the server. Putting both ends on a container network avoids that ceiling.
 #
 # Server: CPU 0, 1 CPU quota, 2 GB, no swap, 65535 fds.
-# k6: CPUs 1..(nproc-3), 3 GB each. The last two CPUs are left to WSL/Docker
-# so a load run cannot make the host unresponsive. Override with
-# SERVER_CPUSET/K6_CPUSET/K6_MEMORY; LOAD_MAX (default nproc+2) aborts k6 if
-# host load runs away.
+# k6: CPUs 1..(nproc-3); per-container memory cap computed from the Docker VM
+# size split across K6_PROCS containers (max 3 GiB each). The last two CPUs
+# are left to WSL/Docker so a load run cannot make the host unresponsive.
+# Override with SERVER_CPUSET/K6_CPUSET/K6_MEMORY; LOAD_MAX (default nproc+2)
+# aborts k6 if host load runs away.
 #
 # usage: K6_BIN=/path/to/k6 dev/loadtest.sh [vus] [ramp] [duration]
 #   SCRIPT=/abs/path/to/script.js  optional k6 script (default bench/load.js)
@@ -25,7 +26,7 @@ PROCS=${K6_PROCS:-1}
 NPROC=$(nproc)
 SERVER_CPUSET=${SERVER_CPUSET:-0}
 K6_CPUSET=${K6_CPUSET:-1-$((NPROC-3))}
-K6_MEMORY=${K6_MEMORY:-3g}
+K6_MEMORY=${K6_MEMORY:-}
 LOAD_MAX=${LOAD_MAX:-$((NPROC + 2))}
 
 # One k6 container only has the VM's ~28k ephemeral ports. Beyond ~20k VUs
@@ -80,6 +81,22 @@ echo "health: $HEALTH"
 [ -n "$UP" ] && [ "$UP" -le 5 ] || { echo "stale listener on :$PORT"; exit 1; }
 echo "limits: $(docker inspect -f 'cpus={{.HostConfig.NanoCpus}} mem={{.HostConfig.Memory}} swap={{.HostConfig.MemorySwap}}' twelve-server)"
 
+# Per-container hard cap, not a reservation. Budget against the Docker VM
+# (not the physical host): server 2 GiB + 512 MiB daemon headroom, split
+# across the generator containers. K6_MEMORY overrides the computed value.
+if [ -z "$K6_MEMORY" ]; then
+  VM_MEM_MB=$(docker info --format '{{.MemTotal}}' 2>/dev/null | awk '{printf "%d", $1/1048576}')
+  [ -n "$VM_MEM_MB" ] || VM_MEM_MB=7800
+  K6_MEM_MB=$(( (VM_MEM_MB - 2048 - 512) / PROCS ))
+  [ "$K6_MEM_MB" -gt 3072 ] && K6_MEM_MB=3072
+  [ "$K6_MEM_MB" -lt 512 ] && K6_MEM_MB=512
+  K6_MEM_LABEL="${K6_MEM_MB}m"
+  echo "k6 memory cap: $K6_MEM_LABEL each (Docker VM ${VM_MEM_MB} MiB, K6_PROCS=$PROCS)"
+else
+  K6_MEM_LABEL="$K6_MEMORY"
+  echo "k6 memory cap: $K6_MEM_LABEL each (override, K6_PROCS=$PROCS)"
+fi
+
 WATCH_PID=""
 if [ "$LOAD_MAX" -gt 0 ]; then
   (
@@ -103,7 +120,7 @@ K6_PIDS=()
 for i in $(seq 0 $((PROCS-1))); do
   n=$PER; [ "$i" -lt "$REM" ] && n=$((n+1))
   docker run --rm --name "twelve-k6-$i" --network "$NET" \
-    --cpuset-cpus="$K6_CPUSET" --memory="$K6_MEMORY" --memory-swap="$K6_MEMORY" \
+    --cpuset-cpus="$K6_CPUSET" --memory="$K6_MEM_LABEL" --memory-swap="$K6_MEM_LABEL" \
     -v "$K6_BIN:/k6:ro" \
     -v "$SCRIPT:/script.js:ro" \
     -v "$REPO/seed/tokens.json:/tokens.json:ro" \

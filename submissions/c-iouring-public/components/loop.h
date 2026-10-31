@@ -61,6 +61,7 @@ typedef struct {
     unsigned max_conns;                  /* default 1<<20 (capped by rings * table size) */
     unsigned sq_entries;                 /* default 1024 */
     unsigned bufs;                       /* provided recv buffers per ring, default 512 */
+    unsigned rearm_credit;               /* multishot re-arms per loop pass after ENOBUFS; 0: no limit */
     unsigned buf_size;                   /* default 2048 */
     unsigned batch;                      /* wait-for-N target, default 128 */
     unsigned wait_us;                    /* max extra wait for N under load (us), default 2000 */

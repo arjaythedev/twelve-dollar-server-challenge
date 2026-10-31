@@ -10,6 +10,7 @@ const char *sqlite3_libversion(void);
 #include <string.h>
 
 static const char *g_shed_mode = "band";  // stats line: which shedding law runs
+#include <sys/mman.h>
 #include <sys/resource.h>
 #include <time.h>
 
@@ -82,6 +83,28 @@ static unsigned envu(const char *k, unsigned d) {
 }
 static float permille(unsigned v) { return (float)v / 1000.0f; }
 
+// Lock the read-only file-backed mappings (the server's code and rodata, libc, the loader: ~3.5 MB, inside the box's
+// 8 MB RLIMIT_MEMLOCK) into RAM. At the memory wall the kernel evicts them like any page cache, the loop then takes
+// major faults that read its own code back from disk under reclaim, and a stall of a second or two leaves every
+// connection's next request unread in the kernel (~1.3 KB each), which is what tips the box into the OOM killer
+// (wall-280k: 28 major faults in the stall that took TCP memory to 76 MB at 60k connections). Best effort.
+static size_t lock_code(void) {
+  FILE *f = fopen("/proc/self/maps", "r");
+  if (!f) return 0;
+  char line[512];
+  size_t locked = 0;
+  while (fgets(line, sizeof line, f)) {
+    unsigned long lo, hi;
+    char perms[8];
+    int path = 0;
+    if (sscanf(line, "%lx-%lx %7s %*s %*s %*s %n", &lo, &hi, perms, &path) < 3 || !path || line[path] != '/') continue;
+    if (perms[1] == 'w' || strstr(line + path, ".db")) continue;   // code and rodata only, never the database
+    if (!mlock((void *)lo, hi - lo)) locked += hi - lo;
+  }
+  fclose(f);
+  return locked;
+}
+
 int main(int argc, char **argv) {
   if (argc > 1 && !strcmp(argv[1], "--train")) return train_main(argc - 1, argv + 1);
   const char *db = getenv("SQLITE_PATH"), *secret = getenv("JWT_SECRET");
@@ -112,6 +135,10 @@ int main(int argc, char **argv) {
       .backlog = (int)envu("CURSED_BACKLOG", 65535),
       .listeners = (int)envu("CURSED_LISTENERS", 8),
       .cq_entries = envu("CURSED_CQ", 32768),
+      // receive buffers per ring, and multishot re-arms per pass after ENOBUFS (0: no limit). 1,024 / 0 (Lean's)
+      // didn't change how often a stall at the wall turned fatal (1 of 5 vs 2 of 5, wall-280k), so 512 / 256 stay
+      .bufs = envu("CURSED_BUFS", 512),
+      .rearm_credit = envu("CURSED_REARM_CREDIT", 256),
       .defer_accept = (int)envu("CURSED_DEFER_ACCEPT", 0),
       .linger_close = (int)strtol(getenv("CURSED_LINGER") ? getenv("CURSED_LINGER") : "0", 0, 10),
       .batch = envu("CURSED_BATCH", 128),
@@ -175,8 +202,9 @@ int main(int argc, char **argv) {
   }
   signal(SIGINT, on_sig);
   signal(SIGTERM, on_sig);
-  fprintf(stderr, "server: %s on %s:%d, parsers %s, %s, sqlite %s\n", loop_backend(gL), cfg.host, cfg.port,
-          app_parsers(), app_db_mode(), sqlite3_libversion());
+  size_t locked = envu("CURSED_MLOCK", 1) ? lock_code() : 0;
+  fprintf(stderr, "server: %s on %s:%d, parsers %s, %s, sqlite %s, code locked %zu KiB\n", loop_backend(gL), cfg.host, cfg.port,
+          app_parsers(), app_db_mode(), sqlite3_libversion(), locked >> 10);
   int r = loop_run(gL);
   loop_free(gL);
   app_close();

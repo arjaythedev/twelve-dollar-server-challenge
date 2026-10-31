@@ -100,6 +100,9 @@ the code by `tools/knobs.py`; the `CURSED_*` and `LOOP_TEST_*` variables exist f
 | `CURSED_BACKLOG` | 65535 | listen backlog per listener, clamped by the kernel to somaxconn (4096 on the box) |
 | `CURSED_LISTENERS` | 8 | io_uring backend: SO_REUSEPORT listeners on the port (as Lean #153); the 256 single-shot accepts are re-armed on the listener with the fewest outstanding, so the accept queues hold ~32k connections through a stall |
 | `CURSED_CQ` | 32768 | io_uring completion queue entries per ring (was 4096) |
+| `CURSED_BUFS` | 512 | io_uring backend: provided receive buffers per ring (power of two) |
+| `CURSED_REARM_CREDIT` | 256 | io_uring backend: multishot receives re-armed per loop pass after ENOBUFS; 0: no limit |
+| `CURSED_MLOCK` | 1 | 1: lock the code and read-only data (server, libc, loader: ~3.5 MB, within an 8 MB RLIMIT_MEMLOCK) into RAM, so the loop never stalls on major faults for its own code at the memory wall; best effort |
 | `CURSED_RECV_MODE` | 0 | 0 (auto) / 1: armed multishot recv; 2: idle connections hold a multishot poll (less kernel memory per idle connection, but a mass close keeps FIN buffers charged: +631 MB at 300k) |
 | `CURSED_EPOLL` | 0 | 1: use the epoll backend even when io_uring is available (it's also the automatic fallback) |
 | `CURSED_RX_TS` | 0 (1 when CURSED_DEADLINE_MS is set) | 1: kernel receive timestamps, so queue delay includes time spent in socket buffers |

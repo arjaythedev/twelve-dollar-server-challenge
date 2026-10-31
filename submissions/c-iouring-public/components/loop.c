@@ -1932,13 +1932,13 @@ static void ur_after_batch(loop_t *L)
     /* credit-limited FIFO: re-arming more recvs than there are free buffers just produces
      * another round of ENOBUFS */
     cref *q = L->rearm.p;
-    uint32_t i = 0, credit = L->cfg.bufs / 2;
+    uint32_t i = 0, credit = L->pollmode ? L->cfg.bufs / 2 : L->cfg.rearm_credit ? L->cfg.rearm_credit : UINT32_MAX;
     for (; i < L->rearm.n && credit; i++) {
         conn_t *c = C(L, q[i].conn);
         if (!(c->fl & F_OPEN) || c->gen != q[i].gen || (c->fl & (F_PAUSED | F_EOF | F_DEAD))) continue;
         if (!(c->fl & F_RECV)) { arm_recv(L, q[i].conn, c); L->st.rearms++; }
         if (L->pollmode && (c->fl & F_AGAIN) && !(c->fl & F_RECVING)) { issue_recv1(L, q[i].conn, c); L->st.rearms++; credit--; }
-        else if (!L->pollmode) credit--;
+        else if (!L->pollmode && L->cfg.rearm_credit) credit--;
     }
     if (i) memmove(q, q + i, (L->rearm.n - i) * sizeof *q);
     L->rearm.n -= i;

@@ -356,24 +356,6 @@ static inline int decode_record(const unsigned char *rec, uint32_t len, col_t *c
   return 0;
 }
 
-/* The serial type SQLite's record format (file format 4) gives integer v,
- * and its n content bytes, big-endian, into b (same rule as
- * sqlite3VdbeSerialType: smallest width that holds v; 0 and 1 have no bytes). */
-static inline unsigned int_serial(int64_t v, unsigned char *b, uint32_t *n) {
-  uint64_t u = v < 0 ? ~(uint64_t)v : (uint64_t)v;
-  unsigned t;
-  if (u <= 127) {
-    if (v == 0 || v == 1) { *n = 0; return 8 + (unsigned)v; }
-    t = 1; *n = 1;
-  } else if (u <= 32767) { t = 2; *n = 2; }
-  else if (u <= 8388607) { t = 3; *n = 3; }
-  else if (u <= 2147483647) { t = 4; *n = 4; }
-  else if (u <= 0x00007fffffffffffull) { t = 5; *n = 6; }
-  else { t = 6; *n = 8; }
-  for (uint32_t i = 0; i < *n; i++) b[i] = (unsigned char)((uint64_t)v >> (8 * (*n - 1 - i)));
-  return t;
-}
-
 /* Full payload of the cursor's current entry: zero-copy when local, else
  * copied into scratch (only one overflow payload may be live at a time). */
 static inline int cursor_payload(db_t *d, BtCursor *c, const unsigned char **p, uint32_t *n) {
@@ -457,20 +439,7 @@ static int bt_render_current(db_t *d, out_t *o) {
   } else if (sqlite3BtreeEof(d->cur_likes)) {
     goto counted;
   }
-  /* Fast path per entry: the index record [post_id, rowid] as SQLite writes
-   * it for post_id == id is header [3][kst][rowid serial], then kb[0..kn).
-   * A raw match counts the entry without decoding; anything else (another
-   * serial type, other bytes, overflow) takes the decoding path below. */
-  unsigned char kb[8]; uint32_t kn; unsigned kst = int_serial(id, kb, &kn);
   for (;;) {
-    uint32_t amt = 0;
-    sqlite3BtreePayloadSize(d->cur_likes);           /* parses the cell info */
-    const unsigned char *p = sqlite3BtreePayloadFetch(d->cur_likes, &amt);
-    if (__builtin_expect(p && amt >= 3 + kn && p[0] == 3 && p[1] == kst, 1)) {
-      uint32_t j = 0;
-      while (j < kn && p[3 + j] == kb[j]) j++;
-      if (__builtin_expect(j == kn, 1)) goto match;
-    }
     if (cursor_payload(d, d->cur_likes, &rec, &rl)) return -1;
     col_t k[1];
     if (decode_record(rec, rl, k, 1)) return -1;
@@ -481,7 +450,6 @@ static int bt_render_current(db_t *d, out_t *o) {
       return -1;
     }
     if (k[0].i != id) { if (k[0].i < id) return -1; break; }
-  match:
     cnt++;
     rc = sqlite3BtreeNext(d->cur_likes, 0);
     if (rc == SQLITE_DONE) break;

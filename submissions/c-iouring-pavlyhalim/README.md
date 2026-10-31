@@ -73,11 +73,13 @@ Each wake-up of the loop is one batch:
   held until the thread reports the log fully copied (at most 1 s; reads go on), so the next write
   restarts the log and it stays small. Past 16,384 frames the loop checkpoints itself, as a last
   resort.
-- No memory map (`mmap_size=0`) and a 64 MB page cache. With a memory map every page fetch first
-  probes the WAL index; with the pages in SQLite's own cache a hit returns at once. Measured in the
-  same harness at 120,000 users: 17.6 → 15.5 µs per request, for 26 MB more memory. `THREADSAFE=2`
-  with `OPEN_NOMUTEX`; memory statistics, the progress-callback check per opcode, shared cache and
-  unused features compiled out.
+- No memory map (`mmap_size=0`) and a 32 MB page cache. With a memory map every page fetch first
+  probes the WAL index; with the pages in SQLite's own cache a hit returns at once (measured at
+  120,000 users: 17.6 → 15.5 µs per request). 32 MB rather than more because each commit that
+  follows a page split scans the whole page cache, so a bigger cache costs more there; 16 MB was
+  too small (misses), 32 MB measured best (14.0 µs per request against 14.8 µs at 64 MB).
+  `THREADSAFE=2` with `OPEN_NOMUTEX`; memory statistics, the progress-callback check per opcode,
+  shared cache and unused features compiled out.
 
 ## HTTP, JSON, JWT
 

@@ -28,6 +28,7 @@ enum { UD_ACCEPT = 1, UD_RECV, UD_SEND, UD_CLOSE, UD_POLL, UD_CKPT };
 @interface TDConn : TDObject {
 @public
     uint32_t gen;
+    uint32_t held;  // requests deferred by a write hold (they stay at the front of the batch)
     bool live, recvArmed, sending, closeAfter, inBatch, needRearm;
     TDBuf in;      // partial request bytes
     TDBuf out;     // responses built, not yet submitted
@@ -155,7 +156,9 @@ typedef struct {
     uint32_t nreq, reqCap;
     uint32_t *dirty, ndirty;
     uint32_t *rearm, nrearm;
-    TDBuf body, scratch;
+    TDBuf body, scratch, harena;
+    TDReq *hreqs;
+    uint32_t hcap;
     char **pool;
     uint32_t npool;
     id handlers[R_COUNT];
@@ -374,6 +377,7 @@ TD_INLINE TDReq *new_req(TDWorker *w, uint32_t slot, TDConn *c, bool close) {
     r->gen = c->gen;
     r->close = close;
     r->route = R_ERR;
+    r->held = 0;
     r->msg = NULL;
     if (!c->inBatch) {
         c->inBatch = true;
@@ -545,18 +549,38 @@ TD_INLINE void req_err(TDReq *r, int st, const char *msg) {
 }
 
 // ---------------------------------------------------------------- batch
+// Runs the batch in one transaction. During a WAL hold (see the checkpointer
+// below) writes wait: a write, and every later request on its connection, stays
+// at the front of the batch for the next flush, while reads are answered.
 - (void)flush TD_DIRECT {
     TDStore *st = store;
     uptime = now - started;
+    bool hold = ckHold;
     bool db = false;
     for (uint32_t i = 0; i < nreq; i++) if (reqs[i].route != R_ERR) { db = true; break; }
     bool wrote = false;
+    uint32_t nheld = 0;
+    harena.len = 0;
     pthread_mutex_lock(&st->lock);
     bool txn = db && [st begin];
     for (uint32_t i = 0; i < nreq; i++) {
         TDReq *r = &reqs[i];
         TDConn *c = conn_at(self, r->slot);
         if (c->gen != r->gen || (!c->live && !c->closeAfter)) continue;
+        if (TD_UNLIKELY(hold) && (r->held || c->held || r->route == R_CREATE || r->route == R_LIKE)) {
+            if (!r->held) { r->held = 1; c->held++; }
+            if (nheld == hcap) { hcap = hcap ? hcap * 2 : 256; hreqs = realloc(hreqs, sizeof(TDReq) * hcap); }
+            TDReq *h = &hreqs[nheld++];
+            *h = *r;
+            if (r->route == R_CREATE) {    // its strings move to the next batch's arena
+                h->nameOff = harena.len;
+                td_buf_put(&harena, arena.p + r->nameOff, r->nameLen);
+                h->bodyOff = harena.len;
+                td_buf_put(&harena, arena.p + r->bodyOff, r->bodyLen);
+            }
+            continue;
+        }
+        if (r->held) c->held--;
         body.len = 0;
         int st2 = imps[r->route](handlers[r->route], handleSel, r, self, &body);
         if (r->route == R_CREATE || r->route == R_LIKE) wrote = true;
@@ -585,16 +609,25 @@ TD_INLINE void req_err(TDReq *r, int st, const char *msg) {
             [self drop:c slot:dirty[i]];
         }
     }
+    uint32_t keep = 0;
     for (uint32_t i = 0; i < ndirty; i++) {
         uint32_t slot = dirty[i];
         TDConn *c = conn_at(self, slot);
+        if (c->held && (c->live || c->closeAfter)) {        // still has held requests: stays in the batch, not closed
+            dirty[keep++] = slot;
+            if (c->out.len && !c->sending) [self startSend:c slot:slot];
+            continue;
+        }
+        c->held = 0;
         c->inBatch = false;
         if (c->out.len && !c->sending) [self startSend:c slot:slot];
         else if (!c->live && !c->sending && c->closeAfter) { c->closeAfter = false; [self submitClose:c slot:slot]; }
     }
-    nreq = 0;
-    ndirty = 0;
+    if (nheld) memcpy(reqs, hreqs, sizeof(TDReq) * nheld);
+    nreq = nheld;
+    ndirty = keep;
     arena.len = 0;
+    if (harena.len) td_buf_put(&arena, harena.p, harena.len);
 }
 
 // ---------------------------------------------------------------- completions
@@ -794,7 +827,7 @@ int td_opt_batch = 128, td_opt_bwait = 1000, td_opt_bthresh = 8;   // --batch=N 
             ckHold = false;
             if (getenv("TD_CKLOG")) fprintf(stderr, "hold timeout frames %d\n", store->walFrames);
         }
-        if (nreq && !ckHold) { [self flush]; [self ckptAfterFlush]; }
+        if (nreq) { [self flush]; [self ckptAfterFlush]; }
         if (nrearm) {
             for (uint32_t i = 0; i < nrearm; i++) {
                 TDConn *c = conn_at(self, rearm[i]);

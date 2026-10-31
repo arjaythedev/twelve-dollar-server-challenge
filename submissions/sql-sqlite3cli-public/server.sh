@@ -43,7 +43,7 @@ done
 
 # serve FD: one keep-alive connection, until the client closes it
 serve() {
-	local fd=$1 me=$BASHPID head line cl body len resp res k
+	local fd=$1 me=$BASHPID head line cl body len resp res k n=0 req
 	k=$((me % POOL))
 	trap '' PIPE
 	mkfifo "$RUN/r$me" && exec {res}<>"$RUN/r$me" || return
@@ -54,14 +54,17 @@ serve() {
 			[[ $line == [Cc]ontent-[Ll]ength:* ]] && cl=${line//[!0-9]/}
 		done
 		((cl > 0)) && IFS= read -r -N "$cl" -u "$fd" body
+		# two request files, used in turn: sqlite3 sends the response before it has read this file to EOF,
+		# so rewriting the same file for the next request could feed it the new file's tail as SQL
+		req=$RUN/c$me.$((n ^= 1)).sql
 		printf "REPLACE INTO temp.req VALUES(1,'%s','%s');\n.once %s\nSELECT '.read route/'||route||'.sql' FROM temp.q;\n.read %s\n.once %s\nSELECT octet_length(r)||char(10)||r FROM temp.http;\n" \
-			"${head//\'/\'\'}" "${body//\'/\'\'}" "$RUN/p$k" "$RUN/p$k" "$RUN/r$me" > "$RUN/c$me.sql"
-		printf '.read %s\n' "$RUN/c$me.sql" >&"${Q[k]}"
+			"${head//\'/\'\'}" "${body//\'/\'\'}" "$RUN/p$k" "$RUN/p$k" "$RUN/r$me" > "$req"
+		printf '.read %s\n' "$req" >&"${Q[k]}"
 		IFS= read -r -u "$res" len && IFS= read -r -N "$((len + 1))" -u "$res" resp || break
 		tee <<< "${resp%$'\n'}" >&"$fd" || break  # one write (tee copies 8 KB at a time); printf writes each line
 		# separately, and on a reused connection Nagle + delayed ACK then hold the rest for 40 ms
 	done
-	rm -f "$RUN/r$me" "$RUN/c$me.sql"
+	rm -f "$RUN/r$me" "$RUN/c$me".[01].sql
 }
 
 # worker: an idle worker. Once it has a connection it asks the main shell (through the spawn FIFO)

@@ -2,7 +2,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -15,6 +14,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -22,17 +22,31 @@ import (
 )
 
 type post struct {
-	ID        int64  `json:"id"`
-	Body      string `json:"body"`
-	CreatedAt string `json:"created_at"`
-	Author    string `json:"author"`
-	LikeCount int64  `json:"like_count"`
+	ID        int64
+	Body      string
+	CreatedAt string
+	Author    string
+	LikeCount int64
 }
 
 type app struct {
-	db      *sql.DB
-	secret  []byte
-	started time.Time
+	db         *sql.DB
+	secret     []byte
+	started    time.Time
+	feed       *sql.Stmt
+	getPost    *sql.Stmt
+	insertPost *sql.Stmt
+	postExists *sql.Stmt
+	insertLike *sql.Stmt
+}
+
+// Reused by every response; the buffer is only returned to the pool after the
+// response body has been written to the connection.
+var bufPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, 0, 4096)
+		return &b
+	},
 }
 
 func main() {
@@ -46,7 +60,8 @@ func main() {
 	}
 
 	dsn := "file:" + os.Getenv("SQLITE_PATH") +
-		"?_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL"
+		"?_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL" +
+		"&_cache_size=-16384&_mmap_size=268435456"
 	db, err := sql.Open("sqlite3", dsn)
 	if err != nil {
 		log.Fatal(err)
@@ -59,6 +74,38 @@ func main() {
 		secret:  []byte(os.Getenv("JWT_SECRET")),
 		started: time.Now(),
 	}
+	a.feed, err = db.Prepare(`
+		SELECT p.id, p.body, p.created_at, u.username,
+		       (SELECT count(*) FROM likes l WHERE l.post_id = p.id)
+		  FROM posts p JOIN users u ON u.id = p.user_id
+		 ORDER BY p.created_at DESC, p.id DESC
+		 LIMIT 20`)
+	if err != nil {
+		log.Fatal(err)
+	}
+	a.getPost, err = db.Prepare(`
+		SELECT p.id, p.body, p.created_at, u.username,
+		       (SELECT count(*) FROM likes l WHERE l.post_id = p.id)
+		  FROM posts p JOIN users u ON u.id = p.user_id
+		 WHERE p.id = ?`)
+	if err != nil {
+		log.Fatal(err)
+	}
+	a.insertPost, err = db.Prepare(
+		"INSERT INTO posts (user_id, body) VALUES (?, ?) RETURNING id, created_at")
+	if err != nil {
+		log.Fatal(err)
+	}
+	a.postExists, err = db.Prepare("SELECT 1 FROM posts WHERE id = ?")
+	if err != nil {
+		log.Fatal(err)
+	}
+	a.insertLike, err = db.Prepare(
+		"INSERT INTO likes (user_id, post_id) VALUES (?, ?) ON CONFLICT (user_id, post_id) DO NOTHING")
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	srv := &http.Server{
 		Addr:              host + ":" + port,
 		Handler:           a,
@@ -72,7 +119,7 @@ func (a *app) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "/health":
 		a.health(w, r)
 	case "/feed":
-		a.feed(w, r)
+		a.feedPosts(w, r)
 	case "/posts":
 		a.createPost(w, r)
 	default:
@@ -86,7 +133,7 @@ func (a *app) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			a.likePost(w, r, id)
 			return
 		}
-		a.getPost(w, r, rest)
+		a.getPostByID(w, r, rest)
 	}
 }
 
@@ -94,59 +141,69 @@ func (a *app) health(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer cancel()
 	var one int
+	bp := bufPool.Get().(*[]byte)
+	b := (*bp)[:0]
 	if err := a.db.QueryRowContext(ctx, "SELECT 1").Scan(&one); err != nil {
-		writeJSON(w, http.StatusServiceUnavailable, struct {
-			Status string `json:"status"`
-			DB     string `json:"db"`
-			Error  string `json:"error"`
-		}{"degraded", "unreachable", err.Error()})
+		b = append(b, `{"status":"degraded","db":"unreachable","error":`...)
+		b = appendString(b, err.Error())
+		b = append(b, '}')
+		*bp = b
+		writeBody(w, http.StatusServiceUnavailable, b)
+		bufPool.Put(bp)
 		return
 	}
-	writeJSON(w, http.StatusOK, struct {
-		Status  string `json:"status"`
-		DB      string `json:"db"`
-		UptimeS int64  `json:"uptime_s"`
-	}{"ok", "ok", int64(time.Since(a.started).Seconds())})
+	b = append(b, `{"status":"ok","db":"ok","uptime_s":`...)
+	b = strconv.AppendInt(b, int64(time.Since(a.started).Seconds()), 10)
+	b = append(b, '}')
+	*bp = b
+	writeBody(w, http.StatusOK, b)
+	bufPool.Put(bp)
 }
 
-func (a *app) feed(w http.ResponseWriter, r *http.Request) {
-	rows, err := a.db.QueryContext(r.Context(), `
-		SELECT p.id, p.body, p.created_at, u.username,
-		       (SELECT count(*) FROM likes l WHERE l.post_id = p.id)
-		  FROM posts p JOIN users u ON u.id = p.user_id
-		 ORDER BY p.created_at DESC, p.id DESC
-		 LIMIT 20`)
+func (a *app) feedPosts(w http.ResponseWriter, r *http.Request) {
+	rows, err := a.feed.QueryContext(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
 	defer rows.Close()
 
-	posts := make([]post, 0, 20)
+	bp := bufPool.Get().(*[]byte)
+	b := append((*bp)[:0], `{"posts":[`...)
+	first := true
 	for rows.Next() {
 		var p post
 		if err := rows.Scan(&p.ID, &p.Body, &p.CreatedAt, &p.Author, &p.LikeCount); err != nil {
+			bufPool.Put(bp)
 			writeError(w, http.StatusInternalServerError, "internal server error")
 			return
 		}
-		posts = append(posts, p)
+		if !first {
+			b = append(b, ',')
+		}
+		first = false
+		b = appendPost(b, p)
 	}
 	if err := rows.Err(); err != nil {
+		bufPool.Put(bp)
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
-	writeJSON(w, http.StatusOK, struct {
-		Posts []post `json:"posts"`
-	}{posts})
+	b = append(b, `]}`...)
+	*bp = b
+	writeBody(w, http.StatusOK, b)
+	bufPool.Put(bp)
 }
 
-func (a *app) getPost(w http.ResponseWriter, r *http.Request, idStr string) {
+func (a *app) getPostByID(w http.ResponseWriter, r *http.Request, idStr string) {
 	id, ok := parsePostID(idStr)
 	if !ok {
 		writeError(w, http.StatusBadRequest, "invalid post id")
 		return
 	}
-	p, err := queryPost(r.Context(), a.db, id)
+	var p post
+	err := a.getPost.QueryRowContext(r.Context(), id).
+		Scan(&p.ID, &p.Body, &p.CreatedAt, &p.Author, &p.LikeCount)
 	if err == sql.ErrNoRows {
 		writeError(w, http.StatusNotFound, "post not found")
 		return
@@ -155,9 +212,13 @@ func (a *app) getPost(w http.ResponseWriter, r *http.Request, idStr string) {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
-	writeJSON(w, http.StatusOK, struct {
-		Post post `json:"post"`
-	}{p})
+	bp := bufPool.Get().(*[]byte)
+	b := append((*bp)[:0], `{"post":`...)
+	b = appendPost(b, p)
+	b = append(b, '}')
+	*bp = b
+	writeBody(w, http.StatusOK, b)
+	bufPool.Put(bp)
 }
 
 func (a *app) createPost(w http.ResponseWriter, r *http.Request) {
@@ -193,18 +254,19 @@ func (a *app) createPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var p post
-	p.Body, p.Author = body, username
-	err = a.db.QueryRowContext(r.Context(),
-		"INSERT INTO posts (user_id, body) VALUES (?, ?) RETURNING id, created_at",
-		userID, body).Scan(&p.ID, &p.CreatedAt)
+	p := post{Body: body, Author: username}
+	err = a.insertPost.QueryRowContext(r.Context(), userID, body).Scan(&p.ID, &p.CreatedAt)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
-	writeJSON(w, http.StatusCreated, struct {
-		Post post `json:"post"`
-	}{p})
+	bp := bufPool.Get().(*[]byte)
+	b := append((*bp)[:0], `{"post":`...)
+	b = appendPost(b, p)
+	b = append(b, '}')
+	*bp = b
+	writeBody(w, http.StatusCreated, b)
+	bufPool.Put(bp)
 }
 
 func (a *app) likePost(w http.ResponseWriter, r *http.Request, idStr string) {
@@ -220,7 +282,7 @@ func (a *app) likePost(w http.ResponseWriter, r *http.Request, idStr string) {
 	}
 
 	var one int
-	err := a.db.QueryRowContext(r.Context(), "SELECT 1 FROM posts WHERE id = ?", id).Scan(&one)
+	err := a.postExists.QueryRowContext(r.Context(), id).Scan(&one)
 	if err == sql.ErrNoRows {
 		writeError(w, http.StatusNotFound, "post not found")
 		return
@@ -230,9 +292,7 @@ func (a *app) likePost(w http.ResponseWriter, r *http.Request, idStr string) {
 		return
 	}
 
-	res, err := a.db.ExecContext(r.Context(),
-		"INSERT INTO likes (user_id, post_id) VALUES (?, ?) ON CONFLICT (user_id, post_id) DO NOTHING",
-		userID, id)
+	res, err := a.insertLike.ExecContext(r.Context(), userID, id)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
@@ -247,22 +307,15 @@ func (a *app) likePost(w http.ResponseWriter, r *http.Request, idStr string) {
 	if already {
 		status = http.StatusOK
 	}
-	writeJSON(w, status, struct {
-		Liked        bool  `json:"liked"`
-		AlreadyLiked bool  `json:"already_liked"`
-		PostID       int64 `json:"post_id"`
-	}{true, already, id})
-}
-
-func queryPost(ctx context.Context, db *sql.DB, id int64) (post, error) {
-	var p post
-	err := db.QueryRowContext(ctx, `
-		SELECT p.id, p.body, p.created_at, u.username,
-		       (SELECT count(*) FROM likes l WHERE l.post_id = p.id)
-		  FROM posts p JOIN users u ON u.id = p.user_id
-		 WHERE p.id = ?`, id).
-		Scan(&p.ID, &p.Body, &p.CreatedAt, &p.Author, &p.LikeCount)
-	return p, err
+	bp := bufPool.Get().(*[]byte)
+	b := append((*bp)[:0], `{"liked":true,"already_liked":`...)
+	b = strconv.AppendBool(b, already)
+	b = append(b, `,"post_id":`...)
+	b = strconv.AppendInt(b, id, 10)
+	b = append(b, '}')
+	*bp = b
+	writeBody(w, status, b)
+	bufPool.Put(bp)
 }
 
 // authenticate verifies the bearer JWT and returns the user id and username.
@@ -354,23 +407,66 @@ func parsePositiveInt(s string) (int64, bool) {
 	return n, true
 }
 
-func writeError(w http.ResponseWriter, status int, msg string) {
-	writeJSON(w, status, struct {
-		Error string `json:"error"`
-	}{msg})
+func appendPost(dst []byte, p post) []byte {
+	dst = append(dst, `{"id":`...)
+	dst = strconv.AppendInt(dst, p.ID, 10)
+	dst = append(dst, `,"body":`...)
+	dst = appendString(dst, p.Body)
+	dst = append(dst, `,"created_at":`...)
+	dst = appendString(dst, p.CreatedAt)
+	dst = append(dst, `,"author":`...)
+	dst = appendString(dst, p.Author)
+	dst = append(dst, `,"like_count":`...)
+	dst = strconv.AppendInt(dst, p.LikeCount, 10)
+	return append(dst, '}')
 }
 
-func writeJSON(w http.ResponseWriter, status int, v any) {
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(false)
-	if err := enc.Encode(v); err != nil {
-		http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
-		return
+// appendString writes a JSON string. Non-ASCII is emitted as UTF-8 (the spec
+// makes escaping optional); quotes, backslashes and control bytes are escaped.
+func appendString(dst []byte, s string) []byte {
+	dst = append(dst, '"')
+	start := 0
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= 0x20 && c != '"' && c != '\\' {
+			continue
+		}
+		dst = append(dst, s[start:i]...)
+		switch c {
+		case '"':
+			dst = append(dst, '\\', '"')
+		case '\\':
+			dst = append(dst, '\\', '\\')
+		case '\n':
+			dst = append(dst, '\\', 'n')
+		case '\r':
+			dst = append(dst, '\\', 'r')
+		case '\t':
+			dst = append(dst, '\\', 't')
+		default:
+			const hex = "0123456789abcdef"
+			dst = append(dst, '\\', 'u', '0', '0', hex[c>>4], hex[c&0x0f])
+		}
+		start = i + 1
 	}
+	dst = append(dst, s[start:]...)
+	return append(dst, '"')
+}
+
+func writeError(w http.ResponseWriter, status int, msg string) {
+	bp := bufPool.Get().(*[]byte)
+	b := append((*bp)[:0], `{"error":`...)
+	b = appendString(b, msg)
+	b = append(b, '}')
+	*bp = b
+	writeBody(w, status, b)
+	bufPool.Put(bp)
+}
+
+func writeBody(w http.ResponseWriter, status int, body []byte) {
 	h := w.Header()
 	h.Set("Content-Type", "application/json")
-	h.Set("Content-Length", strconv.Itoa(buf.Len()))
+	h.Set("Content-Length", strconv.Itoa(len(body)))
 	w.WriteHeader(status)
-	w.Write(buf.Bytes())
+	w.Write(body)
 }

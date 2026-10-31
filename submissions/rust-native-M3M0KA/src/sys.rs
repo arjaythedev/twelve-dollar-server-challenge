@@ -7,7 +7,12 @@
 use std::os::raw::{c_int, c_void};
 
 pub const EPOLLIN: u32 = 0x0001;
-pub const EPOLL_IN_FOR_LISTENER: u32 = EPOLLIN;
+/// With several worker processes waiting on one listening socket, a plain
+/// level-triggered read interest wakes all of them for every new connection and
+/// all but one find EAGAIN. EPOLLEXCLUSIVE wakes one waiter instead. It is only
+/// valid with EPOLL_CTL_ADD, which is how the listener is registered.
+pub const EPOLLEXCLUSIVE: u32 = 0x1000_0000;
+pub const EPOLL_IN_FOR_LISTENER: u32 = EPOLLIN | EPOLLEXCLUSIVE;
 pub const EPOLLOUT: u32 = 0x0004;
 pub const EPOLLERR: u32 = 0x0008;
 pub const EPOLLHUP: u32 = 0x0010;

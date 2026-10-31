@@ -14,7 +14,7 @@
 //!
 //! `self_test` drives real concurrent, pipelined and closing clients through
 //! this exact code path before the public listener exists. If anything fails —
-//! seccomp, an old kernel, an ABI mismatch — the caller stays on the other
+//! syscall policy, an old kernel, an ABI mismatch — the caller stays on the other
 //! transport rather than serving from an untested path.
 
 use std::mem;

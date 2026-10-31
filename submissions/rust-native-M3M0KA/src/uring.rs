@@ -169,7 +169,7 @@ pub struct Ring {
 
 impl Ring {
     /// Creates a ring with `entries` submission slots. Returns None when the
-    /// kernel refuses io_uring (seccomp, old kernel) or the ABI looks wrong.
+    /// kernel refuses io_uring (syscall policy, old kernel) or the ABI looks wrong.
     pub fn new(entries: u32, cq_entries: u32, flags: u32) -> Option<Ring> {
         // The flags were previously accepted and dropped, so an older kernel's
         // refusal was indistinguishable from success. Try the requested flags,

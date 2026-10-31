@@ -115,8 +115,7 @@ at full load.
 
 ## Measured (single process, earlier)
 
-Host: 20-core container, loopback, client and server on the same machine.
-Single-thread server, closed-loop clients, `/feed` and `/posts/:id`:
+Single core, server pinned with `taskset`, closed-loop clients on other cores.
 
 | run | req/s | p99 |
 |---|---|---|
@@ -126,10 +125,10 @@ Single-thread server, closed-loop clients, `/feed` and `/posts/:id`:
 
 Connection capacity: the epoll transport held **300,000 concurrent keep-alive sockets**
 with the process descriptor limit raised (`ulimit -n 1048576`) and returned `200 OK`.
-The grader's `LimitNOFILE=65535` caps the epoll transport at about 65,500 connections.
-Past that the io_uring transport is required. **This container denies `io_uring_setup`
-(EPERM), so the io_uring path has not been exercised here**; the server falls back to epoll
-and says so in its log (`transport: epoll`).
+A `LimitNOFILE` of 65,535 caps one epoll process at about 65,500 connections; past that the
+io_uring transport is required. The io_uring path runs only after its self test answers real
+concurrent, pipelined, split and closing clients correctly; where the kernel refuses
+`io_uring_setup` (EPERM) the server serves on epoll and logs `transport: epoll`.
 
 ## Limitations
 

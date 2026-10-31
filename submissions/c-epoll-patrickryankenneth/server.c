@@ -15,6 +15,7 @@
 #include <sys/socket.h>
 #include <time.h>
 #include <unistd.h>
+#include <emmintrin.h>
 #include "sqlite3.h"
 
 /* ---------------------------------------------------------------- SHA-256 / HMAC */
@@ -270,20 +271,40 @@ static void bres(buf *b, size_t add) {
 }
 static void bput(buf *b, const void *s, size_t n) { bres(b, n); memcpy(b->p + b->n, s, n); b->n += n; }
 static void bstr(buf *b, const char *s) { bput(b, s, strlen(s)); }
-static void bint(buf *b, long long v) { char t[24]; int l = snprintf(t, sizeof t, "%lld", v); bput(b, t, (size_t)l); }
+static void bint(buf *b, long long v) {
+  char t[24]; char *e = t + sizeof t, *p = e;
+  unsigned long long u = v < 0 ? 0ULL - (unsigned long long)v : (unsigned long long)v;
+  do { *--p = (char)('0' + u % 10); u /= 10; } while (u);
+  if (v < 0) *--p = '-';
+  bput(b, p, (size_t)(e - p));
+}
 static void besc(buf *b, const char *s, size_t n) {
-  bres(b, n * 6 + 1);
+  static const char hx[] = "0123456789abcdef";
+  bres(b, n * 6 + 16);                    /* worst case 6 bytes/char, +16 for the vector store */
   char *o = b->p + b->n;
-  for (size_t i = 0; i < n; i++) {
-    unsigned char c = (unsigned char)s[i];
+  const __m128i vq = _mm_set1_epi8('"'), vb = _mm_set1_epi8('\\'), vc = _mm_set1_epi8(0x1f);
+  size_t i = 0;
+  while (i < n) {
+    if (i + 16 <= n) {
+      __m128i v = _mm_loadu_si128((const __m128i *)(s + i));
+      _mm_storeu_si128((__m128i *)o, v);  /* optimistic copy; only kept if the block is clean */
+      __m128i hit = _mm_or_si128(_mm_or_si128(_mm_cmpeq_epi8(v, vq), _mm_cmpeq_epi8(v, vb)),
+                                 _mm_cmpeq_epi8(_mm_min_epu8(v, vc), v));   /* byte <= 0x1f */
+      unsigned m = (unsigned)_mm_movemask_epi8(hit);
+      if (!m) { o += 16; i += 16; continue; }
+      unsigned k = (unsigned)__builtin_ctz(m);   /* clean bytes before the first escapable one */
+      o += k; i += k;
+    }
+    unsigned char c = (unsigned char)s[i++];
     if (c == '"') { *o++ = '\\'; *o++ = '"'; }
     else if (c == '\\') { *o++ = '\\'; *o++ = '\\'; }
     else if (c < 0x20) {
+      *o++ = '\\';
       switch (c) {
-      case '\n': *o++ = '\\'; *o++ = 'n'; break;
-      case '\r': *o++ = '\\'; *o++ = 'r'; break;
-      case '\t': *o++ = '\\'; *o++ = 't'; break;
-      default: o += sprintf(o, "\\u%04x", c);
+      case '\n': *o++ = 'n'; break;
+      case '\r': *o++ = 'r'; break;
+      case '\t': *o++ = 't'; break;
+      default: *o++ = 'u'; *o++ = '0'; *o++ = '0'; *o++ = hx[c >> 4]; *o++ = hx[c & 15];
       }
     } else *o++ = (char)c;
   }
@@ -538,10 +559,20 @@ static int handle(const req *r) {
 static void emit(int st, int close_after) {
   const char *t = st == 200 ? "OK" : st == 201 ? "Created" : st == 400 ? "Bad Request" : st == 401 ? "Unauthorized" :
                   st == 404 ? "Not Found" : st == 503 ? "Service Unavailable" : "Internal Server Error";
-  char h[192];
-  int hl = snprintf(h, sizeof h, "HTTP/1.1 %d %s\r\nContent-Type: application/json\r\nContent-Length: %zu\r\n%s\r\n",
-                    st, t, body.n, close_after ? "Connection: close\r\n" : "");
-  bput(&obuf, h, (size_t)hl); bput(&obuf, body.p, body.n);
+  bres(&obuf, 256 + body.n);
+  char *o = obuf.p + obuf.n;
+  memcpy(o, "HTTP/1.1 ", 9); o += 9;
+  *o++ = (char)('0' + st / 100); *o++ = (char)('0' + st / 10 % 10); *o++ = (char)('0' + st % 10); *o++ = ' ';
+  size_t tl = strlen(t); memcpy(o, t, tl); o += tl;
+  static const char H[] = "\r\nContent-Type: application/json\r\nContent-Length: ";
+  memcpy(o, H, sizeof H - 1); o += sizeof H - 1;
+  char d[24]; char *dp = d + sizeof d; size_t v = body.n;
+  do { *--dp = (char)('0' + v % 10); v /= 10; } while (v);
+  size_t dl = (size_t)(d + sizeof d - dp); memcpy(o, dp, dl); o += dl;
+  if (close_after) { memcpy(o, "\r\nConnection: close", 19); o += 19; }
+  memcpy(o, "\r\n\r\n", 4); o += 4;
+  memcpy(o, body.p, body.n); o += body.n;
+  obuf.n = (size_t)(o - obuf.p);
 }
 
 /* ---------------------------------------------------------------- connections / epoll */

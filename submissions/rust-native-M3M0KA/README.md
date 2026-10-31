@@ -28,6 +28,9 @@ SQLite bindings are written in this repository.
 - `src/http.rs`, `src/json.rs`, `src/crypto.rs`, `src/sys.rs` - protocol primitives
 - `src/pgo_train.c` - build-time profile training on a synthetic database (not the seed)
 - `tests/oracle.sh` - differential test: B-tree plans vs pure SQL, byte-identical, before and after writes
+- `tests/protocol.sh` - pipelined GET+POST+GET in one write (order and statuses), a request split
+  across two writes, `Connection: close`, and `kill -9` with writes in flight (every acknowledged
+  201 must survive the restart)
 - `bench/load.rs` - development load generator (not shipped in the image)
 
 ## Read plans
@@ -50,7 +53,11 @@ they differ.
 ## Correctness
 
 - `test/run.sh` (the official 42 checks): **passed 42/42** on this build.
-- `tests/oracle.sh`: plan output identical to pure SQL on a fresh seed and after writes.
+- `tests/oracle.sh`: plan output identical to pure SQL on a fresh seed and after writes, with the
+  shipped worker count (so writes by other processes are inside the comparison).
+- `tests/protocol.sh`: pipelined write ordering, split requests, `Connection: close`, and 40/40
+  acknowledged writes surviving a `kill -9`.
+- `rustc --test src/main.rs`: six byte-level tests of the io_uring submission entries.
 - The B-tree plan checks the schema layout and the feed invariant (dense rowids,
   non-decreasing `created_at`) at startup and after every insert. Any violation, foreign
   write, or unreadable record disables the plan permanently and reads use SQL.

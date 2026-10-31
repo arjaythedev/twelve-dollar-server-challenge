@@ -529,9 +529,21 @@ impl UringServer {
                 c.send_busy = false;
                 if res > 0 {
                     c.sent += res as usize;
-                } else if res < 0 {
+                } else if res == 0 {
+                    // A send of zero bytes on a non-empty buffer means the peer
+                    // is gone; never retry it or this pass never ends.
+                    c.live = false;
+                    return;
+                } else {
                     let err = -res;
-                    if err != 11 && err != 4 {
+                    if err == 11 {
+                        // Would block: retry once in the flush at the end of
+                        // this pass. Retrying from inside the completion would
+                        // spin the loop against a peer that is not reading.
+                        self.lanes[lane].dirty.push(slot);
+                        return;
+                    }
+                    if err != 4 {
                         c.live = false;
                         return;
                     }

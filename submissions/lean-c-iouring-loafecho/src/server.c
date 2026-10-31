@@ -47,20 +47,14 @@ static inline uint64_t mkud(unsigned type, uint32_t slot, uint32_t gen) {
     return (uint64_t)type << 56 | (uint64_t)(gen & 0xffffff) << 32 | slot;
 }
 
-/* A partial request (only a connection mid-request has one): its capacity
- * and, once its header is complete, need = the request's total bytes. */
-typedef struct { uint32_t cap, need; char data[]; } inbuf_t;
-
-/* One per fixed-file slot; an idle keep-alive connection holds only this.
- * Lengths are 32-bit: grow_cap() refuses a buffer past UINT32_MAX. */
 typedef struct {
-    inbuf_t *in;                       /* partial request (NULL when none), in_len bytes */
-    char    *out;                      /* responses not yet handed to the kernel */
-    char    *snd;                      /* the buffer the in-flight send reads */
-    uint32_t in_len, out_len, out_cap, snd_len, snd_off;
-    uint32_t gen : 24, open : 1, sending : 1, close_after : 1, dirty : 1, cont_sent : 1;
+    char    *in;  size_t in_len, in_cap, need;   /* partial request; need = total bytes once known */
+    char    *out; size_t out_len, out_cap;       /* responses not yet handed to the kernel */
+    char    *snd; size_t snd_len, snd_off, snd_cap; /* the buffer the in-flight send reads */
+    char    *rbuf;                                /* fallback mode only */
+    uint32_t gen;
+    uint8_t  open, sending, close_after, dirty, cont_sent;
 } conn_t;
-_Static_assert(sizeof(conn_t) <= 64, "conn_t grew");
 
 typedef struct { uint32_t slot, gen; size_t off, len; int close; } wspan_t;
 
@@ -71,7 +65,6 @@ static uint32_t *dirty;  static uint32_t ndirty;
 static wspan_t  *wspans; static size_t nwspans, wspans_cap;
 static struct io_uring_buf_ring *br;
 static char     *bufbase;
-static char    **rbufs;        /* per-slot recv buffers, fallback mode only */
 static int       use_bufring;
 static int       listen_fd;
 static db_t     *db;
@@ -96,30 +89,12 @@ static void *xrealloc(void *p, size_t n) {
     return q;
 }
 
-/* Capacity for need bytes: 4096 doubled until it fits (from cap if nonzero).
- * Connection buffers keep 32-bit capacities, so past UINT32_MAX this aborts
- * like any other allocation failure instead of truncating. */
-static inline uint32_t grow_cap(uint32_t cap, size_t need) {
-    size_t n = cap ? cap : 4096;
-    while (n < need) n *= 2;
-    if (n > UINT32_MAX) { fprintf(stderr, "out of memory (connection buffer of %zu bytes)\n", need); abort(); }
-    return (uint32_t)n;
-}
-
-static inline void reserve(char **buf, uint32_t *cap, size_t need) {
+static inline void reserve(char **buf, size_t *cap, size_t need) {
     if (need <= *cap) return;
-    uint32_t n = grow_cap(*cap, need);
+    size_t n = *cap ? *cap : 4096;
+    while (n < need) n *= 2;
     *buf = xrealloc(*buf, n);
     *cap = n;
-}
-
-/* reserve() for c->in, whose capacity and need live in its header. */
-static inline void in_reserve(conn_t *c, size_t need) {
-    uint32_t cap = c->in ? c->in->cap : 0;
-    if (need <= cap) return;
-    uint32_t n = grow_cap(cap, need);
-    c->in = xrealloc(c->in, sizeof(inbuf_t) + n);
-    c->in->cap = n;
 }
 
 static inline void mark_dirty(uint32_t slot) {
@@ -165,7 +140,7 @@ static void put_response(conn_t *c, int st, const char *body, size_t blen, int c
     else if (keep10) { memcpy(p, LIT("\r\nConnection: keep-alive\r\n\r\n")); p += sizeof("\r\nConnection: keep-alive\r\n\r\n") - 1; }
     else { memcpy(p, "\r\n\r\n", 4); p += 4; }
     memcpy(p, body, blen); p += blen;
-    c->out_len = (uint32_t)(p - c->out);   /* <= out_cap */
+    c->out_len = (size_t)(p - c->out);
 }
 
 #define ERR_BODY(m) "{\"error\":\"" m "\"}"
@@ -199,10 +174,11 @@ static void close_conn(uint32_t slot) {
     /* A closed slot keeps no heap: drop the request and response buffers.
      * The send buffer goes too unless a send may still be reading it; then
      * the next accept on this slot frees it. */
-    free(c->in);  c->in = NULL;  c->in_len = 0;
+    free(c->in);  c->in = NULL;  c->in_cap = 0;
+    c->in_len = 0; c->need = 0;
     free(c->out); c->out = NULL; c->out_cap = 0;
     c->out_len = 0;
-    if (!c->sending) { free(c->snd); c->snd = NULL; c->snd_len = c->snd_off = 0; }
+    if (!c->sending) { free(c->snd); c->snd = NULL; c->snd_cap = 0; c->snd_len = c->snd_off = 0; }
 }
 
 static void arm_recv(uint32_t slot) {
@@ -213,7 +189,7 @@ static void arm_recv(uint32_t slot) {
         s->flags |= IOSQE_FIXED_FILE | IOSQE_BUFFER_SELECT;
         s->buf_group = 0;
     } else {
-        io_uring_prep_recv(s, (int)slot, rbufs[slot], RECV_BUF_SZ, 0);
+        io_uring_prep_recv(s, (int)slot, c->rbuf, RECV_BUF_SZ, 0);
         s->flags |= IOSQE_FIXED_FILE;
     }
     io_uring_sqe_set_data64(s, mkud(UD_RECV, slot, c->gen));
@@ -243,7 +219,7 @@ static void flush_conn(uint32_t slot) {
     if (!c->open || c->sending) return;
     if (c->out_len) {
         if (c->snd) free(c->snd);                 /* not sending: nothing reads it */
-        c->snd = c->out; c->snd_len = c->out_len; c->snd_off = 0;
+        c->snd = c->out; c->snd_cap = c->out_cap; c->snd_len = c->out_len; c->snd_off = 0;
         c->out = NULL; c->out_cap = 0; c->out_len = 0;
         c->sending = 1;
         post_send(slot);
@@ -436,10 +412,9 @@ static inline const char *find_hdr_end(const char *b, size_t n, const char **fir
 }
 
 /* Parse and serve one request at buf[0..len). Returns bytes consumed,
- * 0 if incomplete (*need set when the total size is known), -1 after
- * answering a malformed request (connection will close). *need is the
- * partial request's need (c->in->need, or 0 while c->in is empty). */
-static long parse_one(uint32_t slot, conn_t *c, const char *buf, size_t len, uint32_t *need) {
+ * 0 if incomplete (c->need set when the total size is known), -1 after
+ * answering a malformed request (connection will close). */
+static long parse_one(uint32_t slot, conn_t *c, const char *buf, size_t len) {
     size_t scan = len < MAX_HDR ? len : MAX_HDR;
     const char *le = NULL;
     const char *he = find_hdr_end(buf, scan, &le);
@@ -513,7 +488,7 @@ static long parse_one(uint32_t slot, conn_t *c, const char *buf, size_t len, uin
     if (clen > MAX_BODY) { bad_request(c, 400, LIT(E_TOOLARGE)); return -1; }
     size_t total = hlen + (size_t)clen;
     if (len < total) {
-        *need = (uint32_t)total;               /* <= MAX_HDR + MAX_BODY */
+        c->need = total;
         if (expect_cont && !c->cont_sent && !http10) {
             reserve(&c->out, &c->out_cap, c->out_len + 32);
             memcpy(c->out + c->out_len, LIT("HTTP/1.1 100 Continue\r\n\r\n"));
@@ -523,7 +498,7 @@ static long parse_one(uint32_t slot, conn_t *c, const char *buf, size_t len, uin
         }
         return 0;
     }
-    *need = 0; c->cont_sent = 0;
+    c->need = 0; c->cont_sent = 0;
     rq.body = buf + hlen; rq.blen = (size_t)clen;
     rq.close = http10 ? !conn_keep : conn_close;
     rq.keep10 = http10 && conn_keep;
@@ -537,10 +512,10 @@ bad:
 }
 
 /* Serve every complete request in buf; return bytes consumed. */
-static size_t parse_all(uint32_t slot, conn_t *c, const char *buf, size_t len, uint32_t *need) {
+static size_t parse_all(uint32_t slot, conn_t *c, const char *buf, size_t len) {
     size_t off = 0;
     while (off < len && !c->close_after) {
-        long r = parse_one(slot, c, buf + off, len - off, need);
+        long r = parse_one(slot, c, buf + off, len - off);
         if (r <= 0) { if (r < 0) mark_dirty(slot); break; }
         off += (size_t)r;
     }
@@ -551,27 +526,25 @@ static void on_data(uint32_t slot, const char *data, size_t n) {
     conn_t *c = &conns[slot];
     if (c->close_after) return;
     if (c->in_len == 0) {
-        uint32_t need = 0;
-        size_t used = parse_all(slot, c, data, n, &need);
+        size_t used = parse_all(slot, c, data, n);
         if (used < n && !c->close_after) {
-            in_reserve(c, n - used);
-            memcpy(c->in->data, data + used, n - used);
-            c->in_len = (uint32_t)(n - used);
-            c->in->need = need;
+            reserve(&c->in, &c->in_cap, n - used);
+            memcpy(c->in, data + used, n - used);
+            c->in_len = n - used;
         }
         return;
     }
-    in_reserve(c, (size_t)c->in_len + n);
-    memcpy(c->in->data + c->in_len, data, n);
-    c->in_len += (uint32_t)n;                      /* <= in->cap */
-    if (c->in->need && c->in_len < c->in->need) return;
-    size_t used = parse_all(slot, c, c->in->data, c->in_len, &c->in->need);   /* == in_len once close_after */
+    reserve(&c->in, &c->in_cap, c->in_len + n);
+    memcpy(c->in + c->in_len, data, n);
+    c->in_len += n;
+    if (c->need && c->in_len < c->need) return;
+    size_t used = parse_all(slot, c, c->in, c->in_len);   /* == in_len once close_after */
     if (used == c->in_len) {
         /* No partial request left: the connection holds no input buffer. */
-        free(c->in); c->in = NULL; c->in_len = 0;
+        free(c->in); c->in = NULL; c->in_cap = 0; c->in_len = 0;
         return;
     }
-    if (used) { memmove(c->in->data, c->in->data + used, c->in_len - used); c->in_len -= (uint32_t)used; }
+    if (used) { memmove(c->in, c->in + used, c->in_len - used); c->in_len -= used; }
 }
 
 /* ------------------------------------------------------------ CQE dispatch */
@@ -600,11 +573,11 @@ static void on_cqe(struct io_uring_cqe *cqe) {
                 conn_t *c = &conns[res];
                 c->gen = (c->gen + 1) & 0xffffff;
                 c->open = 1; c->sending = 0; c->close_after = 0; c->cont_sent = 0;
-                c->in_len = 0; c->out_len = 0; c->snd_len = c->snd_off = 0;
+                c->in_len = 0; c->need = 0; c->out_len = 0; c->snd_len = c->snd_off = 0;
                 /* A send still in flight when the previous connection on this
                  * slot closed left its buffer; that send is finished now. */
-                if (c->snd) { free(c->snd); c->snd = NULL; }
-                if (!use_bufring && !rbufs[res]) rbufs[res] = xrealloc(NULL, RECV_BUF_SZ);
+                if (c->snd) { free(c->snd); c->snd = NULL; c->snd_cap = 0; }
+                if (!use_bufring && !c->rbuf) c->rbuf = xrealloc(NULL, RECV_BUF_SZ);
                 arm_recv((uint32_t)res);
             }
         } else if (n_accept_err++ % 1000 == 0) {
@@ -620,7 +593,7 @@ static void on_cqe(struct io_uring_cqe *cqe) {
         int live = c->open && c->gen == gen;
         if (!live) { if (has_buf) return_buf(bid); return; }
         if (res > 0) {
-            on_data(slot, use_bufring ? bufbase + (size_t)bid * RECV_BUF_SZ : rbufs[slot], (size_t)res);
+            on_data(slot, use_bufring ? bufbase + (size_t)bid * RECV_BUF_SZ : c->rbuf, (size_t)res);
             if (has_buf) return_buf(bid);
             if (!use_bufring || !(cqe->flags & IORING_CQE_F_MORE)) arm_recv(slot);
             return;
@@ -645,10 +618,10 @@ static void on_cqe(struct io_uring_cqe *cqe) {
         conn_t *c = &conns[slot];
         if (!c->open || c->gen != gen) return;
         if (res < 0) { c->sending = 0; close_conn(slot); return; }
-        c->snd_off += (uint32_t)res;               /* 0 <= res <= snd_len - snd_off */
+        c->snd_off += (size_t)res;
         if (c->snd_off < c->snd_len) { post_send(slot); return; }
         c->sending = 0;
-        free(c->snd); c->snd = NULL; c->snd_len = c->snd_off = 0;
+        free(c->snd); c->snd = NULL; c->snd_cap = 0; c->snd_len = c->snd_off = 0;
         mark_dirty(slot);
         return;
     }
@@ -1072,7 +1045,7 @@ static int pgo_train(void) {
             tr_count(&t, c->out, c->out_len);
             free(c->out); c->out = NULL; c->out_cap = 0; c->out_len = 0;   /* freed after its send */
             if (c->close_after) {
-                c->close_after = 0; c->in_len = 0; c->cont_sent = 0;   /* c->in is NULL once close_after */
+                c->close_after = 0; c->in_len = 0; c->need = 0; c->cont_sent = 0;
                 c->gen = (c->gen + 1) & 0xffffff;
             }
         }
@@ -1178,8 +1151,7 @@ int main(int argc, char **argv) {
     bodybuf = malloc(MAX_BODY);
     if (!conns || !dirty || !scratch || !bodybuf) { fprintf(stderr, "out of memory\n"); return 1; }
     setup_bufring();
-    if (!use_bufring && !(rbufs = calloc(nconns, sizeof *rbufs))) { fprintf(stderr, "out of memory\n"); return 1; }
-    fprintf(stderr, "listening on %s:%s (fixed files %u, conn_t %zu B)\n", host, port, nconns, sizeof(conn_t));
+    fprintf(stderr, "listening on %s:%s (fixed files %u)\n", host, port, nconns);
 
     arm_accept();
     for (;;) {
@@ -1206,7 +1178,7 @@ int main(int argc, char **argv) {
                 size_t tail = c->out_len - (w->off + w->len);
                 char *saved = NULL;
                 if (tail) { saved = xrealloc(NULL, tail); memcpy(saved, c->out + w->off + w->len, tail); }
-                c->out_len = (uint32_t)w->off;         /* <= out_len */
+                c->out_len = w->off;
                 put_response(c, 500, E_INTERNAL, sizeof E_INTERNAL - 1, w->close, 0);
                 if (tail) {
                     reserve(&c->out, &c->out_cap, c->out_len + tail);

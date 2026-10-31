@@ -94,4 +94,12 @@ int db_maybe_checkpoint(db_t *db, int min_frames);
  * printing why). */
 int db_selfcheck(const char *path, unsigned seed);
 
+/* --- PGO training (build.sh only; never called while serving) -------------------
+ * Creates a fresh database at path (in a new, empty directory) from an
+ * embedded copy of the challenge schema.sql and fills it in Inv order:
+ * nusers users, nposts posts (dense ids, created_at strictly increasing
+ * through 2025, existing authors), about nlikes likes, then ANALYZE.
+ * Used by `bin/server --pgo-train`. 0 ok, -1 error (message in err). */
+int db_pgo_make(const char *path, int nusers, int nposts, int nlikes, char *err, size_t errlen);
+
 #endif

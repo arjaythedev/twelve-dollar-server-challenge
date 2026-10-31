@@ -693,12 +693,392 @@ static void maybe_print_plan(char *last, size_t cap) {
     }
 }
 
+/* ------------------------------------------------------------ PGO training
+ * `bin/server --pgo-train` runs once inside build.sh, between the
+ * -fprofile-generate and the -fprofile-use compile. Fully in-process: no
+ * socket, no ring, no seed file. It builds a small database in a new
+ * directory under $TMPDIR (db_pgo_make), opens it with db_open (the plan
+ * must be btree), then hands raw HTTP bytes to on_data() for a few fake
+ * connections exactly as recv completions would, each completion batch
+ * between db_batch_begin()/db_batch_commit() like the main loop, and
+ * verifies extra JWTs directly. The io_uring loop itself is not trained.
+ * The database (and its -wal/-shm) is deleted on success and on failure.
+ * Request mix: the bench/load.js user loop (GET /feed, GET /posts/:id of a
+ * post from that feed, like 15%, create 2%), plus /health and a small share
+ * of malformed, unauthorized, pipelined and split requests. */
+
+#define TR_USERS   2000
+#define TR_POSTS   20000
+#define TR_LIKES   50000
+#define TR_REQS    70000
+#define TR_JWT     30000
+#define TR_CONNS   64
+#define TR_TOKENS  256
+#define TR_NBAD    8
+
+typedef struct {
+    uint64_t rng;
+    int64_t  max_id;                /* newest committed post id (from the 201 bodies) */
+    char    *tok[TR_TOKENS];  size_t toklen[TR_TOKENS];    /* "Bearer <valid jwt>", user i+1 */
+    char    *bad[TR_NBAD];    size_t badlen[TR_NBAD];      /* invalid Authorization values */
+    unsigned long feeds, posts, inserts, likes, parses, jwt, batches;
+    unsigned long st[6];            /* responses by class: 1xx..5xx */
+    unsigned long jwt_wrong;        /* direct verifications with an unexpected result */
+} trainer;
+
+static inline uint32_t tr_rand(trainer *t) {
+    t->rng = t->rng * 6364136223846793005ull + 1442695040888963407ull;
+    return (uint32_t)(t->rng >> 33);
+}
+static inline uint32_t tr_below(trainer *t, uint32_t n) { return tr_rand(t) % n; }
+
+static size_t tr_b64url(const void *src, size_t n, char *out) {
+    static const char a[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    const uint8_t *s = src; size_t o = 0, i = 0;
+    for (; i + 3 <= n; i += 3) {
+        uint32_t v = (uint32_t)s[i] << 16 | (uint32_t)s[i+1] << 8 | s[i+2];
+        out[o++] = a[v >> 18 & 63]; out[o++] = a[v >> 12 & 63]; out[o++] = a[v >> 6 & 63]; out[o++] = a[v & 63];
+    }
+    if (n - i == 1) {
+        uint32_t v = (uint32_t)s[i] << 16;
+        out[o++] = a[v >> 18 & 63]; out[o++] = a[v >> 12 & 63];
+    } else if (n - i == 2) {
+        uint32_t v = (uint32_t)s[i] << 16 | (uint32_t)s[i+1] << 8;
+        out[o++] = a[v >> 18 & 63]; out[o++] = a[v >> 12 & 63]; out[o++] = a[v >> 6 & 63];
+    }
+    return o;
+}
+
+/* "Bearer " + base64url(hdr) "." base64url(pay) "." base64url(HMAC-SHA256),
+ * signed with jwt_key (the server's own key schedule). Heap string. */
+static char *tr_mint(const char *hdr, const char *pay, size_t *len) {
+    char *o = xrealloc(NULL, 7 + 2 * (strlen(hdr) + strlen(pay)) + 64);
+    memcpy(o, "Bearer ", 7);
+    size_t n = 7;
+    n += tr_b64url(hdr, strlen(hdr), o + n);
+    o[n++] = '.';
+    n += tr_b64url(pay, strlen(pay), o + n);
+    uint8_t mac[32];
+    hmac_sha256(&jwt_key, o + 7, n - 7, mac);
+    o[n++] = '.';
+    n += tr_b64url(mac, 32, o + n);
+    o[n] = 0;
+    *len = n;
+    return o;
+}
+
+static char *tr_dup(const char *s, size_t *len) {
+    *len = strlen(s);
+    char *o = xrealloc(NULL, *len + 1);
+    memcpy(o, s, *len + 1);
+    return o;
+}
+
+static void tr_tokens(trainer *t) {
+    static const char hdr[] = "{\"alg\":\"HS256\",\"typ\":\"JWT\"}";
+    static const char *const adj[] = {"golden", "silver", "swift", "quiet", "brave", "cosmic", "lucky", "zesty"};
+    static const char *const noun[] = {"ember", "comet", "nebula", "otter", "falcon", "raven", "willow", "pixel"};
+    long iat = (long)now_unix, exp = iat + 3650L * 86400;
+    char pay[256];
+    for (int i = 0; i < TR_TOKENS; i++) {
+        snprintf(pay, sizeof pay, "{\"sub\":\"%d\",\"username\":\"%s_%s_%d\",\"iat\":%ld,\"exp\":%ld}",
+                 i + 1, adj[i % 8], noun[(i / 8) % 8], i + 1, iat, exp);
+        t->tok[i] = tr_mint(hdr, pay, &t->toklen[i]);
+    }
+    /* 0: bad signature (one signature byte changed) */
+    t->bad[0] = tr_dup(t->tok[0], &t->badlen[0]);
+    char *sg = strrchr(t->bad[0], '.') + 6;
+    *sg = *sg == 'A' ? 'B' : 'A';
+    /* 1: expired */
+    snprintf(pay, sizeof pay, "{\"sub\":\"7\",\"username\":\"lucky_otter_7\",\"iat\":%ld,\"exp\":%ld}", iat - 7200, iat - 3600);
+    t->bad[1] = tr_mint(hdr, pay, &t->badlen[1]);
+    /* 2: alg none */
+    snprintf(pay, sizeof pay, "{\"sub\":\"8\",\"username\":\"brave_raven_8\",\"iat\":%ld,\"exp\":%ld}", iat, exp);
+    t->bad[2] = tr_mint("{\"alg\":\"none\",\"typ\":\"JWT\"}", pay, &t->badlen[2]);
+    /* 3: valid signature, sub not a string (invalid token payload) */
+    snprintf(pay, sizeof pay, "{\"sub\":9,\"username\":\"tiny_pixel_9\",\"iat\":%ld,\"exp\":%ld}", iat, exp);
+    t->bad[3] = tr_mint(hdr, pay, &t->badlen[3]);
+    /* 4-7: malformed */
+    t->bad[4] = tr_dup("Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0", &t->badlen[4]);
+    t->bad[5] = tr_dup("Bearer not-a-jwt", &t->badlen[5]);
+    t->bad[6] = tr_dup("Basic dXNlcjpwYXNzd29yZA==", &t->badlen[6]);
+    t->bad[7] = tr_dup("Bearer a.b.c.d", &t->badlen[7]);
+}
+
+static char *tr_cat(char *p, const char *s) { size_t n = strlen(s); memcpy(p, s, n); return p + n; }
+
+static char *tr_head(trainer *t, char *p) {
+    p = tr_cat(p, "Host: 127.0.0.1:3000\r\n");
+    if (tr_below(t, 10)) p = tr_cat(p, "User-Agent: Grafana k6/1.3.0 (https://k6.io/)\r\n");
+    else p = tr_cat(p, "User-Agent: curl/8.5.0\r\nAccept: */*\r\n");
+    return p;
+}
+
+/* An Authorization header line: mostly valid, 3% invalid, 0.5% absent. */
+static char *tr_auth(trainer *t, char *p) {
+    uint32_t r = tr_below(t, 1000);
+    if (r < 5) return p;
+    p = tr_cat(p, "Authorization: ");
+    if (r < 35) { uint32_t k = tr_below(t, TR_NBAD); memcpy(p, t->bad[k], t->badlen[k]); p += t->badlen[k]; }
+    else { uint32_t k = tr_below(t, TR_TOKENS); memcpy(p, t->tok[k], t->toklen[k]); p += t->toklen[k]; }
+    t->jwt++;
+    return tr_cat(p, "\r\n");
+}
+
+/* A post id the way load.js picks one: from the feed it just read (the 20
+ * newest), else anywhere, else missing or malformed. */
+static char *tr_id(trainer *t, char *p, int allow_bad) {
+    uint32_t r = tr_below(t, 100);
+    int64_t id;
+    if (r < 80) id = t->max_id - (int64_t)tr_below(t, 20);
+    else if (r < 95) id = 1 + (int64_t)tr_below(t, (uint32_t)t->max_id);
+    else if (r < 98 || !allow_bad) id = t->max_id + 1000 + (int64_t)tr_below(t, 100000);
+    else {
+        static const char *const odd[] = {"0", "abc", "12x", "-5", "99999999999999999999"};
+        return tr_cat(p, odd[tr_below(t, 5)]);
+    }
+    if (id < 1) id = 1;
+    return put_u64(p, (uint64_t)id);
+}
+
+/* Write one request into p; returns its end. */
+static char *tr_request(trainer *t, char *p) {
+    uint32_t r = tr_below(t, 10000);
+    char tmp[1024];
+    t->parses++;
+    if (r < 4600) {                                   /* GET /feed */
+        t->feeds++;
+        p = tr_cat(p, "GET /feed HTTP/1.1\r\n");
+        p = tr_head(t, p);
+        return tr_cat(p, "Accept-Encoding: gzip\r\n\r\n");
+    }
+    if (r < 9200) {                                   /* GET /posts/:id */
+        t->posts++;
+        p = tr_cat(p, "GET /posts/");
+        p = tr_id(t, p, 1);
+        p = tr_cat(p, " HTTP/1.1\r\n");
+        p = tr_head(t, p);
+        return tr_cat(p, "Accept-Encoding: gzip\r\n\r\n");
+    }
+    if (r < 9890) {                                   /* POST /posts/:id/like */
+        t->likes++;
+        p = tr_cat(p, "POST /posts/");
+        p = tr_id(t, p, 0);
+        p = tr_cat(p, "/like HTTP/1.1\r\n");
+        p = tr_head(t, p);
+        p = tr_cat(p, "Content-Length: 0\r\n");
+        p = tr_auth(t, p);
+        return tr_cat(p, "Content-Type: application/json\r\nAccept-Encoding: gzip\r\n\r\n");
+    }
+    if (r < 9980) {                                   /* POST /posts */
+        size_t bl;
+        uint32_t k = tr_below(t, 100);
+        if (k < 97) {
+            uint32_t u = tr_below(t, TR_TOKENS);
+            bl = (size_t)snprintf(tmp, sizeof tmp,
+                "{\"body\":\"user_%u says hi at 2026-10-31T12:%02u:%02u.%03uZ (VU %u, iter %u)\"}",
+                u + 1, tr_below(t, 60), tr_below(t, 60), tr_below(t, 1000), u + 1, tr_below(t, 40));
+        } else if (k < 98) {
+            bl = (size_t)snprintf(tmp, sizeof tmp, "%s",
+                "{\"body\":\"  caf\\u00e9 \\\"quoted\\\"\\nline two \\ud83d\\ude00 tab\\t end  \"}");
+        } else {
+            static const char *const badb[] = {"{\"body\":\"   \"}", "{\"text\":\"hi\"}", "{\"body\":\"unterminated",
+                                               "{\"body\":42}", "[\"body\"]"};
+            bl = (size_t)snprintf(tmp, sizeof tmp, "%s", badb[tr_below(t, 5)]);
+        }
+        t->inserts++;
+        p = tr_cat(p, "POST /posts HTTP/1.1\r\n");
+        p = tr_head(t, p);
+        p = tr_cat(p, "Content-Length: ");
+        p = put_u64(p, bl);
+        p = tr_cat(p, "\r\n");
+        p = tr_auth(t, p);
+        p = tr_cat(p, "Content-Type: application/json\r\nAccept-Encoding: gzip\r\n\r\n");
+        memcpy(p, tmp, bl);
+        return p + bl;
+    }
+    if (r < 9990) {                                   /* GET /health */
+        p = tr_cat(p, "GET /health HTTP/1.1\r\n");
+        p = tr_head(t, p);
+        return tr_cat(p, "Accept-Encoding: gzip\r\n\r\n");
+    }
+    switch (tr_below(t, 8)) {                          /* rare shapes */
+    case 0: return tr_cat(p, "GET /nope HTTP/1.1\r\nHost: x\r\n\r\n");
+    case 1: return tr_cat(p, "DELETE /feed HTTP/1.1\r\nHost: x\r\n\r\n");
+    case 2: return tr_cat(p, "POST /posts/5/unlike HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n\r\n");
+    case 3: return tr_cat(p, "GET /feed HTTP/1.0\r\nHost: x\r\nConnection: keep-alive\r\n\r\n");
+    case 4: return tr_cat(p, "GET /feed?x=1 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+    case 5: return tr_cat(p, "GARBAGE\r\n\r\n");
+    case 6: return tr_cat(p, "POST /posts HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n");
+    default: {
+        char big[600];
+        memset(big, 'x', sizeof big);
+        size_t bl = (size_t)snprintf(tmp, sizeof tmp, "{\"body\":\"%.*s\"}", 600, big);
+        t->inserts++;
+        p = tr_cat(p, "POST /posts HTTP/1.1\r\nHost: x\r\nExpect: 100-continue\r\nContent-Length: ");
+        p = put_u64(p, bl);
+        p = tr_cat(p, "\r\n");
+        p = tr_auth(t, p);
+        p = tr_cat(p, "\r\n");
+        memcpy(p, tmp, bl);
+        return p + bl;
+    }
+    }
+}
+
+/* Classify the responses a batch produced (status line + Content-Length),
+ * and track the newest post id from the 201 bodies of POST /posts. */
+static void tr_count(trainer *t, const char *o, size_t n) {
+    const char *p = o, *e = o + n;
+    while (p + 12 <= e && memcmp(p, "HTTP/1.1 ", 9) == 0) {
+        int cls = p[9] - '0';
+        if (cls >= 1 && cls <= 5) t->st[cls]++;
+        const char *he = memmem(p, (size_t)(e - p), "\r\n\r\n", 4);
+        if (!he) break;
+        size_t cl = 0;
+        const char *c = memmem(p, (size_t)(he - p), "Content-Length: ", 16);
+        if (c) for (c += 16; *c >= '0' && *c <= '9'; c++) cl = cl * 10 + (size_t)(*c - '0');
+        const char *b = he + 4;
+        if (memcmp(p + 9, "201", 3) == 0 && cl > 15 && b + cl <= e && memcmp(b, "{\"post\":{\"id\":", 14) == 0) {
+            int64_t id = 0;
+            for (const char *d = b + 14; d < b + cl && *d >= '0' && *d <= '9'; d++) id = id * 10 + (*d - '0');
+            if (id > t->max_id) t->max_id = id;
+        }
+        p = b + cl;
+    }
+    if (p != e) t->st[0]++;                            /* unparseable output */
+}
+
+/* Deliver one request (or a pipelined group, or a request split in two
+ * reads) to a fake connection. */
+static void tr_deliver(trainer *t, char *buf) {
+    uint32_t slot = tr_below(t, TR_CONNS);
+    while (conns[slot].close_after) slot = (slot + 1) % TR_CONNS;
+    char *p = buf;
+    uint32_t shape = tr_below(t, 100);
+    int nreq = shape < 3 ? 2 + (int)tr_below(t, 3) : 1;
+    for (int i = 0; i < nreq; i++) p = tr_request(t, p);
+    size_t n = (size_t)(p - buf);
+    if (shape >= 3 && shape < 6 && n > 1) {           /* split across two reads */
+        size_t cut = 1 + tr_below(t, (uint32_t)(n - 1));
+        on_data(slot, buf, cut);
+        on_data(slot, buf + cut, n - cut);
+    } else {
+        on_data(slot, buf, n);
+    }
+}
+
+static int pgo_train(void) {
+    const char *td = getenv("TMPDIR");
+    if (!td || !*td) td = "/tmp";
+    char dir[2048], path[2100], side[2200];
+    snprintf(dir, sizeof dir, "%s/pgo-train.XXXXXX", td);
+    if (!mkdtemp(dir)) { fprintf(stderr, "pgo-train: mkdtemp %s: %s\n", dir, strerror(errno)); return 1; }
+    snprintf(path, sizeof path, "%s/train.db", dir);
+
+    int ok = 0;
+    char err[512] = {0};
+    static trainer t;
+    memset(&t, 0, sizeof t);
+    t.rng = 0x243f6a8885a308d3ull;
+    struct timespec now;
+
+    if (db_pgo_make(path, TR_USERS, TR_POSTS, TR_LIKES, err, sizeof err)) {
+        fprintf(stderr, "pgo-train: building %s: %s\n", path, err);
+        goto done;
+    }
+    db = db_open(path, err, sizeof err);
+    if (!db) { fprintf(stderr, "pgo-train: db_open %s: %s\n", path, err); goto done; }
+    printf("pgo-train: %s\n", db_plan_line(db));
+    fflush(stdout);
+    if (strcmp(db_plan(db), "btree") != 0) { fprintf(stderr, "pgo-train: plan is not btree\n"); goto done; }
+
+    clock_gettime(CLOCK_MONOTONIC, &t_start);
+    clock_gettime(CLOCK_REALTIME, &now);
+    now_unix = (double)now.tv_sec + now.tv_nsec / 1e9;
+    const char *secret = getenv("JWT_SECRET");
+    if (!secret || !*secret) secret = "pgo-train-secret";
+    jwt_init_tables();
+    hmac_sha256_setkey(&jwt_key, secret, strlen(secret));
+
+    nconns = TR_CONNS;
+    conns = calloc(nconns, sizeof *conns);
+    dirty = calloc(nconns, sizeof *dirty);
+    scratch = malloc(SCRATCH_CAP);
+    bodybuf = malloc(MAX_BODY);
+    if (!conns || !dirty || !scratch || !bodybuf) { fprintf(stderr, "pgo-train: out of memory\n"); goto done; }
+    for (uint32_t i = 0; i < nconns; i++) conns[i].open = 1;
+    tr_tokens(&t);
+    t.max_id = TR_POSTS;
+
+    char *buf = xrealloc(NULL, 64 * 1024);
+    unsigned long fails = 0;
+    while (t.parses < TR_REQS) {
+        clock_gettime(CLOCK_REALTIME, &now);
+        now_unix = (double)now.tv_sec + now.tv_nsec / 1e9;
+        /* Batch sizes: mostly a few completions, sometimes a burst, sometimes none. */
+        uint32_t r = tr_below(&t, 100), n = r < 8 ? 0 : r < 78 ? 1 + tr_below(&t, 4) : 5 + tr_below(&t, 60);
+        db_batch_begin(db);
+        for (uint32_t i = 0; i < n; i++) tr_deliver(&t, buf);
+        if (db_batch_commit(db) != 0) fails++;
+        t.batches++;
+        /* What flush_conn + the send completion would do, minus the ring. */
+        nwspans = 0;
+        for (uint32_t i = 0; i < ndirty; i++) {
+            conn_t *c = &conns[dirty[i]];
+            c->dirty = 0;
+            tr_count(&t, c->out, c->out_len);
+            c->out_len = 0;
+            if (c->close_after) {
+                c->close_after = 0; c->in_len = 0; c->need = 0; c->cont_sent = 0;
+                c->gen = (c->gen + 1) & 0xffffff;
+            }
+        }
+        ndirty = 0;
+        db_maybe_checkpoint(db, 1000);
+    }
+    if (db_health(db) != 0) fails++;
+    db_maybe_checkpoint(db, 0);
+
+    /* Extra HS256 verifications straight through jwt_verify: 90% valid. */
+    for (int i = 0; i < TR_JWT; i++) {
+        int64_t uid; char un[JWT_MAX_USERNAME]; size_t ul;
+        int bad = tr_below(&t, 10) == 0;
+        uint32_t k = bad ? tr_below(&t, TR_NBAD) : tr_below(&t, TR_TOKENS);
+        int rv = bad ? jwt_verify(&jwt_key, t.bad[k], t.badlen[k], now_unix, &uid, un, sizeof un, &ul)
+                     : jwt_verify(&jwt_key, t.tok[k], t.toklen[k], now_unix, &uid, un, sizeof un, &ul);
+        if ((rv == JWT_OK) == bad || (!bad && uid != (int64_t)k + 1)) t.jwt_wrong++;
+        t.jwt++;
+    }
+    free(buf);
+
+    fprintf(stderr, "pgo-train: %lu batches, responses 1xx=%lu 2xx=%lu 3xx=%lu 4xx=%lu 5xx=%lu unparsed=%lu, "
+            "commit/health failures=%lu, wrong jwt results=%lu, final %s\n",
+            t.batches, t.st[1], t.st[2], t.st[3], t.st[4], t.st[5], t.st[0], fails, t.jwt_wrong, db_plan_line(db));
+    if (fails || t.jwt_wrong || t.st[5] || t.st[0] || t.st[2] < t.parses * 9 / 10 ||
+        strcmp(db_plan(db), "btree") != 0) {
+        fprintf(stderr, "pgo-train: training run did not behave as expected\n");
+        goto done;
+    }
+    printf("pgo-train: %lu feeds, %lu posts, %lu inserts, %lu likes, %lu parses, %lu jwt\n",
+           t.feeds, t.posts, t.inserts, t.likes, t.parses, t.jwt);
+    ok = 1;
+done:
+    if (db) { db_close(db); db = NULL; }
+    static const char *const sfx[] = {"", "-wal", "-shm", "-journal"};
+    for (int i = 0; i < 4; i++) { snprintf(side, sizeof side, "%s%s", path, sfx[i]); unlink(side); }
+    if (rmdir(dir) != 0) { fprintf(stderr, "pgo-train: rmdir %s: %s\n", dir, strerror(errno)); ok = 0; }
+    fflush(stdout);
+    return ok ? 0 : 1;
+}
+
 int main(int argc, char **argv) {
     if (argc >= 3 && strcmp(argv[1], "--selfcheck") == 0) {
         int r = db_selfcheck(argv[2], 42);
         fflush(stdout);
         return r == 0 ? 0 : 1;
     }
+    if (argc >= 2 && strcmp(argv[1], "--pgo-train") == 0) return pgo_train();
     const char *path = getenv("SQLITE_PATH"), *secret = getenv("JWT_SECRET");
     const char *host = getenv("HOST"), *port = getenv("PORT");
     if (!path || !*path) { fprintf(stderr, "SQLITE_PATH is required\n"); return 1; }

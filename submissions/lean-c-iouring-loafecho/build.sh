@@ -1,9 +1,21 @@
 #!/usr/bin/env bash
 # build.sh — builds bin/server as a normal user. C only; the Lean 4 spec in
 # spec/ is checked separately with lake (see README.md).
+#
+# PGO=1 (default): profile-guided build in three steps —
+#   1. compile + link instrumented (-fprofile-generate),
+#   2. run `bin/server --pgo-train` (in-process: builds a small DB under
+#      $TMPDIR, serves ~70k raw HTTP requests through the real parser and
+#      handlers, verifies JWTs, deletes the DB) → obj/db.gcda, obj/server.gcda,
+#   3. compile + link again with -fprofile-use.
+# A failure in any step exits non-zero (no silent fallback). PGO=0 builds
+# without a profile. PGO_KEEP_GCDA=1 keeps the .gcda files for inspection.
 set -euo pipefail
 cd "$(dirname "$0")"
 mkdir -p bin obj deps
+PGO="${PGO:-1}"
+tmp=""; tdir=""
+trap 'rm -rf ${tmp:+"$tmp"} ${tdir:+"$tdir"}' EXIT
 
 # SQLite 3.54.1 amalgamation, pinned by SHA-256 (tarball and the two files).
 SQLITE_URL=https://www.sqlite.org/2026/sqlite-autoconf-3540100.tar.gz
@@ -17,7 +29,7 @@ have_sqlite() {
   echo "$SQLITE_H_SHA  deps/sqlite3.h" | sha256sum -c --status
 }
 if ! have_sqlite; then
-  tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+  tmp="$(mktemp -d)"
   echo "build.sh: downloading $SQLITE_URL"
   curl -fsSL --retry 3 -o "$tmp/sqlite.tgz" "$SQLITE_URL"
   echo "$SQLITE_TGZ_SHA  $tmp/sqlite.tgz" | sha256sum -c --quiet
@@ -40,7 +52,37 @@ CC="${CC:-gcc}"
 # Built on the target machine itself, so -march=native is safe.
 CFLAGS="-O3 -flto=auto -march=native -fno-plt -fomit-frame-pointer
   -fno-semantic-interposition -DNDEBUG"
-$CC $CFLAGS -std=gnu11 -w $SQLITE_FLAGS -c src/db.c -o obj/db.o
-$CC $CFLAGS -std=gnu11 -Wall -Wextra -c src/server.c -o obj/server.o
-$CC $CFLAGS -o bin/server obj/server.o obj/db.o -luring -lm -lpthread -ldl
-echo "build.sh: built bin/server"
+# $1: extra flags (word-split). Same -o paths every time, so the .gcda names
+# written in step 2 match the objects of step 3.
+compile() {
+  $CC $CFLAGS $1 -std=gnu11 -w $SQLITE_FLAGS -c src/db.c -o obj/db.o &&
+  $CC $CFLAGS $1 -std=gnu11 -Wall -Wextra -c src/server.c -o obj/server.o &&
+  $CC $CFLAGS $1 -o bin/server obj/server.o obj/db.o -luring -lm -lpthread -ldl
+}
+
+rm -f obj/*.gcda
+if [ "$PGO" = 0 ]; then
+  compile "" || { echo "build.sh: build failed" >&2; exit 1; }
+  echo "build.sh: built bin/server (no pgo)"
+  exit 0
+fi
+
+echo "build.sh: pgo 1/3: instrumented build"
+compile "-fprofile-generate -fprofile-update=single" ||
+  { echo "build.sh: PGO step 1 (instrumented build) failed; not falling back (PGO=0 builds without PGO)" >&2; exit 1; }
+
+echo "build.sh: pgo 2/3: bin/server --pgo-train"
+tdir="$(mktemp -d "${TMPDIR:-/tmp}/pgo-build.XXXXXX")"
+TMPDIR="$tdir" JWT_SECRET=pgo-train-secret ./bin/server --pgo-train ||
+  { echo "build.sh: PGO step 2 (bin/server --pgo-train) failed; not falling back (PGO=0 builds without PGO)" >&2; exit 1; }
+rm -rf "$tdir"; tdir=""
+for f in obj/db.gcda obj/server.gcda; do
+  [ -s "$f" ] || { echo "build.sh: PGO step 2 left no $f; not falling back (PGO=0 builds without PGO)" >&2; exit 1; }
+done
+echo "build.sh: profile: $(cd obj && for f in *.gcda; do printf '%s (%s bytes) ' "$f" "$(wc -c < "$f")"; done)"
+
+echo "build.sh: pgo 3/3: optimized build with the profile"
+compile "-fprofile-use -fprofile-partial-training -Wno-missing-profile" ||
+  { echo "build.sh: PGO step 3 (profile-use build) failed" >&2; exit 1; }
+[ "${PGO_KEEP_GCDA:-0}" = 1 ] || rm -f obj/*.gcda
+echo "build.sh: built bin/server (pgo)"

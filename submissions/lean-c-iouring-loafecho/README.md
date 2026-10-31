@@ -73,5 +73,6 @@ cd spec && lake build && lake env lean Spec/Axioms.lean
   ca-certificates. If those exact versions have left the archive, it installs whatever noble currently ships.
 - `build.sh`: downloads and verifies the amalgamation if `deps/` doesn't already have it, then compiles `src/db.c` and
   `src/server.c` and links `bin/server`. C only.
+- PGO (default; `PGO=0` skips it): `build.sh` builds an instrumented binary, runs `bin/server --pgo-train` (in-process, no network or seed: a small temp DB built from the schema, ~70k raw HTTP requests in the load.js mix through the real parser, handlers and batches, 35k JWT checks; the DB is deleted after), then rebuilds with `-fprofile-use`.
 - `start.sh`: `exec ./bin/server` in the foreground. Env: `SQLITE_PATH`, `JWT_SECRET`, `HOST` (default `0.0.0.0`), `PORT`
   (default `80`).

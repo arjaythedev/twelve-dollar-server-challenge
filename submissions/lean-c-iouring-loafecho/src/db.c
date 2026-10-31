@@ -69,9 +69,11 @@
 #include "../deps/sqlite3.c"
 #pragma GCC diagnostic pop
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include "db.h"
 
 enum { PLAN_BTREE = 0, PLAN_SQL = 1 };
@@ -1046,4 +1048,169 @@ int db_selfcheck(const char *path, unsigned seed) {
   free(a); free(b);
   db_close(d);
   return mism;
+}
+
+/* ------------------------------------------------------------ PGO training */
+/* Used only by `bin/server --pgo-train` (build.sh's PGO step). Never called
+ * while serving. The DDL below is the challenge's schema.sql, embedded so the
+ * training never reads a file. */
+
+static const char pgo_schema[] =
+  "CREATE TABLE users (\n"
+  "  id          INTEGER PRIMARY KEY,\n"
+  "  username    TEXT NOT NULL UNIQUE,\n"
+  "  created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))\n"
+  ");\n"
+  "CREATE TABLE posts (\n"
+  "  id          INTEGER PRIMARY KEY,\n"
+  "  user_id     INTEGER NOT NULL REFERENCES users(id),\n"
+  "  body        TEXT NOT NULL CHECK (length(body) BETWEEN 1 AND 500),\n"
+  "  created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))\n"
+  ");\n"
+  "CREATE TABLE likes (\n"
+  "  user_id     INTEGER NOT NULL REFERENCES users(id),\n"
+  "  post_id     INTEGER NOT NULL REFERENCES posts(id),\n"
+  "  created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),\n"
+  "  PRIMARY KEY (user_id, post_id)\n"
+  ");\n"
+  "CREATE INDEX posts_created_at_id_idx ON posts (created_at DESC, id DESC);\n"
+  "CREATE INDEX posts_user_id_idx       ON posts (user_id);\n"
+  "CREATE INDEX likes_post_id_idx       ON likes (post_id);\n";
+
+static uint32_t pgo_rand(uint64_t *s) {
+  *s = *s * 6364136223846793005ull + 1442695040888963407ull;
+  return (uint32_t)(*s >> 33);
+}
+static double pgo_unit(uint64_t *s) { return pgo_rand(s) / 2147483648.0; }   /* [0, 1) */
+
+/* YYYY-MM-DDTHH:MM:SS.mmmZ */
+static void pgo_ts(char *o, size_t cap, int64_t ms) {
+  time_t t = (time_t)(ms / 1000);
+  struct tm tm;
+  gmtime_r(&t, &tm);
+  snprintf(o, cap, "%04d-%02d-%02dT%02d:%02d:%02d.%03dZ", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+           tm.tm_hour, tm.tm_min, tm.tm_sec, (int)(ms % 1000));
+}
+
+static const char *const pgo_adj[] = {"quiet", "brave", "clever", "sunny", "rusty", "swift", "lazy", "mellow",
+  "sharp", "wild", "cosmic", "tiny", "golden", "silver", "happy", "grumpy", "curious", "lucky", "salty", "zesty"};
+static const char *const pgo_noun[] = {"otter", "falcon", "badger", "comet", "river", "maple", "pixel", "walrus",
+  "ember", "glacier", "lantern", "meadow", "nebula", "orchid", "pebble", "quartz", "raven", "sparrow", "thistle", "willow"};
+
+/* A post body shaped like seed/generate.mjs: an optional opener, 1-3
+ * sentences of 4-14 words, at most 500 characters. */
+static size_t pgo_body(uint64_t *s, char *o) {
+  static const char *const words[] = {"the", "a", "and", "but", "so", "because", "just", "really", "maybe",
+    "server", "database", "request", "latency", "cache", "index", "query", "benchmark", "droplet", "cpu",
+    "memory", "disk", "network", "throughput", "users", "coffee", "deploy", "release", "bug", "feature",
+    "rewrite", "commit", "thinking", "shipping", "debugging", "fast", "slow", "cheap", "simple", "boring",
+    "today", "tonight", "finally", "never", "always", "nginx", "postgres", "linux", "kernel", "socket", "pool"};
+  static const char *const openers[] = {"Hot take:", "TIL", "Unpopular opinion:", "Note to self:", "PSA:",
+    "Okay so", "Update:", "Honestly,", "Reminder:", "Question:"};
+  static const char *const ends[] = {".", ".", ".", "!", "?", "..."};
+  char *p = o;
+  if (pgo_rand(s) % 4 == 0) {
+    const char *w = openers[pgo_rand(s) % 10];
+    size_t l = strlen(w); memcpy(p, w, l); p += l; *p++ = ' ';
+  }
+  int ns = 1 + (int)(pgo_rand(s) % 3);
+  for (int i = 0; i < ns; i++) {
+    if (i) *p++ = ' ';
+    int nw = 4 + (int)(pgo_rand(s) % 11);
+    char *first = p;
+    for (int j = 0; j < nw; j++) {
+      if (j) *p++ = ' ';
+      const char *w = words[pgo_rand(s) % (sizeof words / sizeof words[0])];
+      size_t l = strlen(w); memcpy(p, w, l); p += l;
+    }
+    if (*first >= 'a' && *first <= 'z') *first = (char)(*first - 32);
+    const char *e = ends[pgo_rand(s) % 6];
+    size_t l = strlen(e); memcpy(p, e, l); p += l;
+  }
+  size_t n = (size_t)(p - o);
+  if (n > 500) { memcpy(o + 497, "...", 3); n = 500; }
+  return n;
+}
+
+static int pgo_gcd(int a, int b) { while (b) { int t = a % b; a = b; b = t; } return a; }
+
+int db_pgo_make(const char *path, int nusers, int nposts, int nlikes, char *err, size_t errlen) {
+  sqlite3 *h = NULL;
+  sqlite3_stmt *su = NULL, *sp = NULL, *sl = NULL;
+  uint64_t rng = 0x5eed5eed12345678ull;
+  char ts[40], name[64], body[700];
+  int rc = -1;
+  if (nusers < 1 || nposts < 1 || nlikes < 0) { snprintf(err, errlen, "bad sizes"); return -1; }
+  if (sqlite3_initialize() != SQLITE_OK) { snprintf(err, errlen, "sqlite3_initialize failed"); return -1; }
+  if (sqlite3_open_v2(path, &h, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, NULL) != SQLITE_OK) goto out;
+  /* Like seed/make-seed.sh: no journal while loading, WAL at the end. */
+  if (exec(h, "PRAGMA journal_mode=OFF") || exec(h, "PRAGMA synchronous=OFF") ||
+      exec(h, pgo_schema) || exec(h, "BEGIN")) goto out;
+  if (sqlite3_prepare_v2(h, "INSERT INTO users (id, username, created_at) VALUES (?, ?, ?)", -1, &su, 0) ||
+      sqlite3_prepare_v2(h, "INSERT INTO posts (id, user_id, body, created_at) VALUES (?, ?, ?, ?)", -1, &sp, 0) ||
+      sqlite3_prepare_v2(h, "INSERT INTO likes (user_id, post_id, created_at) VALUES (?, ?, ?)", -1, &sl, 0))
+    goto out;
+
+  const int64_t DAY = 86400000;
+  const int64_t end_ms = 1767225600000LL;              /* 2026-01-01T00:00:00Z */
+  for (int i = 1; i <= nusers; i++) {
+    int nl = snprintf(name, sizeof name, "%s_%s_%d", pgo_adj[pgo_rand(&rng) % 20], pgo_noun[pgo_rand(&rng) % 20], i);
+    pgo_ts(ts, sizeof ts, end_ms - 730 * DAY + (int64_t)(pgo_unit(&rng) * 365 * DAY));
+    sqlite3_bind_int64(su, 1, i);
+    sqlite3_bind_text(su, 2, name, nl, SQLITE_STATIC);
+    sqlite3_bind_text(su, 3, ts, -1, SQLITE_STATIC);
+    if (sqlite3_step(su) != SQLITE_DONE) goto out;
+    sqlite3_reset(su);
+  }
+
+  /* Inv: dense ids 1..nposts, created_at strictly increasing (jitter < step),
+   * authors skewed toward low user ids and always existing. */
+  const int64_t start_ms = end_ms - 365 * DAY, step = 365 * DAY / nposts;
+  int64_t *post_ms = malloc(sizeof(int64_t) * (size_t)nposts);
+  if (!post_ms) { snprintf(err, errlen, "out of memory"); goto out_noerr; }
+  for (int i = 0; i < nposts; i++) {
+    int64_t ms = start_ms + i * step + (int64_t)(pgo_unit(&rng) * (double)step * 0.9);
+    post_ms[i] = ms;
+    pgo_ts(ts, sizeof ts, ms);
+    size_t bl = pgo_body(&rng, body);
+    sqlite3_bind_int64(sp, 1, i + 1);
+    sqlite3_bind_int64(sp, 2, 1 + (int64_t)(nusers * pgo_unit(&rng) * pgo_unit(&rng)));
+    sqlite3_bind_text(sp, 3, body, (int)bl, SQLITE_STATIC);
+    sqlite3_bind_text(sp, 4, ts, -1, SQLITE_STATIC);
+    if (sqlite3_step(sp) != SQLITE_DONE) { free(post_ms); goto out; }
+    sqlite3_reset(sp);
+  }
+
+  /* Likes: about nlikes in all, exponential per post with 1% popular posts at
+   * ~20x the mean; distinct users per post (a stride coprime to nusers). */
+  int stride = 7919 % nusers;
+  if (stride == 0) stride = 1;
+  while (pgo_gcd(stride, nusers) != 1) stride++;
+  double mean = (double)nlikes / nposts;
+  int64_t left = nlikes;
+  for (int i = 0; i < nposts && left > 0; i++) {
+    double m = pgo_rand(&rng) % 100 == 0 ? mean * 20 : mean * 0.81;
+    int64_t k = (int64_t)(-m * log(1.0 - pgo_unit(&rng)) + 0.5);
+    if (k > nusers) k = nusers;
+    if (k > left) k = left;
+    int u0 = (int)(pgo_rand(&rng) % (uint32_t)nusers);
+    for (int64_t j = 0; j < k; j++) {
+      pgo_ts(ts, sizeof ts, post_ms[i] + (int64_t)(pgo_unit(&rng) * 7 * DAY));
+      sqlite3_bind_int64(sl, 1, 1 + (u0 + j * stride) % nusers);
+      sqlite3_bind_int64(sl, 2, i + 1);
+      sqlite3_bind_text(sl, 3, ts, -1, SQLITE_STATIC);
+      if (sqlite3_step(sl) != SQLITE_DONE) { free(post_ms); goto out; }
+      sqlite3_reset(sl);
+    }
+    left -= k;
+  }
+  free(post_ms);
+  if (exec(h, "COMMIT") || exec(h, "ANALYZE") || exec(h, "PRAGMA journal_mode=WAL")) goto out;
+  rc = 0;
+out:
+  if (rc) snprintf(err, errlen, "%s", h ? sqlite3_errmsg(h) : "open failed");
+out_noerr:
+  sqlite3_finalize(su); sqlite3_finalize(sp); sqlite3_finalize(sl);
+  if (h) sqlite3_close(h);
+  return rc;
 }

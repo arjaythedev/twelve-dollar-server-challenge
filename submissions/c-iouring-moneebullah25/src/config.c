@@ -34,6 +34,7 @@ void config_defaults(struct config *c) {
     c->ckpt_frames = 1000;
     c->hold_frames = 8192;
     c->hold_timeout_ms = 500;
+    c->stats_interval_s = 10; /* one line in the journal every 10 s: shed_f, avail_mb, open, accepts */
 }
 
 struct opt {

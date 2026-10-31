@@ -23,6 +23,7 @@ struct db_stats {
     uint64_t hold_ns_max;
     uint64_t hold_timeouts;
     uint64_t feed_fallbacks;
+    uint64_t btree_fallbacks; /* direct reads that handed the request to SQL */
     uint32_t wal_frames;
 };
 
@@ -67,6 +68,11 @@ int db_like(struct db *db, int64_t user_id, int64_t post_id);
 /* The post object as the SPEC lays it out, with escaping. Returns the length or 0 if it does not fit. */
 size_t db_write_post_json(char *out, size_t cap, int64_t id, const char *body, size_t body_len, const char *created_at,
                           size_t created_len, const char *author, size_t author_len, int64_t like_count);
+
+/* Test hook: selects the read path when the direct B-tree reads are
+ * available (1 = B-tree with SQL fallback, 0 = SQL only). Returns the
+ * previous setting; -1 when the B-tree path is not available at all. */
+int db_reads_btree(struct db *db, int on);
 
 /* Warms the page cache with the queries the load will run. */
 void db_warm(struct db *db);

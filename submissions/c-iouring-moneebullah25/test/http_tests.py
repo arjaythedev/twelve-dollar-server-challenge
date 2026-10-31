@@ -653,6 +653,22 @@ def test_churn(srv):
         s.close()
     st, _, _ = request(srv.port, "GET", "/health")
     check(st == 200, "healthy after 300 resets mid-request")
+    # The server shuts the socket down for a "Connection: close" response, and a
+    # client that hangs up at once and reconnects used to get a stale shutdown
+    # on the reused descriptor slot (an EOF on its first request, about 8% of
+    # these cycles). Every one of them must be answered.
+    lost = 0
+    for i in range(1000):
+        s = connect(srv.port)
+        try:
+            s.sendall(build("GET", "/health"))
+            read_response(s)
+            s.sendall(build("GET", "/health", {"Connection": "close"}))
+            read_response(s)
+        except ConnectionError:
+            lost += 1
+        s.close()
+    check(lost == 0, "1000 close-then-reconnect cycles, none loses a request", f"{lost} lost")
 
 
 def test_durability(binary, seed):
@@ -818,6 +834,86 @@ def test_feed_fallback(binary, seed):
         srv_rng.cleanup()
 
 
+def test_shedding(binary, seed):
+    print("-- shedding: Connection: close under forced pressure, idle timeout")
+    # every response closes
+    srv = Server(binary, seed, ["--shed-force", "1"]).start()
+    try:
+        s = connect(srv.port)
+        s.sendall(build("GET", "/health"))
+        st, h, b, _ = read_response(s)
+        check(st == 200 and h.get("connection") == "close", "shed 1.0: response carries Connection: close", str(h))
+        check(is_closed(s, 2.0), "shed 1.0: the server closes after the response")
+        s.close()
+        # HTTP/1.0 keep-alive request: shed wins over the announced keep-alive
+        s = connect(srv.port)
+        s.sendall(b"GET /health HTTP/1.0\r\nConnection: keep-alive\r\n\r\n")
+        st, h, b, _ = read_response(s)
+        check(h.get("connection") == "close", "shed 1.0: HTTP/1.0 keep-alive is answered with close", str(h))
+        check(is_closed(s, 2.0), "shed 1.0: HTTP/1.0 connection closed after the response")
+        s.close()
+        # pipelined pair: the first response closes, the second is never served
+        s = connect(srv.port)
+        s.sendall(build("GET", "/health") + build("GET", "/health"))
+        st, h, b, rest = read_response(s)
+        check(st == 200 and h.get("connection") == "close" and is_closed(s, 2.0),
+              "shed 1.0: pipelined second request is dropped with the close")
+        s.close()
+    finally:
+        srv.cleanup()
+    # half of the responses close, deterministically, keep-alive otherwise intact
+    srv = Server(binary, seed, ["--shed-force", "0.5"]).start()
+    try:
+        closes = 0
+        s = connect(srv.port)
+        for i in range(100):
+            s.sendall(build("GET", "/health"))
+            st, h, b, _ = read_response(s)
+            if h.get("connection") == "close":
+                closes += 1
+                s.close()
+                s = connect(srv.port)
+        s.close()
+        check(48 <= closes <= 52, "shed 0.5: about half of 100 responses close", str(closes))
+        st, h, b = request(srv.port, "GET", "/feed")
+        check(st == 200 and len(json.loads(b)["posts"]) == 20, "shed 0.5: feed still correct")
+    finally:
+        srv.cleanup()
+    # no shedding by default on a quiet machine
+    srv = Server(binary, seed, []).start()
+    try:
+        s = connect(srv.port)
+        closes = 0
+        for i in range(20):
+            s.sendall(build("GET", "/health"))
+            st, h, b, _ = read_response(s)
+            closes += h.get("connection") == "close"
+        s.close()
+        check(closes == 0, "no shedding below the thresholds")
+    finally:
+        srv.cleanup()
+    # idle timeout: a silent keep-alive is closed, an active one is kept
+    srv = Server(binary, seed, ["--idle-timeout-s", "1"]).start()
+    try:
+        idle = connect(srv.port)
+        request(srv.port, "GET", "/health", sock=idle)
+        busy = connect(srv.port)
+        deadline = time.time() + 6
+        closed = False
+        while time.time() < deadline and not closed:
+            request(srv.port, "GET", "/health", sock=busy)
+            time.sleep(0.5)
+            closed = is_closed(idle, 0.1)
+        check(closed, "idle keep-alive closed by the idle timeout")
+        st, h, b = request(srv.port, "GET", "/health", sock=busy)
+        check(st == 200, "active keep-alive survives the idle timeout")
+        busy.close()
+        idle.close()
+        log = srv.logtail(20000)
+    finally:
+        srv.cleanup()
+
+
 def test_review_regressions(srv):
     print("-- regressions from the review")
     A = {"Authorization": "Bearer " + token()}
@@ -961,6 +1057,7 @@ def main():
         srv.cleanup()
     run("durability", test_durability, binary, seed)
     run("slowloris", test_slowloris, binary, seed)
+    run("shedding", test_shedding, binary, seed)
     run("slots", test_slot_exhaustion, binary, seed)
     run("hold", test_write_hold, binary, seed)
     run("feed", test_feed_fallback, binary, seed)

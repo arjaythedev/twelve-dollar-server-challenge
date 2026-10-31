@@ -26,9 +26,15 @@
 #define SMALL_RING         1024 /* tables this small never use multishot accept */
 #define GEN_MASK           0xffffffu
 #define SWEEP_INTERVAL_NS  10000000000LL
+#define IDLE_SWEEP_NS      1000000000LL /* the sweep runs every second when an idle timeout is set */
 #define GUARD_INTERVAL_NS  100000000LL
-#define SHED_PER_TICK      2000
-#define LISTEN_BACKLOG     4096
+/* Closes we initiate (idle shedding, idle timeout) are rate-limited: every
+ * FIN pins about 2.4 KB of socket memory until it is acknowledged, so a mass
+ * close would spike memory exactly when it is short. */
+#define CLOSE_PER_MS   200
+#define CLOSE_BURST    512
+#define SHED_F_ONE     65536u /* shed fraction in 16.16 fixed point */
+#define LISTEN_BACKLOG 4096
 
 /* user_data: type:8 | generation:24 | index:32 */
 enum op {
@@ -84,9 +90,10 @@ struct conn {
     uint16_t partial_len; /* bytes in `partial` */
     char *partial;        /* heap copy of an incomplete request (rare) */
     uint32_t partial_cap;
-    uint8_t sent_100; /* a 100 Continue went out for the current request */
-    uint8_t eof;      /* the peer half-closed; serve what is parked, then close */
-    uint16_t pad;
+    uint8_t sent_100;         /* a 100 Continue went out for the current request */
+    uint8_t eof;              /* the peer half-closed; serve what is parked, then close */
+    uint8_t shutdown_pending; /* a shutdown SQE was issued and its CQE has not been seen */
+    uint8_t close_issued;     /* the slot close (close_direct) was issued */
 };
 
 struct chunk_meta {
@@ -154,9 +161,21 @@ struct net {
     char cg_current_path[256];
     unsigned last_cqes;
 
+    /* shedding: the fraction of responses that carry Connection: close */
+    uint64_t sreclaim_base_kb; /* SReclaimable at startup; growth is pinned socket inodes */
+    uint64_t avail_mb;         /* last reading */
+    double shed_f;             /* smoothed */
+    double shed_f_mem, shed_f_count;
+    uint32_t shed_acc; /* 16.16 accumulator: deterministic, no rand */
+    uint32_t close_tokens;
+    int64_t close_refill_ns;
+    uint32_t closes_this_pass;
+    int64_t last_shed_log_ns;
+
     struct {
         uint64_t accepts, closes, requests, iterations, wakeups, cqes, enobufs, rearms, short_sends, send_errors,
-            bad_requests, too_large, partial_timeouts, shed, accept_errors, mem_pauses, buffers_returned, provide_sqes;
+            bad_requests, too_large, partial_timeouts, shed, accept_errors, mem_pauses, buffers_returned, provide_sqes,
+            shed_closes, idle_closes;
         uint64_t max_open;
         uint64_t iter_ns_max, iters_over_20ms, commit_ns_max, batch_ns_max;
         uint32_t batch_max;
@@ -168,6 +187,8 @@ static void on_signal(int sig) {
     (void)sig;
     stop_requested = 1;
 }
+
+static inline int shed_this(struct net *n);
 
 /* ------------------------------------------------------------------ fifo */
 
@@ -419,8 +440,17 @@ static void release_input(struct net *n, struct conn *c) {
     c->flags &= (uint8_t)~CF_HAS_INPUT;
 }
 
+/* The slot close must not be issued while a shutdown for the same slot is
+ * still outstanding. The kernel always runs IORING_OP_SHUTDOWN on a worker
+ * thread, and a fixed-file slot is looked up when the request runs, not when
+ * it was submitted: if the close ran first, the slot would be free, the next
+ * accept would put a new socket in it, and the late shutdown would hit that
+ * socket (the new client would see an EOF on its first request). So the close
+ * waits for both the receive's final completion and the shutdown's. */
 static void close_direct(struct net *n, uint32_t idx) {
     struct conn *c = conn_at(n, idx);
+    if (c->close_issued || c->shutdown_pending || (c->flags & CF_RECV_ARMED)) return;
+    c->close_issued = 1;
     struct io_uring_sqe *sqe = sqe_get(ring_of(n, c));
     io_uring_prep_close_direct(sqe, c->slot);
     sqe->user_data = ud(OP_CLOSE, c->gen, idx);
@@ -444,6 +474,7 @@ static void conn_close(struct net *n, uint32_t idx) {
         io_uring_prep_shutdown(sqe, (int)c->slot, SHUT_RDWR);
         sqe->flags |= IOSQE_FIXED_FILE;
         sqe->user_data = ud(OP_SHUTDOWN, c->gen, idx);
+        c->shutdown_pending = 1;
     } else {
         close_direct(n, idx);
     }
@@ -480,6 +511,8 @@ static void on_accepted(struct net *n, struct ring *rg, uint32_t slot) {
     c->partial_cap = 0;
     c->sent_100 = 0;
     c->eof = 0;
+    c->shutdown_pending = 0;
+    c->close_issued = 0;
     rg->used++;
     n->open_conns++;
     if (n->open_conns > n->st.max_open) n->st.max_open = n->open_conns;
@@ -643,6 +676,13 @@ static void process_conn(struct net *n, uint32_t idx) {
     } else {
         resp->close_after = !req.keep_alive || c->eof;
         resp->announce_keepalive = !req.version_11 && req.keep_alive && !c->eof;
+        if (!resp->close_after && shed_this(n)) {
+            /* memory or connection pressure: this response says Connection:
+             * close; the user reconnects for its next request */
+            resp->close_after = 1;
+            resp->announce_keepalive = 0;
+            n->st.shed_closes++;
+        }
         n->st.requests++;
         enum app_result r = app_handle(n->app, &req, resp);
         if (r == APP_HELD) {
@@ -804,7 +844,15 @@ static void handle_cqe(struct net *n, struct ring *rg, struct io_uring_cqe *cqe)
     case OP_PROVIDE:
         if (cqe->res < 0) log_msg("provide_buffers ring %u: %s", rg->idx, strerror(-cqe->res));
         break;
-    case OP_SHUTDOWN:
+    case OP_SHUTDOWN: {
+        uint32_t idx = ud_idx(cqe->user_data);
+        struct conn *c = conn_at(n, idx);
+        if (c->gen == ud_gen(cqe->user_data) && c->state == ST_CLOSING) {
+            c->shutdown_pending = 0;
+            close_direct(n, idx); /* waits for the receive's final completion if it is still armed */
+        }
+        break;
+    }
     case OP_SEND100:
     default: break;
     }
@@ -827,17 +875,20 @@ static void reap(struct net *n, struct ring *rg) {
 
 /* ------------------------------------------------------------------ periodic work */
 
-static uint64_t read_meminfo_available_kb(void) {
+/* MemAvailable and SReclaimable, in KiB; UINT64_MAX when unreadable. */
+static void read_meminfo(uint64_t *avail_kb, uint64_t *sreclaim_kb) {
+    *avail_kb = *sreclaim_kb = UINT64_MAX;
     int fd = open("/proc/meminfo", O_RDONLY | O_CLOEXEC);
-    if (fd < 0) return UINT64_MAX;
+    if (fd < 0) return;
     char buf[2048];
     ssize_t r = read(fd, buf, sizeof buf - 1);
     close(fd);
-    if (r <= 0) return UINT64_MAX;
+    if (r <= 0) return;
     buf[r] = 0;
     const char *p = strstr(buf, "MemAvailable:");
-    if (!p) return UINT64_MAX;
-    return strtoull(p + 13, NULL, 10);
+    if (p) *avail_kb = strtoull(p + 13, NULL, 10);
+    p = strstr(buf, "SReclaimable:");
+    if (p) *sreclaim_kb = strtoull(p + 13, NULL, 10);
 }
 
 static uint64_t read_u64_file(const char *path) {
@@ -876,8 +927,16 @@ static void detect_cgroup_limit(struct net *n) {
     log_msg("cgroup memory.max = %llu MB (%s)", (unsigned long long)(lim >> 20), max_path);
 }
 
+/* Memory we can still spend: MemAvailable minus the growth of SReclaimable
+ * since startup (socket inodes and dentries are counted as reclaimable but
+ * are pinned while the socket lives), and the cgroup headroom if smaller. */
 static uint64_t available_mb(struct net *n) {
-    uint64_t kb = read_meminfo_available_kb();
+    uint64_t kb, srec;
+    read_meminfo(&kb, &srec);
+    if (kb != UINT64_MAX && srec != UINT64_MAX && n->sreclaim_base_kb != UINT64_MAX && srec > n->sreclaim_base_kb) {
+        uint64_t pinned = srec - n->sreclaim_base_kb;
+        kb = kb > pinned ? kb - pinned : 0;
+    }
     uint64_t mb = kb == UINT64_MAX ? UINT64_MAX : kb >> 10;
     if (n->cg_limit_bytes) {
         uint64_t cur = read_u64_file(n->cg_current_path);
@@ -889,13 +948,35 @@ static uint64_t available_mb(struct net *n) {
     return mb;
 }
 
+/* One token per close we initiate; CLOSE_PER_MS refill, CLOSE_BURST burst,
+ * and never more than CLOSE_BURST in one pass. */
+static int close_token(struct net *n) {
+    int64_t now = now_ns();
+    int64_t elapsed_ms = (now - n->close_refill_ns) / 1000000;
+    if (elapsed_ms > 0) {
+        uint64_t add = (uint64_t)elapsed_ms * CLOSE_PER_MS;
+        n->close_tokens = add + n->close_tokens > CLOSE_BURST ? CLOSE_BURST : (uint32_t)(add + n->close_tokens);
+        n->close_refill_ns = now;
+    }
+    if (!n->close_tokens || n->closes_this_pass >= CLOSE_BURST) return 0;
+    n->close_tokens--;
+    n->closes_this_pass++;
+    return 1;
+}
+
+static inline int conn_is_idle(const struct conn *c) {
+    return c->state == ST_OPEN && !(c->flags & (CF_HAS_INPUT | CF_SEND_INFLIGHT | CF_HELD | CF_WAIT_OUT));
+}
+
+/* Closes idle keep-alives, round-robin over the table, within the close budget. */
 static void shed_idle(struct net *n) {
     uint32_t closed = 0;
-    for (uint32_t i = 0; i < n->nconns && closed < SHED_PER_TICK; i++) {
+    for (uint32_t i = 0; i < n->nconns; i++) {
         uint32_t idx = n->shed_cursor++;
         if (n->shed_cursor >= n->nconns) n->shed_cursor = 0;
         struct conn *c = conn_at(n, idx);
-        if (c->state == ST_OPEN && !(c->flags & (CF_HAS_INPUT | CF_SEND_INFLIGHT)) && c->last_active + 1 < n->now_s) {
+        if (conn_is_idle(c) && c->last_active + 1 < n->now_s) {
+            if (!close_token(n)) break;
             conn_close(n, idx);
             closed++;
         }
@@ -903,36 +984,93 @@ static void shed_idle(struct net *n) {
     n->st.shed += closed;
 }
 
+/* Decides, once per response, whether it carries Connection: close. The
+ * accumulator makes the fraction exact over any window and needs no rand. */
+static inline int shed_this(struct net *n) {
+    if (n->shed_f <= 0.0) return 0;
+    n->shed_acc += (uint32_t)(n->shed_f * (double)SHED_F_ONE);
+    if (n->shed_acc < SHED_F_ONE) return 0;
+    n->shed_acc -= SHED_F_ONE;
+    return 1;
+}
+
+/* The memory guard, every 100 ms. Two laws set the shed fraction: available
+ * memory between shed_hi and shed_lo, and open connections between 90% of
+ * conn_cap and conn_cap; the larger wins, smoothed over about a second. A
+ * user whose response closed holds no socket during its think time and
+ * reconnects for the next request, so users keep being served while the
+ * socket count, and with it kernel memory, stays flat. Accepting only
+ * pauses at accept_floor, far below, because a paused accept turns memory
+ * pressure into connect latency for everyone. */
 static void memory_guard(struct net *n) {
+    const struct config *cfg = n->cfg;
     uint64_t mb = available_mb(n);
-    if (mb == UINT64_MAX) return;
-    int pause = mb < n->cfg->mem_stop_accept_mb;
-    if (!pause && n->accept_paused && mb < n->cfg->mem_stop_accept_mb + 32) pause = 1; /* hysteresis */
-    if (pause != n->accept_paused) {
-        n->accept_paused = pause;
-        if (pause) n->st.mem_pauses++;
-        log_msg("memory guard: %llu MB available, accept %s", (unsigned long long)mb, pause ? "paused" : "resumed");
-        update_accept(n);
+    n->avail_mb = mb;
+    if (mb != UINT64_MAX) {
+        if (mb >= cfg->shed_hi_mb) {
+            n->shed_f_mem = 0.0;
+        } else if (mb <= cfg->shed_lo_mb || cfg->shed_hi_mb == cfg->shed_lo_mb) {
+            n->shed_f_mem = 1.0;
+        } else {
+            n->shed_f_mem = (double)(cfg->shed_hi_mb - mb) / (double)(cfg->shed_hi_mb - cfg->shed_lo_mb);
+        }
+        int pause = mb < cfg->accept_floor_mb;
+        if (!pause && n->accept_paused && mb < cfg->accept_floor_mb + 32) pause = 1; /* hysteresis */
+        if (pause != n->accept_paused) {
+            n->accept_paused = pause;
+            if (pause) n->st.mem_pauses++;
+            log_msg("memory guard: %llu MB available, accept %s", (unsigned long long)mb, pause ? "paused" : "resumed");
+            update_accept(n);
+        }
+        if (mb <= cfg->shed_lo_mb) shed_idle(n);
     }
-    if (mb < n->cfg->mem_shed_mb) shed_idle(n);
+    uint64_t start = (uint64_t)cfg->conn_cap * 9 / 10;
+    if (n->open_conns <= start) {
+        n->shed_f_count = 0.0;
+    } else if (n->open_conns >= cfg->conn_cap) {
+        n->shed_f_count = 1.0;
+    } else {
+        n->shed_f_count = (double)(n->open_conns - start) / (double)(cfg->conn_cap - start);
+    }
+    double target = n->shed_f_mem > n->shed_f_count ? n->shed_f_mem : n->shed_f_count;
+    if (cfg->shed_force >= 0.0) {
+        n->shed_f = cfg->shed_force;
+    } else {
+        n->shed_f += 0.1 * (target - n->shed_f); /* 100 ms ticks: time constant about 1 s */
+        if (n->shed_f < 0.001) n->shed_f = target > 0.0 ? n->shed_f : 0.0;
+    }
+    int64_t t = now_ns();
+    if (target > 0.0 && t - n->last_shed_log_ns > 5000000000LL) {
+        n->last_shed_log_ns = t;
+        log_msg("memory guard: %llu MB available, open=%u, shedding %.0f%% of responses (mem %.2f, conns %.2f)",
+                (unsigned long long)mb, n->open_conns, n->shed_f * 100.0, n->shed_f_mem, n->shed_f_count);
+    }
 }
 
 /* Closes connections that have left a request incomplete, or a response
  * unread (a peer that stops reading would otherwise pin a send buffer), for
  * longer than the timeout. */
 static void sweep_partials(struct net *n) {
+    uint32_t idle_timeout = n->cfg->idle_timeout_s;
     for (uint32_t i = 0; i < n->nconns; i++) {
         struct conn *c = conn_at(n, i);
-        if (c->state == ST_OPEN && (c->flags & (CF_HAS_INPUT | CF_SEND_INFLIGHT)) &&
-            !(c->flags & (CF_HELD | CF_WAIT_OUT)) && c->last_active + n->cfg->partial_timeout_s < n->now_s) {
+        if (c->state != ST_OPEN) continue;
+        if ((c->flags & (CF_HAS_INPUT | CF_SEND_INFLIGHT)) && !(c->flags & (CF_HELD | CF_WAIT_OUT)) &&
+            c->last_active + n->cfg->partial_timeout_s < n->now_s) {
             n->st.partial_timeouts++;
+            conn_close(n, i);
+        } else if (idle_timeout && conn_is_idle(c) && c->last_active + idle_timeout < n->now_s) {
+            /* a keep-alive nobody uses: the load model never waits this long
+             * between requests, so these are abandoned sockets */
+            if (!close_token(n)) break; /* the rest next second */
+            n->st.idle_closes++;
             conn_close(n, i);
         }
     }
 }
 
 static void print_stats(struct net *n) {
-    static uint64_t last_req, last_cpu_us, last_usr_us;
+    static uint64_t last_req, last_cpu_us, last_usr_us, last_accepts;
     struct rusage ru;
     getrusage(RUSAGE_SELF, &ru);
     uint64_t usr_us = (uint64_t)ru.ru_utime.tv_sec * 1000000 + (uint64_t)ru.ru_utime.tv_usec;
@@ -944,31 +1082,37 @@ static void print_stats(struct net *n) {
     app_get_stats(n->app, &as);
     uint32_t held_now = fifo_len(&n->held);
     log_msg(
-        "stats: open=%u max=%llu req=%llu (+%llu) cpu_us/req=%.1f (usr %.1f sys %.1f, total %.1f) rss=%ld MB avail=%llu MB iters=%llu "
+        "stats: open=%u max=%llu req=%llu (+%llu) cpu_us/req=%.1f (usr %.1f sys %.1f, total %.1f) rss=%ld MB "
+        "avail=%llu MB iters=%llu "
         "wakeups=%llu "
         "cqes=%llu enobufs=%llu rearms=%llu short=%llu senderr=%llu bad=%llu big=%llu shed=%llu "
         "accerr=%llu chunks_free=%u held=%u wal=%u ckpts=%llu ckpt_avg_ms=%.1f ckpt_max_ms=%.1f holds=%llu "
-        "hold_max_ms=%.1f hold_to=%llu fallback=%llu batches=%llu writes=%llu cfail=%llu "
+        "hold_max_ms=%.1f hold_to=%llu fallback=%llu btree_fb=%llu batches=%llu writes=%llu cfail=%llu "
         "feed=%llu post=%llu like=%llu create=%llu health=%llu 2xx=%llu 4xx=%llu 5xx=%llu "
-        "iter_max_ms=%.1f iters_over_20ms=%llu batch_max=%u batch_max_ms=%.1f endbatch_max_ms=%.1f",
+        "iter_max_ms=%.1f iters_over_20ms=%llu batch_max=%u batch_max_ms=%.1f endbatch_max_ms=%.1f "
+        "shed_f=%.2f shed_closes=%llu idle_closes=%llu accepts=%llu (+%llu) avail_mb=%llu",
         n->open_conns, (unsigned long long)n->st.max_open, (unsigned long long)n->st.requests, (unsigned long long)dreq,
         dreq ? (double)dcpu / (double)dreq : 0.0, dreq ? (double)dusr / (double)dreq : 0.0,
-        dreq ? (double)(dcpu - dusr) / (double)dreq : 0.0, n->st.requests ? (double)cpu_us / (double)n->st.requests : 0.0,
-        ru.ru_maxrss / 1024, (unsigned long long)available_mb(n), (unsigned long long)n->st.iterations,
-        (unsigned long long)n->st.wakeups, (unsigned long long)n->st.cqes, (unsigned long long)n->st.enobufs,
-        (unsigned long long)n->st.rearms, (unsigned long long)n->st.short_sends, (unsigned long long)n->st.send_errors,
+        dreq ? (double)(dcpu - dusr) / (double)dreq : 0.0,
+        n->st.requests ? (double)cpu_us / (double)n->st.requests : 0.0, ru.ru_maxrss / 1024,
+        (unsigned long long)available_mb(n), (unsigned long long)n->st.iterations, (unsigned long long)n->st.wakeups,
+        (unsigned long long)n->st.cqes, (unsigned long long)n->st.enobufs, (unsigned long long)n->st.rearms,
+        (unsigned long long)n->st.short_sends, (unsigned long long)n->st.send_errors,
         (unsigned long long)n->st.bad_requests, (unsigned long long)n->st.too_large, (unsigned long long)n->st.shed,
         (unsigned long long)n->st.accept_errors, n->nchunk_free, held_now, ds.wal_frames,
         (unsigned long long)ds.checkpoints,
         ds.checkpoints ? (double)ds.checkpoint_ns_total / (double)ds.checkpoints / 1e6 : 0.0,
         (double)ds.checkpoint_ns_max / 1e6, (unsigned long long)ds.holds, (double)ds.hold_ns_max / 1e6,
         (unsigned long long)ds.hold_timeouts, (unsigned long long)ds.feed_fallbacks,
-        (unsigned long long)as.write_batches, (unsigned long long)as.writes, (unsigned long long)as.commit_failures,
-        (unsigned long long)as.feed, (unsigned long long)as.post_get, (unsigned long long)as.like,
-        (unsigned long long)as.post_create, (unsigned long long)as.health, (unsigned long long)as.status_2xx,
-        (unsigned long long)as.status_4xx, (unsigned long long)as.status_5xx, (double)n->st.iter_ns_max / 1e6,
-        (unsigned long long)n->st.iters_over_20ms, n->st.batch_max, (double)n->st.batch_ns_max / 1e6,
-        (double)n->st.commit_ns_max / 1e6);
+        (unsigned long long)ds.btree_fallbacks, (unsigned long long)as.write_batches, (unsigned long long)as.writes,
+        (unsigned long long)as.commit_failures, (unsigned long long)as.feed, (unsigned long long)as.post_get,
+        (unsigned long long)as.like, (unsigned long long)as.post_create, (unsigned long long)as.health,
+        (unsigned long long)as.status_2xx, (unsigned long long)as.status_4xx, (unsigned long long)as.status_5xx,
+        (double)n->st.iter_ns_max / 1e6, (unsigned long long)n->st.iters_over_20ms, n->st.batch_max,
+        (double)n->st.batch_ns_max / 1e6, (double)n->st.commit_ns_max / 1e6, n->shed_f,
+        (unsigned long long)n->st.shed_closes, (unsigned long long)n->st.idle_closes, (unsigned long long)n->st.accepts,
+        (unsigned long long)(n->st.accepts - last_accepts), (unsigned long long)n->avail_mb);
+    last_accepts = n->st.accepts;
     n->st.iter_ns_max = n->st.batch_ns_max = n->st.commit_ns_max = 0;
     n->st.batch_max = 0;
     last_req = n->st.requests;
@@ -1071,7 +1215,7 @@ static int ring_init(struct net *n, struct ring *rg, uint32_t idx) {
         log_msg("ring %u: out of memory", idx);
         return -1;
     }
-    if (!cfg->no_prefault) memset(rg->bufs, 0, bufs_size);
+    if (cfg->prefault) memset(rg->bufs, 0, bufs_size);
     /* Classic provided buffers: this kernel (Ubuntu 6.8) rejects
      * IORING_REGISTER_PBUF_RING, and one tested path beats two. */
     struct io_uring_sqe *sqe = sqe_get(rg);
@@ -1137,8 +1281,10 @@ static int net_init(struct net *n) {
         n->conns[i].in_bid = NONE16;
         n->conns[i].out_chunk = NONE32;
     }
-    if (!cfg->no_prefault) {
-        /* touch every page now so the first connections do not pay for faults */
+    if (cfg->prefault) {
+        /* touch every page now so the first connections do not pay for faults
+         * (opt-in: untouched pages cost nothing, and on a 2 GB box every
+         * megabyte is about 250 more sockets) */
         memset(n->chunks, 0, chunks_size);
         for (size_t off = 0; off < (size_t)n->nconns * sizeof *n->conns; off += 4096) {
             ((volatile char *)n->conns)[off] = 0;
@@ -1231,6 +1377,14 @@ int net_run(const struct config *cfg, struct app *app, struct db *db) {
     n->listen_fd = -1;
     n->acc_ring = -1;
     n->start_ns = now_ns();
+    n->close_refill_ns = n->start_ns;
+    n->close_tokens = CLOSE_BURST;
+    {
+        uint64_t avail_kb;
+        read_meminfo(&avail_kb, &n->sreclaim_base_kb);
+        n->avail_mb = avail_kb == UINT64_MAX ? UINT64_MAX : avail_kb >> 10;
+    }
+    if (cfg->shed_force >= 0.0) n->shed_f = cfg->shed_force;
     signal(SIGPIPE, SIG_IGN);
     struct sigaction sa = {.sa_handler = on_signal};
     sigaction(SIGINT, &sa, NULL);
@@ -1242,7 +1396,8 @@ int net_run(const struct config *cfg, struct app *app, struct db *db) {
     }
     log_msg("listening on %s:%d", cfg->host, cfg->port);
     n->next_guard_ns = n->start_ns + GUARD_INTERVAL_NS;
-    n->next_sweep_ns = n->start_ns + SWEEP_INTERVAL_NS;
+    const int64_t sweep_ns = cfg->idle_timeout_s ? IDLE_SWEEP_NS : SWEEP_INTERVAL_NS;
+    n->next_sweep_ns = n->start_ns + sweep_ns;
     n->next_stats_ns = cfg->stats_interval_s ? n->start_ns + (int64_t)cfg->stats_interval_s * 1000000000 : INT64_MAX;
     int64_t exit_at = cfg->exit_after_s ? n->start_ns + (int64_t)cfg->exit_after_s * 1000000000 : INT64_MAX;
     struct ring *r0 = &n->rings[0];
@@ -1255,8 +1410,9 @@ int net_run(const struct config *cfg, struct app *app, struct db *db) {
             n->next_guard_ns = t + GUARD_INTERVAL_NS;
             memory_guard(n);
         }
+        n->closes_this_pass = 0;
         if (t >= n->next_sweep_ns) {
-            n->next_sweep_ns = t + SWEEP_INTERVAL_NS;
+            n->next_sweep_ns = t + sweep_ns;
             sweep_partials(n);
         }
         if (t >= n->next_stats_ns) {

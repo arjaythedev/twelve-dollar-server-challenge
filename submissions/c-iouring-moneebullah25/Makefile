@@ -21,6 +21,9 @@ SQLITE_DIR := $(TP)/sqlite-amalgamation-$(SQLITE_VER)
 URING_DIR  := $(TP)/liburing-liburing-2.15
 URING_LIB  := $(URING_DIR)/src/liburing.a
 SQLITE_SRC := $(SQLITE_DIR)/sqlite3.c
+# The server's SQLite object is src/db_btree.c, which includes the amalgamation
+# so the direct B-tree reads can use its private cursor API.
+BTREE_SRC  := src/db_btree.c
 
 SRCS := src/main.c src/config.c src/net.c src/app.c src/db.c src/http.c src/json.c src/jwt.c src/crypto.c
 TOOL_SRCS := src/http.c src/json.c src/jwt.c src/crypto.c
@@ -44,7 +47,7 @@ OPT   := -O3 -march=native -fno-plt
 LTO   := -flto=auto -fuse-linker-plugin
 PROF  := build/prof
 
-.PHONY: all release plain pgo debug asan ubsan check fuzz tools format lint clean deps
+.PHONY: all release plain pgo debug asan ubsan check fuzz tools dbdiff format lint clean deps
 
 all: release
 
@@ -61,7 +64,7 @@ build:
 release: plain
 
 plain: deps build
-	$(CC) $(STD) $(OPT) $(LTO) $(SQLITE_DEFS) -w -c $(SQLITE_SRC) -o build/sqlite3.o
+	$(CC) $(STD) $(OPT) $(LTO) $(SQLITE_DEFS) $(WARN) $(INC) -c $(BTREE_SRC) -o build/sqlite3.o
 	$(CC) $(STD) $(OPT) $(LTO) $(WARN) $(INC) $(SRCS) build/sqlite3.o $(URING_LIB) $(LIBS) -o bin/server
 
 # ---------------------------------------------------------------- PGO release
@@ -75,12 +78,12 @@ pgo: deps build tools
 	GEN="-fprofile-generate -fprofile-dir=$(PROF) -fprofile-update=atomic"; \
 	USE="-fprofile-use -fprofile-dir=$(PROF) -fprofile-correction -Wno-missing-profile"; \
 	echo "pgo: instrumented build"; \
-	$(CC) $(STD) $(OPT) $(SQLITE_DEFS) $$GEN -w -c $(SQLITE_SRC) -o build/sqlite3_pgo.o; \
+	$(CC) $(STD) $(OPT) $(SQLITE_DEFS) $(WARN) $(INC) $$GEN -c $(BTREE_SRC) -o build/sqlite3_pgo.o; \
 	$(CC) $(STD) $(OPT) $(WARN) $(INC) $$GEN $(SRCS) build/sqlite3_pgo.o $(URING_LIB) $(LIBS) -o build/server_pgo; \
 	echo "pgo: training run"; \
 	if ./pgo/train.sh build/server_pgo; then \
 	  echo "pgo: optimized build"; \
-	  $(CC) $(STD) $(OPT) $(LTO) $(SQLITE_DEFS) $$USE -w -c $(SQLITE_SRC) -o build/sqlite3.o; \
+	  $(CC) $(STD) $(OPT) $(LTO) $(SQLITE_DEFS) $(WARN) $(INC) $$USE -c $(BTREE_SRC) -o build/sqlite3.o; \
 	  $(CC) $(STD) $(OPT) $(LTO) $(WARN) $(INC) $$USE $(SRCS) build/sqlite3.o $(URING_LIB) $(LIBS) -o bin/server; \
 	else \
 	  echo "pgo: training failed, building without a profile"; \
@@ -90,15 +93,15 @@ pgo: deps build tools
 # ---------------------------------------------------------------- debug / sanitizers
 
 debug: deps build
-	$(CC) $(STD) -O0 -g $(SQLITE_DEFS) -DSQLITE_DEBUG -w -c $(SQLITE_SRC) -o build/sqlite3_dbg.o
+	$(CC) $(STD) -O0 -g $(SQLITE_DEFS) -DSQLITE_DEBUG $(WARN) $(INC) -c $(BTREE_SRC) -o build/sqlite3_dbg.o
 	$(CC) $(STD) -O0 -g $(WARN) $(INC) $(SRCS) build/sqlite3_dbg.o $(URING_LIB) $(LIBS) -o bin/server-debug
 
 asan: deps build
-	$(CC) $(STD) -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer $(SQLITE_DEFS) -w -c $(SQLITE_SRC) -o build/sqlite3_asan.o
+	$(CC) $(STD) -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer $(SQLITE_DEFS) $(WARN) $(INC) -c $(BTREE_SRC) -o build/sqlite3_asan.o
 	$(CC) $(STD) -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer $(WARN) $(INC) $(SRCS) build/sqlite3_asan.o $(URING_LIB) $(LIBS) -o bin/server-asan
 
 ubsan: deps build
-	$(CC) $(STD) -O1 -g -fsanitize=undefined -fno-omit-frame-pointer $(SQLITE_DEFS) -w -c $(SQLITE_SRC) -o build/sqlite3_ubsan.o
+	$(CC) $(STD) -O1 -g -fsanitize=undefined -fno-omit-frame-pointer $(SQLITE_DEFS) $(WARN) $(INC) -c $(BTREE_SRC) -o build/sqlite3_ubsan.o
 	$(CC) $(STD) -O1 -g -fsanitize=undefined -fno-omit-frame-pointer $(WARN) $(INC) $(SRCS) build/sqlite3_ubsan.o $(URING_LIB) $(LIBS) -o bin/server-ubsan
 
 # ---------------------------------------------------------------- tests and tools
@@ -115,6 +118,10 @@ tools: deps build
 	$(CC) $(STD) -O2 $(WARN) -Isrc tools/mload.c src/jwt.c src/crypto.c src/json.c $(LIBS) -o bin/mload
 	$(CC) $(STD) -O2 $(SQLITE_DEFS) -w -c $(SQLITE_SRC) -o build/sqlite3_tools.o
 	$(CC) $(STD) -O2 $(WARN) $(INC) tools/synthdb.c src/jwt.c src/crypto.c src/json.c build/sqlite3_tools.o $(LIBS) -o bin/synthdb
+
+# the differential test / microbenchmark for the direct reads (needs `make plain` first)
+dbdiff: build
+	$(CC) $(STD) -O2 $(WARN) $(INC) tools/dbdiff.c src/db.c src/json.c src/config.c build/sqlite3.o $(LIBS) -o bin/dbdiff
 
 format:
 	clang-format -i src/*.c src/*.h test/*.c tools/*.c

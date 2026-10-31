@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Language** | [DexLang](https://github.com/ensamuel7/dex) `v0.9.24`: statically typed, compiles to C, which `cc` builds into a native binary |
+| **Language** | [DexLang](https://github.com/ensamuel7/dex) `v0.9.25`: statically typed, compiles to C, which `cc` builds into a native binary |
 | **Framework** | None. DexLang's own `http` and `db` standard library modules |
 | **Server** | The `http` module's io_uring backend (`http.uring()`), with handlers run on the ring's thread |
 | **SQL** | Built with [dexqu](https://github.com/ensamuel7/dex-modules/tree/main/dexqu) `v0.1.0` at startup, prepared once |
@@ -135,16 +135,26 @@ folder:
   re-parsed on every use.
 - A heap overflow in response building when a handler passed a content type
   longer than about 400 bytes, found while replacing its `snprintf`.
+- `req.headers` built the first time a handler uses it, not for every request.
+  The map owns a copy of the header lines, so one kept past its request is
+  still valid, and it reads the same as parsing up front: the HTTP transcript
+  tests' new cases were recorded with the previous runtime and reproduce byte
+  for byte. Here only the like and post handlers read a header, so the feed
+  and single-post requests no longer build the strings.
+- A data race between the thread pool and the idle sweep over a connection's
+  state, found with ThreadSanitizer, and a macOS kqueue bug (filter deletes
+  dropped after a failed one) that left connections reported twice per wait
+  and freed under the event loop. Neither path runs on the benchmark box.
 
 ## Files
 
 ```
 server.dx    routes, handlers, auth, response building
 queries.dx   the six SQL statements, built with dexqu
-dex.mod      module file: dex 0.9.24, dexqu v0.1.0 (pinned in dex.sum)
+dex.mod      module file: dex 0.9.25, dexqu v0.1.0 (pinned in dex.sum)
 install.sh   root, once: build-essential, git, pkg-config, libsqlite3-dev,
              libssl-dev, libcurl, and Go 1.27.2 (sha256-checked)
-build.sh     builds the dex compiler from the pinned v0.9.24 tag through the Go
+build.sh     builds the dex compiler from the pinned v0.9.25 tag through the Go
              module proxy (checksum-verified), fetches dexqu and the SQLite
              3.54.1 amalgamation (sha256-checked), compiles server.dx
 start.sh     raises the soft open-file limit to the hard one and runs the server

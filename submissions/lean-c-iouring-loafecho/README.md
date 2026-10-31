@@ -48,7 +48,10 @@ cd spec && lake build && lake env lean Spec/Axioms.lean
   fixed-file table, so there is no fd per connection and no per-request file lookup. Every k6 user holds one connection,
   so the table is sized from the hard `RLIMIT_NOFILE`, up to the kernel's maximum of 1,048,576 slots. Each connection has
   one multishot recv, re-armed only when the kernel ends it. Data lands in a shared ring of 4096 × 2 KB buffers
-  instead of a buffer per connection, so ~15,000 idle keep-alive connections cost almost no memory. Ubuntu's 6.8 kernel
+  instead of a buffer per connection. Memory per idle keep-alive connection, measured as the service cgroup's
+  `memory.current` growth at 20,000 held connections after one GET /feed each: 1.64 KB, of which 1.53 KB is the
+  kernel's own per-socket objects (socket inode, file, dentry, the armed recv request) and 0.11 KB is the
+  connection's slot in user space; nothing else is held while idle (see "Hand-rolled HTTP and JSON" below). Ubuntu's 6.8 kernel
   rejects a normal buffer-ring registration with EINVAL (Launchpad #2162843; the reserved-field check is inverted).
   The server retries once with the reserved field set, and if that also fails it falls back to a 2 KB buffer per
   connection and plain recv. The log says which path it took. Idle connections are never timed out.

@@ -46,8 +46,6 @@ authorize <- function(request, response, secret = Sys.getenv("JWT_SECRET")) {
     # extract the payload
     payload <- substr(auth_header, 8, nchar(auth_header))
 
-    # get the claim. We reject every alg except HS256 (per SPEC.md) before
-    # verifying, since we would otherwise accept HS384 and HS512 too.
     claim <- rlang::try_fetch(
         {
             header <- strsplit(payload, ".", fixed = TRUE)[[1]][1]

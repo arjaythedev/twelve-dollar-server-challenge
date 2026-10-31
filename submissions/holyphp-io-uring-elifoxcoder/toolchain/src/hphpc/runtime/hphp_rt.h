@@ -11,6 +11,7 @@
 #include <stddef.h>
 #include <setjmp.h>
 #include <stdarg.h>
+#include <string.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -22,8 +23,25 @@ typedef struct {
     size_t len, cap;
 } Buf;
 void hbuf_init(Buf *b);
-void hbuf_putc(Buf *b, char c);
-void hbuf_write(Buf *b, const char *s, size_t n);
+void hbuf_reserve(Buf *b, size_t n);
+void hbuf_grow_slow(Buf *b, size_t need);
+
+/* Inline fast path: every response byte goes through these, and a call plus a
+ * capacity check per byte is measurable. */
+static inline void hbuf_need(Buf *b, size_t n) {
+    if (b->len + n + 1 > b->cap) hbuf_grow_slow(b, n);
+}
+static inline void hbuf_putc(Buf *b, char c) {
+    hbuf_need(b, 1);
+    b->data[b->len++] = c;
+    b->data[b->len] = 0;
+}
+static inline void hbuf_write(Buf *b, const char *s, size_t n) {
+    hbuf_need(b, n);
+    memcpy(b->data + b->len, s, n);
+    b->len += n;
+    b->data[b->len] = 0;
+}
 void hbuf_puts(Buf *b, const char *s);
 void hbuf_printf(Buf *b, const char *fmt, ...);
 char *hbuf_take(Buf *b); /* NUL-terminated, transfers ownership */
@@ -115,13 +133,38 @@ struct hval {
     } u;
 };
 
-hval hp_of_int(int64_t i);
 hval hp_of_float(double f);
-hval hp_of_bool(bool b);
-hval hp_of_str(hstr *s);
 hval hp_of_arr(harr *a);
 hval hp_of_ptr(void *p);
 hval hp_of_clo(hclosure *c);
+
+/* The hot boxing/unboxing paths are inline: every builtin call and every
+ * array index goes through them, and a function call there shows up in the
+ * profile. The slow cases live in hphp_rt.c. */
+static inline hval hp_of_int(int64_t i) {
+    hval v;
+    v.tag = HV_INT;
+    v.u.i = i;
+    return v;
+}
+static inline hval hp_of_bool(bool b) {
+    hval v;
+    v.tag = HV_BOOL;
+    v.u.i = 0;      /* the whole union, so no uninitialised bytes travel */
+    v.u.b = b;
+    return v;
+}
+static inline hval hp_of_str(hstr *s) {
+    hval v;
+    v.tag = HV_STR;
+    v.u.s = s;
+    return v;
+}
+int64_t hp_val_to_int_slow(hval v);
+static inline int64_t hp_val_to_int(hval v) {
+    if (v.tag == HV_INT) return v.u.i;
+    return hp_val_to_int_slow(v);
+}
 static inline hval hp_hv_id(hval v) { return v; }
 #define hv(x) _Generic((x), \
     hval: hp_hv_id, \
@@ -229,6 +272,7 @@ hval hp_divv(hval a, hval b);
 bool hp_streq(hval a, hval b);
 bool hp_ident_eq(hval a, hval b);
 hval hpbi_stream_socket_accept2(hval srv, hval timeout_ms);
+hval hpbi_accept_emfile(void);
 bool hp_lt(hval a, hval b);
 bool hp_gt(hval a, hval b);
 bool hp_le(hval a, hval b);
@@ -338,6 +382,8 @@ hval hpbi_substr(hval s, hval start, hval len);
 hval hpbi_strstr(hval h, hval n);
 hval hpbi_strchr(hval h, hval n);
 hval hpbi_strpos(hval h, hval n, hval off);
+hval hpbi_str_at_eq(hval s, hval start, hval len, hval lit);
+hval hpbi_str_to_int(hval s);
 hval hpbi_str_contains(hval h, hval n);
 hval hpbi_str_starts_with(hval h, hval n);
 hval hpbi_str_ends_with(hval h, hval n);
@@ -401,10 +447,16 @@ hval hpbi_stream_set_blocking(hval s, hval block);
 hval hpbi_stream_set_nodelay(hval s);
 hval hpbi_stream_recv(hval s, hval max);
 hval hpbi_stream_send(hval s, hval data);
+hval hpbi_stream_send2(hval s, hval a, hval b);
+hval hpbi_stream_send_nb(hval s, hval data);
+hval hpbi_stream_send2_nb(hval s, hval a, hval b);
+hval hpbi_nofile_limit(void);
 hval hpbi_stream_ready(hval handles, hval timeout_ms);
 hval hpbi_stream_ready_into(hval out, hval handles, hval timeout_ms);
 hval hpbi_epoll_add(hval s);
 hval hpbi_epoll_del(hval s);
+hval hpbi_epoll_mod(hval s, hval mask);
+hval hpbi_epoll_wait2(hval in, hval out, hval timeout_ms);
 hval hpbi_epoll_wait_into(hval out, hval timeout_ms);
 hval hpbi_stream_eof(hval s);
 hval hpbi_stream_peer(hval s);
@@ -970,6 +1022,30 @@ hval hpbi_live_bytes(void);
 hval hpbi_live_allocs(void);
 hval hpbi_arr_clear(hval a);
 hval hpbi_arr_free(hval a);
+hval hpbi_bt_root(hval db, hval name, hval is_index);
+hval hpbi_bt_open(hval db, hval name, hval is_index);
+hval hpbi_bt_close(hval h);
+hval hpbi_bt_first(hval h);
+hval hpbi_bt_last(hval h);
+hval hpbi_bt_next(hval h);
+hval hpbi_bt_prev(hval h);
+hval hpbi_bt_seek(hval h, hval rowid);
+hval hpbi_bt_rowid(hval h);
+hval hpbi_bt_payload_ptr(hval h);
+hval hpbi_bt_payload_size(hval h);
+hval hpbi_bt_count_key(hval h, hval key);
+hval hpbi_sb_new(void);
+hval hpbi_sb_put(hval h, hval str);
+hval hpbi_sb_bytes(hval h, hval ptr, hval len);
+hval hpbi_sb_int(hval h, hval n);
+hval hpbi_sb_json(hval h, hval ptr, hval len);
+hval hpbi_sb_json_str(hval h, hval str);
+hval hpbi_str_from_bytes(hval ptr, hval len);
+hval hpbi_sb_reserve(hval h, hval n);
+hval hpbi_sb_take(hval h);
+hval hpbi_iarr_new(hval size);
+hval hpbi_iarr_get(hval h, hval i);
+hval hpbi_iarr_set(hval h, hval i, hval v);
 hval hpbi_sqlite_open(hval path);
 hval hpbi_sqlite_close(hval db);
 hval hpbi_sqlite_exec(hval db, hval sql);
@@ -986,6 +1062,47 @@ hval hpbi_sqlite_changes(hval db);
 hval hpbi_sqlite_last_insert_rowid(hval db);
 hval hpbi_sqlite_errmsg(hval db);
 hval hpbi_sqlite_busy_timeout(hval db, hval ms);
+
+/* ---- typed builtin fast paths (see hphp_std.c) ---- */
+int64_t hp_sb_new_t(void);
+bool hp_sb_reserve_t(int64_t h, int64_t n);
+bool hp_sb_put_t(int64_t h, hstr *s);
+bool hp_sb_int_t(int64_t h, int64_t n);
+bool hp_sb_json_t(int64_t h, int64_t ptr, int64_t len);
+bool hp_sb_json_str_t(int64_t h, hstr *s);
+hstr *hp_sb_take_t(int64_t h);
+int64_t hp_iarr_new_t(int64_t n);
+int64_t hp_iarr_get_t(int64_t h, int64_t k);
+bool hp_iarr_set_t(int64_t h, int64_t k, int64_t v);
+int64_t hp_bt_last_t(int64_t h);
+int64_t hp_bt_first_t(int64_t h);
+int64_t hp_bt_prev_t(int64_t h);
+int64_t hp_bt_next_t(int64_t h);
+int64_t hp_bt_seek_t(int64_t h, int64_t rowid);
+int64_t hp_bt_rowid_t(int64_t h);
+int64_t hp_bt_payload_ptr_t(int64_t h);
+int64_t hp_bt_payload_size_t(int64_t h);
+int64_t hp_stream_send_nb_t(int64_t fd, hstr *s);
+int64_t hp_stream_send2_nb_t(int64_t fd, hstr *a, hstr *b);
+bool hp_epoll_mod_t(int64_t fd, int64_t mask);
+int64_t hp_nofile_limit_t(void);
+bool hp_uring_active_t(void);
+int64_t hp_strlen_t(hstr *s);
+int64_t hp_str_to_int_t(hstr *s);
+bool hp_str_at_eq_t(hstr *s, int64_t start, int64_t len, hstr *lit);
+hstr *hp_strtolower_t(hstr *s);
+hstr *hp_trim_t(hstr *s);
+hstr *hp_substr_t(hstr *s, int64_t start, int64_t len);
+hstr *hp_stream_recv_t(int64_t fd, int64_t maxn);
+bool hp_sqlite_bind_int_t(int64_t stmt, int64_t idx, int64_t v);
+bool hp_sqlite_bind_text_t(int64_t stmt, int64_t idx, hstr *s);
+int64_t hp_sqlite_step_t(int64_t stmt);
+int64_t hp_sqlite_reset_t(int64_t stmt);
+bool hp_sqlite_clear_bindings_t(int64_t stmt);
+hstr *hp_sqlite_column_text_t(int64_t stmt, int64_t col);
+int64_t hp_sqlite_column_int_t(int64_t stmt, int64_t col);
+int64_t hp_sqlite_changes_t(int64_t db);
+
 
 #ifdef __cplusplus
 }

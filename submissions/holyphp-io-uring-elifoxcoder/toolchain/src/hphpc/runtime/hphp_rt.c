@@ -61,7 +61,7 @@ void hp_echo(hval v) {
 /* ---------------- string builder ---------------- */
 void hbuf_init(Buf *b) { b->data = NULL; b->len = b->cap = 0; }
 
-static void hbuf_grow(Buf *b, size_t need) {
+static void hbuf_grow_impl(Buf *b, size_t need) {
     if (b->len + need + 1 <= b->cap) return;
     size_t ncap = b->cap ? b->cap : 64;
     while (ncap < b->len + need + 1) ncap *= 2;
@@ -70,14 +70,8 @@ static void hbuf_grow(Buf *b, size_t need) {
     b->cap = ncap;
 }
 
-void hbuf_putc(Buf *b, char c) { hbuf_grow(b, 1); b->data[b->len++] = c; b->data[b->len] = 0; }
-
-void hbuf_write(Buf *b, const char *s, size_t n) {
-    hbuf_grow(b, n);
-    memcpy(b->data + b->len, s, n);
-    b->len += n;
-    b->data[b->len] = 0;
-}
+void hbuf_grow_slow(Buf *b, size_t need) { hbuf_grow_impl(b, need); }
+void hbuf_reserve(Buf *b, size_t n) { hbuf_grow_impl(b, n); }
 
 void hbuf_puts(Buf *b, const char *s) { hbuf_write(b, s, strlen(s)); }
 
@@ -89,7 +83,7 @@ void hbuf_printf(Buf *b, const char *fmt, ...) {
     int n = vsnprintf(NULL, 0, fmt, ap);
     va_end(ap);
     if (n > 0) {
-        hbuf_grow(b, (size_t)n);
+        hbuf_need(b, (size_t)n);
         vsnprintf(b->data + b->len, (size_t)n + 1, fmt, ap2);
         b->len += (size_t)n;
     }
@@ -111,23 +105,67 @@ char *hbuf_take(Buf *b) {
  * when the cycle ends, instead of leaking one allocation per builtin call.
  * Values that must survive the cycle are copied out with hp_str_persist().
  * Outside a scope nothing changes: allocations are plain heap blocks. */
-typedef struct hp_arena_blk { struct hp_arena_blk *next; } hp_arena_blk;
-static _Thread_local hp_arena_blk *g_arena_head = NULL;
+typedef struct hp_arena_blk { struct hp_arena_blk *next; size_t size; } hp_arena_blk;
+/* Bump arena for the request scope. Blocks are allocated once and reused for
+ * every following scope: a request carves ~20 strings out of one block, and
+ * hp_scope_end() only rewinds the bump pointer. */
+static _Thread_local hp_arena_blk *g_ablocks = NULL;   /* in allocation order */
+static _Thread_local hp_arena_blk *g_acur_blk = NULL;
+static _Thread_local char *g_acur = NULL;
+static _Thread_local size_t g_aleft = 0;
 static _Thread_local int g_scope_depth = 0;
+
+#define HP_ARENA_BLOCK (256u * 1024u)
+
+static void hp_arena_reset(void) {
+    g_acur_blk = g_ablocks;
+    if (g_acur_blk) {
+        g_acur = (char *)(g_acur_blk + 1);
+        g_aleft = g_acur_blk->size;
+    } else {
+        g_acur = NULL;
+        g_aleft = 0;
+    }
+}
 
 void hp_scope_begin(void) { g_scope_depth++; }
 
 void hp_scope_end(void) {
     if (g_scope_depth == 0) return;
     if (--g_scope_depth > 0) return;
-    hp_arena_blk *b = g_arena_head;
-    while (b) {
-        hp_arena_blk *n = b->next;
-        free(b);
-        g_live_allocs--;
-        b = n;
+    hp_arena_reset();
+}
+
+static void *hp_arena_alloc(size_t n) {
+    n = (n + 15u) & ~(size_t)15u;
+    if (n > g_aleft) {
+        hp_arena_blk *b = g_acur_blk ? g_acur_blk->next : g_ablocks;
+        while (b && b->size < n) b = b->next;
+        if (!b) {
+            size_t need = n > HP_ARENA_BLOCK ? n : HP_ARENA_BLOCK;
+            b = (hp_arena_blk *)malloc(sizeof(hp_arena_blk) + need);
+            if (!b) {
+                fprintf(stderr, "Fatal error: Allowed memory size exhausted\n");
+                exit(255);
+            }
+            b->size = need;
+            if (g_acur_blk) {
+                b->next = g_acur_blk->next;
+                g_acur_blk->next = b;
+            } else {
+                b->next = g_ablocks;
+                g_ablocks = b;
+            }
+            g_live_allocs++;
+        }
+        g_acur_blk = b;
+        g_acur = (char *)(b + 1);
+        g_aleft = b->size;
     }
-    g_arena_head = NULL;
+    void *p = g_acur;
+    g_acur += n;
+    g_aleft -= n;
+    return p;
 }
 
 /* Always heap, never scoped: for interned literals and the shared empty
@@ -145,19 +183,24 @@ static hstr *hp_str_heap_new(const char *bytes, size_t len) {
     return s;
 }
 
+/* Single characters are shared, immortal strings. Loops such as base64url(),
+ * cp_len(), parse_id() and the JSON scanner index a string hundreds of times
+ * per request and must not allocate a fresh one-character string each time. */
+static _Thread_local hstr *g_chars[256];
+static hstr *hp_char_str(unsigned char c) {
+    if (!g_chars[c]) {
+        g_chars[c] = hp_str_heap_new((const char *)&c, 1);
+        g_chars[c]->flags = HP_F_STATIC;
+        g_chars[c]->rc = 0;
+    }
+    return g_chars[c];
+}
+
 /* Scoped when a scope is active, heap otherwise. */
 static hstr *hp_str_alloc(size_t len, size_t cap) {
     hstr *s;
     if (g_scope_depth > 0) {
-        hp_arena_blk *b = (hp_arena_blk *)malloc(sizeof(hp_arena_blk) + sizeof(hstr) + cap);
-        if (!b) {
-            fprintf(stderr, "Fatal error: Allowed memory size exhausted\n");
-            exit(255);
-        }
-        b->next = g_arena_head;
-        g_arena_head = b;
-        g_live_allocs++;
-        s = (hstr *)(b + 1);
+        s = (hstr *)hp_arena_alloc(sizeof(hstr) + cap);
         memset(s, 0, sizeof(hstr));
         s->flags = HP_F_SCOPED;
         s->rc = 1;
@@ -395,8 +438,8 @@ hstr *hp_str_slice(hstr *s, int64_t start, int64_t end) {
 }
 
 hstr *hp_str_char_at(hstr *s, int64_t idx) {
-    if (!s || idx < 0 || (size_t)idx >= s->len) return hp_str_lit("");
-    return hp_str_new(s->data + idx, 1);
+    if (!s || idx < 0 || (size_t)idx >= s->len) return hp_null_str();
+    return hp_char_str((unsigned char)s->data[idx]);
 }
 
 int64_t hp_str_len(hstr *s) { return s ? (int64_t)s->len : 0; }
@@ -534,10 +577,7 @@ hstr *hp_str_reverse(hstr *s) {
 /* ---------------- values ---------------- */
 hval hp_null = { HV_NULL, { 0 } };
 
-hval hp_of_int(int64_t i) { hval v = { HV_INT, { .i = i } }; return v; }
 hval hp_of_float(double f) { hval v = { HV_FLOAT, { .f = f } }; return v; }
-hval hp_of_bool(bool b) { hval v = { HV_BOOL, { .b = b } }; return v; }
-hval hp_of_str(hstr *s) { hval v = { HV_STR, { .s = s } }; return v; }
 hval hp_of_arr(harr *a) { hval v = { HV_ARR, { .a = a } }; return v; }
 hval hp_of_ptr(void *p) { hval v = { HV_OBJ, { .p = p } }; return v; }
 
@@ -587,7 +627,7 @@ hstr *hp_val_to_str(hval v) {
     }
 }
 
-int64_t hp_val_to_int(hval v) {
+int64_t hp_val_to_int_slow(hval v) {
     switch (v.tag) {
     case HV_INT: return v.u.i;
     case HV_FLOAT: return (int64_t)v.u.f;
@@ -947,8 +987,8 @@ hval hp_arr_get_v(hval container, hval idx) {
     if (container.tag == HV_STR) {
         int64_t i = hp_val_to_int(idx);
         hstr *s = container.u.s;
-        if (i < 0 || !s || (size_t)i >= s->len) return hp_of_str(hp_str_lit(""));
-        return hp_of_str(hp_str_new(s->data + i, 1));
+        if (i < 0 || !s || (size_t)i >= s->len) return hp_of_str(hp_null_str());
+        return hp_of_str(hp_char_str((unsigned char)s->data[i]));
     }
     return hp_null;
 }

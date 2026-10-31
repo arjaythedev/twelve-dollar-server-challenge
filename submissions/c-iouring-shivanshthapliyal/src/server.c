@@ -16,6 +16,8 @@
 #include <sys/socket.h>
 #include <time.h>
 #include <unistd.h>
+#include <pthread.h>
+#include <stdatomic.h>
 
 #include "sqlite3.h"
 
@@ -32,8 +34,10 @@
 #define ACCEPT_MARGIN 512
 #define OUT_CAP (1024 * 1024)
 #ifndef CKPT_FRAMES
-#define CKPT_FRAMES 4096
+#define CKPT_FRAMES 8192
 #endif
+#define HOLD_MAX_MS 250
+#define CQE_PER_PASS 2048
 #ifndef SLOTS_MAX
 #define SLOTS_MAX 65535
 #endif
@@ -392,12 +396,44 @@ static int jobj_scan(const char *p, const char *e, jfield *want, int nwant) {
 
 typedef struct { char *p; uint32_t len, cap; } ob_t;
 
-static void ob_init(ob_t *o, uint32_t cap) { o->p = malloc(cap), o->len = HDR_RES, o->cap = cap; }
+// Response buffers are fixed 8 KB blocks from one slab, reused LIFO; only rare larger responses use malloc.
+#define BLK 8192
+#define NBLK 8192
+static char *slab;
+static uint32_t freeblk[NBLK], nfree;
+
+static void slab_init(void) {
+  slab = malloc((size_t)NBLK * BLK);
+  for (uint32_t i = 0; i < NBLK; i++) freeblk[i] = NBLK - 1 - i;
+  nfree = NBLK;
+}
+
+static inline int in_slab(const char *p) { return p >= slab && p < slab + (size_t)NBLK * BLK; }
+
+static void buf_free(char *p) {
+  if (in_slab(p)) freeblk[nfree++] = (uint32_t)((p - slab) / BLK);
+  else free(p);
+}
+
+static void ob_init(ob_t *o, uint32_t cap) {
+  (void)cap;
+  o->p = nfree ? slab + (size_t)freeblk[--nfree] * BLK : malloc(BLK);
+  o->len = HDR_RES, o->cap = BLK;
+}
 
 static inline void ob_need(ob_t *o, uint32_t n) {
   if (o->len + n <= o->cap) return;
-  while (o->len + n > o->cap) o->cap *= 2;
-  o->p = realloc(o->p, o->cap);
+  uint32_t nc = o->cap;
+  while (o->len + n > nc) nc *= 2;
+  if (in_slab(o->p)) {
+    char *q = malloc(nc);
+    memcpy(q, o->p, o->len);
+    buf_free(o->p);
+    o->p = q;
+  } else {
+    o->p = realloc(o->p, nc);
+  }
+  o->cap = nc;
 }
 
 static inline void ob_put(ob_t *o, const char *s, uint32_t n) {
@@ -418,25 +454,41 @@ static inline void ob_i64(ob_t *o, int64_t v) {
   while (n) o->p[o->len++] = t[--n];
 }
 
+static inline char *esc1(char *d, unsigned char c) {
+  if (c >= 0x20 && c != '"' && c != '\\') { *d++ = c; return d; }
+  *d++ = '\\';
+  switch (c) {
+    case '"': *d++ = '"'; break;
+    case '\\': *d++ = '\\'; break;
+    case '\n': *d++ = 'n'; break;
+    case '\r': *d++ = 'r'; break;
+    case '\t': *d++ = 't'; break;
+    case '\b': *d++ = 'b'; break;
+    case '\f': *d++ = 'f'; break;
+    default: *d++ = 'u', *d++ = '0', *d++ = '0', *d++ = "0123456789abcdef"[c >> 4], *d++ = "0123456789abcdef"[c & 15];
+  }
+  return d;
+}
+
+// True if any of the 8 bytes is < 0x20, '"' or '\\'. May report a false positive, never a false negative.
+static inline int esc8(uint64_t w) {
+  const uint64_t one = 0x0101010101010101ULL, hi = 0x8080808080808080ULL;
+  uint64_t q = w ^ (one * '"'), b = w ^ (one * '\\');
+  return (((w - one * 0x20) & ~w) | ((q - one) & ~q) | ((b - one) & ~b)) & hi;
+}
+
 static void ob_jstr(ob_t *o, const char *s, uint32_t n) {
   ob_need(o, n * 6 + 2);
   char *d = o->p + o->len;
   *d++ = '"';
-  for (uint32_t i = 0; i < n; i++) {
-    unsigned char c = s[i];
-    if (c >= 0x20 && c != '"' && c != '\\') { *d++ = c; continue; }
-    *d++ = '\\';
-    switch (c) {
-      case '"': *d++ = '"'; break;
-      case '\\': *d++ = '\\'; break;
-      case '\n': *d++ = 'n'; break;
-      case '\r': *d++ = 'r'; break;
-      case '\t': *d++ = 't'; break;
-      case '\b': *d++ = 'b'; break;
-      case '\f': *d++ = 'f'; break;
-      default: *d++ = 'u', *d++ = '0', *d++ = '0', *d++ = "0123456789abcdef"[c >> 4], *d++ = "0123456789abcdef"[c & 15];
-    }
+  uint32_t i = 0;
+  for (; i + 8 <= n; i += 8) {
+    uint64_t w;
+    memcpy(&w, s + i, 8);
+    if (!esc8(w)) { memcpy(d, &w, 8), d += 8; continue; }
+    for (uint32_t k = 0; k < 8; k++) d = esc1(d, s[i + k]);
   }
+  for (; i < n; i++) d = esc1(d, s[i]);
   *d++ = '"';
   o->len = (uint32_t)(d - o->p);
 }
@@ -467,13 +519,23 @@ static const char *status_line(int st) {
   }
 }
 
+// Writes the header right-aligned into the reserved space in front of the body.
 static void job_finish(job_t *j, ob_t *o, int st) {
-  char h[HDR_RES];
+  static const char ct[] = "Content-Type: application/json\r\nContent-Length: ";
   uint32_t body = o->len - HDR_RES;
-  int hl = snprintf(h, sizeof h, "%sContent-Type: application/json\r\nContent-Length: %u\r\n%s\r\n", status_line(st), body,
-                    j->close_after ? "Connection: close\r\n" : "");
-  memcpy(o->p + HDR_RES - hl, h, hl);
-  j->resp = o->p, j->resp_off = HDR_RES - hl, j->resp_len = body + hl;
+  const char *sl = status_line(st), *tail = j->close_after ? "\r\nConnection: close\r\n\r\n" : "\r\n\r\n";
+  size_t sll = strlen(sl), tl = strlen(tail);
+  char num[12];
+  int nl = 0;
+  uint32_t v = body;
+  do num[11 - nl++] = '0' + v % 10, v /= 10; while (v);
+  size_t hl = sll + sizeof ct - 1 + nl + tl;
+  char *h = o->p + HDR_RES - hl;
+  memcpy(h, sl, sll);
+  memcpy(h + sll, ct, sizeof ct - 1);
+  memcpy(h + sll + sizeof ct - 1, num + 12 - nl, nl);
+  memcpy(h + sll + sizeof ct - 1 + nl, tail, tl);
+  j->resp = o->p, j->resp_off = (uint32_t)(HDR_RES - hl), j->resp_len = body + (uint32_t)hl;
 }
 
 static void job_error(job_t *j, int st, const char *msg) {
@@ -515,12 +577,88 @@ static int run(sqlite3_stmt *s) {
   return rc == SQLITE_DONE ? SQLITE_OK : rc;
 }
 
+// Checkpoints run on their own thread and connection, so the slow fsync never stalls the event loop.
+// Pass 1 copies the WAL in bulk. Then the loop holds writes (reads go on), pass 2 copies the few frames
+// written meanwhile, and the next write transaction restarts the WAL, which keeps it small.
+enum { CK_IDLE, CK_RUN, CK_GATE_REQ, CK_GATED, CK_DONE };
+static _Atomic int ck_state, ck_in_txn;
+static sqlite3 *ckdb;
+static pthread_mutex_t ck_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t ck_cv = PTHREAD_COND_INITIALIZER;
+static int writes_held;
+static struct timespec hold_t0;
+static char ck_restart_sql[96];
+
+static void ck_set(int s) {
+  pthread_mutex_lock(&ck_mu);
+  atomic_store(&ck_state, s);
+  pthread_cond_signal(&ck_cv);
+  pthread_mutex_unlock(&ck_mu);
+}
+
+static void ck_wait(int s) {
+  pthread_mutex_lock(&ck_mu);
+  while (atomic_load(&ck_state) != s) pthread_cond_wait(&ck_cv, &ck_mu);
+  pthread_mutex_unlock(&ck_mu);
+}
+
+static void *ck_thread(void *arg) {
+  (void)arg;
+  for (;;) {
+    ck_wait(CK_RUN);
+    sqlite3_wal_checkpoint_v2(ckdb, NULL, SQLITE_CHECKPOINT_PASSIVE, NULL, NULL);
+    ck_set(CK_GATE_REQ);
+    ck_wait(CK_GATED);
+    int log = -1, done = -2;
+    sqlite3_wal_checkpoint_v2(ckdb, NULL, SQLITE_CHECKPOINT_PASSIVE, &log, &done);
+    // The first commit after a WAL reset fsyncs the new WAL header. Make that commit here, with the
+    // loop's writes still held: it rewrites the header page with the same user_version, so no table
+    // or row changes, and the loop's own commits never wait on the disk.
+    if (log == done) {
+      atomic_store(&ck_in_txn, 1);
+      if (sqlite3_exec(ckdb, ck_restart_sql, NULL, NULL, NULL) != SQLITE_OK) sqlite3_exec(ckdb, "ROLLBACK", NULL, NULL, NULL);
+      atomic_store(&ck_in_txn, 0);
+    }
+    ck_set(CK_DONE);
+  }
+  return NULL;
+}
+
+static long ms_since(const struct timespec *t0) {
+  struct timespec t;
+  clock_gettime(CLOCK_MONOTONIC, &t);
+  return (t.tv_sec - t0->tv_sec) * 1000 + (t.tv_nsec - t0->tv_nsec) / 1000000;
+}
+
+// Called by the loop between batches: it is the only place the write hold starts or ends.
+static void ck_step(void) {
+  int st = atomic_load(&ck_state);
+  if (st == CK_IDLE && wal_frames >= CKPT_FRAMES) {
+    ck_set(CK_RUN);
+  } else if (st == CK_GATE_REQ) {
+    writes_held = 1;
+    clock_gettime(CLOCK_MONOTONIC, &hold_t0);
+    ck_set(CK_GATED);
+  } else if (st == CK_DONE) {
+    writes_held = 0;
+    wal_frames = 0;
+    atomic_store(&ck_state, CK_IDLE);
+  } else if (writes_held && ms_since(&hold_t0) > HOLD_MAX_MS && !atomic_load(&ck_in_txn)) {
+    // Never during the restart transaction: the loop's next BEGIN IMMEDIATE would wait on its lock.
+    writes_held = 0;
+  }
+}
+
 static void db_open(const char *path) {
-  if (sqlite3_open_v2(path, &db, SQLITE_OPEN_READWRITE, NULL) != SQLITE_OK) {
+  // unix-excl: an exclusive file lock for this process, with the WAL index in heap memory shared by
+  // both connections, so readers pay no shared-memory file locks.
+  if (sqlite3_open_v2(path, &db, SQLITE_OPEN_READWRITE, "unix-excl") != SQLITE_OK ||
+      sqlite3_open_v2(path, &ckdb, SQLITE_OPEN_READWRITE, "unix-excl") != SQLITE_OK) {
     fprintf(stderr, "open %s: %s\n", path, sqlite3_errmsg(db));
     exit(1);
   }
-  exec("PRAGMA locking_mode=EXCLUSIVE");
+  sqlite3_busy_timeout(db, 1000);
+  sqlite3_busy_timeout(ckdb, 1000);
   sqlite3_stmt *jm = prep("PRAGMA journal_mode=WAL");
   if (sqlite3_step(jm) != SQLITE_ROW || strcasecmp((const char *)sqlite3_column_text(jm, 0), "wal")) {
     fprintf(stderr, "could not enable WAL mode\n");
@@ -533,7 +671,16 @@ static void db_open(const char *path) {
   exec("PRAGMA temp_store=MEMORY");
   exec("PRAGMA wal_autocheckpoint=0");
   exec("PRAGMA journal_size_limit=67108864");
+  // ckdb resets the WAL, so the size limit that truncates it on reset must be set on ckdb too.
+  sqlite3_exec(ckdb, "PRAGMA synchronous=NORMAL; PRAGMA wal_autocheckpoint=0; PRAGMA journal_size_limit=67108864", NULL, NULL, NULL);
+  sqlite3_stmt *uv = prep("PRAGMA user_version");
+  int v = sqlite3_step(uv) == SQLITE_ROW ? sqlite3_column_int(uv, 0) : 0;
+  sqlite3_finalize(uv);
+  snprintf(ck_restart_sql, sizeof ck_restart_sql, "BEGIN IMMEDIATE; PRAGMA user_version=%d; COMMIT", v);
+  exec(ck_restart_sql);  // creates and syncs the WAL header now, before the first request
   sqlite3_wal_hook(db, wal_cb, NULL);
+  pthread_t t;
+  if (pthread_create(&t, NULL, ck_thread, NULL)) { perror("pthread_create"); exit(1); }
   st_ids = prep("SELECT id FROM posts ORDER BY created_at DESC, id DESC LIMIT 20");
   st_rows = prep("SELECT p.id, p.body, p.created_at, u.username FROM posts p JOIN users u ON u.id = p.user_id WHERE p.id BETWEEN ?1 AND ?2");
   st_likes = prep("SELECT post_id, count(*) FROM likes WHERE post_id BETWEEN ?1 AND ?2 GROUP BY post_id");
@@ -617,7 +764,7 @@ static void run_read(job_t *j) {
   switch (j->kind) {
     case J_FEED:
       ob_init(&o, 8192);
-      if (do_feed(&o) < 0) { free(o.p); job_error(j, 500, "internal server error"); return; }
+      if (do_feed(&o) < 0) { buf_free(o.p); job_error(j, 500, "internal server error"); return; }
       job_finish(j, &o, 200);
       return;
     case J_POST:
@@ -692,7 +839,7 @@ static void run_write(job_t *j) {
   OB_LIT(&o, "}");
   rc = sqlite3_step(st_create);
   sqlite3_reset(st_create);
-  if (rc != SQLITE_DONE) { free(o.p); job_error(j, 500, "internal server error"); return; }
+  if (rc != SQLITE_DONE) { buf_free(o.p); job_error(j, 500, "internal server error"); return; }
   job_finish(j, &o, 201);
 }
 
@@ -729,7 +876,8 @@ static void conn_release(int r, uint32_t slot) {
   struct io_uring_sqe *s = sqe_get(r);
   io_uring_prep_close_direct(s, slot);
   io_uring_sqe_set_data64(s, UD(OP_CLOSE, r, 0, slot));
-  free(c->in), free(c->q), free(c->sendbuf);
+  free(c->in), free(c->q);
+  if (c->sendbuf) buf_free(c->sendbuf);
   c->in = c->q = c->sendbuf = NULL;
   c->inlen = c->incap = c->qlen = c->qcap = 0;
   c->state = C_FREE, c->flags = 0;
@@ -752,16 +900,16 @@ static void conn_close(int r, uint32_t slot) {
 
 static void conn_send(int r, uint32_t slot, uint16_t gen, char *base, uint32_t off, uint32_t len) {
   conn_t *c = &R[r].conns[slot];
-  if (c->gen != gen || c->state != C_OPEN) { free(base); return; }
+  if (c->gen != gen || c->state != C_OPEN) { buf_free(base); return; }
   if (c->flags & F_SENDING) {
-    if (c->qlen + len > OUT_CAP) { free(base); conn_close(r, slot); return; }
+    if (c->qlen + len > OUT_CAP) { buf_free(base); conn_close(r, slot); return; }
     if (c->qlen + len > c->qcap) {
       c->qcap = (c->qlen + len) * 2;
       c->q = realloc(c->q, c->qcap);
     }
     memcpy(c->q + c->qlen, base + off, len);
     c->qlen += len;
-    free(base);
+    buf_free(base);
     return;
   }
   c->sendbuf = base, c->sendoff = off, c->sendlen = len;
@@ -777,7 +925,7 @@ static void on_send(int r, uint32_t slot, uint16_t gen, int res) {
     submit_send(r, slot);
     return;
   }
-  free(c->sendbuf);
+  buf_free(c->sendbuf);
   c->sendbuf = NULL;
   c->flags &= ~F_SENDING;
   if (c->state == C_CLOSING) { conn_release(r, slot); return; }
@@ -909,10 +1057,22 @@ static int ci_contains(const char *s, const char *e, const char *w) {
   return 0;
 }
 
+// Finds the blank line that ends the headers: "\r\n\r\n".
+static const char *hdr_end(const char *d, size_t n) {
+  const char *e = d + n;
+  for (const char *p = d + 3; p < e;) {
+    const char *nl = memchr(p, '\n', e - p);
+    if (!nl) return NULL;
+    if (nl[-1] == '\r' && nl[-2] == '\n' && nl[-3] == '\r') return nl - 3;
+    p = nl + 1;
+  }
+  return NULL;
+}
+
 // Returns bytes consumed (>0), 0 if incomplete, -1 to close the connection.
 static int handle_request(int r, uint32_t slot, const char *d, size_t n) {
   conn_t *c = &R[r].conns[slot];
-  const char *he = memmem(d, n, "\r\n\r\n", 4);
+  const char *he = hdr_end(d, n);
   if (!he) return n > MAX_HDR ? -1 : 0;
   const char *le = memchr(d, '\r', he + 2 - d);
   const char *sp1 = memchr(d, ' ', le - d);
@@ -929,7 +1089,8 @@ static int handle_request(int r, uint32_t slot, const char *d, size_t n) {
   int http10 = le - sp2 == 9 && !memcmp(sp2 + 1, "HTTP/1.0", 8);
   int close_after = http10, expect = 0;
   for (const char *p = le + 2; p < he;) {
-    const char *eol = memmem(p, he + 2 - p, "\r\n", 2);
+    const char *nl = memchr(p, '\n', he + 2 - p);
+    const char *eol = nl > p && nl[-1] == '\r' ? nl - 1 : nl;
     const char *colon = memchr(p, ':', eol - p);
     if (colon) {
       size_t kl = colon - p;
@@ -954,7 +1115,7 @@ static int handle_request(int r, uint32_t slot, const char *d, size_t n) {
         return -1;
       }
     }
-    p = eol + 2;
+    p = nl + 1;
   }
   size_t total = (he + 4 - d) + cl;
   if (n < total) {
@@ -1026,7 +1187,8 @@ static int in_append(conn_t *c, const char *d, uint32_t n) {
 static void try_buffered(int r, uint32_t slot) {
   conn_t *c = &R[r].conns[slot];
   if (c->state != C_OPEN || !c->inlen) return;
-  if ((c->flags & F_JOB) || njobs >= jobs_cap_pass) { pend_add(r, slot); return; }
+  if (c->flags & F_JOB) return;  // queued again when that job finishes (run_batch)
+  if (njobs >= jobs_cap_pass) { pend_add(r, slot); return; }
   int k = handle_request(r, slot, c->in, c->inlen);
   if (k < 0 || (k == 0 && c->inlen > MAX_REQ + MAX_HDR)) { conn_close(r, slot); return; }
   if (k == 0) return;
@@ -1073,7 +1235,7 @@ static int ring_create(void) {
   ring_t *g = &R[r];
   struct io_uring_params p;
   memset(&p, 0, sizeof p);
-  p.flags = IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN | IORING_SETUP_SUBMIT_ALL | IORING_SETUP_CQSIZE;
+  p.flags = IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN | IORING_SETUP_TASKRUN_FLAG | IORING_SETUP_SUBMIT_ALL | IORING_SETUP_CQSIZE;
   p.cq_entries = CQ_ENTRIES;
   int ret = io_uring_queue_init_params(SQ_ENTRIES, &g->ring, &p);
   if (ret < 0) { fprintf(stderr, "io_uring_queue_init: %s\n", strerror(-ret)); return -1; }
@@ -1178,9 +1340,10 @@ static int drain_ring(int r) {
   ring_t *g = &R[r];
   struct io_uring_cqe *cqe;
   unsigned head, n = 0;
+  // Capped, so one ring's backlog after a delay cannot hold the loop for seconds; the rest waits one pass.
   io_uring_for_each_cqe(&g->ring, head, cqe) {
     handle_cqe(r, cqe);
-    n++;
+    if (++n == CQE_PER_PASS) break;
   }
   io_uring_cq_advance(&g->ring, n);
   if (g->nret) io_uring_buf_ring_advance(g->br, g->nret), g->nret = 0;
@@ -1194,7 +1357,20 @@ static int drain_ring(int r) {
 
 // ---------------------------------------------------------------- batch
 
+#define HELD_CAP (JOBS_CAP - 1024)
+static job_t held[HELD_CAP];
+static int nheld;
+
 static void run_batch(void) {
+  if (writes_held) {
+    // Writes wait for the end of the hold; their connections keep F_JOB, so later requests wait too.
+    int k = 0;
+    for (int i = 0; i < njobs; i++) {
+      if ((jobs[i].kind == J_LIKE || jobs[i].kind == J_CREATE) && nheld < HELD_CAP) held[nheld++] = jobs[i];
+      else jobs[k++] = jobs[i];
+    }
+    njobs = k;
+  }
   int nw = 0;
   for (int i = 0; i < njobs; i++) nw += jobs[i].kind == J_LIKE || jobs[i].kind == J_CREATE;
   if (nw) {
@@ -1205,7 +1381,7 @@ static void run_batch(void) {
       if (ok) run(st_rollback);
       for (int i = 0; i < njobs; i++)
         if (jobs[i].kind == J_LIKE || jobs[i].kind == J_CREATE) {
-          free(jobs[i].resp);
+          if (jobs[i].resp) buf_free(jobs[i].resp);
           job_error(&jobs[i], 500, "internal server error");
         }
     }
@@ -1224,7 +1400,10 @@ static void run_batch(void) {
   for (int i = 0; i < njobs; i++) {
     job_t *j = &jobs[i];
     conn_t *c = &R[j->ring].conns[j->slot];
-    if (c->gen == j->gen) c->flags &= ~F_JOB;
+    if (c->gen == j->gen) {
+      c->flags &= ~F_JOB;
+      if (c->inlen) pend_add(j->ring, j->slot);
+    }
     conn_send(j->ring, j->slot, j->gen, j->resp, j->resp_off, j->resp_len);
     // Set only now: earlier, a previous response's completion would close before this one is queued.
     if (j->close_after && c->gen == j->gen && c->state == C_OPEN) {
@@ -1270,6 +1449,7 @@ int main(void) {
   hmac_setup(secret);
   db_open(path);
   scratch.p = malloc(65536), scratch.cap = 65536, scratch.len = 0;
+  slab_init();
   struct rlimit rl;
   getrlimit(RLIMIT_NOFILE, &rl);
   slots_per_ring = rl.rlim_cur < SLOTS_MAX ? (uint32_t)rl.rlim_cur : SLOTS_MAX;
@@ -1279,21 +1459,25 @@ int main(void) {
   fprintf(stderr, "listening on %s:%s\n", host ? host : "0.0.0.0", port ? port : "3000");
   for (;;) {
     now_s = time(NULL);
+    ck_step();
+    if (!writes_held && nheld) {
+      memcpy(jobs, held, nheld * sizeof *jobs);
+      njobs = nheld, nheld = 0;
+    }
     process_pending();
     int got = 0;
     for (int r = 0; r < nrings; r++) {
-      io_uring_submit_and_get_events(&R[r].ring);
-      got += drain_ring(r);
+      // Enter the kernel only for a ring with SQEs to submit, completions waiting to be posted, or a CQ overflow to flush.
+      struct io_uring *u = &R[r].ring;
+      if (io_uring_sq_ready(u) || (IO_URING_READ_ONCE(*u->sq.kflags) & (IORING_SQ_TASKRUN | IORING_SQ_CQ_OVERFLOW)))
+        io_uring_submit_and_get_events(u);
+      if (io_uring_cq_ready(u)) got += drain_ring(r);
     }
     if (njobs) run_batch(), got = 1;
-    if (wal_frames >= CKPT_FRAMES) {
-      for (int r = 0; r < nrings; r++) io_uring_submit(&R[r].ring);
-      sqlite3_wal_checkpoint_v2(db, NULL, SQLITE_CHECKPOINT_RESTART, NULL, NULL);
-      wal_frames = 0;
-    }
     if (!got && !npend) {
       struct io_uring_cqe *cqe;
-      struct __kernel_timespec ts = {.tv_sec = nrings > 1 ? 0 : 1, .tv_nsec = nrings > 1 ? 1000000 : 0};
+      int short_wait = nrings > 1 || nheld || atomic_load(&ck_state) != CK_IDLE;
+      struct __kernel_timespec ts = {.tv_sec = short_wait ? 0 : 1, .tv_nsec = short_wait ? 1000000 : 0};
       io_uring_submit_and_wait_timeout(&R[accept_ring].ring, &cqe, 1, &ts, NULL);
     }
   }

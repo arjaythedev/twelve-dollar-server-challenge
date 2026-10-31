@@ -180,16 +180,17 @@ func main() {
 	}
 }
 
-// serveConn is net/http's connection loop with an 8 KiB write buffer. The
-// stock server hardcodes 4 KiB (newBufioWriterSize(..., 4<<10)), which forces
-// the 5 KiB feed response into two write syscalls.
+// serveConn is net/http's connection loop with a 6 KiB write buffer and a
+// 2 KiB read buffer. The stock server hardcodes 4 KiB for writes
+// (newBufioWriterSize(..., 4<<10)), which forces the 5 KiB feed response into
+// two write syscalls.
 func (a *app) serveConn(c net.Conn) {
 	defer c.Close()
 	if tc, ok := c.(*net.TCPConn); ok {
 		tc.SetNoDelay(true)
 	}
-	br := bufio.NewReaderSize(c, 4096)
-	bw := bufio.NewWriterSize(c, 8192)
+	br := bufio.NewReaderSize(c, 2048)
+	bw := bufio.NewWriterSize(c, 6144)
 	for {
 		req, err := http.ReadRequest(br)
 		if err != nil {
@@ -210,10 +211,15 @@ func (a *app) serveConn(c net.Conn) {
 			bw.WriteString("\r\nConnection: close")
 		}
 		bw.WriteString("\r\n\r\n")
-		if _, err := bw.Write(resp.body); err != nil {
-			return
+		_, werr := bw.Write(resp.body)
+		if werr == nil {
+			werr = bw.Flush()
 		}
-		if err := bw.Flush(); err != nil {
+		if resp.buf != nil {
+			bufPool.Put(resp.buf)
+			resp.buf = nil
+		}
+		if werr != nil {
 			return
 		}
 		if req.Close {
@@ -225,6 +231,7 @@ func (a *app) serveConn(c net.Conn) {
 type capture struct {
 	status int
 	body   []byte
+	buf    *[]byte
 	hdr    http.Header
 }
 
@@ -378,16 +385,14 @@ func (a *app) health(w http.ResponseWriter, r *http.Request) {
 		b = appendString(b, err.Error())
 		b = append(b, '}')
 		*bp = b
-		writeBody(w, http.StatusServiceUnavailable, b)
-		bufPool.Put(bp)
+		writeBody(w, http.StatusServiceUnavailable, bp, b)
 		return
 	}
 	b = append(b, `{"status":"ok","db":"ok","uptime_s":`...)
 	b = strconv.AppendInt(b, int64(time.Since(a.started).Seconds()), 10)
 	b = append(b, '}')
 	*bp = b
-	writeBody(w, http.StatusOK, b)
-	bufPool.Put(bp)
+	writeBody(w, http.StatusOK, bp, b)
 }
 
 func (a *app) feedPosts(w http.ResponseWriter, r *http.Request) {
@@ -421,8 +426,7 @@ func (a *app) feedPosts(w http.ResponseWriter, r *http.Request) {
 	}
 	b = append(b, `]}`...)
 	*bp = b
-	writeBody(w, http.StatusOK, b)
-	bufPool.Put(bp)
+	writeBody(w, http.StatusOK, bp, b)
 }
 
 func (a *app) getPostByID(w http.ResponseWriter, r *http.Request, idStr string) {
@@ -447,8 +451,7 @@ func (a *app) getPostByID(w http.ResponseWriter, r *http.Request, idStr string) 
 	b = appendPost(b, p)
 	b = append(b, '}')
 	*bp = b
-	writeBody(w, http.StatusOK, b)
-	bufPool.Put(bp)
+	writeBody(w, http.StatusOK, bp, b)
 }
 
 func (a *app) createPost(w http.ResponseWriter, r *http.Request) {
@@ -503,8 +506,7 @@ func (a *app) createPost(w http.ResponseWriter, r *http.Request) {
 	b = appendPost(b, result.post)
 	b = append(b, '}')
 	*bp = b
-	writeBody(w, http.StatusCreated, b)
-	bufPool.Put(bp)
+	writeBody(w, http.StatusCreated, bp, b)
 }
 
 func (a *app) likePost(w http.ResponseWriter, r *http.Request, idStr string) {
@@ -546,8 +548,7 @@ func (a *app) likePost(w http.ResponseWriter, r *http.Request, idStr string) {
 	b = strconv.AppendInt(b, id, 10)
 	b = append(b, '}')
 	*bp = b
-	writeBody(w, status, b)
-	bufPool.Put(bp)
+	writeBody(w, status, bp, b)
 }
 
 // authenticate verifies the bearer JWT and returns the user id and username.
@@ -691,11 +692,18 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	b = appendString(b, msg)
 	b = append(b, '}')
 	*bp = b
-	writeBody(w, status, b)
-	bufPool.Put(bp)
+	writeBody(w, status, bp, b)
 }
 
-func writeBody(w http.ResponseWriter, status int, body []byte) {
+func writeBody(w http.ResponseWriter, status int, bp *[]byte, body []byte) {
 	w.WriteHeader(status)
+	if c, ok := w.(*capture); ok {
+		c.body = body
+		c.buf = bp
+		return
+	}
 	w.Write(body)
+	if bp != nil {
+		bufPool.Put(bp)
+	}
 }

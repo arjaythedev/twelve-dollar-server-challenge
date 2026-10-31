@@ -24,10 +24,11 @@ request reads its data from SQLite while it is being served.
 - JWT HS256 verification is implemented directly with `crypto/hmac`; only `HS256` is accepted
   and `exp` is checked on every request (no token cache). Claims are decoded into a struct.
 - Responses are hand-encoded into pooled byte buffers with fixed key order and JSON string
-  escaping. The response body is written through a custom connection loop built on
-  `http.ReadRequest` with an 8 KiB `bufio.Writer`, because the stock `net/http` server
-  hardcodes a 4 KiB write buffer and the 5,102-byte feed otherwise needs two write syscalls.
-  One `Write` per response; `TCP_NODELAY` is set explicitly.
+  escaping. The pooled buffer is transferred to the connection writer (no copy) and returned
+  to the pool after the response is flushed. The connection loop is built on
+  `http.ReadRequest` with a 2 KiB read buffer and a 6 KiB `bufio.Writer`: the stock
+  `net/http` server hardcodes a 4 KiB write buffer, so the 5,102-byte feed would otherwise
+  need two write syscalls. One `Write` per response; `TCP_NODELAY` is set explicitly.
 - Keep-alive is the HTTP/1.1 default; idle connections are not closed.
 - `PPROF_ADDR` optionally starts a `net/http/pprof` listener; it is unset in benchmark runs.
 
@@ -38,16 +39,17 @@ capped at 1 CPU, 2 GB, no swap and 65,535 open files. 10,000 VUs for 5 minutes:
 
 | Metric | Value |
 |---|---:|
-| Requests | 373,625 |
-| Throughput | 934 req/s |
-| p95 / p99 | 42.2 ms / 100.6 ms (100 ms write window) |
+| Requests | 373,320 |
+| Throughput | 933 req/s |
+| p95 / p99 | 42.6 ms / 100.6 ms (100 ms write window) |
 | Failed requests | 0 |
-| CPU per request | **167.5 µs** |
-| Peak server memory | 405 MB |
+| CPU per request | **162.8 µs** |
+| Peak server memory | 340 MB |
 
 CPU/request evolution on the same 10k run: 253 µs baseline → 211 µs with the batched writer
-→ **167.5 µs** with the 8 KiB connection loop. The p95 above is the cost of the 100 ms group
-commit; it remains far below the 500 ms gate.
+→ 167.5 µs with the connection loop → **162.8 µs** after transferring body buffers and
+shrinking per-connection buffers (6 KiB write + 2 KiB read). Allocation churn fell from
+224 MB to 89 MB per 30 s and live heap from 126 MB to 96 MB; peak RSS dropped 405 → 340 MB.
 
 These are local emulations, not the official benchmark. Above ~10k VUs the rig is limited by
 Docker Desktop's VM memory (k6 VU runtimes), not by the server.

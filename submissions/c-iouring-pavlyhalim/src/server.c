@@ -472,6 +472,15 @@ static void stats(uint64_t dt_ns) {
   T_closes += S.closes;
   fprintf(stderr, "total: requests=%llu accepts=%llu closes=%llu\n", (unsigned long long)T_reqs,
           (unsigned long long)T_accepts, (unsigned long long)T_closes);
+  /* SQLite's own page-cache counters for the request connection, reset each window */
+  int c_hit = 0, c_miss = 0, c_write = 0, c_used = 0, hw;
+  sqlite3_db_status(A.db.c, SQLITE_DBSTATUS_CACHE_HIT, &c_hit, &hw, 1);
+  sqlite3_db_status(A.db.c, SQLITE_DBSTATUS_CACHE_MISS, &c_miss, &hw, 1);
+  sqlite3_db_status(A.db.c, SQLITE_DBSTATUS_CACHE_WRITE, &c_write, &hw, 1);
+  sqlite3_db_status(A.db.c, SQLITE_DBSTATUS_CACHE_USED, &c_used, &hw, 0);
+  fprintf(stderr, "sqlite: cache_hit=%d cache_miss=%d cache_write=%d cache_used=%dKB truncates=%llu skipped=%llu\n",
+          c_hit, c_miss, c_write, c_used / 1024, (unsigned long long)pcache_truncates,
+          (unsigned long long)pcache_truncates_skipped);
   double dt = (double)dt_ns / 1e9;
   struct rusage ru;
   getrusage(RUSAGE_SELF, &ru);

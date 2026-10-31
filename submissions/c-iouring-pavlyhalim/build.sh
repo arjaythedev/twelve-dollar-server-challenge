@@ -33,6 +33,8 @@ CFLAGS="-std=gnu11 -O3 -g $ARCH -mprefer-vector-width=256 -fno-plt -fno-semantic
   -fomit-frame-pointer -Wall -Wno-unused-function -Wno-unused-variable -Wno-unused-but-set-variable
   -I vendor/$SQLITE -I src $SQLOPTS"
 case "$(uname -m)" in aarch64|arm64) CFLAGS=${CFLAGS//-mprefer-vector-width=256/}; CFLAGS=${CFLAGS//-fcf-protection=none/} ;; esac
+# PROFILE=1: keep frame pointers so `perf record -g` can walk the stacks (for profiling only)
+[ "${PROFILE:-0}" = 1 ] && CFLAGS="${CFLAGS//-fomit-frame-pointer/} -fno-omit-frame-pointer -mno-omit-leaf-frame-pointer"
 LDFLAGS="-static -lpthread -lm"
 
 build() { $CC $CFLAGS "$@" src/server.c -o "$1.tmp" $LDFLAGS 2>&1 | grep -v '^$' || true; }

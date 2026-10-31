@@ -141,8 +141,105 @@ static int db_open_conn(sqlite3 **out, const char *path, long long mmap_bytes, i
   return 0;
 }
 
+/* ---- page cache ----
+ * SQLite's default page cache (pcache1) behind its documented plugin interface
+ * (SQLITE_CONFIG_PCACHE2), with one decision changed: when a commit asks it to drop the pages
+ * past the end of the file (xTruncate), and no such page exists, nothing is scanned.
+ *
+ * Why: pcache1 remembers the largest page number it has ever held and never lowers it. A
+ * B-tree page split (balance_nonroot) briefly renames a page to the lock-byte page's number,
+ * 1 GiB / page size + 1, and back. From then on every commit's truncate looks as if pages past
+ * the end of a 250 MB file might exist, and pcache1 walks its whole hash table to find none.
+ *
+ * The wrapper sees every key that enters the cache (xFetch with create, xRekey) and keeps the
+ * largest one, not counting pages parked at the lock-byte page's number, which it counts
+ * separately. If nothing is parked and the largest key is below the limit, no page at or past
+ * the limit can exist, so there is nothing to drop. Otherwise it calls pcache1's truncate as
+ * usual. Pages that leave the cache only make the record an overestimate, which is safe. */
+#define LOCK_BYTE_OFFSET 0x40000000u /* PENDING_BYTE in the file format */
+
+struct wcache {
+  sqlite3_pcache *base;
+  unsigned max_key;   /* largest key ever entered, excluding the parked ones */
+  unsigned lock_page; /* the lock-byte page's number for this page size */
+  unsigned n_parked;  /* pages currently renamed to lock_page */
+};
+static sqlite3_pcache_methods2 pcache_base;
+static uint64_t pcache_truncates, pcache_truncates_skipped;
+
+static int wc_init(void *arg) { (void)arg; return pcache_base.xInit(pcache_base.pArg); }
+static void wc_shutdown(void *arg) { (void)arg; pcache_base.xShutdown(pcache_base.pArg); }
+static sqlite3_pcache *wc_create(int szPage, int szExtra, int bPurgeable) {
+  struct wcache *w = sqlite3_malloc(sizeof *w);
+  if (!w) return NULL;
+  w->base = pcache_base.xCreate(szPage, szExtra, bPurgeable);
+  if (!w->base) { sqlite3_free(w); return NULL; }
+  w->max_key = 0;
+  w->lock_page = LOCK_BYTE_OFFSET / (unsigned)szPage + 1;
+  w->n_parked = 0;
+  return (sqlite3_pcache *)w;
+}
+static void wc_cachesize(sqlite3_pcache *p, int n) { pcache_base.xCachesize(((struct wcache *)p)->base, n); }
+static int wc_pagecount(sqlite3_pcache *p) { return pcache_base.xPagecount(((struct wcache *)p)->base); }
+static sqlite3_pcache_page *wc_fetch(sqlite3_pcache *p, unsigned key, int create) {
+  struct wcache *w = (struct wcache *)p;
+  sqlite3_pcache_page *pg = pcache_base.xFetch(w->base, key, create);
+  if (pg && create) {
+    if (key == w->lock_page) w->n_parked++;
+    else if (key > w->max_key) w->max_key = key;
+  }
+  return pg;
+}
+static void wc_unpin(sqlite3_pcache *p, sqlite3_pcache_page *pg, int discard) {
+  pcache_base.xUnpin(((struct wcache *)p)->base, pg, discard);
+}
+static void wc_rekey(sqlite3_pcache *p, sqlite3_pcache_page *pg, unsigned old_key, unsigned new_key) {
+  struct wcache *w = (struct wcache *)p;
+  pcache_base.xRekey(w->base, pg, old_key, new_key);
+  if (old_key == w->lock_page && w->n_parked) w->n_parked--;
+  if (new_key == w->lock_page) w->n_parked++;
+  else if (new_key > w->max_key) w->max_key = new_key;
+}
+static void wc_truncate(sqlite3_pcache *p, unsigned limit) {
+  struct wcache *w = (struct wcache *)p;
+  pcache_truncates++;
+  if (w->n_parked == 0 && w->max_key < limit) { pcache_truncates_skipped++; return; }
+  pcache_base.xTruncate(w->base, limit);
+  if (limit > 0 && w->max_key >= limit) w->max_key = limit - 1;
+  if (w->lock_page >= limit) w->n_parked = 0;
+}
+static void wc_destroy(sqlite3_pcache *p) {
+  struct wcache *w = (struct wcache *)p;
+  pcache_base.xDestroy(w->base);
+  sqlite3_free(w);
+}
+static void wc_shrink(sqlite3_pcache *p) { pcache_base.xShrink(((struct wcache *)p)->base); }
+
+static int pcache_install(void) {
+  if (sqlite3_config(SQLITE_CONFIG_GETPCACHE2, &pcache_base) != SQLITE_OK) return -1;
+  static sqlite3_pcache_methods2 m;
+  m = pcache_base;
+  m.pArg = NULL;
+  m.xInit = wc_init;
+  m.xShutdown = wc_shutdown;
+  m.xCreate = wc_create;
+  m.xCachesize = wc_cachesize;
+  m.xPagecount = wc_pagecount;
+  m.xFetch = wc_fetch;
+  m.xUnpin = wc_unpin;
+  m.xRekey = wc_rekey;
+  m.xTruncate = wc_truncate;
+  m.xDestroy = wc_destroy;
+  m.xShrink = wc_shrink;
+  return sqlite3_config(SQLITE_CONFIG_PCACHE2, &m) == SQLITE_OK ? 0 : -1;
+}
+
 static int db_open(struct db *d, const char *path, long long mmap_bytes, int cache_kib) {
   memset(d, 0, sizeof *d);
+  if (!getenv("DEFAULT_PCACHE") && pcache_install() < 0) {
+    fprintf(stderr, "sqlite: could not install the page cache\n");
+    return -1;
+  }
   if (sqlite3_initialize() != SQLITE_OK) { /* SQLITE_OMIT_AUTOINIT: nothing else does this */
     fprintf(stderr, "sqlite3_initialize failed\n");
     return -1;

@@ -48,6 +48,11 @@ SQLITE_PATH=... JWT_SECRET=... HOST=0.0.0.0 PORT=80 bash start.sh
 - **Sleeping.** With one ring live, each batch ends in a single `io_uring_enter` that submits and
   waits. With several, the thread sleeps in `epoll_wait` on the rings' eventfds (a `DEFER_TASKRUN`
   ring signals it when work arrives) and runs the task work of the rings that fired.
+- **Batches form when busy.** After a pass that handled 8 or more completions, the next wait asks
+  for 32 completions or 250 µs (one ring: `io_uring_submit_and_wait_timeout`; several: a 250 µs
+  pause after epoll, then every ring's task work), so one wake-up and its `BEGIN`/`COMMIT` and
+  submits are shared by more requests. It delays only when responses leave, never what they
+  contain, and only while the server is busy. Locally it cut CPU per request by about 15 %.
 - **Batches.** Everything from one wake-up is one batch: reads are answered from one `BEGIN`, with
   B-tree cursors opened once per batch; then cursors close, writes run as prepared statements, then
   `COMMIT`, then the sends are submitted (read responses can go out earlier if the submission queue

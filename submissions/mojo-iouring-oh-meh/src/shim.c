@@ -228,6 +228,24 @@ unsigned sh_wait(int timeout_ms) {
 // (number submitted, or -errno).
 int sh_wait_one(int i) { return io_uring_submit_and_wait(&rings[i].ring, 1); }
 
+// Busy variant: submit, then wait for up to `want` completions or `timeout_us`,
+// whichever comes first, still in one enter. Lets a busy loop form batches.
+int sh_wait_one_batch(int i, unsigned want, unsigned timeout_us) {
+  struct __kernel_timespec ts = {.tv_sec = 0, .tv_nsec = (long long)timeout_us * 1000};
+  struct io_uring_cqe *cqe;
+  int rc = io_uring_submit_and_wait_timeout(&rings[i].ring, &cqe, want, &ts, NULL);
+  return rc == -ETIME ? 0 : rc;
+}
+
+// Multi-ring variant of the same idea: after epoll woke us, pause briefly so more
+// completions land, then collect every live ring's deferred work.
+void sh_settle(unsigned sleep_us) {
+  struct timespec ts = {.tv_sec = 0, .tv_nsec = (long)sleep_us * 1000};
+  nanosleep(&ts, NULL);
+  for (int i = 0; i < MAX_RINGS; i++)
+    if (rings[i].live) io_uring_get_events(&rings[i].ring);
+}
+
 unsigned sh_reap(int i, struct sh_cqe *out, unsigned max) {
   struct io_uring *r = &rings[i].ring;
   struct io_uring_cqe *cqe;

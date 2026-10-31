@@ -73,6 +73,16 @@ def wait_one(i: Int) -> Int:
 
 
 @always_inline
+def wait_one_batch(i: Int, want: Int, timeout_us: Int) -> Int:
+    return Int(external_call["sh_wait_one_batch", c_int](c_int(i), UInt32(want), UInt32(timeout_us)))
+
+
+@always_inline
+def settle(sleep_us: Int):
+    external_call["sh_settle", NoneType](UInt32(sleep_us))
+
+
+@always_inline
 def wait(timeout_ms: Int) -> Int:
     return Int(external_call["sh_wait", UInt32](c_int(timeout_ms)))
 

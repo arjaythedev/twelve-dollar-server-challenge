@@ -39,6 +39,13 @@ comptime CKPT_INTERVAL_MS = 250
 # MEM_RESUME_KB; the gap keeps it from flapping while the kernel reclaims.
 comptime MEM_PAUSE_KB = 160 * 1024
 comptime MEM_RESUME_KB = 256 * 1024
+# Batch formation: after a pass that handled at least BUSY_MIN completions, the
+# next wait asks for BATCH_WANT completions or BATCH_US, so one wake-up (and its
+# BEGIN/COMMIT and submits) is shared by more requests. Costs up to BATCH_US of
+# latency only while the server is busy.
+comptime BUSY_MIN = 8
+comptime BATCH_WANT = 32
+comptime BATCH_US = 250
 
 # connection flags
 comptime F_OPEN: UInt8 = 1
@@ -732,12 +739,13 @@ struct Server:
 
     def run(mut self) raises:
         var single = self.single_mode()
+        var busy = False
         if not single:
             for r in range(self.nrings):
                 _ = submit(r)
         while True:
             if single:
-                var rc = wait_one(0)
+                var rc = wait_one_batch(0, BATCH_WANT, BATCH_US) if busy else wait_one(0)
                 if rc < 0 and rc != EAGAIN and rc != -4:
                     log("wait_one failed: " + String(rc) + "; using epoll waits")
                     self.single_wait_ok = False
@@ -748,15 +756,20 @@ struct Server:
                     else:
                         log("eventfd registration failed; epoll waits will time out instead")
                 _ = wait(100 if not self.efd0_ready else 1000)
+                if busy:
+                    settle(BATCH_US)
             self.now = unix_time()
             self.scratch.reset()
+            var handled = 0
             for r in range(self.nrings):
                 while True:
                     var n = reap(r, self.cqes, CQ_BATCH)
+                    handled += n
                     for i in range(n):
                         self.dispatch(self.cqes[unsafe_offset=i])
                     if n < CQ_BATCH:
                         break
+            busy = handled >= BUSY_MIN
             if len(self.writes) > 0:
                 self.run_writes()
             else:

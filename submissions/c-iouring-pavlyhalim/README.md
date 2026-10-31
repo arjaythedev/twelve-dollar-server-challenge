@@ -29,7 +29,9 @@ Every user is a keep-alive connection, so the connection count is what the serve
 - Ring 0 is `SINGLE_ISSUER | DEFER_TASKRUN` and is the ring the loop waits on (a timed
   `io_uring_enter`: 64 completions or 2 ms when busy, up to 1 s when idle). The other rings use
   ordinary task work and signal an eventfd that ring 0 polls, so a completion anywhere ends the
-  wait and idle rings cost nothing. (With `DEFER_TASKRUN` on every ring, a completion on a ring
+  wait and idle rings cost nothing. The eventfd is never read back: a multishot poll posts one
+  completion per wake-up, so draining the counter was 0.3 system calls per request for nothing.
+  (With `DEFER_TASKRUN` on every ring, a completion on a ring
   that is not being entered stays unposted and the loop sleeps through it: measured as a 100–500 ms
   tail on the second request of a connection.)
 - Ubuntu's 6.8.0-136 and later kernels reject provided-buffer-ring registration with `EINVAL`
@@ -68,6 +70,15 @@ Each wake-up of the loop is one batch:
 - `unix-excl` VFS: this process is the only one that opens the file, so the wal-index lives in heap
   memory and no `fcntl()` lock is taken per transaction. The checkpoint thread's second connection
   shares it (same process).
+- A small VFS shim over `unix-excl` (the pattern of SQLite's own `vfstrace`/`multiplex` shims,
+  public API only) writes each WAL frame with one `pwrite` instead of two: SQLite writes a frame's
+  24-byte header and then its page at the next offset, and the shim holds the header for that one
+  call and sends both together. Any other call on the WAL file writes a held header first, and a
+  reader finds a frame only after the wal-index is updated, after both halves are written. WAL
+  `pwrite`s on the request thread: 0.32 → 0.16 per request.
+- System calls per request on the request thread, counted with kernel tracepoints at 120,000
+  users: 0.44 (`io_uring_enter` 0.28, WAL `pwrite` 0.16, everything else ≈ 0). The checkpoint
+  thread adds 0.17, off the request path.
 - WAL, `synchronous=NORMAL`, `wal_autocheckpoint=0`. A WAL hook wakes a checkpoint thread past
   1,000 frames (PASSIVE, on its own connection, never on the loop). Past 4,000 frames, writes are
   held until the thread reports the log fully copied (at most 1 s; reads go on), so the next write
@@ -75,11 +86,18 @@ Each wake-up of the loop is one batch:
   resort.
 - No memory map (`mmap_size=0`) and a 32 MB page cache. With a memory map every page fetch first
   probes the WAL index; with the pages in SQLite's own cache a hit returns at once (measured at
-  120,000 users: 17.6 → 15.5 µs per request). 32 MB rather than more because each commit that
-  follows a page split scans the whole page cache, so a bigger cache costs more there; 16 MB was
-  too small (misses), 32 MB measured best (14.0 µs per request against 14.8 µs at 64 MB).
+  120,000 users: 17.6 → 15.5 µs per request). SQLite's own counters (`SQLITE_DBSTATUS_CACHE_*`,
+  logged every 10 s) put the working set at about 34 MB: at 120,000 users a 32 MB and a 64 MB cache
+  both miss only on first load after startup (~4,300 misses in 55 million lookups) and cost the
+  same CPU within noise, so the smaller one is kept for the memory it leaves to connections.
   `THREADSAFE=2` with `OPEN_NOMUTEX`; memory statistics, the progress-callback check per opcode,
   shared cache and unused features compiled out.
+- SQLite's default page cache sits behind its plugin interface (`SQLITE_CONFIG_PCACHE2`) with one
+  change: at commit, when no page past the end of the file can exist, the cache does not walk its
+  hash table to drop them. A page split briefly renames a page to the lock-byte page's number,
+  which made every later commit scan the whole cache (1.8% of CPU in a profile); the wrapper
+  tracks the keys that enter the cache and skips that scan, 9,770 times out of 9,772 in a test run.
+  The database passes `PRAGMA integrity_check` afterwards and every read matches SQL.
 
 ## HTTP, JSON, JWT
 

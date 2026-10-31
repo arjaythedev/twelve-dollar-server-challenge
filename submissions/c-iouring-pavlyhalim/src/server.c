@@ -366,11 +366,12 @@ static void on_close(unsigned ri, struct io_uring_cqe *cqe) {
   conn_freed(c);
 }
 
+/* A ring's eventfd fired. The counter is not drained: a multishot poll posts one completion per
+ * wake-up of the eventfd, not per level, so reading it back would be a system call for nothing
+ * (and the 64-bit counter cannot overflow at a few thousand signals a second). */
 static void on_evfd(struct io_uring_cqe *cqe) {
   unsigned ri = UD_RING(cqe->user_data);
   struct rs *rs = &R[ri];
-  uint64_t v;
-  while (read(rs->efd, &v, sizeof v) > 0) {}
   rs->need_poll = 1;
   if (!(cqe->flags & IORING_CQE_F_MORE)) sqe_poll_multishot(ring_sqe(&R[0].r), rs->efd, UD(UD_EVFD, ri, 0, 0));
 }
@@ -478,9 +479,9 @@ static void stats(uint64_t dt_ns) {
   sqlite3_db_status(A.db.c, SQLITE_DBSTATUS_CACHE_MISS, &c_miss, &hw, 1);
   sqlite3_db_status(A.db.c, SQLITE_DBSTATUS_CACHE_WRITE, &c_write, &hw, 1);
   sqlite3_db_status(A.db.c, SQLITE_DBSTATUS_CACHE_USED, &c_used, &hw, 0);
-  fprintf(stderr, "sqlite: cache_hit=%d cache_miss=%d cache_write=%d cache_used=%dKB truncates=%llu skipped=%llu\n",
+  fprintf(stderr, "sqlite: cache_hit=%d cache_miss=%d cache_write=%d cache_used=%dKB truncates=%llu skipped=%llu wal_frames_joined=%llu\n",
           c_hit, c_miss, c_write, c_used / 1024, (unsigned long long)pcache_truncates,
-          (unsigned long long)pcache_truncates_skipped);
+          (unsigned long long)pcache_truncates_skipped, (unsigned long long)wal_frames_joined);
   double dt = (double)dt_ns / 1e9;
   struct rusage ru;
   getrusage(RUSAGE_SELF, &ru);

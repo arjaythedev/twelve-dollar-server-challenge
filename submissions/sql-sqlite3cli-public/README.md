@@ -3,12 +3,13 @@
 The web application is written in SQL and run by the `sqlite3` command-line shell. SQLite parses
 the HTTP request, routes it, verifies the JWT with HMAC-SHA256 written as a recursive CTE, runs the
 queries and renders the whole HTTP response. Bash listens on the socket itself and moves bytes,
-because `sqlite3` can't open a socket. No Nginx, no socat, no compiled code of our own.
+because `sqlite3` can't open a socket. No socat, no compiled code of our own.
 
 - **Language:** SQL (SQLite 3.45.1 dialect), plus ~80 lines of Bash 5.2 that move bytes
 - **Runtime:** the stock `sqlite3` CLI and Bash's `accept` loadable builtin (Ubuntu 24.04 packages `sqlite3`, `bash-builtins`)
 - **Framework, driver:** none; the database is the CLI's own
-- **Nginx or direct:** **direct**, on `0.0.0.0:80`
+- **Nginx or direct:** **behind Nginx** (`bench/nginx.conf`, us on `127.0.0.1:3000`). It also runs
+  direct on `0.0.0.0:80` with no changes, but tops out ~6× lower there (see "Limits").
 
 ## How a request flows
 
@@ -78,33 +79,52 @@ own Bash process. These processes are forked from a small main shell and do no f
   replacement through another FIFO. When workers forked their own replacements, the process tree
   became as deep as the number of connections, and the kernel's per-process memory (anon_vma
   chains) grew with that depth.
-- **Nothing on the request path forks.** No `$(...)`, no external commands; `mkfifo`, `rm`, `sleep`
-  and `accept` are Bash loadables.
+- **One write per response.** Bash's `printf` writes each line of the response separately, and on
+  a reused connection Nagle's algorithm plus the client's delayed ACK then hold the rest for 40 ms.
+  The response goes out through the `tee` loadable instead, which copies 8 KB at a time, so it
+  leaves in one `write()`. A feed over 8 KB (20 posts near 500 characters) would still split.
+- **Nothing on the request path forks.** No `$(...)`, no external commands; `mkfifo`, `rm`, `sleep`,
+  `tee` and `accept` are Bash loadables.
 
 ## Limits, measured
 
 Measured in Docker on an Apple M5 (arm64, Linux 7.0), not the x86 box:
-- server container: 1 CPU, 2 GB, no swap;
+- server container: 1 CPU, 2 GB, no swap; Nginx with `bench/nginx.conf` in the same container;
 - load: the organizer's load model (mload: think time ×1, no gzip), 60 s ramp and 60 s hold.
 
-| users | result | p95 | p99 | errors | server CPU |
-|---|---|---|---|---|---|
-| 500 | pass | 2.7 ms | 4.2 ms | 0.18 % | ~3 % |
-| 2,000 | pass | 3.7 ms | 8.8 ms | 0.45 % | ~17 % |
-| 2,500 | pass | 2.3 ms | 3.8 ms | 0.39 % | ~15 % |
-| 3,000 | pass, but at the 2 GB limit | 3.0 ms | 5.2 ms | 0.58 % | ~22 % |
+**Behind Nginx (the submission):**
 
-- **Memory is the ceiling, not CPU.** Each connection costs ~0.4–0.5 MB of private Bash memory
-  (mostly heap, growing slowly with requests served) plus ~0.1 MB of kernel memory (page tables,
-  slab, stack). At 2,500 users that is ~1.4 GB before the database's page cache. At 3,000 the
-  container reached its 2 GB limit and the page cache was squeezed, so a 5-minute hold there would
-  probably not survive. Expect about **2,500** on the box.
-- **The errors are refused or reset connections during the ramp.** A connection that arrives in
-  the microseconds between one worker closing the listener and the next opening it is refused,
-  and the backlog is 1. Each user connects once, so these errors stay roughly fixed while the
-  request count grows over a 5-minute hold.
-- **Not supported:** chunked request bodies (Content-Length only) and `Connection: close`; a
-  connection stays open until the client closes it.
+| users | result | p95 | p99 | errors | server CPU in the hold |
+|---|---|---|---|---|---|
+| 6,000 | pass | 5.2 ms | 41.9 ms | 0.01 % | ~35 % |
+| 10,000 | pass | 5.3 ms | 41.4 ms | 0.01 % | ~55 % |
+| 13,000 | pass | 12.8 ms | 79.9 ms | 0.16 % | ~70–80 % |
+| 16,000 | pass | 70.2 ms | 154 ms | 0.12 % | ~80–90 % |
+
+The 6,000 and 10,000 runs predate the one-write fix, hence their 40 ms p99.
+
+- **CPU is the limit here.** Memory peaked at ~1.8 GB at 16,000, most of it Nginx's client
+  connections and the database page cache; only a few hundred Bash workers are open.
+- **The box's vCPU is slower than an M5 core,** so expect less there. My guess is 8,000–12,000; that
+  isn't measured.
+- **Errors are mostly 502s.** Nginx opens a new upstream connection in the microseconds between one
+  worker closing the listener and the next opening it, and the connect is refused. There are also
+  2–3 unexplained 400s per run.
+
+**Direct, `HOST=0.0.0.0 PORT=80` (optional):**
+
+| users | result | p95 | p99 | errors |
+|---|---|---|---|---|
+| 2,000 | pass | 3.7 ms | 8.8 ms | 0.45 % |
+| 2,500 | pass | 2.3 ms | 3.8 ms | 0.39 % |
+| 3,000 | pass, but at the 2 GB limit | 3.0 ms | 5.2 ms | 0.58 % |
+
+- **Here memory is the limit.** Every user holds a connection and so a Bash process: ~0.4–0.5 MB of
+  private Bash memory (mostly heap) plus ~0.1 MB of kernel memory. At 3,000 the container hit 2 GB.
+- **The errors are refused or reset connections during the ramp** (backlog 1, one listener at a time).
+
+**Not supported:** chunked request bodies (Content-Length only) and `Connection: close`; a
+connection stays open until the client closes it.
 
 ## Files
 

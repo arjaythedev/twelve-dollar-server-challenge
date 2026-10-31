@@ -7,8 +7,9 @@
 # a `.read route/<name>.sql` command to a file and then reads that file), checks the JWT
 # (HMAC-SHA256 in a recursive CTE), runs the queries and renders the whole HTTP response.
 #
-# Served directly, every user holds a connection, and Bash has no select/epoll, so every
-# connection gets its own small Bash process. They share a few sqlite3 processes: a connection
+# It listens on HOST:PORT: behind Nginx (127.0.0.1:3000, the default) or directly (0.0.0.0:80).
+# Bash has no select/epoll, so every connection gets its own small Bash process (served directly,
+# that is one per user). They share a few sqlite3 processes: a connection
 # writes its request to its own file and sends one line, `.read <file>`, to a sqlite3's FIFO
 # (one line is one write, so lines from different connections never interleave: Bash
 # line-buffers stdout); sqlite3 writes the response into the connection's FIFO with `.once`,
@@ -21,7 +22,7 @@ set -u
 export LC_ALL=C
 shopt -u patsub_replacement  # "&" in a ${x//a/b} replacement would otherwise mean the match
 DIR=$(cd "$(dirname "$0")" && pwd)
-HOST=${HOST:-0.0.0.0} PORT=${PORT:-80} POOL=${POOL:-2} IDLE=${IDLE:-4}
+HOST=${HOST:-127.0.0.1} PORT=${PORT:-3000} POOL=${POOL:-2} IDLE=${IDLE:-4}
 : "${SQLITE_PATH:?}" "${JWT_SECRET:?}"
 enable -f accept accept && enable -f mkfifo mkfifo && enable -f rm rm && enable -f sleep sleep && enable -f tee tee || exit 1
 
@@ -79,4 +80,5 @@ worker() {
 mkfifo "$RUN/token" "$RUN/spawn" && exec {TOK}<>"$RUN/token" {SPAWN}<>"$RUN/spawn" || exit 1
 for ((i = 0; i < IDLE; i++)); do worker & done
 printf . >&"$TOK"
-while IFS= read -r -N 1 -u "$SPAWN" _; do worker & done
+# a 1 s timeout, so a TERM trap runs promptly: Bash runs traps only once a read returns
+while :; do IFS= read -r -N 1 -t 1 -u "$SPAWN" _ && { worker & }; done

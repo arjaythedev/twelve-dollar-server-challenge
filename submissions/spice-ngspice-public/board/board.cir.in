@@ -1,0 +1,55 @@
+* The board: a ring-oscillator clock, the request chip (Verilog, run by Verilator inside ngspice's d_cosim),
+* and a gate-level comparator for the JWT signature. @...@ is filled in by build.sh.
+* One job per run: ngspice -b board.cir in a directory holding in.txt (see chip() in ../wire/conn.sh).
+
+* 100 MHz clock: a ring oscillator, one NAND gate (5 ns) feeding itself back through a 5 ns delay line.
+* run (from the source) holds it at 1 until t = 6 ns; then clk falls at 6, 16, 26 ... ns and rises at 11, 21 ... ns.
+aosc [run clkd] clk nand5
+adly clk clkd buf5
+.model nand5 d_nand(rise_delay=1e-12 fall_delay=1e-12)
+.model buf5 d_buffer(rise_delay=4.999e-9 fall_delay=4.999e-9)
+
+* the request bytes: run, iv, ie, i7..i0 (the data change 2 ns after each falling edge)
+asrc [run iv ie i7 i6 i5 i4 i3 i2 i1 i0] reqsrc
+.model reqsrc d_source(input_file="in.txt")
+
+* the chip. d_cosim runs it once per analog timestep, replaying the input events it queued. An output
+* that changes more than `delay` before the end of a step makes d_cosim cut the step short and redo it,
+* and a pin can only change once per step. So: steps of at most 9.9 ns (tran below, under one clock, so a
+* pin changes at most once per step) and outputs that reach the board one clock (10.005 ns) late.
+achip [@IN@] [@OUT@] NULL chipm
+.model chipm d_cosim(simulation="@SO@" delay=10.005e-9 queue_size=1024)
+
+* signature comparator, 12 gates: cbad <= (cclr ? 0 : cbad) | (ca != cb), one byte pair per clock;
+* cack <= cend tells the chip the last pair is in
+ax7 [ca7 cb7] d7 xor1
+ax6 [ca6 cb6] d6 xor1
+ax5 [ca5 cb5] d5 xor1
+ax4 [ca4 cb4] d4 xor1
+ax3 [ca3 cb3] d3 xor1
+ax2 [ca2 cb2] d2 xor1
+ax1 [ca1 cb1] d1 xor1
+ax0 [ca0 cb0] d0 xor1
+aor [d7 d6 d5 d4 d3 d2 d1 d0] ne or1
+ahold [cbad ~cclr] keep and1
+anext [ne keep] cnext or1
+aff cnext clk NULL NULL cbad NULL dff1
+aack cend clk NULL NULL cack NULL dff1
+.model xor1 d_xor(rise_delay=1e-11 fall_delay=1e-11)
+.model or1 d_or(rise_delay=1e-11 fall_delay=1e-11)
+.model and1 d_and(rise_delay=1e-11 fall_delay=1e-11)
+.model dff1 d_dff(clk_delay=1e-11 rise_delay=1e-11 fall_delay=1e-11 ic=0)
+
+* done stops the run: a DAC bridge onto an analog node the control script watches
+adoneb [done] [adone] donedac
+.model donedac dac_bridge(out_low=0 out_high=1 t_rise=1e-12 t_fall=1e-12)
+rdone adone 0 1k
+
+.control
+esave ot ob7 ob6 ob5 ob4 ob3 ob2 ob1 ob0
+stop when v(adone) > 0.5
+tran 1n 2m 0 9.9n
+eprint ot ob7 ob6 ob5 ob4 ob3 ob2 ob1 ob0
+quit
+.endc
+.end

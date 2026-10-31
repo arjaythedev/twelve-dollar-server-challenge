@@ -140,14 +140,18 @@ with a 60 s ramp. Other sessions' containers were busy on the same host, so trea
 |---|---|---|---|---|---|---|---|---|---|
 | first (Bash + ngspice per job) | 150 | **pass** | 12.3 | | 363 ms | 633 ms | 0 | 64% | 44 MB |
 | first | 250 | fail | 18.8 | | 4.4 s | 5.2 s | 0 | 85% (CPU-bound) | 306 MB |
-| now (one long-running board) | 500 | fail | 41.6 | 12 ms | 665 ms | 1.23 s | 0.04% | 40% | 36 MB |
+| now (one long-running board) | 500 | **pass** | 41.9 | 12 ms | 30 ms | 40 ms | 0 | 32% | 32 MB |
+| now | 1,000 | **pass** | 83.9 | 15 ms | 56 ms | 99 ms | 0 | 60% | 34 MB |
+| now | 1,500 | fail | 123.0 | 110 ms | 579 ms | 652 ms | 0 | 80% (CPU-bound) | 39 MB |
 
-At 500 users the median is 12 ms, and the server is busy well under half the time; the tail comes from rare
-stalls of up to ~1.5 s (the server at 100% for a moment), and three responses in that run were
-malformed (nginx: "upstream sent no valid HTTP/1.0 header"). Both came from slice restarts: a job cut off
-by the end of a slice started over, and lost output bits (the two `d_cosim` findings above) either garbled
-it or left it waiting for the next slice. Fixed since; new numbers below as I get them.
-An average user costs ~0.6 ms of CPU per second now (a feed is ~22 ms, the rest 1–4 ms).
+So the edge is between 1,000 and 1,500 users on this host. The benchmark's droplet took ~1.45x longer per
+request than this Mac for the first version, so expect less there. An average user costs ~0.6 ms of CPU per
+second now (a feed is ~22 ms, the rest 1–4 ms).
+
+An earlier run of this version at 500 users failed (p95 665 ms, three malformed responses). Both came from
+slice restarts: a job cut off by the end of a slice started over, and lost output bits (the two `d_cosim`
+findings above) either garbled it or left it waiting for the next slice. The runs in the table are after
+that fix.
 
 ## Files
 

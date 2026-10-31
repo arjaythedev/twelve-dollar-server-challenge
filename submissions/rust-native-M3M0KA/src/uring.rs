@@ -19,6 +19,7 @@ pub const IORING_OFF_SQES: i64 = 0x1000_0000;
 pub const IORING_SETUP_SINGLE_ISSUER: u32 = 1 << 12;
 pub const IORING_SETUP_DEFER_TASKRUN: u32 = 1 << 13;
 pub const IORING_SETUP_COOP_TASKRUN: u32 = 1 << 8;
+pub const IORING_SETUP_TASKRUN_FLAG: u32 = 1 << 14;
 pub const IORING_SETUP_CQSIZE: u32 = 1 << 3;
 
 pub const IORING_ENTER_GETEVENTS: u32 = 1;
@@ -35,9 +36,13 @@ pub const IORING_OP_CLOSE: u8 = 19;
 pub const IORING_OP_SEND: u8 = 26;
 pub const IORING_OP_SHUTDOWN: u8 = 34;
 pub const IORING_OP_RECV_MULTISHOT: u8 = 47;
+pub const IORING_OP_PROVIDE_BUFFERS: u8 = 31;
 
 pub const IOSQE_FIXED_FILE: u8 = 1 << 0;
+pub const IOSQE_IO_HARDLINK: u8 = 1 << 4;
 pub const IOSQE_BUFFER_SELECT: u8 = 1 << 5;
+pub const IOSQE_CQE_SKIP_SUCCESS: u8 = 1 << 6;
+pub const IOSQE_IO_LINK: u8 = 1 << 2;
 
 pub const IORING_ACCEPT_MULTISHOT: u16 = 1;
 pub const IORING_FILE_INDEX_ALLOC: i32 = -1;
@@ -165,12 +170,60 @@ pub struct Ring {
 impl Ring {
     /// Creates a ring with `entries` submission slots. Returns None when the
     /// kernel refuses io_uring (seccomp, old kernel) or the ABI looks wrong.
-    pub fn new(entries: u32, flags: u32) -> Option<Ring> {
-        let mut p = Params { ..Default::default() };
-        let fd = unsafe { syscall(SYS_SETUP, entries as i64, &mut p as *mut Params) } as c_int;
-        if fd < 0 {
-            return None;
+    pub fn new(entries: u32, cq_entries: u32, flags: u32) -> Option<Ring> {
+        // The flags were previously accepted and dropped, so an older kernel's
+        // refusal was indistinguishable from success. Try the requested flags,
+        // then once without them, so an unsupported combination degrades to a
+        // working ring instead of a silent fallback to the other transport.
+        let mut fd = -1;
+        for attempt in 0..2 {
+            let mut p = Params { ..Default::default() };
+            p.flags = if attempt == 0 { flags } else { 0 };
+            p.cq_entries = cq_entries;
+            fd = unsafe { syscall(SYS_SETUP, entries as i64, &mut p as *mut Params) } as c_int;
+            if fd >= 0 {
+                return Self::map(fd, &p);
+            }
+            if flags == 0 {
+                break;
+            }
         }
+        None
+    }
+
+    fn map(fd: c_int, params: &Params) -> Option<Ring> {
+        let p = Params {
+            sq_entries: params.sq_entries,
+            cq_entries: params.cq_entries,
+            flags: params.flags,
+            sq_thread_cpu: params.sq_thread_cpu,
+            sq_thread_idle: params.sq_thread_idle,
+            features: params.features,
+            wq_fd: params.wq_fd,
+            resv: params.resv,
+            sq_off: SqOffsets {
+                head: params.sq_off.head,
+                tail: params.sq_off.tail,
+                ring_mask: params.sq_off.ring_mask,
+                ring_entries: params.sq_off.ring_entries,
+                flags: params.sq_off.flags,
+                dropped: params.sq_off.dropped,
+                array: params.sq_off.array,
+                resv1: params.sq_off.resv1,
+                resv2: params.sq_off.resv2,
+            },
+            cq_off: CqOffsets {
+                head: params.cq_off.head,
+                tail: params.cq_off.tail,
+                ring_mask: params.cq_off.ring_mask,
+                ring_entries: params.cq_off.ring_entries,
+                overflow: params.cq_off.overflow,
+                cqes: params.cq_off.cqes,
+                flags: params.cq_off.flags,
+                resv1: params.cq_off.resv1,
+                resv2: params.cq_off.resv2,
+            },
+        };
         if p.sq_entries == 0 || p.cq_entries == 0 || p.sq_off.array as usize >= 4096 {
             unsafe { super::sys::close(fd) };
             return None;
@@ -312,6 +365,12 @@ impl Ring {
     }
 
     #[inline]
+    pub fn sq_space(&self) -> u32 {
+        let head = unsafe { std::ptr::read_volatile(self.sq_head) };
+        self.sq_entries.saturating_sub(self.cached_tail.wrapping_sub(head))
+    }
+
+    #[inline]
     pub fn sqe(&mut self) -> Option<*mut u8> {
         let head = unsafe { std::ptr::read_volatile(self.sq_head) };
         if self.cached_tail.wrapping_sub(head) >= self.sq_entries {
@@ -418,6 +477,12 @@ impl Drop for Ring {
 pub struct Sqe(pub *mut u8);
 
 impl Sqe {
+    /// Applies a prepared request to this submission slot.
+    #[inline]
+    pub fn apply<F: FnOnce(&Sqe)>(self, f: F) {
+        f(&self);
+    }
+
     #[inline]
     fn put(&self, off: usize, v: u64) {
         unsafe { std::ptr::write_unaligned(self.0.add(off) as *mut u64, v) };
@@ -442,12 +507,41 @@ impl Sqe {
         }
     }
 
+    /// One-shot accept straight into a free slot of the ring's file table.
+    /// Multishot accept is deliberately not used: a burst can hand the ring
+    /// more connections than it has slots, and the overflow is accepted and
+    /// then dropped with ENFILE. One-shot accepts are armed only while slots
+    /// remain, so no connection is ever accepted that cannot be installed.
     pub fn accept(listen_fd: c_int, user: u64) -> impl FnOnce(&Sqe) {
         move |s: &Sqe| {
             s.put8(O_OPCODE, IORING_OP_ACCEPT);
             s.put32(O_FD, listen_fd as u32);
-            s.put16(O_IOPRIO, IORING_ACCEPT_MULTISHOT);
             s.put32(O_FILE_INDEX, IORING_FILE_INDEX_ALLOC as u32);
+            s.put(O_USER, user);
+        }
+    }
+
+    /// Hands `nbufs` buffers of `len` bytes, starting at id `bid`, to group
+    /// `bgid`. The completion is skipped: nothing waits on it.
+    ///
+    /// `struct io_provide_buffers` maps onto the SQE as fd = count, addr = base,
+    /// len = buffer length, off = first id, buf_group = group.
+    pub fn provide_buffers(
+        base: *const u8,
+        len: u32,
+        nbufs: u32,
+        bgid: u16,
+        bid: u32,
+        user: u64,
+    ) -> impl FnOnce(&Sqe) {
+        move |s: &Sqe| {
+            s.put8(O_OPCODE, IORING_OP_PROVIDE_BUFFERS);
+            s.put8(O_FLAGS, IOSQE_CQE_SKIP_SUCCESS);
+            s.put32(O_FD, nbufs);
+            s.put(O_OFF, bid as u64);
+            s.put(O_ADDR, base as u64);
+            s.put32(O_LEN, len);
+            s.put16(O_BUF_GROUP, bgid);
             s.put(O_USER, user);
         }
     }
@@ -474,10 +568,13 @@ impl Sqe {
         }
     }
 
+    /// Shutdown both directions, hard-linked to the close that follows it. The
+    /// armed multishot receive then completes (EOF or error) instead of pinning
+    /// the socket open past the close.
     pub fn shutdown(file_index: u32, user: u64) -> impl FnOnce(&Sqe) {
         move |s: &Sqe| {
             s.put8(O_OPCODE, IORING_OP_SHUTDOWN);
-            s.put8(O_FLAGS, IOSQE_FIXED_FILE);
+            s.put8(O_FLAGS, IOSQE_FIXED_FILE | IOSQE_IO_HARDLINK);
             s.put32(O_FD, file_index);
             s.put32(O_LEN, 2); // SHUT_RDWR
             s.put(O_USER, user);
@@ -506,6 +603,94 @@ pub fn read_eventfd(fd: c_int) {
 #[cfg(test)]
 mod abi_tests {
     use super::*;
+
+    fn encode<F: FnOnce(&Sqe)>(f: F) -> [u8; SQE_SIZE] {
+        let mut b = [0u8; SQE_SIZE];
+        {
+            let s = Sqe(b.as_mut_ptr());
+            s.apply(f);
+        }
+        b
+    }
+    fn u32at(b: &[u8; SQE_SIZE], at: usize) -> u32 {
+        u32::from_ne_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]])
+    }
+    fn u16at(b: &[u8; SQE_SIZE], at: usize) -> u16 {
+        u16::from_ne_bytes([b[at], b[at + 1]])
+    }
+    fn u64at(b: &[u8; SQE_SIZE], at: usize) -> u64 {
+        let mut a = [0u8; 8];
+        a.copy_from_slice(&b[at..at + 8]);
+        u64::from_ne_bytes(a)
+    }
+
+    /// One-shot direct accept: opcode, listener fd, allocating file index, and
+    /// none of the fields the kernel rejects.
+    #[test]
+    fn accept_direct_layout() {
+        let b = encode(Sqe::accept(7, 0x99));
+        assert_eq!(b[O_OPCODE], IORING_OP_ACCEPT);
+        assert_eq!(u32at(&b, O_FD), 7);
+        assert_eq!(u32at(&b, O_FILE_INDEX), IORING_FILE_INDEX_ALLOC as u32);
+        assert_eq!(u32at(&b, O_FLAGS32), 0, "multishot must stay off");
+        assert_eq!(u64at(&b, O_OFF), 0, "addr2/off carries no address");
+        assert_eq!(u32at(&b, O_LEN), 0, "accept rejects a length");
+        assert_eq!(u16at(&b, O_BUF_GROUP), 0, "accept rejects a buffer group");
+        assert_eq!(b[O_FLAGS], 0, "accept is not a fixed-file operation");
+        assert_eq!(u64at(&b, O_USER), 0x99);
+    }
+
+    /// Provided buffers: count in fd, base in addr, length in len, first id in
+    /// off, group in buf_group.
+    #[test]
+    fn provide_buffers_layout() {
+        let base = 0x1000usize as *const u8;
+        let b = encode(Sqe::provide_buffers(base, 2048, 32, 0, 4096, 5));
+        assert_eq!(b[O_OPCODE], IORING_OP_PROVIDE_BUFFERS);
+        assert_eq!(b[O_FLAGS], IOSQE_CQE_SKIP_SUCCESS);
+        assert_eq!(u32at(&b, O_FD), 32, "buffer count");
+        assert_eq!(u64at(&b, O_ADDR), 0x1000);
+        assert_eq!(u32at(&b, O_LEN), 2048);
+        assert_eq!(u64at(&b, O_OFF), 4096, "first buffer id");
+        assert_eq!(u16at(&b, O_BUF_GROUP), 0);
+    }
+
+    /// Multishot receive on a fixed descriptor with buffer selection.
+    #[test]
+    fn recv_multishot_layout() {
+        let b = encode(Sqe::recv_multishot(1234, 0, 6));
+        assert_eq!(b[O_OPCODE], IORING_OP_RECV_MULTISHOT);
+        assert_eq!(b[O_FLAGS], IOSQE_FIXED_FILE | IOSQE_BUFFER_SELECT);
+        assert_eq!(u32at(&b, O_FD), 1234);
+        assert_eq!(u16at(&b, O_BUF_GROUP), 0);
+        assert_eq!(u32at(&b, O_LEN), 0);
+    }
+
+    #[test]
+    fn send_layout() {
+        let buf = b"x".as_ptr();
+        let b = encode(Sqe::send(9, buf, 41, 7));
+        assert_eq!(b[O_OPCODE], IORING_OP_SEND);
+        assert_eq!(b[O_FLAGS], IOSQE_FIXED_FILE);
+        assert_eq!(u32at(&b, O_FD), 9);
+        assert_eq!(u32at(&b, O_LEN), 41);
+        assert_eq!(u32at(&b, O_FLAGS32), 0x4000, "MSG_NOSIGNAL");
+        assert_eq!(u64at(&b, O_ADDR), buf as u64);
+    }
+
+    /// The close is hard-linked behind the shutdown so the armed receive
+    /// terminates instead of pinning the socket.
+    #[test]
+    fn shutdown_links_the_close() {
+        let b = encode(Sqe::shutdown(11, 3));
+        assert_eq!(b[O_OPCODE], IORING_OP_SHUTDOWN);
+        assert_eq!(b[O_FLAGS], IOSQE_FIXED_FILE | IOSQE_IO_HARDLINK);
+        assert_eq!(u32at(&b, O_LEN), 2, "SHUT_RDWR");
+        let c = encode(Sqe::close(11, 4));
+        assert_eq!(c[O_OPCODE], IORING_OP_CLOSE);
+        assert_eq!(c[O_FLAGS], IOSQE_FIXED_FILE);
+        assert_eq!(u32at(&c, O_FD), 11);
+    }
 
     #[test]
     fn struct_sizes_match_the_uapi() {

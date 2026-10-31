@@ -4,13 +4,17 @@
 //! this module skip the bytecode interpreter for the two read endpoints, while
 //! the pager, WAL, locking and transaction boundaries stay SQLite's.
 //!
-//! Correctness rests on two facts that are checked, not assumed:
-//!   * the stored schema is the one these record layouts were written for, and
-//!   * post rowids are dense and `created_at` never decreases in rowid order,
-//!     so the feed order (`created_at DESC, id DESC`) is reverse rowid order.
-//! Both are verified at startup and after every insert; any deviation, any
-//! foreign write, or any overflow-payload row permanently switches reads back
-//! to the ordinary SQL statements.
+//! The feed order (`created_at DESC, id DESC`) is read from the index SQLite
+//! itself maintains for that exact order, `posts_created_at_id_idx`, so no
+//! assumption is made about how ids and timestamps relate: a post inserted with
+//! an earlier `created_at`, a rowid gap, or a write by any other connection is
+//! served correctly with no state carried between requests. Reads always start
+//! from the stored index, the like counts always come from `likes_post_id_idx`,
+//! and every row is read from the page in this request's transaction.
+//!
+//! The stored record layout is checked once at startup, and the plan's output
+//! is compared against the reference SQL once at startup; any mismatch, or an
+//! unreadable record, switches reads back to the ordinary SQL statements.
 
 use std::os::raw::{c_int, c_void};
 
@@ -23,6 +27,7 @@ extern "C" {
     fn feed_btree(db: *mut sqlite3) -> *mut c_void;
     fn feed_cursor_size() -> c_int;
     fn feed_keyinfo(db: *mut sqlite3, nkey: c_int, nextra: c_int) -> *mut c_void;
+    fn feed_keyinfo_desc(db: *mut sqlite3, nkey: c_int, nextra: c_int) -> *mut c_void;
     fn feed_begin_read(bt: *mut c_void, version: *mut u32) -> c_int;
     fn feed_cursor_open(bt: *mut c_void, root: u32, mem: *mut c_void, ki: *mut c_void) -> c_int;
     fn feed_cursor_close(mem: *mut c_void) -> c_int;
@@ -156,42 +161,47 @@ fn decode(rec: &[u8], ncol: usize, cols: &mut [Col; 4]) -> Option<()> {
 pub struct Cursors {
     bt: *mut c_void,
     ki_likes: *mut c_void,
+    ki_newest: *mut c_void,
     scratch_posts: Box<[u8]>,
     scratch_users: Box<[u8]>,
     scratch_likes: Box<[u8]>,
+    scratch_newest: Box<[u8]>,
     pub posts: Box<[u64]>,
     pub users: Box<[u64]>,
     pub likes: Box<[u64]>,
+    pub newest: Box<[u64]>,
     root_posts: u32,
     root_users: u32,
     root_likes: u32,
+    root_newest: u32,
     opened: bool,
 }
 
-/// The two invariants the feed plan needs, plus the schema check.
-pub struct Plan {
-    pub schema_ok: bool,
-    pub invariant_ok: bool,
-    pub last_created: Vec<u8>,
-    pub have_last: bool,
-}
-
 impl Cursors {
-    pub fn new(db: *mut sqlite3, roots: (u32, u32, u32), ki_likes: *mut c_void) -> Cursors {
+    pub fn new(
+        db: *mut sqlite3,
+        roots: (u32, u32, u32, u32),
+        ki_likes: *mut c_void,
+        ki_newest: *mut c_void,
+    ) -> Cursors {
         let sz = unsafe { feed_cursor_size() } as usize;
         let words = sz.div_ceil(8).max(1);
         Cursors {
             bt: unsafe { feed_btree(db) },
             ki_likes,
+            ki_newest,
             scratch_posts: vec![0u8; SCRATCH].into_boxed_slice(),
             scratch_users: vec![0u8; SCRATCH].into_boxed_slice(),
             scratch_likes: vec![0u8; SCRATCH].into_boxed_slice(),
+            scratch_newest: vec![0u8; SCRATCH].into_boxed_slice(),
             posts: vec![0u64; words].into_boxed_slice(),
             users: vec![0u64; words].into_boxed_slice(),
             likes: vec![0u64; words].into_boxed_slice(),
+            newest: vec![0u64; words].into_boxed_slice(),
             root_posts: roots.0,
             root_users: roots.1,
             root_likes: roots.2,
+            root_newest: roots.3,
             opened: false,
         }
     }
@@ -210,86 +220,106 @@ impl Cursors {
         match which {
             0 => self.scratch_posts.as_mut_ptr(),
             1 => self.scratch_users.as_mut_ptr(),
-            _ => self.scratch_likes.as_mut_ptr(),
+            2 => self.scratch_likes.as_mut_ptr(),
+            _ => self.scratch_newest.as_mut_ptr(),
         }
     }
 
-    /// Opens the read transaction and every cursor. Returns the data version.
-    pub fn open(&mut self) -> Option<u32> {
-        let mut v: u32 = 0;
-        if unsafe { feed_begin_read(self.bt, &mut v) } != 0 {
+    /// Opens the read transaction and every cursor. Idempotent.
+    pub fn open(&mut self) -> Option<()> {
+        if self.opened {
+            return Some(());
+        }
+        if unsafe { feed_begin_read(self.bt, std::ptr::null_mut()) } != 0 {
             return None;
         }
         unsafe {
             let p = Self::ptr(&mut self.posts);
+            let u = Self::ptr(&mut self.users);
+            let l = Self::ptr(&mut self.likes);
+            let n = Self::ptr(&mut self.newest);
             if feed_cursor_open(self.bt, self.root_posts, p, std::ptr::null_mut()) != 0 {
                 return None;
             }
-            let u = Self::ptr(&mut self.users);
             if feed_cursor_open(self.bt, self.root_users, u, std::ptr::null_mut()) != 0 {
                 feed_cursor_close(p);
                 return None;
             }
-            let l = Self::ptr(&mut self.likes);
             if feed_cursor_open(self.bt, self.root_likes, l, self.ki_likes) != 0 {
-                feed_cursor_close(p);
                 feed_cursor_close(u);
+                feed_cursor_close(p);
+                return None;
+            }
+            // The index cursor needs key information: without it SQLite treats
+            // the btree as a table and refuses the first step.
+            if feed_cursor_open(self.bt, self.root_newest, n, self.ki_newest) != 0 {
+                feed_cursor_close(l);
+                feed_cursor_close(u);
+                feed_cursor_close(p);
                 return None;
             }
         }
         self.opened = true;
-        Some(v)
+        Some(())
     }
 
+    pub fn is_open(&self) -> bool {
+        self.opened
+    }
+
+    /// Closes every cursor. SQLite's write path must not run while a read
+    /// cursor of ours is positioned on a page it is about to modify.
     pub fn close(&mut self) {
         if !self.opened {
             return;
         }
         self.opened = false;
         unsafe {
+            feed_cursor_close(Self::ptr(&mut self.newest));
             feed_cursor_close(Self::ptr(&mut self.likes));
             feed_cursor_close(Self::ptr(&mut self.users));
             feed_cursor_close(Self::ptr(&mut self.posts));
         }
     }
 
-    /// Sequential crawl used once at startup: dense rowids and non-decreasing
-    /// `created_at` in rowid order. Returns (holds, last created, any rows, next id).
-    pub fn check_invariant(&mut self) -> Option<(bool, Vec<u8>, bool, i64)> {
-        let p = Self::ptr(&mut self.posts);
-        let mut expect: i64 = 1;
-        let mut prev: Vec<u8> = Vec::new();
-        let mut have_prev = false;
-        let mut rc = unsafe { feed_first(p) };
-        while rc == 0 {
-            if unsafe { feed_rowid(p) } != expect {
-                return Some((false, Vec::new(), false, 1));
-            }
+    /// The ids of the newest 20 posts, in feed order, read from
+    /// `posts_created_at_id_idx`. No assumption is made about the relation
+    /// between ids and timestamps: the order is the index's own key order.
+    pub fn newest_ids(&mut self, ids: &mut [i64; 20]) -> Result<usize, &'static str> {
+        let n = Self::ptr(&mut self.newest);
+        let rc = unsafe { feed_first(n) };
+        if rc < 0 {
+            return Err("index first");
+        }
+        let mut count = 0usize;
+        let mut rc = rc;
+        while rc == 0 && count < ids.len() {
             let mut len = 0u32;
-            let sc = self.scratch(0);
-            let rec = unsafe { feed_payload(p, sc, SCRATCH as u32, &mut len) };
+            let sc = self.scratch(3);
+            let rec = unsafe { feed_payload(n, sc, SCRATCH as u32, &mut len) };
             if rec.is_null() {
-                return None;
+                return Err("index record too large");
             }
             let rec = unsafe { std::slice::from_raw_parts(rec, len as usize) };
+            // (created_at, id): the index's two key columns.
             let mut cols = [Col { ty: 0, ptr: std::ptr::null() }; 4];
-            decode(rec, 4, &mut cols)?;
-            if !cols[1].is_int() || !cols[3].is_text() {
-                return Some((false, Vec::new(), false, 1));
+            decode(rec, 2, &mut cols).ok_or("index decode")?;
+            if !cols[1].is_int() || cols[1].int() <= 0 {
+                return Err("index id type");
             }
-            let created = cols[3].bytes().to_vec();
-            if have_prev && prev.as_slice() > created.as_slice() {
-                return Some((false, Vec::new(), false, 1));
-            }
-            prev = created;
-            have_prev = true;
-            expect += 1;
-            rc = unsafe { feed_next(p) };
+            ids[count] = cols[1].int();
+            count += 1;
+            rc = unsafe { feed_next(n) };
         }
         if rc < 0 {
-            return None;
+            return Err("index next");
         }
-        Some((true, prev, have_prev, expect))
+        for k in 1..count {
+            if ids[k] >= ids[k - 1] {
+                return Err("index order");
+            }
+        }
+        Ok(count)
     }
 
     fn user_name(&mut self, uid: i64) -> Option<&'static [u8]> {
@@ -312,6 +342,39 @@ impl Cursors {
             return None;
         }
         Some(cols[1].bytes())
+    }
+
+    /// Like count for one post id.
+    fn like_count(&mut self, id: i64) -> Result<i64, &'static str> {
+        let l = Self::ptr(&mut self.likes);
+        let mut rc = unsafe { feed_index_ge(l, self.ki_likes, id) };
+        if rc < 0 {
+            return Err("index seek");
+        }
+        let mut count = 0i64;
+        while rc == 0 {
+            let mut len = 0u32;
+            let sc = self.scratch(2);
+            let rec = unsafe { feed_payload(l, sc, SCRATCH as u32, &mut len) };
+            if rec.is_null() {
+                return Err("index record too large");
+            }
+            let rec = unsafe { std::slice::from_raw_parts(rec, len as usize) };
+            let mut cols = [Col { ty: 0, ptr: std::ptr::null() }; 4];
+            decode(rec, 1, &mut cols).ok_or("index decode")?;
+            if !cols[0].is_int() {
+                return Err("index key type");
+            }
+            if cols[0].int() != id {
+                break;
+            }
+            count += 1;
+            rc = unsafe { feed_next(l) };
+        }
+        if rc < 0 {
+            return Err("index next");
+        }
+        Ok(count)
     }
 
     /// Like counts for post ids in `lo..=hi`, from one scan of the index.
@@ -370,107 +433,129 @@ impl Cursors {
         out.push(b'}');
     }
 
-    /// `{"posts":[...]}` in feed order. Err(reason) = fall back to SQL.
-    pub fn feed_json(&mut self) -> Result<Vec<u8>, &'static str> {
-        let p = Self::ptr(&mut self.posts);
-        let mut out = Vec::with_capacity(16 * 1024);
-        out.extend_from_slice(b"{\"posts\":[");
-        let rc = unsafe { feed_last(p) };
-        if rc < 0 {
-            return Err("last");
+    /// Appends `{"posts":[...]}` in feed order. Err(reason) = fall back to
+    /// SQL, with nothing appended.
+    pub fn feed_json(&mut self, out: &mut Vec<u8>) -> Result<(), &'static str> {
+        let mark = out.len();
+        let r = self.feed_json_into(out);
+        if r.is_err() {
+            out.truncate(mark);
         }
-        if rc == 0 {
-            let hi = unsafe { feed_rowid(p) };
-            let lo = if hi > 20 { hi - 19 } else { 1 };
-            let span = (hi - lo + 1) as usize;
-            let mut counts = [0i64; 20];
-            self.range_counts(lo, hi, &mut counts[..span])?;
-            let mut first = true;
-            let mut k = 0i64;
-            loop {
-                let mut len = 0u32;
-                let sc = self.scratch(0);
-                let rec = unsafe { feed_payload(p, sc, SCRATCH as u32, &mut len) };
-                if rec.is_null() {
-                    return Err("payload too large");
-                }
-                let rec = unsafe { std::slice::from_raw_parts(rec, len as usize) };
-                let mut cols = [Col { ty: 0, ptr: std::ptr::null() }; 4];
-                decode(rec, 4, &mut cols).ok_or("decode")?;
-                if !cols[1].is_int() {
-                    return Err("user_id type");
-                }
-                if !cols[2].is_text() {
-                    return Err("body type");
-                }
-                if !cols[3].is_text() {
-                    return Err("created type");
-                }
-                let id = unsafe { feed_rowid(p) };
-                if id != hi - k {
-                    return Err("rowid gap");
-                }
-                let author = self.user_name(cols[1].int()).ok_or("author")?;
-                if !first {
-                    out.push(b',');
-                }
-                first = false;
-                Self::emit(
-                    &mut out,
-                    id,
-                    cols[2].bytes(),
-                    cols[3].bytes(),
-                    author,
-                    counts[(id - lo) as usize],
-                );
-                if k == hi - lo {
-                    break;
-                }
-                if unsafe { feed_prev(p) } != 0 {
-                    return Err("prev");
-                }
-                k += 1;
-            }
-        }
-        out.extend_from_slice(b"]}");
-        Ok(out)
+        r
     }
 
-    /// `{"post":{...}}`. 0 ok, 1 missing, -1 fall back / error.
-    pub fn post_json(&mut self, id: i64) -> (i32, Vec<u8>) {
+    fn feed_json_into(&mut self, out: &mut Vec<u8>) -> Result<(), &'static str> {
+        let mut ids = [0i64; 20];
+        let n = self.newest_ids(&mut ids)?;
+        out.extend_from_slice(b"{\"posts\":[");
+        let mut counts = [0i64; 20];
+        // `range_counts` fills one slot per rowid in `lo..=hi`, so a range result
+        // is indexed by (id - lo); a per-id result is indexed by feed position.
+        let mut range_lo: Option<i64> = None;
+        if n > 0 {
+            // Recent posts are almost always consecutive rowids, and then one
+            // forward range scan of likes_post_id_idx counts all of them.
+            let consecutive = ids[..n].windows(2).all(|w| w[0] == w[1] + 1);
+            if consecutive {
+                let lo = ids[n - 1];
+                let hi = ids[0];
+                self.range_counts(lo, hi, &mut counts[..n])?;
+                range_lo = Some(lo);
+            } else {
+                for k in 0..n {
+                    counts[k] = self.like_count(ids[k])?;
+                }
+            }
+        }
         let p = Self::ptr(&mut self.posts);
-        let mut out = Vec::with_capacity(1024);
+        let mut known: Option<i64> = None;
+        for k in 0..n {
+            let id = ids[k];
+            // Descending consecutive ids: step back instead of a fresh descent.
+            let mut positioned = false;
+            if known == Some(id + 1) {
+                if unsafe { feed_prev(p) } == 0 && unsafe { feed_rowid(p) } == id {
+                    positioned = true;
+                }
+            }
+            if !positioned {
+                match unsafe { feed_seek(p, id) } {
+                    0 => {}
+                    1 => return Err("post missing"),
+                    _ => return Err("post seek"),
+                }
+            }
+            known = Some(id);
+            let mut len = 0u32;
+            let sc = self.scratch(0);
+            let rec = unsafe { feed_payload(p, sc, SCRATCH as u32, &mut len) };
+            if rec.is_null() {
+                return Err("payload too large");
+            }
+            let rec = unsafe { std::slice::from_raw_parts(rec, len as usize) };
+            let mut cols = [Col { ty: 0, ptr: std::ptr::null() }; 4];
+            decode(rec, 4, &mut cols).ok_or("decode")?;
+            if !cols[1].is_int() || !cols[2].is_text() || !cols[3].is_text() {
+                return Err("record layout");
+            }
+            let author = self.user_name(cols[1].int()).ok_or("author")?;
+            if k > 0 {
+                out.push(b',');
+            }
+            let likes = match range_lo {
+                Some(lo) => counts[(id - lo) as usize],
+                None => counts[k],
+            };
+            Self::emit(out, id, cols[2].bytes(), cols[3].bytes(), author, likes);
+        }
+        out.extend_from_slice(b"]}");
+        Ok(())
+    }
+
+    /// Appends `{"post":{...}}`. 0 ok, 1 missing, -1 fall back / error, and
+    /// nothing is appended unless the result is 0.
+    pub fn post_json(&mut self, id: i64, out: &mut Vec<u8>) -> i32 {
+        let mark = out.len();
+        let rc = self.post_json_into(id, out);
+        if rc != 0 {
+            out.truncate(mark);
+        }
+        rc
+    }
+
+    fn post_json_into(&mut self, id: i64, out: &mut Vec<u8>) -> i32 {
+        let p = Self::ptr(&mut self.posts);
         match unsafe { feed_seek(p, id) } {
             0 => {}
-            1 => return (1, out),
-            _ => return (-1, out),
+            1 => return 1,
+            _ => return -1,
         }
         let mut len = 0u32;
         let sc = self.scratch(0);
         let rec = unsafe { feed_payload(p, sc, SCRATCH as u32, &mut len) };
         if rec.is_null() {
-            return (-1, out);
+            return -1;
         }
         let rec = unsafe { std::slice::from_raw_parts(rec, len as usize) };
         let mut cols = [Col { ty: 0, ptr: std::ptr::null() }; 4];
         if decode(rec, 4, &mut cols).is_none() {
-            return (-1, out);
+            return -1;
         }
         if !cols[1].is_int() || !cols[2].is_text() || !cols[3].is_text() {
-            return (-1, out);
+            return -1;
         }
         let author = match self.user_name(cols[1].int()) {
             Some(a) => a,
-            None => return (-1, out),
+            None => return -1,
         };
-        let mut counts = [0i64; 1];
-        if self.range_counts(id, id, &mut counts).is_err() {
-            return (-1, out);
-        }
+        let likes = match self.like_count(id) {
+            Ok(c) => c,
+            Err(_) => return -1,
+        };
         out.extend_from_slice(b"{\"post\":");
-        Self::emit(&mut out, id, cols[2].bytes(), cols[3].bytes(), author, counts[0]);
+        Self::emit(out, id, cols[2].bytes(), cols[3].bytes(), author, likes);
         out.push(b'}');
-        (0, out)
+        0
     }
 
     /// True when the stored author still exists (used to validate reads).

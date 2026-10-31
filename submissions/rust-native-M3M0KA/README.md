@@ -23,10 +23,29 @@ SQLite bindings are written in this repository.
 - `src/db.rs` - SQLite connection, SQL statements, batch transaction, startup checks
 - `src/btree.rs`, `src/sqlite_shim.c` - B-tree read plans for `/feed` and `/posts/:id`
   (the shim is compiled into the same translation unit as the unmodified amalgamation)
+- `src/uring.rs` - raw kernel UAPI bindings, with byte-level checks for every
+  submission entry the server uses (`rustc --test src/main.rs`, 6 tests)
 - `src/http.rs`, `src/json.rs`, `src/crypto.rs`, `src/sys.rs` - protocol primitives
 - `src/pgo_train.c` - build-time profile training on a synthetic database (not the seed)
 - `tests/oracle.sh` - differential test: B-tree plans vs pure SQL, byte-identical, before and after writes
 - `bench/load.rs` - development load generator (not shipped in the image)
+
+## Read plans
+
+`GET /feed` walks `posts_created_at_id_idx` for its first 20 entries, which is
+exactly the `ORDER BY created_at DESC, id DESC` order the API asks for, and reads
+the rows from the `posts` tree (stepping back with `sqlite3BtreePrevious` when the
+ids are consecutive), the authors from `users`, and the like counts from
+`likes_post_id_idx` (one range scan when the 20 ids are consecutive, one seek per
+id otherwise). `GET /posts/:id` is a rowid seek plus the same author and count
+lookups.
+
+Nothing is remembered between requests: no next id, no cached timestamp, no data
+version. A write by this server, by a restart, or by any other connection is simply
+read on the next request, so the plan never has to switch itself off — the defect
+that turned this server's reads back into SQL under the scored load. At startup the
+plan's output is compared byte for byte with the reference SQL and disabled only if
+they differ.
 
 ## Correctness
 
@@ -53,6 +72,21 @@ Each event-loop pass runs in one SQLite transaction. Responses are written only 
 
 ## Measured (local, not official)
 
+Single core, server pinned with `taskset`, closed-loop clients on other cores, seed
+database, app CPU from `/proc/<pid>/stat`. The same build measured before the
+per-request allocator and buffer fixes was 20.5 us/request on `/feed`:
+
+| endpoint | app CPU per request |
+|---|---|
+| `GET /health` | 3.4 us |
+| `GET /posts/250000` | 3.4 us (293,000 req/s on one core) |
+| `GET /feed` | 9.6 us |
+| `GET /feed`, `FEED_NO_PLAN=1` | 28.5 us |
+
+`strace -c` on the serving thread shows one `recvfrom` and one `sendto` per request
+and nothing else per request: the connection buffers keep their capacity, so the
+allocator does not enter its mmap/munmap path (that was 2 syscalls per request).
+
 Multi-process capacity, server limited to `ulimit -n 65535` per process, five workers,
 clients from 38 loopback source addresses:
 
@@ -76,9 +110,9 @@ Single-thread server, closed-loop clients, `/feed` and `/posts/:id`:
 |---|---|---|
 | `/feed`, 256 conns | ~45,000 | 6.5 ms |
 | `/posts/250000`, 256 conns | ~70,000 | 4.5 ms |
-| official `bench/load.js`, 3,000 VUs, 60 s | 239 (think-time bound) | 1.3 ms, 0% failed |
+| official `bench/load.js`, 3,000 VUs, 60 s | 239 (think-time bound) | 1.05 ms, 0% failed |
 
-Connection capacity: the epoll transport held **70,000 concurrent keep-alive sockets**
+Connection capacity: the epoll transport held **300,000 concurrent keep-alive sockets**
 with the process descriptor limit raised (`ulimit -n 1048576`) and returned `200 OK`.
 The grader's `LimitNOFILE=65535` caps the epoll transport at about 65,500 connections.
 Past that the io_uring transport is required. **This container denies `io_uring_setup`

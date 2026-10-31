@@ -109,6 +109,25 @@ pub fn set_reuseaddr(fd: c_int) {
     }
 }
 
+/// The soft descriptor limit of this process (what the service unit sets).
+pub fn nofile_limit() -> u32 {
+    #[repr(C)]
+    struct RLimit {
+        cur: u64,
+        max: u64,
+    }
+    extern "C" {
+        fn getrlimit(resource: c_int, rlim: *mut RLimit) -> c_int;
+    }
+    const RLIMIT_NOFILE: c_int = 7;
+    let mut r = RLimit { cur: 0, max: 0 };
+    let rc = unsafe { getrlimit(RLIMIT_NOFILE, &mut r) };
+    if rc != 0 || r.cur == 0 {
+        return 1024;
+    }
+    r.cur.min(u32::MAX as u64) as u32
+}
+
 /// fork(2). Returns the child pid in the parent, 0 in the child.
 pub fn fork_process() -> c_int {
     let pid = unsafe { fork() };

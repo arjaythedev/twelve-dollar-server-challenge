@@ -20,7 +20,13 @@ PID_A=""
 PID_B=""
 
 cleanup() {
-  for p in $PID_A $PID_B; do kill "$p" 2>/dev/null || true; done
+  for p in $PID_A $PID_B; do
+    [ -n "${p:-}" ] || continue
+    # Workers are children: kill them before the parent, or they are
+    # reparented to init and keep the port.
+    pkill -P "$p" 2>/dev/null || true
+    kill "$p" 2>/dev/null || true
+  done
   wait 2>/dev/null || true
   rm -rf "$WORK"
 }
@@ -28,7 +34,7 @@ trap cleanup EXIT
 
 start() { # port, extra env, db -> pid in $STARTED
   SQLITE_PATH="$3" JWT_SECRET=twelve-dollar-challenge HOST=127.0.0.1 PORT="$1" \
-    FEED_WORKERS=1 env $2 "$HERE/bin/feed" >"$WORK/server-$1.log" 2>&1 &
+    env $2 "$HERE/bin/feed" >"$WORK/server-$1.log" 2>&1 &
   STARTED=$!
 }
 
@@ -37,8 +43,11 @@ wait_up() {
   echo "server on $1 never became healthy"; cat "$WORK/server-$1.log"; exit 1
 }
 
-stop() { kill "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true; }
-trap 'pkill -P $$ 2>/dev/null; true' EXIT
+stop() {
+  pkill -P "$1" 2>/dev/null || true
+  kill "$1" 2>/dev/null || true
+  wait "$1" 2>/dev/null || true
+}
 
 grab() { # port, outdir
   mkdir -p "$2"

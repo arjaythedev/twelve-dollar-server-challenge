@@ -34,15 +34,28 @@ void *feed_keyinfo(sqlite3 *db, int nkey, int nextra)
     return k;
 }
 
-/* Forces the read transaction open and reports SQLite's data version, which
- * changes only when another connection commits. */
+/* KeyInfo for an index whose first `nkey` key columns are all DESC, as
+ * posts_created_at_id_idx declares. Sequential walks do not compare, but the
+ * cursor must be opened as an index cursor, which requires key information. */
+void *feed_keyinfo_desc(sqlite3 *db, int nkey, int nextra)
+{
+    KeyInfo *k = (KeyInfo *)feed_keyinfo(db, nkey, nextra);
+    if (!k) return 0;
+    for (int i = 0; i < nkey; i++) k->aSortFlags[i] = KEYINFO_ORDER_DESC;
+    return k;
+}
+
+/* Forces the read transaction open. The data version is reported for callers
+ * that ask for it; nothing in the read plans depends on it. */
 int feed_begin_read(void *bt, unsigned *version)
 {
     int rc = sqlite3BtreeBeginTrans((Btree *)bt, 0, 0);
     if (rc != SQLITE_OK) return rc;
-    u32 v = 0;
-    sqlite3BtreeGetMeta((Btree *)bt, BTREE_DATA_VERSION, &v);
-    *version = v;
+    if (version) {
+        u32 v = 0;
+        sqlite3BtreeGetMeta((Btree *)bt, BTREE_DATA_VERSION, &v);
+        *version = v;
+    }
     return 0;
 }
 

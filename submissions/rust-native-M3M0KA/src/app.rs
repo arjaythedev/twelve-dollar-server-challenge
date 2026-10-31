@@ -99,8 +99,20 @@ pub struct App {
 
 impl App {
     pub fn new(db_path: &str, secret: &str) -> App {
+        // One process keeps the whole hot set in cache; several consumers of
+        // the same 2 GB box each take a quarter of that instead.
+        let workers: i32 = std::env::var("FEED_WORKERS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(5)
+            .clamp(1, 16);
+        let cache_kb = match std::env::var("FEED_CACHE_KB").ok().and_then(|s| s.parse().ok()) {
+            Some(kb) => kb,
+            None if workers == 1 => 32768,
+            None => (32768 / workers).max(8192),
+        };
         App {
-            db: Db::open(db_path),
+            db: Db::open_with_cache(db_path, cache_kb),
             key: HmacKey::new(secret.as_bytes()),
             started: now_s(),
             scratch: Vec::with_capacity(16 * 1024),

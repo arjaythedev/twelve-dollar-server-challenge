@@ -159,9 +159,9 @@ impl Server {
                 }
             }
         }
-        if !buf.is_empty() {
-            self.conns[idx].inbuf = buf;
-        }
+        // Put the buffer back even when it is empty: dropping it here frees and
+        // reallocates it per request, which glibc turns into mmap/munmap.
+        self.conns[idx].inbuf = buf;
         true
     }
 
@@ -196,7 +196,7 @@ impl Server {
             return false;
         }
 
-        self.conns[idx].outbuf = Vec::new();
+        self.conns[idx].outbuf.clear();
         self.conns[idx].sent = 0;
         if self.conns[idx].close_after {
             return false;
@@ -374,21 +374,29 @@ fn main() {
     // API. The self test opens and closes its own connection, so it runs before
     // any fork.
     let use_uring = std::env::var("FEED_EPOLL").is_err() && net_uring::self_test(&secret, &db_path);
+    let mut started: Option<App> = None;
     if use_uring {
         eprintln!("transport: io_uring");
         let app = App::new(&db_path, &secret);
-        net_uring::serve(app, lfd);
+        // Returns only when the rings could not be set up after all.
+        started = Some(net_uring::serve(app, lfd));
+        eprintln!("io_uring: no ring could be opened; serving on epoll in one process");
     }
 
     // Without io_uring, one epoll process is capped at its descriptor limit.
     // Workers are forked before any SQLite connection or epoll instance exists,
     // so each process has its own descriptor table, its own connection and its
     // own epoll set, and all of them accept on the shared listening socket.
-    let workers: usize = std::env::var("FEED_WORKERS")
+    // A process that already owns a connection must not fork, so a server that
+    // fell back after starting its database runs as a single worker.
+    let mut workers: usize = std::env::var("FEED_WORKERS")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(5)
         .clamp(1, 16);
+    if started.is_some() {
+        workers = 1;
+    }
     let mut is_child = false;
     for _ in 1..workers {
         if sys::fork_process() == 0 {
@@ -404,7 +412,10 @@ fn main() {
     unsafe {
         assert!(sys::epoll_ctl(ep, sys::EPOLL_CTL_ADD, lfd, &ev) >= 0);
     }
-    let app = App::new(&db_path, &secret);
+    let app = match started {
+        Some(app) => app,
+        None => App::new(&db_path, &secret),
+    };
     let mut server = Server {
         ep,
         conns: Vec::new(),

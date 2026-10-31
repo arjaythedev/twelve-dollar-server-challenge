@@ -1,0 +1,12 @@
+# Disposable benchmark deployment. scripts/k8s.sh builds and pushes the images,
+# then applies an overlay that sets the namespace and optional image pull secret
+# and pins the images by digest. The namespace and secret are provided outside
+# this kustomization and are never deleted.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: twelve-dollar-java
+resources:
+  - server.yaml
+  - k6.yaml

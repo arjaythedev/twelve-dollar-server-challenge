@@ -1,0 +1,27 @@
+[package]
+name = "feed-server"
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.88" # let chains
+publish = false
+
+# Exact versions; Cargo.lock pins everything transitive.
+[dependencies]
+axum = { version = "=0.8.9", default-features = false }
+base64 = "=0.23.1"
+hmac = "=0.13.0"
+hyper = { version = "=1.12.0", features = ["http1", "server"] }
+hyper-util = { version = "=0.1.21", features = ["http1", "server", "server-graceful", "service", "tokio"] }
+rusqlite = { version = "=0.40.2", features = ["bundled"] }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.154"
+sha2 = "=0.11.1"
+tokio = { version = "=1.54.0", features = ["rt-multi-thread", "net", "time", "signal", "sync", "macros"] }
+tower-http = { version = "=0.7.1", features = ["timeout"] }
+
+[dev-dependencies]
+tower = { version = "=0.5.3", features = ["util"] }
+
+[profile.release]
+codegen-units = 1
+lto = true

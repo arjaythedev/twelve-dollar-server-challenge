@@ -1,0 +1,268 @@
+{
+  "method": "Observed min-max, original 40/20/20/20 weights; recompute bounds over 14 rows. Replace #6 throughput/RSS with the fresh paired measurements; all other historical rows remain unchanged.",
+  "source_snapshot": "2026-10-05; https://github.com/arjaythedev/twelve-dollar-server-challenge/issues/7#issuecomment-5995788219",
+  "limitations": [
+    "Other historical rows were measured in different batches; this is an illustrative preference index.",
+    "The original published 91.1 for #6 used different measurements and bounds and must not be directly compared with the recalculated scores.",
+    "RAM is post-load process RSS; LOC includes all application comments and blank lines; dependency counts exclude runtimes."
+  ],
+  "weights": {
+    "throughput": 0.4,
+    "app_loc": 0.2,
+    "dependencies": 0.2,
+    "rss_mib": 0.2
+  },
+  "bounds": {
+    "throughput": [
+      3550.52,
+      71375.95
+    ],
+    "app_loc": [
+      105,
+      1354
+    ],
+    "dependencies": [
+      0,
+      89
+    ],
+    "rss_mib": [
+      42.79296875,
+      235.2734375
+    ]
+  },
+  "original_pr6": {
+    "name": "#6 C++ / uWebSockets",
+    "pr": 6,
+    "throughput": 62705.21,
+    "rss_mib": 55.6640625,
+    "app_loc": 384,
+    "dependencies": 4,
+    "batch": "U1"
+  },
+  "rows": [
+    {
+      "name": "#1 Python / FastAPI (cknutson12)",
+      "pr": 1,
+      "throughput": 12212.74,
+      "rss_mib": 92.96875,
+      "app_loc": 235,
+      "dependencies": 17,
+      "batch": "U3",
+      "components": {
+        "throughput": 12.771345496814394,
+        "app_loc": 89.59167333867094,
+        "dependencies": 80.89887640449439,
+        "rss_mib": 73.9320142059868
+      },
+      "score": 53.993050988556185
+    },
+    {
+      "name": "#2 Ruby / Rails (gambitboy)",
+      "pr": 2,
+      "throughput": 3550.52,
+      "rss_mib": 216.34375,
+      "app_loc": 286,
+      "dependencies": 89,
+      "batch": "U2",
+      "components": {
+        "throughput": 0.0,
+        "app_loc": 85.50840672538031,
+        "dependencies": 0.0,
+        "rss_mib": 9.834601725012684
+      },
+      "score": 19.0686016900786
+    },
+    {
+      "name": "#3 TypeScript / Bun.listen",
+      "pr": 3,
+      "throughput": 30337.69,
+      "rss_mib": null,
+      "app_loc": 354,
+      "dependencies": 0,
+      "batch": "M1",
+      "components": {
+        "throughput": 39.49428702479292,
+        "app_loc": 80.0640512409928,
+        "dependencies": 100.0,
+        "rss_mib": null
+      },
+      "score": null
+    },
+    {
+      "name": "#4 TypeScript / Bun.serve",
+      "pr": 4,
+      "throughput": 33351.01,
+      "rss_mib": 86.828125,
+      "app_loc": 105,
+      "dependencies": 0,
+      "batch": "M2",
+      "components": {
+        "throughput": 43.93704544151066,
+        "app_loc": 100.0,
+        "dependencies": 100.0,
+        "rss_mib": 77.1222729578894
+      },
+      "score": 72.99927276818214
+    },
+    {
+      "name": "#5 C / fio-stl",
+      "pr": 5,
+      "throughput": 43534.4,
+      "rss_mib": 51.671875,
+      "app_loc": 351,
+      "dependencies": 2,
+      "batch": "M2",
+      "components": {
+        "throughput": 58.9511633026138,
+        "app_loc": 80.30424339471577,
+        "dependencies": 97.75280898876404,
+        "rss_mib": 95.38711314053779
+      },
+      "score": 78.26929842584904
+    },
+    {
+      "name": "#6 C++ / uWebSockets",
+      "pr": 6,
+      "throughput": 59471.8,
+      "rss_mib": 60.140625,
+      "app_loc": 384,
+      "dependencies": 4,
+      "batch": "V2, fresh paired comparison",
+      "components": {
+        "throughput": 82.44883961664529,
+        "app_loc": 77.66212970376301,
+        "dependencies": 95.50561797752809,
+        "rss_mib": 90.9873160832065
+      },
+      "score": 85.81054859955763
+    },
+    {
+      "name": "#8 C++ / epoll",
+      "pr": 8,
+      "throughput": 59359.96,
+      "rss_mib": 53.21484375,
+      "app_loc": 1237,
+      "dependencies": 2,
+      "batch": "U1",
+      "components": {
+        "throughput": 82.28394571180752,
+        "app_loc": 9.367493995196156,
+        "dependencies": 97.75280898876404,
+        "rss_mib": 94.58548959918824
+      },
+      "score": 73.25473680135269
+    },
+    {
+      "name": "#9 C++ / epoll v2",
+      "pr": 9,
+      "throughput": 67723.58,
+      "rss_mib": 235.2734375,
+      "app_loc": 1354,
+      "dependencies": 2,
+      "batch": "U1",
+      "components": {
+        "throughput": 94.61504335468277,
+        "app_loc": 0.0,
+        "dependencies": 97.75280898876404,
+        "rss_mib": 0.0
+      },
+      "score": 57.39657913962591
+    },
+    {
+      "name": "#10 Python / optimized FastAPI",
+      "pr": 10,
+      "throughput": 19533.74,
+      "rss_mib": 92.87890625,
+      "app_loc": 312,
+      "dependencies": 17,
+      "batch": "U3",
+      "components": {
+        "throughput": 23.565232096574988,
+        "app_loc": 83.4267413931145,
+        "dependencies": 80.89887640449439,
+        "rss_mib": 73.97869101978691
+      },
+      "score": 57.08695460210916
+    },
+    {
+      "name": "#11 Erlang / Cowboy",
+      "pr": 11,
+      "throughput": 13095.92,
+      "rss_mib": 106.1328125,
+      "app_loc": 261,
+      "dependencies": 5,
+      "batch": "D1",
+      "components": {
+        "throughput": 14.073482468153907,
+        "app_loc": 87.51000800640513,
+        "dependencies": 94.38202247191012,
+        "rss_mib": 67.09284627092846
+      },
+      "score": 55.42636833711031
+    },
+    {
+      "name": "#12 Ruby / Rails Metal",
+      "pr": 12,
+      "throughput": 11580.93,
+      "rss_mib": 183.82421875,
+      "app_loc": 164,
+      "dependencies": 68,
+      "batch": "U4",
+      "components": {
+        "throughput": 11.839821730580994,
+        "app_loc": 95.27622097678143,
+        "dependencies": 23.59550561797753,
+        "rss_mib": 26.729578893962454
+      },
+      "score": 33.85618978997668
+    },
+    {
+      "name": "#13 Python / Granian RSGI",
+      "pr": 13,
+      "throughput": 30380.22,
+      "rss_mib": 93.9453125,
+      "app_loc": 156,
+      "dependencies": 3,
+      "batch": "U4",
+      "components": {
+        "throughput": 39.55699211932752,
+        "app_loc": 95.91673338670937,
+        "dependencies": 96.62921348314607,
+        "rss_mib": 73.42465753424658
+      },
+      "score": 69.01691772855142
+    },
+    {
+      "name": "#14 Ruby / Iodine",
+      "pr": 14,
+      "throughput": 35056.16,
+      "rss_mib": 80.99609375,
+      "app_loc": 150,
+      "dependencies": 3,
+      "batch": "U4",
+      "components": {
+        "throughput": 46.45107299725193,
+        "app_loc": 96.39711769415533,
+        "dependencies": 96.62921348314607,
+        "rss_mib": 80.15220700152207
+      },
+      "score": 73.21613683466546
+    },
+    {
+      "name": "C++ / uWebSockets group commit",
+      "pr": null,
+      "throughput": 71375.95,
+      "rss_mib": 42.79296875,
+      "app_loc": 424,
+      "dependencies": 4,
+      "batch": "V2, fresh paired comparison",
+      "components": {
+        "throughput": 100.0,
+        "app_loc": 74.4595676541233,
+        "dependencies": 95.50561797752809,
+        "rss_mib": 100.0
+      },
+      "score": 93.99303712633028
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+/target/
+/.devenv/
+/.direnv/
+/.envrc
+/results/
+/pyroclast-runs/
+*.db
+*.db-shm
+*.db-wal
+/.install/
+/.env

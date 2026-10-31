@@ -1,5 +1,8 @@
 # Batch 2 results (2026-10-20/21)
 
+> **Superseded by the [leaderboard](../LEADERBOARD.md),** which has all of these results plus everything scored since.
+> Kept so older links keep working.
+
 26 new submissions (#43–#132) plus 3 entries from batch 1 re-run as anchors. Of the 26: 21 scored as submitted,
 3 scored with a one-line build fix (marked ᵖ, now committed in this repo), Nim #132 failed and D #123 was dropped
 before the run because it fails the test suite.

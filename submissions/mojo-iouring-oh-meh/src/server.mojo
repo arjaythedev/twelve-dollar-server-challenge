@@ -144,6 +144,7 @@ struct Server:
     var cqes: Pointer[Cqe, MutUntrackedOrigin]
     var writes: List[WriteReq]
     var rearm: List[Int]
+    var close_retry: List[Int]   # connections whose close could not get its two SQEs
     var body_buf: Bytes
     var req: Req
     # constant responses
@@ -205,6 +206,7 @@ struct Server:
         self.cqes = calloc_t[Cqe](CQ_BATCH)
         self.writes = List[WriteReq]()
         self.rearm = List[Int]()
+        self.close_retry = List[Int]()
         self.body_buf = balloc(PARTIAL_MAX * 4)
         self.req = Req(self.body_buf)
         self.r_not_found = const_resp(404, '{"error":"not found"}')
@@ -311,7 +313,10 @@ struct Server:
             return
         self.conns[unsafe_offset=conn].flags = f | F_CLOSING
         var g = self.conns[unsafe_offset=conn].gen
-        _ = prep_close(ring, slot, mk_ud(OP_SHUTDOWN, ring, g, slot), mk_ud(OP_CLOSE, ring, g, slot))
+        if prep_close(ring, slot, mk_ud(OP_SHUTDOWN, ring, g, slot), mk_ud(OP_CLOSE, ring, g, slot)) != 0:
+            # no room even after a submit: try again at the end of the batch
+            self.conns[unsafe_offset=conn].flags = f
+            self.close_retry.append(conn)
 
     # Append a queue node for conn (ptr == 0 is a placeholder for a write whose
     # response is built after COMMIT). Returns the node index.
@@ -766,6 +771,17 @@ struct Server:
                     if (f & F_OPEN) != 0 and (f & F_CLOSING) == 0:
                         self.arm_recv(conn // self.table, conn % self.table, conn)
                 self.rearm.clear()
+            if len(self.close_retry) > 0:
+                var n = len(self.close_retry)
+                for i in range(n):
+                    var conn = self.close_retry[i]
+                    if (self.conns[unsafe_offset=conn].flags & F_OPEN) != 0:
+                        self.do_close(conn // self.table, conn % self.table, conn)
+                # keep only what do_close re-queued during this pass
+                var left = List[Int]()
+                for i in range(n, len(self.close_retry)):
+                    left.append(self.close_retry[i])
+                self.close_retry = left^
             self.pump_accepts()
             self.tick()
             single = self.single_mode()

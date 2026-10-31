@@ -166,7 +166,11 @@ int app_init(const char *db_path, const char *secret, char *err, size_t errn) {
   o.direct_reads = APP_DB_DIRECT;               // 0: the spec's prepared SELECTs
   o.wal_coalesce = APP_DB_VFS;                  // 0: SQLite's own unix VFS
   o.exclusive = APP_DB_EXCL;                    // 0: locking_mode=NORMAL
-  o.ckpt_thread = APP_DB_CKPT == 2;             // 2: checkpoint thread + write gate (passes of 4096 frames)
+  o.ckpt_thread = APP_DB_CKPT == 2;             // 2: checkpoint thread + write gate: a pass every 1,024 frames, the
+  if (o.ckpt_thread) {                          //    WAL restarted at 8,192 (32 MB; was 4,096 / 32,768 = 128 MB). Every
+    o.ckpt_frames = 1024;                       //    frame past the restart is a fresh page-cache page, and at the box's
+    o.ckpt_restart = 8192;                      //    memory wall the OOM killer fired on such a WAL write. Xeon at ~24k
+  }                                             //    req/s: 4,096 held writes 8x as often, p99 131 ms; 8,192: 77 (exp1132/1140)
   if (APP_DB_CKPT == 1) o.ckpt_frames = 16384;  // 1: inline PASSIVE after the replies
   if (APP_DB_CKPT == 0) o.ckpt_frames = 0;      // 0: SQLite's own wal_autocheckpoint (1000 frames)
   o.ckpt_async = APP_DB_CKPT == 3;              // 3: the engine's checkpoint on the loop's io_uring (app_tick),
@@ -179,7 +183,7 @@ int app_init(const char *db_path, const char *secret, char *err, size_t errn) {
   }
   o.wal_fadvise =
       APP_DB_WAL_DROP;  // drop checkpointed WAL pages from the page cache (~256 -> <=20 MiB measured on a 1-vCPU Xeon)
-  // page cache (default 8 MiB instead of the engine's 16: memory is the wall; measured 0.056 vs 0.022
+  // page cache (default 4 MiB, as Lean #153; was 8, the engine says 16: memory is the wall; 16 -> 8 measured 0.056 vs 0.022
   // misses/request, ~+0.1 us/request, ~8 MB less RSS)
   o.cache_kib = APP_DB_CACHE_KIB;
   const char *v;

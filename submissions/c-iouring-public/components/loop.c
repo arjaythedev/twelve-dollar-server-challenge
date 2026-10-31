@@ -62,6 +62,7 @@ typedef struct buf {
 
 #define NCLS 9              /* 256 B .. 64 KiB */
 #define POOL_KEEP 256
+#define POOL_KEEP_BYTES (512u << 10)   /* and at most 512 KiB per class (8 x 64 KiB): <= 4.5 MB cached, was 32 MB */
 
 /* ------------------------------------------------------------------ conns */
 
@@ -119,7 +120,8 @@ typedef struct ring {
     int evfd;
     uint32_t open, cap;
     uint32_t singles;               /* single-shot accepts in flight */
-    uint8_t accepting, reap, legacy;
+    uint8_t accepting, reap, legacy;   /* accepting: multishot accepts armed here (one per listener) */
+    uint8_t moving;                 /* their cancel is out (ring nearly full): don't cancel again */
     uint8_t recv1;                  /* poll mode: one-shot recvs queued during this reap */
 } ring_t;
 #endif
@@ -174,7 +176,11 @@ struct loop {
     ring_t *rings;
     unsigned nrings, slot_bits;     /* nrings: maximum; rings are created on demand */
     unsigned nlive, ring_per;       /* rings created so far, slots per ring */
-    int acc_ring;                   /* ring holding the multishot accept, -1 none */
+    int acc_ring;                   /* ring holding the multishot accepts, -1 none */
+    int lfds[LOOP_MAX_LISTENERS];   /* SO_REUSEPORT listeners (lfds[0] == lfd); io_uring backend only */
+    unsigned nlfd;                  /* listeners */
+    uint32_t lsingles[LOOP_MAX_LISTENERS];   /* single-shot accepts outstanding per listener */
+    unsigned acc_queue;             /* each listener's accept queue: min(backlog, somaxconn) */
     int want_accept;
     int busy, more, ring_wait_poll_active;
     int pollmode;                   /* idle conns hold a multishot POLL_ADD; data via one-shot recv */
@@ -235,7 +241,7 @@ static buf_t *buf_get(loop_t *L, size_t need)
 static void buf_put(loop_t *L, buf_t *b)
 {
     if (!b) return;
-    if (b->cls < NCLS && L->pool_n[b->cls] < POOL_KEEP) {
+    if (b->cls < NCLS && L->pool_n[b->cls] < POOL_KEEP && L->pool_n[b->cls] < POOL_KEEP_BYTES >> (8 + b->cls)) {
         b->next = L->pool[b->cls]; L->pool[b->cls] = b; L->pool_n[b->cls]++;
     } else free(b);
 }
@@ -289,12 +295,7 @@ static void conn_close_now(loop_t *L, uint32_t id)
 }
 
 /* Close at a safe point (never while the batch array may reference the conn). */
-#ifdef LOOP_DEBUG
-#define conn_kill(L, id) (fprintf(stderr, "kill %u at line %d\n", (unsigned)(id), __LINE__), conn_kill_(L, id))
-static void conn_kill_(loop_t *L, uint32_t id)
-#else
 static void conn_kill(loop_t *L, uint32_t id)
-#endif
 {
     conn_t *c = C(L, id);
     if (!(c->fl & F_OPEN) || (c->fl & F_DEAD)) return;
@@ -1056,6 +1057,7 @@ static void housekeeping(loop_t *L)
         }
         if (want != L->st.backlog_now && (want * 4 > L->st.backlog_now * 5 || want * 4 < L->st.backlog_now * 3 || want == (uint32_t)L->cfg.backlog)) {
             if (listen(L->lfd, (int)want) == 0) L->st.backlog_now = want;
+            for (unsigned j = 1; j < L->nlfd; j++) listen(L->lfds[j], (int)want);
         }
     }
     float f = 0;
@@ -1090,7 +1092,7 @@ static void housekeeping(loop_t *L)
     long tp = tcp_mem_pages(&L->st.tcp_orphans);
     if (tp >= 0) {
         L->st.tcp_mem_pages = (uint32_t)tp;
-        if (L->tcp_mem_pressure) {   /* tcp_mem[1]: the kernel starts squeezing socket buffers here */
+        if (L->cfg.tcp_mem_close && L->tcp_mem_pressure) {   /* tcp_mem[1]: the kernel starts squeezing socket buffers here */
             float g = ((float)tp - 0.7f * (float)L->tcp_mem_pressure) / (0.3f * (float)L->tcp_mem_pressure);
             if (g > f) f = g > 1 ? 1 : g;
         }
@@ -1137,6 +1139,9 @@ static int make_listener(const loop_cfg *cfg)
     if (fd < 0) return -errno;
     int one = 1;
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+#ifdef SO_REUSEPORT
+    setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof one);   /* the io_uring backend adds more listeners */
+#endif
     if (cfg->nodelay > 0) setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
     if (cfg->rcvbuf) setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &cfg->rcvbuf, sizeof cfg->rcvbuf);
     if (cfg->sndbuf) setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &cfg->sndbuf, sizeof cfg->sndbuf);
@@ -1164,9 +1169,11 @@ loop_t *loop_new(const loop_cfg *in)
     loop_cfg *c = &L->cfg;
     if (!c->host) c->host = "0.0.0.0";
     if (!c->port) c->port = 80;
-    if (!c->backlog) c->backlog = 4096;
+    if (!c->backlog) c->backlog = 65535;   /* the kernel clamps it to somaxconn */
     if (!c->max_conns) c->max_conns = 600000;
     if (!c->sq_entries) c->sq_entries = 1024;
+    if (!c->cq_entries) c->cq_entries = 32768;   /* as every top entry; 512 KB of kernel memory per ring */
+    if (!c->listeners) c->listeners = 8;
     if (!c->bufs) c->bufs = 512;
     if (!c->buf_size) c->buf_size = 2048;
     if (!c->batch) c->batch = 128;
@@ -1215,6 +1222,7 @@ loop_t *loop_new(const loop_cfg *in)
     }
 #endif
     L->lfd = c->listen_fd > 0 ? c->listen_fd : make_listener(c);
+    L->lfds[0] = L->lfd; L->nlfd = 1;
     L->st.backlog_now = (uint32_t)c->backlog;
     if (L->lfd < 0) { errno = -L->lfd; free(L); return NULL; }
     int r = be_init(L);
@@ -1294,6 +1302,7 @@ void loop_free(loop_t *L)
     if (!L) return;
     be_free(L);
     if (L->lfd >= 0) close(L->lfd);
+    for (unsigned j = 1; j < L->nlfd; j++) close(L->lfds[j]);
     for (uint32_t i = 0; i < L->hi; i++) { buf_put(L, L->tab[i].in); buf_put(L, L->tab[i].out); }
     for (int k = 0; k < NCLS; k++) while (L->pool[k]) { buf_t *b = L->pool[k]; L->pool[k] = b->next; free(b); }
     if (L->tab) munmap(L->tab, L->tab_bytes);
@@ -1331,6 +1340,7 @@ static int ring_enter(loop_t *L, ring_t *r, unsigned min, unsigned flags, uint64
                            flags | IORING_ENTER_REGISTERED_RING | (wait_ns ? IORING_ENTER_EXT_ARG : 0),
                            wait_ns ? (void *)&arg : NULL, wait_ns ? sizeof arg : (size_t)0);
     if (ret < 0) ret = -errno;
+    if (sub && ret < (int)sub) r->to_submit = ret < 0 ? sub : sub - (unsigned)ret;   /* the rest stay queued for the next enter */
     return ret;
 }
 
@@ -1438,17 +1448,29 @@ static void arm_recv(loop_t *L, uint32_t id, conn_t *c)
  * the client sees a reset. So multishot only runs on a ring with more free slots than the
  * listen backlog can hold; near capacity we fall back to a bounded number of single-shot
  * accepts, each of which is guaranteed a slot. */
-static void arm_accept(loop_t *L, int ri, int multi)
+static void arm_accept1(loop_t *L, int ri, int multi, unsigned j)
 {
     ring_t *r = &L->rings[ri];
     struct io_uring_sqe *s = get_sqe(L, r);
     s->opcode = IORING_OP_ACCEPT;
-    s->fd = L->lfd;
+    s->fd = L->lfds[j];
     s->ioprio = multi ? IORING_ACCEPT_MULTISHOT : 0;
     s->file_index = IORING_FILE_INDEX_ALLOC;
-    s->user_data = ud_mk(OP_ACCEPT, (unsigned)ri, multi ? 0 : 1, 0);
-    if (multi) { r->accepting = 1; L->acc_ring = ri; }
-    else r->singles++;
+    s->user_data = ud_mk(OP_ACCEPT, (unsigned)ri, multi ? 0 : 1, j);   /* gen: the listener */
+    if (multi) r->accepting++;
+    else { r->singles++; L->lsingles[j]++; }
+}
+
+/* multishot: one per listener, all on ring ri. Single-shot: on the listener with the fewest outstanding.
+ * SO_REUSEPORT hashes each connection to one listener's queue, unevenly; handing re-arms out in turn let the
+ * accepts pile up on quiet listeners until a busy one had none left and its queue was never served
+ * (Xeon exp1118: ~140 of 13k connections stuck until the client's 60 s timeout). */
+static void arm_accept(loop_t *L, int ri, int multi)
+{
+    if (multi) { for (unsigned j = 0; j < L->nlfd; j++) arm_accept1(L, ri, 1, j); L->acc_ring = ri; return; }
+    unsigned b = 0;
+    for (unsigned j = 1; j < L->nlfd; j++) if (L->lsingles[j] < L->lsingles[b]) b = j;
+    arm_accept1(L, ri, 0, b);
 }
 
 static inline uint32_t ring_free(ring_t *r) { return r->cap - r->open - r->singles; }
@@ -1458,7 +1480,7 @@ static inline uint32_t ring_free(ring_t *r) { return r->cap - r->open - r->singl
  * burst between two reaps. */
 static inline uint32_t multi_headroom(loop_t *L, ring_t *r)
 {
-    uint32_t h = (uint32_t)L->cfg.backlog + 256;
+    uint32_t h = L->acc_queue * L->nlfd + 256;
     return h > r->cap / 4 ? h : r->cap / 4;
 }
 
@@ -1468,6 +1490,14 @@ static void cancel_ud(loop_t *L, ring_t *r, uint64_t ud)
     s->opcode = IORING_OP_ASYNC_CANCEL;
     s->addr = ud;
     s->user_data = ud_mk(OP_IGN, 0, 0, 0);
+}
+
+static void cancel_accepts(loop_t *L, unsigned ri, int single)
+{
+    for (unsigned j = 0; j < L->nlfd; j++) {
+        cancel_ud(L, &L->rings[ri], ud_mk(OP_ACCEPT, ri, single, j));
+        if (single) L->rings[ri].sqes[(L->rings[ri].sq_ltail - 1) & L->rings[ri].sq_mask].cancel_flags = IORING_ASYNC_CANCEL_ALL;
+    }
 }
 
 static int ring_init(loop_t *L, ring_t *r, unsigned idx, unsigned slots);
@@ -1502,13 +1532,10 @@ static void ur_accept_ctl(loop_t *L, int on)
     L->want_accept = on;
     if (on) pick_accept_ring(L);
     else {
-        if (L->acc_ring >= 0)   /* the terminating CQE clears acc_ring */
-            cancel_ud(L, &L->rings[L->acc_ring], ud_mk(OP_ACCEPT, (unsigned)L->acc_ring, 0, 0));
+        if (L->acc_ring >= 0)   /* the last terminating CQE clears acc_ring */
+            cancel_accepts(L, (unsigned)L->acc_ring, 0);
         for (unsigned k = 0; k < L->nlive; k++)
-            if (L->rings[k].singles) {
-                cancel_ud(L, &L->rings[k], ud_mk(OP_ACCEPT, k, 1, 0));
-                L->rings[k].sqes[(L->rings[k].sq_ltail - 1) & L->rings[k].sq_mask].cancel_flags = IORING_ASYNC_CANCEL_ALL;
-            }
+            if (L->rings[k].singles) cancel_accepts(L, k, 1);
     }
 }
 
@@ -1725,9 +1752,6 @@ static void handle_cqe(loop_t *L, unsigned ri, struct io_uring_cqe *cqe)
                 /* paused for backpressure (resumed by send_done); if already resumed, re-arm */
                 if (!(c->fl & F_PAUSED)) { cref *q = vpush(&L->rearm); q->conn = id; q->gen = gen; }
             } else {
-#ifdef LOOP_DEBUG
-                fprintf(stderr, "recv err %d conn %u\n", res, id);
-#endif
                 conn_kill(L, id);
             }
             return;
@@ -1786,18 +1810,27 @@ static void handle_cqe(loop_t *L, unsigned ri, struct io_uring_cqe *cqe)
     }
     case OP_ACCEPT: {
         int more = cqe->flags & IORING_CQE_F_MORE;
-        if (slot) r->singles--;
+        if (slot) { r->singles--; if (gen < L->nlfd && L->lsingles[gen]) L->lsingles[gen]--; }
         if (res >= 0) {
             uint32_t id = id_mk(L, ri, (uint32_t)res);
             conn_open(L, id);
             r->open++;
             arm_recv(L, id, C(L, id));
-            if (!slot && more && ring_free(r) <= multi_headroom(L, r))   /* move on before a burst can overflow */
-                cancel_ud(L, r, ud_mk(OP_ACCEPT, ri, 0, 0));
+            if (!slot && more && ring_free(r) <= multi_headroom(L, r) && !r->moving) {   /* move on before a burst can overflow */
+                r->moving = 1;
+                cancel_accepts(L, ri, 0);
+            }
         } else if (res == -ENFILE) fprintf(stderr, "loop: ring %u table full (ENFILE) - a connection was dropped\n", ri);
-        if (!slot && !more) {
-            r->accepting = 0;
-            if (L->acc_ring == (int)ri) L->acc_ring = -1;
+        if (!slot && !more) L->st.accept_ends++;
+        if (!slot && !more && r->accepting) {
+            r->accepting--;
+            /* one listener's multishot ended on its own (an error, CQ overflow): re-arm it alone, or the
+             * connections SO_REUSEPORT steers to that listener wait in its queue with nobody accepting */
+            if (L->want_accept && L->acc_ring == (int)ri && !r->moving && gen < L->nlfd && ring_free(r) > multi_headroom(L, r)) arm_accept1(L, (int)ri, 1, gen);
+            else if (!r->accepting) {
+                r->moving = 0;
+                if (L->acc_ring == (int)ri) L->acc_ring = -1;
+            }
         }
         return;
     }
@@ -1857,7 +1890,12 @@ static int ur_wait_and_reap(loop_t *L)
     if (L->more || L->vin.n || L->ready.n || L->closing.n) min = 0;   /* never sleep on work we already have */
     L->more = 0;
     int ret = ring_enter(L, r0, min, IORING_ENTER_GETEVENTS, wait);
-    if (ret < 0 && ret != -ETIME && ret != -EINTR && ret != -EBUSY) return ret;
+    if (ret == -EAGAIN || ret == -ENOMEM) {
+        /* the kernel had no memory for a request: never fatal (exiting drops every connection and the listener);
+         * the unsubmitted SQEs stay queued and go with the next enter */
+        if (!L->st.enter_errs++) fprintf(stderr, "loop: io_uring_enter: %s, retrying\n", strerror(-ret));
+        L->more = 1;
+    } else if (ret < 0 && ret != -ETIME && ret != -EINTR && ret != -EBUSY) return ret;
     L->st.wakeups++;
     unsigned n = reap(L, 0);
     for (unsigned k = 1; k < L->nlive; k++) {
@@ -1929,7 +1967,7 @@ static int ring_init(loop_t *L, ring_t *r, unsigned idx, unsigned slots)
     for (int t = 0; t < 3 && fd < 0; t++) {
         memset(&p, 0, sizeof p);
         p.flags = base | tries[t];
-        p.cq_entries = L->cfg.sq_entries * 4;
+        p.cq_entries = L->cfg.cq_entries;
         fd = sys_setup(L->cfg.sq_entries, &p);
         if (fd < 0 && t == 0) fprintf(stderr, "loop: ring setup flags %#x failed (%s), falling back\n", p.flags, strerror(errno));
     }
@@ -2045,6 +2083,19 @@ static int ur_init(loop_t *L)
     r = ring_init(L, &L->rings[0], 0, per);
     if (r < 0) { fprintf(stderr, "loop: ring 0 init: %s\n", strerror(-r)); return r; }
     L->nlive = 1;
+    /* more SO_REUSEPORT listeners (as Lean #153: one per ring), so the kernel's accept queues hold
+     * listeners x min(backlog, somaxconn) connections through a loop stall instead of dropping SYNs */
+    unsigned want = L->cfg.listen_fd > 0 ? 1 : (unsigned)L->cfg.listeners;
+    if (want > LOOP_MAX_LISTENERS) want = LOOP_MAX_LISTENERS;
+    while (L->nlfd < want) {
+        int fd = make_listener(&L->cfg);
+        if (fd < 0) { fprintf(stderr, "loop: listener %u: %s (staying at %u)\n", L->nlfd, strerror(-fd), L->nlfd); break; }
+        L->lfds[L->nlfd++] = fd;
+    }
+    L->acc_queue = (unsigned)L->cfg.backlog;
+    {   int fd = open("/proc/sys/net/core/somaxconn", O_RDONLY | O_CLOEXEC);
+        if (fd >= 0) { char b[32]; ssize_t n = read(fd, b, sizeof b - 1); close(fd);
+            if (n > 0) { b[n] = 0; unsigned m = (unsigned)atoi(b); if (m && m < L->acc_queue) L->acc_queue = m; } } }
     return 0;
 }
 

@@ -63,14 +63,14 @@ static void on_tick(loop_t *L, void *ud) {
               "cfail=%llu deadline_503=%llu press_503=%llu sock_pressure=%u/%llu all_503=%llu b503_skipped=%llu b503_tokens=%llu "
               "hint_closes=%llu close_frac=%.2f cap=%u busy=%.2f avail=%uMB orphans=%u listen_overflows=%llu "
               "listen_drops=%llu "
-              "backlog=%u busy_src=%d mem_state=%u accepting=%d enobufs=%llu rearms=%llu loop_drains=%llu tcp_mem=%u utime=%ld.%06ld stime=%ld.%06ld maxrss=%ldKB\n",
+              "backlog=%u busy_src=%d mem_state=%u accepting=%d enobufs=%llu rearms=%llu loop_drains=%llu enter_errs=%llu accept_ends=%llu tcp_mem=%u utime=%ld.%06ld stime=%ld.%06ld maxrss=%ldKB\n",
               g_shed_mode, s->open, (unsigned long long)s->accepted, (unsigned long long)a->requests, (unsigned long long)a->batches,
               (unsigned long long)a->lanes, (unsigned long long)a->slow, (unsigned long long)a->slow_checked,
               (unsigned long long)a->jwts, (unsigned long long)a->held, (unsigned long long)a->commit_failures,
               (unsigned long long)a->deadline_503, (unsigned long long)a->press_503, s->sock_pressure, (unsigned long long)s->sock_pressure_events, (unsigned long long)a->all_503, (unsigned long long)a->b503_skipped, (unsigned long long)a->b503_tokens, (unsigned long long)s->hint_closes, s->close_frac, s->cap, s->busy,
               s->avail_mb, s->tcp_orphans, (unsigned long long)s->listen_overflows, (unsigned long long)s->listen_drops,
               s->backlog_now, s->busy_src, s->mem_state, s->accepting, (unsigned long long)s->enobufs, (unsigned long long)s->rearms,
-              (unsigned long long)s->drains, s->tcp_mem_pages, (long)ru.ru_utime.tv_sec, (long)ru.ru_utime.tv_usec,
+              (unsigned long long)s->drains, (unsigned long long)s->enter_errs, (unsigned long long)s->accept_ends, s->tcp_mem_pages, (long)ru.ru_utime.tv_sec, (long)ru.ru_utime.tv_usec,
               (long)ru.ru_stime.tv_sec, (long)ru.ru_stime.tv_usec, ru.ru_maxrss);
     }
   }
@@ -107,8 +107,11 @@ int main(int argc, char **argv) {
   loop_cfg cfg = {
       .host = getenv("HOST") && *getenv("HOST") ? getenv("HOST") : "0.0.0.0",
       .port = (int)envu("PORT", 80),
-      .backlog = (int)envu("CURSED_BACKLOG",
-                           4096),  // absorbs 100 ms loop stalls at ~14k accepts/s (measured on a 1-vCPU Xeon)
+      // like Lean #153: 8 SO_REUSEPORT listeners at listen(65535) (clamped to somaxconn, 4096 on the box), so the
+      // accept queues hold ~32k connections through a loop stall instead of dropping SYNs (1 s+ retransmits)
+      .backlog = (int)envu("CURSED_BACKLOG", 65535),
+      .listeners = (int)envu("CURSED_LISTENERS", 8),
+      .cq_entries = envu("CURSED_CQ", 32768),
       .defer_accept = (int)envu("CURSED_DEFER_ACCEPT", 0),
       .linger_close = (int)strtol(getenv("CURSED_LINGER") ? getenv("CURSED_LINGER") : "0", 0, 10),
       .batch = envu("CURSED_BATCH", 128),
@@ -156,6 +159,10 @@ int main(int argc, char **argv) {
       .mem_shed_floor_mb = envu("CURSED_MEM_SHED_MB", 0),
       .mem_accept_floor_mb = envu("CURSED_MEM_ACCEPT_MB", 0),
       .shed_fin = (int)envu("CURSED_SHED_FIN", 1),
+      // tcp_mem close hint, off like the rest of the shedding: forced reconnects near the wall cost orphaned sockets
+      // and TCP memory (ada #216 measured it at 280k). It never fired in the arena, where tcp_mem isn't readable
+      // from a container's network namespace, but it was live on the box.
+      .tcp_mem_close = (int)envu("CURSED_TCPMEM_CLOSE", 0),
       .on_batch = on_batch,
       .on_tick = on_tick,
   };

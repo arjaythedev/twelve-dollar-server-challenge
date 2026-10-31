@@ -22,7 +22,7 @@
 #define APP_SQLITE_LINK 0  // 0: unity (engine.c #includes sqlite3.c); 1: separate unit, public API only
 #endif
 #ifndef APP_DB_CACHE_KIB
-#define APP_DB_CACHE_KIB 8192
+#define APP_DB_CACHE_KIB 4096
 #endif
 #ifndef APP_JWT_SCALAR
 #define APP_JWT_SCALAR 0

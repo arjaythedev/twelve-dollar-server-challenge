@@ -26,6 +26,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#define LOOP_MAX_LISTENERS 16
+
 typedef struct loop loop_t;
 typedef uint32_t loop_conn;              /* opaque handle; stable while the connection lives */
 
@@ -50,12 +52,14 @@ typedef struct {
     const char *host;                    /* default "0.0.0.0" */
     int port;                            /* default 80 */
     int listen_fd;                       /* >=0: use this listening socket instead */
+    int listeners;                       /* io_uring: SO_REUSEPORT listeners on host:port (default 8, max LOOP_MAX_LISTENERS) */
+    unsigned cq_entries;                 /* io_uring CQ size per ring (default 32768) */
     int backlog;                         /* default 4096 (somaxconn) */
 
     /* io_uring */
     unsigned rings;                      /* max rings, 0 = enough for max_conns (each <= RLIMIT_NOFILE); created on demand */
     unsigned max_conns;                  /* default 1<<20 (capped by rings * table size) */
-    unsigned sq_entries;                 /* default 1024 (CQ = 4x) */
+    unsigned sq_entries;                 /* default 1024 */
     unsigned bufs;                       /* provided recv buffers per ring, default 512 */
     unsigned buf_size;                   /* default 2048 */
     unsigned batch;                      /* wait-for-N target, default 128 */
@@ -141,6 +145,7 @@ typedef struct {
     unsigned mem_shed_floor_mb;          /* RST the longest-idle keep-alives below this (0 = off) */
     unsigned shed_min_idle_s;            /* only shed conns idle at least this long, default 20 */
     int shed_fin;                        /* 1: shed with FIN instead of RST (SO_LINGER 0) */
+    int tcp_mem_close;                   /* 1: past 70 % of tcp_mem[1], add Connection: close to a rising fraction of replies */
 
     loop_batch_fn on_batch;
     loop_tick_fn on_tick;
@@ -151,6 +156,8 @@ typedef struct {
     uint64_t accepted, closed, batches, batch_items, recvs, sends, send_bytes;
     uint64_t enobufs, rearms, partial_sends, shed, refused_pause, enters, wakeups;
     uint64_t drains;                     /* drain_first: between-chunk ring drains */
+    uint64_t accept_ends;                /* multishot accepts that ended (cancelled or on their own) */
+    uint64_t enter_errs;                 /* io_uring_enter EAGAIN/ENOMEM (no memory for requests): retried next pass */
     uint64_t file_ops;                   /* loop_file_submit ops completed */
     uint64_t rst, hint_closes, stranded;   /* stranded: recvs re-armed by the watchdog (should stay 0) */
     uint32_t open;

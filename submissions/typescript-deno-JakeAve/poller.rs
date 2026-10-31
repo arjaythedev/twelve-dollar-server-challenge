@@ -23,6 +23,10 @@ const RMIN: usize = 1024; // idle read buffer
 const RMAX: usize = 32 * 1024; // headers + a 16 KB body, server.ts's MAX_BUF
 const WMAX: usize = 1 << 20; // queued response bytes before we give up on a client that does not read
 const MAXREQ: usize = 4096; // entries per batch: idx holds 3 ints each
+// Fds kept free below RLIMIT_NOFILE: SQLite's, Deno's, and room to accept users who will get one answer and a
+// close. Past that many connections, px_crowded tells JS to close connections after their response.
+const HEADROOM: usize = 1024;
+const RLIMIT_NOFILE: c_int = 7;
 const NEVENTS: usize = 512;
 const CLOCK_MONOTONIC: c_int = 1;
 const WAKE_TAG: u64 = u64::MAX; // epoll data of the wake eventfd (connections and the listener carry their fd)
@@ -75,6 +79,7 @@ extern "C" {
     fn close(fd: c_int) -> c_int;
     fn clock_gettime(clock: c_int, t: *mut [i64; 2]) -> c_int;
     fn eventfd(init: u32, flags: c_int) -> c_int;
+    fn getrlimit(res: c_int, lim: *mut [u64; 2]) -> c_int;
 }
 
 fn now_ms() -> i64 {
@@ -84,10 +89,11 @@ fn now_ms() -> i64 {
 }
 
 /// r holds unconsumed request bytes (capacity 1 KB, doubling up to RMAX); w the response bytes the socket
-/// has not taken yet (empty and unallocated almost always).
+/// has not taken yet (empty and unallocated almost always). closing: drop it once w is written.
 struct Conn {
     r: Vec<u8>,
     w: Vec<u8>,
+    closing: bool,
 }
 
 struct State {
@@ -103,6 +109,8 @@ struct State {
     lastlog: i64,
     efd: c_int, // wake eventfd (0: px_wake_open not called)
     gens: [u32; MAXFD], // connections accepted on each fd: JS holds responses past a batch, and fds get reused
+    nconn: usize, // open connections
+    crowd: usize, // more open than this: crowded (set by px_start from RLIMIT_NOFILE)
 }
 
 const CLOSED: Option<Box<Conn>> = None;
@@ -121,6 +129,8 @@ static mut S: State = State {
     lastlog: 0,
     efd: 0,
     gens: [0; MAXFD],
+    nconn: 0,
+    crowd: 0,
 };
 
 fn st() -> &'static mut State {
@@ -157,6 +167,7 @@ impl State {
     fn drop(&mut self, fd: usize) {
         if self.conns[fd].take().is_some() {
             unsafe { close(fd as c_int) };
+            self.nconn -= 1;
         }
     }
 
@@ -187,7 +198,8 @@ impl State {
                 continue;
             }
             unsafe { setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one as *const c_int as *const c_void, 4) };
-            self.conns[fd as usize] = Some(Box::new(Conn { r, w: Vec::new() }));
+            self.conns[fd as usize] = Some(Box::new(Conn { r, w: Vec::new(), closing: false }));
+            self.nconn += 1;
             self.gens[fd as usize] = self.gens[fd as usize].wrapping_add(1);
             watch(self.ep, fd as usize, EPOLL_CTL_ADD, EPOLLIN);
         }
@@ -198,6 +210,9 @@ impl State {
         let Some(k) = self.conns[fd].as_mut() else { return };
         let Some(off) = write_some(fd, &k.w) else { return self.drop(fd) };
         if off == k.w.len() {
+            if k.closing {
+                return self.drop(fd);
+            }
             k.w = Vec::new();
             watch(self.ep, fd, EPOLL_CTL_MOD, EPOLLIN);
         } else {
@@ -212,6 +227,9 @@ pub extern "C" fn px_start(host: *const c_char, port: c_int, inbuf: *mut u8, inl
     let s = st();
     let one: c_int = 1;
     (s.inb, s.incap, s.idx) = (inbuf, inlen as usize, index);
+    let mut lim = [MAXFD as u64; 2];
+    unsafe { getrlimit(RLIMIT_NOFILE, &mut lim) };
+    s.crowd = (lim[0].min(MAXFD as u64) as usize).saturating_sub(HEADROOM);
     let Some(ip) = unsafe { CStr::from_ptr(host) }.to_str().ok().and_then(|h| h.parse::<Ipv4Addr>().ok()) else {
         return -2;
     };
@@ -228,9 +246,10 @@ pub extern "C" fn px_start(host: *const c_char, port: c_int, inbuf: *mut u8, inl
     0
 }
 
-/// One response: written now if the socket takes it, else the rest is queued in order. -1: connection gone.
+/// One response: written now if the socket takes it, else the rest is queued in order. close: the response
+/// says `connection: close`, so drop the connection once it is written. -1: connection gone.
 #[no_mangle]
-pub extern "C" fn px_send(fd: c_int, p: *const u8, n: c_int) -> c_int {
+pub extern "C" fn px_send(fd: c_int, p: *const u8, n: c_int, close: c_int) -> c_int {
     let s = st();
     let fd = fd as usize;
     let p = unsafe { slice::from_raw_parts(p, n as usize) };
@@ -245,8 +264,14 @@ pub extern "C" fn px_send(fd: c_int, p: *const u8, n: c_int) -> c_int {
     }
     let rest = &p[w..];
     if rest.is_empty() {
+        // ponytail: close() with a pipelined request unread sends RST and can cut this response short; the
+        // load generators never pipeline. shutdown(SHUT_WR), then drop on EOF, if a client ever does.
+        if close != 0 {
+            s.drop(fd);
+        }
         return 0;
     }
+    k.closing |= close != 0;
     if k.w.len() + rest.len() > WMAX || k.w.try_reserve(rest.len()).is_err() {
         s.drop(fd);
         return -1;
@@ -371,6 +396,14 @@ pub extern "C" fn px_wake_open() -> c_int {
 #[no_mangle]
 pub extern "C" fn px_gen(fd: c_int) -> u32 {
     st().gens[fd as usize]
+}
+
+/// 1 when more connections are open than the fd limit leaves room for: JS answers with `connection: close`
+/// so users above the limit reconnect per request instead of waiting in the listen queue.
+#[no_mangle]
+pub extern "C" fn px_crowded() -> c_int {
+    let s = st();
+    (s.nconn > s.crowd) as c_int
 }
 
 /// Closes a connection now (a COMMIT its response waited on failed).

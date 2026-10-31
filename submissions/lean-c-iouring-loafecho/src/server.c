@@ -170,10 +170,14 @@ static void close_conn(uint32_t slot) {
     s = get_sqe();
     io_uring_prep_close_direct(s, slot);
     io_uring_sqe_set_data64(s, mkud(UD_CLOSE, slot, c->gen));
-    /* Keep small buffers for the next connection on this slot; drop big ones. */
-    if (c->in_cap > 16384) { free(c->in); c->in = NULL; c->in_cap = 0; }
+    /* A closed slot keeps no heap: drop the request and response buffers.
+     * The send buffer goes too unless a send may still be reading it; then
+     * the next accept on this slot frees it. */
+    free(c->in);  c->in = NULL;  c->in_cap = 0;
     c->in_len = 0; c->need = 0;
+    free(c->out); c->out = NULL; c->out_cap = 0;
     c->out_len = 0;
+    if (!c->sending) { free(c->snd); c->snd = NULL; c->snd_cap = 0; c->snd_len = c->snd_off = 0; }
 }
 
 static void arm_recv(uint32_t slot) {
@@ -204,19 +208,23 @@ static void post_send(uint32_t slot) {
     io_uring_sqe_set_data64(s, mkud(UD_SEND, slot, c->gen));
 }
 
-/* Called only at the end of a batch, after db_batch_commit(). */
+/* Called only at the end of a batch, after db_batch_commit().
+ * The out buffer becomes the send buffer and out goes back to empty (no
+ * allocation); the send completion frees it. So an idle connection holds no
+ * heap beyond its conn_t, and a response costs one malloc and one free. */
 static void flush_conn(uint32_t slot) {
     conn_t *c = &conns[slot];
     c->dirty = 0;
     if (!c->open || c->sending) return;
     if (c->out_len) {
-        char *t = c->snd; size_t tc = c->snd_cap;
+        if (c->snd) free(c->snd);                 /* not sending: nothing reads it */
         c->snd = c->out; c->snd_cap = c->out_cap; c->snd_len = c->out_len; c->snd_off = 0;
-        c->out = t; c->out_cap = tc; c->out_len = 0;
+        c->out = NULL; c->out_cap = 0; c->out_len = 0;
         c->sending = 1;
         post_send(slot);
-    } else if (c->close_after) {
-        close_conn(slot);
+    } else {
+        if (c->out) { free(c->out); c->out = NULL; c->out_cap = 0; }
+        if (c->close_after) close_conn(slot);
     }
 }
 
@@ -529,10 +537,13 @@ static void on_data(uint32_t slot, const char *data, size_t n) {
     memcpy(c->in + c->in_len, data, n);
     c->in_len += n;
     if (c->need && c->in_len < c->need) return;
-    size_t used = parse_all(slot, c, c->in, c->in_len);
-    if (c->close_after) { c->in_len = 0; return; }
+    size_t used = parse_all(slot, c, c->in, c->in_len);   /* == in_len once close_after */
+    if (used == c->in_len) {
+        /* No partial request left: the connection holds no input buffer. */
+        free(c->in); c->in = NULL; c->in_cap = 0; c->in_len = 0;
+        return;
+    }
     if (used) { memmove(c->in, c->in + used, c->in_len - used); c->in_len -= used; }
-    if (c->in_len == 0 && c->in_cap > 16384) { free(c->in); c->in = NULL; c->in_cap = 0; }
 }
 
 /* ------------------------------------------------------------ CQE dispatch */
@@ -562,6 +573,9 @@ static void on_cqe(struct io_uring_cqe *cqe) {
                 c->gen = (c->gen + 1) & 0xffffff;
                 c->open = 1; c->sending = 0; c->close_after = 0; c->cont_sent = 0;
                 c->in_len = 0; c->need = 0; c->out_len = 0; c->snd_len = c->snd_off = 0;
+                /* A send still in flight when the previous connection on this
+                 * slot closed left its buffer; that send is finished now. */
+                if (c->snd) { free(c->snd); c->snd = NULL; c->snd_cap = 0; }
                 if (!use_bufring && !c->rbuf) c->rbuf = xrealloc(NULL, RECV_BUF_SZ);
                 arm_recv((uint32_t)res);
             }
@@ -606,7 +620,7 @@ static void on_cqe(struct io_uring_cqe *cqe) {
         c->snd_off += (size_t)res;
         if (c->snd_off < c->snd_len) { post_send(slot); return; }
         c->sending = 0;
-        if (c->snd_cap > 65536) { free(c->snd); c->snd = NULL; c->snd_cap = 0; }
+        free(c->snd); c->snd = NULL; c->snd_cap = 0; c->snd_len = c->snd_off = 0;
         mark_dirty(slot);
         return;
     }
@@ -1028,7 +1042,7 @@ static int pgo_train(void) {
             conn_t *c = &conns[dirty[i]];
             c->dirty = 0;
             tr_count(&t, c->out, c->out_len);
-            c->out_len = 0;
+            free(c->out); c->out = NULL; c->out_cap = 0; c->out_len = 0;   /* freed after its send */
             if (c->close_after) {
                 c->close_after = 0; c->in_len = 0; c->need = 0; c->cont_sent = 0;
                 c->gen = (c->gen + 1) & 0xffffff;

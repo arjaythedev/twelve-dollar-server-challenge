@@ -1,8 +1,10 @@
 with Ada.Directories;
+with Ada.Unchecked_Conversion;
 with Interfaces; use Interfaces;
 with Interfaces.C; use Interfaces.C;
 with Interfaces.C.Strings;
 with System;
+with System.Storage_Elements;
 with Checkpointer;
 with Output;
 with Sys;
@@ -170,6 +172,376 @@ package body Database is
       end;
    end Column_Text;
 
+   ---------------------------------------------------------------------------
+   -- Direct B-tree reads
+   --
+   -- GET /feed and GET /posts/:id, nearly all of the load, read their rows
+   -- through SQLite's own B-tree cursors (src/sqlite_btree.c) instead of
+   -- compiled statements: the same pages, page cache and WAL snapshot, inside
+   -- the same batch transaction, without the bytecode interpreter. The
+   -- records are decoded below. Anything unexpected (a missing row, a value
+   -- of another type, a record not stored whole on its page, any error)
+   -- sends the request through the SQL statements instead, which stay the
+   -- reference. Open enables this only for the schema it was written for.
+   ---------------------------------------------------------------------------
+
+   function BT_Setup (Connection : Handle; Cursor : int; Root : unsigned;
+                      Fields, Descending : int) return int
+     with Import, Convention => C, External_Name => "ada_bt_setup";
+   function BT_Begin return int
+     with Import, Convention => C, External_Name => "ada_bt_begin";
+   procedure BT_End
+     with Import, Convention => C, External_Name => "ada_bt_end";
+   function BT_Seek_Row (Cursor : int; Row_ID : Long_Long_Integer) return int
+     with Import, Convention => C, External_Name => "ada_bt_seek_row";
+   function BT_Seek_Int (Cursor : int; Key : Long_Long_Integer) return int
+     with Import, Convention => C, External_Name => "ada_bt_seek_int";
+   function BT_First (Cursor : int) return int
+     with Import, Convention => C, External_Name => "ada_bt_first";
+   function BT_Step (Cursor : int; Backward : int) return int
+     with Import, Convention => C, External_Name => "ada_bt_step";
+   function BT_Row_ID (Cursor : int) return Long_Long_Integer
+     with Import, Convention => C, External_Name => "ada_bt_rowid";
+   function BT_Record (Cursor : int; Length : access unsigned) return System.Address
+     with Import, Convention => C, External_Name => "ada_bt_record";
+   procedure BT_Close
+     with Import, Convention => C, External_Name => "ada_bt_close";
+
+   Posts_Table : constant int := 0;   -- (id, user_id, body, created_at)
+   Users_Table : constant int := 1;   -- (id, username, created_at)
+   Likes_Index : constant int := 2;   -- likes_post_id_idx: (post_id, rowid)
+   Newest_Index : constant int := 3;  -- posts_created_at_id_idx: (created_at DESC, id DESC, rowid)
+   Fast_Reads : Boolean := False;
+   Fast_Served, SQL_Fallbacks : Natural := 0;   -- since the last stats line
+
+   type Field_Kind is (Null_Field, Int_Field, Text_Field, Other_Field);
+   type Field is record
+      Kind : Field_Kind := Other_Field;
+      Int : Long_Long_Integer := 0;
+      Text : System.Address := System.Null_Address;
+      Length : Natural := 0;
+   end record;
+   type Field_List is array (1 .. 4) of Field;
+   type Byte_Array is array (Natural range <>) of Unsigned_8;
+   function To_Signed is new Ada.Unchecked_Conversion (Unsigned_64, Long_Long_Integer);
+
+   -- Decodes the first Count fields of the current record of Cursor (SQLite
+   -- record format: a header of varint serial types, then the values).
+   -- False if there is no whole record or it has fewer or unknown fields.
+   function Decode (Cursor : int; Count : Positive; Result : out Field_List) return Boolean is
+      Size : aliased unsigned := 0;
+      Data : constant System.Address := BT_Record (Cursor, Size'Access);
+   begin
+      if Data = System.Null_Address or else Size = 0 or else Size > 65_536 then
+         return False;
+      end if;
+      declare
+         use System.Storage_Elements;
+         Bytes : Byte_Array (0 .. Natural (Size) - 1) with Import, Address => Data;
+         Pos : Natural := 0;
+         Header_End, Value_At, Width : Natural;
+         Serial, V : Unsigned_64;
+
+         function Varint return Unsigned_64 is
+            Value : Unsigned_64 := 0;
+            B : Unsigned_8;
+         begin
+            for I in 1 .. 8 loop
+               B := Bytes (Pos);
+               Pos := Pos + 1;
+               Value := Shift_Left (Value, 7) or Unsigned_64 (B and 127);
+               if B < 128 then
+                  return Value;
+               end if;
+            end loop;
+            B := Bytes (Pos);
+            Pos := Pos + 1;
+            return Shift_Left (Value, 8) or Unsigned_64 (B);
+         end Varint;
+      begin
+         V := Varint;
+         if V > Unsigned_64 (Size) then
+            return False;
+         end if;
+         Header_End := Natural (V);
+         Value_At := Header_End;
+         for F in 1 .. Count loop
+            if Pos >= Header_End then
+               return False;
+            end if;
+            Serial := Varint;
+            Result (F) := (others => <>);
+            case Serial is
+               when 0 =>
+                  Result (F).Kind := Null_Field;
+                  Width := 0;
+               when 1 .. 6 =>
+                  Width := (case Serial is when 5 => 6, when 6 => 8, when others => Natural (Serial));
+                  if Value_At + Width > Natural (Size) then
+                     return False;
+                  end if;
+                  V := 0;
+                  for I in 0 .. Width - 1 loop
+                     V := Shift_Left (V, 8) or Unsigned_64 (Bytes (Value_At + I));
+                  end loop;
+                  if Width < 8 and then (V and Shift_Left (1, Width * 8 - 1)) /= 0 then
+                     V := V or Shift_Left (Unsigned_64'Last, Width * 8);  -- negative
+                  end if;
+                  Result (F).Kind := Int_Field;
+                  Result (F).Int := To_Signed (V);
+               when 8 | 9 =>
+                  Result (F).Kind := Int_Field;
+                  Result (F).Int := Long_Long_Integer (Serial - 8);
+                  Width := 0;
+               when 10 | 11 =>
+                  return False;
+               when others =>
+                  if Serial > 2 * 65_536 + 13 then
+                     return False;
+                  end if;
+                  Width := Natural ((Serial - 12) / 2);
+                  if Serial mod 2 = 1 then
+                     Result (F).Kind := Text_Field;
+                     Result (F).Text := Data + Storage_Offset (Value_At);
+                     Result (F).Length := Width;
+                  end if;
+            end case;
+            if Value_At + Width > Natural (Size) then
+               return False;
+            end if;
+            Value_At := Value_At + Width;
+         end loop;
+         return True;
+      end;
+   exception
+      when Constraint_Error =>
+         return False;
+   end Decode;
+
+   procedure Put_Field (F : Field) is
+   begin
+      if F.Length = 0 then
+         Output.Put ("""""");
+      else
+         Output.Put_Quoted (F.Text, F.Length);
+      end if;
+   end Put_Field;
+
+   -- Likes of one post, from likes_post_id_idx; -1 if it cannot tell.
+   function Fast_Like_Count (Post_ID : Long_Long_Integer) return Long_Long_Integer is
+      Key : Field_List;
+      RC : int := BT_Seek_Int (Likes_Index, Post_ID);
+      Count : Long_Long_Integer := 0;
+   begin
+      while RC = 1 loop
+         if not Decode (Likes_Index, 1, Key) or else Key (1).Kind /= Int_Field then
+            return -1;
+         end if;
+         exit when Key (1).Int /= Post_ID;
+         Count := Count + 1;
+         RC := BT_Step (Likes_Index, 0);
+      end loop;
+      return (if RC < 0 then -1 else Count);
+   end Fast_Like_Count;
+
+   -- The current posts row as {"id":..,"body":..,"created_at":..,"author":..,
+   -- "like_count":..}, its author read from users. False (nothing written
+   -- that the caller keeps) if the row or its author is not as expected.
+   function Fast_Post_JSON (ID, Like_Count : Long_Long_Integer) return Boolean is
+      Post_Row, User_Row : Field_List;
+   begin
+      if not Decode (Posts_Table, 4, Post_Row) or else Post_Row (2).Kind /= Int_Field
+        or else Post_Row (3).Kind /= Text_Field or else Post_Row (4).Kind /= Text_Field
+        or else BT_Seek_Row (Users_Table, Post_Row (2).Int) /= 1
+        or else not Decode (Users_Table, 2, User_Row) or else User_Row (2).Kind /= Text_Field
+      then
+         return False;
+      end if;
+      Output.Put ("{""id"":");
+      Output.Put_Int (ID);
+      Output.Put (",""body"":");
+      Put_Field (Post_Row (3));
+      Output.Put (",""created_at"":");
+      Put_Field (Post_Row (4));
+      Output.Put (",""author"":");
+      Put_Field (User_Row (2));
+      Output.Put (",""like_count"":");
+      Output.Put_Int (Like_Count);
+      Output.Put ('}');
+      return True;
+   end Fast_Post_JSON;
+
+   type Fast_Result is (Served, Not_Found, Use_SQL);
+
+   function Fast_Post (ID : Long_Long_Integer) return Fast_Result is
+      Start : constant Natural := Output.Mark;
+      Result : Fast_Result := Use_SQL;
+      Found, Likes : Long_Long_Integer;
+   begin
+      if BT_Begin /= 0 then
+         return Use_SQL;
+      end if;
+      begin
+         Found := Long_Long_Integer (BT_Seek_Row (Posts_Table, ID));
+         if Found = 0 then
+            Result := Not_Found;
+         elsif Found = 1 then
+            Likes := Fast_Like_Count (ID);
+            if Likes >= 0 then
+               Output.Put ("{""post"":");
+               if Fast_Post_JSON (ID, Likes) then
+                  Output.Put ('}');
+                  Result := Served;
+               end if;
+            end if;
+         end if;
+      exception
+         when others =>   -- e.g. a response too large: the SQL path reports it
+            Result := Use_SQL;
+      end;
+      BT_End;
+      if Result = Use_SQL then
+         Output.Rewind (Start);
+         SQL_Fallbacks := SQL_Fallbacks + 1;
+      else
+         Fast_Served := Fast_Served + 1;
+      end if;
+      return Result;
+   end Fast_Post;
+
+   function Fast_Feed return Boolean is
+      Span : constant := 40;
+      IDs : array (1 .. 20) of Long_Long_Integer := [others => 0];
+      Likes : array (0 .. Span - 1) of Long_Long_Integer := [others => 0];
+      Count, Next : Natural := 0;
+      Newest, Oldest, Row : Long_Long_Integer;
+      Key : Field_List;
+      RC : int;
+      Start : constant Natural := Output.Mark;
+      OK : Boolean := False;
+   begin
+      if BT_Begin /= 0 then
+         return False;
+      end if;
+      begin
+         -- The newest 20 posts, in posts_created_at_id_idx order.
+         RC := BT_First (Newest_Index);
+         while RC = 1 and then Count < IDs'Last loop
+            exit when not Decode (Newest_Index, 2, Key) or else Key (2).Kind /= Int_Field;
+            Count := Count + 1;
+            IDs (Count) := Key (2).Int;
+            RC := BT_Step (Newest_Index, 0);
+         end loop;
+         if Count = IDs'Last or else (RC = 0 and then Count > 0) then
+            Newest := IDs (1);
+            Oldest := IDs (Count);
+            -- As in Feed: dense, newest-first IDs only.
+            OK := Oldest <= Long_Long_Integer'Last - Span and then Newest < Oldest + Span;
+            for I in 2 .. Count loop
+               OK := OK and then IDs (I) < IDs (I - 1);
+            end loop;
+         elsif RC = 0 and then Count = 0 then
+            Output.Put ("{""posts"":[]}");
+            BT_End;
+            Fast_Served := Fast_Served + 1;
+            return True;
+         end if;
+         if OK then
+            -- Their likes: one range of likes_post_id_idx.
+            RC := BT_Seek_Int (Likes_Index, Oldest);
+            while RC = 1 loop
+               if not Decode (Likes_Index, 1, Key) or else Key (1).Kind /= Int_Field then
+                  OK := False;
+                  exit;
+               end if;
+               exit when Key (1).Int > Newest;
+               Likes (Natural (Key (1).Int - Oldest)) := Likes (Natural (Key (1).Int - Oldest)) + 1;
+               RC := BT_Step (Likes_Index, 0);
+            end loop;
+            OK := OK and then RC >= 0;
+         end if;
+         if OK then
+            -- The rows, newest first, walking posts backwards from Newest.
+            Output.Put ("{""posts"":[");
+            OK := BT_Seek_Row (Posts_Table, Newest) = 1;
+            Next := 1;
+            while OK and then Next <= Count loop
+               Row := BT_Row_ID (Posts_Table);
+               if Row = IDs (Next) then
+                  if Next > 1 then
+                     Output.Put (',');
+                  end if;
+                  OK := Fast_Post_JSON (Row, Likes (Natural (Row - Oldest)));
+                  Next := Next + 1;
+               elsif Row < IDs (Next) then
+                  OK := False;   -- a wanted post is missing
+               end if;
+               if OK and then Next <= Count then
+                  OK := BT_Step (Posts_Table, 1) = 1;
+               end if;
+            end loop;
+            if OK then
+               Output.Put ("]}");
+            end if;
+         end if;
+      exception
+         when others =>
+            OK := False;
+      end;
+      BT_End;
+      if OK then
+         Fast_Served := Fast_Served + 1;
+      else
+         Output.Rewind (Start);
+         SQL_Fallbacks := SQL_Fallbacks + 1;
+      end if;
+      return OK;
+   end Fast_Feed;
+
+   -- Enables Fast_Reads when the schema is exactly the challenge's.
+   procedure Setup_Fast_Reads is
+      function Scalar (SQL : String) return String is
+         S : aliased Handle := System.Null_Address;
+         Ignored : int;
+      begin
+         Require (Prepare (DB, To_C (SQL), -1, 0, S'Access, System.Null_Address));
+         declare
+            Value : constant String := (if Step (S) = Row then Column_Text (S, 0) else "");
+         begin
+            Ignored := Finalize (S);
+            return Value;
+         end;
+      end Scalar;
+      function Root (Name : String) return unsigned is
+         Text : constant String :=
+           Scalar ("SELECT rootpage FROM sqlite_schema WHERE name='" & Name & "'");
+      begin
+         return (if Text = "" then 0 else unsigned'Value (Text));
+      end Root;
+      function Columns (Table : String) return String is
+        (Scalar ("SELECT group_concat(name||':'||upper(type)||':'||pk,',') FROM " &
+                 "(SELECT * FROM pragma_table_info('" & Table & "') ORDER BY cid)"));
+      function Key (Index : String) return String is
+        (Scalar ("SELECT group_concat(coalesce(name,'rowid')||':'||""desc"",',') FROM " &
+                 "(SELECT * FROM pragma_index_xinfo('" & Index & "') WHERE key ORDER BY seqno)"));
+      Newest_Key : constant String := Key ("posts_created_at_id_idx");
+   begin
+      Fast_Reads := False;
+      if Columns ("posts") /= "id:INTEGER:1,user_id:INTEGER:0,body:TEXT:0,created_at:TEXT:0"
+        or else Columns ("users") /= "id:INTEGER:1,username:TEXT:0,created_at:TEXT:0"
+        or else Key ("likes_post_id_idx") /= "post_id:0"
+        or else (Newest_Key /= "created_at:1,id:1" and then Newest_Key /= "created_at:1,rowid:1")
+        or else Scalar ("PRAGMA encoding") /= "UTF-8"
+      then
+         return;
+      end if;
+      Fast_Reads :=
+        BT_Setup (DB, Posts_Table, Root ("posts"), 0, 0) = 0 and then
+        BT_Setup (DB, Users_Table, Root ("users"), 0, 0) = 0 and then
+        BT_Setup (DB, Likes_Index, Root ("likes_post_id_idx"), 1, 0) = 0 and then
+        BT_Setup (DB, Newest_Index, Root ("posts_created_at_id_idx"), 2, 1) = 0;
+   end Setup_Fast_Reads;
+
    procedure Open (Path : String) is
       Connection : aliased Handle := System.Null_Address;
       S : aliased Handle := System.Null_Address;
@@ -222,11 +594,14 @@ package body Database is
       Compile (Begin_Query, "BEGIN");
       Compile (Commit_Query, "COMMIT");
       Compile (Rollback_Query, "ROLLBACK");
+      Setup_Fast_Reads;
    end Open;
 
    procedure Close is
       Ignored : int;
    begin
+      Fast_Reads := False;
+      BT_Close;
       for S of Statements loop
          if S /= System.Null_Address then
             Ignored := Finalize (S);
@@ -266,8 +641,12 @@ package body Database is
 
    function Checkpoint_Stats return String is
       Text : constant String := " gates" & Gates'Image & " gate_timeouts" & Gate_Timeouts'Image &
-        " worst_gate_ms" & Worst_Gate'Image & " inline_ckpt" & Inline_Checkpoints'Image;
+        " worst_gate_ms" & Worst_Gate'Image & " inline_ckpt" & Inline_Checkpoints'Image &
+        (if Fast_Reads then " btree_reads" & Fast_Served'Image & " sql_fallbacks" & SQL_Fallbacks'Image
+         else " btree_reads off");
    begin
+      Fast_Served := 0;
+      SQL_Fallbacks := 0;
       Worst_Gate := 0;
       Gates := 0;
       Gate_Timeouts := 0;
@@ -377,6 +756,9 @@ package body Database is
    begin
       -- All scans share the batch's SQLite snapshot; nothing outlives it.
       Ensure_Transaction;
+      if Fast_Reads and then Fast_Feed then
+         return;
+      end if;
       S := Statements (Feed_IDs);
       loop
          RC := Step (S);
@@ -450,6 +832,13 @@ package body Database is
       RC : int;
    begin
       Ensure_Transaction;
+      if Fast_Reads then
+         case Fast_Post (ID) is
+            when Served => return True;
+            when Not_Found => return False;
+            when Use_SQL => null;
+         end case;
+      end if;
       Require (Bind_Int (S, 1, ID));
       RC := Step (S);
       if RC = Row then

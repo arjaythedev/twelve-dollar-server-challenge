@@ -284,50 +284,21 @@ static int bt_post_obj(struct bt *b, struct ob *o, i64 id, i64 likes) {
   return 0;
 }
 
-/* ---- prefetching the users pages ----
- * The 20 author lookups of a feed are 20 random rows of a table nobody writes, so their leaf
- * pages sit in the database file (never in the WAL) and in the memory map. Finding each leaf
- * is one binary search of the users root page, which is hot. Done for all 20 before the real
- * seeks, the 20 cold cache lines are fetched in parallel instead of one after another.
- * This is only a hint: a wrong page number costs nothing. */
-static inline uint32_t be32(const u8 *p) { return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3]; }
-static inline uint32_t be16(const u8 *p) { return (uint32_t)p[0] << 8 | p[1]; }
-
-/* The address of a page in the file's memory map, or NULL. */
-static inline const u8 *bt_map_page(struct bt *b, Pgno pgno) {
-  Pager *pg = sqlite3BtreePager(b->bt);
-  unixFile *f = (unixFile *)sqlite3PagerFile(pg);
-  u32 pgsz = (u32)sqlite3BtreeGetPageSize(b->bt);
-  if (!f->pMapRegion || (i64)pgno * pgsz > f->mmapSize) return NULL;
-  return (const u8 *)f->pMapRegion + (size_t)(pgno - 1) * pgsz;
-}
-
-static void bt_prefetch_users(struct bt *b, const i64 *uids, int n) {
-  const u8 *root = bt_map_page(b, b->root_users);
-  if (!root || root[0] != 0x05) return; /* not an interior table page: the root is the leaf, already hot */
-  u32 ncell = be16(root + 3), right = be32(root + 8);
-  const u8 *ptrs = root + 12;
-  for (int k = 0; k < n; k++) {
-    u32 lo = 0, hi = ncell;
-    while (lo < hi) {
-      u32 mid = (lo + hi) / 2;
-      const u8 *cell = root + be16(ptrs + 2 * mid);
-      u64 key;
-      if (!rd_varint(cell + 4, cell + 13, &key)) return;
-      if ((i64)key < uids[k]) lo = mid + 1; else hi = mid;
-    }
-    u32 child = lo < ncell ? be32(root + be16(ptrs + 2 * lo)) : right;
-    const u8 *leaf = bt_map_page(b, child);
-    if (leaf) {
-      __builtin_prefetch(leaf);      /* header and the start of the cell pointer array */
-      __builtin_prefetch(leaf + 64);
-    }
-  }
+/* First row of a table whose rowid is >= key: 0 on a row, 1 past the end, -1 on error.
+ * The B-tree equivalent of the bytecode engine's OP_SeekGE on a rowid. */
+static int table_seek_ge(struct bt_cursor *c, i64 key) {
+  int res;
+  if (sqlite3BtreeTableMoveto(c->c, key, 0, &res) != SQLITE_OK) return -1;
+  if (sqlite3BtreeEof(c->c)) return 1;
+  if (res < 0) return cur_next(c); /* landed on the row just below key */
+  return 0;
 }
 
 /* GET /feed: the 20 newest ids off posts_created_at_id_idx (a DESC,DESC index, so the tree's
- * first entries), all 20 like counts from one range scan when the ids sit within FEED_SPAN,
- * then each row by rowid, then the 20 authors with their pages prefetched. */
+ * first entries). When they lie within FEED_SPAN ids of each other (they do: ids and timestamps
+ * both grow), the rows are read the way the bytecode engine runs `WHERE id BETWEEN lo AND hi`:
+ * one range scan of likes_post_id_idx for the counts, one range scan of posts (a single seek,
+ * then sqlite3BtreeNext) for the rows, keeping the ones in the feed. Then each author by rowid. */
 static int bt_feed(struct bt *b, struct ob *o) {
   i64 ids[FEED_N];
   int n = 0;
@@ -350,25 +321,38 @@ static int bt_feed(struct bt *b, struct ob *o) {
   i64 counts[FEED_SPAN];
   if (bt_range_counts(b, lo, hi, counts)) return -1;
 
-  /* pass 1: the rows (hot pages), copied out because the cursor moves on */
+  /* the rows: one range scan over [lo, hi]. Each kept row is copied out of its page, because the
+   * cursor moves on (and the author seeks below use another cursor). */
+  int8_t slot[FEED_SPAN];
+  memset(slot, -1, sizeof slot);
+  for (int i = 0; i < n; i++) slot[ids[i] - lo] = (int8_t)i;
   static u8 bodies[FEED_N][2048], created[FEED_N][64];
   u32 body_len[FEED_N], created_len[FEED_N];
   i64 uids[FEED_N];
-  for (int i = 0; i < n; i++) {
-    if (cur_seek(&b->posts, ids[i])) return -1;
-    struct rec r;
-    struct col c[4];
-    if (bt_record(b, &b->posts, &r) || rec_cols(&r, 4, c) || !col_is_int(&c[1]) || !col_is_text(&c[2]) || !col_is_text(&c[3]))
-      return -1;
-    body_len[i] = col_len(&c[2]);
-    created_len[i] = col_len(&c[3]);
-    if (body_len[i] > sizeof bodies[i] || created_len[i] > sizeof created[i]) return -1;
-    memcpy(bodies[i], c[2].p, body_len[i]);
-    memcpy(created[i], c[3].p, created_len[i]);
-    uids[i] = col_int(&c[1]);
+  int found = 0;
+  rc = table_seek_ge(&b->posts, lo);
+  while (rc == 0) {
+    i64 id = sqlite3BtreeIntegerKey(b->posts.c);
+    if (id > hi) break;
+    int i = slot[id - lo];
+    if (i >= 0) {
+      struct rec r;
+      struct col c[4];
+      if (bt_record(b, &b->posts, &r) || rec_cols(&r, 4, c) || !col_is_int(&c[1]) || !col_is_text(&c[2]) || !col_is_text(&c[3]))
+        return -1;
+      body_len[i] = col_len(&c[2]);
+      created_len[i] = col_len(&c[3]);
+      if (body_len[i] > sizeof bodies[i] || created_len[i] > sizeof created[i]) return -1;
+      memcpy(bodies[i], c[2].p, body_len[i]);
+      memcpy(created[i], c[3].p, created_len[i]);
+      uids[i] = col_int(&c[1]);
+      if (++found == n) break;
+    }
+    rc = cur_next(&b->posts);
   }
-  /* pass 2: the authors */
-  bt_prefetch_users(b, uids, n);
+  if (rc < 0 || found != n) return -1; /* a row the index named is missing: the SQL path decides */
+
+  /* the authors, and the JSON in feed order */
   ob_lit(o, "{\"posts\":[");
   for (int i = 0; i < n; i++) {
     const u8 *name;

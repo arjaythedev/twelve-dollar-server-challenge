@@ -462,9 +462,16 @@ static void sweep(void) {
   }
 }
 
+static uint64_t T_reqs, T_accepts, T_closes;
+
 static void stats(uint64_t dt_ns) {
   unsigned open = 0;
   for (unsigned i = 0; i < NR; i++) open += R[i].open;
+  T_reqs += S.reqs_sent;
+  T_accepts += S.accepts;
+  T_closes += S.closes;
+  fprintf(stderr, "total: requests=%llu accepts=%llu closes=%llu\n", (unsigned long long)T_reqs,
+          (unsigned long long)T_accepts, (unsigned long long)T_closes);
   double dt = (double)dt_ns / 1e9;
   struct rusage ru;
   getrusage(RUSAGE_SELF, &ru);

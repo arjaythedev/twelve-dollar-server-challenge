@@ -56,7 +56,9 @@ Each wake-up of the loop is one batch:
 - `GET /feed` and `GET /posts/:id` run on SQLite's B-tree cursors (`sqlite3BtreeFirst/Next`,
   `sqlite3BtreeTableMoveto`, `sqlite3BtreeIndexMoveto`) inside the batch's read transaction. The
   feed takes the 20 newest ids off `posts_created_at_id_idx`, counts all 20 posts' likes with one
-  range scan of `likes_post_id_idx`, then reads each row and its author by rowid. Every page comes
+  range scan of `likes_post_id_idx`, reads the rows with one range scan of `posts` (a single seek
+  to the lowest id, then `sqlite3BtreeNext`, as the bytecode engine runs `WHERE id BETWEEN`), then
+  each author by rowid. Every page comes
   through SQLite's pager, WAL and page cache; what is skipped is the bytecode interpreter, since
   both queries are known ahead of time. The stored layout is checked at startup against the schema
   the plans were written for, and any surprise during a read falls back to the reference SQL. The

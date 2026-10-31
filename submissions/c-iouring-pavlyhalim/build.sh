@@ -15,6 +15,9 @@ if [ ! -f "vendor/$SQLITE/sqlite3.c" ]; then
 fi
 
 CC=${CC:-gcc}
+command -v "${CC%% *}" > /dev/null 2>&1 || { echo "CC=$CC not found; using gcc" >&2; CC=gcc; }
+export CC
+[ "$(uname -s)" = Linux ] || { echo "build.sh builds a Linux binary; run it on Linux (the Lima VM)" >&2; exit 1; }
 ARCH=${ARCH:--march=x86-64-v3 -mtune=cascadelake}
 case "$(uname -m)" in aarch64|arm64) ARCH=${ARCH_ARM:--mcpu=native} ;; esac
 # SQLite: no mutexes on the request path (THREADSAFE=2 + OPEN_NOMUTEX: the checkpoint thread has

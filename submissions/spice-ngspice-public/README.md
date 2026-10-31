@@ -4,6 +4,8 @@ Every request is answered by a circuit simulated in **ngspice**. One ngspice pro
 the whole time the server is up. The board has a request chip (Verilog), a gate-level signature
 comparator, a ring-oscillator clock and a network card / storage controller (C). SQLite stores the data.
 
+![The board: network card, chip, comparator and clock](docs/board.svg)
+
 - **Language:** Verilog (the chip), SPICE netlist (the board), C (the network card / storage controller)
 - **Simulator:** ngspice 42 (Ubuntu 24.04 package) with XSPICE. The chip and the network card run as
   `d_cosim` elements; the chip is compiled by Verilator 5.020.
@@ -143,6 +145,7 @@ An average user costs ~0.6 ms of CPU per second now (a feed is ~22 ms, the rest 
   `d_cosim` (pins, the clock multiplier, power-cycle on `rst`). `chip/build-chip.sh` is what ngspice's own
   `vlnggen` does, with optimisation on and our shim: Verilator → `chip.so`.
 - `nic/nic.c`: the network card and storage controller.
+- `docs/board.svg`: the diagram above.
 - `board/board.cir.in`: the board netlist. `board/gen-board.sh` wires the chip's pins.
 - `install.sh`, `build.sh`, `start.sh`: as the rules ask. `build.sh` takes ~10–60 s and writes only
   `build/`.

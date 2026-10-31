@@ -308,7 +308,7 @@ static void db_open(const char *path) {
   }
   char *em = NULL;
   if (sqlite3_exec(db, "PRAGMA journal_mode=WAL;PRAGMA synchronous=NORMAL;PRAGMA temp_store=MEMORY;"
-                       "PRAGMA mmap_size=1073741824;PRAGMA cache_size=-65536;PRAGMA busy_timeout=5000;",
+                       "PRAGMA mmap_size=0;PRAGMA cache_size=-16384;PRAGMA busy_timeout=5000;",
                    NULL, NULL, &em) != SQLITE_OK) { fprintf(stderr, "pragma: %s\n", em); exit(1); }
   st_feed = prep(POST_SQL "ORDER BY p.created_at DESC, p.id DESC LIMIT 20");
   st_one = prep(POST_SQL "WHERE p.id=?");

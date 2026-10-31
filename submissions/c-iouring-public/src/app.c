@@ -33,10 +33,10 @@ const char *app_db_mode(void) {
                      : APP_DB_CKPT == 1 ? "inline"
                                         : "sqlite-auto";
   const char *locking = APP_DB_CKPT == 2 ? "unix-excl" : APP_DB_EXCL ? "exclusive" : "normal";
-  snprintf(m, sizeof m, "%s reads, %s VFS, %s checkpoints%s, %s locking, cache %d KiB, %s JWT, SQLite +%d patches (%s)",
+  snprintf(m, sizeof m, "%s reads, %s VFS, %s checkpoints%s, %s locking, cache %d KiB, %s JWT, stock SQLite (%s)",
            APP_DB_DIRECT ? "direct" : "SQL", APP_DB_VFS ? "cursed-wal" : "stock", ckpt,
            APP_DB_WAL_DROP ? " + WAL page drop" : "", locking, (int)APP_DB_CACHE_KIB,
-           APP_JWT_SCALAR ? "scalar" : jwt_engine(), (int)APP_SQLITE_NPATCH,
+           APP_JWT_SCALAR ? "scalar" : jwt_engine(),
            APP_SQLITE_LINK ? "separate unit, public API only" : "one unit with the engine");
   return m;
 }

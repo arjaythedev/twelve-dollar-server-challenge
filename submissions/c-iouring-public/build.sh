@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # build.sh — builds bin/server as a normal user.
-#   1. SQLite 3.54.1: the pinned amalgamation (sha256-checked) plus our patches (config/cursed.sh picks which)
+#   1. SQLite 3.54.1: the pinned amalgamation (sha256-checked), stock and unmodified
 #   2. our HTTP parser and JWT libraries, vendored in third_party/ at pinned commits: checked against third_party/PINS
 #   3. the HTTP parser, generated from the API spec (gen/) on top of the parser library's fastparse.h
 #   4. the server, with PGO: an instrumented build trains on a synthetic database (no seed data), then the final
@@ -27,8 +27,8 @@ sha256_ok() { [ "$(sha256 "$2" | cut -d' ' -f1)" = "$1" ]; }
 mkdir -p deps build bin
 log "options: $CURSED_SUMMARY parsers=${PARSER_FAST:-batch}+${PARSER_SLOW:-fb}"
 
-# 1. SQLite (cached in deps/ until the version or the patch set changes)
-stamp="$SQLITE_VERSION $SQLITE_SHA256 [$SQLITE_PATCHES] $(cat patches/sqlite/*.patch | sha256 | cut -c1-16)"
+# 1. SQLite (cached in deps/ until the version changes)
+stamp="$SQLITE_VERSION $SQLITE_SHA256"
 if [ "$(cat deps/sqlite/STAMP 2> /dev/null)" != "$stamp" ]; then
   # reuse a cached zip only if it's there and matches; otherwise download (and the check below must pass)
   if ! { [ -f deps/sqlite.zip ] && sha256_ok "$SQLITE_SHA256" deps/sqlite.zip; }; then
@@ -38,14 +38,8 @@ if [ "$(cat deps/sqlite/STAMP 2> /dev/null)" != "$stamp" ]; then
   fi
   rm -rf deps/sqlite "deps/sqlite-amalgamation-$SQLITE_VERSION"
   unzip -q deps/sqlite.zip -d deps
-  mkdir -p deps/sqlite/a
-  cp "deps/sqlite-amalgamation-$SQLITE_VERSION"/sqlite3.[ch] deps/sqlite/a/
-  for p in $SQLITE_PATCHES; do
-    (cd deps/sqlite && patch -s -p1 < "../../patches/sqlite/$p.patch")
-    log "patched $p"
-  done
-  mv deps/sqlite/a/* deps/sqlite/
-  rmdir deps/sqlite/a
+  mkdir -p deps/sqlite
+  cp "deps/sqlite-amalgamation-$SQLITE_VERSION"/sqlite3.[ch] deps/sqlite/
   echo "$stamp" > deps/sqlite/STAMP
 fi
 

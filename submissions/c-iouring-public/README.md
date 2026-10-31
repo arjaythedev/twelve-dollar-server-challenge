@@ -9,7 +9,7 @@ the same 42 checks. Everything is built from source on the box.
 | Piece | Version |
 |---|---|
 | Language / compiler | C11, gcc 13 (Ubuntu 24.04 `build-essential`), `-O3 -march=native`, PGO |
-| Database | SQLite **3.54.1** amalgamation, downloaded and sha256-pinned by `build.sh`, plus one small patch (below), compiled into the binary |
+| Database | SQLite **3.54.1** amalgamation, downloaded and sha256-pinned by `build.sh`, unmodified, compiled into the binary |
 | HTTP | our [cursed-http-parser](https://github.com/public/cursed-http-parser) at commit `3be7fd3` (MIT), vendored in `third_party/` and checked against its pin by `build.sh`: `fastparse.h` regenerated from `gen/spec.json` by its `gen/httpgen.py`, `batchparse.h` (lane-parallel batch parsing) and `fbparse.h` (SIMD general parser with picohttpparser `465a7ff`'s API and identical validation) as the slow path; others selectable at build time (below) |
 | Event loop | own, io_uring via raw syscalls (no liburing). Needs Linux ≥ 6.1; 6.8 is the target |
 | JWT | our [cursed-jwt](https://github.com/public/cursed-jwt) at commit `6f92f71` (MIT), vendored in `third_party/` and checked against its pin by `build.sh`: batch HS256, multi-buffer HMAC-SHA256 with the engine picked at run time (AVX-512VL on ymm, AVX2, ARMv8 SHA2, NEON or scalar); on x86-64 Linux single tokens use OpenSSL's extracted SHA-256 block function (Apache-2.0, in that repo) |
@@ -19,7 +19,7 @@ the same 42 checks. Everything is built from source on the box.
 ## Build and run
 ```bash
 sudo ./install.sh          # apt: build-essential curl unzip ca-certificates python3
-./build.sh                 # SQLite download + patches, parser generation, PGO build -> bin/server (~4 min on 1 vCPU)
+./build.sh                 # SQLite download, parser generation, PGO build -> bin/server (~4 min on 1 vCPU)
 ./start.sh                 # foreground; reads SQLITE_PATH, JWT_SECRET, HOST, PORT
 ```
 `build.sh` falls back to a plain `-O3` build if any PGO step fails. `PGO=0 ./build.sh` skips PGO. A full PGO build is
@@ -44,8 +44,7 @@ its own unit and used only through its public API, prepared SQL, SQLite's own VF
 locking, scalar JWT, picohttpparser for every request.
 | Variable | Cursed (default, submitted) | Boring |
 |---|---|---|
-| `SQLITE_PATCHES` | `pcache1-maxkey` | `none`: stock SQLite 3.54.1 |
-| `SQLITE_LINK` | `unity`: `components/engine.c` `#include`s `sqlite3.c`, one unit, so it can use SQLite's internals | `separate`: `sqlite3.c` is its own unit, and `src/engine_public.c` uses only the public API (`sqlite3.h`). The build checks that no other SQLite symbol is referenced. Works with stock or patched SQLite, and needs the `sql` / `stock` / `sqlite` or `inline` / `keep` values below |
+| `SQLITE_LINK` | `unity`: `components/engine.c` `#include`s `sqlite3.c`, one unit, so it can use SQLite's internals | `separate`: `sqlite3.c` is its own unit, and `src/engine_public.c` uses only the public API (`sqlite3.h`). The build checks that no other SQLite symbol is referenced. Needs the `sql` / `stock` / `sqlite` or `inline` / `keep` values below |
 | `DB_READS` | `direct`: reads through SQLite's own B-tree cursors | `sql`: the spec's prepared SELECTs |
 | `DB_VFS` | `cursed`: WAL write-coalescing and file-size-cache shim | `stock`: SQLite's unix VFS |
 | `DB_CKPT` | `thread`: SQLite's own `sqlite3_wal_checkpoint_v2` from a checkpoint thread on a second connection, in passes of 1,024 WAL frames, with a write gate at 8,192 frames (32 MB); checkpointed WAL pages are dropped from the page cache, `SQLITE_THREADSAFE=2`. Or `bounded`: SQLite's own RESTART checkpoint on the event loop every 16,384 WAL frames, after the batch's replies are submitted; the WAL is reused in place, no write gate, `SQLITE_THREADSAFE=0` (Rust #82's checkpoint style, with a 4× larger mark); `uring`: the engine runs SQLite's checkpoint step itself, as a state machine on the event loop's io_uring, with a write gate; `inline`: PASSIVE after the replies. `CURSED=boring` refuses `uring` | `sqlite`: SQLite's autocheckpoint |
@@ -159,7 +158,6 @@ config/                        build time: compiler flags (sqlite.sh), how curse
                                (parsers.sh), and the compile/link recipe (compile.sh)
 gen/                           the API spec and traffic profile the HTTP parser is generated from (the generator
                                itself comes with cursed-http-parser)
-patches/sqlite/                our SQLite patches, applied by build.sh to the pinned amalgamation (one)
 src/                           run time, our glue: app.c (the batch pipeline), main.c (process setup), train.c (PGO
                                driver, build time only), config.h (every compile-time choice), unit_*.c (the three
                                translation units)
@@ -228,23 +226,8 @@ Each item, and how it stays within the rules:
 - **Write-coalescing VFS.** The same bytes reach the WAL with the same sync behaviour as `synchronous=NORMAL`
   (WAL mode). Only the number of `pwrite` calls changes, and every byte of a commit is written before the commit
   returns and before any response.
-- **One small SQLite patch**, applied by `build.sh` to the pinned amalgamation: `pcache1-maxkey`, a pcache
-  bookkeeping fix that keeps a commit from scanning the whole page-cache hash after a B-tree page is rekeyed. The
-  file format, query results, WAL bytes and sync points are identical to stock (gate-tested), the stock CLI opens
-  the file cleanly, and SQLite's own TCL test suite (1,520 files, ~1M cases) and sqllogictest give the same
-  pass/fail results as stock 3.54.1.
-- **Borrowed, tested, rejected: #154's `balance_nonroot()` one-liner.**
-  - *The idea:* #154 spotted that `balance_nonroot()`'s temporary page number (PENDING_BYTE) inflates pcache1's
-    `iMaxKey` and forces a full hash walk at the next commit. Its one-line fix uses `pBt->nPage+1` instead. Great
-    diagnosis, and it gives the same speed-up as our `pcache1-maxkey`.
-  - *The catch:* it passed our challenge-DB gate, but SQLite's own TCL suite fails it. In `savepoint6.test` (tempdb
-    variant), from case 315 on, integrity_check reports "Failed to read ptrmap" and queries return "malformed". Stock
-    passes all 8,007 cases.
-  - *The cause:* under `auto_vacuum=incremental`, `nPage` can be below the pager's `dbSize` inside a transaction. The
-    temporary page can then be a dirty cached page, which gets dropped.
-  - *Why it didn't bite:* it's latent here, because the challenge schema doesn't use auto-vacuum.
-  - *What we did:* we ship `pcache1-maxkey`, which fixes the same thing from the pcache side and passes the full suite.
-  - *Lesson:* a gate proves equivalence only for the configurations it exercises.
+- **Stock SQLite.** `build.sh` compiles the pinned 3.54.1 amalgamation unmodified. We used to apply one small pcache
+  patch (`pcache1-maxkey`); it's gone, because the challenge requires stock SQLite (rule 2).
 - **Group commit** (rule 6 allows it): every response waits for its batch's commit.
 - **`Connection: close` shedding** (`CURSED_CONN_POLICY=1`, **off** by default: at 450k
   it caused ~80k reconnects and a worse tail; with it off the server held 475k). When on: on a 2 GB box the kernel's ~4.3 KB per open TCP connection is

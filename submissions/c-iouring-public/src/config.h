@@ -116,9 +116,6 @@ SLOW_SIG(hx_parse_request);
 #else
 #define FAST_NAME "slow"
 #endif
-#ifndef APP_SQLITE_NPATCH
-#define APP_SQLITE_NPATCH 1
-#endif
 #ifndef APP_BP_MIN
 #define APP_BP_MIN 8  // measured on a 1-vCPU Xeon: +10% at N=1, ±0 at 8, −4/−5% at 16/32
 #endif

@@ -2,9 +2,9 @@
  *
  * One KallistiOS thread: poll() over the listening socket and up to MAX_CONNS keep-alive
  * connections, parse with fbparse.h, answer with api.c (SQLite through vfs_hostfs.c), and once a
- * second redraw a dashboard of the traffic on the Dreamcast's video output. Connections past
- * MAX_CONNS are accepted and closed at once: 16 MB of RAM is a hard wall, so we refuse politely
- * rather than fall over. */
+ * second redraw a dashboard of the traffic on the Dreamcast's video output. 16 MB of RAM is a hard
+ * wall: at MAX_CONNS, a new connection makes room by closing the longest-idle keep-alive one (Nginx
+ * keeps more idle upstream connections than we have room for), or waits in the listen backlog. */
 #include <kos.h>
 #include <arch/timer.h>
 #include <dc/biosfont.h>
@@ -52,7 +52,8 @@ static int nconns;
 
 #define HIST 100
 static unsigned hist[HIST][ROUTE_COUNT]; /* requests per second, per route; hist[HIST-1] = this second */
-static unsigned long long total, by_route[ROUTE_COUNT], by_class[6], refused;
+static unsigned long long total, by_route[ROUTE_COUNT], by_class[6];
+static int peak_conns;
 static char recent[6][48];
 static int recent_next;
 static unsigned last_us;
@@ -134,8 +135,8 @@ static void draw(void) {
         fill(20 + (r % 3) * 200, 278 + (r / 3) * 28, 14, 14, route_color[r]);
         text(40 + (r % 3) * 200, 272 + (r / 3) * 28, FG, "%s %llu", route_name[r], by_route[r]);
     }
-    text(20, 336, FG, "total %llu  2xx %llu  4xx %llu  5xx %llu  refused %llu", total, by_class[2], by_class[4],
-         by_class[5], refused);
+    text(20, 336, FG, "total %llu  2xx %llu  4xx %llu  5xx %llu  peak conns %d", total, by_class[2], by_class[4],
+         by_class[5], peak_conns);
     struct mallinfo mi = mallinfo();
     text(20, 362, FG, "last %u.%03ums  heap free %dKB", last_us / 1000, last_us % 1000, (mi.fordblks) / 1024);
     for (int i = 0; i < 4; i++)
@@ -155,6 +156,17 @@ static void drop(int i) {
     free(conns[i].in);
     free(conns[i].out.p);
     conns[i] = conns[--nconns];
+}
+
+/* Close the connection idle the longest with no request in progress, to make room. */
+static int drop_idlest(void) {
+    int best = -1;
+    for (int i = 0; i < nconns; i++)
+        if (!conns[i].inlen && conns[i].outoff == conns[i].out.len &&
+            (best < 0 || conns[i].last_ms < conns[best].last_ms))
+            best = i;
+    if (best >= 0) drop(best);
+    return best >= 0;
 }
 
 static const char *reason(int s) {
@@ -266,6 +278,49 @@ static int writable(conn_t *c) {
     return c->close_after ? -1 : 0;
 }
 
+/* Stall reporter: if the main loop stops ticking for 3 s, log every thread (state, what it
+ * waits on, who holds that mutex, and the .text words on its stack: the call chain, give or
+ * take), once per stall, so the host log says why. */
+static volatile uint32_t loop_ticks;
+
+static int report_thread(kthread_t *t, void *arg) {
+    (void)arg;
+    char m[240];
+    int n = snprintf(m, sizeof m, "thread %d '%s' state=%d wait=%s obj=%p", (int)t->tid, t->label,
+                     (int)t->state, t->wait_msg ? t->wait_msg : "-", t->wait_obj);
+    if (t->wait_msg && strncmp(t->wait_msg, "mutex", 5) == 0 && t->wait_obj) {
+        kthread_t *h = ((mutex_t *)t->wait_obj)->holder;
+        n += snprintf(m + n, sizeof m - n, " (held by %d)", h ? (int)h->tid : -1);
+    }
+    n += snprintf(m + n, sizeof m - n, " pc=%08lx stack:", (unsigned long)t->context.pc);
+    uint32_t *sp = (uint32_t *)t->context.r[15];
+    for (int i = 0; t != thd_get_current() && sp && i < 256 && n < (int)sizeof m - 10; i++)
+        if (arch_valid_text_address(sp[i]))
+            n += snprintf(m + n, sizeof m - n, " %08lx", (unsigned long)sp[i]);
+    hostfs_log(m);
+    return 0;
+}
+
+static void *stall_reporter(void *arg) {
+    (void)arg;
+    uint32_t last = 0, still = 0;
+    for (;;) {
+        thd_sleep(1000);
+        uint32_t now = loop_ticks;
+        still = now == last ? still + 1 : 0;
+        last = now;
+        if (still == 3) {
+            char m[96];
+            struct mallinfo mi = mallinfo();
+            snprintf(m, sizeof m, "main loop stalled: conns=%d heap arena=%dK used=%dK", nconns,
+                     mi.arena / 1024, mi.uordblks / 1024);
+            hostfs_log(m);
+            thd_each(report_thread, NULL);
+        }
+    }
+    return NULL;
+}
+
 static void halt(const char *why) {
     hostfs_log(why);
     text(20, 440, RGB(255, 60, 60), "%s", why);
@@ -294,14 +349,17 @@ int main(int argc, char **argv) {
     sa.sin_family = AF_INET;
     sa.sin_port = htons(port);
     sa.sin_addr.s_addr = htonl(INADDR_ANY);
-    if (ls < 0 || bind(ls, (struct sockaddr *)&sa, sizeof sa) < 0 || listen(ls, 64) < 0) halt("listen failed");
+    if (ls < 0 || bind(ls, (struct sockaddr *)&sa, sizeof sa) < 0 || listen(ls, SOMAXCONN) < 0) halt("listen failed");
     fcntl(ls, F_SETFL, O_NONBLOCK);
     snprintf(err, sizeof err, "listening on %s:%d, SQLite %s", ipstr, port, sqlite3_libversion());
     hostfs_log(err);
 
+    thd_create(true, stall_reporter, NULL);
+
     struct pollfd pfd[MAX_CONNS + 1];
     uint64_t next_draw = 0;
     for (;;) {
+        loop_ticks++;
         uint64_t now = timer_ms_gettime64();
         if (now >= next_draw) {
             if (next_draw) tick();
@@ -334,16 +392,12 @@ int main(int argc, char **argv) {
         }
         if (pfd[0].revents & POLLIN) {
             for (;;) {
+                if (nconns == MAX_CONNS && !drop_idlest()) break;
                 int fd = accept(ls, NULL, NULL);
                 if (fd < 0) break;
-                if (nconns == MAX_CONNS) {
-                    close(fd);
-                    refused++;
-                    continue;
-                }
                 fcntl(fd, F_SETFL, O_NONBLOCK);
                 conns[nconns] = (conn_t){.fd = fd, .last_ms = now};
-                nconns++;
+                if (++nconns > peak_conns) peak_conns = nconns;
             }
         }
     }

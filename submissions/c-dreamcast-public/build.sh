@@ -58,7 +58,7 @@ if ! stamp_ok "$B/kos/STAMP" "$kos_stamp"; then
       -e "s#^export DC_ARM_BASE=.*#export DC_ARM_BASE=\"$B/toolchain/arm-eabi\"#" \
       -e "s#^export DC_TOOLS_BASE=.*#export DC_TOOLS_BASE=\"$B/toolchain/bin\"#" \
       "$B/kos/doc/environ.sh.sample" > "$B/kos/environ.sh"
-  rm -f "$B/toolchain/STAMP" "$B/kos/lib/dreamcast/libkallisti.a"
+  rm -f "$B/kos/lib/dreamcast/libkallisti.a"
   echo "$kos_stamp" > "$B/kos/STAMP"
 fi
 

@@ -53,10 +53,9 @@ if [ "$(uname)" = Linux ] && [ -z "${DISPLAY:-}" ] && [ "${DREAMCAST_SCREEN:-0}"
   export DISPLAY=":$(cat "$run/display")"
 fi
 
-# Flycast's network bridge occasionally crashes under heavy connection churn. A real Dreamcast
-# gets its power button pressed; so does this one. Committed rows are already in the host file
-# (the WAL is written through), so a reboot loses only the requests in flight.
-# The guest can also wedge under load; if /health stops answering for 30 s, same treatment.
+# A safety net: if Flycast exits, a real Dreamcast would get its power button pressed; so does
+# this one. Committed rows are already in the host file (the WAL is written through), so a
+# reboot loses only the requests in flight. If /health stops answering for 30 s, same treatment.
 watchdog() {
   local misses=0
   sleep 20

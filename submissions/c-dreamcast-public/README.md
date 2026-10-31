@@ -2,7 +2,8 @@
 
 **This is a joke entry.** The whole server, from the HTTP parser to the SQLite B-tree, runs as a
 KallistiOS program on an emulated Sega Dreamcast: a 200 MHz Hitachi SH-4 with 16 MB of RAM, talking
-to the world through an emulated Broadband Adapter. It passes all 42 checks. It is not fast.
+to the world through an emulated Broadband Adapter. It passes all 42 checks. Getting it to survive
+load meant fixing six bugs in KallistiOS's TCP stack and two in Flycast's (below).
 
 - **Language:** C (gcc 13.2.0, `sh-elf`, `-m4-single`)
 - **Framework:** none; KallistiOS 2.2.2 (the Dreamcast homebrew OS) for threads, TCP/IP and the BBA driver
@@ -46,20 +47,30 @@ k6 ─► Nginx ─► 127.0.0.1:$PORT ─► Flycast (host process)
   and `xSync` is a real host `fsync` at checkpoints.
 - **No caching** (rule 5): every request runs its query; only the prepared statements persist.
   SQLite's page cache is 3 MB of the 16.
-- **Per request.** One KallistiOS thread polls the listening socket and up to 48 connections. Past 48
-  it accepts and closes at once, rather than run out of RAM. `/feed` and `/posts/:id` are the queries
+- **Per request.** One KallistiOS thread polls the listening socket and up to 48 connections. At 48,
+  a new connection makes room by closing the longest-idle keep-alive connection (Nginx keeps more
+  idle upstream connections than 16 MB has room for); if none is idle, it waits in the listen backlog. `/feed` and `/posts/:id` are the queries
   from SPEC.md; `POST /posts` uses `INSERT ... RETURNING`; likes use `ON CONFLICT DO NOTHING`.
 - **Clock.** `created_at` comes from SQLite's `strftime('%f')`, and the VFS gets the host's clock
   through the same syscall, so timestamps are real UTC with milliseconds. JWT `exp` uses it too.
-- **KallistiOS patch.** Its TCP sent a passive close (the client's FIN first) through CLOSING and
-  TIME_WAIT, keeping each socket and its 16 KB of buffers for 30 s. With a new connection per request
-  that filled 16 MB in about 900 requests. One line sends it to LAST_ACK, as RFC 793 says.
-- **Reboots.** Flycast occasionally crashes on the host under heavy connection churn (a double free
-  or a segfault after a few hundred to a few thousand new connections; AddressSanitizer did not catch
-  it and we have not found the cause). `start.sh` reboots the Dreamcast when that
-  happens, in about a second. Committed rows are already in the host file, so a reboot loses only the
-  requests in flight. A watchdog in `start.sh` does the same if `/health` stops answering for
-  about 30 s.
+- **Reboots.** `start.sh` reboots the Dreamcast if Flycast exits, and a watchdog does the same if
+  `/health` stops answering for about 30 s. Committed rows are already in the host file, so a reboot
+  loses only the requests in flight. With the fixes below, neither has fired in our runs.
+
+### The bugs it took
+
+Each was found under load, then confirmed with the instrument in brackets.
+
+| | symptom | cause | fix |
+|---|---|---|---|
+| KOS 0001 | guest out of memory after ~900 connections | a passive close (client's FIN first) went through CLOSING and TIME_WAIT, keeping 16 KB of buffers for 30 s | go to LAST_ACK, as RFC 793 says |
+| KOS 0002 | guest froze with ~34 connections open | lock-order deadlock: `poll()` held the poll mutex while taking socket mutexes, packet input the reverse (stall reporter in `main.c`) | `poll()` no longer holds its mutex while polling sockets |
+| KOS 0003 | 2 s on some new connections | every SYN was dropped while `accept()` was setting up another connection, so the client waited out its SYN retransmit (pcap) | queue the SYNs of other peers during `accept()` |
+| KOS 0004 | guest out of memory under overload | every socket the server closed first sat in TIME_WAIT for 30 s with its 16 KB of buffers (TCP state census) | free the buffers on entering TIME_WAIT; it only needs to re-ACK a FIN |
+| KOS 0005 | connections reset under bursts | the listen backlog was capped at 32, and a SYN past it got a RST | backlog up to 128; drop a SYN past it (the peer retries), as Linux does |
+| KOS 0006 | 2 s on ~5% of `/feed` responses | data that didn't fit the peer's window was only sent by the 2 s retransmit timer, never when an ACK opened the window (census of timer resends) | send queued data when an ACK makes room |
+| Flycast | host heap corruption (double free) | picoTCP's `connect()` ignored a duplicate socket-tree key (Linux reuses loopback ports at once), so deleting one socket freed the other | fail with EADDRINUSE and retry with another port |
+| Flycast | host crash, "jump to heap address" | picoTCP's timer heap holds ~1,000 timers; when it ran out, `socket_del()` freed a socket that `pico_tcp_input()` was still using (AddressSanitizer) | room for ~67,000 timers |
 
 ## Build
 
@@ -67,7 +78,7 @@ k6 ─► Nginx ─► 127.0.0.1:$PORT ─► Flycast (host process)
 toolchain's build deps. `build.sh` builds everything from source into `build/`:
 
 1. SQLite 3.54.1 amalgamation (sha256-checked)
-2. KallistiOS 2.2.2 tarball (sha256-checked) + `patches/kos/`
+2. KallistiOS 2.2.2 tarball (sha256-checked) + `patches/kos/` (the six fixes above)
 3. the `sh-elf` cross toolchain (GCC 13.2.0, binutils 2.43, newlib 4.3) with KallistiOS's `dc-chain`.
    **This is slow: expect well over an hour on one vCPU.**
 4. KallistiOS
@@ -91,28 +102,29 @@ server answers `/health` a few seconds after `start.sh`.
 
 ![The Dreamcast's video output during a k6 run](dashboard.png)
 
-*The Dreamcast's screen during the k6 run below: requests per second for the last 100 seconds by
-endpoint (blue `/feed`, green `/posts/:id`, pink likes, orange creates), 33 of 48 connection slots in use.*
+*The Dreamcast's screen during the 2,500-VU run below: requests per second for the last 100 seconds
+by endpoint (blue `/feed`, green `/posts/:id`, pink likes, orange creates), 47 of 48 connection slots
+in use, 489 KB of the 16 MB free.*
 
 Measured locally in Docker on an Apple-silicon Mac (arm64 Linux, so Flycast's arm64 dynarec, not the
-scoring box's x86-64 one), behind the challenge's `bench/nginx.conf`, with its own k6 script:
+scoring box's x86-64 one), through `start.sh`, behind the challenge's `bench/nginx.conf`, with its own
+k6 script:
 
 ```bash
-k6 run -e BASE_URL=http://127.0.0.1 -e VUS=150 -e RAMP_UP=10s -e DURATION=50s bench/load.js
+k6 run -e BASE_URL=http://127.0.0.1 -e VUS=2500 -e RAMP_UP=20s -e DURATION=60s bench/load.js
 ```
 
 | VUs | requests/s | median | p95 | p99 | errors |
 |---|---|---|---|---|---|
-| 150 | 10.3 | 12 ms | 2.02 s | 2.05 s | 0.29 % |
+| 2,500 | 206 | 11 ms | 20 ms | 28 ms | 0 % |
+| 5,000 | 312 | | 30 s | 30 s | 21.8 % |
 
-So it **fails the latency thresholds at 150 users**, well under the 2,500 the scoring starts at. The
-2-second tail is KallistiOS's TCP retransmission timeout: some frames between picoTCP and the emulated
-Broadband Adapter get dropped, and the guest waits 2 s to resend. A single client sending one request at
-a time gets about 40–80 requests/s.
+So it **passes the thresholds at 2,500 users**, where the scoring starts, and falls over somewhere
+before 5,000: the emulated SH-4 tops out at roughly 300 requests/s. Before the fixes above it failed
+at 150 users (p95 2.02 s, from KOS 0006) and froze or crashed soon after.
 
-**Known problems**, still being investigated: after the 150-VU run above, the guest stopped answering
-with 34 connections open (the `/health` watchdog in `start.sh` reboots it within about a minute), and
-Flycast itself occasionally crashes on the host under heavy connection churn (see Reboots above).
+**Known problem:** past saturation, `/health` takes longer than the watchdog's 10 s, so the watchdog
+reboots a Dreamcast that was only overloaded (4 times in the 5,000-VU run), which makes things worse.
 
 ## Files
 
@@ -123,4 +135,4 @@ Flycast itself occasionally crashes on the host under heavy connection churn (se
 | `guest/vfs_hostfs.c`, `guest/hostfs.h` | the SQLite VFS and the guest side of the syscall |
 | `guest/third_party/` | cursed-jwt and cursed-http-parser (ours, MIT) |
 | `patches/flycast/` | hostfs syscall + TCP forwarding (GPL-2.0, as part of Flycast) |
-| `patches/kos/` | the TCP LAST_ACK fix |
+| `patches/kos/` | the six KallistiOS TCP/`poll()` fixes |

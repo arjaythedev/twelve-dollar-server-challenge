@@ -6,9 +6,48 @@ Flycast patches for dreamcast-sql (applied by build.sh to flyinghead/flycast 1b6
   the emulated Broadband Adapter for any program, not just the games in its table; loopback
   clients appear to the guest as 198.18.0.1 (KallistiOS answers 127/8 on its own loopback);
   closed sockets are pruned from the acceptor; no public-IP / game-server DNS lookups.
+- picotcp pico_socket_connect(): fail with EADDRINUSE when the socket's quad is already in
+  the socket tree, instead of carrying on with an untracked socket whose later deletion
+  unlinks and frees the other one (heap corruption). Linux reuses loopback source ports at
+  once, so forwarded connections hit this; picoppp.cpp then lets picotcp pick a free port.
+- picotcp heap.h: room for ~67,000 timers instead of ~1,000. Each TCP socket keeps several
+  timers (keepalive, stats, retransmit, linger) and closed ones linger for 30 s, so a few dozen
+  connections a second ran out; socket_del() then frees the socket at once while
+  pico_tcp_input() is still using it (use-after-free, found with AddressSanitizer).
 
+diff --git a/core/deps/picotcp/include/heap.h b/core/deps/picotcp/include/heap.h
+index ed0ff2b..fc29660 100644
+--- a/core/deps/picotcp/include/heap.h
++++ b/core/deps/picotcp/include/heap.h
+@@ -4,7 +4,7 @@
+ 
+  *********************************************************************/
+ #define MAX_BLOCK_SIZE 1600
+-#define MAX_BLOCK_COUNT 16
++#define MAX_BLOCK_COUNT 1024 /* 16 (~1,000 timers) ran out with a few dozen connections/s: see socket_del() */
+ 
+ #define DECLARE_HEAP(type, orderby) \
+     struct heap_ ## type {   \
+diff --git a/core/deps/picotcp/stack/pico_socket.c b/core/deps/picotcp/stack/pico_socket.c
+index 60e0a81..7c08b8e 100644
+--- a/core/deps/picotcp/stack/pico_socket.c
++++ b/core/deps/picotcp/stack/pico_socket.c
+@@ -1710,7 +1710,12 @@ int pico_socket_connect(struct pico_socket *s, const void *remote_addr, uint16_t
+         return -1;
+     }
+ 
+-    pico_socket_alter_state(s, PICO_SOCKET_STATE_BOUND, 0, 0);
++    /* A socket with the same quad is already in the tree: carrying on would leave this one
++     * untracked, and deleting it later would unlink (and free) the other one. */
++    if (pico_socket_alter_state(s, PICO_SOCKET_STATE_BOUND, 0, 0) != 0) {
++        pico_err = PICO_ERR_EADDRINUSE;
++        return -1;
++    }
+ 
+ #ifdef PICO_SUPPORT_UDP
+     if (PROTO(s) == PICO_PROTO_UDP) {
 diff --git a/core/network/picoppp.cpp b/core/network/picoppp.cpp
-index 52cfc91..0fbd7e5 100644
+index 52cfc91..34b18d9 100644
 --- a/core/network/picoppp.cpp
 +++ b/core/network/picoppp.cpp
 @@ -54,6 +54,7 @@ extern "C" {
@@ -19,7 +58,7 @@ index 52cfc91..0fbd7e5 100644
  #include <deque>
  #include <mutex>
  #include <future>
-@@ -266,7 +267,12 @@ public:
+@@ -266,9 +267,22 @@ public:
  		attachPicoSocket();
  		const auto& endpoint = socket.remote_endpoint();
  		setName(endpoint);
@@ -31,9 +70,20 @@ index 52cfc91..0fbd7e5 100644
 +			peer = asio::ip::make_address_v4("198.18.0.1");
 +		memcpy(&pico_sock->local_addr.ip4.addr, peer.to_bytes().data(), 4);
  		pico_sock->local_port = htons(endpoint.port());
- 		if (pico_socket_connect(pico_sock, &dcaddr.addr, htons(socket.local_endpoint().port())) != 0)
+-		if (pico_socket_connect(pico_sock, &dcaddr.addr, htons(socket.local_endpoint().port())) != 0)
++		int rc = pico_socket_connect(pico_sock, &dcaddr.addr, htons(socket.local_endpoint().port()));
++		if (rc != 0 && pico_err == PICO_ERR_EADDRINUSE)
++		{
++			// The peer reused a source port while picotcp still holds the old connection
++			// (Linux recycles loopback ports at once): let picotcp pick a free port instead.
++			pico_sock->local_port = 0;
++			rc = pico_socket_connect(pico_sock, &dcaddr.addr, htons(socket.local_endpoint().port()));
++		}
++		if (rc != 0)
  		{
-@@ -282,6 +288,11 @@ public:
+ 			INFO_LOG(NETWORK, "pico_socket_connect failed: error %d", pico_err);
+ 			pico_socket_close(pico_sock);
+@@ -282,6 +296,11 @@ public:
  		return socket;
  	}
  
@@ -45,7 +95,7 @@ index 52cfc91..0fbd7e5 100644
  	void close() {
  		closeAll();
  		directPlay.reset();
-@@ -576,6 +587,15 @@ private:
+@@ -576,6 +595,15 @@ private:
  	friend super;
  };
  
@@ -61,7 +111,7 @@ index 52cfc91..0fbd7e5 100644
  // Handles inbound tcp connections
  class TcpAcceptor : public SharedThis<TcpAcceptor>
  {
-@@ -583,6 +603,8 @@ public:
+@@ -583,6 +611,8 @@ public:
  	void start()
  	{
  		TcpSocket::Ptr newSock = TcpSocket::create(io_context, directPlay);
@@ -70,7 +120,7 @@ index 52cfc91..0fbd7e5 100644
  		sockets.push_back(newSock);
  
  		acceptor.async_accept(newSock->getSocket(),
-@@ -601,7 +623,7 @@ private:
+@@ -601,7 +631,7 @@ private:
  	TcpAcceptor(asio::io_context& io_context, u16 port, std::shared_ptr<DirectPlay> directPlay)
  		: io_context(io_context),
  		  acceptor(asio::ip::tcp::acceptor(io_context,
@@ -79,7 +129,7 @@ index 52cfc91..0fbd7e5 100644
  		  directPlay(directPlay)
  	{
  	}
-@@ -1280,6 +1302,29 @@ void PicoThread::run()
+@@ -1280,6 +1310,29 @@ void PicoThread::run()
  			}
  		}
  	}
@@ -109,7 +159,7 @@ index 52cfc91..0fbd7e5 100644
  	// Web TV requires the VJ compression option, which picotcp doesn't support.
  	// This hack allows WebTV to connect although the correct fix would
  	// be to implement VJ compression.
-@@ -1341,7 +1386,9 @@ void PicoThread::run()
+@@ -1341,7 +1394,9 @@ void PicoThread::run()
  			WARN_LOG(NETWORK, "Can't resolve dns.flyca.st. Using default 46.101.91.123");
  		}
  	}

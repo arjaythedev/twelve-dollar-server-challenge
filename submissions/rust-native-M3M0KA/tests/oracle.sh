@@ -121,5 +121,26 @@ rm -rf "$WORK/plan" "$WORK/sql"
 grab "$PORT_A" "$WORK/plan"; grab "$PORT_B" "$WORK/sql"
 compare "after writes"
 
-echo "compared /feed and $N random posts + 8 edge ids, before and after writes"
+# Stage 3: writes this server did not make. A backdated timestamp, a rowid gap
+# and two posts with the same timestamp are exactly the cases a plan that
+# assumed dense ordered ids would get wrong or switch itself off over.
+stop "$PID_A"; stop "$PID_B"
+sqlite3 "$WORK/a2.db" "UPDATE posts SET created_at='1999-01-01T00:00:00.000Z' WHERE id = 499990;
+  INSERT INTO posts (id, user_id, body, created_at) VALUES (700000, 1, 'rowid gap', '2026-12-31T23:59:59.999Z');
+  INSERT INTO posts (user_id, body, created_at) VALUES (2, 'same timestamp', '2026-12-31T23:59:59.999Z');" >/dev/null
+sqlite3 "$WORK/a2.db" "PRAGMA wal_checkpoint(TRUNCATE);" >/dev/null
+rm -f "$WORK/b.db" "$WORK/b.db-wal" "$WORK/b.db-shm"
+cp "$WORK/a2.db" "$WORK/b.db"
+start "$PORT_A" "" "$WORK/a2.db"; PID_A=$STARTED
+wait_up "$PORT_A"
+start "$PORT_B" "FEED_NO_PLAN=1" "$WORK/b.db"; PID_B=$STARTED
+wait_up "$PORT_B"
+rm -rf "$WORK/plan" "$WORK/sql"
+grab "$PORT_A" "$WORK/plan"; grab "$PORT_B" "$WORK/sql"
+compare "after foreign writes"
+if grep -q "read plans disabled" "$WORK/server-$PORT_A.log"; then
+  echo "FAIL: the plan disabled itself after foreign writes"; fail=1
+fi
+
+echo "compared /feed and $N random posts + 8 edge ids, before and after writes, and after foreign writes"
 [ "$fail" = 0 ] && echo "oracle: identical" || { echo "oracle: MISMATCH"; exit 1; }

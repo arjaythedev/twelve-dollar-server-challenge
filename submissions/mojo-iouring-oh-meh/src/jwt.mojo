@@ -2,7 +2,7 @@
 #
 # Result codes match SPEC.md's error table:
 #   0 ok, 1 "invalid or expired token", 2 "invalid token payload"
-from bytes import Bytes, balloc, beq, eqlit, parse_pos_int
+from bytes import Bytes, balloc, eqlit, find_byte, parse_pos_int
 from sha256 import Sha256
 from jsonscan import JsonScan
 
@@ -74,17 +74,11 @@ struct Jwt:
     def verify(mut self, tok: Bytes, n: Int, now: Int64) -> Int:
         if n < 3 or n > MAX_TOKEN:
             return JWT_INVALID
-        var d1 = -1
-        var d2 = -1
-        for i in range(n):
-            if tok[unsafe_offset=i] == 0x2E:
-                if d1 < 0:
-                    d1 = i
-                elif d2 < 0:
-                    d2 = i
-                else:
-                    return JWT_INVALID
-        if d1 <= 0 or d2 <= d1 + 1 or d2 >= n - 1:
+        var d1 = find_byte(tok, n, 0, 0x2E)
+        if d1 <= 0:
+            return JWT_INVALID
+        var d2 = find_byte(tok, n, d1 + 1, 0x2E)
+        if d2 <= d1 + 1 or d2 >= n - 1 or find_byte(tok, n, d2 + 1, 0x2E) >= 0:
             return JWT_INVALID
         # Signature first: cheapest rejection of garbage, and never leak header checks on unsigned tokens.
         var sn = b64url_decode(tok.unsafe_offset(d2 + 1), n - d2 - 1, self.sig)

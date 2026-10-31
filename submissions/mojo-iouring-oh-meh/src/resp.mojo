@@ -5,7 +5,13 @@ from bytes import Bytes, balloc, bcopy, lit, Out
 
 comptime HDR_RESERVE = 128
 comptime ARENA_SIZE = 1 << 20
-comptime MAX_RESP = 256 << 10   # largest single response we size for
+
+# Upper bounds for the variable-size responses, so an arena is reserved tightly:
+# a post object is at most ~3 KB (500 code points escaped as \u00XX) plus a
+# username; the feed is 20 of them; a created post echoes a token username.
+comptime POST_MAX = 32 << 10
+comptime FEED_MAX = 96 << 10
+comptime CREATE_MAX = 64 << 10
 
 
 @fieldwise_init
@@ -40,9 +46,10 @@ def status_line(status: Int) -> StringSpan[ImmStaticOrigin]:
     return "HTTP/1.1 500 Internal Server Error\r\n"
 
 
-# Write the header for a body of body_len ending exactly at body_start. Returns the header start.
-def write_header(base: Bytes, body_start: Int, status: Int, body_len: Int) -> Int:
-    var tmp = Out(balloc(HDR_RESERVE), HDR_RESERVE)
+# Write the header for a body of body_len ending exactly at base[body_start].
+# Returns the header's start offset. `scratch` is HDR_RESERVE bytes of workspace.
+def write_header(base: Bytes, body_start: Int, status: Int, body_len: Int, scratch: Bytes) -> Int:
+    var tmp = Out(scratch, HDR_RESERVE)
     tmp.put_lit(status_line(status))
     tmp.put_lit("Content-Type: application/json\r\nContent-Length: ")
     tmp.put_int(Int64(body_len))
@@ -57,7 +64,7 @@ def const_resp(status: Int, body: StringSpan[ImmStaticOrigin]) -> Resp:
     var n = body.byte_length()
     var base = balloc(HDR_RESERVE + n)
     bcopy(base.unsafe_offset(HDR_RESERVE), lit(body), n)
-    var start = write_header(base, HDR_RESERVE, status, n)
+    var start = write_header(base, HDR_RESERVE, status, n, balloc(HDR_RESERVE))
     return Resp(Int(base) + start, HDR_RESERVE + n - start, -1)
 
 
@@ -88,20 +95,13 @@ struct Arenas:
     def begin(mut self, max_body: Int) -> Out:
         self.ensure(HDR_RESERVE + max_body)
         var a = self.arenas[self.cur]
-        var start = a.used + HDR_RESERVE
-        return Out(Bytes(unsafe_from_address=a.base + start), max_body)
+        return Out(Bytes(unsafe_from_address=a.base + a.used + HDR_RESERVE), max_body)
 
     # Finish it: write the header just before the body, account the send.
     def finish(mut self, status: Int, o: Out) -> Resp:
         var base = Bytes(unsafe_from_address=self.arenas[self.cur].base)
         var body_start = Int(o.p) - self.arenas[self.cur].base
-        var tmp = Out(self.hdr_scratch, HDR_RESERVE)
-        tmp.put_lit(status_line(status))
-        tmp.put_lit("Content-Type: application/json\r\nContent-Length: ")
-        tmp.put_int(Int64(o.n))
-        tmp.put_lit("\r\n\r\n")
-        var start = body_start - tmp.n
-        bcopy(base.unsafe_offset(start), tmp.p, tmp.n)
+        var start = write_header(base, body_start, status, o.n, self.hdr_scratch)
         self.arenas[self.cur].used = body_start + o.n
         self.arenas[self.cur].inflight += 1
         return Resp(self.arenas[self.cur].base + start, body_start + o.n - start, self.cur)

@@ -5,7 +5,7 @@
 # are group-committed by the caller. Every request reads its rows from SQLite
 # inside the batch's transaction; nothing is cached across requests.
 from std.ffi import c_int, external_call
-from bytes import Bytes, balloc, bcopy, beq, Out, alloc_i64
+from bytes import Bytes, balloc, bcopy, bcmp, Out, calloc_t
 from record import Rec
 
 comptime SQLITE_ROW = 100
@@ -13,6 +13,13 @@ comptime SQLITE_DONE = 101
 comptime FEED_N = 20
 comptime CREATED_LEN = 24
 comptime WAL_MAX_FRAMES = 8192   # 32 MB at 4 KB pages: at most 2 hash segments to search
+comptime WAL_BUSY_SKIP = 64      # batches to wait after a BUSY truncate before trying again
+
+# like() results
+comptime LIKE_MISSING = 0
+comptime LIKE_NEW = 1
+comptime LIKE_DUP = 2
+comptime LIKE_ERR = -1
 
 
 @always_inline
@@ -161,6 +168,7 @@ struct Db:
     var st_commit: Int
     var st_rollback: Int
     var tail_ok: Bool
+    var wal_skip: Int
     var max_id: Int64
     var max_created: Bytes
     var scratch: Bytes
@@ -191,12 +199,13 @@ struct Db:
         self.st_commit = 0
         self.st_rollback = 0
         self.tail_ok = False
+        self.wal_skip = 0
         self.max_id = 0
         self.max_created = balloc(64)
         self.scratch = balloc(1 << 16)
         self.rec = Rec(self.scratch)
         self.urec = Rec(self.scratch)
-        self.counts = alloc_i64(FEED_N)
+        self.counts = calloc_t[Int64](FEED_N)
         if self.h == 0:
             raise Error("cannot open " + path)
         self.posts_root = Int(self._scalar("SELECT rootpage FROM sqlite_master WHERE name='posts'"))
@@ -317,8 +326,11 @@ struct Db:
             # Keep the WAL bounded: SQLite only restarts it on its own during a write
             # lull, and group commit never leaves one. The passive checkpoints on the
             # other thread keep this cheap; BUSY just means try again next batch.
-            if external_call["sq_wal_frames", Int64](self.h) > WAL_MAX_FRAMES:
-                _ = external_call["sq_wal_truncate", c_int](self.h)
+            if self.wal_skip > 0:
+                self.wal_skip -= 1
+            elif external_call["sq_wal_frames", Int64](self.h) > WAL_MAX_FRAMES:
+                if external_call["sq_wal_truncate", c_int](self.h) != 0:
+                    self.wal_skip = WAL_BUSY_SKIP
             return True
         _ = sq_step(self.st_rollback)
         _ = sq_reset(self.st_rollback)
@@ -473,25 +485,25 @@ struct Db:
         _ = sq_reset(self.st_insert_post)
         # keep the tail-plan invariant honest
         if self.tail_ok:
-            var mono = external_call["memcmp", c_int](created, self.max_created, CREATED_LEN) >= 0
+            var mono = bcmp(created, self.max_created, CREATED_LEN) >= 0
             if id != self.max_id + 1 or not mono:
                 self.tail_ok = False
         self.max_id = id
         bcopy(self.max_created, created, CREATED_LEN)
         return True
 
-    # 0 = post missing, 1 = liked now, 2 = already liked, -1 = error
+    # LIKE_MISSING, LIKE_NEW, LIKE_DUP or LIKE_ERR
     def like(mut self, user_id: Int64, post_id: Int64) raises -> Int:
         self.begin()
         _ = sq_bind_int(self.st_post_exists, 1, post_id)
         var exists = sq_step(self.st_post_exists) == SQLITE_ROW
         _ = sq_reset(self.st_post_exists)
         if not exists:
-            return 0
+            return LIKE_MISSING
         _ = sq_bind_int(self.st_insert_like, 1, user_id)
         _ = sq_bind_int(self.st_insert_like, 2, post_id)
         var rc = sq_step(self.st_insert_like)
         _ = sq_reset(self.st_insert_like)
         if rc != SQLITE_DONE:
-            return -1
-        return 1 if sq_changes(self.h) == 1 else 2
+            return LIKE_ERR
+        return LIKE_NEW if sq_changes(self.h) == 1 else LIKE_DUP

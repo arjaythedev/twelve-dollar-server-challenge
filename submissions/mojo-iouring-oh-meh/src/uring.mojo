@@ -1,4 +1,5 @@
 # Typed wrappers over the shim's io_uring entry points, so call sites read like Mojo.
+# The shim handles a full submission queue itself (flush, then retry once).
 from std.ffi import c_int, external_call
 from bytes import Bytes
 
@@ -8,7 +9,6 @@ comptime CQE_F_MORE: UInt32 = 2
 comptime CQE_BUFFER_SHIFT: UInt32 = 16
 
 comptime ENOBUFS = -105
-comptime ENFILE = -23
 comptime EAGAIN = -11
 
 
@@ -60,9 +60,10 @@ def submit(i: Int) -> Int:
     return Int(external_call["sh_submit", c_int](c_int(i)))
 
 
+# Submit and wait on one ring in a single enter; negative on error.
 @always_inline
 def wait_one(i: Int) -> Int:
-    return Int(external_call["sh_wait_one", UInt32](c_int(i)))
+    return Int(external_call["sh_wait_one", c_int](c_int(i)))
 
 
 @always_inline
@@ -91,11 +92,6 @@ def prep_send(i: Int, slot: Int, buf: Int, n: Int, ud: UInt64) -> Int:
 
 
 @always_inline
-def prep_cancel(i: Int, target: UInt64, ud: UInt64) -> Int:
-    return Int(external_call["sh_prep_cancel", c_int](c_int(i), target, ud))
-
-
-@always_inline
 def prep_close(i: Int, slot: Int, ud: UInt64) -> Int:
     return Int(external_call["sh_prep_close", c_int](c_int(i), c_int(slot), ud))
 
@@ -116,13 +112,13 @@ def mem_available_kb() -> Int:
 
 
 @always_inline
-def calloc_bytes(n: Int) -> Bytes:
-    return Bytes(unsafe_from_address=external_call["sh_calloc", Int](n))
+def malloc_bytes(n: Int) -> Int:
+    return external_call["sh_malloc", Int](n)
 
 
 @always_inline
-def malloc_bytes(n: Int) -> Int:
-    return external_call["sh_malloc", Int](n)
+def realloc_bytes(p: Int, n: Int) -> Int:
+    return external_call["sh_realloc", Int](p, n)
 
 
 @always_inline

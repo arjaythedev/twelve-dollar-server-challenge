@@ -1,13 +1,13 @@
 # SHA-256 and HMAC-SHA256, written here so JWT verification is Mojo end to end.
 # The HMAC keeps the inner and outer pad states hashed once, so verifying a
-# token costs the message blocks plus one outer block.
-from bytes import Bytes, balloc, bcopy, bzero, alloc_u32
+# token costs the message blocks plus one outer block. No allocation per call.
+from bytes import Bytes, balloc, bcopy, bzero, calloc_t
 
 comptime W32 = Pointer[UInt32, MutUntrackedOrigin]
 
 
 def make_k() -> W32:
-    var k = alloc_u32(64)
+    var k = calloc_t[UInt32](64)
     var vals: List[UInt32] = [
         0x428A2F98, 0x71374491, 0xB5C0FBCF, 0xE9B5DBA5, 0x3956C25B, 0x59F111F1, 0x923F82A4, 0xAB1C5ED5,
         0xD807AA98, 0x12835B01, 0x243185BE, 0x550C7DC3, 0x72BE5D74, 0x80DEB1FE, 0x9BDC06A7, 0xC19BF174,
@@ -104,22 +104,25 @@ struct Sha256:
     var k: W32
     var w: W32
     var state: W32
-    var block: Bytes
+    var fresh: W32      # the initial state, for plain hashes
+    var block: Bytes    # 128 bytes: the padded tail of a message
+    var ih: Bytes       # 32 bytes: HMAC inner hash
     # HMAC: states after absorbing key^ipad and key^opad (one block each).
     var inner: W32
     var outer: W32
-    var has_key: Bool
 
     def __init__(out self):
         self.k = make_k()
-        self.w = alloc_u32(64)
-        self.state = alloc_u32(8)
+        self.w = calloc_t[UInt32](64)
+        self.state = calloc_t[UInt32](8)
+        self.fresh = calloc_t[UInt32](8)
+        init_state(self.fresh)
         self.block = balloc(128)
-        self.inner = alloc_u32(8)
-        self.outer = alloc_u32(8)
-        self.has_key = False
+        self.ih = balloc(32)
+        self.inner = calloc_t[UInt32](8)
+        self.outer = calloc_t[UInt32](8)
 
-    # Hash `msg` continuing from `start` (already absorbed `prefix_blocks` blocks) into out (32 bytes).
+    # Hash `msg` continuing from `start` (already absorbed `prefix_blocks` blocks) into dst (32 bytes).
     def _finish(mut self, start: W32, prefix_blocks: Int, msg: Bytes, n: Int, dst: Bytes):
         for i in range(8):
             self.state[unsafe_offset=i] = start[unsafe_offset=i]
@@ -142,30 +145,26 @@ struct Sha256:
             store_be32(dst, i * 4, self.state[unsafe_offset=i])
 
     def hash(mut self, msg: Bytes, n: Int, dst: Bytes):
-        var s = alloc_u32(8)
-        init_state(s)
-        self._finish(s, 0, msg, n, dst)
+        self._finish(self.fresh, 0, msg, n, dst)
 
-    def set_key(mut self, key: Bytes, n: Int):
+    # The HMAC pad block: key (zero-padded, or hashed if longer than a block) xor `x`.
+    def _pad_state(mut self, key: Bytes, n: Int, x: UInt8, state: W32):
         var k = balloc(64)
         bzero(k, 64)
         if n > 64:
             self.hash(key, n, k)
         else:
             bcopy(k, key, n)
-        var pad = balloc(64)
         for i in range(64):
-            pad[unsafe_offset=i] = k[unsafe_offset=i] ^ 0x36
-        init_state(self.inner)
-        compress(self.inner, pad, self.k, self.w)
-        for i in range(64):
-            pad[unsafe_offset=i] = k[unsafe_offset=i] ^ 0x5C
-        init_state(self.outer)
-        compress(self.outer, pad, self.k, self.w)
-        self.has_key = True
+            k[unsafe_offset=i] ^= x
+        init_state(state)
+        compress(state, k, self.k, self.w)
 
-    # HMAC-SHA256(key, msg) -> out (32 bytes). Uses a 32-byte scratch tail of self.block.
+    def set_key(mut self, key: Bytes, n: Int):
+        self._pad_state(key, n, 0x36, self.inner)
+        self._pad_state(key, n, 0x5C, self.outer)
+
+    # HMAC-SHA256(key, msg) -> dst (32 bytes).
     def hmac(mut self, msg: Bytes, n: Int, dst: Bytes):
-        var ih = balloc(32)
-        self._finish(self.inner, 1, msg, n, ih)
-        self._finish(self.outer, 1, ih, 32, dst)
+        self._finish(self.inner, 1, msg, n, self.ih)
+        self._finish(self.outer, 1, self.ih, 32, dst)

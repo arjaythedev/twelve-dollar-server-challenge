@@ -2,8 +2,8 @@
 //
 // Two halves, both plumbing rather than logic:
 //   1. io_uring: liburing's prep helpers are inline C, so each one gets a plain
-//      exported wrapper. Rings, their fixed-file tables, provided-buffer rings
-//      and eventfds live here; the event loop, parsing, routing, auth, JSON and
+//      exported wrapper. Rings, their fixed-file tables, provided buffers and
+//      eventfds live here; the event loop, parsing, routing, auth, JSON and
 //      the query plans are in Mojo.
 //   2. SQLite: the amalgamation is compiled into this translation unit so the
 //      B-tree layer (SQLITE_PRIVATE = static) is reachable, and exported as a
@@ -31,6 +31,7 @@
 
 // ============================================================== io_uring rings
 
+// 16 because the Mojo side packs the ring index into 4 bits of user_data.
 #define MAX_RINGS 16
 
 struct ring {
@@ -38,13 +39,13 @@ struct ring {
   unsigned char *bufs;   // nbufs * bufsize, contiguous
   uint64_t *pending;     // bitmap of buffer ids returned since the last flush
   unsigned nbufs, bufsize, npending;
-  unsigned table;        // fixed-file slots
   int efd;
+  int efd_registered;
   int live;
 };
 
 static struct ring rings[MAX_RINGS];
-static int nrings_cap, epfd = -1;
+static int epfd = -1;
 static unsigned cfg_sq, cfg_table, cfg_nbufs, cfg_bufsize;
 
 // Returns the usable fixed-file table size under the current hard fd limit.
@@ -57,22 +58,44 @@ unsigned sh_table_size(void) {
   return lim > 256 ? (unsigned)lim - 64 : (unsigned)lim;
 }
 
-// Configure (nothing is created yet). Returns the max number of rings.
+// Configure (nothing is created yet). Returns 0 or -errno.
 int sh_init(unsigned sq_entries, unsigned table, unsigned nbufs, unsigned bufsize) {
   cfg_sq = sq_entries;
   cfg_table = table;
   cfg_nbufs = nbufs;
   cfg_bufsize = bufsize;
-  nrings_cap = MAX_RINGS;
   epfd = epoll_create1(EPOLL_CLOEXEC);
-  return epfd < 0 ? -errno : nrings_cap;
+  return epfd < 0 ? -errno : 0;
 }
 
-// Create ring i (lazily). Returns 0 or -errno.
+// Take an SQE; if the queue is full, flush it and try once more.
+#define SQE_OR_FAIL(i)                                      \
+  struct io_uring_sqe *s = io_uring_get_sqe(&rings[i].ring); \
+  if (!s) {                                                  \
+    io_uring_submit(&rings[i].ring);                         \
+    s = io_uring_get_sqe(&rings[i].ring);                    \
+    if (!s) return -1;                                       \
+  }
+
+// The eventfd only matters once the loop sleeps in epoll across several rings
+// (a registered eventfd is signalled on every completion round, which is wasted
+// work while one ring is served with submit-and-wait), so it is registered late.
+static int ring_register_efd(struct ring *r) {
+  if (r->efd_registered) return 0;
+  int rc = io_uring_register_eventfd(&r->ring, r->efd);
+  if (rc == 0) r->efd_registered = 1;
+  return rc;
+}
+
+// Create ring i (lazily). Returns 0 or -errno; a failed ring stays dead.
 int sh_ring_open(int i) {
-  if (i < 0 || i >= nrings_cap) return -EINVAL;
+  if (i < 0 || i >= MAX_RINGS) return -EINVAL;
   struct ring *r = &rings[i];
   if (r->live) return 0;
+  if (i > 0) {
+    int rc = ring_register_efd(&rings[0]);
+    if (rc < 0) return rc;
+  }
   struct io_uring_params p;
   memset(&p, 0, sizeof p);
   p.flags = IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN | IORING_SETUP_TASKRUN_FLAG |
@@ -88,15 +111,17 @@ int sh_ring_open(int i) {
     fprintf(stderr, "ring %d: register_files_sparse(%u): %s\n", i, cfg_table, strerror(-rc));
     return rc;
   }
-  r->table = cfg_table;
   r->efd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
-  rc = io_uring_register_eventfd(&r->ring, r->efd);
-  if (rc < 0) {
-    fprintf(stderr, "ring %d: register_eventfd: %s\n", i, strerror(-rc));
-    return rc;
-  }
+  if (r->efd < 0) return -errno;
   struct epoll_event ev = {.events = EPOLLIN, .data.u32 = (uint32_t)i};
   if (epoll_ctl(epfd, EPOLL_CTL_ADD, r->efd, &ev) < 0) return -errno;
+  if (i > 0) {
+    rc = ring_register_efd(r);
+    if (rc < 0) {
+      fprintf(stderr, "ring %d: register_eventfd: %s\n", i, strerror(-rc));
+      return rc;
+    }
+  }
 
   // Provided buffers, the classic IORING_OP_PROVIDE_BUFFERS kind: Ubuntu's 6.8 kernels
   // reject IORING_REGISTER_PBUF_RING, and this works with multishot recv on every 6.x.
@@ -108,9 +133,13 @@ int sh_ring_open(int i) {
   struct io_uring_sqe *s = io_uring_get_sqe(&r->ring);
   io_uring_prep_provide_buffers(s, r->bufs, (int)cfg_bufsize, (int)cfg_nbufs, 0, 0);
   rc = io_uring_submit_and_wait(&r->ring, 1);
-  struct io_uring_cqe *cqe;
-  if (rc < 0 || io_uring_peek_cqe(&r->ring, &cqe) != 0 || cqe->res < 0) {
-    fprintf(stderr, "ring %d: provide_buffers failed: %s\n", i, strerror(cqe ? -cqe->res : -rc));
+  if (rc < 0) {
+    fprintf(stderr, "ring %d: provide_buffers submit: %s\n", i, strerror(-rc));
+    return rc;
+  }
+  struct io_uring_cqe *cqe = NULL;
+  if (io_uring_peek_cqe(&r->ring, &cqe) != 0 || cqe->res < 0) {
+    fprintf(stderr, "ring %d: provide_buffers: %s\n", i, cqe ? strerror(-cqe->res) : "no completion");
     return -EINVAL;
   }
   io_uring_cqe_seen(&r->ring, cqe);
@@ -139,12 +168,7 @@ int sh_buf_flush(int i) {
       unsigned start = w * 64 + (unsigned)__builtin_ctzll(r->pending[w]);
       unsigned end = start;
       while (end + 1 < r->nbufs && (r->pending[(end + 1) >> 6] >> ((end + 1) & 63) & 1)) end++;
-      struct io_uring_sqe *s = io_uring_get_sqe(&r->ring);
-      if (!s) {
-        io_uring_submit(&r->ring);
-        s = io_uring_get_sqe(&r->ring);
-        if (!s) return -1;
-      }
+      SQE_OR_FAIL(i);
       io_uring_prep_provide_buffers(s, r->bufs + (size_t)start * r->bufsize, (int)r->bufsize,
                                     (int)(end - start + 1), 0, (int)start);
       s->flags |= IOSQE_CQE_SKIP_SUCCESS;
@@ -158,15 +182,18 @@ int sh_buf_flush(int i) {
 int sh_listen(const char *host, int port, int backlog) {
   int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
   if (fd < 0) return -errno;
-  int one = 1;
-  setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+  int one = 1, err = 0;
+  (void)setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
   struct sockaddr_in a;
   memset(&a, 0, sizeof a);
   a.sin_family = AF_INET;
   a.sin_port = htons((uint16_t)port);
-  if (inet_pton(AF_INET, host, &a.sin_addr) != 1) return -EINVAL;
-  if (bind(fd, (struct sockaddr *)&a, sizeof a) < 0) return -errno;
-  if (listen(fd, backlog) < 0) return -errno;
+  if (inet_pton(AF_INET, host, &a.sin_addr) != 1) err = EINVAL;
+  else if (bind(fd, (struct sockaddr *)&a, sizeof a) < 0 || listen(fd, backlog) < 0) err = errno;
+  if (err) {
+    close(fd);
+    return -err;
+  }
   return fd;
 }
 
@@ -187,7 +214,7 @@ unsigned sh_wait(int timeout_ms) {
   for (int k = 0; k < n; k++) {
     int i = (int)evs[k].data.u32;
     uint64_t v;
-    while (read(rings[i].efd, &v, sizeof v) > 0) {}
+    (void)!read(rings[i].efd, &v, sizeof v);  // one read clears a non-semaphore eventfd
     io_uring_get_events(&rings[i].ring);
     mask |= 1u << i;
   }
@@ -195,13 +222,9 @@ unsigned sh_wait(int timeout_ms) {
 }
 
 // Single-ring fast path: one io_uring_enter submits pending SQEs and waits for a
-// completion (deferred task work runs inside it). Returns 1 when ring 0 has CQEs.
-unsigned sh_wait_one(int i) {
-  struct io_uring *r = &rings[i].ring;
-  int rc = io_uring_submit_and_wait(r, 1);
-  (void)rc;
-  return 1u << i;
-}
+// completion (deferred task work runs inside it). Returns the enter's result
+// (number submitted, or -errno).
+int sh_wait_one(int i) { return io_uring_submit_and_wait(&rings[i].ring, 1); }
 
 unsigned sh_reap(int i, struct sh_cqe *out, unsigned max) {
   struct io_uring *r = &rings[i].ring;
@@ -217,12 +240,6 @@ unsigned sh_reap(int i, struct sh_cqe *out, unsigned max) {
   io_uring_cq_advance(r, n);
   return n;
 }
-
-unsigned sh_sq_space(int i) { return io_uring_sq_space_left(&rings[i].ring); }
-
-#define SQE_OR_FAIL(i)                                      \
-  struct io_uring_sqe *s = io_uring_get_sqe(&rings[i].ring); \
-  if (!s) return -1;
 
 // One-shot accept straight into a free slot of ring i's table. Bounded by the caller
 // to the slots actually free, so a full table never costs a connection (multishot
@@ -248,13 +265,6 @@ int sh_prep_send(int i, int slot, const void *buf, unsigned len, uint64_t ud) {
   io_uring_sqe_set_data64(s, ud);
   return 0;
 }
-// Cancel the request whose user_data is `target` (the multishot accept, when a table nears full).
-int sh_prep_cancel(int i, uint64_t target, uint64_t ud) {
-  SQE_OR_FAIL(i);
-  io_uring_prep_cancel64(s, target, 0);
-  io_uring_sqe_set_data64(s, ud);
-  return 0;
-}
 int sh_prep_close(int i, int slot, uint64_t ud) {
   SQE_OR_FAIL(i);
   io_uring_prep_close_direct(s, slot);
@@ -264,8 +274,8 @@ int sh_prep_close(int i, int slot, uint64_t ud) {
 
 // ============================================================== misc libc
 
-void *sh_calloc(size_t n) { return calloc(n, 1); }
 void *sh_malloc(size_t n) { return malloc(n); }
+void *sh_realloc(void *p, size_t n) { return realloc(p, n); }
 void sh_free(void *p) { free(p); }
 
 int64_t sh_now_ms(void) {
@@ -274,7 +284,6 @@ int64_t sh_now_ms(void) {
   return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 int64_t sh_unix_time(void) { return (int64_t)time(NULL); }
-void sh_sleep_us(int us) { usleep(us); }
 const char *sh_getenv(const char *k) { return getenv(k); }
 void sh_log(const char *s) { fputs(s, stderr); fputc('\n', stderr); fflush(stderr); }
 
@@ -302,6 +311,7 @@ void *sq_open(const char *path) {
   // are in this process, which is what that VFS is for.
   if (sqlite3_open_v2(path, &db, SQLITE_OPEN_READWRITE, "unix-excl") != SQLITE_OK) {
     fprintf(stderr, "sqlite3_open: %s\n", db ? sqlite3_errmsg(db) : "?");
+    sqlite3_close(db);
     return NULL;
   }
   const char *pragmas =
@@ -309,8 +319,10 @@ void *sq_open(const char *path) {
       "PRAGMA mmap_size=1073741824; PRAGMA temp_store=MEMORY; PRAGMA wal_autocheckpoint=0;";
   char *err = NULL;
   if (sqlite3_exec(db, pragmas, 0, 0, &err) != SQLITE_OK) {
-    fprintf(stderr, "pragmas: %s\n", err);
+    fprintf(stderr, "pragmas: %s\n", err);  // WAL + NORMAL is the design (rule 6); refuse to run without it
     sqlite3_free(err);
+    sqlite3_close(db);
+    return NULL;
   }
   return db;
 }
@@ -318,8 +330,11 @@ void *sq_open(const char *path) {
 void *sq_open_plain(const char *path) {
   sqlite3 *db = NULL;
   sqlite3_initialize();
-  if (sqlite3_open_v2(path, &db, SQLITE_OPEN_READWRITE, "unix-excl") != SQLITE_OK) return NULL;
-  sqlite3_exec(db, "PRAGMA mmap_size=0; PRAGMA cache_size=-512;", 0, 0, 0);
+  if (sqlite3_open_v2(path, &db, SQLITE_OPEN_READWRITE, "unix-excl") != SQLITE_OK ||
+      sqlite3_exec(db, "PRAGMA mmap_size=0; PRAGMA cache_size=-512;", 0, 0, 0) != SQLITE_OK) {
+    sqlite3_close(db);
+    return NULL;
+  }
   return db;
 }
 int sq_close(void *db) { return sqlite3_close(db); }
@@ -365,24 +380,14 @@ int sq_wal_truncate(void *db) {
   int log = 0, ckpt = 0;
   return sqlite3_wal_checkpoint_v2(db, NULL, SQLITE_CHECKPOINT_TRUNCATE, &log, &ckpt);
 }
-int64_t sq_data_version(void *db) {
-  // Changes when another connection commits; used to detect foreign writers.
-  sqlite3_stmt *st;
-  int64_t v = -1;
-  if (sqlite3_prepare_v2(db, "PRAGMA data_version", -1, &st, NULL) == SQLITE_OK) {
-    if (sqlite3_step(st) == SQLITE_ROW) v = sqlite3_column_int64(st, 0);
-    sqlite3_finalize(st);
-  }
-  return v;
-}
 
 // ---- B-tree layer. All calls on one connection, from one thread, inside a
-// transaction (sq_exec "BEGIN" or bt_begin_read). Cursors are closed before COMMIT.
+// transaction (sq_exec "BEGIN" then bt_begin_read). Cursors are closed before COMMIT.
 
 static Btree *main_bt(void *db) { return ((sqlite3 *)db)->aDb[0].pBt; }
 
+// Starts the B-tree read transaction inside the SQL BEGIN; SQL COMMIT ends it.
 int bt_begin_read(void *db) { return sqlite3BtreeBeginTrans(main_bt(db), 0, NULL); }
-int bt_end_read(void *db) { return sqlite3BtreeCommit(main_bt(db)); }
 
 // A cursor object is allocated once and (re)opened per transaction.
 struct bt_cur {
@@ -395,11 +400,14 @@ struct bt_cur {
 void *bt_cursor_alloc(void *db, int nkey) {
   sqlite3 *d = db;
   struct bt_cur *k = calloc(1, sizeof *k);
+  if (!k) return NULL;
   k->c = calloc(1, (size_t)sqlite3BtreeCursorSize());
+  if (!k->c) return NULL;
   sqlite3BtreeCursorZero(k->c);
   if (nkey > 0) {
     k->ki = sqlite3KeyInfoAlloc(d, nkey, 1);  // nkey key columns + rowid; BINARY collation, ASC
     k->rec = sqlite3VdbeAllocUnpackedRecord(k->ki);
+    if (!k->ki || !k->rec) return NULL;
     k->rec->nField = 1;
     k->rec->default_rc = 1;  // SeekGE: entries equal on the prefix compare as "greater", so the
                              // cursor lands just before the first of them (then bt_next if res<0)
@@ -421,7 +429,6 @@ void bt_close(void *kc) {
   k->open = 0;
 }
 int bt_last(void *kc, int *empty) { return sqlite3BtreeLast(((struct bt_cur *)kc)->c, empty); }
-int bt_first(void *kc, int *empty) { return sqlite3BtreeFirst(((struct bt_cur *)kc)->c, empty); }
 int bt_prev(void *kc) { return sqlite3BtreePrevious(((struct bt_cur *)kc)->c, 0); }  // SQLITE_DONE at start
 int bt_next(void *kc) { return sqlite3BtreeNext(((struct bt_cur *)kc)->c, 0); }      // SQLITE_DONE at end
 int bt_moveto(void *kc, int64_t rowid, int *res) {
@@ -455,7 +462,6 @@ int bt_payload(void *kc, uint32_t off, uint32_t n, void *buf) {
 static struct {
   char *path;
   int interval_ms;
-  int frames;
 } ck;
 
 static void *ck_main(void *arg) {
@@ -463,6 +469,7 @@ static void *ck_main(void *arg) {
   sqlite3 *db = NULL;
   if (sqlite3_open_v2(ck.path, &db, SQLITE_OPEN_READWRITE, "unix-excl") != SQLITE_OK) {
     fprintf(stderr, "checkpointer: open failed\n");
+    sqlite3_close(db);
     return NULL;
   }
   sqlite3_busy_timeout(db, 50);

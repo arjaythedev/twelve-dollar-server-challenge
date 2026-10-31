@@ -30,7 +30,8 @@ if [ ! -f "$TP/liburing/src/liburing.a" ]; then
   rm -rf "$TP/liburing"
   tar -xzf "$TP/$LU_TGZ" -C "$TP"
   mv "$TP/liburing-liburing-$LU_VER" "$TP/liburing"
-  (cd "$TP/liburing" && ./configure >/dev/null 2>&1 && make -C src -j"$(nproc)" liburing.a >/dev/null 2>&1)
+  (cd "$TP/liburing" && ./configure && make -C src -j"$(nproc)" liburing.a) > "$TP/liburing-build.log" 2>&1 \
+    || { tail -30 "$TP/liburing-build.log"; echo "liburing build failed"; exit 1; }
 fi
 
 SQ_FLAGS="-DSQLITE_THREADSAFE=2 -DSQLITE_DEFAULT_MEMSTATUS=0 -DSQLITE_OMIT_LOAD_EXTENSION \
@@ -39,7 +40,8 @@ SQ_FLAGS="-DSQLITE_THREADSAFE=2 -DSQLITE_DEFAULT_MEMSTATUS=0 -DSQLITE_OMIT_LOAD_
   -DSQLITE_DEFAULT_WAL_SYNCHRONOUS=1"
 CFLAGS="${CFLAGS:--O3 -march=native -fno-plt}"
 
-if [ ! -f "$TP/libshim.a" ] || [ src/shim.c -nt "$TP/libshim.a" ] || [ build.sh -nt "$TP/libshim.a" ]; then
+# $SQ_FLAGS and $CFLAGS are unquoted on purpose: they are lists of flags.
+if [ ! -f "$TP/libshim.a" ] || [ src/shim.c -nt "$TP/libshim.a" ] || [ "$TP/sqlite3.c" -nt "$TP/libshim.a" ] || [ build.sh -nt "$TP/libshim.a" ]; then
   echo "== shim + sqlite"
   gcc $CFLAGS -fPIC -I"$TP" -I"$TP/liburing/src/include" $SQ_FLAGS -c src/shim.c -o "$TP/shim.o"
   ar rcs "$TP/libshim.a" "$TP/shim.o"

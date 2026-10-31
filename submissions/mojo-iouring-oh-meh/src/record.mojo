@@ -2,7 +2,6 @@
 # https://www.sqlite.org/fileformat2.html#record_format
 from bytes import Bytes
 
-comptime MAX_COLS = 8
 
 
 @always_inline

@@ -1,6 +1,6 @@
 # HTTP/1.1 request parsing: request line, the three headers the API needs,
 # Content-Length body. Everything else is skipped.
-from bytes import Bytes, eqlit, eqlit_ci, find_crlf, lower, parse_uint
+from bytes import Bytes, eqlit, eqlit_ci, find_byte, find_crlf, parse_uint
 
 comptime M_OTHER = 0
 comptime M_GET = 1
@@ -48,14 +48,8 @@ def parse_request(p: Bytes, n: Int, mut r: Req):
         if n > 8192:
             r.status = P_BAD
         return
-    var sp1 = -1
-    var sp2 = -1
-    for i in range(eol):
-        if p[unsafe_offset=i] == 0x20:
-            if sp1 < 0:
-                sp1 = i
-            elif sp2 < 0:
-                sp2 = i
+    var sp1 = find_byte(p, eol, 0, 0x20)
+    var sp2 = find_byte(p, eol, sp1 + 1, 0x20) if sp1 >= 0 else -1
     if sp1 < 0 or sp2 < 0:
         r.status = P_BAD
         return
@@ -68,10 +62,9 @@ def parse_request(p: Bytes, n: Int, mut r: Req):
     r.path = p.unsafe_offset(sp1 + 1)
     r.path_len = sp2 - sp1 - 1
     # drop a query string
-    for i in range(r.path_len):
-        if r.path[unsafe_offset=i] == 0x3F:
-            r.path_len = i
-            break
+    var qm = find_byte(r.path, r.path_len, 0, 0x3F)
+    if qm >= 0:
+        r.path_len = qm
     var vlen = eol - sp2 - 1
     var http10 = eqlit(p.unsafe_offset(sp2 + 1), vlen, "HTTP/1.0")
     if not http10 and not eqlit(p.unsafe_offset(sp2 + 1), vlen, "HTTP/1.1"):

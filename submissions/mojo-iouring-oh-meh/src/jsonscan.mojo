@@ -3,7 +3,7 @@
 #     (JWT header/payload fields).
 #   - validate_body(): validate a whole document and extract the top-level
 #     "body" member as an unescaped UTF-8 string (POST /posts).
-from bytes import Bytes, eqlit, is_ws, lit
+from bytes import Bytes, eqlit, is_ws, is_digit
 
 comptime MAX_DEPTH = 64
 
@@ -17,6 +17,18 @@ def hexval(c: UInt8) -> Int:
     if c >= 0x41 and c <= 0x46:
         return Int(c - 0x41) + 10
     return -1
+
+
+# Four hex digits at p[at:at+4] as an int, or -1.
+@always_inline
+def hex4(p: Bytes, at: Int) -> Int:
+    var cp = 0
+    for k in range(4):
+        var h = hexval(p[unsafe_offset=at + k])
+        if h < 0:
+            return -1
+        cp = (cp << 4) | h
+    return cp
 
 
 # Skip a JSON string starting at p[i] == '"'. Returns the index after the closing
@@ -40,7 +52,7 @@ def scan_string(p: Bytes, n: Int, start: Int, dst: Bytes, cap: Int, mut out_len:
             if i >= n:
                 return -1
             var e = p[unsafe_offset=i]
-            var b: UInt8 = 0
+            var b: UInt8
             if e == 0x22 or e == 0x5C or e == 0x2F:
                 b = e
             elif e == 0x62:
@@ -56,23 +68,15 @@ def scan_string(p: Bytes, n: Int, start: Int, dst: Bytes, cap: Int, mut out_len:
             elif e == 0x75:
                 if i + 4 >= n:
                     return -1
-                var cp = 0
-                for k in range(4):
-                    var h = hexval(p[unsafe_offset=i + 1 + k])
-                    if h < 0:
-                        return -1
-                    cp = (cp << 4) | h
+                var cp = hex4(p, i + 1)
+                if cp < 0:
+                    return -1
                 i += 4
                 if cp >= 0xD800 and cp <= 0xDBFF:
                     # high surrogate: needs \uDC00-\uDFFF next
                     if i + 6 >= n or p[unsafe_offset=i + 1] != 0x5C or p[unsafe_offset=i + 2] != 0x75:
                         return -1
-                    var lo = 0
-                    for k in range(4):
-                        var h = hexval(p[unsafe_offset=i + 3 + k])
-                        if h < 0:
-                            return -1
-                        lo = (lo << 4) | h
+                    var lo = hex4(p, i + 3)
                     if lo < 0xDC00 or lo > 0xDFFF:
                         return -1
                     i += 6
@@ -128,15 +132,15 @@ def scan_number(p: Bytes, n: Int, start: Int) -> Int:
         return -1
     if p[unsafe_offset=i] == 0x30:
         i += 1
-    elif p[unsafe_offset=i] >= 0x31 and p[unsafe_offset=i] <= 0x39:
-        while i < n and p[unsafe_offset=i] >= 0x30 and p[unsafe_offset=i] <= 0x39:
+    elif is_digit(p[unsafe_offset=i]):
+        while i < n and is_digit(p[unsafe_offset=i]):
             i += 1
     else:
         return -1
     if i < n and p[unsafe_offset=i] == 0x2E:
         i += 1
         var d = 0
-        while i < n and p[unsafe_offset=i] >= 0x30 and p[unsafe_offset=i] <= 0x39:
+        while i < n and is_digit(p[unsafe_offset=i]):
             i += 1
             d += 1
         if d == 0:
@@ -146,7 +150,7 @@ def scan_number(p: Bytes, n: Int, start: Int) -> Int:
         if i < n and (p[unsafe_offset=i] == 0x2B or p[unsafe_offset=i] == 0x2D):
             i += 1
         var d = 0
-        while i < n and p[unsafe_offset=i] >= 0x30 and p[unsafe_offset=i] <= 0x39:
+        while i < n and is_digit(p[unsafe_offset=i]):
             i += 1
             d += 1
         if d == 0:
@@ -309,12 +313,11 @@ struct JsonScan:
         if self.vstart < 0:
             return -1
         var i = self.vstart
-        var c = self.p[unsafe_offset=i]
-        if c < 0x30 or c > 0x39:
+        if not is_digit(self.p[unsafe_offset=i]):
             return -1
         var v: Int64 = 0
         var digits = 0
-        while i < self.vend and self.p[unsafe_offset=i] >= 0x30 and self.p[unsafe_offset=i] <= 0x39:
+        while i < self.vend and is_digit(self.p[unsafe_offset=i]):
             if digits < 18:
                 v = v * 10 + Int64(self.p[unsafe_offset=i] - 0x30)
             digits += 1

@@ -8,7 +8,8 @@
  * Plans. Two ways to serve GET /feed and GET /posts/:id:
  *   btree — walk the posts table B-tree from its last row (feed: 20 rows
  *           backwards; post: rowid seek), look up the author by rowid in
- *           users, count likes in likes_post_id_idx. Correct only under the
+ *           users, count likes in likes_post_id_idx (feed: one range walk
+ *           over the 20 ids' entries; post: one seek). Correct only under the
  *           invariant Inv (dense ids 1..n, created_at non-decreasing in id,
  *           every author exists) — proved in spec/ (Lean 4).
  *   sql   — the reference SQL from SPEC.md.

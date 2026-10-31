@@ -398,9 +398,10 @@ static void bt_close_cursors(db_t *d) {
   d->cur_open = 0;
 }
 
-/* Render the post the posts cursor points at. Uses cur_users and cur_likes,
- * which must be open. 0 ok, -1 unexpected. */
-static int bt_render_current(db_t *d, out_t *o) {
+/* Decode the post the posts cursor points at and write its head and author
+ * ({"id":..,"body":..,"created_at":..,"author":..). Uses cur_users, which
+ * must be open. *idp = the post id. 0 ok, -1 unexpected. */
+static inline int bt_render_head(db_t *d, out_t *o, int64_t *idp) {
   BtCursor *pc = d->cur_posts;
   int64_t id = sqlite3BtreeIntegerKey(pc);
   const unsigned char *rec; uint32_t rl;
@@ -421,41 +422,90 @@ static int bt_render_current(db_t *d, out_t *o) {
   if (decode_record(rec, rl, ucol, 2)) return -1;
   if (ucol[0].kind != 0 || ucol[1].kind != 2) return -1;
   put_post_author(o, ucol[1].z, ucol[1].n);
+  *idp = id;
+  return 0;
+}
 
-  /* like_count: entries (post_id = id, rowid) in likes_post_id_idx, SeekGE */
+/* Position cur_likes on the first likes_post_id_idx entry whose post_id is
+ * >= key (as OP_SeekGE). 1 positioned, 0 no such entry, -1 error. */
+static inline int bt_likes_seek_ge(db_t *d, int64_t key) {
   UnpackedRecord *r = d->likes_key;
-  sqlite3VdbeMemSetInt64(&r->aMem[0], id);
+  sqlite3VdbeMemSetInt64(&r->aMem[0], key);
   r->nField = 1;
   r->default_rc = 1;      /* as OP_SeekGE: equal prefix sorts after the key */
   r->eqSeen = 0;
   r->errCode = 0;
-  int64_t cnt = 0;
+  int res = 0;
   int rc = sqlite3BtreeIndexMoveto(d->cur_likes, r, &res);
   if (rc != SQLITE_OK || r->errCode) return -1;
   if (res < 0) {
     rc = sqlite3BtreeNext(d->cur_likes, 0);
-    if (rc == SQLITE_DONE) goto counted;
+    if (rc == SQLITE_DONE) return 0;
     if (rc != SQLITE_OK) return -1;
   } else if (sqlite3BtreeEof(d->cur_likes)) {
-    goto counted;
+    return 0;
   }
-  for (;;) {
-    if (cursor_payload(d, d->cur_likes, &rec, &rl)) return -1;
-    col_t k[1];
-    if (decode_record(rec, rl, k, 1)) return -1;
-    if (k[0].kind != 1) {
-      /* NULL sorts first (cannot be ≥ key); text/blob sort after all ints;
-       * a real could equal an int — refuse to guess. */
-      if (k[0].kind == 2) break;
-      return -1;
-    }
-    if (k[0].i != id) { if (k[0].i < id) return -1; break; }
-    cnt++;
+  return 1;
+}
+
+/* The post_id (first column) of cur_likes' current entry: 1 int (*k set),
+ * 0 text (sorts after every int: past the end of the int keys), -1 error or a
+ * NULL/real (NULL sorts first, so cannot be >= a key; a real could equal an
+ * int — refuse to guess, the caller falls back to SQL). */
+static inline int bt_likes_key(db_t *d, int64_t *k) {
+  const unsigned char *rec; uint32_t rl;
+  if (cursor_payload(d, d->cur_likes, &rec, &rl)) return -1;
+  col_t c[1];
+  if (decode_record(rec, rl, c, 1)) return -1;
+  if (c[0].kind == 1) { *k = c[0].i; return 1; }
+  return c[0].kind == 2 ? 0 : -1;
+}
+
+/* like_count of one post: entries (post_id = id, rowid) in
+ * likes_post_id_idx, SeekGE then Next while the key equals id. */
+static int bt_count_likes(db_t *d, int64_t id, int64_t *cnt) {
+  int64_t n = 0, k;
+  int rc = bt_likes_seek_ge(d, id);
+  if (rc < 0) return -1;
+  if (rc) for (;;) {
+    int kr = bt_likes_key(d, &k);
+    if (kr < 0) return -1;
+    if (kr == 0) break;
+    if (k != id) { if (k < id) return -1; break; }
+    n++;
     rc = sqlite3BtreeNext(d->cur_likes, 0);
     if (rc == SQLITE_DONE) break;
     if (rc != SQLITE_OK) return -1;
   }
-counted:
+  *cnt = n;
+  return 0;
+}
+
+/* like_count of every post id in [lo, hi] (hi - lo < 20) in ONE range walk:
+ * SeekGE lo, then Next until the key passes hi. counts[k - lo] += 1 per
+ * entry; counts must be zeroed by the caller. 0 ok, -1 unexpected. */
+static int bt_count_likes_range(db_t *d, int64_t lo, int64_t hi, int64_t *counts) {
+  int64_t k;
+  int rc = bt_likes_seek_ge(d, lo);
+  if (rc < 0) return -1;
+  if (rc) for (;;) {
+    int kr = bt_likes_key(d, &k);
+    if (kr < 0) return -1;
+    if (kr == 0 || k > hi) break;
+    if (k < lo) return -1;        /* cannot happen after SeekGE */
+    counts[k - lo]++;
+    rc = sqlite3BtreeNext(d->cur_likes, 0);
+    if (rc == SQLITE_DONE) break;
+    if (rc != SQLITE_OK) return -1;
+  }
+  return 0;
+}
+
+/* Render the post the posts cursor points at (GET /posts/:id). Uses cur_users
+ * and cur_likes, which must be open. 0 ok, -1 unexpected. */
+static int bt_render_current(db_t *d, out_t *o) {
+  int64_t id, cnt;
+  if (bt_render_head(d, o, &id) || bt_count_likes(d, id, &cnt)) return -1;
   put_post_tail(o, cnt);
   return o->bad ? -1 : 0;
 }
@@ -510,15 +560,29 @@ done:
   return out;
 }
 
+/* The feed: the last 20 rows of posts, newest first. Under Inv their ids are
+ * max_id-19 .. max_id, so their likes_post_id_idx entries are contiguous at
+ * the end of the index: count them all in one range walk, then render. A row
+ * whose id falls outside that range (only possible if Inv is broken in a way
+ * the open-time check missed) gets the per-post seek instead. */
 static int bt_feed(db_t *d, void *arg) {
   out_t *o = arg;
   int res = 0, rc;
   PUTS(o, "{\"posts\":[");
   if (sqlite3BtreeLast(d->cur_posts, &res) != SQLITE_OK) return -1;
   if (!res) {
+    int64_t max_id = sqlite3BtreeIntegerKey(d->cur_posts);
+    int64_t min_id = max_id >= 20 ? max_id - 19 : 1;
+    int64_t counts[20] = {0};
+    if (min_id <= max_id && bt_count_likes_range(d, min_id, max_id, counts)) return -1;
     for (int i = 0; i < 20; i++) {
       if (i) PUTS(o, ",");
-      if (bt_render_current(d, o)) return -1;
+      int64_t id, cnt;
+      if (bt_render_head(d, o, &id)) return -1;
+      if (id >= min_id && id <= max_id) cnt = counts[id - min_id];
+      else if (bt_count_likes(d, id, &cnt)) return -1;
+      put_post_tail(o, cnt);
+      if (o->bad) return -1;
       if (i == 19) break;
       rc = sqlite3BtreePrevious(d->cur_posts, 0);
       if (rc == SQLITE_DONE) break;

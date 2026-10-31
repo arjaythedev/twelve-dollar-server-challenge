@@ -4,6 +4,8 @@
  *   dbtest <db> bench      checkInv/open time + us per feed render for each plan
  *   dbtest --pcache        page-cache wrapper test on a small DB it creates
  *                          (and deletes) in a new directory under $TMPDIR or /tmp
+ *   dbtest --feedlikes     feed like counts (one index range walk): B-tree feed ==
+ *                          SQL feed byte for byte over edge cases, same temp dir rule
  * Build by hand (same SQLite flags as build.sh):
  *   gcc -O2 -std=gnu11 -w <build.sh SQLITE_FLAGS> -c src/db.c -o /tmp/db.o
  *   gcc -O2 -std=gnu11 -Wall -Wextra src/dbtest.c /tmp/db.o -o /tmp/dbtest -lm
@@ -189,9 +191,182 @@ rm:
   return fail;
 }
 
+/* Feed like counts (one likes_post_id_idx range walk over the 20 feed ids):
+ * the B-tree feed must equal the reference SQL feed byte for byte. */
+static char buf2[1 << 20];
+static int fl_cmp = 0;
+
+static int fl_exec(sqlite3 *h, const char *sql) {
+  char *e = NULL;
+  if (sqlite3_exec(h, sql, 0, 0, &e) != SQLITE_OK) { printf("FAIL exec %s: %s\n", sql, e ? e : "?"); sqlite3_free(e); return 1; }
+  return 0;
+}
+
+/* n likes on post pid by users first_uid .. first_uid+n-1 (no conflicts:
+ * callers delete the post's likes first) */
+static int fl_like_n(sqlite3 *h, int64_t pid, int n, int first_uid) {
+  char sql[256];
+  snprintf(sql, sizeof sql, "WITH RECURSIVE c(i) AS (SELECT 0 UNION ALL SELECT i+1 FROM c WHERE i<%d) "
+           "INSERT INTO likes (user_id, post_id) SELECT %d + i, %lld FROM c WHERE i < %d",
+           n, first_uid, (long long)pid, n);
+  return n > 0 ? fl_exec(h, sql) : 0;
+}
+
+static int fl_has(const char *b, int n, const char *s) {
+  size_t l = strlen(s);
+  for (int i = 0; i + (int)l <= n; i++) if (!memcmp(b + i, s, l)) return 1;
+  return 0;
+}
+
+/* btree vs SQL feed on an open db; expect (optional) must occur in the btree
+ * rendering. 0 equal, 1 mismatch. */
+static int fl_compare(db_t *d, const char *label, const char *expect) {
+  db_force_plan(d, 1); int la = db_feed_json(d, buf, sizeof buf);
+  db_force_plan(d, 2); int lb = db_feed_json(d, buf2, sizeof buf2);
+  db_force_plan(d, 0);
+  fl_cmp++;
+  if (la <= 0 || la != lb || memcmp(buf, buf2, (size_t)la)) {
+    printf("FAIL feedlikes %s: btree_len=%d sql_len=%d\n", label, la, lb);
+    if (la > 0) printf("  btree: %.*s\n", la > 400 ? 400 : la, buf);
+    if (lb > 0) printf("  sql:   %.*s\n", lb > 400 ? 400 : lb, buf2);
+    return 1;
+  }
+  if (expect && !fl_has(buf, la, expect)) {
+    printf("FAIL feedlikes %s: %s not in the feed\n", label, expect);
+    return 1;
+  }
+  return 0;
+}
+
+/* open path, compare, close; want_btree: the invariant must hold */
+static int fl_open_compare(const char *path, const char *label, const char *expect, int want_btree) {
+  char err[512];
+  db_t *d = db_open(path, err, sizeof err);
+  if (!d) { printf("FAIL feedlikes %s: open: %s\n", label, err); return 1; }
+  int fail = 0;
+  if (want_btree && strcmp(db_plan(d), "btree")) { printf("FAIL feedlikes %s: %s\n", label, db_plan_line(d)); fail = 1; }
+  fail |= fl_compare(d, label, expect);
+  db_close(d);
+  if (!fail) printf("feedlikes %s: ok\n", label);
+  return fail;
+}
+
+static void fl_rm(const char *path) {
+  const char *sfx[] = {"", "-wal", "-shm", "-journal"};
+  char side[700];
+  for (int i = 0; i < 4; i++) { snprintf(side, sizeof side, "%s%s", path, sfx[i]); unlink(side); }
+}
+
+static int feedlikes_test(void) {
+  enum { NUSERS = 400, NPOSTS = 600, NLIKES = 3000 };
+  const char *tmp = getenv("TMPDIR");
+  char dir[512], path[600], p5[600], p20[600], err[512], sql[512];
+  snprintf(dir, sizeof dir, "%s/dbtest-feedlikes.XXXXXX", tmp && *tmp ? tmp : "/tmp");
+  if (!mkdtemp(dir)) { perror("mkdtemp"); return 1; }
+  snprintf(path, sizeof path, "%s/t.db", dir);
+  snprintf(p5, sizeof p5, "%s/five.db", dir);
+  snprintf(p20, sizeof p20, "%s/twenty.db", dir);
+  int fail = 0, scen = 0;
+  sqlite3 *h = NULL;
+  db_t *d = NULL;
+  const int64_t M = NPOSTS;   /* max id */
+
+  if (db_pgo_make(path, NUSERS, NPOSTS, NLIKES, err, sizeof err)) { printf("pgo_make: %s\n", err); fail = 1; goto rm; }
+  if (sqlite3_open_v2(path, &h, SQLITE_OPEN_READWRITE, NULL) != SQLITE_OK) { printf("open h\n"); fail = 1; goto rm; }
+
+  /* (a) no likes on the newest 20; likes on the 21st newest, so the SeekGE
+   *     lands past the last entry of the index */
+  snprintf(sql, sizeof sql, "DELETE FROM likes WHERE post_id > %lld", (long long)(M - 22));
+  fail |= fl_exec(h, sql) || fl_like_n(h, M - 20, 7, 1) || fl_like_n(h, M - 21, 3, 1);
+  fail |= fl_open_compare(path, "(a) no likes on the newest 20", "\"like_count\":0}]}", 1); scen++;
+
+  /* (b) 300 likes on the newest post only (distinct users) */
+  fail |= fl_like_n(h, M, 300, 1);
+  fail |= fl_open_compare(path, "(b) 300 likes on the newest post", "{\"posts\":[{\"id\":600,", 1);
+  fail |= fl_open_compare(path, "(b) 300 likes on the newest post (count)", "\"like_count\":300},{", 1); scen++;
+
+  /* (c) likes on all 20 (j+1 on the j-th newest, j = 0..19) plus likes on
+   *     the 21st and 22nd newest, which must not be counted */
+  snprintf(sql, sizeof sql, "DELETE FROM likes WHERE post_id > %lld", (long long)(M - 22));
+  fail |= fl_exec(h, sql);
+  for (int j = 0; j < 22 && !fail; j++) fail |= fl_like_n(h, M - j, j < 20 ? j + 1 : 50, 1 + j);
+  fail |= fl_open_compare(path, "(c) likes on all 20 + 21st/22nd", "\"like_count\":20}]}", 1); scen++;
+
+  /* (f) new posts and likes through db_insert_post / db_like inside batches:
+   *     compared inside the write batch and after its commit (pages in the WAL) */
+  sqlite3_close(h); h = NULL;
+  d = db_open(path, err, sizeof err);
+  if (!d) { printf("FAIL open: %s\n", err); fail = 1; goto rm; }
+  {
+    int64_t maxid = M;
+    uint64_t x = 99;
+    char body[64], label[96];
+    for (int b = 0; b < 6 && !fail; b++) {
+      db_batch_begin(d);
+      for (int k = 0; k < 3 && !fail; k++) {
+        int bl = snprintf(body, sizeof body, "feedlikes post %d.%d", b, k);
+        if (db_insert_post(d, 1 + (b * 3 + k) % NUSERS, "u", 1, body, (size_t)bl, buf, sizeof buf) <= 0) {
+          printf("FAIL insert_post\n"); fail = 1;
+        } else maxid++;
+      }
+      for (int k = 0; k < 60 && !fail; k++) {   /* newest 24 posts, random users */
+        x = x * 6364136223846793005ull + 1442695040888963407ull;
+        int64_t pid = maxid - (int64_t)((x >> 33) % 24);
+        x = x * 6364136223846793005ull + 1442695040888963407ull;
+        int al = -1;
+        if (db_like(d, 1 + (int64_t)((x >> 33) % NUSERS), pid, &al) != 1) { printf("FAIL like\n"); fail = 1; }
+      }
+      snprintf(label, sizeof label, "(f) batch %d in txn", b);
+      fail |= fl_compare(d, label, NULL);
+      if (db_batch_commit(d) != 0) { printf("FAIL commit\n"); fail = 1; }
+      snprintf(label, sizeof label, "(f) batch %d committed", b);
+      fail |= fl_compare(d, label, NULL);
+    }
+    if (strcmp(db_plan(d), "btree")) { printf("FAIL (f): %s\n", db_plan_line(d)); fail = 1; }
+    if (!fail) printf("feedlikes (f) inserts + likes in batches (WAL): ok, max id %lld\n", (long long)maxid);
+    scen++;
+  }
+  db_close(d); d = NULL;
+
+  /* (g) Inv broken (a gap among the newest 20; btree forced as selfcheck
+   *     does): the post below the range gets the per-post seek */
+  if (sqlite3_open_v2(path, &h, SQLITE_OPEN_READWRITE, NULL) != SQLITE_OK) { printf("open h\n"); fail = 1; goto rm; }
+  fail |= fl_exec(h, "DELETE FROM likes WHERE post_id = (SELECT max(id) - 5 FROM posts);"
+                     "DELETE FROM posts WHERE id = (SELECT max(id) - 5 FROM posts);");
+  /* max id is M + 18 after (f); with M + 13 gone the 20th row is M - 2,
+   * one below [max-19, max] */
+  snprintf(sql, sizeof sql, "DELETE FROM likes WHERE post_id = %lld", (long long)(M - 2));
+  fail |= fl_exec(h, sql) || fl_like_n(h, M - 2, 11, 100);
+  sqlite3_close(h); h = NULL;
+  snprintf(sql, sizeof sql, "{\"id\":%lld,", (long long)(M - 2));
+  fail |= fl_open_compare(path, "(g) gap: row below the range (per-post seek)", sql, 0);
+  fail |= fl_open_compare(path, "(g) gap: row below the range (count)", "\"like_count\":11}]}", 0); scen++;
+
+  /* (d) only 5 posts, (e) exactly 20 posts; (h) 20 posts, no likes at all */
+  if (db_pgo_make(p5, 30, 5, 40, err, sizeof err) || db_pgo_make(p20, 30, 20, 120, err, sizeof err)) {
+    printf("pgo_make: %s\n", err); fail = 1; goto rm;
+  }
+  fail |= fl_open_compare(p5, "(d) 5 posts", NULL, 1); scen++;
+  fail |= fl_open_compare(p20, "(e) 20 posts", NULL, 1); scen++;
+  if (sqlite3_open_v2(p20, &h, SQLITE_OPEN_READWRITE, NULL) != SQLITE_OK) { printf("open h\n"); fail = 1; goto rm; }
+  fail |= fl_exec(h, "DELETE FROM likes");
+  sqlite3_close(h); h = NULL;
+  fail |= fl_open_compare(p20, "(h) 20 posts, empty likes index", NULL, 1); scen++;
+
+  printf("feedlikes compared btree vs SQL feed %d times\n", fl_cmp);
+  if (!fail) printf("feedlikes test ok scenarios=%d\n", scen);
+rm:
+  if (h) sqlite3_close(h);
+  if (d) db_close(d);
+  fl_rm(path); fl_rm(p5); fl_rm(p20);
+  rmdir(dir);
+  return fail;
+}
+
 int main(int argc, char **argv) {
   if (argc >= 2 && !strcmp(argv[1], "--pcache")) return pcache_test();
-  if (argc < 2) { fprintf(stderr, "usage: dbtest <db> [dump <dir> | bench] | dbtest --pcache\n"); return 2; }
+  if (argc >= 2 && !strcmp(argv[1], "--feedlikes")) return feedlikes_test();
+  if (argc < 2) { fprintf(stderr, "usage: dbtest <db> [dump <dir> | bench] | dbtest --pcache | dbtest --feedlikes\n"); return 2; }
   db_t *d = open_or_die(argv[1]);
   if (argc >= 4 && !strcmp(argv[2], "dump")) { dump(d, argv[3]); db_close(d); return 0; }
   if (argc >= 3 && !strcmp(argv[2], "bench")) { bench(d); db_close(d); return 0; }

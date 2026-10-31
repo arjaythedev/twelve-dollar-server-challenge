@@ -62,6 +62,7 @@ Local comparison on MEGASERVER, one CPU / 2 GiB per server: a 60-second mixed
 `wrk` run at 1,024 connections produced 56,260 req/s versus 49,219 for the pinned
 C reference (14.3% higher). Saturated p99 was 410 ms versus 287 ms; total cgroup
 peak memory was 1,753 versus 1,655 MiB, mostly reclaimable filesystem cache.
-The unchanged `bench/load.js` passed at 100,000 users with a 60-second hold:
-p95 203 ms, p99 347 ms, zero failed requests. These are local diagnostics,
-not an official five-minute max-user score or leaderboard ranking.
+The unchanged `bench/load.js` passed at 100,000 users with a five-minute hold
+after a separate warm-up: p95 94 ms, p99 289 ms, 3,729,218 requests and zero
+failures. These are local diagnostics, not a measured max-user score or
+leaderboard ranking.

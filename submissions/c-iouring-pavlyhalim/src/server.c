@@ -581,8 +581,8 @@ int main(void) {
   if (NR < 1) NR = 1;
   if (NR > MAX_RINGS) NR = MAX_RINGS;
   unsigned nbufs = (unsigned)env_long("RECV_BUFS", 2048), bufsz = (unsigned)env_long("RECV_BUF_SIZE", 2048);
-  long long mmap_bytes = env_long("MMAP_MB", 1024) << 20;
-  int cache_kib = (int)env_long("CACHE_KIB", 8192);
+  long long mmap_bytes = env_long("MMAP_MB", 0) << 20;
+  int cache_kib = (int)env_long("CACHE_KIB", 65536);
 
   if (app_init(&A, db_path, secret, mmap_bytes, cache_kib) < 0) return 1;
 

@@ -43,9 +43,7 @@ sqlite_options=(
   -DHAVE_USLEEP=1                  # millisecond busy waits instead of whole seconds
   -DHAVE_FDATASYNC=1
 )
-# src/sqlite_btree.c compiles the amalgamation together with the small
-# read-only B-tree wrappers that Database.Fast_Reads uses.
-gcc-13 -O2 -w "${sqlite_options[@]}" -Iobj/sqlite -c src/sqlite_btree.c -o obj/sqlite3.o
+gcc-13 -O2 -w "${sqlite_options[@]}" -c obj/sqlite/sqlite3.c -o obj/sqlite3.o
 
-exec gnatmake-13 -j1 -O3 -gnatn -gnat2022 -gnatwa -fstack-protector-strong \
+exec gnatmake-13 -j1 -O3 -gnatn -gnat2022 -gnatwa -gnatVa -fstack-protector-strong \
   -D obj -Iobj -Isrc src/server.adb -o bin/server -largs obj/sqlite3.o -lcrypto -lm

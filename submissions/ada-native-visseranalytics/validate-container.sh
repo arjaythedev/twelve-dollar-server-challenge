@@ -45,7 +45,6 @@ printf 'Validation log: %s\n' "$LOG"
       fi
       runuser -u ada -- python3 submissions/ada-native-visseranalytics/tests/lifecycle.py
       runuser -u ada -- python3 submissions/ada-native-visseranalytics/tests/feed_ranges.py
-      runuser -u ada -- python3 submissions/ada-native-visseranalytics/tests/btree_reads.py
       dpkg-query -W gnat-13 gcc-13 libgnat-13 libssl3t64
       uname -a
     '

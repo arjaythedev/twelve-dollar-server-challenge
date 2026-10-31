@@ -27,16 +27,11 @@ package body Engine is
    Request_Seconds : constant := 30;  -- unfinished request or response
    Input_Limit : constant := 1_048_576;
 
-   -- Batching. After a heavy turn (Heavy_Completions or more) the loop goes
-   -- straight back for more: the work itself is the batching interval, and
-   -- the thread never sleeps while requests are waiting. After a lighter
-   -- busy turn it waits for Wait_Target completions or Batch_Nanos, so one
-   -- wake-up still serves several requests (and one transaction covers
-   -- them). An idle loop sleeps until something arrives.
+   -- Batching: when busy, wait for a few completions or Batch_Nanos so one
+   -- wake-up serves many requests (and one transaction covers them).
    Busy_Completions : constant := 8;
-   Heavy_Completions : constant := 64;
    Wait_Target : constant := 64;
-   Batch_Nanos : constant := 250_000;
+   Batch_Nanos : constant := 2_000_000;
    Idle_Nanos : constant := 2_000_000;
 
    -- One per possible connection, so it is kept to 40 bytes.
@@ -156,73 +151,6 @@ package body Engine is
    Accept_Ring : Integer := -1;
    Accept_Cancelling : Boolean := False;
    Accept_Retry : Unsigned_32 := 0;     -- after a hard accept error
-
-   -- Memory guard. Every open connection costs the kernel about 4 KB, and
-   -- on a 2 GB machine the kernel OOM killer would end the whole server
-   -- before the connection table fills. While the kernel reports less than
-   -- Guard_Low MB available, new connections wait in the listen queue
-   -- (open ones are served as usual); accepting resumes above Guard_High.
-   Guard_Low : constant := 160;
-   Guard_High : constant := 256;
-   Memory_Low : Boolean := False;
-   Stat_Pauses : Natural := 0;
-   Stat_Min_Available : Integer := Integer'Last;
-   Last_Available : Integer := -1;
-
-   function Open_File (Path : char_array; Flags : int) return int
-     with Import, Convention => C, External_Name => "open";
-   function Read_File (FD : int; Buffer : System.Address; Count : size_t) return long
-     with Import, Convention => C, External_Name => "read";
-
-   -- MemAvailable from /proc/meminfo in MB, or -1.
-   function Available_MB return Integer is
-      Buffer : String (1 .. 2_048);
-      FD : constant int := Open_File (To_C ("/proc/meminfo"), 0);  -- O_RDONLY
-      Got : long;
-      Ignored : int;
-      Key : constant String := "MemAvailable:";
-      Value : Long_Long_Integer := 0;
-      Digits_Seen : Boolean := False;
-   begin
-      if FD < 0 then
-         return -1;
-      end if;
-      Got := Read_File (FD, Buffer'Address, Buffer'Length);
-      Ignored := Sys.Close (FD);
-      if Got <= 0 then
-         return -1;
-      end if;
-      for I in 1 .. Natural (Got) - Key'Length loop
-         if Buffer (I .. I + Key'Length - 1) = Key then
-            for J in I + Key'Length .. Natural (Got) loop
-               exit when Digits_Seen and then Buffer (J) not in '0' .. '9';
-               if Buffer (J) in '0' .. '9' then
-                  Digits_Seen := True;
-                  Value := Value * 10 + Long_Long_Integer (Character'Pos (Buffer (J)) - Character'Pos ('0'));
-               end if;
-            end loop;
-            return (if Digits_Seen then Integer (Value / 1024) else -1);
-         end if;
-      end loop;
-      return -1;
-   end Available_MB;
-
-   -- Once a second.
-   procedure Check_Memory is
-      Available : constant Integer := Available_MB;
-   begin
-      if Available < 0 then
-         return;
-      end if;
-      Last_Available := Available;
-      Stat_Min_Available := Integer'Min (Stat_Min_Available, Available);
-      if not Memory_Low and then Available < Guard_Low then
-         Memory_Low := True;
-         Stat_Pauses := Stat_Pauses + 1;
-      elsif Memory_Low and then Available > Guard_High then
-         Memory_Low := False;
-      end if;
-   end Check_Memory;
 
    -- Receives that ended because the ring ran out of buffers (after a stall,
    -- every waiting socket asks at once). Re-arming them all at once only
@@ -827,19 +755,16 @@ package body Engine is
       E : System.Address;
    begin
       if Accept_Ring >= 0 then
-         if not Accept_Cancelling
-           and then (Memory_Low or else Open_Count (Accept_Ring) + Margin >= Slots)
-         then
+         if not Accept_Cancelling and then Open_Count (Accept_Ring) + Margin >= Slots then
             -- Move on before this table fills: a direct accept into a full
-            -- table would drop the connection. Low memory stops accepting
-            -- the same way.
+            -- table would drop the connection.
             E := Next_Entry (Accept_Ring);
             Uring.Prepare_Cancel (E, Accept_Data (Accept_Ring), Tag_Ignore);
             Accept_Cancelling := True;
          end if;
          return;
       end if;
-      if Memory_Low or else Now < Accept_Retry then
+      if Now < Accept_Retry then
          return;
       end if;
       for R in 0 .. Ring_Count - 1 loop
@@ -1045,7 +970,7 @@ package body Engine is
       Limits : aliased Sys.Resource_Limit;
       RC : Integer;
       Handled : Natural := 0;
-      Busy, Heavy : Boolean;
+      Busy : Boolean;
       Last_Sweep : Unsigned_32;
       T0, T1, T2, T3, T4, T5, T6 : Unsigned_64 := 0;
 
@@ -1094,7 +1019,6 @@ package body Engine is
          exit when Sys.Stop_Requested;
          T0 := Sys.Monotonic_Milliseconds;
          Busy := Handled >= Busy_Completions;
-         Heavy := Handled >= Heavy_Completions;
          Handled := 0;
          for R in 1 .. Ring_Count - 1 loop
             Check_Enter (Uring.Enter (Rings (R), Get_Events => False));
@@ -1102,7 +1026,7 @@ package body Engine is
          T1 := Sys.Monotonic_Milliseconds;
          Check_Enter (Uring.Enter
            (Rings (0), Get_Events => True,
-            Wait_For => (if Heavy then 0 elsif Busy then Wait_Target else 1),
+            Wait_For => (if Busy then Wait_Target else 1),
             Timeout => (if Busy then Batch_Nanos
                         elsif Others_Open or else Closing_Count > 0 or else Database.Writes_Held
                         then Idle_Nanos
@@ -1150,11 +1074,7 @@ package body Engine is
                  " worst_sweep_ms" & Stat_Worst_Sweep'Image &
                  " enobufs" & Stat_No_Buffers'Image & " starved_max" & Stat_Starved'Image &
                  " closing" & Closing_Count'Image &
-                 Database.Checkpoint_Stats &
-                 " mem_min_mb" &
-                 Integer'Image (if Stat_Min_Available = Integer'Last then Last_Available else Stat_Min_Available) &
-                 " accept_paused " & (if Memory_Low then "yes" else "no") & " pauses" & Stat_Pauses'Image &
-                 " slow_loops" & Stat_Slow_Loops'Image &
+                 Database.Checkpoint_Stats & " slow_loops" & Stat_Slow_Loops'Image &
                  (if Stat_Slow_Loops = 0 then "" else
                   " worst_loop_ms" & Stat_Worst_Loop'Image & " (submit" & Stat_Worst_Phases (1)'Image &
                   " wait" & Stat_Worst_Phases (2)'Image & " events" & Stat_Worst_Phases (3)'Image &
@@ -1167,14 +1087,12 @@ package body Engine is
             Stat_Batches := 0; Stat_Completions := 0; Stat_No_Buffers := 0; Stat_Starved := 0;
             Stat_Worst_Batch := 0; Stat_Worst_Commit := 0; Stat_Worst_Sweep := 0;
             Stat_Slow_Loops := 0; Stat_Worst_Loop := 0;
-            Stat_Pauses := 0; Stat_Min_Available := Integer'Last;
          end if;
          if Now /= Last_Sweep then
             declare
                Started : constant Unsigned_64 := Sys.Monotonic_Milliseconds;
             begin
                Sweep;
-               Check_Memory;
                Stat_Worst_Sweep := Unsigned_64'Max (Stat_Worst_Sweep, Sys.Monotonic_Milliseconds - Started);
             end;
             Last_Sweep := Now;

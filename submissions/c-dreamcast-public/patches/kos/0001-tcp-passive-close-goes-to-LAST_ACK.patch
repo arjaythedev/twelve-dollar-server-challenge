@@ -1,0 +1,22 @@
+diff --git a/kernel/net/net_tcp.c b/kernel/net/net_tcp.c
+index 0cc6a062..8c8dd6ac 100644
+--- a/kernel/net/net_tcp.c
++++ b/kernel/net/net_tcp.c
+@@ -420,7 +420,7 @@ retry:
+ 
+             tcp_send_fin_ack(sock);
+             ++sock->data.snd.nxt;
+-            sock->state = TCP_STATE_CLOSING;
++            sock->state = TCP_STATE_LAST_ACK;
+             goto ret_no_remove;
+ 
+         case TCP_STATE_CLOSED | TCP_STATE_RESET:
+@@ -2901,7 +2901,7 @@ static void tcp_thd_cb(void *arg) {
+                         i->state = TCP_STATE_FIN_WAIT_1;
+                     }
+                     else {
+-                        i->state = TCP_STATE_CLOSING;
++                        i->state = TCP_STATE_LAST_ACK;
+                     }
+ 
+                     tcp_send_fin_ack(i);

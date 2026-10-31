@@ -25,7 +25,9 @@ use std::os::raw::{c_int, c_void};
 
 use app::App;
 
-const READ_CHUNK: usize = 16 * 1024;
+/// Response buffers larger than this are released instead of retained per
+/// connection. Everything except `/feed` fits comfortably below it.
+pub const SMALL_RESPONSE: usize = 2048;
 
 struct Conn {
     live: bool,
@@ -61,7 +63,13 @@ struct Server {
     conns: Vec<Conn>,
     app: App,
     pending: Vec<Pending>,
+    /// Response buffers taken back from connections after their send completed.
+    /// A feed response is a few KB; keeping one per connection would cost
+    /// gigabytes at 300k sockets, and freeing one per request costs syscalls.
+    pool: Vec<Vec<u8>>,
 }
+
+const POOL_MAX: usize = 256;
 
 impl Server {
     fn touch(&mut self, fd: usize) {
@@ -97,12 +105,21 @@ impl Server {
             if old > http::MAX_HEAD + http::MAX_BODY {
                 return false;
             }
-            self.conns[idx].inbuf.reserve(READ_CHUNK);
+            // Grow in small steps: reserving the whole read chunk per
+            // connection costs 16 KB of resident memory for every socket, and
+            // at 300k sockets that is more than the kernel's own cost. A long
+            // request still grows the buffer as it arrives.
+            let mut cap = self.conns[idx].inbuf.capacity();
+            if cap - old < 256 {
+                let want = (old + 512).max(512);
+                self.conns[idx].inbuf.reserve(want - old);
+                cap = self.conns[idx].inbuf.capacity();
+            }
             let n = unsafe {
                 sys::recv(
                     fd,
                     self.conns[idx].inbuf.as_mut_ptr().add(old) as *mut c_void,
-                    READ_CHUNK,
+                    cap - old,
                     0,
                 )
             };
@@ -122,6 +139,11 @@ impl Server {
     /// Serve every complete request buffered on the connection. false = close.
     fn serve_conn(&mut self, fd: c_int) -> bool {
         let idx = fd as usize;
+        if self.conns[idx].outbuf.capacity() == 0 {
+            if let Some(b) = self.pool.pop() {
+                self.conns[idx].outbuf = b;
+            }
+        }
         // Move the input out so a request can borrow it while its response is
         // appended to the (different) per-pass buffer.
         let mut buf = mem::take(&mut self.conns[idx].inbuf);
@@ -196,7 +218,19 @@ impl Server {
             return false;
         }
 
-        self.conns[idx].outbuf.clear();
+        // Keep the buffer for the next response, but do not keep a large one
+        // alive on every idle connection: at 300k sockets a retained 5 KB feed
+        // response per connection would cost more than the kernel does. Large
+        // buffers go to the process pool instead of back to the allocator.
+        if self.conns[idx].outbuf.capacity() > SMALL_RESPONSE {
+            let mut b = mem::take(&mut self.conns[idx].outbuf);
+            b.clear();
+            if self.pool.len() < POOL_MAX {
+                self.pool.push(b);
+            }
+        } else {
+            self.conns[idx].outbuf.clear();
+        }
         self.conns[idx].sent = 0;
         if self.conns[idx].close_after {
             return false;
@@ -421,6 +455,7 @@ fn main() {
         conns: Vec::new(),
         app,
         pending: Vec::with_capacity(512),
+        pool: Vec::new(),
     };
     let _ = std::io::stderr().write_all(format!("listening on {host}:{port}\n").as_bytes());
     server.run(lfd);

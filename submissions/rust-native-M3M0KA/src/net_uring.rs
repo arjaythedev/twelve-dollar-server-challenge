@@ -100,6 +100,8 @@ struct Lane {
     deferred_close: Vec<u32>,
     /// Connections with output ready, or waiting to be closed.
     dirty: Vec<u32>,
+    /// Response buffers taken back after their send completed.
+    pool: Vec<Vec<u8>>,
 }
 
 impl Lane {
@@ -240,6 +242,7 @@ impl UringServer {
             accepting: false,
             deferred_close: Vec::new(),
             dirty: Vec::with_capacity(256),
+            pool: Vec::new(),
         };
         // Every buffer is handed over once; the kernel owns them from here.
         let base = lane.bufs.as_ptr();
@@ -349,6 +352,11 @@ impl UringServer {
     /// Serves every complete request currently buffered on the connection.
     fn serve(&mut self, lane: usize, slot: u32) {
         let idx = slot as usize;
+        if self.lanes[lane].conns[idx].outbuf.capacity() == 0 {
+            if let Some(b) = self.lanes[lane].pool.pop() {
+                self.lanes[lane].conns[idx].outbuf = b;
+            }
+        }
         let mut buf = mem::take(&mut self.lanes[lane].conns[idx].inbuf);
         if !buf.is_empty() {
             loop {
@@ -401,6 +409,32 @@ impl UringServer {
         let idx = slot as usize;
         if !self.lanes[lane].conns[idx].live {
             return;
+        }
+        // Common case: nothing buffered, this receive holds exactly one
+        // complete request, and no send is in flight. Serve it straight out of
+        // the kernel's provided buffer, so the connection allocates nothing.
+        if self.lanes[lane].conns[idx].inbuf.is_empty()
+            && !self.lanes[lane].conns[idx].send_busy
+        {
+            if let Ok(Some((rq, used))) = http::parse(data) {
+                if used == data.len() {
+                    let close = {
+                        let l = &mut self.lanes[lane];
+                        if rq.expect_continue {
+                            l.conns[idx]
+                                .outbuf
+                                .extend_from_slice(b"HTTP/1.1 100 Continue\r\n\r\n");
+                        }
+                        let app = &mut self.app;
+                        app.handle(&rq, &mut l.conns[idx].outbuf)
+                    };
+                    if close {
+                        self.lanes[lane].conns[idx].close_after = true;
+                    }
+                    self.mark_dirty(lane, slot);
+                    return;
+                }
+            }
         }
         // While a send is in flight the output buffer must not move, so new
         // bytes wait in the input buffer until it completes.
@@ -504,7 +538,17 @@ impl UringServer {
                 }
                 let done = c.sent >= c.outbuf.len();
                 if done {
-                    c.outbuf.clear();
+                    // Same policy as the epoll transport: keep small buffers,
+                    // release big ones so idle connections stay tiny.
+                    if c.outbuf.capacity() > crate::SMALL_RESPONSE {
+                        let mut b = mem::take(&mut c.outbuf);
+                        b.clear();
+                        if l.pool.len() < 256 {
+                            l.pool.push(b);
+                        }
+                    } else {
+                        c.outbuf.clear();
+                    }
                     c.sent = 0;
                 }
                 if done {

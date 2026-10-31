@@ -79,13 +79,18 @@ per-request allocator and buffer fixes was 20.5 us/request on `/feed`:
 | endpoint | app CPU per request |
 |---|---|
 | `GET /health` | 3.4 us |
-| `GET /posts/250000` | 3.4 us (293,000 req/s on one core) |
-| `GET /feed` | 9.6 us |
-| `GET /feed`, `FEED_NO_PLAN=1` | 28.5 us |
+| `GET /posts/250000` | 3.6 us (277,000 req/s on one core) |
+| `GET /feed` | 9.2 us |
+| `GET /feed`, `FEED_NO_PLAN=1` | 15.9 us |
 
 `strace -c` on the serving thread shows one `recvfrom` and one `sendto` per request
-and nothing else per request: the connection buffers keep their capacity, so the
-allocator does not enter its mmap/munmap path (that was 2 syscalls per request).
+and nothing else per request.
+
+Memory per live connection, measured by opening 5,000 sockets, requesting `/feed`
+on each, and reading the server's RSS: **1.5 kB**. Connection buffers grow in small
+steps (an earlier build reserved 16 kB per socket, 25 kB resident, which the 2 GB
+box cannot afford at 300k), and a response buffer larger than 2 kB goes back to a
+process-wide pool after its send completes instead of being retained per socket.
 
 Multi-process capacity, server limited to `ulimit -n 65535` per process, five workers,
 clients from 38 loopback source addresses:

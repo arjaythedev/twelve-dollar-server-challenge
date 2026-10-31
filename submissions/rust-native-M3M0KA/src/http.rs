@@ -228,6 +228,9 @@ fn reason(code: u16) -> &'static str {
 
 /// Append a complete response (status line, headers, body).
 pub fn respond(out: &mut Vec<u8>, code: u16, body: &[u8]) {
+    // One reservation for the whole response: a fresh buffer would otherwise
+    // grow geometrically, copying a multi-KB feed body about a dozen times.
+    out.reserve(128 + body.len());
     out.extend_from_slice(b"HTTP/1.1 ");
     put_i64(out, code as i64);
     out.push(b' ');

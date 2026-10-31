@@ -1,0 +1,37 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 4K of event 'cycles'
+# Event count (approx.): 104457602443
+#
+# Overhead  Command  Shared Object     Symbol                                         
+# ........  .......  ................  ...............................................
+#
+    10.81%  server   server            [.] sqlite3VdbeExec.lto_priv.0
+     8.05%  server   server            [.] sqlite3BtreeTableMoveto.lto_priv.0
+     7.38%  server   server            [.] walFindFrame.constprop.0
+     1.50%  server   server            [.] getPageNormal.lto_priv.0
+     1.36%  server   server            [.] getPageMMap.lto_priv.0
+     1.33%  server   server            [.] getCellInfo.lto_priv.0
+     1.23%  server   server            [.] sqlite3VdbeRecordCompareWithSkip.lto_priv.0
+     1.16%  server   server            [.] append_uint.copy
+     1.14%  server   server            [.] sqlite3BtreeIndexMoveto.lto_priv.0
+     0.85%  server   server            [.] pcache1Fetch.lto_priv.0
+     0.85%  server   server            [.] walHashGet.lto_priv.0
+     0.81%  server   libc.so.6         [.] __memmove_avx512_unaligned_erms
+     0.80%  server   server            [.] btreeParseCellPtrIndex.lto_priv.0
+     0.78%  server   server            [.] sqlite3_column_int64
+     0.74%  server   server            [.] btreeInitPage.lto_priv.0
+     0.65%  server   server            [.] sha_compress.round
+     0.60%  server   server            [.] sqlite3VdbeHalt.lto_priv.0
+     0.59%  server   server            [.] sqlite3PcacheRelease.lto_priv.0
+     0.58%  server   server            [.] sqlite3_step
+     0.53%  server   [unknown]         [k] 0xffffffffa427902b
+     0.52%  server   [unknown]         [k] 0xffffffffa3b58ca4
+
+
+#
+# (Tip: To analyze particular parallelism levels, try: perf report --latency --parallelism=32-64)
+#

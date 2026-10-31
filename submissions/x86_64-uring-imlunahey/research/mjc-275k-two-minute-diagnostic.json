@@ -1,0 +1,99 @@
+{
+  "generator_revision": "e31cd6285704b436422c2fc100d3beb10e558f6c",
+  "generator_sha256": "1c3908541a89e78401d782271c49e742fe89631cb724ca5af7650b51ed11087d",
+  "server_sha256": "3a07352ab36159baf611f82fcaaa13d91939f415e05a70c7f7a3d7a0dfbe35d4",
+  "arguments": {
+    "users": 275000,
+    "duration": "2m",
+    "ramp_up": "60s",
+    "warmup": false,
+    "score": false,
+    "start_users": 275000,
+    "max_users": 500000,
+    "label": "mjc-tail-diagnostic"
+  },
+  "server_limits": {
+    "cpus": 1,
+    "cpuset": "0",
+    "memory_bytes": 2147483648,
+    "swap_bytes": 0,
+    "nofile": 65535
+  },
+  "client_limits": {
+    "cpuset": "1-7,9-15",
+    "memory_bytes": 12884901888,
+    "swap_bytes": 0,
+    "nofile": 1048576,
+    "tokio_threads": 4
+  },
+  "topology": "separate cgroups; private shared loopback and PID namespace; host cgroup namespace read-only in client",
+  "server_final_state": {
+    "Status": "exited",
+    "Running": false,
+    "Paused": false,
+    "Restarting": false,
+    "OOMKilled": false,
+    "Dead": false,
+    "Pid": 0,
+    "ExitCode": 0,
+    "Error": "",
+    "StartedAt": "2026-10-23T18:44:22.877711751Z",
+    "FinishedAt": "2026-10-23T18:48:14.55245858Z"
+  },
+  "integrity_check": "ok",
+  "passed": true,
+  "source_result_directory": "mjc-tail-diagnostic-20261023T194422",
+  "peak_cgroup_bytes": 1552547840,
+  "native_report": {
+    "aggregate": {
+      "avg_ms": 6.524737074789665,
+      "checks_failed": 0,
+      "errors": {
+        "counts": {},
+        "examples": [],
+        "omitted": 0
+      },
+      "failed": 0,
+      "failure_rate": 0,
+      "max_ms": 553.693094,
+      "med_ms": 1.532109,
+      "p95_ms": 36.630254999999984,
+      "p99_ms": 83.68484148999981,
+      "requests": 5030738
+    },
+    "common_hold_s": 120.000990593,
+    "completed": true,
+    "duration_s": 220.075514399,
+    "hold": {
+      "memory_scope": "sampled cgroup memory.current for selected application and proxy groups, including descendants, socket buffers and page cache",
+      "requests_per_second": 29086.385601447888,
+      "sample_duration_s": 115.01116426,
+      "sample_finished_at": "2026-10-23T18:47:19.571747209+00:00",
+      "sample_started_at": "2026-10-23T18:45:24.560582949+00:00",
+      "sampled_peak_memory_bytes": 1530740736,
+      "service_cpu_percent": 61.477923864988796,
+      "system_memory": {
+        "min_available_bytes": 29700546560,
+        "peak_total_minus_available_bytes": 35424862208,
+        "peak_total_minus_free_bytes_including_reclaimable": 57518362624,
+        "scope": "whole observed system from /proc/meminfo; MemAvailable is never inferred when missing; MemFree-only usage includes reclaimable cache",
+        "total_bytes": 65125408768
+      }
+    },
+    "maximum_users": 275000,
+    "passed": true,
+    "required_hold_s": 120,
+    "runtime_errors": 0,
+    "thresholds": {
+      "failure_rate_lt": 0.01,
+      "p95_ms_lt": 500,
+      "p99_ms_lt": 1000
+    },
+    "latency": "HTTP send through complete response body, excluding DNS and TCP connection setup"
+  },
+  "notes": [
+    "Two-minute diagnostic hold without warmup, not a five-minute qualification.",
+    "A read-only SYS_PTRACE sidecar sampled server memory/ring queue state once per second; samples are unsynchronized and diagnostic only.",
+    "No persistent deferred ENOBUFS queue was observed. The prior full-run tail failure was not reproduced; its cause remains unresolved."
+  ]
+}

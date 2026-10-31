@@ -1,0 +1,3 @@
+picohttpparser from https://github.com/h2o/picohttpparser
+commit 465a7ff09fbd3432fe56c673451f5460154d1f07 (2026-09-29, "Merge pull request #95 from basilfx/feature/fix_avr")
+files copied verbatim: picohttpparser.c picohttpparser.h README.md (license: MIT / Perl, see README)

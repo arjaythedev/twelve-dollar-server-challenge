@@ -1,0 +1,35 @@
+{
+ "requests": 20000,
+ "routes": {
+  "FEED": {
+   "count": 9077,
+   "top_layout_share": 1.0,
+   "median_header_bytes": 60
+  },
+  "GETPOST": {
+   "count": 9301,
+   "top_layout_share": 1.0,
+   "median_header_bytes": 60
+  },
+  "LIKE": {
+   "count": 1404,
+   "top_layout_share": 0.2037,
+   "median_header_bytes": 284
+  },
+  "CREATE": {
+   "count": 218,
+   "top_layout_share": 0.2018,
+   "median_header_bytes": 318
+  }
+ },
+ "methods": {
+  "GET": {
+   "count": 18378,
+   "median_header_bytes": 60
+  },
+  "POST": {
+   "count": 1622,
+   "median_header_bytes": 285
+  }
+ }
+}

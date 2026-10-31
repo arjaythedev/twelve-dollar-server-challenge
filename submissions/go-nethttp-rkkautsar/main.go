@@ -19,6 +19,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 	"unicode/utf8"
 )
@@ -67,6 +68,7 @@ type app struct {
 	readsGroup readGroup
 	readGen    atomic.Uint64
 	readWindow time.Duration
+	uring      *uringWriter
 }
 
 // readCall is one in-flight SQLite read. Concurrent requests for the same key
@@ -209,6 +211,12 @@ func (a *app) serveConn(c net.Conn) {
 	if tc, ok := c.(*net.TCPConn); ok {
 		tc.SetNoDelay(true)
 	}
+	fd := -1
+	if sc, ok := c.(syscall.Conn); ok {
+		if raw, err := sc.SyscallConn(); err == nil {
+			_ = raw.Control(func(f uintptr) { fd = int(f) })
+		}
+	}
 	br := bufio.NewReaderSize(c, 2048)
 	bw := bufio.NewWriterSize(c, 1024)
 	for {
@@ -221,7 +229,11 @@ func (a *app) serveConn(c net.Conn) {
 		var werr error
 		if resp.packet != nil && !req.close {
 			// Packet already contains the status line, headers and body.
-			_, werr = c.Write(resp.packet)
+			if a.uring != nil && fd >= 0 {
+				werr = a.uring.write(fd, resp.packet, c)
+			} else {
+				_, werr = c.Write(resp.packet)
+			}
 		} else {
 			bw.WriteString("HTTP/1.1 ")
 			bw.WriteString(strconv.Itoa(resp.status))

@@ -14,6 +14,9 @@ Flycast patches for dreamcast-sql (applied by build.sh to flyinghead/flycast 1b6
   timers (keepalive, stats, retransmit, linger) and closed ones linger for 30 s, so a few dozen
   connections a second ran out; socket_del() then frees the socket at once while
   pico_tcp_input() is still using it (use-after-free, found with AddressSanitizer).
+- picoppp.cpp: use asio's non-throwing shutdown()/close() when the guest closes a
+  connection; if the host peer had already gone, the uncaught std::system_error
+  ("Transport endpoint is not connected") terminated Flycast.
 
 diff --git a/core/deps/picotcp/include/heap.h b/core/deps/picotcp/include/heap.h
 index ed0ff2b..fc29660 100644
@@ -47,7 +50,7 @@ index 60e0a81..7c08b8e 100644
  #ifdef PICO_SUPPORT_UDP
      if (PROTO(s) == PICO_PROTO_UDP) {
 diff --git a/core/network/picoppp.cpp b/core/network/picoppp.cpp
-index 52cfc91..34b18d9 100644
+index 52cfc91..19db4e0 100644
 --- a/core/network/picoppp.cpp
 +++ b/core/network/picoppp.cpp
 @@ -54,6 +54,7 @@ extern "C" {
@@ -95,7 +98,32 @@ index 52cfc91..34b18d9 100644
  	void close() {
  		closeAll();
  		directPlay.reset();
-@@ -576,6 +595,15 @@ private:
+@@ -459,10 +478,12 @@ private:
+ 					INFO_LOG(NETWORK, "TcpSocket[%s] pico read error: %s", name.c_str(), strerror(pico_err));
+ 					if (socket.is_open())
+ 					{
++						// The host peer may already be gone: don't throw (and terminate) over it
++						asio::error_code ec;
+ 						if (asio.state == Closed)
+-							socket.close();
++							socket.close(ec);
+ 						else
+-							socket.shutdown(asio::socket_base::shutdown_send);
++							socket.shutdown(asio::socket_base::shutdown_send, ec);
+ 					}
+ 					pico_socket_close(pico_sock);
+ 					pico.state = Closed;
+@@ -524,7 +545,8 @@ private:
+ 				pico.state = Closed;
+ 				if (socket.is_open()) {
+ 					pico_socket_shutdown(pico_sock, PICO_SHUT_RD);
+-					socket.shutdown(asio::socket_base::shutdown_send);
++					asio::error_code ec;
++					socket.shutdown(asio::socket_base::shutdown_send, ec);
+ 				}
+ 				else {
+ 					pico_socket_close(pico_sock);
+@@ -576,6 +598,15 @@ private:
  	friend super;
  };
  
@@ -111,7 +139,7 @@ index 52cfc91..34b18d9 100644
  // Handles inbound tcp connections
  class TcpAcceptor : public SharedThis<TcpAcceptor>
  {
-@@ -583,6 +611,8 @@ public:
+@@ -583,6 +614,8 @@ public:
  	void start()
  	{
  		TcpSocket::Ptr newSock = TcpSocket::create(io_context, directPlay);
@@ -120,7 +148,7 @@ index 52cfc91..34b18d9 100644
  		sockets.push_back(newSock);
  
  		acceptor.async_accept(newSock->getSocket(),
-@@ -601,7 +631,7 @@ private:
+@@ -601,7 +634,7 @@ private:
  	TcpAcceptor(asio::io_context& io_context, u16 port, std::shared_ptr<DirectPlay> directPlay)
  		: io_context(io_context),
  		  acceptor(asio::ip::tcp::acceptor(io_context,
@@ -129,7 +157,7 @@ index 52cfc91..34b18d9 100644
  		  directPlay(directPlay)
  	{
  	}
-@@ -1280,6 +1310,29 @@ void PicoThread::run()
+@@ -1280,6 +1313,29 @@ void PicoThread::run()
  			}
  		}
  	}
@@ -159,7 +187,7 @@ index 52cfc91..34b18d9 100644
  	// Web TV requires the VJ compression option, which picotcp doesn't support.
  	// This hack allows WebTV to connect although the correct fix would
  	// be to implement VJ compression.
-@@ -1341,7 +1394,9 @@ void PicoThread::run()
+@@ -1341,7 +1397,9 @@ void PicoThread::run()
  			WARN_LOG(NETWORK, "Can't resolve dns.flyca.st. Using default 46.101.91.123");
  		}
  	}

@@ -42,6 +42,7 @@ typedef struct {
     buf_t out;
     int outoff;
     int close_after;
+    int served; /* answered at least one request: only then is an idle keep-alive one fair game */
     uint64_t last_ms;
 } conn_t;
 
@@ -158,11 +159,12 @@ static void drop(int i) {
     conns[i] = conns[--nconns];
 }
 
-/* Close the connection idle the longest with no request in progress, to make room. */
+/* Close the keep-alive connection idle the longest with no request in progress, to make room.
+ * Never one that has yet to send its first request: under churn that is most of them. */
 static int drop_idlest(void) {
     int best = -1;
     for (int i = 0; i < nconns; i++)
-        if (!conns[i].inlen && conns[i].outoff == conns[i].out.len &&
+        if (conns[i].served && !conns[i].inlen && conns[i].outoff == conns[i].out.len &&
             (best < 0 || conns[i].last_ms < conns[best].last_ms))
             best = i;
     if (best >= 0) drop(best);
@@ -275,6 +277,7 @@ static int writable(conn_t *c) {
         c->outoff += n;
     }
     c->out.len = c->outoff = 0;
+    c->served = 1;
     return c->close_after ? -1 : 0;
 }
 

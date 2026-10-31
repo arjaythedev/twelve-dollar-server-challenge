@@ -3,7 +3,7 @@
 **This is a joke entry.** The whole server, from the HTTP parser to the SQLite B-tree, runs as a
 KallistiOS program on an emulated Sega Dreamcast: a 200 MHz Hitachi SH-4 with 16 MB of RAM, talking
 to the world through an emulated Broadband Adapter. It passes all 42 checks. Getting it to survive
-load meant fixing six bugs in KallistiOS's TCP stack and two in Flycast's (below).
+load meant fixing six bugs in KallistiOS's TCP stack and three in Flycast's network bridge (below).
 
 - **Language:** C (gcc 13.2.0, `sh-elf`, `-m4-single`)
 - **Framework:** none; KallistiOS 2.2.2 (the Dreamcast homebrew OS) for threads, TCP/IP and the BBA driver
@@ -73,6 +73,7 @@ Each was found under load, then confirmed with the instrument in brackets.
 | KOS 0006 | 2 s on ~5% of `/feed` responses | data that didn't fit the peer's window was only sent by the 2 s retransmit timer, never when an ACK opened the window (census of timer resends) | send queued data when an ACK makes room |
 | Flycast | host heap corruption (double free) | picoTCP's `connect()` ignored a duplicate socket-tree key (Linux reuses loopback ports at once), so deleting one socket freed the other | fail with EADDRINUSE and retry with another port |
 | Flycast | host crash, "jump to heap address" | picoTCP's timer heap holds ~1,000 timers; when it ran out, `socket_del()` freed a socket that `pico_tcp_input()` was still using (AddressSanitizer) | room for ~67,000 timers |
+| Flycast | Flycast terminated ("shutdown: Transport endpoint is not connected") | the bridge called asio's throwing `shutdown()` on a host socket whose client had already gone | use the non-throwing overloads |
 
 ## Build
 

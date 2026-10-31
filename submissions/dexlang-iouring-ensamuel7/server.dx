@@ -18,6 +18,10 @@ let stExists: int = -1
 let stLike: int = -1
 let stPing: int = -1
 
+// Writes share one transaction per batch of requests, committed by
+// commitBatch before any response in the batch is sent (group commit).
+let inTx: bool = false
+
 let jwtSecret: string = ""
 let startedAt: long = 0
 
@@ -120,6 +124,27 @@ fn authenticate(req: http.HttpRequest): Auth {
     return Auth { userId: uid, username: name.asString(), err: "" }
 }
 
+fn beginWrite(): void {
+    if (!inTx && db.exec(conn, "BEGIN") >= 0) {
+        inTx = true
+    }
+}
+
+// Runs after every batch of handlers, before their responses go out. A batch
+// with no writes has nothing to commit. If the commit fails nothing in the
+// batch is durable, so the runtime answers every request in it 500.
+fn commitBatch(): bool {
+    if (!inTx) {
+        return true
+    }
+    inTx = false
+    if (db.exec(conn, "COMMIT") < 0) {
+        db.exec(conn, "ROLLBACK")
+        return false
+    }
+    return true
+}
+
 fn health(req: http.HttpRequest): http.HttpResponse {
     db.reset(stPing)
     let ok: bool = db.step(stPing)
@@ -184,6 +209,7 @@ fn createPost(req: http.HttpRequest): http.HttpResponse {
     if (tooLong(body, 500)) {
         return fail(400, "body must be at most 500 characters")
     }
+    beginWrite()
     db.reset(stInsert)
     db.bindLong(stInsert, 1, auth.userId)
     db.bindStr(stInsert, 2, body)
@@ -220,6 +246,7 @@ fn likePost(req: http.HttpRequest): http.HttpResponse {
 
     let inserted: bool = false
     if (exists) {
+        beginWrite()
         db.reset(stLike)
         db.bindLong(stLike, 1, auth.userId)
         db.bindLong(stLike, 2, id)
@@ -303,6 +330,7 @@ fn main(): void {
         host = "0.0.0.0"
     }
 
+    http.afterBatch(commitBatch)
     http.uring()
     http.limits(0, 75, 200000)
 

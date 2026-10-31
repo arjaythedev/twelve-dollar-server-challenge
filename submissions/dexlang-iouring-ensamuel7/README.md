@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Language** | [DexLang](https://github.com/ensamuel7/dex) `v0.9.25`: statically typed, compiles to C, which `cc` builds into a native binary |
+| **Language** | [DexLang](https://github.com/ensamuel7/dex) `v0.9.26`: statically typed, compiles to C, which `cc` builds into a native binary |
 | **Framework** | None. DexLang's own `http` and `db` standard library modules |
 | **Server** | The `http` module's io_uring backend (`http.uring()`), with handlers run on the ring's thread |
 | **SQL** | Built with [dexqu](https://github.com/ensamuel7/dex-modules/tree/main/dexqu) `v0.1.0` at startup, prepared once |
@@ -26,18 +26,29 @@ uses raw `io_uring_setup`/`io_uring_enter`, so there is no liburing dependency.
 If a machine refuses io_uring (an old kernel, or a container that blocks it), the
 server says so and serves the same routes with epoll.
 
-**Direct descriptors double the connections held.** Accepted sockets go into the
-ring's registered file table first, which is sized to the open-file limit and
-doesn't use the process's descriptors, then into ordinary descriptors once it's
-full. Under `LimitNOFILE=65535` that is about 131,000 open keep-alive connections
-before anything has to reconnect. Past fifteen sixteenths of that, responses
-carry `Connection: close` so idle users reconnect for their next request. At the
-limit, new connections wait in the listen queue instead of being refused.
+**Several rings of direct descriptors, on one thread.** Accepted sockets go into
+a ring's registered file table, which doesn't use the process's descriptors. The
+kernel caps one table at the open-file limit, so `http.limits(0, 75, 200000)`
+makes the runtime open three rings on the same thread, each with its own 65,535
+slots, plus ordinary descriptors once those are full: about 262,000 open
+keep-alive connections under `LimitNOFILE=65535` before anything has to
+reconnect (it was 131,000 with one ring). The thread sleeps in epoll on the
+rings' eventfds when none has work. Past fifteen sixteenths of the limit,
+responses carry `Connection: close` so idle users reconnect for their next
+request; at the limit, new connections wait in the listen queue instead of
+being refused.
+
+**No read buffer per idle connection.** Receives take a buffer from a ring the
+kernel fills (`IORING_REGISTER_PBUF_RING`), and the bytes are copied out at
+once into a pooled per-request buffer that goes back when the response is
+sent. A keep-alive user thinking between requests holds no read buffer, so a
+quarter of a million of them do not need half a gigabyte of buffers.
 
 **Handlers run on the ring's thread.** There is no handoff to a pool, no lock
-and no wakeup per request, and the response is queued for sending straight
-away. On one vCPU with handlers that only touch an SQLite file, that is the
-cheapest shape.
+and no wakeup per request. On one vCPU with handlers that only touch an SQLite
+file, that is the cheapest shape. Each pass of the loop runs the handlers for
+every request that arrived, then the batch hook below, then queues all the
+responses.
 
 **The same protections as the default server.** 32 KB header cap (431), 8 MB
 body cap (413), and a 75 s idle timeout that shuts a stalled connection down.
@@ -50,6 +61,14 @@ against slow, oversized, aborted and reset clients, with no findings.
   at startup. A request only binds and steps. The feed walks
   `posts_created_at_id_idx` for 20 rows with no sort, and the like count
   resolves through `likes_post_id_idx` as a covering index.
+- **Group commit (`http.afterBatch`).** A write handler opens a transaction if
+  the batch has none (`beginWrite`); `commitBatch` commits it once per pass of
+  the loop, and the runtime holds every response in that pass until it
+  returns. So a `201` still goes out only after its row is committed (rule 6),
+  but under load one commit and one WAL write cover all the likes and posts of
+  a pass instead of one each. If the commit fails, the runtime answers every
+  request in the batch `500 {"error":"internal server error"}` rather than
+  what its handler said; nothing is acknowledged that is not durable.
 - **Every statement is reset as soon as it's read.** A statement left on a row
   keeps the connection's read transaction open, so an `INSERT` on the same
   connection wouldn't commit until the next reset. Resetting first means a 201
@@ -145,16 +164,23 @@ folder:
   state, found with ThreadSanitizer, and a macOS kqueue bug (filter deletes
   dropped after a failed one) that left connections reported twice per wait
   and freed under the event loop. Neither path runs on the benchmark box.
+- Several io_uring rings on one thread when `http.limits` asks for more
+  connections than one ring's descriptor table holds, receives through a
+  kernel buffer ring instead of a buffer per connection, and an idle sweep
+  that reads compact per-slot timestamps rather than every connection.
+- `http.afterBatch`, the group-commit hook above. Under io_uring a batch is a
+  pass of the loop; on epoll and the thread pool it is one request, so code
+  written for it is correct on every backend.
 
 ## Files
 
 ```
 server.dx    routes, handlers, auth, response building
 queries.dx   the six SQL statements, built with dexqu
-dex.mod      module file: dex 0.9.25, dexqu v0.1.0 (pinned in dex.sum)
+dex.mod      module file: dex 0.9.26, dexqu v0.1.0 (pinned in dex.sum)
 install.sh   root, once: build-essential, git, pkg-config, libsqlite3-dev,
              libssl-dev, libcurl, and Go 1.27.2 (sha256-checked)
-build.sh     builds the dex compiler from the pinned v0.9.25 tag through the Go
+build.sh     builds the dex compiler from the pinned v0.9.26 tag through the Go
              module proxy (checksum-verified), fetches dexqu and the SQLite
              3.54.1 amalgamation (sha256-checked), compiles server.dx
 start.sh     raises the soft open-file limit to the hard one and runs the server

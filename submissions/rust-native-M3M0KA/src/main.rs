@@ -63,6 +63,11 @@ struct Server {
     conns: Vec<Conn>,
     app: App,
     pending: Vec<Pending>,
+    /// False once this process has run out of descriptors: it stops taking new
+    /// connections so the other workers (which share the listening socket) get
+    /// every accept from then on. Without this a full worker would keep winning
+    /// the exclusive wakeup and refuse every connection.
+    accepting: bool,
     /// Response buffers taken back from connections after their send completed.
     /// A feed response is a few KB; keeping one per connection would cost
     /// gigabytes at 300k sockets, and freeing one per request costs syscalls.
@@ -109,9 +114,11 @@ impl Server {
             // connection costs 16 KB of resident memory for every socket, and
             // at 300k sockets that is more than the kernel's own cost. A long
             // request still grows the buffer as it arrives.
+            // Most requests are a few hundred bytes: start there and grow only
+            // for a request that really is longer. Every socket pays for this.
             let mut cap = self.conns[idx].inbuf.capacity();
-            if cap - old < 256 {
-                let want = (old + 512).max(512);
+            if cap - old < 192 {
+                let want = (old + 256).max(256);
                 self.conns[idx].inbuf.reserve(want - old);
                 cap = self.conns[idx].inbuf.capacity();
             }
@@ -243,7 +250,7 @@ impl Server {
     }
 
     fn accept_all(&mut self, lfd: c_int) {
-        loop {
+        while self.accepting {
             let fd = unsafe {
                 sys::accept4(
                     lfd,
@@ -253,6 +260,17 @@ impl Server {
                 )
             };
             if fd < 0 {
+                // EMFILE/ENFILE/ENOBUFS: this process is full. Hand every
+                // further accept to the other workers by leaving the epoll set.
+                let err = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+                if err == 24 || err == 23 || err == 105 {
+                    self.accepting = false;
+                    let ev = sys::event_for(lfd, 0);
+                    unsafe {
+                        sys::epoll_ctl(self.ep, sys::EPOLL_CTL_DEL, lfd, &ev);
+                    }
+                    eprintln!("worker full after {} connections: not accepting", self.conns.len());
+                }
                 return;
             }
             sys::set_nodelay(fd);
@@ -456,6 +474,7 @@ fn main() {
         app,
         pending: Vec::with_capacity(512),
         pool: Vec::new(),
+        accepting: true,
     };
     let _ = std::io::stderr().write_all(format!("listening on {host}:{port}\n").as_bytes());
     server.run(lfd);

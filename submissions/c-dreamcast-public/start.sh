@@ -11,12 +11,17 @@ D="$(cd "$(dirname "$0")" && pwd)"
 B="${DREAMCAST_BUILD:-$D/build}"
 : "${SQLITE_PATH:?}" "${JWT_SECRET:?}"
 export PORT="${PORT:-3000}" HOST="${HOST:-0.0.0.0}"
+# A real SH-4 runs at 200 MHz. Flycast will run it faster, and the server is bound by it.
+# The guest reads this too, for its dashboard.
+export SH4_CLOCK="${SH4_CLOCK:-3200}"
 
 run="$(mktemp -d)"
 mkdir -p "$run/flycast"
-cat > "$run/flycast/emu.cfg" << 'EOF'
+cat > "$run/flycast/emu.cfg" << EOF
 [config]
 UseReios = yes
+Sh4Clock = $SH4_CLOCK
+Dreamcast.RamMod32MB = yes
 Dynarec.Enabled = yes
 Dreamcast.AutoLoadState = no
 Dreamcast.AutoSaveState = no

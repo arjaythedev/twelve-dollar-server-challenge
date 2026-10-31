@@ -1,6 +1,7 @@
 /* api.c - the five endpoints of the challenge's SPEC.md, on SQLite, for one request at a time.
  * Every request runs its own query (rule 5): only the prepared statements are kept. */
 #include "api.h"
+#include <arch/arch.h>
 #include "hostfs.h"
 #include "jwt.h"
 #include "sqlite3.h"
@@ -30,14 +31,18 @@ int api_init(char *err, int errlen) {
     jwt_key_init(&key, secret, strlen(secret));
     started_ms = hostfs_time_ms();
 
+    /* The page cache gets 3 MB of a stock 16 MB, or 16 MB of a 32 MB RAM mod: every miss is a
+     * syscall out to the host file, and the database is far bigger than either. */
+    char pragmas[256];
+    snprintf(pragmas, sizeof pragmas,
+             "PRAGMA locking_mode=EXCLUSIVE;" /* WAL without shared memory, see vfs_hostfs.c */
+             "PRAGMA journal_mode=WAL;"
+             "PRAGMA synchronous=NORMAL;"
+             "PRAGMA cache_size=-%d;"
+             "PRAGMA temp_store=MEMORY;",
+             DBL_MEM ? 16384 : 3072);
     int rc = sqlite3_open_v2("main", &db, SQLITE_OPEN_READWRITE, "hostfs");
-    if (rc == SQLITE_OK)
-        rc = sqlite3_exec(db,
-            "PRAGMA locking_mode=EXCLUSIVE;"  /* WAL without shared memory, see vfs_hostfs.c */
-            "PRAGMA journal_mode=WAL;"
-            "PRAGMA synchronous=NORMAL;"
-            "PRAGMA cache_size=-3072;"        /* 3 MB of our 16 MB */
-            "PRAGMA temp_store=MEMORY;", 0, 0, 0);
+    if (rc == SQLITE_OK) rc = sqlite3_exec(db, pragmas, 0, 0, 0);
     if (rc == SQLITE_OK) rc = prep("SELECT 1", &st_health);
     if (rc == SQLITE_OK) rc = prep(POST_COLS "ORDER BY p.created_at DESC, p.id DESC LIMIT 20", &st_feed);
     if (rc == SQLITE_OK) rc = prep(POST_COLS "WHERE p.id = ?", &st_post);

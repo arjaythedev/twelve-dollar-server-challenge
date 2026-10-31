@@ -98,6 +98,7 @@ static void text(int x, int y, uint16_t fg, const char *fmt, ...) {
 }
 
 static int port;
+static int mhz;
 static char ipstr[20] = "?";
 static uint64_t boot_ms;
 
@@ -105,7 +106,7 @@ static void draw(void) {
     uint64_t up = (timer_ms_gettime64() - boot_ms) / 1000;
     fill(0, 0, 640, 480, BG);
     text(20, 12, ORANGE, "DREAMCAST SQL");
-    text(200, 12, FG, "SH-4 200MHz / 16MB / SQLite %s", sqlite3_libversion());
+    text(200, 12, FG, "SH-4 %dMHz / %dMB / SQLite %s", mhz, (int)(HW_MEMSIZE >> 20), sqlite3_libversion());
     text(20, 44, FG, "%s:%d  up %02u:%02u:%02u  conns %d/%d", ipstr, port, (unsigned)(up / 3600),
          (unsigned)(up / 60 % 60), (unsigned)(up % 60), nconns, MAX_CONNS);
 
@@ -340,6 +341,8 @@ int main(int argc, char **argv) {
 
     char err[160], pbuf[16];
     port = hostfs_getenv("PORT", pbuf, sizeof pbuf) > 0 ? atoi(pbuf) : 3000;
+    /* start.sh tells Flycast how fast to run the SH-4, and us too */
+    mhz = hostfs_getenv("SH4_CLOCK", pbuf, sizeof pbuf) > 0 ? atoi(pbuf) : 200;
     if (api_init(err, sizeof err) < 0) halt(err);
 
     if (net_default_dev == NULL) halt("no network adapter (enable the BBA)");
@@ -354,7 +357,8 @@ int main(int argc, char **argv) {
     sa.sin_addr.s_addr = htonl(INADDR_ANY);
     if (ls < 0 || bind(ls, (struct sockaddr *)&sa, sizeof sa) < 0 || listen(ls, SOMAXCONN) < 0) halt("listen failed");
     fcntl(ls, F_SETFL, O_NONBLOCK);
-    snprintf(err, sizeof err, "listening on %s:%d, SQLite %s", ipstr, port, sqlite3_libversion());
+    snprintf(err, sizeof err, "listening on %s:%d, SQLite %s, SH-4 %d MHz, %d MB RAM", ipstr, port,
+             sqlite3_libversion(), mhz, (int)(HW_MEMSIZE >> 20));
     hostfs_log(err);
 
     thd_create(true, stall_reporter, NULL);

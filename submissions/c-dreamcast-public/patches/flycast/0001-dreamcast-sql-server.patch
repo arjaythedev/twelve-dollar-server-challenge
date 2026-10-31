@@ -1,7 +1,7 @@
 Flycast patches for dreamcast-sql (applied by build.sh to flyinghead/flycast 1b63c8a)
 
 - reios/hostfs.cpp: a "BIOS" syscall at 0x8C00100A that gives the guest page I/O on
-  $HOSTFS_PATH (+ -wal/-journal), two allow-listed env vars and the host clock.
+  $HOSTFS_PATH (+ -wal/-journal), three allow-listed env vars and the host clock.
 - picoppp.cpp: FLYCAST_TCP_FORWARD / FLYCAST_TCP_BIND forward inbound host TCP ports to
   the emulated Broadband Adapter for any program, not just the games in its table; loopback
   clients appear to the guest as 198.18.0.1 (KallistiOS answers 127/8 on its own loopback);
@@ -17,6 +17,9 @@ Flycast patches for dreamcast-sql (applied by build.sh to flyinghead/flycast 1b6
 - picoppp.cpp: use asio's non-throwing shutdown()/close() when the guest closes a
   connection; if the host peer had already gone, the uncaught std::system_error
   ("Transport endpoint is not connected") terminated Flycast.
+- emulator.cpp: keep the configured SH-4 clock (Sh4Clock) when the Broadband Adapter goes
+  online if FLYCAST_TCP_FORWARD is set. Flycast resets it to 200 MHz for online play, where
+  every console must run at the same speed; serving our own port is not that.
 
 diff --git a/core/deps/picotcp/include/heap.h b/core/deps/picotcp/include/heap.h
 index ed0ff2b..fc29660 100644
@@ -49,6 +52,22 @@ index 60e0a81..7c08b8e 100644
  
  #ifdef PICO_SUPPORT_UDP
      if (PROTO(s) == PICO_PROTO_UDP) {
+diff --git a/core/emulator.cpp b/core/emulator.cpp
+index e196b0b..9ea66f9 100644
+--- a/core/emulator.cpp
++++ b/core/emulator.cpp
+@@ -934,8 +934,10 @@ void Emulator::setNetworkState(bool online)
+ 	{
+ 		settings.network.online = online;
+ 		DEBUG_LOG(NETWORK, "Network state %d", online);
++		// Online play needs every console at 200 MHz, but forwarding a port to a
++		// program of our own (FLYCAST_TCP_FORWARD) is not online play.
+ 		if (online && settings.platform.isConsole()
+-				&& config::Sh4Clock != 200)
++				&& config::Sh4Clock != 200 && getenv("FLYCAST_TCP_FORWARD") == nullptr)
+ 		{
+ 			config::Sh4Clock.override(200);
+ 			getSh4Executor()->ResetCache();
 diff --git a/core/network/picoppp.cpp b/core/network/picoppp.cpp
 index 52cfc91..19db4e0 100644
 --- a/core/network/picoppp.cpp
@@ -213,13 +232,13 @@ index bd40efd..62d20ad 100644
          reios_elf.cpp
 diff --git a/core/reios/hostfs.cpp b/core/reios/hostfs.cpp
 new file mode 100644
-index 0000000..8419b82
+index 0000000..eb0d1e9
 --- /dev/null
 +++ b/core/reios/hostfs.cpp
 @@ -0,0 +1,148 @@
 +/*
 +	hostfs: a tiny "BIOS" syscall that lets a guest program do page I/O on
-+	one host file (and its -wal/-journal siblings), plus read two allow-listed
++	one host file (and its -wal/-journal siblings), plus read three allow-listed
 +	environment variables and the host clock.
 +
 +	Added for the dreamcast-sql joke entry of the $12 server challenge. The
@@ -328,7 +347,7 @@ index 0000000..8419b82
 +	case HFS_GETENV:
 +	{
 +		std::string name;
-+		if (!guestString(blk[0], name, 32) || (name != "JWT_SECRET" && name != "PORT"))
++		if (!guestString(blk[0], name, 32) || (name != "JWT_SECRET" && name != "PORT" && name != "SH4_CLOCK"))
 +			return -1;
 +		const char *v = getenv(name.c_str());
 +		u8 *buf = GetMemPtr(blk[1], blk[2]);

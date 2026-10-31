@@ -1,7 +1,8 @@
 # C on a Sega Dreamcast (KallistiOS + SQLite, in Flycast)
 
 **This is a joke entry.** The whole server, from the HTTP parser to the SQLite B-tree, runs as a
-KallistiOS program on an emulated Sega Dreamcast: a 200 MHz Hitachi SH-4 with 16 MB of RAM, talking
+KallistiOS program on an emulated Sega Dreamcast: a Hitachi SH-4 (overclocked from 200 to 3,200 MHz) with
+the 32 MB RAM mod, talking
 to the world through an emulated Broadband Adapter. It passes all 42 checks. Getting it to survive
 load meant fixing six bugs in KallistiOS's TCP stack and three in Flycast's network bridge (below).
 
@@ -9,7 +10,7 @@ load meant fixing six bugs in KallistiOS's TCP stack and three in Flycast's netw
 - **Framework:** none; KallistiOS 2.2.2 (the Dreamcast homebrew OS) for threads, TCP/IP and the BBA driver
 - **Driver:** SQLite 3.54.1 amalgamation, compiled for the SH-4, with a custom VFS
 - **Emulator:** Flycast `1b63c8a`, built from source with a small patch, HLE BIOS (no Sega BIOS)
-- **Nginx or direct:** **behind Nginx**. 16 MB of RAM holds 48 connections, not 15,000.
+- **Nginx or direct:** **behind Nginx**. The guest keeps at most 48 connections, not 15,000.
 
 While it runs, the Dreamcast's video output shows a live dashboard: requests per second for the last
 100 seconds stacked by endpoint, per-endpoint and per-status counters, the last few requests, the
@@ -22,7 +23,7 @@ locally, run with a display (or `DREAMCAST_SCREEN=1`) to watch it.
 k6 ─► Nginx ─► 127.0.0.1:$PORT ─► Flycast (host process)
                                     │ asio acceptor → picoTCP → emulated RTL8139 BBA
                                     ▼
-                   ┌──── emulated Dreamcast (SH-4, 16 MB) ─────────────┐
+                   ┌──── emulated Dreamcast (SH-4, 32 MB) ─────────────┐
                    │ KallistiOS TCP/IP ─► guest/main.c (poll loop)      │
                    │   fbparse.h (HTTP) · cursed-jwt (HS256) · api.c    │
                    │   SQLite 3.54.1 ─► guest/vfs_hostfs.c              │
@@ -46,10 +47,10 @@ k6 ─► Nginx ─► 127.0.0.1:$PORT ─► Flycast (host process)
   `synchronous=NORMAL` (rule 6): every commit is written through to the host's `-wal` before the 201,
   and `xSync` is a real host `fsync` at checkpoints.
 - **No caching** (rule 5): every request runs its query; only the prepared statements persist.
-  SQLite's page cache is 3 MB of the 16.
+  SQLite's page cache is 16 MB of the 32 (3 MB on a stock 16 MB console).
 - **Per request.** One KallistiOS thread polls the listening socket and up to 48 connections. At 48,
   a new connection makes room by closing the longest-idle keep-alive connection (Nginx keeps more
-  idle upstream connections than 16 MB has room for); if none is idle, it waits in the listen backlog. `/feed` and `/posts/:id` are the queries
+  idle upstream connections than we keep); if none is idle, it waits in the listen backlog. `/feed` and `/posts/:id` are the queries
   from SPEC.md; `POST /posts` uses `INSERT ... RETURNING`; likes use `ON CONFLICT DO NOTHING`.
 - **Clock.** `created_at` comes from SQLite's `strftime('%f')`, and the VFS gets the host's clock
   through the same syscall, so timestamps are real UTC with milliseconds. JWT `exp` uses it too.
@@ -123,7 +124,7 @@ server answers `/health` a few seconds after `start.sh`.
 
 ![The Dreamcast's video output during a k6 run](dashboard.png)
 
-*The Dreamcast's screen during the 2,500-VU run below: requests per second for the last 100 seconds
+*The Dreamcast's screen during the 2,500-VU run below (at 200 MHz and 16 MB): requests per second for the last 100 seconds
 by endpoint (blue `/feed`, green `/posts/:id`, pink likes, orange creates), 47 of 48 connection slots
 in use, 489 KB of the 16 MB free.*
 
@@ -140,9 +141,19 @@ k6 run -e BASE_URL=http://127.0.0.1 -e VUS=2500 -e RAMP_UP=20s -e DURATION=60s b
 | 2,500 | 206 | 11 ms | 20 ms | 28 ms | 0 % |
 | 5,000 | 346 | | 30 s | 30 s | 12.0 % |
 
-So it **passes the thresholds at 2,500 users**, where the scoring starts, and falls over somewhere
-before 5,000: the emulated SH-4 tops out at roughly 300 requests/s. Before the fixes above it failed
-at 150 users (p95 2.02 s, from KOS 0006) and froze or crashed soon after.
+Those two rows are at the stock 200 MHz and 16 MB, where the emulated SH-4 tops out at roughly 300
+requests/s. That turned out to be the only limit: the host CPU was mostly idle, and a faster network
+tick changed nothing. So `start.sh` now runs the SH-4 at 3,200 MHz (`SH4_CLOCK`; our Flycast patch
+stops Flycast resetting it to 200 MHz when the network adapter comes up) with the 32 MB RAM mod and
+a 16 MB page cache. With Flycast pinned to a single core, at 800 MHz (not yet re-run at 3,200):
+
+| VUs | requests/s | p95 | p99 | errors |
+|---|---|---|---|---|
+| 5,000 (800 MHz, 32 MB) | 409 | 26 ms | 140 ms | 0.02 % |
+
+On keep-alive connections straight to the guest (one core), throughput by SH-4 clock was 317 req/s
+at 200 MHz, 965 at 800, 1,137 at 1,600 and 1,328 at 3,200. Before the fixes above it failed at 150
+users (p95 2.02 s, from KOS 0006) and froze or crashed soon after.
 
 ## Files
 

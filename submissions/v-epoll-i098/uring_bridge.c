@@ -22,7 +22,7 @@
 #define ACCEPT_DEPTH 64
 #define SQ_SIZE 2048
 #define CQ_SIZE 8192
-#define BATCH_NS 200000 /* Bound completion coalescing before one SQLite transaction. */
+#define BATCH_NS 4000000 /* Bound completion coalescing before one SQLite transaction. */
 #define PENDING_LIMIT (1u << 20) /* Input held while the application is busy; more closes the client. */
 #define TD_CANCEL (UINT64_MAX - 1)
 

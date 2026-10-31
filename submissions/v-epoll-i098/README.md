@@ -28,7 +28,7 @@ The C transport keeps debug symbols and frame pointers for local profiles.
   socket table and runs every query, so there are no mutexes, no thread hand-offs and no lock waits
   between requests. SQLite is compiled with `SQLITE_THREADSAFE=2` (each connection stays on its thread)
   and the other options from SQLite's recommended compile-time list that the server does not need.
-- **Group commit per completion batch.** Completions collect for at most 200 microseconds before
+- **Group commit per completion batch.** Completions collect for at most 4 milliseconds before
   one SQLite transaction. Responses enter the transport only after `COMMIT` succeeds.
   This also holds read responses that observe a write from the same batch.
   A failed commit discards the tentative responses and closes their connections.

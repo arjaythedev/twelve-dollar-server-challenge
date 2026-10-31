@@ -3,13 +3,3 @@ seed/tokens.json
 seed/tsv/
 results/
 .DS_Store
-
-# Kotlin/Gradle caches and generated module output
-.gradle/
-.kotlin/
-build/
-
-# Local runtime configuration; examples may remain versioned
-.env
-.env.local
-.env.*.local

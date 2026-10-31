@@ -1,14 +1,13 @@
 #!/usr/bin/env bash
 # The tester's walk through this submission, each command printed before it runs:
-#   git       the challenge checkout; the TrikeShed subrepo git records at trikeshed/TrikeShed (reified when empty, at
+#   git       the challenge checkout; the TrikeShed commit build.sh pins at trikeshed/TrikeShed (reified when empty, at
 #             the recorded commit); whether the subrepo remote's default branch holds that commit
 #   linkage   every TrikeShed file trikeshed/sources.txt names: present at the recorded commit, unchanged in the
 #             subrepo's working tree; the client's own sources beside them
 #   scaffold  seed database, leaf corpus, and the tools each edition needs
 #   editions  each built, tested and run into build/editions/<os>-<arch>/<edition>/ (status, logs, artifacts)
 #   summary   one line per edition, also written to build/editions/<os>-<arch>/summary.txt
-# No commit is named here: the TrikeShed commit is whatever git records for trikeshed/TrikeShed, and
-# 'git add trikeshed/TrikeShed' records the subrepo's current HEAD.
+# No commit is named here: the TrikeShed commit is the TRIKESHED_COMMIT pinned in build.sh.
 #
 #   bash tester.sh                    every step and every edition (an edition this host cannot build is skipped)
 #   bash tester.sh git linkage        those steps only
@@ -74,7 +73,7 @@ mark() { # mark <edition> <status line>
   case $2 in FAIL*) failed=1 ;; esac
 }
 gradle_run() { "$GRADLE" --no-daemon --console=plain "$@"; }
-recorded() { git ls-files --stage -- "$SUB" | awk '$1 == "160000" { print $2 }'; }
+recorded() { sed -n 's/^TRIKESHED_COMMIT=//p' "$here/build.sh"; }
 junit() { # junit <test-results dir>: totals over its TEST-*.xml
   cat "$1"/TEST-*.xml 2> /dev/null | grep -o '<testsuite [^>]*>' | awk '{
     for (i = 1; i <= NF; i++) if (split($i, kv, "=") == 2) { gsub(/"/, "", kv[2]); s[kv[1]] += kv[2] } }
@@ -86,7 +85,7 @@ reify() {
   [ -d "$SUB/src" ] && return 0
   local commit
   commit=$(recorded)
-  [ -n "$commit" ] || { echo "git records no commit for $SUB"; return 1; }
+  [ -n "$commit" ] || { echo "build.sh pins no commit for $SUB"; return 1; }
   say "reify $SUB at the commit git records for it"
   run mkdir -p "$SUB" || return 1
   run git -C "$SUB" init -q || return 1
@@ -101,10 +100,9 @@ step_git() {
   say "git: the challenge checkout"
   run git -C "$top" log -1 --format='HEAD %h %cd %s'
   run git -C "$top" status --short -- "$here"
-  say "git: the subrepo $SUB as git records it (mode 160000: a gitlink to a commit of another repository)"
-  run git ls-files --stage -- "$SUB"
+  say "git: the commit build.sh pins for $SUB"
   commit=$(recorded)
-  [ -n "$commit" ] || { echo "git records no commit for $SUB"; failed=1; return; }
+  [ -n "$commit" ] || { echo "build.sh pins no commit for $SUB"; failed=1; return; }
   reify || { failed=1; return; }
   say "git: the subrepo's checkout"
   run git -C "$SUB" log -1 --format='%H %cd %an%n  %s'
@@ -114,7 +112,6 @@ step_git() {
     echo "the subrepo's HEAD is the recorded commit"
   else
     echo "the subrepo's HEAD $head is not the recorded commit $commit"
-    echo "(git status shows '$SUB (new commits)'; 'git add $SUB' records the subrepo's HEAD)"
   fi
   say "git: the recorded commit on the subrepo's remote"
   url=$(git -C "$SUB" remote get-url origin)

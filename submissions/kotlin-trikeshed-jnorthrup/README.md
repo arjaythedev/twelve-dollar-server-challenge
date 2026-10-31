@@ -11,7 +11,7 @@ Kotlin with no framework: RelaxFactory's `one.xio` NIO reactor, monomorphized, o
 | HTTP | own: RelaxFactory's `one.xio` selector loop, monomorphized per transport state: one unshared `java.nio` selector (epoll) per state class (listen, header read, body read, buffered write) |
 | SQLite | 3.54.0 amalgamation, compiled by `build.sh`; the download is checked against the SHA3-256 sqlite.org publishes |
 | Driver | `java.lang.foreign` (FFM) downcalls into that `libsqlite3`; no JDBC, no JNI |
-| Libraries | TrikeShed (HMAC-SHA256 for JWT, SHA-3), compiled from the git subrepo `trikeshed/TrikeShed`: the files listed in `trikeshed/sources.txt`, at the commit git records for the subrepo |
+| Libraries | TrikeShed (HMAC-SHA256 for JWT, SHA-3), compiled from the checkout `trikeshed/TrikeShed`: the files listed in `trikeshed/sources.txt`, at the commit pinned in `build.sh` |
 
 ## Nginx or direct
 
@@ -120,6 +120,6 @@ and needs no setup; no sysctl was changed):
 | `server/src/jvmMain` | `Poller.kt` (the four selectors, their dispatch loops and the wait over them), `Sqlite.kt` (FFM binding and statements), `SqliteSource.kt` (fetch + SHA3-256 check) |
 | `loadgen/` | the load generator used under Benchmark (`gradle :loadgen:app` writes `loadgen/build/app`) |
 | `trikeshed/` | Gradle module `:trikeshed`: `build.gradle.kts` and `sources.txt`, no sources of its own |
-| `trikeshed/TrikeShed` | git submodule registered in `.gitmodules`: jnorthrup/TrikeShed at the commit git records. Initialize it with `git submodule update --init`; if it is empty, `build.sh` fetches that same recorded commit (`git` from `install.sh`) |
+| `trikeshed/TrikeShed` | jnorthrup/TrikeShed checkout, not tracked here. If it is empty, `build.sh` fetches the commit pinned as `TRIKESHED_COMMIT` (`git` from `install.sh`) |
 | `install.sh`, `build.sh`, `start.sh` | the challenge contract |
 | `tester.sh` | a tester's walk through git, the TrikeShed linkage, scaffolding, and each edition's build, tests and run, into `build/editions/<os>-<arch>/` |

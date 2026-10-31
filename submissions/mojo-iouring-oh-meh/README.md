@@ -12,7 +12,7 @@ prep helpers, SQLite's file-private B-tree entry points, a checkpoint thread).
 | Language | Mojo 1.2.0 (pinned PyPI wheel, 40 MB), `mojo build` at -O3 |
 | Framework | none |
 | Transport | io_uring (liburing 2.15): multishot accept into direct descriptors, multishot recv from provided buffers, one send in flight per connection |
-| Database | SQLite 3.54.1 amalgamation compiled into the shim, `THREADSAFE=2`, `unix-excl` VFS |
+| Database | SQLite 3.54.1 amalgamation compiled into the shim, `THREADSAFE=2`, `unix-excl` VFS, 32 MB page cache, no mmap |
 | Nginx or direct | **Direct**: serves `HOST:PORT` itself (`0.0.0.0:80` on the box) |
 | Threads | one event loop, plus a C thread that runs passive WAL checkpoints |
 | Kernel | needs Linux 6.1+ (multishot accept/recv); tested on Ubuntu 24.04's 6.8 |
@@ -79,8 +79,8 @@ cap, 413 beyond it); pipelined requests are answered in order with one send in f
 HTTP/1.0 or `Connection: close` closes after the response.
 
 **Memory.** The point of the design: the leaders stall near 290,000 users because the
-kernel's ~3.5 KB per idle socket plus their 800–1,400 MB of app memory fills the 2 GB
-box before CPU runs out. This server's own footprint is the SQLite page cache (8 MB),
+kernel's ~4 KB per idle socket plus their 800–1,400 MB of app memory fills the 2 GB
+box before CPU runs out. This server's own footprint is the SQLite page cache (32 MB),
 the per-ring buffers (4 MB each), response arenas (1 MB each, a handful in flight) and
 a few words per connection. The startup invariant scan runs on a throwaway connection
 without mmap and the file's pages are dropped from the page cache afterwards, so the
@@ -91,21 +91,40 @@ rather than a frozen box.
 
 ## What was measured
 
-Measurements so far are on a 4-vCPU arm64 Ubuntu 24.04 VM (kernel 6.8) with k6 in the
-same VM over loopback; **no user-count score is claimed**. x86 numbers from a 1 vCPU / 2 GB droplet will
-replace these before the PR is final.
+**x86, the benchmark's shape.** A DigitalOcean 1 vCPU / 2 GB Premium Intel droplet
+(2.0 GHz, 1,967 MB, Ubuntu 24.04, kernel 6.8.0-147), the server started by systemd as
+user `deploy` with `LimitNOFILE=65535` and `CAP_NET_BIND_SERVICE` on `0.0.0.0:80`, load
+from a 4 vCPU droplet in the same datacenter over the private network. That load box
+caps what k6 can drive (about 16,000 req/s and 20,000 users), so **no user-count score
+is claimed**; the numbers below are what the organizer's search will be working with.
+
+| Run (x86 droplet) | Result |
+|---|---|
+| `install.sh` / seed / `test/run.sh` | 35 s / 31 s / 64 s (build plus 42/42 checks), 369 MB compile peak |
+| user model without think time, 500 connections, 30 s | 16,000 req/s (k6-bound), server at 45 % CPU: **28 µs of CPU per request, kernel included**; server-side feed latency during it: median 1.2 ms, p90 3.8 ms |
+| `bench/load.js`, 20,000 users, 60 s ramp + 120 s | 0 errors, p99 4.4 ms (k6's view), server-side probe median 0.8 ms; **app cgroup peak 132 MB**; kernel slab +83 MB, i.e. ~4.2 KB of kernel memory per idle connection |
+| idle | 34 MB cgroup, 11 MB RSS |
+
+Profile at saturation (perf, 15 s): 65 % kernel (TCP, io_uring, the virtio notify
+`iowrite16` alone is 10 %), 31 % server, 3 % libc. The largest user-side items are
+HTTP parsing, `sqlite3BtreeTableMoveto` for the users rows, record decoding and
+`pcache1Fetch`. The first profile had `walFindFrame` at 12 %: with `mmap_size` set,
+SQLite bypasses its page cache for mapped pages and consults the WAL index on every
+page touch, so mmap is off and the page cache is 32 MB instead.
+
+What that implies on the benchmark box (same RAM, a faster Xeon): at 28 µs/request the
+CPU runs out near 35,000 req/s, which is roughly 340,000 users in the load model, and
+memory at ~4.2 KB per connection in the kernel plus ~150 MB of app leaves room for
+about 380,000 connections in 1,967 MB. Both are estimates, not measurements.
+
+**arm64 VM** (4 vCPU Ubuntu 24.04, k6 over loopback), for development:
 
 | Run | Result |
 |---|---|
 | `test/run.sh` | 42/42 |
-| `bench/load.js`, 2,000 users, 60 s | 19,229 requests, 0 errors, p95 1.4 ms, p99 1.8 ms |
-| user model without think time, 500 connections, 20 s, one ring | 72,900 req/s, 0 errors, **6.0 µs of server CPU per request** (kernel included), RSS 31 MB |
-| same, forced onto 64-slot rings (8 rings in use) | 75,200 req/s, 0 errors, 6.3 µs/request, RSS 69 MB |
-| idle, 20 s | 50 ms of CPU (the checkpoint thread), RSS 10.5 MB |
-
-Profile at saturation (perf, 10 s): half the samples are in the kernel's TCP and
-io_uring paths; of the user half, the largest items are SQLite's page lookups through the
-WAL index, `sqlite3BtreeTableMoveto` for the users rows, and JSON string escaping.
+| `bench/load.js`, 2,000 and 10,000 users | 0 errors, p99 0.6 ms |
+| user model without think time, 500 connections, one ring | 79,600 req/s, 0 errors, 5.2 µs of server CPU per request |
+| same, forced onto 64-slot rings (8 rings in use) | 77,300 req/s, 0 errors, 5.6 µs/request |
 
 ## Build
 

@@ -314,9 +314,12 @@ void *sq_open(const char *path) {
     sqlite3_close(db);
     return NULL;
   }
+  // No mmap: mapped pages bypass SQLite's page cache, so every page touch would
+  // consult the WAL index first (walFindFrame was 12% of CPU). With a 32 MB page
+  // cache the hot set (users, the tails of posts and likes_post_id_idx) is a cache hit.
   const char *pragmas =
-      "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA cache_size=-8192;"
-      "PRAGMA mmap_size=1073741824; PRAGMA temp_store=MEMORY; PRAGMA wal_autocheckpoint=0;";
+      "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA cache_size=-32768;"
+      "PRAGMA mmap_size=0; PRAGMA temp_store=MEMORY; PRAGMA wal_autocheckpoint=0;";
   char *err = NULL;
   if (sqlite3_exec(db, pragmas, 0, 0, &err) != SQLITE_OK) {
     fprintf(stderr, "pragmas: %s\n", err);  // WAL + NORMAL is the design (rule 6); refuse to run without it

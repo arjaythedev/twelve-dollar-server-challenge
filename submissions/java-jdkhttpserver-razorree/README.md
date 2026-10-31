@@ -58,7 +58,7 @@ taskset -c 0 bash submissions/java-jdkhttpserver-razorree/start.sh
 ```
 
 `start.sh` executes Java in the foreground with the accepted benchmark settings:
-an initial pre-touched 512 MiB heap, a 1,024 MiB maximum heap, a 448 MiB young generation, Serial GC, compact object headers, virtual
+an initial pre-touched 512 MiB heap, a 1,024 MiB maximum heap, a 256 MiB young generation, Serial GC, compact object headers, virtual
 thread scheduler parallelism 2, FFM native access, `MALLOC_ARENA_MAX=1`, and
 `-XX:ActiveProcessorCount=1`. That processor-count flag is a JVM hint, not a CPU
 or total-memory limit; enforce the one-core, 2 GiB service budget externally.
@@ -78,13 +78,13 @@ or total-memory limit; enforce the one-core, 2 GiB service budget externally.
   next transaction. One writer drains up to 256 immediately available requests per
   transaction with per-request savepoints; no artificial batching delay. No ORM
   or connection pool.
-- Every feed and post request reads SQLite. JWT signatures and time claims are verified on
+- Every feed and post request reads SQLite. JWT signatures and the required numeric expiration claim are verified on
   every authenticated request. Request JSON is parsed strictly; generated JSON
   uses the spec's field order. SQLite read responses copy and escape UTF-8 bytes
   without constructing post records or text Strings. Body trimming uses the reference whitespace set,
   and body length counts Unicode code points rather than UTF-16 code units.
 - HttpServer's default 200 idle connections and 30-second idle timeout are
-  increased to 8,192 and 75 seconds. Open connections are not otherwise capped
+  increased to 32,768 and 75 seconds. Open connections are not otherwise capped
   by HttpServer. TCP_NODELAY is enabled; the requested accept backlog is 4,096.
   The OS file-descriptor limit and memory still constrain actual connections.
 - Request bodies larger than 16 KiB return 413; they are outside the spec's
@@ -124,8 +124,8 @@ python3 bench/find-capacity.py --base-url http://SERVER:3000
 ```
 
 For local runs, keep k6 off the server CPU and its SMT sibling. This submission
-reached 250,250 VUs in a local two-minute hold following lower-load runs, but a
-fresh-start run at that load failed. This is not an official five-minute score.
+reached 101,500 VUs in a local five-minute k6 confirmation using the repository workload,
+one CPU and a 1,792 MiB service limit. This is a local measurement rather than an official score.
 
 MIT, under the repository's license.
 

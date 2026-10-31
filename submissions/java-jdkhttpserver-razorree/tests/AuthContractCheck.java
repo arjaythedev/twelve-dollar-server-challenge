@@ -12,8 +12,12 @@ public final class AuthContractCheck {
     private static final Base64.Encoder B64 = Base64.getUrlEncoder().withoutPadding();
 
     private static String token(String username, long expiry) throws Exception {
-        String header = B64.encodeToString("{\"alg\":\"HS256\"}".getBytes(StandardCharsets.UTF_8));
         String payload = "{\"sub\":\"1\",\"username\":\"" + username + "\",\"exp\":" + expiry + "}";
+        return signedPayload(payload);
+    }
+
+    private static String signedPayload(String payload) throws Exception {
+        String header = B64.encodeToString("{\"alg\":\"HS256\"}".getBytes(StandardCharsets.UTF_8));
         String signed = header + "." + B64.encodeToString(payload.getBytes(StandardCharsets.UTF_8));
         Mac reference = Mac.getInstance("HmacSHA256");
         reference.init(new SecretKeySpec(SECRET.getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
@@ -40,6 +44,9 @@ public final class AuthContractCheck {
         Auth auth = new Auth(SECRET);
         long now = Instant.now().getEpochSecond();
         String expired = token("expired", now - 1);
+        for (String claim : List.of("", ",\"exp\":null", ",\"exp\":\"tomorrow\"", ",\"exp\":true")) {
+            reject(auth, signedPayload("{\"sub\":\"1\",\"username\":\"test\"" + claim + "}"));
+        }
         try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
             List<Future<?>> tasks = new ArrayList<>();
             CyclicBarrier barrier = new CyclicBarrier(16);

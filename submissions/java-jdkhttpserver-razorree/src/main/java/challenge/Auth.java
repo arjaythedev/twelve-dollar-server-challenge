@@ -44,7 +44,7 @@ final class Auth {
             if (!(parsed instanceof Map<?, ?> p)) throw new IOException("JWT payload");
             payload = p;
             BigDecimal now = BigDecimal.valueOf(Instant.now().getEpochSecond());
-            if (payload.containsKey("exp") && (!(payload.get("exp") instanceof BigDecimal exp) || now.compareTo(exp) >= 0))
+            if (!(payload.get("exp") instanceof BigDecimal exp) || now.compareTo(exp) >= 0)
                 throw new IOException("JWT expired");
             if (payload.containsKey("nbf") && (!(payload.get("nbf") instanceof BigDecimal nbf) || now.compareTo(nbf) < 0))
                 throw new IOException("JWT not active");

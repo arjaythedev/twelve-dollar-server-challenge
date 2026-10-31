@@ -67,6 +67,8 @@ log "deps ready"
 
 # Stock SQLite, unpatched (rule 2).
 SQLITE_SRC="$SQLITE_DIR/sqlite3.c"
+# src/td_btree.c includes it and adds the /feed and /posts/:id reads on its B-tree layer.
+SQLITE_TU=src/td_btree.c
 
 # One SQLite connection, used by one thread at a time under the server's mutex.
 SQLITE_FLAGS="-DSQLITE_THREADSAFE=0 -DSQLITE_DEFAULT_MEMSTATUS=0 -DSQLITE_DQS=0 \
@@ -81,7 +83,7 @@ WARN="-Wall -Wextra -Wno-unused-parameter -Wno-objc-root-class"
 PROFDATA=llvm-profdata-$LLVM_MAJOR
 compile_all() { # compile_all <extra flags>
     rm -f "$BUILD"/*.o
-    $CC $OPT $SQLITE_FLAGS $1 -I"$SQLITE_DIR" -c "$SQLITE_SRC" -o "$BUILD/sqlite3.o"
+    $CC $OPT $SQLITE_FLAGS $1 -I"$SQLITE_DIR" -Isrc -c "$SQLITE_TU" -o "$BUILD/sqlite3.o"
     for f in src/*.m; do
         $CC $OPT $OBJC_FLAGS $INC $WARN $1 -c "$f" -o "$BUILD/$(basename "${f%.m}").o"
     done

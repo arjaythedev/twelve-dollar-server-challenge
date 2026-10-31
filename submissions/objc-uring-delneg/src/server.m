@@ -147,6 +147,7 @@ typedef struct {
     double ckHoldT;
     int ckRes[3];             // rc, frames in WAL, frames backfilled
     int listenFd;
+    uint64_t nobufs;          // receives that ended with ENOBUFS (TD_CKLOG reports them)
     TDAuth *auth;
     int64_t started, now;
     // batch
@@ -615,6 +616,7 @@ TD_INLINE void req_err(TDReq *r, int st, const char *msg) {
             buf_recycle(rs, bid);
             if (!c->recvArmed && c->live) arm_recv(self, c, slot);
         } else if (res == -ENOBUFS) {
+            nobufs++;
             if (c->live && !c->needRearm) { c->needRearm = true; rearm[nrearm++] = slot; }
         } else {
             if (c->live) [self drop:c slot:slot];
@@ -758,7 +760,7 @@ static double mono_s(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &
     if (ckRes[0] == SQLITE_OK && ckRes[2] >= 0) ckBackfilled = ckRes[2];
     if (ckHold) {
         if (store->walFrames != ckFrom) [self ckptRequest];   // frames were added during the pass: one more
-        else { ckHold = false; if (getenv("TD_CKLOG")) fprintf(stderr, "hold %.1f ms frames %d rc %d log %d ck %d\n", (mono_s() - ckHoldT) * 1e3, store->walFrames, ckRes[0], ckRes[1], ckRes[2]); }
+        else { ckHold = false; if (getenv("TD_CKLOG")) fprintf(stderr, "hold %.1f ms frames %d rc %d log %d ck %d nobufs %llu\n", (mono_s() - ckHoldT) * 1e3, store->walFrames, ckRes[0], ckRes[1], ckRes[2], (unsigned long long)nobufs); }
     }
     if (ckReq >= 0) [self ckptArmRead];
 }
@@ -788,7 +790,10 @@ int td_opt_batch = 128, td_opt_bwait = 1000, td_opt_bthresh = 8;   // --batch=N 
         now = time(NULL);
         for (int k = 0; k < nrings; k++) if (k == 0 || R[k].active) [self reap:k];
         lastReq = nreq;
-        if (TD_UNLIKELY(ckHold) && mono_s() - ckHoldT > 0.25) ckHold = false;   // child stuck: don't wait longer
+        if (TD_UNLIKELY(ckHold) && mono_s() - ckHoldT > 0.25) {   // child stuck: don't wait longer
+            ckHold = false;
+            if (getenv("TD_CKLOG")) fprintf(stderr, "hold timeout frames %d\n", store->walFrames);
+        }
         if (nreq && !ckHold) { [self flush]; [self ckptAfterFlush]; }
         if (nrearm) {
             for (uint32_t i = 0; i < nrearm; i++) {

@@ -1,4 +1,5 @@
 #include "store.h"
+#include "td_btree.h"
 #include <errno.h>
 #include <signal.h>
 #include <stdio.h>
@@ -13,8 +14,11 @@ long long td_opt_mmap = 0; // mmap_size bytes (--mmap=N); 0: page cache reads be
 #define POST_COLS "SELECT p.id, p.body, p.created_at, u.username, " \
     "(SELECT count(*) FROM likes l WHERE l.post_id = p.id) FROM posts p JOIN users u ON u.id = p.user_id "
 
+int td_opt_btree = 1;     // --btree=0: SQL statements for every read
+
 @implementation TDStore {
     sqlite3 *db;
+    bool bt;
     sqlite3_stmt *sFeedIds, *sFeedRange, *sLikeRange;
     TDBuf rows;
     sqlite3_stmt *sHealth, *sFeed, *sPost, *sCreate, *sLike, *sExists, *sBegin, *sCommit, *sRollback;
@@ -91,6 +95,8 @@ static void exec(sqlite3 *db, const char *sql) {
     sLike = prep(db, "INSERT INTO likes (user_id, post_id, created_at) SELECT ?1, ?2, ?3 "
                      "WHERE EXISTS (SELECT 1 FROM posts WHERE id = ?2) ON CONFLICT DO NOTHING");
     sExists = prep(db, "SELECT 1 FROM posts WHERE id = ?1");
+    bt = td_opt_btree && td_bt_init(db);
+    if (!bt) fprintf(stderr, "B-tree reads off: SQL for every read\n");
     sBegin = prep(db, "BEGIN");
     sCommit = prep(db, "COMMIT");
     sRollback = prep(db, "ROLLBACK");
@@ -174,6 +180,32 @@ static int fail(TDBuf *b) {
     return 503;
 }
 
+static void put_view(TDBuf *b, const TDPostView *v) {
+    td_buf_lit(b, "{\"id\":");
+    td_buf_int(b, v->id);
+    td_buf_lit(b, ",\"body\":\"");
+    td_buf_json_str(b, v->body, v->bodyLen);
+    td_buf_lit(b, "\",\"created_at\":\"");
+    td_buf_put(b, v->ca, v->caLen);
+    td_buf_lit(b, "\",\"author\":\"");
+    td_buf_json_str(b, v->au, v->auLen);
+    td_buf_lit(b, "\",\"like_count\":");
+    td_buf_int(b, v->likes);
+    td_buf_ch(b, '}');
+}
+typedef struct { TDBuf *b; uint32_t start; int n; } FeedSink;
+static void feed_sink(void *ctx, const TDPostView *v) {
+    FeedSink *f = ctx;
+    if (f->n++) td_buf_ch(f->b, ',');
+    put_view(f->b, v);
+}
+static void post_sink(void *ctx, const TDPostView *v) {
+    TDBuf *b = ctx;
+    td_buf_lit(b, "{\"post\":");
+    put_view(b, v);
+    td_buf_ch(b, '}');
+}
+
 // The general feed query: one correlated count per post.
 - (int)feedGeneral:(TDBuf *)b TD_DIRECT {
     sqlite3_stmt *s = sFeed;
@@ -197,6 +229,16 @@ typedef struct { uint32_t body, bodyLen, ca, caLen, au, auLen; int64_t likes; bo
 // counts by tallying one likes_post_id_idx range scan, then restores the index order.
 // All three statements run in the batch's transaction, so they see one snapshot.
 - (int)feed:(TDBuf *)b {
+    if (bt) {
+        FeedSink f = { b, b->len, 0 };
+        td_buf_lit(b, "{\"posts\":[");
+        if (td_bt_feed(feed_sink, &f) >= 0) { td_buf_lit(b, "]}"); return 200; }
+        b->len = f.start;
+    }
+    return [self feedSQL:b];
+}
+
+- (int)feedSQL:(TDBuf *)b TD_DIRECT {
     int64_t ids[20];
     int n = 0, rc;
     sqlite3_stmt *s = sFeedIds;
@@ -265,6 +307,13 @@ typedef struct { uint32_t body, bodyLen, ca, caLen, au, auLen; int64_t likes; bo
 }
 
 - (int)post:(int64_t)pid into:(TDBuf *)b {
+    if (bt) {
+        uint32_t start = b->len;
+        int r = td_bt_post(pid, post_sink, b);
+        if (r == 1) return 200;
+        b->len = start;
+        if (r == 0) { td_buf_lit(b, "{\"error\":\"post not found\"}"); return 404; }
+    }
     sqlite3_stmt *s = sPost;
     sqlite3_bind_int64(s, 1, pid);
     int rc = sqlite3_step(s);

@@ -14,6 +14,7 @@
 extern int td_opt_ckptproc, td_opt_hold;
 extern int td_opt_ckpt, td_opt_batch, td_opt_bwait, td_opt_bthresh;
 extern long long td_opt_mmap;
+extern int td_opt_btree;
 
 static int listen_on(const char *host, int port) {
     int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
@@ -46,6 +47,7 @@ int main(int argc, char **argv) {
         else if (!strncmp(argv[i], "--mmap=", 7)) td_opt_mmap = atoll(argv[i] + 7);
         else if (!strncmp(argv[i], "--ckptproc=", 11)) td_opt_ckptproc = atoi(argv[i] + 11);
         else if (!strncmp(argv[i], "--hold=", 7)) td_opt_hold = atoi(argv[i] + 7);
+        else if (!strncmp(argv[i], "--btree=", 8)) td_opt_btree = atoi(argv[i] + 8);
     signal(SIGPIPE, SIG_IGN);
 
     // Accepted sockets live in io_uring fixed-file tables, not the fd table.

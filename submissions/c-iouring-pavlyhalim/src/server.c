@@ -194,8 +194,9 @@ static void arm_recv(struct conn *c) {
  * per ring, the kernel spreads connections over all of them and every ring needs its own system
  * calls each batch). A ring's accept is cancelled ACCEPT_STOP slots before its direct-descriptor
  * table is full: an accept that finds the table full makes the kernel reset that client. */
-#define ACCEPT_NEXT 2048
-#define ACCEPT_STOP 256
+#define ACCEPT_NEXT 8192
+#define ACCEPT_STOP 4096 /* the kernel keeps accepting while the loop is busy or stalled: 4096 covers
+                          * ~0.8 s at 5,000 new connections a second, for 32k of 523k slots */
 
 static int LFD = -1;
 

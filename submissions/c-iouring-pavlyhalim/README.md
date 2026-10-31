@@ -21,19 +21,23 @@ Every user is a keep-alive connection, so the connection count is what the serve
   the process's descriptor table, so `LimitNOFILE=65535` does not cap them. A table cannot be larger
   than that limit, so the server makes 8 rings of 65,471 slots (over 500,000 connections).
 - One listening socket. Its multishot accept is armed on the ring being filled, and also on the next
-  ring once the first is within 2,048 slots of full, so rings fill in order and only as many are
+  ring once the first is within 8,192 slots of full, so rings fill in order and only as many are
   busy as the connection count needs (2 at 120,000 users instead of 8). Every busy ring costs its
   own system calls each batch; with one `SO_REUSEPORT` listener per ring the kernel spread
-  connections over all eight. A ring's accept is cancelled 256 slots before its table is full,
-  because an accept that finds the table full makes the kernel reset that client.
+  connections over all eight. A ring's accept is cancelled 4,096 slots before its table is full,
+  because an accept that finds the table full makes the kernel reset that client, and the kernel
+  keeps accepting on its own while the loop is busy (a 1 s stall at 1,700 new connections a second
+  overran a 256-slot margin in a test).
 - Each connection has one multishot receive into a shared provided-buffer ring (2,048 × 2 KB per
   ring); an idle connection holds no buffer and no heap, only a 40-byte record. The kernel's own
   per-socket memory (~4.3 KB on 6.8, most of it not charged to the process) is the real ceiling on
   a 2 GB box, and the 40 bytes are what the server adds to it.
 - Ring 0 is `SINGLE_ISSUER | DEFER_TASKRUN` and is the ring the loop waits on (a timed
   `io_uring_enter`: 64 completions or 2 ms when busy, up to 1 s when idle). The other rings use
-  ordinary task work and signal an eventfd that ring 0 polls, so a completion anywhere ends the
-  wait and idle rings cost nothing. The eventfd is never read back: a multishot poll posts one
+  ordinary task work, so the kernel posts their completions into their queues while the thread is
+  in that wait, and they are read straight from shared memory without entering those rings (4.7
+  system calls per batch saved with all rings busy); each signals an eventfd that ring 0 polls, so
+  a completion anywhere ends the wait. The eventfd is never read back: a multishot poll posts one
   completion per wake-up, so draining the counter was 0.3 system calls per request for nothing.
   (With `DEFER_TASKRUN` on every ring, a completion on a ring
   that is not being entered stays unposted and the loop sleeps through it: measured as a 100–500 ms
@@ -160,15 +164,24 @@ Ubuntu 24.04 arm64 VM (Lima, kernel 6.8.0-147), server pinned to one vCPU under 
 over loopback. Numbers are only comparable with each other; loopback charges part of the client's
 TCP work to the server, and the vCPU is not the benchmark's.
 
-| Users | Ramp / hold | Requests | Errors | p95 | p99 | max | Server CPU per request | Process RSS | cgroup peak |
-|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| 20,000 | 60 s / 120 s | 328k | 0 | 3.2 ms | 4.7 ms | 632 ms | 31 µs | — | 118 MB |
-| 120,000 | 90 s / 120 s | 2.16M | 0 | 6.1 ms | 14.0 ms | 45 ms | 17 µs | 73 MB | 304 MB |
-| 220,000 | ramp only | 1.3M | 0 | 9.2 ms | 23 ms | — | ~19 µs | 83 MB | 480 MB |
+Load follows the `bench/load.js` user model (think times shortened in the throughput rows).
+CPU per request is the server cgroup's CPU time divided by requests; system calls are counted with
+kernel tracepoints on the request thread.
 
-The 220,000 row is the point where the load generator ran the 4 GB VM out of memory (both ends of
-440,000 sockets live in it); the server itself was at 21,800 requests/s with ~118 requests per
-wake-up and a longest turn of 20 ms.
+| Test | Requests | Errors | p95 | p99 | CPU per request | Server CPU | Memory (cgroup / process) |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 120,000 users, 5-minute hold (90 s ramp, 30 s ramp-down) | 4.62M | 0 | 4.9 ms | 290 ms¹ | 13.2 µs | — | 290 MB / 59 MB |
+| 120,000 users, 2-minute hold, 3 runs | 2.16M each | 0 | 4.5 ms | 12–14 ms | 12.95 µs (median) | 16–18% | 285 MB / 57 MB |
+| 120,000 users at 20,000 requests/s | 3.38M | 0 | 5.2 ms | 15 ms | 12.6 µs | 24% | 299 MB / 57 MB |
+| 120,000 users at 30,000 requests/s | 5.04M | 0 | 7.4 ms | 30 ms | 12.2 µs | 37% | 311 MB / 58 MB |
+| 120,000 users at 40,000 requests/s | 6.66M | 0 | 11.8 ms | 25 ms | 12.1 µs | 50% | 330 MB / 59 MB |
 
-At 120,000 users the loop handled ~65 requests per wake-up and its longest turn was 18.5 ms; the
-cgroup grows by about 1.9 KB per connection, nearly all of it the kernel's per-socket objects.
+¹ one 0.9 s pause of the whole VM (the load generator stalled at the same moment); the other runs'
+p99 is 12–30 ms.
+
+- System calls per request on the request thread: 0.21 (`io_uring_enter` 0.05, WAL `pwrite` 0.16).
+- Memory: the cgroup grows by about 2.1 KB per connection, nearly all of it the kernel's socket
+  objects; the server's own heap stays near 60 MB.
+- Above 40,000 requests/s the two load-generator vCPUs fell behind (the server was at 56% with
+  requests no longer arriving), and above ~180,000 users the 4 GB VM runs out of memory holding
+  both ends of every connection, so neither limit was reached here.

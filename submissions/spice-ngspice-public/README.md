@@ -9,7 +9,8 @@ comparator, a ring-oscillator clock and a network card / storage controller (C).
 - **Language:** Verilog (the chip), SPICE netlist (the board), C (the network card / storage controller)
 - **Simulator:** ngspice 42 (Ubuntu 24.04 package) with XSPICE. The chip and the network card run as
   `d_cosim` elements; the chip is compiled by Verilator 5.020.
-- **Database:** SQLite through the library (3.45, Ubuntu 24.04), one connection
+- **Database:** SQLite (3.45, Ubuntu 24.04), the C library linked into the network card (`nic.so`), one
+  connection. Not part of the chip.
 - **Server:** the network card inside ngspice listens on the socket (epoll); no other process
 - **Mode:** **behind Nginx** (`bench/nginx.conf`) on `127.0.0.1:3000`. Upstream connections stay open until
   Nginx closes them.
@@ -21,7 +22,7 @@ comparator, a ring-oscillator clock and a network card / storage controller (C).
 | `chip/*.v` (~800 lines of Verilog) | ngspice, as a `d_cosim` element (the Verilog compiled by Verilator and loaded into the simulator) | Parses the raw HTTP request: request line, path, query, and the `Authorization` header (matched case-insensitively). Does the routing and the post id checks. Checks `Bearer`. Splits the JWT and base64url-decodes it. Validates the JSON of the header and payload. Computes **HMAC-SHA256** (a SHA-256 core at one round per clock, with the key from `JWT_SECRET`). Checks `alg`, `exp` (required, against the time it is given), `sub` and `username`. Validates the body JSON fully (a streaming parser with a 64-deep stack). Decodes it, including `\u` escapes and surrogate pairs to UTF-8. Trims it and counts characters. Writes the SQL text, quoting `'`. Then turns SQLite's raw rows into the JSON response, escaping `"`, `\` and control characters. Picks every status code and error. Writes the whole HTTP/1.1 response, Content-Length included. |
 | `board/board.cir.in` (SPICE netlist) | ngspice, as XSPICE digital primitives | The 100 MHz clock is a ring oscillator: one NAND gate with a 5 ns delay fed back to itself. **The signature compare is 12 gates** (8 XOR, an 8-input OR and an accumulate-and-clear flip-flop). The chip streams the HMAC tag and the token's signature through it a byte pair per board clock, and its output bit decides whether the token is valid. A voltage source ramping up at 5 ns, through an ADC bridge, is the power-on that starts the clock: the only analog part. |
 | `nic/nic.c` (C) | ngspice, as a second `d_cosim` element on the board | The network card and storage controller, in place of the Bash wire of the first version. It owns the listening socket. It frames each request: the lines up to the blank line, then `Content-Length` bytes. It clocks the bytes into the chip's pins, 8 a clock, and reads the chip's output pins back into bytes. It runs the SQL the chip wrote on SQLite and gives the chip the rows as `sqlite3 -ascii` prints them, plus the error text and an exit code. It writes the chip's response to the socket. Its only branch on content is the first byte of the chip's answer: `!` means the chip answered on its own, `?` means run this SQL first. Between jobs it pulses the chip's `rst` pin. |
-| SQLite | inside the same process (the library) | Runs the statements. |
+| SQLite | the SQLite C library, linked into `nic.so`: on the board, **not in the chip** | Runs the statements the chip wrote. The chip only sends SQL text out on its pins and reads SQLite's rows back in on its pins. |
 
 The circuit's outputs decide every response. A request that needs the database is two jobs for the chip
 (phase A: request → SQL; phase B: SQLite's rows → HTTP response). Errors (401, 400, 404) come from phase A

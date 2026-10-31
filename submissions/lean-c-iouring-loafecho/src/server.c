@@ -97,6 +97,63 @@ static inline void reserve(char **buf, size_t *cap, size_t need) {
     *cap = n;
 }
 
+/* Response buffers: a shared free list of POOL_BUF-byte buffers instead of a
+ * malloc and a free per response. A connection's out buffer starts as a pool
+ * buffer; responses that outgrow it in one batch (pipelining) realloc it into
+ * a plain heap buffer, which is free()d after its send. So cap == POOL_BUF
+ * means "goes back to the pool" (reserve() never yields that size from any
+ * other start). The free list only ever holds buffers no connection uses, so
+ * it grows to the peak number of responses in flight at once (<= POOL_MAX
+ * kept); an idle connection still holds no buffer.
+ * Not a cache (rule 5): a buffer from pool_get() is written from offset 0 by
+ * the next response before anything is read from it, and nothing ever looks
+ * up or reuses what a previous response left in it. */
+#define POOL_BUF 8192
+#define POOL_MAX 1024
+static char    *pool[POOL_MAX];
+static unsigned npool;
+static unsigned long pool_out, pool_out_hw, pool_free_hw, pool_mallocs, pool_frees;
+
+static inline char *pool_get(void) {
+    if (++pool_out > pool_out_hw) pool_out_hw = pool_out;
+    if (npool) return pool[--npool];
+    pool_mallocs++;
+    return xrealloc(NULL, POOL_BUF);
+}
+
+static inline void pool_put(char *p) {
+    pool_out--;
+    if (npool < POOL_MAX) {
+        pool[npool++] = p;
+        if (npool > pool_free_hw) pool_free_hw = npool;
+    } else { pool_frees++; free(p); }
+}
+
+static void pool_stats(const char *who) {
+    fprintf(stderr, "%spool: %u free (high-water %lu), %lu in use (high-water %lu), "
+            "%lu mallocs, %lu frees past POOL_MAX\n",
+            who, npool, pool_free_hw, pool_out, pool_out_hw, pool_mallocs, pool_frees);
+}
+
+/* Debug: with POOL_STATS set, SIGUSR1 prints the pool counters to stderr. */
+static volatile sig_atomic_t pool_stats_req;
+static void on_sigusr1(int sig) { (void)sig; pool_stats_req = 1; }
+
+/* Give back an out/snd buffer: a pool buffer to the pool, any other to free(). */
+static inline void buf_release(char *p, size_t cap) {
+    if (cap == POOL_BUF) pool_put(p);
+    else free(p);
+}
+
+/* reserve() for c->out: an empty out takes a pool buffer; a pool buffer that
+ * must grow leaves the pool (realloc'd to >= 2 * POOL_BUF, free()d later). */
+static inline void out_reserve(conn_t *c, size_t need) {
+    if (need <= c->out_cap) return;
+    if (!c->out && need <= POOL_BUF) { c->out = pool_get(); c->out_cap = POOL_BUF; return; }
+    if (c->out_cap == POOL_BUF) pool_out--;
+    reserve(&c->out, &c->out_cap, need);
+}
+
 static inline void mark_dirty(uint32_t slot) {
     conn_t *c = &conns[slot];
     if (!c->dirty) { c->dirty = 1; dirty[ndirty++] = slot; }
@@ -131,7 +188,7 @@ static const char *status_line(int st, size_t *n) {
 /* Append a complete response to c->out. keep10: HTTP/1.0 keep-alive. */
 static void put_response(conn_t *c, int st, const char *body, size_t blen, int close, int keep10) {
     size_t sl; const char *s = status_line(st, &sl);
-    reserve(&c->out, &c->out_cap, c->out_len + sl + 128 + blen);
+    out_reserve(c, c->out_len + sl + 128 + blen);
     char *p = c->out + c->out_len;
     memcpy(p, s, sl); p += sl;
     memcpy(p, LIT("Content-Type: application/json\r\nContent-Length: ")); p += sizeof("Content-Type: application/json\r\nContent-Length: ") - 1;
@@ -173,12 +230,15 @@ static void close_conn(uint32_t slot) {
     io_uring_sqe_set_data64(s, mkud(UD_CLOSE, slot, c->gen));
     /* A closed slot keeps no heap: drop the request and response buffers.
      * The send buffer goes too unless a send may still be reading it; then
-     * the next accept on this slot frees it. */
+     * the next accept on this slot releases it. */
     free(c->in);  c->in = NULL;  c->in_cap = 0;
     c->in_len = 0; c->need = 0;
-    free(c->out); c->out = NULL; c->out_cap = 0;
-    c->out_len = 0;
-    if (!c->sending) { free(c->snd); c->snd = NULL; c->snd_cap = 0; c->snd_len = c->snd_off = 0; }
+    if (c->out) buf_release(c->out, c->out_cap);
+    c->out = NULL; c->out_cap = 0; c->out_len = 0;
+    if (!c->sending) {
+        if (c->snd) buf_release(c->snd, c->snd_cap);
+        c->snd = NULL; c->snd_cap = 0; c->snd_len = c->snd_off = 0;
+    }
 }
 
 static void arm_recv(uint32_t slot) {
@@ -211,20 +271,21 @@ static void post_send(uint32_t slot) {
 
 /* Called only at the end of a batch, after db_batch_commit().
  * The out buffer becomes the send buffer and out goes back to empty (no
- * allocation); the send completion frees it. So an idle connection holds no
- * heap beyond its conn_t, and a response costs one malloc and one free. */
+ * allocation); the send completion gives it back to the pool. So an idle
+ * connection holds no heap beyond its conn_t, and a response that fits one
+ * pool buffer costs no malloc and no free. */
 static void flush_conn(uint32_t slot) {
     conn_t *c = &conns[slot];
     c->dirty = 0;
     if (!c->open || c->sending) return;
     if (c->out_len) {
-        if (c->snd) free(c->snd);                 /* not sending: nothing reads it */
+        if (c->snd) buf_release(c->snd, c->snd_cap);   /* not sending: nothing reads it */
         c->snd = c->out; c->snd_cap = c->out_cap; c->snd_len = c->out_len; c->snd_off = 0;
         c->out = NULL; c->out_cap = 0; c->out_len = 0;
         c->sending = 1;
         post_send(slot);
     } else {
-        if (c->out) { free(c->out); c->out = NULL; c->out_cap = 0; }
+        if (c->out) { buf_release(c->out, c->out_cap); c->out = NULL; c->out_cap = 0; }
         if (c->close_after) close_conn(slot);
     }
 }
@@ -490,7 +551,7 @@ static long parse_one(uint32_t slot, conn_t *c, const char *buf, size_t len) {
     if (len < total) {
         c->need = total;
         if (expect_cont && !c->cont_sent && !http10) {
-            reserve(&c->out, &c->out_cap, c->out_len + 32);
+            out_reserve(c, c->out_len + 32);
             memcpy(c->out + c->out_len, LIT("HTTP/1.1 100 Continue\r\n\r\n"));
             c->out_len += sizeof("HTTP/1.1 100 Continue\r\n\r\n") - 1;
             c->cont_sent = 1;
@@ -576,7 +637,7 @@ static void on_cqe(struct io_uring_cqe *cqe) {
                 c->in_len = 0; c->need = 0; c->out_len = 0; c->snd_len = c->snd_off = 0;
                 /* A send still in flight when the previous connection on this
                  * slot closed left its buffer; that send is finished now. */
-                if (c->snd) { free(c->snd); c->snd = NULL; c->snd_cap = 0; }
+                if (c->snd) { buf_release(c->snd, c->snd_cap); c->snd = NULL; c->snd_cap = 0; }
                 if (!use_bufring && !c->rbuf) c->rbuf = xrealloc(NULL, RECV_BUF_SZ);
                 arm_recv((uint32_t)res);
             }
@@ -621,7 +682,7 @@ static void on_cqe(struct io_uring_cqe *cqe) {
         c->snd_off += (size_t)res;
         if (c->snd_off < c->snd_len) { post_send(slot); return; }
         c->sending = 0;
-        free(c->snd); c->snd = NULL; c->snd_cap = 0; c->snd_len = c->snd_off = 0;
+        buf_release(c->snd, c->snd_cap); c->snd = NULL; c->snd_cap = 0; c->snd_len = c->snd_off = 0;
         mark_dirty(slot);
         return;
     }
@@ -1043,7 +1104,8 @@ static int pgo_train(void) {
             conn_t *c = &conns[dirty[i]];
             c->dirty = 0;
             tr_count(&t, c->out, c->out_len);
-            free(c->out); c->out = NULL; c->out_cap = 0; c->out_len = 0;   /* freed after its send */
+            if (c->out) buf_release(c->out, c->out_cap);                /* released after its send */
+            c->out = NULL; c->out_cap = 0; c->out_len = 0;
             if (c->close_after) {
                 c->close_after = 0; c->in_len = 0; c->need = 0; c->cont_sent = 0;
                 c->gen = (c->gen + 1) & 0xffffff;
@@ -1077,6 +1139,7 @@ static int pgo_train(void) {
     }
     printf("pgo-train: %lu feeds, %lu posts, %lu inserts, %lu likes, %lu parses, %lu jwt\n",
            t.feeds, t.posts, t.inserts, t.likes, t.parses, t.jwt);
+    pool_stats("pgo-train: ");
     ok = 1;
 done:
     if (db) { db_close(db); db = NULL; }
@@ -1102,6 +1165,12 @@ int main(int argc, char **argv) {
     if (!port || !*port) port = "80";
 
     signal(SIGPIPE, SIG_IGN);
+    if (getenv("POOL_STATS")) {
+        struct sigaction sa;
+        memset(&sa, 0, sizeof sa);
+        sa.sa_handler = on_sigusr1;
+        sigaction(SIGUSR1, &sa, NULL);
+    }
     clock_gettime(CLOCK_MONOTONIC, &t_start);
     jwt_init_tables();
     hmac_sha256_setkey(&jwt_key, secret, strlen(secret));
@@ -1181,7 +1250,7 @@ int main(int argc, char **argv) {
                 c->out_len = w->off;
                 put_response(c, 500, E_INTERNAL, sizeof E_INTERNAL - 1, w->close, 0);
                 if (tail) {
-                    reserve(&c->out, &c->out_cap, c->out_len + tail);
+                    out_reserve(c, c->out_len + tail);
                     memcpy(c->out + c->out_len, saved, tail);
                     c->out_len += tail;
                     free(saved);
@@ -1194,5 +1263,6 @@ int main(int argc, char **argv) {
         io_uring_submit(&ring);
         maybe_print_plan(last_plan, sizeof last_plan);
         db_maybe_checkpoint(db, 1000);
+        if (pool_stats_req) { pool_stats_req = 0; pool_stats(""); }
     }
 }

@@ -1,14 +1,14 @@
-// A minimal feed API: net/http + database/sql + mattn/go-sqlite3.
+// A minimal feed API: net/http parser + direct SQLite (cgo).
 package main
 
 import (
 	"bufio"
-	"context"
+	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
 	"net"
@@ -18,17 +18,16 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
-
-	_ "github.com/mattn/go-sqlite3"
 )
 
-type post struct {
+type postRow struct {
 	ID        int64
-	Body      string
-	CreatedAt string
-	Author    string
+	Body      []byte
+	CreatedAt []byte
+	Author    []byte
 	LikeCount int64
 }
 
@@ -49,27 +48,72 @@ type writeJob struct {
 }
 
 type writeResult struct {
-	post     post
+	post     postRow
 	already  bool
 	notFound bool
 	failed   bool
 }
 
 type app struct {
-	readDB  *sql.DB
-	writeDB *sql.DB
 	secret  []byte
 	started time.Time
 
-	feed    *sql.Stmt
-	getPost *sql.Stmt
-
-	insertPost *sql.Stmt
-	postExists *sql.Stmt
-	insertLike *sql.Stmt
+	reads chan *readConn
+	write *writeConn
 
 	writeCh     chan *writeJob
 	batchWindow time.Duration
+
+	readsGroup readGroup
+	readGen    atomic.Uint64
+	readWindow time.Duration
+}
+
+// readCall is one in-flight SQLite read. Concurrent requests for the same key
+// wait for the same call; the call is removed as soon as it finishes, so this
+// is request coalescing, not a cross-request cache.
+type readResp struct {
+	status int
+	body   []byte
+	packet []byte
+}
+
+type readCall struct {
+	done chan struct{}
+	resp readResp
+}
+
+type readGroup struct {
+	mu sync.Mutex
+	m  map[string]*readCall
+}
+
+func (g *readGroup) do(key string, window time.Duration, fn func() readResp) readResp {
+	g.mu.Lock()
+	if c, ok := g.m[key]; ok {
+		g.mu.Unlock()
+		<-c.done
+		return c.resp
+	}
+	c := &readCall{done: make(chan struct{})}
+	if g.m == nil {
+		g.m = make(map[string]*readCall)
+	}
+	g.m[key] = c
+	g.mu.Unlock()
+
+	// Give concurrent requests a short window to join this read. On one vCPU
+	// the leader would otherwise finish before another goroutine gets to run.
+	if window > 0 {
+		time.Sleep(window)
+	}
+	c.resp = fn()
+
+	g.mu.Lock()
+	delete(g.m, key)
+	g.mu.Unlock()
+	close(c.done)
+	return c.resp
 }
 
 // Reused by every response; the buffer is only returned to the pool after the
@@ -90,25 +134,33 @@ func main() {
 	if port == "" {
 		port = "3000"
 	}
+	path := os.Getenv("SQLITE_PATH")
 
-	dsn := "file:" + os.Getenv("SQLITE_PATH") +
-		"?_busy_timeout=5000&_journal_mode=WAL&_synchronous=NORMAL" +
-		"&_cache_size=-16384&_mmap_size=268435456"
-
-	readDB, err := sql.Open("sqlite3", dsn)
+	readConns := 2
+	if v := os.Getenv("READ_CONNS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			readConns = n
+		}
+	}
+	reads := make(chan *readConn, readConns)
+	for range readConns {
+		rc, err := newReadConn(path)
+		if err != nil {
+			log.Fatal(err)
+		}
+		reads <- rc
+	}
+	wc, err := newWriteConn(path)
 	if err != nil {
 		log.Fatal(err)
 	}
-	readDB.SetMaxOpenConns(4)
-	readDB.SetMaxIdleConns(4)
 
-	writeDB, err := sql.Open("sqlite3", dsn)
-	if err != nil {
-		log.Fatal(err)
+	windowUS := 500
+	if v := os.Getenv("READ_BATCH_US"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			windowUS = n
+		}
 	}
-	writeDB.SetMaxOpenConns(1)
-	writeDB.SetMaxIdleConns(1)
-
 	batchMS := 100
 	if v := os.Getenv("WRITE_BATCH_MS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
@@ -117,45 +169,14 @@ func main() {
 	}
 
 	a := &app{
-		readDB:      readDB,
-		writeDB:     writeDB,
 		secret:      []byte(os.Getenv("JWT_SECRET")),
 		started:     time.Now(),
+		reads:       reads,
+		write:       wc,
 		writeCh:     make(chan *writeJob, 256),
 		batchWindow: time.Duration(batchMS) * time.Millisecond,
+		readWindow:  time.Duration(windowUS) * time.Microsecond,
 	}
-	a.feed, err = readDB.Prepare(`
-		SELECT p.id, p.body, p.created_at, u.username,
-		       (SELECT count(*) FROM likes l WHERE l.post_id = p.id)
-		  FROM posts p JOIN users u ON u.id = p.user_id
-		 ORDER BY p.created_at DESC, p.id DESC
-		 LIMIT 20`)
-	if err != nil {
-		log.Fatal(err)
-	}
-	a.getPost, err = readDB.Prepare(`
-		SELECT p.id, p.body, p.created_at, u.username,
-		       (SELECT count(*) FROM likes l WHERE l.post_id = p.id)
-		  FROM posts p JOIN users u ON u.id = p.user_id
-		 WHERE p.id = ?`)
-	if err != nil {
-		log.Fatal(err)
-	}
-	a.insertPost, err = writeDB.Prepare(
-		"INSERT INTO posts (user_id, body) VALUES (?, ?) RETURNING id, created_at")
-	if err != nil {
-		log.Fatal(err)
-	}
-	a.postExists, err = writeDB.Prepare("SELECT 1 FROM posts WHERE id = ?")
-	if err != nil {
-		log.Fatal(err)
-	}
-	a.insertLike, err = writeDB.Prepare(
-		"INSERT INTO likes (user_id, post_id) VALUES (?, ?) ON CONFLICT (user_id, post_id) DO NOTHING")
-	if err != nil {
-		log.Fatal(err)
-	}
-
 	go a.writeLoop()
 
 	// Opt-in profiling listener; unused in the benchmark runs.
@@ -180,40 +201,42 @@ func main() {
 	}
 }
 
-// serveConn is net/http's connection loop with a 6 KiB write buffer and a
-// 2 KiB read buffer. The stock server hardcodes 4 KiB for writes
-// (newBufioWriterSize(..., 4<<10)), which forces the 5 KiB feed response into
-// two write syscalls.
+// serveConn is a bufio connection loop. Coalesced reads arrive as a complete
+// immutable packet and are written directly, so the per-connection write buffer
+// only has to hold the small write/error responses.
 func (a *app) serveConn(c net.Conn) {
 	defer c.Close()
 	if tc, ok := c.(*net.TCPConn); ok {
 		tc.SetNoDelay(true)
 	}
 	br := bufio.NewReaderSize(c, 2048)
-	bw := bufio.NewWriterSize(c, 6144)
+	bw := bufio.NewWriterSize(c, 1024)
 	for {
-		req, err := http.ReadRequest(br)
+		req, err := readReq(br)
 		if err != nil {
 			return
 		}
 		resp := &capture{status: http.StatusOK}
 		a.ServeHTTP(resp, req)
-		if req.Body != nil {
-			req.Body.Close()
-		}
-		bw.WriteString("HTTP/1.1 ")
-		bw.WriteString(strconv.Itoa(resp.status))
-		bw.WriteByte(' ')
-		bw.WriteString(http.StatusText(resp.status))
-		bw.WriteString("\r\nContent-Type: application/json\r\nContent-Length: ")
-		bw.WriteString(strconv.Itoa(len(resp.body)))
-		if req.Close {
-			bw.WriteString("\r\nConnection: close")
-		}
-		bw.WriteString("\r\n\r\n")
-		_, werr := bw.Write(resp.body)
-		if werr == nil {
-			werr = bw.Flush()
+		var werr error
+		if resp.packet != nil && !req.close {
+			// Packet already contains the status line, headers and body.
+			_, werr = c.Write(resp.packet)
+		} else {
+			bw.WriteString("HTTP/1.1 ")
+			bw.WriteString(strconv.Itoa(resp.status))
+			bw.WriteByte(' ')
+			bw.WriteString(http.StatusText(resp.status))
+			bw.WriteString("\r\nContent-Type: application/json\r\nContent-Length: ")
+			bw.WriteString(strconv.Itoa(len(resp.body)))
+			if req.close {
+				bw.WriteString("\r\nConnection: close")
+			}
+			bw.WriteString("\r\n\r\n")
+			_, werr = bw.Write(resp.body)
+			if werr == nil {
+				werr = bw.Flush()
+			}
 		}
 		if resp.buf != nil {
 			bufPool.Put(resp.buf)
@@ -222,7 +245,7 @@ func (a *app) serveConn(c net.Conn) {
 		if werr != nil {
 			return
 		}
-		if req.Close {
+		if req.close {
 			return
 		}
 	}
@@ -231,6 +254,7 @@ func (a *app) serveConn(c net.Conn) {
 type capture struct {
 	status int
 	body   []byte
+	packet []byte
 	buf    *[]byte
 	hdr    http.Header
 }
@@ -284,14 +308,11 @@ func (a *app) writeLoop() {
 }
 
 func (a *app) runBatch(jobs []*writeJob) {
-	tx, err := a.writeDB.Begin()
-	if err != nil {
+	w := a.write
+	if err := w.db.exec("BEGIN IMMEDIATE"); err != nil {
 		failJobs(jobs)
 		return
 	}
-	insertPost := tx.Stmt(a.insertPost)
-	postExists := tx.Stmt(a.postExists)
-	insertLike := tx.Stmt(a.insertLike)
 
 	results := make([]writeResult, len(jobs))
 	ok := true
@@ -299,47 +320,84 @@ run:
 	for i, j := range jobs {
 		switch j.kind {
 		case writeCreate:
-			var p post
-			p.Body, p.Author = j.body, j.username
-			if err := insertPost.QueryRow(j.userID, j.body).Scan(&p.ID, &p.CreatedAt); err != nil {
+			st := w.insertPost
+			st.reset()
+			if err := st.bindInt64(1, j.userID); err != nil {
 				ok = false
 				break run
 			}
-			results[i].post = p
+			if err := st.bindText(2, j.body); err != nil {
+				ok = false
+				break run
+			}
+			row, err := st.step()
+			if err != nil || !row {
+				ok = false
+				break run
+			}
+			id := st.columnInt64(0)
+			created := append([]byte(nil), st.columnText(1)...)
+			if row, err = st.step(); err != nil || row {
+				ok = false
+				break run
+			}
+			st.reset()
+			results[i].post = postRow{
+				ID: id, Body: []byte(j.body), CreatedAt: created, Author: []byte(j.username),
+			}
 		case writeLike:
-			var one int
-			err := postExists.QueryRow(j.postID).Scan(&one)
-			if err == sql.ErrNoRows {
+			ex := w.postExists
+			ex.reset()
+			if err := ex.bindInt64(1, j.postID); err != nil {
+				ok = false
+				break run
+			}
+			row, err := ex.step()
+			if err != nil {
+				ok = false
+				break run
+			}
+			if !row {
+				ex.reset()
 				results[i].notFound = true
 				continue
 			}
-			if err != nil {
+			ex.reset()
+
+			st := w.insertLike
+			st.reset()
+			if err := st.bindInt64(1, j.userID); err != nil {
 				ok = false
 				break run
 			}
-			res, err := insertLike.Exec(j.userID, j.postID)
-			if err != nil {
+			if err := st.bindInt64(2, j.postID); err != nil {
 				ok = false
 				break run
 			}
-			n, err := res.RowsAffected()
-			if err != nil {
+			row, err = st.step()
+			if err != nil || row {
 				ok = false
 				break run
 			}
-			results[i].already = n == 0
+			results[i].already = st.changes() == 0
+			st.reset()
 		}
 	}
 
 	if ok {
-		err = tx.Commit()
-	} else {
-		tx.Rollback()
+		ok = w.db.exec("COMMIT") == nil
 	}
-	if !ok || err != nil {
+	if !ok {
+		w.insertPost.reset()
+		w.postExists.reset()
+		w.insertLike.reset()
+		w.db.exec("ROLLBACK")
 		failJobs(jobs)
 		return
 	}
+	// Do not let a request that starts after this commit join a read that
+	// started before it. The generation is part of every coalescing key.
+	a.readGen.Add(1)
 	for i, j := range jobs {
 		j.reply <- results[i]
 	}
@@ -351,8 +409,83 @@ func failJobs(jobs []*writeJob) {
 	}
 }
 
-func (a *app) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	switch p := r.URL.Path; p {
+type httpReq struct {
+	path  string
+	auth  string
+	body  []byte
+	close bool
+}
+
+func readReq(br *bufio.Reader) (*httpReq, error) {
+	line, err := br.ReadSlice('\n')
+	if err != nil {
+		return nil, err
+	}
+	line = bytes.TrimSuffix(line, []byte("\n"))
+	line = bytes.TrimSuffix(line, []byte("\r"))
+	sp1 := bytes.IndexByte(line, ' ')
+	if sp1 < 0 {
+		return nil, errBadRequest
+	}
+	rest := line[sp1+1:]
+	sp2 := bytes.IndexByte(rest, ' ')
+	if sp2 < 0 {
+		return nil, errBadRequest
+	}
+	target := rest[:sp2]
+	if q := bytes.IndexByte(target, '?'); q >= 0 {
+		target = target[:q]
+	}
+	version := rest[sp2+1:]
+	req := &httpReq{
+		path:  string(target),
+		close: bytes.Equal(version, []byte("HTTP/1.0")),
+	}
+	clen := 0
+	for {
+		l, err := br.ReadSlice('\n')
+		if err != nil {
+			return nil, err
+		}
+		l = bytes.TrimSuffix(l, []byte("\n"))
+		l = bytes.TrimSuffix(l, []byte("\r"))
+		if len(l) == 0 {
+			break
+		}
+		colon := bytes.IndexByte(l, ':')
+		if colon < 0 {
+			continue
+		}
+		name := bytes.TrimSpace(l[:colon])
+		value := bytes.TrimSpace(l[colon+1:])
+		switch {
+		case bytes.EqualFold(name, []byte("authorization")):
+			req.auth = string(value)
+		case bytes.EqualFold(name, []byte("content-length")):
+			n, err := strconv.Atoi(string(value))
+			if err != nil || n < 0 {
+				return nil, errBadRequest
+			}
+			clen = n
+		case bytes.EqualFold(name, []byte("connection")):
+			if bytes.Contains(bytes.ToLower(value), []byte("close")) {
+				req.close = true
+			}
+		}
+	}
+	if clen > 0 {
+		req.body = make([]byte, clen)
+		if _, err := io.ReadFull(br, req.body); err != nil {
+			return nil, err
+		}
+	}
+	return req, nil
+}
+
+var errBadRequest = errors.New("bad request")
+
+func (a *app) ServeHTTP(w http.ResponseWriter, r *httpReq) {
+	switch p := r.path; p {
 	case "/health":
 		a.health(w, r)
 	case "/feed":
@@ -374,15 +507,19 @@ func (a *app) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (a *app) health(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
-	defer cancel()
-	var one int
+func (a *app) health(w http.ResponseWriter, r *httpReq) {
+	rc := <-a.reads
+	st := rc.health
+	st.reset()
+	row, err := st.step()
+	st.reset()
+	a.reads <- rc
+
 	bp := bufPool.Get().(*[]byte)
 	b := (*bp)[:0]
-	if err := a.readDB.QueryRowContext(ctx, "SELECT 1").Scan(&one); err != nil {
+	if err != nil || !row {
 		b = append(b, `{"status":"degraded","db":"unreachable","error":`...)
-		b = appendString(b, err.Error())
+		b = appendString(b, "database unavailable")
 		b = append(b, '}')
 		*bp = b
 		writeBody(w, http.StatusServiceUnavailable, bp, b)
@@ -395,77 +532,86 @@ func (a *app) health(w http.ResponseWriter, r *http.Request) {
 	writeBody(w, http.StatusOK, bp, b)
 }
 
-func (a *app) feedPosts(w http.ResponseWriter, r *http.Request) {
-	rows, err := a.feed.QueryContext(r.Context())
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
-		return
-	}
-	defer rows.Close()
-
-	bp := bufPool.Get().(*[]byte)
-	b := append((*bp)[:0], `{"posts":[`...)
-	first := true
-	for rows.Next() {
-		var p post
-		if err := rows.Scan(&p.ID, &p.Body, &p.CreatedAt, &p.Author, &p.LikeCount); err != nil {
-			bufPool.Put(bp)
-			writeError(w, http.StatusInternalServerError, "internal server error")
-			return
-		}
-		if !first {
-			b = append(b, ',')
-		}
-		first = false
-		b = appendPost(b, p)
-	}
-	if err := rows.Err(); err != nil {
-		bufPool.Put(bp)
-		writeError(w, http.StatusInternalServerError, "internal server error")
-		return
-	}
-	b = append(b, `]}`...)
-	*bp = b
-	writeBody(w, http.StatusOK, bp, b)
+func (a *app) feedPosts(w http.ResponseWriter, r *httpReq) {
+	key := "feed:" + strconv.FormatUint(a.readGen.Load(), 10)
+	writeSharedBody(w, a.readsGroup.do(key, a.readWindow, a.loadFeed))
 }
 
-func (a *app) getPostByID(w http.ResponseWriter, r *http.Request, idStr string) {
+// loadFeed performs the one SQLite read that serves a coalesced group of feed
+// requests. The returned body is immutable and shared by that group only.
+func (a *app) loadFeed() readResp {
+	rc := <-a.reads
+	st := rc.feed
+	st.reset()
+	row, err := st.step()
+	if err != nil {
+		st.reset()
+		a.reads <- rc
+		return readResp{status: http.StatusInternalServerError, body: []byte(`{"error":"internal server error"}`)}
+	}
+	b := make([]byte, 0, 4096)
+	b = append(b, `{"posts":`...)
+	if row {
+		b = append(b, st.columnText(0)...)
+	} else {
+		b = append(b, `[]`...)
+	}
+	b = append(b, '}')
+	st.reset()
+	a.reads <- rc
+	return readResp{status: http.StatusOK, body: b, packet: makePacket(http.StatusOK, b)}
+}
+
+func (a *app) getPostByID(w http.ResponseWriter, r *httpReq, idStr string) {
 	id, ok := parsePostID(idStr)
 	if !ok {
 		writeError(w, http.StatusBadRequest, "invalid post id")
 		return
 	}
-	var p post
-	err := a.getPost.QueryRowContext(r.Context(), id).
-		Scan(&p.ID, &p.Body, &p.CreatedAt, &p.Author, &p.LikeCount)
-	if err == sql.ErrNoRows {
-		writeError(w, http.StatusNotFound, "post not found")
-		return
-	}
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
-		return
-	}
-	bp := bufPool.Get().(*[]byte)
-	b := append((*bp)[:0], `{"post":`...)
-	b = appendPost(b, p)
-	b = append(b, '}')
-	*bp = b
-	writeBody(w, http.StatusOK, bp, b)
+	key := "post:" + strconv.FormatUint(a.readGen.Load(), 10) + ":" + strconv.FormatInt(id, 10)
+	writeSharedBody(w, a.readsGroup.do(key, a.readWindow, func() readResp {
+		return a.loadPost(id)
+	}))
 }
 
-func (a *app) createPost(w http.ResponseWriter, r *http.Request) {
+// loadPost serves one coalesced group of concurrent reads for the same post.
+func (a *app) loadPost(id int64) readResp {
+	rc := <-a.reads
+	st := rc.getPost
+	st.reset()
+	if err := st.bindInt64(1, id); err != nil {
+		st.reset()
+		a.reads <- rc
+		return readResp{status: http.StatusInternalServerError, body: []byte(`{"error":"internal server error"}`)}
+	}
+	row, err := st.step()
+	if err != nil {
+		st.reset()
+		a.reads <- rc
+		return readResp{status: http.StatusInternalServerError, body: []byte(`{"error":"internal server error"}`)}
+	}
+	if !row {
+		st.reset()
+		a.reads <- rc
+		return readResp{status: http.StatusNotFound, body: []byte(`{"error":"post not found"}`)}
+	}
+	b := make([]byte, 0, 256)
+	b = append(b, `{"post":`...)
+	b = append(b, st.columnText(0)...)
+	b = append(b, '}')
+	st.reset()
+	a.reads <- rc
+	return readResp{status: http.StatusOK, body: b, packet: makePacket(http.StatusOK, b)}
+}
+
+func (a *app) createPost(w http.ResponseWriter, r *httpReq) {
 	userID, username, authErr := a.authenticate(r)
 	if authErr != "" {
 		writeError(w, http.StatusUnauthorized, authErr)
 		return
 	}
 
-	data, err := io.ReadAll(r.Body)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal server error")
-		return
-	}
+	data := r.body
 	var payload struct {
 		Body json.RawMessage `json:"body"`
 	}
@@ -503,13 +649,13 @@ func (a *app) createPost(w http.ResponseWriter, r *http.Request) {
 	}
 	bp := bufPool.Get().(*[]byte)
 	b := append((*bp)[:0], `{"post":`...)
-	b = appendPost(b, result.post)
+	b = appendPostRow(b, result.post)
 	b = append(b, '}')
 	*bp = b
 	writeBody(w, http.StatusCreated, bp, b)
 }
 
-func (a *app) likePost(w http.ResponseWriter, r *http.Request, idStr string) {
+func (a *app) likePost(w http.ResponseWriter, r *httpReq, idStr string) {
 	userID, _, authErr := a.authenticate(r)
 	if authErr != "" {
 		writeError(w, http.StatusUnauthorized, authErr)
@@ -553,13 +699,13 @@ func (a *app) likePost(w http.ResponseWriter, r *http.Request, idStr string) {
 
 // authenticate verifies the bearer JWT and returns the user id and username.
 // A non-empty third result is the error message to send with status 401.
-func (a *app) authenticate(r *http.Request) (int64, string, string) {
+func (a *app) authenticate(r *httpReq) (int64, string, string) {
 	const (
 		missing = "missing bearer token"
 		invalid = "invalid or expired token"
 		payload = "invalid token payload"
 	)
-	header := r.Header.Get("Authorization")
+	header := r.auth
 	if !strings.HasPrefix(header, "Bearer ") {
 		return 0, "", missing
 	}
@@ -640,23 +786,28 @@ func parsePositiveInt(s string) (int64, bool) {
 	return n, true
 }
 
-func appendPost(dst []byte, p post) []byte {
+func appendPostRow(dst []byte, p postRow) []byte {
 	dst = append(dst, `{"id":`...)
 	dst = strconv.AppendInt(dst, p.ID, 10)
 	dst = append(dst, `,"body":`...)
-	dst = appendString(dst, p.Body)
+	dst = appendStringBytes(dst, p.Body)
 	dst = append(dst, `,"created_at":`...)
-	dst = appendString(dst, p.CreatedAt)
+	dst = appendStringBytes(dst, p.CreatedAt)
 	dst = append(dst, `,"author":`...)
-	dst = appendString(dst, p.Author)
+	dst = appendStringBytes(dst, p.Author)
 	dst = append(dst, `,"like_count":`...)
 	dst = strconv.AppendInt(dst, p.LikeCount, 10)
 	return append(dst, '}')
 }
 
-// appendString writes a JSON string. Non-ASCII is emitted as UTF-8 (the spec
-// makes escaping optional); quotes, backslashes and control bytes are escaped.
 func appendString(dst []byte, s string) []byte {
+	return appendStringBytes(dst, []byte(s))
+}
+
+// appendStringBytes writes a JSON string. Non-ASCII is emitted as UTF-8 (the
+// spec makes escaping optional); quotes, backslashes and control bytes are
+// escaped.
+func appendStringBytes(dst []byte, s []byte) []byte {
 	dst = append(dst, '"')
 	start := 0
 	for i := range len(s) {
@@ -693,6 +844,32 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	b = append(b, '}')
 	*bp = b
 	writeBody(w, status, bp, b)
+}
+
+// writeSharedBody sends an immutable body shared by an in-flight read group.
+// It is not returned to bufPool because other waiters may still be writing it.
+func writeSharedBody(w http.ResponseWriter, r readResp) {
+	w.WriteHeader(r.status)
+	if c, ok := w.(*capture); ok {
+		c.body = r.body
+		c.packet = r.packet
+		c.buf = nil
+		return
+	}
+	w.Write(r.body)
+}
+
+func makePacket(status int, body []byte) []byte {
+	p := make([]byte, 0, len(body)+128)
+	p = append(p, "HTTP/1.1 "...)
+	p = strconv.AppendInt(p, int64(status), 10)
+	p = append(p, ' ')
+	p = append(p, http.StatusText(status)...)
+	p = append(p, "\r\nContent-Type: application/json\r\nContent-Length: "...)
+	p = strconv.AppendInt(p, int64(len(body)), 10)
+	p = append(p, "\r\n\r\n"...)
+	p = append(p, body...)
+	return p
 }
 
 func writeBody(w http.ResponseWriter, status int, bp *[]byte, body []byte) {

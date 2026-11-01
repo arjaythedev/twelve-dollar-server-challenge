@@ -154,11 +154,13 @@ struct net {
     uint32_t now_s;
     int acc_ring; /* the ring accepting right now, or -1 */
     int accept_paused;
+    int cap_paused; /* open connections reached hard_conn_cap: accepting waits for closes */
     int shedding;
     uint32_t shed_cursor;
     int64_t next_guard_ns, next_sweep_ns, next_stats_ns;
     uint64_t cg_limit_bytes; /* 0 when no cgroup memory limit applies */
     char cg_current_path[256];
+    char cg_stat_path[256];
     unsigned last_cqes;
 
     /* shedding: the fraction of responses that carry Connection: close */
@@ -356,13 +358,13 @@ static void update_accept(struct net *n) {
     if (n->acc_ring >= 0) {
         struct ring *rg = &n->rings[n->acc_ring];
         if (rg->accept_armed) {
-            if ((n->accept_paused || ring_free(rg) <= reserve) && !rg->cancel_pending) cancel_accept(n, rg);
+            if ((n->accept_paused || n->cap_paused || ring_free(rg) <= reserve) && !rg->cancel_pending) cancel_accept(n, rg);
             return; /* the accept's final completion re-runs this */
         }
         if (rg->oneshots) return; /* let them land first */
         n->acc_ring = -1;
     }
-    if (n->accept_paused) return;
+    if (n->accept_paused || n->cap_paused) return;
     uint32_t best = 0, best_i = 0;
     for (uint32_t i = 0; i < n->nrings; i++) {
         if (ring_free(&n->rings[i]) > best) {
@@ -488,6 +490,7 @@ static void on_closed(struct net *n, uint32_t idx) {
     c->flags = 0;
     rg->used--;
     n->open_conns--;
+    if (n->cap_paused && n->open_conns + n->cfg->hard_conn_cap / 32 <= n->cfg->hard_conn_cap) n->cap_paused = 0;
     update_accept(n);
 }
 
@@ -517,6 +520,8 @@ static void on_accepted(struct net *n, struct ring *rg, uint32_t slot) {
     n->open_conns++;
     if (n->open_conns > n->st.max_open) n->st.max_open = n->open_conns;
     n->st.accepts++;
+    /* optional hard cap (default off): stop accepting; clients wait in the listen backlog */
+    if (n->cfg->hard_conn_cap && n->open_conns >= n->cfg->hard_conn_cap) n->cap_paused = 1;
     arm_recv(n, idx);
 }
 
@@ -809,7 +814,7 @@ static void on_accept_cqe(struct net *n, struct io_uring_cqe *cqe, int oneshot) 
     }
     if (oneshot) {
         /* keep the one-shot window full while this ring still has room */
-        if (n->acc_ring == (int)rg->idx && !n->accept_paused && ring_free(rg) > rg->oneshots &&
+        if (n->acc_ring == (int)rg->idx && !n->accept_paused && !n->cap_paused && ring_free(rg) > rg->oneshots &&
             rg->oneshots < ONESHOT_ACCEPTS) {
             arm_accept_oneshot(n, rg);
         } else if (!rg->oneshots) {
@@ -924,7 +929,44 @@ static void detect_cgroup_limit(struct net *n) {
     if (lim == UINT64_MAX) return;
     n->cg_limit_bytes = lim;
     snprintf(n->cg_current_path, sizeof n->cg_current_path, "/sys/fs/cgroup%s/memory.current", path);
+    snprintf(n->cg_stat_path, sizeof n->cg_stat_path, "/sys/fs/cgroup%s/memory.stat", path);
     log_msg("cgroup memory.max = %llu MB (%s)", (unsigned long long)(lim >> 20), max_path);
+}
+
+/* What the cgroup cannot drop: anon + kernel + sock from memory.stat. Page
+ * cache (clean or dirty) is left out: memory.current counts it, and under a
+ * limit it fills to the limit by itself and is reclaimed on demand, so it is
+ * not pressure. UINT64_MAX when memory.stat is unreadable. */
+static uint64_t cg_used_bytes(struct net *n) {
+    int fd = open(n->cg_stat_path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return UINT64_MAX;
+    char buf[8192];
+    ssize_t r = read(fd, buf, sizeof buf - 1);
+    close(fd);
+    if (r <= 0) return UINT64_MAX;
+    buf[r] = 0;
+    uint64_t anon = UINT64_MAX, kernel = UINT64_MAX, sock = 0, slab = 0, kstack = 0, pt = 0;
+    for (char *l = buf; l && *l;) {
+        char *nl = strchr(l, '\n');
+        if (nl) *nl = 0;
+        char *sp = strchr(l, ' ');
+        if (sp) {
+            uint64_t v = strtoull(sp + 1, NULL, 10);
+            size_t kl = (size_t)(sp - l);
+#define KEY(k) (kl == sizeof(k) - 1 && !memcmp(l, k, kl))
+            if (KEY("anon")) anon = v;
+            else if (KEY("kernel")) kernel = v;
+            else if (KEY("sock")) sock = v;
+            else if (KEY("slab")) slab = v;
+            else if (KEY("kernel_stack")) kstack = v;
+            else if (KEY("pagetables")) pt = v;
+#undef KEY
+        }
+        l = nl ? nl + 1 : NULL;
+    }
+    if (anon == UINT64_MAX) return UINT64_MAX;
+    if (kernel == UINT64_MAX) kernel = slab + kstack + pt; /* older kernels have no "kernel" key */
+    return anon + kernel + sock;
 }
 
 /* Memory we can still spend: MemAvailable minus the growth of SReclaimable
@@ -939,9 +981,10 @@ static uint64_t available_mb(struct net *n) {
     }
     uint64_t mb = kb == UINT64_MAX ? UINT64_MAX : kb >> 10;
     if (n->cg_limit_bytes) {
-        uint64_t cur = read_u64_file(n->cg_current_path);
-        if (cur != UINT64_MAX) {
-            uint64_t cg_mb = cur >= n->cg_limit_bytes ? 0 : (n->cg_limit_bytes - cur) >> 20;
+        uint64_t used = cg_used_bytes(n);
+        if (used == UINT64_MAX) used = read_u64_file(n->cg_current_path); /* no memory.stat: fall back */
+        if (used != UINT64_MAX) {
+            uint64_t cg_mb = used >= n->cg_limit_bytes ? 0 : (n->cg_limit_bytes - used) >> 20;
             if (cg_mb < mb) mb = cg_mb;
         }
     }
@@ -1007,7 +1050,7 @@ static void memory_guard(struct net *n) {
     uint64_t mb = available_mb(n);
     n->avail_mb = mb;
     if (mb != UINT64_MAX) {
-        if (mb >= cfg->shed_hi_mb) {
+        if (!cfg->shed_hi_mb || mb >= cfg->shed_hi_mb) { /* 0 = memory law off */
             n->shed_f_mem = 0.0;
         } else if (mb <= cfg->shed_lo_mb || cfg->shed_hi_mb == cfg->shed_lo_mb) {
             n->shed_f_mem = 1.0;
@@ -1022,10 +1065,10 @@ static void memory_guard(struct net *n) {
             log_msg("memory guard: %llu MB available, accept %s", (unsigned long long)mb, pause ? "paused" : "resumed");
             update_accept(n);
         }
-        if (mb <= cfg->shed_lo_mb) shed_idle(n);
+        if (cfg->shed_lo_mb && mb <= cfg->shed_lo_mb) shed_idle(n);
     }
     uint64_t start = (uint64_t)cfg->conn_cap * 9 / 10;
-    if (n->open_conns <= start) {
+    if (!cfg->conn_cap || n->open_conns <= start) { /* 0 = connection law off */
         n->shed_f_count = 0.0;
     } else if (n->open_conns >= cfg->conn_cap) {
         n->shed_f_count = 1.0;

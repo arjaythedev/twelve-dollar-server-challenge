@@ -179,12 +179,19 @@ func main() {
 	}
 	go a.writeLoop()
 	if os.Getenv("URING") == "1" {
+		feed := func() []byte {
+			r := a.loadFeed()
+			if r.packet != nil {
+				return r.packet
+			}
+			return encodeMuxResponse(&capture{status: r.status, body: r.body}, false)
+		}
 		mux, err := newUringMux(func(req *httpReq) ([]byte, bool) {
 			w := &capture{status: 200}
 			a.ServeHTTP(w, req)
 			closeAfter := req.close
 			return encodeMuxResponse(w, closeAfter), closeAfter
-		}, 64)
+		}, feed, 1)
 		if err != nil {
 			log.Printf("raw io_uring mux unavailable: %v", err)
 		} else {

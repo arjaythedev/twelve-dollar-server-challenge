@@ -19,9 +19,10 @@ being served.
   Rule 6 explicitly allows group commit under that condition.
 - **Raw io_uring request mux (`URING=1`, opt-in).** One event loop owns the
   ring, registered provided-buffer ring (`IORING_REGISTER_PBUF_RING`), fd table,
-  HTTP parser, output queues and raw `IORING_OP_SEND` submissions. A fixed
-  worker pool invokes the handler; there is no goroutine per connection and no
-  per-request channel in the transport. Multishot receives re-arm only when
+  HTTP parser, output queues and raw `IORING_OP_SEND` submissions. One DB
+  owner goroutine executes the blocking SQLite handler; `/feed` requests are
+  batched per event-loop turn and share one query result. There is no goroutine
+  per connection and no per-request transport goroutine. Multishot receives re-arm only when
   `IORING_CQE_F_MORE` is absent or on `-ENOBUFS`; consumed buffers are returned
   by advancing the buffer-ring tail. There is no `iouring-go` dependency and no
   vendor tree. The Go connection loop remains the default: it is faster for the

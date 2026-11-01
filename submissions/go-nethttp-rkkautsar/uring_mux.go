@@ -38,18 +38,22 @@ type muxConn struct {
 type MuxHandler func(*httpReq) (packet []byte, closeAfter bool)
 
 type muxJob struct {
-	c   *muxConn
-	req *httpReq
+	c     *muxConn
+	req   *httpReq
+	feed  bool
+	conns []*muxConn
 }
 
 type muxResp struct {
-	c     *muxConn
-	pkt   []byte
-	close bool
+	c       *muxConn
+	pkt     []byte
+	close   bool
+	feedEnd bool
 }
 
 type uringMux struct {
 	handler   MuxHandler
+	feed      func() []byte
 	ring      *rawRing
 	br        *readBufRing
 	bufs      []byte
@@ -64,9 +68,11 @@ type uringMux struct {
 	jobs      chan *muxJob
 	responses chan *muxResp
 	waiting   []*muxConn
+	feedPend  []*muxConn
+	feedBusy  bool
 }
 
-func newUringMux(handler MuxHandler, workers int) (*uringMux, error) {
+func newUringMux(handler MuxHandler, feed func() []byte, workers int) (*uringMux, error) {
 	ring, err := newRawRing(muxSqEntries, muxCqEntries)
 	if err != nil {
 		return nil, err
@@ -127,6 +133,7 @@ func newUringMux(handler MuxHandler, workers int) (*uringMux, error) {
 	}
 	m := &uringMux{
 		handler:   handler,
+		feed:      feed,
 		ring:      ring,
 		br:        br,
 		bufs:      bufs,
@@ -147,6 +154,15 @@ func newUringMux(handler MuxHandler, workers int) (*uringMux, error) {
 
 func (m *uringMux) worker() {
 	for j := range m.jobs {
+		if j.feed {
+			pkt := m.feed()
+			for _, c := range j.conns {
+				m.responses <- &muxResp{c: c, pkt: pkt}
+			}
+			m.responses <- &muxResp{feedEnd: true}
+			m.wake()
+			continue
+		}
 		pkt, closeAfter := m.handler(j.req)
 		m.responses <- &muxResp{c: j.c, pkt: pkt, close: closeAfter}
 		m.wake()
@@ -334,6 +350,7 @@ func (m *uringMux) loop() {
 			}
 		}
 		m.drainCQEs()
+		m.flushFeeds()
 	}
 }
 
@@ -433,6 +450,12 @@ func (m *uringMux) pump(c *muxConn) {
 	if incomplete {
 		return
 	}
+	if req.path == "/feed" {
+		c.in = c.in[used:]
+		c.busy = true
+		m.feedPend = append(m.feedPend, c)
+		return
+	}
 	select {
 	case m.jobs <- &muxJob{c: c, req: req}:
 		c.in = c.in[used:]
@@ -444,6 +467,11 @@ func (m *uringMux) pump(c *muxConn) {
 }
 
 func (m *uringMux) finishJob(r *muxResp) {
+	if r.feedEnd {
+		m.feedBusy = false
+		m.flushFeeds()
+		return
+	}
 	c := r.c
 	if c.closed || !c.busy {
 		return
@@ -454,6 +482,20 @@ func (m *uringMux) finishJob(r *muxResp) {
 	}
 	if !r.close {
 		m.pump(c)
+	}
+}
+
+func (m *uringMux) flushFeeds() {
+	if m.feedBusy || len(m.feedPend) == 0 {
+		return
+	}
+	batch := m.feedPend
+	m.feedPend = nil
+	select {
+	case m.jobs <- &muxJob{feed: true, conns: batch}:
+		m.feedBusy = true
+	default:
+		m.feedPend = batch
 	}
 }
 

@@ -178,7 +178,9 @@ func main() {
 		readWindow:  time.Duration(windowUS) * time.Microsecond,
 	}
 	go a.writeLoop()
-	if os.Getenv("URING") == "1" {
+	// The raw io_uring + DB-owner path is the default. URING=0 opts out and
+	// exercises the goroutine/serveConn fallback.
+	if os.Getenv("URING") != "0" {
 		feed := func() []byte {
 			r := a.loadFeed()
 			if r.packet != nil {
@@ -186,12 +188,28 @@ func main() {
 			}
 			return encodeMuxResponse(&capture{status: r.status, body: r.body}, false)
 		}
+		postBatch := func(ids []int64) map[int64][]byte {
+			res := a.loadPosts(ids)
+			out := make(map[int64][]byte, len(ids))
+			for _, id := range ids {
+				r, ok := res[id]
+				if !ok || r.packet == nil {
+					out[id] = encodeMuxResponse(&capture{status: 500, body: []byte(`{"error":"internal server error"}`)}, false)
+					continue
+				}
+				out[id] = r.packet
+			}
+			return out
+		}
+		writeBatch := func(reqs []*httpReq) []readResp {
+			return a.muxWriteBatch(reqs)
+		}
 		mux, err := newUringMux(func(req *httpReq) ([]byte, bool) {
 			w := &capture{status: 200}
 			a.ServeHTTP(w, req)
 			closeAfter := req.close
 			return encodeMuxResponse(w, closeAfter), closeAfter
-		}, feed, 1)
+		}, feed, postBatch, writeBatch, 1)
 		if err != nil {
 			log.Printf("raw io_uring mux unavailable: %v", err)
 		} else {
@@ -331,11 +349,10 @@ func (a *app) writeLoop() {
 	}
 }
 
-func (a *app) runBatch(jobs []*writeJob) {
+func (a *app) applyBatch(jobs []*writeJob) ([]writeResult, bool) {
 	w := a.write
 	if err := w.db.exec("BEGIN IMMEDIATE"); err != nil {
-		failJobs(jobs)
-		return
+		return nil, false
 	}
 
 	results := make([]writeResult, len(jobs))
@@ -416,12 +433,20 @@ run:
 		w.postExists.reset()
 		w.insertLike.reset()
 		w.db.exec("ROLLBACK")
-		failJobs(jobs)
-		return
+		return nil, false
 	}
 	// Do not let a request that starts after this commit join a read that
 	// started before it. The generation is part of every coalescing key.
 	a.readGen.Add(1)
+	return results, true
+}
+
+func (a *app) runBatch(jobs []*writeJob) {
+	results, ok := a.applyBatch(jobs)
+	if !ok {
+		failJobs(jobs)
+		return
+	}
 	for i, j := range jobs {
 		j.reply <- results[i]
 	}
@@ -434,10 +459,11 @@ func failJobs(jobs []*writeJob) {
 }
 
 type httpReq struct {
-	path  string
-	auth  string
-	body  []byte
-	close bool
+	method string
+	path   string
+	auth   string
+	body   []byte
+	close  bool
 }
 
 func readReq(br *bufio.Reader) (*httpReq, error) {
@@ -462,8 +488,9 @@ func readReq(br *bufio.Reader) (*httpReq, error) {
 	}
 	version := rest[sp2+1:]
 	req := &httpReq{
-		path:  string(target),
-		close: bytes.Equal(version, []byte("HTTP/1.0")),
+		method: string(line[:sp1]),
+		path:   string(target),
+		close:  bytes.Equal(version, []byte("HTTP/1.0")),
 	}
 	clen := 0
 	for {
@@ -628,97 +655,212 @@ func (a *app) loadPost(id int64) readResp {
 	return readResp{status: http.StatusOK, body: b, packet: makePacket(http.StatusOK, b)}
 }
 
-func (a *app) createPost(w http.ResponseWriter, r *httpReq) {
+// loadPosts serves a whole batch of GET /posts/:id requests with one IN query.
+func (a *app) loadPosts(ids []int64) map[int64]readResp {
+	if len(ids) == 0 {
+		return nil
+	}
+	rc := <-a.reads
+	q := strings.Replace(getPostSQL, "SELECT json_object", "SELECT p.id, json_object", 1)
+	ph := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
+	q = strings.Replace(q, "WHERE p.id = ?", "WHERE p.id IN ("+ph+")", 1)
+	st, err := rc.db.prepare(q)
+	if err != nil {
+		a.reads <- rc
+		return nil
+	}
+	out := make(map[int64]readResp, len(ids))
+	for i, id := range ids {
+		if err := st.bindInt64(i+1, id); err != nil {
+			st.close()
+			a.reads <- rc
+			return nil
+		}
+	}
+	hadErr := false
+	for {
+		row, err := st.step()
+		if err != nil {
+			hadErr = true
+			break
+		}
+		if !row {
+			break
+		}
+		id := st.columnInt64(0)
+		b := make([]byte, 0, 256)
+		b = append(b, `{"post":`...)
+		b = append(b, st.columnText(1)...)
+		b = append(b, '}')
+		out[id] = readResp{status: http.StatusOK, body: b, packet: makePacket(http.StatusOK, b)}
+	}
+	st.close()
+	a.reads <- rc
+	for _, id := range ids {
+		if _, ok := out[id]; ok {
+			continue
+		}
+		if hadErr {
+			out[id] = readResp{status: http.StatusInternalServerError, body: []byte(`{"error":"internal server error"}`), packet: makePacket(http.StatusInternalServerError, []byte(`{"error":"internal server error"}`))}
+			continue
+		}
+		out[id] = readResp{status: http.StatusNotFound, body: []byte(`{"error":"post not found"}`), packet: makePacket(http.StatusNotFound, []byte(`{"error":"post not found"}`))}
+	}
+	return out
+}
+
+func (a *app) prepareCreatePost(r *httpReq) (*writeJob, *capture) {
+	w := &capture{status: http.StatusCreated}
 	userID, username, authErr := a.authenticate(r)
 	if authErr != "" {
 		writeError(w, http.StatusUnauthorized, authErr)
-		return
+		return nil, w
 	}
-
-	data := r.body
 	var payload struct {
 		Body json.RawMessage `json:"body"`
 	}
-	if err := json.Unmarshal(data, &payload); err != nil {
+	if err := json.Unmarshal(r.body, &payload); err != nil {
 		writeError(w, http.StatusBadRequest, "malformed JSON body")
-		return
+		return nil, w
 	}
 	var body string
 	if payload.Body == nil || json.Unmarshal(payload.Body, &body) != nil {
 		writeError(w, http.StatusBadRequest, "body is required")
-		return
+		return nil, w
 	}
 	body = strings.TrimSpace(body)
 	if body == "" {
 		writeError(w, http.StatusBadRequest, "body is required")
-		return
+		return nil, w
 	}
 	if utf8.RuneCountInString(body) > 500 {
 		writeError(w, http.StatusBadRequest, "body must be at most 500 characters")
-		return
+		return nil, w
 	}
-
-	job := &writeJob{
-		kind:     writeCreate,
-		userID:   userID,
-		username: username,
-		body:     body,
-		reply:    make(chan writeResult, 1),
-	}
-	a.writeCh <- job
-	result := <-job.reply
-	if result.failed {
-		writeError(w, http.StatusInternalServerError, "internal server error")
-		return
-	}
-	bp := bufPool.Get().(*[]byte)
-	b := append((*bp)[:0], `{"post":`...)
-	b = appendPostRow(b, result.post)
-	b = append(b, '}')
-	*bp = b
-	writeBody(w, http.StatusCreated, bp, b)
+	return &writeJob{kind: writeCreate, userID: userID, username: username, body: body, reply: make(chan writeResult, 1)}, nil
 }
 
-func (a *app) likePost(w http.ResponseWriter, r *httpReq, idStr string) {
+func (a *app) prepareLike(r *httpReq, idStr string) (*writeJob, *capture) {
+	w := &capture{status: http.StatusCreated}
 	userID, _, authErr := a.authenticate(r)
 	if authErr != "" {
 		writeError(w, http.StatusUnauthorized, authErr)
-		return
+		return nil, w
 	}
 	id, ok := parsePostID(idStr)
 	if !ok {
 		writeError(w, http.StatusBadRequest, "invalid post id")
-		return
+		return nil, w
 	}
+	return &writeJob{kind: writeLike, userID: userID, postID: id, reply: make(chan writeResult, 1)}, nil
+}
 
-	job := &writeJob{
-		kind:   writeLike,
-		userID: userID,
-		postID: id,
-		reply:  make(chan writeResult, 1),
-	}
-	a.writeCh <- job
-	result := <-job.reply
+func createResponse(result writeResult) (int, []byte) {
 	if result.failed {
-		writeError(w, http.StatusInternalServerError, "internal server error")
-		return
+		return http.StatusInternalServerError, []byte(`{"error":"internal server error"}`)
+	}
+	b := make([]byte, 0, 256)
+	b = append(b, `{"post":`...)
+	b = appendPostRow(b, result.post)
+	b = append(b, '}')
+	return http.StatusCreated, b
+}
+
+func likeResponse(result writeResult, id int64) (int, []byte) {
+	if result.failed {
+		return http.StatusInternalServerError, []byte(`{"error":"internal server error"}`)
 	}
 	if result.notFound {
-		writeError(w, http.StatusNotFound, "post not found")
-		return
+		return http.StatusNotFound, []byte(`{"error":"post not found"}`)
 	}
 	status := http.StatusCreated
 	if result.already {
 		status = http.StatusOK
 	}
-	bp := bufPool.Get().(*[]byte)
-	b := append((*bp)[:0], `{"liked":true,"already_liked":`...)
+	b := make([]byte, 0, 64)
+	b = append(b, `{"liked":true,"already_liked":`...)
 	b = strconv.AppendBool(b, result.already)
 	b = append(b, `,"post_id":`...)
 	b = strconv.AppendInt(b, id, 10)
 	b = append(b, '}')
-	*bp = b
-	writeBody(w, status, bp, b)
+	return status, b
+}
+
+// muxWriteBatch parses and commits a batch of writes in one transaction.
+func (a *app) muxWriteBatch(reqs []*httpReq) []readResp {
+	out := make([]readResp, len(reqs))
+	jobs := make([]*writeJob, 0, len(reqs))
+	slots := make([]int, 0, len(reqs))
+	for i, req := range reqs {
+		var job *writeJob
+		var errResp *capture
+		if req.path == "/posts" {
+			job, errResp = a.prepareCreatePost(req)
+		} else {
+			idStr, ok := strings.CutSuffix(strings.TrimPrefix(req.path, "/posts/"), "/like")
+			if !ok {
+				errResp = &capture{status: http.StatusNotFound, body: []byte(`{"error":"not found"}`)}
+			} else {
+				job, errResp = a.prepareLike(req, idStr)
+			}
+		}
+		if job == nil {
+			out[i] = readResp{status: errResp.status, body: errResp.body}
+			continue
+		}
+		jobs = append(jobs, job)
+		slots = append(slots, i)
+	}
+	if len(jobs) > 0 {
+		results, ok := a.applyBatch(jobs)
+		for k, job := range jobs {
+			if !ok {
+				out[slots[k]] = readResp{status: http.StatusInternalServerError, body: []byte(`{"error":"internal server error"}`)}
+				continue
+			}
+			if job.kind == writeCreate {
+				status, body := createResponse(results[k])
+				out[slots[k]] = readResp{status: status, body: body}
+			} else {
+				status, body := likeResponse(results[k], job.postID)
+				out[slots[k]] = readResp{status: status, body: body}
+			}
+		}
+	}
+	for i := range out {
+		if out[i].packet == nil {
+			out[i].packet = makePacket(out[i].status, out[i].body)
+		}
+	}
+	return out
+}
+
+func (a *app) createPost(w http.ResponseWriter, r *httpReq) {
+	job, errResp := a.prepareCreatePost(r)
+	if job == nil {
+		w.WriteHeader(errResp.status)
+		w.Write(errResp.body)
+		return
+	}
+	a.writeCh <- job
+	result := <-job.reply
+	status, body := createResponse(result)
+	w.WriteHeader(status)
+	w.Write(body)
+}
+
+func (a *app) likePost(w http.ResponseWriter, r *httpReq, idStr string) {
+	job, errResp := a.prepareLike(r, idStr)
+	if job == nil {
+		w.WriteHeader(errResp.status)
+		w.Write(errResp.body)
+		return
+	}
+	a.writeCh <- job
+	result := <-job.reply
+	status, body := likeResponse(result, job.postID)
+	w.WriteHeader(status)
+	w.Write(body)
 }
 
 // authenticate verifies the bearer JWT and returns the user id and username.

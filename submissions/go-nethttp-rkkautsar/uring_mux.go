@@ -4,17 +4,21 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"net"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"unsafe"
 )
 
 const (
-	muxReadTag  = 1
-	muxWriteTag = 2
-	muxTagMask  = 7
+	muxReadTag   = 1
+	muxWriteTag  = 2
+	muxAcceptTag = 3
+	muxWakeTag   = 4
+	muxTagMask   = 7
 
 	muxSqEntries = 4096
 	muxCqEntries = 8192
@@ -23,7 +27,6 @@ const (
 type muxConn struct {
 	id         uint64
 	fd         int
-	conn       net.Conn
 	in         []byte
 	out        [][]byte
 	outOff     int
@@ -41,38 +44,54 @@ type muxJob struct {
 	c     *muxConn
 	req   *httpReq
 	feed  bool
+	post  bool
+	write bool
 	conns []*muxConn
+	ids   []int64
+	reqs  []*httpReq
 }
 
 type muxResp struct {
-	c       *muxConn
-	pkt     []byte
-	close   bool
-	feedEnd bool
+	c        *muxConn
+	pkt      []byte
+	close    bool
+	feedEnd  bool
+	postEnd  bool
+	writeEnd bool
 }
 
 type uringMux struct {
-	handler   MuxHandler
-	feed      func() []byte
-	ring      *rawRing
-	br        *readBufRing
-	bufs      []byte
-	epfd      int
-	efd       int
-	wakeR     int
-	wakeW     int
-	addCh     chan net.Conn
-	conns     map[uint64]*muxConn
-	next      atomic.Uint64
-	toSub     uint32
-	jobs      chan *muxJob
-	responses chan *muxResp
-	waiting   []*muxConn
-	feedPend  []*muxConn
-	feedBusy  bool
+	handler     MuxHandler
+	feed        func() []byte
+	postBatch   func([]int64) map[int64][]byte
+	writeBatch  func([]*httpReq) []readResp
+	ring        *rawRing
+	br          *readBufRing
+	bufs        []byte
+	wakeR       int
+	wakeW       int
+	wakeBuf     []byte
+	wakeArmed   bool
+	listenFD    int
+	listener    net.Listener
+	acceptArmed bool
+	conns       map[uint64]*muxConn
+	next        atomic.Uint64
+	toSub       uint32
+	jobs        chan *muxJob
+	responses   chan *muxResp
+	waiting     []*muxConn
+	feedPend    []*muxConn
+	feedBusy    bool
+	postPend    []*muxConn
+	postIDs     []int64
+	postBusy    bool
+	writePend   []*muxConn
+	writeReqs   []*httpReq
+	writeBusy   bool
 }
 
-func newUringMux(handler MuxHandler, feed func() []byte, workers int) (*uringMux, error) {
+func newUringMux(handler MuxHandler, feed func() []byte, postBatch func([]int64) map[int64][]byte, writeBatch func([]*httpReq) []readResp, workers int) (*uringMux, error) {
 	ring, err := newRawRing(muxSqEntries, muxCqEntries)
 	if err != nil {
 		return nil, err
@@ -89,63 +108,32 @@ func newUringMux(handler MuxHandler, feed func() []byte, workers int) (*uringMux
 		syscall.Close(ring.fd)
 		return nil, err
 	}
-	efd, err := rawEventfd()
-	if err != nil {
-		syscall.Close(ring.fd)
-		return nil, err
-	}
-	if _, _, errno := syscall.Syscall6(ioUringRegister, uintptr(ring.fd), registerEventfd, uintptr(unsafe.Pointer(&efd)), 1, 0, 0); errno != 0 {
-		syscall.Close(efd)
-		syscall.Close(ring.fd)
-		return nil, errno
-	}
-	epfd, err := syscall.EpollCreate1(0)
-	if err != nil {
-		syscall.Close(efd)
-		syscall.Close(ring.fd)
-		return nil, err
-	}
-	ev := syscall.EpollEvent{Events: syscall.EPOLLIN, Fd: int32(efd)}
-	if err := syscall.EpollCtl(epfd, syscall.EPOLL_CTL_ADD, efd, &ev); err != nil {
-		syscall.Close(epfd)
-		syscall.Close(efd)
-		syscall.Close(ring.fd)
-		return nil, err
-	}
 	var pipe [2]int
 	if err := syscall.Pipe(pipe[:]); err != nil {
-		syscall.Close(epfd)
-		syscall.Close(efd)
 		syscall.Close(ring.fd)
 		return nil, err
 	}
 	_ = syscall.SetNonblock(pipe[0], true)
 	_ = syscall.SetNonblock(pipe[1], true)
-	wev := syscall.EpollEvent{Events: syscall.EPOLLIN, Fd: int32(pipe[0])}
-	if err := syscall.EpollCtl(epfd, syscall.EPOLL_CTL_ADD, pipe[0], &wev); err != nil {
-		syscall.Close(epfd)
-		syscall.Close(efd)
-		syscall.Close(ring.fd)
-		return nil, err
-	}
 	if workers <= 0 {
 		workers = 64
 	}
 	m := &uringMux{
-		handler:   handler,
-		feed:      feed,
-		ring:      ring,
-		br:        br,
-		bufs:      bufs,
-		epfd:      epfd,
-		efd:       efd,
-		wakeR:     pipe[0],
-		wakeW:     pipe[1],
-		addCh:     make(chan net.Conn, 4096),
-		conns:     make(map[uint64]*muxConn),
-		jobs:      make(chan *muxJob, workers*4),
-		responses: make(chan *muxResp, 1024),
+		handler:    handler,
+		feed:       feed,
+		postBatch:  postBatch,
+		writeBatch: writeBatch,
+		ring:       ring,
+		br:         br,
+		bufs:       bufs,
+		wakeR:      pipe[0],
+		wakeW:      pipe[1],
+		wakeBuf:    make([]byte, 1),
+		conns:      make(map[uint64]*muxConn),
+		jobs:       make(chan *muxJob, workers*4),
+		responses:  make(chan *muxResp, 1024),
 	}
+	m.armWake()
 	for i := 0; i < workers; i++ {
 		go m.worker()
 	}
@@ -163,6 +151,26 @@ func (m *uringMux) worker() {
 			m.wake()
 			continue
 		}
+		if j.post {
+			packets := m.postBatch(j.ids)
+			for i, c := range j.conns {
+				pkt := packets[j.ids[i]]
+				m.responses <- &muxResp{c: c, pkt: pkt}
+			}
+			m.responses <- &muxResp{postEnd: true}
+			m.wake()
+			continue
+		}
+		if j.write {
+			results := m.writeBatch(j.reqs)
+			for i, c := range j.conns {
+				r := results[i]
+				m.responses <- &muxResp{c: c, pkt: r.packet}
+			}
+			m.responses <- &muxResp{writeEnd: true}
+			m.wake()
+			continue
+		}
 		pkt, closeAfter := m.handler(j.req)
 		m.responses <- &muxResp{c: j.c, pkt: pkt, close: closeAfter}
 		m.wake()
@@ -174,17 +182,25 @@ func (m *uringMux) serve(host, port string) error {
 	if err != nil {
 		return err
 	}
-	go func() {
-		for {
-			c, err := ln.Accept()
-			if err != nil {
-				continue
-			}
-			m.addCh <- c
-			var b [1]byte
-			_, _ = syscall.Write(m.wakeW, b[:])
-		}
-	}()
+	tl, ok := ln.(*net.TCPListener)
+	if !ok {
+		ln.Close()
+		return fmt.Errorf("listener is not TCP")
+	}
+	raw, err := tl.SyscallConn()
+	if err != nil {
+		ln.Close()
+		return err
+	}
+	var fd int
+	if err := raw.Control(func(f uintptr) { fd = int(f) }); err != nil {
+		ln.Close()
+		return err
+	}
+	_ = syscall.SetNonblock(fd, true)
+	m.listener = ln
+	m.listenFD = fd
+	m.armAccept()
 	m.loop()
 	return nil
 }
@@ -194,14 +210,53 @@ func (m *uringMux) wake() {
 	_, _ = syscall.Write(m.wakeW, b[:])
 }
 
-func (m *uringMux) drainWake() {
-	var b [256]byte
+func (m *uringMux) armWake() {
 	for {
-		n, err := syscall.Read(m.wakeR, b[:])
-		if n <= 0 || err != nil {
-			return
+		sqe := m.ring.sqe()
+		if sqe == nil {
+			m.flush()
+			continue
 		}
+		*sqe = rawSQE{}
+		sqe.Opcode = 22 // IORING_OP_READ
+		sqe.FD = int32(m.wakeR)
+		sqe.Addr = uint64(uintptr(unsafe.Pointer(&m.wakeBuf[0])))
+		sqe.Len = 1
+		sqe.UserData = muxWakeTag
+		m.wakeArmed = true
+		m.toSub++
+		return
 	}
+}
+
+func (m *uringMux) armAccept() {
+	for {
+		sqe := m.ring.sqe()
+		if sqe == nil {
+			m.flush()
+			continue
+		}
+		*sqe = rawSQE{}
+		sqe.Opcode = 13 // IORING_OP_ACCEPT
+		sqe.FD = int32(m.listenFD)
+		sqe.IOPrio = 1 // IORING_ACCEPT_MULTISHOT
+		sqe.UserData = muxAcceptTag
+		m.acceptArmed = true
+		m.toSub++
+		return
+	}
+}
+
+func (m *uringMux) addFD(fd int) {
+	if fd < 0 {
+		return
+	}
+	_ = syscall.SetNonblock(fd, true)
+	_ = syscall.SetsockoptInt(fd, syscall.IPPROTO_TCP, syscall.TCP_NODELAY, 1)
+	id := m.next.Add(1)
+	mc := &muxConn{id: id, fd: fd}
+	m.conns[id] = mc
+	m.arm(mc)
 }
 
 func (m *uringMux) flush() {
@@ -212,35 +267,6 @@ func (m *uringMux) flush() {
 		}
 		m.toSub -= uint32(rc)
 	}
-}
-
-func (m *uringMux) add(c net.Conn) {
-	tc, ok := c.(*net.TCPConn)
-	if !ok {
-		_ = c.Close()
-		return
-	}
-	_ = tc.SetNoDelay(true)
-	sc, ok := c.(syscall.Conn)
-	if !ok {
-		_ = c.Close()
-		return
-	}
-	raw, err := sc.SyscallConn()
-	if err != nil {
-		_ = c.Close()
-		return
-	}
-	var fd int
-	if err := raw.Control(func(f uintptr) { fd = int(f) }); err != nil || fd < 0 {
-		_ = c.Close()
-		return
-	}
-	_ = syscall.SetNonblock(fd, true)
-	id := m.next.Add(1)
-	mc := &muxConn{id: id, fd: fd, conn: c}
-	m.conns[id] = mc
-	m.arm(mc)
 }
 
 func (m *uringMux) arm(c *muxConn) {
@@ -273,7 +299,7 @@ func (m *uringMux) close(c *muxConn) {
 	}
 	c.closed = true
 	delete(m.conns, c.id)
-	_ = c.conn.Close()
+	_ = syscall.Close(c.fd)
 }
 
 func (m *uringMux) send(c *muxConn, p []byte, closeAfter bool) {
@@ -314,17 +340,18 @@ func (m *uringMux) submitSends() {
 }
 
 func (m *uringMux) loop() {
-	events := make([]syscall.EpollEvent, 16)
 	for {
-		for {
-			select {
-			case c := <-m.addCh:
-				m.add(c)
-			default:
-				goto ready
-			}
+		m.dispatchWaiting()
+		m.flushPosts()
+		m.flushWrites()
+		m.submitSends()
+		if m.toSub > 0 {
+			m.flush()
 		}
-	ready:
+		if _, err := m.ring.enter(0, 1, 1); err != nil && err != syscall.EINTR {
+			return
+		}
+		m.drainCQEs()
 		for {
 			select {
 			case r := <-m.responses:
@@ -334,30 +361,53 @@ func (m *uringMux) loop() {
 			}
 		}
 	drained:
-		m.dispatchWaiting()
-		m.submitSends()
-		n, err := syscall.EpollWait(m.epfd, events, 50)
-		if err != nil && err != syscall.EINTR {
-			return
-		}
-		for i := 0; i < n; i++ {
-			if int(events[i].Fd) == m.wakeR {
-				m.drainWake()
-			}
-			if int(events[i].Fd) == m.efd {
-				var b [8]byte
-				_, _ = syscall.Read(m.efd, b[:])
-			}
-		}
-		m.drainCQEs()
 		m.flushFeeds()
 	}
 }
 
+func (m *uringMux) finishAccept(cqe *rawCQE) {
+	m.acceptArmed = false
+	if cqe.Res >= 0 {
+		m.addFD(int(cqe.Res))
+	}
+	if cqe.Flags&2 == 0 && !m.acceptArmed {
+		m.armAccept()
+	}
+}
+
+func (m *uringMux) finishWake() {
+	m.wakeArmed = false
+	var b [256]byte
+	for {
+		n, err := syscall.Read(m.wakeR, b[:])
+		if n <= 0 || err != nil {
+			break
+		}
+	}
+	for {
+		select {
+		case r := <-m.responses:
+			m.finishJob(r)
+		default:
+			goto armed
+		}
+	}
+armed:
+	m.armWake()
+}
+
 func (m *uringMux) drainCQEs() {
 	m.ring.drain(func(cqe *rawCQE) {
-		id := cqe.UserData >> 3
 		tag := int32(cqe.UserData & muxTagMask)
+		if tag == muxAcceptTag {
+			m.finishAccept(cqe)
+			return
+		}
+		if tag == muxWakeTag {
+			m.finishWake()
+			return
+		}
+		id := cqe.UserData >> 3
 		c := m.conns[id]
 		if c == nil || c.closed {
 			if tag == muxReadTag && cqe.Flags&cqeBuffer != 0 {
@@ -450,10 +500,29 @@ func (m *uringMux) pump(c *muxConn) {
 	if incomplete {
 		return
 	}
-	if req.path == "/feed" {
+	if req.method == "GET" && req.path == "/feed" {
 		c.in = c.in[used:]
 		c.busy = true
 		m.feedPend = append(m.feedPend, c)
+		return
+	}
+	if req.method == "GET" && strings.HasPrefix(req.path, "/posts/") {
+		rest := req.path[len("/posts/"):]
+		if !strings.HasSuffix(rest, "/like") {
+			if id, ok := parsePostID(rest); ok {
+				c.in = c.in[used:]
+				c.busy = true
+				m.postPend = append(m.postPend, c)
+				m.postIDs = append(m.postIDs, id)
+				return
+			}
+		}
+	}
+	if req.method == "POST" && (req.path == "/posts" || strings.HasSuffix(req.path, "/like")) {
+		c.in = c.in[used:]
+		c.busy = true
+		m.writePend = append(m.writePend, c)
+		m.writeReqs = append(m.writeReqs, req)
 		return
 	}
 	select {
@@ -470,6 +539,16 @@ func (m *uringMux) finishJob(r *muxResp) {
 	if r.feedEnd {
 		m.feedBusy = false
 		m.flushFeeds()
+		return
+	}
+	if r.postEnd {
+		m.postBusy = false
+		m.flushPosts()
+		return
+	}
+	if r.writeEnd {
+		m.writeBusy = false
+		m.flushWrites()
 		return
 	}
 	c := r.c
@@ -496,6 +575,40 @@ func (m *uringMux) flushFeeds() {
 		m.feedBusy = true
 	default:
 		m.feedPend = batch
+	}
+}
+
+func (m *uringMux) flushPosts() {
+	if m.postBusy || len(m.postPend) == 0 {
+		return
+	}
+	conns := m.postPend
+	ids := m.postIDs
+	m.postPend = nil
+	m.postIDs = nil
+	select {
+	case m.jobs <- &muxJob{post: true, conns: conns, ids: ids}:
+		m.postBusy = true
+	default:
+		m.postPend = conns
+		m.postIDs = ids
+	}
+}
+
+func (m *uringMux) flushWrites() {
+	if m.writeBusy || len(m.writePend) == 0 {
+		return
+	}
+	conns := m.writePend
+	reqs := m.writeReqs
+	m.writePend = nil
+	m.writeReqs = nil
+	select {
+	case m.jobs <- &muxJob{write: true, conns: conns, reqs: reqs}:
+		m.writeBusy = true
+	default:
+		m.writePend = conns
+		m.writeReqs = reqs
 	}
 }
 
@@ -586,8 +699,9 @@ func parseEventRequest(b []byte) (*httpReq, int, bool, error) {
 		target = target[:q]
 	}
 	req := &httpReq{
-		path:  string(target),
-		close: bytes.Equal(parts[2], []byte("HTTP/1.0")),
+		method: string(parts[0]),
+		path:   string(target),
+		close:  bytes.Equal(parts[2], []byte("HTTP/1.0")),
 	}
 	clen := 0
 	for _, line := range lines[1:] {

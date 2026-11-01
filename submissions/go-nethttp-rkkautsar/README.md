@@ -5,34 +5,36 @@
 **Driver:** direct cgo against the vendored SQLite 3.46.1 amalgamation (`sqlite3.c`/`sqlite3.h`), built with `SQLITE_THREADSAFE=2` and `SQLITE_OPEN_NOMUTEX`
 **Serving:** direct on `HOST:PORT` (`0.0.0.0:80` in the benchmark); no Nginx.
 
-Five endpoints. Concurrent requests for the same feed or post are pooled into one in-flight
-SQLite read and share its result; the group is deleted as soon as it completes. Nothing is
+Five endpoints. The default raw io_uring mux batches reads and writes through one DB owner.
+The Go fallback loop pools concurrent requests for the same feed or post into one in-flight
+SQLite read and shares its result; the group is deleted as soon as it completes. Nothing is
 cached after a group finishes, so every request group reads its data from SQLite while it is
 being served.
 
 ## Implementation notes
 
-- **Split read/write paths.** Reads use a pool of 2 connections (the measured sweet spot on
-  1 vCPU; `READ_CONNS` overrides it). Writes use one dedicated connection and a writer
-  goroutine that group-commits queued create/like jobs every `WRITE_BATCH_MS` (default 100 ms).
-  Every write response waits for that commit, so a 201/200 is only sent for durable rows.
-  Rule 6 explicitly allows group commit under that condition.
-- **Raw io_uring request mux (`URING=1`, opt-in).** One event loop owns the
-  ring, registered provided-buffer ring (`IORING_REGISTER_PBUF_RING`), fd table,
-  HTTP parser, output queues and raw `IORING_OP_SEND` submissions. One DB
-  owner goroutine executes the blocking SQLite handler; `/feed` requests are
-  batched per event-loop turn and share one query result. There is no goroutine
-  per connection and no per-request transport goroutine. Multishot receives re-arm only when
-  `IORING_CQE_F_MORE` is absent or on `-ENOBUFS`; consumed buffers are returned
-  by advancing the buffer-ring tail. There is no `iouring-go` dependency and no
-  vendor tree. The Go connection loop remains the default: it is faster for the
-  current blocking SQLite handler, and the mux falls back to it on setup failure.
-- **In-flight read coalescing.** A request for `/feed` or `/posts/:id` joins the current
+- **Split read/write connections.** Reads use a pool of 2 connections (the measured sweet spot
+  on 1 vCPU; `READ_CONNS` overrides it). Writes use one dedicated connection. The raw mux
+  applies each write batch with one `BEGIN IMMEDIATE`/`COMMIT`; every response waits for the
+  commit, so a 201/200 is only sent for durable rows. The Go fallback's writer goroutine
+  group-commits queued create/like jobs every `WRITE_BATCH_MS` (default 100 ms).
+- **Raw io_uring DB-owner mux is the default (`URING` unset or `1`).** One event loop owns
+  the ring, registered provided-buffer ring (`IORING_REGISTER_PBUF_RING`), fd table, HTTP
+  parser, output queues and raw `IORING_OP_SEND` submissions. It accepts with multishot
+  `IORING_OP_ACCEPT`, waits only in `io_uring_enter(GETEVENTS)`, and wakes from the DB owner
+  through a pipe read SQE; there is no epoll and no eventfd. One DB owner goroutine executes
+  the blocking SQLite work. Each event-loop turn batches `/feed` into one query,
+  `GET /posts/:id` IDs into one `IN` query, and POST creates/likes into one transaction. There
+  is no goroutine per connection and no per-request transport goroutine. Multishot receives
+  re-arm only when `IORING_CQE_F_MORE` is absent or on `-ENOBUFS`; consumed buffers are
+  returned by advancing the buffer-ring tail. `URING=0`, or a ring setup failure, falls back
+  to the Go connection loop. There is no `iouring-go` dependency and no vendor tree.
+- **In-flight read coalescing (Go fallback).** A request for `/feed` or `/posts/:id` joins the current
   group for that key instead of issuing its own query. The key includes a generation counter
   bumped after every successful commit, so a request that starts after a 201/200 can never
   join a read that began before that write. Completed groups are removed immediately; there
   is no time-based or cross-request cache.
-- **Read batch window.** A read leader waits `READ_BATCH_US` (default 500 µs) before
+- **Read batch window (Go fallback).** A read leader waits `READ_BATCH_US` (default 500 µs) before
   querying, so concurrent requests can join the group. On one vCPU an immediate leader
   finishes before another goroutine gets CPU, which made coalescing almost useless (measured
   group size ≈1.02). With the window at 100 clients: `/feed` went from 7.6k to 18.5k req/s,
@@ -108,6 +110,20 @@ These are local emulations, not the official benchmark. Above ~10k VUs the rig i
 Docker Desktop's VM memory (k6 VU runtimes), not by the server. The numbers above predate the
 direct-cgo/coalescing changes and are kept as a baseline; the current build was re-tested for
 correctness and throughput separately.
+
+## Local mixed-load check
+
+Pinned to one server CPU, fresh seed database, 15-second closed-loop runs:
+
+| Path | Concurrency | Requests/s | p50 | p95 | p99 | max | Errors |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `URING` default | 200 | 18,460 | 8.8 ms | 22.6 ms | 63.6 ms | 222 ms | 0 |
+| `URING` default | 1,000 | 18,290 | 52.6 ms | 76.2 ms | 98.9 ms | 296 ms | 0 |
+| `URING=0` fallback | 200 | 18,411 | 8.8 ms | 22.8 ms | 63.8 ms | 305 ms | 0 |
+
+Mix: 75% `/feed`, 20% `GET /posts/:id`, 3% create post, 2% like. All successful responses;
+the load client is a local closed-loop driver, so this is an emulation, not the official
+benchmark.
 
 ## Scripts
 

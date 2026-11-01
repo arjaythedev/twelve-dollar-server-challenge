@@ -9,7 +9,7 @@ HS256 verification, and SQLite (the pinned, unmodified amalgamation, linked in s
 | Crates | `io-uring` 0.7.15, `libc` 0.2.183, `sha2` 0.10.9, `memchr` 2.8.0, `cc` 1.2.56 (build); pinned in `Cargo.lock` |
 | SQLite | 3.54.1 amalgamation, sha256-checked, compiled by `build.rs` with `-O3 -march=native` |
 | Nginx or direct | **Direct**: serves `HOST:PORT` itself (`0.0.0.0:80` on the benchmark box) |
-| Needs | Linux 6.1+ (io_uring with `DEFER_TASKRUN`, multishot receive, provided-buffer rings). There is no epoll fallback, so it won't start where io_uring is blocked (e.g. Docker's default seccomp profile) |
+| Needs | Linux 6.1+ (io_uring with `DEFER_TASKRUN`, multishot receive, provided-buffer rings). There is no epoll fallback, so it won't start where io_uring is blocked (e.g. Docker's default seccomp profile). Ubuntu's 6.8.0-136+ kernels refuse a buffer-ring registration whose reserved words are zero ([Launchpad #2162843](https://bugs.launchpad.net/ubuntu/+source/linux/+bug/2162843), an inverted check), so a refused registration is retried once with `resv[0]=1` |
 
 ## Reads go through SQLite's B-tree, not its SQL engine
 

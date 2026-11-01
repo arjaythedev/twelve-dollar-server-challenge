@@ -8,7 +8,7 @@ mod jwt;
 use app::App;
 use io_uring::{cqueue, opcode, squeue, types, IoUring, SubmissionQueue, Submitter};
 use std::io;
-use std::os::fd::RawFd;
+use std::os::fd::{AsRawFd, RawFd};
 use std::sync::atomic::{AtomicU16, Ordering};
 
 const GETEVENTS: u32 = 1; // IORING_ENTER_GETEVENTS
@@ -47,8 +47,36 @@ struct BufRing {
     mem: Vec<u8>,
 }
 
+/// Registers buffer group 0. Ubuntu's 6.8.0-136 and later kernels invert the check on the
+/// reserved words (Launchpad #2162843): they refuse all zeroes and accept a nonzero `resv[0]`,
+/// so a refused registration is tried once more that way. A correct kernel never gets there.
+fn register_buf_ring(ring_fd: RawFd, addr: u64) -> io::Result<()> {
+    #[repr(C)]
+    struct BufReg {
+        ring_addr: u64,
+        ring_entries: u32,
+        bgid: u16,
+        flags: u16,
+        resv: [u64; 3],
+    }
+    const IORING_REGISTER_PBUF_RING: libc::c_long = 22;
+    let mut reg = BufReg { ring_addr: addr, ring_entries: BUF_COUNT as u32, bgid: 0, flags: 0, resv: [0; 3] };
+    let mut rc = 0;
+    for _ in 0..2 {
+        rc = unsafe { libc::syscall(libc::SYS_io_uring_register, ring_fd, IORING_REGISTER_PBUF_RING, &reg as *const BufReg, 1) };
+        if rc == 0 || io::Error::last_os_error().raw_os_error() != Some(libc::EINVAL) {
+            break;
+        }
+        reg.resv[0] = 1;
+    }
+    if rc < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 impl BufRing {
-    fn new(sub: &Submitter) -> io::Result<BufRing> {
+    fn new(ring_fd: RawFd) -> io::Result<BufRing> {
         let bytes = BUF_COUNT as usize * 16;
         let ring = unsafe {
             libc::mmap(std::ptr::null_mut(), bytes, libc::PROT_READ | libc::PROT_WRITE, libc::MAP_PRIVATE | libc::MAP_ANONYMOUS, -1, 0)
@@ -57,7 +85,7 @@ impl BufRing {
             return Err(io::Error::last_os_error());
         }
         let mut b = BufRing { ring: ring as *mut u8, tail: 0, mem: vec![0u8; BUF_COUNT as usize * BUF_SIZE] };
-        unsafe { sub.register_buf_ring_with_flags(ring as u64, BUF_COUNT, 0, 0)? };
+        register_buf_ring(ring_fd, ring as u64)?;
         for i in 0..BUF_COUNT {
             b.add(i);
         }
@@ -159,7 +187,7 @@ impl Ring {
             .setup_cqsize(CQ_ENTRIES)
             .build(SQ_ENTRIES)?;
         uring.submitter().register_files_sparse(slots)?;
-        let bufs = BufRing::new(&uring.submitter())?;
+        let bufs = BufRing::new(uring.as_raw_fd())?;
         let conns = (0..slots).map(|_| Conn::default()).collect();
         // At most a quarter of a small table, so a full ring can still drain below 2x margin.
         let margin = (slots / 8).clamp(ACCEPT_DEPTH + 1, 512).min(slots / 4);

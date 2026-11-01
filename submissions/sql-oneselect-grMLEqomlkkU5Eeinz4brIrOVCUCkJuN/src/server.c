@@ -20,6 +20,8 @@ static int EP, LFD, MAXFD, NOPEN;
 static conn *CONNS;          /* indexed by fd */
 static conn IDLE;            /* list head: oldest idle connection first */
 
+static void update_pressure(void);
+
 static void idle_remove(conn *c) { if (c->next) { c->prev->next = c->next; c->next->prev = c->prev; c->next = c->prev = 0; } }
 static void idle_push(conn *c) {
   idle_remove(c);
@@ -34,15 +36,32 @@ static void close_conn(conn *c) {
   free(c->in); free(c->out);
   c->in = c->out = 0;
   c->in_len = c->in_cap = c->out_len = c->out_off = c->out_cap = 0;
-  c->open = c->busy = c->close_after = c->sent_continue = 0;
+  c->open = c->busy = c->close_after = c->sent_continue = c->draining = 0;
   c->gen++;
   NOPEN--;
+  update_pressure();
 }
 
-/* LimitNOFILE is 65,535, fewer than the number of users. Near the limit, close the connections that
- * have been idle longest. */
-static void shed_idle(int n) {
-  while (n-- > 0 && IDLE.next != &IDLE) close_conn(IDLE.next);
+/* LimitNOFILE is 65,535, fewer than the number of users. Within MAXFD/16 of the limit, replies carry
+ * Connection: close and the socket is closed after the reply is sent. The client has just been
+ * answered, so no request is in flight and it opens a new connection next time. Off again below
+ * MAXFD/8, so it doesn't flap. */
+static void update_pressure(void) {
+  if (NOPEN > MAXFD - MAXFD / 16) CLOSE_PRESSURE = 1;
+  else if (NOPEN < MAXFD - MAXFD / 8) CLOSE_PRESSURE = 0;
+}
+
+/* Last resort when accept still runs out of descriptors: close idle connections, most recently used
+ * first (the furthest from sending again), skipping any that already have a request waiting. A socket
+ * closed with unread data sends a reset, which a client sees as an error. Returns how many it closed. */
+static int shed_idle(int n) {
+  int closed = 0;
+  char b;
+  for (conn *c = IDLE.prev, *p; c != &IDLE && closed < n; c = p) {
+    p = c->prev;
+    if (recv(c->fd, &b, 1, MSG_PEEK | MSG_DONTWAIT) < 0 && errno == EAGAIN) { close_conn(c); closed++; }
+  }
+  return closed;
 }
 
 static void set_events(conn *c, uint32_t ev) {
@@ -61,7 +80,10 @@ static int flush(conn *c) {
   }
   free(c->out);
   c->out = 0; c->out_len = c->out_off = c->out_cap = 0;
-  if (c->close_after && !c->busy) { close_conn(c); return 0; }
+  /* After a Connection: close reply, wait for the client's FIN rather than closing first: whoever closes
+   * first keeps the TIME_WAIT, and on the server those collide with clients reusing source ports. A
+   * draining connection sits on the idle list, so shed_idle reclaims it if the FIN never comes. */
+  if (c->close_after && !c->busy) { c->draining = 1; idle_push(c); return 1; }
   if (!c->busy) idle_push(c);
   return 1;
 }
@@ -105,6 +127,12 @@ static void serve_pending(void) {
 
 static void on_readable(conn *c) {
   static char rbuf[65536];
+  if (c->draining) {  /* only the FIN matters now */
+    ssize_t n;
+    while ((n = read(c->fd, rbuf, sizeof rbuf)) > 0) {}
+    if (n == 0 || errno != EAGAIN) close_conn(c);
+    return;
+  }
   for (;;) {
     ssize_t n = read(c->fd, rbuf, sizeof rbuf);
     if (n == 0 || (n < 0 && errno != EAGAIN && errno != EINTR)) { if (!c->busy) close_conn(c); else c->close_after = 1; return; }
@@ -126,15 +154,16 @@ static void on_accept(void) {
   for (;;) {
     int fd = accept4(LFD, 0, 0, SOCK_NONBLOCK | SOCK_CLOEXEC);
     if (fd < 0) {
-      if (errno == EMFILE || errno == ENFILE) { shed_idle(1024); continue; }
+      if ((errno == EMFILE || errno == ENFILE) && shed_idle(256)) continue;
       if (errno == EINTR || errno == ECONNABORTED) continue;
       return;  /* EAGAIN */
     }
     if (fd >= MAXFD) { close(fd); continue; }
-    if (NOPEN >= MAXFD - 1024) shed_idle(1024);
+    if (NOPEN >= MAXFD - 64) shed_idle(256);
     conn *c = &CONNS[fd];
     c->fd = fd; c->open = 1;
     NOPEN++;
+    update_pressure();
     struct epoll_event e = {.events = EPOLLIN, .data.fd = fd};
     epoll_ctl(EP, EPOLL_CTL_ADD, fd, &e);
     idle_push(c);

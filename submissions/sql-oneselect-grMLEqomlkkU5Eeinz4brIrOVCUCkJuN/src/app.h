@@ -11,7 +11,7 @@ typedef struct conn {
   uint32_t gen;             /* bumped on close, so a stale reference is ignored */
   char *in;  uint32_t in_len, in_cap;
   char *out; uint32_t out_len, out_off, out_cap;
-  uint8_t open, busy, close_after, sent_continue;
+  uint8_t open, busy, close_after, sent_continue, draining;
   struct conn *prev, *next; /* idle list (server.c) */
 } conn;
 
@@ -32,6 +32,8 @@ enum { BATCH_MAX = 256, ARENA_SIZE = 4 << 20 };
 static request BATCH[BATCH_MAX];
 static int NBATCH;
 static char *ARENA;
+/* Set by server.c when it is close to its descriptor limit: replies then carry Connection: close. */
+static int CLOSE_PRESSURE;
 static size_t ARENA_USED;
 
 static void out_reserve(conn *c, uint32_t more) {
@@ -145,7 +147,7 @@ static int parse_request(conn *c, request *r) {
   r->auth = auth ? arena_copy(auth, alen) : 0; r->auth_len = alen;
   r->body = arena_copy(he + 4, (int)clen); r->body_len = (int)clen;
   if ((auth && !r->auth) || !r->body) return -2;  /* arena full: run the batch first */
-  c->close_after = conn_close && !(http10 && conn_keep);
+  c->close_after = (conn_close && !(http10 && conn_keep)) || CLOSE_PRESSURE;
   return (int)total;
 }
 

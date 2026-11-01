@@ -66,11 +66,15 @@ type readCall struct {
 }
 
 type readGroup struct {
-	mu sync.Mutex
-	m  map[string]*readCall
+	mu      sync.Mutex
+	m       map[string]*readCall
+	enabled bool
 }
 
 func (g *readGroup) do(key string, window time.Duration, fn func() readResp) readResp {
+	if !g.enabled {
+		return fn()
+	}
 	g.mu.Lock()
 	if c, ok := g.m[key]; ok {
 		g.mu.Unlock()
@@ -142,6 +146,12 @@ func main() {
 			readConns = n
 		}
 	}
+	coalesce := true
+	if v := os.Getenv("READ_COALESCE"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			coalesce = b
+		}
+	}
 
 	dsn := path + "?_journal_mode=WAL&_synchronous=NORMAL&_busy_timeout=5000" +
 		"&_cache_size=-16384&_mmap_size=268435456&_mutex=no"
@@ -179,6 +189,7 @@ func main() {
 		writeCh:     make(chan *writeJob, 256),
 		batchWindow: time.Duration(batchMS) * time.Millisecond,
 		readWindow:  time.Duration(windowUS) * time.Microsecond,
+		readsGroup:  readGroup{enabled: coalesce},
 	}
 	if a.feed, err = readDB.Prepare(feedSQL); err != nil {
 		log.Fatal(err)

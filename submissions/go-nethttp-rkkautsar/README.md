@@ -18,7 +18,8 @@ Serving is direct on `HOST:PORT`, no Nginx.
   handlers can join; the group is deleted as soon as the read completes. A
   generation counter in the key is bumped after every commit, so a request that
   starts after a 201/200 cannot join a pre-write read. There is no cache that
-  survives a completed group.
+  survives a completed group. `READ_COALESCE=0` disables joining and the
+  `READ_BATCH_US` window entirely; each request executes its own SQLite read.
 - **Write group commit.** One dedicated `*sql.Conn` runs queued create/like
   jobs in one `BEGIN IMMEDIATE … COMMIT` every `WRITE_BATCH_MS` (default
   100 ms). Every response waits for the commit.

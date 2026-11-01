@@ -179,6 +179,14 @@ func main() {
 		readWindow:  time.Duration(windowUS) * time.Microsecond,
 	}
 	go a.writeLoop()
+	// Opt-in profiling listener; unused in the benchmark runs.
+	if addr := os.Getenv("PPROF_ADDR"); addr != "" {
+		go func() {
+			log.Println("pprof listening on", addr)
+			log.Println(http.ListenAndServe(addr, nil))
+		}()
+	}
+
 	// The raw io_uring + DB-owner path is the default. URING=0 opts out and
 	// exercises the goroutine/serveConn fallback.
 	if os.Getenv("URING") != "0" {
@@ -231,14 +239,6 @@ func main() {
 			log.Printf("raw io_uring request mux enabled (%d shards)", started)
 			select {}
 		}
-	}
-
-	// Opt-in profiling listener; unused in the benchmark runs.
-	if addr := os.Getenv("PPROF_ADDR"); addr != "" {
-		go func() {
-			log.Println("pprof listening on", addr)
-			log.Println(http.ListenAndServe(addr, nil))
-		}()
 	}
 
 	ln, err := net.Listen("tcp", host+":"+port)

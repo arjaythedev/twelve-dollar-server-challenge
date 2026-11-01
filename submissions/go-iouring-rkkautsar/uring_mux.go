@@ -37,6 +37,7 @@ const (
 
 type muxConn struct {
 	id         uint64
+	bufGroup   uint16
 	fileIndex  uint32
 	in         []byte
 	out        [][]byte
@@ -106,8 +107,8 @@ type uringMux struct {
 	postBatch    func([]int64) map[int64][]byte
 	writeBatch   func([]*httpReq) []readResp
 	ring         *rawRing
-	br           *readBufRing
-	bufs         []byte
+	brs          []*readBufRing
+	bufGroups    [][]byte
 	wakeR        int
 	wakeW        int
 	wakeBuf      []byte
@@ -143,17 +144,23 @@ func newUringMux(handler MuxHandler, feed func() []byte, postBatch func([]int64)
 		syscall.Close(ring.fd)
 		return nil, fmt.Errorf("register files: %w", err)
 	}
-	mem, err := syscall.Mmap(-1, 0, readBufCount*16, syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_PRIVATE|syscall.MAP_ANONYMOUS)
-	if err != nil {
-		syscall.Close(ring.fd)
-		return nil, err
-	}
-	bufs := make([]byte, readBufCount*readBufLen)
-	br, err := newReadBufRing(ring, mem, bufs)
-	if err != nil {
-		syscall.Munmap(mem)
-		syscall.Close(ring.fd)
-		return nil, fmt.Errorf("pbuf: %w", err)
+	brs := make([]*readBufRing, readBufGroups)
+	bufGroups := make([][]byte, readBufGroups)
+	for g := 0; g < readBufGroups; g++ {
+		mem, err := syscall.Mmap(-1, 0, readBufCount*16, syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_PRIVATE|syscall.MAP_ANONYMOUS)
+		if err != nil {
+			syscall.Close(ring.fd)
+			return nil, err
+		}
+		bufs := make([]byte, readBufCount*readBufLen)
+		br, err := newReadBufRing(ring, mem, bufs, g)
+		if err != nil {
+			syscall.Munmap(mem)
+			syscall.Close(ring.fd)
+			return nil, fmt.Errorf("pbuf: %w", err)
+		}
+		brs[g] = br
+		bufGroups[g] = bufs
 	}
 	var pipe [2]int
 	if err := syscall.Pipe(pipe[:]); err != nil {
@@ -171,8 +178,8 @@ func newUringMux(handler MuxHandler, feed func() []byte, postBatch func([]int64)
 		postBatch:  postBatch,
 		writeBatch: writeBatch,
 		ring:       ring,
-		br:         br,
-		bufs:       bufs,
+		brs:        brs,
+		bufGroups:  bufGroups,
 		wakeR:      pipe[0],
 		wakeW:      pipe[1],
 		wakeBuf:    make([]byte, 1),
@@ -338,8 +345,8 @@ func (m *uringMux) arm(c *muxConn) {
 		sqe.IOPrio = recvMultishot
 		sqe.FD = int32(c.fileIndex)
 		sqe.Len = 0
-		sqe.BufIndex = readBufGroup
-		sqe.UserData = c.id<<3 | muxReadTag
+		sqe.BufIndex = c.bufGroup
+		sqe.UserData = c.id<<5 | uint64(c.bufGroup)<<3 | muxReadTag
 		c.reading = true
 		m.toSub++
 		return
@@ -420,7 +427,7 @@ func (m *uringMux) submitSends() {
 		sqe.Addr = uint64(uintptr(unsafe.Pointer(&p[c.outOff])))
 		sqe.Len = uint32(len(p) - c.outOff)
 		sqe.RWFlags = syscall.MSG_NOSIGNAL
-		sqe.UserData = c.id<<3 | muxWriteTag
+		sqe.UserData = c.id<<5 | uint64(c.bufGroup)<<3 | muxWriteTag
 		c.writing = true
 		m.toSub++
 	}
@@ -506,13 +513,14 @@ func (m *uringMux) drainCQEs() {
 			m.finishClose()
 			return
 		}
-		id := cqe.UserData >> 3
+		id := cqe.UserData >> 5
 		c := m.conns[id]
 		if c == nil || c.closed {
 			if tag == muxReadTag && cqe.Flags&cqeBuffer != 0 {
 				bid := int((cqe.Flags >> 16) & 0xffff)
-				if bid < readBufCount {
-					m.br.put(m.bufs, bid)
+				g := int((cqe.UserData >> 3) & 3)
+				if g < len(m.brs) {
+					m.brs[g].put(m.bufGroups[g], bid)
 				}
 			}
 			return
@@ -533,18 +541,21 @@ func (m *uringMux) finishRead(c *muxConn, cqe *rawCQE) {
 	if hasBuf {
 		bid = int((flags >> 16) & 0xffff)
 	}
-	if res > 0 && hasBuf && bid < readBufCount {
-		data := append([]byte(nil), m.bufs[bid*readBufLen:bid*readBufLen+int(res)]...)
-		m.br.put(m.bufs, bid)
-		m.handleData(c, data)
-		if flags&cqeMore == 0 {
-			c.reading = false
-			m.arm(c)
+	if hasBuf && bid >= 0 {
+		g := int(c.bufGroup)
+		if g >= 0 && g < len(m.brs) {
+			if res > 0 && bid < readBufCount {
+				data := append([]byte(nil), m.bufGroups[g][bid*readBufLen:bid*readBufLen+int(res)]...)
+				m.brs[g].put(m.bufGroups[g], bid)
+				m.handleData(c, data)
+				if flags&cqeMore == 0 {
+					c.reading = false
+					m.arm(c)
+				}
+				return
+			}
+			m.brs[g].put(m.bufGroups[g], bid)
 		}
-		return
-	}
-	if hasBuf && bid >= 0 && bid < readBufCount {
-		m.br.put(m.bufs, bid)
 	}
 	if res == -int32(syscall.ENOBUFS) || res == -int32(syscall.EAGAIN) || res == -int32(syscall.EINTR) {
 		c.reading = false
@@ -575,6 +586,9 @@ func (m *uringMux) finishWrite(c *muxConn, cqe *rawCQE) {
 	}
 	c.out = c.out[1:]
 	c.outOff = 0
+	if len(c.out) == 0 {
+		c.out = nil
+	}
 	if len(c.out) > 0 {
 		if !c.queued {
 			c.queued = true
@@ -591,8 +605,19 @@ func (m *uringMux) handleData(c *muxConn, data []byte) {
 	if c.closed {
 		return
 	}
-	c.in = append(c.in, data...)
+	if len(c.in) == 0 {
+		c.in = data
+	} else {
+		c.in = append(c.in, data...)
+	}
 	m.pump(c)
+}
+
+func (c *muxConn) consume(n int) {
+	c.in = c.in[n:]
+	if len(c.in) == 0 {
+		c.in = nil
+	}
 }
 
 func (m *uringMux) pump(c *muxConn) {
@@ -608,7 +633,7 @@ func (m *uringMux) pump(c *muxConn) {
 		return
 	}
 	if req.method == "GET" && req.path == "/feed" {
-		c.in = c.in[used:]
+		c.consume(used)
 		c.busy = true
 		m.feedPend = append(m.feedPend, c)
 		return
@@ -617,7 +642,7 @@ func (m *uringMux) pump(c *muxConn) {
 		rest := req.path[len("/posts/"):]
 		if !strings.HasSuffix(rest, "/like") {
 			if id, ok := parsePostID(rest); ok {
-				c.in = c.in[used:]
+				c.consume(used)
 				c.busy = true
 				m.postPend = append(m.postPend, c)
 				m.postIDs = append(m.postIDs, id)
@@ -626,7 +651,7 @@ func (m *uringMux) pump(c *muxConn) {
 		}
 	}
 	if req.method == "POST" && (req.path == "/posts" || strings.HasSuffix(req.path, "/like")) {
-		c.in = c.in[used:]
+		c.consume(used)
 		c.busy = true
 		m.writePend = append(m.writePend, c)
 		m.writeReqs = append(m.writeReqs, req)
@@ -634,7 +659,7 @@ func (m *uringMux) pump(c *muxConn) {
 	}
 	select {
 	case m.jobs <- &muxJob{c: c, req: req}:
-		c.in = c.in[used:]
+		c.consume(used)
 		c.busy = true
 	default:
 		c.waiting = true

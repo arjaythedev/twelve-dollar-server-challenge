@@ -24,9 +24,9 @@ const (
 
 	readSqEntries = 4096
 	readCqEntries = 8192
-	readBufCount  = 8192
-	readBufLen    = 2048
-	readBufGroup  = 0
+	readBufCount  = 32768
+	readBufLen    = 1024
+	readBufGroups = 2
 )
 
 type readBuf struct {
@@ -50,6 +50,7 @@ type readBufRing struct {
 	entries uint32
 	mask    uint32
 	tail    uint32
+	baseID  int
 }
 
 func rawEventfd() (int, error) {
@@ -60,11 +61,11 @@ func rawEventfd() (int, error) {
 	return int(fd), nil
 }
 
-func newReadBufRing(ring *rawRing, mem []byte, bufs []byte) (*readBufRing, error) {
+func newReadBufRing(ring *rawRing, mem []byte, bufs []byte, group int) (*readBufRing, error) {
 	reg := readBufReg{
 		RingAddr: uint64(uintptr(unsafe.Pointer(&mem[0]))),
 		RingEnts: readBufCount,
-		BGID:     readBufGroup,
+		BGID:     uint16(group),
 	}
 	if _, _, errno := syscall.Syscall6(ioUringRegister, uintptr(ring.fd), registerPbufRing, uintptr(unsafe.Pointer(&reg)), 1, 0, 0); errno != 0 {
 		return nil, errno
@@ -81,10 +82,14 @@ func newReadBufRing(ring *rawRing, mem []byte, bufs []byte) (*readBufRing, error
 		entries: readBufCount,
 		mask:    readBufCount - 1,
 		tail:    readBufCount,
+		baseID:  0,
 	}, nil
 }
 
 func (b *readBufRing) put(base []byte, id int) {
+	if id < 0 || id >= readBufCount {
+		return
+	}
 	slot := b.tail & b.mask
 	e := (*readBuf)(unsafe.Pointer(&b.mem[int(slot)*16]))
 	e.Addr = uint64(uintptr(unsafe.Pointer(&base[id*readBufLen])))

@@ -2,7 +2,7 @@
 # Runs once as root on a clean Ubuntu 24.04. Installs the toolchain from official release tarballs,
 # each pinned by version and sha256, into /opt/wat-tdsc:
 #   wabt 1.0.39        wat2wasm: the hand-written WAT -> wasm
-#   wasi-sdk 34        clang for wasm32-wasip1: compiles stock SQLite (and its 30-line export glue) to wasm
+#   wasi-sdk 34        clang for wasm32-wasip1: compiles stock SQLite (#included by sqlite_glue.c, which adds the exports) to wasm
 #   binaryen 125       wasm-merge: joins the WAT module and the SQLite module into one module
 #   WasmEdge 0.18.1    the runtime: `wasmedge compile` (AOT, LLVM) and libwasmedge for the host in src/host.c
 # The app itself (and SQLite, pinned in build.sh) is built from source by build.sh.

@@ -180,3 +180,32 @@ an explicit transaction, `INSERT ... RETURNING` needs a temp file, and WASI has 
 | base (c01300f) | 8.03, 7.87, 7.84 | 37.5, 35.2, 34.5 | 20.3k |
 | E9 group commit | 7.12, 6.05, 6.38 | 39.1, 37.0, 38.0 | 20.5k |
 Median -19% CPU per request; every E9 rep is below every base rep. p95 unchanged (checkpoint stalls).
+
+## Metric correction: ul's CPU number undercounts ~2x (1 Nov)
+ul's `cpu=` (and every us/req above, E3-E9) comes from the server's /proc utime+stime ticks over the
+window. Under `perf stat -e task-clock` on the same runs it reads about half: e.g. E9 "6-7 us/req" is
+21 us/req of task-clock. The comparisons inside one table still hold (same bias for every variant, all
+interleaved), but the absolute numbers are low. From here on: `pstat.sh` = ub.sh with a 25 s window and
+`sudo perf stat -p <server> -- sleep 15` from second 14; it prints task-clock us/req and user/kernel
+cycles and instructions per request. 4000 users x0.013 (~30k req/s, below ul's ~62k ceiling, so every
+variant serves the same offered load).
+
+## E10: /feed and GET /posts/:id on SQLite's B-tree layer (1 Nov) — kept
+`sqlite_glue.c` now `#include`s the amalgamation (one translation unit) and exports one-line wrappers
+over the cursor functions (`sqlite3BtreeCursor`, First/Next/Previous, TableMoveto, IndexMoveto with a
+one-field UnpackedRecord, PayloadFetch). The WAT reads the schema's root pages at start, keeps four
+cursors (posts, users, posts_created_at_id_idx, likes_post_id_idx) open per transaction, decodes records
+itself (varints, serial types) and counts likes by an index range scan (one scan over the 20 feed ids
+when their span is < 256, else one seek each). Guards: UTF-8 database, schema cookie checked per
+transaction, overflow pages or anything unexpected fall back to the SQL statements. Same pager, page
+cache, WAL and locks: only the bytecode engine is skipped. Responses byte-identical to E9 over 314
+requests; 42/42. pstat, 4000 users x0.013, 3 interleaved reps:
+| variant | task-clock us/req | user cycles/req | user instr/req | kernel instr/req | p95 ms | rps |
+|---|---|---|---|---|---|---|
+| E9 (fddfada) | 21.03, 21.23, 21.31 | 55.5k, 56.0k, 56.2k | 155k | 28k | 42.5-43.6 | 30.0k |
+| E10 | 15.26, 15.25, 15.55 | 28.8k, 28.9k, 29.6k | 76.4k | 28k | 39.3-39.9 | 30.5k |
+| ObjC (objc-uring-delneg) | 10.08, 9.47, 9.94 | 10.7k-11.1k | 27.1k | 25k | 1.8-1.85 | 32.4k |
+| C (c-iouring-public) | 9.58, 9.48, 9.65 | 10.5k-10.9k | 22.4k | 26k | 1.45 | 32.5k |
+-28% CPU per request, user instructions halved. WAT is now ~1.6x the baselines' CPU: user cycles ~2.7x
+theirs, kernel about equal. Their p95 is 1.5-1.9 ms against WAT's ~40 ms: the inline WAL checkpoint
+(both baselines checkpoint off the loop). E11 next.

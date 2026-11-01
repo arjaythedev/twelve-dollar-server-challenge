@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Builds as a normal user into ./build (toolchain from install.sh in /opt/wat-tdsc):
-#   1. SQLite 3.54.1 amalgamation (pinned sha256) + src/sqlite_glue.c -> sq.wasm (wasi-sdk clang, WASI reactor)
+#   1. src/sqlite_glue.c, which #includes the SQLite 3.54.1 amalgamation (pinned sha256) -> sq.wasm (wasi-sdk clang, WASI reactor)
 #   2. src/app.wat -> app.wasm (wat2wasm)
 #   3. wasm-merge sq.wasm + app.wasm -> merged.wasm; `wasmedge compile` -> app.so (AOT native code)
 #   4. src/host.c -> host (gcc, links libwasmedge)
@@ -16,7 +16,7 @@ if [ ! -f $SQ/sqlite3.c ]; then
 fi
 F="-O2 -D_GNU_SOURCE -DSQLITE_THREADSAFE=0 -DSQLITE_DEFAULT_MEMSTATUS=0 -DSQLITE_OMIT_LOAD_EXTENSION"
 $WS/bin/clang --target=wasm32-wasip1 $F -I$SQ -mexec-model=reactor \
-  -Wl,-z,stack-size=1048576 -Wl,--global-base=16777216 -o sq.wasm ../src/sqlite_glue.c $SQ/sqlite3.c
+  -Wl,-z,stack-size=1048576 -Wl,--global-base=16777216 -o sq.wasm ../src/sqlite_glue.c   # it #includes $SQ/sqlite3.c
 $T/wabt/bin/wat2wasm --enable-all ../src/app.wat -o app.wasm
 $T/binaryen/bin/wasm-merge --enable-simd --enable-bulk-memory sq.wasm sq app.wasm app -o merged.wasm
 LD_LIBRARY_PATH=$WE/lib $WE/bin/wasmedge compile --optimize=3 merged.wasm app.so >/dev/null

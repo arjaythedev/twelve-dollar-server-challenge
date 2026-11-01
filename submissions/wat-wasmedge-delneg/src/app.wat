@@ -16,6 +16,8 @@
 ;;   0x285000  TXT   decoded POST body, 64 KiB
 ;;   0x295000  MISC  out-params, clock, iovec, digit buffer
 ;;   0x2a0000  LAST  per-fd ms of the last event (idle eviction), 65536 x i32
+;;   0x2e0000  BT    B-tree reads: decoded columns (8 x 32 B), out-params at 0x2e0100, feed ids at 0x2e0200,
+;;                   feed like counts at 0x2e0300, like counts by id span at 0x2e0400 (256 x i64)
 ;;   0x300000  RECS  the batch's responses: (fd, start, len, close after) x up to 60,000
 ;;   0x400000  OUTB  the batch's response bytes, sent after COMMIT (flushed between connections at 12 MiB)
 (module
@@ -34,6 +36,23 @@
   (import "sq" "db_changes" (func $changes (param i32) (result i32)))
   (import "sq" "db_errmsg" (func $errmsg (param i32) (result i32)))
   (import "sq" "env_get" (func $getenv (param i32) (result i32)))
+  (import "sq" "db_autocommit" (func $autocommit (param i32) (result i32)))
+  (import "sq" "db_utf8" (func $db_utf8 (param i32) (result i32)))
+  (import "sq" "bt_of" (func $bt_of (param i32) (result i32)))
+  (import "sq" "bt_read" (func $bt_read (param i32 i32) (result i32)))
+  (import "sq" "key_info" (func $key_info (param i32 i32 i32) (result i32)))
+  (import "sq" "cur_size" (func $cur_size (result i32)))
+  (import "sq" "cur_open" (func $cur_open (param i32 i32 i32 i32) (result i32)))
+  (import "sq" "cur_close" (func $cur_close (param i32) (result i32)))
+  (import "sq" "cur_first" (func $cur_first (param i32 i32) (result i32)))
+  (import "sq" "cur_next" (func $cur_next (param i32) (result i32)))
+  (import "sq" "cur_prev" (func $cur_prev (param i32) (result i32)))
+  (import "sq" "cur_eof" (func $cur_eof (param i32) (result i32)))
+  (import "sq" "cur_rowid" (func $cur_rowid (param i32) (result i64)))
+  (import "sq" "cur_seek_rowid" (func $cur_seek_rowid (param i32 i64 i32) (result i32)))
+  (import "sq" "cur_seek_int" (func $cur_seek_int (param i32 i32 i64 i32 i32) (result i32)))
+  (import "sq" "cur_payload_size" (func $cur_psize (param i32) (result i32)))
+  (import "sq" "cur_payload" (func $cur_payload (param i32 i32) (result i32)))
   (import "sq" "mem_alloc" (func $malloc (param i32) (result i32)))
   (import "sq" "mem_free" (func $free (param i32)))
   (import "wasi_snapshot_preview1" "clock_time_get" (func $clock (param i32 i64 i32) (result i32)))
@@ -120,6 +139,12 @@
   (data (i32.const 0x101140) "fatal: cannot listen\0a")
   (data (i32.const 0x101180) "fatal: JWT_SECRET, SQLITE_PATH, HOST and PORT must be set\0a")
   (data (i32.const 0x1011c0) "COMMIT failed: the batch's connections are closed unanswered\0a")
+  (data (i32.const 0x101200) "SELECT name, rootpage FROM sqlite_schema WHERE type IN ('table','index')")
+  (data (i32.const 0x101280) "posts")
+  (data (i32.const 0x101290) "users")
+  (data (i32.const 0x1012a0) "posts_created_at_id_idx")
+  (data (i32.const 0x1012c0) "likes_post_id_idx")
+  (data (i32.const 0x1012e0) "B-tree reads off: SQL statements serve every read\0a")
   ;; SHA-256 round constants and initial state, as little-endian i32s
   (data (i32.const 0x284b00) "\98\2f\8a\42\91\44\37\71\cf\fb\c0\b5\a5\db\b5\e9\5b\c2\56\39\f1\11\f1\59\a4\82\3f\92\d5\5e\1c\ab\98\aa\07\d8\01\5b\83\12\be\85\31\24\c3\7d\0c\55\74\5d\be\72\fe\b1\de\80\a7\06\dc\9b\74\f1\9b\c1\c1\69\9b\e4\86\47\be\ef\c6\9d\c1\0f\cc\a1\0c\24\6f\2c\e9\2d\aa\84\74\4a\dc\a9\b0\5c\da\88\f9\76\52\51\3e\98\6d\c6\31\a8\c8\27\03\b0\c7\7f\59\bf\f3\0b\e0\c6\47\91\a7\d5\51\63\ca\06\67\29\29\14\85\0a\b7\27\38\21\1b\2e\fc\6d\2c\4d\13\0d\38\53\54\73\0a\65\bb\0a\6a\76\2e\c9\c2\81\85\2c\72\92\a1\e8\bf\a2\4b\66\1a\a8\70\8b\4b\c2\a3\51\6c\c7\19\e8\92\d1\24\06\99\d6\85\35\0e\f4\70\a0\6a\10\16\c1\a4\19\08\6c\37\1e\4c\77\48\27\b5\bc\b0\34\b3\0c\1c\39\4a\aa\d8\4e\4f\ca\9c\5b\f3\6f\2e\68\ee\82\8f\74\6f\63\a5\78\14\78\c8\84\08\02\c7\8c\fa\ff\be\90\eb\6c\50\a4\f7\a3\f9\be\f2\78\71\c6")
   (data (i32.const 0x284c00) "\67\e6\09\6a\85\ae\67\bb\72\f3\6e\3c\3a\f5\4f\a5\7f\52\0e\51\8c\68\05\9b\ab\d9\83\1f\19\cd\e0\5b")
@@ -153,6 +178,21 @@
   (global $maxfd (mut i32) (i32.const 0))
   (global $lastsweep (mut i32) (i32.const 0))
   (global $lis_off (mut i32) (i32.const 0))
+  ;; B-tree reads ($bt = 0: off, every read goes through SQL)
+  (global $bt (mut i32) (i32.const 0))
+  (global $r_posts (mut i32) (i32.const 0))
+  (global $r_users (mut i32) (i32.const 0))
+  (global $r_top (mut i32) (i32.const 0))
+  (global $r_likes (mut i32) (i32.const 0))
+  (global $cookie (mut i32) (i32.const 0))
+  (global $k_top (mut i32) (i32.const 0))
+  (global $k_likes (mut i32) (i32.const 0))
+  (global $csz (mut i32) (i32.const 0))
+  (global $cu_t (mut i32) (i32.const 0))
+  (global $cu_p (mut i32) (i32.const 0))
+  (global $cu_u (mut i32) (i32.const 0))
+  (global $cu_l (mut i32) (i32.const 0))
+  (global $vn (mut i32) (i32.const 0))
 
   ;; ---------- memory helpers ----------
   (func $strlen (param $p i32) (result i32)
@@ -801,8 +841,310 @@
     (i32.const 0))
 
   ;; ---------- routes ----------
+;; ---------- reads on SQLite's B-tree layer ----------
+  ;; /feed and GET /posts/:id read the tables and indexes through SQLite's own cursors (pager, page cache,
+  ;; WAL and locks are SQLite's; only the bytecode engine is skipped), inside the batch's transaction.
+  ;; Nothing is kept between requests but root pages, checked against the schema cookie on every call.
+  ;; A record this code doesn't cover (overflow pages, an unexpected type) sends the request to SQL.
+
+  ;; SQLite varint at $p (https://sqlite.org/fileformat2.html#varint); its length goes to $vn
+  (func $gv (param $p i32) (result i64)
+    (local $v i64) (local $i i32) (local $b i32)
+    (loop $l
+      (local.set $b (i32.load8_u (i32.add (local.get $p) (local.get $i))))
+      (if (i32.eq (local.get $i) (i32.const 8))
+        (then
+          (global.set $vn (i32.const 9))
+          (return (i64.or (i64.shl (local.get $v) (i64.const 8)) (i64.extend_i32_u (local.get $b))))))
+      (local.set $v (i64.or (i64.shl (local.get $v) (i64.const 7)) (i64.extend_i32_u (i32.and (local.get $b) (i32.const 0x7f)))))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br_if $l (i32.ge_u (local.get $b) (i32.const 0x80))))
+    (global.set $vn (local.get $i))
+    (local.get $v))
+
+  ;; decode the first $n columns of the record under cursor $c into COLS (0x2e0000 + 32*i: serial type,
+  ;; pointer, length, integer value). 0: not covered (overflow page, malformed, float key types 10/11)
+  (func $record (param $c i32) (param $n i32) (result i32)
+    (local $size i32) (local $p i32) (local $hdr i32) (local $h i32) (local $d i32) (local $end i32)
+    (local $i i32) (local $t i32) (local $len i32) (local $v i64) (local $k i32) (local $col i32)
+    (local.set $size (call $cur_psize (local.get $c)))
+    (local.set $p (call $cur_payload (local.get $c) (i32.const 0x2e0104)))
+    (if (i32.or (i32.lt_u (i32.load (i32.const 0x2e0104)) (local.get $size)) (i32.lt_u (local.get $size) (i32.const 1)))
+      (then (return (i32.const 0))))
+    (local.set $hdr (i32.wrap_i64 (call $gv (local.get $p))))
+    (local.set $h (global.get $vn))
+    (if (i32.or (i32.gt_u (local.get $hdr) (local.get $size)) (i32.lt_u (local.get $hdr) (local.get $h)))
+      (then (return (i32.const 0))))
+    (local.set $d (i32.add (local.get $p) (local.get $hdr)))
+    (local.set $end (i32.add (local.get $p) (local.get $size)))
+    (block $done (loop $l
+      (br_if $done (i32.ge_u (local.get $i) (local.get $n)))
+      (if (i32.ge_u (local.get $h) (local.get $hdr)) (then (return (i32.const 0))))
+      (local.set $t (i32.wrap_i64 (call $gv (i32.add (local.get $p) (local.get $h)))))
+      (local.set $h (i32.add (local.get $h) (global.get $vn)))
+      (local.set $v (i64.const 0))
+      (if (i32.ge_u (local.get $t) (i32.const 12))
+        (then (local.set $len (i32.shr_u (i32.sub (local.get $t) (i32.const 12)) (i32.const 1))))
+        (else
+          (if (i32.ge_u (local.get $t) (i32.const 10)) (then (return (i32.const 0))))
+          ;; sizes of serial types 0..7: 0 1 2 3 4 6 8 8 (one byte each, in an i64); 8 and 9 have none
+          (local.set $len (select (i32.const 0)
+            (i32.and (i32.wrap_i64 (i64.shr_u (i64.const 0x0808060403020100)
+                                              (i64.extend_i32_u (i32.shl (local.get $t) (i32.const 3)))))
+                     (i32.const 0xff))
+            (i32.ge_u (local.get $t) (i32.const 8))))
+          (if (i32.eq (local.get $t) (i32.const 9)) (then (local.set $v (i64.const 1))))
+          (if (i32.and (i32.ge_u (local.get $t) (i32.const 1)) (i32.le_u (local.get $t) (i32.const 6)))
+            (then
+              (if (i32.gt_u (i32.add (local.get $d) (local.get $len)) (local.get $end)) (then (return (i32.const 0))))
+              (local.set $v (i64.extend8_s (i64.load8_u (local.get $d))))
+              (local.set $k (i32.const 1))
+              (block $bd (loop $bl
+                (br_if $bd (i32.ge_u (local.get $k) (local.get $len)))
+                (local.set $v (i64.or (i64.shl (local.get $v) (i64.const 8))
+                                      (i64.load8_u (i32.add (local.get $d) (local.get $k)))))
+                (local.set $k (i32.add (local.get $k) (i32.const 1)))
+                (br $bl)))))))
+      (if (i32.gt_u (i32.add (local.get $d) (local.get $len)) (local.get $end)) (then (return (i32.const 0))))
+      (local.set $col (i32.add (i32.const 0x2e0000) (i32.shl (local.get $i) (i32.const 5))))
+      (i32.store (local.get $col) (local.get $t))
+      (i32.store offset=4 (local.get $col) (local.get $d))
+      (i32.store offset=8 (local.get $col) (local.get $len))
+      (i64.store offset=16 (local.get $col) (local.get $v))
+      (local.set $d (i32.add (local.get $d) (local.get $len)))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br $l)))
+    (i32.const 1))
+
+  (func $col_t (param $i i32) (result i32) (i32.load (i32.add (i32.const 0x2e0000) (i32.shl (local.get $i) (i32.const 5)))))
+  (func $col_p (param $i i32) (result i32) (i32.load offset=4 (i32.add (i32.const 0x2e0000) (i32.shl (local.get $i) (i32.const 5)))))
+  (func $col_n (param $i i32) (result i32) (i32.load offset=8 (i32.add (i32.const 0x2e0000) (i32.shl (local.get $i) (i32.const 5)))))
+  (func $col_v (param $i i32) (result i64) (i64.load offset=16 (i32.add (i32.const 0x2e0000) (i32.shl (local.get $i) (i32.const 5)))))
+  ;; integer serial types 1..6, 8, 9; text: odd types from 13
+  (func $c_int (param $i i32) (result i32)
+    (local $t i32) (local.set $t (call $col_t (local.get $i)))
+    (i32.or (i32.and (i32.ge_u (local.get $t) (i32.const 1)) (i32.le_u (local.get $t) (i32.const 6)))
+            (i32.or (i32.eq (local.get $t) (i32.const 8)) (i32.eq (local.get $t) (i32.const 9)))))
+  (func $c_text (param $i i32) (result i32)
+    (local $t i32) (local.set $t (call $col_t (local.get $i)))
+    (i32.and (i32.ge_u (local.get $t) (i32.const 13)) (i32.and (local.get $t) (i32.const 1))))
+
+  ;; join the batch's read transaction; 0 if B-tree reads are off or the schema changed
+  (func $bt_begin (result i32)
+    (if (i32.eqz (global.get $bt)) (then (return (i32.const 0))))
+    (if (call $autocommit (global.get $db)) (then (return (i32.const 0))))
+    (if (call $bt_read (global.get $bt) (i32.const 0x2e0108)) (then (return (i32.const 0))))
+    (i32.eq (i32.load (i32.const 0x2e0108)) (global.get $cookie)))
+
+  ;; open the four cursors (zeroed first, so closing one never opened is a no-op); 0 on failure
+  (func $bt_open (result i32)
+    (memory.fill (global.get $cu_t) (i32.const 0) (i32.shl (global.get $csz) (i32.const 2)))
+    (i32.eqz (i32.or (i32.or (call $cur_open (global.get $bt) (global.get $r_top) (global.get $k_top) (global.get $cu_t))
+                             (call $cur_open (global.get $bt) (global.get $r_likes) (global.get $k_likes) (global.get $cu_l)))
+                     (i32.or (call $cur_open (global.get $bt) (global.get $r_posts) (i32.const 0) (global.get $cu_p))
+                             (call $cur_open (global.get $bt) (global.get $r_users) (i32.const 0) (global.get $cu_u))))))
+
+  (func $bt_close
+    (drop (call $cur_close (global.get $cu_t))) (drop (call $cur_close (global.get $cu_l)))
+    (drop (call $cur_close (global.get $cu_p))) (drop (call $cur_close (global.get $cu_u))))
+
+  ;; add the likes of post ids $lo..$hi to the i64 counters at $cnt + 8*(id - $lo); 0 ok, -1 error
+  (func $likes_count (param $lo i64) (param $hi i64) (param $cnt i32) (result i32)
+    (local $rc i32) (local $v i64) (local $a i32)
+    ;; default_rc 1: entries equal to the key sort after it, so the seek lands at or before the first one
+    (if (call $cur_seek_int (global.get $cu_l) (global.get $k_likes) (local.get $lo) (i32.const 1) (i32.const 0x2e0100))
+      (then (return (i32.const -1))))
+    (if (call $cur_eof (global.get $cu_l)) (then (return (i32.const 0))))
+    (if (i32.lt_s (i32.load (i32.const 0x2e0100)) (i32.const 0))
+      (then
+        (local.set $rc (call $cur_next (global.get $cu_l)))
+        (if (i32.eq (local.get $rc) (i32.const 101)) (then (return (i32.const 0))))
+        (if (local.get $rc) (then (return (i32.const -1))))))
+    (loop $l
+      (if (i32.eqz (call $record (global.get $cu_l) (i32.const 1))) (then (return (i32.const -1))))
+      (if (i32.eqz (call $c_int (i32.const 0))) (then (return (i32.const -1))))
+      (local.set $v (call $col_v (i32.const 0)))
+      (if (i64.gt_s (local.get $v) (local.get $hi)) (then (return (i32.const 0))))
+      (if (i64.ge_s (local.get $v) (local.get $lo))
+        (then
+          (local.set $a (i32.add (local.get $cnt) (i32.shl (i32.wrap_i64 (i64.sub (local.get $v) (local.get $lo))) (i32.const 3))))
+          (i64.store (local.get $a) (i64.add (i64.load (local.get $a)) (i64.const 1)))))
+      (local.set $rc (call $cur_next (global.get $cu_l)))
+      (if (i32.eq (local.get $rc) (i32.const 101)) (then (return (i32.const 0))))
+      (br_if $l (i32.eqz (local.get $rc))))
+    (i32.const -1))
+
+  ;; write one post as JSON from the posts row under $cu_p, its author and like count; 0: not covered
+  (func $bt_post_out (param $id i64) (param $likes i64) (result i32)
+    (local $bp i32) (local $bn i32) (local $cp i32) (local $cn i32)
+    (if (i32.eqz (call $record (global.get $cu_p) (i32.const 4))) (then (return (i32.const 0))))
+    (if (i32.eqz (i32.and (call $c_int (i32.const 1))
+                          (i32.and (call $c_text (i32.const 2)) (call $c_text (i32.const 3)))))
+      (then (return (i32.const 0))))
+    (local.set $bp (call $col_p (i32.const 2))) (local.set $bn (call $col_n (i32.const 2)))
+    (local.set $cp (call $col_p (i32.const 3))) (local.set $cn (call $col_n (i32.const 3)))
+    (if (call $cur_seek_rowid (global.get $cu_u) (call $col_v (i32.const 1)) (i32.const 0x2e0100)) (then (return (i32.const 0))))
+    (if (i32.load (i32.const 0x2e0100)) (then (return (i32.const 0))))   ;; no such user: let SQL's join decide
+    (if (i32.eqz (call $record (global.get $cu_u) (i32.const 2))) (then (return (i32.const 0))))
+    (if (i32.eqz (call $c_text (i32.const 1))) (then (return (i32.const 0))))
+    (call $puts (i32.const 0x100500))
+    (call $putu (local.get $id))
+    (call $puts (i32.const 0x100540))
+    (call $putjson (local.get $bp) (local.get $bn))
+    (call $puts (i32.const 0x100580))
+    (call $put (local.get $cp) (local.get $cn))
+    (call $puts (i32.const 0x1005c0))
+    (call $putjson (call $col_p (i32.const 1)) (call $col_n (i32.const 1)))
+    (call $puts (i32.const 0x100600))
+    (call $putu (local.get $likes))
+    (call $putc (i32.const 125))
+    (i32.const 1))
+
+  ;; /feed body into BODYB; 0: not covered (the caller starts over with SQL)
+  (func $bt_feed (result i32)
+    (local $n i32) (local $rc i32) (local $i i32) (local $lo i64) (local $hi i64) (local $id i64) (local $ok i32)
+    (if (i32.eqz (call $bt_begin)) (then (return (i32.const 0))))
+    (block $out
+      (br_if $out (i32.eqz (call $bt_open)))
+      ;; the index is (created_at DESC, id DESC): its first 20 entries are the newest posts
+      (local.set $rc (call $cur_first (global.get $cu_t) (i32.const 0x2e0100)))
+      (br_if $out (local.get $rc))
+      (if (i32.eqz (i32.load (i32.const 0x2e0100)))
+        (then (block $d (loop $l
+          (br_if $d (i32.ge_u (local.get $n) (i32.const 20)))
+          (br_if $out (i32.eqz (call $record (global.get $cu_t) (i32.const 2))))
+          (br_if $out (i32.eqz (call $c_int (i32.const 1))))
+          (i64.store (i32.add (i32.const 0x2e0200) (i32.shl (local.get $n) (i32.const 3))) (call $col_v (i32.const 1)))
+          (local.set $n (i32.add (local.get $n) (i32.const 1)))
+          (local.set $rc (call $cur_next (global.get $cu_t)))
+          (br_if $d (i32.eq (local.get $rc) (i32.const 101)))
+          (br_if $out (local.get $rc))
+          (br $l)))))
+      ;; like counts: one range scan of likes_post_id_idx when the ids span < 256, else one seek per post
+      (if (local.get $n)
+        (then
+          (local.set $lo (i64.load (i32.const 0x2e0200)))
+          (local.set $hi (local.get $lo))
+          (local.set $i (i32.const 1))
+          (block $d (loop $l
+            (br_if $d (i32.ge_u (local.get $i) (local.get $n)))
+            (local.set $id (i64.load (i32.add (i32.const 0x2e0200) (i32.shl (local.get $i) (i32.const 3)))))
+            (if (i64.lt_s (local.get $id) (local.get $lo)) (then (local.set $lo (local.get $id))))
+            (if (i64.gt_s (local.get $id) (local.get $hi)) (then (local.set $hi (local.get $id))))
+            (local.set $i (i32.add (local.get $i) (i32.const 1)))
+            (br $l)))
+          (if (i64.lt_u (i64.sub (local.get $hi) (local.get $lo)) (i64.const 256))
+            (then
+              (memory.fill (i32.const 0x2e0400) (i32.const 0) (i32.shl (i32.add (i32.wrap_i64 (i64.sub (local.get $hi) (local.get $lo))) (i32.const 1)) (i32.const 3)))
+              (br_if $out (call $likes_count (local.get $lo) (local.get $hi) (i32.const 0x2e0400)))
+              (local.set $i (i32.const 0))
+              (block $d (loop $l
+                (br_if $d (i32.ge_u (local.get $i) (local.get $n)))
+                (i64.store (i32.add (i32.const 0x2e0300) (i32.shl (local.get $i) (i32.const 3)))
+                  (i64.load (i32.add (i32.const 0x2e0400) (i32.shl (i32.wrap_i64 (i64.sub
+                    (i64.load (i32.add (i32.const 0x2e0200) (i32.shl (local.get $i) (i32.const 3)))) (local.get $lo))) (i32.const 3)))))
+                (local.set $i (i32.add (local.get $i) (i32.const 1)))
+                (br $l))))
+            (else
+              (local.set $i (i32.const 0))
+              (block $d (loop $l
+                (br_if $d (i32.ge_u (local.get $i) (local.get $n)))
+                (local.set $id (i64.load (i32.add (i32.const 0x2e0200) (i32.shl (local.get $i) (i32.const 3)))))
+                (i64.store (i32.add (i32.const 0x2e0300) (i32.shl (local.get $i) (i32.const 3))) (i64.const 0))
+                (br_if $out (call $likes_count (local.get $id) (local.get $id) (i32.add (i32.const 0x2e0300) (i32.shl (local.get $i) (i32.const 3)))))
+                (local.set $i (i32.add (local.get $i) (i32.const 1)))
+                (br $l)))))))
+      ;; the posts and their authors, newest first
+      (call $puts (i32.const 0x1004c0))
+      (local.set $i (i32.const 0))
+      (local.set $ok (i32.const 1))   ;; "no comma before the first post"
+      (block $d (loop $l
+        (br_if $d (i32.ge_u (local.get $i) (local.get $n)))
+        (local.set $id (i64.load (i32.add (i32.const 0x2e0200) (i32.shl (local.get $i) (i32.const 3)))))
+        (block $found
+          ;; consecutive ids: step back one row instead of seeking from the root
+          (if (local.get $i)
+            (then (if (i64.eq (local.get $id) (i64.sub (i64.load (i32.add (i32.const 0x2e01f8) (i32.shl (local.get $i) (i32.const 3)))) (i64.const 1)))
+              (then (if (i32.eqz (call $cur_prev (global.get $cu_p)))
+                (then (br_if $found (i64.eq (call $cur_rowid (global.get $cu_p)) (local.get $id)))))))))
+          (br_if $out (call $cur_seek_rowid (global.get $cu_p) (local.get $id) (i32.const 0x2e0100)))
+          (if (i32.load (i32.const 0x2e0100))
+            (then (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $l))))   ;; not in posts: the join drops it
+        (if (i32.eqz (local.get $ok)) (then (call $putc (i32.const 44))))
+        (local.set $ok (i32.const 0))
+        (br_if $out (i32.eqz (call $bt_post_out (local.get $id)
+          (i64.load (i32.add (i32.const 0x2e0300) (i32.shl (local.get $i) (i32.const 3)))))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $l)))
+      (call $putc (i32.const 93))
+      (call $putc (i32.const 125))
+      (call $bt_close)
+      (return (i32.const 1)))
+    (call $bt_close)
+    (i32.const 0))
+
+  ;; GET /posts/:id body into BODYB: 1 written, 2 no such post, 0 not covered
+  (func $bt_get (param $id i64) (result i32)
+    (if (i32.eqz (call $bt_begin)) (then (return (i32.const 0))))
+    (block $out
+      (br_if $out (i32.eqz (call $bt_open)))
+      (br_if $out (call $cur_seek_rowid (global.get $cu_p) (local.get $id) (i32.const 0x2e0100)))
+      (if (i32.load (i32.const 0x2e0100)) (then (call $bt_close) (return (i32.const 2))))
+      (i64.store (i32.const 0x2e0300) (i64.const 0))
+      (br_if $out (call $likes_count (local.get $id) (local.get $id) (i32.const 0x2e0300)))
+      ;; the like count was read first: $bt_post_out reuses COLS
+      (call $puts (i32.const 0x100640))
+      (br_if $out (i32.eqz (call $bt_post_out (local.get $id) (i64.load (i32.const 0x2e0300)))))
+      (call $putc (i32.const 125))
+      (call $bt_close)
+      (return (i32.const 1)))
+    (call $bt_close)
+    (i32.const 0))
+
+  ;; root pages, key descriptions, cursors and the schema cookie; leaves $bt = 0 if anything is missing
+  (func $bt_init
+    (local $st i32) (local $nm i32) (local $nn i32) (local $root i32) (local $b i32)
+    (if (i32.eqz (call $db_utf8 (global.get $db))) (then (call $log (i32.const 0x1012e0)) (return)))
+    (local.set $st (call $prep (i32.const 0x101200)))
+    (block $d (loop $l
+      (br_if $d (i32.ne (call $step (local.get $st)) (i32.const 100)))
+      (local.set $nm (call $col_text (local.get $st) (i32.const 0)))
+      (local.set $nn (call $col_bytes (local.get $st) (i32.const 0)))
+      (local.set $root (i32.wrap_i64 (call $col_i64 (local.get $st) (i32.const 1))))
+      (if (i32.eq (local.get $nn) (i32.const 5))
+        (then
+          (if (call $memeq (local.get $nm) (i32.const 0x101280) (i32.const 5)) (then (global.set $r_posts (local.get $root))))
+          (if (call $memeq (local.get $nm) (i32.const 0x101290) (i32.const 5)) (then (global.set $r_users (local.get $root))))))
+      (if (i32.eq (local.get $nn) (i32.const 23))
+        (then (if (call $memeq (local.get $nm) (i32.const 0x1012a0) (i32.const 23)) (then (global.set $r_top (local.get $root))))))
+      (if (i32.eq (local.get $nn) (i32.const 17))
+        (then (if (call $memeq (local.get $nm) (i32.const 0x1012c0) (i32.const 17)) (then (global.set $r_likes (local.get $root))))))
+      (br $l)))
+    (drop (call $reset (local.get $st)))
+    (if (i32.eqz (i32.and (i32.and (i32.ne (global.get $r_posts) (i32.const 0)) (i32.ne (global.get $r_users) (i32.const 0)))
+                          (i32.and (i32.ne (global.get $r_top) (i32.const 0)) (i32.ne (global.get $r_likes) (i32.const 0)))))
+      (then (call $log (i32.const 0x1012e0)) (return)))
+    (global.set $k_top (call $key_info (global.get $db) (i32.const 2) (i32.const 1)))
+    (global.set $k_likes (call $key_info (global.get $db) (i32.const 1) (i32.const 1)))
+    (global.set $csz (i32.and (i32.add (call $cur_size) (i32.const 15)) (i32.const -16)))
+    (global.set $cu_t (call $malloc (i32.shl (global.get $csz) (i32.const 2))))
+    (if (i32.eqz (i32.and (i32.and (i32.ne (global.get $k_top) (i32.const 0)) (i32.ne (global.get $k_likes) (i32.const 0)))
+                          (i32.ne (global.get $cu_t) (i32.const 0))))
+      (then (call $log (i32.const 0x1012e0)) (return)))
+    (global.set $cu_l (i32.add (global.get $cu_t) (global.get $csz)))
+    (global.set $cu_p (i32.add (global.get $cu_l) (global.get $csz)))
+    (global.set $cu_u (i32.add (global.get $cu_p) (global.get $csz)))
+    (local.set $b (call $bt_of (global.get $db)))
+    (call $tx_begin)
+    (if (call $bt_read (local.get $b) (i32.const 0x2e0108)) (then (call $flush) (call $log (i32.const 0x1012e0)) (return)))
+    (global.set $cookie (i32.load (i32.const 0x2e0108)))
+    (call $flush)
+    (global.set $bt (local.get $b)))
+
   (func $feed
     (local $rc i32) (local $first i32)
+    (call $begin)
+    (if (call $bt_feed) (then (call $finish (i32.const 0x100000)) (return)))
     (call $begin)
     (call $puts (i32.const 0x1004c0))
     (local.set $first (i32.const 1))
@@ -839,7 +1181,12 @@
         (call $finish (i32.const 0x100180)))))
 
   (func $get_post (param $id i64)
+    (local $r i32)
     (if (i64.lt_s (local.get $id) (i64.const 0)) (then (call $err (i32.const 0x100080) (i32.const 0x100280)) (return)))
+    (call $begin)
+    (local.set $r (call $bt_get (local.get $id)))
+    (if (i32.eq (local.get $r) (i32.const 1)) (then (call $finish (i32.const 0x100000)) (return)))
+    (if (i32.eq (local.get $r) (i32.const 2)) (then (call $err (i32.const 0x100100) (i32.const 0x1002c0)) (return)))
     (drop (call $bind_i64 (global.get $st_one) (i32.const 1) (local.get $id)))
     (if (i32.eq (call $step (global.get $st_one)) (i32.const 100))
       (then
@@ -1281,6 +1628,7 @@
     (global.set $st_ping (call $prep (i32.const 0x100c80)))
     (global.set $st_begin (call $prep (i32.const 0x100ca0)))
     (global.set $st_commit (call $prep (i32.const 0x100cb0)))
+    (call $bt_init)
     (global.set $lfd (call $listen (call $parse_ip (local.get $host))
       (i32.wrap_i64 (call $parse_len (local.get $port) (call $strlen (local.get $port)))) (i32.const 65535)))
     (if (i32.lt_s (global.get $lfd) (i32.const 0)) (then (call $fatal (i32.const 0x101140))))

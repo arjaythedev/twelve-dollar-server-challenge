@@ -276,3 +276,14 @@ src/wasmWasiTest/kotlin/borg/trikeshed/tilting/leaf/LeafCorpus.wasmWasi.kt
 src/jvmMain/kotlin/borg/trikeshed/userspace/nio/file/spi/JvmFileOperations.kt
 src/jvmMain/kotlin/borg/trikeshed/userspace/nio/platform/spi/SystemOperations.jvm.kt
 src/jvmMain/kotlin/borg/trikeshed/userspace/nio/file/spi/JvmSystemOperations.kt
+# SCTP over UDP (server TRANSPORT=sctp, loadgen transport=sctp): codec, associations, the UDP port, its secret.
+src/commonMain/kotlin/borg/trikeshed/context/sctp/SctpPacket.kt
+src/commonMain/kotlin/borg/trikeshed/context/sctp/SctpTcb.kt
+src/commonMain/kotlin/borg/trikeshed/context/sctp/SctpUdpPort.kt
+src/commonMain/kotlin/borg/trikeshed/couch/isam/WalFrame.kt
+src/commonMain/kotlin/borg/trikeshed/htx/HtxPpid.kt
+src/commonMain/kotlin/borg/trikeshed/userspace/nio/platform/spi/PlatformGetRandom.kt
+src/jvmMain/kotlin/borg/trikeshed/userspace/nio/platform/spi/PlatformGetRandom.jvm.kt
+src/macosMain/kotlin/borg/trikeshed/userspace/nio/platform/spi/PlatformGetRandom.macos.kt
+src/linuxMain/kotlin/borg/trikeshed/userspace/nio/platform/spi/PlatformGetRandom.linux.kt
+src/posixMain/kotlin/borg/trikeshed/userspace/nio/channels/spi/PosixReactorOperations.kt

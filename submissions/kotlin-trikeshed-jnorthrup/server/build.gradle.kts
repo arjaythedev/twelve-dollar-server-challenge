@@ -42,7 +42,11 @@ kotlin {
 
     sourceSets {
         val commonMain by getting {
-            dependencies { implementation(project(":trikeshed")) }
+            dependencies {
+                implementation(project(":trikeshed"))
+                // SctpFeed's owner loop suspends in the reactor (TRANSPORT=sctp): the version the trikeshed slice pins.
+                implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0")
+            }
         }
         val jvmTest by getting {
             dependencies { implementation(kotlin("test")) }

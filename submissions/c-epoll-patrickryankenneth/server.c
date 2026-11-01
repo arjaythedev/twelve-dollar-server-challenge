@@ -424,10 +424,8 @@ static int jwt_verify(const char *tok, size_t n, long long *uid) {
   pn = b64_dec(d1 + 1, pl, (uint8_t *)pb, 1099); if (pn < 0) return 1;
   pb[pn] = 0;
   if (jget(pb, (size_t)pn, "exp", &ty, &v, &vl) != 0) return 1;
-  if (ty != J_MISSING) {
-    if (ty != J_NUM) return 1;
-    if (strtod(v, NULL) <= (double)time(NULL)) return 1;
-  }
+  if (ty != J_NUM) return 1;                      /* missing or non-numeric exp: 401 */
+  if (strtod(v, NULL) <= (double)time(NULL)) return 1;
   if (jget(pb, (size_t)pn, "sub", &ty, &v, &vl) != 0 || ty != J_STR) return 2;
   if (!vl || vl > 15) return 2;
   long long id = 0;
@@ -666,6 +664,15 @@ static int ur_free[UR_NB], ur_nfree;
 static uint32_t wq_head, wq_tail;                   /* FIFO of connections waiting for a buffer (global id + 1) */
 
 static int sys_setup(unsigned n, struct io_uring_params *p) { return (int)syscall(__NR_io_uring_setup, n, p); }
+#ifndef IORING_ENTER_EXT_ARG
+#define IORING_ENTER_EXT_ARG (1U << 3)
+#endif
+struct uring_gea { uint64_t sigmask; uint32_t sigmask_sz; uint32_t pad; uint64_t ts; };
+static int sys_enter_to(int fd, unsigned submit, unsigned wait, unsigned flags, long ns) {
+  struct { int64_t sec; long long nsec; } ts = {0, ns};
+  struct uring_gea g = {0, 0, 0, (uint64_t)(uintptr_t)&ts};
+  return (int)syscall(__NR_io_uring_enter, fd, submit, wait, flags | IORING_ENTER_EXT_ARG, &g, sizeof g);
+}
 static int sys_enter(int fd, unsigned submit, unsigned wait, unsigned flags) {
   return (int)syscall(__NR_io_uring_enter, fd, submit, wait, flags, NULL, 0);
 }
@@ -892,8 +899,8 @@ static int uring_serve(int lfd, unsigned nofile, const char *host, const char *p
     for (int i = 1; i < NR; i++) ring_flush(&rg[i]);
     uring *r0 = &rg[0];
     __atomic_store_n(r0->sq_tail, r0->sq_local, __ATOMIC_RELEASE);
-    int n = sys_enter(r0->fd, r0->to_submit, 1, IORING_ENTER_GETEVENTS);
-    if (n < 0) { if (errno != EINTR && errno != EBUSY && errno != EAGAIN) { perror("io_uring_enter"); exit(1); } }
+    int n = sys_enter_to(r0->fd, r0->to_submit, 1, IORING_ENTER_GETEVENTS, 1000000);
+    if (n < 0) { if (errno != EINTR && errno != EBUSY && errno != EAGAIN && errno != ETIME) { perror("io_uring_enter"); exit(1); } }
     else r0->to_submit -= (unsigned)n;
     for (int i = 0; i < NR; i++) reap(i);
   }

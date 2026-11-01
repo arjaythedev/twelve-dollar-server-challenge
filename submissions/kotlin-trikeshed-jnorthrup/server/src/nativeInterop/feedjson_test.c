@@ -1,13 +1,13 @@
 /*
- * The C the feed's rows are written with (cinterop/feedc.def), held to byte-wise references:
+ * The C the feed's rows are written with, held to byte-wise references:
  *   feed_json_text  one text column as a JSON string body, by Out.escapeFrom's rules: quote and backslash get a backslash,
  *                   \b \f \n \r \t keep their letters, the other bytes below 0x20 become \u00XX (lower-case hex), every
- *                   other byte (UTF-8, DEL) is copied
- *   feed_row_json   one row of POST_SELECT as the feed's JSON object, read from SQLite itself
- * Both functions are cut out of feedc.def, so the test runs the shipped source.
+ *                   other byte (UTF-8, DEL) is copied (feedbt.c, with feed_i64)
+ *   feed_row_json   one row of POST_SELECT as the feed's JSON object, read from SQLite itself (cinterop/feedc.def)
+ * Both functions are cut out of the files that hold them, so the test runs the shipped source.
  *
  *   cd server/src/nativeInterop
- *   awk '/BEGIN feed_json_text/,/END feed_row_json/' cinterop/feedc.def > /tmp/feed_json.h
+ *   { awk '/BEGIN feed_json_text/,/END feed_json_text/' feedbt.c; awk '/BEGIN feed_row_json/,/END feed_row_json/' cinterop/feedc.def; } > /tmp/feed_json.h
  *   cc -O2 -fsanitize=address -I/tmp -o /tmp/feedjson_test feedjson_test.c -lsqlite3 && /tmp/feedjson_test
  */
 #include <stdio.h>

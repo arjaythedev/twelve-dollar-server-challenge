@@ -14,6 +14,9 @@ const val TEXT_MAX: Int = 1 shl 24
 /** The room a feed row is offered before the call: a usual row fits, a row with a long body asks again for exactly what it needs. */
 const val ROW_ROOM: Int = 4096
 
+/** The room a B-tree plan is offered first: a usual feed fits; a larger one asks once for its exact size. */
+const val PLAN_ROOM: Int = 32768
+
 const val POST_SELECT: String = "SELECT p.id, p.body, p.created_at, u.username, " +
     "(SELECT count(*) FROM likes l WHERE l.post_id = p.id) FROM posts p JOIN users u ON u.id = p.user_id"
 
@@ -41,6 +44,9 @@ class SqliteStore(path: String) : FeedStore {
     val rollbackStmt: CPointer<sqlite3_stmt>
     override var pending: Boolean = false
 
+    /** The B-tree read plans (feedbt.c) found the schema they read; false sends every read to SQL. */
+    val plans: Boolean
+
     init {
         db = memScoped {
             val pp = alloc<CPointerVar<sqlite3>>()
@@ -66,6 +72,7 @@ class SqliteStore(path: String) : FeedStore {
         beginStmt = prepare("BEGIN IMMEDIATE")
         commitStmt = prepare("COMMIT")
         rollbackStmt = prepare("ROLLBACK")
+        plans = feedbt_init(db) == 1
     }
 
     fun message(): String = sqlite3_errmsg(db)?.toKString() ?: "unknown error"
@@ -130,6 +137,15 @@ class SqliteStore(path: String) : FeedStore {
     }
 
     override fun feed(out: Out) {
+        if (plans) {
+            out.room(PLAN_ROOM)
+            var n = feedbt_feed(out.bytes.refTo(out.size), out.bytes.size - out.size)
+            if (n < -1) {
+                out.room(-n)
+                n = feedbt_feed(out.bytes.refTo(out.size), out.bytes.size - out.size)
+            }
+            if (n >= 0) { out.size += n; return }
+        }
         out.raw(FEED_OPEN)
         var rc = step(feedStmt)
         var first = true
@@ -145,6 +161,16 @@ class SqliteStore(path: String) : FeedStore {
     }
 
     override fun post(id: Long, out: Out): Boolean {
+        if (plans) {
+            out.room(PLAN_ROOM)
+            var n = feedbt_post(id, out.bytes.refTo(out.size), out.bytes.size - out.size)
+            if (n < -1) {
+                out.room(-n)
+                n = feedbt_post(id, out.bytes.refTo(out.size), out.bytes.size - out.size)
+            }
+            if (n == 0) return false
+            if (n > 0) { out.size += n; return true }
+        }
         bind(postStmt, 1, id)
         val rc = step(postStmt)
         if (rc == SQLITE_DONE) { reset(postStmt); return false }

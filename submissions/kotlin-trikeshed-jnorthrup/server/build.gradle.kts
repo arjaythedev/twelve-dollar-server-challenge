@@ -95,16 +95,21 @@ val sqliteLib = tasks.register<Exec>("sqliteLib") {
 }
 
 // The KN server links SQLite statically: the same options, one object in libsqlite3.a, built from the amalgamation's
-// sqlite3.c as published (SQLite's source is not patched). SQLITE_DISABLE_LFS: the
+// sqlite3.c as published (SQLite's source is not patched). The object is feedbt.c, which includes sqlite3.c whole and adds
+// the B-tree read plans for GET /feed and GET /posts/:id (SQLite's B-tree functions are private to the amalgamation).
+// SQLITE_DISABLE_LFS: the
 // amalgamation's _FILE_OFFSET_BITS=64 makes glibc >= 2.28 name fcntl fcntl64, which Kotlin/Native's glibc 2.19 link
 // sysroot lacks; off_t is 64 bits on x86_64 either way.
 tasks.register<Exec>("sqliteArchive") {
     dependsOn(sqliteSource)
     val dir = sqliteDir.get().asFile
+    val plans = project.file("src/nativeInterop")
     inputs.file(File(dir, "sqlite3.c"))
+    inputs.files(File(plans, "feedbt.c"), File(plans, "feedbt.h"))
     outputs.file(File(dir, "libsqlite3.a"))
     workingDir(dir)
-    commandLine("sh", "-c", (listOf("cc", "-O2", "-fPIC", "-c", "-DSQLITE_DISABLE_LFS") + sqliteOptions + listOf("sqlite3.c", "-o", "sqlite3.o")).joinToString(" ") +
+    commandLine("sh", "-c", (listOf("cc", "-O2", "-fPIC", "-c", "-DSQLITE_DISABLE_LFS") + sqliteOptions +
+        listOf("-I.", "-I${plans.path}", File(plans, "feedbt.c").path, "-o", "sqlite3.o")).joinToString(" ") +
         " && rm -f libsqlite3.a && ar rcs libsqlite3.a sqlite3.o && rm sqlite3.o")
 }
 

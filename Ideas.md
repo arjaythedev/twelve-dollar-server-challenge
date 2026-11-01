@@ -1,48 +1,44 @@
 # Ideas
 
-- [ ] Inspect the feed query plan and its hot SQLite functions. It returns 20 posts per read; the post endpoint returns one.
+- [ ] Compare feed SQL with [the leader's B-tree reads](submissions/c-iouring-pavlyhalim/src/btree.h): SQLite's own cursors, pager, WAL and cache, skipping the VM.
+  Pin SQLite's version and validate schema/layout; close cursors within the transaction and fall back to SQL on unsupported records.
 
-- [ ] Measure io_uring submission and completion batches before changing ring flags. `CPU/request ~= CPU/enter / requests_per_enter + other_work`.
-  Compare `SINGLE_ISSUER`, `DEFER_TASKRUN` and bounded waits with the current loop.
-  Submission, registration and exceptional cleanup must stay on the issuer thread before enabling the first two flags.
-  Reference: [ring_init and ring_wait](submissions/c-iouring-pavlyhalim/src/sys.h).
+- [ ] Compare point lookups with range scans for feed rows and likes.
+  `C_point ~= n*a_seek + k_target*s_scan`; `C_range ~= a_seek + k_span*s_scan`.
+  Choose from measured costs; a narrow ID span can still contain many likes. Keep timestamp/ID order, including gaps and reordered timestamps.
 
-- [ ] Group writes into one transaction, with a size limit b and a timeout.
-  Fixed cost a, per-write cost s: `C(b) ~= s + a/b`.
-  At write rate lambda, collecting b writes adds roughly `(b-1)/(2*lambda)` average wait, before execution and commit. Dependent responses must wait for commit; test rollback and commit failure too.
-  Reference: [c-iouring-pavlyhalim](submissions/c-iouring-pavlyhalim/src/server.c).
+- [ ] Batch author lookups by B-tree level, share page fetches and prefetch searches ([bt_seek_many](submissions/c-iouring-pavlyhalim/src/btree.h)).
+  Try interpolation with a correct binary-search fallback. Pin author pages until serialization; copy post bytes before moving cursors.
 
-- [ ] Compare point lookups with range scans for feed posts and likes.
-  `C_point ~= n*a_seek`, `C_range ~= a_seek + k*s_scan`, where k counts entries actually scanned.
-  Pick from measured costs. An ID span alone does not tell us how many likes we will scan.
-  Reference: [bt_feed and bt_range_counts](submissions/c-iouring-pavlyhalim/src/btree.h).
+- [ ] Group writes with a size limit b and timeout: `C(b) ~= s + a/b`, average collection wait `~= (b-1)/(2*lambda)`.
+  Hold dependent responses until commit; rollbacks and commit failure must replace them with errors.
+  Compare `INSERT ... WHERE EXISTS ... ON CONFLICT` for likes and insert + rowid/timestamp lookup against `RETURNING` ([db.h](submissions/c-iouring-pavlyhalim/src/db.h)).
 
-- [ ] Batch author lookups within one feed request. Shared B-tree pages could save repeated searches. Keep the SQLite snapshot and required feed order.
-  Use SQLite's own APIs; a separate engine for its file format is outside the rules.
-  Reference: [bt_seek_many](submissions/c-iouring-pavlyhalim/src/btree.h).
+- [ ] Measure requests/enter, CQ batch sizes and CPU/request before ring flags: `C ~= C_enter/requests_per_enter + C_other`.
+  Test `SINGLE_ISSUER`/`DEFER_TASKRUN` with submission, registration and cleanup owned by the issuer.
+  Keep the busy-only 16-CQE/1-ms wait as the baseline.
 
-- [ ] Separate read and response budgets. Store pending work cheaply and keep long processing batches from starving I/O.
-  `M_queue ~= Q_kernel*m_kernel + Q_app*m_app`.
-  Moving the queue saves memory only if the new representation is cheaper. Sustained arrivals above completion capacity still grow the backlog.
-  Batch readiness, reads or sends while each request still gets a fresh database read. This shares scheduling and I/O work, not query results.
-  Reference: [read/response budgets in PR #245](https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/245).
+- [ ] Compare direct descriptors, multishot readiness and provided buffers with our per-socket operations ([sys.h](submissions/c-iouring-pavlyhalim/src/sys.h)).
+  Budget reads and answers separately: `M_queue ~= Q_kernel*m_kernel + Q_app*m_app`. Keep queued work small and bound turns.
+  Reuse response arenas after send completion, including partial sends and cancellation.
 
-- [ ] Tune SQLite's page cache against connection memory.
-  `N ~= (RAM - fixed_cost - cache - queues) / memory_per_connection`.
-  A larger cache may save CPU but leave less room for connections.
-  SQLite pages, mmap and prepared plans are allowed reuse. Retaining data-dependent response bytes, rows, table copies or successful JWT checks for another request is forbidden.
+- [ ] Compare SQLite cache sizes with `mmap_size=0`: `N ~= (RAM - fixed_cost - cache - queues)/memory_per_connection`.
+  Keep one database at `SQLITE_PATH`; file sharding changes the fixed data contract. Extra connections add no CPU capacity on one vCPU.
+  Bloom filters help misses: `saved ~= miss_rate*(1-false_positive_rate)*lookup_cost - filter_cost`. Measure a miss-heavy path first; a retained application filter is data-dependent reuse across requests.
 
-- [ ] Measure checkpoint timing, WAL growth and p99 together. Compare checkpoint work and priority before assuming every commit costs an fsync.
+- [ ] Measure checkpoint CPU, WAL growth and p99; try PASSIVE checkpoints on a separate, lower-priority connection.
+  `unix-excl` needs one owning process. Synchronize checkpoint state explicitly.
+  Profile WAL-write coalescing and redundant cache truncation before copying the leader's VFS/cache wrappers; preserve write order, flush errors and `synchronous=NORMAL` or stronger.
 
-- [ ] Inspect generated code for measured hot loops before trying intrinsics or handwritten assembly.
-  Ideal CPU speedup: `S <= 1 / ((1-p) + p/s)`, for accelerated share p and speedup s.
-  Use the share of total CPU, including kernel work, rather than user-stack percentages alone.
+- [ ] Compare PGO trained on fresh synthetic data with plain optimization ([build.sh](submissions/c-iouring-pavlyhalim/build.sh)).
+  SSE2 JSON/UTF-8 scanning already exists and is baseline on x86_64; test wider SIMD for measured hot loops. AVX2/AVX-512 need matching target support or runtime dispatch.
+  `S <= 1/((1-p) + p/s)`, with p measured against total CPU including kernel work.
 
-- [ ] Clarify in-flight read sharing in [issue #261](https://github.com/arjaythedev/twelve-dollar-server-challenge/issues/261), still open without a ruling. Keep this experiment pending.
-  Singleflight shares one fresh result among overlapping identical GETs and discards it afterward. Its short lifetime does not remove the cross-request sharing.
-  Distinguish this from one `WHERE id IN (...)` query for different pending requests. Check freshness and ordering around writes in both cases.
-  [sql-oneselect #243](https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/243) was scored with an unresolved rule note in the [local leaderboard](LEADERBOARD.md), which does not settle permission.
+- [ ] Keep GET sharing pending [#261](https://github.com/arjaythedev/twelve-dollar-server-challenge/issues/261), open and unanswered.
+  Seal fully validated GET cohorts before a fresh SQLite snapshot/read; no later joiners. Split reads at write barriers; never share JWT verification results.
+  Expected batch size `B ~= 1 + lambda_key*W`, with collection window W ending before the read.
+  [#243](https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/243) restored per-request feed reads (`57cf5b2`).
 
-- [ ] Use the workload model when comparing results:
-  `requests/s ~= 2.17*N / (20.5 + HTTP_wait_per_cycle)`.
-  More users do not mean the same number of simultaneous requests. Compare throughput, latency, errors and CPU/request together.
+- [ ] Compare throughput, latency, errors and CPU/request together:
+  `requests/s ~= 2.17*N/(20.5 + HTTP_wait_per_cycle)`.
+  User count is not simultaneous request count.

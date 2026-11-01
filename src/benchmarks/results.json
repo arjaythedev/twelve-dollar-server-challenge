@@ -278,5 +278,25 @@
     "cpu_scope": "server_cgroup",
     "server_peak_bytes": 725737472,
     "passed": true
+  },
+  {
+    "date": "2026-11-01",
+    "name": "btree-feed-50000-linux",
+    "runtime": "C++ 0.1.0",
+    "load_generator": "docker_loopback",
+    "sqlite": "3.53.1",
+    "users": 50000,
+    "hold": "60s",
+    "ramp": "30s",
+    "requests": 518213,
+    "rps": 3984.426176656708,
+    "p95_ms": 1.4738037999999989,
+    "p99_ms": 20.656874960000003,
+    "max_ms": 108.564537,
+    "error_rate": 0.0,
+    "cpu_us_per_request": 44.99782907800461,
+    "cpu_scope": "server_cgroup",
+    "server_peak_bytes": 721321984,
+    "passed": true
   }
 ]

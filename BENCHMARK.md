@@ -1,6 +1,6 @@
 # Benchmarks
 
-2026-11-01. Ryzen 7 7800X3D, Ubuntu 24.04 in Docker Desktop/WSL2. Server: 1 CPU, 2 GiB, no container swap. k6 used the official workload and a fresh database per run, on Windows unless labeled Linux loopback (32 source IPs).
+2026-11-01 to 2026-11-02. Ryzen 7 7800X3D, Ubuntu 24.04 in Docker Desktop/WSL2. Server: 1 CPU, 2 GiB, no container swap. k6 used the official workload and a fresh database per run, on Windows unless labeled Linux loopback (32 source IPs).
 
 | Runtime | Users | Hold | Requests | Requests/s | p95 | p99 | Max | Errors | CPU/request | Peak RAM |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -17,6 +17,7 @@
 | C++ 0.1.0 (uring-base, Linux loopback) | 50,000 | 60 s | 518,222 | 3,984.46 | 0.584 ms | 16.421 ms | 55.84 ms | 0% | 54.58 us | 681.55 MiB |
 | C++ 0.1.0 (uring-batch, Linux loopback) | 50,000 | 60 s | 457,791 | 3,519.70 | 4,804.318 ms | 5,586.012 ms | 54,987.35 ms | 1.94% | 47.02 us | 672.58 MiB |
 | C++ 0.1.0 (adaptive, Linux loopback) | 50,000 | 60 s | 518,877 | 3,989.27 | 1.478 ms | 18.388 ms | 55.68 ms | 0% | 46.25 us | 692.12 MiB |
+| C++ 0.1.0 (B-tree feed, Linux loopback) | 50,000 | 60 s | 518,213 | 3,984.43 | 1.474 ms | 20.657 ms | 108.56 ms | 0% | 45.00 us | 687.91 MiB |
 
 Statistics include the ramps. RAM is the cgroup peak, including charged file pages. Local results, not an official score or a measured capacity limit.
 
@@ -26,13 +27,11 @@ The uring rows read CPU counters externally; earlier rows include the in-contain
 
 ## Native CPU sampling
 
-10,000 users, 30-second ramp, 60-second hold. Passed: 103,568 requests, 796.63 requests/s, p95 1.052 ms, p99 2.075 ms, no errors. Server CPU: 84.13 us/request; peak RAM: 340.36 MiB. These workload totals include the ramps.
+50,000 users before the B-tree change, 30-second ramp and 60-second capture. User CPU: SQL/rows 68.5%, transport/other 21.9%, response JSON 4.9%, auth 4.6%.
 
-CPU sampling covered only the hold (control acknowledgements at 30.48 s and 90.29 s): SQL/row assembly 67.3%, transport/other 24.8%, response JSON 4.4%, auth 3.4%. No request-JSON samples. 1,492 samples at 997 Hz, no loss records, 194 unresolved leaves and two stacks without main.
+5,443 samples, no loss, 775 unresolved leaves. Hold CPU: 5.915 s user, 9.306 s system.
 
-Hold-window cgroup CPU: 1.558 s user, 3.266 s system. Main-process counters agree within their 10 ms tick resolution. CPU-stack shares describe user CPU only.
-
-[Data](src/profiles/native-10000.json). Raw capture: `results/cpp-profile-window-10000/`. The [earlier 5,000-user capture](src/profiles/native-5000.json) also sampled the ramps.
+[Data](src/profiles/native-50000.json). Raw capture: `results/native-current-50000/`.
 
 ## Request-path sampling
 

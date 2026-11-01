@@ -1,5 +1,6 @@
 #include "database.hpp"
 #include "json.hpp"
+#include "sqlite_read.h"
 
 #include <sqlite3.h>
 
@@ -72,6 +73,24 @@ class Transaction
     sqlite3 *db_;
     bool committed_ = false;
 };
+
+struct CloseTree
+{
+    void operator()(tds_btree *tree) const noexcept
+    {
+        tds_btree_destroy(tree);
+    }
+};
+
+using Tree = std::unique_ptr<tds_btree, CloseTree>;
+
+Tree open_tree(sqlite3 *db)
+{
+    tds_btree *tree = nullptr;
+    tds_btree_create(db, &tree);
+
+    return Tree(tree);
+}
 
 class Statement
 {
@@ -172,6 +191,56 @@ class Statement
     sqlite3_stmt *statement_ = nullptr;
 };
 
+class ReadScope
+{
+  public:
+    ReadScope(sqlite3 *db, Statement &begin, Statement &commit, tds_btree &tree)
+        : db_(db), commit_(commit), tree_(tree)
+    {
+        {
+            auto query = begin.use();
+            while (query.next())
+            {
+            }
+        }
+        status_ = tds_btree_begin(&tree_);
+    }
+
+    ~ReadScope()
+    {
+        tds_btree_end(&tree_);
+        if (!committed_)
+        {
+            sqlite3_exec(db_, "ROLLBACK", nullptr, nullptr, nullptr);
+        }
+    }
+
+    ReadScope(const ReadScope &) = delete;
+    ReadScope &operator=(const ReadScope &) = delete;
+
+    bool ready() const noexcept
+    {
+        return status_ == SQLITE_OK;
+    }
+
+    void commit()
+    {
+        tds_btree_end(&tree_);
+        auto query = commit_.use();
+        while (query.next())
+        {
+        }
+        committed_ = true;
+    }
+
+  private:
+    sqlite3 *db_;
+    Statement &commit_;
+    tds_btree &tree_;
+    int status_ = SQLITE_ERROR;
+    bool committed_ = false;
+};
+
 void post_object(std::string &output, std::int64_t id, std::string_view body,
                  std::string_view timestamp, std::string_view author, std::int64_t likes)
 {
@@ -192,6 +261,13 @@ void post_object(std::string &output, const Statement::Use &row)
 {
     // Column views are consumed before stepping or resetting the statement.
     post_object(output, row.number(0), row.text(1), row.text(2), row.text(3), row.number(4));
+}
+
+void post_object(std::string &output, const tds_btree_post &row)
+{
+    post_object(output, row.id, {row.body, static_cast<std::size_t>(row.body_bytes)},
+                {row.created_at, static_cast<std::size_t>(row.created_at_bytes)},
+                {row.author, static_cast<std::size_t>(row.author_bytes)}, row.like_count);
 }
 
 } // namespace
@@ -217,7 +293,8 @@ class Database::State
           exists(db.get(), "SELECT 1 FROM posts WHERE id=?"), like(db.get(), R"sql(
               INSERT INTO likes(user_id, post_id) VALUES(?, ?)
               ON CONFLICT(user_id, post_id) DO NOTHING
-          )sql")
+          )sql"),
+          read_begin(db.get(), "BEGIN"), read_commit(db.get(), "COMMIT"), tree(open_tree(db.get()))
     {
     }
 
@@ -228,6 +305,9 @@ class Database::State
     Statement create;
     Statement exists;
     Statement like;
+    Statement read_begin;
+    Statement read_commit;
+    Tree tree;
 };
 
 Database::Database(const std::string &path) : state_(std::make_unique<State>(path))
@@ -248,6 +328,33 @@ std::string Database::feed()
 {
     std::string output = "{\"posts\":[";
     output.reserve(8192);
+    if (state_->tree)
+    {
+        ReadScope read(state_->db.get(), state_->read_begin, state_->read_commit, *state_->tree);
+        if (read.ready())
+        {
+            tds_btree_post row{};
+            int result = SQLITE_OK;
+            bool first = true;
+            while ((result = tds_btree_feed_next(state_->tree.get(), &row)) == SQLITE_ROW)
+            {
+                if (!first)
+                {
+                    output += ',';
+                }
+                first = false;
+                post_object(output, row);
+            }
+            if (result == SQLITE_DONE)
+            {
+                output += "]}";
+                read.commit();
+
+                return output;
+            }
+        }
+        output = "{\"posts\":[";
+    }
     auto query = state_->feed.use();
     bool first = true;
     while (query.next())

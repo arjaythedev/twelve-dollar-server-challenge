@@ -1,0 +1,16 @@
+# Experiment: 8 PHP threads all the time, instead of 2 (FrankenPHP's default on 1 CPU).
+{
+	auto_https off
+	admin off
+
+	frankenphp {
+		num_threads 8
+	}
+}
+
+http://:{$PORT} {
+	bind {$HOST}
+	root ./public
+	rewrite * /index.php
+	php
+}

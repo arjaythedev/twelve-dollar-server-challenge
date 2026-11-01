@@ -1,0 +1,19 @@
+# Experiment: FrankenPHP adds PHP threads (up to 8) when requests wait for one, and stops them once idle.
+{
+	auto_https off
+	admin off
+
+	frankenphp {
+		max_threads 8
+		worker {
+			file ./public/index.php
+		}
+	}
+}
+
+http://:{$PORT} {
+	bind {$HOST}
+	root ./public
+	rewrite * /index.php
+	php
+}

@@ -1,0 +1,19 @@
+# Experiment: 4 workers, instead of 2 (FrankenPHP's default on 1 CPU).
+{
+	auto_https off
+	admin off
+
+	frankenphp {
+		worker {
+			file ./public/index.php
+			num 4
+		}
+	}
+}
+
+http://:{$PORT} {
+	bind {$HOST}
+	root ./public
+	rewrite * /index.php
+	php
+}

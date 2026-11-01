@@ -21,3 +21,4 @@
 {"id":"S2","what":"C->wasm (cserve.c) saturation at CPUQuota=40%","rps":{"cwasm":[15888,15255],"e18":[35223,34481]},"us_req_at_cap":{"cwasm":[25.2,26.25],"e18":[11.41,11.6]},"status":"measurement"}
 {"id":"E19","what":"ObjC's SQLite OMIT/DQS/ALLOCA compile options","tc_us_req":{"e18":[12.95,13.0,12.84],"e19":[13.0,12.94,12.68]},"reps":3,"tests":"42/42","status":"discarded"}
 {"id":"E20","what":"$put with loads/stores instead of memory.copy (a); + SQLite mem* without bulk memory (b)","tc_us_req":{"e18":[13.18,12.97,13.06],"e20a":[12.67,12.48,12.59],"e20b":[12.65,12.82,12.53]},"reps":3,"tests":"42/42","status":"a kept, b discarded"}
+{"id":"S3","what":"saturation at CPUQuota=40%, 4000x0.007, E20 vs ObjC vs cpub","rps":{"e20":[35330,35762,35783],"objc":[49528,49659,48656],"cpub":[50389,49866,48485]},"status":"measurement"}

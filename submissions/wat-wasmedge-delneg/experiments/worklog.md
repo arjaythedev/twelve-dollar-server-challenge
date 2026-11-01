@@ -339,3 +339,8 @@ plain loads/stores, built with `-mno-bulk-memory -mno-bulk-memory-opt` (LLVM 23 
 pstat, 3 interleaved reps: E18 13.18, 12.97, 13.06 us/req; E20a 12.67, 12.48, 12.59 (-3.7%; user
 instructions 61.9k -> 56.5k, every rep below every E18 rep); E20b 12.65, 12.82, 12.53 (no better than a:
 SQLite's copies aren't on the hot read path). Kept (a) only.
+
+## S3: saturation, E20 vs the baselines (1 Nov) — measurement
+`sat2.sh`, CPUQuota=40%, 4000 users x0.007, 3 interleaved reps (rps; scope CPU per request):
+E20 35.3k, 35.8k, 35.8k (11.33, 11.19 us); ObjC 49.5k, 49.7k, 48.7k (8.08, 8.06 us); top C (cpub)
+50.4k, 49.9k, 48.5k (7.94, 8.02 us). WAT at 0.72x of either; p95 at saturation ~105 ms against ~45 ms.

@@ -87,23 +87,27 @@ sockets under `LimitNOFILE=65535`.
 - Accepted sockets are io_uring **direct descriptors**. They live in a ring's file table, not the
   process fd table. A table can be no larger than `RLIMIT_NOFILE`, so the server raises its soft
   limit to the hard one and gives each ring that many slots.
-- It starts with one ring. When a ring is within a margin of full (1/8 of its slots, between 65
-  and 512), accepting moves to the next ring, adding one if needed (up to 16). Accepting moves
+- It starts with one ring. When a ring is within a margin of full (1/8 of its slots, up to
+  1,024), accepting moves to the next ring, adding one if needed (up to 16). Accepting moves
   before the table is actually full because an accept that finds no free slot has already taken
   the connection off the listen queue, and the kernel would drop it. Accepts are single-shot,
-  at most 64 in flight, so no more than that can land after the switch. A ring accepts again
-  once more than twice the margin of its slots are free. If a ring can't be added, adding is
-  retried once a second.
-- The port has eight `SO_REUSEPORT` listeners, each with 8 of the 64 accepts. A listen queue is
-  capped at `net.core.somaxconn` (4,096 by default), so eight queues hold 32k pending connections
-  through a ramp or a slow pass instead of refusing them.
+  at most 512 in flight (a sixteenth of a small table), always fewer than the margin, so no
+  more than that can land after the switch. A ring accepts again once more than twice the
+  margin of its slots are free. If a ring can't be added, adding is retried once a second.
+- An accept is re-armed only after a pass sees it complete, so the number in flight bounds the
+  accept rate. With 64, a ramp of a few thousand new connections a second outran it on a 1 vCPU
+  droplet: the listen queue filled and new connections waited out SYN retransmits (1 s, 3 s,
+  7 s). 512 keeps up.
+- The port has eight `SO_REUSEPORT` listeners, each with an eighth of the accepts. A listen
+  queue is capped at `net.core.somaxconn` (4,096 by default), so eight queues hold 32k pending
+  connections through a ramp or a slow pass instead of refusing them.
 - One thread drives every ring (`SINGLE_ISSUER`, `DEFER_TASKRUN`). Each pass first gives every
   other ring one non-blocking `io_uring_enter` that submits its queued sends and collects its
   completions. Then ring 0 submits and waits for 256 completions or 1 ms, whichever comes
   first. So a pass never spins, and bigger passes share one COMMIT. The wait adds about 1 ms of
   latency on ring 0, and up to about 2 ms on the other rings.
-- Under `LimitNOFILE=65535`, every ring preallocates a 65,535-entry table of 40-byte connection
-  records (2.6 MB) and 2 MiB of receive buffers: ~6 MB of user space per ring, ~30 MB for five
+- Under `LimitNOFILE=65535`, every ring preallocates a 65,535-entry table of 48-byte connection
+  records (3.1 MB) and 2 MiB of receive buffers: ~6 MB of user space per ring, ~30 MB for five
   rings (300k connections). The table size follows the hard descriptor limit. The pool of
   output buffers adds at most 2,048 × 32 KB. Kernel socket memory (~3.4 KB per connection
   measured) comes on top of all this.
@@ -111,7 +115,7 @@ sockets under `LimitNOFILE=65535`.
   ring), so an idle connection holds no receive buffer. Receives that run out of buffers are
   re-armed after the pass has returned its buffers.
 - Output buffers come from a pool and go back once a send completes, so idle connections hold
-  no heap memory, only a fixed 40-byte record (its three buffers are null pointers until
+  no heap memory, only a fixed 48-byte record (its three buffers are null pointers until
   used). One send per connection is in flight at a time. Pipelined responses queue behind it.
 - Closing is a `SHUTDOWN` hard-linked to a fixed-file `CLOSE`. The shutdown ends the multishot
   receive. A generation number in every `user_data` drops completions for a reused slot.

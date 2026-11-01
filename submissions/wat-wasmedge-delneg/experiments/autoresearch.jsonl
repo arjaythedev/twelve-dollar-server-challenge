@@ -17,3 +17,7 @@
 {"id":"E16","what":"sendmany: one host call per batch of responses","tc_us_req":{"e15":[13.58,13.93,13.77],"e16":[12.99,13.29,13.32]},"reps":3,"tests":"42/42","status":"kept"}
 {"id":"E17","what":"epoll_recv: epoll_wait + recv per readable socket in one host call","tc_us_req":{"e16":[13.45,13.38,13.03],"e17":[13.08,12.91,12.97]},"reps":3,"tests":"42/42","status":"kept"}
 {"id":"E18","what":"SQLite clang -O3 (a); wasm-opt -O3 on merged module (b)","tc_us_req":{"e17":[13.02,13.09,13.04],"o3":[13.31,12.97,13.16],"wasmopt":[12.72,12.85,12.9]},"reps":3,"tests":"42/42","status":"wasm-opt kept, -O3 discarded"}
+{"id":"S1","what":"saturation at CPUQuota=40%, 4000x0.007","rps":{"e18":[34500,34800,33700],"objc":[49800],"cpub":[50000],"soff18":[34600,35100]},"us_req_at_cap":{"e18":11.55,"objc":8.17},"status":"measurement"}
+{"id":"S2","what":"C->wasm (cserve.c) saturation at CPUQuota=40%","rps":{"cwasm":[15888,15255],"e18":[35223,34481]},"us_req_at_cap":{"cwasm":[25.2,26.25],"e18":[11.41,11.6]},"status":"measurement"}
+{"id":"E19","what":"ObjC's SQLite OMIT/DQS/ALLOCA compile options","tc_us_req":{"e18":[12.95,13.0,12.84],"e19":[13.0,12.94,12.68]},"reps":3,"tests":"42/42","status":"discarded"}
+{"id":"E20","what":"$put with loads/stores instead of memory.copy (a); + SQLite mem* without bulk memory (b)","tc_us_req":{"e18":[13.18,12.97,13.06],"e20a":[12.67,12.48,12.59],"e20b":[12.65,12.82,12.53]},"reps":3,"tests":"42/42","status":"a kept, b discarded"}

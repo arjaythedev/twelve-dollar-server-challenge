@@ -305,3 +305,37 @@ pstat, 3 interleaved reps: E17 13.02, 13.09, 13.04 us/req; SQLite -O3 13.31, 12.
 WasmEdge's LLVM -O3 sees it all anyway); wasm-opt -O3 on the merged module 12.72, 12.85, 12.90 (-1.5%,
 user instructions 63.1k -> 61.7k; every rep below every E17 rep). 42/42 on both. Kept wasm-opt (binaryen
 is already installed for wasm-merge).
+
+## S1: saturation under a CPU cap (1 Nov) — measurement, no change
+`sat.sh` runs the server in a `systemd-run --user --scope -p CPUQuota=40%` scope and loads it past its
+limit (4000 users x 0.007), reading the scope's `cpu.stat` over 15 s. E18: 34.5k, 34.8k, 33.7k rps;
+ObjC 49.8k; top C (cpub) 50.0k: WAT is at 0.69x. Per request at the cap: E18 11.55 us (user 5.5, sys 6.1),
+ObjC 8.17 us (user 2.5, sys 5.6). The sync=OFF diagnostic build (never kept) gives 34.6k, 35.1k: only
++2%, so at saturation fsync stalls are not the limit; user CPU is (2.2x ObjC's). Profile of E18 at
+4000 x 0.013: kernel 51.6%, app.so 39.1%, libwasmedge 6.2%, libc 2.6%; top of app.so:
+sqlite3BtreeTableMoveto 5.55, pcache1Fetch 2.71, record 2.68, bt_post_out 2.51, putjson 2.16,
+getCellInfo 1.94, getAndInitPage 1.94, IndexMoveto 1.43, PcacheRelease 1.24.
+
+## S2: C→wasm at saturation (1 Nov) — measurement
+Same harness as S1, 2 interleaved reps: C→wasm (`baseline/cserve.c`, E4's build) 15.9k, 15.3k rps at
+25.2, 26.3 us/req; E18 35.2k, 34.5k at 11.4, 11.6. The C→wasm baseline is the plain C reference (one SQL
+statement set, no B-tree reads, no group-commit window, no batched host calls), so this is mostly the
+design, not the language: E4 measured WAT ≈ C→wasm with the same loop and the same SQL.
+
+## E19: ObjC's SQLite compile options (1 Nov) — discarded
+`-DSQLITE_DQS=0 -DSQLITE_OMIT_DEPRECATED -DSQLITE_OMIT_SHARED_CACHE -DSQLITE_OMIT_PROGRESS_CALLBACK
+-DSQLITE_LIKE_DOESNT_MATCH_BLOBS -DSQLITE_MAX_EXPR_DEPTH=0 -DSQLITE_USE_ALLOCA`. 42/42. pstat, 3
+interleaved reps: E18 12.95, 13.00, 12.84 us/req; E19 13.00, 12.94, 12.68; user instructions the same
+(61.7-62.1k). Noise; discarded.
+
+## E20: `$put` without memory.copy (1 Nov) — (a) kept, (b) discarded
+A profile (perf record) put ~6% in libwasmedge and ~0.7% in pthread_rwlock; disassembly of the hot
+libwasmedge code shows a function that looks up two memory instances, bounds-checks (`pages << 16`) and
+calls memmove: WasmEdge's AOT code makes every `memory.copy` a call into the runtime. `$put` (some 200
+calls per `/feed`) used one memory.copy per call. (a) `$put` copies with v128/i64/i32/byte loads and
+stores, and keeps memory.copy for over 256 bytes. (b) also SQLite: its own memcpy/memmove/memset with
+plain loads/stores, built with `-mno-bulk-memory -mno-bulk-memory-opt` (LLVM 23 splits the latter out;
+`-mno-bulk-memory` alone still inlines memory.copy). 42/42, cmp.py identical, big.py same, both.
+pstat, 3 interleaved reps: E18 13.18, 12.97, 13.06 us/req; E20a 12.67, 12.48, 12.59 (-3.7%; user
+instructions 61.9k -> 56.5k, every rep below every E18 rep); E20b 12.65, 12.82, 12.53 (no better than a:
+SQLite's copies aren't on the hot read path). Kept (a) only.

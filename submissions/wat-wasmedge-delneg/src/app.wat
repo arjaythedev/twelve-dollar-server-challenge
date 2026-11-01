@@ -264,9 +264,40 @@
     (i64.div_u (i64.load (i32.const 0x295010)) (i64.const 1000000000)))
 
   ;; ---------- writing ----------
+  ;; plain loads and stores, 16 bytes at a time: WasmEdge's AOT code turns each memory.copy into a call into
+  ;; the runtime (a lock, a bounds check, memmove), which costs more than these short copies themselves
   (func $put (param $p i32) (param $n i32)
-    (memory.copy (global.get $w) (local.get $p) (local.get $n))
-    (global.set $w (i32.add (global.get $w) (local.get $n))))
+    (local $d i32)
+    (local.set $d (global.get $w))
+    (global.set $w (i32.add (local.get $d) (local.get $n)))
+    (if (i32.gt_u (local.get $n) (i32.const 256))
+      (then (memory.copy (local.get $d) (local.get $p) (local.get $n)) (return)))
+    (block $b (loop $l
+      (br_if $b (i32.lt_u (local.get $n) (i32.const 16)))
+      (v128.store (local.get $d) (v128.load (local.get $p)))
+      (local.set $d (i32.add (local.get $d) (i32.const 16)))
+      (local.set $p (i32.add (local.get $p) (i32.const 16)))
+      (local.set $n (i32.sub (local.get $n) (i32.const 16)))
+      (br $l)))
+    (if (i32.ge_u (local.get $n) (i32.const 8))
+      (then
+        (i64.store (local.get $d) (i64.load (local.get $p)))
+        (local.set $d (i32.add (local.get $d) (i32.const 8)))
+        (local.set $p (i32.add (local.get $p) (i32.const 8)))
+        (local.set $n (i32.sub (local.get $n) (i32.const 8)))))
+    (if (i32.ge_u (local.get $n) (i32.const 4))
+      (then
+        (i32.store (local.get $d) (i32.load (local.get $p)))
+        (local.set $d (i32.add (local.get $d) (i32.const 4)))
+        (local.set $p (i32.add (local.get $p) (i32.const 4)))
+        (local.set $n (i32.sub (local.get $n) (i32.const 4)))))
+    (block $b (loop $l
+      (br_if $b (i32.eqz (local.get $n)))
+      (i32.store8 (local.get $d) (i32.load8_u (local.get $p)))
+      (local.set $d (i32.add (local.get $d) (i32.const 1)))
+      (local.set $p (i32.add (local.get $p) (i32.const 1)))
+      (local.set $n (i32.sub (local.get $n) (i32.const 1)))
+      (br $l))))
 
   (func $putc (param $c i32)
     (i32.store8 (global.get $w) (local.get $c))

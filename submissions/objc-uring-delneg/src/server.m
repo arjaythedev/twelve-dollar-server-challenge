@@ -3,6 +3,7 @@
 // submitted after COMMIT.
 #include "server.h"
 #include <errno.h>
+#include <unistd.h>
 #include <poll.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
@@ -149,6 +150,10 @@ typedef struct {
     int ckRes[3];             // rc, frames in WAL, frames backfilled
     int listenFd;
     uint64_t nobufs;          // receives that ended with ENOBUFS (TD_CKLOG reports them)
+    uint64_t accErr, cqOvf, waitErrs;   // accept CQEs with an error, loop passes that saw a CQ overflow (TD_STATS)
+    int lastAccErr;
+    bool statsOn;
+    int64_t lastStats;
     TDAuth *auth;
     int64_t started, now;
     // batch
@@ -703,6 +708,7 @@ static const char *find_crlf2(const char *p, uint32_t n) {
                 if (q >= 0) [self armAccept:q];
             }
         }
+        if (res < 0) { accErr++; lastAccErr = res; }
         if (res >= 0) {
             uint32_t cid = (uint32_t)k * slots + (uint32_t)res;
             TDConn *c = conn_at(self, cid);
@@ -814,7 +820,17 @@ static double mono_s(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &
 
 int td_opt_batch = 128, td_opt_bwait = 1000, td_opt_bthresh = 8;   // --batch=N --bwait=us --bthresh=N
 
+// TD_STATS=1: one line a second with what the accept side and the completion queues saw.
+- (void)stats:(bool)final TD_DIRECT {
+    uint32_t live = 0, dropped = 0;
+    for (int k = 0; k < nrings; k++) { live += R[k].live; if (R[k].active) dropped += *R[k].ring.cq.koverflow; }
+    fprintf(stderr, "stats%s t=%lld live=%u accErr=%llu last=%d cqOvfPasses=%llu cqDropped=%u nobufs=%llu armed=%d\n",
+            final ? "-final" : "", (long long)(now - started), live, (unsigned long long)accErr, lastAccErr,
+            (unsigned long long)cqOvf, dropped, (unsigned long long)nobufs, (int)[self acceptArmedAnywhere]);
+}
+
 - (void)run {
+    statsOn = getenv("TD_STATS") != NULL;
     uint32_t lastReq = 0;
     for (int k = 0; k < nrings; k++) [self setupRing:k];
     [self armAccept:0];
@@ -831,11 +847,22 @@ int td_opt_batch = 128, td_opt_bwait = 1000, td_opt_bthresh = 8;   // --batch=N 
             ret = io_uring_submit_and_wait_timeout(&R[0].ring, &cq, (unsigned)td_opt_batch, &ts, NULL);
         } else ret = io_uring_submit_and_wait(&R[0].ring, 1);
         if (ret < 0 && ret != -EINTR && ret != -ETIME && ret != -EBUSY && ret != -EAGAIN) {
-            fprintf(stderr, "io_uring_submit_and_wait: %s\n", strerror(-ret));
-            exit(1);
+            // Never exit here: a dead process leaves no listener, and every later connect is refused. Under memory
+            // pressure the kernel can fail to queue an overflowing completion (-EBADR: CQEs were dropped) or to
+            // allocate (-ENOMEM); the loop goes on with what it has, backing off briefly if the error repeats.
+            if (waitErrs++ < 20 || !(waitErrs & 1023)) {
+                fprintf(stderr, "io_uring_submit_and_wait: %s (%llu)\n", strerror(-ret), (unsigned long long)waitErrs);
+                if (statsOn) [self stats:true];
+            }
+            if (ret != -EBADR) usleep(1000);
         }
         now = time(NULL);
         for (int k = 0; k < nrings; k++) if (k == 0 || R[k].active) [self reap:k];
+        if (TD_UNLIKELY(statsOn)) {
+            for (int k = 0; k < nrings; k++)
+                if (R[k].active && (IO_URING_READ_ONCE(*R[k].ring.sq.kflags) & IORING_SQ_CQ_OVERFLOW)) cqOvf++;
+            if (now != lastStats) { lastStats = now; [self stats:false]; }
+        }
         lastReq = nreq;
         if (TD_UNLIKELY(ckHold) && mono_s() - ckHoldT > 0.25) {   // child stuck: don't wait longer
             ckHold = false;

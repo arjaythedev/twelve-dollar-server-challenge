@@ -130,3 +130,49 @@ Final interleaved A/B at 340k (chain-u12), B9 vs B3 (`1fe6941`, the pushed head)
 pair 1 25.50, 91.6 %, 41 / 117 vs 27.01, 96.9 %, 61 / 165; pair 2 26.42, 94.9 %, 55 / 112 vs 27.33, 97.9 %, 161 / 251
 (steal 98 ticks in that B3 run); pair 3 25.53, 91.7 %, 52 / 212 vs 26.97, 96.8 %, 71 / 216. All pass. Lower p95 and p99
 in every pair and −4.7 % µs/req: meets the 1 Nov bar. Pushed.
+
+## 1 Nov, after the merge: the accept side (PR #154 scored 280k at 1fe6941; 290k/300k/320k: ~77 % "connection refused")
+
+What the grader's notes say: the same ~77 % refused shape was seen for 10067c1 at 260k+, and for asm #207 it came with
+"app cgroup memory down to 0", i.e. the app died; a dead process leaves no listener, so every later connect is refused.
+~77 % errors is what a 60 s ramp + 120 s probe gives if serving stops near the end of the ramp. Mojo #224 passed a 290k
+probe, so the load side reaches past 290k; #233 (790 MB) and Lean #153 also collapse to refused at 280k+.
+
+Checked on Synteq (fac5f79 + TD_STATS diagnostics, B10):
+- RLIMIT_NOFILE: main() raises soft to hard; under systemd LimitNOFILE=65535 that is 65,535 = slots per ring (the
+  kernel caps a fixed-file table at RLIMIT_NOFILE). Accepted sockets never enter the fd table.
+- listen(65535) is capped by somaxconn (4096 stock).
+- 8 rings × 65,535 fixed files, high-water 61,439 per ring: 340k uses 6 rings.
+- CQ 16,384 entries per ring: at 340k no pass ever saw IORING_SQ_CQ_OVERFLOW, 0 CQEs dropped.
+- Accept errors at 340k: 5, all -ECANCELED (the high-water hand-off); multishot accept is re-armed after any ending.
+- No conntrack on the grader (no UFW); the server uses no ephemeral ports.
+- 300k, 340k pass locally; 370k fails on CPU with 0 errors. The refused collapse does not reproduce on this 16 GB box.
+
+Memory at 340k users (MEMSTAT, 30 s into the hold): app cgroup anon 168 MB, file 50 MB, kernel 552 MB (slab 545:
+sock_inode, dentry, filp, io_kiocb). Outside the cgroup the kernel's TCP slab holds 768 MB for the 340k server
+sockets (2.26 KB each; on 6.8 an accepted socket's tcp_sock is allocated in softirq and not charged to the app).
+Idle-connection test (100k): our process adds 78 B per idle connection (TDConn) and ~130 B after the first request.
+On the 2 GB grader the app peaked at 1,245 MB at 280k; with ~2.3 KB/connection of TCP slab outside the cgroup that is
+about the whole box, so the likely death is the global OOM killer (largest process) or our own exit(1) on an
+io_uring wait error (-EBADR when the kernel cannot queue overflowing CQEs, -ENOMEM). Not confirmed: needs the grader's
+kernel log / memory.stat for a 290k probe.
+
+E12: io_uring wait errors are no longer fatal (logged; back-off 1 ms if they repeat). TD_STATS=1 prints a line a
+second: live connections, accept errors, CQ-overflow passes, dropped CQEs, ENOBUFS.
+
+E13: SQLite's pcache1 behind SQLITE_CONFIG_PCACHE2 (allowed since 31 Oct, like #233): skips xTruncate when no page at or
+past the limit can be cached (balance_nonroot's pending-byte parking otherwise makes the next commit walk the whole
+hash). TD_PCHECK=1 verifies every skip against pcache1's hash: a 150k users run never aborted, integrity_check ok
+(514k posts, 2.1M likes); diff vs --pcache=0 0 of 1,191. Write-only wrk (70 % likes, 30 % creates): with the old PGO
+profile no gain (the profile's indirect-call promotion inlined pcache1Fetch; the wrapper's fetch went out of line,
+pcache1Fetch 4.4 % against pcache1TruncateUnsafe 5.3 % without the wrapper); trained with the wrapper (pgo/train.m
+installs it), 4 rounds: 20.5 / 19.9 / 18.0 / 20.2 µs/req against 20.1 / 20.2 / 21.6 / 22.5 with --pcache=0.
+
+E12+E13 at 340k (B12 = fac5f79 + E12 + E13, PGO trained with the wrapper), interleaved with B9 (fac5f79), µs/req, CPU,
+hold p95 / p99 ms: B12 25.42, 90.7 %, 346 / 553; 24.75, 88.0 %, 528 / 1,155 FAIL; 26.26, 93.6 %, 403 / 791. B9 25.35,
+90.8 %, 127 / 399; 25.44, 91.3 %, 92 / 222; 26.23, 93.8 %, 218 / 350. Same binary, wrapper off (`--pcache=0`, B12n) vs on:
+off 26.48, 95.0 %, 97 / 173 and 25.51, 91.4 %, 179 / 297; on 25.61, 88.8 %, 1,630 / 5,538 FAIL (cgroup 737 → 1,061 MB
+2.5 min in with RSS flat: socket buffers piling up behind a stall). Four wrapper runs, all with worse tails, two fails;
+CPU per request the same. Cause not found (every skipped truncate verified at 150k). E13 dropped; E12 kept (no effect
+locally, it only matters when the kernel reports an error).
+Fifth wrapper run (u14-b12-340k-2): 24.75 µs, 88.9 %, 42 / 210, pass. Wrapper: 2 fails in 5; without: 0 in 5.

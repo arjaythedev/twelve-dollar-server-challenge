@@ -1142,9 +1142,17 @@ static void ring_init(int ri, int lfd, int slots) {
   for (int tries = 0; (rc = io_uring_queue_init_params(1024, &r->u, &p)) == -ENOMEM && tries < 200; tries++) usleep(50000);
   if (rc < 0) { fprintf(stderr, "io_uring_queue_init: %s\n", strerror(-rc)); exit(1); }
   if ((rc = io_uring_register_files_sparse(&r->u, (unsigned)slots)) < 0) { fprintf(stderr, "register files: %s\n", strerror(-rc)); exit(1); }
-  int err;
-  r->br = io_uring_setup_buf_ring(&r->u, NBUF, 0, 0, &err);
-  if (!r->br) die("buf ring");
+  // Register the buffer ring by hand: Ubuntu kernels 6.8.0-136 and later (LP #2162843) reject a zero
+  // reserved field with EINVAL and accept a nonzero one. A correct kernel takes the first call.
+  r->br = mmap(NULL, NBUF * sizeof(struct io_uring_buf), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_POPULATE, -1, 0);
+  if (r->br == MAP_FAILED) die("mmap buf ring");
+  io_uring_buf_ring_init(r->br);
+  struct io_uring_buf_reg reg = {.ring_addr = (uint64_t)(uintptr_t)r->br, .ring_entries = NBUF, .bgid = 0};
+  if ((rc = io_uring_register_buf_ring(&r->u, &reg, 0)) == -EINVAL) {
+    reg.resv[0] = 1;
+    rc = io_uring_register_buf_ring(&r->u, &reg, 0);
+  }
+  if (rc < 0) { fprintf(stderr, "buf ring %d: %s\n", ri, strerror(-rc)); exit(1); }
   r->bufs = malloc((size_t)NBUF * BUFSZ);
   for (int i = 0; i < NBUF; i++) io_uring_buf_ring_add(r->br, rbuf(r, (uint16_t)i), BUFSZ, (unsigned short)i, io_uring_buf_ring_mask(NBUF), i);
   io_uring_buf_ring_advance(r->br, NBUF);

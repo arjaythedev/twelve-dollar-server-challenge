@@ -27,6 +27,7 @@ struct config {
     uint32_t shed_hi_mb;        /* available memory above which no response carries Connection: close */
     uint32_t shed_lo_mb;        /* ... at or below which every response does, and idle keep-alives are closed */
     uint32_t conn_cap;          /* open connections at which every response closes (shedding starts at 90%) */
+    uint32_t hard_conn_cap;     /* stop accepting at this many open connections (0 = off) */
     uint32_t accept_floor_mb;   /* available memory below which accepting pauses (last resort) */
     uint32_t idle_timeout_s;    /* close keep-alives that sent nothing for this long; 0 = never */
     double shed_force;          /* tests: fixed shed fraction 0..1 instead of the memory/connection laws */

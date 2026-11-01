@@ -16,8 +16,10 @@ and trims CPU and memory. What changed:
   `Connection: close`, so users do not hold a socket during their think time.
   f is the larger of a memory law (0 at 450 MB available or more, 1 at 200 MB or
   less) and a connection-count law (0 at 90% of `--conn-cap`, 1 at the cap,
-  default 260,000). Accepting pauses only below 96 MB. Closes are rate-limited;
-  keep-alives idle over 60 s are closed. The stats line gained `shed_f`,
+  default 260,000). Accepting pauses only below 96 MB. Only the idle-keep-alive
+  sweep is rate-limited (per-response closes are not); keep-alives idle over
+  60 s are closed. **Superseded by the guard-fix follow-up: the laws are off by
+  default, see the section on that follow-up below.** The stats line gained `shed_f`,
   `shed_closes`, `idle_closes`, accepts per interval, `avail_mb` and
   `btree_fb`. This is general memory protection for any client.
 - Feed and single-post reads go through SQLite's B-tree cursor API
@@ -50,16 +52,34 @@ of about 2.5 KB per idle socket in the cgroup. Numbers and methods are in
 RESULTS.md section 8. Runs disturbed by other load on the machine are excluded.
 
 Not verified, stated plainly: serving 350,000 users needs about 33,000
-requests per second. At the measured per-socket kernel cost the box cannot hold
-350,000 sockets, so users must outnumber sockets and about 25 to 28 percent of
-responses must carry `Connection: close`. The estimated CPU on the box at that
-point is about 24 us per request by the server's counter (the laptop figure
-scaled by the 0.9 ratio seen between the box and the laptop on the previous
-version). The organizer's total CPU was about 10 percent above the server's own
-counter on previous runs, which gives about 85 to 90 percent CPU. This is an
-estimate. It has not been tested at box scale, no entry has yet held more than
+requests per second. The forecast made for #228 was that about 31 percent of
+responses would carry `Connection: close` and that the box would run at about
+94 percent CPU (24 us per request by the server's counter, scaled from the
+laptop, plus about 10 percent for the organizer's total). That is the corrected
+figure: earlier text said 25 to 28 percent closing and 85 to 90 percent CPU.
+**#228's own scored result contradicted the forecast: 228,000 users held and the
+240,000 probe failed with connection refused.** The forecast was an estimate and
+was wrong. It has not been tested at box scale, no entry has yet held more than
 280,000 users, and local runs only reached 10,000 to 20,000 connections with
 shedding. No user-count score is claimed.
+
+## Guard-fix follow-up (after #228: 228,000 held, 240,000 failed)
+
+#228's 240,000 probe failed with connection refused; the process was OOM-killed
+in its cgroup, as reproduced locally. Local cgroup tests (RESULTS.md section 9,
+one laptop, not box evidence) found that:
+
+- the guard's available-memory input counted page cache as used under a cgroup
+  limit, producing false shedding and accept pauses; it now uses anon + kernel
+  + sock (falling back to `memory.current` if `memory.stat` is unreadable);
+- closing and reconnecting was net harmful, so the shedding laws are off by
+  default (`--shed-hi-mb 0 --shed-lo-mb 0 --conn-cap 0`); flags re-enable them;
+- an optional `--hard-conn-cap N` (default off) stops accepting at N open
+  connections. The accept-floor pause (96 MB) stays on, driven by the cache-free
+  input.
+
+Not verified: any of this at box scale. No user-count score is claimed, and
+this change may not improve the box result.
 
 ## Since the first scored run (commit 065c235: 209,000 users, 38 us/request, 83% CPU)
 
@@ -149,8 +169,9 @@ on a 1 vCPU / 2 GB droplet. See RESULTS.md for the numbers.
 - Kernel 6.8.0-117 on the box versus 6.8.0-147 here: same series. The
   `IORING_REGISTER_PBUF_RING` EINVAL seen here is the reason classic
   `PROVIDE_BUFFERS` is used; both kernels support it.
-- The shedding thresholds (450 / 200 MB, conn cap 260,000, accept floor 96 MB)
-  were exercised locally with `--shed-force` and a cgroup limit, never on the
+- The shedding thresholds (450 / 200 MB, conn cap 260,000; now off by default)
+  and the accept floor (96 MB) were exercised locally with `--shed-force` and a
+  cgroup limit, never on the
   box's real memory wall. The cgroup headroom
   check was verified under `systemd-run --user --scope -p MemoryMax=`.
 - Port 80 with `CAP_NET_BIND_SERVICE`: not possible without root here; the
@@ -182,7 +203,7 @@ on a 1 vCPU / 2 GB droplet. See RESULTS.md for the numbers.
    the loop are `COMMIT` (WAL append, no fsync) and the one-shot `io_uring_enter`.
    A slow disk shows up as commit latency, not as a hang.
 6. **Shedding raises the connect rate.** Each reconnect costs about 22 to 38 us
-   of mostly kernel time, so at 25 to 28 percent of responses closing the CPU
+   of mostly kernel time, so at about 31 percent of responses closing the CPU
    per request rises by roughly 6 to 10 us over the F=0 figure. Measured on the
    laptop only.
 7. **The 16 ms batch window raises latency** (p95 20 to 35 ms locally against 3

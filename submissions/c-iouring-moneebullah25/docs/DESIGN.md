@@ -140,6 +140,12 @@ loop computes available memory: `MemAvailable` minus the growth of
 `SReclaimable` since start (reclaimable dentry and inode cache from sockets is
 counted as available by the kernel but is not free in practice) and, when the
 process runs under a cgroup with `memory.max`, the cgroup headroom if lower.
+The cgroup headroom is `memory.max` minus anon + kernel + sock from
+`memory.stat` (falling back to `memory.current` if `memory.stat` cannot be
+read). Earlier versions used `memory.current`, which includes page cache; under
+a limit the cache fills to the limit by itself and is reclaimed on demand, so
+the guard saw almost no headroom and shed or paused accepting when memory was
+not short (RESULTS.md section 9).
 The value is smoothed over about 1 s. Its effects are described under
 "Load shedding" below. Accepting pauses only below 96 MB available (resuming
 above that with hysteresis), and keep-alives idle longer than 60 s are closed.
@@ -284,17 +290,30 @@ useful (a multishot poll also pins a socket after `close_direct` unless it is
 cancelled). So to serve more users than the box has socket memory for, users
 must outnumber sockets.
 
+*Status: the laws are OFF by default.* After the scored run of #228 (228,000
+held, 240,000 failed with connection refused) local cgroup tests showed that
+the shedding laws were driven by an input that counted page cache and that
+closing and reconnecting was net harmful (RESULTS.md section 9), so
+`--shed-hi-mb`, `--shed-lo-mb` and `--conn-cap` now default to 0 (law off). The
+flags remain and re-enable the laws as described below.
+
 *The two laws.* f is the larger of:
 
-- a memory law: 0 at or above 450 MB available, 1 at or below 200 MB, linear
-  between, on the smoothed available value described under "Memory guard";
-- a connection-count law: 0 at 90% of `--conn-cap`, 1 at the cap (default
+- a memory law: 0 at or above `--shed-hi-mb` available (for example 450), 1 at
+  or below `--shed-lo-mb` (for example 200), linear between, on the available
+  value described under "Memory guard";
+- a connection-count law: 0 at 90% of `--conn-cap`, 1 at the cap (for example
   260,000), which acts before memory falls.
 
-Closes are rate-limited (a burst of 512 per pass, refilled at 200 per ms) so
-that a mass close does not itself push slab up in one step; a close of 20,000
-sockets raised slab by at most about 16 to 25 MB for 0.1 to 0.3 s. `--shed-force
-F` fixes the fraction for tests.
+Only the idle-keep-alive sweep is rate-limited (a burst of 512 per pass,
+refilled at 200 per ms) so that a mass idle close does not push slab up in one
+step; a close of 20,000 sockets raised slab by at most about 16 to 25 MB for
+0.1 to 0.3 s. Per-response closes (the shed fraction itself) are not
+rate-limited. `--shed-force F` fixes the fraction for tests.
+
+`--hard-conn-cap N` (default off) is a separate, optional guard: when N
+connections are open the server stops accepting and resumes once enough have
+closed; clients wait in the listen backlog.
 
 *Why not an accept pause.* In the second scored run the 240,000 probe paused
 accepting twice (252 MB available) and failed on latency (p95 5.8 s): a pause

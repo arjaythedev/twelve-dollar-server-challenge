@@ -40,8 +40,9 @@ fresh copy of `seed/feed.db` for every run (`tools/bench_local.sh` does that).
 | Checkpoints (4,000-frame trigger) | passive, off-loop; 44 per 90 s at ~600 writes/s, avg 106 ms, max 451 ms; longest COMMIT on the loop 48 ms | 100-770 ms on-loop avoided |
 | Largest local hold | 182,765 connections across 4 rings (generator-limited) | 300-400k on the box |
 
-Sections 1 to 7 are historical; the current defaults and the latest
-measurements are in section 8.
+Sections 1 to 7 are historical; section 8 is the state at #228, and section 9
+holds the local cgroup test behind the guard-fix follow-up (shedding off by
+default, cache-free pressure input).
 
 What this does **not** prove: any user count on the real box, p95/p99 at
 300k users over a real network, or behaviour at the 2 GB memory wall. See
@@ -350,3 +351,60 @@ Unit tests, fuzz (300,000 iterations), the official suite (42 of 42) and the
 black-box suite (177 of 177), all under ASAN and UBSAN. The official suite also
 passed 42 of 42 through `build.sh` with the PGO build (3 m 43 s, 10 profile
 files).
+
+## 9. Guard fix: local cgroup test (2026-10-31 and 2026-11-01)
+
+**Local evidence only: one 2-core laptop, loopback, a systemd user unit with a
+300 MB cgroup. This is not box evidence and no user count on the box follows
+from it.**
+
+*Why.* #228 scored 228,000 held and its 240,000 probe failed with connection
+refused; the process was OOM-killed in its cgroup (reproduced locally). The
+forecast for #228 (about 31% of responses closing, about 94% CPU at 350,000)
+was contradicted by that result.
+
+*Setup.* `MemoryMax=300M`, `MemorySwapMax=0`, server pinned to CPU 0, `mload` on
+CPU 1 with 32 source IPs, think-scale 1, ramp 60 s, hold 240 s, fresh seed copy
+per run, started only when the 1-minute load was under 2.5. Scripts were
+`run1.sh` style (systemd-run, sampler of memory.stat and sockstat).
+
+*Finding 1: the guard counted page cache as pressure.* Under a cgroup limit the
+cgroup's `memory.current` includes page cache, which fills to the limit by
+itself and is dropped on demand. The guard used `memory.max - memory.current` as
+headroom, so it reported little headroom when memory was not short and shed or
+paused accepting early. In a 120,000-user run of the new build the cgroup held
+about 35 MB anon, 195 MB kernel (slab) and 70 MB file cache; the cache-free
+figure (anon + kernel + sock, about 230 MB) is what the guard now uses.
+
+*Finding 2: closing and reconnecting did not help.* With the cache-free input,
+the plain server (no shedding) survived 60,000 to 120,000 users in the 300 MB
+cgroup with 0 errors; the same server with shedding thresholds scaled to the
+cgroup (84 / 37 MB, conn cap 74,400) added connect errors from 80,000 up.
+
+Results, one run per cell unless marked (x2 = two runs with the same result):
+
+| users | old guard, shedding on | old guard, no shedding | cache-free input, shedding on | cache-free input, no shedding |
+|---|---|---|---|---|
+| 60,000 | | | 0 errors (x2) | 0 errors |
+| 70,000 | | | 0 errors (x2) | 0 errors (x2) |
+| 80,000 | OOM-killed at 82 s | OOM-killed at 121 s | 0.50% errors (x2) | 0 errors (x2) |
+| 100,000 | OOM-killed at 61 s | OOM-killed at 85 s | 1.50 and 1.53% errors | 0 errors |
+| 120,000 | OOM-killed at 55 s | OOM-killed at 72 s | 2.5% errors (x2) | 0 errors |
+
+"Old guard" is the #228 build with `memory.current` as input; shedding on is
+84 / 37 MB, accept floor 18 MB, conn cap 74,400 (scaled to 300 MB); no shedding
+is `--shed-force 0 --shed-hi-mb 0 --shed-lo-mb 0 --conn-cap 4000000
+--accept-floor-mb 1 --idle-timeout-s 0`. The "cache-free, shedding on" column
+also includes a slewed and budgeted shed fraction that is not part of this
+follow-up. The "cache-free, no shedding" runs used an accept floor of 1 MB;
+the shipped default is 96 MB, so they are not the default configuration. Why
+the old build was killed with shedding disabled, when the new build was not, was
+not isolated. Latency in the no-shedding column at 120,000: p95 93 ms,
+p99 274 ms (about 24.7 us per request by the server's counter); with shedding
+p95 was 23 to 26 ms. At 160,000 and 200,000 users the plain server was
+OOM-killed in this cgroup (at 105 s and 51 s); a hand-scaled shedding variant
+was also killed at both. Each of those was a single run.
+
+*What follows.* Pressure is now measured without page cache; shedding is off by
+default; `--hard-conn-cap` is available and off. Whether any of this helps on
+the 2 GB box is not known.

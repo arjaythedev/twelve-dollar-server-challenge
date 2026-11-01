@@ -121,3 +121,20 @@ way merged entries fetch LLVM/Lean/Mojo toolchains). build.sh (user): SQLite 3.5
 (sha256 0a9c8e34…) → sq.wasm, app.wat → app.wasm, wasm-merge, `wasmedge compile`, gcc host.c.
 CI mimic (`~/watlab/ci.sh`: fresh ubuntu:24.04 container, install.sh as root, test/run.sh as a user):
 passed=42 failed=0.
+
+## E6: past the fd cap — idle keep-alive eviction (1 Nov)
+Harness: `ul` now binds source addresses 127.0.0.2-9 (more than 64k client ports) and reports error kinds;
+`ub.sh` limits only the server to 65,535 fds (like the grader's LimitNOFILE). Real think times (scale 1.0),
+ramp 30 s, measure 30 s, single runs (a cliff test, not an A/B).
+| variant | users | rps | us/req | p95/p99 ms | err | note |
+|---|---|---|---|---|---|---|
+| E2 build | 40,000 | 4235 | 10.78 | 4.2 / 37.3 | 0 | 80k sockets, ~600 MB RAM |
+| E2 build | 80,000 | 7025 | 55.28 | 20.9 / 39.6 | 0* | ~14k users never accepted; EMFILE busy-loop on the level-triggered listener (*ul has no timeout; k6 would time out) |
+| evict ≥1.5 s idle when >60k conns | 80,000 | 8435 | 15.02 | 35.4 / 125.0 | 0.77% | ECONNRESET: closed sockets that already held an unread request |
+| + read once before closing | 80,000 | 8417 | 14.69 | 40.2 / 171.4 | 0.000% | recv0=141 over the whole run incl. ramp |
+Kept: when more than 60,000 sockets are open (or accept hits EMFILE), every 0.5 s close keep-alive
+sockets idle ≥ 1.5 s with no partial request or unsent output, after one recv() that must return EAGAIN
+(else the request is served). On EMFILE with nothing to free, the listener is paused until the next sweep.
+Cost: past ~60k users most requests come on a fresh connection (~15 vs ~11 us/req on loopback; the
+grader's real NIC adds more). io_uring direct descriptors (what ObjC/Lean/Mojo use) would lift the cap;
+consider later via the host.

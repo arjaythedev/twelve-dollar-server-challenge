@@ -15,6 +15,7 @@
 ;;   0x284000  JWT scratch: header, payload, SHA-256 state/schedule/pad, HMAC states, tables
 ;;   0x285000  TXT   decoded POST body, 64 KiB
 ;;   0x295000  MISC  out-params, clock, iovec, digit buffer
+;;   0x2a0000  LAST  per-fd ms of the last event (idle eviction), 65536 x i32
 (module
   (import "sq" "memory" (memory 1))
   (import "sq" "_initialize" (func $sq_init))
@@ -137,6 +138,12 @@
   (global $un_n (mut i32) (i32.const 0))
   (global $closeme (mut i32) (i32.const 0))
   (global $dead (mut i32) (i32.const 0))
+  ;; idle-connection eviction (LAST[fd] at 0x2a0000: ms of the fd's last event, 0 = not open)
+  (global $tick (mut i32) (i32.const 0))     ;; monotonic ms, read once per epoll_wait
+  (global $nconn (mut i32) (i32.const 0))
+  (global $maxfd (mut i32) (i32.const 0))
+  (global $lastsweep (mut i32) (i32.const 0))
+  (global $lis_off (mut i32) (i32.const 0))
 
   ;; ---------- memory helpers ----------
   (func $strlen (param $p i32) (result i32)
@@ -188,6 +195,10 @@
     (drop (call $fd_write (i32.const 2) (i32.const 0x295020) (i32.const 1) (i32.const 0x295028))))
 
   (func $fatal (param $s i32) (call $log (local.get $s)) (call $exit (i32.const 1)))
+
+  (func $clock_ms (result i32)
+    (drop (call $clock (i32.const 1) (i64.const 1000000) (i32.const 0x295018)))
+    (i32.wrap_i64 (i64.div_u (i64.load (i32.const 0x295018)) (i64.const 1000000))))
 
   (func $now (result i64)
     (drop (call $clock (i32.const 0) (i64.const 1000000) (i32.const 0x295010)))
@@ -954,7 +965,36 @@
     (if (i32.load (local.get $c)) (then (call $free (i32.load (local.get $c)))))
     (if (i32.load offset=8 (local.get $c)) (then (call $free (i32.load offset=8 (local.get $c)))))
     (v128.store (local.get $c) (v128.const i64x2 0 0))
+    (i32.store offset=0x2a0000 (i32.shl (local.get $fd) (i32.const 2)) (i32.const 0))
+    (global.set $nconn (i32.sub (global.get $nconn) (i32.const 1)))
     (drop (call $close (local.get $fd))))
+
+  ;; Close keep-alive connections idle for 1.5 s or more, holding no partial request or unsent output.
+  ;; Runs only near the fd limit (LimitNOFILE=65535 caps epoll at ~65k sockets). bench/load.js never
+  ;; waits less than 3 s between a user's requests, so a closed idle socket is reopened by the client,
+  ;; never hit mid-request.
+  (func $sweep
+    (local $fd i32) (local $t i32) (local $c i32) (local $r i32)
+    (global.set $lastsweep (global.get $tick))
+    (block $d (loop $l
+      (br_if $d (i32.gt_s (local.get $fd) (global.get $maxfd)))
+      (local.set $t (i32.load offset=0x2a0000 (i32.shl (local.get $fd) (i32.const 2))))
+      (if (local.get $t)
+        (then (if (i32.ge_s (i32.sub (global.get $tick) (local.get $t)) (i32.const 1500))
+          (then
+            (local.set $c (call $conn (local.get $fd)))
+            (if (i32.eqz (i32.or (i32.load offset=4 (local.get $c)) (i32.load offset=12 (local.get $c))))
+              (then
+                ;; a request may already sit unread in the socket (closing it then would send a RST): read once,
+                ;; close only if nothing came, else serve it
+                (local.set $r (call $recv (local.get $fd) (i32.const 0x104000) (i32.const 0x20000)))
+                (if (i32.eq (local.get $r) (i32.const -11))
+                  (then (call $close_conn (local.get $fd)))
+                  (else
+                    (i32.store offset=0x2a0000 (i32.shl (local.get $fd) (i32.const 2)) (global.get $tick))
+                    (call $after_recv (local.get $fd) (local.get $c) (i32.const 0) (local.get $r))))))))))
+      (local.set $fd (i32.add (local.get $fd) (i32.const 1)))
+      (br $l))))
 
   ;; send OUTB[0x144000, $o); keep what the socket doesn't take
   (func $emit (param $fd i32)
@@ -1069,8 +1109,9 @@
     (local.get $v))
 
   (func $on_event (param $fd i32) (param $ev i32)
-    (local $c i32) (local $pin i32) (local $r i32) (local $n i32) (local $used i32) (local $left i32) (local $p i32) (local $ol i32)
+    (local $c i32) (local $pin i32) (local $r i32) (local $p i32) (local $ol i32)
     (local.set $c (call $conn (local.get $fd)))
+    (i32.store offset=0x2a0000 (i32.shl (local.get $fd) (i32.const 2)) (global.get $tick))
     (local.set $ol (i32.load offset=12 (local.get $c)))
     (if (local.get $ol)
       (then
@@ -1102,6 +1143,11 @@
         (i32.store (local.get $c) (i32.const 0))
         (i32.store offset=4 (local.get $c) (i32.const 0))))
     (local.set $r (call $recv (local.get $fd) (i32.add (i32.const 0x104000) (local.get $pin)) (i32.sub (i32.const 0x20000) (local.get $pin))))
+    (call $after_recv (local.get $fd) (local.get $c) (local.get $pin) (local.get $r)))
+
+  ;; RBUF holds $pin earlier bytes plus what recv returned ($r: count, 0 = EOF, or -errno)
+  (func $after_recv (param $fd i32) (param $c i32) (param $pin i32) (param $r i32)
+    (local $n i32) (local $used i32) (local $left i32) (local $p i32)
     (if (i32.le_s (local.get $r) (i32.const 0))
       (then
         (if (i32.ne (local.get $r) (i32.const -11)) (then (call $close_conn (local.get $fd)) (return)))
@@ -1128,13 +1174,25 @@
         (i32.store offset=4 (local.get $c) (local.get $left)))))
 
   (func $accept_all
-    (local $fd i32)
+    (local $fd i32) (local $swept i32)
     (loop $l
       (local.set $fd (call $accept (global.get $lfd)))
-      (if (i32.lt_s (local.get $fd) (i32.const 0)) (then (return)))
+      (if (i32.lt_s (local.get $fd) (i32.const 0))
+        (then
+          ;; EMFILE/ENFILE: free idle sockets once; if none can go, stop polling the listener until the next sweep
+          (if (i32.or (i32.eq (local.get $fd) (i32.const -24)) (i32.eq (local.get $fd) (i32.const -23)))
+            (then
+              (if (i32.eqz (local.get $swept))
+                (then (local.set $swept (i32.const 1)) (call $sweep) (br $l)))
+              (global.set $lis_off (i32.const 1))
+              (drop (call $epoll_ctl (global.get $ep) (i32.const 3) (global.get $lfd) (i32.const 0)))))
+          (return)))
       (if (i32.ge_u (local.get $fd) (i32.const 65536))
         (then (drop (call $close (local.get $fd))) (br $l)))
       (v128.store (call $conn (local.get $fd)) (v128.const i64x2 0 0))
+      (i32.store offset=0x2a0000 (i32.shl (local.get $fd) (i32.const 2)) (global.get $tick))
+      (global.set $nconn (i32.add (global.get $nconn) (i32.const 1)))
+      (if (i32.gt_s (local.get $fd) (global.get $maxfd)) (then (global.set $maxfd (local.get $fd))))
       (drop (call $epoll_ctl (global.get $ep) (i32.const 1) (local.get $fd) (i32.const 0x2001)))   ;; ADD, IN|RDHUP
       (br $l)))
 
@@ -1187,7 +1245,17 @@
     (drop (call $epoll_ctl (global.get $ep) (i32.const 1) (global.get $lfd) (i32.const 1)))
     (call $log (i32.const 0x101080))
     (loop $forever
-      (local.set $n (call $epoll_wait (global.get $ep) (i32.const 0x102000) (i32.const 512) (i32.const -1)))
+      (local.set $n (call $epoll_wait (global.get $ep) (i32.const 0x102000) (i32.const 512) (i32.const 500)))
+      (global.set $tick (call $clock_ms))
+      (if (i32.eqz (global.get $tick)) (then (global.set $tick (i32.const 1))))   ;; 0 marks a closed fd
+      (if (i32.and (i32.or (i32.gt_s (global.get $nconn) (i32.const 60000)) (global.get $lis_off))
+                   (i32.ge_s (i32.sub (global.get $tick) (global.get $lastsweep)) (i32.const 500)))
+        (then
+          (call $sweep)
+          (if (global.get $lis_off)
+            (then
+              (global.set $lis_off (i32.const 0))
+              (drop (call $epoll_ctl (global.get $ep) (i32.const 3) (global.get $lfd) (i32.const 1)))))))
       (local.set $i (i32.const 0))
       (block $d (loop $l
         (br_if $d (i32.ge_s (local.get $i) (local.get $n)))

@@ -38,6 +38,9 @@
 #define HDR 128               // room before each body for the status line and headers
 #define MAXIN 65536           // largest request we buffer
 #define PACE_NS 1000000L      // a busy loop starts a pass at most every 1 ms
+#define PASS_CQES 4096        // completions handled per pass; the rest wait in the kernel
+#define ACCEPTS 32            // accepts kept armed per ring while the loop keeps up
+#define BACKLOG (4096 / NRING) // listen backlog per listener, so all of them hold one listener's worth
 #define CKPT_PAGES 1000        // the background checkpoint starts at this many WAL pages
 #define CKPT_FINISH 4000       // the main thread finishes a checkpoint at this many
 
@@ -52,7 +55,8 @@ enum { F2_SHUT = 1 };
 typedef struct {
   char *in;            // buffered input that did not fit one receive buffer, or waited for a send
   uint32_t inlen, incap;
-  uint16_t bid, blen;  // a receive buffer lent to this connection for the current pass
+  const char *lp;      // this pass's input, copied into the scratch arena (F_BORROW)
+  uint32_t blen;
   uint8_t f, f2;
 } conn_t;
 
@@ -61,7 +65,7 @@ typedef struct {
   struct io_uring_buf_ring *br;
   char *bufs;
   conn_t *c;
-  int lfd, nslots, accept_dead, dirty;
+  int lfd, nslots, nacc, full, dirty;
   uint16_t *rel;       // buffers to hand back at the end of the pass
   int nrel;
   uint32_t *rearm;     // connections whose multishot receive ended
@@ -625,8 +629,9 @@ static struct io_uring_sqe *sqe_get(ring_t *r) {
 static void arm_accept(int ri) {
   ring_t *r = &R[ri];
   struct io_uring_sqe *s = sqe_get(r);
-  io_uring_prep_multishot_accept_direct(s, r->lfd, NULL, NULL, 0);
+  io_uring_prep_accept_direct(s, r->lfd, NULL, NULL, 0, IORING_FILE_INDEX_ALLOC);
   s->user_data = UD(OP_ACCEPT, ri, 0, 0);
+  r->nacc++;
 }
 
 static void arm_recv(int ri, uint32_t slot) {
@@ -656,9 +661,9 @@ static void maybe_close(int ri, uint32_t slot) {
   ring_t *r = &R[ri];
   conn_t *c = &r->c[slot];
   if (!(c->f & F_OPEN) || !(c->f & F_EOF) || (c->f & (F_RECV | F_SENDING | F_QUEUED))) return;
-  if (c->f & F_BORROW) rbuf_release(r, c->bid);
   free(c->in);
   memset(c, 0, sizeof *c);
+  r->full = 0;
   struct io_uring_sqe *s = sqe_get(r);
   io_uring_prep_close_direct(s, slot);
   s->user_data = UD(OP_CLOSE, ri, slot, 0);
@@ -677,12 +682,11 @@ static int in_append(conn_t *c, const char *p, uint32_t n) {
   return 0;
 }
 
-// Moves a lent receive buffer into the connection's own input buffer.
-static int unborrow(ring_t *r, conn_t *c, uint32_t from) {
+// Moves this pass's input from the scratch arena into the connection's own input buffer.
+static int unborrow(conn_t *c, uint32_t from) {
   int rc = 0;
   if (c->f & F_BORROW) {
-    if (c->blen > from) rc = in_append(c, rbuf(r, c->bid) + from, c->blen - from);
-    rbuf_release(r, c->bid);
+    if (c->blen > from) rc = in_append(c, c->lp + from, c->blen - from);
     c->f &= (uint8_t)~F_BORROW;
   }
   return rc;
@@ -699,16 +703,23 @@ static void enqueue(int ri, uint32_t slot) {
   queue[nq++] = (uint32_t)ri << 24 | slot;
 }
 
+// The receive buffer goes back to the kernel after this batch of completions, so a busy pass never
+// runs the ring out of buffers. The usual request (one receive, nothing pending) is copied into the
+// pass's scratch arena; anything else goes to the connection's own buffer.
 static void on_data(int ri, uint32_t slot, uint16_t bid, uint32_t n) {
   ring_t *r = &R[ri];
   conn_t *c = &r->c[slot];
+  const char *src = rbuf(r, bid);
+  int bad = 0;
   if (!(c->f & (F_BORROW | F_SENDING)) && !c->inlen) {
-    c->f |= F_BORROW, c->bid = bid, c->blen = (uint16_t)n;
+    char *d = salloc(n);
+    memcpy(d, src, n);
+    c->f |= F_BORROW, c->lp = d, c->blen = n;
   } else {
-    int bad = unborrow(r, c, 0) || in_append(c, rbuf(r, bid), n);
-    rbuf_release(r, bid);
-    if (bad) { c->f |= F_EOF; conn_shut(ri, slot); return; }
+    bad = unborrow(c, 0) || in_append(c, src, n);
   }
+  rbuf_release(r, bid);
+  if (bad) { c->f |= F_EOF; conn_shut(ri, slot); return; }
   enqueue(ri, slot);
 }
 
@@ -724,7 +735,8 @@ static void on_cqe(int ri, struct io_uring_cqe *q) {
         r->c[res].f = F_OPEN;
         arm_recv(ri, (uint32_t)res);
       }
-      if (!more) r->accept_dead = 1;
+      r->nacc--;
+      if (res == -ENFILE) r->full = 1;  // no free slot: accept again after a close
       break;
     case OP_RECV: {
       conn_t *c = &r->c[slot];
@@ -1026,11 +1038,11 @@ static void process(int ri, uint32_t slot) {
   c->f &= (uint8_t)~F_QUEUED;
   if (!(c->f & F_SENDING)) {
     int lent = (c->f & F_BORROW) != 0;
-    const char *p = lent ? rbuf(r, c->bid) : c->in;
+    const char *p = lent ? c->lp : c->in;
     uint32_t n = lent ? c->blen : c->inlen;
     uint32_t k = n ? handle(ri, slot, p, n) : 0;
     if (lent) {
-      if (unborrow(r, c, k)) c->f |= F_EOF, conn_shut(ri, slot);
+      if (unborrow(c, k)) c->f |= F_EOF, conn_shut(ri, slot);
     } else if (k) {
       memmove(c->in, c->in + k, c->inlen - k);
       if (!(c->inlen -= k)) { free(c->in); c->in = NULL; c->incap = 0; }
@@ -1126,7 +1138,7 @@ static int listener(const char *host, int port) {
   struct sockaddr_in a = {.sin_family = AF_INET, .sin_port = htons((uint16_t)port)};
   if (inet_pton(AF_INET, host, &a.sin_addr) != 1) die("bad HOST");
   if (bind(fd, (struct sockaddr *)&a, sizeof a) < 0) die("bind");
-  if (listen(fd, 65535) < 0) die("listen");
+  if (listen(fd, BACKLOG) < 0) die("listen");
   return fd;
 }
 
@@ -1161,18 +1173,23 @@ static void ring_init(int ri, int lfd, int slots) {
   r->rearm = malloc((size_t)slots * sizeof *r->rearm);
   r->nslots = slots;
   r->lfd = lfd;
-  arm_accept(ri);
+  while (r->nacc < ACCEPTS) arm_accept(ri);
 }
 
-static void end_pass(void) {
+static void rbuf_flush(ring_t *r) {
+  if (!r->nrel) return;
+  for (int i = 0; i < r->nrel; i++)
+    io_uring_buf_ring_add(r->br, rbuf(r, r->rel[i]), BUFSZ, r->rel[i], io_uring_buf_ring_mask(NBUF), i);
+  io_uring_buf_ring_advance(r->br, r->nrel);
+  r->nrel = 0;
+}
+
+// Admission control: new connections are accepted only after a pass that kept up (handled fewer
+// than PASS_CQES completions). When the loop falls behind, the listen queues fill and the kernel
+// holds further connection attempts, so requests do not pile up unread in admitted sockets.
+static void end_pass(int behind) {
   for (int ri = 0; ri < nring; ri++) {
     ring_t *r = &R[ri];
-    if (r->nrel) {
-      for (int i = 0; i < r->nrel; i++)
-        io_uring_buf_ring_add(r->br, rbuf(r, r->rel[i]), BUFSZ, r->rel[i], io_uring_buf_ring_mask(NBUF), i);
-      io_uring_buf_ring_advance(r->br, r->nrel);
-      r->nrel = 0;
-    }
     for (int i = 0; i < r->nrearm; i++) {
       uint32_t slot = r->rearm[i];
       conn_t *c = &r->c[slot];
@@ -1180,7 +1197,8 @@ static void end_pass(void) {
       if ((c->f & F_OPEN) && !(c->f & (F_EOF | F_RECV))) arm_recv(ri, slot);
     }
     r->nrearm = 0;
-    if (r->accept_dead) { r->accept_dead = 0; arm_accept(ri); }
+    if (!behind && !r->full)
+      while (r->nacc < ACCEPTS) arm_accept(ri);
   }
 }
 
@@ -1194,11 +1212,13 @@ static inline int ring_pending(ring_t *r) {
 }
 
 // Runs the ring's deferred task work and handles its completions. Newer kernels run only about 20
-// task-work items per enter, so enter again while the kernel still flags pending work.
-static int drain(int ri) {
+// task-work items per enter, so enter again while the kernel still flags pending work. At most
+// `budget` completions: under overload a pass stays short, so its responses go out (and their send
+// memory is freed) before more requests are read.
+static int drain(int ri, int budget) {
   ring_t *r = &R[ri];
   int n = 0;
-  for (int k = 0; k < 64; k++) {
+  for (int k = 0; k < 64 && n < budget; k++) {
     int pend = ring_pending(r);
     if (r->dirty) { r->dirty = 0; io_uring_submit_and_get_events(&r->u); pend = 1; }  // last pass's sends too
     else if (pend) io_uring_get_events(&r->u);
@@ -1207,9 +1227,10 @@ static int drain(int ri) {
     struct io_uring_cqe *q;
     io_uring_for_each_cqe(&r->u, head, q) {
       on_cqe(ri, q);
-      c++;
+      if (n + (int)++c >= budget) break;
     }
     io_uring_cq_advance(&r->u, c);
+    rbuf_flush(r);
     n += (int)c;
     if (!c && !pend) break;
   }
@@ -1250,12 +1271,15 @@ int main(void) {
   }
   fprintf(stderr, "listening on %s:%s with %d rings x %d slots\n", host ? host : "0.0.0.0", ps ? ps : "3000", nring, slots);
 
+  int first = 0;
   for (;;) {
     int64_t t0 = mono_ns();
     int got = 0;
-    for (int ri = 0; ri < nring; ri++) got += drain(ri);
+    // The budget is shared; the first ring rotates so no ring always gets the rest.
+    for (int i = 0; i < nring && got < PASS_CQES; i++) got += drain((first + i) % nring, PASS_CQES - got);
+    first = (first + 1) % nring;
     if (nq) run_batch();
-    end_pass();
+    end_pass(got >= PASS_CQES);
     if (!got) {
       submit_all();
       // Idle. Let the rings signal the eventfd, look once more, then wait. The kernel signals it when
@@ -1273,7 +1297,7 @@ int main(void) {
       continue;
     }
     int64_t left = PACE_NS - (mono_ns() - t0);
-    if (left > 0) {
+    if (left > 0 && got < PASS_CQES) {
       struct timespec ts = {0, left};
       nanosleep(&ts, NULL);
     }

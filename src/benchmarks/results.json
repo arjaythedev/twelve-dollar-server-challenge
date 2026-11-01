@@ -52,5 +52,23 @@
     "cpu_us_per_request": 273.54324324324324,
     "server_peak_bytes": 339001344,
     "passed": true
+  },
+  {
+    "date": "2026-11-01",
+    "name": "python315-5000",
+    "python": "3.15.2",
+    "sqlite": "3.53.1",
+    "users": 5000,
+    "hold": "5m",
+    "ramp": "60s",
+    "requests": 186708,
+    "rps": 466.766477196705,
+    "p95_ms": 1.0435,
+    "p99_ms": 1.564,
+    "max_ms": 61.0902,
+    "error_rate": 0.0,
+    "cpu_us_per_request": 269.5358045718448,
+    "server_peak_bytes": 407289856,
+    "passed": true
   }
 ]

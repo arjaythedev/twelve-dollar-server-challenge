@@ -17,9 +17,10 @@ SELECT http_reply(slot, CASE
 
   WHEN route = 'feed' THEN
     '200 {"posts":' || (
-      SELECT json_group_array(json(post)) FROM (
-        SELECT json_object('id', p.id, 'body', p.body, 'created_at', p.created_at, 'author', u.username,
-                           'like_count', (SELECT count(*) FROM likes AS l WHERE l.post_id = p.id)) AS post
+      SELECT json_group_array(json_object('id', id, 'body', body, 'created_at', created_at, 'author', author,
+                                          'like_count', like_count)) FROM (
+        SELECT p.id, p.body, p.created_at, u.username AS author,
+               (SELECT count(*) FROM likes AS l WHERE l.post_id = p.id) AS like_count
           FROM posts AS p JOIN users AS u ON u.id = p.user_id
          ORDER BY p.created_at DESC, p.id DESC
          LIMIT 20)) || '}'

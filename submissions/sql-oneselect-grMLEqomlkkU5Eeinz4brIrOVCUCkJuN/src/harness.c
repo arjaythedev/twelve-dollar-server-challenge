@@ -10,15 +10,33 @@ int main(int argc, char **argv) {
   c.in_cap = 1 << 20;
   c.in = malloc(c.in_cap);
   c.in_len = (uint32_t)fread(c.in, 1, c.in_cap, stdin);
-  if (argc > 2) {  /* bin/harness server.sql batch: every request on its own connection, all in one batch */
+  /* bin/harness server.sql batch: every request on its own connection, all in one batch.
+   * bin/harness server.sql bench <runs>: the same, run <runs> times; prints the statement's time per request. */
+  if (argc > 2) {
     static conn cs[BATCH_MAX];
-    int k = 0;
-    for (; k < BATCH_MAX && c.in_len; k++) {
-      cs[k] = c; cs[k].busy = 0; cs[k].out = 0; cs[k].out_len = cs[k].out_cap = 0;
-      if (queue_request(&cs[k]) != 1) break;
-      c.in = cs[k].in; c.in_len = cs[k].in_len;
+    int runs = argc > 3 ? atoi(argv[3]) : 1, k = 0;
+    char *orig = malloc(c.in_len);
+    uint32_t orig_len = c.in_len;
+    memcpy(orig, c.in, orig_len);
+    double spent = 0;
+    for (int run = 0; run < runs; run++) {
+      memcpy(c.in, orig, orig_len);
+      c.in_len = orig_len;
+      char *in = c.in;
+      for (k = 0; k < BATCH_MAX && c.in_len; k++) {
+        free(cs[k].out);
+        cs[k] = c; cs[k].busy = 0; cs[k].out = 0; cs[k].out_len = cs[k].out_cap = 0;
+        if (queue_request(&cs[k]) != 1) break;
+        c.in = cs[k].in; c.in_len = cs[k].in_len;
+      }
+      c.in = in;
+      struct timespec t0, t1;
+      clock_gettime(CLOCK_MONOTONIC, &t0);
+      run_batch();
+      clock_gettime(CLOCK_MONOTONIC, &t1);
+      spent += (double)(t1.tv_sec - t0.tv_sec) * 1e6 + (double)(t1.tv_nsec - t0.tv_nsec) / 1e3;
     }
-    run_batch();
+    if (runs > 1) { printf("%d requests x %d runs: %.1f us per request\n", k, runs, spent / ((double)k * runs)); return 0; }
     for (int i = 0; i < k; i++) fwrite(cs[i].out, 1, cs[i].out_len, stdout);
     return 0;
   }

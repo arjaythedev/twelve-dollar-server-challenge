@@ -11,7 +11,7 @@ typedef struct conn {
   uint32_t gen;             /* bumped on close, so a stale reference is ignored */
   char *in;  uint32_t in_len, in_cap;
   char *out; uint32_t out_len, out_off, out_cap;
-  uint8_t open, busy, close_after, sent_continue, draining;
+  uint8_t open, busy, close_after, sent_continue, draining, sending, ring, eof;
   struct conn *prev, *next; /* idle list (server.c) */
 } conn;
 

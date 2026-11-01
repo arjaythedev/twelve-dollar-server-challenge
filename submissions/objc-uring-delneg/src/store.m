@@ -138,8 +138,8 @@ TD_INLINE bool run1(sqlite3_stmt *s) {
 }
 
 - (bool)begin { return run1(sBegin); }
-- (bool)commit { return run1(sCommit); }
-- (void)rollback { if (!sqlite3_get_autocommit(db)) run1(sRollback); }
+- (bool)commit { td_bt_end(); return run1(sCommit); }
+- (void)rollback { td_bt_end(); if (!sqlite3_get_autocommit(db)) run1(sRollback); }
 
 static void put_post(TDBuf *b, sqlite3_stmt *s) {
     td_buf_lit(b, "{\"id\":");

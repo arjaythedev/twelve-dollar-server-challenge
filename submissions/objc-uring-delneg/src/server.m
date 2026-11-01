@@ -429,13 +429,24 @@ TD_INLINE void req_err(TDReq *r, int st, const char *msg) {
     arena.len += (uint32_t)len;
 }
 
+// First "\r\n\r\n" in p[0..n), like memmem, but stepping by memchr (SIMD) from one '\r' to the next.
+static const char *find_crlf2(const char *p, uint32_t n) {
+    if (n < 4) return NULL;
+    const char *q = p, *last = p + n - 3;    // a match starts before last
+    while (q < last && (q = memchr(q, '\r', (size_t)(last - q)))) {
+        if (q[1] == '\n' && q[2] == '\r' && q[3] == '\n') return q;
+        q++;
+    }
+    return NULL;
+}
+
 // Parses complete requests from d[0..n). Returns bytes consumed, or -1 to drop the connection.
 - (int)parse:(TDConn *)c slot:(uint32_t)slot data:(const char *)d length:(uint32_t)n TD_DIRECT {
     uint32_t off = 0;
     while (off < n) {
         const char *p = d + off;
         uint32_t avail = n - off;
-        const char *he = memmem(p, avail, "\r\n\r\n", 4);
+        const char *he = find_crlf2(p, avail);
         if (!he) {
             if (avail > MAX_REQ) return -1;
             break;

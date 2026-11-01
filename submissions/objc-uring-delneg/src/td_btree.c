@@ -16,7 +16,13 @@ static struct {
     Pgno posts, users, top, likes;   /* root pages: posts, users, posts_created_at_id_idx, likes_post_id_idx */
     u32 cookie;
     KeyInfo *topKey, *likesKey;
+    /* Cursors stay open for the rest of the batch's transaction (td_bt_end closes
+    ** them before COMMIT/ROLLBACK); a write in between makes SQLite save and
+    ** reseek them, as for any open statement cursor. */
+    BtCursor cur[4];
+    u8 open[4];
 } B;
+enum { C_TOP, C_POSTS, C_USERS, C_LIKES };
 
 int td_bt_init(sqlite3 *db) {
     memset(&B, 0, sizeof B);
@@ -82,10 +88,22 @@ static int rec(BtCursor *c, int n, Col *col) {
 #define IS_INT(c) (((c).type >= 1 && (c).type <= 6) || (c).type == 8 || (c).type == 9)
 #define IS_TEXT(c) ((c).type >= 13 && ((c).type & 1))
 
-static int open_cur(BtCursor *c, Pgno root, KeyInfo *k) {
+static BtCursor *cur(int i) {
+    static const u8 isIndex[4] = {1, 0, 0, 1};
+    BtCursor *c = &B.cur[i];
+    if (B.open[i]) return c;
+    Pgno root = i == C_TOP ? B.top : i == C_POSTS ? B.posts : i == C_USERS ? B.users : B.likes;
     memset(c, 0, sizeof *c);
     sqlite3BtreeCursorZero(c);
-    return sqlite3BtreeCursor(B.db->aDb[0].pBt, root, 0, k, c);
+    if (sqlite3BtreeCursor(B.db->aDb[0].pBt, root, 0,
+                           isIndex[i] ? (i == C_TOP ? B.topKey : B.likesKey) : NULL, c)) return NULL;
+    B.open[i] = 1;
+    return c;
+}
+
+void td_bt_end(void) {
+    for (int i = 0; i < 4; i++)
+        if (B.open[i]) { sqlite3BtreeCloseCursor(&B.cur[i]); B.open[i] = 0; }
 }
 
 /* First likes_post_id_idx entry with post_id >= id. 0: on an entry, 1: none, -1: error. */
@@ -153,80 +171,67 @@ static int begin_read(void) {
 
 int td_bt_feed(TDPostSink sink, void *ctx) {
     if (begin_read()) return -1;
-    BtCursor top, pc, uc, lc;
+    BtCursor *top = cur(C_TOP), *pc = cur(C_POSTS), *uc = cur(C_USERS), *lc = cur(C_LIKES);
+    if (!top || !pc || !uc || !lc) return -1;
     i64 ids[20];
-    int n = 0, res = 0, ok = -1;
-    if (open_cur(&top, B.top, B.topKey)) return -1;
-    int rc = sqlite3BtreeFirst(&top, &res);     /* the index is (created_at DESC, id DESC): newest first */
+    int n = 0, res = 0;
+    int rc = sqlite3BtreeFirst(top, &res);     /* the index is (created_at DESC, id DESC): newest first */
     while (rc == SQLITE_OK && !res && n < 20) {
         Col k[2];
-        if (!rec(&top, 2, k) || !IS_INT(k[1])) { rc = SQLITE_CORRUPT; break; }
+        if (!rec(top, 2, k) || !IS_INT(k[1])) return -1;
         ids[n++] = k[1].v;
-        rc = sqlite3BtreeNext(&top, 0);
+        rc = sqlite3BtreeNext(top, 0);
         if (rc == SQLITE_DONE) { rc = SQLITE_OK; break; }
     }
-    sqlite3BtreeCloseCursor(&top);
     if (rc != SQLITE_OK) return -1;
     if (n == 0) return 0;
     i64 lo = ids[0], hi = ids[0];
     for (int i = 1; i < n; i++) { if (ids[i] < lo) lo = ids[i]; if (ids[i] > hi) hi = ids[i]; }
     i64 cnt[SPAN], likes[20];
-    if (open_cur(&lc, B.likes, B.likesKey)) return -1;
     if (hi - lo < SPAN) {
         memset(cnt, 0, sizeof(i64) * (size_t)(hi - lo + 1));
-        rc = likes_count(&lc, lo, hi, cnt);
+        rc = likes_count(lc, lo, hi, cnt);
         for (int i = 0; i < n; i++) likes[i] = cnt[ids[i] - lo];
     } else {
         rc = 0;
-        for (int i = 0; i < n && !rc; i++) { likes[i] = 0; rc = likes_count(&lc, ids[i], ids[i], &likes[i]); }
+        for (int i = 0; i < n && !rc; i++) { likes[i] = 0; rc = likes_count(lc, ids[i], ids[i], &likes[i]); }
     }
-    sqlite3BtreeCloseCursor(&lc);
     if (rc) return -1;
-    if (open_cur(&pc, B.posts, NULL)) return -1;
-    if (open_cur(&uc, B.users, NULL)) { sqlite3BtreeCloseCursor(&pc); return -1; }
-    TDPostView v[20];
-    int i = 0;
-    for (; i < n; i++) {
-        /* consecutive ids: step back one row instead of seeking from the root */
-        if (!(i > 0 && ids[i] == ids[i - 1] - 1 && sqlite3BtreePrevious(&pc, 0) == SQLITE_OK
-              && sqlite3BtreeIntegerKey(&pc) == ids[i])) {
-            if (sqlite3BtreeTableMoveto(&pc, ids[i], 0, &res)) break;
+    TDPostView v;
+    for (int i = 0; i < n; i++) {
+        int at = 0;
+        if (i == 0 && ids[0] == hi) {
+            /* the newest post is usually the table's last row: a rightmost descent, no search */
+            at = sqlite3BtreeLast(pc, &res) == SQLITE_OK && !res && sqlite3BtreeIntegerKey(pc) == ids[0];
+        } else if (i > 0 && ids[i] == ids[i - 1] - 1) {
+            /* consecutive ids: step back one row instead of seeking from the root */
+            at = sqlite3BtreePrevious(pc, 0) == SQLITE_OK && sqlite3BtreeIntegerKey(pc) == ids[i];
+        }
+        if (!at) {
+            if (sqlite3BtreeTableMoveto(pc, ids[i], 0, &res)) return -1;
             if (res != 0) continue;     /* not in the table: same as the SQL join */
         }
-        if (post_view(&pc, &uc, &v[0])) break;
-        v[0].id = ids[i];
-        v[0].likes = likes[i];
-        sink(ctx, &v[0]);
+        if (post_view(pc, uc, &v)) return -1;
+        v.id = ids[i];
+        v.likes = likes[i];
+        sink(ctx, &v);
     }
-    if (i == n) ok = n;
-    sqlite3BtreeCloseCursor(&uc);
-    sqlite3BtreeCloseCursor(&pc);
-    return ok;
+    return n;
 }
 
 int td_bt_post(int64_t id, TDPostSink sink, void *ctx) {
     if (begin_read()) return -1;
-    BtCursor pc, uc, lc;
-    int res = 0, ok = -1;
-    if (open_cur(&pc, B.posts, NULL)) return -1;
-    if (open_cur(&uc, B.users, NULL)) { sqlite3BtreeCloseCursor(&pc); return -1; }
+    BtCursor *pc = cur(C_POSTS), *uc = cur(C_USERS), *lc = cur(C_LIKES);
+    if (!pc || !uc || !lc) return -1;
+    int res = 0;
+    if (sqlite3BtreeTableMoveto(pc, id, 0, &res)) return -1;
+    if (res != 0) return 0;
     TDPostView v;
-    if (sqlite3BtreeTableMoveto(&pc, id, 0, &res) == SQLITE_OK) {
-        if (res != 0) ok = 0;
-        else if (post_view(&pc, &uc, &v) == 0) {
-            i64 c = 0;
-            if (open_cur(&lc, B.likes, B.likesKey) == SQLITE_OK) {
-                if (likes_count(&lc, id, id, &c) == 0) {
-                    v.id = id;
-                    v.likes = c;
-                    sink(ctx, &v);
-                    ok = 1;
-                }
-                sqlite3BtreeCloseCursor(&lc);
-            }
-        }
-    }
-    sqlite3BtreeCloseCursor(&uc);
-    sqlite3BtreeCloseCursor(&pc);
-    return ok;
+    if (post_view(pc, uc, &v)) return -1;
+    i64 c = 0;
+    if (likes_count(lc, id, id, &c)) return -1;
+    v.id = id;
+    v.likes = c;
+    sink(ctx, &v);
+    return 1;
 }

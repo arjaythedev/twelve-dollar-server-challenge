@@ -1,0 +1,16 @@
+[versions]
+dotenv = "6.5.1"
+logback = "1.5.37"
+kotlin = "2.4.0"
+hikari = "7.1.0"
+sqlite = "3.53.4.0"
+
+[libraries]
+dotenv = { module = "io.github.cdimascio:dotenv-kotlin", version.ref = "dotenv"}
+logback-classic = { module = "ch.qos.logback:logback-classic", version.ref = "logback" }
+hikari = { module = "com.zaxxer:HikariCP", version.ref = "hikari" }
+sqlite = { module = "org.xerial:sqlite-jdbc", version.ref = "sqlite" }
+
+[plugins]
+kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
+kotlin-serialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }

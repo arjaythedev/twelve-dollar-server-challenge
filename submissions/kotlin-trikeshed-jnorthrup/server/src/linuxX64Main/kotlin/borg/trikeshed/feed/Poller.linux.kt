@@ -80,6 +80,7 @@ actual class Poller actual constructor(host: String, port: Int) {
             at[0] = 0
             for (r in 0 until RINGS) reap(r)
             dispatch(xio)
+            xio.rest()
             unborrow()
             xio.tick()
             feed_policy()

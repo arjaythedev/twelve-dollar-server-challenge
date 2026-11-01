@@ -236,9 +236,11 @@ class Xio(val poller: Poller, val feed: Feed, val store: FeedStore, val commitWi
 
     fun init() = poller.run(this)
 
+    /** The end of a wake (the poller's dispatch pass is done): read state held for the wake's reads is let go. */
+    fun rest() = store.rest()
+
     /** COMMIT once the open transaction's window has passed. */
     fun tick() {
-        store.rest()
         if (windowOpen && monoNanos() - deadline >= 0) settle()
     }
 

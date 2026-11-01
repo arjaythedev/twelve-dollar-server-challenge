@@ -113,6 +113,7 @@ actual class Poller actual constructor(host: String, port: Int) {
             header.dispatch((ready and HEADER_BIT) != 0)
             body.dispatch(xio, (ready and BODY_BIT) != 0)
             write.dispatch(xio, (ready and WRITE_BIT) != 0)
+            xio.rest()
         }
     }
 

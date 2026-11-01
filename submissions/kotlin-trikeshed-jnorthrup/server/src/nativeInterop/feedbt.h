@@ -11,4 +11,8 @@ int feedbt_feed(char *dst, int cap);
 /* GET /posts/:id's JSON at dst: the bytes written; 0 when there is no such post; -1 and below as feedbt_feed. */
 int feedbt_post(long long id, char *dst, int cap);
 
+/* Ends the wake's read transaction and closes its cursors (a no-op when none is held). Call at the end of each wake and
+ * before any SQL statement steps on the connection. */
+void feedbt_release(void);
+
 #endif

@@ -23,12 +23,14 @@ static long checks, fallbacks;
 
 static void exec1(const char *sql) {
   char *err = NULL;
+  feedbt_release(); /* as the server's step(): SQL never runs inside the wake's held read */
   if (sqlite3_exec(db, sql, 0, 0, &err) != SQLITE_OK) { printf("sql failed: %s: %s\n", sql, err); exit(1); }
 }
 
 /* The server's SQL feed: {"posts":[row,row,...]} */
 static int sql_feed(char *dst) {
   int w = 0, first = 1;
+  feedbt_release();
   memcpy(dst, "{\"posts\":[", 10); w = 10;
   while (sqlite3_step(feedStmt) == SQLITE_ROW) {
     if (!first) dst[w++] = ',';
@@ -42,6 +44,7 @@ static int sql_feed(char *dst) {
 
 /* The server's SQL post: {"post":row}, or 0 when absent */
 static int sql_post(long long id, char *dst) {
+  feedbt_release();
   sqlite3_bind_int64(postStmt, 1, id);
   int w = 0;
   if (sqlite3_step(postStmt) == SQLITE_ROW) {
@@ -120,6 +123,7 @@ int main(int argc, char **argv) {
   /* The 20 newest ids spanning exactly 63 (range scans) and exactly 64 (one past the arrays: sought one by one). */
   sqlite3_stmt *mx;
   sqlite3_prepare_v2(db, "SELECT max(id) FROM posts", -1, &mx, NULL);
+  feedbt_release();
   sqlite3_step(mx);
   long long hi = sqlite3_column_int64(mx, 0);
   sqlite3_finalize(mx);
@@ -135,6 +139,17 @@ int main(int argc, char **argv) {
     exec1("DELETE FROM likes WHERE user_id BETWEEN 400 AND 410 AND post_id = (SELECT max(id) FROM posts) - 63");
   }
   printf("  %-48s ok\n", "the 20 newest ids span 63 and 64");
+
+  { /* one wake: held reads agree with each other; the write between wakes is seen by the next wake */
+    static char a[1 << 16], b2[1 << 16];
+    int na = feedbt_feed(a, sizeof a), nb = feedbt_feed(b2, sizeof b2), np = feedbt_post(500001, b2 + nb, (int)sizeof b2 - nb);
+    if (na <= 0 || na != nb || memcmp(a, b2, (size_t)na) || np <= 0) { printf("FAIL reads inside one wake differ\n"); return 1; }
+    exec1("INSERT INTO posts (user_id, body) VALUES (3, 'wake-2 post')");
+    feedbt_release();
+    check_feed("the next wake after a write");
+    if (!memmem(got, (size_t)feedbt_feed(got, sizeof got), "wake-2 post", 11)) { printf("FAIL the next wake misses the write\n"); return 1; }
+    printf("  %-48s ok\n", "held reads in a wake, the write seen next wake");
+  }
 
   exec1("UPDATE users SET username = 'q\"u' || char(10) || 'x' WHERE id = 7");
   check_feed("an author name with escapes"); check_posts("an author name with escapes", 50);
@@ -172,14 +187,18 @@ int main(int argc, char **argv) {
   for (int pass = 0; pass < 2; pass++) {
     t0 = now_ns(); for (int i = 0; i < R; i++) sink += sql_feed(want); t1 = now_ns();
     double a = (t1 - t0) / R;
-    t0 = now_ns(); for (int i = 0; i < R; i++) sink += feedbt_feed(got, sizeof got); t1 = now_ns();
+    t0 = now_ns(); for (int i = 0; i < R; i++) { sink += feedbt_feed(got, sizeof got); feedbt_release(); } t1 = now_ns();
     double b = (t1 - t0) / R;
+    t0 = now_ns(); for (int i = 0; i < R; i++) { sink += feedbt_feed(got, sizeof got); if (i % 20 == 19) feedbt_release(); } t1 = now_ns();
+    double bw = (t1 - t0) / R;
     t0 = now_ns(); for (int i = 0; i < R; i++) sink += sql_post(500000 - i % 20, want); t1 = now_ns();
     double c = (t1 - t0) / R;
-    t0 = now_ns(); for (int i = 0; i < R; i++) sink += feedbt_post(500000 - i % 20, got, sizeof got); t1 = now_ns();
+    t0 = now_ns(); for (int i = 0; i < R; i++) { sink += feedbt_post(500000 - i % 20, got, sizeof got); feedbt_release(); } t1 = now_ns();
     double d = (t1 - t0) / R;
-    if (pass) printf("GET /feed: SQL %.2f us, B-tree %.2f us (%.1fx)   GET /posts/:id: SQL %.2f us, B-tree %.2f us (%.1fx)\n",
-                     a / 1000, b / 1000, a / b, c / 1000, d / 1000, c / d);
+    t0 = now_ns(); for (int i = 0; i < R; i++) { sink += feedbt_post(500000 - i % 20, got, sizeof got); if (i % 20 == 19) feedbt_release(); } t1 = now_ns();
+    double dw = (t1 - t0) / R;
+    if (pass) printf("GET /feed: SQL %.2f us, B-tree %.2f us, 20 per wake %.2f us   GET /posts/:id: SQL %.2f us, B-tree %.2f us, 20 per wake %.2f us\n",
+                     a / 1000, b / 1000, bw / 1000, c / 1000, d / 1000, dw / 1000);
   }
   printf("feedbt ok\n");
   return 0;

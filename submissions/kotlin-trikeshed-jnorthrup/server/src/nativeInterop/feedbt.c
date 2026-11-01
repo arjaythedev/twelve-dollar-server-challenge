@@ -81,6 +81,7 @@ static struct {
   KeyInfo *kiLikes, *kiPosts;
   BtCursor *posts, *users, *likes, *postsIdx;
   int ok;
+  int held; /* a read transaction and its cursors are open for this wake */
   u8 *spill;
   u32 spillCap;
   FeedBtRow rows[FEEDBT_N];
@@ -150,14 +151,32 @@ int feedbt_init(sqlite3 *db) {
   return 1;
 }
 
-/* Cursors for one call. Inside the connection's open write transaction they read it (as the SQL path does); otherwise a
- * read transaction is begun here and ended in fb_close. */
+static int fb_cursors(void);
+
+/* Cursors for one call. Inside the connection's open write transaction they are opened for the call and read it (as the
+ * SQL path does). Otherwise one read transaction and its cursors are filled on the first read of a wake and held for every
+ * read after it, until feedbt_release drains them: at the end of the wake, and before any SQL statement steps. */
 static int fb_open(int *began) {
   *began = 0;
+  if (B.held) return 0;
   if (sqlite3BtreeTxnState(B.bt) == SQLITE_TXN_NONE) {
     if (sqlite3BtreeBeginTrans(B.bt, 0, 0) != SQLITE_OK) return -1;
-    *began = 1;
+    B.held = 1;
+    if (fb_cursors()) { feedbt_release(); return -1; } /* closes what it opened (zeroed cursors close as no-ops) */
+    return 0;
   }
+  return fb_cursors();
+}
+
+void feedbt_release(void) {
+  if (!B.held) return;
+  B.held = 0;
+  sqlite3BtreeCloseCursor(B.posts); sqlite3BtreeCloseCursor(B.users);
+  sqlite3BtreeCloseCursor(B.likes); sqlite3BtreeCloseCursor(B.postsIdx);
+  sqlite3BtreeCommit(B.bt);
+}
+
+static int fb_cursors(void) {
   sqlite3BtreeCursorZero(B.posts); sqlite3BtreeCursorZero(B.users);
   sqlite3BtreeCursorZero(B.likes); sqlite3BtreeCursorZero(B.postsIdx);
   if (sqlite3BtreeCursor(B.bt, B.rootPosts, 0, NULL, B.posts) != SQLITE_OK ||
@@ -167,10 +186,12 @@ static int fb_open(int *began) {
   return 0;
 }
 
+/* Per-call cursors (inside a write transaction) are closed; held ones stay for the wake. */
 static void fb_close(int began) {
+  (void)began;
+  if (B.held) return;
   sqlite3BtreeCloseCursor(B.posts); sqlite3BtreeCloseCursor(B.users);
   sqlite3BtreeCloseCursor(B.likes); sqlite3BtreeCloseCursor(B.postsIdx);
-  if (began) sqlite3BtreeCommit(B.bt);
 }
 
 /* ---- records (https://sqlite.org/fileformat2.html#record_format) ---- */

@@ -300,6 +300,7 @@ static int feed_bind_text(sqlite3_stmt *s, int i, const char *p, int n) { return
 int feedbt_init(sqlite3 *db);
 int feedbt_feed(char *dst, int cap);
 int feedbt_post(long long id, char *dst, int cap);
+void feedbt_release(void);
 
 /* The JSON text writer and the digit writer live in feedbt.c (built into libsqlite3.a with the amalgamation): the
  * cinterop stub does not export its own functions to the archive, so they are defined there and declared here. */

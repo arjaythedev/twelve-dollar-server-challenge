@@ -238,6 +238,7 @@ class Xio(val poller: Poller, val feed: Feed, val store: FeedStore, val commitWi
 
     /** COMMIT once the open transaction's window has passed. */
     fun tick() {
+        store.rest()
         if (windowOpen && monoNanos() - deadline >= 0) settle()
     }
 
@@ -433,21 +434,29 @@ class Xio(val poller: Poller, val feed: Feed, val store: FeedStore, val commitWi
     }
 
     /**
-     * What this read produced goes to [BufferedWrite]: parked until COMMIT while a transaction is open, else into the
-     * write selector's queue. Nothing produced: the connection stays in, or enters, its read state.
+     * What this read produced goes out: parked in [BufferedWrite] until COMMIT while a transaction is open; else handed
+     * straight to the poller (one copy, into the send arena), and only a rest the socket did not take is kept in
+     * [BufferedWrite] for the write selector's queue. Nothing produced: the connection stays in, or enters, its read state.
      */
     fun emit(c: Conn) {
         if (!c.open) return
         if (send.size == 0) { toRead(c); return }
         val w = c.write
-        output.put(w, send.bytes, 0, send.size)
         if (store.pending) {
+            output.put(w, send.bytes, 0, send.size)
             c.stage = PARKED
             commits.add(c)
-        } else {
-            c.stage = WRITE
-            poller.ready(w)
+            return
         }
+        val n = poller.write(c.handle, send.bytes, 0, send.size)
+        if (n < 0) { close(c); return }
+        if (n == send.size) {
+            if (c.closing) close(c) else toRead(c)
+            return
+        }
+        output.put(w, send.bytes, n, send.size)
+        c.stage = WRITE
+        poller.ready(w)
     }
 
     /**

@@ -60,6 +60,7 @@ class SctpFeed(val feed: Feed, val store: FeedStore, val commitWindowNanos: Long
 
     /** COMMIT once the window has passed; then the parked responses leave, or their associations abort if it failed. */
     fun tick(now: Long) {
+        store.rest()
         if (!windowOpen || now - deadline < 0) return
         windowOpen = false
         val committed = try { store.commit(); true } catch (_: Throwable) { false }

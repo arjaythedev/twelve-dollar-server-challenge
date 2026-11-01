@@ -89,7 +89,13 @@ class SqliteStore(path: String) : FeedStore {
         pp.value!!
     }
 
-    fun step(stmt: CPointer<sqlite3_stmt>): Int = sqlite3_step(stmt)
+    /** Every SQL statement steps here: the wake's held read transaction (feedbt.c) ends first. */
+    fun step(stmt: CPointer<sqlite3_stmt>): Int {
+        if (plans) feedbt_release()
+        return sqlite3_step(stmt)
+    }
+
+    override fun rest() { if (plans) feedbt_release() }
 
     fun reset(stmt: CPointer<sqlite3_stmt>) { sqlite3_reset(stmt) }
 

@@ -26,6 +26,9 @@ interface FeedStore {
     /** Whether a write transaction is open; [commit] ends it. */
     val pending: Boolean
     fun commit()
+
+    /** The end of a wake: read state held for the wake's reads (a read transaction) is let go. */
+    fun rest() {}
 }
 
 /** Status line + fixed headers, up to the Content-Length value. */

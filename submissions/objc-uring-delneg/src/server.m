@@ -754,17 +754,20 @@ static const char *find_crlf2(const char *p, uint32_t n) {
     io_uring_cq_advance(r, n);
 }
 
-extern int td_opt_ckpt;
+// --ckpass=N: new WAL frames between passive passes in the checkpointer process. Each pass costs a WAL read, the
+// page writes and two fsyncs in the server's own CPU budget, and a page rewritten many times between passes is copied
+// once, so passes are far apart (250, the in-loop autocheckpoint's value, cost ~5% more CPU per request).
+int td_opt_ckpass = 2000;
 int td_opt_hold = 8192;   // --hold=N: WAL frames at which writes wait for one checkpoint pass so the WAL rewinds
 
 static double mono_s(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec + t.tv_nsec / 1e9; }
 
 // ---------------------------------------------------------------- checkpointer
 // A child process runs PASSIVE checkpoints (copy + 2 fsyncs) so the loop never
-// waits on them. The loop asks for a pass every td_opt_ckpt new frames. Under
+// waits on them. The loop asks for a pass every td_opt_ckpass new frames. Under
 // constant writes a pass never ends with the WAL fully copied, so the WAL can't
-// rewind; past td_opt_hold frames the loop stops flushing (requests queue up)
-// for one pass, after which the next write rewinds the WAL.
+// rewind; past td_opt_hold frames writes wait (reads are still answered) for one
+// pass, after which the next write rewinds the WAL.
 - (void)ckptGone TD_DIRECT {
     if (ckReq >= 0) close(ckReq);
     ckReq = -1;
@@ -795,7 +798,7 @@ static double mono_s(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &
         if (!ckBusy) [self ckptRequest];
         return;
     }
-    if (!ckBusy && f - ckBackfilled >= td_opt_ckpt) [self ckptRequest];
+    if (!ckBusy && f - ckBackfilled >= td_opt_ckpass) [self ckptRequest];
 }
 
 - (void)ckptDone:(int)res TD_DIRECT {

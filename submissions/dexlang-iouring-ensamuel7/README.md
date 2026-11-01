@@ -11,7 +11,7 @@
 | **Nginx or direct** | **Direct**, on `HOST:PORT` (`0.0.0.0:80` on the benchmark box) |
 
 DexLang compiles to C. What runs is one native binary with SQLite compiled in:
-no interpreter, no garbage collector, no framework. The program is about 360
+no interpreter, no garbage collector, no framework. The program is about 510
 lines of DexLang in `server.dx` and `queries.dx`, and everything below it is the
 language's standard library, unmodified for this challenge.
 
@@ -57,27 +57,59 @@ against slow, oversized, aborted and reset clients, with no findings.
 
 ## The database
 
-- **The six statements are built once with dexqu** (`queries.dx`) and prepared
-  at startup. A request only binds and steps. The feed walks
-  `posts_created_at_id_idx` for 20 rows with no sort, and the like count
-  resolves through `likes_post_id_idx` as a covering index.
-- **Group commit (`http.afterBatch`).** A write handler opens a transaction if
-  the batch has none (`beginWrite`); `commitBatch` commits it once per pass of
-  the loop, and the runtime holds every response in that pass until it
-  returns. So a `201` still goes out only after its row is committed (rule 6),
-  but under load one commit and one WAL write cover all the likes and posts of
-  a pass instead of one each. If the commit fails, the runtime answers every
-  request in the batch `500 {"error":"internal server error"}` rather than
-  what its handler said; nothing is acknowledged that is not durable.
+- **The statements are built once with dexqu** (`queries.dx`) and prepared
+  at startup. A request only binds and steps.
+- **The feed is three range reads, not twenty lookups.** The reference query
+  runs a like count and an author join for each of its 20 posts. Here the feed
+  reads the 20 newest ids from `posts_created_at_id_idx` (covering, no sort),
+  then makes one pass over `likes_post_id_idx` for the like counts and one over
+  `posts` (joined to `users`) for the rows, both over the id range the 20
+  cover, and puts the rows back in feed order. New posts get consecutive ids,
+  so that range is normally the 20 posts and nothing more. Rows in the range
+  that are not among the 20 are skipped; if the ids span 256 or more, or one
+  of them has no row, the handler runs the reference query instead. The
+  answer is always the reference query's: checked byte for byte against it on
+  the seed, with likes on the newest posts, with an old post among the newest,
+  with a hole in the range, and with a post whose author row is missing.
+  Every feed request still runs its queries; nothing is cached.
+- **Group commit (`http.afterBatch`), with reads in the same transaction.**
+  The first handler in a batch that touches the database opens a transaction
+  (`beginBatch`); `commitBatch` commits it once per pass of the loop, and the
+  runtime holds every response in that pass until it returns. So a `201` still
+  goes out only after its row is committed (rule 6), but under load one commit
+  and one WAL write cover all the likes and posts of a pass instead of one
+  each, and the reads in the pass share one snapshot instead of taking one per
+  statement. A read sees the writes before it in its batch, which is what it
+  would see if the requests ran one after another. If the commit fails, the
+  runtime answers every request in the batch, reads included,
+  `500 {"error":"internal server error"}` rather than what its handler said;
+  nothing is acknowledged that is not durable.
 - **Every statement is reset as soon as it's read.** A statement left on a row
   keeps the connection's read transaction open, so an `INSERT` on the same
   connection wouldn't commit until the next reset. Resetting first means a 201
   goes out after its row is committed (rule 6), and lets the WAL checkpoint.
-- **One connection, `locking_mode=EXCLUSIVE`, opened with
-  `db.openSingleThreaded`.** Only the ring's thread touches SQLite, so it takes
-  the file lock once instead of a lock round-trip per request, and skips the
-  mutex SQLite otherwise takes on every call. Checkpoints use SQLite's own autocheckpoint, with
-  `journal_size_limit` keeping the WAL file at 64 MB at most.
+- **The request connection is opened with `db.openSingleThreaded`, on the
+  `unix-excl` VFS.** Only the ring's thread uses it, so it skips the mutex
+  SQLite otherwise takes on every call. `unix-excl` is SQLite's own VFS that
+  takes the file lock for this process once and keeps the WAL index in heap
+  memory, so no other process can open the database while the server runs,
+  and the connections inside it share the index without a mapped `-shm` file.
+- **Checkpoints run on their own thread and connection.** The event loop sets
+  `wal_autocheckpoint=65536`, so it does not copy the WAL back itself under
+  normal load. A thread spawned at startup runs `wal_checkpoint(PASSIVE)`
+  every 100 ms: it copies committed frames into the database file and fsyncs
+  it without blocking the writer, so the loop never waits on that disk work.
+  Once the WAL passes 8,192 frames (32 MB), the thread also runs a `RESTART`
+  pass, which waits for the writer between batches and lets the next commit
+  start the WAL from the beginning. That is why a batch begins with
+  `BEGIN IMMEDIATE`: a transaction that has already read cannot wait for the
+  write lock it then needs (SQLite answers BUSY at once), but one that asks
+  for it first waits under `busy_timeout`. In local runs at full load the WAL
+  stayed under about 50 MB; with passive passes alone it grew to the 256 MB
+  ceiling the loop's autocheckpoint sets as a fallback. Durability is
+  unchanged: every commit is in the WAL, written with `synchronous=NORMAL`,
+  before its response goes out. If the second connection cannot be opened,
+  the loop checkpoints as SQLite normally does.
 - **`ON CONFLICT DO NOTHING ... RETURNING`** answers "liked now" and "already
   liked" in one statement.
 - **SQLite is compiled in, not linked.** `build.sh` downloads the official
@@ -88,7 +120,7 @@ against slow, oversized, aborted and reset clients, with no findings.
   about 15% fewer instructions per request than the shared library.
 
 ```
-locking_mode       = EXCLUSIVE
+vfs                = unix-excl   one process; WAL index in heap memory
 journal_mode       = WAL
 synchronous        = NORMAL      rule 6: a commit reaches the WAL before the response
 busy_timeout       = 5000
@@ -96,6 +128,7 @@ cache_size         = -65536      64 MB of pages
 mmap_size          = 268435456   256 MB, covering the 238 MB seed file
 temp_store         = MEMORY
 journal_size_limit = 67108864
+wal_autocheckpoint = 65536       a ceiling; the checkpoint thread does the work
 ```
 
 No response or query result is cached. Every request reads SQLite.
@@ -176,7 +209,7 @@ folder:
 
 ```
 server.dx    routes, handlers, auth, response building
-queries.dx   the six SQL statements, built with dexqu
+queries.dx   the SQL statements, built with dexqu
 dex.mod      module file: dex 0.9.26, dexqu v0.1.0 (pinned in dex.sum)
 install.sh   root, once: build-essential, git, pkg-config, libsqlite3-dev,
              libssl-dev, libcurl, and Go 1.27.2 (sha256-checked)

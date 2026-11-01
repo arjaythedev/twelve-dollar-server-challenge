@@ -31,7 +31,8 @@ its #229 run (`f0fb733`) held 232,000, its #216 run (`ee683db`) and #211 run (`7
 #250 (`051f03c`); its #230 run (`b32c4ee`) held 270,000 and its earlier #214 run (`9844f31`) held 238,000. sql-sqlite3cli-public is scored at its follow-up PR
 #232 (`1319a07`); its earlier #219 run (`3f7cab9`) held 6,000. c-iouring-pavlyhalim is scored at its follow-up PR #245
 (`7387a31`); its earlier #233 run (`3f5c305`) held 270,000. rust-iouring-kensac is scored at its follow-up PR #248
-(`3bd2352`, merged as rebased `551ff3a`, same folder); its earlier #247 run (`d42783b`) held 257,000.
+(`3bd2352`, merged as rebased `551ff3a`, same folder); its earlier #247 run (`d42783b`) held 257,000. php-symfony-gnugat is scored at its follow-up PR #256 (`4a11a5d`); its
+earlier #136 run (`48e3783`) held 15,500.
 
 **Re-runs.** The first submissions (#2–#29) were scored on a DigitalOcean $12 droplet, which is about 2× slower for
 CPU-bound servers, so those numbers aren't comparable. All of them have now been re-run on this box (finished
@@ -194,9 +195,9 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | 149 | pascal-horse-viniabreu | #134 | Pascal (Horse) | **20,000** | 1,966 | 81 | 111 | 0.00 | 90 | 426 | 270 | 2026-10-28 |
 | 150 | csharp-aspnetcore-larsholm | #47 | C# (ASP.NET Core) | **19,000** | 1,854 | 381 | 943 | 0.00 | 57 | 286 | 439 | 2026-10-26 |
 | 150 | crystal-kemal-krthr | #146 | Crystal (Kemal) | **19,000** ᵐ | 1,869 | 27 | 153 | 0.00 | 24 | 119 | 1,631 | 2026-10-28 |
-| 152 | kotlin-springboot-Mindstorm1750 | #66 | Kotlin (Spring Boot, Tomcat, virtual threads) | **18,000** | 1,760 | 397 | 870 | 0.00 | 61 | 323 | 792 | 2026-10-27 |
-| 153 | python-litestar-przwr | #23 | Python (Litestar) | **16,000** | 1,569 | 259 | 788 | 0.00 | 66 | 391 | 256 | 2026-10-26 |
-| 154 | php-symfony-gnugat | #136 | PHP (Symfony, FrankenPHP) | **15,500** | 1,521 | 174 | 425 | 0.00 | 97 | 592 | 952 | 2026-10-30 |
+| 152 | php-symfony-gnugat | #256 | PHP (Symfony, FrankenPHP) | **18,500** | 1,809 | 325 | 804 | 0.00 | 96 | 494 | 1,111 | 2026-11-01 |
+| 153 | kotlin-springboot-Mindstorm1750 | #66 | Kotlin (Spring Boot, Tomcat, virtual threads) | **18,000** | 1,760 | 397 | 870 | 0.00 | 61 | 323 | 792 | 2026-10-27 |
+| 154 | python-litestar-przwr | #23 | Python (Litestar) | **16,000** | 1,569 | 259 | 788 | 0.00 | 66 | 391 | 256 | 2026-10-26 |
 | 155 | kotlin-ktor-jvm-syorito-hatsuki | #36 | Kotlin (Ktor, JVM) | **14,000** | 1,370 | 370 | 728 | 0.00 | 79 | 536 | 603 | 2026-10-26 |
 | 156 | kotlin-ktor-graalvm-noamm9 | #53 | Kotlin (Ktor, GraalVM native) | **10,500** | 1,027 | 356 | 906 | 0.00 | 79 | 715 | 314 | 2026-10-26 |
 | 157 | php-codeigniter-melroy89 | #50 | PHP (CodeIgniter, FrankenPHP) | **9,500** | 926 | 332 | 456 | 0.00 | 99 | 995 | 626 | 2026-10-30 |

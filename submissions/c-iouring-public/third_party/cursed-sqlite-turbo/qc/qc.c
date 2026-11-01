@@ -2435,7 +2435,7 @@ out:
 #endif
 #ifndef QC_ADAPT_MARGIN   /* (medians and 5 % until the broker's exp994/995: on box2 the verdicts on 10-100 µs plans flipped from
                              run to run, atuin store.next served 5 -> 51 -> 5 %, whatever the margin; 1.03 until bench's sweep,
-                             exp1261-1277: once 1b6fcc3 timed the interpreter fairly, 1.03 kept 49 of 418 statement-modes that
+                             exp1261-1277: once 92b48c2 timed the interpreter fairly, 1.03 kept 49 of 418 statement-modes that
                              then lost over 2 % in cycles, 0.98 keeps 9, at 0.949 of stock's post-verdict cycles against
                              0.961, with no more flips between rounds) */
 #define QC_ADAPT_MARGIN 0.98

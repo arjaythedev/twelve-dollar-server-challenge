@@ -89,7 +89,7 @@ static void *qv_alloc(QvArena *A, size_t n) {
    run past it allocated (mmap past glibc's 128 KB) and freed (munmap) a block of that size every run, its pages faulted in
    again: bench exp1183, box2's glibc, one 4 MiB block a run, 513-643 page faults (freshrss entry_count_per_day, zotero
    load_creators); macOS's allocator caches such a block, so locally there were none. One block of a run's whole size
-   (f8bf4d9, reverted) was re-made whenever the statements of one connection needed different sizes. A spare unused for
+   (0bb53b0, reverted) was re-made whenever the statements of one connection needed different sizes. A spare unused for
    QV_ARENA_IDLE runs is freed, so a statement that keeps needing a lot keeps its blocks (calibre view.meta: about 128 MB a
    run, past a 32 MB cap, 26-32k page faults a run, a quarter of its time) and a one-off gives them back soon after */
 static void qv_arena_reset(QvArena *A) {

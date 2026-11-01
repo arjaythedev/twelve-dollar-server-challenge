@@ -64,6 +64,17 @@ kotlin {
         target.compilations.getByName("main").cinterops.create("posixSpawn") {
             definitionFile.set(File(subrepo, "src/posixMain/resources/META-INF/cinterop/posix_spawn.def"))
         }
+        // Linux: TrikeShed's ring actuals (Liburing.linux.kt, NativeUringAdapter.linux.kt) call liburing through its
+        // zlinux_uring cinterop, over the liburing the server module configures and builds (server/build/liburing).
+        if (target.name.startsWith("linux")) target.compilations.getByName("main").cinterops.create("zlinux_uring") {
+            definitionFile.set(File(subrepo, "src/linuxMain/resources/META-INF/cinterop/liburing.def"))
+            packageName("zlinux_uring")
+            val uring = rootProject.file("server/build/liburing")
+            compilerOpts("-I$uring/src/include", "-I" + File(subrepo, "src/linuxMain/resources/liburing/src/include"),
+                "-I" + File(subrepo, "src/linuxMain/resources/io_uring_interop"))
+            extraOpts("-libraryPath", "$uring/src")
+            tasks.named(interopProcessingTaskName).configure { dependsOn(":server:liburingLib") }
+        }
         if (lib != null) target.binaries.all { linkerOpts("-L$lib") }
         // Debug test binaries link without Kotlin/Native's compiler caches: on the macOS host the 2.4.21-RC
         // macos_arm64 stdlib cache in ~/.konan held objects built for iOS (LC_BUILD_VERSION platform 2), which ld rejected.

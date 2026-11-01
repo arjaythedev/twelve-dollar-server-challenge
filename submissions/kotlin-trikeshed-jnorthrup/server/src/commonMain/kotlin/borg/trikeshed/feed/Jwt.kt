@@ -40,12 +40,8 @@ class Bearer(val secret: ByteArray) {
         if (diff != 0) return BearerState.INVALID
         val payload = base64Url(src, d1 + 1, d2) ?: return BearerState.INVALID
         if (claims.scan(payload) != KnownShape.OBJECT) return BearerState.INVALID
-        // exp is optional; when present it must be a JSON number (fraction and exponent allowed) not yet reached.
-        when (claims.kind(2)) {
-            KnownKind.ABSENT -> {}
-            KnownKind.NUMBER -> if (nowSeconds >= claims.number(2)) return BearerState.INVALID
-            else -> return BearerState.INVALID
-        }
+        // exp is required: a JSON number (fraction and exponent allowed) not yet reached. Absent, it is a 401 (SPEC).
+        if (claims.kind(2) != KnownKind.NUMBER || nowSeconds >= claims.number(2)) return BearerState.INVALID
         if (claims.kind(0) != KnownKind.STRING || claims.kind(1) != KnownKind.STRING) return BearerState.PAYLOAD
         user = claims.positiveDecimal(0)
         if (user <= 0) return BearerState.PAYLOAD

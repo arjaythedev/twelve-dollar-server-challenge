@@ -287,3 +287,8 @@ src/jvmMain/kotlin/borg/trikeshed/userspace/nio/platform/spi/PlatformGetRandom.j
 src/macosMain/kotlin/borg/trikeshed/userspace/nio/platform/spi/PlatformGetRandom.macos.kt
 src/linuxMain/kotlin/borg/trikeshed/userspace/nio/platform/spi/PlatformGetRandom.linux.kt
 src/posixMain/kotlin/borg/trikeshed/userspace/nio/channels/spi/PosixReactorOperations.kt
+# linuxX64: the Linux actuals of the posix ring (liburing through the zlinux_uring cinterop) and system operations.
+src/linuxMain/kotlin/borg/trikeshed/userspace/Liburing.linux.kt
+src/linuxMain/kotlin/borg/trikeshed/userspace/NativeUringAdapter.linux.kt
+src/linuxMain/kotlin/borg/trikeshed/userspace/nio/platform/spi/SystemOperations.linux.kt
+src/linuxMain/kotlin/borg/trikeshed/userspace/nio/file/spi/LinuxSystemOperations.kt

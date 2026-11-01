@@ -3,7 +3,7 @@
 import argparse
 import base64
 import concurrent.futures
-from contextlib import closing
+from contextlib import closing, contextmanager
 import hashlib
 import hmac
 import json
@@ -83,7 +83,16 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--seed", type=Path, required=True)
     parser.add_argument("--server", type=Path, required=True)
+    parser.add_argument("--database-access", choices=("exclusive", "shared"), default="exclusive",
+                        help="exclusive owns the database while running; shared also tests live external access")
     args = parser.parse_args()
+    exclusive = args.database_access == "exclusive"
+    print(f"database-access profile: {args.database_access}", flush=True)
+    if exclusive:
+        print("External connections must be rejected. Database inspection, mutations and backup run offline; "
+              "freshness is checked through live API writes and reads.", flush=True)
+    else:
+        print("Checks include live external mutations, external writer contention and online backup.", flush=True)
     passed = 0
 
     def check(condition, label):
@@ -98,6 +107,18 @@ def main():
         log_path = Path(scratch) / "server.log"
         with log_path.open("w+") as log:
             server = Server(args.server.resolve(), database, "twelve-dollar-challenge", log)
+
+            @contextmanager
+            def database_connection(kill=False):
+                if exclusive:
+                    server.stop(kill=kill)
+                try:
+                    with closing(sqlite3.connect(server.database)) as connection:
+                        yield connection
+                finally:
+                    if exclusive:
+                        server.start()
+
             try:
                 server.start()
                 valid = token(server.secret)
@@ -134,6 +155,19 @@ def main():
                 status, body, _ = server.request("POST", "/posts", valid, {"body": "  " + text + "  "})
                 check(status == 201 and body["post"]["body"] == text, "500 Unicode code points round-trip")
                 post_id = body["post"]["id"]
+                check(server.request("GET", f"/posts/{post_id}")[1]["post"]["body"] == text,
+                      "post JSON preserves 500 Unicode code points")
+                check(server.request("GET", "/feed")[1]["posts"][0]["body"] == text,
+                      "feed JSON preserves 500 Unicode code points")
+                escaped = 'quotes: " \\ /\n\t\x00 and Unicode: \u00e9\U0001f642'
+                escaped_post = server.request("POST", "/posts", valid, {"body": escaped})[1]["post"]
+                observed = server.request("GET", f"/posts/{escaped_post['id']}")[1]["post"]
+                expected_keys = ["id", "body", "created_at", "author", "like_count"]
+                check(observed == escaped_post and list(observed) == expected_keys,
+                      "post JSON escapes text and preserves key order")
+                observed = server.request("GET", "/feed")[1]["posts"][0]
+                check(observed == escaped_post and list(observed) == expected_keys,
+                      "feed JSON escapes text and preserves key order")
                 status, body, _ = server.request("POST", "/posts", valid, {"body": text + "🙂"})
                 check(status == 400 and body == {"error": "body must be at most 500 characters"}, "501 Unicode code points rejected")
 
@@ -160,18 +194,37 @@ def main():
                 check(server.request("GET", f"/posts/{post_id}")[1]["post"]["like_count"] == 41,
                       "committed concurrent likes visible to next read")
 
-                # Reused statements must read fresh rows, not preserve a prior result.
-                with closing(sqlite3.connect(database)) as connection:
+                if exclusive:
+                    previous_ids = {post["id"] for post in server.request("GET", "/feed")[1]["posts"]}
+                    fresh_status, fresh_body, _ = server.request("POST", "/posts", valid, {"body": "live API freshness"})
+                    check(fresh_status == 201 and fresh_body["post"]["id"] not in previous_ids and
+                          any(post["id"] == fresh_body["post"]["id"] and post["body"] == "live API freshness"
+                              for post in server.request("GET", "/feed")[1]["posts"]),
+                          "reused feed query sees a newly committed API post without restart")
+                    fresh_id = fresh_body["post"]["id"]
+                    before_like = server.request("GET", f"/posts/{fresh_id}")[1]["post"]["like_count"]
+                    liked_status = server.request("POST", f"/posts/{fresh_id}/like", valid)[0]
+                    check(before_like == 0 and liked_status == 201 and
+                          server.request("GET", f"/posts/{fresh_id}")[1]["post"]["like_count"] == 1,
+                          "reused post query sees a newly committed API like without restart")
+                    check(any(post["id"] == fresh_id and post["like_count"] == 1
+                              for post in server.request("GET", "/feed")[1]["posts"]),
+                          "reused feed query sees a newly committed API like without restart")
+
+                # Shared mode observes external changes live; exclusive mode releases ownership first.
+                with database_connection() as connection:
                     connection.execute("UPDATE posts SET body = ? WHERE id = ?", ("external update", post_id))
                     connection.execute("INSERT INTO likes (user_id, post_id) VALUES (3, ?)", (post_id,))
                     connection.commit()
                 observed = server.request("GET", f"/posts/{post_id}")[1]["post"]
                 check(observed["body"] == "external update" and observed["like_count"] == 42,
+                      "post sees persisted external changes after restart" if exclusive else
                       "reused post query sees external committed changes")
                 observed_feed = server.request("GET", "/feed")[1]["posts"]
                 check(any(post["id"] == post_id and post["body"] == "external update" and post["like_count"] == 42
-                          for post in observed_feed), "reused feed query sees external committed changes")
-                with closing(sqlite3.connect(database)) as connection:
+                          for post in observed_feed), "feed sees persisted external changes after restart" if exclusive else
+                      "reused feed query sees external committed changes")
+                with database_connection() as connection:
                     connection.execute("DELETE FROM likes WHERE user_id = 3 AND post_id = ?", (post_id,))
                     connection.commit()
 
@@ -184,39 +237,78 @@ def main():
                       len({body["post"]["id"] for _, body, _ in posts}) == 48,
                       "48 concurrent creates have unique committed IDs")
                 persisted_id = posts[-1][1]["post"]["id"]
-                with closing(sqlite3.connect(database)) as connection:
-                    check(connection.execute("SELECT count(*) FROM posts WHERE id = ?", (persisted_id,)).fetchone()[0] == 1,
-                          "201 is visible from a separate database connection")
+                # Exclusive mode kills immediately after the 201s so shutdown cannot commit pending work.
+                with database_connection(kill=exclusive) as connection:
+                    expected_ids = [row[0] for row in connection.execute(
+                        "SELECT id FROM posts ORDER BY created_at DESC, id DESC LIMIT 20")]
+                    if exclusive:
+                        acknowledged_ids = {body["post"]["id"] for _, body, _ in posts}
+                        persisted_ids = {row[0] for row in connection.execute(
+                            "SELECT id FROM posts WHERE id >= ?", (min(acknowledged_ids),))}
+                        check(acknowledged_ids <= persisted_ids,
+                              "all acknowledged creates are visible after immediate process kill")
+                    else:
+                        check(connection.execute("SELECT count(*) FROM posts WHERE id = ?", (persisted_id,)).fetchone()[0] == 1,
+                              "201 is visible from a separate database connection")
                     check(connection.execute("PRAGMA foreign_key_check").fetchall() == [], "foreign key integrity holds")
                     before = connection.execute("SELECT count(*) FROM posts").fetchone()[0]
+                check([post["id"] for post in server.request("GET", "/feed")[1]["posts"]] == expected_ids,
+                      "feed JSON preserves timestamp and ID ordering")
                 unknown_user = token(server.secret, {"sub": "999999999", "username": "absent", "exp": int(time.time()) + 3600})
                 status, body, _ = server.request("POST", "/posts", unknown_user, {"body": "must roll back"})
                 check(status == 500 and body == {"error": "internal server error"}, "foreign key violation gives safe error")
-                with closing(sqlite3.connect(database)) as connection:
-                    check(connection.execute("SELECT count(*) FROM posts").fetchone()[0] == before, "failed write leaves no partial row")
-                check(server.request("POST", "/posts", valid, {"body": "write after constraint failure"})[0] == 201,
-                      "writer recovers after a constraint failure")
+                if exclusive:
+                    recovered_status, recovered_body, _ = server.request(
+                        "POST", "/posts", valid, {"body": "write after constraint failure"})
+                    check(recovered_status == 201 and
+                          server.request("GET", f"/posts/{recovered_body['post']['id']}")[1]["post"]["body"] ==
+                          "write after constraint failure", "writer recovers after a constraint failure without restart")
+                    with database_connection() as connection:
+                        check(connection.execute("SELECT count(*) FROM posts").fetchone()[0] == before + 1,
+                              "failed write leaves no partial row; only the recovery create was added")
 
-                # An external writer must not cause an unbounded application queue wait.
-                with closing(sqlite3.connect(database)) as blocker:
-                    blocker.execute("BEGIN IMMEDIATE")
+                    rejected = None
                     contention_start = time.monotonic()
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
-                        waiting = [pool.submit(create, index) for index in range(8)]
-                        check(server.request("GET", "/feed")[0] == 200, "WAL reads succeed while external writer holds a lock")
-                        blocked = [future.result() for future in waiting]
-                    check(all(status == 500 and body == {"error": "internal server error"} for status, body, _ in blocked),
-                          "blocked writes fail with safe contract errors")
-                    check(time.monotonic() - contention_start < 6, "write permit waits have a bounded deadline")
-                    blocker.rollback()
-                check(server.request("POST", "/posts", valid, {"body": "write after contention"})[0] == 201,
-                      "writer permit recovers after contention failures")
+                    try:
+                        with closing(sqlite3.connect(database, timeout=0.1)) as outsider:
+                            outsider.execute("SELECT id FROM posts LIMIT 1").fetchone()
+                    except sqlite3.OperationalError as error:
+                        rejected = error
+                    check(rejected is not None and
+                          (getattr(rejected, "sqlite_errorcode", 0) & 0xff) in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED),
+                          "exclusive owner rejects a second database connection")
+                    check(time.monotonic() - contention_start < 2, "external connection rejection is prompt")
+                    check(server.request("GET", "/feed")[0] == 200, "API reads recover after rejected external access")
+                    check(server.request("POST", "/posts", valid, {"body": "write after rejected external access"})[0] == 201,
+                          "API writes recover after rejected external access")
+                else:
+                    with database_connection() as connection:
+                        check(connection.execute("SELECT count(*) FROM posts").fetchone()[0] == before, "failed write leaves no partial row")
+                    check(server.request("POST", "/posts", valid, {"body": "write after constraint failure"})[0] == 201,
+                          "writer recovers after a constraint failure")
+
+                    # Shared mode: an external writer must not cause an unbounded application queue wait.
+                    with closing(sqlite3.connect(database)) as blocker:
+                        blocker.execute("BEGIN IMMEDIATE")
+                        contention_start = time.monotonic()
+                        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+                            waiting = [pool.submit(create, index) for index in range(8)]
+                            check(server.request("GET", "/feed")[0] == 200, "WAL reads succeed while external writer holds a lock")
+                            blocked = [future.result() for future in waiting]
+                        check(all(status == 500 and body == {"error": "internal server error"} for status, body, _ in blocked),
+                              "blocked writes fail with safe contract errors")
+                        check(time.monotonic() - contention_start < 6, "write permit waits have a bounded deadline")
+                        blocker.rollback()
+                    check(server.request("POST", "/posts", valid, {"body": "write after contention"})[0] == 201,
+                          "writer permit recovers after contention failures")
 
                 server.stop(kill=True)
                 server.start()
                 check(server.request("GET", f"/posts/{persisted_id}")[0] == 200, "acknowledged post survives process kill/restart")
                 check(server.request("GET", f"/posts/{post_id}")[1]["post"]["like_count"] == 41,
                       "acknowledged likes survive process kill/restart")
+                if exclusive:
+                    server.stop()
                 with closing(sqlite3.connect(database)) as connection:
                     check(connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok", "database integrity after recovery")
                     backup = Path(scratch) / "backup.db"
@@ -225,7 +317,8 @@ def main():
                 server.stop()
                 server.database = backup
                 server.start()
-                check(server.request("GET", f"/posts/{persisted_id}")[0] == 200, "online backup restores acknowledged data")
+                check(server.request("GET", f"/posts/{persisted_id}")[0] == 200,
+                      "offline backup restores acknowledged data" if exclusive else "online backup restores acknowledged data")
 
                 # A real, longer secret must go through the unmodified IdentityModel provider.
                 server.stop()
@@ -235,6 +328,32 @@ def main():
                 check(status == 201, "standard IdentityModel validation accepts a stronger secret")
                 check(server.request("POST", "/posts", valid, {"body": "wrong key"})[0] == 401,
                       "old challenge signature rejected with stronger secret")
+
+                # Escaping valid control characters expands this feed to about 60 KB.
+                large_token = token(server.secret)
+                large_creates = []
+                for index in range(20):
+                    prefix = f"large-{index:02d}:\U0001f642"
+                    text = prefix + "\x01" * (500 - len(prefix))
+                    status, payload, _ = server.request("POST", "/posts", large_token, {"body": text})
+                    large_creates.append((status, payload, text))
+                check(all(status == 201 and payload["post"]["body"] == text
+                          for status, payload, text in large_creates),
+                      "20 posts with 500-codepoint escaped control-character bodies are accepted")
+                expected_large_posts = sorted((payload["post"] for _, payload, _ in large_creates),
+                                              key=lambda post: (post["created_at"], post["id"]), reverse=True)
+                with urllib.request.urlopen(f"http://127.0.0.1:{server.port}/feed", timeout=15) as response:
+                    large_status = response.status
+                    large_content_length = response.headers.get("Content-Length")
+                    large_raw = response.read()
+                large_feed = json.loads(large_raw)
+                check(large_status == 200 and list(large_feed) == ["posts"] and
+                      large_feed["posts"] == expected_large_posts and
+                      all(list(post) == expected_keys for post in large_feed["posts"]),
+                      "large feed preserves all 20 posts, ordering, escaped bodies and object key order")
+                check(len(large_raw) >= 60_000 and large_content_length is not None and
+                      int(large_content_length) == len(large_raw),
+                      "large feed Content-Length matches its complete UTF-8 body of at least 60 KB")
             except BaseException:
                 server.stop(kill=True)
                 log.flush()

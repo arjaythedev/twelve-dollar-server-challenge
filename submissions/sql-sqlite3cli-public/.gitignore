@@ -1,0 +1,5 @@
+sql/hmac.sql
+*.db
+*.db-shm
+*.db-wal
+*.log

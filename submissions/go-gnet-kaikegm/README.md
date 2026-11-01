@@ -39,6 +39,9 @@ SQLITE_PATH=... JWT_SECRET=... HOST=0.0.0.0 PORT=80 bash start.sh
 5. **Profile-Guided Optimization (`default.pgo`) & Runtime Tuning**
    Built with a CPU profile (`default.pgo`) captured under realistic load so the Go compiler optimizes hot-path inlining and branch layout (`OnTraffic`, `parseRequest`, `verifyJWT`, `dbFeed`), paired with `debug.SetGCPercent(400)` and `debug.SetMemoryLimit(1200 << 20)`.
 
+6. **Two-Tier FD Pressure Control & $O(1)$ Zero-Alloc Intrusive LRU Eviction**
+   To scale past the 65k virtual user plateau under the official systemd `LimitNOFILE=65535` constraint without triggering `gnet`'s fatal `EMFILE` reactor shutdown, the server maintains an intrusive doubly-linked list (`lruList`) indexed by file descriptor (`[65536]int32`). Under connection pressure (`openConns >= 55,000`), active HTTP responses append `Connection: close` to cycle out keep-alive connections gracefully after serving requests; if open connections approach `62,000` (~3.5k headroom below `LimitNOFILE` reserved for SQLite WAL, epoll, and new accepts), the oldest idle connections are evicted in $O(1)$ amortized time.
+
 ## Benchmark Verification
 
 ### Test Hardware & Environment

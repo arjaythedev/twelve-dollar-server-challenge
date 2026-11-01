@@ -1,0 +1,16 @@
+[versions]
+helidon = "27.0.1"
+junit-jupiter = "6.1.3"
+sqlite-jdbc = "3.53.4.0"
+
+[libraries]
+helidon-bom = { group = "io.helidon", name = "helidon-bom", version.ref = "helidon" }
+helidon-codegen-apt = { group = "io.helidon.codegen", name = "helidon-codegen-apt" }
+helidon-http-media-json = { group = "io.helidon.http.media", name = "helidon-http-media-json" }
+helidon-http-media-json-binding = { group = "io.helidon.http.media", name = "helidon-http-media-json-binding" }
+helidon-json-binding = { group = "io.helidon.json", name = "helidon-json-binding" }
+helidon-json-codegen = { group = "io.helidon.json", name = "helidon-json-codegen" }
+helidon-service-codegen = { group = "io.helidon.service", name = "helidon-service-codegen" }
+helidon-webserver = { group = "io.helidon.webserver", name = "helidon-webserver" }
+junit-jupiter = { module = "org.junit.jupiter:junit-jupiter", version.ref = "junit-jupiter" }
+sqlite-jdbc = { group = "org.xerial", name = "sqlite-jdbc", version.ref = "sqlite-jdbc" }

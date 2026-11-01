@@ -138,6 +138,7 @@ internal sealed class Api(Db db, Jwt jwt) {
         return outcome == LikeOutcome.Liked ? 201 : 200;
     }
 
+    /// <summary>Outcome of <see cref="ReadBody"/>: a usable body, malformed JSON, or no string <c>body</c> field.</summary>
     private enum BodyResult { Ok, Malformed, Required }
 
     /// <summary>
@@ -185,6 +186,7 @@ internal sealed class Api(Db db, Jwt jwt) {
         return rootIsObject && length >= 0 ? BodyResult.Ok : BodyResult.Required;
     }
 
+    /// <summary>Outcome of <see cref="ParseId"/>: a usable id, not a positive integer (400), or beyond INTEGER range (404).</summary>
     private enum IdResult { Ok, Invalid, TooLarge }
 
     /// <summary>
@@ -231,6 +233,7 @@ internal sealed class Api(Db db, Jwt jwt) {
         return 401;
     }
 
+    // Error bodies, byte for byte as SPEC.md gives them.
     private static ReadOnlySpan<byte> NotFound => "{\"error\":\"not found\"}"u8;
     private static ReadOnlySpan<byte> InvalidId => "{\"error\":\"invalid post id\"}"u8;
     private static ReadOnlySpan<byte> PostNotFound => "{\"error\":\"post not found\"}"u8;

@@ -13,12 +13,14 @@ internal static class HealthEndpoints
             try
             {
                 repository.CheckHealth();
-                return Results.Json(new HealthResponse("ok", "ok", (long)Stopwatch.GetElapsedTime(started).TotalSeconds));
+                return Results.Json(new HealthResponse("ok", "ok", (long)Stopwatch.GetElapsedTime(started).TotalSeconds),
+                    ApiJsonContext.Default.HealthResponse);
             }
             catch (Exception exception)
             {
                 logger.LogError(exception, "Database health check failed");
-                return Results.Json(new DegradedHealthResponse("degraded", "unreachable", "database check failed"), statusCode: 503);
+                return Results.Json(new DegradedHealthResponse("degraded", "unreachable", "database check failed"),
+                    ApiJsonContext.Default.DegradedHealthResponse, statusCode: 503);
             }
         }).WithName("GetHealth").WithTags("Health");
     }

@@ -1,0 +1,4 @@
+/build/
+/bin/
+/toolchain/src/hphpc/runtime_embed.h
+*.o

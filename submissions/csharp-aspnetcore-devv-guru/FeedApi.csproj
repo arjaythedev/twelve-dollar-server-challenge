@@ -8,7 +8,9 @@
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
     <EnableRequestDelegateGenerator>true</EnableRequestDelegateGenerator>
-    <PublishReadyToRun>true</PublishReadyToRun>
+    <PublishAot>true</PublishAot>
+    <IlcOptimizationPreference>Speed</IlcOptimizationPreference>
+    <InvariantGlobalization>true</InvariantGlobalization>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.13" />

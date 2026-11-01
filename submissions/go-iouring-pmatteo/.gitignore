@@ -1,0 +1,19 @@
+# Local working files: never committed (see the plan's git rules).
+local-bench/
+bin/
+*.pgo
+default.pgo
+sqlite-amalgamation*/
+sqlite-amalgamation*.zip
+# Downloaded SQLite amalgamation: never committed.
+sqlite3.c
+sqlite3.h
+.sqlite-download/
+# Compiled SQLite, its PGO counters and the Go profile: all build output.
+.deps/
+# Stray binary: "go build" with no -o names the output after the package directory.
+go-iouring-pmatteo
+# Go unit tests: local only. The scoring harness runs the repo's own test/run.sh against the
+# running server, which is what validates the submission; these pin internals (the two-phase
+# close, the idle wheel, the accept handoff) and are kept out of the submitted tree.
+*_test.go

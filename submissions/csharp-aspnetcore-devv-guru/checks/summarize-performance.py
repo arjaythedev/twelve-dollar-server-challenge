@@ -56,6 +56,8 @@ results = []
 for directory in args.directories:
     for summary_path in sorted(directory.glob("*/measured-summary.json")):
         output = summary_path.parent
+        if (output / "aborted.json").is_file():
+            continue
         metadata = json.loads((output / "metadata.json").read_text())
         summary = json.loads(summary_path.read_text())
         metrics = summary["metrics"]

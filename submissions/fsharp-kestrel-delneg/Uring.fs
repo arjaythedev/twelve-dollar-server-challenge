@@ -107,8 +107,9 @@ let private TCP_NODELAY = 1
 /// Ring sizes. CQ 4x the SQ: a pass can take many completions.
 let private SqEntries = 4096u
 let private CqEntries = 16384u
-/// Provided receive buffers per ring: 8,192 x 2 KB (16 MB; the ring hands them out in turn, so all of it gets
-/// touched). A request is a few hundred bytes; a bigger one arrives in parts. With 2,048, a saturated loop ran out of
+/// Provided receive buffers per ring: 8,192 x 1 KB (8 MB; the ring hands them out in turn, so all of it gets
+/// touched). A request is a few hundred bytes (the token alone is ~190); a bigger one arrives in parts. 2 KB buffers
+/// cost 8 MB more per ring (peak RSS at 320,000 users 259 vs 210 MB) for no CPU difference. With 2,048, a saturated loop ran out of
 /// buffers (ENOBUFS, receives armed again and again) and fell behind: 400,000 users passed half as often.
 /// Tuning knobs for experiments (the defaults are the measured best): FS3_NBUFS (buffers per ring, a power of 2),
 /// FS3_WAIT_N (completions the loop waits for) and FS3_WAIT_US (the longest wait).
@@ -121,7 +122,7 @@ let private NBufs =
     if n &&& (n - 1) = 0 && n <= 32768 then n else 8192
 let private WaitN = uint32 (envInt "FS3_WAIT_N" 32)
 let private WaitNs = int64 (envInt "FS3_WAIT_US" 2000) * 1000L
-let private BufSize = 2048
+let private BufSize = 1024
 let private BufGroup = 0us
 let private MaxRings = 8
 /// Completions handled in one pass at most (the rest wait for the next pass), so that one pass stays short.
@@ -174,7 +175,8 @@ let private FdLimit =
     let soft = if Sys.getrlimit(7, lim) = 0 then lim.[0] else 65535UL
     int (min soft 65535UL)
 
-/// The kernel's per-connection objects are 4 KB; when memory gets low, new connections get "Connection: close".
+/// One io_uring instance: a fixed-file table of up to FdLimit sockets, its receive buffers and its slots. (The kernel
+/// keeps about 3.75 KB per connection: socket, inode, file.)
 type private Ring(index: int) =
     let p = Marshal.AllocHGlobal 120
     do
@@ -264,9 +266,18 @@ type private Ring(index: int) =
                 try
                     register REGISTER_PBUF_RING reg 1L
                     false
-                with e ->
-                    if index = 0 then eprintfn "io_uring buffer ring refused (%s): using IORING_OP_PROVIDE_BUFFERS" e.Message
-                    true
+                with _ ->
+                    // Ubuntu 6.8.0-147 (and other builds of that series) has the check on the struct's reserved words
+                    // inverted: it refuses zeroes and accepts anything else (Launchpad #2162843). A correct kernel refuses
+                    // a non-zero word, so this second try only succeeds where the first one failed for that reason.
+                    NativePtr.write (NativePtr.ofNativeInt<uint64> (reg + 16n)) 1UL
+                    try
+                        register REGISTER_PBUF_RING reg 1L
+                        if index = 0 then eprintfn "io_uring buffer ring registered with resv[0]=1 (inverted check)"
+                        false
+                    with e ->
+                        if index = 0 then eprintfn "io_uring buffer ring refused (%s): using IORING_OP_PROVIDE_BUFFERS" e.Message
+                        true
             finally
                 Marshal.FreeHGlobal reg
     /// Legacy mode: buffers used since the last PublishBuffers.
@@ -385,6 +396,11 @@ type private Ring(index: int) =
     member this.Submit() = this.Enter(0u, 0L, 0n)
 
     /// Copies the ready completions into `into` (user_data, res, flags) and frees them in the CQ.
+    /// The CQ tail: how many completions the kernel has posted so far (wraps).
+    member _.CqTail = loadAcquire cqTail
+    /// Completions posted and not reaped yet.
+    member _.CqReady = loadAcquire cqTail - NativePtr.read cqHead
+
     member _.Reap(into: List<struct (uint64 * int * uint32)>, cap: int) =
         let mutable head = NativePtr.read cqHead
         let t = loadAcquire cqTail
@@ -449,44 +465,10 @@ type private Ring(index: int) =
         NativePtr.write (NativePtr.ofNativeInt<uint64> (s + 32n)) OpIgnore
         let c = this.Sqe()
         NativePtr.write (NativePtr.ofNativeInt<byte> c) OP_CLOSE
-        NativePtr.write (NativePtr.ofNativeInt<byte> (c + 1n)) SQE_CQE_SKIP_SUCCESS
+        // The CLOSE posts its completion (ignored): then every deferred completion the loop runs posts one, and the
+        // loop's "enter again until a call adds none" (Run) does not stop while closes wait.
         NativePtr.write (NativePtr.ofNativeInt<uint32> (c + 44n)) (uint32 (slot + 1))
         NativePtr.write (NativePtr.ofNativeInt<uint64> (c + 32n)) OpIgnore
-
-/// What Kestrel gets for each new connection. The loop owns the socket and runs its requests; Kestrel's connection
-/// handler returns at once (Program.fs), so this object lives only for Kestrel's dispatch.
-[<AllowNullLiteral>]
-type UConn(id: int64) =
-    inherit ConnectionContext()
-    let mutable features: IFeatureCollection = FeatureCollection(2)
-    let mutable items: IDictionary<obj, obj> = null
-    let mutable connectionId: string = null
-    let mutable transport: IDuplexPipe = null
-    override _.ConnectionId
-        with get () =
-            if isNull connectionId then connectionId <- "u" + string id
-            connectionId
-        and set v = connectionId <- v
-    override _.Features = features
-    override _.Items
-        with get () =
-            if isNull items then items <- Dictionary<obj, obj>()
-            items
-        and set v = items <- v
-    override _.Transport
-        with get () =
-            if isNull transport then
-                let p = System.IO.Pipelines.Pipe()
-                transport <-
-                    { new IDuplexPipe with
-                        member _.Input = p.Reader
-                        member _.Output = p.Writer }
-            transport
-        and set v = transport <- v
-    override _.Abort(_: ConnectionAbortedException) = ()
-    override _.DisposeAsync() =
-        features <- FeatureCollection(0)
-        ValueTask.CompletedTask
 
 /// The responses of one pass: one pinned buffer, the HTTP handler writes into it.
 type private Arena(initial: int) =
@@ -546,7 +528,6 @@ type private Loop(listenFd: int) as this =
     let mutable stRearmMax = 0
     let mutable stSpills = 0L
     let mutable stLast = Diagnostics.Stopwatch.GetTimestamp()
-    let mutable nextId = 1L
     let mutable acceptRing = 0
     let mutable acceptBroken = false
     /// Buffers of sends still in flight for connections that closed meanwhile, by (ring, slot, generation).
@@ -607,9 +588,7 @@ type private Loop(listenFd: int) as this =
             r.State.[slot] <- Live
             r.Open <- r.Open + 1
             r.Recv slot
-            let id = nextId
-            nextId <- nextId + 1L
-            accepted.Writer.TryWrite(UConn(id)) |> ignore
+            // Kestrel is not told (see Listener).
 
     member private this.Process(r: Ring, slot: int, src: nativeint, n: int) =
         let mutable data = ReadOnlySpan<byte>(NativePtr.toVoidPtr (NativePtr.ofNativeInt<byte> src), n)
@@ -879,16 +858,25 @@ type private Loop(listenFd: int) as this =
             let mutable openTotal = 0
             while true do
                 // 1. Wait in ring 0: for 32 completions or 2 ms while connections are open, else for one completion.
-                let r0 = rings.[0]
-                if carry.Count = 0 then
-                    if openTotal = 0 && rings.Count = 1 then
-                        r0.Enter(1u, ENTER_GETEVENTS, 0n) |> ignore
-                    else
-                        r0.Enter(WaitN, ENTER_GETEVENTS ||| ENTER_EXT_ARG, waitArg) |> ignore
-                else
-                    r0.Enter(0u, ENTER_GETEVENTS, 0n) |> ignore
-                for i in 1 .. rings.Count - 1 do
-                    rings.[i].Enter(0u, ENTER_GETEVENTS, 0n) |> ignore
+                for i in 0 .. rings.Count - 1 do
+                    let r = rings.[i]
+                    if i > 0 || carry.Count > 0 then r.Enter(0u, ENTER_GETEVENTS, 0n) |> ignore
+                    elif openTotal = 0 && rings.Count = 1 then r.Enter(1u, ENTER_GETEVENTS, 0n) |> ignore
+                    else r.Enter(WaitN, ENTER_GETEVENTS ||| ENTER_EXT_ARG, waitArg) |> ignore
+                    // From 6.13 one io_uring_enter runs at most max(20, wait) of the ring's deferred completions
+                    // ("limit local tw done") and keeps the rest for the next call. With one call per ring per pass, 5
+                    // rings gave a pass at most 32 + 4 x 20 of them: 320,000 users got 25,700 requests per second at 66%
+                    // CPU and waited 4.5 s. So enter again, waiting for as many completions as the ring already holds:
+                    // the call runs up to that many and returns at once (they are there). Until a call adds none (6.8
+                    // runs them all in the first call; then the second finds none). Not "until a call adds fewer than
+                    // 16": closes without a completion (CQE_SKIP_SUCCESS) made that stop early, with 4 s waits.
+                    let mutable k = 0
+                    let mutable more = true
+                    while more && k < 64 do
+                        let before = r.CqTail
+                        r.Enter(r.CqReady, ENTER_GETEVENTS, 0n) |> ignore
+                        more <- r.CqTail <> before
+                        k <- k + 1
                 // 2. Handle the completions: new connections, received requests (responses into the arena).
                 pass <- pass + 1
                 let t0 = if stats then Diagnostics.Stopwatch.GetTimestamp() else 0L
@@ -923,6 +911,7 @@ type private Loop(listenFd: int) as this =
                 if Db.bgCheckpoint && not Db.holdWrites && Volatile.Read &Db.walFrames >= holdAt then
                     Volatile.Write(&Db.caughtUp, false)
                     Volatile.Write(&Db.holdWrites, true)
+                    Db.wakeCheckpointer ()
                     holdSince <- Environment.TickCount64
                 (try this.Flush committed with _ -> ())
                 (try this.ManageAccept() with _ -> ())
@@ -958,6 +947,9 @@ type private Loop(listenFd: int) as this =
                         stPasses <- 0L; stCqes <- 0L; stMaxCqes <- 0; stMaxPassTicks <- 0L; stNoBufs <- 0L
                         stCarryMax <- 0; stRearmMax <- 0; stSpills <- 0L; stLast <- t1
 
+/// Kestrel's accept never completes: the loop keeps every connection from accept to close. Handing each new
+/// connection to Kestrel (whose handler then returned at once) woke a thread-pool thread that spun with sched_yield
+/// against the loop on the one core: 44 to 32 us of CPU per new connection in a 320,000-user ramp, ~200 us when idle.
 type private Listener(endpoint: EndPoint, loop: Loop) =
     interface IConnectionListener with
         member _.EndPoint = endpoint

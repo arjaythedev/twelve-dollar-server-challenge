@@ -8,10 +8,114 @@ import (
 	"github.com/panjf2000/gnet/v2"
 )
 
+const (
+	maxHeader    = 16 << 10
+	maxBody      = 1 << 20
+	softMaxConns = 55000 // Begin proactive keep-alive cycling with Connection: close
+	hardMaxConns = 62000 // Strict cap leaving ~3.5k FDs headroom below OS 65,535 LimitNOFILE
+)
+
+// lruList maintains an intrusive doubly-linked list of active connections indexed by file descriptor.
+// All operations (add, remove, touch, popOldest) are O(1) and zero-allocation.
+type lruList struct {
+	conns [65536]gnet.Conn
+	prev  [65536]int32
+	next  [65536]int32
+	open  [65536]bool
+	head  int32
+	tail  int32
+	count int
+}
+
+func (l *lruList) init() {
+	l.head = -1
+	l.tail = -1
+	for i := range l.prev {
+		l.prev[i] = -1
+		l.next[i] = -1
+	}
+}
+
+func (l *lruList) add(fd int32, c gnet.Conn) {
+	if fd < 0 || int(fd) >= len(l.conns) {
+		return
+	}
+	if l.open[fd] {
+		l.remove(fd)
+	}
+	l.open[fd] = true
+	l.conns[fd] = c
+	l.prev[fd] = l.tail
+	l.next[fd] = -1
+	if l.tail >= 0 {
+		l.next[l.tail] = fd
+	} else {
+		l.head = fd
+	}
+	l.tail = fd
+	l.count++
+}
+
+func (l *lruList) remove(fd int32) {
+	if fd < 0 || int(fd) >= len(l.conns) || !l.open[fd] {
+		return
+	}
+	p := l.prev[fd]
+	n := l.next[fd]
+	if p >= 0 {
+		l.next[p] = n
+	} else {
+		l.head = n
+	}
+	if n >= 0 {
+		l.prev[n] = p
+	} else {
+		l.tail = p
+	}
+	l.prev[fd] = -1
+	l.next[fd] = -1
+	l.conns[fd] = nil
+	l.open[fd] = false
+	l.count--
+}
+
+func (l *lruList) touch(fd int32) {
+	if fd < 0 || int(fd) >= len(l.conns) || !l.open[fd] || l.tail == fd {
+		return
+	}
+	p := l.prev[fd]
+	n := l.next[fd]
+	if p >= 0 {
+		l.next[p] = n
+	} else {
+		l.head = n
+	}
+	if n >= 0 {
+		l.prev[n] = p
+	}
+	l.prev[fd] = l.tail
+	l.next[fd] = -1
+	if l.tail >= 0 {
+		l.next[l.tail] = fd
+	}
+	l.tail = fd
+}
+
+func (l *lruList) popOldest() gnet.Conn {
+	if l.head < 0 {
+		return nil
+	}
+	fd := l.head
+	c := l.conns[fd]
+	l.remove(fd)
+	return c
+}
+
 // httpServer handles HTTP/1.1 connections in an epoll event loop without allocating a goroutine per connection.
 type httpServer struct {
 	gnet.BuiltinEventEngine
 	body, out []byte // reused buffer for the single-threaded event loop
+	lru       lruList
 }
 
 func listen(addr string) error {
@@ -19,22 +123,56 @@ func listen(addr string) error {
 		body: make([]byte, 0, 64<<10),
 		out:  make([]byte, 0, 64<<10),
 	}
+	srv.lru.init()
+
 	return gnet.Run(srv, "tcp://"+addr,
 		gnet.WithMulticore(false),
 		gnet.WithTCPNoDelay(gnet.TCPNoDelay),
-		gnet.WithTCPKeepAlive(65*time.Second),
+		gnet.WithTCPKeepAlive(30*time.Second),
 		gnet.WithReusePort(false),
 		gnet.WithReuseAddr(true),
 		gnet.WithLockOSThread(true),
+		gnet.WithTicker(true),
 	)
 }
 
-const maxHeader = 16 << 10
-const maxBody = 1 << 20
+func (s *httpServer) OnOpen(c gnet.Conn) (out []byte, action gnet.Action) {
+	fd := int32(c.Fd())
+	if s.lru.count >= hardMaxConns {
+		if oldest := s.lru.popOldest(); oldest != nil {
+			_ = oldest.Close()
+		}
+	}
+	s.lru.add(fd, c)
+	return nil, gnet.None
+}
+
+func (s *httpServer) OnClose(c gnet.Conn, err error) (action gnet.Action) {
+	s.lru.remove(int32(c.Fd()))
+	return gnet.None
+}
+
+func (s *httpServer) OnTick() (delay time.Duration, action gnet.Action) {
+	if s.lru.count > softMaxConns {
+		for i := 0; i < 64 && s.lru.count > softMaxConns; i++ {
+			if oldest := s.lru.popOldest(); oldest != nil {
+				_ = oldest.Close()
+			} else {
+				break
+			}
+		}
+	}
+	return 250 * time.Millisecond, gnet.None
+}
+
+const (
+	crlfcrlfStr = "\r\n\r\n"
+	crlfStr     = "\r\n"
+)
 
 var (
-	crlfcrlf = []byte("\r\n\r\n")
-	crlf     = []byte("\r\n")
+	crlfcrlf = []byte(crlfcrlfStr)
+	crlf     = []byte(crlfStr)
 
 	hdr200 = []byte("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ")
 	hdr201 = []byte("HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: ")
@@ -46,6 +184,7 @@ var (
 )
 
 func (s *httpServer) OnTraffic(c gnet.Conn) gnet.Action {
+	s.lru.touch(int32(c.Fd()))
 	in, _ := c.Peek(-1)
 	s.out = s.out[:0]
 	used, closeConn := 0, false
@@ -61,7 +200,7 @@ func (s *httpServer) OnTraffic(c gnet.Conn) gnet.Action {
 			break
 		}
 		used += n
-		closeConn = r.close
+		closeConn = r.close || (s.lru.count >= softMaxConns)
 
 		var status int
 		status, s.body = serve(r.method, r.path, r.auth, r.body, s.body[:0])

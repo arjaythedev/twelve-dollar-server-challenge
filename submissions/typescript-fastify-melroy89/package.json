@@ -1,0 +1,17 @@
+{
+  "name": "typescript-fastify-melroy89",
+  "private": true,
+  "type": "module",
+  "scripts": { "build": "tsc", "check": "tsc --noEmit" },
+  "dependencies": {
+    "@fastify/jwt": "10.2.4",
+    "better-sqlite3": "13.0.3",
+    "fastify": "5.12.7"
+  },
+  "devDependencies": {
+    "node-gyp": "13.1.0",
+    "@types/better-sqlite3": "9.6.0",
+    "@types/node": "26.6.5",
+    "typescript": "7.0.2"
+  }
+}

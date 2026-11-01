@@ -9,7 +9,6 @@ internal sealed record Post(
     [property: JsonPropertyName("author"), JsonPropertyOrder(3)] string Author,
     [property: JsonPropertyName("like_count"), JsonPropertyOrder(4)] long LikeCount);
 
-internal sealed record FeedResponse([property: JsonPropertyName("posts")] List<Post> Posts);
 internal sealed record PostResponse([property: JsonPropertyName("post")] Post Post);
 internal sealed record ApiError([property: JsonPropertyName("error")] string Error);
 internal sealed record HealthResponse(
@@ -25,7 +24,6 @@ internal sealed record LikeResponse(
     [property: JsonPropertyName("already_liked"), JsonPropertyOrder(1)] bool AlreadyLiked,
     [property: JsonPropertyName("post_id"), JsonPropertyOrder(2)] long PostId);
 
-[JsonSerializable(typeof(FeedResponse))]
 [JsonSerializable(typeof(PostResponse))]
 [JsonSerializable(typeof(ApiError))]
 [JsonSerializable(typeof(HealthResponse))]

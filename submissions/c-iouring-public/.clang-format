@@ -1,0 +1,16 @@
+# Formatting for our own code (src/). components/ and third_party/ are vendored and keep their owners' style.
+BasedOnStyle: LLVM
+IndentWidth: 2
+ColumnLimit: 120
+IndentCaseLabels: true
+AllowShortFunctionsOnASingleLine: Empty
+AllowShortIfStatementsOnASingleLine: WithoutElse
+AllowShortLoopsOnASingleLine: false
+AllowShortBlocksOnASingleLine: Empty
+AllowShortCaseLabelsOnASingleLine: true
+AlignConsecutiveMacros: AcrossComments
+AlignTrailingComments: true
+AlignEscapedNewlines: Left
+SortIncludes: Never
+ReflowComments: true
+SpacesBeforeTrailingComments: 2

@@ -1,0 +1,8 @@
+/bin/
+/build/
+/lib/
+/.shards/
+/measurements/*.db*
+
+/measurements/**/*-server.log
+/measurements/**/*-warmup.txt

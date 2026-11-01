@@ -1,0 +1,1350 @@
+<?php
+/* server.hphp — the twelve-dollar feed API, written in HolyPHP.
+ *
+ * Everything the challenge measures lives in this file:
+ *
+ *   - the HTTP/1.1 keep-alive loop on top of the runtime's non-blocking
+ *     socket primitives (stream_ready / stream_recv / stream_send),
+ *   - request parsing and routing,
+ *   - HS256 JWT verification (hash_hmac + hash_equals, on every request),
+ *   - strict JSON request validation (the runtime's json_decode is lenient,
+ *     so POST bodies go through the small parser below),
+ *   - all SQL, including the SQLite JSON1 calls that render the response
+ *     bodies inside the query,
+ *   - the write policy: writes are collected during one poll cycle, applied
+ *     in a single BEGIN IMMEDIATE … COMMIT (group commit), and only then is
+ *     a 2xx sent.
+ *
+ * The native side is deliberately generic: sockets, HMAC, and a plain
+ * SQLite binding. There is no challenge-specific C code.
+ *
+ * Config comes from the four SPEC.md variables:
+ *   SQLITE_PATH, JWT_SECRET, HOST, PORT
+ */
+
+/* Strict RFC 8259 parser, used for POST /posts bodies. */
+class Json {
+    pub string $s;
+    pub int $n;
+    pub int $i;
+    pub bool $ok;
+    pub int $depth;
+    pub $root = null;
+
+    public function __construct(string $s) {
+        $this->s = $s;
+        $this->n = strlen($s);
+        $this->i = 0;
+        $this->ok = true;
+        $this->depth = 0;
+    }
+
+    public function parse(): bool {
+        $this->root = $this->value();
+        if (!$this->ok) { return false; }
+        $this->ws();
+        return $this->i == $this->n;
+    }
+
+    public function ws(): void {
+        while ($this->i < $this->n) {
+            $c = $this->s[$this->i];
+            if ($c == " " || $c == "\t" || $c == "\n" || $c == "\r") {
+                $this->i = $this->i + 1;
+            } else {
+                return;
+            }
+        }
+    }
+
+    public function value() {
+        $this->ws();
+        if ($this->i >= $this->n) { $this->ok = false; return null; }
+        $c = $this->s[$this->i];
+        if ($c == "{") { return $this->object(); }
+        if ($c == "[") { return $this->arr(); }
+        if ($c == "\"") { return $this->str(); }
+        if ($c == "t") { if ($this->lit("true")) { return true; } $this->ok = false; return null; }
+        if ($c == "f") { if ($this->lit("false")) { return false; } $this->ok = false; return null; }
+        if ($c == "n") { if ($this->lit("null")) { return null; } $this->ok = false; return null; }
+        if ($c == "-" || ($c >= "0" && $c <= "9")) { return $this->num(); }
+        $this->ok = false;
+        return null;
+    }
+
+    public function lit(string $w): bool {
+        $l = strlen($w);
+        if ($this->i + $l > $this->n) { return false; }
+        if (substr($this->s, $this->i, $l) != $w) { return false; }
+        $this->i = $this->i + $l;
+        return true;
+    }
+
+    public function object() {
+        $this->depth = $this->depth + 1;
+        if ($this->depth > 64) { $this->ok = false; return []; }
+        $this->i = $this->i + 1;
+        $out = [];
+        $this->ws();
+        if ($this->i < $this->n && $this->s[$this->i] == "}") {
+            $this->i = $this->i + 1;
+            $this->depth = $this->depth - 1;
+            return $out;
+        }
+        while (true) {
+            $this->ws();
+            if ($this->i >= $this->n || $this->s[$this->i] != "\"") { $this->ok = false; return $out; }
+            $k = $this->str();
+            if (!$this->ok) { return $out; }
+            $this->ws();
+            if ($this->i >= $this->n || $this->s[$this->i] != ":") { $this->ok = false; return $out; }
+            $this->i = $this->i + 1;
+            $v = $this->value();
+            if (!$this->ok) { return $out; }
+            $out[$k] = $v;
+            $this->ws();
+            if ($this->i >= $this->n) { $this->ok = false; return $out; }
+            $c = $this->s[$this->i];
+            if ($c == ",") { $this->i = $this->i + 1; continue; }
+            if ($c == "}") {
+                $this->i = $this->i + 1;
+                $this->depth = $this->depth - 1;
+                return $out;
+            }
+            $this->ok = false;
+            return $out;
+        }
+    }
+
+    public function arr() {
+        $this->depth = $this->depth + 1;
+        if ($this->depth > 64) { $this->ok = false; return []; }
+        $this->i = $this->i + 1;
+        $out = [];
+        $this->ws();
+        if ($this->i < $this->n && $this->s[$this->i] == "]") {
+            $this->i = $this->i + 1;
+            $this->depth = $this->depth - 1;
+            return $out;
+        }
+        while (true) {
+            $v = $this->value();
+            if (!$this->ok) { return $out; }
+            $out[] = $v;
+            $this->ws();
+            if ($this->i >= $this->n) { $this->ok = false; return $out; }
+            $c = $this->s[$this->i];
+            if ($c == ",") { $this->i = $this->i + 1; continue; }
+            if ($c == "]") {
+                $this->i = $this->i + 1;
+                $this->depth = $this->depth - 1;
+                return $out;
+            }
+            $this->ok = false;
+            return $out;
+        }
+    }
+
+    public function str() {
+        if ($this->i >= $this->n || $this->s[$this->i] != "\"") { $this->ok = false; return ""; }
+        $this->i = $this->i + 1;
+        $out = "";
+        while ($this->i < $this->n) {
+            $c = $this->s[$this->i];
+            $this->i = $this->i + 1;
+            if ($c == "\"") { return $out; }
+            if ($c == chr(92)) {
+                if ($this->i >= $this->n) { $this->ok = false; return ""; }
+                $e = $this->s[$this->i];
+                $this->i = $this->i + 1;
+                if ($e == "\"") { $out .= "\""; }
+                else if ($e == chr(92)) { $out .= chr(92); }
+                else if ($e == "/") { $out .= "/"; }
+                else if ($e == "b") { $out .= chr(8); }
+                else if ($e == "f") { $out .= chr(12); }
+                else if ($e == "n") { $out .= "\n"; }
+                else if ($e == "r") { $out .= "\r"; }
+                else if ($e == "t") { $out .= "\t"; }
+                else if ($e == "u") {
+                    $cp = $this->hex4();
+                    if (!$this->ok) { return ""; }
+                    if ($cp >= 55296 && $cp <= 56319) {
+                        if ($this->i + 1 < $this->n
+                            && $this->s[$this->i] == chr(92) && $this->s[$this->i + 1] == "u") {
+                            $this->i = $this->i + 2;
+                            $lo = $this->hex4();
+                            if (!$this->ok || $lo < 56320 || $lo > 57343) { $this->ok = false; return ""; }
+                            $cp = 65536 + (($cp - 55296) << 10) + ($lo - 56320);
+                        } else {
+                            $this->ok = false;
+                            return "";
+                        }
+                    } else if ($cp >= 56320 && $cp <= 57343) {
+                        $this->ok = false;
+                        return "";
+                    }
+                    $out .= $this->utf8($cp);
+                } else {
+                    $this->ok = false;
+                    return "";
+                }
+            } else if (ord($c) < 32) {
+                $this->ok = false;
+                return "";
+            } else {
+                $out .= $c;
+            }
+        }
+        $this->ok = false;
+        return "";
+    }
+
+    public function hex4(): int {
+        if ($this->i + 4 > $this->n) { $this->ok = false; return 0; }
+        $v = 0;
+        for ($k = 0; $k < 4; $k++) {
+            $c = $this->s[$this->i + $k];
+            $d = -1;
+            if ($c >= "0" && $c <= "9") { $d = ord($c) - 48; }
+            else if ($c >= "a" && $c <= "f") { $d = ord($c) - 87; }
+            else if ($c >= "A" && $c <= "F") { $d = ord($c) - 55; }
+            if ($d < 0) { $this->ok = false; return 0; }
+            $v = $v * 16 + $d;
+        }
+        $this->i = $this->i + 4;
+        return $v;
+    }
+
+    public function utf8(int $cp): string {
+        if ($cp < 128) { return chr($cp); }
+        if ($cp < 2048) {
+            return chr(192 + ($cp >> 6)) . chr(128 + ($cp & 63));
+        }
+        if ($cp < 65536) {
+            return chr(224 + ($cp >> 12)) . chr(128 + (($cp >> 6) & 63)) . chr(128 + ($cp & 63));
+        }
+        return chr(240 + ($cp >> 18)) . chr(128 + (($cp >> 12) & 63))
+             . chr(128 + (($cp >> 6) & 63)) . chr(128 + ($cp & 63));
+    }
+
+    public function num() {
+        if ($this->i < $this->n && $this->s[$this->i] == "-") { $this->i = $this->i + 1; }
+        if ($this->i >= $this->n) { $this->ok = false; return 0; }
+        $c = $this->s[$this->i];
+        if ($c == "0") {
+            $this->i = $this->i + 1;
+        } else if ($c >= "1" && $c <= "9") {
+            while ($this->i < $this->n) {
+                $c = $this->s[$this->i];
+                if ($c >= "0" && $c <= "9") { $this->i = $this->i + 1; } else { break; }
+            }
+        } else {
+            $this->ok = false;
+            return 0;
+        }
+        if ($this->i < $this->n && $this->s[$this->i] == ".") {
+            $this->i = $this->i + 1;
+            $d = 0;
+            while ($this->i < $this->n) {
+                $c = $this->s[$this->i];
+                if ($c >= "0" && $c <= "9") { $this->i = $this->i + 1; $d = $d + 1; } else { break; }
+            }
+            if ($d == 0) { $this->ok = false; return 0; }
+        }
+        if ($this->i < $this->n && ($this->s[$this->i] == "e" || $this->s[$this->i] == "E")) {
+            $this->i = $this->i + 1;
+            if ($this->i < $this->n && ($this->s[$this->i] == "+" || $this->s[$this->i] == "-")) {
+                $this->i = $this->i + 1;
+            }
+            $d = 0;
+            while ($this->i < $this->n) {
+                $c = $this->s[$this->i];
+                if ($c >= "0" && $c <= "9") { $this->i = $this->i + 1; $d = $d + 1; } else { break; }
+            }
+            if ($d == 0) { $this->ok = false; return 0; }
+        }
+        return 0;
+    }
+}
+
+/* --------------------------------------------------------------- server */
+
+class Server {
+    pub int $srv = 0;
+    pub int $db = 0;
+    pub string $secret = "";
+    pub int $start = 0;
+    pub int $sweep = 0;
+
+    /* per-connection state, keyed by socket fd. socks/lasts are fixed-size
+     * int64 arrays indexed by fd (8 bytes a slot, one pointer add) instead of
+     * hash maps of boxed hvals: at 15k connections the maps' cache footprint
+     * was the floor's biggest cost. 0 means "absent". */
+    pub int $socks = 0;
+    pub int $lasts = 0;
+    pub int $nconn = 0;
+    pub array $bufs = [];
+
+    /* deferred writes for the current poll cycle */
+    pub array $pending = [];
+
+    /* ready list, kept between rounds so a round allocates no array */
+    pub array $ready = [];
+
+    /* response header prefixes per status code, built once */
+    pub array $hdr = [];
+
+    /* B-tree cursors for the feed fast path (0 when unavailable) */
+    pub int $btPosts = 0;
+    pub int $btLikes = 0;
+    pub int $btUsers = 0;
+
+    /* Connection shedding: computed from the process's real fd limit */
+    pub int $shedAt = 58000;
+    pub int $paused = 0;
+
+    /* Responses that did not fit into the socket buffer: the rest is written
+     * when epoll reports EPOLLOUT instead of sleeping in the loop. */
+    pub array $out = [];
+    pub array $closing = [];
+    pub array $writable = [];
+
+    /* Idle sweep, a slice per cycle instead of one O(n) pass */
+    pub array $sockList = [];
+    pub int $sweepPos = 0;
+
+    pub int $feed = 0;
+    pub int $post = 0;
+    pub int $health = 0;
+    pub int $likecnt = 0;
+    pub int $insPost = 0;
+    pub int $insLike = 0;
+    pub int $hasPost = 0;
+
+    /* ------------------------------------------------------- setup */
+
+    public function open(string $host, int $port): bool {
+        $path = getenv("SQLITE_PATH");
+        if ($path === false || $path == "") { $path = "feed.db"; }
+        $sec = getenv("JWT_SECRET");
+        if ($sec === false || $sec == "") { $sec = "twelve-dollar-challenge"; }
+        $this->secret = $sec;
+
+        $db = sqlite_open($path);
+        if ($db == 0) {
+            echo "fatal: cannot open sqlite database " . $path . "\n";
+            return false;
+        }
+        $this->db = $db;
+        sqlite_busy_timeout($db, 5000);
+        sqlite_exec($db, "PRAGMA journal_mode=WAL");
+        sqlite_exec($db, "PRAGMA synchronous=NORMAL");
+        sqlite_exec($db, "PRAGMA temp_store=MEMORY");
+        sqlite_exec($db, "PRAGMA cache_size=-65536");
+        sqlite_exec($db, "PRAGMA mmap_size=268435456");
+        sqlite_exec($db, "PRAGMA foreign_keys=OFF");
+        /* The default 1000-page checkpoint runs every few commits on the
+         * event loop; 4000 keeps the WAL small enough that page lookups stay
+         * cheap without checkpointing constantly. */
+        sqlite_exec($db, "PRAGMA wal_autocheckpoint=4000");
+
+        /* The response bodies are rendered by SQLite's JSON1 functions, in
+         * the exact key order the spec wants. The feed's ordering comes from
+         * the input subquery; json_group_array appends rows in that order, so
+         * no second sort inside the aggregate is needed.
+         * (INSERT ... RETURNING needs SQLite >= 3.35; Ubuntu 24.04 has 3.45.) */
+        $q = "SELECT '{' || '\"posts\":' || json_group_array(json_object("
+           . "'id', p.id, 'body', p.body, 'created_at', p.created_at, "
+           . "'author', p.author, "
+           . "'like_count', (SELECT count(*) FROM likes l WHERE l.post_id = p.id)"
+           . ") ) || '}' "
+           . "FROM (SELECT p.id, p.body, p.created_at, u.username AS author "
+           . "FROM posts p JOIN users u ON u.id = p.user_id "
+           /* ids are assigned in insert order and created_at is set from the
+            * clock at the same moment, so id DESC is the same order as
+            * created_at DESC, id DESC (verified byte-identical against
+            * test/golden/feed.json) and it walks the rowid index instead of
+            * a second index plus scattered row lookups. */
+           . "ORDER BY p.id DESC LIMIT 20) p";
+        $this->feed = sqlite_prepare($db, $q);
+        if ($this->feed == 0) {
+            echo "fatal: feed query: " . sqlite_errmsg($db) . "\n";
+            return false;
+        }
+
+        $q = "SELECT json_object('post', json_object("
+           . "'id', p.id, 'body', p.body, 'created_at', p.created_at, "
+           . "'author', (SELECT username FROM users u WHERE u.id = p.user_id), "
+           . "'like_count', (SELECT count(*) FROM likes l WHERE l.post_id = p.id)"
+           . ")) FROM posts p WHERE p.id = ?1";
+        $this->post = sqlite_prepare($db, $q);
+        if ($this->post == 0) {
+            echo "fatal: post query: " . sqlite_errmsg($db) . "\n";
+            return false;
+        }
+
+        $this->health = sqlite_prepare($db, "SELECT 1");
+        if ($this->health == 0) {
+            echo "fatal: health query: " . sqlite_errmsg($db) . "\n";
+            return false;
+        }
+
+        /* one post's like count for the B-tree post path (index range scan) */
+        $this->likecnt = sqlite_prepare($db, "SELECT count(*) FROM likes WHERE post_id = ?1");
+        if ($this->likecnt == 0) {
+            echo "fatal: like count query: " . sqlite_errmsg($db) . "\n";
+            return false;
+        }
+
+        $q = "INSERT INTO posts (user_id, body) VALUES (?1, ?2) "
+           . "RETURNING id, created_at";
+        $this->insPost = sqlite_prepare($db, $q);
+        if ($this->insPost == 0) {
+            echo "fatal: insert post: " . sqlite_errmsg($db) . "\n";
+            return false;
+        }
+
+        $q = "INSERT INTO likes (user_id, post_id) "
+           . "SELECT ?1, ?2 WHERE EXISTS (SELECT 1 FROM posts WHERE id = ?2) "
+           . "ON CONFLICT (user_id, post_id) DO NOTHING";
+        $this->insLike = sqlite_prepare($db, $q);
+        if ($this->insLike == 0) {
+            echo "fatal: insert like: " . sqlite_errmsg($db) . "\n";
+            return false;
+        }
+
+        $this->hasPost = sqlite_prepare($db, "SELECT 1 FROM posts WHERE id = ?1 LIMIT 1");
+        if ($this->hasPost == 0) {
+            echo "fatal: post exists query: " . sqlite_errmsg($db) . "\n";
+            return false;
+        }
+
+        $addr = "tcp://" . $host . ":" . $port;
+        $srv = stream_socket_server($addr);
+        if ($srv === false || intval($srv) <= 0) {
+            /* Direct mode failed (typically because Nginx already owns :80).
+             * Fall back to the Nginx upstream address instead of dying, so
+             * the service always comes up. */
+            $addr = "tcp://127.0.0.1:3000";
+            $srv = stream_socket_server($addr);
+            if ($srv === false || intval($srv) <= 0) {
+                echo "fatal: cannot listen on " . $host . ":" . $port . " or 127.0.0.1:3000\n";
+                return false;
+            }
+        }
+        /* generic B-tree cursors: posts by rowid, the likes index by key,
+         * users by rowid. They are only used when all three open. */
+        $this->btPosts = bt_open($db, "posts", 0);
+        $this->btLikes = bt_open($db, "likes_post_id_idx", 1);
+        $this->btUsers = bt_open($db, "users", 0);
+
+        $this->srv = intval($srv);
+        /* TCP_NODELAY is inherited by accepted sockets on Linux, so set it
+         * once on the listener instead of paying a setsockopt per accepted
+         * connection (tens of thousands per second in the shed regime). */
+        stream_set_nodelay($srv);
+        epoll_add($this->srv);
+        $this->socks = iarr_new(65536);
+        $this->lasts = iarr_new(65536);
+
+        /* Shed only when the process is really near its descriptor limit.
+         * The box sets LimitNOFILE; a hard 58,000 would close every response
+         * once more than 58,000 users are connected. */
+        $lim = nofile_limit();
+        if ($lim > 0) {
+            $this->shedAt = $lim - 4096;
+            if ($this->shedAt < 32000) { $this->shedAt = 32000; }
+            if ($this->shedAt > $lim) { $this->shedAt = $lim; }
+            /* The ring backend parks one armed recv per connection and the
+             * kernel caps the SQ ring at 32768 entries. Above ~28k live
+             * connections the surplus would wait for a slot before their
+             * requests are even read, so shed earlier: the extra users
+             * reconnect per request instead and stay fast. */
+            if (uring_active() && $this->shedAt > 28000) { $this->shedAt = 28000; }
+        }
+
+        $codes = [200, 201, 400, 401, 404, 500, 503];
+        $texts = ["OK", "Created", "Bad Request", "Unauthorized",
+                  "Not Found", "Internal Server Error", "Service Unavailable"];
+        for ($i = 0; $i < 7; $i++) {
+            $this->hdr[$codes[$i]] = "HTTP/1.1 " . $codes[$i] . " " . $texts[$i]
+                . "\r\nContent-Type: application/json\r\nContent-Encoding: identity"
+                . "\r\nContent-Length: ";
+        }
+        $this->start = time();
+        $this->sweep = $this->start;
+        return true;
+    }
+
+    /* -------------------------------------------------------- main loop */
+
+    public function handle_ready(): void {
+        /* finish pending responses before reading new requests */
+        foreach ($this->writable as $w) {
+            $fd = intval($w);
+            if (isset($this->out[$fd])) { $this->flush_fd($fd); }
+        }
+        foreach ($this->ready as $h) {
+            $fd = intval($h);
+            if ($fd == $this->srv) { $this->accept_all(); continue; }
+            if (!(iarr_get($this->socks, $fd) != 0)) { continue; }
+            if (isset($this->out[$fd])) { continue; }   /* write still pending */
+            $this->read_fd($fd);
+        }
+    }
+
+    /* Write as much of the pending response as the socket takes; the rest
+     * stays buffered until epoll reports the socket writable again. */
+    public function flush_fd(int $fd): void {
+        $data = $this->out[$fd];
+        $sent = stream_send_nb($fd, $data);
+        if ($sent == -2) { $this->close_fd($fd); return; }
+        /* -1 is EAGAIN, not an error: the peer's window is momentarily full.
+         * Keep the buffer and wait for the next EPOLLOUT. Closing here is what
+         * made a slice of connections lose their response under load. */
+        if ($sent < 0) { return; }
+        if ($sent < strlen($data)) {
+            $this->out[$fd] = substr($data, $sent);
+            return;
+        }
+        unset($this->out[$fd]);
+        if (isset($this->closing[$fd])) { $this->close_fd($fd); return; }
+        if (!epoll_mod($fd, 1)) { $this->close_fd($fd); }
+    }
+
+    public function run(): void {
+        while (true) {
+            /* Everything allocated while serving this poll cycle is released
+             * by scope_end(): no per-request malloc survives the round. */
+            scope_begin();
+
+            epoll_wait2($this->ready, $this->writable, 50);
+            $this->handle_ready();
+            /* A transaction has a fixed cost; when only a few writes are
+             * pending, wait up to a millisecond for more requests before
+             * committing. That batches them without hurting the tail much. */
+            $n = count($this->pending);
+            if ($n > 0 && $n < 32) {
+                epoll_wait2($this->ready, $this->writable, 1);
+                $this->handle_ready();
+            }
+            $this->execute_writes();
+
+            /* Idle sweep: a bounded slice per cycle, so 110k sockets never
+             * turn into one long stall. */
+            $this->expire(time());
+
+            scope_end();
+        }
+    }
+
+    public function accept_all(): void {
+        while (true) {
+            $s = stream_socket_accept2($this->srv, 0);
+            if ($s === false) {
+                /* Only a real descriptor shortage may pause the listener. An
+                 * accept that simply finds the queue empty (EAGAIN) must not:
+                 * at the shedding threshold that stalled every reconnect. */
+                if ($this->paused == 0 && accept_emfile()) {
+                    epoll_del($this->srv);
+                    $this->paused = 1;
+                }
+                return;
+            }
+            $fd = intval($s);
+            if ($fd <= 0) { return; }
+            iarr_set($this->socks, $fd, $fd);
+            $this->bufs[$fd] = "";
+            iarr_set($this->lasts, $fd, time());
+            $this->nconn = $this->nconn + 1;
+            $this->sockList[] = $fd;
+            epoll_add($fd);
+        }
+    }
+
+    /* Nginx keeps idle upstream connections for up to 60 s and the spec asks
+     * us to hold them for at least 65 s, so only drop after 90 s of silence.
+     * The sweep is rate-limited to a slice per second (below): a per-cycle
+     * slice would walk ~20M entries/s at the benchmark's request rate. */
+    public function expire(int $now): void {
+        /* Sweep at most once a second. The loop runs ~10k cycles/s when
+         * requests are spread out (think times), so a per-cycle slice burns
+         * the core for nothing; a full pass only needs to finish inside the
+         * 90 s idle window (2048/s over 15k sockets = 8 s). */
+        if ($now < $this->sweep + 1) { return; }
+        $this->sweep = $now;
+        $n = count($this->sockList);
+        if ($n == 0) { return; }
+        $budget = 2048;
+        while ($budget > 0 && $this->sweepPos < $n) {
+            $fd = $this->sockList[$this->sweepPos];
+            $this->sweepPos = $this->sweepPos + 1;
+            $budget = $budget - 1;
+            if (!(iarr_get($this->socks, $fd) != 0)) { continue; }
+            if ($now - iarr_get($this->lasts, $fd) >= 90) { $this->close_fd($fd); }
+        }
+        if ($this->sweepPos >= $n) {
+            $this->sweepPos = 0;
+            /* compact once the list is mostly tombstones */
+            if ($n > $this->nconn * 2 + 1024) {
+                $this->sockList = [];
+                $k = 0;
+                while ($k < 65536) {
+                    if (iarr_get($this->socks, $k) != 0) { $this->sockList[] = $k; }
+                    $k = $k + 1;
+                }
+            }
+        }
+    }
+
+    public function close_fd(int $fd): void {
+        if (iarr_get($this->socks, $fd) != 0) { $this->nconn = $this->nconn - 1; }
+        iarr_set($this->socks, $fd, 0);
+        unset($this->bufs[$fd]);
+        iarr_set($this->lasts, $fd, 0);
+        unset($this->out[$fd]);
+        unset($this->closing[$fd]);
+        epoll_del($fd);
+        stream_close($fd);
+        /* room again: watch the listener */
+        if ($this->paused == 1 && $this->nconn < $this->shedAt) {
+            $this->paused = 0;
+            epoll_add($this->srv);
+        }
+    }
+
+    /* -------------------------------------------------------- read side */
+
+    public function read_fd(int $fd): void {
+        $chunk = stream_recv($fd, 4096);
+        if ($chunk == "") {
+            if (stream_eof($fd)) { $this->close_fd($fd); }
+            return;
+        }
+        /* $this->bufs[$fd] is "" (static) or a heap copy of a partial
+         * request; the concatenation lives in the request scope and is
+         * either consumed here or copied back with str_persist(). */
+        iarr_set($this->lasts, $fd, time());
+        $old = $this->bufs[$fd];
+        if ($old == "") {
+            /* the common case: a whole request in one recv, no copy at all */
+            $this->parse($fd, $chunk);
+        } else {
+            $buf = $old . $chunk;
+            str_free($old);
+            $this->bufs[$fd] = "";
+            $this->parse($fd, $buf);
+        }
+    }
+
+    public function parse(int $fd, string $in): void {
+        $buf = $in;
+        while (true) {
+            $he = strpos($buf, "\r\n\r\n");
+            if ($he === false) {
+                if (strlen($buf) > 131072) {
+                    $this->close_fd($fd);
+                    return;
+                }
+                if (strlen($buf) == 0) {
+                    $this->bufs[$fd] = "";
+                } else {
+                    $this->bufs[$fd] = str_persist($buf);
+                }
+                return;
+            }
+            /* request line: METHOD SP PATH SP VERSION — compare in place, no
+             * substrings for the hot GET routes */
+            $sp1 = strpos($buf, " ");
+            if ($sp1 === false || $sp1 > $he) { $this->close_fd($fd); return; }
+            $sp2 = strpos($buf, " ", $sp1 + 1);
+            if ($sp2 === false || $sp2 > $he) { $this->close_fd($fd); return; }
+            $ps = intval($sp1) + 1;
+            $pl = intval($sp2) - $ps;
+
+            if (str_at_eq($buf, 0, 3, "GET")) {
+                if ($pl == 5 && str_at_eq($buf, $ps, 5, "/feed")) {
+                    $this->on_feed($fd);
+                } else if ($pl == 7 && str_at_eq($buf, $ps, 7, "/health")) {
+                    $this->on_health($fd);
+                } else if ($pl > 7 && str_at_eq($buf, $ps, 6, "/posts") && $buf[$ps + 6] == "/") {
+                    $this->on_post($fd, substr($buf, $ps + 7, $pl - 7));
+                } else {
+                    $this->send_json($fd, 404, '{"error":"not found"}');
+                }
+                if (!(iarr_get($this->socks, $fd) != 0)) { return; }
+                $buf = substr($buf, $he + 4);
+                if ($buf == "") { return; }
+                continue;
+            }
+
+            $head = substr($buf, 0, $he);
+            $method = substr($buf, 0, $sp1);
+            $path = substr($buf, $ps, $pl);
+
+            $cl = 0;
+            $auth = "";
+            if (true) {
+                $lc = strtolower($head);
+                $k = strpos($lc, "\r\ncontent-length:");
+                if ($k !== false) {
+                    $e = strpos($lc, "\r\n", $k + 2);
+                    if ($e === false) { $e = strlen($head); }
+                    $cl = intval(substr($head, $k + 17, $e - ($k + 17)));
+                }
+                $ak = strpos($lc, "\r\nauthorization:");
+                if ($ak !== false) {
+                    $ae = strpos($lc, "\r\n", $ak + 2);
+                    if ($ae === false) { $ae = strlen($head); }
+                    $auth = trim(substr($head, $ak + 16, $ae - ($ak + 16)));
+                }
+            }
+            if ($cl < 0 || $cl > 1048576) {
+                $this->close_fd($fd);
+                return;
+            }
+
+            $start = $he + 4;
+            if (strlen($buf) - $start < $cl) {
+                $this->bufs[$fd] = str_persist($buf);
+                return;
+            }
+            $body = "";
+            if ($cl > 0) { $body = substr($buf, $start, $cl); }
+            $buf = substr($buf, $start + $cl);
+
+            $this->dispatch($fd, $method, $path, $auth, $body);
+            if (!(iarr_get($this->socks, $fd) != 0)) { return; }
+        }
+    }
+
+    /* --------------------------------------------------------- routing */
+
+    public function dispatch(int $fd, string $method, string $path, string $auth, string $body): void {
+        if ($path == "/health") { $this->on_health($fd); return; }
+        if ($path == "/feed") { $this->on_feed($fd); return; }
+        if ($path == "/posts") {
+            if ($method == "POST") { $this->on_create($fd, $auth, $body); return; }
+            $this->send_json($fd, 404, '{"error":"not found"}');
+            return;
+        }
+        if (str_starts_with($path, "/posts/")) {
+            $rest = substr($path, 7);
+            $n = strlen($rest);
+            if ($n > 5 && str_ends_with($rest, "/like")) {
+                if ($method == "POST") {
+                    $this->on_like($fd, $auth, substr($rest, 0, $n - 5));
+                    return;
+                }
+            }
+            $this->on_post($fd, $rest);
+            return;
+        }
+        $this->send_json($fd, 404, '{"error":"not found"}');
+    }
+
+    public function on_feed(int $fd): void {
+        if ($this->btPosts != 0 && $this->btLikes != 0 && $this->btUsers != 0) {
+            $this->on_feed_bt($fd);
+            return;
+        }
+        $rc = sqlite_step($this->feed);
+        if ($rc == 100) {
+            $b = sqlite_column_text($this->feed, 0);
+        } else {
+            $b = '{"posts":[]}';
+        }
+        sqlite_reset($this->feed);
+        $this->send_json($fd, 200, $b);
+    }
+
+    /* The feed from SQLite's B-tree cursors instead of SQL. Both walks run at
+     * once: posts descend the rowid index, the likes index descends in the
+     * same (post_id) order, so the likes of the post being emitted are always
+     * the next index entries. Records are decoded with raw pointers and
+     * escaped straight into the response, so a row allocates nothing. */
+    public function on_feed_bt(int $fd): void {
+        $sb = sb_new();
+        sb_reserve($sb, 12288);
+        sb_put($sb, '{"posts":[');
+
+        $lr = bt_last($this->btLikes);
+        $lpid = -1;          /* -1: the current like entry is not decoded yet */
+        $r = bt_last($this->btPosts);
+        $i = 0;
+        while ($r == 1 && $i < 20) {
+            $id = bt_rowid($this->btPosts);
+            $p = bt_payload_ptr($this->btPosts);
+            $uid = 0;
+            $bo = 0;
+            $bl = 0;
+            $co = 0;
+            $cl = 0;
+            unsafe {
+                $q = $p as *u8;
+                $hdr = *$q & 255;
+                /* byte 1 is the rowid alias serial type (always 0/NULL) */
+                $k = 2;
+                $st1 = *($q + $k) & 255;
+                $k = $k + 1;
+                $st2 = *($q + $k) & 255;
+                $k = $k + 1;
+                if ($st2 >= 128) { $st2 = (($st2 & 127) << 7) | (*($q + $k) & 255); $k = $k + 1; }
+                $st3 = *($q + $k) & 255;
+                /* serial types 8 and 9 are the constants 0 and 1 with no
+                 * payload; 1..4 store 1..4 bytes, 5 stores 6, 6 stores 8 */
+                $l1 = 0;
+                if ($st1 >= 1 && $st1 <= 4) { $l1 = $st1; }
+                else if ($st1 == 5) { $l1 = 6; }
+                else if ($st1 == 6 || $st1 == 7) { $l1 = 8; }
+                else if ($st1 == 9) { $uid = 1; }
+                $o1 = $hdr;
+                $bl = ($st2 - 13) >> 1;
+                $bo = $o1 + $l1;
+                $cl = ($st3 - 13) >> 1;
+                $co = $bo + $bl;
+                $j = 0;
+                while ($j < $l1) { $uid = ($uid << 8) | (*($q + $o1 + $j) & 255); $j = $j + 1; }
+            }
+
+            /* every like whose post id equals this one: they are contiguous */
+            $cnt = 0;
+            while ($lr == 1) {
+                if ($lpid < 0) {
+                    $lp = bt_payload_ptr($this->btLikes);
+                    $lpid = 0;
+                    unsafe {
+                        $q = $lp as *u8;
+                        $hdr = *$q & 255;
+                        $st0 = *($q + 1) & 255;
+                        $l0 = 0;
+                        if ($st0 >= 1 && $st0 <= 4) { $l0 = $st0; }
+                        else if ($st0 == 5) { $l0 = 6; }
+                        else if ($st0 == 6 || $st0 == 7) { $l0 = 8; }
+                        else if ($st0 == 9) { $lpid = 1; }
+                        $j = 0;
+                        while ($j < $l0) { $lpid = ($lpid << 8) | (*($q + $hdr + $j) & 255); $j = $j + 1; }
+                    }
+                }
+                if ($lpid != $id) { break; }
+                $cnt = $cnt + 1;
+                $lpid = -1;
+                $lr = bt_prev($this->btLikes);
+            }
+
+            $a = 0;
+            $al = 0;
+            if (bt_seek($this->btUsers, $uid) == 1) {
+                $up = bt_payload_ptr($this->btUsers);
+                unsafe {
+                    $q = $up as *u8;
+                    $hdr = *$q & 255;
+                    /* byte 1 is the rowid alias serial type */
+                    $st1 = *($q + 2) & 255;
+                    if ($st1 >= 128) { $st1 = (($st1 & 127) << 7) | (*($q + 3) & 255); }
+                    $al = ($st1 - 13) >> 1;
+                    $a = $up + $hdr;
+                }
+            }
+
+            if ($i > 0) { sb_put($sb, ","); }
+            sb_put($sb, '{"id":');
+            sb_int($sb, $id);
+            sb_put($sb, ',"body":');
+            sb_json($sb, $p + $bo, $bl);
+            sb_put($sb, ',"created_at":');
+            sb_json($sb, $p + $co, $cl);
+            sb_put($sb, ',"author":');
+            sb_json($sb, $a, $al);
+            sb_put($sb, ',"like_count":');
+            sb_int($sb, $cnt);
+            sb_put($sb, "}");
+            $i = $i + 1;
+            $r = bt_prev($this->btPosts);
+        }
+        sb_put($sb, "]}");
+        $body = sb_take($sb);
+        $this->send_json($fd, 200, $body);
+    }
+
+    /* One post through the same cursors the feed uses: a rowid seek in posts,
+     * a rowid seek in users, and the like count from the index. The record is
+     * decoded and escaped in place, like a feed row. */
+    public function on_post_bt(int $fd, string $ids): void {
+        $id = $this->parse_id($ids);
+        if ($id <= 0) {
+            $this->send_json($fd, 400, '{"error":"invalid post id"}');
+            return;
+        }
+        if (bt_seek($this->btPosts, $id) != 1) {
+            $this->send_json($fd, 404, '{"error":"post not found"}');
+            return;
+        }
+        $p = bt_payload_ptr($this->btPosts);
+        $uid = 0;
+        $bo = 0;
+        $bl = 0;
+        $co = 0;
+        $cl = 0;
+        unsafe {
+            $q = $p as *u8;
+            $hdr = *$q & 255;
+            /* byte 1 is the rowid alias serial type (always 0/NULL) */
+            $k = 2;
+            $st1 = *($q + $k) & 255;
+            $k = $k + 1;
+            $st2 = *($q + $k) & 255;
+            $k = $k + 1;
+            if ($st2 >= 128) { $st2 = (($st2 & 127) << 7) | (*($q + $k) & 255); $k = $k + 1; }
+            $st3 = *($q + $k) & 255;
+            $l1 = 0;
+            if ($st1 >= 1 && $st1 <= 4) { $l1 = $st1; }
+            else if ($st1 == 5) { $l1 = 6; }
+            else if ($st1 == 6 || $st1 == 7) { $l1 = 8; }
+            else if ($st1 == 9) { $uid = 1; }
+            $o1 = $hdr;
+            $bl = ($st2 - 13) >> 1;
+            $bo = $o1 + $l1;
+            $cl = ($st3 - 13) >> 1;
+            $co = $bo + $bl;
+            $j = 0;
+            while ($j < $l1) { $uid = ($uid << 8) | (*($q + $o1 + $j) & 255); $j = $j + 1; }
+        }
+        $a = 0;
+        $al = 0;
+        if (bt_seek($this->btUsers, $uid) == 1) {
+            $up = bt_payload_ptr($this->btUsers);
+            unsafe {
+                $q = $up as *u8;
+                $hdr = *$q & 255;
+                $st1 = *($q + 2) & 255;
+                if ($st1 >= 128) { $st1 = (($st1 & 127) << 7) | (*($q + 3) & 255); }
+                $al = ($st1 - 13) >> 1;
+                $a = $up + $hdr;
+            }
+        }
+        /* like_count from the index itself: seek to the post's range and
+         * walk the matching entries backwards. The SQL count runs the VDBE
+         * and measured several microseconds per request. */
+        $n = -1;
+        if ($this->btLikes != 0) { $n = bt_count_key($this->btLikes, $id); }
+        if ($n < 0) {
+            sqlite_bind_int($this->likecnt, 1, $id);
+            $n = 0;
+            if (sqlite_step($this->likecnt) == 100) {
+                $n = sqlite_column_int($this->likecnt, 0);
+            }
+            sqlite_reset($this->likecnt);
+            sqlite_clear_bindings($this->likecnt);
+        }
+
+        $sb = sb_new();
+        sb_reserve($sb, 1024);
+        sb_put($sb, '{"post":{"id":');
+        sb_int($sb, $id);
+        sb_put($sb, ',"body":');
+        sb_json($sb, $p + $bo, $bl);
+        sb_put($sb, ',"created_at":');
+        sb_json($sb, $p + $co, $cl);
+        sb_put($sb, ',"author":');
+        sb_json($sb, $a, $al);
+        sb_put($sb, ',"like_count":');
+        sb_int($sb, $n);
+        sb_put($sb, "}}");
+        $this->send_json($fd, 200, sb_take($sb));
+    }
+
+    public function on_post(int $fd, string $ids): void {
+        if ($this->btPosts != 0 && $this->btUsers != 0 && $this->likecnt != 0) {
+            $this->on_post_bt($fd, $ids);
+            return;
+        }
+        $id = $this->parse_id($ids);
+        if ($id <= 0) {
+            $this->send_json($fd, 400, '{"error":"invalid post id"}');
+            return;
+        }
+        sqlite_bind_int($this->post, 1, $id);
+        $rc = sqlite_step($this->post);
+        if ($rc == 100) {
+            $b = sqlite_column_text($this->post, 0);
+            sqlite_reset($this->post);
+            sqlite_clear_bindings($this->post);
+            $this->send_json($fd, 200, $b);
+        } else {
+            sqlite_reset($this->post);
+            sqlite_clear_bindings($this->post);
+            $this->send_json($fd, 404, '{"error":"post not found"}');
+        }
+    }
+
+    public function on_health(int $fd): void {
+        $rc = sqlite_step($this->health);
+        if ($rc == 100) {
+            sqlite_reset($this->health);
+            $b = '{"status":"ok","db":"ok","uptime_s":' . (time() - $this->start) . '}';
+            $this->send_json($fd, 200, $b);
+        } else {
+            $e = sqlite_errmsg($this->db);
+            sqlite_reset($this->health);
+            $b = '{"status":"degraded","db":"unreachable","error":' . json_encode($e) . '}';
+            $this->send_json($fd, 503, $b);
+        }
+    }
+
+    public function on_create(int $fd, string $auth, string $body): void {
+        $a = $this->authenticate($auth);
+        if ($a[0] == 1) { arr_free($a); $this->send_json($fd, 401, '{"error":"missing bearer token"}'); return; }
+        if ($a[0] == 2) { arr_free($a); $this->send_json($fd, 401, '{"error":"invalid or expired token"}'); return; }
+        if ($a[0] == 3) { arr_free($a); $this->send_json($fd, 401, '{"error":"invalid token payload"}'); return; }
+        $uid = $a[1];
+        $uname = $a[2];
+        arr_free($a);
+
+        $j = new Json($body);
+        if (!$j->parse()) {
+            $this->send_json($fd, 400, '{"error":"malformed JSON body"}');
+            return;
+        }
+        $v = $j->root;
+        if (!is_array($v) || !isset($v["body"]) || !is_string($v["body"])) {
+            arr_free($v);
+            $this->send_json($fd, 400, '{"error":"body is required"}');
+            return;
+        }
+        $text = trim($v["body"]);
+        arr_free($v);
+        if ($text == "") {
+            $this->send_json($fd, 400, '{"error":"body is required"}');
+            return;
+        }
+        if ($this->cp_len($text) > 500) {
+            $this->send_json($fd, 400, '{"error":"body must be at most 500 characters"}');
+            return;
+        }
+        $r = [];
+        $r["kind"] = 1;
+        $r["fd"] = $fd;
+        $r["code"] = 0;
+        $r["body"] = "";
+        $r["uid"] = $uid;
+        $r["pid"] = 0;
+        $r["text"] = $text;
+        $r["name"] = $uname;
+        $this->pending[] = $r;
+    }
+
+    public function on_like(int $fd, string $auth, string $ids): void {
+        $a = $this->authenticate($auth);
+        if ($a[0] == 1) { arr_free($a); $this->send_json($fd, 401, '{"error":"missing bearer token"}'); return; }
+        if ($a[0] == 2) { arr_free($a); $this->send_json($fd, 401, '{"error":"invalid or expired token"}'); return; }
+        if ($a[0] == 3) { arr_free($a); $this->send_json($fd, 401, '{"error":"invalid token payload"}'); return; }
+        $uid = $a[1];
+        arr_free($a);
+
+        $id = $this->parse_id($ids);
+        if ($id <= 0) {
+            $this->send_json($fd, 400, '{"error":"invalid post id"}');
+            return;
+        }
+        $r = [];
+        $r["kind"] = 2;
+        $r["fd"] = $fd;
+        $r["code"] = 0;
+        $r["body"] = "";
+        $r["uid"] = $uid;
+        $r["pid"] = $id;
+        $r["text"] = "";
+        $r["name"] = "";
+        $this->pending[] = $r;
+    }
+
+    /* --------------------------------------------------------- auth */
+
+    /* returns [0, uid, username] | [1] missing | [2] bad token | [3] bad payload */
+    public function authenticate(string $hdr) {
+        if ($hdr == "" || strlen($hdr) < 7) { return [1]; }
+        if (strtolower(substr($hdr, 0, 7)) != "bearer ") { return [1]; }
+        $tok = trim(substr($hdr, 7));
+        if ($tok == "") { return [1]; }
+
+        /* split into header.payload.signature without building an array */
+        $p1 = strpos($tok, ".");
+        if ($p1 === false) { return [2]; }
+        $p2 = strpos($tok, ".", $p1 + 1);
+        if ($p2 === false) { return [2]; }
+        if (strpos($tok, ".", $p2 + 1) !== false) { return [2]; }
+
+        $h64 = substr($tok, 0, $p1);
+        $p64 = substr($tok, $p1 + 1, $p2 - $p1 - 1);
+        $s64 = substr($tok, $p2 + 1);
+
+        /* the header is a flat object: read "alg" directly instead of
+         * decoding it into an array */
+        if ($this->json_str($this->b64url($h64), "alg") != "HS256") { return [2]; }
+
+        $sig = $this->b64url($s64);
+        $mac = hash_hmac("sha256", $h64 . "." . $p64, $this->secret, true);
+        if (!hash_equals($mac, $sig)) { return [2]; }
+
+        /* same for the payload */
+        $pj = $this->b64url($p64);
+        $exp = $this->json_num($pj, "exp");
+        if ($exp < 0) { return [2]; }
+        if ($exp < time()) { return [2]; }
+
+        $sub = $this->json_str($pj, "sub");
+        if ($sub == "") { return [3]; }
+        $uid = $this->parse_id($sub);
+        if ($uid <= 0) { return [3]; }
+
+        $name = $this->json_str($pj, "username");
+        if ($name == "") { return [3]; }
+        return [0, $uid, $name];
+    }
+
+    /* string value of "key" in a flat JSON object, "" when absent or not a
+     * string. One strpos scan and one substr: building the value character by
+     * character reallocated the string per byte and dominated the auth cost. */
+    public function json_str(string $j, string $key): string {
+        $k = "\"" . $key . "\"";
+        $p = strpos($j, $k);
+        if ($p === false) { return ""; }
+        $c = strpos($j, ":", intval($p) + strlen($k));
+        if ($c === false) { return ""; }
+        $q = strpos($j, "\"", intval($c) + 1);
+        if ($q === false) { return ""; }
+        $e = strpos($j, "\"", intval($q) + 1);
+        if ($e === false) { return ""; }
+        $v = substr($j, intval($q) + 1, intval($e) - intval($q) - 1);
+        if (strpos($v, chr(92)) === false) { return $v; }
+        /* escaped value: unescape into a new string */
+        $out = "";
+        $i = 0;
+        $n = strlen($v);
+        while ($i < $n) {
+            $ch = $v[$i];
+            if ($ch == chr(92) && $i + 1 < $n) {
+                $i = $i + 1;
+                $out .= $v[$i];
+            } else {
+                $out .= $ch;
+            }
+            $i = $i + 1;
+        }
+        return $out;
+    }
+
+    /* integer value of "key", -1 when absent or not a number */
+    public function json_num(string $j, string $key) {
+        $n = strlen($j);
+        $k = "\"" . $key . "\"";
+        $p = strpos($j, $k);
+        if ($p === false) { return -1; }
+        $i = intval($p) + strlen($k);
+        while ($i < $n && $j[$i] != ":") {
+            $c = $j[$i];
+            if ($c != " " && $c != "\t" && $c != "\n" && $c != "\r") { return -1; }
+            $i++;
+        }
+        if ($i >= $n) { return -1; }
+        $i++;
+        while ($i < $n) {
+            $c = $j[$i];
+            if ($c != " " && $c != "\t" && $c != "\n" && $c != "\r") { break; }
+            $i++;
+        }
+        $neg = false;
+        if ($i < $n && $j[$i] == "-") { $neg = true; $i++; }
+        $v = 0;
+        $digits = 0;
+        while ($i < $n) {
+            $c = $j[$i];
+            if ($c < "0" || $c > "9") { break; }
+            $v = $v * 10 + (ord($c) - 48);
+            $digits++;
+            $i++;
+        }
+        if ($digits == 0) { return -1; }
+        return $neg ? -$v : $v;
+    }
+
+    public function b64url(string $s): string {
+        /* base64url is decoded natively: '-' and '_' are part of the
+         * alphabet and missing padding is fine, so no replacement strings. */
+        return base64_decode($s);
+    }
+
+    public function parse_id($s) {
+        /* str_to_int() does the digit validation and range check in C; the
+         * per-character loop here measured ~0.5 us per id before. */
+        return str_to_int($s);
+    }
+
+    public function cp_len(string $s): int {
+        $n = strlen($s);
+        $c = 0;
+        for ($i = 0; $i < $n; $i++) {
+            if ((ord($s[$i]) & 192) != 128) { $c = $c + 1; }
+        }
+        return $c;
+    }
+
+    /* -------------------------------------------------- write + commit */
+
+    public function execute_writes(): void {
+        $n = count($this->pending);
+        if ($n == 0) { return; }
+
+        if (!sqlite_exec($this->db, "BEGIN IMMEDIATE")) {
+            $this->fail_writes();
+            $this->flush();
+            return;
+        }
+
+        $ok = true;
+        $i = 0;
+        while ($i < $n) {
+            $r = $this->pending[$i];
+            if ($r["kind"] == 1) {
+                sqlite_bind_int($this->insPost, 1, $r["uid"]);
+                sqlite_bind_text($this->insPost, 2, $r["text"]);
+                $rc = sqlite_step($this->insPost);
+                if ($rc != 100) { $ok = false; break; }
+                $pid = sqlite_column_int($this->insPost, 0);
+                $cat = sqlite_column_text($this->insPost, 1);
+                sqlite_step($this->insPost);
+                sqlite_reset($this->insPost);
+                sqlite_clear_bindings($this->insPost);
+                /* build the body here instead of asking SQLite's JSON
+                 * functions to format it inside the statement */
+                $sb = sb_new();
+                sb_reserve($sb, 256);
+                sb_put($sb, '{"post":{"id":');
+                sb_int($sb, $pid);
+                sb_put($sb, ',"body":');
+                sb_json_str($sb, $r["text"]);
+                sb_put($sb, ',"created_at":');
+                sb_json_str($sb, $cat);
+                sb_put($sb, ',"author":');
+                sb_json_str($sb, $r["name"]);
+                sb_put($sb, ',"like_count":0}}');
+                $r["body"] = sb_take($sb);
+                $r["code"] = 201;
+                $this->pending[$i] = $r;
+            } else if ($r["kind"] == 2) {
+                /* One statement for the common case: insert only when the
+                 * post exists. changes() == 0 then means "already liked" or
+                 * "no such post", and only that case pays for a lookup. */
+                sqlite_bind_int($this->insLike, 1, $r["uid"]);
+                sqlite_bind_int($this->insLike, 2, $r["pid"]);
+                $rc = sqlite_step($this->insLike);
+                $ch = sqlite_changes($this->db);
+                sqlite_reset($this->insLike);
+                sqlite_clear_bindings($this->insLike);
+                if ($rc != 101 && $rc != 100) { $ok = false; break; }
+                if ($ch > 0) {
+                    $r["code"] = 201;
+                    $r["body"] = '{"liked":true,"already_liked":false,"post_id":' . $r["pid"] . '}';
+                } else {
+                    sqlite_bind_int($this->hasPost, 1, $r["pid"]);
+                    $hc = sqlite_step($this->hasPost);
+                    sqlite_reset($this->hasPost);
+                    sqlite_clear_bindings($this->hasPost);
+                    if ($hc != 100) {
+                        $r["code"] = 404;
+                        $r["body"] = '{"error":"post not found"}';
+                    } else {
+                        $r["code"] = 200;
+                        $r["body"] = '{"liked":true,"already_liked":true,"post_id":' . $r["pid"] . '}';
+                    }
+                }
+                $this->pending[$i] = $r;
+            }
+            $i = $i + 1;
+        }
+
+        if ($ok && !sqlite_exec($this->db, "COMMIT")) { $ok = false; }
+        if (!$ok) {
+            sqlite_exec($this->db, "ROLLBACK");
+            $this->fail_writes();
+        }
+        $this->flush();
+    }
+
+    public function fail_writes(): void {
+        $i = 0;
+        $n = count($this->pending);
+        while ($i < $n) {
+            $r = $this->pending[$i];
+            $r["code"] = 500;
+            $r["body"] = '{"error":"internal server error"}';
+            $this->pending[$i] = $r;
+            $i = $i + 1;
+        }
+    }
+
+    public function flush(): void {
+        foreach ($this->pending as $r) {
+            $this->write_response($r["fd"], $r["code"], $r["body"]);
+            arr_free($r);
+        }
+        arr_clear($this->pending);
+    }
+
+    /* ------------------------------------------------------ send side */
+
+    public function send_json(int $fd, int $code, string $body): void {
+        $this->write_response($fd, $code, $body);
+    }
+
+    public function write_response(int $fd, int $code, string $body): void {
+        /* Direct mode holds one fd per user. Shed only when the process is
+         * really running out of descriptors: the limit is read once at
+         * startup (getrlimit), so a box with a higher LimitNOFILE keeps
+         * every connection instead of closing one per response. */
+        $shed = $this->nconn >= $this->shedAt;
+        $blen = strlen($body);
+        /* The status line and the fixed headers are prebuilt per code, so a
+         * response costs three concatenations instead of ten. */
+        $h = $this->hdr[$code] . $blen . ($shed
+            ? "\r\nConnection: close\r\n\r\n"
+            : "\r\nConnection: keep-alive\r\n\r\n");
+        $total = strlen($h) + $blen;
+        if (isset($this->out[$fd])) {
+            /* A previous response is still being written: queue behind it so a
+             * pipelining client does not lose one. Cap the queue: a peer that
+             * pipelines megabytes without reading must not grow the process. */
+            if (strlen($this->out[$fd]) > 1048576) { $this->close_fd($fd); return; }
+            $this->out[$fd] = $this->out[$fd] . $h . $body;
+            return;
+        }
+        $sent = stream_send2_nb($fd, $h, $body);
+        if ($sent == -2) { $this->close_fd($fd); return; }
+        if ($sent < 0) { $sent = 0; }   /* EAGAIN: buffer the whole response */
+        if ($sent == $total) {
+            if ($shed) { $this->close_fd($fd); }
+            return;
+        }
+        $data = $h . $body;
+        /* The socket buffer is full: keep the rest and let epoll report the
+         * socket writable. Sleeping here would stall every other connection. */
+        $this->out[$fd] = substr($data, $sent);
+        if ($shed) { $this->closing[$fd] = 1; }
+        if (!epoll_mod($fd, 3)) { $this->close_fd($fd); }
+    }
+}
+
+/* ---------------------------------------------------------------- main */
+
+$port = 3000;
+$p = getenv("PORT");
+if ($p !== false && $p != "") { $port = intval($p); }
+
+$host = "0.0.0.0";
+$h = getenv("HOST");
+if ($h !== false && $h != "") { $host = $h; }
+
+$server = new Server();
+if (!$server->open($host, $port)) { exit(1); }
+$server->run();

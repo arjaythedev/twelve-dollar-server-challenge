@@ -44,15 +44,22 @@ def main():
     logs = args.output.parent / (args.output.stem + "-logs")
     logs.mkdir(exist_ok=True)
     cgroup_path = Path("/sys/fs/cgroup" + Path("/proc/self/cgroup").read_text().strip().split("::")[1])
+    variant_info = {}
+    for label, executable in variants.items():
+        application = executable.parent / "FeedApi.dll"
+        if not application.is_file():
+            application = executable
+        variant_info[label] = {
+            "directory": str(executable.parent),
+            "application_file": application.name,
+            "application_sha256": hashlib.sha256(application.read_bytes()).hexdigest(),
+            "publish_bytes": sum(path.stat().st_size for path in executable.parent.rglob("*") if path.is_file())}
     report = {
         "created_utc": datetime.now(timezone.utc).isoformat(),
         "method": "Alternating fresh processes, fresh seed copies, warm OS caches, persistent HTTP connection after first health response.",
         "limits": {name: (cgroup_path / name).read_text().strip()
                    for name in ("cpu.max", "memory.max", "memory.swap.max")},
-        "variants": {label: {"directory": str(exe.parent),
-                             "application_sha256": hashlib.sha256((exe.parent / "FeedApi.dll").read_bytes()).hexdigest(),
-                             "publish_bytes": sum(path.stat().st_size for path in exe.parent.rglob("*") if path.is_file())}
-                     for label, exe in variants.items()},
+        "variants": variant_info,
         "samples": [], "summary": {}
     }
 

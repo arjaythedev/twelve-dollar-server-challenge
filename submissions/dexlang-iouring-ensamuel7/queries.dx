@@ -1,0 +1,52 @@
+import "github.com/ensamuel7/dex-modules/dexqu" as "q"
+
+fn posts(): q.Select {
+    let likes: q.Select = q.from("likes l")
+        .select([q.countAll()])
+        .where(q.col("l.post_id").eq(q.col("p.id")))
+
+    return q.from("posts p")
+        .select([q.col("p.id"), q.col("p.body"), q.col("p.created_at"), q.col("u.username"), q.sub(likes)])
+        .join("users u", q.col("u.id").eq(q.col("p.user_id")))
+}
+
+fn feed(): string throws q.QueryError {
+    return posts()
+        .orderBy("p.created_at DESC")
+        .orderBy("p.id DESC")
+        .limitExpr(q.raw("20"))
+        .build(q.Dialect.SQLite).sql
+}
+
+fn onePost(): string throws q.QueryError {
+    return posts().where(q.col("p.id").eq(q.param("id"))).build(q.Dialect.SQLite).sql
+}
+
+fn insertPost(): string throws q.QueryError {
+    return q.insertInto("posts")
+        .columns(["user_id", "body"])
+        .values([q.param("user_id"), q.param("body")])
+        .returning(["id", "created_at"])
+        .build(q.Dialect.SQLite).sql
+}
+
+fn postExists(): string throws q.QueryError {
+    return q.select([q.raw("1")])
+        .from("posts")
+        .where(q.col("id").eq(q.param("id")))
+        .build(q.Dialect.SQLite).sql
+}
+
+fn like(): string throws q.QueryError {
+    return q.insertInto("likes")
+        .columns(["user_id", "post_id"])
+        .values([q.param("user_id"), q.param("post_id")])
+        .onConflict(["user_id", "post_id"])
+        .doNothing()
+        .returning(["post_id"])
+        .build(q.Dialect.SQLite).sql
+}
+
+fn ping(): string throws q.QueryError {
+    return q.select([q.raw("1")]).build(q.Dialect.SQLite).sql
+}

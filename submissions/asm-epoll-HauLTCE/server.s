@@ -1,5 +1,5 @@
 # 12$ server challenge - x86_64 linux asm (gas, intel syntax)
-# gcc -no-pie -O3 server.s -o bin/server -lsqlite3 -lcrypto
+# gcc -no-pie -O3 -march=native server.s -o bin/server -lsqlite3 -lcrypto
 
 .intel_syntax noprefix
 .global main
@@ -18,6 +18,7 @@
 .extern listen
 
 .extern sqlite3_open_v2
+.extern sqlite3_close_v2
 .extern sqlite3_exec
 .extern sqlite3_prepare_v3
 .extern sqlite3_reset
@@ -26,36 +27,42 @@
 .extern sqlite3_step
 .extern sqlite3_column_int64
 .extern sqlite3_column_text
+.extern sqlite3_column_bytes
 .extern sqlite3_changes
 
-.extern EVP_sha256
-.extern HMAC
+.extern SHA256_Init
+.extern SHA256_Update
+.extern SHA256_Final
 .extern CRYPTO_memcmp
 
 .equ SYS_READ,               0
 .equ SYS_WRITE,              1
 .equ SYS_CLOSE,              3
+.equ SYS_FORK,               57
+.equ SYS_GETRLIMIT,          97
 .equ SYS_EPOLL_WAIT,         232
 .equ SYS_EPOLL_CTL,          233
 .equ SYS_ACCEPT4,            288
+.equ SYS_EVENTFD2,           290
 .equ SYS_EPOLL_CREATE1,      291
 
+.equ RLIMIT_NOFILE,          7
 .equ AF_INET,                2
 .equ SOCK_STREAM_NONBLOCK,   0x80801
 .equ SOCK_NONBLOCK_CLOEXEC,  0x80800
 .equ SOL_SOCKET,             1
 .equ SO_REUSEADDR,           2
 .equ SO_REUSEPORT,           15
-.equ IPPROTO_TCP,            6
-.equ TCP_NODELAY,            1
 .equ EPOLL_CTL_ADD,          1
 .equ EPOLL_CTL_DEL,          2
 .equ EPOLLIN,                1
 .equ MAX_EVENTS,             512
-.equ MAX_BATCH,              512
-.equ KEEP_ALIVE_FD_LIMIT,    65000
+.equ MAX_BATCH,              256
+.equ DEF_FD_LIMIT,           63500
+.equ MAX_WORKERS,            6
 .equ SQLITE_OPEN_RW_NOMUTEX, 0x00008002
 .equ SQLITE_PREPARE_PERSIST, 1
+.equ SQLITE_BUSY,            5
 .equ SQLITE_ROW,             100
 .equ SQLITE_DONE,            101
 
@@ -74,42 +81,70 @@ env_host:           .asciz "HOST"
 def_host:           .asciz "0.0.0.0"
 env_port:           .asciz "PORT"
 def_port:           .asciz "80"
+env_fd_limit:       .asciz "FD_LIMIT"
 
 msg_up:             .ascii "[asm] listening\n"
 .equ LEN_MSG_UP,    . - msg_up
 msg_fatal:          .ascii "fatal: init failed\n"
 .equ LEN_MSG_FATAL, . - msg_fatal
 
-# warm posts index last so likes scan doesnt evict posts from the 16mb cache
-sql_pragmas:
+# worker 0 runs full index warmup; standby workers run fast pragma init when woken up
+sql_pragmas_w0:
     .ascii "PRAGMA journal_mode = WAL;"
+    .ascii "PRAGMA busy_timeout = 5000;"
     .ascii "PRAGMA synchronous = NORMAL;"
     .ascii "PRAGMA temp_store = MEMORY;"
     .ascii "PRAGMA mmap_size = 1073741824;"
     .ascii "PRAGMA cache_size = -16000;"
     .ascii "PRAGMA wal_autocheckpoint = 0;"
     .ascii "PRAGMA journal_size_limit = 67108864;"
-    .ascii "PRAGMA busy_timeout = 5000;"
     .ascii "SELECT count(*) FROM likes INDEXED BY likes_post_id_idx;"
     .ascii "SELECT count(*) FROM users;"
     .asciz "SELECT count(*) FROM posts INDEXED BY posts_created_at_id_idx;"
 
+sql_pragmas_wn:
+    .ascii "PRAGMA busy_timeout = 5000;"
+    .ascii "PRAGMA synchronous = NORMAL;"
+    .ascii "PRAGMA temp_store = MEMORY;"
+    .ascii "PRAGMA mmap_size = 536870912;"
+    .ascii "PRAGMA cache_size = -4000;"
+    .ascii "PRAGMA wal_autocheckpoint = 0;"
+    .asciz "PRAGMA journal_size_limit = 67108864;"
+
+sql_busy_zero:
+    .asciz "PRAGMA busy_timeout = 0;"
+
 sql_health:
     .asciz "SELECT 1"
 
-sql_feed:
-    .ascii "SELECT p.id, p.body, p.created_at, "
-    .ascii "(SELECT username FROM users u WHERE u.id = p.user_id), "
+sql_feed_ids:
+    .asciz "SELECT id FROM posts INDEXED BY posts_created_at_id_idx ORDER BY created_at DESC, id DESC LIMIT 20"
+
+sql_feed_likes:
+    .asciz "SELECT post_id FROM likes INDEXED BY likes_post_id_idx WHERE post_id >= ?1 AND post_id <= ?2"
+
+sql_feed_range:
+    .asciz "SELECT p.id, p.body, p.created_at, u.username FROM posts p JOIN users u ON u.id = p.user_id WHERE p.id >= ?1 AND p.id <= ?2 ORDER BY p.id DESC"
+
+sql_feed_slow:
+    .ascii "SELECT p.id, p.body, p.created_at, u.username, "
     .ascii "(SELECT count(*) FROM likes l WHERE l.post_id = p.id) "
-    .asciz "FROM posts p ORDER BY p.created_at DESC, p.id DESC LIMIT 20"
+    .ascii "FROM posts p JOIN users u ON u.id = p.user_id "
+    .asciz "ORDER BY p.created_at DESC, p.id DESC LIMIT 20"
 
 sql_get_post:
-    .ascii "SELECT p.id, p.body, p.created_at, "
-    .ascii "(SELECT username FROM users u WHERE u.id = p.user_id), "
+    .ascii "SELECT p.id, p.body, p.created_at, u.username, "
     .ascii "(SELECT count(*) FROM likes l WHERE l.post_id = p.id) "
-    .asciz "FROM posts p WHERE p.id = ?1"
+    .asciz "FROM posts p JOIN users u ON u.id = p.user_id WHERE p.id = ?1"
 
-# lazy way out for utf8 char count + whitespace trim on POST /posts
+sql_chk_like:
+    .ascii "SELECT CASE "
+    .ascii "  WHEN EXISTS (SELECT 1 FROM likes WHERE user_id = ?1 AND post_id = ?2) THEN 2 "
+    .ascii "  WHEN EXISTS (SELECT 1 FROM posts WHERE id = ?2) THEN 1 "
+    .ascii "  ELSE 0 "
+    .asciz "END"
+
+# fallback for escaped/unicode/weird json on POST /posts
 sql_validate_body:
     .ascii "SELECT "
     .ascii "  CASE "
@@ -127,11 +162,8 @@ sql_validate_body:
 sql_insert_post:
     .asciz "INSERT INTO posts (user_id, body) VALUES (?1, ?2) RETURNING id, created_at"
 
-sql_post_exists:
-    .asciz "SELECT 1 FROM posts WHERE id = ?1"
-
 sql_insert_like:
-    .asciz "INSERT INTO likes (user_id, post_id) SELECT ?1, ?2 WHERE EXISTS (SELECT 1 FROM posts WHERE id = ?2) ON CONFLICT (user_id, post_id) DO NOTHING"
+    .asciz "INSERT INTO likes (user_id, post_id) VALUES (?1, ?2) ON CONFLICT (user_id, post_id) DO NOTHING"
 
 sql_begin_read:     .asciz "BEGIN"
 sql_begin:          .asciz "BEGIN IMMEDIATE"
@@ -140,16 +172,27 @@ sql_rollback:       .asciz "ROLLBACK"
 sql_ckpt:           .asciz "PRAGMA wal_checkpoint(PASSIVE)"
 
 err_not_found:      .asciz "{\"error\":\"not found\"}"
+.equ LEN_ERR_NF,    . - err_not_found - 1
 err_invalid_id:     .asciz "{\"error\":\"invalid post id\"}"
+.equ LEN_ERR_ID,    . - err_invalid_id - 1
 err_post_not_found: .asciz "{\"error\":\"post not found\"}"
+.equ LEN_ERR_PNF,   . - err_post_not_found - 1
 err_missing_token:  .asciz "{\"error\":\"missing bearer token\"}"
+.equ LEN_ERR_MTOK,  . - err_missing_token - 1
 err_invalid_token:  .asciz "{\"error\":\"invalid or expired token\"}"
+.equ LEN_ERR_ITOK,  . - err_invalid_token - 1
 err_invalid_pay:    .asciz "{\"error\":\"invalid token payload\"}"
+.equ LEN_ERR_IPAY,  . - err_invalid_pay - 1
 err_malformed_json: .asciz "{\"error\":\"malformed JSON body\"}"
+.equ LEN_ERR_MAL,   . - err_malformed_json - 1
 err_body_required:  .asciz "{\"error\":\"body is required\"}"
+.equ LEN_ERR_REQ,   . - err_body_required - 1
 err_body_too_long:  .asciz "{\"error\":\"body must be at most 500 characters\"}"
+.equ LEN_ERR_LONG,  . - err_body_too_long - 1
 err_internal:       .asciz "{\"error\":\"internal server error\"}"
+.equ LEN_ERR_INT,   . - err_internal - 1
 err_degraded:       .asciz "{\"status\":\"degraded\",\"db\":\"unreachable\",\"error\":\"db failed\"}"
+.equ LEN_ERR_DEG,   . - err_degraded - 1
 
 str_health_prefix:  .ascii "{\"status\":\"ok\",\"db\":\"ok\",\"uptime_s\":"
 .equ LEN_HEALTH_PFX, . - str_health_prefix
@@ -224,20 +267,31 @@ b64url_table:
 .align 64
 
 g_start_time:       .quad 0
+g_now_time:         .quad 0
+g_db_path:          .quad 0
 g_db:               .quad 0
 g_jwt_secret:       .quad 0
 g_jwt_secret_len:   .quad 0
 g_listen_fd:        .quad 0
 g_epoll_fd:         .quad 0
+g_fd_limit:         .quad 0
+g_worker_idx:       .quad 0
+g_next_efd:         .quad 0
+g_handed_off:       .quad 0
 g_in_tx:            .quad 0
+g_tick_evs:         .quad 0
 g_ckpt_counter:     .quad 0
+g_coalesced:        .quad 0
 
 g_stmt_health:      .quad 0
-g_stmt_feed:        .quad 0
+g_stmt_feed_ids:    .quad 0
+g_stmt_feed_likes:  .quad 0
+g_stmt_feed_range:  .quad 0
+g_stmt_feed_slow:   .quad 0
 g_stmt_get_post:    .quad 0
+g_stmt_chk_like:    .quad 0
 g_stmt_val_body:    .quad 0
 g_stmt_ins_post:    .quad 0
-g_stmt_post_exists: .quad 0
 g_stmt_ins_like:    .quad 0
 g_stmt_begin_read:  .quad 0
 g_stmt_begin:       .quad 0
@@ -248,23 +302,49 @@ g_stmt_ckpt:        .quad 0
 g_auth_uid:         .quad 0
 g_auth_username:    .space 256
 
+# pre-keyed HMAC-SHA256 contexts (112 bytes each) + working context
+.align 64
+g_hmac_ipad_ctx:    .space 128
+g_hmac_opad_ctx:    .space 128
+g_sha_work_ctx:     .space 128
+g_hmac_k_ipad:      .space 64
+g_hmac_k_opad:      .space 64
+
+# 32-slot like count array for contiguous 20-post range scan
+.align 64
+g_like_counts:      .space (32 * 8)
+
 g_sockaddr:         .space 16
 g_epoll_ev:         .space 16
 g_epoll_events:     .space (MAX_EVENTS * 12)
 g_req_buf:          .space 32768
 g_resp_buf:         .space 65536
+g_resp_200_buf:     .space 65536
 g_json_buf:         .space 65536
 g_num_tmp:          .space 32
 g_jwt_hdr_buf:      .space 2048
 g_jwt_pay_buf:      .space 4096
 g_jwt_sig_buf:      .space 256
 g_hmac_out:         .space 64
-g_hmac_len:         .long 0
 
 g_batch_count:      .quad 0
 g_batch_queue:      .space (MAX_BATCH * BATCH_ITEM_SIZE)
 
 .section .text
+
+# open shared read tx once per multi-event epoll batch
+ensure_read_tx:
+    cmp qword ptr [rip + g_in_tx], 0
+    jne .ert_done
+    cmp qword ptr [rip + g_tick_evs], 2
+    jl .ert_done
+    mov rdi, qword ptr [rip + g_stmt_begin_read]
+    call sqlite3_step
+    mov rdi, qword ptr [rip + g_stmt_begin_read]
+    call sqlite3_reset
+    mov qword ptr [rip + g_in_tx], 1
+.ert_done:
+    ret
 
 append_u64:
     mov rax, rsi
@@ -345,7 +425,7 @@ append_json_escaped:
 .esc_done:
     ret
 
-# only calls our own leaf helpers above, so r10/r11 survive
+# only calls leaf helpers above, so r10/r11 survive
 append_post_json:
     push rbx
     push r12
@@ -414,14 +494,12 @@ send_http_response:
     mov r10, rdx                    # body_ptr
     mov r11, rcx                    # body_len
 
-    # fuck it, anything past fd 65000 gets Connection: close so it never hit EMFILE
-    cmp r12d, KEEP_ALIVE_FD_LIMIT
+    cmp r12d, dword ptr [rip + g_fd_limit]
     jg .use_close_hdr
 
-    lea rsi, [rip + hdr_200_ka]
-    mov ecx, LEN_200_KA
     cmp eax, 200
-    je .do_hdr_cp
+    je .fast_200_ka
+
     lea rsi, [rip + hdr_201_ka]
     mov ecx, LEN_201_KA
     cmp eax, 201
@@ -445,6 +523,23 @@ send_http_response:
     lea rsi, [rip + hdr_500_ka]
     mov ecx, LEN_500_KA
     jmp .do_hdr_cp
+
+.fast_200_ka:
+    lea rdi, [rip + g_resp_200_buf + LEN_200_KA]
+    mov rsi, r11
+    call append_u64
+    mov dword ptr [rax], 0x0a0d0a0d
+    add rax, 4
+    lea rcx, [rip + g_resp_200_buf]
+    mov rbx, rax
+    sub rbx, rcx
+    mov rdi, rax
+    mov rsi, r10
+    mov rcx, r11
+    rep movsb
+    add rbx, r11
+    lea r10, [rip + g_resp_200_buf]
+    jmp .write_again
 
 .use_close_hdr:
     lea rsi, [rip + hdr_201_cl]
@@ -491,7 +586,7 @@ send_http_response:
     jmp .write_again
 
 .maybe_evict:
-    cmp r12d, KEEP_ALIVE_FD_LIMIT
+    cmp r12d, dword ptr [rip + g_fd_limit]
     jle .resp_out
     mov eax, SYS_EPOLL_CTL
     mov edi, dword ptr [rip + g_epoll_fd]
@@ -507,16 +602,6 @@ send_http_response:
     pop r12
     pop rbx
     ret
-
-send_cstr_response:
-    xor ecx, ecx
-1:
-    cmp byte ptr [rdx + rcx], 0
-    je 2f
-    inc rcx
-    jmp 1b
-2:
-    jmp send_http_response
 
 parse_positive_int:
     test rsi, rsi
@@ -555,7 +640,7 @@ parse_positive_int:
     mov rax, -1
     ret
 
-# keep bit count in cl and accum in r11d so it doesnt touch the stack in the loop
+# keep bit count in cl and accum in r11d so the loop never touches the stack
 base64url_decode:
     test rsi, rsi
     jle .b64_err
@@ -729,6 +814,71 @@ find_bearer_token:
     xor edx, edx
     ret
 
+# precompute SHA256 ipad/opad contexts from g_jwt_secret once at startup
+init_hmac_ctx:
+    push rbx
+    sub rsp, 16
+
+    mov rax, 0x3636363636363636
+    lea rdi, [rip + g_hmac_k_ipad]
+    mov ecx, 8
+    rep stosq
+
+    mov rax, 0x5c5c5c5c5c5c5c5c
+    lea rdi, [rip + g_hmac_k_opad]
+    mov ecx, 8
+    rep stosq
+
+    mov rsi, qword ptr [rip + g_jwt_secret]
+    mov rcx, qword ptr [rip + g_jwt_secret_len]
+    cmp rcx, 64
+    jle .xor_key
+
+    # RFC 2104: if secret > 64 bytes, hash it with SHA256 into 32 bytes first
+    lea rdi, [rip + g_sha_work_ctx]
+    call SHA256_Init
+    lea rdi, [rip + g_sha_work_ctx]
+    mov rsi, qword ptr [rip + g_jwt_secret]
+    mov rdx, qword ptr [rip + g_jwt_secret_len]
+    call SHA256_Update
+    lea rdi, [rip + g_hmac_out]
+    lea rsi, [rip + g_sha_work_ctx]
+    call SHA256_Final
+    lea rsi, [rip + g_hmac_out]
+    mov ecx, 32
+
+.xor_key:
+    lea r8, [rip + g_hmac_k_ipad]
+    lea r9, [rip + g_hmac_k_opad]
+    xor edx, edx
+1:
+    cmp rdx, rcx
+    jge 2f
+    movzx eax, byte ptr [rsi + rdx]
+    xor byte ptr [r8 + rdx], al
+    xor byte ptr [r9 + rdx], al
+    inc rdx
+    jmp 1b
+2:
+    lea rdi, [rip + g_hmac_ipad_ctx]
+    call SHA256_Init
+    lea rdi, [rip + g_hmac_ipad_ctx]
+    lea rsi, [rip + g_hmac_k_ipad]
+    mov edx, 64
+    call SHA256_Update
+
+    lea rdi, [rip + g_hmac_opad_ctx]
+    call SHA256_Init
+    lea rdi, [rip + g_hmac_opad_ctx]
+    lea rsi, [rip + g_hmac_k_opad]
+    mov edx, 64
+    call SHA256_Update
+
+    add rsp, 16
+    pop rbx
+    ret
+
+# verifies every token's HMAC-SHA256 signature + claims on every request using pre-keyed SHA256 contexts
 verify_jwt:
     push rbx
     push r12
@@ -791,18 +941,31 @@ verify_jwt:
     cmp rax, 32
     jne .jwt_bad
 
-    call EVP_sha256
-    mov rdi, rax
-    mov rsi, qword ptr [rip + g_jwt_secret]
-    mov edx, dword ptr [rip + g_jwt_secret_len]
-    mov rcx, r12
-    mov r8, r15
-    lea r9, [rip + g_hmac_out]
-    lea rax, [rip + g_hmac_len]
-    mov qword ptr [rsp], rax
-    call HMAC
-    test rax, rax
-    jz .jwt_bad
+    # inner hash: SHA256(k_ipad || header.payload)
+    lea rdi, [rip + g_sha_work_ctx]
+    lea rsi, [rip + g_hmac_ipad_ctx]
+    mov ecx, 14
+    rep movsq
+    lea rdi, [rip + g_sha_work_ctx]
+    mov rsi, r12
+    mov rdx, r15
+    call SHA256_Update
+    lea rdi, [rip + g_hmac_out]
+    lea rsi, [rip + g_sha_work_ctx]
+    call SHA256_Final
+
+    # outer hash: SHA256(k_opad || inner_hash)
+    lea rdi, [rip + g_sha_work_ctx]
+    lea rsi, [rip + g_hmac_opad_ctx]
+    mov ecx, 14
+    rep movsq
+    lea rdi, [rip + g_sha_work_ctx]
+    lea rsi, [rip + g_hmac_out]
+    mov edx, 32
+    call SHA256_Update
+    lea rdi, [rip + g_hmac_out]
+    lea rsi, [rip + g_sha_work_ctx]
+    call SHA256_Final
 
     lea rdi, [rip + g_hmac_out]
     lea rsi, [rip + g_jwt_sig_buf]
@@ -857,8 +1020,7 @@ verify_jwt:
     test rax, rax
     jle .jwt_bad
     mov rbx, rax
-    xor edi, edi
-    call time
+    mov rax, qword ptr [rip + g_now_time]
     cmp rbx, rax
     jle .jwt_bad
 
@@ -911,7 +1073,7 @@ verify_jwt:
     lea rdi, [rip + g_auth_username]
     xor ecx, ecx
 6:
-    cmp ecx, 250
+    cmp ecx, 60
     jge .jwt_bad_pay
     movzx edx, byte ptr [rax + rcx]
     test dl, dl
@@ -925,6 +1087,7 @@ verify_jwt:
     test ecx, ecx
     jz .jwt_bad_pay
     mov byte ptr [rdi + rcx], 0
+
     mov rax, rbx
     jmp .jwt_out
 
@@ -955,21 +1118,27 @@ flush_group_commit:
     test r12, r12
     jz .fgc_done
 
+    # close any open read snapshot before starting BEGIN IMMEDIATE
     cmp qword ptr [rip + g_in_tx], 0
-    jne .tx_open
-
-    mov rdi, qword ptr [rip + g_stmt_begin]
+    je .start_write_tx
+    mov rdi, qword ptr [rip + g_stmt_commit]
+    call sqlite3_step
+    mov rdi, qword ptr [rip + g_stmt_commit]
     call sqlite3_reset
+    mov qword ptr [rip + g_in_tx], 0
+
+.start_write_tx:
     mov rdi, qword ptr [rip + g_stmt_begin]
     call sqlite3_step
     mov r14d, eax
     mov rdi, qword ptr [rip + g_stmt_begin]
     call sqlite3_reset
+    cmp r14d, SQLITE_BUSY
+    je .fgc_done                    # another worker holds write lock; keep batch queued for next tick
     cmp r14d, SQLITE_DONE
     jne .abort_batch
     mov qword ptr [rip + g_in_tx], 1
 
-.tx_open:
     xor ebx, ebx
     lea r13, [rip + g_batch_queue]
 
@@ -979,9 +1148,6 @@ flush_group_commit:
 
     cmp qword ptr [r13 + 8], OP_CREATE_POST
     jne .do_like
-
-    mov rdi, qword ptr [rip + g_stmt_ins_post]
-    call sqlite3_reset
 
     mov rdi, qword ptr [rip + g_stmt_ins_post]
     mov esi, 1
@@ -1021,33 +1187,37 @@ flush_group_commit:
     lea r8, [r13 + 32]
     xor r9d, r9d
     call append_post_json
-    mov word ptr [rax], 0x007d
+    mov byte ptr [rax], '}'
+    inc rax
+    lea rsi, [rip + g_json_buf]
+    mov rcx, rax
+    sub rcx, rsi
+    mov qword ptr [r13 + 8], rcx
+    lea rdi, [r13 + 160]
+    rep movsb
 
-    # wtf sqlite keeps vdbe open on RETURNING if it doesnt step to DONE before reset,
-    # which makes COMMIT fail with SQLITE_BUSY and loses every write
+    # wtf sqlite keeps vdbe open on RETURNING if i dont step to DONE before reset,
+    # which makes COMMIT fail with SQLITE_BUSY and drops the whole batch
     mov rdi, qword ptr [rip + g_stmt_ins_post]
     call sqlite3_step
     mov rdi, qword ptr [rip + g_stmt_ins_post]
     call sqlite3_reset
 
     mov qword ptr [r13 + 24], 201
-    lea rdi, [r13 + 160]
-    lea rsi, [rip + g_json_buf]
-    call strcpy
     jmp .next_slot
 
 .ins_failed:
     mov rdi, qword ptr [rip + g_stmt_ins_post]
     call sqlite3_reset
     mov qword ptr [r13 + 24], 500
+    mov qword ptr [r13 + 8], LEN_ERR_INT
     lea rdi, [r13 + 160]
     lea rsi, [rip + err_internal]
-    call strcpy
+    mov ecx, LEN_ERR_INT
+    rep movsb
     jmp .next_slot
 
 .do_like:
-    mov rdi, qword ptr [rip + g_stmt_ins_like]
-    call sqlite3_reset
     mov rdi, qword ptr [rip + g_stmt_ins_like]
     mov esi, 1
     mov rdx, qword ptr [r13 + 16]
@@ -1070,48 +1240,35 @@ flush_group_commit:
     test eax, eax
     jg .like_201
 
-    mov rdi, qword ptr [rip + g_stmt_post_exists]
-    call sqlite3_reset
-    mov rdi, qword ptr [rip + g_stmt_post_exists]
-    mov esi, 1
-    mov rdx, r14
-    call sqlite3_bind_int64
-    mov rdi, qword ptr [rip + g_stmt_post_exists]
-    call sqlite3_step
-    mov r15d, eax
-    mov rdi, qword ptr [rip + g_stmt_post_exists]
-    call sqlite3_reset
-    cmp r15d, SQLITE_ROW
-    jne .like_404
-
     mov qword ptr [r13 + 24], 200
     lea rdi, [r13 + 160]
     lea rsi, [rip + str_like_rep_pfx]
-    mov edx, LEN_LIKE_REP
-    call memcpy
+    mov ecx, LEN_LIKE_REP
+    rep movsb
     lea rdi, [r13 + 160 + LEN_LIKE_REP]
     mov rsi, r14
     call append_u64
-    mov word ptr [rax], 0x007d
+    mov byte ptr [rax], '}'
+    inc rax
+    lea rcx, [r13 + 160]
+    sub rax, rcx
+    mov qword ptr [r13 + 8], rax
     jmp .next_slot
 
 .like_201:
     mov qword ptr [r13 + 24], 201
     lea rdi, [r13 + 160]
     lea rsi, [rip + str_like_new_pfx]
-    mov edx, LEN_LIKE_NEW
-    call memcpy
+    mov ecx, LEN_LIKE_NEW
+    rep movsb
     lea rdi, [r13 + 160 + LEN_LIKE_NEW]
     mov rsi, r14
     call append_u64
-    mov word ptr [rax], 0x007d
-    jmp .next_slot
-
-.like_404:
-    mov qword ptr [r13 + 24], 404
-    lea rdi, [r13 + 160]
-    lea rsi, [rip + err_post_not_found]
-    call strcpy
+    mov byte ptr [rax], '}'
+    inc rax
+    lea rcx, [r13 + 160]
+    sub rax, rcx
+    mov qword ptr [r13 + 8], rax
 
 .next_slot:
     inc rbx
@@ -1119,8 +1276,6 @@ flush_group_commit:
     jmp .batch_loop
 
 .commit_batch:
-    mov rdi, qword ptr [rip + g_stmt_commit]
-    call sqlite3_reset
     mov rdi, qword ptr [rip + g_stmt_commit]
     call sqlite3_step
     mov r14d, eax
@@ -1138,17 +1293,16 @@ flush_group_commit:
     mov edi, dword ptr [r13]
     mov esi, dword ptr [r13 + 24]
     lea rdx, [r13 + 160]
-    call send_cstr_response
+    mov rcx, qword ptr [r13 + 8]
+    call send_http_response
     inc rbx
     add r13, BATCH_ITEM_SIZE
     jmp .send_batch
 
 .maybe_ckpt:
     inc qword ptr [rip + g_ckpt_counter]
-    test qword ptr [rip + g_ckpt_counter], 63
+    test qword ptr [rip + g_ckpt_counter], 511
     jnz .clear_batch
-    mov rdi, qword ptr [rip + g_stmt_ckpt]
-    call sqlite3_reset
     mov rdi, qword ptr [rip + g_stmt_ckpt]
     call sqlite3_step
     mov rdi, qword ptr [rip + g_stmt_ckpt]
@@ -1156,8 +1310,6 @@ flush_group_commit:
     jmp .clear_batch
 
 .rollback_batch:
-    mov rdi, qword ptr [rip + g_stmt_rollback]
-    call sqlite3_reset
     mov rdi, qword ptr [rip + g_stmt_rollback]
     call sqlite3_step
     mov rdi, qword ptr [rip + g_stmt_rollback]
@@ -1173,7 +1325,8 @@ flush_group_commit:
     mov edi, dword ptr [r13]
     mov esi, 500
     lea rdx, [rip + err_internal]
-    call send_cstr_response
+    mov ecx, LEN_ERR_INT
+    call send_http_response
     inc rbx
     add r13, BATCH_ITEM_SIZE
     jmp .send_500_loop
@@ -1202,6 +1355,17 @@ handle_client_request:
     mov r13, rsi                    # buf
     mov r14, rdx                    # len
 
+    # dispatch GET right away in registers without scanning headers for \r\n\r\n
+    cmp r14, 14
+    jl .ret_404
+    cmp dword ptr [r13], 0x20544547 # "GET "
+    je .route_get
+
+    cmp dword ptr [r13], 0x54534f50 # "POST"
+    jne .ret_404
+    cmp byte ptr [r13 + 4], ' '
+    jne .ret_404
+
     xor ebx, ebx
     mov rcx, r14
     sub rcx, 3
@@ -1216,13 +1380,6 @@ handle_client_request:
 .got_headers:
     add rbx, 4
     mov rbp, rbx                    # headers_len in rbp
-
-    cmp dword ptr [r13], 0x20544547 # "GET "
-    je .route_get
-    cmp dword ptr [r13], 0x54534f50 # "POST"
-    jne .ret_404
-    cmp byte ptr [r13 + 4], ' '
-    jne .ret_404
 
     lea r15, [r13 + 5]
     xor ecx, ecx
@@ -1267,8 +1424,90 @@ handle_client_request:
     sub rsi, rbp
     mov byte ptr [rdi + rsi], 0
 
-    mov rdi, qword ptr [rip + g_stmt_val_body]
-    call sqlite3_reset
+    # fast path for clean ascii {"body":"..."} so k6/wrk skips sqlite json_extract
+    cmp rsi, 11
+    jl .val_body_sqlite
+    cmp dword ptr [rdi], 0x6f62227b     # {"bo
+    jne .val_body_sqlite
+    cmp dword ptr [rdi + 4], 0x223a2264 # dy":
+    jne .val_body_sqlite
+    cmp byte ptr [rdi + 8], '"'
+    jne .val_body_sqlite
+
+    lea r8, [rdi + 9]
+    xor ecx, ecx
+.fp_scan_q:
+    movzx eax, byte ptr [r8 + rcx]
+    test al, al
+    jz .val_body_sqlite
+    cmp al, '"'
+    je .fp_got_q
+    cmp al, '\\'
+    je .val_body_sqlite
+    cmp al, 32
+    jl .val_body_sqlite
+    cmp al, 126
+    jg .val_body_sqlite
+    inc rcx
+    cmp rcx, 505
+    jg .val_body_sqlite
+    jmp .fp_scan_q
+
+.fp_got_q:
+    cmp byte ptr [r8 + rcx + 1], '}'
+    jne .val_body_sqlite
+    cmp byte ptr [r8 + rcx + 2], 0
+    jne .val_body_sqlite
+
+    # trim ascii spaces on both ends
+    xor edx, edx
+.fp_trim_l:
+    cmp rdx, rcx
+    jge .val_body_sqlite
+    cmp byte ptr [r8 + rdx], ' '
+    jne .fp_trim_r
+    inc rdx
+    jmp .fp_trim_l
+.fp_trim_r:
+    cmp rcx, rdx
+    jle .val_body_sqlite
+    cmp byte ptr [r8 + rcx - 1], ' '
+    jne .fp_trimmed
+    dec rcx
+    jmp .fp_trim_r
+.fp_trimmed:
+    sub rcx, rdx
+    test rcx, rcx
+    jle .val_body_sqlite
+    cmp rcx, 500
+    jg .val_body_sqlite
+
+    mov rbx, qword ptr [rip + g_batch_count]
+    imul rbx, rbx, BATCH_ITEM_SIZE
+    lea r15, [rip + g_batch_queue]
+    add r15, rbx
+
+    mov qword ptr [r15], r12
+    mov qword ptr [r15 + 8], OP_CREATE_POST
+    mov rax, qword ptr [rip + g_auth_uid]
+    mov qword ptr [r15 + 16], rax
+
+    lea rdi, [r15 + 160]
+    lea rsi, [r8 + rdx]
+    mov r9, rcx
+    rep movsb
+    mov byte ptr [r15 + 160 + r9], 0
+
+    lea rdi, [r15 + 32]
+    lea rsi, [rip + g_auth_username]
+    mov ecx, 8
+    rep movsq
+
+    inc qword ptr [rip + g_batch_count]
+    jmp .req_done
+
+.val_body_sqlite:
+    call ensure_read_tx
     mov rdi, qword ptr [rip + g_stmt_val_body]
     mov esi, 1
     lea rdx, [r13 + rbp]
@@ -1306,7 +1545,8 @@ handle_client_request:
 
     lea rdi, [r15 + 32]
     lea rsi, [rip + g_auth_username]
-    call strcpy
+    mov ecx, 8
+    rep movsq
 
     mov rdi, qword ptr [rip + g_stmt_val_body]
     mov esi, 1
@@ -1373,7 +1613,35 @@ handle_client_request:
     call parse_positive_int
     test rax, rax
     jle .ret_400_invalid_id
+    mov r14, rax                    # post_id
 
+    # query sqlite first: 2 = already liked, 1 = needs insert, 0 = post missing
+    call ensure_read_tx
+    mov rdi, qword ptr [rip + g_stmt_chk_like]
+    mov esi, 1
+    mov rdx, qword ptr [rip + g_auth_uid]
+    call sqlite3_bind_int64
+    mov rdi, qword ptr [rip + g_stmt_chk_like]
+    mov esi, 2
+    mov rdx, r14
+    call sqlite3_bind_int64
+    mov rdi, qword ptr [rip + g_stmt_chk_like]
+    call sqlite3_step
+    cmp eax, SQLITE_ROW
+    jne .chk_like_err
+    mov rdi, qword ptr [rip + g_stmt_chk_like]
+    xor esi, esi
+    call sqlite3_column_int64
+    mov rbx, rax
+    mov rdi, qword ptr [rip + g_stmt_chk_like]
+    call sqlite3_reset
+
+    test rbx, rbx
+    jz .like_not_found
+    cmp rbx, 2
+    je .like_already_done
+
+    mov rcx, qword ptr [rip + g_auth_uid]
     mov rbx, qword ptr [rip + g_batch_count]
     imul rbx, rbx, BATCH_ITEM_SIZE
     lea r15, [rip + g_batch_queue]
@@ -1381,143 +1649,35 @@ handle_client_request:
 
     mov qword ptr [r15], r12
     mov qword ptr [r15 + 8], OP_LIKE_POST
-    mov rcx, qword ptr [rip + g_auth_uid]
     mov qword ptr [r15 + 16], rcx
-    mov qword ptr [r15 + 24], rax
+    mov qword ptr [r15 + 24], r14
 
     inc qword ptr [rip + g_batch_count]
     jmp .req_done
 
-.route_get:
-    lea r15, [r13 + 4]
-    xor ecx, ecx
-2:
-    movzx eax, byte ptr [r15 + rcx]
-    cmp al, ' '
-    je .dispatch_get
-    cmp al, '?'
-    je .dispatch_get
-    cmp al, 13
-    je .dispatch_get
-    test al, al
-    jz .ret_404
-    inc rcx
-    jmp 2b
-
-.dispatch_get:
-    cmp rcx, 5
-    jne .try_health
-    cmp dword ptr [r15], 0x6565662f # "/fee"
-    jne .ret_404
-    cmp byte ptr [r15 + 4], 'd'
-    jne .ret_404
-
-    mov rdi, qword ptr [rip + g_stmt_feed]
+.chk_like_err:
+    mov rdi, qword ptr [rip + g_stmt_chk_like]
     call sqlite3_reset
+    jmp .ret_500
 
-    lea rbx, [rip + g_json_buf]
-    mov rax, qword ptr [rip + str_feed_prefix]
-    mov qword ptr [rbx], rax
-    mov word ptr [rbx + 8], 0x5b3a  # ":["
-    add rbx, LEN_FEED_PFX
-    xor r14d, r14d
-
-.feed_next_row:
-    mov rdi, qword ptr [rip + g_stmt_feed]
-    call sqlite3_step
-    cmp eax, SQLITE_ROW
-    jne .feed_done
-
-    test r14d, r14d
-    jz 3f
-    mov byte ptr [rbx], ','
-    inc rbx
-3:
-    inc r14d
-
-    mov rdi, qword ptr [rip + g_stmt_feed]
-    xor esi, esi
-    call sqlite3_column_int64
-    mov r15, rax
-
-    mov rdi, qword ptr [rip + g_stmt_feed]
-    mov esi, 1
-    call sqlite3_column_text
-    mov qword ptr [rsp], rax
-
-    mov rdi, qword ptr [rip + g_stmt_feed]
-    mov esi, 2
-    call sqlite3_column_text
-    mov qword ptr [rsp + 8], rax
-
-    mov rdi, qword ptr [rip + g_stmt_feed]
-    mov esi, 3
-    call sqlite3_column_text
-    mov qword ptr [rsp + 16], rax
-
-    mov rdi, qword ptr [rip + g_stmt_feed]
-    mov esi, 4
-    call sqlite3_column_int64
-    mov r9, rax
-
-    mov rdi, rbx
-    mov rsi, r15
-    mov rdx, qword ptr [rsp]
-    mov rcx, qword ptr [rsp + 8]
-    mov r8, qword ptr [rsp + 16]
-    call append_post_json
-    mov rbx, rax
-    jmp .feed_next_row
-
-.feed_done:
-    mov word ptr [rbx], 0x7d5d
-    add rbx, 2
-
-    mov rdi, qword ptr [rip + g_stmt_feed]
-    call sqlite3_reset
-
-    lea rdx, [rip + g_json_buf]
-    mov rcx, rbx
-    sub rcx, rdx
+.like_not_found:
     mov edi, r12d
-    mov esi, 200
+    mov esi, 404
+    lea rdx, [rip + err_post_not_found]
+    mov ecx, LEN_ERR_PNF
     call send_http_response
     jmp .req_done
 
-.try_health:
-    cmp rcx, 7
-    jne .try_get_post
-    cmp dword ptr [r15], 0x6165682f # "/hea"
-    jne .ret_404
-    cmp word ptr [r15 + 4], 0x746c
-    jne .ret_404
-    cmp byte ptr [r15 + 6], 'h'
-    jne .ret_404
-
-    mov rdi, qword ptr [rip + g_stmt_health]
-    call sqlite3_reset
-    mov rdi, qword ptr [rip + g_stmt_health]
-    call sqlite3_step
-    mov ebx, eax
-    mov rdi, qword ptr [rip + g_stmt_health]
-    call sqlite3_reset
-    cmp ebx, SQLITE_ROW
-    jne .ret_503
-
+.like_already_done:
     lea rdi, [rip + g_json_buf]
-    lea rsi, [rip + str_health_prefix]
-    mov edx, LEN_HEALTH_PFX
-    call memcpy
-
-    xor edi, edi
-    call time
-    sub rax, qword ptr [rip + g_start_time]
-    lea rdi, [rip + g_json_buf + LEN_HEALTH_PFX]
-    mov rsi, rax
+    lea rsi, [rip + str_like_rep_pfx]
+    mov ecx, LEN_LIKE_REP
+    rep movsb
+    lea rdi, [rip + g_json_buf + LEN_LIKE_REP]
+    mov rsi, r14
     call append_u64
     mov byte ptr [rax], '}'
     inc rax
-
     lea rdx, [rip + g_json_buf]
     mov rcx, rax
     sub rcx, rdx
@@ -1526,26 +1686,268 @@ handle_client_request:
     call send_http_response
     jmp .req_done
 
+.route_get:
+    mov rax, 0x6565662f20544547     # "GET /fee"
+    cmp qword ptr [r13], rax
+    jne .try_get_post
+    cmp byte ptr [r13 + 8], 'd'
+    jne .ret_404
+    movzx eax, byte ptr [r13 + 9]
+    cmp al, ' '
+    je .do_get_feed
+    cmp al, '?'
+    je .do_get_feed
+    jmp .ret_404
+
+.do_get_feed:
+    call ensure_read_tx
+
+    # step 1: check if newest 20 post ids from covering index are contiguous (max_id .. max_id - 19)
+    xor ebx, ebx                    # row count
+    xor r14d, r14d                  # max_id
+    mov r15d, 1                     # contiguous flag
+.feed_id_loop:
+    mov rdi, qword ptr [rip + g_stmt_feed_ids]
+    call sqlite3_step
+    cmp eax, SQLITE_ROW
+    jne .feed_ids_done
+    mov rdi, qword ptr [rip + g_stmt_feed_ids]
+    xor esi, esi
+    call sqlite3_column_int64
+    test ebx, ebx
+    jnz .check_contig
+    mov r14, rax
+    jmp .next_feed_id
+.check_contig:
+    mov rcx, r14
+    sub rcx, rbx
+    cmp rax, rcx
+    je .next_feed_id
+    xor r15d, r15d
+.next_feed_id:
+    inc ebx
+    jmp .feed_id_loop
+
+.feed_ids_done:
+    mov rdi, qword ptr [rip + g_stmt_feed_ids]
+    call sqlite3_reset
+
+    cmp ebx, 20
+    jne .feed_fallback
+    test r15d, r15d
+    jz .feed_fallback
+
+    # step 2: contiguous range [min_id, max_id] -> scan likes_post_id_idx range + posts PK range
+    mov r13, r14
+    sub r13, 19                     # r13 = min_id, r14 = max_id
+
+    xor eax, eax
+    lea rdi, [rip + g_like_counts]
+    mov ecx, 24
+    rep stosq
+
+    mov rdi, qword ptr [rip + g_stmt_feed_likes]
+    mov esi, 1
+    mov rdx, r13
+    call sqlite3_bind_int64
+    mov rdi, qword ptr [rip + g_stmt_feed_likes]
+    mov esi, 2
+    mov rdx, r14
+    call sqlite3_bind_int64
+
+    lea rbx, [rip + g_like_counts]
+.feed_likes_loop:
+    mov rdi, qword ptr [rip + g_stmt_feed_likes]
+    call sqlite3_step
+    cmp eax, SQLITE_ROW
+    jne .feed_likes_done
+    mov rdi, qword ptr [rip + g_stmt_feed_likes]
+    xor esi, esi
+    call sqlite3_column_int64
+    sub rax, r13
+    cmp rax, 20
+    jae .feed_likes_loop
+    inc qword ptr [rbx + rax*8]
+    jmp .feed_likes_loop
+
+.feed_likes_done:
+    mov rdi, qword ptr [rip + g_stmt_feed_likes]
+    call sqlite3_reset
+
+    mov rdi, qword ptr [rip + g_stmt_feed_range]
+    mov esi, 1
+    mov rdx, r13
+    call sqlite3_bind_int64
+    mov rdi, qword ptr [rip + g_stmt_feed_range]
+    mov esi, 2
+    mov rdx, r14
+    call sqlite3_bind_int64
+
+    lea r15, [rip + g_json_buf]
+    mov rax, qword ptr [rip + str_feed_prefix]
+    mov qword ptr [r15], rax
+    mov word ptr [r15 + 8], 0x5b3a  # ":["
+    add r15, LEN_FEED_PFX
+    xor ebx, ebx
+
+.feed_range_loop:
+    mov rdi, qword ptr [rip + g_stmt_feed_range]
+    call sqlite3_step
+    cmp eax, SQLITE_ROW
+    jne .feed_range_done
+
+    test ebx, ebx
+    jz 1f
+    mov byte ptr [r15], ','
+    inc r15
+1:
+    inc ebx
+
+    mov rdi, qword ptr [rip + g_stmt_feed_range]
+    xor esi, esi
+    call sqlite3_column_int64
+    mov rbp, rax                    # id
+
+    mov rdi, qword ptr [rip + g_stmt_feed_range]
+    mov esi, 1
+    call sqlite3_column_text
+    mov qword ptr [rsp], rax        # body
+
+    mov rdi, qword ptr [rip + g_stmt_feed_range]
+    mov esi, 2
+    call sqlite3_column_text
+    mov qword ptr [rsp + 8], rax    # created_at
+
+    mov rdi, qword ptr [rip + g_stmt_feed_range]
+    mov esi, 3
+    call sqlite3_column_text
+    mov r8, rax                     # author
+
+    mov rax, rbp
+    sub rax, r13
+    lea rcx, [rip + g_like_counts]
+    mov r9, qword ptr [rcx + rax*8] # like_count
+
+    mov rdi, r15
+    mov rsi, rbp
+    mov rdx, qword ptr [rsp]
+    mov rcx, qword ptr [rsp + 8]
+    call append_post_json
+    mov r15, rax
+    jmp .feed_range_loop
+
+.feed_range_done:
+    mov rdi, qword ptr [rip + g_stmt_feed_range]
+    call sqlite3_reset
+
+    mov word ptr [r15], 0x7d5d      # "]}"
+    add r15, 2
+    lea rdx, [rip + g_json_buf]
+    mov rcx, r15
+    sub rcx, rdx
+    mov edi, r12d
+    mov esi, 200
+    call send_http_response
+    jmp .req_done
+
+.feed_fallback:
+    lea r15, [rip + g_json_buf]
+    mov rax, qword ptr [rip + str_feed_prefix]
+    mov qword ptr [r15], rax
+    mov word ptr [r15 + 8], 0x5b3a
+    add r15, LEN_FEED_PFX
+    xor ebx, ebx
+
+.feed_slow_loop:
+    mov rdi, qword ptr [rip + g_stmt_feed_slow]
+    call sqlite3_step
+    cmp eax, SQLITE_ROW
+    jne .feed_slow_done
+
+    test ebx, ebx
+    jz 1f
+    mov byte ptr [r15], ','
+    inc r15
+1:
+    inc ebx
+
+    mov rdi, qword ptr [rip + g_stmt_feed_slow]
+    xor esi, esi
+    call sqlite3_column_int64
+    mov rbp, rax
+
+    mov rdi, qword ptr [rip + g_stmt_feed_slow]
+    mov esi, 1
+    call sqlite3_column_text
+    mov qword ptr [rsp], rax
+
+    mov rdi, qword ptr [rip + g_stmt_feed_slow]
+    mov esi, 2
+    call sqlite3_column_text
+    mov qword ptr [rsp + 8], rax
+
+    mov rdi, qword ptr [rip + g_stmt_feed_slow]
+    mov esi, 3
+    call sqlite3_column_text
+    mov qword ptr [rsp + 16], rax
+
+    mov rdi, qword ptr [rip + g_stmt_feed_slow]
+    mov esi, 4
+    call sqlite3_column_int64
+    mov r9, rax
+
+    mov rdi, r15
+    mov rsi, rbp
+    mov rdx, qword ptr [rsp]
+    mov rcx, qword ptr [rsp + 8]
+    mov r8, qword ptr [rsp + 16]
+    call append_post_json
+    mov r15, rax
+    jmp .feed_slow_loop
+
+.feed_slow_done:
+    mov rdi, qword ptr [rip + g_stmt_feed_slow]
+    call sqlite3_reset
+    mov word ptr [r15], 0x7d5d
+    add r15, 2
+    lea rdx, [rip + g_json_buf]
+    mov rcx, r15
+    sub rcx, rdx
+    mov edi, r12d
+    mov esi, 200
+    call send_http_response
+    jmp .req_done
+
 .try_get_post:
-    cmp rcx, 7
-    jle .ret_404
-    cmp dword ptr [r15], 0x736f702f
+    mov rax, 0x736f702f20544547     # "GET /pos"
+    cmp qword ptr [r13], rax
+    jne .try_health
+    cmp word ptr [r13 + 8], 0x7374  # "ts"
     jne .ret_404
-    cmp word ptr [r15 + 4], 0x7374
-    jne .ret_404
-    cmp byte ptr [r15 + 6], '/'
+    cmp byte ptr [r13 + 10], '/'
     jne .ret_404
 
-    lea rdi, [r15 + 7]
-    mov rsi, rcx
-    sub rsi, 7
+    lea rdi, [r13 + 11]
+    xor esi, esi
+1:
+    movzx eax, byte ptr [rdi + rsi]
+    cmp al, ' '
+    je 2f
+    cmp al, '?'
+    je 2f
+    cmp al, 13
+    je 2f
+    test al, al
+    jz .ret_404
+    inc rsi
+    jmp 1b
+2:
     call parse_positive_int
     test rax, rax
     jle .ret_400_invalid_id
-
     mov rbx, rax
-    mov rdi, qword ptr [rip + g_stmt_get_post]
-    call sqlite3_reset
+
+    call ensure_read_tx
     mov rdi, qword ptr [rip + g_stmt_get_post]
     mov esi, 1
     mov rdx, rbx
@@ -1556,40 +1958,40 @@ handle_client_request:
     cmp eax, SQLITE_ROW
     jne .post_missing
 
-    lea rdi, [rip + g_json_buf]
-    mov rax, qword ptr [rip + str_post_prefix]
-    mov qword ptr [rdi], rax
-
     mov rdi, qword ptr [rip + g_stmt_get_post]
     xor esi, esi
     call sqlite3_column_int64
-    mov r15, rax
+    mov rbp, rax
 
     mov rdi, qword ptr [rip + g_stmt_get_post]
     mov esi, 1
     call sqlite3_column_text
-    mov qword ptr [rsp], rax
+    mov r13, rax
 
     mov rdi, qword ptr [rip + g_stmt_get_post]
     mov esi, 2
     call sqlite3_column_text
-    mov qword ptr [rsp + 8], rax
+    mov r14, rax
 
     mov rdi, qword ptr [rip + g_stmt_get_post]
     mov esi, 3
     call sqlite3_column_text
-    mov qword ptr [rsp + 16], rax
+    mov r15, rax
 
     mov rdi, qword ptr [rip + g_stmt_get_post]
     mov esi, 4
     call sqlite3_column_int64
     mov r9, rax
 
+    lea rdi, [rip + g_json_buf]
+    mov rax, qword ptr [rip + str_post_prefix]
+    mov qword ptr [rdi], rax
+
     lea rdi, [rip + g_json_buf + LEN_POST_PFX]
-    mov rsi, r15
-    mov rdx, qword ptr [rsp]
-    mov rcx, qword ptr [rsp + 8]
-    mov r8, qword ptr [rsp + 16]
+    mov rsi, rbp
+    mov rdx, r13
+    mov rcx, r14
+    mov r8, r15
     call append_post_json
     mov byte ptr [rax], '}'
     inc rax
@@ -1612,77 +2014,137 @@ handle_client_request:
     mov edi, r12d
     mov esi, 404
     lea rdx, [rip + err_post_not_found]
-    call send_cstr_response
+    mov ecx, LEN_ERR_PNF
+    call send_http_response
+    jmp .req_done
+
+.try_health:
+    mov rax, 0x6165682f20544547     # "GET /hea"
+    cmp qword ptr [r13], rax
+    jne .ret_404
+    cmp word ptr [r13 + 8], 0x746c  # "lt"
+    jne .ret_404
+    cmp byte ptr [r13 + 10], 'h'
+    jne .ret_404
+    movzx eax, byte ptr [r13 + 11]
+    cmp al, ' '
+    je .do_health
+    cmp al, '?'
+    je .do_health
+    jmp .ret_404
+
+.do_health:
+    xor edi, edi
+    call time
+    mov qword ptr [rip + g_now_time], rax
+
+    mov rdi, qword ptr [rip + g_stmt_health]
+    call sqlite3_step
+    mov ebx, eax
+    mov rdi, qword ptr [rip + g_stmt_health]
+    call sqlite3_reset
+    cmp ebx, SQLITE_ROW
+    jne .ret_503
+
+    lea rdi, [rip + g_json_buf]
+    lea rsi, [rip + str_health_prefix]
+    mov edx, LEN_HEALTH_PFX
+    call memcpy
+
+    mov rax, qword ptr [rip + g_now_time]
+    sub rax, qword ptr [rip + g_start_time]
+    lea rdi, [rip + g_json_buf + LEN_HEALTH_PFX]
+    mov rsi, rax
+    call append_u64
+    mov byte ptr [rax], '}'
+    inc rax
+
+    lea rdx, [rip + g_json_buf]
+    mov rcx, rax
+    sub rcx, rdx
+    mov edi, r12d
+    mov esi, 200
+    call send_http_response
     jmp .req_done
 
 .ret_404:
     mov edi, r12d
     mov esi, 404
     lea rdx, [rip + err_not_found]
-    call send_cstr_response
+    mov ecx, LEN_ERR_NF
+    call send_http_response
     jmp .req_done
 
 .ret_400_invalid_id:
     mov edi, r12d
     mov esi, 400
     lea rdx, [rip + err_invalid_id]
-    call send_cstr_response
+    mov ecx, LEN_ERR_ID
+    call send_http_response
     jmp .req_done
 
 .ret_400_malformed:
     mov edi, r12d
     mov esi, 400
     lea rdx, [rip + err_malformed_json]
-    call send_cstr_response
+    mov ecx, LEN_ERR_MAL
+    call send_http_response
     jmp .req_done
 
 .ret_400_required:
     mov edi, r12d
     mov esi, 400
     lea rdx, [rip + err_body_required]
-    call send_cstr_response
+    mov ecx, LEN_ERR_REQ
+    call send_http_response
     jmp .req_done
 
 .ret_400_too_long:
     mov edi, r12d
     mov esi, 400
     lea rdx, [rip + err_body_too_long]
-    call send_cstr_response
+    mov ecx, LEN_ERR_LONG
+    call send_http_response
     jmp .req_done
 
 .ret_401_missing:
     mov edi, r12d
     mov esi, 401
     lea rdx, [rip + err_missing_token]
-    call send_cstr_response
+    mov ecx, LEN_ERR_MTOK
+    call send_http_response
     jmp .req_done
 
 .ret_401_invalid:
     mov edi, r12d
     mov esi, 401
     lea rdx, [rip + err_invalid_token]
-    call send_cstr_response
+    mov ecx, LEN_ERR_ITOK
+    call send_http_response
     jmp .req_done
 
 .ret_401_payload:
     mov edi, r12d
     mov esi, 401
     lea rdx, [rip + err_invalid_pay]
-    call send_cstr_response
+    mov ecx, LEN_ERR_IPAY
+    call send_http_response
     jmp .req_done
 
 .ret_503:
     mov edi, r12d
     mov esi, 503
     lea rdx, [rip + err_degraded]
-    call send_cstr_response
+    mov ecx, LEN_ERR_DEG
+    call send_http_response
     jmp .req_done
 
 .ret_500:
     mov edi, r12d
     mov esi, 500
     lea rdx, [rip + err_internal]
-    call send_cstr_response
+    mov ecx, LEN_ERR_INT
+    call send_http_response
 
 .req_done:
     add rsp, 24
@@ -1703,9 +2165,11 @@ prep_stmt:
     jmp sqlite3_prepare_v3
 
 # r12d = listen_fd, r13d = epoll_fd
+# when accepted fd reaches g_fd_limit, hand off listen_fd to the sleeping standby worker!
 drain_accept:
-    push rbx
-    sub rsp, 16
+    lea r9, [rip + g_epoll_ev]
+    mov dword ptr [r9], EPOLLIN
+    mov dword ptr [r9 + 8], 0
 .acc_next:
     mov eax, SYS_ACCEPT4
     mov edi, r12d
@@ -1715,27 +2179,38 @@ drain_accept:
     syscall
     test eax, eax
     js .acc_done
-    mov ebx, eax
-    mov dword ptr [rsp], 1
-    mov edi, ebx
-    mov esi, IPPROTO_TCP
-    mov edx, TCP_NODELAY
-    mov rcx, rsp
-    mov r8d, 4
-    call setsockopt
-    lea r10, [rip + g_epoll_ev]
-    mov dword ptr [r10], EPOLLIN
-    mov dword ptr [r10 + 4], ebx
-    mov dword ptr [r10 + 8], 0
+    mov r8d, eax
+    mov dword ptr [r9 + 4], eax
+    mov edx, eax
     mov eax, SYS_EPOLL_CTL
     mov edi, r13d
     mov esi, EPOLL_CTL_ADD
-    mov edx, ebx
+    mov r10, r9
     syscall
-    jmp .acc_next
+
+    cmp r8d, dword ptr [rip + g_fd_limit]
+    jl .acc_next
+    cmp qword ptr [rip + g_handed_off], 0
+    jne .acc_next
+    cmp qword ptr [rip + g_next_efd], 0
+    jle .acc_next
+
+    # hand off listen_fd baton: remove listen_fd from this worker's epoll and wake standby worker
+    mov qword ptr [rip + g_handed_off], 1
+    mov eax, SYS_EPOLL_CTL
+    mov edi, r13d
+    mov esi, EPOLL_CTL_DEL
+    mov edx, r12d
+    xor r10d, r10d
+    syscall
+
+    mov qword ptr [rip + g_num_tmp], 1
+    mov eax, SYS_WRITE
+    mov edi, dword ptr [rip + g_next_efd]
+    lea rsi, [rip + g_num_tmp]
+    mov edx, 8
+    syscall
 .acc_done:
-    add rsp, 16
-    pop rbx
     ret
 
 main:
@@ -1752,9 +2227,44 @@ main:
     mov esi, 1
     call signal
 
+    mov edi, 17
+    mov esi, 1
+    call signal
+
+    lea rdi, [rip + g_resp_200_buf]
+    lea rsi, [rip + hdr_200_ka]
+    mov ecx, LEN_200_KA
+    rep movsb
+
+    mov qword ptr [rip + g_fd_limit], DEF_FD_LIMIT
+    mov eax, SYS_GETRLIMIT
+    mov edi, RLIMIT_NOFILE
+    mov rsi, rsp
+    syscall
+    test eax, eax
+    jnz .check_env_fd_limit
+    mov rax, qword ptr [rsp]
+    sub rax, 1535
+    cmp rax, 1024
+    jl .check_env_fd_limit
+    mov qword ptr [rip + g_fd_limit], rax
+
+.check_env_fd_limit:
+    lea rdi, [rip + env_fd_limit]
+    call getenv
+    test rax, rax
+    jz .rlim_done
+    mov rdi, rax
+    call atoi
+    cmp eax, 16
+    jl .rlim_done
+    mov qword ptr [rip + g_fd_limit], rax
+.rlim_done:
+
     xor edi, edi
     call time
     mov qword ptr [rip + g_start_time], rax
+    mov qword ptr [rip + g_now_time], rax
 
     lea rdi, [rip + env_jwt_secret]
     call getenv
@@ -1766,100 +2276,9 @@ main:
     mov rdi, rax
     call strlen
     mov qword ptr [rip + g_jwt_secret_len], rax
+    call init_hmac_ctx
 
-    lea rdi, [rip + env_sqlite_path]
-    call getenv
-    test rax, rax
-    jnz 2f
-    lea rax, [rip + def_sqlite_path]
-2:
-    mov rdi, rax
-    lea rsi, [rip + g_db]
-    mov edx, SQLITE_OPEN_RW_NOMUTEX
-    xor ecx, ecx
-    call sqlite3_open_v2
-    test eax, eax
-    jnz .fatal
-
-    mov rdi, qword ptr [rip + g_db]
-    lea rsi, [rip + sql_pragmas]
-    xor edx, edx
-    xor ecx, ecx
-    xor r8d, r8d
-    call sqlite3_exec
-
-    lea rsi, [rip + sql_health]
-    lea r8, [rip + g_stmt_health]
-    call prep_stmt
-    test eax, eax
-    jnz .fatal
-
-    lea rsi, [rip + sql_feed]
-    lea r8, [rip + g_stmt_feed]
-    call prep_stmt
-    test eax, eax
-    jnz .fatal
-
-    lea rsi, [rip + sql_get_post]
-    lea r8, [rip + g_stmt_get_post]
-    call prep_stmt
-    test eax, eax
-    jnz .fatal
-
-    lea rsi, [rip + sql_validate_body]
-    lea r8, [rip + g_stmt_val_body]
-    call prep_stmt
-    test eax, eax
-    jnz .fatal
-
-    lea rsi, [rip + sql_insert_post]
-    lea r8, [rip + g_stmt_ins_post]
-    call prep_stmt
-    test eax, eax
-    jnz .fatal
-
-    lea rsi, [rip + sql_post_exists]
-    lea r8, [rip + g_stmt_post_exists]
-    call prep_stmt
-    test eax, eax
-    jnz .fatal
-
-    lea rsi, [rip + sql_insert_like]
-    lea r8, [rip + g_stmt_ins_like]
-    call prep_stmt
-    test eax, eax
-    jnz .fatal
-
-    lea rsi, [rip + sql_begin_read]
-    lea r8, [rip + g_stmt_begin_read]
-    call prep_stmt
-    test eax, eax
-    jnz .fatal
-
-    lea rsi, [rip + sql_begin]
-    lea r8, [rip + g_stmt_begin]
-    call prep_stmt
-    test eax, eax
-    jnz .fatal
-
-    lea rsi, [rip + sql_commit]
-    lea r8, [rip + g_stmt_commit]
-    call prep_stmt
-    test eax, eax
-    jnz .fatal
-
-    lea rsi, [rip + sql_rollback]
-    lea r8, [rip + g_stmt_rollback]
-    call prep_stmt
-    test eax, eax
-    jnz .fatal
-
-    lea rsi, [rip + sql_ckpt]
-    lea r8, [rip + g_stmt_ckpt]
-    call prep_stmt
-    test eax, eax
-    jnz .fatal
-
+    # open shared listen socket once before any standby fork so standby workers have empty fd tables
     mov edi, AF_INET
     mov esi, SOCK_STREAM_NONBLOCK
     xor edx, edx
@@ -1921,6 +2340,174 @@ main:
     test eax, eax
     jnz .fatal
 
+    lea rdi, [rip + env_sqlite_path]
+    call getenv
+    test rax, rax
+    jnz 2f
+    lea rax, [rip + def_sqlite_path]
+2:
+    mov qword ptr [rip + g_db_path], rax
+
+.spawn_standby:
+    # if worker_idx < MAX_WORKERS - 1, fork one sleeping standby child with a clean fd table
+    mov rax, qword ptr [rip + g_worker_idx]
+    cmp rax, (MAX_WORKERS - 1)
+    jge .open_worker_db
+
+    mov eax, SYS_EVENTFD2
+    xor edi, edi
+    xor esi, esi
+    syscall
+    test eax, eax
+    js .open_worker_db
+    mov r14d, eax                   # efd
+
+    mov eax, SYS_FORK
+    syscall
+    test eax, eax
+    js .open_worker_db
+    jz .standby_child_wait
+
+    # active worker saves efd in g_next_efd to wake standby child when g_fd_limit is reached
+    mov qword ptr [rip + g_next_efd], r14
+    jmp .open_worker_db
+
+.standby_child_wait:
+    # standby child sleeps on eventfd (0% CPU, 0 sqlite connections) until parent hands off listen_fd
+    inc qword ptr [rip + g_worker_idx]
+    mov qword ptr [rip + g_next_efd], 0
+    mov qword ptr [rip + g_handed_off], 0
+.wait_efd_read:
+    mov eax, SYS_READ
+    mov edi, r14d
+    mov rsi, rsp
+    mov edx, 8
+    syscall
+    cmp rax, 8
+    jne .wait_efd_read
+
+    mov eax, SYS_CLOSE
+    mov edi, r14d
+    syscall
+    jmp .spawn_standby              # woken standby worker forks the next standby worker and starts!
+
+.open_worker_db:
+    mov rdi, qword ptr [rip + g_db_path]
+    lea rsi, [rip + g_db]
+    mov edx, SQLITE_OPEN_RW_NOMUTEX
+    xor ecx, ecx
+    call sqlite3_open_v2
+    test eax, eax
+    jnz .fatal
+
+    mov rdi, qword ptr [rip + g_db]
+    lea rsi, [rip + sql_pragmas_w0]
+    cmp qword ptr [rip + g_worker_idx], 0
+    je 5f
+    lea rsi, [rip + sql_pragmas_wn]
+5:
+    xor edx, edx
+    xor ecx, ecx
+    xor r8d, r8d
+    call sqlite3_exec
+
+    lea rsi, [rip + sql_health]
+    lea r8, [rip + g_stmt_health]
+    call prep_stmt
+    test eax, eax
+    jnz .fatal
+
+    lea rsi, [rip + sql_feed_ids]
+    lea r8, [rip + g_stmt_feed_ids]
+    call prep_stmt
+    test eax, eax
+    jnz .fatal
+
+    lea rsi, [rip + sql_feed_likes]
+    lea r8, [rip + g_stmt_feed_likes]
+    call prep_stmt
+    test eax, eax
+    jnz .fatal
+
+    lea rsi, [rip + sql_feed_range]
+    lea r8, [rip + g_stmt_feed_range]
+    call prep_stmt
+    test eax, eax
+    jnz .fatal
+
+    lea rsi, [rip + sql_feed_slow]
+    lea r8, [rip + g_stmt_feed_slow]
+    call prep_stmt
+    test eax, eax
+    jnz .fatal
+
+    lea rsi, [rip + sql_get_post]
+    lea r8, [rip + g_stmt_get_post]
+    call prep_stmt
+    test eax, eax
+    jnz .fatal
+
+    lea rsi, [rip + sql_chk_like]
+    lea r8, [rip + g_stmt_chk_like]
+    call prep_stmt
+    test eax, eax
+    jnz .fatal
+
+    lea rsi, [rip + sql_validate_body]
+    lea r8, [rip + g_stmt_val_body]
+    call prep_stmt
+    test eax, eax
+    jnz .fatal
+
+    lea rsi, [rip + sql_insert_post]
+    lea r8, [rip + g_stmt_ins_post]
+    call prep_stmt
+    test eax, eax
+    jnz .fatal
+
+    lea rsi, [rip + sql_insert_like]
+    lea r8, [rip + g_stmt_ins_like]
+    call prep_stmt
+    test eax, eax
+    jnz .fatal
+
+    lea rsi, [rip + sql_begin_read]
+    lea r8, [rip + g_stmt_begin_read]
+    call prep_stmt
+    test eax, eax
+    jnz .fatal
+
+    lea rsi, [rip + sql_begin]
+    lea r8, [rip + g_stmt_begin]
+    call prep_stmt
+    test eax, eax
+    jnz .fatal
+
+    lea rsi, [rip + sql_commit]
+    lea r8, [rip + g_stmt_commit]
+    call prep_stmt
+    test eax, eax
+    jnz .fatal
+
+    lea rsi, [rip + sql_rollback]
+    lea r8, [rip + g_stmt_rollback]
+    call prep_stmt
+    test eax, eax
+    jnz .fatal
+
+    lea rsi, [rip + sql_ckpt]
+    lea r8, [rip + g_stmt_ckpt]
+    call prep_stmt
+    test eax, eax
+    jnz .fatal
+
+    mov rdi, qword ptr [rip + g_db]
+    lea rsi, [rip + sql_busy_zero]
+    xor edx, edx
+    xor ecx, ecx
+    xor r8d, r8d
+    call sqlite3_exec
+
     mov eax, SYS_EPOLL_CREATE1
     xor edi, edi
     syscall
@@ -1938,6 +2525,8 @@ main:
     mov edx, r12d
     syscall
 
+    cmp qword ptr [rip + g_worker_idx], 0
+    jne .ev_loop
     mov eax, SYS_WRITE
     mov edi, 2
     lea rsi, [rip + msg_up]
@@ -1945,29 +2534,36 @@ main:
     syscall
 
 .ev_loop:
+    mov qword ptr [rip + g_coalesced], 0
+    mov r10d, -1
+    cmp qword ptr [rip + g_batch_count], 0
+    jle .do_epoll_wait
+    mov r10d, 1                     # 1ms retry timeout if a write batch is waiting on SQLITE_BUSY
+.do_epoll_wait:
     mov eax, SYS_EPOLL_WAIT
     mov edi, r13d
     lea rsi, [rip + g_epoll_events]
     mov edx, MAX_EVENTS
-    mov r10d, -1
     syscall
     test eax, eax
+    jg .got_events
+    jne .ev_loop
+    cmp qword ptr [rip + g_batch_count], 0
     jle .ev_loop
+    call flush_group_commit
+    jmp .ev_loop
 
+.got_events:
     mov r14d, eax
-    xor r15d, r15d
+    xor edi, edi
+    call time
+    mov qword ptr [rip + g_now_time], rax
+    mov eax, r14d
 
-    cmp r14d, 4
-    jl .next_ev
-    cmp qword ptr [rip + g_in_tx], 0
-    jne .next_ev
-    mov rdi, qword ptr [rip + g_stmt_begin_read]
-    call sqlite3_reset
-    mov rdi, qword ptr [rip + g_stmt_begin_read]
-    call sqlite3_step
-    mov rdi, qword ptr [rip + g_stmt_begin_read]
-    call sqlite3_reset
-    mov qword ptr [rip + g_in_tx], 1
+.proc_batch:
+    mov r14d, eax
+    mov qword ptr [rip + g_tick_evs], r14
+    xor r15d, r15d
 
 .next_ev:
     cmp r15d, r14d
@@ -2026,19 +2622,35 @@ main:
     jmp .next_ev
 
 .tick_done:
-    cmp qword ptr [rip + g_batch_count], 0
-    jg .do_flush
-
+    # always close the per-batch read snapshot before checking write queue
     cmp qword ptr [rip + g_in_tx], 0
-    je .ev_loop
-    mov rdi, qword ptr [rip + g_stmt_commit]
-    call sqlite3_reset
+    je .check_writes
     mov rdi, qword ptr [rip + g_stmt_commit]
     call sqlite3_step
     mov rdi, qword ptr [rip + g_stmt_commit]
     call sqlite3_reset
     mov qword ptr [rip + g_in_tx], 0
-    jmp .ev_loop
+
+.check_writes:
+    cmp qword ptr [rip + g_batch_count], 0
+    jle .ev_loop
+
+.maybe_coalesce:
+    cmp qword ptr [rip + g_tick_evs], 8
+    jl .do_flush
+    cmp qword ptr [rip + g_coalesced], 2
+    jge .do_flush
+    cmp qword ptr [rip + g_batch_count], 64
+    jge .do_flush
+    inc qword ptr [rip + g_coalesced]
+    mov eax, SYS_EPOLL_WAIT
+    mov edi, r13d
+    lea rsi, [rip + g_epoll_events]
+    mov edx, MAX_EVENTS
+    xor r10d, r10d
+    syscall
+    test eax, eax
+    jg .proc_batch
 
 .do_flush:
     call flush_group_commit

@@ -1,0 +1,4 @@
+/target/
+/vendor/
+*.db*
+__pycache__/

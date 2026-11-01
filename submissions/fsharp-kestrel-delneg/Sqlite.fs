@@ -1,5 +1,8 @@
 /// The SQLite C API, bound directly with blittable types: raw handles, no marshalling.
-/// The column getters are tiny and never block or call back into .NET, so they skip the GC transition.
+/// The column getters are tiny and never block or call back into .NET, so they skip the GC transition. So do step
+/// and reset: SQLite never calls back into .NET here (no hooks or functions of ours; busy_timeout is SQLite's own native
+/// sleep), and only the loop thread allocates (the checkpoint thread's loop does not), so a step that waits (a lock,
+/// the fsync that starts the WAL again) holds up no GC.
 module Sqlite
 
 #nowarn "9"
@@ -34,10 +37,10 @@ extern int exec(nativeint db, nativeint sql, nativeint callback, nativeint arg, 
 [<DllImport(Lib, EntryPoint = "sqlite3_prepare_v3")>]
 extern int prepare_v3(nativeint db, nativeint sql, int length, uint32 flags, nativeint& stmt, nativeint tail)
 
-[<DllImport(Lib, EntryPoint = "sqlite3_step")>]
+[<DllImport(Lib, EntryPoint = "sqlite3_step"); SuppressGCTransition>]
 extern int step(nativeint stmt)
 
-[<DllImport(Lib, EntryPoint = "sqlite3_reset")>]
+[<DllImport(Lib, EntryPoint = "sqlite3_reset"); SuppressGCTransition>]
 extern int reset(nativeint stmt)
 
 [<DllImport(Lib, EntryPoint = "sqlite3_finalize")>]

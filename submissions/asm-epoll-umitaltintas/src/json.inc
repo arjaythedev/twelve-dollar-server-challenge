@@ -604,18 +604,25 @@ b64_init:
   mov byte [rdi+'_'], 63
   ret
 
-; w_u64: append rax as decimal at rdi. Clobbers rax, rcx, rdx, rsi, r8 (uses the red zone).
+; w_u64: append rax as decimal at rdi. Clobbers rax, rcx, rdx, rsi, r8, r9 (uses the red zone).
+; Divides by 10 with a multiply (x * ceil(2^67 / 10) >> 67), not div.
 w_u64:
   lea rsi, [rsp-1]
   mov r8, rsi
-  mov ecx, 10
+  mov r9, rax
+  mov rcx, 0xCCCCCCCCCCCCCCCD
 .l:
-  xor edx, edx
-  div rcx
-  add dl, '0'
-  mov [rsi], dl
+  mov rax, r9
+  mul rcx
+  shr rdx, 3                  ; rdx = r9 / 10
+  lea rax, [rdx + rdx*4]
+  add rax, rax                ; rax = (r9 / 10) * 10
+  sub r9, rax                 ; r9 = digit
+  add r9b, '0'
+  mov [rsi], r9b
   dec rsi
-  test rax, rax
+  mov r9, rdx
+  test rdx, rdx
   jnz .l
   mov rcx, r8
   sub rcx, rsi
@@ -624,15 +631,50 @@ w_u64:
   ret
 
 ; w_jstr: append rsi/rdx(len) as a quoted JSON string at rdi.
-; Escapes '"', '\' and control characters like JSON.stringify. Clobbers rax, rcx, rdx, rsi, r8.
+; Escapes '"', '\' and control characters like JSON.stringify. 16 bytes at a time while none of
+; them needs escaping (the output buffer must have 16 bytes of room past the result).
+; Clobbers rax, rcx, rdx, rsi, r8, xmm0-xmm5.
 w_jstr:
   mov byte [rdi], '"'
   inc rdi
   test rdx, rdx
   jz .end
   lea r8, [rsi+rdx]
+  movdqa xmm1, [jq_quote]
+  movdqa xmm2, [jq_bslash]
+  movdqa xmm3, [jq_ctl]
 .l:
+  lea rax, [rsi+16]
+  cmp rax, r8
+  ja .tail
+  movdqu xmm0, [rsi]
+  movdqa xmm4, xmm0
+  pcmpeqb xmm4, xmm1          ; '"'
+  movdqa xmm5, xmm0
+  pcmpeqb xmm5, xmm2          ; '\'
+  por xmm4, xmm5
+  movdqa xmm5, xmm0
+  pminub xmm5, xmm3
+  pcmpeqb xmm5, xmm0          ; byte <= 0x1F
+  por xmm4, xmm5
+  pmovmskb eax, xmm4
+  movdqu [rdi], xmm0
+  test eax, eax
+  jnz .some
+  add rsi, 16
+  add rdi, 16
+  jmp .l
+.some:                        ; the clean bytes before the first special one are copied
+  bsf ecx, eax
+  add rsi, rcx
+  add rdi, rcx
   movzx eax, byte [rsi]
+  jmp .chk
+.tail:
+  cmp rsi, r8
+  jae .end
+  movzx eax, byte [rsi]
+.chk:
   cmp al, '"'
   je .q
   cmp al, '\'
@@ -643,8 +685,7 @@ w_jstr:
   inc rdi
 .n:
   inc rsi
-  cmp rsi, r8
-  jb .l
+  jmp .l
 .end:
   mov byte [rdi], '"'
   inc rdi
@@ -677,6 +718,13 @@ w_jstr:
   mov [rdi+5], dl
   add rdi, 6
   jmp .n
+
+[section .rodata]
+align 16
+jq_quote:  times 16 db '"'
+jq_bslash: times 16 db '\'
+jq_ctl:    times 16 db 0x1F
+__?SECT?__
 
 ; ws_len: length of a JS whitespace character at rsi (rdi = end), 0 if none.
 ; ws_len_back: same for the character that ends at rdi (rsi = start). Clobber eax, ecx.

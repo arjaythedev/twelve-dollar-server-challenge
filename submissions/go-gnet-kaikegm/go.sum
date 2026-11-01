@@ -1,5 +1,7 @@
 github.com/KaikeGM/zerojwt/v2 v2.0.0 h1:2IWMrtWvTp8AHRrY5wXLCbCrzxZcYWtSj52tvcB3hX0=
 github.com/KaikeGM/zerojwt/v2 v2.0.0/go.mod h1:u41lkap2oOvXSAkbyGpt1OCHswl72D469O7l+T9LzOI=
+github.com/KaikeGM/zerojwt/v2 v2.3.2 h1:t+Yz/sJMGsYD78qAtATMX+dZ15HD7YUtSSQcE+EeIUo=
+github.com/KaikeGM/zerojwt/v2 v2.3.2/go.mod h1:u41lkap2oOvXSAkbyGpt1OCHswl72D469O7l+T9LzOI=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/panjf2000/ants/v2 v2.12.1 h1:BWvU2wHpyXWxhhNXsGB6JXLCNbshyLd1QxvoAmZnu10=

@@ -139,6 +139,11 @@ let holdFrames =
 
 let mutable private path = ""
 
+/// Set by the loop when it starts a hold: the checkpoint thread wakes at once (it sleeps 50 ms between rounds, and it
+/// has just gone to sleep when the loop sees the WAL size it reported, so the hold would wait ~50 ms for nothing).
+let private wake = new AutoResetEvent(false)
+let wakeCheckpointer () = wake.Set() |> ignore
+
 let private startCheckpointer () =
     let p = Marshal.StringToCoTaskMemUTF8 path
     let mutable cdb = 0n
@@ -169,7 +174,7 @@ let private startCheckpointer () =
         let mutable seen = -1
         while true do
             // While writes are held, go on at once: the loop waits for this checkpoint.
-            if Volatile.Read &holdWrites then Thread.Sleep 1 else Thread.Sleep 50
+            if Volatile.Read &holdWrites then Thread.Sleep 1 else wake.WaitOne 50 |> ignore
             let held = Volatile.Read &holdWrites
             let now = Volatile.Read &commits
             // Caught up and the loop has not ended the hold yet: nothing to do. (A checkpoint now would copy the frame

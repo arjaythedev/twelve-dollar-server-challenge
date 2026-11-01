@@ -10,10 +10,11 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
 
-    <!-- One native binary, compiled on the box for the box's CPU. -->
     <PublishAot>true</PublishAot>
     <RuntimeIdentifier>linux-x64</RuntimeIdentifier>
-    <IlcInstructionSet>x86-64-v3</IlcInstructionSet><!-- batch 2: native fails in ilc on AVX-512 (Vector256) -->
+    <!-- With a native target, Native AOT fails with a Vector256 error on AVX-512 machines.
+         build.sh lowers this to x86-64-v2 on a CPU without AVX2. -->
+    <IlcInstructionSet>x86-64-v3</IlcInstructionSet>
     <OptimizationPreference>Speed</OptimizationPreference>
     <InvariantGlobalization>true</InvariantGlobalization>
 
@@ -26,7 +27,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- build.sh compiles SQLite from source into this static library. Both it and libc are called directly, without a runtime lookup. -->
+    <!-- build.sh compiles SQLite from source into this static library. SQLite and libc are called directly, with no lookup at run time. -->
     <DirectPInvoke Include="sqlite3" />
     <NativeLibrary Include="obj/sqlite/libsqlite3.a" />
     <DirectPInvoke Include="libc" />

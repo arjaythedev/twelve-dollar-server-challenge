@@ -14,11 +14,22 @@ internal static class PostEndpoints
         posts.MapPost("/{id}/like", LikePostAsync).WithName("LikePost");
     }
 
-    private static IResult GetPost(string id, FeedRepository repository)
+    private static async Task GetPost(string id, HttpContext context, FeedRepository repository)
     {
-        if (!TryPostId(id, out var postId)) return Error(400, "invalid post id");
-        var post = repository.GetPost(postId);
-        return post is null ? Error(404, "post not found") : Results.Json(new PostResponse(post));
+        if (!TryPostId(id, out var postId))
+        {
+            await Error(400, "invalid post id").ExecuteAsync(context);
+            return;
+        }
+        var length = repository.CopyPostJson(postId, context.Response.BodyWriter);
+        if (length < 0)
+        {
+            await Error(404, "post not found").ExecuteAsync(context);
+            return;
+        }
+        context.Response.ContentType = "application/json";
+        context.Response.ContentLength = length;
+        await context.Response.BodyWriter.FlushAsync(context.RequestAborted);
     }
 
     private static async Task<IResult> CreatePostAsync(
@@ -47,7 +58,7 @@ internal static class PostEndpoints
         if (body.EnumerateRunes().Count() > 500) return Error(400, "body must be at most 500 characters");
 
         var post = await repository.CreatePostAsync(auth.Identity!, body, context.RequestAborted);
-        return Results.Json(new PostResponse(post), statusCode: 201);
+        return Results.Json(new PostResponse(post), ApiJsonContext.Default.PostResponse, statusCode: 201);
     }
 
     private static async Task<IResult> LikePostAsync(
@@ -60,6 +71,7 @@ internal static class PostEndpoints
         return outcome == LikeOutcome.MissingPost
             ? Error(404, "post not found")
             : Results.Json(new LikeResponse(true, outcome == LikeOutcome.AlreadyLiked, postId),
+                ApiJsonContext.Default.LikeResponse,
                 statusCode: outcome == LikeOutcome.Created ? 201 : 200);
     }
 

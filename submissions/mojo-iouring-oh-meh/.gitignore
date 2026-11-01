@@ -1,0 +1,5 @@
+bin/
+third_party/
+*.o
+*.a
+__pycache__/

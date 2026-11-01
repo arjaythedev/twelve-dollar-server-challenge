@@ -12,6 +12,10 @@ if (!int.TryParse(Environment.GetEnvironmentVariable("PORT"), out int port)) {
     port = 3000;
 }
 
+// .NET opens stderr on first use, which needs a free file descriptor. Opening it now means a
+// later error report cannot fail for lack of one, however many connections are open.
+Console.Error.Flush();
+
 Db db = new(sqlitePath);
 Api api = new(db, new Jwt(Encoding.UTF8.GetBytes(secret)));
 Server server = new(host, port, api, db);

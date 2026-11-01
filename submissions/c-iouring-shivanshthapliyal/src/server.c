@@ -23,11 +23,12 @@
 #include "sqlite_bt.h"
 
 #define MAX_RINGS 8
-#define NBUF 1024
-#define BUF_SZ 2048
+#define NBUF 4096  // receive buffers per ring: a burst after a stall drains sockets in few passes
+#define BUF_SZ 1024  // requests are 40-400 bytes; larger ones span buffers
 #define BGID 0
 #define SQ_ENTRIES 4096
-#define CQ_ENTRIES 16384
+#define CQ_ENTRIES 65536  // a burst never spills to the kernel overflow list
+#define NLISTEN 8  // SO_REUSEPORT listeners: 8 accept queues ride out a stall
 #define JOBS_CAP 4096
 #define MAX_HDR 16384
 #define MAX_REQ (64 * 1024)
@@ -75,7 +76,7 @@ typedef struct {
 } ring_t;
 
 static ring_t R[MAX_RINGS];
-static int nrings, accept_ring, listen_fd, accept_paused;
+static int nrings, accept_ring, accept_paused, listen_fds[NLISTEN];
 static uint16_t accept_epoch;
 static uint32_t slots_per_ring;
 static void arm_accept(int r);
@@ -670,7 +671,7 @@ static void db_open(const char *path, const char *vfs) {
   }
   sqlite3_finalize(jm);
   exec("PRAGMA synchronous=NORMAL");
-  exec("PRAGMA cache_size=-32768");  // 32 MiB: the hot set plus room, so page misses stay rare
+  exec("PRAGMA cache_size=-8192");  // 8 MiB: the hot set is ~2 MB; the rest is better left to sockets
   exec("PRAGMA mmap_size=0");
   exec("PRAGMA temp_store=MEMORY");
   exec("PRAGMA wal_autocheckpoint=0");
@@ -1252,11 +1253,17 @@ static void on_data(int r, uint32_t slot, const char *d, uint32_t n) {
 
 // ---------------------------------------------------------------- rings, accept, completions
 
-// Each arm gets a new epoch, so a late -ECANCELED from an older arm cannot disturb the current one.
-static void arm_accept(int r) {
+static void arm_listener(int r, int i) {
   struct io_uring_sqe *s = sqe_get(r);
-  io_uring_prep_multishot_accept_direct(s, listen_fd, NULL, NULL, 0);
-  io_uring_sqe_set_data64(s, UD(OP_ACCEPT, r, ++accept_epoch, 0));
+  io_uring_prep_multishot_accept_direct(s, listen_fds[i], NULL, NULL, 0);
+  io_uring_sqe_set_data64(s, UD(OP_ACCEPT, r, accept_epoch, i));
+}
+
+// One multishot accept per listener, all on ring r. Each arm gets a new epoch, so a late -ECANCELED
+// from an older arm cannot disturb the current one.
+static void arm_accept(int r) {
+  ++accept_epoch;
+  for (int i = 0; i < NLISTEN; i++) arm_listener(r, i);
   R[r].accept_armed = 1;
   accept_ring = r;
   accept_paused = 0;
@@ -1306,9 +1313,11 @@ static int pick_accept_ring(void) {
 static void move_accept(void) {
   int old = accept_ring;
   if (R[old].accept_armed) {
-    struct io_uring_sqe *s = sqe_get(old);
-    io_uring_prep_cancel64(s, UD(OP_ACCEPT, old, accept_epoch, 0), 0);
-    io_uring_sqe_set_data64(s, UD(OP_CANCEL, old, 0, 0));
+    for (int i = 0; i < NLISTEN; i++) {
+      struct io_uring_sqe *s = sqe_get(old);
+      io_uring_prep_cancel64(s, UD(OP_ACCEPT, old, accept_epoch, i), 0);
+      io_uring_sqe_set_data64(s, UD(OP_CANCEL, old, 0, 0));
+    }
     R[old].accept_armed = 0;
   }
   int r = pick_accept_ring();
@@ -1342,10 +1351,7 @@ static void handle_cqe(int r, struct io_uring_cqe *cqe) {
         move_accept();
         return;
       }
-      if (!(cqe->flags & IORING_CQE_F_MORE) && cur) {
-        g->accept_armed = 0;
-        if (res != -ECANCELED) arm_accept(r);
-      }
+      if (!(cqe->flags & IORING_CQE_F_MORE) && cur && res != -ECANCELED) arm_listener(r, (int)slot);  // re-arm that listener
       return;
     }
     case OP_RECV: {
@@ -1469,6 +1475,7 @@ static void process_pending(void) {
 static int setup_listener(const char *host, int port) {
   int fd = socket(AF_INET, SOCK_STREAM, 0), one = 1;
   setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+  setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof one);
   setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
   struct sockaddr_in a = {.sin_family = AF_INET, .sin_port = htons(port)};
   if (inet_pton(AF_INET, host, &a.sin_addr) != 1) { fprintf(stderr, "bad HOST %s\n", host); exit(1); }
@@ -1492,7 +1499,7 @@ int main(void) {
   struct rlimit rl;
   getrlimit(RLIMIT_NOFILE, &rl);
   slots_per_ring = rl.rlim_cur < SLOTS_MAX ? (uint32_t)rl.rlim_cur : SLOTS_MAX;
-  listen_fd = setup_listener(host ? host : "0.0.0.0", port ? atoi(port) : 3000);
+  for (int i = 0; i < NLISTEN; i++) listen_fds[i] = setup_listener(host ? host : "0.0.0.0", port ? atoi(port) : 3000);
   if (ring_create() < 0) return 1;
   arm_accept(0);
   fprintf(stderr, "listening on %s:%s\n", host ? host : "0.0.0.0", port ? port : "3000");

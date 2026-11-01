@@ -1,0 +1,14 @@
+# yaml-language-server: $schema=../schema/config.schema.json
+allow_file_actions: true
+seed: 42
+stages:
+  - { duration: __RAMP_UP__, target: __VUS__ }
+  - { duration: __DURATION__, target: __VUS__ }
+  - { duration: __RAMP_DOWN__, target: 0 }
+after:
+  - name: challenge SLO
+    use: std/thresholds@v1
+    with:
+      http_req_duration: ["p95<500", "p99<1000"]
+      http_req_failed: ["rate<0.01"]
+    severity: fail

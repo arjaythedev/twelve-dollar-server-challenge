@@ -25,20 +25,20 @@ One event-loop thread of C on raw io_uring, with SQLite compiled into the same b
 ## SQLite
 
 - Both connections use the `unix-excl` VFS: an exclusive file lock for this process, with the WAL index in heap memory shared by the two connections.
-- Pragmas: `journal_mode=WAL`, `synchronous=NORMAL`, `cache_size=-65536` (64 MiB), `mmap_size=0`, `temp_store=MEMORY`, `wal_autocheckpoint=0`, `journal_size_limit=64 MiB`.
+- Pragmas: `journal_mode=WAL`, `synchronous=NORMAL`, `cache_size=-16384` (16 MiB; the hot set is about 2 MB), `mmap_size=0`, `temp_store=MEMORY`, `wal_autocheckpoint=0`, `journal_size_limit=64 MiB`.
 - **Checkpoints never fsync on the loop.** When the WAL passes 8,192 frames, the checkpoint thread runs a passive checkpoint (pass 1: the bulk copy and its fsyncs). It then asks the loop to hold writes; reads go on. Pass 2 copies the few frames written meanwhile. The thread then makes the first commit into the fresh WAL, `PRAGMA user_version` set to its current value (no table or row changes), because that commit fsyncs the new WAL header. The hold ends and the loop commits into a WAL that is already synced. A hold lasts at most 250 ms (never cut during that last transaction). The WAL stays under about 36 MB.
 - All statements are prepared once (`SQLITE_PREPARE_PERSISTENT`) and reused.
 - Build flags: `THREADSAFE=2 DEFAULT_MEMSTATUS=0 OMIT_DEPRECATED OMIT_SHARED_CACHE OMIT_LOAD_EXTENSION USE_ALLOCA DQS=0 DEFAULT_WAL_SYNCHRONOUS=1 MAX_EXPR_DEPTH=0 OMIT_PROGRESS_CALLBACK OMIT_AUTOINIT LIKE_DOESNT_MATCH_BLOBS`.
 
-## Queries
+## Reads
 
-- **Feed**, three plain SQL statements:
-  1. `SELECT id FROM posts ORDER BY created_at DESC, id DESC LIMIT 20` (covering index scan).
-  2. `SELECT post_id, count(*) FROM likes WHERE post_id BETWEEN ? AND ? GROUP BY post_id`.
-  3. `SELECT p.id, p.body, p.created_at, u.username FROM posts p JOIN users u ON u.id = p.user_id WHERE p.id BETWEEN ? AND ?`.
+`GET /feed` and `GET /posts/:id` read through SQLite's own B-tree cursor API (allowed by the 2026-10-31 ruling, rules 2/3), in `src/sqlite_bt.c`. That file includes the unmodified amalgamation; SQLite's source is not patched. Each batch's read phase opens one read transaction (`BEGIN`, then `sqlite3BtreeBeginTrans`) and its cursors; `COMMIT` ends it.
 
-  Rows from steps 2 and 3 are matched to the 20 ids from step 1, and the output follows step 1's order. Rows outside the id set are skipped. If the ids span 256 or more, or a post has no author row, the server runs the reference query from SPEC.md instead. No assumption about dense ids or `created_at` order is needed for correctness.
-- **Post:** the reference join with a correlated `count(*)`.
+- **Feed:** walk `posts_created_at_id_idx` from its first entry. The index is `(created_at DESC, id DESC)`, so its b-tree order is exactly the feed's order, with no assumption about ids or timestamps. For each entry, load the post row by rowid (a step back when the next id is one lower) and its author from `users`; a post without an author row is skipped, as the reference query's inner join does. Stop at 20 posts. Like counts come from `likes_post_id_idx`: one range scan when the 20 ids lie within 256 of each other, otherwise one seek per post.
+- **Post:** the post row, its author and its like count, the same way.
+- **Fallback:** any surprise (an overflow page, a malformed record, an error) makes the request use plain SQL instead: the reference queries from SPEC.md, with the feed's ids first taken from the covering index.
+
+## Writes
 - **Like:** `SELECT 1 FROM posts WHERE id = ?` (404 if missing), then `INSERT … ON CONFLICT (user_id, post_id) DO NOTHING`; `sqlite3_changes()` picks 201 or 200.
 - **Create:** `INSERT INTO posts (user_id, body) VALUES (?, ?) RETURNING id, created_at`. `created_at` comes from the column default.
 
@@ -52,6 +52,6 @@ One event-loop thread of C on raw io_uring, with SQLite compiled into the same b
 ## Rule notes
 
 - No caches of any kind: every request reads SQLite while it is served. No response, query-result or JWT caches.
-- Plain SQL only: no SQLite internals, no B-tree cursors, no source patches.
+- Unmodified SQLite 3.54.1: reads use its public B-tree cursor API (allowed, 2026-10-31 ruling), writes use plain SQL. No source patches, no own engine for the file format.
 - No load shedding, no error budgets, no memory-pressure tricks, nothing tuned to the load test.
 - Configured only by `SQLITE_PATH`, `JWT_SECRET`, `HOST` and `PORT`.

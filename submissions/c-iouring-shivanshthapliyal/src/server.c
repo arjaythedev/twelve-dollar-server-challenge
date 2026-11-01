@@ -20,6 +20,7 @@
 #include <stdatomic.h>
 
 #include "sqlite3.h"
+#include "sqlite_bt.h"
 
 #define MAX_RINGS 8
 #define NBUF 1024
@@ -553,6 +554,7 @@ static sqlite3 *db;
 static sqlite3_stmt *st_ids, *st_rows, *st_likes, *st_feed, *st_post, *st_exists, *st_like, *st_create, *st_one;
 static sqlite3_stmt *st_begin, *st_begin_w, *st_commit, *st_rollback;
 static int wal_frames;
+static int bt_on, bt_ok;  // B-tree read path available / open for the current read phase
 
 static sqlite3_stmt *prep(const char *sql) {
   sqlite3_stmt *s;
@@ -666,7 +668,7 @@ static void db_open(const char *path) {
   }
   sqlite3_finalize(jm);
   exec("PRAGMA synchronous=NORMAL");
-  exec("PRAGMA cache_size=-65536");
+  exec("PRAGMA cache_size=-16384");  // hot set is ~2 MB; more would duplicate the OS page cache
   exec("PRAGMA mmap_size=0");
   exec("PRAGMA temp_store=MEMORY");
   exec("PRAGMA wal_autocheckpoint=0");
@@ -694,13 +696,29 @@ static void db_open(const char *path) {
   st_begin_w = prep("BEGIN IMMEDIATE");
   st_commit = prep("COMMIT");
   st_rollback = prep("ROLLBACK");
+  bt_on = bt_init(db) == 0;
+  if (!bt_on) fprintf(stderr, "B-tree read path unavailable; using SQL\n");
 }
 
 #define TXT(s, i) (const char *)sqlite3_column_text(s, i), sqlite3_column_bytes(s, i)
 
 static ob_t scratch;
+static char btbuf[65536];
 
 static int do_feed(ob_t *o) {
+  if (bt_ok) {
+    bt_post ps[20];
+    int np;
+    if (bt_feed(ps, &np, btbuf, sizeof btbuf) == 0) {
+      OB_LIT(o, "{\"posts\":[");
+      for (int k = 0; k < np; k++) {
+        if (k) OB_LIT(o, ",");
+        ob_post(o, ps[k].id, ps[k].body, ps[k].bl, ps[k].ca, ps[k].cl, ps[k].au, ps[k].al, ps[k].likes);
+      }
+      OB_LIT(o, "]}");
+      return 0;
+    }
+  }
   int64_t ids[20];
   int n = 0, rc;
   while (n < 20 && (rc = sqlite3_step(st_ids)) == SQLITE_ROW) ids[n++] = sqlite3_column_int64(st_ids, 0);
@@ -768,6 +786,19 @@ static void run_read(job_t *j) {
       job_finish(j, &o, 200);
       return;
     case J_POST:
+      if (bt_ok) {
+        bt_post p;
+        int k = bt_post_get(j->post_id, &p, btbuf, sizeof btbuf);
+        if (k == 0) { job_error(j, 404, "post not found"); return; }
+        if (k == 1) {
+          ob_init(&o, 1024);
+          OB_LIT(&o, "{\"post\":");
+          ob_post(&o, p.id, p.body, p.bl, p.ca, p.cl, p.au, p.al, p.likes);
+          OB_LIT(&o, "}");
+          job_finish(j, &o, 200);
+          return;
+        }
+      }
       sqlite3_bind_int64(st_post, 1, j->post_id);
       rc = sqlite3_step(st_post);
       if (rc == SQLITE_ROW) {
@@ -1390,12 +1421,16 @@ static void run_batch(void) {
   for (int i = 0; i < njobs; i++) {
     job_t *j = &jobs[i];
     if (j->kind == J_FEED || j->kind == J_POST || j->kind == J_HEALTH) {
-      if (!began) began = run(st_begin) == SQLITE_OK ? 1 : -1;
+      if (!began) {
+        began = run(st_begin) == SQLITE_OK ? 1 : -1;
+        bt_ok = began == 1 && bt_on && bt_begin() == 0;
+      }
       run_read(j);
     } else if (j->kind == J_ERR) {
       job_error(j, j->status, j->err);
     }
   }
+  if (bt_ok) bt_end(), bt_ok = 0;  // cursors must be closed before COMMIT ends the read transaction
   if (began == 1) run(st_commit);
   for (int i = 0; i < njobs; i++) {
     job_t *j = &jobs[i];

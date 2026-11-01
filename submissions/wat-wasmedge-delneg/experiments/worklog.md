@@ -256,3 +256,18 @@ each fd has a generation (GEN at 0x144000, bumped on close) and the record keeps
 -25% fsyncs. The WAL volume follows the number of writes more than the number of commits: a like
 dirties random leaves of two indexes. 5 ms: no better CPU, and the closed-loop users get fewer
 requests in. The median latency cost (2.5 ms) is nothing next to the 500 ms p95 budget.
+
+## E14: SIMD fast path in the JSON string writer; fixed lengths for constant strings (1 Nov) — kept
+Profile of E13 (perf record, names from a `--debug-names` / `wasm-merge -g` copy): kernel 46%, app.so
+42%, libwasmedge 7.7% + libc 3.7% (host-call path: rwlock, free). In app.so: sqlite3BtreeTableMoveto
+5.9, putjson 5.0, bt_post_out 3.8, pcache1Fetch 2.6, record 2.5, sha_block only 0.6. `putjson` escaped
+byte by byte; `$puts` ran strlen over each constant. Now putjson copies 16 bytes at a time with one
+v128 compare while none is '"', '\\' or < 0x20 (then byte by byte as before), and the feed's field
+names and the Content-Type header are written with their lengths. Responses identical to E13
+(`cmp.py`: /feed + 182 GET /posts/:id hashed, plus 7 POSTed bodies with quotes, backslashes, control
+characters and UTF-8 read back through /posts/:id and /feed). 42/42. pstat, 4000 x0.013, 3 reps:
+| variant | task-clock us/req | user cycles | user instr |
+|---|---|---|---|
+| E13 | 14.60, 14.51, 14.33 | 27.6k-28.2k | 76.2k |
+| E14 | 13.43, 13.57, 13.74 | 24.7k-24.9k | 66.3k |
+-6% CPU per request, -13% user instructions.

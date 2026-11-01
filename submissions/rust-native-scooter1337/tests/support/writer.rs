@@ -1,6 +1,42 @@
 use super::*;
 
 #[test]
+fn request_capacity_stays_charged_until_reply_consumption() {
+    let (tx, requests) = mpsc::sync_channel(2);
+    let sender = WriteSender { tx, thread: thread::current(), bytes: Rc::new(Cell::new(0)) };
+    let other_ring = sender.clone();
+    for _ in 0..2 {
+        assert!(sender.try_send(WriteJob {
+            request: Vec::with_capacity(REQUEST_BYTES / 2 + SMALL_REQUEST), ..Default::default()
+        }).is_ok());
+    }
+    let active = requests.try_recv().unwrap();
+    // Dequeuing into the writer batch does not free the shared byte budget.
+    assert!(!other_ring.available(SMALL_REQUEST + 1));
+    assert!(matches!(other_ring.try_send(WriteJob {
+        request: Vec::with_capacity(SMALL_REQUEST + 1), ..Default::default()
+    }), Err(TrySendError::Full(_))));
+    // Small buffers remain bounded by queue slots when the excess budget is full.
+    assert!(other_ring.available(SMALL_REQUEST));
+    assert!(other_ring.try_send(WriteJob {
+        request: Vec::with_capacity(16), ..Default::default()
+    }).is_ok());
+    assert_eq!(sender.bytes.get(), REQUEST_BYTES);
+    sender.completed(&active);
+    let used = sender.bytes.get();
+    // A job-count-full channel must not leak a byte reservation either.
+    assert!(matches!(sender.try_send(WriteJob {
+        request: Vec::with_capacity(SMALL_REQUEST + 32), ..Default::default()
+    }), Err(TrySendError::Full(_))));
+    assert_eq!(sender.bytes.get(), used);
+    for job in requests.try_iter() { sender.completed(&job); }
+    assert_eq!(sender.bytes.get(), 0);
+    drop(requests);
+    assert!(matches!(sender.try_send(WriteJob::default()), Err(TrySendError::Disconnected(_))));
+    assert_eq!(sender.bytes.get(), 0);
+}
+
+#[test]
 #[ignore = "requires a disposable seeded SQLITE_PATH and CHECK_TOKEN"]
 fn responses_follow_commit_and_failed_batches_leave_no_rows() {
     let _fixture = crate::SEEDED_TEST.lock().unwrap();

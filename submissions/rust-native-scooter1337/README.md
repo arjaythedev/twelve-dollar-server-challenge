@@ -27,7 +27,11 @@ amalgamation. Record decoding, query plans, HTTP, JSON and authentication are Ru
   their final completion; generations reject completions for reused slots.
 - A dedicated SQLite owner executes POSTs and commits while the issuer serves
   live reads through its own connection. Bounded queues transfer owned request
-  and response buffers, reused from pools. Writes gather for 20 ms before opening
+  and response buffers, reused from pools. Queue slots cover up to 4 KiB per job;
+  all rings share a 32 MiB budget for capacity above that. Across both 8,192-job
+  queues and the 1,024-job batch, outstanding raw-request capacity is at most
+  100 MiB, including executing jobs and pending replies.
+  Writes gather for 20 ms before opening
   a transaction, then execute at most 1,024 queued requests. Responses wait for
   successful commit; failed commits replace tentative replies with errors.
 - Each connection's pipeline waits for its write response before serving the next
@@ -56,19 +60,21 @@ python3 submissions/rust-native-scooter1337/tests/native_oracle.py \
 
 The SQL oracle covers sparse IDs, unordered/tied timestamps, overflow records,
 escaped UTF-8, committed writes and recovery after process termination.
-The production binary passes all 42 repository checks, 15 Rust tests, the SQL
+The production binary passes all 42 repository checks, 17 Rust tests, the SQL
 oracle, six feed checks and 96 protocol/recovery checks.
 Protocol checks cover 15,000 simultaneous connections, original sockets reused
 after 66 seconds idle, commit failures and recovery after SIGKILL. Regression
 checks cover checkpoint-held and asynchronously queued writes across EOF,
-commit-before-publication, failed-batch rollback, pipelines and reused slots.
+commit-before-publication, failed-batch rollback, pipelines, reused slots, shared
+request-byte backpressure and prompt descriptor release after closing EOF.
 
 The last [official result, #238](https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/238#issuecomment-6553794291),
 is **210,000 users**. Local MEGASERVER comparisons use a one-CPU server quota,
 2 GiB/no swap and a 65,535 descriptor hard limit. The host OS has multiple CPUs;
 these diagnostics do not establish an official VM score.
 
-Local comparison against the merged #238 binary, using fresh seeds, the unchanged
+Local comparison of dedicated-writer revision `a613014` against the merged #238
+binary, using fresh seeds, the unchanged
 `bench/load.js`, its standard 60-second ramp and a five-minute hold at 100k users:
 
 | Version | Requests | p95 | p99 | Failed requests/checks |
@@ -92,3 +98,8 @@ req/s (+4.9%). These use 1,024 clients without think time and nominal one-minute
 work pending at cutoff counts as failure. Batching increases saturated p95 from
 23–26 ms to 51–52 ms; p99 ranges 151–189 ms versus 135–151 ms. These diagnostics
 measure throughput and its latency tradeoff, not the challenge's user score.
+
+The request-budget and closing-EOF follow-up retains the full correctness suite.
+Four reversed one-minute saturation runs average 61,667 versus 61,737 completed
+req/s (-0.11%, within the 0.5% regression tolerance). These review checks are
+separate from the five-minute `a613014` results above.

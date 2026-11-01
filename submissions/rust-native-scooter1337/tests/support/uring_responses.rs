@@ -241,3 +241,28 @@ fn queued_write_survives_receive_eof() {
     }
     std::fs::remove_file(path).unwrap();
 }
+
+#[test]
+#[ignore = "requires a seeded SQLITE_PATH and Linux io_uring"]
+fn closing_eof_releases_pipelined_input_without_idle_sweep() {
+    let _fixture = crate::SEEDED_TEST.lock().unwrap();
+    let mut app = App {
+        db: crate::db::Db::open(&std::env::var("SQLITE_PATH").unwrap(), true),
+        auth: crate::Auth::new("twelve-dollar-challenge"),
+        start: Instant::now(),
+    };
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let mut worker = Worker::new(listener.as_raw_fd(), 4096).unwrap();
+    let mut client = Client {
+        generation: 7, state: LIVE | CLOSING | RECEIVING | SHUT, ..Default::default()
+    };
+    client.input.extend(b"GET /feed HTTP/1.1\r\nHost: test\r\n\r\n");
+    worker.clients.push(client);
+    worker.open = 1;
+    worker.on_recv(0, 7, 0, 0, &mut app);
+    assert_eq!(worker.open, 0);
+    assert_eq!(worker.clients[0].state, 0);
+    assert_eq!(worker.clients[0].generation, 8);
+    assert_eq!(worker.clients[0].input.cap, 0);
+    assert!(worker.ready.is_empty());
+}

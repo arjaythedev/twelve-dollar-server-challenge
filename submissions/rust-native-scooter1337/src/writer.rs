@@ -1,16 +1,27 @@
 //! Owned request buffers cross bounded queues; SQLite connections stay thread-local.
 use crate::{App, Auth, Parsed, db, error, frame};
 use std::{
+    cell::Cell,
     io,
     os::fd::{AsRawFd, FromRawFd, OwnedFd},
+    rc::Rc,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
-        mpsc::{self, Receiver, SyncSender},
+        mpsc::{self, Receiver, SyncSender, TrySendError},
     },
     thread::{self, JoinHandle, Thread},
     time::{Duration, Instant},
 };
+
+// Two 8,192-job queues and one 1,024-job batch permit at most 68 MiB
+// of small-buffer capacity. Charging all excess caps outstanding requests
+// at 100 MiB while the usual small writes need no counter updates.
+const SMALL_REQUEST: usize = 4096;
+const REQUEST_BYTES: usize = 32 * 1024 * 1024;
+const QUEUE_JOBS: usize = 8192;
+const BATCH_JOBS: usize = 1024;
+const _: () = assert!((2 * QUEUE_JOBS + BATCH_JOBS) * SMALL_REQUEST + REQUEST_BYTES <= 100 * 1024 * 1024);
 
 #[derive(Default)]
 pub(crate) struct WriteJob {
@@ -25,8 +36,44 @@ pub(crate) struct WriteJob {
 
 #[derive(Clone)]
 pub(crate) struct WriteSender {
-    pub tx: SyncSender<WriteJob>,
-    pub thread: Thread,
+    tx: SyncSender<WriteJob>,
+    thread: Thread,
+    // Only the issuer admits jobs and consumes replies. Sharing this counter
+    // across its rings needs no atomics or allocation per request.
+    bytes: Rc<Cell<usize>>,
+}
+
+impl WriteSender {
+    #[inline(always)]
+    pub fn available(&self, bytes: usize) -> bool {
+        let bytes = bytes.saturating_sub(SMALL_REQUEST);
+        bytes == 0 || (bytes <= REQUEST_BYTES && self.bytes.get() <= REQUEST_BYTES - bytes)
+    }
+
+    pub fn try_send(&self, job: WriteJob) -> Result<(), TrySendError<WriteJob>> {
+        let capacity = job.request.capacity();
+        let bytes = capacity.saturating_sub(SMALL_REQUEST);
+        if !self.available(capacity) {
+            return Err(TrySendError::Full(job));
+        }
+        self.tx.try_send(job)?;
+        if bytes != 0 {
+            self.bytes.set(self.bytes.get() + bytes);
+        }
+        self.thread.unpark();
+        Ok(())
+    }
+
+    #[inline(always)]
+    pub fn completed(&self, job: &WriteJob) {
+        // Keep the charge through execution and the reply queue, including
+        // replies whose connection has already closed or reused its slot.
+        let bytes = job.request.capacity().saturating_sub(SMALL_REQUEST);
+        if bytes != 0 {
+            self.bytes.set(self.bytes.get().checked_sub(bytes)
+                .expect("outstanding write bytes"));
+        }
+    }
 }
 
 pub(crate) struct Writer {
@@ -55,8 +102,8 @@ impl Writer {
         let wake = Arc::clone(&signal);
         let stop = Arc::new(AtomicBool::new(false));
         let stopped = Arc::clone(&stop);
-        let (tx, requests) = mpsc::sync_channel::<WriteJob>(8192);
-        let (replies, rx) = mpsc::sync_channel::<WriteJob>(8192);
+        let (tx, requests) = mpsc::sync_channel::<WriteJob>(QUEUE_JOBS);
+        let (replies, rx) = mpsc::sync_channel::<WriteJob>(QUEUE_JOBS);
         let (ready, started) = mpsc::sync_channel(1);
         let worker = thread::Builder::new()
             .name("sqlite-writer".into())
@@ -64,7 +111,7 @@ impl Writer {
             .spawn(move || {
                 let mut app = init();
                 ready.send(()).expect("writer startup receiver");
-                let mut batch = Vec::with_capacity(1024);
+                let mut batch = Vec::with_capacity(BATCH_JOBS);
                 while !stopped.load(Ordering::Acquire) {
                     app.db.checkpoint_async();
                     if app.db.draining() {
@@ -85,7 +132,7 @@ impl Writer {
                     // elapsed wall time must not fragment an already ready batch.
                     if app.db.group {
                         thread::sleep(Duration::from_millis(20));
-                        batch.extend(requests.try_iter().take(1023));
+                        batch.extend(requests.try_iter().take(BATCH_JOBS - 1));
                     }
                     for job in &mut batch {
                         let Parsed::Complete(req) =
@@ -133,6 +180,7 @@ impl Writer {
             sender: WriteSender {
                 tx,
                 thread: worker.thread().clone(),
+                bytes: Rc::new(Cell::new(0)),
             },
             replies: Some(rx),
             signal,

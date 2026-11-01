@@ -541,7 +541,8 @@ impl Worker {
             match frame(&input[offset..]) {
                 Ok(Parsed::Complete(req)) => {
                     if req.method == "POST" && self.writer.is_some() {
-                        if self.writer_full {
+                        if self.writer_full || !self.writer.as_ref().unwrap().available(req.consumed) {
+                            self.writer_full = true;
                             held = true;
                             deferred = true;
                             break;
@@ -554,10 +555,9 @@ impl Worker {
                         job.request.clear();
                         job.request.extend_from_slice(&input[offset..offset + req.consumed]);
                         let writer = self.writer.as_ref().unwrap();
-                        match writer.tx.try_send(job) {
+                        match writer.try_send(job) {
                             Ok(()) => {
                                 self.clients[fd].state = (self.clients[fd].state | WRITING) & !CONTINUED;
-                                writer.thread.unpark();
                                 offset += req.consumed;
                                 deferred = true;
                             }
@@ -707,7 +707,8 @@ impl Worker {
                     };
                     self.process(fd, bytes, app);
                 }
-            } else if result == 0 && (self.clients[fd].input.len != 0 || self.clients[fd].state & WRITING != 0) {
+            } else if result == 0 && self.clients[fd].state & CLOSING == 0
+                && (self.clients[fd].input.len != 0 || self.clients[fd].state & WRITING != 0) {
                 self.clients[fd].state |= EOF;
                 self.schedule(fd);
             } else if (result != -libc::ENOBUFS && result != -libc::ECANCELED)
@@ -907,6 +908,9 @@ impl Worker {
     }
 
     fn written(&mut self, mut job: WriteJob) {
+        if let Some(writer) = &self.writer {
+            writer.completed(&job);
+        }
         self.writer_full = false;
         let fd = job.fd;
         if fd < self.clients.len() && self.clients[fd].generation == job.generation

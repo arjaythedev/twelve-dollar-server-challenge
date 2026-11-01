@@ -102,3 +102,31 @@ than the effect. `--cache` (E5's flag) taken out again; it was never kept.
 
 From 1 Nov the bar for a push (Opt): clearly lower p95/p99 at load, with at most ~2 % more µs/req, over 2+ runs, 42/42.
 So the next A/B runs at the knee (340k), where the tails come from CPU.
+
+## E10: 340k A/B, B8 (= 4b18d6d: E7 + E9) vs B3 (1fe6941); E11: checkpoint pass every 2000 frames (`--ckpt=2000`)
+
+At 340k the run is a closed loop at the CPU limit: response time is about N/X − think time, so a 1 % capacity shortfall
+turns straight into latency and runs come out bimodal (they keep up or tip over). Hold p95/p99 ms:
+
+| run | B3 | B8 | B8 `--ckpt=2000` |
+|---|---|---|---|
+| 1 | 26.19 µs, 93.5 %, 416 / 766 | 25.16 µs, 90.4 %, 32 / 95 | 23.78 µs, 85.5 %, 31 / 144 |
+| 2 | 26.60 µs, 95.0 %, 140 / 545 | 26.12 µs, 91.9 %, 979 / 3,064 FAIL (steal 74 ticks vs ~35) | 25.47 µs, 91.3 %, 183 / 338 |
+| 3 | | 26.35 µs, 93.5 %, 553 / 1,028 | |
+| 4 | | 25.87 µs, 92.8 %, 130 / 222 | |
+
+TCP retransmits and timeouts are the same in every run (10–20 SYN retransmits). `--ckpt` is the number of new WAL frames
+between passive checkpoint requests to the checkpointer process; 250 was chosen when checkpoints still ran inside the
+loop (shorter stalls). In the child, each pass costs a WAL read, page writes and two fsyncs in the same 1-CPU cgroup,
+and a longer interval copies a hot page once instead of once per pass. chain-u11: `--ckpt=4000`, B8, `--ckpt=2000`.
+
+## E11 result and push: fac5f79 (B9 = B8 + `--ckpass=2000`)
+
+More 340k runs: B8 26.10 / 25.84 (p95 432 / 35); `--ckpt=2000` 24.88 / 26.26 (p95 88 / 440); `--ckpt=4000` 24.37 /
+25.73 (p95 41 / 202). The interval became its own flag, `--ckpass` (default 2000); `--ckpt` stays 250 for the inline
+fallback. 42/42; diff 0 of 1,191, also with `--hold=40` (54 holds).
+
+Final interleaved A/B at 340k (chain-u12), B9 vs B3 (`1fe6941`, the pushed head), µs/req, CPU, hold p95 / p99 ms:
+pair 1 25.50, 91.6 %, 41 / 117 vs 27.01, 96.9 %, 61 / 165; pair 2 26.42, 94.9 %, 55 / 112 vs 27.33, 97.9 %, 161 / 251
+(steal 98 ticks in that B3 run); pair 3 25.53, 91.7 %, 52 / 212 vs 26.97, 96.8 %, 71 / 216. All pass. Lower p95 and p99
+in every pair and −4.7 % µs/req: meets the 1 Nov bar. Pushed.

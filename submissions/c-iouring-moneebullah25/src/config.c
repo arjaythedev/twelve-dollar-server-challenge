@@ -24,9 +24,10 @@ void config_defaults(struct config *c) {
     c->max_head = 8192;
     c->max_body = 16384;
     c->partial_timeout_s = 30;
-    c->shed_hi_mb = 450;
-    c->shed_lo_mb = 200;
-    c->conn_cap = 260000;
+    c->shed_hi_mb = 0;  /* off: closing connections to shed load was net harmful locally; set 450 to re-enable */
+    c->shed_lo_mb = 0;
+    c->conn_cap = 0;   /* off; set 260000 to re-enable */
+    c->hard_conn_cap = 0;
     c->accept_floor_mb = 96;
     c->idle_timeout_s = 60;
     c->shed_force = -1.0;       /* off */
@@ -76,6 +77,7 @@ int config_parse(struct config *c, int argc, char **argv) {
         {"shed-hi-mb", &c->shed_hi_mb, NULL, "no Connection: close above this much available memory"},
         {"shed-lo-mb", &c->shed_lo_mb, NULL, "every response closes at or below this; idle keep-alives are closed"},
         {"conn-cap", &c->conn_cap, NULL, "open connections at which every response closes (shedding from 90%)"},
+        {"hard-conn-cap", &c->hard_conn_cap, NULL, "stop accepting at this many open connections, resume as they close (0 = off)"},
         {"accept-floor-mb", &c->accept_floor_mb, NULL, "pause accepting below this much available memory"},
         {"idle-timeout-s", &c->idle_timeout_s, NULL, "close keep-alives idle this long (0 = never)"},
         {"sqlite-cache-kib", &c->sqlite_cache_kib, NULL, "SQLite page cache"},
@@ -138,7 +140,7 @@ int config_parse(struct config *c, int argc, char **argv) {
     }
     if (c->port <= 0 || c->port > 65535 || c->max_conns == 0 || c->recv_bufs == 0 || c->out_chunks == 0 ||
         c->out_chunk_size < 4096 || c->work_budget == 0 || c->batch_cqes == 0 || c->recv_buf_size < 512 ||
-        c->shed_lo_mb > c->shed_hi_mb || c->conn_cap == 0) {
+        c->shed_lo_mb > c->shed_hi_mb) {
         fprintf(stderr, "invalid configuration\n");
         return -1;
     }

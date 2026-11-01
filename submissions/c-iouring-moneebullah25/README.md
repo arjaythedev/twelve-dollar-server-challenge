@@ -51,15 +51,23 @@ the PGO build (`make pgo`, training on a synthetic database); `start.sh` runs
   `wal_autocheckpoint=0`; passive checkpoints on the nice-10 thread every
   1,000 frames, and a short *write hold* (reads continue) every 8,192 frames
   so the WAL restarts instead of growing without bound.
-- **Shedding**: instead of pausing accepts when memory runs low, responses
-  carry `Connection: close` for a fraction f of requests, so a user holds no
-  socket during its think time and reconnects for its next request. f is the
-  larger of a memory law (0 at or above 450 MB available, 1 at or below
-  200 MB) and a connection-count law (0 at 90% of `--conn-cap`, 1 at the cap;
-  default cap 260,000). Accepting pauses only below 96 MB available. Closes are
-  rate-limited, and keep-alives idle longer than 60 s are closed
-  (`--idle-timeout-s`). This is general memory protection for any client; HTTP
-  clients reconnect transparently after `Connection: close`.
+- **Shedding (available, OFF by default)**: responses can carry
+  `Connection: close` for a fraction f of requests, so a user holds no socket
+  during its think time and reconnects for its next request. f is the larger of
+  a memory law (`--shed-hi-mb` / `--shed-lo-mb`; for example 450 and 200: 0 at
+  or above 450 MB available, 1 at or below 200 MB) and a connection-count law
+  (`--conn-cap`, for example 260,000: 0 at 90% of the cap, 1 at the cap). Both
+  laws are off by default (0), because local testing in a 300 MB cgroup found
+  closing and reconnecting net harmful (docs/RESULTS.md section 9). Only the
+  idle-keep-alive sweep is rate-limited; per-response closes are not.
+  Keep-alives idle longer than 60 s are closed (`--idle-timeout-s`).
+- **Memory guard input and accept floor**: available memory is MemAvailable
+  (less SReclaimable growth) and, under a cgroup `memory.max`, the cgroup
+  headroom computed from anon + kernel + sock in `memory.stat` (page cache is
+  not counted; it falls back to `memory.current` if `memory.stat` is
+  unreadable). Accepting pauses below 96 MB available. `--hard-conn-cap N`
+  (default off) additionally stops accepting at N open connections and resumes
+  as they close.
 - **Stats line**: every 10 s (`--stats-interval-s`, 0 turns it off) the server
   writes one line to stderr (the journal under systemd): open connections,
   request count, cpu_us per request with user and system parts, rss, available

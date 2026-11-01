@@ -892,6 +892,32 @@ def test_shedding(binary, seed):
         check(closes == 0, "no shedding below the thresholds")
     finally:
         srv.cleanup()
+    # optional hard connection cap: accepting stops at the cap and resumes on a close
+    srv = Server(binary, seed, ["--hard-conn-cap", "8"]).start()
+    try:
+        held = []
+        for i in range(8):
+            c = connect(srv.port)
+            request(srv.port, "GET", "/health", sock=c)
+            held.append(c)
+        extra = connect(srv.port)  # completes in the listen backlog
+        extra.sendall(build("GET", "/health"))
+        extra.settimeout(1.0)
+        try:
+            got = extra.recv(1)
+        except socket.timeout:
+            got = None
+        check(not got, "hard-conn-cap: the connection beyond the cap is not served while 8 are open")
+        held.pop().close()
+        held.pop().close()
+        extra.settimeout(10)
+        st, h, b, _ = read_response(extra)
+        check(st == 200, "hard-conn-cap: served once connections close")
+        for c in held:
+            c.close()
+        extra.close()
+    finally:
+        srv.cleanup()
     # idle timeout: a silent keep-alive is closed, an active one is kept
     srv = Server(binary, seed, ["--idle-timeout-s", "1"]).start()
     try:

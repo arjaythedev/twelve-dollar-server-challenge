@@ -10,7 +10,8 @@
 ;;   0x102000  epoll events: 512 x (fd i32, events i32)
 ;;   0x104000  RBUF  read buffer, 128 KiB (a connection's unfinished request is copied in front first)
 ;;   0x124000  BODYB response body being built, 128 KiB
-;;   0x144000  (free)
+;;   0x144000  GEN   per-fd generation, 65536 x i32: bumped on close, so a response held for COMMIT never
+;;                   goes to a later connection that reuses the fd
 ;;   0x184000  CONN  per-fd state, 65536 x 16 bytes: in_ptr, in_len, out_ptr, out_len (malloc'd leftovers)
 ;;   0x284000  JWT scratch: header, payload, SHA-256 state/schedule/pad, HMAC states, tables
 ;;   0x285000  TXT   decoded POST body, 64 KiB
@@ -178,6 +179,10 @@
   (global $maxfd (mut i32) (i32.const 0))
   (global $lastsweep (mut i32) (i32.const 0))
   (global $lis_off (mut i32) (i32.const 0))
+  ;; group commit: the open transaction, the ms it began, and whether it has written anything
+  (global $txopen (mut i32) (i32.const 0))
+  (global $txt0 (mut i32) (i32.const 0))
+  (global $wr (mut i32) (i32.const 0))
   ;; B-tree reads ($bt = 0: off, every read goes through SQL)
   (global $bt (mut i32) (i32.const 0))
   (global $r_posts (mut i32) (i32.const 0))
@@ -1209,6 +1214,7 @@
     (local.set $rc (call $step (global.get $st_exists)))
     (drop (call $reset (global.get $st_exists)))
     (if (i32.ne (local.get $rc) (i32.const 100)) (then (call $err (i32.const 0x100100) (i32.const 0x1002c0)) (return)))
+    (global.set $wr (i32.const 1))
     (drop (call $bind_i64 (global.get $st_like) (i32.const 1) (global.get $uid)))
     (drop (call $bind_i64 (global.get $st_like) (i32.const 2) (local.get $id)))
     (local.set $rc (call $step (global.get $st_like)))
@@ -1257,6 +1263,7 @@
       (local.set $q (i32.add (local.get $q) (i32.const 1)))
       (br_if $l3 (i32.lt_u (local.get $q) (local.get $e))))
     (if (i32.gt_u (local.get $chars) (i32.const 500)) (then (call $err (i32.const 0x100080) (i32.const 0x100440)) (return)))
+    (global.set $wr (i32.const 1))
     (drop (call $bind_i64 (global.get $st_ins) (i32.const 1) (global.get $uid)))
     (drop (call $bind_text (global.get $st_ins) (i32.const 2) (local.get $s) (i32.sub (local.get $e) (local.get $s))))
     (if (i32.ne (call $step (global.get $st_ins)) (i32.const 100))
@@ -1322,6 +1329,8 @@
     (if (i32.load offset=8 (local.get $c)) (then (call $free (i32.load offset=8 (local.get $c)))))
     (v128.store (local.get $c) (v128.const i64x2 0 0))
     (i32.store offset=0x2a0000 (i32.shl (local.get $fd) (i32.const 2)) (i32.const 0))
+    (i32.store offset=0x144000 (i32.shl (local.get $fd) (i32.const 2))
+      (i32.add (i32.load offset=0x144000 (i32.shl (local.get $fd) (i32.const 2))) (i32.const 1)))
     (global.set $nconn (i32.sub (global.get $nconn) (i32.const 1)))
     (drop (call $close (local.get $fd))))
 
@@ -1356,7 +1365,10 @@
 ;; ---------- group commit ----------
   ;; Each epoll batch runs in one transaction. Responses wait in OUTB, and are sent only after COMMIT,
   ;; so no 201 goes out for a row that is not committed.
-  (func $tx_begin (drop (call $step (global.get $st_begin))) (drop (call $reset (global.get $st_begin))))
+  (func $tx_begin
+    (drop (call $step (global.get $st_begin))) (drop (call $reset (global.get $st_begin)))
+    (global.set $txopen (i32.const 1))
+    (global.set $txt0 (global.get $tick)))
 
   ;; note the connection's output since the last call; $cl: close it once that is sent
   (func $rec (param $fd i32) (param $cl i32)
@@ -1366,7 +1378,8 @@
     (i32.store (local.get $r) (local.get $fd))
     (i32.store offset=4 (local.get $r) (global.get $ostart))
     (i32.store offset=8 (local.get $r) (i32.sub (global.get $o) (global.get $ostart)))
-    (i32.store offset=12 (local.get $r) (local.get $cl))
+    (i32.store offset=12 (local.get $r) (i32.or (local.get $cl)
+      (i32.shl (i32.load offset=0x144000 (i32.shl (local.get $fd) (i32.const 2))) (i32.const 1))))
     (global.set $ostart (global.get $o))
     (global.set $nrec (i32.add (global.get $nrec) (i32.const 1))))
 
@@ -1381,15 +1394,18 @@
     (block $d (loop $l
       (br_if $d (i32.ge_u (local.get $i) (global.get $nrec)))
       (local.set $r (i32.add (i32.const 0x300000) (i32.shl (local.get $i) (i32.const 4))))
-      (if (i32.load offset=0x2a0000 (i32.shl (i32.load (local.get $r)) (i32.const 2)))   ;; still open
+      (if (i32.eq (i32.shr_u (i32.load offset=12 (local.get $r)) (i32.const 1))   ;; the same connection, still open
+                  (i32.load offset=0x144000 (i32.shl (i32.load (local.get $r)) (i32.const 2))))
         (then
           (if (local.get $ok)
             (then (call $send_out (i32.load (local.get $r)) (i32.load offset=4 (local.get $r))
-                                  (i32.load offset=8 (local.get $r)) (i32.load offset=12 (local.get $r))))
+                                  (i32.load offset=8 (local.get $r)) (i32.and (i32.load offset=12 (local.get $r)) (i32.const 1))))
             (else (call $close_conn (i32.load (local.get $r)))))))
       (local.set $i (i32.add (local.get $i) (i32.const 1)))
       (br $l)))
     (global.set $nrec (i32.const 0))
+    (global.set $txopen (i32.const 0))
+    (global.set $wr (i32.const 0))
     (global.set $o (i32.const 0x400000))
     (global.set $ostart (i32.const 0x400000)))
 
@@ -1605,7 +1621,7 @@
     (i32.load (i32.const 0x295004)))
 
   (func (export "_start")
-    (local $key i32) (local $path i32) (local $host i32) (local $port i32) (local $n i32) (local $i i32) (local $fd i32)
+    (local $key i32) (local $path i32) (local $host i32) (local $port i32) (local $n i32) (local $i i32) (local $fd i32) (local $w i32)
     (call $sq_init)
     (call $b64init)
     (global.set $t0 (call $now))
@@ -1636,10 +1652,16 @@
     (drop (call $epoll_ctl (global.get $ep) (i32.const 1) (global.get $lfd) (i32.const 1)))
     (call $log (i32.const 0x101080))
     (loop $forever
-      (local.set $n (call $epoll_wait (global.get $ep) (i32.const 0x102000) (i32.const 512) (i32.const 500)))
+      ;; a transaction that has written waits up to WINDOW ms for more writes: fewer commits, fewer WAL
+      ;; frames (a hot page is written once per commit, not once per request) and fewer checkpoints
+      (local.set $n (call $epoll_wait (global.get $ep) (i32.const 0x102000) (i32.const 512)
+        (if (result i32) (global.get $txopen)
+          (then (select (local.tee $w (i32.sub (i32.const 2) (i32.sub (call $clock_ms) (global.get $txt0))))
+                        (i32.const 0) (i32.gt_s (local.get $w) (i32.const 0))))
+          (else (i32.const 500)))))
       (global.set $tick (call $clock_ms))
       (if (i32.eqz (global.get $tick)) (then (global.set $tick (i32.const 1))))   ;; 0 marks a closed fd
-      (call $tx_begin)
+      (if (i32.eqz (global.get $txopen)) (then (call $tx_begin)))
       (if (i32.and (i32.or (i32.gt_s (global.get $nconn) (i32.const 60000)) (global.get $lis_off))
                    (i32.ge_s (i32.sub (global.get $tick) (global.get $lastsweep)) (i32.const 500)))
         (then
@@ -1659,6 +1681,7 @@
             (call $maybe_flush)))
         (local.set $i (i32.add (local.get $i) (i32.const 1)))
         (br $l)))
-      (call $flush)
+      (if (i32.or (i32.eqz (global.get $wr)) (i32.ge_s (i32.sub (call $clock_ms) (global.get $txt0)) (i32.const 2)))
+        (then (call $flush)))
       (br $forever)))
 )

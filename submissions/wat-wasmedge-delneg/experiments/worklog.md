@@ -209,3 +209,50 @@ requests; 42/42. pstat, 4000 users x0.013, 3 interleaved reps:
 -28% CPU per request, user instructions halved. WAT is now ~1.6x the baselines' CPU: user cycles ~2.7x
 theirs, kernel about equal. Their p95 is 1.5-1.9 ms against WAT's ~40 ms: the inline WAL checkpoint
 (both baselines checkpoint off the loop). E11 next.
+
+## E11: smaller WAL checkpoints (`wal_autocheckpoint` 1000 -> 250 / 100) (1 Nov) — discarded
+pstat, 4000 users x0.013, 3 interleaved reps:
+| variant | task-clock us/req | p50 ms | p95 ms | rps |
+|---|---|---|---|---|
+| E10 (1000 pages) | 15.41, 15.33, 15.39 | 0.30 | 38.9-41.1 | 30.4k |
+| 250 pages | 15.78, 14.98, 15.17 | 8.5-8.95 | 28.5-28.7 | 30.0k |
+| 100 pages | 15.15, 14.98, 14.83 | 22.7-23.3 | 39.3-40.1 | 27.4k |
+Shorter stalls but many more, and the median goes from 0.3 to 9-23 ms: each checkpoint costs two
+fsyncs whatever its size. opt-box's disk: fsync of 200 KB takes 16.9 ms (p50, 30 tries). Counting
+syscalls over 15 s (`fsc.sh`, perf tracepoints): E10 makes 240 fsyncs (8 checkpoints/s, ~3.3k
+commits/s), so the loop sits in fsync ~27% of the time; even at ~half CPU this costs 7% of the offered
+load (30.5k vs 32.6k served). A diagnostic build with `synchronous=OFF` (not allowed by rule 6, never
+kept) has p95 0.40 ms and serves all 32.6k. So: fewer checkpoints (E12) or checkpoints off the loop.
+
+## E12: bigger WAL checkpoints (`wal_autocheckpoint` 4000 / 16000) (1 Nov) — discarded
+`fsc.sh` (fsync count over 15 s), 4000 users x0.013, 3 interleaved reps:
+| variant | fsyncs / 15 s | p50 ms | p95 ms | p99 ms | max ms | rps |
+|---|---|---|---|---|---|---|
+| E10 (1000) | 238, 243, 240 | 0.25 | 38.7-40.1 | 45-47 | 54-72 | 30.4k |
+| 4000 | 71, 72, 71 | 0.20 | 69.6-73.9 | 83-88 | 99-143 | 30.2k |
+| 16000 | 18, 18, 18 | 0.15 | 43.5-73.6 | 189-198 | 219-622 | 30.7k |
+Fewer checkpoints, but each copies and fsyncs more distinct pages: ~80 ms at 4000, ~200 ms at 16000.
+Blocked time drops (~27% -> ~19% -> ~12%) but the tail gets worse. Consulted DeepSeek and Gemini on
+moving fsync off the loop (a VFS shim whose xSync hands the fd to a host thread): both say it is
+`synchronous=OFF` in effect (SQLite's noSync path skips exactly those syncs), and the stall would move
+to the next WAL restart anyway. Not doing it. A real off-loop checkpointer needs a shared wal-index
+(wasi-threads, or a host-backed xShm + a native checkpoint thread): big, and C. Cheaper first: write
+less WAL (E13).
+
+## E13: group-commit window of 2 ms; per-fd generation for held responses (1 Nov) — kept
+A transaction that has written stays open across epoll_wait calls (timeout = what is left of the
+window) until 2 ms after it began; one with no writes commits at the end of its batch as before, so
+read-only traffic waits for nothing. Responses are still sent only after COMMIT. Fixes a latent bug the
+longer hold would have made likelier: a held response checked only that its fd was open, so a
+connection closed and its fd reused by an accept in the same batch could get the old response. Now
+each fd has a generation (GEN at 0x144000, bumped on close) and the record keeps it. 42/42.
+4000 users x0.013, 3 interleaved reps each of fsc.sh then pstat.sh:
+| variant | fsyncs / 15 s | task-clock us/req | user / kernel cycles | p50 ms | p95 ms | rps |
+|---|---|---|---|---|---|---|
+| E10 | 237, 240, 243 | 15.43, 15.23, 15.34 | 29.1k / 26.0k | 0.25-0.30 | 37.8-43.9 | 30.3k |
+| E13, 2 ms | 178, 180, 180 | 14.46, 14.33, 14.37 | 27.8k / 24.1k | 2.35-2.5 | 37.3-43.1 | 30.7k |
+| 5 ms | 158, 156, 156 | 15.06, 14.60, 14.31 | 27.5k / 24.2k | 4.7-5.2 | 43.2-47.4 | 29.9k |
+-6% CPU per request (fewer commits: less SQLite commit work and fewer WAL writes and syscalls) and
+-25% fsyncs. The WAL volume follows the number of writes more than the number of commits: a like
+dirties random leaves of two indexes. 5 ms: no better CPU, and the closed-loop users get fewer
+requests in. The median latency cost (2.5 ms) is nothing next to the 500 ms p95 budget.

@@ -11,7 +11,7 @@ writes are prepared SQL with group commit. Nothing on the request path allocates
 | Database | SQLite 3.54.1 amalgamation, SHA-256 pinned, downloaded by `build.sh`; `unix-excl` VFS |
 | Build | `-O3`, static, profile-guided (trained on a synthetic database at build time), AVX-512 kept to 256-bit |
 | **Nginx or direct** | **Direct**: serves `HOST:PORT` itself (`0.0.0.0:80` on the benchmark box) |
-| Needs | Linux 6.1+ (io_uring with provided buffer rings and multishot accept/receive); tested on Ubuntu 24.04's 6.8 |
+| Needs | Linux 6.1+ (io_uring with provided buffer rings, multishot accept and multishot poll); tested on Ubuntu 24.04's 6.8 |
 
 ## Connections
 
@@ -20,18 +20,33 @@ Every user is a keep-alive connection, so the connection count is what the serve
 - Accepted sockets are io_uring direct descriptors, held in each ring's fixed-file table rather than
   the process's descriptor table, so `LimitNOFILE=65535` does not cap them. A table cannot be larger
   than that limit, so the server makes 8 rings of 65,471 slots (over 500,000 connections).
-- One listening socket. Its multishot accept is armed on the ring being filled, and also on the next
-  ring once the first is within 8,192 slots of full, so rings fill in order and only as many are
-  busy as the connection count needs (2 at 120,000 users instead of 8). Every busy ring costs its
-  own system calls each batch; with one `SO_REUSEPORT` listener per ring the kernel spread
-  connections over all eight. A ring's accept is cancelled 4,096 slots before its table is full,
-  because an accept that finds the table full makes the kernel reset that client, and the kernel
-  keeps accepting on its own while the loop is busy (a 1 s stall at 1,700 new connections a second
-  overran a 256-slot margin in a test).
-- Each connection has one multishot receive into a shared provided-buffer ring (2,048 × 2 KB per
-  ring); an idle connection holds no buffer and no heap, only a 40-byte record. The kernel's own
-  per-socket memory (~4.3 KB on 6.8, most of it not charged to the process) is the real ceiling on
-  a 2 GB box, and the 40 bytes are what the server adds to it.
+- Eight listening sockets share the port (`SO_REUSEPORT`). The kernel spreads new connections over
+  them and each has its own accept queue of `somaxconn` (4,096 on the box), so together they hold
+  about 32,000 connections through a stall instead of 4,096. With one listener a run with stalls
+  counted 1.8 million accept-queue overflows, each a SYN the client resends after 1 s and then 3 s;
+  with eight, a ramp to 160,000 users counted none. Their multishot accepts are armed on the ring
+  being filled, and also on the next ring once the first is within 8,192 slots of full, so rings
+  fill in order and only as many are busy as the connection count needs (2 at 120,000 users instead
+  of 8). A ring's accepts are cancelled 4,096 slots before its table is full, because an accept that
+  finds the table full makes the kernel reset that client, and the kernel keeps accepting on its own
+  while the loop is busy.
+- An idle connection waits on a multishot poll and holds no buffer and no heap, only a 40-byte
+  record. When the poll reports it readable it goes on a read queue, and at the end of each batch
+  the loop issues one read per queued connection (`MSG_DONTWAIT`, into a shared provided-buffer
+  ring of 4,096 × 1 KB per ring), never more on a ring than it has free buffers. An earlier version
+  kept a multishot receive armed on every connection instead. After a pause of a second or two the
+  kernel filled every pending receive at once, ran the buffer ring dry, and ended the rest with
+  `ENOBUFS`; each had to be re-armed, found its data waiting and no buffer, and ended again (up to
+  700,000 times in 10 s, with turns of 1–3 s), until the requests waiting in the kernel ran the
+  machine out of memory. The read queue absorbs a burst of any size instead. A poll is also
+  smaller: 263 bytes of kernel memory per idle connection on 6.8 against 360 for a multishot
+  receive, measured over 50,000 sockets. It costs one more submission per request: 15.5–16 µs per
+  request against 14.5 in the same test at 160,000 users.
+- Completion queues hold 65,536 entries per ring, more than a ring's connections, so a burst of
+  completions never spills into the kernel's overflow list, which allocates per completion just
+  when memory is shortest.
+- The kernel's own per-socket memory (~4.3 KB on 6.8, most of it not charged to the process) is the
+  real ceiling on a 2 GB box, and the 40 bytes are what the server adds to it.
 - Ring 0 is `SINGLE_ISSUER | DEFER_TASKRUN` and is the ring the loop waits on (a timed
   `io_uring_enter`: 64 completions or 2 ms when busy, up to 1 s when idle). The other rings use
   ordinary task work, so the kernel posts their completions into their queues while the thread is
@@ -45,8 +60,12 @@ Every user is a keep-alive connection, so the connection count is what the serve
 - Ubuntu's 6.8.0-136 and later kernels reject provided-buffer-ring registration with `EINVAL`
   (Launchpad #2162843: an inverted reserved-field check). The server retries once with a nonzero
   reserved byte, which those kernels accept and a correct kernel never sees.
-- Idle keep-alives are closed after 90 s without a request; closes are a shutdown hard-linked to a
-  close of the slot.
+- Idle keep-alives are closed after 90 s without a request. A close is three linked operations:
+  cancel the connection's poll, shut the socket down, close the slot. The poll has to go, because a
+  request on a direct descriptor keeps the socket alive after its slot is closed, and it is
+  cancelled by its user data, a hash lookup. Cancelling by descriptor instead walks every armed poll
+  on the ring: with 160,000 users leaving over 30 s that closed 10,000 of them and the loop did
+  little else; by user data, all 160,000 closed with p99 at 101 ms.
 
 ## At the memory wall
 
@@ -60,6 +79,30 @@ and the OOM killer ends it. Nothing the loop needs is left to be found at that m
   from disk. It fits the 8 MB `RLIMIT_MEMLOCK` systemd gives a service (io_uring's rings and buffer
   rings are charged to the memory cgroup on 6.8, not to that limit); if locking fails the server
   runs unlocked.
+- Drain first. After a stall the loop reads faster than it answers: up to 16,384 reads a batch but
+  only 2,048 answers, and what is read beyond that waits in the connection's own buffer, a copy the
+  size of the request, freed once answered. A request left waiting in its socket costs a 3–4 KB
+  network buffer; 170,000 of them came to 650 MB, far past TCP's hard limit on a 2 GB machine
+  (177 MB), where the kernel prunes and drops data and spends the single vCPU doing it, so the loop
+  never caught up. Read out at once, a backlog of 90,000 requests cleared within 20 s, and TCP's
+  buffers, which reached 300 MB in that burst, were back near zero 20 s later instead of climbing
+  to 650 MB. The 2,048 cap keeps turns short (30–350 ms after a burst, against 1–4 s uncapped), so
+  replies go out while the backlog is still being read.
+- The checkpoint thread runs at nice 19. On one vCPU a checkpoint pass at the default priority holds
+  the loop off the CPU for its whole length, 300–430 ms at the memory wall on the box
+  (c-iouring-public, #158, measured 2 of 3 holds dying at nice 0 and 3 of 3 holding at nice 19).
+  The loop's batches are short, so the thread still runs between them.
+- A memory valve, off by default (`VALVE=1` turns it on; see rule 7). Every 200 ms the loop reads
+  `/proc/meminfo` and takes `MemAvailable` minus `SReclaimable` as what the kernel could still hand
+  out (the sockets' own dentries and inodes count as reclaimable but are pinned while the socket is
+  open; #158 measured this signal on the box), looking 2 s ahead while it falls. Below 400 MB a
+  growing share of responses carries `Connection: close`, up to all of them at 200 MB, so the client
+  reconnects for its next request instead of keeping a socket open through its think time. It is
+  off because it did not pay: while an old socket finishes closing, the client's new one is already
+  open, so near the wall a wave of closes adds sockets before it removes any. With 1,000 MB locked in
+  the test VM to bring the wall within reach, the valve on closed 17,000 connections in 10 s and the
+  server was OOM-killed at about 59,000 connections; with it off the same setup held to about
+  144,000. #158 reached the same conclusion and ships its valve off.
 - Memory is faulted in while there is plenty: 256 KB of the loop's stack and 128 KB of the
   checkpoint thread's, 8 response arenas (8 MB, enough for a batch of about 2,000 requests) and the
   per-batch lists sized for 32,768 entries (the largest batch seen after a stall was 20,303). Each
@@ -71,9 +114,10 @@ and the OOM killer ends it. Nothing the loop needs is left to be found at that m
 
 Each wake-up of the loop is one batch:
 
-1. Every completion is handled. Requests are parsed in place in the kernel's receive buffers and
-   answered straight into a per-batch arena. A connection gets at most one request per batch; any
-   pipelined bytes wait for the send to complete.
+1. Every completion is handled. Requests are parsed in place in the receive buffers and answered
+   straight into a per-batch arena, up to 2,048 a batch (the rest wait in their connection's buffer
+   for the next). A connection gets at most one request per batch; any pipelined bytes wait for the
+   send to complete.
 2. All of the batch's reads and writes run in one SQLite transaction, begun lazily by the first of
    them (group commit). Reads see the batch's earlier writes.
 3. `COMMIT`, then every response is handed to the kernel as one send pointing into the arena. If
@@ -122,22 +166,23 @@ Each wake-up of the loop is one batch:
   401,222 acknowledged likes, none lost, `integrity_check` ok every round. Commits average 6.6
   frames, and `pwrite`s per request (whole process, kernel tracepoints, 120,000 users) went from
   0.24 to 0.095.
-- System calls per request, whole process, at 120,000 users: 0.23 (`io_uring_enter` 0.05, `pwrite`
-  0.095 including the checkpoint thread's, everything else ≈ 0.08).
-- WAL, `synchronous=NORMAL`, `wal_autocheckpoint=0`. A WAL hook wakes a checkpoint thread past
-  1,000 frames (PASSIVE, on its own connection, never on the loop). Past 4,000 frames, writes are
-  held until the thread reports the log fully copied (at most 1 s; reads go on), so the next write
-  restarts the log and it stays small. Past 16,384 frames the loop checkpoints itself, as a last
-  resort.
-- No memory map (`mmap_size=0`) and a 32 MB page cache. With a memory map every page fetch first
+- System calls per request, whole process, at 120,000 users, measured before reads moved to the
+  poll path (commit 3f5c305): 0.23 (`io_uring_enter` 0.05, `pwrite` 0.095 including the checkpoint
+  thread's, everything else ≈ 0.08).
+- WAL, `synchronous=NORMAL`, `wal_autocheckpoint=0`. A WAL hook wakes a checkpoint thread past 1,000
+  frames (PASSIVE, on its own connection, never on the loop, at nice 19). Past 4,000 frames, writes
+  are held until the thread reports the log fully copied (at most 1 s; reads go on), so the next
+  write restarts the log and it stays small. Past 16,384 frames the loop checkpoints itself, as a
+  last resort.
+- No memory map (`mmap_size=0`) and an 8 MB page cache. With a memory map every page fetch first
   probes the WAL index; with the pages in SQLite's own cache a hit returns at once (measured at
   120,000 users: 17.6 → 15.5 µs per request). SQLite's own counters (`SQLITE_DBSTATUS_CACHE_*`,
-  logged every 10 s) put the working set at about 34 MB: at 120,000 users a 32 MB and a 64 MB cache
-  both miss only on first load after startup (~4,300 misses in 55 million lookups) and cost the
-  same CPU within noise, so the smaller one is kept for the memory it leaves to connections. Smaller
-  caches were measured too: misses per request were 0.0017 at 32 MB, 0.020 at 16 MB, 0.053 at 8 MB
-  and 0.071 at 4 MB, each miss a `pread` on the event loop that turns into a disk read once memory
-  is short, which is the stall the server is built to avoid; 32 MB stays.
+  logged every 10 s) put the working set at about 34 MB. Misses per request were 0.0017 at 32 MB,
+  0.020 at 16 MB, 0.053 at 8 MB and 0.071 at 4 MB, each a `pread` answered from the kernel's page
+  cache. The cache is memory the kernel cannot take back, and at the wall every megabyte is about
+  240 sockets, so 8 MB is kept: it frees 24 MB against 32 MB for 0.05 reads a request, and the
+  server's CPU at 31,000 requests/s was the same (process peak 64 → 37 MB). Below 8 MB the misses
+  grow faster than the memory saved, and near the wall a miss can become a disk read on the loop.
   `THREADSAFE=2` with `OPEN_NOMUTEX`; memory statistics, the progress-callback check per opcode,
   shared cache and unused features compiled out.
 - SQLite's default page cache sits behind its plugin interface (`SQLITE_CONFIG_PCACHE2`) with one
@@ -180,7 +225,10 @@ cursors through SQLite's pager; writes use SQL.
 pages while it is served. Kept between batches: prepared statements, the table root pages and column
 layout (schema metadata, read at open), and the HMAC key schedule.
 6. WAL + `synchronous=NORMAL`; group commit; each response waits for its batch's commit.
-7. Nothing detects the load test.
+7. Nothing detects the load test. The memory valve (above) is off by default and the scored server
+runs without it. When turned on it adds `Connection: close` to a share of responses only when the
+memory the kernel could still hand out falls under 400 MB, looking at memory alone, never at the
+client, the route or the request; it never refuses or delays a request and never sends an error.
 8–9. Direct on `0.0.0.0:80`. Direct descriptors need no file descriptors beyond the listeners.
 10. Built from source on the box; SQLite 3.54.1 pinned by SHA-256.
 11. Nothing on the box is tuned. The process raises its own soft `RLIMIT_NOFILE` to the hard limit.
@@ -198,6 +246,29 @@ src/train.c, train.sh   PGO training client and driver (build time only)
 ```
 
 ## Local measurements (not a score)
+
+### Two VMs, box-shaped memory
+
+The server alone in a 1 vCPU / 2 GiB VM (Lima on an M1, Ubuntu 24.04 arm64, kernel 6.8.0-147;
+1,959 MB visible against the box's 1,967 MB), under systemd with `MemoryMax=1750M` and
+`LimitNOFILE=65535`; a native replay of `bench/load.js` in a second VM over Lima's user-mode
+network (0.45 ms round trip), so only the server's own sockets are in its VM, as on the box. Above
+about 180,000 connections the Mac runs out of fast cores (a fixed piece of work in the server VM
+went from 40 to 50–96 ms of CPU) and Lima's network stalls, so the box's range is out of reach here.
+
+| Test | Result |
+|---|---|
+| 30,000 users at 31,400 requests/s | p95 5 ms, p99 6–8 ms, 0 errors; 9.3 µs of CPU per request, as before |
+| 160,000 users, 150 s hold, beside 3f5c305 | 3f5c305: one pause left 918,702 `ENOBUFS` in 10 s, then OOM-killed. Now: held with 0 errors; four pauses left 10,000–13,000 requests waiting, each cleared within 10 s; 15.5–16 µs per request against 14.5 |
+| 160,000 users, 90 s hold, then 30 s ramp-down | PASS: p95 7.8 ms, p99 17.4 ms, 0 errors; 158,700 connections closed in the last 30 s, TCP buffers at 0 throughout, no accept-queue overflows |
+| Ramp to 360,000 users over 720 s | every 10 s window passed up to 178,705 connections |
+
+A cpu-clock profile of every server thread at 160,000 users: the kernel's socket lookup for each
+incoming packet (`__inet_lookup_established`, a walk of a hash chain sized from RAM at boot) 14%,
+the checkpoint thread 5.6%, SQLite's page-cache lookup 2.8%, the author lookups 2.2%, the feed 1.8%,
+JSON escaping 1.7%.
+
+### One VM over loopback, before these changes
 
 Ubuntu 24.04 arm64 VM (Lima, kernel 6.8.0-147), server pinned to one vCPU under systemd with
 `MemoryMax=1750M` and `LimitNOFILE=65535`, a native replay of `bench/load.js` on two other vCPUs

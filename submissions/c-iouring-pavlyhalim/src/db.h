@@ -81,6 +81,12 @@ static int db_wal_hook(void *ud, sqlite3 *c, const char *name, int frames) {
 
 static void *db_ckpt_thread(void *ud) {
   struct db *d = ud;
+  /* nice 19: on one vCPU a pass at the default priority takes the loop's CPU for its whole length,
+   * 300-430 ms at the memory wall on the box, and c-iouring-public (#158) measured that stall as the
+   * difference at the edge (2 of 3 holds died at nice 0, 3 of 3 held at 19). The loop's batches
+   * are short, so the thread still runs between them. */
+  setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), 19);
+  pthread_setname_np(pthread_self(), "ckpt");
   prefault_stack(128 << 10);
   for (;;) {
     pthread_mutex_lock(&d->mu);

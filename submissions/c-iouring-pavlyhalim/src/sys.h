@@ -81,6 +81,9 @@
 #ifndef IOSQE_IO_HARDLINK
 #define IOSQE_IO_HARDLINK (1U << 3)
 #endif
+#ifndef POLLRDHUP
+#define POLLRDHUP 0x2000
+#endif
 #ifndef IOSQE_BUFFER_SELECT
 #define IOSQE_BUFFER_SELECT (1U << 4)
 #endif
@@ -295,12 +298,24 @@ static inline void sqe_accept_multishot(struct io_uring_sqe *s, int listen_fd, u
   s->file_index = IORING_FILE_INDEX_ALLOC; /* allocate a direct descriptor per accepted socket */
   s->user_data = ud;
 }
-static inline void sqe_recv_multishot(struct io_uring_sqe *s, unsigned slot, uint64_t ud) {
+/* A connection waits on a multishot poll: it holds no buffer, so a burst can never end it, and it
+ * costs one request (256 B) where a multishot recv also holds an async-poll entry (96 B more). */
+static inline void sqe_poll_conn(struct io_uring_sqe *s, unsigned slot, uint64_t ud) {
+  s->opcode = IORING_OP_POLL_ADD;
+  s->fd = (int)slot;
+  s->flags = IOSQE_FIXED_FILE;
+  s->len = IORING_POLL_ADD_MULTI;
+  s->poll32_events = POLLIN | POLLRDHUP;
+  s->user_data = ud;
+}
+/* One read of a connection the poll reported readable, into a buffer the kernel picks from the ring.
+ * MSG_DONTWAIT: if the data is already gone it completes with -EAGAIN instead of arming a wait. */
+static inline void sqe_recv_once(struct io_uring_sqe *s, unsigned slot, uint64_t ud) {
   s->opcode = IORING_OP_RECV;
   s->fd = (int)slot;
   s->flags = IOSQE_FIXED_FILE | IOSQE_BUFFER_SELECT;
-  s->ioprio = IORING_RECV_MULTISHOT;
   s->buf_group = BUF_GROUP;
+  s->msg_flags = MSG_DONTWAIT;
   s->user_data = ud;
 }
 static inline void sqe_send(struct io_uring_sqe *s, unsigned slot, const void *p, unsigned n, uint64_t ud) {
@@ -327,9 +342,20 @@ static inline void sqe_poll_multishot(struct io_uring_sqe *s, int fd, uint64_t u
   s->poll32_events = POLLIN;
   s->user_data = ud;
 }
-/* shutdown(RDWR) hard-linked to close: the shutdown ends the multishot recv, the close frees the slot. */
-static inline void sqe_shutdown_close(struct ring *r, unsigned slot, uint64_t ud) {
+/* Cancel the connection's poll, then shutdown(RDWR), then close, hard-linked. The poll must go: a
+ * request on a direct descriptor keeps its file, and so the socket, alive after the slot is closed.
+ * It is cancelled by its user_data, a hash lookup: cancelling by descriptor walks every armed poll
+ * on the ring (160k), and at thousands of closes a second that stopped the loop (30 s of ramp-down
+ * closed 10k of 160k connections). Reads never wait (MSG_DONTWAIT) and the shutdown fails a send
+ * that does, so the poll is the only request that can be left. */
+static inline void sqe_shutdown_close(struct ring *r, unsigned slot, uint64_t ud, uint64_t poll_ud, uint64_t cancel_ud) {
   struct io_uring_sqe *s = ring_sqe(r);
+  s->opcode = IORING_OP_ASYNC_CANCEL;
+  s->fd = -1;
+  s->addr = poll_ud;
+  s->flags = IOSQE_IO_HARDLINK | IOSQE_CQE_SKIP_SUCCESS;
+  s->user_data = cancel_ud; /* only seen if nothing was left to cancel; ignored */
+  s = ring_sqe(r);
   s->opcode = IORING_OP_SHUTDOWN;
   s->fd = (int)slot;
   s->flags = IOSQE_FIXED_FILE | IOSQE_IO_HARDLINK | IOSQE_CQE_SKIP_SUCCESS;

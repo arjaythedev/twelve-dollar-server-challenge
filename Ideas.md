@@ -4,6 +4,7 @@
 
 - [ ] Measure io_uring submission and completion batches before changing ring flags. `CPU/request ~= CPU/enter / requests_per_enter + other_work`.
   Compare `SINGLE_ISSUER`, `DEFER_TASKRUN` and bounded waits with the current loop.
+  Submission, registration and exceptional cleanup must stay on the issuer thread before enabling the first two flags.
   Reference: [ring_init and ring_wait](submissions/c-iouring-pavlyhalim/src/sys.h).
 
 - [ ] Group writes into one transaction, with a size limit b and a timeout.

@@ -1,6 +1,6 @@
 # Benchmarks
 
-2026-11-01. Ryzen 7 7800X3D, Ubuntu 24.04 in Docker Desktop/WSL2. Server: 1 CPU, 2 GiB, no container swap. k6 ran on Windows with the official workload and a fresh database per run.
+2026-11-01. Ryzen 7 7800X3D, Ubuntu 24.04 in Docker Desktop/WSL2. Server: 1 CPU, 2 GiB, no container swap. k6 used the official workload and a fresh database per run, on Windows unless labeled Linux loopback (32 source IPs).
 
 | Runtime | Users | Hold | Requests | Requests/s | p95 | p99 | Max | Errors | CPU/request | Peak RAM |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -11,10 +11,16 @@
 | Python 3.15.2 + C JSON | 5,000 | 60 s | 51,870 | 399.05 | 1.086 ms | 1.610 ms | 121.65 ms | 0% | 264.36 us | 336.33 MiB |
 | C++ 0.1.0 | 5,000 | 60 s | 51,865 | 398.95 | 1.048 ms | 1.568 ms | 189.80 ms | 0% | 132.13 us | 304.56 MiB |
 | C++ 0.1.0 (repeat) | 5,000 | 60 s | 51,909 | 399.31 | 1.050 ms | 1.552 ms | 184.86 ms | 0% | 131.93 us | 302.72 MiB |
+| C++ 0.1.0 (uring-base, Windows) | 10,000 | 60 s | 103,259 | 794.27 | 1.060 ms | 2.074 ms | 45.99 ms | 0% | 84.23 us | 348.19 MiB |
+| C++ 0.1.0 (uring-coop, Windows) | 10,000 | 60 s | 103,820 | 798.59 | 1.050 ms | 1.605 ms | 33.10 ms | 0% | 82.84 us | 343.96 MiB |
+| C++ 0.1.0 (uring-batch, Windows) | 10,000 | 60 s | 103,745 | 798.01 | 2.609 ms | 5.363 ms | 34.67 ms | 0% | 81.92 us | 340.11 MiB |
+| C++ 0.1.0 (uring-base, Linux loopback) | 50,000 | 60 s | 518,222 | 3,984.46 | 0.584 ms | 16.421 ms | 55.84 ms | 0% | 54.58 us | 681.55 MiB |
+| C++ 0.1.0 (uring-batch, Linux loopback) | 50,000 | 60 s | 457,791 | 3,519.70 | 4,804.318 ms | 5,586.012 ms | 54,987.35 ms | 1.94% | 47.02 us | 672.58 MiB |
+| C++ 0.1.0 (adaptive, Linux loopback) | 50,000 | 60 s | 518,877 | 3,989.27 | 1.478 ms | 18.388 ms | 55.68 ms | 0% | 46.25 us | 692.12 MiB |
 
 Statistics include the ramps. RAM is the cgroup peak, including charged file pages. Local results, not an official score or a measured capacity limit.
 
-The CPU values above include the old counter reader running inside the server container. New runs read counters from a separate container; their CPU/request values are not directly comparable.
+The uring rows read CPU counters externally; earlier rows include the in-container counter reader. Their CPU/request values are not directly comparable.
 
 [Data](src/benchmarks/results.json). Full logs stay in `results/<run>/`.
 

@@ -16,7 +16,8 @@
 - [x] Compare changes on the same setup and repeat runs.
 - [x] Add native CPU profiling to replace the Python sampler.
 - [x] Separate server, kernel and benchmark-sampler CPU costs; profile the hold at 10,000 users.
-- [ ] Measure io_uring syscall and completion batching, then choose one change to test.
+- [x] Compare completion waits at 50,000 users; keep adaptive batching without delaying accepts.
+- [ ] Compare feed B-tree access with the leading submission and test one improvement.
 - [ ] Later: test capacity on a comparable Linux VM with a separate load generator.
 - [ ] Finally: move our src contents and docs into `submissions/<stack>-SmolBlackHole/` with git mv. Rename SUBMISSION.md to README.md, update paths and rerun checks. Exclude generated output.
 

@@ -23,14 +23,14 @@ Python 3.15 and uv run the dev tools.
 ```sh
 uv run --directory src --locked dev.py check
 uv run --directory src --locked dev.py check --docker
-uv run --directory src --locked dev.py bench --label cpp-5000 --k6 /path/to/k6
-uv run --directory src --locked dev.py profile --label native-10000 --vus 10000 --k6 /path/to/k6 --save profiles/native-10000.json
+uv run --directory src --locked dev.py bench --label cpp-50000 --vus 50000
+uv run --directory src --locked dev.py profile --label native-10000 --vus 10000 --save profiles/native-10000.json
 uv run --directory src --locked dev.py results
 ```
 
 Docker checks include transport tests, the 42 official checks and extra HTTP regressions on fresh data. On Windows they also refresh Linux headers for IntelliSense.
 
-The server container uses 1 CPU, 2 GiB and the profile in src/docker/seccomp.json. It adds only the three io_uring syscalls to Moby's allowlist. No extra capabilities are needed.
+The server container uses 1 CPU, 2 GiB, a 1,048,576 file limit and the profile in src/docker/seccomp.json. It adds only the three io_uring syscalls to Moby's allowlist. No extra capabilities are needed.
 
 Benchmarks and profiles default to a 30-second ramp and 60-second hold. Use `--hold 5m --ramp 60s` for confirmation runs.
 

@@ -19,6 +19,7 @@ import uuid
 from collections import Counter
 from collections.abc import Generator
 from contextlib import closing, contextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal, Never, TypedDict, cast
@@ -28,6 +29,9 @@ import psutil
 ROOT = Path(__file__).resolve().parent.parent
 IMAGE = "twelve-dollar-cpp:local"
 PROFILER_IMAGE = "twelve-dollar-profiler:local"
+K6_IMAGE = (
+    "grafana/k6:1.3.0@sha256:a90b459a3768c46ad1013da53af24189f735d7112273c6ac3212ca8ed0e18656"
+)
 PROFILE_EVENT = "cpu-clock:u"
 PROFILE_FREQUENCY = 997
 PROFILE_STACK_BYTES = 8192
@@ -73,6 +77,7 @@ class Result(TypedDict):
     date: str
     name: str
     runtime: str
+    load_generator: str
     sqlite: str
     users: int
     hold: str
@@ -109,8 +114,10 @@ class NativeProfile(TypedDict):
     hotspots: list[Hotspot]
 
 
-def command(*args: str) -> str:
-    result = subprocess.run(args, check=True, capture_output=True, text=True, encoding="utf-8")
+def command(*args: str, timeout: int | None = 30) -> str:
+    result = subprocess.run(
+        args, check=True, capture_output=True, text=True, encoding="utf-8", timeout=timeout
+    )
     return result.stdout.strip()
 
 
@@ -274,6 +281,7 @@ def read_results(path: Path) -> list[Result]:
                 date=text(row, "date"),
                 name=text(row, "name"),
                 runtime=text(row, "runtime"),
+                load_generator=text(row, "load_generator") if "load_generator" in row else "native",
                 sqlite=text(row, "sqlite"),
                 users=integer(row, "users"),
                 hold=text(row, "hold"),
@@ -323,6 +331,7 @@ def summarize(output: Path) -> Result:
         date=datetime.fromtimestamp((output / "run.json").stat().st_mtime, UTC).date().isoformat(),
         name=output.name,
         runtime=f"C++ {text(runtime, 'version')}",
+        load_generator=text(run, "load_generator") if "load_generator" in run else "native",
         sqlite=text(runtime, "sqlite"),
         users=int(setting("VUS")),
         hold=setting("DURATION"),
@@ -349,6 +358,7 @@ def show_results(results: list[Result]) -> None:
         [
             "Run",
             "Runtime",
+            "Client",
             "Users",
             "Hold",
             "Req/s",
@@ -366,6 +376,7 @@ def show_results(results: list[Result]) -> None:
             [
                 f"{row['date']}/{row['name']}",
                 row["runtime"],
+                "loopback" if row["load_generator"] == "docker_loopback" else "native",
                 str(row["users"]),
                 row["hold"],
                 f"{row['rps']:.2f}",
@@ -404,6 +415,7 @@ def build(*, tests: bool = False, profiler: bool = False) -> str:
         "--file",
         str(ROOT / "src/Dockerfile"),
         str(ROOT / "src"),
+        timeout=None,
     )
     return image
 
@@ -469,6 +481,8 @@ def native_check() -> None:
                 "2g",
                 "--memory-swap",
                 "2g",
+                "--ulimit",
+                "nofile=1048576:1048576",
                 "--security-opt",
                 f"seccomp={ROOT / 'src/docker/seccomp.json'}",
                 "--entrypoint",
@@ -539,27 +553,104 @@ def verify(container: str, port: int, output: Path) -> None:
     print("42 official checks passed; keep-alive connection reused.")
 
 
-def load(args: Arguments, observer: str, port: int, output: Path) -> int:
-    if args.k6 is None:
-        raise ValueError("k6 is required for load generation")
-    k6 = args.k6.resolve()
-    warmup = duration_seconds(args.ramp)
-    hold = duration_seconds(args.hold)
-    profiling = args.action == "profile"
-    with socket.socket() as address:
-        address.bind(("127.0.0.1", 0))
-        api_port = address.getsockname()[1]
+@dataclass(frozen=True)
+class LoadGenerator:
+    invocation: list[str]
+    api_port: int
+    version: str
+    sha256: str
+    container: str | None = None
+
+    def sample(self, pid: int) -> dict[str, JSONValue]:
+        if self.container is None:
+            client = psutil.Process(pid)
+            cpu = client.cpu_times()
+
+            return {
+                "client_cpu_s": cpu.user + cpu.system,
+                "client_rss_bytes": client.memory_info().rss,
+            }
+        values = command(
+            "docker",
+            "exec",
+            self.container,
+            "sh",
+            "-c",
+            "cat /sys/fs/cgroup/cpu.stat; printf 'memory '; cat /sys/fs/cgroup/memory.current",
+        )
+        rows = {line.split()[0]: int(line.split()[1]) for line in values.splitlines()}
+
+        return {"client_cpu_s": rows["usage_usec"] / 1e6, "client_cgroup_bytes": rows["memory"]}
+
+
+@contextmanager
+def load_generator(
+    args: Arguments, container: str, port: int, output: Path
+) -> Generator[LoadGenerator]:
+    name: str | None = None
+    if args.k6 is not None:
+        k6 = args.k6.resolve()
+        prefix = [str(k6)]
+        version = command(str(k6), "version")
+        sha256 = file_hash(k6)
+        with socket.socket() as address:
+            address.bind(("127.0.0.1", 0))
+            api_port = address.getsockname()[1]
+        listen = f"127.0.0.1:{api_port}"
+        target = f"http://127.0.0.1:{port}"
+        summary = str(output / "k6-summary.json")
+        tokens = (ROOT / "seed/tokens.json").as_posix()
+        script = str(ROOT / "bench/load.js")
+    else:
+        name = f"{container}-load"
+        environment = mapping(read_json(output / "environment.json"))
+        vm_memory = integer(mapping(environment["docker_info"]), "MemTotal")
+        # Leave space for the API and Docker; contain generator failures in its own cgroup.
+        client_memory = max(vm_memory // 2, vm_memory - 4 * 2**30)
+        api_port = int(command("docker", "port", container, "6565/tcp").rsplit(":", 1)[1])
+        prefix = [
+            "docker",
+            "run",
+            f"--name={name}",
+            "--cap-drop=ALL",
+            f"--memory={client_memory}",
+            f"--memory-swap={client_memory}",
+            f"--env=GOMEMLIMIT={client_memory * 9 // 10}B",
+            f"--network=container:{container}",
+            "--ulimit=nofile=1048576:1048576",
+            f"--mount=type=bind,source={ROOT},target=/work,readonly",
+            f"--mount=type=bind,source={output},target=/results",
+            K6_IMAGE,
+        ]
+        version = command("docker", "run", "--rm", "--network=none", K6_IMAGE, "version")
+        sha256 = command(
+            "docker",
+            "run",
+            "--rm",
+            "--network=none",
+            "--entrypoint=sha256sum",
+            K6_IMAGE,
+            "/usr/bin/k6",
+        ).split()[0]
+        listen = "0.0.0.0:6565"
+        target = "http://127.0.0.1:3000"
+        summary, tokens, script = (
+            "/results/k6-summary.json",
+            "/work/seed/tokens.json",
+            "/work/bench/load.js",
+        )
     invocation = [
-        str(k6),
+        *prefix,
         "run",
         "--quiet",
         "--paused",
         "--address",
-        f"127.0.0.1:{api_port}",
+        listen,
+        *(["--local-ips=127.0.0.2-127.0.0.33"] if name is not None else []),
         "--summary-export",
-        str(output / "k6-summary.json"),
+        summary,
         "-e",
-        f"BASE_URL=http://127.0.0.1:{port}",
+        f"BASE_URL={target}",
         "-e",
         f"VUS={args.vus}",
         "-e",
@@ -567,31 +658,66 @@ def load(args: Arguments, observer: str, port: int, output: Path) -> int:
         "-e",
         f"RAMP_UP={args.ramp}",
         "-e",
-        f"TOKENS={(ROOT / 'seed/tokens.json').as_posix()}",
-        str(ROOT / "bench/load.js"),
+        f"TOKENS={tokens}",
+        script,
     ]
+    try:
+        yield LoadGenerator(invocation, api_port, version, sha256, name)
+    finally:
+        if name is not None:
+            inspected = subprocess.run(["docker", "inspect", name], capture_output=True, text=True)
+            (output / "load-generator.json").write_text(inspected.stdout, encoding="utf-8")
+            subprocess.run(["docker", "rm", "--force", name], capture_output=True, check=False)
+
+
+def load(args: Arguments, generator: LoadGenerator, observer: str, output: Path) -> int:
+    warmup = duration_seconds(args.ramp)
+    hold = duration_seconds(args.hold)
+    profiling = args.action == "profile"
     ticks = int(command("docker", "exec", observer, "getconf", "CLK_TCK"))
     samples: list[dict[str, JSONValue]] = []
     with (output / "k6.log").open("w", encoding="utf-8") as log:
-        with subprocess.Popen(invocation, stdout=log, stderr=subprocess.STDOUT) as child:
-            client = psutil.Process(child.pid)
+        with subprocess.Popen(generator.invocation, stdout=log, stderr=subprocess.STDOUT) as child:
             try:
-                ready_deadline = time.monotonic() + 120
+                initializing = time.monotonic()
+                ready_deadline = initializing + 120
+                next_init_sample = next_init_progress = initializing
                 while True:
                     if child.poll() is not None:
                         raise RuntimeError("k6 exited during initialization; inspect k6.log")
                     try:
-                        status = k6_status(api_port)
+                        status = k6_status(generator.api_port)
                         if status.get("status") == K6_PAUSED_BEFORE_RUN:
                             break
                     except OSError, http.client.HTTPException:
                         pass
+                    now = time.monotonic()
+                    if now >= next_init_sample:
+                        try:
+                            samples.append(
+                                {
+                                    "phase": "initializing",
+                                    "elapsed_s": now - initializing,
+                                    **generator.sample(child.pid),
+                                }
+                            )
+                        except psutil.NoSuchProcess, subprocess.CalledProcessError:
+                            if child.poll() is not None:
+                                raise RuntimeError(
+                                    "k6 exited during initialization; inspect k6.log"
+                                ) from None
+                        next_init_sample = now + 2
+                    if now >= next_init_progress:
+                        print(
+                            f"{args.label}: initializing k6 ({now - initializing:.0f}s)", flush=True
+                        )
+                        next_init_progress = now + 30
                     if time.monotonic() >= ready_deadline:
                         raise RuntimeError("k6 did not initialize within 120 seconds")
                     time.sleep(0.1)
                 before = counters(observer)
                 started = time.monotonic()
-                k6_status(api_port, resume=True)
+                k6_status(generator.api_port, resume=True)
                 resumed = time.monotonic() - started
                 next_sample = next_progress = 0.0
                 window: dict[str, JSONValue] = {
@@ -627,11 +753,10 @@ def load(args: Arguments, observer: str, port: int, output: Path) -> int:
                         continue
                     next_sample = elapsed + 2
                     try:
-                        cpu = client.cpu_times()
                         sample: dict[str, JSONValue] = {
+                            "phase": "workload",
                             "elapsed_s": time.monotonic() - started,
-                            "client_cpu_s": cpu.user + cpu.system,
-                            "client_rss_bytes": client.memory_info().rss,
+                            **generator.sample(child.pid),
                             "server": counters(observer),
                         }
                         samples.append(sample)
@@ -641,7 +766,11 @@ def load(args: Arguments, observer: str, port: int, output: Path) -> int:
                                 f"{args.label}: {time.monotonic() - started:.0f}s elapsed",
                                 flush=True,
                             )
-                    except psutil.NoSuchProcess:
+                    except (psutil.NoSuchProcess, subprocess.CalledProcessError) as error:
+                        try:
+                            child.wait(timeout=15)
+                        except subprocess.TimeoutExpired:
+                            raise error from None
                         break
                 code = child.wait(timeout=15)
                 if profiling and not profile_done:
@@ -655,7 +784,7 @@ def load(args: Arguments, observer: str, port: int, output: Path) -> int:
     write_json(
         output / "run.json",
         {
-            "arguments": invocation,
+            "arguments": generator.invocation,
             "exit_code": code,
             "wall_seconds": time.monotonic() - started,
             "cgroup_before": before,
@@ -664,8 +793,9 @@ def load(args: Arguments, observer: str, port: int, output: Path) -> int:
             "clock_ticks_per_second": ticks,
             "initial_k6_status": status,
             "cpu": cpu_delta(before, after, ticks),
-            "load_generator_version": command(str(k6), "version"),
-            "load_generator_sha256": file_hash(k6),
+            "load_generator": "docker_loopback" if generator.container is not None else "native",
+            "load_generator_version": generator.version,
+            "load_generator_sha256": generator.sha256,
         },
     )
     print(f"k6 exit={code}; results={output}", flush=True)
@@ -719,11 +849,13 @@ def server(
             "--security-opt",
             f"seccomp={ROOT / 'src/docker/seccomp.json'}",
             "--ulimit",
-            "nofile=65535:65535",
+            "nofile=1048576:1048576",
             "--env",
             f"JWT_SECRET={secret}",
             "--publish",
             "127.0.0.1::3000",
+            "--publish",
+            "127.0.0.1::6565",
             "--volume",
             f"{volume}:/data",
             "--mount",
@@ -1005,7 +1137,7 @@ def main() -> None:
             "--ramp", default="30s", help="ramp-up time (default: 30s; confirmation: 60s)"
         )
         benchmark.add_argument(
-            "--k6", type=Path, default=shutil.which("k6"), help="k6 executable; defaults to PATH"
+            "--k6", type=Path, help="native k6 executable; defaults to pinned Linux k6 in Docker"
         )
         benchmark.add_argument("--save", type=Path, default=RESULTS if action == "bench" else None)
         benchmark.add_argument(
@@ -1029,8 +1161,8 @@ def main() -> None:
             else:
                 show_profile(mapping(mapping(document)["profile"]))
         else:
-            if args.k6 is None or not args.k6.is_file():
-                parser.error("install k6 or pass --k6 PATH")
+            if args.k6 is not None and not args.k6.is_file():
+                parser.error("--k6 must point to an executable file")
             if (
                 args.vus < 1
                 or not args.label
@@ -1055,8 +1187,11 @@ def main() -> None:
                 if profiling:
                     build(profiler=True)
             with server(output) as (container, port):
-                with observing(container, output, profiling=profiling) as name:
-                    code = load(args, name, port, output)
+                with (
+                    observing(container, output, profiling=profiling) as name,
+                    load_generator(args, container, port, output) as generator,
+                ):
+                    code = load(args, generator, name, output)
             result = summarize(output)
             show_results([result])
             if profiling:
@@ -1086,7 +1221,7 @@ def main() -> None:
         if error.stderr:
             print(error.stderr)
         raise SystemExit(error.returncode) from error
-    except (RuntimeError, ValueError, KeyError, OSError) as error:
+    except (RuntimeError, ValueError, KeyError, OSError, subprocess.TimeoutExpired) as error:
         parser.exit(1, f"{error}\n")
 
 

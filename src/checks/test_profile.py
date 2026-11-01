@@ -1,12 +1,19 @@
 """Check weighted native profiles, stack attribution and incomplete captures."""
 
+import subprocess
+import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 from dev import (
+    Arguments,
     JSONValue,
+    LoadGenerator,
     analyze_profile,
     cpu_delta,
     duration_seconds,
+    load,
     parse_counters,
     profile_stage,
 )
@@ -26,6 +33,38 @@ def statistics(samples: int, lost: int = 0) -> str:
 
 
 class NativeProfileTests(unittest.TestCase):
+    def test_finished_generator_can_be_reaped_after_sampler_race(self) -> None:
+        args = Arguments(action="bench", label="exit-race", ramp="30s", hold="60s")
+        generator = LoadGenerator(["k6"], 6565, "test", "test", "load-container")
+        snapshot: dict[str, JSONValue] = {
+            "user_usec": 0,
+            "system_usec": 0,
+            "main_user_ticks": 0,
+            "main_system_ticks": 0,
+        }
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch("dev.subprocess.Popen") as launch,
+            patch("dev.command", return_value="100"),
+            patch("dev.k6_status", return_value={"status": 4}),
+            patch("dev.counters", return_value=snapshot),
+            patch.object(
+                LoadGenerator, "sample", side_effect=subprocess.CalledProcessError(1, "docker exec")
+            ),
+        ):
+            child = launch.return_value.__enter__.return_value
+            child.pid = 1
+            child.wait.return_value = 0
+
+            def poll() -> int | None:
+                return 0 if child.wait.called else None
+
+            child.poll.side_effect = poll
+            self.assertEqual(load(args, generator, "observer", Path(directory)), 0)
+            child.wait.assert_any_call(timeout=15)
+            child.kill.assert_not_called()
+            self.assertTrue((Path(directory) / "run.json").is_file())
+
     def test_process_name_does_not_shift_cpu_fields(self) -> None:
         fields = ["S", *(["0"] * 10), "123", "45", *(["0"] * 30)]
         values = "usage_usec 1700000\nuser_usec 1300000\nprocess_stat 1 (a name (x)) "

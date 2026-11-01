@@ -508,32 +508,50 @@ class Server::State
         }
     }
 
+    int wait(unsigned previous_count, bool accepted)
+    {
+        // Rearm accepts promptly; EXT_ARG avoids synthetic timeout completions.
+        if (accepted || previous_count < 2 || stopping || !(ring.features & IORING_FEAT_EXT_ARG))
+        {
+            return io_uring_submit_and_wait(&ring, 1);
+        }
+        __kernel_timespec timeout{0, 1'000'000};
+        io_uring_cqe *first = nullptr;
+
+        return io_uring_submit_and_wait_timeout(&ring, &first, 16, &timeout, nullptr);
+    }
+
     void run()
     {
         accept();
         io_uring_prep_poll_add(entry(&stop_operation), stop.get(), POLLIN);
+        unsigned previous_count = 0;
+        bool accepted = false;
         while (pending)
         {
-            const int result = io_uring_submit_and_wait(&ring, 1);
+            const int result = wait(previous_count, accepted);
             if (result == -EINTR)
             {
                 continue;
             }
-            if (result < 0)
+            if (result < 0 && result != -ETIME)
             {
                 throw std::system_error(-result, std::generic_category(), "wait");
             }
             unsigned head = 0;
             unsigned count = 0;
+            accepted = false;
             io_uring_cqe *completion = nullptr;
             io_uring_for_each_cqe(&ring, head, completion)
             {
                 --pending;
-                complete(static_cast<Operation *>(io_uring_cqe_get_data(completion)),
-                         completion->res);
+                auto *operation = static_cast<Operation *>(io_uring_cqe_get_data(completion));
+                accepted = accepted || (operation && operation->event == Event::accept);
+                complete(operation, completion->res);
                 ++count;
             }
             io_uring_cq_advance(&ring, count);
+            previous_count = count;
         }
     }
 

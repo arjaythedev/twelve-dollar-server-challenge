@@ -6,12 +6,15 @@
 #include <cstring>
 #include <exception>
 #include <iostream>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <sys/socket.h>
 #include <thread>
 #include <unistd.h>
+#include <utility>
+#include <vector>
 
 namespace
 {
@@ -131,6 +134,20 @@ void exercise(std::uint16_t port)
     require(connection.response() == "/feed", "path decoding");
     connection.send("GET /large HTTP/1.1\r\nHost: localhost\r\n\r\n");
     require(connection.response() == std::string(1024 * 1024, 'x'), "partial sends");
+    std::vector<std::unique_ptr<Client>> burst;
+    for (int i = 0; i < 128; ++i)
+    {
+        auto client = std::make_unique<Client>(port);
+        client->send("GET /burst HTTP/1.1\r\nHost: localhost\r\n\r\n"
+                     "GET /again HTTP/1.1\r\nHost: localhost\r\n\r\n");
+        burst.push_back(std::move(client));
+    }
+    for (auto &client : burst)
+    {
+        require(client->response() == "/burst", "burst response");
+        require(client->response() == "/again", "burst pipelined response");
+    }
+    burst.clear();
     for (int i = 0; i < 100; ++i)
     {
         Client disconnected(port);
@@ -170,9 +187,18 @@ int main()
                 server_error = std::current_exception();
             }
         });
+        std::vector<std::unique_ptr<Client>> idle;
         try
         {
             exercise(server.port());
+            // Exercise cancellation across more operations than the submission ring holds.
+            for (int i = 0; i < 1100; ++i)
+            {
+                auto client = std::make_unique<Client>(server.port());
+                client->send("GET /idle HTTP/1.1\r\nHost: localhost\r\n\r\n");
+                require(client->response() == "/idle", "idle connection established");
+                idle.push_back(std::move(client));
+            }
         }
         catch (...)
         {
@@ -180,16 +206,13 @@ int main()
             thread.join();
             throw;
         }
-        // Leave a receive outstanding while shutdown cancels the connections.
-        Client idle(server.port());
         server.request_stop();
         thread.join();
         if (server_error)
         {
             std::rethrow_exception(server_error);
         }
-        std::cout
-            << "HTTP fragmentation, pipelining, chunking, partial sends and cancellation passed\n";
+        std::cout << "HTTP fragmentation, pipelining, bursts, partial sends and cancellation passed\n";
         return 0;
     }
     catch (const std::exception &error)

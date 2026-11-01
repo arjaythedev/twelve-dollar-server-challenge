@@ -236,14 +236,13 @@ src/jvmTest/kotlin/borg/trikeshed/userspace/PanamauIdentityTest.kt
 src/jvmTest/kotlin/borg/trikeshed/userspace/SocketLifecycleSqeTest.kt
 src/jvmTest/kotlin/borg/trikeshed/userspace/UringPipeRaceTest.kt
 src/lzNativeMain/kotlin/borg/trikeshed/tilting/leaf/LeafPermutationMain.kt
-src/lzNativeMain/kotlin/borg/trikeshed/tilting/leaf/LeafSpecialization.native.kt
 src/lzNativeTest/kotlin/borg/trikeshed/tilting/leaf/LeafCorpus.native.kt
 src/macosMain/kotlin/borg/trikeshed/userspace/Liburing.macos.kt
 src/macosMain/kotlin/borg/trikeshed/userspace/NativeUringAdapter.macos.kt
 src/macosMain/kotlin/borg/trikeshed/userspace/nio/channels/spi/KqueueReactorOperations.kt
 src/macosMain/kotlin/borg/trikeshed/userspace/nio/platform/spi/SystemOperations.macos.kt
-src/nativeInterop/cinterop/lz.def
 src/nativeMain/kotlin/borg/trikeshed/isam/Locks.kt
+src/nativeMain/kotlin/borg/trikeshed/tilting/leaf/LeafSpecialization.nativeKotlin.kt
 src/nativeMain/kotlin/borg/trikeshed/userspace/nio/file/spi/FileIoContext.kt
 src/nativeMain/kotlin/borg/trikeshed/userspace/nio/platform/spi/PlatformEndianness.native.kt
 src/nonPosixMain/kotlin/borg/trikeshed/lib/FileBuffer.nonPosix.kt

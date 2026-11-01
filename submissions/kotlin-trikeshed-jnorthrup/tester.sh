@@ -19,14 +19,15 @@
 #   leaf-jvm       the leaf codec permutation on the JVM (liblz4/liblzo2 through FFM), plus :trikeshed:jvmTest
 #   leaf-graal-bt  native-image of the same jar with the jar's native-image config: FFM handles made at image build time
 #   leaf-graal-rt  native-image with the jar's config excluded: FFM handles made at image run time
-#   leaf-kn        Kotlin/Native for this host (macosArm64 or linuxX64; liblz4/liblzo2 through cinterop), plus
+#   leaf-kn        Kotlin/Native for this host (macosArm64 or linuxX64; the Kotlin LZ4 and LZO codecs), plus
 #                  :trikeshed:<target>Test. Kotlin/Native has no linux-aarch64 compiler, so a linux-arm64 host skips it
 #   leaf-wasi      Kotlin/Wasm for WASI under wasmtime (kotlin codecs only)
 #
 # Environment, all optional: JAVA_HOME (a GraalVM JDK 25 with native-image), GRADLE, WASMTIME, TRIKESHED_URL,
 # PORT (test/run.sh, default 3000), GRADLE_HEAP (Gradle heap for the leaf editions, default 3g).
-# Host packages the leaf editions use: Linux liblz4-dev liblzo2-dev zlib1g-dev (native-image links -lz) python3;
-# macOS Homebrew lz4 lzo.
+# Host packages the leaf editions use: python3; Linux zlib1g-dev (native-image links -lz). The JVM editions (leaf-jvm,
+# leaf-graal-*) load liblz4 and liblzo2 through FFM (Linux liblz4-1 liblzo2-2; macOS Homebrew lz4 lzo); leaf-kn and
+# leaf-wasi use no C library and no C header.
 set -o pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 cd "$here" || exit 1
@@ -212,10 +213,10 @@ step_scaffold() {
   tool "leaf-graal-*: native-image" "$NATIVE_IMAGE" --version
   tool "leaf-wasi: wasmtime" "$WASMTIME" --version
   tool "scaffold: python3" python3 --version
-  say "scaffold: liblz4 / liblzo2 (leaf-jvm, leaf-graal-*: run time; leaf-kn: headers and link); libz (native-image link)"
+  say "scaffold: liblz4 / liblzo2 (leaf-jvm, leaf-graal-*: run time, through FFM; leaf-kn, leaf-wasi: none); libz (native-image link)"
   case $os in
-    linux) pipe "ldconfig -p | grep -E 'liblz4\\.so|liblzo2\\.so'; ls -l /usr/include/lz4.h /usr/include/lzo/lzo1x.h /usr/lib/*-linux-gnu/libz.so" ;;
-    darwin) pipe "ls -l /opt/homebrew/lib/liblz4.dylib /opt/homebrew/lib/liblzo2.dylib /opt/homebrew/include/lz4.h /opt/homebrew/include/lzo/lzo1x.h" ;;
+    linux) pipe "ldconfig -p | grep -E 'liblz4\\.so|liblzo2\\.so'; ls -l /usr/lib/*-linux-gnu/libz.so" ;;
+    darwin) pipe "ls -l /opt/homebrew/lib/liblz4.dylib /opt/homebrew/lib/liblzo2.dylib" ;;
   esac
 }
 
@@ -275,14 +276,6 @@ ed_leaf_kn() {
   local name=leaf-kn-$kt d=$E/leaf-kn-$kt s=$SECONDS T props=("-Ptrike.targets=$kt")
   mkdir -p "$d"
   reify && need_corpus || { mark "$name" "FAIL scaffold"; return; }
-  if [ "$os" = linux ]; then
-    [ -f /usr/include/lz4.h ] && [ -d /usr/include/lzo ] || { mark "$name" "SKIP no lz4.h, lzo/ (liblz4-dev liblzo2-dev)"; return; }
-    say "$name: an include dir holding only lz4.h and lzo/ (Kotlin/Native parses them with its own sysroot)"
-    run mkdir -p "$E/clib/include"
-    run cp /usr/include/lz4.h "$E/clib/include/"
-    run cp -R /usr/include/lzo "$E/clib/include/"
-    props+=("-Ptrike.cinclude=$E/clib/include")
-  fi
   T=$(printf '%s' "${kt:0:1}" | tr '[:lower:]' '[:upper:]')${kt:1}
   say "$name: the executable (the first Kotlin/Native build downloads its toolchain into ~/.konan)"
   log "$d/build.log" gradle_run "-Dorg.gradle.jvmargs=-Xmx$HEAP -XX:+UseSerialGC" "${props[@]}" \

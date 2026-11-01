@@ -11,13 +11,11 @@ plugins {
     kotlin("plugin.serialization")
 }
 
-// Opt-in targets for the leaf permutation, -Ptrike.targets=linuxX64,linuxArm64,macosArm64,wasmWasi; the box builds the
-// JVM target only. The native targets reach liblz4/liblzo2 through cinterop: -Ptrike.cinclude=<dir holding lz4.h and
-// lzo/> (macosArm64 defaults to Homebrew's include dir), -Ptrike.clib=<dir holding liblz4.so and liblzo2.so> when
-// a Linux target is linked on another host; -Ptrike.cinclude.<target> / -Ptrike.clib.<target> override per target.
+// Opt-in targets for the leaf permutation and the Kotlin/Native server, -Ptrike.targets=linuxX64,linuxArm64,macosArm64,
+// wasmWasi; the box builds the JVM target only. A native target needs no C header and no C library for the leaf
+// codecs: it compiles the Kotlin LZ4 and LZO of commonMain (nativeMain's LeafSpecialization binds nothing). Only the
+// JVM's FFM specialization loads liblz4 and liblzo2, at run time.
 val extraTargets = providers.gradleProperty("trike.targets").orNull.orEmpty().split(',').map { it.trim() }.toSet()
-val cinclude = providers.gradleProperty("trike.cinclude").orNull
-val clib = providers.gradleProperty("trike.clib").orNull
 
 // TrikeShed linkage: this module compiles TrikeShed's own files, read from the git subrepo TrikeShed/ at the commit
 // git records for it (build.sh reifies the subrepo when a checkout leaves it empty). sources.txt lists the paths;
@@ -53,12 +51,6 @@ kotlin {
         if ("macosArm64" in extraTargets) macosArm64() else null,
     )
     for (target in natives) {
-        val include = providers.gradleProperty("trike.cinclude.${target.name}").orNull ?: cinclude
-        val lib = providers.gradleProperty("trike.clib.${target.name}").orNull ?: clib
-        target.compilations.getByName("main").cinterops.create("lz") {
-            definitionFile.set(File(subrepo, "src/nativeInterop/cinterop/lz.def"))
-            (include ?: "/opt/homebrew/include".takeIf { target.name == "macosArm64" })?.let { includeDirs(it) }
-        }
         target.binaries.executable("leafPermutation") { entryPoint = "borg.trikeshed.tilting.leaf.main" }
         // posix_spawn.def: TrikeShed's POSIX cinterop (trikeshed_open, spawn, args), package borg.trikeshed.userspace.nio.posix.
         target.compilations.getByName("main").cinterops.create("posixSpawn") {
@@ -75,7 +67,6 @@ kotlin {
             extraOpts("-libraryPath", "$uring/src")
             tasks.named(interopProcessingTaskName).configure { dependsOn(":server:liburingLib") }
         }
-        if (lib != null) target.binaries.all { linkerOpts("-L$lib") }
         // Debug test binaries link without Kotlin/Native's compiler caches: on the macOS host the 2.4.21-RC
         // macos_arm64 stdlib cache in ~/.konan held objects built for iOS (LC_BUILD_VERSION platform 2), which ld rejected.
         if (target.name == "macosArm64") target.binaries.withType<TestExecutable>().configureEach {
@@ -124,7 +115,7 @@ kotlin {
         if (natives.isNotEmpty()) {
             val nativeMain by creating { dependsOn(commonMain) }
             val posixMain by creating { dependsOn(nativeMain) }
-            // lzNative{Main,Test}: the cinterop specialization and its main, shared by every native target.
+            // lzNative{Main,Test}: the leaf permutation's main and its corpus reader, shared by every native target.
             val lzNativeMain by creating { dependsOn(posixMain) }
             val lzNativeTest by creating { dependsOn(commonTest) }
             // src/linuxMain and src/macosMain: TrikeShed's per-OS actuals (its ring facade, its host probes).

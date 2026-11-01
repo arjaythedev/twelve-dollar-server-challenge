@@ -166,7 +166,7 @@ Every 128k run failed with the server at 22 to 37% CPU, zero listen or backlog d
 - 64k users (`s64q`): failed. Peak established 62,243; 2,148 failed; 821,879 UDP receive-buffer errors.
 - Profile of the 32k run: software CRC32c 4.8%, GC about 8%, the HashMap, Enum.equals, iterator and ArrayDeque families 5.7% together (HashMap alone 3.7%), unwinding 2.6%, kernel 27%.
 - Hash-map audit (helper B): the TCP request path has no hash map or set. The SCTP path has 18 entries (five Long-keyed maps per request).
-- Re-run of 32k with the current server (`s32r`): pending; result appended below when it arrives.
+- Re-run of 32k with the current server (`s32r`, after fix 2): 3,367 req/s, 0 failed, p50 / p95 / p99 49.2 / 98.3 / 131.1 ms, server CPU user 36% + sys 14% = 50%, about 148 µs per request (before: 38% + 14% = 52%, 154 µs). No UDP drops on either end. Cgroup peak 131 MB. Finding: the faster row path saves about 4% on SCTP. The cost is in the transport (CRC32c, GC, hash maps, kernel), not in SQLite.
 
 ## S14. What the five winners do that we did not (from their READMEs, 2026-11-01)
 

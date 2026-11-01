@@ -18,6 +18,7 @@ unsafe extern "C" {
     fn td_first(c: Cur) -> c_int;
     fn td_next(c: Cur) -> c_int;
     fn td_payload(c: Cur, len: *mut u32) -> *const u8;
+    fn td_count_likes(c: Cur, lo: i64, hi: i64, n: *mut u32) -> c_int;
     fn td_insert_post(uid: i64, body: *const u8, len: c_int, id: *mut i64, created: *mut u8, clen: *mut c_int) -> c_int;
     fn td_insert_like(uid: i64, pid: i64) -> c_int;
     fn td_health(err: *mut c_char, n: c_int) -> c_int;
@@ -146,8 +147,18 @@ fn text(c: (u64, &[u8])) -> Result<&[u8], DbError> {
     }
 }
 
-/// Likes of one post: walk likes_post_id_idx from its first entry.
+/// Likes of one post.
 fn count_likes(c: Cur, id: i64) -> Result<i64, DbError> {
+    let mut n = 0u32;
+    match unsafe { td_count_likes(c, id, id, &mut n) } {
+        0 => Ok(n as i64),
+        1 => count_likes_slow(c, id),
+        _ => Err(DbError),
+    }
+}
+
+/// Likes of one post, decoding each entry here: for cells td_count_likes doesn't expect.
+fn count_likes_slow(c: Cur, id: i64) -> Result<i64, DbError> {
     let mut r = unsafe { td_seek_ge(c, id) };
     let mut n = 0;
     while r == 1 {
@@ -363,20 +374,19 @@ impl Db {
         if let (Some(&lo), Some(&hi)) = (self.order.first(), self.order.last()) {
             let (lo, hi) = (rows[lo].id, rows[hi].id);
             if hi - lo <= RANGE_SPAN {
-                let mut r = unsafe { td_seek_ge(cl, lo) };
-                while r == 1 {
-                    let [k] = columns::<1>(payload(cl)?)?;
-                    let pid = int_of(k.0, k.1)?;
-                    if pid > hi {
-                        break;
+                let mut n = [0u32; RANGE_SPAN as usize + 1];
+                match unsafe { td_count_likes(cl, lo, hi, n.as_mut_ptr()) } {
+                    0 => {
+                        for row in rows.iter_mut() {
+                            row.likes = n[(row.id - lo) as usize] as i64;
+                        }
                     }
-                    if let Ok(j) = self.order.binary_search_by_key(&pid, |&i| rows[i].id) {
-                        rows[self.order[j]].likes += 1;
+                    1 => {
+                        for row in rows.iter_mut() {
+                            row.likes = count_likes_slow(cl, row.id)?;
+                        }
                     }
-                    r = unsafe { td_next(cl) };
-                }
-                if r < 0 {
-                    return Err(DbError);
+                    _ => return Err(DbError),
                 }
             } else {
                 for row in rows.iter_mut() {

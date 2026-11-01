@@ -355,6 +355,47 @@ int td_seek_ge(BtCursor *c, i64 k) {
   return 1;
 }
 
+/* Likes per post for lo <= post_id <= hi, read off likes_post_id_idx (post_id, rowid) in one
+ * walk: n[post_id - lo] counts the entries (n has hi - lo + 1 zeroed slots). The cells are
+ * decoded here, a leaf at a time, instead of one call per entry. 0 ok, -1 error, 1 a cell not
+ * in the expected form (the caller decodes the entries itself, which reports it). */
+int td_count_likes(BtCursor *c, i64 lo, i64 hi, unsigned *n) {
+  int r = td_seek_ge(c, lo);
+  if (r <= 0) return r;
+  for (;;) {
+    MemPage *pg = c->pPage;
+    int i = c->ix, last = pg->leaf ? pg->nCell : i + 1; /* an interior entry: just this one */
+    for (; i < last; i++) {
+      u8 *cell = findCell(pg, i) + pg->childPtrSize;
+      u32 len = cell[0];
+      const u8 *p = cell + 1;
+      /* One-byte sizes only, so the record is all on this page (maxLocal is far larger). */
+      if (len >= 0x80 || len < 3 || p + len > pg->aDataEnd) return 1;
+      u32 h = p[0], t = p[1];
+      if (h >= len || h < 3 || t >= 0x80) return 1;
+      i64 v;
+      if (t >= 1 && t <= 6) {
+        static const u8 sz[7] = {0, 1, 2, 3, 4, 6, 8};
+        u32 k = sz[t];
+        if (h + k > len) return 1;
+        const u8 *q = p + h;
+        v = (i8)q[0];
+        for (u32 j = 1; j < k; j++) v = v << 8 | q[j];
+      } else if (t == 8 || t == 9) {
+        v = t - 8;
+      } else {
+        return 1;
+      }
+      if (v > hi) return 0;
+      if (v >= lo) n[v - lo]++;
+    }
+    c->ix = (u16)(last - 1);
+    int rc = sqlite3BtreeNext(c, 0);
+    if (rc == SQLITE_DONE) return 0;
+    if (rc != SQLITE_OK) return -1;
+  }
+}
+
 /* 1 on a row, 0 empty, -1 error. */
 int td_first(BtCursor *c) {
   int empty = 1;

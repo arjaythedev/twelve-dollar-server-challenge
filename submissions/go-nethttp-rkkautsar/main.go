@@ -222,7 +222,7 @@ func main() {
 			}, feed, postBatch, writeBatch, 1)
 		}
 		started := 0
-		for range 5 {
+		for range 3 {
 			mux, err := newMux()
 			if err != nil {
 				log.Printf("raw io_uring mux unavailable: %v", err)

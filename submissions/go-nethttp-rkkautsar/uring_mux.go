@@ -43,6 +43,7 @@ type muxConn struct {
 	outOff     int
 	reading    bool
 	writing    bool
+	queued     bool
 	busy       bool
 	waiting    bool
 	closeAfter bool
@@ -130,6 +131,7 @@ type uringMux struct {
 	writePend    []*muxConn
 	writeReqs    []*httpReq
 	writeBusy    bool
+	sendReady    []*muxConn
 }
 
 func newUringMux(handler MuxHandler, feed func() []byte, postBatch func([]int64) map[int64][]byte, writeBatch func([]*httpReq) []readResp, workers int) (*uringMux, error) {
@@ -361,6 +363,10 @@ func (m *uringMux) send(c *muxConn, p []byte, closeAfter bool) {
 	if closeAfter {
 		c.closeAfter = true
 	}
+	if !c.writing && !c.queued {
+		c.queued = true
+		m.sendReady = append(m.sendReady, c)
+	}
 }
 
 func (m *uringMux) armClose(index uint32) {
@@ -392,31 +398,32 @@ func (m *uringMux) finishClose() {
 }
 
 func (m *uringMux) submitSends() {
-	for _, c := range m.conns {
+	for len(m.sendReady) > 0 {
+		c := m.sendReady[0]
+		m.sendReady = m.sendReady[1:]
+		c.queued = false
 		if c.closed || c.writing || len(c.out) == 0 {
 			continue
 		}
-		for {
-			sqe := m.ring.sqe()
-			if sqe == nil {
-				m.flush()
-				continue
-			}
-			p := c.out[0]
-			*sqe = rawSQE{}
-			sqe.Opcode = 26 // IORING_OP_SEND
-			sqe.Flags = iosqeFixedFile
-			sqe.FD = int32(c.fileIndex)
-			sqe.Addr = uint64(uintptr(unsafe.Pointer(&p[c.outOff])))
-			sqe.Len = uint32(len(p) - c.outOff)
-			sqe.RWFlags = syscall.MSG_NOSIGNAL
-			sqe.UserData = c.id<<3 | muxWriteTag
-			c.writing = true
-			m.toSub++
-			break
+		sqe := m.ring.sqe()
+		if sqe == nil {
+			c.queued = true
+			m.sendReady = append(m.sendReady, c)
+			m.flush()
+			return
 		}
+		p := c.out[0]
+		*sqe = rawSQE{}
+		sqe.Opcode = 26 // IORING_OP_SEND
+		sqe.Flags = iosqeFixedFile
+		sqe.FD = int32(c.fileIndex)
+		sqe.Addr = uint64(uintptr(unsafe.Pointer(&p[c.outOff])))
+		sqe.Len = uint32(len(p) - c.outOff)
+		sqe.RWFlags = syscall.MSG_NOSIGNAL
+		sqe.UserData = c.id<<3 | muxWriteTag
+		c.writing = true
+		m.toSub++
 	}
-	m.flush()
 }
 
 func (m *uringMux) loop() {
@@ -426,9 +433,12 @@ func (m *uringMux) loop() {
 		m.flushWrites()
 		m.submitSends()
 		if m.toSub > 0 {
-			m.flush()
-		}
-		if _, err := m.ring.enter(0, 1, 1); err != nil && err != syscall.EINTR {
+			rc, err := m.ring.enter(m.toSub, 1, 1)
+			if err != nil && err != syscall.EINTR {
+				return
+			}
+			m.toSub -= uint32(rc)
+		} else if _, err := m.ring.enter(0, 1, 1); err != nil && err != syscall.EINTR {
 			return
 		}
 		m.drainCQEs()
@@ -557,11 +567,19 @@ func (m *uringMux) finishWrite(c *muxConn, cqe *rawCQE) {
 	}
 	c.outOff += int(cqe.Res)
 	if c.outOff < len(c.out[0]) {
+		if !c.queued {
+			c.queued = true
+			m.sendReady = append(m.sendReady, c)
+		}
 		return
 	}
 	c.out = c.out[1:]
 	c.outOff = 0
 	if len(c.out) > 0 {
+		if !c.queued {
+			c.queued = true
+			m.sendReady = append(m.sendReady, c)
+		}
 		return
 	}
 	if c.closeAfter {

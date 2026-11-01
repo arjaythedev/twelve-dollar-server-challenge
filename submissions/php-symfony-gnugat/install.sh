@@ -3,14 +3,14 @@
 # extensions the app needs) and Composer, both checksum-verified.
 set -euo pipefail
 
-FRANKENPHP_VERSION=1.13.0
+FRANKENPHP_VERSION=1.13.4
 case "$(uname -m)" in
-  x86_64) FRANKENPHP_SHA256=89e6410f56baf4b960f6429a778081524d266f9b9c8a9a14d1ba697c21e70104 ;;
-  aarch64) FRANKENPHP_SHA256=4dfbd5bd33bdd96da2cefce55b90aec29483aba5426f733cd3d4a3282c54434f ;;
+  x86_64) FRANKENPHP_SHA256=d4d032529a2553bf91034a47ded3f1f1b99c1630541008b3ce1ce0d28f01dbcc ;;
+  aarch64) FRANKENPHP_SHA256=439922840c5afaba450ce9a7c1863dd740bbd4d53591d0f6bff5fd1945b2c0a7 ;;
   *) echo "unsupported architecture: $(uname -m)"; exit 1 ;;
 esac
-COMPOSER_VERSION=2.10.2
-COMPOSER_SHA256=5ee7125f8a30a34d246cefdc0bc85b8a783b28f2aec968994118512350d28027
+COMPOSER_VERSION=2.11.1
+COMPOSER_SHA256=6f1b891e1d4927d62740276c540fb490e47689e19e102c49e8da849794882f8c
 
 apt-get update
 apt-get install -y --no-install-recommends ca-certificates curl unzip

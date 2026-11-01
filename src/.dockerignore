@@ -1,0 +1,9 @@
+.venv
+.ruff_cache
+**/__pycache__
+**/*.pyc
+.git
+.vscode
+benchmarks
+.env
+.env.*

@@ -1,0 +1,25 @@
+# Experiment: PR 40's Caddyfile settings (php_server with the worker on match *, log level WARN, expose_php 0).
+{
+	auto_https off
+	admin off
+	log {
+		level WARN
+	}
+
+	frankenphp {
+		php_ini expose_php 0
+	}
+}
+
+http://:{$PORT} {
+	bind {$HOST}
+	php_server {
+		root ./public
+		file_server off
+		resolve_root_symlink false
+		worker {
+			file index.php
+			match *
+		}
+	}
+}

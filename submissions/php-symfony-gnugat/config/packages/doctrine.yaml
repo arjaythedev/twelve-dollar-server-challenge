@@ -8,29 +8,3 @@ doctrine:
             !php/const PDO::ATTR_PERSISTENT: true
 
         profiling_collect_backtrace: '%kernel.debug%'
-    orm:
-        validate_xml_mapping: true
-        naming_strategy: doctrine.orm.naming_strategy.underscore
-        auto_mapping: true
-        mappings:
-            App:
-                type: attribute
-                is_bundle: false
-                dir: '%kernel.project_dir%/src/Entity'
-                prefix: 'App\Entity'
-                alias: App
-
-# No result cache: the challenge forbids caching data across requests.
-# The query cache only holds DQL to SQL translations, like a prepared statement.
-when@prod:
-    doctrine:
-        orm:
-            query_cache_driver:
-                type: pool
-                pool: doctrine.system_cache_pool
-
-    framework:
-        cache:
-            pools:
-                doctrine.system_cache_pool:
-                    adapter: cache.system

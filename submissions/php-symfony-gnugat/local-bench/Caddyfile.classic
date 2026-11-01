@@ -2,13 +2,6 @@
 {
 	auto_https off
 	admin off
-
-	frankenphp {
-		# 2 PHP threads to start with, the default (max_threads alone would make it 1), up to 8: FrankenPHP adds threads
-		# when requests wait for a free one (while others wait on SQLite), and stops them once idle for max_idle_time.
-		num_threads 2
-		max_threads 8
-	}
 }
 
 # Classic mode: Symfony boots on every request, like with PHP-FPM.

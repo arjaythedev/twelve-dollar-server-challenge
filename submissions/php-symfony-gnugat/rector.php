@@ -6,11 +6,7 @@ use Rector\Caching\ValueObject\Storage\FileCacheStorage;
 use Rector\CodeQuality\Rector\Assign\CombinedAssignRector;
 use Rector\Config\RectorConfig;
 use Rector\DeadCode\Rector\ClassMethod\RemoveUnusedPromotedPropertyRector;
-use Rector\Naming\Rector\Assign\RenameVariableToMatchMethodCallReturnTypeRector;
-use Rector\Naming\Rector\Class_\RenamePropertyToMatchTypeRector;
-use Rector\Naming\Rector\ClassMethod\RenameParamToMatchTypeRector;
 use Rector\Set\ValueObject\SetList;
-use Rector\Visibility\Rector\ClassConst\ChangeConstantVisibilityRector;
 use Rector\Visibility\Rector\ClassMethod\ChangeMethodVisibilityRector;
 
 return RectorConfig::configure()
@@ -33,10 +29,6 @@ return RectorConfig::configure()
         // —— Excluded rules ———————————————————————————————————————————————————
         // [CODE_QUALITY]
         CombinedAssignRector::class,
-        // [NAMING]
-        RenameParamToMatchTypeRector::class,
-        RenamePropertyToMatchTypeRector::class,
-        RenameVariableToMatchMethodCallReturnTypeRector::class,
         // [DEAD_CODE]
         // Never read on purpose: holding the statement keeps it out of the pool while the result is alive
         RemoveUnusedPromotedPropertyRector::class => [
@@ -62,6 +54,5 @@ return RectorConfig::configure()
     ->withRules([
         // —— Core —————————————————————————————————————————————————————————————
         // Inherit parent visibility
-        ChangeConstantVisibilityRector::class,
         ChangeMethodVisibilityRector::class,
     ]);

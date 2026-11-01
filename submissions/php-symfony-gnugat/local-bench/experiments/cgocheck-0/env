@@ -1,0 +1,2 @@
+# Experiment: no cgo pointer checks on PHP <-> Go calls, as in PR 40 (FrankenPHP's performance guide)
+GODEBUG=cgocheck=0

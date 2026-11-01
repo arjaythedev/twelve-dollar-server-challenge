@@ -4,16 +4,19 @@
 # Only the files the build needs are copied, unchanged, plus the repo's licences. Default commit: HEAD.
 #   tools/sync-libs.sh ../cursed-http-parser 3be7fd3
 #   tools/sync-libs.sh https://github.com/public/cursed-jwt.git 6f92f71
+#   tools/sync-libs.sh ../cursed-sqlite-jit ed317cd          (vendored as third_party/cursed-sqlite-turbo)
 set -euo pipefail
 here=$(cd "$(dirname "$0")/.." && pwd)
 src=${1:?usage: sync-libs.sh <repo-dir-or-url> [commit]}
 rev=${2:-HEAD}
 repo=$(basename "${src%.git}")
+[ "$repo" = cursed-sqlite-jit ] && repo=cursed-sqlite-turbo # the repo's old directory name
 case $repo in
   cursed-http-parser) paths="LICENSE include/fastparse.h include/batchparse.h include/fbparse.h gen/httpgen.py
     vendor/pico/picohttpparser.c vendor/pico/picohttpparser.h vendor/pico/COMMIT vendor/pico/README.md" ;;
   cursed-jwt) paths="LICENSE licenses/OpenSSL-LICENSE.txt include/jwt.h src/jwt.c src/jwt_mb.inc
     src/sha256_x86_64_ossl.S" ;;
+  cursed-sqlite-turbo) paths="LICENSE qc/qc.c qc/qcg.c qc/qvm.c qc/qvm_run.h qc/gen_decoders.py" ;; # DB_READS=turbo
   *) echo "sync-libs.sh: unknown library '$repo'" >&2; exit 2 ;;
 esac
 sha() { if sha256sum --version > /dev/null 2>&1; then sha256sum "$@"; else shasum -a 256 "$@"; fi; }

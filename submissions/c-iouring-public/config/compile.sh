@@ -41,7 +41,13 @@ compile_units() {
     if [ "${SQLITE_LINK:-unity}" = separate ]; then
       $cc "$@" -I"$sq" $SQLOPTS -c "$sq/sqlite3.c" -o "$out/sqlite.o" || return 1
     else
-      $cc "$@" -I"$sq" $INCLUDES $SQLOPTS -c src/unit_sqlite.c -o "$out/sqlite.o" || return 1
+      local tq=""
+      if [ "${TURBO:-0}" = 1 ]; then # DB_READS=turbo: qc.c and its generated record decoders join this unit
+        python3 third_party/cursed-sqlite-turbo/qc/gen_decoders.py "$out/qc_dec.h" || return 1
+        tq="-Ithird_party/cursed-sqlite-turbo/qc -I$out"
+      fi
+      # shellcheck disable=SC2086 # $tq is a flag list
+      $cc "$@" -I"$sq" $INCLUDES $tq $SQLOPTS -c src/unit_sqlite.c -o "$out/sqlite.o" || return 1
     fi
     echo "$sq ${SQLITE_LINK:-unity} $SQLOPTS" > "$out/sqlite.o.src"
   fi

@@ -53,12 +53,13 @@ static void on_tick(loop_t *L, void *ud) {
               "engine ckpts=%llu ckpt_frames=%llu ckpt_max_ms=%.1f ckpt_total_ms=%.0f wal_max=%llu drains=%llu "
               "drain_timeouts=%llu "
               "drain_ms_max=%.1f busy_sleeps=%llu restarts=%llu wal_resets=%llu wal_dropped=%lluMB wal_flushes=%llu "
-              "commits_failed=%llu\n",
+              "commits_failed=%llu turbo=%llu turbo_fallbacks=%llu\n",
               (unsigned long long)es.checkpoints, (unsigned long long)es.ckpt_frames, es.ckpt_max_ms, es.ckpt_total_ms,
               (unsigned long long)es.wal_max, (unsigned long long)es.drains, (unsigned long long)es.drains_timed_out,
               es.drain_ms_max, (unsigned long long)es.busy_sleeps, (unsigned long long)es.restarts,
               (unsigned long long)es.wal_resets, (unsigned long long)(es.wal_dropped_bytes >> 20),
-              (unsigned long long)es.wal_flushes, (unsigned long long)es.commits_failed);
+              (unsigned long long)es.wal_flushes, (unsigned long long)es.commits_failed,
+              (unsigned long long)es.turbo_served, (unsigned long long)es.turbo_fallbacks);
       fprintf(stderr,
               "stats shed=%s open=%u acc=%llu req=%llu batches=%llu lanes=%llu slow=%llu slow_checked=%llu jwt=%llu held=%llu "
               "cfail=%llu deadline_503=%llu press_503=%llu sock_pressure=%u/%llu all_503=%llu b503_skipped=%llu b503_tokens=%llu "

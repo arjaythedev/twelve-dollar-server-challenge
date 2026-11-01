@@ -45,7 +45,7 @@ locking, scalar JWT, picohttpparser for every request.
 | Variable | Cursed (default, submitted) | Boring |
 |---|---|---|
 | `SQLITE_LINK` | `unity`: `components/engine.c` `#include`s `sqlite3.c`, one unit, so it can use SQLite's internals | `separate`: `sqlite3.c` is its own unit, and `src/engine_public.c` uses only the public API (`sqlite3.h`). The build checks that no other SQLite symbol is referenced. Needs the `sql` / `stock` / `sqlite` or `inline` / `keep` values below |
-| `DB_READS` | `direct`: reads through SQLite's own B-tree cursors | `sql`: the spec's prepared SELECTs |
+| `DB_READS` | `turbo`: the spec's prepared feed and post SELECTs, run by our [cursed-sqlite-turbo](https://github.com/public/cursed-sqlite-turbo) at commit `ed317cd` (vendored, pinned), whose plans write the JSON body. It is compiled after SQLite 3.54.1's own `sqlite3.c`, unmodified (`QC_STOCK=1`, no generated copies), and any statement it can't reproduce exactly runs in SQLite's interpreter. Or `direct`: reads through SQLite's own B-tree cursors (#158's default) | `sql`: the spec's prepared SELECTs |
 | `DB_VFS` | `cursed`: WAL write-coalescing and file-size-cache shim | `stock`: SQLite's unix VFS |
 | `DB_CKPT` | `thread`: SQLite's own `sqlite3_wal_checkpoint_v2` from a checkpoint thread on a second connection, in passes of 1,024 WAL frames, with a write gate at 8,192 frames (32 MB); checkpointed WAL pages are dropped from the page cache, `SQLITE_THREADSAFE=2`. Or `bounded`: SQLite's own RESTART checkpoint on the event loop every 16,384 WAL frames, after the batch's replies are submitted; the WAL is reused in place, no write gate, `SQLITE_THREADSAFE=0` (Rust #82's checkpoint style, with a 4× larger mark); `uring`: the engine runs SQLite's checkpoint step itself, as a state machine on the event loop's io_uring, with a write gate; `inline`: PASSIVE after the replies. `CURSED=boring` refuses `uring` | `sqlite`: SQLite's autocheckpoint |
 | `DB_WAL_DROP` | `drop` with `thread` / `uring`: checkpointed WAL pages are dropped from the page cache, and the WAL is truncated at restart; `keep` with `bounded` (its ~64 MB WAL stays hot) | `keep` |
@@ -194,8 +194,11 @@ wakeup is one batch:
 3. **Authenticate.** All Bearer tokens of the batch are verified in one multi-buffer HMAC call. Every signature is
    recomputed, and `exp` is required.
 4. **Database.** All requests of the batch run in one SQLite transaction (group commit), in arrival order:
-   - Reads use SQLite's B-tree cursors directly: the feed's like counts come from one index range scan, and its 20
-     author lookups run as one batched seek.
+   - Reads are the spec's prepared `SELECT`s, run by cursed-sqlite-turbo: it reads the bytecode SQLite's planner made
+     for each statement and runs a plan with the same results. The feed's 20 like-count subqueries become one index range
+     walk and its author joins one batched seek, and the plan writes the JSON body. It runs on stock SQLite, unmodified,
+     and anything it can't reproduce exactly falls back to SQLite's interpreter before a byte is written.
+     (`DB_READS=direct` reads SQLite's B-tree cursors with our own code instead, as #158 did.)
    - Writes are prepared SQL `INSERT`s.
    - A small VFS shim writes each commit's WAL frames with one `pwrite` and caches the DB file size while the lock
      is held.

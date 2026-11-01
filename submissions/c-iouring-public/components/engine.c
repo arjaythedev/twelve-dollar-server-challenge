@@ -1,6 +1,9 @@
 /* db/engine.c (sha256 8bf59ee9eea9), developed separately for this entry. */
 // engine.c — see engine.h. One translation unit with the SQLite amalgamation.
 #include "sqlite3.c"
+#if ENG_TURBO
+#include "qc.c"   // cursed-sqlite-turbo (DB_READS=turbo): qc/qcg/qvm, over the same unmodified amalgamation (QC_STOCK)
+#endif
 #include "engine.h"
 #include <stdio.h>
 #include <string.h>
@@ -691,6 +694,18 @@ static int wal_hook(void *arg, sqlite3 *db, const char *name, int frames) { (voi
 static BtCursor *mkcur(void) { BtCursor *c = sqlite3MallocZero(sqlite3BtreeCursorSize()); if (c) sqlite3BtreeCursorZero(c); return c; }
 
 static int prep(eng *e, const char *sql, sqlite3_stmt **s) { return sqlite3_prepare_v3(e->db, sql, -1, SQLITE_PREPARE_PERSISTENT, s, 0); }
+#if ENG_TURBO
+// the bodies w_post writes, as qc templates: i = integer, s = JSON string (JSON.stringify's escapes, as eng_json_escape)
+#define TJ_POST { "{\"id\":", ",\"body\":", ",\"created_at\":", ",\"author\":", ",\"like_count\":", "}" }
+static const QcJson tj_feed = { "{\"posts\":[", "]}", ",", 5, "isssi", TJ_POST };
+static const QcJson tj_post = { "{\"post\":", "}", ",", 5, "isssi", TJ_POST };
+// 1: qc wrote the body (*rows rows); 0: QC_FALLBACK, step the statement as usual
+static int turbo_body(eng_stats *st, sqlite3_stmt *s, const i64 *param, char *out, size_t cap, size_t *n, int *rows) {
+  QcOut o = { out, cap, 0, 0, param, param ? 1 : 0 };
+  if (sqlite3_qc_exec(s, 0, &o) != SQLITE_OK) { st->turbo_fallbacks++; return 0; }
+  st->turbo_served++; *n = o.n; *rows = o.rows; return 1;
+}
+#endif
 
 #define POSTQ "SELECT p.id, p.body, p.created_at, u.username, (SELECT count(*) FROM likes l WHERE l.post_id = p.id) AS like_count FROM posts p JOIN users u ON u.id = p.user_id "
 
@@ -769,6 +784,16 @@ eng *eng_open(const char *path, const eng_opts *opts, char *err, size_t errn) {
       prep(e, "INSERT INTO posts (user_id, body, created_at) VALUES (?1, ?2, ?3)", &e->s_ins) ||
       prep(e, "INSERT INTO likes (user_id, post_id, created_at) VALUES (?1, ?2, ?3) ON CONFLICT (user_id, post_id) DO NOTHING", &e->s_like))
     { why = sqlite3_errmsg(db); goto fail; }
+#if ENG_TURBO
+  if (e->o.turbo_reads && !e->o.direct_reads) {
+    e->o.feed_range = 0;   // qc compiles the spec's one-statement feed (its count subquery becomes one range walk)
+    // a statement qc doesn't take stays on SQLite's interpreter; log it, the server still works
+    if (sqlite3_qc(e->s_feed) != 1 || !sqlite3_qc_json(e->s_feed, &tj_feed)) fprintf(stderr, "turbo: feed not compiled (%s)\n", qc_why);
+    if (sqlite3_qc(e->s_post) != 1 || !sqlite3_qc_json(e->s_post, &tj_post)) fprintf(stderr, "turbo: post not compiled (%s)\n", qc_why);
+  }
+#else
+  e->o.turbo_reads = 0;
+#endif
   return e;
 fail:
   if (err) snprintf(err, errn, "%s", why);
@@ -793,6 +818,9 @@ void eng_close(eng *e) {
   }
   sqlite3_stmt **ss[] = {&e->s_begin, &e->s_commit, &e->s_rollback, &e->s_health, &e->s_feed, &e->s_post, &e->s_ids, &e->s_rlikes,
                          &e->s_rposts, &e->s_exists, &e->s_ins, &e->s_like};
+#if ENG_TURBO && QC_STOCK
+  for (size_t i = 0; i < sizeof ss / sizeof *ss; i++) if (*ss[i]) sqlite3_qc_forget(*ss[i]);
+#endif
   for (size_t i = 0; i < sizeof ss / sizeof *ss; i++) sqlite3_finalize(*ss[i]);
   for (int i = 0; i < NRC; i++) sqlite3_free(e->rc[i]);
   for (int i = 0; i < NWC; i++) sqlite3_free(e->wc[i]);
@@ -1363,6 +1391,10 @@ static inline int stmt_fits(sqlite3_stmt *s, size_t room) {
 }
 static int sql_get(eng *e, i64 id, char *out, size_t cap, size_t *n) {
   if (sql_txn(e)) return err500(out, n);
+#if ENG_TURBO
+  int rows;
+  if (e->o.turbo_reads && turbo_body(&e->st, e->s_post, &id, out, cap, n, &rows)) return rows ? 200 : err404(out, n);
+#endif
   sqlite3_stmt *s = e->s_post; sqlite3_bind_int64(s, 1, id);
   int rc = sqlite3_step(s), st;
   if (rc == SQLITE_ROW) {
@@ -1373,6 +1405,10 @@ static int sql_get(eng *e, i64 id, char *out, size_t cap, size_t *n) {
   return st;
 }
 static int sql_feed_ref(eng *e, char *out, size_t cap, size_t *n) {
+#if ENG_TURBO
+  int rows;
+  if (e->o.turbo_reads && turbo_body(&e->st, e->s_feed, 0, out, cap, n, &rows)) return 200;
+#endif
   sqlite3_stmt *s = e->s_feed; char *p = W(out, "{\"posts\":["), *end = out + cap; int k = 0, rc;
   while ((rc = sqlite3_step(s)) == SQLITE_ROW) {
     if (!stmt_fits(s, (size_t)(end - p) - 8)) { rc = SQLITE_NOMEM; break; }

@@ -146,7 +146,7 @@ func main() {
 			readConns = n
 		}
 	}
-	coalesce := true
+	coalesce := false
 	if v := os.Getenv("READ_COALESCE"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			coalesce = b

@@ -13,14 +13,13 @@ Serving is direct on `HOST:PORT`, no Nginx.
 - **SQLite renders the JSON.** `/feed` and `/posts/:id` return one `TEXT` value
   built by `json_group_array(json_object(...))` / `json_object(...)`, not rows
   mapped and re-encoded in Go.
-- **In-flight read batching.** Concurrent requests for the same feed/post join
-  one SQLite read. The leader waits `READ_BATCH_US` (default 500 µs) so other
-  handlers can join; the group is deleted as soon as the read completes. A
-  generation counter in the key is bumped after every commit, so a request that
-  starts after a 201/200 cannot join a pre-write read. There is no cache that
-  survives a completed group. This is enabled by default; `READ_COALESCE=0`
-  disables joining and the `READ_BATCH_US` window entirely, so each request
-  executes its own SQLite read.
+- **Optional in-flight read batching.** Disabled by default so every request
+  executes its own SQLite read. With `READ_COALESCE=1`, concurrent requests for
+  the same feed/post join one SQLite read; the leader waits `READ_BATCH_US`
+  (default 500 µs) so other handlers can join, and the group is deleted as soon
+  as the read completes. A generation counter in the key is bumped after every
+  commit, so a request that starts after a 201/200 cannot join a pre-write read.
+  No result outlives its group.
 - **Write group commit.** One dedicated `*sql.Conn` runs queued create/like
   jobs in one `BEGIN IMMEDIATE … COMMIT` every `WRITE_BATCH_MS` (default
   100 ms). Every response waits for the commit.
@@ -30,15 +29,23 @@ Serving is direct on `HOST:PORT`, no Nginx.
 
 ## Local measurements
 
-Server pinned to 1 CPU, 100 keep-alive clients, same seed DB:
+Docker load test with the server pinned to one CPU and `1.5 GiB` of memory,
+four LG clients (20 s ramp, 60 s hold), fresh seed database, with read
+coalescing disabled:
 
-| Path | This build | Custom branch | Current net/http peers |
-|---|---:|---:|---:|
-| `/feed` | 10.4–12.1k req/s, 81–87 µs | 19.2–19.9k, 47 µs | 5.9–6.9k |
-| `/posts/:id` | 16.2–17.4k req/s, 55–58 µs | 26.7–26.9k, 33 µs | 10.4–10.9k |
+| Users | Client results | Server |
+|---:|---|---|
+| 35,000 | p95 71.6 ms, p99 120.1 ms, p50 0.4 ms, 0 errors; 4 clients pass | 61.5% CPU, 1.172 GiB peak |
+| 70,000 | p95 ~10 s, ~40% errors; clients saw EOF/timeouts | container gone before the 45 s sample |
 
-`test/run.sh` passes **42/42**. The custom branch (`go-nethttp-rkkautsar` on its
-own branch) keeps the custom parser/writer and direct cgo binding.
+35k connections already use 1.17 GiB, so 70k does not fit this 1.5 GiB test
+container and is not expected to fit the 2 GiB benchmark VM either. The
+`READ_COALESCE=0` path is correct and passes the full test suite, but the
+per-connection cost of stock `net/http` is the limit at these connection
+counts.
+
+`test/run.sh` passes **42/42** with `READ_COALESCE=0` (the default) and with
+`READ_COALESCE=1`.
 
 ## Prior art
 
@@ -48,8 +55,8 @@ own branch) keeps the custom parser/writer and direct cgo binding.
 - In-flight feed coalescing was independently implemented in the top-ranked
   `c-iouring-meros` submission, but left **off by default** because its author
   judged rule 5 (“no response/query-result caches”) ambiguous for one query
-  serving many requests. This build keeps it enabled as request batching; no
-  result outlives its group.
+  serving many requests. This build also leaves it off by default; it is
+  available with `READ_COALESCE=1`.
 - The custom branch’s prebuilt packet and single-write response are also not
   novel: top io_uring implementations write headers in front of the body in one
   send.

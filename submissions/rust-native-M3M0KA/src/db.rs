@@ -7,6 +7,7 @@
 
 use std::ffi::CString;
 use std::os::raw::{c_char, c_int, c_void};
+use std::sync::Arc;
 
 use crate::btree::Cursors;
 use crate::http::{put_i64, put_jstr};
@@ -68,6 +69,22 @@ extern "C" {
     fn sqlite3_column_text(s: *mut Stmt, i: c_int) -> *const c_char;
     fn sqlite3_column_bytes(s: *mut Stmt, i: c_int) -> c_int;
     fn sqlite3_changes(db: *mut Sqlite3) -> c_int;
+    fn setpriority(which: c_int, who: c_int, nice: c_int) -> c_int;
+    fn sqlite3_wal_hook(
+        db: *mut Sqlite3,
+        cb: Option<unsafe extern "C" fn(*mut c_void, *mut Sqlite3, *const c_char, c_int) -> c_int>,
+        ud: *mut c_void,
+    ) -> Option<
+        unsafe extern "C" fn(*mut c_void, *mut Sqlite3, *const c_char, c_int) -> c_int,
+    >;
+    fn sqlite3_wal_checkpoint_v2(
+        db: *mut Sqlite3,
+        zdb: *const c_char,
+        mode: c_int,
+        log: *mut c_int,
+        ckpt: *mut c_int,
+    ) -> c_int;
+    fn syscall(num: c_int, ...) -> c_int;
 }
 
 pub enum LikeResult {
@@ -75,6 +92,120 @@ pub enum LikeResult {
     AlreadyLiked,
     Missing,
     Error,
+}
+
+/// Off-loop WAL checkpointing, the shape the top boards run: the loop pays
+/// nothing for checkpoints, and a dedicated thread at nice 19 copies the WAL
+/// between the loop's batches. `wal_autocheckpoint` stays 0, so nothing inside
+/// a serving statement ever blocks on a checkpoint copy.
+///
+/// - the WAL hook records the frame count and wakes the thread past
+///   `wake_frames` (default 1,000 = ~4 MB of WAL);
+/// - the thread runs one PASSIVE checkpoint on its own second connection and
+///   stops when `nlog == nckpt` (everything backfilled). While the gate is
+///   held — `gate_frames` exceeded — it keeps re-arming until the copy is
+///   done, because with a still-open write the next commit would stall
+///   otherwise;
+/// - the thread is at nice 19: on one vCPU a pass at the default priority can
+///   take the CPU for its whole length, and the measured effect at the edge
+///   was holds dying at nice 0 and passing at 19. The loop's batches are
+///   short, so the thread runs between them.
+const CKPT_PASSIVE: c_int = 1; // SQLITE_CHECKPOINT_PASSIVE
+const WAL_WAKE_FRAMES: i32 = 1000;
+const WAL_GATE_FRAMES: i32 = 4096;
+
+struct WalCtl {
+    mu: std::sync::Mutex<bool>, // `wanted`
+    cv: std::sync::Condvar,
+    commit_seq: std::sync::atomic::AtomicU64,
+    backfilled_seq: std::sync::atomic::AtomicU64,
+    stop: std::sync::atomic::AtomicBool,
+    gate_held: std::sync::atomic::AtomicBool,
+    c2: *mut Sqlite3,
+}
+
+unsafe impl Send for WalCtl {}
+unsafe impl Sync for WalCtl {}
+
+impl WalCtl {
+    fn new(c2: *mut Sqlite3) -> std::sync::Arc<WalCtl> {
+        std::sync::Arc::new(WalCtl {
+            mu: std::sync::Mutex::new(false),
+            cv: std::sync::Condvar::new(),
+            commit_seq: std::sync::atomic::AtomicU64::new(0),
+            backfilled_seq: std::sync::atomic::AtomicU64::new(0),
+            stop: std::sync::atomic::AtomicBool::new(false),
+            gate_held: std::sync::atomic::AtomicBool::new(false),
+            c2,
+        })
+    }
+
+    /// One PASSIVE checkpoint on the second connection, then either done
+    /// (everything backfilled) or re-armed while the gate is held.
+    fn one_ckpt(&self) {
+        use std::sync::atomic::Ordering::*;
+        let seq = self.commit_seq.load(Acquire);
+        let mut nlog: c_int = 0;
+        let mut nckpt: c_int = 0;
+        let name = b"main\0";
+        let rc = unsafe {
+            sqlite3_wal_checkpoint_v2(self.c2, name.as_ptr() as *const i8, CKPT_PASSIVE, &mut nlog, &mut nckpt)
+        };
+        let done = (rc == 0 || rc == 3) && nlog == nckpt;
+        if done {
+            self.backfilled_seq.store(seq, Release);
+            self.gate_held.store(false, Release);
+        }
+        if !done && self.gate_held.load(Acquire) {
+            let mut wanted = self.mu.lock().unwrap();
+            *wanted = true;
+            self.cv.notify_one();
+        }
+    }
+
+    /// Owns `c2` for its whole lifetime. Runs at nice 19 so a checkpoint copy
+    /// never preempts a loop pass; between passes the loop is out of the way
+    /// for tens of microseconds, which is all this needs.
+    fn run(self: std::sync::Arc<WalCtl>) {
+        unsafe {
+            setpriority(0, syscall(186), 19); // PRIO_PROCESS, gettid, nice
+        }
+        let mut wanted = self.mu.lock().unwrap();
+        loop {
+            let (guard, _) = self
+                .cv
+                .wait_timeout(wanted, std::time::Duration::from_millis(250))
+                .unwrap();
+            wanted = guard;
+            if self.stop.load(std::sync::atomic::Ordering::Acquire) {
+                return;
+            }
+            if *wanted {
+                *wanted = false;
+                std::mem::drop(wanted);
+                self.one_ckpt();
+                wanted = self.mu.lock().unwrap();
+            }
+        }
+    }
+}
+
+unsafe extern "C" fn wal_hook(
+    ud: *mut c_void,
+    _db: *mut Sqlite3,
+    _name: *const c_char,
+    frames: c_int,
+) -> c_int {
+    let ctl = ud as *const WalCtl;
+    let ctl = &*ctl;
+    use std::sync::atomic::Ordering::*;
+    ctl.commit_seq.fetch_add(1, Release);
+    if frames >= WAL_WAKE_FRAMES {
+        let mut wanted = ctl.mu.lock().unwrap();
+        *wanted = true;
+        ctl.cv.notify_one();
+    }
+    0
 }
 
 unsafe fn column(s: *mut Stmt, i: c_int) -> &'static [u8] {
@@ -116,6 +247,8 @@ pub struct Db {
     batch_failed: bool,
     plan: Option<Cursors>,
     plan_ok: bool,
+    /// Off-loop WAL checkpoint control; None keeps the inline auto-checkpoint.
+    wal: Option<std::sync::Arc<WalCtl>>,
 }
 
 impl Db {
@@ -143,6 +276,7 @@ impl Db {
             batch_failed: false,
             plan: None,
             plan_ok: false,
+            wal: None,
         };
         // A PASSIVE checkpoint copies the accumulated frames into the database
         // file inside the statement that crosses the threshold. Smaller means a
@@ -150,7 +284,7 @@ impl Db {
         let ac: i64 = std::env::var("FEED_WAL_AC")
             .ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(512);
+            .unwrap_or(0);
         for pragma in [
             String::from("PRAGMA journal_mode = WAL"),
             String::from("PRAGMA synchronous = NORMAL"),
@@ -160,6 +294,28 @@ impl Db {
             format!("PRAGMA wal_autocheckpoint = {ac}"),
         ] {
             db.exec(&pragma);
+        }
+        if ac == 0 {
+            // The inline auto-checkpoint is off: a WAL hook counts frames and a
+            // dedicated nice-19 thread copies the WAL between loop batches.
+            let cpath = CString::new(path).expect("path");
+            let mut c2: *mut Sqlite3 = std::ptr::null_mut();
+            if unsafe {
+                sqlite3_open_v2(cpath.as_ptr(), &mut c2, SQLITE_OPEN_READWRITE, std::ptr::null())
+            } == SQLITE_OK
+            {
+                unsafe {
+                    sqlite3_busy_timeout(c2, 5000);
+                    db.exec("PRAGMA cache_size = -2048");
+                }
+                let ctl = WalCtl::new(c2);
+                unsafe {
+                    sqlite3_wal_hook(db.h, Some(wal_hook), Arc::as_ptr(&ctl) as *mut c_void);
+                }
+                let clone = Arc::clone(&ctl);
+                std::thread::spawn(move || clone.run());
+                db.wal = Some(ctl);
+            }
         }
         const COLS: &str = "SELECT p.id, p.body, p.created_at, u.username, \
              (SELECT count(*) FROM likes l WHERE l.post_id = p.id) \

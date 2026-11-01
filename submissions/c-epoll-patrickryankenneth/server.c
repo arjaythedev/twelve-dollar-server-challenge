@@ -868,6 +868,7 @@ static void reap(int ri) {
 }
 
 /* Returns only if io_uring cannot be used (the caller then falls back to epoll). */
+static int lf[64];
 static int uring_serve(int lfd, unsigned nofile, const char *host, const char *port) {
   const char *e;
   NT = nofile < 400000 ? nofile : 400000; NR = 8;
@@ -884,6 +885,21 @@ static int uring_serve(int lfd, unsigned nofile, const char *host, const char *p
   if (!U) return -1;
   for (int i = 0; i < UR_NB; i++) ur_free[ur_nfree++] = i;
   for (int i = 0; i < NR; i++) { rg[i].want_accept = 1; }
+  for (int i = 0; i < 64; i++) lf[i] = lfd;
+  if (!getenv("NO_REUSEPORT")) {                     /* one listener per ring: the kernel hashes flows across them */
+    struct sockaddr_in a2; memset(&a2, 0, sizeof a2); a2.sin_family = AF_INET; a2.sin_port = htons((uint16_t)atoi(port));
+    if (inet_pton(AF_INET, host, &a2.sin_addr) != 1) a2.sin_addr.s_addr = htonl(INADDR_ANY);
+    int ok = 1, o2 = 1;
+    for (int i = 1; i < NR && ok; i++) {
+      int f = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+      if (f < 0) { ok = 0; break; }
+      setsockopt(f, SOL_SOCKET, SO_REUSEADDR, &o2, sizeof o2); setsockopt(f, SOL_SOCKET, SO_REUSEPORT, &o2, sizeof o2);
+      if (bind(f, (struct sockaddr *)&a2, sizeof a2) < 0 || listen(f, 65535) < 0) { close(f); ok = 0; break; }
+      setsockopt(f, IPPROTO_TCP, TCP_NODELAY, &o2, sizeof o2);
+      lf[i] = f;
+    }
+    if (!ok) { for (int i = 1; i < NR; i++) if (lf[i] != lfd) { close(lf[i]); lf[i] = lfd; } fprintf(stderr, "reuseport listeners unavailable, sharing one\n"); }
+  }
   for (int i = 1; i < NR; i++) {                     /* ring 0 sleeps for everyone: it watches the other rings */
     struct io_uring_sqe *s = get_sqe(&rg[0]);
     s->opcode = IORING_OP_POLL_ADD; s->fd = rg[i].fd; s->len = IORING_POLL_ADD_MULTI;
@@ -893,7 +909,7 @@ static int uring_serve(int lfd, unsigned nofile, const char *host, const char *p
   for (;;) {
     for (int i = 0; i < NR; i++) {
       uring *r = &rg[i];
-      if (!r->accept_armed && r->want_accept && r->nconn + NMARGIN < NT) { sq_accept(r, lfd); r->accept_armed = 1; r->want_accept = 0; }
+      if (!r->accept_armed && r->want_accept && r->nconn + NMARGIN < NT) { sq_accept(r, lf[i]); r->accept_armed = 1; r->want_accept = 0; }
       else if (r->accept_armed && !r->accept_cancel && r->nconn + NMARGIN >= NT) { sq_cancel(r, UD(U_ACCEPT, 0, 0)); r->accept_cancel = 1; }
     }
     for (int i = 1; i < NR; i++) ring_flush(&rg[i]);
@@ -923,7 +939,7 @@ int main(void) {
   conns = calloc((size_t)maxfd, sizeof(conn));
 
   int lfd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
-  int one = 1; setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+  int one = 1; setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one); setsockopt(lfd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof one);
   struct sockaddr_in a = {.sin_family = AF_INET, .sin_port = htons((uint16_t)atoi(port))};
   if (inet_pton(AF_INET, host, &a.sin_addr) != 1) { fprintf(stderr, "bad HOST\n"); return 1; }
   if (bind(lfd, (struct sockaddr *)&a, sizeof a) < 0) { perror("bind"); return 1; }

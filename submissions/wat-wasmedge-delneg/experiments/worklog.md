@@ -299,3 +299,9 @@ eviction sweep can run, and each event keeps its connection's generation so an e
 was closed in between (a send error during an early flush) is skipped. Tests: 42/42, cmp.py identical,
 `big.py` (a 12 KB request over several slots, 3 pipelined requests, a sender dribbling 7 bytes every
 2 ms) same as E16. pstat, 3 reps: E16 13.45, 13.38, 13.03 us/req; E17 13.08, 12.91, 12.97 (-3%).
+
+## E18: SQLite at clang -O3; binaryen `wasm-opt -O3` before AOT (1 Nov) — wasm-opt kept
+pstat, 3 interleaved reps: E17 13.02, 13.09, 13.04 us/req; SQLite -O3 13.31, 12.97, 13.16 (nothing:
+WasmEdge's LLVM -O3 sees it all anyway); wasm-opt -O3 on the merged module 12.72, 12.85, 12.90 (-1.5%,
+user instructions 63.1k -> 61.7k; every rep below every E17 rep). 42/42 on both. Kept wasm-opt (binaryen
+is already installed for wasm-merge).

@@ -16,3 +16,4 @@
 {"id":"E15","what":"SQLite -DUSE_PREAD (no lseek per page I/O)","tc_us_req":{"e14":[13.94,13.6,13.59],"e15":[14.12,13.42,13.5]},"syscalls_10s":{"e14":876159,"e15":757619},"reps":3,"tests":"42/42","status":"kept (neutral CPU, -14% syscalls)"}
 {"id":"E16","what":"sendmany: one host call per batch of responses","tc_us_req":{"e15":[13.58,13.93,13.77],"e16":[12.99,13.29,13.32]},"reps":3,"tests":"42/42","status":"kept"}
 {"id":"E17","what":"epoll_recv: epoll_wait + recv per readable socket in one host call","tc_us_req":{"e16":[13.45,13.38,13.03],"e17":[13.08,12.91,12.97]},"reps":3,"tests":"42/42","status":"kept"}
+{"id":"E18","what":"SQLite clang -O3 (a); wasm-opt -O3 on merged module (b)","tc_us_req":{"e17":[13.02,13.09,13.04],"o3":[13.31,12.97,13.16],"wasmopt":[12.72,12.85,12.9]},"reps":3,"tests":"42/42","status":"wasm-opt kept, -O3 discarded"}

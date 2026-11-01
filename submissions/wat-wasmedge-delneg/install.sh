@@ -3,7 +3,7 @@
 # each pinned by version and sha256, into /opt/wat-tdsc:
 #   wabt 1.0.39        wat2wasm: the hand-written WAT -> wasm
 #   wasi-sdk 34        clang for wasm32-wasip1: compiles stock SQLite (#included by sqlite_glue.c, which adds the exports) to wasm
-#   binaryen 125       wasm-merge: joins the WAT module and the SQLite module into one module
+#   binaryen 125       wasm-merge: joins the WAT module and the SQLite module into one; wasm-opt -O3 on the result
 #   WasmEdge 0.18.1    the runtime: `wasmedge compile` (AOT, LLVM) and libwasmedge for the host in src/host.c
 # The app itself (and SQLite, pinned in build.sh) is built from source by build.sh.
 set -euo pipefail

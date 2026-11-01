@@ -10,6 +10,7 @@ $WS/bin/clang --target=wasm32-wasip1 $F -I$S -mexec-model=reactor -Wl,-z,stack-s
   -o sq.wasm $SRC/sqlite_glue.c
 $X/wat2wasm --enable-all $WAT -o app.wasm
 $B/wasm-merge --enable-simd --enable-bulk-memory sq.wasm sq app.wasm app -o merged.wasm
-$WE/bin/wasmedge compile --optimize=3 merged.wasm app.so >/dev/null
+$B/wasm-opt -O3 --enable-simd --enable-bulk-memory merged.wasm -o merged.opt.wasm
+$WE/bin/wasmedge compile --optimize=3 merged.opt.wasm app.so >/dev/null
 gcc -O2 -o host $SRC/host.c -I$WE/include -L$WE/lib -lwasmedge -Wl,-rpath,$WE/lib
 ls -la app.so host | awk '{print $5, $9}'

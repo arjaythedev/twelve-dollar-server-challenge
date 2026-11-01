@@ -168,6 +168,19 @@ Every 128k run failed with the server at 22 to 37% CPU, zero listen or backlog d
 - Hash-map audit (helper B): the TCP request path has no hash map or set. The SCTP path has 18 entries (five Long-keyed maps per request).
 - Re-run of 32k with the current server (`s32r`, after fix 2): 3,367 req/s, 0 failed, p50 / p95 / p99 49.2 / 98.3 / 131.1 ms, server CPU user 36% + sys 14% = 50%, about 148 µs per request (before: 38% + 14% = 52%, 154 µs). No UDP drops on either end. Cgroup peak 131 MB. Finding: the faster row path saves about 4% on SCTP. The cost is in the transport (CRC32c, GC, hash maps, kernel), not in SQLite.
 
+## S13b. SCTP against TCP at the same load
+
+Question: does SCTP cost more per request than TCP? Method: same Mac Kotlin/Native client (8 processes), same 32k users, 40 s ramp, 120 s hold, same server binary (fix 2), server on kali CPU 1 in the box.
+
+| transport | run | req/s | p50 / p95 / p99 | server CPU user + sys | µs/request (user + kernel) | cgroup peak |
+|---|---|---|---|---|---|---|
+| TCP (io_uring) | t32r | 3,361 | 47.6 / 233.5 / 282.6 ms | 12% + 8% = 20% | 60 (36 + 24) | 226 MB |
+| SCTP over UDP | s32r | 3,367 | 49.2 / 98.3 / 131.1 ms | 36% + 14% = 50% | 148 (107 + 42) | 131 MB |
+
+Finding: SCTP costs 2.5 times as much per request. User space is 3 times as much (the Kotlin SCTP stack does what the kernel does for TCP: CRC32c, acknowledgements, retransmit state, reassembly). The kernel part is 1.75 times as much (one datagram system call path per packet, no batching). An earlier estimate that the kernel part was equal used the kali-local TCP run, whose kernel time the load generator inflates; it was wrong.
+The ngsctp design (KMPngSCTP/README.md) is native SCTP with card offload ("No UDP tax"). This bench is SCTP inside UDP without offload: kali's card (hv_netvsc) reports tx-checksum-sctp, tx-sctp-segmentation and tx-udp-segmentation "off [fixed]", and the scored box gives no CAP_NET_RAW for native SCTP from user space. The offload open to us is the CPU's CRC32c instruction (SSE4.2, arm64 CRC) and kernel UDP batching (UDP_SEGMENT, UDP_GRO).
+Open: the TCP p95 (233 ms) is higher than the SCTP p95 (98 ms) at this load. Not explained.
+
 ## S14. What the five winners do that we did not (from their READMEs, 2026-11-01)
 
 1. B-tree cursor reads for /feed and /posts/:id (S8 confirms the size of this gap).

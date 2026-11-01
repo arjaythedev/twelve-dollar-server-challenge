@@ -64,8 +64,12 @@ type rawRing struct {
 	entries uint32
 }
 
-func newRawRing(entries uint32) (*rawRing, error) {
+func newRawRing(entries, cqEntries uint32) (*rawRing, error) {
 	var params [120]byte
+	if cqEntries > 0 {
+		*(*uint32)(unsafe.Pointer(&params[4])) = cqEntries
+		*(*uint32)(unsafe.Pointer(&params[8])) = 1 << 3 // IORING_SETUP_CQSIZE
+	}
 	fd, _, errno := syscall.Syscall(ioUringSetup, uintptr(entries), uintptr(unsafe.Pointer(&params[0])), 0)
 	if errno != 0 {
 		return nil, errno
@@ -74,13 +78,13 @@ func newRawRing(entries uint32) (*rawRing, error) {
 	u32 := func(off int) uint32 { return *(*uint32)(unsafe.Pointer(&params[off])) }
 	r.entries = u32(0)
 	sqArrayOff := u32(40 + 6*4)
-	cqEntries := u32(4)
+	cqeCount := u32(4)
 	cqHeadOff := u32(80)
 	cqTailOff := u32(80 + 4)
 	cqMaskOff := u32(80 + 8)
 	cqCQEsOff := u32(80 + 5*4)
 	sqRingLen := int(sqArrayOff + r.entries*4)
-	cqRingLen := int(cqCQEsOff + cqEntries*16)
+	cqRingLen := int(cqCQEsOff + cqeCount*16)
 	sqeLen := int(r.entries * 64)
 	sqRing, err := syscall.Mmap(int(fd), ioringOffSqRing, sqRingLen, syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_SHARED)
 	if err != nil {
@@ -167,7 +171,7 @@ type uringWriter struct {
 }
 
 func newUringWriter() (*uringWriter, error) {
-	ring, err := newRawRing(uringEntries)
+	ring, err := newRawRing(uringEntries, 512)
 	if err != nil {
 		return nil, err
 	}

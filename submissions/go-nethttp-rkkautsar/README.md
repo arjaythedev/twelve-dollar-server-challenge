@@ -17,6 +17,14 @@ being served.
   goroutine that group-commits queued create/like jobs every `WRITE_BATCH_MS` (default 100 ms).
   Every write response waits for that commit, so a 201/200 is only sent for durable rows.
   Rule 6 explicitly allows group commit under that condition.
+- **Raw io_uring transport.** Socket reads use one multishot
+  `IORING_OP_RECV` per connection with a registered provided-buffer ring
+  (`IORING_REGISTER_PBUF_RING`), and complete response packets are written
+  through raw `IORING_OP_SEND` syscalls in batches of up to 64. The read path
+  re-arms only when `IORING_CQE_F_MORE` is absent or on `-ENOBUFS`; consumed
+  buffers are returned by advancing the buffer-ring tail. There is no
+  `iouring-go` dependency and no vendor tree. Both paths fall back to the Go
+  connection loop if io_uring setup fails.
 - **In-flight read coalescing.** A request for `/feed` or `/posts/:id` joins the current
   group for that key instead of issuing its own query. The key includes a generation counter
   bumped after every successful commit, so a request that starts after a 201/200 can never

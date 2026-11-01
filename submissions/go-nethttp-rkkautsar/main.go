@@ -69,6 +69,7 @@ type app struct {
 	readGen    atomic.Uint64
 	readWindow time.Duration
 	uring      *uringWriter
+	uringRead  *uringReader
 }
 
 // readCall is one in-flight SQLite read. Concurrent requests for the same key
@@ -186,6 +187,12 @@ func main() {
 	} else {
 		log.Printf("raw io_uring write batching unavailable: %v", err)
 	}
+	if ur, err := newUringReader(); err == nil {
+		a.uringRead = ur
+		log.Print("raw io_uring multishot receive enabled")
+	} else {
+		log.Printf("raw io_uring multishot receive unavailable: %v", err)
+	}
 
 	// Opt-in profiling listener; unused in the benchmark runs.
 	if addr := os.Getenv("PPROF_ADDR"); addr != "" {
@@ -224,6 +231,12 @@ func (a *app) serveConn(c net.Conn) {
 		}
 	}
 	br := bufio.NewReaderSize(c, 2048)
+	if a.uringRead != nil && fd >= 0 {
+		if uc := a.uringRead.add(fd); uc != nil {
+			defer a.uringRead.drop(uc)
+			br = bufio.NewReaderSize(uc, 2048)
+		}
+	}
 	bw := bufio.NewWriterSize(c, 1024)
 	for {
 		req, err := readReq(br)

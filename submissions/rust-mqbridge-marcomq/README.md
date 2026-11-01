@@ -21,6 +21,8 @@ handling and batching come from the library.
   sent after `COMMIT`, so a 201 means the row is durable (rule 6). At most 512 requests are in
   flight at a time (`concurrency_limit`, mq-bridge's default is 100), so a batch has at most
   512 requests.
+- **Single-threaded tokio runtime, HTTP/1.1 only.** The box has one vCPU, so `current_thread`
+  avoids cross-thread wakeups, and `Http1Only` skips the HTTP/2 detection on every connection.
 - **One SQLite connection**, WAL, `synchronous=NORMAL`, `mmap_size` 1 GiB. With a single writer
   there is no `database is locked`, and batching makes up for the single connection.
 - **SQLite builds the JSON.** Each query returns the finished response body via `json_object`

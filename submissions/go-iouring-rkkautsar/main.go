@@ -68,6 +68,7 @@ type app struct {
 	readsGroup readGroup
 	readGen    atomic.Uint64
 	readWindow time.Duration
+	coalesce   bool
 }
 
 // readCall is one in-flight SQLite read. Concurrent requests for the same key
@@ -85,11 +86,15 @@ type readCall struct {
 }
 
 type readGroup struct {
-	mu sync.Mutex
-	m  map[string]*readCall
+	mu      sync.Mutex
+	m       map[string]*readCall
+	enabled bool
 }
 
 func (g *readGroup) do(key string, window time.Duration, fn func() readResp) readResp {
+	if !g.enabled {
+		return fn()
+	}
 	g.mu.Lock()
 	if c, ok := g.m[key]; ok {
 		g.mu.Unlock()
@@ -143,6 +148,12 @@ func main() {
 			readConns = n
 		}
 	}
+	coalesce := true
+	if v := os.Getenv("READ_COALESCE"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			coalesce = b
+		}
+	}
 	reads := make(chan *readConn, readConns)
 	for range readConns {
 		rc, err := newReadConn(path)
@@ -177,6 +188,8 @@ func main() {
 		writeCh:     make(chan *writeJob, 256),
 		batchWindow: time.Duration(batchMS) * time.Millisecond,
 		readWindow:  time.Duration(windowUS) * time.Microsecond,
+		coalesce:    coalesce,
+		readsGroup:  readGroup{enabled: coalesce},
 	}
 	go a.writeLoop()
 	// Opt-in profiling listener; unused in the benchmark runs.
@@ -219,7 +232,7 @@ func main() {
 				a.ServeHTTP(w, req)
 				closeAfter := req.close
 				return encodeMuxResponse(w, closeAfter), closeAfter
-			}, feed, postBatch, writeBatch, 1)
+			}, feed, postBatch, writeBatch, a.coalesce, 1)
 		}
 		started := 0
 		for range 3 {

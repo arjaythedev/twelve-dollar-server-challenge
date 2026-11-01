@@ -6,9 +6,11 @@
 **Serving:** direct on `HOST:PORT` (`0.0.0.0:80` in the benchmark); no Nginx
 
 All five endpoints read SQLite while the request is being served. There is no response
-cache, query-result cache, in-memory table copy, or remembered JWT verification. Groups of
-concurrent reads share only their in-flight SQLite result, and the group is removed as soon
-as that read completes. Prepared statements cache only query plans, as allowed by rule 5.
+cache, query-result cache, in-memory table copy, or remembered JWT verification. With
+`READ_COALESCE=1` (default), groups of concurrent reads share only their in-flight SQLite
+result, and the group is removed as soon as that read completes. `READ_COALESCE=0` disables
+read sharing entirely: every feed/post request executes its own SQLite query. Prepared
+statements cache only query plans, as allowed by rule 5.
 
 ## Architecture
 
@@ -20,8 +22,10 @@ as that read completes. Prepared statements cache only query plans, as allowed b
   used, and if ring setup fails the process falls back to the Go connection loop.
 - **One DB owner per shard.** Feed requests, `GET /posts/:id` batches, and create/like
   batches are sent to the shard's blocking DB worker. There is no goroutine per connection
-  and no per-request transport goroutine. Each worker batches concurrent feed requests into
-  one query, post IDs into one `IN` query, and writes into one transaction.
+  and no per-request transport goroutine. With coalescing enabled, each worker batches
+  concurrent feed requests into one query, post IDs into one `IN` query, and writes into
+  one transaction. With `READ_COALESCE=0`, reads go through the generic single-request
+  handler instead, so no read result is shared between requests.
 - **Durable writes.** The raw writer uses `BEGIN IMMEDIATE`/`COMMIT` and only queues a
   201/200 response after the commit succeeds. SQLite runs WAL with `synchronous=NORMAL`;
   the schema is unchanged. The Go fallback group-commits writes every `WRITE_BATCH_MS`
@@ -58,6 +62,7 @@ as that read completes. Prepared statements cache only query plans, as allowed b
 | `HOST`, `PORT` | `127.0.0.1`, `3000` | Listen address |
 | `URING` | unset/`1` | `0` selects the Go fallback |
 | `READ_CONNS` | `2` | SQLite read connections |
+| `READ_COALESCE` | `1` | `0` disables in-flight read sharing |
 | `READ_BATCH_US` | `500` | Go fallback read window |
 | `WRITE_BATCH_MS` | `100` | Go fallback write commit window |
 | `PPROF_ADDR` | unset | Optional pprof listener |
@@ -65,7 +70,8 @@ as that read completes. Prepared statements cache only query plans, as allowed b
 ## Local measurements
 
 These are local emulations on one pinned CPU with a separate set of k6 clients, not the
-official benchmark. The database was a fresh copy of the seed on every run.
+official benchmark. The database was a fresh copy of the seed on every run. These numbers
+use the default `READ_COALESCE=1`; `READ_COALESCE=0` is correctness-isolated but slower.
 
 | Run | p95 | p99 | Server CPU | Peak RSS | Errors |
 |---|---:|---:|---:|---:|---:|

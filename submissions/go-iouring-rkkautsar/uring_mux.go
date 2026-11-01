@@ -124,6 +124,7 @@ type uringMux struct {
 	jobs         chan *muxJob
 	responses    chan *muxResp
 	waiting      []*muxConn
+	coalesce     bool
 	feedPend     []*muxConn
 	feedBusy     bool
 	postPend     []*muxConn
@@ -135,7 +136,7 @@ type uringMux struct {
 	sendReady    []*muxConn
 }
 
-func newUringMux(handler MuxHandler, feed func() []byte, postBatch func([]int64) map[int64][]byte, writeBatch func([]*httpReq) []readResp, workers int) (*uringMux, error) {
+func newUringMux(handler MuxHandler, feed func() []byte, postBatch func([]int64) map[int64][]byte, writeBatch func([]*httpReq) []readResp, coalesce bool, workers int) (*uringMux, error) {
 	ring, err := newRawRing(muxSqEntries, muxCqEntries)
 	if err != nil {
 		return nil, fmt.Errorf("ring: %w", err)
@@ -177,6 +178,7 @@ func newUringMux(handler MuxHandler, feed func() []byte, postBatch func([]int64)
 		feed:       feed,
 		postBatch:  postBatch,
 		writeBatch: writeBatch,
+		coalesce:   coalesce,
 		ring:       ring,
 		brs:        brs,
 		bufGroups:  bufGroups,
@@ -632,13 +634,13 @@ func (m *uringMux) pump(c *muxConn) {
 	if incomplete {
 		return
 	}
-	if req.method == "GET" && req.path == "/feed" {
+	if m.coalesce && req.method == "GET" && req.path == "/feed" {
 		c.consume(used)
 		c.busy = true
 		m.feedPend = append(m.feedPend, c)
 		return
 	}
-	if req.method == "GET" && strings.HasPrefix(req.path, "/posts/") {
+	if m.coalesce && req.method == "GET" && strings.HasPrefix(req.path, "/posts/") {
 		rest := req.path[len("/posts/"):]
 		if !strings.HasSuffix(rest, "/like") {
 			if id, ok := parsePostID(rest); ok {

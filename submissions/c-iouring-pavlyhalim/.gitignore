@@ -1,0 +1,5 @@
+bin/
+vendor/
+pgo/
+*.gcda
+.DS_Store

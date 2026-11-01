@@ -9,7 +9,7 @@ SQLite adapter and commit-before-response batching.
 | | |
 |---|---|
 | Language | Crystal 1.22.1, checksum-pinned official toolchain |
-| Framework | Rayo 0.1.0, commit `c9553d94583fe2a56ab299e3788fe40dcd0e72b2` |
+| Framework | Rayo 0.1.0, commit `facd4464cb55eec83b5541b605ea42b57632ea60` |
 | SQLite | 3.54.1, checksum-pinned amalgamation, static, `-O3 -march=x86-64-v3` + PGO |
 | Crypto | Rayo HS256 JWT through OpenSSL 3 libcrypto |
 | Nginx or direct | **Direct**, configured by `HOST` and `PORT` |
@@ -108,6 +108,34 @@ flock /home/user/experiments/crystal-challenges/bench/.lock env \
 `DURATION`, `WORKLOADS`, `RESULTS` and `SESSION_FILE` can be overridden. Connection counts are capped at 3,000. The
 wrapper starts and stops only its own recorded server PID and removes its
 scratch database. Raw results and the complete session are in `measurements/`.
+
+## Native reads and idle memory (Rayo facd446)
+
+The leaderboard run held 60k users; from about 63k new connections were refused while CPU
+sat near 30%. The limit was memory: idle keep-alive connections kept their grown request and
+response buffers (about 14 KB each).
+
+- Rayo facd446 frees connection buffers whenever they are empty, so an idle connection holds
+  no buffer memory. At 80k users the process went from 1,128 MB to 283 MB RSS.
+- `src/native.c` includes the SQLite amalgamation and reads the feed and single posts
+  directly from SQLite's B-tree layer (posts table tail scan, users rowid seeks, one range scan
+  of `likes_post_id_idx`), inside the same transaction, pager and WAL; only the bytecode
+  interpreter is skipped. Writes stay SQL. This relies on `created_at` never decreasing in
+  rowid order (then the feed order is reverse rowid order): checked over all posts at startup
+  and on every insert, with SQL used for good once it fails. Locally `/feed` went from about
+  17-20k to 27k req/s on one CPU.
+
+Runs on a local Ryzen 7 5700G, Ubuntu 24.04 kernel 6.8.0-147, app in a container limited to
+1 CPU and 2 GB (`LimitNOFILE` 65,535), loadgen on other cores, 30 s ramp + 60 s measure:
+
+| Users | req/s | p95 | p99 | errors | verdict |
+|---:|---:|---:|---:|---:|---|
+| 80,000 | 8,474 | 0.3 ms | 0.7 ms | 0 | pass |
+| 200,000 | 21,188 | 0.6 ms | 1.1 ms | 0 | pass |
+| 240,000 | 25,423 | 0.7 ms | 1.9 ms | 0 | pass |
+| 260,000 | 25,839 | 10.2 s | 10.2 s | 11.2% | fail (connect timeouts, CPU 54%) |
+
+On the same box `crystal-epoll-faustinoaq` failed 260k (65% errors, CPU 93%).
 
 ## Final comparison (Rayo c9553d9)
 

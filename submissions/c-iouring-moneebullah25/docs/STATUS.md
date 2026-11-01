@@ -1,8 +1,87 @@
 # Status
 
-Last updated: 2026-10-29.
+Last updated: 2026-10-31.
 
-## Since the scored run (commit 065c235: 209,000 users, 38 us/request, 83% CPU)
+## Since the second scored run (commit 3f0c2c1: 230,000 users, 27 us/request, 66% CPU)
+
+The organizer's result for 3f0c2c1: 230,000 users held 5 min at 22,377 req/s,
+p95 9.3 ms, p99 37 ms, 0 errors, 66% CPU (27 us/request, down from 38), 1,106 MB
+RAM. The 240,000 probe failed on latency (p95 5.8 s) while the memory guard
+paused accepting twice (252 MB available). The 320,000 probe ended with the box
+rebooting and nothing in the app's log (memory pressure outside the app). This
+follow-up (commit 5b86634) changes how the server behaves near the memory wall
+and trims CPU and memory. What changed:
+
+- Load shedding replaces the accept pause: a fraction f of responses carries
+  `Connection: close`, so users do not hold a socket during their think time.
+  f is the larger of a memory law (0 at 450 MB available or more, 1 at 200 MB or
+  less) and a connection-count law (0 at 90% of `--conn-cap`, 1 at the cap,
+  default 260,000). Accepting pauses only below 96 MB. Only the idle-keep-alive
+  sweep is rate-limited (per-response closes are not); keep-alives idle over
+  60 s are closed. **Superseded by the guard-fix follow-up: the laws are off by
+  default, see the section on that follow-up below.** The stats line gained `shed_f`,
+  `shed_closes`, `idle_closes`, accepts per interval, `avail_mb` and
+  `btree_fb`. This is general memory protection for any client.
+- Feed and single-post reads go through SQLite's B-tree cursor API
+  (`src/db_btree.c`), validated at open, with a per-request fallback to the SQL
+  path and `DB_READS=sql` to turn it off. The same technique is used by
+  lean-derive-hargup (#153) and c-iouring-public (#158); the organizer's
+  rulings on those entries apply here.
+- Close-path race fixed: a late shutdown could kill the next client that reused
+  a fixed-file slot. The original lost the first request of 25 of 300
+  reconnecting clients; the fixed server lost 0 of 3,000.
+- Batch window 512 completions or 16 ms (was 32 and 2 ms), up to 512 requests
+  per pass (was 256), send pool 1,024 x 72 KiB (was 512), lazily faulted.
+- Footprint: no prefault by default, receive buffers 2,048 x 1 KiB per ring
+  (was 4,096 x 2 KiB), SQLite cache 4 MiB (was 32 MiB), checkpoint at 1,000 WAL
+  frames (was 4,000), write hold at 8,192 frames (was 16,384).
+- The date header buffer is sized so the format-truncation warning is gone.
+
+The server prints a stats line to stderr every 10 s by default
+(`--stats-interval-s 0` turns it off), including `shed_f`, `avail_mb`, accepts
+per interval and `btree_fb`; DESIGN.md explains how to read it to separate
+memory pressure from a CPU limit.
+
+Verified (laptop, 2 cores, not the box): unit tests, fuzz 300,000 iterations,
+official suite 42 of 42 and black-box suite 177 of 177 under ASAN and UBSAN;
+official suite 42 of 42 through `build.sh` with the PGO build; the B-tree path
+byte for byte identical to the SQL path over all 500,633 ids and after 2,008
+random writes (`tools/dbdiff.c`, 0 fallbacks); 20.7 us/request at F=0 and 27 to
+28 at F=0.3 with the 16 ms window; about 22 to 38 us per reconnect; kernel memory
+of about 2.5 KB per idle socket in the cgroup. Numbers and methods are in
+RESULTS.md section 8. Runs disturbed by other load on the machine are excluded.
+
+Not verified, stated plainly: serving 350,000 users needs about 33,000
+requests per second. The forecast made for #228 was that about 31 percent of
+responses would carry `Connection: close` and that the box would run at about
+94 percent CPU (24 us per request by the server's counter, scaled from the
+laptop, plus about 10 percent for the organizer's total). That is the corrected
+figure: earlier text said 25 to 28 percent closing and 85 to 90 percent CPU.
+**#228's own scored result contradicted the forecast: 228,000 users held and the
+240,000 probe failed with connection refused.** The forecast was an estimate and
+was wrong. It has not been tested at box scale, no entry has yet held more than
+280,000 users, and local runs only reached 10,000 to 20,000 connections with
+shedding. No user-count score is claimed.
+
+## Guard-fix follow-up (after #228: 228,000 held, 240,000 failed)
+
+#228's 240,000 probe failed with connection refused; the process was OOM-killed
+in its cgroup, as reproduced locally. Local cgroup tests (RESULTS.md section 9,
+one laptop, not box evidence) found that:
+
+- the guard's available-memory input counted page cache as used under a cgroup
+  limit, producing false shedding and accept pauses; it now uses anon + kernel
+  + sock (falling back to `memory.current` if `memory.stat` is unreadable);
+- closing and reconnecting was net harmful, so the shedding laws are off by
+  default (`--shed-hi-mb 0 --shed-lo-mb 0 --conn-cap 0`); flags re-enable them;
+- an optional `--hard-conn-cap N` (default off) stops accepting at N open
+  connections. The accept-floor pause (96 MB) stays on, driven by the cache-free
+  input.
+
+Not verified: any of this at box scale. No user-count score is claimed, and
+this change may not improve the box result.
+
+## Since the first scored run (commit 065c235: 209,000 users, 38 us/request, 83% CPU)
 
 The organizer's result put this entry 8th at 38 us of CPU per request, with the
 best p95 on the board (51 ms) and the entries above it at 28-33 us. Our own
@@ -39,8 +118,8 @@ on a 1 vCPU / 2 GB droplet. See RESULTS.md for the numbers.
 - The challenge suite `test/test.sh`: 42/42, with the ASAN/UBSAN build and the
   release build, started through the upstream `test/run.sh` (build.sh +
   start.sh).
-- `test/http_tests.py`: 166 checks (148 plus 18 regressions from the
-  independent review), all passing under ASAN and under UBSAN: exact bytes
+- `test/http_tests.py`: 177 checks (including 18 regressions from the
+  independent review and the close-path race regression), all passing under ASAN and under UBSAN: exact bytes
   and key order, auth-before-id ordering, pipelining (including POST then GET
   on one connection), byte-by-byte and split requests, `Expect: 100-continue`,
   keep-alive reuse (3 s; 66 s with `--long`), 500 idle connections, malformed
@@ -90,8 +169,10 @@ on a 1 vCPU / 2 GB droplet. See RESULTS.md for the numbers.
 - Kernel 6.8.0-117 on the box versus 6.8.0-147 here: same series. The
   `IORING_REGISTER_PBUF_RING` EINVAL seen here is the reason classic
   `PROVIDE_BUFFERS` is used; both kernels support it.
-- The memory guard thresholds (256 MB / 128 MB) were only exercised by reading
-  the counters; they never triggered on a 14 GB machine. The cgroup headroom
+- The shedding thresholds (450 / 200 MB, conn cap 260,000; now off by default)
+  and the accept floor (96 MB) were exercised locally with `--shed-force` and a
+  cgroup limit, never on the
+  box's real memory wall. The cgroup headroom
   check was verified under `systemd-run --user --scope -p MemoryMax=`.
 - Port 80 with `CAP_NET_BIND_SERVICE`: not possible without root here; the
   server binds whatever `HOST:PORT` says and was tested on high ports.
@@ -99,8 +180,8 @@ on a 1 vCPU / 2 GB droplet. See RESULTS.md for the numbers.
   gives up after 500 ms and writes continue on a growing WAL; the WAL then only
   restarts on a later successful hold.
 - PGO on the target CPU (Cascade Lake or Broadwell): the profile is collected on
-  the box itself by `make pgo`, but the default build is plain LTO because PGO
-  showed no gain here.
+  the box itself by `make pgo`, but `build.sh` falls back to plain LTO if training fails;
+  PGO showed no gain on the laptop.
 
 ## Known risks
 
@@ -109,9 +190,10 @@ on a 1 vCPU / 2 GB droplet. See RESULTS.md for the numbers.
    with the loopback client's cost mixed in; the real figure is unknown until a
    droplet run.
 2. **Kernel socket memory at 300k+.** ~4 KB per established socket means the
-   2 GB box is full near 350-400k regardless of this process; the memory guard
-   turns that into a paused accept rather than an OOM kill, but the exact
-   ceiling is the kernel's.
+   2 GB box is full near 350-400k regardless of this process; shedding
+   and the accept floor turn that into closed connections rather than an OOM
+   kill, but the exact ceiling is the kernel's (the 320,000 probe rebooted the
+   box).
 3. **Multishot-to-oneshot accept handoff** at ring boundaries was exercised
    3 times per local run (100k and 183k connections over 2-4 rings) with zero
    accept errors after the fix; before it, each boundary lost one connection.
@@ -120,15 +202,28 @@ on a 1 vCPU / 2 GB droplet. See RESULTS.md for the numbers.
 5. **A single thread means any stall is global.** The only blocking calls on
    the loop are `COMMIT` (WAL append, no fsync) and the one-shot `io_uring_enter`.
    A slow disk shows up as commit latency, not as a hang.
-6. **Rule 7 and PGO:** training uses a synthetic database and secret generated
+6. **Shedding raises the connect rate.** Each reconnect costs about 22 to 38 us
+   of mostly kernel time, so at about 31 percent of responses closing the CPU
+   per request rises by roughly 6 to 10 us over the F=0 figure. Measured on the
+   laptop only.
+7. **The 16 ms batch window raises latency** (p95 20 to 35 ms locally against 3
+   to 4 ms at 2 ms) in exchange for 10 to 15 percent less CPU.
+8. **The B-tree path depends on SQLite 3.54.1 internals**, pinned by checksum.
+   It validates the schema at open and falls back to SQL for any unusual record
+   or schema change; `DB_READS=sql` disables it. Whether it is acceptable under
+   rule 2 is the organizer's call (see the rulings on #153 and #158).
+9. **Untested at box scale:** shedding, the larger window and the B-tree reads
+   were only run locally at 10,000 to 20,000 connections.
+10. **Rule 7 and PGO:** training uses a synthetic database and secret generated
    by `tools/synthdb.c`; the seed is never read during the build.
 
 ## Questions for the organizer (deliberately not implemented)
 
-- A direct B-tree page reader for the feed (technique 20 of the exploration)
-  would be the largest remaining CPU lever. It arguably violates rule 2 ("the
-  database is SQLite, used in-process") because it is another driver; not
-  built.
+- The direct B-tree reads (`src/db_btree.c`) are built and on by default. They
+  read SQLite's own pages through SQLite's own code, but they are a different
+  API from SQL, so they arguably stretch rule 2 ("the database is SQLite, used
+  in-process"). Same technique as #153 and #158; the organizer's rulings on
+  those entries apply, and `DB_READS=sql` turns it off.
 - Trimming: the SPEC says "empty after trimming whitespace". This server trims
   ASCII whitespace (space, \t, \n, \r, \v, \f). JavaScript's `trim()` also
   removes NBSP and other Unicode spaces; the load test sends plain ASCII.

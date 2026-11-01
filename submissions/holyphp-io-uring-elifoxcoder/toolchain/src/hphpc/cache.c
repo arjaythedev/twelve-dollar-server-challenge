@@ -84,6 +84,20 @@ char *cache_key_for_files(PtrVec *files, PtrVec *tools) {
             free(h);
         }
     }
+    /* An external static library is an input too. build.sh points
+     * HPHP_SQLITE_LIB at a freshly built SQLite; a cache key that ignores it
+     * hands back a binary linked against the system library instead. */
+    {
+        const char *slib = getenv("HPHP_SQLITE_LIB");
+        if (slib && *slib) {
+            char *h = hash_file(slib);
+            strcat(key, slib);
+            strcat(key, ":");
+            strcat(key, h);
+            strcat(key, ";");
+            free(h);
+        }
+    }
     unsigned long kh = simple_hash(key);
     char *res = malloc(64);
     snprintf(res, 64, "cache_%lx", kh);

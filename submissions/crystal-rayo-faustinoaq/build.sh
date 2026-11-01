@@ -6,7 +6,7 @@ mkdir -p build bin
 shards install
 SQ=sqlite-amalgamation-3540100
 SQ_SHA=0a9c8e34352dad46006aa82836d5383bff9dc6bc9ce5a60553c05aa30e6ad1f9
-if [ ! -f build/libsqlite3.a ]; then
+if [ ! -f build/libsqlite3.a ] || [ src/native.c -nt build/libsqlite3.a ]; then
   [ -f build/$SQ.zip ] || curl -fsSL -o build/$SQ.zip "https://www.sqlite.org/2026/$SQ.zip"
   echo "$SQ_SHA  build/$SQ.zip" | sha256sum -c -
   (cd build && rm -rf $SQ && unzip -q $SQ.zip)
@@ -22,13 +22,13 @@ if [ ! -f build/libsqlite3.a ]; then
   # on a synthetic database it generates), then rebuild SQLite with that profile.
   # bash build.sh --no-pgo skips it.
   if [ "${1:-}" = --no-pgo ]; then
-    cc $FLAGS -c build/$SQ/sqlite3.c -o build/sqlite3.o
+    cc $FLAGS -Ibuild/$SQ -c src/native.c -o build/sqlite3.o
   else
     rm -rf build/pgo
-    cc $FLAGS -fprofile-generate -fprofile-update=single -fprofile-dir=build/pgo -c build/$SQ/sqlite3.c -o build/sqlite3.o
+    cc $FLAGS -fprofile-generate -fprofile-update=single -fprofile-dir=build/pgo -Ibuild/$SQ -c src/native.c -o build/sqlite3.o
     cc -O2 -Ibuild/$SQ pgo/train.c build/sqlite3.o -fprofile-generate -o build/train -lm
     ./build/train build/train.db
-    cc $FLAGS -fprofile-use -fprofile-partial-training -Wno-missing-profile -fprofile-dir=build/pgo -c build/$SQ/sqlite3.c -o build/sqlite3.o
+    cc $FLAGS -fprofile-use -fprofile-partial-training -Wno-missing-profile -fprofile-dir=build/pgo -Ibuild/$SQ -c src/native.c -o build/sqlite3.o
   fi
   ar rcs build/libsqlite3.a build/sqlite3.o
 fi

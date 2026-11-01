@@ -542,9 +542,13 @@ static void emit_c_string(const char *s, size_t n, Buf *dst) {
 
 static void emit_str_lit(const char *s, Buf *dst) {
     size_t n = strlen(s);
-    buf_puts(dst, "hp_str_intern(");
+    /* A per-call-site cache: the literal's address is stable, so the first
+     * evaluation interns it and every later one is a load instead of a hash
+     * probe. Statement expressions are a GCC/Clang extension; the backend
+     * compiles with gcc. */
+    buf_puts(dst, "({ static hstr *hp_lit_; if (!hp_lit_) hp_lit_ = hp_str_intern(");
     emit_c_string(s, n, dst);
-    buf_puts(dst, ")");
+    buf_puts(dst, "); hp_lit_; })");
 }
 
 /* ---------------- expressions ---------------- */
@@ -709,7 +713,8 @@ static void emit_binop(Codegen *g, Expr *e, Buf *dst) {
     }
     switch (op) {
     case T_PLUS:
-        if (numeric) buf_printf(dst, "((%s) + (%s))", ls, rs);
+        if (lt && lt->kind == TY_PTR) buf_printf(dst, "((char*)(%s) + (%s))", ls, rs);
+        else if (numeric) buf_printf(dst, "((%s) + (%s))", ls, rs);
         /* the runtime's hp_add keeps PHP semantics (numeric strings add as
          * numbers), so only project to hstr* when the node is typed string */
         else if (e->type && e->type->kind == TY_STRING)
@@ -718,7 +723,8 @@ static void emit_binop(Codegen *g, Expr *e, Buf *dst) {
             buf_printf(dst, "hp_add(hv(%s), hv(%s))", ls, rs);
         break;
     case T_MINUS:
-        if (numeric) buf_printf(dst, "((%s) - (%s))", ls, rs);
+        if (lt && lt->kind == TY_PTR) buf_printf(dst, "((char*)(%s) - (%s))", ls, rs);
+        else if (numeric) buf_printf(dst, "((%s) - (%s))", ls, rs);
         else buf_printf(dst, "hpbi_scalar_sub(hv(%s), hv(%s))", ls, rs);
         break;
     case T_STAR:
@@ -1152,6 +1158,77 @@ static void emit_builtin_call_body(Codegen *g, const char *name, PtrVec args,
         buf_puts(dst, ", hp_of_int(1))");
         project_hval(dst, ret);
         return;
+    }
+    /* Typed fast path: when every argument has the static type the builtin
+     * expects, call the raw-typed variant and skip hval boxing on both
+     * sides. Falls through to the hval ABI for anything else. */
+    {
+        static const struct { const char *name; const char *params; char ret; } T[] = {
+            {"iarr_new",          "i",   'i'},
+            {"iarr_get",          "ii",  'i'},
+            {"iarr_set",          "iii", 'b'},
+            {"sb_new",           "",    'i'},
+            {"sb_reserve",       "ii",  'b'},
+            {"sb_put",           "is",  'b'},
+            {"sb_int",           "ii",  'b'},
+            {"sb_json",          "iii", 'b'},
+            {"sb_json_str",      "is",  'b'},
+            {"sb_take",          "i",   's'},
+            {"bt_last",          "i",   'i'},
+            {"bt_first",         "i",   'i'},
+            {"bt_prev",          "i",   'i'},
+            {"bt_next",          "i",   'i'},
+            {"bt_seek",          "ii",  'i'},
+            {"bt_rowid",         "i",   'i'},
+            {"bt_payload_ptr",   "i",   'i'},
+            {"bt_payload_size",  "i",   'i'},
+            {"stream_send_nb",   "is",  'i'},
+            {"stream_send2_nb",  "iss", 'i'},
+            {"epoll_mod",        "ii",  'b'},
+            {"nofile_limit",     "",    'i'},
+            {"uring_active",     "",    'b'},
+            {"strlen",           "s",   'i'},
+            {"str_at_eq",        "siis", 'b'},
+            {"str_to_int",       "s",   'i'},
+            {"strtolower",       "s",   's'},
+            {"trim",             "s",   's'},
+            {"substr",           "sii", 's'},
+            {"stream_recv",      "ii",  's'},
+            {"sqlite_bind_int",  "iii", 'b'},
+            {"sqlite_bind_text", "iis", 'b'},
+            {"sqlite_step",      "i",   'i'},
+            {"sqlite_reset",     "i",   'i'},
+            {"sqlite_clear_bindings", "i", 'b'},
+            {"sqlite_column_text", "ii", 's'},
+            {"sqlite_column_int",  "ii", 'i'},
+            {"sqlite_changes",     "i",  'i'},
+        };
+        for (size_t k = 0; k < sizeof T / sizeof T[0]; k++) {
+            if (strcmp(name, T[k].name) != 0) continue;
+            if (strlen(T[k].params) != args.len) break;
+            bool ok = true;
+            for (size_t i = 0; i < args.len; i++) {
+                const Type *at = ((Expr *)args.items[i])->type;
+                char want = T[k].params[i];
+                if (!at) { ok = false; break; }
+                if (want == 'i') { if (!type_is_integral(at->kind)) { ok = false; break; } }
+                else if (want == 's') { if (at->kind != TY_STRING) { ok = false; break; } }
+                else { ok = false; break; }
+            }
+            if (!ok) break;
+            if (!ret) break;
+            bool ret_ok = (T[k].ret == 'i' && type_is_integral(ret->kind)) ||
+                          (T[k].ret == 's' && ret->kind == TY_STRING) ||
+                          (T[k].ret == 'b' && ret->kind == TY_BOOL);
+            if (!ret_ok) break;
+            buf_printf(dst, "hp_%s_t(", name);
+            for (size_t i = 0; i < args.len; i++) {
+                if (i) buf_puts(dst, ", ");
+                emit_expr(g, args.items[i], dst);
+            }
+            buf_puts(dst, ")");
+            return;
+        }
     }
     const char *cname = name;   /* emitted C name (aliases below) */
     if (strcmp(name, "date") == 0) cname = "date2";
@@ -2631,7 +2708,17 @@ static void emit_expr(Codegen *g, Expr *e, Buf *dst) {
         Buf o;
         buf_init(&o);
         emit_expr(g, e->u.deref.operand, &o);
-        buf_printf(dst, "(*%s)", buf_take(&o));
+        /* raw pointers are void*: cast to the pointee type so *p reads the
+         * right width (a byte for *u8, not eight bytes) */
+        const Type *pt = e->u.deref.operand->type;
+        const char *ct = "int64_t";
+        if (pt && pt->kind == TY_PTR && pt->elem) {
+            if (pt->elem->kind == TY_I8)
+                ct = "unsigned char";
+            else
+                ct = ctype_of(pt->elem);
+        }
+        buf_printf(dst, "(*(%s *)(%s))", ct, buf_take(&o));
         free(o.data);
         break;
     }

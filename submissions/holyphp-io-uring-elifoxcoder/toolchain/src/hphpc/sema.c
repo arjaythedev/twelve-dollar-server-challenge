@@ -1121,6 +1121,12 @@ static const Type *check_bin(Scope *sc, Expr *e) {
         e->type = unify_numeric(lt, rt);
         return e->type;
     }
+    /* pointer arithmetic (unsafe only): ptr + int / ptr - int -> ptr */
+    if ((op == T_PLUS || op == T_MINUS) && lt->kind == TY_PTR &&
+        (type_is_integral(rt->kind) || rt->kind == TY_INT)) {
+        e->type = lt;
+        return e->type;
+    }
     /* arithmetic */
     if (op == T_PLUS || op == T_MINUS || op == T_STAR || op == T_SLASH ||
         op == T_PERCENT || op == T_POW) {

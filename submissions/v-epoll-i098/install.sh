@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Runs once as root on a clean Ubuntu 24.04: builds the pinned V compiler (0.5.2) from source into /opt/v.
+# Runs once as root on a clean Ubuntu 24.04: builds the pinned V compiler (0.5.2) into /opt/v from its pinned C bootstrap (about 3 minutes on 1 vCPU).
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
@@ -14,9 +14,7 @@ rm -rf /opt/v
 fetch https://github.com/vlang/v "$V_COMMIT" /opt/v
 fetch https://github.com/vlang/vc "$VC_COMMIT" /opt/v/vc
 cd /opt/v
-cc -std=gnu11 -w -O2 -o v1 vc/v.c -lm -lpthread
-./v1 -no-parallel -o v2 cmd/v
-./v2 -o v cmd/v
-rm -f v1 v2
+# vc/v.c is already the full 0.5.2 compiler, so no v1/v2 self-rebuild (that took over an hour on 1 vCPU).
+cc -std=gnu11 -w -O2 -o v vc/v.c -lm -lpthread
 chmod -R a+rX /opt/v
 /opt/v/v version

@@ -56,6 +56,8 @@ void builtins_init(void) {
     add("strchr",        B_STR2,    ty_mixed,  false, false);   /* alias, string|false */
     add("strpos",        B_MISC,    ty_mixed,  false, false);   /* (hay, needle[, offset]) -> int|false, PHP-style */
     add("str_contains",  B_STR2,    ty_bool,   false, false);
+    add("str_at_eq",      B_MISC,    ty_bool,   false, false);
+    add("str_to_int",      B_MISC,    ty_int,    false, false);
     add("str_starts_with", B_STR2,  ty_bool,   false, false);
     add("str_ends_with", B_STR2,    ty_bool,   false, false);
     add("strcmp",        B_CMP,     ty_int,    false, false);
@@ -278,15 +280,23 @@ void builtins_init(void) {
     add("stream_socket_client", B_MISC, ty_mixed,  false, false);
     add("stream_socket_accept", B_MISC, ty_mixed,  false, false);
     add("stream_socket_accept2", B_MISC, ty_mixed, false, false);   /* (srv, timeoutMs): false on timeout */
+    add("accept_emfile",     B_ZERO,    ty_bool,   false, false);   /* last accept failed with EMFILE/ENFILE */
     add("stream_set_blocking",  B_MISC, ty_bool,   false, false);
     add("stream_set_nodelay",   B_MISC, ty_bool,   false, false);
     add("stream_ready",         B_MISC, type_array_of(ty_mixed), false, false);
     add("stream_ready_into",    B_MISC, type_array_of(ty_mixed), false, false);
     add("epoll_add",            B_MISC, ty_bool,   false, false);
     add("epoll_del",            B_MISC, ty_bool,   false, false);
+    add("epoll_mod",            B_MISC, ty_bool,   false, false);
+    add("epoll_wait2",          B_MISC, ty_bool,   false, false);
     add("epoll_wait_into",      B_MISC, type_array_of(ty_mixed), false, false);
     add("stream_recv",          B_MISC, ty_string, false, false);
     add("stream_send",          B_MISC, ty_int,    false, false);
+    add("stream_send2",         B_MISC, ty_int,    false, false);
+    add("stream_send_nb",       B_MISC, ty_int,    false, false);
+    add("stream_send2_nb",      B_MISC, ty_int,    false, false);
+    add("nofile_limit",         B_ZERO, ty_int,    false, false);
+    add("uring_active",         B_ZERO, ty_bool,   false, false);
     add("stream_eof",           B_MISC, ty_bool,   false, false);
     add("stream_peer",          B_MISC, ty_string, false, false);
     add("stream_close",         B_MISC, ty_bool,   false, false);
@@ -853,6 +863,30 @@ void builtins_init(void) {
     add("live_allocs",          B_MISC, ty_int,    false, false);
     add("arr_clear",            B_MISC, ty_bool,   false, false);
     add("arr_free",             B_MISC, ty_bool,   false, false);
+    add("bt_root",              B_MISC, ty_int,    false, false);
+    add("bt_open",              B_MISC, ty_int,    false, false);
+    add("bt_close",             B_MISC, ty_bool,   false, false);
+    add("bt_first",             B_MISC, ty_int,    false, false);
+    add("bt_last",              B_MISC, ty_int,    false, false);
+    add("bt_next",              B_MISC, ty_int,    false, false);
+    add("bt_prev",              B_MISC, ty_int,    false, false);
+    add("bt_seek",              B_MISC, ty_int,    false, false);
+    add("bt_rowid",             B_MISC, ty_int,    false, false);
+    add("bt_payload_ptr",       B_MISC, ty_int,    false, false);
+    add("bt_payload_size",      B_MISC, ty_int,    false, false);
+    add("bt_count_key",        B_MISC, ty_int,    false, false);
+    add("iarr_new",            B_MISC, ty_int,    false, false);
+    add("iarr_get",            B_MISC, ty_int,    false, false);
+    add("iarr_set",            B_MISC, ty_bool,   false, false);
+    add("sb_new",               B_MISC, ty_int,    false, false);
+    add("sb_put",               B_MISC, ty_bool,   false, false);
+    add("sb_bytes",             B_MISC, ty_bool,   false, false);
+    add("sb_int",               B_MISC, ty_bool,   false, false);
+    add("sb_json",              B_MISC, ty_bool,   false, false);
+    add("sb_json_str",          B_MISC, ty_bool,   false, false);
+    add("str_from_bytes",       B_MISC, ty_string, false, false);
+    add("sb_reserve",           B_MISC, ty_bool,   false, false);
+    add("sb_take",              B_MISC, ty_string, false, false);
     add("sqlite_open",          B_MISC, ty_int,    false, false);  /* (path) -> handle|0 */
     add("sqlite_close",         B_MISC, ty_bool,   false, false);
     add("sqlite_exec",          B_MISC, ty_bool,   false, false);  /* (db, sql) */

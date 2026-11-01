@@ -1,6 +1,26 @@
 require "rayo/sqlite/group_commit"
 require "./checkpoint"
 
+# Direct B-tree reads compiled into the SQLite build (src/native.c).
+lib LibNative
+  struct Row
+    id : Int64
+    user_id : Int64
+    likes : Int64
+    body_off : UInt32
+    body_len : UInt32
+    at_off : UInt32
+    at_len : UInt32
+    au_off : UInt32
+    au_len : UInt32
+  end
+
+  fun nf_init(db : Void*) : Int32
+  fun nf_disable : Void
+  fun nf_feed(rows : Row*, max : Int32, buf : UInt8*, cap : UInt32) : Int32
+  fun nf_post(id : Int64, row : Row*, buf : UInt8*, cap : UInt32) : Int32
+end
+
 module Feed
   # Borrowed SQLite row, serialized before stepping/resetting its statement.
   struct Post
@@ -31,6 +51,10 @@ module Feed
     @slots = StaticArray(Int32, 256).new(-1)
     @counts = StaticArray(Int64, 256).new(0)
     @started = Time.utc.to_unix
+    @native = StaticArray(LibNative::Row, 20).new(LibNative::Row.new)
+    @text = Bytes.new(65536)
+    @last_at = Bytes.new(32)
+    @last_at_len = 0
 
     def initialize
       path = ENV["SQLITE_PATH"]
@@ -46,7 +70,46 @@ module Feed
       @ping = @db.prepare("SELECT 1")
       @group = Rayo::SQLite::GroupCommit.new(@db, capacity: 8192)
       @group.attach
+      native_init
       Checkpoint.start(path)
+    end
+
+    # The native feed reads posts in reverse rowid order, which matches the feed order
+    # while created_at never decreases with rowid. Checked here over all posts, then on
+    # every insert (`create`); SQL is used for good once it fails.
+    private def native_init
+      ok = false
+      st = @db.prepare("SELECT (SELECT count(*) FROM (SELECT created_at < lag(created_at) OVER (ORDER BY id) AS back FROM posts) WHERE back), (SELECT created_at FROM posts ORDER BY id DESC LIMIT 1)")
+      begin
+        if st.step && st.i64(0) == 0
+          last = st.str(1)
+          if last.size <= @last_at.size
+            last.copy_to(@last_at.to_unsafe, last.size)
+            @last_at_len = last.size
+            ok = true
+          end
+        end
+      ensure
+        st.close
+      end
+      ok = LibNative.nf_init(@db.ptr) == 1 if ok
+      STDERR.puts "native feed reads: #{ok ? "on" : "off"}"
+    end
+
+    private def native(row : LibNative::Row)
+      {id: row.id, body: Bytes.new(@text.to_unsafe + row.body_off, row.body_len),
+       created_at: Bytes.new(@text.to_unsafe + row.at_off, row.at_len),
+       author: Bytes.new(@text.to_unsafe + row.au_off, row.au_len), like_count: row.likes}
+    end
+
+    private def track(created_at : Bytes)
+      last = Bytes.new(@last_at.to_unsafe, @last_at_len)
+      if created_at.size > @last_at.size || (created_at <=> last) < 0
+        LibNative.nf_disable
+      else
+        created_at.copy_to(@last_at.to_unsafe, created_at.size)
+        @last_at_len = created_at.size
+      end
     end
 
     def transaction(ctx, &)
@@ -72,6 +135,14 @@ module Feed
     end
 
     def post(ctx, id)
+      case LibNative.nf_post(id, @native.to_unsafe, @text.to_unsafe, @text.size.to_u32)
+      when 1
+        ctx.json post: native(@native[0])
+        return
+      when 0
+        Feed.error(ctx, 404, "post not found")
+        return
+      end
       query(@one) do |st|
         st.bind(1, id)
         if st.step
@@ -83,6 +154,17 @@ module Feed
     end
 
     def feed(ctx)
+      n = LibNative.nf_feed(@native.to_unsafe, 20, @text.to_unsafe, @text.size.to_u32)
+      if n >= 0
+        ctx.json do |j|
+          j.object do
+            j.field("posts") do
+              j.array(0...n) { |i| native(@native[i]) }
+            end
+          end
+        end
+        return
+      end
       ids = uninitialized Int64[20]
       n = 0
       lo = Int64::MAX
@@ -156,6 +238,7 @@ module Feed
         st.bind(2, body)
         if st.step
           ctx.status 201
+          track(st.str(1))
           ctx.json post: {id: st.i64(0), body: body,
                           created_at: st.str(1), author: name, like_count: 0}
           raise "SQLite insert failed" if st.step

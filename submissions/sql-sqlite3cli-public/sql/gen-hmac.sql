@@ -4,13 +4,16 @@
 -- SQLite has no SHA-256, so the hash is a recursive CTE with one row per round: the 8 working
 -- variables, the 8 chaining values and a 16-word message window as columns. There are no user
 -- functions in SQL either, so the round expressions are expanded here from text templates with
--- replace(). SQLite has no XOR: a^b^c = a+b+c-2(a&b+a&c+b&c)+4(a&b&c) on 32-bit values.
+-- replace(). SQLite has no XOR: a^b^c = a+b+c-2*maj(a,b,c) on 32-bit values (a full adder: the
+-- sum bit plus twice the carry), which names each operand fewer times than the inclusion-exclusion
+-- form. Nor does it share subexpressions, so T1, needed twice per round, is computed once as the
+-- only row of generate_series(T1, 4294967295, 4294967296) and read back as x1.value.
 .headers off
 .mode list
 CREATE TEMP TABLE t(k TEXT PRIMARY KEY, v TEXT);
 INSERT INTO t VALUES
  ('rotr', '((@X>>@N)|((@X<<@L)&4294967295))'),
- ('xor3', '((@A)+(@B)+(@C)-2*(((@A)&(@B))+((@A)&(@C))+((@B)&(@C)))+4*((@A)&(@B)&(@C)))');
+ ('xor3', '((@A)+(@B)+(@C)-2*(((@A)&(@B))|((@C)&((@A)|(@B)))))');
 -- the four sigma functions; the third term of the small sigmas is a shift, not a rotation
 INSERT INTO t SELECT column1,
   replace(replace(replace(x3.v,
@@ -28,25 +31,25 @@ INSERT INTO t SELECT 'T2', '(' || v || '+((a&b)|(c&(a|b))))' FROM t WHERE k = 'S
 INSERT INTO t VALUES ('cte', '@NAME(@CARRY,blk,t,a,b,c,d,e,f,g,h,h0,h1,h2,h3,h4,h5,h6,h7,w0,w1,w2,w3,w4,w5,w6,w7,w8,w9,w10,w11,w12,w13,w14,w15) AS (
 @SEED
 UNION ALL SELECT @CARRY,blk+(t=63),(t+1)%64,
-CASE WHEN t=63 THEN (h0+@T1+@T2)&4294967295 ELSE (@T1+@T2)&4294967295 END,
+CASE WHEN t=63 THEN (h0+x1.value+@T2)&4294967295 ELSE (x1.value+@T2)&4294967295 END,
 CASE WHEN t=63 THEN (h1+a)&4294967295 ELSE a END,
 CASE WHEN t=63 THEN (h2+b)&4294967295 ELSE b END,
 CASE WHEN t=63 THEN (h3+c)&4294967295 ELSE c END,
-CASE WHEN t=63 THEN (h4+d+@T1)&4294967295 ELSE (d+@T1)&4294967295 END,
+CASE WHEN t=63 THEN (h4+d+x1.value)&4294967295 ELSE (d+x1.value)&4294967295 END,
 CASE WHEN t=63 THEN (h5+e)&4294967295 ELSE e END,
 CASE WHEN t=63 THEN (h6+f)&4294967295 ELSE f END,
 CASE WHEN t=63 THEN (h7+g)&4294967295 ELSE g END,
-CASE WHEN t=63 THEN (h0+@T1+@T2)&4294967295 ELSE h0 END,
+CASE WHEN t=63 THEN (h0+x1.value+@T2)&4294967295 ELSE h0 END,
 CASE WHEN t=63 THEN (h1+a)&4294967295 ELSE h1 END,
 CASE WHEN t=63 THEN (h2+b)&4294967295 ELSE h2 END,
 CASE WHEN t=63 THEN (h3+c)&4294967295 ELSE h3 END,
-CASE WHEN t=63 THEN (h4+d+@T1)&4294967295 ELSE h4 END,
+CASE WHEN t=63 THEN (h4+d+x1.value)&4294967295 ELSE h4 END,
 CASE WHEN t=63 THEN (h5+e)&4294967295 ELSE h5 END,
 CASE WHEN t=63 THEN (h6+f)&4294967295 ELSE h6 END,
 CASE WHEN t=63 THEN (h7+g)&4294967295 ELSE h7 END,
 w1,w2,w3,w4,w5,w6,w7,w8,w9,w10,w11,w12,w13,w14,w15,
 CASE WHEN t<15 THEN @WORD_NEXT WHEN t=63 THEN @WORD_BLOCK ELSE (@s1+w9+@s0+w0)&4294967295 END
-FROM @NAME JOIN temp.jk ON kt=t WHERE blk<=@STOP)');
+FROM @NAME JOIN temp.jk ON kt=t, generate_series(@T1&4294967295, 4294967295, 4294967296) AS x1 WHERE blk<=@STOP)');
 -- the three hashes: the key blocks (midstates), the inner hash of the token, the outer hash
 CREATE TEMP TABLE c(id INT, name TEXT, carry TEXT, seed TEXT, word TEXT, stop TEXT);
 INSERT INTO c VALUES

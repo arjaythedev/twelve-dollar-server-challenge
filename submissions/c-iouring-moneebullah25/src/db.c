@@ -11,6 +11,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "db_btree.h"
 #include "json.h"
 #include "sqlite3.h"
 #include "util.h"
@@ -76,6 +77,8 @@ struct db {
     sqlite3_stmt *stmt[S_COUNT];
     const struct config *cfg;
     int read_txn_open;
+    struct bt *bt;  /* direct B-tree reads, or NULL when DB_READS=sql or the schema differs */
+    int bt_enabled; /* db_reads_btree(): tests compare the two paths in one process */
 
     /* checkpointer */
     sqlite3 *ckpt_conn;
@@ -188,6 +191,17 @@ struct db *db_open(const struct config *cfg, char *err, size_t err_cap) {
     }
     sqlite3_wal_hook(db->conn, wal_hook, db);
     db->hold_retry_frames = cfg->hold_frames;
+    /* Reads go through the B-tree cursors unless asked otherwise; the SQL
+     * statements above stay prepared as the fallback for every case the
+     * direct path declines. */
+    const char *reads = getenv("DB_READS");
+    if (!reads || strcmp(reads, "sql") != 0) {
+        char berr[256];
+        db->bt = bt_open(db->conn, berr, sizeof berr);
+        if (!db->bt) log_msg("%s; reads use SQL", berr);
+    }
+    db->bt_enabled = db->bt != NULL;
+    log_msg("reads: %s", db->bt ? "btree" : "sql");
     return db;
 }
 
@@ -200,6 +214,7 @@ void db_close(struct db *db) {
         pthread_mutex_unlock(&db->mu);
         pthread_join(db->ckpt_thread, NULL);
     }
+    bt_close(db->bt);
     for (int i = 0; i < S_COUNT; i++) sqlite3_finalize(db->stmt[i]);
     if (db->ckpt_conn) sqlite3_close(db->ckpt_conn);
     if (db->conn) {
@@ -363,6 +378,7 @@ void db_read_begin(struct db *db) {
 }
 
 void db_read_end(struct db *db) {
+    bt_read_end(db->bt); /* a snapshot the direct reads opened outside the shared transaction */
     if (!db->read_txn_open) return;
     db->read_txn_open = 0;
     if (step_done(db, S_COMMIT)) step_done(db, S_ROLLBACK);
@@ -562,10 +578,20 @@ static size_t feed_ranges(struct db *db, char *out, size_t cap) {
 size_t db_feed_json(struct db *db, char *out, size_t cap) {
     if (cap < 16) return 0;
     if (db->cfg->feed_reference) return feed_reference(db, out, cap);
+    if (db->bt && db->bt_enabled) {
+        size_t n = bt_feed_json(db->bt, out, cap);
+        if (n) return n;
+        db->stats.btree_fallbacks++;
+    }
     return feed_ranges(db, out, cap);
 }
 
 size_t db_post_json(struct db *db, int64_t id, char *out, size_t cap) {
+    if (db->bt && db->bt_enabled && !db->cfg->feed_reference) {
+        size_t n = bt_post_json(db->bt, id, out, cap);
+        if (n != (size_t)-1) return n;
+        db->stats.btree_fallbacks++;
+    }
     sqlite3_stmt *st = db->stmt[S_POST];
     sqlite3_bind_int64(st, 1, id);
     int rc = sqlite3_step(st);
@@ -641,6 +667,13 @@ int db_like(struct db *db, int64_t user_id, int64_t post_id) {
         return -1;
     }
     return sqlite3_changes(db->conn) ? 2 : 1;
+}
+
+int db_reads_btree(struct db *db, int on) {
+    if (!db->bt) return -1;
+    int was = db->bt_enabled;
+    db->bt_enabled = on != 0;
+    return was;
 }
 
 void db_warm(struct db *db) {

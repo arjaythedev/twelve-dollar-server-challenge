@@ -174,7 +174,7 @@ const char *http_date_now(void) {
     static const char *const DAYS[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
     static const char *const MONTHS[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
                                          "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
-    static char cached[HTTP_DATE_LEN + 1];
+    static char cached[80]; /* HTTP_DATE_LEN + 1 in practice; sized for any int the compiler allows in tm */
     static time_t cached_s;
     time_t now = time(NULL);
     if (now != cached_s || !cached[0]) {

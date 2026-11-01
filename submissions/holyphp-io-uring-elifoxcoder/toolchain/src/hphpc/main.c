@@ -658,7 +658,15 @@ static int cc_build_in_dir(const char *wd, const char *rt, const char *cpath,
     char *out_abs = path_join(wd, out);
     int verbose = getenv("HPHP_VERBOSE") != NULL;
     (void)rt;
+    /* HPHP_CFLAGS is a debugging aid (sanitizers, coverage); it is appended
+     * to the optimisation flag the backend already uses. */
+    const char *extra = getenv("HPHP_CFLAGS");
     const char *opt = dev ? "-O0" : "-O2";
+    char optbuf[512];
+    if (extra && *extra) {
+        snprintf(optbuf, sizeof optbuf, "%s %s", opt, extra);
+        opt = optbuf;
+    }
 
     /* ---- which runtime modules this program actually uses ----
      * hp_rt and hp_std are the base and always come along. Thread, UI and
@@ -851,9 +859,13 @@ static int cc_build_in_dir(const char *wd, const char *rt, const char *cpath,
                              "-luuid -lversion -lshlwapi -lwinmm",
                              opt, subsys, objlist, out);
 #else
-            /* POSIX: sockets live in libc, the UI layer is inert stubs */
-            char *link = fmt("gcc %s %s -o %s -lm -lpthread -lsqlite3",
-                             opt, objlist, out);
+            /* POSIX: sockets live in libc, the UI layer is inert stubs.
+             * HPHP_SQLITE_LIB points at a static SQLite built by build.sh
+             * (THREADSAFE=0); without it the system library is used. */
+            const char *slib = getenv("HPHP_SQLITE_LIB");
+            char *link = (slib && *slib)
+                ? fmt("gcc %s %s -o %s -lm -lpthread %s", opt, objlist, out, slib)
+                : fmt("gcc %s %s -o %s -lm -lpthread -lsqlite3", opt, objlist, out);
 #endif
             rc = run_direct(link, !verbose);
             if (verbose) fprintf(stderr, "[hphp backend] gcc-fallback rc=%d nonempty=%d exe=%d\n",

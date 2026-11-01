@@ -40,6 +40,10 @@ fresh copy of `seed/feed.db` for every run (`tools/bench_local.sh` does that).
 | Checkpoints (4,000-frame trigger) | passive, off-loop; 44 per 90 s at ~600 writes/s, avg 106 ms, max 451 ms; longest COMMIT on the loop 48 ms | 100-770 ms on-loop avoided |
 | Largest local hold | 182,765 connections across 4 rings (generator-limited) | 300-400k on the box |
 
+Sections 1 to 7 are historical; section 8 is the state at #228, and section 9
+holds the local cgroup test behind the guard-fix follow-up (shedding off by
+default, cache-free pressure input).
+
 What this does **not** prove: any user count on the real box, p95/p99 at
 300k users over a real network, or behaviour at the 2 GB memory wall. See
 `STATUS.md`.
@@ -221,3 +225,186 @@ reach them. PGO is now part of `build.sh` (trained on a synthetic database on
 the box itself, falling back to the plain build if training fails): the F#
 entry measured 2-4.5% from it on the box; our own laptop measurement was
 inconclusive (section 2).
+
+## 8. After the second scored run (2026-10-30 and 31)
+
+Everything in this section except the first subsection was measured on the
+2-core laptop (Athlon Silver 3050U, kernel 6.8.0-147), with the server pinned to
+core 0 and `tools/mload.c` on core 1. Nothing was measured at box scale and no
+user-count score is claimed.
+
+### 8.1 Organizer result for commit 3f0c2c1 (PR 203, on the box)
+
+- 230,000 users held 5 min: 22,377 req/s, p95 9.3 ms, p99 37 ms, 0 errors, 66%
+  CPU (27 us/request by the server's counter, was 38), 1,106 MB RAM.
+- 240,000 users (2 min probe): failed on latency (p95 5.8 s) while the memory
+  guard paused accepting twice (252 MB available).
+- 320,000 users: the app logged nothing and the box rebooted (memory pressure
+  outside the app).
+
+The Summary at the top predates this section; its numbers are those of earlier
+versions.
+
+### 8.2 Method
+
+Unless a row says otherwise: 10,000 users, `--think-scale 0.2`, 40 s, a fresh
+copy of `seed/feed.db` per run, server on core 0 and `mload` on core 1. CPU per
+request is the whole-run user+sys total from the server's `getrusage` divided by
+its request count. `F` is the fraction of responses carrying `Connection:
+close`, fixed with the server's `--shed-force F` flag. Runs during which other
+work on the machine raised the load average above 6, where p95 went above 1 s,
+are discarded and excluded from every number below.
+
+### 8.3 Batch window
+
+Us per request at F=0 and F=0.3, and p95 (CQEs / time before a pass):
+
+| Window | F=0 | F=0.3 | p95 |
+|---|---|---|---|
+| 32 / 2 ms (previous default) | 22.7-23.5 | 32.4-34.2 | 3-4 ms |
+| 128 / 4 ms | 21.0-21.4 | 28.3-30.2 | 5-9 ms |
+| 256 / 8 ms | 21.1-21.2 | 27.9-29.0 | 10-18 ms |
+| 512 / 16 ms (adopted) | 20.7 (5 runs) | 27.2-28.3 | 20-35 ms |
+
+1,024 / 32 ms was not adopted: its shedding runs were disturbed by machine load
+(p95 over 1 s) and are excluded. The adopted window trades up to about 35 ms of
+p95 for 10 to 15 percent less CPU.
+
+### 8.4 Reconnect cost
+
+Earlier build, 2 clean runs per cell except F=0.5 (one clean run):
+
+| F | us/request | p95 |
+|---|---|---|
+| 0 | 23.15 | 3.1-4.0 ms |
+| 0.2 | 30.85 | 3.1-4.0 ms |
+| 0.5 | 37.3 | 3.1-4.0 ms |
+| 1.0 | 45.5 | 3.1-4.0 ms |
+
+One reconnect (accept, handshake, shutdown, close; almost all kernel time) costs
+about 22 us at F=1.0, 28 us at 0.5 and 38 us at 0.2: the marginal cost is highest
+at low F.
+
+### 8.5 Where the CPU goes at F=0
+
+Sampled with rdtsc counters (since removed), cycles per request at about 2.1
+GHz: HTTP parse 0.56k; `app_handle` 14.3k, of which the feed read 11.1k (row and
+author load 7.2k, JSON 2.2k, ids 0.84k, likes scan 0.45k) and a single post
+2.1k; commit in `end_batch` 4.5k (mostly kernel I/O); building and submitting
+sends 0.09k; reaping 0.28k. About 8 us of the 20.7 us is user time; the rest is
+the kernel's TCP work.
+
+### 8.6 B-tree reads versus SQL
+
+SQLite-only microbenchmark (seed database, pinned, warm, 32 reads per shared
+read transaction, best of 3 x 20,000): feed 14.2 and 14.4 us versus 32.8 and
+30.3 us; single post 3.6 and 3.4 us versus 4.2 and 4.4 us.
+
+Differential test (`tools/dbdiff.c`): the feed and all 500,005 post ids were
+byte for byte identical to the SQL path; after 2,008 random likes and posts in
+130 batches, the feed and 5 posts were compared after every batch and were
+identical; a final comparison over all 500,633 ids after the writes was
+identical. 0 fallbacks in the whole run.
+
+### 8.7 SQLite knobs
+
+10,000 users, think-scale 0.25, 45 s, clean runs only (load average under 3):
+
+| Setting | us/request | Memory |
+|---|---|---|
+| cache 32 MiB | 29.2, 30.4 | anonymous 60 MB |
+| cache 8 MiB | 29.5 | 54 MB |
+| cache 4 MiB (adopted) | 30.1 | 49 MB |
+| `mmap_size` 256 MB or 1 GiB, added | +2 to +5 (user time) | no change in cgroup memory (same file-backed pages) |
+| checkpoint at 1,000 frames, hold at 8,192 (adopted) | 28.8 (one clean run) | cgroup 145 MB against 174 MB |
+
+### 8.8 Kernel memory per idle socket
+
+Kernel 6.8.0-147, loopback, averaged over both endpoints: about 2.5 to 2.6 KB
+charged to the cgroup (all slab: about 1.45 KB unreclaimable plus about 1.05 KB
+reclaimable dentry and inode cache) and about 3.6 to 3.9 KB system-wide slab.
+Socket buffer memory is 0 while a socket is idle and stays 0 after a 200-byte
+request has been read. `SO_RCVBUF` and `SO_SNDBUF` of 4096, and io_uring
+fixed-file sockets, change nothing measurable. Arming a multishot receive adds
+about 0.26 KB in the cgroup and about 0.5 KB system-wide. A multishot or
+one-shot poll costs the same in the cgroup and saves about 0.2 KB system-wide,
+so poll arming was not adopted; a multishot poll also pins a socket after
+`close_direct` unless it is cancelled explicitly. A mass close of 20,000 sockets
+raised slab by at most about 16 to 25 MB for 0.1 to 0.3 s. The organizer's own
+estimate for the box is about 4.3 KB per socket.
+
+### 8.9 Things tried and not kept
+
+Linked shutdown plus `close_direct` submission saved under 1 us per request.
+Cancelling the armed receive and then closing is invalid: a fixed-file close
+does not release the socket while a receive is armed. `TCP_DEFER_ACCEPT` gave no
+gain.
+
+### 8.10 Close-path race
+
+The original server lost the first request of 25 of 300 reconnecting clients;
+the fixed server lost 0 of 3,000 (DESIGN.md, "Close-path race").
+
+### 8.11 Tests on the final tree
+
+Unit tests, fuzz (300,000 iterations), the official suite (42 of 42) and the
+black-box suite (177 of 177), all under ASAN and UBSAN. The official suite also
+passed 42 of 42 through `build.sh` with the PGO build (3 m 43 s, 10 profile
+files).
+
+## 9. Guard fix: local cgroup test (2026-10-31 and 2026-11-01)
+
+**Local evidence only: one 2-core laptop, loopback, a systemd user unit with a
+300 MB cgroup. This is not box evidence and no user count on the box follows
+from it.**
+
+*Why.* #228 scored 228,000 held and its 240,000 probe failed with connection
+refused; the process was OOM-killed in its cgroup (reproduced locally). The
+forecast for #228 (about 31% of responses closing, about 94% CPU at 350,000)
+was contradicted by that result.
+
+*Setup.* `MemoryMax=300M`, `MemorySwapMax=0`, server pinned to CPU 0, `mload` on
+CPU 1 with 32 source IPs, think-scale 1, ramp 60 s, hold 240 s, fresh seed copy
+per run, started only when the 1-minute load was under 2.5. Scripts were
+`run1.sh` style (systemd-run, sampler of memory.stat and sockstat).
+
+*Finding 1: the guard counted page cache as pressure.* Under a cgroup limit the
+cgroup's `memory.current` includes page cache, which fills to the limit by
+itself and is dropped on demand. The guard used `memory.max - memory.current` as
+headroom, so it reported little headroom when memory was not short and shed or
+paused accepting early. In a 120,000-user run of the new build the cgroup held
+about 35 MB anon, 195 MB kernel (slab) and 70 MB file cache; the cache-free
+figure (anon + kernel + sock, about 230 MB) is what the guard now uses.
+
+*Finding 2: closing and reconnecting did not help.* With the cache-free input,
+the plain server (no shedding) survived 60,000 to 120,000 users in the 300 MB
+cgroup with 0 errors; the same server with shedding thresholds scaled to the
+cgroup (84 / 37 MB, conn cap 74,400) added connect errors from 80,000 up.
+
+Results, one run per cell unless marked (x2 = two runs with the same result):
+
+| users | old guard, shedding on | old guard, no shedding | cache-free input, shedding on | cache-free input, no shedding |
+|---|---|---|---|---|
+| 60,000 | | | 0 errors (x2) | 0 errors |
+| 70,000 | | | 0 errors (x2) | 0 errors (x2) |
+| 80,000 | OOM-killed at 82 s | OOM-killed at 121 s | 0.50% errors (x2) | 0 errors (x2) |
+| 100,000 | OOM-killed at 61 s | OOM-killed at 85 s | 1.50 and 1.53% errors | 0 errors |
+| 120,000 | OOM-killed at 55 s | OOM-killed at 72 s | 2.5% errors (x2) | 0 errors |
+
+"Old guard" is the #228 build with `memory.current` as input; shedding on is
+84 / 37 MB, accept floor 18 MB, conn cap 74,400 (scaled to 300 MB); no shedding
+is `--shed-force 0 --shed-hi-mb 0 --shed-lo-mb 0 --conn-cap 4000000
+--accept-floor-mb 1 --idle-timeout-s 0`. The "cache-free, shedding on" column
+also includes a slewed and budgeted shed fraction that is not part of this
+follow-up. The "cache-free, no shedding" runs used an accept floor of 1 MB;
+the shipped default is 96 MB, so they are not the default configuration. Why
+the old build was killed with shedding disabled, when the new build was not, was
+not isolated. Latency in the no-shedding column at 120,000: p95 93 ms,
+p99 274 ms (about 24.7 us per request by the server's counter); with shedding
+p95 was 23 to 26 ms. At 160,000 and 200,000 users the plain server was
+OOM-killed in this cgroup (at 105 s and 51 s); a hand-scaled shedding variant
+was also killed at both. Each of those was a single run.
+
+*What follows.* Pressure is now measured without page cache; shedding is off by
+default; `--hard-conn-cap` is available and off. Whether any of this helps on
+the 2 GB box is not known.

@@ -50,6 +50,7 @@ typedef SOCKET hp_sock;
 #include <sys/stat.h>
 #include <dirent.h>
 #include <sys/socket.h>
+#include <sys/syscall.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
@@ -57,6 +58,8 @@ typedef SOCKET hp_sock;
 #include <poll.h>
 #if !defined(_WIN32)
 #include <sys/epoll.h>
+#include <sys/uio.h>
+#include <sys/resource.h>
 #endif
 #include <fcntl.h>
 #include <errno.h>
@@ -210,6 +213,52 @@ hval hpbi_strpos(hval h, hval n, hval off) {
     if (r < 0) return hp_of_bool(false);   /* PHP: strpos miss => false */
     RETI(r + o);                            /* absolute position */
 }
+/* str_at_eq($s, $start, $len, $lit): compare $len bytes at $start with the
+ * literal, without building a substring. */
+hval hpbi_str_at_eq(hval s, hval start, hval len, hval lit) {
+    hstr *x = hp_val_to_str(s);
+    hstr *y = hp_val_to_str(lit);
+    int64_t st = hp_val_to_int(start);
+    int64_t n = hp_val_to_int(len);
+    if (st < 0 || n < 0 || (size_t)n != y->len ||
+        (uint64_t)st + (uint64_t)n > (uint64_t)x->len)
+        return hp_of_bool(false);
+    return hp_of_bool(memcmp(x->data + st, y->data, (size_t)n) == 0);
+}
+bool hp_str_at_eq_t(hstr *x, int64_t st, int64_t n, hstr *y) {
+    if (st < 0 || n < 0 || (size_t)n != y->len ||
+        (uint64_t)st + (uint64_t)n > (uint64_t)x->len)
+        return false;
+    return memcmp(x->data + st, y->data, (size_t)n) == 0;
+}
+
+/* str_to_int($s): parse a decimal string to int, -1 on a non-digit,
+ * empty string, or a value outside (0, INT64_MAX]. Replaces a per-character
+ * HolyPHP loop in the server's parse_id(); the string argument stays unboxed. */
+hval hpbi_str_to_int(hval s) {
+    hstr *x = hp_val_to_str(s);
+    size_t n = x->len;
+    if (n < 1 || n > 18) return hp_of_int(-1);
+    int64_t v = 0;
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)x->data[i];
+        if (c < '0' || c > '9') return hp_of_int(-1);
+        v = v * 10 + (int64_t)(c - '0');
+    }
+    return hp_of_int(v <= 0 ? -1 : v);
+}
+int64_t hp_str_to_int_t(hstr *x) {
+    size_t n = x->len;
+    if (n < 1 || n > 18) return -1;
+    int64_t v = 0;
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)x->data[i];
+        if (c < '0' || c > '9') return -1;
+        v = v * 10 + (int64_t)(c - '0');
+    }
+    return v <= 0 ? -1 : v;
+}
+
 hval hpbi_str_contains(hval h, hval n) {
     RETB(hp_str_index(hp_val_to_str(h), hp_val_to_str(n)) >= 0);
 }
@@ -689,8 +738,8 @@ static int b64_val(char c) {
     if (c >= 'A' && c <= 'Z') return c - 'A';
     if (c >= 'a' && c <= 'z') return c - 'a' + 26;
     if (c >= '0' && c <= '9') return c - '0' + 52;
-    if (c == '+') return 62;
-    if (c == '/') return 63;
+    if (c == '+' || c == '-') return 62;   /* base64 and base64url */
+    if (c == '/' || c == '_') return 63;
     return -1;
 }
 static hstr *hp_b64_decode(hstr *in) {
@@ -1851,7 +1900,7 @@ static void hp_net_init(void) {
 
 /* Per-socket state. EOF is sticky: once the peer closes, it stays closed
  * even if we stop reading. */
-typedef struct { intptr_t h; bool eof; } hp_sockrec;
+typedef struct { intptr_t h; bool eof; bool listener; } hp_sockrec;
 /* Indexed by descriptor: a server with 15k connections must not pay a linear
  * scan on every recv/send. Slots are grown on demand. */
 static hp_sockrec *g_sock;
@@ -1881,6 +1930,7 @@ static void sock_forget(intptr_t h) {
     if (h < 0 || (size_t)h >= g_sock_cap) return;
     g_sock[h].h = 0;
     g_sock[h].eof = false;
+    g_sock[h].listener = false;
 }
 
 static hp_sock sock_of(hval v) { return (hp_sock)(intptr_t)hp_val_to_int(v); }
@@ -1935,14 +1985,15 @@ hval hpbi_stream_socket_server(hval addr) {
     if (s == HP_SOCK_BAD) { freeaddrinfo(res); return hp_of_int(-1); }
     int yes = 1;
     setsockopt(s, SOL_SOCKET, SO_REUSEADDR, (const char *)&yes, sizeof yes);
-    if (bind(s, res->ai_addr, (int)res->ai_addrlen) != 0 || listen(s, 128) != 0) {
+    if (bind(s, res->ai_addr, (int)res->ai_addrlen) != 0 || listen(s, 4096) != 0) {
         freeaddrinfo(res);
         hp_sock_close(s);
         return hp_of_bool(false);   /* PHP-style: failure is falsy */
     }
     freeaddrinfo(res);
     sock_nonblocking(s, true);
-    sockrec((intptr_t)s, true);
+    hp_sockrec *sr = sockrec((intptr_t)s, true);
+    if (sr) sr->listener = true;
     return hp_of_int((int64_t)(intptr_t)s);
 }
 
@@ -1967,6 +2018,8 @@ hval hpbi_stream_socket_client(hval addr) {
     return hp_of_int((int64_t)(intptr_t)s);
 }
 
+static _Thread_local int g_accept_errno = 0;
+
 hval hpbi_stream_socket_accept(hval srv) {
     hp_net_init();
     hp_sock s = sock_of(srv);
@@ -1975,12 +2028,28 @@ hval hpbi_stream_socket_accept(hval srv) {
     for (;;) {
         struct sockaddr_storage ss;
         socklen_t sl = sizeof ss;
+#if defined(__linux__) && defined(SYS_accept4)
+        /* one syscall: the accepted fd is already non-blocking (plain accept
+         * plus two fcntl round trips would cost two more per connection) */
+        hp_sock c = (hp_sock)syscall(SYS_accept4, s,
+                                     (struct sockaddr *)&ss, &sl,
+                                     (long)O_NONBLOCK);
+#else
         hp_sock c = accept(s, (struct sockaddr *)&ss, &sl);
+#endif
         if (c != HP_SOCK_BAD) {
+#if !defined(__linux__) || !defined(SYS_accept4)
             sock_nonblocking(c, true);
+#endif
             sockrec((intptr_t)c, true);
+            g_accept_errno = 0;
             return hp_of_int((int64_t)(intptr_t)c);
         }
+#if defined(_WIN32)
+        g_accept_errno = WSAGetLastError();
+#else
+        g_accept_errno = errno;
+#endif
         if (!hp_sock_wouldblock()) return hp_of_bool(false);
         sock_sleep_ms(5);
     }
@@ -1999,12 +2068,26 @@ hval hpbi_stream_socket_accept2(hval srv, hval timeout_ms) {
     for (;;) {
         struct sockaddr_storage ss;
         socklen_t sl = sizeof ss;
+#if defined(__linux__) && defined(SYS_accept4)
+        hp_sock c = (hp_sock)syscall(SYS_accept4, s,
+                                     (struct sockaddr *)&ss, &sl,
+                                     (long)O_NONBLOCK);
+#else
         hp_sock c = accept(s, (struct sockaddr *)&ss, &sl);
+#endif
         if (c != HP_SOCK_BAD) {
+#if !defined(__linux__) || !defined(SYS_accept4)
             sock_nonblocking(c, true);
+#endif
             sockrec((intptr_t)c, true);
+            g_accept_errno = 0;
             return hp_of_int((int64_t)(intptr_t)c);
         }
+#if defined(_WIN32)
+        g_accept_errno = WSAGetLastError();
+#else
+        g_accept_errno = errno;
+#endif
         if (!hp_sock_wouldblock()) return hp_of_bool(false);
         if (waited >= limit) return hp_of_bool(false);   /* poll timed out */
         sock_sleep_ms(5);
@@ -2036,18 +2119,27 @@ hval hpbi_stream_recv(hval s, hval maxn) {
     int64_t want = hp_val_to_int(maxn);
     if (want <= 0) want = 4096;
     if (want > (1 << 20)) want = (1 << 20);
-    char *buf = (char *)malloc((size_t)want);
-    if (!buf) return hp_of_str(hp_str_lit(""));
+    /* one reusable buffer per thread instead of a malloc/free per recv */
+    static _Thread_local char *g_rbuf = NULL;
+    static _Thread_local size_t g_rbuf_cap = 0;
+    if ((size_t)want > g_rbuf_cap) {
+        char *nb = (char *)realloc(g_rbuf, (size_t)want);
+        if (!nb) return hp_of_str(hp_null_str());
+        g_rbuf = nb;
+        g_rbuf_cap = (size_t)want;
+    }
+#ifdef HP_UR_CAN
+    if (hp_uring_active()) return hp_of_str(hp_uring_take_recv(fd, (size_t)want));
+#endif
+    char *buf = g_rbuf;
     int r = recv(fd, buf, (int)want, 0);
     bool blocked = (r < 0) && hp_sock_wouldblock();
     if (r <= 0 && !blocked)
         sockrec((intptr_t)fd, true)->eof = true;
     if (r > 0) {
         hstr *out = hp_str_new(buf, (size_t)r);
-        free(buf);
         return hp_of_str(out);
     }
-    free(buf);
     if (r == 0) {                    /* orderly shutdown by the peer */
         sockrec((intptr_t)fd, true)->eof = true;
         return hp_of_str(hp_str_lit(""));
@@ -2055,6 +2147,14 @@ hval hpbi_stream_recv(hval s, hval maxn) {
     if (!blocked)                    /* hard error: treat as closed */
         sockrec((intptr_t)fd, true)->eof = true;
     return hp_of_str(hp_str_lit(""));
+}
+
+hval hpbi_accept_emfile(void) {
+#if defined(_WIN32)
+    return hp_of_bool(g_accept_errno == WSAEMFILE);
+#else
+    return hp_of_bool(g_accept_errno == EMFILE || g_accept_errno == ENFILE);
+#endif
 }
 
 hval hpbi_stream_send(hval s, hval data) {
@@ -2069,6 +2169,94 @@ hval hpbi_stream_send(hval s, hval data) {
         if (r > 0) { sent += (size_t)r; continue; }
         if (r < 0 && hp_sock_wouldblock() && waited_ms < 2000) {
             sock_sleep_ms(1);        /* let the peer drain; frames stay whole */
+            waited_ms++;
+            continue;
+        }
+        if (r < 0) sockrec((intptr_t)fd, true)->eof = true;
+        break;
+    }
+    return hp_of_int((int64_t)sent);
+}
+
+/* The process's descriptor limit, so the server sheds connections only when
+ * it is really about to run out (0 = unknown). */
+hval hpbi_nofile_limit(void) {
+#if defined(_WIN32)
+    return hp_of_int(0);
+#else
+    struct rlimit rl;
+    if (getrlimit(RLIMIT_NOFILE, &rl) != 0) return hp_of_int(0);
+    return hp_of_int((int64_t)rl.rlim_cur);
+#endif
+}
+
+/* Two buffers, one writev(2), no blocking: the header and the body go out
+ * together without copying the body. Returns bytes written, -1 would-block,
+ * -2 error. */
+hval hpbi_stream_send2_nb(hval s, hval a, hval b) {
+    hp_net_init();
+    hp_sock fd = sock_of(s);
+    if (fd == HP_SOCK_BAD) return hp_of_int(-2);
+    hstr *x = hp_val_to_str(a);
+    hstr *y = hp_val_to_str(b);
+#ifdef HP_UR_CAN
+    if (hp_uring_active()) return hp_of_int(hp_uring_send2(fd, x, y));
+#endif
+#if defined(_WIN32)
+    /* no writev: one concatenated send (the caller buffers the remainder the
+     * same way, the bytes are identical) */
+    size_t n = x->len + y->len;
+    char *tmp = malloc(n ? n : 1);
+    if (!tmp) return hp_of_int(-2);
+    memcpy(tmp, x->data, x->len);
+    memcpy(tmp + x->len, y->data, y->len);
+    int r = (int)send(fd, tmp, (int)n, 0);
+    free(tmp);
+    if (r >= 0) return hp_of_int(r);
+    return hp_of_int(hp_sock_wouldblock() ? -1 : -2);
+#else
+    struct iovec iov[2];
+    iov[0].iov_base = x->data;
+    iov[0].iov_len = x->len;
+    iov[1].iov_base = y->data;
+    iov[1].iov_len = y->len;
+    ssize_t r = writev(fd, iov, 2);
+    if (r >= 0) return hp_of_int((int64_t)r);
+    return hp_of_int(hp_sock_wouldblock() ? -1 : -2);
+#endif
+}
+
+/* Two buffers, one syscall: the header and the body of a response without
+ * copying the body into a new string. Returns the bytes written. */
+hval hpbi_stream_send2(hval s, hval a, hval b) {
+    hp_net_init();
+    hp_sock fd = sock_of(s);
+    if (fd == HP_SOCK_BAD) return hp_of_int(0);
+    hstr *x = hp_val_to_str(a);
+    hstr *y = hp_val_to_str(b);
+    size_t total = x->len + y->len;
+    size_t sent = 0;
+    int waited_ms = 0;
+    while (sent < total) {
+        long long r;
+#if defined(_WIN32)
+        if (sent < x->len) r = send(fd, x->data + sent, (int)(x->len - sent), 0);
+        else r = send(fd, y->data + (sent - x->len), (int)(total - sent), 0);
+#else
+        if (sent < x->len) {
+            struct iovec iov[2];
+            iov[0].iov_base = x->data + sent;
+            iov[0].iov_len = x->len - sent;
+            iov[1].iov_base = y->data;
+            iov[1].iov_len = y->len;
+            r = (long long)writev(fd, iov, 2);
+        } else {
+            r = send(fd, y->data + (sent - x->len), (int)(total - sent), 0);
+        }
+#endif
+        if (r > 0) { sent += (size_t)r; continue; }
+        if (r < 0 && hp_sock_wouldblock() && waited_ms < 2000) {
+            sock_sleep_ms(1);
             waited_ms++;
             continue;
         }
@@ -2150,11 +2338,686 @@ hval hpbi_stream_ready_into(hval outv, hval handles, hval timeout_ms) {
 static _Thread_local int g_epfd = -1;
 #endif
 
+/* ---- io_uring backend (Linux) ----------------------------------------------
+ * Transparent backend behind the epoll/stream primitives. The ring carries one
+ * armed recv per live connection plus the pending response sends, so one
+ * io_uring_enter per poll cycle replaces one epoll_wait plus one recv (and one
+ * send) syscall per request. Built on raw syscalls so nothing depends on
+ * liburing; if the kernel cannot create a ring (no io_uring, or the sandbox
+ * forbids it) every primitive falls back to the epoll path below.
+ * HPHP_URING=0 disables the backend. */
+#if defined(__linux__)
+#include <sys/syscall.h>
+#include <sys/mman.h>
+#endif
+#if defined(__linux__) && defined(SYS_io_uring_setup)
+#define HP_UR_CAN 1
+#endif
+
+#ifdef HP_UR_CAN
+
+/* opcode numbers from the IORING_OP_ enum (index from 0): POLL_ADD=6,
+ * SEND=26, RECV=27 — verified against /usr/include/liburing/io_uring.h */
+#define HP_UR_OP_POLL     6
+#define HP_UR_OP_SEND     26
+#define HP_UR_OP_RECV     27
+#define HP_UR_OFF_CQ      0x8000000ULL
+#define HP_UR_OFF_SQES    0x10000000ULL
+#define HP_UR_ENTER_GET   1
+/* IORING_ENTER_EXT_ARG is bit 3 (verified against io_uring.h + the probe) */
+#define HP_UR_ENTER_EXT   8
+/* IORING_SETUP_CQSIZE = bit 3, IORING_SETUP_CLAMP = bit 4 (uapi io_uring.h) */
+#define HP_UR_SETUP_CQSIZE (1U << 3)
+#define HP_UR_SETUP_CLAMP   (1U << 4)
+#define HP_UR_KIND_RECV   1
+#define HP_UR_KIND_SEND   2
+#define HP_UR_KIND_POLL   3
+#define HP_UR_KIND        0xff
+#define HP_UR_ENTRIES     65536   /* deep ring: ~60k + live conns at 280k users */
+#define HP_UR_RECV_LEN    4096
+
+/* raw ABI, from include/uapi/linux/io_uring.h */
+struct hp_uring_sqe {
+    uint8_t  opcode;
+    uint8_t  flags;
+    uint16_t ioprio;
+    int32_t  fd;
+    union { uint64_t off; uint64_t addr2; };
+    union { uint64_t addr; };
+    uint32_t len;
+    union {
+        uint32_t rw_flags;
+        uint32_t fsync_flags;
+        uint16_t poll_events;
+        uint32_t poll32_events;
+        uint32_t splice_flags;
+    };
+    uint64_t user_data;
+    union { uint16_t buf_group; };
+    uint64_t pad[2];
+};
+struct hp_uring_cqe {
+    uint64_t user_data;
+    int32_t  res;
+    uint32_t flags;
+};
+struct hp_uring_sq_ring {                 /* io_sqring_offsets */
+    uint32_t head, tail, ring_mask, ring_entries, flags, dropped, array, resv1;
+    uint64_t user_addr;
+};
+struct hp_uring_cq_ring {                 /* io_cqring_offsets */
+    uint32_t head, tail, ring_mask, ring_entries, overflow, cqes, flags, resv1;
+    uint64_t user_addr;
+};
+struct hp_uring_setup_params {
+    uint32_t sq_entries, cq_entries, flags, sq_thread_cpu, sq_thread_idle,
+             features, wq_fd;
+    uint32_t resv[3];
+    struct hp_uring_sq_ring sq_off;
+    struct hp_uring_cq_ring cq_off;
+};
+
+struct hp_urchunk {
+    struct hp_urchunk *next;
+    char   *data;
+    size_t  off, len;
+};
+
+/* Per-connection (per-fd) state: one recv buffer (recycled between
+ * completions) and at most one in-flight send chunk per fd; everything is
+ * freed on close, and the epoch stamped into user_data makes completions
+ * that arrive after a close plus fd reuse drop. */
+struct hp_urfds {
+    struct hp_urchunk *shead, *stail;     /* queued send chain */
+    int    squeued;
+    char  *rbuf;                          /* recycled recv buffer */
+    size_t rcap;
+    size_t rlen;                          /* fresh bytes available */
+    int    rarmed;                        /* a recv SQE is queued or in flight */
+    int    rready;                        /* rbuf holds unconsumed data */
+    int    reof;
+    int    listener;
+    int    pollarmed;
+    int    sarmed;                        /* a send SQE is queued or in flight */
+    int    rtagged;                       /* parked in the retry ring */
+    int    closeafter;                    /* close deferred until sends drain */
+    int    ctagged;                       /* listed for the deadline check */
+    int64_t cdeadline;
+    uint32_t epoch;
+};
+
+static _Thread_local int hp_ur_st = 0;    /* 0 untried, 1 active, -1 unusable */
+static _Thread_local int hp_ur_fd = -1;
+static _Thread_local unsigned char *hp_ur_sqes;
+static _Thread_local struct hp_uring_cqe *hp_ur_cqes;
+static _Thread_local uint32_t *hp_ur_sqarr;
+static _Thread_local volatile uint32_t *hp_ur_sq_head, *hp_ur_sq_tail;
+static _Thread_local volatile uint32_t *hp_ur_cq_head, *hp_ur_cq_tail;
+static _Thread_local uint32_t hp_ur_sqtail, hp_ur_cqhead;
+static _Thread_local uint32_t hp_ur_sqmask, hp_ur_cqmask;
+static _Thread_local struct hp_urfds *hp_ur_fds;
+static _Thread_local uint32_t hp_ur_fdscap;
+static _Thread_local int hp_ur_pushfail;    /* retry-ring overflow: run scan */
+static _Thread_local int hp_ur_dbg;         /* HPHP_URING_DEBUG=1 */
+static _Thread_local uint32_t *hp_ur_retry; /* fds waiting for a re-arm slot */
+static _Thread_local uint32_t hp_ur_retcap, hp_ur_rethead, hp_ur_rettail;
+static _Thread_local uint32_t *hp_ur_closing; /* fds waiting for a send drain */
+static _Thread_local uint32_t hp_ur_closecap, hp_ur_closecnt;
+
+static int hp_uring_active(void) { return hp_ur_st == 1; }
+
+static struct hp_urfds *hp_ur_st_of(hp_sock fd) {
+    if (fd < 0 || (uint32_t)fd >= hp_ur_fdscap) return NULL;
+    return &hp_ur_fds[fd];
+}
+
+static void hp_ur_fdgrow(hp_sock fd) {
+    uint32_t want = (uint32_t)fd + 1;
+    if (want <= hp_ur_fdscap) return;
+    uint32_t ncap = hp_ur_fdscap ? hp_ur_fdscap : 4096;
+    while (ncap < want) {
+        if (ncap > ((uint32_t)1 << 26)) { hp_ur_st = -1; return; }
+        ncap *= 2;
+    }
+    struct hp_urfds *nf = (struct hp_urfds *)realloc(hp_ur_fds,
+                       (size_t)ncap * sizeof *nf);
+    if (!nf) { hp_ur_st = -1; return; }
+    memset(nf + hp_ur_fdscap, 0, (size_t)(ncap - hp_ur_fdscap) * sizeof *nf);
+    hp_ur_fds = nf;
+    hp_ur_fdscap = ncap;
+    /* keep the retry ring at least as wide as the fd table: one slot per
+     * connection so a fully saturated ring still tracks every pending fd */
+    if (ncap > hp_ur_retcap) {
+        uint32_t *nr = (uint32_t *)malloc((size_t)ncap * sizeof *nr);
+        if (!nr) { hp_ur_pushfail++; return; }
+        uint32_t n = 0;
+        for (uint32_t k = hp_ur_rethead; k != hp_ur_rettail;
+             k = (k + 1) & (hp_ur_retcap - 1))
+            nr[n++] = hp_ur_retry[k];
+        free(hp_ur_retry);
+        hp_ur_retry = nr;
+        hp_ur_rethead = 0;
+        hp_ur_rettail = n;
+        hp_ur_retcap = ncap;
+    }
+    if (ncap > hp_ur_closecap) {
+        uint32_t *nc = (uint32_t *)realloc(hp_ur_closing,
+                                           (size_t)ncap * sizeof *nc);
+        if (nc) { hp_ur_closing = nc; hp_ur_closecap = ncap; }
+    }
+}
+
+/* An fd whose SQE push hit a full ring parks here and is re-armed after the
+ * next CQE drain, when slots have freed up. At the multi-10k-connection
+ * scale each idle connection parks one recv SQE while the kernel caps the
+ * SQ ring at 32768 entries, so per-cycle full-table scans would otherwise
+ * burn measurable CPU; this stays O(pending). */
+static void hp_ur_retfd(hp_sock fd) {
+    struct hp_urfds *st = hp_ur_st_of(fd);
+    if (st && st->rtagged) return;
+    if (st) st->rtagged = 1;
+    if (!hp_ur_retcap) { hp_ur_pushfail++; return; }
+    uint32_t nt = (hp_ur_rettail + 1) & (hp_ur_retcap - 1);
+    if (nt == hp_ur_rethead) { hp_ur_pushfail++; return; }   /* ring full */
+    hp_ur_retry[hp_ur_rettail] = (uint32_t)fd;
+    hp_ur_rettail = nt;
+}
+
+static void hp_ur_drop_send_chain(struct hp_urfds *st) {
+    struct hp_urchunk *c = st->shead;
+    while (c) { struct hp_urchunk *n = c->next; free(c->data); free(c); c = n; }
+    st->shead = st->stail = NULL;
+    st->squeued = 0;
+}
+
+static long hp_ur_enter(long to_submit, long min_complete, int wait_ms);
+static bool hp_ur_arm_send_head(hp_sock fd);
+static void hp_ur_free_fd(hp_sock fd);
+
+/* The app asked to close an fd while a SEND is still queued in the ring.
+ * The bytes have not reached the kernel yet, so closing now would cancel the
+ * response (exactly what the shed path does: write_response closes the fd
+ * right after stream_send2_nb reports "sent"). Leave the SQE queued -- the
+ * next enter submits it with everything else -- and keep the state, and with
+ * it the buffers the kernel reads from, alive until the chain drains;
+ * hp_uring_wait finishes the close. */
+static void hp_ur_finish_close(hp_sock fd) {
+    struct hp_urfds *st = hp_ur_st_of(fd);
+    if (!st) return;
+    st->ctagged = 0;
+    st->closeafter = 0;
+    st->sarmed = 0;                /* nothing may defer the close again */
+    sock_forget((intptr_t)fd);
+    close(fd);                     /* cancels any in-flight op first */
+    hp_ur_drop_send_chain(st);
+    hp_ur_free_fd(fd);
+}
+
+/* Drop everything the ring still references for an fd. The kernel cancels
+ * in-flight SQEs on file release; completions that still arrive are dropped
+ * by the epoch in user_data. */
+static void hp_ur_free_fd(hp_sock fd) {
+    struct hp_urfds *st = hp_ur_st_of(fd);
+    if (!st) return;
+    if (!st->listener && (st->sarmed || st->shead)) {
+        if (!st->sarmed) hp_ur_arm_send_head(fd);
+        /* The send SQE is already queued; the next wait cycle submits it
+         * together with everything else. Only the close has to wait. */
+        st->closeafter = 1;
+        st->cdeadline = (int64_t)time(NULL) + 15;
+        if (!st->ctagged) {
+            if (hp_ur_closecnt < hp_ur_closecap) {
+                st->ctagged = 1;
+                hp_ur_closing[hp_ur_closecnt++] = (uint32_t)fd;
+                return;
+            }
+            /* no tracking room: close now (bounded, never leaks) */
+            st->closeafter = 0;
+        } else {
+            return;
+        }
+    }
+    hp_ur_drop_send_chain(st);
+    free(st->rbuf);
+    uint32_t e = st->epoch + 1;          /* keep escalating so fd-reuse
+                                            completions always mismatch */
+    memset(st, 0, sizeof *st);
+    st->epoch = e;
+}
+
+static long hp_ur_enter(long to_submit, long min_complete, int wait_ms) {
+    if (wait_ms < 0) return syscall(SYS_io_uring_enter, (long)hp_ur_fd,
+                                    to_submit, min_complete,
+                                    HP_UR_ENTER_GET, 0L, 0L);
+    struct timespec ts;
+    ts.tv_sec = wait_ms / 1000;
+    ts.tv_nsec = (long)(wait_ms % 1000) * 1000000L;
+    long r = syscall(SYS_io_uring_enter, (long)hp_ur_fd, to_submit,
+                     min_complete, HP_UR_ENTER_GET | HP_UR_ENTER_EXT,
+                     (long)&ts, (long)sizeof ts);
+    if (r >= 0 || (errno != EINVAL && errno != ENOSYS)) return r;
+    /* kernels without the ext-arg timeout still work, without the bound */
+    return syscall(SYS_io_uring_enter, (long)hp_ur_fd, to_submit,
+                   min_complete ? min_complete : 1, HP_UR_ENTER_GET, 0L, 0L);
+}
+
+static bool hp_uring_setup(void) {
+    const char *env = getenv("HPHP_URING");
+    if (env && (env[0] == '0' || env[0] == 'n' || env[0] == 'N')) return false;
+    hp_ur_dbg = getenv("HPHP_URING_DEBUG") != NULL;
+    struct hp_uring_setup_params p;
+    memset(&p, 0, sizeof p);
+    /* Ask for an explicit 64k/64k ring: at 280k users the box holds ~60k
+     * live connections and every armed poll/recv/send occupies an SQE slot,
+     * so the default 32k SQ ring would start rejecting pushes at the very
+     * scale the bench measures. CQSIZE requests the CQ depth (the uapi
+     * requires cq_entries >= sq_entries), CLAMP lets a kernel with a lower
+     * sq cap shrink that side and keep the deep CQ. Total ~5.3 MB entered
+     * under the default 8 MB RLIMIT_MEMLOCK; any failure falls back to the
+     * classic 32k defaults (~3.2 MB). */
+    p.sq_entries = HP_UR_ENTRIES;
+    p.cq_entries = HP_UR_ENTRIES;
+    p.flags = HP_UR_SETUP_CQSIZE | HP_UR_SETUP_CLAMP;
+    int fd = (int)syscall(SYS_io_uring_setup, (unsigned long)p.sq_entries, &p);
+    if (fd < 0) {
+        memset(&p, 0, sizeof p);
+        fd = (int)syscall(SYS_io_uring_setup,
+                          (unsigned long)(HP_UR_ENTRIES / 2), &p);
+        if (fd < 0) return false;
+    }
+    size_t sq_sz = p.sq_off.array + (size_t)p.sq_entries * sizeof(uint32_t);
+    size_t cq_sz = p.cq_off.cqes + (size_t)p.cq_entries * sizeof(struct hp_uring_cqe);
+    size_t sqe_sz = (size_t)p.sq_entries * sizeof(struct hp_uring_sqe);
+    void *sqring = mmap(0, sq_sz, PROT_READ | PROT_WRITE,
+                        MAP_SHARED | MAP_POPULATE, fd, 0);
+    void *cqring = mmap(0, cq_sz, PROT_READ | PROT_WRITE,
+                        MAP_SHARED | MAP_POPULATE, fd, (off_t)HP_UR_OFF_CQ);
+    void *sqes = mmap(0, sqe_sz, PROT_READ | PROT_WRITE,
+                      MAP_SHARED | MAP_POPULATE, fd, (off_t)HP_UR_OFF_SQES);
+    if (sqring == MAP_FAILED || cqring == MAP_FAILED || sqes == MAP_FAILED) {
+        if (sqring != MAP_FAILED) munmap(sqring, sq_sz);
+        if (cqring != MAP_FAILED) munmap(cqring, cq_sz);
+        if (sqes != MAP_FAILED) munmap(sqes, sqe_sz);
+        close(fd);
+        return false;
+    }
+    /* ring sizes/masks must come from the kernel-reported BYTE offsets:
+     * with IORING_FEAT_SINGLE_MMAP both rings share one mmap and their
+     * header fields interleave (sq mask sits at sq_off.ring_mask = +16,
+     * NOT at byte 8 like a plain struct overlay would read). Verified
+     * against the raw mmap dump on kernel 6.18. */
+    hp_ur_fd = fd;
+    hp_ur_sqmask = *(volatile uint32_t *)((char *)sqring + p.sq_off.ring_mask);
+    hp_ur_cqmask = *(volatile uint32_t *)((char *)cqring + p.cq_off.ring_mask);
+    hp_ur_sq_head = (volatile uint32_t *)((char *)sqring + p.sq_off.head);
+    hp_ur_sq_tail = (volatile uint32_t *)((char *)sqring + p.sq_off.tail);
+    hp_ur_cq_head = (volatile uint32_t *)((char *)cqring + p.cq_off.head);
+    hp_ur_cq_tail = (volatile uint32_t *)((char *)cqring + p.cq_off.tail);
+    hp_ur_sqarr = (uint32_t *)((char *)sqring + p.sq_off.array);
+    hp_ur_sqes = (unsigned char *)sqes;
+    hp_ur_cqes = (struct hp_uring_cqe *)((char *)cqring + p.cq_off.cqes);
+    hp_ur_sqtail = __atomic_load_n(hp_ur_sq_tail, __ATOMIC_ACQUIRE);
+    hp_ur_cqhead = __atomic_load_n(hp_ur_cq_head, __ATOMIC_ACQUIRE);
+    return true;
+}
+
+static int hp_uring_maybe_setup(void) {
+    if (hp_ur_st == 0) hp_ur_st = hp_uring_setup() ? 1 : -1;
+    return hp_ur_st == 1;
+}
+
+/* Queue one SQE; false when the ring has no space (callers fall back). */
+static bool hp_ur_sq_push(struct hp_uring_sqe *fill) {
+    uint32_t tail = hp_ur_sqtail;
+    uint32_t head = __atomic_load_n(hp_ur_sq_head, __ATOMIC_ACQUIRE);
+    if (tail - head >= (uint32_t)(hp_ur_sqmask + 1)) {
+        return false;   /* no slot: the fd is parked in the retry ring */
+    }
+    struct hp_uring_sqe *slot = (struct hp_uring_sqe *)
+        (hp_ur_sqes + (size_t)(tail & hp_ur_sqmask) * sizeof(struct hp_uring_sqe));
+    *slot = *fill;
+    hp_ur_sqarr[tail & hp_ur_sqmask] = tail & hp_ur_sqmask;
+    __atomic_store_n(hp_ur_sq_tail, tail + 1, __ATOMIC_RELEASE);
+    hp_ur_sqtail = tail + 1;
+    return true;
+}
+
+static uint64_t hp_ur_ud(struct hp_urfds *st, hp_sock fd, int kind) {
+    return ((uint64_t)st->epoch << 40) | ((uint64_t)(uint16_t)fd << 8)
+         | (uint64_t)kind;
+}
+
+/* Track (never double-track) one recv per fd. The buffer is recycled across
+ * EAGAIN cycles; a data completion hands it to the app and the app's consume
+ * frees it and arms a fresh one. */
+static bool hp_uring_arm_recv(hp_sock fd, size_t want) {
+    struct hp_urfds *st = hp_ur_st_of(fd);
+    if (!st || st->rarmed || st->reof || st->listener) return false;
+    if (!st->rbuf) {
+        if (want < HP_UR_RECV_LEN) want = HP_UR_RECV_LEN;
+        st->rbuf = (char *)malloc(want);
+        if (!st->rbuf) return false;
+        st->rcap = want;
+    }
+    if (want > st->rcap) {
+        char *nb = (char *)realloc(st->rbuf, want);
+        if (!nb) return false;
+        st->rbuf = nb;
+        st->rcap = want;
+    }
+    struct hp_uring_sqe s;
+    memset(&s, 0, sizeof s);
+    s.opcode = HP_UR_OP_RECV;
+    s.fd = (int)fd;
+    s.addr = (uint64_t)(uintptr_t)st->rbuf;
+    s.len = (uint32_t)st->rcap;
+    s.user_data = hp_ur_ud(st, fd, HP_UR_KIND_RECV);
+    if (!hp_ur_sq_push(&s)) { hp_ur_retfd(fd); return false; }
+    st->rarmed = 1;
+    return true;
+}
+
+static bool hp_uring_arm_poll(hp_sock fd) {
+    struct hp_urfds *st = hp_ur_st_of(fd);
+    if (!st || st->pollarmed) return false;
+    struct hp_uring_sqe s;
+    memset(&s, 0, sizeof s);
+    s.opcode = HP_UR_OP_POLL;
+    s.fd = (int)fd;
+    s.poll_events = POLLIN;
+    s.user_data = hp_ur_ud(st, fd, HP_UR_KIND_POLL);
+    if (!hp_ur_sq_push(&s)) { hp_ur_retfd(fd); return false; }
+    st->pollarmed = 1;
+    return true;
+}
+
+static bool hp_ur_arm_send_head(hp_sock fd) {
+    struct hp_urfds *st = hp_ur_st_of(fd);
+    if (!st || st->sarmed || !st->shead) return false;
+    struct hp_urchunk *c = st->shead;
+    struct hp_uring_sqe s;
+    memset(&s, 0, sizeof s);
+    s.opcode = HP_UR_OP_SEND;
+    s.fd = (int)fd;
+    s.addr = (uint64_t)(uintptr_t)(c->data + c->off);
+    s.len = (uint32_t)(c->len - c->off);
+    s.user_data = hp_ur_ud(st, fd, HP_UR_KIND_SEND);
+    if (!hp_ur_sq_push(&s)) { hp_ur_retfd(fd); return false; }
+    st->sarmed = 1;
+    return true;
+}
+
+/* Queue a response for the ring: the bytes are copied into the chunk so the
+ * caller's hstr can be freed while the send is still in flight. The full
+ * length is claimed as sent (so write_response's bookkeeping matches the
+ * sync contract) and the flush happens on the next poll cycle's enter.
+ * -2 on a fatal path (no ring slot, OOM, stalled peer) so the caller's close
+ * path cleans up, exactly like the synchronous contract. */
+static int64_t hp_uring_send2(hp_sock fd, hstr *a, hstr *b) {
+    struct hp_urfds *st = hp_ur_st_of(fd);
+    if (!st || st->reof) return -2;
+    if (st->squeued >= 64) {                       /* a stalled peer */
+        st->reof = 1;
+        /* keep the chain: the head may still be in flight, so freeing it
+         * here would let the kernel read freed memory. The completion (or
+         * the deferred close) drops it. */
+        return -2;
+    }
+    size_t n = a->len + b->len;
+    char *buf = (char *)malloc(n ? n : 1);
+    if (!buf) { st->reof = 1; hp_ur_drop_send_chain(st); return -2; }
+    if (a->len) memcpy(buf, a->data, a->len);
+    if (b->len) memcpy(buf + a->len, b->data, b->len);
+    struct hp_urchunk *c = (struct hp_urchunk *)malloc(sizeof *c);
+    if (!c) { free(buf); st->reof = 1; hp_ur_drop_send_chain(st); return -2; }
+    c->data = buf; c->off = 0; c->len = n; c->next = NULL;
+    if (st->stail) st->stail->next = c; else st->shead = c;
+    st->stail = c;
+    st->squeued++;
+    if (!st->sarmed) hp_ur_arm_send_head(fd);
+    return (int64_t)n;
+}
+
+/* Return the fresh bytes for fd. The ring only pushes an fd into the ready
+ * list when its recv completed with data, so this copies out and re-arms the
+ * same buffer -- a read costs zero syscalls and zero malloc. */
+static hstr *hp_uring_take_recv(hp_sock fd, size_t maxall) {
+    struct hp_urfds *st = hp_ur_st_of(fd);
+    if (!st || !st->rready) return hp_str_lit("");
+    size_t avail = st->rlen < maxall ? st->rlen : maxall;
+    hstr *out = avail ? hp_str_new(st->rbuf, avail) : hp_str_lit("");
+    if (avail && (size_t)avail >= st->rlen) {
+        st->rready = 0;
+        st->rlen = 0;
+        st->rarmed = 0;
+        hp_uring_arm_recv(fd, maxall);
+    }
+    return out;
+}
+
+/* Submit everything queued since the last cycle, wait up to timeout_ms for
+ * progress, then drain the completions. */
+static void hp_uring_wait(harr *in, harr *out, int timeout_ms) {
+    long to_submit = (long)(hp_ur_sqtail -
+        __atomic_load_n(hp_ur_sq_head, __ATOMIC_ACQUIRE));
+    uint32_t head = hp_ur_cqhead;
+    uint32_t have;
+    {
+        uint32_t tail = __atomic_load_n(hp_ur_cq_tail, __ATOMIC_ACQUIRE);
+        have = tail - head;
+    }
+    hp_ur_enter(to_submit, 1, have > 0 ? 0 : timeout_ms);
+
+    for (;;) {
+        uint32_t tail = __atomic_load_n(hp_ur_cq_tail, __ATOMIC_ACQUIRE);
+        if (head == tail) break;
+        struct hp_uring_cqe *c = hp_ur_cqes + (head & hp_ur_cqmask);
+        head++;
+        uint64_t ud = c->user_data;
+        int kind = (int)(ud & HP_UR_KIND);
+        if (kind != HP_UR_KIND_RECV && kind != HP_UR_KIND_SEND &&
+            kind != HP_UR_KIND_POLL) continue;
+        hp_sock fd = (hp_sock)((ud >> 8) & 0xffff);
+        uint32_t epoch = (uint32_t)(ud >> 40);
+        if (hp_ur_dbg)
+            fprintf(stderr, "[ur] cqe kind=%d fd=%d ep=%u res=%d\n",
+                    kind, (int)fd, epoch, c->res);
+        struct hp_urfds *st = hp_ur_st_of(fd);
+        if (!st || st->epoch != epoch) continue;   /* closed + reused fd */
+        if (kind == HP_UR_KIND_RECV) {
+            st->rarmed = 0;
+            if (st->closeafter) continue;   /* app already closed: ignore */
+            if (c->res > 0) {
+                st->rlen = (size_t)c->res;
+                st->rready = 1;
+                if (in) hp_arr_push(in, hp_of_int(fd));
+            } else if (c->res == -EAGAIN || c->res == -EINTR) {
+                hp_uring_arm_recv(fd, HP_UR_RECV_LEN);
+            } else {
+                /* 0 = orderly close, negative = hard error */
+                st->reof = 1;
+                if (in) hp_arr_push(in, hp_of_int(fd));
+            }
+        } else if (kind == HP_UR_KIND_POLL) {
+            st->pollarmed = 0;
+            if (st->closeafter) continue;   /* app already closed: ignore */
+            if (c->res < 0 && (c->res == -ECANCELED || c->res == -EBADF))
+                continue;
+            /* the completion res is the event mask (positive) only when the
+             * poll succeeded; a negative res must not arm-ready the fd */
+            if (c->res > 0 && (c->res & POLLIN)) {
+                if (in) hp_arr_push(in, hp_of_int(fd));
+                hp_uring_arm_poll(fd);             /* keep watching */
+            } else if (c->res <= 0) {
+                /* the poll died: surface the fd so the owner closes it */
+                st->reof = 1;
+                if (in) hp_arr_push(in, hp_of_int(fd));
+            }
+        } else {
+            st->sarmed = 0;
+            struct hp_urchunk *c2 = st->shead;
+            if (c2) {
+                if (c->res >= 0) {
+                    c2->off += (size_t)c->res;
+                    if (c2->off >= c2->len) {
+                        st->shead = c2->next;
+                        if (!st->shead) st->stail = NULL;
+                        st->squeued--;
+                        free(c2->data);
+                        free(c2);
+                    }
+                } else if (c->res != -ECANCELED && c->res != -EBADF &&
+                           c->res != -EAGAIN && c->res != -EINTR) {
+                    /* EPIPE / ECONNRESET: the peer died mid-response */
+                    st->reof = 1;
+                    if (in) hp_arr_push(in, hp_of_int(fd));
+                    hp_ur_drop_send_chain(st);
+                }
+                if (!st->reof) hp_ur_arm_send_head(fd);
+            }
+            if (st->closeafter) {
+                if (!st->shead) hp_ur_finish_close(fd);
+                continue;
+            }
+        }
+        /* keep this fd's pipeline flowing for the next cycle */
+        if (!st->reof && !st->closeafter && !st->listener &&
+            !st->rready && !st->rarmed)
+            hp_uring_arm_recv(fd, HP_UR_RECV_LEN);
+    }
+    __atomic_store_n(hp_ur_cq_head, head, __ATOMIC_RELEASE);
+    hp_ur_cqhead = head;
+    /* an fd whose SQE push hit a full ring is parked in the retry ring and
+     * re-armed here, after the CQE drain freed slots up. In the common case
+     * the ring is empty and this costs nothing; the rare overflow flag
+     * falls back to one full fd-table scan. */
+    /* Only try as many parked fds as the SQ ring can take right now. With a
+     * full ring every pop would just re-park its entry, which turns this
+     * into an O(parked) loop on every cycle -- and the kernel caps the SQ at
+     * 32768 entries while the box holds up to ~61k connections. Entries we
+     * do not reach stay queued for the next cycle. */
+    uint32_t slots = (hp_ur_sqmask + 1) -
+        (hp_ur_sqtail - __atomic_load_n(hp_ur_sq_head, __ATOMIC_ACQUIRE));
+    while (hp_ur_rethead != hp_ur_rettail && slots > 0) {
+        uint32_t i = hp_ur_retry[hp_ur_rethead];
+        hp_ur_rethead = (hp_ur_rethead + 1) & (hp_ur_retcap - 1);
+        if (i >= hp_ur_fdscap) continue;
+        struct hp_urfds *st = &hp_ur_fds[i];
+        if (!st->rtagged) continue;              /* already handled */
+        st->rtagged = 0;
+        if (st->reof) continue;
+        if (st->closeafter) {
+            if (st->shead && !st->sarmed) {
+                if (hp_ur_arm_send_head((hp_sock)i)) slots--;
+                else hp_ur_retfd((hp_sock)i);
+            }
+            continue;
+        }
+        if (st->listener) {
+            if (hp_uring_arm_poll((hp_sock)i)) slots--;
+            else hp_ur_retfd((hp_sock)i);
+            continue;
+        }
+        if (st->shead && !st->sarmed) {
+            if (hp_ur_arm_send_head((hp_sock)i)) slots--;
+            else hp_ur_retfd((hp_sock)i);
+        }
+        if (slots == 0) { hp_ur_retfd((hp_sock)i); continue; }  /* recv next cycle */
+        if (st->rbuf && !st->rready && !st->rarmed) {
+            if (hp_uring_arm_recv((hp_sock)i, HP_UR_RECV_LEN)) slots--;
+            else hp_ur_retfd((hp_sock)i);
+        }
+    }
+    /* deferred closes: the send chain drained (or the peer is gone for
+     * good) -> close the fd for real. Entries live until then, bounded by
+     * the deadline so a stalled peer cannot pin descriptors forever. */
+    if (hp_ur_closecnt) {
+        uint32_t n = 0;
+        int64_t now = (int64_t)time(NULL);
+        for (uint32_t k = 0; k < hp_ur_closecnt; k++) {
+            uint32_t i = hp_ur_closing[k];
+            if (i >= hp_ur_fdscap) continue;
+            struct hp_urfds *st = &hp_ur_fds[i];
+            if (!st->ctagged) continue;
+            if (st->closeafter && !st->shead) {
+                hp_ur_finish_close((hp_sock)i);
+                continue;
+            }
+            if (!st->closeafter) { st->ctagged = 0; continue; }
+            if (now >= st->cdeadline) {
+                hp_ur_finish_close((hp_sock)i);
+                continue;
+            }
+            hp_ur_closing[n++] = i;
+        }
+        hp_ur_closecnt = n;
+    }
+    if (hp_ur_pushfail) {
+        hp_ur_pushfail = 0;
+        for (uint32_t i = 0; i < hp_ur_fdscap; i++) {
+            struct hp_urfds *st = &hp_ur_fds[i];
+            st->rtagged = 0;
+            if (st->reof) continue;
+            if (st->closeafter) {
+                if (st->shead && !st->sarmed && !hp_ur_arm_send_head((hp_sock)i))
+                    hp_ur_retfd((hp_sock)i);
+                continue;
+            }
+            if (st->listener) {
+                if (!hp_uring_arm_poll((hp_sock)i)) hp_ur_retfd((hp_sock)i);
+                continue;
+            }
+            if (st->shead && !st->sarmed && !hp_ur_arm_send_head((hp_sock)i))
+                hp_ur_retfd((hp_sock)i);
+            if (st->rbuf && !st->rready && !st->rarmed &&
+                !hp_uring_arm_recv((hp_sock)i, HP_UR_RECV_LEN))
+                hp_ur_retfd((hp_sock)i);
+        }
+        hp_ur_rethead = hp_ur_rettail = 0;
+    }
+    (void)out;
+}
+#endif /* HP_UR_CAN */
+
+
+
+#ifdef HP_UR_CAN
+static int hp_uring_active(void);
+static void hp_ur_free_fd(hp_sock fd);
+static hstr *hp_uring_take_recv(hp_sock fd, size_t want);
+static int64_t hp_uring_send2(hp_sock fd, hstr *a, hstr *b);
+#endif
+
 hval hpbi_epoll_add(hval s) {
     hp_net_init();
 #if !defined(_WIN32)
     hp_sock fd = sock_of(s);
     if (fd == HP_SOCK_BAD) return hp_of_bool(false);
+#ifdef HP_UR_CAN
+    if (hp_uring_maybe_setup()) {
+        hp_ur_fdgrow(fd);
+        struct hp_urfds *st = hp_ur_st_of(fd);
+        if (st) {
+            /* The listener flag is recorded when the socket is created; only
+             * an fd the runtime does not track pays the getsockopt probe
+             * (one syscall per accepted connection would otherwise). */
+            hp_sockrec *sr = sockrec((intptr_t)fd, false);
+            int lt = 0;
+            if (sr) {
+                lt = sr->listener ? 1 : 0;
+            } else {
+                socklen_t accsl = sizeof lt;
+                getsockopt(fd, SOL_SOCKET, SO_ACCEPTCONN, &lt, &accsl);
+            }
+            st->listener = (lt == 1);
+            if (hp_ur_dbg)
+                fprintf(stderr, "[ur] add fd=%d listener=%d\n", (int)fd, st->listener);
+            if (st->listener) hp_uring_arm_poll(fd);
+            else hp_uring_arm_recv(fd, HP_UR_RECV_LEN);
+        }
+        return hp_of_bool(true);
+    }
+#endif
     if (g_epfd < 0) g_epfd = epoll_create1(0);
     if (g_epfd < 0) return hp_of_bool(false);
     struct epoll_event ev;
@@ -2170,10 +3033,81 @@ hval hpbi_epoll_add(hval s) {
 hval hpbi_epoll_del(hval s) {
 #if !defined(_WIN32)
     hp_sock fd = sock_of(s);
+#ifdef HP_UR_CAN
+    if (hp_uring_active()) { hp_ur_free_fd(fd); return hp_of_bool(true); }
+#endif
     if (fd != HP_SOCK_BAD && g_epfd >= 0)
         epoll_ctl(g_epfd, EPOLL_CTL_DEL, fd, NULL);
 #endif
     return hp_of_bool(true);
+}
+
+/* epoll_mod($fd, $mask): 1 = readable, 2 = writable (or both). */
+hval hpbi_epoll_mod(hval s, hval mask) {
+    hp_net_init();
+#if !defined(_WIN32)
+    hp_sock fd = sock_of(s);
+#ifdef HP_UR_CAN
+    if (hp_uring_active()) return hp_of_bool(true);
+#endif
+    if (fd == HP_SOCK_BAD || g_epfd < 0) return hp_of_bool(false);
+    struct epoll_event ev;
+    memset(&ev, 0, sizeof ev);
+    int m = (int)hp_val_to_int(mask);
+    if (m & 1) ev.events |= EPOLLIN;
+    if (m & 2) ev.events |= EPOLLOUT;
+    ev.data.fd = fd;
+    if (epoll_ctl(g_epfd, EPOLL_CTL_MOD, fd, &ev) != 0) return hp_of_bool(false);
+#endif
+    return hp_of_bool(true);
+}
+
+/* epoll_wait2($readable, $writable, $timeoutMs): fills both lists. */
+hval hpbi_epoll_wait2(hval inv, hval outv, hval timeout_ms) {
+    hp_net_init();
+    harr *in = (inv.tag == HV_ARR) ? inv.u.a : NULL;
+    harr *out = (outv.tag == HV_ARR) ? outv.u.a : NULL;
+    if (in) { in->len = 0; in->next_index = 0; in->is_map = false; }
+    if (out) { out->len = 0; out->next_index = 0; out->is_map = false; }
+#if !defined(_WIN32)
+#ifdef HP_UR_CAN
+    if (hp_uring_maybe_setup()) {
+        int to = (int)hp_val_to_int(timeout_ms);
+        if (to < 0) to = 0;
+        (void)to;
+        hp_uring_wait(in, out, to > 0 ? to : 0);
+        return hp_of_bool(true);
+    }
+#endif
+    if (g_epfd < 0) return hp_of_bool(true);
+    static _Thread_local struct epoll_event evs[1024];
+    int to = (int)hp_val_to_int(timeout_ms);
+    if (to < 0) to = 0;
+    int n = epoll_wait(g_epfd, evs, 1024, to);
+    for (int i = 0; i < n; i++) {
+        unsigned int e = evs[i].events;
+        if ((e & (EPOLLIN | EPOLLERR | EPOLLHUP)) && in)
+            hp_arr_push(in, hp_of_int(evs[i].data.fd));
+        if ((e & EPOLLOUT) && out)
+            hp_arr_push(out, hp_of_int(evs[i].data.fd));
+    }
+#endif
+    return hp_of_bool(true);
+}
+
+/* stream_send_nb($fd, $data): one send(2). Returns the bytes written, -1 if
+ * the socket would block, -2 on error. The caller buffers the remainder and
+ * asks for EPOLLOUT; the loop must never sleep on a slow peer. */
+hval hpbi_stream_send_nb(hval s, hval data) {
+    hp_net_init();
+    hp_sock fd = sock_of(s);
+    if (fd == HP_SOCK_BAD) return hp_of_int(-2);
+    hstr *d = hp_val_to_str(data);
+    if (d->len == 0) return hp_of_int(0);
+    int r = (int)send(fd, d->data, (int)d->len, 0);
+    if (r >= 0) return hp_of_int(r);
+    if (hp_sock_wouldblock()) return hp_of_int(-1);
+    return hp_of_int(-2);
 }
 
 /* epoll_wait_into($out, $timeoutMs): clear $out, fill it with ready fds. */
@@ -2270,6 +3204,16 @@ hval hpbi_stream_peer(hval s) {
 
 hval hpbi_stream_close(hval s) {
     hp_sock fd = sock_of(s);
+#ifdef HP_UR_CAN
+    if (hp_uring_active()) {
+        struct hp_urfds *st = hp_ur_st_of(fd);
+        /* a send is still in flight: hp_ur_free_fd defers the real close
+         * until the kernel has taken the bytes (see hp_ur_finish_close) */
+        if (st && st->closeafter) return hp_of_bool(true);
+        hp_ur_free_fd(fd);
+        if (st && st->closeafter) return hp_of_bool(true);
+    }
+#endif
     if (fd == HP_SOCK_BAD) return hp_of_bool(false);
     hp_sock_graceful_close(fd);
     sock_forget((intptr_t)fd);
@@ -4624,6 +5568,232 @@ hval hpbi_arr_free(hval a) {
     return hp_of_bool(true);
 }
 
+/* ---- generic B-tree cursor binding ----
+ * The implementation is appended to the SQLite amalgamation by build.sh
+ * (toolchain/src/hp_btree.c) and exported as hp_bt_*_impl. A weak reference
+ * keeps the program linkable against the system library: the builtins then
+ * report failure and the server uses its SQL path. */
+#if defined(__GNUC__)
+#define HP_BT_WEAK __attribute__((weak))
+#else
+#define HP_BT_WEAK
+#endif
+HP_BT_WEAK unsigned int hp_bt_root_impl(sqlite3 *db, const char *z, int i);
+HP_BT_WEAK void *hp_bt_open_impl(sqlite3 *db, const char *z, int isidx);
+HP_BT_WEAK void hp_bt_close_impl(void *v);
+HP_BT_WEAK int hp_bt_first_impl(void *v);
+HP_BT_WEAK int hp_bt_last_impl(void *v);
+HP_BT_WEAK int hp_bt_next_impl(void *v);
+HP_BT_WEAK int hp_bt_prev_impl(void *v);
+HP_BT_WEAK int hp_bt_seek_impl(void *v, int64_t r);
+HP_BT_WEAK int64_t hp_bt_rowid_impl(void *v);
+HP_BT_WEAK const unsigned char *hp_bt_payload_impl(void *v, int *pn);
+HP_BT_WEAK int hp_bt_count_key_impl(void *v, int64_t key);
+
+static void *bt_h(hval v) { return (void *)(intptr_t)hp_val_to_int(v); }
+
+hval hpbi_bt_root(hval dbv, hval name, hval isidx) {
+    sqlite3 *db = hp_sqlite_db(dbv);
+    hstr *s = hp_val_to_str(name);
+    return hp_of_int(hp_bt_root_impl ? (int64_t)hp_bt_root_impl(db, s->data, (int)hp_val_to_int(isidx)) : 0);
+}
+hval hpbi_bt_open(hval dbv, hval name, hval isidx) {
+    sqlite3 *db = hp_sqlite_db(dbv);
+    hstr *s;
+    if (!hp_bt_open_impl) return hp_of_int(0);
+    s = hp_val_to_str(name);
+    return hp_of_int((int64_t)(intptr_t)hp_bt_open_impl(db, s->data, (int)hp_val_to_int(isidx)));
+}
+hval hpbi_bt_close(hval h) { if (hp_bt_close_impl) hp_bt_close_impl(bt_h(h)); return hp_of_bool(true); }
+hval hpbi_bt_first(hval h) { return hp_of_int(hp_bt_first_impl ? hp_bt_first_impl(bt_h(h)) : -1); }
+hval hpbi_bt_last(hval h) { return hp_of_int(hp_bt_last_impl ? hp_bt_last_impl(bt_h(h)) : -1); }
+hval hpbi_bt_next(hval h) { return hp_of_int(hp_bt_next_impl ? hp_bt_next_impl(bt_h(h)) : 0); }
+hval hpbi_bt_prev(hval h) { return hp_of_int(hp_bt_prev_impl ? hp_bt_prev_impl(bt_h(h)) : 0); }
+hval hpbi_bt_seek(hval h, hval rowid) { return hp_of_int(hp_bt_seek_impl ? hp_bt_seek_impl(bt_h(h), (int64_t)hp_val_to_int(rowid)) : -1); }
+hval hpbi_bt_rowid(hval h) { return hp_of_int(hp_bt_rowid_impl ? hp_bt_rowid_impl(bt_h(h)) : -1); }
+hval hpbi_bt_payload_ptr(hval h) {
+    int n = 0;
+    const unsigned char *p;
+    if (!hp_bt_payload_impl) return hp_of_int(0);
+    p = hp_bt_payload_impl(bt_h(h), &n);
+    return hp_of_int((int64_t)(intptr_t)p);
+}
+hval hpbi_bt_payload_size(hval h) {
+    int n = 0;
+    if (!hp_bt_payload_impl) return hp_of_int(0);
+    (void)hp_bt_payload_impl(bt_h(h), &n);
+    return hp_of_int(n);
+}
+hval hpbi_bt_count_key(hval h, hval key) {
+    if (!hp_bt_count_key_impl) return hp_of_int(-1);
+    return hp_of_int((int64_t)hp_bt_count_key_impl(bt_h(h), (int64_t)hp_val_to_int(key)));
+}
+
+/* ---- generic string builder ---- */
+typedef struct { Buf b; } HpSb;
+static HpSb *sb_h(hval v) { return (HpSb *)(intptr_t)hp_val_to_int(v); }
+
+hval hpbi_sb_new(void) {
+    HpSb *s = (HpSb *)hp_alloc(sizeof *s);
+    hbuf_init(&s->b);
+    return hp_of_int((int64_t)(intptr_t)s);
+}
+hval hpbi_sb_put(hval h, hval str) {
+    HpSb *s = sb_h(h);
+    hstr *x = hp_val_to_str(str);
+    hbuf_write(&s->b, x->data, x->len);
+    return hp_of_bool(true);
+}
+hval hpbi_sb_bytes(hval h, hval ptr, hval len) {
+    HpSb *s = sb_h(h);
+    int64_t n = hp_val_to_int(len);
+    const char *p = (const char *)(intptr_t)hp_val_to_int(ptr);
+    if (p && n > 0) hbuf_write(&s->b, p, (size_t)n);
+    return hp_of_bool(true);
+}
+hval hpbi_sb_int(hval h, hval n) {
+    HpSb *s = sb_h(h);
+    long long v = (long long)hp_val_to_int(n);
+    char tmp[24];
+    int i = 24;
+    unsigned long long u = v < 0 ? -(unsigned long long)v : (unsigned long long)v;
+    do { tmp[--i] = (char)('0' + (u % 10)); u /= 10; } while (u);
+    if (v < 0) tmp[--i] = '-';
+    hbuf_write(&s->b, tmp + i, (size_t)(24 - i));
+    return hp_of_bool(true);
+}
+/* Find the first byte that JSON must escape (c < 0x20, '"' or '\\').
+ * Clean runs are scanned eight bytes at a time. */
+static size_t json_next_special(const unsigned char *p, size_t n, size_t i) {
+    while (i + 8 <= n) {
+        uint64_t v;
+        memcpy(&v, p + i, 8);
+        /* bytes < 0x20 (high bit set in the mask for those lanes) */
+        uint64_t lt = (v - 0x2020202020202020ULL) & ~v & 0x8080808080808080ULL;
+        uint64_t zq = v ^ 0x2222222222222222ULL;
+        uint64_t zb = v ^ 0x5C5C5C5C5C5C5C5CULL;
+        uint64_t q = (zq - 0x0101010101010101ULL) & ~zq & 0x8080808080808080ULL;
+        uint64_t b = (zb - 0x0101010101010101ULL) & ~zb & 0x8080808080808080ULL;
+        if (!(lt | q | b)) { i += 8; continue; }
+        break;
+    }
+    while (i < n) {
+        unsigned char c = p[i];
+        if (c < 0x20 || c == '"' || c == '\\') return i;
+        i++;
+    }
+    return n;
+}
+
+/* append a quoted, escaped JSON string for n bytes at p */
+static void sb_json_esc(Buf *b, const unsigned char *p, size_t n) {
+    static const char H[] = "0123456789abcdef";
+    size_t i = 0;
+    hbuf_putc(b, '"');
+    while (i < n) {
+        size_t j = json_next_special(p, n, i);
+        if (j > i) {
+            hbuf_write(b, (const char *)p + i, j - i);
+            i = j;
+        }
+        if (i >= n) break;
+        unsigned char c = p[i];
+        if (c == '"' || c == '\\') { hbuf_putc(b, '\\'); hbuf_putc(b, (char)c); }
+        else if (c == '\n') hbuf_puts(b, "\\n");
+        else if (c == '\r') hbuf_puts(b, "\\r");
+        else if (c == '\t') hbuf_puts(b, "\\t");
+        else if (c == '\b') hbuf_puts(b, "\\b");
+        else if (c == '\f') hbuf_puts(b, "\\f");
+        else {
+            hbuf_puts(b, "\\u00");
+            hbuf_putc(b, H[(c >> 4) & 15]);
+            hbuf_putc(b, H[c & 15]);
+        }
+        i++;
+    }
+    hbuf_putc(b, '"');
+}
+hval hpbi_sb_json(hval h, hval ptr, hval len) {
+    HpSb *s = sb_h(h);
+    const unsigned char *p = (const unsigned char *)(intptr_t)hp_val_to_int(ptr);
+    int64_t n = hp_val_to_int(len);
+    if (p && n > 0) sb_json_esc(&s->b, p, (size_t)n);
+    else hbuf_puts(&s->b, "\"\"");
+    return hp_of_bool(true);
+}
+hval hpbi_sb_json_str(hval h, hval str) {
+    HpSb *s = sb_h(h);
+    hstr *x = hp_val_to_str(str);
+    sb_json_esc(&s->b, (const unsigned char *)x->data, x->len);
+    return hp_of_bool(true);
+}
+hval hpbi_sb_reserve(hval h, hval n) {
+    HpSb *s = sb_h(h);
+    int64_t want = hp_val_to_int(n);
+    if (want > 0) hbuf_reserve(&s->b, (size_t)want);
+    return hp_of_bool(true);
+}
+hval hpbi_str_from_bytes(hval ptr, hval len) {
+    const char *p = (const char *)(intptr_t)hp_val_to_int(ptr);
+    int64_t n = hp_val_to_int(len);
+    if (!p || n < 0) return hp_of_str(hp_null_str());
+    return hp_of_str(hp_str_new(p, (size_t)n));
+}
+/* Fixed-size int64 array indexed directly, for per-connection state keyed by
+ * fd. A hash map of boxed hvals costs a probe plus a 16-byte key and value per
+ * entry; this is 8 bytes per slot and one pointer add. 0 means "absent". */
+typedef struct { int64_t *v; int64_t cap; } hp_iarr_t;
+
+static hp_iarr_t *iarr_of(hval h) { return (hp_iarr_t *)(intptr_t)hp_val_to_int(h); }
+
+hval hpbi_iarr_new(hval size) {
+    int64_t n = hp_val_to_int(size);
+    if (n < 1) n = 1;
+    hp_iarr_t *a = (hp_iarr_t *)hp_alloc(sizeof *a);
+    a->cap = n;
+    a->v = (int64_t *)hp_alloc(sizeof(int64_t) * (size_t)n);
+    return hp_of_int((int64_t)(intptr_t)a);
+}
+hval hpbi_iarr_get(hval h, hval i) {
+    hp_iarr_t *a = iarr_of(h);
+    int64_t k = hp_val_to_int(i);
+    if (!a || k < 0 || k >= a->cap) return hp_of_int(0);
+    return hp_of_int(a->v[k]);
+}
+hval hpbi_iarr_set(hval h, hval i, hval v) {
+    hp_iarr_t *a = iarr_of(h);
+    int64_t k = hp_val_to_int(i);
+    if (a && k >= 0 && k < a->cap) a->v[k] = hp_val_to_int(v);
+    return hp_of_bool(true);
+}
+int64_t hp_iarr_new_t(int64_t n) {
+    if (n < 1) n = 1;
+    hp_iarr_t *a = (hp_iarr_t *)hp_alloc(sizeof *a);
+    a->cap = n;
+    a->v = (int64_t *)hp_alloc(sizeof(int64_t) * (size_t)n);
+    return (int64_t)(intptr_t)a;
+}
+int64_t hp_iarr_get_t(int64_t h, int64_t k) {
+    hp_iarr_t *a = (hp_iarr_t *)(intptr_t)h;
+    if (!a || k < 0 || k >= a->cap) return 0;
+    return a->v[k];
+}
+bool hp_iarr_set_t(int64_t h, int64_t k, int64_t v) {
+    hp_iarr_t *a = (hp_iarr_t *)(intptr_t)h;
+    if (a && k >= 0 && k < a->cap) a->v[k] = v;
+    return true;
+}
+
+hval hpbi_sb_take(hval h) {
+    HpSb *s = sb_h(h);
+    size_t n = s->b.len;
+    char *p = hbuf_take(&s->b);
+    hstr *r = hp_str_new(p, n);
+    free(p);
+    free(s);
+    return hp_of_str(r);
+}
+
 hval hpbi_sqlite_open(hval path) {
     hstr *p = hp_val_to_str(path);
     sqlite3 *db = NULL;
@@ -4736,4 +5906,223 @@ hval hpbi_sqlite_busy_timeout(hval dbv, hval ms) {
     sqlite3 *db = hp_sqlite_db(dbv);
     if (!db) return hp_of_bool(false);
     return hp_of_bool(sqlite3_busy_timeout(db, (int)hp_val_to_int(ms)) == SQLITE_OK);
+}
+
+/* ---------------- typed builtin fast paths ----------------
+ * The codegen calls these instead of the hval ABI when every argument has a
+ * statically known type. Both sides then skip boxing: no hp_of_* on the way
+ * in, no hp_val_to_* on the way out. They are plain C functions, so a
+ * program that never hits the fast path is unaffected. */
+
+int64_t hp_sb_new_t(void) {
+    HpSb *s = (HpSb *)hp_alloc(sizeof *s);
+    hbuf_init(&s->b);
+    return (int64_t)(intptr_t)s;
+}
+bool hp_sb_reserve_t(int64_t h, int64_t n) {
+    HpSb *s = (HpSb *)(intptr_t)h;
+    if (n > 0) hbuf_reserve(&s->b, (size_t)n);
+    return true;
+}
+bool hp_sb_put_t(int64_t h, hstr *x) {
+    HpSb *s = (HpSb *)(intptr_t)h;
+    hbuf_write(&s->b, x->data, x->len);
+    return true;
+}
+bool hp_sb_int_t(int64_t h, int64_t n) {
+    HpSb *s = (HpSb *)(intptr_t)h;
+    char tmp[24];
+    int i = 24;
+    unsigned long long u = n < 0 ? -(unsigned long long)n : (unsigned long long)n;
+    do { tmp[--i] = (char)('0' + (u % 10)); u /= 10; } while (u);
+    if (n < 0) tmp[--i] = '-';
+    hbuf_write(&s->b, tmp + i, (size_t)(24 - i));
+    return true;
+}
+bool hp_sb_json_t(int64_t h, int64_t ptr, int64_t len) {
+    HpSb *s = (HpSb *)(intptr_t)h;
+    const unsigned char *p = (const unsigned char *)(intptr_t)ptr;
+    if (p && len > 0) sb_json_esc(&s->b, p, (size_t)len);
+    else hbuf_puts(&s->b, "\"\"");
+    return true;
+}
+bool hp_sb_json_str_t(int64_t h, hstr *x) {
+    HpSb *s = (HpSb *)(intptr_t)h;
+    sb_json_esc(&s->b, (const unsigned char *)x->data, x->len);
+    return true;
+}
+hstr *hp_sb_take_t(int64_t h) {
+    HpSb *s = (HpSb *)(intptr_t)h;
+    size_t n = s->b.len;
+    char *p = hbuf_take(&s->b);
+    hstr *r = hp_str_new(p, n);
+    free(p);
+    free(s);
+    return r;
+}
+int64_t hp_bt_last_t(int64_t h) { return hp_bt_last_impl ? hp_bt_last_impl((void *)(intptr_t)h) : -1; }
+int64_t hp_bt_first_t(int64_t h) { return hp_bt_first_impl ? hp_bt_first_impl((void *)(intptr_t)h) : -1; }
+int64_t hp_bt_prev_t(int64_t h) { return hp_bt_prev_impl ? hp_bt_prev_impl((void *)(intptr_t)h) : 0; }
+int64_t hp_bt_next_t(int64_t h) { return hp_bt_next_impl ? hp_bt_next_impl((void *)(intptr_t)h) : 0; }
+int64_t hp_bt_seek_t(int64_t h, int64_t rowid) {
+    return hp_bt_seek_impl ? hp_bt_seek_impl((void *)(intptr_t)h, (sqlite3_int64)rowid) : -1;
+}
+int64_t hp_bt_rowid_t(int64_t h) {
+    return hp_bt_rowid_impl ? (int64_t)hp_bt_rowid_impl((void *)(intptr_t)h) : -1;
+}
+int64_t hp_bt_payload_ptr_t(int64_t h) {
+    int n = 0;
+    const unsigned char *p;
+    if (!hp_bt_payload_impl) return 0;
+    p = hp_bt_payload_impl((void *)(intptr_t)h, &n);
+    return (int64_t)(intptr_t)p;
+}
+int64_t hp_bt_payload_size_t(int64_t h) {
+    int n = 0;
+    if (!hp_bt_payload_impl) return 0;
+    (void)hp_bt_payload_impl((void *)(intptr_t)h, &n);
+    return n;
+}
+int64_t hp_stream_send_nb_t(int64_t fd, hstr *d) {
+    if (d->len == 0) return 0;
+    int r = (int)send((hp_sock)fd, d->data, (int)d->len, 0);
+    if (r >= 0) return r;
+    if (hp_sock_wouldblock()) return -1;
+    return -2;
+}
+int64_t hp_stream_send2_nb_t(int64_t fd, hstr *x, hstr *y) {
+#ifdef HP_UR_CAN
+    if (hp_uring_active()) return hp_uring_send2((hp_sock)fd, x, y);
+#endif
+#if defined(_WIN32)
+    size_t n = x->len + y->len;
+    char *tmp = malloc(n ? n : 1);
+    if (!tmp) return -2;
+    memcpy(tmp, x->data, x->len);
+    memcpy(tmp + x->len, y->data, y->len);
+    int r = (int)send((hp_sock)fd, tmp, (int)n, 0);
+    free(tmp);
+    if (r >= 0) return r;
+    return hp_sock_wouldblock() ? -1 : -2;
+#else
+    struct iovec iov[2];
+    iov[0].iov_base = x->data;
+    iov[0].iov_len = x->len;
+    iov[1].iov_base = y->data;
+    iov[1].iov_len = y->len;
+    ssize_t r = writev((hp_sock)fd, iov, 2);
+    if (r >= 0) return (int64_t)r;
+    return hp_sock_wouldblock() ? -1 : -2;
+#endif
+}
+bool hp_epoll_mod_t(int64_t fd, int64_t mask) {
+#if !defined(_WIN32)
+    if (fd < 0 || g_epfd < 0) return false;
+    struct epoll_event ev;
+    memset(&ev, 0, sizeof ev);
+    if (mask & 1) ev.events |= EPOLLIN;
+    if (mask & 2) ev.events |= EPOLLOUT;
+    ev.data.fd = (int)fd;
+    if (epoll_ctl(g_epfd, EPOLL_CTL_MOD, (int)fd, &ev) != 0) return false;
+#endif
+    return true;
+}
+int64_t hp_nofile_limit_t(void) {
+#if defined(_WIN32)
+    return 0;
+#else
+    struct rlimit rl;
+    if (getrlimit(RLIMIT_NOFILE, &rl) != 0) return 0;
+    return (int64_t)rl.rlim_cur;
+#endif
+}
+
+/* Whether the io_uring backend actually came up. Generic: a program can size
+ * its own connection table to the backend's real capacity. */
+bool hp_uring_active_t(void) {
+#ifdef HP_UR_CAN
+    return hp_uring_active();
+#else
+    return false;
+#endif
+}
+hval hpbi_uring_active(void) { return hp_of_bool(hp_uring_active_t()); }
+
+/* ---- typed fast paths for the request/parse and SQLite calls ---- */
+
+int64_t hp_strlen_t(hstr *s) { return (int64_t)s->len; }
+hstr *hp_strtolower_t(hstr *s) { return hp_str_tolower(s); }
+hstr *hp_trim_t(hstr *s) { return hp_str_trim(s); }
+hstr *hp_substr_t(hstr *x, int64_t st, int64_t l) {
+    st = st < 0 ? st + (int64_t)x->len : st;
+    if (st < 0) st = 0;
+    if ((size_t)st > x->len) return hp_str_lit("");
+    if (l < 0) l = (int64_t)x->len - st + l;
+    if (l < 0) l = 0;
+    return hp_str_slice(x, st, st + l);
+}
+hstr *hp_stream_recv_t(int64_t fd, int64_t want) {
+    hp_net_init();
+    if ((hp_sock)fd == HP_SOCK_BAD) return hp_str_lit("");
+#ifdef HP_UR_CAN
+    if (hp_uring_active()) return hp_uring_take_recv((hp_sock)fd, (size_t)(want > 0 ? want : 4096));
+#endif
+    if (want <= 0) want = 4096;
+    if (want > (1 << 20)) want = (1 << 20);
+    static _Thread_local char *g_rbuf = NULL;
+    static _Thread_local size_t g_rbuf_cap = 0;
+    if ((size_t)want > g_rbuf_cap) {
+        char *nb = (char *)realloc(g_rbuf, (size_t)want);
+        if (!nb) return hp_null_str();
+        g_rbuf = nb;
+        g_rbuf_cap = (size_t)want;
+    }
+    int r = recv((hp_sock)fd, g_rbuf, (int)want, 0);
+    bool blocked = (r < 0) && hp_sock_wouldblock();
+    if (r <= 0 && !blocked) sockrec((intptr_t)fd, true)->eof = true;
+    if (r > 0) return hp_str_new(g_rbuf, (size_t)r);
+    return hp_str_lit("");
+}
+bool hp_sqlite_bind_int_t(int64_t stv, int64_t idx, int64_t v) {
+    sqlite3_stmt *st = (sqlite3_stmt *)(intptr_t)stv;
+    if (!st) return false;
+    return sqlite3_bind_int64(st, (int)idx, (sqlite3_int64)v) == SQLITE_OK;
+}
+bool hp_sqlite_bind_text_t(int64_t stv, int64_t idx, hstr *s) {
+    sqlite3_stmt *st = (sqlite3_stmt *)(intptr_t)stv;
+    if (!st) return false;
+    return sqlite3_bind_text(st, (int)idx, s->data, (int)s->len, SQLITE_TRANSIENT) == SQLITE_OK;
+}
+int64_t hp_sqlite_step_t(int64_t stv) {
+    sqlite3_stmt *st = (sqlite3_stmt *)(intptr_t)stv;
+    if (!st) return SQLITE_MISUSE;
+    return sqlite3_step(st);
+}
+int64_t hp_sqlite_reset_t(int64_t stv) {
+    sqlite3_stmt *st = (sqlite3_stmt *)(intptr_t)stv;
+    if (!st) return SQLITE_MISUSE;
+    return sqlite3_reset(st);
+}
+bool hp_sqlite_clear_bindings_t(int64_t stv) {
+    sqlite3_stmt *st = (sqlite3_stmt *)(intptr_t)stv;
+    if (!st) return false;
+    return sqlite3_clear_bindings(st) == SQLITE_OK;
+}
+hstr *hp_sqlite_column_text_t(int64_t stv, int64_t col) {
+    sqlite3_stmt *st = (sqlite3_stmt *)(intptr_t)stv;
+    if (!st) return hp_str_lit("");
+    int i = (int)col;
+    const unsigned char *p = sqlite3_column_text(st, i);
+    int n = sqlite3_column_bytes(st, i);
+    if (!p) return hp_str_lit("");
+    return hp_str_new((const char *)p, (size_t)n);
+}
+int64_t hp_sqlite_column_int_t(int64_t stv, int64_t col) {
+    sqlite3_stmt *st = (sqlite3_stmt *)(intptr_t)stv;
+    if (!st) return 0;
+    return (int64_t)sqlite3_column_int64(st, (int)col);
+}
+int64_t hp_sqlite_changes_t(int64_t dbv) {
+    sqlite3 *db = (sqlite3 *)(intptr_t)dbv;
+    return db ? (int64_t)sqlite3_changes(db) : 0;
 }

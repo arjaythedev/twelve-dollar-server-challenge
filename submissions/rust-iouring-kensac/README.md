@@ -77,6 +77,9 @@ sockets under `LimitNOFILE=65535`.
   at most 64 in flight, so no more than that can land after the switch. A ring accepts again
   once more than twice the margin of its slots are free. If a ring can't be added, adding is
   retried once a second.
+- The port has eight `SO_REUSEPORT` listeners, each with 8 of the 64 accepts. A listen queue is
+  capped at `net.core.somaxconn` (4,096 by default), so eight queues hold 32k pending connections
+  through a ramp or a slow pass instead of refusing them.
 - One thread drives every ring (`SINGLE_ISSUER`, `DEFER_TASKRUN`). Each pass first gives every
   other ring one non-blocking `io_uring_enter` that submits its queued sends and collects its
   completions. Then ring 0 submits and waits for 256 completions or 1 ms, whichever comes

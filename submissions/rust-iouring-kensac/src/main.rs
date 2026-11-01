@@ -17,8 +17,11 @@ const OP_RECV: u64 = 2;
 const OP_SEND: u64 = 3;
 const OP_SHUTDOWN: u64 = 4;
 const OP_CLOSE: u64 = 5;
-/// Single-shot accepts kept in flight on the accepting ring.
+/// Single-shot accepts kept in flight on the accepting ring, spread evenly over the listeners.
 const ACCEPT_DEPTH: u32 = 64;
+/// SO_REUSEPORT listeners on the one port. Each has its own accept queue, capped at
+/// net.core.somaxconn (4,096 by default), so eight hold eight times as many pending connections.
+const LISTENERS: usize = 8;
 
 const SQ_ENTRIES: u32 = 4096;
 const CQ_ENTRIES: u32 = 65536;
@@ -167,7 +170,8 @@ struct Ring {
     conns: Vec<Conn>,
     /// Accepts are kept armed here.
     accepting: bool,
-    accepts: u32,
+    /// Accepts in flight, per listener.
+    accepts: [u32; LISTENERS],
     /// Not accepting here: the table is (nearly) full.
     full: bool,
     open: u32,
@@ -191,7 +195,7 @@ impl Ring {
         let conns = (0..slots).map(|_| Conn::default()).collect();
         // At most a quarter of a small table, so a full ring can still drain below 2x margin.
         let margin = (slots / 8).clamp(ACCEPT_DEPTH + 1, 512).min(slots / 4);
-        Ok(Ring { uring, bufs, conns, accepting: false, accepts: 0, full: false, open: 0, margin, rearm: Vec::new() })
+        Ok(Ring { uring, bufs, conns, accepting: false, accepts: [0; LISTENERS], full: false, open: 0, margin, rearm: Vec::new() })
     }
 }
 
@@ -243,18 +247,20 @@ fn arm_close(sq: &mut SubmissionQueue, sub: &Submitter, ri: usize, slot: u32, c:
     push(sq, sub, &cl, 1);
 }
 
-fn fill_accepts(sq: &mut SubmissionQueue, sub: &Submitter, ri: usize, listen: RawFd, accepts: &mut u32) {
-    while *accepts < ACCEPT_DEPTH {
-        let e = opcode::Accept::new(types::Fd(listen), std::ptr::null_mut(), std::ptr::null_mut())
-            .file_index(Some(types::DestinationSlot::auto_target()))
-            .build()
-            .user_data(ud(OP_ACCEPT, ri, 0, 0));
-        push(sq, sub, &e, 1);
-        *accepts += 1;
+fn fill_accepts(sq: &mut SubmissionQueue, sub: &Submitter, ri: usize, listen: &[RawFd], accepts: &mut [u32; LISTENERS]) {
+    for (li, &fd) in listen.iter().enumerate() {
+        while accepts[li] < ACCEPT_DEPTH / LISTENERS as u32 {
+            let e = opcode::Accept::new(types::Fd(fd), std::ptr::null_mut(), std::ptr::null_mut())
+                .file_index(Some(types::DestinationSlot::auto_target()))
+                .build()
+                .user_data(ud(OP_ACCEPT, ri, 0, li as u32));
+            push(sq, sub, &e, 1);
+            accepts[li] += 1;
+        }
     }
 }
 
-fn arm_accept(r: &mut Ring, ri: usize, listen: RawFd) {
+fn arm_accept(r: &mut Ring, ri: usize, listen: &[RawFd]) {
     r.accepting = true;
     let (sub, mut sq, _) = r.uring.split();
     fill_accepts(&mut sq, &sub, ri, listen, &mut r.accepts);
@@ -263,7 +269,7 @@ fn arm_accept(r: &mut Ring, ri: usize, listen: RawFd) {
 struct Server {
     rings: Vec<Ring>,
     app: App,
-    listen: RawFd,
+    listen: Vec<RawFd>,
     slots: u32,
     pool: Vec<Box<Vec<u8>>>,
     touched: Vec<(u8, u32)>,
@@ -305,7 +311,7 @@ impl Server {
             let flags = cqe.flags();
             match op {
                 OP_ACCEPT => {
-                    *accepts -= 1;
+                    accepts[slot as usize] -= 1;
                     if res >= 0 {
                         let c = &mut conns[res as usize];
                         let g = c.gen.wrapping_add(1);
@@ -401,7 +407,7 @@ impl Server {
                 *accepting = false;
                 *need_ring = true;
             } else {
-                fill_accepts(&mut sq, &sub, ri, *listen, accepts);
+                fill_accepts(&mut sq, &sub, ri, listen, accepts);
             }
         }
         n
@@ -470,7 +476,7 @@ impl Server {
             return true;
         }
         if let Some(ri) = self.rings.iter().position(|r| !r.full) {
-            arm_accept(&mut self.rings[ri], ri, self.listen);
+            arm_accept(&mut self.rings[ri], ri, &self.listen);
             return true;
         }
         if self.rings.len() >= MAX_RINGS {
@@ -480,7 +486,7 @@ impl Server {
         match Ring::new(self.slots) {
             Ok(mut r) => {
                 let ri = self.rings.len();
-                arm_accept(&mut r, ri, self.listen);
+                arm_accept(&mut r, ri, &self.listen);
                 self.rings.push(r);
                 eprintln!("ring {ri} added ({} slots each)", self.slots);
                 true
@@ -609,8 +615,12 @@ fn serve(app: &mut App, pool: &mut Vec<Box<Vec<u8>>>, touched: &mut Vec<(u8, u32
     }
 }
 
-fn listen(host: &str, port: u16) -> io::Result<RawFd> {
+fn listen(host: &str, port: u16) -> io::Result<Vec<RawFd>> {
     let ip: std::net::Ipv4Addr = host.parse().map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "HOST must be an IPv4 address"))?;
+    (0..LISTENERS).map(|_| listener(ip, port)).collect()
+}
+
+fn listener(ip: std::net::Ipv4Addr, port: u16) -> io::Result<RawFd> {
     unsafe {
         let fd = libc::socket(libc::AF_INET, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0);
         if fd < 0 {
@@ -619,6 +629,9 @@ fn listen(host: &str, port: u16) -> io::Result<RawFd> {
         let one: libc::c_int = 1;
         let sz = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
         libc::setsockopt(fd, libc::SOL_SOCKET, libc::SO_REUSEADDR, &one as *const _ as *const _, sz);
+        if libc::setsockopt(fd, libc::SOL_SOCKET, libc::SO_REUSEPORT, &one as *const _ as *const _, sz) < 0 {
+            return Err(io::Error::last_os_error());
+        }
         // Accepted sockets inherit TCP_NODELAY.
         libc::setsockopt(fd, libc::IPPROTO_TCP, libc::TCP_NODELAY, &one as *const _ as *const _, sz);
         let addr = libc::sockaddr_in {
@@ -670,7 +683,7 @@ fn main() {
         eprintln!("io_uring: {e}");
         std::process::exit(1)
     });
-    arm_accept(&mut ring, 0, fd);
+    arm_accept(&mut ring, 0, &fd);
     eprintln!("listening on {host}:{port}; io_uring, {slots} direct descriptors per ring");
     let mut s = Server { rings: vec![ring], app, listen: fd, slots, pool: Vec::new(), touched: Vec::new(), need_ring: false, spill_after: std::time::Instant::now() };
     s.run()

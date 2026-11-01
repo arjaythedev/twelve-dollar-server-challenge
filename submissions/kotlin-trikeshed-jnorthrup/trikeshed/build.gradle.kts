@@ -60,6 +60,10 @@ kotlin {
             (include ?: "/opt/homebrew/include".takeIf { target.name == "macosArm64" })?.let { includeDirs(it) }
         }
         target.binaries.executable("leafPermutation") { entryPoint = "borg.trikeshed.tilting.leaf.main" }
+        // posix_spawn.def: TrikeShed's POSIX cinterop (trikeshed_open, spawn, args), package borg.trikeshed.userspace.nio.posix.
+        target.compilations.getByName("main").cinterops.create("posixSpawn") {
+            definitionFile.set(File(subrepo, "src/posixMain/resources/META-INF/cinterop/posix_spawn.def"))
+        }
         if (lib != null) target.binaries.all { linkerOpts("-L$lib") }
         // Debug test binaries link without Kotlin/Native's compiler caches: on the macOS host the 2.4.21-RC
         // macos_arm64 stdlib cache in ~/.konan held objects built for iOS (LC_BUILD_VERSION platform 2), which ld rejected.
@@ -91,8 +95,6 @@ kotlin {
         // The userspace ring, reactor TLS and Confix closure: the versions TrikeShed's own build pins.
         val commonMain by getting {
             dependencies {
-                // Hmac, Sha256Pure, Sha512Pure and KnownSchema compile in :trikecore (the native server's whole need).
-                api(project(":trikecore"))
                 implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0")
                 implementation("org.jetbrains.kotlinx:kotlinx-serialization-core:1.11.0")
                 implementation("org.jetbrains.kotlinx:kotlinx-datetime:0.8.0-0.6.x-compat")
@@ -112,8 +114,11 @@ kotlin {
             // lzNative{Main,Test}: the cinterop specialization and its main, shared by every native target.
             val lzNativeMain by creating { dependsOn(posixMain) }
             val lzNativeTest by creating { dependsOn(commonTest) }
+            // src/linuxMain and src/macosMain: TrikeShed's per-OS actuals (its ring facade, its host probes).
+            val linuxMain by creating { dependsOn(lzNativeMain) }
+            val macosMain by creating { dependsOn(lzNativeMain) }
             for (target in natives) {
-                getByName("${target.name}Main") { dependsOn(lzNativeMain) }
+                getByName("${target.name}Main") { dependsOn(if (target.name.startsWith("macos")) macosMain else linuxMain) }
                 getByName("${target.name}Test") { dependsOn(lzNativeTest) }
             }
         }

@@ -42,9 +42,6 @@ kotlin {
 
     sourceSets {
         val commonMain by getting {
-            dependencies { implementation(project(":trikecore")) }
-        }
-        val jvmMain by getting {
             dependencies { implementation(project(":trikeshed")) }
         }
         val jvmTest by getting {

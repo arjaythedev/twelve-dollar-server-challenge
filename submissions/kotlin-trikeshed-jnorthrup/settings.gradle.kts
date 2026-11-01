@@ -14,4 +14,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "kotlin-trikeshed-jnorthrup"
 
-include(":trikecore", ":trikeshed", ":server", ":loadgen", ":components")
+include(":trikeshed", ":server", ":loadgen", ":components")

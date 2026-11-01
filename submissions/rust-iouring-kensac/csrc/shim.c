@@ -3,8 +3,13 @@
  * Reads (GET /feed, GET /posts/:id) walk SQLite's own B-tree cursors inside SQLite read
  * transactions, skipping the SQL bytecode engine. Rows are decoded in Rust from the record bytes
  * SQLite hands back. Writes, BEGIN/COMMIT and /health go through ordinary SQL statements.
- * Everything runs on one thread, so SQLite is built with SQLITE_THREADSAFE=0. */
+ * Everything runs on the event-loop thread except WAL checkpoints, which a second thread runs on
+ * its own connection, so SQLite is built with SQLITE_THREADSAFE=2 (each connection is used by one
+ * thread). */
 #include "sqlite3.c"
+#include <pthread.h>
+#include <sys/resource.h>
+#include <sys/syscall.h>
 
 typedef long long i64;
 
@@ -29,7 +34,25 @@ static int cur_open;
 static u8 *spill;
 static u32 spill_cap;
 
-#define CKPT_FRAMES 8192
+/* Checkpoints (see "Durability and batching" in README.md). Past CKPT_FRAMES WAL frames the
+ * checkpoint thread copies the log back. Then writes are held (reads go on) while it copies the
+ * frames written meanwhile, so the next write restarts the log. A hold lasts at most
+ * HOLD_MAX_MS. Past CKPT_FORCE frames (the thread keeps failing to catch up) the event loop
+ * checkpoints by itself, as a last resort. */
+#define CKPT_FRAMES 4096
+#define CKPT_FORCE 65536
+#define HOLD_MAX_MS 250
+/* On one vCPU a checkpoint at the default priority takes the loop's CPU for its whole pass. */
+#define CKPT_NICE 19
+
+static sqlite3 *ckdb;
+enum { CK_IDLE, CK_BULK, CK_BULK_DONE, CK_TAIL, CK_TAIL_DONE };
+static int ck_state; /* written under ck_mu; the loop polls it with an atomic load */
+static int ck_full;  /* the thread's last pass left nothing to copy back (set before *_DONE) */
+static pthread_mutex_t ck_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t ck_cv = PTHREAD_COND_INITIALIZER;
+static int writes_held;
+static struct timespec hold_t0;
 
 static int fail(char *err, int n, const char *what) {
   snprintf(err, n, "%s: %s", what, db ? sqlite3_errmsg(db) : "no database");
@@ -84,21 +107,69 @@ static sqlite3_stmt *prep(const char *sql) {
 
 static int exec(const char *sql) { return sqlite3_exec(db, sql, 0, 0, 0); }
 
+static void ck_set(int s) {
+  pthread_mutex_lock(&ck_mu);
+  __atomic_store_n(&ck_state, s, __ATOMIC_RELEASE);
+  pthread_cond_signal(&ck_cv);
+  pthread_mutex_unlock(&ck_mu);
+}
+
+/* The checkpoint thread: one PASSIVE checkpoint per request from the loop, on its own
+ * connection. PASSIVE never waits on the loop's locks, and the loop never waits on the thread. */
+static void *ck_main(void *arg) {
+  (void)arg;
+  setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), CKPT_NICE);
+  for (;;) {
+    pthread_mutex_lock(&ck_mu);
+    while (ck_state != CK_BULK && ck_state != CK_TAIL) pthread_cond_wait(&ck_cv, &ck_mu);
+    int st = ck_state;
+    pthread_mutex_unlock(&ck_mu);
+    int nlog = -1, ndone = -2;
+    int rc = sqlite3_wal_checkpoint_v2(ckdb, "main", SQLITE_CHECKPOINT_PASSIVE, &nlog, &ndone);
+    pthread_mutex_lock(&ck_mu);
+    ck_full = rc == SQLITE_OK && nlog == ndone;
+    __atomic_store_n(&ck_state, st + 1, __ATOMIC_RELEASE);
+    pthread_mutex_unlock(&ck_mu);
+  }
+  return 0;
+}
+
+static int ck_start(const char *path) {
+  if (sqlite3_open_v2(path, &ckdb, SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX, "unix-excl")) return -1;
+  /* A checkpoint copies frames straight from the WAL; this connection reads no tables. */
+  if (sqlite3_exec(ckdb, "PRAGMA synchronous = NORMAL; PRAGMA wal_autocheckpoint = 0; PRAGMA cache_size = 16",
+                   0, 0, 0))
+    return -1;
+  pthread_t t;
+  pthread_attr_t a;
+  pthread_attr_init(&a);
+  pthread_attr_setstacksize(&a, 256 << 10);
+  int rc = pthread_create(&t, &a, ck_main, 0);
+  pthread_attr_destroy(&a);
+  return rc ? -1 : 0;
+}
+
 int td_open(const char *path, char *err, int n) {
   if (sqlite3_initialize()) return fail(err, n, "init");
-  if (sqlite3_open_v2(path, &db, SQLITE_OPEN_READWRITE, 0)) return fail(err, n, "open");
-  /* Exclusive locking: this process is the only user of the file, so WAL needs no shared-memory
-   * index and no file locks per transaction. synchronous=NORMAL in WAL: a commit is durable
+  /* unix-excl: this process takes an exclusive lock on the file and keeps it, so no other process
+   * can open it, and the WAL index lives in heap memory shared by this process's two connections
+   * (no -shm file, no file locks per transaction). synchronous=NORMAL in WAL: a commit is durable
    * against process crashes when COMMIT returns (rule 6). */
+  if (sqlite3_open_v2(path, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX, "unix-excl"))
+    return fail(err, n, "open");
   /* No mmap: a page held in SQLite's own cache keeps its parsed B-tree header and is found
    * without a WAL lookup, while an mmap page is looked up in the WAL index and re-parsed on
    * every fetch. The pages the requests touch fit in the cache. */
-  if (exec("PRAGMA locking_mode = EXCLUSIVE") || exec("PRAGMA journal_mode = WAL") ||
+  if (exec("PRAGMA journal_mode = WAL") ||
       exec("PRAGMA synchronous = NORMAL") || exec("PRAGMA temp_store = MEMORY") ||
       exec("PRAGMA cache_size = -65536") || exec("PRAGMA mmap_size = 0") ||
       exec("PRAGMA wal_autocheckpoint = 0") || exec("SELECT count(*) FROM sqlite_schema"))
     return fail(err, n, "pragmas");
   sqlite3_wal_hook(db, wal_hook, 0);
+  if (ck_start(path)) {
+    snprintf(err, n, "checkpoint connection: %s", ckdb ? sqlite3_errmsg(ckdb) : "cannot open");
+    return -1;
+  }
   static const char *checks[][2] = {
     {"SELECT name FROM pragma_table_info('posts')", "id,user_id,body,created_at"},
     {"SELECT name FROM pragma_table_info('users')", "id,username,created_at"},
@@ -199,15 +270,51 @@ int td_commit(void) {
     step_reset(st_rollback);
     return -1;
   }
-  /* Exclusive mode has no other readers, so a PASSIVE checkpoint copies the whole log and the
-   * next write starts it over from the beginning. */
-  if (wal_frames >= CKPT_FRAMES) {
-    int nlog = 0, ndone = 0;
-    if (sqlite3_wal_checkpoint_v2(db, "main", SQLITE_CHECKPOINT_PASSIVE, &nlog, &ndone) == SQLITE_OK)
-      wal_frames = 0;
-  }
   return 0;
 }
+
+static long ms_since(const struct timespec *t0) {
+  struct timespec t;
+  clock_gettime(CLOCK_MONOTONIC, &t);
+  return (t.tv_sec - t0->tv_sec) * 1000 + (t.tv_nsec - t0->tv_nsec) / 1000000;
+}
+
+/* Between passes (no transaction open): drives the checkpoint thread. A hold starts and ends only
+ * here, so the tail checkpoint starts after the last write committed, and the pass after the hold
+ * begins its read with the log fully copied back, which lets its first write restart the log. */
+void td_tick(void) {
+  switch (__atomic_load_n(&ck_state, __ATOMIC_ACQUIRE)) {
+  case CK_IDLE:
+    if (wal_frames >= CKPT_FORCE) {
+      /* Last resort: with the thread idle there is no other reader, so this copies the whole log. */
+      int nlog = 0, ndone = 0;
+      if (sqlite3_wal_checkpoint_v2(db, "main", SQLITE_CHECKPOINT_PASSIVE, &nlog, &ndone) == SQLITE_OK &&
+          nlog == ndone)
+        wal_frames = 0;
+    } else if (wal_frames >= CKPT_FRAMES) {
+      ck_set(CK_BULK);
+    }
+    break;
+  case CK_BULK_DONE:
+    writes_held = 1;
+    clock_gettime(CLOCK_MONOTONIC, &hold_t0);
+    ck_set(CK_TAIL);
+    break;
+  case CK_TAIL_DONE:
+    /* Fully copied: the next write restarts the log and the WAL hook reports its new size.
+     * Otherwise (the hold timed out and writes went on) the next tick starts another round. */
+    if (ck_full) wal_frames = 0;
+    writes_held = 0;
+    ck_set(CK_IDLE);
+    break;
+  default:
+    if (writes_held && ms_since(&hold_t0) > HOLD_MAX_MS) writes_held = 0;
+    break;
+  }
+}
+
+/* Writes wait, unread, while the checkpoint thread copies the log's last frames. */
+int td_writes_held(void) { return writes_held; }
 
 void td_rollback(void) {
   if (!in_batch) return;

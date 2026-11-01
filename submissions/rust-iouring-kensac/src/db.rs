@@ -10,6 +10,8 @@ unsafe extern "C" {
     fn td_open(path: *const c_char, err: *mut c_char, n: c_int) -> c_int;
     fn td_begin() -> c_int;
     fn td_commit() -> c_int;
+    fn td_tick();
+    fn td_writes_held() -> c_int;
     fn td_cursor(i: c_int) -> Cur;
     fn td_seek(c: Cur, id: i64) -> c_int;
     fn td_seek_ge(c: Cur, k: i64) -> c_int;
@@ -216,6 +218,18 @@ impl Db {
         // td_commit also reports a transaction SQLite rolled back by itself during the pass.
         self.in_tx = false;
         unsafe { td_commit() == 0 }
+    }
+
+    /// Between passes, after the commit: drives the checkpoint thread (see csrc/shim.c).
+    #[inline]
+    pub fn tick(&mut self) {
+        unsafe { td_tick() }
+    }
+
+    /// Writes must wait: the checkpoint thread is copying the log's last frames.
+    #[inline]
+    pub fn writes_held(&self) -> bool {
+        unsafe { td_writes_held() != 0 }
     }
 
     pub fn health(&mut self) -> Result<(), String> {

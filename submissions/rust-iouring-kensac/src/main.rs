@@ -273,6 +273,9 @@ struct Server {
     slots: u32,
     pool: Vec<Box<Vec<u8>>>,
     touched: Vec<(u8, u32)>,
+    /// Connections whose next request is a write waiting for a checkpoint hold to end
+    /// (ring, slot, generation). May hold duplicates.
+    held: Vec<(u8, u32, u16)>,
     need_ring: bool,
     /// When adding a ring failed: don't retry before this.
     spill_after: std::time::Instant,
@@ -296,7 +299,7 @@ fn give_buf(pool: &mut Vec<Box<Vec<u8>>>, b: Buf) {
 impl Server {
     /// Handles every completion of ring `ri`. Returns how many there were.
     fn drain(&mut self, ri: usize) -> usize {
-        let Server { rings, app, pool, touched, listen, need_ring, .. } = self;
+        let Server { rings, app, pool, touched, held, listen, need_ring, .. } = self;
         let r = &mut rings[ri];
         let Ring { uring, bufs, conns, accepting, accepts, full, open, margin, rearm } = r;
         let slots = conns.len() as u32;
@@ -340,7 +343,7 @@ impl Server {
                             continue;
                         };
                         let data = bufs.get(b, res as usize);
-                        serve(app, pool, touched, ri, slot, c, data);
+                        serve(app, pool, touched, held, ri, slot, c, data);
                         bufs.add(b);
                         if !cqueue::more(flags) {
                             rearm.push(slot);
@@ -417,6 +420,8 @@ impl Server {
     fn end_batch(&mut self) {
         let committed = self.app.db.commit();
         self.app.wrote = false;
+        // No transaction is open here: the only point where a checkpoint hold starts or ends.
+        self.app.db.tick();
         let Server { rings, touched, pool, .. } = self;
         for &(ri, slot) in touched.iter() {
             let r = &mut rings[ri as usize];
@@ -465,6 +470,19 @@ impl Server {
             self.need_ring = !self.spill();
             if self.need_ring {
                 self.spill_after = std::time::Instant::now() + std::time::Duration::from_secs(1);
+            }
+        }
+    }
+
+    /// The hold is over: serves the writes it held (and whatever arrived behind them) in this
+    /// pass, from the bytes kept on each connection.
+    fn release_held(&mut self) {
+        let list = std::mem::take(&mut self.held);
+        let Server { rings, app, pool, touched, held, .. } = self;
+        for &(ri, slot, gen) in &list {
+            let c = &mut rings[ri as usize].conns[slot as usize];
+            if c.gen == gen && c.open && !c.closing {
+                serve(app, pool, touched, held, ri as usize, slot, c, &[]);
             }
         }
     }
@@ -527,6 +545,9 @@ impl Server {
                 n += self.drain(ri);
             }
             let _ = n;
+            if !self.held.is_empty() && !self.app.db.writes_held() {
+                self.release_held();
+            }
             #[cfg(feature = "stats")]
             stats::batch(n, self.touched.len(), self.app.wrote);
             self.end_batch();
@@ -569,8 +590,11 @@ fn mark(touched: &mut Vec<(u8, u32)>, ri: usize, slot: u32, c: &mut Conn) {
     }
 }
 
-/// Parses and answers every complete request in `data` (plus any earlier partial bytes).
-fn serve(app: &mut App, pool: &mut Vec<Box<Vec<u8>>>, touched: &mut Vec<(u8, u32)>, ri: usize, slot: u32, c: &mut Conn, data: &[u8]) {
+/// Parses and answers every complete request in `data` (plus any earlier partial bytes). During a
+/// checkpoint hold a write stops it: that request and everything behind it stay on the
+/// connection, which goes on the held list, until the hold ends.
+#[allow(clippy::too_many_arguments)]
+fn serve(app: &mut App, pool: &mut Vec<Box<Vec<u8>>>, touched: &mut Vec<(u8, u32)>, held: &mut Vec<(u8, u32, u16)>, ri: usize, slot: u32, c: &mut Conn, data: &[u8]) {
     if c.close_after {
         return;
     }
@@ -585,6 +609,10 @@ fn serve(app: &mut App, pool: &mut Vec<Box<Vec<u8>>>, touched: &mut Vec<(u8, u32
     loop {
         match http::parse(&buf[off..]) {
             http::Parsed::Done(req, used) => {
+                if req.method == b"POST" && app.db.writes_held() {
+                    held.push((ri as u8, slot, c.gen));
+                    break;
+                }
                 mark(touched, ri, slot, c);
                 c.answered = true;
                 app.handle(&req, c.out.get(pool));
@@ -685,6 +713,6 @@ fn main() {
     });
     arm_accept(&mut ring, 0, &fd);
     eprintln!("listening on {host}:{port}; io_uring, {slots} direct descriptors per ring");
-    let mut s = Server { rings: vec![ring], app, listen: fd, slots, pool: Vec::new(), touched: Vec::new(), need_ring: false, spill_after: std::time::Instant::now() };
+    let mut s = Server { rings: vec![ring], app, listen: fd, slots, pool: Vec::new(), touched: Vec::new(), held: Vec::new(), need_ring: false, spill_after: std::time::Instant::now() };
     s.run()
 }

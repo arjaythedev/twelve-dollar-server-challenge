@@ -1,7 +1,8 @@
 # Rust, no framework: io_uring + SQLite B-tree reads
 
 One thread drives everything: an io_uring event loop, an HTTP/1.1 parser, a JSON reader/writer,
-HS256 verification, and SQLite (the pinned, unmodified amalgamation, linked in statically).
+HS256 verification, and SQLite (the pinned, unmodified amalgamation, linked in statically). The
+one exception is WAL checkpoints, which a second, low-priority thread runs.
 
 | | |
 |---|---|
@@ -35,16 +36,19 @@ c-iouring-public #158, it doesn't patch SQLite's source.
   table and index it decodes, and refuses to start on a different schema.
 - **Live reads:** every request reads its rows from SQLite while it is served (rule 5).
   Only prepared statements, cursors, KeyInfo objects and the four B-tree root page numbers
-  (read from `sqlite_schema` at startup) are reused. `locking_mode=EXCLUSIVE` means no other
-  connection can change the schema while the server runs.
+  (read from `sqlite_schema` at startup) are reused. The `unix-excl` VFS keeps other processes
+  off the file, and the server's second connection only checkpoints, so nothing can change the
+  schema while the server runs.
 - **Writes use SQL:** `INSERT … RETURNING id, created_at` for posts, `INSERT … ON CONFLICT DO
   NOTHING` for likes. Only `sqlite3_changes` tells a new like from a repeat. The like handler's
   check that the post exists (the 404 case) is a B-tree seek on `posts`, like the reads.
 
 ## Durability and batching
 
-- WAL with `synchronous=NORMAL` and `locking_mode=EXCLUSIVE`. Only this process uses the file,
-  so WAL needs no shared-memory index or file locks.
+- WAL with `synchronous=NORMAL`, opened through SQLite's `unix-excl` VFS: the process takes an
+  exclusive lock on the file at the first read and keeps it, so no other process can open it,
+  and the WAL index lives in heap memory shared by the process's two connections (no `-shm`
+  file, no file locks per transaction).
 - Each event-loop pass is one SQLite transaction. Its reads share a snapshot, and its writes are
   group-committed (rule 6). **No response from a pass is handed to the kernel until its COMMIT
   returns.** If a commit fails, every response from that pass is replaced with a 500 and the
@@ -53,12 +57,28 @@ c-iouring-public #158, it doesn't patch SQLite's source.
   sees a row that wasn't committed. If SQLite rolls the transaction back by itself mid-pass
   (`SQLITE_FULL`, I/O errors), the rest of the pass doesn't write, and its COMMIT reports the
   failure.
-- Automatic checkpoints are off. After a commit leaves 8,192 or more WAL frames (about 32 MB),
-  a PASSIVE checkpoint copies the log back. With no other readers it always completes, so the
-  next write restarts the log. It runs on the event-loop thread right after a COMMIT, so the
-  responses of that one pass wait for it (a latency spike every ~8k frames). A longer log
-  means fewer fsyncs, and pages written many times (the newest posts and likes leaves) are
-  copied back once per checkpoint.
+- Automatic checkpoints are off. Checkpoints run on a second thread, on its own connection, at
+  nice 19, so the event loop never waits for their fsyncs. After a commit leaves 4,096 or more
+  WAL frames (16 MB), the loop wakes the thread, which runs a PASSIVE checkpoint while the loop
+  goes on reading and writing. A PASSIVE checkpoint never waits on the loop's locks, and the
+  loop never waits on the thread.
+- Under steady writes that checkpoint can't copy the frames written while it ran, and the log
+  only restarts once it is fully copied. So when the thread is done, writes are **held**: the
+  next POST on each connection stays unread in that connection's buffer (reads go on), and the
+  thread copies the rest. The hold then ends, and the next write restarts the log. A hold starts
+  and ends only between passes, never inside one. It lasts at most 250 ms: if the thread is
+  slower than that, writes go on and the next round tries again. Past 65,536 frames the loop
+  checkpoints by itself, as a last resort.
+- Measured in a 1-CPU container (load generator on the same CPU, 200 keep-alive connections,
+  ~77k req/s, 30% likes and 5% posts, 20 s): with the old inline checkpoint every request had
+  p99 31 ms and max 199 ms. With the thread, reads were at p99 6 ms and max 39 ms, writes at
+  p99 43 ms and max 155 ms (holds of 80–95 ms), with the same CPU per request (thread included).
+  A `kill -9` during a checkpoint lost none of the 255k acknowledged writes, and
+  `integrity_check` was ok.
+- Moving the checkpoint off the loop meant dropping `locking_mode=EXCLUSIVE` for `unix-excl`
+  (two connections) and building with `THREADSAFE=2`. A transaction is one pass, not one
+  request, so the extra cost is per pass. Measured per pass (1 to 40 requests, with and
+  without writes), the difference is within noise (±1%).
 - No `mmap`: reads go through SQLite's page cache (64 MB). A cached page keeps its parsed
   B-tree header and is found without a WAL-index lookup; an mmap page pays both on every fetch.
 
@@ -125,10 +145,10 @@ sockets under `LimitNOFILE=65535`.
 | `src/app.rs` | routes, handlers, responses |
 | `src/db.rs` | record decoding, the feed and post plans, writes (FFI to the shim) |
 | `src/http.rs`, `src/json.rs`, `src/jwt.rs` | request framing, JSON, HS256 |
-| `csrc/shim.c` | the amalgamation plus B-tree cursor and statement helpers |
+| `csrc/shim.c` | the amalgamation plus B-tree cursor and statement helpers, the checkpoint thread |
 | `build.rs` | compiles the shim and SQLite with the options below |
 
-SQLite options (all in `build.rs`): `THREADSAFE=0` (one thread), `DEFAULT_MEMSTATUS=0`,
+SQLite options (all in `build.rs`): `THREADSAFE=2` (each connection used by one thread), `DEFAULT_MEMSTATUS=0`,
 `DEFAULT_WAL_SYNCHRONOUS=1`, `DQS=0`, `LIKE_DOESNT_MATCH_BLOBS`, `MAX_EXPR_DEPTH=0`,
 `USE_ALLOCA`, `OMIT_DEPRECATED`, `OMIT_PROGRESS_CALLBACK`, `OMIT_SHARED_CACHE`,
 `OMIT_LOAD_EXTENSION`, `OMIT_AUTOINIT`, `OMIT_UTF16`, `OMIT_TRACE`, `OMIT_COMPLETE`,

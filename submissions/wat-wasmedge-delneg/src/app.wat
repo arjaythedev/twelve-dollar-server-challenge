@@ -67,6 +67,7 @@
   (import "sys" "recv" (func $recv (param i32 i32 i32) (result i32)))
   (import "sys" "send" (func $send (param i32 i32 i32) (result i32)))
   (import "sys" "close" (func $close (param i32) (result i32)))
+  (import "sys" "sendmany" (func $sendmany (param i32 i32 i32) (result i32)))
 
   ;; ---------- string constants ----------
   (data (i32.const 0x100000) "HTTP/1.1 200 OK\0d\0a")
@@ -1395,26 +1396,50 @@
     (global.set $ostart (global.get $o))
     (global.set $nrec (i32.add (global.get $nrec) (i32.const 1))))
 
-  ;; COMMIT, then send every noted response (or, if COMMIT failed, close those connections unanswered)
+  ;; COMMIT, then send every noted response (or, if COMMIT failed, close those connections unanswered).
+  ;; One host call sends a chunk of up to 32768 responses; their results land in RBUF (free between connections).
   (func $flush
-    (local $ok i32) (local $i i32) (local $r i32)
+    (local $ok i32) (local $i i32) (local $r i32) (local $j i32) (local $m i32)
     (local.set $ok (i32.eq (call $step (global.get $st_commit)) (i32.const 101)))
     (drop (call $reset (global.get $st_commit)))
     (if (i32.eqz (local.get $ok))
       (then (call $log (call $errmsg (global.get $db))) (call $log (i32.const 0x1011c0))
             (drop (call $db_exec (global.get $db) (i32.const 0x100cc0)))))
+    ;; a record whose connection is gone (closed, or its fd reused since) gets fd -1: nothing to send
     (block $d (loop $l
       (br_if $d (i32.ge_u (local.get $i) (global.get $nrec)))
       (local.set $r (i32.add (i32.const 0x300000) (i32.shl (local.get $i) (i32.const 4))))
-      (if (i32.eq (i32.shr_u (i32.load offset=12 (local.get $r)) (i32.const 1))   ;; the same connection, still open
+      (if (i32.ne (i32.shr_u (i32.load offset=12 (local.get $r)) (i32.const 1))
                   (i32.load offset=0x144000 (i32.shl (i32.load (local.get $r)) (i32.const 2))))
-        (then
-          (if (local.get $ok)
-            (then (call $send_out (i32.load (local.get $r)) (i32.load offset=4 (local.get $r))
-                                  (i32.load offset=8 (local.get $r)) (i32.and (i32.load offset=12 (local.get $r)) (i32.const 1))))
-            (else (call $close_conn (i32.load (local.get $r)))))))
+        (then (i32.store (local.get $r) (i32.const -1)))
+        (else (if (i32.eqz (local.get $ok))
+          (then (call $close_conn (i32.load (local.get $r))) (i32.store (local.get $r) (i32.const -1))))))
       (local.set $i (i32.add (local.get $i) (i32.const 1)))
       (br $l)))
+    (if (local.get $ok)
+      (then
+        (local.set $j (i32.const 0))
+        (block $d2 (loop $chunk
+          (br_if $d2 (i32.ge_u (local.get $j) (global.get $nrec)))
+          (local.set $m (i32.sub (global.get $nrec) (local.get $j)))
+          (if (i32.gt_u (local.get $m) (i32.const 32768)) (then (local.set $m (i32.const 32768))))
+          (drop (call $sendmany (i32.add (i32.const 0x300000) (i32.shl (local.get $j) (i32.const 4)))
+                                (local.get $m) (i32.const 0x104000)))
+          (local.set $i (i32.const 0))
+          (block $d3 (loop $l3
+            (br_if $d3 (i32.ge_u (local.get $i) (local.get $m)))
+            (local.set $r (i32.add (i32.const 0x300000) (i32.shl (i32.add (local.get $j) (local.get $i)) (i32.const 4))))
+            ;; still the same connection: an earlier record's send error may have closed it
+            (if (i32.and (i32.ge_s (i32.load (local.get $r)) (i32.const 0))
+                         (i32.eq (i32.shr_u (i32.load offset=12 (local.get $r)) (i32.const 1))
+                                 (i32.load offset=0x144000 (i32.shl (i32.load (local.get $r)) (i32.const 2)))))
+              (then (call $sent (i32.load (local.get $r)) (i32.load offset=4 (local.get $r)) (i32.load offset=8 (local.get $r))
+                                (i32.and (i32.load offset=12 (local.get $r)) (i32.const 1))
+                                (i32.load (i32.add (i32.const 0x104000) (i32.shl (local.get $i) (i32.const 2)))))))
+            (local.set $i (i32.add (local.get $i) (i32.const 1)))
+            (br $l3)))
+          (local.set $j (i32.add (local.get $j) (local.get $m)))
+          (br $chunk)))))
     (global.set $nrec (i32.const 0))
     (global.set $txopen (i32.const 0))
     (global.set $wr (i32.const 0))
@@ -1426,13 +1451,13 @@
     (if (i32.or (i32.gt_u (global.get $o) (i32.const 0xc00000)) (i32.ge_u (global.get $nrec) (i32.const 60000)))
       (then (call $flush) (call $tx_begin))))
 
-  ;; send [$p, $p+$len); keep what the socket doesn't take (EPOLLOUT finishes it)
-  (func $send_out (param $fd i32) (param $p i32) (param $len i32) (param $cl i32)
-    (local $c i32) (local $r i32) (local $q i32)
+  ;; [$p, $p+$len) was offered to the socket, which took $r bytes (or -errno); keep the rest (EPOLLOUT
+  ;; finishes it)
+  (func $sent (param $fd i32) (param $p i32) (param $len i32) (param $cl i32) (param $r i32)
+    (local $c i32) (local $q i32)
     (local.set $c (call $conn (local.get $fd)))
     (if (local.get $len)
       (then
-        (local.set $r (call $send (local.get $fd) (local.get $p) (local.get $len)))
         (if (i32.lt_s (local.get $r) (i32.const 0))
           (then
             (if (i32.ne (local.get $r) (i32.const -11)) (then (call $close_conn (local.get $fd)) (return)))

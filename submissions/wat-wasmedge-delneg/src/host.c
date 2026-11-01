@@ -1,7 +1,8 @@
 // host.c: a thin WasmEdge embedder, about 100 lines. It runs the AOT-compiled app (hand-written WAT plus
-// stock SQLite) with WASI for SQLite's file I/O, and gives it eight Linux socket/epoll calls as the "sys"
+// stock SQLite) with WASI for SQLite's file I/O, and gives it nine Linux socket/epoll calls as the "sys"
 // import module, because WASI's poll_oneoff re-registers every connection on every call. No request logic
-// lives here: each function only moves its arguments between wasm memory and one syscall.
+// lives here: each function only moves its arguments between wasm memory and one syscall (sendmany: one
+// per record).
 #define _GNU_SOURCE
 #include <wasmedge/wasmedge.h>
 #include <errno.h>
@@ -52,6 +53,17 @@ FN(h_accept) { (void)d; (void)f; RET(rv(accept4(P(0), NULL, NULL, SOCK_NONBLOCK 
 FN(h_recv) { (void)d; uint8_t *p = mem(f, (uint32_t)P(1), (uint32_t)P(2)); if (!p) RET(-EFAULT); RET(rv(recv(P(0), p, (size_t)P(2), 0))); }
 FN(h_send) { (void)d; uint8_t *p = mem(f, (uint32_t)P(1), (uint32_t)P(2)); if (!p) RET(-EFAULT); RET(rv(send(P(0), p, (size_t)P(2), MSG_NOSIGNAL))); }
 FN(h_close) { (void)d; (void)f; RET(rv(close(P(0)))); }
+// sendmany(recs, n, res): recs holds n records of 4 x i32 (fd, ptr, len, unused); sends each one whose fd is
+// >= 0 and writes the bytes sent (or -errno) to res[i]. One host call per batch instead of one per response.
+FN(h_sendmany) { (void)d;
+  uint32_t n = (uint32_t)P(1); int32_t *r = (int32_t *)mem(f, (uint32_t)P(0), n * 16), *o = (int32_t *)mem(f, (uint32_t)P(2), n * 4);
+  if (!r || !o) RET(-EFAULT);
+  for (uint32_t i = 0; i < n; i++, r += 4) {
+    uint8_t *p = r[0] < 0 ? NULL : mem(f, (uint32_t)r[1], (uint32_t)r[2]);
+    o[i] = r[0] < 0 ? 0 : p ? rv(send(r[0], p, (size_t)r[2], MSG_NOSIGNAL)) : -EFAULT;
+  }
+  RET(0);
+}
 
 static void add(WasmEdge_ModuleInstanceContext *m, const char *name, WasmEdge_HostFunc_t fn, int np) {
   WasmEdge_ValType p[4], r[1] = {WasmEdge_ValTypeGenI32()};
@@ -89,7 +101,7 @@ int main(int argc, char **argv) {
   WasmEdge_ModuleInstanceContext *m = WasmEdge_ModuleInstanceCreate(sys);
   add(m, "listen", h_listen, 3); add(m, "epoll_create", h_epoll_create, 0); add(m, "epoll_ctl", h_epoll_ctl, 4);
   add(m, "epoll_wait", h_epoll_wait, 4); add(m, "accept", h_accept, 1); add(m, "recv", h_recv, 3);
-  add(m, "send", h_send, 3); add(m, "close", h_close, 1);
+  add(m, "send", h_send, 3); add(m, "close", h_close, 1); add(m, "sendmany", h_sendmany, 3);
   WasmEdge_Result r = WasmEdge_VMRegisterModuleFromImport(vm, m);
   if (!WasmEdge_ResultOK(r)) { fprintf(stderr, "register: %s\n", WasmEdge_ResultGetMessage(r)); return 1; }
 

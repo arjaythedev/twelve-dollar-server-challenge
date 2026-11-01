@@ -14,7 +14,8 @@ if [ ! -f $SQ/sqlite3.c ]; then
   echo "$SQ_SHA  sqlite.zip" | sha256sum -c - >/dev/null
   unzip -qo sqlite.zip && rm sqlite.zip
 fi
-F="-O2 -D_GNU_SOURCE -DSQLITE_THREADSAFE=0 -DSQLITE_DEFAULT_MEMSTATUS=0 -DSQLITE_OMIT_LOAD_EXTENSION"
+# USE_PREAD: positioned reads/writes (fd_pread/fd_pwrite) instead of a seek before each, one syscall less per page
+F="-O2 -D_GNU_SOURCE -DSQLITE_THREADSAFE=0 -DSQLITE_DEFAULT_MEMSTATUS=0 -DSQLITE_OMIT_LOAD_EXTENSION -DUSE_PREAD"
 $WS/bin/clang --target=wasm32-wasip1 $F -I$SQ -mexec-model=reactor \
   -Wl,-z,stack-size=1048576 -Wl,--global-base=16777216 -o sq.wasm ../src/sqlite_glue.c   # it #includes $SQ/sqlite3.c
 $T/wabt/bin/wat2wasm --enable-all ../src/app.wat -o app.wasm

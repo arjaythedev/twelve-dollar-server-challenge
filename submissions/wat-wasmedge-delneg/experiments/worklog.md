@@ -271,3 +271,20 @@ characters and UTF-8 read back through /posts/:id and /feed). 42/42. pstat, 4000
 | E13 | 14.60, 14.51, 14.33 | 27.6k-28.2k | 76.2k |
 | E14 | 13.43, 13.57, 13.74 | 24.7k-24.9k | 66.3k |
 -6% CPU per request, -13% user instructions.
+
+## E15: SQLite with `-DUSE_PREAD` (1 Nov) — kept (neutral on CPU)
+Syscalls under load (perf tracepoints, 10 s at ~30.7k req/s): recvfrom 308k, sendto 307k, lseek 124k,
+writev 100k, readv 21k, epoll_wait 21k, fsync ~120; 876k in all (2.85 per request). Without
+`USE_PREAD` SQLite's unix VFS seeks before every read and write, and WASI turns each into `fd_seek` +
+`fd_write`. With it: preadv 21k + pwritev 101k, no lseek, 758k syscalls (-14%). pstat, 3 reps:
+E14 13.94, 13.60, 13.59 us/req; E15 14.12, 13.42, 13.50. Within noise; kept as fewer syscalls (it may
+matter more on a box where syscalls cost more). Also: ~14.5 requests per epoll_wait at this load, and
+~6k WAL frames/s (two pwritev each: frame header and page).
+
+## E16: one host call sends the whole batch (`sys.sendmany`) (1 Nov) — kept
+Host calls cost: libwasmedge 7.7% + libc 3.7% (rwlock) of the E13 profile, ~1.5 us per request over
+~2.3 host calls. `$flush` made one `send` host call per response; now it marks records whose connection
+is gone (fd -1, by generation), hands the record list to `sendmany` (host: one `send` per record, results
+into RBUF, up to 32768 per call), then handles partial sends and errors as before. host.c +12 lines, no
+logic (a loop over records and one syscall each). Responses identical (cmp.py), 42/42. pstat, 3 reps:
+E15 13.58, 13.93, 13.77 us/req; E16 12.99, 13.29, 13.32 (-3.6%; every E16 rep below every E15 rep).

@@ -1,0 +1,21 @@
+package main
+
+import "http"
+import "handlers/health.tx"
+
+func main() int {
+  let host string, port int, ok bool = handlers.prepare()
+  if !ok {
+    return 1
+  }
+
+  http.get("/health", handlers.health)
+  http.get("/feed", handlers.feed)
+  http.get("/posts/:id", handlers.getPost)
+  http.post("/posts", handlers.createPost)
+  http.post("/posts/:id/like", handlers.likePost)
+  http.notFound(handlers.notFound)
+  // One worker: the sqlite connection cache is process-global, and this box has one vCPU.
+  http.serve(host, port, 1)
+  return 0
+}

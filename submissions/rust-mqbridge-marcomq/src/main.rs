@@ -9,7 +9,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use hmac::{Hmac, KeyInit, Mac};
 use mq_bridge::endpoints::http::HttpRequestExt;
-use mq_bridge::models::{Endpoint, EndpointType, HttpConfig};
+use mq_bridge::models::{Endpoint, EndpointType, HttpConfig, HttpServerProtocol};
 use mq_bridge::sqlx::sqlite::{
     SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous,
 };
@@ -316,7 +316,8 @@ fn env(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_owned())
 }
 
-#[tokio::main]
+// One vCPU on the benchmark box: a single-threaded runtime avoids cross-thread wakeups.
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
     let options = SqliteConnectOptions::new()
         .filename(env("SQLITE_PATH", "feed.db"))
@@ -334,7 +335,8 @@ async fn main() -> anyhow::Result<()> {
         started: Instant::now(),
     };
     let addr = format!("{}:{}", env("HOST", "127.0.0.1"), env("PORT", "3000"));
-    let http = HttpConfig::new(addr).with_concurrency_limit(512);
+    let mut http = HttpConfig::new(addr).with_concurrency_limit(512);
+    http.server_protocol = HttpServerProtocol::Http1Only;
     let input = Endpoint::new(EndpointType::Http(http));
     let route = Route::new(input, Endpoint::new_response())
         .with_batch_size(512)

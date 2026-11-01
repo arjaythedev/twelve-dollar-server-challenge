@@ -106,5 +106,41 @@
     "cpu_us_per_request": 264.35843454790825,
     "server_peak_bytes": 352669696,
     "passed": true
+  },
+  {
+    "date": "2026-11-01",
+    "name": "cpp-5000",
+    "runtime": "C++ 0.1.0",
+    "sqlite": "3.53.1",
+    "users": 5000,
+    "hold": "60s",
+    "ramp": "30s",
+    "requests": 51865,
+    "rps": 398.95360971887635,
+    "p95_ms": 1.0481,
+    "p99_ms": 1.5677080000000003,
+    "max_ms": 189.8026,
+    "error_rate": 0.0,
+    "cpu_us_per_request": 132.12958642629906,
+    "server_peak_bytes": 319352832,
+    "passed": true
+  },
+  {
+    "date": "2026-11-01",
+    "name": "cpp-repeat-5000",
+    "runtime": "C++ 0.1.0",
+    "sqlite": "3.53.1",
+    "users": 5000,
+    "hold": "60s",
+    "ramp": "30s",
+    "requests": 51909,
+    "rps": 399.31079152772213,
+    "p95_ms": 1.04976,
+    "p99_ms": 1.5524679999999993,
+    "max_ms": 184.8646,
+    "error_rate": 0.0,
+    "cpu_us_per_request": 131.93326783409427,
+    "server_peak_bytes": 317427712,
+    "passed": true
   }
 ]

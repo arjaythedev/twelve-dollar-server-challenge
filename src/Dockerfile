@@ -10,7 +10,7 @@ ARG TDS_SANITIZERS=OFF
 RUN cmake -S . -B out -G Ninja -DCMAKE_BUILD_TYPE=Release -DTDS_SANITIZERS=${TDS_SANITIZERS} \
     && cmake --build out --parallel 2
 
-FROM ubuntu:24.04@sha256:78d4744ead1f5b19b04d0df558ab182a5300903900755e515b2ca4d10eb2044d
+FROM ubuntu:24.04@sha256:78d4744ead1f5b19b04d0df558ab182a5300903900755e515b2ca4d10eb2044d AS runtime
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     libstdc++6 libssl3t64 curl jq openssl sqlite3 \
@@ -20,3 +20,15 @@ COPY --from=build /build/out/server ./server
 USER 10001:10001
 ENV HOST=0.0.0.0 PORT=3000 SQLITE_PATH=/data/feed.db
 ENTRYPOINT ["/app/server"]
+
+FROM runtime AS profiler
+USER root
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends linux-tools-generic \
+    && perf_path="$(find /usr/lib -path '*/linux-tools*/perf' -type f -print -quit)" \
+    && test -n "$perf_path" \
+    && ln -s "$perf_path" /usr/local/bin/perf
+USER 10001:10001
+ENTRYPOINT ["perf"]
+
+FROM runtime AS final

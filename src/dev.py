@@ -7,6 +7,7 @@ import json
 import math
 import os
 import platform
+import re
 import shlex
 import shutil
 import subprocess
@@ -14,6 +15,7 @@ import tarfile
 import tempfile
 import time
 import uuid
+from collections import Counter
 from collections.abc import Generator
 from contextlib import closing, contextmanager
 from datetime import UTC, datetime
@@ -24,6 +26,18 @@ import psutil
 
 ROOT = Path(__file__).resolve().parent.parent
 IMAGE = "twelve-dollar-cpp:local"
+PROFILER_IMAGE = "twelve-dollar-profiler:local"
+PROFILE_EVENT = "cpu-clock:u"
+PROFILE_FREQUENCY = 997
+PROFILE_STACK_BYTES = 8192
+PROFILE_STAGES = {
+    "database_and_rows": "SQL / row assembly",
+    "transport_and_other": "Transport / other",
+    "response_json": "Response JSON",
+    "request_json": "Request JSON",
+    "auth": "Auth / JWT JSON",
+    "unknown": "Unknown",
+}
 JWT_KEY = "twelve-dollar-challenge"
 RESULTS = ROOT / "src/benchmarks/results.json"
 
@@ -47,7 +61,7 @@ class Arguments(argparse.Namespace):
     hold: str
     ramp: str
     k6: Path | None
-    save: Path
+    save: Path | None
     file: Path
     json_output: bool
 
@@ -71,6 +85,26 @@ class Result(TypedDict):
     passed: bool
 
 
+class Hotspot(TypedDict):
+    symbol: str
+    module: str
+    cpu_ns: int
+    samples: int
+
+
+class NativeProfile(TypedDict):
+    event: str
+    frequency_hz: int
+    stack_bytes: int
+    samples: int
+    sampled_cpu_ns: int
+    lost_records: int
+    unresolved_leaf_samples: int
+    unrooted_samples: int
+    stages_cpu_ns: dict[str, int]
+    hotspots: list[Hotspot]
+
+
 def command(*args: str) -> str:
     result = subprocess.run(args, check=True, capture_output=True, text=True, encoding="utf-8")
     return result.stdout.strip()
@@ -78,7 +112,7 @@ def command(*args: str) -> str:
 
 def write_json(path: Path, value: object) -> None:
     temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
+    temporary.write_text(json.dumps(value, indent=2, allow_nan=False) + "\n", encoding="utf-8")
     temporary.replace(path)
 
 
@@ -270,9 +304,9 @@ def show_results(results: list[Result]) -> None:
         )
 
 
-def build(*, tests: bool = False) -> str:
-    print("Building C++ image...", flush=True)
-    image = IMAGE + ("-build" if tests else "")
+def build(*, tests: bool = False, profiler: bool = False) -> str:
+    print("Building profiler image..." if profiler else "Building C++ image...", flush=True)
+    image = PROFILER_IMAGE if profiler else IMAGE + ("-build" if tests else "")
     command(
         "docker",
         "build",
@@ -282,7 +316,7 @@ def build(*, tests: bool = False) -> str:
         "linux/amd64",
         "--tag",
         image,
-        *(["--target", "build"] if tests else []),
+        *(["--target", "profiler"] if profiler else ["--target", "build"] if tests else []),
         "--file",
         str(ROOT / "src/Dockerfile"),
         str(ROOT / "src"),
@@ -366,6 +400,7 @@ def check(use_docker: bool) -> None:
         ["ruff", "check", "."],
         ["ruff", "format", "--check", "."],
         ["pyright"],
+        ["python", "-m", "unittest", "-v", "checks.test_profile"],
     ]:
         subprocess.run(["uv", "run", "--locked", *args], cwd=ROOT / "src", check=True)
     if use_docker:
@@ -600,6 +635,209 @@ def server(
         command("docker", "volume", "rm", volume)
 
 
+def profile_stage(frames: list[tuple[str, str]]) -> str:
+    symbols = "\n".join(symbol for symbol, _ in frames)
+    if "tds::authenticate(" in symbols or any("libcrypto" in module for _, module in frames):
+        return "auth"
+    if "tds::quote(" in symbols or "tds::integer(" in symbols:
+        return "response_json"
+    if "tds::read_json(" in symbols or "yyjson" in symbols:
+        return "request_json"
+    if "sqlite3" in symbols or "tds::Database::" in symbols:
+        return "database_and_rows"
+    if any(name in symbols for name in ("tds::Server::", "tds::Api::", "llhttp", "io_uring")):
+        return "transport_and_other"
+    return "unknown"
+
+
+def analyze_profile(stacks: str, statistics: str) -> NativeProfile:
+    stages: Counter[str] = Counter()
+    weights: Counter[tuple[str, str]] = Counter()
+    counts: Counter[tuple[str, str]] = Counter()
+    samples = unresolved = unrooted = 0
+    for block in re.split(r"\n\s*\n", stacks.strip()):
+        lines = block.splitlines()
+        if len(lines) < 2 or not lines[0].strip().isdigit():
+            raise ValueError("invalid perf stack header")
+        period = int(lines[0].strip())
+        if period <= 0:
+            raise ValueError("perf sample period must be positive")
+        frames: list[tuple[str, str]] = []
+        for line in lines[1:]:
+            frame = re.fullmatch(r"\s*[0-9a-f]+\s+(.+) \((.+)\)\s*", line)
+            if frame is None:
+                raise ValueError(f"invalid perf frame: {line}")
+            frames.append((frame[1], frame[2]))
+        leaf = frames[0]
+        samples += 1
+        unresolved += leaf[0] == "[unknown]"
+        unrooted += not any(symbol == "main" for symbol, _ in frames)
+        stages[profile_stage(frames)] += period
+        weights[leaf] += period
+        counts[leaf] += 1
+
+    aggregate = statistics.split(f"{PROFILE_EVENT} stats:", 1)[0]
+    recorded = re.search(r"^\s*SAMPLE events:\s*(\d+)", aggregate, re.MULTILINE)
+    if recorded is None or int(recorded[1]) != samples:
+        raise ValueError("parsed stacks do not match perf's recorded sample count")
+    lost = sum(
+        int(value)
+        for value in re.findall(r"^\s*LOST(?:_SAMPLES)? events:\s*(\d+)", aggregate, re.MULTILINE)
+    )
+    if lost:
+        raise ValueError(
+            f"perf reported {lost} loss records; retain the raw data and lower the rate"
+        )
+    return NativeProfile(
+        event=PROFILE_EVENT,
+        frequency_hz=PROFILE_FREQUENCY,
+        stack_bytes=PROFILE_STACK_BYTES,
+        samples=samples,
+        sampled_cpu_ns=sum(stages.values()),
+        lost_records=lost,
+        unresolved_leaf_samples=unresolved,
+        unrooted_samples=unrooted,
+        stages_cpu_ns=dict(stages),
+        hotspots=[
+            Hotspot(symbol=key[0], module=key[1], cpu_ns=value, samples=counts[key])
+            for key, value in weights.most_common(15)
+        ],
+    )
+
+
+def show_profile(profile: dict[str, JSONValue]) -> None:
+    total = number(profile, "sampled_cpu_ns")
+    if total <= 0:
+        raise ValueError("profile contains no sampled CPU time")
+    print(
+        f"User CPU: {integer(profile, 'samples'):,} samples; "
+        f"{integer(profile, 'unresolved_leaf_samples'):,} unresolved leaves; "
+        f"{integer(profile, 'unrooted_samples'):,} stacks without main."
+    )
+    values = mapping(profile["stages_cpu_ns"])
+    stages = [(stage, number(values, stage)) for stage in values]
+    for stage, weight in sorted(stages, key=lambda item: item[1], reverse=True):
+        print(f"  {PROFILE_STAGES.get(stage, stage):24} {weight / total:6.1%}")
+    hotspots = profile["hotspots"]
+    if not isinstance(hotspots, list):
+        raise ValueError("profile hotspots must be an array")
+    print("Top functions:")
+    for value in hotspots[:8]:
+        row = mapping(value)
+        print(f"  {number(row, 'cpu_ns') / total:6.1%}  {text(row, 'symbol')[:100]}")
+
+
+@contextmanager
+def sampling(container: str, output: Path) -> Generator[None]:
+    target_hash = command("docker", "exec", container, "sha256sum", "/app/server").split()[0]
+    symbol_hash = command(
+        "docker", "run", "--rm", "--entrypoint", "sha256sum", PROFILER_IMAGE, "/app/server"
+    ).split()[0]
+    if target_hash != symbol_hash:
+        raise RuntimeError("profiler symbols do not match the running server")
+    name = f"{container}-perf"
+    created = False
+    try:
+        command(
+            "docker",
+            "run",
+            "--detach",
+            "--name",
+            name,
+            "--network",
+            "none",
+            "--pid",
+            f"container:{container}",
+            "--user",
+            "10001:10001",
+            "--cap-drop",
+            "ALL",
+            "--cap-add",
+            "PERFMON",
+            "--cpus",
+            "1",
+            "--memory",
+            "512m",
+            "--memory-swap",
+            "512m",
+            PROFILER_IMAGE,
+            "record",
+            "-e",
+            PROFILE_EVENT,
+            "-F",
+            str(PROFILE_FREQUENCY),
+            "--call-graph",
+            f"dwarf,{PROFILE_STACK_BYTES}",
+            "-p",
+            "1",
+            "-o",
+            "/tmp/perf.data",
+        )
+        created = True
+        time.sleep(1)
+        if command("docker", "inspect", "--format", "{{.State.Running}}", name) != "true":
+            raise RuntimeError(command("docker", "logs", name))
+        write_json(
+            output / "sampler.json",
+            {
+                "perf_version": command("docker", "exec", name, "perf", "--version"),
+                "binary_sha256": target_hash,
+                "container": decode_json(command("docker", "inspect", name).encode()),
+            },
+        )
+        yield
+    finally:
+        try:
+            if created:
+                command("docker", "stop", "--signal", "SIGINT", "--timeout", "15", name)
+                logs = subprocess.run(["docker", "logs", name], capture_output=True, text=True)
+                (output / "perf.log").write_text(logs.stdout + logs.stderr, encoding="utf-8")
+                exit_code = command("docker", "inspect", "--format", "{{.State.ExitCode}}", name)
+                if exit_code not in ("0", "130"):
+                    raise RuntimeError(f"perf exited with {exit_code}; see perf.log")
+                command("docker", "cp", f"{name}:/tmp/perf.data", str(output / "perf.data"))
+                common = [
+                    "docker",
+                    "run",
+                    "--rm",
+                    "--network",
+                    "none",
+                    "--pid",
+                    f"container:{container}",
+                    "--cap-drop",
+                    "ALL",
+                    "--mount",
+                    f"type=bind,source={output},target=/profile,readonly",
+                    PROFILER_IMAGE,
+                ]
+                stacks = command(
+                    *common,
+                    "script",
+                    "--symfs",
+                    "/proc/1/root",
+                    "-i",
+                    "/profile/perf.data",
+                    "-F",
+                    "period,ip,sym,dso",
+                )
+                statistics = command(
+                    *common,
+                    "report",
+                    "--symfs",
+                    "/proc/1/root",
+                    "--stdio",
+                    "--stats",
+                    "--no-children",
+                    "-i",
+                    "/profile/perf.data",
+                )
+                (output / "stacks.txt").write_text(stacks + "\n", encoding="utf-8")
+                (output / "perf-stats.txt").write_text(statistics + "\n", encoding="utf-8")
+                write_json(output / "profile.json", analyze_profile(stacks, statistics))
+        finally:
+            subprocess.run(["docker", "rm", "--force", name], capture_output=True, check=False)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     actions = parser.add_subparsers(dest="action", required=True)
@@ -607,19 +845,23 @@ def main() -> None:
     checks.add_argument(
         "--docker", action="store_true", help="also build Linux and run native and HTTP tests"
     )
-    benchmark = actions.add_parser("bench", help="run the official k6 workload in Docker")
-    benchmark.add_argument("--label", required=True, help="unique lowercase run name")
-    benchmark.add_argument("--vus", type=int, default=5000)
-    benchmark.add_argument(
-        "--hold", default="60s", help="time at target users (default: 60s; confirmation: 5m)"
-    )
-    benchmark.add_argument(
-        "--ramp", default="30s", help="ramp-up time (default: 30s; confirmation: 60s)"
-    )
-    benchmark.add_argument(
-        "--k6", type=Path, default=shutil.which("k6"), help="k6 executable; defaults to PATH"
-    )
-    benchmark.add_argument("--save", type=Path, default=RESULTS, help="compact result file")
+    for action, description in (
+        ("bench", "run the official k6 workload in Docker"),
+        ("profile", "sample native user CPU stacks during the workload"),
+    ):
+        benchmark = actions.add_parser(action, help=description)
+        benchmark.add_argument("--label", required=True, help="unique lowercase run name")
+        benchmark.add_argument("--vus", type=int, default=5000)
+        benchmark.add_argument(
+            "--hold", default="60s", help="time at target users (default: 60s; confirmation: 5m)"
+        )
+        benchmark.add_argument(
+            "--ramp", default="30s", help="ramp-up time (default: 30s; confirmation: 60s)"
+        )
+        benchmark.add_argument(
+            "--k6", type=Path, default=shutil.which("k6"), help="k6 executable; defaults to PATH"
+        )
+        benchmark.add_argument("--save", type=Path, default=RESULTS if action == "bench" else None)
     results = actions.add_parser("results", help="display saved benchmark results")
     results.add_argument("file", type=Path, nargs="?", default=RESULTS)
     results.add_argument(
@@ -630,11 +872,13 @@ def main() -> None:
         if args.action == "check":
             check(args.docker)
         elif args.action == "results":
-            saved = read_results(args.file)
+            document = read_json(args.file)
             if args.json_output:
-                print(json.dumps(saved))
+                print(json.dumps(document, allow_nan=False))
+            elif isinstance(document, list):
+                show_results(read_results(args.file))
             else:
-                show_results(saved)
+                show_profile(mapping(mapping(document)["profile"]))
         else:
             if args.k6 is None or not args.k6.is_file():
                 parser.error("install k6 or pass --k6 PATH")
@@ -644,18 +888,41 @@ def main() -> None:
                 or any(c not in "abcdefghijklmnopqrstuvwxyz0123456789-" for c in args.label)
             ):
                 parser.error("positive VUs and a lowercase alphanumeric/hyphen label are required")
-            saved = read_results(args.save) if args.save.exists() else []
+            profiling = args.action == "profile"
+            destination = args.save
+            saved = (
+                read_results(destination)
+                if not profiling and destination is not None and destination.exists()
+                else []
+            )
             if any(row["name"] == args.label for row in saved):
                 parser.error("run name already exists; choose a new --label")
             output = ROOT / "results" / args.label
             output.mkdir(parents=True, exist_ok=False)
             build()
+            if profiling:
+                build(profiler=True)
             with server(output) as (container, port):
-                code = load(args, container, port, output)
+                if profiling:
+                    with sampling(container, output):
+                        code = load(args, container, port, output)
+                else:
+                    code = load(args, container, port, output)
             result = summarize(output)
-            args.save.parent.mkdir(parents=True, exist_ok=True)
-            write_json(args.save, [*saved, result])
             show_results([result])
+            if profiling:
+                profile = mapping(read_json(output / "profile.json"))
+                report = {"benchmark": result, "profile": profile}
+                write_json(output / "profile.json", report)
+                if destination is not None:
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    write_json(destination, report)
+                show_profile(profile)
+            else:
+                if destination is None:
+                    raise ValueError("a result file is required for benchmarks")
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                write_json(destination, [*saved, result])
             raise SystemExit(code)
     except subprocess.CalledProcessError as error:
         if error.stdout:

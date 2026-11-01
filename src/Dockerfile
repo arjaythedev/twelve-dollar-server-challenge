@@ -1,21 +1,22 @@
-FROM ubuntu:24.04@sha256:78d4744ead1f5b19b04d0df558ab182a5300903900755e515b2ca4d10eb2044d
+FROM ubuntu:24.04@sha256:78d4744ead1f5b19b04d0df558ab182a5300903900755e515b2ca4d10eb2044d AS build
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    ca-certificates cmake ninja-build make gcc g++ libssl-dev
+WORKDIR /build
+COPY CMakeLists.txt ./
+COPY server ./server
+COPY checks/transport.cpp ./checks/transport.cpp
+ARG TDS_SANITIZERS=OFF
+RUN cmake -S . -B out -G Ninja -DCMAKE_BUILD_TYPE=Release -DTDS_SANITIZERS=${TDS_SANITIZERS} \
+    && cmake --build out --parallel 2
 
-ENV UV_PYTHON_INSTALL_DIR=/opt/python \
-    UV_CACHE_DIR=/tmp/uv-cache \
-    UV_PYTHON_PREFERENCE=only-managed \
-    HOST=0.0.0.0 PORT=3000 SQLITE_PATH=/data/feed.db
+FROM ubuntu:24.04@sha256:78d4744ead1f5b19b04d0df558ab182a5300903900755e515b2ca4d10eb2044d
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    libstdc++6 libssl3t64 curl jq openssl sqlite3 \
+    && useradd --uid 10001 --create-home benchmark
 WORKDIR /app
-COPY install.sh build.sh start.sh server.py pyproject.toml uv.lock .python-version ./
-# Normalize Windows checkout line endings without changing upstream files.
-RUN sed -i 's/\r$//' ./*.sh \
-    && bash install.sh \
-    && apt-get install -y --no-install-recommends jq openssl \
-    && useradd --uid 10001 --create-home benchmark \
-    && mkdir -p /opt/python \
-    && chown -R 10001:10001 /app /opt/python
+COPY --from=build /build/out/server ./server
 USER 10001:10001
-RUN uv sync --locked --no-dev
-COPY --chown=10001:10001 api ./api
-COPY --chown=10001:10001 native ./native
-RUN bash build.sh
-CMD ["bash", "start.sh"]
+ENV HOST=0.0.0.0 PORT=3000 SQLITE_PATH=/data/feed.db
+ENTRYPOINT ["/app/server"]

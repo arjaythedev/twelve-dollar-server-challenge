@@ -1,8 +1,6 @@
 .venv
 .ruff_cache
-.native
-api/_json.dll
-api/_json.so
+.build
 **/__pycache__
 **/*.pyc
 .git

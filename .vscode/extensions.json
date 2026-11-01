@@ -4,6 +4,7 @@
     "ms-python.vscode-pylance",
     "charliermarsh.ruff",
     "editorconfig.editorconfig",
-    "tamasfe.even-better-toml"
+    "tamasfe.even-better-toml",
+    "ms-vscode.cpptools"
   ]
 }

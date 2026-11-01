@@ -2,7 +2,7 @@
   {
     "date": "2026-11-01",
     "name": "probe-1000",
-    "python": "3.12.13",
+    "runtime": "Python 3.12.13",
     "sqlite": "3.53.1",
     "users": 1000,
     "hold": "60s",
@@ -20,7 +20,7 @@
   {
     "date": "2026-11-01",
     "name": "probe-5000",
-    "python": "3.12.13",
+    "runtime": "Python 3.12.13",
     "sqlite": "3.53.1",
     "users": 5000,
     "hold": "60s",
@@ -38,7 +38,7 @@
   {
     "date": "2026-11-01",
     "name": "confirm-5000",
-    "python": "3.12.13",
+    "runtime": "Python 3.12.13",
     "sqlite": "3.53.1",
     "users": 5000,
     "hold": "5m",
@@ -56,7 +56,7 @@
   {
     "date": "2026-11-01",
     "name": "python315-5000",
-    "python": "3.15.2",
+    "runtime": "Python 3.15.2",
     "sqlite": "3.53.1",
     "users": 5000,
     "hold": "5m",
@@ -74,7 +74,7 @@
   {
     "date": "2026-11-01",
     "name": "json-before-5000",
-    "python": "3.15.2",
+    "runtime": "Python 3.15.2",
     "sqlite": "3.53.1",
     "users": 5000,
     "hold": "60s",
@@ -92,7 +92,7 @@
   {
     "date": "2026-11-01",
     "name": "json-native-5000",
-    "python": "3.15.2",
+    "runtime": "Python 3.15.2",
     "sqlite": "3.53.1",
     "users": 5000,
     "hold": "60s",

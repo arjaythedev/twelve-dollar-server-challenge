@@ -29,4 +29,4 @@ Python 3.15.2, 5,000 users, five-minute hold. External CPU/wall samplers at 1 kH
 
 These are sampling estimates, not exact function timings. Stack-read failures: CPU 2.58%, wall 2.44%. Body-JSON parsing and GC had no captured samples; that does not establish zero cost.
 
-[Profile data](src/profiles/request-5000.json). Raw samples and flamegraphs: `results/request-profile-5000/`.
+Raw samples and flamegraphs: `results/request-profile-5000/`.

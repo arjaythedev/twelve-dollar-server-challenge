@@ -5,9 +5,12 @@ import hashlib
 import http.client
 import json
 import math
+import os
 import platform
+import shlex
 import shutil
 import subprocess
+import tarfile
 import tempfile
 import time
 import uuid
@@ -15,18 +18,25 @@ from collections.abc import Generator
 from contextlib import closing, contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TypedDict
+from typing import Never, TypedDict, cast
 
 import psutil
 
-from api.codec import JSONValue, decode_json
-from request_profile import ModeProfile
-from request_profile import analyze as analyze_profile
-from request_profile import display as display_profile
-
 ROOT = Path(__file__).resolve().parent.parent
-IMAGE = "twelve-dollar-baseline:local"
+IMAGE = "twelve-dollar-cpp:local"
+JWT_KEY = "twelve-dollar-challenge"
 RESULTS = ROOT / "src/benchmarks/results.json"
+
+
+type JSONValue = bool | int | float | str | list[JSONValue] | dict[str, JSONValue] | None
+
+
+def reject_constant(value: str) -> Never:
+    raise ValueError(f"invalid JSON constant: {value}")
+
+
+def decode_json(data: bytes) -> JSONValue:
+    return cast(JSONValue, json.loads(data.decode("utf-8"), parse_constant=reject_constant))
 
 
 class Arguments(argparse.Namespace):
@@ -40,14 +50,12 @@ class Arguments(argparse.Namespace):
     save: Path
     file: Path
     json_output: bool
-    iterations: int
-    repeat: int
 
 
 class Result(TypedDict):
     date: str
     name: str
-    python: str
+    runtime: str
     sqlite: str
     users: int
     hold: str
@@ -95,13 +103,13 @@ def counters(container: str) -> dict[str, JSONValue]:
     return {line.split()[0]: int(line.split()[1]) for line in values.splitlines()}
 
 
-def healthy(port: int) -> bool:
+def healthy(port: int, *, expected: int = 200) -> bool:
     try:
         with closing(http.client.HTTPConnection("127.0.0.1", port, timeout=2)) as connection:
             connection.request("GET", "/health")
             response = connection.getresponse()
             response.read()
-            return response.status == 200
+            return response.status == expected
     except OSError, http.client.HTTPException:
         return False
 
@@ -151,7 +159,7 @@ def read_results(path: Path) -> list[Result]:
             Result(
                 date=text(row, "date"),
                 name=text(row, "name"),
-                python=text(row, "python"),
+                runtime=text(row, "runtime"),
                 sqlite=text(row, "sqlite"),
                 users=integer(row, "users"),
                 hold=text(row, "hold"),
@@ -174,7 +182,7 @@ def summarize(output: Path) -> Result:
     run = mapping(read_json(output / "run.json"))
     summary = mapping(read_json(output / "k6-summary.json"))
     environment = mapping(read_json(output / "environment.json"))
-    python_version, sqlite_version = text(environment, "runtime").split()
+    runtime = mapping(environment["runtime"])
     metrics = mapping(summary["metrics"])
     requests = mapping(metrics["http_reqs"])
     latency = mapping(metrics["http_req_duration"])
@@ -199,8 +207,8 @@ def summarize(output: Path) -> Result:
     return Result(
         date=datetime.fromtimestamp((output / "run.json").stat().st_mtime, UTC).date().isoformat(),
         name=output.name,
-        python=python_version,
-        sqlite=sqlite_version,
+        runtime=f"C++ {text(runtime, 'version')}",
+        sqlite=text(runtime, "sqlite"),
         users=int(setting("VUS")),
         hold=setting("DURATION"),
         ramp=setting("RAMP_UP"),
@@ -224,7 +232,7 @@ def show_results(results: list[Result]) -> None:
     rows = [
         [
             "Run",
-            "Python",
+            "Runtime",
             "Users",
             "Hold",
             "Req/s",
@@ -240,7 +248,7 @@ def show_results(results: list[Result]) -> None:
         rows.append(
             [
                 f"{row['date']}/{row['name']}",
-                row["python"],
+                row["runtime"],
                 str(row["users"]),
                 row["hold"],
                 f"{row['rps']:.2f}",
@@ -262,41 +270,119 @@ def show_results(results: list[Result]) -> None:
         )
 
 
-def build() -> None:
-    print("Building Ubuntu image...", flush=True)
+def build(*, tests: bool = False) -> str:
+    print("Building C++ image...", flush=True)
+    image = IMAGE + ("-build" if tests else "")
     command(
         "docker",
         "build",
-        "--quiet",
+        "--progress",
+        "plain",
         "--platform",
         "linux/amd64",
         "--tag",
-        IMAGE,
+        image,
+        *(["--target", "build"] if tests else []),
         "--file",
         str(ROOT / "src/Dockerfile"),
         str(ROOT / "src"),
     )
+    return image
+
+
+def cpp_editor(image: str) -> None:
+    """Give Windows IntelliSense the headers used by the Linux build."""
+    destination = ROOT / "src/.build/editor"
+    destination.mkdir(parents=True, exist_ok=True)
+
+    version = command("docker", "run", "--rm", image, "g++", "-dumpversion")
+    target = command("docker", "run", "--rm", image, "g++", "-dumpmachine")
+    gcc = command("docker", "run", "--rm", image, "g++", "-print-file-name=include")
+    directories = {
+        "cxx": f"/usr/include/c++/{version}",
+        "cxx-target": f"/usr/include/{target}/c++/{version}",
+        "gcc": gcc,
+        "local": "/usr/local/include",
+        "system": "/usr/include",
+        "uring": "/build/out/_deps/liburing/src/include",
+        "llhttp": "/build/out/_deps/llhttp-src/include",
+    }
+    script = "set -eu\nmkdir -p /tmp/editor/sqlite /tmp/editor/yyjson\n"
+    for name, source in directories.items():
+        script += f"cp -aL {shlex.quote(source)} /tmp/editor/{name}\n"
+    script += (
+        "cp /build/out/_deps/sqlite-src/sqlite3.h /build/out/_deps/sqlite-src/sqlite3ext.h "
+        "/tmp/editor/sqlite/\n"
+        "cp /build/out/_deps/yyjson_source-src/src/yyjson.h /tmp/editor/yyjson/\n"
+        "tar -cf - -C /tmp/editor .\n"
+    )
+    with tempfile.TemporaryFile() as archive:
+        subprocess.run(
+            ["docker", "run", "--rm", "--network", "none", image, "sh", "-c", script],
+            stdout=archive,
+            check=True,
+        )
+        archive.seek(0)
+        with tarfile.open(fileobj=archive) as headers:
+            headers.extractall(destination, filter="data")
+
+    print("Editor headers refreshed from the Linux build image.")
+
+
+def native_check() -> None:
+    image = build(tests=True)
+    cpp_editor(image)
+    for executable, arguments in (("server", ["--self-test"]), ("transport_tests", [])):
+        print(
+            command(
+                "docker",
+                "run",
+                "--rm",
+                "--network",
+                "none",
+                "--read-only",
+                "--user",
+                "10001:10001",
+                "--cap-drop",
+                "ALL",
+                "--cpus",
+                "1",
+                "--memory",
+                "2g",
+                "--memory-swap",
+                "2g",
+                "--security-opt",
+                f"seccomp={ROOT / 'src/docker/seccomp.json'}",
+                "--entrypoint",
+                f"/build/out/{executable}",
+                image,
+                *arguments,
+            )
+        )
 
 
 def check(use_docker: bool) -> None:
     for args in [
-        ["python", "native/build.py"],
         ["ruff", "check", "."],
         ["ruff", "format", "--check", "."],
         ["pyright"],
-        ["python", "-m", "unittest", "discover", "-v", "-s", "checks", "-p", "test_*.py"],
     ]:
         subprocess.run(["uv", "run", "--locked", *args], cwd=ROOT / "src", check=True)
     if use_docker:
         build()
+        native_check()
         output = ROOT / "results"
         output.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(prefix="check-", dir=output) as directory:
             work = Path(directory).resolve()
-            if not work.is_relative_to(output.resolve()):
-                raise RuntimeError("check directory must stay under results/")
             with server(work) as (container, port):
                 verify(container, port, work)
+        subprocess.run(
+            ["uv", "run", "--locked", "python", "-m", "unittest", "-v", "checks.test_api"],
+            cwd=ROOT / "src",
+            env=os.environ | {"TDS_HTTP_TESTS": "1"},
+            check=True,
+        )
 
 
 def verify(container: str, port: int, output: Path) -> None:
@@ -359,7 +445,6 @@ def load(args: Arguments, container: str, port: int, output: Path) -> int:
     before = counters(container)
     started = time.monotonic()
     samples: list[dict[str, JSONValue]] = []
-    aborted = False
     with (output / "k6.log").open("w", encoding="utf-8") as log:
         with subprocess.Popen(invocation, stdout=log, stderr=subprocess.STDOUT) as child:
             client = psutil.Process(child.pid)
@@ -367,14 +452,10 @@ def load(args: Arguments, container: str, port: int, output: Path) -> int:
                 while child.poll() is None:
                     try:
                         cpu = client.cpu_times()
-                        host = psutil.virtual_memory()
                         sample: dict[str, JSONValue] = {
                             "elapsed_s": time.monotonic() - started,
                             "client_cpu_s": cpu.user + cpu.system,
                             "client_rss_bytes": client.memory_info().rss,
-                            "host_memory_percent": host.percent,
-                            "host_available_bytes": host.available,
-                            "host_cpu_percent": psutil.cpu_percent(),
                             "server": counters(container),
                         }
                         samples.append(sample)
@@ -383,10 +464,6 @@ def load(args: Arguments, container: str, port: int, output: Path) -> int:
                                 f"{args.label}: {time.monotonic() - started:.0f}s elapsed",
                                 flush=True,
                             )
-                        if host.percent >= 90:
-                            aborted = True
-                            child.terminate()
-                            break
                     except psutil.NoSuchProcess:
                         break
                     time.sleep(2)
@@ -402,7 +479,6 @@ def load(args: Arguments, container: str, port: int, output: Path) -> int:
         {
             "arguments": invocation,
             "exit_code": code,
-            "host_memory_abort": aborted,
             "wall_seconds": time.monotonic() - started,
             "cgroup_before": before,
             "cgroup_after": after,
@@ -411,18 +487,23 @@ def load(args: Arguments, container: str, port: int, output: Path) -> int:
         },
     )
     print(f"k6 exit={code}; results={output}", flush=True)
-    if aborted or code not in (0, 99):
+    if code not in (0, 99):
         raise RuntimeError("load generator aborted or failed; inspect k6.log")
     return code
 
 
 @contextmanager
-def server(output: Path) -> Generator[tuple[str, int]]:
+def server(
+    output: Path, *, database: Path | None = None, secret: str = JWT_KEY
+) -> Generator[tuple[str, int]]:
     unique = f"td-bench-{uuid.uuid4().hex[:10]}"
     volume = unique + "-data"
-    seed = (ROOT / "seed/feed.db").resolve()
-    if not seed.is_file():
+    seed = (database or ROOT / "seed/feed.db").resolve()
+    if database is None and not seed.is_file():
         raise ValueError("seed/feed.db is missing")
+    launch = "exec /app/server"
+    if seed.is_file():
+        launch = f"cp {shlex.quote('/seed/' + seed.name)} /data/feed.db && {launch}"
     command("docker", "volume", "create", volume)
     try:
         command(
@@ -451,24 +532,29 @@ def server(output: Path) -> Generator[tuple[str, int]]:
             "2g",
             "--memory-swap",
             "2g",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            f"seccomp={ROOT / 'src/docker/seccomp.json'}",
             "--ulimit",
             "nofile=65535:65535",
             "--env",
-            "JWT_SECRET=twelve-dollar-challenge",
+            f"JWT_SECRET={secret}",
             "--publish",
             "127.0.0.1::3000",
             "--volume",
             f"{volume}:/data",
             "--mount",
             f"type=bind,source={seed.parent},target=/seed,readonly",
-            IMAGE,
+            "--entrypoint",
             "sh",
+            IMAGE,
             "-c",
-            "cp /seed/feed.db /data/feed.db && exec bash start.sh",
+            launch,
         )
         port = int(command("docker", "port", unique, "3000/tcp").rsplit(":", 1)[1])
         for _ in range(120):
-            if healthy(port):
+            if healthy(port, expected=200 if seed.is_file() else 503):
                 break
             time.sleep(0.5)
         else:
@@ -484,18 +570,8 @@ def server(output: Path) -> Generator[tuple[str, int]]:
                 ),
                 "container": decode_json(command("docker", "inspect", unique).encode()),
                 "image": decode_json(command("docker", "image", "inspect", IMAGE).encode()),
-                "runtime": command(
-                    "docker",
-                    "exec",
-                    unique,
-                    "uv",
-                    "run",
-                    "--locked",
-                    "--no-sync",
-                    "--no-dev",
-                    "python",
-                    "-c",
-                    "import platform,sqlite3; print(platform.python_version(),sqlite3.sqlite_version)",
+                "runtime": decode_json(
+                    command("docker", "exec", unique, "/app/server", "--version").encode()
                 ),
                 "filesystem": command("docker", "exec", unique, "df", "-T", "/data"),
                 "limits": command(
@@ -511,7 +587,7 @@ def server(output: Path) -> Generator[tuple[str, int]]:
                 "workload_sha256": hashlib.sha256(
                     (ROOT / "bench/load.js").read_bytes()
                 ).hexdigest(),
-                "seed_sha256": file_hash(seed),
+                "seed_sha256": file_hash(seed) if seed.is_file() else None,
             },
         )
         yield unique, port
@@ -524,168 +600,35 @@ def server(output: Path) -> Generator[tuple[str, int]]:
         command("docker", "volume", "rm", volume)
 
 
-@contextmanager
-def sampling(container: str, output: Path) -> Generator[None]:
-    discover = (
-        "from pathlib import Path; "
-        "p=[int(p.name) for p in Path('/proc').iterdir() if p.name.isdigit() "
-        "and b'--multiprocessing-fork' in (p/'cmdline').read_bytes().split(bytes([0]))]; "
-        "assert len(p)==1,p; print(p[0])"
-    )
-    pid = command(
-        "docker",
-        "exec",
-        container,
-        "uv",
-        "run",
-        "--locked",
-        "--no-sync",
-        "--no-dev",
-        "python",
-        "-c",
-        discover,
-    )
-    owned: list[tuple[str, str]] = []
-    try:
-        for mode in ("cpu", "wall"):
-            name = f"{container}-profile-{mode}"
-            owned.append((mode, name))
-            command(
-                "docker",
-                "run",
-                "--detach",
-                "--name",
-                name,
-                "--user",
-                "0",
-                "--network",
-                "none",
-                "--pid",
-                f"container:{container}",
-                "--cap-add",
-                "SYS_PTRACE",
-                "--cpus",
-                "1",
-                "--memory",
-                "512m",
-                "--memory-swap",
-                "512m",
-                "--entrypoint",
-                "/app/.venv/bin/python",
-                IMAGE,
-                "-m",
-                "profiling.sampling",
-                "attach",
-                "--duration",
-                "600",
-                "--mode",
-                mode,
-                "--native",
-                "--binary",
-                "--compression",
-                "none",
-                "--sampling-rate",
-                "1000",
-                "--output",
-                "/tmp/request.bin",
-                pid,
-            )
-            time.sleep(1)
-            if command("docker", "inspect", "--format", "{{.State.Running}}", name) != "true":
-                raise RuntimeError(command("docker", "logs", name))
-        yield
-    finally:
-        failures: list[str] = []
-        for mode, name in owned:
-            try:
-                command("docker", "stop", "--signal", "SIGINT", "--timeout", "15", name)
-                log = subprocess.run(["docker", "logs", name], capture_output=True, text=True)
-                (output / f"{mode}-sampler.log").write_text(
-                    log.stdout + log.stderr, encoding="utf-8"
-                )
-                code = command("docker", "inspect", "--format", "{{.State.ExitCode}}", name)
-                if code not in ("0", "130"):
-                    raise RuntimeError(f"{mode} sampler exited with {code}; see its log")
-                command("docker", "cp", f"{name}:/tmp/request.bin", str(output / f"{mode}.bin"))
-            except (subprocess.CalledProcessError, RuntimeError) as error:
-                failures.append(str(error))
-            finally:
-                subprocess.run(["docker", "rm", "--force", name], capture_output=True, check=False)
-        if failures:
-            raise RuntimeError("; ".join(failures))
-
-
-def profile_report(output: Path) -> None:
-    profiles: list[ModeProfile] = []
-    for mode in ("cpu", "wall"):
-        for option, suffix in (("--collapsed", "collapsed"), ("--flamegraph", "html")):
-            command(
-                "uv",
-                "run",
-                "--directory",
-                str(ROOT / "src"),
-                "--locked",
-                "--no-sync",
-                "python",
-                "-m",
-                "profiling.sampling",
-                "replay",
-                option,
-                "--output",
-                str(output / f"{mode}.{suffix}"),
-                str(output / f"{mode}.bin"),
-            )
-        profiles.append(analyze_profile(output, mode))
-    write_json(output / "profile.json", {"benchmark": summarize(output), "profiles": profiles})
-    display_profile(profiles)
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     actions = parser.add_subparsers(dest="action", required=True)
-    checks = actions.add_parser("check", help="lint, formatting, strict typing and unit tests")
+    checks = actions.add_parser("check", help="lint, formatting and strict typing")
     checks.add_argument(
-        "--docker", action="store_true", help="also build Ubuntu and run official HTTP checks"
+        "--docker", action="store_true", help="also build Linux and run native and HTTP tests"
     )
-    for action, help_text in (
-        ("bench", "run the official k6 workload in Docker"),
-        ("profile", "sample CPU and wall time without changing the server"),
-    ):
-        benchmark = actions.add_parser(action, help=help_text)
-        benchmark.add_argument("--label", required=True, help="unique lowercase run name")
-        benchmark.add_argument("--vus", type=int, default=5000)
-        benchmark.add_argument(
-            "--hold", default="60s", help="time at target users (default: 60s; confirmation: 5m)"
-        )
-        benchmark.add_argument(
-            "--ramp", default="30s", help="ramp-up time (default: 30s; confirmation: 60s)"
-        )
-        benchmark.add_argument(
-            "--k6", type=Path, default=shutil.which("k6"), help="k6 executable; defaults to PATH"
-        )
-        if action == "bench":
-            benchmark.add_argument("--save", type=Path, default=RESULTS, help="compact result file")
+    benchmark = actions.add_parser("bench", help="run the official k6 workload in Docker")
+    benchmark.add_argument("--label", required=True, help="unique lowercase run name")
+    benchmark.add_argument("--vus", type=int, default=5000)
+    benchmark.add_argument(
+        "--hold", default="60s", help="time at target users (default: 60s; confirmation: 5m)"
+    )
+    benchmark.add_argument(
+        "--ramp", default="30s", help="ramp-up time (default: 30s; confirmation: 60s)"
+    )
+    benchmark.add_argument(
+        "--k6", type=Path, default=shutil.which("k6"), help="k6 executable; defaults to PATH"
+    )
+    benchmark.add_argument("--save", type=Path, default=RESULTS, help="compact result file")
     results = actions.add_parser("results", help="display saved benchmark results")
     results.add_argument("file", type=Path, nargs="?", default=RESULTS)
     results.add_argument(
         "--json", action="store_true", dest="json_output", help="emit JSON for other tools"
     )
-    encoding = actions.add_parser(
-        "encoding", help="compare JSON encoders and fresh SQL-to-bytes reads"
-    )
-    encoding.add_argument("--iterations", type=int, default=10000)
-    encoding.add_argument("--repeat", type=int, default=7)
-    encoding.add_argument("--save", type=Path, default=ROOT / "src/benchmarks/encoding.json")
     args = parser.parse_args(namespace=Arguments())
     try:
         if args.action == "check":
             check(args.docker)
-        elif args.action == "encoding":
-            from encoding_bench import run
-            from native.build import main as build_native
-
-            build_native()
-            run(args.iterations, args.repeat, args.save)
         elif args.action == "results":
             saved = read_results(args.file)
             if args.json_output:
@@ -701,25 +644,17 @@ def main() -> None:
                 or any(c not in "abcdefghijklmnopqrstuvwxyz0123456789-" for c in args.label)
             ):
                 parser.error("positive VUs and a lowercase alphanumeric/hyphen label are required")
-            profiling = args.action == "profile"
-            saved = read_results(args.save) if not profiling and args.save.exists() else []
+            saved = read_results(args.save) if args.save.exists() else []
             if any(row["name"] == args.label for row in saved):
                 parser.error("run name already exists; choose a new --label")
             output = ROOT / "results" / args.label
             output.mkdir(parents=True, exist_ok=False)
             build()
             with server(output) as (container, port):
-                if profiling:
-                    with sampling(container, output):
-                        code = load(args, container, port, output)
-                else:
-                    code = load(args, container, port, output)
+                code = load(args, container, port, output)
             result = summarize(output)
-            if profiling:
-                profile_report(output)
-            else:
-                args.save.parent.mkdir(parents=True, exist_ok=True)
-                write_json(args.save, [*saved, result])
+            args.save.parent.mkdir(parents=True, exist_ok=True)
+            write_json(args.save, [*saved, result])
             show_results([result])
             raise SystemExit(code)
     except subprocess.CalledProcessError as error:

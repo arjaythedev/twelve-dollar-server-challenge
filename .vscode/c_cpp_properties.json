@@ -1,0 +1,37 @@
+{
+  "configurations": [
+    {
+      "name": "Linux Docker",
+      "compilerPath": "",
+      "intelliSenseMode": "linux-gcc-x64",
+      "cppStandard": "c++23",
+      "cStandard": "c17",
+      "defines": [
+        "NDEBUG",
+        "_GNU_SOURCE",
+        "__LONG_LONG_MAX__=0x7fffffffffffffffLL"
+      ],
+      "includePath": [
+        "${workspaceFolder}/src/server",
+        "${workspaceFolder}/src/.build/editor/uring",
+        "${workspaceFolder}/src/.build/editor/llhttp",
+        "${workspaceFolder}/src/.build/editor/sqlite",
+        "${workspaceFolder}/src/.build/editor/yyjson",
+        "${workspaceFolder}/src/.build/editor/cxx",
+        "${workspaceFolder}/src/.build/editor/cxx-target",
+        "${workspaceFolder}/src/.build/editor/cxx/backward",
+        "${workspaceFolder}/src/.build/editor/gcc",
+        "${workspaceFolder}/src/.build/editor/local",
+        "${workspaceFolder}/src/.build/editor/system/x86_64-linux-gnu",
+        "${workspaceFolder}/src/.build/editor/system"
+      ],
+      "browse": {
+        "path": [
+          "${workspaceFolder}/src/server",
+          "${workspaceFolder}/src/checks"
+        ]
+      }
+    }
+  ],
+  "version": 4
+}

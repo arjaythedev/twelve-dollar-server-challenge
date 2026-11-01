@@ -1,7 +1,7 @@
 //! Reads through SQLite's B-tree cursors (see csrc/shim.c) and writes through SQL. Every
 //! response is built from rows read while the request is served, inside the batch's
 //! transaction; nothing is kept between requests except prepared statements and cursors.
-use crate::json::{escape_into, push_int};
+use crate::json::{self, escape_into, push_int};
 use std::ffi::{c_char, c_int, c_void, CString};
 
 type Cur = *mut c_void;
@@ -10,12 +10,15 @@ unsafe extern "C" {
     fn td_open(path: *const c_char, err: *mut c_char, n: c_int) -> c_int;
     fn td_begin() -> c_int;
     fn td_commit() -> c_int;
+    fn td_tick();
+    fn td_writes_held() -> c_int;
     fn td_cursor(i: c_int) -> Cur;
     fn td_seek(c: Cur, id: i64) -> c_int;
     fn td_seek_ge(c: Cur, k: i64) -> c_int;
     fn td_first(c: Cur) -> c_int;
     fn td_next(c: Cur) -> c_int;
     fn td_payload(c: Cur, len: *mut u32) -> *const u8;
+    fn td_count_likes(c: Cur, lo: i64, hi: i64, n: *mut u32) -> c_int;
     fn td_insert_post(uid: i64, body: *const u8, len: c_int, id: *mut i64, created: *mut u8, clen: *mut c_int) -> c_int;
     fn td_insert_like(uid: i64, pid: i64) -> c_int;
     fn td_health(err: *mut c_char, n: c_int) -> c_int;
@@ -144,8 +147,18 @@ fn text(c: (u64, &[u8])) -> Result<&[u8], DbError> {
     }
 }
 
-/// Likes of one post: walk likes_post_id_idx from its first entry.
+/// Likes of one post.
 fn count_likes(c: Cur, id: i64) -> Result<i64, DbError> {
+    let mut n = 0u32;
+    match unsafe { td_count_likes(c, id, id, &mut n) } {
+        0 => Ok(n as i64),
+        1 => count_likes_slow(c, id),
+        _ => Err(DbError),
+    }
+}
+
+/// Likes of one post, decoding each entry here: for cells td_count_likes doesn't expect.
+fn count_likes_slow(c: Cur, id: i64) -> Result<i64, DbError> {
     let mut r = unsafe { td_seek_ge(c, id) };
     let mut n = 0;
     while r == 1 {
@@ -216,6 +229,18 @@ impl Db {
         // td_commit also reports a transaction SQLite rolled back by itself during the pass.
         self.in_tx = false;
         unsafe { td_commit() == 0 }
+    }
+
+    /// Between passes, after the commit: drives the checkpoint thread (see csrc/shim.c).
+    #[inline]
+    pub fn tick(&mut self) {
+        unsafe { td_tick() }
+    }
+
+    /// Writes must wait: the checkpoint thread is copying the log's last frames.
+    #[inline]
+    pub fn writes_held(&self) -> bool {
+        unsafe { td_writes_held() != 0 }
     }
 
     pub fn health(&mut self) -> Result<(), String> {
@@ -349,20 +374,19 @@ impl Db {
         if let (Some(&lo), Some(&hi)) = (self.order.first(), self.order.last()) {
             let (lo, hi) = (rows[lo].id, rows[hi].id);
             if hi - lo <= RANGE_SPAN {
-                let mut r = unsafe { td_seek_ge(cl, lo) };
-                while r == 1 {
-                    let [k] = columns::<1>(payload(cl)?)?;
-                    let pid = int_of(k.0, k.1)?;
-                    if pid > hi {
-                        break;
+                let mut n = [0u32; RANGE_SPAN as usize + 1];
+                match unsafe { td_count_likes(cl, lo, hi, n.as_mut_ptr()) } {
+                    0 => {
+                        for row in rows.iter_mut() {
+                            row.likes = n[(row.id - lo) as usize] as i64;
+                        }
                     }
-                    if let Ok(j) = self.order.binary_search_by_key(&pid, |&i| rows[i].id) {
-                        rows[self.order[j]].likes += 1;
+                    1 => {
+                        for row in rows.iter_mut() {
+                            row.likes = count_likes_slow(cl, row.id)?;
+                        }
                     }
-                    r = unsafe { td_next(cl) };
-                }
-                if r < 0 {
-                    return Err(DbError);
+                    _ => return Err(DbError),
                 }
             } else {
                 for row in rows.iter_mut() {
@@ -373,25 +397,32 @@ impl Db {
         Ok(true)
     }
 
+    /// Written in one reservation: every row's strings live in self.text, so 6x its length
+    /// bounds their escaped form.
     fn feed_json(&self, out: &mut Vec<u8>) {
-        out.extend_from_slice(b"{\"posts\":[");
-        for (k, row) in self.rows.iter().enumerate() {
-            if k > 0 {
-                out.push(b',');
+        const ROW: usize = b",{\"id\":,\"body\":\"\",\"created_at\":\"\",\"author\":\"\",\"like_count\":}".len() + 2 * json::INT_BOUND;
+        let t = &self.text;
+        let bound = b"{\"posts\":[]}".len() + self.rows.len() * ROW + json::esc_bound(t.len());
+        json::fill(out, bound, |c| {
+            c.lit(b"{\"posts\":[");
+            for (k, row) in self.rows.iter().enumerate() {
+                if k > 0 {
+                    c.byte(b',');
+                }
+                c.lit(b"{\"id\":");
+                c.int(row.id);
+                c.lit(b",\"body\":\"");
+                c.esc(&t[row.body.0 as usize..row.body.1 as usize]);
+                c.lit(b"\",\"created_at\":\"");
+                c.esc(&t[row.created.0 as usize..row.created.1 as usize]);
+                c.lit(b"\",\"author\":\"");
+                c.esc(&t[row.author.0 as usize..row.author.1 as usize]);
+                c.lit(b"\",\"like_count\":");
+                c.int(row.likes);
+                c.byte(b'}');
             }
-            out.extend_from_slice(b"{\"id\":");
-            push_int(out, row.id);
-            out.extend_from_slice(b",\"body\":\"");
-            escape_into(out, &self.text[row.body.0 as usize..row.body.1 as usize]);
-            out.extend_from_slice(b"\",\"created_at\":\"");
-            escape_into(out, &self.text[row.created.0 as usize..row.created.1 as usize]);
-            out.extend_from_slice(b"\",\"author\":\"");
-            escape_into(out, &self.text[row.author.0 as usize..row.author.1 as usize]);
-            out.extend_from_slice(b"\",\"like_count\":");
-            push_int(out, row.likes);
-            out.push(b'}');
-        }
-        out.extend_from_slice(b"]}");
+            c.lit(b"]}");
+        });
     }
 
     /// The reference query, for data the B-tree plan doesn't expect.

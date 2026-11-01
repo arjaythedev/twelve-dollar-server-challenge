@@ -17,8 +17,14 @@ const OP_RECV: u64 = 2;
 const OP_SEND: u64 = 3;
 const OP_SHUTDOWN: u64 = 4;
 const OP_CLOSE: u64 = 5;
-/// Single-shot accepts kept in flight on the accepting ring.
-const ACCEPT_DEPTH: u32 = 64;
+/// Single-shot accepts kept in flight on the accepting ring, spread evenly over the listeners
+/// (fewer on a small table). Each is re-armed only after a pass sees it complete, so this bounds
+/// the accept rate: a ramp of thousands of connections a second needs hundreds in flight, or the
+/// listen queues fill and new connections wait out SYN retransmits.
+const ACCEPT_DEPTH: u32 = 512;
+/// SO_REUSEPORT listeners on the one port. Each has its own accept queue, capped at
+/// net.core.somaxconn (4,096 by default), so eight hold eight times as many pending connections.
+const LISTENERS: usize = 8;
 
 const SQ_ENTRIES: u32 = 4096;
 const CQ_ENTRIES: u32 = 65536;
@@ -118,6 +124,10 @@ struct Conn {
     open: bool,
     /// The connection ends once its output drains.
     close_after: bool,
+    /// A write of this connection waits out a checkpoint hold (it is on the held list).
+    held: bool,
+    /// The client finished sending while a write was held: close once that write is answered.
+    eof: bool,
     /// shutdown/close submitted.
     closing: bool,
     sending: bool,
@@ -134,10 +144,10 @@ struct Conn {
     partial: Buf,
 }
 
-const _: () = assert!(std::mem::size_of::<Conn>() == 40);
+const _: () = assert!(std::mem::size_of::<Conn>() == 48);
 
 /// A connection's byte buffer: one null pointer while unused, so an idle connection's record
-/// stays at 40 bytes (there is one per descriptor slot, in use or not).
+/// stays at 48 bytes (there is one per descriptor slot, in use or not).
 #[derive(Default)]
 struct Buf(Option<Box<Vec<u8>>>);
 
@@ -167,11 +177,13 @@ struct Ring {
     conns: Vec<Conn>,
     /// Accepts are kept armed here.
     accepting: bool,
-    accepts: u32,
+    /// Accepts in flight, per listener, and how many each listener keeps.
+    accepts: [u32; LISTENERS],
+    depth: u32,
     /// Not accepting here: the table is (nearly) full.
     full: bool,
     open: u32,
-    /// Accepting moves on while this many slots are still free (more than ACCEPT_DEPTH): an
+    /// Accepting moves on while this many slots are still free (more than the accepts in flight): an
     /// accept that finds the table full has already taken the connection off the listen queue
     /// and would drop it. Single-shot accepts bound how many can land after the switch.
     margin: u32,
@@ -189,9 +201,11 @@ impl Ring {
         uring.submitter().register_files_sparse(slots)?;
         let bufs = BufRing::new(uring.as_raw_fd())?;
         let conns = (0..slots).map(|_| Conn::default()).collect();
+        // In flight at once: at most a sixteenth of the table, and always less than the margin.
+        let depth = (slots / 16).clamp(LISTENERS as u32, ACCEPT_DEPTH) / LISTENERS as u32 * LISTENERS as u32;
         // At most a quarter of a small table, so a full ring can still drain below 2x margin.
-        let margin = (slots / 8).clamp(ACCEPT_DEPTH + 1, 512).min(slots / 4);
-        Ok(Ring { uring, bufs, conns, accepting: false, accepts: 0, full: false, open: 0, margin, rearm: Vec::new() })
+        let margin = (slots / 8).clamp(depth + 1, 2 * ACCEPT_DEPTH).min(slots / 4);
+        Ok(Ring { uring, bufs, conns, accepting: false, accepts: [0; LISTENERS], depth, full: false, open: 0, margin, rearm: Vec::new() })
     }
 }
 
@@ -243,30 +257,35 @@ fn arm_close(sq: &mut SubmissionQueue, sub: &Submitter, ri: usize, slot: u32, c:
     push(sq, sub, &cl, 1);
 }
 
-fn fill_accepts(sq: &mut SubmissionQueue, sub: &Submitter, ri: usize, listen: RawFd, accepts: &mut u32) {
-    while *accepts < ACCEPT_DEPTH {
-        let e = opcode::Accept::new(types::Fd(listen), std::ptr::null_mut(), std::ptr::null_mut())
-            .file_index(Some(types::DestinationSlot::auto_target()))
-            .build()
-            .user_data(ud(OP_ACCEPT, ri, 0, 0));
-        push(sq, sub, &e, 1);
-        *accepts += 1;
+fn fill_accepts(sq: &mut SubmissionQueue, sub: &Submitter, ri: usize, listen: &[RawFd], accepts: &mut [u32; LISTENERS], depth: u32) {
+    for (li, &fd) in listen.iter().enumerate() {
+        while accepts[li] < depth / LISTENERS as u32 {
+            let e = opcode::Accept::new(types::Fd(fd), std::ptr::null_mut(), std::ptr::null_mut())
+                .file_index(Some(types::DestinationSlot::auto_target()))
+                .build()
+                .user_data(ud(OP_ACCEPT, ri, 0, li as u32));
+            push(sq, sub, &e, 1);
+            accepts[li] += 1;
+        }
     }
 }
 
-fn arm_accept(r: &mut Ring, ri: usize, listen: RawFd) {
+fn arm_accept(r: &mut Ring, ri: usize, listen: &[RawFd]) {
     r.accepting = true;
     let (sub, mut sq, _) = r.uring.split();
-    fill_accepts(&mut sq, &sub, ri, listen, &mut r.accepts);
+    fill_accepts(&mut sq, &sub, ri, listen, &mut r.accepts, r.depth);
 }
 
 struct Server {
     rings: Vec<Ring>,
     app: App,
-    listen: RawFd,
+    listen: Vec<RawFd>,
     slots: u32,
     pool: Vec<Box<Vec<u8>>>,
     touched: Vec<(u8, u32)>,
+    /// Connections whose next request is a write waiting for a checkpoint hold to end
+    /// (ring, slot, generation). May hold duplicates.
+    held: Vec<(u8, u32, u16)>,
     need_ring: bool,
     /// When adding a ring failed: don't retry before this.
     spill_after: std::time::Instant,
@@ -290,9 +309,9 @@ fn give_buf(pool: &mut Vec<Box<Vec<u8>>>, b: Buf) {
 impl Server {
     /// Handles every completion of ring `ri`. Returns how many there were.
     fn drain(&mut self, ri: usize) -> usize {
-        let Server { rings, app, pool, touched, listen, need_ring, .. } = self;
+        let Server { rings, app, pool, touched, held, listen, need_ring, .. } = self;
         let r = &mut rings[ri];
-        let Ring { uring, bufs, conns, accepting, accepts, full, open, margin, rearm } = r;
+        let Ring { uring, bufs, conns, accepting, accepts, depth, full, open, margin, rearm } = r;
         let slots = conns.len() as u32;
         let (sub, mut sq, mut cq) = uring.split();
         cq.sync();
@@ -305,7 +324,7 @@ impl Server {
             let flags = cqe.flags();
             match op {
                 OP_ACCEPT => {
-                    *accepts -= 1;
+                    accepts[slot as usize] -= 1;
                     if res >= 0 {
                         let c = &mut conns[res as usize];
                         let g = c.gen.wrapping_add(1);
@@ -334,7 +353,7 @@ impl Server {
                             continue;
                         };
                         let data = bufs.get(b, res as usize);
-                        serve(app, pool, touched, ri, slot, c, data);
+                        serve(app, pool, touched, held, ri, slot, c, data);
                         bufs.add(b);
                         if !cqueue::more(flags) {
                             rearm.push(slot);
@@ -346,8 +365,13 @@ impl Server {
                         if let Some(b) = bid {
                             bufs.add(b);
                         }
-                        c.close_after = true;
-                        mark(touched, ri, slot, c);
+                        if c.held {
+                            // Its held write is still owed an answer.
+                            c.eof = true;
+                        } else {
+                            c.close_after = true;
+                            mark(touched, ri, slot, c);
+                        }
                     }
                 }
                 OP_SEND => {
@@ -401,7 +425,7 @@ impl Server {
                 *accepting = false;
                 *need_ring = true;
             } else {
-                fill_accepts(&mut sq, &sub, ri, *listen, accepts);
+                fill_accepts(&mut sq, &sub, ri, listen, accepts, *depth);
             }
         }
         n
@@ -411,6 +435,8 @@ impl Server {
     fn end_batch(&mut self) {
         let committed = self.app.db.commit();
         self.app.wrote = false;
+        // No transaction is open here: the only point where a checkpoint hold starts or ends.
+        self.app.db.tick();
         let Server { rings, touched, pool, .. } = self;
         for &(ri, slot) in touched.iter() {
             let r = &mut rings[ri as usize];
@@ -463,6 +489,24 @@ impl Server {
         }
     }
 
+    /// The hold is over: serves the writes it held (and whatever arrived behind them) in this
+    /// pass, from the bytes kept on each connection.
+    fn release_held(&mut self) {
+        let list = std::mem::take(&mut self.held);
+        let Server { rings, app, pool, touched, held, .. } = self;
+        for &(ri, slot, gen) in &list {
+            let c = &mut rings[ri as usize].conns[slot as usize];
+            if c.gen == gen && c.open && !c.closing {
+                c.held = false;
+                serve(app, pool, touched, held, ri as usize, slot, c, &[]);
+                if c.eof && !c.held {
+                    c.close_after = true;
+                    mark(touched, ri as usize, slot, c);
+                }
+            }
+        }
+    }
+
     /// A ring's descriptor table is full: accept on the next ring with room, adding one if needed.
     /// Returns whether some ring is accepting afterwards.
     fn spill(&mut self) -> bool {
@@ -470,7 +514,7 @@ impl Server {
             return true;
         }
         if let Some(ri) = self.rings.iter().position(|r| !r.full) {
-            arm_accept(&mut self.rings[ri], ri, self.listen);
+            arm_accept(&mut self.rings[ri], ri, &self.listen);
             return true;
         }
         if self.rings.len() >= MAX_RINGS {
@@ -480,7 +524,7 @@ impl Server {
         match Ring::new(self.slots) {
             Ok(mut r) => {
                 let ri = self.rings.len();
-                arm_accept(&mut r, ri, self.listen);
+                arm_accept(&mut r, ri, &self.listen);
                 self.rings.push(r);
                 eprintln!("ring {ri} added ({} slots each)", self.slots);
                 true
@@ -521,6 +565,9 @@ impl Server {
                 n += self.drain(ri);
             }
             let _ = n;
+            if !self.held.is_empty() && !self.app.db.writes_held() {
+                self.release_held();
+            }
             #[cfg(feature = "stats")]
             stats::batch(n, self.touched.len(), self.app.wrote);
             self.end_batch();
@@ -563,8 +610,11 @@ fn mark(touched: &mut Vec<(u8, u32)>, ri: usize, slot: u32, c: &mut Conn) {
     }
 }
 
-/// Parses and answers every complete request in `data` (plus any earlier partial bytes).
-fn serve(app: &mut App, pool: &mut Vec<Box<Vec<u8>>>, touched: &mut Vec<(u8, u32)>, ri: usize, slot: u32, c: &mut Conn, data: &[u8]) {
+/// Parses and answers every complete request in `data` (plus any earlier partial bytes). During a
+/// checkpoint hold a write stops it: that request and everything behind it stay on the
+/// connection, which goes on the held list, until the hold ends.
+#[allow(clippy::too_many_arguments)]
+fn serve(app: &mut App, pool: &mut Vec<Box<Vec<u8>>>, touched: &mut Vec<(u8, u32)>, held: &mut Vec<(u8, u32, u16)>, ri: usize, slot: u32, c: &mut Conn, data: &[u8]) {
     if c.close_after {
         return;
     }
@@ -579,6 +629,13 @@ fn serve(app: &mut App, pool: &mut Vec<Box<Vec<u8>>>, touched: &mut Vec<(u8, u32
     loop {
         match http::parse(&buf[off..]) {
             http::Parsed::Done(req, used) => {
+                if req.method == b"POST" && app.db.writes_held() {
+                    if !c.held {
+                        c.held = true;
+                        held.push((ri as u8, slot, c.gen));
+                    }
+                    break;
+                }
                 mark(touched, ri, slot, c);
                 c.answered = true;
                 app.handle(&req, c.out.get(pool));
@@ -609,8 +666,12 @@ fn serve(app: &mut App, pool: &mut Vec<Box<Vec<u8>>>, touched: &mut Vec<(u8, u32
     }
 }
 
-fn listen(host: &str, port: u16) -> io::Result<RawFd> {
+fn listen(host: &str, port: u16) -> io::Result<Vec<RawFd>> {
     let ip: std::net::Ipv4Addr = host.parse().map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "HOST must be an IPv4 address"))?;
+    (0..LISTENERS).map(|_| listener(ip, port)).collect()
+}
+
+fn listener(ip: std::net::Ipv4Addr, port: u16) -> io::Result<RawFd> {
     unsafe {
         let fd = libc::socket(libc::AF_INET, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0);
         if fd < 0 {
@@ -619,6 +680,9 @@ fn listen(host: &str, port: u16) -> io::Result<RawFd> {
         let one: libc::c_int = 1;
         let sz = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
         libc::setsockopt(fd, libc::SOL_SOCKET, libc::SO_REUSEADDR, &one as *const _ as *const _, sz);
+        if libc::setsockopt(fd, libc::SOL_SOCKET, libc::SO_REUSEPORT, &one as *const _ as *const _, sz) < 0 {
+            return Err(io::Error::last_os_error());
+        }
         // Accepted sockets inherit TCP_NODELAY.
         libc::setsockopt(fd, libc::IPPROTO_TCP, libc::TCP_NODELAY, &one as *const _ as *const _, sz);
         let addr = libc::sockaddr_in {
@@ -670,8 +734,8 @@ fn main() {
         eprintln!("io_uring: {e}");
         std::process::exit(1)
     });
-    arm_accept(&mut ring, 0, fd);
+    arm_accept(&mut ring, 0, &fd);
     eprintln!("listening on {host}:{port}; io_uring, {slots} direct descriptors per ring");
-    let mut s = Server { rings: vec![ring], app, listen: fd, slots, pool: Vec::new(), touched: Vec::new(), need_ring: false, spill_after: std::time::Instant::now() };
+    let mut s = Server { rings: vec![ring], app, listen: fd, slots, pool: Vec::new(), touched: Vec::new(), held: Vec::new(), need_ring: false, spill_after: std::time::Instant::now() };
     s.run()
 }

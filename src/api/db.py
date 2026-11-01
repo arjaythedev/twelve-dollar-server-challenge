@@ -1,4 +1,4 @@
-"""Request-thread-owned SQLite connection, ordinary SQL and explicit write commits."""
+"""Request-thread-owned SQLite; native JSON reads and explicit write commits."""
 
 import sqlite3
 from pathlib import Path
@@ -6,19 +6,23 @@ from typing import cast
 
 from .models import Post
 
-type PostRow = tuple[int, str, str, str, int]
 type CreatedRow = tuple[int, str]
 
 
-POST_SELECT = """
-SELECT p.id, p.body, p.created_at, u.username,
-       (SELECT count(*) FROM likes l WHERE l.post_id = p.id)
-FROM posts p JOIN users u ON u.id = p.user_id
+FEED_SQL = """
+SELECT td_feed(id, body, created_at, author, like_count)
+FROM (
+    SELECT p.id, p.body, p.created_at, u.username AS author,
+           (SELECT count(*) FROM likes l WHERE l.post_id = p.id) AS like_count
+    FROM posts p JOIN users u ON u.id = p.user_id
+    ORDER BY p.created_at DESC, p.id DESC LIMIT 20
+)
 """
-
-
-def _post(row: PostRow) -> Post:
-    return Post(id=row[0], body=row[1], created_at=row[2], author=row[3], like_count=row[4])
+POST_SQL = """
+SELECT td_post(p.id, p.body, p.created_at, u.username,
+               (SELECT count(*) FROM likes l WHERE l.post_id = p.id))
+FROM posts p JOIN users u ON u.id = p.user_id WHERE p.id = ?
+"""
 
 
 class Database:
@@ -28,6 +32,11 @@ class Database:
             uri, uri=True, isolation_level="DEFERRED", cached_statements=16
         )
         try:
+            connection.enable_load_extension(True)
+            try:
+                connection.load_extension(str(Path(__file__).with_name("_json")))
+            finally:
+                connection.enable_load_extension(False)
             connection.execute("PRAGMA journal_mode=WAL").fetchall()
             connection.execute("PRAGMA synchronous=NORMAL")
             connection.execute("PRAGMA foreign_keys=ON")
@@ -42,21 +51,15 @@ class Database:
     def health(self) -> None:
         self.connection.execute("SELECT 1").fetchall()
 
-    def feed(self) -> list[Post]:
-        rows = cast(
-            list[PostRow],
-            self.connection.execute(
-                POST_SELECT + " ORDER BY p.created_at DESC, p.id DESC LIMIT 20"
-            ).fetchall(),
-        )
-        return [_post(row) for row in rows]
+    def feed(self) -> bytes:
+        return cast(tuple[bytes], self.connection.execute(FEED_SQL).fetchone())[0]
 
-    def post(self, post_id: int) -> Post | None:
+    def post(self, post_id: int) -> bytes | None:
         row = cast(
-            PostRow | None,
-            self.connection.execute(POST_SELECT + " WHERE p.id = ?", (post_id,)).fetchone(),
+            tuple[bytes] | None,
+            self.connection.execute(POST_SQL, (post_id,)).fetchone(),
         )
-        return _post(row) if row is not None else None
+        return row[0] if row is not None else None
 
     def create(self, user_id: int, username: str, body: str) -> Post:
         with self.connection:

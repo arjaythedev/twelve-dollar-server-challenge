@@ -2,6 +2,9 @@
 __pycache__/
 *.py[cod]
 .ruff_cache/
+.native/
+api/_json.dll
+api/_json.so
 .env
 .env.*
 !.env.example

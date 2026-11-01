@@ -1,4 +1,4 @@
-"""Five API routes with Python JSON and fresh SQLite reads."""
+"""Five API routes with fresh SQLite reads and JSON bytes ready for Granian."""
 
 import logging
 import os
@@ -73,7 +73,7 @@ class Application:
                 "uptime_s": int(time.monotonic() - self.started),
             }
         if method == "GET" and path == "/feed":
-            return 200, {"posts": self.database.feed()}
+            return 200, self.database.feed()
         if method == "POST" and path == "/posts":
             identity = authenticate(scope.headers.get("authorization", ""), self.secret)
             try:
@@ -92,7 +92,7 @@ class Application:
             post = self.database.post(post_id)
             if post is None:
                 raise APIError(404, "post not found")
-            return 200, {"post": post}
+            return 200, post
         if route is not None and method == "POST" and route[2] is not None:
             identity = authenticate(scope.headers.get("authorization", ""), self.secret)
             post_id = positive_id(route[1])
@@ -109,7 +109,7 @@ class Application:
     async def __call__(self, scope: Request, protocol: ResponseProtocol) -> None:
         try:
             status, body = await self.handle(scope, protocol)
-            encoded = encode_json(body)
+            encoded = body if isinstance(body, bytes) else encode_json(body)
         except AuthenticationError as error:
             status, encoded = 401, encode_json({"error": str(error)})
         except APIError as error:

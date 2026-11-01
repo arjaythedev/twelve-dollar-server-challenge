@@ -6,7 +6,9 @@
 - [x] Record the first Docker benchmarks.
 - [x] Reduce the docs and combine dev tooling.
 - [x] Rename the package to api and upgrade to current stable Python.
-- [ ] Profile the baseline, then pick one item from [Ideas.md](Ideas.md).
+- [x] Profile the unchanged request path at 5,000 users: SQL, JSON, auth and remaining work.
+- [x] Compare stdlib, orjson, msgspec, SQLite JSON and a native JSON writer.
+- [x] Encode feed and post reads directly in C through SQLite's extension API.
 - [ ] Compare changes on the same setup and repeat runs.
 - [ ] Later: test capacity on a comparable Linux VM with a separate load generator.
 - [ ] Finally: move our src contents and docs into `submissions/<stack>-SmolBlackHole/` with git mv. Rename SUBMISSION.md to README.md, update paths and rerun checks. Exclude generated output.

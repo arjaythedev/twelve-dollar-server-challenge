@@ -6,7 +6,6 @@ ENV UV_PYTHON_INSTALL_DIR=/opt/python \
     HOST=0.0.0.0 PORT=3000 SQLITE_PATH=/data/feed.db
 WORKDIR /app
 COPY install.sh build.sh start.sh server.py pyproject.toml uv.lock .python-version ./
-COPY api ./api
 # Normalize Windows checkout line endings without changing upstream files.
 RUN sed -i 's/\r$//' ./*.sh \
     && bash install.sh \
@@ -15,5 +14,8 @@ RUN sed -i 's/\r$//' ./*.sh \
     && mkdir -p /opt/python \
     && chown -R 10001:10001 /app /opt/python
 USER 10001:10001
+RUN uv sync --locked --no-dev
+COPY --chown=10001:10001 api ./api
+COPY --chown=10001:10001 native ./native
 RUN bash build.sh
 CMD ["bash", "start.sh"]

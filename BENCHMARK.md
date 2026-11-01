@@ -12,3 +12,21 @@
 Statistics include the ramps. RAM is the cgroup peak, including charged file pages. Maximum latency in the short 5,000-user run: 584.91 ms. Local results, not an official score or a measured capacity limit.
 
 [Data](src/benchmarks/results.json). Full logs stay in `results/<run>/`.
+
+## Request-path sampling
+
+Python 3.15.2, 5,000 users, five-minute hold. External CPU/wall samplers at 1 kHz on Granian's Python request thread. Unchanged API. The load run passed: 186,776 requests, p95 1.056 ms, p99 1.616 ms, no errors.
+
+| Within captured handler stacks | CPU samples | Wall samples |
+| --- | ---: | ---: |
+| SQL + database wrapper | 49.5% | 52.7% |
+| Row materialization | 0.1% | 0.1% |
+| Response JSON | 31.2% | 24.6% |
+| Auth, including JWT JSON | 3.2% | 2.6% |
+| Routing, response handoff and other | 16.0% | 20.0% |
+
+5,842 handler CPU samples and 8,521 handler wall samples. Another 59.8% of valid CPU samples were outside the handler, mainly asyncio/event-loop work. Native HTTP threads and suspended async waits are outside this profile's scope.
+
+These are sampling estimates, not exact function timings. Stack-read failures: CPU 2.58%, wall 2.44%. Body-JSON parsing and GC had no captured samples; that does not establish zero cost.
+
+[Profile data](src/profiles/request-5000.json). Raw samples and flamegraphs: `results/request-profile-5000/`.

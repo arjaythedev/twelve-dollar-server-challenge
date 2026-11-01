@@ -196,6 +196,43 @@ class ApplicationTests(unittest.TestCase):
         self.assertEqual(status, 401)
         self.assertEqual(protocol.reads, 0)
 
+    def test_empty_feed_and_limit_with_nonmonotonic_timestamps(self) -> None:
+        with closing(sqlite3.connect(self.path)) as connection, connection:
+            connection.execute("DELETE FROM posts")
+        self.assertEqual(self.request("GET", "/feed")[:2], (200, {"posts": []}))
+        with closing(sqlite3.connect(self.path)) as connection, connection:
+            connection.executemany(
+                "INSERT INTO posts(id,user_id,body,created_at) VALUES(?,1,'body',?)",
+                [(i, f"2026-01-{31 - i // 2:02}T00:00:00.000Z") for i in range(1, 32)],
+            )
+        posts = as_array(self.request("GET", "/feed")[1]["posts"])
+        self.assertEqual(len(posts), 20)
+        self.assertEqual(
+            [as_object(p)["id"] for p in posts],
+            [1, 3, 2, 5, 4, 7, 6, 9, 8, 11, 10, 13, 12, 15, 14, 17, 16, 19, 18, 21],
+        )
+
+    def test_native_reads_preserve_special_characters(self) -> None:
+        text = 'prefix\0"\\\n\t <>&/ café \N{GRINNING FACE}'
+        with closing(sqlite3.connect(self.path)) as connection, connection:
+            connection.execute("UPDATE users SET username=? WHERE id=1", (text,))
+        status, body, _ = self.request(
+            "POST", "/posts", json.dumps({"body": text}).encode(), sign(claims(username=text))
+        )
+        self.assertEqual(status, 201)
+        post = as_object(body["post"])
+        self.assertEqual((post["body"], post["author"]), (text, text))
+        fresh = as_object(self.request("GET", f"/posts/{post['id']}")[1]["post"])
+        self.assertEqual(fresh, post)
+        self.assertEqual(as_object(as_array(self.request("GET", "/feed")[1]["posts"])[0]), post)
+
+    def test_created_response_preserves_escaped_surrogate_username(self) -> None:
+        status, body, _ = self.request(
+            "POST", "/posts", b'{"body":"valid"}', sign(claims(username="\ud800"))
+        )
+        self.assertEqual(status, 201)
+        self.assertEqual(as_object(body["post"])["author"], "\ud800")
+
     def test_post_and_like_are_committed_before_response(self) -> None:
         status, body, _ = self.request(
             "POST", "/posts", b'{"body":"  committed  "}', sign(claims())

@@ -70,5 +70,41 @@
     "cpu_us_per_request": 269.5358045718448,
     "server_peak_bytes": 407289856,
     "passed": true
+  },
+  {
+    "date": "2026-11-01",
+    "name": "json-before-5000",
+    "python": "3.15.2",
+    "sqlite": "3.53.1",
+    "users": 5000,
+    "hold": "60s",
+    "ramp": "30s",
+    "requests": 51771,
+    "rps": 398.2503992473522,
+    "p95_ms": 1.1902,
+    "p99_ms": 3.5916500000001093,
+    "max_ms": 475.2094,
+    "error_rate": 0.0,
+    "cpu_us_per_request": 291.12885592320026,
+    "server_peak_bytes": 451485696,
+    "passed": true
+  },
+  {
+    "date": "2026-11-01",
+    "name": "json-native-5000",
+    "python": "3.15.2",
+    "sqlite": "3.53.1",
+    "users": 5000,
+    "hold": "60s",
+    "ramp": "30s",
+    "requests": 51870,
+    "rps": 399.046771658188,
+    "p95_ms": 1.0859549999999996,
+    "p99_ms": 1.6103,
+    "max_ms": 121.6459,
+    "error_rate": 0.0,
+    "cpu_us_per_request": 264.35843454790825,
+    "server_peak_bytes": 352669696,
+    "passed": true
   }
 ]

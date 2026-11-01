@@ -23,10 +23,6 @@ class DegradedResponse(TypedDict):
     error: str
 
 
-class FeedResponse(TypedDict):
-    posts: list[Post]
-
-
 class PostResponse(TypedDict):
     post: Post
 
@@ -37,4 +33,9 @@ class LikeResponse(TypedDict):
     post_id: int
 
 
-type Response = HealthResponse | DegradedResponse | FeedResponse | PostResponse | LikeResponse
+class ErrorResponse(TypedDict):
+    error: str
+
+
+type JSONResponse = HealthResponse | DegradedResponse | PostResponse | LikeResponse | ErrorResponse
+type Response = JSONResponse | bytes

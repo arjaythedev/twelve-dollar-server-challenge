@@ -38,6 +38,8 @@ downloaded by `build.sh`:
 - **SQLite:** WAL, `synchronous=NORMAL`, persistent prepared statements, 64 MiB page cache,
   `temp_store=MEMORY` (WASI has no temp directory). WASI has no shared memory, so the connection runs with
   `locking_mode=EXCLUSIVE` (the WAL index lives in its heap); it is the only connection anyway.
+  `wal_autocheckpoint=16000` (64 MiB of WAL): with no thread or fork in WASI, checkpoints run on the
+  event loop and their two fsyncs stop it, so they run every few seconds instead of every ~0.5 s.
 - **Group commit.** One transaction per epoll batch: BEGIN after `epoll_wait`, every request of the batch,
   then COMMIT, and only then are the responses sent (all of them, from one buffer, in one host call). A
   transaction that has written stays open for up to 2 ms across `epoll_wait` calls to take in more

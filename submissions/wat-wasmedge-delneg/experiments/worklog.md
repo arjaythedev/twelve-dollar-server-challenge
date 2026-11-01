@@ -1,5 +1,6 @@
-# WAT entry worklog (opt-box: i5-11400F VM, 4 vCPU, x86_64; NOT the grader)
+# WAT entry worklog (boxes: opt-box = i5-11400F VM, 4 vCPU; Synteq = Xeon Platinum 8260 VM, 8 vCPU, from S4 on. Neither is the grader)
 
+Every number up to and including S3 is from opt-box. From S4 on, each entry names its box.
 Harness: `ub.sh` starts the server pinned to CPU 0 on a fresh copy of the seed (on disk, `~/watlab/wb`),
 then `ul` (own C load generator, `bench/load.js` user loop with think times x SCALE, keep-alive,
 reconnects on `Connection: close`) on CPUs 1-3. us/req = server process CPU (utime+stime) / requests
@@ -344,3 +345,53 @@ SQLite's copies aren't on the hot read path). Kept (a) only.
 `sat2.sh`, CPUQuota=40%, 4000 users x0.007, 3 interleaved reps (rps; scope CPU per request):
 E20 35.3k, 35.8k, 35.8k (11.33, 11.19 us); ObjC 49.5k, 49.7k, 48.7k (8.08, 8.06 us); top C (cpub)
 50.4k, 49.9k, 48.5k (7.94, 8.02 us). WAT at 0.72x of either; p95 at saturation ~105 ms against ~45 ms.
+
+## S4: Synteq set up (1 Nov, Synteq) — setup
+Synteq (`root@167.17.74.246`, `/root/watlab`): Xeon Platinum 8260 (Cascade Lake, AVX-512 without
+VBMI), 8 vCPU, 15 GB, Ubuntu 24.04.5, kernel 6.8, ~2.3 GB disk free. Copied from opt-box: WasmEdge lib
+and CLI, the seed, `ul`, the scripts, E20a. Each app is built for this CPU: WAT `app.so` AOT-compiled
+on Synteq from the same `merged.opt.wasm`; ObjC and cpub rebuilt in a clean ubuntu:24.04 container on
+opt-box with `-march=cascadelake` (`mkcl.sh`), because their opt-box `-march=native` builds crash here
+(ObjC: Illegal instruction). All three 42/42 here; WAT cmp.py digest 8aece8930ce55536, bad=0.
+Harness `ss.sh`: the server alone on CPU 0 in `systemd-run --scope -p MemoryMax=2G -p MemorySwapMax=0`
+(the 1 vCPU / 2 GB stand-in; docker's default seccomp blocks io_uring, so no container), `ul` on CPUs
+1-7 with 7 threads, fresh seed copy per run; scope cgroup cpu.stat over 15 s of the 25 s window.
+fsync on this disk: 4 KiB O_DSYNC writes ~2.2 ms each.
+
+Probe (Synteq, 6000 users x0.004, 1 run each): WAT 31.5k rps at 82% of the core, p50 151 ms, 26.0
+us/req (cgroup); ObjC 42.0k at 99%, p50 106 ms, p95 128 ms, 23.6 us/req. Kernel time per request is
+~3x opt-box's here (ObjC user 6.1 + sys ~17.5 us). WAT does not fill the core: `perf trace --duration 3`
+shows a checkpoint every ~500 ms (wal_autocheckpoint 1000 pages), each with fsync(WAL) 13-16 ms and
+fsync(db) 35-65 ms on the event loop, i.e. ~10-15% of wall time stalled. ObjC checkpoints in a child.
+
+## E21: `wal_autocheckpoint` 1000 / 4000 / 16000 (1 Nov, Synteq) — 16000 kept
+S4 showed the inline checkpoints stall the loop. Larger values mean fewer checkpoints, and each copies
+fewer frames per committed request (a hot page is copied once per checkpoint). `ss.sh`, 6000 users
+x0.004, 3 interleaved reps, rps (cgroup us/req):
+- 1000 (E20a): 34.0k, 33.5k, 32.8k (24.1, 24.3, 24.5)
+- 4000: 38.6k, 37.8k, 38.0k (23.9, 24.6, 24.9)
+- 16000: 40.6k, 39.3k, 40.5k (24.0, 24.2, 23.4), +19%, core 95-98% busy
+- ObjC: 43.4k, 44.9k, 41.7k (22.8, 22.1, 23.8); cpub: 47.4k, 48.1k, 48.3k (20.1, 20.2, 19.9)
+CPU per request does not change; the gain is the core no longer idling in fsync. WAT is now at 0.92x
+ObjC and 0.84x cpub in rps here, and ~5% above ObjC in CPU per request. `perf trace` at 16000: a
+checkpoint every ~7 s, stalling ~150-200 ms (fsync WAL ~68 ms, copy, fsync db 48-108 ms); the first one
+~450 ms (the WAL file grows to 64 MiB once). 42/42 (Synteq, opt-box), cmp.py digest 8aece8930ce55536,
+big.py ok. ul's p95/p99 here are not usable: above 200 ms its buckets were 1 s wide (fixed after E21:
+5 ms buckets to ~5.3 s).
+
+## S5: scorer-like load (1 Nov, Synteq) — measurement
+LEADERBOARD.md: the grader is a Synteq 1 vCPU / 2 GB VPS, Xeon Platinum 8260, Ubuntu 24.04, kernel 6.8,
+the same CPU as our Synteq box; the top entries hold ~280k users at ~26.7k req/s, 27 us/req.
+`sc.sh`: `bench/load.js` think times (scale 1), 250,000 users, 60 s ramp, 10 s settle, 120 s measured,
+server alone on CPU 0 with MemoryMax=2G (ul now has 5 ms buckets above 200 ms, so p95/p99 are usable):
+- E21 (WAT, 16000): 21.1k rps, p50 1.59 s, p95 >5.3 s, err 0.064%, 3,572,770 dials, cgroup 95.6%,
+  45.4 us/req, 315 MB
+- ObjC: 26.5k rps, p50 2.7 ms, p95 7.0 ms, p99 15.8 ms, 0 errors, 250,000 dials, cgroup 69.2%,
+  26.2 us/req, 533 MB (the leaderboard has 27 us/req for it: this harness matches the grader's)
+The WAT server holds at most ~60k sockets (epoll and the process fd table, LimitNOFILE=65535) and
+closes the ones idle for 1.5 s, so with 250k users almost every request comes on a new connection
+(~19k dials/s): accept, epoll_ctl, the kernel's TCP setup and teardown, a sweep recv and close. That
+costs ~20 us per request and saturates the core. ObjC keeps all 250k connections in io_uring fixed-file
+tables (8 rings x 65,535 slots, which don't count against RLIMIT_NOFILE). The 6000-user tests above
+never saw this. On loopback the client's CPU takes part of the server's TCP work, so on the grader the
+churn costs the server more, not less.

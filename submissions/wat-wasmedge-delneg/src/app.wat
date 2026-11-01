@@ -118,7 +118,7 @@
   (data (i32.const 0x100cb0) "COMMIT")
   (data (i32.const 0x100cc0) "ROLLBACK")
   ;; WASI has no shared memory, so WAL runs with exclusive locking (wal-index on the heap)
-  (data (i32.const 0x100d00) "PRAGMA locking_mode=EXCLUSIVE; PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA cache_size=-65536; PRAGMA temp_store=MEMORY;")
+  (data (i32.const 0x100d00) "PRAGMA locking_mode=EXCLUSIVE; PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA cache_size=-65536; PRAGMA temp_store=MEMORY; PRAGMA wal_autocheckpoint=16000;")
   (data (i32.const 0x100e00) "SQLITE_PATH")
   (data (i32.const 0x100e20) "JWT_SECRET")
   (data (i32.const 0x100e40) "HOST")

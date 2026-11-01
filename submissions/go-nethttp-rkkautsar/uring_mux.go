@@ -61,34 +61,35 @@ type muxResp struct {
 }
 
 type uringMux struct {
-	handler     MuxHandler
-	feed        func() []byte
-	postBatch   func([]int64) map[int64][]byte
-	writeBatch  func([]*httpReq) []readResp
-	ring        *rawRing
-	br          *readBufRing
-	bufs        []byte
-	wakeR       int
-	wakeW       int
-	wakeBuf     []byte
-	wakeArmed   bool
-	listenFD    int
-	listener    net.Listener
-	acceptArmed bool
-	conns       map[uint64]*muxConn
-	next        atomic.Uint64
-	toSub       uint32
-	jobs        chan *muxJob
-	responses   chan *muxResp
-	waiting     []*muxConn
-	feedPend    []*muxConn
-	feedBusy    bool
-	postPend    []*muxConn
-	postIDs     []int64
-	postBusy    bool
-	writePend   []*muxConn
-	writeReqs   []*httpReq
-	writeBusy   bool
+	handler      MuxHandler
+	feed         func() []byte
+	postBatch    func([]int64) map[int64][]byte
+	writeBatch   func([]*httpReq) []readResp
+	ring         *rawRing
+	br           *readBufRing
+	bufs         []byte
+	wakeR        int
+	wakeW        int
+	wakeBuf      []byte
+	wakeArmed    bool
+	listenFD     int
+	listener     net.Listener
+	acceptArmed  bool
+	acceptPaused bool
+	conns        map[uint64]*muxConn
+	next         atomic.Uint64
+	toSub        uint32
+	jobs         chan *muxJob
+	responses    chan *muxResp
+	waiting      []*muxConn
+	feedPend     []*muxConn
+	feedBusy     bool
+	postPend     []*muxConn
+	postIDs      []int64
+	postBusy     bool
+	writePend    []*muxConn
+	writeReqs    []*httpReq
+	writeBusy    bool
 }
 
 func newUringMux(handler MuxHandler, feed func() []byte, postBatch func([]int64) map[int64][]byte, writeBatch func([]*httpReq) []readResp, workers int) (*uringMux, error) {
@@ -300,6 +301,10 @@ func (m *uringMux) close(c *muxConn) {
 	c.closed = true
 	delete(m.conns, c.id)
 	_ = syscall.Close(c.fd)
+	if m.acceptPaused {
+		m.acceptPaused = false
+		m.armAccept()
+	}
 }
 
 func (m *uringMux) send(c *muxConn, p []byte, closeAfter bool) {
@@ -369,8 +374,13 @@ func (m *uringMux) finishAccept(cqe *rawCQE) {
 	m.acceptArmed = false
 	if cqe.Res >= 0 {
 		m.addFD(int(cqe.Res))
+	} else if cqe.Res == -int32(syscall.EMFILE) || cqe.Res == -int32(syscall.ENFILE) {
+		// Accept cannot make progress until a file descriptor is closed.
+		// Rearming immediately just produces an EMFILE CQE loop and pins CPU.
+		m.acceptPaused = true
+		return
 	}
-	if cqe.Flags&2 == 0 && !m.acceptArmed {
+	if cqe.Flags&2 == 0 && !m.acceptArmed && !m.acceptPaused {
 		m.armAccept()
 	}
 }

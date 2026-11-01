@@ -1,2 +1,6 @@
 {"id":"E1","what":"C ref: keep-alive poll vs Connection: close, native and WasmEdge AOT","us_req":{"native_ka":189,"native_close":17.5,"we_ka":136,"we_close":20},"reps":3,"status":"finding: O(n) poll; superseded by epoll host"}
 {"id":"E2","what":"WAT app first build, epoll host, WasmEdge AOT","tests":"42/42","status":"kept"}
+{"id":"E3","what":"WAT epoll keep-alive vs C refs, 4000u x0.1","us_req":{"wat":[9.91,10.09,13.39],"native_close":[17.34,19.04,16.87],"we_close":[19.17,19.36,18.98],"native_ka":[186.7,182.2,185.7]},"reps":3,"status":"baseline"}
+{"id":"E4","what":"same epoll host: WAT vs C-wasm vs C-native, 4000u x0.02 (~20k rps)","us_req":{"wat":[7.91,7.84,7.92],"c_wasm":[7.54,7.99,7.52],"c_native":[8.41,8.60,8.82]},"p95":{"wat":[38.2,34.7,38.0],"c_wasm":[35.3,35.9,35.3],"c_native":[33.0,32.5,32.7]},"reps":3,"status":"baseline; WAT~=C-wasm"}
+{"id":"E5","what":"wal_autocheckpoint=0 diagnostic","p95":{"wat":[38.4,36.8,35.9],"nockpt":[0.40,0.35,0.35]},"rps":{"wat":[20215,20285,20357],"nockpt":[21134,21192,21187]},"reps":3,"status":"diagnostic: stalls are the inline checkpoint"}
+{"id":"S1","what":"install/build/start scripts + clean ubuntu:24.04 CI mimic","tests":"42/42","status":"kept"}

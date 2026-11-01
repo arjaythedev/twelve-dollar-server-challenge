@@ -77,3 +77,47 @@ epoll, per-fd state in a table indexed by the real fd. WASI is kept only for SQL
 clock. SQLite: one connection, `unix-none` VFS, locking_mode=EXCLUSIVE, WAL, synchronous=NORMAL,
 64 MiB cache, persistent prepared statements, default autocheckpoint (inline).
 Result: `t.sh e2 out/host out/app.so` → passed=42 failed=0 on the first full run.
+
+## E3: WAT (epoll, keep-alive) vs the E1 references (1 Nov)
+4000 users, scale 0.1 (~4.2k req/s), 15 s, 3 interleaved reps, server on CPU 0.
+| variant | us/req (3 reps) | p99 ms |
+|---|---|---|
+| WAT, WasmEdge AOT, epoll host, keep-alive | 9.91, 10.09, 13.39 | 32-35 |
+| C native, poll, Connection: close | 17.34, 19.04, 16.87 | 34-36 |
+| C→wasm WasmEdge AOT, poll_oneoff, Connection: close | 19.17, 19.36, 18.98 | 35-38 |
+| C native, poll, keep-alive | 186.7, 182.2, 185.7 | 32-36 |
+The epoll host plus keep-alive takes the WAT build below the best E1 variant at this load. Not yet a fair
+WAT-vs-C test: the C side still uses poll. E4 puts the same C on the same epoll loop and host.
+p99 ~33 ms everywhere: still suspect the inline WAL checkpoint.
+
+## E4: same epoll loop and host, WAT vs C→wasm vs C native (1 Nov)
+`baseline/cserve.c` = the C reference (wserve.c) with its poll loop replaced by the WAT entry's loop and
+"sys" calls; wasm build runs on the same `host` (42/42), native build uses the calls as syscalls (42/42).
+4000 users, scale 0.02 (~20k req/s), 20 s, 3 interleaved reps.
+| variant | us/req | p95 ms | p99 ms | rss |
+|---|---|---|---|---|
+| WAT, WasmEdge AOT | 7.91, 7.84, 7.92 | 38.2, 34.7, 38.0 | 44.3, 40.7, 135.2 | 59 MB |
+| C→wasm, WasmEdge AOT, same host | 7.54, 7.99, 7.52 | 35.3, 35.9, 35.3 | 39.5, 40.4, 41.7 | 96 MB |
+| C native (gcc -O2), epoll | 8.41, 8.60, 8.82 | 33.0, 32.5, 32.7 | 38.7, 37.8, 38.0 | 48 MB |
+Server CPU is only ~16% at 20k req/s: loopback charges much of the TCP work to the client cores, and
+most of a request's server cost is SQLite. WAT ≈ C→wasm here (C→wasm ~2% lower median, within noise);
+both wasm builds are a bit below native (unexplained; malloc? check later). The real problem: p95
+~35 ms in all three at 20k req/s. Suspect the inline WAL autocheckpoint (E5).
+
+## E5: inline autocheckpoint off (diagnostic only; WAL grows without bound) (1 Nov)
+Same load as E4 (4000 users, x0.02, 20 s), 3 interleaved reps.
+| variant | rps | us/req | p95 ms | p99 ms |
+|---|---|---|---|---|
+| WAT (autocheckpoint 1000) | 20215, 20285, 20357 | 7.54, 8.06, 7.79 | 38.4, 36.8, 35.9 | 44.6, 42.3, 40.9 |
+| WAT, wal_autocheckpoint=0 | 21134, 21192, 21187 | 8.16, 7.90, 7.91 | 0.40, 0.35, 0.35 | 4.45, 0.60, 0.55 |
+Confirmed: the ~35 ms p95 is the inline checkpoint (its fsyncs block the loop); CPU per request is
+about the same, so the cost is blocked time, not CPU (~4.5% fewer requests served in the window).
+Not kept (can't ship without checkpoints). Next: checkpoints off the loop (no threads/fork in WASI).
+
+## Setup: install.sh / build.sh / start.sh + clean-container CI mimic (1 Nov)
+install.sh (root): apt build-essential/curl/unzip, then wabt 1.0.39, wasi-sdk 34, binaryen 125 and
+WasmEdge 0.18.1 (ubuntu20.04 build) release tarballs, each sha256-pinned, into /opt/wat-tdsc (the same
+way merged entries fetch LLVM/Lean/Mojo toolchains). build.sh (user): SQLite 3.54.1 amalgamation
+(sha256 0a9c8e34…) → sq.wasm, app.wat → app.wasm, wasm-merge, `wasmedge compile`, gcc host.c.
+CI mimic (`~/watlab/ci.sh`: fresh ubuntu:24.04 container, install.sh as root, test/run.sh as a user):
+passed=42 failed=0.

@@ -35,14 +35,17 @@ coalescing disabled:
 
 | Users | Client results | Server |
 |---:|---|---|
-| 35,000 | p95 71.6 ms, p99 120.1 ms, p50 0.4 ms, 0 errors; 4 clients pass | 61.5% CPU, 1.172 GiB peak |
+| 35,000 | p95 71.6 ms, p99 120.1 ms, p50 0.4 ms, 0 errors; 4 clients pass | 61.5% CPU, 1.172 GiB at 45 s |
+| 55,000 | p95 1.26 s, p99 1.86 s, p50 60.5 ms, 0 client errors | 81.3% CPU, 1.36 GiB at 45 s; OOMKilled at 1.5 GiB |
 | 70,000 | p95 ~10 s, ~40% errors; clients saw EOF/timeouts | container gone before the 45 s sample |
 
 The official service has `LimitNOFILE=65535`, so a net/http implementation is
 capped at roughly 65k accepted keep-alive sockets; 70k is above that fd ceiling
-regardless of SQLite or read coalescing. The local test container used a 1M fd
-limit, so the 70k run was not an official-capacity test; the server did not
-survive it, and 35k connections already use 1.17 GiB. The `READ_COALESCE=0`
+regardless of SQLite or read coalescing. Connection eviction can get past that
+fd ceiling, but it does not explain the 55k result: 55k is below the cap and
+still misses the latency target on CPU, while 35k connections already use
+1.17 GiB. The local test container used a 1M fd limit, so the 70k run was not an
+official-capacity test; the server did not survive it. The `READ_COALESCE=0`
 path is correct and passes the full test suite, but the per-connection cost of
 stock `net/http` is the limit at these connection counts.
 

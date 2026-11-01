@@ -180,6 +180,12 @@ func main() {
 		readWindow:  time.Duration(windowUS) * time.Microsecond,
 	}
 	go a.writeLoop()
+	if uw, err := newUringWriter(); err == nil {
+		a.uring = uw
+		log.Print("raw io_uring write batching enabled")
+	} else {
+		log.Printf("raw io_uring write batching unavailable: %v", err)
+	}
 
 	// Opt-in profiling listener; unused in the benchmark runs.
 	if addr := os.Getenv("PPROF_ADDR"); addr != "" {

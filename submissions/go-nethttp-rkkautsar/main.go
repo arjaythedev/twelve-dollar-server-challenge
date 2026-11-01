@@ -181,17 +181,21 @@ func main() {
 		readWindow:  time.Duration(windowUS) * time.Microsecond,
 	}
 	go a.writeLoop()
-	if uw, err := newUringWriter(); err == nil {
-		a.uring = uw
-		log.Print("raw io_uring write batching enabled")
+	if os.Getenv("URING") == "1" {
+		if uw, err := newUringWriter(); err == nil {
+			a.uring = uw
+			log.Print("raw io_uring write batching enabled")
+		} else {
+			log.Printf("raw io_uring write batching unavailable: %v", err)
+		}
+		if ur, err := newUringReader(); err == nil {
+			a.uringRead = ur
+			log.Print("raw io_uring multishot receive enabled")
+		} else {
+			log.Printf("raw io_uring multishot receive unavailable: %v", err)
+		}
 	} else {
-		log.Printf("raw io_uring write batching unavailable: %v", err)
-	}
-	if ur, err := newUringReader(); err == nil {
-		a.uringRead = ur
-		log.Print("raw io_uring multishot receive enabled")
-	} else {
-		log.Printf("raw io_uring multishot receive unavailable: %v", err)
+		log.Print("raw io_uring transport disabled (URING=1 to enable)")
 	}
 
 	// Opt-in profiling listener; unused in the benchmark runs.

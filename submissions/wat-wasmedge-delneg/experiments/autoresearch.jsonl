@@ -1,0 +1,2 @@
+{"id":"E1","what":"C ref: keep-alive poll vs Connection: close, native and WasmEdge AOT","us_req":{"native_ka":189,"native_close":17.5,"we_ka":136,"we_close":20},"reps":3,"status":"finding: O(n) poll; superseded by epoll host"}
+{"id":"E2","what":"WAT app first build, epoll host, WasmEdge AOT","tests":"42/42","status":"kept"}

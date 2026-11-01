@@ -92,11 +92,6 @@ impl App {
         App { db, jwt: Verifier::new(secret), started: Instant::now(), body: Vec::with_capacity(2048), wrote: false }
     }
 
-    #[cfg(feature = "bench")]
-    pub fn bench_verify(&mut self, h: &[u8]) -> bool {
-        self.jwt.verify(Some(h), now_secs()).is_ok()
-    }
-
     /// Handles one request; the response is appended to `out`.
     pub fn handle(&mut self, req: &Request, out: &mut Vec<u8>) {
         let p = req.path;

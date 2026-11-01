@@ -397,11 +397,6 @@ impl Db {
         Ok(true)
     }
 
-    #[cfg(feature = "bench")]
-    pub fn bench_feed_json(&self, out: &mut Vec<u8>) {
-        self.feed_json(out)
-    }
-
     /// Written in one reservation: every row's strings live in self.text, so 6x its length
     /// bounds their escaped form.
     fn feed_json(&self, out: &mut Vec<u8>) {

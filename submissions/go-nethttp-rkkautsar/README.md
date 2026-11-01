@@ -38,11 +38,13 @@ coalescing disabled:
 | 35,000 | p95 71.6 ms, p99 120.1 ms, p50 0.4 ms, 0 errors; 4 clients pass | 61.5% CPU, 1.172 GiB peak |
 | 70,000 | p95 ~10 s, ~40% errors; clients saw EOF/timeouts | container gone before the 45 s sample |
 
-35k connections already use 1.17 GiB, so 70k does not fit this 1.5 GiB test
-container and is not expected to fit the 2 GiB benchmark VM either. The
-`READ_COALESCE=0` path is correct and passes the full test suite, but the
-per-connection cost of stock `net/http` is the limit at these connection
-counts.
+The official service has `LimitNOFILE=65535`, so a net/http implementation is
+capped at roughly 65k accepted keep-alive sockets; 70k is above that fd ceiling
+regardless of SQLite or read coalescing. The local test container used a 1M fd
+limit, so the 70k run was not an official-capacity test; the server did not
+survive it, and 35k connections already use 1.17 GiB. The `READ_COALESCE=0`
+path is correct and passes the full test suite, but the per-connection cost of
+stock `net/http` is the limit at these connection counts.
 
 `test/run.sh` passes **42/42** with `READ_COALESCE=0` (the default) and with
 `READ_COALESCE=1`.

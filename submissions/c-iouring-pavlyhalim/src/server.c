@@ -244,9 +244,9 @@ static void queue_read(struct conn *c) {
   cref_push(&rq, &nrq, &rq_cap, c);
 }
 
-/* End of batch: one read per queued connection, up to each ring's free receive buffers; the rest stay
- * queued for the next batch. */
-static void issue_reads(void) {
+/* One read per queued connection, up to each ring's free receive buffers; the rest stay queued for
+ * the next batch. Returns the reads issued. */
+static unsigned issue_reads(void) {
   unsigned budget = READS_PER_BATCH, end = nrq;
   while (rq_head < end && budget) {
     struct cref e = rq[rq_head++];
@@ -269,6 +269,7 @@ static void issue_reads(void) {
     rq_head = 0;
   }
   S.rq_max = nrq - rq_head > S.rq_max ? nrq - rq_head : S.rq_max;
+  return READS_PER_BATCH - budget;
 }
 
 /* Accepting. NLISTEN listening sockets share the port (SO_REUSEPORT); the kernel spreads new
@@ -982,6 +983,15 @@ int main(void) {
     answers_left = ANSWERS_PER_BATCH;
     unsigned ncq = reap(0);
     for (unsigned i = 1; i < NR; i++) ncq += reap(i);
+    /* Reads for the connections the polls just reported, issued and completed now: a MSG_DONTWAIT
+     * read finishes during the submit, so its request is answered in the batch that saw it ready.
+     * Issued at the end of the batch instead, it waited for the next one, whose wait for 64
+     * completions then held it up to 2 ms more (p95 4.7 against 2.7 ms at 20k users). */
+    if (issue_reads()) {
+      for (unsigned i = 0; i < NR; i++)
+        if (ring_pending_submit(&R[i].r)) ring_submit(&R[i].r, 0, 0, NULL, 0);
+      for (unsigned i = 0; i < NR; i++) ncq += reap(i);
+    }
     run_lists();
     uint64_t tc = now_ns();
     int failed = db_commit(&A.db) < 0;
@@ -997,7 +1007,6 @@ int main(void) {
       }
       rs->nrearm = 0;
     }
-    issue_reads();
     accept_policy();
     last_cqes = ncq;
     S.batches++;

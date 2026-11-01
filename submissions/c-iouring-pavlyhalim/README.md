@@ -32,9 +32,12 @@ Every user is a keep-alive connection, so the connection count is what the serve
   finds the table full makes the kernel reset that client, and the kernel keeps accepting on its own
   while the loop is busy.
 - An idle connection waits on a multishot poll and holds no buffer and no heap, only a 40-byte
-  record. When the poll reports it readable it goes on a read queue, and at the end of each batch
-  the loop issues one read per queued connection (`MSG_DONTWAIT`, into a shared provided-buffer
-  ring of 4,096 × 1 KB per ring), never more on a ring than it has free buffers. An earlier version
+  record. When the poll reports it readable it goes on a read queue, and as soon as the batch's
+  completions are in, the loop issues one read per queued connection (`MSG_DONTWAIT`, into a shared
+  provided-buffer ring of 4,096 × 1 KB per ring), never more on a ring than it has free buffers.
+  Those reads finish during the submit, so a request is answered in the batch that saw it ready
+  (issued at the end of the batch they waited a batch plus up to 2 ms: p95 4.7 against 2.7 ms at
+  20,000 users). An earlier version
   kept a multishot receive armed on every connection instead. After a pause of a second or two the
   kernel filled every pending receive at once, ran the buffer ring dry, and ended the rest with
   `ENOBUFS`; each had to be re-armed, found its data waiting and no buffer, and ended again (up to

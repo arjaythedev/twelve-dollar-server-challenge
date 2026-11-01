@@ -863,7 +863,7 @@ static void reap(int ri) {
 /* Returns only if io_uring cannot be used (the caller then falls back to epoll). */
 static int uring_serve(int lfd, unsigned nofile, const char *host, const char *port) {
   const char *e;
-  NT = nofile < 400000 ? nofile : 400000; NR = 6;
+  NT = nofile < 400000 ? nofile : 400000; NR = 8;
   if ((e = getenv("URING_SLOTS")) && atoi(e) > 0 && (unsigned)atoi(e) < NT) NT = (unsigned)atoi(e);
   if ((e = getenv("URING_RINGS")) && atoi(e) > 0 && atoi(e) <= 64) NR = atoi(e);
   if (NT < 16) return -1;

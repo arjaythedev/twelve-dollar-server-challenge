@@ -34,7 +34,17 @@ the thread waits on one eventfd that all rings signal.
 
 When the loop is busy, a new pass starts at most every 1 ms, so each kernel entry and each commit serve
 many requests. The sends of a pass are submitted together with the next pass's fetch (one
-`io_uring_enter` per ring per pass). Together this adds at most about 2 ms of latency.
+`io_uring_enter` per ring per pass). Together this adds at most about 2 ms of latency. A pass handles at
+most 4,096 completions; the rest wait in the kernel for the next pass.
+
+**Accepts follow the loop.** Each ring keeps 32 single-shot accepts armed, and re-arms them only after a
+pass that kept up (fewer than 4,096 completions). The six listeners share one listener's backlog (4,096
+in total). Without this, under overload the server admitted connections faster than it served them. Each
+admitted connection's unread request held about 4 KB of kernel socket memory, which reached 570 MB at
+280,000 users in a box-like VM and the OOM killer ended the server. With it, a connection that the loop
+cannot serve yet waits in the kernel's connect queue, and socket memory stays under about 30 MB. This is
+admission control, not request shedding: no request is refused or answered with an error, and every
+connection is accepted as soon as the loop catches up.
 
 **Reads through SQLite's B-tree API** (`src/bt.h`, allowed by Arjay's 2026-10-31 ruling). The feed is the
 first 20 entries of `posts_created_at_id_idx`, one range scan of `likes_post_id_idx` for all 20 like counts,
@@ -43,9 +53,10 @@ in the batch's read transaction. Anything unusual (overflow pages, a schema chan
 runs the plain SQL query instead. `SQL_READS=1` turns the B-tree path off; both paths give byte-identical
 responses.
 
-**Memory.** A connection is 24 bytes in user space. Request bytes stay in the kernel-provided receive
-buffer for the pass; only a request split over several receives (or one that arrives while a response is
-still sending) is copied to a heap buffer. Responses go into 1 MB send chunks that are reused when their
+**Memory.** A connection is 32 bytes in user space. A request that arrives in one receive is copied into
+the pass's scratch arena and its kernel-provided receive buffer goes back to the kernel at once, so the
+buffer ring never runs dry under load. Only a request split over several receives (or one that arrives
+while a response is still sending) is copied to a heap buffer. Responses go into 1 MB send chunks that are reused when their
 sends complete.
 
 **Other parts, all written for this entry:** HTTP parsing, a JSON validator and string decoder,
@@ -62,7 +73,30 @@ restarts the WAL. The WAL now stays under about 17 MB.
 
 ## Measured
 
-On a Ryzen 9 9950X3D (kernel 7.0), server pinned to one core and the `bench/load.js` user model on four
+**Box-like VM.** qemu/KVM on the RTX 5090 host, built to match the box: 1 vCPU (pinned), 1,968 MB RAM,
+no swap, Ubuntu 24.04 with kernel 6.8.0-117 (the box's), the server started by systemd as user `deploy`
+with `LimitNOFILE=65535` on `0.0.0.0:80`. The load generator runs outside the VM: the `bench/load.js`
+user model in C (from #moneebullah25's mload, timing each request from after its connection is made, as
+k6 does), 60 s ramp, then a 5-minute hold, a fresh database for every run. Pass = p95 < 500 ms,
+p99 < 1 s, errors < 1 %, over the whole run including the ramp.
+
+| Users | Passes | Worst p99 of the passes |
+|---:|---:|---:|
+| 260,000 | 1 / 1 | 13 ms |
+| 280,000 | 2 / 2 | 240 ms |
+| 300,000 | 4 / 5 | 77 ms |
+| 320,000 | 2 / 2 | 271 ms |
+| 340,000 | 1 / 1 | 57 ms |
+| 360,000 | 0 / 2 | (OOM-killed during the ramp) |
+| 380,000 | 0 / 1 | (OOM-killed during the ramp) |
+
+In the same VM, c-iouring-shivanshthapliyal (#230, 270k on the box) passed 260,000 and failed 280,000
+(p99 3.4 s). The VM is a model of the box, not the box. The failed 300,000 run fell behind about
+70 s into the hold, after all users were connected, and its socket memory then grew until the OOM killer
+ended the server. I did not find the cause; the other host jobs on that machine are one candidate. At
+saturation about 85 % of the CPU is kernel time (virtio and TCP), and the server's own code about 8 %.
+
+**Per-request CPU.** On a Ryzen 9 9950X3D (kernel 7.0), server pinned to one core and the `bench/load.js` user model on four
 others, 30,000 users at 0.06 think-time scale (about 39k req/s). Server CPU per request, interleaved
 rounds. The machine had other jobs on it; the numbers compare entries, they are not a user-count score.
 
@@ -74,9 +108,11 @@ rounds. The machine had other jobs on it; the numbers compare entries, they are 
 The two are level within noise. At 300,000 connections with the real think times, in a systemd scope
 with `MemoryMax=1750M` and `LimitNOFILE=65535` on one pinned core, this entry held all 300,000 with 0
 errors at about 1.24 GB (#230: 1.24 GB, also 0 errors). On that machine the connect phase past about 280k
-is slow for every server (one machine runs both ends), so the latency of that run means little. When the
-load generator closes all 300,000 connections at once at the end, the queued FINs briefly charge about
-870 MB of socket memory, which broke the 1.75 GB cap of my test scope after the load had ended.
+is slow for every server (one machine runs both ends), so the latency of that run means little.
+
+**Kernel note.** Ubuntu kernels 6.8.0-136 and later reject a provided-buffer ring whose reserved field is
+zero (`EINVAL`). The box's 6.8.0-117 does not, but the server registers the ring by hand and retries with
+the field set, so it also starts on the newer kernels.
 
 Checks: `test/test.sh` 42/42 (also with `SQL_READS=1`); B-tree and SQL responses identical after writes
 with escapes and non-ASCII text; 6 rounds of concurrent writes with `SIGKILL` mid-stream lost 0 of 10,024
@@ -88,5 +124,6 @@ acknowledged writes.
   (read at open), and the HMAC key blocks. Every JWT signature is verified on every request.
 - Stock SQLite: the amalgamation is unmodified. The B-tree reads call SQLite's own functions.
 - WAL with `synchronous=NORMAL`. No response to a write leaves before its batch's `COMMIT` returns.
-- No load shedding, nothing tuned to the load test. Configured only by `SQLITE_PATH`, `JWT_SECRET`, `HOST`
+- No request is refused or answered with an error, and nothing is tuned to the load test. The only
+  limit under overload is the accept pacing described above. Configured only by `SQLITE_PATH`, `JWT_SECRET`, `HOST`
   and `PORT` (`SQL_READS=1` only switches the B-tree reads off, for testing).

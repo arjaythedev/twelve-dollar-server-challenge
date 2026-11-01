@@ -10,9 +10,9 @@ the same 42 checks. Everything is built from source on the box.
 |---|---|
 | Language / compiler | C11, gcc 13 (Ubuntu 24.04 `build-essential`), `-O3 -march=native`, PGO |
 | Database | SQLite **3.54.1** amalgamation, downloaded and sha256-pinned by `build.sh`, unmodified, compiled into the binary |
-| HTTP | our [cursed-http-parser](https://github.com/public/cursed-http-parser) at commit `3be7fd3` (MIT), vendored in `third_party/` and checked against its pin by `build.sh`: `fastparse.h` regenerated from `gen/spec.json` by its `gen/httpgen.py`, `batchparse.h` (lane-parallel batch parsing) and `fbparse.h` (SIMD general parser with picohttpparser `465a7ff`'s API and identical validation) as the slow path; others selectable at build time (below) |
+| HTTP | our [cursed-http-parser](https://github.com/public/cursed-http-parser) at commit `be52489` (MIT), vendored in `third_party/` and checked against its pin by `build.sh`: `fastparse.h` regenerated from `gen/spec.json` by its `gen/httpgen.py`, `batchparse.h` (lane-parallel batch parsing) and `fbparse.h` (SIMD general parser with picohttpparser `465a7ff`'s API and identical validation) as the slow path; others selectable at build time (below) |
 | Event loop | own, io_uring via raw syscalls (no liburing). Needs Linux ≥ 6.1; 6.8 is the target |
-| JWT | our [cursed-jwt](https://github.com/public/cursed-jwt) at commit `6f92f71` (MIT), vendored in `third_party/` and checked against its pin by `build.sh`: batch HS256, multi-buffer HMAC-SHA256 with the engine picked at run time (AVX-512VL on ymm, AVX2, ARMv8 SHA2, NEON or scalar); on x86-64 Linux single tokens use OpenSSL's extracted SHA-256 block function (Apache-2.0, in that repo) |
+| JWT | our [cursed-jwt](https://github.com/public/cursed-jwt) at commit `74f62ce` (MIT), vendored in `third_party/` and checked against its pin by `build.sh`: batch HS256, multi-buffer HMAC-SHA256 with the engine picked at run time (AVX-512VL on ymm, AVX2, ARMv8 SHA2, NEON or scalar); on x86-64 Linux single tokens use OpenSSL's extracted SHA-256 block function (Apache-2.0, in that repo) |
 
 **Direct mode: no Nginx.** Listen on `HOST:PORT` (e.g. `0.0.0.0:80`).
 

@@ -11,6 +11,9 @@ const val SQLITE_DONE: Int = 101
 /** The longest column text one row may hold: room for six escaped bytes per byte stays inside an Int. */
 const val TEXT_MAX: Int = 1 shl 24
 
+/** The room a feed row is offered before the call: a usual row fits, a row with a long body asks again for exactly what it needs. */
+const val ROW_ROOM: Int = 4096
+
 const val POST_SELECT: String = "SELECT p.id, p.body, p.created_at, u.username, " +
     "(SELECT count(*) FROM likes l WHERE l.post_id = p.id) FROM posts p JOIN users u ON u.id = p.user_id"
 
@@ -101,13 +104,15 @@ class SqliteStore(path: String) : FeedStore {
         out.size += feed_json_text(p, n, out.bytes.refTo(out.size))
     }
 
+    /** One POST_SELECT row as the feed's JSON object, written by feed_row_json in one crossing; a short buffer asks again with the room it needs. */
     fun row(stmt: CPointer<sqlite3_stmt>, out: Out) {
-        out.raw(ROW_ID); out.long(long(stmt, 0))
-        out.raw(ROW_BODY); text(stmt, 1, out)
-        out.raw(ROW_CREATED); text(stmt, 2, out)
-        out.raw(ROW_AUTHOR); text(stmt, 3, out)
-        out.raw(ROW_LIKES); out.long(long(stmt, 4))
-        out.byte('}'.code)
+        out.room(ROW_ROOM)
+        var n = feed_row_json(stmt, out.bytes.refTo(out.size), out.bytes.size - out.size)
+        if (n < 0) {
+            out.room(-n)
+            n = feed_row_json(stmt, out.bytes.refTo(out.size), out.bytes.size - out.size)
+        }
+        out.size += n
     }
 
     fun failure(stmt: CPointer<sqlite3_stmt>): Nothing {

@@ -301,7 +301,7 @@ static int feed_bind_text(sqlite3_stmt *s, int i, const char *p, int n) { return
  * One text column as the body of a JSON string: quote and backslash get a backslash, \b \f \n \r \t keep their letters, the
  * other bytes below 0x20 become \u00XX, everything else (UTF-8 included) is copied. A run with nothing to escape moves
  * whole: eight bytes are tested per step, then one memcpy. dst has room for 6 bytes per source byte; the result is the
- * count written. jsontext_test.c holds this function to a byte-wise reference.
+ * count written. feedjson_test.c holds this function to a byte-wise reference.
  */
 static int feed_json_text(const unsigned char *src, int n, char *dst) {
   static const char hex[] = "0123456789abcdef";
@@ -337,3 +337,46 @@ static int feed_json_text(const unsigned char *src, int n, char *dst) {
   return w;
 }
 /* END feed_json_text */
+
+/* BEGIN feed_row_json */
+static int feed_i64(char *dst, long long v) {
+  char t[24];
+  int n = 0, w = 0;
+  unsigned long long u = v < 0 ? 0ULL - (unsigned long long)v : (unsigned long long)v;
+  if (v < 0) dst[w++] = '-';
+  do { t[n++] = (char)('0' + u % 10); u /= 10; } while (u);
+  while (n) dst[w++] = t[--n];
+  return w;
+}
+
+/*
+ * One row of POST_SELECT (id, body, created_at, username, like_count) as the feed's JSON object, written at dst:
+ *   {"id":N,"body":"..","created_at":"..","author":"..","like_count":N}
+ * Returns the bytes written, or minus the room the row can need when cap is below it (nothing is written then; call again
+ * with that much). One crossing from Kotlin per row instead of about twelve. feedjson_test.c holds this function to SQLite
+ * and a byte-wise reference.
+ */
+static int feed_row_json(sqlite3_stmt *s, char *dst, int cap) {
+  long long id = sqlite3_column_int64(s, 0), likes = sqlite3_column_int64(s, 4);
+  const unsigned char *b = sqlite3_column_text(s, 1); int bn = sqlite3_column_bytes(s, 1);
+  const unsigned char *c = sqlite3_column_text(s, 2); int cn = sqlite3_column_bytes(s, 2);
+  const unsigned char *a = sqlite3_column_text(s, 3); int an = sqlite3_column_bytes(s, 3);
+  long long need = 100 + 6LL * ((long long)bn + cn + an);   /* the fixed parts, 20 digits twice, six bytes per escaped byte */
+  if (need > cap) return need > 0x7fffffff ? -0x7fffffff : (int)-need;
+  int w = 0;
+#define FEED_PUT(lit) do { memcpy(dst + w, lit, sizeof(lit) - 1); w += (int)sizeof(lit) - 1; } while (0)
+  FEED_PUT("{\"id\":");
+  w += feed_i64(dst + w, id);
+  FEED_PUT(",\"body\":\"");
+  w += feed_json_text(b, bn, dst + w);
+  FEED_PUT("\",\"created_at\":\"");
+  w += feed_json_text(c, cn, dst + w);
+  FEED_PUT("\",\"author\":\"");
+  w += feed_json_text(a, an, dst + w);
+  FEED_PUT("\",\"like_count\":");
+  w += feed_i64(dst + w, likes);
+  dst[w++] = '}';
+#undef FEED_PUT
+  return w;
+}
+/* END feed_row_json */

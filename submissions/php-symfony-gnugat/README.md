@@ -5,9 +5,9 @@ Symfony components first. No custom HTTP server, no hand-written JSON, no group 
 
 | | |
 |---|---|
-| Language | PHP 8.5.11 (ZTS), built into [FrankenPHP's release binary](https://github.com/php/frankenphp/releases/tag/v1.13.0) |
-| Framework | Symfony 8.1 (FrameworkBundle 8.1.8, SecurityBundle, JsonStreamer, Runtime for the console) |
-| Server | FrankenPHP 1.13.0 (Caddy 2.11.7) in worker mode, with the worker loop of FrankenPHP's docs in `public/index.php` |
+| Language | PHP 8.5.12 (ZTS), built into [FrankenPHP's release binary](https://github.com/php/frankenphp/releases/tag/v1.13.4) |
+| Framework | Symfony 8.1 (FrameworkBundle 8.1.10, SecurityBundle, JsonStreamer, Runtime for the console) |
+| Server | FrankenPHP 1.13.4 (Caddy 2.11.7) in worker mode, with the worker loop of FrankenPHP's docs in `public/index.php` |
 | SQLite driver | PDO SQLite (SQLite 3.45.2) via Doctrine DBAL 4.5 (DoctrineBundle 3.3) |
 | **Nginx or direct** | **Direct**: FrankenPHP serves `HOST:PORT` itself (`0.0.0.0:80` on the droplet) |
 

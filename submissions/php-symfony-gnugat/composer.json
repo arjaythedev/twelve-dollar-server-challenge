@@ -7,10 +7,10 @@
         "php": ">=8.5",
         "ext-ctype": "*",
         "ext-iconv": "*",
-        "doctrine/doctrine-bundle": "^3.3",
+        "doctrine/doctrine-bundle": "^3.3.4",
         "symfony/console": "8.1.*",
         "symfony/dotenv": "8.1.*",
-        "symfony/flex": "^2",
+        "symfony/flex": "^2.12",
         "symfony/framework-bundle": "8.1.*",
         "symfony/json-streamer": "8.1.*",
         "symfony/runtime": "8.1.*",
@@ -19,10 +19,10 @@
     },
     "require-dev": {
         "friendsofphp/php-cs-fixer": "^3.95",
-        "phpstan/phpstan": "^2.3",
-        "phpstan/phpstan-doctrine": "^2.0",
-        "phpstan/phpstan-symfony": "^2.1",
-        "rector/rector": "^2.7"
+        "phpstan/phpstan": "^2.3.4",
+        "phpstan/phpstan-doctrine": "^2.1",
+        "phpstan/phpstan-symfony": "^2.1.1",
+        "rector/rector": "^2.8.3"
     },
     "config": {
         "allow-plugins": {

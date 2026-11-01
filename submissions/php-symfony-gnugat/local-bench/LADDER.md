@@ -21,7 +21,8 @@ Two measures, both throttled:
   users. Each setup's load calibrates itself between saturation and timeouts. Two rounds, every setup once per
   round.
 
-Measured 2026-10-30 to 2026-11-01.
+Measured 2026-10-30 to 2026-11-01, on FrankenPHP 1.13.0 (PHP 8.5.11) and Symfony 8.1.8, before the update to
+FrankenPHP 1.13.4 (PHP 8.5.12) and Symfony 8.1.10 for their security fixes.
 
 **Only compare these numbers with each other.** The leaderboard's box is not a quarter of this core: PR 40 scores
 21,000 users there and 5,750 here (3.65 times as many), this app's scored commit (`48e3783`) 15,500 and 3,750 (4.13

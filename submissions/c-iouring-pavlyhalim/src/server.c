@@ -85,7 +85,10 @@ struct cref {
 };
 
 static struct rs R[MAX_RINGS];
-static unsigned NR;
+static unsigned NR;     /* rings created so far; they are created in order, as connections need them */
+static unsigned NR_MAX; /* rings the connection target asks for */
+static unsigned ring_slots, ring_bufs, ring_buf_size;
+static int ring_grow_failed;
 static struct app A;
 static uint32_t now_s;
 static int writes_ok = 1;
@@ -300,6 +303,35 @@ static void ring_populate(struct rs *rs) {
   fprintf(stderr, "ring %u: %zu KiB faulted in (%.1f ms)\n", (unsigned)(rs - R), (nc + nb) >> 10, (double)(now_ns() - t) / 1e6);
 }
 
+/* A ring is made when connections first need it (ring 0 at startup, each later one ACCEPT_NEXT
+ * connections before the one before it is full), so rings that are never used cost no kernel
+ * memory. Newer kernels than the box's 6.8 charge ring memory to RLIMIT_MEMLOCK (8 MB under
+ * systemd): made up front, eight rings with 65,536-entry completion queues did not fit, and CI's
+ * runner refused the seventh. The CQ holds one completion per connection on the ring, so a burst
+ * of completions never goes to the kernel's overflow list, allocated per completion just when
+ * memory is shortest; on ENOMEM from io_uring_setup (nothing allocated yet) the ring is made with
+ * half the entries, down to 8,192. */
+static int ring_create(unsigned i) {
+  const char *err = "";
+  unsigned cq = 65536;
+  while (ring_init(&R[i].r, 4096, cq, ring_slots, ring_bufs, ring_buf_size, i == 0, &err) < 0) {
+    if (errno != ENOMEM || strcmp(err, "io_uring_setup") || cq <= 8192) {
+      fprintf(stderr, "ring %u: %s: %s\n", i, err, strerror(errno));
+      return -1;
+    }
+    cq /= 2;
+  }
+  R[i].conns = mmap(NULL, (size_t)ring_slots * sizeof(struct conn), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  if (R[i].conns == MAP_FAILED) { perror("mmap conns"); return -1; }
+  if (i > 0) {
+    R[i].efd = ring_register_eventfd(&R[i].r);
+    if (R[i].efd < 0) { perror("register eventfd"); return -1; }
+    sqe_poll_multishot(ring_sqe(&R[0].r), R[i].efd, UD(UD_EVFD, i, 0, 0));
+  }
+  fprintf(stderr, "ring %u: io_uring fd %d, %u CQ entries\n", i, R[i].r.fd, cq);
+  return 0;
+}
+
 static void arm_accept(struct rs *rs, unsigned ri) {
   if (!rs->populated) ring_populate(rs);
   for (unsigned l = 0; l < NLISTEN; l++)
@@ -310,6 +342,10 @@ static void arm_accept(struct rs *rs, unsigned ri) {
 }
 
 static void accept_policy(void) {
+  if (NR < NR_MAX && !ring_grow_failed && R[NR - 1].open + ACCEPT_NEXT >= R[NR - 1].r.nslots) {
+    if (ring_create(NR) == 0) NR++;
+    else ring_grow_failed = 1; /* stay at NR rings; the last one's accepts stop ACCEPT_STOP short of full */
+  }
   unsigned lowest = NR;
   for (unsigned i = 0; i < NR; i++)
     if (R[i].open + ACCEPT_STOP < R[i].r.nslots) { lowest = i; break; }
@@ -877,9 +913,9 @@ int main(void) {
   unsigned nslots = rl.rlim_cur > 65535 ? 65535 : (unsigned)rl.rlim_cur;
   if (nslots > 256) nslots -= 64; /* leave room for the process's ordinary descriptors */
   long want_conns = env_long("MAX_CONNS", 500000);
-  NR = (unsigned)((want_conns + nslots - 1) / nslots);
-  if (NR < 1) NR = 1;
-  if (NR > MAX_RINGS) NR = MAX_RINGS;
+  NR_MAX = (unsigned)((want_conns + nslots - 1) / nslots);
+  if (NR_MAX < 1) NR_MAX = 1;
+  if (NR_MAX > MAX_RINGS) NR_MAX = MAX_RINGS;
   /* 4,096 buffers of 1 KB per ring: a request is 150-600 bytes, and the count, not the size, is what
    * a burst runs out of (a larger request spans buffers and goes through pend) */
   unsigned nbufs = (unsigned)env_long("RECV_BUFS", 4096), bufsz = (unsigned)env_long("RECV_BUF_SIZE", 1024);
@@ -901,35 +937,14 @@ int main(void) {
       }
     }
   }
-  for (unsigned i = 0; i < NR; i++) {
-    const char *err = "";
-    /* The CQ holds one completion per connection on the ring, so a burst of completions never goes
-     * to the kernel's overflow list, allocated per completion just when memory is shortest. On 6.8
-     * a ring's queues are one physically contiguous block (2 MB for 65,536 entries), which a
-     * fragmented machine may not have: on ENOMEM from io_uring_setup (nothing allocated yet) the
-     * ring is made with half the entries, down to 8,192. */
-    unsigned cq = 65536;
-    while (ring_init(&R[i].r, 4096, cq, nslots, nbufs, bufsz, i == 0, &err) < 0) {
-      if (errno != ENOMEM || strcmp(err, "io_uring_setup") || cq <= 8192) {
-        fprintf(stderr, "ring %u: %s: %s\n", i, err, strerror(errno));
-        return 1;
-      }
-      cq /= 2;
-    }
-    if (cq < 65536) fprintf(stderr, "ring %u: %u CQ entries (no contiguous memory for more)\n", i, cq);
-    R[i].conns = mmap(NULL, (size_t)nslots * sizeof(struct conn), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (R[i].conns == MAP_FAILED) { perror("mmap conns"); return 1; }
-    if (i > 0) {
-      R[i].efd = ring_register_eventfd(&R[i].r);
-      if (R[i].efd < 0) { perror("register eventfd"); return 1; }
-      sqe_poll_multishot(ring_sqe(&R[0].r), R[i].efd, UD(UD_EVFD, i, 0, 0));
-    }
-  }
-  fprintf(stderr, "listening on %s:%s: %u rings x %u direct descriptors, %u x %u B receive buffers per ring, "
+  ring_slots = nslots;
+  ring_bufs = nbufs;
+  ring_buf_size = bufsz;
+  if (ring_create(0) < 0) return 1;
+  NR = 1;
+  fprintf(stderr, "listening on %s:%s: up to %u rings x %u direct descriptors, %u x %u B receive buffers per ring, "
                   "mmap %lld MB, cache %d KiB\n",
-          host, port, NR, nslots, nbufs, bufsz, mmap_bytes >> 20, cache_kib);
-  for (unsigned i = 0; i < NR; i++) fprintf(stderr, "ring %u: io_uring fd %d\n", i, R[i].r.fd);
-  /* after the rings, so the code lock can never take memlock room a ring needs */
+          host, port, NR_MAX, nslots, nbufs, bufsz, mmap_bytes >> 20, cache_kib);
   fprintf(stderr, "code locked in RAM: %zu KiB\n", lock_code() >> 10);
   prewarm_batch_memory();
   prefault_stack(256 << 10);

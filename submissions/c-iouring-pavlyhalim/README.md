@@ -19,7 +19,8 @@ Every user is a keep-alive connection, so the connection count is what the serve
 
 - Accepted sockets are io_uring direct descriptors, held in each ring's fixed-file table rather than
   the process's descriptor table, so `LimitNOFILE=65535` does not cap them. A table cannot be larger
-  than that limit, so the server makes 8 rings of 65,471 slots (over 500,000 connections).
+  than that limit, so the server uses up to 8 rings of 65,471 slots (over 500,000 connections),
+  each made when connections first need it.
 - Eight listening sockets share the port (`SO_REUSEPORT`). The kernel spreads new connections over
   them and each has its own accept queue of `somaxconn` (4,096 on the box), so together they hold
   about 32,000 connections through a stall instead of 4,096. With one listener a run with stalls
@@ -44,9 +45,12 @@ Every user is a keep-alive connection, so the connection count is what the serve
   request against 14.5 in the same test at 160,000 users.
 - Completion queues hold 65,536 entries per ring, more than a ring's connections, so a burst of
   completions never spills into the kernel's overflow list, which allocates per completion just
-  when memory is shortest. On 6.8 a ring's queues are one physically contiguous block (2 MB at this
-  size); if `io_uring_setup` finds none, the ring is made with half the entries, down to 8,192, and
-  the size is logged (CI's runner gave up at the seventh ring).
+  when memory is shortest. Rings are made as connections need them: ring 0 at startup, each later
+  one 8,192 connections before the one before it is full, so rings that are never used cost no
+  kernel memory. Kernels newer than the box's 6.8 charge ring memory to `RLIMIT_MEMLOCK` (8 MB
+  under systemd), where eight rings of this size made up front did not fit (CI's runner refused the
+  seventh). If `io_uring_setup` says `ENOMEM`, the ring is made with half the entries, down to
+  8,192; if a ring cannot be made at all, the server keeps serving on the rings it has.
 - The kernel's own per-socket memory (~4.3 KB on 6.8, most of it not charged to the process) is the
   real ceiling on a 2 GB box, and the 40 bytes are what the server adds to it.
 - Ring 0 is `SINGLE_ISSUER | DEFER_TASKRUN` and is the ring the loop waits on (a timed

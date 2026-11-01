@@ -13,6 +13,12 @@ being served.
 
 ## Implementation notes
 
+- **Direct-descriptor accept.** Accepted sockets are placed in an io_uring registered file table with
+  `IORING_FILE_INDEX_ALLOC`; recv/send/close use fixed-file indexes. This removes the process
+  `RLIMIT_NOFILE` cap for accepted sockets. Five listener shards (`SO_REUSEPORT`) each register a
+  65,500-slot table, covering 327,500 connections. Sparse file-table registration is preferred so the
+  registration is not charged against `RLIMIT_NOFILE`; kernels without sparse registration fall back to
+  a normal table and then to the Go loop.
 - **Split read/write connections.** Reads use a pool of 2 connections (the measured sweet spot
   on 1 vCPU; `READ_CONNS` overrides it). Writes use one dedicated connection. The raw mux
   applies each write batch with one `BEGIN IMMEDIATE`/`COMMIT`; every response waits for the

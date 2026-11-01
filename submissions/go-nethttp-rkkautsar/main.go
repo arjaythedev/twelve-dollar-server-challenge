@@ -60,6 +60,7 @@ type app struct {
 
 	reads chan *readConn
 	write *writeConn
+	dbMu  sync.Mutex
 
 	writeCh     chan *writeJob
 	batchWindow time.Duration
@@ -204,20 +205,31 @@ func main() {
 		writeBatch := func(reqs []*httpReq) []readResp {
 			return a.muxWriteBatch(reqs)
 		}
-		mux, err := newUringMux(func(req *httpReq) ([]byte, bool) {
-			w := &capture{status: 200}
-			a.ServeHTTP(w, req)
-			closeAfter := req.close
-			return encodeMuxResponse(w, closeAfter), closeAfter
-		}, feed, postBatch, writeBatch, 1)
-		if err != nil {
-			log.Printf("raw io_uring mux unavailable: %v", err)
-		} else {
-			log.Print("raw io_uring request mux enabled")
-			if err := mux.serve(host, port); err != nil {
-				log.Fatal(err)
+		newMux := func() (*uringMux, error) {
+			return newUringMux(func(req *httpReq) ([]byte, bool) {
+				w := &capture{status: 200}
+				a.ServeHTTP(w, req)
+				closeAfter := req.close
+				return encodeMuxResponse(w, closeAfter), closeAfter
+			}, feed, postBatch, writeBatch, 1)
+		}
+		started := 0
+		for range 5 {
+			mux, err := newMux()
+			if err != nil {
+				log.Printf("raw io_uring mux unavailable: %v", err)
+				continue
 			}
-			return
+			started++
+			go func(m *uringMux) {
+				if err := m.serve(host, port); err != nil {
+					log.Printf("raw io_uring mux stopped: %v", err)
+				}
+			}(mux)
+		}
+		if started > 0 {
+			log.Printf("raw io_uring request mux enabled (%d shards)", started)
+			select {}
 		}
 	}
 
@@ -350,6 +362,8 @@ func (a *app) writeLoop() {
 }
 
 func (a *app) applyBatch(jobs []*writeJob) ([]writeResult, bool) {
+	a.dbMu.Lock()
+	defer a.dbMu.Unlock()
 	w := a.write
 	if err := w.db.exec("BEGIN IMMEDIATE"); err != nil {
 		return nil, false

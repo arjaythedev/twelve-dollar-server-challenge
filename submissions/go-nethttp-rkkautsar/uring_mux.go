@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"net"
 	"strconv"
@@ -18,15 +19,25 @@ const (
 	muxWriteTag  = 2
 	muxAcceptTag = 3
 	muxWakeTag   = 4
+	muxCloseTag  = 5
 	muxTagMask   = 7
 
-	muxSqEntries = 4096
-	muxCqEntries = 8192
+	muxSqEntries = 8192
+	muxCqEntries = 32768
+
+	// Accepted sockets live in this registered file table, not in the process
+	// fd table. RLIMIT_NOFILE therefore does not cap the connection count.
+	muxFileTableEntries      = 131072
+	ioringFileIndexAlloc     = ^uint32(0)
+	ioringRsrcRegisterSparse = 1
+	iosqeFixedFile           = 1
+	rawOpAccept              = 13
+	rawOpClose               = 19
 )
 
 type muxConn struct {
 	id         uint64
-	fd         int
+	fileIndex  uint32
 	in         []byte
 	out        [][]byte
 	outOff     int
@@ -36,6 +47,34 @@ type muxConn struct {
 	waiting    bool
 	closeAfter bool
 	closed     bool
+}
+
+type rsrcRegister struct {
+	Nr    uint32
+	Flags uint32
+	Resv2 uint64
+	Data  uint64
+	Tags  uint64
+}
+
+// registerFileTable prefers the sparse registration: it is not charged
+// against RLIMIT_NOFILE, so fixed file indexes can exceed 65,535.
+func registerFileTable(ringFD int, n int) error {
+	reg := rsrcRegister{Nr: uint32(n), Flags: 1} // IORING_RSRC_REGISTER_SPARSE
+	sparseErrno := syscall.Errno(0)
+	if _, _, errno := syscall.Syscall6(ioUringRegister, uintptr(ringFD), 13, uintptr(unsafe.Pointer(&reg)), 1, 0, 0); errno == 0 {
+		return nil
+	} else {
+		sparseErrno = errno
+	}
+	fds := make([]int32, n)
+	for i := range fds {
+		fds[i] = -1
+	}
+	if _, _, errno := syscall.Syscall6(ioUringRegister, uintptr(ringFD), 2, uintptr(unsafe.Pointer(&fds[0])), uintptr(len(fds)), 0, 0); errno != 0 {
+		return fmt.Errorf("sparse: %v; normal: %w", sparseErrno, errno)
+	}
+	return nil
 }
 
 type MuxHandler func(*httpReq) (packet []byte, closeAfter bool)
@@ -76,6 +115,7 @@ type uringMux struct {
 	listener     net.Listener
 	acceptArmed  bool
 	acceptPaused bool
+	closePending int
 	conns        map[uint64]*muxConn
 	next         atomic.Uint64
 	toSub        uint32
@@ -95,7 +135,11 @@ type uringMux struct {
 func newUringMux(handler MuxHandler, feed func() []byte, postBatch func([]int64) map[int64][]byte, writeBatch func([]*httpReq) []readResp, workers int) (*uringMux, error) {
 	ring, err := newRawRing(muxSqEntries, muxCqEntries)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("ring: %w", err)
+	}
+	if err := registerFileTable(ring.fd, muxFileTableEntries); err != nil {
+		syscall.Close(ring.fd)
+		return nil, fmt.Errorf("register files: %w", err)
 	}
 	mem, err := syscall.Mmap(-1, 0, readBufCount*16, syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_PRIVATE|syscall.MAP_ANONYMOUS)
 	if err != nil {
@@ -107,7 +151,7 @@ func newUringMux(handler MuxHandler, feed func() []byte, postBatch func([]int64)
 	if err != nil {
 		syscall.Munmap(mem)
 		syscall.Close(ring.fd)
-		return nil, err
+		return nil, fmt.Errorf("pbuf: %w", err)
 	}
 	var pipe [2]int
 	if err := syscall.Pipe(pipe[:]); err != nil {
@@ -179,7 +223,16 @@ func (m *uringMux) worker() {
 }
 
 func (m *uringMux) serve(host, port string) error {
-	ln, err := net.Listen("tcp", host+":"+port)
+	lc := net.ListenConfig{Control: func(_, _ string, conn syscall.RawConn) error {
+		var serr error
+		if err := conn.Control(func(fd uintptr) {
+			serr = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, 15, 1) // SO_REUSEPORT
+		}); err != nil {
+			return err
+		}
+		return serr
+	}}
+	ln, err := lc.Listen(context.Background(), "tcp", host+":"+port)
 	if err != nil {
 		return err
 	}
@@ -199,6 +252,7 @@ func (m *uringMux) serve(host, port string) error {
 		return err
 	}
 	_ = syscall.SetNonblock(fd, true)
+	_ = syscall.SetsockoptInt(fd, syscall.IPPROTO_TCP, syscall.TCP_NODELAY, 1)
 	m.listener = ln
 	m.listenFD = fd
 	m.armAccept()
@@ -238,9 +292,10 @@ func (m *uringMux) armAccept() {
 			continue
 		}
 		*sqe = rawSQE{}
-		sqe.Opcode = 13 // IORING_OP_ACCEPT
+		sqe.Opcode = rawOpAccept
 		sqe.FD = int32(m.listenFD)
-		sqe.IOPrio = 1 // IORING_ACCEPT_MULTISHOT
+		sqe.IOPrio = 1      // IORING_ACCEPT_MULTISHOT
+		sqe.SpliceFDIn = -1 // IORING_FILE_INDEX_ALLOC
 		sqe.UserData = muxAcceptTag
 		m.acceptArmed = true
 		m.toSub++
@@ -248,14 +303,9 @@ func (m *uringMux) armAccept() {
 	}
 }
 
-func (m *uringMux) addFD(fd int) {
-	if fd < 0 {
-		return
-	}
-	_ = syscall.SetNonblock(fd, true)
-	_ = syscall.SetsockoptInt(fd, syscall.IPPROTO_TCP, syscall.TCP_NODELAY, 1)
+func (m *uringMux) addDirect(index uint32) {
 	id := m.next.Add(1)
-	mc := &muxConn{id: id, fd: fd}
+	mc := &muxConn{id: id, fileIndex: index}
 	m.conns[id] = mc
 	m.arm(mc)
 }
@@ -282,9 +332,9 @@ func (m *uringMux) arm(c *muxConn) {
 		}
 		*sqe = rawSQE{}
 		sqe.Opcode = rawOpRecv
-		sqe.Flags = iosqeBufSel
+		sqe.Flags = iosqeBufSel | iosqeFixedFile
 		sqe.IOPrio = recvMultishot
-		sqe.FD = int32(c.fd)
+		sqe.FD = int32(c.fileIndex)
 		sqe.Len = 0
 		sqe.BufIndex = readBufGroup
 		sqe.UserData = c.id<<3 | muxReadTag
@@ -300,11 +350,7 @@ func (m *uringMux) close(c *muxConn) {
 	}
 	c.closed = true
 	delete(m.conns, c.id)
-	_ = syscall.Close(c.fd)
-	if m.acceptPaused {
-		m.acceptPaused = false
-		m.armAccept()
-	}
+	m.armClose(c.fileIndex)
 }
 
 func (m *uringMux) send(c *muxConn, p []byte, closeAfter bool) {
@@ -314,6 +360,34 @@ func (m *uringMux) send(c *muxConn, p []byte, closeAfter bool) {
 	c.out = append(c.out, p)
 	if closeAfter {
 		c.closeAfter = true
+	}
+}
+
+func (m *uringMux) armClose(index uint32) {
+	for {
+		sqe := m.ring.sqe()
+		if sqe == nil {
+			m.flush()
+			continue
+		}
+		*sqe = rawSQE{}
+		sqe.Opcode = rawOpClose
+		sqe.Flags = iosqeFixedFile
+		sqe.SpliceFDIn = int32(index)
+		sqe.UserData = muxCloseTag
+		m.closePending++
+		m.toSub++
+		return
+	}
+}
+
+func (m *uringMux) finishClose() {
+	if m.closePending > 0 {
+		m.closePending--
+	}
+	if m.acceptPaused && m.closePending == 0 {
+		m.acceptPaused = false
+		m.armAccept()
 	}
 }
 
@@ -331,7 +405,8 @@ func (m *uringMux) submitSends() {
 			p := c.out[0]
 			*sqe = rawSQE{}
 			sqe.Opcode = 26 // IORING_OP_SEND
-			sqe.FD = int32(c.fd)
+			sqe.Flags = iosqeFixedFile
+			sqe.FD = int32(c.fileIndex)
 			sqe.Addr = uint64(uintptr(unsafe.Pointer(&p[c.outOff])))
 			sqe.Len = uint32(len(p) - c.outOff)
 			sqe.RWFlags = syscall.MSG_NOSIGNAL
@@ -373,7 +448,7 @@ func (m *uringMux) loop() {
 func (m *uringMux) finishAccept(cqe *rawCQE) {
 	m.acceptArmed = false
 	if cqe.Res >= 0 {
-		m.addFD(int(cqe.Res))
+		m.addDirect(uint32(cqe.Res))
 	} else if cqe.Res == -int32(syscall.EMFILE) || cqe.Res == -int32(syscall.ENFILE) {
 		// Accept cannot make progress until a file descriptor is closed.
 		// Rearming immediately just produces an EMFILE CQE loop and pins CPU.
@@ -415,6 +490,10 @@ func (m *uringMux) drainCQEs() {
 		}
 		if tag == muxWakeTag {
 			m.finishWake()
+			return
+		}
+		if tag == muxCloseTag {
+			m.finishClose()
 			return
 		}
 		id := cqe.UserData >> 3

@@ -15,5 +15,7 @@ int bt_begin(void);
 void bt_end(void);
 int bt_feed(bt_post *out, int *n, char *buf, size_t cap);
 int bt_post_get(long long id, bt_post *out, char *buf, size_t cap);
+int bt_vfs_register(void);    // after sqlite3_initialize: registers the "tds" VFS (unix-excl + WAL write coalescing)
+int bt_pcache_install(void);  // before sqlite3_initialize: page cache wrapper over pcache1
 
 #endif

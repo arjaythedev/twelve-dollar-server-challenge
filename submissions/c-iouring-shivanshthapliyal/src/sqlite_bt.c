@@ -237,3 +237,181 @@ int bt_post_get(long long id, bt_post *o, char *buf, size_t cap) {
   if (k <= 0) return k;
   return count_one(o) ? -1 : 1;
 }
+
+// ---------------------------------------------------------------- WAL write coalescing (custom VFS)
+//
+// "tds" wraps unix-excl. For WAL files only, consecutive appends are buffered and written with one pwrite
+// when the commit frame's page arrives. That is still inside SQLite's commit, before the WAL index makes
+// the frames visible to any reader, so no reader (including the checkpoint connection) can see a frame
+// that is not in the file. Any other write, read, sync, truncate, size or close flushes first.
+
+typedef struct {
+  const sqlite3_io_methods *real;
+  char *buf;
+  sqlite3_int64 off;
+  int len, cap, commit_hdr;
+} walx;
+
+#define WAL_WRITE_MAX (120 * 1024)
+
+static sqlite3_vfs tds_vfs, *base_vfs;
+static sqlite3_io_methods wal_io;
+
+static walx *WX(sqlite3_file *f) { return (walx *)((char *)f + base_vfs->szOsFile); }
+
+static int wflush(sqlite3_file *f) {
+  walx *x = WX(f);
+  if (!x->len) return SQLITE_OK;
+  // unixWrite handles at most 128 KB per call (seekAndWriteFd masks nBuf with 0x1ffff), so write in pieces.
+  int rc = SQLITE_OK;
+  for (int done = 0; done < x->len && rc == SQLITE_OK;) {
+    int n = x->len - done < WAL_WRITE_MAX ? x->len - done : WAL_WRITE_MAX;
+    rc = x->real->xWrite(f, x->buf + done, n, x->off + done);
+    done += n;
+  }
+  x->len = 0;
+  return rc;
+}
+
+static int w_write(sqlite3_file *f, const void *z, int n, sqlite3_int64 off) {
+  walx *x = WX(f);
+  int append = x->len ? off == x->off + x->len : 1;
+  if (!append || x->len + n > x->cap) {
+    int rc = wflush(f);
+    if (rc) return rc;
+    if (!append || n > x->cap) return x->real->xWrite(f, z, n, off);  // not an append: write it directly
+  }
+  if (!x->len) x->off = off;
+  memcpy(x->buf + x->len, z, n);
+  x->len += n;
+  if (n == WAL_FRAME_HDRSIZE) {
+    const u8 *h = z;
+    x->commit_hdr = (h[4] | h[5] | h[6] | h[7]) != 0;  // nTruncate != 0 marks the commit frame
+  } else if (x->commit_hdr) {
+    x->commit_hdr = 0;
+    return wflush(f);
+  }
+  return SQLITE_OK;
+}
+
+static int w_read(sqlite3_file *f, void *z, int n, sqlite3_int64 off) {
+  int rc = wflush(f);
+  return rc ? rc : WX(f)->real->xRead(f, z, n, off);
+}
+static int w_sync(sqlite3_file *f, int fl) { int rc = wflush(f); return rc ? rc : WX(f)->real->xSync(f, fl); }
+static int w_trunc(sqlite3_file *f, sqlite3_int64 s) { int rc = wflush(f); return rc ? rc : WX(f)->real->xTruncate(f, s); }
+static int w_size(sqlite3_file *f, sqlite3_int64 *s) { int rc = wflush(f); return rc ? rc : WX(f)->real->xFileSize(f, s); }
+static int w_close(sqlite3_file *f) {
+  walx *x = WX(f);
+  int rc = wflush(f);
+  const sqlite3_io_methods *real = x->real;
+  sqlite3_free(x->buf);
+  x->buf = 0;
+  f->pMethods = real;
+  int rc2 = real->xClose(f);
+  return rc ? rc : rc2;
+}
+static int w_lock(sqlite3_file *f, int l) { return WX(f)->real->xLock(f, l); }
+static int w_unlock(sqlite3_file *f, int l) { return WX(f)->real->xUnlock(f, l); }
+static int w_reserved(sqlite3_file *f, int *r) { return WX(f)->real->xCheckReservedLock(f, r); }
+static int w_fcntl(sqlite3_file *f, int op, void *a) { return WX(f)->real->xFileControl(f, op, a); }
+static int w_sector(sqlite3_file *f) { return WX(f)->real->xSectorSize(f); }
+static int w_dev(sqlite3_file *f) { return WX(f)->real->xDeviceCharacteristics(f); }
+static int w_shmmap(sqlite3_file *f, int i, int sz, int ext, void volatile **p) { return WX(f)->real->xShmMap(f, i, sz, ext, p); }
+static int w_shmlock(sqlite3_file *f, int o, int n, int fl) { return WX(f)->real->xShmLock(f, o, n, fl); }
+static void w_shmbarrier(sqlite3_file *f) { WX(f)->real->xShmBarrier(f); }
+static int w_shmunmap(sqlite3_file *f, int del) { return WX(f)->real->xShmUnmap(f, del); }
+static int w_fetch(sqlite3_file *f, sqlite3_int64 o, int n, void **p) { int rc = wflush(f); return rc ? rc : WX(f)->real->xFetch(f, o, n, p); }
+static int w_unfetch(sqlite3_file *f, sqlite3_int64 o, void *p) { return WX(f)->real->xUnfetch(f, o, p); }
+
+static int tds_open(sqlite3_vfs *v, sqlite3_filename name, sqlite3_file *f, int flags, int *out) {
+  (void)v;
+  int rc = base_vfs->xOpen(base_vfs, name, f, flags, out);
+  if (rc != SQLITE_OK || !(flags & SQLITE_OPEN_WAL) || !f->pMethods || f->pMethods->iVersion < 3) return rc;
+  walx *x = WX(f);
+  memset(x, 0, sizeof *x);
+  x->cap = 4 << 20;
+  if (!(x->buf = sqlite3_malloc(x->cap))) return SQLITE_OK;  // no buffer: leave the plain methods in place
+  x->real = f->pMethods;
+  f->pMethods = &wal_io;
+  return SQLITE_OK;
+}
+
+int bt_vfs_register(void) {
+  if (!(base_vfs = sqlite3_vfs_find("unix-excl"))) return -1;
+  tds_vfs = *base_vfs;
+  tds_vfs.zName = "tds";
+  tds_vfs.szOsFile = base_vfs->szOsFile + (int)sizeof(walx);
+  tds_vfs.xOpen = tds_open;
+  tds_vfs.pNext = 0;
+  wal_io = (sqlite3_io_methods){3, w_close, w_read, w_write, w_trunc, w_sync, w_size, w_lock, w_unlock, w_reserved, w_fcntl,
+                                w_sector, w_dev, w_shmmap, w_shmlock, w_shmbarrier, w_shmunmap, w_fetch, w_unfetch};
+  return sqlite3_vfs_register(&tds_vfs, 0);
+}
+
+// ---------------------------------------------------------------- page cache (SQLITE_CONFIG_PCACHE2 wrapper)
+//
+// balance_nonroot() briefly uses the pending-byte page number (about 262k with 4 KB pages) as a key. That
+// raises pcache1's max key, and every later commit's truncate then walks the whole cache. This wrapper
+// forwards everything to the default pcache1 but tracks the largest real key itself: a truncate that cannot
+// drop anything is skipped, and the pending-byte page alone is dropped directly.
+
+static sqlite3_pcache_methods2 pc_base;
+
+typedef struct {
+  sqlite3_pcache *inner;
+  unsigned max_key, pend_key;
+  int pend_in;
+} pcw;
+
+static int pc_init(void *a) { return pc_base.xInit ? pc_base.xInit(a) : SQLITE_OK; }
+static void pc_shutdown(void *a) { if (pc_base.xShutdown) pc_base.xShutdown(a); }
+
+static sqlite3_pcache *pc_create(int szPage, int szExtra, int purge) {
+  pcw *w = sqlite3_malloc(sizeof *w);
+  if (!w) return 0;
+  if (!(w->inner = pc_base.xCreate(szPage, szExtra, purge))) { sqlite3_free(w); return 0; }
+  w->max_key = 0, w->pend_in = 0;
+  w->pend_key = (unsigned)(PENDING_BYTE / szPage) + 1;
+  return (sqlite3_pcache *)w;
+}
+static void pc_cachesize(sqlite3_pcache *p, int n) { pc_base.xCachesize(((pcw *)p)->inner, n); }
+static int pc_pagecount(sqlite3_pcache *p) { return pc_base.xPagecount(((pcw *)p)->inner); }
+static void pc_note(pcw *w, unsigned key) {
+  if (key == w->pend_key) w->pend_in = 1;
+  else if (key > w->max_key) w->max_key = key;
+}
+static sqlite3_pcache_page *pc_fetch(sqlite3_pcache *p, unsigned key, int create) {
+  pcw *w = (pcw *)p;
+  sqlite3_pcache_page *pg = pc_base.xFetch(w->inner, key, create);
+  if (pg) pc_note(w, key);
+  return pg;
+}
+static void pc_unpin(sqlite3_pcache *p, sqlite3_pcache_page *pg, int discard) { pc_base.xUnpin(((pcw *)p)->inner, pg, discard); }
+static void pc_rekey(sqlite3_pcache *p, sqlite3_pcache_page *pg, unsigned o, unsigned n) {
+  pcw *w = (pcw *)p;
+  pc_base.xRekey(w->inner, pg, o, n);
+  pc_note(w, n);
+}
+static void pc_truncate(sqlite3_pcache *p, unsigned limit) {
+  pcw *w = (pcw *)p;
+  if (w->pend_in && w->pend_key >= limit) {
+    sqlite3_pcache_page *pg = pc_base.xFetch(w->inner, w->pend_key, 0);
+    if (pg) pc_base.xUnpin(w->inner, pg, 1);
+    w->pend_in = 0;
+  }
+  if (w->max_key >= limit) {
+    pc_base.xTruncate(w->inner, limit);
+    w->max_key = limit ? limit - 1 : 0;
+  }
+}
+static void pc_destroy(sqlite3_pcache *p) { pc_base.xDestroy(((pcw *)p)->inner), sqlite3_free(p); }
+static void pc_shrink(sqlite3_pcache *p) { pc_base.xShrink(((pcw *)p)->inner); }
+
+int bt_pcache_install(void) {
+  if (sqlite3_config(SQLITE_CONFIG_GETPCACHE2, &pc_base) != SQLITE_OK || !pc_base.xCreate) return -1;
+  static sqlite3_pcache_methods2 m;
+  m = (sqlite3_pcache_methods2){1, 0, pc_init, pc_shutdown, pc_create, pc_cachesize, pc_pagecount, pc_fetch,
+                                pc_unpin, pc_rekey, pc_truncate, pc_destroy, pc_shrink};
+  return sqlite3_config(SQLITE_CONFIG_PCACHE2, &m);
+}

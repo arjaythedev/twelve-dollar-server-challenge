@@ -606,6 +606,8 @@ static void ck_wait(int s) {
 
 static void *ck_thread(void *arg) {
   (void)arg;
+  // Lowest priority: the bulk page copy runs in the loop's idle time instead of preempting it near saturation.
+  setpriority(PRIO_PROCESS, (id_t)gettid(), 19);
   for (;;) {
     ck_wait(CK_RUN);
     sqlite3_wal_checkpoint_v2(ckdb, NULL, SQLITE_CHECKPOINT_PASSIVE, NULL, NULL);
@@ -651,11 +653,11 @@ static void ck_step(void) {
   }
 }
 
-static void db_open(const char *path) {
+static void db_open(const char *path, const char *vfs) {
   // unix-excl: an exclusive file lock for this process, with the WAL index in heap memory shared by
   // both connections, so readers pay no shared-memory file locks.
-  if (sqlite3_open_v2(path, &db, SQLITE_OPEN_READWRITE, "unix-excl") != SQLITE_OK ||
-      sqlite3_open_v2(path, &ckdb, SQLITE_OPEN_READWRITE, "unix-excl") != SQLITE_OK) {
+  if (sqlite3_open_v2(path, &db, SQLITE_OPEN_READWRITE, vfs) != SQLITE_OK ||
+      sqlite3_open_v2(path, &ckdb, SQLITE_OPEN_READWRITE, vfs) != SQLITE_OK) {
     fprintf(stderr, "open %s: %s\n", path, sqlite3_errmsg(db));
     exit(1);
   }
@@ -668,7 +670,7 @@ static void db_open(const char *path) {
   }
   sqlite3_finalize(jm);
   exec("PRAGMA synchronous=NORMAL");
-  exec("PRAGMA cache_size=-16384");  // hot set is ~2 MB; more would duplicate the OS page cache
+  exec("PRAGMA cache_size=-32768");  // 32 MiB: the hot set plus room, so page misses stay rare
   exec("PRAGMA mmap_size=0");
   exec("PRAGMA temp_store=MEMORY");
   exec("PRAGMA wal_autocheckpoint=0");
@@ -1479,10 +1481,12 @@ int main(void) {
   clock_gettime(CLOCK_MONOTONIC, &start_ts);
   const char *path = getenv("SQLITE_PATH"), *secret = getenv("JWT_SECRET"), *host = getenv("HOST"), *port = getenv("PORT");
   if (!path || !secret) { fprintf(stderr, "SQLITE_PATH and JWT_SECRET are required\n"); return 1; }
+  if (bt_pcache_install()) fprintf(stderr, "page cache wrapper unavailable; using pcache1\n");
   sqlite3_initialize();
+  const char *vfs = bt_vfs_register() == SQLITE_OK ? "tds" : "unix-excl";
   b64_init();
   hmac_setup(secret);
-  db_open(path);
+  db_open(path, vfs);
   scratch.p = malloc(65536), scratch.cap = 65536, scratch.len = 0;
   slab_init();
   struct rlimit rl;

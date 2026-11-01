@@ -12,7 +12,7 @@ One event-loop thread of C on raw io_uring, with SQLite compiled into the same b
 
 ## Design
 
-- **One event-loop thread.** HTTP, JSON, JWT checks and all request SQL run on it. A second, low-traffic thread only runs WAL checkpoints on its own connection (see below). SQLite is built with `SQLITE_THREADSAFE=2`: each connection is used by one thread only.
+- **One event-loop thread.** HTTP, JSON, JWT checks and all request SQL run on it. A second thread, at the lowest priority (nice 19), only runs WAL checkpoints on its own connection (see below), in the loop's idle time. SQLite is built with `SQLITE_THREADSAFE=2`: each connection is used by one thread only.
 - **Rings.** Each io_uring ring has a sparse direct-descriptor table of `LimitNOFILE` slots (65,535). A new ring starts when the current one is close to full, up to 8 rings (about 520k connections). Ring flags: `SINGLE_ISSUER`, `DEFER_TASKRUN`, `SUBMIT_ALL`, `CQSIZE`.
 - **Accept** is multishot with `IORING_FILE_INDEX_ALLOC`, on one ring at a time. It moves to the next ring 512 slots before the table is full, so the kernel never accepts and closes a connection for lack of a slot.
 - **Receive** is multishot into a provided-buffer ring (1,024 × 2 KB per ring). The request is parsed in place and the buffer goes back at once. Idle connections hold no buffer. A connection record is 56 bytes.
@@ -24,8 +24,10 @@ One event-loop thread of C on raw io_uring, with SQLite compiled into the same b
 
 ## SQLite
 
-- Both connections use the `unix-excl` VFS: an exclusive file lock for this process, with the WAL index in heap memory shared by the two connections.
-- Pragmas: `journal_mode=WAL`, `synchronous=NORMAL`, `cache_size=-16384` (16 MiB; the hot set is about 2 MB), `mmap_size=0`, `temp_store=MEMORY`, `wal_autocheckpoint=0`, `journal_size_limit=64 MiB`.
+- Both connections use a small custom VFS, `tds` (public VFS API), over `unix-excl`: an exclusive file lock for this process, with the WAL index in heap memory shared by the two connections.
+  - For WAL files only, it buffers consecutive appends and writes them when the commit frame's page arrives, in pieces of at most 120 KB (`unixWrite` takes at most 128 KB per call). That is one or two `pwrite` calls per commit instead of two per frame. The write still happens inside SQLite's commit, before the WAL index makes the frames visible, so no reader can see a frame that is not in the file. Any other write, read, sync, truncate or close flushes first. A test that kills the server with SIGKILL during concurrent writes found every acknowledged post present and `integrity_check` ok.
+- A page cache wrapper (`SQLITE_CONFIG_PCACHE2`) forwards to SQLite's default pcache1. Page splits briefly use the pending-byte page number as a key, which makes pcache1's truncate at each commit walk the whole cache; the wrapper tracks the largest real key and skips truncates that cannot drop anything (dropping only that one page when needed).
+- Pragmas: `journal_mode=WAL`, `synchronous=NORMAL`, `cache_size=-32768` (32 MiB), `mmap_size=0`, `temp_store=MEMORY`, `wal_autocheckpoint=0`, `journal_size_limit=64 MiB`.
 - **Checkpoints never fsync on the loop.** When the WAL passes 8,192 frames, the checkpoint thread runs a passive checkpoint (pass 1: the bulk copy and its fsyncs). It then asks the loop to hold writes; reads go on. Pass 2 copies the few frames written meanwhile. The thread then makes the first commit into the fresh WAL, `PRAGMA user_version` set to its current value (no table or row changes), because that commit fsyncs the new WAL header. The hold ends and the loop commits into a WAL that is already synced. A hold lasts at most 250 ms (never cut during that last transaction). The WAL stays under about 36 MB.
 - All statements are prepared once (`SQLITE_PREPARE_PERSISTENT`) and reused.
 - Build flags: `THREADSAFE=2 DEFAULT_MEMSTATUS=0 OMIT_DEPRECATED OMIT_SHARED_CACHE OMIT_LOAD_EXTENSION USE_ALLOCA DQS=0 DEFAULT_WAL_SYNCHRONOUS=1 MAX_EXPR_DEPTH=0 OMIT_PROGRESS_CALLBACK OMIT_AUTOINIT LIKE_DOESNT_MATCH_BLOBS`.

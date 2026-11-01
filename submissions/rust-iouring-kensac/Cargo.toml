@@ -12,6 +12,7 @@ memchr = "=2.8.0"
 
 [features]
 stats = []
+bench = []
 
 [build-dependencies]
 cc = "=1.2.56"

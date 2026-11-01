@@ -1,7 +1,7 @@
 //! Reads through SQLite's B-tree cursors (see csrc/shim.c) and writes through SQL. Every
 //! response is built from rows read while the request is served, inside the batch's
 //! transaction; nothing is kept between requests except prepared statements and cursors.
-use crate::json::{escape_into, push_int};
+use crate::json::{self, escape_into, push_int};
 use std::ffi::{c_char, c_int, c_void, CString};
 
 type Cur = *mut c_void;
@@ -397,25 +397,37 @@ impl Db {
         Ok(true)
     }
 
+    #[cfg(feature = "bench")]
+    pub fn bench_feed_json(&self, out: &mut Vec<u8>) {
+        self.feed_json(out)
+    }
+
+    /// Written in one reservation: every row's strings live in self.text, so 6x its length
+    /// bounds their escaped form.
     fn feed_json(&self, out: &mut Vec<u8>) {
-        out.extend_from_slice(b"{\"posts\":[");
-        for (k, row) in self.rows.iter().enumerate() {
-            if k > 0 {
-                out.push(b',');
+        const ROW: usize = b",{\"id\":,\"body\":\"\",\"created_at\":\"\",\"author\":\"\",\"like_count\":}".len() + 2 * json::INT_BOUND;
+        let t = &self.text;
+        let bound = b"{\"posts\":[]}".len() + self.rows.len() * ROW + json::esc_bound(t.len());
+        json::fill(out, bound, |c| {
+            c.lit(b"{\"posts\":[");
+            for (k, row) in self.rows.iter().enumerate() {
+                if k > 0 {
+                    c.byte(b',');
+                }
+                c.lit(b"{\"id\":");
+                c.int(row.id);
+                c.lit(b",\"body\":\"");
+                c.esc(&t[row.body.0 as usize..row.body.1 as usize]);
+                c.lit(b"\",\"created_at\":\"");
+                c.esc(&t[row.created.0 as usize..row.created.1 as usize]);
+                c.lit(b"\",\"author\":\"");
+                c.esc(&t[row.author.0 as usize..row.author.1 as usize]);
+                c.lit(b"\",\"like_count\":");
+                c.int(row.likes);
+                c.byte(b'}');
             }
-            out.extend_from_slice(b"{\"id\":");
-            push_int(out, row.id);
-            out.extend_from_slice(b",\"body\":\"");
-            escape_into(out, &self.text[row.body.0 as usize..row.body.1 as usize]);
-            out.extend_from_slice(b"\",\"created_at\":\"");
-            escape_into(out, &self.text[row.created.0 as usize..row.created.1 as usize]);
-            out.extend_from_slice(b"\",\"author\":\"");
-            escape_into(out, &self.text[row.author.0 as usize..row.author.1 as usize]);
-            out.extend_from_slice(b"\",\"like_count\":");
-            push_int(out, row.likes);
-            out.push(b'}');
-        }
-        out.extend_from_slice(b"]}");
+            c.lit(b"]}");
+        });
     }
 
     /// The reference query, for data the B-tree plan doesn't expect.

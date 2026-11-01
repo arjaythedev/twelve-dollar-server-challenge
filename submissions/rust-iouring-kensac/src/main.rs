@@ -4,6 +4,8 @@ mod db;
 mod http;
 mod json;
 mod jwt;
+#[cfg(feature = "bench")]
+mod bench;
 
 use app::App;
 use io_uring::{cqueue, opcode, squeue, types, IoUring, SubmissionQueue, Submitter};
@@ -724,7 +726,13 @@ fn main() {
         eprintln!("database: {e}");
         std::process::exit(1)
     });
-    let app = App::new(db, secret.as_bytes());
+    #[allow(unused_mut)]
+    let mut app = App::new(db, secret.as_bytes());
+    #[cfg(feature = "bench")]
+    if let Ok(t) = std::env::var("BENCH_TOKEN") {
+        bench::run(&mut app, &t);
+        return;
+    }
     let slots = descriptor_slots();
     let fd = listen(&host, port).unwrap_or_else(|e| {
         eprintln!("listen {host}:{port}: {e}");

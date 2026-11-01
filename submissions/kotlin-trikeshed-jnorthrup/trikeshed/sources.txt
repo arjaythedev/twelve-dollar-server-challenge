@@ -18,10 +18,7 @@ src/commonMain/kotlin/borg/trikeshed/cursor/ReifiedSplitSeries2.kt
 src/commonMain/kotlin/borg/trikeshed/cursor/StructuralTypeMemento.kt
 src/commonMain/kotlin/borg/trikeshed/isam/Locks.kt
 src/commonMain/kotlin/borg/trikeshed/isam/meta/IOMemento.kt
-src/commonMain/kotlin/borg/trikeshed/job/Hmac.kt
-src/commonMain/kotlin/borg/trikeshed/job/Sha256Pure.kt
 src/commonMain/kotlin/borg/trikeshed/job/Sha3Pure.kt
-src/commonMain/kotlin/borg/trikeshed/job/Sha512Pure.kt
 src/commonMain/kotlin/borg/trikeshed/lib/AutoTwinContext.kt
 src/commonMain/kotlin/borg/trikeshed/lib/ByteSeries.kt
 src/commonMain/kotlin/borg/trikeshed/lib/CZero.kt
@@ -45,7 +42,6 @@ src/commonMain/kotlin/borg/trikeshed/lib/Usable.kt
 src/commonMain/kotlin/borg/trikeshed/lib/appendWal.kt
 src/commonMain/kotlin/borg/trikeshed/lib/debug.kt
 src/commonMain/kotlin/borg/trikeshed/lib/longp/LongSeries.kt
-src/commonMain/kotlin/borg/trikeshed/parse/confix/KnownSchema.kt
 src/commonMain/kotlin/borg/trikeshed/platform/Discontinued.kt
 src/commonMain/kotlin/borg/trikeshed/platform/HostDescriptor.kt
 src/commonMain/kotlin/borg/trikeshed/platform/PlatformHost.kt

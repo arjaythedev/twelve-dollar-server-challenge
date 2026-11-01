@@ -91,6 +91,8 @@ kotlin {
         // The userspace ring, reactor TLS and Confix closure: the versions TrikeShed's own build pins.
         val commonMain by getting {
             dependencies {
+                // Hmac, Sha256Pure, Sha512Pure and KnownSchema compile in :trikecore (the native server's whole need).
+                api(project(":trikecore"))
                 implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0")
                 implementation("org.jetbrains.kotlinx:kotlinx-serialization-core:1.11.0")
                 implementation("org.jetbrains.kotlinx:kotlinx-datetime:0.8.0-0.6.x-compat")

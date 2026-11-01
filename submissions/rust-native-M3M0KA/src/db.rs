@@ -355,7 +355,8 @@ impl Db {
             return;
         }
         let mut planned = Vec::new();
-        let planned_ok = c.feed_json(&mut planned).is_ok();
+        let planned_res = c.feed_json(&mut planned);
+        let planned_ok = planned_res.is_ok();
         c.close();
 
         let mut reference = Vec::new();
@@ -378,7 +379,7 @@ impl Db {
             }
             sql_ok && planned == reference
         } else {
-            eprintln!("feed plan self check failed");
+            eprintln!("feed plan self check failed: {planned_res:?}");
             false
         };
         if !agree {

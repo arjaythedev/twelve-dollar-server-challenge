@@ -33,18 +33,18 @@ import kotlin.test.assertTrue
 
 /** RingServer on the process's ring backend (TRIKESHED_URING_MODE) against a copy of the seed database. */
 class RingServerTest {
-    private val seed = File(System.getProperty("feed.seed"))
-    private val dir = Files.createTempDirectory("ringserver").toFile()
-    private val token = Regex("\"token\":\"([^\"]+)\"").find(File(seed, "tokens.json").readText())!!.groupValues[1]
+    val seed = File(System.getProperty("feed.seed"))
+    val dir = Files.createTempDirectory("ringserver").toFile()
+    val token = Regex("\"token\":\"([^\"]+)\"").find(File(seed, "tokens.json").readText())!!.groupValues[1]
     /**
      * Everything a test opens, closed on every exit by [clean] (an assertion failure included): peers, then helper
      * threads (joined), then servers (stopped and joined), then the stores no live server thread still uses. Client
      * threads of a test add to these at once, so they are concurrent collections.
      */
-    private val peers = ConcurrentLinkedQueue<Socket>()
-    private val servers = ConcurrentLinkedQueue<Running>()
-    private val helpers = ConcurrentLinkedQueue<Thread>()
-    private val stores = ConcurrentLinkedQueue<SqliteStore>()
+    val peers = ConcurrentLinkedQueue<Socket>()
+    val servers = ConcurrentLinkedQueue<Running>()
+    val helpers = ConcurrentLinkedQueue<Thread>()
+    val stores = ConcurrentLinkedQueue<SqliteStore>()
 
     @AfterTest
     fun clean() {
@@ -59,19 +59,19 @@ class RingServerTest {
         for (t in helpers) assertFalse(t.isAlive, "helper thread ${t.name} ended")
     }
 
-    private fun store(): SqliteStore {
+    fun store(): SqliteStore {
         val db = File(dir, "feed-${System.nanoTime()}.db")
         File(seed, "feed.db").copyTo(db)
         return SqliteStore(db.path).also(stores::add)
     }
 
     /** A test's client thread, joined by [clean] on every exit. */
-    private fun helper(name: String, body: () -> Unit): Thread =
+    fun helper(name: String, body: () -> Unit): Thread =
         Thread(body, name).apply { isDaemon = true; helpers.add(this); start() }
 
-    private fun freePort(): Int = ServerSocket(0).use { it.localPort }
+    fun freePort(): Int = ServerSocket(0).use { it.localPort }
 
-    private class Running(val server: RingServer, val port: Int, val thread: Thread, val store: FeedStore) {
+    class Running(val server: RingServer, val port: Int, val thread: Thread, val store: FeedStore) {
         @Volatile var failure: Throwable? = null
 
         /** Idempotent: true once the server's run has returned. */
@@ -82,7 +82,7 @@ class RingServerTest {
         }
     }
 
-    private fun start(store: FeedStore, options: (Int) -> RingOptions): Running {
+    fun start(store: FeedStore, options: (Int) -> RingOptions): Running {
         val port = freePort()
         val server = openWithRetry { openRingServer(options(port), Feed(store, Bearer(SECRET.encodeToByteArray()), epochSeconds()), store) }
         val holder = arrayOfNulls<Running>(1)
@@ -110,7 +110,7 @@ class RingServerTest {
      * the hypothesis and a final failure carries the facts (the original failure is the one thrown). Any other failure
      * is the test's at once.
      */
-    private fun <T> openWithRetry(open: () -> T): T {
+    fun <T> openWithRetry(open: () -> T): T {
         val deadline = System.nanoTime() + 5_000_000_000L
         var attempts = 0
         while (true) {
@@ -133,7 +133,7 @@ class RingServerTest {
     }
 
     /** The facts that bear on an io_uring ENOMEM, from /proc (Linux); what cannot be read says so. */
-    private fun memoryFacts(): String {
+    fun memoryFacts(): String {
         fun read(path: String) = runCatching { File(path).readLines() }.getOrElse { listOf("unreadable: $it") }
         val limits = read("/proc/self/limits").filter { it.startsWith("Max locked memory") || it.startsWith("unreadable") }
         val status = read("/proc/self/status").filter { it.startsWith("VmLck") || it.startsWith("VmPin") || it.startsWith("unreadable") }
@@ -150,14 +150,14 @@ class RingServerTest {
             "liveServerThreads=$liveServers cgroup=$cgroup $memcg"
     }
 
-    private fun connect(port: Int): Socket = Socket().apply {
+    fun connect(port: Int): Socket = Socket().apply {
         peers.add(this)
         connect(InetSocketAddress("127.0.0.1", port), 5_000)
         soTimeout = 10_000
     }
 
     /** Every byte until the peer closes. */
-    private fun drain(socket: Socket): ByteArray {
+    fun drain(socket: Socket): ByteArray {
         val all = ByteArrayOutputStream()
         val buffer = ByteArray(65536)
         val input = socket.getInputStream()
@@ -169,7 +169,7 @@ class RingServerTest {
     }
 
     /** Status codes and bodies of the complete HTTP/1.1 responses in [bytes], in order. */
-    private fun responses(bytes: ByteArray): List<Pair<Int, String>> {
+    fun responses(bytes: ByteArray): List<Pair<Int, String>> {
         val text = String(bytes, Charsets.ISO_8859_1)
         val found = ArrayList<Pair<Int, String>>()
         var at = 0
@@ -186,7 +186,7 @@ class RingServerTest {
     }
 
     /** One whole response from a keep-alive connection, which stays open. */
-    private fun readResponse(socket: Socket): Pair<Int, String> {
+    fun readResponse(socket: Socket): Pair<Int, String> {
         val all = ByteArrayOutputStream()
         val buffer = ByteArray(8192)
         while (true) {
@@ -197,16 +197,16 @@ class RingServerTest {
         }
     }
 
-    private fun get(port: Int, path: String): Pair<Int, String> = connect(port).use { s ->
+    fun get(port: Int, path: String): Pair<Int, String> = connect(port).use { s ->
         s.getOutputStream().write("GET $path HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n".toByteArray())
         responses(drain(s)).single()
     }
 
-    private fun likeCount(port: Int, post: Int): Int =
+    fun likeCount(port: Int, post: Int): Int =
         Regex("\"like_count\":(\\d+)").find(get(port, "/posts/$post").second)!!.groupValues[1].toInt()
 
     /** A peer that pipelines [count] feed requests and never reads, so the server's SEND waits on POLLOUT. */
-    private fun stall(port: Int, count: Int): Socket {
+    fun stall(port: Int, count: Int): Socket {
         val s = connect(port)
         val many = "GET /feed HTTP/1.1\r\nHost: t\r\n\r\n".repeat(count).toByteArray()
         helper("stall-${s.localPort}") { runCatching { s.getOutputStream().write(many) } }
@@ -316,10 +316,10 @@ class RingServerTest {
     }
 
     /** Identity "TLS" whose close_notify waits for one more input, as a session holding plaintext for a handshake. */
-    private class DeferredClose : TlsRecordSession {
+    class DeferredClose : TlsRecordSession {
         override var established = false
         override var closed = false
-        private var closeWanted = false
+        var closeWanted = false
         override val session: TlsSession? = null
         override val pendingCiphertext: Int = 0
         override val pendingPlaintext: Int get() = if (closeWanted && !closed) 1 else 0
@@ -360,7 +360,7 @@ class RingServerTest {
     }
 
     /** Identity "TLS" whose engine waits for the peer with its held plaintext full: every send is refused. */
-    private class Refusing : TlsRecordSession {
+    class Refusing : TlsRecordSession {
         override var established = false
         override val closed = false
         override val session: TlsSession? = null
@@ -389,7 +389,7 @@ class RingServerTest {
     }
 
     /** Identity "TLS" that never finishes its handshake: every accepted connection stays mid-handshake. */
-    private class NeverEstablished : TlsRecordSession {
+    class NeverEstablished : TlsRecordSession {
         override val established = false
         override var closed = false
         override val session: TlsSession? = null
@@ -418,7 +418,7 @@ class RingServerTest {
     }
 
     /** First flights take [cost] ms each, as a real handshake takes about one; a byte after that echoes back. */
-    private class SlowHello(private val hellos: AtomicInteger, private val started: CountDownLatch, private val cost: Long) :
+    class SlowHello(val hellos: AtomicInteger, val started: CountDownLatch, val cost: Long) :
         TlsRecordSession {
         override var established = false
         override var closed = false
@@ -445,7 +445,7 @@ class RingServerTest {
         override fun close(sink: TlsRecordSink) { closed = true }
     }
 
-    private fun readExactly(socket: Socket, n: Int): String {
+    fun readExactly(socket: Socket, n: Int): String {
         val bytes = ByteArray(n)
         var at = 0
         while (at < n) {
@@ -508,11 +508,11 @@ class RingServerTest {
      * After close() it waits for input: the first byte brings more ciphertext (the session still open), the next
      * one ends it with "BYE". Its output while closing makes the server close gracefully again while input waits.
      */
-    private class SlowClose : TlsRecordSession {
+    class SlowClose : TlsRecordSession {
         override var established = false
         override var closed = false
-        private var closeWanted = false
-        private var more = false
+        var closeWanted = false
+        var more = false
         override val session: TlsSession? = null
         override val pendingCiphertext: Int = 0
         override val pendingPlaintext: Int get() = if (closeWanted && !closed) 1 else 0
@@ -699,7 +699,7 @@ class RingServerTest {
     }
 
     /** A P-256 identity for 127.0.0.1 from keytool: certificate and PKCS#8 key PEM paths. */
-    private fun identity(): Pair<String, String> {
+    fun identity(): Pair<String, String> {
         val store = File(dir, "id.p12")
         val keytool = File(System.getProperty("java.home"), "bin/keytool").path
         val run = ProcessBuilder(keytool, "-genkeypair", "-alias", "t", "-keyalg", "EC", "-groupname", "secp256r1",
@@ -715,7 +715,7 @@ class RingServerTest {
         return cert.path to key.path
     }
 
-    private companion object {
+    companion object {
         const val SECRET = "twelve-dollar-challenge"
     }
 }

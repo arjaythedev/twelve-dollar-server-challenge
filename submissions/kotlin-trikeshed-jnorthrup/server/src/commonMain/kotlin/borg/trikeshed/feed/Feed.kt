@@ -73,7 +73,7 @@ val BODY_SCHEMA: KnownSchema = KnownSchema(*BODY_KEYS)
 /** Routes one framed request and appends its whole HTTP response to [send]. */
 class Feed(val store: FeedStore, val bearer: Bearer, val startedSeconds: Long) {
     val body = Out()
-    private val bodyReader = BODY_SCHEMA.reader()
+    val bodyReader = BODY_SCHEMA.reader()
 
     fun respond(src: ByteArray, r: Request, send: Out) {
         body.size = 0

@@ -11,33 +11,33 @@ import java.lang.foreign.Arena
 import java.lang.foreign.MemorySegment
 import java.lang.foreign.ValueLayout
 
-private const val OP_ACCEPT = 1L
-private const val OP_LISTEN_POLL = 2L
-private const val OP_POLL_IN = 3L
-private const val OP_RECV = 4L
-private const val OP_SEND = 5L
-private const val OP_CLOSE = 6L
-private const val OP_POLL_OUT = 7L
-private const val OP_LISTEN_CLOSE = 8L
-private const val OP_STRAY_CLOSE = 9L
-private const val OP_PROBE = 10L
-private const val POLLIN = 1
-private const val POLLOUT = 4
-private const val POLLERR = 8
-private const val POLLHUP = 0x10
+const val OP_ACCEPT = 1L
+const val OP_LISTEN_POLL = 2L
+const val OP_POLL_IN = 3L
+const val OP_RECV = 4L
+const val OP_SEND = 5L
+const val OP_CLOSE = 6L
+const val OP_POLL_OUT = 7L
+const val OP_LISTEN_CLOSE = 8L
+const val OP_STRAY_CLOSE = 9L
+const val OP_PROBE = 10L
+const val POLLIN = 1
+const val POLLOUT = 4
+const val POLLERR = 8
+const val POLLHUP = 0x10
 
 /** Handled CQEs between the handshakes a loop that never runs dry still starts: the share handshakes keep. */
-private const val HANDSHAKE_SLICE = 128
+const val HANDSHAKE_SLICE = 128
 
 /** Liveness probes in flight at most; each that finds its client still waiting starts one handshake. */
-private const val MAX_PROBES = 16
+const val MAX_PROBES = 16
 
 /** One drain pass handles at most this many CQEs, or runs at most [PASS_NANOS]; the rest waits for the next pass. */
-private const val PASS_CQES = 4096
-private const val PASS_NANOS = 20_000_000L
+const val PASS_CQES = 4096
+const val PASS_NANOS = 20_000_000L
 
 /** Accepts one loop pass may chain by submitting the next ACCEPT at once. */
-private const val ACCEPT_BURST = 256
+const val ACCEPT_BURST = 256
 
 /** One RECV window: a whole TLS record (16 KiB plaintext plus header and tag) fits. */
 const val RX_WINDOW: Int = 17 * 1024
@@ -106,111 +106,111 @@ class RingConn(val slot: Int, val gen: Int, val fd: Int) {
  * back into this server or into another session from their sinks (the record sessions' non-reentrant contract).
  */
 class RingServer(
-    private val ring: LiburingFacade,
-    private val feed: Feed,
-    private val store: FeedStore,
-    private val sessions: (() -> TlsRecordSession)?,
-    private val listeners: IntArray,
+    val ring: LiburingFacade,
+    val feed: Feed,
+    val store: FeedStore,
+    val sessions: (() -> TlsRecordSession)?,
+    val listeners: IntArray,
     rxWindows: Int = 512,
     txWindows: Int = 512,
-    private val commitWindowNanos: Long = COMMIT_WINDOW_NANOS,
+    val commitWindowNanos: Long = COMMIT_WINDOW_NANOS,
     /** On stop: how long connections may drain their output before they are aborted, and the bound on every CQE. */
-    private val drainNanos: Long = 3_000_000_000L,
-    private val shutdownNanos: Long = 10_000_000_000L,
+    val drainNanos: Long = 3_000_000_000L,
+    val shutdownNanos: Long = 10_000_000_000L,
     /**
      * Admission: at most this many accepted connections without a finished handshake. Past it a listener takes no
      * ACCEPT until one finishes or closes, so the backlog waits in the kernel's listen queue (bytes in the kernel,
      * no session, no heap) instead of in this process, where p10 held 131k descriptors and ran its heap out.
      */
-    private val maxHandshaking: Int = 2048,
+    val maxHandshaking: Int = 2048,
 ) {
-    private val arena = Arena.ofShared()
-    private val rx: MemorySegment = arena.allocate(RX_WINDOW.toLong() * rxWindows, 64)
-    private val tx: MemorySegment = arena.allocate(TX_WINDOW.toLong() * txWindows, 64)
-    private val rxFree = IntArray(rxWindows) { it }
-    private var rxTop = rxWindows
-    private val txFree = IntArray(txWindows) { it }
-    private var txTop = txWindows
-    private val rxHeap = ByteArray(RX_WINDOW)
-    private var conns = arrayOfNulls<RingConn>(1024)
-    private var gens = IntArray(1024)
-    private var freeSlots = IntArray(1024)
-    private var freeTop = 0
-    private var slotsUsed = 0
-    private val waitingRx = ArrayDeque<RingConn>()
-    private val waitingTx = ArrayDeque<RingConn>()
-    private val request = Request()
-    private val send = Out()
-    private val plain = Out()
-    private val deferred = ArrayList<RingConn>()
-    private var windowOpen = false
-    private var openedAt = 0L
-    private var reportedAt = 0L
-    private val paused = BooleanArray(listeners.size)
-    private var anyPaused = false
+    val arena = Arena.ofShared()
+    val rx: MemorySegment = arena.allocate(RX_WINDOW.toLong() * rxWindows, 64)
+    val tx: MemorySegment = arena.allocate(TX_WINDOW.toLong() * txWindows, 64)
+    val rxFree = IntArray(rxWindows) { it }
+    var rxTop = rxWindows
+    val txFree = IntArray(txWindows) { it }
+    var txTop = txWindows
+    val rxHeap = ByteArray(RX_WINDOW)
+    var conns = arrayOfNulls<RingConn>(1024)
+    var gens = IntArray(1024)
+    var freeSlots = IntArray(1024)
+    var freeTop = 0
+    var slotsUsed = 0
+    val waitingRx = ArrayDeque<RingConn>()
+    val waitingTx = ArrayDeque<RingConn>()
+    val request = Request()
+    val send = Out()
+    val plain = Out()
+    val deferred = ArrayList<RingConn>()
+    var windowOpen = false
+    var openedAt = 0L
+    var reportedAt = 0L
+    val paused = BooleanArray(listeners.size)
+    var anyPaused = false
     /** Connections whose first flight waits for its handshake, in arrival order (closed ones are skipped). */
-    private val handshakes = ArrayDeque<RingConn>()
-    private var probes = 0
+    val handshakes = ArrayDeque<RingConn>()
+    var probes = 0
     /** Handshakes not started because the client had closed or reset while it waited. */
-    var abandoned = 0L; private set
+    var abandoned = 0L
     /** First flights given to their sessions. */
-    var handshakesStarted = 0L; private set
+    var handshakesStarted = 0L
     /** The most CQEs reaped and not yet handled at one time. */
-    var maxQueued = 0L; private set
+    var maxQueued = 0L
     /** Watches not armed because the connection already read or waited for a window (each a duplicate prevented). */
-    var rxGuarded = 0L; private set
+    var rxGuarded = 0L
 
     /** Times a listener stopped accepting because [maxHandshaking] connections were mid-handshake. */
-    var acceptPauses = 0L; private set
-    private var reporter: (RingServer) -> Unit = {}
+    var acceptPauses = 0L
+    var reporter: (RingServer) -> Unit = {}
 
     /** The largest drain so far (CQEs handled in one pass) and the longest one. */
-    var maxBatch = 0L; private set
-    var maxBatchNanos = 0L; private set
+    var maxBatch = 0L
+    var maxBatchNanos = 0L
     /** The most a commit settled after its window closed. */
-    var commitLateMaxNanos = 0L; private set
+    var commitLateMaxNanos = 0L
     /**
      * CQEs reaped and not yet handled, in order: [batchHead] is the next to handle. A stage that finds the ring full
      * reaps into this queue wherever it runs, inside a handler or not, and every reaped CQE is handled exactly once.
      */
-    private var batchData = LongArray(1024)
-    private var batchRes = IntArray(1024)
-    private var batchCount = 0
-    private var batchHead = 0
-    private var handling = false
-    private var started = false
-    private var current: RingConn? = null
-    private val sink = object : TlsRecordSink {
+    var batchData = LongArray(1024)
+    var batchRes = IntArray(1024)
+    var batchCount = 0
+    var batchHead = 0
+    var handling = false
+    var started = false
+    var current: RingConn? = null
+    val sink = object : TlsRecordSink {
         override fun plaintext(bytes: ByteArray, from: Int, to: Int) = plain.raw(bytes, from, to)
         override fun ciphertext(bytes: ByteArray, from: Int, to: Int) = enqueue(current!!, bytes, from, to)
     }
 
-    var accepted = 0L; private set
-    var acceptErrors = 0L; private set
-    var closed = 0L; private set
-    var requests = 0L; private set
-    var tlsFailures = 0L; private set
+    var accepted = 0L
+    var acceptErrors = 0L
+    var closed = 0L
+    var requests = 0L
+    var tlsFailures = 0L
     /** Connections ended because their TLS session refused a response (see TlsSendOutcome.BACKPRESSURE). */
-    var tlsBackpressure = 0L; private set
+    var tlsBackpressure = 0L
     /** Connections open, and of those the ones whose TLS handshake finished (all of them under plain HTTP). */
-    var live = 0; private set
-    var established = 0; private set
-    var peakLive = 0; private set
-    var peakEstablished = 0; private set
-    var loops = 0L; private set
-    var cqes = 0L; private set
+    var live = 0
+    var established = 0
+    var peakLive = 0
+    var peakEstablished = 0
+    var loops = 0L
+    var cqes = 0L
     /** SQEs staged whose CQE has not arrived; slots not yet free. */
-    var inFlight = 0L; private set
-    var occupied = 0; private set
+    var inFlight = 0L
+    var occupied = 0
     /** Connections the stop aborted because their output had not drained in time. */
-    var unfinished = 0; private set
+    var unfinished = 0
     /** The stop saw every CQE, so the windows' memory was released. */
-    var drained = false; private set
+    var drained = false
     /** Stages the ring refused until a submit and reap made room; of those, the ones outside a CQE handler. */
-    var fullRing = 0L; private set
-    var fullRingOutsideHandler = 0L; private set
+    var fullRing = 0L
+    var fullRingOutsideHandler = 0L
     /** Loop turns that found CQEs queued (reaped by a stage outside a handler) right before they would have waited. */
-    var queuedBeforeWait = 0L; private set
+    var queuedBeforeWait = 0L
 
     /** What executes the SQEs, as the ring describes its backend. */
     val backend: String get() = ring.availability
@@ -244,7 +244,7 @@ class RingServer(
     }
 
     /** The stop, then the ring, then (once every CQE is in) the windows: [failure] with whatever these add. */
-    private fun release(failure: Throwable?, report: (RingServer) -> Unit): Throwable? {
+    fun release(failure: Throwable?, report: (RingServer) -> Unit): Throwable? {
         var error = failure
         try {
             drained = shutdown()
@@ -263,7 +263,7 @@ class RingServer(
         return error
     }
 
-    private fun serve(report: (RingServer) -> Unit) {
+    fun serve(report: (RingServer) -> Unit) {
         reporter = report
         reportedAt = System.nanoTime()
         for (i in listeners.indices) stage { ring.prepAccept(listeners[i], listenerToken(i, OP_ACCEPT)) }
@@ -297,7 +297,7 @@ class RingServer(
      * [commitWindowNanos]) and the once-a-second report. Also checked between CQEs of a long drain, so a burst of
      * handshakes cannot hold a commit or a report back for the whole batch.
      */
-    private fun tick() {
+    fun tick() {
         if (store.pending) {
             val at = monoNanos()
             if (!windowOpen) {
@@ -323,7 +323,7 @@ class RingServer(
      * and drains its output, TLS ones ending with close_notify, for at most [drainNanos]; what remains is aborted.
      * True once every staged SQE has its CQE and every slot is free, within [shutdownNanos].
      */
-    private fun shutdown(): Boolean {
+    fun shutdown(): Boolean {
         stopping = true
         for (i in listeners.indices) stage { ring.prepClose(listeners[i], listenerToken(i, OP_LISTEN_CLOSE)) }
         if (store.pending) settle()
@@ -370,11 +370,11 @@ class RingServer(
         "handshakesStarted" to handshakesStarted, "abandoned" to abandoned, "probes" to probes.toLong(), "maxQueued" to maxQueued, "rxGuarded" to rxGuarded, "maxBatch" to maxBatch, "maxBatchMicros" to maxBatchNanos / 1000, "commitLateMaxMicros" to commitLateMaxNanos / 1000,
     ) + ring.counters()
 
-    private fun token(c: RingConn, op: Long): Long = (c.gen.toLong() shl 36) or (c.slot.toLong() shl 4) or op
-    private fun listenerToken(index: Int, op: Long): Long = (index.toLong() shl 4) or op
+    fun token(c: RingConn, op: Long): Long = (c.gen.toLong() shl 36) or (c.slot.toLong() shl 4) or op
+    fun listenerToken(index: Int, op: Long): Long = (index.toLong() shl 4) or op
 
     /** Every CQE now available joins the queue before any is handled, so the SQEs handlers stage find CQ room. */
-    private fun process(first: UringCompletion) {
+    fun process(first: UringCompletion) {
         add(first)
         absorbAccepting()
         drainBatch()
@@ -386,7 +386,7 @@ class RingServer(
      * while the batch holds seconds of handshakes, instead of overflowing behind them (dropped ACKs and SYN
      * retransmissions cost seconds each).
      */
-    private fun absorbAccepting() {
+    fun absorbAccepting() {
         var burst = 0
         while (true) {
             val c = ring.peekCqe().getOrThrow() ?: return
@@ -407,7 +407,7 @@ class RingServer(
      * reclaimed, so the queue holds only unhandled CQEs (p11's single pass handled 1.23M CQEs in 130 s into arrays
      * that only grew).
      */
-    private fun drainBatch() {
+    fun drainBatch() {
         if (handling) return
         handling = true
         val began = System.nanoTime()
@@ -446,7 +446,7 @@ class RingServer(
         if (took > maxBatchNanos) maxBatchNanos = took
     }
 
-    private fun compact() {
+    fun compact() {
         val left = batchCount - batchHead
         batchData.copyInto(batchData, 0, batchHead, batchCount)
         batchRes.copyInto(batchRes, 0, batchHead, batchCount)
@@ -454,7 +454,7 @@ class RingServer(
         batchCount = left
     }
 
-    private fun add(c: UringCompletion) {
+    fun add(c: UringCompletion) {
         if (batchCount == batchData.size) {
             batchData = batchData.copyOf(batchCount * 2)
             batchRes = batchRes.copyOf(batchCount * 2)
@@ -467,12 +467,12 @@ class RingServer(
         if (queued > maxQueued) maxQueued = queued
     }
 
-    private fun absorb() {
+    fun absorb() {
         while (true) add(ring.peekCqe().getOrThrow() ?: return)
     }
 
     /** Stages one SQE; when the ring refuses (SQ plus unreaped CQ at its depth) it submits, gathers, retries once. */
-    private inline fun stage(op: () -> Result<Unit>) {
+    inline fun stage(op: () -> Result<Unit>) {
         if (op().isFailure) {
             fullRing++
             if (!handling) fullRingOutsideHandler++
@@ -483,7 +483,7 @@ class RingServer(
         inFlight++
     }
 
-    private fun handle(userData: Long, res: Int) {
+    fun handle(userData: Long, res: Int) {
         val op = userData and 0xF
         val slot = ((userData ushr 4) and 0xFFFFFFFFL).toInt()
         when (op) {
@@ -538,7 +538,7 @@ class RingServer(
         if (c.closeDone && !c.busy) free(c)
     }
 
-    private fun listenerEvent(index: Int, op: Long, res: Int) {
+    fun listenerEvent(index: Int, op: Long, res: Int) {
         val fd = listeners[index]
         if (op == OP_LISTEN_POLL) {
             if (res >= 0 && !stopping) stage { ring.prepAccept(fd, listenerToken(index, OP_ACCEPT)) }
@@ -568,7 +568,7 @@ class RingServer(
     }
 
     /** Paused listeners accept again once fewer than [maxHandshaking] connections are mid-handshake. */
-    private fun resumeAccepts() {
+    fun resumeAccepts() {
         if (stopping || live - established >= maxHandshaking) return
         anyPaused = false
         for (i in listeners.indices) if (paused[i]) {
@@ -577,7 +577,7 @@ class RingServer(
         }
     }
 
-    private fun accept(fd: Int) {
+    fun accept(fd: Int) {
         accepted++
         noDelay(fd)
         val slot = if (freeTop > 0) freeSlots[--freeTop] else {
@@ -610,13 +610,13 @@ class RingServer(
         pollIn(c)
     }
 
-    private fun reading(c: RingConn): Boolean = !c.closeSent && (!c.closing || c.awaitTls)
+    fun reading(c: RingConn): Boolean = !c.closeSent && (!c.closing || c.awaitTls)
 
     /**
      * One watch, one RECV or one place in the window queue per connection, never two at once; a held first flight
      * waits for its probe instead.
      */
-    private fun pollIn(c: RingConn) {
+    fun pollIn(c: RingConn) {
         if (c.recvWindow >= 0 || c.rxQueued) {
             // A graceful close re-arming input while a read is in flight or queued (seen under a small RX pool).
             rxGuarded++
@@ -627,7 +627,7 @@ class RingServer(
         stage { ring.prepPollAdd(c.fd, POLLIN, token(c, OP_POLL_IN)) }
     }
 
-    private fun readable(c: RingConn) {
+    fun readable(c: RingConn) {
         if (!reading(c) || c.recvWindow >= 0 || c.rxQueued) return
         if (rxTop == 0) {
             c.rxQueued = true
@@ -635,13 +635,13 @@ class RingServer(
         } else recv(c, rxFree[--rxTop])
     }
 
-    private fun recv(c: RingConn, window: Int) {
+    fun recv(c: RingConn, window: Int) {
         check(c.recvWindow < 0 && !c.polling) { "connection ${c.slot}: a second receive" }
         c.recvWindow = window
         stage { ring.prepRecv(c.fd, rx.address() + window.toLong() * RX_WINDOW, RX_WINDOW, 0, token(c, OP_RECV)) }
     }
 
-    private fun releaseRx(window: Int) {
+    fun releaseRx(window: Int) {
         while (waitingRx.isNotEmpty()) {
             val next = waitingRx.removeFirst()
             next.rxQueued = false
@@ -653,7 +653,7 @@ class RingServer(
         rxFree[rxTop++] = window
     }
 
-    private fun received(c: RingConn, res: Int) {
+    fun received(c: RingConn, res: Int) {
         val window = c.recvWindow
         c.recvWindow = -1
         if (res > 0) MemorySegment.copy(rx, ValueLayout.JAVA_BYTE, window.toLong() * RX_WINDOW, rxHeap, 0, res)
@@ -681,7 +681,7 @@ class RingServer(
         }
     }
 
-    private fun holdHello(c: RingConn, bytes: ByteArray, n: Int) {
+    fun holdHello(c: RingConn, bytes: ByteArray, n: Int) {
         val prior = c.hello
         if (prior == null) {
             c.hello = bytes.copyOf(n)
@@ -695,7 +695,7 @@ class RingServer(
     }
 
     /** Probes up to [count] waiting handshakes, at most [MAX_PROBES] in flight; each live one starts on its CQE. */
-    private fun admitHandshakes(count: Int) {
+    fun admitHandshakes(count: Int) {
         var left = count
         while (left > 0 && probes < MAX_PROBES) {
             val c = handshakes.removeFirstOrNull() ?: return
@@ -708,7 +708,7 @@ class RingServer(
     }
 
     /** The held first flight goes to the session: the handshake runs now. */
-    private fun handshake(c: RingConn) {
+    fun handshake(c: RingConn) {
         val hello = c.hello ?: return
         val size = c.helloSize
         c.hello = null
@@ -720,7 +720,7 @@ class RingServer(
     }
 
     /** [count] received bytes at the start of [data]: decrypted under TLS, then framed and answered. */
-    private fun input(c: RingConn, data: ByteArray, count: Int) {
+    fun input(c: RingConn, data: ByteArray, count: Int) {
         val session = c.tls
         if (session == null) {
             frame(c, data, count)
@@ -755,7 +755,7 @@ class RingServer(
     }
 
     /** Xio.onRead from its framing on: requests out of [data], answers into [send], held while a commit is open. */
-    private fun frame(c: RingConn, data: ByteArray, count: Int) {
+    fun frame(c: RingConn, data: ByteArray, count: Int) {
         val prior = c.cursor
         val src: ByteArray
         val to: Int
@@ -799,7 +799,7 @@ class RingServer(
         } else emit(c, send.bytes, 0, send.size)
     }
 
-    private fun hold(c: RingConn, bytes: ByteArray, from: Int, to: Int) {
+    fun hold(c: RingConn, bytes: ByteArray, from: Int, to: Int) {
         val n = to - from
         val prior = c.held
         val into = if (prior == null) ByteArray(maxOf(n, 256)) else if (c.heldSize + n > prior.size) prior.copyOf(maxOf(prior.size * 2, c.heldSize + n)) else prior
@@ -809,7 +809,7 @@ class RingServer(
     }
 
     /** Plaintext for the peer: encrypted under TLS, then queued for SEND. */
-    private fun emit(c: RingConn, bytes: ByteArray, from: Int, to: Int) {
+    fun emit(c: RingConn, bytes: ByteArray, from: Int, to: Int) {
         val session = c.tls
         if (session == null) {
             enqueue(c, bytes, from, to)
@@ -834,7 +834,7 @@ class RingServer(
         }
     }
 
-    private fun enqueue(c: RingConn, bytes: ByteArray, from: Int, to: Int) {
+    fun enqueue(c: RingConn, bytes: ByteArray, from: Int, to: Int) {
         val n = to - from
         val prior = c.out
         if (prior == null) {
@@ -856,7 +856,7 @@ class RingServer(
      * Starts the next SEND when none is in flight. A closing connection whose output has drained and which holds no
      * response for a COMMIT ends gracefully.
      */
-    private fun flushOut(c: RingConn) {
+    fun flushOut(c: RingConn) {
         if (c.sendWindow >= 0 || c.closeSent) return
         if (c.outTo == c.outFrom) {
             c.out = null
@@ -877,7 +877,7 @@ class RingServer(
      * session holds plaintext a handshake must finish first, close_notify waits: the connection keeps reading, sends
      * what ciphertext there is, and returns here once a receive has let the session close.
      */
-    private fun closeGracefully(c: RingConn) {
+    fun closeGracefully(c: RingConn) {
         val session = c.tls
         if (session != null && !session.closed) {
             current = c
@@ -896,7 +896,7 @@ class RingServer(
         finish(c)
     }
 
-    private fun startSend(c: RingConn, window: Int) {
+    fun startSend(c: RingConn, window: Int) {
         val out = c.out!!
         val n = minOf(TX_WINDOW, c.outTo - c.outFrom)
         MemorySegment.copy(out, c.outFrom, tx, ValueLayout.JAVA_BYTE, window.toLong() * TX_WINDOW, n)
@@ -907,12 +907,12 @@ class RingServer(
         postSend(c)
     }
 
-    private fun postSend(c: RingConn) {
+    fun postSend(c: RingConn) {
         val at = tx.address() + c.sendWindow.toLong() * TX_WINDOW + c.sendDone
         stage { ring.prepSend(c.fd, at, c.sendLen - c.sendDone, 0, token(c, OP_SEND)) }
     }
 
-    private fun sent(c: RingConn, res: Int) {
+    fun sent(c: RingConn, res: Int) {
         if (c.closeSent) {
             releaseTx(c)
             return
@@ -939,7 +939,7 @@ class RingServer(
         }
     }
 
-    private fun releaseTx(c: RingConn) {
+    fun releaseTx(c: RingConn) {
         val window = c.sendWindow
         if (window < 0) return
         c.sendWindow = -1
@@ -954,7 +954,7 @@ class RingServer(
     }
 
     /** Ends [c] without its pending output: the peer left, the connection failed, or the stop ran out of time. */
-    private fun abort(c: RingConn) {
+    fun abort(c: RingConn) {
         c.hello = null
         c.closing = true
         c.awaitTls = false
@@ -970,14 +970,14 @@ class RingServer(
      * CLOSE: it also ends what still waits on the descriptor (the POLL_ADD; a SEND an abort left in the kernel); the
      * slot and windows return once every CQE is in.
      */
-    private fun finish(c: RingConn) {
+    fun finish(c: RingConn) {
         if (c.closeSent) return
         c.closeSent = true
         c.cursor = null
         stage { ring.prepClose(c.fd, token(c, OP_CLOSE)) }
     }
 
-    private fun free(c: RingConn) {
+    fun free(c: RingConn) {
         if (conns[c.slot] !== c) return
         conns[c.slot] = null
         freeSlots[freeTop++] = c.slot
@@ -985,7 +985,7 @@ class RingServer(
     }
 
     /** COMMIT, then every response that waited for it leaves; a failed COMMIT ends those connections instead. */
-    private fun settle() {
+    fun settle() {
         windowOpen = false
         val committed = try {
             store.commit()

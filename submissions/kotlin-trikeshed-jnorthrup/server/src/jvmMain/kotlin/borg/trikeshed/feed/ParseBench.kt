@@ -14,7 +14,7 @@ import java.util.SplittableRandom
  * warmup, one JSON line per case. Single-threaded, bounded by PASSES over the corpus.
  * usage: java -cp <the server/build/app jars> borg.trikeshed.feed.ParseBenchKt [PASSES] [SEED]
  */
-private const val CORPUS = 1024
+const val CORPUS = 1024
 
 fun main(args: Array<String>) {
     val passes = args.getOrNull(0)?.toInt() ?: 2000

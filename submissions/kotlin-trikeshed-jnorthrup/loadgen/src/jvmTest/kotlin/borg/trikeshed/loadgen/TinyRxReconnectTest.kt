@@ -19,10 +19,10 @@ import kotlin.test.assertTrue
  * the worker, which the summary reports.
  */
 class TinyRxReconnectTest {
-    private val dir: File = Files.createTempDirectory("loadgen-tinyrx").toFile()
-    private val sockets = ConcurrentLinkedQueue<Socket>()
-    private val threads = ConcurrentLinkedQueue<Thread>()
-    private var listener: ServerSocket? = null
+    val dir: File = Files.createTempDirectory("loadgen-tinyrx").toFile()
+    val sockets = ConcurrentLinkedQueue<Socket>()
+    val threads = ConcurrentLinkedQueue<Thread>()
+    var listener: ServerSocket? = null
 
     @AfterTest
     fun clean() {
@@ -32,7 +32,7 @@ class TinyRxReconnectTest {
         dir.deleteRecursively()
     }
 
-    private fun serve(requests: AtomicLong) {
+    fun serve(requests: AtomicLong) {
         val server = ServerSocket(0).also { listener = it }
         threads.add(Thread {
             while (!server.isClosed) {
@@ -43,7 +43,7 @@ class TinyRxReconnectTest {
         }.apply { isDaemon = true; start() })
     }
 
-    private fun connection(s: Socket, requests: AtomicLong) = runCatching {
+    fun connection(s: Socket, requests: AtomicLong) = runCatching {
         val input = s.getInputStream()
         val output = s.getOutputStream()
         val pending = ByteArrayOutputStream()

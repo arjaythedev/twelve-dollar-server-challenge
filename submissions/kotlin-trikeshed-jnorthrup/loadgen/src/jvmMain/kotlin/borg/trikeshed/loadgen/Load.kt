@@ -26,21 +26,21 @@ import java.util.concurrent.atomic.AtomicLongArray
 import java.util.concurrent.locks.LockSupport
 import java.util.concurrent.atomic.AtomicReference
 
-private const val OP_SOCKET = 1L
-private const val OP_CONNECT = 2L
-private const val OP_POLL_IN = 3L
-private const val OP_RECV = 4L
-private const val OP_SEND = 5L
-private const val OP_CLOSE = 6L
-private const val OP_BIND = 7L
-private const val OP_POLL_OUT = 8L
-private const val POLLOUT = 4
-private const val POLLERR = 8
-private const val POLLHUP = 0x10
-private const val RX = 17 * 1024
-private const val TX = 16 * 1024
-private const val WINDOWS = 256
-private const val STRAY = 0xFFFFFL
+const val OP_SOCKET = 1L
+const val OP_CONNECT = 2L
+const val OP_POLL_IN = 3L
+const val OP_RECV = 4L
+const val OP_SEND = 5L
+const val OP_CLOSE = 6L
+const val OP_BIND = 7L
+const val OP_POLL_OUT = 8L
+const val POLLOUT = 4
+const val POLLERR = 8
+const val POLLHUP = 0x10
+const val RX = 17 * 1024
+const val TX = 16 * 1024
+const val WINDOWS = 256
+const val STRAY = 0xFFFFFL
 
 /** Request kinds, in load.js order. */
 const val FEED = 0
@@ -75,7 +75,7 @@ class Histogram {
         if (v > max) max = v
     }
 
-    private fun index(v: Long): Int {
+    fun index(v: Long): Int {
         val exponent = 63 - java.lang.Long.numberOfLeadingZeros(v)
         return if (exponent < 6) v.toInt() else (exponent - 5) * 64 + ((v shr (exponent - 6)) and 63).toInt()
     }
@@ -227,8 +227,8 @@ class Vu(val index: Int, val local: Int, val user: Int, val port: Int) {
  * its new socket while that socket's watch is armed. A user holds at most one place, and none while it watches or
  * reads.
  */
-class RxPlaces(private val users: Array<Vu>) {
-    private val places = ArrayDeque<Long>()
+class RxPlaces(val users: Array<Vu>) {
+    val places = ArrayDeque<Long>()
     val size: Int get() = places.size
 
     fun queue(v: Vu) {
@@ -259,44 +259,44 @@ class Worker(val plan: Plan, val id: Int, val vus: Array<Vu>) : Runnable {
     val connects = Histogram()
     @Volatile var failure: Throwable? = null
     @Volatile var drained = false
-    private val ring: LiburingFacade = openLiburingFacade(plan.entries, plan.mode)
+    val ring: LiburingFacade = openLiburingFacade(plan.entries, plan.mode)
     val backend: String = ring.availability
-    private val arena = Arena.ofShared()
-    private val rx = arena.allocate((RX * plan.rxWindows).toLong(), 64)
-    private val tx = arena.allocate((TX * WINDOWS).toLong(), 64)
-    private val rxFree = IntArray(plan.rxWindows) { it }
-    private var rxTop = plan.rxWindows
-    private val txFree = IntArray(WINDOWS) { it }
-    private var txTop = WINDOWS
-    private val txOf = IntArray(vus.size) { -1 }
-    private val waitRx = RxPlaces(vus)
-    private val waitTx = ArrayDeque<Vu>()
-    private val rxHeap = ByteArray(RX)
-    private val addresses = HashMap<Int, MemorySegment>()
-    private val sourceAddresses = plan.sources.map { address(it, 0) }
-    private val random = SplittableRandom(plan.seed + id)
-    private var heapTime = LongArray(1024)
-    private var heapVu = IntArray(1024)
-    private var heapSeq = IntArray(1024)
-    private var heapSize = 0
-    private var current: Vu? = null
-    private val plain = java.io.ByteArrayOutputStream()
-    private val sink = object : TlsRecordSink {
+    val arena = Arena.ofShared()
+    val rx = arena.allocate((RX * plan.rxWindows).toLong(), 64)
+    val tx = arena.allocate((TX * WINDOWS).toLong(), 64)
+    val rxFree = IntArray(plan.rxWindows) { it }
+    var rxTop = plan.rxWindows
+    val txFree = IntArray(WINDOWS) { it }
+    var txTop = WINDOWS
+    val txOf = IntArray(vus.size) { -1 }
+    val waitRx = RxPlaces(vus)
+    val waitTx = ArrayDeque<Vu>()
+    val rxHeap = ByteArray(RX)
+    val addresses = HashMap<Int, MemorySegment>()
+    val sourceAddresses = plan.sources.map { address(it, 0) }
+    val random = SplittableRandom(plan.seed + id)
+    var heapTime = LongArray(1024)
+    var heapVu = IntArray(1024)
+    var heapSeq = IntArray(1024)
+    var heapSize = 0
+    var current: Vu? = null
+    val plain = java.io.ByteArrayOutputStream()
+    val sink = object : TlsRecordSink {
         override fun plaintext(bytes: ByteArray, from: Int, to: Int) = plain.write(bytes, from, to - from)
         override fun ciphertext(bytes: ByteArray, from: Int, to: Int) = append(current!!, bytes, from, to)
     }
     /** CQEs reaped and not yet handled, in order; a stage that finds the ring full reaps into it wherever it runs. */
-    private var batch = LongArray(1024)
-    private var batchRes = IntArray(1024)
-    private var batchCount = 0
-    private var batchHead = 0
-    private var handling = false
-    private var nextActivation = 0
-    private var sqes = 0L
-    private var outstanding = 0
-    private var strays = 0L
+    var batch = LongArray(1024)
+    var batchRes = IntArray(1024)
+    var batchCount = 0
+    var batchHead = 0
+    var handling = false
+    var nextActivation = 0
+    var sqes = 0L
+    var outstanding = 0
+    var strays = 0L
 
-    private fun address(host: String, port: Int): MemorySegment = arena.allocate(16).also { a ->
+    fun address(host: String, port: Int): MemorySegment = arena.allocate(16).also { a ->
         val octets = host.split('.').map { it.toInt() }
         a.set(ValueLayout.JAVA_BYTE, 0, 2)
         a.set(ValueLayout.JAVA_BYTE, 2, (port shr 8).toByte())
@@ -305,11 +305,11 @@ class Worker(val plan: Plan, val id: Int, val vus: Array<Vu>) : Runnable {
     }
 
     /** op 4 bits, user 20 bits, window 12 bits (RECV/SEND), connection generation 28 bits. */
-    private fun token(v: Vu, op: Long, window: Int = 0): Long =
+    fun token(v: Vu, op: Long, window: Int = 0): Long =
         (v.gen.toLong() shl 36) or (window.toLong() shl 24) or (v.local.toLong() shl 4) or op
 
     /** CLOSE of a socket whose connection was abandoned before its SOCKET CQE: no user owns it. */
-    private fun strayToken(): Long = ((strays++ and 0x0FFFFFFFL) shl 36) or (STRAY shl 4) or OP_CLOSE
+    fun strayToken(): Long = ((strays++ and 0x0FFFFFFFL) shl 36) or (STRAY shl 4) or OP_CLOSE
 
     override fun run() {
         var error: Throwable? = null
@@ -329,7 +329,7 @@ class Worker(val plan: Plan, val id: Int, val vus: Array<Vu>) : Runnable {
         failure = error
     }
 
-    private fun loop() {
+    fun loop() {
         while (!plan.stop) {
             val now = System.nanoTime()
             if (plan.draining && (outstanding == 0 || now >= plan.drainDeadline)) break
@@ -364,7 +364,7 @@ class Worker(val plan: Plan, val id: Int, val vus: Array<Vu>) : Runnable {
     }
 
     /** A request still outstanding when the worker ends: the wait so far joins the histograms, counted as unfinished. */
-    private fun terminated(kind: Int, start: Long, end: Long) {
+    fun terminated(kind: Int, start: Long, end: Long) {
         val micros = (end - start) / 1000
         for (scope in 0 until 3) {
             if (!inScope(scope, start)) continue
@@ -375,7 +375,7 @@ class Worker(val plan: Plan, val id: Int, val vus: Array<Vu>) : Runnable {
     }
 
     /** Every socket closes; true once every SQE has its CQE (within 10 s). */
-    private fun shutdown(): Boolean {
+    fun shutdown(): Boolean {
         for (v in vus) if (v.fd >= 0 || v.connecting) closeFd(v)
         val start = System.nanoTime()
         while (sqes > 0 || batchHead < batchCount) {
@@ -391,14 +391,14 @@ class Worker(val plan: Plan, val id: Int, val vus: Array<Vu>) : Runnable {
         return true
     }
 
-    private fun process(first: UringCompletion) {
+    fun process(first: UringCompletion) {
         add(first)
         while (true) add(ring.peekCqe().getOrThrow() ?: break)
         drainBatch()
     }
 
     /** Handles every queued CQE in order; CQEs a handler's stage reaps join the queue and this same pass. */
-    private fun drainBatch() {
+    fun drainBatch() {
         if (handling) return
         handling = true
         try {
@@ -413,7 +413,7 @@ class Worker(val plan: Plan, val id: Int, val vus: Array<Vu>) : Runnable {
         }
     }
 
-    private fun add(c: UringCompletion) {
+    fun add(c: UringCompletion) {
         if (batchCount == batch.size) {
             batch = batch.copyOf(batchCount * 2)
             batchRes = batchRes.copyOf(batchCount * 2)
@@ -424,7 +424,7 @@ class Worker(val plan: Plan, val id: Int, val vus: Array<Vu>) : Runnable {
         sqes--
     }
 
-    private inline fun stage(op: () -> Result<Unit>) {
+    inline fun stage(op: () -> Result<Unit>) {
         if (op().isFailure) {
             ring.submit().getOrThrow()
             while (true) add(ring.peekCqe().getOrThrow() ?: break)
@@ -434,7 +434,7 @@ class Worker(val plan: Plan, val id: Int, val vus: Array<Vu>) : Runnable {
     }
 
     /** Users start evenly over the ramp, as k6's ramping-vus does; a frozen ramp starts no more. */
-    private fun activate(now: Long) {
+    fun activate(now: Long) {
         while (nextActivation < vus.size && !plan.frozen) {
             val v = vus[nextActivation]
             val at = plan.started + plan.rampNanos * v.index / plan.vus
@@ -446,12 +446,12 @@ class Worker(val plan: Plan, val id: Int, val vus: Array<Vu>) : Runnable {
         }
     }
 
-    private fun schedule(v: Vu, at: Long) {
+    fun schedule(v: Vu, at: Long) {
         v.seq++
         push(at, v.local, v.seq)
     }
 
-    private fun push(at: Long, vu: Int, seq: Int) {
+    fun push(at: Long, vu: Int, seq: Int) {
         if (heapSize == heapTime.size) {
             heapTime = heapTime.copyOf(heapSize * 2); heapVu = heapVu.copyOf(heapSize * 2); heapSeq = heapSeq.copyOf(heapSize * 2)
         }
@@ -465,7 +465,7 @@ class Worker(val plan: Plan, val id: Int, val vus: Array<Vu>) : Runnable {
         heapTime[i] = at; heapVu[i] = vu; heapSeq[i] = seq
     }
 
-    private fun pop() {
+    fun pop() {
         val last = --heapSize
         if (last == 0) return
         val t = heapTime[last]; val vu = heapVu[last]; val sq = heapSeq[last]
@@ -481,10 +481,10 @@ class Worker(val plan: Plan, val id: Int, val vus: Array<Vu>) : Runnable {
         heapTime[i] = t; heapVu[i] = vu; heapSeq[i] = sq
     }
 
-    private fun between(lo: Double, hi: Double): Long = ((lo + random.nextDouble() * (hi - lo)) * 1e9).toLong()
+    fun between(lo: Double, hi: Double): Long = ((lo + random.nextDouble() * (hi - lo)) * 1e9).toLong()
 
     /** A timer: the next step of load.js, or the request in flight timing out. Draining starts no new request. */
-    private fun fire(v: Vu, now: Long) {
+    fun fire(v: Vu, now: Long) {
         if (v.kind >= 0) {
             // The deadline drops the connection: a disconnect like any other, counted and stamped as one.
             val reason = if (v.established) Reason.REQUEST_TIMEOUT else Reason.SETUP_TIMEOUT
@@ -519,7 +519,7 @@ class Worker(val plan: Plan, val id: Int, val vus: Array<Vu>) : Runnable {
         }
     }
 
-    private fun request(v: Vu, kind: Int, path: String, body: ByteArray?) {
+    fun request(v: Vu, kind: Int, path: String, body: ByteArray?) {
         val head = StringBuilder(160)
         head.append(if (body == null) "GET " else "POST ").append(path).append(" HTTP/1.1\r\nHost: ").append(plan.host)
             .append(':').append(v.port).append("\r\nUser-Agent: trikeshed-loadgen\r\n")
@@ -538,7 +538,7 @@ class Worker(val plan: Plan, val id: Int, val vus: Array<Vu>) : Runnable {
         if (!v.connected) connect(v) else if (v.established) transmit(v)
     }
 
-    private fun connect(v: Vu) {
+    fun connect(v: Vu) {
         if (v.connecting) return
         v.connecting = true
         v.gen = (v.gen + 1) and 0x0FFFFFFF
@@ -547,7 +547,7 @@ class Worker(val plan: Plan, val id: Int, val vus: Array<Vu>) : Runnable {
     }
 
     /** The request's first byte leaves now: k6's http_req_duration starts here, after connecting and TLS. */
-    private fun transmit(v: Vu) {
+    fun transmit(v: Vu) {
         val bytes = v.request ?: return
         v.request = null
         v.sentAt = System.nanoTime()
@@ -567,7 +567,7 @@ class Worker(val plan: Plan, val id: Int, val vus: Array<Vu>) : Runnable {
         pollIn(v)
     }
 
-    private fun append(v: Vu, bytes: ByteArray, from: Int, to: Int) {
+    fun append(v: Vu, bytes: ByteArray, from: Int, to: Int) {
         val n = to - from
         val prior = v.out
         val into = if (prior == null) ByteArray(maxOf(n, 512)) else if (v.outSize + n > prior.size) prior.copyOf(maxOf(prior.size * 2, v.outSize + n)) else prior
@@ -576,13 +576,13 @@ class Worker(val plan: Plan, val id: Int, val vus: Array<Vu>) : Runnable {
         v.outSize += n
     }
 
-    private fun flush(v: Vu) {
+    fun flush(v: Vu) {
         if (v.sending || v.outSize == 0 || !v.connected) return
         if (txTop == 0) { waitTx.addLast(v); return }
         startSend(v, txFree[--txTop])
     }
 
-    private fun startSend(v: Vu, window: Int) {
+    fun startSend(v: Vu, window: Int) {
         val out = v.out!!
         val n = minOf(TX, v.outSize)
         MemorySegment.copy(out, 0, tx, ValueLayout.JAVA_BYTE, window.toLong() * TX, n)
@@ -595,13 +595,13 @@ class Worker(val plan: Plan, val id: Int, val vus: Array<Vu>) : Runnable {
         postSend(v)
     }
 
-    private fun postSend(v: Vu) {
+    fun postSend(v: Vu) {
         val window = txOf[v.local]
         val at = tx.address() + window.toLong() * TX + v.sendDone
         stage { ring.prepSend(v.fd, at, v.sendLen - v.sendDone, 0, token(v, OP_SEND, window)) }
     }
 
-    private fun releaseTx(window: Int) {
+    fun releaseTx(window: Int) {
         while (waitTx.isNotEmpty()) {
             val next = waitTx.removeFirst()
             if (next.connected && !next.sending && next.outSize > 0) { startSend(next, window); return }
@@ -609,13 +609,13 @@ class Worker(val plan: Plan, val id: Int, val vus: Array<Vu>) : Runnable {
         txFree[txTop++] = window
     }
 
-    private fun pollIn(v: Vu) {
+    fun pollIn(v: Vu) {
         if (v.polling || v.receiving || v.rxQueued || !v.connected) return
         v.polling = true
         stage { ring.prepPollAdd(v.fd, 1, token(v, OP_POLL_IN)) }
     }
 
-    private fun handle(userData: Long, res: Int) {
+    fun handle(userData: Long, res: Int) {
         val op = userData and 0xF
         val local = (userData ushr 4) and 0xFFFFFL
         if (local == STRAY) return
@@ -702,7 +702,7 @@ class Worker(val plan: Plan, val id: Int, val vus: Array<Vu>) : Runnable {
         }
     }
 
-    private fun established(v: Vu) {
+    fun established(v: Vu) {
         val now = System.nanoTime()
         v.established = true
         plan.established.incrementAndGet()
@@ -714,25 +714,25 @@ class Worker(val plan: Plan, val id: Int, val vus: Array<Vu>) : Runnable {
         if (session != null && plan.protocol.get() == null) plan.protocol.compareAndSet(null, "${session.protocol} ${session.cipherSuite}")
     }
 
-    private fun startConnect(v: Vu) {
+    fun startConnect(v: Vu) {
         val target = addresses.getOrPut(v.port) { address(plan.host, v.port) }
         stage { ring.prepConnect(v.fd, target.address(), 16, token(v, OP_CONNECT)) }
     }
 
-    private fun recv(v: Vu, window: Int) {
+    fun recv(v: Vu, window: Int) {
         check(!v.receiving && !v.polling && !v.rxQueued) { "user ${v.index}: a second read" }
         v.receiving = true
         stage { ring.prepRecv(v.fd, rx.address() + window.toLong() * RX, RX, 0, token(v, OP_RECV, window)) }
     }
 
     /** A window back from its CQE goes to the next user waiting for one, else to the pool. */
-    private fun releaseRx(window: Int) {
+    fun releaseRx(window: Int) {
         val next = waitRx.next()
         if (next != null) { recv(next, window); return }
         rxFree[rxTop++] = window
     }
 
-    private fun received(v: Vu, window: Int, res: Int, fresh: Boolean) {
+    fun received(v: Vu, window: Int, res: Int, fresh: Boolean) {
         if (fresh && res > 0) MemorySegment.copy(rx, ValueLayout.JAVA_BYTE, window.toLong() * RX, rxHeap, 0, res)
         releaseRx(window)
         if (!fresh) return
@@ -759,7 +759,7 @@ class Worker(val plan: Plan, val id: Int, val vus: Array<Vu>) : Runnable {
     }
 
     /** Response bytes: complete once the head and Content-Length bytes are in; then checked and timed. */
-    private fun body(v: Vu, bytes: ByteArray, from: Int, to: Int) {
+    fun body(v: Vu, bytes: ByteArray, from: Int, to: Int) {
         val n = to - from
         val prior = v.response
         val into = if (prior == null) ByteArray(maxOf(8192, n)) else if (v.responseSize + n > prior.size) prior.copyOf(maxOf(prior.size * 2, v.responseSize + n)) else prior
@@ -777,19 +777,19 @@ class Worker(val plan: Plan, val id: Int, val vus: Array<Vu>) : Runnable {
         complete(v, status, text)
     }
 
-    private fun inScope(scope: Int, start: Long): Boolean = when (scope) {
+    fun inScope(scope: Int, start: Long): Boolean = when (scope) {
         RUN -> true
         CANONICAL -> start >= plan.canonicalStart && start < plan.canonicalEnd
         else -> plan.inEstablishedWindow(start)
     }
 
-    private fun scopeEnd(scope: Int): Long = when (scope) {
+    fun scopeEnd(scope: Int): Long = when (scope) {
         RUN -> Long.MAX_VALUE
         CANONICAL -> plan.canonicalEnd
         else -> plan.establishedEnd
     }
 
-    private fun record(kind: Int, start: Long, end: Long, ok: Boolean, checkFailed: Boolean) {
+    fun record(kind: Int, start: Long, end: Long, ok: Boolean, checkFailed: Boolean) {
         val micros = (end - start) / 1000
         for (scope in 0 until 3) {
             if (!inScope(scope, start)) continue
@@ -804,7 +804,7 @@ class Worker(val plan: Plan, val id: Int, val vus: Array<Vu>) : Runnable {
         outstanding--
     }
 
-    private fun complete(v: Vu, status: Int, text: String) {
+    fun complete(v: Vu, status: Int, text: String) {
         val now = System.nanoTime()
         val kind = v.kind
         if (kind < 0) return
@@ -831,7 +831,7 @@ class Worker(val plan: Plan, val id: Int, val vus: Array<Vu>) : Runnable {
     }
 
     /** load.js after a request: a failed feed sleeps 3-7 s and starts over; every other check failure carries on. */
-    private fun advance(v: Vu, kind: Int, ok: Boolean, now: Long) {
+    fun advance(v: Vu, kind: Int, ok: Boolean, now: Long) {
         if (kind == FEED && !ok) { v.step = 0; v.iter++; schedule(v, now + between(3.0, 7.0)); return }
         when (kind) {
             FEED -> { v.step = 1; schedule(v, now + between(3.0, 7.0)) }
@@ -842,7 +842,7 @@ class Worker(val plan: Plan, val id: Int, val vus: Array<Vu>) : Runnable {
     }
 
     /** The request in flight failed without a response (timeout, connect or transport failure), as k6 status 0. */
-    private fun fail(v: Vu, now: Long, reason: Int) {
+    fun fail(v: Vu, now: Long, reason: Int) {
         val kind = v.kind
         if (kind < 0) return
         plan.failReasons.incrementAndGet(reason)
@@ -854,7 +854,7 @@ class Worker(val plan: Plan, val id: Int, val vus: Array<Vu>) : Runnable {
     }
 
     /** The connection ended under a request or between them: reconnect at the next request. */
-    private fun lost(v: Vu, reason: Int) {
+    fun lost(v: Vu, reason: Int) {
         val now = System.nanoTime()
         plan.disconnects.incrementAndGet()
         plan.lostReasons.incrementAndGet(reason)
@@ -864,17 +864,17 @@ class Worker(val plan: Plan, val id: Int, val vus: Array<Vu>) : Runnable {
         fail(v, now, reason)
     }
 
-    private fun errno(res: Int) {
+    fun errno(res: Int) {
         if (res < 0) plan.errnos.incrementAndGet(minOf(-res, plan.errnos.length() - 1))
     }
 
-    private fun drop(v: Vu) {
+    fun drop(v: Vu) {
         if (v.established) plan.established.decrementAndGet()
         if (v.connected) plan.connected.decrementAndGet()
         closeFd(v)
     }
 
-    private fun closeFd(v: Vu) {
+    fun closeFd(v: Vu) {
         if (v.fd >= 0) {
             val fd = v.fd
             stage { ring.prepClose(fd, token(v, OP_CLOSE)) }
@@ -896,7 +896,7 @@ class Worker(val plan: Plan, val id: Int, val vus: Array<Vu>) : Runnable {
         // SQEs still in flight for this connection carry its generation; their CQEs return their windows.
     }
 
-    private fun ids(text: String): LongArray {
+    fun ids(text: String): LongArray {
         val found = LongArray(32)
         var count = 0
         var at = text.indexOf("{\"id\":")
@@ -911,7 +911,7 @@ class Worker(val plan: Plan, val id: Int, val vus: Array<Vu>) : Runnable {
     }
 }
 
-private fun indexOf(bytes: ByteArray, size: Int, pattern: String): Int {
+fun indexOf(bytes: ByteArray, size: Int, pattern: String): Int {
     val p = pattern.encodeToByteArray()
     outer@ for (i in 0..size - p.size) {
         for (j in p.indices) if (bytes[i + j] != p[j]) continue@outer
@@ -920,7 +920,7 @@ private fun indexOf(bytes: ByteArray, size: Int, pattern: String): Int {
     return -1
 }
 
-private fun header(bytes: ByteArray, end: Int, name: String): Int? {
+fun header(bytes: ByteArray, end: Int, name: String): Int? {
     val text = String(bytes, 0, end, Charsets.ISO_8859_1).lowercase()
     val at = text.indexOf(name)
     if (at < 0) return null

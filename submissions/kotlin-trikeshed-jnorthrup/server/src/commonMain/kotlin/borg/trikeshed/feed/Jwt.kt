@@ -20,8 +20,8 @@ val HS256: ByteArray = "HS256".encodeToByteArray()
 class Bearer(val secret: ByteArray) {
     var user: Long = 0
     var name: String = ""
-    private val header = HEADER_SCHEMA.reader()
-    private val claims = PAYLOAD_SCHEMA.reader()
+    val header = HEADER_SCHEMA.reader()
+    val claims = PAYLOAD_SCHEMA.reader()
 
     /** The Authorization value at [from, to) of [src]; null range for an absent header. */
     fun verify(src: ByteArray, from: Int, to: Int, nowSeconds: Long): BearerState {

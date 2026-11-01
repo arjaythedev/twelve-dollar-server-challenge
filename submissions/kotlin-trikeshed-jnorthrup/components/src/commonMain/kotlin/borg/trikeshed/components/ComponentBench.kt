@@ -20,7 +20,7 @@ expect fun fileRoundTrip(path: String, bytes: ByteArray, rounds: Int): Long?
 /** A writable scratch path for [name] on this platform. */
 expect fun scratchPath(name: String): String
 
-private fun line(case: String, n: Long, nanos: Long, extra: String = "") =
+fun line(case: String, n: Long, nanos: Long, extra: String = "") =
     println("{\"platform\":\"$platformName\",\"case\":\"$case\",\"ops\":$n,\"nsPerOp\":${(nanos * 10 / n) / 10.0}$extra}")
 
 /**

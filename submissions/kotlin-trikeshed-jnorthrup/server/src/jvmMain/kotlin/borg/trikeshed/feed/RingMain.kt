@@ -119,10 +119,10 @@ fun serveRing(env: Map<String, String>, feed: Feed, store: FeedStore) {
     }
 }
 
-private fun json(text: String): String = text.replace("\\", "\\\\").replace("\"", "\\\"")
+fun json(text: String): String = text.replace("\\", "\\\\").replace("\"", "\\\"")
 
 /** A listening socket made by ring SQEs: SOCKET, SO_REUSEADDR, BIND, LISTEN (backlog 65535); closed on failure. */
-private fun listen(ring: LiburingFacade, host: String, port: Int, token: Long): Int {
+fun listen(ring: LiburingFacade, host: String, port: Int, token: Long): Int {
     val fd = ring.one(token) { ring.prepSocket(2, 1, 0, it) }
     check(fd >= 0) { "socket: $fd" }
     try {

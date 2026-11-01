@@ -19,12 +19,12 @@ import kotlin.test.fail
  */
 class KnownSchemaLawTest {
     // ASCII names, a non-ASCII name, the replacement character and a lone surrogate (which has no UTF-8 form).
-    private val keys = arrayOf("sub", "username", "exp", "body", "alg", "\u00e9", "\uFFFD", "\uD800")
-    private val schema = KnownSchema(*keys)
-    private val reader = schema.reader()
-    private val into = arrayOfNulls<Any>(keys.size)
+    val keys = arrayOf("sub", "username", "exp", "body", "alg", "\u00e9", "\uFFFD", "\uD800")
+    val schema = KnownSchema(*keys)
+    val reader = schema.reader()
+    val into = arrayOfNulls<Any>(keys.size)
 
-    private val corpus = listOf(
+    val corpus = listOf(
         """{"sub":"42","username":"u42","exp":1893456000}""",
         """{"sub":"42","username":"u42","exp":1.8934560e9}""",
         """{"sub":"42","username":"u42","exp":-0}""",
@@ -51,7 +51,7 @@ class KnownSchemaLawTest {
     )
 
     /** Texts with bytes that are not UTF-8: a raw 0xFF key decodes to U+FFFD, a raw surrogate encoding to replacements. */
-    private val rawCorpus: List<ByteArray> = listOf(
+    val rawCorpus: List<ByteArray> = listOf(
         bytes("{\"", 0xFF, "\":1}"),
         bytes("{\"body\":\"", 0xFF, "x\"}"),
         bytes("{\"", 0xED, 0xA0, 0x80, "\":2,\"alg\":\"", 0xED, 0xA0, 0x80, "\"}"),
@@ -60,13 +60,13 @@ class KnownSchemaLawTest {
         bytes("{\"body\":\"caf", 0xC3, 0xA9, "\\n\"}"),
     )
 
-    private fun bytes(vararg parts: Any): ByteArray {
+    fun bytes(vararg parts: Any): ByteArray {
         val out = java.io.ByteArrayOutputStream()
         for (p in parts) if (p is Int) out.write(p) else out.write((p as String).encodeToByteArray())
         return out.toByteArray()
     }
 
-    private fun check(text: ByteArray, from: Int, to: Int) {
+    fun check(text: ByteArray, from: Int, to: Int) {
         val expected = JsonScan(text, from, to).members(keys, into)
         val actual = reader.scan(text, from, to)
         assertEquals(expected.name, actual.name, "shape of ${text.decodeToString(from, to)}")
@@ -228,16 +228,16 @@ class KnownSchemaLawTest {
         }
     }
 
-    private val secret = "twelve-dollar-challenge".encodeToByteArray()
-    private val encoder = Base64.getUrlEncoder().withoutPadding()
+    val secret = "twelve-dollar-challenge".encodeToByteArray()
+    val encoder = Base64.getUrlEncoder().withoutPadding()
 
-    private fun token(header: String, payload: String): ByteArray {
+    fun token(header: String, payload: String): ByteArray {
         val signing = encoder.encodeToString(header.encodeToByteArray()) + "." + encoder.encodeToString(payload.encodeToByteArray())
         val signature = encoder.encodeToString(hmacSha256(secret, signing.encodeToByteArray()))
         return "Bearer $signing.$signature".encodeToByteArray()
     }
 
-    private fun verify(header: String, payload: String, now: Long = 1_800_000_000L): Pair<BearerState, Bearer> {
+    fun verify(header: String, payload: String, now: Long = 1_800_000_000L): Pair<BearerState, Bearer> {
         val bearer = Bearer(secret)
         val t = token(header, payload)
         return bearer.verify(t, 0, t.size, now) to bearer

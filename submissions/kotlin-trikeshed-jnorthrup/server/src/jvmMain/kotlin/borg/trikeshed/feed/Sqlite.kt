@@ -98,7 +98,7 @@ class SqliteStore(path: String) : FeedStore, AutoCloseable {
 
     fun message(): String = (Sqlite3.errmsg.invokeExact(db) as MemorySegment).reinterpret(4096).getString(0)
 
-    private var open = true
+    var open = true
 
     /** Rolls back an open transaction, finalizes the statements and closes the connection; idempotent. */
     override fun close() {

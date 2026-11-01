@@ -133,7 +133,7 @@ class ServerSnapshot(val t: Long, val live: Long, val established: Long, val acc
  * The newest COMPLETE line (newline-terminated) of the server's STATS_FILE, or null when there is none. A partial
  * last line is ignored; the caller judges freshness by [ServerSnapshot.t].
  */
-private fun serverSnapshot(file: File?): ServerSnapshot? {
+fun serverSnapshot(file: File?): ServerSnapshot? {
     if (file == null || !file.exists()) return null
     RandomAccessFile(file, "r").use { f ->
         val length = f.length()
@@ -167,11 +167,11 @@ private fun serverSnapshot(file: File?): ServerSnapshot? {
  * as failed, and their wait so far is in the quantiles) over the whole run and over the established hold; no failed
  * body check; the memory guard never acted.
  */
-private fun reasons(counts: java.util.concurrent.atomic.AtomicLongArray): String =
+fun reasons(counts: java.util.concurrent.atomic.AtomicLongArray): String =
     Reason.NAMES.indices.joinToString(",", "{", "}") { "\"${Reason.NAMES[it]}\":${counts.get(it)}" }
 
 /** Nonzero errno counts as {"errno":count}; the last slot also holds larger errnos. */
-private fun errnos(counts: java.util.concurrent.atomic.AtomicLongArray): String =
+fun errnos(counts: java.util.concurrent.atomic.AtomicLongArray): String =
     (0 until counts.length()).filter { counts.get(it) > 0 }.joinToString(",", "{", "}") { "\"$it\":${counts.get(it)}" }
 
 fun runLoad(o: Map<String, String>): Boolean {

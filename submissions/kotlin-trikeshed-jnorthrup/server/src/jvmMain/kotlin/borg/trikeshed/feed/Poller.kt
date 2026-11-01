@@ -30,10 +30,10 @@ actual class Handle(val channel: SocketChannel) {
 }
 
 /** A state selector's bit in the ready set of a wait (its index in the stage poll). */
-private const val LISTEN_BIT = 1
-private const val HEADER_BIT = 2
-private const val BODY_BIT = 4
-private const val WRITE_BIT = 8
+const val LISTEN_BIT = 1
+const val HEADER_BIT = 2
+const val BODY_BIT = 4
+const val WRITE_BIT = 8
 
 /**
  * HeaderRead visits per outer pass of [Poller.run] (straight from the header select and from its overflow together),
@@ -41,17 +41,17 @@ private const val WRITE_BIT = 8
  * The rest of what one select reported waits, in order, for the next passes, and that selector is selected again only
  * once it is all handled, so no ready key waits behind keys that became ready after it.
  */
-private const val READ_ROUND = 64
+const val READ_ROUND = 64
 
 /** Writes one visit of the write dispatch loop makes, one write call each. */
-private const val WRITE_ROUND = 1024
+const val WRITE_ROUND = 1024
 
 /**
  * While the header selector's select is the wait: the longest it waits, so the listen selector (and, without the stage
  * poll, an armed body or write selector) is visited this often, after at most that pass's header visits.
  */
-private const val SLICE_MILLIS = 5L
-private const val SLICE_NANOS = SLICE_MILLIS * 1_000_000L
+const val SLICE_MILLIS = 5L
+const val SLICE_NANOS = SLICE_MILLIS * 1_000_000L
 
 /**
  * java.nio readiness with one Selector per transport state class (the table is on [Poller] in Xio.kt). Each Selector
@@ -71,14 +71,14 @@ private const val SLICE_NANOS = SLICE_MILLIS * 1_000_000L
  * (not Linux) the header selector's select always carries the wait, bounded by [SLICE_MILLIS].
  */
 actual class Poller actual constructor(host: String, port: Int) {
-    private val listen: ListenSelector
-    private val header: HeaderSelector
-    private val body: BodySelector
-    private val write: WriteSelector
+    val listen: ListenSelector
+    val header: HeaderSelector
+    val body: BodySelector
+    val write: WriteSelector
     /** poll(2) over the four selectors' epoll descriptors; null where they are not known. */
-    private val stages: StagePoll?
-    private val rx: ByteBuffer = ByteBuffer.allocateDirect(1 shl 16)
-    private val tx: ByteBuffer = ByteBuffer.allocateDirect(WRITE_CALL)
+    val stages: StagePoll?
+    val rx: ByteBuffer = ByteBuffer.allocateDirect(1 shl 16)
+    val tx: ByteBuffer = ByteBuffer.allocateDirect(WRITE_CALL)
 
     init {
         val proc = Files.isDirectory(PROC_FD)
@@ -117,7 +117,7 @@ actual class Poller actual constructor(host: String, port: Int) {
     }
 
     /** The wait described on the class: the bits of the selectors to select now (0 after an interrupted poll). */
-    private fun await(xio: Xio, pending: Boolean): Int {
+    fun await(xio: Xio, pending: Boolean): Int {
         val s = stages
         val armed = body.armed > 0 || write.blocked > 0
         if (s != null && (armed || header.quiet)) return s.poll(if (pending) 0 else xio.waitMillis())
@@ -172,10 +172,10 @@ actual class Poller actual constructor(host: String, port: Int) {
 }
 
 /** The Listen state's selector: the listening socket's one key, with accept interest always. */
-private class ListenSelector(host: String, port: Int) {
-    private val selector: Selector = Selector.open()
-    private val keys: MutableSet<SelectionKey> = selector.selectedKeys()
-    private val server: ServerSocketChannel = ServerSocketChannel.open()
+class ListenSelector(host: String, port: Int) {
+    val selector: Selector = Selector.open()
+    val keys: MutableSet<SelectionKey> = selector.selectedKeys()
+    val server: ServerSocketChannel = ServerSocketChannel.open()
     /** Its registration is applied at its first select, which comes before the owner thread may wait. */
     var dirty = true
     /** When it was last selected ([monoNanos]). */
@@ -225,18 +225,18 @@ private class ListenSelector(host: String, port: Int) {
  * HeaderRead is queued twice or visited twice for one select. Interest changes made during a visit (inside the select)
  * leave the selector dirty for its next select.
  */
-private class HeaderSelector {
-    private val selector: Selector = Selector.open()
+class HeaderSelector {
+    val selector: Selector = Selector.open()
     /** The HeaderReads a select reported after the pass's visits ran out, in the order reported. */
-    private val overflow = ArrayDeque<HeaderRead>(1024)
+    val overflow = ArrayDeque<HeaderRead>(1024)
     /** The owner thread's [Xio], whose [Xio.onHeader] every visit calls; set by [Poller.run] before the first select. */
     lateinit var owner: Xio
     /** HeaderRead visits left in this outer pass. */
-    private var budget = 0
+    var budget = 0
     /** This outer pass has selected the header selector. */
-    private var selected = false
+    var selected = false
     /** The header selector's one consumer, the only one given to any Selector: a visit while the pass has visits left, else overflow. */
-    private val visit = Consumer<SelectionKey> { k ->
+    val visit = Consumer<SelectionKey> { k ->
         val h = k.attachment() as HeaderRead
         if (budget > 0) serve(h) else overflow.addLast(h)
     }
@@ -281,14 +281,14 @@ private class HeaderSelector {
     /** The wait while it carries traffic: one select of at most [millis] (0: none); its overflow is empty. */
     fun await(millis: Long) = select(millis)
 
-    private fun select(millis: Long) {
+    fun select(millis: Long) {
         selected = true
         dirty = false
         quiet = (if (millis <= 0L) selector.selectNow(visit) else selector.select(visit, millis)) == 0
     }
 
     /** The one call site of [Xio.onHeader], for direct and queued delivery alike: a visit, then the commit deadline. */
-    private fun serve(h: HeaderRead) {
+    fun serve(h: HeaderRead) {
         budget--
         owner.onHeader(h)
         owner.tick()
@@ -296,9 +296,9 @@ private class HeaderSelector {
 }
 
 /** The BodyRead state's selector: body keys, armed with read interest only while their connection is in BODY. */
-private class BodySelector {
-    private val selector: Selector = Selector.open()
-    private val keys: MutableSet<SelectionKey> = selector.selectedKeys()
+class BodySelector {
+    val selector: Selector = Selector.open()
+    val keys: MutableSet<SelectionKey> = selector.selectedKeys()
     var dirty = false
     /** Body keys armed now. */
     var armed = 0
@@ -358,10 +358,10 @@ private class BodySelector {
  * full. A blocked write its selector reports writable joins the same queue (if still blocked and not queued), so one
  * call site writes both.
  */
-private class WriteSelector {
-    private val selector: Selector = Selector.open()
-    private val keys: MutableSet<SelectionKey> = selector.selectedKeys()
-    private val queue = ArrayDeque<BufferedWrite>(1024)
+class WriteSelector {
+    val selector: Selector = Selector.open()
+    val keys: MutableSet<SelectionKey> = selector.selectedKeys()
+    val queue = ArrayDeque<BufferedWrite>(1024)
     var dirty = false
     /** Writes blocked now (write interest armed). */
     var blocked = 0
@@ -472,10 +472,10 @@ class StagePoll(fds: IntArray) {
     }
 }
 
-private val PROC_FD: Path = Path.of("/proc/self/fd")
+val PROC_FD: Path = Path.of("/proc/self/fd")
 
 /** This process's descriptors that are epoll instances (Linux /proc). */
-private fun eventpolls(): Set<Int> {
+fun eventpolls(): Set<Int> {
     val out = HashSet<Int>()
     val names = PROC_FD.toFile().list() ?: return out
     for (name in names) {

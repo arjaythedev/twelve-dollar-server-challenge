@@ -8,7 +8,7 @@ import kotlin.test.assertSame
 
 /** The window queue's ownership rule, step by step: a place belongs to one connection generation of one user. */
 class RxPlacesTest {
-    private fun user(local: Int) = Vu(local, local, 0, 1).apply { gen = 1; connected = true }
+    fun user(local: Int) = Vu(local, local, 0, 1).apply { gen = 1; connected = true }
 
     @Test
     fun aUserWhoTimedOutAndReconnectedNeverInheritsItsOldPlace() {

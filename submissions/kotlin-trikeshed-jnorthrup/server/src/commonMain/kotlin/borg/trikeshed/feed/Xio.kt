@@ -392,7 +392,7 @@ class Xio(val poller: Poller, val feed: Feed, val store: FeedStore, val commitWi
     }
 
     /** Answers every complete request in src[start, to) into [send]; a partial head stays in [HeaderRead], a partial body moves to [BodyRead]. */
-    private fun frame(c: Conn, src: ByteArray, start: Int, to: Int) {
+    fun frame(c: Conn, src: ByteArray, start: Int, to: Int) {
         val r = request
         var from = start
         while (from < to && !c.closing) {
@@ -411,7 +411,7 @@ class Xio(val poller: Poller, val feed: Feed, val store: FeedStore, val commitWi
     }
 
     /** The head in src[from, to) is parsed (its sizes bounded) and its body incomplete: the bytes and the parse move to [BodyRead]. */
-    private fun toBody(c: Conn, src: ByteArray, from: Int, to: Int) {
+    fun toBody(c: Conn, src: ByteArray, from: Int, to: Int) {
         val b = c.body ?: BodyRead(c).also { c.body = it }
         b.need = request.bodyTo - from
         b.bytes = ByteArray(b.need)
@@ -422,7 +422,7 @@ class Xio(val poller: Poller, val feed: Feed, val store: FeedStore, val commitWi
     }
 
     /** One response into [send]; when it began the write transaction, the window starts from the request's start. */
-    private fun respond(c: Conn, src: ByteArray, r: Request) {
+    fun respond(c: Conn, src: ByteArray, r: Request) {
         val start = if (windowOpen) 0L else monoNanos()
         feed.respond(src, r, send)
         if (r.close) c.closing = true
@@ -436,7 +436,7 @@ class Xio(val poller: Poller, val feed: Feed, val store: FeedStore, val commitWi
      * What this read produced goes to [BufferedWrite]: parked until COMMIT while a transaction is open, else into the
      * write selector's queue. Nothing produced: the connection stays in, or enters, its read state.
      */
-    private fun emit(c: Conn) {
+    fun emit(c: Conn) {
         if (!c.open) return
         if (send.size == 0) { toRead(c); return }
         val w = c.write
@@ -454,7 +454,7 @@ class Xio(val poller: Poller, val feed: Feed, val store: FeedStore, val commitWi
      * Its output is out (or it produced none): the connection returns to its read state. [HEADER] arms the header key
      * if it was disarmed; [BODY] takes read interest from the header key and gives it to the body key.
      */
-    private fun toRead(c: Conn) {
+    fun toRead(c: Conn) {
         val h = c.header
         if (c.reading == HEADER) {
             c.stage = HEADER
@@ -468,19 +468,19 @@ class Xio(val poller: Poller, val feed: Feed, val store: FeedStore, val commitWi
     }
 
     /** The flags change only when the selector took the change, so they always say what it watches. */
-    private fun arm(h: HeaderRead, c: Conn) {
+    fun arm(h: HeaderRead, c: Conn) {
         if (poller.interest(h, true)) h.armed = true else close(c)
     }
 
-    private fun disarm(h: HeaderRead, c: Conn) {
+    fun disarm(h: HeaderRead, c: Conn) {
         if (poller.interest(h, false)) h.armed = false else close(c)
     }
 
-    private fun arm(b: BodyRead, c: Conn) {
+    fun arm(b: BodyRead, c: Conn) {
         if (poller.interest(b, true)) b.armed = true else close(c)
     }
 
-    private fun disarm(b: BodyRead, c: Conn) {
+    fun disarm(b: BodyRead, c: Conn) {
         if (poller.interest(b, false)) b.armed = false else close(c)
     }
 }

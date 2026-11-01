@@ -903,13 +903,20 @@ int main(void) {
   }
   for (unsigned i = 0; i < NR; i++) {
     const char *err = "";
-    /* the CQ holds one completion per connection on the ring: an ENOBUFS burst ends every armed
-     * receive at once, and completions past the CQ go to a kernel overflow list, allocated per
-     * completion just when memory is shortest */
-    if (ring_init(&R[i].r, 4096, 65536, nslots, nbufs, bufsz, i == 0, &err) < 0) {
-      fprintf(stderr, "ring %u: %s: %s\n", i, err, strerror(errno));
-      return 1;
+    /* The CQ holds one completion per connection on the ring, so a burst of completions never goes
+     * to the kernel's overflow list, allocated per completion just when memory is shortest. On 6.8
+     * a ring's queues are one physically contiguous block (2 MB for 65,536 entries), which a
+     * fragmented machine may not have: on ENOMEM from io_uring_setup (nothing allocated yet) the
+     * ring is made with half the entries, down to 8,192. */
+    unsigned cq = 65536;
+    while (ring_init(&R[i].r, 4096, cq, nslots, nbufs, bufsz, i == 0, &err) < 0) {
+      if (errno != ENOMEM || strcmp(err, "io_uring_setup") || cq <= 8192) {
+        fprintf(stderr, "ring %u: %s: %s\n", i, err, strerror(errno));
+        return 1;
+      }
+      cq /= 2;
     }
+    if (cq < 65536) fprintf(stderr, "ring %u: %u CQ entries (no contiguous memory for more)\n", i, cq);
     R[i].conns = mmap(NULL, (size_t)nslots * sizeof(struct conn), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (R[i].conns == MAP_FAILED) { perror("mmap conns"); return 1; }
     if (i > 0) {

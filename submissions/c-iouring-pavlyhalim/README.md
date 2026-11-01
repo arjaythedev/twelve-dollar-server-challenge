@@ -44,7 +44,9 @@ Every user is a keep-alive connection, so the connection count is what the serve
   request against 14.5 in the same test at 160,000 users.
 - Completion queues hold 65,536 entries per ring, more than a ring's connections, so a burst of
   completions never spills into the kernel's overflow list, which allocates per completion just
-  when memory is shortest.
+  when memory is shortest. On 6.8 a ring's queues are one physically contiguous block (2 MB at this
+  size); if `io_uring_setup` finds none, the ring is made with half the entries, down to 8,192, and
+  the size is logged (CI's runner gave up at the seventh ring).
 - The kernel's own per-socket memory (~4.3 KB on 6.8, most of it not charged to the process) is the
   real ceiling on a 2 GB box, and the 40 bytes are what the server adds to it.
 - Ring 0 is `SINGLE_ISSUER | DEFER_TASKRUN` and is the ring the loop waits on (a timed

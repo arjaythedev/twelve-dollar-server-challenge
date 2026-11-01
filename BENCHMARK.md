@@ -14,15 +14,19 @@
 
 Statistics include the ramps. RAM is the cgroup peak, including charged file pages. Local results, not an official score or a measured capacity limit.
 
+The CPU values above include the old counter reader running inside the server container. New runs read counters from a separate container; their CPU/request values are not directly comparable.
+
 [Data](src/benchmarks/results.json). Full logs stay in `results/<run>/`.
 
 ## Native CPU sampling
 
-5,000 users, 60-second hold, `cpu-clock:u` at 997 Hz. SQL/row assembly: 63.4%; transport/other: 27.9%; JSON output: 4.7%; auth: 3.9%. No request-JSON samples were captured.
+10,000 users, 30-second ramp, 60-second hold. Passed: 103,568 requests, 796.63 requests/s, p95 1.052 ms, p99 2.075 ms, no errors. Server CPU: 84.13 us/request; peak RAM: 340.36 MiB. These workload totals include the ramps.
 
-1,369 samples, no loss records, 167 unresolved leaf symbols and one stack without main. These shares cover sampled server user CPU. Kernel work and the benchmark sampler are excluded. The container counters include both: 43.5% user CPU, 56.5% system CPU.
+CPU sampling covered only the hold (control acknowledgements at 30.48 s and 90.29 s): SQL/row assembly 67.3%, transport/other 24.8%, response JSON 4.4%, auth 3.4%. No request-JSON samples. 1,492 samples at 997 Hz, no loss records, 194 unresolved leaves and two stacks without main.
 
-[Data](src/profiles/native-5000.json). Raw capture: `results/cpp-profile-5000/`.
+Hold-window cgroup CPU: 1.558 s user, 3.266 s system. Main-process counters agree within their 10 ms tick resolution. CPU-stack shares describe user CPU only.
+
+[Data](src/profiles/native-10000.json). Raw capture: `results/cpp-profile-window-10000/`. The [earlier 5,000-user capture](src/profiles/native-5000.json) also sampled the ramps.
 
 ## Request-path sampling
 

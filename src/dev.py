@@ -10,6 +10,7 @@ import platform
 import re
 import shlex
 import shutil
+import socket
 import subprocess
 import tarfile
 import tempfile
@@ -20,7 +21,7 @@ from collections.abc import Generator
 from contextlib import closing, contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Never, TypedDict, cast
+from typing import Literal, Never, TypedDict, cast
 
 import psutil
 
@@ -30,6 +31,7 @@ PROFILER_IMAGE = "twelve-dollar-profiler:local"
 PROFILE_EVENT = "cpu-clock:u"
 PROFILE_FREQUENCY = 997
 PROFILE_STACK_BYTES = 8192
+K6_PAUSED_BEFORE_RUN = 4
 PROFILE_STAGES = {
     "database_and_rows": "SQL / row assembly",
     "transport_and_other": "Transport / other",
@@ -64,6 +66,7 @@ class Arguments(argparse.Namespace):
     save: Path | None
     file: Path
     json_output: bool
+    no_build: bool
 
 
 class Result(TypedDict):
@@ -81,6 +84,7 @@ class Result(TypedDict):
     max_ms: float
     error_rate: float
     cpu_us_per_request: float
+    cpu_scope: str
     server_peak_bytes: int
     passed: bool
 
@@ -121,20 +125,96 @@ def file_hash(path: Path) -> str:
         return hashlib.file_digest(source, "sha256").hexdigest()
 
 
-def counters(container: str) -> dict[str, JSONValue]:
-    # cgroup counters include the server, its page cache and these short sampler processes.
+def parse_counters(values: str) -> dict[str, JSONValue]:
+    rows, process = values.rsplit("process_stat ", 1)
+    fields = process[process.rindex(")") + 2 :].split()
+    result: dict[str, JSONValue] = {
+        line.split()[0]: int(line.split()[1]) for line in rows.splitlines()
+    }
+    result["main_user_ticks"] = int(fields[11])
+    result["main_system_ticks"] = int(fields[12])
+    return result
+
+
+def counters(observer: str) -> dict[str, JSONValue]:
+    # Read through the server's root, but run the reader in a separate cgroup.
+    root = "/proc/1/root/sys/fs/cgroup"
     values = command(
         "docker",
         "exec",
-        container,
+        observer,
         "sh",
         "-c",
-        "cat /sys/fs/cgroup/cpu.stat; "
-        "printf 'memory_current '; cat /sys/fs/cgroup/memory.current; "
-        "printf 'memory_peak '; cat /sys/fs/cgroup/memory.peak; "
-        "cat /sys/fs/cgroup/memory.events",
+        f"cat {root}/cpu.stat; "
+        f"printf 'memory_current '; cat {root}/memory.current; "
+        f"printf 'memory_peak '; cat {root}/memory.peak; "
+        f"cat {root}/memory.events; printf 'process_stat '; cat /proc/1/stat",
     )
-    return {line.split()[0]: int(line.split()[1]) for line in values.splitlines()}
+    return parse_counters(values)
+
+
+def cpu_delta(
+    before: dict[str, JSONValue], after: dict[str, JSONValue], ticks_per_second: int
+) -> dict[str, float]:
+    def delta(key: str) -> float:
+        return number(after, key) - number(before, key)
+
+    user = delta("user_usec") / 1e6
+    system = delta("system_usec") / 1e6
+    main_user = delta("main_user_ticks") / ticks_per_second
+    main_system = delta("main_system_ticks") / ticks_per_second
+    return {
+        "cgroup_user_s": user,
+        "cgroup_system_s": system,
+        "main_user_s": main_user,
+        "main_system_s": main_system,
+        "cgroup_minus_main_s": user + system - main_user - main_system,
+    }
+
+
+def duration_seconds(value: str) -> float:
+    units = {"ns": 1e-9, "us": 1e-6, "ms": 1e-3, "s": 1, "m": 60, "h": 3600}
+    parts = list(re.finditer(r"(\d+(?:\.\d+)?)(ns|us|ms|s|m|h)", value))
+    if "".join(part[0] for part in parts) != value or not parts:
+        raise ValueError(f"invalid duration: {value}")
+    seconds = sum(float(part[1]) * units[part[2]] for part in parts)
+    if seconds <= 0 or not math.isfinite(seconds):
+        raise ValueError("durations must be finite and positive")
+    return seconds
+
+
+def k6_status(port: int, *, resume: bool = False) -> dict[str, JSONValue]:
+    body = (
+        b'{"data":{"type":"status","id":"default","attributes":{"paused":false}}}'
+        if resume
+        else None
+    )
+    with closing(http.client.HTTPConnection("127.0.0.1", port, timeout=2)) as connection:
+        connection.request(
+            "PATCH" if resume else "GET",
+            "/v1/status",
+            body=body,
+            headers={"Content-Type": "application/json"},
+        )
+        response = connection.getresponse()
+        data = response.read()
+        if response.status != 200:
+            raise RuntimeError(f"k6 control API returned {response.status}: {data!r}")
+        return mapping(mapping(mapping(decode_json(data))["data"])["attributes"])
+
+
+def perf_control(observer: str, action: Literal["ping", "enable", "disable"]) -> None:
+    command(
+        "docker",
+        "exec",
+        observer,
+        "bash",
+        "-c",
+        'exec 3<>/tmp/perf-ack 4<>/tmp/perf-control; printf "%s\\n" "$1" >&4; '
+        'read -r -t 5 reply <&3 && test "$reply" = ack',
+        "perf-control",
+        action,
+    )
 
 
 def healthy(port: int, *, expected: int = 200) -> bool:
@@ -205,6 +285,7 @@ def read_results(path: Path) -> list[Result]:
                 max_ms=number(row, "max_ms"),
                 error_rate=number(row, "error_rate"),
                 cpu_us_per_request=number(row, "cpu_us_per_request"),
+                cpu_scope=text(row, "cpu_scope") if "cpu_scope" in row else "server_and_sampler",
                 server_peak_bytes=integer(row, "server_peak_bytes"),
                 passed=passed,
             )
@@ -253,6 +334,7 @@ def summarize(output: Path) -> Result:
         max_ms=number(latency, "max"),
         error_rate=number(errors, "value"),
         cpu_us_per_request=(number(after, "usage_usec") - number(before, "usage_usec")) / count,
+        cpu_scope=text(run, "cpu_scope") if "cpu_scope" in run else "server_and_sampler",
         server_peak_bytes=integer(after, "memory_peak"),
         passed=(
             integer(run, "exit_code") == 0
@@ -274,6 +356,7 @@ def show_results(results: list[Result]) -> None:
             "p99 ms",
             "Errors",
             "CPU us/req",
+            "CPU scope",
             "RAM MiB",
             "Pass",
         ]
@@ -290,6 +373,7 @@ def show_results(results: list[Result]) -> None:
                 f"{row['p99_ms']:.3f}",
                 f"{row['error_rate']:.2%}",
                 f"{row['cpu_us_per_request']:.2f}",
+                "server" if row["cpu_scope"] == "server_cgroup" else "server+sampler",
                 f"{row['server_peak_bytes'] / 2**20:.2f}",
                 "yes" if row["passed"] else "NO",
             ]
@@ -455,14 +539,23 @@ def verify(container: str, port: int, output: Path) -> None:
     print("42 official checks passed; keep-alive connection reused.")
 
 
-def load(args: Arguments, container: str, port: int, output: Path) -> int:
+def load(args: Arguments, observer: str, port: int, output: Path) -> int:
     if args.k6 is None:
         raise ValueError("k6 is required for load generation")
     k6 = args.k6.resolve()
+    warmup = duration_seconds(args.ramp)
+    hold = duration_seconds(args.hold)
+    profiling = args.action == "profile"
+    with socket.socket() as address:
+        address.bind(("127.0.0.1", 0))
+        api_port = address.getsockname()[1]
     invocation = [
         str(k6),
         "run",
         "--quiet",
+        "--paused",
+        "--address",
+        f"127.0.0.1:{api_port}",
         "--summary-export",
         str(output / "k6-summary.json"),
         "-e",
@@ -477,38 +570,88 @@ def load(args: Arguments, container: str, port: int, output: Path) -> int:
         f"TOKENS={(ROOT / 'seed/tokens.json').as_posix()}",
         str(ROOT / "bench/load.js"),
     ]
-    before = counters(container)
-    started = time.monotonic()
+    ticks = int(command("docker", "exec", observer, "getconf", "CLK_TCK"))
     samples: list[dict[str, JSONValue]] = []
     with (output / "k6.log").open("w", encoding="utf-8") as log:
         with subprocess.Popen(invocation, stdout=log, stderr=subprocess.STDOUT) as child:
             client = psutil.Process(child.pid)
             try:
+                ready_deadline = time.monotonic() + 120
+                while True:
+                    if child.poll() is not None:
+                        raise RuntimeError("k6 exited during initialization; inspect k6.log")
+                    try:
+                        status = k6_status(api_port)
+                        if status.get("status") == K6_PAUSED_BEFORE_RUN:
+                            break
+                    except OSError, http.client.HTTPException:
+                        pass
+                    if time.monotonic() >= ready_deadline:
+                        raise RuntimeError("k6 did not initialize within 120 seconds")
+                    time.sleep(0.1)
+                before = counters(observer)
+                started = time.monotonic()
+                k6_status(api_port, resume=True)
+                resumed = time.monotonic() - started
+                next_sample = next_progress = 0.0
+                window: dict[str, JSONValue] = {
+                    "warmup_s": warmup,
+                    "hold_s": hold,
+                    "resume_ack_s": resumed,
+                }
+                profile_before: dict[str, JSONValue] | None = None
+                profile_done = False
                 while child.poll() is None:
+                    elapsed = time.monotonic() - started
+                    if profiling and profile_before is None and elapsed >= warmup:
+                        profile_before = counters(observer)
+                        window["enable_request_s"] = time.monotonic() - started
+                        perf_control(observer, "enable")
+                        window["enable_ack_s"] = time.monotonic() - started
+                        print(f"{args.label}: warm-up complete; sampling {args.hold}", flush=True)
+                    if profiling and not profile_done and elapsed >= warmup + hold:
+                        window["disable_request_s"] = time.monotonic() - started
+                        perf_control(observer, "disable")
+                        window["disable_ack_s"] = time.monotonic() - started
+                        profile_after = counters(observer)
+                        if profile_before is None:
+                            raise RuntimeError("profile window never started")
+                        window["cpu"] = dict(cpu_delta(profile_before, profile_after, ticks))
+                        window["cgroup_before"] = profile_before
+                        window["cgroup_after"] = profile_after
+                        write_json(output / "window.json", window)
+                        profile_done = True
+                        print(f"{args.label}: sampling complete; draining workload", flush=True)
+                    if elapsed < next_sample:
+                        time.sleep(0.1)
+                        continue
+                    next_sample = elapsed + 2
                     try:
                         cpu = client.cpu_times()
                         sample: dict[str, JSONValue] = {
                             "elapsed_s": time.monotonic() - started,
                             "client_cpu_s": cpu.user + cpu.system,
                             "client_rss_bytes": client.memory_info().rss,
-                            "server": counters(container),
+                            "server": counters(observer),
                         }
                         samples.append(sample)
-                        if len(samples) % 15 == 0:
+                        if elapsed >= next_progress:
+                            next_progress = elapsed + 30
                             print(
                                 f"{args.label}: {time.monotonic() - started:.0f}s elapsed",
                                 flush=True,
                             )
                     except psutil.NoSuchProcess:
                         break
-                    time.sleep(2)
                 code = child.wait(timeout=15)
+                if profiling and not profile_done:
+                    raise RuntimeError("load ended before the profile window completed")
             finally:
                 if child.poll() is None:
                     child.kill()
                     child.wait(timeout=15)
                 write_json(output / "samples.json", samples)
-    after = counters(container)
+    after = counters(observer)
     write_json(
         output / "run.json",
         {
@@ -517,6 +660,10 @@ def load(args: Arguments, container: str, port: int, output: Path) -> int:
             "wall_seconds": time.monotonic() - started,
             "cgroup_before": before,
             "cgroup_after": after,
+            "cpu_scope": "server_cgroup",
+            "clock_ticks_per_second": ticks,
+            "initial_k6_status": status,
+            "cpu": cpu_delta(before, after, ticks),
             "load_generator_version": command(str(k6), "version"),
             "load_generator_sha256": file_hash(k6),
         },
@@ -727,68 +874,103 @@ def show_profile(profile: dict[str, JSONValue]) -> None:
         print(f"  {number(row, 'cpu_ns') / total:6.1%}  {text(row, 'symbol')[:100]}")
 
 
+def collect_profile(container: str, output: Path) -> None:
+    common = [
+        "docker",
+        "run",
+        "--rm",
+        "--network=none",
+        f"--pid=container:{container}",
+        "--cap-drop=ALL",
+        f"--mount=type=bind,source={output},target=/profile,readonly",
+        PROFILER_IMAGE,
+    ]
+    stacks = command(
+        *common,
+        "script",
+        "--symfs=/proc/1/root",
+        "--input=/profile/perf.data",
+        "-F",
+        "period,ip,sym,dso",
+    )
+    statistics = command(
+        *common,
+        "report",
+        "--symfs=/proc/1/root",
+        "--input=/profile/perf.data",
+        "--stdio",
+        "--stats",
+        "--no-children",
+    )
+    (output / "stacks.txt").write_text(stacks + "\n", encoding="utf-8")
+    (output / "perf-stats.txt").write_text(statistics + "\n", encoding="utf-8")
+    write_json(output / "profile.json", analyze_profile(stacks, statistics))
+
+
 @contextmanager
-def sampling(container: str, output: Path) -> Generator[None]:
-    target_hash = command("docker", "exec", container, "sha256sum", "/app/server").split()[0]
-    symbol_hash = command(
-        "docker", "run", "--rm", "--entrypoint", "sha256sum", PROFILER_IMAGE, "/app/server"
-    ).split()[0]
-    if target_hash != symbol_hash:
-        raise RuntimeError("profiler symbols do not match the running server")
-    name = f"{container}-perf"
+def observing(container: str, output: Path, *, profiling: bool) -> Generator[str]:
+    name = f"{container}-observer"
+    launch = ["--read-only", "--entrypoint=sleep", IMAGE, "infinity"]
+    target_hash = ""
+    if profiling:
+        target_hash = command("docker", "exec", container, "sha256sum", "/app/server").split()[0]
+        symbol_hash = command(
+            "docker", "run", "--rm", "--entrypoint=sha256sum", PROFILER_IMAGE, "/app/server"
+        ).split()[0]
+        if target_hash != symbol_hash:
+            raise RuntimeError("profiler symbols do not match the running server")
+        launch = [
+            "--cap-add=PERFMON",
+            "--entrypoint=sh",
+            PROFILER_IMAGE,
+            "-c",
+            'mkfifo /tmp/perf-control /tmp/perf-ack && exec perf "$@"',
+            "perf",
+            "record",
+            "--delay=-1",
+            "--control=fifo:/tmp/perf-control,/tmp/perf-ack",
+            f"--event={PROFILE_EVENT}",
+            f"--freq={PROFILE_FREQUENCY}",
+            f"--call-graph=dwarf,{PROFILE_STACK_BYTES}",
+            "--pid=1",
+            "--output=/tmp/perf.data",
+        ]
     created = False
+    completed = False
     try:
         command(
             "docker",
             "run",
             "--detach",
-            "--name",
-            name,
-            "--network",
-            "none",
-            "--pid",
-            f"container:{container}",
-            "--user",
-            "10001:10001",
-            "--cap-drop",
-            "ALL",
-            "--cap-add",
-            "PERFMON",
-            "--cpus",
-            "1",
-            "--memory",
-            "512m",
-            "--memory-swap",
-            "512m",
-            PROFILER_IMAGE,
-            "record",
-            "-e",
-            PROFILE_EVENT,
-            "-F",
-            str(PROFILE_FREQUENCY),
-            "--call-graph",
-            f"dwarf,{PROFILE_STACK_BYTES}",
-            "-p",
-            "1",
-            "-o",
-            "/tmp/perf.data",
+            f"--name={name}",
+            "--network=none",
+            f"--pid=container:{container}",
+            "--user=10001:10001",
+            "--cap-drop=ALL",
+            "--cpus=1",
+            "--memory=512m",
+            "--memory-swap=512m",
+            *launch,
         )
         created = True
-        time.sleep(1)
-        if command("docker", "inspect", "--format", "{{.State.Running}}", name) != "true":
-            raise RuntimeError(command("docker", "logs", name))
-        write_json(
-            output / "sampler.json",
-            {
-                "perf_version": command("docker", "exec", name, "perf", "--version"),
-                "binary_sha256": target_hash,
-                "container": decode_json(command("docker", "inspect", name).encode()),
-            },
-        )
-        yield
+        if profiling:
+            time.sleep(1)
+            if command("docker", "inspect", "--format", "{{.State.Running}}", name) != "true":
+                raise RuntimeError(command("docker", "logs", name))
+            perf_control(name, "ping")
+            write_json(
+                output / "sampler.json",
+                {
+                    "perf_version": command("docker", "exec", name, "perf", "--version"),
+                    "binary_sha256": target_hash,
+                    "container": decode_json(command("docker", "inspect", name).encode()),
+                },
+            )
+        yield name
+        completed = True
     finally:
         try:
-            if created:
+            if created and profiling:
                 command("docker", "stop", "--signal", "SIGINT", "--timeout", "15", name)
                 logs = subprocess.run(["docker", "logs", name], capture_output=True, text=True)
                 (output / "perf.log").write_text(logs.stdout + logs.stderr, encoding="utf-8")
@@ -796,44 +978,8 @@ def sampling(container: str, output: Path) -> Generator[None]:
                 if exit_code not in ("0", "130"):
                     raise RuntimeError(f"perf exited with {exit_code}; see perf.log")
                 command("docker", "cp", f"{name}:/tmp/perf.data", str(output / "perf.data"))
-                common = [
-                    "docker",
-                    "run",
-                    "--rm",
-                    "--network",
-                    "none",
-                    "--pid",
-                    f"container:{container}",
-                    "--cap-drop",
-                    "ALL",
-                    "--mount",
-                    f"type=bind,source={output},target=/profile,readonly",
-                    PROFILER_IMAGE,
-                ]
-                stacks = command(
-                    *common,
-                    "script",
-                    "--symfs",
-                    "/proc/1/root",
-                    "-i",
-                    "/profile/perf.data",
-                    "-F",
-                    "period,ip,sym,dso",
-                )
-                statistics = command(
-                    *common,
-                    "report",
-                    "--symfs",
-                    "/proc/1/root",
-                    "--stdio",
-                    "--stats",
-                    "--no-children",
-                    "-i",
-                    "/profile/perf.data",
-                )
-                (output / "stacks.txt").write_text(stacks + "\n", encoding="utf-8")
-                (output / "perf-stats.txt").write_text(statistics + "\n", encoding="utf-8")
-                write_json(output / "profile.json", analyze_profile(stacks, statistics))
+                if completed:
+                    collect_profile(container, output)
         finally:
             subprocess.run(["docker", "rm", "--force", name], capture_output=True, check=False)
 
@@ -862,6 +1008,9 @@ def main() -> None:
             "--k6", type=Path, default=shutil.which("k6"), help="k6 executable; defaults to PATH"
         )
         benchmark.add_argument("--save", type=Path, default=RESULTS if action == "bench" else None)
+        benchmark.add_argument(
+            "--no-build", action="store_true", help="reuse existing images without rebuilding"
+        )
     results = actions.add_parser("results", help="display saved benchmark results")
     results.add_argument("file", type=Path, nargs="?", default=RESULTS)
     results.add_argument(
@@ -889,6 +1038,8 @@ def main() -> None:
             ):
                 parser.error("positive VUs and a lowercase alphanumeric/hyphen label are required")
             profiling = args.action == "profile"
+            duration_seconds(args.ramp)
+            duration_seconds(args.hold)
             destination = args.save
             saved = (
                 read_results(destination)
@@ -899,20 +1050,25 @@ def main() -> None:
                 parser.error("run name already exists; choose a new --label")
             output = ROOT / "results" / args.label
             output.mkdir(parents=True, exist_ok=False)
-            build()
-            if profiling:
-                build(profiler=True)
-            with server(output) as (container, port):
+            if not args.no_build:
+                build()
                 if profiling:
-                    with sampling(container, output):
-                        code = load(args, container, port, output)
-                else:
-                    code = load(args, container, port, output)
+                    build(profiler=True)
+            with server(output) as (container, port):
+                with observing(container, output, profiling=profiling) as name:
+                    code = load(args, name, port, output)
             result = summarize(output)
             show_results([result])
             if profiling:
                 profile = mapping(read_json(output / "profile.json"))
-                report = {"benchmark": result, "profile": profile}
+                window = mapping(read_json(output / "window.json"))
+                report = {
+                    "benchmark": result,
+                    "profile": profile,
+                    "window": {
+                        key: value for key, value in window.items() if not key.startswith("cgroup_")
+                    },
+                }
                 write_json(output / "profile.json", report)
                 if destination is not None:
                     destination.parent.mkdir(parents=True, exist_ok=True)

@@ -1,0 +1,146 @@
+{
+  "benchmark": {
+    "date": "2026-11-01",
+    "name": "cpp-profile-window-10000",
+    "runtime": "C++ 0.1.0",
+    "sqlite": "3.53.1",
+    "users": 10000,
+    "hold": "60s",
+    "ramp": "30s",
+    "requests": 103568,
+    "rps": 796.6347357525015,
+    "p95_ms": 1.052,
+    "p99_ms": 2.075055000000006,
+    "max_ms": 31.8824,
+    "error_rate": 0.0,
+    "cpu_us_per_request": 84.13105399351151,
+    "cpu_scope": "server_cgroup",
+    "server_peak_bytes": 356892672,
+    "passed": true
+  },
+  "profile": {
+    "event": "cpu-clock:u",
+    "frequency_hz": 997,
+    "stack_bytes": 8192,
+    "samples": 1492,
+    "sampled_cpu_ns": 1496489428,
+    "lost_records": 0,
+    "unresolved_leaf_samples": 194,
+    "unrooted_samples": 2,
+    "stages_cpu_ns": {
+      "transport_and_other": 371113330,
+      "response_json": 65195585,
+      "database_and_rows": 1007021036,
+      "auth": 51153459,
+      "unknown": 2006018
+    },
+    "hotspots": [
+      {
+        "symbol": "sqlite3VdbeExec",
+        "module": "/app/server",
+        "cpu_ns": 186559674,
+        "samples": 186
+      },
+      {
+        "symbol": "[unknown]",
+        "module": "/usr/lib/x86_64-linux-gnu/libc.so.6",
+        "cpu_ns": 179538611,
+        "samples": 179
+      },
+      {
+        "symbol": "sqlite3BtreeTableMoveto",
+        "module": "/app/server",
+        "cpu_ns": 133400197,
+        "samples": 133
+      },
+      {
+        "symbol": "pcache1Fetch",
+        "module": "/app/server",
+        "cpu_ns": 121364089,
+        "samples": 121
+      },
+      {
+        "symbol": "llhttp__internal__run",
+        "module": "/app/server",
+        "cpu_ns": 61183549,
+        "samples": 61
+      },
+      {
+        "symbol": "tds::quote(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >&, std::basic_string_view<char, std::char_traits<char> >)",
+        "module": "/app/server",
+        "cpu_ns": 37111333,
+        "samples": 37
+      },
+      {
+        "symbol": "io_uring_submit_and_wait",
+        "module": "/app/server",
+        "cpu_ns": 35105315,
+        "samples": 35
+      },
+      {
+        "symbol": "sqlite3GetVarint",
+        "module": "/app/server",
+        "cpu_ns": 30090270,
+        "samples": 30
+      },
+      {
+        "symbol": "tds::Server::State::respond(tds::Server::State::Connection&, tds::Response)",
+        "module": "/app/server",
+        "cpu_ns": 28084252,
+        "samples": 28
+      },
+      {
+        "symbol": "tds::Server::run()",
+        "module": "/app/server",
+        "cpu_ns": 27081243,
+        "samples": 27
+      },
+      {
+        "symbol": "vdbeRecordCompareInt",
+        "module": "/app/server",
+        "cpu_ns": 27081243,
+        "samples": 27
+      },
+      {
+        "symbol": "sqlite3BtreeIndexMoveto",
+        "module": "/app/server",
+        "cpu_ns": 27081243,
+        "samples": 27
+      },
+      {
+        "symbol": "malloc",
+        "module": "/usr/lib/x86_64-linux-gnu/libc.so.6",
+        "cpu_ns": 26078234,
+        "samples": 26
+      },
+      {
+        "symbol": "tds::Server::State::complete(tds::Server::State::Operation*, int)",
+        "module": "/app/server",
+        "cpu_ns": 21063189,
+        "samples": 21
+      },
+      {
+        "symbol": "sqlite3_step",
+        "module": "/app/server",
+        "cpu_ns": 18054162,
+        "samples": 18
+      }
+    ]
+  },
+  "window": {
+    "warmup_s": 30.0,
+    "hold_s": 60.0,
+    "resume_ack_s": 0.0008375999750569463,
+    "enable_request_s": 30.286806900054216,
+    "enable_ack_s": 30.47510110004805,
+    "disable_request_s": 90.09893109998666,
+    "disable_ack_s": 90.29121040005703,
+    "cpu": {
+      "cgroup_user_s": 1.557948,
+      "cgroup_system_s": 3.266309,
+      "main_user_s": 1.56,
+      "main_system_s": 3.27,
+      "cgroup_minus_main_s": -0.005742999999999832
+    }
+  }
+}

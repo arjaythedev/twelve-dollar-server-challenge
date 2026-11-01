@@ -2,7 +2,14 @@
 
 import unittest
 
-from dev import analyze_profile, profile_stage
+from dev import (
+    JSONValue,
+    analyze_profile,
+    cpu_delta,
+    duration_seconds,
+    parse_counters,
+    profile_stage,
+)
 
 
 def stack(period: int, *frames: tuple[str, str]) -> str:
@@ -19,6 +26,41 @@ def statistics(samples: int, lost: int = 0) -> str:
 
 
 class NativeProfileTests(unittest.TestCase):
+    def test_process_name_does_not_shift_cpu_fields(self) -> None:
+        fields = ["S", *(["0"] * 10), "123", "45", *(["0"] * 30)]
+        values = "usage_usec 1700000\nuser_usec 1300000\nprocess_stat 1 (a name (x)) "
+        counters = parse_counters(values + " ".join(fields))
+        self.assertEqual(counters["usage_usec"], 1700000)
+        self.assertEqual(counters["main_user_ticks"], 123)
+        self.assertEqual(counters["main_system_ticks"], 45)
+
+    def test_main_process_and_cgroup_cpu_remain_separate(self) -> None:
+        before: dict[str, JSONValue] = {
+            "user_usec": 1000000,
+            "system_usec": 2000000,
+            "main_user_ticks": 90,
+            "main_system_ticks": 140,
+        }
+        after: dict[str, JSONValue] = {
+            "user_usec": 3000000,
+            "system_usec": 5000000,
+            "main_user_ticks": 290,
+            "main_system_ticks": 340,
+        }
+        result = cpu_delta(before, after, 100)
+        self.assertEqual(result["cgroup_user_s"], 2)
+        self.assertEqual(result["cgroup_system_s"], 3)
+        self.assertEqual(result["main_system_s"], 2)
+        self.assertEqual(result["cgroup_minus_main_s"], 1)
+
+    def test_profile_durations(self) -> None:
+        self.assertEqual(duration_seconds("30s"), 30)
+        self.assertEqual(duration_seconds("1m30s"), 90)
+        self.assertEqual(duration_seconds("500ms"), 0.5)
+        for value in ("", "0s", "-1s", "60", "30sjunk", "infh"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                duration_seconds(value)
+
     def test_period_weights_and_unresolved_leaves(self) -> None:
         auth = stack(
             100,

@@ -1,6 +1,10 @@
 # Ideas
 
-- [ ] Profile the feed first. It returns 20 posts per read; the post endpoint returns one. Separate SQL, object creation and JSON costs before moving code to C.
+- [ ] Inspect the feed query plan and its hot SQLite functions. It returns 20 posts per read; the post endpoint returns one.
+
+- [ ] Measure io_uring submission and completion batches before changing ring flags. `CPU/request ~= CPU/enter / requests_per_enter + other_work`.
+  Compare `SINGLE_ISSUER`, `DEFER_TASKRUN` and bounded waits with the current loop.
+  Reference: [ring_init and ring_wait](submissions/c-iouring-pavlyhalim/src/sys.h).
 
 - [ ] Group writes into one transaction, with a size limit b and a timeout.
   Fixed cost a, per-write cost s: `C(b) ~= s + a/b`.
@@ -29,9 +33,9 @@
 
 - [ ] Measure checkpoint timing, WAL growth and p99 together. Compare checkpoint work and priority before assuming every commit costs an fsync.
 
-- [ ] Try coarse native calls, such as one call per feed or batch. Compare Python, suitable Numba kernels and C on the same inputs. Include JIT startup, memory, FFI and copy costs.
+- [ ] Inspect generated code for measured hot loops before trying intrinsics or handwritten assembly.
   Ideal CPU speedup: `S <= 1 / ((1-p) + p/s)`, for accelerated share p and speedup s.
-  Inspect compiler/LLVM output before trying handwritten assembly.
+  Use the share of total CPU, including kernel work, rather than user-stack percentages alone.
 
 - [ ] Clarify in-flight read sharing in [issue #261](https://github.com/arjaythedev/twelve-dollar-server-challenge/issues/261), still open without a ruling. Keep this experiment pending.
   Singleflight shares one fresh result among overlapping identical GETs and discards it afterward. Its short lifetime does not remove the cross-request sharing.

@@ -24,7 +24,7 @@ Python 3.15 and uv run the dev tools.
 uv run --directory src --locked dev.py check
 uv run --directory src --locked dev.py check --docker
 uv run --directory src --locked dev.py bench --label cpp-5000 --k6 /path/to/k6
-uv run --directory src --locked dev.py profile --label native-5000 --k6 /path/to/k6 --save profiles/native-5000.json
+uv run --directory src --locked dev.py profile --label native-10000 --vus 10000 --k6 /path/to/k6 --save profiles/native-10000.json
 uv run --directory src --locked dev.py results
 ```
 
@@ -34,6 +34,8 @@ The server container uses 1 CPU, 2 GiB and the profile in src/docker/seccomp.jso
 
 Benchmarks and profiles default to a 30-second ramp and 60-second hold. Use `--hold 5m --ramp 60s` for confirmation runs.
 
-Profiles use a separate perf container with CAP_PERFMON, the same UID and the server's PID namespace. The server keeps its normal limits and permissions. Sampling uses `cpu-clock:u` at 997 Hz with DWARF stacks and the unchanged release binary. Kernel CPU time and io_uring worker threads are outside its scope.
+Both use the unchanged `bench/load.js`; k6 reports latency, throughput and errors. The wrapper manages Docker, resource counters and saved results. Use `--no-build` to reuse existing images. Counter readers run outside the server's cgroup.
+
+Profiles use a separate perf container with CAP_PERFMON, the same UID and the server's PID namespace. Sampling covers the hold only, using `cpu-clock:u` at 997 Hz with DWARF stacks and the unchanged release binary. Kernel work and io_uring workers are outside the stack profile; cgroup counters record user and system CPU separately. k6 still runs its final 30-second ramp-down.
 
 Raw profiles stay in `results/<label>/`. `--save` keeps a compact summary; `dev.py results <profile.json>` displays it. Paths passed through `uv run --directory src` are relative to src. Stage attribution uses stack names; inlining and unresolved frames limit precision.

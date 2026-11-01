@@ -7,11 +7,8 @@ src/commonMain/kotlin/borg/trikeshed/collections/MutableSeries.kt
 src/commonMain/kotlin/borg/trikeshed/collections/SeriesBuffer.kt
 src/commonMain/kotlin/borg/trikeshed/collections/Snapshotable.kt
 src/commonMain/kotlin/borg/trikeshed/common/Usable.kt
-src/commonMain/kotlin/borg/trikeshed/context/AsyncContextElement.kt
-src/commonMain/kotlin/borg/trikeshed/context/AsyncContextKey.kt
 src/commonMain/kotlin/borg/trikeshed/context/BitMasked.kt
 src/commonMain/kotlin/borg/trikeshed/context/Lifecycle.kt
-src/commonMain/kotlin/borg/trikeshed/context/SplatAsyncContextElement.kt
 src/commonMain/kotlin/borg/trikeshed/context/SplatFanoutDispatcherElement.kt
 src/commonMain/kotlin/borg/trikeshed/cursor/Cursor.kt
 src/commonMain/kotlin/borg/trikeshed/cursor/ReifiedSplitSeries2.kt
@@ -251,3 +248,5 @@ src/posixMain/kotlin/simple/PosixStatMode.kt
 src/wasmWasiMain/kotlin/borg/trikeshed/tilting/leaf/LeafSpecialization.wasmWasi.kt
 src/wasmWasiMain/kotlin/borg/trikeshed/userspace/nio/platform/spi/PlatformEndianness.wasmWasi.kt
 src/wasmWasiTest/kotlin/borg/trikeshed/tilting/leaf/LeafCorpus.wasmWasi.kt
+src/commonMain/kotlin/borg/trikeshed/userspace/nio/channels/spi/ProcessOperations.kt
+src/posixMain/kotlin/borg/trikeshed/userspace/nio/channels/spi/PosixCompletionWait.kt

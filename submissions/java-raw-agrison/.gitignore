@@ -1,0 +1,7 @@
+out/
+native/
+*.so
+*.dylib
+*.zip
+*.jfr
+sqlite-amalgamation-*/

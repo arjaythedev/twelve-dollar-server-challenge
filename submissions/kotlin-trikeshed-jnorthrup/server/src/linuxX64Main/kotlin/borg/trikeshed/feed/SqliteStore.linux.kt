@@ -8,6 +8,9 @@ import kotlinx.cinterop.*
 const val SQLITE_ROW: Int = 100
 const val SQLITE_DONE: Int = 101
 
+/** The longest column text one row may hold: room for six escaped bytes per byte stays inside an Int. */
+const val TEXT_MAX: Int = 1 shl 24
+
 const val POST_SELECT: String = "SELECT p.id, p.body, p.created_at, u.username, " +
     "(SELECT count(*) FROM likes l WHERE l.post_id = p.id) FROM posts p JOIN users u ON u.id = p.user_id"
 
@@ -88,15 +91,14 @@ class SqliteStore(path: String) : FeedStore {
 
     fun long(stmt: CPointer<sqlite3_stmt>, col: Int): Long = sqlite3_column_int64(stmt, col)
 
-    /** Column text copied into [out] and escaped as a JSON string body. */
+    /** Column text copied into [out] as a JSON string body, in one C pass (feed_json_text in feedc.def). */
     fun text(stmt: CPointer<sqlite3_stmt>, col: Int, out: Out) {
         val p = sqlite3_column_text(stmt, col)
         val n = sqlite3_column_bytes(stmt, col)
-        out.room(n)
-        val at = out.size
-        if (p != null) for (i in 0 until n) out.bytes[at + i] = p[i].toByte()
-        out.size += n
-        out.escapeFrom(at)
+        if (p == null || n == 0) return
+        check(n <= TEXT_MAX) { "column text of $n bytes" }
+        out.room(n * 6)
+        out.size += feed_json_text(p, n, out.bytes.refTo(out.size))
     }
 
     fun row(stmt: CPointer<sqlite3_stmt>, out: Out) {

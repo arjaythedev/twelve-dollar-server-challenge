@@ -295,3 +295,45 @@ static int feed_reap(int r, long long *ud, int *res, int *flags, int *off, int m
 }
 
 static int feed_bind_text(sqlite3_stmt *s, int i, const char *p, int n) { return sqlite3_bind_text(s, i, p, n, SQLITE_TRANSIENT); }
+
+/* BEGIN feed_json_text */
+/*
+ * One text column as the body of a JSON string: quote and backslash get a backslash, \b \f \n \r \t keep their letters, the
+ * other bytes below 0x20 become \u00XX, everything else (UTF-8 included) is copied. A run with nothing to escape moves
+ * whole: eight bytes are tested per step, then one memcpy. dst has room for 6 bytes per source byte; the result is the
+ * count written. jsontext_test.c holds this function to a byte-wise reference.
+ */
+static int feed_json_text(const unsigned char *src, int n, char *dst) {
+  static const char hex[] = "0123456789abcdef";
+  int r = 0, w = 0;
+  while (r < n) {
+    int s = r;
+    while (r + 8 <= n) {
+      unsigned long long x, q, b;
+      memcpy(&x, src + r, 8);
+      q = x ^ 0x2222222222222222ULL;
+      b = x ^ 0x5C5C5C5C5C5C5C5CULL;
+      if ((((x - 0x2020202020202020ULL) & ~x) | ((q - 0x0101010101010101ULL) & ~q) | ((b - 0x0101010101010101ULL) & ~b)) & 0x8080808080808080ULL) break;
+      r += 8;
+    }
+    while (r < n && src[r] >= 0x20 && src[r] != '"' && src[r] != '\\') r++;
+    memcpy(dst + w, src + s, (size_t)(r - s));
+    w += r - s;
+    if (r < n) {
+      unsigned c = src[r++];
+      dst[w++] = '\\';
+      switch (c) {
+        case '"': dst[w++] = '"'; break;
+        case '\\': dst[w++] = '\\'; break;
+        case 0x08: dst[w++] = 'b'; break;
+        case 0x0C: dst[w++] = 'f'; break;
+        case 0x0A: dst[w++] = 'n'; break;
+        case 0x0D: dst[w++] = 'r'; break;
+        case 0x09: dst[w++] = 't'; break;
+        default: dst[w++] = 'u'; dst[w++] = '0'; dst[w++] = '0'; dst[w++] = hex[c >> 4]; dst[w++] = hex[c & 15];
+      }
+    }
+  }
+  return w;
+}
+/* END feed_json_text */

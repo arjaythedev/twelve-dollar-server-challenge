@@ -122,14 +122,160 @@ SQLITE_PATH=/path/to/feed.db JWT_SECRET=twelve-dollar-challenge HOST=0.0.0.0 POR
 | commit | users held 5 min | req/s | app CPU | µs/req | errors |
 |---|---:|---:|---:|---:|---:|
 | `96aa4f5` (B-tree feed) | 110,000 | 10,637 | 83 % | 73 | 0 |
-| `8ee9c5a` (send-path fix) | **130,000** | 12,618 | 93 % | 69 | 0 |
+| `8ee9c5a` (send-path fix) | 130,000 | 12,618 | 93 % | 69 | 0 |
+| `7a3f61e` (sweep rate-limit, `str_to_int`) | 135,000 | 13,117 | 92 % | 65 | 0 |
+| `1569472` (io_uring backend + ring-scale fixes) | **145,000** | 14,093 | 91 % | 60 | 0 |
+| `d75dd29` (allocation-free request path) | box run requested | — | — | — | — |
+
+### The allocation round (`2f8507b` … `d75dd29`)
+
+Instrumentation first: `runtime_stats()` exposes generic runtime counters
+(ring enters, SQEs/CQEs per op kind, send copies, hstr allocations, poll
+cycles); `server.hphp` mirrors them at `/stats` when the operator sets
+`HPHP_STATS=1` — bench requests pay nothing for it (the run scripts never set
+the env).
+
+Then three measured fixes on the request path, each one attributing its cost
+with the counters (or gdb sampling under load) before touching it:
+
+| counter per `/health` request | before | after |
+|---|---:|---:|
+| hstr allocations (`str_new`) | 7.01 | **0.02** |
+| send-payload copies (`send_chunk`) | 1.00 | **0.00** |
+| ring `io_uring_enter` | 1.11 | **0.97** |
+
+- `c10afad`: `strpos` scanned by *copying the tail into a throwaway string*
+  first (gdb sampling: 3 of 5 allocations per request); it now scans in place
+  from the offset. The hot `/health` response is built straight into one
+  buffer and handed to the ring send chunk (`stream_send_sb(self-fd, sb)` —
+  the builder buffer *becomes* the send chunk, zero payload copies; generics:
+  `int_digits`, the SB flow). The parse loop skips the pipelining-`substr`
+  for single-request packets.
+- `d75dd29`: the recv handout is a pointer, not a copy — with the ring active
+  each connection owns one long-lived hstr block the kernel writes into;
+  `stream_recv` returns it directly (`HP_F_SCOPED` so retain paths copy and
+  close frees it; a caller asking for fewer bytes than arrived still gets the
+  classic copy).
+
+Local (WSL microbenchmarks — my machine, not box numbers): a minimal C epoll
+server on the same stack costs 54.1 µs/req; this build is at 57.4 µs/req.
+Attribution of the remaining gap, measured by removing one piece at a time:
+SQLite health check 0.7 µs, response builder 0.2 µs, the rest is the
+interpreter/parse and the ring's two completions per request. `/health` is at
+0 strings and 0 payload copies per request; p95 1.11 ms → 691 µs, median
+436 µs → 359 µs. The box run for `d75dd29` (or later) is requested upstream
+with `HPHP_STATS=1` so the same counter split can be read from the $12 box.
+
+#### Leak fixes found by the counters (`06c6b17`)
+
+`runtime_stats()` now also reports `live_allocs`, which turned two silent
+leaks into measurements:
+
+- `stream_send_sb` consumed the builder's payload buffer but never freed the
+  builder handle: **~55 B leaked per `/health` request** (+14.8 MB RSS over
+  270k requests). The handle is freed now; the buffer still becomes the ring
+  send chunk (zero copies unchanged).
+- the io_uring EOF path set the ring's own EOF flag but not the app-side
+  socket record, and `stream_eof()` consults the latter — a client disconnect
+  was never noticed. Measured: 21 closed clients left 21 fds open and the
+  close counter at 0. The EOF completion now mirrors into the socket record:
+  fds return to baseline and `close` equals `accept`.
+
+After both: RSS flat at 14.6 MB over 810k requests (three 30 s windows at
+9k rps), `live_allocs` flat, `str_new` 0.02/req, `send_chunk` 0.00/req,
+`enter` 0.95/req, 42/42 tests green.
+
+#### Shed-path crash and stall found by ASAN + load (`524fa14`)
+
+The shed regime (above the ring's 28k connection cap) is the churn regime:
+every response says `Connection: close`, so the server accepts and closes a
+connection per request. Two runtime bugs only showed up there:
+
+- **heap corruption**: `unset()` on an empty map computed `len - 1` and
+  touched one element before `keys[]`. The index could hold a duplicate
+  entry (inserted twice when a rebuild ran during the add) that survived a
+  delete and pointed past the live range. Fixed, plus index maintenance in
+  `array_pop`/`array_shift`.
+- **infinite loop**: the open-addressing probe loops had no termination
+  condition. Once churn left the table without a single empty slot, a lookup
+  spun at 100 % CPU and the server stopped answering (measured: 137 of
+  26,855 requests, then dead). Probe loops are bounded now and deletes count
+  their tombstones against the rebuild budget.
+- **the enter timeout never applied**: `IORING_ENTER_EXT_ARG` expects a
+  `struct io_uring_getevents_arg`, not a bare `timespec`; the kernel answered
+  EINVAL and the fallback ran an unbounded enter (blocks forever when nothing
+  is pending). Fixed, with a poll-based fallback for old kernels.
+
+Also: the zero-copy recv re-arm is deferred to the next wait cycle so the
+kernel cannot overwrite the buffer while the handler parses it.
+
+Evidence: ASAN build under churn (3 × 20 s at 3000 req/s, shed threshold 32):
+before, 3/3 runs died; after, 3/3 alive with zero ASAN reports. 9k rps
+keep-alive: 26,855 requests, 0 % errors, server healthy after the run.
+42/42 tests green.
+
+#### This round: 60k connections, native auth, one-buffer feed
+
+- **28,000 → 60,000 held connections.** The kernel caps the io_uring SQ ring
+  at 32768 entries and the server parks one armed recv per connection, so it
+  used to shed everything above 28k; those users paid a TCP handshake plus
+  accept/close for every request. Connections beyond the ring cap now
+  register in an epoll set (the ring still carries the sends), so the server
+  holds up to the descriptor limit. Verified with `HPHP_RING_MAX=10` and 1500
+  connections: 45,000 requests, 0 % errors, and the ring counters show only
+  the 10 ring connections produced recv completions.
+- **native HS256 `jwt_verify`**: split, alg, constant-time signature compare
+  and exp in C. The PHP version allocated ~20 strings per authenticated
+  request; the like path now allocates 13 per request, down from 29.
+- **in-place header parsing** (`str_pos_ci`, `str_int_range`,
+  `str_trim_range`): no `strtolower($head)`, no header copy, no
+  Content-Length substring.
+- **SQLite record decoder** (`bt_cols`): the feed decodes a row's header once
+  in C instead of walking varints byte by byte in the application loop.
+- **feed response from one buffer**: header prepended into the builder and the
+  buffer becomes the ring send chunk (no body copy, no header concatenations).
+- **1 KB recv buffer** (was 4 KB): 60 MB instead of 240 MB at 60k connections.
+  A controlled alternating A/B on one binary measured 77.3 vs 74.6 µs/req
+  (about 3 %) -- a noisy back-to-back comparison had suggested much more, so
+  the number here is the conservative one.
+
+Local numbers (WSL, my machine, not box numbers): like 151 → 136 µs cold and
+61.5 µs at 4k rps; the user-model mix 76.1 → 74.9 µs at 200 VUs. The box run
+is what counts.
+
+#### The wakeup round (`abf7a6d`): one `io_uring_enter` serves many requests
+
+Measured on one machine against the C submission (`c-iouring-public`, #2),
+same seed, same user model, alternating runs:
+
+| | C submission | HolyPHP before | HolyPHP after |
+|---|---:|---:|---:|
+| `/health` µs/req | 40.8 / 39.8 | 98.8 / 100.8 | **40.5 / 41.0** |
+| user-model mix µs/req | 40.5 / 40.3 | 129.6 / 194.5 | **47.6 / 45.3** |
+| `io_uring_enter` per request | — | 1.63 | **0.14** |
+
+The gap was not the generated code: the C submission's loop waits for up to
+128 completions or 2 ms while it has work, so one wakeup serves a batch of
+requests. Ours waited for exactly one completion per cycle. `hp_uring_wait`
+now does the same (64 completions / 2 ms while busy, block for the first
+completion when idle), and `hp_uring_enter` takes microseconds.
+
+That took the trivial path to parity with C and the mix from 1.8× to
+1.12–1.18×. The batching costs latency: median 2.5 ms, p95 4.6 ms, p99
+6.3 ms locally — far inside the box's p95 < 500 ms.
+
+
+
+
 
 The 64,000 at `c935dfe` was a bug (EAGAIN treated as fatal in the non-blocking
 send path), fixed in `8ee9c5a`. `30d155b` rate-limits the idle sweep to one
-slice per second — on the box that sweep was ~52 of the 69 µs/req (the
-endpoints are ~17 µs/req), so it should lift the CPU-bound ceiling further.
-That head is awaiting a box run. The numbers above are what count; the local
-figures below are a proxy.
+slice per second. `1569472` puts the network primitives on io_uring and fixes
+the scale-time paths (deferred close for shed responses, bounded retry drain,
+keep-alive table sized to the ring, `accept4`, listener `TCP_NODELAY`); the
+ring is worth about 5 µs/req. Above 145k the search fails on CPU: 150k ran at
+93 % CPU with p95 567 ms. The numbers above are what count; the local figures
+below are a proxy.
 
 On a VPS shaped like the box (1 vCPU, 2 GB), fresh seed, `wrk`, measuring the
 server's own CPU from `/proc`:

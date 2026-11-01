@@ -17,11 +17,8 @@ one exception is WAL checkpoints, which a second, low-priority thread runs.
 `GET /feed` and `GET /posts/:id` read SQLite's own B-tree cursors
 (`csrc/shim.c` `#include`s the unmodified amalgamation), inside the pass's SQLite transaction. Rust then
 decodes the record bytes SQLite returns and writes the JSON directly. There's no bytecode engine,
-no `sqlite3_column_*` calls, and no copying through SQLite values. This is the same approach as
-c-uring-curvynes #217, rust-native #222 and ada-native #223: an unmodified amalgamation, writes
-through SQL, and a SQL fallback. It is still pending a rules ruling (rules 2/3). Unlike
-mojo-iouring #224, it keeps no state about the data (no "dense ids" flag, no last id). Unlike
-c-iouring-public #158, it doesn't patch SQLite's source.
+no `sqlite3_column_*` calls, and no copying through SQLite values. The amalgamation is
+unmodified, writes go through SQL, and there's a SQL fallback.
 
 - **Feed:** walk `posts_created_at_id_idx` from its first entry. The index is
   `(created_at DESC, id DESC)`, so this is exactly `ORDER BY created_at DESC, id DESC`, and its

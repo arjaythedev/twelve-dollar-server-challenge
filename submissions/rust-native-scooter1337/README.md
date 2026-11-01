@@ -69,7 +69,7 @@ commit-before-publication, failed-batch rollback, pipelines, reused slots, share
 request-byte backpressure and prompt descriptor release after closing EOF.
 
 The last [official result, #238](https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/238#issuecomment-6553794291),
-is **210,000 users**. Local MEGASERVER comparisons use a one-CPU server quota,
+is **210,000 users**. Comparisons on local linux proxmox use a one-CPU server quota,
 2 GiB/no swap and a 65,535 descriptor hard limit. The host OS has multiple CPUs;
 these diagnostics do not establish an official VM score.
 

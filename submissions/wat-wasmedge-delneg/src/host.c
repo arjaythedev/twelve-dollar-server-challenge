@@ -1,8 +1,8 @@
-// host.c: a thin WasmEdge embedder, about 100 lines. It runs the AOT-compiled app (hand-written WAT plus
-// stock SQLite) with WASI for SQLite's file I/O, and gives it nine Linux socket/epoll calls as the "sys"
+// host.c: a thin WasmEdge embedder, about 125 lines. It runs the AOT-compiled app (hand-written WAT plus
+// stock SQLite) with WASI for SQLite's file I/O, and gives it ten Linux socket/epoll calls as the "sys"
 // import module, because WASI's poll_oneoff re-registers every connection on every call. No request logic
-// lives here: each function only moves its arguments between wasm memory and one syscall (sendmany: one
-// per record).
+// lives here: each function only moves its arguments between wasm memory and one syscall (sendmany and
+// epoll_recv: a loop of them).
 #define _GNU_SOURCE
 #include <wasmedge/wasmedge.h>
 #include <errno.h>
@@ -49,6 +49,20 @@ FN(h_epoll_wait) { (void)d;
   for (int i = 0; i < n; i++) { o[2 * i] = (int32_t)ev[i].data.u64; o[2 * i + 1] = (int32_t)ev[i].events; }
   RET(n);
 }
+// epoll_recv(ep, ptr, max, timeout_ms, listener, slots) -> n: epoll_wait, then one recv for each event that
+// is not the listener's and not a write-ready one, into slots + 4096 * i; writes n x i32 (fd, events,
+// bytes received or -errno) at ptr. One host call per batch instead of one per connection.
+FN(h_epoll_recv) { (void)d;
+  struct epoll_event ev[512]; int max = P(2) > 512 ? 512 : P(2);
+  int n = epoll_wait(P(0), ev, max, P(3)); if (n <= 0) RET(n < 0 ? -errno : 0);
+  int32_t *o = (int32_t *)mem(f, (uint32_t)P(1), (uint32_t)n * 12); uint8_t *s = mem(f, (uint32_t)P(5), (uint32_t)n * 4096);
+  if (!o || !s) RET(-EFAULT);
+  for (int i = 0; i < n; i++) {
+    int fd = (int)ev[i].data.u64; o[3 * i] = fd; o[3 * i + 1] = (int32_t)ev[i].events;
+    o[3 * i + 2] = fd == P(4) || (ev[i].events & EPOLLOUT) ? 0 : rv(recv(fd, s + 4096 * i, 4096, 0));
+  }
+  RET(n);
+}
 FN(h_accept) { (void)d; (void)f; RET(rv(accept4(P(0), NULL, NULL, SOCK_NONBLOCK | SOCK_CLOEXEC))); }
 FN(h_recv) { (void)d; uint8_t *p = mem(f, (uint32_t)P(1), (uint32_t)P(2)); if (!p) RET(-EFAULT); RET(rv(recv(P(0), p, (size_t)P(2), 0))); }
 FN(h_send) { (void)d; uint8_t *p = mem(f, (uint32_t)P(1), (uint32_t)P(2)); if (!p) RET(-EFAULT); RET(rv(send(P(0), p, (size_t)P(2), MSG_NOSIGNAL))); }
@@ -66,7 +80,7 @@ FN(h_sendmany) { (void)d;
 }
 
 static void add(WasmEdge_ModuleInstanceContext *m, const char *name, WasmEdge_HostFunc_t fn, int np) {
-  WasmEdge_ValType p[4], r[1] = {WasmEdge_ValTypeGenI32()};
+  WasmEdge_ValType p[6], r[1] = {WasmEdge_ValTypeGenI32()};
   for (int i = 0; i < np; i++) p[i] = WasmEdge_ValTypeGenI32();
   WasmEdge_FunctionTypeContext *t = WasmEdge_FunctionTypeCreate(p, (uint32_t)np, r, 1);
   WasmEdge_String s = WasmEdge_StringCreateByCString(name);
@@ -102,6 +116,7 @@ int main(int argc, char **argv) {
   add(m, "listen", h_listen, 3); add(m, "epoll_create", h_epoll_create, 0); add(m, "epoll_ctl", h_epoll_ctl, 4);
   add(m, "epoll_wait", h_epoll_wait, 4); add(m, "accept", h_accept, 1); add(m, "recv", h_recv, 3);
   add(m, "send", h_send, 3); add(m, "close", h_close, 1); add(m, "sendmany", h_sendmany, 3);
+  add(m, "epoll_recv", h_epoll_recv, 6);
   WasmEdge_Result r = WasmEdge_VMRegisterModuleFromImport(vm, m);
   if (!WasmEdge_ResultOK(r)) { fprintf(stderr, "register: %s\n", WasmEdge_ResultGetMessage(r)); return 1; }
 

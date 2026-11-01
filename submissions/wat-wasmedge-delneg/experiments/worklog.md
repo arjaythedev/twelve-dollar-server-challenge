@@ -288,3 +288,14 @@ is gone (fd -1, by generation), hands the record list to `sendmany` (host: one `
 into RBUF, up to 32768 per call), then handles partial sends and errors as before. host.c +12 lines, no
 logic (a loop over records and one syscall each). Responses identical (cmp.py), 42/42. pstat, 3 reps:
 E15 13.58, 13.93, 13.77 us/req; E16 12.99, 13.29, 13.32 (-3.6%; every E16 rep below every E15 rep).
+
+## E17: one host call waits and receives (`sys.epoll_recv`) (1 Nov) — kept
+The host's epoll_recv does epoll_wait, then one `recv` (4 KiB) for each event that is neither the
+listener's nor write-ready, into RSLOT (0xe00000, 512 x 4 KiB; OUTB shrinks to 10 MiB). The WAT serves a
+connection straight from its slot, or joins it after an unfinished request's bytes in RBUF; a request
+longer than 4 KiB just takes more batches (epoll is level-triggered). Two guards, because the bytes are
+now read before the WAT looks at the connection: every event's connection is marked active before the
+eviction sweep can run, and each event keeps its connection's generation so an event whose connection
+was closed in between (a send error during an early flush) is skipped. Tests: 42/42, cmp.py identical,
+`big.py` (a 12 KB request over several slots, 3 pipelined requests, a sender dribbling 7 bytes every
+2 ms) same as E16. pstat, 3 reps: E16 13.45, 13.38, 13.03 us/req; E17 13.08, 12.91, 12.97 (-3%).

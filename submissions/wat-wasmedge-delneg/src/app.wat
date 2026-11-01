@@ -7,7 +7,8 @@
 ;;
 ;; Memory map (this module owns [1 MiB, 16 MiB); SQLite's C stack is below 1 MiB, its data and heap above 16 MiB):
 ;;   0x100000  string constants, NUL-terminated, in 64-byte slots; SQL at 0x100800
-;;   0x102000  epoll events: 512 x (fd i32, events i32)
+;;   0x102000  epoll events: 512 x (fd i32, events i32, bytes the host's recv got or -errno); at 0x103800
+;;             each event's connection generation
 ;;   0x104000  RBUF  read buffer, 128 KiB (a connection's unfinished request is copied in front first)
 ;;   0x124000  BODYB response body being built, 128 KiB
 ;;   0x144000  GEN   per-fd generation, 65536 x i32: bumped on close, so a response held for COMMIT never
@@ -20,7 +21,9 @@
 ;;   0x2e0000  BT    B-tree reads: decoded columns (8 x 32 B), out-params at 0x2e0100, feed ids at 0x2e0200,
 ;;                   feed like counts at 0x2e0300, like counts by id span at 0x2e0400 (256 x i64)
 ;;   0x300000  RECS  the batch's responses: (fd, start, len, close after) x up to 60,000
-;;   0x400000  OUTB  the batch's response bytes, sent after COMMIT (flushed between connections at 12 MiB)
+;;   0x400000  OUTB  the batch's response bytes, sent after COMMIT (flushed between connections at 10 MiB)
+;;   0xa00000  (OUTB's last MiB: headroom for the connection being served)
+;;   0xe00000  RSLOT 512 x 4 KiB: what the host's recv got for each event of the batch
 (module
   (import "sq" "memory" (memory 1))
   (import "sq" "_initialize" (func $sq_init))
@@ -68,6 +71,7 @@
   (import "sys" "send" (func $send (param i32 i32 i32) (result i32)))
   (import "sys" "close" (func $close (param i32) (result i32)))
   (import "sys" "sendmany" (func $sendmany (param i32 i32 i32) (result i32)))
+  (import "sys" "epoll_recv" (func $epoll_recv (param i32 i32 i32 i32 i32 i32) (result i32)))
 
   ;; ---------- string constants ----------
   (data (i32.const 0x100000) "HTTP/1.1 200 OK\0d\0a")
@@ -1370,7 +1374,7 @@
                   (then (call $close_conn (local.get $fd)))
                   (else
                     (i32.store offset=0x2a0000 (i32.shl (local.get $fd) (i32.const 2)) (global.get $tick))
-                    (call $after_recv (local.get $fd) (local.get $c) (i32.const 0) (local.get $r))
+                    (call $after_recv (local.get $fd) (local.get $c) (i32.const 0x104000) (i32.const 0) (local.get $r))
                     (call $maybe_flush)))))))))
       (local.set $fd (i32.add (local.get $fd) (i32.const 1)))
       (br $l))))
@@ -1448,7 +1452,7 @@
 
   ;; between connections: commit and send early if OUTB or RECS is filling up
   (func $maybe_flush
-    (if (i32.or (i32.gt_u (global.get $o) (i32.const 0xc00000)) (i32.ge_u (global.get $nrec) (i32.const 60000)))
+    (if (i32.or (i32.gt_u (global.get $o) (i32.const 0x900000)) (i32.ge_u (global.get $nrec) (i32.const 60000)))
       (then (call $flush) (call $tx_begin))))
 
   ;; [$p, $p+$len) was offered to the socket, which took $r bytes (or -errno); keep the rest (EPOLLOUT
@@ -1539,7 +1543,7 @@
       (local.set $pos (i32.add (local.get $pos) (i32.add (local.get $hdr) (local.get $clen))))
       (br_if $out (global.get $closeme))
       ;; a flood of pipelined requests: stop before OUTB overflows, answer what was handled, close
-      (if (i32.gt_u (global.get $o) (i32.const 0xf00000)) (then (global.set $closeme (i32.const 1)) (br $out)))
+      (if (i32.gt_u (global.get $o) (i32.const 0xc00000)) (then (global.set $closeme (i32.const 1)) (br $out)))
       (br $req)))
     (local.get $pos))
 
@@ -1557,8 +1561,10 @@
       (br $l)))
     (local.get $v))
 
-  (func $on_event (param $fd i32) (param $ev i32)
-    (local $c i32) (local $pin i32) (local $r i32) (local $p i32) (local $ol i32)
+  ;; one event of the batch; for a reading connection the host has already received $r bytes (or -errno)
+  ;; into $slot
+  (func $on_event (param $fd i32) (param $ev i32) (param $slot i32) (param $r i32)
+    (local $c i32) (local $pin i32) (local $p i32) (local $ol i32)
     (local.set $c (call $conn (local.get $fd)))
     (i32.store offset=0x2a0000 (i32.shl (local.get $fd) (i32.const 2)) (global.get $tick))
     (local.set $ol (i32.load offset=12 (local.get $c)))
@@ -1583,19 +1589,22 @@
         (if (i32.eq (i32.load offset=4 (local.get $c)) (i32.const -1)) (then (call $close_conn (local.get $fd)) (return)))
         (drop (call $epoll_ctl (global.get $ep) (i32.const 3) (local.get $fd) (i32.const 0x2001)))   ;; MOD, IN|RDHUP
         (return)))
-    ;; readable
+    ;; readable: serve straight from the slot, unless an unfinished request is waiting to be joined
     (local.set $pin (i32.load offset=4 (local.get $c)))
-    (if (local.get $pin)
-      (then
-        (memory.copy (i32.const 0x104000) (i32.load (local.get $c)) (local.get $pin))
-        (call $free (i32.load (local.get $c)))
-        (i32.store (local.get $c) (i32.const 0))
-        (i32.store offset=4 (local.get $c) (i32.const 0))))
-    (local.set $r (call $recv (local.get $fd) (i32.add (i32.const 0x104000) (local.get $pin)) (i32.sub (i32.const 0x20000) (local.get $pin))))
-    (call $after_recv (local.get $fd) (local.get $c) (local.get $pin) (local.get $r)))
+    (if (i32.eqz (local.get $pin))
+      (then (call $after_recv (local.get $fd) (local.get $c) (local.get $slot) (i32.const 0) (local.get $r)) (return)))
+    (if (i32.gt_s (local.get $r) (i32.sub (i32.const 0x20000) (local.get $pin)))   ;; a request over 128 KiB
+      (then (call $close_conn (local.get $fd)) (return)))
+    (memory.copy (i32.const 0x104000) (i32.load (local.get $c)) (local.get $pin))
+    (call $free (i32.load (local.get $c)))
+    (i32.store (local.get $c) (i32.const 0))
+    (i32.store offset=4 (local.get $c) (i32.const 0))
+    (if (i32.gt_s (local.get $r) (i32.const 0))
+      (then (memory.copy (i32.add (i32.const 0x104000) (local.get $pin)) (local.get $slot) (local.get $r))))
+    (call $after_recv (local.get $fd) (local.get $c) (i32.const 0x104000) (local.get $pin) (local.get $r)))
 
-  ;; RBUF holds $pin earlier bytes plus what recv returned ($r: count, 0 = EOF, or -errno)
-  (func $after_recv (param $fd i32) (param $c i32) (param $pin i32) (param $r i32)
+  ;; $buf holds $pin earlier bytes plus what recv returned ($r: count, 0 = EOF, or -errno)
+  (func $after_recv (param $fd i32) (param $c i32) (param $buf i32) (param $pin i32) (param $r i32)
     (local $n i32) (local $used i32) (local $left i32) (local $p i32)
     (if (i32.le_s (local.get $r) (i32.const 0))
       (then
@@ -1603,14 +1612,14 @@
         (local.set $r (i32.const 0))))
     (local.set $n (i32.add (local.get $pin) (local.get $r)))
     (global.set $closeme (i32.const 0))
-    (local.set $used (call $process (local.get $fd) (i32.const 0x104000) (local.get $n)))
+    (local.set $used (call $process (local.get $fd) (local.get $buf) (local.get $n)))
     (call $rec (local.get $fd) (global.get $closeme))
     (if (global.get $closeme) (then (return)))   ;; closed after the batch's COMMIT and send
     (local.set $left (i32.sub (local.get $n) (local.get $used)))
     (if (local.get $left)
       (then
         (local.set $p (call $malloc (local.get $left)))
-        (memory.copy (local.get $p) (i32.add (i32.const 0x104000) (local.get $used)) (local.get $left))
+        (memory.copy (local.get $p) (i32.add (local.get $buf) (local.get $used)) (local.get $left))
         (i32.store (local.get $c) (local.get $p))
         (i32.store offset=4 (local.get $c) (local.get $left)))))
 
@@ -1658,7 +1667,7 @@
     (i32.load (i32.const 0x295004)))
 
   (func (export "_start")
-    (local $key i32) (local $path i32) (local $host i32) (local $port i32) (local $n i32) (local $i i32) (local $fd i32) (local $w i32)
+    (local $key i32) (local $path i32) (local $host i32) (local $port i32) (local $n i32) (local $i i32) (local $fd i32) (local $w i32) (local $e i32)
     (call $sq_init)
     (call $b64init)
     (global.set $t0 (call $now))
@@ -1691,13 +1700,28 @@
     (loop $forever
       ;; a transaction that has written waits up to WINDOW ms for more writes: fewer commits, fewer WAL
       ;; frames (a hot page is written once per commit, not once per request) and fewer checkpoints
-      (local.set $n (call $epoll_wait (global.get $ep) (i32.const 0x102000) (i32.const 512)
+      ;; one host call waits and receives on every readable connection
+      (local.set $n (call $epoll_recv (global.get $ep) (i32.const 0x102000) (i32.const 512)
         (if (result i32) (global.get $txopen)
           (then (select (local.tee $w (i32.sub (i32.const 2) (i32.sub (call $clock_ms) (global.get $txt0))))
                         (i32.const 0) (i32.gt_s (local.get $w) (i32.const 0))))
-          (else (i32.const 500)))))
+          (else (i32.const 500)))
+        (global.get $lfd) (i32.const 0xe00000)))
       (global.set $tick (call $clock_ms))
       (if (i32.eqz (global.get $tick)) (then (global.set $tick (i32.const 1))))   ;; 0 marks a closed fd
+      ;; mark this batch's connections active first: no eviction below may close one whose bytes the host
+      ;; already received (its fd could then be reused by an accept, and get them)
+      (local.set $i (i32.const 0))
+      (block $d0 (loop $l0
+        (br_if $d0 (i32.ge_s (local.get $i) (local.get $n)))
+        (local.set $fd (i32.load (i32.add (i32.const 0x102000) (i32.mul (local.get $i) (i32.const 12)))))
+        (if (i32.ne (local.get $fd) (global.get $lfd))
+          (then (i32.store offset=0x2a0000 (i32.shl (local.get $fd) (i32.const 2)) (global.get $tick))))
+        ;; and the connection's generation, to skip the event if a send error closes it first
+        (i32.store offset=0x103800 (i32.shl (local.get $i) (i32.const 2))
+          (i32.load offset=0x144000 (i32.shl (local.get $fd) (i32.const 2))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $l0)))
       (if (i32.eqz (global.get $txopen)) (then (call $tx_begin)))
       (if (i32.and (i32.or (i32.gt_s (global.get $nconn) (i32.const 60000)) (global.get $lis_off))
                    (i32.ge_s (i32.sub (global.get $tick) (global.get $lastsweep)) (i32.const 500)))
@@ -1710,11 +1734,15 @@
       (local.set $i (i32.const 0))
       (block $d (loop $l
         (br_if $d (i32.ge_s (local.get $i) (local.get $n)))
-        (local.set $fd (i32.load (i32.add (i32.const 0x102000) (i32.shl (local.get $i) (i32.const 3)))))
+        (local.set $e (i32.add (i32.const 0x102000) (i32.mul (local.get $i) (i32.const 12))))
+        (local.set $fd (i32.load (local.get $e)))
         (if (i32.eq (local.get $fd) (global.get $lfd))
           (then (call $accept_all))
-          (else
-            (call $on_event (local.get $fd) (i32.load offset=4 (i32.add (i32.const 0x102000) (i32.shl (local.get $i) (i32.const 3)))))
+          (else (if (i32.eq (i32.load offset=0x103800 (i32.shl (local.get $i) (i32.const 2)))
+                            (i32.load offset=0x144000 (i32.shl (local.get $fd) (i32.const 2))))
+            (then
+            (call $on_event (local.get $fd) (i32.load offset=4 (local.get $e))
+                            (i32.add (i32.const 0xe00000) (i32.shl (local.get $i) (i32.const 12))) (i32.load offset=8 (local.get $e)))))
             (call $maybe_flush)))
         (local.set $i (i32.add (local.get $i) (i32.const 1)))
         (br $l)))

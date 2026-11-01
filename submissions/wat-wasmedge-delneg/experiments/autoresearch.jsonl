@@ -15,3 +15,4 @@
 {"id":"E14","what":"SIMD putjson fast path, constant string lengths","tc_us_req":{"e13":[14.6,14.51,14.33],"e14":[13.43,13.57,13.74]},"user_instr_req":{"e13":76200,"e14":66300},"reps":3,"tests":"42/42","status":"kept"}
 {"id":"E15","what":"SQLite -DUSE_PREAD (no lseek per page I/O)","tc_us_req":{"e14":[13.94,13.6,13.59],"e15":[14.12,13.42,13.5]},"syscalls_10s":{"e14":876159,"e15":757619},"reps":3,"tests":"42/42","status":"kept (neutral CPU, -14% syscalls)"}
 {"id":"E16","what":"sendmany: one host call per batch of responses","tc_us_req":{"e15":[13.58,13.93,13.77],"e16":[12.99,13.29,13.32]},"reps":3,"tests":"42/42","status":"kept"}
+{"id":"E17","what":"epoll_recv: epoll_wait + recv per readable socket in one host call","tc_us_req":{"e16":[13.45,13.38,13.03],"e17":[13.08,12.91,12.97]},"reps":3,"tests":"42/42","status":"kept"}

@@ -32,7 +32,8 @@ its #229 run (`f0fb733`) held 232,000, its #216 run (`ee683db`) and #211 run (`7
 #232 (`1319a07`); its earlier #219 run (`3f7cab9`) held 6,000. c-iouring-pavlyhalim is scored at its follow-up PR #245
 (`7387a31`); its earlier #233 run (`3f5c305`) held 270,000. rust-iouring-kensac is scored at its follow-up PR #248
 (`3bd2352`, merged as rebased `551ff3a`, same folder); its earlier #247 run (`d42783b`) held 257,000. php-symfony-gnugat is scored at its follow-up PR #256 (`4a11a5d`); its
-earlier #136 run (`48e3783`) held 15,500.
+earlier #136 run (`48e3783`) held 15,500. mojo-iouring-oh-meh is scored at its follow-up PR #257 (`a9df151`); its merged
+#224 code (`ef45beb`) held 280,000, and its earlier #224 runs held 280,000 (`29024f3`) and 290,000 (`1f4eb0b`).
 
 **Re-runs.** The first submissions (#2–#29) were scored on a DigitalOcean $12 droplet, which is about 2× slower for
 CPU-bound servers, so those numbers aren't comparable. All of them have now been re-run on this box (finished
@@ -44,10 +45,10 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 
 | # | Submission | PR | Language | Users held 5 min | req/s | p95 ms | p99 ms | err % | CPU % | µs/req | RAM MB | Scored |
 |---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
-| 1 | c-iouring-pavlyhalim | #245 | C (io_uring, SQLite B-tree reads) | **295,000** | 28,013 | 28 | 117 | 0.00 | 81 | 26 | 1,536 | 2026-11-01 |
-| 2 | lean-derive-hargup | #153 | Lean 4 (generated C, io_uring) | **280,000** | 26,683 | 141 | 316 | 0.00 | 92 | 31 | 836 | 2026-10-28 |
-| 2 | mojo-iouring-oh-meh | #224 | Mojo (io_uring, SQLite B-tree reads) | **280,000** | 26,489 | 366 | 556 | 0.00 | 85 | 29 | 1,597 | 2026-10-31 |
-| 2 | objc-uring-delneg | #154 | Objective-C (GNUstep, io_uring, SQLite B-tree reads) | **280,000** | 26,741 | 35 | 227 | 0.00 | 79 | 27 | 1,245 | 2026-10-31 |
+| 1 | mojo-iouring-oh-meh | #257 | Mojo (io_uring, SQLite B-tree reads) | **304,000** | 28,705 | 159 | 545 | 0.00 | 82 | 26 | 726 | 2026-11-01 |
+| 2 | c-iouring-pavlyhalim | #245 | C (io_uring, SQLite B-tree reads) | **295,000** | 28,013 | 28 | 117 | 0.00 | 81 | 26 | 1,536 | 2026-11-01 |
+| 3 | lean-derive-hargup | #153 | Lean 4 (generated C, io_uring) | **280,000** | 26,683 | 141 | 316 | 0.00 | 92 | 31 | 836 | 2026-10-28 |
+| 3 | objc-uring-delneg | #154 | Objective-C (GNUstep, io_uring, SQLite B-tree reads) | **280,000** | 26,741 | 35 | 227 | 0.00 | 79 | 27 | 1,245 | 2026-10-31 |
 | 5 | c-iouring-shivanshthapliyal | #250 | C (io_uring, SQLite B-tree reads) | **276,000** | 26,403 | 23 | 147 | 0.00 | 77 | 26 | 638 | 2026-11-01 |
 | 6 | c-iouring-public | #158 | C (io_uring, SQLite B-tree reads) | **275,000** | 26,227 | 128 | 672 | 0.00 | 80 | 28 | 625 | 2026-10-31 |
 | 7 | crystal-epoll-faustinoaq | #193 | Crystal (io_uring) | **270,000** | 25,693 | 348 | 879 | 0.00 | 92 | 32 | 1,160 | 2026-10-29 |

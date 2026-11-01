@@ -31,7 +31,8 @@ headers) and checks the HS256 signature; `server.sql` decides everything else.
 ## Rules notes
 
 - Caching: nothing is kept between statement runs except prepared statements and the HMAC key pads
-  derived from `JWT_SECRET`.
+  derived from `JWT_SECRET`. Within a run, each request does its own reads: the feed subquery refers to
+  the request row, so SQLite runs it once per feed request rather than once per batch.
 - Durability: WAL with `synchronous=NORMAL`, and replies are sent only after the commit.
 - JWT: every request with a token gets a full HS256 check: signature, `alg`, `exp` (required, in the
   future), then `sub` and `username`.

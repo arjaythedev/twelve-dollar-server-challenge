@@ -22,6 +22,11 @@ SELECT http_reply(slot, CASE
         SELECT p.id, p.body, p.created_at, u.username AS author,
                (SELECT count(*) FROM likes AS l WHERE l.post_id = p.id) AS like_count
           FROM posts AS p JOIN users AS u ON u.id = p.user_id
+         -- Rule 5: every request reads its own data. This always-true condition refers to the request
+         -- row, so SQLite reads the feed once per request. Without it the subquery is uncorrelated and
+         -- SQLite reads it once per statement run, which every feed request in the batch would share:
+         --   (no WHERE clause here)
+         WHERE req.slot = req.slot
          ORDER BY p.created_at DESC, p.id DESC
          LIMIT 20)) || '}'
 

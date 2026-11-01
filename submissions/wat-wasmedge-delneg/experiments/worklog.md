@@ -138,3 +138,45 @@ sockets idle ≥ 1.5 s with no partial request or unsent output, after one recv(
 Cost: past ~60k users most requests come on a fresh connection (~15 vs ~11 us/req on loopback; the
 grader's real NIC adds more). io_uring direct descriptors (what ObjC/Lean/Mojo use) would lift the cap;
 consider later via the host.
+
+## E7: baselines, ObjC #154 and c-iouring-public #158 vs WAT and C→wasm (1 Nov)
+The two entries were built by their own install.sh/build.sh in fresh ubuntu:24.04 containers
+(`~/watlab/mkbase.sh`), then their `/app` was copied out and run natively by `ub.sh` like ours (CPU 0,
+nofile 65,535). In Docker, the default seccomp profile refuses io_uring (ObjC exits, the C entry falls back
+to epoll), so native runs are the fair setup. Both use io_uring here (checked in their startup logs).
+4000 users, scale 0.02, 20 s, 3 interleaved reps (WAT, C→wasm, ObjC, C), the same load as E4.
+| variant | us/req | rps | p95 ms | p99 ms | rss |
+|---|---|---|---|---|---|
+| WAT, WasmEdge AOT | 8.07, 8.04, 7.99 | 20.1–20.3k | 41.9, 35.4, 35.1 | 48.6, 41.3, 40.8 | 59 MB |
+| C→wasm (cserve.c), same host | 7.80, 7.79, 8.25 | 20.3k | 35.4, 35.0, 35.4 | 40.3, 40.2, 40.7 | 96 MB |
+| ObjC #154 (objc-uring-delneg) | 6.23, 6.13, 5.95 | 21.1k | 1.5, 1.5, 1.5 | 1.8, 1.6, 1.6 | 25 MB |
+| C #158 (c-iouring-public) | 7.22, 6.30, 6.50 | 21.1k | 1.3, 1.25, 1.25 | 1.75, 1.45, 1.5 | 13 MB |
+WAT is ~30% more CPU per request than ObjC and ~20% more than the top C entry, and about level with
+C→wasm. The wasm builds also serve ~4% fewer req/s at the same offered load, because the inline
+checkpoint stalls (p95 ~35 ms) delay each user's next think period. Both baselines checkpoint off the
+loop (ObjC: a forked child; C: a thread). They also read /feed and posts through SQLite's B-tree layer
+with no bytecode, batch writes into one transaction, and (ObjC) use PGO.
+
+## E8: profile, WAT vs ObjC (perf, 4000 users x0.02) (1 Nov)
+`perf record` on the server under E7's load. The AOT `.so` names functions `f<index>`; a copy built with
+`wat2wasm --debug-names` and `wasm-merge -g` maps them (`out/prof/names.txt`).
+WAT: app.so 57.6% (sqlite3VdbeExec 9.3, BtreeTableMoveto 6.6, BtreeIndexMoveto 4.3,
+vdbeRecordCompareInt 3.9, pcache1Fetch 2.9, getAndInitPage 2.6 ... the WAT's own functions together ~6%:
+putjson 2.9, post_json 1.9, process 0.6), kernel 33.3%, libwasmedge 6.1% + libc rwlock 1% (host-call and
+WASI dispatch). ObjC: kernel 67%, its own code 30% (`_i_TDStore__feed_` 9.9%: the feed on the B-tree layer).
+In samples, WAT's user time is ~3x ObjC's while kernel time is about equal. So the gap is SQLite's
+bytecode path for /feed and posts, not the WAT code and not the runtime: E9 (group commit) and E10
+(B-tree reads) next.
+
+## E9: group commit, one transaction per epoll batch (1 Nov) — kept
+BEGIN after each epoll_wait, COMMIT after the batch; responses wait in OUTB (now 12 MiB at 0x400000,
+with a record list at 0x300000) and are sent only after COMMIT, so no 201 goes out before its row is
+committed; if COMMIT fails, the batch's connections are closed unanswered. Bug found on the way: inside
+an explicit transaction, `INSERT ... RETURNING` needs a temp file, and WASI has no temp directory
+("disk I/O error", then "cannot commit - no transaction is active"): fixed with `PRAGMA temp_store=MEMORY`.
+42/42. 4000 users x0.02, 20 s, 3 interleaved reps:
+| variant | us/req | p95 ms | rps |
+|---|---|---|---|
+| base (c01300f) | 8.03, 7.87, 7.84 | 37.5, 35.2, 34.5 | 20.3k |
+| E9 group commit | 7.12, 6.05, 6.38 | 39.1, 37.0, 38.0 | 20.5k |
+Median -19% CPU per request; every E9 rep is below every base rep. p95 unchanged (checkpoint stalls).

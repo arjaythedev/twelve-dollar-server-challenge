@@ -10,12 +10,14 @@
 ;;   0x102000  epoll events: 512 x (fd i32, events i32)
 ;;   0x104000  RBUF  read buffer, 128 KiB (a connection's unfinished request is copied in front first)
 ;;   0x124000  BODYB response body being built, 128 KiB
-;;   0x144000  OUTB  responses waiting for send(), 256 KiB (flushed at 128 KiB)
+;;   0x144000  (free)
 ;;   0x184000  CONN  per-fd state, 65536 x 16 bytes: in_ptr, in_len, out_ptr, out_len (malloc'd leftovers)
 ;;   0x284000  JWT scratch: header, payload, SHA-256 state/schedule/pad, HMAC states, tables
 ;;   0x285000  TXT   decoded POST body, 64 KiB
 ;;   0x295000  MISC  out-params, clock, iovec, digit buffer
 ;;   0x2a0000  LAST  per-fd ms of the last event (idle eviction), 65536 x i32
+;;   0x300000  RECS  the batch's responses: (fd, start, len, close after) x up to 60,000
+;;   0x400000  OUTB  the batch's response bytes, sent after COMMIT (flushed between connections at 12 MiB)
 (module
   (import "sq" "memory" (memory 1))
   (import "sq" "_initialize" (func $sq_init))
@@ -87,8 +89,11 @@
   (data (i32.const 0x100b00) "INSERT INTO likes (user_id, post_id) VALUES (?, ?) ON CONFLICT (user_id, post_id) DO NOTHING")
   (data (i32.const 0x100c00) "SELECT 1 FROM posts WHERE id = ?")
   (data (i32.const 0x100c80) "SELECT 1")
+  (data (i32.const 0x100ca0) "BEGIN")
+  (data (i32.const 0x100cb0) "COMMIT")
+  (data (i32.const 0x100cc0) "ROLLBACK")
   ;; WASI has no shared memory, so WAL runs with exclusive locking (wal-index on the heap)
-  (data (i32.const 0x100d00) "PRAGMA locking_mode=EXCLUSIVE; PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA cache_size=-65536;")
+  (data (i32.const 0x100d00) "PRAGMA locking_mode=EXCLUSIVE; PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA cache_size=-65536; PRAGMA temp_store=MEMORY;")
   (data (i32.const 0x100e00) "SQLITE_PATH")
   (data (i32.const 0x100e20) "JWT_SECRET")
   (data (i32.const 0x100e40) "HOST")
@@ -114,6 +119,7 @@
   (data (i32.const 0x101100) "fatal: cannot prepare a statement\0a")
   (data (i32.const 0x101140) "fatal: cannot listen\0a")
   (data (i32.const 0x101180) "fatal: JWT_SECRET, SQLITE_PATH, HOST and PORT must be set\0a")
+  (data (i32.const 0x1011c0) "COMMIT failed: the batch's connections are closed unanswered\0a")
   ;; SHA-256 round constants and initial state, as little-endian i32s
   (data (i32.const 0x284b00) "\98\2f\8a\42\91\44\37\71\cf\fb\c0\b5\a5\db\b5\e9\5b\c2\56\39\f1\11\f1\59\a4\82\3f\92\d5\5e\1c\ab\98\aa\07\d8\01\5b\83\12\be\85\31\24\c3\7d\0c\55\74\5d\be\72\fe\b1\de\80\a7\06\dc\9b\74\f1\9b\c1\c1\69\9b\e4\86\47\be\ef\c6\9d\c1\0f\cc\a1\0c\24\6f\2c\e9\2d\aa\84\74\4a\dc\a9\b0\5c\da\88\f9\76\52\51\3e\98\6d\c6\31\a8\c8\27\03\b0\c7\7f\59\bf\f3\0b\e0\c6\47\91\a7\d5\51\63\ca\06\67\29\29\14\85\0a\b7\27\38\21\1b\2e\fc\6d\2c\4d\13\0d\38\53\54\73\0a\65\bb\0a\6a\76\2e\c9\c2\81\85\2c\72\92\a1\e8\bf\a2\4b\66\1a\a8\70\8b\4b\c2\a3\51\6c\c7\19\e8\92\d1\24\06\99\d6\85\35\0e\f4\70\a0\6a\10\16\c1\a4\19\08\6c\37\1e\4c\77\48\27\b5\bc\b0\34\b3\0c\1c\39\4a\aa\d8\4e\4f\ca\9c\5b\f3\6f\2e\68\ee\82\8f\74\6f\63\a5\78\14\78\c8\84\08\02\c7\8c\fa\ff\be\90\eb\6c\50\a4\f7\a3\f9\be\f2\78\71\c6")
   (data (i32.const 0x284c00) "\67\e6\09\6a\85\ae\67\bb\72\f3\6e\3c\3a\f5\4f\a5\7f\52\0e\51\8c\68\05\9b\ab\d9\83\1f\19\cd\e0\5b")
@@ -129,7 +135,11 @@
   (global $ep (mut i32) (i32.const 0))
   (global $lfd (mut i32) (i32.const 0))
   (global $w (mut i32) (i32.const 0))       ;; write cursor (BODYB while building a body, OUTB otherwise)
-  (global $o (mut i32) (i32.const 0x144000)) ;; end of pending output in OUTB
+  (global $o (mut i32) (i32.const 0x400000)) ;; end of the batch's output in OUTB
+  (global $ostart (mut i32) (i32.const 0x400000)) ;; start of the current connection's output
+  (global $nrec (mut i32) (i32.const 0))
+  (global $st_begin (mut i32) (i32.const 0))
+  (global $st_commit (mut i32) (i32.const 0))
   (global $jp (mut i32) (i32.const 0))      ;; JSON reader cursor
   (global $je (mut i32) (i32.const 0))      ;; JSON reader end
   (global $jv (mut i32) (i32.const 0))      ;; value found by $jfind
@@ -137,7 +147,6 @@
   (global $un_p (mut i32) (i32.const 0))    ;; username, raw JSON string bytes from the token
   (global $un_n (mut i32) (i32.const 0))
   (global $closeme (mut i32) (i32.const 0))
-  (global $dead (mut i32) (i32.const 0))
   ;; idle-connection eviction (LAST[fd] at 0x2a0000: ms of the fd's last event, 0 = not open)
   (global $tick (mut i32) (i32.const 0))     ;; monotonic ms, read once per epoll_wait
   (global $nconn (mut i32) (i32.const 0))
@@ -918,7 +927,7 @@
     (call $put (global.get $un_p) (global.get $un_n))
     (call $putc (i32.const 34))
     (call $puts (i32.const 0x100780))
-    ;; the second step finishes the statement, which commits: the row is durable before we answer
+    ;; the second step finishes the statement; the batch's COMMIT runs before any response is sent
     (local.set $rc (call $step (global.get $st_ins)))
     (drop (call $reset (global.get $st_ins)))
     (if (i32.ne (local.get $rc) (i32.const 101)) (then (call $err (i32.const 0x100140) (i32.const 0x100480)) (return)))
@@ -992,38 +1001,77 @@
                   (then (call $close_conn (local.get $fd)))
                   (else
                     (i32.store offset=0x2a0000 (i32.shl (local.get $fd) (i32.const 2)) (global.get $tick))
-                    (call $after_recv (local.get $fd) (local.get $c) (i32.const 0) (local.get $r))))))))))
+                    (call $after_recv (local.get $fd) (local.get $c) (i32.const 0) (local.get $r))
+                    (call $maybe_flush)))))))))
       (local.set $fd (i32.add (local.get $fd) (i32.const 1)))
       (br $l))))
 
-  ;; send OUTB[0x144000, $o); keep what the socket doesn't take
-  (func $emit (param $fd i32)
-    (local $len i32) (local $c i32) (local $r i32) (local $p i32) (local $ol i32)
-    (local.set $len (i32.sub (global.get $o) (i32.const 0x144000)))
-    (if (i32.eqz (local.get $len)) (then (return)))
-    (global.set $o (i32.const 0x144000))
+;; ---------- group commit ----------
+  ;; Each epoll batch runs in one transaction. Responses wait in OUTB, and are sent only after COMMIT,
+  ;; so no 201 goes out for a row that is not committed.
+  (func $tx_begin (drop (call $step (global.get $st_begin))) (drop (call $reset (global.get $st_begin))))
+
+  ;; note the connection's output since the last call; $cl: close it once that is sent
+  (func $rec (param $fd i32) (param $cl i32)
+    (local $r i32)
+    (if (i32.and (i32.eq (global.get $o) (global.get $ostart)) (i32.eqz (local.get $cl))) (then (return)))
+    (local.set $r (i32.add (i32.const 0x300000) (i32.shl (global.get $nrec) (i32.const 4))))
+    (i32.store (local.get $r) (local.get $fd))
+    (i32.store offset=4 (local.get $r) (global.get $ostart))
+    (i32.store offset=8 (local.get $r) (i32.sub (global.get $o) (global.get $ostart)))
+    (i32.store offset=12 (local.get $r) (local.get $cl))
+    (global.set $ostart (global.get $o))
+    (global.set $nrec (i32.add (global.get $nrec) (i32.const 1))))
+
+  ;; COMMIT, then send every noted response (or, if COMMIT failed, close those connections unanswered)
+  (func $flush
+    (local $ok i32) (local $i i32) (local $r i32)
+    (local.set $ok (i32.eq (call $step (global.get $st_commit)) (i32.const 101)))
+    (drop (call $reset (global.get $st_commit)))
+    (if (i32.eqz (local.get $ok))
+      (then (call $log (call $errmsg (global.get $db))) (call $log (i32.const 0x1011c0))
+            (drop (call $db_exec (global.get $db) (i32.const 0x100cc0)))))
+    (block $d (loop $l
+      (br_if $d (i32.ge_u (local.get $i) (global.get $nrec)))
+      (local.set $r (i32.add (i32.const 0x300000) (i32.shl (local.get $i) (i32.const 4))))
+      (if (i32.load offset=0x2a0000 (i32.shl (i32.load (local.get $r)) (i32.const 2)))   ;; still open
+        (then
+          (if (local.get $ok)
+            (then (call $send_out (i32.load (local.get $r)) (i32.load offset=4 (local.get $r))
+                                  (i32.load offset=8 (local.get $r)) (i32.load offset=12 (local.get $r))))
+            (else (call $close_conn (i32.load (local.get $r)))))))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br $l)))
+    (global.set $nrec (i32.const 0))
+    (global.set $o (i32.const 0x400000))
+    (global.set $ostart (i32.const 0x400000)))
+
+  ;; between connections: commit and send early if OUTB or RECS is filling up
+  (func $maybe_flush
+    (if (i32.or (i32.gt_u (global.get $o) (i32.const 0xc00000)) (i32.ge_u (global.get $nrec) (i32.const 60000)))
+      (then (call $flush) (call $tx_begin))))
+
+  ;; send [$p, $p+$len); keep what the socket doesn't take (EPOLLOUT finishes it)
+  (func $send_out (param $fd i32) (param $p i32) (param $len i32) (param $cl i32)
+    (local $c i32) (local $r i32) (local $q i32)
     (local.set $c (call $conn (local.get $fd)))
-    (local.set $ol (i32.load offset=12 (local.get $c)))
-    (if (i32.eqz (local.get $ol))
+    (if (local.get $len)
       (then
-        (local.set $r (call $send (local.get $fd) (i32.const 0x144000) (local.get $len)))
-        (if (i32.eq (local.get $r) (local.get $len)) (then (return)))
+        (local.set $r (call $send (local.get $fd) (local.get $p) (local.get $len)))
         (if (i32.lt_s (local.get $r) (i32.const 0))
           (then
-            (if (i32.ne (local.get $r) (i32.const -11)) (then (global.set $dead (i32.const 1)) (return)))
+            (if (i32.ne (local.get $r) (i32.const -11)) (then (call $close_conn (local.get $fd)) (return)))
             (local.set $r (i32.const 0))))
-        (local.set $p (call $malloc (i32.sub (local.get $len) (local.get $r))))
-        (memory.copy (local.get $p) (i32.add (i32.const 0x144000) (local.get $r)) (i32.sub (local.get $len) (local.get $r)))
-        (i32.store offset=8 (local.get $c) (local.get $p))
-        (i32.store offset=12 (local.get $c) (i32.sub (local.get $len) (local.get $r)))
-        (drop (call $epoll_ctl (global.get $ep) (i32.const 3) (local.get $fd) (i32.const 4)))   ;; MOD, EPOLLOUT
-        (return)))
-    (local.set $p (call $malloc (i32.add (local.get $ol) (local.get $len))))
-    (memory.copy (local.get $p) (i32.load offset=8 (local.get $c)) (local.get $ol))
-    (memory.copy (i32.add (local.get $p) (local.get $ol)) (i32.const 0x144000) (local.get $len))
-    (call $free (i32.load offset=8 (local.get $c)))
-    (i32.store offset=8 (local.get $c) (local.get $p))
-    (i32.store offset=12 (local.get $c) (i32.add (local.get $ol) (local.get $len))))
+        (if (i32.lt_u (local.get $r) (local.get $len))
+          (then
+            (local.set $q (call $malloc (i32.sub (local.get $len) (local.get $r))))
+            (memory.copy (local.get $q) (i32.add (local.get $p) (local.get $r)) (i32.sub (local.get $len) (local.get $r)))
+            (i32.store offset=8 (local.get $c) (local.get $q))
+            (i32.store offset=12 (local.get $c) (i32.sub (local.get $len) (local.get $r)))
+            (if (local.get $cl) (then (i32.store offset=4 (local.get $c) (i32.const -1))))   ;; close once the output is gone
+            (drop (call $epoll_ctl (global.get $ep) (i32.const 3) (local.get $fd) (i32.const 4)))   ;; MOD, EPOLLOUT
+            (return)))))
+    (if (local.get $cl) (then (call $close_conn (local.get $fd)))))
 
   ;; handle every complete request in [$buf, $buf+$n); returns the bytes consumed
   (func $process (param $fd i32) (param $buf i32) (param $n i32) (result i32)
@@ -1090,7 +1138,8 @@
                     (local.get $ah) (local.get $an) (i32.add (local.get $s) (local.get $hdr)) (local.get $clen))
       (local.set $pos (i32.add (local.get $pos) (i32.add (local.get $hdr) (local.get $clen))))
       (br_if $out (global.get $closeme))
-      (if (i32.gt_u (global.get $o) (i32.const 0x164000)) (then (call $emit (local.get $fd))))
+      ;; a flood of pipelined requests: stop before OUTB overflows, answer what was handled, close
+      (if (i32.gt_u (global.get $o) (i32.const 0xf00000)) (then (global.set $closeme (i32.const 1)) (br $out)))
       (br $req)))
     (local.get $pos))
 
@@ -1153,18 +1202,10 @@
         (if (i32.ne (local.get $r) (i32.const -11)) (then (call $close_conn (local.get $fd)) (return)))
         (local.set $r (i32.const 0))))
     (local.set $n (i32.add (local.get $pin) (local.get $r)))
-    (global.set $o (i32.const 0x144000))
     (global.set $closeme (i32.const 0))
-    (global.set $dead (i32.const 0))
     (local.set $used (call $process (local.get $fd) (i32.const 0x104000) (local.get $n)))
-    (call $emit (local.get $fd))
-    (if (global.get $dead) (then (call $close_conn (local.get $fd)) (return)))
-    (if (global.get $closeme)
-      (then
-        (if (i32.load offset=12 (local.get $c))
-          (then (i32.store offset=4 (local.get $c) (i32.const -1)))   ;; close once the output is gone
-          (else (call $close_conn (local.get $fd))))
-        (return)))
+    (call $rec (local.get $fd) (global.get $closeme))
+    (if (global.get $closeme) (then (return)))   ;; closed after the batch's COMMIT and send
     (local.set $left (i32.sub (local.get $n) (local.get $used)))
     (if (local.get $left)
       (then
@@ -1238,6 +1279,8 @@
     (global.set $st_like (call $prep (i32.const 0x100b00)))
     (global.set $st_exists (call $prep (i32.const 0x100c00)))
     (global.set $st_ping (call $prep (i32.const 0x100c80)))
+    (global.set $st_begin (call $prep (i32.const 0x100ca0)))
+    (global.set $st_commit (call $prep (i32.const 0x100cb0)))
     (global.set $lfd (call $listen (call $parse_ip (local.get $host))
       (i32.wrap_i64 (call $parse_len (local.get $port) (call $strlen (local.get $port)))) (i32.const 65535)))
     (if (i32.lt_s (global.get $lfd) (i32.const 0)) (then (call $fatal (i32.const 0x101140))))
@@ -1248,6 +1291,7 @@
       (local.set $n (call $epoll_wait (global.get $ep) (i32.const 0x102000) (i32.const 512) (i32.const 500)))
       (global.set $tick (call $clock_ms))
       (if (i32.eqz (global.get $tick)) (then (global.set $tick (i32.const 1))))   ;; 0 marks a closed fd
+      (call $tx_begin)
       (if (i32.and (i32.or (i32.gt_s (global.get $nconn) (i32.const 60000)) (global.get $lis_off))
                    (i32.ge_s (i32.sub (global.get $tick) (global.get $lastsweep)) (i32.const 500)))
         (then
@@ -1262,8 +1306,11 @@
         (local.set $fd (i32.load (i32.add (i32.const 0x102000) (i32.shl (local.get $i) (i32.const 3)))))
         (if (i32.eq (local.get $fd) (global.get $lfd))
           (then (call $accept_all))
-          (else (call $on_event (local.get $fd) (i32.load offset=4 (i32.add (i32.const 0x102000) (i32.shl (local.get $i) (i32.const 3)))))))
+          (else
+            (call $on_event (local.get $fd) (i32.load offset=4 (i32.add (i32.const 0x102000) (i32.shl (local.get $i) (i32.const 3)))))
+            (call $maybe_flush)))
         (local.set $i (i32.add (local.get $i) (i32.const 1)))
         (br $l)))
+      (call $flush)
       (br $forever)))
 )

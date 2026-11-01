@@ -125,6 +125,7 @@ fn text<'a>(c: Column<'a>) -> Result<&'a [u8]> {
         Err(CORRUPT)
     }
 }
+#[inline(always)]
 fn varint(input: &[u8], at: &mut usize) -> Result<u64> {
     let mut n = 0;
     for _ in 0..8 {
@@ -139,6 +140,7 @@ fn varint(input: &[u8], at: &mut usize) -> Result<u64> {
     *at += 1;
     Ok((n << 8) | u64::from(b))
 }
+#[inline(always)]
 fn columns<const N: usize>(input: &[u8]) -> Result<[Column<'_>; N]> {
     let mut h = 0;
     let header = usize::try_from(varint(input, &mut h)?).map_err(|_| CORRUPT)?;

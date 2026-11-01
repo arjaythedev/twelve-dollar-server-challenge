@@ -28,6 +28,12 @@ impl Writer {
                     at += 16;
                     continue;
                 }
+                // An overlapping final vector covers the tail without an
+                // out-of-bounds read or a scalar branch for every plain byte.
+                if input.len() - at < 16 && input.len() >= 16
+                    && crate::plain16(&input[input.len() - 16..]) {
+                    break;
+                }
                 let c = input[at];
                 if c < 32 || c == b'"' || c == b'\\' {
                     self.bytes(&input[start..at]);
@@ -102,7 +108,7 @@ mod tests {
     #[test]
     fn escaping_and_capacity_match_independent_json_serializer() {
         let controls: String = (0u8..32).map(char::from).collect();
-        for pattern in ["a", "\\\"\n\r\t", "😀名", &controls] {
+        for pattern in ["a", "\\\"\n\r\t", "😀名", "\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", &controls] {
             for n in [0, 1, 15, 16, 17, 31, 32, 500] {
                 let body = pattern.repeat(n);
                 let mut out = b"prefix".to_vec();

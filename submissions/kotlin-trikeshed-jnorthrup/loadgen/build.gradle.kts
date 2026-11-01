@@ -20,7 +20,22 @@ kotlin {
         compilerOptions { jvmTarget.set(JvmTarget.JVM_25) }
     }
 
+    // -Ptrike.targets=macosArm64: the Kotlin/Native client (commonMain ReactorLoad over the kqueue reactor),
+    // build/bin/macosArm64/loadgenReleaseExecutable/loadgen.kexe. No JVM descriptor cap, no JVM heap per process.
+    if ("macosArm64" in providers.gradleProperty("trike.targets").orNull.orEmpty().split(',').map { it.trim() }) {
+        macosArm64 {
+            compilerOptions { optIn.add("kotlinx.cinterop.ExperimentalForeignApi") }
+            binaries.executable("loadgen") { entryPoint = "borg.trikeshed.loadgen.reactor.main" }
+        }
+    }
+
     sourceSets {
+        val commonMain by getting {
+            dependencies {
+                implementation(project(":trikeshed"))
+                implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0")
+            }
+        }
         val jvmMain by getting {
             dependencies { implementation(project(":trikeshed")) }
         }

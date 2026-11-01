@@ -19,7 +19,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 	"unicode/utf8"
 )
@@ -68,8 +67,6 @@ type app struct {
 	readsGroup readGroup
 	readGen    atomic.Uint64
 	readWindow time.Duration
-	uring      *uringWriter
-	uringRead  *uringReader
 }
 
 // readCall is one in-flight SQLite read. Concurrent requests for the same key
@@ -182,20 +179,21 @@ func main() {
 	}
 	go a.writeLoop()
 	if os.Getenv("URING") == "1" {
-		if uw, err := newUringWriter(); err == nil {
-			a.uring = uw
-			log.Print("raw io_uring write batching enabled")
+		mux, err := newUringMux(func(req *httpReq) ([]byte, bool) {
+			w := &capture{status: 200}
+			a.ServeHTTP(w, req)
+			closeAfter := req.close
+			return encodeMuxResponse(w, closeAfter), closeAfter
+		}, 64)
+		if err != nil {
+			log.Printf("raw io_uring mux unavailable: %v", err)
 		} else {
-			log.Printf("raw io_uring write batching unavailable: %v", err)
+			log.Print("raw io_uring request mux enabled")
+			if err := mux.serve(host, port); err != nil {
+				log.Fatal(err)
+			}
+			return
 		}
-		if ur, err := newUringReader(); err == nil {
-			a.uringRead = ur
-			log.Print("raw io_uring multishot receive enabled")
-		} else {
-			log.Printf("raw io_uring multishot receive unavailable: %v", err)
-		}
-	} else {
-		log.Print("raw io_uring transport disabled (URING=1 to enable)")
 	}
 
 	// Opt-in profiling listener; unused in the benchmark runs.
@@ -228,19 +226,7 @@ func (a *app) serveConn(c net.Conn) {
 	if tc, ok := c.(*net.TCPConn); ok {
 		tc.SetNoDelay(true)
 	}
-	fd := -1
-	if sc, ok := c.(syscall.Conn); ok {
-		if raw, err := sc.SyscallConn(); err == nil {
-			_ = raw.Control(func(f uintptr) { fd = int(f) })
-		}
-	}
 	br := bufio.NewReaderSize(c, 2048)
-	if a.uringRead != nil && fd >= 0 {
-		if uc := a.uringRead.add(fd); uc != nil {
-			defer a.uringRead.drop(uc)
-			br = bufio.NewReaderSize(uc, 2048)
-		}
-	}
 	bw := bufio.NewWriterSize(c, 1024)
 	for {
 		req, err := readReq(br)
@@ -252,11 +238,7 @@ func (a *app) serveConn(c net.Conn) {
 		var werr error
 		if resp.packet != nil && !req.close {
 			// Packet already contains the status line, headers and body.
-			if a.uring != nil && fd >= 0 {
-				werr = a.uring.write(fd, resp.packet, c)
-			} else {
-				_, werr = c.Write(resp.packet)
-			}
+			_, werr = c.Write(resp.packet)
 		} else {
 			bw.WriteString("HTTP/1.1 ")
 			bw.WriteString(strconv.Itoa(resp.status))

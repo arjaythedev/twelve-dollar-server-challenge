@@ -4,7 +4,7 @@
 # Only the files the build needs are copied, unchanged, plus the repo's licences. Default commit: HEAD.
 #   tools/sync-libs.sh ../cursed-http-parser 3be7fd3
 #   tools/sync-libs.sh https://github.com/public/cursed-jwt.git 6f92f71
-#   tools/sync-libs.sh ../cursed-sqlite-jit 696c2fc          (vendored as third_party/cursed-sqlite-turbo)
+#   tools/sync-libs.sh ../cursed-sqlite-jit f748f0b          (vendored as third_party/cursed-sqlite-turbo)
 set -euo pipefail
 here=$(cd "$(dirname "$0")/.." && pwd)
 src=${1:?usage: sync-libs.sh <repo-dir-or-url> [commit]}

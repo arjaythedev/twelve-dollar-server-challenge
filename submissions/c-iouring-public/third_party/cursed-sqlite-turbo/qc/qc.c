@@ -82,11 +82,11 @@ static QcVs qc_vs_none; static QcDs qc_ds_none;   /* (no state yet: read as zero
 static _Thread_local sqlite3 *qc_cdb; static _Thread_local QcDs *qc_cd;
 static _Thread_local Vdbe *qc_cv; static _Thread_local QcVs *qc_cs;
 static void qc_ds_destroy(void *p);
-static __attribute__((noinline)) QcDs *qc_ds_find(sqlite3 *db) {   /* (another client data in front of qc's) */
+static __attribute__((noinline)) QcDs *qc_ds_find(const sqlite3 *db) {   /* (another client data in front of qc's) */
   for (DbClientData *p = db->pDbData; p; p = p->pNext) if (p->xDestructor == qc_ds_destroy) return p->pData;
   return &qc_ds_none;
 }
-static inline QcDs *qc_ds(sqlite3 *db) { DbClientData *p = db->pDbData; return p && p->xDestructor == qc_ds_destroy ? p->pData : qc_ds_find(db); }
+static inline QcDs *qc_ds(const sqlite3 *db) { DbClientData *p = db->pDbData; return p && p->xDestructor == qc_ds_destroy ? p->pData : qc_ds_find(db); }
 static inline u32 qc_vs_slot(const QcDs *d, const Vdbe *v) { return (u32)(((uintptr_t)v >> 4) * 0x9e3779b97f4a7c15ull >> 32) & d->mask; }
 static QcVs **qc_vs_at(QcDs *d, const Vdbe *v) {   /* v's slot, or the empty one it would take */
   u32 i = qc_vs_slot(d, v); while (d->tab[i] && d->tab[i]->v != v) i = (i + 1) & d->mask;
@@ -116,7 +116,7 @@ static void qc_vs_del(QcDs *d, Vdbe *v) {   /* v's QcVs freed (its plan and temp
   }
 }
 static inline void qc_cur_db(sqlite3 *db) { qc_cdb = db; qc_cd = qc_ds(db); qc_cv = 0; }
-static inline QcDs *qc_ds_cur(sqlite3 *db) { return db == qc_cdb ? qc_cd : qc_ds(db); }
+static inline QcDs *qc_ds_cur(const sqlite3 *db) { return db == qc_cdb ? qc_cd : qc_ds(db); }
 static inline QcVs *qc_vs_cur(Vdbe *v) { return v == qc_cv ? qc_cs : qc_vs(v); }
 static QcVs *qc_vs_enter(Vdbe *v);
 #define QCV(v) qc_vs_cur(v)

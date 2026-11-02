@@ -395,3 +395,54 @@ costs ~20 us per request and saturates the core. ObjC keeps all 250k connections
 tables (8 rings x 65,535 slots, which don't count against RLIMIT_NOFILE). The 6000-user tests above
 never saw this. On loopback the client's CPU takes part of the server's TCP work, so on the grader the
 churn costs the server more, not less.
+More WAT points (Synteq, sc.sh): 150k users: 15.5k rps, p50 16 ms, p95 1.08 s, p99 1.32 s, 2.40M dials,
+73% CPU, 47.4 us/req; 180k: 18.3k rps, p95 1.54 s, 2.93M dials, 89%, 48.5 us/req. 200k: 19.1k rps, p95 3.18 s, p99 5.09 s,
+3.14M dials, 94.3%, 49.3 us/req. So the entry fails
+p95 at 150k already, with the core 27% idle: during a checkpoint stall (150-450 ms) ~16k dials/s
+overrun the 4096-entry accept queue (somaxconn), and a dropped SYN is retried after 1 s
+(TcpExtListenOverflows/ListenDrops climb; SyncookiesSent too). Keeping connections removes both the
+per-request TCP setup and the accept queue from the picture.
+Consult (DeepSeek, 2 rounds) on the fix: fork + SO_REUSEPORT is out (one DB owner: EXCLUSIVE locking,
+WAL index in the wasm heap); parking idle sockets in io_uring slots and installing them back
+(FIXED_FD_INSTALL) rejected: same churn count, two state machines, spin risk at EMFILE. Plan E22:
+connections live only in io_uring fixed-file slots (accept4, register into a chosen slot, close the
+fd), recv/send/close as ring ops, ~5 rings x 65535 slots, generation in user_data, one send in flight
+per connection.
+
+## E22: connections in io_uring fixed-file slots (1 Nov) — fixed in E23
+The epoll loop and its ten host calls are replaced by io_uring, driven from the WAT. host.c sets up
+rings (`ring_new`: ring fd, mmaps, a sparse fixed-file table of min(RLIMIT_NOFILE, 65535) slots),
+registers a provided-buffer ring that lives in wasm memory (`ring_pbuf`), and has one submit/reap call
+(`ring_go`: copy the SQEs the WAT wrote, enter, copy the CQEs back). The WAT writes every SQE:
+- multishot ACCEPT straight into a free slot (IORING_FILE_INDEX_ALLOC), on one ring at a time; at a
+  high-water mark (n - min(n/4, 4096)) it is cancelled and moved to the next ring (up to 8 rings,
+  cid = ring << 16 | slot); slots do not count against RLIMIT_NOFILE, so no idle sweep any more
+- multishot RECV with buffer select (2048 x 2 KiB buffers per ring, recycled by the WAT)
+- the batch's responses as SENDs straight from OUTB with MSG_DONTWAIT (they complete in the submit;
+  a remainder is copied out and sent by an ordinary SEND); one send in flight per connection
+- close: SHUTDOWN linked to CLOSE of the slot; a generation per cid in user_data
+- ring 0 (DEFER_TASKRUN) is the one waited on; it holds a multishot POLL on each other ring's fd
+- Ubuntu's 6.8.0-147 rejects the buffer-ring registration unless resv[0]=1 (same workaround as ObjC)
+42/42 on opt-box and Synteq. Synteq sc.sh 250k: 19.0k rps, p95 230 ms, 29.2 us/req, 56% CPU,
+250,000 dials: the connections are kept, but rps was 28% short of the offered load. ul had no request
+timeout, so a request that never got an answer was never counted; ul now reports in-flight requests
+at the end (`stuck>2s`). Rerun: 89,770 users stuck (opt-box 50k x 0.35: 13,655).
+Bug, found with a debug build that logs connection states every 5 s: when a batch has over 1024
+responses (after a checkpoint stall), `$sqe` submits mid-staging and reaps the first sends'
+completions before `$from` was taken, so `$scan_sends` never saw them and `$on_cqe` ignores that kind.
+Those connections kept "send in flight" forever (later responses queued behind it), and `$nsendb`
+never got back to 0, so every later flush spent ~100 ms in the fallback wait loop.
+
+## E23: E22 with the send scan fixed (1 Nov) — kept
+`$from` is taken before staging. The fallback for a send that did not complete in the submit (EAGAIN:
+the kernel retries it later, reading OUTB) waits up to ~20 ms, then ASYNC_CANCELs what is still out
+(those connections are dropped), so OUTB is never reused under a send. 42/42 on opt-box and Synteq.
+- opt-box 50k x 0.35 (debug build): 15.1k rps (all of the offered load), p50 1.3 ms, 0 stuck, nlate 0
+- opt-box 70k x 0.35 (two rings): 21.1k rps (all of it), p50 1.5 ms, p95 85 ms, 0 stuck
+- opt-box CPUQuota=40%, 4000 x 0.007, interleaved: E21 34.8k, 35.6k, 35.5k (11.11, 10.81, 10.80
+  us/req); E23 35.8k, 35.3k, 34.4k (10.90, 10.93, 11.05). Same CPU per request when no connection churns.
+- Synteq sc.sh 250k (ul spread over 32 source addresses from here on): 26.3k rps, p50 2.05 ms,
+  p95 335 ms, p99 645 ms, max 1.42 s, 0 errors, 0 stuck, 250,000 dials, cgroup 76.8%, 29.2 us/req,
+  614 MB. E21: 21.1k rps, p95 >5.3 s. ObjC in the same session (8 addresses): 26.4k rps, p95 8.6 ms.
+The remaining tail is the checkpoint stall (fsyncs on the event loop): that is now what limits the
+score, not connections.

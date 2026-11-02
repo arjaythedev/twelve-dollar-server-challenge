@@ -7,8 +7,8 @@ compiled ahead of time to native code by WasmEdge, and run by a small C embedder
 
 | File | Language | What it does |
 |---|---|---|
-| `src/app.wat` | WAT, hand-written | Everything a request touches: the epoll loop, HTTP/1.1 parsing, routing, JSON reading and writing, base64url, SHA-256 and HMAC for the HS256 JWT check, SQL statement calls, group commit, idle-connection eviction, and the B-tree read paths (record decoding, which cursors to open and seek) |
-| `src/host.c` | C, ~125 lines | WasmEdge embedder: loads the AOT-compiled module, gives it WASI (used only by SQLite for file I/O, env vars and the clock) and ten Linux calls as imports: `listen`, `epoll_create`, `epoll_ctl`, `epoll_wait`, `accept4`, `recv`, `send`, `close`, and two batched ones: `epoll_recv` (epoll_wait, then one `recv` per readable socket) and `sendmany` (one `send` per response record). Each import moves its arguments between wasm memory and syscalls; there is no request logic in it |
+| `src/app.wat` | WAT, hand-written | Everything a request touches: the io_uring event loop (it writes every submission entry and reads every completion itself), HTTP/1.1 parsing, routing, JSON reading and writing, base64url, SHA-256 and HMAC for the HS256 JWT check, SQL statement calls, group commit, and the B-tree read paths (record decoding, which cursors to open and seek) |
+| `src/host.c` | C, ~175 lines | WasmEdge embedder: loads the AOT-compiled module, gives it WASI (used only by SQLite for file I/O, env vars and the clock) and five Linux imports: `listen`; `ring_new` (sets up an io_uring and its fixed-file table); `ring_pbuf` (registers a provided-buffer ring that lives in wasm memory); `ring_go` (copies the SQEs the WAT wrote into the ring, calls `io_uring_enter`, copies the completions back); and `membase` (the native address of wasm memory, which the kernel needs for buffer addresses). There is no request logic in it |
 | `src/sqlite_glue.c` | C, ~70 lines | `#include`s the stock SQLite amalgamation and exports what the WAT calls: the public SQL API, and one-line wrappers over SQLite's B-tree cursor functions (open, first, next, previous, seek, payload). No decisions are made here |
 | SQLite 3.54.1 | C, stock | The amalgamation, unmodified, compiled to wasm with wasi-sdk |
 | wasi-libc | C | From wasi-sdk, for SQLite (malloc, file calls) |
@@ -29,23 +29,30 @@ downloaded by `build.sh`:
 
 ## Design
 
-- **One thread, epoll, direct.** The WAT runs its own epoll loop through the host's `sys` imports
-  (WASI's `poll_oneoff` would re-register every socket on every call). Host calls are batched: one call
-  waits and receives on every readable socket of the batch, one call sends all of the batch's responses.
-- **Idle sockets near the fd limit.** With `LimitNOFILE=65535` and one keep-alive socket per user, the
-  server closes sockets idle for 1.5 s or more once it holds over 60,000; `bench/load.js` never waits
-  less than 3 s between a user's requests, so a closed idle socket is simply reopened by the client.
+- **One thread, io_uring, direct.** The WAT runs the loop through io_uring, with the host only copying
+  submission and completion entries in and out (WASI's `poll_oneoff` would re-register every socket on
+  every call). A multishot accept puts each new connection straight into a slot of the ring's
+  fixed-file table, so connections never take a process file descriptor: with `LimitNOFILE=65535` the
+  server still keeps every user's keep-alive connection, in up to 8 rings of 65,535 slots (250,000
+  users tested). The accept moves to the next ring when one gets near full. Each connection has a
+  multishot receive with buffer selection (2,048 x 2 KiB buffers per ring, in wasm memory). Ring 0 is
+  the one waited on and holds a multishot poll on each other ring's fd.
+- **Responses go out from one buffer.** After COMMIT, every response of the batch is a send straight
+  from the batch's output buffer, all submitted in one `io_uring_enter`; with `MSG_DONTWAIT` they
+  complete inside that call. A remainder the socket did not take is copied out and sent on its own;
+  a send the kernel would retry later is waited for briefly and then cancelled (the connection is
+  closed), so the buffer is never reused under a send. One send in flight per connection.
 - **SQLite:** WAL, `synchronous=NORMAL`, persistent prepared statements, 64 MiB page cache,
   `temp_store=MEMORY` (WASI has no temp directory). WASI has no shared memory, so the connection runs with
   `locking_mode=EXCLUSIVE` (the WAL index lives in its heap); it is the only connection anyway.
   `wal_autocheckpoint=16000` (64 MiB of WAL): with no thread or fork in WASI, checkpoints run on the
   event loop and their two fsyncs stop it, so they run every few seconds instead of every ~0.5 s.
-- **Group commit.** One transaction per epoll batch: BEGIN after `epoll_wait`, every request of the batch,
-  then COMMIT, and only then are the responses sent (all of them, from one buffer, in one host call). A
-  transaction that has written stays open for up to 2 ms across `epoll_wait` calls to take in more
-  writes; one that has only read commits at the end of its batch. If COMMIT fails, the batch's
-  connections are closed unanswered, so no 201 is ever sent for a row that isn't committed. A per-fd
-  generation counter makes sure a held response never goes to a new connection that reused the fd.
+- **Group commit.** One transaction per batch of completions: BEGIN after the wait, every request of
+  the batch, then COMMIT, and only then are the responses sent. A transaction that has written stays
+  open for up to 2 ms across waits to take in more writes; one that has only read commits at the end of
+  its batch. If COMMIT fails, the batch's connections are closed unanswered, so no 201 is ever sent for
+  a row that isn't committed. A generation counter per slot, carried in each entry's `user_data`, makes
+  sure a held response or a late completion never reaches a new connection in the same slot.
 - **Reads on SQLite's B-tree layer.** `/feed` and `GET /posts/:id` skip SQL's bytecode engine: the WAT
   opens cursors on `posts`, `users`, `posts_created_at_id_idx` and `likes_post_id_idx` (root pages read
   from `sqlite_schema` at start), seeks them, decodes the records itself, and counts likes with an index

@@ -613,3 +613,29 @@ A/B at 300k (Synteq, interleaved, 3 reps, 0 errors everywhere): E30 p95 89.5, 78
 27.62, 27.84, 28.09 us/req, 676, 696, 697 MB. Same speed within the box's noise. Kept as a robustness fix;
 it can't be shown on Synteq (16 GB never runs short of contiguous pages). Committed, not pushed (the PR
 head waits for the scorer's ruling on nBackfill).
+
+## F1: fallback if nBackfill writes are ruled out: E30 with CKPT_DEFER=0 (2 Nov, Synteq) — measurement
+Same build, all checkpoints inline at the end of $flush (database sync on the loop, no wal_backfill calls).
+locking_mode=EXCLUSIVE with one connection means no public-API way (a reader's read mark, a VFS) keeps the
+WAL from restarting before an async database sync completes, so inline is the honest fallback.
+sc.sh 300k, interleaved, 3 reps, 0 errors: deferred (E30) p95 74.3, 82.5, 104.5 / p99 163, 189, 260 /
+max 455, 559, 723 ms, 27.76, 27.90, 28.19 us/req; inline p95 265, 245, 220 / p99 565, 475, 405 / max
+1517, 841, 736 ms, 27.91, 27.62, 27.34 us/req. Inline keeps CPU the same but p99 is ~2.5x higher (like
+E24b: 440-560 ms); the scorer's 5-minute hold at 270k with the deferred sync was already p99 845 ms, so
+inline would likely score lower there (unchecked).
+
+## S12: syscall and io_uring census at 300k, E30 (2 Nov, Synteq) — measurement
+bpftrace (cen.bt), 20 s in the middle of a 300k sc.sh run (31.6k rps, p95 154, p99 460 ms, 28.6 us/req):
+SEND 635,432 (one per request), POLL_ADD 39,802 (ring 0's poll on the other rings, re-armed ~2k/s), RECV
+2,186 (multishot re-arms), FSYNC 6; 1,314,533 CQEs (~2.1 per request). Syscalls: pwritev 251,717 (WAL
+frames, header + page each, ~12.6k/s), io_uring_enter 79,704, preadv 28,361, everything else < 200.
+In the E29 profile (perf41) the pwritev path is < 0.5 % self time, so buffering WAL writes is not worth it.
+Top app functions (symbol map): sqlite3BtreeTableMoveto 6.2 % (mostly the 20 author seeks per feed:
+random user ids; the posts already step back with cur_prev and the like counts are one range scan),
+record 2.3, pcache1Fetch 2.3, putjson 1.7, put 1.6, IndexMoveto 1.5, after_recv 1.5. Kernel time is the
+network path (both ends local here). No large CPU lever left inside the app.
+
+## S13: 5-minute hold at 320k, E30 (2 Nov, Synteq) — measurement
+hold.sh: 33.5k rps, p50 39.4 ms, p95 505 ms, p99 1,160 ms, max 2.10 s, 0 errors, cgroup 94.4 %,
+28.23 us/req, 1,122 MB. Fails (p95 and p99), like the last E29 hold in S11 (365 / 1,165); single run, not
+paired, so no comparison with E29 is drawn. 320k stays this box's edge.

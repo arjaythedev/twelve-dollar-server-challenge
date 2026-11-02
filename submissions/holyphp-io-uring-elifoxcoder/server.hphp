@@ -336,6 +336,18 @@ class Server {
 
     /* ------------------------------------------------------- setup */
 
+    public function open_bt_cursors(): void {
+        if ($this->btPosts == 0) { $this->btPosts = bt_open($this->db, "posts", 0); }
+        if ($this->btLikes == 0) { $this->btLikes = bt_open($this->db, "likes_post_id_idx", 1); }
+        if ($this->btUsers == 0) { $this->btUsers = bt_open($this->db, "users", 0); }
+    }
+
+    public function close_bt_cursors(): void {
+        if ($this->btPosts != 0) { bt_close($this->btPosts); $this->btPosts = 0; }
+        if ($this->btLikes != 0) { bt_close($this->btLikes); $this->btLikes = 0; }
+        if ($this->btUsers != 0) { bt_close($this->btUsers); $this->btUsers = 0; }
+    }
+
     public function open(string $host, int $port): bool {
         $path = getenv("SQLITE_PATH");
         if ($path === false || $path == "") { $path = "feed.db"; }
@@ -455,11 +467,9 @@ class Server {
                 return false;
             }
         }
-        /* generic B-tree cursors: posts by rowid, the likes index by key,
-         * users by rowid. They are only used when all three open. */
-        $this->btPosts = bt_open($db, "posts", 0);
-        $this->btLikes = bt_open($db, "likes_post_id_idx", 1);
-        $this->btUsers = bt_open($db, "users", 0);
+        /* Generic B-tree cursors are reopened around write batches so SQLite
+         * never has to save a low-level cursor position across an INSERT. */
+        $this->open_bt_cursors();
 
         $this->srv = intval($srv);
         /* TCP_NODELAY is inherited by accepted sockets on Linux, so set it
@@ -1246,8 +1256,12 @@ class Server {
         $n = count($this->pending);
         if ($n == 0) { return; }
 
+        /* Close low-level cursors before SQLite writes; reopen after commit or
+         * rollback so no cursor position is retained across mutations. */
+        $this->close_bt_cursors();
         if (!$this->txn($this->beginTx)) {
             $this->fail_writes();
+            $this->open_bt_cursors();
             $this->flush();
             return;
         }
@@ -1319,6 +1333,7 @@ class Server {
             $this->txn($this->rollbackTx);
             $this->fail_writes();
         }
+        $this->open_bt_cursors();
         $this->flush();
     }
 

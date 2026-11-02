@@ -2503,6 +2503,8 @@ static _Thread_local int g_epfd = -1;
 #define HP_UR_ENTER_GET   1
 /* IORING_ENTER_EXT_ARG is bit 3 (verified against io_uring.h + the probe) */
 #define HP_UR_ENTER_EXT   8
+/* io_uring SQ flags: deferred task work is pending (uapi value 1 << 2) */
+#define HP_UR_SQ_TASKRUN  (1U << 2)
 /* IORING_SETUP_CQSIZE = bit 3, IORING_SETUP_CLAMP = bit 4 (uapi io_uring.h) */
 #define HP_UR_SETUP_CQSIZE (1U << 3)
 #define HP_UR_SETUP_CLAMP   (1U << 4)
@@ -2760,6 +2762,7 @@ struct hp_uring_ring {
     struct hp_uring_cqe *cqes;
     uint32_t *sqarr;
     volatile uint32_t *sq_head, *sq_tail, *cq_head, *cq_tail;
+    volatile uint32_t *sq_flags;
     uint32_t sqtail, cqhead, sqmask, cqmask;
     struct hp_urfds *dirs;
     uint32_t dircap;
@@ -2849,6 +2852,18 @@ static void hp_ur_use_ring(hp_sock fd) {
 static void hp_ur_slot_freed(hp_sock fd) {
     int r = hp_ur_ring_of(fd);
     if (r >= 0) hp_ur_rings[r].accept_full = 0;
+}
+
+/* An enter is only needed when the ring has SQEs to submit, deferred task
+ * work to flush, or completions waiting. Idle rings cost no syscall. */
+static int hp_ur_ring_needs_enter(struct hp_uring_ring *rg) {
+    if (rg->sqtail != __atomic_load_n(rg->sq_head, __ATOMIC_ACQUIRE)) return 1;
+    if (rg->sq_flags &&
+        (__atomic_load_n(rg->sq_flags, __ATOMIC_ACQUIRE) & HP_UR_SQ_TASKRUN))
+        return 1;
+    if (__atomic_load_n(rg->cq_head, __ATOMIC_ACQUIRE) !=
+        __atomic_load_n(rg->cq_tail, __ATOMIC_ACQUIRE)) return 1;
+    return 0;
 }
 
 /* Grow the deferred-close and retry queues. They are simple FIFOs, so their
@@ -3195,6 +3210,7 @@ static bool hp_ur_ring_setup(struct hp_uring_ring *r) {
     r->cqmask = *(volatile uint32_t *)((char *)cqring + p.cq_off.ring_mask);
     r->sq_head = (volatile uint32_t *)((char *)sqring + p.sq_off.head);
     r->sq_tail = (volatile uint32_t *)((char *)sqring + p.sq_off.tail);
+    r->sq_flags = (volatile uint32_t *)((char *)sqring + p.sq_off.flags);
     r->cq_head = (volatile uint32_t *)((char *)cqring + p.cq_off.head);
     r->cq_tail = (volatile uint32_t *)((char *)cqring + p.cq_off.tail);
     r->sqarr = (uint32_t *)((char *)sqring + p.sq_off.array);
@@ -4171,7 +4187,9 @@ static void hp_uring_wait(harr *in, harr *out, int timeout_ms) {
          * DEFER_TASKRUN work), then block on the epoll set that watches all
          * ring fds and any overflow connections. */
         for (int r = 0; r < hp_ur_nrings; r++) {
-            hp_ur_cur = &hp_ur_rings[r];
+            struct hp_uring_ring *rg = &hp_ur_rings[r];
+            if (!hp_ur_ring_needs_enter(rg)) continue;
+            hp_ur_cur = rg;
             long to_submit = (long)(hp_ur_sqtail -
                 __atomic_load_n(hp_ur_sq_head, __ATOMIC_ACQUIRE));
             hp_ur_enter(to_submit > 0 ? to_submit : 0, 0, 0);
@@ -4184,22 +4202,20 @@ static void hp_uring_wait(harr *in, harr *out, int timeout_ms) {
         }
         struct epoll_event evs[256];
         int n = epoll_wait(epfd, evs, 256, ep_to);
-        /* level-triggered eventfds must be re-armed by reading the counter */
-        for (int r = 0; r < hp_ur_nrings; r++) {
-            if (hp_ur_rings[r].efd < 0) continue;
-            uint64_t v;
-            while (read(hp_ur_rings[r].efd, &v, sizeof v) == (ssize_t)sizeof v)
-                ;
-        }
         for (int i = 0; i < n; i++) {
             int efd = evs[i].data.fd;
             int is_ring = 0;
-            for (int r = 0; r < hp_ur_nrings; r++)
-                if (efd == hp_ur_rings[r].fd ||
-                    (hp_ur_rings[r].efd >= 0 && efd == hp_ur_rings[r].efd)) {
+            for (int r = 0; r < hp_ur_nrings; r++) {
+                if (efd == hp_ur_rings[r].fd) { is_ring = 1; break; }
+                if (hp_ur_rings[r].efd >= 0 && efd == hp_ur_rings[r].efd) {
+                    /* level-triggered: clear the counter we just consumed */
+                    uint64_t v;
+                    while (read(efd, &v, sizeof v) == (ssize_t)sizeof v)
+                        ;
                     is_ring = 1;
                     break;
                 }
+            }
             if (is_ring) continue;       /* ring: drained below */
             if (in) hp_arr_push(in, hp_of_int(efd));
         }

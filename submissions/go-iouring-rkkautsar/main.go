@@ -144,17 +144,17 @@ func main() {
 	}
 	path := os.Getenv("SQLITE_PATH")
 
-	shards := 3
+	shards := 2
 	if v := os.Getenv("SHARDS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 8 {
 			shards = n
 		}
 	}
-	layout := muxMixed
+	layout := muxReadSharedWrite
 	switch strings.ToLower(os.Getenv("MUX_LAYOUT")) {
-	case "", "mixed":
-	case "read", "readwrite", "read-shared-write":
-		layout = muxReadSharedWrite
+	case "", "read", "readwrite", "read-shared-write":
+	case "mixed":
+		layout = muxMixed
 	case "feedpost", "feed-post", "feedpost-shared-write":
 		layout = muxFeedPostSharedWrite
 	default:

@@ -14,21 +14,24 @@ statements cache only query plans, as allowed by rule 5.
 
 ## Architecture
 
-- **Raw io_uring is the default.** The process starts three `SO_REUSEPORT` listener shards.
-  Each shard owns an io_uring, a 65,000-entry registered file table (195,000 slots across
-  shards), its HTTP parser, and its output queues. Accepted sockets use
+- **Raw io_uring is the default.** The default layout starts two `SO_REUSEPORT` listener
+  shards. Each shard owns an io_uring, a 65,000-entry registered file table (130,000 slots
+  across shards), its HTTP parser, and its output queues. Accepted sockets use
   `IORING_FILE_INDEX_ALLOC`, so accepted connections do not consume the process
   `RLIMIT_NOFILE` budget. Sparse file-table registration is requested first; the
   registration size must fit inside the hard `RLIMIT_NOFILE`, otherwise Linux returns
   `EINVAL` and the normal fallback hits `EMFILE`. The 65,000 size is deliberately below
   the challenge's 65,535 hard limit. If ring setup still fails, the process falls back to
   the Go connection loop; that loop backs off on `EMFILE`/`ENFILE` instead of spinning.
-- **One DB owner per shard.** Feed requests, `GET /posts/:id` batches, and create/like
-  batches are sent to the shard's blocking DB worker. There is no goroutine per connection
-  and no per-request transport goroutine. With coalescing enabled, each worker batches
-  concurrent feed requests into one query, post IDs into one `IN` query, and writes into
-  one transaction. With `READ_COALESCE=0`, reads go through the generic single-request
-  handler instead, so no read result is shared between requests.
+- **Read worker per shard, one shared writer.** The default layout has one blocking read
+  worker per shard for feed and post requests, and one writer shared by both shards for
+  create/like batches. There is no goroutine per connection and no per-request transport
+  goroutine. `MUX_LAYOUT=mixed` instead gives each shard one worker for feed, post, and
+  write jobs; `MUX_LAYOUT=feedpost` gives each shard separate feed and post workers. With
+  coalescing enabled, read workers batch concurrent feed requests into one query and post
+  IDs into one `IN` query, and the writer batches writes into one transaction. With
+  `READ_COALESCE=0`, reads go through the generic single-request handler instead, so no
+  read result is shared between requests.
 - **Durable writes.** The raw writer uses `BEGIN IMMEDIATE`/`COMMIT` and only queues a
   201/200 response after the commit succeeds. SQLite runs WAL with `synchronous=NORMAL`;
   the schema is unchanged. The Go fallback group-commits writes every `WRITE_BATCH_MS`
@@ -64,8 +67,8 @@ statements cache only query plans, as allowed by rule 5.
 | `JWT_SECRET` | required by the challenge | HS256 signing secret |
 | `HOST`, `PORT` | `127.0.0.1`, `3000` | Listen address |
 | `URING` | unset/`1` | `0` selects the Go fallback |
-| `SHARDS` | `3` | io_uring listener shards |
-| `MUX_LAYOUT` | `mixed` | `mixed`: one feed/post/write worker per shard; `read`: one read worker per shard plus one shared writer; `feedpost`: one feed and one post worker per shard plus one shared writer |
+| `SHARDS` | `2` | io_uring listener shards |
+| `MUX_LAYOUT` | `read` | `read`: one read worker per shard plus one shared writer; `mixed`: one feed/post/write worker per shard; `feedpost`: one feed and one post worker per shard plus one shared writer |
 | `READ_CONNS` | `2` | SQLite read connections |
 | `READ_COALESCE` | `1` | `0` disables in-flight read sharing |
 | `READ_BATCH_US` | `500` | Go fallback read window |

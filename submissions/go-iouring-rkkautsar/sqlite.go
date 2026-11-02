@@ -156,25 +156,28 @@ const (
 			 LIMIT 20
 		) p`
 	getPostSQL = `
-		SELECT json_object(
+		SELECT json_object('post', json_object(
 			'id', p.id,
 			'body', p.body,
 			'created_at', p.created_at,
 			'author', u.username,
-			'like_count', (SELECT count(*) FROM likes l WHERE l.post_id = p.id))
+			'like_count', (SELECT count(*) FROM likes l WHERE l.post_id = p.id)))
 		  FROM posts p JOIN users u ON u.id = p.user_id
 		 WHERE p.id = ?`
 	insertPostSQL = "INSERT INTO posts (user_id, body) VALUES (?, ?) RETURNING id, created_at"
 	postExistsSQL = "SELECT 1 FROM posts WHERE id = ?"
-	insertLikeSQL = "INSERT INTO likes (user_id, post_id) VALUES (?, ?) ON CONFLICT (user_id, post_id) DO NOTHING"
-	healthSQL     = "SELECT 1"
+	insertLikeSQL = `INSERT INTO likes (user_id, post_id)
+		SELECT ?1, ?2 WHERE EXISTS (SELECT 1 FROM posts WHERE id = ?2)
+		ON CONFLICT (user_id, post_id) DO NOTHING`
+	healthSQL = "SELECT 1"
 )
 
 type readConn struct {
-	db      *sqliteConn
-	feed    *sqliteStmt
-	getPost *sqliteStmt
-	health  *sqliteStmt
+	db        *sqliteConn
+	feed      *sqliteStmt
+	getPost   *sqliteStmt
+	health    *sqliteStmt
+	postStmts map[int]*sqliteStmt
 }
 
 func newReadConn(path string) (*readConn, error) {
@@ -182,7 +185,7 @@ func newReadConn(path string) (*readConn, error) {
 	if err != nil {
 		return nil, err
 	}
-	rc := &readConn{db: db}
+	rc := &readConn{db: db, postStmts: make(map[int]*sqliteStmt)}
 	if rc.feed, err = db.prepare(feedSQL); err != nil {
 		db.close()
 		return nil, err

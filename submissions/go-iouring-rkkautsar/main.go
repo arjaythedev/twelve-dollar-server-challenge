@@ -421,24 +421,6 @@ run:
 				ID: id, Body: []byte(j.body), CreatedAt: created, Author: []byte(j.username),
 			}
 		case writeLike:
-			ex := w.postExists
-			ex.reset()
-			if err := ex.bindInt64(1, j.postID); err != nil {
-				ok = false
-				break run
-			}
-			row, err := ex.step()
-			if err != nil {
-				ok = false
-				break run
-			}
-			if !row {
-				ex.reset()
-				results[i].notFound = true
-				continue
-			}
-			ex.reset()
-
 			st := w.insertLike
 			st.reset()
 			if err := st.bindInt64(1, j.userID); err != nil {
@@ -449,13 +431,36 @@ run:
 				ok = false
 				break run
 			}
-			row, err = st.step()
+			row, err := st.step()
 			if err != nil || row {
 				ok = false
 				break run
 			}
-			results[i].already = st.changes() == 0
+			changed := st.changes()
 			st.reset()
+			if changed > 0 {
+				results[i].already = false
+				continue
+			}
+			// Zero rows means duplicate like or missing post; only the
+			// fallback needs the separate existence check.
+			ex := w.postExists
+			ex.reset()
+			if err := ex.bindInt64(1, j.postID); err != nil {
+				ok = false
+				break run
+			}
+			row, err = ex.step()
+			if err != nil {
+				ok = false
+				break run
+			}
+			ex.reset()
+			if !row {
+				results[i].notFound = true
+				continue
+			}
+			results[i].already = true
 		}
 	}
 
@@ -680,10 +685,7 @@ func (a *app) loadPost(id int64) readResp {
 		a.reads <- rc
 		return readResp{status: http.StatusNotFound, body: []byte(`{"error":"post not found"}`)}
 	}
-	b := make([]byte, 0, 256)
-	b = append(b, `{"post":`...)
-	b = append(b, st.columnText(0)...)
-	b = append(b, '}')
+	b := append([]byte(nil), st.columnText(0)...)
 	st.reset()
 	a.reads <- rc
 	return readResp{status: http.StatusOK, body: b, packet: makePacket(http.StatusOK, b)}
@@ -695,18 +697,25 @@ func (a *app) loadPosts(ids []int64) map[int64]readResp {
 		return nil
 	}
 	rc := <-a.reads
-	q := strings.Replace(getPostSQL, "SELECT json_object", "SELECT p.id, json_object", 1)
-	ph := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
-	q = strings.Replace(q, "WHERE p.id = ?", "WHERE p.id IN ("+ph+")", 1)
-	st, err := rc.db.prepare(q)
-	if err != nil {
-		a.reads <- rc
-		return nil
+	n := len(ids)
+	st, ok := rc.postStmts[n]
+	if !ok {
+		q := strings.Replace(getPostSQL, "SELECT json_object", "SELECT p.id, json_object", 1)
+		ph := strings.TrimSuffix(strings.Repeat("?,", n), ",")
+		q = strings.Replace(q, "WHERE p.id = ?", "WHERE p.id IN ("+ph+")", 1)
+		var err error
+		st, err = rc.db.prepare(q)
+		if err != nil {
+			a.reads <- rc
+			return nil
+		}
+		rc.postStmts[n] = st
 	}
+	st.reset()
 	out := make(map[int64]readResp, len(ids))
 	for i, id := range ids {
 		if err := st.bindInt64(i+1, id); err != nil {
-			st.close()
+			st.reset()
 			a.reads <- rc
 			return nil
 		}
@@ -722,13 +731,10 @@ func (a *app) loadPosts(ids []int64) map[int64]readResp {
 			break
 		}
 		id := st.columnInt64(0)
-		b := make([]byte, 0, 256)
-		b = append(b, `{"post":`...)
-		b = append(b, st.columnText(1)...)
-		b = append(b, '}')
+		b := append([]byte(nil), st.columnText(1)...)
 		out[id] = readResp{status: http.StatusOK, body: b, packet: makePacket(http.StatusOK, b)}
 	}
-	st.close()
+	st.reset()
 	a.reads <- rc
 	for _, id := range ids {
 		if _, ok := out[id]; ok {

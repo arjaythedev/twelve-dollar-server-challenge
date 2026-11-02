@@ -12,9 +12,11 @@ from dev import (
     LoadGenerator,
     analyze_profile,
     cpu_delta,
+    decode_json,
     duration_seconds,
     kernel_stage,
     load,
+    mapping,
     parse_counters,
     profile_stage,
 )
@@ -106,6 +108,35 @@ class NativeProfileTests(unittest.TestCase):
             child.wait.assert_any_call(timeout=15)
             child.kill.assert_not_called()
             self.assertTrue((Path(directory) / "run.json").is_file())
+
+    def test_cpp_generator_starts_through_gate_without_k6_api(self) -> None:
+        args = Arguments(action="bench", label="native-gate", ramp="30s", hold="60s")
+        generator = LoadGenerator(["load_generator"], 0, "test", "test", kind="cpp")
+        snapshot: dict[str, JSONValue] = {
+            "user_usec": 0,
+            "system_usec": 0,
+            "main_user_ticks": 0,
+            "main_system_ticks": 0,
+        }
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch("dev.subprocess.Popen") as launch,
+            patch("dev.command", return_value="100"),
+            patch("dev.k6_status") as k6_api,
+            patch("dev.counters", return_value=snapshot),
+            patch.object(LoadGenerator, "sample", return_value={}),
+        ):
+            output = Path(directory)
+            (output / "generator.ready").touch()
+            child = launch.return_value.__enter__.return_value
+            child.pid = 1
+            child.wait.return_value = 0
+            child.poll.side_effect = lambda: 0 if (output / "generator.start").exists() else None
+            self.assertEqual(load(args, generator, "observer", output), 0)
+            k6_api.assert_not_called()
+            self.assertEqual(
+                mapping(decode_json((output / "run.json").read_bytes()))["generator"], "cpp"
+            )
 
     def test_process_name_does_not_shift_cpu_fields(self) -> None:
         fields = ["S", *(["0"] * 10), "123", "45", *(["0"] * 30)]

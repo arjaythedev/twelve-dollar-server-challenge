@@ -6,6 +6,7 @@ WORKDIR /build
 COPY CMakeLists.txt ./
 COPY server ./server
 COPY checks/transport.cpp ./checks/transport.cpp
+COPY load ./load
 ARG TDS_SANITIZERS=OFF
 RUN cmake -S . -B out -G Ninja -DCMAKE_BUILD_TYPE=Release -DTDS_SANITIZERS=${TDS_SANITIZERS} \
     && cmake --build out --parallel 2
@@ -17,6 +18,7 @@ RUN apt-get update \
     && useradd --uid 10001 --create-home benchmark
 WORKDIR /app
 COPY --from=build /build/out/server ./server
+COPY --from=build /build/out/load_generator ./load_generator
 USER 10001:10001
 ENV HOST=0.0.0.0 PORT=3000 SQLITE_PATH=/data/feed.db
 ENTRYPOINT ["/app/server"]

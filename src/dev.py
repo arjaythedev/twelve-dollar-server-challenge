@@ -55,6 +55,7 @@ RESULTS = ROOT / "src/benchmarks/results.json"
 
 type JSONValue = bool | int | float | str | list[JSONValue] | dict[str, JSONValue] | None
 type ProfileScope = Literal["user", "kernel", "all"]
+type GeneratorKind = Literal["cpp", "k6"]
 
 
 def profile_event(scope: ProfileScope) -> str:
@@ -77,6 +78,7 @@ class Arguments(argparse.Namespace):
     hold: str
     ramp: str
     k6: Path | None
+    generator: GeneratorKind
     save: Path | None
     file: Path
     json_output: bool
@@ -89,6 +91,8 @@ class Result(TypedDict):
     name: str
     runtime: str
     load_generator: str
+    generator: NotRequired[str]
+    client_sampled_peak_bytes: NotRequired[int]
     sqlite: str
     users: int
     hold: str
@@ -310,6 +314,10 @@ def read_results(path: Path) -> list[Result]:
                 passed=passed,
             )
         )
+        if "generator" in row:
+            results[-1]["generator"] = text(row, "generator")
+        if "client_sampled_peak_bytes" in row:
+            results[-1]["client_sampled_peak_bytes"] = integer(row, "client_sampled_peak_bytes")
     return results
 
 
@@ -339,11 +347,12 @@ def summarize(output: Path) -> Result:
     count = integer(requests, "count")
     if count <= 0:
         raise ValueError("no HTTP requests were measured")
-    return Result(
+    result = Result(
         date=datetime.fromtimestamp((output / "run.json").stat().st_mtime, UTC).date().isoformat(),
         name=output.name,
         runtime=f"C++ {text(runtime, 'version')}",
         load_generator=text(run, "load_generator") if "load_generator" in run else "native",
+        generator=text(run, "generator") if "generator" in run else "k6",
         sqlite=text(runtime, "sqlite"),
         users=int(setting("VUS")),
         hold=setting("DURATION"),
@@ -363,6 +372,22 @@ def summarize(output: Path) -> Result:
             and integer(after, "oom_kill") == 0
         ),
     )
+    samples = read_json(output / "samples.json")
+    if not isinstance(samples, list):
+        raise ValueError("client samples must be an array")
+    memory_key = (
+        "client_cgroup_bytes"
+        if result["load_generator"] == "docker_loopback"
+        else "client_rss_bytes"
+    )
+    peak_bytes = 0
+    for value in samples:
+        sample = mapping(value)
+        if memory_key in sample:
+            peak_bytes = max(peak_bytes, integer(sample, memory_key))
+    if peak_bytes:
+        result["client_sampled_peak_bytes"] = peak_bytes
+    return result
 
 
 def show_results(results: list[Result]) -> None:
@@ -371,6 +396,8 @@ def show_results(results: list[Result]) -> None:
             "Run",
             "Runtime",
             "Client",
+            "Generator",
+            "Client MiB",
             "Users",
             "Hold",
             "Req/s",
@@ -389,6 +416,10 @@ def show_results(results: list[Result]) -> None:
                 f"{row['date']}/{row['name']}",
                 row["runtime"],
                 "loopback" if row["load_generator"] == "docker_loopback" else "native",
+                row.get("generator", "k6"),
+                f"{row['client_sampled_peak_bytes'] / 2**20:.2f}"
+                if "client_sampled_peak_bytes" in row
+                else "-",
                 str(row["users"]),
                 row["hold"],
                 f"{row['rps']:.2f}",
@@ -474,7 +505,11 @@ def cpp_editor(image: str) -> None:
 def native_check() -> None:
     image = build(tests=True)
     cpp_editor(image)
-    for executable, arguments in (("server", ["--self-test"]), ("transport_tests", [])):
+    for executable, arguments in (
+        ("server", ["--self-test"]),
+        ("transport_tests", []),
+        ("load_generator", ["--self-test"]),
+    ):
         print(
             command(
                 "docker",
@@ -572,6 +607,7 @@ class LoadGenerator:
     version: str
     sha256: str
     container: str | None = None
+    kind: GeneratorKind = "k6"
 
     def sample(self, pid: int) -> dict[str, JSONValue]:
         if self.container is None:
@@ -600,6 +636,7 @@ def load_generator(
     args: Arguments, container: str, port: int, output: Path
 ) -> Generator[LoadGenerator]:
     name: str | None = None
+    kind: GeneratorKind = "k6" if args.k6 is not None else args.generator
     if args.k6 is not None:
         k6 = args.k6.resolve()
         prefix = [str(k6)]
@@ -627,23 +664,35 @@ def load_generator(
             "--cap-drop=ALL",
             f"--memory={client_memory}",
             f"--memory-swap={client_memory}",
-            f"--env=GOMEMLIMIT={client_memory * 9 // 10}B",
             f"--network=container:{container}",
             "--ulimit=nofile=1048576:1048576",
             f"--mount=type=bind,source={ROOT},target=/work,readonly",
             f"--mount=type=bind,source={output},target=/results",
-            K6_IMAGE,
         ]
-        version = command("docker", "run", "--rm", "--network=none", K6_IMAGE, "version")
-        sha256 = command(
-            "docker",
-            "run",
-            "--rm",
-            "--network=none",
-            "--entrypoint=sha256sum",
-            K6_IMAGE,
-            "/usr/bin/k6",
-        ).split()[0]
+        if kind == "cpp":
+            metadata = command(
+                "docker",
+                "run",
+                "--rm",
+                "--network=none",
+                "--entrypoint=sh",
+                IMAGE,
+                "-c",
+                "/app/load_generator --version; sha256sum /app/load_generator",
+            ).splitlines()
+            version, sha256 = metadata[0], metadata[1].split()[0]
+        else:
+            prefix += [f"--env=GOMEMLIMIT={client_memory * 9 // 10}B", K6_IMAGE]
+            version = command("docker", "run", "--rm", "--network=none", K6_IMAGE, "version")
+            sha256 = command(
+                "docker",
+                "run",
+                "--rm",
+                "--network=none",
+                "--entrypoint=sha256sum",
+                K6_IMAGE,
+                "/usr/bin/k6",
+            ).split()[0]
         listen = "0.0.0.0:6565"
         target = "http://127.0.0.1:3000"
         summary, tokens, script = (
@@ -651,16 +700,7 @@ def load_generator(
             "/work/seed/tokens.json",
             "/work/bench/load.js",
         )
-    invocation = [
-        *prefix,
-        "run",
-        "--quiet",
-        "--paused",
-        "--address",
-        listen,
-        *(["--local-ips=127.0.0.2-127.0.0.33"] if name is not None else []),
-        "--summary-export",
-        summary,
+    settings = [
         "-e",
         f"BASE_URL={target}",
         "-e",
@@ -671,10 +711,37 @@ def load_generator(
         f"RAMP_UP={args.ramp}",
         "-e",
         f"TOKENS={tokens}",
-        script,
     ]
+    if kind == "cpp":
+        invocation = [
+            *prefix,
+            *settings,
+            "--entrypoint=/app/load_generator",
+            IMAGE,
+            "--summary-export",
+            summary,
+            "--local-ips=127.0.0.2-127.0.0.33",
+            "--ready-file",
+            "/results/generator.ready",
+            "--start-gate",
+            "/results/generator.start",
+        ]
+    else:
+        invocation = [
+            *prefix,
+            "run",
+            "--quiet",
+            "--paused",
+            "--address",
+            listen,
+            *(["--local-ips=127.0.0.2-127.0.0.33"] if name is not None else []),
+            "--summary-export",
+            summary,
+            *settings,
+            script,
+        ]
     try:
-        yield LoadGenerator(invocation, api_port, version, sha256, name)
+        yield LoadGenerator(invocation, api_port, version, sha256, name, kind)
     finally:
         if name is not None:
             inspected = subprocess.run(["docker", "inspect", name], capture_output=True, text=True)
@@ -688,7 +755,7 @@ def load(args: Arguments, generator: LoadGenerator, observer: str, output: Path)
     profiling = args.action == "profile"
     ticks = int(command("docker", "exec", observer, "getconf", "CLK_TCK"))
     samples: list[dict[str, JSONValue]] = []
-    with (output / "k6.log").open("w", encoding="utf-8") as log:
+    with (output / "load.log").open("w", encoding="utf-8") as log:
         with subprocess.Popen(generator.invocation, stdout=log, stderr=subprocess.STDOUT) as child:
             try:
                 initializing = time.monotonic()
@@ -696,10 +763,20 @@ def load(args: Arguments, generator: LoadGenerator, observer: str, output: Path)
                 next_init_sample = next_init_progress = initializing
                 while True:
                     if child.poll() is not None:
-                        raise RuntimeError("k6 exited during initialization; inspect k6.log")
+                        raise RuntimeError(
+                            "generator exited during initialization; inspect load.log"
+                        )
                     try:
-                        status = k6_status(generator.api_port)
-                        if status.get("status") == K6_PAUSED_BEFORE_RUN:
+                        if generator.kind == "cpp":
+                            status: dict[str, JSONValue] = {
+                                "ready": (output / "generator.ready").is_file()
+                            }
+                        else:
+                            status = k6_status(generator.api_port)
+                        if (
+                            status.get("ready") is True
+                            or status.get("status") == K6_PAUSED_BEFORE_RUN
+                        ):
                             break
                     except OSError, http.client.HTTPException:
                         pass
@@ -716,20 +793,24 @@ def load(args: Arguments, generator: LoadGenerator, observer: str, output: Path)
                         except psutil.NoSuchProcess, subprocess.CalledProcessError:
                             if child.poll() is not None:
                                 raise RuntimeError(
-                                    "k6 exited during initialization; inspect k6.log"
+                                    "generator exited during initialization; inspect load.log"
                                 ) from None
                         next_init_sample = now + 2
                     if now >= next_init_progress:
                         print(
-                            f"{args.label}: initializing k6 ({now - initializing:.0f}s)", flush=True
+                            f"{args.label}: initializing {generator.kind} ({now - initializing:.0f}s)",
+                            flush=True,
                         )
                         next_init_progress = now + 30
                     if time.monotonic() >= ready_deadline:
-                        raise RuntimeError("k6 did not initialize within 120 seconds")
+                        raise RuntimeError("generator did not initialize within 120 seconds")
                     time.sleep(0.1)
                 before = counters(observer)
                 started = time.monotonic()
-                k6_status(generator.api_port, resume=True)
+                if generator.kind == "cpp":
+                    (output / "generator.start").touch()
+                else:
+                    k6_status(generator.api_port, resume=True)
                 resumed = time.monotonic() - started
                 next_sample = next_progress = 0.0
                 window: dict[str, JSONValue] = {
@@ -803,16 +884,17 @@ def load(args: Arguments, generator: LoadGenerator, observer: str, output: Path)
             "cgroup_after": after,
             "cpu_scope": "server_cgroup",
             "clock_ticks_per_second": ticks,
-            "initial_k6_status": status,
+            "initial_generator_status": status,
             "cpu": cpu_delta(before, after, ticks),
             "load_generator": "docker_loopback" if generator.container is not None else "native",
+            "generator": generator.kind,
             "load_generator_version": generator.version,
             "load_generator_sha256": generator.sha256,
         },
     )
-    print(f"k6 exit={code}; results={output}", flush=True)
+    print(f"{generator.kind} exit={code}; results={output}", flush=True)
     if code not in (0, 99):
-        raise RuntimeError("load generator aborted or failed; inspect k6.log")
+        raise RuntimeError("load generator aborted or failed; inspect load.log")
     return code
 
 
@@ -1057,6 +1139,7 @@ def show_profile(profile: dict[str, JSONValue]) -> None:
     )
     values = mapping(profile["stages_cpu_ns"])
     stages = [(stage, number(values, stage)) for stage in values]
+    print("Exclusive stack-path categories:")
     for stage, weight in sorted(stages, key=lambda item: item[1], reverse=True):
         print(f"  {PROFILE_STAGES.get(stage, stage):24} {weight / total:6.1%}")
     if "syscalls_cpu_ns" in profile:
@@ -1068,7 +1151,7 @@ def show_profile(profile: dict[str, JSONValue]) -> None:
     hotspots = profile["hotspots"]
     if not isinstance(hotspots, list):
         raise ValueError("profile hotspots must be an array")
-    print("Top functions:")
+    print("Leaf CPU (self):")
     for value in hotspots[:8]:
         row = mapping(value)
         print(f"  {number(row, 'cpu_ns') / total:6.1%}  {text(row, 'symbol')[:100]}")
@@ -1196,7 +1279,7 @@ def main() -> None:
         "--docker", action="store_true", help="also build Linux and run native and HTTP tests"
     )
     for action, description in (
-        ("bench", "run the official k6 workload in Docker"),
+        ("bench", "run the browsing workload in Docker"),
         ("profile", "sample native CPU stacks during the workload"),
     ):
         benchmark = actions.add_parser(action, help=description)
@@ -1208,7 +1291,14 @@ def main() -> None:
         benchmark.add_argument(
             "--ramp", default="30s", help="ramp-up time (default: 30s; confirmation: 60s)"
         )
-        benchmark.add_argument(
+        generator = benchmark.add_mutually_exclusive_group()
+        generator.add_argument(
+            "--generator",
+            choices=("cpp", "k6"),
+            default="cpp",
+            help="load generator (default: cpp; k6 is the reference)",
+        )
+        generator.add_argument(
             "--k6", type=Path, help="native k6 executable; defaults to pinned Linux k6 in Docker"
         )
         benchmark.add_argument("--save", type=Path, default=RESULTS if action == "bench" else None)

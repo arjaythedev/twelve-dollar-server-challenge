@@ -24,8 +24,6 @@ class Server
         std::function<void(std::span<const Request *const>, std::span<Response>)> handle;
     };
 
-    static constexpr std::size_t write_batch_limit = 16;
-
     Server(std::string_view host, std::uint16_t port, Handler handler, HeaderHandler headers,
            WriteHandlers writes = {});
     ~Server();

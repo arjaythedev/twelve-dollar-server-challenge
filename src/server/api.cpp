@@ -281,6 +281,10 @@ Response write_response(const Database::Write &write, Database::WriteValue value
 
 bool Api::is_write(const Request &request)
 {
+    if (request.method != "POST")
+    {
+        return false;
+    }
     const auto endpoint = route(request).endpoint;
 
     return endpoint == Endpoint::create || endpoint == Endpoint::like;
@@ -288,13 +292,13 @@ bool Api::is_write(const Request &request)
 
 void Api::handle_writes(std::span<const Request *const> requests, std::span<Response> responses)
 {
-    if (requests.size() != responses.size() || requests.size() > 16)
+    if (requests.size() != responses.size() || requests.size() > write_batch_limit)
     {
         throw std::logic_error("invalid HTTP write batch");
     }
     std::vector<Database::Write> writes;
     writes.reserve(requests.size());
-    std::array<std::size_t, 16> positions{};
+    std::array<std::size_t, write_batch_limit> positions;
     for (std::size_t index = 0; index < requests.size(); ++index)
     {
         try
@@ -344,8 +348,7 @@ void Api::handle_writes(std::span<const Request *const> requests, std::span<Resp
 
 std::optional<Response> Api::authorize(Request &request) const
 {
-    const auto endpoint = route(request).endpoint;
-    if (endpoint != Endpoint::create && endpoint != Endpoint::like)
+    if (!is_write(request))
     {
         return std::nullopt;
     }
@@ -360,7 +363,7 @@ std::optional<Response> Api::authorize(Request &request) const
     return std::nullopt;
 }
 
-Response Api::handle(const Request &request)
+Response Api::handle_read(const Request &request)
 {
     const auto target = route(request);
     switch (target.endpoint)
@@ -372,13 +375,8 @@ Response Api::handle(const Request &request)
     case Endpoint::post:
         return get_post(target.id);
     case Endpoint::create:
-    case Endpoint::like: {
-        const std::array<const Request *, 1> requests{&request};
-        std::array<Response, 1> responses{};
-        handle_writes(requests, responses);
-
-        return std::move(responses.front());
-    }
+    case Endpoint::like:
+        throw std::logic_error("write request reached read handler");
     case Endpoint::missing:
         return error_response({Status::not_found, "not found"});
     }

@@ -497,7 +497,7 @@ void exercise_write_batches()
          },
          [&](std::span<const tds::Request *const> requests, std::span<tds::Response> responses) {
              require(!requests.empty() && requests.size() == responses.size() &&
-                         requests.size() <= tds::Server::write_batch_limit,
+                         requests.size() <= tds::write_batch_limit,
                      "write callback receives bounded matching spans");
              {
                  std::lock_guard lock(batch_mutex);
@@ -548,8 +548,8 @@ void exercise_write_batches()
 
     std::vector<std::unique_ptr<Client>> clients;
     std::vector<std::string> bodies;
-    constexpr auto count = tds::Server::write_batch_limit + 1;
-    static_assert(tds::Server::write_batch_limit == 16);
+    constexpr auto count = tds::write_batch_limit + 1;
+    static_assert(tds::write_batch_limit == 16);
     for (std::size_t index = 0; index < count; ++index)
     {
         clients.push_back(ready_client(server.port()));

@@ -7,7 +7,6 @@
 #include <optional>
 #include <span>
 #include <string>
-#include <string_view>
 #include <variant>
 #include <vector>
 
@@ -42,8 +41,6 @@ class Database
     void health();
     std::string feed();
     std::optional<std::string> post(std::int64_t id);
-    std::string create(std::int64_t user_id, std::string_view username, std::string_view body);
-    std::optional<bool> like(std::int64_t user_id, std::int64_t post_id);
     // Results follow input order and are returned only after commit or rollback
     std::vector<WriteResult> write_batch(std::span<const Write> writes);
 

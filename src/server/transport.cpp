@@ -352,12 +352,12 @@ class Server::State
 
     void flush_writes()
     {
-        if (!write_count)
+        if (!pending_writes.count)
         {
             return;
         }
-        const auto count = std::exchange(write_count, 0);
-        const auto connections = std::span(write_queue).first(count);
+        const auto count = std::exchange(pending_writes.count, 0);
+        const auto connections = std::span(pending_writes.connections).first(count);
         if (stopping)
         {
             // Queued requests have no pending SQE, so shutdown closes them directly
@@ -368,19 +368,15 @@ class Server::State
 
             return;
         }
-        std::array<const Request *, write_batch_limit> requests{};
-        std::array<Response, write_batch_limit> responses{};
-        for (std::size_t index = 0; index < count; ++index)
-        {
-            requests[index] = &connections[index]->exchange->parser.request();
-        }
+        const auto requests = std::span(pending_writes.requests).first(count);
+        const auto responses = std::span(pending_writes.responses).first(count);
         try
         {
 #ifdef TDS_DIAGNOSTICS
             write_batch_size.record(count);
             timing::Scope sample(write_batch_wall_ns);
 #endif
-            writes.handle(std::span(requests).first(count), std::span(responses).first(count));
+            writes.handle(requests, responses);
         }
         catch (const std::exception &error)
         {
@@ -437,8 +433,9 @@ class Server::State
                     if (writes.handle && writes.accepts(parser.request()))
                     {
                         connection.start_application();
-                        write_queue[write_count++] = &connection;
-                        if (write_count == write_batch_limit)
+                        pending_writes.connections[pending_writes.count] = &connection;
+                        pending_writes.requests[pending_writes.count++] = &parser.request();
+                        if (pending_writes.count == write_batch_limit)
                         {
                             flush_writes();
                         }
@@ -806,8 +803,15 @@ class Server::State
     Handler handler;
     HeaderHandler headers;
     WriteHandlers writes;
-    std::array<Connection *, write_batch_limit> write_queue{};
-    std::size_t write_count = 0;
+
+    struct PendingWrites
+    {
+        std::array<Connection *, write_batch_limit> connections{};
+        std::array<const Request *, write_batch_limit> requests{};
+        std::array<Response, write_batch_limit> responses{};
+        std::size_t count = 0;
+    } pending_writes;
+
     static constexpr std::size_t max_rings = 16;
     // Ticket targets remain alive until every owning ring has exited
     std::array<AcceptTicket, 64> accept_tickets;

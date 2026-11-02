@@ -2,7 +2,7 @@
 
 ## Next, in order
 
-- [ ] Simplify the current code: batch response setup, transaction control statements and duplicated handler logic. Check the generated code before keeping changes.
+- [ ] Compare prepared transaction/savepoint statements and inspect the generated code.
 
 ## Later
 
@@ -13,6 +13,7 @@
 
 ## Done
 
+- [x] Remove the old single-write API, migrate tests to write_batch, reuse batch response storage and simplify read dispatch. Inspect assembly and confirm at 300k.
 - [x] Group up to 16 queued HTTP writes without added delay; verify commit failure, savepoint isolation, response order and shutdown. Compare short and five-minute 300k runs.
 - [x] Capture five-second server/client timings at 300k; identify foreground COMMIT stalls and the following CQ/CPU backlog, with millisecond client scheduling delays.
 - [x] Read feed posts and unique authors in ID order within each request; verify direct SQLite results, snapshots and overflow, then compare native CPU and a 300k profile.

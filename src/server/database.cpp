@@ -12,6 +12,7 @@
 #include <mutex>
 #include <stdexcept>
 #include <stop_token>
+#include <string_view>
 #include <thread>
 #include <utility>
 
@@ -611,32 +612,6 @@ std::optional<std::string> Database::post(std::int64_t id)
     {
     }
     return output;
-}
-
-std::string Database::create(std::int64_t user_id, std::string_view username, std::string_view body)
-{
-#ifdef TDS_DIAGNOSTICS
-    state_->timings.report();
-    timing::Scope measure(state_->timings.create);
-#endif
-    Transaction transaction(state_->db.get());
-    std::string output = state_->create_post(user_id, username, body);
-    state_->commit(transaction);
-
-    return output;
-}
-
-std::optional<bool> Database::like(std::int64_t user_id, std::int64_t post_id)
-{
-#ifdef TDS_DIAGNOSTICS
-    state_->timings.report();
-    timing::Scope measure(state_->timings.like);
-#endif
-    Transaction transaction(state_->db.get());
-    const auto created = state_->like_post(user_id, post_id);
-    state_->commit(transaction);
-
-    return created;
 }
 
 std::vector<Database::WriteResult> Database::write_batch(std::span<const Write> writes)

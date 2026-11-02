@@ -1054,7 +1054,6 @@
     "name": "group-commit-300000-5m",
     "runtime": "C++ 0.1.0",
     "load_generator": "docker_loopback",
-    "generator": "cpp",
     "sqlite": "3.53.1",
     "users": 300000,
     "hold": "5m",
@@ -1069,6 +1068,29 @@
     "cpu_scope": "server_cgroup",
     "server_peak_bytes": 1308463104,
     "passed": true,
+    "generator": "cpp",
     "client_sampled_peak_bytes": 1551409152
+  },
+  {
+    "date": "2026-11-02",
+    "name": "group-commit-cleanup-300000-5m",
+    "runtime": "C++ 0.1.0",
+    "load_generator": "docker_loopback",
+    "generator": "cpp",
+    "sqlite": "3.53.1",
+    "users": 300000,
+    "hold": "5m",
+    "ramp": "60s",
+    "requests": 11207115,
+    "rps": 28017.7609221,
+    "p95_ms": 4.82779760001,
+    "p99_ms": 6.7752499,
+    "max_ms": 159.67584,
+    "error_rate": 0.0,
+    "cpu_us_per_request": 23.62494513530021,
+    "cpu_scope": "server_cgroup",
+    "server_peak_bytes": 1357783040,
+    "passed": true,
+    "client_sampled_peak_bytes": 1523130368
   }
 ]

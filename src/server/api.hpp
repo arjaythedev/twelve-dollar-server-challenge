@@ -18,9 +18,9 @@ class Api
   public:
     Api(std::string database_path, std::string secret);
 
-    // Authorize after headers; only accepted requests may reach handle after the body
+    // Authorize after headers; handlers receive complete accepted requests
     std::optional<Response> authorize(Request &request) const;
-    Response handle(const Request &request);
+    Response handle_read(const Request &request);
     static bool is_write(const Request &request);
     void handle_writes(std::span<const Request *const> requests, std::span<Response> responses);
 

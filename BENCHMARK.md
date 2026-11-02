@@ -54,12 +54,15 @@
 | C++ 0.1.0 (feed batch control, failed) | 300,000 | 5 min | 11,139,199 | 27,847.99 | 134.529 ms | 1,702.041 ms | 14,729.54 ms | 0% | 26.45 us | 1,982.40 MiB |
 | C++ 0.1.0 (group commit) | 300,000 | 60 s | 3,581,785 | 22,386.04 | 28.255 ms | 371.544 ms | 4,785.60 ms | 0% | 25.95 us | 1,097.05 MiB |
 | C++ 0.1.0 (group commit) | 300,000 | 5 min | 11,200,015 | 28,000.03 | 5.360 ms | 82.080 ms | 3,954.01 ms | 0% | 24.36 us | 1,247.85 MiB |
+| C++ 0.1.0 (batch cleanup) | 300,000 | 5 min | 11,207,115 | 28,017.76 | 4.828 ms | 6.775 ms | 159.68 ms | 0% | 23.62 us | 1,294.88 MiB |
 
 Statistics include the ramps. RAM is the cgroup peak, including charged file pages. Local results, not an official score or a measured capacity limit.
 
 300k feed batch, five minutes: hold-only p99 1,172.77 ms; aggregate p99 749.36 ms.
 
 300k group commit, five minutes, no internal telemetry: hold-only p99 97.99 ms; maximum 3,954.01 ms. The short run had worse p99 than the earlier short feed profile.
+
+300k batch cleanup, five minutes, no internal telemetry: hold-only p99 7.04 ms; maximum 159.68 ms.
 
 Normal repeat: same server/client/seed/workload hashes, different RNG seed; p99 rose from 749.36 to 1,702.04 ms. No memory-limit or reclaim events.
 
@@ -76,6 +79,8 @@ The uring rows read CPU counters externally; earlier rows include the in-contain
 Feed batching: native median 10.58 to 9.06 us over five alternating pairs; after cleanup, 10.42 to 9.05 us over three pairs. Outputs matched. [Data](src/benchmarks/feed-batch.json).
 
 Group commit, 10,000 valid writes, two reversed pairs: b=1 to b=16 reduced median CPU/write from 63.85 to 51.88 us, WAL frames from 53,424 to 41,488, commits from 10,000 to 625. Outputs/state matched; inline checkpoints, no HTTP timing. b=64 saved more CPU in the mixed test but showed unstable wall time. [Data](src/benchmarks/group-commit.json).
+
+Batch cleanup: `flush_writes` code 3,966 to 2,570 bytes, reserved stack 984 to 184 bytes; total executable text 3,332 bytes smaller.
 
 `SQLITE_DEFAULT_MEMSTATUS=0`, seven alternating CPU comparisons: feed paired median 1.0% slower, post 0.9% faster. All JSON hashes matched.
 

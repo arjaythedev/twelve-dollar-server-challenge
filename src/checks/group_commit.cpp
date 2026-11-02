@@ -3,10 +3,14 @@
 #include <sqlite3.h>
 
 #include <array>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <exception>
 #include <filesystem>
 #include <memory>
+#include <optional>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -297,7 +301,9 @@ void failed_commits()
                         scalar(reader.get(), "SELECT count(*) FROM likes") == 0,
                     "failed commit retained batch writes");
             control.commit_failure = CommitFailure::none;
-            require(!db.create(1, "first", "recovered after failed commit").empty(),
+            const std::array<Write, 1> recovery{
+                Database::Create{1, "first", "recovered after failed commit"}};
+            require(!created(db.write_batch(recovery).at(0)).empty(),
                     "failed commit left writer unusable");
         }
     }
@@ -321,7 +327,9 @@ void automatic_rollback()
     all_failed(db.write_batch(jobs), jobs.size());
     require(control.commits == 0 && scalar(reader.get(), "SELECT count(*) FROM posts") == 1,
             "automatic rollback retained a batch write or continued the batch");
-    require(!db.create(1, "first", "recovered after automatic rollback").empty(),
+    const std::array<Write, 1> recovery{
+        Database::Create{1, "first", "recovered after automatic rollback"}};
+    require(!created(db.write_batch(recovery).at(0)).empty(),
             "automatic rollback left writer unusable");
 }
 
@@ -341,7 +349,8 @@ void fatal_error()
     require(control.commits == 0 && scalar(reader.get(), "SELECT count(*) FROM posts") == 1 &&
                 scalar(reader.get(), "SELECT count(*) FROM likes") == 0,
             "fatal error retained provisional writes");
-    require(db.like(2, 1) == true, "fatal error left writer unusable");
+    const std::array<Write, 1> recovery{Database::Like{2, 1}};
+    require(liked(db.write_batch(recovery).at(0)) == true, "fatal error left writer unusable");
 }
 
 void singleton_and_empty()

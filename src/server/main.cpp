@@ -254,7 +254,7 @@ int main(int argc, char **argv)
         tds::Server server(
             host, static_cast<std::uint16_t>(*port),
             [&](const tds::Request &request) {
-                return api.handle(request);
+                return api.handle_read(request);
             },
             [&](tds::Request &request) {
                 return api.authorize(request);

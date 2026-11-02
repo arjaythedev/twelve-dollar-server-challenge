@@ -654,10 +654,10 @@ class Server::State
         {
             return io_uring_submit_and_wait(&ring, 1);
         }
-        __kernel_timespec timeout{0, 2'000'000};
+        __kernel_timespec timeout{0, 4'000'000};
         io_uring_cqe *first = nullptr;
 
-        return io_uring_submit_and_wait_timeout(&ring, &first, immediate ? 1 : 16, &timeout,
+        return io_uring_submit_and_wait_timeout(&ring, &first, immediate ? 1 : 32, &timeout,
                                                 nullptr);
     }
 

@@ -25,6 +25,10 @@
 | C++ 0.1.0 (range/local + 2-ms repeat, Linux loopback) | 50,000 | 60 s | 517,392 | 3,978.10 | 2.587 ms | 21.344 ms | 104.77 ms | 0% | 40.02 us | 686.48 MiB |
 | C++ 0.1.0 (shared receive pool, Linux loopback) | 50,000 | 60 s | 517,485 | 3,978.64 | 2.448 ms | 19.221 ms | 106.41 ms | 0% | 38.78 us | 466.52 MiB |
 | C++ 0.1.0 (scatter-gather sends, Linux loopback) | 50,000 | 60 s | 518,431 | 3,986.25 | 2.403 ms | 20.840 ms | 114.77 ms | 0% | 37.27 us | 422.15 MiB |
+| C++ 0.1.0 (32 CQEs / 4-ms wait, Linux loopback) | 50,000 | 60 s | 518,522 | 3,986.87 | 4.646 ms | 22.405 ms | 112.91 ms | 0% | 33.52 us | 422.06 MiB |
+| C++ 0.1.0 (64 CQEs / 8-ms wait, Linux loopback) | 50,000 | 60 s | 517,863 | 3,981.45 | 8.645 ms | 22.215 ms | 97.42 ms | 0% | 33.64 us | 422.19 MiB |
+| C++ 0.1.0 (direct-parse baseline, Linux loopback) | 50,000 | 60 s | 517,785 | 3,980.96 | 4.652 ms | 21.708 ms | 106.82 ms | 0% | 34.27 us | 421.78 MiB |
+| C++ 0.1.0 (direct receive parsing, Linux loopback) | 50,000 | 60 s | 518,140 | 3,983.96 | 4.661 ms | 21.401 ms | 111.44 ms | 0% | 34.73 us | 405.88 MiB |
 
 Statistics include the ramps. RAM is the cgroup peak, including charged file pages. Local results, not an official score or a measured capacity limit.
 
@@ -35,6 +39,10 @@ The uring rows read CPU counters externally; earlier rows include the in-contain
 `SQLITE_DEFAULT_MEMSTATUS=0`, seven alternating CPU comparisons: feed paired median 1.0% slower, post 0.9% faster. All JSON hashes matched.
 
 Release LTO, seven alternating CPU comparisons: feed medians 10.358 to 10.227 us, post 4.086 to 4.169 us; executable text 10.1% smaller. All JSON hashes matched.
+
+`-mtune=cascadelake`, 7 pairs: feed 10.218 to 10.231 us; post 4.088 to 4.041 us.
+
+GCC13 to GCC16 (C++23/GNU17), 7 pairs: feed 10.147 to 10.279 us; post 4.081 to 4.127 us. GCC16 needed a SQLite warning exception.
 
 ## Native CPU sampling
 

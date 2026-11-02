@@ -33,7 +33,6 @@ extern "C"
     /* Return ROW, DONE, or a SQLite error. Other errors require the SQL fallback.
      * Text is UTF-8, need not be terminated, and survives until the next read/end. */
     int tds_btree_feed_next(tds_btree *reader, tds_btree_post *out);
-    int tds_btree_get_post(tds_btree *reader, sqlite3_int64 id, tds_btree_post *out);
 
 #ifdef __cplusplus
 }

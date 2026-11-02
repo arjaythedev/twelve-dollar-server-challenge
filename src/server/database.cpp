@@ -1,6 +1,8 @@
 #include "database.hpp"
+#include "database_timing.hpp"
 #include "json.hpp"
 #include "sqlite_read.h"
+#include "timing.hpp"
 
 #include <sqlite3.h>
 
@@ -18,6 +20,12 @@ namespace tds
 namespace
 {
 
+#ifdef TDS_DIAGNOSTICS
+using database_timing::DatabaseTimings;
+using database_timing::install_sync_hooks;
+using database_timing::SyncScope;
+#endif
+
 struct Close
 {
     void operator()(sqlite3 *db) const noexcept
@@ -28,16 +36,29 @@ struct Close
 
 using Connection = std::unique_ptr<sqlite3, Close>;
 
+struct SqlError : std::runtime_error
+{
+    SqlError(sqlite3 *db, int result) : std::runtime_error(sqlite3_errmsg(db)), code(result & 0xff)
+    {
+    }
+
+    int code;
+};
+
 void execute(sqlite3 *db, const char *sql)
 {
-    if (sqlite3_exec(db, sql, nullptr, nullptr, nullptr) != SQLITE_OK)
+    const int result = sqlite3_exec(db, sql, nullptr, nullptr, nullptr);
+    if (result != SQLITE_OK)
     {
-        throw std::runtime_error(sqlite3_errmsg(db));
+        throw SqlError(db, result);
     }
 }
 
 Connection open(const std::string &path)
 {
+#ifdef TDS_DIAGNOSTICS
+    install_sync_hooks();
+#endif
     sqlite3 *raw = nullptr;
     const int result =
         sqlite3_open_v2(path.c_str(), &raw, SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX, nullptr);
@@ -89,6 +110,9 @@ class Checkpoints
   private:
     void run(std::stop_token stop)
     {
+#ifdef TDS_DIAGNOSTICS
+        DatabaseTimings timings("checkpoint");
+#endif
         bool reported_busy = false;
         bool reported_error = false;
         while (!stop.stop_requested())
@@ -105,8 +129,22 @@ class Checkpoints
 
             int frames = -1;
             int checkpointed = -1;
-            const int result = sqlite3_wal_checkpoint_v2(
-                db_.get(), "main", SQLITE_CHECKPOINT_PASSIVE, &frames, &checkpointed);
+            int result;
+            {
+#ifdef TDS_DIAGNOSTICS
+                timing::Scope measure(timings.checkpoint);
+                SyncScope sync(timings, "checkpoint");
+#endif
+                result = sqlite3_wal_checkpoint_v2(db_.get(), "main", SQLITE_CHECKPOINT_PASSIVE,
+                                                   &frames, &checkpointed);
+            }
+#ifdef TDS_DIAGNOSTICS
+            if (frames >= 0 && checkpointed >= 0 && checkpointed <= frames)
+            {
+                timings.backlog.record(static_cast<std::uint64_t>(frames - checkpointed));
+            }
+            timings.report();
+#endif
             const bool busy = result == SQLITE_BUSY || result == SQLITE_LOCKED;
             if (busy && !reported_busy)
             {
@@ -193,10 +231,11 @@ class Statement
   public:
     Statement(sqlite3 *db, const char *sql) : db_(db)
     {
-        if (sqlite3_prepare_v3(db, sql, -1, SQLITE_PREPARE_PERSISTENT, &statement_, nullptr) !=
-            SQLITE_OK)
+        const int result =
+            sqlite3_prepare_v3(db, sql, -1, SQLITE_PREPARE_PERSISTENT, &statement_, nullptr);
+        if (result != SQLITE_OK)
         {
-            throw std::runtime_error(sqlite3_errmsg(db));
+            throw SqlError(db, result);
         }
     }
 
@@ -246,7 +285,7 @@ class Statement
             {
                 return false;
             }
-            throw std::runtime_error(sqlite3_errmsg(owner_.db_));
+            throw SqlError(owner_.db_, result);
         }
 
         std::int64_t number(int column) const
@@ -270,7 +309,7 @@ class Statement
         {
             if (result != SQLITE_OK)
             {
-                throw std::runtime_error(sqlite3_errmsg(owner_.db_));
+                throw SqlError(owner_.db_, result);
             }
         }
 
@@ -355,7 +394,7 @@ void post_object(std::string &output, std::int64_t id, std::string_view body,
 
 void post_object(std::string &output, const Statement::Use &row)
 {
-    // Column views are consumed before stepping or resetting the statement.
+    // Column views are consumed before stepping or resetting the statement
     post_object(output, row.number(0), row.text(1), row.text(2), row.text(3), row.number(4));
 }
 
@@ -402,6 +441,77 @@ class Database::State
         sqlite3_wal_hook(db.get(), nullptr, nullptr);
     }
 
+    void commit(Transaction &transaction)
+    {
+#ifdef TDS_DIAGNOSTICS
+        timing::Scope measure(timings.commit);
+        SyncScope sync(timings, "issuer");
+#endif
+        transaction.commit();
+    }
+
+    std::string create_post(std::int64_t user_id, std::string_view username, std::string_view body)
+    {
+        std::string output = "{\"post\":";
+        auto query = create.use();
+        query.bind(1, user_id);
+        query.bind(2, body);
+        if (!query.next())
+        {
+            throw std::runtime_error("insert returned no row");
+        }
+
+        post_object(output, query.number(0), body, query.text(1), username, 0);
+        output += '}';
+        while (query.next())
+        {
+        }
+        return output;
+    }
+
+    std::optional<bool> like_post(std::int64_t user_id, std::int64_t post_id)
+    {
+        bool found = false;
+        {
+            auto query = exists.use();
+            query.bind(1, post_id);
+            found = query.next();
+            while (found && query.next())
+            {
+            }
+        }
+        if (!found)
+        {
+            return std::nullopt;
+        }
+
+        {
+            auto query = like.use();
+            query.bind(1, user_id);
+            query.bind(2, post_id);
+            while (query.next())
+            {
+            }
+        }
+        return sqlite3_changes(db.get()) == 1;
+    }
+
+    WriteValue apply(const Write &write)
+    {
+        if (const auto *job = std::get_if<Create>(&write))
+        {
+#ifdef TDS_DIAGNOSTICS
+            timing::Scope measure(timings.create);
+#endif
+            return create_post(job->user_id, job->username, job->body);
+        }
+        const auto &job = std::get<Like>(write);
+#ifdef TDS_DIAGNOSTICS
+        timing::Scope measure(timings.like);
+#endif
+        return like_post(job.user_id, job.post_id);
+    }
+
     Connection db;
     Statement health;
     Statement feed;
@@ -412,6 +522,9 @@ class Database::State
     Statement read_begin;
     Statement read_commit;
     Tree tree;
+#ifdef TDS_DIAGNOSTICS
+    DatabaseTimings timings{"database"};
+#endif
     Checkpoints checkpoints;
 };
 
@@ -431,6 +544,10 @@ void Database::health()
 
 std::string Database::feed()
 {
+#ifdef TDS_DIAGNOSTICS
+    state_->timings.report();
+    timing::Scope measure(state_->timings.feed);
+#endif
     std::string output = "{\"posts\":[";
     output.reserve(8192);
     if (state_->tree)
@@ -477,6 +594,10 @@ std::string Database::feed()
 
 std::optional<std::string> Database::post(std::int64_t id)
 {
+#ifdef TDS_DIAGNOSTICS
+    state_->timings.report();
+    timing::Scope measure(state_->timings.post);
+#endif
     auto query = state_->post.use();
     query.bind(1, id);
     if (!query.next())
@@ -494,59 +615,78 @@ std::optional<std::string> Database::post(std::int64_t id)
 
 std::string Database::create(std::int64_t user_id, std::string_view username, std::string_view body)
 {
+#ifdef TDS_DIAGNOSTICS
+    state_->timings.report();
+    timing::Scope measure(state_->timings.create);
+#endif
     Transaction transaction(state_->db.get());
-    std::string output = "{\"post\":";
-    {
-        auto query = state_->create.use();
-        query.bind(1, user_id);
-        query.bind(2, body);
-        if (!query.next())
-        {
-            throw std::runtime_error("insert returned no row");
-        }
-
-        post_object(output, query.number(0), body, query.text(1), username, 0);
-        output += '}';
-        while (query.next())
-        {
-        }
-    }
-    transaction.commit();
+    std::string output = state_->create_post(user_id, username, body);
+    state_->commit(transaction);
 
     return output;
 }
 
 std::optional<bool> Database::like(std::int64_t user_id, std::int64_t post_id)
 {
+#ifdef TDS_DIAGNOSTICS
+    state_->timings.report();
+    timing::Scope measure(state_->timings.like);
+#endif
     Transaction transaction(state_->db.get());
-    bool found = false;
-    {
-        auto query = state_->exists.use();
-        query.bind(1, post_id);
-        found = query.next();
-        while (found && query.next())
-        {
-        }
-    }
-    if (!found)
-    {
-        transaction.commit();
-
-        return std::nullopt;
-    }
-
-    {
-        auto query = state_->like.use();
-        query.bind(1, user_id);
-        query.bind(2, post_id);
-        while (query.next())
-        {
-        }
-    }
-    const bool created = sqlite3_changes(state_->db.get()) == 1;
-    transaction.commit();
+    const auto created = state_->like_post(user_id, post_id);
+    state_->commit(transaction);
 
     return created;
+}
+
+std::vector<Database::WriteResult> Database::write_batch(std::span<const Write> writes)
+{
+    std::vector<WriteResult> results;
+    results.reserve(writes.size());
+    if (writes.empty())
+    {
+        return results;
+    }
+#ifdef TDS_DIAGNOSTICS
+    state_->timings.report();
+#endif
+    try
+    {
+        Transaction transaction(state_->db.get());
+        const bool savepoints = writes.size() > 1;
+        for (const auto &write : writes)
+        {
+            if (savepoints)
+            {
+                execute(state_->db.get(), "SAVEPOINT write_job");
+            }
+            try
+            {
+                results.emplace_back(state_->apply(write));
+            }
+            catch (const SqlError &error)
+            {
+                if (!savepoints || error.code != SQLITE_CONSTRAINT ||
+                    sqlite3_get_autocommit(state_->db.get()) != 0)
+                {
+                    throw;
+                }
+                execute(state_->db.get(), "ROLLBACK TO write_job");
+                results.emplace_back(std::unexpected(std::current_exception()));
+            }
+            if (savepoints)
+            {
+                execute(state_->db.get(), "RELEASE write_job");
+            }
+        }
+        state_->commit(transaction);
+    }
+    catch (...)
+    {
+        // A failed transaction invalidates every provisional result
+        results.assign(writes.size(), std::unexpected(std::current_exception()));
+    }
+    return results;
 }
 
 } // namespace tds

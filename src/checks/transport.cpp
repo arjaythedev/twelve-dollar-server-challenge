@@ -13,6 +13,7 @@
 #include <exception>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <linux/io_uring.h>
 #include <memory>
@@ -132,6 +133,40 @@ class Client
         while (receive(MSG_DONTWAIT))
         {
         }
+    }
+
+    void finish_writing() const
+    {
+        if (::shutdown(fd_, SHUT_WR) < 0)
+        {
+            throw std::runtime_error("client write shutdown failed");
+        }
+    }
+
+    bool response_available() const
+    {
+        pollfd socket{fd_, POLLIN, 0};
+        int result;
+        do
+        {
+            result = ::poll(&socket, 1, 0);
+        } while (result < 0 && errno == EINTR);
+        if (result < 0)
+        {
+            throw std::runtime_error("poll client response");
+        }
+        return !received_.empty() || result > 0;
+    }
+
+    bool closed() const
+    {
+        char byte;
+        ssize_t result;
+        do
+        {
+            result = ::recv(fd_, &byte, 1, MSG_PEEK | MSG_DONTWAIT);
+        } while (result < 0 && errno == EINTR);
+        return result == 0 || (result < 0 && errno == ECONNRESET);
     }
 
   private:
@@ -332,18 +367,19 @@ std::vector<std::filesystem::path> ring_fdinfos(pid_t process = ::getpid())
     return result;
 }
 
-void wait_for_completion(int result)
+void wait_for_completion(int result, std::size_t minimum = 1)
 {
     const std::string expected = "res:" + std::to_string(result) + ",";
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     do
     {
+        std::size_t observed = 0;
         for (const auto &info : ring_fdinfos())
         {
             std::ifstream stream(info);
             for (std::string line; std::getline(stream, line);)
             {
-                if (line.find(expected) != std::string::npos)
+                if (line.find(expected) != std::string::npos && ++observed >= minimum)
                 {
                     return;
                 }
@@ -352,6 +388,280 @@ void wait_for_completion(int result)
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     } while (std::chrono::steady_clock::now() < deadline);
     throw std::runtime_error("expected io_uring completion " + std::to_string(result));
+}
+
+class RunningServer
+{
+  public:
+    RunningServer(tds::Server::Handler handler, tds::Server::HeaderHandler headers,
+                  tds::Server::WriteHandlers writes, std::function<void()> release)
+        : release_(std::move(release)),
+          server_("127.0.0.1", 0, std::move(handler), std::move(headers), std::move(writes)),
+          thread_([this] {
+              try
+              {
+                  server_.run();
+              }
+              catch (...)
+              {
+                  error_ = std::current_exception();
+              }
+          })
+    {
+    }
+
+    ~RunningServer()
+    {
+        release_();
+        server_.request_stop();
+        if (thread_.joinable())
+        {
+            thread_.join();
+        }
+    }
+
+    RunningServer(const RunningServer &) = delete;
+    RunningServer &operator=(const RunningServer &) = delete;
+
+    std::uint16_t port() const
+    {
+        return server_.port();
+    }
+
+    void request_stop() const
+    {
+        server_.request_stop();
+    }
+
+    void stop()
+    {
+        release_();
+        server_.request_stop();
+        thread_.join();
+        if (error_)
+        {
+            std::rethrow_exception(error_);
+        }
+    }
+
+  private:
+    std::function<void()> release_;
+    tds::Server server_;
+    std::exception_ptr error_;
+    std::jthread thread_;
+};
+
+std::string write_request(std::string_view path, std::string_view body)
+{
+    return "POST " + std::string(path) +
+           " HTTP/1.1\r\nHost: localhost\r\nContent-Length: " + std::to_string(body.size()) +
+           "\r\n\r\n" + std::string(body);
+}
+
+std::unique_ptr<Client> ready_client(std::uint16_t port)
+{
+    auto client = std::make_unique<Client>(port);
+    client->send("GET /ready HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    require(client->response() == "/ready", "batch client established");
+    return client;
+}
+
+void exercise_write_batches()
+{
+    RequestGate headers_gate;
+    RequestGate batch_gate;
+    std::mutex batch_mutex;
+    std::vector<std::size_t> batch_sizes;
+    std::vector<std::string> blocked_bodies;
+    const auto recorded_batches = [&] {
+        std::lock_guard lock(batch_mutex);
+        return batch_sizes;
+    };
+    RunningServer server(
+        [](const tds::Request &request) -> tds::Response {
+            return {tds::Status::ok, request.path};
+        },
+        [&](tds::Request &request) -> std::optional<tds::Response> {
+            if (request.path == "/hold")
+            {
+                headers_gate.block();
+            }
+            if (request.method == "POST")
+            {
+                request.identity = tds::Identity{42, "writer"};
+            }
+            return std::nullopt;
+        },
+        {[](const tds::Request &request) {
+             return request.method == "POST";
+         },
+         [&](std::span<const tds::Request *const> requests, std::span<tds::Response> responses) {
+             require(!requests.empty() && requests.size() == responses.size() &&
+                         requests.size() <= tds::Server::write_batch_limit,
+                     "write callback receives bounded matching spans");
+             {
+                 std::lock_guard lock(batch_mutex);
+                 batch_sizes.push_back(requests.size());
+             }
+             std::vector<std::string> bodies;
+             for (std::size_t index = 0; index < requests.size(); ++index)
+             {
+                 const auto &request = *requests[index];
+                 require(request.method == "POST" && request.identity &&
+                             request.identity->user_id == 42,
+                         "batched request retains parsed headers and identity");
+                 bodies.push_back(request.body);
+                 responses[index] = {tds::Status::created, request.body};
+             }
+             if (requests.front()->path == "/write-block")
+             {
+                 blocked_bodies = bodies;
+                 batch_gate.block();
+             }
+             for (std::size_t index = 0; index < requests.size(); ++index)
+             {
+                 require(requests[index]->body == bodies[index],
+                         "request pointers and bodies survive the batch callback");
+             }
+             if (requests.front()->path == "/write-throw")
+             {
+                 throw std::runtime_error("write callback failed after filling responses");
+             }
+         }},
+        [&] {
+            headers_gate.release();
+            batch_gate.release();
+        });
+
+    Client singleton(server.port());
+    singleton.send(write_request("/write", "singleton"));
+    require(singleton.response(tds::Status::created) == "singleton",
+            "single queued write flushes without another request");
+    singleton.send(write_request("/write", "first") + write_request("/write", "second") +
+                   "GET /after-write HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    require(singleton.response(tds::Status::created) == "first", "first batched pipeline response");
+    require(singleton.response(tds::Status::created) == "second",
+            "second batched pipeline response");
+    require(singleton.response() == "/after-write", "read follows batched pipeline writes");
+    require(recorded_batches() == std::vector<std::size_t>{1, 1, 1},
+            "a connection holds one write until its response completes");
+
+    std::vector<std::unique_ptr<Client>> clients;
+    std::vector<std::string> bodies;
+    constexpr auto count = tds::Server::write_batch_limit + 1;
+    static_assert(tds::Server::write_batch_limit == 16);
+    for (std::size_t index = 0; index < count; ++index)
+    {
+        clients.push_back(ready_client(server.port()));
+        bodies.push_back(std::string(index < 10 ? "0" : "") + std::to_string(index) + ':' +
+                         std::string(1024, static_cast<char>('a' + index)));
+    }
+    auto blocker = ready_client(server.port());
+    blocker->send("GET /hold HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    headers_gate.wait();
+    const auto before_batches = recorded_batches().size();
+    for (std::size_t index = 0; index < count; ++index)
+    {
+        clients[index]->send(write_request("/write-block", bodies[index]));
+    }
+    const auto wire_size = write_request("/write-block", bodies.front()).size();
+    // Every socket already has a receive submitted before the header callback blocks
+    wait_for_completion(static_cast<int>(wire_size), count);
+    headers_gate.release();
+    batch_gate.wait();
+    require(blocked_bodies.size() == 16, "ready writes flush at the sixteen-request limit");
+    for (const auto &client : clients)
+    {
+        require(!client->response_available(), "no write response before callback returns");
+    }
+    const auto disconnected = std::find(bodies.begin(), bodies.end(), blocked_bodies.front());
+    require(disconnected != bodies.end(), "blocked request belongs to a live client");
+    clients[static_cast<std::size_t>(disconnected - bodies.begin())].reset();
+    batch_gate.release();
+    require(blocker->response() == "/hold", "batch preload gate completes");
+    for (std::size_t index = 0; index < count; ++index)
+    {
+        if (clients[index])
+        {
+            require(clients[index]->response(tds::Status::created) == bodies[index],
+                    "batched response preserves each request body after peer disconnect");
+        }
+    }
+    const auto after_batches = recorded_batches();
+    require(after_batches.size() == before_batches + 2 && after_batches[before_batches] == 16 &&
+                after_batches[before_batches + 1] == 1,
+            "ready writes form one full batch and flush the final singleton");
+
+    headers_gate.reset();
+    auto failed_first = ready_client(server.port());
+    auto failed_second = ready_client(server.port());
+    blocker->send("GET /hold HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    headers_gate.wait();
+    const auto before_throw = recorded_batches().size();
+    const auto throwing_wire = write_request("/write-throw", "throw-body");
+    failed_first->send(throwing_wire);
+    failed_second->send(throwing_wire);
+    wait_for_completion(static_cast<int>(throwing_wire.size()), 2);
+    headers_gate.release();
+    require(failed_first->response(tds::Status::internal_error) != "throw-body" &&
+                failed_second->response(tds::Status::internal_error) != "throw-body",
+            "throwing callback replaces every partially filled response with an error");
+    require(blocker->response() == "/hold", "throwing batch preload gate completes");
+    const auto after_throw = recorded_batches();
+    require(after_throw.size() == before_throw + 1 && after_throw.back() == 2,
+            "throwing callback consumes one complete batch");
+    Client fresh(server.port());
+    fresh.send(write_request("/write", "fresh-owned-body"));
+    require(fresh.response(tds::Status::created) == "fresh-owned-body",
+            "batch callback failure leaves no stale request pointers");
+    server.stop();
+}
+
+void exercise_queued_write_shutdown()
+{
+    RequestGate preload_gate;
+    std::size_t queued_writes = 0;
+    std::size_t batches = 0;
+    RunningServer server(
+        [](const tds::Request &request) -> tds::Response {
+            return {tds::Status::ok, request.path};
+        },
+        [&](tds::Request &request) -> std::optional<tds::Response> {
+            if (request.path == "/hold")
+            {
+                preload_gate.block();
+            }
+            return std::nullopt;
+        },
+        {[&](const tds::Request &request) {
+             queued_writes += request.method == "POST";
+             return request.method == "POST";
+         },
+         [&](std::span<const tds::Request *const>, std::span<tds::Response>) {
+             ++batches;
+         }},
+        [&] {
+            preload_gate.release();
+        });
+    auto first = ready_client(server.port());
+    auto second = ready_client(server.port());
+    auto blocker = ready_client(server.port());
+    blocker->send("GET /hold HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    preload_gate.wait();
+    const auto first_wire = write_request("/first", "queued-body");
+    first->send(first_wire);
+    second->send(write_request("/other", "queued-body"));
+    wait_for_completion(static_cast<int>(first_wire.size()), 2);
+    first.reset();
+    server.request_stop();
+    wait_for_completion(POLLIN);
+    // Both receives precede stop in the CQ before their drain starts, including when
+    // io_uring_for_each_cqe takes a snapshot of the CQ tail for the entire drain
+    preload_gate.release();
+    server.stop();
+    require(queued_writes == 2, "both completed write requests queue before stop is serviced");
+    require(batches == 0, "shutdown discards queued writes without calling the batch handler");
+    require(second->closed(), "shutdown closes the remaining queued connection");
 }
 
 void wait_for_blocked_send(pid_t process = ::getpid())
@@ -384,9 +694,10 @@ void exercise_short_send(std::uint16_t port, RequestGate &gate)
     Client slow(port, 4096);
     slow.send("GET /ready HTTP/1.1\r\nHost: localhost\r\n\r\n");
     require(slow.response() == "/ready", "slow connection established");
-    slow.send("GET /large HTTP/1.1\r\nHost: localhost\r\n\r\n"
-              "GET /after HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    slow.send("GET /large HTTP/1.1\r\nHost: localhost\r\n\r\n");
     wait_for_blocked_send();
+    // Readability can arrive while a partial response still owns the data-I/O operation
+    slow.send("GET /after HTTP/1.1\r\nHost: localhost\r\n\r\n");
     Client blocker(port);
     // This round trip submits the slow socket's next send before the handler blocks.
     blocker.send("GET /ready HTTP/1.1\r\nHost: localhost\r\n\r\n");
@@ -449,7 +760,7 @@ void exercise_pool(std::uint16_t port, const std::vector<std::unique_ptr<Client>
     blocker.send("GET /block HTTP/1.1\r\nHost: localhost\r\n\r\n");
     gate.wait();
     send_pool_requests(clients);
-    // Observe a real kernel CQE while the handler cannot return buffers to the pool.
+    // Observe a real kernel CQE while the handler cannot return buffers to the pool
     wait_for_completion(-ENOBUFS);
     gate.release();
     require(blocker.response() == "/block", "blocking response");
@@ -515,6 +826,10 @@ void exercise(std::uint16_t port)
                     "GET /small HTTP/1.1\r\nHost: localhost\r\n\r\n");
     require(connection.response().empty(), "header-only response");
     require(connection.response() == "/small", "small response after an empty body");
+    Client half_closed(port);
+    half_closed.send("GET /half-closed HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    half_closed.finish_writing();
+    require(half_closed.response() == "/half-closed", "readable bytes survive peer half-close");
     std::vector<std::unique_ptr<Client>> burst;
     for (int i = 0; i < 128; ++i)
     {
@@ -883,6 +1198,8 @@ int main(int argc, char **argv)
         // Fork before this process creates a server thread or io_uring.
         exercise_capacity(768, 256);
         exercise_request_reuse();
+        exercise_write_batches();
+        exercise_queued_write_shutdown();
         RequestGate gate;
         tds::Server server(
             "127.0.0.1", 0,

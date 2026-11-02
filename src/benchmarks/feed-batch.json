@@ -1,0 +1,46 @@
+{
+  "date": "2026-11-02",
+  "measurement": "process CPU, feed read and JSON serialization",
+  "compiler": "GCC 13.3, Release, SQLite 3.53.1",
+  "warmup_calls": 200,
+  "calls_per_sample": 10000,
+  "order": [
+    "baseline/candidate",
+    "candidate/baseline",
+    "baseline/candidate",
+    "candidate/baseline",
+    "baseline/candidate"
+  ],
+  "baseline_us": [
+    9.801755,
+    10.581613,
+    10.120612,
+    10.792714,
+    10.764465
+  ],
+  "candidate_us": [
+    9.529360,
+    8.904551,
+    9.034413,
+    9.585891,
+    9.063055
+  ],
+  "baseline_median_us": 10.581613,
+  "candidate_median_us": 9.063055,
+  "output_bytes_per_call": 5102,
+  "output_fnv1a": "3325a30e3f466185",
+  "all_outputs_match": true,
+  "baseline_probe_sha256": "f6e4bb8360f44cc6ed3a98bc6802808838d771c257e6314cf8b052b08b3927ad",
+  "candidate_probe_sha256": "b93af8917464fe35019850beb00cb95d5b4b4d175a4b0c6fa93a28c443fc4378",
+  "cleanup_baseline_us": [
+    11.339273,
+    10.346494,
+    10.422802
+  ],
+  "cleanup_candidate_us": [
+    8.815334,
+    9.497034,
+    9.052939
+  ],
+  "cleanup_probe_sha256": "1518d52b99325ee66226b23bf9d593679b65340e4a4831e53f86a4219ca61184"
+}

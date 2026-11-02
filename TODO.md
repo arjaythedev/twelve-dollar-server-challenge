@@ -2,17 +2,22 @@
 
 ## Next, in order
 
-- [ ] Isolate the remaining 300k p99 stalls with per-ring CQ, handler/SQLite and I/O-pressure timing; the checkpoint worker still misses p99 despite eliminating request errors.
-- [ ] Compare multishot receive after isolating handler stalls.
-- [ ] Compare ID-ordered post/author reads, then use the next profile to choose smaller changes such as hybrid SEND and JSON scanning.
+- [ ] Simplify the current code: batch response setup, transaction control statements and duplicated handler logic. Check the generated code before keeping changes.
 
 ## Later
 
+- [ ] Split foreground COMMIT stalls into sync/write/retry time, then trace waiting before receive-CQE service and deferred reads.
+- [ ] Compare multishot receive after isolating handler stalls.
 - [ ] Test capacity on a comparable Linux VM with a separate load generator and the official file limit.
 - [ ] Finally, use git mv to put our source and docs in `submissions/<stack>-SmolBlackHole/`. Rename SUBMISSION.md to README.md, update paths and run checks. Keep generated output out of the submission.
 
 ## Done
 
+- [x] Group up to 16 queued HTTP writes without added delay; verify commit failure, savepoint isolation, response order and shutdown. Compare short and five-minute 300k runs.
+- [x] Capture five-second server/client timings at 300k; identify foreground COMMIT stalls and the following CQ/CPU backlog, with millisecond client scheduling delays.
+- [x] Read feed posts and unique authors in ID order within each request; verify direct SQLite results, snapshots and overflow, then compare native CPU and a 300k profile.
+- [x] Compare idle multishot polls at 300k; retain pending receives and the extra half-close/send-readiness tests.
+- [x] Record cgroup memory categories alongside CPU and pressure samples.
 - [x] Reuse empty request buffers within the Exchange budget; verify isolation, oversize rejection and generated reset code.
 - [x] Measure checkpoint stalls, add an owned checkpoint worker and compare at 100k; lower p99 costs more CPU.
 - [x] Compare bounded CQ/handler queues; retain inline dispatch after no measured gain.

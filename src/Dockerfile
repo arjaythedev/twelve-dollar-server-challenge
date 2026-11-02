@@ -7,9 +7,14 @@ COPY CMakeLists.txt ./
 COPY server ./server
 COPY checks/transport.cpp ./checks/transport.cpp
 COPY checks/checkpoint.cpp ./checks/checkpoint.cpp
+COPY checks/group_commit.cpp ./checks/group_commit.cpp
+COPY checks/btree.cpp ./checks/btree.cpp
+COPY checks/sync.cpp ./checks/sync.cpp
 COPY load ./load
+COPY benchmarks/group_commit.cpp ./benchmarks/group_commit.cpp
 ARG TDS_SANITIZERS=OFF
-RUN cmake -S . -B out -G Ninja -DCMAKE_BUILD_TYPE=Release -DTDS_SANITIZERS=${TDS_SANITIZERS} \
+ARG TDS_DIAGNOSTICS=OFF
+RUN cmake -S . -B out -G Ninja -DCMAKE_BUILD_TYPE=Release -DTDS_SANITIZERS=${TDS_SANITIZERS} -DTDS_DIAGNOSTICS=${TDS_DIAGNOSTICS} \
     && cmake --build out --parallel 2
 
 FROM ubuntu:24.04@sha256:78d4744ead1f5b19b04d0df558ab182a5300903900755e515b2ca4d10eb2044d AS runtime

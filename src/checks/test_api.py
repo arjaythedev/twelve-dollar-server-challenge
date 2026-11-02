@@ -17,6 +17,7 @@ from contextlib import ExitStack, closing
 from pathlib import Path
 
 from dev import ROOT, JSONValue, command, decode_json, integer, mapping, server
+from dev import text as json_text
 
 SECRET = b"test-secret"
 
@@ -86,6 +87,57 @@ class HTTPTests(unittest.TestCase):
             "docker", "exec", self.container, "sqlite3", "-json", "/data/feed.db", statement
         )
         return array(decode_json(result.encode())) if result else []
+
+    def test_concurrent_write_results_and_constraint_isolation(self) -> None:
+        with ExitStack() as connections:
+            pending: list[tuple[http.client.HTTPConnection, int, str]] = []
+            for index in range(24):
+                connection = connections.enter_context(
+                    closing(http.client.HTTPConnection("127.0.0.1", self.port, timeout=5))
+                )
+                connection.connect()
+                text = f"batch-{index} café \N{GRINNING FACE}"
+                pending.append((connection, index, text))
+            for connection, index, text in pending:
+                body = b"{" if index == 0 else json.dumps({"body": text}).encode()
+                user_id = "999999" if index == 1 else "1"
+                connection.request(
+                    "POST", "/posts", body, {"authorization": sign(claims(sub=user_id))}
+                )
+            created: list[int] = []
+            for connection, index, text in pending:
+                response = connection.getresponse()
+                result = mapping(decode_json(response.read()))
+                self.assertEqual(response.status, 400 if index == 0 else 500 if index == 1 else 201)
+                if index > 1:
+                    post = mapping(result["post"])
+                    self.assertEqual(post["body"], text)
+                    created.append(integer(post, "id"))
+            self.assertEqual(len(set(created)), 22)
+            self.assertEqual(
+                integer(mapping(self.sql("SELECT count(*) AS n FROM posts")[0]), "n"), 25
+            )
+
+    def test_pipelined_like_read_and_duplicate_keep_order(self) -> None:
+        authorization = sign(claims())
+        write = (
+            "POST /posts/1/like HTTP/1.1\r\nHost: localhost\r\n"
+            f"Authorization: {authorization}\r\nContent-Length: 0\r\n\r\n"
+        )
+        read = "GET /posts/1 HTTP/1.1\r\nHost: localhost\r\n\r\n"
+        with closing(socket.create_connection(("127.0.0.1", self.port), timeout=5)) as connection:
+            connection.sendall((write + read + write).encode())
+            with connection.makefile("rb") as stream:
+                for expected_status, kind in ((201, "like"), (200, "post"), (200, "duplicate")):
+                    self.assertTrue(
+                        stream.readline().startswith(f"HTTP/1.1 {expected_status} ".encode())
+                    )
+                    headers = http.client.parse_headers(stream)
+                    result = mapping(decode_json(stream.read(int(headers["content-length"]))))
+                    if kind == "post":
+                        self.assertEqual(mapping(result["post"])["like_count"], 1)
+                    else:
+                        self.assertEqual(result["already_liked"], kind == "duplicate")
 
     def test_required_expiration_and_payload(self) -> None:
         missing = claims()
@@ -173,6 +225,74 @@ class HTTPTests(unittest.TestCase):
             [mapping(post)["id"] for post in posts],
             [1, 3, 2, 5, 4, 7, 6, 9, 8, 11, 10, 13, 12, 15, 14, 17, 16, 19, 18, 21],
         )
+
+    def test_feed_batch_reorders_rows_and_refreshes_duplicate_authors(self) -> None:
+        self.sql(
+            "DELETE FROM likes; DELETE FROM posts;"
+            "INSERT INTO users(id,username) VALUES(-7,'negative'),"
+            "(2,replace(hex(zeroblob(5000)),'0','x') || char(0) || ' café'),"
+            "(900001,'distant');"
+        )
+        ids = [-9223372036854775808, -5000000, -17, -1, 0, *range(2, 28)]
+        ids += [1000000, 9223372036854775807]
+        authors = [-7, 1, 2, 900001]
+        rows: list[str] = []
+        for index, post_id in enumerate(ids):
+            timestamp = f"2026-02-{(7 * index) % 28 + 1:02}T00:00:00.000Z"
+            if post_id == ids[0]:
+                timestamp = "2089-01-01T00:00:00.000Z"
+            if post_id == ids[-1]:
+                timestamp = "2090-01-01T00:00:00.000Z"
+            rows.append(f"({post_id},{authors[index % len(authors)]},'post-{index}','{timestamp}')")
+        rows.extend(
+            f"({post_id},1,'skipped','2000-01-01T00:00:00.000Z')" for post_id in range(10000, 10100)
+        )
+        self.sql(
+            "INSERT INTO posts(id,user_id,body,created_at) VALUES "
+            + ",".join(rows)
+            + "; INSERT INTO likes(user_id,post_id) SELECT 1,id FROM posts WHERE id<0;"
+        )
+        reference = (
+            "SELECT p.id,p.body,p.created_at,hex(u.username) AS author,"
+            "(SELECT count(*) FROM likes WHERE post_id=p.id) AS like_count "
+            "FROM posts p JOIN users u ON u.id=p.user_id "
+            "ORDER BY p.created_at DESC,p.id DESC LIMIT 20"
+        )
+
+        def reference_rows() -> list[dict[str, JSONValue]]:
+            # The SQLite CLI truncates TEXT at NUL, so transfer author bytes as hex
+            rows = [mapping(row) for row in self.sql(reference)]
+            return [
+                {**row, "author": bytes.fromhex(json_text(row, "author")).decode("utf-8")}
+                for row in rows
+            ]
+
+        self.assertEqual(array(self.request("GET", "/feed")[1]["posts"]), reference_rows())
+        self.sql(
+            "UPDATE users SET username='refreshed' WHERE id=2;"
+            "UPDATE posts SET body='fresh body',created_at='2100-01-01T00:00:00.000Z' "
+            "WHERE id=1000000;"
+        )
+        self.assertEqual(array(self.request("GET", "/feed")[1]["posts"]), reference_rows())
+
+    def test_feed_batch_applies_inner_join_before_limit(self) -> None:
+        rows = ",".join(
+            f"({index * 100000 - 3000000},{999 if index > 25 else 1},'body',"
+            f"'2026-01-01T00:00:{index:02}.000Z')"
+            for index in range(1, 51)
+        )
+        self.sql(
+            "PRAGMA foreign_keys=OFF; DELETE FROM likes; DELETE FROM posts;"
+            f"INSERT INTO posts(id,user_id,body,created_at) VALUES {rows};"
+        )
+        reference = (
+            "SELECT p.id,p.body,p.created_at,u.username AS author,0 AS like_count "
+            "FROM posts p JOIN users u ON u.id=p.user_id "
+            "ORDER BY p.created_at DESC,p.id DESC LIMIT 20"
+        )
+        self.assertEqual(array(self.request("GET", "/feed")[1]["posts"]), self.sql(reference))
+        self.sql("INSERT INTO users(id,username) VALUES(999,'newly joined')")
+        self.assertEqual(array(self.request("GET", "/feed")[1]["posts"]), self.sql(reference))
 
     def test_special_characters_and_surrogate_username(self) -> None:
         text = 'prefix\0"\\\n\t <>&/ café \N{GRINNING FACE}'

@@ -18,7 +18,9 @@ from dev import (
     load,
     mapping,
     parse_counters,
+    parse_timings,
     profile_stage,
+    server,
 )
 
 
@@ -142,16 +144,73 @@ class NativeProfileTests(unittest.TestCase):
         fields = ["S", *(["0"] * 10), "123", "45", *(["0"] * 30)]
         values = (
             "usage_usec 1700000\nuser_usec 1300000\n"
+            "memory_current 65536\nmemory_stat_anon 8192\n"
+            "memory_stat_file 32768\nmemory_stat_sock 4096\n"
+            "Tcp: InSegs OutSegs RetransSegs\nTcp: 100 200 3\n"
+            "TcpExt: ListenDrops TCPTimeouts\nTcpExt: 5 7\n"
             "io_pressure some avg10=2.40 avg60=1.00 avg300=0.20 total=321000\n"
             "io_pressure full avg10=1.20 avg60=0.50 avg300=0.10 total=123000\n"
             "process_stat 1 (a name (x)) "
         )
         counters = parse_counters(values + " ".join(fields))
         self.assertEqual(counters["usage_usec"], 1700000)
+        self.assertEqual(counters["memory_current"], 65536)
+        self.assertEqual(counters["memory_stat_anon"], 8192)
+        self.assertEqual(counters["memory_stat_file"], 32768)
+        self.assertEqual(counters["memory_stat_sock"], 4096)
+        self.assertEqual(counters["net_tcp_RetransSegs"], 3)
+        self.assertEqual(counters["net_tcpext_ListenDrops"], 5)
+        self.assertEqual(counters["net_tcpext_TCPTimeouts"], 7)
         self.assertEqual(counters["main_user_ticks"], 123)
         self.assertEqual(counters["main_system_ticks"], 45)
         self.assertEqual(counters["io_pressure_some_usec"], 321000)
         self.assertEqual(counters["io_pressure_full_usec"], 123000)
+
+    def test_timing_rows_remain_separate_from_server_messages(self) -> None:
+        log = (
+            "Listening on 0.0.0.0:3000\n"
+            'TDS_TIMING {"source":"transport","time_ns":123,"final":false}\n'
+            "WAL checkpoint busy, retrying on a later write\n"
+            'TDS_TIMING {"owner":"checkpoint","time_ns":125,"final":true}\n'
+        )
+        rows = parse_timings(log)
+        self.assertEqual([row["time_ns"] for row in rows], [123, 125])
+        self.assertEqual(rows[-1]["final"], True)
+        self.assertEqual(parse_timings("Listening\n"), [])
+        with self.assertRaises(ValueError):
+            parse_timings("TDS_TIMING not-json")
+
+    def test_stop_timeout_preserves_failure_and_removes_owned_resources(self) -> None:
+        def response(*args: str) -> str:
+            return "127.0.0.1:12345" if args[:2] == ("docker", "port") else "{}"
+
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch("dev.command", side_effect=response) as command,
+            patch("dev.healthy", return_value=True),
+            patch("dev.subprocess.run") as run,
+            patch("builtins.print"),
+        ):
+            output = Path(directory)
+            seed = output / "fixture.db"
+            seed.touch()
+            run.side_effect = [
+                subprocess.TimeoutExpired("docker stop", 20),
+                subprocess.CompletedProcess(["docker", "inspect"], 0, "[]", ""),
+                subprocess.CompletedProcess(["docker", "logs"], 0, "Listening\n", ""),
+                subprocess.CompletedProcess(["docker", "rm"], 0, "", ""),
+            ]
+            container_name = ""
+            with self.assertRaisesRegex(RuntimeError, "request failed"):
+                with server(output, database=seed) as (name, port):
+                    container_name = name
+                    self.assertEqual(port, 12345)
+                    raise RuntimeError("request failed")
+            run.assert_any_call(
+                ["docker", "rm", "--force", container_name], capture_output=True, check=False
+            )
+            command.assert_any_call("docker", "volume", "rm", container_name + "-data")
+            self.assertEqual((output / "server.log").read_text(), "Listening\n")
 
     def test_main_process_and_cgroup_cpu_remain_separate(self) -> None:
         before: dict[str, JSONValue] = {

@@ -3,10 +3,14 @@
 #include "json.hpp"
 #include "parsing.hpp"
 
+#include <array>
 #include <expected>
+#include <iostream>
+#include <span>
 #include <stdexcept>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 namespace tds
 {
@@ -198,26 +202,29 @@ Response Api::get_post(std::string_view id)
     return {Status::ok, std::move(*post)};
 }
 
-Response Api::create_post(const Request &request)
+namespace
+{
+
+std::expected<Database::Write, Response> prepare_create(const Request &request)
 {
     const auto &identity = request.identity.value();
 
     const auto document = read_json(request.body);
     if (!document)
     {
-        return error_response({Status::bad_request, "malformed JSON body"});
+        return std::unexpected(error_response({Status::bad_request, "malformed JSON body"}));
     }
 
     auto *value = member(yyjson_doc_get_root(document->get()), "body");
     if (!yyjson_is_str(value))
     {
-        return error_response({Status::bad_request, "body is required"});
+        return std::unexpected(error_response({Status::bad_request, "body is required"}));
     }
 
     const auto body = trimmed_body(text_value(value));
     if (body.empty())
     {
-        return error_response({Status::bad_request, "body is required"});
+        return std::unexpected(error_response({Status::bad_request, "body is required"}));
     }
 
     std::size_t characters = 0;
@@ -227,25 +234,36 @@ Response Api::create_post(const Request &request)
     }
     if (characters > 500)
     {
-        return error_response({Status::bad_request, "body must be at most 500 characters"});
+        return std::unexpected(
+            error_response({Status::bad_request, "body must be at most 500 characters"}));
     }
 
     const auto user_id = database_user_id(identity);
 
-    return {Status::created, database().create(user_id, identity.username, body)};
+    // The yyjson document dies here, so the queued write owns its trimmed body
+    return Database::Create{user_id, identity.username, std::string(body)};
 }
 
-Response Api::like_post(const Request &request, std::string_view id)
+std::expected<Database::Write, Response> prepare_like(const Request &request, std::string_view id)
 {
     const auto &identity = request.identity.value();
 
     const auto parsed = parse_post_id(id);
     if (!parsed)
     {
-        return error_response(parsed.error());
+        return std::unexpected(error_response(parsed.error()));
     }
 
-    const auto created = database().like(database_user_id(identity), *parsed);
+    return Database::Like{database_user_id(identity), *parsed};
+}
+
+Response write_response(const Database::Write &write, Database::WriteValue value)
+{
+    if (std::holds_alternative<Database::Create>(write))
+    {
+        return {Status::created, std::get<std::string>(std::move(value))};
+    }
+    const auto created = std::get<std::optional<bool>>(value);
     if (!created)
     {
         return error_response({Status::not_found, "post not found"});
@@ -253,10 +271,75 @@ Response Api::like_post(const Request &request, std::string_view id)
 
     std::string output = *created ? "{\"liked\":true,\"already_liked\":false,\"post_id\":"
                                   : "{\"liked\":true,\"already_liked\":true,\"post_id\":";
-    integer(output, *parsed);
+    integer(output, std::get<Database::Like>(write).post_id);
     output += '}';
 
     return {*created ? Status::created : Status::ok, std::move(output)};
+}
+
+} // namespace
+
+bool Api::is_write(const Request &request)
+{
+    const auto endpoint = route(request).endpoint;
+
+    return endpoint == Endpoint::create || endpoint == Endpoint::like;
+}
+
+void Api::handle_writes(std::span<const Request *const> requests, std::span<Response> responses)
+{
+    if (requests.size() != responses.size() || requests.size() > 16)
+    {
+        throw std::logic_error("invalid HTTP write batch");
+    }
+    std::vector<Database::Write> writes;
+    writes.reserve(requests.size());
+    std::array<std::size_t, 16> positions{};
+    for (std::size_t index = 0; index < requests.size(); ++index)
+    {
+        try
+        {
+            const auto &request = *requests[index];
+            const auto target = route(request);
+            auto write = target.endpoint == Endpoint::create ? prepare_create(request)
+                                                             : prepare_like(request, target.id);
+            if (!write)
+            {
+                responses[index] = std::move(write.error());
+                continue;
+            }
+            positions[writes.size()] = index;
+            writes.push_back(std::move(*write));
+        }
+        catch (const std::exception &error)
+        {
+            std::cerr << "request failed: " << error.what() << '\n';
+            responses[index] = error_response({Status::internal_error, "internal server error"});
+        }
+    }
+    if (writes.empty())
+    {
+        return;
+    }
+    auto outcomes = database().write_batch(writes);
+    for (std::size_t index = 0; index < writes.size(); ++index)
+    {
+        try
+        {
+            if (!outcomes[index])
+            {
+                std::rethrow_exception(outcomes[index].error());
+            }
+            responses[positions[index]] =
+                write_response(writes[index], std::move(*outcomes[index]));
+        }
+        catch (const std::exception &error)
+        {
+            std::cerr << "request failed: " << error.what() << '\n';
+            responses[positions[index]] =
+                error_response({Status::internal_error, "internal server error"});
+        }
+    }
 }
 
 std::optional<Response> Api::authorize(Request &request) const
@@ -289,9 +372,13 @@ Response Api::handle(const Request &request)
     case Endpoint::post:
         return get_post(target.id);
     case Endpoint::create:
-        return create_post(request);
-    case Endpoint::like:
-        return like_post(request, target.id);
+    case Endpoint::like: {
+        const std::array<const Request *, 1> requests{&request};
+        std::array<Response, 1> responses{};
+        handle_writes(requests, responses);
+
+        return std::move(responses.front());
+    }
     case Endpoint::missing:
         return error_response({Status::not_found, "not found"});
     }

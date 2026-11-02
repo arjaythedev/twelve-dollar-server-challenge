@@ -51,6 +51,10 @@ struct Exchange
     std::array<iovec, 2> send_vectors{};
     msghdr send_message{};
     std::size_t sent = 0;
+#ifdef TDS_DIAGNOSTICS
+    std::uint64_t send_prepared_ns = 0;
+    std::uint64_t receive_serviced_ns = 0;
+#endif
 };
 
 class Operation
@@ -138,6 +142,11 @@ struct Connection
         io_phase_ = IoPhase::closing;
     }
 
+    void start_application() noexcept
+    {
+        io_phase_ = IoPhase::application;
+    }
+
     bool io_idle() const noexcept
     {
         return io_phase_ == IoPhase::idle;
@@ -160,6 +169,7 @@ struct Connection
     {
         idle,
         active,
+        application,
         closing
     };
 

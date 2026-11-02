@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <arpa/inet.h>
 #include <array>
+#include <bit>
 #include <cerrno>
 #include <charconv>
 #include <chrono>
@@ -209,6 +210,7 @@ struct Config
     double timeout = 60;
     double time_scale = 1;
     std::uint64_t seed = std::random_device{}();
+    bool diagnostics = false;
 };
 
 struct Endpoint
@@ -475,11 +477,177 @@ std::string create_body(const Token &token, std::size_t vu, std::uint64_t iterat
            '}';
 }
 
+struct HistogramBounds
+{
+    double lower = 0;
+    double upper = 0;
+};
+
+struct DiagnosticHistogram
+{
+    static constexpr unsigned subdivisions = 16;
+    static constexpr std::size_t bin_count = 1 + 64 * subdivisions;
+    std::array<std::uint64_t, bin_count> bins{};
+    std::uint64_t count = 0;
+    double maximum_ms = 0;
+
+    void record(double milliseconds) noexcept
+    {
+        std::size_t index = 0;
+        if (milliseconds > 0)
+        {
+            const auto units = static_cast<std::uint64_t>(std::ceil(milliseconds * 1000));
+            const auto exponent = static_cast<unsigned>(std::bit_width(units) - 1);
+            const auto offset = units - (std::uint64_t{1} << exponent);
+            const auto subdivision =
+                exponent >= 4 ? offset >> (exponent - 4) : offset << (4 - exponent);
+            index = 1 + static_cast<std::size_t>(exponent) * subdivisions +
+                    static_cast<std::size_t>(subdivision);
+        }
+        ++bins[index];
+        ++count;
+        maximum_ms = std::max(maximum_ms, milliseconds);
+    }
+
+    static HistogramBounds bounds(std::size_t index) noexcept
+    {
+        if (index == 0)
+        {
+            return {};
+        }
+        --index;
+        const auto exponent = index / subdivisions;
+        const auto subdivision = index % subdivisions;
+        const double base = std::ldexp(1.0, static_cast<int>(exponent));
+        const double lower_us =
+            std::ceil(base * (1 + static_cast<double>(subdivision) / subdivisions)) - 1;
+        const double upper_us =
+            std::ceil(base * (1 + static_cast<double>(subdivision + 1) / subdivisions)) - 1;
+        return {lower_us / 1000, upper_us / 1000};
+    }
+
+    HistogramBounds quantile(double fraction) const noexcept
+    {
+        if (count == 0)
+        {
+            return {};
+        }
+        const double rank = fraction * static_cast<double>(count - 1);
+        const auto first = static_cast<std::uint64_t>(rank) + 1;
+        const auto second = std::min(first + 1, count);
+        HistogramBounds lower;
+        HistogramBounds upper;
+        std::uint64_t cumulative = 0;
+        for (std::size_t index = 0; index < bins.size(); ++index)
+        {
+            const auto previous = cumulative;
+            cumulative += bins[index];
+            if (previous < first && cumulative >= first)
+            {
+                lower = bounds(index);
+            }
+            if (cumulative >= second)
+            {
+                upper = bounds(index);
+                break;
+            }
+        }
+        const double weight = rank - std::floor(rank);
+        return {lower.lower + (upper.lower - lower.lower) * weight,
+                std::min(maximum_ms, lower.upper + (upper.upper - lower.upper) * weight)};
+    }
+};
+
+struct DiagnosticWindow
+{
+    static constexpr std::uint64_t unset = ~std::uint64_t{0};
+    std::uint64_t sequence = unset;
+    DiagnosticHistogram request_duration;
+    DiagnosticHistogram timer_overdue;
+    DiagnosticHistogram epoll_service_lag;
+};
+
+class Diagnostics
+{
+  public:
+    static constexpr std::size_t window_slots = 128;
+    static constexpr double window_seconds = 5;
+
+    void request(double completed, double milliseconds) noexcept
+    {
+        ++requests;
+        if (auto *entry = window(completed))
+        {
+            entry->request_duration.record(milliseconds);
+        }
+    }
+
+    void timer(double serviced, double due) noexcept
+    {
+        ++timers;
+        if (auto *entry = window(serviced))
+        {
+            entry->timer_overdue.record(std::max(0.0, serviced - due) * 1000);
+        }
+    }
+
+    void epoll(double serviced, double batch_ready) noexcept
+    {
+        ++events;
+        if (auto *entry = window(serviced))
+        {
+            entry->epoll_service_lag.record(std::max(0.0, serviced - batch_ready) * 1000);
+        }
+    }
+
+    const DiagnosticWindow &retained(std::uint64_t sequence) const noexcept
+    {
+        return windows[sequence % window_slots];
+    }
+
+    std::uint64_t latest = DiagnosticWindow::unset;
+    std::uint64_t workload_start_ns = 0;
+    std::uint64_t overwritten_windows = 0;
+    std::uint64_t dropped_late_samples = 0;
+    std::uint64_t requests = 0;
+    std::uint64_t timers = 0;
+    std::uint64_t events = 0;
+
+  private:
+    DiagnosticWindow *window(double elapsed) noexcept
+    {
+        const auto sequence = static_cast<std::uint64_t>(elapsed / window_seconds);
+        if (latest == DiagnosticWindow::unset || sequence > latest)
+        {
+            latest = sequence;
+        }
+        if (latest - sequence >= window_slots)
+        {
+            ++dropped_late_samples;
+            return nullptr;
+        }
+        auto &entry = windows[sequence % window_slots];
+        if (entry.sequence != sequence)
+        {
+            if (entry.sequence != DiagnosticWindow::unset)
+            {
+                ++overwritten_windows;
+            }
+            entry = {};
+            entry.sequence = sequence;
+        }
+        return &entry;
+    }
+
+    std::array<DiagnosticWindow, window_slots> windows{};
+};
+
 struct Metrics
 {
     std::vector<double> durations;
     std::array<std::vector<double>, 4> endpoint_durations;
     std::array<std::vector<double>, 4> phase_durations;
+    std::unique_ptr<Diagnostics> diagnostics;
     std::uint64_t failures = 0;
     std::array<std::uint64_t, 4> checks_passed{};
     std::array<std::uint64_t, 4> checks_failed{};
@@ -630,6 +798,10 @@ class Load
         {
             throw std::runtime_error("epoll_create1: " + std::string(std::strerror(errno)));
         }
+        if (config_.diagnostics)
+        {
+            metrics_.diagnostics = std::make_unique<Diagnostics>();
+        }
         rlimit limit{};
         if (::getrlimit(RLIMIT_NOFILE, &limit) != 0 || config_.vus + 16 > limit.rlim_cur)
         {
@@ -651,6 +823,12 @@ class Load
     Metrics run(bool progress = true)
     {
         start_ = Clock::now();
+        if (metrics_.diagnostics)
+        {
+            metrics_.diagnostics->workload_start_ns = static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(start_.time_since_epoch())
+                    .count());
+        }
         double next_progress = 5;
         std::array<epoll_event, 512> events{};
         while (!timers_.empty() && !interrupted)
@@ -659,6 +837,10 @@ class Load
             while (!timers_.empty() && users_[timers_.first()].timer <= now)
             {
                 const auto id = timers_.first();
+                if (metrics_.diagnostics)
+                {
+                    metrics_.diagnostics->timer(now, users_[id].timer);
+                }
                 tick(id, now);
                 if (!users_[id].stopped)
                 {
@@ -683,6 +865,7 @@ class Load
             const int wait_ms = static_cast<int>(std::min(1000.0, std::ceil(delay * 1000)));
             const int count =
                 ::epoll_wait(epoll_.get(), events.data(), static_cast<int>(events.size()), wait_ms);
+            const double batch_ready = metrics_.diagnostics ? elapsed() : 0;
             if (count < 0 && errno != EINTR)
             {
                 throw std::runtime_error("epoll_wait: " + std::string(std::strerror(errno)));
@@ -694,8 +877,16 @@ class Load
                 const auto generation = static_cast<std::uint32_t>(event.data.u64 >> 32);
                 auto &user = users_[id];
                 const double event_time = elapsed();
+                if (metrics_.diagnostics)
+                {
+                    metrics_.diagnostics->epoll(event_time, batch_ready);
+                }
                 if (!user.stopped && user.timer <= event_time)
                 {
+                    if (metrics_.diagnostics)
+                    {
+                        metrics_.diagnostics->timer(event_time, user.timer);
+                    }
                     tick(id, event_time);
                     if (!user.stopped)
                     {
@@ -1176,6 +1367,10 @@ class Load
         metrics_.durations.push_back(sample);
         metrics_.endpoint_durations[check_index].push_back(sample);
         metrics_.phase_durations[completion_phase(config_, now)].push_back(sample);
+        if (metrics_.diagnostics)
+        {
+            metrics_.diagnostics->request(now, sample);
+        }
         metrics_.blocked_sum += (request->connecting ? now : request->connected) - request->queued;
         if (!http_ok)
         {
@@ -1293,6 +1488,99 @@ void duration_groups(std::ostream &output, std::array<std::vector<double>, 4> &g
     output << '}';
 }
 
+void diagnostic_histogram(std::ostream &output, const DiagnosticHistogram &histogram)
+{
+    const auto p95 = histogram.quantile(0.95);
+    const auto p99 = histogram.quantile(0.99);
+    output << "{\"count\":" << histogram.count << ",\"max_ms\":" << histogram.maximum_ms
+           << ",\"p95_lower_ms\":" << p95.lower << ",\"p95_upper_ms\":" << p95.upper
+           << ",\"p99_lower_ms\":" << p99.lower << ",\"p99_upper_ms\":" << p99.upper
+           << ",\"histogram\":[";
+    bool first = true;
+    for (std::size_t index = 0; index < histogram.bins.size(); ++index)
+    {
+        if (histogram.bins[index] == 0)
+        {
+            continue;
+        }
+        const auto bounds = DiagnosticHistogram::bounds(index);
+        output << (first ? "" : ",") << '[' << bounds.lower << ',' << bounds.upper << ','
+               << histogram.bins[index] << ']';
+        first = false;
+    }
+    output << "]}";
+}
+
+void diagnostic_summary(std::ostream &output, const Diagnostics &diagnostics, double elapsed)
+{
+    const auto last = diagnostics.latest;
+    const auto first = last != DiagnosticWindow::unset && last >= Diagnostics::window_slots
+                           ? last - Diagnostics::window_slots + 1
+                           : 0;
+    std::size_t retained = 0;
+    if (last != DiagnosticWindow::unset)
+    {
+        for (auto sequence = first; sequence <= last; ++sequence)
+        {
+            if (diagnostics.retained(sequence).sequence == sequence)
+            {
+                ++retained;
+            }
+        }
+    }
+    output << "{\"workload_start_ns\":" << diagnostics.workload_start_ns
+           << ",\"clock\":\"std::chrono::steady_clock, same epoch as server time_ns\""
+           << ",\"window_seconds\":" << Diagnostics::window_seconds
+           << ",\"window_slots\":" << Diagnostics::window_slots
+           << ",\"storage_bytes\":" << sizeof(Diagnostics) << ",\"windows_retained\":" << retained
+           << ",\"windows_overwritten\":" << diagnostics.overwritten_windows
+           << ",\"dropped_late_samples\":" << diagnostics.dropped_late_samples
+           << ",\"requests_total\":" << diagnostics.requests
+           << ",\"timer_services_total\":" << diagnostics.timers
+           << ",\"epoll_events_total\":" << diagnostics.events
+           << ",\"histogram_semantics\":\"sparse [lower_ms,upper_ms,count]; lower exclusive except "
+              "exact zero bin; ceil to 1us, 16 subdivisions per power of two; bucket width <=6.25% "
+              "plus 1us\""
+           << ",\"quantile_semantics\":\"approximate bounds for linear interpolation at "
+              "p*(count-1); exact count and max\""
+           << ",\"window_semantics\":\"[start_s,end_s) relative to workload_start_ns; classified "
+              "by completion/service time; unobserved empty windows omitted; last 128 intervals "
+              "retained\""
+           << ",\"request_semantics\":\"same as global http_req_duration; failures and timeouts "
+              "included, canceled in-flight requests omitted\""
+           << ",\"timer_semantics\":\"due-to-tick service delay for all VU activation, think, "
+              "idle, retirement, grace and request/connect timeout timers\""
+           << ",\"epoll_semantics\":\"epoll_wait return to start of each returned event dispatch, "
+              "including stale events; not kernel readiness arrival time\""
+           << ",\"windows\":[";
+    bool comma = false;
+    if (last != DiagnosticWindow::unset)
+    {
+        for (auto sequence = first; sequence <= last; ++sequence)
+        {
+            const auto &window = diagnostics.retained(sequence);
+            if (window.sequence != sequence)
+            {
+                continue;
+            }
+            output << (comma ? "," : "")
+                   << "{\"start_s\":" << static_cast<double>(sequence) * Diagnostics::window_seconds
+                   << ",\"end_s\":"
+                   << std::min(elapsed,
+                               static_cast<double>(sequence + 1) * Diagnostics::window_seconds)
+                   << ",\"request_duration_ms\":";
+            diagnostic_histogram(output, window.request_duration);
+            output << ",\"timer_overdue_ms\":";
+            diagnostic_histogram(output, window.timer_overdue);
+            output << ",\"epoll_service_lag_ms\":";
+            diagnostic_histogram(output, window.epoll_service_lag);
+            output << '}';
+            comma = true;
+        }
+    }
+    output << "]}";
+}
+
 Summary summarize(Metrics &metrics, const Config &config)
 {
     std::sort(metrics.durations.begin(), metrics.durations.end());
@@ -1367,7 +1655,13 @@ Summary summarize(Metrics &metrics, const Config &config)
     output << ",\"phase_duration_ms\":";
     duration_groups(output, metrics.phase_durations, {"ramp_up", "hold", "ramp_down", "grace"});
     output << ",\"phase_semantics\":\"classification by completion timestamp; stage boundaries "
-              "enter the next phase\"}\n}\n";
+              "enter the next phase\"";
+    if (metrics.diagnostics)
+    {
+        output << ",\"diagnostics\":";
+        diagnostic_summary(output, *metrics.diagnostics, metrics.elapsed);
+    }
+    output << "}\n}\n";
     return {output.str(), passed};
 }
 
@@ -1407,6 +1701,7 @@ int main(int argc, char **argv)
                    "  [--ramp-up 60s] [--ramp-down 30s] [--graceful-ramp-down 10s]\n"
                    "  [--request-timeout 60s] [--tokens seed/tokens.json] [--summary-export PATH]\n"
                    "  [--local-ips IPv4,IPv4-IPv4] [--ready-file PATH] [--start-gate PATH]\n"
+                   "  [--diagnostics]\n"
                    "Environment: BASE_URL, VUS, DURATION, RAMP_UP, TOKENS\n"
                    "Linux, plain HTTP/1.1, IPv4; one persistent socket per VU\n"
                    "Exact quantiles retain 24 bytes/request plus vector capacity (20 million "
@@ -1417,6 +1712,11 @@ int main(int argc, char **argv)
         for (int index = 1; index < argc; ++index)
         {
             const std::string_view argument(argv[index]);
+            if (argument == "--diagnostics")
+            {
+                config.diagnostics = true;
+                continue;
+            }
             const auto equals = argument.find('=');
             const auto name = argument.substr(0, equals);
             std::string_view value;
@@ -1864,6 +2164,70 @@ void self_test()
     const std::vector<double> samples{0, 1, 2, 3};
     require(percentile(samples, 0.5) == 1.5 && std::abs(percentile(samples, 0.95) - 2.85) < 1e-12,
             "linear quantiles");
+    DiagnosticHistogram histogram;
+    require(histogram.quantile(0.99).upper == 0 && histogram.count == 0,
+            "empty diagnostic histogram");
+    const std::vector<double> diagnostic_samples{0,     0.0001,   0.0005, 0.001, 0.001001, 0.015999,
+                                                 0.016, 0.016001, 1,      500,   1000,     60000};
+    for (const double sample : diagnostic_samples)
+    {
+        histogram.record(sample);
+        DiagnosticHistogram single;
+        single.record(sample);
+        const auto bounds = single.quantile(0.99);
+        require(bounds.lower <= sample && sample <= bounds.upper && single.maximum_ms == sample,
+                "diagnostic single-sample bounds include sub-microsecond input");
+    }
+    for (const double fraction : {0.0, 0.5, 0.95, 0.99, 1.0})
+    {
+        const auto bounds = histogram.quantile(fraction);
+        const double exact = percentile(diagnostic_samples, fraction);
+        require(bounds.lower <= exact && exact <= bounds.upper,
+                "diagnostic quantile bounds contain exact interpolation");
+    }
+    std::uint64_t histogram_count = 0;
+    for (const auto count : histogram.bins)
+    {
+        histogram_count += count;
+    }
+    require(histogram_count == diagnostic_samples.size() && histogram.maximum_ms == 60000,
+            "diagnostic histogram count and exact maximum");
+    auto diagnostics = std::make_unique<Diagnostics>();
+    require(sizeof(Diagnostics) < 4 * 1024 * 1024, "diagnostic fixed storage stays below 4 MiB");
+    diagnostics->request(4.999, 1);
+    diagnostics->request(5, 2);
+    diagnostics->timer(5.001, 5);
+    diagnostics->epoll(5.002, 5);
+    require(diagnostics->retained(0).request_duration.count == 1 &&
+                diagnostics->retained(1).request_duration.count == 1 &&
+                std::abs(diagnostics->retained(1).timer_overdue.maximum_ms - 1) < 1e-9 &&
+                std::abs(diagnostics->retained(1).epoll_service_lag.maximum_ms - 2) < 1e-9,
+            "diagnostic window boundaries and service delays");
+    diagnostics->timer(640, 639.75);
+    diagnostics->request(4.5, 3);
+    diagnostics->timer(640.001, 641);
+    diagnostics->request(645, 4);
+    require(diagnostics->retained(128).sequence == 128 &&
+                diagnostics->retained(128).timer_overdue.count == 2 &&
+                diagnostics->retained(128).timer_overdue.maximum_ms == 250 &&
+                diagnostics->retained(128).timer_overdue.bins[0] == 1 &&
+                diagnostics->overwritten_windows == 2 && diagnostics->dropped_late_samples == 1,
+            "diagnostic ring wrap preserves current timers and rejects expired samples");
+    diagnostics->workload_start_ns = 987654321;
+    std::ostringstream diagnostic_output;
+    diagnostic_summary(diagnostic_output, *diagnostics, 646);
+    const auto diagnostic_document = json(diagnostic_output.str());
+    auto *diagnostic_root =
+        diagnostic_document ? yyjson_doc_get_root(diagnostic_document.get()) : nullptr;
+    auto *diagnostic_windows = yyjson_obj_get(diagnostic_root, "windows");
+    require(yyjson_get_uint(yyjson_obj_get(diagnostic_root, "workload_start_ns")) == 987654321 &&
+                yyjson_get_uint(yyjson_obj_get(diagnostic_root, "windows_retained")) == 2 &&
+                yyjson_arr_size(diagnostic_windows) == 2 &&
+                yyjson_get_num(yyjson_obj_get(yyjson_arr_get(diagnostic_windows, 0), "start_s")) ==
+                    640 &&
+                yyjson_get_num(yyjson_obj_get(yyjson_arr_get(diagnostic_windows, 1), "end_s")) ==
+                    646,
+            "diagnostic summary retains time origin and bounded windows");
     Config phases;
     phases.ramp_up = 2;
     phases.hold = 3;
@@ -1891,8 +2255,13 @@ void self_test()
     config.time_scale = 0.0001;
     config.local_ips = "127.0.0.2-127.0.0.5";
     config.seed = 42;
+    config.diagnostics = true;
     Fixture workflow(FixtureMode::workflow);
     const auto metrics = fixture_run(workflow, config);
+    require(metrics.diagnostics && metrics.diagnostics->requests == metrics.durations.size() &&
+                metrics.diagnostics->workload_start_ns > 0 && metrics.diagnostics->timers > 0 &&
+                metrics.diagnostics->events > 0,
+            "live diagnostic counts and time origin");
     require(grouped_count(metrics.endpoint_durations) == metrics.durations.size() &&
                 grouped_count(metrics.phase_durations) == metrics.durations.size(),
             "latency group counts equal global count");
@@ -1912,6 +2281,8 @@ void self_test()
     Fixture failed_feed(FixtureMode::failed_feed);
     config.hold = 0.04;
     const auto failed = fixture_run(failed_feed, config);
+    require(failed.diagnostics && failed.diagnostics->requests == failed.durations.size(),
+            "failed requests included in diagnostic latency");
     require(grouped_count(failed.endpoint_durations) == failed.durations.size() &&
                 grouped_count(failed.phase_durations) == failed.durations.size(),
             "failed samples retained in latency groups");
@@ -1931,6 +2302,8 @@ void self_test()
     config.ramp_down = 0;
     config.grace = 0.005;
     const auto canceled = fixture_run(stalled, config);
+    require(canceled.diagnostics && canceled.diagnostics->requests == 0,
+            "canceled requests omitted from diagnostic latency");
     require(grouped_count(canceled.endpoint_durations) == 0 &&
                 grouped_count(canceled.phase_durations) == 0,
             "canceled samples omitted from latency groups");
@@ -1941,6 +2314,8 @@ void self_test()
     config.hold = 0.025;
     config.timeout = 0.005;
     const auto timed_out = fixture_run(timeout, config);
+    require(timed_out.diagnostics && timed_out.diagnostics->requests == timed_out.durations.size(),
+            "timed out requests included in diagnostic latency");
     require(timed_out.failures > 0 && timed_out.checks_failed[0] > 0 &&
                 timed_out.durations.front() >= 5,
             "request timeout is a real failed sample");

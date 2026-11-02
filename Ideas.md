@@ -20,13 +20,16 @@
 
 - [x] Keep 64 reserved-slot direct accepts pending on one listener. Burst tests reduced recovery latency while handlers were blocked; tickets retain their ring/slot through cancellation and late successful accepts.
 
+- [x] Compare idle multishot polls with bounded nonblocking reads. At 300k, CPU/request rose from 28.42 to 30.26 us and p99 from 8.03 to 4,170.84 ms; keep pending receives.
+
 - [ ] Compare lazy ring packing with balanced 4/8/12-ring connection shards at the same load and total buffer budget. One issuer and one vCPU remain; compare CPU/request, wakeups, empty CQ scans and p99. More rings add capacity and change locality, not CPU cores.
 
 - [ ] Compare an exact non-empty-ring bitmap if ring selection becomes hot. Free-slot allocation is already O(1); a Bloom filter adds hashes and false positives before a direct slot lookup.
 
 - [x] Compare a bounded ready queue with round-robin handler dispatch. At 100k, CPU/request changed from 31.05 to 31.32 us and p99 from 27.42 to 32.71 ms; keep inline dispatch.
 
-- [ ] Collect aggregate handler/SQLite/commit and send-submission-to-CQE histograms, with per-ring CQ depth and overflow counters. Send timing includes CQ service delay; CPU samples omit I/O waits.
+- [x] Collect handler, database-method, commit and send-preparation-to-CQE histograms, with per-ring CQ depth/overflow and five-second client/scheduling windows. Send timing includes batching and CQ service delay; CPU samples omit I/O waits.
+  A 300k trace captured 2.53- and 1.43-second foreground commits followed by full CQs and CPU saturation. Client scheduling stayed near 1 ms; foreground WAL-header sync under NORMAL is a candidate to measure next.
 
 - [ ] Bound CQ draining and handler work before extending completion waits further. Network/socket paths account for 40.2% and io_uring for 12.0% of sampled CPU in the [100k profile](src/profiles/exchange-100000.json).
   Measure requests/enter, CQ batch sizes and CPU/request: `C ~= C_enter/requests_per_enter + C_other`. Adapt batching to queue depth and oldest response age; cap CQ drains by count or elapsed time, submit pending sends promptly and avoid waiting while application work is ready.
@@ -57,16 +60,21 @@
 - [x] Move PASSIVE checkpoints to a worker with its own SQLite connection. At 100k, p99 fell from 27.42 to 4.71 ms while CPU/request rose from 31.05 to 32.70 us.
   Coalesce 1,000-frame wakeups, defer partial/failed checkpoints and join before closing connections. Keep commits on the issuer and preserve `synchronous=NORMAL`; confirm WAL backlog and latency at 300k.
 
-- [ ] Group writes with a size limit b and timeout: `C(b) ~= s + a/b`, average collection wait `~= (b-1)/(2*lambda)`.
-  Measure write arrival rate and transaction cost before choosing b or the collection window. Hold dependent responses until commit; rollbacks and commit failure must replace them with errors.
+- [x] Group up to 16 queued writes without added delay: `C(b) ~= s + a/b`.
+  Own job data, isolate failures with savepoints and release responses after commit. Keep reads outside the write transaction.
+
+- [ ] Tune batch size or a collection window from the measured write arrival rate: average collection wait `~= (b-1)/(2*lambda)`.
+  Compare prepared transaction/savepoint statements instead of parsing control SQL per write.
   Compare `INSERT ... WHERE EXISTS ... ON CONFLICT` for likes and insert + rowid/timestamp lookup against `RETURNING` ([db.h](submissions/c-iouring-pavlyhalim/src/db.h)).
 
-- [ ] Compare point lookups with range scans for feed posts when SQL/row work, currently 22.2% of sampled CPU, remains a target.
+- [x] Compare point lookups with bounded range scans for feed posts. Native feed CPU fell from 10.58 to 9.06 us; whole-server CPU stayed nearly unchanged at 300k.
   `C_point ~= n*a_seek + k_target*s_scan`; `C_range ~= a_seek + k_span*s_scan`.
   Start with a small decision tree of measured scan/seek thresholds; an ML forest is unnecessary for this choice. Bound skipped rows before seeking across gaps; a narrow ID span can still contain many likes.
   Collect IDs within one fresh feed snapshot, scan in ID order and restore timestamp order with request-local slots, including gaps and reordered timestamps.
 
-- [ ] Deduplicate author IDs within one feed, then batch lookups by B-tree level ([bt_seek_many](submissions/c-iouring-pavlyhalim/src/btree.h)).
+- [x] Deduplicate author IDs within one feed and read them in ID order. Copy post records and author names into request-local arenas; retain the SQL point-read path and remove the unused B-tree point-read API.
+
+- [ ] Compare batched lookups by B-tree level ([bt_seek_many](submissions/c-iouring-pavlyhalim/src/btree.h)).
   Interleave independent descents and fetch shared pages once. Try interpolation from the current page's endpoint keys, with bounded correction and a correct binary-search fallback.
   Keep all lookup state within the request. Pin author pages until serialization; copy post bytes before moving cursors.
 
@@ -106,6 +114,12 @@
   SSE2 JSON/UTF-8 scanning already exists and is baseline on x86_64; test wider SIMD for measured hot loops. AVX2/AVX-512 need matching target support or runtime dispatch.
   `S <= 1/((1-p) + p/s)`, with p measured against total CPU including kernel work.
   JSON is currently 1.8% of sampled CPU, so use a fresh profile before spending time on vector width or more encoding specializations.
+
+- [ ] Compare loop unrolling (`-funroll-loops`, `-funroll-all-loops` and unroll limits), then revisit `-flto` and PGO combinations after hot-path changes.
+  Change one option at a time; compare CPU/request, p99 and code size, and inspect the hot-path assembly for instruction-cache costs.
+
+- [ ] Compare stack-protector, `_FORTIFY_SOURCE` and allocator-hardening settings independently, including disabled variants.
+  Keep correctness and sanitizer checks; record measured gains and which protections each variant removes.
 
 - [ ] Compare ISA-specific kernels for the Xeon Platinum 8260 (Cascade Lake) after checking the VPS feature mask ([GCC](https://gcc.gnu.org/onlinedocs/gcc-13.1.0/gcc/x86-Options.html)). The local `-mtune=cascadelake` comparison is complete.
   Compare SSE2, AVX2 and AVX-512 with runtime dispatch; keep surrogate and bounds handling.

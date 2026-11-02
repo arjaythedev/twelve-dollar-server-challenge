@@ -258,7 +258,11 @@ int main(int argc, char **argv)
             },
             [&](tds::Request &request) {
                 return api.authorize(request);
-            });
+            },
+            {tds::Api::is_write, [&](std::span<const tds::Request *const> requests,
+                                     std::span<tds::Response> responses) {
+                 api.handle_writes(requests, responses);
+             }});
         const Signals signals(server.stop_descriptor());
         std::cout << "Listening on " << host << ':' << server.port() << " through io_uring\n"
                   << std::flush;

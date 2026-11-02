@@ -5,6 +5,7 @@
 **/*.pyc
 .git
 .vscode
-benchmarks
+benchmarks/*
+!benchmarks/group_commit.cpp
 .env
 .env.*

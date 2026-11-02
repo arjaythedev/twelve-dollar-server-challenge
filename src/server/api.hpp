@@ -6,6 +6,7 @@
 #include <chrono>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 
@@ -17,16 +18,16 @@ class Api
   public:
     Api(std::string database_path, std::string secret);
 
-    // Authorize after headers; only accepted requests may reach handle after the body.
+    // Authorize after headers; only accepted requests may reach handle after the body
     std::optional<Response> authorize(Request &request) const;
     Response handle(const Request &request);
+    static bool is_write(const Request &request);
+    void handle_writes(std::span<const Request *const> requests, std::span<Response> responses);
 
   private:
     Database &database();
     Response health();
     Response get_post(std::string_view id);
-    Response create_post(const Request &request);
-    Response like_post(const Request &request, std::string_view id);
 
     std::string database_path_;
     std::string secret_;

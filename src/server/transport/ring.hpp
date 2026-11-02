@@ -1,5 +1,6 @@
 #pragma once
 
+#include "../timing.hpp"
 #include "connection.hpp"
 #include "descriptor.hpp"
 
@@ -130,6 +131,19 @@ class Ring
     unsigned pending = 0;
     std::size_t shutdown_cursor = 0;
     bool wake_pending = false;
+#ifdef TDS_DIAGNOSTICS
+    struct Diagnostics
+    {
+        timing::Histogram cq_depth;
+        timing::Histogram deferred_receive_depth;
+        timing::Histogram send_attempt;
+        std::uint64_t cqes = 0;
+        std::uint64_t receive_enobufs = 0;
+        std::uint64_t empty_cq_samples = 0;
+        std::uint64_t overflow_flag_samples = 0;
+        unsigned previous_overflow = 0;
+    } diagnostics;
+#endif
 
   private:
     static constexpr std::size_t max_pooled_exchanges = 1024;

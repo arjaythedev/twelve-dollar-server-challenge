@@ -22,6 +22,7 @@ from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from statistics import median
 from typing import Literal, Never, NotRequired, TypedDict, cast
 
 import psutil
@@ -35,6 +36,22 @@ K6_IMAGE = (
 PROFILE_EVENT = "cpu-clock:u"
 PROFILE_FREQUENCY = 997
 PROFILE_STACK_BYTES = 8192
+NETWORK_COUNTERS = frozenset(
+    {
+        "InSegs",
+        "OutSegs",
+        "RetransSegs",
+        "ListenOverflows",
+        "ListenDrops",
+        "TCPTimeouts",
+        "TCPSynRetrans",
+        "TCPSpuriousRTOs",
+        "TCPBacklogDrop",
+        "TCPRcvQDrop",
+        "TCPZeroWindowDrop",
+        "TCPWqueueTooBig",
+    }
+)
 K6_PAUSED_BEFORE_RUN = 4
 PROFILE_STAGES = {
     "database_and_rows": "SQL / row assembly",
@@ -84,6 +101,7 @@ class Arguments(argparse.Namespace):
     json_output: bool
     no_build: bool
     scope: ProfileScope
+    diagnostics: bool = False
 
 
 class Result(TypedDict):
@@ -148,12 +166,31 @@ def file_hash(path: Path) -> str:
         return hashlib.file_digest(source, "sha256").hexdigest()
 
 
+def parse_timings(log: str) -> list[dict[str, JSONValue]]:
+    prefix = "TDS_TIMING "
+    return [
+        mapping(decode_json(line.removeprefix(prefix).encode("utf-8")))
+        for line in log.splitlines()
+        if line.startswith(prefix)
+    ]
+
+
 def parse_counters(values: str) -> dict[str, JSONValue]:
     rows, process = values.rsplit("process_stat ", 1)
     fields = process[process.rindex(")") + 2 :].split()
     result: dict[str, JSONValue] = {}
+    network_headers: dict[str, list[str]] = {}
     for line in rows.splitlines():
         name, value, *parts = line.split()
+        if name in ("Tcp:", "TcpExt:"):
+            network_values = [value, *parts]
+            if name not in network_headers:
+                network_headers[name] = network_values
+                continue
+            for key, item in zip(network_headers.pop(name), network_values, strict=True):
+                if key in NETWORK_COUNTERS:
+                    result[f"net_{name[:-1].lower()}_{key}"] = int(item)
+            continue
         if name.endswith("_pressure"):
             for part in parts:
                 if part.startswith("total="):
@@ -163,13 +200,15 @@ def parse_counters(values: str) -> dict[str, JSONValue]:
                 raise ValueError(f"missing total in {name}")
         else:
             result[name] = int(value)
+    if network_headers:
+        raise ValueError("incomplete TCP counter rows")
     result["main_user_ticks"] = int(fields[11])
     result["main_system_ticks"] = int(fields[12])
     return result
 
 
 def counters(observer: str) -> dict[str, JSONValue]:
-    # Read through the server's root, but run the reader in a separate cgroup.
+    # Read through the server's root, but run the reader in a separate cgroup
     root = "/proc/1/root/sys/fs/cgroup"
     pressure = "".join(
         f"sed 's/^/{resource}_pressure /' {root}/{resource}.pressure; "
@@ -184,7 +223,14 @@ def counters(observer: str) -> dict[str, JSONValue]:
         f"cat {root}/cpu.stat; "
         f"printf 'memory_current '; cat {root}/memory.current; "
         f"printf 'memory_peak '; cat {root}/memory.peak; "
-        f"cat {root}/memory.events; {pressure}printf 'process_stat '; cat /proc/1/stat",
+        f"sed 's/^/memory_stat_/' {root}/memory.stat; "
+        f"cat {root}/memory.events; {pressure}"
+        "grep -h '^Tcp' /proc/1/net/snmp /proc/1/net/netstat; "
+        "if [ -f /proc/1/root/data/feed.db ]; then "
+        "printf 'database_file_bytes '; stat -c %s /proc/1/root/data/feed.db; fi; "
+        "if [ -f /proc/1/root/data/feed.db-wal ]; then "
+        "printf 'wal_file_bytes '; stat -c %s /proc/1/root/data/feed.db-wal; fi; "
+        "printf 'process_stat '; cat /proc/1/stat",
     )
     return parse_counters(values)
 
@@ -455,9 +501,14 @@ def show_results(results: list[Result]) -> None:
         )
 
 
-def build(*, tests: bool = False, profiler: bool = False) -> str:
+def image_name(*, profiler: bool = False, diagnostics: bool = False) -> str:
+    base = PROFILER_IMAGE if profiler else IMAGE
+    return base + ("-diagnostics" if diagnostics else "")
+
+
+def build(*, tests: bool = False, profiler: bool = False, diagnostics: bool = False) -> str:
     print("Building profiler image..." if profiler else "Building C++ image...", flush=True)
-    image = PROFILER_IMAGE if profiler else IMAGE + ("-build" if tests else "")
+    image = image_name(profiler=profiler, diagnostics=diagnostics) + ("-build" if tests else "")
     command(
         "docker",
         "build",
@@ -467,6 +518,8 @@ def build(*, tests: bool = False, profiler: bool = False) -> str:
         "linux/amd64",
         "--tag",
         image,
+        "--build-arg",
+        f"TDS_DIAGNOSTICS={'ON' if diagnostics else 'OFF'}",
         *(["--target", "profiler"] if profiler else ["--target", "build"] if tests else []),
         "--file",
         str(ROOT / "src/Dockerfile"),
@@ -522,6 +575,9 @@ def native_check() -> None:
         ("server", ["--self-test"]),
         ("transport_tests", []),
         ("checkpoint_tests", []),
+        ("group_commit_tests", []),
+        ("btree_tests", []),
+        ("sync_tests", []),
         ("load_generator", ["--self-test"]),
     ):
         print(
@@ -648,8 +704,9 @@ class LoadGenerator:
 
 @contextmanager
 def load_generator(
-    args: Arguments, container: str, port: int, output: Path
+    args: Arguments, container: str, port: int, output: Path, *, image: str | None = None
 ) -> Generator[LoadGenerator]:
+    image = image or IMAGE
     name: str | None = None
     kind: GeneratorKind = "k6" if args.k6 is not None else args.generator
     if args.k6 is not None:
@@ -691,7 +748,7 @@ def load_generator(
                 "--rm",
                 "--network=none",
                 "--entrypoint=sh",
-                IMAGE,
+                image,
                 "-c",
                 "/app/load_generator --version; sha256sum /app/load_generator",
             ).splitlines()
@@ -732,7 +789,7 @@ def load_generator(
             *prefix,
             *settings,
             "--entrypoint=/app/load_generator",
-            IMAGE,
+            image,
             "--summary-export",
             summary,
             "--local-ips=127.0.0.2-127.0.0.33",
@@ -740,6 +797,7 @@ def load_generator(
             "/results/generator.ready",
             "--start-gate",
             "/results/generator.start",
+            *(["--diagnostics"] if args.diagnostics else []),
         ]
     else:
         invocation = [
@@ -861,11 +919,20 @@ def load(args: Arguments, generator: LoadGenerator, observer: str, output: Path)
                         continue
                     next_sample = elapsed + 2
                     try:
+                        client_started = time.monotonic() - started
+                        client_sample = generator.sample(child.pid)
+                        client_finished = time.monotonic() - started
+                        server_started = time.monotonic() - started
+                        server_sample = counters(observer)
+                        server_finished = time.monotonic() - started
                         sample: dict[str, JSONValue] = {
                             "phase": "workload",
-                            "elapsed_s": time.monotonic() - started,
-                            **generator.sample(child.pid),
-                            "server": counters(observer),
+                            "elapsed_s": client_started,
+                            "client_sample_end_s": client_finished,
+                            "server_sample_start_s": server_started,
+                            "server_sample_end_s": server_finished,
+                            **client_sample,
+                            "server": server_sample,
                         }
                         samples.append(sample)
                         if elapsed >= next_progress:
@@ -903,6 +970,7 @@ def load(args: Arguments, generator: LoadGenerator, observer: str, output: Path)
             "cpu": cpu_delta(before, after, ticks),
             "load_generator": "docker_loopback" if generator.container is not None else "native",
             "generator": generator.kind,
+            "diagnostics": args.diagnostics,
             "load_generator_version": generator.version,
             "load_generator_sha256": generator.sha256,
         },
@@ -915,8 +983,9 @@ def load(args: Arguments, generator: LoadGenerator, observer: str, output: Path)
 
 @contextmanager
 def server(
-    output: Path, *, database: Path | None = None, secret: str = JWT_KEY
+    output: Path, *, database: Path | None = None, secret: str = JWT_KEY, image: str | None = None
 ) -> Generator[tuple[str, int]]:
+    image = image or IMAGE
     unique = f"td-bench-{uuid.uuid4().hex[:10]}"
     volume = unique + "-data"
     seed = (database or ROOT / "seed/feed.db").resolve()
@@ -937,7 +1006,7 @@ def server(
             f"{volume}:/data",
             "--entrypoint",
             "chown",
-            IMAGE,
+            image,
             "10001:10001",
             "/data",
         )
@@ -971,7 +1040,7 @@ def server(
             f"type=bind,source={seed.parent},target=/seed,readonly",
             "--entrypoint",
             "sh",
-            IMAGE,
+            image,
             "-c",
             launch,
         )
@@ -992,7 +1061,7 @@ def server(
                     command("docker", "info", "--format", "{{json .}}").encode()
                 ),
                 "container": decode_json(command("docker", "inspect", unique).encode()),
-                "image": decode_json(command("docker", "image", "inspect", IMAGE).encode()),
+                "image": decode_json(command("docker", "image", "inspect", image).encode()),
                 "runtime": decode_json(
                     command("docker", "exec", unique, "/app/server", "--version").encode()
                 ),
@@ -1015,12 +1084,24 @@ def server(
         )
         yield unique, port
     finally:
+        try:
+            subprocess.run(
+                ["docker", "stop", "--time=10", unique],
+                capture_output=True,
+                check=False,
+                timeout=20,
+            )
+        except subprocess.TimeoutExpired:
+            print("Server stop timed out; removing the container.", flush=True)
         state = subprocess.run(["docker", "inspect", unique], capture_output=True, text=True)
         (output / "container-final.json").write_text(state.stdout, encoding="utf-8")
         logs = subprocess.run(["docker", "logs", unique], capture_output=True, text=True)
         (output / "server.log").write_text(logs.stdout + logs.stderr, encoding="utf-8")
         subprocess.run(["docker", "rm", "--force", unique], capture_output=True, check=False)
         command("docker", "volume", "rm", volume)
+        timings = parse_timings(logs.stdout + logs.stderr)
+        if timings:
+            write_json(output / "timings.json", timings)
 
 
 def profile_stage(frames: list[tuple[str, str]]) -> str:
@@ -1189,7 +1270,65 @@ def show_latency_breakdown(workload: dict[str, JSONValue]) -> None:
             )
 
 
-def collect_profile(container: str, output: Path, *, scope: ProfileScope = "user") -> None:
+def show_group_commits(report: dict[str, JSONValue]) -> None:
+    for key, title in (("rows", "Mixed writes"), ("valid_rows", "Valid writes")):
+        values = report.get(key, [])
+        if not isinstance(values, list):
+            raise ValueError("group-commit samples must be an array")
+        groups: dict[tuple[str, int], list[dict[str, JSONValue]]] = {}
+        for value in values:
+            row = mapping(value)
+            group = (text(row, "mode"), integer(row, "batch"))
+            groups.setdefault(group, []).append(row)
+        if not groups:
+            continue
+        print(f"{title}: write-kernel medians, inline checkpoints, no HTTP timing")
+        print("Mode              Batch  CPU us/write  Wall us/write  WAL frames  Commits")
+        for (mode, batch), rows in groups.items():
+            print(
+                f"{mode:18} {batch:5}  "
+                f"{median(number(row, 'cpu_us_per_job') for row in rows):12.3f}  "
+                f"{median(number(row, 'wall_us_per_job') for row in rows):13.3f}  "
+                f"{median(integer(row, 'wal_appended_frames') for row in rows):10.0f}  "
+                f"{median(integer(row, 'commits') for row in rows):7.0f}"
+            )
+
+
+def show_diagnostics(workload: dict[str, JSONValue]) -> None:
+    diagnostics = mapping(workload.get("diagnostics", {}))
+    values = diagnostics.get("windows", [])
+    if not isinstance(values, list):
+        raise ValueError("diagnostic windows must be an array")
+    windows = [mapping(value) for value in values]
+    if not windows:
+        return
+    ranked = sorted(
+        windows,
+        key=lambda row: number(mapping(row["request_duration_ms"]), "p99_upper_ms"),
+        reverse=True,
+    )[:5]
+    maximum = max(windows, key=lambda row: number(mapping(row["request_duration_ms"]), "max_ms"))
+    if maximum not in ranked:
+        ranked.append(maximum)
+    print("Worst client windows (approximate p99 bounds, ms):")
+    print("Window s     Requests         p99 bounds        Max  Timer max  epoll max")
+    for row in ranked:
+        request = mapping(row["request_duration_ms"])
+        timer = mapping(row["timer_overdue_ms"])
+        epoll = mapping(row["epoll_service_lag_ms"])
+        print(
+            f"{number(row, 'start_s'):4.0f}-{number(row, 'end_s'):<4.0f}  "
+            f"{integer(request, 'count'):9}  "
+            f"{number(request, 'p99_lower_ms'):9.3f}-{number(request, 'p99_upper_ms'):<9.3f}  "
+            f"{number(request, 'max_ms'):9.3f}  "
+            f"{number(timer, 'max_ms'):9.3f}  {number(epoll, 'max_ms'):9.3f}"
+        )
+
+
+def collect_profile(
+    container: str, output: Path, *, scope: ProfileScope = "user", image: str | None = None
+) -> None:
+    image = image or PROFILER_IMAGE
     common = [
         "docker",
         "run",
@@ -1199,7 +1338,7 @@ def collect_profile(container: str, output: Path, *, scope: ProfileScope = "user
         "--cap-drop=ALL",
         *(["--user=0", "--cap-add=SYSLOG", "--cap-add=SYS_PTRACE"] if scope != "user" else []),
         f"--mount=type=bind,source={output},target=/profile,readonly",
-        PROFILER_IMAGE,
+        image,
     ]
     stacks = command(
         *common,
@@ -1225,15 +1364,23 @@ def collect_profile(container: str, output: Path, *, scope: ProfileScope = "user
 
 @contextmanager
 def observing(
-    container: str, output: Path, *, profiling: bool, scope: ProfileScope = "user"
+    container: str,
+    output: Path,
+    *,
+    profiling: bool,
+    scope: ProfileScope = "user",
+    image: str | None = None,
+    profiler_image: str | None = None,
 ) -> Generator[str]:
+    image = image or IMAGE
+    profiler_image = profiler_image or PROFILER_IMAGE
     name = f"{container}-observer"
-    launch = ["--read-only", "--entrypoint=sleep", IMAGE, "infinity"]
+    launch = ["--read-only", "--entrypoint=sleep", image, "infinity"]
     target_hash = ""
     if profiling:
         target_hash = command("docker", "exec", container, "sha256sum", "/app/server").split()[0]
         symbol_hash = command(
-            "docker", "run", "--rm", "--entrypoint=sha256sum", PROFILER_IMAGE, "/app/server"
+            "docker", "run", "--rm", "--entrypoint=sha256sum", profiler_image, "/app/server"
         ).split()[0]
         if target_hash != symbol_hash:
             raise RuntimeError("profiler symbols do not match the running server")
@@ -1241,7 +1388,7 @@ def observing(
             "--cap-add=PERFMON",
             *(["--cap-add=SYSLOG", "--cap-add=SYS_PTRACE"] if scope != "user" else []),
             "--entrypoint=sh",
-            PROFILER_IMAGE,
+            profiler_image,
             "-c",
             'mkfifo /tmp/perf-control /tmp/perf-ack && exec perf "$@"',
             "perf",
@@ -1298,7 +1445,7 @@ def observing(
                     raise RuntimeError(f"perf exited with {exit_code}; see perf.log")
                 command("docker", "cp", f"{name}:/tmp/perf.data", str(output / "perf.data"))
                 if completed:
-                    collect_profile(container, output, scope=scope)
+                    collect_profile(container, output, scope=scope, image=profiler_image)
         finally:
             subprocess.run(["docker", "rm", "--force", name], capture_output=True, check=False)
 
@@ -1337,6 +1484,11 @@ def main() -> None:
         benchmark.add_argument(
             "--no-build", action="store_true", help="reuse existing images without rebuilding"
         )
+        benchmark.add_argument(
+            "--diagnostics",
+            action="store_true",
+            help="use separate timing builds and collect native-client scheduling statistics",
+        )
         if action == "profile":
             benchmark.add_argument("--scope", choices=("user", "kernel", "all"), default="user")
     results = actions.add_parser("results", help="display saved benchmark results")
@@ -1356,8 +1508,16 @@ def main() -> None:
                 show_results(read_results(args.file))
             else:
                 report = mapping(document)
-                show_profile(mapping(report["profile"]))
-                show_latency_breakdown(mapping(report.get("load_generator", {})))
+                if "rows" in report:
+                    show_group_commits(report)
+                    return
+                if "profile" in report:
+                    show_profile(mapping(report["profile"]))
+                    workload = mapping(report.get("load_generator", {}))
+                else:
+                    workload = mapping(report.get("generator", {}))
+                show_latency_breakdown(workload)
+                show_diagnostics(workload)
         else:
             if args.k6 is not None and not args.k6.is_file():
                 parser.error("--k6 must point to an executable file")
@@ -1380,19 +1540,25 @@ def main() -> None:
                 parser.error("run name already exists; choose a new --label")
             output = ROOT / "results" / args.label
             output.mkdir(parents=True, exist_ok=False)
+            runtime_image = image_name(diagnostics=args.diagnostics)
+            profiler_image = image_name(profiler=True, diagnostics=args.diagnostics)
             if not args.no_build:
-                build()
+                build(diagnostics=args.diagnostics)
                 if profiling:
-                    build(profiler=True)
-            with server(output) as (container, port):
+                    build(profiler=True, diagnostics=args.diagnostics)
+            if args.diagnostics:
+                print("Diagnostics enabled; timing overhead is included in this run.", flush=True)
+            with server(output, image=runtime_image) as (container, port):
                 with (
                     observing(
                         container,
                         output,
                         profiling=profiling,
                         scope=args.scope if profiling else "user",
+                        image=runtime_image,
+                        profiler_image=profiler_image,
                     ) as name,
-                    load_generator(args, container, port, output) as generator,
+                    load_generator(args, container, port, output, image=runtime_image) as generator,
                 ):
                     code = load(args, generator, name, output)
             result = summarize(output)
@@ -1423,6 +1589,11 @@ def main() -> None:
                     raise ValueError("a result file is required for benchmarks")
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 write_json(destination, [*saved, result])
+            if args.diagnostics:
+                workload = mapping(
+                    mapping(read_json(output / "k6-summary.json")).get("generator", {})
+                )
+                show_diagnostics(workload)
             raise SystemExit(code)
     except subprocess.CalledProcessError as error:
         if error.stdout:

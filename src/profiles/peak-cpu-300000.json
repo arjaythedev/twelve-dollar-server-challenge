@@ -1,0 +1,236 @@
+{
+  "benchmark_name": "peak-cpu-300000",
+  "benchmark_results": "../benchmarks/results.json",
+  "profile": {
+    "event": "cpu-clock",
+    "frequency_hz": 199,
+    "stack_bytes": 8192,
+    "samples": 9690,
+    "sampled_cpu_ns": 48693461250,
+    "lost_records": 0,
+    "unresolved_leaf_samples": 440,
+    "unrooted_samples": 266,
+    "stages_cpu_ns": {
+      "database_and_rows": 12281405500,
+      "response_json": 944723500,
+      "kernel_network": 17386932500,
+      "kernel_other": 2648240875,
+      "kernel_filesystem": 7814069375,
+      "transport_and_other": 2211055000,
+      "kernel_io_uring": 3899497000,
+      "auth": 743718500,
+      "kernel_scheduler": 748743625,
+      "unknown": 15075375
+    },
+    "hotspots": [
+      {
+        "symbol": "_raw_spin_unlock_irqrestore",
+        "module": "[kernel.kallsyms]",
+        "cpu_ns": 2814070000,
+        "samples": 560
+      },
+      {
+        "symbol": "[unknown]",
+        "module": "/usr/lib/x86_64-linux-gnu/libc.so.6",
+        "cpu_ns": 1999999750,
+        "samples": 398
+      },
+      {
+        "symbol": "sqlite3BtreeTableMoveto",
+        "module": "/app/server",
+        "cpu_ns": 1829145500,
+        "samples": 364
+      },
+      {
+        "symbol": "pcache1Fetch",
+        "module": "/app/server",
+        "cpu_ns": 1376884250,
+        "samples": 274
+      },
+      {
+        "symbol": "__inet_lookup_established",
+        "module": "[kernel.kallsyms]",
+        "cpu_ns": 999999875,
+        "samples": 199
+      },
+      {
+        "symbol": "walMerge",
+        "module": "/app/server",
+        "cpu_ns": 809045125,
+        "samples": 161
+      },
+      {
+        "symbol": "srso_alias_safe_ret",
+        "module": "[kernel.kallsyms]",
+        "cpu_ns": 763819000,
+        "samples": 152
+      },
+      {
+        "symbol": "sqlite3GetVarint",
+        "module": "/app/server",
+        "cpu_ns": 748743625,
+        "samples": 149
+      },
+      {
+        "symbol": "finish_task_switch.isra.0",
+        "module": "[kernel.kallsyms]",
+        "cpu_ns": 698492375,
+        "samples": 139
+      },
+      {
+        "symbol": "exit_to_user_mode_prepare",
+        "module": "[kernel.kallsyms]",
+        "cpu_ns": 693467250,
+        "samples": 138
+      },
+      {
+        "symbol": "tds::Server::State::run()",
+        "module": "/app/server",
+        "cpu_ns": 658291375,
+        "samples": 131
+      },
+      {
+        "symbol": "tcp_ack",
+        "module": "[kernel.kallsyms]",
+        "cpu_ns": 597989875,
+        "samples": 119
+      },
+      {
+        "symbol": "copyin",
+        "module": "[kernel.kallsyms]",
+        "cpu_ns": 517587875,
+        "samples": 103
+      },
+      {
+        "symbol": "posix_lock_inode",
+        "module": "[kernel.kallsyms]",
+        "cpu_ns": 497487375,
+        "samples": 99
+      },
+      {
+        "symbol": "syscall_enter_from_user_mode",
+        "module": "[kernel.kallsyms]",
+        "cpu_ns": 472361750,
+        "samples": 94
+      }
+    ],
+    "syscalls_cpu_ns": {
+      "other": 4336682875,
+      "io_uring_enter": 19326630750,
+      "pwrite64": 2798994625,
+      "fsync": 1417085250,
+      "fcntl": 3864321125,
+      "pread64": 472361750,
+      "futex": 90452250,
+      "read": 145728625,
+      "ftruncate": 45226125
+    }
+  },
+  "window": {
+    "warmup_s": 60.0,
+    "hold_s": 60.0,
+    "resume_ack_s": 0.0003400000277906656,
+    "enable_request_s": 60.23871730000246,
+    "enable_ack_s": 60.42700119991787,
+    "disable_request_s": 120.0219681999879,
+    "disable_ack_s": 120.21067649999168,
+    "cpu": {
+      "cgroup_user_s": 16.598365,
+      "cgroup_system_s": 33.748003,
+      "main_user_s": 16.6,
+      "main_system_s": 33.74,
+      "cgroup_minus_main_s": 0.006367999999994822
+    }
+  },
+  "load_generator": {
+    "name": "td-load",
+    "version": "0.1.0",
+    "transport": "epoll/http1.1/IPv4",
+    "source": "bench/load.js",
+    "passed": true,
+    "checks_passed": true,
+    "vus": 300000,
+    "ramp_up_seconds": 60,
+    "hold_seconds": 60,
+    "ramp_down_seconds": 30,
+    "grace_seconds": 10,
+    "request_timeout_seconds": 60,
+    "elapsed_seconds": 160.000604736,
+    "connections": 300000,
+    "max_rss_bytes": 149753856,
+    "idle_vu_state_bytes": 80,
+    "interrupted_iterations": 153470,
+    "workflow_errors": 0,
+    "bytes_received": 6670259401,
+    "seed": 3705775006,
+    "quantiles": "exact linear interpolation, all completed requests, 24 bytes/request across global+endpoint+phase samples, plus vector capacity, 20 million request limit",
+    "duration_semantics": "send+wait+receive, excludes connect; interrupted requests omitted",
+    "endpoint_requests": {
+      "feed": 1653613,
+      "post": 1653613,
+      "like": 245946,
+      "create": 32877
+    },
+    "endpoint_duration_ms": {
+      "feed": {
+        "count": 1653613,
+        "avg": 2.24515570734,
+        "p95": 5.0226056,
+        "p99": 8.08707884,
+        "max": 94.866191
+      },
+      "post": {
+        "count": 1653613,
+        "avg": 2.25980419179,
+        "p95": 5.1153098,
+        "p99": 7.97047679999,
+        "max": 94.621081
+      },
+      "like": {
+        "count": 245946,
+        "avg": 2.31112733639,
+        "p95": 5.14096100001,
+        "p99": 7.80657100001,
+        "max": 94.551796
+      },
+      "create": {
+        "count": 32877,
+        "avg": 2.31038533345,
+        "p95": 5.1536602,
+        "p99": 8.37047628001,
+        "max": 78.15512
+      }
+    },
+    "phase_duration_ms": {
+      "ramp_up": {
+        "count": 1108091,
+        "avg": 2.122140522,
+        "p95": 4.821185,
+        "p99": 7.077313,
+        "max": 94.866191
+      },
+      "hold": {
+        "count": 1904416,
+        "avg": 2.40324033049,
+        "p95": 5.37861900001,
+        "p99": 10.8433906,
+        "max": 73.80781
+      },
+      "ramp_down": {
+        "count": 563315,
+        "avg": 2.03080543656,
+        "p95": 4.5622945,
+        "p99": 5.78713196,
+        "max": 10.685294
+      },
+      "grace": {
+        "count": 10227,
+        "avg": 2.10755854874,
+        "p95": 4.33130869999,
+        "p99": 4.64478889999,
+        "max": 8.804685
+      }
+    },
+    "phase_semantics": "classification by completion timestamp; stage boundaries enter the next phase"
+  }
+}

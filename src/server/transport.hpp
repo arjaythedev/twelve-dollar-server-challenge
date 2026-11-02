@@ -6,6 +6,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string_view>
 
 namespace tds
@@ -17,7 +18,16 @@ class Server
     using Handler = std::function<Response(const Request &)>;
     using HeaderHandler = std::function<std::optional<Response>(Request &)>;
 
-    Server(std::string_view host, std::uint16_t port, Handler handler, HeaderHandler headers);
+    struct WriteHandlers
+    {
+        std::function<bool(const Request &)> accepts;
+        std::function<void(std::span<const Request *const>, std::span<Response>)> handle;
+    };
+
+    static constexpr std::size_t write_batch_limit = 16;
+
+    Server(std::string_view host, std::uint16_t port, Handler handler, HeaderHandler headers,
+           WriteHandlers writes = {});
     ~Server();
     Server(const Server &) = delete;
     Server &operator=(const Server &) = delete;

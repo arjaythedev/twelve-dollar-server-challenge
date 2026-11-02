@@ -46,8 +46,24 @@
 | C++ 0.1.0 (bounded handler queue) | 100,000 | 60 s | 1,037,202 | 7,978.44 | 12.390 ms | 32.713 ms | 201.77 ms | 0% | 31.32 us | 525.76 MiB |
 | C++ 0.1.0 (checkpoint worker) | 100,000 | 60 s | 1,037,228 | 7,978.67 | 3.690 ms | 4.711 ms | 34.51 ms | 0% | 32.70 us | 535.91 MiB |
 | C++ 0.1.0 (checkpoint worker, failed) | 300,000 | 5 min | 11,039,291 | 27,598.20 | 75.035 ms | 3,979.977 ms | 33,316.56 ms | 0% | 27.86 us | 1,857.30 MiB |
+| C++ 0.1.0 (300k profile) | 300,000 | 60 s | 3,586,049 | 22,412.72 | 5.080 ms | 8.026 ms | 94.87 ms | 0% | 28.42 us | 1,522.39 MiB |
+| C++ 0.1.0 (idle poll, reverted) | 300,000 | 60 s | 3,542,624 | 22,141.34 | 72.329 ms | 4,170.837 ms | 7,246.31 ms | 0% | 30.26 us | 1,993.39 MiB |
+| C++ 0.1.0 (feed batch) | 300,000 | 60 s | 3,586,146 | 22,413.30 | 5.067 ms | 8.487 ms | 139.13 ms | 0% | 28.32 us | 1,361.25 MiB |
+| C++ 0.1.0 (feed batch) | 300,000 | 5 min | 11,148,015 | 27,869.99 | 16.217 ms | 749.363 ms | 23,529.85 ms | 0% | 26.69 us | 1,618.10 MiB |
+| C++ 0.1.0 (diagnostics) | 300,000 | 5 min | 10,846,881 | 27,117.20 | 390.067 ms | 9,904.171 ms | 38,276.73 ms | 0% | 26.47 us | 2,354.75 MiB |
+| C++ 0.1.0 (feed batch control, failed) | 300,000 | 5 min | 11,139,199 | 27,847.99 | 134.529 ms | 1,702.041 ms | 14,729.54 ms | 0% | 26.45 us | 1,982.40 MiB |
+| C++ 0.1.0 (group commit) | 300,000 | 60 s | 3,581,785 | 22,386.04 | 28.255 ms | 371.544 ms | 4,785.60 ms | 0% | 25.95 us | 1,097.05 MiB |
+| C++ 0.1.0 (group commit) | 300,000 | 5 min | 11,200,015 | 28,000.03 | 5.360 ms | 82.080 ms | 3,954.01 ms | 0% | 24.36 us | 1,247.85 MiB |
 
 Statistics include the ramps. RAM is the cgroup peak, including charged file pages. Local results, not an official score or a measured capacity limit.
+
+300k feed batch, five minutes: hold-only p99 1,172.77 ms; aggregate p99 749.36 ms.
+
+300k group commit, five minutes, no internal telemetry: hold-only p99 97.99 ms; maximum 3,954.01 ms. The short run had worse p99 than the earlier short feed profile.
+
+Normal repeat: same server/client/seed/workload hashes, different RNG seed; p99 rose from 749.36 to 1,702.04 ms. No memory-limit or reclaim events.
+
+Diagnostics: foreground COMMIT maxima 2,526.89 and 1,426.01 ms; full CQs and CPU saturation afterward. Client timer p99 about 1.1 ms, epoll p99 below 0.25 ms. Memory limit reached during hold, no OOM. [Data](src/profiles/stalls-300000.json).
 
 Low-hanging and direct-descriptor pairs ran one baseline and one candidate concurrently. Direct-descriptor pairs used the official 65,535 file limit.
 
@@ -55,7 +71,11 @@ Transport check: 70,000 open connections with `RLIMIT_NOFILE=65535`, two rings, 
 
 The uring rows read CPU counters externally; earlier rows include the in-container counter reader. Their CPU/request values are not directly comparable.
 
-[Data](src/benchmarks/results.json). Full logs stay in `results/<run>/`.
+[Data](src/benchmarks/results.json). [300k CPU profile](src/profiles/peak-cpu-300000.json). Full logs stay in `results/<run>/`.
+
+Feed batching: native median 10.58 to 9.06 us over five alternating pairs; after cleanup, 10.42 to 9.05 us over three pairs. Outputs matched. [Data](src/benchmarks/feed-batch.json).
+
+Group commit, 10,000 valid writes, two reversed pairs: b=1 to b=16 reduced median CPU/write from 63.85 to 51.88 us, WAL frames from 53,424 to 41,488, commits from 10,000 to 625. Outputs/state matched; inline checkpoints, no HTTP timing. b=64 saved more CPU in the mixed test but showed unstable wall time. [Data](src/benchmarks/group-commit.json).
 
 `SQLITE_DEFAULT_MEMSTATUS=0`, seven alternating CPU comparisons: feed paired median 1.0% slower, post 0.9% faster. All JSON hashes matched.
 

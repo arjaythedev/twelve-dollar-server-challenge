@@ -17,6 +17,7 @@
 //! syscall policy, an old kernel, an ABI mismatch — the caller stays on the other
 //! transport rather than serving from an untested path.
 
+use std::collections::VecDeque;
 use std::mem;
 use std::os::raw::c_int;
 
@@ -129,6 +130,9 @@ struct Lane {
     accepting: bool,
     /// Connections whose close could not be submitted yet.
     deferred_close: Vec<u32>,
+    /// Starved receives (ENOBUFS) waiting for the ring's buffers to come
+    /// back, oldest first: each pass re-arms at most as many as returned.
+    read_queue: std::collections::VecDeque<u32>,
     /// Connections with output ready, or waiting to be closed.
     dirty: Vec<u32>,
     /// Response buffers taken back after their send completed.
@@ -312,6 +316,7 @@ impl UringServer {
             pending: vec![0u64; Lane::pending_words()].into_boxed_slice(),
             npending: 0,
             held_bufs: 0,
+            read_queue: VecDeque::new(),
             free_slots: table,
             conns: (0..table).map(|_| Conn::new()).collect(),
             accept_inflight: 0,
@@ -636,11 +641,22 @@ impl UringServer {
                     self.submit_close(lane, slot);
                 } else {
                     let err = -res;
-                    // ENOBUFS: no provided buffer was available; the receive
-                    // must be re-armed. EAGAIN/EINTR/EALREADY likewise.
-                    if err == 105 || err == 11 || err == 4 || err == 114 {
+                    // EAGAIN/EINTR/EALREADY: transient, re-arm as usual.
+                    // ENOBUFS is the storm case: the ring's buffers are out,
+                    // and re-arming every starved receive at once re-arms them
+                    // all into an empty ring (each ends ENOBUFS again). The
+                    // starved connection joins a first-in, first-out queue;
+                    // each pass re-arms at most as many of them as buffers were
+                    // returned, so the queue drains at the rate the ring can
+                    // serve and never regenerates the collapse (the failure
+                    // mode the merged head's 240k probe died in).
+                    if err == 11 || err == 4 || err == 114 {
                         if self.lanes[lane].conns[slot as usize].live {
                             self.arm_recv(lane, slot);
+                        }
+                    } else if err == 105 {
+                        if self.lanes[lane].conns[slot as usize].live {
+                            self.lanes[lane].read_queue.push_back(slot);
                         }
                     } else {
                         self.submit_close(lane, slot);
@@ -744,6 +760,37 @@ impl UringServer {
                 self.serve(lane, r.slot);
             } else {
                 self.arm_recv(lane, r.slot);
+            }
+        }
+    }
+
+    /// Fair re-arms after a dry ring: at most `free buffers` starved
+    /// connections get their multishot receive back per pass, oldest first,
+    /// so the queue drains at the rate the ring can serve.
+    fn drain_starved(&mut self, lane: usize) {
+        let l = &mut self.lanes[lane];
+        let free = (BUF_COUNT as i64 - l.held_bufs as i64).max(0) as usize;
+        let mut budget = free.min(256);
+        while budget > 0 {
+            match l.read_queue.pop_front() {
+                Some(slot) => {
+                    let idx = slot as usize;
+                    if idx < l.conns.len() && l.conns[idx].live && !l.conns[idx].write_parked {
+                        let u = tag(K_RECV, slot, lane as u32);
+                        match l.ring.sqe() {
+                            Some(p) => {
+                                Sqe(p).apply(Sqe::recv_multishot(slot, 0, u));
+                                budget -= 1;
+                            }
+                            None => {
+                                // SQ full: back at the front for the next pass.
+                                l.read_queue.push_front(slot);
+                                break;
+                            }
+                        }
+                    }
+                }
+                None => break,
             }
         }
     }
@@ -893,6 +940,7 @@ impl UringServer {
         for lane in 0..self.lanes.len() {
             self.lanes[lane].flush_buffers(lane);
             self.retry_deferred(lane);
+            self.drain_starved(lane);
             let _ = self.lanes[lane].ring.submit(0, 0);
         }
         // Accept backpressure on system-wide free memory: an out-of-memory kill

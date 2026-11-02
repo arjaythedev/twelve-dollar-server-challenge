@@ -1,11 +1,12 @@
 # Lean 4: the verified handler is the one that runs
 
 Every request is parsed, routed, authenticated, validated, planned and rendered by Lean code
-compiled by the Lean compiler. The theorems in `Feed/Proofs/` are about those same functions: the
-handler is written once, generic in its storage operations, and the build checks the proofs about
-it on a model of the tables and compiles it against SQLite. A small C runtime (SQLite, the storage
-operations, byte and crypto leaves, the io_uring transport) is trusted; each C leaf has a Lean
-definition that the proofs use and that the build tests it against.
+compiled by the Lean compiler. The theorems in `Feed/Proofs/` are about those same functions
+(parsing excepted: they take the parsers' results as given): the handler is written once, generic
+in its storage operations, and the build checks the proofs about it on a model of the tables and
+compiles it against SQLite. A small C runtime (SQLite, the storage operations, byte and crypto
+leaves, the io_uring transport) is trusted; each C leaf has a Lean definition that the proofs use
+and that the build tests it against.
 
 | | |
 |---|---|
@@ -15,6 +16,37 @@ definition that the proofs use and that the build tests it against.
 | Transport | io_uring (Linux ≥ 6.1), one thread, HTTP/1.1 keep-alive |
 | **Nginx** | **no: serves directly** on `HOST:PORT` (`0.0.0.0:80`) |
 | Dependencies | Lean toolchain and SQLite, pinned by version and SHA-256 |
+
+## What this entry contributes
+
+This entry started from lean-derive-hargup #153, the first Lean entry (see Credits). What is new
+here is that the Lean code is the code that runs, and the proofs are about it:
+
+* **Lean on the request path.** HTTP/1.1 framing, routing, the JWT check, the JSON of bodies and
+  tokens, validation, the read plans, the response bytes and each batch's read and write phases are
+  Lean 4 (1,446 lines, every function total), compiled by the Lean compiler; C leaves (below) do
+  the byte work. The transport calls `Feed.batch`, which is `runBatch` at `IO` by definition.
+* **One handler, two instances.** The handler is generic in `Store m` (nine operations): the server
+  runs `Store IO`, C over SQLite, and the proofs run `Store Model`, a state monad over the tables of
+  `Feed/Spec.lean`, which states SPEC.md and schema.sql over the stored bytes, down to the complete
+  HTTP response.
+* **Theorems about the code that runs**: 107, checked by `lake build` in `build.sh` (no `sorry`;
+  axioms `propext`, `Classical.choice`, `Quot.sound`). They cover both reads byte for byte, the
+  writes, accepted tokens, routing, one request's complete response (`decide_spec`) and the batch
+  (`runBatch_spec`: a batch is a serial execution for any choice of the batches that may write, so
+  the transport can group commits without a new proof). The one hypothesis is fewer than 20·2⁶³
+  posts; with no invariant on the data, ties, id gaps and posts without an author are covered.
+* **C leaves with Lean bodies.** 13 C functions (escaping, appending, searching, post objects,
+  HMAC-SHA256, base64url) are `@[extern]` on Lean definitions whose bodies are their
+  specifications: the proofs use the bodies and the binary calls the C. After linking, `build.sh`
+  compares each leaf with its body on 20,000 random inputs, and the storage operations with
+  `Store Model` on a random SQLite file; any difference fails the build.
+* **Compared with the earlier Lean entries.** lean-derive-hargup #153 and lean-c-iouring-loafecho
+  #239 prove read plans against a Lean model, the feed plan under a data invariant the server
+  checks; their READMEs say their C is tested and unproved, and neither runs Lean while serving
+  (#153 generates its route matcher, error responses and serializers from Lean). Here the request
+  path is Lean, at the cost of trusting Lean's compiler and runtime, and the theorems also cover
+  routing, the response bytes, accepted tokens, the writes and the batch.
 
 ## What runs and what is proved
 
@@ -36,9 +68,10 @@ class Store (m : Type → Type) where
   over lists of rows (`Feed/Model.lean`). Each C function is written to that one-line contract.
 
 A `Page` is one byte array of text and one array of numbers, eight per row; `Page.view` reads a
-row back as the post object it renders (none if the author row is missing). A request makes one
-storage call: the C side reads the posts, their authors and their like counts together, and the
-Lean side decides which rows are rendered, in what order and how.
+row back as the post object it renders (none if the author row is missing). A request usually
+makes one storage call: the C side reads the posts, their authors and their like counts together
+(the feed asks again, for twice as many rows, while fewer than 20 of them have an author), and the
+Lean side decides which rows are rendered and how.
 
 `Feed/Spec.lean` is SPEC.md as Lean: tables as lists, `ORDER BY created_at DESC, id DESC LIMIT 20`
 as a sort, the join and the like count as list functions, the five endpoints, the routes, the
@@ -63,8 +96,9 @@ plans do not rely on rowids being distinct or positive) or about how ids and tim
 `runBatch_spec` is about the function the transport calls (`Feed.batch` is `runBatch` at `IO`). It
 is what makes group commit and shared snapshots safe here: a connection's requests keep their
 order, a write in a batch is the first request of its connection in that batch, nothing after a
-write is answered in the same batch, and no answer leaves before the commit. It holds whether or
-not the batch may write (`writesOk`), which is what lets the transport put writes into fewer
+write is answered in the same batch. That no answer leaves before the commit follows from
+`runBatch` building the replies after the commit and from `runtime/uring.c` sending only what
+`Feed.batch` returns. `runBatch_spec` holds whether or not the batch may write (`writesOk`), which is what lets the transport put writes into fewer
 batches than reads (below) without a new proof.
 
 ### The trust base
@@ -84,14 +118,18 @@ Not proved, and how it is checked instead:
   `Feed/Bytes.lean`), one post object (`postJsonAfter`, `Feed/Handler.lean`), HMAC-SHA256
   (`Hmac.mac`, `Feed/Sha256.lean`) and base64url (`Jwt.b64Encode`, `Jwt.b64Decode`). Each is a
   Lean definition that the proofs use; `@[extern]` makes the binary call the C version. The
-  self-test compares every leaf with its Lean definition on 20,000 random inputs, and checks that
-  this catches mistakes: a flipped bit of the MAC, a wrong padding length, a wrong base64
-  character, a misspelled key, an off-by-one in the rowid search or the like count all fail it.
-* **SHA-256** (`Feed/Sha256.lean`): the Lean definition (the reference for the C HMAC) is checked
-  against the FIPS 180-4 and RFC 4231 vectors by the self-test; not proved equal to the standard.
-* **Parsing**: HTTP framing (`Feed/Http.lean`) and the JSON of bodies and tokens (`Feed/Json.lean`)
-  are Lean code. The theorems take their results as given (`decide_spec` is stated for any parsed
-  request; `verify_ok_sound` in terms of the parser's fields).
+  self-test compares every leaf with its Lean definition on 20,000 random inputs. During
+  development we injected mistakes into the C (a flipped bit of the MAC, a wrong padding length, a
+  wrong base64 character, a misspelled key, an off-by-one in the rowid search or the like count),
+  and each one failed the self-test.
+* **Lean code whose results the theorems take as given**: `Http.parse`, `Json.parseTop`,
+  `decodeString`, `postText`, `numGt` and `Hmac.Key.of` (`decide_spec` is stated for any parsed
+  request; `verify_ok_sound` in terms of the parser's fields), and that the Lean base64url,
+  SHA-256 and HMAC follow their standards (SHA-256 and HMAC are checked against the FIPS 180-4 and
+  RFC 4231 vectors by the self-test).
+* **Between the model and SQLite**: no theorem carries the results from `Store Model` to
+  `Store IO`; the self-test above is the check. Outside the model: a failed `BEGIN` or commit,
+  `/health`'s 503, and the input kept for the next batch.
 * **The transport** (`runtime/uring.c`): moves bytes between sockets and `Feed.batch`; does not
   parse HTTP. The WAL shim (`runtime/walvfs.c`) only merges the write calls of one commit; the
   page cache wrapper (`runtime/db.c`) only skips a scan that would find nothing.
@@ -127,7 +165,8 @@ below end. Without a backlog, batches stay far below the cap.
 feed reads the index, the rows, each author and the like counts); every token's signature is
 computed.
 
-**Reads.** One storage call per request. The feed reads the first entries of
+**Reads.** Usually one storage call per request (the feed asks again while fewer than 20 of its
+rows have an author). The feed reads the first entries of
 `posts_created_at_id_idx`, then the rows by one backward scan of `posts` when their ids are
 consecutive (each checked against the index; otherwise one seek each), the like counts by one
 range scan of `likes_post_id_idx` when the ids are close together, and the authors by one
@@ -188,9 +227,8 @@ first 8 MB of the code locked in memory as it first runs (reclaim would otherwis
 own pages back and the loop would stall reading them from disk). Checkpoints run at nice 19, so on
 one vCPU they take the CPU only while the loop sleeps between batches. Ubuntu's 6.8 kernels from
 6.8.0-136 on (and the cloud-image kernel 6.8.0-1067) reject the registration of provided-buffer rings with a zero
-reserved field (Launchpad #2162843); the server retries with a nonzero one, as c-iouring-pavlyhalim
-#245 found, which those kernels accept and a correct kernel never sees. Its notes on the memory wall
-led to most of this paragraph.
+reserved field (Launchpad #2162843); the server retries with a nonzero one, which those kernels
+accept and a correct kernel never sees (see Credits for where this paragraph's ideas come from).
 
 ## Measurements
 
@@ -204,7 +242,7 @@ as `deploy` (172 s, 669 MB peak); systemd runs the server as `deploy` with `Limi
 `CAP_NET_BIND_SERVICE`; the 42 checks pass. Load: five 16-vCPU VMs in the same subnet
 running k6 1.3.0 with `bench/load.js`, four k6 processes each (one per server address). Every
 probe starts the server on a fresh copy of the seed; pass is
-k6's thresholds in every process. c-iouring-pavlyhalim #245, second on the leaderboard at 295,000,
+k6's thresholds in every process. c-iouring-pavlyhalim #245, third on the leaderboard at 295,000,
 ran the same probes on the same VMs.
 
 | | this | c-iouring-pavlyhalim #245 |
@@ -231,7 +269,7 @@ think 3–7 s, post, think 3–8 s, 15 % like, 2 % new post, idle 5–15 s) from
 60 s ramp, 120 s hold, 30 s ramp-down. Pass means p95 < 500 ms, p99 < 1 s over the whole run and
 under 1 % errors, as on the box. Four other entries ran in the same harness: the three in the first
 table below, which held 280,000 on the box (#224 is the earlier code of mojo-iouring-oh-meh), and
-mojo-iouring-oh-meh #257, first on the leaderboard at 304,000, in the second.
+mojo-iouring-oh-meh #257, second on the leaderboard at 304,000, in the second.
 
 **Box speed** is a CFS quota of 57.5 % of the core (1.15 ms every 2 ms): objc-uring-delneg uses
 15.3 µs of CPU per request here at full core and 27 µs on the box. This kernel (100 Hz, no IRQ
@@ -291,6 +329,52 @@ grouped author lookup, the HMAC and base64 leaves, the post-object leaf, inserts
 statement journal, the page cache wrapper, the write window and the profile-guided build); the
 rest is kernel time (fewer log writes and commits, reads issued in batches). The write window
 costs a write up to 10 ms of latency.
+
+## Credits
+
+Where an entry's code is not named below, the idea came from its README and the code here is ours.
+
+* **lean-derive-hargup #153**, the first Lean entry, whose runtime and model this one started from.
+  Code: `install.sh`; `build.sh`'s SQLite download and first eight `-DSQLITE_` flags; `server.c` as
+  one translation unit with the amalgamation; in `db.c` the SQLite helpers, the record decoder,
+  `cur_payload`, `likes_seek_ge`, the layout check, `db_open`'s order, the batch's `BEGIN` plus
+  `sqlite3BtreeBeginTrans` and the checkpoint thread; the skeleton of `uring.c` (ring setup,
+  `user_data` tags, submissions and completions, the listener, ring sizes from `RLIMIT_NOFILE`, the
+  held-connection list). Ideas: B-tree cursor reads with SQL writes; a batch as one transaction,
+  reads first, answered after its commit; a `SO_REUSEPORT` listener per ring. Lean: a model of the
+  API over lists of rows with proofs checked in `build.sh`; `Feed/Spec.lean`'s tables and reads
+  (`newerEq`, `feed`, `view`, `getPost`, `nextPostId`, the like insert) follow its `Model.lean`.
+  The summary table and parts of Design paraphrase its README.
+* **c-iouring-pavlyhalim #233 and #245.** Code: the grouped rowid search (`lookup_many`, `page_key`,
+  `page_lower_bound`, `hit_record`) is adapted from `bt_seek_many`, `bt_cell_key`, `bt_lower_bound`
+  and `bt_hit_record` (`src/btree.h`, #233, kept in #245); pinning interior pages, the direct hit at
+  `k - k0` and the integer interpolation are ours. The buffer-ring retry is from #245's `src/sys.h`
+  (ada-native-visseranalytics #211 and fsharp-kestrel-delneg reported the kernel bug earlier). Ideas
+  from #233: testing that search against `sqlite3BtreeTableMoveto`, the page cache wrapper, the
+  training database's sizes and request mix. From #245: reads on multishot-poll readiness through a
+  read queue, removing the poll before a close, 65,536-entry completion queues, smaller rings on
+  `ENOMEM`, the 8 MB SQLite cache and its reasoning, checkpoints at nice 19, locking the code.
+* **objc-uring-delneg #154.** Inserts without `RETURNING`: `created_at` formatted and bound by the
+  server, the id from `sqlite3_last_insert_rowid` (#233 too); a profile-guided build trained by the
+  server's own code on made-up data, with a plain build as fallback (#233 and #228 also use PGO); the
+  cause of the page cache's scan, `balance_nonroot` parking a page under the lock-byte page's number.
+* **mojo-iouring-oh-meh #224.** A read on the checkpoint connection at open (its README: passive
+  checkpoints do nothing without one); the `PROVIDE_BUFFERS` fallback (buffers returned in runs,
+  completions skipped); the phrases "cursors opened once per batch", "never waits on an fsync",
+  "only the bytecode engine is skipped".
+* **c-iouring-moneebullah25 #228** (first in #156): pausing writes, reads going on, past 8,192 log
+  frames until the log can restart; #153's and #224's READMEs explain why group commit needs it.
+* **v-epoll-i098 #191.** The feed plan: the newest ids from `posts_created_at_id_idx`, one scan of
+  `posts` when they are consecutive, one range scan of `likes_post_id_idx` (c-iouring-raoz #26 and
+  cpp-eastl-io_uring-pgo-hendy643 #32 had it earlier). It also holds new writes for 5 ms after a
+  commit so that they share the next one, the same idea as the write window here.
+* **c-iouring-public #158**, via #245's notes: the measurement behind nice 19 (at nice 0 a checkpoint
+  pass of 300 to 430 ms took half the vCPU from the loop) and the idea of locking the code.
+
+Ours in C, besides the above: the WAL shim (#158 and #233 have similar ones), the page cache
+wrapper's code, the 2 ms iteration period, the overload cap and its delayed-ACK reasoning, the
+write window's size, `INSERT OR IGNORE` without a statement journal, the WAL pause's 300 ms limit,
+and `train.c`.
 
 ## Build and run
 

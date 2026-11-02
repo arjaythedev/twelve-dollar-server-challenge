@@ -1,7 +1,8 @@
 /* Storage primitives over SQLite. Compiled in the same translation unit as the amalgamation
  * (server.c includes sqlite3.c first), so reads can use SQLite's B-tree cursors directly: the
  * pager, WAL, locking and page cache are SQLite's own, only the bytecode engine is skipped.
- * Writes are prepared SQL statements.
+ * Writes are prepared SQL statements. This runtime started from lean-derive-hargup #153's, and the
+ * grouped rowid search is adapted from c-iouring-pavlyhalim's src/btree.h (#233, #245); see README.md, Credits.
  *
  * Every primitive is called from Lean (Feed/Store.lean) and has a one-line contract there,
  * stated over the list model of the tables (Feed/Model.lean). The primitives decide nothing
@@ -89,7 +90,7 @@ static int CKPT_FRAMES = 500;      /* FEED_CKPT_FRAMES overrides it (for measure
 static int WAL_PAUSE_FRAMES = 8192;   /* see db_writes_ok; FEED_WAL_PAUSE_FRAMES overrides it (for measurements) */
 static int pause_at = 8192;
 /* On one vCPU a checkpoint pass at the request thread's priority takes the CPU from the loop for
- * the length of the pass (c-iouring-pavlyhalim #245 measured 300-430 ms on the benchmark box); at
+ * the length of the pass (c-iouring-public #158 measured 300-430 ms on the benchmark box, as #245's notes cite); at
  * nice 19 it runs while the loop sleeps between batches. FEED_CKPT_NICE overrides it. */
 static int ckpt_nice = 19;
 static u64_t WAL_PAUSE_NS = 300000000ull;  /* the longest write pause (below); FEED_PAUSE_MS overrides it */

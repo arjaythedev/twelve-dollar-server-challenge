@@ -1,7 +1,7 @@
 /* Byte-level leaf functions. Each one implements a Lean definition in Feed/Bytes.lean, which is
  * its specification: the Lean body is what the proofs reason about, and `@[extern]` makes the
  * compiled program call this C code instead. They know nothing about the API; they copy, scan
- * and escape bytes. `test/leaves.lean` checks each against its Lean definition on random inputs. */
+ * and escape bytes. `Feed/Selftest.lean` checks each against its Lean definition on random inputs. */
 #include "rt.h"
 #include <immintrin.h>
 #include <stdlib.h>

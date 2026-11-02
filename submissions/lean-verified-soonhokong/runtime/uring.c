@@ -559,7 +559,7 @@ static int ring_init(ring *r, int idx, u32_t slots, const char *host, int port) 
   int brc = getenv("FEED_NO_PBUF") ? (errno = ENOSYS, -1) : sys_register(fd, IORING_REGISTER_PBUF_RING, &reg, 1);   /* FEED_NO_PBUF: for measurements */
   if (brc < 0 && errno == EINVAL) {
     /* Ubuntu's 6.8 kernels from 6.8.0-136 (and the cloud-image kernel 6.8.0-1067) invert the check of the reserved
-     * fields and reject zero ones (Launchpad #2162843, found by c-iouring-pavlyhalim #245); they
+     * fields and reject zero ones (Launchpad #2162843; the retry is as c-iouring-pavlyhalim #245 does); they
      * accept a nonzero reserved byte, and a correct kernel never gets here. */
     reg.resv[0] = 1;
     brc = sys_register(fd, IORING_REGISTER_PBUF_RING, &reg, 1);

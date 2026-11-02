@@ -7,9 +7,9 @@ compiled ahead of time to native code by WasmEdge, and run by a small C embedder
 
 | File | Language | What it does |
 |---|---|---|
-| `src/app.wat` | WAT, hand-written | Everything a request touches: the io_uring event loop (it writes every submission entry and reads every completion itself), HTTP/1.1 parsing, routing, JSON reading and writing, base64url, SHA-256 and HMAC for the HS256 JWT check, SQL statement calls, group commit, when to checkpoint the WAL and the io_uring fsync of the database file, and the B-tree read paths (record decoding, which cursors to open and seek) |
-| `src/host.c` | C, ~200 lines | WasmEdge embedder: loads the AOT-compiled module, gives it WASI (used only by SQLite for file I/O, env vars and the clock) and six Linux imports: `listen`; `ring_new` (sets up an io_uring and its fixed-file table); `ring_pbuf` (registers a provided-buffer ring that lives in wasm memory); `ring_go` (copies the SQEs the WAT wrote into the ring, calls `io_uring_enter`, copies the completions back); `membase` (the native address of wasm memory, which the kernel needs for buffer addresses); and `file_fd` (opens the database file read-only, so the WAT can submit an fsync of it to io_uring). It also starts one thread that calls `fdatasync` on the WAL file every 100 ms (below). There is no request logic in it |
-| `src/sqlite_glue.c` | C, ~130 lines | `#include`s the stock SQLite amalgamation and exports what the WAT calls: the public SQL API; one-line wrappers over SQLite's B-tree cursor functions (open, first, next, previous, seek, payload); and, for checkpoints, a passive checkpoint that can skip its final sync of the database file, plus getters and a guarded setter for the WAL's frame count and `nBackfill`; and a wrapper on the page cache's rekey call (below). When to checkpoint and when that sync has happened are decided in the WAT |
+| `src/app.wat` | WAT, hand-written | Everything a request touches: the io_uring event loop (it writes every submission entry and reads every completion itself), HTTP/1.1 parsing, routing, JSON reading and writing, base64url, SHA-256 and HMAC for the HS256 JWT check, SQL statement calls, group commit, when to checkpoint the WAL, and the B-tree read paths (record decoding, which cursors to open and seek) |
+| `src/host.c` | C, ~200 lines | WasmEdge embedder: loads the AOT-compiled module, gives it WASI (used only by SQLite for file I/O, env vars and the clock) and five Linux imports: `listen`; `ring_new` (sets up an io_uring and its fixed-file table); `ring_pbuf` (registers a provided-buffer ring that lives in wasm memory); `ring_go` (copies the SQEs the WAT wrote into the ring, calls `io_uring_enter`, copies the completions back); and `membase` (the native address of wasm memory, which the kernel needs for buffer addresses). It also starts one thread that calls `fdatasync` on the WAL file every 100 ms (below). There is no request logic in it |
+| `src/sqlite_glue.c` | C, ~130 lines | `#include`s the stock SQLite amalgamation and exports what the WAT calls: the public SQL API; one-line wrappers over SQLite's B-tree cursor functions (open, first, next, previous, seek, payload); a WAL hook that records the WAL's size, and a passive `sqlite3_wal_checkpoint_v2`; and a page cache that wraps SQLite's default one (below). All of it is SQLite's public API. When to checkpoint is decided in the WAT |
 | SQLite 3.54.1 | C, stock | The amalgamation, unmodified, compiled to wasm with wasi-sdk |
 | wasi-libc | C | From wasi-sdk, for SQLite (malloc, file calls) |
 | `experiments/` | notes, scripts, C | The worklog of every measured change, and `baseline/cserve.c`, the C reference server used to compare WAT with C compiled to wasm. Not built or run by the entry |
@@ -48,30 +48,31 @@ downloaded by `build.sh`:
 - **SQLite:** WAL, `synchronous=NORMAL`, persistent prepared statements, 64 MiB page cache,
   `temp_store=MEMORY` (WASI has no temp directory). WASI has no shared memory, so the connection runs with
   `locking_mode=EXCLUSIVE` (the WAL index lives in its heap); it is the only connection anyway.
-  With no thread or fork in WASI, checkpoints run on the event loop, every 16,000 frames (64 MiB of
-  WAL) instead of SQLite's default 1,000, so they come every few seconds.
-- **WAL flusher thread.** A checkpoint starts by syncing the WAL, which by then holds up to 64 MiB, and
+  With no thread or fork in WASI, checkpoints run on the event loop, every 128,000 frames (500 MiB of
+  WAL) instead of SQLite's default 1,000, so one comes every ~25 s at 300,000 users.
+- **WAL flusher thread.** A checkpoint starts by syncing the WAL, which by then holds up to 500 MiB, and
   the loop waits for it. A thread in `host.c` calls `fdatasync` on the WAL file (through its own
   descriptor) every 100 ms, so that sync finds little left to write. It only makes data durable sooner;
   SQLite still makes every sync it would make anyway. At 280,000 users this halved p95 and p99 (below).
-- **The checkpoint's database sync goes to io_uring.** After a checkpoint copies pages into the
-  database file, it fsyncs that file: 100-130 ms every ~3 s on the test box (bpftrace), with the loop
-  stopped. The WAT now runs checkpoints itself (`wal_autocheckpoint=0`), after a batch's responses are
-  sent, and has that one sync skipped: the copy runs as usual, then `nBackfill` (how much of the WAL is
-  in the database file) is put back to its old value and an `IORING_OP_FSYNC` of the database file goes
-  to the ring. The loop goes on serving; when the fsync completes, `nBackfill` moves up. Until then
-  SQLite cannot restart the WAL, so every frame whose page is not yet durable in the database file is
-  still in the WAL, and recovery after a crash replays it. Frames written during the sync get another
-  round; once at most 2,000 are left, an ordinary checkpoint finishes them with its syncs inline (with the
-  loop stopped for 90-157 ms on the test box: WAL 15 ms, database 40-57 ms, WAL header 4 ms, plus the
-  copy) and the WAL restarts. The WAL's own sync before the copy is unchanged. `synchronous=NORMAL`
-  holds throughout.
+- **Checkpoints are SQLite's own.** `wal_autocheckpoint` is off and a WAL hook records the WAL's size
+  after each commit; once it reaches `CKPT_FRAMES` (128,000), the WAT calls
+  `sqlite3_wal_checkpoint_v2(PASSIVE)` after the batch's responses are sent, so that batch does not wait
+  for it (the loop does: the copy and the syncs run on it). SQLite does every step and every sync itself,
+  through its public API only. `CKPT_AUTO=1` uses `sqlite3_wal_autocheckpoint(CKPT_FRAMES)` instead (the
+  checkpoint then runs inside the commit). Each checkpoint stops the loop for a time that grows only
+  slowly with its size, so fewer, larger ones give a better tail: at 300,000 users p99 went from 410-480 ms
+  at 16,000 frames to 143-270 ms at 128,000 (below). The WAL then takes up to ~500 MiB on disk and in the
+  page cache; with `MemoryMax=1200M` the server still ran without errors. An earlier build skipped the
+  checkpoint's database sync and sent it to io_uring, which meant writing SQLite's internal `nBackfill`;
+  that is gone.
 - **A page-cache fix in the glue.** perf showed `pcache1Truncate` at 1.2% of the CPU. Each commit calls
   it with the database's size, and about one commit in ten made it walk all 8,192 hash slots (~250 µs).
   The cause is SQLite's `balance_nonroot`, which swaps two pages through a temporary page number, the
   lock-byte page's (262,145 here), and the cache then believes it holds a page that far out. The glue
-  wraps the cache's rekey call and keeps the old high-water mark for that one number; SQLite's source is
-  unchanged. `pcache1Truncate` now shows 0.00% in the same profile.
+  installs a page cache (`SQLITE_CONFIG_PCACHE2`) that wraps SQLite's default one, tracks the highest
+  page number it holds (not counting that temporary one) and skips a truncate that is past it. Public
+  API only; SQLite's source and internals are untouched. With the first version of this fix, which set
+  the default cache's internal mark directly, `pcache1Truncate` showed 0.00% in the same profile.
 - **Group commit.** One transaction per batch of completions: BEGIN after the wait, every request of
   the batch, then COMMIT, and only then are the responses sent. A transaction that has written stays
   open for up to 2 ms across waits to take in more writes; one that has only read commits at the end of
@@ -97,13 +98,13 @@ the load generator (`ul`, C, the `bench/load.js` user loop with its real think t
 connection per user, 32 source addresses) runs on CPUs 1-7. 60 s ramp, then the measured window.
 `experiments/worklog.md` has every run, including the changes that didn't help.
 
-5-minute hold at 320,000 users with the io_uring database sync: 33.7k req/s, p50 8.9 ms, **p95 198 ms,
-p99 455 ms, 0 errors**, max 1.8 s; the server used 94% of its CPU (27.8 µs per request) and peaked at
-880 MB (cgroup, page cache included). 320,000 is this box's edge, though: later the same day, paired holds
-gave p95 295 and 280 ms / p99 835 and 765 ms for that build, and p95 275, 265 and 365 ms / p99 800, 785
-and 1,165 ms for this commit (the last one over the p99 limit), all at 93-95% CPU and 0 errors. 330,000
-and 340,000 users fail on CPU (97-98%). Before the checkpoint change, the 5-minute hold at 280,000 users gave p95 355 ms
-and p99 670 ms.
+5-minute holds with SQLite's own checkpoint every 128,000 frames (this commit): at 300,000 users,
+31.7k req/s, p50 2.1 ms, **p95 82 ms, p99 330 ms, 0 errors**, max 1.1 s, 91% of the CPU (28.8 µs per
+request), 1,210 MB peak (cgroup, page cache included); two earlier holds of the same setting gave p95 63
+and 46 ms / p99 325 and 305 ms, against p95 141 and 152 / p99 425 and 460 every 64,000 frames. At 320,000
+users: 33.6k req/s, p95 315 ms, p99 1,005 ms (just over the limit), 0 errors, 95% CPU, so 320,000 is
+still this box's edge, as it was with the earlier deferred database sync (p99 455-1,165 ms there over
+five holds). 330,000 and 340,000 users fail on CPU (97-98%).
 
 2-minute runs, 3 interleaved reps each:
 
@@ -114,7 +115,12 @@ and p99 670 ms.
 | + WAL flusher | 300,000 | 280, 230, 265 | 560, 440, 520 | 27.3-28.0 µs |
 | + database sync through io_uring | 300,000 | 134, 127, 109 | 345, 310, 250 | 28.5-29.0 µs |
 | same, rerun later, paired with the next row | 300,000 | 76, 67, 147 | 210, 155, 420 | 27.3-27.7 µs |
-| + page-cache fix (this commit) | 300,000 | 86, 59, 78 | 215, 132, 176 | 27.1-27.8 µs |
+| + page-cache fix | 300,000 | 86, 59, 78 | 215, 132, 176 | 27.1-27.8 µs |
+| that build again (E30), paired with the next two rows | 300,000 | 135, 81, 102 | 315, 177, 245 | 27.5-28.5 µs |
+| SQLite's own checkpoint, every 16,000 frames | 300,000 | 225, 255, 265 | 430, 505, 510 | 27.8-28.2 µs |
+| same, with `wal_autocheckpoint` (`CKPT_AUTO=1`) | 300,000 | 250, 255, 275 | 515, 495, 575 | 27.5-28.1 µs |
+| SQLite's own checkpoint, every 64,000 frames | 300,000 | 66, 52, 48 | 230, 210, 193 | 28.1-28.7 µs |
+| SQLite's own checkpoint, every 128,000 frames (this commit) | 300,000 | 24, 51, 28 | 181, 270, 143 | 28.3-29.0 µs |
 | objc-uring-delneg, for reference (1 run) | 280,000 | 11.2 | 23.4 | 25.5 µs |
 
 At 320,000 users the server is at 91-94% of its one CPU, so CPU per request is the next limit.

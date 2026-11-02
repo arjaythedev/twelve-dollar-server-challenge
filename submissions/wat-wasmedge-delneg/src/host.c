@@ -2,8 +2,8 @@
 // WASI for SQLite's file I/O, and gives it a few raw Linux calls as the "sys" import module: `listen`, and
 // io_uring setup (ring_new: the rings and their sparse fixed-file tables; ring_pbuf: a provided-buffer ring
 // in wasm memory) and one submit/reap call (ring_go: copies the SQEs the WAT wrote into the ring, enters,
-// copies the CQEs back); WASI's poll_oneoff would re-register every connection on every call. file_fd
-// opens the database file read-only so the WAT can fsync it through io_uring. No request logic lives here:
+// copies the CQEs back); WASI's poll_oneoff would re-register every connection on every call. No request
+// logic lives here:
 // the WAT builds every SQE and reads every CQE. One helper thread fdatasyncs the WAL file every 100 ms
 // (see walsync below).
 #define _GNU_SOURCE
@@ -129,9 +129,6 @@ FN(h_ring_go) { (void)d;
   }
   RET(got);
 }
-// file_fd(path) -> a read-only fd of that file (or -errno), for the WAT's IORING_OP_FSYNC of the database
-FN(h_file_fd) { (void)d; const char *p = (const char *)mem(f, (uint32_t)P(0), 1); if (!p) RET(-EFAULT);
-  RET(rv(open(p, O_RDONLY | O_CLOEXEC))); }
 // membase() -> the native address of wasm memory offset 0, which the kernel needs for buffer addresses.
 // WasmEdge reserves the whole 4 GiB range up front and grows memory in place, so it never moves.
 FN(h_membase) { (void)d; (void)in; out[0] = WasmEdge_ValueGenI64((int64_t)(uintptr_t)mem(f, 0, 1)); return WasmEdge_Result_Success; }
@@ -171,9 +168,9 @@ int main(int argc, char **argv) {
   WasmEdge_VMContext *vm = WasmEdge_VMCreate(conf, NULL);
 
   // WASI: the SPEC's env vars, and the database's directory pre-opened at the same path
-  static const char *names[] = {"SQLITE_PATH", "JWT_SECRET", "HOST", "PORT", "CKPT_FRAMES", "CKPT_TAIL", "CKPT_DEFER"};
-  const char *envs[7]; int ne = 0;
-  for (int i = 0; i < 7; i++) {
+  static const char *names[] = {"SQLITE_PATH", "JWT_SECRET", "HOST", "PORT", "CKPT_FRAMES", "CKPT_AUTO"};
+  const char *envs[6]; int ne = 0;
+  for (int i = 0; i < 6; i++) {
     const char *v = getenv(names[i]); if (!v) continue;
     char *e = malloc(strlen(names[i]) + strlen(v) + 2); sprintf(e, "%s=%s", names[i], v); envs[ne++] = e;
   }
@@ -187,7 +184,7 @@ int main(int argc, char **argv) {
   WasmEdge_String sys = WasmEdge_StringCreateByCString("sys");
   WasmEdge_ModuleInstanceContext *m = WasmEdge_ModuleInstanceCreate(sys);
   add(m, "listen", h_listen, 3); add(m, "ring_new", h_ring_new, 2); add(m, "ring_pbuf", h_ring_pbuf, 4);
-  add(m, "ring_go", h_ring_go, 6); add(m, "membase", h_membase, -1); add(m, "file_fd", h_file_fd, 1);
+  add(m, "ring_go", h_ring_go, 6); add(m, "membase", h_membase, -1);
   WasmEdge_Result r = WasmEdge_VMRegisterModuleFromImport(vm, m);
   if (!WasmEdge_ResultOK(r)) { fprintf(stderr, "register: %s\n", WasmEdge_ResultGetMessage(r)); return 1; }
 

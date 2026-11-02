@@ -639,3 +639,66 @@ network path (both ends local here). No large CPU lever left inside the app.
 hold.sh: 33.5k rps, p50 39.4 ms, p95 505 ms, p99 1,160 ms, max 2.10 s, 0 errors, cgroup 94.4 %,
 28.23 us/req, 1,122 MB. Fails (p95 and p99), like the last E29 hold in S11 (365 / 1,165); single run, not
 paired, so no comparison with E29 is drawn. 320k stays this box's edge.
+
+## E31: SQLite's own checkpointing, public API only (2 Nov, opt-box build, Synteq runs) — kept (required)
+Arjay held the merge over the glue writing SQLite's internal nBackfill; Denis: switch back to SQLite's own
+checkpointing. The glue now uses only public API: a WAL hook (sqlite3_wal_hook) records the WAL size; at
+CKPT_FRAMES (16,000) the WAT calls sqlite3_wal_checkpoint_v2(PASSIVE) at the end of $flush, after the
+responses are sent; CKPT_AUTO=1 uses sqlite3_wal_autocheckpoint(CKPT_FRAMES) instead. Gone: wal_backfill,
+wal_mx, db_ckpt/db_fsync, the io_methods swap, file_fd and the CQE fsync branch. E29's cache fix is redone
+through SQLITE_CONFIG_GETPCACHE2/PCACHE2: a wrapper tracks its own max key (ignoring the rekey temp key
+PENDING_BYTE/szPage+1) and skips xTruncate past it. 42/42 on opt-box (both modes) and Synteq; kill -9
+during load then integrity_check ok in both modes on opt-box.
+sc.sh 300k, interleaved, 3 reps, 0 errors (Synteq):
+E30 (deferred db sync): p95 135, 81, 102 / p99 315, 177, 245 / max 1107, 627, 646 ms, 28.52, 28.26, 27.46 us/req
+E31 (checkpoint after flush): p95 225, 255, 265 / p99 430, 505, 510 / max 777, 892, 1099 ms, 27.75, 28.24, 27.97
+E31 CKPT_AUTO=1: p95 250, 255, 275 / p99 515, 495, 575 / max 1705, 1164, 1389 ms, 27.45, 27.51, 28.13
+As F1 predicted: same CPU, p99 about 2x E30's. The flush checkpoint is a little better than autocheckpoint
+(it runs after the responses go out) and is the default.
+
+## E32: host thread starts writeback of the database file every 5 ms (2 Nov, opt-box build, Synteq runs) — dropped
+The WAL flusher thread also called sync_file_range(dbfd, 0, 0, SYNC_FILE_RANGE_WRITE) every DBWB_MS (5), so
+pages a checkpoint copies are already being written when SQLite's own fsync of the database comes. 42/42
+(opt-box, Synteq); integrity ok after kill -9. Also CKPT_FRAMES=4000 on the same build.
+sc.sh 300k, interleaved, 3 reps, 0 errors (Synteq):
+E31: p95 390, 250, 240 / p99 815, 475, 425 / max 1435, 931, 756 ms, 28.33, 27.33, 27.43 us/req
+E32: p95 245, 270, 335 / p99 475, 715, 695 / max 940, 1818, 1952 ms, 27.51, 28.10, 28.59
+E32 CKPT_FRAMES=4000: p95 795, 540, 555 / p99 1870, 1020, 1170 / max 3190, 1493, 2419 ms, 27.46, 26.95, 27.24
+No gain from the writeback (noise is as large as any difference); reverted. Checkpoints every 4,000 frames
+are much worse: each checkpoint seems to have a large fixed cost, so fewer, larger ones next (s54).
+
+## E33: SQLite built with HAVE_FDATASYNC=1 (2 Nov, opt-box build, Synteq runs) — dropped
+Without it SQLite's unix VFS #defines fdatasync to fsync. strace (opt-box, 24 s write load): the loop
+thread's syncs are fdatasync with the flag, fsync without. 42/42 on opt-box and Synteq. Measured in s55
+below (CKPT_FRAMES=64000): p95 135, 59, 88 / p99 515, 285, 345 ms vs E31's 66, 52, 48 / 230, 210, 193.
+No gain; dropped.
+
+## E34: CKPT_FRAMES 16k / 32k / 64k with SQLite's own checkpoint (2 Nov, Synteq) — measurement
+Build E32 (writeback on; it made no difference in E32), env only. sc.sh 300k, interleaved, 3 reps, 0 errors:
+16,000: p95 220, 225, 245 / p99 415, 410, 480 / max 849, 808, 970 ms, 27.48, 27.51, 28.21 us/req, 690 MB
+32,000: p95 170, 163, 168 / p99 430, 445, 405 / max 943, 1204, 1037 ms, 28.80, 28.14, 28.81, 750 MB
+64,000: p95 37, 119, 73 / p99 168, 425, 315 / max 587, 1194, 1650 ms, 28.10, 28.51, 27.80, 880 MB
+Fewer, larger checkpoints win (with 4,000 the worst, E32): each checkpoint has a large fixed cost. 64,000
+frames is a 250 MiB WAL; memory (cgroup, page cache included) goes up ~190 MB.
+
+## M2: loop-thread syncs at CKPT_FRAMES 16k vs 64k, E31 (2 Nov, Synteq) — measurement
+bpftrace (ck.bt) on fsync/fdatasync for 100 s of a 300k sc.sh run (my per-key printing came out split, so
+counts only): the loop thread made ~105 fsyncs at 16,000 frames and ~33 at 64,000 (about 3 per
+checkpoint: every ~3 s vs every ~12 s). Runs under tracing: 16k p95 240 / p99 450 ms; 64k p95 70 / p99 235.
+
+## E35: CKPT_FRAMES 64k vs 128k, and E33, on E31 (2 Nov, Synteq) — 64k/128k both good
+sc.sh 300k, interleaved, 3 reps, 0 errors:
+E31 64,000: p95 66, 52, 48 / p99 230, 210, 193 / max 715, 927, 691 ms, 28.05, 28.66, 28.25 us/req, 876 MB
+E33 64,000: p95 135, 59, 88 / p99 515, 285, 345 / max 2038, 1373, 909 ms, 28.02, 27.52, 28.81, 875-902 MB
+E31 128,000: p95 24, 51, 28 / p99 181, 270, 143 / max 1085, 1266, 567 ms, 28.32, 28.32, 29.04, 1,135 MB
+SQLite's own checkpoint every 64,000 frames is as good as E30's deferred sync was (s52: p99 177-315).
+
+## E36: default CKPT_FRAMES 128,000 (2 Nov, opt-box build, Synteq runs) — kept
+5-minute holds (hold.sh, MemoryMax=2G), E31 build with env, interleaved, 0 errors:
+64,000: p95 141, 152 / p99 425, 460 / max 1534, 1197 ms, 28.27, 28.00 us/req, 951-952 MB
+128,000: p95 63, 46 / p99 325, 305 / max 1074, 1057 ms, 28.36, 27.88 us/req, 1,206-1,207 MB
+MemoryMax=1200M (scm.sh, 2 min, 300k, 128,000): p95 33, p99 270 ms, 0 errors, peak 1,145 MB.
+Default set to 128,000 in app.wat (E36). 42/42 on opt-box, Synteq and the clean ubuntu:24.04 container
+build (ci2.sh); kill -9 under load then integrity_check ok (opt-box). Holds of E36 itself: 300k p95 82,
+p99 330, max 1097 ms, 31.7k rps, 91.2 %, 28.78 us/req, 1,210 MB; 320k p95 315, p99 1,005 (fails p99
+by 5 ms), max 2647, 33.6k rps, 95.2 %, 28.33 us/req, 1,259 MB. Same edge as E26-E30.

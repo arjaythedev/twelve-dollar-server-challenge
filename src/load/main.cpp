@@ -478,6 +478,8 @@ std::string create_body(const Token &token, std::size_t vu, std::uint64_t iterat
 struct Metrics
 {
     std::vector<double> durations;
+    std::array<std::vector<double>, 4> endpoint_durations;
+    std::array<std::vector<double>, 4> phase_durations;
     std::uint64_t failures = 0;
     std::array<std::uint64_t, 4> checks_passed{};
     std::array<std::uint64_t, 4> checks_failed{};
@@ -490,6 +492,23 @@ struct Metrics
     double blocked_sum = 0;
     double elapsed = 0;
 };
+
+std::size_t completion_phase(const Config &config, double completed)
+{
+    if (completed < config.ramp_up)
+    {
+        return 0;
+    }
+    if (completed < config.ramp_up + config.hold)
+    {
+        return 1;
+    }
+    if (completed < config.ramp_up + config.hold + config.ramp_down)
+    {
+        return 2;
+    }
+    return 3;
+}
 
 struct User
 {
@@ -1141,15 +1160,22 @@ class Load
         if (metrics_.durations.size() == max_samples)
         {
             throw std::runtime_error("exact duration sample limit reached (20 million requests, "
-                                     "160 MiB); shorten the run");
+                                     "480 MB sample data); shorten the run");
         }
         if (metrics_.durations.size() == metrics_.durations.capacity())
         {
             metrics_.durations.reserve(std::min(
                 max_samples, std::max(std::size_t{4096}, metrics_.durations.capacity() * 2)));
         }
-        metrics_.durations.push_back(
-            request->connecting ? 0 : std::max(0.0, now - request->connected) * 1000);
+        const double sample =
+            request->connecting ? 0 : std::max(0.0, now - request->connected) * 1000;
+        const auto check_index = request->step == Step::feed   ? 0U
+                                 : request->step == Step::post ? 1U
+                                 : request->step == Step::like ? 2U
+                                                               : 3U;
+        metrics_.durations.push_back(sample);
+        metrics_.endpoint_durations[check_index].push_back(sample);
+        metrics_.phase_durations[completion_phase(config_, now)].push_back(sample);
         metrics_.blocked_sum += (request->connecting ? now : request->connected) - request->queued;
         if (!http_ok)
         {
@@ -1168,10 +1194,6 @@ class Load
         {
             close(id);
         }
-        const auto check_index = request->step == Step::feed   ? 0U
-                                 : request->step == Step::post ? 1U
-                                 : request->step == Step::like ? 2U
-                                                               : 3U;
         const bool check_ok = request->step == Step::create ? status == 201
                               : request->step == Step::like ? status == 200 || status == 201
                                                             : status == 200;
@@ -1248,6 +1270,29 @@ struct Summary
     bool passed;
 };
 
+void duration_groups(std::ostream &output, std::array<std::vector<double>, 4> &groups,
+                     const std::array<std::string_view, 4> &names)
+{
+    output << '{';
+    for (std::size_t index = 0; index < groups.size(); ++index)
+    {
+        auto &samples = groups[index];
+        std::sort(samples.begin(), samples.end());
+        double sum = 0;
+        for (const double sample : samples)
+        {
+            sum += sample;
+        }
+        output << (index == 0 ? "" : ",") << json_string(names[index])
+               << ":{\"count\":" << samples.size()
+               << ",\"avg\":" << (samples.empty() ? 0 : sum / static_cast<double>(samples.size()))
+               << ",\"p95\":" << percentile(samples, 0.95)
+               << ",\"p99\":" << percentile(samples, 0.99)
+               << ",\"max\":" << (samples.empty() ? 0 : samples.back()) << '}';
+    }
+    output << '}';
+}
+
 Summary summarize(Metrics &metrics, const Config &config)
 {
     std::sort(metrics.durations.begin(), metrics.durations.end());
@@ -1309,14 +1354,20 @@ Summary summarize(Metrics &metrics, const Config &config)
            << ",\"interrupted_iterations\":" << metrics.interrupted_iterations
            << ",\"workflow_errors\":" << metrics.workflow_errors
            << ",\"bytes_received\":" << metrics.bytes_received << ",\"seed\":" << config.seed
-           << ",\"quantiles\":\"exact linear interpolation, all completed requests, 8 "
-              "bytes/sample, 20 million sample limit\""
+           << ",\"quantiles\":\"exact linear interpolation, all completed requests, 24 "
+              "bytes/request across global+endpoint+phase samples, plus vector capacity, 20 "
+              "million request limit\""
            << ",\"duration_semantics\":\"send+wait+receive, excludes connect; interrupted requests "
               "omitted\""
            << ",\"endpoint_requests\":{\"feed\":" << metrics.endpoint_requests[0]
            << ",\"post\":" << metrics.endpoint_requests[1]
            << ",\"like\":" << metrics.endpoint_requests[2]
-           << ",\"create\":" << metrics.endpoint_requests[3] << "}}\n}\n";
+           << ",\"create\":" << metrics.endpoint_requests[3] << '}' << ",\"endpoint_duration_ms\":";
+    duration_groups(output, metrics.endpoint_durations, {"feed", "post", "like", "create"});
+    output << ",\"phase_duration_ms\":";
+    duration_groups(output, metrics.phase_durations, {"ramp_up", "hold", "ramp_down", "grace"});
+    output << ",\"phase_semantics\":\"classification by completion timestamp; stage boundaries "
+              "enter the next phase\"}\n}\n";
     return {output.str(), passed};
 }
 
@@ -1358,7 +1409,8 @@ int main(int argc, char **argv)
                    "  [--local-ips IPv4,IPv4-IPv4] [--ready-file PATH] [--start-gate PATH]\n"
                    "Environment: BASE_URL, VUS, DURATION, RAMP_UP, TOKENS\n"
                    "Linux, plain HTTP/1.1, IPv4; one persistent socket per VU\n"
-                   "Exact quantiles retain 8 bytes/request (20 million request limit)\n";
+                   "Exact quantiles retain 24 bytes/request plus vector capacity (20 million "
+                   "request limit)\n";
             return 0;
         }
         Config config;
@@ -1812,6 +1864,23 @@ void self_test()
     const std::vector<double> samples{0, 1, 2, 3};
     require(percentile(samples, 0.5) == 1.5 && std::abs(percentile(samples, 0.95) - 2.85) < 1e-12,
             "linear quantiles");
+    Config phases;
+    phases.ramp_up = 2;
+    phases.hold = 3;
+    phases.ramp_down = 4;
+    require(completion_phase(phases, 0) == 0 && completion_phase(phases, 1.999) == 0 &&
+                completion_phase(phases, 2) == 1 && completion_phase(phases, 4.999) == 1 &&
+                completion_phase(phases, 5) == 2 && completion_phase(phases, 8.999) == 2 &&
+                completion_phase(phases, 9) == 3,
+            "completion phase boundaries");
+    const auto grouped_count = [](const std::array<std::vector<double>, 4> &groups) {
+        std::size_t count = 0;
+        for (const auto &group : groups)
+        {
+            count += group.size();
+        }
+        return count;
+    };
     Config config;
     config.vus = 4;
     config.ramp_up = 0.005;
@@ -1824,6 +1893,14 @@ void self_test()
     config.seed = 42;
     Fixture workflow(FixtureMode::workflow);
     const auto metrics = fixture_run(workflow, config);
+    require(grouped_count(metrics.endpoint_durations) == metrics.durations.size() &&
+                grouped_count(metrics.phase_durations) == metrics.durations.size(),
+            "latency group counts equal global count");
+    for (std::size_t index = 0; index < metrics.endpoint_durations.size(); ++index)
+    {
+        require(metrics.endpoint_durations[index].size() == metrics.endpoint_requests[index],
+                "latency endpoint classification");
+    }
     require(metrics.failures == 0 && metrics.workflow_errors == 0, "live workflow HTTP");
     require(metrics.endpoint_requests[0] > 0 && metrics.endpoint_requests[1] > 0 &&
                 metrics.endpoint_requests[2] > 0 && metrics.endpoint_requests[3] > 0,
@@ -1835,6 +1912,9 @@ void self_test()
     Fixture failed_feed(FixtureMode::failed_feed);
     config.hold = 0.04;
     const auto failed = fixture_run(failed_feed, config);
+    require(grouped_count(failed.endpoint_durations) == failed.durations.size() &&
+                grouped_count(failed.phase_durations) == failed.durations.size(),
+            "failed samples retained in latency groups");
     require(failed.failures > 0 && failed.endpoint_requests[1] == 0 &&
                 failed.endpoint_requests[2] == 0 && failed.endpoint_requests[3] == 0,
             "failed feed ends iteration");
@@ -1851,6 +1931,9 @@ void self_test()
     config.ramp_down = 0;
     config.grace = 0.005;
     const auto canceled = fixture_run(stalled, config);
+    require(grouped_count(canceled.endpoint_durations) == 0 &&
+                grouped_count(canceled.phase_durations) == 0,
+            "canceled samples omitted from latency groups");
     require(canceled.interrupted_iterations == 1 && canceled.durations.empty() &&
                 canceled.failures == 0 && canceled.iterations == 0,
             "grace cancellation omits in-flight request");

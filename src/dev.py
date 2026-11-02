@@ -1157,6 +1157,23 @@ def show_profile(profile: dict[str, JSONValue]) -> None:
         print(f"  {number(row, 'cpu_ns') / total:6.1%}  {text(row, 'symbol')[:100]}")
 
 
+def show_latency_breakdown(workload: dict[str, JSONValue]) -> None:
+    for key, title in (
+        ("endpoint_duration_ms", "Endpoint latency"),
+        ("phase_duration_ms", "Phase latency"),
+    ):
+        groups = mapping(workload.get(key, {}))
+        if not groups:
+            continue
+        print(f"{title} (ms):")
+        for name, value in groups.items():
+            row = mapping(value)
+            print(
+                f"  {name:10} n={integer(row, 'count'):8}  "
+                f"p95={number(row, 'p95'):8.3f}  p99={number(row, 'p99'):8.3f}"
+            )
+
+
 def collect_profile(container: str, output: Path, *, scope: ProfileScope = "user") -> None:
     common = [
         "docker",
@@ -1323,7 +1340,9 @@ def main() -> None:
             elif isinstance(document, list):
                 show_results(read_results(args.file))
             else:
-                show_profile(mapping(mapping(document)["profile"]))
+                report = mapping(document)
+                show_profile(mapping(report["profile"]))
+                show_latency_breakdown(mapping(report.get("load_generator", {})))
         else:
             if args.k6 is not None and not args.k6.is_file():
                 parser.error("--k6 must point to an executable file")
@@ -1366,6 +1385,9 @@ def main() -> None:
             if profiling:
                 profile = mapping(read_json(output / "profile.json"))
                 window = mapping(read_json(output / "window.json"))
+                workload = mapping(
+                    mapping(read_json(output / "k6-summary.json")).get("generator", {})
+                )
                 report = {
                     "benchmark": result,
                     "profile": profile,
@@ -1373,11 +1395,14 @@ def main() -> None:
                         key: value for key, value in window.items() if not key.startswith("cgroup_")
                     },
                 }
+                if workload:
+                    report["load_generator"] = workload
                 write_json(output / "profile.json", report)
                 if destination is not None:
                     destination.parent.mkdir(parents=True, exist_ok=True)
                     write_json(destination, report)
                 show_profile(profile)
+                show_latency_breakdown(workload)
             else:
                 if destination is None:
                     raise ValueError("a result file is required for benchmarks")

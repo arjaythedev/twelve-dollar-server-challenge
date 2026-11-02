@@ -190,17 +190,73 @@ Open: the TCP p95 (233 ms) is higher than the SCTP p95 (98 ms) at this load. Not
 5. Memory discipline (no multishot receive on idle connections in #1; fixed batch caps; code locked in RAM).
 Their own rules checks found no rule break. #2 (hargup) depends on dense ids and a non-decreasing `created_at`: do not copy that part.
 
+## S15. Five runtimes from one tree, and which of them use io_uring (kali, 2026-11-02)
+
+`start.sh` picks the runtime with `RUNTIME`: `kn` (default), `graal-static`, `graal-jit`, `node`, `wasi`. A missing build falls back along kn, graal-static, graal-jit. The GraalVM builds serve through the io_uring ring (`TRANSPORT=ring`) unless `TRANSPORT` says otherwise.
+Method: `vcheck.sh` (skill `twelve-dollar-kali-loadtest`, scripts/). The server runs in the box (CPU 1, 2 GB, no swap, 65,535 files) on a fresh seed copy. It gets the 42 checks, then 6 s of `wrk` on GET /posts/:id with 1,024 connections. `perf` counts the server's io_uring_enter, epoll_wait, epoll_pwait, read and write over 4 s, and `/proc/PID/fd` gives its io_uring descriptors.
+
+| Runtime | 42 checks | µs/req | io_uring fds | in 4 s |
+|---|---|---|---|---|
+| kn (pin 35886891f) | 42/42 | 10 | 8 | 31,055 io_uring_enter, 0 epoll, 0 read/write |
+| graal-static, ring | 42/42 | 23 | 1 | 8,360 io_uring_enter, 0 epoll |
+| graal-static, xio | 42/42 | 25 | 0 | 834 epoll_wait, 165k read + 165k write |
+| graal-jit, ring | 42/42 | 40 | 1 | 4,143 io_uring_enter, 0 epoll |
+| graal-jit, xio | 42/42 | 38 | 0 | 665 epoll_wait, 107k read + 107k write |
+| node (node:net, node:sqlite) | 42/42 | 132 | 3 | 57 epoll_pwait = 57 io_uring_enter, 30k read + 31k write |
+| wasi | not built | | | |
+
+Findings:
+- Every runtime that can use io_uring does: KN, and both GraalVM builds on `TRANSPORT=ring`.
+- Node's sockets do not. libuv holds 3 rings, but it enters a ring once per epoll_pwait (57 = 57): the rings batch epoll changes, and the socket bytes go through read and write.
+- The native image (`gstatic.sh`) builds in the box: 667 s, anon peak 1,869 MB of 2,048, 34 MB binary. Its handles are made without an address and at image build time (`SqliteCalls`, `--initialize-at-build-time`). A handle made at run time takes the image's generic call path: 3.5 to 5.3 µs per call. The KN link peaks near 1.8 GB too, so build.sh must build the variants one after the other: two at once do not fit in 2 GB.
+- The KN difftest at the new pin: 734 posts sent, 757 GETs compared, 0 mismatches.
+
+## S16. The cost of the unified channel layer, against the nearest open window and the floor (kali, 2026-11-02)
+
+The design goal: one CCEK channel layer. The server loop sits in common code over `ChannelOperations` and `ReactorOperations` from the coroutine context, and each runtime changes only the element at the bottom. This study measures what that layer costs today.
+Workload: TrikeShed's `UringBenchmark` (NOP, 4 KB WRITE, 4 KB READ on a cached file, batch 8, 250 warm-up batches, 1,000 measured batches, CPU 1). The floor programs `floor.c` and `floor.js` (skill scripts/) do the same work with no layer. ns per operation, two passes:
+
+| Path | NOP | WRITE | READ |
+|---|---|---|---|
+| C, one syscall per op | 1,074-1,098 | 1,532-1,541 | 1,331-1,367 |
+| C, liburing, one submit per batch | 223-228 | 2,334-2,419 | 587-596 |
+| KN through the facade (kernel ring) | 3,008-3,644 | 6,684-7,242 | 3,493-3,524 |
+| node `fs.*Sync` (the open window) | 21-39 | 2,474-2,643 | 3,003-3,066 |
+| node through the facade (emulated ring) | 27,689-28,192 | 142,738-142,925 | 113,172-113,984 |
+
+Findings:
+- On KN the kernel is not the cost. Above the same ring used from C, the facade adds about 2.8 µs per NOP, 4.3 µs per WRITE and 2.9 µs per READ. Its NOP is 13 to 16 times the C ring's.
+- `perf` of the KN facade (20,000 batches): user space 69%, kernel 24%. `kotlin.collections.HashMap` takes about 9%, because in-flight operations are keyed by userData in a map. Allocation and GC sweep take about 6% (one `UringSubmission` and one `UringCompletion` per operation, and a `Result` per CQE peek). The facade's bookkeeping (`dependsOn`, `validate`, `partition`, `Enum.equals`, `completeBatches`) takes about 4%. The benchmark's own coroutine body takes 16%, with its buffer refill per batch (memset 2.4%).
+- On node the emulated facade costs 38 to 57 times the plain synchronous call. A 4 KB WRITE takes 143 µs against 2.5 µs, because every SQE becomes an asynchronous fs call with a callback, a trip through the libuv thread pool. The native module `@trikeshed/uring` is absent, so the default mode runs the same emulation.
+- A syscall costs about 1.1 µs on this WSL2 kernel (getppid). Batching on the ring takes the NOP to 0.22 µs.
+- The elements per layer in TrikeShed 35886891f:
+  - Linux and macOS (posix), JVM and mingw have real channel and reactor elements.
+  - The WASI channel element queues ACCEPT, LISTEN, CLOSE, readv and writev in an emulated ring. No WASI reactor exists.
+  - The node elements (`JsChannelOperations`, `JsReactorOperations`) are stubs: one throws on every call, the other returns nothing.
+  - The emulated rings on node and WASI carry file operations only, with no socket operations.
+- The interface itself allocates on every layer: `ReactorOperations.poll` returns a List of `ReactorSignal` data objects, `register` takes a `Set<Interest>`, and `ChannelHandle.wait` returns a List of `ChannelResult`.
+
+What the layer needs to reach the floor, in this order:
+1. In-flight state in fixed slot arrays indexed by userData, with no HashMap. `DatagramWheel` (TrikeShed, from the f-sctp helper work) already does this for datagrams: the window index is the user_data, and each window is pinned once.
+2. SQE fields written straight into the ring, and completions handed back into the caller's arrays (`ChannelHandle.waitInto`). No per-operation submission or completion objects, and no List results.
+3. One submit per wake (fill/drain), and a blocking park for an owner thread that holds nothing else (`ParkingReactor.park`).
+4. On node: the emulated ring through the synchronous fs calls, or a native ring module, instead of the callback path (a 50× gap). A node channel element for sockets (SQE to libuv) to replace the stubs.
+5. On WASI: a reactor over `poll_oneoff`, and socket SQEs over `sock_accept`, `sock_recv` and `sock_send` (wasmtime `-S tcplisten`).
+6. Then the same socket loop over every element: one common echo/HTTP benchmark against each runtime's open window.
+
 ## Next steps, in order of measured size
 
-1. B-tree cursor reads in C for feed, post and like counts: about 8 µs per mix request.
+1. Done: B-tree cursor reads in C for feed and post (098ccd1, feed 40 to 23 µs), and a held read transaction per wake (4dc083f, feed 21 µs, post 10 µs).
 2. Reads must not wait for the commit window. Measure the window knee (64, 16, 4, 2, 1 ms) with `mixlat.sh` and `knee2.sh like`, then a 64k run.
 3. Batch formation (2 ms or 64 completions): about 3 µs per mix request.
 4. Pin once and recycle windows (Poller arrays, `Out` buffers): about 2.5 µs, and the GC share falls.
 5. WAL read path (`walFindFrame`, `pcache1Fetch` 3.3%) and the checkpoint off the loop.
 6. Task P follow-up: the other three winners need their own toolchains.
 7. 128k run with a Linux load generator; SCTP 64k.
+8. The channel layer to the floor (S16, items 1 to 6), in TrikeShed master. Then the server's Poller moves into common code over the elements, and the per-runtime pollers (`Poller.linux.kt`, the JVM `Poller.kt`, `Poller.js.kt`) become elements or go away.
+9. build.sh builds every runtime one after the other (S15: two at once do not fit in 2 GB); install.sh adds Node 24 (node:sqlite), and wasmtime v50.0.1 and wasi-sdk 34 for the wasi build, with pinned sums.
 
 ## State
 
-- Challenge repo, branch `sctp`: 06182a8 (`feed_row_json`), 7fbf26b (`feed_json_text`), 2495dd0 (lz in commonMain, TrikeShed pin a7d4caec1). `main` is the PR head 87b974c. Push guard on. Nothing pushed.
-- Shelved: mingw lines in `trikeshed/build.gradle.kts` (uncommitted).
+- Challenge repo, branch `sctp`: the five-runtime start.sh, the node build, the native-image handles and S15/S16 (this commit), on 35316a6 (research), 4dc083f (one read transaction per wake), 098ccd1 (B-tree reads). TrikeShed pin 35886891f. `main` is the PR head 87b974c. Push guard on. Nothing pushed.
+- Shelved: mingw lines for `trikeshed/build.gradle.kts`, kept as `references/mingw-slice.patch` in the skill `twelve-dollar-kali-loadtest`.

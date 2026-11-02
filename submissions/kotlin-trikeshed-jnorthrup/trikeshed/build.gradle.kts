@@ -21,7 +21,11 @@ val extraTargets = providers.gradleProperty("trike.targets").orNull.orEmpty().sp
 // git records for it (build.sh reifies the subrepo when a checkout leaves it empty). sources.txt lists the paths;
 // each source set reads src/<set>/kotlin and src/<set>/resources of the subrepo, restricted to the listed files.
 val subrepo = file("TrikeShed")
-val linked = file("sources.txt").readLines().map { it.trim() }.filter { it.isNotEmpty() && !it.startsWith("#") }
+val listed = file("sources.txt").readLines().map { it.trim() }.filter { it.isNotEmpty() && !it.startsWith("#") }
+val linked = listed.filter { ':' !in it }
+// "set:path" lines compile a TrikeShed file into another source set of this module: webMain (js and wasmWasi) takes
+// commonMain expects whose JVM and posix actuals the other targets do not compile.
+val routed = listed.filter { ':' in it }.map { it.substringBefore(':') to it.substringAfter(':') }
 check(File(subrepo, "src").isDirectory) { "trikeshed/TrikeShed is not reified: build.sh (or tester.sh git) does that" }
 
 kotlin {
@@ -82,8 +86,21 @@ kotlin {
             binaries.executable()
         }
     }
+    // js: Kotlin/JS for Node.js, the library side of the server's node build.
+    if ("js" in extraTargets) {
+        js { nodejs() }
+    }
 
     sourceSets.configureEach {
+        val into = routed.filter { it.first == name }.map { it.second }
+        if (into.isNotEmpty()) {
+            val root = into.first().substringBefore("/kotlin/") + "/kotlin"
+            check(into.all { it.startsWith("$root/") }) { "$name: routed files must share one source root" }
+            kotlin.setSrcDirs(listOf(File(subrepo, root)))
+            kotlin.setIncludes(into.map { it.removePrefix("$root/") })
+            resources.setSrcDirs(emptyList<File>())
+            return@configureEach
+        }
         val kotlinFiles = linked.filter { it.startsWith("src/$name/kotlin/") }.map { it.removePrefix("src/$name/kotlin/") }
         val resourceFiles =
             linked.filter { it.startsWith("src/$name/resources/") }.map { it.removePrefix("src/$name/resources/") }
@@ -126,8 +143,16 @@ kotlin {
                 getByName("${target.name}Test") { dependsOn(lzNativeTest) }
             }
         }
+        val web = "js" in extraTargets || "wasmWasi" in extraTargets
+        val webMain = if (web) (findByName("webMain") ?: create("webMain")).apply { dependsOn(nonPosixMain) } else null
         if ("wasmWasi" in extraTargets) {
-            val wasmWasiMain by getting { dependsOn(nonPosixMain) }
+            // src/wasmMain: TrikeShed's actuals shared by its two wasm targets.
+            val wasmMain = findByName("wasmMain") ?: create("wasmMain")
+            wasmMain.dependsOn(webMain!!)
+            val wasmWasiMain by getting { dependsOn(wasmMain) }
+        }
+        if ("js" in extraTargets) {
+            val jsMain by getting { dependsOn(webMain!!) }
         }
     }
 }

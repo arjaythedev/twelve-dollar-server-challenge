@@ -4,31 +4,63 @@ import java.lang.foreign.*
 import java.lang.foreign.ValueLayout.*
 import java.lang.invoke.MethodHandle
 
-/** libsqlite3 entry points as FFM downcalls. Critical: no thread-state transition, heap segments passed in place. */
+/**
+ * The FFM downcall handles, one per C signature, made without a function address: the address is the first argument of
+ * each call ([Sqlite3] finds it at run time). They are static final fields, so a native image makes them at image build
+ * time (--initialize-at-build-time=borg.trikeshed.feed.SqliteCalls) and compiles each call to a direct call: a handle made
+ * at run time takes the image's generic path, 3.5 to 5.3 us per call. The JIT folds both shapes alike. Critical: no
+ * thread-state transition, heap segments passed in place.
+ */
+object SqliteCalls {
+    @JvmField val linker: Linker = Linker.nativeLinker()
+    @JvmField val critical: Linker.Option = Linker.Option.critical(true)
+
+    /** int f(void*) */
+    @JvmField val iA: MethodHandle = linker.downcallHandle(FunctionDescriptor.of(JAVA_INT, ADDRESS), critical)
+    /** void* f(void*) */
+    @JvmField val aA: MethodHandle = linker.downcallHandle(FunctionDescriptor.of(ADDRESS, ADDRESS), critical)
+    /** int f(void*, int, long) */
+    @JvmField val iAIJ: MethodHandle = linker.downcallHandle(FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_INT, JAVA_LONG), critical)
+    /** long f(void*, int) */
+    @JvmField val jAI: MethodHandle = linker.downcallHandle(FunctionDescriptor.of(JAVA_LONG, ADDRESS, JAVA_INT), critical)
+    /** int f(void*, int) */
+    @JvmField val iAI: MethodHandle = linker.downcallHandle(FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_INT), critical)
+    /** void* f(void*, int) */
+    @JvmField val aAI: MethodHandle = linker.downcallHandle(FunctionDescriptor.of(ADDRESS, ADDRESS, JAVA_INT), critical)
+    /** int f(void*, int, void*, int, void*) */
+    @JvmField val iAIAIA: MethodHandle =
+        linker.downcallHandle(FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_INT, ADDRESS, JAVA_INT, ADDRESS), critical)
+    /** int f(void*, void*, int, void*): sqlite3_open_v2 */
+    @JvmField val iAAIA: MethodHandle =
+        linker.downcallHandle(FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS, JAVA_INT, ADDRESS), critical)
+    /** int f(void*, void*, void*, void*, void*): sqlite3_exec */
+    @JvmField val iAAAAA: MethodHandle =
+        linker.downcallHandle(FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS, ADDRESS, ADDRESS, ADDRESS), critical)
+    /** int f(void*, void*, int, int, void*, void*): sqlite3_prepare_v3 */
+    @JvmField val iAAIIAA: MethodHandle =
+        linker.downcallHandle(FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS, JAVA_INT, JAVA_INT, ADDRESS, ADDRESS), critical)
+}
+
+/** libsqlite3's entry points: their addresses, found at run time in the library -Dsqlite.lib names. */
 object Sqlite3 {
-    val linker: Linker = Linker.nativeLinker()
     val lookup: SymbolLookup = SymbolLookup.libraryLookup(System.getProperty("sqlite.lib", "libsqlite3.so.0"), Arena.global())
-    val critical: Linker.Option = Linker.Option.critical(true)
 
-    fun handle(name: String, fd: FunctionDescriptor): MethodHandle =
-        linker.downcallHandle(lookup.find(name).orElseThrow { UnsatisfiedLinkError(name) }, fd, critical)
+    fun find(name: String): MemorySegment = lookup.find(name).orElseThrow { UnsatisfiedLinkError(name) }
 
-    val openV2: MethodHandle = handle("sqlite3_open_v2", FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS, JAVA_INT, ADDRESS))
-    val exec: MethodHandle = handle("sqlite3_exec", FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS, ADDRESS, ADDRESS, ADDRESS))
-    val prepareV3: MethodHandle =
-        handle("sqlite3_prepare_v3", FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS, JAVA_INT, JAVA_INT, ADDRESS, ADDRESS))
-    val step: MethodHandle = handle("sqlite3_step", FunctionDescriptor.of(JAVA_INT, ADDRESS))
-    val reset: MethodHandle = handle("sqlite3_reset", FunctionDescriptor.of(JAVA_INT, ADDRESS))
-    val bindInt64: MethodHandle = handle("sqlite3_bind_int64", FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_INT, JAVA_LONG))
-    val bindText: MethodHandle =
-        handle("sqlite3_bind_text", FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_INT, ADDRESS, JAVA_INT, ADDRESS))
-    val columnInt64: MethodHandle = handle("sqlite3_column_int64", FunctionDescriptor.of(JAVA_LONG, ADDRESS, JAVA_INT))
-    val columnText: MethodHandle = handle("sqlite3_column_text", FunctionDescriptor.of(ADDRESS, ADDRESS, JAVA_INT))
-    val columnBytes: MethodHandle = handle("sqlite3_column_bytes", FunctionDescriptor.of(JAVA_INT, ADDRESS, JAVA_INT))
-    val changes: MethodHandle = handle("sqlite3_changes", FunctionDescriptor.of(JAVA_INT, ADDRESS))
-    val errmsg: MethodHandle = handle("sqlite3_errmsg", FunctionDescriptor.of(ADDRESS, ADDRESS))
-    val finalize: MethodHandle = handle("sqlite3_finalize", FunctionDescriptor.of(JAVA_INT, ADDRESS))
-    val closeV2: MethodHandle = handle("sqlite3_close_v2", FunctionDescriptor.of(JAVA_INT, ADDRESS))
+    @JvmField val openV2: MemorySegment = find("sqlite3_open_v2")
+    @JvmField val exec: MemorySegment = find("sqlite3_exec")
+    @JvmField val prepareV3: MemorySegment = find("sqlite3_prepare_v3")
+    @JvmField val step: MemorySegment = find("sqlite3_step")
+    @JvmField val reset: MemorySegment = find("sqlite3_reset")
+    @JvmField val bindInt64: MemorySegment = find("sqlite3_bind_int64")
+    @JvmField val bindText: MemorySegment = find("sqlite3_bind_text")
+    @JvmField val columnInt64: MemorySegment = find("sqlite3_column_int64")
+    @JvmField val columnText: MemorySegment = find("sqlite3_column_text")
+    @JvmField val columnBytes: MemorySegment = find("sqlite3_column_bytes")
+    @JvmField val changes: MemorySegment = find("sqlite3_changes")
+    @JvmField val errmsg: MemorySegment = find("sqlite3_errmsg")
+    @JvmField val finalize: MemorySegment = find("sqlite3_finalize")
+    @JvmField val closeV2: MemorySegment = find("sqlite3_close_v2")
 }
 
 const val SQLITE_ROW: Int = 100
@@ -72,7 +104,7 @@ class SqliteStore(path: String) : FeedStore, AutoCloseable {
     init {
         Arena.ofConfined().use { a ->
             val pp = a.allocate(ADDRESS)
-            val rc = Sqlite3.openV2.invokeExact(a.allocateFrom(path), pp, SQLITE_OPEN_READWRITE or SQLITE_OPEN_NOMUTEX,
+            val rc = SqliteCalls.iAAIA.invokeExact(Sqlite3.openV2, a.allocateFrom(path), pp, SQLITE_OPEN_READWRITE or SQLITE_OPEN_NOMUTEX,
                 MemorySegment.NULL) as Int
             db = pp.get(ADDRESS, 0)
             check(rc == 0) { "sqlite3_open_v2($path): ${message()}" }
@@ -96,7 +128,7 @@ class SqliteStore(path: String) : FeedStore, AutoCloseable {
         rollbackStmt = prepare("ROLLBACK")
     }
 
-    fun message(): String = (Sqlite3.errmsg.invokeExact(db) as MemorySegment).reinterpret(4096).getString(0)
+    fun message(): String = (SqliteCalls.aA.invokeExact(Sqlite3.errmsg, db) as MemorySegment).reinterpret(4096).getString(0)
 
     var open = true
 
@@ -110,44 +142,44 @@ class SqliteStore(path: String) : FeedStore, AutoCloseable {
             pending = false
         }
         for (stmt in arrayOf(feedStmt, postStmt, createStmt, likeStmt, existsStmt, pingStmt, beginStmt, commitStmt, rollbackStmt)) {
-            val rc = Sqlite3.finalize.invokeExact(stmt) as Int
+            val rc = SqliteCalls.iA.invokeExact(Sqlite3.finalize, stmt) as Int
         }
-        val rc = Sqlite3.closeV2.invokeExact(db) as Int
+        val rc = SqliteCalls.iA.invokeExact(Sqlite3.closeV2, db) as Int
         check(rc == 0) { "sqlite3_close_v2: rc $rc" }
     }
 
     fun exec(sql: String) = Arena.ofConfined().use { a ->
-        val rc = Sqlite3.exec.invokeExact(db, a.allocateFrom(sql), MemorySegment.NULL, MemorySegment.NULL, MemorySegment.NULL) as Int
+        val rc = SqliteCalls.iAAAAA.invokeExact(Sqlite3.exec, db, a.allocateFrom(sql), MemorySegment.NULL, MemorySegment.NULL, MemorySegment.NULL) as Int
         check(rc == 0) { "$sql: ${message()}" }
     }
 
     fun prepare(sql: String): MemorySegment = Arena.ofConfined().use { a ->
         val pp = a.allocate(ADDRESS)
-        val rc = Sqlite3.prepareV3.invokeExact(db, a.allocateFrom(sql), -1, SQLITE_PREPARE_PERSISTENT, pp, MemorySegment.NULL) as Int
+        val rc = SqliteCalls.iAAIIAA.invokeExact(Sqlite3.prepareV3, db, a.allocateFrom(sql), -1, SQLITE_PREPARE_PERSISTENT, pp, MemorySegment.NULL) as Int
         check(rc == 0) { "$sql: ${message()}" }
         pp.get(ADDRESS, 0)
     }
 
-    fun step(stmt: MemorySegment): Int = Sqlite3.step.invokeExact(stmt) as Int
+    fun step(stmt: MemorySegment): Int = SqliteCalls.iA.invokeExact(Sqlite3.step, stmt) as Int
 
     fun reset(stmt: MemorySegment) {
-        val rc = Sqlite3.reset.invokeExact(stmt) as Int
+        val rc = SqliteCalls.iA.invokeExact(Sqlite3.reset, stmt) as Int
     }
 
     fun bind(stmt: MemorySegment, index: Int, value: Long) {
-        val rc = Sqlite3.bindInt64.invokeExact(stmt, index, value) as Int
+        val rc = SqliteCalls.iAIJ.invokeExact(Sqlite3.bindInt64, stmt, index, value) as Int
     }
 
     fun bind(stmt: MemorySegment, index: Int, text: ByteArray) {
-        val rc = Sqlite3.bindText.invokeExact(stmt, index, MemorySegment.ofArray(text), text.size, TRANSIENT) as Int
+        val rc = SqliteCalls.iAIAIA.invokeExact(Sqlite3.bindText, stmt, index, MemorySegment.ofArray(text), text.size, TRANSIENT) as Int
     }
 
-    fun long(stmt: MemorySegment, col: Int): Long = Sqlite3.columnInt64.invokeExact(stmt, col) as Long
+    fun long(stmt: MemorySegment, col: Int): Long = SqliteCalls.jAI.invokeExact(Sqlite3.columnInt64, stmt, col) as Long
 
     /** Column text copied into [out] and escaped as a JSON string body. */
     fun text(stmt: MemorySegment, col: Int, out: Out) {
-        val p = Sqlite3.columnText.invokeExact(stmt, col) as MemorySegment
-        val n = Sqlite3.columnBytes.invokeExact(stmt, col) as Int
+        val p = SqliteCalls.aAI.invokeExact(Sqlite3.columnText, stmt, col) as MemorySegment
+        val n = SqliteCalls.iAI.invokeExact(Sqlite3.columnBytes, stmt, col) as Int
         out.room(n)
         MemorySegment.copy(p.reinterpret(n.toLong()), JAVA_BYTE, 0L, out.bytes, out.size, n)
         val at = out.size
@@ -245,7 +277,7 @@ class SqliteStore(path: String) : FeedStore, AutoCloseable {
         bind(likeStmt, 2, post)
         if (step(likeStmt) != SQLITE_DONE) failure(likeStmt)
         reset(likeStmt)
-        if ((Sqlite3.changes.invokeExact(db) as Int) == 1) return 1
+        if ((SqliteCalls.iA.invokeExact(Sqlite3.changes, db) as Int) == 1) return 1
         bind(existsStmt, 1, post)
         val rc = step(existsStmt)
         reset(existsStmt)

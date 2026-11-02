@@ -14,7 +14,7 @@
 # The CPU limit is a quota, not a pinned core (rule 11). Timings from that run are not the droplet's timings.
 set -euo pipefail
 cd "$(dirname "$0")"
-TRIKESHED_COMMIT=a7d4caec114739c0bb713bb0b213b3a86d088a3d
+TRIKESHED_COMMIT=35886891f6bb9874155301f678d5458b06a48ed2
 if [ ! -d trikeshed/TrikeShed/src ]; then
   commit=$TRIKESHED_COMMIT
   mkdir -p trikeshed/TrikeShed

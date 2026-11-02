@@ -280,6 +280,12 @@ src/commonMain/kotlin/borg/trikeshed/context/sctp/SctpPacket.kt
 src/commonMain/kotlin/borg/trikeshed/context/sctp/SctpTcb.kt
 src/commonMain/kotlin/borg/trikeshed/context/sctp/SctpUdpPort.kt
 src/commonMain/kotlin/borg/trikeshed/couch/isam/WalFrame.kt
+# CRC32c for the SCTP and WAL frames: the CPU's instruction where there is one (posix C, the JVM's intrinsic), else the table.
+src/commonMain/kotlin/borg/trikeshed/couch/isam/Crc32c.kt
+src/jvmMain/kotlin/borg/trikeshed/couch/isam/Crc32c.jvm.kt
+src/posixMain/kotlin/borg/trikeshed/couch/isam/Crc32c.posix.kt
+src/wasmWasiMain/kotlin/borg/trikeshed/couch/isam/Crc32c.wasmWasi.kt
+src/jsMain/kotlin/borg/trikeshed/couch/isam/Crc32c.js.kt
 src/commonMain/kotlin/borg/trikeshed/htx/HtxPpid.kt
 src/commonMain/kotlin/borg/trikeshed/userspace/nio/platform/spi/PlatformGetRandom.kt
 src/jvmMain/kotlin/borg/trikeshed/userspace/nio/platform/spi/PlatformGetRandom.jvm.kt
@@ -291,3 +297,35 @@ src/linuxMain/kotlin/borg/trikeshed/userspace/Liburing.linux.kt
 src/linuxMain/kotlin/borg/trikeshed/userspace/NativeUringAdapter.linux.kt
 src/linuxMain/kotlin/borg/trikeshed/userspace/nio/platform/spi/SystemOperations.linux.kt
 src/linuxMain/kotlin/borg/trikeshed/userspace/nio/file/spi/LinuxSystemOperations.kt
+# node and wasi builds of the server (-Ptrike.targets=js / wasmWasi): TrikeShed's JS actuals, and its WASI actuals with
+# the wasm ones they share with wasmJs (src/wasmMain).
+src/jsMain/kotlin/borg/trikeshed/common/JsCommonActuals.kt
+src/jsMain/kotlin/borg/trikeshed/isam/Locks.kt
+src/jsMain/kotlin/borg/trikeshed/lib/JsLibActuals.kt
+src/jsMain/kotlin/borg/trikeshed/platform/PlatformHost.js.kt
+src/jsMain/kotlin/borg/trikeshed/tilting/leaf/LeafSpecialization.js.kt
+src/jsMain/kotlin/borg/trikeshed/userspace/Liburing.js.kt
+src/jsMain/kotlin/borg/trikeshed/userspace/UserspaceIO.js.kt
+src/jsMain/kotlin/borg/trikeshed/userspace/nio/channels/spi/MemoryOperations.js.kt
+src/jsMain/kotlin/borg/trikeshed/userspace/nio/file/spi/JsFileOperations.kt
+src/jsMain/kotlin/borg/trikeshed/userspace/nio/platform/spi/PlatformEndianness.js.kt
+src/jsMain/kotlin/borg/trikeshed/userspace/nio/platform/spi/PlatformGetRandom.js.kt
+src/jsMain/kotlin/borg/trikeshed/userspace/nio/platform/spi/SystemOperations.js.kt
+src/wasmMain/kotlin/borg/trikeshed/isam/Locks.kt
+src/wasmMain/kotlin/borg/trikeshed/lib/WasmLibActuals.kt
+src/wasmMain/kotlin/borg/trikeshed/userspace/Liburing.wasm.kt
+src/wasmMain/kotlin/borg/trikeshed/userspace/nio/channels/spi/MemoryOperations.wasm.kt
+src/wasmWasiMain/kotlin/borg/trikeshed/common/Files.wasmWasi.kt
+src/wasmWasiMain/kotlin/borg/trikeshed/platform/PlatformHost.wasmWasi.kt
+src/wasmWasiMain/kotlin/borg/trikeshed/userspace/UserspaceIO.wasmWasi.kt
+src/wasmWasiMain/kotlin/borg/trikeshed/userspace/nio/file/spi/WasiFileOperations.kt
+src/wasmWasiMain/kotlin/borg/trikeshed/userspace/nio/platform/spi/SystemOperations.wasmWasi.kt
+src/jsMain/kotlin/borg/trikeshed/lib/JsNode.kt
+src/jsMain/kotlin/borg/trikeshed/common/Files.kt
+src/jsMain/kotlin/borg/trikeshed/platform/HostDescriptor.js.kt
+src/jsMain/kotlin/borg/trikeshed/userspace/NodeUringDiscovery.kt
+src/jsMain/kotlin/borg/trikeshed/userspace/nio/file/spi/JsSystemOperations.kt
+src/wasmWasiMain/kotlin/borg/trikeshed/userspace/wasi/Wasi.kt
+# webMain (js and wasmWasi only): the common Files and readLines expects that their actuals above implement.
+webMain:src/commonMain/kotlin/borg/trikeshed/common/Files.kt
+webMain:src/commonMain/kotlin/borg/trikeshed/common/ReadLines.kt

@@ -40,6 +40,15 @@ kotlin {
         }
     }
 
+    // -Ptrike.targets=js: Kotlin/JS on Node.js (node:net sockets, node:sqlite), build/dist/node/server.js (nodeDist).
+    if ("js" in nativeTargets) {
+        js {
+            outputModuleName.set("server")
+            nodejs()
+            binaries.executable()
+        }
+    }
+
     sourceSets {
         val commonMain by getting {
             dependencies {
@@ -59,6 +68,12 @@ val app = tasks.register<Sync>("app") {
     from(tasks.named("jvmJar"))
     from(configurations.named("jvmRuntimeClasspath"))
     into(layout.buildDirectory.dir("app"))
+}
+
+// The node build: the production executable and the modules it requires, flat in build/dist/node.
+if ("js" in nativeTargets) tasks.register<Sync>("nodeDist") {
+    from(tasks.named("jsProductionExecutableCompileSync"))
+    into(layout.buildDirectory.dir("dist/node"))
 }
 
 // The driver: SQLite 3.54.0 from its amalgamation, built here for this one-thread process.

@@ -32,5 +32,7 @@ fun main() {
         }
         return
     }
-    Xio(Poller(host, port), feed, store).init()
+    // COMMIT_WINDOW_US: the group-commit window in microseconds, for measuring its knee; unset keeps COMMIT_WINDOW_NANOS.
+    val window = env("COMMIT_WINDOW_US")?.toLongOrNull()?.let { it * 1_000L } ?: COMMIT_WINDOW_NANOS
+    Xio(Poller(host, port), feed, store, window).init()
 }

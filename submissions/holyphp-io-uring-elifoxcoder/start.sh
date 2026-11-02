@@ -7,4 +7,7 @@ set -euo pipefail
 # path automatically if registration or the provided-buffer ring fails, and
 # HPHP_DIRECT=0 forces it.
 export HPHP_DIRECT="${HPHP_DIRECT:-1}"
+# Five rings x 65535 direct slots = ~327k tabletops; the runtime falls back
+# to one ring (and to the real-fd path) when setup fails.
+export HPHP_RINGS="${HPHP_RINGS:-5}"
 exec "$(dirname "$0")/bin/server"

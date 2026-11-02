@@ -468,10 +468,10 @@ class Server {
         stream_set_nodelay($srv);
         epoll_add($this->srv);
         /* Handles are either real fds (< 65536) or direct-descriptor handles
-         * (65536 + slot). The registered table is capped by RLIMIT_NOFILE
-         * (<= 65535 on the box), so 262144 int slots cover both spaces. */
-        $this->socks = iarr_new(262144);
-        $this->lasts = iarr_new(262144);
+         * (65536 + ring * 65536 + slot). Up to 5 rings x 65535 slots fit in
+         * 524288 int slots (real fds and direct handles share the space). */
+        $this->socks = iarr_new(524288);
+        $this->lasts = iarr_new(524288);
 
         /* Shed only when the process is really near its descriptor limit.
          * The box sets LimitNOFILE; a hard 58,000 would close every response
@@ -634,7 +634,7 @@ class Server {
             if ($n > $this->nconn * 2 + 1024) {
                 $this->sockList = [];
                 $k = 0;
-                while ($k < 262144) {
+                while ($k < 524288) {
                     if (iarr_get($this->socks, $k) != 0) { $this->sockList[] = $k; }
                     $k = $k + 1;
                 }

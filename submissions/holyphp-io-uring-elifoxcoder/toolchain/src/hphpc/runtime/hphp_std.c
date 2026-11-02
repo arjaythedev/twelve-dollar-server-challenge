@@ -51,6 +51,7 @@ typedef SOCKET hp_sock;
 #include <dirent.h>
 #include <sys/socket.h>
 #include <sys/syscall.h>
+#include <sys/eventfd.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
@@ -2524,6 +2525,7 @@ static _Thread_local int g_epfd = -1;
 #define HP_UR_REGISTER_FILES_UPDATE 6
 #define HP_UR_REGISTER_FILES2       13   /* sparse table registration */
 #define HP_UR_RSRC_REGISTER_SPARSE  (1U << 0)
+#define HP_UR_REGISTER_EVENTFD      4
 #define HP_UR_REGISTER_PBUF_RING    22
 #define HP_UR_ENTRIES     65536   /* deep ring: ~60k + live conns at 280k users */
 /* Per-connection recv target. Requests are a few hundred bytes (headers plus
@@ -2716,7 +2718,6 @@ struct hp_urfds {
     int    direct;                        /* direct descriptor (direct fds) */
     int    diridx;                        /* slot in the registered file table */
     int    rmshot;                        /* recv SQE is multishot */
-    int    acceptarmed;                   /* listener: multishot accept in flight */
     int64_t cdeadline;
     uint32_t epoch;
 };
@@ -2739,14 +2740,6 @@ static _Thread_local long hp_ur_batch_us = HP_UR_BATCH_US;
 static _Thread_local int hp_ur_taskrun = 1;
 
 static _Thread_local int hp_ur_st = 0;    /* 0 untried, 1 active, -1 unusable */
-static _Thread_local int hp_ur_fd = -1;
-static _Thread_local unsigned char *hp_ur_sqes;
-static _Thread_local struct hp_uring_cqe *hp_ur_cqes;
-static _Thread_local uint32_t *hp_ur_sqarr;
-static _Thread_local volatile uint32_t *hp_ur_sq_head, *hp_ur_sq_tail;
-static _Thread_local volatile uint32_t *hp_ur_cq_head, *hp_ur_cq_tail;
-static _Thread_local uint32_t hp_ur_sqtail, hp_ur_cqhead;
-static _Thread_local uint32_t hp_ur_sqmask, hp_ur_cqmask;
 static _Thread_local struct hp_urfds *hp_ur_fds;
 static _Thread_local uint32_t hp_ur_fdscap;
 static _Thread_local int hp_ur_pushfail;    /* retry-ring overflow: run scan */
@@ -2756,38 +2749,106 @@ static _Thread_local uint32_t hp_ur_retcap, hp_ur_rethead, hp_ur_rettail;
 static _Thread_local uint32_t *hp_ur_closing; /* fds waiting for a send drain */
 static _Thread_local uint32_t hp_ur_closecap, hp_ur_closecnt;
 
+/* One io_uring instance. A single connection is tied to the ring that owns
+ * its direct descriptor, so every low-level op runs against hp_ur_cur. The
+ * macros below keep the existing call sites unchanged while the actual
+ * state lives per ring. */
+struct hp_uring_ring {
+    int fd;
+    int efd;              /* CQE eventfd registered into epoll, -1 = none */
+    unsigned char *sqes;
+    struct hp_uring_cqe *cqes;
+    uint32_t *sqarr;
+    volatile uint32_t *sq_head, *sq_tail, *cq_head, *cq_tail;
+    uint32_t sqtail, cqhead, sqmask, cqmask;
+    struct hp_urfds *dirs;
+    uint32_t dircap;
+    struct hp_uring_buf_ring *pbuf;
+    char *pbuf_mem;
+    size_t pbuf_mapsz;
+    uint32_t pbuf_n, pbuf_mask, pbuf_tail, pbuf_blen;
+    int accept_armed;
+    int accept_full;      /* this ring's direct table is full */
+    /* The accept SQE keeps these alive while the multishot op is armed. */
+    struct sockaddr_storage accept_addr;
+    socklen_t accept_len;
+};
+#define HP_UR_RINGS_MAX        5
+#define HP_UR_SLOTS_PER_RING   65536U
+static _Thread_local struct hp_uring_ring hp_ur_rings[HP_UR_RINGS_MAX];
+static _Thread_local int hp_ur_nrings;
+static _Thread_local struct hp_uring_ring *hp_ur_cur;   /* set at setup */
+
+#define hp_ur_fd          (hp_ur_cur->fd)
+#define hp_ur_sqes        (hp_ur_cur->sqes)
+#define hp_ur_cqes        (hp_ur_cur->cqes)
+#define hp_ur_sqarr       (hp_ur_cur->sqarr)
+#define hp_ur_sq_head     (hp_ur_cur->sq_head)
+#define hp_ur_sq_tail     (hp_ur_cur->sq_tail)
+#define hp_ur_cq_head     (hp_ur_cur->cq_head)
+#define hp_ur_cq_tail     (hp_ur_cur->cq_tail)
+#define hp_ur_sqtail      (hp_ur_cur->sqtail)
+#define hp_ur_cqhead      (hp_ur_cur->cqhead)
+#define hp_ur_sqmask      (hp_ur_cur->sqmask)
+#define hp_ur_cqmask      (hp_ur_cur->cqmask)
+#define hp_ur_dirs        (hp_ur_cur->dirs)
+#define hp_ur_dircap      (hp_ur_cur->dircap)
+#define hp_ur_pbuf        (hp_ur_cur->pbuf)
+#define hp_ur_pbuf_mem    (hp_ur_cur->pbuf_mem)
+#define hp_ur_pbuf_mapsz  (hp_ur_cur->pbuf_mapsz)
+#define hp_ur_pbuf_n      (hp_ur_cur->pbuf_n)
+#define hp_ur_pbuf_mask   (hp_ur_cur->pbuf_mask)
+#define hp_ur_pbuf_tail   (hp_ur_cur->pbuf_tail)
+#define hp_ur_pbuf_blen   (hp_ur_cur->pbuf_blen)
+
 /* ---- direct descriptors / provided buffers (HPHP_DIRECT=1) ---------------- */
 static _Thread_local int hp_ur_direct = -1;   /* -1 untried, 0 off, 1 on */
-static _Thread_local struct hp_urfds *hp_ur_dirs;
-static _Thread_local uint32_t hp_ur_dircap;
-static _Thread_local struct hp_uring_buf_ring *hp_ur_pbuf;
-static _Thread_local char *hp_ur_pbuf_mem;
-static _Thread_local size_t hp_ur_pbuf_mapsz;
-static _Thread_local uint32_t hp_ur_pbuf_n, hp_ur_pbuf_mask, hp_ur_pbuf_tail;
-static _Thread_local uint32_t hp_ur_pbuf_blen;
 static _Thread_local uint32_t *hp_ur_acceptq; /* accepted direct handles */
 static _Thread_local uint32_t hp_ur_acceptq_cap, hp_ur_acceptq_len, hp_ur_acceptq_pos;
-/* The accept SQE keeps these alive while the multishot op is armed. */
-static _Thread_local struct sockaddr_storage hp_ur_accept_addr;
-static _Thread_local socklen_t hp_ur_accept_len;
+/* Listener state: every ring arms its own multishot accept on this real fd. */
+static _Thread_local hp_sock hp_ur_listen_fd = -1;
+static _Thread_local int hp_ur_listen_on = 0;
 
 uint64_t hp_st[HP_ST_N];   /* runtime counters, see hphp_rt.h */
 
 static int hp_uring_active(void) { return hp_ur_st == 1; }
 static int hp_ur_direct_on(void) { return hp_ur_direct == 1; }
-static bool hp_ur_is_direct(hp_sock h) {
-    return hp_ur_direct == 1 && h >= (hp_sock)HP_UR_HANDLE_BASE;
+
+/* Direct handles encode (ring, slot): BASE + ring * 65536 + slot. Real fds
+ * occupy ring 0's SQ but never share the direct handle space. */
+static int hp_ur_ring_of(hp_sock h) {
+    if (hp_ur_direct != 1 || h < (hp_sock)HP_UR_HANDLE_BASE) return -1;
+    uint32_t off = (uint32_t)(h - (hp_sock)HP_UR_HANDLE_BASE);
+    uint32_t r = off / HP_UR_SLOTS_PER_RING;
+    if ((int)r >= hp_ur_nrings) return -1;
+    return (int)r;
 }
+static bool hp_ur_is_direct(hp_sock h) { return hp_ur_ring_of(h) >= 0; }
 
 static struct hp_urfds *hp_ur_st_of(hp_sock fd) {
-    if (hp_ur_direct == 1 && fd >= (hp_sock)HP_UR_HANDLE_BASE) {
-        uint32_t i = (uint32_t)(fd - (hp_sock)HP_UR_HANDLE_BASE);
-        if (!hp_ur_dirs || i >= hp_ur_dircap) return NULL;
-        if (!hp_ur_dirs[i].direct) return NULL;
-        return &hp_ur_dirs[i];
+    int r = hp_ur_ring_of(fd);
+    if (r >= 0) {
+        uint32_t i = (uint32_t)(fd - (hp_sock)HP_UR_HANDLE_BASE) %
+                     HP_UR_SLOTS_PER_RING;
+        struct hp_uring_ring *rg = &hp_ur_rings[r];
+        if (!rg->dirs || i >= rg->dircap) return NULL;
+        if (!rg->dirs[i].direct) return NULL;
+        return &rg->dirs[i];
     }
     if (fd < 0 || (uint32_t)fd >= hp_ur_fdscap) return NULL;
     return &hp_ur_fds[fd];
+}
+
+/* Select the ring that owns this handle (ring 0 for real fds). */
+static void hp_ur_use_ring(hp_sock fd) {
+    int r = hp_ur_ring_of(fd);
+    hp_ur_cur = (r >= 0) ? &hp_ur_rings[r] : &hp_ur_rings[0];
+}
+/* A direct slot was released: let that ring's accept be re-armed if its
+ * table had been full. */
+static void hp_ur_slot_freed(hp_sock fd) {
+    int r = hp_ur_ring_of(fd);
+    if (r >= 0) hp_ur_rings[r].accept_full = 0;
 }
 
 /* Grow the deferred-close and retry queues. They are simple FIFOs, so their
@@ -2894,7 +2955,8 @@ static long hp_ur_enter(long to_submit, long min_complete, int wait_us);
 static bool hp_ur_sq_push(struct hp_uring_sqe *fill);
 static bool hp_ur_arm_send_head(hp_sock fd);
 static bool hp_uring_arm_recv(hp_sock fd, size_t want);
-static bool hp_uring_arm_accept(hp_sock fd);
+static bool hp_uring_arm_accept(hp_sock fd, int ring);
+static void hp_ur_arm_all_accepts(void);
 static void hp_ur_free_fd(hp_sock fd);
 static void hp_ur_ep_del(hp_sock fd);
 static void hp_ur_detach(struct hp_urfds *st);
@@ -2935,6 +2997,7 @@ static bool hp_ur_close_slot(uint32_t idx, uint64_t ud) {
  * it the buffers the kernel reads from, alive until the chain drains;
  * hp_uring_wait finishes the close. */
 static void hp_ur_finish_close(hp_sock fd) {
+    hp_ur_use_ring(fd);
     struct hp_urfds *st = hp_ur_st_of(fd);
     if (!st) return;
     st->ctagged = 0;
@@ -2957,8 +3020,10 @@ static void hp_ur_finish_close(hp_sock fd) {
  * owners close after epoll_del + stream_close; direct descriptors are closed
  * by hp_ur_finish_close() before this runs. */
 static void hp_ur_free_fd(hp_sock fd) {
+    hp_ur_use_ring(fd);
     struct hp_urfds *st = hp_ur_st_of(fd);
     if (!st) return;
+    if (st->direct && !st->listener) hp_ur_slot_freed(fd);
     if (!st->listener && (st->sarmed || st->shead)) {
         if (!st->sarmed) hp_ur_arm_send_head(fd);
         /* The send SQE is already queued; the next wait cycle submits it
@@ -2980,16 +3045,24 @@ static void hp_ur_free_fd(hp_sock fd) {
         }
     }
     /* A paused direct listener keeps its real fd open; cancel the armed
-     * multishot accept so later completions cannot create orphan handles. */
-    if (st->listener && st->acceptarmed && hp_ur_direct == 1) {
-        struct hp_uring_sqe s;
-        memset(&s, 0, sizeof s);
-        s.opcode = HP_UR_OP_ASYNC_CANCEL;
-        s.fd = -1;
-        s.addr = hp_ur_ud(st, fd, HP_UR_KIND_ACCEPT);
-        s.cancel_flags = HP_UR_ASYNC_CANCEL_USERDATA;
-        hp_ur_sq_push(&s);
-        st->acceptarmed = 0;
+     * multishot accept on every ring so later completions cannot create
+     * orphan handles. */
+    if (st->listener && hp_ur_direct == 1) {
+        for (int r = 0; r < hp_ur_nrings; r++) {
+            if (!hp_ur_rings[r].accept_armed) continue;
+            hp_ur_cur = &hp_ur_rings[r];
+            struct hp_uring_sqe s;
+            memset(&s, 0, sizeof s);
+            s.opcode = HP_UR_OP_ASYNC_CANCEL;
+            s.fd = -1;
+            s.addr = hp_ur_ud(st, fd, HP_UR_KIND_ACCEPT);
+            s.cancel_flags = HP_UR_ASYNC_CANCEL_USERDATA;
+            hp_ur_sq_push(&s);
+            hp_ur_rings[r].accept_armed = 0;
+        }
+        hp_ur_cur = &hp_ur_rings[0];
+        hp_ur_listen_on = 0;
+        hp_ur_listen_fd = -1;
     }
     /* A direct descriptor is owned by the ring, not by the process fd
      * table: after a deferred close it must be released explicitly. */
@@ -3042,17 +3115,8 @@ static long hp_ur_enter(long to_submit, long min_complete, int wait_us) {
                    HP_UR_ENTER_GET, 0L, 0L);
 }
 
-static bool hp_uring_setup(void) {
-    const char *env = getenv("HPHP_URING");
-    if (env && (env[0] == '0' || env[0] == 'n' || env[0] == 'N')) return false;
-    hp_ur_dbg = getenv("HPHP_URING_DEBUG") != NULL;
-    if ((env = getenv("HPHP_BATCH_N"))) hp_ur_batch = atol(env);
-    if (hp_ur_batch < 1) hp_ur_batch = 1;
-    if ((env = getenv("HPHP_BATCH_US"))) hp_ur_batch_us = atol(env);
-    if (hp_ur_batch_us < 0) hp_ur_batch_us = 0;
-    if ((env = getenv("HPHP_TASKRUN")) && (env[0] == '0' || env[0] == 'n' ||
-                                           env[0] == 'N'))
-        hp_ur_taskrun = 0;
+/* Create and map one io_uring instance. */
+static bool hp_ur_ring_setup(struct hp_uring_ring *r) {
     struct hp_uring_setup_params p;
     memset(&p, 0, sizeof p);
     /* Ask for an explicit 64k/64k ring: at 280k users the box holds ~60k
@@ -3091,6 +3155,19 @@ static bool hp_uring_setup(void) {
                           (unsigned long)(HP_UR_ENTRIES / 2), &p);
         if (fd < 0) return false;
     }
+    /* A registered eventfd makes CQ readiness pollable even with
+     * DEFER_TASKRUN (the same mechanism the top C submission uses). */
+    r->efd = -1;
+    {
+        int evfd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+        if (evfd >= 0) {
+            if (syscall(SYS_io_uring_register, (long)fd,
+                        HP_UR_REGISTER_EVENTFD, (long)&evfd, 1L) == 0)
+                r->efd = evfd;
+            else
+                close(evfd);
+        }
+    }
     size_t sq_sz = p.sq_off.array + (size_t)p.sq_entries * sizeof(uint32_t);
     size_t cq_sz = p.cq_off.cqes + (size_t)p.cq_entries * sizeof(struct hp_uring_cqe);
     size_t sqe_sz = (size_t)p.sq_entries * sizeof(struct hp_uring_sqe);
@@ -3104,6 +3181,7 @@ static bool hp_uring_setup(void) {
         if (sqring != MAP_FAILED) munmap(sqring, sq_sz);
         if (cqring != MAP_FAILED) munmap(cqring, cq_sz);
         if (sqes != MAP_FAILED) munmap(sqes, sqe_sz);
+        if (r->efd >= 0) close(r->efd);
         close(fd);
         return false;
     }
@@ -3112,18 +3190,52 @@ static bool hp_uring_setup(void) {
      * header fields interleave (sq mask sits at sq_off.ring_mask = +16,
      * NOT at byte 8 like a plain struct overlay would read). Verified
      * against the raw mmap dump on kernel 6.18. */
-    hp_ur_fd = fd;
-    hp_ur_sqmask = *(volatile uint32_t *)((char *)sqring + p.sq_off.ring_mask);
-    hp_ur_cqmask = *(volatile uint32_t *)((char *)cqring + p.cq_off.ring_mask);
-    hp_ur_sq_head = (volatile uint32_t *)((char *)sqring + p.sq_off.head);
-    hp_ur_sq_tail = (volatile uint32_t *)((char *)sqring + p.sq_off.tail);
-    hp_ur_cq_head = (volatile uint32_t *)((char *)cqring + p.cq_off.head);
-    hp_ur_cq_tail = (volatile uint32_t *)((char *)cqring + p.cq_off.tail);
-    hp_ur_sqarr = (uint32_t *)((char *)sqring + p.sq_off.array);
-    hp_ur_sqes = (unsigned char *)sqes;
-    hp_ur_cqes = (struct hp_uring_cqe *)((char *)cqring + p.cq_off.cqes);
-    hp_ur_sqtail = __atomic_load_n(hp_ur_sq_tail, __ATOMIC_ACQUIRE);
-    hp_ur_cqhead = __atomic_load_n(hp_ur_cq_head, __ATOMIC_ACQUIRE);
+    r->fd = fd;
+    r->sqmask = *(volatile uint32_t *)((char *)sqring + p.sq_off.ring_mask);
+    r->cqmask = *(volatile uint32_t *)((char *)cqring + p.cq_off.ring_mask);
+    r->sq_head = (volatile uint32_t *)((char *)sqring + p.sq_off.head);
+    r->sq_tail = (volatile uint32_t *)((char *)sqring + p.sq_off.tail);
+    r->cq_head = (volatile uint32_t *)((char *)cqring + p.cq_off.head);
+    r->cq_tail = (volatile uint32_t *)((char *)cqring + p.cq_off.tail);
+    r->sqarr = (uint32_t *)((char *)sqring + p.sq_off.array);
+    r->sqes = (unsigned char *)sqes;
+    r->cqes = (struct hp_uring_cqe *)((char *)cqring + p.cq_off.cqes);
+    r->sqtail = __atomic_load_n(r->sq_tail, __ATOMIC_ACQUIRE);
+    r->cqhead = __atomic_load_n(r->cq_head, __ATOMIC_ACQUIRE);
+    return true;
+}
+
+static bool hp_uring_setup(void) {
+    const char *env = getenv("HPHP_URING");
+    if (env && (env[0] == '0' || env[0] == 'n' || env[0] == 'N')) return false;
+    hp_ur_dbg = getenv("HPHP_URING_DEBUG") != NULL;
+    if ((env = getenv("HPHP_BATCH_N"))) hp_ur_batch = atol(env);
+    if (hp_ur_batch < 1) hp_ur_batch = 1;
+    if ((env = getenv("HPHP_BATCH_US"))) hp_ur_batch_us = atol(env);
+    if (hp_ur_batch_us < 0) hp_ur_batch_us = 0;
+    if ((env = getenv("HPHP_TASKRUN")) && (env[0] == '0' || env[0] == 'n' ||
+                                           env[0] == 'N'))
+        hp_ur_taskrun = 0;
+    /* Multiple rings multiply the direct-descriptor space: the kernel caps
+     * each registration at RLIMIT_NOFILE (65535 on the box), not the sum.
+     * HPHP_RINGS is bounded by HP_UR_RINGS_MAX so handle encoding stays
+     * inside the app's int tables. */
+    int want = 1;
+    if ((env = getenv("HPHP_RINGS")) && *env) {
+        long v = atol(env);
+        if (v >= 1 && v <= HP_UR_RINGS_MAX) want = (int)v;
+    }
+    hp_ur_nrings = 0;
+    for (int i = 0; i < want; i++) {
+        hp_ur_cur = &hp_ur_rings[i];
+        if (!hp_ur_ring_setup(&hp_ur_rings[i])) {
+            if (i == 0) return false;
+            break;
+        }
+        hp_ur_nrings = i + 1;
+    }
+    hp_ur_cur = &hp_ur_rings[0];
+    if (hp_ur_dbg) fprintf(stderr, "[ur] rings=%d\n", hp_ur_nrings);
     return true;
 }
 
@@ -3196,6 +3308,7 @@ static bool hp_uring_direct_setup(void) {
     const char *e = getenv("HPHP_DIRECT");
     if (!e || !(e[0] == '1' || e[0] == 'y' || e[0] == 'Y')) {
         hp_ur_direct = 0;
+        hp_ur_nrings = 1;        /* unused rings would only idle */
         return false;
     }
     uint32_t n = HP_UR_DIRECT_FILES_DEF;
@@ -3216,36 +3329,52 @@ static bool hp_uring_direct_setup(void) {
     if (rl.rlim_cur != 0 &&
         rl.rlim_cur != RLIM_INFINITY && (uint64_t)rl.rlim_cur < n)
         n = (uint32_t)rl.rlim_cur;
-    /* A fully sparse table, so ALLOC can fill any slot. This is FILES2 with
-     * IORING_RSRC_REGISTER_SPARSE: plain REGISTER_FILES(NULL) is EFAULT. */
-    struct hp_uring_rsrc_register rr;
-    memset(&rr, 0, sizeof rr);
-    rr.nr = n;
-    rr.flags = HP_UR_RSRC_REGISTER_SPARSE;
-    if (syscall(SYS_io_uring_register, (long)hp_ur_fd,
-                HP_UR_REGISTER_FILES2, (long)&rr, (long)sizeof rr) < 0) {
-        fprintf(stderr, "[ur] direct: files register failed errno=%d (%s)\n",
-                errno, strerror(errno));
+    /* A fully sparse table per ring, so ALLOC can fill any slot. This is
+     * FILES2 with IORING_RSRC_REGISTER_SPARSE: plain REGISTER_FILES(NULL)
+     * is EFAULT. The kernel caps each registration at RLIMIT_NOFILE, but
+     * the sum over rings is not capped. */
+    e = getenv("HPHP_PBUF");
+    int nopbuf = (e && e[0] == '0');
+    int okrings = 0;
+    for (int ri = 0; ri < hp_ur_nrings; ri++) {
+        hp_ur_cur = &hp_ur_rings[ri];
+        struct hp_uring_rsrc_register rr;
+        memset(&rr, 0, sizeof rr);
+        rr.nr = n;
+        rr.flags = HP_UR_RSRC_REGISTER_SPARSE;
+        if (syscall(SYS_io_uring_register, (long)hp_ur_fd,
+                    HP_UR_REGISTER_FILES2, (long)&rr, (long)sizeof rr) < 0) {
+            fprintf(stderr,
+                    "[ur] direct: ring %d files register failed errno=%d (%s)\n",
+                    ri, errno, strerror(errno));
+            break;
+        }
+        hp_ur_dirs = (struct hp_urfds *)calloc(n, sizeof *hp_ur_dirs);
+        if (!hp_ur_dirs) break;
+        hp_ur_dircap = n;
+        /* Provided buffers are the fast path, not a requirement. If the
+         * kernel refuses the registration (memlock/accounting), keep direct
+         * descriptors and use one fixed-file recv per connection. */
+        if (nopbuf) {
+            if (hp_ur_dbg)
+                fprintf(stderr, "[ur] direct: provided buffers disabled\n");
+        } else if (!hp_uring_pbuf_setup()) {
+            fprintf(stderr,
+                    "[ur] direct: ring %d provided-buffer setup failed, "
+                    "using one-shot recv\n", ri);
+        }
+        okrings = ri + 1;
+    }
+    hp_ur_cur = &hp_ur_rings[0];
+    if (okrings == 0) {
         hp_ur_direct = 0;
+        hp_ur_nrings = 1;
         return false;
     }
-    hp_ur_dirs = (struct hp_urfds *)calloc(n, sizeof *hp_ur_dirs);
-    if (!hp_ur_dirs) { hp_ur_direct = 0; return false; }
-    hp_ur_dircap = n;
-    /* Provided buffers are the fast path, not a requirement. If the kernel
-     * refuses the registration (memlock/accounting), keep direct descriptors
-     * and fall back to one fixed-file recv per connection. */
-    e = getenv("HPHP_PBUF");
-    if (e && e[0] == '0') {
-        if (hp_ur_dbg)
-            fprintf(stderr, "[ur] direct: provided buffers disabled\n");
-    } else if (!hp_uring_pbuf_setup()) {
-        fprintf(stderr,
-                "[ur] direct: provided-buffer setup failed, using one-shot recv\n");
-    }
+    hp_ur_nrings = okrings;      /* rings without a table are unusable */
     hp_ur_direct = 1;
-    fprintf(stderr, "[ur] direct mode: %u slots, %u pbufs\n",
-            hp_ur_dircap, hp_ur_pbuf_n);
+    fprintf(stderr, "[ur] direct mode: %d rings, %u slots/ring, %u pbufs\n",
+            okrings, n, hp_ur_rings[0].pbuf_n);
     return true;
 }
 
@@ -3292,11 +3421,18 @@ static int hp_ur_ep_setup(void) {
     if (hp_ur_epfd >= 0) return hp_ur_epfd;
     int efd = epoll_create1(0);
     if (efd < 0) return -1;
-    struct epoll_event ev;
-    memset(&ev, 0, sizeof ev);
-    ev.events = EPOLLIN;
-    ev.data.fd = (int)hp_ur_fd;          /* ring fd: completions pending */
-    if (epoll_ctl(efd, EPOLL_CTL_ADD, hp_ur_fd, &ev) != 0) { close(efd); return -1; }
+    for (int r = 0; r < hp_ur_nrings; r++) {
+        int ifd = hp_ur_rings[r].efd >= 0 ? hp_ur_rings[r].efd
+                                          : hp_ur_rings[r].fd;
+        struct epoll_event ev;
+        memset(&ev, 0, sizeof ev);
+        ev.events = EPOLLIN;
+        ev.data.fd = ifd;                 /* completions pending */
+        if (epoll_ctl(efd, EPOLL_CTL_ADD, ifd, &ev) != 0) {
+            close(efd);
+            return -1;
+        }
+    }
     hp_ur_epfd = efd;
     return efd;
 }
@@ -3344,6 +3480,7 @@ static void hp_ur_ep_del(hp_sock fd) {
  * exact same hstr is handed out, so a request costs zero recv copies and
  * zero recv string allocations. */
 static bool hp_uring_arm_recv(hp_sock fd, size_t want) {
+    hp_ur_use_ring(fd);
     struct hp_urfds *st = hp_ur_st_of(fd);
     if (!st || st->rarmed || st->reof || st->listener) return false;
     /* overflow connections are watched by epoll, not by an armed SQE */
@@ -3435,6 +3572,7 @@ static bool hp_uring_arm_recv(hp_sock fd, size_t want) {
 }
 
 static bool hp_uring_arm_poll(hp_sock fd) {
+    hp_ur_use_ring(fd);
     struct hp_urfds *st = hp_ur_st_of(fd);
     if (!st || st->pollarmed) return false;
     struct hp_uring_sqe s;
@@ -3449,20 +3587,24 @@ static bool hp_uring_arm_poll(hp_sock fd) {
     return true;
 }
 
-/* One multishot accept on the real listener fd. Each success carries a
- * direct-descriptor index in cqe->res and keeps the op armed while
- * IORING_CQE_F_MORE is set, so accepting 280k connections costs one SQE. */
-static bool hp_uring_arm_accept(hp_sock fd) {
+/* One multishot accept per ring on the real listener fd. Each success
+ * carries a direct-descriptor slot in cqe->res; the ring index is implicit
+ * in which ring's CQ the completion came from. The op stays armed while
+ * IORING_CQE_F_MORE is set. */
+static bool hp_uring_arm_accept(hp_sock fd, int ring) {
+    if (ring < 0 || ring >= hp_ur_nrings) return false;
+    struct hp_uring_ring *rg = &hp_ur_rings[ring];
     struct hp_urfds *st = hp_ur_st_of(fd);
-    if (!st || !st->listener || st->acceptarmed) return false;
+    if (!st || !st->listener || rg->accept_armed) return false;
     if (hp_ur_direct != 1) return false;
-    hp_ur_accept_len = sizeof hp_ur_accept_addr;
+    hp_ur_cur = rg;
+    rg->accept_len = sizeof rg->accept_addr;
     struct hp_uring_sqe s;
     memset(&s, 0, sizeof s);
     s.opcode = HP_UR_OP_ACCEPT;
     s.fd = (int)fd;
-    s.addr = (uint64_t)(uintptr_t)&hp_ur_accept_addr;
-    s.addr2 = (uint64_t)(uintptr_t)&hp_ur_accept_len;
+    s.addr = (uint64_t)(uintptr_t)&rg->accept_addr;
+    s.addr2 = (uint64_t)(uintptr_t)&rg->accept_len;
     s.ioprio = HP_UR_ACCEPT_MULTISHOT;
     s.file_index = HP_UR_FILE_INDEX_ALLOC;
     /* A direct-slot accept must NOT carry SOCK_CLOEXEC: the kernel rejects
@@ -3471,14 +3613,30 @@ static bool hp_uring_arm_accept(hp_sock fd) {
     s.user_data = hp_ur_ud(st, fd, HP_UR_KIND_ACCEPT);
     if (!hp_ur_sq_push(&s)) {
         hp_st[HP_ST_ARM_FAIL]++;
-        hp_ur_retfd(fd);
         return false;
     }
-    st->acceptarmed = 1;
+    rg->accept_armed = 1;
     return true;
 }
 
+/* Keep one multishot accept armed on every ring while the listener is
+ * active. Cheap (rings are single digit) and makes accept-arm failures and
+ * transient op terminations self-healing. */
+static void hp_ur_arm_all_accepts(void) {
+    if (!hp_ur_listen_on || hp_ur_listen_fd < 0 || hp_ur_direct != 1) return;
+    for (int r = 0; r < hp_ur_nrings; r++) {
+        if (hp_ur_rings[r].accept_armed || hp_ur_rings[r].accept_full) continue;
+        hp_ur_cur = &hp_ur_rings[r];
+        if (!hp_uring_arm_accept(hp_ur_listen_fd, r)) {
+            /* a full SQ is retried on the next cycle */
+            if (hp_ur_rings[r].accept_armed) continue;
+        }
+    }
+    hp_ur_cur = &hp_ur_rings[0];
+}
+
 static bool hp_ur_arm_send_head(hp_sock fd) {
+    hp_ur_use_ring(fd);
     struct hp_urfds *st = hp_ur_st_of(fd);
     if (!st || st->sarmed || !st->shead) return false;
     struct hp_urchunk *c = st->shead;
@@ -3727,15 +3885,19 @@ static hp_sock hp_ur_acceptq_pop(void) {
 /* Initialize the per-connection state for a slot the kernel just installed
  * with accept(ALLOC). The epoch keeps counting across slot reuse so a late
  * completion from the previous owner can never touch this connection. */
-static hp_sock hp_ur_accept_one(uint32_t idx) {
-    if (!hp_ur_dirs || idx >= hp_ur_dircap) return HP_SOCK_BAD;
-    struct hp_urfds *st = &hp_ur_dirs[idx];
+static hp_sock hp_ur_accept_one(uint32_t ring, uint32_t idx) {
+    if (ring >= (uint32_t)hp_ur_nrings) return HP_SOCK_BAD;
+    struct hp_uring_ring *rg = &hp_ur_rings[ring];
+    if (!rg->dirs || idx >= rg->dircap) return HP_SOCK_BAD;
+    struct hp_urfds *st = &rg->dirs[idx];
     uint32_t e = st->epoch + 1;
     memset(st, 0, sizeof *st);
     st->epoch = e;
     st->direct = 1;
     st->diridx = (int)idx;
-    hp_sock h = (hp_sock)(HP_UR_HANDLE_BASE + idx);
+    hp_sock h = (hp_sock)(HP_UR_HANDLE_BASE +
+                          (hp_sock)ring * (hp_sock)HP_UR_SLOTS_PER_RING +
+                          (hp_sock)idx);
     hp_st[HP_ST_ACCEPT]++;
     hp_sockrec *sr = sockrec((intptr_t)h, true);
     if (sr) { sr->eof = false; sr->listener = false; }
@@ -3759,6 +3921,7 @@ static void hp_ur_detach(struct hp_urfds *st) {
 /* Re-arm one handle after a push failure freed ring slots. Shared by the
  * real-fd and direct-descriptor full scans. */
 static void hp_ur_rescan_one(hp_sock fd) {
+    hp_ur_use_ring(fd);
     struct hp_urfds *st = hp_ur_st_of(fd);
     if (!st) return;
     st->rtagged = 0;
@@ -3769,9 +3932,8 @@ static void hp_ur_rescan_one(hp_sock fd) {
         return;
     }
     if (st->listener) {
-        bool ok = (hp_ur_direct == 1) ? hp_uring_arm_accept(fd)
-                                      : hp_uring_arm_poll(fd);
-        if (!ok) hp_ur_retfd(fd);
+        if (hp_ur_direct == 1) hp_ur_arm_all_accepts();
+        else if (!hp_uring_arm_poll(fd)) hp_ur_retfd(fd);
         return;
     }
     if (st->shead && !st->sarmed && !hp_ur_arm_send_head(fd))
@@ -3781,51 +3943,18 @@ static void hp_ur_rescan_one(hp_sock fd) {
         hp_ur_retfd(fd);
 }
 
-/* Submit everything queued since the last cycle, wait up to timeout_ms for
- * progress, then drain the completions. */
-static void hp_uring_wait(harr *in, harr *out, int timeout_ms) {
-    if (hp_ur_dbg) fprintf(stderr, "[ur] wait to=%d\n", timeout_ms);
-    long to_submit = (long)(hp_ur_sqtail -
-        __atomic_load_n(hp_ur_sq_head, __ATOMIC_ACQUIRE));
+/* Drain one ring's completion queue. hp_ur_cur selects the ring; helper
+ * calls may switch it, so the loop restores it every iteration. */
+static int hp_ur_drain_ring(harr *in) {
+    struct hp_uring_ring *self = hp_ur_cur;
     uint32_t head = hp_ur_cqhead;
-    uint32_t have;
-    {
-        uint32_t tail = __atomic_load_n(hp_ur_cq_tail, __ATOMIC_ACQUIRE);
-        have = tail - head;
-    }
-    if (hp_ur_ep_conns > 0 && hp_ur_epfd >= 0 && have == 0) {
-        /* Overflow connections exist: submit without blocking, then wait on
-         * the epoll set, which also watches the ring fd. Ring completions are
-         * already in the CQ ring when that fires, so the drain below sees
-         * them; overflow fds go straight into the ready list. */
-        hp_ur_enter(to_submit, 0, 0);
-        struct epoll_event evs[64];
-        int ep_to = (int)(hp_ur_batch_us / 1000);
-        if (ep_to < 1) ep_to = 1;
-        int n = epoll_wait(hp_ur_epfd, evs, 64, ep_to);
-        for (int i = 0; i < n; i++) {
-            int efd = evs[i].data.fd;
-            if (efd == (int)hp_ur_fd) continue;   /* ring: drained below */
-            if (in) hp_arr_push(in, hp_of_int(efd));
-        }
-    } else {
-        /* Batching, like the fast C servers: while the last cycle had work,
-         * wait for up to HP_UR_BATCH completions or HP_UR_BATCH_US
-         * microseconds, so one wakeup serves many requests. Idle waits block
-         * until the first completion. */
-        int min = 1;
-        long wait_us = (long)timeout_ms * 1000;
-        if (have > 0) { min = 0; wait_us = 0; }
-        else if (hp_ur_busy) { min = (int)hp_ur_batch; wait_us = hp_ur_batch_us; }
-        hp_ur_enter(to_submit, min, wait_us);
-    }
-
     int drained = 0;
     /* One listener wakeup per drain is enough: accept_all() empties the
      * whole accept queue. Pushing the listener for every one of tens of
      * thousands of accept CQEs would bloat the app's ready array. */
     int accept_woken = 0;
     for (;;) {
+        hp_ur_cur = self;
         uint32_t tail = __atomic_load_n(hp_ur_cq_tail, __ATOMIC_ACQUIRE);
         if (head == tail) break;
         struct hp_uring_cqe *c = hp_ur_cqes + (head & hp_ur_cqmask);
@@ -3861,10 +3990,12 @@ static void hp_uring_wait(harr *in, harr *out, int timeout_ms) {
                 if (c->res >= 0) hp_ur_close_slot((uint32_t)c->res, 0);
                 continue;
             }
-            st->acceptarmed = (c->flags & HP_UR_CQE_F_MORE) ? 1 : 0;
+            int rr = (int)(hp_ur_cur - hp_ur_rings);
+            hp_ur_rings[rr].accept_armed =
+                (c->flags & HP_UR_CQE_F_MORE) ? 1 : 0;
             if (c->res >= 0) {
                 uint32_t idx = (uint32_t)c->res;
-                hp_sock nh = hp_ur_accept_one(idx);
+                hp_sock nh = hp_ur_accept_one((uint32_t)rr, idx);
                 if (nh == HP_SOCK_BAD || !hp_ur_acceptq_push(nh)) {
                     /* no queue room: release the fresh slot right away */
                     if (nh != HP_SOCK_BAD) {
@@ -3883,25 +4014,34 @@ static void hp_uring_wait(harr *in, harr *out, int timeout_ms) {
                     accept_woken = 1;
                 }
             } else {
-                /* -EAGAIN is normal churn; anything else (EMFILE/ENFILE)
-                 * keeps the app's shed/pause logic working. */
+                /* -EAGAIN is normal churn. A full direct table belongs to
+                 * ONE ring: disable just that ring instead of pausing the
+                 * listener, so the other rings keep accepting. */
                 if (c->res == -ECANCELED || c->res == -EBADF ||
-                    c->res == -EAGAIN || c->res == -EINTR)
+                    c->res == -EAGAIN || c->res == -EINTR) {
                     g_accept_errno = 0;
-                else
+                } else if (hp_ur_direct == 1 &&
+                           (c->res == -ENFILE || c->res == -EMFILE ||
+                            c->res == -ENOMEM)) {
+                    hp_ur_rings[rr].accept_full = 1;
+                    hp_ur_rings[rr].accept_armed = 0;
+                    g_accept_errno = 0;
+                } else {
                     g_accept_errno = (int)(-c->res);
-                if (in && !accept_woken) {
-                    hp_arr_push(in, hp_of_int(fd));
-                    accept_woken = 1;
+                    if (in && !accept_woken) {
+                        hp_arr_push(in, hp_of_int(fd));
+                        accept_woken = 1;
+                    }
                 }
             }
             /* A multishot accept normally stays armed. If the kernel ended
              * it after a success (or a transient EAGAIN), re-arm so the
              * listener never goes deaf. Hard errors (EMFILE) are left to
              * the app's pause/shed logic. */
-            if (st->listener && !st->acceptarmed && hp_ur_direct == 1 &&
+            if (st->listener && !hp_ur_rings[rr].accept_armed &&
+                hp_ur_direct == 1 &&
                 (c->res >= 0 || c->res == -EAGAIN || c->res == -EINTR))
-                hp_uring_arm_accept(fd);
+                hp_uring_arm_accept(fd, rr);
             continue;
         }
         if (kind == HP_UR_KIND_CLOSE) continue;
@@ -4004,8 +4144,82 @@ static void hp_uring_wait(harr *in, harr *out, int timeout_ms) {
                 fprintf(stderr, "[ur] rearm-failed fd=%d\n", (int)fd);
         }
     }
+    hp_ur_cur = self;
     __atomic_store_n(hp_ur_cq_head, head, __ATOMIC_RELEASE);
     hp_ur_cqhead = head;
+    return drained;
+}
+
+/* Submit everything queued since the last cycle, wait until at least one
+ * ring has progress (or the timeout expires), then drain every ring. */
+static void hp_uring_wait(harr *in, harr *out, int timeout_ms) {
+    if (hp_ur_dbg) fprintf(stderr, "[ur] wait to=%d\n", timeout_ms);
+    hp_ur_arm_all_accepts();
+
+    int drained = 0;
+    uint32_t have = 0;
+    for (int r = 0; r < hp_ur_nrings; r++) {
+        hp_ur_cur = &hp_ur_rings[r];
+        uint32_t t = __atomic_load_n(hp_ur_cq_tail, __ATOMIC_ACQUIRE);
+        have += t - hp_ur_cqhead;
+    }
+
+    int epfd = -1;
+    if (hp_ur_nrings > 1 || hp_ur_ep_conns > 0) epfd = hp_ur_ep_setup();
+    if (epfd >= 0) {
+        /* Submit on every ring without blocking (this also flushes
+         * DEFER_TASKRUN work), then block on the epoll set that watches all
+         * ring fds and any overflow connections. */
+        for (int r = 0; r < hp_ur_nrings; r++) {
+            hp_ur_cur = &hp_ur_rings[r];
+            long to_submit = (long)(hp_ur_sqtail -
+                __atomic_load_n(hp_ur_sq_head, __ATOMIC_ACQUIRE));
+            hp_ur_enter(to_submit > 0 ? to_submit : 0, 0, 0);
+        }
+        int ep_to = timeout_ms;
+        if (have > 0) ep_to = 0;
+        else if (hp_ur_busy) {
+            ep_to = (int)(hp_ur_batch_us / 1000);
+            if (ep_to < 1) ep_to = 1;
+        }
+        struct epoll_event evs[256];
+        int n = epoll_wait(epfd, evs, 256, ep_to);
+        /* level-triggered eventfds must be re-armed by reading the counter */
+        for (int r = 0; r < hp_ur_nrings; r++) {
+            if (hp_ur_rings[r].efd < 0) continue;
+            uint64_t v;
+            while (read(hp_ur_rings[r].efd, &v, sizeof v) == (ssize_t)sizeof v)
+                ;
+        }
+        for (int i = 0; i < n; i++) {
+            int efd = evs[i].data.fd;
+            int is_ring = 0;
+            for (int r = 0; r < hp_ur_nrings; r++)
+                if (efd == hp_ur_rings[r].fd ||
+                    (hp_ur_rings[r].efd >= 0 && efd == hp_ur_rings[r].efd)) {
+                    is_ring = 1;
+                    break;
+                }
+            if (is_ring) continue;       /* ring: drained below */
+            if (in) hp_arr_push(in, hp_of_int(efd));
+        }
+    } else {
+        /* One ring, no epoll: one enter submits and waits, as before. */
+        hp_ur_cur = &hp_ur_rings[0];
+        long to_submit = (long)(hp_ur_sqtail -
+            __atomic_load_n(hp_ur_sq_head, __ATOMIC_ACQUIRE));
+        int min = 1;
+        long wait_us = (long)timeout_ms * 1000;
+        if (have > 0) { min = 0; wait_us = 0; }
+        else if (hp_ur_busy) { min = (int)hp_ur_batch; wait_us = hp_ur_batch_us; }
+        hp_ur_enter(to_submit, min, wait_us);
+    }
+
+    for (int r = 0; r < hp_ur_nrings; r++) {
+        hp_ur_cur = &hp_ur_rings[r];
+        drained |= hp_ur_drain_ring(in);
+    }
+    hp_ur_cur = &hp_ur_rings[0];
     hp_ur_busy = drained;
     /* an fd whose SQE push hit a full ring is parked in the retry ring and
      * re-armed here, after the CQE drain freed slots up. In the common case
@@ -4016,91 +4230,43 @@ static void hp_uring_wait(harr *in, harr *out, int timeout_ms) {
      * into an O(parked) loop on every cycle -- and the kernel caps the SQ at
      * 32768 entries while the box holds up to ~61k connections. Entries we
      * do not reach stay queued for the next cycle. */
-    uint32_t slots = (hp_ur_sqmask + 1) -
-        (hp_ur_sqtail - __atomic_load_n(hp_ur_sq_head, __ATOMIC_ACQUIRE));
-    while (hp_ur_rethead != hp_ur_rettail && slots > 0) {
+    /* Bound the work per cycle; each push checks its own ring's SQ space,
+     * and a failed push simply re-parks the handle for the next cycle. */
+    uint32_t budget = 4096;
+    while (hp_ur_rethead != hp_ur_rettail && budget > 0) {
+        budget--;
         uint32_t i = hp_ur_retry[hp_ur_rethead];
         hp_ur_rethead = (hp_ur_rethead + 1) & (hp_ur_retcap - 1);
-        if (hp_ur_dbg)
-            fprintf(stderr, "[ur] drain fd=%u slots=%u\n", (unsigned)i, slots);
-        if (hp_ur_is_direct((hp_sock)i)) {
-            /* direct handles live in hp_ur_dirs; they are not indexed by a
-             * real fd in hp_ur_fds */
-            if (!hp_ur_dirs || !hp_ur_dircap) continue;
-            uint32_t didx = (uint32_t)(i - HP_UR_HANDLE_BASE);
-            if (didx >= hp_ur_dircap) continue;
-            struct hp_urfds *st = &hp_ur_dirs[didx];
-            if (!st->direct || !st->rtagged) continue;
-            st->rtagged = 0;
-            if (st->reof) continue;
-            if (st->closeafter) {
-                if (st->shead && !st->sarmed) {
-                    if (hp_ur_arm_send_head((hp_sock)i)) slots--;
-                    else hp_ur_retfd((hp_sock)i);
-                }
-                continue;
-            }
-            if (st->listener) {
-                if (hp_uring_arm_accept((hp_sock)i)) slots--;
-                else hp_ur_retfd((hp_sock)i);
-                continue;
-            }
-            if (st->shead && !st->sarmed) {
-                if (hp_ur_arm_send_head((hp_sock)i)) slots--;
-                else hp_ur_retfd((hp_sock)i);
-            }
-            if (slots == 0) { hp_ur_retfd((hp_sock)i); continue; }
-            if (st->rh && !st->rready && !st->rarmed) {
-                if (hp_uring_arm_recv((hp_sock)i, hp_ur_rlen())) {
-                    slots--;
-                } else {
-                    hp_ur_retfd((hp_sock)i);
-                    break;
-                }
-            }
-            continue;
-        }
-        if (i >= hp_ur_fdscap) { hp_ur_retfd((hp_sock)i); continue; }
-        struct hp_urfds *st = &hp_ur_fds[i];
+        hp_sock h = (hp_sock)i;
+        int rr = hp_ur_ring_of(h);
+        hp_ur_cur = &hp_ur_rings[rr < 0 ? 0 : rr];
+        struct hp_urfds *st = hp_ur_st_of(h);
+        if (!st) continue;
         if (!st->rtagged) continue;              /* already handled */
         st->rtagged = 0;
         if (st->reof) continue;
         if (st->closeafter) {
-            if (st->shead && !st->sarmed) {
-                if (hp_ur_arm_send_head((hp_sock)i)) slots--;
-                else hp_ur_retfd((hp_sock)i);
-            }
+            if (st->shead && !st->sarmed && !hp_ur_arm_send_head(h))
+                hp_ur_retfd(h);
             continue;
         }
         if (st->listener) {
-            if (hp_uring_arm_poll((hp_sock)i)) slots--;
-            else hp_ur_retfd((hp_sock)i);
+            bool ok = (hp_ur_direct == 1)
+                ? hp_uring_arm_accept(h, rr < 0 ? 0 : rr)
+                : hp_uring_arm_poll(h);
+            if (!ok) hp_ur_retfd(h);
             continue;
         }
-        if (st->shead && !st->sarmed) {
-            if (hp_ur_arm_send_head((hp_sock)i)) slots--;
-            else hp_ur_retfd((hp_sock)i);
-        }
-        if (slots == 0) { hp_ur_retfd((hp_sock)i); continue; }  /* recv next cycle */
+        if (st->shead && !st->sarmed && !hp_ur_arm_send_head(h))
+            hp_ur_retfd(h);
+        if (budget == 0) { hp_ur_retfd(h); continue; }   /* recv next cycle */
         if (st->rh && !st->rready && !st->rarmed) {
-            if (hp_ur_dbg)
-                fprintf(stderr, "[ur] retry-arm fd=%u rready=%d rarmed=%d\n",
-                        (unsigned)i, st->rready, st->rarmed);
-            if (hp_uring_arm_recv((hp_sock)i, hp_ur_rlen())) {
-                slots--;
-            } else {
-                /* leave it parked for the next cycle instead of re-parking and
-                 * popping it again in this same loop (that spins forever when
-                 * the push keeps failing while slots is still > 0) */
-                if (hp_ur_dbg)
-                    fprintf(stderr, "[ur] retry-armfail fd=%u slots=%u\n",
-                            (unsigned)i, slots);
-                hp_ur_retfd((hp_sock)i);
+            if (!hp_uring_arm_recv(h, hp_ur_rlen())) {
+                /* leave it parked for the next cycle instead of re-parking
+                 * and popping it again in this same loop */
+                hp_ur_retfd(h);
                 break;
             }
-        } else if (hp_ur_dbg) {
-            fprintf(stderr, "[ur] retry-skip fd=%u rh=%d rready=%d rarmed=%d\n",
-                    (unsigned)i, st->rh ? 1 : 0, st->rready, st->rarmed);
         }
     }
     /* deferred closes: the send chain drained (or the peer is gone for
@@ -4128,14 +4294,18 @@ static void hp_uring_wait(harr *in, harr *out, int timeout_ms) {
     }
     if (hp_ur_pushfail) {
         hp_ur_pushfail = 0;
+        hp_ur_cur = &hp_ur_rings[0];
         for (uint32_t i = 0; i < hp_ur_fdscap; i++)
             hp_ur_rescan_one((hp_sock)i);
-        if (hp_ur_dirs) {
-            for (uint32_t i = 0; i < hp_ur_dircap; i++) {
-                if (!hp_ur_dirs[i].direct) continue;
-                hp_ur_rescan_one((hp_sock)(HP_UR_HANDLE_BASE + i));
+        for (int r = 0; r < hp_ur_nrings; r++) {
+            struct hp_uring_ring *rg = &hp_ur_rings[r];
+            for (uint32_t i = 0; i < rg->dircap; i++) {
+                if (!rg->dirs[i].direct) continue;
+                hp_ur_rescan_one((hp_sock)(HP_UR_HANDLE_BASE +
+                    (hp_sock)r * (hp_sock)HP_UR_SLOTS_PER_RING + (hp_sock)i));
             }
         }
+        hp_ur_cur = &hp_ur_rings[0];
         hp_ur_rethead = hp_ur_rettail = 0;
     }
     (void)out;
@@ -4178,10 +4348,15 @@ hval hpbi_epoll_add(hval s) {
             if (hp_ur_dbg)
                 fprintf(stderr, "[ur] add fd=%d listener=%d\n", (int)fd, st->listener);
             if (st->listener) {
-                /* direct mode accepts straight into the registered table:
-                 * one multishot accept replaces poll + accept4 per client */
-                if (hp_ur_direct == 1) hp_uring_arm_accept(fd);
-                else hp_uring_arm_poll(fd);
+                /* direct mode accepts straight into the registered tables:
+                 * one multishot accept per ring replaces poll + accept4 */
+                if (hp_ur_direct == 1) {
+                    hp_ur_listen_fd = fd;
+                    hp_ur_listen_on = 1;
+                    hp_ur_arm_all_accepts();
+                } else {
+                    hp_uring_arm_poll(fd);
+                }
             } else {
                 hp_uring_add_conn(fd);
             }
@@ -7647,7 +7822,11 @@ hval hpbi_uring_direct(void) { return hp_of_bool(hp_uring_direct_t()); }
 /* Number of direct-descriptor slots actually registered (0 when off). */
 int64_t hp_uring_direct_slots_t(void) {
 #ifdef HP_UR_CAN
-    return hp_ur_direct_on() ? (int64_t)hp_ur_dircap : 0;
+    if (!hp_ur_direct_on()) return 0;
+    int64_t total = 0;
+    for (int r = 0; r < hp_ur_nrings; r++)
+        total += (int64_t)hp_ur_rings[r].dircap;
+    return total;
 #else
     return 0;
 #endif

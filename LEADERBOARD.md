@@ -34,6 +34,8 @@ its #229 run (`f0fb733`) held 232,000, its #216 run (`ee683db`) and #211 run (`7
 (`3bd2352`, merged as rebased `551ff3a`, same folder); its earlier #247 run (`d42783b`) held 257,000. php-symfony-gnugat is scored at its follow-up PR #256 (`4a11a5d`); its
 earlier #136 run (`48e3783`) held 15,500. mojo-iouring-oh-meh is scored at its follow-up PR #257 (`a9df151`); its merged
 #224 code (`ef45beb`) held 280,000, and its earlier #224 runs held 280,000 (`29024f3`) and 290,000 (`1f4eb0b`).
+java-jdkhttpserver-razorree is scored at its follow-up PR #262 (`d1268e6`); its merged #209 code (`89e75e0`) held 38,000
+(0.89 % dropped writes below full CPU) and its earlier #209 run (`d2286fa`) 9,500.
 
 **Re-runs.** The first submissions (#2–#29) were scored on a DigitalOcean $12 droplet, which is about 2× slower for
 CPU-bound servers, so those numbers aren't comparable. All of them have now been re-run on this box (finished
@@ -172,17 +174,17 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | 123 | typescript-fastify-melroy89 | #51 | TypeScript (Fastify, Node) | **57,000** | 5,582 | 212 | 614 | 0.00 | 77 | 128 | 1,072 | 2026-10-30 |
 | 126 | haskell-warp-staticfx | #104 | Haskell (Warp) | **55,000** | 5,411 | 2.5 | 198 | 0.00 | 62 | 107 | 1,587 | 2026-10-21 |
 | 126 | go-nethttp-fi5HiE | #99 | Go (net/http) | **55,000** | 5,382 | 425 | 679 | 0.00 | 90 | 156 | 1,465 | 2026-10-21 |
-| 128 | go-nethttp-tbsvttr | #18 | Go (net/http) | **53,000** | 5,165 | 374 | 659 | 0.00 | 93 | 168 | 624 | 2026-10-26 |
-| 128 | python-pyrustapi-rajboopathiking | #147 | Python (PyRustAPI, Rust/Hyper core) | **53,000** | 5,185 | 294 | 429 | 0.00 | 90 | 162 | 1,232 | 2026-10-28 |
-| 130 | csharp-aspnetcore-andrexx | #20 | C# (ASP.NET Core) | **49,000** | 4,815 | 84 | 234 | 0.00 | 88 | 170 | 846 | 2026-10-26 |
-| 131 | python-fastapi-tejasnafde | #10 | Python (FastAPI) | **48,000** | 4,701 | 303 | 465 | 0.00 | 89 | 176 | 583 | 2026-10-21 |
-| 131 | swift-hummingbird-denizak ᵖ | #43 | Swift (Hummingbird) | **48,000** | 4,700 | 210 | 300 | 0.00 | 97 | 191 | 1,269 | 2026-10-21 |
-| 133 | java-helidon-dglynch | #159 | Java (Helidon) | **46,000** | 4,525 | 76 | 121 | 0.00 | 84 | 173 | 1,579 | 2026-10-29 |
-| 134 | python-granian-tbsvttr | #13 | Python (Granian) | **45,000** | 4,400 | 202 | 812 | 0.00 | 93 | 197 | 709 | 2026-10-26 |
-| 134 | go-nethttp-NaveedZahoorKhan | #129 | Go (net/http, cgo SQLite) | **45,000** ᵏ | 4,429 | 33 | 303 | 0.00 | 67 | 141 | 1,507 | 2026-10-28 |
-| 136 | node-fastify-gmr458 | #61 | TypeScript (Fastify, Node) | **44,000** | 4,285 | 489 | 915 | 0.00 | 86 | 187 | 812 | 2026-10-27 |
-| 137 | ruby-iodine-tbsvttr | #14 | Ruby (iodine) | **43,000** | 4,223 | 89 | 175 | 0.00 | 86 | 189 | 1,096 | 2026-10-26 |
-| 138 | java-jdkhttpserver-razorree | #209 | Java (JDK HttpServer, virtual threads) | **38,000** ᵉ | 3,701 | 494 | 742 | 0.89 | 75 | 188 | 1,308 | 2026-10-31 |
+| 126 | java-jdkhttpserver-razorree | #262 | Java (JDK HttpServer, virtual threads) | **55,000** | 5,384 | 306 | 862 | 0.00 | 92 | 159 | 1,291 | 2026-11-02 |
+| 129 | go-nethttp-tbsvttr | #18 | Go (net/http) | **53,000** | 5,165 | 374 | 659 | 0.00 | 93 | 168 | 624 | 2026-10-26 |
+| 129 | python-pyrustapi-rajboopathiking | #147 | Python (PyRustAPI, Rust/Hyper core) | **53,000** | 5,185 | 294 | 429 | 0.00 | 90 | 162 | 1,232 | 2026-10-28 |
+| 131 | csharp-aspnetcore-andrexx | #20 | C# (ASP.NET Core) | **49,000** | 4,815 | 84 | 234 | 0.00 | 88 | 170 | 846 | 2026-10-26 |
+| 132 | python-fastapi-tejasnafde | #10 | Python (FastAPI) | **48,000** | 4,701 | 303 | 465 | 0.00 | 89 | 176 | 583 | 2026-10-21 |
+| 132 | swift-hummingbird-denizak ᵖ | #43 | Swift (Hummingbird) | **48,000** | 4,700 | 210 | 300 | 0.00 | 97 | 191 | 1,269 | 2026-10-21 |
+| 134 | java-helidon-dglynch | #159 | Java (Helidon) | **46,000** | 4,525 | 76 | 121 | 0.00 | 84 | 173 | 1,579 | 2026-10-29 |
+| 135 | python-granian-tbsvttr | #13 | Python (Granian) | **45,000** | 4,400 | 202 | 812 | 0.00 | 93 | 197 | 709 | 2026-10-26 |
+| 135 | go-nethttp-NaveedZahoorKhan | #129 | Go (net/http, cgo SQLite) | **45,000** ᵏ | 4,429 | 33 | 303 | 0.00 | 67 | 141 | 1,507 | 2026-10-28 |
+| 137 | node-fastify-gmr458 | #61 | TypeScript (Fastify, Node) | **44,000** | 4,285 | 489 | 915 | 0.00 | 86 | 187 | 812 | 2026-10-27 |
+| 138 | ruby-iodine-tbsvttr | #14 | Ruby (iodine) | **43,000** | 4,223 | 89 | 175 | 0.00 | 86 | 189 | 1,096 | 2026-10-26 |
 | 139 | d-vibe-http-cyrusmsk | #162 | D (vibe.d) | **33,000** | 3,233 | 300 | 579 | 0.00 | 85 | 244 | 1,663 | 2026-10-29 |
 | 140 | java-spring-boot-nb-99 | #33 | Java (Spring Boot WebFlux) | **32,000** | 3,151 | 9.9 | 27 | 0.00 | 81 | 239 | 763 | 2026-10-26 |
 | 141 | java-quarkus-wolches | #67 | Java (Quarkus) | **29,000** ᵈ | 2,838 | 306 | 451 | 0.00 | 50 | 164 | 542 | 2026-10-21 |
@@ -307,11 +309,6 @@ grow with load (0.26 % at 23k, 1.45 % at 25k); at 30k+ Nginx also returns 502/50
 ʷ **Crystal Kemal #194's errors are dropped writes at half CPU.** The 0.96 % in its scored hold (51 % CPU) are EOFs, all
 on POSTs: 13 % of likes and 10 % of new posts failed, 0 reads. They grow with load (0.27 % at 23k, 1.44 % at 25k, 5.5 %
 at 40k) while CPU stays at 50–79 %, so the write path, not CPU, is the limit.
-
-ᵉ **JDK HttpServer #209's errors are dropped writes below full CPU.** Scored at `89e75e0` (it was 9,500 at `d2286fa`).
-The 0.89 % in its scored hold (75 % CPU) are EOFs (11,794), all on POSTs: 12 % of likes and 11 % of new posts failed,
-0 reads. They grow with load (0 at 30k, 0.35 % at 35k, 0.92 % at 39k, 1.04 % at 40k) while CPU stays at 53–80 %, so
-the write path, not CPU, is the limit.
 
 ᵏ **Go net/http #129 is memory-bound.** At 45,000 it was clean at 67 % CPU (303 ms p99), but its cgroup peaked at 1.5 GB.
 At 47k/48k/50k/60k/80k it was OOM-killed during the ramp (kernel log) and most later connections were refused (54–93 %

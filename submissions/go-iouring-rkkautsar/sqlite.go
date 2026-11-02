@@ -6,6 +6,7 @@ package main
 /*
 #cgo CFLAGS: -I${SRCDIR} -O2 -DSQLITE_THREADSAFE=2 -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_DEFAULT_MEMSTATUS=0
 #include <stdlib.h>
+#include <stdatomic.h>
 #include "sqlite3.h"
 
 static int bind_text_transient(sqlite3_stmt *s, int i, const char *p, int n) {
@@ -16,6 +17,8 @@ import "C"
 
 import (
 	"errors"
+	"os"
+	"strings"
 	"unsafe"
 )
 
@@ -46,6 +49,7 @@ func openSQLite(path string) (*sqliteConn, error) {
 	c := &sqliteConn{h: h}
 	C.sqlite3_busy_timeout(h, 5000)
 	if err := c.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;" +
+		"PRAGMA wal_autocheckpoint=1000;" +
 		"PRAGMA cache_size=-16384; PRAGMA mmap_size=268435456;"); err != nil {
 		c.close()
 		return nil, err
@@ -164,11 +168,15 @@ const (
 			'like_count', (SELECT count(*) FROM likes l WHERE l.post_id = p.id)))
 		  FROM posts p JOIN users u ON u.id = p.user_id
 		 WHERE p.id = ?`
-	insertPostSQL = "INSERT INTO posts (user_id, body) VALUES (?, ?) RETURNING id, created_at"
-	postExistsSQL = "SELECT 1 FROM posts WHERE id = ?"
-	insertLikeSQL = `INSERT INTO likes (user_id, post_id)
-		SELECT ?1, ?2 WHERE EXISTS (SELECT 1 FROM posts WHERE id = ?2)
-		ON CONFLICT (user_id, post_id) DO NOTHING`
+	insertPostsBulkSQL = `INSERT INTO posts (user_id, body)
+		SELECT CAST(value->>'u' AS INTEGER), value->>'b'
+		  FROM json_each(?1) WHERE true
+		RETURNING id, created_at`
+	insertLikesBulkSQL = `INSERT INTO likes (user_id, post_id)
+		SELECT CAST(value->>0 AS INTEGER), CAST(value->>1 AS INTEGER)
+		  FROM json_each(?1) WHERE true
+		ON CONFLICT (user_id, post_id) DO NOTHING
+		RETURNING user_id, post_id`
 	healthSQL = "SELECT 1"
 )
 
@@ -178,6 +186,7 @@ type readConn struct {
 	getPost   *sqliteStmt
 	health    *sqliteStmt
 	postStmts map[int]*sqliteStmt
+	btree     *btreeReader
 }
 
 func newReadConn(path string) (*readConn, error) {
@@ -186,6 +195,9 @@ func newReadConn(path string) (*readConn, error) {
 		return nil, err
 	}
 	rc := &readConn{db: db, postStmts: make(map[int]*sqliteStmt)}
+	if roots, ok := db.loadBtreeRoots(); ok && os.Getenv("BTREE") != "0" {
+		rc.btree = db.newBtreeReader(roots)
+	}
 	if rc.feed, err = db.prepare(feedSQL); err != nil {
 		db.close()
 		return nil, err
@@ -202,10 +214,10 @@ func newReadConn(path string) (*readConn, error) {
 }
 
 type writeConn struct {
-	db         *sqliteConn
-	insertPost *sqliteStmt
-	postExists *sqliteStmt
-	insertLike *sqliteStmt
+	db          *sqliteConn
+	insertPosts *sqliteStmt
+	insertLike  *sqliteStmt
+	postIn      map[int]*sqliteStmt
 }
 
 func newWriteConn(path string) (*writeConn, error) {
@@ -213,18 +225,28 @@ func newWriteConn(path string) (*writeConn, error) {
 	if err != nil {
 		return nil, err
 	}
-	wc := &writeConn{db: db}
-	if wc.insertPost, err = db.prepare(insertPostSQL); err != nil {
+	wc := &writeConn{db: db, postIn: make(map[int]*sqliteStmt)}
+	if wc.insertPosts, err = db.prepare(insertPostsBulkSQL); err != nil {
 		db.close()
 		return nil, err
 	}
-	if wc.postExists, err = db.prepare(postExistsSQL); err != nil {
-		db.close()
-		return nil, err
-	}
-	if wc.insertLike, err = db.prepare(insertLikeSQL); err != nil {
+	if wc.insertLike, err = db.prepare(insertLikesBulkSQL); err != nil {
 		db.close()
 		return nil, err
 	}
 	return wc, nil
+}
+
+// postInStmt returns a cached "WHERE id IN (?,...)" existence probe for n ids.
+func (w *writeConn) postInStmt(n int) (*sqliteStmt, error) {
+	if st := w.postIn[n]; st != nil {
+		return st, nil
+	}
+	sql := "SELECT id FROM posts WHERE id IN (?" + strings.Repeat(",?", n-1) + ")"
+	st, err := w.db.prepare(sql)
+	if err != nil {
+		return nil, err
+	}
+	w.postIn[n] = st
+	return st, nil
 }

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"syscall"
+	"time"
 	"unsafe"
 )
 
@@ -23,7 +24,7 @@ const (
 	muxTagMask   = 7
 
 	muxSqEntries = 8192
-	muxCqEntries = 32768
+	muxCqEntries = 16384
 
 	// Accepted sockets live in this registered file table, not in the process
 	// fd table. Keep the sparse table size within RLIMIT_NOFILE: Linux rejects
@@ -293,14 +294,54 @@ func (m *uringMux) processGeneric(j *muxJob) {
 // runWriteWorker is the one writer shared by all shards. It routes results
 // back to the mux that queued the job so its event loop can wake up.
 func runWriteWorker(jobs <-chan *muxJob, writeBatch func([]*httpReq) []readResp) {
-	for j := range jobs {
-		results := writeBatch(j.reqs)
-		for i, c := range j.conns {
-			r := results[i]
-			j.owner.responses <- &muxResp{c: c, pkt: r.packet}
+	const maxReqs = 2048
+	for first := range jobs {
+		batch := []*muxJob{first}
+		nreq := len(first.reqs)
+		// Only merge when there is a real backlog. Merging a nearly empty
+		// queue just adds latency to the first batch without reducing commits.
+		if len(jobs) >= 4 {
+		collect:
+			for nreq < maxReqs && len(batch) < 16 {
+				select {
+				case j := <-jobs:
+					batch = append(batch, j)
+					nreq += len(j.reqs)
+				default:
+					break collect
+				}
+			}
 		}
-		j.owner.responses <- &muxResp{writeEnd: true}
-		j.owner.wake()
+		timed := statEnabled.Load()
+		var t0 time.Time
+		if timed {
+			t0 = time.Now()
+			statWriteJob.Add(1)
+			statWriteReq.Add(uint64(nreq))
+		}
+		var results []readResp
+		if len(batch) == 1 {
+			results = writeBatch(first.reqs)
+		} else {
+			reqs := make([]*httpReq, 0, nreq)
+			for _, j := range batch {
+				reqs = append(reqs, j.reqs...)
+			}
+			results = writeBatch(reqs)
+		}
+		if timed {
+			statWriteNS.Add(uint64(time.Since(t0)))
+		}
+		off := 0
+		for _, j := range batch {
+			for i, c := range j.conns {
+				r := results[off+i]
+				j.owner.responses <- &muxResp{c: c, pkt: r.packet}
+			}
+			j.owner.responses <- &muxResp{writeEnd: true}
+			j.owner.wake()
+			off += len(j.reqs)
+		}
 	}
 }
 
@@ -512,13 +553,14 @@ func (m *uringMux) loop() {
 		m.flushPosts()
 		m.flushWrites()
 		m.submitSends()
+		min := uint32(1)
 		if m.toSub > 0 {
-			rc, err := m.ring.enter(m.toSub, 1, 1)
+			rc, err := m.ring.enter(m.toSub, min, 1)
 			if err != nil && err != syscall.EINTR {
 				return
 			}
 			m.toSub -= uint32(rc)
-		} else if _, err := m.ring.enter(0, 1, 1); err != nil && err != syscall.EINTR {
+		} else if _, err := m.ring.enter(0, min, 1); err != nil && err != syscall.EINTR {
 			return
 		}
 		m.drainCQEs()
@@ -572,7 +614,7 @@ armed:
 }
 
 func (m *uringMux) drainCQEs() {
-	m.ring.drain(func(cqe *rawCQE) {
+	n := m.ring.drain(func(cqe *rawCQE) {
 		tag := int32(cqe.UserData & muxTagMask)
 		if tag == muxAcceptTag {
 			m.finishAccept(cqe)
@@ -604,6 +646,9 @@ func (m *uringMux) drainCQEs() {
 		}
 		m.finishRead(c, cqe)
 	})
+	if statEnabled.Load() {
+		statCQEs.Add(uint64(n))
+	}
 }
 
 func (m *uringMux) finishRead(c *muxConn, cqe *rawCQE) {

@@ -4,6 +4,7 @@ package main
 import (
 	"sync/atomic"
 	"syscall"
+	"time"
 	"unsafe"
 )
 
@@ -123,6 +124,11 @@ func (r *rawRing) sqe() *rawSQE {
 }
 
 func (r *rawRing) enter(toSubmit, minComplete, flags uint32) (int, error) {
+	timed := statEnabled.Load()
+	var t0 time.Time
+	if timed {
+		t0 = time.Now()
+	}
 	for {
 		n, _, errno := syscall.Syscall6(ioUringEnter, uintptr(r.fd), uintptr(toSubmit), uintptr(minComplete), uintptr(flags), 0, 0)
 		if errno == syscall.EINTR {
@@ -130,6 +136,10 @@ func (r *rawRing) enter(toSubmit, minComplete, flags uint32) (int, error) {
 		}
 		if errno != 0 {
 			return 0, errno
+		}
+		if timed {
+			statEnter.Add(1)
+			statEnterNS.Add(uint64(time.Since(t0)))
 		}
 		return int(n), nil
 	}

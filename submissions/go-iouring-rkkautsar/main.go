@@ -134,6 +134,7 @@ var bufPool = sync.Pool{
 }
 
 func main() {
+	startBtreeStats()
 	host := os.Getenv("HOST")
 	if host == "" {
 		host = "127.0.0.1"
@@ -144,7 +145,7 @@ func main() {
 	}
 	path := os.Getenv("SQLITE_PATH")
 
-	shards := 2
+	shards := 4
 	if v := os.Getenv("SHARDS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 8 {
 			shards = n
@@ -185,7 +186,6 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-
 	windowUS := 500
 	if v := os.Getenv("READ_BATCH_US"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
@@ -414,86 +414,226 @@ func (a *app) applyBatch(jobs []*writeJob) ([]writeResult, bool) {
 
 	results := make([]writeResult, len(jobs))
 	ok := true
-run:
-	for i, j := range jobs {
-		switch j.kind {
-		case writeCreate:
-			st := w.insertPost
-			st.reset()
-			if err := st.bindInt64(1, j.userID); err != nil {
-				ok = false
-				break run
-			}
-			if err := st.bindText(2, j.body); err != nil {
-				ok = false
-				break run
-			}
-			row, err := st.step()
-			if err != nil || !row {
-				ok = false
-				break run
-			}
-			id := st.columnInt64(0)
-			created := append([]byte(nil), st.columnText(1)...)
-			if row, err = st.step(); err != nil || row {
-				ok = false
-				break run
-			}
-			st.reset()
-			results[i].post = postRow{
-				ID: id, Body: []byte(j.body), CreatedAt: created, Author: []byte(j.username),
-			}
-		case writeLike:
-			st := w.insertLike
-			st.reset()
-			if err := st.bindInt64(1, j.userID); err != nil {
-				ok = false
-				break run
-			}
-			if err := st.bindInt64(2, j.postID); err != nil {
-				ok = false
-				break run
-			}
-			row, err := st.step()
-			if err != nil || row {
-				ok = false
-				break run
-			}
-			changed := st.changes()
-			st.reset()
-			if changed > 0 {
-				results[i].already = false
-				continue
-			}
-			// Zero rows means duplicate like or missing post; only the
-			// fallback needs the separate existence check.
-			ex := w.postExists
-			ex.reset()
-			if err := ex.bindInt64(1, j.postID); err != nil {
-				ok = false
-				break run
-			}
-			row, err = ex.step()
-			if err != nil {
-				ok = false
-				break run
-			}
-			ex.reset()
-			if !row {
-				results[i].notFound = true
-				continue
-			}
-			results[i].already = true
-		}
+	timed := statEnabled.Load()
+	var phaseStart time.Time
+	if timed {
+		phaseStart = time.Now()
 	}
 
+	type createInput struct {
+		UserID int64  `json:"u"`
+		Body   string `json:"b"`
+	}
+	createIdx := make([]int, 0, len(jobs))
+	creates := make([]createInput, 0, len(jobs))
+	for i, j := range jobs {
+		if j.kind != writeCreate {
+			continue
+		}
+		createIdx = append(createIdx, i)
+		creates = append(creates, createInput{UserID: j.userID, Body: j.body})
+	}
+	if len(creates) > 0 {
+		jsonBuf, err := json.Marshal(creates)
+		if err != nil {
+			ok = false
+		} else {
+			type createRow struct {
+				id      int64
+				created []byte
+			}
+			rows := make([]createRow, 0, len(creates))
+			st := w.insertPosts
+			st.reset()
+			if err = st.bindText(1, string(jsonBuf)); err != nil {
+				ok = false
+			} else {
+				for {
+					row, e := st.step()
+					if e != nil {
+						ok = false
+						break
+					}
+					if !row {
+						break
+					}
+					rows = append(rows, createRow{
+						id:      st.columnInt64(0),
+						created: append([]byte(nil), st.columnText(1)...),
+					})
+				}
+				st.reset()
+			}
+			if ok && len(rows) != len(creates) {
+				ok = false
+			}
+			if ok {
+				sort.Slice(rows, func(x, y int) bool { return rows[x].id < rows[y].id })
+				for k, idx := range createIdx {
+					j := jobs[idx]
+					results[idx].post = postRow{
+						ID: rows[k].id, Body: []byte(j.body), CreatedAt: rows[k].created, Author: []byte(j.username),
+					}
+				}
+			}
+		}
+	}
+	if timed {
+		statCreateNS.Add(uint64(time.Since(phaseStart)))
+		statCreateJob.Add(uint64(len(creates)))
+	}
+
+	// Likes are the hot path. Resolve post existence for the whole batch with
+	// one IN query, then insert every new (user, post) pair with one JSON-driven
+	// multi-row statement. RETURNING tells us which rows were newly inserted;
+	// conflicts are already-liked. Every response still waits for COMMIT.
+	var likeStart time.Time
+	if timed {
+		likeStart = time.Now()
+		phaseStart = likeStart
+	}
+	if ok {
+		likeIdx := make([]int, 0, len(jobs))
+		uniquePosts := make([]int64, 0, len(jobs))
+		seenPost := make(map[int64]bool, len(jobs))
+		for i, j := range jobs {
+			if j.kind != writeLike {
+				continue
+			}
+			likeIdx = append(likeIdx, i)
+			if !seenPost[j.postID] {
+				seenPost[j.postID] = true
+				uniquePosts = append(uniquePosts, j.postID)
+			}
+		}
+		if len(likeIdx) > 0 {
+			if timed {
+				statLikeJob.Add(uint64(len(likeIdx)))
+			}
+			exists := make(map[int64]bool, len(uniquePosts))
+			st, err := w.postInStmt(len(uniquePosts))
+			if err != nil {
+				ok = false
+			} else {
+				st.reset()
+				for k, id := range uniquePosts {
+					if err = st.bindInt64(k+1, id); err != nil {
+						break
+					}
+				}
+				if err != nil {
+					ok = false
+				} else {
+					for {
+						row, e := st.step()
+						if e != nil {
+							ok = false
+							break
+						}
+						if !row {
+							break
+						}
+						exists[st.columnInt64(0)] = true
+					}
+					st.reset()
+				}
+			}
+			if timed {
+				statLikeExistNS.Add(uint64(time.Since(phaseStart)))
+				phaseStart = time.Now()
+			}
+
+			type pair struct{ userID, postID int64 }
+			candidates := make([]pair, 0, len(likeIdx))
+			seenPair := make(map[pair]bool, len(likeIdx))
+			jsonBuf := make([]byte, 0, 8+len(likeIdx)*16)
+			jsonBuf = append(jsonBuf, '[')
+			first := true
+			for _, idx := range likeIdx {
+				j := jobs[idx]
+				if !exists[j.postID] {
+					results[idx].notFound = true
+					continue
+				}
+				p := pair{j.userID, j.postID}
+				if seenPair[p] {
+					continue
+				}
+				seenPair[p] = true
+				candidates = append(candidates, p)
+				if !first {
+					jsonBuf = append(jsonBuf, ',')
+				}
+				first = false
+				jsonBuf = append(jsonBuf, '[')
+				jsonBuf = strconv.AppendInt(jsonBuf, j.userID, 10)
+				jsonBuf = append(jsonBuf, ',')
+				jsonBuf = strconv.AppendInt(jsonBuf, j.postID, 10)
+				jsonBuf = append(jsonBuf, ']')
+			}
+			jsonBuf = append(jsonBuf, ']')
+
+			inserted := make(map[pair]bool, len(candidates))
+			if ok && len(candidates) > 0 {
+				st = w.insertLike
+				st.reset()
+				if err = st.bindText(1, string(jsonBuf)); err != nil {
+					ok = false
+				} else {
+					for {
+						row, e := st.step()
+						if e != nil {
+							ok = false
+							break
+						}
+						if !row {
+							break
+						}
+						inserted[pair{st.columnInt64(0), st.columnInt64(1)}] = true
+					}
+					st.reset()
+				}
+			}
+			if ok {
+				for _, idx := range likeIdx {
+					j := jobs[idx]
+					if results[idx].notFound {
+						continue
+					}
+					p := pair{j.userID, j.postID}
+					if inserted[p] {
+						results[idx].already = false
+						delete(inserted, p)
+					} else {
+						results[idx].already = true
+					}
+				}
+			}
+			if timed {
+				statLikeInsNS.Add(uint64(time.Since(phaseStart)))
+			}
+		}
+	}
+	if timed {
+		statLikeNS.Add(uint64(time.Since(likeStart)))
+	}
+
+	var commitStart time.Time
+	if timed {
+		commitStart = time.Now()
+	}
 	if ok {
 		ok = w.db.exec("COMMIT") == nil
 	}
+	if timed {
+		statCommitNS.Add(uint64(time.Since(commitStart)))
+	}
 	if !ok {
-		w.insertPost.reset()
-		w.postExists.reset()
+		w.insertPosts.reset()
 		w.insertLike.reset()
+		for _, st := range w.postIn {
+			st.reset()
+		}
 		w.db.exec("ROLLBACK")
 		return nil, false
 	}
@@ -654,6 +794,21 @@ func (a *app) feedPosts(w http.ResponseWriter, r *httpReq) {
 // requests. The returned body is immutable and shared by that group only.
 func (a *app) loadFeed() readResp {
 	rc := <-a.reads
+	if rc.btree != nil {
+		if fragment, ok := rc.btree.feed(); ok {
+			const prefix = `{"posts":`
+			bodyLen := len(prefix) + len(fragment) + 1
+			packet := make([]byte, 0, packetHeaderLen(http.StatusOK, bodyLen)+bodyLen)
+			packet = appendPacketHeader(packet, http.StatusOK, bodyLen)
+			bodyStart := len(packet)
+			packet = append(packet, prefix...)
+			packet = append(packet, fragment...)
+			packet = append(packet, '}')
+			body := packet[bodyStart:]
+			a.reads <- rc
+			return readResp{status: http.StatusOK, body: body, packet: packet}
+		}
+	}
 	st := rc.feed
 	st.reset()
 	row, err := st.step()
@@ -695,6 +850,27 @@ func (a *app) getPostByID(w http.ResponseWriter, r *httpReq, idStr string) {
 // loadPost serves one coalesced group of concurrent reads for the same post.
 func (a *app) loadPost(id int64) readResp {
 	rc := <-a.reads
+	if rc.btree != nil {
+		if fragment, found, ok := rc.btree.post(id); ok {
+			if !found {
+				body := []byte(`{"error":"post not found"}`)
+				packet := makePacket(http.StatusNotFound, body)
+				a.reads <- rc
+				return readResp{status: http.StatusNotFound, body: body, packet: packet}
+			}
+			const prefix = `{"post":`
+			bodyLen := len(prefix) + len(fragment) + 1
+			packet := make([]byte, 0, packetHeaderLen(http.StatusOK, bodyLen)+bodyLen)
+			packet = appendPacketHeader(packet, http.StatusOK, bodyLen)
+			bodyStart := len(packet)
+			packet = append(packet, prefix...)
+			packet = append(packet, fragment...)
+			packet = append(packet, '}')
+			body := packet[bodyStart:]
+			a.reads <- rc
+			return readResp{status: http.StatusOK, body: body, packet: packet}
+		}
+	}
 	st := rc.getPost
 	st.reset()
 	if err := st.bindInt64(1, id); err != nil {
@@ -719,10 +895,56 @@ func (a *app) loadPost(id int64) readResp {
 	return readResp{status: http.StatusOK, body: body, packet: packet}
 }
 
+// loadPostsBtree serves a coalesced batch one post at a time through the
+// B-tree path.  A nil,false result means the caller should use the SQL batch.
+func (a *app) loadPostsBtree(ids []int64) (map[int64]readResp, bool) {
+	unique := make([]int64, 0, len(ids))
+	seen := make(map[int64]struct{}, len(ids))
+	for _, id := range ids {
+		if _, ok := seen[id]; !ok {
+			seen[id] = struct{}{}
+			unique = append(unique, id)
+		}
+	}
+	rc := <-a.reads
+	if rc.btree == nil {
+		a.reads <- rc
+		return nil, false
+	}
+	results, ok := rc.btree.posts(unique)
+	if !ok {
+		a.reads <- rc
+		return nil, false
+	}
+	out := make(map[int64]readResp, len(unique))
+	for i, id := range unique {
+		if !results[i].found {
+			body := []byte(`{"error":"post not found"}`)
+			out[id] = readResp{status: http.StatusNotFound, body: body, packet: makePacket(http.StatusNotFound, body)}
+			continue
+		}
+		body := results[i].body
+		const prefix = `{"post":`
+		bodyLen := len(prefix) + len(body) + 1
+		packet := make([]byte, 0, packetHeaderLen(http.StatusOK, bodyLen)+bodyLen)
+		packet = appendPacketHeader(packet, http.StatusOK, bodyLen)
+		bodyStart := len(packet)
+		packet = append(packet, prefix...)
+		packet = append(packet, body...)
+		packet = append(packet, '}')
+		out[id] = readResp{status: http.StatusOK, body: packet[bodyStart:], packet: packet}
+	}
+	a.reads <- rc
+	return out, true
+}
+
 // loadPosts serves a whole batch of GET /posts/:id requests with one IN query.
 func (a *app) loadPosts(ids []int64) map[int64]readResp {
 	if len(ids) == 0 {
 		return nil
+	}
+	if out, ok := a.loadPostsBtree(ids); ok {
+		return out
 	}
 	unique := make([]int64, 0, len(ids))
 	seen := make(map[int64]struct{}, len(ids))

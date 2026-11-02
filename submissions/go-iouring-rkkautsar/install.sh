@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Installs the Go toolchain and the C compiler. SQLite is vendored as the
-# amalgamation (sqlite3.c/sqlite3.h) and compiled with the submission, so no
+# amalgamation (sqlite/sqlite3.c and sqlite3.h) and compiled with the submission, so no
 # system SQLite development package is needed.
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive

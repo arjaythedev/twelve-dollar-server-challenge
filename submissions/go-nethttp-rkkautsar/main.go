@@ -100,6 +100,12 @@ func (g *readGroup) do(key string, window time.Duration, fn func() readResp) rea
 	return c.resp
 }
 
+type postReadReq struct {
+	id    int64
+	gen   uint64
+	reply chan readResp
+}
+
 type app struct {
 	secret  []byte
 	started time.Time
@@ -121,6 +127,8 @@ type app struct {
 	readsGroup readGroup
 	readGen    atomic.Uint64
 	readWindow time.Duration
+	postCh     chan postReadReq
+	postBatch  bool
 }
 
 func main() {
@@ -128,7 +136,7 @@ func main() {
 	port := envOr("PORT", "3000")
 	path := os.Getenv("SQLITE_PATH")
 
-	batchMS := 100
+	batchMS := 50
 	if v := os.Getenv("WRITE_BATCH_MS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
 			batchMS = n
@@ -140,21 +148,33 @@ func main() {
 			windowUS = n
 		}
 	}
-	readConns := 2
+	readConns := 4
 	if v := os.Getenv("READ_CONNS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			readConns = n
 		}
 	}
-	coalesce := false
+	coalesce := true
 	if v := os.Getenv("READ_COALESCE"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			coalesce = b
 		}
 	}
+	postBatch := false
+	if v := os.Getenv("POST_BATCH"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			postBatch = b
+		}
+	}
+	idleMS := 10
+	if v := os.Getenv("IDLE_TIMEOUT_MS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			idleMS = n
+		}
+	}
 
 	dsn := path + "?_journal_mode=WAL&_synchronous=NORMAL&_busy_timeout=5000" +
-		"&_cache_size=-16384&_mmap_size=268435456&_mutex=no"
+		"&_cache_size=-16384&_mmap_size=268435456&_mutex=no&_wal_autocheckpoint=10000"
 
 	readDB, err := sql.Open("sqlite3", dsn)
 	if err != nil {
@@ -190,6 +210,8 @@ func main() {
 		batchWindow: time.Duration(batchMS) * time.Millisecond,
 		readWindow:  time.Duration(windowUS) * time.Microsecond,
 		readsGroup:  readGroup{enabled: coalesce},
+		postCh:      make(chan postReadReq, 1024),
+		postBatch:   postBatch,
 	}
 	if a.feed, err = readDB.Prepare(feedSQL); err != nil {
 		log.Fatal(err)
@@ -211,6 +233,9 @@ func main() {
 		log.Fatal(err)
 	}
 	go a.writeLoop()
+	if coalesce && postBatch {
+		go a.postBatchLoop()
+	}
 
 	if addr := os.Getenv("PPROF_ADDR"); addr != "" {
 		go func() {
@@ -223,7 +248,7 @@ func main() {
 		Addr:              host + ":" + port,
 		Handler:           a,
 		ReadHeaderTimeout: 10 * time.Second,
-		IdleTimeout:       75 * time.Second,
+		IdleTimeout:       time.Duration(idleMS) * time.Millisecond,
 	}
 	log.Fatal(srv.ListenAndServe())
 }
@@ -261,8 +286,10 @@ const (
 		 WHERE p.id = ?`
 	insertPostSQL = "INSERT INTO posts (user_id, body) VALUES (?, ?) RETURNING id, created_at"
 	postExistsSQL = "SELECT 1 FROM posts WHERE id = ?"
-	insertLikeSQL = "INSERT INTO likes (user_id, post_id) VALUES (?, ?) ON CONFLICT (user_id, post_id) DO NOTHING"
-	healthSQL     = "SELECT 1"
+	insertLikeSQL = `INSERT INTO likes (user_id, post_id)
+		SELECT ?1, ?2 WHERE EXISTS (SELECT 1 FROM posts WHERE id = ?2)
+		ON CONFLICT (user_id, post_id) DO NOTHING`
+	healthSQL = "SELECT 1"
 )
 
 func (a *app) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -322,19 +349,123 @@ func (a *app) getPostByID(w http.ResponseWriter, r *http.Request, idStr string) 
 		writeError(w, http.StatusBadRequest, "invalid post id")
 		return
 	}
-	key := "post:" + strconv.FormatUint(a.readGen.Load(), 10) + ":" + strconv.FormatInt(id, 10)
-	resp := a.readsGroup.do(key, a.readWindow, func() readResp {
-		var body []byte
-		err := a.getPost.QueryRow(id).Scan(&body)
-		if err == sql.ErrNoRows {
-			return readResp{status: http.StatusNotFound, body: []byte(`{"error":"post not found"}`)}
-		}
-		if err != nil {
-			return readResp{status: http.StatusInternalServerError, body: []byte(`{"error":"internal server error"}`)}
-		}
-		return readResp{status: http.StatusOK, body: body}
-	})
+	if !a.readsGroup.enabled || !a.postBatch {
+		resp := a.loadPost(id)
+		writeJSON(w, resp.status, resp.body)
+		return
+	}
+	gen := a.readGen.Load()
+	reply := make(chan readResp, 1)
+	a.postCh <- postReadReq{id: id, gen: gen, reply: reply}
+	resp := <-reply
+	// A write may have committed after this request was queued. Never
+	// return a read that started before that commit.
+	if a.readGen.Load() != gen {
+		resp = a.loadPost(id)
+	}
 	writeJSON(w, resp.status, resp.body)
+}
+
+func (a *app) loadPost(id int64) readResp {
+	var body []byte
+	err := a.getPost.QueryRow(id).Scan(&body)
+	if err == sql.ErrNoRows {
+		return readResp{status: http.StatusNotFound, body: []byte(`{"error":"post not found"}`)}
+	}
+	if err != nil {
+		return readResp{status: http.StatusInternalServerError, body: []byte(`{"error":"internal server error"}`)}
+	}
+	return readResp{status: http.StatusOK, body: body}
+}
+
+const maxPostBatch = 256
+
+// postBatchLoop serves concurrent GET /posts/:id requests with one IN query.
+// Requests carry the write generation so a post-write request cannot accept a
+// result produced before the commit.
+func (a *app) postBatchLoop() {
+	for first := range a.postCh {
+		reqs := make([]postReadReq, 1, maxPostBatch)
+		reqs[0] = first
+		if a.readWindow > 0 {
+			timer := time.NewTimer(a.readWindow)
+		collect:
+			for len(reqs) < maxPostBatch {
+				select {
+				case r := <-a.postCh:
+					reqs = append(reqs, r)
+				case <-timer.C:
+					break collect
+				}
+			}
+			timer.Stop()
+		} else {
+		drain:
+			for len(reqs) < maxPostBatch {
+				select {
+				case r := <-a.postCh:
+					reqs = append(reqs, r)
+				default:
+					break drain
+				}
+			}
+		}
+		a.resolvePostBatch(reqs)
+	}
+}
+
+func (a *app) resolvePostBatch(reqs []postReadReq) {
+	ids := make([]int64, 0, len(reqs))
+	seen := make(map[int64]struct{}, len(reqs))
+	for _, req := range reqs {
+		if _, ok := seen[req.id]; ok {
+			continue
+		}
+		seen[req.id] = struct{}{}
+		ids = append(ids, req.id)
+	}
+	ph := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
+	q := strings.Replace(getPostSQL, "SELECT json_object", "SELECT p.id, json_object", 1)
+	q = strings.Replace(q, "WHERE p.id = ?", "WHERE p.id IN ("+ph+")", 1)
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		args[i] = id
+	}
+	rows, err := a.readDB.Query(q, args...)
+	if err != nil {
+		a.failPostBatch(reqs)
+		return
+	}
+	found := make(map[int64]readResp, len(ids))
+	for rows.Next() {
+		var id int64
+		var body []byte
+		if err := rows.Scan(&id, &body); err != nil {
+			rows.Close()
+			a.failPostBatch(reqs)
+			return
+		}
+		found[id] = readResp{status: http.StatusOK, body: body}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		a.failPostBatch(reqs)
+		return
+	}
+	rows.Close()
+	for _, req := range reqs {
+		resp, ok := found[req.id]
+		if !ok {
+			resp = readResp{status: http.StatusNotFound, body: []byte(`{"error":"post not found"}`)}
+		}
+		req.reply <- resp
+	}
+}
+
+func (a *app) failPostBatch(reqs []postReadReq) {
+	for _, req := range reqs {
+		req.reply <- readResp{status: http.StatusInternalServerError, body: []byte(`{"error":"internal server error"}`)}
+	}
 }
 
 func (a *app) createPost(w http.ResponseWriter, r *http.Request) {
@@ -541,8 +672,20 @@ run:
 				ID: id, Body: j.body, CreatedAt: created, Author: j.username,
 			}
 		case writeLike:
+			res, err := a.insertLike.ExecContext(ctx, j.userID, j.postID)
+			if err != nil {
+				ok = false
+				break run
+			}
+			n, _ := res.RowsAffected()
+			if n > 0 {
+				results[i].already = false
+				continue
+			}
+			// Zero rows means duplicate like or missing post; only the
+			// fallback needs the separate existence check.
 			var one int
-			err := a.postExists.QueryRowContext(ctx, j.postID).Scan(&one)
+			err = a.postExists.QueryRowContext(ctx, j.postID).Scan(&one)
 			if err == sql.ErrNoRows {
 				results[i].notFound = true
 				continue
@@ -551,13 +694,7 @@ run:
 				ok = false
 				break run
 			}
-			res, err := a.insertLike.ExecContext(ctx, j.userID, j.postID)
-			if err != nil {
-				ok = false
-				break run
-			}
-			n, _ := res.RowsAffected()
-			results[i].already = n == 0
+			results[i].already = true
 		}
 	}
 	if ok {

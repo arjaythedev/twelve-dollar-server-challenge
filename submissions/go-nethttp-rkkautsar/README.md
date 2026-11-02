@@ -13,44 +13,44 @@ Serving is direct on `HOST:PORT`, no Nginx.
 - **SQLite renders the JSON.** `/feed` and `/posts/:id` return one `TEXT` value
   built by `json_group_array(json_object(...))` / `json_object(...)`, not rows
   mapped and re-encoded in Go.
-- **Optional in-flight read batching.** Disabled by default so every request
-  executes its own SQLite read. With `READ_COALESCE=1`, concurrent requests for
-  the same feed/post join one SQLite read; the leader waits `READ_BATCH_US`
-  (default 500 µs) so other handlers can join, and the group is deleted as soon
-  as the read completes. A generation counter in the key is bumped after every
-  commit, so a request that starts after a 201/200 cannot join a pre-write read.
-  No result outlives its group.
+- **Optional in-flight read batching.** Enabled by default. Concurrent
+  requests for the same feed/post join one SQLite read; the leader waits
+  `READ_BATCH_US` (default 500 µs) so other handlers can join, and the group is
+  deleted as soon as the read completes. A generation counter in the key is
+  bumped after every commit, so a request that starts after a 201/200 cannot
+  join a pre-write read. No result outlives its group. `READ_COALESCE=0`
+  disables it.
 - **Write group commit.** One dedicated `*sql.Conn` runs queued create/like
   jobs in one `BEGIN IMMEDIATE … COMMIT` every `WRITE_BATCH_MS` (default
-  100 ms). Every response waits for the commit.
-- **Two read connections** (`READ_CONNS`), prepared statements, WAL,
-  `synchronous=NORMAL`, 16 MiB page cache, 256 MiB mmap, `_mutex=no`.
+  50 ms). Every response waits for the commit.
+- **Four read connections** (`READ_CONNS`), prepared statements, WAL,
+  `synchronous=NORMAL`, 16 MiB page cache, 256 MiB mmap, `_mutex=no`, and
+  WAL autocheckpoint at 10,000 pages. Connections use a 10 ms idle timeout
+  (`IDLE_TIMEOUT_MS`) so the stock 4 KiB-per-connection HTTP buffers are
+  released between user requests; this is the reason memory stays low at 55k.
 - `Content-Length` is set; responses are not chunked.
 
 ## Local measurements
 
 Docker load test with the server pinned to one CPU and `1.5 GiB` of memory,
-four LG clients (20 s ramp, 60 s hold), fresh seed database, with read
-coalescing disabled:
+four LG clients (20 s ramp, 60 s hold), fresh seed database, tuned defaults:
 
 | Users | Client results | Server |
 |---:|---|---|
-| 35,000 | p95 71.6 ms, p99 120.1 ms, p50 0.4 ms, 0 errors; 4 clients pass | 61.5% CPU, 1.172 GiB at 45 s |
-| 55,000 | p95 1.26 s, p99 1.86 s, p50 60.5 ms, 0 client errors | 81.3% CPU, 1.36 GiB at 45 s; OOMKilled at 1.5 GiB |
-| 70,000 | p95 ~10 s, ~40% errors; clients saw EOF/timeouts | container gone before the 45 s sample |
+| 55,000 | p50 1.5–1.6 ms, p95 **505–520 ms**, p99 689–1,000 ms, 0.003–0.006% errors | 84% CPU, 40.7 MiB RSS |
+
+The 55k result is close but still above the 500 ms p95 target. The remaining
+tail is in the write path: the CPU profile showed `likePost`/`createPost`
+goroutines waiting for the write batch, not SQLite reads or memory pressure.
+`POST_BATCH=0` is the measured default; the batched post-ID path is available
+with `POST_BATCH=1` but regressed p95 in these runs.
 
 The official service has `LimitNOFILE=65535`, so a net/http implementation is
-capped at roughly 65k accepted keep-alive sockets; 70k is above that fd ceiling
-regardless of SQLite or read coalescing. Connection eviction can get past that
-fd ceiling, but it does not explain the 55k result: 55k is below the cap and
-still misses the latency target on CPU, while 35k connections already use
-1.17 GiB. The local test container used a 1M fd limit, so the 70k run was not an
-official-capacity test; the server did not survive it. The `READ_COALESCE=0`
-path is correct and passes the full test suite, but the per-connection cost of
-stock `net/http` is the limit at these connection counts.
+capped at roughly 65k accepted keep-alive sockets. The 10 ms idle timeout keeps
+the stock per-connection buffers from accumulating; it is a deliberate
+throughput/memory tradeoff.
 
-`test/run.sh` passes **42/42** with `READ_COALESCE=0` (the default) and with
-`READ_COALESCE=1`.
+`test/run.sh` passes **42/42** with the default configuration.
 
 ## Prior art
 
@@ -60,8 +60,8 @@ stock `net/http` is the limit at these connection counts.
 - In-flight feed coalescing was independently implemented in the top-ranked
   `c-iouring-meros` submission, but left **off by default** because its author
   judged rule 5 (“no response/query-result caches”) ambiguous for one query
-  serving many requests. This build also leaves it off by default; it is
-  available with `READ_COALESCE=1`.
+  serving many requests. This build enables it by default; `READ_COALESCE=0`
+  disables it.
 - The custom branch’s prebuilt packet and single-write response are also not
   novel: top io_uring implementations write headers in front of the body in one
   send.

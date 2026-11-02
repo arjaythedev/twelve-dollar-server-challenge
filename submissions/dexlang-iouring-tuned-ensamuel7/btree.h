@@ -15,22 +15,19 @@ int dexbt_attach_next(void);
  * serve reads on that connection, 0 if it stays off. */
 int dexbt_init(void);
 
-/* GET /feed: the 20 newest posts that have an author, newest first. The
- * number found (0..20), or -1. Results are read with the getters below. */
+/* GET /feed: the 20 newest posts that have an author, newest first, as the
+ * response body (dexbt_json). The number found (0..20), or -1. */
 int dexbt_feed(void);
 
-/* GET /posts/:id: 1 found (row 0 of the getters), 0 no such post, -1. */
+/* GET /posts/:id: 1 found (the body is in dexbt_json), 0 no such post, -1. */
 int dexbt_post(long id);
 
 /* Does post `id` exist: 1, 0, or -1. */
 int dexbt_exists(long id);
 
-/* Row i of the last dexbt_feed or dexbt_post. The strings stay valid until
- * the next call into the engine. Out of range: 0 or "". */
-long dexbt_id(int i);
-int dexbt_likes(int i);
-const char* dexbt_body(int i);
-const char* dexbt_created(int i);
-const char* dexbt_author(int i);
+/* The JSON body of the last dexbt_feed or dexbt_post that answered, byte for
+ * byte what json.encode makes of the same rows; "" after one that did not.
+ * Valid until the next call into the engine. */
+const char* dexbt_json(void);
 
 #endif

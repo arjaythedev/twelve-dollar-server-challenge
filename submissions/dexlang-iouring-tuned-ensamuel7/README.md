@@ -6,7 +6,7 @@
 | **Framework** | None. DexLang's own `http` and `db` standard library modules |
 | **Server** | The `http` module's io_uring backend (`http.uring()`), with handlers run on the ring's thread |
 | **SQL** | Built with [dexqu](https://github.com/ensamuel7/dex-modules/tree/main/dexqu) `v0.1.0` at startup, prepared once; used for every write |
-| **Reads** | `btree.c`, about 390 lines of C that read SQLite's B-tree cursors directly, falling back to the SQL whenever it can't answer exactly |
+| **Reads** | `btree.c`, about 540 lines of C that read SQLite's B-tree cursors directly and write the JSON, falling back to the SQL whenever it can't answer exactly |
 | **SQLite driver** | SQLite 3.54.1, the official amalgamation compiled into the binary by the `db` module (`DEX_SQLITE`), pinned and sha256-checked in `build.sh` |
 | **Build toolchain** | Go 1.27.2 to build the compiler, then `cc` (gcc 13) on the C it emits |
 | **Nginx or direct** | **Direct**, on `HOST:PORT` (`0.0.0.0:80` on the benchmark box) |
@@ -21,7 +21,7 @@ committed before their response, and every response is byte for byte what the
 other entry sends.
 
 DexLang compiles to C. What runs is one native binary with SQLite compiled in:
-no interpreter, no garbage collector, no framework. The program is about 560
+no interpreter, no garbage collector, no framework. The program is about 620
 lines of DexLang in `server.dx` and `queries.dx` plus the read engine in
 `btree.c`; everything below that is the language's standard library,
 unmodified for this challenge.
@@ -34,14 +34,26 @@ unmodified for this challenge.
   the stock amalgamation, which gives it SQLite's internal B-tree interface.
   SQLite itself is unchanged. The engine opens read-only cursors on the
   program's own connection, inside the transaction the batch already holds,
-  and walks the same indexes the SQL plan would:
-  - `posts_created_at_id_idx` backwards for the 20 newest;
-  - `likes_post_id_idx` for each count;
-  - `posts` and `users` by rowid for the rows.
+  and reads the same indexes the SQL plan does:
+  - **The feed** walks `posts_created_at_id_idx` from the newest entry. New
+    posts get consecutive ids, so the posts cursor steps back one row from the
+    last post instead of seeking from the root, and seeks only when an id
+    isn't the one before.
+  - **The like counts** come from one backwards walk through
+    `likes_post_id_idx`: positioned once, the way SQLite's `OP_SeekLE` does,
+    then each post continues from where the one before it stopped. A post out
+    of descending id order seeks again.
+  - **Records are read in place** on their B-tree page, as SQLite's own column
+    reads take them. They are copied out only when a row spills onto overflow
+    pages.
+  - **The engine writes the response body itself**: the JSON `json.encode`
+    makes of the same structs, with the same escaping, built straight from the
+    records into one reused buffer. Each value is copied once, with no `Post`
+    structs or strings in between.
 
   It checks the schema at startup and the schema cookie on every call. It
   returns "can't answer" (-1) on anything it doesn't expect, and the handler
-  then runs the SQL. That covers no open transaction, a record of another
+  then runs #251's SQL. That covers no open transaction, a record of another
   shape, a NUL byte in a text value, and a value bigger than its buffers. A
   post whose author row is missing is skipped, as the SQL's inner join skips
   it. Writes all stay in SQL.
@@ -52,19 +64,32 @@ unmodified for this challenge.
   `build.sh` undoes `SECURE_DELETE`, which zeroes freed space on every write,
   and adds `OMIT_DEPRECATED`, `OMIT_SHARED_CACHE`, `OMIT_PROGRESS_CALLBACK` and
   `MAX_EXPR_DEPTH=0`.
-Measured locally against #251. Each figure is two runs, with the server pinned
-to one core of an arm64 VM. Treat them as relative, not as box numbers.
+Measured locally against #251, under the same think-time load (the k6 user
+loop with think times scaled down), on an arm64 VM. Treat these as relative,
+not as box numbers:
 
 | | #251 | this entry |
 |---|---:|---:|
-| 20,000 think-time users (k6 loop, think x0.05), ~41.8k req/s: server CPU per request | 12.9 / 13.0 µs | **12.1 / 12.1 µs** |
-| think-time users: p95 / p99 | 9.8 / 15.2 ms, 9.3 / 15.3 ms | **8.8 / 13.0 ms, 8.7 / 12.7 ms** |
-| wrk, 1,000 connections, k6-like mix: server CPU per request | 10.8 / 10.7 µs | 11.3 / 12.0 µs |
-| wrk: peak RSS | 201 MB | **85 MB** |
+| user-space instructions per request (callgrind, the same 38k-request run) | 82.8k | **43.0k** |
+| 20,000 think-time users, ~41k req/s: server CPU per request, four runs taking turns | 15.1 / 16.6 / 17.1 / 15.9 µs | **14.5 / 16.3 / 13.2 / 14.2 µs** |
+| wrk, 1,000 connections, k6-like mix: peak RSS | 201 MB | **85 MB** |
 
-Responses were byte-identical to #251's on the seed and with 3,000 likes on
-the newest post, across the feed and 1,538 post lookups. It passes the test
-suite, 42/42.
+The instruction count is the steadier measure, because it doesn't move with
+what else the machine is doing. The CPU-time figures include the kernel's
+loopback TCP, which is the same for both and is most of each request here.
+
+Responses were checked against #251's byte for byte: the feed and about 3,000
+post lookups, with a logging build counting which path answered each one. The
+cases were:
+- the seed;
+- 3,000 likes on the newest post;
+- holes in the id range, with random likes over the newest 50 posts;
+- an old post among the newest;
+- a post whose author row is missing;
+- long UTF-8 bodies, equal `created_at` values, and every escaped character.
+
+The engine answered all of them. It handed only a NUL inside the newest body
+back to the SQL, as designed. The entry passes the test suite, 42/42.
 
 **Tried, not kept:**
 - `http.batchWindow(1)` (dex v0.9.28 and later), which holds a batch open for

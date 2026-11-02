@@ -22,11 +22,7 @@ external module bt {
     fn feed(): int = "dexbt_feed"
     fn post(id: long): int = "dexbt_post"
     fn exists(id: long): int = "dexbt_exists"
-    fn id(i: int): long = "dexbt_id"
-    fn likes(i: int): int = "dexbt_likes"
-    fn body(i: int): string = "dexbt_body"
-    fn created(i: int): string = "dexbt_created"
-    fn author(i: int): string = "dexbt_author"
+    fn json(): string = "dexbt_json"
 }
 
 let conn: int = -1
@@ -203,30 +199,22 @@ fn feedByPost(): http.HttpResponse {
 // reference query.
 const FEED_SPAN: long = 256
 
-// The 20 newest ids, then one scan of likes and one of posts over the id
-// range they cover, put back in feed order. The answer is the reference
-// query's: rows in the range that are not among the 20 are skipped, and if
-// the ids are spread wide or one of them has no row, it runs that instead.
-// Row i of the engine's last answer.
-fn enginePost(i: int): Post {
-    return Post { id: bt.id(i), body: bt.body(i), created_at: bt.created(i), author: bt.author(i), like_count: bt.likes(i) }
-}
-
+// The engine writes the response body itself, the bytes json.encode would
+// make of the same rows.
 fn feed(req: http.HttpRequest): http.HttpResponse {
     beginBatch()
     if (btreeReads) {
-        let n: int = bt.feed()
-        if (n >= 0) {
-            let posts: Post[] = []
-            for (let i = 0; i < n; i++) {
-                posts.push(enginePost(i))
-            }
-            return http.response(200, json.encode(FeedPage { posts: posts }), "application/json")
+        if (bt.feed() >= 0) {
+            return http.response(200, bt.json(), "application/json")
         }
     }
     return feedBySql()
 }
 
+// The 20 newest ids, then one scan of likes and one of posts over the id
+// range they cover, put back in feed order. The answer is the reference
+// query's: rows in the range that are not among the 20 are skipped, and if
+// the ids are spread wide or one of them has no row, it runs that instead.
 fn feedBySql(): http.HttpResponse {
     let ids: long[] = []
     db.reset(stIds)
@@ -312,7 +300,7 @@ fn onePost(req: http.HttpRequest): http.HttpResponse {
             return fail(404, "post not found")
         }
         if (found == 1) {
-            return http.response(200, json.encode(PostEnvelope { post: enginePost(0) }), "application/json")
+            return http.response(200, bt.json(), "application/json")
         }
     }
     db.reset(stOne)

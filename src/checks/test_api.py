@@ -180,11 +180,16 @@ class HTTPTests(unittest.TestCase):
         self.assertEqual((post["body"], post["author"]), (text, text))
         self.assertEqual(mapping(self.request("GET", f"/posts/{post['id']}")[1]["post"]), post)
         self.assertEqual(mapping(array(self.request("GET", "/feed")[1]["posts"])[0]), post)
-        status, body, _ = self.request(
-            "POST", "/posts", b'{"body":"valid"}', sign(claims(username="\ud800"))
-        )
-        self.assertEqual(status, 201)
-        self.assertEqual(mapping(body["post"])["author"], "\ud800")
+        for offset in (0, 15, 16, 31, 32):
+            username = "a" * offset + "\ud800" + "b" * 17 + "\udfff" + "c" * 17
+            status, body, raw = self.request(
+                "POST", "/posts", b'{"body":"valid"}', sign(claims(username=username))
+            )
+            self.assertEqual(status, 201)
+            self.assertEqual(mapping(body["post"])["author"], username)
+            self.assertEqual(
+                raw, json.dumps(body, ensure_ascii=True, separators=(",", ":")).encode()
+            )
 
     def test_writes_are_committed_before_response(self) -> None:
         status, body, _ = self.request(
@@ -278,6 +283,11 @@ class HTTPTests(unittest.TestCase):
         rng = random.Random(42)
         alphabet = [chr(i) for i in range(128)] + ["é", "\u2028", "\N{GRINNING FACE}"]
         strings = ["a" * n + '"\\\0\n' + "b" * (35 - n) for n in range(36)]
+        strings += [
+            "a" * n + marker + "b" * 33
+            for n in (0, 14, 15, 16, 30, 31, 32)
+            for marker in ("", "\ud000", "\ud7ff")
+        ]
         strings += ["".join(rng.choices(alphabet, k=rng.randrange(499))) for _ in range(1000)]
         for text in strings:
             value = "x" + text + "x"

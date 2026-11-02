@@ -20,6 +20,7 @@
 - [x] Compare shared receive buffers, scatter-gather sends and completion batching, including lifetime and exhaustion tests.
 - [x] Compare LTO, Cascade Lake tuning and GCC16 without changing the production compiler.
 - [x] Compare direct receive parsing at 50,000 users; keep the current parser path for now.
+- [x] Reuse HTTP header storage, skip duplicate B-tree cleanup after commit and append clean JSON runs.
 
 Keep our code in src/, use English and strict typing. Leave upstream files and other submissions alone.
 

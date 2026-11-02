@@ -430,11 +430,20 @@ class Server::State
     void respond(Connection &connection, Response response)
     {
         connection.close_after = connection.close_after || !connection.parser.request.keep_alive;
-        connection.output = "HTTP/1.1 " + std::to_string(static_cast<unsigned>(response.status)) +
-                            " " + std::string(reason(response.status)) +
-                            "\r\nContent-Type: application/json\r\nContent-Length: " +
-                            std::to_string(response.body.size()) + "\r\n" +
-                            (connection.close_after ? "Connection: close\r\n" : "") + "\r\n";
+        auto &output = connection.output;
+        output.clear();
+        output += "HTTP/1.1 ";
+        output += std::to_string(static_cast<unsigned>(response.status));
+        output += ' ';
+        output += reason(response.status);
+        output += "\r\nContent-Type: application/json\r\nContent-Length: ";
+        output += std::to_string(response.body.size());
+        output += "\r\n";
+        if (connection.close_after)
+        {
+            output += "Connection: close\r\n";
+        }
+        output += "\r\n";
         connection.response_body = std::move(response.body);
         connection.sent = 0;
         send(connection);

@@ -137,22 +137,39 @@ void quote(std::string &output, std::string_view text)
     std::size_t i = 0;
     while (i < text.size())
     {
+        const auto start = i;
 #if defined(__SSE2__)
-        if (text.size() - i >= 16)
+        while (text.size() - i >= 16)
         {
             const auto block = _mm_loadu_si128(reinterpret_cast<const __m128i *>(text.data() + i));
             auto bad = _mm_or_si128(_mm_cmpeq_epi8(block, _mm_set1_epi8('"')),
                                     _mm_cmpeq_epi8(block, _mm_set1_epi8('\\')));
             bad = _mm_or_si128(bad, _mm_cmpeq_epi8(_mm_min_epu8(block, _mm_set1_epi8(31)), block));
             bad = _mm_or_si128(bad, _mm_cmpeq_epi8(block, _mm_set1_epi8(static_cast<char>(0xED))));
-            if (!_mm_movemask_epi8(bad))
+            if (_mm_movemask_epi8(bad))
             {
-                output.append(text.substr(i, 16));
-                i += 16;
-                continue;
+                break;
             }
+            i += 16;
         }
 #endif
+        while (i < text.size())
+        {
+            const auto c = static_cast<unsigned char>(text[i]);
+            if (c < 32 || c == '"' || c == '\\' || c == 0xED)
+            {
+                break;
+            }
+            ++i;
+        }
+        if (i != start)
+        {
+            output.append(text.substr(start, i - start));
+        }
+        if (i == text.size())
+        {
+            break;
+        }
         const auto c = static_cast<unsigned char>(text[i++]);
         if (c == '"' || c == '\\')
         {

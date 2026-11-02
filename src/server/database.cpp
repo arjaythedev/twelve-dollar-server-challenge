@@ -208,9 +208,9 @@ class ReadScope
 
     ~ReadScope()
     {
-        tds_btree_end(&tree_);
         if (!committed_)
         {
+            tds_btree_end(&tree_);
             sqlite3_exec(db_, "ROLLBACK", nullptr, nullptr, nullptr);
         }
     }

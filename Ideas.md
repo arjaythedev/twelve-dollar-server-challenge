@@ -39,7 +39,7 @@
 
 - [ ] Measure checkpoint CPU, WAL growth and p99 before changing write scheduling. Files/locks/page cache account for 10.9% of sampled CPU; this includes reads and locking as well as writes.
   Try PASSIVE checkpoints on a separate, lower-priority connection. `unix-excl` needs one owning process. Synchronize checkpoint state explicitly.
-  Profile WAL-write coalescing and redundant cache truncation before copying the leader's VFS/cache wrappers; preserve write order, flush errors and `synchronous=NORMAL` or stronger.
+  Profile WAL writes separately from checkpoints; preserve write order, flush errors and `synchronous=NORMAL` or stronger.
 
 - [ ] Group writes with a size limit b and timeout: `C(b) ~= s + a/b`, average collection wait `~= (b-1)/(2*lambda)`.
   Measure write arrival rate and transaction cost before choosing b or the collection window. Hold dependent responses until commit; rollbacks and commit failure must replace them with errors.
@@ -52,7 +52,7 @@
 
 - [ ] Deduplicate author IDs within one feed, then batch lookups by B-tree level ([bt_seek_many](submissions/c-iouring-pavlyhalim/src/btree.h)).
   Interleave independent descents and fetch shared pages once. Try interpolation from the current page's endpoint keys, with bounded correction and a correct binary-search fallback.
-  Keep all lookup state within the request. Pin author pages until serialization; copy post bytes before moving cursors. Persistent learned indexes or Eytzinger copies would reuse database-derived data across requests.
+  Keep all lookup state within the request. Pin author pages until serialization; copy post bytes before moving cursors.
 
 - [ ] Compare an FD-indexed connection table and stable slabs when connection churn, allocation or connection memory is material.
   Current CQEs already carry `Connection*`; the map is used for accept, close and shutdown rather than a lookup on every request. Measure those costs before replacing it.
@@ -79,10 +79,8 @@
   Keep io_uring as the chosen architecture while testing this alternative. Hold connection count, receive/send storage, work budgets, socket options and load setup constant; compare CPU/request, tail latency, memory and errors.
   Include `EAGAIN`, short I/O, disconnects, early auth rejection, pipelining and shutdown. Count syscall and readiness costs rather than assuming either I/O API wins for small requests.
 
-- [ ] Compare SQLite cache sizes with `mmap_size=0`: `N ~= (RAM - fixed_cost - cache - queues)/memory_per_connection`.
+- [ ] Compare SQLite's own page-cache sizes with `mmap_size=0`: `N ~= (RAM - fixed_cost - cache - queues)/memory_per_connection`. SQLite's page cache is explicitly allowed by [rule 5](README.md#rules).
   Keep one database at `SQLITE_PATH`; file sharding changes the fixed data contract. Extra connections add no CPU capacity on one vCPU.
-  Bloom filters help misses: `saved ~= miss_rate*(1-false_positive_rate)*lookup_cost - filter_cost`. Measure a miss-heavy path first; a retained application filter is data-dependent reuse across requests.
-  Static encoding tables are fine; persistent author, post and count maps are data caches. Post age does not relax freshness or feed ordering.
 
 - [ ] Compare PGO trained on fresh synthetic data with plain optimization ([build.sh](submissions/c-iouring-pavlyhalim/build.sh)).
   SSE2 JSON/UTF-8 scanning already exists and is baseline on x86_64; test wider SIMD for measured hot loops. AVX2/AVX-512 need matching target support or runtime dispatch.
@@ -90,13 +88,9 @@
   JSON is currently 2.1% of sampled CPU, so use a fresh profile before spending time on vector width or more encoding specializations.
 
 - [ ] Compare ISA-specific kernels for the Xeon Platinum 8260 (Cascade Lake) after checking the VPS feature mask ([GCC](https://gcc.gnu.org/onlinedocs/gcc-13.1.0/gcc/x86-Options.html)). The local `-mtune=cascadelake` comparison is complete.
-  Compare SSE2, AVX2 and AVX-512 with runtime dispatch. Batch safe JSON bytes into one append per run before widening vectors; keep surrogate and bounds handling.
+  Compare SSE2, AVX2 and AVX-512 with runtime dispatch; keep surrogate and bounds handling.
 
 - [ ] Test C++26 when a specific feature simplifies a hot path; keep compiler upgrades separate from language changes ([standard support](https://gcc.gnu.org/projects/cxx-status.html)).
-
-- [ ] Keep GET sharing pending clarification in [#261](https://github.com/arjaythedev/twelve-dollar-server-challenge/issues/261).
-  This includes cross-request `IN (...)` reads, flagged in [#260](https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/260). Use independent reads until clarified.
-  [#243](https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/243) restored per-request feed reads (`57cf5b2`).
 
 - [ ] Compare throughput, latency, errors and CPU/request together:
   `requests/s ~= 2.17*N/(20.5 + HTTP_wait_per_cycle)`.

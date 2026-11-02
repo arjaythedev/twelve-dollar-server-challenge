@@ -29,8 +29,14 @@
 | C++ 0.1.0 (64 CQEs / 8-ms wait, Linux loopback) | 50,000 | 60 s | 517,863 | 3,981.45 | 8.645 ms | 22.215 ms | 97.42 ms | 0% | 33.64 us | 422.19 MiB |
 | C++ 0.1.0 (direct-parse baseline, Linux loopback) | 50,000 | 60 s | 517,785 | 3,980.96 | 4.652 ms | 21.708 ms | 106.82 ms | 0% | 34.27 us | 421.78 MiB |
 | C++ 0.1.0 (direct receive parsing, Linux loopback) | 50,000 | 60 s | 518,140 | 3,983.96 | 4.661 ms | 21.401 ms | 111.44 ms | 0% | 34.73 us | 405.88 MiB |
+| C++ 0.1.0 (low-hanging baseline A, Linux loopback) | 25,000 | 60 s | 259,411 | 1,995.17 | 4.643 ms | 15.593 ms | 99.42 ms | 0% | 39.79 us | 341.71 MiB |
+| C++ 0.1.0 (low-hanging A, Linux loopback) | 25,000 | 60 s | 259,483 | 1,995.82 | 4.632 ms | 15.321 ms | 91.17 ms | 0% | 39.34 us | 341.66 MiB |
+| C++ 0.1.0 (low-hanging baseline B, Linux loopback) | 25,000 | 60 s | 259,468 | 1,995.52 | 4.645 ms | 14.754 ms | 99.35 ms | 0% | 39.69 us | 341.40 MiB |
+| C++ 0.1.0 (low-hanging B, Linux loopback) | 25,000 | 60 s | 259,229 | 1,993.62 | 4.640 ms | 15.178 ms | 95.01 ms | 0% | 39.48 us | 341.59 MiB |
 
 Statistics include the ramps. RAM is the cgroup peak, including charged file pages. Local results, not an official score or a measured capacity limit.
+
+Low-hanging pairs ran one baseline and one candidate concurrently.
 
 The uring rows read CPU counters externally; earlier rows include the in-container counter reader. Their CPU/request values are not directly comparable.
 

@@ -34,8 +34,8 @@ The server container uses 1 CPU, 2 GiB, the official 65,535 file limit and the p
 
 Benchmarks and profiles default to a 30-second ramp and 60-second hold. Use `--hold 5m --ramp 60s` for confirmation runs.
 
-Both use the unchanged `bench/load.js`; k6 reports latency, throughput and errors. The wrapper manages Docker, resource counters and saved results. Use `--no-build` to reuse existing images. Counter readers run outside the server's cgroup.
+The native C++ generator follows `bench/load.js` with shared tokens and one connection per user. It supports plain HTTP/IPv4 without redirects or compressed responses. Use `--generator k6` for the reference workload. Both save latency, throughput and errors through dev.py. Use `--no-build` to reuse existing images. Counter readers run outside the server's cgroup.
 
-Profiles use a separate perf container with CAP_PERFMON, the same UID and the server's PID namespace. Sampling covers the hold only, using `cpu-clock:u` at 997 Hz with DWARF stacks and the unchanged release binary. Kernel work and io_uring workers are outside the stack profile; cgroup counters record user and system CPU separately. k6 still runs its final 30-second ramp-down.
+Profiles use a separate perf container in the server's PID namespace. Sampling covers the hold only, at 997 Hz with DWARF stacks and the unchanged release binary. The default `cpu-clock:u` captures user CPU; `--scope all` includes kernel CPU. Cgroup counters record user and system CPU separately. Both generators finish with a 30-second ramp-down and up to 10 seconds of grace.
 
-Raw profiles stay in `results/<label>/`. `--save` keeps a compact summary; `dev.py results <profile.json>` displays it. Paths passed through `uv run --directory src` are relative to src. Stage attribution uses stack names; inlining and unresolved frames limit precision.
+Raw profiles stay in `results/<label>/`. `--save` keeps a compact summary; `dev.py results <profile.json>` displays it. Paths passed through `uv run --directory src` are relative to src. Stage categories follow whole call paths; leaf CPU shows the sampled function. These views overlap. Inlining and unresolved frames limit precision.

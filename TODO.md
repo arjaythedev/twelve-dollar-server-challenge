@@ -2,7 +2,6 @@
 
 ## Next, in order
 
-- [ ] Split transport into parser, connection, ring and event loop; verify behavior, then run larger load groups.
 - [ ] Separate bounded receive draining from handler work, then compare multishot receive and accept depth.
 - [ ] Measure WAL/checkpoint costs, then compare background checkpoints and bounded group commit. Send write responses after commit.
 - [ ] Compare ID-ordered post/author reads, then use the next profile to choose smaller changes such as hybrid SEND and JSON scanning.
@@ -14,6 +13,8 @@
 
 ## Done
 
+- [x] Build the native load generator, compare its behavior and memory with k6 at 10,000 users and integrate it into dev.py.
+- [x] Split transport into parser, connection, ring and event loop; simplify state, pass behavior checks and compare at 50,000 users.
 - [x] Build and measure the typed Python baseline; replace its runtime with C++23/io_uring and keep Python for tooling.
 - [x] Pass native, official and extra HTTP tests; profile user and kernel CPU.
 - [x] Keep B-tree feed reads, request-local like scans and local payload decoding; retain SQL point reads.

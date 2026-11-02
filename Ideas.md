@@ -23,6 +23,7 @@
   Budget socket reads and response work separately: `M_queue ~= Q_kernel*m_kernel + Q_app*m_app`. Drain input within a byte budget before expensive handlers; cap queued input and output, pause new work at a high watermark and resume below a lower one.
   Start with FIFO; compare byte-deficit scheduling for uneven response sizes, with request-age promotion to prevent starvation. Preserve connection/write order and read fresh data when dispatched.
   Test multishot accept separately to reduce accept SQEs and rearming. Count accepted sockets and terminal CQEs correctly, close arrivals during shutdown and rearm after termination.
+  First compare one pending accept with 64 reserved-slot tickets on one listener. Use a controlled 20-ms handler stall and measure accepted CQEs, first-response latency and listen overflows; retain each ticket through cancellation and late successful accepts.
   Keep submission, registration and cleanup with one issuer when comparing `SINGLE_ISSUER`/`DEFER_TASKRUN`. Isolate the contribution of the current `IORING_RECVSEND_POLL_FIRST` idle-receive path ([liburing](https://github.com/axboe/liburing/blob/liburing-2.15/man/io_uring_prep_recv.3)).
 
 - [x] Compare direct receive-buffer parsing against the 4-ms / 32-CQE baseline. The first pair saved memory without a CPU gain; keep the current path for now.
@@ -37,8 +38,11 @@
 
 ## Then: storage and measured hot paths
 
-- [ ] Reuse immutable parser callback tables; API handlers already live for the server's lifetime. Keep request state and JWT verification separate for every request.
-- [ ] Compare a small parser/connection FSM with the current flags. Make valid transitions explicit; measure an event bus only if multiple event consumers justify its routing and lifetime costs.
+- [x] Share immutable parser callbacks and use small parser/connection FSMs. API handlers already live for the server's lifetime; request state and JWT verification remain per request.
+- [ ] Test an event bus only if multiple event consumers justify its routing and lifetime costs.
+- [ ] Move cold parser/buffer/send state behind a lazily owned Exchange ([Rust](https://github.com/arjaythedev/twelve-dollar-server-challenge/blob/4298101/submissions/rust-iouring-kensac/src/main.rs#L133)). Estimated storage: `64*N + 584*A`, plus payloads, pool and allocator costs; N is open connections, A is active exchanges. Keep each parser alive through fragments, auth, pipeline tails and terminal I/O CQEs.
+  Bound recycled Exchange/output capacity and discard oversized buffers; a slow send must not pin unrelated responses.
+- [ ] Compare encoded CQE identities `(event, ring, slot, generation)` with the two Operation records ([C](submissions/c-iouring-pavlyhalim/src/server.c)). Preserve cancellation matching, generation wrap and stale-buffer returns.
 
 - [ ] Measure checkpoint CPU, WAL growth and p99 before changing write scheduling. Files/locks/page cache account for 10.9% of sampled CPU; this includes reads and locking as well as writes.
   Try PASSIVE checkpoints on a separate, lower-priority connection. `unix-excl` needs one owning process. Synchronize checkpoint state explicitly.
@@ -70,6 +74,9 @@
 
 ## Larger or conditional experiments
 
+- [x] Build a small native load generator matching `bench/load.js`: shared tokens, per-user connections and state, the same ramps, think times, write probabilities, checks and latency definitions.
+  Use an event loop and timers instead of a JavaScript runtime per user. Compare small runs against k6 before using it for capacity experiments; keep k6 as the reference.
+
 - [ ] Test multishot receive after the simpler accept and work-budget comparisons.
   It needs separate stable receive/send operation identities, terminal-CQE tracking and bounded `ENOBUFS` rearming; the current one-operation-per-connection model cannot track concurrent receive/send operations.
   Bound queued input while sends are outstanding, preserve HTTP response order and return each selected buffer exactly once, including shutdown and cancellation.
@@ -82,7 +89,8 @@
   Keep io_uring as the chosen architecture while testing this alternative. Hold connection count, receive/send storage, work budgets, socket options and load setup constant; compare CPU/request, tail latency, memory and errors.
   Include `EAGAIN`, short I/O, disconnects, early auth rejection, pipelining and shutdown. Count syscall and readiness costs rather than assuming either I/O API wins for small requests.
 
-- [ ] Compare SQLite's own page-cache sizes with `mmap_size=0`: `N ~= (RAM - fixed_cost - cache - queues)/memory_per_connection`. SQLite's page cache is explicitly allowed by [rule 5](README.md#rules).
+- [x] Compare SQLite's own page-cache sizes with `mmap_size=0`: `N ~= (RAM - fixed_cost - cache - queues)/memory_per_connection`. SQLite's page cache is explicitly allowed by [rule 5](README.md#rules).
+  Use a 16-MiB budget; random post reads improved without the larger cache's feed regression.
   Keep one database at `SQLITE_PATH`; file sharding changes the fixed data contract. Extra connections add no CPU capacity on one vCPU.
 
 - [ ] Compare PGO trained on fresh synthetic data with plain optimization ([build.sh](submissions/c-iouring-pavlyhalim/build.sh)).

@@ -37,6 +37,8 @@
 | C++ 0.1.0 (direct descriptors A, Linux loopback) | 25,000 | 60 s | 259,013 | 1,991.54 | 4.640 ms | 14.730 ms | 65.56 ms | 0% | 40.49 us | 342.45 MiB |
 | C++ 0.1.0 (direct-descriptor baseline B, Linux loopback) | 25,000 | 60 s | 259,159 | 1,992.99 | 4.634 ms | 14.107 ms | 92.20 ms | 0% | 40.56 us | 341.35 MiB |
 | C++ 0.1.0 (direct descriptors B, Linux loopback) | 25,000 | 60 s | 259,214 | 1,993.26 | 4.639 ms | 14.077 ms | 92.99 ms | 0% | 40.49 us | 342.55 MiB |
+| C++ 0.1.0 (refactor baseline, Linux loopback) | 50,000 | 60 s | 519,120 | 3,990.66 | 4.681 ms | 21.253 ms | 125.79 ms | 0% | 34.47 us | 431.94 MiB |
+| C++ 0.1.0 (compact transport, Linux loopback) | 50,000 | 60 s | 518,181 | 3,983.89 | 4.612 ms | 20.346 ms | 117.51 ms | 0% | 33.59 us | 407.12 MiB |
 
 Statistics include the ramps. RAM is the cgroup peak, including charged file pages. Local results, not an official score or a measured capacity limit.
 
@@ -56,6 +58,10 @@ Release LTO, seven alternating CPU comparisons: feed medians 10.358 to 10.227 us
 
 GCC13 to GCC16 (C++23/GNU17), 7 pairs: feed 10.147 to 10.279 us; post 4.081 to 4.127 us. GCC16 needed a SQLite warning exception.
 
+SQLite page cache, 2 to 16 MiB, five alternating pairs: random-post CPU median change -12.6%, misses -37.3%, feed unchanged. JSON hashes matched. Mixed 10k profile: 51.85 us/request, no errors, no clear overall CPU change. [Data](src/profiles/cache16-10000.json).
+
+Load generator, 10k users / 60 s: sampled client cgroup peak 2,775.08 MiB (k6) versus 52.63 MiB (native); 795.95 versus 797.57 requests/s, no errors. Native process peak RSS: 24.05 MiB. [Data](src/profiles/cpp-load-10000.json).
+
 ## Native CPU sampling
 
 50,000 users before the B-tree change, 30-second ramp and 60-second capture. User CPU: SQL/rows 68.5%, transport/other 21.9%, response JSON 4.9%, auth 4.6%.
@@ -69,6 +75,8 @@ Kernel capture after the B-tree change, same load and window: network/socket pat
 [Data](src/profiles/kernel-50000.json). Raw capture: `results/kernel-btree-50000/`.
 
 Current combined capture, same load and window: network 38.2%, SQL/rows 21.8%, io_uring 12.8%, files/locks/page cache 10.9%, JSON 2.1%, auth 2.0% of sampled CPU. 10,549 samples, no loss, 435 unresolved leaves. No request errors. [Data](src/profiles/combined-50000.json).
+
+Compact transport, 10,000 users, 30-second ramp and 60-second capture: network 37.1%, SQL/rows 20.4%, io_uring 17.9%, files/locks/page cache 9.7%. Leaf CPU: interrupt unlock 10.8%, `finish_task_switch` 8.4%. 2,657 samples, no loss, 101 unresolved leaves, no request errors. [Data](src/profiles/compact-10000.json).
 
 ## Request-path sampling
 

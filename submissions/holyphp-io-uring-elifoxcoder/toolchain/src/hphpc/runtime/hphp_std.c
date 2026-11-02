@@ -2521,6 +2521,7 @@ static _Thread_local int g_epfd = -1;
 #define HP_UR_KIND_ACCEPT 4
 #define HP_UR_KIND_CLOSE  5
 #define HP_UR_KIND_READ   6
+#define HP_UR_READ_ANSWER_MAX 2048U
 #define HP_UR_KIND        0xff
 #define HP_UR_OP_ASYNC_CANCEL 14
 #define HP_UR_ASYNC_CANCEL_USERDATA (1U << 4)
@@ -2723,6 +2724,7 @@ struct hp_urfds {
     int    rmshot;                        /* recv SQE is multishot */
     int    rreadq;                        /* queued for a bounded single-shot drain */
     int    rreading;                      /* bounded single-shot recv is in flight */
+    int    ranswerq;                      /* ready, but deferred by the answer cap */
     int64_t cdeadline;
     uint32_t epoch;
 };
@@ -2754,6 +2756,10 @@ static _Thread_local uint32_t hp_ur_retcap, hp_ur_rethead, hp_ur_rettail;
 struct hp_ur_readq_ent { uint32_t fd, epoch; };
 static _Thread_local struct hp_ur_readq_ent *hp_ur_readq;
 static _Thread_local uint32_t hp_ur_readq_cap, hp_ur_readq_head, hp_ur_readq_tail;
+static _Thread_local struct hp_ur_readq_ent *hp_ur_answerq;
+static _Thread_local uint32_t hp_ur_answerq_cap, hp_ur_answerq_head, hp_ur_answerq_tail;
+static _Thread_local uint32_t hp_ur_answer_budget;
+static _Thread_local int hp_ur_recovery_mode;
 static _Thread_local int hp_ur_readq_debugged;
 static _Thread_local int hp_ur_readq_diag;
 static _Thread_local uint32_t *hp_ur_closing; /* fds waiting for a send drain */
@@ -2975,6 +2981,7 @@ static void hp_ur_retfd(hp_sock fd) {
  * nonblocking buffer-select reads before returning to multishot receive. */
 static bool hp_ur_readq_push(hp_sock fd, struct hp_urfds *st, int reason) {
     if (!st || st->rreadq) return true;
+    hp_ur_recovery_mode = 1;
     if (!hp_ur_readq_cap) {
         hp_ur_readq_cap = 1024;
         hp_ur_readq = (struct hp_ur_readq_ent *)malloc(
@@ -3017,6 +3024,77 @@ static bool hp_ur_readq_pop(struct hp_ur_readq_ent *out) {
     }
     *out = hp_ur_readq[hp_ur_readq_head++];
     return true;
+}
+
+static bool hp_ur_answerq_push(hp_sock fd, struct hp_urfds *st) {
+    if (!st || st->ranswerq) return true;
+    if (!hp_ur_answerq_cap) {
+        hp_ur_answerq_cap = 1024;
+        hp_ur_answerq = (struct hp_ur_readq_ent *)malloc(
+            (size_t)hp_ur_answerq_cap * sizeof *hp_ur_answerq);
+        if (!hp_ur_answerq) { hp_ur_answerq_cap = 0; return false; }
+    }
+    if (hp_ur_answerq_tail == hp_ur_answerq_cap) {
+        if (hp_ur_answerq_head) {
+            uint32_t n = hp_ur_answerq_tail - hp_ur_answerq_head;
+            memmove(hp_ur_answerq, hp_ur_answerq + hp_ur_answerq_head,
+                    (size_t)n * sizeof *hp_ur_answerq);
+            hp_ur_answerq_head = 0;
+            hp_ur_answerq_tail = n;
+        }
+        if (hp_ur_answerq_tail == hp_ur_answerq_cap) {
+            if (hp_ur_answerq_cap >= (1U << 22)) return false;
+            uint32_t ncap = hp_ur_answerq_cap << 1;
+            struct hp_ur_readq_ent *n = (struct hp_ur_readq_ent *)realloc(
+                hp_ur_answerq, (size_t)ncap * sizeof *n);
+            if (!n) return false;
+            hp_ur_answerq = n;
+            hp_ur_answerq_cap = ncap;
+        }
+    }
+    hp_ur_answerq[hp_ur_answerq_tail++] =
+        (struct hp_ur_readq_ent){ (uint32_t)fd, st->epoch };
+    st->ranswerq = 1;
+    return true;
+}
+
+static bool hp_ur_answerq_pop(struct hp_ur_readq_ent *out) {
+    if (hp_ur_answerq_head == hp_ur_answerq_tail) {
+        hp_ur_answerq_head = hp_ur_answerq_tail = 0;
+        return false;
+    }
+    *out = hp_ur_answerq[hp_ur_answerq_head++];
+    return true;
+}
+
+/* Recovery may drain many sockets at once. Bound how many are handed to the
+ * application per event-loop pass and keep the rest FIFO-ready for the next
+ * pass so accepts and unrelated completions get CPU time too. */
+static void hp_ur_recovery_ready(hp_sock fd, struct hp_urfds *st, harr *in) {
+    if (!in) return;
+    if (hp_ur_answer_budget) {
+        hp_arr_push(in, hp_of_int(fd));
+        hp_ur_answer_budget--;
+    } else if (!hp_ur_answerq_push(fd, st)) {
+        /* Preserve readiness if the bounded FIFO cannot grow. */
+        hp_arr_push(in, hp_of_int(fd));
+    }
+}
+
+static uint32_t hp_ur_dispatch_answerq(harr *in) {
+    uint32_t dispatched = 0;
+    struct hp_ur_readq_ent ent;
+    while (in && hp_ur_answer_budget && hp_ur_answerq_pop(&ent)) {
+        hp_sock fd = (hp_sock)ent.fd;
+        struct hp_urfds *st = hp_ur_st_of(fd);
+        if (!st || st->epoch != ent.epoch || !st->ranswerq) continue;
+        st->ranswerq = 0;
+        if (!st->rready || st->closeafter) continue;
+        hp_arr_push(in, hp_of_int(fd));
+        hp_ur_answer_budget--;
+        dispatched++;
+    }
+    return dispatched;
 }
 
 static void hp_ur_drop_send_chain(struct hp_urfds *st) {
@@ -4150,6 +4228,7 @@ static int hp_ur_drain_ring(harr *in) {
         if (kind == HP_UR_KIND_CLOSE) continue;
         if (kind == HP_UR_KIND_READ) {
             hp_st[HP_ST_CQE_RECV]++;
+            hp_ur_recovery_mode = 1;
             st->rreading = 0;
             uint32_t bid = c->flags >> HP_UR_CQE_BUFFER_SHIFT;
             int have_buf = (c->flags & HP_UR_CQE_F_BUFFER) &&
@@ -4161,7 +4240,7 @@ static int hp_ur_drain_ring(harr *in) {
             if (have_buf) hp_ur_pbuf_return(bid);
             if (st->closeafter) continue;
             if (c->res > 0 && have_buf) {
-                if (in) hp_arr_push(in, hp_of_int(fd));
+                hp_ur_recovery_ready(fd, st, in);
                 if ((uint32_t)c->res == hp_ur_pbuf_blen) {
                     if (!hp_ur_readq_push(fd, st, 1)) hp_ur_retfd(fd);
                 } else if (!hp_uring_arm_recv(fd, hp_ur_rlen())) {
@@ -4198,6 +4277,8 @@ static int hp_ur_drain_ring(harr *in) {
                 }
             }
             if (st->closeafter) continue;   /* app already closed: ignore */
+            if (st->direct && st->rmshot && !more)
+                hp_ur_recovery_mode = 1;
             if (c->res > 0) {
                 if (!st->direct || !st->rmshot) {
                     /* one-shot recv wrote straight into rh */
@@ -4209,7 +4290,8 @@ static int hp_ur_drain_ring(harr *in) {
                         st->rh->data[c->res] = 0;
                     }
                 }
-                if (in) hp_arr_push(in, hp_of_int(fd));
+                if (hp_ur_recovery_mode) hp_ur_recovery_ready(fd, st, in);
+                else if (in) hp_arr_push(in, hp_of_int(fd));
                 /* The multishot stopped after this buffer (normally because
                  * the buffer ring was empty). Drain any remaining socket data
                  * with bounded reads before re-arming it. */
@@ -4358,6 +4440,11 @@ static int hp_ur_run_readq(harr *in) {
  * ring has progress (or the timeout expires), then drain every ring. */
 static void hp_uring_wait(harr *in, harr *out, int timeout_ms) {
     if (hp_ur_dbg) fprintf(stderr, "[ur] wait to=%d\n", timeout_ms);
+    hp_ur_answer_budget = HP_UR_READ_ANSWER_MAX;
+    hp_ur_recovery_mode =
+        (hp_ur_answerq_head != hp_ur_answerq_tail ||
+         hp_ur_readq_head != hp_ur_readq_tail);
+    uint32_t recovery_dispatched = hp_ur_dispatch_answerq(in);
     hp_ur_arm_all_accepts();
 
     int drained = 0;
@@ -4367,6 +4454,7 @@ static void hp_uring_wait(harr *in, harr *out, int timeout_ms) {
         uint32_t t = __atomic_load_n(hp_ur_cq_tail, __ATOMIC_ACQUIRE);
         have += t - hp_ur_cqhead;
     }
+    if (recovery_dispatched) have = 1; /* queued answers must not wait for I/O */
 
     int epfd = -1;
     if (hp_ur_nrings > 1 || hp_ur_ep_conns > 0) epfd = hp_ur_ep_setup();
@@ -4476,6 +4564,7 @@ static void hp_uring_wait(harr *in, harr *out, int timeout_ms) {
     }
     int read_drained = hp_ur_run_readq(in);
     hp_ur_busy |= read_drained;
+    if (hp_ur_answerq_head != hp_ur_answerq_tail) hp_ur_busy = 1;
     /* deferred closes: the send chain drained (or the peer is gone for
      * good) -> close the fd for real. Entries live until then, bounded by
      * the deadline so a stalled peer cannot pin descriptors forever. */

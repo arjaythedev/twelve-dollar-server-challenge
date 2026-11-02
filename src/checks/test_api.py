@@ -139,6 +139,11 @@ class HTTPTests(unittest.TestCase):
             self.request("POST", "/posts/abc/like", auth=sign(claims()))[:2],
             (400, {"error": "invalid post id"}),
         )
+        self.assertEqual(
+            self.request("POST", "/posts/99999/like", auth=sign(claims()))[:2],
+            (404, {"error": "post not found"}),
+        )
+        self.assertEqual(self.request("POST", "/posts/3/like", auth=sign(claims()))[0], 201)
         with socket.create_connection(("127.0.0.1", self.port), timeout=2) as connection:
             connection.sendall(
                 b"POST /posts HTTP/1.1\r\nHost: localhost\r\nContent-Length: 100\r\n\r\n"

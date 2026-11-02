@@ -420,7 +420,7 @@ std::optional<bool> Database::like(std::int64_t user_id, std::int64_t post_id)
         auto query = state_->exists.use();
         query.bind(1, post_id);
         found = query.next();
-        while (query.next())
+        while (found && query.next())
         {
         }
     }

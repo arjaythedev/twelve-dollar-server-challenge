@@ -121,13 +121,35 @@ pub struct Db {
 
 impl Db {
     pub fn open_with_cache(path: &str, cache_kb: i32) -> Db {
+        Self::open_vfs(path, cache_kb, std::env::var("FEED_UNIX_EXCL").is_ok())
+    }
+
+    /// `unix_excl` opens through SQLite's exclusive-lock VFS: this process
+    /// takes the file lock and keeps it, and the WAL index lives in heap
+    /// memory the process's connections share (no `-shm` file, no
+    /// per-transaction file locks). Single-process runs only: another
+    /// process holding the file fails the open and the caller retries with
+    /// the default VFS.
+    pub fn open_vfs(path: &str, cache_kb: i32, unix_excl: bool) -> Db {
         let cpath = CString::new(path).expect("path");
         let mut h: *mut Sqlite3 = std::ptr::null_mut();
         unsafe {
-            if sqlite3_open_v2(cpath.as_ptr(), &mut h, SQLITE_OPEN_READWRITE, std::ptr::null())
-                != SQLITE_OK
-            {
-                panic!("cannot open {path}");
+            let vfs: *const c_char = if unix_excl {
+                b"unix-excl\0".as_ptr() as *const c_char
+            } else {
+                std::ptr::null()
+            };
+            if sqlite3_open_v2(cpath.as_ptr(), &mut h, SQLITE_OPEN_READWRITE, vfs) != SQLITE_OK {
+                if unix_excl {
+                    eprintln!("unix-excl open failed; default VFS");
+                    if sqlite3_open_v2(cpath.as_ptr(), &mut h, SQLITE_OPEN_READWRITE, std::ptr::null())
+                        != SQLITE_OK
+                    {
+                        panic!("cannot open {path}");
+                    }
+                } else {
+                    panic!("cannot open {path}");
+                }
             }
             sqlite3_busy_timeout(h, 5000);
         }
@@ -711,13 +733,29 @@ unsafe impl Send for WriteConn {}
 
 impl WriteConn {
     pub fn open(path: &str) -> Option<WriteConn> {
+        Self::open_vfs(path, std::env::var("FEED_UNIX_EXCL").is_ok())
+    }
+
+    pub fn open_vfs(path: &str, unix_excl: bool) -> Option<WriteConn> {
         let cpath = CString::new(path).expect("path");
         let mut h: *mut Sqlite3 = std::ptr::null_mut();
         unsafe {
-            if sqlite3_open_v2(cpath.as_ptr(), &mut h, SQLITE_OPEN_READWRITE, std::ptr::null())
-                != SQLITE_OK
-            {
-                return None;
+            let vfs: *const c_char = if unix_excl {
+                b"unix-excl\0".as_ptr() as *const c_char
+            } else {
+                std::ptr::null()
+            };
+            if sqlite3_open_v2(cpath.as_ptr(), &mut h, SQLITE_OPEN_READWRITE, vfs) != SQLITE_OK {
+                if unix_excl {
+                    eprintln!("writer unix-excl open failed; default VFS");
+                    if sqlite3_open_v2(cpath.as_ptr(), &mut h, SQLITE_OPEN_READWRITE, std::ptr::null())
+                        != SQLITE_OK
+                    {
+                        return None;
+                    }
+                } else {
+                    return None;
+                }
             }
             sqlite3_busy_timeout(h, 5000);
         }

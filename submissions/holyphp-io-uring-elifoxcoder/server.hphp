@@ -478,11 +478,12 @@ class Server {
             $this->shedAt = $lim - 4096;
             if ($this->shedAt < 32000) { $this->shedAt = 32000; }
             if ($this->shedAt > $lim) { $this->shedAt = $lim; }
-            /* The ring backend parks one armed recv per connection and the
-             * kernel caps the SQ ring at 32768 entries; the runtime routes
-             * connections beyond that through epoll, so the server can hold
-             * up to the descriptor limit (the fd cap below). */
-            if (uring_active() && $this->shedAt > 60000) { $this->shedAt = 60000; }
+            /* Keep-alive holding is capped by the ring's armed-recv capacity
+             * (the kernel caps the SQ ring at 32768, the default track limit
+             * is 28000). Anything beyond that pays accept/close per request
+             * -- the park-and-retry regime the 145k box run measured at
+             * 60 us/req; the epoll-hold alternative measured at 76 us/req. */
+            if (uring_active() && $this->shedAt > 28000) { $this->shedAt = 28000; }
         }
         /* Operator override (tests, capacity experiments): the shed regime is
          * the churn regime, so being able to force it locally is how the

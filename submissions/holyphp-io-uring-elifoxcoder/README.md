@@ -264,6 +264,28 @@ That took the trivial path to parity with C and the mix from 1.8× to
 1.12–1.18×. The batching costs latency: median 2.5 ms, p95 4.6 ms, p99
 6.3 ms locally — far inside the box's p95 < 500 ms.
 
+#### The box said no to the epoll-hold round: back to park-and-retry
+
+The box scored the branch at `56b5187` at **100,000 users** — below the
+merged 145,000, and with CPU per request up from 60 to 76 µs. That branch's
+connection-cap round had replaced the proven overflow behavior: connections
+beyond the ring cap had been parked in the retry ring and re-armed after the
+next drain (`1569472`, which scored 145k at 60 µs/req); the hold round routed
+them into an epoll set instead. Its first box-scale run carried up to ~32k
+epoll-held connections and those requests paid a recv syscall plus epoll
+add/del per request. Local tests at 2500 connections pinned to one core
+showed the epoll-hold path at 57 µs/req vs 31 µs/req for arm-retry, and the
+box confirmed the direction: 76 µs/req where park-and-retry scored 60.
+
+The runtime is back on park-and-retry by default (`HPHP_OVERFLOW=1` opts
+into the epoll set for measurement), and the server sheds again at the
+ring's armed-recv capacity (28000 under uring), which is exactly the regime
+the merged 145k run used: keep-alive up to the ring cap, accept/close churn
+beyond it. Batched wakeups, the taskrun flags, the native auth/feed work and
+the 1 KB buffers stay.
+
+Rest of the story continues below.
+
 
 
 

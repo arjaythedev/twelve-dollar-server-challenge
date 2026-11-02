@@ -2620,6 +2620,12 @@ static _Thread_local int hp_ur_ep_conns = 0;
 static _Thread_local int hp_ur_ring_conns = 0;
 static _Thread_local int hp_ur_ring_max = -1;
 static _Thread_local int hp_ur_busy = 0;   /* the last wakeup had completions */
+/* Batching is tunable at runtime so the box can decide its own trade:
+ * HPHP_BATCH_N completions waited for, HPHP_BATCH_US waiting ceiling.
+ * N=1 / US=0 restores the one-completion-per-wait behavior. */
+static _Thread_local long hp_ur_batch = HP_UR_BATCH;
+static _Thread_local long hp_ur_batch_us = HP_UR_BATCH_US;
+static _Thread_local int hp_ur_taskrun = 1;
 
 static _Thread_local int hp_ur_st = 0;    /* 0 untried, 1 active, -1 unusable */
 static _Thread_local int hp_ur_fd = -1;
@@ -2813,6 +2819,13 @@ static bool hp_uring_setup(void) {
     const char *env = getenv("HPHP_URING");
     if (env && (env[0] == '0' || env[0] == 'n' || env[0] == 'N')) return false;
     hp_ur_dbg = getenv("HPHP_URING_DEBUG") != NULL;
+    if ((env = getenv("HPHP_BATCH_N"))) hp_ur_batch = atol(env);
+    if (hp_ur_batch < 1) hp_ur_batch = 1;
+    if ((env = getenv("HPHP_BATCH_US"))) hp_ur_batch_us = atol(env);
+    if (hp_ur_batch_us < 0) hp_ur_batch_us = 0;
+    if ((env = getenv("HPHP_TASKRUN")) && (env[0] == '0' || env[0] == 'n' ||
+                                           env[0] == 'N'))
+        hp_ur_taskrun = 0;
     struct hp_uring_setup_params p;
     memset(&p, 0, sizeof p);
     /* Ask for an explicit 64k/64k ring: at 280k users the box holds ~60k
@@ -2826,10 +2839,17 @@ static bool hp_uring_setup(void) {
     p.sq_entries = HP_UR_ENTRIES;
     p.cq_entries = HP_UR_ENTRIES;
     uint32_t base = HP_UR_SETUP_CQSIZE | HP_UR_SETUP_CLAMP;
-    p.flags = base | HP_UR_SETUP_COOP_TASKRUN | HP_UR_SETUP_TASKRUN_FLAG |
-              HP_UR_SETUP_SINGLE_ISSUER | HP_UR_SETUP_DEFER_TASKRUN;
+    /* DEFER_TASKRUN keeps completion work inside io_uring_enter instead of
+     * running it as task_work on every syscall exit; off-switchable via
+     * HPHP_TASKRUN=0 if the box kernel treats it badly. */
+    if (hp_ur_taskrun) {
+        p.flags = base | HP_UR_SETUP_COOP_TASKRUN | HP_UR_SETUP_TASKRUN_FLAG |
+                  HP_UR_SETUP_SINGLE_ISSUER | HP_UR_SETUP_DEFER_TASKRUN;
+    } else {
+        p.flags = base;
+    }
     int fd = (int)syscall(SYS_io_uring_setup, (unsigned long)p.sq_entries, &p);
-    if (fd < 0) {
+    if (fd < 0 && hp_ur_taskrun) {
         /* older kernel: drop DEFER_TASKRUN/SINGLE_ISSUER, keep COOP_TASKRUN */
         p.flags = base | HP_UR_SETUP_COOP_TASKRUN | HP_UR_SETUP_TASKRUN_FLAG;
         fd = (int)syscall(SYS_io_uring_setup, (unsigned long)p.sq_entries, &p);
@@ -3040,9 +3060,14 @@ static bool hp_ur_arm_send_head(hp_sock fd) {
     return true;
 }
 
-/* Track a fresh connection: ring while the ring has room, epoll beyond it.
- * HPHP_RING_MAX overrides the threshold (used by tests to exercise the
- * overflow path without 28k live sockets). */
+/* Track a fresh connection: arm a ring recv. When the SQ ring is full the fd
+ * parks in the retry ring and is re-armed after the next drain freed slots --
+ * the regime the 145k box run succeeded with. HPHP_OVERFLOW=1 opts into
+ * watching overflow connections in an epoll set instead (each request there
+ * pays a recv syscall plus epoll churn; measured at 2500 conns pinned to one
+ * core it costs 57 us/req vs 31 us/req for arm-retry, and its first box run
+ * scored at 76 us/req where the park-and-retry version scored 60 us/req). */
+static int hp_ur_overflow_mode = -1;
 static bool hp_uring_add_conn(hp_sock fd) {
     struct hp_urfds *st = hp_ur_st_of(fd);
     if (!st) return false;
@@ -3051,12 +3076,16 @@ static bool hp_uring_add_conn(hp_sock fd) {
         hp_ur_ring_max = (e && *e) ? atoi(e) : HP_UR_RING_MAX_DEFAULT;
         if (hp_ur_ring_max < 1) hp_ur_ring_max = 1;
     }
-    if (hp_ur_ring_conns < hp_ur_ring_max) {
-        st->ringconn = 1;
-        hp_ur_ring_conns++;
-        return hp_uring_arm_recv(fd, hp_ur_rlen());
+    if (hp_ur_overflow_mode < 0) {
+        const char *e = getenv("HPHP_OVERFLOW");
+        hp_ur_overflow_mode = (e && (e[0] == '1' || e[0] == 'y' ||
+                                     e[0] == 'Y')) ? 1 : 0;
     }
-    return hp_ur_ep_add(fd);
+    if (hp_ur_overflow_mode == 1 && hp_ur_ring_conns >= hp_ur_ring_max)
+        return hp_ur_ep_add(fd);
+    st->ringconn = 1;
+    hp_ur_ring_conns++;
+    return hp_uring_arm_recv(fd, hp_ur_rlen());
 }
 
 /* Queue a response whose buffer the runtime already owns (stream_send_sb):
@@ -3188,7 +3217,8 @@ static void hp_uring_wait(harr *in, harr *out, int timeout_ms) {
          * them; overflow fds go straight into the ready list. */
         hp_ur_enter(to_submit, 0, 0);
         struct epoll_event evs[64];
-        int ep_to = hp_ur_busy ? (HP_UR_BATCH_US / 1000) : timeout_ms;
+        int ep_to = (int)(hp_ur_batch_us / 1000);
+        if (ep_to < 1) ep_to = 1;
         int n = epoll_wait(hp_ur_epfd, evs, 64, ep_to);
         for (int i = 0; i < n; i++) {
             int efd = evs[i].data.fd;
@@ -3201,9 +3231,9 @@ static void hp_uring_wait(harr *in, harr *out, int timeout_ms) {
          * microseconds, so one wakeup serves many requests. Idle waits block
          * until the first completion. */
         int min = 1;
-        int wait_us = timeout_ms * 1000;
+        long wait_us = (long)timeout_ms * 1000;
         if (have > 0) { min = 0; wait_us = 0; }
-        else if (hp_ur_busy) { min = HP_UR_BATCH; wait_us = HP_UR_BATCH_US; }
+        else if (hp_ur_busy) { min = (int)hp_ur_batch; wait_us = hp_ur_batch_us; }
         hp_ur_enter(to_submit, min, wait_us);
     }
 

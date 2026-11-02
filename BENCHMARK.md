@@ -42,6 +42,9 @@
 | C++ 0.1.0 (native client, Linux loopback) | 100,000 | 60 s | 1,036,376 | 7,972.07 | 11.246 ms | 26.269 ms | 120.47 ms | 0% | 32.54 us | 653.45 MiB |
 | C++ 0.1.0 (hybrid send, Linux loopback) | 100,000 | 60 s | 1,036,840 | 7,975.70 | 12.957 ms | 33.165 ms | 125.39 ms | 0% | 32.52 us | 647.02 MiB |
 | C++ 0.1.0 (cold Exchange, Linux loopback) | 100,000 | 60 s | 1,036,362 | 7,972.03 | 11.366 ms | 27.424 ms | 455.02 ms | 0% | 31.05 us | 528.11 MiB |
+| C++ 0.1.0 (native client, failed) | 300,000 | 5 min | 10,284,638 | 25,711.54 | 5,316.581 ms | 19,524.643 ms | 60,001.25 ms | 0.0066% | 25.80 us | 1,391.69 MiB |
+| C++ 0.1.0 (bounded handler queue) | 100,000 | 60 s | 1,037,202 | 7,978.44 | 12.390 ms | 32.713 ms | 201.77 ms | 0% | 31.32 us | 525.76 MiB |
+| C++ 0.1.0 (checkpoint worker) | 100,000 | 60 s | 1,037,228 | 7,978.67 | 3.690 ms | 4.711 ms | 34.51 ms | 0% | 32.70 us | 535.91 MiB |
 
 Statistics include the ramps. RAM is the cgroup peak, including charged file pages. Local results, not an official score or a measured capacity limit.
 

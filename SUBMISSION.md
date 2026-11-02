@@ -2,7 +2,7 @@
 
 C++23, liburing 2.15, llhttp 9.4.3, SQLite 3.53.1, yyjson 0.13.0 and OpenSSL 3. CMake pins downloaded sources by SHA-256.
 
-One event-loop thread drives up to 16 io_uring rings with direct descriptors and one SQLite connection. One listener keeps 64 direct accepts pending. Rings are added as their file tables fill. WAL, synchronous=NORMAL and foreign keys are enabled. Reads query SQLite afresh. Writes commit before their response. Each protected request verifies its JWT after the headers; its identity lasts for that request only.
+One event-loop thread drives up to 16 io_uring rings with direct descriptors and 64 pending accepts. Rings are added as their file tables fill. Requests use one SQLite connection; a checkpoint worker owns a second connection for PASSIVE checkpoints. WAL, synchronous=NORMAL and foreign keys are enabled. Reads query SQLite afresh. Writes commit before their response. Each protected request verifies its JWT after the headers; its identity lasts for that request only.
 
 Idle connections hold 56 bytes of state. Parser and send storage live in an Exchange during active requests; each ring recycles at most 1,024 Exchanges with up to 8 KiB of retained string capacity each.
 

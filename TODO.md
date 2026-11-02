@@ -2,8 +2,8 @@
 
 ## Next, in order
 
-- [ ] Separate bounded receive draining from handler work, then compare multishot receive.
-- [ ] Measure WAL/checkpoint costs, then compare background checkpoints and bounded group commit. Send write responses after commit.
+- [ ] Confirm the checkpoint worker at 300k with a five-minute hold; record latency, CPU and WAL backlog.
+- [ ] Compare multishot receive after isolating handler stalls.
 - [ ] Compare ID-ordered post/author reads, then use the next profile to choose smaller changes such as hybrid SEND and JSON scanning.
 
 ## Later
@@ -13,6 +13,8 @@
 
 ## Done
 
+- [x] Measure checkpoint stalls, add an owned checkpoint worker and compare at 100k; lower p99 costs more CPU.
+- [x] Compare bounded CQ/handler queues; retain inline dispatch after no measured gain.
 - [x] Keep 64 direct accepts pending; compare short bursts and verify multi-ring reuse and shutdown.
 - [x] Use 56-byte connections and bounded Exchange reuse; pass native, sanitizer and HTTP checks, then compare at 100k.
 - [x] Build the native load generator, compare its behavior and memory with k6 at 10,000 users and integrate it into dev.py.

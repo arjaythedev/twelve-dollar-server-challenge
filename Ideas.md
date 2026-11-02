@@ -24,6 +24,10 @@
 
 - [ ] Compare an exact non-empty-ring bitmap if ring selection becomes hot. Free-slot allocation is already O(1); a Bloom filter adds hashes and false positives before a direct slot lookup.
 
+- [x] Compare a bounded ready queue with round-robin handler dispatch. At 100k, CPU/request changed from 31.05 to 31.32 us and p99 from 27.42 to 32.71 ms; keep inline dispatch.
+
+- [ ] Collect aggregate handler/SQLite/commit and send-submission-to-CQE histograms, with per-ring CQ depth and overflow counters. Send timing includes CQ service delay; CPU samples omit I/O waits.
+
 - [ ] Bound CQ draining and handler work before extending completion waits further. Network/socket paths account for 40.2% and io_uring for 12.0% of sampled CPU in the [100k profile](src/profiles/exchange-100000.json).
   Measure requests/enter, CQ batch sizes and CPU/request: `C ~= C_enter/requests_per_enter + C_other`. Adapt batching to queue depth and oldest response age; cap CQ drains by count or elapsed time, submit pending sends promptly and avoid waiting while application work is ready.
   Budget socket reads and response work separately: `M_queue ~= Q_kernel*m_kernel + Q_app*m_app`. Drain input within a byte budget before expensive handlers; cap queued input and output, pause new work at a high watermark and resume below a lower one.
@@ -49,9 +53,8 @@
   Bound recycled Exchange/output capacity and discard oversized buffers; a slow send must not pin unrelated responses.
 - [ ] Compare encoded CQE identities `(event, ring, slot, generation)` with the two Operation records ([C](submissions/c-iouring-pavlyhalim/src/server.c)). Preserve cancellation matching, generation wrap and stale-buffer returns.
 
-- [ ] Measure checkpoint CPU, WAL growth and p99 before changing write scheduling. Files/locks/page cache account for 11.8% of sampled CPU; this includes reads and locking as well as writes.
-  Try PASSIVE checkpoints on a separate, lower-priority connection. `unix-excl` needs one owning process. Synchronize checkpoint state explicitly.
-  Profile WAL writes separately from checkpoints; preserve write order, flush errors and `synchronous=NORMAL` or stronger.
+- [x] Move PASSIVE checkpoints to a worker with its own SQLite connection. At 100k, p99 fell from 27.42 to 4.71 ms while CPU/request rose from 31.05 to 32.70 us.
+  Coalesce 1,000-frame wakeups, defer partial/failed checkpoints and join before closing connections. Keep commits on the issuer and preserve `synchronous=NORMAL`; confirm WAL backlog and latency at 300k.
 
 - [ ] Group writes with a size limit b and timeout: `C(b) ~= s + a/b`, average collection wait `~= (b-1)/(2*lambda)`.
   Measure write arrival rate and transaction cost before choosing b or the collection window. Hold dependent responses until commit; rollbacks and commit failure must replace them with errors.

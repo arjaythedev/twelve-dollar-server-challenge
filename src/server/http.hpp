@@ -1,8 +1,9 @@
 #pragma once
 
 #include "identity.hpp"
+#include "write.hpp"
 
-#include <cstddef>
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -10,7 +11,16 @@
 namespace tds
 {
 
-inline constexpr std::size_t write_batch_limit = 16;
+enum class Endpoint : std::uint8_t
+{
+    unresolved,
+    health,
+    feed,
+    post,
+    create,
+    like,
+    missing
+};
 
 enum class Status : unsigned short
 {
@@ -31,6 +41,7 @@ struct Request
     std::string authorization;
     std::string body;
     std::optional<Identity> identity;
+    Endpoint endpoint = Endpoint::unresolved;
     bool keep_alive = true;
 };
 
@@ -39,6 +50,8 @@ struct Response
     Status status;
     std::string body;
 };
+
+using RequestResult = std::variant<Response, WriteCommand>;
 
 struct ApiError
 {

@@ -55,6 +55,9 @@
 | C++ 0.1.0 (group commit) | 300,000 | 60 s | 3,581,785 | 22,386.04 | 28.255 ms | 371.544 ms | 4,785.60 ms | 0% | 25.95 us | 1,097.05 MiB |
 | C++ 0.1.0 (group commit) | 300,000 | 5 min | 11,200,015 | 28,000.03 | 5.360 ms | 82.080 ms | 3,954.01 ms | 0% | 24.36 us | 1,247.85 MiB |
 | C++ 0.1.0 (batch cleanup) | 300,000 | 5 min | 11,207,115 | 28,017.76 | 4.828 ms | 6.775 ms | 159.68 ms | 0% | 23.62 us | 1,294.88 MiB |
+| C++ 0.1.0 (batch cleanup, failed) | 500,000 | 60 s | 1,821,037 | 11,381.47 | 58,471.894 ms | 84,766.683 ms | 87,071.71 ms | 6.60% | 32.58 us | 1,277.16 MiB |
+| C++ 0.1.0 (typed pipeline) | 300,000 | 60 s | 3,586,201 | 22,413.76 | 4.675 ms | 6.174 ms | 37.62 ms | 0% | 25.16 us | 1,026.10 MiB |
+| C++ 0.1.0 (typed pipeline) | 300,000 | 5 min | 11,206,740 | 28,016.80 | 4.818 ms | 6.439 ms | 86.89 ms | 0% | 23.81 us | 1,107.38 MiB |
 
 Statistics include the ramps. RAM is the cgroup peak, including charged file pages. Local results, not an official score or a measured capacity limit.
 
@@ -63,6 +66,10 @@ Statistics include the ramps. RAM is the cgroup peak, including charged file pag
 300k group commit, five minutes, no internal telemetry: hold-only p99 97.99 ms; maximum 3,954.01 ms. The short run had worse p99 than the earlier short feed profile.
 
 300k batch cleanup, five minutes, no internal telemetry: hold-only p99 7.04 ms; maximum 159.68 ms.
+
+300k typed pipeline, five minutes, no internal telemetry: hold-only p99 6.54 ms; maximum 86.89 ms.
+
+500k: no completed requests during hold; server CPU fell while the client used one core. Cause unresolved; this run does not establish server capacity.
 
 Normal repeat: same server/client/seed/workload hashes, different RNG seed; p99 rose from 749.36 to 1,702.04 ms. No memory-limit or reclaim events.
 

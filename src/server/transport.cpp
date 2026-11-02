@@ -1,6 +1,10 @@
 #include "transport.hpp"
 #include "transport/ring.hpp"
 
+#ifdef TDS_DIAGNOSTICS
+#include "transport/diagnostics.hpp"
+#endif
+
 #include <algorithm>
 #include <arpa/inet.h>
 #include <array>
@@ -36,10 +40,10 @@ class Server::State
 {
   public:
     State(std::string_view host, std::uint16_t port, Handler handle, HeaderHandler head,
-          WriteHandlers write_handlers)
+          BatchHandler write_handler)
         : listener(::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0)),
           stop(::eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK)), handler(std::move(handle)),
-          headers(std::move(head)), writes(std::move(write_handlers))
+          headers(std::move(head)), writes(std::move(write_handler))
     {
         int enabled = 1;
         if (::setsockopt(listener.get(), SOL_SOCKET, SO_REUSEADDR, &enabled, sizeof(enabled)) < 0)
@@ -106,8 +110,7 @@ class Server::State
     void run()
     {
 #ifdef TDS_DIAGNOSTICS
-        diagnostics_started_ns = timing::now_ns();
-        diagnostics_last_ns = diagnostics_started_ns;
+        diagnostics.start();
 
         struct FinalReport
         {
@@ -115,7 +118,7 @@ class Server::State
 
             ~FinalReport()
             {
-                owner.report_diagnostics(true);
+                owner.diagnostics.report(owner.rings, true);
             }
         } report_on_exit{*this};
 #endif
@@ -156,6 +159,10 @@ class Server::State
                     auto *operation = static_cast<Operation *>(io_uring_cqe_get_data(completion));
                     accepted = accepted || (operation && operation->event == Event::accept);
                     complete(owner, operation, completion->res, completion->flags);
+                    if (pending_writes.commands.size() == write_batch_limit)
+                    {
+                        flush_writes();
+                    }
                     if (++drained == 256)
                     {
                         break;
@@ -181,83 +188,27 @@ class Server::State
             finish_wakeups();
             previous_count = count;
 #ifdef TDS_DIAGNOSTICS
-            report_diagnostics(false);
+            diagnostics.report(rings, false);
 #endif
         }
     }
 
   private:
 #ifdef TDS_DIAGNOSTICS
-    Response measured_handler(Connection &connection)
+    RequestResult measured_handler(Connection &connection)
     {
-        receive_to_handler_ns.record(timing::now_ns() - connection.exchange->receive_serviced_ns);
-        timing::Scope sample(handler_wall_ns);
+        const auto &request = connection.exchange->parser.request();
+        if (request.endpoint == Endpoint::create || request.endpoint == Endpoint::like)
+        {
+            return handler(request);
+        }
+        diagnostics.receive_to_handler_ns.record(timing::now_ns() -
+                                                 connection.exchange->receive_serviced_ns);
+        timing::Scope sample(diagnostics.handler_wall_ns);
 
         return handler(connection.exchange->parser.request());
     }
 
-    void report_diagnostics(bool final) noexcept
-    {
-        const auto now = timing::now_ns();
-        const auto interval = now - diagnostics_last_ns;
-        if (!final && interval < 5'000'000'000ULL)
-        {
-            return;
-        }
-        const auto write_started_ns = timing::now_ns();
-        ::flockfile(stderr);
-        std::fprintf(stderr,
-                     "TDS_TIMING {\"source\":\"transport\",\"time_ns\":%" PRIu64
-                     ",\"elapsed_ns\":%" PRIu64 ",\"interval_ns\":%" PRIu64
-                     ",\"previous_report_write_ns\":%" PRIu64 ",\"final\":%s,",
-                     now, now - diagnostics_started_ns, interval, previous_report_write_ns,
-                     final ? "true" : "false");
-        handler_wall_ns.write(stderr, "handler_wall_ns");
-        handler_wall_ns.reset();
-        std::fputc(',', stderr);
-        write_batch_size.write(stderr, "write_batch_size", "requests");
-        write_batch_size.reset();
-        std::fputc(',', stderr);
-        write_batch_wall_ns.write(stderr, "write_batch_wall_ns");
-        write_batch_wall_ns.reset();
-        std::fputc(',', stderr);
-        receive_to_handler_ns.write(stderr, "receive_cqe_service_to_handler_start_ns");
-        receive_to_handler_ns.reset();
-        std::fputs(",\"rings\":[", stderr);
-        for (std::size_t index = 0; index < rings.size(); ++index)
-        {
-            auto &owner = *rings[index];
-            auto &sample = owner.diagnostics;
-            const auto overflow = io_uring_smp_load_acquire(owner.queue.cq.koverflow);
-            std::fprintf(stderr,
-                         "%s{\"ring\":%zu,\"cqes\":%" PRIu64 ",\"receive_enobufs\":%" PRIu64
-                         ",\"cq_empty_samples\":%" PRIu64 ",\"cq_overflow_flag_samples\":%" PRIu64
-                         ",\"cq_overflow_counter_delta\":%u,",
-                         index ? "," : "", index, sample.cqes, sample.receive_enobufs,
-                         sample.empty_cq_samples, sample.overflow_flag_samples,
-                         overflow - sample.previous_overflow);
-            sample.cq_depth.write(stderr, "cq_ready_before_drain", "cqes");
-            std::fputc(',', stderr);
-            sample.deferred_receive_depth.write(stderr, "deferred_receive_queue_depth",
-                                                "connections");
-            std::fputc(',', stderr);
-            // Each attempt includes submission batching and CQ service delay, not just socket I/O
-            sample.send_attempt.write(stderr, "send_attempt_prepare_to_cqe_service_ns");
-            std::fputc('}', stderr);
-            sample.cq_depth.reset();
-            sample.deferred_receive_depth.reset();
-            sample.send_attempt.reset();
-            sample.cqes = 0;
-            sample.receive_enobufs = 0;
-            sample.empty_cq_samples = 0;
-            sample.overflow_flag_samples = 0;
-            sample.previous_overflow = overflow;
-        }
-        std::fputs("]}\n", stderr);
-        ::funlockfile(stderr);
-        previous_report_write_ns = timing::now_ns() - write_started_ns;
-        diagnostics_last_ns = now;
-    }
 #endif
 
     void poll_satellite(Ring &owner)
@@ -352,11 +303,11 @@ class Server::State
 
     void flush_writes()
     {
-        if (!pending_writes.count)
+        if (pending_writes.commands.empty())
         {
             return;
         }
-        const auto count = std::exchange(pending_writes.count, 0);
+        const auto count = pending_writes.commands.size();
         const auto connections = std::span(pending_writes.connections).first(count);
         if (stopping)
         {
@@ -365,18 +316,18 @@ class Server::State
             {
                 close(*connection);
             }
+            pending_writes.commands.clear();
 
             return;
         }
-        const auto requests = std::span(pending_writes.requests).first(count);
         const auto responses = std::span(pending_writes.responses).first(count);
         try
         {
 #ifdef TDS_DIAGNOSTICS
-            write_batch_size.record(count);
-            timing::Scope sample(write_batch_wall_ns);
+            diagnostics.write_batch_size.record(count);
+            timing::Scope sample(diagnostics.write_batch_wall_ns);
 #endif
-            writes.handle(requests, responses);
+            writes(pending_writes.commands, responses);
         }
         catch (const std::exception &error)
         {
@@ -395,6 +346,15 @@ class Server::State
                 connection.close_after || responses[index].status == Status::internal_error;
             respond(connection, std::move(responses[index]));
         }
+        pending_writes.commands.clear();
+    }
+
+    void queue_write(Connection &connection, WriteCommand command)
+    {
+        const auto index = pending_writes.commands.size();
+        pending_writes.commands.push_back(std::move(command));
+        pending_writes.connections[index] = &connection;
+        connection.start_queued_write();
     }
 
     void process(Connection &connection)
@@ -430,23 +390,19 @@ class Server::State
                 }
                 if (parser.complete())
                 {
-                    if (writes.handle && writes.accepts(parser.request()))
-                    {
-                        connection.start_application();
-                        pending_writes.connections[pending_writes.count] = &connection;
-                        pending_writes.requests[pending_writes.count++] = &parser.request();
-                        if (pending_writes.count == write_batch_limit)
-                        {
-                            flush_writes();
-                        }
-
-                        return;
-                    }
 #ifdef TDS_DIAGNOSTICS
-                    respond(connection, measured_handler(connection));
+                    auto outcome = measured_handler(connection);
 #else
-                    respond(connection, handler(parser.request()));
+                    auto outcome = handler(parser.request());
 #endif
+                    if (auto *response = std::get_if<Response>(&outcome))
+                    {
+                        respond(connection, std::move(*response));
+                    }
+                    else
+                    {
+                        queue_write(connection, std::get<WriteCommand>(std::move(outcome)));
+                    }
                 }
                 else
                 {
@@ -802,14 +758,18 @@ class Server::State
     Descriptor stop;
     Handler handler;
     HeaderHandler headers;
-    WriteHandlers writes;
+    BatchHandler writes;
 
     struct PendingWrites
     {
+        PendingWrites()
+        {
+            commands.reserve(write_batch_limit);
+        }
+
         std::array<Connection *, write_batch_limit> connections{};
-        std::array<const Request *, write_batch_limit> requests{};
         std::array<Response, write_batch_limit> responses{};
-        std::size_t count = 0;
+        std::vector<WriteCommand> commands;
     } pending_writes;
 
     static constexpr std::size_t max_rings = 16;
@@ -822,18 +782,12 @@ class Server::State
     bool stopping = false;
     bool closing_wakeups = false;
 #ifdef TDS_DIAGNOSTICS
-    timing::Histogram handler_wall_ns;
-    timing::Histogram receive_to_handler_ns;
-    timing::Histogram write_batch_size;
-    timing::Histogram write_batch_wall_ns;
-    std::uint64_t diagnostics_started_ns = 0;
-    std::uint64_t diagnostics_last_ns = 0;
-    std::uint64_t previous_report_write_ns = 0;
+    transport::TransportDiagnostics diagnostics;
 #endif
 };
 
 Server::Server(std::string_view host, std::uint16_t port, Handler handler, HeaderHandler headers,
-               WriteHandlers writes)
+               BatchHandler writes)
     : state_(std::make_unique<State>(host, port, std::move(handler), std::move(headers),
                                      std::move(writes)))
 {

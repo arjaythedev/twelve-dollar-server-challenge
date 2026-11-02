@@ -15,17 +15,12 @@ namespace tds
 class Server
 {
   public:
-    using Handler = std::function<Response(const Request &)>;
+    using Handler = std::function<RequestResult(const Request &)>;
     using HeaderHandler = std::function<std::optional<Response>(Request &)>;
-
-    struct WriteHandlers
-    {
-        std::function<bool(const Request &)> accepts;
-        std::function<void(std::span<const Request *const>, std::span<Response>)> handle;
-    };
+    using BatchHandler = std::function<void(std::span<const WriteCommand>, std::span<Response>)>;
 
     Server(std::string_view host, std::uint16_t port, Handler handler, HeaderHandler headers,
-           WriteHandlers writes = {});
+           BatchHandler writes = {});
     ~Server();
     Server(const Server &) = delete;
     Server &operator=(const Server &) = delete;

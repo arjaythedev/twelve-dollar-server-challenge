@@ -19,8 +19,11 @@
 
 namespace
 {
-using Database = tds::Database;
-using Write = Database::Write;
+using tds::CreatePost;
+using tds::Database;
+using tds::LikePost;
+using tds::WriteCommand;
+using tds::WriteResult;
 
 void require(bool condition, const char *message)
 {
@@ -172,7 +175,7 @@ struct Control
     std::int64_t visible_likes = -1;
 };
 
-const std::string &created(const Database::WriteResult &result)
+const std::string &created(const WriteResult &result)
 {
     require(result.has_value(), "create result failed");
     const auto *value = std::get_if<std::string>(&*result);
@@ -180,7 +183,7 @@ const std::string &created(const Database::WriteResult &result)
     return *value;
 }
 
-std::optional<bool> liked(const Database::WriteResult &result)
+std::optional<bool> liked(const WriteResult &result)
 {
     require(result.has_value(), "like result failed");
     const auto *value = std::get_if<std::optional<bool>>(&*result);
@@ -188,7 +191,7 @@ std::optional<bool> liked(const Database::WriteResult &result)
     return *value;
 }
 
-void all_failed(const std::vector<Database::WriteResult> &results, std::size_t count)
+void all_failed(const std::vector<WriteResult> &results, std::size_t count)
 {
     require(results.size() == count, "failed batch lost results");
     for (const auto &result : results)
@@ -239,16 +242,16 @@ void fifo_isolation_and_visibility()
     auto reader = open(fixture.path);
     Control control(reader.get());
     const std::string body = "quote \" slash \\ line\n\t\r\b\f\x01 caf\xc3\xa9";
-    const std::array<Write, 9> jobs{
-        Database::Create{1, "first", body},
-        Database::Like{2, 2},
-        Database::Like{2, 2},
-        Database::Like{1, 999},
-        Database::Create{999, "missing", "bad foreign key"},
-        Database::Like{999, 1},
-        Database::Create{1, "first", ""},
-        Database::Create{2, "second", "after failed neighbors"},
-        Database::Like{1, 3},
+    const std::array<WriteCommand, 9> jobs{
+        CreatePost{1, "first", body},
+        LikePost{2, 2},
+        LikePost{2, 2},
+        LikePost{1, 999},
+        CreatePost{999, "missing", "bad foreign key"},
+        LikePost{999, 1},
+        CreatePost{1, "first", ""},
+        CreatePost{2, "second", "after failed neighbors"},
+        LikePost{1, 3},
     };
     const auto results = db.write_batch(jobs);
     require(results.size() == jobs.size(), "batch lost results");
@@ -287,12 +290,13 @@ void failed_commits()
             auto reader = open(fixture.path);
             Control control(reader.get());
             control.commit_failure = failure;
-            const std::array<Write, 3> jobs{
-                Database::Create{1, "first", "must roll back"},
-                Database::Like{2, 1},
-                Database::Like{1, 999},
+            const std::array<WriteCommand, 3> jobs{
+                CreatePost{1, "first", "must roll back"},
+                LikePost{2, 1},
+                LikePost{1, 999},
             };
-            const auto writes = std::span<const Write>(jobs).first(singleton ? 1U : jobs.size());
+            const auto writes =
+                std::span<const WriteCommand>(jobs).first(singleton ? 1U : jobs.size());
             all_failed(db.write_batch(writes), writes.size());
             require(control.commits == 1 && control.visible_posts == 1 &&
                         control.visible_likes == 0,
@@ -301,8 +305,8 @@ void failed_commits()
                         scalar(reader.get(), "SELECT count(*) FROM likes") == 0,
                     "failed commit retained batch writes");
             control.commit_failure = CommitFailure::none;
-            const std::array<Write, 1> recovery{
-                Database::Create{1, "first", "recovered after failed commit"}};
+            const std::array<WriteCommand, 1> recovery{
+                CreatePost{1, "first", "recovered after failed commit"}};
             require(!created(db.write_batch(recovery).at(0)).empty(),
                     "failed commit left writer unusable");
         }
@@ -319,16 +323,16 @@ void automatic_rollback()
     )sql");
     Database db(fixture.path);
     Control control(reader.get());
-    const std::array<Write, 3> jobs{
-        Database::Create{1, "first", "provisional"},
-        Database::Create{1, "first", "automatic rollback"},
-        Database::Create{1, "first", "must not run"},
+    const std::array<WriteCommand, 3> jobs{
+        CreatePost{1, "first", "provisional"},
+        CreatePost{1, "first", "automatic rollback"},
+        CreatePost{1, "first", "must not run"},
     };
     all_failed(db.write_batch(jobs), jobs.size());
     require(control.commits == 0 && scalar(reader.get(), "SELECT count(*) FROM posts") == 1,
             "automatic rollback retained a batch write or continued the batch");
-    const std::array<Write, 1> recovery{
-        Database::Create{1, "first", "recovered after automatic rollback"}};
+    const std::array<WriteCommand, 1> recovery{
+        CreatePost{1, "first", "recovered after automatic rollback"}};
     require(!created(db.write_batch(recovery).at(0)).empty(),
             "automatic rollback left writer unusable");
 }
@@ -340,16 +344,16 @@ void fatal_error()
     auto reader = open(fixture.path);
     Control control(reader.get());
     control.fail_savepoint = 2;
-    const std::array<Write, 3> jobs{
-        Database::Create{1, "first", "provisional"},
-        Database::Like{2, 1},
-        Database::Create{1, "first", "must not run"},
+    const std::array<WriteCommand, 3> jobs{
+        CreatePost{1, "first", "provisional"},
+        LikePost{2, 1},
+        CreatePost{1, "first", "must not run"},
     };
     all_failed(db.write_batch(jobs), jobs.size());
     require(control.commits == 0 && scalar(reader.get(), "SELECT count(*) FROM posts") == 1 &&
                 scalar(reader.get(), "SELECT count(*) FROM likes") == 0,
             "fatal error retained provisional writes");
-    const std::array<Write, 1> recovery{Database::Like{2, 1}};
+    const std::array<WriteCommand, 1> recovery{LikePost{2, 1}};
     require(liked(db.write_batch(recovery).at(0)) == true, "fatal error left writer unusable");
 }
 
@@ -359,19 +363,19 @@ void singleton_and_empty()
     Database db(fixture.path);
     auto reader = open(fixture.path);
     Control control(reader.get());
-    const std::array<Write, 0> empty{};
+    const std::array<WriteCommand, 0> empty{};
     require(db.write_batch(empty).empty() && control.begins == 0,
             "empty batch opened a transaction");
-    const std::array<Write, 1> invalid{Database::Create{999, "missing", "bad foreign key"}};
+    const std::array<WriteCommand, 1> invalid{CreatePost{999, "missing", "bad foreign key"}};
     all_failed(db.write_batch(invalid), 1);
-    const std::array<Write, 1> create{Database::Create{1, "first", "singleton"}};
+    const std::array<WriteCommand, 1> create{CreatePost{1, "first", "singleton"}};
     const auto created_results = db.write_batch(create);
     require(created_results.size() == 1, "singleton create lost its result");
     verify_created(reader.get(), created(created_results[0]), 2, "singleton", "first");
-    const std::array<Write, 1> like{Database::Like{2, 2}};
+    const std::array<WriteCommand, 1> like{LikePost{2, 2}};
     require(liked(db.write_batch(like).at(0)) == true && liked(db.write_batch(like).at(0)) == false,
             "singleton duplicate-like behavior changed");
-    const std::array<Write, 1> missing{Database::Like{2, 999}};
+    const std::array<WriteCommand, 1> missing{LikePost{2, 999}};
     require(!liked(db.write_batch(missing).at(0)).has_value(), "singleton missing post changed");
     require(control.savepoints == 0, "singleton batches added savepoint overhead");
 }

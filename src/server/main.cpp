@@ -254,15 +254,14 @@ int main(int argc, char **argv)
         tds::Server server(
             host, static_cast<std::uint16_t>(*port),
             [&](const tds::Request &request) {
-                return api.handle_read(request);
+                return api.handle(request);
             },
             [&](tds::Request &request) {
-                return api.authorize(request);
+                return api.accept_headers(request);
             },
-            {tds::Api::is_write, [&](std::span<const tds::Request *const> requests,
-                                     std::span<tds::Response> responses) {
-                 api.handle_writes(requests, responses);
-             }});
+            [&](std::span<const tds::WriteCommand> commands, std::span<tds::Response> responses) {
+                api.handle_writes(commands, responses);
+            });
         const Signals signals(server.stop_descriptor());
         std::cout << "Listening on " << host << ':' << server.port() << " through io_uring\n"
                   << std::flush;

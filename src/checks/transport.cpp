@@ -28,10 +28,13 @@
 #include <thread>
 #include <unistd.h>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace
 {
+
+static_assert(sizeof(tds::transport::Connection) == 56);
 
 class Client
 {
@@ -208,6 +211,8 @@ void exercise_request_reuse()
     auto exchange = ring.acquire_exchange();
     auto &parser = exchange->parser;
     auto &request = parser.request();
+    require(request.endpoint == tds::Endpoint::unresolved && !request.identity,
+            "new request has no route or identity");
     auto expected_capacity = parser.scratch_capacity();
     for (auto member : {&tds::Request::method, &tds::Request::path, &tds::Request::authorization,
                         &tds::Request::body})
@@ -232,6 +237,7 @@ void exercise_request_reuse()
                 request.authorization == authorization && !request.keep_alive,
             "reused request headers parsed");
     request.identity = tds::Identity{42, "alice"};
+    request.endpoint = tds::Endpoint::create;
     parser.accept_headers();
     const auto parsed_body = parser.parse(std::string_view(wire).substr(headers.consumed));
     require(parsed_body.valid && parser.complete() && request.body == body,
@@ -240,8 +246,9 @@ void exercise_request_reuse()
     require(retained_capacity <= 8192, "ordinary request fits exchange retention budget");
     exchange->finish_response();
     require(request.method.empty() && request.path.empty() && request.authorization.empty() &&
-                request.body.empty() && !request.identity && request.keep_alive,
-            "finished request clears strings, identity and connection policy");
+                request.body.empty() && !request.identity &&
+                request.endpoint == tds::Endpoint::unresolved && request.keep_alive,
+            "finished request clears strings, route, identity and connection policy");
     require(!parser.complete() && !parser.headers_pending() &&
                 parser.error() == tds::Status::bad_request,
             "finished request resets parser state");
@@ -255,8 +262,9 @@ void exercise_request_reuse()
     require(next.valid && exchange->parser.headers_pending(), "recycled parser reads next request");
     const auto &fresh = exchange->parser.request();
     require(fresh.method == "GET" && fresh.path == "/fresh" && fresh.authorization.empty() &&
-                fresh.body.empty() && !fresh.identity && fresh.keep_alive,
-            "recycled request does not inherit authorization, body or identity");
+                fresh.body.empty() && !fresh.identity &&
+                fresh.endpoint == tds::Endpoint::unresolved && fresh.keep_alive,
+            "recycled request does not inherit authorization, body, route or identity");
     exchange->parser.accept_headers();
     require(exchange->parser.parse({}).valid && exchange->parser.complete(),
             "recycled parser completes an empty body");
@@ -394,7 +402,7 @@ class RunningServer
 {
   public:
     RunningServer(tds::Server::Handler handler, tds::Server::HeaderHandler headers,
-                  tds::Server::WriteHandlers writes, std::function<void()> release)
+                  tds::Server::BatchHandler writes, std::function<void()> release)
         : release_(std::move(release)),
           server_("127.0.0.1", 0, std::move(handler), std::move(headers), std::move(writes)),
           thread_([this] {
@@ -478,10 +486,24 @@ void exercise_write_batches()
         return batch_sizes;
     };
     RunningServer server(
-        [](const tds::Request &request) -> tds::Response {
-            return {tds::Status::ok, request.path};
+        [](const tds::Request &request) -> tds::RequestResult {
+            if (request.endpoint == tds::Endpoint::create)
+            {
+                require(request.identity && request.identity->user_id == 42 &&
+                            request.identity->username == "writer",
+                        "write preparation receives the current request identity");
+                return tds::WriteCommand{tds::CreatePost{*request.identity->user_id,
+                                                         request.identity->username, request.body}};
+            }
+            require(request.endpoint == tds::Endpoint::feed && !request.identity,
+                    "read after a write has its own route and no stale identity");
+            return tds::Response{tds::Status::ok, request.path};
         },
         [&](tds::Request &request) -> std::optional<tds::Response> {
+            require(request.endpoint == tds::Endpoint::unresolved && !request.identity,
+                    "keepalive request begins without a stale route or identity");
+            request.endpoint =
+                request.method == "POST" ? tds::Endpoint::create : tds::Endpoint::feed;
             if (request.path == "/hold")
             {
                 headers_gate.block();
@@ -492,42 +514,40 @@ void exercise_write_batches()
             }
             return std::nullopt;
         },
-        {[](const tds::Request &request) {
-             return request.method == "POST";
-         },
-         [&](std::span<const tds::Request *const> requests, std::span<tds::Response> responses) {
-             require(!requests.empty() && requests.size() == responses.size() &&
-                         requests.size() <= tds::write_batch_limit,
-                     "write callback receives bounded matching spans");
-             {
-                 std::lock_guard lock(batch_mutex);
-                 batch_sizes.push_back(requests.size());
-             }
-             std::vector<std::string> bodies;
-             for (std::size_t index = 0; index < requests.size(); ++index)
-             {
-                 const auto &request = *requests[index];
-                 require(request.method == "POST" && request.identity &&
-                             request.identity->user_id == 42,
-                         "batched request retains parsed headers and identity");
-                 bodies.push_back(request.body);
-                 responses[index] = {tds::Status::created, request.body};
-             }
-             if (requests.front()->path == "/write-block")
-             {
-                 blocked_bodies = bodies;
-                 batch_gate.block();
-             }
-             for (std::size_t index = 0; index < requests.size(); ++index)
-             {
-                 require(requests[index]->body == bodies[index],
-                         "request pointers and bodies survive the batch callback");
-             }
-             if (requests.front()->path == "/write-throw")
-             {
-                 throw std::runtime_error("write callback failed after filling responses");
-             }
-         }},
+        [&](std::span<const tds::WriteCommand> commands, std::span<tds::Response> responses) {
+            require(!commands.empty() && commands.size() == responses.size() &&
+                        commands.size() <= tds::write_batch_limit,
+                    "write callback receives bounded matching spans");
+            {
+                std::lock_guard lock(batch_mutex);
+                batch_sizes.push_back(commands.size());
+            }
+            std::vector<std::string> bodies;
+            for (std::size_t index = 0; index < commands.size(); ++index)
+            {
+                const auto *create = std::get_if<tds::CreatePost>(&commands[index]);
+                require(create && create->user_id == 42 && create->username == "writer",
+                        "batched command owns the prepared identity and create data");
+                bodies.push_back(create->body);
+                responses[index] = {tds::Status::created, create->body};
+            }
+            if (bodies.front().starts_with("blocked:"))
+            {
+                blocked_bodies = bodies;
+                batch_gate.block();
+            }
+            for (std::size_t index = 0; index < commands.size(); ++index)
+            {
+                const auto &create = std::get<tds::CreatePost>(commands[index]);
+                require(create.user_id == 42 && create.username == "writer" &&
+                            create.body == bodies[index],
+                        "owned commands survive the batch callback and peer disconnect");
+            }
+            if (bodies.front() == "throw-body")
+            {
+                throw std::runtime_error("write callback failed after filling responses");
+            }
+        },
         [&] {
             headers_gate.release();
             batch_gate.release();
@@ -553,8 +573,8 @@ void exercise_write_batches()
     for (std::size_t index = 0; index < count; ++index)
     {
         clients.push_back(ready_client(server.port()));
-        bodies.push_back(std::string(index < 10 ? "0" : "") + std::to_string(index) + ':' +
-                         std::string(1024, static_cast<char>('a' + index)));
+        bodies.push_back("blocked:" + std::string(index < 10 ? "0" : "") + std::to_string(index) +
+                         ':' + std::string(1024, static_cast<char>('a' + index)));
     }
     auto blocker = ready_client(server.port());
     blocker->send("GET /hold HTTP/1.1\r\nHost: localhost\r\n\r\n");
@@ -613,7 +633,7 @@ void exercise_write_batches()
     Client fresh(server.port());
     fresh.send(write_request("/write", "fresh-owned-body"));
     require(fresh.response(tds::Status::created) == "fresh-owned-body",
-            "batch callback failure leaves no stale request pointers");
+            "batch callback failure leaves no stale commands or responses");
     server.stop();
 }
 
@@ -623,8 +643,13 @@ void exercise_queued_write_shutdown()
     std::size_t queued_writes = 0;
     std::size_t batches = 0;
     RunningServer server(
-        [](const tds::Request &request) -> tds::Response {
-            return {tds::Status::ok, request.path};
+        [&](const tds::Request &request) -> tds::RequestResult {
+            if (request.method == "POST")
+            {
+                ++queued_writes;
+                return tds::WriteCommand{tds::CreatePost{42, "writer", request.body}};
+            }
+            return tds::Response{tds::Status::ok, request.path};
         },
         [&](tds::Request &request) -> std::optional<tds::Response> {
             if (request.path == "/hold")
@@ -633,13 +658,9 @@ void exercise_queued_write_shutdown()
             }
             return std::nullopt;
         },
-        {[&](const tds::Request &request) {
-             queued_writes += request.method == "POST";
-             return request.method == "POST";
-         },
-         [&](std::span<const tds::Request *const>, std::span<tds::Response>) {
-             ++batches;
-         }},
+        [&](std::span<const tds::WriteCommand>, std::span<tds::Response>) {
+            ++batches;
+        },
         [&] {
             preload_gate.release();
         });
@@ -659,7 +680,7 @@ void exercise_queued_write_shutdown()
     // io_uring_for_each_cqe takes a snapshot of the CQ tail for the entire drain
     preload_gate.release();
     server.stop();
-    require(queued_writes == 2, "both completed write requests queue before stop is serviced");
+    require(queued_writes == 2, "both completed writes are prepared before stop is serviced");
     require(batches == 0, "shutdown discards queued writes without calling the batch handler");
     require(second->closed(), "shutdown closes the remaining queued connection");
 }

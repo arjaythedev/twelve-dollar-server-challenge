@@ -142,9 +142,9 @@ struct Connection
         io_phase_ = IoPhase::closing;
     }
 
-    void start_application() noexcept
+    void start_queued_write() noexcept
     {
-        io_phase_ = IoPhase::application;
+        io_phase_ = IoPhase::queued_write;
     }
 
     bool io_idle() const noexcept
@@ -169,7 +169,7 @@ struct Connection
     {
         idle,
         active,
-        application,
+        queued_write,
         closing
     };
 

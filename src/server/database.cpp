@@ -497,16 +497,16 @@ class Database::State
         return sqlite3_changes(db.get()) == 1;
     }
 
-    WriteValue apply(const Write &write)
+    WriteValue apply(const WriteCommand &write)
     {
-        if (const auto *job = std::get_if<Create>(&write))
+        if (const auto *job = std::get_if<CreatePost>(&write))
         {
 #ifdef TDS_DIAGNOSTICS
             timing::Scope measure(timings.create);
 #endif
             return create_post(job->user_id, job->username, job->body);
         }
-        const auto &job = std::get<Like>(write);
+        const auto &job = std::get<LikePost>(write);
 #ifdef TDS_DIAGNOSTICS
         timing::Scope measure(timings.like);
 #endif
@@ -614,7 +614,7 @@ std::optional<std::string> Database::post(std::int64_t id)
     return output;
 }
 
-std::vector<Database::WriteResult> Database::write_batch(std::span<const Write> writes)
+std::vector<WriteResult> Database::write_batch(std::span<const WriteCommand> writes)
 {
     std::vector<WriteResult> results;
     results.reserve(writes.size());

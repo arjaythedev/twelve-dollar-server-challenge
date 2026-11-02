@@ -77,6 +77,7 @@ target_link_libraries(api PRIVATE sqlite yyjson OpenSSL::Crypto parsing Threads:
 target_include_directories(api PUBLIC server)
 if(TDS_DIAGNOSTICS)
     target_sources(api PRIVATE server/sync_timing.cpp)
+    target_sources(transport PRIVATE server/transport/diagnostics.cpp)
     target_compile_definitions(api PRIVATE TDS_DIAGNOSTICS)
     target_compile_definitions(transport PUBLIC TDS_DIAGNOSTICS)
     target_link_options(api INTERFACE -Wl,--wrap=fsync -Wl,--wrap=fdatasync)

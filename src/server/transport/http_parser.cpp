@@ -56,6 +56,7 @@ void HttpParser::reset()
     request_.authorization.clear();
     request_.body.clear();
     request_.identity.reset();
+    request_.endpoint = Endpoint::unresolved;
     request_.keep_alive = true;
     url_.clear();
     field_.clear();

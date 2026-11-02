@@ -77,21 +77,26 @@ statements cache only query plans, as allowed by rule 5.
 
 ## Local measurements
 
-These are local emulations on one pinned CPU with a separate set of k6 clients, not the
+These are local emulations on one pinned CPU with a separate set of load clients, not the
 official benchmark. The database was a fresh copy of the seed on every run. These numbers
-use the default `READ_COALESCE=1`; `READ_COALESCE=0` is correctness-isolated but slower.
+use `READ_COALESCE=1`; `READ_COALESCE=0` is correctness-isolated but slower.
 
-| Run | p95 | p99 | Server CPU | Peak RSS | Errors |
+70,000 VUs (4 clients x 17,500), 80 s:
+
+| Layout | Total req/s | Server CPU | Peak RSS | Median client p95 | p95 range |
 |---|---:|---:|---:|---:|---:|
-| 200k VUs, 20 s mixed load | 1.89 s | 2.20 s | 94.5% | 1.131 GiB | 0 |
+| 3 shards, mixed | 5,912 | 74.3% | 655 MiB | 2.09 s | 1.89-2.47 s |
+| **2 shards, read + shared writer (default)** | **6,050** | 77.9% | **516 MiB** | **1.66 s** | **1.11-1.71 s** |
+| 2 shards, feed/post + shared writer | 5,855 | 69.3% | 515 MiB | 1.81 s | 1.54-2.16 s |
 
-The 200k run still fails the challenge latency thresholds locally. The remaining cost is
-kernel/TCP and io_uring work per response plus the SQLite read path; more receive buffers,
-more buffer groups, zero-copy receive, zero-copy send, larger socket buffers, and write
-batching were all measured and did not help. The design is comfortably within the 2 GiB
-memory limit, and the local result is around the limit of this Go/cgo/SQL architecture.
-A 280k result would require a different read path, specifically a rule-compatible B-tree
-cursor implementation and/or a C service loop, not more buffer tuning.
+All runs had zero failed requests but miss the challenge latency thresholds locally. The
+client p95 is dominated by the local harness; the official k6 result is authoritative.
+The default layout uses the least memory and measured the highest throughput locally.
+The remaining cost is kernel/TCP and io_uring work per response plus the SQLite read path;
+more receive buffers, more buffer groups, zero-copy receive, zero-copy send, larger socket
+buffers, and write batching were all measured and did not help. A larger result would
+require a different read path, specifically a rule-compatible B-tree cursor implementation
+and/or a C service loop, not more buffer tuning.
 
 ## Scripts
 

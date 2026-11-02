@@ -1,39 +1,26 @@
 #include "transport.hpp"
-#include "transport/ring.hpp"
+#include "net/reactor.hpp"
+#include "transport/connection.hpp"
 
 #ifdef TDS_DIAGNOSTICS
 #include "transport/diagnostics.hpp"
 #endif
 
-#include <algorithm>
-#include <arpa/inet.h>
 #include <array>
-#include <cerrno>
-#include <cstdint>
 #include <iostream>
-#include <netinet/in.h>
-#include <poll.h>
+#include <span>
 #include <stdexcept>
-#include <string>
-#include <sys/eventfd.h>
-#include <sys/resource.h>
-#include <sys/socket.h>
-#include <system_error>
-#include <unistd.h>
 #include <utility>
+#include <vector>
 
 namespace tds
 {
 namespace
 {
-using transport::AcceptTicket;
-using transport::Connection;
-using transport::Descriptor;
-using transport::Event;
-using transport::Operation;
-using transport::ReceiveBufferLease;
-using transport::ReceiveBuffers;
-using transport::Ring;
+using net::Completion;
+using net::CompletionKind;
+using net::Connection;
+using net::Reactor;
 } // namespace
 
 class Server::State
@@ -41,70 +28,24 @@ class Server::State
   public:
     State(std::string_view host, std::uint16_t port, Handler handle, HeaderHandler head,
           BatchHandler write_handler)
-        : listener(::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0)),
-          stop(::eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK)), handler(std::move(handle)),
-          headers(std::move(head)), writes(std::move(write_handler))
+        : reactor(host, port), handler(std::move(handle)), headers(std::move(head)),
+          writes(std::move(write_handler))
     {
-        int enabled = 1;
-        if (::setsockopt(listener.get(), SOL_SOCKET, SO_REUSEADDR, &enabled, sizeof(enabled)) < 0)
-        {
-            throw std::system_error(errno, std::generic_category(), "reuse address");
-        }
-        sockaddr_in address{};
-        address.sin_family = AF_INET;
-        address.sin_port = htons(port);
-        const std::string host_string(host);
-        if (::inet_pton(AF_INET, host_string.c_str(), &address.sin_addr) != 1)
-        {
-            throw std::runtime_error("HOST must be an IPv4 address");
-        }
-        if (::bind(listener.get(), reinterpret_cast<sockaddr *>(&address), sizeof(address)) < 0 ||
-            ::listen(listener.get(), 4096) < 0)
-        {
-            throw std::system_error(errno, std::generic_category(), "listen");
-        }
-
-        socklen_t length = sizeof(address);
-        if (::getsockname(listener.get(), reinterpret_cast<sockaddr *>(&address), &length) < 0)
-        {
-            throw std::system_error(errno, std::generic_category(), "socket address");
-        }
-        bound_port = ntohs(address.sin_port);
-        rlimit limit{};
-        if (::getrlimit(RLIMIT_NOFILE, &limit) < 0)
-        {
-            throw std::system_error(errno, std::generic_category(), "file limit");
-        }
-        table_size = static_cast<unsigned>(std::min<rlim_t>(limit.rlim_cur, 65535));
-        if (!table_size)
-        {
-            throw std::runtime_error("file limit leaves no direct descriptor slots");
-        }
-        rings.push_back(std::make_unique<Ring>(table_size, true));
     }
 
     void request_stop() const noexcept
     {
-        const std::uint64_t value = 1;
-        ssize_t result = 0;
-        do
-        {
-            result = ::write(stop.get(), &value, sizeof(value));
-        } while (result < 0 && errno == EINTR);
-        if (result < 0 && errno != EAGAIN)
-        {
-            std::terminate();
-        }
+        reactor.request_stop();
     }
 
     [[nodiscard]] int stop_descriptor() const noexcept
     {
-        return stop.get();
+        return reactor.stop_descriptor();
     }
 
     [[nodiscard]] std::uint16_t port() const noexcept
     {
-        return bound_port;
+        return reactor.port();
     }
 
     void run()
@@ -118,85 +59,36 @@ class Server::State
 
             ~FinalReport()
             {
-                owner.diagnostics.report(owner.rings, true);
+                owner.diagnostics.report(owner.reactor.rings(), true);
             }
         } report_on_exit{*this};
 #endif
-        accept();
-        io_uring_prep_poll_add(rings.front()->entry(&stop_operation), stop.get(), POLLIN);
-        unsigned previous_count = 0;
-        bool accepted = false;
-        while (pending_count())
+        reactor.start();
+        while (reactor.pending_count())
         {
-            const int result = wait(previous_count, accepted);
-            if (result == -EINTR)
+            reactor.begin_turn();
+            Completion completion;
+            while (reactor.next(completion))
             {
-                continue;
-            }
-            if (result < 0 && result != -ETIME && result != -EBUSY)
-            {
-                throw std::system_error(-result, std::generic_category(), "wait");
-            }
-            unsigned count = 0;
-            accepted = false;
-            // A busy ring cannot monopolize handlers or delay another ring's close CQEs
-            for (std::size_t index = 0; index < rings.size(); ++index)
-            {
-                auto &owner = *rings[index];
-#ifdef TDS_DIAGNOSTICS
-                const auto depth = io_uring_cq_ready(&owner.queue);
-                owner.diagnostics.cq_depth.record(depth);
-                owner.diagnostics.empty_cq_samples += depth == 0;
-                owner.diagnostics.overflow_flag_samples +=
-                    (io_uring_smp_load_acquire(owner.queue.sq.kflags) & IORING_SQ_CQ_OVERFLOW) != 0;
-#endif
-                unsigned head = 0;
-                unsigned drained = 0;
-                io_uring_cqe *completion = nullptr;
-                io_uring_for_each_cqe(&owner.queue, head, completion)
+                complete(completion);
+                if (pending_writes.commands.size() == write_batch_limit)
                 {
-                    --owner.pending;
-                    auto *operation = static_cast<Operation *>(io_uring_cqe_get_data(completion));
-                    accepted = accepted || (operation && operation->event == Event::accept);
-                    complete(owner, operation, completion->res, completion->flags);
-                    if (pending_writes.commands.size() == write_batch_limit)
-                    {
-                        flush_writes();
-                    }
-                    if (++drained == 256)
-                    {
-                        break;
-                    }
-                }
-                io_uring_cq_advance(&owner.queue, drained);
-#ifdef TDS_DIAGNOSTICS
-                owner.diagnostics.cqes += drained;
-                // Sample before retry draining so queues filled within one turn remain visible
-                owner.diagnostics.deferred_receive_depth.record(owner.deferred_receives.size());
-#endif
-                count += drained;
-                if (!stopping)
-                {
-                    retry_receives(owner);
-                }
-                else
-                {
-                    advance_shutdown(owner);
+                    flush_writes();
                 }
             }
+            // Flush before the reactor waits so a partial batch cannot strand its replies
             flush_writes();
-            finish_wakeups();
-            previous_count = count;
+            reactor.finish_turn();
 #ifdef TDS_DIAGNOSTICS
-            diagnostics.report(rings, false);
+            diagnostics.report(reactor.rings(), false);
 #endif
         }
     }
 
   private:
-#ifdef TDS_DIAGNOSTICS
-    RequestResult measured_handler(Connection &connection)
+    RequestResult handle(Connection &connection)
     {
+#ifdef TDS_DIAGNOSTICS
         const auto &request = connection.exchange->parser.request();
         if (request.endpoint == Endpoint::create || request.endpoint == Endpoint::like)
         {
@@ -206,79 +98,10 @@ class Server::State
                                                  connection.exchange->receive_serviced_ns);
         timing::Scope sample(diagnostics.handler_wall_ns);
 
+        return handler(request);
+#else
         return handler(connection.exchange->parser.request());
-    }
-
 #endif
-
-    void poll_satellite(Ring &owner)
-    {
-        io_uring_prep_poll_add(rings.front()->entry(&owner.wake_operation),
-                               owner.notification->get(), POLLIN);
-        owner.wake_pending = true;
-    }
-
-    void accept()
-    {
-        if (stopping)
-        {
-            return;
-        }
-        for (auto &ticket : accept_tickets)
-        {
-            if (ticket.pending)
-            {
-                continue;
-            }
-            Ring *accepting = nullptr;
-            for (const auto &owner : rings)
-            {
-                if (!owner->free_slots.empty())
-                {
-                    accepting = owner.get();
-                    break;
-                }
-            }
-            if (!accepting)
-            {
-                if (rings.size() == max_rings)
-                {
-                    return;
-                }
-                auto owner = std::make_unique<Ring>(table_size, false);
-                accepting = owner.get();
-                rings.push_back(std::move(owner));
-                poll_satellite(*accepting);
-            }
-            ticket.ring = accepting;
-            ticket.slot = accepting->free_slots.back();
-            accepting->free_slots.pop_back();
-            ticket.pending = true;
-            io_uring_prep_accept_direct(accepting->entry(&ticket.operation), listener.get(),
-                                        nullptr, nullptr, SOCK_NONBLOCK, ticket.slot);
-        }
-    }
-
-    void receive(Connection &connection)
-    {
-        connection.start_io(Event::receive);
-        auto *request = connection.ring.entry(&connection.operation);
-        io_uring_prep_recv(request, static_cast<int>(connection.slot), nullptr,
-                           ReceiveBuffers::size, 0);
-        request->flags |= IOSQE_BUFFER_SELECT | IOSQE_FIXED_FILE;
-        request->buf_group = ReceiveBuffers::group;
-        request->ioprio |= IORING_RECVSEND_POLL_FIRST;
-    }
-
-    void retry_receives(Ring &owner)
-    {
-        const auto count = std::min(owner.deferred_receives.size(), static_cast<std::size_t>(256));
-        for (std::size_t i = 0; i < count; ++i)
-        {
-            auto *connection = owner.deferred_receives.front();
-            owner.deferred_receives.pop_front();
-            receive(*connection);
-        }
     }
 
     void send(Connection &connection)
@@ -287,10 +110,7 @@ class Server::State
         connection.exchange->send_prepared_ns = timing::now_ns();
 #endif
         auto &message = connection.exchange->prepare_send();
-        connection.start_io(Event::send);
-        auto *request = connection.ring.entry(&connection.operation);
-        io_uring_prep_sendmsg(request, static_cast<int>(connection.slot), &message, MSG_NOSIGNAL);
-        request->flags |= IOSQE_FIXED_FILE;
+        reactor.send(connection, message);
     }
 
     void respond(Connection &connection, Response response)
@@ -309,12 +129,11 @@ class Server::State
         }
         const auto count = pending_writes.commands.size();
         const auto connections = std::span(pending_writes.connections).first(count);
-        if (stopping)
+        if (reactor.stopping())
         {
-            // Queued requests have no pending SQE, so shutdown closes them directly
             for (auto *connection : connections)
             {
-                close(*connection);
+                reactor.close(*connection);
             }
             pending_writes.commands.clear();
 
@@ -332,13 +151,12 @@ class Server::State
         catch (const std::exception &error)
         {
             std::cerr << "write batch failed: " << error.what() << '\n';
-            for (std::size_t index = 0; index < count; ++index)
+            for (auto &response : responses)
             {
-                responses[index] = {Status::internal_error,
-                                    "{\"error\":\"internal server error\"}"};
+                response = {Status::internal_error, "{\"error\":\"internal server error\"}"};
             }
         }
-        // Connections and their request storage stay pinned until the batch has committed
+        // Queued commands and their targets stay alive until replies have been staged
         for (std::size_t index = 0; index < count; ++index)
         {
             auto &connection = *connections[index];
@@ -374,12 +192,11 @@ class Server::State
                     return;
                 }
                 exchange.input.erase(0, result.consumed);
-
                 if (parser.headers_pending())
                 {
                     if (auto rejected = headers(parser.request()))
                     {
-                        // Unread body bytes cannot become the next keep-alive request
+                        // Unread body bytes must not become the next keep-alive request
                         connection.close_after = true;
                         respond(connection, std::move(*rejected));
 
@@ -390,11 +207,7 @@ class Server::State
                 }
                 if (parser.complete())
                 {
-#ifdef TDS_DIAGNOSTICS
-                    auto outcome = measured_handler(connection);
-#else
-                    auto outcome = handler(parser.request());
-#endif
+                    auto outcome = handle(connection);
                     if (auto *response = std::get_if<Response>(&outcome))
                     {
                         respond(connection, std::move(*response));
@@ -406,7 +219,7 @@ class Server::State
                 }
                 else
                 {
-                    receive(connection);
+                    reactor.receive(connection);
                 }
 
                 return;
@@ -420,153 +233,45 @@ class Server::State
         }
     }
 
-    void close(Connection &connection)
+    void complete_receive(Completion &completion)
     {
-        connection.start_close();
-        // Yes, this is cursed: close_direct takes a fixed slot but rejects IOSQE_FIXED_FILE
-        io_uring_prep_close_direct(connection.ring.entry(&connection.close_operation),
-                                   connection.slot);
-    }
-
-    void cancel(Ring &owner, Operation &operation)
-    {
-        io_uring_prep_cancel(owner.entry(nullptr), &operation, 0);
-    }
-
-    void stop_all()
-    {
-        stopping = true;
-        for (auto &ticket : accept_tickets)
-        {
-            if (ticket.pending)
-            {
-                cancel(*ticket.ring, ticket.operation);
-            }
-        }
-        for (const auto &owner : rings)
-        {
-            owner->deferred_receives.clear();
-        }
-    }
-
-    void advance_shutdown(Ring &owner)
-    {
-        // Bound cancellation work so a large idle table cannot fill the CQ before it is drained
-        unsigned count = 0;
-        while (owner.shutdown_cursor < owner.connections.size() && count < 128)
-        {
-            const auto &connection = owner.connections[owner.shutdown_cursor++];
-            if (!connection)
-            {
-                continue;
-            }
-            ++count;
-            if (connection->io_idle())
-            {
-                close(*connection);
-            }
-            else if (connection->io_active())
-            {
-                cancel(owner, connection->operation);
-            }
-        }
-    }
-
-    void complete_wake(Ring &satellite, int result)
-    {
-        satellite.wake_pending = false;
-        if (result >= 0)
-        {
-            std::uint64_t notifications = 0;
-            ssize_t read;
-            do
-            {
-                read = ::read(satellite.notification->get(), &notifications, sizeof(notifications));
-            } while (read < 0 && errno == EINTR);
-            if (read < 0 && errno != EAGAIN)
-            {
-                throw std::system_error(errno, std::generic_category(), "ring notification");
-            }
-        }
-        else if (result != -ECANCELED && result != -EINTR)
-        {
-            throw std::system_error(-result, std::generic_category(), "ring poll");
-        }
-        if (!closing_wakeups)
-        {
-            poll_satellite(satellite);
-        }
-    }
-
-    void complete_accept(AcceptTicket &ticket, int result)
-    {
-        auto &owner = *ticket.ring;
-        ticket.pending = false;
-        if (result >= 0)
-        {
-            auto connection = std::make_unique<Connection>(owner, ticket.slot);
-            auto &value = *connection;
-            owner.connections[ticket.slot] = std::move(connection);
-            if (stopping)
-            {
-                close(value);
-            }
-            else
-            {
-                receive(value);
-            }
-        }
-        else
-        {
-            owner.free_slots.push_back(ticket.slot);
-            if (result != -ECANCELED && result != -EINTR && result != -EAGAIN &&
-                result != -EMFILE && result != -ENFILE)
-            {
-                throw std::system_error(-result, std::generic_category(), "accept");
-            }
-        }
-        accept();
-    }
-
-    void complete_close(Ring &owner, Connection &connection, int result)
-    {
-        if (result < 0)
-        {
-            throw std::system_error(-result, std::generic_category(), "close direct descriptor");
-        }
-        const unsigned slot = connection.slot;
-        owner.connections[slot].reset();
-        owner.free_slots.push_back(slot);
-        accept();
-    }
-
-    void complete_receive(Connection &connection, int result, unsigned flags,
-                          ReceiveBufferLease &buffer)
-    {
+        auto &connection = *completion.connection;
 #ifdef TDS_DIAGNOSTICS
         const auto received_ns = timing::now_ns();
 #endif
-        if (!(flags & IORING_CQE_F_BUFFER) || static_cast<unsigned>(result) > ReceiveBuffers::size)
-        {
-            throw std::runtime_error("invalid receive buffer result");
-        }
-        const auto id = flags >> IORING_CQE_BUFFER_SHIFT;
         if (!connection.exchange)
         {
             connection.exchange = connection.ring.acquire_exchange();
         }
 #ifdef TDS_DIAGNOSTICS
-        // Buffered pipeline requests keep this timestamp through earlier response sends
+        // A buffered pipeline request keeps this time through earlier response sends
         connection.exchange->receive_serviced_ns = received_ns;
 #endif
-        connection.exchange->input.append(connection.ring.receive_buffers->data(id),
-                                          static_cast<std::size_t>(result));
-        buffer.release();
+        const auto input = completion.buffer.bytes();
+        connection.exchange->input.append(input.data(), input.size());
+        completion.buffer.release();
         process(connection);
     }
 
-    void complete_send(Connection &connection, int result)
+    void complete_send(const Completion &completion)
     {
+        auto &connection = *completion.connection;
+        const auto result = completion.result;
+#ifdef TDS_DIAGNOSTICS
+        connection.ring.diagnostics.send_attempt.record(completion.serviced_ns -
+                                                        connection.exchange->send_prepared_ns);
+#endif
+        // Fatal and shutdown completions have already started closing in the reactor
+        if (connection.io_closing())
+        {
+            return;
+        }
+        if (result < 0)
+        {
+            send(connection);
+
+            return;
+        }
         auto &exchange = *connection.exchange;
         exchange.sent += static_cast<std::size_t>(result);
         if (exchange.sent < exchange.output.size() + exchange.response_body.size())
@@ -577,7 +282,7 @@ class Server::State
         }
         if (connection.close_after)
         {
-            close(connection);
+            reactor.close(connection);
 
             return;
         }
@@ -589,173 +294,25 @@ class Server::State
             return;
         }
         connection.ring.recycle_exchange(std::move(connection.exchange));
-        receive(connection);
+        reactor.receive(connection);
     }
 
-    void complete_io(Connection &connection, Event event, int result, unsigned flags,
-                     ReceiveBufferLease &buffer)
+    void complete(Completion &completion)
     {
-#ifdef TDS_DIAGNOSTICS
-        if (event == Event::receive && result == -ENOBUFS)
+        switch (completion.kind)
         {
-            ++connection.ring.diagnostics.receive_enobufs;
-        }
-        if (event == Event::send)
-        {
-            connection.ring.diagnostics.send_attempt.record(timing::now_ns() -
-                                                            connection.exchange->send_prepared_ns);
-        }
-#endif
-        connection.finish_io();
-        if (!stopping && event == Event::receive && result == -ENOBUFS)
-        {
-            connection.ring.deferred_receives.push_back(&connection);
-
+        case CompletionKind::control:
             return;
-        }
-        if (stopping || result == 0 || (result < 0 && result != -EAGAIN && result != -EINTR))
-        {
-            close(connection);
-
+        case CompletionKind::received:
+            complete_receive(completion);
             return;
-        }
-        if (result < 0)
-        {
-            if (event == Event::receive)
-            {
-                receive(connection);
-            }
-            else
-            {
-                send(connection);
-            }
-
-            return;
-        }
-        if (event == Event::receive)
-        {
-            complete_receive(connection, result, flags, buffer);
-        }
-        else
-        {
-            complete_send(connection, result);
-        }
-    }
-
-    void complete(Ring &owner, Operation *operation, int result, unsigned flags)
-    {
-        if (!operation)
-        {
-            // Only anonymous cancel completions use a null operation, they own no receive buffer
-            return;
-        }
-        const bool selected = (flags & IORING_CQE_F_BUFFER) != 0;
-        const auto id = flags >> IORING_CQE_BUFFER_SHIFT;
-        if (selected && id >= ReceiveBuffers::count)
-        {
-            throw std::runtime_error("invalid receive buffer id");
-        }
-        ReceiveBufferLease buffer(selected ? owner.receive_buffers.get() : nullptr,
-                                  static_cast<unsigned short>(id));
-        switch (operation->event)
-        {
-        case Event::stop:
-            stop_all();
-            return;
-        case Event::wake:
-            complete_wake(operation->ring(), result);
-            return;
-        case Event::accept:
-            complete_accept(operation->accept_ticket(), result);
-            return;
-        case Event::close:
-            complete_close(owner, operation->connection(), result);
-            return;
-        case Event::receive:
-        case Event::send:
-            complete_io(operation->connection(), operation->event, result, flags, buffer);
+        case CompletionKind::sent:
+            complete_send(completion);
             return;
         }
     }
 
-    int wait(unsigned previous_count, bool accepted)
-    {
-        auto &primary = rings.front()->queue;
-        bool deferred = false;
-        for (std::size_t index = 0; index < rings.size(); ++index)
-        {
-            const auto &owner = rings[index];
-            if (index)
-            {
-                owner->submit();
-            }
-            deferred = deferred || !owner->deferred_receives.empty();
-        }
-        // Satellite CQEs cannot count toward the primary ring's blocking wait
-        // Submit the primary too before a ready satellite triggers another fair drain
-        for (std::size_t index = 1; index < rings.size(); ++index)
-        {
-            if (io_uring_cq_ready(&rings[index]->queue))
-            {
-                rings.front()->submit();
-                return 0;
-            }
-        }
-        // Rearm accepts promptly; EXT_ARG avoids synthetic timeout completions
-        const bool immediate = accepted || previous_count < 2;
-        if (stopping || !(primary.features & IORING_FEAT_EXT_ARG) || (immediate && !deferred))
-        {
-            return io_uring_submit_and_wait(&primary, 1);
-        }
-        __kernel_timespec timeout{0, 4'000'000};
-        io_uring_cqe *first = nullptr;
-
-        return io_uring_submit_and_wait_timeout(&primary, &first, immediate ? 1 : 32, &timeout,
-                                                nullptr);
-    }
-
-    unsigned pending_count() const noexcept
-    {
-        unsigned count = 0;
-        for (const auto &owner : rings)
-        {
-            count += owner->pending;
-        }
-        return count;
-    }
-
-    void finish_wakeups()
-    {
-        if (!stopping || closing_wakeups)
-        {
-            return;
-        }
-        unsigned polls = 0;
-        for (const auto &owner : rings)
-        {
-            if (owner->shutdown_cursor != owner->connections.size())
-            {
-                return;
-            }
-            polls += static_cast<unsigned>(owner->wake_pending);
-        }
-        if (pending_count() != polls)
-        {
-            return;
-        }
-        // Satellite wakes remain armed until every original and close CQE has drained
-        closing_wakeups = true;
-        for (const auto &owner : rings)
-        {
-            if (owner->wake_pending)
-            {
-                cancel(*rings.front(), owner->wake_operation);
-            }
-        }
-    }
-
-    Descriptor listener;
-    Descriptor stop;
+    Reactor reactor;
     Handler handler;
     HeaderHandler headers;
     BatchHandler writes;
@@ -771,16 +328,6 @@ class Server::State
         std::array<Response, write_batch_limit> responses{};
         std::vector<WriteCommand> commands;
     } pending_writes;
-
-    static constexpr std::size_t max_rings = 16;
-    // Ticket targets remain alive until every owning ring has exited
-    std::array<AcceptTicket, 64> accept_tickets;
-    std::vector<std::unique_ptr<Ring>> rings;
-    Operation stop_operation{Event::stop};
-    unsigned table_size = 0;
-    std::uint16_t bound_port = 0;
-    bool stopping = false;
-    bool closing_wakeups = false;
 #ifdef TDS_DIAGNOSTICS
     transport::TransportDiagnostics diagnostics;
 #endif

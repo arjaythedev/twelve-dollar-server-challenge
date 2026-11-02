@@ -1,4 +1,5 @@
 #include "connection.hpp"
+#include "../net/connection.hpp"
 
 #include <string_view>
 #include <utility>
@@ -82,3 +83,16 @@ void Exchange::finish_response()
 }
 
 } // namespace tds::transport
+
+namespace tds::net
+{
+
+Connection::Connection(Ring &owner, DirectSlot index)
+    : ring(owner), operation{Event::receive, *this}, close_operation{Event::close, *this},
+      slot(index)
+{
+}
+
+Connection::~Connection() = default;
+
+} // namespace tds::net

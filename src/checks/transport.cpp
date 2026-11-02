@@ -1,5 +1,6 @@
 #include "transport.hpp"
-#include "transport/ring.hpp"
+#include "net/ring.hpp"
+#include "transport/connection.hpp"
 
 #include <algorithm>
 #include <arpa/inet.h>
@@ -34,7 +35,7 @@
 namespace
 {
 
-static_assert(sizeof(tds::transport::Connection) == 56);
+static_assert(sizeof(tds::net::Connection) == 56);
 
 class Client
 {
@@ -207,7 +208,7 @@ void require(bool condition, std::string_view message)
 
 void exercise_request_reuse()
 {
-    tds::transport::Ring ring(8, true);
+    tds::net::Ring ring(8, true);
     auto exchange = ring.acquire_exchange();
     auto &parser = exchange->parser;
     auto &request = parser.request();

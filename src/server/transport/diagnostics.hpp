@@ -8,15 +8,18 @@
 #include <memory>
 #include <span>
 
+namespace tds::net
+{
+class Ring;
+}
+
 namespace tds::transport
 {
-
-class Ring;
 
 struct TransportDiagnostics
 {
     void start() noexcept;
-    void report(std::span<const std::unique_ptr<Ring>> rings, bool final) noexcept;
+    void report(std::span<const std::unique_ptr<net::Ring>> rings, bool final) noexcept;
 
     timing::Histogram handler_wall_ns;
     timing::Histogram receive_to_handler_ns;

@@ -2,7 +2,7 @@
 
 #ifdef TDS_DIAGNOSTICS
 
-#include "ring.hpp"
+#include "../net/ring.hpp"
 
 #include <cinttypes>
 #include <cstddef>
@@ -17,7 +17,8 @@ void TransportDiagnostics::start() noexcept
     diagnostics_last_ns = diagnostics_started_ns;
 }
 
-void TransportDiagnostics::report(std::span<const std::unique_ptr<Ring>> rings, bool final) noexcept
+void TransportDiagnostics::report(std::span<const std::unique_ptr<net::Ring>> rings,
+                                  bool final) noexcept
 {
     const auto now = timing::now_ns();
     const auto interval = now - diagnostics_last_ns;

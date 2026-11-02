@@ -574,6 +574,7 @@ def native_check() -> None:
     for executable, arguments in (
         ("server", ["--self-test"]),
         ("transport_tests", []),
+        ("io_lifetime_tests", []),
         ("checkpoint_tests", []),
         ("group_commit_tests", []),
         ("post_writer_tests", []),

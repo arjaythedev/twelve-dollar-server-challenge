@@ -4,7 +4,7 @@
 #include <system_error>
 #include <unistd.h>
 
-namespace tds::transport
+namespace tds::net
 {
 
 class Descriptor
@@ -35,4 +35,4 @@ class Descriptor
     int value_;
 };
 
-} // namespace tds::transport
+} // namespace tds::net

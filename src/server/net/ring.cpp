@@ -1,45 +1,16 @@
 #include "ring.hpp"
+#include "../transport/connection.hpp"
 
 #include <exception>
 #include <sys/eventfd.h>
 #include <utility>
 
-namespace tds::transport
+namespace tds::net
 {
-
-ReceiveBuffers::ReceiveBuffers(io_uring &owner)
-    : ring(owner), storage(std::make_unique_for_overwrite<char[]>(count * size))
-{
-    int error = 0;
-    buffers = io_uring_setup_buf_ring(&ring, count, group, 0, &error);
-    if (!buffers)
-    {
-        throw std::system_error(-error, std::generic_category(), "receive buffer ring");
-    }
-    for (unsigned id = 0; id < count; ++id)
-    {
-        io_uring_buf_ring_add(buffers, data(id), size, static_cast<unsigned short>(id),
-                              io_uring_buf_ring_mask(count), static_cast<int>(id));
-    }
-    io_uring_buf_ring_advance(buffers, count);
-}
-
-ReceiveBuffers::~ReceiveBuffers()
-{
-    if (io_uring_free_buf_ring(&ring, buffers, count, group) < 0)
-    {
-        std::terminate();
-    }
-}
 
 Ring::Ring(unsigned slots, bool primary) : connections(slots), wake_operation{Event::wake, *this}
 {
     exchange_pool_.reserve(max_pooled_exchanges);
-    free_slots.reserve(slots);
-    for (unsigned index = slots; index > 0; --index)
-    {
-        free_slots.push_back(index - 1);
-    }
     if (!primary)
     {
         notification = std::make_unique<Descriptor>(::eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK));
@@ -76,7 +47,7 @@ Ring::Ring(unsigned slots, bool primary) : connections(slots), wake_operation{Ev
 
 Ring::~Ring()
 {
-    // Fatal exits must stop kernel access before any connection storage is freed
+    // Fatal exits stop kernel access before either connection or send storage is freed
     if (pending)
     {
         io_uring_sync_cancel_reg request{};
@@ -92,11 +63,11 @@ Ring::~Ring()
     io_uring_queue_exit(&queue);
 }
 
-std::unique_ptr<Exchange> Ring::acquire_exchange()
+std::unique_ptr<transport::Exchange> Ring::acquire_exchange()
 {
     if (exchange_pool_.empty())
     {
-        return std::make_unique<Exchange>();
+        return std::make_unique<transport::Exchange>();
     }
     auto exchange = std::move(exchange_pool_.back());
     exchange_pool_.pop_back();
@@ -104,7 +75,7 @@ std::unique_ptr<Exchange> Ring::acquire_exchange()
     return exchange;
 }
 
-void Ring::recycle_exchange(std::unique_ptr<Exchange> exchange)
+void Ring::recycle_exchange(std::unique_ptr<transport::Exchange> exchange)
 {
     if (exchange_pool_.size() == max_pooled_exchanges ||
         exchange->retained_capacity() > max_retained_capacity)
@@ -114,4 +85,4 @@ void Ring::recycle_exchange(std::unique_ptr<Exchange> exchange)
     exchange_pool_.push_back(std::move(exchange));
 }
 
-} // namespace tds::transport
+} // namespace tds::net

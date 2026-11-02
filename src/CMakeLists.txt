@@ -68,7 +68,10 @@ add_library(transport STATIC
     server/transport.cpp
     server/transport/http_parser.cpp
     server/transport/connection.cpp
-    server/transport/ring.cpp
+    server/net/buffers.cpp
+    server/net/connections.cpp
+    server/net/ring.cpp
+    server/net/reactor.cpp
 )
 target_link_libraries(transport PRIVATE uring llhttp_static parsing)
 target_include_directories(transport PUBLIC server)
@@ -87,6 +90,8 @@ add_executable(server server/main.cpp)
 target_link_libraries(server PRIVATE transport api uring sqlite)
 add_executable(transport_tests checks/transport.cpp)
 target_link_libraries(transport_tests PRIVATE transport uring llhttp_static)
+add_executable(io_lifetime_tests checks/io_lifetimes.cpp)
+target_link_libraries(io_lifetime_tests PRIVATE transport uring llhttp_static)
 add_executable(checkpoint_tests checks/checkpoint.cpp)
 target_link_libraries(checkpoint_tests PRIVATE api sqlite)
 add_executable(group_commit_tests checks/group_commit.cpp)
@@ -108,7 +113,7 @@ add_executable(load_generator load/main.cpp)
 target_link_libraries(load_generator PRIVATE llhttp_static yyjson)
 add_executable(group_commit_probe EXCLUDE_FROM_ALL benchmarks/group_commit.cpp)
 target_link_libraries(group_commit_probe PRIVATE sqlite Threads::Threads)
-foreach(target server transport transport_tests checkpoint_tests group_commit_tests post_writer_tests btree_tests sync_tests api parsing sqlite load_generator group_commit_probe)
+foreach(target server transport transport_tests io_lifetime_tests checkpoint_tests group_commit_tests post_writer_tests btree_tests sync_tests api parsing sqlite load_generator group_commit_probe)
     target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror)
     if(TDS_SANITIZERS)
         target_compile_options(${target} PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
@@ -119,10 +124,11 @@ endforeach()
 enable_testing()
 add_test(NAME io_uring_operations COMMAND server --self-test)
 add_test(NAME transport_lifetimes COMMAND transport_tests)
+add_test(NAME io_lifetime_contract COMMAND io_lifetime_tests)
 add_test(NAME checkpoint_lifetimes COMMAND checkpoint_tests)
 add_test(NAME group_commit_contract COMMAND group_commit_tests)
 add_test(NAME post_writer_bytes COMMAND post_writer_tests)
 add_test(NAME btree_feed COMMAND btree_tests)
 add_test(NAME sync_timing_contract COMMAND sync_tests)
-set_tests_properties(checkpoint_lifetimes group_commit_contract PROPERTIES TIMEOUT 15)
+set_tests_properties(checkpoint_lifetimes group_commit_contract io_lifetime_contract PROPERTIES TIMEOUT 15)
 add_test(NAME load_generator_conformance COMMAND load_generator --self-test)

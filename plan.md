@@ -1,6 +1,6 @@
 # Server rewrite
 
-Status: active, phase 1 complete; next: phase 2 (I/O and lifetime core)
+Status: active, phase 2 complete; next: phase 3 (HTTP and application)
 
 Build a new server around explicit ownership and a typed request pipeline. Replace the current server internals and callback contracts while preserving the API and the algorithms that already proved useful. Compare the result against commit `671fd4e`.
 
@@ -218,7 +218,7 @@ Shutdown follows dependency order:
 | Phase | Deliverable | Acceptance |
 | --- | --- | --- |
 | 1. Contracts and storage (done) | Domain values, explicit errors and caller-owned read output; migrate B-tree and group-commit internals without allocation or transaction-policy changes | Release and diagnostic builds pass; writer bytes, rollback/checkpoint checks, 42 official checks and 17 HTTP regressions pass |
-| 2. I/O and lifetime core | Reactor, connection ownership, buffer leases, direct accepts and cancellation/close handling; preserve existing allocation and pool policies | Native and sanitizer checks cover multi-ring reuse above 65,535 connections, partial I/O, existing pool exhaustion, late CQEs and shutdown |
+| 2. I/O and lifetime core (done) | Reactor, connection ownership, buffer leases, direct accepts and cancellation/close handling; existing allocation, pool and scheduling policies retained | Release/diagnostic builds, 42 official checks and 17 HTTP regressions pass; native and ASan/UBSan tests cover 70,000 connections under the 65,535 server FD limit, slot reuse, exhaustion, partial I/O, original-CQE lifetime and late-accept shutdown |
 | 3. HTTP and application | Session state machine, header acceptance, typed preparation and reply ownership | Official 42 checks plus existing auth, fragment, pipeline and keep-alive regressions pass |
 | 4. Direct cutover | Wire concrete components into main and replace the old server contracts | One production path; old callbacks, generic mutable request state and superseded transport removed; affected tests/tooling updated |
 | 5. Architecture comparison gate | Optimized normal build against `671fd4e`, with identical scheduling, allocation/pool policies, generator build, source-IP count, workload settings and fresh seed database | Focused checks pass; inspect changed hotpaths in disassembly and compare a short profile, then confirm at 300k; reject unexplained CPU, memory or tail-latency regressions before proceeding |

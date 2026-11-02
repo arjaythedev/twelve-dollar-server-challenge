@@ -15,6 +15,7 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -696,8 +697,18 @@ func (a *app) loadPosts(ids []int64) map[int64]readResp {
 	if len(ids) == 0 {
 		return nil
 	}
+	unique := make([]int64, 0, len(ids))
+	seen := make(map[int64]struct{}, len(ids))
+	for _, id := range ids {
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		unique = append(unique, id)
+	}
+	sort.Slice(unique, func(i, j int) bool { return unique[i] < unique[j] })
 	rc := <-a.reads
-	n := len(ids)
+	n := len(unique)
 	st, ok := rc.postStmts[n]
 	if !ok {
 		q := strings.Replace(getPostSQL, "SELECT json_object", "SELECT p.id, json_object", 1)
@@ -712,8 +723,8 @@ func (a *app) loadPosts(ids []int64) map[int64]readResp {
 		rc.postStmts[n] = st
 	}
 	st.reset()
-	out := make(map[int64]readResp, len(ids))
-	for i, id := range ids {
+	out := make(map[int64]readResp, len(unique))
+	for i, id := range unique {
 		if err := st.bindInt64(i+1, id); err != nil {
 			st.reset()
 			a.reads <- rc

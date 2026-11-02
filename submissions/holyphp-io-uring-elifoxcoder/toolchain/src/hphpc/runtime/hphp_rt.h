@@ -1137,6 +1137,8 @@ int64_t hp_stream_send2_nb_t(int64_t fd, hstr *a, hstr *b);
 bool hp_epoll_mod_t(int64_t fd, int64_t mask);
 int64_t hp_nofile_limit_t(void);
 bool hp_uring_active_t(void);
+bool hp_uring_direct_t(void);
+int64_t hp_uring_direct_slots_t(void);
 int64_t hp_strlen_t(hstr *s);
 int64_t hp_str_to_int_t(hstr *s);
 bool hp_str_at_eq_t(hstr *s, int64_t start, int64_t len, hstr *lit);

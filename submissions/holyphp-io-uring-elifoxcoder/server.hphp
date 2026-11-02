@@ -467,14 +467,24 @@ class Server {
          * connection (tens of thousands per second in the shed regime). */
         stream_set_nodelay($srv);
         epoll_add($this->srv);
-        $this->socks = iarr_new(65536);
-        $this->lasts = iarr_new(65536);
+        /* Handles are either real fds (< 65536) or direct-descriptor handles
+         * (65536 + slot). The registered table is capped by RLIMIT_NOFILE
+         * (<= 65535 on the box), so 262144 int slots cover both spaces. */
+        $this->socks = iarr_new(262144);
+        $this->lasts = iarr_new(262144);
 
         /* Shed only when the process is really near its descriptor limit.
          * The box sets LimitNOFILE; a hard 58,000 would close every response
          * once more than 58,000 users are connected. */
         $lim = nofile_limit();
-        if ($lim > 0) {
+        if (uring_direct()) {
+            /* Ring-owned descriptors are not limited by RLIMIT_NOFILE and
+             * one multishot recv per connection stays in flight, so neither
+             * the fd limit nor the 28k armed-SQE ceiling applies. Shed just
+             * below the registered table (which the kernel caps at NOFILE). */
+            $this->shedAt = intval(uring_direct_slots()) - 1024;
+            if ($this->shedAt < 1024) { $this->shedAt = 1024; }
+        } elseif ($lim > 0) {
             $this->shedAt = $lim - 4096;
             if ($this->shedAt < 32000) { $this->shedAt = 32000; }
             if ($this->shedAt > $lim) { $this->shedAt = $lim; }
@@ -624,7 +634,7 @@ class Server {
             if ($n > $this->nconn * 2 + 1024) {
                 $this->sockList = [];
                 $k = 0;
-                while ($k < 65536) {
+                while ($k < 262144) {
                     if (iarr_get($this->socks, $k) != 0) { $this->sockList[] = $k; }
                     $k = $k + 1;
                 }

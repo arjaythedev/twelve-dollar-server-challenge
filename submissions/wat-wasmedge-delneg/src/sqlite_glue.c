@@ -9,7 +9,20 @@
 _Static_assert(SQLITE_VERSION_NUMBER == 3054001, "the B-tree wrappers below are checked against SQLite 3.54.1");
 
 #define X(name) __attribute__((export_name(#name)))
+// balance_nonroot swaps two pages through a temporary key, the lock-byte page's number (262,145 at 4 KiB).
+// pcache1Rekey raises the cache's iMaxKey to it, so the commit's pcache1Truncate(dbSize + 1) then walks
+// the whole hash table (~250 us at 8,192 slots) for pages past the end that are not there. The page
+// moves on to a real number before balance_nonroot returns, so iMaxKey keeps its old value for that key.
+static void (*pc_rekey)(sqlite3_pcache *, sqlite3_pcache_page *, unsigned, unsigned);
+static void pc_rekey_tmp(sqlite3_pcache *p, sqlite3_pcache_page *pg, unsigned from, unsigned to) {
+  PCache1 *c = (PCache1 *)p; unsigned m = c->iMaxKey;
+  pc_rekey(p, pg, from, to);
+  if (to == (unsigned)PENDING_BYTE / (unsigned)c->szPage + 1 && to > m) c->iMaxKey = m;
+}
 X(db_open) int db_open(const char *path, sqlite3 **db) {
+  int rc = sqlite3_initialize();
+  if (rc) return rc;
+  if (!pc_rekey) { pc_rekey = sqlite3GlobalConfig.pcache2.xRekey; sqlite3GlobalConfig.pcache2.xRekey = pc_rekey_tmp; }
   return sqlite3_open_v2(path, db, SQLITE_OPEN_READWRITE, "unix-none");
 }
 X(db_exec) int db_exec(sqlite3 *db, const char *sql) { return sqlite3_exec(db, sql, 0, 0, 0); }

@@ -504,3 +504,73 @@ restarts. CKPT_DEFER=0: plain inline checkpoints at the same point.
 ## S9: 5-minute hold at 320k, E26 (2 Nov, Synteq) — measurement
 hold.sh: 33.7k rps, p50 8.85 ms, p95 198 ms, p99 455 ms, max 1.82 s, 0 errors, 0 stuck, cgroup 93.6%,
 27.78 us/req, 880 MB. Passes.
+
+## S10: where the time goes at 300k, E26 (2 Nov, Synteq) — measurement
+perf record -C 0 (20 s): kernel 64%, app.so 33% (WAT + SQLite), libc 1%, libwasmedge 1%. Top: SQLite
+sqlite3BtreeTableMoveto 5.4%, __inet_lookup_established 4.5% (the box's ehash has 131,072 buckets for
+~600k sockets, both ends local), then WAT record/putjson/put/after_recv and pcache1Fetch at 1.3-2.2% each.
+(Symbols: wasm-opt --symbolmap on a merge of sq.wasm and a --debug-names app.wasm gives the same binary.)
+Loop gaps > 40 ms (gap.bt, 100 s): 33 of 41 have 3 syncs = the inline tail checkpoint (90-157 ms); 5 are
+a deferred round's copy (~41 ms incl. a 13 ms WAL sync). sy.bt: per cycle, WAL sync 15 ms, io_uring
+fdatasync of the db 110-157 ms (off the loop), tail: WAL sync 15 ms + db fsync 49 ms + restart header
+sync 4 ms.
+
+## E26b: CKPT_TAIL=300 (2 Nov, Synteq) — rejected
+1 rep at 300k: p50 18.8 ms, p95 230, p99 670 ms, 1136 MB: under load a round never ends with <= 300 frames
+left, so the WAL keeps growing (145 MB) instead of restarting. (Its first paired TAIL=2000 run lost the
+server at start: the previous run's server, closing 300k sockets, still held the port; ubs.sh now waits
+for the port to be free.) Stopped after rep 1.
+
+## E27: SQLite syncs with fdatasync (2 Nov)
+strace showed every SQLite sync as fsync(): the amalgamation defines fdatasync as fsync unless
+HAVE_FDATASYNC, and the WASI build has no configure step. Stock Linux builds use fdatasync. Build flag
+-DHAVE_FDATASYNC=1 (wasi-libc has fdatasync -> fd_datasync). opt-box: 42/42, kill -9 check ok, strace
+now shows fdatasync on the db and WAL. Synteq: 42/42.
+A/B at 300k (Synteq, interleaved, 3 reps): E26 p95 86, 89, 108 / p99 188, 192, 265 / 28.01, 28.13,
+28.46 us/req; E27 p95 162, 80, 95 / p99 400, 182, 240 / 29.10, 28.08, 28.26 us/req. No difference beyond
+noise (this session's E26 runs were also faster than S8's). sy.bt on E27: the io_uring db sync still
+takes 120-184 ms and the tail's db sync 40-57 ms, so data, not metadata, dominates. Not kept for speed;
+the flag stays in the E28 build only to match stock Linux builds (to decide with E28).
+
+## E28: DB_CHUNK (SQLITE_FCNTL_CHUNK_SIZE) — crashes under WASI, dropped
+With DB_CHUNK=64 MB the server died at the first checkpoint: "integer divide by zero" in _start. The
+checkpoint's SQLITE_FCNTL_SIZE_HINT goes to fcntlSizeHint, whose non-fallocate path divides by
+st_blksize, and WASI's filestat has no block size (0). Integrity ok after the crash. Removed.
+
+## E28: CKPT_WAL — let the WAL grow before a restart (2 Nov)
+The inline tail (90-157 ms loop stall) runs once per restart cycle, about every 3 s at 300k. With
+CKPT_WAL=N, the async rounds go on (every CKPT_FRAMES frames) until the WAL has N frames, and only then
+does a round end in the tail + restart, so the stall comes ~N/16000 times less often for N/4 KB of WAL
+file. opt-box: 42/42 (defaults, and FRAMES=500 TAIL=200 WAL=6000); kill -9 check with FRAMES=400
+WAL=2000: the WAL file stays at ~2025 frames (restarts), integrity ok, counts match.
+A/B at 300k (Synteq, interleaved, 3 reps; e28 built with -DHAVE_FDATASYNC=1):
+- E26: p95 65.6, 88.3, 100.6 / p99 141, 197, 225 / max 363, 574, 640 / 27.44, 28.40, 27.43 us/req, 675 MB
+- FRAMES=4000 WAL=64000: p95 42.2, 82.7, 79.8 / p99 114, 315, 350 / max 726, 1100, 1366 / 28.50, 28.90, 28.65, 870 MB
+- FRAMES=16000 WAL=64000: p95 41.9, 166.8, 78.6 / p99 129, 740, 285 / max 537, 2236, 1351 / 27.65, 29.25, 28.48, 880 MB
+Not better on p99/max as measured; the box's run-to-run noise is as large as the effect.
+gap.bt over 100 s (Synteq, 300k), WAL=64000: 10 loop gaps > 40 ms (9 tails, 44-122 ms, every ~10.5 s; total
+~1.0 s) vs E26's 41 (3.6 s total, S10). New: one 279 ms gap holding a single 237 ms sync (a round's WAL
+sync, it seems), which E26's trace never showed. Next: interleaved 5-minute holds at 340k, E26 vs WAL=64000.
+5-minute holds (Synteq): 340k fails CPU-bound for both (E26 34.7k rps, p95 1.42 s, p99 4.9 s, 97.8%; WAL=64000
+33.5k rps, p95 2.5 s, 96.9%). 330k, interleaved: WAL=64000 p95 360, 1060 / p99 1475, 3845 ms; E26 p95
+830, 580 / p99 2350, 1610 ms; all four fail, at 96-97.5% cgroup CPU. Synteq's ceiling is ~320k and it is
+CPU. E28 dropped (code reverted); its log stays.
+
+## E29: keep pcache1's iMaxKey off the lock-byte page (2 Nov)
+perf had pcache1Truncate at 1.2% of CPU 0. uprobes (Synteq, 300k, 10 s): ~500 calls/s on the main cache,
+most 1-8 us, but ~50/s take 128-512 us (~250 us each). Reading PCache1 out of wasm memory at those calls:
+iMaxKey = 262,145, nHash 8,192, nPage ~8,100, iLimit = dbSize + 1 (~64,700). A ustack on pcache1Fetch(key
+262,145) points at sqlite3PcacheMove: balance_nonroot swaps two new pages through a temporary key,
+PENDING_BYTE / pageSize + 1, and pcache1Rekey raises iMaxKey to it. The commit's pcache1Truncate(dbSize+1)
+then sees iMaxKey - iLimit >= nHash and walks the whole hash table for pages that are not there. Fix in
+sqlite_glue.c (SQLite itself unchanged): db_open wraps sqlite3GlobalConfig.pcache2.xRekey; on a rekey to
+that number it puts iMaxKey back (the page moves on to a real number before balance_nonroot returns, and
+no truncate runs in between). opt-box: 42/42, kill -9 check ok. Synteq: 42/42.
+(The two small caches truncated to 1-2 are the RETURNING statements' ephemeral tables, ~0.2% each.)
+A/B at 300k (Synteq, interleaved, 3 reps): E29 p95 85.9, 59.3, 78.3 / p99 215, 132, 176 / 27.77, 27.06,
+27.60 us/req; E26 p95 76.1, 67.0, 147 / p99 210, 155, 420 / 27.32, 27.74, 27.71 us/req. perf -C 0 (20 s,
+E29): pcache1Truncate (f1131) 0.00%, was 1.2%. The us/req difference is within the box's noise.
+Clean container (opt-box ci2.sh): 42/42. 5-minute holds at 320k, Synteq (afternoon, paired): E29 alone
+p95 275 / p99 800; then E26 295/835, E29 265/785, E26 280/765, E29 365/1165 (fails p99). All 0 errors,
+93-95% CPU. The morning's E26 hold (S9) gave 198/455: 320k is this box's edge, and the spread between
+holds of one build is larger than any difference between these two. Kept: it only removes work.

@@ -2,6 +2,7 @@
 
 ## Next, in order
 
+- [ ] Split transport into parser, connection, ring and event loop; verify behavior, then run larger load groups.
 - [ ] Separate bounded receive draining from handler work, then compare multishot receive and accept depth.
 - [ ] Measure WAL/checkpoint costs, then compare background checkpoints and bounded group commit. Send write responses after commit.
 - [ ] Compare ID-ordered post/author reads, then use the next profile to choose smaller changes such as hybrid SEND and JSON scanning.

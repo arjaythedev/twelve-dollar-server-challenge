@@ -37,6 +37,9 @@
 
 ## Then: storage and measured hot paths
 
+- [ ] Reuse immutable parser callback tables; API handlers already live for the server's lifetime. Keep request state and JWT verification separate for every request.
+- [ ] Compare a small parser/connection FSM with the current flags. Make valid transitions explicit; measure an event bus only if multiple event consumers justify its routing and lifetime costs.
+
 - [ ] Measure checkpoint CPU, WAL growth and p99 before changing write scheduling. Files/locks/page cache account for 10.9% of sampled CPU; this includes reads and locking as well as writes.
   Try PASSIVE checkpoints on a separate, lower-priority connection. `unix-excl` needs one owning process. Synchronize checkpoint state explicitly.
   Profile WAL writes separately from checkpoints; preserve write order, flush errors and `synchronous=NORMAL` or stronger.

@@ -62,7 +62,12 @@ add_dependencies(uring uring_build)
 
 add_library(parsing STATIC server/parsing.cpp)
 target_include_directories(parsing PUBLIC server)
-add_library(transport STATIC server/transport.cpp)
+add_library(transport STATIC
+    server/transport.cpp
+    server/transport/http_parser.cpp
+    server/transport/connection.cpp
+    server/transport/ring.cpp
+)
 target_link_libraries(transport PUBLIC uring llhttp_static parsing)
 target_include_directories(transport PUBLIC server)
 add_library(api STATIC server/api.cpp server/auth.cpp server/database.cpp server/json.cpp)

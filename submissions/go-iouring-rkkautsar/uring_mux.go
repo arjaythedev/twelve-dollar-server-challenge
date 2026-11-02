@@ -83,12 +83,21 @@ func registerFileTable(ringFD int, n int) error {
 
 type MuxHandler func(*httpReq) (packet []byte, closeAfter bool)
 
+type muxLayout int
+
+const (
+	muxMixed muxLayout = iota
+	muxReadSharedWrite
+	muxFeedPostSharedWrite
+)
+
 type muxJob struct {
 	c     *muxConn
 	req   *httpReq
 	feed  bool
 	post  bool
 	write bool
+	owner *uringMux
 	conns []*muxConn
 	ids   []int64
 	reqs  []*httpReq
@@ -124,6 +133,9 @@ type uringMux struct {
 	next         atomic.Uint64
 	toSub        uint32
 	jobs         chan *muxJob
+	feedJobs     chan *muxJob
+	postJobs     chan *muxJob
+	writeJobs    chan *muxJob
 	responses    chan *muxResp
 	waiting      []*muxConn
 	coalesce     bool
@@ -138,7 +150,7 @@ type uringMux struct {
 	sendReady    []*muxConn
 }
 
-func newUringMux(handler MuxHandler, feed func() []byte, postBatch func([]int64) map[int64][]byte, writeBatch func([]*httpReq) []readResp, coalesce bool, workers int) (*uringMux, error) {
+func newUringMux(handler MuxHandler, feed func() []byte, postBatch func([]int64) map[int64][]byte, writeBatch func([]*httpReq) []readResp, coalesce bool, workers int, layout muxLayout, writeJobs chan *muxJob) (*uringMux, error) {
 	ring, err := newRawRing(muxSqEntries, muxCqEntries)
 	if err != nil {
 		return nil, fmt.Errorf("ring: %w", err)
@@ -189,49 +201,106 @@ func newUringMux(handler MuxHandler, feed func() []byte, postBatch func([]int64)
 		wakeBuf:    make([]byte, 1),
 		conns:      make(map[uint64]*muxConn),
 		jobs:       make(chan *muxJob, workers*4),
+		writeJobs:  writeJobs,
 		responses:  make(chan *muxResp, 1024),
 	}
+	if layout == muxFeedPostSharedWrite {
+		m.feedJobs = make(chan *muxJob, 64)
+		m.postJobs = make(chan *muxJob, 64)
+	}
 	m.armWake()
-	for i := 0; i < workers; i++ {
-		go m.worker()
+	if layout == muxFeedPostSharedWrite {
+		go m.feedWorker()
+		go m.postWorker()
+	} else {
+		for range workers {
+			go m.worker()
+		}
 	}
 	return m, nil
 }
 
 func (m *uringMux) worker() {
 	for j := range m.jobs {
+		m.processJob(j)
+	}
+}
+
+func (m *uringMux) feedWorker() {
+	for j := range m.feedJobs {
 		if j.feed {
-			pkt := m.feed()
-			for _, c := range j.conns {
-				m.responses <- &muxResp{c: c, pkt: pkt}
-			}
-			m.responses <- &muxResp{feedEnd: true}
-			m.wake()
-			continue
+			m.processFeed(j)
+		} else {
+			m.processGeneric(j)
 		}
-		if j.post {
-			packets := m.postBatch(j.ids)
-			for i, c := range j.conns {
-				pkt := packets[j.ids[i]]
-				m.responses <- &muxResp{c: c, pkt: pkt}
-			}
-			m.responses <- &muxResp{postEnd: true}
-			m.wake()
-			continue
+	}
+}
+
+func (m *uringMux) postWorker() {
+	for j := range m.postJobs {
+		m.processPost(j)
+	}
+}
+
+func (m *uringMux) processJob(j *muxJob) {
+	switch {
+	case j.feed:
+		m.processFeed(j)
+	case j.post:
+		m.processPost(j)
+	case j.write:
+		m.processWrite(j)
+	default:
+		m.processGeneric(j)
+	}
+}
+
+func (m *uringMux) processFeed(j *muxJob) {
+	pkt := m.feed()
+	for _, c := range j.conns {
+		m.responses <- &muxResp{c: c, pkt: pkt}
+	}
+	m.responses <- &muxResp{feedEnd: true}
+	m.wake()
+}
+
+func (m *uringMux) processPost(j *muxJob) {
+	packets := m.postBatch(j.ids)
+	for i, c := range j.conns {
+		pkt := packets[j.ids[i]]
+		m.responses <- &muxResp{c: c, pkt: pkt}
+	}
+	m.responses <- &muxResp{postEnd: true}
+	m.wake()
+}
+
+func (m *uringMux) processWrite(j *muxJob) {
+	results := m.writeBatch(j.reqs)
+	for i, c := range j.conns {
+		r := results[i]
+		m.responses <- &muxResp{c: c, pkt: r.packet}
+	}
+	m.responses <- &muxResp{writeEnd: true}
+	m.wake()
+}
+
+func (m *uringMux) processGeneric(j *muxJob) {
+	pkt, closeAfter := m.handler(j.req)
+	m.responses <- &muxResp{c: j.c, pkt: pkt, close: closeAfter}
+	m.wake()
+}
+
+// runWriteWorker is the one writer shared by all shards. It routes results
+// back to the mux that queued the job so its event loop can wake up.
+func runWriteWorker(jobs <-chan *muxJob, writeBatch func([]*httpReq) []readResp) {
+	for j := range jobs {
+		results := writeBatch(j.reqs)
+		for i, c := range j.conns {
+			r := results[i]
+			j.owner.responses <- &muxResp{c: c, pkt: r.packet}
 		}
-		if j.write {
-			results := m.writeBatch(j.reqs)
-			for i, c := range j.conns {
-				r := results[i]
-				m.responses <- &muxResp{c: c, pkt: r.packet}
-			}
-			m.responses <- &muxResp{writeEnd: true}
-			m.wake()
-			continue
-		}
-		pkt, closeAfter := m.handler(j.req)
-		m.responses <- &muxResp{c: j.c, pkt: pkt, close: closeAfter}
-		m.wake()
+		j.owner.responses <- &muxResp{writeEnd: true}
+		j.owner.wake()
 	}
 }
 
@@ -661,8 +730,12 @@ func (m *uringMux) pump(c *muxConn) {
 		m.writeReqs = append(m.writeReqs, req)
 		return
 	}
+	jobs := m.jobs
+	if m.feedJobs != nil {
+		jobs = m.feedJobs
+	}
 	select {
-	case m.jobs <- &muxJob{c: c, req: req}:
+	case jobs <- &muxJob{c: c, req: req}:
 		c.consume(used)
 		c.busy = true
 	default:
@@ -706,8 +779,12 @@ func (m *uringMux) flushFeeds() {
 	}
 	batch := m.feedPend
 	m.feedPend = nil
+	jobs := m.jobs
+	if m.feedJobs != nil {
+		jobs = m.feedJobs
+	}
 	select {
-	case m.jobs <- &muxJob{feed: true, conns: batch}:
+	case jobs <- &muxJob{feed: true, conns: batch}:
 		m.feedBusy = true
 	default:
 		m.feedPend = batch
@@ -722,8 +799,12 @@ func (m *uringMux) flushPosts() {
 	ids := m.postIDs
 	m.postPend = nil
 	m.postIDs = nil
+	jobs := m.jobs
+	if m.postJobs != nil {
+		jobs = m.postJobs
+	}
 	select {
-	case m.jobs <- &muxJob{post: true, conns: conns, ids: ids}:
+	case jobs <- &muxJob{post: true, conns: conns, ids: ids}:
 		m.postBusy = true
 	default:
 		m.postPend = conns
@@ -739,8 +820,12 @@ func (m *uringMux) flushWrites() {
 	reqs := m.writeReqs
 	m.writePend = nil
 	m.writeReqs = nil
+	jobs := m.jobs
+	if m.writeJobs != nil {
+		jobs = m.writeJobs
+	}
 	select {
-	case m.jobs <- &muxJob{write: true, conns: conns, reqs: reqs}:
+	case jobs <- &muxJob{write: true, owner: m, conns: conns, reqs: reqs}:
 		m.writeBusy = true
 	default:
 		m.writePend = conns

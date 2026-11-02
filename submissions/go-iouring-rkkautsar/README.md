@@ -64,6 +64,8 @@ statements cache only query plans, as allowed by rule 5.
 | `JWT_SECRET` | required by the challenge | HS256 signing secret |
 | `HOST`, `PORT` | `127.0.0.1`, `3000` | Listen address |
 | `URING` | unset/`1` | `0` selects the Go fallback |
+| `SHARDS` | `3` | io_uring listener shards |
+| `MUX_LAYOUT` | `mixed` | `mixed`: one feed/post/write worker per shard; `read`: one read worker per shard plus one shared writer; `feedpost`: one feed and one post worker per shard plus one shared writer |
 | `READ_CONNS` | `2` | SQLite read connections |
 | `READ_COALESCE` | `1` | `0` disables in-flight read sharing |
 | `READ_BATCH_US` | `500` | Go fallback read window |

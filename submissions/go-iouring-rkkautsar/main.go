@@ -144,6 +144,23 @@ func main() {
 	}
 	path := os.Getenv("SQLITE_PATH")
 
+	shards := 3
+	if v := os.Getenv("SHARDS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 8 {
+			shards = n
+		}
+	}
+	layout := muxMixed
+	switch strings.ToLower(os.Getenv("MUX_LAYOUT")) {
+	case "", "mixed":
+	case "read", "readwrite", "read-shared-write":
+		layout = muxReadSharedWrite
+	case "feedpost", "feed-post", "feedpost-shared-write":
+		layout = muxFeedPostSharedWrite
+	default:
+		log.Fatalf("unknown MUX_LAYOUT %q", os.Getenv("MUX_LAYOUT"))
+	}
+
 	readConns := 2
 	if v := os.Getenv("READ_CONNS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
@@ -228,16 +245,21 @@ func main() {
 		writeBatch := func(reqs []*httpReq) []readResp {
 			return a.muxWriteBatch(reqs)
 		}
+		var writeJobs chan *muxJob
+		if layout != muxMixed {
+			writeJobs = make(chan *muxJob, 256)
+			go runWriteWorker(writeJobs, writeBatch)
+		}
 		newMux := func() (*uringMux, error) {
 			return newUringMux(func(req *httpReq) ([]byte, bool) {
 				w := &capture{status: 200}
 				a.ServeHTTP(w, req)
 				closeAfter := req.close
 				return encodeMuxResponse(w, closeAfter), closeAfter
-			}, feed, postBatch, writeBatch, a.coalesce, 1)
+			}, feed, postBatch, writeBatch, a.coalesce, 1, layout, writeJobs)
 		}
 		started := 0
-		for range 3 {
+		for range shards {
 			mux, err := newMux()
 			if err != nil {
 				log.Printf("raw io_uring mux unavailable: %v", err)
@@ -251,7 +273,7 @@ func main() {
 			}(mux)
 		}
 		if started > 0 {
-			log.Printf("raw io_uring request mux enabled (%d shards)", started)
+			log.Printf("raw io_uring request mux enabled (%d shards, layout %d)", started, layout)
 			select {}
 		}
 	}

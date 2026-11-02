@@ -1,0 +1,112 @@
+{
+  "date": "2026-11-02",
+  "baseline": "1 pending accept",
+  "candidate": "64 pending accepts",
+  "workload": {
+    "child_rlimit_nofile": 256,
+    "warm_connections": 256,
+    "gate_connection": 1,
+    "burst_nonblocking_connections": 512,
+    "target_handler_gate_ms": 20,
+    "fdinfo_sample_ms_after_gate": 15,
+    "latency_endpoint": "first complete correct HTTP response per burst connection",
+    "quantile": "nearest rank",
+    "order": [
+      "baseline",
+      "candidate",
+      "candidate",
+      "baseline"
+    ]
+  },
+  "runs": [
+    {
+      "variant": "baseline",
+      "gate_ms": 20.014,
+      "fixed_before": 257,
+      "fixed_during": 258,
+      "accepted_while_blocked": 1,
+      "rings_during": 2,
+      "rings_after": 4,
+      "fixed_after": 769,
+      "responses": 512,
+      "errors": 0,
+      "connect_response_p95_ms": 23.358,
+      "connect_response_p99_ms": 23.992,
+      "after_release_p95_ms": 9.321,
+      "after_release_p99_ms": 10.223
+    },
+    {
+      "variant": "candidate",
+      "gate_ms": 20.011,
+      "fixed_before": 257,
+      "fixed_during": 321,
+      "accepted_while_blocked": 64,
+      "rings_during": 2,
+      "rings_after": 4,
+      "fixed_after": 769,
+      "responses": 512,
+      "errors": 0,
+      "connect_response_p95_ms": 19.982,
+      "connect_response_p99_ms": 20.924,
+      "after_release_p95_ms": 6.004,
+      "after_release_p99_ms": 6.106
+    },
+    {
+      "variant": "candidate",
+      "gate_ms": 20.018,
+      "fixed_before": 257,
+      "fixed_during": 321,
+      "accepted_while_blocked": 64,
+      "rings_during": 2,
+      "rings_after": 4,
+      "fixed_after": 769,
+      "responses": 512,
+      "errors": 0,
+      "connect_response_p95_ms": 19.837,
+      "connect_response_p99_ms": 20.733,
+      "after_release_p95_ms": 6.178,
+      "after_release_p99_ms": 6.281
+    },
+    {
+      "variant": "baseline",
+      "gate_ms": 20.023,
+      "fixed_before": 257,
+      "fixed_during": 258,
+      "accepted_while_blocked": 1,
+      "rings_during": 2,
+      "rings_after": 4,
+      "fixed_after": 769,
+      "responses": 512,
+      "errors": 0,
+      "connect_response_p95_ms": 22.215,
+      "connect_response_p99_ms": 22.781,
+      "after_release_p95_ms": 8.183,
+      "after_release_p99_ms": 9.011
+    }
+  ],
+  "validation": {
+    "source_review": "pass, independent read-only review found no actionable correctness or lifetime defects",
+    "stop_before_burst": {
+      "gate_ms": 20.0199,
+      "fixed_before": 257,
+      "fixed_during": 321,
+      "rings_during": 2,
+      "exit_code": 0
+    },
+    "candidate_native": {
+      "passed": true,
+      "wall_seconds": 3.723,
+      "clients": 768,
+      "rlimit_nofile": 256,
+      "rings": 4,
+      "checks": [
+        "direct slot reuse",
+        "HTTP fragmentation",
+        "pipelining",
+        "receive pool exhaustion",
+        "partial sends",
+        "live-socket cancellation and shutdown"
+      ]
+    }
+  }
+}

@@ -39,6 +39,9 @@
 | C++ 0.1.0 (direct descriptors B, Linux loopback) | 25,000 | 60 s | 259,214 | 1,993.26 | 4.639 ms | 14.077 ms | 92.99 ms | 0% | 40.49 us | 342.55 MiB |
 | C++ 0.1.0 (refactor baseline, Linux loopback) | 50,000 | 60 s | 519,120 | 3,990.66 | 4.681 ms | 21.253 ms | 125.79 ms | 0% | 34.47 us | 431.94 MiB |
 | C++ 0.1.0 (compact transport, Linux loopback) | 50,000 | 60 s | 518,181 | 3,983.89 | 4.612 ms | 20.346 ms | 117.51 ms | 0% | 33.59 us | 407.12 MiB |
+| C++ 0.1.0 (native client, Linux loopback) | 100,000 | 60 s | 1,036,376 | 7,972.07 | 11.246 ms | 26.269 ms | 120.47 ms | 0% | 32.54 us | 653.45 MiB |
+| C++ 0.1.0 (hybrid send, Linux loopback) | 100,000 | 60 s | 1,036,840 | 7,975.70 | 12.957 ms | 33.165 ms | 125.39 ms | 0% | 32.52 us | 647.02 MiB |
+| C++ 0.1.0 (cold Exchange, Linux loopback) | 100,000 | 60 s | 1,036,362 | 7,972.03 | 11.366 ms | 27.424 ms | 455.02 ms | 0% | 31.05 us | 528.11 MiB |
 
 Statistics include the ramps. RAM is the cgroup peak, including charged file pages. Local results, not an official score or a measured capacity limit.
 
@@ -61,6 +64,8 @@ GCC13 to GCC16 (C++23/GNU17), 7 pairs: feed 10.147 to 10.279 us; post 4.081 to 4
 SQLite page cache, 2 to 16 MiB, five alternating pairs: random-post CPU median change -12.6%, misses -37.3%, feed unchanged. JSON hashes matched. Mixed 10k profile: 51.85 us/request, no errors, no clear overall CPU change. [Data](src/profiles/cache16-10000.json).
 
 Load generator, 10k users / 60 s: sampled client cgroup peak 2,775.08 MiB (k6) versus 52.63 MiB (native); 795.95 versus 797.57 requests/s, no errors. Native process peak RSS: 24.05 MiB. [Data](src/profiles/cpp-load-10000.json).
+
+Accept depth 1 to 64, 512-connection bursts behind a 20-ms handler gate, file limit 256: actual accepts during the gate 1 to 64; after-release p99 10.223 to 6.106 ms and 9.011 to 6.281 ms. All responses passed. [Data](src/benchmarks/accept-depth.json).
 
 ## Native CPU sampling
 

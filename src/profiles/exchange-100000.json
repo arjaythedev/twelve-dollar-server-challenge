@@ -1,0 +1,257 @@
+{
+  "benchmark": {
+    "date": "2026-11-02",
+    "name": "exchange-100000",
+    "runtime": "C++ 0.1.0",
+    "load_generator": "docker_loopback",
+    "generator": "cpp",
+    "sqlite": "3.53.1",
+    "users": 100000,
+    "hold": "60s",
+    "ramp": "30s",
+    "requests": 1036362,
+    "rps": 7972.03237075,
+    "p95_ms": 11.3663622,
+    "p99_ms": 27.42442939,
+    "max_ms": 455.024195,
+    "error_rate": 0.0,
+    "cpu_us_per_request": 31.04905621780806,
+    "cpu_scope": "server_cgroup",
+    "server_peak_bytes": 553758720,
+    "passed": true,
+    "client_sampled_peak_bytes": 449904640
+  },
+  "profile": {
+    "event": "cpu-clock",
+    "frequency_hz": 997,
+    "stack_bytes": 8192,
+    "samples": 16881,
+    "sampled_cpu_ns": 16931794929,
+    "lost_records": 0,
+    "unresolved_leaf_samples": 704,
+    "unrooted_samples": 11,
+    "stages_cpu_ns": {
+      "kernel_filesystem": 2004011982,
+      "kernel_network": 6814443146,
+      "database_and_rows": 3766298795,
+      "transport_and_other": 863590749,
+      "kernel_io_uring": 2031093225,
+      "kernel_other": 733199579,
+      "kernel_scheduler": 133400197,
+      "response_json": 309929781,
+      "auth": 269809421,
+      "request_json": 1003009,
+      "unknown": 5015045
+    },
+    "hotspots": [
+      {
+        "symbol": "_raw_spin_unlock_irqrestore",
+        "module": "[kernel.kallsyms]",
+        "cpu_ns": 1646940778,
+        "samples": 1642
+      },
+      {
+        "symbol": "[unknown]",
+        "module": "/usr/lib/x86_64-linux-gnu/libc.so.6",
+        "cpu_ns": 622868589,
+        "samples": 621
+      },
+      {
+        "symbol": "sqlite3BtreeTableMoveto",
+        "module": "/app/server",
+        "cpu_ns": 583751238,
+        "samples": 582
+      },
+      {
+        "symbol": "pcache1Fetch",
+        "module": "/app/server",
+        "cpu_ns": 517552644,
+        "samples": 516
+      },
+      {
+        "symbol": "finish_task_switch.isra.0",
+        "module": "[kernel.kallsyms]",
+        "cpu_ns": 498495473,
+        "samples": 497
+      },
+      {
+        "symbol": "srso_alias_safe_ret",
+        "module": "[kernel.kallsyms]",
+        "cpu_ns": 304914736,
+        "samples": 304
+      },
+      {
+        "symbol": "sqlite3GetVarint",
+        "module": "/app/server",
+        "cpu_ns": 251755259,
+        "samples": 251
+      },
+      {
+        "symbol": "tcp_ack",
+        "module": "[kernel.kallsyms]",
+        "cpu_ns": 220661980,
+        "samples": 220
+      },
+      {
+        "symbol": "tds::Server::State::run()",
+        "module": "/app/server",
+        "cpu_ns": 216649944,
+        "samples": 216
+      },
+      {
+        "symbol": "llhttp__internal__run",
+        "module": "/app/server",
+        "cpu_ns": 181544629,
+        "samples": 181
+      },
+      {
+        "symbol": "sqlite3VdbeExec",
+        "module": "/app/server",
+        "cpu_ns": 178535602,
+        "samples": 178
+      },
+      {
+        "symbol": "__inet_lookup_established",
+        "module": "[kernel.kallsyms]",
+        "cpu_ns": 170511530,
+        "samples": 170
+      },
+      {
+        "symbol": "syscall_enter_from_user_mode",
+        "module": "[kernel.kallsyms]",
+        "cpu_ns": 162487458,
+        "samples": 162
+      },
+      {
+        "symbol": "selinux_socket_recvmsg",
+        "module": "[kernel.kallsyms]",
+        "cpu_ns": 160481440,
+        "samples": 160
+      },
+      {
+        "symbol": "posix_lock_inode",
+        "module": "[kernel.kallsyms]",
+        "cpu_ns": 151454359,
+        "samples": 151
+      }
+    ],
+    "syscalls_cpu_ns": {
+      "fcntl": 1276830457,
+      "io_uring_enter": 8517552428,
+      "other": 914744208,
+      "fsync": 249749241,
+      "pwrite64": 636910715,
+      "read": 44132396,
+      "pread64": 73219657,
+      "brk": 1003009,
+      "ftruncate": 2006018
+    }
+  },
+  "window": {
+    "warmup_s": 30.0,
+    "hold_s": 60.0,
+    "resume_ack_s": 0.00024099997244775295,
+    "enable_request_s": 30.212102699908428,
+    "enable_ack_s": 30.387221499928273,
+    "disable_request_s": 90.04950729990378,
+    "disable_ack_s": 90.2338163999375,
+    "cpu": {
+      "cgroup_user_s": 5.54343,
+      "cgroup_system_s": 12.313853,
+      "main_user_s": 5.55,
+      "main_system_s": 12.31,
+      "cgroup_minus_main_s": -0.002717000000002301
+    }
+  },
+  "load_generator": {
+    "name": "td-load",
+    "version": "0.1.0",
+    "transport": "epoll/http1.1/IPv4",
+    "source": "bench/load.js",
+    "passed": true,
+    "checks_passed": true,
+    "vus": 100000,
+    "ramp_up_seconds": 30,
+    "hold_seconds": 60,
+    "ramp_down_seconds": 30,
+    "grace_seconds": 10,
+    "request_timeout_seconds": 60,
+    "elapsed_seconds": 129.999723007,
+    "connections": 100000,
+    "max_rss_bytes": 57962496,
+    "idle_vu_state_bytes": 80,
+    "interrupted_iterations": 51312,
+    "workflow_errors": 0,
+    "bytes_received": 1945112063,
+    "seed": 2396452139,
+    "quantiles": "exact linear interpolation, all completed requests, 24 bytes/request across global+endpoint+phase samples, plus vector capacity, 20 million request limit",
+    "duration_semantics": "send+wait+receive, excludes connect; interrupted requests omitted",
+    "endpoint_requests": {
+      "feed": 477936,
+      "post": 477936,
+      "like": 70991,
+      "create": 9499
+    },
+    "endpoint_duration_ms": {
+      "feed": {
+        "count": 477936,
+        "avg": 4.11584891777,
+        "p95": 11.58103025,
+        "p99": 28.5036994,
+        "max": 454.955521
+      },
+      "post": {
+        "count": 477936,
+        "avg": 3.80275361609,
+        "p95": 10.86667825,
+        "p99": 26.4037346,
+        "max": 455.024195
+      },
+      "like": {
+        "count": 70991,
+        "avg": 4.02548447774,
+        "p95": 12.891098,
+        "p99": 28.0997621,
+        "max": 452.553171
+      },
+      "create": {
+        "count": 9499,
+        "avg": 3.79501141415,
+        "p95": 11.2847743,
+        "p99": 29.25254528,
+        "max": 446.184608
+      }
+    },
+    "phase_duration_ms": {
+      "ramp_up": {
+        "count": 209312,
+        "avg": 2.20023315988,
+        "p95": 4.43926825,
+        "p99": 21.19884109,
+        "max": 34.054258
+      },
+      "hold": {
+        "count": 634936,
+        "avg": 4.64246103816,
+        "p95": 13.1205305,
+        "p99": 27.8651217,
+        "max": 455.024195
+      },
+      "ramp_down": {
+        "count": 188746,
+        "avg": 3.65919161132,
+        "p95": 14.274651,
+        "p99": 47.57115575,
+        "max": 108.679079
+      },
+      "grace": {
+        "count": 3368,
+        "avg": 2.24126420695,
+        "p95": 4.22420555,
+        "p99": 18.19265505,
+        "max": 25.490052
+      }
+    },
+    "phase_semantics": "classification by completion timestamp; stage boundaries enter the next phase"
+  }
+}

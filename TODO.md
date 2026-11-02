@@ -2,7 +2,7 @@
 
 ## Next, in order
 
-- [ ] Separate bounded receive draining from handler work, then compare multishot receive and accept depth.
+- [ ] Separate bounded receive draining from handler work, then compare multishot receive.
 - [ ] Measure WAL/checkpoint costs, then compare background checkpoints and bounded group commit. Send write responses after commit.
 - [ ] Compare ID-ordered post/author reads, then use the next profile to choose smaller changes such as hybrid SEND and JSON scanning.
 
@@ -13,6 +13,8 @@
 
 ## Done
 
+- [x] Keep 64 direct accepts pending; compare short bursts and verify multi-ring reuse and shutdown.
+- [x] Use 56-byte connections and bounded Exchange reuse; pass native, sanitizer and HTTP checks, then compare at 100k.
 - [x] Build the native load generator, compare its behavior and memory with k6 at 10,000 users and integrate it into dev.py.
 - [x] Split transport into parser, connection, ring and event loop; simplify state, pass behavior checks and compare at 50,000 users.
 - [x] Build and measure the typed Python baseline; replace its runtime with C++23/io_uring and keep Python for tooling.

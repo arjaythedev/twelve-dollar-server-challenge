@@ -18,19 +18,24 @@
   Keep fixed-file slot indices separate from OS descriptors; a slot index must never reach `Descriptor` or `close()`. Route operations by ring/slot and recycle a slot only after its close CQE.
   The official `RLIMIT_NOFILE=65535` caps each ring's sparse table. Add rings lazily, up to 16, to exceed the ordinary FD limit without raising it. Bound total ring/queue/pool memory.
 
-- [ ] Bound CQ draining and handler work before extending completion waits further. Network/socket paths account for 38.2% and io_uring for 12.8% of sampled CPU in the [combined profile](src/profiles/combined-50000.json).
+- [x] Keep 64 reserved-slot direct accepts pending on one listener. Burst tests reduced recovery latency while handlers were blocked; tickets retain their ring/slot through cancellation and late successful accepts.
+
+- [ ] Compare lazy ring packing with balanced 4/8/12-ring connection shards at the same load and total buffer budget. One issuer and one vCPU remain; compare CPU/request, wakeups, empty CQ scans and p99. More rings add capacity and change locality, not CPU cores.
+
+- [ ] Compare an exact non-empty-ring bitmap if ring selection becomes hot. Free-slot allocation is already O(1); a Bloom filter adds hashes and false positives before a direct slot lookup.
+
+- [ ] Bound CQ draining and handler work before extending completion waits further. Network/socket paths account for 40.2% and io_uring for 12.0% of sampled CPU in the [100k profile](src/profiles/exchange-100000.json).
   Measure requests/enter, CQ batch sizes and CPU/request: `C ~= C_enter/requests_per_enter + C_other`. Adapt batching to queue depth and oldest response age; cap CQ drains by count or elapsed time, submit pending sends promptly and avoid waiting while application work is ready.
   Budget socket reads and response work separately: `M_queue ~= Q_kernel*m_kernel + Q_app*m_app`. Drain input within a byte budget before expensive handlers; cap queued input and output, pause new work at a high watermark and resume below a lower one.
   Start with FIFO; compare byte-deficit scheduling for uneven response sizes, with request-age promotion to prevent starvation. Preserve connection/write order and read fresh data when dispatched.
   Test multishot accept separately to reduce accept SQEs and rearming. Count accepted sockets and terminal CQEs correctly, close arrivals during shutdown and rearm after termination.
-  First compare one pending accept with 64 reserved-slot tickets on one listener. Use a controlled 20-ms handler stall and measure accepted CQEs, first-response latency and listen overflows; retain each ticket through cancellation and late successful accepts.
   Keep submission, registration and cleanup with one issuer when comparing `SINGLE_ISSUER`/`DEFER_TASKRUN`. Isolate the contribution of the current `IORING_RECVSEND_POLL_FIRST` idle-receive path ([liburing](https://github.com/axboe/liburing/blob/liburing-2.15/man/io_uring_prep_recv.3)).
 
 - [x] Compare direct receive-buffer parsing against the 4-ms / 32-CQE baseline. The first pair saved memory without a CPU gain; keep the current path for now.
   Parse leased receive bytes directly with llhttp; copy only unconsumed tails across callbacks or sends. Release the lease before auth/handler callbacks and preserve early auth errors, fragments and pipeline order.
   Measure request-field allocations separately before adding views. Fields that survive a receive lease need request-owned storage before the lease is released.
 
-- [ ] Measure a hybrid send threshold: contiguous `send()` for small responses, one `sendmsg()` for larger bodies.
+- [x] Measure a hybrid send threshold: contiguous `send()` for small responses, one `sendmsg()` for larger bodies. At 100k, 256-byte bodies gave no clear CPU gain (32.54 to 32.52 us/request); retain scatter-gather.
   Compare `C_send ~= a_send + B*c_copy` with `C_sendmsg ~= a_sendmsg`; copying B bytes can cost less than vector setup for a small body. Find the crossover on mixed response sizes.
   Compare header headroom with moving the body and inserting the header; insertion still moves B bytes. Keep one operation per attempt and release large storage after completion so idle connections retain the accepted memory savings.
   Track partial sends across header/body boundaries; keep storage alive through completion or confirmed cancellation. Finish the database read before sending 200 so failures can still return 500.
@@ -40,11 +45,11 @@
 
 - [x] Share immutable parser callbacks and use small parser/connection FSMs. API handlers already live for the server's lifetime; request state and JWT verification remain per request.
 - [ ] Test an event bus only if multiple event consumers justify its routing and lifetime costs.
-- [ ] Move cold parser/buffer/send state behind a lazily owned Exchange ([Rust](https://github.com/arjaythedev/twelve-dollar-server-challenge/blob/4298101/submissions/rust-iouring-kensac/src/main.rs#L133)). Estimated storage: `64*N + 584*A`, plus payloads, pool and allocator costs; N is open connections, A is active exchanges. Keep each parser alive through fragments, auth, pipeline tails and terminal I/O CQEs.
+- [x] Move cold parser/buffer/send state behind a lazily owned Exchange ([Rust](https://github.com/arjaythedev/twelve-dollar-server-challenge/blob/4298101/submissions/rust-iouring-kensac/src/main.rs#L133)). Storage: `56*N + 584*(A+P)`, plus buffers and allocator costs; N is open connections, A is active exchanges, P is pooled exchanges. Keep each parser alive through fragments, auth, pipeline tails and terminal I/O CQEs.
   Bound recycled Exchange/output capacity and discard oversized buffers; a slow send must not pin unrelated responses.
 - [ ] Compare encoded CQE identities `(event, ring, slot, generation)` with the two Operation records ([C](submissions/c-iouring-pavlyhalim/src/server.c)). Preserve cancellation matching, generation wrap and stale-buffer returns.
 
-- [ ] Measure checkpoint CPU, WAL growth and p99 before changing write scheduling. Files/locks/page cache account for 10.9% of sampled CPU; this includes reads and locking as well as writes.
+- [ ] Measure checkpoint CPU, WAL growth and p99 before changing write scheduling. Files/locks/page cache account for 11.8% of sampled CPU; this includes reads and locking as well as writes.
   Try PASSIVE checkpoints on a separate, lower-priority connection. `unix-excl` needs one owning process. Synchronize checkpoint state explicitly.
   Profile WAL writes separately from checkpoints; preserve write order, flush errors and `synchronous=NORMAL` or stronger.
 
@@ -52,7 +57,7 @@
   Measure write arrival rate and transaction cost before choosing b or the collection window. Hold dependent responses until commit; rollbacks and commit failure must replace them with errors.
   Compare `INSERT ... WHERE EXISTS ... ON CONFLICT` for likes and insert + rowid/timestamp lookup against `RETURNING` ([db.h](submissions/c-iouring-pavlyhalim/src/db.h)).
 
-- [ ] Compare point lookups with range scans for feed posts when SQL/row work, currently 21.8% of sampled CPU, remains a target.
+- [ ] Compare point lookups with range scans for feed posts when SQL/row work, currently 22.2% of sampled CPU, remains a target.
   `C_point ~= n*a_seek + k_target*s_scan`; `C_range ~= a_seek + k_span*s_scan`.
   Start with a small decision tree of measured scan/seek thresholds; an ML forest is unnecessary for this choice. Bound skipped rows before seeking across gaps; a narrow ID span can still contain many likes.
   Collect IDs within one fresh feed snapshot, scan in ID order and restore timestamp order with request-local slots, including gaps and reordered timestamps.
@@ -91,12 +96,12 @@
 
 - [x] Compare SQLite's own page-cache sizes with `mmap_size=0`: `N ~= (RAM - fixed_cost - cache - queues)/memory_per_connection`. SQLite's page cache is explicitly allowed by [rule 5](README.md#rules).
   Use a 16-MiB budget; random post reads improved without the larger cache's feed regression.
-  Keep one database at `SQLITE_PATH`; file sharding changes the fixed data contract. Extra connections add no CPU capacity on one vCPU.
+  Keep one database at `SQLITE_PATH`; shard transport metadata and work queues, not database files or schema. Extra connections can isolate I/O waits but share one vCPU and one WAL writer.
 
 - [ ] Compare PGO trained on fresh synthetic data with plain optimization ([build.sh](submissions/c-iouring-pavlyhalim/build.sh)).
   SSE2 JSON/UTF-8 scanning already exists and is baseline on x86_64; test wider SIMD for measured hot loops. AVX2/AVX-512 need matching target support or runtime dispatch.
   `S <= 1/((1-p) + p/s)`, with p measured against total CPU including kernel work.
-  JSON is currently 2.1% of sampled CPU, so use a fresh profile before spending time on vector width or more encoding specializations.
+  JSON is currently 1.8% of sampled CPU, so use a fresh profile before spending time on vector width or more encoding specializations.
 
 - [ ] Compare ISA-specific kernels for the Xeon Platinum 8260 (Cascade Lake) after checking the VPS feature mask ([GCC](https://gcc.gnu.org/onlinedocs/gcc-13.1.0/gcc/x86-Options.html)). The local `-mtune=cascadelake` comparison is complete.
   Compare SSE2, AVX2 and AVX-512 with runtime dispatch; keep surrogate and bounds handling.

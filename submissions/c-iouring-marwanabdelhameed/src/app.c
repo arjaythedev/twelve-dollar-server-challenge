@@ -11,6 +11,17 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#if defined(V_SQLITE_HEAP) || defined(V_HUGEPAGE)
+#include <sys/mman.h>
+#endif
+#ifdef V_JSON_SPEC
+#include <emmintrin.h>
+#endif
+#ifdef V_CKPT_PROC
+#include <signal.h>
+#include <sys/prctl.h>
+#include <unistd.h>
+#endif
 
 #define MAX_HEADER 8192
 #define MAX_BODY 16384
@@ -61,12 +72,79 @@ static void b_put(buf *b, const char *s, size_t n) {
 
 #define B_LIT(b, s) b_put((b), (s), sizeof(s) - 1)
 
+#ifdef V_JSON_SPEC
+/* V_JSON_SPEC: the response bodies have a fixed key order (B_LIT templates in put_post, h_feed and h_health), so
+ * the remaining per-response work is the values. Integers are written by hand, without snprintf, and strings are
+ * escaped with a 16-byte scan for the bytes that need an escape, copying each clean run in one memcpy. */
+static void b_int(buf *b, long long v) {
+    char t[24];
+    size_t i = sizeof t;
+    unsigned long long u = v < 0 ? 0ULL - (unsigned long long)v : (unsigned long long)v;
+    do { t[--i] = (char)('0' + u % 10); u /= 10; } while (u);
+    if (v < 0) t[--i] = '-';
+    b_put(b, t + i, sizeof t - i);
+}
+#else
 static void b_int(buf *b, long long v) {
     char t[32];
     int n = snprintf(t, sizeof t, "%lld", v);
     b_put(b, t, (size_t)n);
 }
+#endif
 
+#ifdef V_JSON_SPEC
+static void b_esc_slow(char **op, const char *s, size_t n);
+
+/* Index of the first byte of s[0..n) that JSON needs escaped (below 0x20, a quote or a backslash), or n. */
+static size_t esc_run(const char *s, size_t n) {
+    size_t i = 0;
+    const __m128i quote = _mm_set1_epi8('"'), bslash = _mm_set1_epi8('\\'), lim = _mm_set1_epi8(0x1F);
+    for (; i + 16 <= n; i += 16) {
+        __m128i x = _mm_loadu_si128((const __m128i *)(s + i));
+        __m128i bad = _mm_or_si128(_mm_or_si128(_mm_cmpeq_epi8(x, quote), _mm_cmpeq_epi8(x, bslash)),
+                                   _mm_cmpeq_epi8(_mm_min_epu8(x, lim), x)); /* x <= 0x1F, unsigned */
+        int m = _mm_movemask_epi8(bad);
+        if (m) return i + (size_t)__builtin_ctz((unsigned)m);
+    }
+    for (; i < n; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if (c < 0x20 || c == '"' || c == '\\') return i;
+    }
+    return n;
+}
+
+static void b_esc(buf *b, const char *s, size_t n) {
+    b_reserve(b, n * 6 + 1);
+    char *o = b->p + b->len;
+    while (n) {
+        size_t run = esc_run(s, n);
+        memcpy(o, s, run);
+        o += run; s += run; n -= run;
+        if (n) { b_esc_slow(&o, s, 1); s++; n--; }
+    }
+    b->len = (size_t)(o - b->p);
+}
+
+static void b_esc_slow(char **op, const char *s, size_t n) {
+    char *o = *op;
+    static const char hex[] = "0123456789abcdef";
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if (c == '"') { *o++ = '\\'; *o++ = '"'; }
+        else if (c == '\\') { *o++ = '\\'; *o++ = '\\'; }
+        else if (c == '\n') { *o++ = '\\'; *o++ = 'n'; }
+        else if (c == '\r') { *o++ = '\\'; *o++ = 'r'; }
+        else if (c == '\t') { *o++ = '\\'; *o++ = 't'; }
+        else if (c == '\b') { *o++ = '\\'; *o++ = 'b'; }
+        else if (c == '\f') { *o++ = '\\'; *o++ = 'f'; }
+        else {
+            *o++ = '\\'; *o++ = 'u'; *o++ = '0'; *o++ = '0';
+            *o++ = hex[c >> 4]; *o++ = hex[c & 15];
+        }
+    }
+    *op = o;
+}
+#else
 static void b_esc(buf *b, const char *s, size_t n) {
     b_reserve(b, n * 6 + 1);
     char *o = b->p + b->len;
@@ -88,6 +166,7 @@ static void b_esc(buf *b, const char *s, size_t n) {
     }
     b->len = (size_t)(o - b->p);
 }
+#endif
 
 /* ---------- responses ---------- */
 
@@ -104,14 +183,56 @@ static const char *reason(int status) {
     }
 }
 
+#ifdef V_HDR_TEMPLATE
+/* Header bytes up to the content length are constant per status; only the number and the optional
+ * "Connection: close" line vary. Returns 0 for a status without a template (the caller formats it). */
+#define HDR_PRE(code, text) "HTTP/1.1 " #code " " text "\r\nContent-Type: application/json\r\nContent-Length: "
+static size_t hdr_build(char *o, int status, size_t n, int closing) {
+    const char *pre;
+    size_t pl;
+    switch (status) {
+#define HDR_CASE(code, text) case code: pre = HDR_PRE(code, text); pl = sizeof(HDR_PRE(code, text)) - 1; break;
+    HDR_CASE(200, "OK")
+    HDR_CASE(201, "Created")
+    HDR_CASE(400, "Bad Request")
+    HDR_CASE(401, "Unauthorized")
+    HDR_CASE(404, "Not Found")
+    HDR_CASE(413, "Payload Too Large")
+    HDR_CASE(500, "Internal Server Error")
+    HDR_CASE(503, "Service Unavailable")
+#undef HDR_CASE
+    default: return 0;
+    }
+    memcpy(o, pre, pl);
+    size_t k = pl;
+    char d[24];
+    size_t nd = 0;
+    do { d[nd++] = (char)('0' + n % 10); n /= 10; } while (n);
+    while (nd) o[k++] = d[--nd];
+    o[k++] = '\r'; o[k++] = '\n';
+    if (closing) { memcpy(o + k, "Connection: close\r\n", 19); k += 19; }
+    o[k++] = '\r'; o[k++] = '\n';
+    return k;
+}
+#endif
+
 static void respond(conn *c, int status, const char *body, size_t n) {
     char hdr[192];
-    int h = snprintf(hdr, sizeof hdr,
+    int h = 0;
+#ifdef V_HDR_TEMPLATE
+    h = (int)hdr_build(hdr, status, n, c->closing);
+#endif
+    if (h == 0)
+        h = snprintf(hdr, sizeof hdr,
                      "HTTP/1.1 %d %s\r\nContent-Type: application/json\r\nContent-Length: %zu\r\n%s\r\n", status,
                      reason(status), n, c->closing ? "Connection: close\r\n" : "");
     size_t need = (size_t)c->out_len + (size_t)h + n;
     if (need > c->out_cap) {
+#ifdef V_SMALL_CONN
+        size_t cap = need; /* the response needs exactly this much; the buffer is freed after the send */
+#else
         size_t cap = need < 1024 ? 1024 : need;
+#endif
         char *p = realloc(c->out, cap);
         if (!p) die("out of memory");
         c->out = p;
@@ -267,14 +388,118 @@ static sqlite3_stmt *prep(sqlite3 *db, const char *sql) {
     " (SELECT count(*) FROM likes l WHERE l.post_id = p.id) AS like_count"                    \
     " FROM posts p JOIN users u ON u.id = p.user_id"
 
+#ifdef V_SQLITE_HEAP
+/* SQLITE_CONFIG_HEAP: every SQLite allocation comes from one static block (V_SQLITE_HEAP megabytes, default 256)
+ * handled by SQLite's memsys5 allocator, which needs the amalgamation built with SQLITE_ENABLE_MEMSYS5 (build.sh
+ * adds it). The block is mapped, not touched, so only the pages SQLite uses become resident. */
+static void sqlite_heap_init(void) {
+    size_t mb = (V_SQLITE_HEAP + 0) > 1 ? (size_t)(V_SQLITE_HEAP + 0) : 256;
+    size_t bytes = mb << 20;
+    if (!sqlite3_compileoption_used("ENABLE_MEMSYS5")) die("V_SQLITE_HEAP needs SQLITE_ENABLE_MEMSYS5 in the sqlite build");
+    size_t align = (size_t)2 << 20;
+    char *p = mmap(NULL, bytes + align, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (p == MAP_FAILED) die("cannot map the SQLite heap");
+    p = (char *)(((uintptr_t)p + align - 1) & ~(uintptr_t)(align - 1));
+#ifdef V_HUGEPAGE
+    fprintf(stderr, "V_HUGEPAGE: madvise(MADV_HUGEPAGE) on the SQLite heap: %s\n",
+            madvise(p, bytes, MADV_HUGEPAGE) == 0 ? "ok" : strerror(errno));
+#endif
+    if (sqlite3_config(SQLITE_CONFIG_HEAP, p, (int)bytes, 64) != SQLITE_OK) die("SQLITE_CONFIG_HEAP failed");
+    fprintf(stderr, "V_SQLITE_HEAP: %zu MB static heap\n", mb);
+}
+#endif
+
+#ifdef V_HUGEPAGE
+/* SQLite maps the database file itself and gives no handle to the mapping, so find it in /proc/self/maps and ask
+ * for huge pages. A remap (the file grows) creates a new mapping, so app_commit repeats this now and then. */
+static char db_real[4096];
+static void hugepage_db(int verbose) {
+    FILE *f = fopen("/proc/self/maps", "r");
+    if (!f) return;
+    char *line = NULL;
+    size_t cap = 0;
+    int n = 0, bad = 0, err = 0;
+    while (getline(&line, &cap, f) > 0) {
+        unsigned long s, e;
+        int off = 0;
+        if (sscanf(line, "%lx-%lx %*s %*s %*s %*s %n", &s, &e, &off) < 2 || off == 0) continue;
+        char *path = line + off;
+        path[strcspn(path, "\n")] = 0;
+        if (strcmp(path, db_real) != 0) continue;
+        n++;
+        if (madvise((void *)s, e - s, MADV_HUGEPAGE) != 0) { bad++; err = errno; }
+    }
+    free(line);
+    fclose(f);
+    if (verbose)
+        fprintf(stderr, "V_HUGEPAGE: madvise(MADV_HUGEPAGE) on %d database mapping(s): %s\n", n,
+                n == 0 ? "no mapping found" : bad ? strerror(err) : "ok");
+}
+static unsigned long ncommits;
+#endif
+
+#ifdef V_CKPT_PROC
+/* The off-CPU profile (exp/offcpu_21k.txt) shows the request thread blocked in fsync for 11 s of 60 s, called from
+ * SQLite's WAL auto-checkpoint inside COMMIT. A helper process (rule 1 allows any number of processes) opens its own
+ * connection and runs PASSIVE checkpoints, so the fsync blocks it and not the event loop. It is forked before this
+ * process touches SQLite, because a connection must not cross fork(). V_CKPT_PROC=ms is the pause between
+ * checkpoints (default 250). */
+static pid_t ckpt_child;
+
+static void ckpt_child_main(const char *db_path, pid_t parent) {
+    prctl(PR_SET_PDEATHSIG, SIGKILL);
+    if (getppid() != parent) _exit(0);
+    signal(SIGPIPE, SIG_DFL);
+    long ms = (V_CKPT_PROC + 0) > 1 ? (V_CKPT_PROC + 0) : 250;
+    struct timespec ts = {.tv_sec = ms / 1000, .tv_nsec = (ms % 1000) * 1000000L};
+    struct timespec first = {.tv_sec = 2, .tv_nsec = 0}; /* the parent sets WAL mode first */
+    nanosleep(&first, NULL);
+    sqlite3 *db = NULL;
+    while (sqlite3_open_v2(db_path, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX, NULL) != SQLITE_OK) {
+        sqlite3_close(db);
+        nanosleep(&ts, NULL);
+        if (getppid() != parent) _exit(0);
+    }
+    sqlite3_busy_timeout(db, 5000);
+    sqlite3_exec(db, "PRAGMA synchronous=NORMAL", NULL, NULL, NULL);
+    for (;;) {
+        nanosleep(&ts, NULL);
+        if (getppid() != parent) _exit(0);
+        int logf = 0, ck = 0;
+        sqlite3_wal_checkpoint_v2(db, NULL, SQLITE_CHECKPOINT_PASSIVE, &logf, &ck);
+    }
+}
+
+static void ckpt_start(const char *db_path) {
+    pid_t parent = getpid();
+    pid_t pid = fork();
+    if (pid == 0) ckpt_child_main(db_path, parent);
+    if (pid < 0) {
+        fprintf(stderr, "V_CKPT_PROC: fork failed (%s), keeping the auto-checkpoint\n", strerror(errno));
+        return;
+    }
+    ckpt_child = pid;
+    fprintf(stderr, "V_CKPT_PROC: checkpoint helper process %d\n", (int)pid);
+}
+#endif
+
 int app_init(const char *db_path, const char *jwt_secret) {
     clock_gettime(CLOCK_MONOTONIC, &t_start);
+#ifdef V_CKPT_PROC
+    ckpt_start(db_path);
+#endif
     hmac_key_init(&jwt_key, jwt_secret, strlen(jwt_secret));
+#ifdef V_SQLITE_HEAP
+    sqlite_heap_init();
+#endif
 
     if (sqlite3_open_v2(db_path, &wdb, SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX, NULL) != SQLITE_OK)
         die("cannot open the database for writing");
     exec_sql(wdb, "PRAGMA busy_timeout=5000; PRAGMA synchronous=NORMAL; PRAGMA cache_size=-32768;"
                   " PRAGMA journal_mode=WAL;");
+#ifdef V_CKPT_PROC
+    if (ckpt_child > 0) exec_sql(wdb, "PRAGMA wal_autocheckpoint=0;"); /* the helper process checkpoints instead */
+#endif
     sqlite3_stmt *jm = prep(wdb, "PRAGMA journal_mode");
     if (sqlite3_step(jm) != SQLITE_ROW || strcmp((const char *)sqlite3_column_text(jm, 0), "wal") != 0)
         die("the database is not in WAL mode");
@@ -298,6 +523,13 @@ int app_init(const char *db_path, const char *jwt_secret) {
     st_begin = prep(wdb, "BEGIN IMMEDIATE");
     st_commit = prep(wdb, "COMMIT");
     st_rollback = prep(wdb, "ROLLBACK");
+#ifdef V_HUGEPAGE
+    if (!realpath(db_path, db_real)) snprintf(db_real, sizeof db_real, "%s", db_path);
+    sqlite3_bind_int64(st_exist, 1, 1); /* one read so that SQLite maps the file */
+    sqlite3_step(st_exist);
+    sqlite3_reset(st_exist);
+    hugepage_db(1);
+#endif
     return 0;
 }
 
@@ -327,8 +559,15 @@ static void add_pending(conn *c) {
 
 int app_has_pending(void) { return npend > 0; }
 
+#ifdef V_GROUP_COMMIT_N
+size_t app_pending_count(void) { return npend; }
+#endif
+
 int app_commit(conn ***released) {
     int ok = 1;
+#ifdef V_HUGEPAGE
+    if ((++ncommits & 255) == 0) hugepage_db(0);
+#endif
     if (in_txn) {
         ok = run_simple(st_commit);
         if (!ok) {
@@ -698,10 +937,35 @@ static long parse_request(conn *c, request *r, size_t *need) {
 
 static void grow_input(conn *c, size_t need) {
     if (need <= c->in_cap && c->in_len < c->in_cap) return;
+#ifdef V_MULTISHOT_RECV
+    if (c->in_ext) { /* the bytes sit in a provided ring buffer: move them into an owned buffer first */
+        size_t ecap = need > c->in_len ? need : (size_t)c->in_len + 1;
+        if (ecap < 512) ecap = 512;
+        if (ecap > MAX_REQUEST) ecap = MAX_REQUEST;
+        char *e = malloc(ecap);
+        if (!e) die("out of memory");
+        memcpy(e, c->in, c->in_len);
+        c->in = e;
+        c->in_cap = (uint32_t)ecap;
+        c->in_ext = 0;
+        return;
+    }
+#endif
     size_t cap = c->in_cap;
     while (cap < need || cap <= c->in_len) cap *= 2;
     if (cap > MAX_REQUEST) cap = MAX_REQUEST;
+#ifdef CONN_INLINE_IN
+    char *p;
+    if (c->in == c->in0) { /* first outgrowing of the inline buffer */
+        p = malloc(cap);
+        if (!p) die("out of memory");
+        memcpy(p, c->in0, c->in_len);
+    } else {
+        p = realloc(c->in, cap);
+    }
+#else
     char *p = realloc(c->in, cap);
+#endif
     if (!p) die("out of memory");
     c->in = p;
     c->in_cap = (uint32_t)cap;
@@ -729,9 +993,17 @@ void app_process(conn *c) {
         size_t used = (size_t)rc;
         memmove(c->in, c->in + used, c->in_len - used);
         c->in_len -= (uint32_t)used;
+#ifdef CONN_INLINE_IN
+        if (c->in_len == 0 && c->in != c->in0) { /* idle again: give the larger buffer back */
+            free(c->in);
+            c->in = c->in0;
+            c->in_cap = CONN_INLINE_IN;
+        }
+#else
         if (c->in_len == 0 && c->in_cap > 8192) {
             char *p = realloc(c->in, IN_INITIAL);
             if (p) { c->in = p; c->in_cap = IN_INITIAL; }
         }
+#endif
     }
 }

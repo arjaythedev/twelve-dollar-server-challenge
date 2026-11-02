@@ -15,11 +15,14 @@ statements cache only query plans, as allowed by rule 5.
 ## Architecture
 
 - **Raw io_uring is the default.** The process starts three `SO_REUSEPORT` listener shards.
-  Each shard owns an io_uring, a 131,072-entry registered file table, its HTTP parser, and
-  its output queues. Accepted sockets use `IORING_FILE_INDEX_ALLOC`, so accepted
-  connections do not consume the process `RLIMIT_NOFILE` budget. Sparse file-table
-  registration is requested first; if the kernel rejects it, a normal registered table is
-  used, and if ring setup fails the process falls back to the Go connection loop.
+  Each shard owns an io_uring, a 65,000-entry registered file table (195,000 slots across
+  shards), its HTTP parser, and its output queues. Accepted sockets use
+  `IORING_FILE_INDEX_ALLOC`, so accepted connections do not consume the process
+  `RLIMIT_NOFILE` budget. Sparse file-table registration is requested first; the
+  registration size must fit inside the hard `RLIMIT_NOFILE`, otherwise Linux returns
+  `EINVAL` and the normal fallback hits `EMFILE`. The 65,000 size is deliberately below
+  the challenge's 65,535 hard limit. If ring setup still fails, the process falls back to
+  the Go connection loop; that loop backs off on `EMFILE`/`ENFILE` instead of spinning.
 - **One DB owner per shard.** Feed requests, `GET /posts/:id` batches, and create/like
   batches are sent to the shard's blocking DB worker. There is no goroutine per connection
   and no per-request transport goroutine. With coalescing enabled, each worker batches

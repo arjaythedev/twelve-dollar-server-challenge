@@ -19,6 +19,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 	"unicode/utf8"
 )
@@ -261,6 +262,12 @@ func main() {
 	for {
 		c, err := ln.Accept()
 		if err != nil {
+			// EMFILE/ENFILE cannot make progress until a descriptor is
+			// released. Retrying immediately spins at 100% CPU and floods the
+			// log, so pause before retrying.
+			if errors.Is(err, syscall.EMFILE) || errors.Is(err, syscall.ENFILE) {
+				time.Sleep(20 * time.Millisecond)
+			}
 			log.Print(err)
 			continue
 		}

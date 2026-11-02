@@ -26,8 +26,10 @@ const (
 	muxCqEntries = 32768
 
 	// Accepted sockets live in this registered file table, not in the process
-	// fd table. RLIMIT_NOFILE therefore does not cap the connection count.
-	muxFileTableEntries      = 131072
+	// fd table. Keep the sparse table size within RLIMIT_NOFILE: Linux rejects
+	// a sparse registration larger than the hard limit with EINVAL, which
+	// previously forced the Go fallback. Three shards provide 195k slots.
+	muxFileTableEntries      = 65000
 	ioringFileIndexAlloc     = ^uint32(0)
 	ioringRsrcRegisterSparse = 1
 	iosqeFixedFile           = 1

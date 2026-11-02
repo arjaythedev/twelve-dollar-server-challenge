@@ -32,6 +32,8 @@ typedef struct {
   int walk_cells;        // 1: count likes by parsing index leaf cells in place instead of BtreeNext per like
   int feed_batch;        // 1: the feed's 20 author lookups as one batched, prefetch-interleaved multi-seek (sqlite-simd).
                          //    Ignored when mmap_size > 0 (it relies on page-cache pages)
+  int turbo_reads;       // 1: with direct_reads=0, the feed and post-by-id SELECTs run through cursed-sqlite-turbo's qc
+                         //    plans, which write the JSON body (an ENG_TURBO build; QC_FALLBACK steps them as usual)
   int exclusive;         // 1: PRAGMA locking_mode=EXCLUSIVE (WAL index in heap memory, no shm, no fcntl locks)
   int wal_coalesce;      // 1: "cursed-wal" VFS shim, one pwrite per commit instead of two per WAL frame
   int wal_fadvise;       // 1: drop checkpointed WAL frames from the page cache (POSIX_FADV_DONTNEED) and truncate the
@@ -127,7 +129,7 @@ void eng_format_ts(char out[24], int64_t unix_ms);
 
 // test hooks
 typedef struct { uint64_t batches, write_batches, commits_failed, checkpoints, ckpt_frames, wal_writes, wal_flushes, feeds_computed, feeds_shared;
-                 uint64_t busy_sleeps, restarts, wal_max, drains, drains_timed_out, feed_batch_fallbacks, wal_dropped_bytes, wal_fadvise_skipped, wal_resets, cw_late_flushes, ack_cycles, ack_errors; double ckpt_max_ms, ckpt_total_ms,
+                 uint64_t busy_sleeps, restarts, wal_max, drains, drains_timed_out, feed_batch_fallbacks, wal_dropped_bytes, wal_fadvise_skipped, wal_resets, cw_late_flushes, ack_cycles, ack_errors, turbo_served, turbo_fallbacks; double ckpt_max_ms, ckpt_total_ms,
                  drain_ms_max, drain_ms_total; } eng_stats;
 void eng_get_stats(eng *e, eng_stats *s);
 void eng_set_clock(eng *e, int64_t (*now_ms)(void));  // override the created_at clock (differential tests)

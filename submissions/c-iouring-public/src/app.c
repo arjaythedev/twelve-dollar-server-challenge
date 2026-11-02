@@ -34,7 +34,7 @@ const char *app_db_mode(void) {
                                         : "sqlite-auto";
   const char *locking = APP_DB_CKPT == 2 ? "unix-excl" : APP_DB_EXCL ? "exclusive" : "normal";
   snprintf(m, sizeof m, "%s reads, %s VFS, %s checkpoints%s, %s locking, cache %d KiB, %s JWT, stock SQLite (%s)",
-           APP_DB_DIRECT ? "direct" : "SQL", APP_DB_VFS ? "cursed-wal" : "stock", ckpt,
+           APP_DB_DIRECT ? "direct" : APP_DB_TURBO ? "turbo" : "SQL", APP_DB_VFS ? "cursed-wal" : "stock", ckpt,
            APP_DB_WAL_DROP ? " + WAL page drop" : "", locking, (int)APP_DB_CACHE_KIB,
            APP_JWT_SCALAR ? "scalar" : jwt_engine(),
            APP_SQLITE_LINK ? "separate unit, public API only" : "one unit with the engine");
@@ -164,6 +164,7 @@ int app_init(const char *db_path, const char *secret, char *err, size_t errn) {
   eng_default_opts(&o);
   // build-time cursedness (cursed.sh): what the engine does to SQLite
   o.direct_reads = APP_DB_DIRECT;               // 0: the spec's prepared SELECTs
+  o.turbo_reads = APP_DB_TURBO;                 // 1: ... run by cursed-sqlite-turbo's qc plans
   o.wal_coalesce = APP_DB_VFS;                  // 0: SQLite's own unix VFS
   o.exclusive = APP_DB_EXCL;                    // 0: locking_mode=NORMAL
   o.ckpt_thread = APP_DB_CKPT == 2;             // 2: checkpoint thread + write gate: a pass every 1,024 frames, the

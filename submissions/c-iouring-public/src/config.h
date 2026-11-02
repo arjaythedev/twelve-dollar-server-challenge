@@ -6,6 +6,9 @@
 #ifndef APP_DB_DIRECT
 #define APP_DB_DIRECT 1
 #endif
+#ifndef APP_DB_TURBO
+#define APP_DB_TURBO 0 // 1: DB_READS=turbo (APP_DB_DIRECT 0, engine.c built with ENG_TURBO)
+#endif
 #ifndef APP_DB_VFS
 #define APP_DB_VFS 1
 #endif

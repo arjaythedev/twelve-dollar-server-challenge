@@ -2520,6 +2520,7 @@ static _Thread_local int g_epfd = -1;
 #define HP_UR_KIND_POLL   3
 #define HP_UR_KIND_ACCEPT 4
 #define HP_UR_KIND_CLOSE  5
+#define HP_UR_KIND_READ   6
 #define HP_UR_KIND        0xff
 #define HP_UR_OP_ASYNC_CANCEL 14
 #define HP_UR_ASYNC_CANCEL_USERDATA (1U << 4)
@@ -2720,6 +2721,8 @@ struct hp_urfds {
     int    direct;                        /* direct descriptor (direct fds) */
     int    diridx;                        /* slot in the registered file table */
     int    rmshot;                        /* recv SQE is multishot */
+    int    rreadq;                        /* queued for a bounded single-shot drain */
+    int    rreading;                      /* bounded single-shot recv is in flight */
     int64_t cdeadline;
     uint32_t epoch;
 };
@@ -2748,6 +2751,11 @@ static _Thread_local int hp_ur_pushfail;    /* retry-ring overflow: run scan */
 static _Thread_local int hp_ur_dbg;         /* HPHP_URING_DEBUG=1 */
 static _Thread_local uint32_t *hp_ur_retry; /* fds waiting for a re-arm slot */
 static _Thread_local uint32_t hp_ur_retcap, hp_ur_rethead, hp_ur_rettail;
+struct hp_ur_readq_ent { uint32_t fd, epoch; };
+static _Thread_local struct hp_ur_readq_ent *hp_ur_readq;
+static _Thread_local uint32_t hp_ur_readq_cap, hp_ur_readq_head, hp_ur_readq_tail;
+static _Thread_local int hp_ur_readq_debugged;
+static _Thread_local int hp_ur_readq_diag;
 static _Thread_local uint32_t *hp_ur_closing; /* fds waiting for a send drain */
 static _Thread_local uint32_t hp_ur_closecap, hp_ur_closecnt;
 
@@ -2770,6 +2778,7 @@ struct hp_uring_ring {
     char *pbuf_mem;
     size_t pbuf_mapsz;
     uint32_t pbuf_n, pbuf_mask, pbuf_tail, pbuf_blen;
+    uint32_t read_inflight;               /* buffer-select recovery reads in flight */
     int accept_armed;
     int accept_full;      /* this ring's direct table is full */
     /* The accept SQE keeps these alive while the multishot op is armed. */
@@ -2813,6 +2822,7 @@ static _Thread_local hp_sock hp_ur_listen_fd = -1;
 static _Thread_local int hp_ur_listen_on = 0;
 
 uint64_t hp_st[HP_ST_N];   /* runtime counters, see hphp_rt.h */
+static _Thread_local uint64_t hp_ur_readq_enqueues, hp_ur_readq_completions;
 
 static int hp_uring_active(void) { return hp_ur_st == 1; }
 static int hp_ur_direct_on(void) { return hp_ur_direct == 1; }
@@ -2957,6 +2967,56 @@ static void hp_ur_retfd(hp_sock fd) {
     hp_ur_retry[hp_ur_rettail] = (uint32_t)fd;
     hp_ur_rettail = nt;
     if (hp_ur_dbg) fprintf(stderr, "[ur] park fd=%d\n", (int)fd);
+}
+
+/* A multishot receive that exhausts its provided buffers must not be re-armed
+ * with every other connection at once: that recreates the same ENOBUFS burst.
+ * Keep each stopped connection once in a FIFO and drain it with bounded,
+ * nonblocking buffer-select reads before returning to multishot receive. */
+static bool hp_ur_readq_push(hp_sock fd, struct hp_urfds *st, int reason) {
+    if (!st || st->rreadq) return true;
+    if (!hp_ur_readq_cap) {
+        hp_ur_readq_cap = 1024;
+        hp_ur_readq = (struct hp_ur_readq_ent *)malloc(
+            (size_t)hp_ur_readq_cap * sizeof *hp_ur_readq);
+        if (!hp_ur_readq) { hp_ur_readq_cap = 0; return false; }
+    }
+    if (hp_ur_readq_tail == hp_ur_readq_cap) {
+        if (hp_ur_readq_head) {
+            uint32_t n = hp_ur_readq_tail - hp_ur_readq_head;
+            memmove(hp_ur_readq, hp_ur_readq + hp_ur_readq_head,
+                    (size_t)n * sizeof *hp_ur_readq);
+            hp_ur_readq_head = 0;
+            hp_ur_readq_tail = n;
+        }
+        if (hp_ur_readq_tail == hp_ur_readq_cap) {
+            if (hp_ur_readq_cap >= (1U << 22)) return false;
+            uint32_t ncap = hp_ur_readq_cap << 1;
+            struct hp_ur_readq_ent *n = (struct hp_ur_readq_ent *)realloc(
+                hp_ur_readq, (size_t)ncap * sizeof *n);
+            if (!n) return false;
+            hp_ur_readq = n;
+            hp_ur_readq_cap = ncap;
+        }
+    }
+    hp_ur_readq[hp_ur_readq_tail++] = (struct hp_ur_readq_ent){ (uint32_t)fd, st->epoch };
+    st->rreadq = 1;
+    hp_ur_readq_enqueues++;
+    if (hp_ur_dbg && !hp_ur_readq_debugged) {
+        hp_ur_readq_debugged = 1;
+        fprintf(stderr, "[ur] bounded read recovery activated reason=%d armed=%d reading=%d\n",
+                reason, st->rarmed, st->rreading);
+    }
+    return true;
+}
+
+static bool hp_ur_readq_pop(struct hp_ur_readq_ent *out) {
+    if (hp_ur_readq_head == hp_ur_readq_tail) {
+        hp_ur_readq_head = hp_ur_readq_tail = 0;
+        return false;
+    }
+    *out = hp_ur_readq[hp_ur_readq_head++];
+    return true;
 }
 
 static void hp_ur_drop_send_chain(struct hp_urfds *st) {
@@ -3587,6 +3647,28 @@ static bool hp_uring_arm_recv(hp_sock fd, size_t want) {
     return true;
 }
 
+/* Drain one queued direct socket without waiting for data. BUFFER_SELECT
+ * keeps the receive allocation per ring; MSG_DONTWAIT makes the CQE arrive
+ * during this pass, including EAGAIN when the socket has been drained. */
+static bool hp_uring_arm_read(hp_sock fd) {
+    hp_ur_use_ring(fd);
+    struct hp_urfds *st = hp_ur_st_of(fd);
+    if (!st || !st->direct || !st->rmshot || !hp_ur_pbuf || st->reof ||
+        st->closeafter || st->rarmed || st->rreading) return false;
+    struct hp_uring_sqe s;
+    memset(&s, 0, sizeof s);
+    s.opcode = HP_UR_OP_RECV;
+    s.flags = HP_UR_IOSQE_FIXED_FILE | HP_UR_IOSQE_BUFFER_SELECT;
+    s.fd = st->diridx;
+    s.rw_flags = MSG_DONTWAIT;
+    s.buf_group = 0;
+    s.user_data = hp_ur_ud(st, fd, HP_UR_KIND_READ);
+    if (!hp_ur_sq_push(&s)) return false;
+    st->rreading = 1;
+    hp_ur_cur->read_inflight++;
+    return true;
+}
+
 static bool hp_uring_arm_poll(hp_sock fd) {
     hp_ur_use_ring(fd);
     struct hp_urfds *st = hp_ur_st_of(fd);
@@ -3819,7 +3901,7 @@ static hstr *hp_uring_take_recv(hp_sock fd, size_t maxall) {
         /* One-shot recv must be re-armed after the app is done with the
          * buffer. A multishot op that is still in flight keeps receiving;
          * only a connection whose op stopped is parked for a re-arm. */
-        if (!st->rmshot || !st->rarmed) {
+        if ((!st->rmshot || !st->rarmed) && !st->rreadq && !st->rreading) {
             st->rarmed = 0;
             hp_ur_retfd(fd);
         }
@@ -3955,6 +4037,7 @@ static void hp_ur_rescan_one(hp_sock fd) {
     if (st->shead && !st->sarmed && !hp_ur_arm_send_head(fd))
         hp_ur_retfd(fd);
     if (st->rh && !st->rready && !st->rarmed &&
+        !st->rreadq && !st->rreading &&
         !hp_uring_arm_recv(fd, hp_ur_rlen()))
         hp_ur_retfd(fd);
 }
@@ -3979,11 +4062,15 @@ static int hp_ur_drain_ring(harr *in) {
         hp_st[HP_ST_CQE]++;
         uint64_t ud = c->user_data;
         int kind = (int)(ud & HP_UR_KIND);
-        if (kind != HP_UR_KIND_RECV && kind != HP_UR_KIND_SEND &&
+        if (kind != HP_UR_KIND_RECV && kind != HP_UR_KIND_READ &&
+            kind != HP_UR_KIND_SEND &&
             kind != HP_UR_KIND_POLL && kind != HP_UR_KIND_ACCEPT &&
             kind != HP_UR_KIND_CLOSE) continue;
         hp_sock fd = hp_ur_ud_handle(ud);
         uint32_t epoch = (uint32_t)(ud >> 40);
+        if (kind == HP_UR_KIND_READ && self->read_inflight > 0)
+            self->read_inflight--;
+        if (kind == HP_UR_KIND_READ) hp_ur_readq_completions++;
         if (hp_ur_dbg)
             fprintf(stderr, "[ur] cqe kind=%d fd=%d ep=%u res=%d\n",
                     kind, (int)fd, epoch, c->res);
@@ -3991,7 +4078,7 @@ static int hp_ur_drain_ring(harr *in) {
         if (!st || st->epoch != epoch) {
             /* A recv that was in flight when the connection closed still owns
              * a provided buffer; return it or the ring drains permanently. */
-            if (kind == HP_UR_KIND_RECV && hp_ur_is_direct(fd) &&
+            if ((kind == HP_UR_KIND_RECV || kind == HP_UR_KIND_READ) &&
                 (c->flags & HP_UR_CQE_F_BUFFER))
                 hp_ur_pbuf_return(c->flags >> HP_UR_CQE_BUFFER_SHIFT);
             /* An accept that completed after the listener was paused still
@@ -4061,6 +4148,37 @@ static int hp_ur_drain_ring(harr *in) {
             continue;
         }
         if (kind == HP_UR_KIND_CLOSE) continue;
+        if (kind == HP_UR_KIND_READ) {
+            hp_st[HP_ST_CQE_RECV]++;
+            st->rreading = 0;
+            uint32_t bid = c->flags >> HP_UR_CQE_BUFFER_SHIFT;
+            int have_buf = (c->flags & HP_UR_CQE_F_BUFFER) &&
+                           bid < hp_ur_pbuf_n;
+            if (have_buf && c->res > 0)
+                hp_ur_recv_append(st,
+                    hp_ur_pbuf_mem + (size_t)bid * hp_ur_pbuf_blen,
+                    (size_t)c->res);
+            if (have_buf) hp_ur_pbuf_return(bid);
+            if (st->closeafter) continue;
+            if (c->res > 0 && have_buf) {
+                if (in) hp_arr_push(in, hp_of_int(fd));
+                if ((uint32_t)c->res == hp_ur_pbuf_blen) {
+                    if (!hp_ur_readq_push(fd, st, 1)) hp_ur_retfd(fd);
+                } else if (!hp_uring_arm_recv(fd, hp_ur_rlen())) {
+                    hp_ur_retfd(fd);
+                }
+            } else if (c->res == -ENOBUFS) {
+                if (!hp_ur_readq_push(fd, st, 2)) hp_ur_retfd(fd);
+            } else if (c->res == -EAGAIN || c->res == -EINTR) {
+                if (!hp_uring_arm_recv(fd, hp_ur_rlen())) hp_ur_retfd(fd);
+            } else {
+                st->reof = 1;
+                hp_sockrec *sr = sockrec((intptr_t)fd, false);
+                if (sr) sr->eof = true;
+                if (in) hp_arr_push(in, hp_of_int(fd));
+            }
+            continue;
+        }
         if (kind == HP_UR_KIND_RECV) {
             hp_st[HP_ST_CQE_RECV]++;
             int more = (c->flags & HP_UR_CQE_F_MORE) ? 1 : 0;
@@ -4092,10 +4210,19 @@ static int hp_ur_drain_ring(harr *in) {
                     }
                 }
                 if (in) hp_arr_push(in, hp_of_int(fd));
+                /* The multishot stopped after this buffer (normally because
+                 * the buffer ring was empty). Drain any remaining socket data
+                 * with bounded reads before re-arming it. */
+                if (st->direct && st->rmshot && !more &&
+                    !hp_ur_readq_push(fd, st, 3)) hp_ur_retfd(fd);
             } else if (c->res == -ENOBUFS) {
-                /* no provided buffer free: park and re-arm next cycle */
-                st->rarmed = 0;
-                hp_ur_retfd(fd);
+                /* Don't re-arm a whole burst of stopped multishots together. */
+                if (!more) st->rarmed = 0;
+                if (!more && st->direct && st->rmshot && hp_ur_pbuf) {
+                    if (!hp_ur_readq_push(fd, st, 4)) hp_ur_retfd(fd);
+                } else if (!more) {
+                    hp_ur_retfd(fd);
+                }
             } else if (c->res == -EAGAIN || c->res == -EINTR) {
                 hp_uring_arm_recv(fd, hp_ur_rlen());
             } else {
@@ -4153,7 +4280,7 @@ static int hp_ur_drain_ring(harr *in) {
         }
         /* keep this fd's pipeline flowing for the next cycle */
         if (!st->reof && !st->closeafter && !st->listener &&
-            !st->rready && !st->rarmed) {
+            !st->rready && !st->rarmed && !st->rreadq && !st->rreading) {
             if (hp_ur_dbg)
                 fprintf(stderr, "[ur] rearm-after-cqe fd=%d\n", (int)fd);
             if (!hp_uring_arm_recv(fd, hp_ur_rlen()) && hp_ur_dbg)
@@ -4164,6 +4291,67 @@ static int hp_ur_drain_ring(harr *in) {
     __atomic_store_n(hp_ur_cq_head, head, __ATOMIC_RELEASE);
     hp_ur_cqhead = head;
     return drained;
+}
+
+/* Drain a burst in bounded, FIFO rounds. Each direct ring has its own buffer
+ * pool; limiting fallback reads to that pool ensures every read can return a
+ * selected buffer instead of creating another ENOBUFS wave. */
+static int hp_ur_run_readq(harr *in) {
+    uint32_t budget = 16384;
+    int any_drained = 0;
+    while (budget && hp_ur_readq_head != hp_ur_readq_tail) {
+        uint32_t scan = hp_ur_readq_tail - hp_ur_readq_head;
+        uint32_t issued = 0;
+        while (scan-- && issued < budget) {
+            struct hp_ur_readq_ent ent;
+            if (!hp_ur_readq_pop(&ent)) break;
+            hp_sock fd = (hp_sock)ent.fd;
+            int rr = hp_ur_ring_of(fd);
+            if (rr < 0 || rr >= hp_ur_nrings) continue;
+            hp_ur_cur = &hp_ur_rings[rr];
+            struct hp_urfds *st = hp_ur_st_of(fd);
+            if (!st || st->epoch != ent.epoch || !st->rreadq) continue;
+            st->rreadq = 0;
+            if (hp_ur_dbg && !hp_ur_readq_diag) {
+                hp_ur_readq_diag = 1;
+                fprintf(stderr, "[ur] recovery state fd=%d direct=%d mshot=%d pbuf=%d eof=%d closing=%d armed=%d reading=%d inflight=%u/%u\n",
+                        (int)fd, st->direct, st->rmshot, hp_ur_pbuf != 0,
+                        st->reof, st->closeafter, st->rarmed, st->rreading,
+                        hp_ur_cur->read_inflight, hp_ur_pbuf_n);
+            }
+            if (!st->direct || !st->rmshot || !hp_ur_pbuf || st->reof ||
+                st->closeafter || st->rarmed || st->rreading) continue;
+            if (hp_ur_cur->read_inflight >= hp_ur_pbuf_n) {
+                if (!hp_ur_readq_push(fd, st, 5)) hp_ur_retfd(fd);
+                continue;
+            }
+            if (!hp_uring_arm_read(fd)) {
+                if (!hp_ur_readq_push(fd, st, 6)) hp_ur_retfd(fd);
+                /* The SQ is full: let the next normal wait reap it first. */
+                break;
+            }
+            issued++;
+        }
+        if (!issued) break;
+        budget -= issued;
+
+        /* MSG_DONTWAIT reads should finish within this enter. Draining after
+         * every round returns buffers before more queued sockets are issued. */
+        for (int r = 0; r < hp_ur_nrings; r++) {
+            struct hp_uring_ring *rg = &hp_ur_rings[r];
+            if (!hp_ur_ring_needs_enter(rg)) continue;
+            hp_ur_cur = rg;
+            long to_submit = (long)(rg->sqtail -
+                __atomic_load_n(rg->sq_head, __ATOMIC_ACQUIRE));
+            hp_ur_enter(to_submit > 0 ? to_submit : 0, 0, -1);
+        }
+        for (int r = 0; r < hp_ur_nrings; r++) {
+            hp_ur_cur = &hp_ur_rings[r];
+            any_drained |= hp_ur_drain_ring(in);
+        }
+    }
+    hp_ur_cur = &hp_ur_rings[0];
+    return any_drained;
 }
 
 /* Submit everything queued since the last cycle, wait until at least one
@@ -4276,7 +4464,8 @@ static void hp_uring_wait(harr *in, harr *out, int timeout_ms) {
         if (st->shead && !st->sarmed && !hp_ur_arm_send_head(h))
             hp_ur_retfd(h);
         if (budget == 0) { hp_ur_retfd(h); continue; }   /* recv next cycle */
-        if (st->rh && !st->rready && !st->rarmed) {
+        if (st->rh && !st->rready && !st->rarmed &&
+            !st->rreadq && !st->rreading) {
             if (!hp_uring_arm_recv(h, hp_ur_rlen())) {
                 /* leave it parked for the next cycle instead of re-parking
                  * and popping it again in this same loop */
@@ -4285,6 +4474,8 @@ static void hp_uring_wait(harr *in, harr *out, int timeout_ms) {
             }
         }
     }
+    int read_drained = hp_ur_run_readq(in);
+    hp_ur_busy |= read_drained;
     /* deferred closes: the send chain drained (or the peer is gone for
      * good) -> close the fd for real. Entries live until then, bounded by
      * the deadline so a stalled peer cannot pin descriptors forever. */
@@ -7891,6 +8082,10 @@ static void hp_stats_emit(void) {
         hp_stats_put("=", 1);
         hp_stats_num(hp_st[f[i].idx]);
     }
+    hp_stats_put(" readq=", 7);
+    hp_stats_num(hp_ur_readq_enqueues);
+    hp_stats_put(" bounded_recv=", 14);
+    hp_stats_num(hp_ur_readq_completions);
     hp_stats_put("\n", 1);
 }
 #if !defined(_WIN32)

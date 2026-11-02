@@ -40,7 +40,8 @@ Connection open(const std::string &path)
     {
         throw std::runtime_error(raw ? sqlite3_errmsg(raw) : "database open failed");
     }
-    execute(raw, "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON;");
+    execute(raw, "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON;"
+                 "PRAGMA cache_size=-16384;");
     return db;
 }
 

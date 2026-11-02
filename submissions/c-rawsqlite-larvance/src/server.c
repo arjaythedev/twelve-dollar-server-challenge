@@ -1,4 +1,6 @@
 #define _GNU_SOURCE
+#include "sqlite3.c"
+
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -6,21 +8,13 @@
 #include <time.h>
 
 #include "rt.h"
-#include "sqlite_format.h"
-#include "raw_sqlite.h"
 #include "out.c"
 #include "json.c"
 #include "jwt.c"
 #include "http.c"
-#include "raw_sqlite.c"
+#include "db.c"
 #include "app.c"
 #include "uring.c"
-
-static void on_sigterm(int sig) {
-  (void)sig;
-  raw_sqlite_close();
-  _exit(0);
-}
 
 int main(void) {
   const char *path = getenv("SQLITE_PATH");
@@ -35,22 +29,16 @@ int main(void) {
   if (!host) host = "0.0.0.0";
 
   signal(SIGPIPE, SIG_IGN);
-  signal(SIGTERM, on_sigterm);
-  signal(SIGINT, on_sigterm);
   hmac_init((const u8 *)secret, strlen(secret));
 
-  if (raw_sqlite_open(path) != 0) {
-    fprintf(stderr, "failed to open database at %s\n", path);
-    return 1;
-  }
+  db_open(path);
   app_init();
 
   const char *conns_env = getenv("CONNS");
-  u32 want_conns = conns_env ? (u32)atoi(conns_env) : 500000;
+  u32 want_conns = conns_env ? (u32)atoi(conns_env) : 600000;
   transport_init(host, port ? atoi(port) : 3000, want_conns);
 
-  fprintf(stderr, "c-rawsqlite-larvance listening on %s:%s\n", host, port ? port : "3000");
+  fprintf(stderr, "c-libsqlite-larvance listening on %s:%s\n", host, port ? port : "3000");
   transport_run();
-  raw_sqlite_close();
   return 0;
 }

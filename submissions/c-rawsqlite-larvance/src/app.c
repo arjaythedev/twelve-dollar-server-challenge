@@ -1,6 +1,4 @@
-#define _GNU_SOURCE
 #include "rt.h"
-#include "raw_sqlite.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -24,7 +22,22 @@ static const u8 E_INTERNAL[]    = "HTTP/1.1 500 Internal Server Error\r\nContent
 
 enum { K_NONE = 0, K_HEALTH, K_FEED, K_POST, K_LIKE, K_CREATE };
 
-static i64 started_at = 0;
+static Pgno ROOT_posts, ROOT_users, ROOT_likes_post_id_idx;
+static KeyInfo *KI_likes_post_id_idx;
+static cursor C_posts, C_users, C_likes_post_id_idx;
+static i64 started_at;
+
+static void cursors_open(void) {
+  C_posts = cursor_new(ROOT_posts, 0);
+  C_users = cursor_new(ROOT_users, 0);
+  C_likes_post_id_idx = cursor_new(ROOT_likes_post_id_idx, KI_likes_post_id_idx);
+}
+
+static void cursors_close(void) {
+  cursor_close(&C_posts);
+  cursor_close(&C_users);
+  cursor_close(&C_likes_post_id_idx);
+}
 
 static int parse_id(const u8 *s, u32 n, i64 *out) {
   if (!n) return 0;
@@ -158,159 +171,177 @@ static inline void put_post(out_t *o, i64 id, const u8 *body, u32 body_len,
   out_lit(o, "}", 1);
 }
 
+static int user_name(i64 uid, const u8 **author, u32 *author_len) {
+  int rc = cur_seek(&C_users, uid);
+  if (rc) return rc;
+  rec_t r; col_t c[3];
+  if (cur_record(&C_users, &r) || rec_cols(&r, 3, c) || !(c[1].t >= 13 && (c[1].t & 1))) return -1;
+  *author = c[1].p;
+  *author_len = serial_len(c[1].t);
+  return 0;
+}
+
+static int range_counts(i64 lo, i64 hi, i64 *counts) {
+  memset(counts, 0, sizeof(i64) * (size_t)(hi - lo + 1));
+  int rc = idx_seek_ge(&C_likes_post_id_idx, KI_likes_post_id_idx, lo);
+  while (rc == 0) {
+    rec_t r; col_t c[1];
+    if (cur_record(&C_likes_post_id_idx, &r) || rec_cols(&r, 1, c)) return -1;
+    i64 pid = col_int(&c[0]);
+    if (pid > hi) return 0;
+    if (pid >= lo) counts[pid - lo]++;
+    rc = cur_next(&C_likes_post_id_idx);
+  }
+  return rc < 0 ? -1 : 0;
+}
+
+static int feed_tail(out_t *o) {
+  out_need(o, 10);
+  out_lit(o, "{\"posts\":[", 10);
+  int rc = cur_last(&C_posts);
+  if (rc < 0) return -1;
+  if (rc == 0) {
+    i64 pids[20];
+    rec_t recs[20];
+    col_t cols[20][4];
+    int n = 0;
+    for (int k = 0; k < 20; k++) {
+      pids[k] = cur_rowid(&C_posts);
+      if (cur_record(&C_posts, &recs[k]) || rec_cols(&recs[k], 4, cols[k])) return -1;
+      n++;
+      if (cur_prev(&C_posts) != 0) break;
+    }
+    if (n > 0) {
+      i64 lo = pids[n - 1];
+      i64 hi = pids[0];
+      if (hi - lo < 64) {
+        i64 counts[64];
+        range_counts(lo, hi, counts);
+        for (int k = 0; k < n; k++) {
+          i64 id = pids[k];
+          const u8 *author; u32 author_len;
+          if (user_name(col_int(&cols[k][1]), &author, &author_len)) return -1;
+          if (k) { out_need(o, 1); out_lit(o, ",", 1); }
+          put_post(o, id, cols[k][2].p, serial_len(cols[k][2].t),
+                   cols[k][3].p, serial_len(cols[k][3].t),
+                   author, author_len, counts[id - lo]);
+        }
+      } else {
+        for (int k = 0; k < n; k++) {
+          i64 id = pids[k];
+          const u8 *author; u32 author_len;
+          if (user_name(col_int(&cols[k][1]), &author, &author_len)) return -1;
+          i64 count = 0;
+          range_counts(id, id, &count);
+          if (k) { out_need(o, 1); out_lit(o, ",", 1); }
+          put_post(o, id, cols[k][2].p, serial_len(cols[k][2].t),
+                   cols[k][3].p, serial_len(cols[k][3].t),
+                   author, author_len, count);
+        }
+      }
+    }
+  }
+  out_need(o, 2);
+  out_lit(o, "]}", 2);
+  return 0;
+}
+
+static int post_by_id(out_t *o, i64 id) {
+  int rc = cur_seek(&C_posts, id);
+  if (rc) return rc;
+  rec_t r; col_t c[4];
+  if (cur_record(&C_posts, &r) || rec_cols(&r, 4, c)) return -1;
+  const u8 *author; u32 author_len;
+  rc = user_name(col_int(&c[1]), &author, &author_len);
+  if (rc) return rc;
+  i64 likes = 0;
+  if (range_counts(id, id, &likes)) return -1;
+  out_need(o, 8);
+  out_lit(o, "{\"post\":", 8);
+  put_post(o, id, c[2].p, serial_len(c[2].t), c[3].p, serial_len(c[3].t), author, author_len, likes);
+  out_need(o, 1);
+  out_lit(o, "}", 1);
+  return 0;
+}
+
 static void exec_read(job_t *j) {
   out_t o0, *o = &o0;
   out_begin(o);
   switch (j->kind) {
     case K_HEALTH: {
-      i64 uptime = now_s - started_at;
-      out_need(o, 64);
-      out_lit(o, "{\"status\":\"ok\",\"db\":\"ok\",\"uptime_s\":", 36);
-      out_i64(o, uptime);
-      out_lit(o, "}", 1);
-      j->resp = out_finish(o, HDR_200, sizeof HDR_200 - 1);
+      int rc = sqlite3_step(Q_health);
+      sqlite3_reset(Q_health);
+      if (rc == SQLITE_ROW) {
+        i64 uptime = now_s - started_at;
+        out_need(o, 64);
+        out_lit(o, "{\"status\":\"ok\",\"db\":\"ok\",\"uptime_s\":", 36);
+        out_i64(o, uptime);
+        out_lit(o, "}", 1);
+        j->resp = out_finish(o, HDR_200, sizeof HDR_200 - 1);
+      } else {
+        j->resp = ERR(INTERNAL);
+      }
       return;
     }
     case K_FEED: {
-      out_need(o, 10);
-      out_lit(o, "{\"posts\":[", 10);
-      raw_table_cursor_t cur;
-      if (LIKELY(raw_last_table(&cur, ROOT_POSTS) == 0)) {
-        struct {
-          i64 id;
-          i64 uid;
-          const u8 *body, *created, *author;
-          u32 body_len, created_len, author_len;
-          i64 likes;
-        } feed[20];
-        int count = 0;
-        for (;;) {
-          feed[count].id = cur.rowid;
-          parse_post_cols(cur.payload, &feed[count].uid, &feed[count].body, &feed[count].body_len,
-                          &feed[count].created, &feed[count].created_len);
-          raw_get_username(feed[count].uid, &feed[count].author, &feed[count].author_len);
-          feed[count].likes = 0;
-          count++;
-          if (count == 20 || raw_prev_table(&cur) != 0) break;
-        }
-
-        if (count > 0) {
-          i64 hi = feed[0].id;
-          i64 lo = feed[count - 1].id;
-          if (LIKELY(hi - lo + 1 == count)) {
-            i64 counts[20];
-            raw_range_counts(lo, hi, counts);
-            for (int k = 0; k < count; k++) feed[k].likes = counts[feed[k].id - lo];
-          } else if (hi - lo + 1 <= 64) {
-            i64 counts[64];
-            raw_range_counts(lo, hi, counts);
-            for (int k = 0; k < count; k++) feed[k].likes = counts[feed[k].id - lo];
-          } else {
-            for (int k = 0; k < count; k++) {
-              raw_range_counts(feed[k].id, feed[k].id, &feed[k].likes);
-            }
-          }
-
-          for (int k = 0; k < count; k++) {
-            if (k) { out_need(o, 1); out_lit(o, ",", 1); }
-            put_post(o, feed[k].id, feed[k].body, feed[k].body_len,
-                     feed[k].created, feed[k].created_len,
-                     feed[k].author, feed[k].author_len, feed[k].likes);
-          }
-        }
+      if (feed_tail(o) != 0) {
+        out_abort(o);
+        j->resp = ERR(INTERNAL);
+        return;
       }
-      out_need(o, 2);
-      out_lit(o, "]}", 2);
       j->resp = out_finish(o, HDR_200, sizeof HDR_200 - 1);
       return;
     }
     case K_POST: {
-      raw_table_cursor_t cur;
-      if (raw_seek_table(&cur, ROOT_POSTS, j->id) != 0) {
+      int rc = post_by_id(o, j->id);
+      if (rc != 0) {
         out_abort(o);
-        j->resp = ERR(NO_POST);
+        j->resp = rc > 0 ? ERR(NO_POST) : ERR(INTERNAL);
         return;
       }
-      i64 uid, likes = 0;
-      const u8 *body, *created, *author;
-      u32 body_len, created_len, author_len;
-      parse_post_cols(cur.payload, &uid, &body, &body_len, &created, &created_len);
-      raw_get_username(uid, &author, &author_len);
-      raw_range_counts(j->id, j->id, &likes);
-      out_need(o, 8);
-      out_lit(o, "{\"post\":", 8);
-      put_post(o, j->id, body, body_len, created, created_len, author, author_len, likes);
-      out_need(o, 1);
-      out_lit(o, "}", 1);
       j->resp = out_finish(o, HDR_200, sizeof HDR_200 - 1);
       return;
     }
   }
-}
-
-static time_t cached_sec = 0;
-static char cached_time_prefix[21];
-
-static inline void format_iso8601(char out[32], int *out_len) {
-  struct timespec ts;
-  clock_gettime(CLOCK_REALTIME, &ts);
-  if (UNLIKELY(ts.tv_sec != cached_sec)) {
-    struct tm tm;
-    gmtime_r(&ts.tv_sec, &tm);
-    snprintf(cached_time_prefix, sizeof cached_time_prefix, "%04d-%02d-%02dT%02d:%02d:%02d.",
-             tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
-             tm.tm_hour, tm.tm_min, tm.tm_sec);
-    cached_sec = ts.tv_sec;
-  }
-  memcpy(out, cached_time_prefix, 20);
-  int ms = (int)(ts.tv_nsec / 1000000);
-  if (ms < 0) ms = 0;
-  if (ms > 999) ms = 999;
-  out[20] = (char)('0' + (ms / 100));
-  out[21] = (char)('0' + ((ms / 10) % 10));
-  out[22] = (char)('0' + (ms % 10));
-  out[23] = 'Z';
-  out[24] = '\0';
-  *out_len = 24;
 }
 
 static void exec_write(job_t *j) {
   out_t o0, *o = &o0;
   switch (j->kind) {
     case K_LIKE: {
-      if (raw_post_exists(j->id) != 0) {
-        j->resp = ERR(NO_POST);
-        return;
-      }
-      char created_str[32];
-      int clen = 0;
-      format_iso8601(created_str, &clen);
-      bool already_liked = false;
-      raw_insert_like(j->uid, j->id, (const u8 *)created_str, (u32)clen, &already_liked);
+      int rc = cur_seek(&C_posts, j->id);
+      if (rc) { j->resp = rc > 0 ? ERR(NO_POST) : ERR(INTERNAL); return; }
+      sqlite3_bind_int64(Q_like_insert, 1, j->uid);
+      sqlite3_bind_int64(Q_like_insert, 2, j->id);
+      rc = sqlite3_step(Q_like_insert);
+      sqlite3_reset(Q_like_insert);
+      if (rc != SQLITE_DONE) { j->resp = ERR(INTERNAL); return; }
+      int already = sqlite3_changes(db) != 1;
       out_begin(o);
       out_need(o, 67);
       out_lit(o, "{\"liked\":true,\"already_liked\":", 30);
-      if (already_liked) out_lit(o, "true", 4); else out_lit(o, "false", 5);
+      if (already) out_lit(o, "true", 4); else out_lit(o, "false", 5);
       out_lit(o, ",\"post_id\":", 11);
       out_i64(o, j->id);
       out_lit(o, "}", 1);
-      j->resp = already_liked ? out_finish(o, HDR_200, sizeof HDR_200 - 1) : out_finish(o, HDR_201, sizeof HDR_201 - 1);
+      j->resp = already ? out_finish(o, HDR_200, sizeof HDR_200 - 1) : out_finish(o, HDR_201, sizeof HDR_201 - 1);
       return;
     }
     case K_CREATE: {
-      char created_str[32];
-      int clen = 0;
-      format_iso8601(created_str, &clen);
-      raw_post_view_t pv;
-      raw_insert_post(j->uid, j->text, j->text_len, (const u8 *)created_str, (u32)clen,
-                      j->name, j->name_len, &pv);
+      sqlite3_bind_int64(Q_post_insert, 1, j->uid);
+      sqlite3_bind_text(Q_post_insert, 2, (const char *)j->text, (int)j->text_len, SQLITE_STATIC);
+      int rc = sqlite3_step(Q_post_insert);
+      if (rc != SQLITE_ROW) { sqlite3_reset(Q_post_insert); j->resp = ERR(INTERNAL); return; }
+      i64 id = sqlite3_column_int64(Q_post_insert, 0);
+      const u8 *created = sqlite3_column_text(Q_post_insert, 1);
+      u32 created_len = (u32)sqlite3_column_bytes(Q_post_insert, 1);
       out_begin(o);
       out_need(o, 8);
       out_lit(o, "{\"post\":", 8);
-      put_post(o, pv.id, pv.body, pv.body_len, pv.created_at, pv.created_at_len,
-               pv.author, pv.author_len, 0);
+      put_post(o, id, j->text, j->text_len, created, created_len, j->name, j->name_len, 0);
       out_need(o, 1);
       out_lit(o, "}", 1);
+      sqlite3_reset(Q_post_insert);
       j->resp = out_finish(o, HDR_201, sizeof HDR_201 - 1);
       return;
     }
@@ -319,31 +350,25 @@ static void exec_write(job_t *j) {
 
 static void app_batch(job_t *js, int n) {
   int reads = 0, writes = 0;
-  for (int i = 0; i < n; i++) {
-    if (js[i].kind) {
-      if (js[i].is_write) writes++; else reads++;
-    }
-  }
+  for (int i = 0; i < n; i++) if (js[i].kind) { if (js[i].is_write) writes++; else reads++; }
   if (reads || writes) {
-    raw_sqlite_batch_begin();
-    for (int i = 0; i < n; i++) {
-      if (js[i].kind && !js[i].is_write) exec_read(&js[i]);
-    }
-    for (int i = 0; i < n; i++) {
-      if (js[i].kind && js[i].is_write) exec_write(&js[i]);
-    }
-    if (UNLIKELY(raw_sqlite_batch_end() != 0)) {
-      for (int i = 0; i < n; i++) {
-        if (js[i].kind && js[i].is_write) {
-          if (js[i].resp) obuf_release(js[i].resp);
-          js[i].resp = ERR(INTERNAL);
-        }
-      }
+    db_batch_begin();
+    cursors_open();
+    for (int i = 0; i < n; i++) if (js[i].kind && !js[i].is_write) exec_read(&js[i]);
+    for (int i = 0; i < n; i++) if (js[i].kind && js[i].is_write) exec_write(&js[i]);
+    cursors_close();
+    if (db_batch_end() && writes) {
+      for (int i = 0; i < n; i++)
+        if (js[i].kind && js[i].is_write) { if (js[i].resp) obuf_release(js[i].resp); js[i].resp = ERR(INTERNAL); }
     }
   }
   arena_used = 0;
 }
 
 static void app_init(void) {
+  ROOT_posts = db_rootpage("posts");
+  ROOT_users = db_rootpage("users");
+  ROOT_likes_post_id_idx = db_rootpage("likes_post_id_idx");
+  KI_likes_post_id_idx = db_keyinfo(1, 1);
   started_at = time(0);
 }

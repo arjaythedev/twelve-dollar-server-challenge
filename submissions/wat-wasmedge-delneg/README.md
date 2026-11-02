@@ -8,7 +8,7 @@ compiled ahead of time to native code by WasmEdge, and run by a small C embedder
 | File | Language | What it does |
 |---|---|---|
 | `src/app.wat` | WAT, hand-written | Everything a request touches: the io_uring event loop (it writes every submission entry and reads every completion itself), HTTP/1.1 parsing, routing, JSON reading and writing, base64url, SHA-256 and HMAC for the HS256 JWT check, SQL statement calls, group commit, and the B-tree read paths (record decoding, which cursors to open and seek) |
-| `src/host.c` | C, ~175 lines | WasmEdge embedder: loads the AOT-compiled module, gives it WASI (used only by SQLite for file I/O, env vars and the clock) and five Linux imports: `listen`; `ring_new` (sets up an io_uring and its fixed-file table); `ring_pbuf` (registers a provided-buffer ring that lives in wasm memory); `ring_go` (copies the SQEs the WAT wrote into the ring, calls `io_uring_enter`, copies the completions back); and `membase` (the native address of wasm memory, which the kernel needs for buffer addresses). There is no request logic in it |
+| `src/host.c` | C, ~200 lines | WasmEdge embedder: loads the AOT-compiled module, gives it WASI (used only by SQLite for file I/O, env vars and the clock) and five Linux imports: `listen`; `ring_new` (sets up an io_uring and its fixed-file table); `ring_pbuf` (registers a provided-buffer ring that lives in wasm memory); `ring_go` (copies the SQEs the WAT wrote into the ring, calls `io_uring_enter`, copies the completions back); and `membase` (the native address of wasm memory, which the kernel needs for buffer addresses). It also starts one thread that calls `fdatasync` on the WAL file every 100 ms (below). There is no request logic in it |
 | `src/sqlite_glue.c` | C, ~70 lines | `#include`s the stock SQLite amalgamation and exports what the WAT calls: the public SQL API, and one-line wrappers over SQLite's B-tree cursor functions (open, first, next, previous, seek, payload). No decisions are made here |
 | SQLite 3.54.1 | C, stock | The amalgamation, unmodified, compiled to wasm with wasi-sdk |
 | wasi-libc | C | From wasi-sdk, for SQLite (malloc, file calls) |
@@ -33,7 +33,7 @@ downloaded by `build.sh`:
   submission and completion entries in and out (WASI's `poll_oneoff` would re-register every socket on
   every call). A multishot accept puts each new connection straight into a slot of the ring's
   fixed-file table, so connections never take a process file descriptor: with `LimitNOFILE=65535` the
-  server still keeps every user's keep-alive connection, in up to 8 rings of 65,535 slots (250,000
+  server still keeps every user's keep-alive connection, in up to 8 rings of 65,535 slots (280,000
   users tested). The accept moves to the next ring when one gets near full. Each connection has a
   multishot receive with buffer selection (2,048 x 2 KiB buffers per ring, in wasm memory). Ring 0 is
   the one waited on and holds a multishot poll on each other ring's fd.
@@ -47,6 +47,12 @@ downloaded by `build.sh`:
   `locking_mode=EXCLUSIVE` (the WAL index lives in its heap); it is the only connection anyway.
   `wal_autocheckpoint=16000` (64 MiB of WAL): with no thread or fork in WASI, checkpoints run on the
   event loop and their two fsyncs stop it, so they run every few seconds instead of every ~0.5 s.
+- **WAL flusher thread.** A checkpoint starts by syncing the WAL, which by then holds up to 64 MiB, and
+  the loop waits for it. A thread in `host.c` calls `fdatasync` on the WAL file (through its own
+  descriptor) every 100 ms, so that sync finds little left to write. It only makes data durable sooner;
+  SQLite still makes every sync it would make anyway. At 280,000 users this halved p95 and p99 (below).
+  What is left of the stall is the sync of the database file after the checkpoint copies pages into it,
+  100-130 ms every ~3 s (bpftrace).
 - **Group commit.** One transaction per batch of completions: BEGIN after the wait, every request of
   the batch, then COMMIT, and only then are the responses sent. A transaction that has written stays
   open for up to 2 ms across waits to take in more writes; one that has only read commits at the end of
@@ -66,10 +72,34 @@ downloaded by `build.sh`:
 
 ## Measured
 
-All numbers are local, from opt-box (a 4 vCPU VM whose disk takes ~17 ms per fsync), not from the
-grader's droplet. The server runs on CPU 0; a load generator runs the `bench/load.js` user loop on
-CPUs 1-3, with its think times multiplied by a scale factor. `experiments/worklog.md` has every run,
-including the changes that didn't help.
+**Scorer-like load, Synteq.** A rented 8 vCPU box with the grader droplet's CPU (Xeon Platinum 8260) and
+kernel (6.8.0). The server runs alone on CPU 0 in a scope with `MemoryMax=2G`, with `LimitNOFILE=65535`;
+the load generator (`ul`, C, the `bench/load.js` user loop with its real think times, one keep-alive
+connection per user, 32 source addresses) runs on CPUs 1-7. 60 s ramp, then the measured window.
+`experiments/worklog.md` has every run, including the changes that didn't help.
+
+5-minute hold at 280,000 users (this commit): 29.4k req/s, p50 2.8 ms, **p95 355 ms, p99 670 ms, 0
+errors**; the server used 84% of its CPU (28.5 µs per request) and peaked at 719 MB (cgroup, page cache
+included).
+
+2-minute runs at 280,000 users, 3 interleaved reps each:
+
+| server | p95 (ms) | p99 (ms) | CPU per request |
+|---|---|---|---|
+| io_uring loop, no WAL flusher | 325, 385, 425 | 620, 735, 800 | 27.7-27.9 µs |
+| + WAL flusher (this commit) | 196, 138, 184 | 465, 285, 390 | 28.7-28.9 µs |
+| objc-uring-delneg, for reference (1 run) | 11.2 | 23.4 | 25.5 µs |
+
+The ObjC entry checkpoints from a separate process, so its loop never waits for an fsync; that is most
+of the gap in the tail. It uses about 0.9x this entry's CPU per request here.
+
+The build merged in #259 (epoll, one file descriptor per connection) had to close idle keep-alive
+connections past ~60,000 users; the io_uring loop keeps all of them.
+
+**CPU per request, opt-box.** The numbers below are older, from opt-box (a 4 vCPU VM whose disk takes
+~17 ms per fsync) and the earlier epoll loop; the io_uring loop measures the same there (35.8k, 36.6k,
+35.8k req/s, 10.9-11.2 µs per request). The server runs on CPU 0, a load generator on CPUs 1-3, with think
+times multiplied by a scale factor.
 
 Throughput with the server held to 40% of one CPU (`systemd-run --scope -p CPUQuota=40%`), 4,000 users
 at scale 0.007 (more than any of them can serve), 3 interleaved runs:

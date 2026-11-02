@@ -446,3 +446,32 @@ the kernel retries it later, reading OUTB) waits up to ~20 ms, then ASYNC_CANCEL
   614 MB. E21: 21.1k rps, p95 >5.3 s. ObjC in the same session (8 addresses): 26.4k rps, p95 8.6 ms.
 The remaining tail is the checkpoint stall (fsyncs on the event loop): that is now what limits the
 score, not connections.
+
+## S6: 280k, E23 vs ObjC (1 Nov, Synteq) — measurement
+sc.sh, 2 min, 280,000 users, 32 source addresses. E23: 29.5k rps, p95 315 ms, p99 550 ms, cgroup 82.5%,
+28.0 us/req, 656 MB. ObjC: 29.6k rps, p50 3.4 ms, p95 11.2 ms, p99 23.4 ms, 75.5%, 25.5 us/req, 585 MB.
+With 8 source addresses `ul` itself got stuck in connect() near 280k; 32 fixed it.
+
+## E24: WAL flusher thread in host.c (1-2 Nov) — kept
+A host pthread fdatasyncs `$SQLITE_PATH-wal` (own fd) every WALSYNC_MS (default 100; 0 = off), so the
+WAL sync a checkpoint starts with is short.
+- Synteq sc.sh 280k, interleaved, 3 reps: E23 p95 325, 385, 425 / p99 620, 735, 800 ms, 27.67, 27.92,
+  27.70 us/req; E24 p95 196, 138, 184 / p99 465, 285, 390 ms, 28.87, 28.87, 28.66 us/req (+~1 us/req,
+  likely smaller batches while the loop no longer stalls as long).
+- opt-box q40, 4000 x 0.007: E23 36.1k, 33.2k, 35.1k rps, p99 230-290 ms; E24 36.2k, 36.7k, 36.1k,
+  p99 89-103 ms. opt-box 50k x 0.35: E23 p99 225, 183, 185 ms; E24 35, 40, 33 ms.
+- bpftrace on Synteq 280k (sc26, `ck.bt`): the db-file sync after the copy takes 93-136 ms every ~3 s
+  (fd 4); the loop's own WAL sync is now under 20 ms except once (421 ms, while the flusher's own sync
+  took 394 ms). That db sync is the remaining stall.
+
+## E25: wal_autocheckpoint 4000 / 8000 / 16000 with the flusher (2 Nov, opt-box) — 16000 kept
+50k x 0.35, 3 interleaved reps, p99: 16000 31.8, 33.2, 32.8 ms; 8000 49.8, 44.3, 43.3; 4000 44.8, 43.7,
+44.8. q40 rps: 16000 35.8k, 36.6k, 35.8k; 8000 36.0k, 36.7k, 37.5k; 4000 36.3k, 37.5k, 37.0k (noise).
+
+## S7: 5-minute hold, E24 (2 Nov, Synteq) — measurement
+hold.sh (sc.sh with a 300 s window), 280,000 users: 29.4k rps, p50 2.8 ms, p95 355 ms, p99 670 ms, max
+1.52 s, 0 errors, 0 stuck, cgroup 83.8%, 28.5 us/req, 719 MB. Passes the score's limits; the 2-minute
+probes read lower (p95 138-196 ms), so the 5-minute window catches more checkpoint stalls.
+Clean build (opt-box `ci2.sh`): a fresh ubuntu:24.04 container runs install.sh as root and build.sh as a
+user; the built folder is then tested outside the container (docker's default seccomp profile refuses
+io_uring): passed=42 failed=0. Also 42/42 on opt-box and Synteq from their own builds.

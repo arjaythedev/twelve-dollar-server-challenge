@@ -3,7 +3,8 @@
 // io_uring setup (ring_new: the rings and their sparse fixed-file tables; ring_pbuf: a provided-buffer ring
 // in wasm memory) and one submit/reap call (ring_go: copies the SQEs the WAT wrote into the ring, enters,
 // copies the CQEs back); WASI's poll_oneoff would re-register every connection on every call. No request
-// logic lives here: the WAT builds every SQE and reads every CQE.
+// logic lives here: the WAT builds every SQE and reads every CQE. One helper thread fdatasyncs the WAL file
+// every 100 ms (see walsync below).
 #define _GNU_SOURCE
 #include <wasmedge/wasmedge.h>
 #include <errno.h>

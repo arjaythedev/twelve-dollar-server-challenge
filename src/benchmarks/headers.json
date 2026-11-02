@@ -1,0 +1,565 @@
+{
+  "result": "No adoption: headmove reliably improves feed only; post, 92%-read mixed and protected requests do not show a consistent win. Viewref alone is inconclusive; both regresses post in the matrix.",
+  "baseline_commit": "0a3c419b3e4f3c07784583217b7ea760841a5f24",
+  "build": {
+    "image": "twelve-dollar-cpp:tcp-close-build",
+    "compiler": "GCC 13.3.0 (Ubuntu 13.3.0-6ubuntu2~24.04.1)",
+    "flags": "-O3 -DNDEBUG -std=c++23 -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror",
+    "diagnostics": false,
+    "sanitizers": false,
+    "lto": false,
+    "dependencies": "Cached pinned llhttp 9.4.3, SQLite 3.53.1, yyjson 0.13.0 and OpenSSL 3; no vendor rebuild"
+  },
+  "variants": {
+    "baseline": "RequestHeadView value; AcceptedHead value",
+    "viewref": "const RequestHeadView&; AcceptedHead value",
+    "headmove": "RequestHeadView value; AcceptedHead&&",
+    "both": "const RequestHeadView&; AcceptedHead&&"
+  },
+  "measurement": {
+    "cpu": "AMD Ryzen 7 7800X3D, Docker Linux VM on Windows",
+    "kernel": "6.6.114.1-microsoft-standard-WSL2",
+    "clock": "CLOCK_THREAD_CPUTIME_ID",
+    "threads": 1,
+    "rounds": 7,
+    "warm_up_requests_per_process": 5000,
+    "affinity": "taskset -c 2 on each isolated probe process only, identically for every variant; no production/server/Docker/host affinity changes",
+    "order": "r,s,slot are zero-based: workload[(r+s)%5], variant[(r+s+(r%2==0?slot:-slot)+8)%4]",
+    "confirmation_order": "Seven additional paired rounds, workload[(r+s)%5], baseline/headmove order reversed when (r+s) is odd",
+    "paired_pct": "100 * (candidate_cpu_ns / baseline_cpu_ns - 1); negative is faster; arrays ordered by round 1..7"
+  },
+  "checks": [
+    "Actual production Application and HttpSession compiled separately per variant; shared real llhttp parser; no mirrored functions or forced noinline",
+    "Full owned input append, llhttp header/body completion, accepted-context transfer and reset, parameter and context destruction included",
+    "Preflight checks route alternatives, borrowed post IDs, owned 96-byte JWT username, prepared Create command and real HS256 invalid-signature rejection",
+    "Every sample verifies accepted-context checksum; paired samples match requests, input bytes and checksums",
+    "Application lazy Store never accessed; no database or network I/O in timed work",
+    "Formatting and rebuilding produced byte-identical binaries for all four variants"
+  ],
+  "limits": [
+    "Header-path CPU experiment only; excludes SQLite, response encoding, networking and deployed end-to-end performance",
+    "All measured requests include framing/assertion/checksum overhead shared across variants",
+    "Host/VM timing noise remains substantial, including invalid-auth control that never calls HttpSession::accept_headers",
+    "Affinity is an experiment control, not a production configuration; no unpinned confirmation because no change is adopted"
+  ],
+  "probe": {
+    "path": "src/.build/headers/probe.cpp",
+    "sha256": "bbc9a9a5720048b03087580fa64b9327d8e8ee5c25743382cf41441321b935d5",
+    "measured_source_sha256": "8d921c88bbd673b82733fe052299ed9445b7eb3da7a6767f36a3d3e848e0f458",
+    "artifacts": "Ignored src/.build/headers contains exact source snapshots, binaries, disassembly, build.sh, schedules and raw TSV; probe container removed"
+  },
+  "codegen_bytes": {
+    "columns": [
+      "binary_text",
+      "Application_accept_headers",
+      "HttpSession_accept_headers",
+      "timed_exchange_hot_clone"
+    ],
+    "baseline": [
+      1819835,
+      938,
+      3105,
+      1519
+    ],
+    "viewref": [
+      1819803,
+      997,
+      3105,
+      1487
+    ],
+    "headmove": [
+      1818303,
+      938,
+      3105,
+      801
+    ],
+    "both": [
+      1818271,
+      997,
+      3105,
+      753
+    ]
+  },
+  "workloads": {
+    "feed": {
+      "shared_per_sample": {
+        "repetitions": 922124,
+        "requests": 922124,
+        "input_bytes": 44261952,
+        "checksum": 1844248
+      },
+      "matrix": {
+        "baseline": {
+          "cpu_ns": [
+            98353443,
+            97238979,
+            95255295,
+            91178841,
+            108019194,
+            99317103,
+            100813463
+          ],
+          "median_ns_per_request": 106.66,
+          "paired_median_pct": 0.0,
+          "faster_rounds": 0
+        },
+        "viewref": {
+          "cpu_ns": [
+            95813633,
+            99786134,
+            88047189,
+            89987451,
+            93250202,
+            101922326,
+            93539550
+          ],
+          "median_ns_per_request": 101.439,
+          "paired_median_pct": -2.582,
+          "faster_rounds": 5
+        },
+        "headmove": {
+          "cpu_ns": [
+            92778017,
+            90803668,
+            87961917,
+            86801305,
+            91934064,
+            99300832,
+            93739369
+          ],
+          "median_ns_per_request": 99.698,
+          "paired_median_pct": -6.618,
+          "faster_rounds": 7
+        },
+        "both": {
+          "cpu_ns": [
+            89370635,
+            98475395,
+            88902672,
+            89194206,
+            94764484,
+            96384047,
+            97227447
+          ],
+          "median_ns_per_request": 102.768,
+          "paired_median_pct": -3.557,
+          "faster_rounds": 6
+        }
+      },
+      "confirmation": {
+        "baseline": {
+          "cpu_ns": [
+            98066179,
+            96911628,
+            115155524,
+            91125329,
+            92610663,
+            94656499,
+            90769153
+          ],
+          "median_ns_per_request": 102.651,
+          "paired_median_pct": 0.0,
+          "faster_rounds": 0
+        },
+        "headmove": {
+          "cpu_ns": [
+            91298688,
+            87130790,
+            87249386,
+            86697147,
+            90864796,
+            91890311,
+            87306981
+          ],
+          "median_ns_per_request": 94.68,
+          "paired_median_pct": -4.859,
+          "faster_rounds": 7
+        }
+      }
+    },
+    "post": {
+      "shared_per_sample": {
+        "repetitions": 896626,
+        "requests": 896626,
+        "input_bytes": 44831300,
+        "checksum": 10759512
+      },
+      "matrix": {
+        "baseline": {
+          "cpu_ns": [
+            98810521,
+            99738602,
+            97575678,
+            101770328,
+            124463895,
+            102849004,
+            105783130
+          ],
+          "median_ns_per_request": 113.504,
+          "paired_median_pct": 0.0,
+          "faster_rounds": 0
+        },
+        "viewref": {
+          "cpu_ns": [
+            97810272,
+            106167214,
+            98335631,
+            94846149,
+            128155285,
+            105591567,
+            99384030
+          ],
+          "median_ns_per_request": 110.842,
+          "paired_median_pct": 0.779,
+          "faster_rounds": 3
+        },
+        "headmove": {
+          "cpu_ns": [
+            107237049,
+            101588461,
+            97432054,
+            100384125,
+            103903404,
+            104828042,
+            103602353
+          ],
+          "median_ns_per_request": 115.547,
+          "paired_median_pct": -0.147,
+          "faster_rounds": 4
+        },
+        "both": {
+          "cpu_ns": [
+            112930263,
+            113459605,
+            107869278,
+            110491856,
+            111445529,
+            121434017,
+            111193337
+          ],
+          "median_ns_per_request": 124.294,
+          "paired_median_pct": 10.549,
+          "faster_rounds": 1
+        }
+      },
+      "confirmation": {
+        "baseline": {
+          "cpu_ns": [
+            105851352,
+            98763243,
+            104200047,
+            104264079,
+            96949961,
+            96877593,
+            107076405
+          ],
+          "median_ns_per_request": 116.214,
+          "paired_median_pct": 0.0,
+          "faster_rounds": 0
+        },
+        "headmove": {
+          "cpu_ns": [
+            99610929,
+            100262796,
+            107479470,
+            111606139,
+            106702707,
+            97413971,
+            98545428
+          ],
+          "median_ns_per_request": 111.822,
+          "paired_median_pct": 1.518,
+          "faster_rounds": 2
+        }
+      }
+    },
+    "mixed": {
+      "shared_per_sample": {
+        "repetitions": 3750,
+        "requests": 375000,
+        "input_bytes": 28230000,
+        "checksum": 9780000
+      },
+      "matrix": {
+        "baseline": {
+          "cpu_ns": [
+            105901866,
+            106080425,
+            102278882,
+            109526174,
+            117121023,
+            122182948,
+            109764966
+          ],
+          "median_ns_per_request": 292.07,
+          "paired_median_pct": 0.0,
+          "faster_rounds": 0
+        },
+        "viewref": {
+          "cpu_ns": [
+            108343019,
+            107162910,
+            104878424,
+            103048462,
+            106581095,
+            120866239,
+            107987643
+          ],
+          "median_ns_per_request": 285.768,
+          "paired_median_pct": -1.078,
+          "faster_rounds": 4
+        },
+        "headmove": {
+          "cpu_ns": [
+            100217601,
+            97941452,
+            103488778,
+            101755337,
+            114143233,
+            108136035,
+            110767821
+          ],
+          "median_ns_per_request": 275.97,
+          "paired_median_pct": -5.367,
+          "faster_rounds": 5
+        },
+        "both": {
+          "cpu_ns": [
+            100024173,
+            107518043,
+            101257935,
+            105244054,
+            108354380,
+            115077846,
+            112821996
+          ],
+          "median_ns_per_request": 286.715,
+          "paired_median_pct": -3.91,
+          "faster_rounds": 5
+        }
+      },
+      "confirmation": {
+        "baseline": {
+          "cpu_ns": [
+            107837883,
+            102686584,
+            100144082,
+            101134581,
+            104242357,
+            99755315,
+            102981864
+          ],
+          "median_ns_per_request": 273.831,
+          "paired_median_pct": 0.0,
+          "faster_rounds": 0
+        },
+        "headmove": {
+          "cpu_ns": [
+            104055793,
+            97860307,
+            101850068,
+            104744640,
+            100911557,
+            99971594,
+            98356700
+          ],
+          "median_ns_per_request": 269.097,
+          "paired_median_pct": -3.195,
+          "faster_rounds": 4
+        }
+      }
+    },
+    "protected": {
+      "shared_per_sample": {
+        "repetitions": 24241,
+        "requests": 48482,
+        "input_bytes": 18301955,
+        "checksum": 11902331
+      },
+      "matrix": {
+        "baseline": {
+          "cpu_ns": [
+            97401859,
+            97958856,
+            101876214,
+            97635452,
+            112067656,
+            105122959,
+            112437117
+          ],
+          "median_ns_per_request": 2101.32,
+          "paired_median_pct": 0.0,
+          "faster_rounds": 0
+        },
+        "viewref": {
+          "cpu_ns": [
+            105840419,
+            100386916,
+            105534063,
+            102255126,
+            104552476,
+            114846602,
+            111651809
+          ],
+          "median_ns_per_request": 2176.768,
+          "paired_median_pct": 3.59,
+          "faster_rounds": 2
+        },
+        "headmove": {
+          "cpu_ns": [
+            101214352,
+            99202695,
+            96637618,
+            97634135,
+            110044035,
+            109555840,
+            106254526
+          ],
+          "median_ns_per_request": 2087.669,
+          "paired_median_pct": -0.001,
+          "faster_rounds": 4
+        },
+        "both": {
+          "cpu_ns": [
+            101298954,
+            108755151,
+            97310145,
+            111799126,
+            112392611,
+            103636097,
+            110660290
+          ],
+          "median_ns_per_request": 2243.207,
+          "paired_median_pct": 0.29,
+          "faster_rounds": 3
+        }
+      },
+      "confirmation": {
+        "baseline": {
+          "cpu_ns": [
+            102077679,
+            99021411,
+            97124282,
+            109711544,
+            97607838,
+            99515248,
+            104942354
+          ],
+          "median_ns_per_request": 2052.623,
+          "paired_median_pct": 0.0,
+          "faster_rounds": 0
+        },
+        "headmove": {
+          "cpu_ns": [
+            102966466,
+            103235528,
+            99478529,
+            100985238,
+            104397181,
+            102508573,
+            103380863
+          ],
+          "median_ns_per_request": 2123.808,
+          "paired_median_pct": 2.424,
+          "faster_rounds": 2
+        }
+      }
+    },
+    "invalid": {
+      "shared_per_sample": {
+        "repetitions": 50855,
+        "requests": 50855,
+        "input_bytes": 17850105,
+        "checksum": 20392855
+      },
+      "matrix": {
+        "baseline": {
+          "cpu_ns": [
+            100987022,
+            103325590,
+            97579686,
+            99863287,
+            103647929,
+            108460942,
+            104737567
+          ],
+          "median_ns_per_request": 2031.769,
+          "paired_median_pct": 0.0,
+          "faster_rounds": 0
+        },
+        "viewref": {
+          "cpu_ns": [
+            108431345,
+            102303368,
+            103616229,
+            102441280,
+            102880473,
+            113683901,
+            134794285
+          ],
+          "median_ns_per_request": 2037.484,
+          "paired_median_pct": 4.816,
+          "faster_rounds": 2
+        },
+        "headmove": {
+          "cpu_ns": [
+            107172492,
+            100171750,
+            96402453,
+            104178316,
+            101823538,
+            103242660,
+            103932450
+          ],
+          "median_ns_per_request": 2030.138,
+          "paired_median_pct": -1.206,
+          "faster_rounds": 5
+        },
+        "both": {
+          "cpu_ns": [
+            105659436,
+            99447839,
+            99962346,
+            96839199,
+            109875305,
+            104596199,
+            102015613
+          ],
+          "median_ns_per_request": 2006.009,
+          "paired_median_pct": -2.599,
+          "faster_rounds": 4
+        }
+      },
+      "confirmation": {
+        "baseline": {
+          "cpu_ns": [
+            101566771,
+            110822692,
+            99051598,
+            98523306,
+            100622781,
+            110477859,
+            98683270
+          ],
+          "median_ns_per_request": 1978.621,
+          "paired_median_pct": 0.0,
+          "faster_rounds": 0
+        },
+        "headmove": {
+          "cpu_ns": [
+            102090570,
+            97846831,
+            104368747,
+            113143907,
+            107042720,
+            102507235,
+            98394181
+          ],
+          "median_ns_per_request": 2015.677,
+          "paired_median_pct": 0.516,
+          "faster_rounds": 3
+        }
+      }
+    }
+  }
+}

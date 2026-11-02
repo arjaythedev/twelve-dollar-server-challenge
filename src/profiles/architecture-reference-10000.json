@@ -1,0 +1,82 @@
+{
+  "reference_commit": "671fd4e",
+  "candidate_commit": "0a3c419",
+  "settings": {
+    "users": 10000,
+    "warmup_s": 30,
+    "capture_s": 60,
+    "source_ips": 64,
+    "server_cpus": 1,
+    "server_memory_bytes": 2147483648,
+    "diagnostics": false,
+    "event": "cpu-clock",
+    "frequency_hz": 997
+  },
+  "limits": [
+    "Single before/after pair with different random seeds",
+    "CPU includes sampling overhead",
+    "The 300k architecture confirmation remains pending"
+  ],
+  "runs": [
+    {
+      "name": "671fd4e",
+      "server_sha256": "fee8a294420d0e06384d0da2b3a7b0767119fbc3f91b6b127e9ef573ce35eced",
+      "generator_sha256": "50bd3a8cf53f2d9544bdfc72be044adb4b2b66e82d4371b080d2ddb3cd3fb4c3",
+      "random_seed": 1687930810,
+      "requests_total": 103862,
+      "errors": 0.0,
+      "hold_requests": 63671,
+      "hold_user_us_per_request": 14.169983194861082,
+      "hold_kernel_us_per_request": 33.24755383141461,
+      "hold_cpu_us_per_request": 47.4175370262757,
+      "hold_p95_ms": 4.227136,
+      "hold_p99_ms": 4.3413634,
+      "aggregate_cpu_us_per_request": 53.01161156149506,
+      "peak_bytes": 303362048,
+      "samples": 2709,
+      "lost_records": 0,
+      "unresolved_leaf_samples": 101,
+      "stage_percent": {
+        "database_and_rows": 20.41343669250646,
+        "kernel_io_uring": 14.765596160944998,
+        "kernel_network": 42.15577703949797,
+        "kernel_filesystem": 8.047249907715024,
+        "auth": 2.5101513473606496,
+        "transport_and_other": 5.389442598744925,
+        "kernel_other": 4.835732742709487,
+        "response_json": 1.8087855297157622,
+        "kernel_scheduler": 0.0369139904023625,
+        "unknown": 0.0369139904023625
+      }
+    },
+    {
+      "name": "current",
+      "server_sha256": "e5490e8487f11047e3a537cd9fb972e16ca016c5b5ea1ab4c447fea0a0d98373",
+      "generator_sha256": "50bd3a8cf53f2d9544bdfc72be044adb4b2b66e82d4371b080d2ddb3cd3fb4c3",
+      "random_seed": 4264492554,
+      "requests_total": 103683,
+      "errors": 0.0,
+      "hold_requests": 63586,
+      "hold_user_us_per_request": 15.11041738747523,
+      "hold_kernel_us_per_request": 30.598480797659864,
+      "hold_cpu_us_per_request": 45.70889818513509,
+      "hold_p95_ms": 4.21616725,
+      "hold_p99_ms": 4.3098502,
+      "aggregate_cpu_us_per_request": 54.220209677574914,
+      "peak_bytes": 310972416,
+      "samples": 2605,
+      "lost_records": 0,
+      "unresolved_leaf_samples": 100,
+      "stage_percent": {
+        "kernel_network": 39.80806142034549,
+        "kernel_io_uring": 14.702495201535509,
+        "kernel_filesystem": 8.675623800383876,
+        "database_and_rows": 20.460652591170824,
+        "auth": 2.3032629558541267,
+        "transport_and_other": 6.90978886756238,
+        "kernel_other": 4.452975047984645,
+        "response_json": 2.6871401151631478
+      }
+    }
+  ]
+}

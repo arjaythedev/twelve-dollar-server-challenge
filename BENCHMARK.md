@@ -62,6 +62,8 @@
 | C++ 0.1.0 (rewrite phase 2, 64 IPs) | 300,000 | 60 s | 3,585,569 | 22,409.78 | 5.104 ms | 8.526 ms | 218.07 ms | 0% | 26.66 us | 1,051.48 MiB |
 | C++ 0.1.0 (rewrite phase 3, 64 IPs) | 300,000 | 60 s | 3,585,622 | 22,410.09 | 5.027 ms | 7.968 ms | 157.08 ms | 0% | 26.51 us | 1,060.18 MiB |
 | C++ 0.1.0 (rewrite phase 4, 64 IPs) | 300,000 | 60 s | 3,585,799 | 22,411.15 | 5.433 ms | 8.865 ms | 47.29 ms | 0% | 28.22 us | 1,081.30 MiB |
+| C++ 0.1.0 (reference 671fd4e, 64 IPs) | 300,000 | 60 s | 3,586,039 | 22,412.72 | 5.063 ms | 8.395 ms | 63.71 ms | 0% | 26.80 us | 1,005.53 MiB |
+| C++ 0.1.0 (rewrite + TCP close, 64 IPs) | 300,000 | 60 s | 3,587,278 | 22,420.39 | 5.025 ms | 7.690 ms | 99.27 ms | 0% | 26.85 us | 914.77 MiB |
 
 Statistics include the ramps. RAM is the cgroup peak, including charged file pages. Local results, not an official score or a measured capacity limit.
 
@@ -109,7 +111,11 @@ Accept depth 1 to 64, 512-connection bursts behind a 20-ms handler gate, file li
 
 Parser reuse, 100k lifecycle cycles, four alternating samples: JWT/body CPU median 29.098 to 20.631 ms, allocations 250,009 to 16. With 25% oversized bodies: 30.288 to 27.834 ms, allocations 250,009 to 275,006 as oversized Exchanges are discarded. Checksums matched. Reset code: 1,335 to 267 bytes.
 
+Header passing, no SQLite, seven confirmation pairs: `AcceptedHead&&` feed -4.86%, post +1.52%, mixed -3.20% (4/7 faster), protected +2.42%. Kept value parameters. [Data](src/benchmarks/headers.json).
+
 ## Native CPU sampling
+
+Rewrite versus `671fd4e`, 10k users, 30-second warm-up and 60-second capture: hold CPU 47.42 to 45.71 us/request, p99 4.341 to 4.310 ms; aggregate CPU 53.01 to 54.22 us/request. No errors or lost samples. One pair, different random seeds. [Data](src/profiles/architecture-reference-10000.json).
 
 50,000 users before the B-tree change, 30-second ramp and 60-second capture. User CPU: SQL/rows 68.5%, transport/other 21.9%, response JSON 4.9%, auth 4.6%.
 

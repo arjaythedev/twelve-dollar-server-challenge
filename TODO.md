@@ -2,7 +2,7 @@
 
 ## Next, in order
 
-- [ ] Compare the rewrite against `671fd4e`, inspect changed hotpaths in disassembly and take a short profile; investigate the higher CPU/request in the phase 4 run.
+- [ ] Implement phase 6 admission control; pass the memory-exhaustion and progress tests in plan.md before adoption.
 - [ ] Compare prepared transaction/savepoint statements and inspect the generated code.
 
 ## Later
@@ -14,6 +14,7 @@
 
 ## Done
 
+- [x] Complete the rewrite comparison against `671fd4e`: short profiles, disassembly and matched 300k runs; no request errors, essentially equal CPU cost.
 - [x] Shut down fixed sockets before unregistering them; verify prompt TCP EOF with an active idle peer, slot reuse and terminal-CQE ownership.
 - [x] Separate transport diagnostics and clarify queued-write ownership; pass both build modes and confirm at 300k. The normal binary is unchanged by diagnostic extraction.
 - [x] Route and authorize once, queue owned write commands and remove batch response remapping; pass native, official and HTTP lifecycle checks.

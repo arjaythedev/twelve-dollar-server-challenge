@@ -1,6 +1,6 @@
 # Server rewrite
 
-Status: phases 1-4 complete; phase 5 (architecture comparison gate) pending
+Status: phases 1-5 complete; next: phase 6 (admission control)
 
 Build a new server around explicit ownership and a typed request pipeline. Replace the current server internals and callback contracts while preserving the API and the algorithms that already proved useful. Compare the result against commit `671fd4e`.
 
@@ -221,7 +221,7 @@ Shutdown follows dependency order:
 | 2. I/O and lifetime core (done) | Reactor, connection ownership, buffer leases, direct accepts and cancellation/close handling; existing allocation, pool and scheduling policies retained | Release/diagnostic builds, 42 official checks and 17 HTTP regressions pass; native and ASan/UBSan tests cover 70,000 connections under the 65,535 server FD limit, slot reuse, exhaustion, partial I/O, original-CQE lifetime and late-accept shutdown |
 | 3. HTTP and application (done) | Session state machine, header acceptance, typed preparation and reply ownership; Application component-tested before production wiring in phase 4 | Release/diagnostic builds, 5 Application test groups, ASan/UBSan transport checks, 42 official checks and 17 HTTP regressions pass |
 | 4. Direct cutover (done) | Concrete Server/Application/HttpSession/Reactor path; old contracts removed | Release/diagnostic builds, native and ASan/UBSan transport checks, 42 official checks and 17 HTTP regressions pass; 300k/60s hold completes without errors |
-| 5. Architecture comparison gate | Optimized normal build against `671fd4e`, with identical scheduling, allocation/pool policies, generator build, source-IP count, workload settings and fresh seed database | Focused checks pass; inspect changed hotpaths in disassembly and compare a short profile, then confirm at 300k; reject unexplained CPU, memory or tail-latency regressions before proceeding |
+| 5. Architecture comparison gate (done) | Optimized normal build against `671fd4e`, with identical scheduling, allocation/pool policies, generator build, source-IP count, workload settings and fresh seed database | Focused checks pass; inspect changed hotpaths in disassembly and compare a short profile, then confirm at 300k; reject unexplained CPU, memory or tail-latency regressions before proceeding |
 | 6. Admission control | Add and activate global byte budgets and high/low watermarks separately; preserve pool sizing and scheduling | Every admission-exhaustion test above passes before adoption; compare against the accepted rewrite and retain `671fd4e` as the overall reference |
 
 Keep the old implementation in Git, without a permanent adapter, runtime switch or v2 API. Tests can exercise replacement components before cutover. Reuse proven algorithms without inheriting old ownership contracts.

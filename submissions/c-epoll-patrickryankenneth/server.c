@@ -317,6 +317,7 @@ static void besc(buf *b, const char *s, size_t n) {
 
 /* ---------------------------------------------------------------- DB */
 static sqlite3 *db;
+static int g_group, g_tx;                      /* group commit: io_uring mode only */
 static sqlite3_stmt *st_feed, *st_one, *st_ins, *st_exists, *st_like, *st_health;
 static time_t t_start;
 #define POST_SQL "SELECT p.id,p.body,p.created_at,u.username,(SELECT count(*) FROM likes l WHERE l.post_id=p.id) FROM posts p JOIN users u ON u.id=p.user_id "
@@ -494,6 +495,9 @@ static int h_get(const char *s, size_t n) {
   sqlite3_reset(st_one);
   return st;
 }
+static void tx_begin(void) {
+  if (g_group && !g_tx && sqlite3_exec(db, "BEGIN", NULL, NULL, NULL) == SQLITE_OK) g_tx = 1;
+}
 static char dec[RBUF_SZ + 8];
 static int h_create(const req *r) {
   long long uid; int s;
@@ -509,6 +513,7 @@ static int h_create(const req *r) {
   if (a == e) return err(400, "body is required");
   size_t chars = 0; for (size_t i = a; i < e; i++) if (((unsigned char)dec[i] & 0xC0) != 0x80) chars++;
   if (chars > 500) return err(400, "body must be at most 500 characters");
+  tx_begin();
   sqlite3_bind_int64(st_ins, 1, uid);
   sqlite3_bind_text(st_ins, 2, dec + a, (int)(e - a), SQLITE_STATIC);
   long long id = 0; char ca[48] = {0};
@@ -536,6 +541,7 @@ static int h_like(const req *r, const char *ids, size_t idn) {
   rc = sqlite3_step(st_exists); sqlite3_reset(st_exists);
   if (rc == SQLITE_DONE) return err(404, "post not found");
   if (rc != SQLITE_ROW) return err(500, "internal server error");
+  tx_begin();
   sqlite3_bind_int64(st_like, 1, uid); sqlite3_bind_int64(st_like, 2, pid);
   rc = sqlite3_step(st_like);
   int changed = sqlite3_changes(db);
@@ -784,6 +790,14 @@ static void dispatch_waiters(void) {
   }
 }
 
+static struct { int ri; unsigned slot, gen; } txp[131072];
+static unsigned ntxp;
+static void tx_flush(void);
+static void tx_hold(int ri, unsigned slot, unsigned gen) {
+  if (ntxp == sizeof txp / sizeof *txp) tx_flush();
+  if (!g_tx) { sq_send(&rg[ri], slot, gen, uc(ri, slot)->wbuf, uc(ri, slot)->wlen); return; }
+  txp[ntxp].ri = ri; txp[ntxp].slot = slot; txp[ntxp].gen = gen; ntxp++;
+}
 static void on_cqe(int ri, uint64_t ud, int res, unsigned fl) {
   uring *r = &rg[ri];
   unsigned type = (unsigned)(ud & 15), slot = (unsigned)((ud >> 4) & 0xFFFFF); uint32_t gen = (uint32_t)(ud >> 24);
@@ -826,7 +840,7 @@ static void on_cqe(int ri, uint64_t ud, int res, unsigned fl) {
       c->wbuf = malloc(obuf.n); if (!c->wbuf) abort();
       memcpy(c->wbuf, obuf.p, obuf.n);
       c->wlen = (uint32_t)obuf.n; c->woff = 0; c->closing |= (uint8_t)closing; c->state = S_SEND;
-      sq_send(r, slot, gen, c->wbuf, c->wlen);
+      if (g_tx) tx_hold(ri, slot, gen); else sq_send(r, slot, gen, c->wbuf, c->wlen);
     } else if (closing || c->closing) u_close(ri, slot);
     else { c->state = S_IDLE; if (c->ready) start_recv(ri, slot); }
     break;
@@ -865,6 +879,23 @@ static void reap(int ri) {
     on_cqe(ri, e.user_data, e.res, e.flags);
   }
   __atomic_store_n(r->cq_head, head, __ATOMIC_RELEASE);
+}
+
+/* Group commit: one COMMIT per loop pass, then release every held reply. No reply leaves before its commit. */
+static void tx_flush(void) {
+  int ok = 1;
+  if (g_tx) {
+    ok = sqlite3_exec(db, "COMMIT", NULL, NULL, NULL) == SQLITE_OK;
+    if (!ok) sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+    g_tx = 0;
+  }
+  for (unsigned i = 0; i < ntxp; i++) {
+    int ri = txp[i].ri; unsigned slot = txp[i].slot, gen = txp[i].gen;
+    uconn *c = uc(ri, slot);
+    if (c->gen != gen || c->state != S_SEND) continue;
+    if (ok) sq_send(&rg[ri], slot, gen, c->wbuf, c->wlen); else u_close(ri, slot);
+  }
+  ntxp = 0;
 }
 
 /* Returns only if io_uring cannot be used (the caller then falls back to epoll). */
@@ -906,6 +937,7 @@ static int uring_serve(int lfd, unsigned nofile, const char *host, const char *p
     s->poll32_events = POLLIN; s->user_data = UD(U_RINGPOLL, (unsigned)i, 0);
   }
   fprintf(stderr, "listening on %s:%s io_uring: %d rings of %u direct sockets\n", host, port, NR, NT);
+  g_group = !getenv("NO_GROUP_COMMIT");
   for (;;) {
     for (int i = 0; i < NR; i++) {
       uring *r = &rg[i];
@@ -919,6 +951,7 @@ static int uring_serve(int lfd, unsigned nofile, const char *host, const char *p
     if (n < 0) { if (errno != EINTR && errno != EBUSY && errno != EAGAIN && errno != ETIME) { perror("io_uring_enter"); exit(1); } }
     else r0->to_submit -= (unsigned)n;
     for (int i = 0; i < NR; i++) reap(i);
+    tx_flush();
   }
 }
 

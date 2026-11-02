@@ -1,9 +1,9 @@
-#include "http_parser.hpp"
-#include "parsing.hpp"
+#include "parser.hpp"
+#include "../parsing.hpp"
 
 #include <climits>
 
-namespace tds::transport
+namespace tds::http
 {
 namespace
 {
@@ -21,7 +21,7 @@ int append_fragment(std::string &target, const char *data, std::size_t length)
 
 } // namespace
 
-constinit const llhttp_settings_t HttpParser::settings_ = []() constexpr {
+constinit const llhttp_settings_t Parser::settings_ = []() constexpr {
     llhttp_settings_t settings{};
     settings.on_url = on_url;
     settings.on_header_field = on_header_field;
@@ -33,12 +33,12 @@ constinit const llhttp_settings_t HttpParser::settings_ = []() constexpr {
     return settings;
 }();
 
-HttpParser::HttpParser()
+Parser::Parser()
 {
     reset();
 }
 
-ParseResult HttpParser::parse(std::string_view input)
+ParseResult Parser::parse(std::string_view input)
 {
     const auto result = llhttp_execute(&parser_, input.data(), input.size());
     std::size_t consumed = input.size();
@@ -49,7 +49,7 @@ ParseResult HttpParser::parse(std::string_view input)
     return {consumed, result == HPE_OK || result == HPE_PAUSED};
 }
 
-void HttpParser::reset()
+void Parser::reset()
 {
     request_.method.clear();
     request_.path.clear();
@@ -67,27 +67,27 @@ void HttpParser::reset()
     parser_.data = this;
 }
 
-int HttpParser::on_url(llhttp_t *parser, const char *data, std::size_t length)
+int Parser::on_url(llhttp_t *parser, const char *data, std::size_t length)
 {
-    auto &self = *static_cast<HttpParser *>(parser->data);
+    auto &self = *static_cast<Parser *>(parser->data);
     return append_fragment(self.url_, data, length);
 }
 
-int HttpParser::on_header_field(llhttp_t *parser, const char *data, std::size_t length)
+int Parser::on_header_field(llhttp_t *parser, const char *data, std::size_t length)
 {
-    auto &self = *static_cast<HttpParser *>(parser->data);
+    auto &self = *static_cast<Parser *>(parser->data);
     return append_fragment(self.field_, data, length);
 }
 
-int HttpParser::on_header_value(llhttp_t *parser, const char *data, std::size_t length)
+int Parser::on_header_value(llhttp_t *parser, const char *data, std::size_t length)
 {
-    auto &self = *static_cast<HttpParser *>(parser->data);
+    auto &self = *static_cast<Parser *>(parser->data);
     return append_fragment(self.value_, data, length);
 }
 
-int HttpParser::on_header_value_complete(llhttp_t *parser)
+int Parser::on_header_value_complete(llhttp_t *parser)
 {
-    auto &self = *static_cast<HttpParser *>(parser->data);
+    auto &self = *static_cast<Parser *>(parser->data);
     for (char &c : self.field_)
     {
         if (c >= 'A' && c <= 'Z')
@@ -104,10 +104,10 @@ int HttpParser::on_header_value_complete(llhttp_t *parser)
     return 0;
 }
 
-int HttpParser::on_headers_complete(llhttp_t *parser)
+int Parser::on_headers_complete(llhttp_t *parser)
 {
-    auto &self = *static_cast<HttpParser *>(parser->data);
-    self.phase_ = Phase::awaiting_auth;
+    auto &self = *static_cast<Parser *>(parser->data);
+    self.phase_ = Phase::awaiting_headers;
     self.request_.method = llhttp_method_name(static_cast<llhttp_method_t>(parser->method));
     self.request_.keep_alive = llhttp_should_keep_alive(parser) != 0;
     const auto end = self.url_.find('?');
@@ -139,9 +139,9 @@ int HttpParser::on_headers_complete(llhttp_t *parser)
     return static_cast<int>(HPE_PAUSED);
 }
 
-int HttpParser::on_body(llhttp_t *parser, const char *data, std::size_t length)
+int Parser::on_body(llhttp_t *parser, const char *data, std::size_t length)
 {
-    auto &self = *static_cast<HttpParser *>(parser->data);
+    auto &self = *static_cast<Parser *>(parser->data);
     if (self.request_.body.size() + length > 16384)
     {
         self.error_ = Status::too_large;
@@ -151,10 +151,10 @@ int HttpParser::on_body(llhttp_t *parser, const char *data, std::size_t length)
     return 0;
 }
 
-int HttpParser::on_message_complete(llhttp_t *parser)
+int Parser::on_message_complete(llhttp_t *parser)
 {
-    static_cast<HttpParser *>(parser->data)->phase_ = Phase::complete;
+    static_cast<Parser *>(parser->data)->phase_ = Phase::complete;
     return static_cast<int>(HPE_PAUSED);
 }
 
-} // namespace tds::transport
+} // namespace tds::http

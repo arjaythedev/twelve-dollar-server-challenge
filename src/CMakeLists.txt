@@ -66,16 +66,18 @@ add_library(parsing STATIC server/parsing.cpp)
 target_include_directories(parsing PUBLIC server)
 add_library(transport STATIC
     server/transport.cpp
-    server/transport/http_parser.cpp
+    server/http/parser.cpp
+    server/http/session.cpp
+    server/http/reply.cpp
     server/transport/connection.cpp
     server/net/buffers.cpp
     server/net/connections.cpp
     server/net/ring.cpp
     server/net/reactor.cpp
 )
-target_link_libraries(transport PRIVATE uring llhttp_static parsing)
+target_link_libraries(transport PUBLIC uring llhttp_static PRIVATE parsing)
 target_include_directories(transport PUBLIC server)
-add_library(api STATIC server/api.cpp server/auth.cpp server/storage/database.cpp server/json.cpp
+add_library(api STATIC server/api.cpp server/app/application.cpp server/auth.cpp server/storage/database.cpp server/json.cpp
     server/app/post_writer.cpp)
 target_link_libraries(api PRIVATE sqlite yyjson OpenSSL::Crypto parsing Threads::Threads)
 target_include_directories(api PUBLIC server)
@@ -99,6 +101,8 @@ target_link_libraries(group_commit_tests PRIVATE api sqlite)
 target_link_options(group_commit_tests PRIVATE -Wl,--wrap=sqlite3_exec)
 add_executable(post_writer_tests checks/post_writer.cpp)
 target_link_libraries(post_writer_tests PRIVATE api)
+add_executable(application_tests checks/application.cpp)
+target_link_libraries(application_tests PRIVATE api transport OpenSSL::Crypto sqlite yyjson)
 add_executable(btree_tests checks/btree.cpp)
 target_include_directories(btree_tests PRIVATE server)
 target_link_libraries(btree_tests PRIVATE sqlite)
@@ -113,7 +117,7 @@ add_executable(load_generator load/main.cpp)
 target_link_libraries(load_generator PRIVATE llhttp_static yyjson)
 add_executable(group_commit_probe EXCLUDE_FROM_ALL benchmarks/group_commit.cpp)
 target_link_libraries(group_commit_probe PRIVATE sqlite Threads::Threads)
-foreach(target server transport transport_tests io_lifetime_tests checkpoint_tests group_commit_tests post_writer_tests btree_tests sync_tests api parsing sqlite load_generator group_commit_probe)
+foreach(target server transport transport_tests io_lifetime_tests checkpoint_tests group_commit_tests post_writer_tests application_tests btree_tests sync_tests api parsing sqlite load_generator group_commit_probe)
     target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror)
     if(TDS_SANITIZERS)
         target_compile_options(${target} PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
@@ -128,6 +132,7 @@ add_test(NAME io_lifetime_contract COMMAND io_lifetime_tests)
 add_test(NAME checkpoint_lifetimes COMMAND checkpoint_tests)
 add_test(NAME group_commit_contract COMMAND group_commit_tests)
 add_test(NAME post_writer_bytes COMMAND post_writer_tests)
+add_test(NAME application_contract COMMAND application_tests)
 add_test(NAME btree_feed COMMAND btree_tests)
 add_test(NAME sync_timing_contract COMMAND sync_tests)
 set_tests_properties(checkpoint_lifetimes group_commit_contract io_lifetime_contract PROPERTIES TIMEOUT 15)

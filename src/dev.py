@@ -578,6 +578,7 @@ def native_check() -> None:
         ("checkpoint_tests", []),
         ("group_commit_tests", []),
         ("post_writer_tests", []),
+        ("application_tests", []),
         ("btree_tests", []),
         ("sync_tests", []),
         ("load_generator", ["--self-test"]),
@@ -1116,7 +1117,10 @@ def profile_stage(frames: list[tuple[str, str]]) -> str:
         return "request_json"
     if "sqlite3" in symbols or "tds::Database::" in symbols or "tds::Store::" in symbols:
         return "database_and_rows"
-    if any(name in symbols for name in ("tds::Server::", "tds::Api::", "llhttp", "io_uring")):
+    if any(
+        name in symbols
+        for name in ("tds::Server::", "tds::Api::", "tds::Application::", "llhttp", "io_uring")
+    ):
         return "transport_and_other"
     return "unknown"
 

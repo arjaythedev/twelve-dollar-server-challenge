@@ -89,7 +89,7 @@ class Server::State
     RequestResult handle(Connection &connection)
     {
 #ifdef TDS_DIAGNOSTICS
-        const auto &request = connection.exchange->parser.request();
+        const auto &request = connection.exchange->session.request();
         if (request.endpoint == Endpoint::create || request.endpoint == Endpoint::like)
         {
             return handler(request);
@@ -100,7 +100,7 @@ class Server::State
 
         return handler(request);
 #else
-        return handler(connection.exchange->parser.request());
+        return handler(connection.exchange->session.request());
 #endif
     }
 
@@ -109,15 +109,15 @@ class Server::State
 #ifdef TDS_DIAGNOSTICS
         connection.exchange->send_prepared_ns = timing::now_ns();
 #endif
-        auto &message = connection.exchange->prepare_send();
+        auto &message = connection.exchange->reply.message();
         reactor.send(connection, message);
     }
 
     void respond(Connection &connection, Response response)
     {
         connection.close_after =
-            connection.close_after || !connection.exchange->parser.request().keep_alive;
-        connection.exchange->prepare_response(std::move(response), connection.close_after);
+            connection.close_after || !connection.exchange->session.request().keep_alive;
+        connection.exchange->reply.prepare(std::move(response), connection.close_after);
         send(connection);
     }
 
@@ -178,23 +178,23 @@ class Server::State
     void process(Connection &connection)
     {
         auto &exchange = *connection.exchange;
-        auto &parser = exchange.parser;
+        auto &session = exchange.session;
         try
         {
             while (true)
             {
-                const auto result = parser.parse(exchange.input);
+                const auto result = session.consume();
                 if (!result.valid)
                 {
                     connection.close_after = true;
-                    respond(connection, {parser.error(), "{\"error\":\"malformed HTTP request\"}"});
+                    respond(connection,
+                            {session.error(), "{\"error\":\"malformed HTTP request\"}"});
 
                     return;
                 }
-                exchange.input.erase(0, result.consumed);
-                if (parser.headers_pending())
+                if (session.headers_pending())
                 {
-                    if (auto rejected = headers(parser.request()))
+                    if (auto rejected = headers(session.request()))
                     {
                         // Unread body bytes must not become the next keep-alive request
                         connection.close_after = true;
@@ -202,10 +202,10 @@ class Server::State
 
                         return;
                     }
-                    parser.accept_headers();
+                    session.accept_headers();
                     continue;
                 }
-                if (parser.complete())
+                if (session.complete())
                 {
                     auto outcome = handle(connection);
                     if (auto *response = std::get_if<Response>(&outcome))
@@ -248,7 +248,7 @@ class Server::State
         connection.exchange->receive_serviced_ns = received_ns;
 #endif
         const auto input = completion.buffer.bytes();
-        connection.exchange->input.append(input.data(), input.size());
+        connection.exchange->session.append({input.data(), input.size()});
         completion.buffer.release();
         process(connection);
     }
@@ -273,8 +273,7 @@ class Server::State
             return;
         }
         auto &exchange = *connection.exchange;
-        exchange.sent += static_cast<std::size_t>(result);
-        if (exchange.sent < exchange.output.size() + exchange.response_body.size())
+        if (!exchange.reply.advance(static_cast<std::size_t>(result)))
         {
             send(connection);
 
@@ -286,8 +285,9 @@ class Server::State
 
             return;
         }
-        exchange.finish_response();
-        if (!exchange.input.empty())
+        exchange.reply.reset();
+        exchange.session.reset();
+        if (exchange.session.has_input())
         {
             process(connection);
 

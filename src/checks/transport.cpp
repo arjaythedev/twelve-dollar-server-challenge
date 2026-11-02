@@ -210,11 +210,11 @@ void exercise_request_reuse()
 {
     tds::net::Ring ring(8, true);
     auto exchange = ring.acquire_exchange();
-    auto &parser = exchange->parser;
-    auto &request = parser.request();
+    auto &session = exchange->session;
+    auto &request = session.request();
     require(request.endpoint == tds::Endpoint::unresolved && !request.identity,
             "new request has no route or identity");
-    auto expected_capacity = parser.scratch_capacity();
+    auto expected_capacity = session.retained_capacity();
     for (auto member : {&tds::Request::method, &tds::Request::path, &tds::Request::authorization,
                         &tds::Request::body})
     {
@@ -222,7 +222,7 @@ void exercise_request_reuse()
         const auto old_capacity = field.capacity();
         field.reserve(256);
         expected_capacity += field.capacity() - old_capacity;
-        require(parser.scratch_capacity() == expected_capacity,
+        require(session.retained_capacity() == expected_capacity,
                 "retained parser capacity includes each request string");
     }
 
@@ -232,26 +232,28 @@ void exercise_request_reuse()
     const std::string wire = "POST " + path + " HTTP/1.1\r\nAuthorization: " + authorization +
                              "\r\nContent-Length: " + std::to_string(body.size()) +
                              "\r\nConnection: close\r\n\r\n" + body;
-    const auto headers = parser.parse(wire);
-    require(headers.valid && parser.headers_pending(), "reused request pauses for authorization");
+    session.append(wire);
+    const auto headers = session.consume();
+    require(headers.valid && session.headers_pending(), "reused request pauses for authorization");
     require(request.method == "POST" && request.path == path &&
                 request.authorization == authorization && !request.keep_alive,
             "reused request headers parsed");
     request.identity = tds::Identity{tds::UserId{42}, "alice"};
     request.endpoint = tds::Endpoint::create;
-    parser.accept_headers();
-    const auto parsed_body = parser.parse(std::string_view(wire).substr(headers.consumed));
-    require(parsed_body.valid && parser.complete() && request.body == body,
+    session.accept_headers();
+    const auto parsed_body = session.consume();
+    require(parsed_body.valid && session.complete() && request.body == body,
             "reused request body parsed");
     const auto retained_capacity = exchange->retained_capacity();
     require(retained_capacity <= 8192, "ordinary request fits exchange retention budget");
-    exchange->finish_response();
+    exchange->reply.reset();
+    session.reset();
     require(request.method.empty() && request.path.empty() && request.authorization.empty() &&
                 request.body.empty() && !request.identity &&
                 request.endpoint == tds::Endpoint::unresolved && request.keep_alive,
             "finished request clears strings, route, identity and connection policy");
-    require(!parser.complete() && !parser.headers_pending() &&
-                parser.error() == tds::Status::bad_request,
+    require(!session.complete() && !session.headers_pending() &&
+                session.error() == tds::Status::bad_request,
             "finished request resets parser state");
     require(exchange->retained_capacity() == retained_capacity,
             "finished request preserves bounded string storage");
@@ -259,24 +261,28 @@ void exercise_request_reuse()
     ring.recycle_exchange(std::move(exchange));
     exchange = ring.acquire_exchange();
     require(exchange.get() == pooled, "bounded exchange reused from pool");
-    const auto next = exchange->parser.parse("GET /fresh HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    require(next.valid && exchange->parser.headers_pending(), "recycled parser reads next request");
-    const auto &fresh = exchange->parser.request();
+    exchange->session.append("GET /fresh HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    const auto next = exchange->session.consume();
+    require(next.valid && exchange->session.headers_pending(),
+            "recycled parser reads next request");
+    const auto &fresh = exchange->session.request();
     require(fresh.method == "GET" && fresh.path == "/fresh" && fresh.authorization.empty() &&
                 fresh.body.empty() && !fresh.identity &&
                 fresh.endpoint == tds::Endpoint::unresolved && fresh.keep_alive,
             "recycled request does not inherit authorization, body, route or identity");
-    exchange->parser.accept_headers();
-    require(exchange->parser.parse({}).valid && exchange->parser.complete(),
+    exchange->session.accept_headers();
+    require(exchange->session.consume().valid && exchange->session.complete(),
             "recycled parser completes an empty body");
-    exchange->finish_response();
+    exchange->reply.reset();
+    exchange->session.reset();
     ring.recycle_exchange(std::move(exchange));
 
     for (auto member : {&tds::Request::path, &tds::Request::authorization, &tds::Request::body})
     {
         exchange = ring.acquire_exchange();
-        (exchange->parser.request().*member).assign(8193, 'x');
-        exchange->finish_response();
+        (exchange->session.request().*member).assign(8193, 'x');
+        exchange->reply.reset();
+        exchange->session.reset();
         require(exchange->retained_capacity() > 8192,
                 "oversized cleared request storage exceeds retention budget");
         ring.recycle_exchange(std::move(exchange));

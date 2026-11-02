@@ -1,6 +1,6 @@
 #pragma once
 
-#include "http.hpp"
+#include "../http.hpp"
 
 #include <llhttp.h>
 
@@ -9,7 +9,7 @@
 #include <string>
 #include <string_view>
 
-namespace tds::transport
+namespace tds::http
 {
 
 struct ParseResult
@@ -18,12 +18,12 @@ struct ParseResult
     bool valid;
 };
 
-class HttpParser
+class Parser
 {
   public:
-    HttpParser();
-    HttpParser(const HttpParser &) = delete;
-    HttpParser &operator=(const HttpParser &) = delete;
+    Parser();
+    Parser(const Parser &) = delete;
+    Parser &operator=(const Parser &) = delete;
 
     ParseResult parse(std::string_view input);
 
@@ -44,7 +44,7 @@ class HttpParser
 
     bool headers_pending() const noexcept
     {
-        return phase_ == Phase::awaiting_auth;
+        return phase_ == Phase::awaiting_headers;
     }
 
     void accept_headers() noexcept
@@ -71,7 +71,7 @@ class HttpParser
     enum class Phase : std::uint8_t
     {
         headers,
-        awaiting_auth,
+        awaiting_headers,
         body,
         complete
     };
@@ -95,4 +95,4 @@ class HttpParser
     Status error_ = Status::bad_request;
 };
 
-} // namespace tds::transport
+} // namespace tds::http

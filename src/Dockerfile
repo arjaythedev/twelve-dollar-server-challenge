@@ -10,6 +10,7 @@ COPY checks/io_lifetimes.cpp ./checks/io_lifetimes.cpp
 COPY checks/checkpoint.cpp ./checks/checkpoint.cpp
 COPY checks/group_commit.cpp ./checks/group_commit.cpp
 COPY checks/post_writer.cpp ./checks/post_writer.cpp
+COPY checks/application.cpp ./checks/application.cpp
 COPY checks/btree.cpp ./checks/btree.cpp
 COPY checks/sync.cpp ./checks/sync.cpp
 COPY load ./load

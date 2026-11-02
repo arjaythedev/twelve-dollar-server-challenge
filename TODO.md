@@ -2,8 +2,7 @@
 
 ## Next, in order
 
-- [ ] Replace ordinary accepted FDs with direct descriptors across bounded rings on one event-loop thread. Test beyond 65,535 connections under the official file limit.
-- [ ] Bound completion, receive and handler work, then compare multishot receive and accept depth.
+- [ ] Separate bounded receive draining from handler work, then compare multishot receive and accept depth.
 - [ ] Measure WAL/checkpoint costs, then compare background checkpoints and bounded group commit. Send write responses after commit.
 - [ ] Compare ID-ordered post/author reads, then use the next profile to choose smaller changes such as hybrid SEND and JSON scanning.
 
@@ -21,6 +20,7 @@
 - [x] Compare LTO, Cascade Lake tuning and GCC16 without changing the production compiler.
 - [x] Compare direct receive parsing at 50,000 users; keep the current parser path for now.
 - [x] Reuse HTTP header storage, skip duplicate B-tree cleanup after commit and append clean JSON runs.
+- [x] Use direct descriptors across lazy rings on one thread; pass 70,000 connections under the official 65,535 file limit, including reuse and shutdown.
 
 Keep our code in src/, use English and strict typing. Leave upstream files and other submissions alone.
 

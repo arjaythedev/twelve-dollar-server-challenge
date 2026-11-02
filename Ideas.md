@@ -14,9 +14,9 @@
 
 ## Next transport comparisons
 
-- [ ] Scale direct descriptors across bounded io_uring rings on one thread ([sys.h](submissions/c-iouring-pavlyhalim/src/sys.h)). Direct accept avoids installing ordinary process FDs.
+- [x] Scale direct descriptors across bounded io_uring rings on one thread ([sys.h](submissions/c-iouring-pavlyhalim/src/sys.h)). Direct accept avoids installing ordinary process FDs.
   Keep fixed-file slot indices separate from OS descriptors; a slot index must never reach `Descriptor` or `close()`. Route operations by ring/slot and recycle a slot only after its close CQE.
-  The official `RLIMIT_NOFILE=65535` caps each ring's sparse table. Start near 60,000 connections on one ring, then add bounded rings to exceed the ordinary FD limit without raising it. Bound total ring/queue/pool memory; gains remain unmeasured.
+  The official `RLIMIT_NOFILE=65535` caps each ring's sparse table. Add rings lazily, up to 16, to exceed the ordinary FD limit without raising it. Bound total ring/queue/pool memory.
 
 - [ ] Bound CQ draining and handler work before extending completion waits further. Network/socket paths account for 38.2% and io_uring for 12.8% of sampled CPU in the [combined profile](src/profiles/combined-50000.json).
   Measure requests/enter, CQ batch sizes and CPU/request: `C ~= C_enter/requests_per_enter + C_other`. Adapt batching to queue depth and oldest response age; cap CQ drains by count or elapsed time, submit pending sends promptly and avoid waiting while application work is ready.
@@ -54,9 +54,9 @@
   Interleave independent descents and fetch shared pages once. Try interpolation from the current page's endpoint keys, with bounded correction and a correct binary-search fallback.
   Keep all lookup state within the request. Pin author pages until serialization; copy post bytes before moving cursors.
 
-- [ ] Compare an FD-indexed connection table and stable slabs when connection churn, allocation or connection memory is material.
-  Current CQEs already carry `Connection*`; the map is used for accept, close and shutdown rather than a lookup on every request. Measure those costs before replacing it.
-  A table costs roughly `M_fd ~= (fd_max+1)*sizeof(slot)` plus connection storage, so sparse/high descriptors can waste space. Reuse slab slots only after all operations and cancellation completions are finished; preserve stable addresses or validate generation-tagged handles.
+- [ ] Compare stable connection slabs when connection churn, allocation or connection memory is material.
+  CQEs already carry `Connection*`, and each ring owns a table indexed by direct slot. Measure construction and destruction before replacing per-connection allocations.
+  `M_slots ~= rings*slots_per_ring*sizeof(slot)` plus connection storage. Reuse slab slots only after all operations and cancellation completions are finished; preserve stable addresses or validate generation-tagged handles.
 
 - [ ] Compare receive-pool sizes such as 256 x 4 KiB and 512 x 2 KiB against 1,024 x 4 KiB.
   `M_pool ~= K*B`; measure buffer occupancy, extra receives for fragmented requests, `ENOBUFS`, rearm work and latency during bursts. Reducing the current 4-MiB pool alone saves little of the full server's memory.

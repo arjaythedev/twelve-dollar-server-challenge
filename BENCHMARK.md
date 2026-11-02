@@ -33,10 +33,16 @@
 | C++ 0.1.0 (low-hanging A, Linux loopback) | 25,000 | 60 s | 259,483 | 1,995.82 | 4.632 ms | 15.321 ms | 91.17 ms | 0% | 39.34 us | 341.66 MiB |
 | C++ 0.1.0 (low-hanging baseline B, Linux loopback) | 25,000 | 60 s | 259,468 | 1,995.52 | 4.645 ms | 14.754 ms | 99.35 ms | 0% | 39.69 us | 341.40 MiB |
 | C++ 0.1.0 (low-hanging B, Linux loopback) | 25,000 | 60 s | 259,229 | 1,993.62 | 4.640 ms | 15.178 ms | 95.01 ms | 0% | 39.48 us | 341.59 MiB |
+| C++ 0.1.0 (direct-descriptor baseline A, Linux loopback) | 25,000 | 60 s | 259,288 | 1,993.44 | 4.634 ms | 14.389 ms | 68.82 ms | 0% | 40.46 us | 343.40 MiB |
+| C++ 0.1.0 (direct descriptors A, Linux loopback) | 25,000 | 60 s | 259,013 | 1,991.54 | 4.640 ms | 14.730 ms | 65.56 ms | 0% | 40.49 us | 342.45 MiB |
+| C++ 0.1.0 (direct-descriptor baseline B, Linux loopback) | 25,000 | 60 s | 259,159 | 1,992.99 | 4.634 ms | 14.107 ms | 92.20 ms | 0% | 40.56 us | 341.35 MiB |
+| C++ 0.1.0 (direct descriptors B, Linux loopback) | 25,000 | 60 s | 259,214 | 1,993.26 | 4.639 ms | 14.077 ms | 92.99 ms | 0% | 40.49 us | 342.55 MiB |
 
 Statistics include the ramps. RAM is the cgroup peak, including charged file pages. Local results, not an official score or a measured capacity limit.
 
-Low-hanging pairs ran one baseline and one candidate concurrently.
+Low-hanging and direct-descriptor pairs ran one baseline and one candidate concurrently. Direct-descriptor pairs used the official 65,535 file limit.
+
+Transport check: 70,000 open connections with `RLIMIT_NOFILE=65535`, two rings, 1 CPU and 2 GiB. Slot reuse and shutdown passed.
 
 The uring rows read CPU counters externally; earlier rows include the in-container counter reader. Their CPU/request values are not directly comparable.
 

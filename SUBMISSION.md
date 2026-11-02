@@ -2,7 +2,7 @@
 
 C++23, liburing 2.15, llhttp 9.4.3, SQLite 3.53.1, yyjson 0.13.0 and OpenSSL 3. CMake pins downloaded sources by SHA-256.
 
-One io_uring event loop and one SQLite connection, with WAL, synchronous=NORMAL and foreign keys enabled. Reads query SQLite afresh. Writes commit before their response. Each protected request verifies its JWT after the headers; its identity lasts for that request only.
+One event-loop thread drives up to 16 io_uring rings with direct descriptors and one SQLite connection. Rings are added as their file tables fill. WAL, synchronous=NORMAL and foreign keys are enabled. Reads query SQLite afresh. Writes commit before their response. Each protected request verifies its JWT after the headers; its identity lasts for that request only.
 
 ## Run
 
@@ -30,7 +30,7 @@ uv run --directory src --locked dev.py results
 
 Docker checks include transport tests, the 42 official checks and extra HTTP regressions on fresh data. On Windows they also refresh Linux headers for IntelliSense.
 
-The server container uses 1 CPU, 2 GiB, a 1,048,576 file limit and the profile in src/docker/seccomp.json. It adds only the three io_uring syscalls to Moby's allowlist. No extra capabilities are needed.
+The server container uses 1 CPU, 2 GiB, the official 65,535 file limit and the profile in src/docker/seccomp.json. Each ring's fixed-file table respects that limit. The profile adds only the three io_uring syscalls to Moby's allowlist. No extra capabilities are needed.
 
 Benchmarks and profiles default to a 30-second ramp and 60-second hold. Use `--hold 5m --ramp 60s` for confirmation runs.
 

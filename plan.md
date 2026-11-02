@@ -1,6 +1,6 @@
 # Server rewrite
 
-Status: phases 1-3 complete; next: phase 4 (direct cutover)
+Status: phases 1-4 complete; phase 5 (architecture comparison gate) pending
 
 Build a new server around explicit ownership and a typed request pipeline. Replace the current server internals and callback contracts while preserving the API and the algorithms that already proved useful. Compare the result against commit `671fd4e`.
 
@@ -160,7 +160,7 @@ A cancel CQE alone does not retire the cancelled operation. Keep stable records 
 
 ## Memory and scheduling during the rewrite
 
-`ConnectionStore` initially preserves the current per-connection allocation and release policy, stable addresses and O(1) free-slot reuse. Compare object layout with the current 56-byte connection. Keep parser and send state outside it. Stable pages and connection-object reuse remain later experiments, without changing this ownership boundary.
+`ConnectionStore` initially preserves the current per-connection allocation and release policy, stable addresses and O(1) free-slot reuse. Keep parser and send state outside it. Phase 3 to 4 layout: Connection stays 56 bytes, Exchange grows from 584 to 608, HttpSession from 424 to 448. Stable pages and connection-object reuse remain later experiments, without changing this ownership boundary.
 
 Keep the current per-ring Exchange limits, receive-pool sizing and response-body release policy. Do not introduce global pooling or retain response bodies during the ownership rewrite. A later body-reuse experiment must account for the existing 8-KiB Exchange retention policy separately from reply storage.
 
@@ -220,7 +220,7 @@ Shutdown follows dependency order:
 | 1. Contracts and storage (done) | Domain values, explicit errors and caller-owned read output; migrate B-tree and group-commit internals without allocation or transaction-policy changes | Release and diagnostic builds pass; writer bytes, rollback/checkpoint checks, 42 official checks and 17 HTTP regressions pass |
 | 2. I/O and lifetime core (done) | Reactor, connection ownership, buffer leases, direct accepts and cancellation/close handling; existing allocation, pool and scheduling policies retained | Release/diagnostic builds, 42 official checks and 17 HTTP regressions pass; native and ASan/UBSan tests cover 70,000 connections under the 65,535 server FD limit, slot reuse, exhaustion, partial I/O, original-CQE lifetime and late-accept shutdown |
 | 3. HTTP and application (done) | Session state machine, header acceptance, typed preparation and reply ownership; Application component-tested before production wiring in phase 4 | Release/diagnostic builds, 5 Application test groups, ASan/UBSan transport checks, 42 official checks and 17 HTTP regressions pass |
-| 4. Direct cutover | Wire concrete components into main and replace the old server contracts | One production path; old callbacks, generic mutable request state and superseded transport removed; affected tests/tooling updated |
+| 4. Direct cutover (done) | Concrete Server/Application/HttpSession/Reactor path; old contracts removed | Release/diagnostic builds, native and ASan/UBSan transport checks, 42 official checks and 17 HTTP regressions pass; 300k/60s hold completes without errors |
 | 5. Architecture comparison gate | Optimized normal build against `671fd4e`, with identical scheduling, allocation/pool policies, generator build, source-IP count, workload settings and fresh seed database | Focused checks pass; inspect changed hotpaths in disassembly and compare a short profile, then confirm at 300k; reject unexplained CPU, memory or tail-latency regressions before proceeding |
 | 6. Admission control | Add and activate global byte budgets and high/low watermarks separately; preserve pool sizing and scheduling | Every admission-exhaustion test above passes before adoption; compare against the accepted rewrite and retain `671fd4e` as the overall reference |
 

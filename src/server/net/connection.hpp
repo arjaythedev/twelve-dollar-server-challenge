@@ -3,7 +3,7 @@
 #include <cstdint>
 #include <memory>
 
-namespace tds::transport
+namespace tds::http
 {
 struct Exchange;
 }
@@ -136,7 +136,7 @@ struct Connection
     Ring &ring;
     Operation operation;
     Operation close_operation;
-    std::unique_ptr<transport::Exchange> exchange;
+    std::unique_ptr<http::Exchange> exchange;
     DirectSlot slot;
     bool close_after = false;
 

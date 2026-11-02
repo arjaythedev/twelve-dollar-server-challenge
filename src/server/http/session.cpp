@@ -1,5 +1,7 @@
 #include "session.hpp"
 
+#include <utility>
+
 namespace tds::http
 {
 
@@ -22,7 +24,15 @@ ParseResult HttpSession::consume()
 
 void HttpSession::reset()
 {
+    // Drop borrowed route views before reusing the parser's strings
+    accepted_.reset();
     parser_.reset();
+}
+
+void HttpSession::accept_headers(AcceptedHead head)
+{
+    accepted_ = std::move(head);
+    parser_.accept_headers();
 }
 
 } // namespace tds::http

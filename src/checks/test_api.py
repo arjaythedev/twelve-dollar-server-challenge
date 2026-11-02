@@ -403,6 +403,30 @@ class HTTPTests(unittest.TestCase):
         )
         for value, expected in (("0", 400), ("-1", 400), ("abc", 400), (str(2**63), 404)):
             self.assertEqual(self.request("GET", f"/posts/{value}")[0], expected)
+        self.connection.close()
+        for path, body in (("/posts", '{"body":"valid"}'), ("/posts/1/like", "")):
+            with (
+                self.subTest(path=path),
+                closing(
+                    socket.create_connection(("127.0.0.1", self.port), timeout=5)
+                ) as connection,
+            ):
+                auth = sign(claims(sub=str(2**63)))
+                request = (
+                    f"POST {path} HTTP/1.1\r\nHost: local\r\nAuthorization: {auth}\r\n"
+                    f"Content-Length: {len(body)}\r\n\r\n{body}"
+                    "GET /health HTTP/1.1\r\nHost: local\r\n\r\n"
+                )
+                connection.sendall(request.encode())
+                with connection.makefile("rb") as stream:
+                    self.assertTrue(stream.readline().startswith(b"HTTP/1.1 500 "))
+                    headers = http.client.parse_headers(stream)
+                    self.assertEqual(headers["connection"], "close")
+                    self.assertEqual(
+                        mapping(decode_json(stream.read(int(headers["content-length"])))),
+                        {"error": "internal server error"},
+                    )
+                    self.assertEqual(stream.read(1), b"")
 
     def test_json_escaping_matches_stdlib(self) -> None:
         rng = random.Random(42)

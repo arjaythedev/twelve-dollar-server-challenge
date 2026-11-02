@@ -61,6 +61,7 @@
 | C++ 0.1.0 (rewrite phase 1, 64 IPs) | 300,000 | 60 s | 3,586,160 | 22,413.42 | 4.829 ms | 6.554 ms | 30.20 ms | 0% | 26.11 us | 1,005.14 MiB |
 | C++ 0.1.0 (rewrite phase 2, 64 IPs) | 300,000 | 60 s | 3,585,569 | 22,409.78 | 5.104 ms | 8.526 ms | 218.07 ms | 0% | 26.66 us | 1,051.48 MiB |
 | C++ 0.1.0 (rewrite phase 3, 64 IPs) | 300,000 | 60 s | 3,585,622 | 22,410.09 | 5.027 ms | 7.968 ms | 157.08 ms | 0% | 26.51 us | 1,060.18 MiB |
+| C++ 0.1.0 (rewrite phase 4, 64 IPs) | 300,000 | 60 s | 3,585,799 | 22,411.15 | 5.433 ms | 8.865 ms | 47.29 ms | 0% | 28.22 us | 1,081.30 MiB |
 
 Statistics include the ramps. RAM is the cgroup peak, including charged file pages. Local results, not an official score or a measured capacity limit.
 

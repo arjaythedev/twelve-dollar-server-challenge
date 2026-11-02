@@ -65,25 +65,24 @@ add_dependencies(uring uring_build)
 add_library(parsing STATIC server/parsing.cpp)
 target_include_directories(parsing PUBLIC server)
 add_library(transport STATIC
-    server/transport.cpp
+    server/server.cpp
     server/http/parser.cpp
     server/http/session.cpp
     server/http/reply.cpp
-    server/transport/connection.cpp
     server/net/buffers.cpp
     server/net/connections.cpp
     server/net/ring.cpp
     server/net/reactor.cpp
 )
-target_link_libraries(transport PUBLIC uring llhttp_static PRIVATE parsing)
+target_link_libraries(transport PUBLIC uring llhttp_static PRIVATE api parsing)
 target_include_directories(transport PUBLIC server)
-add_library(api STATIC server/api.cpp server/app/application.cpp server/auth.cpp server/storage/database.cpp server/json.cpp
+add_library(api STATIC server/app/application.cpp server/auth.cpp server/storage/database.cpp server/json.cpp
     server/app/post_writer.cpp)
 target_link_libraries(api PRIVATE sqlite yyjson OpenSSL::Crypto parsing Threads::Threads)
 target_include_directories(api PUBLIC server)
 if(TDS_DIAGNOSTICS)
     target_sources(api PRIVATE server/sync_timing.cpp)
-    target_sources(transport PRIVATE server/transport/diagnostics.cpp)
+    target_sources(transport PRIVATE server/diagnostics/io.cpp)
     target_compile_definitions(api PRIVATE TDS_DIAGNOSTICS)
     target_compile_definitions(transport PUBLIC TDS_DIAGNOSTICS)
     target_link_options(api INTERFACE -Wl,--wrap=fsync -Wl,--wrap=fdatasync)
@@ -91,7 +90,7 @@ endif()
 add_executable(server server/main.cpp)
 target_link_libraries(server PRIVATE transport api uring sqlite)
 add_executable(transport_tests checks/transport.cpp)
-target_link_libraries(transport_tests PRIVATE transport uring llhttp_static)
+target_link_libraries(transport_tests PRIVATE transport api sqlite yyjson OpenSSL::Crypto)
 add_executable(io_lifetime_tests checks/io_lifetimes.cpp)
 target_link_libraries(io_lifetime_tests PRIVATE transport uring llhttp_static)
 add_executable(checkpoint_tests checks/checkpoint.cpp)

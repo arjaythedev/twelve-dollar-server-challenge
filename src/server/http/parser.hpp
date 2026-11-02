@@ -18,6 +18,15 @@ struct ParseResult
     bool valid;
 };
 
+struct Message
+{
+    std::string method;
+    std::string path;
+    std::string authorization;
+    std::string body;
+    bool keep_alive = true;
+};
+
 class Parser
 {
   public:
@@ -27,12 +36,7 @@ class Parser
 
     ParseResult parse(std::string_view input);
 
-    Request &request() noexcept
-    {
-        return request_;
-    }
-
-    const Request &request() const noexcept
+    const Message &message() const noexcept
     {
         return request_;
     }
@@ -87,7 +91,7 @@ class Parser
     static const llhttp_settings_t settings_;
 
     llhttp_t parser_{};
-    Request request_;
+    Message request_;
     std::string url_;
     std::string field_;
     std::string value_;

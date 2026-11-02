@@ -1,5 +1,5 @@
 #include "ring.hpp"
-#include "../transport/connection.hpp"
+#include "../http/exchange.hpp"
 
 #include <exception>
 #include <sys/eventfd.h>
@@ -63,11 +63,11 @@ Ring::~Ring()
     io_uring_queue_exit(&queue);
 }
 
-std::unique_ptr<transport::Exchange> Ring::acquire_exchange()
+std::unique_ptr<http::Exchange> Ring::acquire_exchange()
 {
     if (exchange_pool_.empty())
     {
-        return std::make_unique<transport::Exchange>();
+        return std::make_unique<http::Exchange>();
     }
     auto exchange = std::move(exchange_pool_.back());
     exchange_pool_.pop_back();
@@ -75,7 +75,7 @@ std::unique_ptr<transport::Exchange> Ring::acquire_exchange()
     return exchange;
 }
 
-void Ring::recycle_exchange(std::unique_ptr<transport::Exchange> exchange)
+void Ring::recycle_exchange(std::unique_ptr<http::Exchange> exchange)
 {
     if (exchange_pool_.size() == max_pooled_exchanges ||
         exchange->retained_capacity() > max_retained_capacity)

@@ -71,6 +71,7 @@ class Application
     std::expected<void, WriteError> commit(std::span<const WriteCommand> commands,
                                            std::span<WriteOutcome> outcomes);
     Response write_reply(const WriteCommand &command, const WriteOutcome &outcome) const;
+    static Response error_response(ApiError error);
 
   private:
     Store &store();

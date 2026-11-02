@@ -1,12 +1,8 @@
 #pragma once
 
-#include "http.hpp"
-
 #include <cstdint>
-#include <functional>
 #include <memory>
-#include <optional>
-#include <span>
+#include <string>
 #include <string_view>
 
 namespace tds
@@ -15,12 +11,8 @@ namespace tds
 class Server
 {
   public:
-    using Handler = std::function<RequestResult(const Request &)>;
-    using HeaderHandler = std::function<std::optional<Response>(Request &)>;
-    using BatchHandler = std::function<void(std::span<const WriteCommand>, std::span<Response>)>;
-
-    Server(std::string_view host, std::uint16_t port, Handler handler, HeaderHandler headers,
-           BatchHandler writes = {});
+    Server(std::string_view host, std::uint16_t port, std::string database_path,
+           std::string secret);
     ~Server();
     Server(const Server &) = delete;
     Server &operator=(const Server &) = delete;

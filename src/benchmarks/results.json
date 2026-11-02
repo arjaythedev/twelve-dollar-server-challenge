@@ -1224,5 +1224,27 @@
     "server_peak_bytes": 1111674880,
     "passed": true,
     "client_sampled_peak_bytes": 1323806720
+  },
+  {
+    "date": "2026-11-02",
+    "name": "rewrite-phase4-300000-64ips",
+    "runtime": "C++ 0.1.0",
+    "load_generator": "docker_loopback",
+    "generator": "cpp",
+    "sqlite": "3.53.1",
+    "users": 300000,
+    "hold": "60s",
+    "ramp": "60s",
+    "requests": 3585799,
+    "rps": 22411.1494027,
+    "p95_ms": 5.433083,
+    "p99_ms": 8.86534108,
+    "max_ms": 47.291584,
+    "error_rate": 0,
+    "cpu_us_per_request": 28.21929840462335,
+    "cpu_scope": "server_cgroup",
+    "server_peak_bytes": 1133826048,
+    "passed": true,
+    "client_sampled_peak_bytes": 1327910912
   }
 ]

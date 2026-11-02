@@ -1,8 +1,10 @@
 #pragma once
 
+#include "../app/application.hpp"
 #include "parser.hpp"
 
 #include <cstddef>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -19,14 +21,9 @@ class HttpSession
     void append(std::string_view bytes);
     ParseResult consume();
 
-    Request &request() noexcept
+    const Message &message() const noexcept
     {
-        return parser_.request();
-    }
-
-    const Request &request() const noexcept
-    {
-        return parser_.request();
+        return parser_.message();
     }
 
     bool complete() const noexcept
@@ -39,9 +36,12 @@ class HttpSession
         return parser_.headers_pending();
     }
 
-    void accept_headers() noexcept
+    void accept_headers(AcceptedHead head);
+
+    // The accepted context borrows the normalized path until this message resets
+    const AcceptedHead &accepted_head() const noexcept
     {
-        parser_.accept_headers();
+        return *accepted_;
     }
 
     Status error() const noexcept
@@ -65,6 +65,7 @@ class HttpSession
   private:
     Parser parser_;
     std::string input_;
+    std::optional<AcceptedHead> accepted_;
 };
 
 } // namespace tds::http

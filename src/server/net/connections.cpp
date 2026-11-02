@@ -1,4 +1,5 @@
 #include "connections.hpp"
+#include "../http/exchange.hpp"
 
 #include <cassert>
 #include <stdexcept>
@@ -6,6 +7,14 @@
 
 namespace tds::net
 {
+
+Connection::Connection(Ring &owner, DirectSlot index)
+    : ring(owner), operation{Event::receive, *this}, close_operation{Event::close, *this},
+      slot(index)
+{
+}
+
+Connection::~Connection() = default;
 
 ConnectionStore::ConnectionStore(unsigned slots) : records_(slots)
 {

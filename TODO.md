@@ -2,10 +2,12 @@
 
 ## Next, in order
 
+- [ ] Compare the rewrite against `671fd4e`, inspect changed hotpaths in disassembly and take a short profile; investigate the higher CPU/request in the phase 4 run.
 - [ ] Compare prepared transaction/savepoint statements and inspect the generated code.
 
 ## Later
 
+- [ ] Trace delayed TCP EOF with another idle connection; reproduced through Docker's published port in phases 3 and 4.
 - [ ] Split foreground COMMIT stalls into sync/write/retry time, then trace waiting before receive-CQE service and deferred reads.
 - [ ] Compare multishot receive after isolating handler stalls.
 - [ ] Test capacity on a comparable Linux VM with a separate load generator and the official file limit.

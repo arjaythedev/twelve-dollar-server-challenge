@@ -1,6 +1,11 @@
-#include "transport.hpp"
+#include "app/application.hpp"
+#include "http/exchange.hpp"
 #include "net/ring.hpp"
-#include "transport/connection.hpp"
+#include "server.hpp"
+
+#include <openssl/evp.h>
+#include <openssl/hmac.h>
+#include <sqlite3.h>
 
 #include <algorithm>
 #include <arpa/inet.h>
@@ -8,34 +13,38 @@
 #include <cerrno>
 #include <charconv>
 #include <chrono>
-#include <condition_variable>
 #include <csignal>
+#include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <exception>
 #include <filesystem>
 #include <fstream>
-#include <functional>
 #include <iostream>
 #include <linux/io_uring.h>
 #include <memory>
-#include <mutex>
+#include <optional>
 #include <poll.h>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <sys/resource.h>
 #include <sys/socket.h>
+#include <sys/syscall.h>
 #include <sys/wait.h>
 #include <thread>
 #include <unistd.h>
 #include <utility>
-#include <variant>
 #include <vector>
 
 namespace
 {
 
 static_assert(sizeof(tds::net::Connection) == 56);
+constexpr std::string_view secret = "transport-secret";
+constexpr std::string_view small_post =
+    "{\"post\":{\"id\":1,\"body\":\"seed\",\"created_at\":\"2025-01-01T00:00:00.000Z\","
+    "\"author\":\"db-user\",\"like_count\":0}}";
 
 class Client
 {
@@ -206,136 +215,244 @@ void require(bool condition, std::string_view message)
     }
 }
 
+std::string base64url(std::string_view value)
+{
+    std::string encoded(4 * ((value.size() + 2) / 3), '\0');
+    const int size = EVP_EncodeBlock(reinterpret_cast<unsigned char *>(encoded.data()),
+                                     reinterpret_cast<const unsigned char *>(value.data()),
+                                     static_cast<int>(value.size()));
+    require(size >= 0, "encode JWT segment");
+    encoded.resize(static_cast<std::size_t>(size));
+    for (char &byte : encoded)
+    {
+        if (byte == '+')
+        {
+            byte = '-';
+        }
+        else if (byte == '/')
+        {
+            byte = '_';
+        }
+    }
+    while (encoded.ends_with('='))
+    {
+        encoded.pop_back();
+    }
+
+    return encoded;
+}
+
+const std::string &authorization()
+{
+    static const std::string result = [] {
+        const auto content = base64url(R"({"alg":"HS256"})") + '.' +
+                             base64url(R"({"sub":"1","username":"token-user","exp":4102444800})");
+        std::array<unsigned char, 32> digest{};
+        unsigned length = 0;
+        require(HMAC(EVP_sha256(), secret.data(), static_cast<int>(secret.size()),
+                     reinterpret_cast<const unsigned char *>(content.data()), content.size(),
+                     digest.data(), &length) != nullptr &&
+                    length == digest.size(),
+                "sign transport JWT");
+        const std::string_view signature(reinterpret_cast<const char *>(digest.data()), length);
+
+        return "Bearer " + content + '.' + base64url(signature);
+    }();
+
+    return result;
+}
+
+class Fixture
+{
+  public:
+    Fixture()
+    {
+        char directory[] = "/tmp/td-transport-XXXXXX";
+        const auto *created = ::mkdtemp(directory);
+        require(created != nullptr, "fixture directory");
+        directory_ = created;
+        path = directory_ + "/feed.db";
+        auto db = open();
+        execute(db.get(), R"sql(
+            CREATE TABLE users(id INTEGER PRIMARY KEY, username TEXT NOT NULL UNIQUE,
+              created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')));
+            CREATE TABLE posts(id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id),
+              body TEXT NOT NULL CHECK(length(body) BETWEEN 1 AND 500),
+              created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')));
+            CREATE TABLE likes(user_id INTEGER NOT NULL REFERENCES users(id),
+              post_id INTEGER NOT NULL REFERENCES posts(id),
+              created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+              PRIMARY KEY(user_id,post_id));
+            CREATE INDEX posts_created_at_id_idx ON posts(created_at DESC,id DESC);
+            CREATE INDEX posts_user_id_idx ON posts(user_id);
+            CREATE INDEX likes_post_id_idx ON likes(post_id);
+            INSERT INTO users(id,username) VALUES(1,'db-user');
+            INSERT INTO posts(id,user_id,body,created_at)
+              VALUES(1,1,'seed','2025-01-01T00:00:00.000Z');
+        )sql");
+        sqlite3_stmt *raw = nullptr;
+        require(sqlite3_prepare_v2(db.get(), "INSERT INTO users(id,username) VALUES(2,?)", -1, &raw,
+                                   nullptr) == SQLITE_OK,
+                "prepare large author");
+        std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)> query(raw, sqlite3_finalize);
+        const std::string author(1024 * 1024, 'x');
+        require(sqlite3_bind_text64(raw, 1, author.data(), author.size(), SQLITE_TRANSIENT,
+                                    SQLITE_UTF8) == SQLITE_OK &&
+                    sqlite3_step(raw) == SQLITE_DONE,
+                "insert large author");
+        // Username size is unrestricted by the fixed schema, giving real API send backpressure
+        execute(db.get(), R"sql(
+            INSERT INTO posts(id,user_id,body,created_at)
+              VALUES(2,2,'large','2000-01-01T00:00:00.000Z');
+        )sql");
+    }
+
+    ~Fixture()
+    {
+        std::error_code error;
+        std::filesystem::remove_all(directory_, error);
+    }
+
+    std::int64_t scalar(const char *sql) const
+    {
+        auto db = open();
+        sqlite3_stmt *raw = nullptr;
+        require(sqlite3_prepare_v2(db.get(), sql, -1, &raw, nullptr) == SQLITE_OK,
+                "prepare fixture query");
+        std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)> query(raw, sqlite3_finalize);
+        require(sqlite3_step(raw) == SQLITE_ROW, "fixture query row");
+
+        return sqlite3_column_int64(raw, 0);
+    }
+
+    static std::string large_post()
+    {
+        return "{\"post\":{\"id\":2,\"body\":\"large\",\"created_at\":\"2000-01-01T00:00:00.000Z\","
+               "\"author\":\"" +
+               std::string(1024 * 1024, 'x') + "\",\"like_count\":0}}";
+    }
+
+    std::string path;
+
+  private:
+    struct Close
+    {
+        void operator()(sqlite3 *db) const noexcept
+        {
+            sqlite3_close(db);
+        }
+    };
+
+    std::unique_ptr<sqlite3, Close> open() const
+    {
+        sqlite3 *raw = nullptr;
+        const int result = sqlite3_open_v2(path.c_str(), &raw,
+                                           SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nullptr);
+        std::unique_ptr<sqlite3, Close> db(raw);
+        require(result == SQLITE_OK, "open transport fixture");
+
+        return db;
+    }
+
+    static void execute(sqlite3 *db, const char *sql)
+    {
+        require(sqlite3_exec(db, sql, nullptr, nullptr, nullptr) == SQLITE_OK,
+                "transport fixture SQL");
+    }
+
+    std::string directory_;
+};
+
 void exercise_request_reuse()
 {
+    Fixture fixture;
+    tds::Application application(fixture.path, std::string(secret));
     tds::net::Ring ring(8, true);
     auto exchange = ring.acquire_exchange();
     auto &session = exchange->session;
-    auto &request = session.request();
-    require(request.endpoint == tds::Endpoint::unresolved && !request.identity,
-            "new request has no route or identity");
-    auto expected_capacity = session.retained_capacity();
-    for (auto member : {&tds::Request::method, &tds::Request::path, &tds::Request::authorization,
-                        &tds::Request::body})
-    {
-        auto &field = request.*member;
-        const auto old_capacity = field.capacity();
-        field.reserve(256);
-        expected_capacity += field.capacity() - old_capacity;
-        require(session.retained_capacity() == expected_capacity,
-                "retained parser capacity includes each request string");
-    }
-
-    const std::string path = "/" + std::string(128, 'p');
-    const std::string authorization = "Bearer " + std::string(512, 't');
+    const auto &message = session.message();
     const std::string body(2048, 'b');
-    const std::string wire = "POST " + path + " HTTP/1.1\r\nAuthorization: " + authorization +
+    const std::string wire = "POST /posts HTTP/1.1\r\nAuthorization: " + authorization() +
                              "\r\nContent-Length: " + std::to_string(body.size()) +
                              "\r\nConnection: close\r\n\r\n" + body;
     session.append(wire);
-    const auto headers = session.consume();
-    require(headers.valid && session.headers_pending(), "reused request pauses for authorization");
-    require(request.method == "POST" && request.path == path &&
-                request.authorization == authorization && !request.keep_alive,
-            "reused request headers parsed");
-    request.identity = tds::Identity{tds::UserId{42}, "alice"};
-    request.endpoint = tds::Endpoint::create;
-    session.accept_headers();
-    const auto parsed_body = session.consume();
-    require(parsed_body.valid && session.complete() && request.body == body,
-            "reused request body parsed");
-    const auto retained_capacity = exchange->retained_capacity();
-    require(retained_capacity <= 8192, "ordinary request fits exchange retention budget");
+    require(session.consume().valid && session.headers_pending(),
+            "request pauses for header acceptance");
+    require(message.method == "POST" && message.path == "/posts" &&
+                message.authorization == authorization() && !message.keep_alive,
+            "request headers parsed");
+    auto accepted =
+        application.accept_headers({message.method, message.path, message.authorization});
+    require(accepted && std::holds_alternative<tds::CreateHead>(*accepted),
+            "protected route accepted with a fresh identity");
+    session.accept_headers(std::move(*accepted));
+    require(std::get<tds::CreateHead>(session.accepted_head()).identity.user_id == tds::UserId{1},
+            "session owns the accepted identity");
+    require(session.consume().valid && session.complete() && message.body == body,
+            "request body parsed");
+    const auto retained = exchange->retained_capacity();
+    require(retained <= 8192, "ordinary request fits exchange retention budget");
     exchange->reply.reset();
     session.reset();
-    require(request.method.empty() && request.path.empty() && request.authorization.empty() &&
-                request.body.empty() && !request.identity &&
-                request.endpoint == tds::Endpoint::unresolved && request.keep_alive,
-            "finished request clears strings, route, identity and connection policy");
+    require(message.method.empty() && message.path.empty() && message.authorization.empty() &&
+                message.body.empty() && message.keep_alive,
+            "finished message clears fields and connection policy");
     require(!session.complete() && !session.headers_pending() &&
                 session.error() == tds::Status::bad_request,
-            "finished request resets parser state");
-    require(exchange->retained_capacity() == retained_capacity,
-            "finished request preserves bounded string storage");
+            "finished message resets parser state");
+    require(exchange->retained_capacity() == retained,
+            "finished message preserves bounded string storage");
     const auto *pooled = exchange.get();
     ring.recycle_exchange(std::move(exchange));
     exchange = ring.acquire_exchange();
     require(exchange.get() == pooled, "bounded exchange reused from pool");
-    exchange->session.append("GET /fresh HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    const auto next = exchange->session.consume();
-    require(next.valid && exchange->session.headers_pending(),
-            "recycled parser reads next request");
-    const auto &fresh = exchange->session.request();
-    require(fresh.method == "GET" && fresh.path == "/fresh" && fresh.authorization.empty() &&
-                fresh.body.empty() && !fresh.identity &&
-                fresh.endpoint == tds::Endpoint::unresolved && fresh.keep_alive,
-            "recycled request does not inherit authorization, body, route or identity");
-    exchange->session.accept_headers();
-    require(exchange->session.consume().valid && exchange->session.complete(),
+    auto &fresh_session = exchange->session;
+    fresh_session.append("GET /feed HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    require(fresh_session.consume().valid && fresh_session.headers_pending(),
+            "recycled parser reads the next request");
+    const auto &fresh = fresh_session.message();
+    require(fresh.method == "GET" && fresh.path == "/feed" && fresh.authorization.empty() &&
+                fresh.body.empty() && fresh.keep_alive,
+            "recycled message does not inherit authorization, body or close policy");
+    accepted = application.accept_headers({fresh.method, fresh.path, fresh.authorization});
+    require(accepted && std::holds_alternative<tds::FeedHead>(*accepted),
+            "recycled session receives a fresh public route context");
+    fresh_session.accept_headers(std::move(*accepted));
+    require(std::holds_alternative<tds::FeedHead>(fresh_session.accepted_head()),
+            "previous identity does not leak into the next message");
+    require(fresh_session.consume().valid && fresh_session.complete(),
             "recycled parser completes an empty body");
-    exchange->reply.reset();
-    exchange->session.reset();
+    fresh_session.reset();
     ring.recycle_exchange(std::move(exchange));
 
-    for (auto member : {&tds::Request::path, &tds::Request::authorization, &tds::Request::body})
+    const std::string oversized(8193, 'x');
+    const std::array requests{"GET /" + oversized + " HTTP/1.1\r\nHost: local\r\n\r\n",
+                              "GET /feed HTTP/1.1\r\nAuthorization: " + oversized + "\r\n\r\n",
+                              "POST /posts HTTP/1.1\r\nAuthorization: " + authorization() +
+                                  "\r\nContent-Length: 8193\r\n\r\n" + oversized};
+    for (const auto &request : requests)
     {
         exchange = ring.acquire_exchange();
-        (exchange->session.request().*member).assign(8193, 'x');
+        auto &large = exchange->session;
+        large.append(request);
+        require(large.consume().valid && large.headers_pending(),
+                "large protocol field reaches the header boundary");
+        const auto &head = large.message();
+        accepted = application.accept_headers({head.method, head.path, head.authorization});
+        require(accepted.has_value(), "large field accepted without changing protocol limits");
+        large.accept_headers(std::move(*accepted));
+        require(large.consume().valid && large.complete(), "large message is framed completely");
         exchange->reply.reset();
-        exchange->session.reset();
+        large.reset();
         require(exchange->retained_capacity() > 8192,
-                "oversized cleared request storage exceeds retention budget");
+                "oversized cleared storage exceeds the retention budget");
         ring.recycle_exchange(std::move(exchange));
         exchange = ring.acquire_exchange();
         require(exchange->retained_capacity() <= 8192,
-                "oversized request storage is discarded instead of pooled");
+                "oversized storage is discarded instead of pooled");
         ring.recycle_exchange(std::move(exchange));
     }
 }
-
-class RequestGate
-{
-  public:
-    void block()
-    {
-        std::unique_lock lock(mutex);
-        entered = true;
-        changed.notify_all();
-        changed.wait(lock, [&] {
-            return released;
-        });
-    }
-
-    void wait()
-    {
-        std::unique_lock lock(mutex);
-        require(changed.wait_for(lock, std::chrono::seconds(5),
-                                 [&] {
-                                     return entered;
-                                 }),
-                "blocking request reached handler");
-    }
-
-    void release()
-    {
-        std::lock_guard lock(mutex);
-        released = true;
-        changed.notify_all();
-    }
-
-    void reset()
-    {
-        std::lock_guard lock(mutex);
-        entered = false;
-        released = false;
-    }
-
-  private:
-    std::mutex mutex;
-    std::condition_variable changed;
-    bool entered = false;
-    bool released = false;
-};
 
 void limit_listener_send_buffer(std::uint16_t port)
 {
@@ -382,14 +499,14 @@ std::vector<std::filesystem::path> ring_fdinfos(pid_t process = ::getpid())
     return result;
 }
 
-void wait_for_completion(int result, std::size_t minimum = 1)
+void wait_for_completion(int result, pid_t process, std::size_t minimum = 1)
 {
     const std::string expected = "res:" + std::to_string(result) + ",";
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     do
     {
         std::size_t observed = 0;
-        for (const auto &info : ring_fdinfos())
+        for (const auto &info : ring_fdinfos(process))
         {
             std::ifstream stream(info);
             for (std::string line; std::getline(stream, line);)
@@ -405,292 +522,27 @@ void wait_for_completion(int result, std::size_t minimum = 1)
     throw std::runtime_error("expected io_uring completion " + std::to_string(result));
 }
 
-class RunningServer
+void wait_for_receives(pid_t process, std::size_t minimum)
 {
-  public:
-    RunningServer(tds::Server::Handler handler, tds::Server::HeaderHandler headers,
-                  tds::Server::BatchHandler writes, std::function<void()> release)
-        : release_(std::move(release)),
-          server_("127.0.0.1", 0, std::move(handler), std::move(headers), std::move(writes)),
-          thread_([this] {
-              try
-              {
-                  server_.run();
-              }
-              catch (...)
-              {
-                  error_ = std::current_exception();
-              }
-          })
+    const auto expected = "  op=" + std::to_string(IORING_OP_RECV) + ',';
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    do
     {
-    }
-
-    ~RunningServer()
-    {
-        release_();
-        server_.request_stop();
-        if (thread_.joinable())
+        std::size_t observed = 0;
+        for (const auto &info : ring_fdinfos(process))
         {
-            thread_.join();
+            std::ifstream stream(info);
+            for (std::string line; std::getline(stream, line);)
+            {
+                if (line.find(expected) != std::string::npos && ++observed >= minimum)
+                {
+                    return;
+                }
+            }
         }
-    }
-
-    RunningServer(const RunningServer &) = delete;
-    RunningServer &operator=(const RunningServer &) = delete;
-
-    std::uint16_t port() const
-    {
-        return server_.port();
-    }
-
-    void request_stop() const
-    {
-        server_.request_stop();
-    }
-
-    void stop()
-    {
-        release_();
-        server_.request_stop();
-        thread_.join();
-        if (error_)
-        {
-            std::rethrow_exception(error_);
-        }
-    }
-
-  private:
-    std::function<void()> release_;
-    tds::Server server_;
-    std::exception_ptr error_;
-    std::jthread thread_;
-};
-
-std::string write_request(std::string_view path, std::string_view body)
-{
-    return "POST " + std::string(path) +
-           " HTTP/1.1\r\nHost: localhost\r\nContent-Length: " + std::to_string(body.size()) +
-           "\r\n\r\n" + std::string(body);
-}
-
-std::unique_ptr<Client> ready_client(std::uint16_t port)
-{
-    auto client = std::make_unique<Client>(port);
-    client->send("GET /ready HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    require(client->response() == "/ready", "batch client established");
-    return client;
-}
-
-void exercise_write_batches()
-{
-    RequestGate headers_gate;
-    RequestGate batch_gate;
-    std::mutex batch_mutex;
-    std::vector<std::size_t> batch_sizes;
-    std::vector<std::string> blocked_bodies;
-    const auto recorded_batches = [&] {
-        std::lock_guard lock(batch_mutex);
-        return batch_sizes;
-    };
-    RunningServer server(
-        [](const tds::Request &request) -> tds::RequestResult {
-            if (request.endpoint == tds::Endpoint::create)
-            {
-                require(request.identity && request.identity->user_id == tds::UserId{42} &&
-                            request.identity->username == "writer",
-                        "write preparation receives the current request identity");
-                return tds::WriteCommand{tds::CreatePost{*request.identity->user_id,
-                                                         request.identity->username, request.body}};
-            }
-            require(request.endpoint == tds::Endpoint::feed && !request.identity,
-                    "read after a write has its own route and no stale identity");
-            return tds::Response{tds::Status::ok, request.path};
-        },
-        [&](tds::Request &request) -> std::optional<tds::Response> {
-            require(request.endpoint == tds::Endpoint::unresolved && !request.identity,
-                    "keepalive request begins without a stale route or identity");
-            request.endpoint =
-                request.method == "POST" ? tds::Endpoint::create : tds::Endpoint::feed;
-            if (request.path == "/hold")
-            {
-                headers_gate.block();
-            }
-            if (request.method == "POST")
-            {
-                request.identity = tds::Identity{tds::UserId{42}, "writer"};
-            }
-            return std::nullopt;
-        },
-        [&](std::span<const tds::WriteCommand> commands, std::span<tds::Response> responses) {
-            require(!commands.empty() && commands.size() == responses.size() &&
-                        commands.size() <= tds::write_batch_limit,
-                    "write callback receives bounded matching spans");
-            {
-                std::lock_guard lock(batch_mutex);
-                batch_sizes.push_back(commands.size());
-            }
-            std::vector<std::string> bodies;
-            for (std::size_t index = 0; index < commands.size(); ++index)
-            {
-                const auto *create = std::get_if<tds::CreatePost>(&commands[index]);
-                require(create && create->user_id == tds::UserId{42} &&
-                            create->username == "writer",
-                        "batched command owns the prepared identity and create data");
-                bodies.push_back(create->body);
-                responses[index] = {tds::Status::created, create->body};
-            }
-            if (bodies.front().starts_with("blocked:"))
-            {
-                blocked_bodies = bodies;
-                batch_gate.block();
-            }
-            for (std::size_t index = 0; index < commands.size(); ++index)
-            {
-                const auto &create = std::get<tds::CreatePost>(commands[index]);
-                require(create.user_id == tds::UserId{42} && create.username == "writer" &&
-                            create.body == bodies[index],
-                        "owned commands survive the batch callback and peer disconnect");
-            }
-            if (bodies.front() == "throw-body")
-            {
-                throw std::runtime_error("write callback failed after filling responses");
-            }
-        },
-        [&] {
-            headers_gate.release();
-            batch_gate.release();
-        });
-
-    Client singleton(server.port());
-    singleton.send(write_request("/write", "singleton"));
-    require(singleton.response(tds::Status::created) == "singleton",
-            "single queued write flushes without another request");
-    singleton.send(write_request("/write", "first") + write_request("/write", "second") +
-                   "GET /after-write HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    require(singleton.response(tds::Status::created) == "first", "first batched pipeline response");
-    require(singleton.response(tds::Status::created) == "second",
-            "second batched pipeline response");
-    require(singleton.response() == "/after-write", "read follows batched pipeline writes");
-    require(recorded_batches() == std::vector<std::size_t>{1, 1, 1},
-            "a connection holds one write until its response completes");
-
-    std::vector<std::unique_ptr<Client>> clients;
-    std::vector<std::string> bodies;
-    constexpr auto count = tds::write_batch_limit + 1;
-    static_assert(tds::write_batch_limit == 16);
-    for (std::size_t index = 0; index < count; ++index)
-    {
-        clients.push_back(ready_client(server.port()));
-        bodies.push_back("blocked:" + std::string(index < 10 ? "0" : "") + std::to_string(index) +
-                         ':' + std::string(1024, static_cast<char>('a' + index)));
-    }
-    auto blocker = ready_client(server.port());
-    blocker->send("GET /hold HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    headers_gate.wait();
-    const auto before_batches = recorded_batches().size();
-    for (std::size_t index = 0; index < count; ++index)
-    {
-        clients[index]->send(write_request("/write-block", bodies[index]));
-    }
-    const auto wire_size = write_request("/write-block", bodies.front()).size();
-    // Every socket already has a receive submitted before the header callback blocks
-    wait_for_completion(static_cast<int>(wire_size), count);
-    headers_gate.release();
-    batch_gate.wait();
-    require(blocked_bodies.size() == 16, "ready writes flush at the sixteen-request limit");
-    for (const auto &client : clients)
-    {
-        require(!client->response_available(), "no write response before callback returns");
-    }
-    const auto disconnected = std::find(bodies.begin(), bodies.end(), blocked_bodies.front());
-    require(disconnected != bodies.end(), "blocked request belongs to a live client");
-    clients[static_cast<std::size_t>(disconnected - bodies.begin())].reset();
-    batch_gate.release();
-    require(blocker->response() == "/hold", "batch preload gate completes");
-    for (std::size_t index = 0; index < count; ++index)
-    {
-        if (clients[index])
-        {
-            require(clients[index]->response(tds::Status::created) == bodies[index],
-                    "batched response preserves each request body after peer disconnect");
-        }
-    }
-    const auto after_batches = recorded_batches();
-    require(after_batches.size() == before_batches + 2 && after_batches[before_batches] == 16 &&
-                after_batches[before_batches + 1] == 1,
-            "ready writes form one full batch and flush the final singleton");
-
-    headers_gate.reset();
-    auto failed_first = ready_client(server.port());
-    auto failed_second = ready_client(server.port());
-    blocker->send("GET /hold HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    headers_gate.wait();
-    const auto before_throw = recorded_batches().size();
-    const auto throwing_wire = write_request("/write-throw", "throw-body");
-    failed_first->send(throwing_wire);
-    failed_second->send(throwing_wire);
-    wait_for_completion(static_cast<int>(throwing_wire.size()), 2);
-    headers_gate.release();
-    require(failed_first->response(tds::Status::internal_error) != "throw-body" &&
-                failed_second->response(tds::Status::internal_error) != "throw-body",
-            "throwing callback replaces every partially filled response with an error");
-    require(blocker->response() == "/hold", "throwing batch preload gate completes");
-    const auto after_throw = recorded_batches();
-    require(after_throw.size() == before_throw + 1 && after_throw.back() == 2,
-            "throwing callback consumes one complete batch");
-    Client fresh(server.port());
-    fresh.send(write_request("/write", "fresh-owned-body"));
-    require(fresh.response(tds::Status::created) == "fresh-owned-body",
-            "batch callback failure leaves no stale commands or responses");
-    server.stop();
-}
-
-void exercise_queued_write_shutdown()
-{
-    RequestGate preload_gate;
-    std::size_t queued_writes = 0;
-    std::size_t batches = 0;
-    RunningServer server(
-        [&](const tds::Request &request) -> tds::RequestResult {
-            if (request.method == "POST")
-            {
-                ++queued_writes;
-                return tds::WriteCommand{tds::CreatePost{tds::UserId{42}, "writer", request.body}};
-            }
-            return tds::Response{tds::Status::ok, request.path};
-        },
-        [&](tds::Request &request) -> std::optional<tds::Response> {
-            if (request.path == "/hold")
-            {
-                preload_gate.block();
-            }
-            return std::nullopt;
-        },
-        [&](std::span<const tds::WriteCommand>, std::span<tds::Response>) {
-            ++batches;
-        },
-        [&] {
-            preload_gate.release();
-        });
-    auto first = ready_client(server.port());
-    auto second = ready_client(server.port());
-    auto blocker = ready_client(server.port());
-    blocker->send("GET /hold HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    preload_gate.wait();
-    const auto first_wire = write_request("/first", "queued-body");
-    first->send(first_wire);
-    second->send(write_request("/other", "queued-body"));
-    wait_for_completion(static_cast<int>(first_wire.size()), 2);
-    first.reset();
-    server.request_stop();
-    wait_for_completion(POLLIN);
-    // Both receives precede stop in the CQ before their drain starts, including when
-    // io_uring_for_each_cqe takes a snapshot of the CQ tail for the entire drain
-    preload_gate.release();
-    server.stop();
-    require(queued_writes == 2, "both completed writes are prepared before stop is serviced");
-    require(batches == 0, "shutdown discards queued writes without calling the batch handler");
-    require(second->closed(), "shutdown closes the remaining queued connection");
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    } while (std::chrono::steady_clock::now() < deadline);
+    throw std::runtime_error("expected submitted receives before pausing userspace");
 }
 
 void wait_for_blocked_send(pid_t process = ::getpid())
@@ -715,172 +567,6 @@ void wait_for_blocked_send(pid_t process = ::getpid())
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     } while (std::chrono::steady_clock::now() < deadline);
     throw std::runtime_error("large send did not reach socket backpressure");
-}
-
-void exercise_short_send(std::uint16_t port, RequestGate &gate)
-{
-    limit_listener_send_buffer(port);
-    Client slow(port, 4096);
-    slow.send("GET /ready HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    require(slow.response() == "/ready", "slow connection established");
-    slow.send("GET /large HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    wait_for_blocked_send();
-    // Readability can arrive while a partial response still owns the data-I/O operation
-    slow.send("GET /after HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    Client blocker(port);
-    // This round trip submits the slow socket's next send before the handler blocks.
-    blocker.send("GET /ready HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    require(blocker.response() == "/ready", "short-send barrier");
-    blocker.send("GET /block HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    gate.wait();
-    bool observed = false;
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-    do
-    {
-        slow.drain_available();
-        for (const auto &info : ring_fdinfos())
-        {
-            std::ifstream stream(info);
-            for (std::string line; std::getline(stream, line);)
-            {
-                const auto start = line.find("res:");
-                int result = 0;
-                if (start != std::string::npos &&
-                    std::from_chars(line.data() + start + 4, line.data() + line.size(), result)
-                            .ec == std::errc{} &&
-                    result > 1024 && result < 1024 * 1024)
-                {
-                    observed = true;
-                }
-            }
-        }
-        if (!observed)
-        {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
-    } while (!observed && std::chrono::steady_clock::now() < deadline);
-    require(observed, "short send CQE observed before draining a 1 MiB response");
-    gate.release();
-    require(blocker.response() == "/block", "short-send blocking response");
-    require(slow.response() == std::string(1024 * 1024, 'x'), "short-send body ownership");
-    require(slow.response() == "/after", "pipeline after a short send");
-    gate.reset();
-}
-
-std::string pool_body(std::size_t id)
-{
-    return std::to_string(id) + ':' + std::string(2048, static_cast<char>('a' + id % 26));
-}
-
-void send_pool_requests(const std::vector<std::unique_ptr<Client>> &clients)
-{
-    for (std::size_t id = 0; id < clients.size(); ++id)
-    {
-        const auto body = pool_body(id);
-        clients[id]->send("POST /body HTTP/1.1\r\nHost: localhost\r\nContent-Length: " +
-                          std::to_string(body.size()) + "\r\n\r\n" + body);
-    }
-}
-
-void exercise_pool(std::uint16_t port, const std::vector<std::unique_ptr<Client>> &clients,
-                   RequestGate &gate)
-{
-    Client blocker(port);
-    blocker.send("GET /block HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    gate.wait();
-    send_pool_requests(clients);
-    // Observe a real kernel CQE while the handler cannot return buffers to the pool
-    wait_for_completion(-ENOBUFS);
-    gate.release();
-    require(blocker.response() == "/block", "blocking response");
-    for (std::size_t id = 0; id < clients.size(); ++id)
-    {
-        require(clients[id]->response() == pool_body(id), "receive pool response ownership");
-    }
-}
-
-void exercise_parser_limits(std::uint16_t port)
-{
-    for (const std::size_t size : {16384U, 16385U})
-    {
-        const std::string path = "/" + std::string(size - 1, 'x');
-        const std::array<std::string, 3> requests{
-            "GET " + path + " HTTP/1.1\r\nHost: localhost\r\n\r\n",
-            "GET /limit HTTP/1.1\r\n" + std::string(size, 'x') + ": ok\r\n\r\n",
-            "GET /limit HTTP/1.1\r\nX-Test: " + std::string(size, 'x') + "\r\n\r\n"};
-        for (std::size_t index = 0; index < requests.size(); ++index)
-        {
-            Client client(port);
-            client.send(requests[index]);
-            if (size == 16384)
-            {
-                require(client.response() == (index ? "/limit" : path), "parser token at limit");
-            }
-            else
-            {
-                require(client.response(tds::Status::bad_request) ==
-                            "{\"error\":\"malformed HTTP request\"}",
-                        "parser rejects oversized token");
-            }
-        }
-    }
-    Client body(port);
-    body.send("POST /body HTTP/1.1\r\nHost: localhost\r\nContent-Length: 16385\r\n\r\n");
-    require(body.response(tds::Status::too_large) == "{\"error\":\"malformed HTTP request\"}",
-            "oversized content length rejected before body arrives");
-}
-
-void exercise(std::uint16_t port)
-{
-    exercise_parser_limits(port);
-    Client connection(port);
-    connection.send("GET /first HTTP/1.1\r\nHo");
-    connection.send("st: localhost\r\n\r\n");
-    require(connection.response() == "/first", "fragmented headers");
-    connection.send("POST /body HTTP/1.1\r\nHost: localhost\r\nContent-Length: 6\r\n\r\nab");
-    connection.send("cdef");
-    require(connection.response() == "abcdef", "fragmented body");
-    connection.send(
-        "GET /one HTTP/1.1\r\nHost: localhost\r\n\r\nGET /two HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    require(connection.response() == "/one", "first pipelined response");
-    require(connection.response() == "/two", "second pipelined response");
-    connection.send("POST /body HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: "
-                    "chunked\r\n\r\n3\r\nabc\r\n3\r\ndef\r\n0\r\n\r\n");
-    require(connection.response() == "abcdef", "chunked body");
-    connection.send("GET /%66eed?ignored=yes HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    require(connection.response() == "/feed", "path decoding");
-    connection.send("GET /large HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    require(connection.response() == std::string(1024 * 1024, 'x'), "partial sends");
-    connection.send("POST /body HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n"
-                    "GET /small HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    require(connection.response().empty(), "header-only response");
-    require(connection.response() == "/small", "small response after an empty body");
-    Client half_closed(port);
-    half_closed.send("GET /half-closed HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    half_closed.finish_writing();
-    require(half_closed.response() == "/half-closed", "readable bytes survive peer half-close");
-    std::vector<std::unique_ptr<Client>> burst;
-    for (int i = 0; i < 128; ++i)
-    {
-        auto client = std::make_unique<Client>(port);
-        client->send("GET /burst HTTP/1.1\r\nHost: localhost\r\n\r\n"
-                     "GET /again HTTP/1.1\r\nHost: localhost\r\n\r\n");
-        burst.push_back(std::move(client));
-    }
-    for (auto &client : burst)
-    {
-        require(client->response() == "/burst", "burst response");
-        require(client->response() == "/again", "burst pipelined response");
-    }
-    burst.clear();
-    for (int i = 0; i < 100; ++i)
-    {
-        Client disconnected(port);
-        disconnected.send(
-            "POST /body HTTP/1.1\r\nHost: localhost\r\nContent-Length: 1000\r\n\r\na");
-    }
-    connection.send("GET /alive HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
-    require(connection.response() == "/alive", "server after client disconnects");
 }
 
 class Pipe
@@ -978,56 +664,438 @@ class ChildProcess
     pid_t process_;
 };
 
-int child_server(int ready, int stop, rlim_t descriptor_limit)
+volatile std::sig_atomic_t child_stop_descriptor = -1;
+volatile std::sig_atomic_t child_gate_ready = -1;
+volatile std::sig_atomic_t child_gate_release = -1;
+
+void stop_child(int)
 {
-    try
+    const int saved_errno = errno;
+    const std::uint64_t value = 1;
+    ssize_t result;
+    do
     {
-        const rlimit limit{descriptor_limit, descriptor_limit};
-        require(::setrlimit(RLIMIT_NOFILE, &limit) == 0, "set child descriptor limit");
-        tds::Server server(
-            "127.0.0.1", 0,
-            [](const tds::Request &request) -> tds::Response {
-                if (request.path == "/large")
+        result = ::write(child_stop_descriptor, &value, sizeof(value));
+    } while (result < 0 && errno == EINTR);
+    errno = saved_errno;
+}
+
+void pause_child(int)
+{
+    const int saved_errno = errno;
+    const char ready = 'r';
+    ssize_t result;
+    do
+    {
+        result = ::write(child_gate_ready, &ready, sizeof(ready));
+    } while (result < 0 && errno == EINTR);
+    char released;
+    do
+    {
+        result = ::read(child_gate_release, &released, sizeof(released));
+    } while (result < 0 && errno == EINTR);
+    errno = saved_errno;
+}
+
+class RunningServer
+{
+  public:
+    explicit RunningServer(const Fixture &fixture, rlim_t descriptor_limit = 65535)
+    {
+        Pipe ready;
+        process_ = ::fork();
+        require(process_ >= 0, "fork concrete server");
+        if (process_ == 0)
+        {
+            ready.close_reader();
+            gate_ready_.close_reader();
+            gate_release_.close_writer();
+            try
+            {
+                const rlimit limit{descriptor_limit, descriptor_limit};
+                require(::setrlimit(RLIMIT_NOFILE, &limit) == 0, "set server descriptor limit");
                 {
-                    return {tds::Status::ok, std::string(1024 * 1024, 'x')};
+                    tds::Server server("127.0.0.1", 0, fixture.path, std::string(secret));
+                    child_stop_descriptor = server.stop_descriptor();
+                    child_gate_ready = gate_ready_.writer();
+                    child_gate_release = gate_release_.reader();
+                    require(std::signal(SIGUSR1, stop_child) != SIG_ERR,
+                            "install test stop signal");
+                    require(std::signal(SIGUSR2, pause_child) != SIG_ERR,
+                            "install userspace dispatch gate");
+                    limit_listener_send_buffer(server.port());
+                    const auto port = server.port();
+                    require(::write(ready.writer(), &port, sizeof(port)) ==
+                                static_cast<ssize_t>(sizeof(port)),
+                            "publish server port");
+                    ready.close_writer();
+                    server.run();
                 }
-                return {tds::Status::ok, request.path == "/body" ? request.body : request.path};
-            },
-            [](tds::Request &request) -> std::optional<tds::Response> {
-                if (request.path == "/auth" && request.authorization != "Bearer accepted")
-                {
-                    return tds::Response{tds::Status::unauthorized, "rejected before body"};
-                }
-                return std::nullopt;
-            });
-        limit_listener_send_buffer(server.port());
-        const auto port = server.port();
-        ssize_t written;
+                ::_exit(0);
+            }
+            catch (const std::exception &error)
+            {
+                std::cerr << "child server: " << error.what() << '\n';
+                ::_exit(1);
+            }
+        }
+        child_ = std::make_unique<ChildProcess>(process_);
+        ready.close_writer();
+        gate_ready_.close_writer();
+        gate_release_.close_reader();
+        pollfd startup{ready.reader(), POLLIN, 0};
+        int result;
         do
         {
-            written = ::write(ready, &port, sizeof(port));
-        } while (written < 0 && errno == EINTR);
-        require(written == static_cast<ssize_t>(sizeof(port)), "publish child server port");
-        std::jthread control([&](std::stop_token token) {
-            while (!token.stop_requested())
+            result = ::poll(&startup, 1, 10000);
+        } while (result < 0 && errno == EINTR);
+        require(result > 0, "concrete server startup");
+        require(::read(ready.reader(), &port_, sizeof(port_)) ==
+                    static_cast<ssize_t>(sizeof(port_)),
+                "read concrete server port");
+    }
+
+    ~RunningServer()
+    {
+        if (child_)
+        {
+            try
             {
-                pollfd pipe{stop, POLLIN, 0};
-                const int result = ::poll(&pipe, 1, 50);
-                if (result > 0 || (result < 0 && errno != EINTR))
+                request_stop();
+                resume();
+                child_->wait();
+            }
+            catch (...)
+            {
+                // ChildProcess still owns forced cleanup if graceful shutdown failed
+            }
+        }
+    }
+
+    std::uint16_t port() const noexcept
+    {
+        return port_;
+    }
+
+    pid_t process() const noexcept
+    {
+        return process_;
+    }
+
+    void pause()
+    {
+        require(!paused_, "dispatch gate already active");
+        // Keep the task schedulable so io_uring task_work can complete kernel requests
+        require(::syscall(SYS_tgkill, process_, process_, SIGUSR2) == 0,
+                "pause main-thread dispatch");
+        pollfd ready{gate_ready_.reader(), POLLIN, 0};
+        int result;
+        do
+        {
+            result = ::poll(&ready, 1, 5000);
+        } while (result < 0 && errno == EINTR);
+        char byte;
+        require(result > 0 && ::read(gate_ready_.reader(), &byte, sizeof(byte)) ==
+                                  static_cast<ssize_t>(sizeof(byte)),
+                "main thread entered the dispatch gate");
+        paused_ = true;
+    }
+
+    void resume()
+    {
+        if (!paused_)
+        {
+            return;
+        }
+        const char released = 'r';
+        ssize_t result;
+        do
+        {
+            result = ::write(gate_release_.writer(), &released, sizeof(released));
+        } while (result < 0 && errno == EINTR);
+        require(result == static_cast<ssize_t>(sizeof(released)), "resume userspace dispatch");
+        paused_ = false;
+    }
+
+    void request_stop() const
+    {
+        require(::kill(process_, SIGUSR1) == 0, "request concrete server stop");
+    }
+
+    void stop()
+    {
+        request_stop();
+        resume();
+        child_->wait();
+        child_.reset();
+    }
+
+  private:
+    pid_t process_ = -1;
+    std::unique_ptr<ChildProcess> child_;
+    std::uint16_t port_ = 0;
+    Pipe gate_ready_;
+    Pipe gate_release_;
+    bool paused_ = false;
+};
+
+std::string get_post(std::int64_t id = 1)
+{
+    return "GET /posts/" + std::to_string(id) + " HTTP/1.1\r\nHost: localhost\r\n\r\n";
+}
+
+std::string write_request(std::string_view body, std::size_t padding = 0)
+{
+    return "POST /posts HTTP/1.1\r\nHost: localhost\r\nAuthorization: " + authorization() +
+           "\r\nX-Pad: " + std::string(padding, 'p') +
+           "\r\nContent-Type: application/json\r\nContent-Length: " + std::to_string(body.size()) +
+           "\r\n\r\n" + std::string(body);
+}
+
+std::unique_ptr<Client> ready_client(std::uint16_t port)
+{
+    auto client = std::make_unique<Client>(port);
+    client->send(get_post());
+    require(client->response() == small_post, "concrete API connection established");
+
+    return client;
+}
+
+void exercise_write_batches()
+{
+    Fixture fixture;
+    RunningServer server(fixture);
+    auto client = ready_client(server.port());
+    client->send(write_request(R"({"body":"singleton"})"));
+    require(client->response(tds::Status::created).find("\"body\":\"singleton\"") !=
+                std::string::npos,
+            "singleton write flushes without another request");
+    client->send(write_request(R"({"body":"first"})") + write_request(R"({"body":"second"})") +
+                 get_post(5));
+    require(client->response(tds::Status::created).find("\"body\":\"first\"") != std::string::npos,
+            "first create response keeps pipeline order");
+    require(client->response(tds::Status::created).find("\"body\":\"second\"") != std::string::npos,
+            "second create response keeps pipeline order");
+    require(client->response().find("\"body\":\"second\"") != std::string::npos,
+            "pipelined read observes the committed second write");
+
+    std::vector<std::unique_ptr<Client>> clients;
+    constexpr auto count = tds::write_batch_limit + 1;
+    for (std::size_t index = 0; index < count; ++index)
+    {
+        clients.push_back(ready_client(server.port()));
+    }
+    wait_for_receives(server.process(), clients.size() + 1);
+    server.pause();
+    for (std::size_t index = 0; index < count; ++index)
+    {
+        clients[index]->send(write_request("{\"body\":\"batch:" + std::to_string(index) + "\"}"));
+    }
+    server.resume();
+    for (std::size_t index = 0; index < count; ++index)
+    {
+        require(clients[index]
+                        ->response(tds::Status::created)
+                        .find("\"body\":\"batch:" + std::to_string(index) + "\"") !=
+                    std::string::npos,
+                "concurrent committed response belongs to its own command");
+    }
+    require(fixture.scalar("SELECT count(*) FROM posts") ==
+                static_cast<std::int64_t>(2 + 3 + count),
+            "acknowledged writes are visible to a separate SQLite reader");
+
+    client->send("POST /posts/1/like HTTP/1.1\r\nHost: localhost\r\nAuthorization: " +
+                 authorization() + "\r\nContent-Length: 0\r\n\r\n" + get_post());
+    require(client->response(tds::Status::created) ==
+                "{\"liked\":true,\"already_liked\":false,\"post_id\":1}",
+            "first like has the canonical committed outcome");
+    require(client->response().find("\"like_count\":1") != std::string::npos,
+            "pipelined read observes committed likes");
+
+    Client rejected(server.port());
+    rejected.send("POST /posts/abc/like HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n");
+    require(rejected.response(tds::Status::unauthorized) == "{\"error\":\"missing bearer token\"}",
+            "real auth precedes invalid path ID");
+    server.stop();
+}
+
+void exercise_shutdown_pending()
+{
+    Fixture fixture;
+    RunningServer server(fixture);
+    auto first = ready_client(server.port());
+    auto second = ready_client(server.port());
+    wait_for_receives(server.process(), 2);
+    server.pause();
+    first->send(write_request(R"({"body":"shutdown-one"})"));
+    second->send(write_request(R"({"body":"shutdown-two"})"));
+    wait_for_completion(static_cast<int>(write_request(R"({"body":"shutdown-one"})").size()),
+                        server.process(), 2);
+    first.reset();
+    // Stop is queued before resuming userspace; no fake callback controls admission
+    server.request_stop();
+    wait_for_completion(POLLIN, server.process());
+    server.stop();
+    require(fixture.scalar("SELECT count(*) FROM posts WHERE body LIKE 'shutdown-%'") <= 2,
+            "shutdown does not replay prepared writes");
+}
+
+void exercise_short_send(RunningServer &server)
+{
+    Client slow(server.port(), 4096);
+    slow.send(get_post());
+    require(slow.response() == small_post, "slow concrete API connection established");
+    slow.send(get_post(2));
+    wait_for_blocked_send(server.process());
+    slow.send(get_post());
+    auto barrier = ready_client(server.port());
+    server.pause();
+    bool observed = false;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    do
+    {
+        slow.drain_available();
+        for (const auto &info : ring_fdinfos(server.process()))
+        {
+            std::ifstream stream(info);
+            for (std::string line; std::getline(stream, line);)
+            {
+                const auto start = line.find("res:");
+                int result = 0;
+                if (start != std::string::npos &&
+                    std::from_chars(line.data() + start + 4, line.data() + line.size(), result)
+                            .ec == std::errc{} &&
+                    result > 1024 && result < 1024 * 1024)
                 {
-                    server.request_stop();
-                    return;
+                    observed = true;
                 }
             }
-        });
-        server.run();
-        return 0;
-    }
-    catch (const std::exception &error)
+        }
+        if (!observed)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    } while (!observed && std::chrono::steady_clock::now() < deadline);
+    require(observed, "real short-send CQE observed before draining the response");
+    server.resume();
+    require(slow.response() == Fixture::large_post(), "large API response survives partial sends");
+    require(slow.response() == small_post, "pipeline resumes after the partial response");
+}
+
+std::string pool_body(std::size_t id)
+{
+    return std::to_string(id) + ':' + std::string(128, static_cast<char>('a' + id % 26));
+}
+
+void send_pool_requests(const std::vector<std::unique_ptr<Client>> &clients)
+{
+    for (std::size_t id = 0; id < clients.size(); ++id)
     {
-        std::cerr << "child server: " << error.what() << '\n';
-        return 1;
+        clients[id]->send(write_request("{\"body\":\"" + pool_body(id) + "\"}", 2048));
     }
+}
+
+void exercise_pool(RunningServer &server, const std::vector<std::unique_ptr<Client>> &clients)
+{
+    // Receiving a response does not imply its send CQE has rearmed the next receive
+    wait_for_receives(server.process(), clients.size());
+    server.pause();
+    send_pool_requests(clients);
+    // The pipe gate blocks userspace dispatch while kernel task_work remains runnable
+    wait_for_completion(-ENOBUFS, server.process());
+    server.resume();
+    for (std::size_t id = 0; id < clients.size(); ++id)
+    {
+        require(clients[id]
+                        ->response(tds::Status::created)
+                        .find("\"body\":\"" + pool_body(id) + "\"") != std::string::npos,
+                "receive-pool recovery preserves each real create body");
+    }
+}
+
+void exercise_parser_limits(std::uint16_t port)
+{
+    for (const std::size_t size : {16384U, 16385U})
+    {
+        const std::string path = "/" + std::string(size - 1, 'x');
+        const std::array<std::string, 3> requests{
+            "GET " + path + " HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            "GET /limit HTTP/1.1\r\n" + std::string(size, 'x') + ": ok\r\n\r\n",
+            "GET /limit HTTP/1.1\r\nX-Test: " + std::string(size, 'x') + "\r\n\r\n"};
+        for (const auto &request : requests)
+        {
+            Client client(port);
+            client.send(request);
+            if (size == 16384)
+            {
+                require(client.response(tds::Status::not_found) == "{\"error\":\"not found\"}",
+                        "at-limit token reaches real routing");
+            }
+            else
+            {
+                require(client.response(tds::Status::bad_request) ==
+                            "{\"error\":\"malformed HTTP request\"}",
+                        "oversized token fails framing");
+            }
+        }
+    }
+    Client body(port);
+    body.send("POST /posts HTTP/1.1\r\nHost: localhost\r\nContent-Length: 16385\r\n\r\n");
+    require(body.response(tds::Status::too_large) == "{\"error\":\"malformed HTTP request\"}",
+            "framing rejects oversized content length before authentication");
+}
+
+void exercise(std::uint16_t port)
+{
+    exercise_parser_limits(port);
+    Client connection(port);
+    connection.send("GET /posts/1 HTTP/1.1\r\nHo");
+    connection.send("st: localhost\r\n\r\n");
+    require(connection.response() == small_post, "fragmented headers");
+    const auto create = write_request(R"({"body":"fragmented"})");
+    connection.send(std::string_view(create).substr(0, create.size() - 5));
+    connection.send(std::string_view(create).substr(create.size() - 5));
+    require(connection.response(tds::Status::created).find("\"body\":\"fragmented\"") !=
+                std::string::npos,
+            "fragmented authenticated JSON body");
+    connection.send(get_post() + get_post());
+    require(connection.response() == small_post && connection.response() == small_post,
+            "two concrete pipelined reads");
+
+    connection.send("POST /posts HTTP/1.1\r\nHost: localhost\r\nAuthorization: " + authorization() +
+                    "\r\nTransfer-Encoding: "
+                    "chunked\r\n\r\n8\r\n{\"body\":\r\n9\r\n\"chunked\"\r\n1\r\n}\r\n0\r\n\r\n");
+    require(connection.response(tds::Status::created).find("\"body\":\"chunked\"") !=
+                std::string::npos,
+            "chunked authenticated JSON body");
+    connection.send("GET /%70osts/1?ignored=yes HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    require(connection.response() == small_post, "decoded route ignores query string");
+
+    Client half_closed(port);
+    half_closed.send(get_post());
+    half_closed.finish_writing();
+    require(half_closed.response() == small_post, "readable bytes survive half-close");
+    std::vector<std::unique_ptr<Client>> burst;
+    for (int index = 0; index < 128; ++index)
+    {
+        auto client = std::make_unique<Client>(port);
+        client->send(get_post() + get_post());
+        burst.push_back(std::move(client));
+    }
+    for (auto &client : burst)
+    {
+        require(client->response() == small_post && client->response() == small_post,
+                "burst pipeline responses remain ordered");
+    }
+    burst.clear();
+    for (int index = 0; index < 100; ++index)
+    {
+        Client disconnected(port);
+        disconnected.send("POST /posts HTTP/1.1\r\nHost: localhost\r\nAuthorization: " +
+                          authorization() + "\r\nContent-Length: 1000\r\n\r\na");
+    }
+    connection.send("GET /posts/1 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+    require(connection.response() == small_post, "server survives incomplete client disconnects");
 }
 
 std::optional<std::size_t> registered_files(const std::vector<std::filesystem::path> &infos)
@@ -1075,87 +1143,64 @@ std::optional<std::size_t> registered_files(const std::vector<std::filesystem::p
 
 void exercise_capacity(std::size_t count, rlim_t descriptor_limit, bool progress = false)
 {
-    require(count > descriptor_limit, "capacity clients exceed a single direct table");
+    require(count > descriptor_limit, "capacity clients exceed one direct table");
     const auto stage = [progress](std::string_view message) {
         if (progress)
         {
             std::cout << "capacity: " << message << '\n' << std::flush;
         }
     };
-    Pipe ready;
-    Pipe stop;
-    const auto process = ::fork();
-    require(process >= 0, "fork low-limit server");
-    if (process == 0)
-    {
-        ready.close_reader();
-        stop.close_writer();
-        const auto result = child_server(ready.writer(), stop.reader(), descriptor_limit);
-        ::_exit(result);
-    }
-    ChildProcess child(process);
-    ready.close_writer();
-    stop.close_reader();
-    pollfd startup{ready.reader(), POLLIN, 0};
-    int available;
-    do
-    {
-        available = ::poll(&startup, 1, 10000);
-    } while (available < 0 && errno == EINTR);
-    require(available > 0, "child startup timed out");
-    std::uint16_t port = 0;
-    ssize_t received;
-    do
-    {
-        received = ::read(ready.reader(), &port, sizeof(port));
-    } while (received < 0 && errno == EINTR);
-    require(received == static_cast<ssize_t>(sizeof(port)), "read child server port");
-    ready.close_reader();
-
+    Fixture fixture;
+    RunningServer server(fixture, descriptor_limit);
+    const auto port = server.port();
+    const auto process = server.process();
     std::vector<std::unique_ptr<Client>> clients;
     clients.reserve(count);
     for (std::size_t id = 0; id < count; ++id)
     {
-        // Distinct loopback source addresses avoid ephemeral tuple exhaustion in opt-in runs.
         const auto source = INADDR_LOOPBACK + 1U + static_cast<std::uint32_t>(id / 16000);
-        // Keep the final unread response bounded even after its earlier 1 MiB round trip.
         auto client = std::make_unique<Client>(port, id + 1 == count ? 4096 : 0, source);
-        client->send("GET /idle HTTP/1.1\r\nHost: localhost\r\n\r\n");
-        require(client->response() == "/idle", "direct connection established");
+        client->send(get_post());
+        require(client->response() == small_post, "direct concrete API connection established");
         clients.push_back(std::move(client));
     }
     const auto infos = ring_fdinfos(process);
-    require(infos.size() > 1, "multiple io_uring rings used at low descriptor limit");
+    require(infos.size() > 1, "multiple rings used at the official table boundary");
     auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     auto files_before = registered_files(infos);
     while (!files_before || *files_before < count)
     {
         require(std::chrono::steady_clock::now() < deadline,
-                "all client sockets are registered direct descriptors");
+                "all clients registered as direct FDs");
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
         files_before = registered_files(infos);
     }
-    stage("all clients accepted and registered across multiple rings");
+    stage("all clients registered across multiple rings");
     const auto removed = std::min(static_cast<std::size_t>(descriptor_limit), count / 2);
     for (std::size_t id = 0; id < removed; ++id)
     {
         clients[id].reset();
     }
+
     auto &satellite = *clients.back();
-    satellite.send("POST /body HTTP/1.1\r\nHo");
-    satellite.send("st: localhost\r\nContent-Length: 6\r\n\r\nab");
-    satellite.send("cdefGET /satellite HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    require(satellite.response() == "abcdef", "satellite fragmented request body");
-    require(satellite.response() == "/satellite", "satellite pipeline after primary closes");
-    satellite.send("GET /large HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    require(satellite.response() == std::string(1024 * 1024, 'x'), "satellite partial writes");
+    const auto wire = write_request(R"({"body":"satellite-fragments"})");
+    satellite.send(std::string_view(wire).substr(0, 25));
+    satellite.send(std::string_view(wire).substr(25, wire.size() - 30));
+    satellite.send(std::string_view(wire).substr(wire.size() - 5));
+    satellite.send(get_post());
+    require(satellite.response(tds::Status::created).find("\"body\":\"satellite-fragments\"") !=
+                std::string::npos,
+            "satellite fragmented write");
+    require(satellite.response() == small_post, "satellite pipeline after primary closes");
+    satellite.send(get_post(2));
+    require(satellite.response() == Fixture::large_post(), "satellite large response ownership");
     {
         Client rejected(port);
-        rejected.send("POST /auth HTTP/1.1\r\nHost: localhost\r\nContent-Length: 999\r\n\r\n");
-        require(rejected.response(tds::Status::unauthorized) == "rejected before body",
-                "direct socket rejects authorization before an absent body");
+        rejected.send("POST /posts HTTP/1.1\r\nHost: localhost\r\nContent-Length: 999\r\n\r\n");
+        require(rejected.response(tds::Status::unauthorized) ==
+                    "{\"error\":\"missing bearer token\"}",
+                "real auth rejects an absent body on a direct socket");
     }
-    stage("satellite protocol and authorization checks passed after primary closes");
     deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     while (true)
     {
@@ -1164,34 +1209,33 @@ void exercise_capacity(std::size_t count, rlim_t descriptor_limit, bool progress
         {
             break;
         }
-        require(std::chrono::steady_clock::now() < deadline, "closed direct slots released");
+        require(std::chrono::steady_clock::now() < deadline, "closed direct slots retired");
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     for (std::size_t id = 0; id < removed; ++id)
     {
         const auto source = INADDR_LOOPBACK + 1024U + static_cast<std::uint32_t>(id / 16000);
         auto client = std::make_unique<Client>(port, 0, source);
-        client->send("GET /reused HTTP/1.1\r\nHost: localhost\r\n\r\n");
-        require(client->response() == "/reused", "reused direct slot responds");
+        client->send(get_post());
+        require(client->response() == small_post, "reused direct slot serves the real API");
         clients[id] = std::move(client);
     }
-    require(ring_fdinfos(process).size() == infos.size(), "reuse does not allocate another ring");
-    stage("closed direct slots reused without allocating another ring");
+    require(ring_fdinfos(process).size() == infos.size(), "reuse allocates no extra ring");
+    stage("direct slots reused");
     for (std::size_t id = 0; id + 1 < clients.size(); id += 2)
     {
-        clients[id]->send("POST /body HTTP/1.1\r\nHost: localhost\r\nContent-Length: 999\r\n\r\na");
+        clients[id]->send("POST /posts HTTP/1.1\r\nHost: localhost\r\nAuthorization: " +
+                          authorization() + "\r\nContent-Length: 999\r\n\r\na");
         clients[id].reset();
     }
-    clients.back()->send("GET /alive HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    require(clients.back()->response() == "/alive", "satellite survives abrupt partial requests");
-    stage("abrupt partial closes passed, waiting for unread satellite send");
-    clients.back()->send("GET /large HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    clients.back()->send(get_post());
+    require(clients.back()->response() == small_post, "satellite survives incomplete closes");
+    clients.back()->send(get_post(2));
     wait_for_blocked_send(process);
-    stage("satellite send backpressure observed, stopping with live sockets");
-    stop.close_writer();
-    child.wait();
+    stage("stopping with a backpressured satellite send");
+    server.stop();
     std::cout << count << " external clients, " << descriptor_limit << " ordinary-fd limit, "
-              << infos.size() << " rings, slot reuse and live-socket shutdown passed\n";
+              << infos.size() << " rings, real API, slot reuse and live shutdown passed\n";
 }
 
 } // namespace
@@ -1222,96 +1266,44 @@ int main(int argc, char **argv)
                         "invalid child descriptor limit");
             }
             exercise_capacity(count, limit, true);
+
             return 0;
         }
-        // Fork before this process creates a server thread or io_uring.
         exercise_capacity(768, 256);
         exercise_request_reuse();
         exercise_write_batches();
-        exercise_queued_write_shutdown();
-        RequestGate gate;
-        tds::Server server(
-            "127.0.0.1", 0,
-            [&gate](const tds::Request &request) -> tds::Response {
-                if (request.path == "/block")
-                {
-                    gate.block();
-                }
-                if (request.path == "/large")
-                {
-                    return {tds::Status::ok, std::string(1024 * 1024, 'x')};
-                }
-                return {tds::Status::ok, request.path == "/body" ? request.body : request.path};
-            },
-            [](tds::Request &) -> std::optional<tds::Response> {
-                return std::nullopt;
-            });
-        std::exception_ptr server_error;
-        std::jthread thread([&] {
-            try
-            {
-                server.run();
-            }
-            catch (...)
-            {
-                server_error = std::current_exception();
-            }
-        });
+        exercise_shutdown_pending();
+        Fixture fixture;
+        RunningServer server(fixture);
+        exercise(server.port());
+        exercise_short_send(server);
         std::vector<std::unique_ptr<Client>> idle;
-        try
+        for (int index = 0; index < 1536; ++index)
         {
-            exercise(server.port());
-            exercise_short_send(server.port(), gate);
-            // Exercise cancellation across more operations than the submission ring holds.
-            for (int i = 0; i < 1536; ++i)
-            {
-                auto client = std::make_unique<Client>(server.port());
-                client->send("GET /idle HTTP/1.1\r\nHost: localhost\r\n\r\n");
-                require(client->response() == "/idle", "idle connection established");
-                idle.push_back(std::move(client));
-            }
-            exercise_pool(server.port(), idle, gate);
-
-            gate.reset();
-            Client unread(server.port(), 4096);
-            unread.send("GET /ready HTTP/1.1\r\nHost: localhost\r\n\r\n");
-            require(unread.response() == "/ready", "unread connection established");
-            unread.send("GET /large HTTP/1.1\r\nHost: localhost\r\n\r\n");
-            wait_for_blocked_send();
-            Client blocker(server.port());
-            blocker.send("GET /block HTTP/1.1\r\nHost: localhost\r\n\r\n");
-            gate.wait();
-            send_pool_requests(idle);
-            wait_for_completion(-ENOBUFS);
-            // Receive completions precede stop so shutdown also covers already completed reads
-            server.request_stop();
-            wait_for_completion(POLLIN);
-            gate.release();
+            idle.push_back(ready_client(server.port()));
         }
-        catch (...)
-        {
-            gate.release();
-            server.request_stop();
-            thread.join();
-            if (server_error)
-            {
-                std::rethrow_exception(server_error);
-            }
-            throw;
-        }
+        exercise_pool(server, idle);
+        Client unread(server.port(), 4096);
+        unread.send(get_post(2));
+        wait_for_blocked_send(server.process());
+        wait_for_receives(server.process(), idle.size());
+        server.pause();
+        send_pool_requests(idle);
+        wait_for_completion(-ENOBUFS, server.process());
         server.request_stop();
-        thread.join();
-        if (server_error)
-        {
-            std::rethrow_exception(server_error);
-        }
-        std::cout << "HTTP fragmentation, pipelining, pool exhaustion, partial sends and "
-                     "cancellation passed\n";
+        server.stop();
+        std::cout << "HTTP framing, real auth/writes, pipeline visibility, pool exhaustion, "
+                     "partial sends and cancellation passed\n";
+        std::cout << "Layout bytes: Connection=" << sizeof(tds::net::Connection)
+                  << " Exchange=" << sizeof(tds::http::Exchange)
+                  << " HttpSession=" << sizeof(tds::http::HttpSession) << '\n';
+
         return 0;
     }
     catch (const std::exception &error)
     {
         std::cerr << error.what() << '\n';
+
         return 1;
     }
 }

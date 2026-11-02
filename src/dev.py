@@ -1119,7 +1119,14 @@ def profile_stage(frames: list[tuple[str, str]]) -> str:
         return "database_and_rows"
     if any(
         name in symbols
-        for name in ("tds::Server::", "tds::Api::", "tds::Application::", "llhttp", "io_uring")
+        for name in (
+            "tds::Server::",
+            "tds::Application::",
+            "tds::http::",
+            "tds::net::",
+            "llhttp",
+            "io_uring",
+        )
     ):
         return "transport_and_other"
     return "unknown"

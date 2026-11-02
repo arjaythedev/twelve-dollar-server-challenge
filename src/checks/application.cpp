@@ -378,30 +378,30 @@ void fragmented_context_and_pipeline()
                    "\r\nContent-Length: 4\r\n\r\nab");
     require(session.consume().valid && session.headers_pending(),
             "fragment did not pause at headers");
-    const auto &request = session.request();
+    const auto &request = session.message();
     auto accepted = app.accept_headers({request.method, request.path, request.authorization});
     require(accepted && std::holds_alternative<tds::LikeHead>(*accepted),
             "fragmented like rejected");
     const auto id = std::get<tds::LikeHead>(*accepted).id;
-    require(id.data() == session.request().path.data() + 7, "header context copied the path ID");
-    session.accept_headers();
+    require(id.data() == session.message().path.data() + 7, "header context copied the path ID");
+    session.accept_headers(std::move(*accepted));
     require(session.consume().valid && !session.complete(), "partial body completed too early");
     session.append("cdGET /feed HTTP/1.1\r\nHost: local\r\n\r\n");
     require(session.consume().valid && session.complete() &&
-                std::get<tds::LikeHead>(*accepted).id.data() == id.data(),
+                std::get<tds::LikeHead>(session.accepted_head()).id.data() == id.data(),
             "body fragment invalidated accepted path data");
-    const auto prepared = app.prepare(*accepted, session.request().body);
+    const auto prepared = app.prepare(session.accepted_head(), session.message().body);
     require(prepared && std::get<tds::LikePost>(std::get<tds::WriteCommand>(*prepared)).post_id ==
                             tds::PostId{3},
             "fragmented message did not produce its owned command");
 
     session.reset();
     require(session.consume().valid && session.headers_pending(), "pipeline remainder was lost");
-    const auto &next = session.request();
+    const auto &next = session.message();
     accepted = app.accept_headers({next.method, next.path, next.authorization});
     require(accepted && std::holds_alternative<tds::FeedHead>(*accepted),
             "previous identity or route leaked into pipelined read");
-    session.accept_headers();
+    session.accept_headers(std::move(*accepted));
     require(session.consume().valid && session.complete(), "pipelined read did not complete");
 
     tds::http::HttpSession malformed;

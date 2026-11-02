@@ -1,13 +1,15 @@
-#include "transport.hpp"
+#include "server.hpp"
+#include "app/application.hpp"
+#include "http/exchange.hpp"
 #include "net/reactor.hpp"
-#include "transport/connection.hpp"
 
 #ifdef TDS_DIAGNOSTICS
-#include "transport/diagnostics.hpp"
+#include "diagnostics/io.hpp"
 #endif
 
 #include <array>
 #include <iostream>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <utility>
@@ -26,10 +28,8 @@ using net::Reactor;
 class Server::State
 {
   public:
-    State(std::string_view host, std::uint16_t port, Handler handle, HeaderHandler head,
-          BatchHandler write_handler)
-        : reactor(host, port), handler(std::move(handle)), headers(std::move(head)),
-          writes(std::move(write_handler))
+    State(std::string_view host, std::uint16_t port, std::string database_path, std::string secret)
+        : application(std::move(database_path), std::move(secret)), reactor(host, port)
     {
     }
 
@@ -86,22 +86,43 @@ class Server::State
     }
 
   private:
-    RequestResult handle(Connection &connection)
+    void dispatch(Connection &connection)
     {
+        const auto &session = connection.exchange->session;
 #ifdef TDS_DIAGNOSTICS
-        const auto &request = connection.exchange->session.request();
-        if (request.endpoint == Endpoint::create || request.endpoint == Endpoint::like)
+        const bool reading = !std::holds_alternative<CreateHead>(session.accepted_head()) &&
+                             !std::holds_alternative<LikeHead>(session.accepted_head());
+        std::optional<timing::Scope> sample;
+        if (reading)
         {
-            return handler(request);
+            diagnostics.receive_to_handler_ns.record(timing::now_ns() -
+                                                     connection.exchange->receive_serviced_ns);
+            sample.emplace(diagnostics.handler_wall_ns);
         }
-        diagnostics.receive_to_handler_ns.record(timing::now_ns() -
-                                                 connection.exchange->receive_serviced_ns);
-        timing::Scope sample(diagnostics.handler_wall_ns);
-
-        return handler(request);
-#else
-        return handler(connection.exchange->session.request());
 #endif
+        auto prepared = application.prepare(session.accepted_head(), session.message().body);
+        if (!prepared)
+        {
+#ifdef TDS_DIAGNOSTICS
+            sample.reset();
+#endif
+            connection.close_after =
+                connection.close_after || prepared.error().status == Status::internal_error;
+            respond(connection, Application::error_response(prepared.error()));
+
+            return;
+        }
+        if (auto *write = std::get_if<WriteCommand>(&*prepared))
+        {
+            queue_write(connection, std::move(*write));
+
+            return;
+        }
+        auto response = application.read(std::get<ReadQuery>(*prepared));
+#ifdef TDS_DIAGNOSTICS
+        sample.reset();
+#endif
+        respond(connection, std::move(response));
     }
 
     void send(Connection &connection)
@@ -116,14 +137,14 @@ class Server::State
     void respond(Connection &connection, Response response)
     {
         connection.close_after =
-            connection.close_after || !connection.exchange->session.request().keep_alive;
+            connection.close_after || !connection.exchange->session.message().keep_alive;
         connection.exchange->reply.prepare(std::move(response), connection.close_after);
         send(connection);
     }
 
     void flush_writes()
     {
-        if (pending_writes.commands.empty())
+        if (pending_writes.commands.empty() || pending_writes.resolved)
         {
             return;
         }
@@ -135,7 +156,7 @@ class Server::State
             {
                 reactor.close(*connection);
             }
-            pending_writes.commands.clear();
+            pending_writes.clear();
 
             return;
         }
@@ -146,14 +167,38 @@ class Server::State
             diagnostics.write_batch_size.record(count);
             timing::Scope sample(diagnostics.write_batch_wall_ns);
 #endif
-            writes(pending_writes.commands, responses);
+            // Keep the existing per-batch allocation until the architecture comparison passes
+            std::vector<WriteOutcome> outcomes(count);
+            const auto committed = application.commit(pending_writes.commands, outcomes);
+            // Serialization or send failures must never replay already committed commands
+            pending_writes.resolved = true;
+            if (!committed)
+            {
+                throw std::runtime_error(committed.error().message);
+            }
+            for (std::size_t index = 0; index < count; ++index)
+            {
+                try
+                {
+                    responses[index] =
+                        application.write_reply(pending_writes.commands[index], outcomes[index]);
+                }
+                catch (const std::exception &error)
+                {
+                    std::cerr << "request failed: " << error.what() << '\n';
+                    responses[index] = Application::error_response(
+                        {Status::internal_error, "internal server error"});
+                }
+            }
         }
         catch (const std::exception &error)
         {
             std::cerr << "write batch failed: " << error.what() << '\n';
+            pending_writes.resolved = true;
             for (auto &response : responses)
             {
-                response = {Status::internal_error, "{\"error\":\"internal server error\"}"};
+                response =
+                    Application::error_response({Status::internal_error, "internal server error"});
             }
         }
         // Queued commands and their targets stay alive until replies have been staged
@@ -164,7 +209,7 @@ class Server::State
                 connection.close_after || responses[index].status == Status::internal_error;
             respond(connection, std::move(responses[index]));
         }
-        pending_writes.commands.clear();
+        pending_writes.clear();
     }
 
     void queue_write(Connection &connection, WriteCommand command)
@@ -187,35 +232,30 @@ class Server::State
                 if (!result.valid)
                 {
                     connection.close_after = true;
-                    respond(connection,
-                            {session.error(), "{\"error\":\"malformed HTTP request\"}"});
+                    respond(connection, Application::error_response(
+                                            {session.error(), "malformed HTTP request"}));
 
                     return;
                 }
                 if (session.headers_pending())
                 {
-                    if (auto rejected = headers(session.request()))
+                    const auto &message = session.message();
+                    auto accepted = application.accept_headers(
+                        {message.method, message.path, message.authorization});
+                    if (!accepted)
                     {
                         // Unread body bytes must not become the next keep-alive request
                         connection.close_after = true;
-                        respond(connection, std::move(*rejected));
+                        respond(connection, Application::error_response(accepted.error()));
 
                         return;
                     }
-                    session.accept_headers();
+                    session.accept_headers(std::move(*accepted));
                     continue;
                 }
                 if (session.complete())
                 {
-                    auto outcome = handle(connection);
-                    if (auto *response = std::get_if<Response>(&outcome))
-                    {
-                        respond(connection, std::move(*response));
-                    }
-                    else
-                    {
-                        queue_write(connection, std::get<WriteCommand>(std::move(outcome)));
-                    }
+                    dispatch(connection);
                 }
                 else
                 {
@@ -229,7 +269,8 @@ class Server::State
         {
             std::cerr << "request failed: " << error.what() << '\n';
             connection.close_after = true;
-            respond(connection, {Status::internal_error, "{\"error\":\"internal server error\"}"});
+            respond(connection,
+                    Application::error_response({Status::internal_error, "internal server error"}));
         }
     }
 
@@ -312,31 +353,36 @@ class Server::State
         }
     }
 
+    // Keep the application alive until reactor-owned I/O storage has retired
+    Application application;
     Reactor reactor;
-    Handler handler;
-    HeaderHandler headers;
-    BatchHandler writes;
 
-    struct PendingWrites
+    struct WriteBatch
     {
-        PendingWrites()
+        WriteBatch()
         {
             commands.reserve(write_batch_limit);
+        }
+
+        void clear() noexcept
+        {
+            commands.clear();
+            resolved = false;
         }
 
         std::array<Connection *, write_batch_limit> connections{};
         std::array<Response, write_batch_limit> responses{};
         std::vector<WriteCommand> commands;
+        bool resolved = false;
     } pending_writes;
 #ifdef TDS_DIAGNOSTICS
-    transport::TransportDiagnostics diagnostics;
+    diagnostics::IoDiagnostics diagnostics;
 #endif
 };
 
-Server::Server(std::string_view host, std::uint16_t port, Handler handler, HeaderHandler headers,
-               BatchHandler writes)
-    : state_(std::make_unique<State>(host, port, std::move(handler), std::move(headers),
-                                     std::move(writes)))
+Server::Server(std::string_view host, std::uint16_t port, std::string database_path,
+               std::string secret)
+    : state_(std::make_unique<State>(host, port, std::move(database_path), std::move(secret)))
 {
 }
 

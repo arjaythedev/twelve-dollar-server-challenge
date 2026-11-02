@@ -13,10 +13,10 @@ namespace tds::net
 class Ring;
 }
 
-namespace tds::transport
+namespace tds::diagnostics
 {
 
-struct TransportDiagnostics
+struct IoDiagnostics
 {
     void start() noexcept;
     void report(std::span<const std::unique_ptr<net::Ring>> rings, bool final) noexcept;
@@ -30,6 +30,6 @@ struct TransportDiagnostics
     std::uint64_t previous_report_write_ns = 0;
 };
 
-} // namespace tds::transport
+} // namespace tds::diagnostics
 
 #endif

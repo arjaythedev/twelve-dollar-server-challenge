@@ -1,9 +1,8 @@
 #include <liburing.h>
 #include <sqlite3.h>
 
-#include "api.hpp"
 #include "parsing.hpp"
-#include "transport.hpp"
+#include "server.hpp"
 
 #include <array>
 #include <cerrno>
@@ -250,18 +249,8 @@ int main(int argc, char **argv)
         {
             throw std::runtime_error("PORT must be between 1 and 65535");
         }
-        tds::Api api(setting("SQLITE_PATH"), setting("JWT_SECRET"));
-        tds::Server server(
-            host, static_cast<std::uint16_t>(*port),
-            [&](const tds::Request &request) {
-                return api.handle(request);
-            },
-            [&](tds::Request &request) {
-                return api.accept_headers(request);
-            },
-            [&](std::span<const tds::WriteCommand> commands, std::span<tds::Response> responses) {
-                api.handle_writes(commands, responses);
-            });
+        tds::Server server(host, static_cast<std::uint16_t>(*port), setting("SQLITE_PATH"),
+                           setting("JWT_SECRET"));
         const Signals signals(server.stop_descriptor());
         std::cout << "Listening on " << host << ':' << server.port() << " through io_uring\n"
                   << std::flush;

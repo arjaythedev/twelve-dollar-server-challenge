@@ -1,26 +1,10 @@
 #pragma once
 
-#include "identity.hpp"
-#include "model.hpp"
-
-#include <cstdint>
-#include <optional>
 #include <string>
 #include <string_view>
 
 namespace tds
 {
-
-enum class Endpoint : std::uint8_t
-{
-    unresolved,
-    health,
-    feed,
-    post,
-    create,
-    like,
-    missing
-};
 
 enum class Status : unsigned short
 {
@@ -34,24 +18,11 @@ enum class Status : unsigned short
     unavailable = 503,
 };
 
-struct Request
-{
-    std::string method;
-    std::string path;
-    std::string authorization;
-    std::string body;
-    std::optional<Identity> identity;
-    Endpoint endpoint = Endpoint::unresolved;
-    bool keep_alive = true;
-};
-
 struct Response
 {
     Status status;
     std::string body;
 };
-
-using RequestResult = std::variant<Response, WriteCommand>;
 
 struct ApiError
 {

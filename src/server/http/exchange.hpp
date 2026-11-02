@@ -1,12 +1,12 @@
 #pragma once
 
-#include "../http/reply.hpp"
-#include "../http/session.hpp"
+#include "reply.hpp"
+#include "session.hpp"
 
 #include <cstddef>
 #include <cstdint>
 
-namespace tds::transport
+namespace tds::http
 {
 
 struct Exchange
@@ -20,12 +20,12 @@ struct Exchange
         return session.retained_capacity() + reply.retained_capacity();
     }
 
-    http::HttpSession session;
-    http::Reply reply;
+    HttpSession session;
+    Reply reply;
 #ifdef TDS_DIAGNOSTICS
     std::uint64_t send_prepared_ns = 0;
     std::uint64_t receive_serviced_ns = 0;
 #endif
 };
 
-} // namespace tds::transport
+} // namespace tds::http

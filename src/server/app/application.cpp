@@ -12,10 +12,7 @@
 
 namespace tds
 {
-namespace
-{
-
-Response error_response(ApiError error)
+Response Application::error_response(ApiError error)
 {
     std::string output = "{\"error\":";
     quote(output, error.message);
@@ -23,6 +20,9 @@ Response error_response(ApiError error)
 
     return {error.status, std::move(output)};
 }
+
+namespace
+{
 
 std::expected<PostId, ApiError> parse_post_id(std::string_view text)
 {

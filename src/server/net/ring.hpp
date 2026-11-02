@@ -27,9 +27,9 @@ class Ring
     Ring(const Ring &) = delete;
     Ring &operator=(const Ring &) = delete;
 
-    std::unique_ptr<transport::Exchange> acquire_exchange();
+    std::unique_ptr<http::Exchange> acquire_exchange();
     // Only reset exchanges without pipeline input enter this ring-local pool
-    void recycle_exchange(std::unique_ptr<transport::Exchange> exchange);
+    void recycle_exchange(std::unique_ptr<http::Exchange> exchange);
 
     void submit()
     {
@@ -90,7 +90,7 @@ class Ring
   private:
     static constexpr std::size_t max_pooled_exchanges = 1024;
     static constexpr std::size_t max_retained_capacity = 8192;
-    std::vector<std::unique_ptr<transport::Exchange>> exchange_pool_;
+    std::vector<std::unique_ptr<http::Exchange>> exchange_pool_;
 };
 
 } // namespace tds::net

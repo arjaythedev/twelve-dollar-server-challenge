@@ -1,4 +1,4 @@
-#include "diagnostics.hpp"
+#include "io.hpp"
 
 #ifdef TDS_DIAGNOSTICS
 
@@ -8,17 +8,16 @@
 #include <cstddef>
 #include <cstdio>
 
-namespace tds::transport
+namespace tds::diagnostics
 {
 
-void TransportDiagnostics::start() noexcept
+void IoDiagnostics::start() noexcept
 {
     diagnostics_started_ns = timing::now_ns();
     diagnostics_last_ns = diagnostics_started_ns;
 }
 
-void TransportDiagnostics::report(std::span<const std::unique_ptr<net::Ring>> rings,
-                                  bool final) noexcept
+void IoDiagnostics::report(std::span<const std::unique_ptr<net::Ring>> rings, bool final) noexcept
 {
     const auto now = timing::now_ns();
     const auto interval = now - diagnostics_last_ns;
@@ -80,6 +79,6 @@ void TransportDiagnostics::report(std::span<const std::unique_ptr<net::Ring>> ri
     diagnostics_last_ns = now;
 }
 
-} // namespace tds::transport
+} // namespace tds::diagnostics
 
 #endif

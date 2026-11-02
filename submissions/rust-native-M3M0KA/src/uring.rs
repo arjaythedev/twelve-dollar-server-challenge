@@ -19,7 +19,7 @@ pub const IORING_OFF_SQES: i64 = 0x1000_0000;
 pub const IORING_SETUP_SINGLE_ISSUER: u32 = 1 << 12;
 pub const IORING_SETUP_DEFER_TASKRUN: u32 = 1 << 13;
 pub const IORING_SETUP_COOP_TASKRUN: u32 = 1 << 8;
-pub const IORING_SETUP_TASKRUN_FLAG: u32 = 1 << 14;
+pub const IORING_SETUP_TASKRUN_FLAG: u32 = 1 << 9;
 pub const IORING_SETUP_CQSIZE: u32 = 1 << 3;
 /// Tolerate unknown setup bits (5.5+), and don't drop the rest of a batch when
 /// one SQE is refused (5.19+; this ring needs 6.0+ for DEFER_TASKRUN anyway).
@@ -31,6 +31,7 @@ pub const IORING_ENTER_SQ_WAKEUP: u32 = 2;
 
 pub const IORING_REGISTER_FILES: u32 = 2;
 pub const IORING_UNREGISTER_FILES: u32 = 3;
+pub const IORING_REGISTER_EVENTFD: u32 = 4;
 pub const IORING_REGISTER_EVENTFD_ASYNC: u32 = 7;
 pub const IORING_REGISTER_PBUF_RING: u32 = 22;
 
@@ -38,8 +39,8 @@ pub const IORING_OP_NOP: u8 = 0;
 pub const IORING_OP_ACCEPT: u8 = 13;
 pub const IORING_OP_CLOSE: u8 = 19;
 pub const IORING_OP_SEND: u8 = 26;
+pub const IORING_OP_RECV: u8 = 27;
 pub const IORING_OP_SHUTDOWN: u8 = 34;
-pub const IORING_OP_RECV_MULTISHOT: u8 = 47;
 pub const IORING_OP_PROVIDE_BUFFERS: u8 = 31;
 
 pub const IOSQE_FIXED_FILE: u8 = 1 << 0;
@@ -52,7 +53,6 @@ pub const IORING_ACCEPT_MULTISHOT: u16 = 1;
 pub const IORING_FILE_INDEX_ALLOC: i32 = -1;
 
 pub const IORING_CQE_F_BUFFER: u32 = 1;
-pub const IORING_CQE_F_MORE: u32 = 2;
 pub const IORING_CQE_BUFFER_SHIFT: u32 = 16;
 
 pub const IORING_ASYNC_CANCEL_ANY: u32 = 1 << 3;
@@ -186,7 +186,9 @@ impl Ring {
             p.cq_entries = cq_entries;
             fd = unsafe { syscall(SYS_SETUP, entries as i64, &mut p as *mut Params) } as c_int;
             if fd >= 0 {
-                return Self::map(fd, &p);
+                if let Some(ring) = Self::map(fd, &p) {
+                    return Some(ring);
+                }
             }
             if flags == 0 {
                 break;
@@ -228,7 +230,7 @@ impl Ring {
                 resv2: params.cq_off.resv2,
             },
         };
-        if p.sq_entries == 0 || p.cq_entries == 0 || p.sq_off.array as usize >= 4096 {
+        if p.sq_entries == 0 || p.cq_entries == 0 || p.sq_off.array % 4 != 0 {
             unsafe { super::sys::close(fd) };
             return None;
         }
@@ -325,11 +327,19 @@ impl Ring {
     }
 
     pub fn register_eventfd_async(&self, efd: c_int) -> bool {
+        self.register_eventfd_with_opcode(efd, IORING_REGISTER_EVENTFD_ASYNC)
+    }
+
+    pub fn register_eventfd(&self, efd: c_int) -> bool {
+        self.register_eventfd_with_opcode(efd, IORING_REGISTER_EVENTFD)
+    }
+
+    fn register_eventfd_with_opcode(&self, efd: c_int, opcode: u32) -> bool {
         let rc = unsafe {
             syscall(
                 SYS_REGISTER,
                 self.fd as i64,
-                IORING_REGISTER_EVENTFD_ASYNC as i64,
+                opcode as i64,
                 &efd as *const c_int as i64,
                 1,
             )
@@ -421,10 +431,20 @@ impl Ring {
 
     /// Reaps completions, calling `f(user_data, res, flags)` for each.
     pub fn reap<F: FnMut(u64, i32, u32)>(&self, mut f: F) -> usize {
+        self.reap_bounded(usize::MAX, f)
+    }
+
+    /// Reaps at most `cap` completions; the rest stay queued in the ring (the
+    /// CQ is FIFO, so the next pass reaps the oldest first). Bounding the
+    /// batch bounds a pass's worst case at the memory wall: one giant drain
+    /// cannot hold every reply behind one slow commit.
+    pub fn reap_bounded<F: FnMut(u64, i32, u32)>(&self, cap: usize, mut f: F) -> usize {
         let head = unsafe { std::ptr::read_volatile(self.cq_head) };
         let tail = unsafe { std::ptr::read_volatile(self.cq_tail) };
         let mut i = head;
-        while i != tail {
+        let bound = tail.wrapping_sub(head) as usize;
+        let n = bound.min(cap);
+        for k in 0..n {
             let slot = (i & self.cq_mask) as usize;
             let p = unsafe { self.cqes.add(slot * CQE_SIZE) };
             let user = unsafe { std::ptr::read_volatile(p as *const u64) };
@@ -433,10 +453,10 @@ impl Ring {
             f(user, res, flags);
             i = i.wrapping_add(1);
         }
-        if head != tail {
-            unsafe { std::ptr::write_volatile(self.cq_head, tail) };
+        if n > 0 {
+            unsafe { std::ptr::write_volatile(self.cq_head, head.wrapping_add(n as u32)) };
         }
-        tail.wrapping_sub(head) as usize
+        n
     }
 
     pub fn pending(&self) -> u32 {
@@ -550,9 +570,9 @@ impl Sqe {
         }
     }
 
-    pub fn recv_multishot(file_index: u32, bgid: u16, user: u64) -> impl FnOnce(&Sqe) {
+    pub fn recv_buffered(file_index: u32, bgid: u16, user: u64) -> impl FnOnce(&Sqe) {
         move |s: &Sqe| {
-            s.put8(O_OPCODE, IORING_OP_RECV_MULTISHOT);
+            s.put8(O_OPCODE, IORING_OP_RECV);
             s.put8(O_FLAGS, IOSQE_FIXED_FILE | IOSQE_BUFFER_SELECT);
             s.put32(O_FD, file_index);
             s.put16(O_BUF_GROUP, bgid);
@@ -659,11 +679,11 @@ mod abi_tests {
         assert_eq!(u16at(&b, O_BUF_GROUP), 0);
     }
 
-    /// Multishot receive on a fixed descriptor with buffer selection.
+    /// One-shot receive on a fixed descriptor with buffer selection.
     #[test]
-    fn recv_multishot_layout() {
-        let b = encode(Sqe::recv_multishot(1234, 0, 6));
-        assert_eq!(b[O_OPCODE], IORING_OP_RECV_MULTISHOT);
+    fn recv_buffered_layout() {
+        let b = encode(Sqe::recv_buffered(1234, 0, 6));
+        assert_eq!(b[O_OPCODE], IORING_OP_RECV);
         assert_eq!(b[O_FLAGS], IOSQE_FIXED_FILE | IOSQE_BUFFER_SELECT);
         assert_eq!(u32at(&b, O_FD), 1234);
         assert_eq!(u16at(&b, O_BUF_GROUP), 0);
@@ -720,6 +740,7 @@ mod abi_tests {
         assert_eq!(IORING_SETUP_SUBMIT_ALL, 1 << 7);
         assert_eq!(IORING_SETUP_SINGLE_ISSUER, 1 << 12);
         assert_eq!(IORING_SETUP_DEFER_TASKRUN, 1 << 13);
-        assert_eq!(IORING_SETUP_TASKRUN_FLAG, 1 << 14);
+        assert_eq!(IORING_SETUP_COOP_TASKRUN, 1 << 8);
+        assert_eq!(IORING_SETUP_TASKRUN_FLAG, 1 << 9);
     }
 }

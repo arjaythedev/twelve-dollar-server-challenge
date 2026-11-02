@@ -13,6 +13,7 @@ from dev import (
     analyze_profile,
     cpu_delta,
     duration_seconds,
+    kernel_stage,
     load,
     parse_counters,
     profile_stage,
@@ -33,6 +34,47 @@ def statistics(samples: int, lost: int = 0) -> str:
 
 
 class NativeProfileTests(unittest.TestCase):
+    def test_combined_profile_separates_modes_and_retains_user_caller_frames(self) -> None:
+        user = stack(100, ("sqlite3_step", "/app/server"), ("main", "/app/server"))
+        kernel = stack(
+            300,
+            ("posix_lock_inode", "[kernel.kallsyms]"),
+            ("__x64_sys_fcntl", "[kernel.kallsyms]"),
+            ("sqlite3_step", "/app/server"),
+            ("main", "/app/server"),
+        )
+        report = analyze_profile(
+            user + "\n\n" + kernel,
+            statistics(2).replace("cpu-clock:u", "cpu-clock"),
+            scope="all",
+        )
+        self.assertEqual(report["event"], "cpu-clock")
+        self.assertEqual(report["sampled_cpu_ns"], 400)
+        self.assertEqual(
+            report["stages_cpu_ns"], {"database_and_rows": 100, "kernel_filesystem": 300}
+        )
+        self.assertEqual(report.get("syscalls_cpu_ns"), {"fcntl": 300})
+        self.assertEqual(report["unrooted_samples"], 0)
+
+    def test_kernel_attribution_preserves_nested_network_and_file_work(self) -> None:
+        outer = ("__x64_sys_io_uring_enter", "[kernel.kallsyms]")
+        self.assertEqual(
+            kernel_stage([("tcp_sendmsg_locked", "[kernel.kallsyms]"), outer]),
+            "kernel_network",
+        )
+        self.assertEqual(
+            kernel_stage([("do_fcntl", "[kernel.kallsyms]"), outer]), "kernel_filesystem"
+        )
+        report = analyze_profile(
+            stack(300, outer) + "\n\n" + stack(100, ("[unknown]", "[unknown]")),
+            statistics(2).replace("cpu-clock:u", "cpu-clock:k"),
+            scope="kernel",
+        )
+        self.assertEqual(report["event"], "cpu-clock:k")
+        self.assertEqual(report["stages_cpu_ns"], {"kernel_io_uring": 300, "unknown": 100})
+        self.assertEqual(report["unrooted_samples"], 1)
+        self.assertEqual(report.get("syscalls_cpu_ns"), {"io_uring_enter": 300, "other": 100})
+
     def test_finished_generator_can_be_reaped_after_sampler_race(self) -> None:
         args = Arguments(action="bench", label="exit-race", ramp="30s", hold="60s")
         generator = LoadGenerator(["k6"], 6565, "test", "test", "load-container")

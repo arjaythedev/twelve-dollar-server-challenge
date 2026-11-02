@@ -11,6 +11,7 @@
 #include <climits>
 #include <cstdint>
 #include <cstring>
+#include <deque>
 #include <fcntl.h>
 #include <iostream>
 #include <netinet/in.h>
@@ -19,6 +20,7 @@
 #include <string>
 #include <sys/eventfd.h>
 #include <sys/socket.h>
+#include <sys/uio.h>
 #include <system_error>
 #include <unistd.h>
 #include <unordered_map>
@@ -206,6 +208,58 @@ std::string_view reason(Status status)
 class Server::State
 {
   public:
+    class ReceiveBuffers
+    {
+      public:
+        static constexpr unsigned count = 1024;
+        static constexpr unsigned size = 4096;
+        static constexpr int group = 0;
+
+        explicit ReceiveBuffers(io_uring &owner)
+            : ring(owner), storage(std::make_unique_for_overwrite<char[]>(count * size))
+        {
+            int error = 0;
+            buffers = io_uring_setup_buf_ring(&ring, count, group, 0, &error);
+            if (!buffers)
+            {
+                throw std::system_error(-error, std::generic_category(), "receive buffer ring");
+            }
+            for (unsigned id = 0; id < count; ++id)
+            {
+                io_uring_buf_ring_add(buffers, data(id), size, static_cast<unsigned short>(id),
+                                      io_uring_buf_ring_mask(count), static_cast<int>(id));
+            }
+            io_uring_buf_ring_advance(buffers, count);
+        }
+
+        ~ReceiveBuffers()
+        {
+            if (io_uring_free_buf_ring(&ring, buffers, count, group) < 0)
+            {
+                std::terminate();
+            }
+        }
+
+        ReceiveBuffers(const ReceiveBuffers &) = delete;
+        ReceiveBuffers &operator=(const ReceiveBuffers &) = delete;
+
+        char *data(unsigned id) noexcept
+        {
+            return storage.get() + id * size;
+        }
+
+        void release(unsigned short id) noexcept
+        {
+            io_uring_buf_ring_add(buffers, data(id), size, id, io_uring_buf_ring_mask(count), 0);
+            io_uring_buf_ring_advance(buffers, 1);
+        }
+
+      private:
+        io_uring &ring;
+        std::unique_ptr<char[]> storage;
+        io_uring_buf_ring *buffers = nullptr;
+    };
+
     struct Connection;
 
     struct Operation
@@ -223,9 +277,11 @@ class Server::State
         Descriptor socket;
         Operation operation;
         Parser parser;
-        std::array<char, 4096> received{};
         std::string input;
         std::string output;
+        std::string response_body;
+        std::array<iovec, 2> send_vectors{};
+        msghdr send_message{};
         std::size_t sent = 0;
         bool close_after = false;
         bool pending = false;
@@ -266,6 +322,15 @@ class Server::State
         {
             throw std::system_error(-result, std::generic_category(), "io_uring setup");
         }
+        try
+        {
+            receive_buffers = std::make_unique<ReceiveBuffers>(ring);
+        }
+        catch (...)
+        {
+            io_uring_queue_exit(&ring);
+            throw;
+        }
     }
 
     ~State()
@@ -282,6 +347,7 @@ class Server::State
                 std::terminate();
             }
         }
+        receive_buffers.reset();
         io_uring_queue_exit(&ring);
     }
 
@@ -316,17 +382,49 @@ class Server::State
     {
         connection.operation.event = Event::receive;
         connection.pending = true;
-        io_uring_prep_recv(entry(&connection.operation), connection.socket.get(),
-                           connection.received.data(), connection.received.size(), 0);
+        auto *request = entry(&connection.operation);
+        io_uring_prep_recv(request, connection.socket.get(), nullptr, ReceiveBuffers::size, 0);
+        request->flags |= IOSQE_BUFFER_SELECT;
+        request->buf_group = ReceiveBuffers::group;
+        request->ioprio |= IORING_RECVSEND_POLL_FIRST;
+    }
+
+    void retry_receives()
+    {
+        const auto count =
+            std::min(deferred_receives.size(), static_cast<std::size_t>(ReceiveBuffers::count));
+        for (std::size_t i = 0; i < count; ++i)
+        {
+            auto *connection = deferred_receives.front();
+            deferred_receives.pop_front();
+            receive(*connection);
+        }
     }
 
     void send(Connection &connection)
     {
+        std::size_t count = 0;
+        std::size_t body_offset = 0;
+        if (connection.sent < connection.output.size())
+        {
+            connection.send_vectors[count++] = {connection.output.data() + connection.sent,
+                                                connection.output.size() - connection.sent};
+        }
+        else
+        {
+            body_offset = connection.sent - connection.output.size();
+        }
+        if (body_offset < connection.response_body.size())
+        {
+            connection.send_vectors[count++] = {connection.response_body.data() + body_offset,
+                                                connection.response_body.size() - body_offset};
+        }
+        connection.send_message.msg_iov = connection.send_vectors.data();
+        connection.send_message.msg_iovlen = count;
         connection.operation.event = Event::send;
         connection.pending = true;
-        io_uring_prep_send(entry(&connection.operation), connection.socket.get(),
-                           connection.output.data() + connection.sent,
-                           connection.output.size() - connection.sent, MSG_NOSIGNAL);
+        io_uring_prep_sendmsg(entry(&connection.operation), connection.socket.get(),
+                              &connection.send_message, MSG_NOSIGNAL);
     }
 
     void respond(Connection &connection, Response response)
@@ -337,7 +435,7 @@ class Server::State
                             "\r\nContent-Type: application/json\r\nContent-Length: " +
                             std::to_string(response.body.size()) + "\r\n" +
                             (connection.close_after ? "Connection: close\r\n" : "") + "\r\n";
-        connection.output += response.body;
+        connection.response_body = std::move(response.body);
         connection.sent = 0;
         send(connection);
     }
@@ -408,6 +506,7 @@ class Server::State
     void stop_all()
     {
         stopping = true;
+        deferred_receives.clear();
         cancel(accept_operation);
         for (auto &[fd, connection] : connections)
         {
@@ -419,8 +518,35 @@ class Server::State
         }
     }
 
-    void complete(Operation *operation, int result)
+    void complete(Operation *operation, int result, unsigned flags)
     {
+        const bool selected = (flags & IORING_CQE_F_BUFFER) != 0;
+        const auto id = flags >> IORING_CQE_BUFFER_SHIFT;
+        if (selected && id >= ReceiveBuffers::count)
+        {
+            throw std::runtime_error("invalid receive buffer id");
+        }
+
+        struct ReturnBuffer
+        {
+            ReceiveBuffers *owner;
+            unsigned short id;
+
+            ~ReturnBuffer()
+            {
+                release();
+            }
+
+            void release() noexcept
+            {
+                if (owner)
+                {
+                    owner->release(id);
+                    owner = nullptr;
+                }
+            }
+        } buffer{selected ? receive_buffers.get() : nullptr, static_cast<unsigned short>(id)};
+
         if (!operation)
         {
             return;
@@ -460,6 +586,11 @@ class Server::State
         auto &connection = *operation->connection;
         connection.pending = false;
         const int fd = connection.socket.get();
+        if (!stopping && operation->event == Event::receive && result == -ENOBUFS)
+        {
+            deferred_receives.push_back(&connection);
+            return;
+        }
         if (stopping || result == 0 || (result < 0 && result != -EAGAIN && result != -EINTR))
         {
             connections.erase(fd);
@@ -478,13 +609,18 @@ class Server::State
         }
         else if (operation->event == Event::receive)
         {
-            connection.input.append(connection.received.data(), static_cast<std::size_t>(result));
+            if (!selected || static_cast<unsigned>(result) > ReceiveBuffers::size)
+            {
+                throw std::runtime_error("invalid receive buffer result");
+            }
+            connection.input.append(receive_buffers->data(id), static_cast<std::size_t>(result));
+            buffer.release();
             process(connection);
         }
         else
         {
             connection.sent += static_cast<std::size_t>(result);
-            if (connection.sent < connection.output.size())
+            if (connection.sent < connection.output.size() + connection.response_body.size())
             {
                 send(connection);
             }
@@ -495,6 +631,7 @@ class Server::State
             else
             {
                 connection.output.clear();
+                std::string{}.swap(connection.response_body);
                 connection.parser.reset();
                 if (connection.input.empty())
                 {
@@ -511,14 +648,17 @@ class Server::State
     int wait(unsigned previous_count, bool accepted)
     {
         // Rearm accepts promptly; EXT_ARG avoids synthetic timeout completions.
-        if (accepted || previous_count < 2 || stopping || !(ring.features & IORING_FEAT_EXT_ARG))
+        const bool immediate = accepted || previous_count < 2;
+        if (stopping || !(ring.features & IORING_FEAT_EXT_ARG) ||
+            (immediate && deferred_receives.empty()))
         {
             return io_uring_submit_and_wait(&ring, 1);
         }
-        __kernel_timespec timeout{0, 1'000'000};
+        __kernel_timespec timeout{0, 2'000'000};
         io_uring_cqe *first = nullptr;
 
-        return io_uring_submit_and_wait_timeout(&ring, &first, 16, &timeout, nullptr);
+        return io_uring_submit_and_wait_timeout(&ring, &first, immediate ? 1 : 16, &timeout,
+                                                nullptr);
     }
 
     void run()
@@ -547,10 +687,14 @@ class Server::State
                 --pending;
                 auto *operation = static_cast<Operation *>(io_uring_cqe_get_data(completion));
                 accepted = accepted || (operation && operation->event == Event::accept);
-                complete(operation, completion->res);
+                complete(operation, completion->res, completion->flags);
                 ++count;
             }
             io_uring_cq_advance(&ring, count);
+            if (!stopping)
+            {
+                retry_receives();
+            }
             previous_count = count;
         }
     }
@@ -560,7 +704,10 @@ class Server::State
     Handler handler;
     HeaderHandler headers;
     io_uring ring{};
+    std::unique_ptr<ReceiveBuffers> receive_buffers;
     std::unordered_map<int, std::unique_ptr<Connection>> connections;
+    // Queued connections stay owned by the map and have no operation in flight.
+    std::deque<Connection *> deferred_receives;
     Operation accept_operation{Event::accept};
     Operation stop_operation{Event::stop};
     unsigned pending = 0;

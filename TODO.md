@@ -18,7 +18,13 @@
 - [x] Separate server, kernel and benchmark-sampler CPU costs; profile the hold at 10,000 users.
 - [x] Compare completion waits at 50,000 users; keep adaptive batching without delaying accepts.
 - [x] Compare historical SQL/JSON variants and feed B-tree access; keep B-tree feed reads and SQL post reads.
-- [ ] Profile kernel CPU: network, io_uring and SQLite file/lock work.
+- [x] Profile kernel CPU: network, io_uring and SQLite file/lock work.
+- [x] Compare io_uring waits and deferred taskwork; keep the 2-ms busy wait.
+- [x] Batch feed likes and decode local index payloads, preserving SQLite snapshots and overflow handling.
+- [x] Compare shared receive buffers, including exhaustion, rearming and cancellation.
+- [x] Avoid response body copies and release idle send storage.
+- [x] Profile the updated kernel and request path before choosing the next CPU target.
+- [ ] Compare Cascade Lake tuning and a newer compiler on unchanged C++23 code.
 - [ ] Later: test capacity on a comparable Linux VM with a separate load generator.
 - [ ] Finally: move our src contents and docs into `submissions/<stack>-SmolBlackHole/` with git mv. Rename SUBMISSION.md to README.md, update paths and rerun checks. Exclude generated output.
 

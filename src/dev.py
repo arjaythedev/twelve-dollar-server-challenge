@@ -22,7 +22,7 @@ from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal, Never, TypedDict, cast
+from typing import Literal, Never, NotRequired, TypedDict, cast
 
 import psutil
 
@@ -43,12 +43,22 @@ PROFILE_STAGES = {
     "request_json": "Request JSON",
     "auth": "Auth / JWT JSON",
     "unknown": "Unknown",
+    "kernel_network": "Network / sockets",
+    "kernel_filesystem": "Files / locks / page cache",
+    "kernel_io_uring": "io_uring machinery",
+    "kernel_scheduler": "Scheduling / timers",
+    "kernel_other": "Other kernel work",
 }
 JWT_KEY = "twelve-dollar-challenge"
 RESULTS = ROOT / "src/benchmarks/results.json"
 
 
 type JSONValue = bool | int | float | str | list[JSONValue] | dict[str, JSONValue] | None
+type ProfileScope = Literal["user", "kernel", "all"]
+
+
+def profile_event(scope: ProfileScope) -> str:
+    return {"user": PROFILE_EVENT, "kernel": "cpu-clock:k", "all": "cpu-clock"}[scope]
 
 
 def reject_constant(value: str) -> Never:
@@ -71,6 +81,7 @@ class Arguments(argparse.Namespace):
     file: Path
     json_output: bool
     no_build: bool
+    scope: ProfileScope
 
 
 class Result(TypedDict):
@@ -112,6 +123,7 @@ class NativeProfile(TypedDict):
     unrooted_samples: int
     stages_cpu_ns: dict[str, int]
     hotspots: list[Hotspot]
+    syscalls_cpu_ns: NotRequired[dict[str, int]]
 
 
 def command(*args: str, timeout: int | None = 30) -> str:
@@ -929,10 +941,37 @@ def profile_stage(frames: list[tuple[str, str]]) -> str:
     return "unknown"
 
 
-def analyze_profile(stacks: str, statistics: str) -> NativeProfile:
+def kernel_stage(frames: list[tuple[str, str]]) -> str:
+    symbols = [symbol for symbol, module in frames if module.startswith("[kernel")]
+    if any(
+        symbol.startswith(("tcp_", "udp_", "ip_", "inet_", "sock_", "sk_", "skb_", "__sock_"))
+        for symbol in symbols
+    ):
+        return "kernel_network"
+    if any(
+        symbol.startswith(
+            ("vfs_", "ovl_", "ext4_", "filemap_", "shmem_", "locks_", "posix_lock", "fcntl_")
+        )
+        or symbol in ("do_fcntl", "ksys_pread64", "ksys_pwrite64")
+        for symbol in symbols
+    ):
+        return "kernel_filesystem"
+    if any("io_uring" in symbol or symbol.startswith(("io_", "__io_")) for symbol in symbols):
+        return "kernel_io_uring"
+    if any(
+        "schedule" in symbol or symbol.startswith(("hrtimer_", "timer_", "finish_task_switch"))
+        for symbol in symbols
+    ):
+        return "kernel_scheduler"
+    return "kernel_other" if symbols else "unknown"
+
+
+def analyze_profile(stacks: str, statistics: str, *, scope: ProfileScope = "user") -> NativeProfile:
+    event = profile_event(scope)
     stages: Counter[str] = Counter()
     weights: Counter[tuple[str, str]] = Counter()
     counts: Counter[tuple[str, str]] = Counter()
+    syscalls: Counter[str] = Counter()
     samples = unresolved = unrooted = 0
     for block in re.split(r"\n\s*\n", stacks.strip()):
         lines = block.splitlines()
@@ -948,14 +987,30 @@ def analyze_profile(stacks: str, statistics: str) -> NativeProfile:
                 raise ValueError(f"invalid perf frame: {line}")
             frames.append((frame[1], frame[2]))
         leaf = frames[0]
+        kernel = scope == "kernel" or (
+            scope == "all" and any(module.startswith("[kernel") for _, module in frames)
+        )
         samples += 1
         unresolved += leaf[0] == "[unknown]"
-        unrooted += not any(symbol == "main" for symbol, _ in frames)
-        stages[profile_stage(frames)] += period
+        unrooted += not any(
+            module.startswith("[kernel") if kernel else symbol == "main"
+            for symbol, module in frames
+        )
+        stages[kernel_stage(frames) if kernel else profile_stage(frames)] += period
+        if kernel:
+            syscall = next(
+                (
+                    symbol.removeprefix("__x64_sys_")
+                    for symbol, _ in frames
+                    if symbol.startswith("__x64_sys_")
+                ),
+                "other",
+            )
+            syscalls[syscall] += period
         weights[leaf] += period
         counts[leaf] += 1
 
-    aggregate = statistics.split(f"{PROFILE_EVENT} stats:", 1)[0]
+    aggregate = statistics.split(f"{event} stats:", 1)[0]
     recorded = re.search(r"^\s*SAMPLE events:\s*(\d+)", aggregate, re.MULTILINE)
     if recorded is None or int(recorded[1]) != samples:
         raise ValueError("parsed stacks do not match perf's recorded sample count")
@@ -967,10 +1022,10 @@ def analyze_profile(stacks: str, statistics: str) -> NativeProfile:
         raise ValueError(
             f"perf reported {lost} loss records; retain the raw data and lower the rate"
         )
-    return NativeProfile(
-        event=PROFILE_EVENT,
+    profile = NativeProfile(
+        event=event,
         frequency_hz=PROFILE_FREQUENCY,
-        stack_bytes=PROFILE_STACK_BYTES,
+        stack_bytes=0 if scope == "kernel" else PROFILE_STACK_BYTES,
         samples=samples,
         sampled_cpu_ns=sum(stages.values()),
         lost_records=lost,
@@ -982,21 +1037,34 @@ def analyze_profile(stacks: str, statistics: str) -> NativeProfile:
             for key, value in weights.most_common(15)
         ],
     )
+    if scope != "user":
+        profile["syscalls_cpu_ns"] = dict(syscalls)
+    return profile
 
 
 def show_profile(profile: dict[str, JSONValue]) -> None:
     total = number(profile, "sampled_cpu_ns")
     if total <= 0:
         raise ValueError("profile contains no sampled CPU time")
+    kernel = text(profile, "event").endswith(":k")
+    combined = text(profile, "event") == "cpu-clock"
+    label = "CPU (user + kernel)" if combined else "Kernel CPU" if kernel else "User CPU"
+    root = "expected roots" if combined else "kernel frames" if kernel else "main"
     print(
-        f"User CPU: {integer(profile, 'samples'):,} samples; "
+        f"{label}: {integer(profile, 'samples'):,} samples; "
         f"{integer(profile, 'unresolved_leaf_samples'):,} unresolved leaves; "
-        f"{integer(profile, 'unrooted_samples'):,} stacks without main."
+        f"{integer(profile, 'unrooted_samples'):,} stacks without {root}."
     )
     values = mapping(profile["stages_cpu_ns"])
     stages = [(stage, number(values, stage)) for stage in values]
     for stage, weight in sorted(stages, key=lambda item: item[1], reverse=True):
         print(f"  {PROFILE_STAGES.get(stage, stage):24} {weight / total:6.1%}")
+    if "syscalls_cpu_ns" in profile:
+        syscalls = mapping(profile["syscalls_cpu_ns"])
+        kernel_total = sum(number(syscalls, name) for name in syscalls)
+        print("Syscall paths (share of kernel CPU, including nested work):")
+        for name in sorted(syscalls, key=lambda name: number(syscalls, name), reverse=True):
+            print(f"  {name:24} {number(syscalls, name) / kernel_total:6.1%}")
     hotspots = profile["hotspots"]
     if not isinstance(hotspots, list):
         raise ValueError("profile hotspots must be an array")
@@ -1006,7 +1074,7 @@ def show_profile(profile: dict[str, JSONValue]) -> None:
         print(f"  {number(row, 'cpu_ns') / total:6.1%}  {text(row, 'symbol')[:100]}")
 
 
-def collect_profile(container: str, output: Path) -> None:
+def collect_profile(container: str, output: Path, *, scope: ProfileScope = "user") -> None:
     common = [
         "docker",
         "run",
@@ -1014,6 +1082,7 @@ def collect_profile(container: str, output: Path) -> None:
         "--network=none",
         f"--pid=container:{container}",
         "--cap-drop=ALL",
+        *(["--user=0", "--cap-add=SYSLOG", "--cap-add=SYS_PTRACE"] if scope != "user" else []),
         f"--mount=type=bind,source={output},target=/profile,readonly",
         PROFILER_IMAGE,
     ]
@@ -1036,11 +1105,13 @@ def collect_profile(container: str, output: Path) -> None:
     )
     (output / "stacks.txt").write_text(stacks + "\n", encoding="utf-8")
     (output / "perf-stats.txt").write_text(statistics + "\n", encoding="utf-8")
-    write_json(output / "profile.json", analyze_profile(stacks, statistics))
+    write_json(output / "profile.json", analyze_profile(stacks, statistics, scope=scope))
 
 
 @contextmanager
-def observing(container: str, output: Path, *, profiling: bool) -> Generator[str]:
+def observing(
+    container: str, output: Path, *, profiling: bool, scope: ProfileScope = "user"
+) -> Generator[str]:
     name = f"{container}-observer"
     launch = ["--read-only", "--entrypoint=sleep", IMAGE, "infinity"]
     target_hash = ""
@@ -1053,6 +1124,7 @@ def observing(container: str, output: Path, *, profiling: bool) -> Generator[str
             raise RuntimeError("profiler symbols do not match the running server")
         launch = [
             "--cap-add=PERFMON",
+            *(["--cap-add=SYSLOG", "--cap-add=SYS_PTRACE"] if scope != "user" else []),
             "--entrypoint=sh",
             PROFILER_IMAGE,
             "-c",
@@ -1061,9 +1133,9 @@ def observing(container: str, output: Path, *, profiling: bool) -> Generator[str
             "record",
             "--delay=-1",
             "--control=fifo:/tmp/perf-control,/tmp/perf-ack",
-            f"--event={PROFILE_EVENT}",
+            f"--event={profile_event(scope)}",
             f"--freq={PROFILE_FREQUENCY}",
-            f"--call-graph=dwarf,{PROFILE_STACK_BYTES}",
+            "--call-graph=fp" if scope == "kernel" else f"--call-graph=dwarf,{PROFILE_STACK_BYTES}",
             "--pid=1",
             "--output=/tmp/perf.data",
         ]
@@ -1077,7 +1149,7 @@ def observing(container: str, output: Path, *, profiling: bool) -> Generator[str
             f"--name={name}",
             "--network=none",
             f"--pid=container:{container}",
-            "--user=10001:10001",
+            "--user=0" if profiling and scope != "user" else "--user=10001:10001",
             "--cap-drop=ALL",
             "--cpus=1",
             "--memory=512m",
@@ -1111,7 +1183,7 @@ def observing(container: str, output: Path, *, profiling: bool) -> Generator[str
                     raise RuntimeError(f"perf exited with {exit_code}; see perf.log")
                 command("docker", "cp", f"{name}:/tmp/perf.data", str(output / "perf.data"))
                 if completed:
-                    collect_profile(container, output)
+                    collect_profile(container, output, scope=scope)
         finally:
             subprocess.run(["docker", "rm", "--force", name], capture_output=True, check=False)
 
@@ -1125,7 +1197,7 @@ def main() -> None:
     )
     for action, description in (
         ("bench", "run the official k6 workload in Docker"),
-        ("profile", "sample native user CPU stacks during the workload"),
+        ("profile", "sample native CPU stacks during the workload"),
     ):
         benchmark = actions.add_parser(action, help=description)
         benchmark.add_argument("--label", required=True, help="unique lowercase run name")
@@ -1143,6 +1215,8 @@ def main() -> None:
         benchmark.add_argument(
             "--no-build", action="store_true", help="reuse existing images without rebuilding"
         )
+        if action == "profile":
+            benchmark.add_argument("--scope", choices=("user", "kernel", "all"), default="user")
     results = actions.add_parser("results", help="display saved benchmark results")
     results.add_argument("file", type=Path, nargs="?", default=RESULTS)
     results.add_argument(
@@ -1188,7 +1262,12 @@ def main() -> None:
                     build(profiler=True)
             with server(output) as (container, port):
                 with (
-                    observing(container, output, profiling=profiling) as name,
+                    observing(
+                        container,
+                        output,
+                        profiling=profiling,
+                        scope=args.scope if profiling else "user",
+                    ) as name,
                     load_generator(args, container, port, output) as generator,
                 ):
                     code = load(args, generator, name, output)

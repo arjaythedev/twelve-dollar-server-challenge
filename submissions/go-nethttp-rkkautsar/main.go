@@ -3,6 +3,7 @@
 package main
 
 import (
+	"container/list"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -11,6 +12,7 @@ import (
 	"encoding/json"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
@@ -54,6 +56,65 @@ type writeResult struct {
 	already  bool
 	notFound bool
 	failed   bool
+}
+
+// connTracker bounds resident keep-alive sockets. Above soft it asks clients
+// to close after the current response (Connection: close), which is safe for
+// non-idempotent requests. Above hard it closes the oldest idle socket as a
+// last-resort valve. Closing an idle socket races with a client that sends at
+// that instant, so soft is the primary mechanism.
+type connTracker struct {
+	mu    sync.Mutex
+	idle  list.List
+	elems map[net.Conn]*list.Element
+	n     int
+	soft  int
+	hard  int
+}
+
+func newConnTracker(soft, hard int) *connTracker {
+	return &connTracker{elems: make(map[net.Conn]*list.Element), soft: soft, hard: hard}
+}
+
+func (t *connTracker) state(c net.Conn, s http.ConnState) {
+	var close []net.Conn
+	t.mu.Lock()
+	switch s {
+	case http.StateNew:
+		t.n++
+	case http.StateActive:
+		if e, ok := t.elems[c]; ok {
+			t.idle.Remove(e)
+			delete(t.elems, c)
+		}
+	case http.StateIdle:
+		if _, ok := t.elems[c]; !ok {
+			t.elems[c] = t.idle.PushBack(c)
+		}
+		for t.n > t.hard && t.idle.Len() > 0 {
+			front := t.idle.Front()
+			v := front.Value.(net.Conn)
+			t.idle.Remove(front)
+			delete(t.elems, v)
+			close = append(close, v)
+		}
+	case http.StateClosed, http.StateHijacked:
+		t.n--
+		if e, ok := t.elems[c]; ok {
+			t.idle.Remove(e)
+			delete(t.elems, c)
+		}
+	}
+	t.mu.Unlock()
+	for _, c := range close {
+		c.Close()
+	}
+}
+
+func (t *connTracker) overSoft() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.n > t.soft
 }
 
 type readResp struct {
@@ -116,14 +177,16 @@ type app struct {
 	getPost *sql.Stmt
 	health  *sql.Stmt
 
-	writeDB    *sql.DB
-	writeConn  *sql.Conn
-	insertPost *sql.Stmt
-	postExists *sql.Stmt
-	insertLike *sql.Stmt
+	writeDB         *sql.DB
+	writeConn       *sql.Conn
+	insertPostsBulk *sql.Stmt
+	insertLikesBulk *sql.Stmt
+	postsExistBulk  *sql.Stmt
 
 	writeCh     chan *writeJob
 	batchWindow time.Duration
+
+	conns *connTracker
 
 	readsGroup readGroup
 	readGen    atomic.Uint64
@@ -162,16 +225,34 @@ func main() {
 			coalesce = b
 		}
 	}
-	postBatch := false
+	postBatch := true
 	if v := os.Getenv("POST_BATCH"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			postBatch = b
 		}
 	}
-	idleMS := 1000
+	idleMS := 65000
 	if v := os.Getenv("IDLE_TIMEOUT_MS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
 			idleMS = n
+		}
+	}
+	maxConns := 50000
+	if v := os.Getenv("MAX_CONNS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			maxConns = n
+		}
+	}
+	softConns := 48000
+	if v := os.Getenv("SOFT_CONNS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			softConns = n
+		}
+	}
+	if softConns >= maxConns {
+		softConns = maxConns - 2000
+		if softConns < 1 {
+			softConns = maxConns
 		}
 	}
 
@@ -215,6 +296,7 @@ func main() {
 		postCh:      make(chan postReadReq, 1024),
 		postBatch:   postBatch,
 		postStmts:   make(map[int]*sql.Stmt),
+		conns:       newConnTracker(softConns, maxConns),
 	}
 	if a.feed, err = readDB.Prepare(feedSQL); err != nil {
 		log.Fatal(err)
@@ -226,17 +308,17 @@ func main() {
 		log.Fatal(err)
 	}
 	ctx := context.Background()
-	if a.insertPost, err = wconn.PrepareContext(ctx, insertPostSQL); err != nil {
+	if a.insertPostsBulk, err = wconn.PrepareContext(ctx, insertPostsBulkSQL); err != nil {
 		log.Fatal(err)
 	}
-	if a.postExists, err = wconn.PrepareContext(ctx, postExistsSQL); err != nil {
+	if a.insertLikesBulk, err = wconn.PrepareContext(ctx, insertLikesBulkSQL); err != nil {
 		log.Fatal(err)
 	}
-	if a.insertLike, err = wconn.PrepareContext(ctx, insertLikeSQL); err != nil {
+	if a.postsExistBulk, err = wconn.PrepareContext(ctx, postsExistBulkSQL); err != nil {
 		log.Fatal(err)
 	}
 	go a.writeLoop()
-	if coalesce && postBatch {
+	if postBatch {
 		go a.postBatchLoop()
 	}
 
@@ -252,6 +334,7 @@ func main() {
 		Handler:           a,
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       time.Duration(idleMS) * time.Millisecond,
+		ConnState:         a.conns.state,
 	}
 	log.Fatal(srv.ListenAndServe())
 }
@@ -287,15 +370,29 @@ const (
 			'like_count', (SELECT count(*) FROM likes l WHERE l.post_id = p.id)))
 		  FROM posts p JOIN users u ON u.id = p.user_id
 		 WHERE p.id = ?`
-	insertPostSQL = "INSERT INTO posts (user_id, body) VALUES (?, ?) RETURNING id, created_at"
-	postExistsSQL = "SELECT 1 FROM posts WHERE id = ?"
-	insertLikeSQL = `INSERT INTO likes (user_id, post_id)
-		SELECT ?1, ?2 WHERE EXISTS (SELECT 1 FROM posts WHERE id = ?2)
-		ON CONFLICT (user_id, post_id) DO NOTHING`
+	insertPostsBulkSQL = `INSERT INTO posts (user_id, body)
+		SELECT CAST(json_extract(value, '$.u') AS INTEGER), json_extract(value, '$.b')
+		  FROM json_each(?1)
+		RETURNING id, created_at`
+	insertLikesBulkSQL = `INSERT INTO likes (user_id, post_id)
+		SELECT CAST(json_extract(value, '$.u') AS INTEGER),
+		       CAST(json_extract(value, '$.p') AS INTEGER)
+		  FROM json_each(?1) WHERE true
+		ON CONFLICT (user_id, post_id) DO NOTHING
+		RETURNING user_id, post_id`
+	postsExistBulkSQL = `SELECT id FROM posts
+		 WHERE id IN (SELECT CAST(value AS INTEGER) FROM json_each(?1))`
 	healthSQL = "SELECT 1"
 )
 
 func (a *app) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if a.conns.overSoft() && r.Method != http.MethodPost {
+		// Close after reads, not writes: a client may chain a write on the
+		// same connection (the LG sends like -> create immediately), and a
+		// close here would turn that chained write into an EOF. GETs are the
+		// majority, so the cap still drains.
+		w.Header().Set("Connection", "close")
+	}
 	switch p := r.URL.Path; p {
 	case "/health":
 		a.healthHandler(w, r)
@@ -352,7 +449,7 @@ func (a *app) getPostByID(w http.ResponseWriter, r *http.Request, idStr string) 
 		writeError(w, http.StatusBadRequest, "invalid post id")
 		return
 	}
-	if !a.readsGroup.enabled || !a.postBatch {
+	if !a.postBatch {
 		resp := a.loadPost(id)
 		writeJSON(w, resp.status, resp.body)
 		return
@@ -390,26 +487,28 @@ func (a *app) postBatchLoop() {
 	for first := range a.postCh {
 		reqs := make([]postReadReq, 1, maxPostBatch)
 		reqs[0] = first
-		if a.readWindow > 0 {
-			timer := time.NewTimer(a.readWindow)
-		collect:
-			for len(reqs) < maxPostBatch {
-				select {
-				case r := <-a.postCh:
-					reqs = append(reqs, r)
-				case <-timer.C:
-					break collect
+		if len(a.postCh) > 0 {
+			if a.readWindow > 0 {
+				timer := time.NewTimer(a.readWindow)
+			collect:
+				for len(reqs) < maxPostBatch {
+					select {
+					case r := <-a.postCh:
+						reqs = append(reqs, r)
+					case <-timer.C:
+						break collect
+					}
 				}
-			}
-			timer.Stop()
-		} else {
-		drain:
-			for len(reqs) < maxPostBatch {
-				select {
-				case r := <-a.postCh:
-					reqs = append(reqs, r)
-				default:
-					break drain
+				timer.Stop()
+			} else {
+			drain:
+				for len(reqs) < maxPostBatch {
+					select {
+					case r := <-a.postCh:
+						reqs = append(reqs, r)
+					default:
+						break drain
+					}
 				}
 			}
 		}
@@ -635,9 +734,11 @@ func (a *app) authenticate(r *http.Request) (int64, string, string) {
 
 func (a *app) writeLoop() {
 	for first := range a.writeCh {
-		jobs := make([]*writeJob, 1, 64)
+		jobs := make([]*writeJob, 1, 128)
 		jobs[0] = first
-		if a.batchWindow > 0 {
+		// Only wait for a batch when there is already a real backlog;
+		// a nearly empty queue is committed immediately.
+		if len(a.writeCh) >= 4 && a.batchWindow > 0 {
 			timer := time.NewTimer(a.batchWindow)
 		collect:
 			for len(jobs) < cap(jobs) {
@@ -672,46 +773,178 @@ func (a *app) runBatch(jobs []*writeJob) {
 	}
 	results := make([]writeResult, len(jobs))
 	ok := true
-run:
+
+	// Creates: one multi-row INSERT ... json_each ... RETURNING. ids are
+	// assigned in insertion order, so sorting them pairs each row with the
+	// create job that produced it.
+	type createIn struct {
+		U int64  `json:"u"`
+		B string `json:"b"`
+	}
+	createIdx := make([]int, 0, len(jobs))
+	creates := make([]createIn, 0, len(jobs))
 	for i, j := range jobs {
-		switch j.kind {
-		case writeCreate:
-			var id int64
-			var created string
-			err := a.insertPost.QueryRowContext(ctx, j.userID, j.body).Scan(&id, &created)
-			if err != nil {
-				ok = false
-				break run
-			}
-			results[i].post = post{
-				ID: id, Body: j.body, CreatedAt: created, Author: j.username,
-			}
-		case writeLike:
-			res, err := a.insertLike.ExecContext(ctx, j.userID, j.postID)
-			if err != nil {
-				ok = false
-				break run
-			}
-			n, _ := res.RowsAffected()
-			if n > 0 {
-				results[i].already = false
-				continue
-			}
-			// Zero rows means duplicate like or missing post; only the
-			// fallback needs the separate existence check.
-			var one int
-			err = a.postExists.QueryRowContext(ctx, j.postID).Scan(&one)
-			if err == sql.ErrNoRows {
-				results[i].notFound = true
-				continue
-			}
-			if err != nil {
-				ok = false
-				break run
-			}
-			results[i].already = true
+		if j.kind == writeCreate {
+			createIdx = append(createIdx, i)
+			creates = append(creates, createIn{U: j.userID, B: j.body})
 		}
 	}
+	if len(creates) > 0 {
+		buf, err := json.Marshal(creates)
+		if err != nil {
+			ok = false
+		} else {
+			rows, err := a.insertPostsBulk.QueryContext(ctx, string(buf))
+			if err != nil {
+				ok = false
+			} else {
+				type createRow struct {
+					id      int64
+					created string
+				}
+				got := make([]createRow, 0, len(creates))
+				for rows.Next() {
+					var id int64
+					var created string
+					if err := rows.Scan(&id, &created); err != nil {
+						ok = false
+						break
+					}
+					got = append(got, createRow{id, created})
+				}
+				if err := rows.Err(); err != nil {
+					ok = false
+				}
+				rows.Close()
+				if ok && len(got) != len(creates) {
+					ok = false
+				}
+				if ok {
+					sort.Slice(got, func(i, j int) bool { return got[i].id < got[j].id })
+					for k, idx := range createIdx {
+						j := jobs[idx]
+						results[idx].post = post{
+							ID: got[k].id, Body: j.body,
+							CreatedAt: got[k].created, Author: j.username,
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Likes: resolve post existence for the whole batch with one IN query,
+	// then insert every new (user, post) pair with one multi-row statement.
+	// RETURNING tells us which rows were new; conflicts are already-liked.
+	if ok {
+		type likeIn struct {
+			U int64 `json:"u"`
+			P int64 `json:"p"`
+		}
+		likeIdx := make([]int, 0, len(jobs))
+		uniquePosts := make([]int64, 0, len(jobs))
+		seenPost := make(map[int64]bool, len(jobs))
+		for i, j := range jobs {
+			if j.kind != writeLike {
+				continue
+			}
+			likeIdx = append(likeIdx, i)
+			if !seenPost[j.postID] {
+				seenPost[j.postID] = true
+				uniquePosts = append(uniquePosts, j.postID)
+			}
+		}
+		if len(likeIdx) > 0 {
+			exists := make(map[int64]bool, len(uniquePosts))
+			idsBuf, err := json.Marshal(uniquePosts)
+			if err != nil {
+				ok = false
+			} else {
+				rows, err := a.postsExistBulk.QueryContext(ctx, string(idsBuf))
+				if err != nil {
+					ok = false
+				} else {
+					for rows.Next() {
+						var id int64
+						if err := rows.Scan(&id); err != nil {
+							ok = false
+							break
+						}
+						exists[id] = true
+					}
+					if err := rows.Err(); err != nil {
+						ok = false
+					}
+					rows.Close()
+				}
+			}
+
+			if ok {
+				type pair struct{ u, p int64 }
+				candidates := make([]pair, 0, len(likeIdx))
+				seenPair := make(map[pair]bool, len(likeIdx))
+				for _, idx := range likeIdx {
+					j := jobs[idx]
+					if !exists[j.postID] {
+						results[idx].notFound = true
+						continue
+					}
+					p := pair{j.userID, j.postID}
+					if seenPair[p] {
+						continue
+					}
+					seenPair[p] = true
+					candidates = append(candidates, p)
+				}
+
+				inserted := make(map[pair]bool, len(candidates))
+				if len(candidates) > 0 {
+					in := make([]likeIn, 0, len(candidates))
+					for _, p := range candidates {
+						in = append(in, likeIn{U: p.u, P: p.p})
+					}
+					buf, err := json.Marshal(in)
+					if err != nil {
+						ok = false
+					} else {
+						rows, err := a.insertLikesBulk.QueryContext(ctx, string(buf))
+						if err != nil {
+							ok = false
+						} else {
+							for rows.Next() {
+								var u, p int64
+								if err := rows.Scan(&u, &p); err != nil {
+									ok = false
+									break
+								}
+								inserted[pair{u, p}] = true
+							}
+							if err := rows.Err(); err != nil {
+								ok = false
+							}
+							rows.Close()
+						}
+					}
+				}
+				if ok {
+					for _, idx := range likeIdx {
+						j := jobs[idx]
+						if results[idx].notFound {
+							continue
+						}
+						p := pair{j.userID, j.postID}
+						if inserted[p] {
+							results[idx].already = false
+							delete(inserted, p)
+						} else {
+							results[idx].already = true
+						}
+					}
+				}
+			}
+		}
+	}
+
 	if ok {
 		_, okErr := a.writeConn.ExecContext(ctx, "COMMIT")
 		ok = okErr == nil

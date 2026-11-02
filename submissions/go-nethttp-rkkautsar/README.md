@@ -21,13 +21,21 @@ Serving is direct on `HOST:PORT`, no Nginx.
   join a pre-write read. No result outlives its group. `READ_COALESCE=0`
   disables it.
 - **Write group commit.** One dedicated `*sql.Conn` runs queued create/like
-  jobs in one `BEGIN IMMEDIATE … COMMIT` every `WRITE_BATCH_MS` (default
-  10 ms). Every response waits for the commit.
+  jobs in one `BEGIN IMMEDIATE … COMMIT`; it waits for `WRITE_BATCH_MS` only
+  when at least four jobs are already queued, otherwise it commits
+  immediately. Creates use one multi-row `json_each` insert; likes use one
+  existence query plus one multi-row `INSERT … RETURNING`. Every response
+  waits for the commit.
 - **Four read connections** (`READ_CONNS`), prepared statements, WAL,
   `synchronous=NORMAL`, 16 MiB page cache, 256 MiB mmap, `_mutex=no`, and
-  WAL autocheckpoint at 10,000 pages. Connections use a 1 s idle timeout
-  (`IDLE_TIMEOUT_MS`); shorter timeouts caused `ECONNRESET` on create requests
-  from clients reusing a socket the server had just closed.
+  WAL autocheckpoint at 10,000 pages. Connections use a 65 s idle timeout
+  (`IDLE_TIMEOUT_MS`). It must exceed the load's longest think gap (15 s); the
+  earlier 1 s timeout closed every keep-alive socket between requests, and
+  clients do not retry a POST that lands on a socket the server just closed.
+  A soft/hard resident cap (`SOFT_CONNS`/`MAX_CONNS`) bounds memory: above
+  soft, read responses send `Connection: close` so the client reconnects after
+  the response; writes are exempt so a chained create is not cut off. Above
+  hard, the oldest idle socket is closed as a backstop.
 - `Content-Length` is set; responses are not chunked.
 
 ## Configuration
@@ -37,32 +45,37 @@ Serving is direct on `HOST:PORT`, no Nginx.
 | `SQLITE_PATH` | required | SQLite database |
 | `JWT_SECRET` | required | HS256 secret |
 | `HOST`, `PORT` | `127.0.0.1`, `3000` | Listen address |
-| `IDLE_TIMEOUT_MS` | `1000` | Keep-alive idle timeout |
+| `IDLE_TIMEOUT_MS` | `65000` | Keep-alive idle timeout |
+| `MAX_CONNS` | `50000` | Hard resident-connection cap (LRU idle eviction) |
+| `SOFT_CONNS` | `48000` | Above this, responses send `Connection: close` |
 | `WRITE_BATCH_MS` | `10` | Write group-commit window |
 | `READ_CONNS` | `4` | SQLite read connections |
 | `READ_COALESCE` | `1` | In-flight feed/post read sharing |
 | `READ_BATCH_US` | `500` | Read coalescing window |
-| `POST_BATCH` | `0` | Sorted/cached post-ID batching |
+| `POST_BATCH` | `1` | Batched post-ID reads (`IN`) |
 
 ## Local measurements
 
-Docker load test with the server pinned to one CPU and `1.5 GiB` of memory,
-four LG clients (20 s ramp, 60 s hold), fresh seed database, tuned defaults:
+Docker load test on one pinned CPU, 1.9 GiB memory, 1.7 GiB Go memory limit,
+four LG clients (60 s ramp, 60 s hold), fresh seed database, tuned defaults.
+The server runs with `SOFT_CONNS=48000`, `MAX_CONNS=50000`,
+`IDLE_TIMEOUT_MS=65000`, `POST_BATCH=1`.
 
 | Users | Client results | Server |
 |---:|---|---|
-| 70,000 | p50 160–161 ms, p95 **709–714 ms**, p99 1.07–1.08 s, 0 errors | 94% CPU, 324 MiB RSS |
+| 70,000 | p95 345–347 ms, p99 616–620 ms, 0 errors | 940 MiB at 30 s, ~48k resident, no OOM |
+| 100,000 | p95 3.2 s, p99 5.5–6.2 s, 0.4–0.6 % net errors | OOM at 1.855 GiB |
 
-The 70k result is still above the 500 ms p95 target. The 1 s idle timeout avoids
-create-request resets; shorter timeouts dropped p95 in some runs but produced
-`ECONNRESET` failures from stale client connections. `POST_BATCH=0` remains the
-default; the optional path deduplicates, sorts, and caches one prepared `IN`
-statement per batch size.
+70k passes with four 17,500-user clients. The cap holds ~48k resident
+connections; the excess cycles through `Connection: close` after read
+responses (writes are exempt, so a chained create is not cut off). 100k is past
+the one-vCPU/2 GiB ceiling: the ramp and reconnect churn outrun the cap and the
+server OOMs.
 
-The official service has `LimitNOFILE=65535`, so a net/http implementation is
-capped at roughly 65k accepted keep-alive sockets. The 1 s idle timeout costs
-memory but stays well below the 2 GiB limit; the stock per-connection buffers
-are still released between VU think periods.
+The official service has `LimitNOFILE=65535`; the 50k cap stays below it, so
+the fd limit is not the binding constraint. With the 65 s idle timeout, memory
+is: a net/http connection costs roughly 29 KB including Go runtime and buffers,
+so ~50k resident is the practical ceiling on 2 GiB.
 
 `test/run.sh` passes **42/42** with the default configuration.
 
@@ -75,7 +88,8 @@ are still released between VU think periods.
   `c-iouring-meros` submission, but left **off by default** because its author
   judged rule 5 (“no response/query-result caches”) ambiguous for one query
   serving many requests. This build enables it by default; `READ_COALESCE=0`
-  disables it.
+  disables it. `POST_BATCH=1` (default) does the same for concurrent post
+  reads; `POST_BATCH=0` disables it.
 - The custom branch’s prebuilt packet and single-write response are also not
   novel: top io_uring implementations write headers in front of the body in one
   send.

@@ -138,7 +138,7 @@ func main() {
 	port := envOr("PORT", "3000")
 	path := os.Getenv("SQLITE_PATH")
 
-	batchMS := 50
+	batchMS := 10
 	if v := os.Getenv("WRITE_BATCH_MS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
 			batchMS = n
@@ -168,7 +168,7 @@ func main() {
 			postBatch = b
 		}
 	}
-	idleMS := 10
+	idleMS := 1000
 	if v := os.Getenv("IDLE_TIMEOUT_MS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
 			idleMS = n

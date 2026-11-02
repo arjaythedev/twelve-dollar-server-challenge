@@ -22,13 +22,27 @@ Serving is direct on `HOST:PORT`, no Nginx.
   disables it.
 - **Write group commit.** One dedicated `*sql.Conn` runs queued create/like
   jobs in one `BEGIN IMMEDIATE … COMMIT` every `WRITE_BATCH_MS` (default
-  50 ms). Every response waits for the commit.
+  10 ms). Every response waits for the commit.
 - **Four read connections** (`READ_CONNS`), prepared statements, WAL,
   `synchronous=NORMAL`, 16 MiB page cache, 256 MiB mmap, `_mutex=no`, and
-  WAL autocheckpoint at 10,000 pages. Connections use a 10 ms idle timeout
-  (`IDLE_TIMEOUT_MS`) so the stock 4 KiB-per-connection HTTP buffers are
-  released between user requests; this is the reason memory stays low at 55k.
+  WAL autocheckpoint at 10,000 pages. Connections use a 1 s idle timeout
+  (`IDLE_TIMEOUT_MS`); shorter timeouts caused `ECONNRESET` on create requests
+  from clients reusing a socket the server had just closed.
 - `Content-Length` is set; responses are not chunked.
+
+## Configuration
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `SQLITE_PATH` | required | SQLite database |
+| `JWT_SECRET` | required | HS256 secret |
+| `HOST`, `PORT` | `127.0.0.1`, `3000` | Listen address |
+| `IDLE_TIMEOUT_MS` | `1000` | Keep-alive idle timeout |
+| `WRITE_BATCH_MS` | `10` | Write group-commit window |
+| `READ_CONNS` | `4` | SQLite read connections |
+| `READ_COALESCE` | `1` | In-flight feed/post read sharing |
+| `READ_BATCH_US` | `500` | Read coalescing window |
+| `POST_BATCH` | `0` | Sorted/cached post-ID batching |
 
 ## Local measurements
 
@@ -37,19 +51,18 @@ four LG clients (20 s ramp, 60 s hold), fresh seed database, tuned defaults:
 
 | Users | Client results | Server |
 |---:|---|---|
-| 55,000 | p50 1.5–1.6 ms, p95 **505–520 ms**, p99 689–1,000 ms, 0.003–0.006% errors | 84% CPU, 40.7 MiB RSS |
+| 70,000 | p50 160–161 ms, p95 **709–714 ms**, p99 1.07–1.08 s, 0 errors | 94% CPU, 324 MiB RSS |
 
-The 55k result is close but still above the 500 ms p95 target. The remaining
-tail is in the write path: the CPU profile showed `likePost`/`createPost`
-goroutines waiting for the write batch, not SQLite reads or memory pressure.
-`POST_BATCH=0` remains the default. The batched post-ID path now deduplicates,
-sorts, and caches one prepared `IN` statement per batch size; it is still
-opt-in pending official results.
+The 70k result is still above the 500 ms p95 target. The 1 s idle timeout avoids
+create-request resets; shorter timeouts dropped p95 in some runs but produced
+`ECONNRESET` failures from stale client connections. `POST_BATCH=0` remains the
+default; the optional path deduplicates, sorts, and caches one prepared `IN`
+statement per batch size.
 
 The official service has `LimitNOFILE=65535`, so a net/http implementation is
-capped at roughly 65k accepted keep-alive sockets. The 10 ms idle timeout keeps
-the stock per-connection buffers from accumulating; it is a deliberate
-throughput/memory tradeoff.
+capped at roughly 65k accepted keep-alive sockets. The 1 s idle timeout costs
+memory but stays well below the 2 GiB limit; the stock per-connection buffers
+are still released between VU think periods.
 
 `test/run.sh` passes **42/42** with the default configuration.
 

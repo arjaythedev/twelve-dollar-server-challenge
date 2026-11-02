@@ -5,18 +5,14 @@ declare(strict_types=1);
 namespace App\Repository;
 
 use App\Controller\CreatePostPayload;
-use App\Entity\Post;
 use App\ReadModel\PostView;
 use App\Security\JwtUser;
-use Doctrine\Bundle\DoctrineBundle\Repository\ServiceEntityRepository;
-use Doctrine\Persistence\ManagerRegistry;
+use Doctrine\DBAL\Connection;
 
 /**
  * Plain SQL through DBAL: SQLite writes the response JSON of the reads, and the write is one INSERT.
- *
- * @extends ServiceEntityRepository<Post>
  */
-class PostRepository extends ServiceEntityRepository
+final readonly class PostRepository
 {
     /**
      * One row per post: the post object of the API (same keys, in the same order, as PostView), with its author and
@@ -37,9 +33,9 @@ class PostRepository extends ServiceEntityRepository
       JOIN users u ON u.id = p.user_id
     SQL;
 
-    public function __construct(ManagerRegistry $registry)
-    {
-        parent::__construct($registry, Post::class);
+    public function __construct(
+        private Connection $connection,
+    ) {
     }
 
     /**
@@ -49,7 +45,7 @@ class PostRepository extends ServiceEntityRepository
      */
     public function findFeedJson(int $limit): string
     {
-        $json = $this->getEntityManager()->getConnection()->fetchOne(
+        $json = $this->connection->fetchOne(
             "SELECT json_object('posts', json_group_array(json(post) ORDER BY created_at DESC, id DESC))"
             .' FROM ('.self::POST_SQL.' ORDER BY p.created_at DESC, p.id DESC LIMIT ?)',
             [$limit],
@@ -66,7 +62,7 @@ class PostRepository extends ServiceEntityRepository
      */
     public function findPostJson(int $id): ?string
     {
-        $json = $this->getEntityManager()->getConnection()->fetchOne(
+        $json = $this->connection->fetchOne(
             "SELECT json_object('post', json(post)) FROM (".self::POST_SQL.' WHERE p.id = ?)',
             [$id],
         );
@@ -76,7 +72,7 @@ class PostRepository extends ServiceEntityRepository
 
     public function exists(int $id): bool
     {
-        return false !== $this->getEntityManager()->getConnection()->fetchOne(
+        return false !== $this->connection->fetchOne(
             'SELECT 1 FROM posts WHERE id = ?',
             [$id],
         );
@@ -90,17 +86,11 @@ class PostRepository extends ServiceEntityRepository
      */
     public function create(JwtUser $author, CreatePostPayload $payload): PostView
     {
-        if (!\is_string($payload->body)) {
-            throw new \LogicException('body must be validated first');
-        }
-
-        $body = trim($payload->body);
-
-        $rows = $this->getEntityManager()->getConnection()->fetchAllAssociative(
+        $rows = $this->connection->fetchAllAssociative(
             'INSERT INTO posts (user_id, body) VALUES (?, ?) RETURNING id, created_at',
             [
                 $author->id,
-                $body,
+                $payload->body,
             ],
         );
         $id = $rows[0]['id'] ?? null;
@@ -111,7 +101,7 @@ class PostRepository extends ServiceEntityRepository
 
         return new PostView(
             $id,
-            $body,
+            $payload->body,
             $createdAt,
             $author->username,
             0,

@@ -20,13 +20,15 @@
 #include <stdatomic.h>
 
 #include "sqlite3.h"
+#include "sqlite_bt.h"
 
 #define MAX_RINGS 8
-#define NBUF 1024
-#define BUF_SZ 2048
+#define NBUF 4096  // receive buffers per ring: a burst after a stall drains sockets in few passes
+#define BUF_SZ 1024  // requests are 40-400 bytes; larger ones span buffers
 #define BGID 0
 #define SQ_ENTRIES 4096
-#define CQ_ENTRIES 16384
+#define CQ_ENTRIES 65536  // a burst never spills to the kernel overflow list
+#define NLISTEN 8  // SO_REUSEPORT listeners: 8 accept queues ride out a stall
 #define JOBS_CAP 4096
 #define MAX_HDR 16384
 #define MAX_REQ (64 * 1024)
@@ -74,7 +76,7 @@ typedef struct {
 } ring_t;
 
 static ring_t R[MAX_RINGS];
-static int nrings, accept_ring, listen_fd, accept_paused;
+static int nrings, accept_ring, accept_paused, listen_fds[NLISTEN];
 static uint16_t accept_epoch;
 static uint32_t slots_per_ring;
 static void arm_accept(int r);
@@ -553,6 +555,7 @@ static sqlite3 *db;
 static sqlite3_stmt *st_ids, *st_rows, *st_likes, *st_feed, *st_post, *st_exists, *st_like, *st_create, *st_one;
 static sqlite3_stmt *st_begin, *st_begin_w, *st_commit, *st_rollback;
 static int wal_frames;
+static int bt_on, bt_ok;  // B-tree read path available / open for the current read phase
 
 static sqlite3_stmt *prep(const char *sql) {
   sqlite3_stmt *s;
@@ -604,6 +607,8 @@ static void ck_wait(int s) {
 
 static void *ck_thread(void *arg) {
   (void)arg;
+  // Lowest priority: the bulk page copy runs in the loop's idle time instead of preempting it near saturation.
+  setpriority(PRIO_PROCESS, (id_t)gettid(), 19);
   for (;;) {
     ck_wait(CK_RUN);
     sqlite3_wal_checkpoint_v2(ckdb, NULL, SQLITE_CHECKPOINT_PASSIVE, NULL, NULL);
@@ -649,11 +654,11 @@ static void ck_step(void) {
   }
 }
 
-static void db_open(const char *path) {
+static void db_open(const char *path, const char *vfs) {
   // unix-excl: an exclusive file lock for this process, with the WAL index in heap memory shared by
   // both connections, so readers pay no shared-memory file locks.
-  if (sqlite3_open_v2(path, &db, SQLITE_OPEN_READWRITE, "unix-excl") != SQLITE_OK ||
-      sqlite3_open_v2(path, &ckdb, SQLITE_OPEN_READWRITE, "unix-excl") != SQLITE_OK) {
+  if (sqlite3_open_v2(path, &db, SQLITE_OPEN_READWRITE, vfs) != SQLITE_OK ||
+      sqlite3_open_v2(path, &ckdb, SQLITE_OPEN_READWRITE, vfs) != SQLITE_OK) {
     fprintf(stderr, "open %s: %s\n", path, sqlite3_errmsg(db));
     exit(1);
   }
@@ -666,7 +671,7 @@ static void db_open(const char *path) {
   }
   sqlite3_finalize(jm);
   exec("PRAGMA synchronous=NORMAL");
-  exec("PRAGMA cache_size=-65536");
+  exec("PRAGMA cache_size=-8192");  // 8 MiB: the hot set is ~2 MB; the rest is better left to sockets
   exec("PRAGMA mmap_size=0");
   exec("PRAGMA temp_store=MEMORY");
   exec("PRAGMA wal_autocheckpoint=0");
@@ -694,13 +699,29 @@ static void db_open(const char *path) {
   st_begin_w = prep("BEGIN IMMEDIATE");
   st_commit = prep("COMMIT");
   st_rollback = prep("ROLLBACK");
+  bt_on = bt_init(db) == 0;
+  if (!bt_on) fprintf(stderr, "B-tree read path unavailable; using SQL\n");
 }
 
 #define TXT(s, i) (const char *)sqlite3_column_text(s, i), sqlite3_column_bytes(s, i)
 
 static ob_t scratch;
+static char btbuf[65536];
 
 static int do_feed(ob_t *o) {
+  if (bt_ok) {
+    bt_post ps[20];
+    int np;
+    if (bt_feed(ps, &np, btbuf, sizeof btbuf) == 0) {
+      OB_LIT(o, "{\"posts\":[");
+      for (int k = 0; k < np; k++) {
+        if (k) OB_LIT(o, ",");
+        ob_post(o, ps[k].id, ps[k].body, ps[k].bl, ps[k].ca, ps[k].cl, ps[k].au, ps[k].al, ps[k].likes);
+      }
+      OB_LIT(o, "]}");
+      return 0;
+    }
+  }
   int64_t ids[20];
   int n = 0, rc;
   while (n < 20 && (rc = sqlite3_step(st_ids)) == SQLITE_ROW) ids[n++] = sqlite3_column_int64(st_ids, 0);
@@ -768,6 +789,19 @@ static void run_read(job_t *j) {
       job_finish(j, &o, 200);
       return;
     case J_POST:
+      if (bt_ok) {
+        bt_post p;
+        int k = bt_post_get(j->post_id, &p, btbuf, sizeof btbuf);
+        if (k == 0) { job_error(j, 404, "post not found"); return; }
+        if (k == 1) {
+          ob_init(&o, 1024);
+          OB_LIT(&o, "{\"post\":");
+          ob_post(&o, p.id, p.body, p.bl, p.ca, p.cl, p.au, p.al, p.likes);
+          OB_LIT(&o, "}");
+          job_finish(j, &o, 200);
+          return;
+        }
+      }
       sqlite3_bind_int64(st_post, 1, j->post_id);
       rc = sqlite3_step(st_post);
       if (rc == SQLITE_ROW) {
@@ -1219,11 +1253,17 @@ static void on_data(int r, uint32_t slot, const char *d, uint32_t n) {
 
 // ---------------------------------------------------------------- rings, accept, completions
 
-// Each arm gets a new epoch, so a late -ECANCELED from an older arm cannot disturb the current one.
-static void arm_accept(int r) {
+static void arm_listener(int r, int i) {
   struct io_uring_sqe *s = sqe_get(r);
-  io_uring_prep_multishot_accept_direct(s, listen_fd, NULL, NULL, 0);
-  io_uring_sqe_set_data64(s, UD(OP_ACCEPT, r, ++accept_epoch, 0));
+  io_uring_prep_multishot_accept_direct(s, listen_fds[i], NULL, NULL, 0);
+  io_uring_sqe_set_data64(s, UD(OP_ACCEPT, r, accept_epoch, i));
+}
+
+// One multishot accept per listener, all on ring r. Each arm gets a new epoch, so a late -ECANCELED
+// from an older arm cannot disturb the current one.
+static void arm_accept(int r) {
+  ++accept_epoch;
+  for (int i = 0; i < NLISTEN; i++) arm_listener(r, i);
   R[r].accept_armed = 1;
   accept_ring = r;
   accept_paused = 0;
@@ -1273,9 +1313,11 @@ static int pick_accept_ring(void) {
 static void move_accept(void) {
   int old = accept_ring;
   if (R[old].accept_armed) {
-    struct io_uring_sqe *s = sqe_get(old);
-    io_uring_prep_cancel64(s, UD(OP_ACCEPT, old, accept_epoch, 0), 0);
-    io_uring_sqe_set_data64(s, UD(OP_CANCEL, old, 0, 0));
+    for (int i = 0; i < NLISTEN; i++) {
+      struct io_uring_sqe *s = sqe_get(old);
+      io_uring_prep_cancel64(s, UD(OP_ACCEPT, old, accept_epoch, i), 0);
+      io_uring_sqe_set_data64(s, UD(OP_CANCEL, old, 0, 0));
+    }
     R[old].accept_armed = 0;
   }
   int r = pick_accept_ring();
@@ -1309,10 +1351,7 @@ static void handle_cqe(int r, struct io_uring_cqe *cqe) {
         move_accept();
         return;
       }
-      if (!(cqe->flags & IORING_CQE_F_MORE) && cur) {
-        g->accept_armed = 0;
-        if (res != -ECANCELED) arm_accept(r);
-      }
+      if (!(cqe->flags & IORING_CQE_F_MORE) && cur && res != -ECANCELED) arm_listener(r, (int)slot);  // re-arm that listener
       return;
     }
     case OP_RECV: {
@@ -1390,12 +1429,16 @@ static void run_batch(void) {
   for (int i = 0; i < njobs; i++) {
     job_t *j = &jobs[i];
     if (j->kind == J_FEED || j->kind == J_POST || j->kind == J_HEALTH) {
-      if (!began) began = run(st_begin) == SQLITE_OK ? 1 : -1;
+      if (!began) {
+        began = run(st_begin) == SQLITE_OK ? 1 : -1;
+        bt_ok = began == 1 && bt_on && bt_begin() == 0;
+      }
       run_read(j);
     } else if (j->kind == J_ERR) {
       job_error(j, j->status, j->err);
     }
   }
+  if (bt_ok) bt_end(), bt_ok = 0;  // cursors must be closed before COMMIT ends the read transaction
   if (began == 1) run(st_commit);
   for (int i = 0; i < njobs; i++) {
     job_t *j = &jobs[i];
@@ -1432,6 +1475,7 @@ static void process_pending(void) {
 static int setup_listener(const char *host, int port) {
   int fd = socket(AF_INET, SOCK_STREAM, 0), one = 1;
   setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+  setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof one);
   setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
   struct sockaddr_in a = {.sin_family = AF_INET, .sin_port = htons(port)};
   if (inet_pton(AF_INET, host, &a.sin_addr) != 1) { fprintf(stderr, "bad HOST %s\n", host); exit(1); }
@@ -1444,16 +1488,18 @@ int main(void) {
   clock_gettime(CLOCK_MONOTONIC, &start_ts);
   const char *path = getenv("SQLITE_PATH"), *secret = getenv("JWT_SECRET"), *host = getenv("HOST"), *port = getenv("PORT");
   if (!path || !secret) { fprintf(stderr, "SQLITE_PATH and JWT_SECRET are required\n"); return 1; }
+  if (bt_pcache_install()) fprintf(stderr, "page cache wrapper unavailable; using pcache1\n");
   sqlite3_initialize();
+  const char *vfs = bt_vfs_register() == SQLITE_OK ? "tds" : "unix-excl";
   b64_init();
   hmac_setup(secret);
-  db_open(path);
+  db_open(path, vfs);
   scratch.p = malloc(65536), scratch.cap = 65536, scratch.len = 0;
   slab_init();
   struct rlimit rl;
   getrlimit(RLIMIT_NOFILE, &rl);
   slots_per_ring = rl.rlim_cur < SLOTS_MAX ? (uint32_t)rl.rlim_cur : SLOTS_MAX;
-  listen_fd = setup_listener(host ? host : "0.0.0.0", port ? atoi(port) : 3000);
+  for (int i = 0; i < NLISTEN; i++) listen_fds[i] = setup_listener(host ? host : "0.0.0.0", port ? atoi(port) : 3000);
   if (ring_create() < 0) return 1;
   arm_accept(0);
   fprintf(stderr, "listening on %s:%s\n", host ? host : "0.0.0.0", port ? port : "3000");

@@ -46,6 +46,9 @@ comptime MEM_RESUME_KB = 256 * 1024
 comptime BUSY_MIN = 8
 comptime BATCH_WANT = 32
 comptime BATCH_US = 250
+# While writes are held for a WAL restart the wait is bounded, so the hold ends
+# (backfilled, or expired) even if no completion arrives to wake the loop.
+comptime HOLD_POLL_US = 2000
 
 # connection flags
 comptime F_OPEN: UInt8 = 1
@@ -169,6 +172,7 @@ struct Server:
     var r_too_large: Resp
     var r_degraded: Resp
     var last_tick: Int
+    var last_tick_prev: Int
     var efd0_ready: Bool
 
     def __init__(out self, db_path: String, secret: String, host: String, port: Int) raises:
@@ -230,6 +234,7 @@ struct Server:
         self.r_too_large = const_resp(413, '{"error":"request too large"}')
         self.r_degraded = const_resp(503, '{"status":"degraded","db":"unreachable","error":"SELECT 1 failed"}')
         self.last_tick = self.start_ms
+        self.last_tick_prev = self.start_ms
         self.efd0_ready = False
         if ring_open(0) != 0:
             raise Error("ring 0 open failed")
@@ -723,6 +728,10 @@ struct Server:
         if t - self.last_tick < 1000:
             return
         self.last_tick = t
+        # a line every minute on how the WAL has been kept short (restarts should do it all)
+        if (t - self.start_ms) // 60000 != (self.last_tick_prev - self.start_ms) // 60000:
+            log("wal: holds " + String(self.db.holds) + ", restarts " + String(self.db.restarts) + ", expired " + String(self.db.holds_expired) + ", loop truncates " + String(self.db.truncates))
+        self.last_tick_prev = t
         var kb = mem_available_kb()
         if self.accept_paused:
             if (kb == 0 or kb > MEM_RESUME_KB) and self.next_accept_ring():
@@ -745,7 +754,13 @@ struct Server:
                 _ = submit(r)
         while True:
             if single:
-                var rc = wait_one_batch(0, BATCH_WANT, BATCH_US) if busy else wait_one(0)
+                var rc: Int
+                if self.db.writes_held:
+                    rc = wait_one_batch(0, 1, HOLD_POLL_US)
+                elif busy:
+                    rc = wait_one_batch(0, BATCH_WANT, BATCH_US)
+                else:
+                    rc = wait_one(0)
                 if rc < 0 and rc != EAGAIN and rc != -4:
                     log("wait_one failed: " + String(rc) + "; using epoll waits")
                     self.single_wait_ok = False
@@ -755,11 +770,14 @@ struct Server:
                         self.efd0_ready = True
                     else:
                         log("eventfd registration failed; epoll waits will time out instead")
-                _ = wait(100 if not self.efd0_ready else 1000)
+                _ = wait(HOLD_POLL_US // 1000 if self.db.writes_held else (100 if not self.efd0_ready else 1000))
                 if busy:
                     settle(BATCH_US)
             self.now = unix_time()
-            self.scratch.reset()
+            self.db.release_hold()
+            # held writes keep their names and bodies in scratch across batches
+            if len(self.writes) == 0:
+                self.scratch.reset()
             var handled = 0
             for r in range(self.nrings):
                 while True:
@@ -770,7 +788,7 @@ struct Server:
                     if n < CQ_BATCH:
                         break
             busy = handled >= BUSY_MIN
-            if len(self.writes) > 0:
+            if len(self.writes) > 0 and not self.db.writes_held:
                 self.run_writes()
             else:
                 _ = self.db.commit()
@@ -813,5 +831,8 @@ def main() raises:
     var srv = Server(db_path, secret, host, port)
     var ck = db_path
     _ = external_call["sh_checkpointer_start", c_int](ck.as_c_string_span(), c_int(CKPT_INTERVAL_MS))
+    var binary_ok: c_int = 0
+    var locked = Int(external_call["sh_lock_code", Int](Pointer(to=binary_ok)))
+    log("locked " + String(locked // 1024) + " KB of code and read-only data" + ("" if binary_ok != 0 else " (the binary itself only partly: RLIMIT_MEMLOCK)"))
     log("mojo server listening on " + host + ":" + String(port) + " (fd table " + String(srv.table) + " x up to " + String(srv.max_rings) + " rings, tail plan " + ("on" if srv.db.tail_ok else "off") + ")")
     srv.run()

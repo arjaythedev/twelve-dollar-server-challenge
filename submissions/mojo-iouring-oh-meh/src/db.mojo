@@ -7,12 +7,21 @@
 from std.ffi import c_int, external_call
 from bytes import Bytes, balloc, bcopy, bcmp, Out, calloc_t
 from record import Rec
+from uring import now_ms, getenv
 
 comptime SQLITE_ROW = 100
 comptime SQLITE_DONE = 101
 comptime FEED_N = 20
 comptime CREATED_LEN = 24
-comptime WAL_MAX_FRAMES = 8192   # 32 MB at 4 KB pages: at most 2 hash segments to search
+# The WAL is kept short by restarting it, never by a checkpoint on the loop: past
+# WAL_HOLD_FRAMES the loop holds its writes (reads go on) until the checkpoint
+# thread reports every frame backfilled, and the next write then restarts the log at
+# frame 1 inside SQLite's own frame write. A hold lasts one passive pass, at most
+# WAL_HOLD_MS. Only if the log still reaches WAL_MAX_FRAMES (the thread starved,
+# a reader pinned the old log) does the loop fall back to a TRUNCATE of its own.
+comptime WAL_HOLD_FRAMES = 8192  # 32 MB at 4 KB pages: at most 2 hash segments to search
+comptime WAL_HOLD_MS = 1000
+comptime WAL_MAX_FRAMES = 16384
 comptime WAL_BUSY_SKIP = 64      # batches to wait after a BUSY truncate before trying again
 
 # like() results
@@ -170,6 +179,15 @@ struct Db:
     var st_prev: Int
     var tail_ok: Bool
     var wal_skip: Int
+    var hold_frames: Int
+    var writes_held: Bool
+    var hold_since: Int
+    var expect_restart: Bool
+    var frames_at_release: Int64
+    var holds: Int
+    var restarts: Int
+    var holds_expired: Int
+    var truncates: Int
     var scratch: Bytes
     var rec: Rec
     var urec: Rec
@@ -200,6 +218,20 @@ struct Db:
         self.st_prev = 0
         self.tail_ok = False
         self.wal_skip = 0
+        # Test-only knob (like MOJO_TABLE_OVERRIDE): a tiny threshold makes holds
+        # happen after a few writes, so the probes can exercise them. Never set on the box.
+        self.hold_frames = WAL_HOLD_FRAMES
+        var override = getenv("MOJO_WAL_HOLD_OVERRIDE", "")
+        if override != "":
+            self.hold_frames = Int(override)
+        self.writes_held = False
+        self.hold_since = 0
+        self.expect_restart = False
+        self.frames_at_release = 0
+        self.holds = 0
+        self.restarts = 0
+        self.holds_expired = 0
+        self.truncates = 0
         self.scratch = balloc(1 << 16)
         self.rec = Rec(self.scratch)
         self.urec = Rec(self.scratch)
@@ -316,18 +348,44 @@ struct Db:
         var rc = sq_step(self.st_commit)
         _ = sq_reset(self.st_commit)
         if rc == SQLITE_DONE:
-            # Keep the WAL bounded: SQLite only restarts it on its own during a write
-            # lull, and group commit never leaves one. The passive checkpoints on the
-            # other thread keep this cheap; BUSY just means try again next batch.
+            # Keep the WAL bounded: SQLite only restarts it on its own when a write
+            # begins with the log fully backfilled, and group commit never leaves such
+            # a moment unless the loop makes one by holding its writes (see the top).
+            var frames = external_call["sq_wal_frames", Int64](self.h)
+            if self.expect_restart and frames != self.frames_at_release:
+                # the first write after a hold: a restarted log has few frames
+                if frames < self.frames_at_release:
+                    self.restarts += 1
+                self.expect_restart = False
+            if not self.writes_held and frames > Int64(self.hold_frames):
+                self.writes_held = True
+                self.hold_since = now_ms()
+                self.holds += 1
+                external_call["sq_wal_want_restart", NoneType](c_int(1))
             if self.wal_skip > 0:
                 self.wal_skip -= 1
-            elif external_call["sq_wal_frames", Int64](self.h) > WAL_MAX_FRAMES:
+            elif frames > WAL_MAX_FRAMES:
+                self.truncates += 1
                 if external_call["sq_wal_truncate", c_int](self.h) != 0:
                     self.wal_skip = WAL_BUSY_SKIP
             return True
         _ = sq_step(self.st_rollback)
         _ = sq_reset(self.st_rollback)
         return False
+
+    # Called before each batch starts its transaction: end a hold once the log is
+    # fully backfilled (this batch's write restarts it) or once it has lasted too long.
+    def release_hold(mut self):
+        if not self.writes_held:
+            return
+        if external_call["sq_wal_backfilled", c_int](self.h) != 0:
+            self.writes_held = False
+            self.expect_restart = True
+            self.frames_at_release = external_call["sq_wal_frames", Int64](self.h)
+        elif now_ms() - self.hold_since > WAL_HOLD_MS:
+            self.writes_held = False
+            self.holds_expired += 1
+            external_call["sq_wal_want_restart", NoneType](c_int(0))
 
     def health_ok(mut self) -> Bool:
         var rc = sq_step(self.st_health)

@@ -17,9 +17,13 @@ let stInsert: int = -1
 let stExists: int = -1
 let stLike: int = -1
 let stPing: int = -1
+let stIds: int = -1
+let stCounts: int = -1
+let stRange: int = -1
 
-// Writes share one transaction per batch of requests, committed by
-// commitBatch before any response in the batch is sent (group commit).
+// Every request in a batch runs in one transaction, committed by
+// commitBatch before any response in the batch is sent (group commit). Reads
+// share it too, so a batch takes one snapshot instead of one per statement.
 let inTx: bool = false
 
 let jwtSecret: string = ""
@@ -124,15 +128,20 @@ fn authenticate(req: http.HttpRequest): Auth {
     return Auth { userId: uid, username: name.asString(), err: "" }
 }
 
-fn beginWrite(): void {
-    if (!inTx && db.exec(conn, "BEGIN") >= 0) {
+// IMMEDIATE takes the write lock up front. A transaction that has already
+// read cannot wait for a lock it then needs to write (SQLite returns BUSY at
+// once), and the checkpointer holds that lock while it restarts the WAL, so
+// the batch waits for it here, under busy_timeout, instead.
+fn beginBatch(): void {
+    if (!inTx && db.exec(conn, "BEGIN IMMEDIATE") >= 0) {
         inTx = true
     }
 }
 
 // Runs after every batch of handlers, before their responses go out. A batch
-// with no writes has nothing to commit. If the commit fails nothing in the
-// batch is durable, so the runtime answers every request in it 500.
+// that never touched the database has nothing to commit. If the commit fails,
+// nothing in the batch is durable, so the runtime answers every request in it
+// 500, reads included.
 fn commitBatch(): bool {
     if (!inTx) {
         return true
@@ -156,12 +165,95 @@ fn health(req: http.HttpRequest): http.HttpResponse {
     return http.response(200, json.encode({ status: "ok", db: "ok", uptime_s: time.unixNow() - startedAt }), "application/json")
 }
 
-fn feed(req: http.HttpRequest): http.HttpResponse {
+// The reference query: a like count and an author lookup per post.
+fn feedByPost(): http.HttpResponse {
     let posts: Post[] = []
     db.reset(stFeed)
     while (db.step(stFeed)) {
         let p: Post = Post {}
         db.fill(p, stFeed)
+        posts.push(p)
+    }
+    db.reset(stFeed)
+    return http.response(200, json.encode(FeedPage { posts: posts }), "application/json")
+}
+
+// Widest id span the range scans cover before the feed falls back to the
+// reference query.
+const FEED_SPAN: long = 256
+
+// The 20 newest ids, then one scan of likes and one of posts over the id
+// range they cover, put back in feed order. The answer is the reference
+// query's: rows in the range that are not among the 20 are skipped, and if
+// the ids are spread wide or one of them has no row, it runs that instead.
+fn feed(req: http.HttpRequest): http.HttpResponse {
+    beginBatch()
+    let ids: long[] = []
+    db.reset(stIds)
+    while (db.step(stIds)) {
+        let id: long = db.col(stIds, 0)
+        ids.push(id)
+    }
+    db.reset(stIds)
+    if (ids.len() == 0) {
+        return http.response(200, json.encode(FeedPage { posts: [] }), "application/json")
+    }
+
+    let lo: long = ids[0]
+    let hi: long = ids[0]
+    for (let j = 1; j < ids.len(); j++) {
+        let id: long = ids[j]
+        if (id < lo) {
+            lo = id
+        }
+        if (id > hi) {
+            hi = id
+        }
+    }
+    if (hi - lo >= FEED_SPAN) {
+        return feedByPost()
+    }
+    let span: int = num.toInt(hi - lo) + 1
+
+    // Indexed by id - lo: where the post's row is in rows, and its likes.
+    let slot: int[] = []
+    let likes: int[] = []
+    for (let i = 0; i < span; i++) {
+        slot.push(-1)
+        likes.push(0)
+    }
+
+    db.reset(stCounts)
+    db.bindLong(stCounts, 1, lo)
+    db.bindLong(stCounts, 2, hi)
+    while (db.step(stCounts)) {
+        let id: long = db.col(stCounts, 0)
+        let n: int = db.col(stCounts, 1)
+        likes[num.toInt(id - lo)] = n
+    }
+    db.reset(stCounts)
+
+    let rows: Post[] = []
+    db.reset(stRange)
+    db.bindLong(stRange, 1, lo)
+    db.bindLong(stRange, 2, hi)
+    while (db.step(stRange)) {
+        let p: Post = Post {}
+        db.fill(p, stRange)
+        slot[num.toInt(p.id - lo)] = rows.len()
+        rows.push(p)
+    }
+    db.reset(stRange)
+
+    let posts: Post[] = []
+    for (let j = 0; j < ids.len(); j++) {
+        let id: long = ids[j]
+        let k: int = slot[num.toInt(id - lo)]
+        if (k < 0) {
+            return feedByPost()
+        }
+        let p: Post = rows[k]
+        p.like_count = likes[num.toInt(id - lo)]
         posts.push(p)
     }
     return http.response(200, json.encode(FeedPage { posts: posts }), "application/json")
@@ -173,6 +265,7 @@ fn onePost(req: http.HttpRequest): http.HttpResponse {
         return fail(400, "invalid post id")
     }
 
+    beginBatch()
     db.reset(stOne)
     db.bindLong(stOne, 1, id)
     if (!db.step(stOne)) {
@@ -209,7 +302,7 @@ fn createPost(req: http.HttpRequest): http.HttpResponse {
     if (tooLong(body, 500)) {
         return fail(400, "body must be at most 500 characters")
     }
-    beginWrite()
+    beginBatch()
     db.reset(stInsert)
     db.bindLong(stInsert, 1, auth.userId)
     db.bindStr(stInsert, 2, body)
@@ -239,6 +332,7 @@ fn likePost(req: http.HttpRequest): http.HttpResponse {
     if (id == 0) {
         return fail(400, "invalid post id")
     }
+    beginBatch()
     db.reset(stExists)
     db.bindLong(stExists, 1, id)
     let exists: bool = db.step(stExists)
@@ -246,7 +340,6 @@ fn likePost(req: http.HttpRequest): http.HttpResponse {
 
     let inserted: bool = false
     if (exists) {
-        beginWrite()
         db.reset(stLike)
         db.bindLong(stLike, 1, auth.userId)
         db.bindLong(stLike, 2, id)
@@ -265,6 +358,38 @@ fn likePost(req: http.HttpRequest): http.HttpResponse {
     return http.response(status, json.encode({ liked: true, already_liked: !inserted, post_id: id }), "application/json")
 }
 
+// WAL frames (4 KB each) past which the checkpointer, having copied what it
+// could without blocking anyone, waits for the writer to restart the WAL.
+const CKPT_RESTART_FRAMES: int = 8192
+
+// A file name as a URI path, so the connections can name a VFS.
+fn fileUri(path: string): string {
+    return "file:" + path.replace("%", "%25").replace("?", "%3f").replace("#", "%23") + "?vfs=unix-excl"
+}
+
+// Checkpoints run here, on their own connection, so the event loop never
+// copies WAL frames into the database file or waits on its fsync. A passive
+// pass copies what is committed without blocking the writer; once the WAL
+// is long, a restart pass also waits for the writer between batches so the
+// next commit starts the WAL from the beginning. Durability is the same:
+// a commit is in the WAL before its response, and the WAL is the record.
+fn checkpointer(passive: int, restart: int): void {
+    while (true) {
+        time.sleep(100)
+        db.reset(passive)
+        let frames: int = 0
+        if (db.step(passive)) {
+            frames = db.col(passive, 1)
+        }
+        db.reset(passive)
+        if (frames >= CKPT_RESTART_FRAMES) {
+            db.reset(restart)
+            db.step(restart)
+            db.reset(restart)
+        }
+    }
+}
+
 fn unmatched(req: http.HttpRequest): http.HttpResponse {
     return fail(404, "not found")
 }
@@ -279,13 +404,13 @@ fn main(): void {
         jwtSecret = "twelve-dollar-challenge"
     }
 
-    conn = db.openSingleThreaded("sqlite", path)
+    let uri: string = fileUri(path)
+    conn = db.openSingleThreaded("sqlite", uri)
     if (conn == -1) {
         fmt.println("cannot open " + path)
         os.exit(1)
     }
 
-    db.exec(conn, "PRAGMA locking_mode=EXCLUSIVE")
     db.exec(conn, "PRAGMA journal_mode=WAL")
     db.exec(conn, "PRAGMA synchronous=NORMAL")
     db.exec(conn, "PRAGMA busy_timeout=5000")
@@ -293,6 +418,9 @@ fn main(): void {
     db.exec(conn, "PRAGMA mmap_size=268435456")
     db.exec(conn, "PRAGMA temp_store=MEMORY")
     db.exec(conn, "PRAGMA journal_size_limit=67108864")
+    // The checkpointer below copies the WAL back; past 64k frames the loop
+    // does it too, so the WAL stays bounded if that thread falls behind.
+    db.exec(conn, "PRAGMA wal_autocheckpoint=65536")
 
     try {
         stFeed = db.prepare(conn, queries.feed())
@@ -301,12 +429,16 @@ fn main(): void {
         stExists = db.prepare(conn, queries.postExists())
         stLike = db.prepare(conn, queries.like())
         stPing = db.prepare(conn, queries.ping())
+        stIds = db.prepare(conn, queries.newestIds())
+        stCounts = db.prepare(conn, queries.likeCounts())
+        stRange = db.prepare(conn, queries.postRange())
     } catch (e: q.QueryError) {
         fmt.println("could not build statements: ${e.message}")
         os.exit(1)
     }
 
-    if (stFeed == -1 || stOne == -1 || stInsert == -1 || stExists == -1 || stLike == -1 || stPing == -1) {
+    if (stFeed == -1 || stOne == -1 || stInsert == -1 || stExists == -1 || stLike == -1 || stPing == -1
+        || stIds == -1 || stCounts == -1 || stRange == -1) {
         fmt.println("could not prepare statements")
         os.exit(1)
     }
@@ -330,6 +462,22 @@ fn main(): void {
         host = "0.0.0.0"
     }
 
+    // Its own connection and statements, set up here so that if any of it
+    // fails, checkpoints stay where SQLite normally runs them, on the loop.
+    let ckpt: int = db.openSingleThreaded("sqlite", uri)
+    let passive: int = -1
+    let restart: int = -1
+    if (ckpt != -1) {
+        db.exec(ckpt, "PRAGMA busy_timeout=250")
+        passive = db.prepare(ckpt, "PRAGMA wal_checkpoint(PASSIVE)")
+        restart = db.prepare(ckpt, "PRAGMA wal_checkpoint(RESTART)")
+    }
+    if (passive == -1 || restart == -1) {
+        fmt.println("no checkpoint connection; the event loop checkpoints")
+        db.exec(conn, "PRAGMA wal_autocheckpoint=1000")
+    } else {
+        spawn { checkpointer(passive, restart) }
+    }
     http.afterBatch(commitBatch)
     http.uring()
     http.limits(0, 75, 200000)

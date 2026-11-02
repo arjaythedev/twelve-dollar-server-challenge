@@ -22,6 +22,7 @@
 #include <string.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
+#include <sys/mman.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
 #include <time.h>
@@ -411,8 +412,20 @@ int64_t sq_wal_frames(void *db) {
   Pager *pPager = ((sqlite3 *)db)->aDb[0].pBt->pBt->pPager;
   return pPager->pWal ? (int64_t)pPager->pWal->hdr.mxFrame : 0;
 }
-// Backfill what is left and reset the WAL to empty. Returns SQLITE_OK, or BUSY if the
-// checkpointer thread holds the checkpoint lock right now (caller retries later).
+// 1 when every WAL frame is already in the database file: a write transaction that
+// begins now reads from the file alone and its first frame restarts the WAL at
+// frame 1 (walRestartLog), with no checkpoint on this thread. Read from the shared
+// wal-index, so it is current even though this connection's own header snapshot is
+// refreshed only when a transaction starts.
+int sq_wal_backfilled(void *db) {
+  Pager *pPager = ((sqlite3 *)db)->aDb[0].pBt->pBt->pPager;
+  Wal *pWal = pPager->pWal;
+  if (!pWal || !pWal->apWiData || !pWal->apWiData[0]) return 1;
+  return walCkptInfo(pWal)->nBackfill >= walIndexHdr(pWal)->mxFrame;
+}
+// Last resort: backfill what is left and reset the WAL to empty, on this thread.
+// Returns SQLITE_OK, or BUSY if the checkpointer thread holds the checkpoint lock
+// right now (caller retries later).
 int sq_wal_truncate(void *db) {
   int log = 0, ckpt = 0;
   return sqlite3_wal_checkpoint_v2(db, NULL, SQLITE_CHECKPOINT_TRUNCATE, &log, &ckpt);
@@ -501,9 +514,17 @@ static struct {
   char *path;
   int interval_ms;
 } ck;
+// Set by the loop while it holds writes for a WAL restart: the thread then runs
+// passes back to back until the log is fully backfilled, and clears it.
+static int ck_urgent;
+void sq_wal_want_restart(int on) { __atomic_store_n(&ck_urgent, on, __ATOMIC_RELEASE); }
 
 static void *ck_main(void *arg) {
   (void)arg;
+  // Lowest priority: on one vCPU a checkpoint pass at the loop's priority holds the
+  // loop off the CPU for the pass's whole length (30-400 ms near the memory wall).
+  // At nice 19 the thread still runs between the loop's batches.
+  setpriority(PRIO_PROCESS, 0, 19);
   sqlite3 *db = NULL;
   if (sqlite3_open_v2(ck.path, &db, SQLITE_OPEN_READWRITE, "unix-excl") != SQLITE_OK) {
     fprintf(stderr, "checkpointer: open failed\n");
@@ -516,10 +537,22 @@ static void *ck_main(void *arg) {
   sqlite3_exec(db, "SELECT 1 FROM sqlite_master LIMIT 1", 0, 0, 0);
   int last_log = -1, idle = 0, reported = 0;
   for (;;) {
-    // back off to 10x the interval when the WAL hasn't changed (idle server)
-    usleep((useconds_t)ck.interval_ms * 1000 * (idle > 5 ? 10 : 1));
+    // Sleep the interval (10x when the WAL hasn't changed: idle server) in 10 ms
+    // slices, so a restart request cuts it short; then run back to back until the
+    // log is fully backfilled. A pass only clears the request it saw before it
+    // started: an older pass's snapshot says nothing about frames added since.
+    int urgent = __atomic_load_n(&ck_urgent, __ATOMIC_ACQUIRE);
+    if (urgent) {
+      usleep(2000);
+    } else {
+      for (int left = ck.interval_ms * (idle > 5 ? 10 : 1); left > 0 && !urgent; left -= 10) {
+        usleep(10000);
+        urgent = __atomic_load_n(&ck_urgent, __ATOMIC_ACQUIRE);
+      }
+    }
     int log = 0, done = 0;
     int rc = sqlite3_wal_checkpoint_v2(db, NULL, SQLITE_CHECKPOINT_PASSIVE, &log, &done);
+    if (urgent && rc == SQLITE_OK && done >= log) __atomic_store_n(&ck_urgent, 0, __ATOMIC_RELEASE);
     if (!reported && log > 0) {
       fprintf(stderr, "checkpointer: first passive checkpoint rc=%d wal_frames=%d backfilled=%d\n", rc, log, done);
       fflush(stderr);
@@ -529,6 +562,37 @@ static void *ck_main(void *arg) {
     last_log = log;
   }
   return NULL;
+}
+
+// Lock the process's file-backed code and read-only data in RAM: the binary first,
+// then the shared libraries it loaded, until RLIMIT_MEMLOCK (8 MB under systemd)
+// is used up. Near the memory wall, with no swap, reclaim takes file-backed pages
+// first, and the loop then stalls on major faults reading its own code back from
+// disk. Returns the bytes locked; *binary_ok says whether every mapping of the
+// binary itself was locked (a later library mapping that fails just ends the pass).
+long sh_lock_code(int *binary_ok) {
+  char exe[256] = "";
+  ssize_t n = readlink("/proc/self/exe", exe, sizeof exe - 1);
+  if (n > 0) exe[n] = 0;
+  long locked = 0;
+  *binary_ok = 1;
+  for (int pass = 0; pass < 2; pass++) {
+    FILE *f = fopen("/proc/self/maps", "r");
+    if (!f) { *binary_ok = 0; break; }
+    char line[512];
+    while (fgets(line, sizeof line, f)) {
+      unsigned long lo, hi;
+      char perms[8], path[256] = "";
+      if (sscanf(line, "%lx-%lx %7s %*s %*s %*s %255s", &lo, &hi, perms, path) < 4) continue;
+      if (path[0] != '/' || perms[3] != 'p' || perms[1] == 'w') continue;  // code and rodata only
+      if ((strcmp(path, exe) == 0) != (pass == 0)) continue;              // pass 0: the binary
+      if (mlock((void *)lo, hi - lo) == 0) locked += (long)(hi - lo);
+      else if (pass == 0) *binary_ok = 0;
+      else break;                                                         // limit reached
+    }
+    fclose(f);
+  }
+  return locked;
 }
 
 int sh_checkpointer_start(const char *path, int interval_ms) {

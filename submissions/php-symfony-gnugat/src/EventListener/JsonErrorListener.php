@@ -12,8 +12,6 @@ use Symfony\Component\HttpKernel\Event\ExceptionEvent;
 use Symfony\Component\HttpKernel\Exception\HttpExceptionInterface;
 use Symfony\Component\HttpKernel\KernelEvents;
 use Symfony\Component\Routing\Exception\ResourceNotFoundException;
-use Symfony\Component\Serializer\Exception\NotEncodableValueException;
-use Symfony\Component\Validator\Exception\ValidationFailedException;
 
 /**
  * Every error is `{"error":"<message>"}`. Runs after the Security listener, which handles 401s.
@@ -36,13 +34,9 @@ final readonly class JsonErrorListener
             return;
         }
 
-        $previous = $exception->getPrevious();
-        $message = match (true) {
-            $previous instanceof ResourceNotFoundException => 'not found',
-            $previous instanceof NotEncodableValueException => 'malformed JSON body',
-            $previous instanceof ValidationFailedException => $previous->getViolations()->get(0)->getMessage(),
-            default => $exception->getMessage(),
-        };
+        $message = $exception->getPrevious() instanceof ResourceNotFoundException
+            ? 'not found'
+            : $exception->getMessage();
 
         $event->setResponse(new JsonResponse(['error' => $message], $exception->getStatusCode(), $exception->getHeaders()));
     }

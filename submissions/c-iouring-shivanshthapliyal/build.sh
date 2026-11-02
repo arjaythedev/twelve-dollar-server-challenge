@@ -14,6 +14,8 @@ SQLITE_DEFS="-DSQLITE_THREADSAFE=2 -DSQLITE_DEFAULT_MEMSTATUS=0 -DSQLITE_OMIT_DE
   -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_USE_ALLOCA -DSQLITE_DQS=0 -DSQLITE_DEFAULT_WAL_SYNCHRONOUS=1
   -DSQLITE_MAX_EXPR_DEPTH=0 -DSQLITE_OMIT_PROGRESS_CALLBACK -DSQLITE_OMIT_AUTOINIT -DSQLITE_LIKE_DOESNT_MATCH_BLOBS"
 CFLAGS="-O2 -march=native -flto -fno-plt"
-[ build/sqlite3.o -nt build.sh ] || gcc $CFLAGS $SQLITE_DEFS -c "build/$SQ/sqlite3.c" -o build/sqlite3.o
+# SQLite stays unmodified: src/sqlite_bt.c includes the amalgamation and adds read helpers on its cursor API.
+[ build/sqlite_bt.o -nt build.sh ] && [ build/sqlite_bt.o -nt src/sqlite_bt.c ] ||
+  gcc $CFLAGS $SQLITE_DEFS -I"build/$SQ" -c src/sqlite_bt.c -o build/sqlite_bt.o
 gcc $CFLAGS -Wall -Wextra -I"build/$SQ" -c src/server.c -o build/server.o
-gcc $CFLAGS -o bin/server build/server.o build/sqlite3.o -luring -lm -pthread
+gcc $CFLAGS -o bin/server build/server.o build/sqlite_bt.o -luring -lm -pthread

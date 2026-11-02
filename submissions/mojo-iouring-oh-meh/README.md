@@ -8,7 +8,7 @@ One thread of Mojo on io_uring, with SQLite compiled into a small C shim. Direct
 | Framework | none: hand-written HTTP/1.1, JSON, JWT and SHA-256 in Mojo |
 | io_uring | liburing 2.15, built from the pinned tarball; needs Linux 6.1+ |
 | SQLite | 3.54.1 amalgamation, SHA-256 pinned, compiled into `src/shim.c` with GCC 13 (`-O3 -march=native`), not patched |
-| C | `src/shim.c`, ~490 lines: wrappers for liburing's inline prep helpers, SQLite's file-private B-tree calls, a checkpoint thread. No request logic |
+| C | `src/shim.c`, ~600 lines: wrappers for liburing's inline prep helpers, SQLite's file-private B-tree calls, a checkpoint thread, the code lock. No request logic |
 | **Nginx or direct** | **Direct** on `HOST:PORT` (`0.0.0.0:80` on the box) |
 
 I picked Mojo because nobody had, and because the language question is already settled by
@@ -31,7 +31,7 @@ SQLITE_PATH=... JWT_SECRET=... HOST=0.0.0.0 PORT=80 bash start.sh
 ## Design
 
 - **One thread.** The event loop, HTTP, JWT, JSON and SQLite reads all run on one thread. A second
-  C thread only runs passive WAL checkpoints. SQLite is built `THREADSAFE=2` for that.
+  C thread only runs passive WAL checkpoints, at nice 19. SQLite is built `THREADSAFE=2` for that.
 - **Rings.** Accepted sockets are io_uring direct descriptors, so `LimitNOFILE=65535` caps one
   ring's table, not the server. Rings open lazily, each with `RLIMIT_NOFILE - 64` slots, up to 16.
   Flags: `SINGLE_ISSUER`, `DEFER_TASKRUN`, `TASKRUN_FLAG`, `CQSIZE`, `SUBMIT_ALL`.
@@ -85,12 +85,37 @@ SQLITE_PATH=... JWT_SECRET=... HOST=0.0.0.0 PORT=80 bash start.sh
   No data is remembered across requests.
 - **Writes** are the reference `INSERT ... RETURNING` and `INSERT ... ON CONFLICT DO NOTHING`,
   group-committed per batch.
-- **Checkpoints.** The checkpoint thread runs `PASSIVE` every 250 ms on its own connection (which
-  runs one read first: a connection that has never run a statement has not opened the WAL, and a
-  checkpoint on it is a no-op; the thread logs its first real checkpoint at startup). SQLite only
-  restarts a WAL on its own during a write lull, and group commit never leaves one, so the writer
-  runs a `TRUNCATE` checkpoint once the WAL passes 8,192 frames (32 MiB). Before that fix the WAL
-  reached 600 MB in a saturation test and `walFindFrame` was a quarter of all CPU.
+- **No routine checkpoint work on the loop.** The checkpoint thread runs `PASSIVE` every 250 ms on
+  its own connection (which runs one read first: a connection that has never run a statement has
+  not opened the WAL, and a checkpoint on it is a no-op; the thread logs its first real checkpoint
+  at startup), at nice 19, so on the one vCPU the loop is scheduled ahead of it. SQLite only
+  restarts a WAL when a write begins with every frame already in the database file, and group
+  commit never leaves such a moment, so the loop makes one: past 8,192 frames (32 MiB, two
+  wal-index hash segments) it holds its writes (reads go on) while the thread runs passes back to
+  back, and once the log is fully backfilled the next batch's first frame restarts it at frame 1
+  inside SQLite's own frame write. A hold ends when the thread reports the log copied, or after
+  1 s; while it lasts the loop polls every 2 ms, so the end is seen even with no traffic. A write
+  caught in a hold waits for it, and so does anything pipelined behind that write on its
+  connection; a hold is one pass plus the thread's wake-up, 20-50 ms on an idle disk and
+  50-460 ms with the box's memory pinned to the benchmark's level. What stays on the loop is
+  SQLite's sync of the new WAL header at each restart (`synchronous=NORMAL` syncs the header
+  when a log is reused): one fsync per 8,192 frames, where the earlier version's `TRUNCATE`
+  checkpoint on the loop cost two fsyncs plus the copy. That `TRUNCATE` remains as the last
+  resort past 16,384 frames, and the log says once a minute how many holds, restarts, expired
+  holds and loop truncates there were (the last two should stay 0). `MOJO_WAL_HOLD_OVERRIDE`
+  is a test-only knob that lowers the threshold so the probes can exercise a hold.
+  Measured on a 1 vCPU / 2 GB droplet with 1.1 GB pinned and 120,000 users of the benchmark's
+  model, 3-minute holds: `ef45beb` ran 69 loop-thread `TRUNCATE`s (51 ms average, 215 ms worst);
+  this version 62 holds, 62 restarts, 0 expired, 0 truncates; the reads' p99 over 10-second
+  windows went from 54 ms (median window) and 314 ms (worst window) to 11 ms and 72 ms, p99 over
+  all requests from 161 to 35 ms, and the writes' p99 from 55 ms (median window) and 400 ms (worst)
+  to 28-37 ms and 319 ms: a write caught in a hold waits for the pass, the rest do not.
+- **The binary's code and read-only data are locked in RAM** (`mlock` of each private read-only
+  file-backed mapping, the binary's own 1.6 MB first, then the shared libraries until systemd's
+  8 MB `RLIMIT_MEMLOCK` is used up; 8,156 KB in all on the droplet). With no swap, reclaim near
+  the memory wall takes file-backed pages first, and the loop then stalls on major faults reading
+  its own code back from disk: 21 of them on the loop thread in the 3-minute hold above, 2 with
+  the lock. The log says how much was locked and whether the binary itself was locked in full.
 - `mmap_size=0` on purpose: with mmap on, SQLite skips its page cache for mapped pages and consults
   the WAL index on every page touch, which was 12 % of CPU. With a 32 MiB page cache the hot set
   (users, the tails of posts and of the likes index) is a cache hit.

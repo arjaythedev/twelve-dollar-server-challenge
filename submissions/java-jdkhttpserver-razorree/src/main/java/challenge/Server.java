@@ -15,6 +15,8 @@ public final class Server {
     private static final String WHITESPACE = "\t\n\u000b\f\r \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff";
     private final Database db;
     private final Auth auth;
+    private final ConnectionPolicy connections = new ConnectionPolicy(
+        Integer.getInteger("challenge.keepAliveConnections", 8192));
     record Response(int status, Object body) {}
     static final class ApiError extends Exception {
         final int status;
@@ -27,7 +29,7 @@ public final class Server {
         // HttpServer reads these properties during initialization.
         System.setProperty("sun.net.httpserver.idleInterval", "75");
         System.setProperty("sun.net.httpserver.maxIdleConnections",
-            System.getProperty("sun.net.httpserver.maxIdleConnections", "32768"));
+            Integer.toString(Integer.MAX_VALUE));
         System.setProperty("jdk.httpserver.maxConnections", "-1");
         System.setProperty("sun.net.httpserver.nodelay", "true");
         Database database = new Database(required("SQLITE_PATH"));
@@ -66,6 +68,7 @@ public final class Server {
     }
 
     private void handle(HttpExchange exchange) throws IOException {
+        ConnectionPolicy.Lease lease = connections.begin(exchange.getRemoteAddress());
         try (exchange) {
             Response response;
             try {
@@ -85,9 +88,14 @@ public final class Server {
             // SQLite read routes return complete JSON bytes; other routes serialize here.
             byte[] bytes = response.body() instanceof byte[] raw ? raw : Json.encode(response.body());
             exchange.getResponseHeaders().set("Content-Type", "application/json");
-            if (CLOSE_CONNECTIONS) exchange.getResponseHeaders().set("Connection", "close");
+            if (connections.finish(lease, CLOSE_CONNECTIONS || "close".equalsIgnoreCase(
+                    exchange.getRequestHeaders().getFirst("Connection"))))
+                exchange.getResponseHeaders().set("Connection", "close");
             exchange.sendResponseHeaders(response.status(), bytes.length);
             exchange.getResponseBody().write(bytes);
+        } catch (IOException | RuntimeException | Error error) {
+            connections.abort(lease);
+            throw error;
         }
     }
 

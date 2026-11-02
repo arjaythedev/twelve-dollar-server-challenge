@@ -356,3 +356,203 @@ pub fn push_int(out: &mut Vec<u8>, v: i64) {
     }
     out.extend_from_slice(&buf[i..]);
 }
+
+/// Writes straight into spare capacity that `fill` reserved, with no per-piece capacity checks
+/// or library memcpy calls: fixed pieces become plain stores, integers are written in place, and
+/// strings are copied 8 bytes at a time while they are checked for characters to escape.
+pub struct Cur {
+    p: *mut u8,
+    end: *mut u8,
+}
+
+/// Bytes `Cur::esc` may write for `n` input bytes (every byte a \u00XX escape).
+#[inline(always)]
+pub const fn esc_bound(n: usize) -> usize {
+    6 * n
+}
+
+/// Bytes `Cur::int` may write.
+pub const INT_BOUND: usize = 20;
+
+/// Reserves `bound` bytes after `out`'s end, lets `f` write at most that many, and keeps them.
+/// Every write is checked against the bound in debug builds; release builds check once at the
+/// end and abort, so a wrong bound is a crash, never a quiet result.
+#[inline(always)]
+pub fn fill(out: &mut Vec<u8>, bound: usize, f: impl FnOnce(&mut Cur)) {
+    out.reserve(bound);
+    let len = out.len();
+    // SAFETY: the reservation makes [len, len + bound) writable, and callers size `bound` from
+    // esc_bound / INT_BOUND / the literal lengths they write.
+    unsafe {
+        let base = out.as_mut_ptr();
+        let mut c = Cur { p: base.add(len), end: base.add(len + bound) };
+        f(&mut c);
+        assert!(c.p <= c.end, "json::fill bound exceeded");
+        out.set_len(c.p.offset_from(base) as usize);
+    }
+}
+
+impl Cur {
+    #[inline(always)]
+    pub fn lit(&mut self, s: &[u8]) {
+        debug_assert!(self.p as usize + s.len() <= self.end as usize);
+        unsafe {
+            std::ptr::copy_nonoverlapping(s.as_ptr(), self.p, s.len());
+            self.p = self.p.add(s.len());
+        }
+    }
+
+    #[inline(always)]
+    pub fn byte(&mut self, b: u8) {
+        debug_assert!(self.p < self.end);
+        unsafe {
+            *self.p = b;
+            self.p = self.p.add(1);
+        }
+    }
+
+    /// `v` in decimal, as push_int writes it.
+    #[inline(always)]
+    pub fn int(&mut self, v: i64) {
+        debug_assert!(self.p as usize + INT_BOUND <= self.end as usize);
+        // Digits go right-aligned into buf[..20]; then a fixed 20-byte copy from the first digit
+        // (buf has 20 spare bytes so that stays in bounds), and the cursor moves by the length.
+        let mut buf = [0u8; 40];
+        let mut i = 20;
+        let mut n = v.unsigned_abs();
+        while n >= 100 {
+            let r = (n % 100) as usize * 2;
+            n /= 100;
+            i -= 2;
+            buf[i] = DIGITS2[r];
+            buf[i + 1] = DIGITS2[r + 1];
+        }
+        if n >= 10 {
+            let r = n as usize * 2;
+            i -= 2;
+            buf[i] = DIGITS2[r];
+            buf[i + 1] = DIGITS2[r + 1];
+        } else {
+            i -= 1;
+            buf[i] = b'0' + n as u8;
+        }
+        if v < 0 {
+            i -= 1;
+            buf[i] = b'-';
+        }
+        unsafe {
+            std::ptr::copy_nonoverlapping(buf.as_ptr().add(i), self.p, INT_BOUND);
+            self.p = self.p.add(20 - i);
+        }
+    }
+
+    /// `s` as a JSON string body, byte for byte what `escape_into` writes.
+    #[inline]
+    pub fn esc(&mut self, s: &[u8]) {
+        debug_assert!(self.p as usize + esc_bound(s.len()) <= self.end as usize);
+        let mut i = 0;
+        #[cfg(target_arch = "x86_64")]
+        {
+            #[cfg(target_feature = "avx2")]
+            while i + 32 <= s.len() {
+                // SAFETY: 32 bytes of s from i are in bounds; 32 bytes of room are reserved
+                // (esc_bound of the bytes still to come is at least 6 * 32).
+                let m = unsafe { simd::store_check32(s.as_ptr().add(i), self.p) };
+                i += self.chunk_tail(s, i, 32, m);
+            }
+            while i + 16 <= s.len() {
+                // SAFETY: as above, for 16 bytes.
+                let m = unsafe { simd::store_check16(s.as_ptr().add(i), self.p) };
+                i += self.chunk_tail(s, i, 16, m);
+            }
+        }
+        while i + 8 <= s.len() {
+            let w = u64::from_le_bytes(s[i..i + 8].try_into().unwrap());
+            if word_needs_escape(w) != 0 {
+                for &c in &s[i..i + 8] {
+                    self.esc_byte(c);
+                }
+            } else {
+                unsafe {
+                    std::ptr::write_unaligned(self.p as *mut u64, w.to_le());
+                    self.p = self.p.add(8);
+                }
+            }
+            i += 8;
+        }
+        for &c in &s[i..] {
+            self.esc_byte(c);
+        }
+    }
+
+    /// After a chunk of `n` bytes at s[i..] was stored verbatim and `m` has a bit per byte that
+    /// needs escaping: keeps the clean prefix, escapes the rest of the chunk byte by byte.
+    /// Returns n.
+    #[inline(always)]
+    #[allow(dead_code)]
+    fn chunk_tail(&mut self, s: &[u8], i: usize, n: usize, m: u32) -> usize {
+        if m == 0 {
+            unsafe { self.p = self.p.add(n) };
+        } else {
+            let k = m.trailing_zeros() as usize;
+            unsafe { self.p = self.p.add(k) };
+            for &c in &s[i + k..i + n] {
+                self.esc_byte(c);
+            }
+        }
+        n
+    }
+
+    #[inline(always)]
+    fn esc_byte(&mut self, c: u8) {
+        if ESC[c as usize] == 0 {
+            self.byte(c);
+        } else {
+            self.esc_special(c);
+        }
+    }
+
+    #[cold]
+    fn esc_special(&mut self, c: u8) {
+        const H: &[u8; 16] = b"0123456789abcdef";
+        match c {
+            b'"' => self.lit(b"\\\""),
+            b'\\' => self.lit(b"\\\\"),
+            b'\n' => self.lit(b"\\n"),
+            b'\r' => self.lit(b"\\r"),
+            b'\t' => self.lit(b"\\t"),
+            8 => self.lit(b"\\b"),
+            12 => self.lit(b"\\f"),
+            _ => self.lit(&[b'\\', b'u', b'0', b'0', H[(c >> 4) as usize], H[(c & 15) as usize]]),
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+mod simd {
+    use std::arch::x86_64::*;
+
+    /// Copies 16 bytes from `src` to `dst` and returns a bit per byte that is < 0x20, '"' or '\\'.
+    /// SSE2 is part of x86_64.
+    #[inline(always)]
+    pub unsafe fn store_check16(src: *const u8, dst: *mut u8) -> u32 {
+        let v = _mm_loadu_si128(src as *const __m128i);
+        _mm_storeu_si128(dst as *mut __m128i, v);
+        let ctl = _mm_cmpeq_epi8(_mm_min_epu8(v, _mm_set1_epi8(0x1f)), v);
+        let q = _mm_cmpeq_epi8(v, _mm_set1_epi8(b'"' as i8));
+        let b = _mm_cmpeq_epi8(v, _mm_set1_epi8(b'\\' as i8));
+        _mm_movemask_epi8(_mm_or_si128(ctl, _mm_or_si128(q, b))) as u32
+    }
+
+    /// The same for 32 bytes.
+    #[cfg(target_feature = "avx2")]
+    #[inline(always)]
+    pub unsafe fn store_check32(src: *const u8, dst: *mut u8) -> u32 {
+        let v = _mm256_loadu_si256(src as *const __m256i);
+        _mm256_storeu_si256(dst as *mut __m256i, v);
+        let ctl = _mm256_cmpeq_epi8(_mm256_min_epu8(v, _mm256_set1_epi8(0x1f)), v);
+        let q = _mm256_cmpeq_epi8(v, _mm256_set1_epi8(b'"' as i8));
+        let b = _mm256_cmpeq_epi8(v, _mm256_set1_epi8(b'\\' as i8));
+        _mm256_movemask_epi8(_mm256_or_si256(ctl, _mm256_or_si256(q, b))) as u32
+    }
+}

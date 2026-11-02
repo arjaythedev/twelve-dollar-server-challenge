@@ -3,6 +3,9 @@
 # GOMAXPROCS and FrankenPHP's defaults all see one CPU; k6 runs in its own container on the other cores. Numbers are only comparable with each other (Apple silicon, no CPU steal, no real network).
 #
 #   bash local-bench/bench.sh build              # build the image (runs install.sh and build.sh)
+#   bash local-bench/bench.sh build-peer php-symfony-pklebba [git ref]
+#                                                # build another submission (default ref origin/main), tagged
+#                                                # twelve-dollar-<folder>: start it with IMAGE=twelve-dollar-<folder>
 #   bash local-bench/bench.sh test               # what CI runs: test/run.sh, inside the image
 #   bash local-bench/bench.sh start              # start the server (1 CPU, 2 GB) on a fresh database
 #   bash local-bench/bench.sh load 2000 [label]  # k6 bench/load.js against it, CPU/RAM sampled to results/
@@ -31,6 +34,13 @@ K6_CPUS="2-$(( $(docker info --format '{{.NCPU}}') - 1 ))"
 case "${1:-}" in
   build)
     docker build -f "$HERE/Dockerfile" -t "$IMAGE" "$APP"
+    ;;
+  build-peer)
+    peer="${2:?usage: bench.sh build-peer <submission folder> [git ref]}"; ref="${3:-origin/main}"
+    src="$(mktemp -d)"
+    git -C "$REPO" archive "$ref" "submissions/$peer" | tar -x -C "$src"
+    docker build -f "$HERE/Dockerfile.peer" --build-context bench="$HERE" -t "twelve-dollar-$peer" "$src/submissions/$peer"
+    rm -rf "$src"
     ;;
   test)
     docker run --rm --cpuset-cpus="$SERVER_CPU" --memory=2g --memory-swap=2g \
@@ -116,6 +126,6 @@ case "${1:-}" in
     docker rm -f "$SERVER" >/dev/null 2>&1 || true
     ;;
   *)
-    sed -n '2,11p' "$0"; exit 1
+    sed -n '2,14p' "$0"; exit 1
     ;;
 esac

@@ -4,7 +4,6 @@
 	admin localhost:2019
 
 	frankenphp {
-		max_threads 8
 		worker {
 			file ./public/index.php
 		}

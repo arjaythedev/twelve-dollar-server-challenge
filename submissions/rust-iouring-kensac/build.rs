@@ -10,7 +10,7 @@ fn main() {
         .flag("-fno-plt")
         .warnings(false);
     for d in [
-        "SQLITE_THREADSAFE=0",
+        "SQLITE_THREADSAFE=2",
         "SQLITE_DEFAULT_MEMSTATUS=0",
         "SQLITE_DEFAULT_WAL_SYNCHRONOUS=1",
         "SQLITE_DQS=0",
@@ -37,4 +37,5 @@ fn main() {
     }
     b.compile("shim");
     println!("cargo:rustc-link-lib=m");
+    println!("cargo:rustc-link-lib=pthread");
 }

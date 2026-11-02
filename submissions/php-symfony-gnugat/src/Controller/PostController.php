@@ -11,8 +11,8 @@ use App\Repository\PostRepository;
 use App\Security\JwtUser;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\JsonResponse;
+use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\Response;
-use Symfony\Component\HttpKernel\Attribute\MapRequestPayload;
 use Symfony\Component\HttpKernel\Attribute\ValueResolver;
 use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
 use Symfony\Component\JsonStreamer\JsonStreamWriter;
@@ -54,11 +54,10 @@ final class PostController extends AbstractController
     public function create(
         #[CurrentUser]
         JwtUser $user,
-        #[MapRequestPayload(validationFailedStatusCode: Response::HTTP_BAD_REQUEST)]
-        CreatePostPayload $payload,
+        Request $request,
     ): JsonResponse {
         return $this->writeJson(
-            new PostOutput($this->posts->create($user, $payload)),
+            new PostOutput($this->posts->create($user, CreatePostPayload::fromRequest($request))),
             Response::HTTP_CREATED,
         );
     }

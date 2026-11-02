@@ -66,3 +66,50 @@ X(cur_seek_int) int cur_seek_int(BtCursor *c, KeyInfo *k, long long key, int def
 X(cur_payload_size) unsigned cur_payload_size(BtCursor *c) { return sqlite3BtreePayloadSize(c); }
 // the record's bytes on the cursor's page; *amt = how many are there (fewer than the size: overflow)
 X(cur_payload) const u8 *cur_payload(BtCursor *c, u32 *amt) { return sqlite3BtreePayloadFetch(c, amt); }
+
+// ---- checkpoints with the database file's sync done through io_uring (decided in the WAT, see $ckpt).
+// db_ckpt runs a PASSIVE checkpoint; with skip set, the sync of the database file at its end returns at
+// once without syncing (the WAL's sync before the copy is still made). The WAT then puts nBackfill back
+// to what it was, so the WAL cannot restart over frames whose pages are not yet durable in the database
+// file, submits an fdatasync of that file, and sets nBackfill once it has completed.
+static sqlite3_io_methods db_io;
+static int (*db_xsync)(sqlite3_file *, int);
+static int db_skip;
+static sqlite3_file *db_file;
+static int db_sync(sqlite3_file *f, int flags) {
+  if (db_skip) { db_skip = 2; return SQLITE_OK; }
+  return db_xsync(f, flags);
+}
+// once, after opening: route the main database file's xSync through db_sync
+X(db_sync_hook) int db_sync_hook(sqlite3 *db) {
+  sqlite3_file *f = 0;
+  if (sqlite3_file_control(db, "main", SQLITE_FCNTL_FILE_POINTER, &f) != SQLITE_OK || !f || !f->pMethods) return 1;
+  db_io = *f->pMethods; db_xsync = db_io.xSync; db_io.xSync = db_sync; f->pMethods = &db_io; db_file = f;
+  return 0;
+}
+// -1: error; else 1 if the database file's sync was skipped, 0 if none was needed
+X(db_ckpt) int db_ckpt(sqlite3 *db, int skip) {
+  int log = 0, ck = 0;
+  db_skip = skip ? 1 : 0;
+  int rc = sqlite3_wal_checkpoint_v2(db, 0, SQLITE_CHECKPOINT_PASSIVE, &log, &ck);
+  int s = db_skip; db_skip = 0;
+  return rc != SQLITE_OK ? -1 : s == 2;
+}
+// the database file's sync, now (when nBackfill could not be put back)
+X(db_fsync) int db_fsync(sqlite3 *db) { (void)db; return db_file ? db_xsync(db_file, SQLITE_SYNC_NORMAL) : 0; }
+static Wal *wal_of(sqlite3 *db) { return sqlite3BtreePager(db->aDb[0].pBt)->pWal; }
+// frames in the WAL
+X(wal_mx) int wal_mx(sqlite3 *db) { Wal *w = wal_of(db); return w && w->apWiData && w->apWiData[0] ? (int)walIndexHdr(w)->mxFrame : -1; }
+// nBackfill: how many of the WAL's frames are copied into the database file. n >= 0 sets it, only between
+// transactions and never past the last frame (-2 if refused). Returns the value before.
+X(wal_backfill) int wal_backfill(sqlite3 *db, int n) {
+  Wal *w = wal_of(db);
+  if (!w || !w->apWiData || !w->apWiData[0]) return -1;
+  volatile WalCkptInfo *ci = walCkptInfo(w);
+  int old = (int)ci->nBackfill;
+  if (n >= 0) {
+    if (w->readLock >= 0 || w->writeLock || (u32)n > walIndexHdr(w)->mxFrame || (u32)n > ci->nBackfillAttempted) return -2;
+    ci->nBackfill = (u32)n;
+  }
+  return old;
+}

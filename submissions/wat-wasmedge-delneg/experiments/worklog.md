@@ -475,3 +475,32 @@ probes read lower (p95 138-196 ms), so the 5-minute window catches more checkpoi
 Clean build (opt-box `ci2.sh`): a fresh ubuntu:24.04 container runs install.sh as root and build.sh as a
 user; the built folder is then tested outside the container (docker's default seccomp profile refuses
 io_uring): passed=42 failed=0. Also 42/42 on opt-box and Synteq from their own builds.
+
+## S8: 2-minute probes above 280k, E24 (2 Nov, Synteq) — measurement
+sc.sh: 300,000 users: 31.5k rps, p95 255 ms, p99 525 ms, max 985 ms, 0 errors, cgroup 89.2%, 28.3 us/req,
+686 MB. 320,000 users: 33.6k rps, p50 13.3 ms, p95 315 ms, p99 640 ms, max 1.49 s, 0 errors, 91.4%,
+27.2 us/req, 727 MB. CPU is close to the 1-vCPU limit at 320k.
+
+## E26: the checkpoint's database-file sync through io_uring (2 Nov)
+wal_autocheckpoint=0; the WAT checkpoints itself at the end of $flush (responses sent, no transaction open)
+once CKPT_FRAMES (16000) frames are not backfilled. sqlite_glue.c swaps the main db file's io_methods for a
+copy whose xSync returns at once while db_ckpt(db, 1) runs; the WAL sync before the copy is unchanged.
+After the copy the WAT puts nBackfill back (wal_backfill), so SQLite cannot restart the WAL over frames
+whose pages are not yet durable in the db file, and submits IORING_OP_FSYNC (DATASYNC) on a read-only fd
+of the db file (new host import file_fd). On its CQE nBackfill moves up; frames written meanwhile get
+another round, or an ordinary inline checkpoint once at most CKPT_TAIL (2000) remain, after which the WAL
+restarts. CKPT_DEFER=0: plain inline checkpoints at the same point.
+- opt-box: 42/42. e26chk.sh (5000 users, CKPT_FRAMES=2000 CKPT_TAIL=200, kill -9 after 24 s):
+  integrity_check ok in both modes; WAL file stays at ~8.3-9.4 MB (restarts). strace: inline mode, the
+  loop's fsync of the db took 368 ms; deferred, two rounds went to io_uring and the inline tail's
+  fsync took ~11 ms.
+- Synteq: 42/42 from the AOT build there.
+- Synteq sc.sh 300k, interleaved, 3 reps: E24b p95 280, 230, 265 / p99 560, 440, 520 ms / max 1226, 828,
+  966 ms, 27.93, 27.27, 28.03 us/req; E26 p95 134, 127, 109 / p99 345, 310, 250 / max 1232, 916, 552,
+  28.75, 28.46, 29.03 us/req. Kept: p99 down ~40%; ~+0.8 us/req (as with E24, shorter stalls mean
+  smaller batches).
+- Clean container build (opt-box ci2.sh): 42/42.
+
+## S9: 5-minute hold at 320k, E26 (2 Nov, Synteq) — measurement
+hold.sh: 33.7k rps, p50 8.85 ms, p95 198 ms, p99 455 ms, max 1.82 s, 0 errors, 0 stuck, cgroup 93.6%,
+27.78 us/req, 880 MB. Passes.

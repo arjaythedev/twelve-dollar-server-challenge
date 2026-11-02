@@ -55,6 +55,11 @@
   (import "sq" "cur_seek_int" (func $cur_seek_int (param i32 i32 i64 i32 i32) (result i32)))
   (import "sq" "cur_payload_size" (func $cur_psize (param i32) (result i32)))
   (import "sq" "cur_payload" (func $cur_payload (param i32 i32) (result i32)))
+  (import "sq" "db_sync_hook" (func $db_sync_hook (param i32) (result i32)))
+  (import "sq" "db_ckpt" (func $db_ckpt (param i32 i32) (result i32)))
+  (import "sq" "db_fsync" (func $db_fsync (param i32) (result i32)))
+  (import "sq" "wal_mx" (func $wal_mx (param i32) (result i32)))
+  (import "sq" "wal_backfill" (func $wal_backfill (param i32 i32) (result i32)))
   (import "sq" "mem_alloc" (func $malloc (param i32) (result i32)))
   (import "sq" "mem_free" (func $free (param i32)))
   (import "wasi_snapshot_preview1" "clock_time_get" (func $clock (param i32 i64 i32) (result i32)))
@@ -65,6 +70,7 @@
   (import "sys" "ring_pbuf" (func $ring_pbuf (param i32 i32 i32 i32) (result i32)))
   (import "sys" "ring_go" (func $ring_go (param i32 i32 i32 i32 i32 i32) (result i32)))
   (import "sys" "membase" (func $membase (result i64)))
+  (import "sys" "file_fd" (func $file_fd (param i32) (result i32)))
 
   ;; ---------- string constants ----------
   (data (i32.const 0x100000) "HTTP/1.1 200 OK\0d\0a")
@@ -111,11 +117,15 @@
   (data (i32.const 0x100cb0) "COMMIT")
   (data (i32.const 0x100cc0) "ROLLBACK")
   ;; WASI has no shared memory, so WAL runs with exclusive locking (wal-index on the heap)
-  (data (i32.const 0x100d00) "PRAGMA locking_mode=EXCLUSIVE; PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA cache_size=-65536; PRAGMA temp_store=MEMORY; PRAGMA wal_autocheckpoint=16000;")
+  (data (i32.const 0x100d00) "PRAGMA locking_mode=EXCLUSIVE; PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA cache_size=-65536; PRAGMA temp_store=MEMORY; PRAGMA wal_autocheckpoint=0;")
   (data (i32.const 0x100e00) "SQLITE_PATH")
   (data (i32.const 0x100e20) "JWT_SECRET")
   (data (i32.const 0x100e40) "HOST")
   (data (i32.const 0x100e60) "PORT")
+  (data (i32.const 0x100e80) "CKPT_FRAMES")
+  (data (i32.const 0x100ea0) "CKPT_TAIL")
+  (data (i32.const 0x100ec0) "CKPT_DEFER")
+  (data (i32.const 0x100ee0) "checkpoint: synced inline\n")
   (data (i32.const 0x100f00) "alg")
   (data (i32.const 0x100f10) "exp")
   (data (i32.const 0x100f20) "sub")
@@ -201,6 +211,15 @@
   (global $cu_u (mut i32) (i32.const 0))
   (global $cu_l (mut i32) (i32.const 0))
   (global $vn (mut i32) (i32.const 0))
+  ;; checkpoints: 0 none running, 1 the database file's fdatasync is in flight, 2 it is done, 3 it failed;
+  ;; the frames that sync covers, its generation, the frames that start one (CKPT_FRAMES), the remainder
+  ;; finished inline (CKPT_TAIL), and the database file's fd for the sync (-1: CKPT_DEFER=0, all inline)
+  (global $ck_st (mut i32) (i32.const 0))
+  (global $ck_m (mut i32) (i32.const 0))
+  (global $ck_gen (mut i32) (i32.const 0))
+  (global $ck_t (mut i32) (i32.const 16000))
+  (global $ck_tail (mut i32) (i32.const 2000))
+  (global $dbfd (mut i32) (i32.const -1))
 
   ;; ---------- memory helpers ----------
   (func $strlen (param $p i32) (result i32)
@@ -1663,7 +1682,47 @@
     (global.set $txopen (i32.const 0))
     (global.set $wr (i32.const 0))
     (global.set $o (i32.const 0x400000))
-    (global.set $ostart (i32.const 0x400000)))
+    (global.set $ostart (i32.const 0x400000))
+    (call $ckpt_step))
+
+  ;; Checkpoints run here, after the batch's responses are sent and with no transaction open. A checkpoint
+  ;; copies the WAL's frames into the database file and then fsyncs that file, which takes ~100 ms per
+  ;; 16,000 frames on the test box; the loop does not wait for that sync. The checkpoint skips it
+  ;; (db_ckpt with skip set; the WAL's own sync before the copy still runs), nBackfill is put back to what
+  ;; it was so SQLite cannot restart the WAL over frames whose pages may not be durable in the database
+  ;; file yet (and recovery would replay them from the WAL), and the fdatasync goes to the kernel as an
+  ;; io_uring FSYNC. Once it completes, nBackfill moves up to the frames it covers. The frames written in
+  ;; the meantime get another such round, or, once at most CKPT_TAIL are left, an ordinary checkpoint
+  ;; with its sync inline, after which the next write restarts the WAL.
+  (func $ckpt_step
+    (local $nb i32) (local $m i32)
+    (if (i32.eq (global.get $ck_st) (i32.const 1)) (then (return)))
+    (if (i32.eq (global.get $ck_st) (i32.const 3))
+      (then (global.set $ck_st (i32.const 0)) (drop (call $db_ckpt (global.get $db) (i32.const 0))) (return)))
+    (local.set $nb (call $wal_backfill (global.get $db) (i32.const -1)))
+    (if (i32.lt_s (local.get $nb) (i32.const 0)) (then (return)))
+    (if (i32.eq (global.get $ck_st) (i32.const 2))
+      (then
+        (global.set $ck_st (i32.const 0))
+        ;; refused (-2): nBackfill stays where it was and those frames are copied again
+        (drop (call $wal_backfill (global.get $db) (global.get $ck_m)))
+        (local.set $nb (call $wal_backfill (global.get $db) (i32.const -1)))
+        (if (i32.le_s (i32.sub (call $wal_mx (global.get $db)) (local.get $nb)) (global.get $ck_tail))
+          (then (drop (call $db_ckpt (global.get $db) (i32.const 0))) (return))))
+      (else
+        (if (i32.lt_s (i32.sub (call $wal_mx (global.get $db)) (local.get $nb)) (global.get $ck_t)) (then (return)))))
+    (if (i32.lt_s (global.get $dbfd) (i32.const 0))
+      (then (drop (call $db_ckpt (global.get $db) (i32.const 0))) (return)))
+    (if (i32.ne (call $db_ckpt (global.get $db) (i32.const 1)) (i32.const 1)) (then (return)))
+    (local.set $m (call $wal_backfill (global.get $db) (local.get $nb)))
+    (if (i32.lt_s (local.get $m) (i32.const 0))
+      (then (call $log (i32.const 0x100ee0)) (drop (call $db_fsync (global.get $db))) (return)))
+    (global.set $ck_m (local.get $m))
+    (global.set $ck_gen (i32.add (global.get $ck_gen) (i32.const 1)))
+    ;; IORING_OP_FSYNC (3) with IORING_FSYNC_DATASYNC; kind 8 in user_data
+    (i32.store offset=28 (call $sqe (i32.const 0) (i32.const 3) (i32.const 0) (global.get $dbfd)
+      (i32.const 0x8000000) (global.get $ck_gen)) (i32.const 1))
+    (global.set $ck_st (i32.const 1)))
 
   ;; ASYNC_CANCEL each batch send still in flight (its connection still has flag 16); it then completes
   ;; with -ECANCELED, or with its result if it finished first
@@ -1867,7 +1926,11 @@
     (if (i32.eq (local.get $kind) (i32.const 6))
       (then (if (i32.eqz (i32.and (local.get $fl) (i32.const 2)))
         (then (local.set $t (call $rt (local.get $cid)))
-              (i32.store offset=32 (local.get $t) (i32.and (i32.load offset=32 (local.get $t)) (i32.const -9))))))))
+              (i32.store offset=32 (local.get $t) (i32.and (i32.load offset=32 (local.get $t)) (i32.const -9)))))))
+    ;; the database file's fdatasync, for checkpoint round $ck_gen
+    (if (i32.eq (local.get $kind) (i32.const 8))
+      (then (if (i32.and (i32.eq (global.get $ck_st) (i32.const 1)) (i32.eq (i32.load offset=4 (local.get $e)) (global.get $ck_gen)))
+        (then (global.set $ck_st (select (i32.const 3) (i32.const 2) (i32.lt_s (local.get $res) (i32.const 0)))))))))
 
   ;; multishot recv: $res bytes in buffer (flags >> 16) of the ring's buffers, 0 = EOF, or -errno
   (func $on_recv (param $cid i32) (param $g i32) (param $res i32) (param $fl i32)
@@ -1998,6 +2061,14 @@
     (if (call $db_open (local.get $path) (i32.const 0x295000)) (then (call $fatal (i32.const 0x1010c0))))
     (global.set $db (i32.load (i32.const 0x295000)))
     (if (call $db_exec (global.get $db) (i32.const 0x100d00)) (then (call $fatal (i32.const 0x1010c0))))
+    (drop (call $db_sync_hook (global.get $db)))   ;; if it fails, every checkpoint syncs inline
+    (if (local.tee $k (call $getenv (i32.const 0x100e80)))
+      (then (global.set $ck_t (i32.wrap_i64 (call $parse_len (local.get $k) (call $strlen (local.get $k)))))))
+    (if (local.tee $k (call $getenv (i32.const 0x100ea0)))
+      (then (global.set $ck_tail (i32.wrap_i64 (call $parse_len (local.get $k) (call $strlen (local.get $k)))))))
+    (local.set $k (call $getenv (i32.const 0x100ec0)))
+    (if (i32.or (i32.eqz (local.get $k)) (i32.ne (i32.load8_u (local.get $k)) (i32.const 48)))
+      (then (global.set $dbfd (call $file_fd (local.get $path)))))
     (global.set $st_one (call $prep (i32.const 0x100800)))
     (global.set $st_feed (call $prep (i32.const 0x100900)))
     (global.set $st_ins (call $prep (i32.const 0x100a00)))

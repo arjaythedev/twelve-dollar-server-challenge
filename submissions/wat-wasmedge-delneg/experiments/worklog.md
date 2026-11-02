@@ -574,3 +574,42 @@ Clean container (opt-box ci2.sh): 42/42. 5-minute holds at 320k, Synteq (afterno
 p95 275 / p99 800; then E26 295/835, E29 265/785, E26 280/765, E29 365/1165 (fails p99). All 0 errors,
 93-95% CPU. The morning's E26 hold (S9) gave 198/455: 320k is this box's edge, and the spread between
 holds of one build is larger than any difference between these two. Kept: it only removes work.
+
+## M1: why the scorer's box refused connections at 280k (Synteq, E26 = f220565)
+Scorer (1 vCPU / 2 GB, 31 us/req): 270k held; 280k and 320k collapsed in the 2-min probe with 71 % / 76 %
+errors, nearly all "connection refused", which suggests no listener (server gone). Tried to reproduce:
+- s44, 280k, memory breakdown at t=150 s: cgroup current 650 MB = anon 101 + file 95 + kernel 453
+  (slab reclaimable 294, unreclaimable 154), sock 12 KB; VmRSS 145 MB; 560,168 sockets (both ends local).
+- s45, 340k (overload), sampled every 10 s: anon 63 -> 116 MB, file 69 -> 640 MB because the WAL grew
+  64 -> 605 MB (checkpoints fall behind), slab plateau ~355 + 178 MB, sock peak 76 MB, current peak 1,330 MB.
+  Server survived: 34,974 rps, p95 900, p99 3,760 ms, 97.0 % CPU, 27.73 us/req.
+- s46, 280k with the server's scope capped at CPUQuota=89 % (to mimic a slower CPU): passed, 29,610 rps,
+  p95 70.8, p99 150.9 ms, 0 errors, 83.1 % CPU, 28.08 us/req, 638 MB; WAL stayed 63-68 MB; listener up
+  for the whole run.
+Not reproduced on Synteq. Open: what kills the server on a 2 GB droplet (OOM with OS + slab + WAL cache
+under overload is the leading guess, unchecked; a $fatal path is the other).
+- s47, 340k with the server's scope capped at MemoryMax=1200M: no OOM (memory.events high/max/oom all 0),
+  current peak 955 MB (anon 116, file 278, dirty 0-3 MB, WAL 67 -> 242 MB), listener up for the whole run.
+  35,485 rps, p95 550, p99 1,185 ms, 0 errors, 96.2 % CPU, 27.11 us/req. Memory pressure alone does not
+  kill the server here.
+- Synteq is not the scorer's box: ours has 8 cores / 16 GB and sysctl tuning (90-million.conf: tcp_mem,
+  somaxconn 65535, file-max ...); the scorer's is a stock Synteq 1 vCPU / 1,967 MB (LEADERBOARD.md).
+- Code path that exits under load: $arm_acc called $ring_create for a new ring at runtime (the 5th ring
+  starts at ~245k connections), and any failure there went to $fatal -> exit 1 -> "connection refused" for
+  everyone. In Linux 6.8 io_uring/io_uring.c, io_mem_alloc() is __get_free_pages(GFP_KERNEL_ACCOUNT |
+  __GFP_ZERO | __GFP_NOWARN | __GFP_COMP, get_order(size)): our CQ ring (16,384 CQEs + SQ array) is one
+  512 KiB block (order 7) and the SQEs one 256 KiB block (order 6), and a failure leaves nothing in the
+  kernel log. On a 2 GB box holding ~450 MB of socket slab, an order-7 allocation can fail. Unchecked on
+  the scorer's box: the server log there would show "fatal: io_uring setup failed".
+
+## E30: set up all 8 rings at start (opt-box build; Synteq tests)
+$ring_create split into $ring_setup (kernel ring, fixed-file table, buffer ring and receive buffers; returns
+1 on failure instead of exiting) and $ring_on (counts the ring in, arms ring 0's poll on it). _start sets up
+rings 0-7 before the first accept; a ring that fails there caps the count ($nmax) instead of exiting. Rings
+still come into use one at a time as before. Startup (Synteq): 8 io_uring fds instead of 1, VmRSS 74.8 MB
+vs 70.6 MB. opt-box: 42/42, kill -9 check ok. Synteq: 42/42.
+A/B at 300k (Synteq, interleaved, 3 reps, 0 errors everywhere): E30 p95 89.5, 78.9, 92.2 / p99 210, 177,
+205 / 27.91, 27.45, 27.78 us/req, 703, 681, 682 MB; E29 p95 67.6, 126.8, 130.9 / p99 145, 370, 315 /
+27.62, 27.84, 28.09 us/req, 676, 696, 697 MB. Same speed within the box's noise. Kept as a robustness fix;
+it can't be shown on Synteq (16 GB never runs short of contiguous pages). Committed, not pushed (the PR
+head waits for the scorer's ruling on nBackfill).

@@ -21,7 +21,7 @@
 ;;   0xa00000  (OUTB's last MiB: headroom for the connection being served)
 ;;   0xe00000  CQ    completions copied out by the host: 131,072 x 16 bytes (user_data, res, flags)
 ;; From SQLite's heap (malloc): CONN and GEN (per connection, see $conn), and per ring an SQE staging array,
-;; a provided-buffer ring and its 2048 receive buffers (see $ring_create)
+;; a provided-buffer ring and its 2048 receive buffers (see $ring_setup)
 (module
   (import "sq" "memory" (memory 1))
   (import "sq" "_initialize" (func $sq_init))
@@ -188,6 +188,7 @@
   (global $connb (mut i32) (i32.const 0))
   (global $genb (mut i32) (i32.const 0))
   (global $nr (mut i32) (i32.const 0))
+  (global $nmax (mut i32) (i32.const 0))   ;; rings set up at start (up to 8)
   (global $ncq (mut i32) (i32.const 0))
   (global $cqi (mut i32) (i32.const 0))
   (global $nsendb (mut i32) (i32.const 0))
@@ -1442,17 +1443,20 @@
     (i32.store16 offset=12 (local.get $e) (local.get $bid))   ;; bytes 14-15 of entry 0 are the ring's tail: left alone
     (i32.store offset=8 (local.get $t) (i32.add (i32.load offset=8 (local.get $t)) (i32.const 1))))
 
-  (func $ring_create (param $k i32)
+  ;; sets up ring $k (kernel ring, fixed-file table, receive buffers) -> 0, or 1 if that failed. All rings are
+  ;; set up at start: on Linux 6.8 the kernel puts a ring in one block of contiguous pages (512 KiB here),
+  ;; which can fail once the box's memory is fragmented under load. $ring_on starts using one.
+  (func $ring_setup (param $k i32) (result i32)
     (local $t i32) (local $i i32) (local $n i32) (local $m i32)
     (local.set $t (call $rt (local.get $k)))
-    (if (call $ring_new (local.get $k) (i32.add (local.get $t) (i32.const 20))) (then (call $fatal (i32.const 0x101340))))
+    (if (call $ring_new (local.get $k) (i32.add (local.get $t) (i32.const 20))) (then (return (i32.const 1))))
     (i32.store (local.get $t) (call $malloc (i32.const 65536)))
     (i32.store offset=12 (local.get $t) (i32.and (i32.add (call $malloc (i32.const 0x9000)) (i32.const 4095)) (i32.const -4096)))
     (memory.fill (i32.load offset=12 (local.get $t)) (i32.const 0) (i32.const 0x8000))
     (i32.store offset=16 (local.get $t) (call $malloc (i32.const 0x400000)))
-    (if (i32.or (i32.eqz (i32.load offset=16 (local.get $t))) (i32.eqz (i32.load (local.get $t)))) (then (call $fatal (i32.const 0x101340))))
+    (if (i32.or (i32.eqz (i32.load offset=16 (local.get $t))) (i32.eqz (i32.load (local.get $t)))) (then (return (i32.const 1))))
     (if (call $ring_pbuf (local.get $k) (i32.load offset=12 (local.get $t)) (i32.const 2048) (i32.const 0))
-      (then (call $fatal (i32.const 0x101340))))
+      (then (return (i32.const 1))))
     (block $d (loop $l
       (br_if $d (i32.ge_u (local.get $i) (i32.const 2048)))
       (call $recycle (local.get $k) (local.get $i))
@@ -1464,6 +1468,9 @@
     (if (i32.gt_u (local.get $m) (i32.const 4096)) (then (local.set $m (i32.const 4096))))
     (i32.store offset=36 (local.get $t) (i32.sub (local.get $n) (local.get $m)))
     (i32.store offset=40 (local.get $t) (i32.shr_u (local.get $m) (i32.const 1)))
+    (i32.const 0))
+
+  (func $ring_on (param $k i32)
     (global.set $nr (i32.add (local.get $k) (i32.const 1)))
     (if (local.get $k) (then (call $arm_poll (local.get $k)))))
 
@@ -1479,18 +1486,18 @@
   ;; multishot accept straight into a free slot of ring $k's table
   (func $arm_acc (param $k i32)
     (local $s i32)
-    (if (i32.ge_u (local.get $k) (global.get $nr)) (then (call $ring_create (local.get $k))))
+    (if (i32.ge_u (local.get $k) (global.get $nr)) (then (call $ring_on (local.get $k))))
     (local.set $s (call $sqe (local.get $k) (i32.const 13) (i32.const 0) (global.get $lfd)
       (i32.or (local.get $k) (i32.const 0x1000000)) (i32.const 0)))
     (i32.store16 offset=2 (local.get $s) (i32.const 1))   ;; IORING_ACCEPT_MULTISHOT
     (i32.store offset=44 (local.get $s) (i32.const -1))   ;; IORING_FILE_INDEX_ALLOC
     (i32.store offset=32 (call $rt (local.get $k)) (i32.or (i32.load offset=32 (call $rt (local.get $k))) (i32.const 1))))
 
-  ;; the first ring below its high-water mark (a ring not made yet counts), else the first not full, else -1
+  ;; the first ring below its high-water mark (a ring not in use yet counts), else the first not full, else -1
   (func $acc_target (result i32)
     (local $q i32)
     (block $d (loop $l
-      (br_if $d (i32.ge_u (local.get $q) (i32.const 8)))
+      (br_if $d (i32.ge_u (local.get $q) (global.get $nmax)))
       (if (i32.eqz (i32.and (i32.load offset=32 (call $rt (local.get $q))) (i32.const 6))) (then (return (local.get $q))))
       (local.set $q (i32.add (local.get $q) (i32.const 1)))
       (br $l)))
@@ -2087,6 +2094,13 @@
     (if (i32.or (i32.eqz (global.get $connb)) (i32.eqz (global.get $genb))) (then (call $fatal (i32.const 0x101340))))
     (memory.fill (global.get $connb) (i32.const 0) (i32.const 0x1000000))
     (memory.fill (global.get $genb) (i32.const 0) (i32.const 0x200000))
+    (if (call $ring_setup (i32.const 0)) (then (call $fatal (i32.const 0x101340))))
+    (global.set $nmax (i32.const 1))
+    (block $rd (loop $rl
+      (br_if $rd (i32.ge_u (global.get $nmax) (i32.const 8)))
+      (br_if $rd (call $ring_setup (global.get $nmax)))   ;; a ring that fails here caps the count, no exit
+      (global.set $nmax (i32.add (global.get $nmax) (i32.const 1)))
+      (br $rl)))
     (call $arm_acc (i32.const 0))
     (call $log (i32.const 0x101080))
     (loop $forever

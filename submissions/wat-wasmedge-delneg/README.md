@@ -34,7 +34,10 @@ downloaded by `build.sh`:
   every call). A multishot accept puts each new connection straight into a slot of the ring's
   fixed-file table, so connections never take a process file descriptor: with `LimitNOFILE=65535` the
   server still keeps every user's keep-alive connection, in up to 8 rings of 65,535 slots (320,000
-  users tested). The accept moves to the next ring when one gets near full. Each connection has a
+  users tested). All 8 rings are set up at start, while memory is not yet fragmented: Linux 6.8 puts
+  each ring in one 512 KiB block of contiguous pages, which a 2 GB box under load may not have, and a
+  ring that can't be set up only lowers the cap instead of stopping the server. The accept moves to the
+  next ring when one gets near full. Each connection has a
   multishot receive with buffer selection (2,048 x 2 KiB buffers per ring, in wasm memory). Ring 0 is
   the one waited on and holds a multishot poll on each other ring's fd.
 - **Responses go out from one buffer.** After COMMIT, every response of the batch is a send straight

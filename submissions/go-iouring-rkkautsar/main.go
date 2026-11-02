@@ -662,17 +662,22 @@ func (a *app) loadFeed() readResp {
 		a.reads <- rc
 		return readResp{status: http.StatusInternalServerError, body: []byte(`{"error":"internal server error"}`)}
 	}
-	b := make([]byte, 0, 4096)
-	b = append(b, `{"posts":`...)
-	if row {
-		b = append(b, st.columnText(0)...)
-	} else {
-		b = append(b, `[]`...)
+	fragment := st.columnText(0)
+	if !row {
+		fragment = []byte("[]")
 	}
-	b = append(b, '}')
+	const prefix = `{"posts":`
+	bodyLen := len(prefix) + len(fragment) + 1
+	packet := make([]byte, 0, packetHeaderLen(http.StatusOK, bodyLen)+bodyLen)
+	packet = appendPacketHeader(packet, http.StatusOK, bodyLen)
+	bodyStart := len(packet)
+	packet = append(packet, prefix...)
+	packet = append(packet, fragment...)
+	packet = append(packet, '}')
+	body := packet[bodyStart:]
 	st.reset()
 	a.reads <- rc
-	return readResp{status: http.StatusOK, body: b, packet: makePacket(http.StatusOK, b)}
+	return readResp{status: http.StatusOK, body: body, packet: packet}
 }
 
 func (a *app) getPostByID(w http.ResponseWriter, r *httpReq, idStr string) {
@@ -708,10 +713,10 @@ func (a *app) loadPost(id int64) readResp {
 		a.reads <- rc
 		return readResp{status: http.StatusNotFound, body: []byte(`{"error":"post not found"}`)}
 	}
-	b := append([]byte(nil), st.columnText(0)...)
+	packet, body := makePacketExact(http.StatusOK, st.columnText(0))
 	st.reset()
 	a.reads <- rc
-	return readResp{status: http.StatusOK, body: b, packet: makePacket(http.StatusOK, b)}
+	return readResp{status: http.StatusOK, body: body, packet: packet}
 }
 
 // loadPosts serves a whole batch of GET /posts/:id requests with one IN query.
@@ -764,8 +769,8 @@ func (a *app) loadPosts(ids []int64) map[int64]readResp {
 			break
 		}
 		id := st.columnInt64(0)
-		b := append([]byte(nil), st.columnText(1)...)
-		out[id] = readResp{status: http.StatusOK, body: b, packet: makePacket(http.StatusOK, b)}
+		packet, body := makePacketExact(http.StatusOK, st.columnText(1))
+		out[id] = readResp{status: http.StatusOK, body: body, packet: packet}
 	}
 	st.reset()
 	a.reads <- rc
@@ -1098,17 +1103,49 @@ func writeSharedBody(w http.ResponseWriter, r readResp) {
 	w.Write(r.body)
 }
 
+func decimalLen(n int) int {
+	if n < 10 {
+		return 1
+	}
+	digits := 1
+	for n >= 10 {
+		n /= 10
+		digits++
+	}
+	return digits
+}
+
+func packetHeaderLen(status, bodyLen int) int {
+	return len("HTTP/1.1 ") + decimalLen(status) + 1 + len(http.StatusText(status)) +
+		len("\r\nContent-Type: application/json\r\nContent-Length: ") +
+		decimalLen(bodyLen) + len("\r\n\r\n")
+}
+
+func appendPacketHeader(dst []byte, status, bodyLen int) []byte {
+	dst = append(dst, "HTTP/1.1 "...)
+	dst = strconv.AppendInt(dst, int64(status), 10)
+	dst = append(dst, ' ')
+	dst = append(dst, http.StatusText(status)...)
+	dst = append(dst, "\r\nContent-Type: application/json\r\nContent-Length: "...)
+	dst = strconv.AppendInt(dst, int64(bodyLen), 10)
+	dst = append(dst, "\r\n\r\n"...)
+	return dst
+}
+
+func makePacketExact(status int, body []byte) (packet, bodyOut []byte) {
+	bodyLen := len(body)
+	packet = make([]byte, 0, packetHeaderLen(status, bodyLen)+bodyLen)
+	packet = appendPacketHeader(packet, status, bodyLen)
+	bodyStart := len(packet)
+	packet = append(packet, body...)
+	return packet, packet[bodyStart:]
+}
+
 func makePacket(status int, body []byte) []byte {
-	p := make([]byte, 0, len(body)+128)
-	p = append(p, "HTTP/1.1 "...)
-	p = strconv.AppendInt(p, int64(status), 10)
-	p = append(p, ' ')
-	p = append(p, http.StatusText(status)...)
-	p = append(p, "\r\nContent-Type: application/json\r\nContent-Length: "...)
-	p = strconv.AppendInt(p, int64(len(body)), 10)
-	p = append(p, "\r\n\r\n"...)
-	p = append(p, body...)
-	return p
+	bodyLen := len(body)
+	p := make([]byte, 0, packetHeaderLen(status, bodyLen)+bodyLen)
+	p = appendPacketHeader(p, status, bodyLen)
+	return append(p, body...)
 }
 
 func writeBody(w http.ResponseWriter, status int, bp *[]byte, body []byte) {

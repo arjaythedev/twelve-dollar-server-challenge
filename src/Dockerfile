@@ -6,6 +6,7 @@ WORKDIR /build
 COPY CMakeLists.txt ./
 COPY server ./server
 COPY checks/transport.cpp ./checks/transport.cpp
+COPY checks/checkpoint.cpp ./checks/checkpoint.cpp
 COPY load ./load
 ARG TDS_SANITIZERS=OFF
 RUN cmake -S . -B out -G Ninja -DCMAKE_BUILD_TYPE=Release -DTDS_SANITIZERS=${TDS_SANITIZERS} \

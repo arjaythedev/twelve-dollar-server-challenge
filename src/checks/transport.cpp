@@ -857,10 +857,11 @@ int main(int argc, char **argv)
             Client blocker(server.port());
             blocker.send("GET /block HTTP/1.1\r\nHost: localhost\r\n\r\n");
             gate.wait();
-            server.request_stop();
-            wait_for_completion(POLLIN);
             send_pool_requests(idle);
             wait_for_completion(-ENOBUFS);
+            // Receive completions precede stop so shutdown also covers already completed reads
+            server.request_stop();
+            wait_for_completion(POLLIN);
             gate.release();
         }
         catch (...)

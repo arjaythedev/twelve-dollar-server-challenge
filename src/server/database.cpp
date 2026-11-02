@@ -4,7 +4,13 @@
 
 #include <sqlite3.h>
 
+#include <chrono>
+#include <condition_variable>
+#include <cstdio>
+#include <mutex>
 #include <stdexcept>
+#include <stop_token>
+#include <thread>
 #include <utility>
 
 namespace tds
@@ -44,6 +50,95 @@ Connection open(const std::string &path)
                  "PRAGMA cache_size=-16384;");
     return db;
 }
+
+class Checkpoints
+{
+  public:
+    explicit Checkpoints(const std::string &path)
+        : db_(open(path)), worker_([this](std::stop_token stop) {
+              run(stop);
+          })
+    {
+    }
+
+    ~Checkpoints()
+    {
+        worker_.request_stop();
+        worker_.join();
+    }
+
+    static int committed(void *context, sqlite3 *, const char *, int frames) noexcept
+    {
+        auto &owner = *static_cast<Checkpoints *>(context);
+        if (frames >= frame_threshold)
+        {
+            bool notify = false;
+            {
+                std::lock_guard lock(owner.mutex_);
+                notify = !owner.pending_;
+                owner.pending_ = true;
+            }
+            if (notify)
+            {
+                owner.ready_.notify_one();
+            }
+        }
+        return SQLITE_OK;
+    }
+
+  private:
+    void run(std::stop_token stop)
+    {
+        bool reported_busy = false;
+        bool reported_error = false;
+        while (!stop.stop_requested())
+        {
+            std::unique_lock lock(mutex_);
+            if (!ready_.wait(lock, stop, [this] {
+                    return pending_;
+                }))
+            {
+                return;
+            }
+            pending_ = false;
+            lock.unlock();
+
+            int frames = -1;
+            int checkpointed = -1;
+            const int result = sqlite3_wal_checkpoint_v2(
+                db_.get(), "main", SQLITE_CHECKPOINT_PASSIVE, &frames, &checkpointed);
+            const bool busy = result == SQLITE_BUSY || result == SQLITE_LOCKED;
+            if (busy && !reported_busy)
+            {
+                std::fprintf(stderr, "WAL checkpoint busy, retrying on a later write\n");
+                reported_busy = true;
+            }
+            else if (result != SQLITE_OK && !busy && !reported_error)
+            {
+                std::fprintf(stderr, "WAL checkpoint failed (%d): %s, retrying on a later write\n",
+                             result, sqlite3_errstr(result));
+                reported_error = true;
+            }
+            if (result != SQLITE_OK || checkpointed < frames)
+            {
+                lock.lock();
+                ready_.wait_for(lock, stop, retry_delay, [] {
+                    return false;
+                });
+            }
+        }
+    }
+
+    static constexpr int frame_threshold = 1000;
+    static constexpr auto retry_delay = std::chrono::milliseconds(10);
+
+    Connection db_;
+    std::mutex mutex_;
+    std::condition_variable_any ready_;
+    bool pending_ = false;
+    // The worker joins before its connection and wakeup state are destroyed
+    std::jthread worker_;
+};
 
 class Transaction
 {
@@ -295,8 +390,16 @@ class Database::State
               INSERT INTO likes(user_id, post_id) VALUES(?, ?)
               ON CONFLICT(user_id, post_id) DO NOTHING
           )sql"),
-          read_begin(db.get(), "BEGIN"), read_commit(db.get(), "COMMIT"), tree(open_tree(db.get()))
+          read_begin(db.get(), "BEGIN"), read_commit(db.get(), "COMMIT"), tree(open_tree(db.get())),
+          checkpoints(path)
     {
+        sqlite3_wal_autocheckpoint(db.get(), 0);
+        sqlite3_wal_hook(db.get(), Checkpoints::committed, &checkpoints);
+    }
+
+    ~State()
+    {
+        sqlite3_wal_hook(db.get(), nullptr, nullptr);
     }
 
     Connection db;
@@ -309,6 +412,7 @@ class Database::State
     Statement read_begin;
     Statement read_commit;
     Tree tree;
+    Checkpoints checkpoints;
 };
 
 Database::Database(const std::string &path) : state_(std::make_unique<State>(path))

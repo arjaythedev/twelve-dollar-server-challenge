@@ -51,10 +51,10 @@ ParseResult HttpParser::parse(std::string_view input)
 
 void HttpParser::reset()
 {
-    std::string{}.swap(request_.method);
-    std::string{}.swap(request_.path);
-    std::string{}.swap(request_.authorization);
-    std::string{}.swap(request_.body);
+    request_.method.clear();
+    request_.path.clear();
+    request_.authorization.clear();
+    request_.body.clear();
     request_.identity.reset();
     request_.keep_alive = true;
     url_.clear();

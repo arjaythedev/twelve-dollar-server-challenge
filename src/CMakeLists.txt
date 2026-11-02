@@ -77,7 +77,7 @@ target_include_directories(api PUBLIC server)
 add_executable(server server/main.cpp)
 target_link_libraries(server PRIVATE transport api uring sqlite)
 add_executable(transport_tests checks/transport.cpp)
-target_link_libraries(transport_tests PRIVATE transport uring)
+target_link_libraries(transport_tests PRIVATE transport uring llhttp_static)
 add_executable(checkpoint_tests checks/checkpoint.cpp)
 target_link_libraries(checkpoint_tests PRIVATE api sqlite)
 target_link_options(checkpoint_tests PRIVATE

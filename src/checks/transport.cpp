@@ -1,4 +1,5 @@
 #include "transport.hpp"
+#include "transport/ring.hpp"
 
 #include <algorithm>
 #include <arpa/inet.h>
@@ -163,6 +164,82 @@ void require(bool condition, std::string_view message)
     if (!condition)
     {
         throw std::runtime_error(std::string(message));
+    }
+}
+
+void exercise_request_reuse()
+{
+    tds::transport::Ring ring(8, true);
+    auto exchange = ring.acquire_exchange();
+    auto &parser = exchange->parser;
+    auto &request = parser.request();
+    auto expected_capacity = parser.scratch_capacity();
+    for (auto member : {&tds::Request::method, &tds::Request::path, &tds::Request::authorization,
+                        &tds::Request::body})
+    {
+        auto &field = request.*member;
+        const auto old_capacity = field.capacity();
+        field.reserve(256);
+        expected_capacity += field.capacity() - old_capacity;
+        require(parser.scratch_capacity() == expected_capacity,
+                "retained parser capacity includes each request string");
+    }
+
+    const std::string path = "/" + std::string(128, 'p');
+    const std::string authorization = "Bearer " + std::string(512, 't');
+    const std::string body(2048, 'b');
+    const std::string wire = "POST " + path + " HTTP/1.1\r\nAuthorization: " + authorization +
+                             "\r\nContent-Length: " + std::to_string(body.size()) +
+                             "\r\nConnection: close\r\n\r\n" + body;
+    const auto headers = parser.parse(wire);
+    require(headers.valid && parser.headers_pending(), "reused request pauses for authorization");
+    require(request.method == "POST" && request.path == path &&
+                request.authorization == authorization && !request.keep_alive,
+            "reused request headers parsed");
+    request.identity = tds::Identity{42, "alice"};
+    parser.accept_headers();
+    const auto parsed_body = parser.parse(std::string_view(wire).substr(headers.consumed));
+    require(parsed_body.valid && parser.complete() && request.body == body,
+            "reused request body parsed");
+    const auto retained_capacity = exchange->retained_capacity();
+    require(retained_capacity <= 8192, "ordinary request fits exchange retention budget");
+    exchange->finish_response();
+    require(request.method.empty() && request.path.empty() && request.authorization.empty() &&
+                request.body.empty() && !request.identity && request.keep_alive,
+            "finished request clears strings, identity and connection policy");
+    require(!parser.complete() && !parser.headers_pending() &&
+                parser.error() == tds::Status::bad_request,
+            "finished request resets parser state");
+    require(exchange->retained_capacity() == retained_capacity,
+            "finished request preserves bounded string storage");
+    const auto *pooled = exchange.get();
+    ring.recycle_exchange(std::move(exchange));
+    exchange = ring.acquire_exchange();
+    require(exchange.get() == pooled, "bounded exchange reused from pool");
+    const auto next = exchange->parser.parse("GET /fresh HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    require(next.valid && exchange->parser.headers_pending(), "recycled parser reads next request");
+    const auto &fresh = exchange->parser.request();
+    require(fresh.method == "GET" && fresh.path == "/fresh" && fresh.authorization.empty() &&
+                fresh.body.empty() && !fresh.identity && fresh.keep_alive,
+            "recycled request does not inherit authorization, body or identity");
+    exchange->parser.accept_headers();
+    require(exchange->parser.parse({}).valid && exchange->parser.complete(),
+            "recycled parser completes an empty body");
+    exchange->finish_response();
+    ring.recycle_exchange(std::move(exchange));
+
+    for (auto member : {&tds::Request::path, &tds::Request::authorization, &tds::Request::body})
+    {
+        exchange = ring.acquire_exchange();
+        (exchange->parser.request().*member).assign(8193, 'x');
+        exchange->finish_response();
+        require(exchange->retained_capacity() > 8192,
+                "oversized cleared request storage exceeds retention budget");
+        ring.recycle_exchange(std::move(exchange));
+        exchange = ring.acquire_exchange();
+        require(exchange->retained_capacity() <= 8192,
+                "oversized request storage is discarded instead of pooled");
+        ring.recycle_exchange(std::move(exchange));
     }
 }
 
@@ -805,6 +882,7 @@ int main(int argc, char **argv)
         }
         // Fork before this process creates a server thread or io_uring.
         exercise_capacity(768, 256);
+        exercise_request_reuse();
         RequestGate gate;
         tds::Server server(
             "127.0.0.1", 0,

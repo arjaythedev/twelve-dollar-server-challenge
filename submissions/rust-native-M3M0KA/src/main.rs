@@ -14,6 +14,7 @@ mod db;
 mod http;
 mod json;
 mod net_uring;
+mod writer;
 mod sys;
 mod uring;
 

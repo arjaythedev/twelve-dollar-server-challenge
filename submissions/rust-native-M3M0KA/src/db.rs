@@ -105,6 +105,7 @@ fn row_json(s: *mut Stmt, out: &mut Vec<u8>) {
 
 pub struct Db {
     h: *mut Sqlite3,
+    db_path: String,
     q_feed: *mut Stmt,
     q_get: *mut Stmt,
     q_exists: *mut Stmt,
@@ -132,6 +133,7 @@ impl Db {
         }
         let mut db = Db {
             h,
+            db_path: path.to_string(),
             q_feed: std::ptr::null_mut(),
             q_get: std::ptr::null_mut(),
             q_exists: std::ptr::null_mut(),
@@ -568,6 +570,11 @@ impl Db {
         }
     }
 
+    /// The path this connection opened (the writer reopens the same file).
+    pub fn db_path(&self) -> &str {
+        &self.db_path
+    }
+
     pub fn batch_failed(&self) -> bool {
         self.batch_failed
     }
@@ -671,3 +678,159 @@ impl Drop for Db {
         }
     }
 }
+
+/// The types the concurrent writer thread runs its own connection with. Each
+/// connection in this process is used by exactly one thread
+/// (`SQLITE_THREADSAFE=2`), so a second connection for the write path is the
+/// same pattern as the checkpoint connection.
+pub enum WriteJobRepr {
+    Create(i64, Vec<u8>, Vec<u8>),
+    Like(i64, i64),
+}
+
+pub enum LikeRaw {
+    Created,
+    AlreadyLiked,
+    Missing,
+    Error,
+}
+
+/// A second process-local connection dedicated to the writer thread: writes
+/// only (INSERT RETURNING / INSERT-DO-NOTHING / exists probe), no read plans,
+/// no read cursors. `wal_autocheckpoint` stays 0 here too: the reader
+/// connection owns the inline checkpoint that keeps the WAL bounded.
+pub struct WriteConn {
+    h: *mut Sqlite3,
+    q_exists: *mut Stmt,
+    q_insert: *mut Stmt,
+    q_like: *mut Stmt,
+    in_batch: bool,
+}
+
+unsafe impl Send for WriteConn {}
+
+impl WriteConn {
+    pub fn open(path: &str) -> Option<WriteConn> {
+        let cpath = CString::new(path).expect("path");
+        let mut h: *mut Sqlite3 = std::ptr::null_mut();
+        unsafe {
+            if sqlite3_open_v2(cpath.as_ptr(), &mut h, SQLITE_OPEN_READWRITE, std::ptr::null())
+                != SQLITE_OK
+            {
+                return None;
+            }
+            sqlite3_busy_timeout(h, 5000);
+        }
+        let mut c = WriteConn {
+            h,
+            q_exists: std::ptr::null_mut(),
+            q_insert: std::ptr::null_mut(),
+            q_like: std::ptr::null_mut(),
+            in_batch: false,
+        };
+        for pragma in [
+            "PRAGMA journal_mode = WAL",
+            "PRAGMA synchronous = NORMAL",
+            "PRAGMA temp_store = MEMORY",
+            "PRAGMA cache_size = -4096",
+            "PRAGMA mmap_size = 0",
+            "PRAGMA wal_autocheckpoint = 0",
+        ] {
+            c.exec_str(pragma);
+        }
+        unsafe {
+            let q = |sql: &str| -> *mut Stmt {
+                let cs = CString::new(sql).unwrap();
+                let mut s: *mut Stmt = std::ptr::null_mut();
+                if sqlite3_prepare_v3(c.h, cs.as_ptr(), -1, 0, &mut s, std::ptr::null_mut())
+                    != SQLITE_OK
+                {
+                    panic!("writer prepare: {sql}");
+                }
+                s
+            };
+            c.q_exists = q("SELECT 1 FROM posts WHERE id = ?1");
+            c.q_insert = q("INSERT INTO posts (user_id, body) VALUES (?, ?) RETURNING id, created_at");
+            c.q_like = q(
+                "INSERT INTO likes (user_id, post_id) VALUES (?, ?) \
+                 ON CONFLICT (user_id, post_id) DO NOTHING",
+            );
+        }
+        Some(c)
+    }
+
+    fn exec_str(&mut self, sql: &str) {
+        let cs = CString::new(sql).expect("sql");
+        unsafe {
+            sqlite3_exec(
+                self.h,
+                cs.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            );
+        }
+    }
+
+    pub fn begin_write(&mut self) -> bool {
+        let cs = CString::new("BEGIN IMMEDIATE").unwrap();
+        let rc = unsafe { sqlite3_exec(self.h, cs.as_ptr(), std::ptr::null(), std::ptr::null_mut(), std::ptr::null_mut()) };
+        self.in_batch = rc == SQLITE_OK;
+        self.in_batch
+    }
+
+    pub fn commit(&mut self) -> bool {
+        let cs = CString::new("COMMIT").unwrap();
+        let rc = unsafe { sqlite3_exec(self.h, cs.as_ptr(), std::ptr::null(), std::ptr::null_mut(), std::ptr::null_mut()) };
+        self.in_batch = false;
+        rc == SQLITE_OK
+    }
+
+    pub fn create(&mut self, uid: i64, body: &[u8]) -> Option<(i64, Vec<u8>)> {
+        unsafe {
+            sqlite3_bind_int64(self.q_insert, 1, uid);
+            sqlite3_bind_text(
+                self.q_insert,
+                2,
+                body.as_ptr() as *const c_char,
+                body.len() as c_int,
+                None,
+            );
+            if sqlite3_step(self.q_insert) != SQLITE_ROW {
+                sqlite3_reset(self.q_insert);
+                return None;
+            }
+            let id = sqlite3_column_int64(self.q_insert, 0);
+            let created = column(self.q_insert, 1).to_vec();
+            sqlite3_reset(self.q_insert);
+            Some((id, created))
+        }
+    }
+
+    pub fn like(&mut self, uid: i64, post_id: i64) -> LikeRaw {
+        unsafe {
+            sqlite3_bind_int64(self.q_exists, 1, post_id);
+            let rc = sqlite3_step(self.q_exists);
+            sqlite3_reset(self.q_exists);
+            if rc == SQLITE_DONE {
+                return LikeRaw::Missing;
+            }
+            if rc != SQLITE_ROW {
+                return LikeRaw::Error;
+            }
+            sqlite3_bind_int64(self.q_like, 1, uid);
+            sqlite3_bind_int64(self.q_like, 2, post_id);
+            let rc = sqlite3_step(self.q_like);
+            sqlite3_reset(self.q_like);
+            if rc != SQLITE_DONE {
+                return LikeRaw::Error;
+            }
+            if sqlite3_changes(self.h) == 1 {
+                LikeRaw::Created
+            } else {
+                LikeRaw::AlreadyLiked
+            }
+        }
+    }
+}
+

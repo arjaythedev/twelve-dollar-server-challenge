@@ -42,6 +42,11 @@ const HANDOVER_FREE: u32 = 4096;
 /// ring boundaries for real before the public listener exists. A value of the
 /// `FEED_TABLE` / `FEED_HANDOVER` environment overrides them; unset means the
 /// process limit and the default.
+/// The DB path the writer reopens (same file, second connection).
+fn app_db_path_of(app: &App) -> String {
+    app.db_path().to_string()
+}
+
 fn env_u32(name: &str) -> Option<u32> {
     std::env::var(name).ok().and_then(|s| s.parse().ok())
 }
@@ -77,6 +82,12 @@ struct Conn {
     sent: usize,
     close_after: bool,
     send_busy: bool,
+    /// A queued write owns this connection: further requests wait in the
+    /// input buffer until the write commits and its reply is queued.
+    write_parked: bool,
+    /// The generation this conn had when its write was queued (stale
+    /// completions drop).
+    parked_gen: u32,
 }
 
 impl Conn {
@@ -88,7 +99,13 @@ impl Conn {
             sent: 0,
             close_after: false,
             send_busy: false,
+            write_parked: false,
+            parked_gen: 0,
         }
+    }
+
+    fn inbuf_has_data(&self) -> bool {
+        !self.inbuf.is_empty()
     }
 }
 
@@ -97,10 +114,15 @@ struct Lane {
     efd: c_int,
     /// This ring's own listening socket (REUSEPORT group); -1 unassigned.
     listen_fd: c_int,
+    /// Per-connection-slot generation, bumped at close: a queued write's
+    /// reply is dropped unless the slot still holds its connection.
+    gens: Vec<u32>,
     bufs: Vec<u8>,
     /// Buffers returned since the last flush, as a bitmap.
     pending: Box<[u64]>,
     npending: u32,
+    /// Provided buffers currently in use by published completions.
+    held_bufs: u32,
     free_slots: u32,
     conns: Vec<Conn>,
     accept_inflight: u32,
@@ -211,6 +233,10 @@ pub struct UringServer {
     mem: sys::MemGuard,
     /// Set while a memory-pressure hold is active on the accepting lane.
     mem_holding: bool,
+    /// The parked-write queue (None when the writer thread could not start).
+    writer: Option<Box<crate::writer::IssuerQueue>>,
+    /// The wake fd the writer signals; registered in the issuer's epoll.
+    writer_wake_fd: c_int,
 }
 
 impl UringServer {
@@ -281,9 +307,11 @@ impl UringServer {
             ring,
             efd: -1,
             listen_fd: self.listen_lfds.get(i).copied().unwrap_or(self.listen_fd),
+            gens: vec![0u32; table as usize],
             bufs,
             pending: vec![0u64; Lane::pending_words()].into_boxed_slice(),
             npending: 0,
+            held_bufs: 0,
             free_slots: table,
             conns: (0..table).map(|_| Conn::new()).collect(),
             accept_inflight: 0,
@@ -425,11 +453,37 @@ impl UringServer {
                         }
                         // Cursors must not span a write; the DB layer closes and
                         // reopens them around one.
-                        let close = {
+                        let (close, parked) = {
                             let app = &mut self.app;
                             let out = &mut self.lanes[lane].conns[idx].outbuf;
-                            app.handle(&rq, out)
+                            let mut pk =
+                                crate::app::ParkedOut { out, owns_writes: self.writer.is_some(), job: None };
+                            let closed = app.route(&rq, &mut pk);
+                            (closed, pk.job)
                         };
+                        if let Some(job) = parked {
+                            // The issuer hands the job to the writer queue; the
+                            // reply comes back through the wake fd. The
+                            // pipeline on this connection waits (no recv re-
+                            // arm, no further serve) until the reply is queued.
+                            let gen = self.lanes[lane].gens[idx];
+                            let queued = match &self.writer {
+                                Some(q) => q.enqueue(lane as u32, slot, gen, job),
+                                None => false,
+                            };
+                            if queued {
+                                self.lanes[lane].conns[idx].write_parked = true;
+                                buf.drain(..used);
+                                continue;
+                            }
+                            // Queue full: same answer as a failed batch commit.
+                            let c = &mut self.lanes[lane].conns[idx];
+                            c.outbuf.clear();
+                            http::respond(&mut c.outbuf, 503, crate::app::R_INTERNAL);
+                            c.close_after = true;
+                            buf.clear();
+                            break;
+                        }
                         buf.drain(..used);
                         if close {
                             let c = &mut self.lanes[lane].conns[idx];
@@ -466,24 +520,41 @@ impl UringServer {
         {
             if let Ok(Some((rq, used))) = http::parse(data) {
                 if used == data.len() {
-                    let close = {
-                        let l = &mut self.lanes[lane];
-                        if rq.expect_continue {
-                            l.conns[idx]
-                                .outbuf
-                                .extend_from_slice(b"HTTP/1.1 100 Continue\r\n\r\n");
-                        }
+                    // Same routed path as the buffered serve: a write parks in
+                    // the writer queue and the reply arrives through the wake.
+                    let owns = self.writer.is_some();
+                    let (close, parked) = {
                         let app = &mut self.app;
-                        app.handle(&rq, &mut l.conns[idx].outbuf)
+                        let out = &mut self.lanes[lane].conns[idx].outbuf;
+                        let mut pk = crate::app::ParkedOut { out, owns_writes: owns, job: None };
+                        let closed = app.route(&rq, &mut pk);
+                        (closed, pk.job)
                     };
+                    if let Some(job) = parked {
+                        let gen = self.lanes[lane].gens[idx];
+                        let queued = match &self.writer {
+                            Some(q) => q.enqueue(lane as u32, slot, gen, job),
+                            None => false,
+                        };
+                        if queued {
+                            self.lanes[lane].conns[idx].write_parked = true;
+                            // No recv re-arm: the pipeline waits for the commit.
+                            return;
+                        }
+                        let c = &mut self.lanes[lane].conns[idx];
+                        c.outbuf.clear();
+                        http::respond(&mut c.outbuf, 503, crate::app::R_INTERNAL);
+                        c.close_after = true;
+                        self.mark_dirty(lane, slot);
+                        return;
+                    }
                     if close {
                         self.lanes[lane].conns[idx].close_after = true;
                     }
                     self.mark_dirty(lane, slot);
                     return;
                 }
-            }
-        }
+            }        }
         // While a send is in flight the output buffer must not move, so new
         // bytes wait in the input buffer until it completes.
         self.lanes[lane].conns[idx].inbuf.extend_from_slice(data);
@@ -549,10 +620,15 @@ impl UringServer {
                     // not handed back to the kernel until the pass ends, so it
                     // stays valid for the whole call.
                     let base = self.lanes[lane].bufs.as_ptr();
+                    self.lanes[lane].held_bufs += 1;
                     self.lanes[lane].recycle(bid);
                     let data = unsafe { std::slice::from_raw_parts(base.add(start), n) };
                     self.on_data(lane, slot, data);
-                    if flags & IORING_CQE_F_MORE == 0 && self.lanes[lane].conns[slot as usize].live
+                    // A parked write holds the pipeline: the receive re-arms
+                    // only when the write's reply is queued.
+                    if flags & IORING_CQE_F_MORE == 0
+                        && self.lanes[lane].conns[slot as usize].live
+                        && !self.lanes[lane].conns[slot as usize].write_parked
                     {
                         self.arm_recv(lane, slot);
                     }
@@ -620,16 +696,61 @@ impl UringServer {
             K_CLOSE => {
                 let l = &mut self.lanes[lane];
                 l.conns[slot as usize] = Conn::new();
+                let gi = slot as usize;
+                if gi < l.gens.len() {
+                    l.gens[gi] = l.gens[gi].wrapping_add(1);
+                }
                 l.free_slots = (l.free_slots + 1).min(l.conns.len() as u32);
             }
             _ => {}
         }
     }
 
+    /// Drains the writer's committed replies and submits their sends. A reply
+    /// for a slot whose connection died in the meantime is dropped (the write
+    /// still committed — accepted-request semantics).
+    fn publish_writer_replies(&mut self) {
+        let q = match &self.writer {
+            Some(q) => q,
+            None => return,
+        };
+        for r in q.drain() {
+            let idx = r.slot as usize;
+            if r.lane as usize >= self.lanes.len() || idx >= self.lanes[r.lane as usize].conns.len()
+            {
+                continue;
+            }
+            let lane_live = {
+                let l = &self.lanes[r.lane as usize];
+                let gi = idx.min(l.gens.len() - 1);
+                l.gens[gi] == r.gen && l.conns[idx].live
+            };
+            if !lane_live {
+                continue;
+            }
+            let c = &mut self.lanes[r.lane as usize].conns[idx];
+            c.outbuf.clear();
+            c.outbuf.extend_from_slice(&r.bytes);
+            c.sent = 0;
+            c.write_parked = false;
+            if r.close {
+                c.close_after = true;
+            }
+            let lane = r.lane as usize;
+            self.submit_send(lane, r.slot);
+            // The pipeline continues: the next request on this connection was
+            // buffered while the write was parked.
+            if self.lanes[lane].conns[idx].inbuf_has_data() {
+                self.serve(lane, r.slot);
+            } else {
+                self.arm_recv(lane, r.slot);
+            }
+        }
+    }
+
     /// Hands the listener to a ring with free slots, opening the next ring when
     /// none has room yet.
-    fn advance_accept(&mut self, from: usize) {
-        let free: Vec<u32> = self.lanes.iter().map(|l| l.free_slots).collect();
+    fn advance_accept(&mut self, from: usize) {        let free: Vec<u32> = self.lanes.iter().map(|l| l.free_slots).collect();
         if let Some(next) = handover_target(&free, from, self.hwm) {
             self.start_accepting(next);
             return;
@@ -711,6 +832,13 @@ impl UringServer {
             if n > 0 {
                 for i in 0..n as usize {
                     let fd = sys::event_fd(&events[i]);
+                    if fd == self.writer_wake_fd {
+                        // The writer committed a batch: replies wait in the
+                        // ready queue.
+                        crate::writer::eventdrain(fd);
+                        self.publish_writer_replies();
+                        continue;
+                    }
                     for lane in 0..self.lanes.len() {
                         if self.lanes[lane].efd == fd {
                             read_eventfd(fd);
@@ -837,6 +965,8 @@ pub fn self_test(secret: &str, db_path: &str) -> bool {
         table_override: None,
         mem: sys::MemGuard::new(),
         mem_holding: false,
+        writer: None,
+        writer_wake_fd: -1,
     };
     if !server.open_lane(0) {
         return false;
@@ -950,6 +1080,8 @@ fn self_test_boundary(secret: &str, db_path: &str, port: u16, lfd: c_int) -> boo
         table_override: Some(32),
         mem: sys::MemGuard::new(),
         mem_holding: false,
+        writer: None,
+        writer_wake_fd: -1,
     };
     if !server.open_lane(0) {
         return false;
@@ -1043,6 +1175,18 @@ mod handover_tests {
 pub fn serve(app: App, listen_fds: &[c_int]) -> App {
     let ep = unsafe { sys::epoll_create1(0x80000) };
     assert!(ep >= 0, "epoll_create1 failed");
+    // The writer pair: the issuer's queue + eventfd, and the writer thread's
+    // own connection. Writes park here so the issuer's passes never stall on
+    // a write transaction.
+    let iq: Option<crate::writer::IssuerQueue> =
+        match crate::writer::IssuerQueue::new(&app_db_path_of(&app)) {
+            Ok(q) => Some(q),
+            Err(e) => {
+                eprintln!("writer queue unavailable: {e}; writes run inline");
+                None
+            }
+        };
+    let writer_fd = iq.as_ref().map(|q| q.fd).unwrap_or(-1);
     let mut server = UringServer {
         lanes: Vec::new(),
         ep,
@@ -1054,6 +1198,8 @@ pub fn serve(app: App, listen_fds: &[c_int]) -> App {
         table_override: env_u32("FEED_TABLE"),
         mem: sys::MemGuard::new(),
         mem_holding: false,
+        writer: iq.map(Box::new),
+        writer_wake_fd: writer_fd,
     };
     if !server.open_lane(0) {
         for lane in server.lanes.iter() {
@@ -1061,6 +1207,12 @@ pub fn serve(app: App, listen_fds: &[c_int]) -> App {
         }
         unsafe { sys::close(ep) };
         return server.app;
+    }
+    if server.writer_wake_fd >= 0 {
+        let ev = sys::event_for(server.writer_wake_fd, sys::EPOLLIN);
+        unsafe {
+            sys::epoll_ctl(ep, sys::EPOLL_CTL_ADD, server.writer_wake_fd, &ev);
+        }
     }
     let additional = listen_fds.len().min(MAX_LANES) - 1;
     // Each extra ring accepts from its own reuseport listener. Ring i's

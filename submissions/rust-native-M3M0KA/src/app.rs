@@ -177,12 +177,24 @@ impl App {
         self.jwt(&auth[7..], now)
     }
 
-    /// Handle one request. Returns `true` when the connection must be closed.
-    pub fn handle(&mut self, rq: &Request, out: &mut Vec<u8>) -> bool {
-        if self.db.batch_failed() {
-            http::respond(out, 503, b"{\"error\":\"database busy\"}");
-            return !rq.keep_alive;
-        }
+    /// Handles one request on a transport without a writer queue: writes
+    /// execute inline exactly as every earlier verification ran.
+    /// The DB path (the writer thread reopens the same file).
+    pub fn db_path(&self) -> &str {
+        self.db.db_path()
+    }
+
+    pub fn handle(&mut self, rq: &Request, out: &mut Vec<u8>) -> bool {        let mut park = ParkedOut { out, owns_writes: false, job: None };
+        self.route(rq, &mut park)
+    }
+
+    /// The shared route used by both transports. `park` receives a queued
+    /// write when the transport owns a writer queue; without one, writes
+    /// execute inline on this thread's connection (same visibility rules as
+    /// before: every response reflects committed state, because inline writes
+    /// commit inside the pass's transaction).
+    pub fn route(&mut self, rq: &Request, park: &mut ParkedOut) -> bool {
+        let out = &mut *park.out;
         let now = now_s();
         if rq.method == b"GET" {
             if rq.path == b"/health" {
@@ -261,6 +273,10 @@ impl App {
                         return !rq.keep_alive;
                     }
                 };
+                if park.owns_writes {
+                    park.job = Some(WriteJob::Create(uid, name, text.to_vec()));
+                    return !rq.keep_alive;
+                }
                 match self.db.create(uid, text) {
                     Some((id, created)) => {
                         let mut body = Vec::with_capacity(1024);
@@ -289,8 +305,18 @@ impl App {
                     }
                 };
                 match id {
-                    IdParse::Invalid => http::respond(out, 400, R_BAD_ID),
-                    IdParse::TooBig => http::respond(out, 404, R_NO_POST),
+                    IdParse::Invalid => {
+                        http::respond(out, 400, R_BAD_ID);
+                        return !rq.keep_alive;
+                    }
+                    IdParse::TooBig => {
+                        http::respond(out, 404, R_NO_POST);
+                        return !rq.keep_alive;
+                    }
+                    IdParse::Ok(id) if park.owns_writes => {
+                        park.job = Some(WriteJob::Like(uid, id));
+                        return !rq.keep_alive;
+                    }
                     IdParse::Ok(id) => match self.db.like(uid, id) {
                         LikeResult::Created => {
                             let mut body = Vec::with_capacity(64);
@@ -331,6 +357,15 @@ impl App {
     pub fn end_batch(&mut self) -> bool {
         self.db.batch_commit()
     }
+}
+
+pub use crate::db::WriteJobRepr as WriteJob;
+
+pub struct ParkedOut<'a> {
+    pub out: &'a mut Vec<u8>,
+    /// `false` on transports without a writer queue: writes execute inline.
+    pub owns_writes: bool,
+    pub job: Option<WriteJob>,
 }
 
 enum IdParse {

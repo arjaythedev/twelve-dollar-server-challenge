@@ -1,4 +1,5 @@
 #include "api.hpp"
+#include "app/post_writer.hpp"
 #include "auth.hpp"
 #include "json.hpp"
 #include "parsing.hpp"
@@ -9,6 +10,7 @@
 #include <stdexcept>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 namespace tds
 {
@@ -62,7 +64,7 @@ Response error_response(ApiError error)
     return {error.status, std::move(body)};
 }
 
-std::expected<std::int64_t, ApiError> parse_post_id(std::string_view text)
+std::expected<PostId, ApiError> parse_post_id(std::string_view text)
 {
     if (!parsing::ascii_digits(text) || text.find_first_not_of('0') == std::string_view::npos)
     {
@@ -80,7 +82,7 @@ std::expected<std::int64_t, ApiError> parse_post_id(std::string_view text)
         return std::unexpected(ApiError{status, message});
     }
 
-    return *parsed;
+    return PostId{*parsed};
 }
 
 bool body_whitespace(std::uint32_t value)
@@ -116,7 +118,7 @@ std::string_view trimmed_body(std::string_view body)
     return last ? body.substr(first, last - first) : std::string_view{};
 }
 
-std::int64_t database_user_id(const Identity &identity)
+UserId database_user_id(const Identity &identity)
 {
     if (!identity.user_id)
     {
@@ -134,21 +136,21 @@ Api::Api(std::string database_path, std::string secret)
 {
 }
 
-Database &Api::database()
+Store &Api::store()
 {
-    if (!database_)
+    if (!store_)
     {
-        database_ = std::make_unique<Database>(database_path_);
+        store_ = std::make_unique<Store>(database_path_);
     }
 
-    return *database_;
+    return *store_;
 }
 
 Response Api::health()
 {
     try
     {
-        database().health();
+        store().health();
     }
     catch (const std::exception &error)
     {
@@ -175,13 +177,14 @@ Response Api::get_post(std::string_view id)
         return error_response(parsed.error());
     }
 
-    auto post = database().post(*parsed);
-    if (!post)
+    std::string output;
+    PostWriter writer(output, PostShape::single);
+    if (!store().post(*parsed, writer))
     {
         return error_response({Status::not_found, "post not found"});
     }
 
-    return {Status::ok, std::move(*post)};
+    return {Status::ok, std::move(output)};
 }
 
 namespace
@@ -238,24 +241,26 @@ RequestResult prepare_like(const Request &request, std::string_view id)
     return WriteCommand{LikePost{database_user_id(identity), *parsed}};
 }
 
-Response write_response(const WriteCommand &write, WriteValue value)
+Response write_response(const WriteCommand &write, const WriteValue &value)
 {
-    if (std::holds_alternative<CreatePost>(write))
+    if (const auto *command = std::get_if<CreatePost>(&write))
     {
-        return {Status::created, std::get<std::string>(std::move(value))};
-    }
-    const auto created = std::get<std::optional<bool>>(value);
-    if (!created)
-    {
-        return error_response({Status::not_found, "post not found"});
-    }
+        const auto &created = std::get<CreatedPost>(value);
+        std::string output;
+        PostWriter writer(output, PostShape::single);
+        writer.append(created.id, command->body,
+                      {created.created_at.data(), created.created_at.size()}, command->username, 0);
+        writer.finish();
 
-    std::string output = *created ? "{\"liked\":true,\"already_liked\":false,\"post_id\":"
-                                  : "{\"liked\":true,\"already_liked\":true,\"post_id\":";
-    integer(output, std::get<LikePost>(write).post_id);
+        return {Status::created, std::move(output)};
+    }
+    const bool created = std::get<LikeResult>(value) == LikeResult::created;
+    std::string output = created ? "{\"liked\":true,\"already_liked\":false,\"post_id\":"
+                                 : "{\"liked\":true,\"already_liked\":true,\"post_id\":";
+    integer(output, std::get<LikePost>(write).post_id.value);
     output += '}';
 
-    return {*created ? Status::created : Status::ok, std::move(output)};
+    return {created ? Status::created : Status::ok, std::move(output)};
 }
 
 } // namespace
@@ -270,16 +275,38 @@ void Api::handle_writes(std::span<const WriteCommand> commands, std::span<Respon
     {
         return;
     }
-    auto outcomes = database().write_batch(commands);
+    std::vector<WriteOutcome> outcomes(commands.size());
+    const auto committed = store().commit(commands, outcomes);
+    if (!committed)
+    {
+        std::cerr << "write batch failed: " << committed.error().message << '\n';
+        for (auto &response : responses)
+        {
+            response = error_response({Status::internal_error, "internal server error"});
+        }
+
+        return;
+    }
     for (std::size_t index = 0; index < commands.size(); ++index)
     {
         try
         {
             if (!outcomes[index])
             {
-                std::rethrow_exception(outcomes[index].error());
+                const auto &error = outcomes[index].error();
+                if (error.code == WriteErrorCode::post_not_found)
+                {
+                    responses[index] = error_response({Status::not_found, "post not found"});
+                }
+                else
+                {
+                    std::cerr << "request failed: " << error.message << '\n';
+                    responses[index] =
+                        error_response({Status::internal_error, "internal server error"});
+                }
+                continue;
             }
-            responses[index] = write_response(commands[index], std::move(*outcomes[index]));
+            responses[index] = write_response(commands[index], *outcomes[index]);
         }
         catch (const std::exception &error)
         {
@@ -315,8 +342,13 @@ RequestResult Api::handle(const Request &request)
         throw std::logic_error("request headers were not accepted");
     case Endpoint::health:
         return health();
-    case Endpoint::feed:
-        return Response{Status::ok, database().feed()};
+    case Endpoint::feed: {
+        std::string output;
+        PostWriter writer(output, PostShape::feed);
+        store().feed(writer);
+
+        return Response{Status::ok, std::move(output)};
+    }
     case Endpoint::post:
         return get_post(std::string_view(request.path).substr(7));
     case Endpoint::create:

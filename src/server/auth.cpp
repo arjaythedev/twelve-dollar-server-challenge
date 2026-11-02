@@ -126,10 +126,10 @@ std::expected<Identity, ApiError> authenticate(std::string_view header, std::str
         return std::unexpected(invalid_payload);
     }
 
-    std::optional<std::int64_t> user_id;
+    std::optional<UserId> user_id;
     if (const auto parsed = parsing::integer<std::int64_t>(subject))
     {
-        user_id = *parsed;
+        user_id = UserId{*parsed};
     }
 
     return Identity{user_id, std::string(text_value(username_value))};

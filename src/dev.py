@@ -576,6 +576,7 @@ def native_check() -> None:
         ("transport_tests", []),
         ("checkpoint_tests", []),
         ("group_commit_tests", []),
+        ("post_writer_tests", []),
         ("btree_tests", []),
         ("sync_tests", []),
         ("load_generator", ["--self-test"]),
@@ -1108,11 +1109,11 @@ def profile_stage(frames: list[tuple[str, str]]) -> str:
     symbols = "\n".join(symbol for symbol, _ in frames)
     if "tds::authenticate(" in symbols or any("libcrypto" in module for _, module in frames):
         return "auth"
-    if "tds::quote(" in symbols or "tds::integer(" in symbols:
+    if any(name in symbols for name in ("tds::quote(", "tds::integer(", "tds::PostWriter::")):
         return "response_json"
     if "tds::read_json(" in symbols or "yyjson" in symbols:
         return "request_json"
-    if "sqlite3" in symbols or "tds::Database::" in symbols:
+    if "sqlite3" in symbols or "tds::Database::" in symbols or "tds::Store::" in symbols:
         return "database_and_rows"
     if any(name in symbols for name in ("tds::Server::", "tds::Api::", "llhttp", "io_uring")):
         return "transport_and_other"

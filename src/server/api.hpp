@@ -1,7 +1,7 @@
 #pragma once
 
-#include "database.hpp"
 #include "http.hpp"
+#include "storage/database.hpp"
 
 #include <chrono>
 #include <memory>
@@ -24,14 +24,14 @@ class Api
     void handle_writes(std::span<const WriteCommand> commands, std::span<Response> responses);
 
   private:
-    Database &database();
+    Store &store();
     Response health();
     Response get_post(std::string_view id);
 
     std::string database_path_;
     std::string secret_;
     std::chrono::steady_clock::time_point started_;
-    std::unique_ptr<Database> database_;
+    std::unique_ptr<Store> store_;
 };
 
 } // namespace tds

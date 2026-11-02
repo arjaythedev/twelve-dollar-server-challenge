@@ -1,11 +1,12 @@
 #include "database.hpp"
-#include "database_timing.hpp"
-#include "json.hpp"
-#include "sqlite_read.h"
-#include "timing.hpp"
+#include "../app/post_writer.hpp"
+#include "../database_timing.hpp"
+#include "../sqlite_read.h"
+#include "../timing.hpp"
 
 #include <sqlite3.h>
 
+#include <algorithm>
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
@@ -377,38 +378,22 @@ class ReadScope
     bool committed_ = false;
 };
 
-void post_object(std::string &output, std::int64_t id, std::string_view body,
-                 std::string_view timestamp, std::string_view author, std::int64_t likes)
-{
-    output += "{\"id\":";
-    integer(output, id);
-    output += ",\"body\":";
-    quote(output, body);
-    output += ",\"created_at\":";
-    quote(output, timestamp);
-    output += ",\"author\":";
-    quote(output, author);
-    output += ",\"like_count\":";
-    integer(output, likes);
-    output += '}';
-}
-
-void post_object(std::string &output, const Statement::Use &row)
+void write_post(PostWriter &writer, const Statement::Use &row)
 {
     // Column views are consumed before stepping or resetting the statement
-    post_object(output, row.number(0), row.text(1), row.text(2), row.text(3), row.number(4));
+    writer.append(PostId{row.number(0)}, row.text(1), row.text(2), row.text(3), row.number(4));
 }
 
-void post_object(std::string &output, const tds_btree_post &row)
+void write_post(PostWriter &writer, const tds_btree_post &row)
 {
-    post_object(output, row.id, {row.body, static_cast<std::size_t>(row.body_bytes)},
-                {row.created_at, static_cast<std::size_t>(row.created_at_bytes)},
-                {row.author, static_cast<std::size_t>(row.author_bytes)}, row.like_count);
+    writer.append(PostId{row.id}, {row.body, static_cast<std::size_t>(row.body_bytes)},
+                  {row.created_at, static_cast<std::size_t>(row.created_at_bytes)},
+                  {row.author, static_cast<std::size_t>(row.author_bytes)}, row.like_count);
 }
 
 } // namespace
 
-class Database::State
+class Store::State
 {
   public:
     explicit State(const std::string &path)
@@ -451,31 +436,36 @@ class Database::State
         transaction.commit();
     }
 
-    std::string create_post(std::int64_t user_id, std::string_view username, std::string_view body)
+    CreatedPost create_post(UserId user_id, std::string_view body)
     {
-        std::string output = "{\"post\":";
         auto query = create.use();
-        query.bind(1, user_id);
+        query.bind(1, user_id.value);
         query.bind(2, body);
         if (!query.next())
         {
             throw std::runtime_error("insert returned no row");
         }
 
-        post_object(output, query.number(0), body, query.text(1), username, 0);
-        output += '}';
+        CreatedPost result{PostId{query.number(0)}, {}};
+        const auto timestamp = query.text(1);
+        if (timestamp.size() != result.created_at.size())
+        {
+            throw std::runtime_error("insert returned an invalid timestamp");
+        }
+        std::ranges::copy(timestamp, result.created_at.begin());
         while (query.next())
         {
         }
-        return output;
+
+        return result;
     }
 
-    std::optional<bool> like_post(std::int64_t user_id, std::int64_t post_id)
+    WriteOutcome like_post(UserId user_id, PostId post_id)
     {
         bool found = false;
         {
             auto query = exists.use();
-            query.bind(1, post_id);
+            query.bind(1, post_id.value);
             found = query.next();
             while (found && query.next())
             {
@@ -483,33 +473,36 @@ class Database::State
         }
         if (!found)
         {
-            return std::nullopt;
+            return std::unexpected(WriteError{WriteErrorCode::post_not_found, "post not found"});
         }
 
         {
             auto query = like.use();
-            query.bind(1, user_id);
-            query.bind(2, post_id);
+            query.bind(1, user_id.value);
+            query.bind(2, post_id.value);
             while (query.next())
             {
             }
         }
-        return sqlite3_changes(db.get()) == 1;
+
+        return WriteValue{sqlite3_changes(db.get()) == 1 ? LikeResult::created
+                                                         : LikeResult::already_liked};
     }
 
-    WriteValue apply(const WriteCommand &write)
+    WriteOutcome apply(const WriteCommand &write)
     {
         if (const auto *job = std::get_if<CreatePost>(&write))
         {
 #ifdef TDS_DIAGNOSTICS
             timing::Scope measure(timings.create);
 #endif
-            return create_post(job->user_id, job->username, job->body);
+            return WriteValue{create_post(job->user_id, job->body)};
         }
         const auto &job = std::get<LikePost>(write);
 #ifdef TDS_DIAGNOSTICS
         timing::Scope measure(timings.like);
 #endif
+
         return like_post(job.user_id, job.post_id);
     }
 
@@ -529,13 +522,13 @@ class Database::State
     Checkpoints checkpoints;
 };
 
-Database::Database(const std::string &path) : state_(std::make_unique<State>(path))
+Store::Store(const std::string &path) : state_(std::make_unique<State>(path))
 {
 }
 
-Database::~Database() = default;
+Store::~Store() = default;
 
-void Database::health()
+void Store::health()
 {
     auto query = state_->health.use();
     while (query.next())
@@ -543,14 +536,12 @@ void Database::health()
     }
 }
 
-std::string Database::feed()
+void Store::feed(PostWriter &writer)
 {
 #ifdef TDS_DIAGNOSTICS
     state_->timings.report();
     timing::Scope measure(state_->timings.feed);
 #endif
-    std::string output = "{\"posts\":[";
-    output.reserve(8192);
     if (state_->tree)
     {
         ReadScope read(state_->db.get(), state_->read_begin, state_->read_commit, *state_->tree);
@@ -558,69 +549,59 @@ std::string Database::feed()
         {
             tds_btree_post row{};
             int result = SQLITE_OK;
-            bool first = true;
             while ((result = tds_btree_feed_next(state_->tree.get(), &row)) == SQLITE_ROW)
             {
-                if (!first)
-                {
-                    output += ',';
-                }
-                first = false;
-                post_object(output, row);
+                write_post(writer, row);
             }
             if (result == SQLITE_DONE)
             {
-                output += "]}";
+                writer.finish();
                 read.commit();
 
-                return output;
+                return;
             }
         }
-        output = "{\"posts\":[";
+        writer.reset();
     }
     auto query = state_->feed.use();
-    bool first = true;
     while (query.next())
     {
-        if (!first)
-        {
-            output += ',';
-        }
-        first = false;
-        post_object(output, query);
+        write_post(writer, query);
     }
-    output += "]}";
-    return output;
+    writer.finish();
 }
 
-std::optional<std::string> Database::post(std::int64_t id)
+bool Store::post(PostId id, PostWriter &writer)
 {
 #ifdef TDS_DIAGNOSTICS
     state_->timings.report();
     timing::Scope measure(state_->timings.post);
 #endif
     auto query = state_->post.use();
-    query.bind(1, id);
+    query.bind(1, id.value);
     if (!query.next())
     {
-        return std::nullopt;
+        return false;
     }
-    std::string output = "{\"post\":";
-    post_object(output, query);
-    output += '}';
+    write_post(writer, query);
+    writer.finish();
     while (query.next())
     {
     }
-    return output;
+
+    return true;
 }
 
-std::vector<WriteResult> Database::write_batch(std::span<const WriteCommand> writes)
+std::expected<void, WriteError> Store::commit(std::span<const WriteCommand> commands,
+                                              std::span<WriteOutcome> outcomes)
 {
-    std::vector<WriteResult> results;
-    results.reserve(writes.size());
-    if (writes.empty())
+    if (commands.size() != outcomes.size() || commands.size() > write_batch_limit)
     {
-        return results;
+        throw std::logic_error("invalid storage write batch");
+    }
+    if (commands.empty())
+    {
+        return {};
     }
 #ifdef TDS_DIAGNOSTICS
     state_->timings.report();
@@ -628,8 +609,8 @@ std::vector<WriteResult> Database::write_batch(std::span<const WriteCommand> wri
     try
     {
         Transaction transaction(state_->db.get());
-        const bool savepoints = writes.size() > 1;
-        for (const auto &write : writes)
+        const bool savepoints = commands.size() > 1;
+        for (std::size_t index = 0; index < commands.size(); ++index)
         {
             if (savepoints)
             {
@@ -637,7 +618,7 @@ std::vector<WriteResult> Database::write_batch(std::span<const WriteCommand> wri
             }
             try
             {
-                results.emplace_back(state_->apply(write));
+                outcomes[index] = state_->apply(commands[index]);
             }
             catch (const SqlError &error)
             {
@@ -647,7 +628,8 @@ std::vector<WriteResult> Database::write_batch(std::span<const WriteCommand> wri
                     throw;
                 }
                 execute(state_->db.get(), "ROLLBACK TO write_job");
-                results.emplace_back(std::unexpected(std::current_exception()));
+                outcomes[index] =
+                    std::unexpected(WriteError{WriteErrorCode::constraint, error.what()});
             }
             if (savepoints)
             {
@@ -656,12 +638,16 @@ std::vector<WriteResult> Database::write_batch(std::span<const WriteCommand> wri
         }
         state_->commit(transaction);
     }
-    catch (...)
+    catch (const std::exception &error)
     {
-        // A failed transaction invalidates every provisional result
-        results.assign(writes.size(), std::unexpected(std::current_exception()));
+        const WriteError failure{WriteErrorCode::transaction, error.what()};
+        // Transaction unwinding rolls back before provisional outcomes are invalidated
+        std::ranges::fill(outcomes, std::unexpected(failure));
+
+        return std::unexpected(failure);
     }
-    return results;
+
+    return {};
 }
 
 } // namespace tds

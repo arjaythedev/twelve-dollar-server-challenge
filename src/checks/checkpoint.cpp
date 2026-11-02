@@ -1,4 +1,5 @@
-#include "database.hpp"
+#include "app/post_writer.hpp"
+#include "storage/database.hpp"
 
 #include <sqlite3.h>
 
@@ -6,7 +7,6 @@
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
-#include <exception>
 #include <filesystem>
 #include <memory>
 #include <mutex>
@@ -18,6 +18,7 @@
 #include <unistd.h>
 #include <utility>
 #include <variant>
+#include <vector>
 
 namespace
 {
@@ -31,18 +32,44 @@ void require(bool condition, const char *message)
     }
 }
 
-template <class Value> Value write_one(tds::Database &db, const tds::WriteCommand &write)
+template <class Value> Value write_one(tds::Store &db, const tds::WriteCommand &write)
 {
-    auto results = db.write_batch(std::span<const tds::WriteCommand>(&write, 1));
-    require(results.size() == 1, "singleton write lost its result");
+    std::vector<tds::WriteOutcome> results(1);
+    const auto committed = db.commit(std::span<const tds::WriteCommand>(&write, 1), results);
+    if (!committed)
+    {
+        throw std::runtime_error(committed.error().message);
+    }
     auto &result = results.front();
     if (!result)
     {
-        std::rethrow_exception(result.error());
+        throw std::runtime_error(result.error().message);
     }
     auto *value = std::get_if<Value>(&*result);
     require(value != nullptr, "singleton write returned the wrong type");
+
     return std::move(*value);
+}
+
+std::string read_feed(tds::Store &store)
+{
+    std::string output;
+    tds::PostWriter writer(output, tds::PostShape::feed);
+    store.feed(writer);
+
+    return output;
+}
+
+std::optional<std::string> read_post(tds::Store &store, tds::PostId id)
+{
+    std::string output;
+    tds::PostWriter writer(output, tds::PostShape::single);
+    if (!store.post(id, writer))
+    {
+        return std::nullopt;
+    }
+
+    return output;
 }
 
 struct Close
@@ -179,12 +206,12 @@ struct Unblock
     }
 };
 
-void write_until_started(tds::Database &db, Control &control, int target)
+void write_until_started(tds::Store &db, Control &control, int target)
 {
     const std::string body(500, 'x');
     for (int count = 0; count < 1000; ++count)
     {
-        write_one<std::string>(db, tds::CreatePost{1, "first", body});
+        write_one<tds::CreatedPost>(db, tds::CreatePost{tds::UserId{1}, "first", body});
         {
             std::lock_guard lock(control.mutex);
             if (control.started >= target)
@@ -210,7 +237,7 @@ void startup_failure()
     bool failed = false;
     try
     {
-        tds::Database db(fixture.path);
+        tds::Store db(fixture.path);
     }
     catch (const std::runtime_error &)
     {
@@ -227,7 +254,7 @@ void coalescing_and_freshness()
     Fixture fixture;
     Control control;
     {
-        tds::Database db(fixture.path);
+        tds::Store db(fixture.path);
         const Unblock unblock{control};
         control.blocked = true;
         write_until_started(db, control, 1);
@@ -247,21 +274,23 @@ void coalescing_and_freshness()
         const auto begin = std::chrono::steady_clock::now();
         for (int count = 0; count < 100; ++count)
         {
-            write_one<std::string>(
-                db, tds::CreatePost{1, "first", "created while checkpoint is blocked"});
+            write_one<tds::CreatedPost>(db, tds::CreatePost{tds::UserId{1}, "first",
+                                                            "created while checkpoint is blocked"});
         }
         require(std::chrono::steady_clock::now() - begin < 500ms,
                 "writer waits for checkpoint I/O");
         watchdog.request_stop();
         watchdog.join();
         require(control.started == 1, "checkpoint wakeups were not coalesced");
-        require(write_one<std::optional<bool>>(db, tds::LikePost{2, 1}) == true &&
-                    write_one<std::optional<bool>>(db, tds::LikePost{2, 1}) == false,
+        require(write_one<tds::LikeResult>(db, tds::LikePost{tds::UserId{2}, tds::PostId{1}}) ==
+                        tds::LikeResult::created &&
+                    write_one<tds::LikeResult>(db, tds::LikePost{tds::UserId{2}, tds::PostId{1}}) ==
+                        tds::LikeResult::already_liked,
                 "like result changed");
-        const auto post = db.post(1);
+        const auto post = read_post(db, tds::PostId{1});
         require(post && post->find("\"like_count\":1") != std::string::npos,
                 "post is stale after like");
-        require(db.feed().find("created while checkpoint is blocked") != std::string::npos,
+        require(read_feed(db).find("created while checkpoint is blocked") != std::string::npos,
                 "feed is stale after create");
         control.release();
         control.wait([&] {
@@ -287,7 +316,7 @@ void checkpoint_failures()
     Fixture fixture;
     Control control;
     {
-        tds::Database db(fixture.path);
+        tds::Store db(fixture.path);
         control.injected_result = SQLITE_BUSY;
         write_until_started(db, control, 1);
         control.wait([&] {
@@ -305,7 +334,8 @@ void checkpoint_failures()
                     "busy checkpoint retried without a later write");
             control.injected_result = SQLITE_IOERR;
         }
-        write_one<std::string>(db, tds::CreatePost{1, "first", "committed after busy checkpoint"});
+        write_one<tds::CreatedPost>(
+            db, tds::CreatePost{tds::UserId{1}, "first", "committed after busy checkpoint"});
         control.wait([&] {
             return control.finished == previous + 1;
         });
@@ -318,12 +348,12 @@ void checkpoint_failures()
                     "failed checkpoint retried without a later write");
             control.injected_result = SQLITE_OK;
         }
-        write_one<std::string>(db,
-                               tds::CreatePost{1, "first", "committed after failed checkpoint"});
+        write_one<tds::CreatedPost>(
+            db, tds::CreatePost{tds::UserId{1}, "first", "committed after failed checkpoint"});
         control.wait([&] {
             return control.finished == previous + 2 && control.frames == control.backfilled;
         });
-        require(db.feed().find("committed after failed checkpoint") != std::string::npos,
+        require(read_feed(db).find("committed after failed checkpoint") != std::string::npos,
                 "checkpoint failure lost committed data");
     }
     auto db = open(fixture.path);
@@ -335,7 +365,7 @@ void shutdown_joins()
 {
     Fixture fixture;
     Control control;
-    auto db = std::make_unique<tds::Database>(fixture.path);
+    auto db = std::make_unique<tds::Store>(fixture.path);
     const Unblock unblock{control};
     control.blocked = true;
     write_until_started(*db, control, 1);
@@ -354,7 +384,7 @@ void pinned_reader()
     Fixture fixture;
     Control control;
     {
-        tds::Database db(fixture.path);
+        tds::Store db(fixture.path);
         auto reader = open(fixture.path);
         require(sqlite3_exec(reader.get(), "BEGIN", nullptr, nullptr, nullptr) == SQLITE_OK,
                 "reader transaction failed");
@@ -376,12 +406,12 @@ void pinned_reader()
         }
         require(sqlite3_exec(reader.get(), "COMMIT", nullptr, nullptr, nullptr) == SQLITE_OK,
                 "reader commit failed");
-        write_one<std::string>(db,
-                               tds::CreatePost{1, "first", "written after reader releases WAL"});
+        write_one<tds::CreatedPost>(
+            db, tds::CreatePost{tds::UserId{1}, "first", "written after reader releases WAL"});
         control.wait([&] {
             return control.finished > previous && control.frames == control.backfilled;
         });
-        require(db.feed().find("written after reader releases WAL") != std::string::npos,
+        require(read_feed(db).find("written after reader releases WAL") != std::string::npos,
                 "partial checkpoint recovery hid committed write");
     }
     require(!control.wrong_owner && !control.closed_during_checkpoint,

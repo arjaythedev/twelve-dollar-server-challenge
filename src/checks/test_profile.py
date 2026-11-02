@@ -266,6 +266,19 @@ class NativeProfileTests(unittest.TestCase):
             ("tds::Database::feed[abi:cxx11]()", "/app/server"),
         ]
         self.assertEqual(profile_stage(frames), "response_json")
+        self.assertEqual(
+            profile_stage([("tds::Store::feed(tds::PostWriter&)", "/app/server")]),
+            "database_and_rows",
+        )
+        self.assertEqual(
+            profile_stage(
+                [
+                    ("tds::PostWriter::append(...) ", "/app/server"),
+                    ("tds::Store::feed(tds::PostWriter&)", "/app/server"),
+                ]
+            ),
+            "response_json",
+        )
         self.assertEqual(profile_stage([("yyjson_read", "/app/server")]), "request_json")
         self.assertEqual(profile_stage([("[unknown]", "/lib/libcrypto.so.3")]), "auth")
         self.assertEqual(

@@ -8,6 +8,7 @@ COPY server ./server
 COPY checks/transport.cpp ./checks/transport.cpp
 COPY checks/checkpoint.cpp ./checks/checkpoint.cpp
 COPY checks/group_commit.cpp ./checks/group_commit.cpp
+COPY checks/post_writer.cpp ./checks/post_writer.cpp
 COPY checks/btree.cpp ./checks/btree.cpp
 COPY checks/sync.cpp ./checks/sync.cpp
 COPY load ./load

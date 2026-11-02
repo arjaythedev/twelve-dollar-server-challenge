@@ -236,7 +236,7 @@ void exercise_request_reuse()
     require(request.method == "POST" && request.path == path &&
                 request.authorization == authorization && !request.keep_alive,
             "reused request headers parsed");
-    request.identity = tds::Identity{42, "alice"};
+    request.identity = tds::Identity{tds::UserId{42}, "alice"};
     request.endpoint = tds::Endpoint::create;
     parser.accept_headers();
     const auto parsed_body = parser.parse(std::string_view(wire).substr(headers.consumed));
@@ -489,7 +489,7 @@ void exercise_write_batches()
         [](const tds::Request &request) -> tds::RequestResult {
             if (request.endpoint == tds::Endpoint::create)
             {
-                require(request.identity && request.identity->user_id == 42 &&
+                require(request.identity && request.identity->user_id == tds::UserId{42} &&
                             request.identity->username == "writer",
                         "write preparation receives the current request identity");
                 return tds::WriteCommand{tds::CreatePost{*request.identity->user_id,
@@ -510,7 +510,7 @@ void exercise_write_batches()
             }
             if (request.method == "POST")
             {
-                request.identity = tds::Identity{42, "writer"};
+                request.identity = tds::Identity{tds::UserId{42}, "writer"};
             }
             return std::nullopt;
         },
@@ -526,7 +526,8 @@ void exercise_write_batches()
             for (std::size_t index = 0; index < commands.size(); ++index)
             {
                 const auto *create = std::get_if<tds::CreatePost>(&commands[index]);
-                require(create && create->user_id == 42 && create->username == "writer",
+                require(create && create->user_id == tds::UserId{42} &&
+                            create->username == "writer",
                         "batched command owns the prepared identity and create data");
                 bodies.push_back(create->body);
                 responses[index] = {tds::Status::created, create->body};
@@ -539,7 +540,7 @@ void exercise_write_batches()
             for (std::size_t index = 0; index < commands.size(); ++index)
             {
                 const auto &create = std::get<tds::CreatePost>(commands[index]);
-                require(create.user_id == 42 && create.username == "writer" &&
+                require(create.user_id == tds::UserId{42} && create.username == "writer" &&
                             create.body == bodies[index],
                         "owned commands survive the batch callback and peer disconnect");
             }
@@ -647,7 +648,7 @@ void exercise_queued_write_shutdown()
             if (request.method == "POST")
             {
                 ++queued_writes;
-                return tds::WriteCommand{tds::CreatePost{42, "writer", request.body}};
+                return tds::WriteCommand{tds::CreatePost{tds::UserId{42}, "writer", request.body}};
             }
             return tds::Response{tds::Status::ok, request.path};
         },

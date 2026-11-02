@@ -2241,6 +2241,7 @@ hval hpbi_stream_recv(hval s, hval maxn) {
     if (r <= 0 && !blocked)
         sockrec((intptr_t)fd, true)->eof = true;
     if (r > 0) {
+        hp_st[HP_ST_REQ]++;
         hstr *out = hp_str_new(buf, (size_t)r);
         return hp_of_str(out);
     }
@@ -3023,7 +3024,7 @@ static bool hp_uring_arm_recv(hp_sock fd, size_t want) {
     s.addr = (uint64_t)(uintptr_t)st->rh->data;
     s.len = (uint32_t)st->rcap;
     s.user_data = hp_ur_ud(st, fd, HP_UR_KIND_RECV);
-    if (!hp_ur_sq_push(&s)) { hp_ur_retfd(fd); return false; }
+    if (!hp_ur_sq_push(&s)) { hp_st[HP_ST_ARM_FAIL]++; hp_ur_retfd(fd); return false; }
     st->rarmed = 1;
     return true;
 }
@@ -3038,7 +3039,7 @@ static bool hp_uring_arm_poll(hp_sock fd) {
     s.fd = (int)fd;
     s.poll_events = POLLIN;
     s.user_data = hp_ur_ud(st, fd, HP_UR_KIND_POLL);
-    if (!hp_ur_sq_push(&s)) { hp_ur_retfd(fd); return false; }
+    if (!hp_ur_sq_push(&s)) { hp_st[HP_ST_ARM_FAIL]++; hp_ur_retfd(fd); return false; }
     st->pollarmed = 1;
     return true;
 }
@@ -3055,7 +3056,7 @@ static bool hp_ur_arm_send_head(hp_sock fd) {
     s.addr = (uint64_t)(uintptr_t)(c->data + c->off);
     s.len = (uint32_t)(c->len - c->off);
     s.user_data = hp_ur_ud(st, fd, HP_UR_KIND_SEND);
-    if (!hp_ur_sq_push(&s)) { hp_ur_retfd(fd); return false; }
+    if (!hp_ur_sq_push(&s)) { hp_st[HP_ST_ARM_FAIL]++; hp_ur_retfd(fd); return false; }
     st->sarmed = 1;
     return true;
 }
@@ -3159,6 +3160,7 @@ static hstr *hp_uring_take_recv(hp_sock fd, size_t maxall) {
         if (maxall && maxall < cap) cap = maxall;
         ssize_t r = recv(fd, st->rh->data, cap, 0);
         if (r > 0) {
+            hp_st[HP_ST_REQ]++;
             st->rh->len = (size_t)r;
             st->rh->hash = 0;
             st->rh->data[r] = 0;
@@ -3185,6 +3187,7 @@ static hstr *hp_uring_take_recv(hp_sock fd, size_t maxall) {
     st->rh->hash = 0;
     st->rh->data[avail] = 0;
     if (avail) {
+        hp_st[HP_ST_REQ]++;
         st->rready = 0;
         st->rlen = 0;
         st->rarmed = 0;
@@ -6906,13 +6909,77 @@ bool hp_uring_active_t(void) {
 }
 hval hpbi_uring_active(void) { return hp_of_bool(hp_uring_active_t()); }
 
+/* ---- shutdown diagnostics ------------------------------------------------
+ * One stderr line at exit (normal return or SIGTERM/SIGINT) with the counters
+ * that explain a benchmark run: requests, io_uring enters (so enter/request
+ * shows whether batching engaged), parked SQEs and failed arms. The line is
+ * written with write(2) and a manual integer formatter, so it is safe from a
+ * signal handler and costs nothing before shutdown. HPHP_STATS=0 disables it.
+ * Programs that never served a request print nothing, which keeps normal CLI
+ * stderr clean. */
+static void hp_stats_put(const char *s, size_t n) {
+#if !defined(_WIN32)
+    ssize_t ignored = write(2, s, n);
+    (void)ignored;
+#else
+    (void)s; (void)n;
+#endif
+}
+static void hp_stats_num(uint64_t v) {
+    char b[24];
+    size_t i = sizeof b;
+    if (v == 0) { hp_stats_put("0", 1); return; }
+    while (v && i) { b[--i] = (char)('0' + (int)(v % 10)); v /= 10; }
+    hp_stats_put(b + i, sizeof b - i);
+}
+static void hp_stats_emit(void) {
+    if (!hp_st[HP_ST_REQ] && !hp_st[HP_ST_ACCEPT] && !hp_st[HP_ST_ENTER])
+        return;                    /* no server traffic: stay quiet */
+    static const struct { const char *name; int idx; } f[] = {
+        {"reqs", HP_ST_REQ}, {"enter", HP_ST_ENTER},
+        {"sqe", HP_ST_SQE_SUB}, {"cqe", HP_ST_CQE},
+        {"cqe_recv", HP_ST_CQE_RECV}, {"cqe_send", HP_ST_CQE_SEND},
+        {"arm_fail", HP_ST_ARM_FAIL}, {"parked", HP_ST_SQE_PARK},
+        {"close", HP_ST_CLOSE}, {"accept", HP_ST_ACCEPT},
+    };
+    hp_stats_put("[hphp]", 6);
+    for (size_t i = 0; i < sizeof f / sizeof f[0]; i++) {
+        hp_stats_put(" ", 1);
+        hp_stats_put(f[i].name, strlen(f[i].name));
+        hp_stats_put("=", 1);
+        hp_stats_num(hp_st[f[i].idx]);
+    }
+    hp_stats_put("\n", 1);
+}
+#if !defined(_WIN32)
+static void hp_stats_sig(int sig) {
+    hp_stats_emit();
+    signal(sig, SIG_DFL);
+    raise(sig);                    /* keep the normal exit status/semantics */
+}
+#endif
+static void hp_stats_atexit(void) { hp_stats_emit(); }
+#if defined(__GNUC__)
+__attribute__((constructor))
+#endif
+static void hp_stats_install(void) {
+    const char *e = getenv("HPHP_STATS");
+    if (e && e[0] == '0') return;
+#if !defined(_WIN32)
+    signal(SIGTERM, hp_stats_sig);
+    signal(SIGINT, hp_stats_sig);
+#endif
+    atexit(hp_stats_atexit);
+}
+
 /* runtime_stats(): JSON snapshot of the process counters (see hphp_rt.h).
  * Generic introspection, like nofile_limit(): a program (or the operator) can
  * see syscalls/allocations per request. Key order == HP_ST index order. */
 static const char *const hp_stat_names[HP_ST_N] = {
+    "reqs",
     "enter", "sqe_submitted", "sqe_pushed", "sqe_parked",
     "cqe", "cqe_recv", "cqe_send", "cqe_poll",
-    "arm_recv", "arm_send", "arm_poll",
+    "arm_recv", "arm_send", "arm_poll", "arm_fail",
     "close", "accept", "send_chunk", "str_new", "scope_end",
 };
 hval hpbi_runtime_stats(void) {
@@ -6969,7 +7036,10 @@ hstr *hp_stream_recv_t(int64_t fd, int64_t want) {
     int r = recv((hp_sock)fd, g_rbuf, (int)want, 0);
     bool blocked = (r < 0) && hp_sock_wouldblock();
     if (r <= 0 && !blocked) sockrec((intptr_t)fd, true)->eof = true;
-    if (r > 0) return hp_str_new(g_rbuf, (size_t)r);
+    if (r > 0) {
+        hp_st[HP_ST_REQ]++;
+        return hp_str_new(g_rbuf, (size_t)r);
+    }
     return hp_str_lit("");
 }
 bool hp_sqlite_bind_int_t(int64_t stv, int64_t idx, int64_t v) {

@@ -69,7 +69,8 @@ typedef struct hval hval;
  * Plain adds: the VM is single-threaded. Exposed as a JSON object by the
  * runtime_stats() builtin; the indices are the key order. */
 enum {
-    HP_ST_ENTER = 0,   /* io_uring enter syscalls issued */
+    HP_ST_REQ = 0,     /* request reads handed to the program */
+    HP_ST_ENTER,       /* io_uring enter syscalls issued */
     HP_ST_SQE_SUB,     /* SQEs driven into the kernel in one enter */
     HP_ST_SQE_PUSH,    /* SQEs accepted by the ring */
     HP_ST_SQE_PARK,    /* pushes rejected because the ring was full */
@@ -80,6 +81,7 @@ enum {
     HP_ST_ARM_RECV,
     HP_ST_ARM_SEND,
     HP_ST_ARM_POLL,
+    HP_ST_ARM_FAIL,    /* an arm could not be queued (ring full / state) */
     HP_ST_CLOSE,       /* stream_close calls (connection ends) */
     HP_ST_ACCEPT,      /* accepted connections */
     HP_ST_SEND_CHUNK,  /* send-payload copies queued (malloc per chunk) */

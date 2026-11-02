@@ -382,8 +382,40 @@ void exercise_pool(std::uint16_t port, const std::vector<std::unique_ptr<Client>
     }
 }
 
+void exercise_parser_limits(std::uint16_t port)
+{
+    for (const std::size_t size : {16384U, 16385U})
+    {
+        const std::string path = "/" + std::string(size - 1, 'x');
+        const std::array<std::string, 3> requests{
+            "GET " + path + " HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            "GET /limit HTTP/1.1\r\n" + std::string(size, 'x') + ": ok\r\n\r\n",
+            "GET /limit HTTP/1.1\r\nX-Test: " + std::string(size, 'x') + "\r\n\r\n"};
+        for (std::size_t index = 0; index < requests.size(); ++index)
+        {
+            Client client(port);
+            client.send(requests[index]);
+            if (size == 16384)
+            {
+                require(client.response() == (index ? "/limit" : path), "parser token at limit");
+            }
+            else
+            {
+                require(client.response(tds::Status::bad_request) ==
+                            "{\"error\":\"malformed HTTP request\"}",
+                        "parser rejects oversized token");
+            }
+        }
+    }
+    Client body(port);
+    body.send("POST /body HTTP/1.1\r\nHost: localhost\r\nContent-Length: 16385\r\n\r\n");
+    require(body.response(tds::Status::too_large) == "{\"error\":\"malformed HTTP request\"}",
+            "oversized content length rejected before body arrives");
+}
+
 void exercise(std::uint16_t port)
 {
+    exercise_parser_limits(port);
     Client connection(port);
     connection.send("GET /first HTTP/1.1\r\nHo");
     connection.send("st: localhost\r\n\r\n");

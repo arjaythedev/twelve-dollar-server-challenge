@@ -91,7 +91,7 @@ class Ring
         {
             result = io_uring_submit(&queue);
         } while (result == -EINTR);
-        // NODROP retains overflowed CQEs. Drain the CQ before trying another enter.
+        // NODROP retains overflowed CQEs, drain the CQ before trying another enter
         if (result < 0 && result != -EBUSY)
         {
             throw std::system_error(-result, std::generic_category(), "submit");
@@ -120,7 +120,7 @@ class Ring
     std::unique_ptr<Descriptor> notification;
     std::vector<std::unique_ptr<Connection>> connections;
     std::vector<unsigned> free_slots;
-    // Deferred connections have no operation in flight and remain owned by connections.
+    // Deferred connections have no operation in flight and remain owned by connections
     std::deque<Connection *> deferred_receives;
     Operation accept_operation;
     Operation wake_operation;

@@ -75,7 +75,7 @@ Ring::Ring(unsigned slots, bool primary)
 
 Ring::~Ring()
 {
-    // Fatal exits must stop kernel access before any connection storage is freed.
+    // Fatal exits must stop kernel access before any connection storage is freed
     if (pending)
     {
         io_uring_sync_cancel_reg request{};

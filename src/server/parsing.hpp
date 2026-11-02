@@ -2,6 +2,7 @@
 
 #include <charconv>
 #include <concepts>
+#include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <optional>

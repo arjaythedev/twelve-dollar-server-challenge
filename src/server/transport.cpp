@@ -119,7 +119,7 @@ class Server::State
             }
             unsigned count = 0;
             accepted = false;
-            // A busy ring cannot monopolize handlers or delay another ring's close CQEs.
+            // A busy ring cannot monopolize handlers or delay another ring's close CQEs
             for (std::size_t index = 0; index < rings.size(); ++index)
             {
                 auto &owner = *rings[index];
@@ -250,7 +250,7 @@ class Server::State
                 {
                     if (auto rejected = headers(parser.request()))
                     {
-                        // Unread body bytes cannot become the next keep-alive request.
+                        // Unread body bytes cannot become the next keep-alive request
                         connection.close_after = true;
                         respond(connection, std::move(*rejected));
 
@@ -282,7 +282,7 @@ class Server::State
     void close(Connection &connection)
     {
         connection.start_close();
-        // close_direct takes a slot but must not carry IOSQE_FIXED_FILE.
+        // Yes, this is cursed: close_direct takes a fixed slot but rejects IOSQE_FIXED_FILE
         io_uring_prep_close_direct(connection.ring.entry(&connection.close_operation),
                                    connection.slot);
     }
@@ -307,7 +307,7 @@ class Server::State
 
     void advance_shutdown(Ring &owner)
     {
-        // Bound cancellation work so a large idle table cannot fill the CQ before it is drained.
+        // Bound cancellation work so a large idle table cannot fill the CQ before it is drained
         unsigned count = 0;
         while (owner.shutdown_cursor < owner.connections.size() && count < 128)
         {
@@ -475,6 +475,11 @@ class Server::State
 
     void complete(Ring &owner, Operation *operation, int result, unsigned flags)
     {
+        if (!operation)
+        {
+            // Only anonymous cancel completions use a null operation, they own no receive buffer
+            return;
+        }
         const bool selected = (flags & IORING_CQE_F_BUFFER) != 0;
         const auto id = flags >> IORING_CQE_BUFFER_SHIFT;
         if (selected && id >= ReceiveBuffers::count)
@@ -483,10 +488,6 @@ class Server::State
         }
         ReceiveBufferLease buffer(selected ? owner.receive_buffers.get() : nullptr,
                                   static_cast<unsigned short>(id));
-        if (!operation)
-        {
-            return;
-        }
         switch (operation->event)
         {
         case Event::stop:
@@ -521,8 +522,8 @@ class Server::State
             }
             deferred = deferred || !owner->deferred_receives.empty();
         }
-        // Satellite CQEs cannot count toward the primary ring's blocking wait.
-        // Submit the primary too before a ready satellite triggers another fair drain.
+        // Satellite CQEs cannot count toward the primary ring's blocking wait
+        // Submit the primary too before a ready satellite triggers another fair drain
         for (std::size_t index = 1; index < rings.size(); ++index)
         {
             if (io_uring_cq_ready(&rings[index]->queue))
@@ -531,7 +532,7 @@ class Server::State
                 return 0;
             }
         }
-        // Rearm accepts promptly; EXT_ARG avoids synthetic timeout completions.
+        // Rearm accepts promptly; EXT_ARG avoids synthetic timeout completions
         const bool immediate = accepted || previous_count < 2;
         if (stopping || !(primary.features & IORING_FEAT_EXT_ARG) || (immediate && !deferred))
         {
@@ -573,7 +574,7 @@ class Server::State
         {
             return;
         }
-        // Satellite wakes remain armed until every original and close CQE has drained.
+        // Satellite wakes remain armed until every original and close CQE has drained
         closing_wakeups = true;
         for (const auto &owner : rings)
         {

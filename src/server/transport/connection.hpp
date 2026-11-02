@@ -54,7 +54,7 @@ class Operation
     Event event;
 
   private:
-    // The event selects the target: receive/send/close use connection, accept/wake use ring.
+    // The event selects the target: receive/send/close use connection, accept/wake use ring
     union Target {
         Connection *connection = nullptr;
         Ring *ring;

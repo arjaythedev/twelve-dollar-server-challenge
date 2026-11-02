@@ -8,6 +8,7 @@
 #include <array>
 #include <cerrno>
 #include <csignal>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
@@ -16,6 +17,7 @@
 #include <string_view>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <utility>
 
 namespace
 {

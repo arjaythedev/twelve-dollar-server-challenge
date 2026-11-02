@@ -5,6 +5,21 @@
 
 namespace tds::transport
 {
+namespace
+{
+
+int append_fragment(std::string &target, const char *data, std::size_t length)
+{
+    if (length > 16384 - target.size())
+    {
+        return -1;
+    }
+    target.append(data, length);
+
+    return 0;
+}
+
+} // namespace
 
 constinit const llhttp_settings_t HttpParser::settings_ = []() constexpr {
     llhttp_settings_t settings{};
@@ -54,22 +69,19 @@ void HttpParser::reset()
 int HttpParser::on_url(llhttp_t *parser, const char *data, std::size_t length)
 {
     auto &self = *static_cast<HttpParser *>(parser->data);
-    self.url_.append(data, length);
-    return self.url_.size() > 16384 ? -1 : 0;
+    return append_fragment(self.url_, data, length);
 }
 
 int HttpParser::on_header_field(llhttp_t *parser, const char *data, std::size_t length)
 {
     auto &self = *static_cast<HttpParser *>(parser->data);
-    self.field_.append(data, length);
-    return self.field_.size() > 16384 ? -1 : 0;
+    return append_fragment(self.field_, data, length);
 }
 
 int HttpParser::on_header_value(llhttp_t *parser, const char *data, std::size_t length)
 {
     auto &self = *static_cast<HttpParser *>(parser->data);
-    self.value_.append(data, length);
-    return self.value_.size() > 16384 ? -1 : 0;
+    return append_fragment(self.value_, data, length);
 }
 
 int HttpParser::on_header_value_complete(llhttp_t *parser)

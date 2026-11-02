@@ -14,6 +14,7 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -129,6 +130,7 @@ type app struct {
 	readWindow time.Duration
 	postCh     chan postReadReq
 	postBatch  bool
+	postStmts  map[int]*sql.Stmt
 }
 
 func main() {
@@ -212,6 +214,7 @@ func main() {
 		readsGroup:  readGroup{enabled: coalesce},
 		postCh:      make(chan postReadReq, 1024),
 		postBatch:   postBatch,
+		postStmts:   make(map[int]*sql.Stmt),
 	}
 	if a.feed, err = readDB.Prepare(feedSQL); err != nil {
 		log.Fatal(err)
@@ -424,14 +427,26 @@ func (a *app) resolvePostBatch(reqs []postReadReq) {
 		seen[req.id] = struct{}{}
 		ids = append(ids, req.id)
 	}
-	ph := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
-	q := strings.Replace(getPostSQL, "SELECT json_object", "SELECT p.id, json_object", 1)
-	q = strings.Replace(q, "WHERE p.id = ?", "WHERE p.id IN ("+ph+")", 1)
-	args := make([]any, len(ids))
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	n := len(ids)
+	st, ok := a.postStmts[n]
+	if !ok {
+		ph := strings.TrimSuffix(strings.Repeat("?,", n), ",")
+		q := strings.Replace(getPostSQL, "SELECT json_object", "SELECT p.id, json_object", 1)
+		q = strings.Replace(q, "WHERE p.id = ?", "WHERE p.id IN ("+ph+")", 1)
+		var err error
+		st, err = a.readDB.Prepare(q)
+		if err != nil {
+			a.failPostBatch(reqs)
+			return
+		}
+		a.postStmts[n] = st
+	}
+	args := make([]any, n)
 	for i, id := range ids {
 		args[i] = id
 	}
-	rows, err := a.readDB.Query(q, args...)
+	rows, err := st.Query(args...)
 	if err != nil {
 		a.failPostBatch(reqs)
 		return

@@ -42,8 +42,9 @@ four LG clients (20 s ramp, 60 s hold), fresh seed database, tuned defaults:
 The 55k result is close but still above the 500 ms p95 target. The remaining
 tail is in the write path: the CPU profile showed `likePost`/`createPost`
 goroutines waiting for the write batch, not SQLite reads or memory pressure.
-`POST_BATCH=0` is the measured default; the batched post-ID path is available
-with `POST_BATCH=1` but regressed p95 in these runs.
+`POST_BATCH=0` remains the default. The batched post-ID path now deduplicates,
+sorts, and caches one prepared `IN` statement per batch size; it is still
+opt-in pending official results.
 
 The official service has `LimitNOFILE=65535`, so a net/http implementation is
 capped at roughly 65k accepted keep-alive sockets. The 10 ms idle timeout keeps

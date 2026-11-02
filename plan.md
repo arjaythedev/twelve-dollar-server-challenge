@@ -153,7 +153,7 @@ Operation records are authoritative for pending kernel I/O. Exchange phase is au
 | Request input/context | No parser view or command borrows it; preserve pipeline remainder |
 | Command and target pin | Transaction resolved or command cancelled before execution; reply preparation no longer needs it |
 | Reply body, headers, vectors and message | Final send CQE or terminal completion after cancellation |
-| Connection and direct slot | Original data operation and close completed; no queued work refers to the record |
+| Connection and direct slot | Original data operation, socket shutdown and direct close completed; no queued work refers to the record |
 | Accept ticket | Terminal CQE received; close late successful accepts during shutdown |
 
 A cancel CQE alone does not retire the cancelled operation. Keep stable records pinned through terminal CQEs; ordinary reuse therefore needs no additional generation-based identity scheme.
@@ -209,7 +209,7 @@ Shutdown follows dependency order:
 
 1. Stop accepts and application dispatch; cancel accept tickets and handle late successes
 2. Cancel queued writes that have not begun, without success responses, matching current shutdown behavior; resolve any transaction already executing
-3. Finish or cancel sends/receives, drain terminal CQEs and close direct slots
+3. Finish or cancel sends/receives, drain their terminal CQEs, then shut down sockets before closing direct slots
 4. Release exchanges and connections only after their dependencies retire
 5. Stop and join the checkpoint worker, close SQLite handles, then destroy ring resources
 

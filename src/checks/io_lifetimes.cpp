@@ -99,7 +99,7 @@ class Client
         {
             char byte = 0;
             const auto result = ::recv(descriptor_, &byte, 1, MSG_DONTWAIT);
-            if (result == 0 || (result < 0 && errno == ECONNRESET))
+            if (result == 0)
             {
                 return true;
             }
@@ -238,6 +238,24 @@ void close_and_late_accept()
     require(store.at(slot.value) == address && connection.io_active(),
             "rejected close changed original-operation ownership");
 
+    Client idle(reactor.port());
+    await_completion(reactor, deadline);
+    reactor.begin_turn();
+    drain_turn(reactor, [](const Completion &completion) {
+        require(completion.kind == CompletionKind::control, "idle accept reached application I/O");
+    });
+    Connection *idle_connection = nullptr;
+    for (std::size_t index = 0; index < store.size(); ++index)
+    {
+        if (auto *candidate = store.at(index); candidate && candidate != address)
+        {
+            require(!idle_connection, "more than one idle connection");
+            idle_connection = candidate;
+        }
+    }
+    require(idle_connection && idle_connection->io_active(),
+            "idle peer did not retain its original receive in the same ring");
+
     initial.send_byte();
     bool received = false;
     while (!received)
@@ -259,7 +277,7 @@ void close_and_late_accept()
                     "receive CQE retired before close CQE");
                 reactor.close(*completion.connection);
                 require(store.at(slot.value) == address && completion.connection->io_closing(),
-                        "submitting close retired its record before the CQE");
+                        "submitting close retired its record before the final close CQE");
                 rejects(
                     [&] {
                         reactor.close(*completion.connection);
@@ -273,9 +291,55 @@ void close_and_late_accept()
     {
         await_completion(reactor, deadline);
         reactor.begin_turn();
-        drain_turn(reactor, [](const Completion &completion) {
+        drain_turn(reactor, [&](const Completion &completion) {
             require(completion.kind == CompletionKind::control, "unexpected I/O while closing");
+            if (auto *closing = store.at(slot.value))
+            {
+                require(closing == address && closing->io_closing(),
+                        "intermediate close completion changed record ownership");
+                rejects(
+                    [&] {
+                        reactor.close(*closing);
+                    },
+                    "intermediate close completion allowed a duplicate close");
+            }
         });
+    }
+
+    // Cursed fixed-file table references can outlive close_direct's CQE and delay TCP EOF
+    require(idle_connection->io_active(), "idle receive completed before the EOF check");
+    require(initial.closed(Clock::now() + 1s),
+            "retired connection did not deliver TCP EOF while an unrelated receive was pending");
+    const auto reused = store.reserve();
+    require(reused == slot && !store.at(reused.value), "close did not return its direct slot");
+    store.release(reused);
+
+    for (unsigned attempt = 0; attempt < 2; ++attempt)
+    {
+        idle.send_byte();
+        bool idle_received = false;
+        while (!idle_received)
+        {
+            await_completion(reactor, deadline);
+            reactor.begin_turn();
+            drain_turn(reactor, [&](Completion &completion) {
+                if (completion.kind == CompletionKind::received)
+                {
+                    require(completion.connection == idle_connection && completion.result == 1 &&
+                                completion.buffer.bytes().size() == 1 &&
+                                completion.buffer.bytes().front() == 'x',
+                            "closing another connection damaged the idle peer's receive");
+                    completion.buffer.release();
+                    reactor.receive(*idle_connection);
+                    idle_received = true;
+                }
+                else
+                {
+                    require(completion.kind == CompletionKind::control,
+                            "unexpected send while checking the idle peer");
+                }
+            });
+        }
     }
 
     reactor.request_stop();
@@ -322,6 +386,7 @@ void close_and_late_accept()
     }
 
     require(late.closed(deadline), "late accepted client was left open");
+    require(idle.closed(deadline), "idle peer remained open after shutdown");
     for (const auto &ring : reactor.rings())
     {
         auto &connections = ring->connections;
@@ -354,7 +419,8 @@ int main()
         reservation_and_record_guards();
         close_and_late_accept();
         ::alarm(0);
-        std::puts("I/O reservation, original-CQE lifetime and late-accept shutdown checks passed");
+        std::puts("I/O reservation, original-CQE lifetime, prompt TCP EOF and late-accept shutdown "
+                  "checks passed");
 
         return 0;
     }

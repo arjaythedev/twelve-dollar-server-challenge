@@ -7,7 +7,6 @@
 
 ## Later
 
-- [ ] Trace delayed TCP EOF with another idle connection; reproduced through Docker's published port in phases 3 and 4.
 - [ ] Split foreground COMMIT stalls into sync/write/retry time, then trace waiting before receive-CQE service and deferred reads.
 - [ ] Compare multishot receive after isolating handler stalls.
 - [ ] Test capacity on a comparable Linux VM with a separate load generator and the official file limit.
@@ -15,6 +14,7 @@
 
 ## Done
 
+- [x] Shut down fixed sockets before unregistering them; verify prompt TCP EOF with an active idle peer, slot reuse and terminal-CQE ownership.
 - [x] Separate transport diagnostics and clarify queued-write ownership; pass both build modes and confirm at 300k. The normal binary is unchanged by diagnostic extraction.
 - [x] Route and authorize once, queue owned write commands and remove batch response remapping; pass native, official and HTTP lifecycle checks.
 - [x] Remove the old single-write API, migrate tests to write_batch, reuse batch response storage and simplify read dispatch. Inspect assembly and confirm at 300k.

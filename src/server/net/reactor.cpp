@@ -193,9 +193,11 @@ void Reactor::close(Connection &connection)
         throw std::logic_error("closing a connection before its original I/O completed");
     }
     connection.start_close();
-    // Cursed but required: close_direct takes a fixed slot and rejects IOSQE_FIXED_FILE
-    io_uring_prep_close_direct(connection.ring.entry(&connection.close_operation),
-                               connection.slot.value);
+    // Cursed kernel detail: unregistering a fixed slot can defer socket release behind other I/O
+    // Send TCP EOF before close_direct drops the registration
+    auto *request = connection.ring.entry(&connection.close_operation);
+    io_uring_prep_shutdown(request, static_cast<int>(connection.slot.value), SHUT_RDWR);
+    request->flags |= IOSQE_FIXED_FILE;
 }
 
 void Reactor::request_stop() const noexcept
@@ -383,6 +385,19 @@ void Reactor::complete_accept(AcceptTicket &ticket, int result)
     accept();
 }
 
+void Reactor::complete_shutdown(Connection &connection, int result)
+{
+    // A reset or already disconnected peer still needs its fixed slot released
+    if (result < 0 && result != -ENOTCONN)
+    {
+        throw std::system_error(-result, std::generic_category(), "shutdown direct socket");
+    }
+    // Reuse this stable operation only after its shutdown CQE has arrived
+    connection.close_operation.event = Event::close;
+    io_uring_prep_close_direct(connection.ring.entry(&connection.close_operation),
+                               connection.slot.value);
+}
+
 void Reactor::complete_close(Ring &owner, Connection &connection, int result)
 {
     if (result < 0)
@@ -475,6 +490,9 @@ void Reactor::complete(Ring &owner, Operation *operation, int result, unsigned f
         return;
     case Event::accept:
         complete_accept(operation->accept_ticket(), result);
+        return;
+    case Event::shutdown:
+        complete_shutdown(operation->connection(), result);
         return;
     case Event::close:
         complete_close(owner, operation->connection(), result);

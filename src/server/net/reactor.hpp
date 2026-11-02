@@ -64,6 +64,7 @@ class Reactor
     void advance_shutdown(Ring &owner);
     void complete_wake(Ring &owner, int result);
     void complete_accept(AcceptTicket &ticket, int result);
+    void complete_shutdown(Connection &connection, int result);
     void complete_close(Ring &owner, Connection &connection, int result);
     void complete_io(Connection &connection, Event event, int result, unsigned flags,
                      ReceiveBufferLease buffer, Completion &completion);

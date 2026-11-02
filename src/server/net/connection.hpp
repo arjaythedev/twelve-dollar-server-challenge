@@ -23,6 +23,7 @@ enum class Event
     accept,
     receive,
     send,
+    shutdown,
     close,
     stop,
     wake

@@ -9,7 +9,7 @@ namespace tds::net
 {
 
 Connection::Connection(Ring &owner, DirectSlot index)
-    : ring(owner), operation{Event::receive, *this}, close_operation{Event::close, *this},
+    : ring(owner), operation{Event::receive, *this}, close_operation{Event::shutdown, *this},
       slot(index)
 {
 }

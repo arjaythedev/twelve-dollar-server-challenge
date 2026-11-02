@@ -2,6 +2,7 @@
 
 #include <exception>
 #include <sys/eventfd.h>
+#include <utility>
 
 namespace tds::transport
 {
@@ -31,9 +32,9 @@ ReceiveBuffers::~ReceiveBuffers()
     }
 }
 
-Ring::Ring(unsigned slots, bool primary)
-    : connections(slots), accept_operation{Event::accept, *this}, wake_operation{Event::wake, *this}
+Ring::Ring(unsigned slots, bool primary) : connections(slots), wake_operation{Event::wake, *this}
 {
+    exchange_pool_.reserve(max_pooled_exchanges);
     free_slots.reserve(slots);
     for (unsigned index = slots; index > 0; --index)
     {
@@ -89,6 +90,28 @@ Ring::~Ring()
     }
     receive_buffers.reset();
     io_uring_queue_exit(&queue);
+}
+
+std::unique_ptr<Exchange> Ring::acquire_exchange()
+{
+    if (exchange_pool_.empty())
+    {
+        return std::make_unique<Exchange>();
+    }
+    auto exchange = std::move(exchange_pool_.back());
+    exchange_pool_.pop_back();
+
+    return exchange;
+}
+
+void Ring::recycle_exchange(std::unique_ptr<Exchange> exchange)
+{
+    if (exchange_pool_.size() == max_pooled_exchanges ||
+        exchange->retained_capacity() > max_retained_capacity)
+    {
+        return;
+    }
+    exchange_pool_.push_back(std::move(exchange));
 }
 
 } // namespace tds::transport

@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <arpa/inet.h>
+#include <array>
 #include <cerrno>
 #include <cstdint>
 #include <iostream>
@@ -21,6 +22,7 @@ namespace tds
 {
 namespace
 {
+using transport::AcceptTicket;
 using transport::Connection;
 using transport::Descriptor;
 using transport::Event;
@@ -163,33 +165,43 @@ class Server::State
 
     void accept()
     {
-        if (stopping || accepting)
+        if (stopping)
         {
             return;
         }
-        for (const auto &owner : rings)
+        for (auto &ticket : accept_tickets)
         {
-            if (!owner->free_slots.empty())
+            if (ticket.pending)
             {
+                continue;
+            }
+            Ring *accepting = nullptr;
+            for (const auto &owner : rings)
+            {
+                if (!owner->free_slots.empty())
+                {
+                    accepting = owner.get();
+                    break;
+                }
+            }
+            if (!accepting)
+            {
+                if (rings.size() == max_rings)
+                {
+                    return;
+                }
+                auto owner = std::make_unique<Ring>(table_size, false);
                 accepting = owner.get();
-                break;
+                rings.push_back(std::move(owner));
+                poll_satellite(*accepting);
             }
+            ticket.ring = accepting;
+            ticket.slot = accepting->free_slots.back();
+            accepting->free_slots.pop_back();
+            ticket.pending = true;
+            io_uring_prep_accept_direct(accepting->entry(&ticket.operation), listener.get(),
+                                        nullptr, nullptr, SOCK_NONBLOCK, ticket.slot);
         }
-        if (!accepting)
-        {
-            if (rings.size() == max_rings)
-            {
-                return;
-            }
-            auto owner = std::make_unique<Ring>(table_size, false);
-            accepting = owner.get();
-            rings.push_back(std::move(owner));
-            poll_satellite(*accepting);
-        }
-        accepting->accept_slot = accepting->free_slots.back();
-        accepting->free_slots.pop_back();
-        io_uring_prep_accept_direct(accepting->entry(&accepting->accept_operation), listener.get(),
-                                    nullptr, nullptr, SOCK_NONBLOCK, accepting->accept_slot);
     }
 
     void receive(Connection &connection)
@@ -216,7 +228,7 @@ class Server::State
 
     void send(Connection &connection)
     {
-        auto &message = connection.prepare_send();
+        auto &message = connection.exchange->prepare_send();
         connection.start_io(Event::send);
         auto *request = connection.ring.entry(&connection.operation);
         io_uring_prep_sendmsg(request, static_cast<int>(connection.slot), &message, MSG_NOSIGNAL);
@@ -225,18 +237,21 @@ class Server::State
 
     void respond(Connection &connection, Response response)
     {
-        connection.prepare_response(std::move(response));
+        connection.close_after =
+            connection.close_after || !connection.exchange->parser.request().keep_alive;
+        connection.exchange->prepare_response(std::move(response), connection.close_after);
         send(connection);
     }
 
     void process(Connection &connection)
     {
-        auto &parser = connection.parser;
+        auto &exchange = *connection.exchange;
+        auto &parser = exchange.parser;
         try
         {
             while (true)
             {
-                const auto result = parser.parse(connection.input);
+                const auto result = parser.parse(exchange.input);
                 if (!result.valid)
                 {
                     connection.close_after = true;
@@ -244,7 +259,7 @@ class Server::State
 
                     return;
                 }
-                connection.input.erase(0, result.consumed);
+                exchange.input.erase(0, result.consumed);
 
                 if (parser.headers_pending())
                 {
@@ -295,9 +310,12 @@ class Server::State
     void stop_all()
     {
         stopping = true;
-        if (accepting)
+        for (auto &ticket : accept_tickets)
         {
-            cancel(*accepting, accepting->accept_operation);
+            if (ticket.pending)
+            {
+                cancel(*ticket.ring, ticket.operation);
+            }
         }
         for (const auto &owner : rings)
         {
@@ -354,14 +372,15 @@ class Server::State
         }
     }
 
-    void complete_accept(Ring &owner, int result)
+    void complete_accept(AcceptTicket &ticket, int result)
     {
-        accepting = nullptr;
+        auto &owner = *ticket.ring;
+        ticket.pending = false;
         if (result >= 0)
         {
-            auto connection = std::make_unique<Connection>(owner, owner.accept_slot);
+            auto connection = std::make_unique<Connection>(owner, ticket.slot);
             auto &value = *connection;
-            owner.connections[owner.accept_slot] = std::move(connection);
+            owner.connections[ticket.slot] = std::move(connection);
             if (stopping)
             {
                 close(value);
@@ -373,7 +392,7 @@ class Server::State
         }
         else
         {
-            owner.free_slots.push_back(owner.accept_slot);
+            owner.free_slots.push_back(ticket.slot);
             if (result != -ECANCELED && result != -EINTR && result != -EAGAIN &&
                 result != -EMFILE && result != -ENFILE)
             {
@@ -403,35 +422,41 @@ class Server::State
             throw std::runtime_error("invalid receive buffer result");
         }
         const auto id = flags >> IORING_CQE_BUFFER_SHIFT;
-        connection.input.append(connection.ring.receive_buffers->data(id),
-                                static_cast<std::size_t>(result));
+        if (!connection.exchange)
+        {
+            connection.exchange = connection.ring.acquire_exchange();
+        }
+        connection.exchange->input.append(connection.ring.receive_buffers->data(id),
+                                          static_cast<std::size_t>(result));
         buffer.release();
         process(connection);
     }
 
     void complete_send(Connection &connection, int result)
     {
-        connection.sent += static_cast<std::size_t>(result);
-        if (connection.sent < connection.output.size() + connection.response_body.size())
+        auto &exchange = *connection.exchange;
+        exchange.sent += static_cast<std::size_t>(result);
+        if (exchange.sent < exchange.output.size() + exchange.response_body.size())
         {
             send(connection);
+
+            return;
         }
-        else if (connection.close_after)
+        if (connection.close_after)
         {
             close(connection);
+
+            return;
         }
-        else
+        exchange.finish_response();
+        if (!exchange.input.empty())
         {
-            connection.finish_response();
-            if (connection.input.empty())
-            {
-                receive(connection);
-            }
-            else
-            {
-                process(connection);
-            }
+            process(connection);
+
+            return;
         }
+        connection.ring.recycle_exchange(std::move(connection.exchange));
+        receive(connection);
     }
 
     void complete_io(Connection &connection, Event event, int result, unsigned flags,
@@ -497,7 +522,7 @@ class Server::State
             complete_wake(operation->ring(), result);
             return;
         case Event::accept:
-            complete_accept(owner, result);
+            complete_accept(operation->accept_ticket(), result);
             return;
         case Event::close:
             complete_close(owner, operation->connection(), result);
@@ -590,8 +615,9 @@ class Server::State
     Handler handler;
     HeaderHandler headers;
     static constexpr std::size_t max_rings = 16;
+    // Ticket targets remain alive until every owning ring has exited
+    std::array<AcceptTicket, 64> accept_tickets;
     std::vector<std::unique_ptr<Ring>> rings;
-    Ring *accepting = nullptr;
     Operation stop_operation{Event::stop};
     unsigned table_size = 0;
     std::uint16_t bound_port = 0;

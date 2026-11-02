@@ -58,6 +58,11 @@ class HttpParser
         return error_;
     }
 
+    std::size_t scratch_capacity() const noexcept
+    {
+        return url_.capacity() + field_.capacity() + value_.capacity();
+    }
+
     void reset();
 
   private:

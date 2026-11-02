@@ -33,9 +33,8 @@ std::string_view reason(Status status)
 
 } // namespace
 
-void Connection::prepare_response(Response response)
+void Exchange::prepare_response(Response response, bool close_after)
 {
-    close_after = close_after || !parser.request().keep_alive;
     output.clear();
     output += "HTTP/1.1 ";
     output += std::to_string(static_cast<unsigned>(response.status));
@@ -53,7 +52,7 @@ void Connection::prepare_response(Response response)
     sent = 0;
 }
 
-msghdr &Connection::prepare_send()
+msghdr &Exchange::prepare_send()
 {
     std::size_t count = 0;
     std::size_t body_offset = 0;
@@ -75,7 +74,7 @@ msghdr &Connection::prepare_send()
     return send_message;
 }
 
-void Connection::finish_response()
+void Exchange::finish_response()
 {
     output.clear();
     std::string{}.swap(response_body);

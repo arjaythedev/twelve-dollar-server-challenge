@@ -84,6 +84,10 @@ class Ring
     Ring(const Ring &) = delete;
     Ring &operator=(const Ring &) = delete;
 
+    std::unique_ptr<Exchange> acquire_exchange();
+    // Completed responses enter the pool with a reset parser and no buffered input
+    void recycle_exchange(std::unique_ptr<Exchange> exchange);
+
     void submit()
     {
         int result;
@@ -122,12 +126,15 @@ class Ring
     std::vector<unsigned> free_slots;
     // Deferred connections have no operation in flight and remain owned by connections
     std::deque<Connection *> deferred_receives;
-    Operation accept_operation;
     Operation wake_operation;
-    unsigned accept_slot = 0;
     unsigned pending = 0;
     std::size_t shutdown_cursor = 0;
     bool wake_pending = false;
+
+  private:
+    static constexpr std::size_t max_pooled_exchanges = 1024;
+    static constexpr std::size_t max_retained_capacity = 8192;
+    std::vector<std::unique_ptr<Exchange>> exchange_pool_;
 };
 
 } // namespace tds::transport

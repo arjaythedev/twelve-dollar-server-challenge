@@ -6,6 +6,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <sys/socket.h>
 #include <sys/uio.h>
@@ -24,7 +25,33 @@ enum class Event
 };
 
 struct Connection;
+struct AcceptTicket;
 class Ring;
+
+struct Exchange
+{
+    Exchange() = default;
+    Exchange(const Exchange &) = delete;
+    Exchange &operator=(const Exchange &) = delete;
+
+    void prepare_response(Response response, bool close_after);
+    msghdr &prepare_send();
+    void finish_response();
+
+    std::size_t retained_capacity() const noexcept
+    {
+        return input.capacity() + output.capacity() + response_body.capacity() +
+               parser.scratch_capacity();
+    }
+
+    HttpParser parser;
+    std::string input;
+    std::string output;
+    std::string response_body;
+    std::array<iovec, 2> send_vectors{};
+    msghdr send_message{};
+    std::size_t sent = 0;
+};
 
 class Operation
 {
@@ -41,6 +68,16 @@ class Operation
     {
     }
 
+    explicit Operation(AcceptTicket &owner) noexcept
+        : event(Event::accept), target_{.accept = &owner}
+    {
+    }
+
+    AcceptTicket &accept_ticket() const noexcept
+    {
+        return *target_.accept;
+    }
+
     Connection &connection() const noexcept
     {
         return *target_.connection;
@@ -54,24 +91,36 @@ class Operation
     Event event;
 
   private:
-    // The event selects the target: receive/send/close use connection, accept/wake use ring
+    // The event selects the target: receive/send/close use connection, wake uses ring
     union Target {
         Connection *connection = nullptr;
         Ring *ring;
+        AcceptTicket *accept;
     } target_;
+};
+
+struct AcceptTicket
+{
+    AcceptTicket() = default;
+    AcceptTicket(const AcceptTicket &) = delete;
+    AcceptTicket &operator=(const AcceptTicket &) = delete;
+
+    Operation operation{*this};
+    Ring *ring = nullptr;
+    unsigned slot = 0;
+    bool pending = false;
 };
 
 struct Connection
 {
     Connection(Ring &owner, unsigned index)
-        : ring(owner), slot(index), operation{Event::receive, *this},
-          close_operation{Event::close, *this}
+        : ring(owner), operation{Event::receive, *this}, close_operation{Event::close, *this},
+          slot(index)
     {
     }
 
-    void prepare_response(Response response);
-    msghdr &prepare_send();
-    void finish_response();
+    Connection(const Connection &) = delete;
+    Connection &operator=(const Connection &) = delete;
 
     void start_io(Event event) noexcept
     {
@@ -100,16 +149,10 @@ struct Connection
     }
 
     Ring &ring;
-    unsigned slot;
     Operation operation;
     Operation close_operation;
-    HttpParser parser;
-    std::string input;
-    std::string output;
-    std::string response_body;
-    std::array<iovec, 2> send_vectors{};
-    msghdr send_message{};
-    std::size_t sent = 0;
+    std::unique_ptr<Exchange> exchange;
+    unsigned slot;
     bool close_after = false;
 
   private:

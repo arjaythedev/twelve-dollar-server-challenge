@@ -1,0 +1,3070 @@
+// Library.SQLite.ailang — native SQLite file reader/writer (pager + btree + WAL)
+//
+// No SQL parser. mmap the database file, walk btrees, decode records.
+// Dirty pages live in a Hash overlay (page-number string -> buffer) and
+// commit as WAL frames. One open database.
+//
+// Copyright (c) 2026 Sean Collins, 2 Paws Machine and Engineering.
+// Released under the MIT License, as required for submissions to this challenge.
+
+LibraryImport.Arena
+LibraryImport.Hash
+
+FixedPool.SQLiteSys {
+    "OPEN": Initialize=2
+    "CLOSE": Initialize=3
+    "FSTAT": Initialize=5
+    "MMAP": Initialize=9
+    "WRITE": Initialize=1
+    "PWRITE": Initialize=18
+    "FDATASYNC": Initialize=75
+    "CLOCK": Initialize=228
+    "O_RDONLY": Initialize=0
+    "O_RDWR": Initialize=2
+    "O_CREAT": Initialize=64
+    "PROT_READ": Initialize=1
+    "MAP_PRIVATE": Initialize=2
+    "MODE": Initialize=420
+}
+
+FixedPool.SQLiteDB {
+    "fd": Initialize=0, CanChange=True
+    "map": Initialize=0, CanChange=True
+    "size": Initialize=0, CanChange=True
+    "page": Initialize=0, CanChange=True
+    "reserved": Initialize=0, CanChange=True
+    "usable": Initialize=0, CanChange=True
+    "ok": Initialize=0, CanChange=True
+    "users_root": Initialize=0, CanChange=True
+    "posts_root": Initialize=0, CanChange=True
+    "likes_root": Initialize=0, CanChange=True
+    "feed_idx": Initialize=0, CanChange=True
+    "likes_idx": Initialize=0, CanChange=True
+    "likes_right": Initialize=0, CanChange=True
+    "users_idx": Initialize=0, CanChange=True
+    "likes_pk": Initialize=0, CanChange=True
+    "path": Initialize=0, CanChange=True
+    "overlay": Initialize=0, CanChange=True
+    "txn": Initialize=0, CanChange=True
+    "keybuf": Initialize=0, CanChange=True
+    "npages": Initialize=0, CanChange=True
+    "wal_fd": Initialize=0, CanChange=True
+    "wal_size": Initialize=0, CanChange=True
+    "wal_ck0": Initialize=0, CanChange=True
+    "wal_ck1": Initialize=0, CanChange=True
+    "salt1": Initialize=0, CanChange=True
+    "salt2": Initialize=0, CanChange=True
+    "wal_buf": Initialize=0, CanChange=True
+    "dirty_n": Initialize=0, CanChange=True
+    "auto_commit": Initialize=1, CanChange=True
+    "likes_right_dirty": Initialize=0, CanChange=True
+    "users_dirty": Initialize=0, CanChange=True
+}
+
+FixedPool.SQLiteV {
+    "next": Initialize=0, CanChange=True
+    "val": Initialize=0, CanChange=True
+    "ptr": Initialize=0, CanChange=True
+    "len": Initialize=0, CanChange=True
+}
+
+FixedPool.SQLiteIns {
+    "buf": Initialize=0, CanChange=True
+    "len": Initialize=0, CanChange=True
+    "rec": Initialize=0, CanChange=True
+    "rowid": Initialize=0, CanChange=True
+    "kind": Initialize=0, CanChange=True
+    "cmp": Initialize=0, CanChange=True
+    "root": Initialize=0, CanChange=True
+    "which": Initialize=0, CanChange=True
+    "split": Initialize=0, CanChange=True
+    "right": Initialize=0, CanChange=True
+    "sep": Initialize=0, CanChange=True
+    "seplen": Initialize=0, CanChange=True
+}
+
+FixedPool.SQLitePost {
+    "id": Initialize=0, CanChange=True
+    "body": Initialize=0, CanChange=True
+    "created": Initialize=0, CanChange=True
+    "author": Initialize=0, CanChange=True
+    "likes": Initialize=0, CanChange=True
+    "body_n": Initialize=0, CanChange=True
+    "created_n": Initialize=0, CanChange=True
+    "author_n": Initialize=0, CanChange=True
+}
+
+FixedPool.SQLiteFeedOff {
+    "ID": Initialize=0
+    "BODY": Initialize=8
+    "CREATED": Initialize=16
+    "AUTHOR": Initialize=24
+    "LIKES": Initialize=32
+    "BODY_N": Initialize=40
+    "CREATED_N": Initialize=48
+    "AUTHOR_N": Initialize=56
+    "STRIDE": Initialize=64
+}
+
+FixedPool.SQLiteFeed {
+    "slots": Initialize=0, CanChange=True
+    "n": Initialize=0, CanChange=True
+    "want": Initialize=20, CanChange=True
+}
+
+FixedPool.SQLiteCnt {
+    "leaf": Initialize=0, CanChange=True
+    "hit": Initialize=0, CanChange=True
+    "first": Initialize=0, CanChange=True
+    "last": Initialize=0, CanChange=True
+    "lo": Initialize=0, CanChange=True
+    "prev": Initialize=0, CanChange=True
+    "ptr": Initialize=0, CanChange=True
+    "pbase": Initialize=0, CanChange=True
+    "key": Initialize=0, CanChange=True
+    "ncells": Initialize=0, CanChange=True
+}
+
+FixedPool.SQLiteRow {
+    "leaf": Initialize=0, CanChange=True
+    "first": Initialize=0, CanChange=True
+    "last": Initialize=0, CanChange=True
+    "ptr": Initialize=0, CanChange=True
+    "pbase": Initialize=0, CanChange=True
+    "ncells": Initialize=0, CanChange=True
+    "key": Initialize=0, CanChange=True
+}
+
+FixedPool.SQLitePRow {
+    "leaf": Initialize=0, CanChange=True
+    "first": Initialize=0, CanChange=True
+    "last": Initialize=0, CanChange=True
+    "ptr": Initialize=0, CanChange=True
+    "pbase": Initialize=0, CanChange=True
+    "ncells": Initialize=0, CanChange=True
+}
+
+FixedPool.SQLiteURow {
+    "leaf": Initialize=0, CanChange=True
+    "first": Initialize=0, CanChange=True
+    "last": Initialize=0, CanChange=True
+    "ptr": Initialize=0, CanChange=True
+    "pbase": Initialize=0, CanChange=True
+    "ncells": Initialize=0, CanChange=True
+}
+
+FixedPool.SQLiteRow {
+    "leaf": Initialize=0, CanChange=True
+    "first": Initialize=0, CanChange=True
+    "last": Initialize=0, CanChange=True
+    "ptr": Initialize=0, CanChange=True
+    "pbase": Initialize=0, CanChange=True
+    "ncells": Initialize=0, CanChange=True
+    "key": Initialize=0, CanChange=True
+}
+
+FixedPool.SQLitePRow {
+    "leaf": Initialize=0, CanChange=True
+    "first": Initialize=0, CanChange=True
+    "last": Initialize=0, CanChange=True
+    "ptr": Initialize=0, CanChange=True
+    "pbase": Initialize=0, CanChange=True
+    "ncells": Initialize=0, CanChange=True
+}
+
+FixedPool.SQLiteURow {
+    "leaf": Initialize=0, CanChange=True
+    "first": Initialize=0, CanChange=True
+    "last": Initialize=0, CanChange=True
+    "ptr": Initialize=0, CanChange=True
+    "pbase": Initialize=0, CanChange=True
+    "ncells": Initialize=0, CanChange=True
+}
+
+FixedPool.SQLiteUDirOff {
+    "FIRST": Initialize=0
+    "LAST": Initialize=8
+    "PGNO": Initialize=16
+    "STRIDE": Initialize=24
+}
+
+FixedPool.SQLiteUDir {
+    "slots": Initialize=0, CanChange=True
+    "n": Initialize=0, CanChange=True
+    "cap": Initialize=0, CanChange=True
+}
+
+Function.SQLite.BE16 {
+    Input: p: Address
+    Input: off: Integer
+    Output: Integer
+    Body: {
+        b0 = GetByte(p, off)
+        b1 = GetByte(p, Add(off, 1))
+        ReturnValue(BitwiseOr(LeftShift(b0, 8), b1))
+    }
+}
+
+Function.SQLite.BE32 {
+    Input: p: Address
+    Input: off: Integer
+    Output: Integer
+    Body: {
+        b0 = GetByte(p, off)
+        b1 = GetByte(p, Add(off, 1))
+        b2 = GetByte(p, Add(off, 2))
+        b3 = GetByte(p, Add(off, 3))
+        t = BitwiseOr(LeftShift(b0, 24), LeftShift(b1, 16))
+        t2 = BitwiseOr(t, LeftShift(b2, 8))
+        ReturnValue(BitwiseOr(t2, b3))
+    }
+}
+
+Function.SQLite.PutBE16 {
+    Input: p: Address
+    Input: off: Integer
+    Input: v: Integer
+    Body: {
+        SetByte(p, off, BitwiseAnd(RightShift(v, 8), 255))
+        SetByte(p, Add(off, 1), BitwiseAnd(v, 255))
+    }
+}
+
+Function.SQLite.PutBE32 {
+    Input: p: Address
+    Input: off: Integer
+    Input: v: Integer
+    Body: {
+        SetByte(p, off, BitwiseAnd(RightShift(v, 24), 255))
+        SetByte(p, Add(off, 1), BitwiseAnd(RightShift(v, 16), 255))
+        SetByte(p, Add(off, 2), BitwiseAnd(RightShift(v, 8), 255))
+        SetByte(p, Add(off, 3), BitwiseAnd(v, 255))
+    }
+}
+
+Function.SQLite.GetLE32 {
+    Input: p: Address
+    Input: off: Integer
+    Output: Integer
+    Body: {
+        b0 = GetByte(p, off)
+        b1 = GetByte(p, Add(off, 1))
+        b2 = GetByte(p, Add(off, 2))
+        b3 = GetByte(p, Add(off, 3))
+        t = BitwiseOr(b0, LeftShift(b1, 8))
+        t2 = BitwiseOr(t, LeftShift(b2, 16))
+        ReturnValue(BitwiseOr(t2, LeftShift(b3, 24)))
+    }
+}
+
+Function.SQLite.PutLE32 {
+    Input: p: Address
+    Input: off: Integer
+    Input: v: Integer
+    Body: {
+        SetByte(p, off, BitwiseAnd(v, 255))
+        SetByte(p, Add(off, 1), BitwiseAnd(RightShift(v, 8), 255))
+        SetByte(p, Add(off, 2), BitwiseAnd(RightShift(v, 16), 255))
+        SetByte(p, Add(off, 3), BitwiseAnd(RightShift(v, 24), 255))
+    }
+}
+
+Function.SQLite.PutVarint {
+    Input: p: Address
+    Input: off: Integer
+    Input: v: Integer
+    Output: Integer
+    Body: {
+        IfCondition LessThan(v, 128) ThenBlock: {
+            SetByte(p, off, v)
+            ReturnValue(1)
+        }
+        IfCondition LessThan(v, 16384) ThenBlock: {
+            SetByte(p, off, BitwiseOr(BitwiseAnd(RightShift(v, 7), 127), 128))
+            SetByte(p, Add(off, 1), BitwiseAnd(v, 127))
+            ReturnValue(2)
+        }
+        IfCondition LessThan(v, 2097152) ThenBlock: {
+            SetByte(p, off, BitwiseOr(BitwiseAnd(RightShift(v, 14), 127), 128))
+            SetByte(p, Add(off, 1), BitwiseOr(BitwiseAnd(RightShift(v, 7), 127), 128))
+            SetByte(p, Add(off, 2), BitwiseAnd(v, 127))
+            ReturnValue(3)
+        }
+        SetByte(p, off, BitwiseOr(BitwiseAnd(RightShift(v, 21), 127), 128))
+        SetByte(p, Add(off, 1), BitwiseOr(BitwiseAnd(RightShift(v, 14), 127), 128))
+        SetByte(p, Add(off, 2), BitwiseOr(BitwiseAnd(RightShift(v, 7), 127), 128))
+        SetByte(p, Add(off, 3), BitwiseAnd(v, 127))
+        ReturnValue(4)
+    }
+}
+
+Function.SQLite.Varint {
+    Input: p: Address
+    Input: off: Integer
+    Output: Integer
+    Body: {
+        v = 0
+        i = 0
+        WhileLoop LessThan(i, 8) {
+            b = GetByte(p, Add(off, i))
+            v = BitwiseOr(LeftShift(v, 7), BitwiseAnd(b, 127))
+            IfCondition LessThan(b, 128) ThenBlock: {
+                SQLiteV.next = Add(Add(off, i), 1)
+                ReturnValue(v)
+            }
+            i = Add(i, 1)
+        }
+        b = GetByte(p, Add(off, 8))
+        v = BitwiseOr(LeftShift(v, 8), b)
+        SQLiteV.next = Add(off, 9)
+        ReturnValue(v)
+    }
+}
+
+Function.SQLite.PageKey {
+    Input: n: Integer
+    Output: Address
+    Body: {
+        buf = SQLiteDB.keybuf
+        IfCondition EqualTo(buf, 0) ThenBlock: {
+            buf = Allocate(24)
+            SQLiteDB.keybuf = buf
+        }
+        IfCondition EqualTo(n, 0) ThenBlock: {
+            SetByte(buf, 0, 48)
+            SetByte(buf, 1, 0)
+            ReturnValue(buf)
+        }
+        v = n
+        i = 0
+        WhileLoop GreaterThan(v, 0) {
+            d = Modulo(v, 10)
+            SetByte(buf, i, Add(48, d))
+            v = Divide(v, 10)
+            i = Add(i, 1)
+        }
+        SetByte(buf, i, 0)
+        L = i
+        a = 0
+        b = Subtract(L, 1)
+        WhileLoop LessThan(a, b) {
+            ca = GetByte(buf, a)
+            cb = GetByte(buf, b)
+            SetByte(buf, a, cb)
+            SetByte(buf, b, ca)
+            a = Add(a, 1)
+            b = Subtract(b, 1)
+        }
+        ReturnValue(buf)
+    }
+}
+
+Function.SQLite.FilePage {
+    Input: pageno: Integer
+    Output: Address
+    Body: {
+        IfCondition LessThan(pageno, 1) ThenBlock: { ReturnValue(0) }
+        ps = SQLiteDB.page
+        off = Multiply(Subtract(pageno, 1), ps)
+        IfCondition GreaterEqual(off, SQLiteDB.size) ThenBlock: { ReturnValue(0) }
+        ReturnValue(Add(SQLiteDB.map, off))
+    }
+}
+
+Function.SQLite.Page {
+    Input: pageno: Integer
+    Output: Address
+    Body: {
+        IfCondition LessThan(pageno, 1) ThenBlock: { ReturnValue(0) }
+        IfCondition GreaterThan(SQLiteDB.dirty_n, 0) ThenBlock: {
+            IfCondition NotEqual(SQLiteDB.overlay, 0) ThenBlock: {
+                key = SQLite.PageKey(pageno)
+                ov = Hash.Get(SQLiteDB.overlay, key)
+                IfCondition NotEqual(ov, 0) ThenBlock: {
+                    ReturnValue(ov)
+                }
+            }
+        }
+        src = SQLite.FilePage(pageno)
+        ReturnValue(src)
+    }
+}
+
+Function.SQLite.Dirty {
+    Input: pageno: Integer
+    Output: Address
+    Body: {
+        key = SQLite.PageKey(pageno)
+        ov = Hash.Get(SQLiteDB.overlay, key)
+        IfCondition EqualTo(ov, 0) ThenBlock: {
+            src = SQLite.FilePage(pageno)
+            IfCondition EqualTo(src, 0) ThenBlock: { ReturnValue(0) }
+            ov = Allocate(SQLiteDB.page)
+            MemoryCopy(ov, src, SQLiteDB.page)
+            Hash.Set(SQLiteDB.overlay, key, ov)
+            SQLiteDB.dirty_n = Add(SQLiteDB.dirty_n, 1)
+        }
+        Hash.Set(SQLiteDB.txn, key, pageno)
+        ReturnValue(ov)
+    }
+}
+
+Function.SQLite.HdrOff {
+    Input: pageno: Integer
+    Output: Integer
+    Body: {
+        IfCondition EqualTo(pageno, 1) ThenBlock: { ReturnValue(100) }
+        ReturnValue(0)
+    }
+}
+
+Function.SQLite.Open {
+    Input: path: Address
+    Output: Integer
+    Body: {
+        SQLiteDB.ok = 0
+        fd = SystemCall(SQLiteSys.OPEN, path, SQLiteSys.O_RDWR, 0)
+        IfCondition LessThan(fd, 0) ThenBlock: {
+            fd = SystemCall(SQLiteSys.OPEN, path, SQLiteSys.O_RDONLY, 0)
+        }
+        IfCondition LessThan(fd, 0) ThenBlock: { ReturnValue(0) }
+        st = Allocate(152)
+        MemorySet(st, 0, 152)
+        SystemCall(SQLiteSys.FSTAT, fd, st, 0, 0, 0)
+        sz = Dereference(Add(st, 48))
+        Deallocate(st, 152)
+        IfCondition LessThan(sz, 100) ThenBlock: {
+            SystemCall(SQLiteSys.CLOSE, fd, 0, 0)
+            ReturnValue(0)
+        }
+        mp = SystemCall(SQLiteSys.MMAP, 0, sz, SQLiteSys.PROT_READ, SQLiteSys.MAP_PRIVATE, fd, 0)
+        IfCondition LessThan(mp, 4096) ThenBlock: {
+            SystemCall(SQLiteSys.CLOSE, fd, 0, 0)
+            ReturnValue(0)
+        }
+        mag0 = GetByte(mp, 0)
+        IfCondition NotEqual(mag0, 83) ThenBlock: {
+            ReturnValue(0)
+        }
+        ps = SQLite.BE16(mp, 16)
+        IfCondition EqualTo(ps, 1) ThenBlock: { ps = 65536 }
+        reserved = GetByte(mp, 20)
+        SQLiteDB.fd = fd
+        SQLiteDB.map = mp
+        SQLiteDB.size = sz
+        SQLiteDB.page = ps
+        SQLiteDB.reserved = reserved
+        SQLiteDB.usable = Subtract(ps, reserved)
+        SQLiteDB.npages = Divide(sz, ps)
+        SQLiteDB.wal_fd = Subtract(0, 1)
+        SQLiteDB.wal_size = 0
+        SQLiteDB.path = path
+        SQLiteDB.keybuf = Allocate(24)
+        SQLiteDB.overlay = Hash.Create(64)
+        SQLiteDB.txn = Hash.Create(64)
+        SQLiteFeed.slots = Allocate(1280)
+        SQLiteCnt.leaf = 0
+        SQLiteCnt.first = 0
+        SQLiteCnt.last = 0
+        SQLiteCnt.lo = 0
+        SQLiteCnt.prev = 0
+        SQLiteCnt.ncells = 0
+        SQLiteDB.likes_right = 0
+        SQLiteDB.dirty_n = 0
+        SQLiteDB.auto_commit = 1
+        SQLiteDB.likes_right_dirty = 0
+        SQLiteDB.users_dirty = 0
+        SQLiteUDir.n = 0
+        SQLite.ClearRowCache()
+        SQLiteDB.ok = 1
+        SQLite.LoadCatalog()
+        SQLite.LoadWal()
+        ReturnValue(1)
+    }
+}
+
+Function.SQLite.SliceZ {
+    Input: p: Address
+    Input: n: Integer
+    Output: Address
+    Body: {
+        out = Allocate(Add(n, 1))
+        IfCondition GreaterThan(n, 0) ThenBlock: {
+            MemoryCopy(out, p, n)
+        }
+        SetByte(out, n, 0)
+        ReturnValue(out)
+    }
+}
+
+Function.SQLite.SerialLen {
+    Input: st: Integer
+    Output: Integer
+    Body: {
+        IfCondition GreaterEqual(st, 12) ThenBlock: {
+            ReturnValue(Divide(Subtract(st, 12), 2))
+        }
+        IfCondition EqualTo(st, 0) ThenBlock: { ReturnValue(0) }
+        IfCondition EqualTo(st, 1) ThenBlock: { ReturnValue(1) }
+        IfCondition EqualTo(st, 2) ThenBlock: { ReturnValue(2) }
+        IfCondition EqualTo(st, 3) ThenBlock: { ReturnValue(3) }
+        IfCondition EqualTo(st, 4) ThenBlock: { ReturnValue(4) }
+        IfCondition EqualTo(st, 5) ThenBlock: { ReturnValue(6) }
+        IfCondition EqualTo(st, 6) ThenBlock: { ReturnValue(8) }
+        IfCondition EqualTo(st, 7) ThenBlock: { ReturnValue(8) }
+        IfCondition EqualTo(st, 8) ThenBlock: { ReturnValue(0) }
+        IfCondition EqualTo(st, 9) ThenBlock: { ReturnValue(0) }
+        ReturnValue(0)
+    }
+}
+
+Function.SQLite.ReadIntBE {
+    Input: p: Address
+    Input: n: Integer
+    Output: Integer
+    Body: {
+        v = 0
+        i = 0
+        WhileLoop LessThan(i, n) {
+            v = BitwiseOr(LeftShift(v, 8), GetByte(p, i))
+            i = Add(i, 1)
+        }
+        ReturnValue(v)
+    }
+}
+
+Function.SQLite.ColInt {
+    Input: rec: Address
+    Input: idx: Integer
+    Output: Integer
+    Body: {
+        hsz = SQLite.Varint(rec, 0)
+        hend = hsz
+        tpos = SQLiteV.next
+        i = 0
+        data = rec
+        data = Add(rec, hend)
+        WhileLoop LessThan(tpos, hend) {
+            st = SQLite.Varint(rec, tpos)
+            tpos = SQLiteV.next
+            ln = SQLite.SerialLen(st)
+            IfCondition EqualTo(i, idx) ThenBlock: {
+                IfCondition EqualTo(st, 0) ThenBlock: { ReturnValue(0) }
+                IfCondition EqualTo(st, 8) ThenBlock: { ReturnValue(0) }
+                IfCondition EqualTo(st, 9) ThenBlock: { ReturnValue(1) }
+                ge = GreaterEqual(st, 1)
+                le = LessEqual(st, 6)
+                IfCondition EqualTo(ge, 1) ThenBlock: {
+                    IfCondition EqualTo(le, 1) ThenBlock: {
+                        n = SQLite.ReadIntBE(data, ln)
+                        ReturnValue(n)
+                    }
+                }
+                ReturnValue(0)
+            }
+            data = Add(data, ln)
+            i = Add(i, 1)
+        }
+        ReturnValue(0)
+    }
+}
+
+Function.SQLite.ColTextAt {
+    Input: rec: Address
+    Input: idx: Integer
+    Output: Address
+    Body: {
+        SQLiteV.ptr = 0
+        SQLiteV.len = 0
+        IfCondition EqualTo(rec, 0) ThenBlock: { ReturnValue(0) }
+        hsz = SQLite.Varint(rec, 0)
+        hend = hsz
+        tpos = SQLiteV.next
+        i = 0
+        data = Add(rec, hend)
+        WhileLoop LessThan(tpos, hend) {
+            st = SQLite.Varint(rec, tpos)
+            tpos = SQLiteV.next
+            ln = SQLite.SerialLen(st)
+            IfCondition EqualTo(i, idx) ThenBlock: {
+                odd = Modulo(st, 2)
+                IfCondition GreaterEqual(st, 13) ThenBlock: {
+                    IfCondition EqualTo(odd, 1) ThenBlock: {
+                        SQLiteV.ptr = data
+                        SQLiteV.len = ln
+                        ReturnValue(data)
+                    }
+                }
+                ReturnValue(0)
+            }
+            data = Add(data, ln)
+            i = Add(i, 1)
+        }
+        ReturnValue(0)
+    }
+}
+
+Function.SQLite.ColText {
+    Input: rec: Address
+    Input: idx: Integer
+    Output: Address
+    Body: {
+        p = SQLite.ColTextAt(rec, idx)
+        IfCondition EqualTo(p, 0) ThenBlock: { ReturnValue(0) }
+        s = SQLite.SliceZ(p, SQLiteV.len)
+        ReturnValue(s)
+    }
+}
+
+Function.SQLite.EqLit {
+    Input: p: Address
+    Input: n: Integer
+    Input: z: Address
+    Output: Integer
+    Body: {
+        IfCondition EqualTo(p, 0) ThenBlock: { ReturnValue(1) }
+        IfCondition EqualTo(z, 0) ThenBlock: { ReturnValue(1) }
+        i = 0
+        WhileLoop LessThan(i, n) {
+            IfCondition NotEqual(GetByte(p, i), GetByte(z, i)) ThenBlock: { ReturnValue(1) }
+            i = Add(i, 1)
+        }
+        IfCondition NotEqual(GetByte(z, n), 0) ThenBlock: { ReturnValue(1) }
+        ReturnValue(0)
+    }
+}
+
+Function.SQLite.LeafCell {
+    Input: page: Address
+    Input: pageno: Integer
+    Input: ci: Integer
+    Output: Address
+    Body: {
+        h = SQLite.HdrOff(pageno)
+        ncells = SQLite.BE16(page, Add(h, 3))
+        IfCondition GreaterEqual(ci, ncells) ThenBlock: { ReturnValue(0) }
+        ptrbase = Add(h, 8)
+        flags = GetByte(page, h)
+        IfCondition EqualTo(flags, 2) ThenBlock: {
+            ptrbase = Add(h, 12)
+        }
+        IfCondition EqualTo(flags, 5) ThenBlock: {
+            ptrbase = Add(h, 12)
+        }
+        coff = SQLite.BE16(page, Add(ptrbase, Multiply(ci, 2)))
+        ReturnValue(Add(page, coff))
+    }
+}
+
+Function.SQLite.TableCellRec {
+    Input: cell: Address
+    Output: Address
+    Body: {
+        payload = SQLite.Varint(cell, 0)
+        off = SQLiteV.next
+        rowid = SQLite.Varint(cell, off)
+        rec_off = SQLiteV.next
+        ReturnValue(Add(cell, rec_off))
+    }
+}
+
+Function.SQLite.TableCellRowid {
+    Input: cell: Address
+    Output: Integer
+    Body: {
+        payload = SQLite.Varint(cell, 0)
+        off = SQLiteV.next
+        rowid = SQLite.Varint(cell, off)
+        ReturnValue(rowid)
+    }
+}
+
+Function.SQLite.WalkMaster {
+    Body: {
+        page = SQLite.Page(1)
+        h = 100
+        flags = GetByte(page, h)
+        ncells = SQLite.BE16(page, Add(h, 3))
+        ci = 0
+        WhileLoop LessThan(ci, ncells) {
+            cell = SQLite.LeafCell(page, 1, ci)
+            rec = SQLite.TableCellRec(cell)
+            kind = SQLite.ColText(rec, 0)
+            name = SQLite.ColText(rec, 1)
+            root = SQLite.ColInt(rec, 3)
+            IfCondition NotEqual(name, 0) ThenBlock: {
+                IfCondition EqualTo(StringCompare(name, "users"), 0) ThenBlock: {
+                    IfCondition EqualTo(StringCompare(kind, "table"), 0) ThenBlock: {
+                        SQLiteDB.users_root = root
+                    }
+                }
+                IfCondition EqualTo(StringCompare(name, "posts"), 0) ThenBlock: {
+                    IfCondition EqualTo(StringCompare(kind, "table"), 0) ThenBlock: {
+                        SQLiteDB.posts_root = root
+                    }
+                }
+                IfCondition EqualTo(StringCompare(name, "likes"), 0) ThenBlock: {
+                    IfCondition EqualTo(StringCompare(kind, "table"), 0) ThenBlock: {
+                        SQLiteDB.likes_root = root
+                    }
+                }
+                IfCondition EqualTo(StringCompare(name, "posts_created_at_id_idx"), 0) ThenBlock: {
+                    SQLiteDB.feed_idx = root
+                }
+                IfCondition EqualTo(StringCompare(name, "likes_post_id_idx"), 0) ThenBlock: {
+                    SQLiteDB.likes_idx = root
+                }
+                IfCondition EqualTo(StringCompare(name, "posts_user_id_idx"), 0) ThenBlock: {
+                    SQLiteDB.users_idx = root
+                }
+                IfCondition EqualTo(StringCompare(name, "sqlite_autoindex_likes_1"), 0) ThenBlock: {
+                    SQLiteDB.likes_pk = root
+                }
+            }
+            ci = Add(ci, 1)
+        }
+    }
+}
+
+Function.SQLite.RightLeaf {
+    Input: pageno: Integer
+    Output: Integer
+    Body: {
+        IfCondition LessThan(pageno, 1) ThenBlock: { ReturnValue(0) }
+        page = SQLite.Page(pageno)
+        IfCondition EqualTo(page, 0) ThenBlock: { ReturnValue(0) }
+        h = SQLite.HdrOff(pageno)
+        flags = GetByte(page, h)
+        IfCondition EqualTo(flags, 10) ThenBlock: { ReturnValue(pageno) }
+        IfCondition EqualTo(flags, 13) ThenBlock: { ReturnValue(pageno) }
+        IfCondition EqualTo(flags, 2) ThenBlock: {
+            right = SQLite.BE32(page, Add(h, 8))
+            r = SQLite.RightLeaf(right)
+            ReturnValue(r)
+        }
+        IfCondition EqualTo(flags, 5) ThenBlock: {
+            right2 = SQLite.BE32(page, Add(h, 8))
+            r2 = SQLite.RightLeaf(right2)
+            ReturnValue(r2)
+        }
+        ReturnValue(0)
+    }
+}
+
+Function.SQLite.LoadCatalog {
+    Body: {
+        SQLiteDB.users_root = 0
+        SQLiteDB.posts_root = 0
+        SQLiteDB.likes_root = 0
+        SQLiteDB.feed_idx = 0
+        SQLiteDB.likes_idx = 0
+        SQLiteDB.likes_right = 0
+        SQLiteDB.likes_pk = 0
+        SQLite.WalkMaster()
+        IfCondition NotEqual(SQLiteDB.likes_idx, 0) ThenBlock: {
+            SQLiteDB.likes_right = SQLite.RightLeaf(SQLiteDB.likes_idx)
+        }
+        SQLite.BuildUDir()
+    }
+}
+
+Function.SQLite.ClearRowCache {
+    Body: {
+        SQLiteRow.leaf = 0
+        SQLiteRow.first = 0
+        SQLiteRow.last = 0
+        SQLiteRow.ptr = 0
+        SQLiteRow.pbase = 0
+        SQLiteRow.ncells = 0
+        SQLiteRow.key = 0
+        SQLitePRow.leaf = 0
+        SQLitePRow.first = 0
+        SQLitePRow.last = 0
+        SQLitePRow.ptr = 0
+        SQLitePRow.pbase = 0
+        SQLitePRow.ncells = 0
+        SQLiteURow.leaf = 0
+        SQLiteURow.first = 0
+        SQLiteURow.last = 0
+        SQLiteURow.ptr = 0
+        SQLiteURow.pbase = 0
+        SQLiteURow.ncells = 0
+    }
+}
+
+Function.SQLite.SavePRow {
+    Body: {
+        SQLitePRow.leaf = SQLiteRow.leaf
+        SQLitePRow.first = SQLiteRow.first
+        SQLitePRow.last = SQLiteRow.last
+        SQLitePRow.ptr = SQLiteRow.ptr
+        SQLitePRow.pbase = SQLiteRow.pbase
+        SQLitePRow.ncells = SQLiteRow.ncells
+    }
+}
+
+Function.SQLite.SaveURow {
+    Body: {
+        SQLiteURow.leaf = SQLiteRow.leaf
+        SQLiteURow.first = SQLiteRow.first
+        SQLiteURow.last = SQLiteRow.last
+        SQLiteURow.ptr = SQLiteRow.ptr
+        SQLiteURow.pbase = SQLiteRow.pbase
+        SQLiteURow.ncells = SQLiteRow.ncells
+    }
+}
+
+Function.SQLite.DirAppend {
+    Input: pageno: Integer
+    Output: Integer
+    Body: {
+        IfCondition GreaterEqual(SQLiteUDir.n, SQLiteUDir.cap) ThenBlock: { ReturnValue(0) }
+        IfCondition EqualTo(SQLiteUDir.slots, 0) ThenBlock: { ReturnValue(0) }
+        stride = SQLiteUDirOff.STRIDE
+        off = Multiply(SQLiteUDir.n, stride)
+        slot = Add(SQLiteUDir.slots, off)
+        pgslot = Add(slot, SQLiteUDirOff.PGNO)
+        StoreValue(pgslot, pageno)
+        page = SQLite.Page(pageno)
+        IfCondition EqualTo(page, 0) ThenBlock: { ReturnValue(0) }
+        ncells = SQLite.BE16(page, 3)
+        IfCondition LessThan(ncells, 1) ThenBlock: { ReturnValue(0) }
+        first = SQLite.RowidAtPtr(page, 8, 0, 0)
+        StoreValue(slot, first)
+        pn = Dereference(pgslot)
+        page2 = SQLite.Page(pn)
+        IfCondition EqualTo(page2, 0) ThenBlock: { ReturnValue(0) }
+        n2 = SQLite.BE16(page2, 3)
+        lasti = Subtract(n2, 1)
+        last = SQLite.RowidAtPtr(page2, 8, lasti, 0)
+        lastslot = Add(slot, SQLiteUDirOff.LAST)
+        StoreValue(lastslot, last)
+        SQLiteUDir.n = Add(SQLiteUDir.n, 1)
+        ReturnValue(1)
+    }
+}
+
+Function.SQLite.DirWalk {
+    Input: pageno: Integer
+    Output: Integer
+    Body: {
+        IfCondition LessThan(pageno, 1) ThenBlock: { ReturnValue(0) }
+        page = SQLite.Page(pageno)
+        IfCondition EqualTo(page, 0) ThenBlock: { ReturnValue(0) }
+        h = SQLite.HdrOff(pageno)
+        flags = GetByte(page, h)
+        ho = Add(h, 3)
+        ncells = SQLite.BE16(page, ho)
+        IfCondition EqualTo(flags, 5) ThenBlock: {
+            ci = 0
+            WhileLoop LessThan(ci, ncells) {
+                page = SQLite.Page(pageno)
+                cell = SQLite.LeafCell(page, pageno, ci)
+                left = SQLite.BE32(cell, 0)
+                SQLite.DirWalk(left)
+                ci = Add(ci, 1)
+            }
+            page = SQLite.Page(pageno)
+            h2 = SQLite.HdrOff(pageno)
+            roff = Add(h2, 8)
+            right = SQLite.BE32(page, roff)
+            SQLite.DirWalk(right)
+            ReturnValue(0)
+        }
+        IfCondition EqualTo(flags, 13) ThenBlock: {
+            SQLite.DirAppend(pageno)
+            ReturnValue(0)
+        }
+        ReturnValue(0)
+    }
+}
+
+Function.SQLite.BuildUDir {
+    Output: Integer
+    Body: {
+        SQLiteUDir.n = 0
+        IfCondition EqualTo(SQLiteUDir.slots, 0) ThenBlock: {
+            SQLiteUDir.cap = 2048
+            nb = Multiply(2048, 24)
+            SQLiteUDir.slots = Allocate(nb)
+        }
+        IfCondition EqualTo(SQLiteUDir.slots, 0) ThenBlock: { ReturnValue(0) }
+        IfCondition EqualTo(SQLiteDB.users_root, 0) ThenBlock: { ReturnValue(0) }
+        SQLite.DirWalk(SQLiteDB.users_root)
+        ReturnValue(SQLiteUDir.n)
+    }
+}
+
+Function.SQLite.DirGet {
+    Input: want: Integer
+    Output: Address
+    Body: {
+        SQLiteRow.key = want
+        n = SQLiteUDir.n
+        slots = SQLiteUDir.slots
+        IfCondition EqualTo(n, 0) ThenBlock: { ReturnValue(0) }
+        IfCondition EqualTo(slots, 0) ThenBlock: { ReturnValue(0) }
+        lo = 0
+        hi = n
+        WhileLoop LessThan(lo, hi) {
+            s = Add(lo, hi)
+            mid = Divide(s, 2)
+            off = Add(LeftShift(mid, 4), LeftShift(mid, 3))
+            base = Add(slots, off)
+            last = Dereference(Add(base, 8))
+            IfCondition LessThan(last, SQLiteRow.key) ThenBlock: {
+                lo = Add(mid, 1)
+            }
+            IfCondition GreaterEqual(last, SQLiteRow.key) ThenBlock: {
+                hi = mid
+            }
+        }
+        nn = SQLiteUDir.n
+        IfCondition GreaterEqual(lo, nn) ThenBlock: { ReturnValue(0) }
+        eoff = Add(LeftShift(lo, 4), LeftShift(lo, 3))
+        ep = Add(SQLiteUDir.slots, eoff)
+        first = Dereference(ep)
+        IfCondition LessThan(SQLiteRow.key, first) ThenBlock: { ReturnValue(0) }
+        last2 = Dereference(Add(ep, SQLiteUDirOff.LAST))
+        pgno = Dereference(Add(ep, SQLiteUDirOff.PGNO))
+        SQLiteURow.first = first
+        SQLiteURow.last = last2
+        SQLiteURow.leaf = pgno
+        SQLiteURow.pbase = 8
+        page = SQLite.Page(SQLiteURow.leaf)
+        IfCondition EqualTo(page, 0) ThenBlock: {
+            SQLiteURow.leaf = 0
+            ReturnValue(0)
+        }
+        ncells = SQLite.BE16(page, 3)
+        SQLiteURow.ptr = page
+        SQLiteURow.ncells = ncells
+        rec = SQLite.RecAtWant(SQLiteURow.ptr, SQLiteURow.pbase, SQLiteURow.ncells, SQLiteURow.first, SQLiteURow.last, SQLiteRow.key)
+        ReturnValue(rec)
+    }
+}
+
+Function.SQLite.RowidAtPtr {
+    Input: page: Address
+    Input: ptrbase: Integer
+    Input: ci: Integer
+    Input: kind: Integer
+    Output: Integer
+    Body: {
+        poff = Add(ptrbase, Multiply(ci, 2))
+        b0 = GetByte(page, poff)
+        b1 = GetByte(page, Add(poff, 1))
+        coff = BitwiseOr(LeftShift(b0, 8), b1)
+        cell = Add(page, coff)
+        IfCondition EqualTo(kind, 1) ThenBlock: {
+            r0 = GetByte(cell, 4)
+            IfCondition LessThan(r0, 128) ThenBlock: { ReturnValue(r0) }
+            r1 = GetByte(cell, 5)
+            v = BitwiseOr(LeftShift(BitwiseAnd(r0, 127), 7), BitwiseAnd(r1, 127))
+            IfCondition LessThan(r1, 128) ThenBlock: { ReturnValue(v) }
+            r2 = GetByte(cell, 6)
+            v = BitwiseOr(LeftShift(v, 7), BitwiseAnd(r2, 127))
+            IfCondition LessThan(r2, 128) ThenBlock: { ReturnValue(v) }
+            r3 = GetByte(cell, 7)
+            v = BitwiseOr(LeftShift(v, 7), BitwiseAnd(r3, 127))
+            IfCondition LessThan(r3, 128) ThenBlock: { ReturnValue(v) }
+            k = SQLite.Varint(cell, 4)
+            ReturnValue(k)
+        }
+        p0 = GetByte(cell, 0)
+        off = 1
+        IfCondition GreaterEqual(p0, 128) ThenBlock: {
+            p1 = GetByte(cell, 1)
+            off = 2
+            IfCondition GreaterEqual(p1, 128) ThenBlock: {
+                p2 = GetByte(cell, 2)
+                off = 3
+                IfCondition GreaterEqual(p2, 128) ThenBlock: {
+                    rid = SQLite.TableCellRowid(cell)
+                    ReturnValue(rid)
+                }
+            }
+        }
+        r0 = GetByte(cell, off)
+        IfCondition LessThan(r0, 128) ThenBlock: { ReturnValue(r0) }
+        r1 = GetByte(cell, Add(off, 1))
+        v = BitwiseOr(LeftShift(BitwiseAnd(r0, 127), 7), BitwiseAnd(r1, 127))
+        IfCondition LessThan(r1, 128) ThenBlock: { ReturnValue(v) }
+        r2 = GetByte(cell, Add(off, 2))
+        v = BitwiseOr(LeftShift(v, 7), BitwiseAnd(r2, 127))
+        IfCondition LessThan(r2, 128) ThenBlock: { ReturnValue(v) }
+        r3 = GetByte(cell, Add(off, 3))
+        v = BitwiseOr(LeftShift(v, 7), BitwiseAnd(r3, 127))
+        IfCondition LessThan(r3, 128) ThenBlock: { ReturnValue(v) }
+        rid2 = SQLite.TableCellRowid(cell)
+        ReturnValue(rid2)
+    }
+}
+
+Function.SQLite.RecAt {
+    Input: page: Address
+    Input: ptrbase: Integer
+    Input: ci: Integer
+    Output: Address
+    Body: {
+        poff = Add(ptrbase, Multiply(ci, 2))
+        b0 = GetByte(page, poff)
+        b1 = GetByte(page, Add(poff, 1))
+        coff = BitwiseOr(LeftShift(b0, 8), b1)
+        cell = Add(page, coff)
+        p0 = GetByte(cell, 0)
+        off = 1
+        IfCondition GreaterEqual(p0, 128) ThenBlock: {
+            p1 = GetByte(cell, 1)
+            off = 2
+            IfCondition GreaterEqual(p1, 128) ThenBlock: {
+                p2 = GetByte(cell, 2)
+                off = 3
+                IfCondition GreaterEqual(p2, 128) ThenBlock: {
+                    rec = SQLite.TableCellRec(cell)
+                    ReturnValue(rec)
+                }
+            }
+        }
+        r0 = GetByte(cell, off)
+        IfCondition LessThan(r0, 128) ThenBlock: {
+            ReturnValue(Add(cell, Add(off, 1)))
+        }
+        r1 = GetByte(cell, Add(off, 1))
+        IfCondition LessThan(r1, 128) ThenBlock: {
+            ReturnValue(Add(cell, Add(off, 2)))
+        }
+        r2 = GetByte(cell, Add(off, 2))
+        IfCondition LessThan(r2, 128) ThenBlock: {
+            ReturnValue(Add(cell, Add(off, 3)))
+        }
+        r3 = GetByte(cell, Add(off, 3))
+        IfCondition LessThan(r3, 128) ThenBlock: {
+            ReturnValue(Add(cell, Add(off, 4)))
+        }
+        rec2 = SQLite.TableCellRec(cell)
+        ReturnValue(rec2)
+    }
+}
+
+Function.SQLite.RecAtWant {
+    Input: page: Address
+    Input: ptrbase: Integer
+    Input: ncells: Integer
+    Input: first: Integer
+    Input: last: Integer
+    Input: want: Integer
+    Output: Address
+    Body: {
+        span = Add(Subtract(last, first), 1)
+        IfCondition EqualTo(span, ncells) ThenBlock: {
+            idx = Subtract(want, first)
+            IfCondition LessThan(idx, 0) ThenBlock: { ReturnValue(0) }
+            IfCondition GreaterEqual(idx, ncells) ThenBlock: { ReturnValue(0) }
+            rec = SQLite.RecAt(page, ptrbase, idx)
+            ReturnValue(rec)
+        }
+        SQLiteRow.ptr = page
+        SQLiteRow.pbase = ptrbase
+        SQLiteRow.ncells = ncells
+        SQLiteRow.key = want
+        lo = SQLite.LowerBoundRowid(page, ptrbase, ncells, 0, want)
+        IfCondition GreaterEqual(lo, SQLiteRow.ncells) ThenBlock: { ReturnValue(0) }
+        rid = SQLite.RowidAtPtr(SQLiteRow.ptr, SQLiteRow.pbase, lo, 0)
+        IfCondition NotEqual(rid, SQLiteRow.key) ThenBlock: { ReturnValue(0) }
+        rec2 = SQLite.RecAt(SQLiteRow.ptr, SQLiteRow.pbase, lo)
+        ReturnValue(rec2)
+    }
+}
+
+Function.SQLite.LowerBoundRowid {
+    Input: page: Address
+    Input: ptrbase: Integer
+    Input: ncells: Integer
+    Input: kind: Integer
+    Input: want: Integer
+    Output: Integer
+    Body: {
+        lo = 0
+        hi = ncells
+        WhileLoop LessThan(lo, hi) {
+            mid = Divide(Add(lo, hi), 2)
+            key = SQLite.RowidAtPtr(page, ptrbase, mid, kind)
+            IfCondition LessThan(key, want) ThenBlock: {
+                lo = Add(mid, 1)
+            }
+            IfCondition GreaterEqual(key, want) ThenBlock: {
+                hi = mid
+            }
+        }
+        ReturnValue(lo)
+    }
+}
+
+Function.SQLite.FindRowid {
+    Input: pageno: Integer
+    Input: want: Integer
+    Output: Address
+    Body: {
+        page = SQLite.Page(pageno)
+        IfCondition EqualTo(page, 0) ThenBlock: { ReturnValue(0) }
+        h = SQLite.HdrOff(pageno)
+        flags = GetByte(page, h)
+        ncells = SQLite.BE16(page, Add(h, 3))
+        IfCondition EqualTo(flags, 5) ThenBlock: {
+            ptrbase = Add(h, 12)
+            lo = SQLite.LowerBoundRowid(page, ptrbase, ncells, 1, want)
+            IfCondition GreaterEqual(lo, ncells) ThenBlock: {
+                right = SQLite.BE32(page, Add(h, 8))
+                found = SQLite.FindRowid(right, want)
+                ReturnValue(found)
+            }
+            coff = SQLite.BE16(page, Add(ptrbase, Multiply(lo, 2)))
+            cell = Add(page, coff)
+            left = SQLite.BE32(cell, 0)
+            found2 = SQLite.FindRowid(left, want)
+            ReturnValue(found2)
+        }
+        ptr2 = Add(h, 8)
+        SQLiteRow.key = want
+        lo2 = SQLite.LowerBoundRowid(page, ptr2, ncells, 0, want)
+        IfCondition GreaterEqual(lo2, ncells) ThenBlock: { ReturnValue(0) }
+        SQLiteRow.ptr = page
+        SQLiteRow.pbase = ptr2
+        SQLiteRow.ncells = ncells
+        SQLiteRow.leaf = pageno
+        rid = SQLite.RowidAtPtr(SQLiteRow.ptr, SQLiteRow.pbase, lo2, 0)
+        IfCondition NotEqual(rid, SQLiteRow.key) ThenBlock: { ReturnValue(0) }
+        rec = SQLite.RecAt(SQLiteRow.ptr, SQLiteRow.pbase, lo2)
+        SQLiteRow.first = SQLite.RowidAtPtr(SQLiteRow.ptr, SQLiteRow.pbase, 0, 0)
+        lasti = Subtract(SQLiteRow.ncells, 1)
+        SQLiteRow.last = SQLite.RowidAtPtr(SQLiteRow.ptr, SQLiteRow.pbase, lasti, 0)
+        ReturnValue(rec)
+    }
+}
+
+Function.SQLite.ReadPostCols {
+    Input: rec: Address
+    Output: Integer
+    Body: {
+        SQLitePost.body = 0
+        SQLitePost.created = 0
+        SQLitePost.body_n = 0
+        SQLitePost.created_n = 0
+        uid = 0
+        IfCondition EqualTo(rec, 0) ThenBlock: { ReturnValue(0) }
+        hsz = SQLite.Varint(rec, 0)
+        hend = hsz
+        tpos = SQLiteV.next
+        data = Add(rec, hend)
+        st0 = SQLite.Varint(rec, tpos)
+        tpos = SQLiteV.next
+        ln0 = SQLite.SerialLen(st0)
+        data = Add(data, ln0)
+        st1 = SQLite.Varint(rec, tpos)
+        tpos = SQLiteV.next
+        ln1 = SQLite.SerialLen(st1)
+        IfCondition EqualTo(st1, 9) ThenBlock: { uid = 1 }
+        IfCondition EqualTo(st1, 8) ThenBlock: { uid = 0 }
+        IfCondition GreaterEqual(st1, 1) ThenBlock: {
+            IfCondition LessEqual(st1, 6) ThenBlock: {
+                acc = 0
+                k = 0
+                WhileLoop LessThan(k, ln1) {
+                    acc = BitwiseOr(LeftShift(acc, 8), GetByte(data, k))
+                    k = Add(k, 1)
+                }
+                uid = acc
+            }
+        }
+        data = Add(data, ln1)
+        st2 = SQLite.Varint(rec, tpos)
+        tpos = SQLiteV.next
+        ln2 = SQLite.SerialLen(st2)
+        IfCondition GreaterEqual(st2, 13) ThenBlock: {
+            odd2 = Modulo(st2, 2)
+            IfCondition EqualTo(odd2, 1) ThenBlock: {
+                SQLitePost.body = data
+                SQLitePost.body_n = ln2
+            }
+        }
+        data = Add(data, ln2)
+        IfCondition LessThan(tpos, hend) ThenBlock: {
+            st3 = SQLite.Varint(rec, tpos)
+            ln3 = SQLite.SerialLen(st3)
+            IfCondition GreaterEqual(st3, 13) ThenBlock: {
+                odd3 = Modulo(st3, 2)
+                IfCondition EqualTo(odd3, 1) ThenBlock: {
+                    SQLitePost.created = data
+                    SQLitePost.created_n = ln3
+                }
+            }
+        }
+        ReturnValue(uid)
+    }
+}
+
+Function.SQLite.UserName {
+    Input: uid: Integer
+    Output: Address
+    Body: {
+        SQLitePost.author_n = 0
+        SQLiteRow.key = uid
+        IfCondition LessThan(SQLiteRow.key, 1) ThenBlock: { ReturnValue(0) }
+        rec = 0
+        IfCondition NotEqual(SQLiteURow.leaf, 0) ThenBlock: {
+            IfCondition GreaterEqual(SQLiteRow.key, SQLiteURow.first) ThenBlock: {
+                IfCondition LessEqual(SQLiteRow.key, SQLiteURow.last) ThenBlock: {
+                    rec = SQLite.RecAtWant(SQLiteURow.ptr, SQLiteURow.pbase, SQLiteURow.ncells, SQLiteURow.first, SQLiteURow.last, SQLiteRow.key)
+                }
+            }
+        }
+        IfCondition EqualTo(rec, 0) ThenBlock: {
+            rec = SQLite.DirGet(SQLiteRow.key)
+        }
+        IfCondition EqualTo(rec, 0) ThenBlock: {
+            rec = SQLite.FindRowid(SQLiteDB.users_root, SQLiteRow.key)
+            IfCondition EqualTo(rec, 0) ThenBlock: { ReturnValue(0) }
+            SQLite.SaveURow()
+        }
+        s = SQLite.ColTextAt(rec, 1)
+        SQLitePost.author_n = SQLiteV.len
+        ReturnValue(s)
+    }
+}
+
+Function.SQLite.IndexCellRec {
+    Input: cell: Address
+    Input: skip: Integer
+    Output: Address
+    Body: {
+        payload = SQLite.Varint(cell, skip)
+        ReturnValue(Add(cell, SQLiteV.next))
+    }
+}
+
+Function.SQLite.RecFirstInt {
+    Input: rec: Address
+    Output: Integer
+    Body: {
+        hsz = SQLite.Varint(rec, 0)
+        tpos = SQLiteV.next
+        st = SQLite.Varint(rec, tpos)
+        IfCondition EqualTo(st, 0) ThenBlock: { ReturnValue(0) }
+        IfCondition EqualTo(st, 8) ThenBlock: { ReturnValue(0) }
+        IfCondition EqualTo(st, 9) ThenBlock: { ReturnValue(1) }
+        ln = SQLite.SerialLen(st)
+        ge = GreaterEqual(st, 1)
+        le = LessEqual(st, 6)
+        IfCondition EqualTo(ge, 1) ThenBlock: {
+            IfCondition EqualTo(le, 1) ThenBlock: {
+                data = Add(rec, hsz)
+                n = SQLite.ReadIntBE(data, ln)
+                ReturnValue(n)
+            }
+        }
+        ReturnValue(0)
+    }
+}
+
+Function.SQLite.IdxKeyAt {
+    Input: page: Address
+    Input: ptrbase: Integer
+    Input: skip: Integer
+    Input: ci: Integer
+    Output: Integer
+    Body: {
+        poff = Add(ptrbase, Multiply(ci, 2))
+        b0 = GetByte(page, poff)
+        b1 = GetByte(page, Add(poff, 1))
+        coff = BitwiseOr(LeftShift(b0, 8), b1)
+        cell = Add(page, coff)
+        bpl = GetByte(cell, skip)
+        IfCondition LessThan(bpl, 128) ThenBlock: {
+            rec = Add(cell, Add(skip, 1))
+            hsz = GetByte(rec, 0)
+            IfCondition LessThan(hsz, 128) ThenBlock: {
+                IfCondition GreaterThan(hsz, 1) ThenBlock: {
+                    st = GetByte(rec, 1)
+                    data = Add(rec, hsz)
+                    IfCondition EqualTo(st, 3) ThenBlock: {
+                        x0 = GetByte(data, 0)
+                        x1 = GetByte(data, 1)
+                        x2 = GetByte(data, 2)
+                        t = BitwiseOr(LeftShift(x0, 16), LeftShift(x1, 8))
+                        ReturnValue(BitwiseOr(t, x2))
+                    }
+                    IfCondition EqualTo(st, 2) ThenBlock: {
+                        x0 = GetByte(data, 0)
+                        x1 = GetByte(data, 1)
+                        ReturnValue(BitwiseOr(LeftShift(x0, 8), x1))
+                    }
+                    IfCondition EqualTo(st, 1) ThenBlock: {
+                        ReturnValue(GetByte(data, 0))
+                    }
+                    IfCondition EqualTo(st, 4) ThenBlock: {
+                        x0 = GetByte(data, 0)
+                        x1 = GetByte(data, 1)
+                        x2 = GetByte(data, 2)
+                        x3 = GetByte(data, 3)
+                        t = BitwiseOr(LeftShift(x0, 24), LeftShift(x1, 16))
+                        t2 = BitwiseOr(t, LeftShift(x2, 8))
+                        ReturnValue(BitwiseOr(t2, x3))
+                    }
+                    IfCondition EqualTo(st, 9) ThenBlock: { ReturnValue(1) }
+                    IfCondition EqualTo(st, 8) ThenBlock: { ReturnValue(0) }
+                    IfCondition EqualTo(st, 0) ThenBlock: { ReturnValue(0) }
+                }
+            }
+        }
+        rec2 = SQLite.IndexCellRec(cell, skip)
+        k = SQLite.RecFirstInt(rec2)
+        ReturnValue(k)
+    }
+}
+
+Function.SQLite.PageFlags {
+    Input: pageno: Integer
+    Output: Integer
+    Body: {
+        page = SQLite.Page(pageno)
+        IfCondition EqualTo(page, 0) ThenBlock: { ReturnValue(0) }
+        h = SQLite.HdrOff(pageno)
+        ReturnValue(GetByte(page, h))
+    }
+}
+
+Function.SQLite.IdxKey {
+    Input: page: Address
+    Input: pageno: Integer
+    Input: ci: Integer
+    Input: skip: Integer
+    Output: Integer
+    Body: {
+        h = SQLite.HdrOff(pageno)
+        ptrbase = Add(h, Add(8, skip))
+        k = SQLite.IdxKeyAt(page, ptrbase, skip, ci)
+        ReturnValue(k)
+    }
+}
+
+Function.SQLite.IdxLeft {
+    Input: page: Address
+    Input: pageno: Integer
+    Input: ci: Integer
+    Output: Integer
+    Body: {
+        cell = SQLite.LeafCell(page, pageno, ci)
+        left = SQLite.BE32(cell, 0)
+        ReturnValue(left)
+    }
+}
+
+Function.SQLite.LowerBound {
+    Input: page: Address
+    Input: pageno: Integer
+    Input: ncells: Integer
+    Input: skip: Integer
+    Input: want: Integer
+    Output: Integer
+    Body: {
+        h = SQLite.HdrOff(pageno)
+        ptrbase = Add(h, Add(8, skip))
+        lo = 0
+        hi = ncells
+        WhileLoop LessThan(lo, hi) {
+            mid = Divide(Add(lo, hi), 2)
+            key = SQLite.IdxKeyAt(page, ptrbase, skip, mid)
+            IfCondition LessThan(key, want) ThenBlock: {
+                lo = Add(mid, 1)
+            }
+            IfCondition GreaterEqual(key, want) ThenBlock: {
+                hi = mid
+            }
+        }
+        ReturnValue(lo)
+    }
+}
+
+Function.SQLite.CountLeafRun {
+    Input: page: Address
+    Input: pageno: Integer
+    Input: ncells: Integer
+    Input: want: Integer
+    Output: Integer
+    Body: {
+        h = SQLite.HdrOff(pageno)
+        ptrbase = Add(h, 8)
+        lo = SQLite.LowerBound(page, pageno, ncells, 0, want)
+        SQLiteCnt.lo = lo
+        n = 0
+        ci = lo
+        WhileLoop LessThan(ci, ncells) {
+            pid = SQLite.IdxKeyAt(page, ptrbase, 0, ci)
+            IfCondition EqualTo(pid, want) ThenBlock: {
+                n = Add(n, 1)
+            }
+            IfCondition GreaterThan(pid, want) ThenBlock: {
+                ReturnValue(n)
+            }
+            ci = Add(ci, 1)
+        }
+        ReturnValue(n)
+    }
+}
+
+Function.SQLite.CountDown {
+    Output: Integer
+    Body: {
+        SQLiteCnt.hit = Subtract(SQLiteCnt.lo, 1)
+        n = 0
+        WhileLoop GreaterEqual(SQLiteCnt.hit, 0) {
+            pid = SQLite.IdxKeyAt(SQLiteCnt.ptr, SQLiteCnt.pbase, 0, SQLiteCnt.hit)
+            IfCondition EqualTo(pid, SQLiteCnt.key) ThenBlock: {
+                n = Add(n, 1)
+                SQLiteCnt.hit = Subtract(SQLiteCnt.hit, 1)
+            }
+            IfCondition NotEqual(pid, SQLiteCnt.key) ThenBlock: {
+                IfCondition LessThan(pid, SQLiteCnt.key) ThenBlock: {
+                    SQLiteCnt.lo = Add(SQLiteCnt.hit, 1)
+                    ReturnValue(n)
+                }
+                SQLiteCnt.hit = Subtract(SQLiteCnt.hit, 1)
+            }
+        }
+        SQLiteCnt.lo = 0
+        ReturnValue(n)
+    }
+}
+
+Function.SQLite.CountIfInside {
+    Input: pageno: Integer
+    Input: want: Integer
+    Output: Integer
+    Body: {
+        SQLiteCnt.hit = 0
+        page = SQLite.Page(pageno)
+        IfCondition EqualTo(page, 0) ThenBlock: { ReturnValue(0) }
+        h = SQLite.HdrOff(pageno)
+        flags = GetByte(page, h)
+        IfCondition NotEqual(flags, 10) ThenBlock: { ReturnValue(0) }
+        ncells = SQLite.BE16(page, Add(h, 3))
+        IfCondition LessThan(ncells, 2) ThenBlock: { ReturnValue(0) }
+        ptrbase = Add(h, 8)
+        first = SQLite.IdxKeyAt(page, ptrbase, 0, 0)
+        lasti = Subtract(ncells, 1)
+        last = SQLite.IdxKeyAt(page, ptrbase, 0, lasti)
+        IfCondition GreaterEqual(first, want) ThenBlock: { ReturnValue(0) }
+        IfCondition LessEqual(last, want) ThenBlock: { ReturnValue(0) }
+        SQLiteCnt.hit = 1
+        n = SQLite.CountLeafRun(page, pageno, ncells, want)
+        ReturnValue(n)
+    }
+}
+
+Function.SQLite.CountTable {
+    Input: pageno: Integer
+    Input: post_id: Integer
+    Output: Integer
+    Body: {
+        page = SQLite.Page(pageno)
+        IfCondition EqualTo(page, 0) ThenBlock: { ReturnValue(0) }
+        h = SQLite.HdrOff(pageno)
+        flags = GetByte(page, h)
+        ncells = SQLite.BE16(page, Add(h, 3))
+        IfCondition EqualTo(flags, 5) ThenBlock: {
+            n = 0
+            ci = 0
+            WhileLoop LessThan(ci, ncells) {
+                cell = SQLite.LeafCell(page, pageno, ci)
+                left = SQLite.BE32(cell, 0)
+                c = SQLite.CountTable(left, post_id)
+                n = Add(n, c)
+                ci = Add(ci, 1)
+            }
+            right = SQLite.BE32(page, Add(h, 8))
+            c2 = SQLite.CountTable(right, post_id)
+            n = Add(n, c2)
+            ReturnValue(n)
+        }
+        IfCondition NotEqual(flags, 13) ThenBlock: { ReturnValue(0) }
+        n = 0
+        ci = 0
+        WhileLoop LessThan(ci, ncells) {
+            cell = SQLite.LeafCell(page, pageno, ci)
+            rec = SQLite.TableCellRec(cell)
+            pid = SQLite.ColInt(rec, 1)
+            IfCondition EqualTo(pid, post_id) ThenBlock: {
+                n = Add(n, 1)
+            }
+            ci = Add(ci, 1)
+        }
+        ReturnValue(n)
+    }
+}
+
+Function.SQLite.CountIdx {
+    Input: pageno: Integer
+    Input: want: Integer
+    Output: Integer
+    Body: {
+        page = SQLite.Page(pageno)
+        IfCondition EqualTo(page, 0) ThenBlock: { ReturnValue(0) }
+        h = SQLite.HdrOff(pageno)
+        flags = GetByte(page, h)
+        ncells = SQLite.BE16(page, Add(h, 3))
+        IfCondition EqualTo(flags, 2) ThenBlock: {
+            lo = SQLite.LowerBound(page, pageno, ncells, 4, want)
+            IfCondition GreaterEqual(lo, ncells) ThenBlock: {
+                right = SQLite.BE32(page, Add(h, 8))
+                c0 = SQLite.CountIdx(right, want)
+                ReturnValue(c0)
+            }
+            n = 0
+            ci = lo
+            WhileLoop LessThan(ci, ncells) {
+                left = SQLite.IdxLeft(page, pageno, ci)
+                c = SQLite.CountIdx(left, want)
+                n = Add(n, c)
+                key = SQLite.IdxKey(page, pageno, ci, 4)
+                IfCondition EqualTo(key, want) ThenBlock: {
+                    n = Add(n, 1)
+                }
+                IfCondition GreaterThan(key, want) ThenBlock: {
+                    ReturnValue(n)
+                }
+                ci = Add(ci, 1)
+            }
+            lastk = SQLite.IdxKey(page, pageno, Subtract(ncells, 1), 4)
+            IfCondition LessEqual(lastk, want) ThenBlock: {
+                right2 = SQLite.BE32(page, Add(h, 8))
+                c3 = SQLite.CountIdx(right2, want)
+                n = Add(n, c3)
+            }
+            ReturnValue(n)
+        }
+        IfCondition NotEqual(flags, 10) ThenBlock: { ReturnValue(0) }
+        SQLiteCnt.leaf = pageno
+        SQLiteCnt.ncells = ncells
+        n = SQLite.CountLeafRun(page, pageno, ncells, want)
+        ptrb = Add(h, 8)
+        IfCondition GreaterThan(SQLiteCnt.ncells, 0) ThenBlock: {
+            SQLiteCnt.first = SQLite.IdxKeyAt(page, ptrb, 0, 0)
+            lasti = Subtract(SQLiteCnt.ncells, 1)
+            SQLiteCnt.last = SQLite.IdxKeyAt(page, ptrb, 0, lasti)
+        }
+        ReturnValue(n)
+    }
+}
+
+Function.SQLite.CountLikes {
+    Input: post_id: Integer
+    Output: Integer
+    Body: {
+        want = post_id
+        IfCondition NotEqual(SQLiteDB.likes_idx, 0) ThenBlock: {
+            IfCondition NotEqual(SQLiteCnt.leaf, 0) ThenBlock: {
+                IfCondition GreaterThan(want, SQLiteCnt.first) ThenBlock: {
+                    edge = 0
+                    IfCondition LessThan(want, SQLiteCnt.last) ThenBlock: { edge = 1 }
+                    IfCondition EqualTo(want, SQLiteCnt.last) ThenBlock: {
+                        IfCondition EqualTo(SQLiteCnt.leaf, SQLiteDB.likes_right) ThenBlock: {
+                            edge = 1
+                        }
+                    }
+                    IfCondition EqualTo(edge, 1) ThenBlock: {
+                        SQLiteCnt.key = want
+                        page = SQLite.Page(SQLiteCnt.leaf)
+                        IfCondition NotEqual(page, 0) ThenBlock: {
+                            h = SQLite.HdrOff(SQLiteCnt.leaf)
+                            SQLiteCnt.ptr = page
+                            SQLiteCnt.pbase = Add(h, 8)
+                            ncells = SQLite.BE16(SQLiteCnt.ptr, Add(h, 3))
+                            SQLiteCnt.ncells = ncells
+                            n0 = 0
+                            IfCondition GreaterThan(SQLiteCnt.prev, SQLiteCnt.key) ThenBlock: {
+                                n0 = SQLite.CountDown()
+                            }
+                            IfCondition LessEqual(SQLiteCnt.prev, SQLiteCnt.key) ThenBlock: {
+                                IfCondition EqualTo(SQLiteCnt.key, SQLiteCnt.last) ThenBlock: {
+                                    SQLiteCnt.lo = SQLiteCnt.ncells
+                                    n0 = SQLite.CountDown()
+                                }
+                                IfCondition NotEqual(SQLiteCnt.key, SQLiteCnt.last) ThenBlock: {
+                                    n0 = SQLite.CountLeafRun(SQLiteCnt.ptr, SQLiteCnt.leaf, SQLiteCnt.ncells, SQLiteCnt.key)
+                                }
+                            }
+                            SQLiteCnt.prev = SQLiteCnt.key
+                            ReturnValue(n0)
+                        }
+                    }
+                }
+            }
+            n = SQLite.CountIdx(SQLiteDB.likes_idx, want)
+            SQLiteCnt.prev = want
+            ReturnValue(n)
+        }
+        n2 = SQLite.CountTable(SQLiteDB.likes_root, want)
+        ReturnValue(n2)
+    }
+}
+
+Function.SQLite.Select1 {
+    Output: Integer
+    Body: {
+        ReturnValue(SQLiteDB.ok)
+    }
+}
+
+Function.SQLite.GetPostRec {
+    Input: rec: Address
+    Input: id: Integer
+    Output: Integer
+    Body: {
+        IfCondition EqualTo(rec, 0) ThenBlock: { ReturnValue(0) }
+        SQLitePost.id = id
+        uid = SQLite.ReadPostCols(rec)
+        author = SQLite.UserName(uid)
+        likes = SQLite.CountLikes(SQLitePost.id)
+        SQLitePost.author = author
+        SQLitePost.likes = likes
+        ReturnValue(1)
+    }
+}
+
+Function.SQLite.GetPost {
+    Input: id: Integer
+    Output: Integer
+    Body: {
+        SQLitePost.id = 0
+        SQLitePost.body = 0
+        SQLitePost.created = 0
+        SQLitePost.author = 0
+        SQLitePost.likes = 0
+        SQLitePost.body_n = 0
+        SQLitePost.created_n = 0
+        SQLitePost.author_n = 0
+        IfCondition LessThan(id, 1) ThenBlock: { ReturnValue(0) }
+        SQLitePost.id = id
+        rec = 0
+        IfCondition NotEqual(SQLitePRow.leaf, 0) ThenBlock: {
+            IfCondition GreaterEqual(SQLitePost.id, SQLitePRow.first) ThenBlock: {
+                IfCondition LessEqual(SQLitePost.id, SQLitePRow.last) ThenBlock: {
+                    rec = SQLite.RecAtWant(SQLitePRow.ptr, SQLitePRow.pbase, SQLitePRow.ncells, SQLitePRow.first, SQLitePRow.last, SQLitePost.id)
+                }
+            }
+        }
+        IfCondition EqualTo(rec, 0) ThenBlock: {
+            rec = SQLite.FindRowid(SQLiteDB.posts_root, SQLitePost.id)
+            IfCondition EqualTo(rec, 0) ThenBlock: { ReturnValue(0) }
+            SQLite.SavePRow()
+        }
+        ok = SQLite.GetPostRec(rec, SQLitePost.id)
+        ReturnValue(ok)
+    }
+}
+
+Function.SQLite.FeedAt {
+    Input: i: Integer
+    Output: Address
+    Body: {
+        ReturnValue(Add(SQLiteFeed.slots, Multiply(i, SQLiteFeedOff.STRIDE)))
+    }
+}
+
+Function.SQLite.FeedId {
+    Input: i: Integer
+    Output: Integer
+    Body: {
+        p = SQLite.FeedAt(i)
+        ReturnValue(Dereference(p))
+    }
+}
+
+Function.SQLite.FeedBody {
+    Input: i: Integer
+    Output: Address
+    Body: {
+        p = SQLite.FeedAt(i)
+        ReturnValue(Dereference(Add(p, SQLiteFeedOff.BODY)))
+    }
+}
+
+Function.SQLite.FeedCreated {
+    Input: i: Integer
+    Output: Address
+    Body: {
+        p = SQLite.FeedAt(i)
+        ReturnValue(Dereference(Add(p, SQLiteFeedOff.CREATED)))
+    }
+}
+
+Function.SQLite.FeedAuthor {
+    Input: i: Integer
+    Output: Address
+    Body: {
+        p = SQLite.FeedAt(i)
+        ReturnValue(Dereference(Add(p, SQLiteFeedOff.AUTHOR)))
+    }
+}
+
+Function.SQLite.FeedLikes {
+    Input: i: Integer
+    Output: Integer
+    Body: {
+        p = SQLite.FeedAt(i)
+        ReturnValue(Dereference(Add(p, SQLiteFeedOff.LIKES)))
+    }
+}
+
+Function.SQLite.FeedStore {
+    Body: {
+        slot = SQLite.FeedAt(SQLiteFeed.n)
+        StoreValue(slot, SQLitePost.id)
+        StoreValue(Add(slot, SQLiteFeedOff.BODY), SQLitePost.body)
+        StoreValue(Add(slot, SQLiteFeedOff.CREATED), SQLitePost.created)
+        StoreValue(Add(slot, SQLiteFeedOff.AUTHOR), SQLitePost.author)
+        StoreValue(Add(slot, SQLiteFeedOff.LIKES), SQLitePost.likes)
+        StoreValue(Add(slot, SQLiteFeedOff.BODY_N), SQLitePost.body_n)
+        StoreValue(Add(slot, SQLiteFeedOff.CREATED_N), SQLitePost.created_n)
+        StoreValue(Add(slot, SQLiteFeedOff.AUTHOR_N), SQLitePost.author_n)
+        SQLiteFeed.n = Add(SQLiteFeed.n, 1)
+    }
+}
+
+Function.SQLite.FeedLoad {
+    Input: i: Integer
+    Body: {
+        p = SQLite.FeedAt(i)
+        SQLitePost.id = Dereference(p)
+        SQLitePost.body = Dereference(Add(p, SQLiteFeedOff.BODY))
+        SQLitePost.created = Dereference(Add(p, SQLiteFeedOff.CREATED))
+        SQLitePost.author = Dereference(Add(p, SQLiteFeedOff.AUTHOR))
+        SQLitePost.likes = Dereference(Add(p, SQLiteFeedOff.LIKES))
+        SQLitePost.body_n = Dereference(Add(p, SQLiteFeedOff.BODY_N))
+        SQLitePost.created_n = Dereference(Add(p, SQLiteFeedOff.CREATED_N))
+        SQLitePost.author_n = Dereference(Add(p, SQLiteFeedOff.AUTHOR_N))
+    }
+}
+
+Function.SQLite.FeedWalkTable {
+    Input: pageno: Integer
+    Output: Integer
+    Body: {
+        IfCondition GreaterEqual(SQLiteFeed.n, SQLiteFeed.want) ThenBlock: {
+            ReturnValue(0)
+        }
+        IfCondition LessThan(pageno, 1) ThenBlock: { ReturnValue(0) }
+        page = SQLite.Page(pageno)
+        IfCondition EqualTo(page, 0) ThenBlock: { ReturnValue(0) }
+        h = SQLite.HdrOff(pageno)
+        flags = GetByte(page, h)
+        ncells = SQLite.BE16(page, Add(h, 3))
+        IfCondition EqualTo(flags, 5) ThenBlock: {
+            right = SQLite.BE32(page, Add(h, 8))
+            SQLite.FeedWalkTable(right)
+            IfCondition GreaterEqual(SQLiteFeed.n, SQLiteFeed.want) ThenBlock: {
+                ReturnValue(0)
+            }
+            page = SQLite.Page(pageno)
+            IfCondition EqualTo(page, 0) ThenBlock: { ReturnValue(0) }
+            h2 = SQLite.HdrOff(pageno)
+            ncells = SQLite.BE16(page, Add(h2, 3))
+            ci = Subtract(ncells, 1)
+            WhileLoop GreaterEqual(ci, 0) {
+                IfCondition GreaterEqual(SQLiteFeed.n, SQLiteFeed.want) ThenBlock: {
+                    ReturnValue(0)
+                }
+                page = SQLite.Page(pageno)
+                cell = SQLite.LeafCell(page, pageno, ci)
+                left = SQLite.BE32(cell, 0)
+                SQLite.FeedWalkTable(left)
+                ci = Subtract(ci, 1)
+            }
+            ReturnValue(0)
+        }
+        IfCondition NotEqual(flags, 13) ThenBlock: { ReturnValue(0) }
+        ptrbase = Add(h, 8)
+        SQLitePRow.leaf = pageno
+        SQLitePRow.ptr = page
+        SQLitePRow.pbase = ptrbase
+        SQLitePRow.ncells = ncells
+        IfCondition GreaterThan(SQLitePRow.ncells, 0) ThenBlock: {
+            SQLitePRow.first = SQLite.RowidAtPtr(SQLitePRow.ptr, SQLitePRow.pbase, 0, 0)
+            lasti = Subtract(SQLitePRow.ncells, 1)
+            SQLitePRow.last = SQLite.RowidAtPtr(SQLitePRow.ptr, SQLitePRow.pbase, lasti, 0)
+        }
+        ci2 = Subtract(SQLitePRow.ncells, 1)
+        WhileLoop GreaterEqual(ci2, 0) {
+            IfCondition GreaterEqual(SQLiteFeed.n, SQLiteFeed.want) ThenBlock: {
+                ReturnValue(0)
+            }
+            SQLiteIns.rowid = ci2
+            rec = SQLite.RecAt(SQLitePRow.ptr, SQLitePRow.pbase, SQLiteIns.rowid)
+            SQLiteV.ptr = rec
+            rid = SQLite.RowidAtPtr(SQLitePRow.ptr, SQLitePRow.pbase, SQLiteIns.rowid, 0)
+            ok = SQLite.GetPostRec(SQLiteV.ptr, rid)
+            IfCondition EqualTo(ok, 1) ThenBlock: {
+                SQLite.FeedStore()
+            }
+            ci2 = Subtract(SQLiteIns.rowid, 1)
+        }
+        ReturnValue(0)
+    }
+}
+
+Function.SQLite.FeedWalk {
+    Input: pageno: Integer
+    Output: Integer
+    Body: {
+        IfCondition GreaterEqual(SQLiteFeed.n, SQLiteFeed.want) ThenBlock: {
+            ReturnValue(0)
+        }
+        page = SQLite.Page(pageno)
+        IfCondition EqualTo(page, 0) ThenBlock: { ReturnValue(0) }
+        h = SQLite.HdrOff(pageno)
+        flags = GetByte(page, h)
+        ncells = SQLite.BE16(page, Add(h, 3))
+        IfCondition EqualTo(flags, 2) ThenBlock: {
+            ci = 0
+            WhileLoop LessThan(ci, ncells) {
+                IfCondition GreaterEqual(SQLiteFeed.n, SQLiteFeed.want) ThenBlock: {
+                    ReturnValue(0)
+                }
+                cell = SQLite.LeafCell(page, pageno, ci)
+                left = SQLite.BE32(cell, 0)
+                SQLite.FeedWalk(left)
+                ci = Add(ci, 1)
+            }
+            IfCondition GreaterEqual(SQLiteFeed.n, SQLiteFeed.want) ThenBlock: {
+                ReturnValue(0)
+            }
+            right = SQLite.BE32(page, Add(h, 8))
+            SQLite.FeedWalk(right)
+            ReturnValue(0)
+        }
+        IfCondition NotEqual(flags, 10) ThenBlock: { ReturnValue(0) }
+        ci = 0
+        WhileLoop LessThan(ci, ncells) {
+            IfCondition GreaterEqual(SQLiteFeed.n, SQLiteFeed.want) ThenBlock: {
+                ReturnValue(0)
+            }
+            cell = SQLite.LeafCell(page, pageno, ci)
+            rec = SQLite.IndexCellRec(cell, 0)
+            rid = SQLite.ColInt(rec, 1)
+            ok = SQLite.GetPost(rid)
+            IfCondition EqualTo(ok, 1) ThenBlock: {
+                SQLite.FeedStore()
+            }
+            ci = Add(ci, 1)
+        }
+        ReturnValue(0)
+    }
+}
+
+Function.SQLite.Feed20 {
+    Output: Integer
+    Body: {
+        IfCondition EqualTo(SQLiteFeed.slots, 0) ThenBlock: {
+            SQLiteFeed.slots = Allocate(1280)
+        }
+        SQLiteFeed.n = 0
+        SQLiteFeed.want = 20
+        IfCondition EqualTo(SQLiteDB.posts_root, 0) ThenBlock: { ReturnValue(0) }
+        SQLite.FeedWalkTable(SQLiteDB.posts_root)
+        ReturnValue(SQLiteFeed.n)
+    }
+}
+
+Function.SQLite.WalName {
+    Output: Address
+    Body: {
+        n = StringLength(SQLiteDB.path)
+        out = Allocate(Add(n, 5))
+        IfCondition GreaterThan(n, 0) ThenBlock: {
+            MemoryCopy(out, SQLiteDB.path, n)
+        }
+        SetByte(out, n, 45)
+        SetByte(out, Add(n, 1), 119)
+        SetByte(out, Add(n, 2), 97)
+        SetByte(out, Add(n, 3), 108)
+        SetByte(out, Add(n, 4), 0)
+        ReturnValue(out)
+    }
+}
+
+Function.SQLite.WalCkAdd {
+    Input: p: Address
+    Input: off: Integer
+    Input: nbyte: Integer
+    Body: {
+        s1 = SQLiteDB.wal_ck0
+        s2 = SQLiteDB.wal_ck1
+        i = 0
+        WhileLoop LessThan(i, nbyte) {
+            x1 = SQLite.GetLE32(p, Add(off, i))
+            x2 = SQLite.GetLE32(p, Add(off, Add(i, 4)))
+            t1 = Add(Add(s1, x1), s2)
+            s1 = BitwiseAnd(t1, 4294967295)
+            t2 = Add(Add(s2, x2), s1)
+            s2 = BitwiseAnd(t2, 4294967295)
+            i = Add(i, 8)
+        }
+        SQLiteDB.wal_ck0 = s1
+        SQLiteDB.wal_ck1 = s2
+    }
+}
+
+Function.SQLite.LoadWal {
+    Output: Integer
+    Body: {
+        wn = SQLite.WalName()
+        fd = SystemCall(SQLiteSys.OPEN, wn, SQLiteSys.O_RDONLY, 0)
+        IfCondition LessThan(fd, 0) ThenBlock: {
+            ReturnValue(0)
+        }
+        st = Allocate(152)
+        MemorySet(st, 0, 152)
+        SystemCall(SQLiteSys.FSTAT, fd, st, 0, 0, 0)
+        wsz = Dereference(Add(st, 48))
+        Deallocate(st, 152)
+        IfCondition LessThan(wsz, 32) ThenBlock: {
+            SystemCall(SQLiteSys.CLOSE, fd, 0, 0)
+            ReturnValue(0)
+        }
+        mp = SystemCall(SQLiteSys.MMAP, 0, wsz, SQLiteSys.PROT_READ, SQLiteSys.MAP_PRIVATE, fd, 0)
+        IfCondition LessThan(mp, 4096) ThenBlock: {
+            SystemCall(SQLiteSys.CLOSE, fd, 0, 0)
+            ReturnValue(0)
+        }
+        magic = SQLite.BE32(mp, 0)
+        IfCondition NotEqual(magic, 931135106) ThenBlock: {
+            SystemCall(SQLiteSys.CLOSE, fd, 0, 0)
+            ReturnValue(0)
+        }
+        ps = SQLite.BE32(mp, 8)
+        IfCondition EqualTo(ps, 1) ThenBlock: { ps = 65536 }
+        SQLiteDB.salt1 = SQLite.BE32(mp, 16)
+        SQLiteDB.salt2 = SQLite.BE32(mp, 20)
+        SQLiteDB.wal_ck0 = 0
+        SQLiteDB.wal_ck1 = 0
+        SQLite.WalCkAdd(mp, 0, 24)
+        off = 32
+        fr = Add(24, ps)
+        WhileLoop LessEqual(Add(off, fr), wsz) {
+            pgno = SQLite.BE32(mp, off)
+            dbn = SQLite.BE32(mp, Add(off, 4))
+            fs1 = SQLite.BE32(mp, Add(off, 8))
+            fs2 = SQLite.BE32(mp, Add(off, 12))
+            IfCondition NotEqual(fs1, SQLiteDB.salt1) ThenBlock: {
+                BreakLoop
+            }
+            IfCondition NotEqual(fs2, SQLiteDB.salt2) ThenBlock: {
+                BreakLoop
+            }
+            SQLite.WalCkAdd(mp, off, 8)
+            SQLite.WalCkAdd(mp, Add(off, 24), ps)
+            buf = Allocate(ps)
+            MemoryCopy(buf, Add(mp, Add(off, 24)), ps)
+            key = SQLite.PageKey(pgno)
+            Hash.Set(SQLiteDB.overlay, key, buf)
+            SQLiteDB.dirty_n = Add(SQLiteDB.dirty_n, 1)
+            IfCondition GreaterThan(dbn, 0) ThenBlock: {
+                SQLiteDB.npages = dbn
+            }
+            off = Add(off, fr)
+        }
+        SQLiteDB.wal_size = off
+        SystemCall(SQLiteSys.CLOSE, fd, 0, 0)
+        ReturnValue(1)
+    }
+}
+
+Function.SQLite.WalEnsure {
+    Output: Integer
+    Body: {
+        IfCondition GreaterEqual(SQLiteDB.wal_fd, 0) ThenBlock: {
+            ReturnValue(1)
+        }
+        wn = SQLite.WalName()
+        flags = Add(SQLiteSys.O_RDWR, SQLiteSys.O_CREAT)
+        fd = SystemCall(SQLiteSys.OPEN, wn, flags, SQLiteSys.MODE)
+        IfCondition LessThan(fd, 0) ThenBlock: { ReturnValue(0) }
+        SQLiteDB.wal_fd = fd
+        IfCondition GreaterThan(SQLiteDB.wal_size, 0) ThenBlock: {
+            ReturnValue(1)
+        }
+        hdr = Allocate(32)
+        MemorySet(hdr, 0, 32)
+        SQLite.PutBE32(hdr, 0, 931135106)
+        SQLite.PutBE32(hdr, 4, 3007000)
+        SQLite.PutBE32(hdr, 8, SQLiteDB.page)
+        ts = Allocate(16)
+        MemorySet(ts, 0, 16)
+        SystemCall(SQLiteSys.CLOCK, 0, ts)
+        SQLiteDB.salt1 = Dereference(ts)
+        SQLiteDB.salt2 = Dereference(Add(ts, 8))
+        Deallocate(ts, 16)
+        SQLite.PutBE32(hdr, 16, SQLiteDB.salt1)
+        SQLite.PutBE32(hdr, 20, SQLiteDB.salt2)
+        SQLiteDB.wal_ck0 = 0
+        SQLiteDB.wal_ck1 = 0
+        SQLite.WalCkAdd(hdr, 0, 24)
+        SQLite.PutBE32(hdr, 24, SQLiteDB.wal_ck0)
+        SQLite.PutBE32(hdr, 28, SQLiteDB.wal_ck1)
+        SystemCall(SQLiteSys.PWRITE, fd, hdr, 32, 0)
+        SQLiteDB.wal_size = 32
+        ReturnValue(1)
+    }
+}
+
+Function.SQLite.WalFrame {
+    Input: pgno: Integer
+    Input: commit: Integer
+    Output: Integer
+    Body: {
+        ok = SQLite.WalEnsure()
+        IfCondition EqualTo(ok, 0) ThenBlock: { ReturnValue(0) }
+        ps = SQLiteDB.page
+        fr = Add(24, ps)
+        buf = SQLiteDB.wal_buf
+        IfCondition EqualTo(buf, 0) ThenBlock: {
+            buf = Allocate(fr)
+            SQLiteDB.wal_buf = buf
+        }
+        MemorySet(buf, 0, fr)
+        SQLite.PutBE32(buf, 0, pgno)
+        dbn = 0
+        IfCondition EqualTo(commit, 1) ThenBlock: {
+            dbn = SQLiteDB.npages
+        }
+        SQLite.PutBE32(buf, 4, dbn)
+        SQLite.PutBE32(buf, 8, SQLiteDB.salt1)
+        SQLite.PutBE32(buf, 12, SQLiteDB.salt2)
+        SQLite.WalCkAdd(buf, 0, 8)
+        page = SQLite.Page(pgno)
+        MemoryCopy(Add(buf, 24), page, ps)
+        SQLite.WalCkAdd(buf, 24, ps)
+        SQLite.PutBE32(buf, 16, SQLiteDB.wal_ck0)
+        SQLite.PutBE32(buf, 20, SQLiteDB.wal_ck1)
+        SystemCall(SQLiteSys.PWRITE, SQLiteDB.wal_fd, buf, fr, SQLiteDB.wal_size)
+        SQLiteDB.wal_size = Add(SQLiteDB.wal_size, fr)
+        ReturnValue(1)
+    }
+}
+
+Function.SQLite.Commit {
+    Output: Integer
+    Body: {
+        IfCondition EqualTo(SQLiteDB.txn, 0) ThenBlock: { ReturnValue(1) }
+        vals = Hash.Values(SQLiteDB.txn)
+        n = Array.Size(vals)
+        IfCondition EqualTo(n, 0) ThenBlock: { ReturnValue(1) }
+        i = 0
+        last = Subtract(n, 1)
+        WhileLoop LessThan(i, n) {
+            pgno = Array.Get(vals, i)
+            cmt = 0
+            IfCondition EqualTo(i, last) ThenBlock: { cmt = 1 }
+            SQLite.WalFrame(pgno, cmt)
+            i = Add(i, 1)
+        }
+        Hash.Clear(SQLiteDB.txn)
+        SQLiteCnt.leaf = 0
+        SQLiteCnt.first = 0
+        SQLiteCnt.last = 0
+        SQLiteCnt.lo = 0
+        SQLiteCnt.prev = 0
+        SQLiteCnt.ncells = 0
+        SQLite.ClearRowCache()
+        IfCondition EqualTo(SQLiteDB.likes_right_dirty, 1) ThenBlock: {
+            IfCondition NotEqual(SQLiteDB.likes_idx, 0) ThenBlock: {
+                SQLiteDB.likes_right = SQLite.RightLeaf(SQLiteDB.likes_idx)
+            }
+            SQLiteDB.likes_right_dirty = 0
+        }
+        IfCondition EqualTo(SQLiteDB.users_dirty, 1) ThenBlock: {
+            SQLite.BuildUDir()
+            SQLiteDB.users_dirty = 0
+        }
+        ReturnValue(1)
+    }
+}
+
+Function.SQLite.IntSerial {
+    Input: v: Integer
+    Output: Integer
+    Body: {
+        IfCondition EqualTo(v, 0) ThenBlock: { ReturnValue(8) }
+        IfCondition EqualTo(v, 1) ThenBlock: { ReturnValue(9) }
+        IfCondition LessThan(v, 128) ThenBlock: { ReturnValue(1) }
+        IfCondition LessThan(v, 32768) ThenBlock: { ReturnValue(2) }
+        IfCondition LessThan(v, 8388608) ThenBlock: { ReturnValue(3) }
+        ReturnValue(4)
+    }
+}
+
+Function.SQLite.PutIntN {
+    Input: p: Address
+    Input: off: Integer
+    Input: n: Integer
+    Input: v: Integer
+    Body: {
+        IfCondition EqualTo(n, 1) ThenBlock: {
+            SetByte(p, off, BitwiseAnd(v, 255))
+        }
+        IfCondition EqualTo(n, 2) ThenBlock: {
+            SQLite.PutBE16(p, off, v)
+        }
+        IfCondition EqualTo(n, 3) ThenBlock: {
+            SetByte(p, off, BitwiseAnd(RightShift(v, 16), 255))
+            SQLite.PutBE16(p, Add(off, 1), v)
+        }
+        IfCondition EqualTo(n, 4) ThenBlock: {
+            SQLite.PutBE32(p, off, v)
+        }
+    }
+}
+
+Function.SQLite.ColRaw {
+    Input: rec: Address
+    Input: idx: Integer
+    Output: Address
+    Body: {
+        hsz = SQLite.Varint(rec, 0)
+        hend = hsz
+        tpos = SQLiteV.next
+        i = 0
+        data = Add(rec, hend)
+        WhileLoop LessThan(tpos, hend) {
+            st = SQLite.Varint(rec, tpos)
+            tpos = SQLiteV.next
+            ln = SQLite.SerialLen(st)
+            IfCondition EqualTo(i, idx) ThenBlock: {
+                SQLiteV.len = ln
+                SQLiteV.ptr = data
+                ReturnValue(data)
+            }
+            data = Add(data, ln)
+            i = Add(i, 1)
+        }
+        SQLiteV.len = 0
+        SQLiteV.ptr = 0
+        ReturnValue(0)
+    }
+}
+
+Function.SQLite.MemCmp {
+    Input: a: Address
+    Input: na: Integer
+    Input: b: Address
+    Input: nb: Integer
+    Output: Integer
+    Body: {
+        n = na
+        IfCondition GreaterThan(na, nb) ThenBlock: { n = nb }
+        i = 0
+        WhileLoop LessThan(i, n) {
+            ba = GetByte(a, i)
+            bb = GetByte(b, i)
+            IfCondition LessThan(ba, bb) ThenBlock: { ReturnValue(-1) }
+            IfCondition GreaterThan(ba, bb) ThenBlock: { ReturnValue(1) }
+            i = Add(i, 1)
+        }
+        IfCondition LessThan(na, nb) ThenBlock: { ReturnValue(-1) }
+        IfCondition GreaterThan(na, nb) ThenBlock: { ReturnValue(1) }
+        ReturnValue(0)
+    }
+}
+
+Function.SQLite.CmpRec {
+    Input: a: Address
+    Input: b: Address
+    Output: Integer
+    Body: {
+        mode = SQLiteIns.cmp
+        IfCondition EqualTo(mode, 1) ThenBlock: {
+            pa = SQLite.ColRaw(a, 0)
+            la = SQLiteV.len
+            pb = SQLite.ColRaw(b, 0)
+            lb = SQLiteV.len
+            c = SQLite.MemCmp(pa, la, pb, lb)
+            IfCondition GreaterThan(c, 0) ThenBlock: { ReturnValue(-1) }
+            IfCondition LessThan(c, 0) ThenBlock: { ReturnValue(1) }
+            ia = SQLite.ColInt(a, 1)
+            ib = SQLite.ColInt(b, 1)
+            IfCondition GreaterThan(ia, ib) ThenBlock: { ReturnValue(-1) }
+            IfCondition LessThan(ia, ib) ThenBlock: { ReturnValue(1) }
+            ReturnValue(0)
+        }
+        ia0 = SQLite.ColInt(a, 0)
+        ib0 = SQLite.ColInt(b, 0)
+        IfCondition LessThan(ia0, ib0) ThenBlock: { ReturnValue(-1) }
+        IfCondition GreaterThan(ia0, ib0) ThenBlock: { ReturnValue(1) }
+        ia1 = SQLite.ColInt(a, 1)
+        ib1 = SQLite.ColInt(b, 1)
+        IfCondition LessThan(ia1, ib1) ThenBlock: { ReturnValue(-1) }
+        IfCondition GreaterThan(ia1, ib1) ThenBlock: { ReturnValue(1) }
+        ReturnValue(0)
+    }
+}
+
+Function.SQLite.CmpCell {
+    Input: cell: Address
+    Input: flags: Integer
+    Output: Integer
+    Body: {
+        IfCondition EqualTo(flags, 5) ThenBlock: {
+            rid = SQLite.Varint(cell, 4)
+            IfCondition LessThan(SQLiteIns.rowid, rid) ThenBlock: { ReturnValue(-1) }
+            IfCondition GreaterThan(SQLiteIns.rowid, rid) ThenBlock: { ReturnValue(1) }
+            ReturnValue(0)
+        }
+        IfCondition EqualTo(SQLiteIns.kind, 0) ThenBlock: {
+            rid2 = SQLite.TableCellRowid(cell)
+            IfCondition LessThan(SQLiteIns.rowid, rid2) ThenBlock: { ReturnValue(-1) }
+            IfCondition GreaterThan(SQLiteIns.rowid, rid2) ThenBlock: { ReturnValue(1) }
+            ReturnValue(0)
+        }
+        skip = 0
+        IfCondition EqualTo(flags, 2) ThenBlock: { skip = 4 }
+        rec = SQLite.IndexCellRec(cell, skip)
+        c = SQLite.CmpRec(SQLiteIns.rec, rec)
+        ReturnValue(c)
+    }
+}
+
+Function.SQLite.CellSize {
+    Input: cell: Address
+    Input: flags: Integer
+    Output: Integer
+    Body: {
+        IfCondition EqualTo(flags, 5) ThenBlock: {
+            SQLite.Varint(cell, 4)
+            ReturnValue(SQLiteV.next)
+        }
+        skip = 0
+        IfCondition EqualTo(flags, 2) ThenBlock: { skip = 4 }
+        payload = SQLite.Varint(cell, skip)
+        rec_off = SQLiteV.next
+        ReturnValue(Add(rec_off, payload))
+    }
+}
+
+Function.SQLite.AllocPage {
+    Input: flags: Integer
+    Output: Integer
+    Body: {
+        SQLiteDB.npages = Add(SQLiteDB.npages, 1)
+        pn = SQLiteDB.npages
+        buf = Allocate(SQLiteDB.page)
+        MemorySet(buf, 0, SQLiteDB.page)
+        SetByte(buf, 0, flags)
+        SQLite.PutBE16(buf, 5, SQLiteDB.usable)
+        key = SQLite.PageKey(pn)
+        Hash.Set(SQLiteDB.overlay, key, buf)
+        Hash.Set(SQLiteDB.txn, key, pn)
+        SQLiteDB.dirty_n = Add(SQLiteDB.dirty_n, 1)
+        ReturnValue(pn)
+    }
+}
+
+Function.SQLite.PtrBase {
+    Input: h: Integer
+    Input: flags: Integer
+    Output: Integer
+    Body: {
+        ptrbase = Add(h, 8)
+        IfCondition EqualTo(flags, 2) ThenBlock: { ptrbase = Add(h, 12) }
+        IfCondition EqualTo(flags, 5) ThenBlock: { ptrbase = Add(h, 12) }
+        ReturnValue(ptrbase)
+    }
+}
+
+Function.SQLite.Gap {
+    Input: pageno: Integer
+    Output: Integer
+    Body: {
+        page = SQLite.Page(pageno)
+        h = SQLite.HdrOff(pageno)
+        flags = GetByte(page, h)
+        ncells = SQLite.BE16(page, Add(h, 3))
+        content = SQLite.BE16(page, Add(h, 5))
+        pb = SQLite.PtrBase(h, flags)
+        pend = Add(pb, Multiply(ncells, 2))
+        ReturnValue(Subtract(content, pend))
+    }
+}
+
+Function.SQLite.Compact {
+    Input: pageno: Integer
+    Body: {
+        page = SQLite.Dirty(pageno)
+        h = SQLite.HdrOff(pageno)
+        flags = GetByte(page, h)
+        ncells = SQLite.BE16(page, Add(h, 3))
+        pb = SQLite.PtrBase(h, flags)
+        ps = SQLiteDB.page
+        tmp = Allocate(ps)
+        MemoryCopy(tmp, page, ps)
+        dst = SQLiteDB.usable
+        i = 0
+        WhileLoop LessThan(i, ncells) {
+            cell = SQLite.LeafCell(page, pageno, i)
+            sz = SQLite.CellSize(cell, flags)
+            dst = Subtract(dst, sz)
+            MemoryCopy(Add(tmp, dst), cell, sz)
+            SQLite.PutBE16(tmp, Add(pb, Multiply(i, 2)), dst)
+            i = Add(i, 1)
+        }
+        SQLite.PutBE16(tmp, Add(h, 5), dst)
+        SQLite.PutBE16(tmp, Add(h, 1), 0)
+        SetByte(tmp, Add(h, 7), 0)
+        MemoryCopy(page, tmp, ps)
+        Deallocate(tmp, ps)
+    }
+}
+
+Function.SQLite.PutCell {
+    Input: pageno: Integer
+    Input: pos: Integer
+    Input: src: Address
+    Input: slen: Integer
+    Output: Integer
+    Body: {
+        page = SQLite.Dirty(pageno)
+        need = Add(slen, 2)
+        gap = SQLite.Gap(pageno)
+        IfCondition LessThan(gap, need) ThenBlock: {
+            SQLite.Compact(pageno)
+            gap = SQLite.Gap(pageno)
+            IfCondition LessThan(gap, need) ThenBlock: { ReturnValue(0) }
+            page = SQLite.Page(pageno)
+        }
+        h = SQLite.HdrOff(pageno)
+        flags = GetByte(page, h)
+        ncells = SQLite.BE16(page, Add(h, 3))
+        content = SQLite.BE16(page, Add(h, 5))
+        pb = SQLite.PtrBase(h, flags)
+        new_off = Subtract(content, slen)
+        MemoryCopy(Add(page, new_off), src, slen)
+        i = ncells
+        WhileLoop GreaterThan(i, pos) {
+            prev = Subtract(i, 1)
+            w = SQLite.BE16(page, Add(pb, Multiply(prev, 2)))
+            SQLite.PutBE16(page, Add(pb, Multiply(i, 2)), w)
+            i = Subtract(i, 1)
+        }
+        SQLite.PutBE16(page, Add(pb, Multiply(pos, 2)), new_off)
+        SQLite.PutBE16(page, Add(h, 3), Add(ncells, 1))
+        SQLite.PutBE16(page, Add(h, 5), new_off)
+        ReturnValue(1)
+    }
+}
+
+Function.SQLite.SetRoot {
+    Input: pn: Integer
+    Body: {
+        w = SQLiteIns.which
+        IfCondition EqualTo(w, 1) ThenBlock: { SQLiteDB.posts_root = pn }
+        IfCondition EqualTo(w, 2) ThenBlock: { SQLiteDB.likes_root = pn }
+        IfCondition EqualTo(w, 3) ThenBlock: { SQLiteDB.feed_idx = pn }
+        IfCondition EqualTo(w, 4) ThenBlock: { SQLiteDB.likes_idx = pn }
+        IfCondition EqualTo(w, 5) ThenBlock: { SQLiteDB.users_idx = pn }
+        IfCondition EqualTo(w, 6) ThenBlock: { SQLiteDB.likes_pk = pn }
+    }
+}
+
+Function.SQLite.CaptureSep {
+    Input: cell: Address
+    Input: flags: Integer
+    Body: {
+        IfCondition EqualTo(flags, 5) ThenBlock: {
+            SQLiteIns.sep = SQLite.Varint(cell, 4)
+            SQLiteIns.seplen = 0
+            ReturnValue(0)
+        }
+        IfCondition EqualTo(SQLiteIns.kind, 0) ThenBlock: {
+            SQLiteIns.sep = SQLite.TableCellRowid(cell)
+            SQLiteIns.seplen = 0
+            ReturnValue(0)
+        }
+        skip = 0
+        IfCondition EqualTo(flags, 2) ThenBlock: { skip = 4 }
+        payload = SQLite.Varint(cell, skip)
+        rec = SQLite.IndexCellRec(cell, skip)
+        buf = Allocate(Add(payload, 1))
+        IfCondition GreaterThan(payload, 0) ThenBlock: {
+            MemoryCopy(buf, rec, payload)
+        }
+        SQLiteIns.sep = buf
+        SQLiteIns.seplen = payload
+    }
+}
+
+Function.SQLite.SaveSep {
+    Input: pageno: Integer
+    Body: {
+        page = SQLite.Page(pageno)
+        h = SQLite.HdrOff(pageno)
+        flags = GetByte(page, h)
+        ncells = SQLite.BE16(page, Add(h, 3))
+        last = Subtract(ncells, 1)
+        cell = SQLite.LeafCell(page, pageno, last)
+        SQLite.CaptureSep(cell, flags)
+    }
+}
+
+Function.SQLite.PutNew {
+    Input: pageno: Integer
+    Output: Integer
+    Body: {
+        page = SQLite.Page(pageno)
+        IfCondition EqualTo(page, 0) ThenBlock: { ReturnValue(0) }
+        h = SQLite.HdrOff(pageno)
+        flags = GetByte(page, h)
+        ncells = SQLite.BE16(page, Add(h, 3))
+        pos = 0
+        ci = 0
+        WhileLoop LessThan(ci, ncells) {
+            cell = SQLite.LeafCell(page, pageno, ci)
+            c = SQLite.CmpCell(cell, flags)
+            IfCondition LessEqual(c, 0) ThenBlock: {
+                pos = ci
+                BreakLoop
+            }
+            pos = Add(ci, 1)
+            ci = Add(ci, 1)
+        }
+        ok = SQLite.PutCell(pageno, pos, SQLiteIns.buf, SQLiteIns.len)
+        ReturnValue(ok)
+    }
+}
+
+Function.SQLite.LinkAfter {
+    Input: pageno: Integer
+    Input: left: Integer
+    Input: right: Integer
+    Output: Integer
+    Body: {
+        IfCondition LessThan(pageno, 1) ThenBlock: { ReturnValue(0) }
+        page = SQLite.Dirty(pageno)
+        IfCondition EqualTo(page, 0) ThenBlock: { ReturnValue(0) }
+        h = SQLite.HdrOff(pageno)
+        ncells = SQLite.BE16(page, Add(h, 3))
+        ci = 0
+        WhileLoop LessThan(ci, ncells) {
+            cell = SQLite.LeafCell(page, pageno, ci)
+            cl = SQLite.BE32(cell, 0)
+            IfCondition EqualTo(cl, left) ThenBlock: {
+                nxt = Add(ci, 1)
+                IfCondition LessThan(nxt, ncells) ThenBlock: {
+                    ncell = SQLite.LeafCell(page, pageno, nxt)
+                    SQLite.PutBE32(ncell, 0, right)
+                }
+                IfCondition GreaterEqual(nxt, ncells) ThenBlock: {
+                    SQLite.PutBE32(page, Add(h, 8), right)
+                }
+                ReturnValue(1)
+            }
+            ci = Add(ci, 1)
+        }
+        ReturnValue(0)
+    }
+}
+
+Function.SQLite.CmpSep {
+    Output: Integer
+    Body: {
+        IfCondition EqualTo(SQLiteIns.kind, 0) ThenBlock: {
+            IfCondition LessThan(SQLiteIns.rowid, SQLiteIns.sep) ThenBlock: { ReturnValue(-1) }
+            IfCondition GreaterThan(SQLiteIns.rowid, SQLiteIns.sep) ThenBlock: { ReturnValue(1) }
+            ReturnValue(0)
+        }
+        c = SQLite.CmpRec(SQLiteIns.rec, SQLiteIns.sep)
+        ReturnValue(c)
+    }
+}
+
+Function.SQLite.SplitLeaf {
+    Input: pageno: Integer
+    Input: pos: Integer
+    Output: Integer
+    Body: {
+        page = SQLite.Dirty(pageno)
+        h = SQLite.HdrOff(pageno)
+        flags = GetByte(page, h)
+        ncells = SQLite.BE16(page, Add(h, 3))
+        mid = Divide(ncells, 2)
+        is_int = 0
+        IfCondition EqualTo(flags, 2) ThenBlock: { is_int = 1 }
+        IfCondition EqualTo(flags, 5) ThenBlock: { is_int = 1 }
+        orig_right = 0
+        IfCondition EqualTo(is_int, 1) ThenBlock: {
+            orig_right = SQLite.BE32(page, Add(h, 8))
+        }
+        rp = SQLite.AllocPage(flags)
+        IfCondition EqualTo(is_int, 1) ThenBlock: {
+            IfCondition LessThan(ncells, 2) ThenBlock: {
+                is_int = 0
+            }
+        }
+        IfCondition EqualTo(is_int, 1) ThenBlock: {
+            prom = SQLite.LeafCell(page, pageno, mid)
+            prom_left = SQLite.BE32(prom, 0)
+            SQLite.CaptureSep(prom, flags)
+            i = Add(mid, 1)
+            rpos = 0
+            WhileLoop LessThan(i, ncells) {
+                cell = SQLite.LeafCell(page, pageno, i)
+                sz = SQLite.CellSize(cell, flags)
+                SQLite.PutCell(rp, rpos, cell, sz)
+                rpos = Add(rpos, 1)
+                i = Add(i, 1)
+            }
+            rpage = SQLite.Page(rp)
+            SQLite.PutBE32(rpage, 8, orig_right)
+            SQLite.PutBE16(page, Add(h, 3), mid)
+            SQLite.PutBE32(page, Add(h, 8), prom_left)
+            SQLite.Compact(pageno)
+            cs = SQLite.CmpSep()
+            IfCondition GreaterThan(cs, 0) ThenBlock: {
+                SQLite.PutNew(rp)
+            }
+            IfCondition LessEqual(cs, 0) ThenBlock: {
+                SQLite.PutNew(pageno)
+            }
+            SQLiteIns.split = 1
+            SQLiteIns.right = rp
+            ReturnValue(1)
+        }
+        i = mid
+        rpos = 0
+        WhileLoop LessThan(i, ncells) {
+            cell = SQLite.LeafCell(page, pageno, i)
+            sz = SQLite.CellSize(cell, flags)
+            SQLite.PutCell(rp, rpos, cell, sz)
+            rpos = Add(rpos, 1)
+            i = Add(i, 1)
+        }
+        SQLite.PutBE16(page, Add(h, 3), mid)
+        SQLite.Compact(pageno)
+        IfCondition LessEqual(pos, mid) ThenBlock: {
+            SQLite.PutCell(pageno, pos, SQLiteIns.buf, SQLiteIns.len)
+        }
+        IfCondition GreaterThan(pos, mid) ThenBlock: {
+            rppos = Subtract(pos, mid)
+            SQLite.PutCell(rp, rppos, SQLiteIns.buf, SQLiteIns.len)
+        }
+        SQLite.SaveSep(pageno)
+        SQLiteIns.split = 1
+        SQLiteIns.right = rp
+        ReturnValue(1)
+    }
+}
+
+Function.SQLite.MakeIntCell {
+    Input: left: Integer
+    Output: Address
+    Body: {
+        IfCondition EqualTo(SQLiteIns.kind, 0) ThenBlock: {
+            buf = Allocate(16)
+            SQLite.PutBE32(buf, 0, left)
+            n = SQLite.PutVarint(buf, 4, SQLiteIns.sep)
+            SQLiteIns.len = Add(4, n)
+            ReturnValue(buf)
+        }
+        buf = Allocate(Add(SQLiteIns.seplen, 16))
+        SQLite.PutBE32(buf, 0, left)
+        n = SQLite.PutVarint(buf, 4, SQLiteIns.seplen)
+        MemoryCopy(Add(buf, Add(4, n)), SQLiteIns.sep, SQLiteIns.seplen)
+        SQLiteIns.len = Add(Add(4, n), SQLiteIns.seplen)
+        ReturnValue(buf)
+    }
+}
+
+Function.SQLite.FinishSplit {
+    Input: pageno: Integer
+    Input: child: Integer
+    Body: {
+        newr = SQLiteIns.right
+        ibuf = SQLite.MakeIntCell(child)
+        SQLiteIns.buf = ibuf
+        SQLiteIns.split = 0
+        page = SQLite.Page(pageno)
+        h = SQLite.HdrOff(pageno)
+        ncells = SQLite.BE16(page, Add(h, 3))
+        ipos = ncells
+        ci = 0
+        WhileLoop LessThan(ci, ncells) {
+            cell = SQLite.LeafCell(page, pageno, ci)
+            left = SQLite.BE32(cell, 0)
+            IfCondition EqualTo(left, child) ThenBlock: {
+                ipos = ci
+                BreakLoop
+            }
+            ci = Add(ci, 1)
+        }
+        ok = SQLite.PutCell(pageno, ipos, ibuf, SQLiteIns.len)
+        IfCondition EqualTo(ok, 0) ThenBlock: {
+            SQLite.SplitLeaf(pageno, ipos)
+            SQLite.LinkAfter(pageno, child, newr)
+            IfCondition EqualTo(SQLiteIns.split, 1) ThenBlock: {
+                SQLite.LinkAfter(SQLiteIns.right, child, newr)
+            }
+            ReturnValue(0)
+        }
+        SQLite.LinkAfter(pageno, child, newr)
+    }
+}
+
+Function.SQLite.BtreeInsert {
+    Input: pageno: Integer
+    Output: Integer
+    Body: {
+        page = SQLite.Page(pageno)
+        IfCondition EqualTo(page, 0) ThenBlock: { ReturnValue(0) }
+        h = SQLite.HdrOff(pageno)
+        flags = GetByte(page, h)
+        ncells = SQLite.BE16(page, Add(h, 3))
+        IfCondition EqualTo(flags, 5) ThenBlock: {
+            child = SQLite.BE32(page, Add(h, 8))
+            ci = 0
+            WhileLoop LessThan(ci, ncells) {
+                cell = SQLite.LeafCell(page, pageno, ci)
+                left = SQLite.BE32(cell, 0)
+                key = SQLite.Varint(cell, 4)
+                IfCondition LessEqual(SQLiteIns.rowid, key) ThenBlock: {
+                    child = left
+                    BreakLoop
+                }
+                ci = Add(ci, 1)
+            }
+            SQLite.BtreeInsert(child)
+            IfCondition EqualTo(SQLiteIns.split, 0) ThenBlock: { ReturnValue(1) }
+            SQLite.FinishSplit(pageno, child)
+            ReturnValue(1)
+        }
+        IfCondition EqualTo(flags, 2) ThenBlock: {
+            child = SQLite.BE32(page, Add(h, 8))
+            ci = 0
+            WhileLoop LessThan(ci, ncells) {
+                cell = SQLite.LeafCell(page, pageno, ci)
+                left = SQLite.BE32(cell, 0)
+                rec = SQLite.IndexCellRec(cell, 4)
+                c = SQLite.CmpRec(SQLiteIns.rec, rec)
+                IfCondition LessEqual(c, 0) ThenBlock: {
+                    child = left
+                    BreakLoop
+                }
+                ci = Add(ci, 1)
+            }
+            SQLite.BtreeInsert(child)
+            IfCondition EqualTo(SQLiteIns.split, 0) ThenBlock: { ReturnValue(1) }
+            SQLite.FinishSplit(pageno, child)
+            ReturnValue(1)
+        }
+        pos = 0
+        ci = 0
+        WhileLoop LessThan(ci, ncells) {
+            cell = SQLite.LeafCell(page, pageno, ci)
+            c = SQLite.CmpCell(cell, flags)
+            IfCondition LessEqual(c, 0) ThenBlock: {
+                pos = ci
+                BreakLoop
+            }
+            pos = Add(ci, 1)
+            ci = Add(ci, 1)
+        }
+        ok = SQLite.PutCell(pageno, pos, SQLiteIns.buf, SQLiteIns.len)
+        IfCondition EqualTo(ok, 0) ThenBlock: {
+            SQLite.SplitLeaf(pageno, pos)
+            ReturnValue(1)
+        }
+        ReturnValue(1)
+    }
+}
+
+Function.SQLite.CommitBatch {
+    Input: unused: Address
+    Body: {
+        SQLite.Commit()
+    }
+}
+
+Function.SQLite.InsertRoot {
+    Input: root: Integer
+    Output: Integer
+    Body: {
+        SQLiteIns.split = 0
+        SQLite.BtreeInsert(root)
+        IfCondition EqualTo(SQLiteIns.which, 4) ThenBlock: {
+            SQLiteDB.likes_right_dirty = 1
+        }
+        IfCondition EqualTo(SQLiteIns.split, 1) ThenBlock: {
+            ifl = 5
+            IfCondition EqualTo(SQLiteIns.kind, 1) ThenBlock: { ifl = 2 }
+            nr = SQLite.AllocPage(ifl)
+            ibuf = SQLite.MakeIntCell(root)
+            SQLite.PutCell(nr, 0, ibuf, SQLiteIns.len)
+            page = SQLite.Dirty(nr)
+            SQLite.PutBE32(page, 8, SQLiteIns.right)
+            SQLite.SetRoot(nr)
+            SQLiteIns.split = 0
+        }
+        ReturnValue(1)
+    }
+}
+
+Function.SQLite.MaxRowid {
+    Input: pageno: Integer
+    Output: Integer
+    Body: {
+        cur = pageno
+        WhileLoop GreaterThan(cur, 0) {
+            page = SQLite.Page(cur)
+            IfCondition EqualTo(page, 0) ThenBlock: { ReturnValue(0) }
+            h = SQLite.HdrOff(cur)
+            flags = GetByte(page, h)
+            ncells = SQLite.BE16(page, Add(h, 3))
+            IfCondition EqualTo(flags, 5) ThenBlock: {
+                cur = SQLite.BE32(page, Add(h, 8))
+            }
+            IfCondition NotEqual(flags, 5) ThenBlock: {
+                IfCondition EqualTo(ncells, 0) ThenBlock: { ReturnValue(0) }
+                last = Subtract(ncells, 1)
+                cell = SQLite.LeafCell(page, cur, last)
+                rid = SQLite.TableCellRowid(cell)
+                ReturnValue(rid)
+            }
+        }
+        ReturnValue(0)
+    }
+}
+
+Function.SQLite.MakeTableCell {
+    Input: rec: Address
+    Input: rlen: Integer
+    Input: rowid: Integer
+    Output: Address
+    Body: {
+        buf = Allocate(Add(rlen, 16))
+        n0 = SQLite.PutVarint(buf, 0, rlen)
+        n1 = SQLite.PutVarint(buf, n0, rowid)
+        MemoryCopy(Add(buf, Add(n0, n1)), rec, rlen)
+        SQLiteIns.len = Add(Add(n0, n1), rlen)
+        ReturnValue(buf)
+    }
+}
+
+Function.SQLite.MakeIndexCell {
+    Input: rec: Address
+    Input: rlen: Integer
+    Output: Address
+    Body: {
+        buf = Allocate(Add(rlen, 8))
+        n0 = SQLite.PutVarint(buf, 0, rlen)
+        MemoryCopy(Add(buf, n0), rec, rlen)
+        SQLiteIns.len = Add(n0, rlen)
+        ReturnValue(buf)
+    }
+}
+
+Function.SQLite.EncIntsText {
+    Input: a: Integer
+    Input: b: Integer
+    Input: t: Address
+    Output: Address
+    Body: {
+        ln = 0
+        IfCondition NotEqual(t, 0) ThenBlock: {
+            ln = StringLength(t)
+        }
+        sta = SQLite.IntSerial(a)
+        stb = SQLite.IntSerial(b)
+        stt = Add(13, Multiply(ln, 2))
+        rec = Allocate(Add(ln, 32))
+        SetByte(rec, 0, 4)
+        SetByte(rec, 1, sta)
+        SetByte(rec, 2, stb)
+        SetByte(rec, 3, stt)
+        o = 4
+        la = SQLite.SerialLen(sta)
+        SQLite.PutIntN(rec, o, la, a)
+        o = Add(o, la)
+        lb = SQLite.SerialLen(stb)
+        SQLite.PutIntN(rec, o, lb, b)
+        o = Add(o, lb)
+        IfCondition GreaterThan(ln, 0) ThenBlock: {
+            MemoryCopy(Add(rec, o), t, ln)
+        }
+        SQLiteV.len = Add(o, ln)
+        ReturnValue(rec)
+    }
+}
+
+Function.SQLite.EncPostRec {
+    Input: uid: Integer
+    Input: body: Address
+    Input: created: Address
+    Output: Address
+    Body: {
+        bl = StringLength(body)
+        cl = StringLength(created)
+        stu = SQLite.IntSerial(uid)
+        stb = Add(13, Multiply(bl, 2))
+        stc = Add(13, Multiply(cl, 2))
+        rec = Allocate(Add(Add(bl, cl), 32))
+        SetByte(rec, 0, 5)
+        SetByte(rec, 1, 0)
+        SetByte(rec, 2, stu)
+        n3 = SQLite.PutVarint(rec, 3, stb)
+        off = Add(3, n3)
+        n4 = SQLite.PutVarint(rec, off, stc)
+        hend = Add(off, n4)
+        IfCondition NotEqual(hend, 5) ThenBlock: {
+            SetByte(rec, 0, hend)
+        }
+        o = hend
+        lu = SQLite.SerialLen(stu)
+        SQLite.PutIntN(rec, o, lu, uid)
+        o = Add(o, lu)
+        MemoryCopy(Add(rec, o), body, bl)
+        o = Add(o, bl)
+        MemoryCopy(Add(rec, o), created, cl)
+        o = Add(o, cl)
+        SQLiteV.len = o
+        ReturnValue(rec)
+    }
+}
+
+Function.SQLite.EncTextTwoInt {
+    Input: t: Address
+    Input: a: Integer
+    Input: b: Integer
+    Output: Address
+    Body: {
+        ln = StringLength(t)
+        stt = Add(13, Multiply(ln, 2))
+        sta = SQLite.IntSerial(a)
+        stb = SQLite.IntSerial(b)
+        rec = Allocate(Add(ln, 32))
+        n1 = SQLite.PutVarint(rec, 1, stt)
+        SetByte(rec, Add(1, n1), sta)
+        SetByte(rec, Add(Add(1, n1), 1), stb)
+        hend = Add(Add(1, n1), 2)
+        SetByte(rec, 0, hend)
+        IfCondition GreaterThan(ln, 0) ThenBlock: {
+            MemoryCopy(Add(rec, hend), t, ln)
+        }
+        o = Add(hend, ln)
+        la = SQLite.SerialLen(sta)
+        SQLite.PutIntN(rec, o, la, a)
+        o = Add(o, la)
+        lb = SQLite.SerialLen(stb)
+        SQLite.PutIntN(rec, o, lb, b)
+        o = Add(o, lb)
+        SQLiteV.len = o
+        ReturnValue(rec)
+    }
+}
+
+Function.SQLite.EncTwoInt {
+    Input: a: Integer
+    Input: b: Integer
+    Output: Address
+    Body: {
+        sta = SQLite.IntSerial(a)
+        stb = SQLite.IntSerial(b)
+        rec = Allocate(16)
+        SetByte(rec, 0, 3)
+        SetByte(rec, 1, sta)
+        SetByte(rec, 2, stb)
+        o = 3
+        la = SQLite.SerialLen(sta)
+        SQLite.PutIntN(rec, o, la, a)
+        o = Add(o, la)
+        lb = SQLite.SerialLen(stb)
+        SQLite.PutIntN(rec, o, lb, b)
+        o = Add(o, lb)
+        SQLiteV.len = o
+        ReturnValue(rec)
+    }
+}
+
+Function.SQLite.EncThreeInt {
+    Input: a: Integer
+    Input: b: Integer
+    Input: c: Integer
+    Output: Address
+    Body: {
+        sta = SQLite.IntSerial(a)
+        stb = SQLite.IntSerial(b)
+        stc = SQLite.IntSerial(c)
+        rec = Allocate(24)
+        SetByte(rec, 0, 4)
+        SetByte(rec, 1, sta)
+        SetByte(rec, 2, stb)
+        SetByte(rec, 3, stc)
+        o = 4
+        la = SQLite.SerialLen(sta)
+        SQLite.PutIntN(rec, o, la, a)
+        o = Add(o, la)
+        lb = SQLite.SerialLen(stb)
+        SQLite.PutIntN(rec, o, lb, b)
+        o = Add(o, lb)
+        lc = SQLite.SerialLen(stc)
+        SQLite.PutIntN(rec, o, lc, c)
+        o = Add(o, lc)
+        SQLiteV.len = o
+        ReturnValue(rec)
+    }
+}
+
+Function.SQLite.InsertPost {
+    Input: uid: Integer
+    Input: body: Address
+    Input: created: Address
+    Output: Integer
+    Body: {
+        rid = SQLite.MaxRowid(SQLiteDB.posts_root)
+        rid = Add(rid, 1)
+        rec = SQLite.EncPostRec(uid, body, created)
+        rlen = SQLiteV.len
+        SQLiteIns.buf = SQLite.MakeTableCell(rec, rlen, rid)
+        SQLiteIns.rowid = rid
+        SQLiteIns.kind = 0
+        SQLiteIns.cmp = 0
+        SQLiteIns.which = 1
+        SQLite.InsertRoot(SQLiteDB.posts_root)
+        ft = SQLite.EncTextTwoInt(created, rid, rid)
+        flen = SQLiteV.len
+        SQLiteIns.rec = ft
+        SQLiteIns.buf = SQLite.MakeIndexCell(ft, flen)
+        SQLiteIns.kind = 1
+        SQLiteIns.cmp = 1
+        SQLiteIns.which = 3
+        SQLite.InsertRoot(SQLiteDB.feed_idx)
+        urec = SQLite.EncTwoInt(uid, rid)
+        ulen = SQLiteV.len
+        SQLiteIns.rec = urec
+        SQLiteIns.buf = SQLite.MakeIndexCell(urec, ulen)
+        SQLiteIns.kind = 1
+        SQLiteIns.cmp = 2
+        SQLiteIns.which = 5
+        SQLite.InsertRoot(SQLiteDB.users_idx)
+        IfCondition EqualTo(SQLiteDB.auto_commit, 1) ThenBlock: {
+            SQLite.Commit()
+        }
+        ReturnValue(rid)
+    }
+}
+
+Function.SQLite.PkWalk {
+    Input: pageno: Integer
+    Input: uid: Integer
+    Input: pid: Integer
+    Output: Integer
+    Body: {
+        page = SQLite.Page(pageno)
+        IfCondition EqualTo(page, 0) ThenBlock: { ReturnValue(0) }
+        h = SQLite.HdrOff(pageno)
+        flags = GetByte(page, h)
+        ncells = SQLite.BE16(page, Add(h, 3))
+        IfCondition EqualTo(flags, 2) ThenBlock: {
+            ci = 0
+            WhileLoop LessThan(ci, ncells) {
+                cell = SQLite.LeafCell(page, pageno, ci)
+                left = SQLite.BE32(cell, 0)
+                rec = SQLite.IndexCellRec(cell, 4)
+                ku = SQLite.ColInt(rec, 0)
+                kp = SQLite.ColInt(rec, 1)
+                go = 0
+                IfCondition LessThan(uid, ku) ThenBlock: { go = 1 }
+                IfCondition EqualTo(uid, ku) ThenBlock: {
+                    IfCondition LessEqual(pid, kp) ThenBlock: { go = 1 }
+                }
+                IfCondition EqualTo(go, 1) ThenBlock: {
+                    hit = SQLite.PkWalk(left, uid, pid)
+                    IfCondition EqualTo(hit, 1) ThenBlock: { ReturnValue(1) }
+                    IfCondition GreaterThan(ku, uid) ThenBlock: { ReturnValue(0) }
+                    IfCondition EqualTo(ku, uid) ThenBlock: {
+                        IfCondition GreaterThan(kp, pid) ThenBlock: { ReturnValue(0) }
+                    }
+                }
+                ci = Add(ci, 1)
+            }
+            right = SQLite.BE32(page, Add(h, 8))
+            hit2 = SQLite.PkWalk(right, uid, pid)
+            ReturnValue(hit2)
+        }
+        IfCondition NotEqual(flags, 10) ThenBlock: { ReturnValue(0) }
+        ci = 0
+        WhileLoop LessThan(ci, ncells) {
+            cell = SQLite.LeafCell(page, pageno, ci)
+            rec = SQLite.IndexCellRec(cell, 0)
+            ku = SQLite.ColInt(rec, 0)
+            kp = SQLite.ColInt(rec, 1)
+            IfCondition EqualTo(ku, uid) ThenBlock: {
+                IfCondition EqualTo(kp, pid) ThenBlock: { ReturnValue(1) }
+            }
+            IfCondition GreaterThan(ku, uid) ThenBlock: { ReturnValue(0) }
+            ci = Add(ci, 1)
+        }
+        ReturnValue(0)
+    }
+}
+
+Function.SQLite.LikeExists {
+    Input: uid: Integer
+    Input: pid: Integer
+    Output: Integer
+    Body: {
+        IfCondition EqualTo(SQLiteDB.likes_pk, 0) ThenBlock: { ReturnValue(0) }
+        hit = SQLite.PkWalk(SQLiteDB.likes_pk, uid, pid)
+        ReturnValue(hit)
+    }
+}
+
+Function.SQLite.LikePost {
+    Input: uid: Integer
+    Input: pid: Integer
+    Input: created: Address
+    Output: Integer
+    Body: {
+        ex = SQLite.LikeExists(uid, pid)
+        IfCondition EqualTo(ex, 1) ThenBlock: { ReturnValue(2) }
+        gp = SQLite.GetPost(pid)
+        IfCondition EqualTo(gp, 0) ThenBlock: { ReturnValue(0) }
+        rid = SQLite.MaxRowid(SQLiteDB.likes_root)
+        rid = Add(rid, 1)
+        rec = SQLite.EncIntsText(uid, pid, created)
+        rlen = SQLiteV.len
+        SQLiteIns.buf = SQLite.MakeTableCell(rec, rlen, rid)
+        SQLiteIns.rowid = rid
+        SQLiteIns.kind = 0
+        SQLiteIns.cmp = 0
+        SQLiteIns.which = 2
+        SQLite.InsertRoot(SQLiteDB.likes_root)
+        irec = SQLite.EncTwoInt(pid, rid)
+        ilen = SQLiteV.len
+        SQLiteIns.rec = irec
+        SQLiteIns.buf = SQLite.MakeIndexCell(irec, ilen)
+        SQLiteIns.kind = 1
+        SQLiteIns.cmp = 2
+        SQLiteIns.which = 4
+        SQLite.InsertRoot(SQLiteDB.likes_idx)
+        prec = SQLite.EncThreeInt(uid, pid, rid)
+        plen = SQLiteV.len
+        SQLiteIns.rec = prec
+        SQLiteIns.buf = SQLite.MakeIndexCell(prec, plen)
+        SQLiteIns.kind = 1
+        SQLiteIns.cmp = 2
+        SQLiteIns.which = 6
+        SQLite.InsertRoot(SQLiteDB.likes_pk)
+        IfCondition EqualTo(SQLiteDB.auto_commit, 1) ThenBlock: {
+            SQLite.Commit()
+        }
+        ReturnValue(1)
+    }
+}

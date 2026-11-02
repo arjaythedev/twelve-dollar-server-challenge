@@ -1,0 +1,891 @@
+// Feed API for the $12 Server Challenge — HTTP/1.1 + native SQLite + JWT
+//
+// Copyright (c) 2026 Sean Collins, 2 Paws Machine and Engineering.
+// Released under the MIT License, as required for submissions to this challenge.
+
+LibraryImport.Arena
+LibraryImport.Env
+LibraryImport.JSON
+LibraryImport.Crypto
+LibraryImport.HTTP1
+LibraryImport.SQLite
+
+FixedPool.FeedSt {
+    "out": Initialize=0, CanChange=True
+    "cap": Initialize=65536, CanChange=True
+    "len": Initialize=0, CanChange=True
+    "ts": Initialize=0, CanChange=True
+    "iso": Initialize=0, CanChange=True
+    "rest": Initialize=0, CanChange=True
+    "secret": Initialize=0, CanChange=True
+    "start": Initialize=0, CanChange=True
+    "ok": Initialize=0, CanChange=True
+}
+
+Function.Feed.NowUnix {
+    Output: Integer
+    Body: {
+        SystemCall(228, 0, FeedSt.ts)
+        ReturnValue(Dereference(FeedSt.ts))
+    }
+}
+
+Function.Feed.PutDigits {
+    Input: buf: Address
+    Input: off: Integer
+    Input: width: Integer
+    Input: v: Integer
+    Body: {
+        x = v
+        i = Subtract(width, 1)
+        WhileLoop GreaterEqual(i, 0) {
+            d = Modulo(x, 10)
+            SetByte(buf, Add(off, i), Add(48, d))
+            x = Divide(x, 10)
+            i = Subtract(i, 1)
+        }
+    }
+}
+
+Function.Feed.NowISO {
+    Output: Address
+    Body: {
+        sec = Feed.NowUnix()
+        ns = Dereference(Add(FeedSt.ts, 8))
+        ms = Divide(ns, 1000000)
+        days = Divide(sec, 86400)
+        sod = Subtract(sec, Multiply(days, 86400))
+        hh = Divide(sod, 3600)
+        rem = Subtract(sod, Multiply(hh, 3600))
+        mm = Divide(rem, 60)
+        ss = Subtract(rem, Multiply(mm, 60))
+        z = Add(days, 719468)
+        era = Divide(z, 146097)
+        doe = Subtract(z, Multiply(era, 146097))
+        a = Divide(doe, 1460)
+        b = Divide(doe, 36524)
+        c = Divide(doe, 146096)
+        yoe = Divide(Subtract(Add(doe, b), Add(a, c)), 365)
+        y = Add(yoe, Multiply(era, 400))
+        y4 = Divide(yoe, 4)
+        y100 = Divide(yoe, 100)
+        doy = Subtract(doe, Subtract(Add(Multiply(365, yoe), y4), y100))
+        mp = Divide(Add(Multiply(5, doy), 2), 153)
+        d = Add(Subtract(doy, Divide(Add(Multiply(153, mp), 2), 5)), 1)
+        m = 0
+        IfCondition LessThan(mp, 10) ThenBlock: {
+            m = Add(mp, 3)
+        }
+        IfCondition GreaterEqual(mp, 10) ThenBlock: {
+            m = Subtract(mp, 9)
+        }
+        IfCondition LessEqual(m, 2) ThenBlock: {
+            y = Add(y, 1)
+        }
+        buf = FeedSt.iso
+        Feed.PutDigits(buf, 0, 4, y)
+        SetByte(buf, 4, 45)
+        Feed.PutDigits(buf, 5, 2, m)
+        SetByte(buf, 7, 45)
+        Feed.PutDigits(buf, 8, 2, d)
+        SetByte(buf, 10, 84)
+        Feed.PutDigits(buf, 11, 2, hh)
+        SetByte(buf, 13, 58)
+        Feed.PutDigits(buf, 14, 2, mm)
+        SetByte(buf, 16, 58)
+        Feed.PutDigits(buf, 17, 2, ss)
+        SetByte(buf, 19, 46)
+        Feed.PutDigits(buf, 20, 3, ms)
+        SetByte(buf, 23, 90)
+        SetByte(buf, 24, 0)
+        ReturnValue(buf)
+    }
+}
+
+Function.Feed.Reset {
+    Body: {
+        FeedSt.len = 0
+    }
+}
+
+Function.Feed.Put {
+    Input: src: Address
+    Input: n: Integer
+    Body: {
+        IfCondition LessEqual(n, 0) ThenBlock: { ReturnValue(0) }
+        ol = FeedSt.len
+        IfCondition GreaterThan(Add(ol, n), FeedSt.cap) ThenBlock: {
+            n = Subtract(FeedSt.cap, ol)
+        }
+        IfCondition GreaterThan(n, 0) ThenBlock: {
+            MemoryCopy(Add(FeedSt.out, ol), src, n)
+            FeedSt.len = Add(ol, n)
+        }
+    }
+}
+
+Function.Feed.PutZ {
+    Input: s: Address
+    Body: {
+        n = StringLength(s)
+        Feed.Put(s, n)
+    }
+}
+
+Function.Feed.PutInt {
+    Input: v: Integer
+    Body: {
+        ol = FeedSt.len
+        cap = FeedSt.cap
+        out = FeedSt.out
+        IfCondition EqualTo(v, 0) ThenBlock: {
+            IfCondition LessThan(ol, cap) ThenBlock: {
+                SetByte(out, ol, 48)
+                FeedSt.len = Add(ol, 1)
+            }
+            ReturnValue(0)
+        }
+        x = v
+        IfCondition LessThan(x, 0) ThenBlock: {
+            IfCondition LessThan(ol, cap) ThenBlock: {
+                SetByte(out, ol, 45)
+                ol = Add(ol, 1)
+            }
+            x = Subtract(0, x)
+        }
+        n = 1
+        IfCondition GreaterEqual(x, 10) ThenBlock: {
+            n = 2
+            IfCondition GreaterEqual(x, 100) ThenBlock: {
+                n = 3
+                IfCondition GreaterEqual(x, 1000) ThenBlock: {
+                    n = 4
+                    IfCondition GreaterEqual(x, 10000) ThenBlock: {
+                        n = 5
+                        IfCondition GreaterEqual(x, 100000) ThenBlock: {
+                            n = 6
+                            IfCondition GreaterEqual(x, 1000000) ThenBlock: {
+                                n = 7
+                                t = x
+                                WhileLoop GreaterEqual(t, 10000000) {
+                                    n = Add(n, 1)
+                                    t = Divide(t, 10)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        IfCondition GreaterThan(Add(ol, n), cap) ThenBlock: {
+            n = Subtract(cap, ol)
+        }
+        IfCondition LessEqual(n, 0) ThenBlock: {
+            FeedSt.len = ol
+            ReturnValue(0)
+        }
+        i = Subtract(n, 1)
+        WhileLoop GreaterEqual(i, 0) {
+            d = Modulo(x, 10)
+            SetByte(out, Add(ol, i), Add(48, d))
+            x = Divide(x, 10)
+            i = Subtract(i, 1)
+        }
+        FeedSt.len = Add(ol, n)
+    }
+}
+
+Function.Feed.PutByte {
+    Input: ch: Integer
+    Body: {
+        ol = FeedSt.len
+        IfCondition LessThan(ol, FeedSt.cap) ThenBlock: {
+            SetByte(FeedSt.out, ol, ch)
+            FeedSt.len = Add(ol, 1)
+        }
+    }
+}
+
+Function.Feed.PutEscByte {
+    Input: ch: Integer
+    Body: {
+        IfCondition EqualTo(ch, 34) ThenBlock: {
+            Feed.PutByte(92)
+            Feed.PutByte(34)
+            ReturnValue(0)
+        }
+        IfCondition EqualTo(ch, 92) ThenBlock: {
+            Feed.PutByte(92)
+            Feed.PutByte(92)
+            ReturnValue(0)
+        }
+        IfCondition EqualTo(ch, 10) ThenBlock: {
+            Feed.PutByte(92)
+            Feed.PutByte(110)
+            ReturnValue(0)
+        }
+        IfCondition EqualTo(ch, 13) ThenBlock: {
+            Feed.PutByte(92)
+            Feed.PutByte(114)
+            ReturnValue(0)
+        }
+        IfCondition EqualTo(ch, 9) ThenBlock: {
+            Feed.PutByte(92)
+            Feed.PutByte(116)
+            ReturnValue(0)
+        }
+        IfCondition LessThan(ch, 32) ThenBlock: {
+            Feed.PutByte(92)
+            Feed.PutByte(117)
+            Feed.PutByte(48)
+            Feed.PutByte(48)
+            hi = Divide(ch, 16)
+            lo = Modulo(ch, 16)
+            hc = Add(48, hi)
+            IfCondition GreaterThan(hi, 9) ThenBlock: { hc = Add(87, hi) }
+            lc = Add(48, lo)
+            IfCondition GreaterThan(lo, 9) ThenBlock: { lc = Add(87, lo) }
+            Feed.PutByte(hc)
+            Feed.PutByte(lc)
+            ReturnValue(0)
+        }
+        Feed.PutByte(ch)
+    }
+}
+
+Function.Feed.PutEscN {
+    Input: p: Address
+    Input: n: Integer
+    Body: {
+        IfCondition EqualTo(p, 0) ThenBlock: { ReturnValue(0) }
+        IfCondition LessEqual(n, 0) ThenBlock: { ReturnValue(0) }
+        i = 0
+        need = 0
+        WhileLoop LessThan(i, n) {
+            ch = GetByte(p, i)
+            IfCondition EqualTo(ch, 34) ThenBlock: { need = 1 }
+            IfCondition EqualTo(ch, 92) ThenBlock: { need = 1 }
+            IfCondition LessThan(ch, 32) ThenBlock: { need = 1 }
+            i = Add(i, 1)
+        }
+        IfCondition EqualTo(need, 0) ThenBlock: {
+            Feed.Put(p, n)
+            ReturnValue(0)
+        }
+        i2 = 0
+        WhileLoop LessThan(i2, n) {
+            ch2 = GetByte(p, i2)
+            Feed.PutEscByte(ch2)
+            i2 = Add(i2, 1)
+        }
+    }
+}
+
+Function.Feed.PutPost {
+    Body: {
+        ol = FeedSt.len
+        dst = Add(FeedSt.out, ol)
+        FeedSt.len = Add(ol, 6)
+        MemoryCopy(dst, "{\"id\":", 6)
+        Feed.PutInt(SQLitePost.id)
+        ol = FeedSt.len
+        dst = Add(FeedSt.out, ol)
+        FeedSt.len = Add(ol, 9)
+        MemoryCopy(dst, ",\"body\":\"", 9)
+        Feed.PutEscN(SQLitePost.body, SQLitePost.body_n)
+        ol = FeedSt.len
+        dst = Add(FeedSt.out, ol)
+        FeedSt.len = Add(ol, 16)
+        MemoryCopy(dst, "\",\"created_at\":\"", 16)
+        cp = SQLitePost.created
+        cn = SQLitePost.created_n
+        IfCondition NotEqual(cp, 0) ThenBlock: {
+            IfCondition GreaterThan(cn, 0) ThenBlock: {
+                ol = FeedSt.len
+                dst = Add(FeedSt.out, ol)
+                FeedSt.len = Add(ol, cn)
+                MemoryCopy(dst, cp, cn)
+            }
+        }
+        ol = FeedSt.len
+        dst = Add(FeedSt.out, ol)
+        FeedSt.len = Add(ol, 12)
+        MemoryCopy(dst, "\",\"author\":\"", 12)
+        ap = SQLitePost.author
+        an = SQLitePost.author_n
+        IfCondition NotEqual(ap, 0) ThenBlock: {
+            IfCondition GreaterThan(an, 0) ThenBlock: {
+                ol = FeedSt.len
+                dst = Add(FeedSt.out, ol)
+                FeedSt.len = Add(ol, an)
+                MemoryCopy(dst, ap, an)
+            }
+        }
+        ol = FeedSt.len
+        dst = Add(FeedSt.out, ol)
+        FeedSt.len = Add(ol, 15)
+        MemoryCopy(dst, "\",\"like_count\":", 15)
+        Feed.PutInt(SQLitePost.likes)
+        ol = FeedSt.len
+        SetByte(FeedSt.out, ol, 125)
+        FeedSt.len = Add(ol, 1)
+    }
+}
+
+Function.Feed.Reply {
+    Input: conn: Address
+    Input: status: Integer
+    Body: {
+        HTTP1.Reply(conn, status, FeedSt.out, FeedSt.len)
+    }
+}
+
+Function.Feed.Err {
+    Input: conn: Address
+    Input: status: Integer
+    Input: msg: Address
+    Body: {
+        Feed.Reset()
+        Feed.PutZ("{\"error\":\"")
+        Feed.PutZ(msg)
+        Feed.PutZ("\"}")
+        Feed.Reply(conn, status)
+    }
+}
+
+Function.Feed.Starts {
+    Input: s: Address
+    Input: prefix: Address
+    Output: Integer
+    Body: {
+        i = 0
+        WhileLoop 1 {
+            pc = GetByte(prefix, i)
+            IfCondition EqualTo(pc, 0) ThenBlock: { ReturnValue(1) }
+            sc = GetByte(s, i)
+            IfCondition NotEqual(sc, pc) ThenBlock: { ReturnValue(0) }
+            i = Add(i, 1)
+        }
+        ReturnValue(0)
+    }
+}
+
+Function.Feed.ParseId {
+    Input: p: Address
+    Output: Integer
+    Body: {
+        FeedSt.rest = p
+        c0 = GetByte(p, 0)
+        IfCondition LessThan(c0, 48) ThenBlock: { ReturnValue(0) }
+        IfCondition GreaterThan(c0, 57) ThenBlock: { ReturnValue(0) }
+        v = 0
+        i = 0
+        WhileLoop 1 {
+            ch = GetByte(p, i)
+            IfCondition LessThan(ch, 48) ThenBlock: { BreakLoop }
+            IfCondition GreaterThan(ch, 57) ThenBlock: { BreakLoop }
+            v = Add(Multiply(v, 10), Subtract(ch, 48))
+            i = Add(i, 1)
+        }
+        IfCondition EqualTo(i, 0) ThenBlock: { ReturnValue(0) }
+        IfCondition EqualTo(v, 0) ThenBlock: { ReturnValue(0) }
+        FeedSt.rest = Add(p, i)
+        ReturnValue(v)
+    }
+}
+
+Function.Feed.BearerOk {
+    Input: b: Address
+    Output: Integer
+    Body: {
+        IfCondition EqualTo(b, 0) ThenBlock: { ReturnValue(0) }
+        IfCondition NotEqual(GetByte(b, 0), 66) ThenBlock: { ReturnValue(0) }
+        IfCondition NotEqual(GetByte(b, 1), 101) ThenBlock: { ReturnValue(0) }
+        IfCondition NotEqual(GetByte(b, 2), 97) ThenBlock: { ReturnValue(0) }
+        IfCondition NotEqual(GetByte(b, 3), 114) ThenBlock: { ReturnValue(0) }
+        IfCondition NotEqual(GetByte(b, 4), 101) ThenBlock: { ReturnValue(0) }
+        IfCondition NotEqual(GetByte(b, 5), 114) ThenBlock: { ReturnValue(0) }
+        IfCondition NotEqual(GetByte(b, 6), 32) ThenBlock: { ReturnValue(0) }
+        IfCondition EqualTo(GetByte(b, 7), 0) ThenBlock: { ReturnValue(0) }
+        ReturnValue(1)
+    }
+}
+
+Function.Feed.Auth {
+    Input: conn: Address
+    Output: Integer
+    Body: {
+        b = HTTP1.Bearer(conn)
+        okb = Feed.BearerOk(b)
+        IfCondition EqualTo(okb, 0) ThenBlock: { ReturnValue(0) }
+        tok = Add(b, 7)
+        now = Feed.NowUnix()
+        rc = Crypto.JWT_HS256(tok, FeedSt.secret, now)
+        IfCondition EqualTo(rc, 1) ThenBlock: { ReturnValue(1) }
+        IfCondition EqualTo(rc, 2) ThenBlock: { ReturnValue(-2) }
+        ReturnValue(-1)
+    }
+}
+
+Function.Feed.AuthOrErr {
+    Input: conn: Address
+    Output: Integer
+    Body: {
+        a = Feed.Auth(conn)
+        IfCondition EqualTo(a, 0) ThenBlock: {
+            Feed.Err(conn, 401, "missing bearer token")
+            ReturnValue(0)
+        }
+        IfCondition EqualTo(a, -1) ThenBlock: {
+            Feed.Err(conn, 401, "invalid or expired token")
+            ReturnValue(0)
+        }
+        IfCondition EqualTo(a, -2) ThenBlock: {
+            Feed.Err(conn, 401, "invalid token payload")
+            ReturnValue(0)
+        }
+        ReturnValue(1)
+    }
+}
+
+Function.Feed.TrimCopy {
+    Input: s: Address
+    Output: Address
+    Body: {
+        i = 0
+        WhileLoop 1 {
+            ch = GetByte(s, i)
+            sp = 0
+            IfCondition EqualTo(ch, 32) ThenBlock: { sp = 1 }
+            IfCondition EqualTo(ch, 9) ThenBlock: { sp = 1 }
+            IfCondition EqualTo(ch, 10) ThenBlock: { sp = 1 }
+            IfCondition EqualTo(ch, 13) ThenBlock: { sp = 1 }
+            IfCondition EqualTo(sp, 0) ThenBlock: { BreakLoop }
+            i = Add(i, 1)
+        }
+        n = StringLength(s)
+        e = n
+        WhileLoop GreaterThan(e, i) {
+            ch = GetByte(s, Subtract(e, 1))
+            sp = 0
+            IfCondition EqualTo(ch, 32) ThenBlock: { sp = 1 }
+            IfCondition EqualTo(ch, 9) ThenBlock: { sp = 1 }
+            IfCondition EqualTo(ch, 10) ThenBlock: { sp = 1 }
+            IfCondition EqualTo(ch, 13) ThenBlock: { sp = 1 }
+            IfCondition EqualTo(sp, 0) ThenBlock: { BreakLoop }
+            e = Subtract(e, 1)
+        }
+        ln = Subtract(e, i)
+        out = Allocate(Add(ln, 1))
+        IfCondition GreaterThan(ln, 0) ThenBlock: {
+            MemoryCopy(out, Add(s, i), ln)
+        }
+        SetByte(out, ln, 0)
+        ReturnValue(out)
+    }
+}
+
+Function.Feed.Health {
+    Input: conn: Address
+    Body: {
+        Feed.Reset()
+        dbok = SQLite.Select1()
+        now = Feed.NowUnix()
+        up = Subtract(now, FeedSt.start)
+        IfCondition LessThan(up, 0) ThenBlock: { up = 0 }
+        IfCondition EqualTo(dbok, 1) ThenBlock: {
+            Feed.Put("{\"status\":\"ok\",\"db\":\"ok\",\"uptime_s\":", 36)
+            Feed.PutInt(up)
+            Feed.Put("}", 1)
+            Feed.Reply(conn, 200)
+        }
+        IfCondition NotEqual(dbok, 1) ThenBlock: {
+            Feed.Put("{\"status\":\"degraded\",\"db\":\"unreachable\",\"error\":\"database not open\"}", 68)
+            Feed.Reply(conn, 503)
+        }
+    }
+}
+
+Function.Feed.DoFeed {
+    Input: conn: Address
+    Body: {
+        n = SQLite.Feed20()
+        FeedSt.len = 0
+        MemoryCopy(FeedSt.out, "{\"posts\":[", 10)
+        FeedSt.len = 10
+        i = 0
+        WhileLoop LessThan(i, n) {
+            IfCondition GreaterThan(i, 0) ThenBlock: {
+                ol = FeedSt.len
+                SetByte(FeedSt.out, ol, 44)
+                FeedSt.len = Add(ol, 1)
+            }
+            SQLite.FeedLoad(i)
+            Feed.PutPost()
+            i = Add(i, 1)
+        }
+        ol2 = FeedSt.len
+        dst = Add(FeedSt.out, ol2)
+        FeedSt.len = Add(ol2, 2)
+        MemoryCopy(dst, "]}", 2)
+        Feed.Reply(conn, 200)
+    }
+}
+
+Function.Feed.DoGetPost {
+    Input: conn: Address
+    Input: path: Address
+    Body: {
+        rest = Add(path, 7)
+        id = Feed.ParseId(rest)
+        endc = GetByte(FeedSt.rest, 0)
+        IfCondition EqualTo(id, 0) ThenBlock: {
+            Feed.Err(conn, 400, "invalid post id")
+            ReturnValue(0)
+        }
+        IfCondition NotEqual(endc, 0) ThenBlock: {
+            Feed.Err(conn, 400, "invalid post id")
+            ReturnValue(0)
+        }
+        gp = SQLite.GetPost(id)
+        IfCondition EqualTo(gp, 0) ThenBlock: {
+            Feed.Err(conn, 404, "post not found")
+            ReturnValue(0)
+        }
+        FeedSt.len = 0
+        MemoryCopy(FeedSt.out, "{\"post\":", 8)
+        FeedSt.len = 8
+        Feed.PutPost()
+        ol = FeedSt.len
+        SetByte(FeedSt.out, ol, 125)
+        FeedSt.len = Add(ol, 1)
+        Feed.Reply(conn, 200)
+    }
+}
+
+Function.Feed.JsonObjectOk {
+    Input: s: Address
+    Input: n: Integer
+    Output: Integer
+    Body: {
+        i = 0
+        WhileLoop LessThan(i, n) {
+            ch = GetByte(s, i)
+            ws = 0
+            IfCondition EqualTo(ch, 32) ThenBlock: { ws = 1 }
+            IfCondition EqualTo(ch, 9) ThenBlock: { ws = 1 }
+            IfCondition EqualTo(ch, 10) ThenBlock: { ws = 1 }
+            IfCondition EqualTo(ch, 13) ThenBlock: { ws = 1 }
+            IfCondition EqualTo(ws, 0) ThenBlock: { BreakLoop }
+            i = Add(i, 1)
+        }
+        IfCondition GreaterEqual(i, n) ThenBlock: { ReturnValue(0) }
+        IfCondition NotEqual(GetByte(s, i), 123) ThenBlock: { ReturnValue(0) }
+        depth = 1
+        in_str = 0
+        esc = 0
+        i = Add(i, 1)
+        WhileLoop LessThan(i, n) {
+            ch = GetByte(s, i)
+            IfCondition EqualTo(in_str, 1) ThenBlock: {
+                IfCondition EqualTo(esc, 1) ThenBlock: {
+                    esc = 0
+                }
+                ElseBlock: {
+                    IfCondition EqualTo(ch, 92) ThenBlock: { esc = 1 }
+                    IfCondition EqualTo(ch, 34) ThenBlock: { in_str = 0 }
+                }
+            }
+            ElseBlock: {
+                IfCondition EqualTo(ch, 34) ThenBlock: { in_str = 1 }
+                IfCondition EqualTo(ch, 123) ThenBlock: { depth = Add(depth, 1) }
+                IfCondition EqualTo(ch, 91) ThenBlock: { depth = Add(depth, 1) }
+                IfCondition EqualTo(ch, 93) ThenBlock: { depth = Subtract(depth, 1) }
+                IfCondition EqualTo(ch, 125) ThenBlock: {
+                    depth = Subtract(depth, 1)
+                    IfCondition EqualTo(depth, 0) ThenBlock: {
+                        j = Add(i, 1)
+                        WhileLoop LessThan(j, n) {
+                            c2 = GetByte(s, j)
+                            ws2 = 0
+                            IfCondition EqualTo(c2, 32) ThenBlock: { ws2 = 1 }
+                            IfCondition EqualTo(c2, 9) ThenBlock: { ws2 = 1 }
+                            IfCondition EqualTo(c2, 10) ThenBlock: { ws2 = 1 }
+                            IfCondition EqualTo(c2, 13) ThenBlock: { ws2 = 1 }
+                            IfCondition EqualTo(ws2, 0) ThenBlock: { ReturnValue(0) }
+                            j = Add(j, 1)
+                        }
+                        ReturnValue(1)
+                    }
+                }
+            }
+            i = Add(i, 1)
+        }
+        ReturnValue(0)
+    }
+}
+
+Function.Feed.DoCreate {
+    Input: conn: Address
+    Body: {
+        aok = Feed.AuthOrErr(conn)
+        IfCondition EqualTo(aok, 0) ThenBlock: { ReturnValue(0) }
+        raw = HTTP1.Body(conn)
+        n = HTTP1.BodyLen(conn)
+        IfCondition LessEqual(n, 0) ThenBlock: {
+            Feed.Err(conn, 400, "malformed JSON body")
+            ReturnValue(0)
+        }
+        copy = Allocate(Add(n, 1))
+        MemoryCopy(copy, raw, n)
+        SetByte(copy, n, 0)
+        jok = Feed.JsonObjectOk(copy, n)
+        IfCondition EqualTo(jok, 0) ThenBlock: {
+            Feed.Err(conn, 400, "malformed JSON body")
+            ReturnValue(0)
+        }
+        tag = ParseJSON(copy)
+        IfCondition EqualTo(tag, 0) ThenBlock: {
+            Feed.Err(conn, 400, "malformed JSON body")
+            ReturnValue(0)
+        }
+        obj = JSON.AsObject(tag)
+        IfCondition EqualTo(obj, 0) ThenBlock: {
+            Feed.Err(conn, 400, "malformed JSON body")
+            ReturnValue(0)
+        }
+        ty = JSON.GetType(obj, "body")
+        IfCondition NotEqual(ty, 1) ThenBlock: {
+            Feed.Err(conn, 400, "body is required")
+            ReturnValue(0)
+        }
+        body = JSON.GetString(obj, "body")
+        IfCondition EqualTo(body, 0) ThenBlock: {
+            Feed.Err(conn, 400, "body is required")
+            ReturnValue(0)
+        }
+        trimmed = Feed.TrimCopy(body)
+        tlen = StringLength(trimmed)
+        IfCondition EqualTo(tlen, 0) ThenBlock: {
+            Feed.Err(conn, 400, "body is required")
+            ReturnValue(0)
+        }
+        IfCondition GreaterThan(tlen, 500) ThenBlock: {
+            Feed.Err(conn, 400, "body must be at most 500 characters")
+            ReturnValue(0)
+        }
+        uid = Crypto.JWT_Uid()
+        created = Feed.NowISO()
+        nid = SQLite.InsertPost(uid, trimmed, created)
+        IfCondition LessThan(nid, 1) ThenBlock: {
+            Feed.Err(conn, 500, "internal server error")
+            ReturnValue(0)
+        }
+        author = Crypto.JWT_Username()
+        SQLitePost.id = nid
+        SQLitePost.body = trimmed
+        SQLitePost.body_n = tlen
+        SQLitePost.created = created
+        SQLitePost.created_n = StringLength(created)
+        SQLitePost.author = author
+        SQLitePost.author_n = StringLength(author)
+        SQLitePost.likes = 0
+        Feed.Reset()
+        Feed.Put("{\"post\":", 8)
+        Feed.PutPost()
+        Feed.Put("}", 1)
+        Feed.Reply(conn, 201)
+        HTTP1.Defer(conn)
+    }
+}
+
+Function.Feed.DoLike {
+    Input: conn: Address
+    Input: path: Address
+    Body: {
+        aok = Feed.AuthOrErr(conn)
+        IfCondition EqualTo(aok, 0) ThenBlock: { ReturnValue(0) }
+        pre = Feed.Starts(path, "/posts/")
+        IfCondition EqualTo(pre, 0) ThenBlock: {
+            Feed.Err(conn, 404, "not found")
+            ReturnValue(0)
+        }
+        rest = Add(path, 7)
+        id = Feed.ParseId(rest)
+        likeok = Feed.Starts(FeedSt.rest, "/like")
+        endc = GetByte(FeedSt.rest, 5)
+        IfCondition EqualTo(id, 0) ThenBlock: {
+            Feed.Err(conn, 400, "invalid post id")
+            ReturnValue(0)
+        }
+        IfCondition EqualTo(likeok, 0) ThenBlock: {
+            Feed.Err(conn, 400, "invalid post id")
+            ReturnValue(0)
+        }
+        IfCondition NotEqual(endc, 0) ThenBlock: {
+            Feed.Err(conn, 400, "invalid post id")
+            ReturnValue(0)
+        }
+        uid = Crypto.JWT_Uid()
+        created = Feed.NowISO()
+        rc = SQLite.LikePost(uid, id, created)
+        IfCondition EqualTo(rc, 0) ThenBlock: {
+            Feed.Err(conn, 404, "post not found")
+            ReturnValue(0)
+        }
+        Feed.Reset()
+        Feed.Put("{\"liked\":true,\"already_liked\":", 30)
+        IfCondition EqualTo(rc, 2) ThenBlock: {
+            Feed.Put("true", 4)
+        }
+        IfCondition NotEqual(rc, 2) ThenBlock: {
+            Feed.Put("false", 5)
+        }
+        Feed.Put(",\"post_id\":", 11)
+        Feed.PutInt(id)
+        Feed.Put("}", 1)
+        st = 201
+        IfCondition EqualTo(rc, 2) ThenBlock: { st = 200 }
+        Feed.Reply(conn, st)
+        IfCondition EqualTo(rc, 1) ThenBlock: {
+            HTTP1.Defer(conn)
+        }
+    }
+}
+
+Function.Feed.CommitBatch {
+    Input: unused: Address
+    Body: {
+        SQLite.Commit()
+    }
+}
+
+Function.FeedHandler {
+    Input: conn: Address
+    Body: {
+        method = HTTP1.Method(conn)
+        path = HTTP1.Path(conn)
+        m0 = GetByte(method, 0)
+        IfCondition EqualTo(m0, 71) ThenBlock: {
+            IfCondition NotEqual(GetByte(method, 1), 69) ThenBlock: {
+                Feed.Err(conn, 404, "not found")
+                ReturnValue(0)
+            }
+            IfCondition NotEqual(GetByte(method, 2), 84) ThenBlock: {
+                Feed.Err(conn, 404, "not found")
+                ReturnValue(0)
+            }
+            IfCondition NotEqual(GetByte(method, 3), 0) ThenBlock: {
+                Feed.Err(conn, 404, "not found")
+                ReturnValue(0)
+            }
+            Arena_ScratchBegin()
+            p0 = GetByte(path, 0)
+            p1 = GetByte(path, 1)
+            IfCondition EqualTo(p0, 47) ThenBlock: {
+                IfCondition EqualTo(p1, 102) ThenBlock: {
+                    IfCondition EqualTo(GetByte(path, 2), 101) ThenBlock: {
+                        IfCondition EqualTo(GetByte(path, 3), 101) ThenBlock: {
+                            IfCondition EqualTo(GetByte(path, 4), 100) ThenBlock: {
+                                IfCondition EqualTo(GetByte(path, 5), 0) ThenBlock: {
+                                    Feed.DoFeed(conn)
+                                    Arena_ScratchEnd()
+                                    ReturnValue(0)
+                                }
+                            }
+                        }
+                    }
+                }
+                IfCondition EqualTo(p1, 104) ThenBlock: {
+                    hcmp = StringCompare(path, "/health")
+                    IfCondition EqualTo(hcmp, 0) ThenBlock: {
+                        Feed.Health(conn)
+                        Arena_ScratchEnd()
+                        ReturnValue(0)
+                    }
+                }
+                IfCondition EqualTo(p1, 112) ThenBlock: {
+                    pre = Feed.Starts(path, "/posts/")
+                    IfCondition EqualTo(pre, 1) ThenBlock: {
+                        Feed.DoGetPost(conn, path)
+                        Arena_ScratchEnd()
+                        ReturnValue(0)
+                    }
+                }
+            }
+            Feed.Err(conn, 404, "not found")
+            Arena_ScratchEnd()
+            ReturnValue(0)
+        }
+        IfCondition EqualTo(m0, 80) ThenBlock: {
+            is_post = StringCompare(method, "POST")
+            IfCondition NotEqual(is_post, 0) ThenBlock: {
+                Feed.Err(conn, 404, "not found")
+                ReturnValue(0)
+            }
+            pcmp = StringCompare(path, "/posts")
+            IfCondition EqualTo(pcmp, 0) ThenBlock: {
+                Feed.DoCreate(conn)
+                ReturnValue(0)
+            }
+            pre2 = Feed.Starts(path, "/posts/")
+            IfCondition EqualTo(pre2, 1) ThenBlock: {
+                Feed.DoLike(conn, path)
+                ReturnValue(0)
+            }
+            Feed.Err(conn, 404, "not found")
+            ReturnValue(0)
+        }
+        Feed.Err(conn, 404, "not found")
+    }
+}
+
+SubRoutine.Main {
+    FeedSt.out = Allocate(FeedSt.cap)
+    FeedSt.ts = Allocate(16)
+    FeedSt.iso = Allocate(32)
+    MemorySet(FeedSt.ts, 0, 16)
+    FeedSt.start = Feed.NowUnix()
+    path = Env.Get("SQLITE_PATH")
+    IfCondition EqualTo(path, 0) ThenBlock: {
+        PrintMessage("FAIL SQLITE_PATH\n")
+        Exit(1)
+    }
+    secret = Env.Get("JWT_SECRET")
+    IfCondition EqualTo(secret, 0) ThenBlock: {
+        secret = "twelve-dollar-challenge"
+    }
+    FeedSt.secret = secret
+    host = Env.Get("HOST")
+    IfCondition EqualTo(host, 0) ThenBlock: {
+        host = "127.0.0.1"
+    }
+    port = Env.GetInt("PORT")
+    IfCondition EqualTo(port, 0) ThenBlock: {
+        port = 3000
+    }
+    dbok = SQLite.Open(path)
+    FeedSt.ok = dbok
+    IfCondition EqualTo(dbok, 0) ThenBlock: {
+        PrintMessage("FAIL sqlite open\n")
+        Exit(1)
+    }
+    SQLiteDB.auto_commit = 0
+    HTTP1St.commit_fn = AddressOf(Feed.CommitBatch)
+    ns = Env.GetInt("HTTP_NSLOT")
+    IfCondition EqualTo(ns, 0) ThenBlock: { ns = 8192 }
+    HTTP1St.nslot = ns
+    HTTP1St.evmax = 256
+    bz = Env.GetInt("HTTP_BUFSZ")
+    IfCondition EqualTo(bz, 0) ThenBlock: { bz = 8192 }
+    HTTP1St.bufsz = bz
+    fd = HTTP1.Listen(host, port)
+    IfCondition LessThan(fd, 0) ThenBlock: {
+        PrintMessage("FAIL listen\n")
+        Exit(1)
+    }
+    PrintMessage("listening\n")
+    HTTP1.Serve(AddressOf(FeedHandler))
+    Exit(0)
+}
+RunTask(Main)

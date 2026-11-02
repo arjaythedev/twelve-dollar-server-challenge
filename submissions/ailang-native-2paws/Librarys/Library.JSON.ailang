@@ -1,0 +1,1127 @@
+// Library.JSON.ailang
+// JSON Parse & Build Library for AILang - v2.2
+//
+// Copyright (c) 2025-2026 Sean Collins, 2 Paws Machine and Engineering.
+// Released under the MIT License, as required for submissions to this challenge.
+//
+// v2.2 FIX:
+//   - Removed ConcatFree function entirely. The self-hosting compiler
+//     has codegen issues with a helper that calls StringConcat then
+//     Deallocate on its own input parameter (register clobber between
+//     the two built-in calls).
+//   - All serialization now uses the proven v1 inline temp pattern:
+//       temp = result
+//       result = StringConcat(result, something)
+//       Deallocate(temp, 0)
+//   - All Deallocate calls use size 0 (allocator auto-detect)
+//
+// TAGGED VALUE LAYOUT (16 bytes):
+//   [0-7]  type tag (JType constant)
+//   [8-15] value (Address for strings/objects/arrays, Integer for numbers/bools)
+
+LibraryImport.Arrays
+LibraryImport.StringUtils
+
+// =============================================================================
+// CONSTANTS
+// =============================================================================
+FixedPool.JType {
+    "NULL": Initialize=0
+    "STRING": Initialize=1
+    "NUMBER": Initialize=2
+    "BOOL": Initialize=3
+    "OBJECT": Initialize=4
+    "ARRAY": Initialize=5
+}
+
+FixedPool.JParse {
+    "buffer": Initialize=0, CanChange=True
+    "size": Initialize=0, CanChange=True
+    "pos": Initialize=0, CanChange=True
+    "error": Initialize=0, CanChange=True
+    "error_msg": Initialize=0, CanChange=True
+}
+
+// =============================================================================
+// TAGGED VALUE MANAGEMENT
+// =============================================================================
+Function.JSON.Tag {
+    Input: vtype: Integer
+    Input: value: Address
+    Output: Address
+    Body: {
+        t = Allocate(16)
+        StoreValue(t, vtype)
+        StoreValue(Add(t, 8), value)
+        ReturnValue(t)
+    }
+}
+
+Function.JSON.TagType {
+    Input: tagged: Address
+    Output: Integer
+    Body: {
+        IfCondition EqualTo(tagged, 0) ThenBlock: { ReturnValue(JType.NULL) }
+        ReturnValue(Dereference(tagged))
+    }
+}
+
+Function.JSON.TagValue {
+    Input: tagged: Address
+    Output: Address
+    Body: {
+        IfCondition EqualTo(tagged, 0) ThenBlock: { ReturnValue(0) }
+        ReturnValue(Dereference(Add(tagged, 8)))
+    }
+}
+
+// =============================================================================
+// UNWRAP HELPERS
+// =============================================================================
+Function.JSON.AsObject {
+    Input: tagged: Address
+    Output: Address
+    Body: {
+        IfCondition EqualTo(tagged, 0) ThenBlock: { ReturnValue(0) }
+        vtype = Dereference(tagged)
+        IfCondition NotEqual(vtype, JType.OBJECT) ThenBlock: { ReturnValue(0) }
+        ReturnValue(Dereference(Add(tagged, 8)))
+    }
+}
+
+Function.JSON.AsArray {
+    Input: tagged: Address
+    Output: Address
+    Body: {
+        IfCondition EqualTo(tagged, 0) ThenBlock: { ReturnValue(0) }
+        vtype = Dereference(tagged)
+        IfCondition NotEqual(vtype, JType.ARRAY) ThenBlock: { ReturnValue(0) }
+        ReturnValue(Dereference(Add(tagged, 8)))
+    }
+}
+
+Function.JSON.AsString {
+    Input: tagged: Address
+    Output: Address
+    Body: {
+        IfCondition EqualTo(tagged, 0) ThenBlock: { ReturnValue(0) }
+        vtype = Dereference(tagged)
+        IfCondition NotEqual(vtype, JType.STRING) ThenBlock: { ReturnValue(0) }
+        ReturnValue(Dereference(Add(tagged, 8)))
+    }
+}
+
+Function.JSON.AsNumber {
+    Input: tagged: Address
+    Output: Integer
+    Body: {
+        IfCondition EqualTo(tagged, 0) ThenBlock: { ReturnValue(0) }
+        vtype = Dereference(tagged)
+        IfCondition NotEqual(vtype, JType.NUMBER) ThenBlock: { ReturnValue(0) }
+        ReturnValue(Dereference(Add(tagged, 8)))
+    }
+}
+
+Function.JSON.AsBool {
+    Input: tagged: Address
+    Output: Integer
+    Body: {
+        IfCondition EqualTo(tagged, 0) ThenBlock: { ReturnValue(0) }
+        vtype = Dereference(tagged)
+        IfCondition NotEqual(vtype, JType.BOOL) ThenBlock: { ReturnValue(0) }
+        ReturnValue(Dereference(Add(tagged, 8)))
+    }
+}
+
+Function.JSON.ArrayLength {
+    Input: arr: Address
+    Output: Integer
+    Body: {
+        IfCondition EqualTo(arr, 0) ThenBlock: { ReturnValue(0) }
+        ReturnValue(Array.Size(arr))
+    }
+}
+
+Function.JSON.ArrayGet {
+    Input: arr: Address
+    Input: index: Integer
+    Output: Address
+    Body: {
+        IfCondition EqualTo(arr, 0) ThenBlock: { ReturnValue(0) }
+        ReturnValue(Array.Get(arr, index))
+    }
+}
+
+// =============================================================================
+// CONSTRUCTORS
+// =============================================================================
+Function.JSON.NewObject {
+    Output: Address
+    Body: {
+        ReturnValue(SHash.Create(16))
+    }
+}
+
+Function.JSON.NewArray {
+    Output: Address
+    Body: {
+        ReturnValue(Array.Create(16))
+    }
+}
+
+// =============================================================================
+// OBJECT SETTERS - Store tagged values into XSHash
+// =============================================================================
+Function.JSON.SetString {
+    Input: obj: Address
+    Input: key: Address
+    Input: value: Address
+    Body: {
+        tagged = JSON.Tag(JType.STRING, value)
+        SHash.Insert(obj, key, tagged)
+    }
+}
+
+Function.JSON.SetNumber {
+    Input: obj: Address
+    Input: key: Address
+    Input: value: Integer
+    Body: {
+        tagged = JSON.Tag(JType.NUMBER, value)
+        SHash.Insert(obj, key, tagged)
+    }
+}
+
+Function.JSON.SetBool {
+    Input: obj: Address
+    Input: key: Address
+    Input: value: Integer
+    Body: {
+        tagged = JSON.Tag(JType.BOOL, value)
+        SHash.Insert(obj, key, tagged)
+    }
+}
+
+Function.JSON.SetNull {
+    Input: obj: Address
+    Input: key: Address
+    Body: {
+        tagged = JSON.Tag(JType.NULL, 0)
+        SHash.Insert(obj, key, tagged)
+    }
+}
+
+Function.JSON.SetObject {
+    Input: obj: Address
+    Input: key: Address
+    Input: child: Address
+    Body: {
+        tagged = JSON.Tag(JType.OBJECT, child)
+        SHash.Insert(obj, key, tagged)
+    }
+}
+
+Function.JSON.SetArray {
+    Input: obj: Address
+    Input: key: Address
+    Input: child: Address
+    Body: {
+        tagged = JSON.Tag(JType.ARRAY, child)
+        SHash.Insert(obj, key, tagged)
+    }
+}
+
+// =============================================================================
+// ARRAY PUSHERS - Push tagged values into XArray
+// =============================================================================
+Function.JSON.PushString {
+    Input: arr: Address
+    Input: value: Address
+    Body: {
+        tagged = JSON.Tag(JType.STRING, value)
+        Array.Push(arr, tagged)
+    }
+}
+
+Function.JSON.PushNumber {
+    Input: arr: Address
+    Input: value: Integer
+    Body: {
+        tagged = JSON.Tag(JType.NUMBER, value)
+        Array.Push(arr, tagged)
+    }
+}
+
+Function.JSON.PushBool {
+    Input: arr: Address
+    Input: value: Integer
+    Body: {
+        tagged = JSON.Tag(JType.BOOL, value)
+        Array.Push(arr, tagged)
+    }
+}
+
+Function.JSON.PushNull {
+    Input: arr: Address
+    Body: {
+        tagged = JSON.Tag(JType.NULL, 0)
+        Array.Push(arr, tagged)
+    }
+}
+
+Function.JSON.PushObject {
+    Input: arr: Address
+    Input: child: Address
+    Body: {
+        tagged = JSON.Tag(JType.OBJECT, child)
+        Array.Push(arr, tagged)
+    }
+}
+
+Function.JSON.PushArray {
+    Input: arr: Address
+    Input: child: Address
+    Body: {
+        tagged = JSON.Tag(JType.ARRAY, child)
+        Array.Push(arr, tagged)
+    }
+}
+
+// =============================================================================
+// OBJECT GETTERS - Lookup key, unwrap tagged value
+// =============================================================================
+Function.JSON.GetString {
+    Input: obj: Address
+    Input: key: Address
+    Output: Address
+    Body: {
+        IfCondition EqualTo(obj, 0) ThenBlock: { ReturnValue(0) }
+        tagged = SHash.Lookup(obj, key)
+        IfCondition EqualTo(tagged, Arrays.NULL) ThenBlock: { ReturnValue(0) }
+        ReturnValue(JSON.AsString(tagged))
+    }
+}
+
+Function.JSON.GetNumber {
+    Input: obj: Address
+    Input: key: Address
+    Output: Integer
+    Body: {
+        IfCondition EqualTo(obj, 0) ThenBlock: { ReturnValue(0) }
+        tagged = SHash.Lookup(obj, key)
+        IfCondition EqualTo(tagged, Arrays.NULL) ThenBlock: { ReturnValue(0) }
+        ReturnValue(JSON.AsNumber(tagged))
+    }
+}
+
+Function.JSON.GetBool {
+    Input: obj: Address
+    Input: key: Address
+    Output: Integer
+    Body: {
+        IfCondition EqualTo(obj, 0) ThenBlock: { ReturnValue(0) }
+        tagged = SHash.Lookup(obj, key)
+        IfCondition EqualTo(tagged, Arrays.NULL) ThenBlock: { ReturnValue(0) }
+        ReturnValue(JSON.AsBool(tagged))
+    }
+}
+
+Function.JSON.GetObject {
+    Input: obj: Address
+    Input: key: Address
+    Output: Address
+    Body: {
+        IfCondition EqualTo(obj, 0) ThenBlock: { ReturnValue(0) }
+        tagged = SHash.Lookup(obj, key)
+        IfCondition EqualTo(tagged, Arrays.NULL) ThenBlock: { ReturnValue(0) }
+        ReturnValue(JSON.AsObject(tagged))
+    }
+}
+
+Function.JSON.GetArray {
+    Input: obj: Address
+    Input: key: Address
+    Output: Address
+    Body: {
+        IfCondition EqualTo(obj, 0) ThenBlock: { ReturnValue(0) }
+        tagged = SHash.Lookup(obj, key)
+        IfCondition EqualTo(tagged, Arrays.NULL) ThenBlock: { ReturnValue(0) }
+        ReturnValue(JSON.AsArray(tagged))
+    }
+}
+
+Function.JSON.GetType {
+    Input: obj: Address
+    Input: key: Address
+    Output: Integer
+    Body: {
+        IfCondition EqualTo(obj, 0) ThenBlock: { ReturnValue(JType.NULL) }
+        tagged = SHash.Lookup(obj, key)
+        IfCondition EqualTo(tagged, Arrays.NULL) ThenBlock: { ReturnValue(JType.NULL) }
+        ReturnValue(JSON.TagType(tagged))
+    }
+}
+
+// =============================================================================
+// STRING ESCAPING - For serialization
+// =============================================================================
+Function.JSON.EscapeString {
+    Input: str: Address
+    Output: Address
+    Body: {
+        IfCondition EqualTo(str, 0) ThenBlock: {
+            e = Allocate(1)
+            SetByte(e, 0, 0)
+            ReturnValue(e)
+        }
+
+        // Pass 1: count output length
+        src = str
+        out_len = 0
+        WhileLoop EqualTo(1, 1) {
+            ch = Dereference(src, "byte")
+            IfCondition EqualTo(ch, 0) ThenBlock: { BreakLoop }
+            IfCondition EqualTo(ch, 34) ThenBlock: { out_len = Add(out_len, 2) }
+            ElseBlock: {
+                IfCondition EqualTo(ch, 92) ThenBlock: { out_len = Add(out_len, 2) }
+                ElseBlock: {
+                    IfCondition EqualTo(ch, 10) ThenBlock: { out_len = Add(out_len, 2) }
+                    ElseBlock: {
+                        IfCondition EqualTo(ch, 13) ThenBlock: { out_len = Add(out_len, 2) }
+                        ElseBlock: {
+                            IfCondition EqualTo(ch, 9) ThenBlock: { out_len = Add(out_len, 2) }
+                            ElseBlock: {
+                                // All other control chars (0x01–0x1F) → \uXXXX (6 chars)
+                                IfCondition LessThan(ch, 32) ThenBlock: { out_len = Add(out_len, 6) }
+                                ElseBlock: { out_len = Add(out_len, 1) }
+                            }
+                        }
+                    }
+                }
+            }
+            src = Add(src, 1)
+        }
+
+        // Quick check: if out_len == input length, no escaping needed
+        in_len = StringLength(str)
+        IfCondition EqualTo(out_len, in_len) ThenBlock: {
+            copy = Allocate(Add(in_len, 1))
+            i = 0
+            WhileLoop LessThan(i, in_len) {
+                b = Dereference(Add(str, i), "byte")
+                SetByte(copy, i, b)
+                i = Add(i, 1)
+            }
+            SetByte(copy, in_len, 0)
+            ReturnValue(copy)
+        }
+
+        // Pass 2: build escaped string
+        out = Allocate(Add(out_len, 1))
+        src = str
+        dst = 0
+        WhileLoop EqualTo(1, 1) {
+            ch = Dereference(src, "byte")
+            IfCondition EqualTo(ch, 0) ThenBlock: { BreakLoop }
+
+            IfCondition EqualTo(ch, 34) ThenBlock: {
+                SetByte(out, dst, 92)
+                dst = Add(dst, 1)
+                SetByte(out, dst, 34)
+                dst = Add(dst, 1)
+            } ElseBlock: {
+                IfCondition EqualTo(ch, 92) ThenBlock: {
+                    SetByte(out, dst, 92)
+                    dst = Add(dst, 1)
+                    SetByte(out, dst, 92)
+                    dst = Add(dst, 1)
+                } ElseBlock: {
+                    IfCondition EqualTo(ch, 10) ThenBlock: {
+                        SetByte(out, dst, 92)
+                        dst = Add(dst, 1)
+                        SetByte(out, dst, 110)
+                        dst = Add(dst, 1)
+                    } ElseBlock: {
+                        IfCondition EqualTo(ch, 13) ThenBlock: {
+                            SetByte(out, dst, 92)
+                            dst = Add(dst, 1)
+                            SetByte(out, dst, 114)
+                            dst = Add(dst, 1)
+                        } ElseBlock: {
+                            IfCondition EqualTo(ch, 9) ThenBlock: {
+                                SetByte(out, dst, 92)
+                                dst = Add(dst, 1)
+                                SetByte(out, dst, 116)
+                                dst = Add(dst, 1)
+                            } ElseBlock: {
+                                // All other control chars (0x01–0x1F) → \uXXXX
+                                IfCondition LessThan(ch, 32) ThenBlock: {
+                                    SetByte(out, dst, 92)
+                                    dst = Add(dst, 1)
+                                    SetByte(out, dst, 117)
+                                    dst = Add(dst, 1)
+                                    SetByte(out, dst, 48)
+                                    dst = Add(dst, 1)
+                                    SetByte(out, dst, 48)
+                                    dst = Add(dst, 1)
+                                    hi = Divide(ch, 16)
+                                    IfCondition LessThan(hi, 10) ThenBlock: {
+                                        SetByte(out, dst, Add(48, hi))
+                                    } ElseBlock: {
+                                        SetByte(out, dst, Add(87, hi))
+                                    }
+                                    dst = Add(dst, 1)
+                                    lo = Modulo(ch, 16)
+                                    IfCondition LessThan(lo, 10) ThenBlock: {
+                                        SetByte(out, dst, Add(48, lo))
+                                    } ElseBlock: {
+                                        SetByte(out, dst, Add(87, lo))
+                                    }
+                                    dst = Add(dst, 1)
+                                } ElseBlock: {
+                                    SetByte(out, dst, ch)
+                                    dst = Add(dst, 1)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            src = Add(src, 1)
+        }
+        SetByte(out, dst, 0)
+        ReturnValue(out)
+    }
+}
+
+// =============================================================================
+// SERIALIZATION — uses inline temp pattern (no ConcatFree)
+//
+// Pattern:
+//   temp = result
+//   result = StringConcat(result, ...)
+//   Deallocate(temp, StringLength(temp)+1)
+// Arena_Free routes by size; 0 means the 24-byte slab, never "auto".
+// =============================================================================
+
+// Serialize a tagged value to JSON string
+Function.JSON.Serialize {
+    Input: tagged: Address
+    Output: Address
+    Body: {
+        IfCondition EqualTo(tagged, 0) ThenBlock: { ReturnValue(StringConcat("null", "")) }
+        IfCondition EqualTo(tagged, Arrays.NULL) ThenBlock: { ReturnValue(StringConcat("null", "")) }
+
+        vtype = Dereference(tagged)
+        value = Dereference(Add(tagged, 8))
+
+        IfCondition EqualTo(vtype, JType.NULL) ThenBlock: {
+            ReturnValue(StringConcat("null", ""))
+        }
+
+        IfCondition EqualTo(vtype, JType.BOOL) ThenBlock: {
+            IfCondition NotEqual(value, 0) ThenBlock: {
+                ReturnValue(StringConcat("true", ""))
+            }
+            ReturnValue(StringConcat("false", ""))
+        }
+
+        IfCondition EqualTo(vtype, JType.NUMBER) ThenBlock: {
+            // NumberToString allocates 24 bytes but returns an INTERIOR
+            // pointer to the digits. SerializeObject then Deallocate()s
+            // that pointer, which poisons the 24-byte slab. Copy into a
+            // real strlen+1 buffer so the later free hits the right slab.
+            num_str = NumberToString(value)
+            nlen = StringLength(num_str)
+            num_copy = Allocate(Add(nlen, 1))
+            ni = 0
+            WhileLoop LessThan(ni, nlen) {
+                SetByte(num_copy, ni, GetByte(num_str, ni))
+                ni = Add(ni, 1)
+            }
+            SetByte(num_copy, nlen, 0)
+            ReturnValue(num_copy)
+        }
+
+        IfCondition EqualTo(vtype, JType.STRING) ThenBlock: {
+            escaped = JSON.EscapeString(value)
+            result = StringConcat("\"", escaped)
+            temp = result
+            result = StringConcat(result, "\"")
+            // Arena_Free routes by size to a slab. Size 0 is <= 24, so
+            // Deallocate(ptr, 0) always Free24s — fatal for any string
+            // longer than 23 bytes (history content, file reads, etc.).
+            Deallocate(temp, Add(StringLength(temp), 1))
+            ReturnValue(result)
+        }
+
+        IfCondition EqualTo(vtype, JType.OBJECT) ThenBlock: {
+            ReturnValue(JSON.SerializeObject(value))
+        }
+
+        IfCondition EqualTo(vtype, JType.ARRAY) ThenBlock: {
+            ReturnValue(JSON.SerializeArray(value))
+        }
+
+        ReturnValue(StringConcat("null", ""))
+    }
+}
+
+// Serialize XSHash (object) to JSON string
+Function.JSON.SerializeObject {
+    Input: obj: Address
+    Output: Address
+    Body: {
+        IfCondition EqualTo(obj, 0) ThenBlock: { ReturnValue(StringConcat("{}", "")) }
+
+        keys = SHash.Keys(obj)
+        count = Array.Size(keys)
+
+        IfCondition EqualTo(count, 0) ThenBlock: {
+            Array.Destroy(keys)
+            ReturnValue(StringConcat("{}", ""))
+        }
+
+        result = StringConcat("{", "")
+
+        i = 0
+        emitted = 0
+        WhileLoop LessThan(i, count) {
+            key = Array.Get(keys, i)
+            tagged = 0
+            IfCondition NotEqual(key, 0) ThenBlock: {
+                tagged = SHash.Lookup(obj, key)
+            }
+            // Skip phantom empty keys (uninitialized hashmap buckets).
+            // Emitting {"":null} became messages[1] and the API rejected it.
+            skip = 0
+            IfCondition EqualTo(key, 0) ThenBlock: { skip = 1 }
+            IfCondition EqualTo(tagged, 0) ThenBlock: { skip = 1 }
+            IfCondition EqualTo(tagged, Arrays.NULL) ThenBlock: { skip = 1 }
+
+            IfCondition EqualTo(skip, 0) ThenBlock: {
+            // Comma separator
+            IfCondition GreaterThan(emitted, 0) ThenBlock: {
+                temp = result
+                result = StringConcat(result, ",")
+                Deallocate(temp, Add(StringLength(temp), 1))
+            }
+
+            // Key: "key":
+            escaped_key = JSON.EscapeString(key)
+
+            temp = result
+            result = StringConcat(result, "\"")
+            Deallocate(temp, Add(StringLength(temp), 1))
+
+            temp = result
+            result = StringConcat(result, escaped_key)
+            Deallocate(temp, Add(StringLength(temp), 1))
+            Deallocate(escaped_key, Add(StringLength(escaped_key), 1))
+
+            temp = result
+            result = StringConcat(result, "\":")
+            Deallocate(temp, Add(StringLength(temp), 1))
+
+            val_str = JSON.Serialize(tagged)
+
+            temp = result
+            result = StringConcat(result, val_str)
+            Deallocate(temp, Add(StringLength(temp), 1))
+            Deallocate(val_str, Add(StringLength(val_str), 1))
+            emitted = Add(emitted, 1)
+            }
+
+            i = Add(i, 1)
+        }
+
+        temp = result
+        result = StringConcat(result, "}")
+        Deallocate(temp, Add(StringLength(temp), 1))
+
+        Array.Destroy(keys)
+        ReturnValue(result)
+    }
+}
+
+// Serialize XArray to JSON array string
+Function.JSON.SerializeArray {
+    Input: arr: Address
+    Output: Address
+    Body: {
+        IfCondition EqualTo(arr, 0) ThenBlock: { ReturnValue(StringConcat("[]", "")) }
+
+        count = Array.Size(arr)
+
+        IfCondition EqualTo(count, 0) ThenBlock: {
+            ReturnValue(StringConcat("[]", ""))
+        }
+
+        result = StringConcat("[", "")
+
+        i = 0
+        emitted = 0
+        WhileLoop LessThan(i, count) {
+            tagged = Array.Get(arr, i)
+            IfCondition And(NotEqual(tagged, 0), NotEqual(tagged, Arrays.NULL)) ThenBlock: {
+                IfCondition GreaterThan(emitted, 0) ThenBlock: {
+                    temp = result
+                    result = StringConcat(result, ",")
+                    Deallocate(temp, Add(StringLength(temp), 1))
+                }
+
+                val_str = JSON.Serialize(tagged)
+
+                temp = result
+                result = StringConcat(result, val_str)
+                Deallocate(temp, Add(StringLength(temp), 1))
+                Deallocate(val_str, Add(StringLength(val_str), 1))
+                emitted = Add(emitted, 1)
+            }
+
+            i = Add(i, 1)
+        }
+
+        temp = result
+        result = StringConcat(result, "]")
+        Deallocate(temp, Add(StringLength(temp), 1))
+
+        ReturnValue(result)
+    }
+}
+
+// =============================================================================
+// PARSING - Shared state via JParse pool
+// =============================================================================
+
+Function.ParseJSON {
+    Input: json_str: Address
+    Output: Address
+    Body: {
+        IfCondition EqualTo(json_str, 0) ThenBlock: { ReturnValue(0) }
+
+        JParse.buffer = json_str
+        JParse.size = StringLength(json_str)
+        JParse.pos = 0
+        JParse.error = 0
+        JParse.error_msg = 0
+
+        result = JSON.ParseValue()
+        ReturnValue(result)
+    }
+}
+
+Function.JSON.SkipWhitespace {
+    Body: {
+        WhileLoop LessThan(JParse.pos, JParse.size) {
+            ch = Dereference(Add(JParse.buffer, JParse.pos), "byte")
+            is_ws = 0
+            IfCondition EqualTo(ch, 32) ThenBlock: { is_ws = 1 }
+            IfCondition EqualTo(ch, 9) ThenBlock: { is_ws = 1 }
+            IfCondition EqualTo(ch, 10) ThenBlock: { is_ws = 1 }
+            IfCondition EqualTo(ch, 13) ThenBlock: { is_ws = 1 }
+            IfCondition EqualTo(is_ws, 0) ThenBlock: { BreakLoop }
+            JParse.pos = Add(JParse.pos, 1)
+        }
+    }
+}
+
+Function.JSON.ParseValue {
+    Output: Address
+    Body: {
+        JSON.SkipWhitespace()
+        IfCondition GreaterEqual(JParse.pos, JParse.size) ThenBlock: {
+            ReturnValue(JSON.Tag(JType.NULL, 0))
+        }
+
+        ch = Dereference(Add(JParse.buffer, JParse.pos), "byte")
+
+        IfCondition EqualTo(ch, 123) ThenBlock: {
+            ReturnValue(JSON.ParseObject())
+        }
+
+        IfCondition EqualTo(ch, 91) ThenBlock: {
+            ReturnValue(JSON.ParseArray())
+        }
+
+        IfCondition EqualTo(ch, 34) ThenBlock: {
+            ReturnValue(JSON.ParseString())
+        }
+
+        ReturnValue(JSON.ParsePrimitive())
+    }
+}
+
+Function.JSON.ParseObject {
+    Output: Address
+    Body: {
+        obj = SHash.Create(16)
+
+        JParse.pos = Add(JParse.pos, 1)
+        JSON.SkipWhitespace()
+
+        IfCondition LessThan(JParse.pos, JParse.size) ThenBlock: {
+            ch = Dereference(Add(JParse.buffer, JParse.pos), "byte")
+            IfCondition EqualTo(ch, 125) ThenBlock: {
+                JParse.pos = Add(JParse.pos, 1)
+                ReturnValue(JSON.Tag(JType.OBJECT, obj))
+            }
+        }
+
+        parsing = 1
+        WhileLoop EqualTo(parsing, 1) {
+            JSON.SkipWhitespace()
+
+            key_tagged = JSON.ParseString()
+            key = JSON.AsString(key_tagged)
+            Deallocate(key_tagged, 16)
+
+            JSON.SkipWhitespace()
+
+            IfCondition LessThan(JParse.pos, JParse.size) ThenBlock: {
+                ch = Dereference(Add(JParse.buffer, JParse.pos), "byte")
+                IfCondition EqualTo(ch, 58) ThenBlock: {
+                    JParse.pos = Add(JParse.pos, 1)
+                }
+            }
+
+            JSON.SkipWhitespace()
+
+            value_tagged = JSON.ParseValue()
+            SHash.Insert(obj, key, value_tagged)
+
+            JSON.SkipWhitespace()
+
+            IfCondition LessThan(JParse.pos, JParse.size) ThenBlock: {
+                ch = Dereference(Add(JParse.buffer, JParse.pos), "byte")
+                IfCondition EqualTo(ch, 125) ThenBlock: {
+                    JParse.pos = Add(JParse.pos, 1)
+                    parsing = 0
+                } ElseBlock: {
+                    IfCondition EqualTo(ch, 44) ThenBlock: {
+                        JParse.pos = Add(JParse.pos, 1)
+                    } ElseBlock: {
+                        parsing = 0
+                    }
+                }
+            } ElseBlock: {
+                parsing = 0
+            }
+        }
+
+        ReturnValue(JSON.Tag(JType.OBJECT, obj))
+    }
+}
+
+Function.JSON.ParseArray {
+    Output: Address
+    Body: {
+        arr = Array.Create(16)
+
+        JParse.pos = Add(JParse.pos, 1)
+        JSON.SkipWhitespace()
+
+        IfCondition LessThan(JParse.pos, JParse.size) ThenBlock: {
+            ch = Dereference(Add(JParse.buffer, JParse.pos), "byte")
+            IfCondition EqualTo(ch, 93) ThenBlock: {
+                JParse.pos = Add(JParse.pos, 1)
+                ReturnValue(JSON.Tag(JType.ARRAY, arr))
+            }
+        }
+
+        parsing = 1
+        WhileLoop EqualTo(parsing, 1) {
+            JSON.SkipWhitespace()
+
+            value_tagged = JSON.ParseValue()
+            Array.Push(arr, value_tagged)
+
+            JSON.SkipWhitespace()
+
+            IfCondition LessThan(JParse.pos, JParse.size) ThenBlock: {
+                ch = Dereference(Add(JParse.buffer, JParse.pos), "byte")
+                IfCondition EqualTo(ch, 93) ThenBlock: {
+                    JParse.pos = Add(JParse.pos, 1)
+                    parsing = 0
+                } ElseBlock: {
+                    IfCondition EqualTo(ch, 44) ThenBlock: {
+                        JParse.pos = Add(JParse.pos, 1)
+                    } ElseBlock: {
+                        parsing = 0
+                    }
+                }
+            } ElseBlock: {
+                parsing = 0
+            }
+        }
+
+        ReturnValue(JSON.Tag(JType.ARRAY, arr))
+    }
+}
+
+Function.JSON.ParseString {
+    Output: Address
+    Body: {
+        JParse.pos = Add(JParse.pos, 1)
+        start = JParse.pos
+
+        scan = JParse.pos
+        out_len = 0
+        WhileLoop LessThan(scan, JParse.size) {
+            ch = Dereference(Add(JParse.buffer, scan), "byte")
+            IfCondition EqualTo(ch, 92) ThenBlock: {
+                out_len = Add(out_len, 1)
+                scan = Add(scan, 1)
+                IfCondition LessThan(scan, JParse.size) ThenBlock: {
+                    scan = Add(scan, 1)
+                } ElseBlock: {
+                    BreakLoop
+                }
+            } ElseBlock: {
+                IfCondition EqualTo(ch, 34) ThenBlock: {
+                    BreakLoop
+                } ElseBlock: {
+                    out_len = Add(out_len, 1)
+                    scan = Add(scan, 1)
+                }
+            }
+        }
+
+        str = Allocate(Add(out_len, 1))
+        IfCondition LessEqual(str, 0) ThenBlock: {
+            ReturnValue(JSON.Tag(JType.NULL, 0))
+        }
+        dst = 0
+
+        WhileLoop And(LessThan(JParse.pos, scan), LessThan(JParse.pos, JParse.size)) {
+            IfCondition GreaterEqual(dst, out_len) ThenBlock: { BreakLoop }
+            ch = Dereference(Add(JParse.buffer, JParse.pos), "byte")
+
+            IfCondition EqualTo(ch, 92) ThenBlock: {
+                JParse.pos = Add(JParse.pos, 1)
+                IfCondition LessThan(JParse.pos, JParse.size) ThenBlock: {
+                    IfCondition GreaterEqual(dst, out_len) ThenBlock: { BreakLoop }
+                    esc = Dereference(Add(JParse.buffer, JParse.pos), "byte")
+                    IfCondition EqualTo(esc, 34) ThenBlock: {
+                        SetByte(str, dst, 34)
+                        dst = Add(dst, 1)
+                    } ElseBlock: {
+                    IfCondition EqualTo(esc, 92) ThenBlock: {
+                        SetByte(str, dst, 92)
+                        dst = Add(dst, 1)
+                    } ElseBlock: {
+                    IfCondition EqualTo(esc, 110) ThenBlock: {
+                        SetByte(str, dst, 10)
+                        dst = Add(dst, 1)
+                    } ElseBlock: {
+                    IfCondition EqualTo(esc, 114) ThenBlock: {
+                        SetByte(str, dst, 13)
+                        dst = Add(dst, 1)
+                    } ElseBlock: {
+                    IfCondition EqualTo(esc, 116) ThenBlock: {
+                        SetByte(str, dst, 9)
+                        dst = Add(dst, 1)
+                    } ElseBlock: {
+                    IfCondition EqualTo(esc, 47) ThenBlock: {
+                        SetByte(str, dst, 47)
+                        dst = Add(dst, 1)
+                    } ElseBlock: {
+                    IfCondition EqualTo(esc, 98) ThenBlock: {
+                        SetByte(str, dst, 8)
+                        dst = Add(dst, 1)
+                    } ElseBlock: {
+                    IfCondition EqualTo(esc, 102) ThenBlock: {
+                        SetByte(str, dst, 12)
+                        dst = Add(dst, 1)
+                    } ElseBlock: {
+                        SetByte(str, dst, esc)
+                        dst = Add(dst, 1)
+                    }}}}}}}}
+                    JParse.pos = Add(JParse.pos, 1)
+                }
+            } ElseBlock: {
+                SetByte(str, dst, ch)
+                dst = Add(dst, 1)
+                JParse.pos = Add(JParse.pos, 1)
+            }
+        }
+
+        SetByte(str, dst, 0)
+
+        IfCondition LessThan(JParse.pos, JParse.size) ThenBlock: {
+            ch = Dereference(Add(JParse.buffer, JParse.pos), "byte")
+            IfCondition EqualTo(ch, 34) ThenBlock: {
+                JParse.pos = Add(JParse.pos, 1)
+            }
+        }
+
+        ReturnValue(JSON.Tag(JType.STRING, str))
+    }
+}
+
+Function.JSON.ParsePrimitive {
+    Output: Address
+    Body: {
+        start = JParse.pos
+
+        WhileLoop LessThan(JParse.pos, JParse.size) {
+            ch = Dereference(Add(JParse.buffer, JParse.pos), "byte")
+            is_delim = 0
+            IfCondition EqualTo(ch, 32) ThenBlock: { is_delim = 1 }
+            IfCondition EqualTo(ch, 9) ThenBlock: { is_delim = 1 }
+            IfCondition EqualTo(ch, 10) ThenBlock: { is_delim = 1 }
+            IfCondition EqualTo(ch, 13) ThenBlock: { is_delim = 1 }
+            IfCondition EqualTo(ch, 44) ThenBlock: { is_delim = 1 }
+            IfCondition EqualTo(ch, 125) ThenBlock: { is_delim = 1 }
+            IfCondition EqualTo(ch, 93) ThenBlock: { is_delim = 1 }
+            IfCondition EqualTo(ch, 58) ThenBlock: { is_delim = 1 }
+            IfCondition EqualTo(is_delim, 1) ThenBlock: { BreakLoop }
+            JParse.pos = Add(JParse.pos, 1)
+        }
+
+        length = Subtract(JParse.pos, start)
+        IfCondition EqualTo(length, 0) ThenBlock: {
+            ReturnValue(JSON.Tag(JType.NULL, 0))
+        }
+
+        token = Allocate(Add(length, 1))
+        i = 0
+        WhileLoop LessThan(i, length) {
+            b = Dereference(Add(JParse.buffer, Add(start, i)), "byte")
+            SetByte(token, i, b)
+            i = Add(i, 1)
+        }
+        SetByte(token, length, 0)
+
+        IfCondition EqualTo(StringCompare(token, "true"), 0) ThenBlock: {
+            Deallocate(token, Add(length, 1))
+            ReturnValue(JSON.Tag(JType.BOOL, 1))
+        }
+
+        IfCondition EqualTo(StringCompare(token, "false"), 0) ThenBlock: {
+            Deallocate(token, Add(length, 1))
+            ReturnValue(JSON.Tag(JType.BOOL, 0))
+        }
+
+        IfCondition EqualTo(StringCompare(token, "null"), 0) ThenBlock: {
+            Deallocate(token, Add(length, 1))
+            ReturnValue(JSON.Tag(JType.NULL, 0))
+        }
+
+        first = Dereference(Add(token, 0), "byte")
+        is_num = 0
+        IfCondition And(GreaterEqual(first, 48), LessEqual(first, 57)) ThenBlock: { is_num = 1 }
+        IfCondition EqualTo(first, 45) ThenBlock: { is_num = 1 }
+
+        IfCondition EqualTo(is_num, 1) ThenBlock: {
+            num = StringToNumber(token)
+            Deallocate(token, Add(length, 1))
+            ReturnValue(JSON.Tag(JType.NUMBER, num))
+        }
+
+        ReturnValue(JSON.Tag(JType.STRING, token))
+    }
+}
+
+// =============================================================================
+// BACKWARD COMPAT WRAPPERS
+// =============================================================================
+Function.JSON.BuildObject {
+    Input: obj: Address
+    Output: Address
+    Body: {
+        ReturnValue(JSON.SerializeObject(obj))
+    }
+}
+
+Function.JSON.BuildArray {
+    Input: arr: Address
+    Output: Address
+    Body: {
+        ReturnValue(JSON.SerializeArray(arr))
+    }
+}
+
+Function.JSON.ParseDataField {
+    Input: json_str: Address
+    Output: Address
+    Body: {
+        outer = ParseJSON(json_str)
+        IfCondition EqualTo(outer, 0) ThenBlock: { ReturnValue(0) }
+
+        obj = JSON.AsObject(outer)
+        IfCondition EqualTo(obj, 0) ThenBlock: { ReturnValue(0) }
+
+        data_str = JSON.GetString(obj, "data")
+        IfCondition EqualTo(data_str, 0) ThenBlock: { ReturnValue(0) }
+
+        data_parsed = ParseJSON(data_str)
+        ReturnValue(data_parsed)
+    }
+}
+
+// =============================================================================
+// CLEANUP - Free tagged values recursively
+// =============================================================================
+Function.JSON.Free {
+    Input: tagged: Address
+    Body: {
+        IfCondition EqualTo(tagged, 0) ThenBlock: { ReturnValue(0) }
+
+        vtype = Dereference(tagged)
+        value = Dereference(Add(tagged, 8))
+
+        IfCondition EqualTo(vtype, JType.STRING) ThenBlock: {
+            IfCondition NotEqual(value, 0) ThenBlock: {
+                Deallocate(value, Add(StringLength(value), 1))
+            }
+        }
+
+        IfCondition EqualTo(vtype, JType.OBJECT) ThenBlock: {
+            JSON.FreeObject(value)
+        }
+
+        IfCondition EqualTo(vtype, JType.ARRAY) ThenBlock: {
+            JSON.FreeArray(value)
+        }
+
+        Deallocate(tagged, 16)
+    }
+}
+
+Function.JSON.FreeObject {
+    Input: obj: Address
+    Body: {
+        IfCondition EqualTo(obj, 0) ThenBlock: { ReturnValue(0) }
+
+        keys = SHash.Keys(obj)
+        count = Array.Size(keys)
+        i = 0
+        WhileLoop LessThan(i, count) {
+            key = Array.Get(keys, i)
+            tagged = SHash.Lookup(obj, key)
+            IfCondition NotEqual(tagged, Arrays.NULL) ThenBlock: {
+                JSON.Free(tagged)
+            }
+            i = Add(i, 1)
+        }
+        Array.Destroy(keys)
+        SHash.Destroy(obj)
+    }
+}
+
+Function.JSON.FreeArray {
+    Input: arr: Address
+    Body: {
+        IfCondition EqualTo(arr, 0) ThenBlock: { ReturnValue(0) }
+
+        count = Array.Size(arr)
+        i = 0
+        WhileLoop LessThan(i, count) {
+            tagged = Array.Get(arr, i)
+            JSON.Free(tagged)
+            i = Add(i, 1)
+        }
+        Array.Destroy(arr)
+    }
+}

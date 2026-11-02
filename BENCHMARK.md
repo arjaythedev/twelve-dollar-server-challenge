@@ -45,6 +45,7 @@
 | C++ 0.1.0 (native client, failed) | 300,000 | 5 min | 10,284,638 | 25,711.54 | 5,316.581 ms | 19,524.643 ms | 60,001.25 ms | 0.0066% | 25.80 us | 1,391.69 MiB |
 | C++ 0.1.0 (bounded handler queue) | 100,000 | 60 s | 1,037,202 | 7,978.44 | 12.390 ms | 32.713 ms | 201.77 ms | 0% | 31.32 us | 525.76 MiB |
 | C++ 0.1.0 (checkpoint worker) | 100,000 | 60 s | 1,037,228 | 7,978.67 | 3.690 ms | 4.711 ms | 34.51 ms | 0% | 32.70 us | 535.91 MiB |
+| C++ 0.1.0 (checkpoint worker, failed) | 300,000 | 5 min | 11,039,291 | 27,598.20 | 75.035 ms | 3,979.977 ms | 33,316.56 ms | 0% | 27.86 us | 1,857.30 MiB |
 
 Statistics include the ramps. RAM is the cgroup peak, including charged file pages. Local results, not an official score or a measured capacity limit.
 
@@ -69,6 +70,8 @@ SQLite page cache, 2 to 16 MiB, five alternating pairs: random-post CPU median c
 Load generator, 10k users / 60 s: sampled client cgroup peak 2,775.08 MiB (k6) versus 52.63 MiB (native); 795.95 versus 797.57 requests/s, no errors. Native process peak RSS: 24.05 MiB. [Data](src/profiles/cpp-load-10000.json).
 
 Accept depth 1 to 64, 512-connection bursts behind a 20-ms handler gate, file limit 256: actual accepts during the gate 1 to 64; after-release p99 10.223 to 6.106 ms and 9.011 to 6.281 ms. All responses passed. [Data](src/benchmarks/accept-depth.json).
+
+Parser reuse, 100k lifecycle cycles, four alternating samples: JWT/body CPU median 29.098 to 20.631 ms, allocations 250,009 to 16. With 25% oversized bodies: 30.288 to 27.834 ms, allocations 250,009 to 275,006 as oversized Exchanges are discarded. Checksums matched. Reset code: 1,335 to 267 bytes.
 
 ## Native CPU sampling
 

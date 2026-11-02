@@ -2,7 +2,7 @@
 
 ## Next, in order
 
-- [ ] Confirm the checkpoint worker at 300k with a five-minute hold; record latency, CPU and WAL backlog.
+- [ ] Isolate the remaining 300k p99 stalls with per-ring CQ, handler/SQLite and I/O-pressure timing; the checkpoint worker still misses p99 despite eliminating request errors.
 - [ ] Compare multishot receive after isolating handler stalls.
 - [ ] Compare ID-ordered post/author reads, then use the next profile to choose smaller changes such as hybrid SEND and JSON scanning.
 
@@ -13,6 +13,7 @@
 
 ## Done
 
+- [x] Reuse empty request buffers within the Exchange budget; verify isolation, oversize rejection and generated reset code.
 - [x] Measure checkpoint stalls, add an owned checkpoint worker and compare at 100k; lower p99 costs more CPU.
 - [x] Compare bounded CQ/handler queues; retain inline dispatch after no measured gain.
 - [x] Keep 64 direct accepts pending; compare short bursts and verify multi-ring reuse and shutdown.

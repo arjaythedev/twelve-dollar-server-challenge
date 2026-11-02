@@ -878,7 +878,6 @@
     "name": "checkpoint-current-100000",
     "runtime": "C++ 0.1.0",
     "load_generator": "docker_loopback",
-    "generator": "cpp",
     "sqlite": "3.53.1",
     "users": 100000,
     "hold": "60s",
@@ -893,6 +892,29 @@
     "cpu_scope": "server_cgroup",
     "server_peak_bytes": 561946624,
     "passed": true,
+    "generator": "cpp",
     "client_sampled_peak_bytes": 450129920
+  },
+  {
+    "date": "2026-11-02",
+    "name": "checkpoint-300000-5m",
+    "runtime": "C++ 0.1.0",
+    "load_generator": "docker_loopback",
+    "generator": "cpp",
+    "sqlite": "3.53.1",
+    "users": 300000,
+    "hold": "5m",
+    "ramp": "60s",
+    "requests": 11039291,
+    "rps": 27598.2024896,
+    "p95_ms": 75.0348665,
+    "p99_ms": 3979.9769644,
+    "max_ms": 33316.559552,
+    "error_rate": 0.0,
+    "cpu_us_per_request": 27.85717687847888,
+    "cpu_scope": "server_cgroup",
+    "server_peak_bytes": 1947521024,
+    "passed": false,
+    "client_sampled_peak_bytes": 1489727488
   }
 ]

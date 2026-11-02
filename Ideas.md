@@ -51,6 +51,7 @@
 - [ ] Test an event bus only if multiple event consumers justify its routing and lifetime costs.
 - [x] Move cold parser/buffer/send state behind a lazily owned Exchange ([Rust](https://github.com/arjaythedev/twelve-dollar-server-challenge/blob/4298101/submissions/rust-iouring-kensac/src/main.rs#L133)). Storage: `56*N + 584*(A+P)`, plus buffers and allocator costs; N is open connections, A is active exchanges, P is pooled exchanges. Keep each parser alive through fragments, auth, pipeline tails and terminal I/O CQEs.
   Bound recycled Exchange/output capacity and discard oversized buffers; a slow send must not pin unrelated responses.
+- [x] Reuse cleared request-string buffers in pooled Exchanges; include all request capacities in the 8-KiB retention budget and reset the identity before reuse.
 - [ ] Compare encoded CQE identities `(event, ring, slot, generation)` with the two Operation records ([C](submissions/c-iouring-pavlyhalim/src/server.c)). Preserve cancellation matching, generation wrap and stale-buffer returns.
 
 - [x] Move PASSIVE checkpoints to a worker with its own SQLite connection. At 100k, p99 fell from 27.42 to 4.71 ms while CPU/request rose from 31.05 to 32.70 us.

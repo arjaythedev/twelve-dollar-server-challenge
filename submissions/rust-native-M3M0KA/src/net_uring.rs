@@ -853,9 +853,15 @@ impl UringServer {
     }
 
     fn collect(&mut self, lane: usize, out: &mut Vec<(u64, i32, u32)>) {
+        // The per-pass cap: completions beyond it wait in the ring (FIFO) for
+        // the next pass, so one memory-wall pass cannot hold the whole
+        // connection set behind a single slow commit. 1,024 per ring matches
+        // the batch size the writer executes and keeps a pass's worst case in
+        // the tens of milliseconds even with every row a cache miss.
+        const CQ_CAP_PER_LANE: usize = 1024;
         self.lanes[lane]
             .ring
-            .reap(|u, res, flags| out.push((u, res, flags)));
+            .reap_bounded(CQ_CAP_PER_LANE, |u, res, flags| out.push((u, res, flags)));
     }
 
     /// One pass: wait for completions, serve the requests they carried, commit
@@ -901,7 +907,7 @@ impl UringServer {
             }
         }
 
-        let mut done: Vec<(u64, i32, u32)> = Vec::with_capacity(64);
+        let mut done: Vec<(u64, i32, u32)> = Vec::with_capacity(2048);
         for lane in 0..self.lanes.len() {
             self.collect(lane, &mut done);
         }

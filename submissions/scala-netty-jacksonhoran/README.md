@@ -50,8 +50,8 @@ SQLITE_PATH=... JWT_SECRET=... HOST=0.0.0.0 PORT=80 bash start.sh
   only when that inserted nothing, to tell "already liked" from "no such post".
 - **Responses built as bytes.** Pre-encoded JSON fragments plus column bytes go into one reusable
   buffer, with escaping only when a byte needs it.
-- **JWT verified by hand on every request**: HS256 only, constant-time signature compare, `exp`/`nbf`
-  checked. No verification cache (rule 5).
+- **JWT verified by hand on every request**: HS256 only, constant-time signature compare, `exp` required and
+  checked, `nbf` checked. No verification cache (rule 5).
 - **Pragmas**: `journal_mode=WAL`, `synchronous=NORMAL` (rule 6), 1 GiB `mmap_size`, 64 MiB page
   cache. Autocommit mode commits each write before its response is sent.
 - **JVM**: Serial GC, because a parallel or concurrent collector would just compete with the event

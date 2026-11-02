@@ -84,7 +84,10 @@ or total-memory limit; enforce the one-core, 2 GiB service budget externally.
   without constructing post records or text Strings. Body trimming uses the reference whitespace set,
   and body length counts Unicode code points rather than UTF-16 code units.
 - HttpServer's default 200 idle connections and 30-second idle timeout are
-  increased to 32,768 and 75 seconds. Open connections are not otherwise capped
+  managed by an application reuse pool of 8,192 connections, with a 75-second idle timeout.
+  Overflow responses and the 32nd response on an admitted connection explicitly send `Connection: close`.
+  JDK idle-count eviction is disabled to avoid unannounced overflow closes. Reuse-slot metadata
+  for disconnected clients is reclaimed conservatively after 120 idle seconds. Open connections are not otherwise capped
   by HttpServer. TCP_NODELAY is enabled; the requested accept backlog is 4,096.
   The OS file-descriptor limit and memory still constrain actual connections.
 - Request bodies larger than 16 KiB return 413; they are outside the spec's
@@ -124,8 +127,10 @@ python3 bench/find-capacity.py --base-url http://SERVER:3000
 ```
 
 For local runs, keep k6 off the server CPU and its SMT sibling. This submission
-reached 101,500 VUs in a local five-minute k6 confirmation using the repository workload,
-one CPU and a 1,792 MiB service limit. This is a local measurement rather than an official score.
+passed an 80,000-VU five-minute k6 search hold with zero errors after the announced-closure fix,
+using one CPU and a 1,792 MiB service limit. The search stopped after a latency failure at
+100,000 VUs under the requested regression cutoff; no new maximum or confirmation score is claimed.
+The previous 101,500-VU result used the earlier idle-eviction policy.
 
 MIT, under the repository's license.
 

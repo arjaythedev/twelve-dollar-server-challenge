@@ -13,6 +13,7 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/eventfd.h>
+#include <sys/mman.h>
 #include <sys/resource.h>
 #include <sys/prctl.h>
 #include <sys/socket.h>
@@ -688,13 +689,25 @@ static uint64_t evbuf;
 static void arm_evfd(void) {  // extra rings signal this eventfd; ring 0 waits on it
   struct io_uring_sqe *s = sqe(0); io_uring_prep_read(s, efd, &evbuf, 8, 0); s->user_data = T_EVFD;
 }
+// Some Ubuntu 6.8 kernels (0-136 and later, Launchpad #2162843) refuse a registration whose reserved words
+// are all zero and accept resv[0] = 1; every other kernel takes the zeroes, so those are tried first.
+static struct io_uring_buf_ring *buf_ring(struct io_uring *u) {
+  void *p = mmap(NULL, NBUF * sizeof(struct io_uring_buf), PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+  if (p == MAP_FAILED) return NULL;
+  struct io_uring_buf_reg reg = {.ring_addr = (uintptr_t)p, .ring_entries = NBUF};
+  int rc = io_uring_register_buf_ring(u, &reg, 0);
+  if (rc == -EINVAL) { reg.resv[0] = 1; rc = io_uring_register_buf_ring(u, &reg, 0); }
+  if (rc < 0) { munmap(p, NBUF * sizeof(struct io_uring_buf)); return NULL; }
+  io_uring_buf_ring_init(p);
+  return p;
+}
 static int ring_init(int k) {
-  ring_t *r = &R[k]; int e;
+  ring_t *r = &R[k];
   // Ring 0 is the one the loop waits on, so its completions can run in that wait (DEFER_TASKRUN).
   struct io_uring_params p = {.flags = IORING_SETUP_SUBMIT_ALL | IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_CQSIZE |
                               (k ? 0 : IORING_SETUP_DEFER_TASKRUN), .cq_entries = 16384};
   if (io_uring_queue_init_params(4096, &r->r, &p) < 0) return -1;
-  if (io_uring_register_files_sparse(&r->r, tsize) < 0 || !(r->br = io_uring_setup_buf_ring(&r->r, NBUF, 0, 0, &e))) {
+  if (io_uring_register_files_sparse(&r->r, tsize) < 0 || !(r->br = buf_ring(&r->r))) {
     io_uring_queue_exit(&r->r); return -1;
   }
   io_uring_register_ring_fd(&r->r);

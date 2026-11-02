@@ -50,6 +50,10 @@ The C transport keeps debug symbols and frame pointers for local profiles.
   by signalling every thread it knows, and a thread stuck in `fsync` cannot answer, so the process
   aborted with "Signals delivery fails constantly" when the disk stalled.
   The existing request connection and background checkpoint connection keep separate thread owners.
+- **Interpolated row seeks.** `td_sqlite.c` finds a post or author by rowid with the same page walk as
+  `sqlite3BtreeTableMoveto`, but the first probe on each page interpolates between its first and last key
+  (ids are dense) and a miss gallops before it bisects. It reads the same B-tree pages on every request and
+  keeps nothing between requests. 65.1k to 63.4k instructions per request.
 - **SQLite page cache, no mmap.** Pages come from a 64 MiB page cache (`cache_size=-65536`), which holds
   the hot pages of this workload. With `mmap_size` set, each page fetch costs SQLite more instructions:
   turning it off cut server instructions per request by 3.8% in a local profile.

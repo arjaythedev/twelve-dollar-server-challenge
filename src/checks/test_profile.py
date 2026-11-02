@@ -140,11 +140,18 @@ class NativeProfileTests(unittest.TestCase):
 
     def test_process_name_does_not_shift_cpu_fields(self) -> None:
         fields = ["S", *(["0"] * 10), "123", "45", *(["0"] * 30)]
-        values = "usage_usec 1700000\nuser_usec 1300000\nprocess_stat 1 (a name (x)) "
+        values = (
+            "usage_usec 1700000\nuser_usec 1300000\n"
+            "io_pressure some avg10=2.40 avg60=1.00 avg300=0.20 total=321000\n"
+            "io_pressure full avg10=1.20 avg60=0.50 avg300=0.10 total=123000\n"
+            "process_stat 1 (a name (x)) "
+        )
         counters = parse_counters(values + " ".join(fields))
         self.assertEqual(counters["usage_usec"], 1700000)
         self.assertEqual(counters["main_user_ticks"], 123)
         self.assertEqual(counters["main_system_ticks"], 45)
+        self.assertEqual(counters["io_pressure_some_usec"], 321000)
+        self.assertEqual(counters["io_pressure_full_usec"], 123000)
 
     def test_main_process_and_cgroup_cpu_remain_separate(self) -> None:
         before: dict[str, JSONValue] = {

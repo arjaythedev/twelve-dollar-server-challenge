@@ -151,9 +151,18 @@ def file_hash(path: Path) -> str:
 def parse_counters(values: str) -> dict[str, JSONValue]:
     rows, process = values.rsplit("process_stat ", 1)
     fields = process[process.rindex(")") + 2 :].split()
-    result: dict[str, JSONValue] = {
-        line.split()[0]: int(line.split()[1]) for line in rows.splitlines()
-    }
+    result: dict[str, JSONValue] = {}
+    for line in rows.splitlines():
+        name, value, *parts = line.split()
+        if name.endswith("_pressure"):
+            for part in parts:
+                if part.startswith("total="):
+                    result[f"{name}_{value}_usec"] = int(part.removeprefix("total="))
+                    break
+            else:
+                raise ValueError(f"missing total in {name}")
+        else:
+            result[name] = int(value)
     result["main_user_ticks"] = int(fields[11])
     result["main_system_ticks"] = int(fields[12])
     return result
@@ -162,6 +171,10 @@ def parse_counters(values: str) -> dict[str, JSONValue]:
 def counters(observer: str) -> dict[str, JSONValue]:
     # Read through the server's root, but run the reader in a separate cgroup.
     root = "/proc/1/root/sys/fs/cgroup"
+    pressure = "".join(
+        f"sed 's/^/{resource}_pressure /' {root}/{resource}.pressure; "
+        for resource in ("io", "memory", "cpu")
+    )
     values = command(
         "docker",
         "exec",
@@ -171,7 +184,7 @@ def counters(observer: str) -> dict[str, JSONValue]:
         f"cat {root}/cpu.stat; "
         f"printf 'memory_current '; cat {root}/memory.current; "
         f"printf 'memory_peak '; cat {root}/memory.peak; "
-        f"cat {root}/memory.events; printf 'process_stat '; cat /proc/1/stat",
+        f"cat {root}/memory.events; {pressure}printf 'process_stat '; cat /proc/1/stat",
     )
     return parse_counters(values)
 
@@ -508,6 +521,7 @@ def native_check() -> None:
     for executable, arguments in (
         ("server", ["--self-test"]),
         ("transport_tests", []),
+        ("checkpoint_tests", []),
         ("load_generator", ["--self-test"]),
     ):
         print(
@@ -518,6 +532,7 @@ def native_check() -> None:
                 "--network",
                 "none",
                 "--read-only",
+                "--tmpfs=/tmp:rw,mode=1777,size=64m",
                 "--user",
                 "10001:10001",
                 "--cap-drop",

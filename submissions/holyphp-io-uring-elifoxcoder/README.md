@@ -47,9 +47,10 @@ the app itself.
   benchmark's spread-out request rate the loop runs ~10k cycles/s, so a per-cycle
   slice walked ~20M entries/s for nothing. A full pass still finishes far inside
   the 90 s window.
-- **Connection shedding** above 58,000 open fds (the box sets
-  `LimitNOFILE=65535`): such responses carry `Connection: close`, so new users
-  are never refused.
+- **Connection shedding** just below the usable descriptor table: 61,439 real
+  fds in the classic path (the box sets `LimitNOFILE=65535`), or
+  `uring_direct_slots() - 1024` with ring-owned descriptors. Shed responses
+  carry `Connection: close`, so new users are never refused.
 - A strict RFC 8259 parser for POST bodies (the runtime's `json_decode` is lenient).
 
 ## Runtime/compiler work (generic, no challenge logic)
@@ -94,6 +95,23 @@ allocation-stable for a long-running server. All of this is generic:
   per request instead of waiting for an armed-recv slot. If the kernel
   refuses the ring, every primitive falls back to the plain epoll path;
   `HPHP_URING=0` forces it.
+- **Ring-owned descriptors, multishot recv, several rings.** With
+  `HPHP_DIRECT=1` (default in `start.sh`), each ring registers a sparse
+  65535-slot file table (`IORING_REGISTER_FILES2` +
+  `IORING_RSRC_REGISTER_SPARSE`, clamped to `RLIMIT_NOFILE`) and accepts
+  straight into it with one multishot accept. Connections then use multishot
+  recv over a provided-buffer ring (one SQE for the connection's lifetime,
+  data copied into the connection's own buffer, buffer id returned at once),
+  fixed-file sends, and ring CLOSE. Direct handles live above every real fd,
+  so the 65535 fd limit no longer caps held connections. `HPHP_RINGS`
+  (default 5) creates five rings, each with its own sparse table and buffer
+  ring: ~327k direct slots. A registered eventfd per ring keeps CQ wakeups
+  reliable with `DEFER_TASKRUN`; wait/retry/close paths are ring-aware, and a
+  full ring disables only its own accept. Locally: 42/42 with five rings,
+  80,000 concurrent connections from eight parallel clients with
+  `arm_fail=0`/`parked=0`, and 42/42 on the classic real-fd path.
+  `HPHP_DIRECT=0` forces that path; a failed registration falls back
+  automatically.
 
 There is no challenge-specific C code: the backend is generic runtime code the
 same way epoll and the SQLite binding are.

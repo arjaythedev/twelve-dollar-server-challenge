@@ -429,7 +429,20 @@ fn main() {
 
     sys::raise_nofile();
 
-    let listener = TcpListener::bind((host.as_str(), port)).expect("bind listener");
+    // Ring teardown after SIGKILL can briefly retain in-flight accepts (and
+    // their listener reference) after waitpid has reported process exit.
+    let bind_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let listener = loop {
+        match TcpListener::bind((host.as_str(), port)) {
+            Ok(listener) => break listener,
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse
+                && std::time::Instant::now() < bind_deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(e) => panic!("bind listener: {e}"),
+        }
+    };
     listener.set_nonblocking(true).expect("nonblocking listener");
     let lfds = vec![listener.into_raw_fd()];
     sys::set_reuseaddr(lfds[0]);

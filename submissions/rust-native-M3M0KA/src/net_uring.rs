@@ -7,7 +7,7 @@
 //!
 //! Accepts are one-shot and armed only while slots remain: a burst can never
 //! overrun a table, which is how multishot accept loses connections at handover.
-//! Each connection holds one multishot receive into buffers provided with
+//! Each connection holds one receive into buffers provided with
 //! `IORING_OP_PROVIDE_BUFFERS`, which every Linux 5.7+ kernel accepts (the
 //! buffer-ring registration is rejected outright by Ubuntu's 6.8 kernels).
 //! Idle connections own no user-space buffer.
@@ -26,8 +26,8 @@ use crate::http;
 use crate::sys;
 use crate::uring::{
     new_eventfd, read_eventfd, Ring, Sqe, IORING_CQE_BUFFER_SHIFT,
-    IORING_ENTER_GETEVENTS, IORING_SETUP_CLAMP, IORING_SETUP_CQSIZE, IORING_SETUP_DEFER_TASKRUN,
-    IORING_SETUP_SINGLE_ISSUER, IORING_SETUP_SUBMIT_ALL, IORING_SETUP_TASKRUN_FLAG,
+    IORING_ENTER_GETEVENTS, IORING_SETUP_CLAMP, IORING_SETUP_CQSIZE,
+    IORING_SETUP_SINGLE_ISSUER, IORING_SETUP_SUBMIT_ALL,
 };
 
 /// Ring 0 plus seven more, each with the process's descriptor limit.
@@ -76,6 +76,11 @@ fn tag_lane(u: u64) -> u32 {
     ((u >> 24) & 0xff) as u32
 }
 
+#[inline]
+fn conn_tag(kind: u64, slot: u32, lane: u32, generation: u32) -> u64 {
+    tag(kind, slot, lane) | ((generation as u64) << 32)
+}
+
 struct Conn {
     live: bool,
     inbuf: Vec<u8>,
@@ -83,6 +88,7 @@ struct Conn {
     sent: usize,
     close_after: bool,
     send_busy: bool,
+    recv_busy: bool,
     /// A queued write owns this connection: further requests wait in the
     /// input buffer until the write commits and its reply is queued.
     write_parked: bool,
@@ -103,6 +109,7 @@ impl Conn {
             sent: 0,
             close_after: false,
             send_busy: false,
+            recv_busy: false,
             write_parked: false,
             parked_gen: 0,
             pending_writer_reply: None,
@@ -248,10 +255,16 @@ pub struct UringServer {
 
 impl UringServer {
     fn arm_recv(&mut self, lane: usize, slot: u32) {
-        let u = tag(K_RECV, slot, lane as u32);
         let l = &mut self.lanes[lane];
+        if !l.conns[slot as usize].live || l.conns[slot as usize].recv_busy {
+            return;
+        }
+        let u = conn_tag(K_RECV, slot, lane as u32, l.gens[slot as usize]);
         if let Some(p) = l.ring.sqe() {
             Sqe(p).apply(Sqe::recv_buffered(slot, 0, u));
+            l.conns[slot as usize].recv_busy = true;
+        } else {
+            l.read_queue.push_back(slot);
         }
     }
 
@@ -284,7 +297,7 @@ impl UringServer {
     /// Opens ring `i` with a fixed-file table sized to this process's limit.
     fn open_lane(&mut self, i: usize) -> bool {
         let table = match self.table_override {
-            Some(t) => t.min(MAX_LANES as u32),
+            Some(t) => t.clamp(2, 1 << 20),
             None => sys::nofile_limit()
                 .saturating_sub(64)
                 .max(64)
@@ -292,17 +305,13 @@ impl UringServer {
                 // inside it so a large nofile limit cannot fail the whole lane.
                 .min(1 << 20),
         };
-        // A single ring with an out-of-ring writer wake must also receive
-        // ordinary CQ notifications through epoll. Deferred task work may
-        // wait for the issuer's next enter, so it cannot be the sole wake
-        // source while the issuer is sleeping for the writer.
-        let defer_taskrun = if i == 0 && self.writer_wake_fd >= 0 {
-            0
-        } else {
-            IORING_SETUP_DEFER_TASKRUN | IORING_SETUP_TASKRUN_FLAG
-        };
+        // Reduced limits must leave a reachable handover target. A watermark
+        // above the entire table makes every other lane appear full forever.
+        self.hwm = self.hwm.min((table / 4).max(1));
+        // Every lane must wake epoll independently. DEFER_TASKRUN requires an
+        // enter on that ring before its CQ/eventfd can advance; sleeping in
+        // epoll until that same eventfd fires can strand the next accept lane.
         let flags = IORING_SETUP_SINGLE_ISSUER
-            | defer_taskrun
             | IORING_SETUP_CQSIZE
             | IORING_SETUP_CLAMP
             | IORING_SETUP_SUBMIT_ALL;
@@ -357,11 +366,7 @@ impl UringServer {
             return false;
         }
         lane.efd = efd;
-        let registered = if defer_taskrun == 0 {
-            lane.ring.register_eventfd(efd)
-        } else {
-            lane.ring.register_eventfd_async(efd)
-        };
+        let registered = lane.ring.register_eventfd(efd);
         if !registered {
             eprintln!("io_uring: ring {i}: eventfd registration refused");
             return false;
@@ -384,6 +389,9 @@ impl UringServer {
 
     fn submit_close(&mut self, lane: usize, slot: u32) {
         let l = &mut self.lanes[lane];
+        if !l.conns[slot as usize].live {
+            return;
+        }
         if l.ring.sq_space() < 2 {
             let _ = l.ring.submit(0, 0);
             if l.ring.sq_space() < 2 {
@@ -396,8 +404,9 @@ impl UringServer {
         }
         // Both entries or neither: an SQE taken but not prepared would go out
         // as whatever it held last time.
-        let u_shutdown = tag(K_SHUTDOWN, slot, lane as u32);
-        let u_close = tag(K_CLOSE, slot, lane as u32);
+        let generation = l.gens[slot as usize];
+        let u_shutdown = conn_tag(K_SHUTDOWN, slot, lane as u32, generation);
+        let u_close = conn_tag(K_CLOSE, slot, lane as u32, generation);
         if let Some(p) = l.ring.sqe() {
             Sqe(p).apply(Sqe::shutdown(slot, u_shutdown));
         }
@@ -418,8 +427,9 @@ impl UringServer {
                 l.deferred_close.push(slot);
                 continue;
             }
-            let u_shutdown = tag(K_SHUTDOWN, slot, lane as u32);
-            let u_close = tag(K_CLOSE, slot, lane as u32);
+            let generation = l.gens[slot as usize];
+            let u_shutdown = conn_tag(K_SHUTDOWN, slot, lane as u32, generation);
+            let u_close = conn_tag(K_CLOSE, slot, lane as u32, generation);
             if let Some(p) = l.ring.sqe() {
                 Sqe(p).apply(Sqe::shutdown(slot, u_shutdown));
             }
@@ -438,7 +448,7 @@ impl UringServer {
             }
             (unsafe { c.outbuf.as_ptr().add(c.sent) }, c.outbuf.len() - c.sent)
         };
-        let u = tag(K_SEND, slot, lane as u32);
+        let u = conn_tag(K_SEND, slot, lane as u32, self.lanes[lane].gens[idx]);
         let l = &mut self.lanes[lane];
         if let Some(p) = l.ring.sqe() {
             Sqe(p).apply(Sqe::send(slot, ptr, len, u));
@@ -596,6 +606,17 @@ impl UringServer {
         if lane >= self.lanes.len() || slot as usize >= self.lanes[lane].conns.len() {
             return;
         }
+        if matches!(kind, K_RECV | K_SEND | K_SHUTDOWN | K_CLOSE)
+            && (u >> 32) as u32 != self.lanes[lane].gens[slot as usize]
+        {
+            // A terminated operation can complete after this fixed slot has
+            // been reused. Return its buffer without touching the new socket.
+            if kind == K_RECV && res > 0 {
+                self.lanes[lane].held_bufs += 1;
+                self.lanes[lane].recycle(flags >> IORING_CQE_BUFFER_SHIFT);
+            }
+            return;
+        }
         match kind {
             K_ACCEPT => {
                 let l = &mut self.lanes[lane];
@@ -629,6 +650,7 @@ impl UringServer {
                 }
             }
             K_RECV => {
+                self.lanes[lane].conns[slot as usize].recv_busy = false;
                 if res > 0 {
                     let bid = flags >> IORING_CQE_BUFFER_SHIFT;
                     let start = bid as usize * BUF_SIZE;
@@ -687,7 +709,7 @@ impl UringServer {
                 } else if res == 0 {
                     // A send of zero bytes on a non-empty buffer means the peer
                     // is gone; never retry it or this pass never ends.
-                    c.live = false;
+                    self.submit_close(lane, slot);
                     return;
                 } else {
                     let err = -res;
@@ -699,7 +721,7 @@ impl UringServer {
                         return;
                     }
                     if err != 4 {
-                        c.live = false;
+                        self.submit_close(lane, slot);
                         return;
                     }
                 }
@@ -726,6 +748,11 @@ impl UringServer {
             }
             K_CLOSE => {
                 let l = &mut self.lanes[lane];
+                if res < 0 {
+                    eprintln!("io_uring: direct close failed: lane {lane}, slot {slot}, error {}", -res);
+                    l.deferred_close.push(slot);
+                    return;
+                }
                 l.conns[slot as usize] = Conn::new();
                 let gi = slot as usize;
                 if gi < l.gens.len() {
@@ -793,10 +820,14 @@ impl UringServer {
                 Some(slot) => {
                     let idx = slot as usize;
                     if idx < l.conns.len() && l.conns[idx].live && !l.conns[idx].write_parked {
-                        let u = tag(K_RECV, slot, lane as u32);
+                        if l.conns[idx].recv_busy {
+                            continue;
+                        }
+                        let u = conn_tag(K_RECV, slot, lane as u32, l.gens[idx]);
                         match l.ring.sqe() {
                             Some(p) => {
                                 Sqe(p).apply(Sqe::recv_buffered(slot, 0, u));
+                                l.conns[idx].recv_busy = true;
                                 budget -= 1;
                             }
                             None => {
@@ -814,7 +845,8 @@ impl UringServer {
 
     /// Hands the listener to a ring with free slots, opening the next ring when
     /// none has room yet.
-    fn advance_accept(&mut self, from: usize) {        let free: Vec<u32> = self.lanes.iter().map(|l| l.free_slots).collect();
+    fn advance_accept(&mut self, from: usize) {
+        let free: Vec<u32> = self.lanes.iter().map(|l| l.free_slots).collect();
         if let Some(next) = handover_target(&free, from, self.hwm) {
             self.start_accepting(next);
             return;
@@ -904,14 +936,17 @@ impl UringServer {
     /// One pass: wait for completions, serve the requests they carried, commit
     /// the batch, then submit the sends and the returned buffers.
     fn pump(&mut self, wait: bool) -> usize {
+        // A bounded reap can leave CQEs after the eventfd counter was drained.
+        // They already represent work: never wait for another notification.
+        let wait = wait && self.lanes.iter().all(|lane| lane.ring.pending() == 0);
         // Wait. One ring: a single enter both submits and sleeps. Several:
         // sleep in epoll across their eventfds and run their task work.
         if self.lanes.len() == 1 && self.writer_wake_fd < 0 {
             if wait {
                 let _ = self.lanes[0].ring.submit(1, IORING_ENTER_GETEVENTS);
             } else {
-                // Deferred task work only runs on an enter, so a non-blocking
-                // pass still has to enter; it just does not wait.
+                // Publish submissions and flush kernel completion overflow
+                // without blocking the self-test driver.
                 let _ = self.lanes[0].ring.submit(0, 0);
                 let _ = self.lanes[0].ring.enter(0, IORING_ENTER_GETEVENTS);
             }
@@ -932,7 +967,7 @@ impl UringServer {
                     for lane in 0..self.lanes.len() {
                         if self.lanes[lane].efd == fd {
                             read_eventfd(fd);
-                            // Deferred task work runs inside this call.
+                            // Flush kernel completion overflow too.
                             let _ = self.lanes[lane].ring.enter(0, IORING_ENTER_GETEVENTS);
                         }
                     }
@@ -1145,11 +1180,14 @@ pub fn self_test(secret: &str, db_path: &str) -> bool {
         ok &= h.join().unwrap_or(false);
     }
     drop(server);
+    if !ok {
+        eprintln!("io_uring: protocol self test failed");
+    }
 
     // Ring-boundary stage: a small per-ring table plus a small watermark force
     // the ignored listener to cross from ring 0 to ring 1 while clients are
     // still arriving. Every client must be served after the handover.
-    ok
+    ok && self_test_boundary(secret, db_path, port, lfd)
 }
 
 /// 64 clients against a 32-slot table with a watermark of 8: ring 0 stops
@@ -1179,8 +1217,10 @@ fn self_test_boundary(secret: &str, db_path: &str, port: u16, lfd: c_int) -> boo
     server.start_accepting(0);
 
     const CLIENTS: usize = 64;
+    let arrived = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let mut handles = Vec::new();
     for _c in 0..CLIENTS {
+        let arrived = arrived.clone();
         handles.push(std::thread::spawn(move || -> bool {
             use std::io::{Read, Write};
             let mut s = match std::net::TcpStream::connect(("127.0.0.1", port)) {
@@ -1197,14 +1237,29 @@ fn self_test_boundary(secret: &str, db_path: &str, port: u16, lfd: c_int) -> boo
             if !buf[..n].starts_with(b"HTTP/1.1 200") {
                 return false;
             }
+            // Keep all sockets alive until all 64 have been answered. Otherwise
+            // a fast client can free its slot and the test may never hand over.
+            arrived.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while arrived.load(std::sync::atomic::Ordering::SeqCst) < CLIENTS {
+                if std::time::Instant::now() >= deadline {
+                    return false;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
             if s.write_all(b"GET /posts/3 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
                 .is_err()
             {
                 return false;
             }
             let mut tail = Vec::new();
-            let n = s.read_to_end(&mut tail).unwrap_or(0);
-            n > 0
+            match s.read_to_end(&mut tail) {
+                Ok(n) => n > 0,
+                Err(e) => {
+                    eprintln!("io_uring: boundary close failed: {e} ({} bytes)", tail.len());
+                    false
+                }
+            }
         }));
     }
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -1222,6 +1277,10 @@ fn self_test_boundary(secret: &str, db_path: &str, port: u16, lfd: c_int) -> boo
     // The handover itself must have happened; otherwise table 32 could not hold
     // 64 concurrent clients and the test would be measuring nothing.
     ok &= server.lanes.len() >= 2;
+    if !ok {
+        eprintln!("io_uring: boundary self test failed ({} clients answered)",
+                  arrived.load(std::sync::atomic::Ordering::SeqCst));
+    }
     ok
 }
 
@@ -1230,6 +1289,16 @@ fn self_test_boundary(secret: &str, db_path: &str, port: u16, lfd: c_int) -> boo
 #[cfg(test)]
 mod handover_tests {
     use super::*;
+
+    #[test]
+    fn connection_generation_does_not_change_routing() {
+        let u = conn_tag(K_RECV, (1 << 20) - 1, 7, u32::MAX);
+        assert_eq!(tag_kind(u), K_RECV);
+        assert_eq!(tag_slot(u), (1 << 20) - 1);
+        assert_eq!(tag_lane(u), 7);
+        assert_eq!((u >> 32) as u32, u32::MAX);
+        assert_ne!(u, conn_tag(K_RECV, (1 << 20) - 1, 7, 0));
+    }
 
     #[test]
     fn picks_the_next_ring_with_room() {

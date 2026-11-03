@@ -44,7 +44,7 @@ pub const IORING_OP_SHUTDOWN: u8 = 34;
 pub const IORING_OP_PROVIDE_BUFFERS: u8 = 31;
 
 pub const IOSQE_FIXED_FILE: u8 = 1 << 0;
-pub const IOSQE_IO_HARDLINK: u8 = 1 << 4;
+pub const IOSQE_IO_HARDLINK: u8 = 1 << 3;
 pub const IOSQE_BUFFER_SELECT: u8 = 1 << 5;
 pub const IOSQE_CQE_SKIP_SUCCESS: u8 = 1 << 6;
 pub const IOSQE_IO_LINK: u8 = 1 << 2;
@@ -608,8 +608,9 @@ impl Sqe {
     pub fn close(file_index: u32, user: u64) -> impl FnOnce(&Sqe) {
         move |s: &Sqe| {
             s.put8(O_OPCODE, IORING_OP_CLOSE);
-            s.put8(O_FLAGS, IOSQE_FIXED_FILE);
-            s.put32(O_FD, file_index);
+            // close_direct uses a one-based file_index, NOT IOSQE_FIXED_FILE.
+            // The latter makes CLOSE fail with EBADF and leaks the socket.
+            s.put32(O_FILE_INDEX, file_index + 1);
             s.put(O_USER, user);
         }
     }
@@ -709,11 +710,13 @@ mod abi_tests {
         let b = encode(Sqe::shutdown(11, 3));
         assert_eq!(b[O_OPCODE], IORING_OP_SHUTDOWN);
         assert_eq!(b[O_FLAGS], IOSQE_FIXED_FILE | IOSQE_IO_HARDLINK);
+        assert_eq!(b[O_FLAGS], 0x09, "FIXED_FILE plus IO_HARDLINK, not ASYNC");
         assert_eq!(u32at(&b, O_LEN), 2, "SHUT_RDWR");
         let c = encode(Sqe::close(11, 4));
         assert_eq!(c[O_OPCODE], IORING_OP_CLOSE);
-        assert_eq!(c[O_FLAGS], IOSQE_FIXED_FILE);
-        assert_eq!(u32at(&c, O_FD), 11);
+        assert_eq!(c[O_FLAGS], 0);
+        assert_eq!(u32at(&c, O_FD), 0);
+        assert_eq!(u32at(&c, O_FILE_INDEX), 12);
     }
 
     #[test]

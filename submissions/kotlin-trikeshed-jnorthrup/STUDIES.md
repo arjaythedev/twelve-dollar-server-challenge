@@ -313,13 +313,24 @@ The p95 and p99 are now the writes (7.8% of the mix) waiting for their batch. Th
 next limit (next steps, 3). A second run of 1b524df overlapped another project's Gradle build on kali and is not
 counted.
 
+Batch waits (`feed_enter`, the #1 entry's numbers: kensac `src/main.rs` WAIT_MIN 256, WAIT_NS 1 ms): ring 0 now waits
+for 256 completions or 1 ms, never past the commit deadline. The vcheck load step made 1,370 `io_uring_enter` calls in
+4 s against 56,307 (101k against 92k req/s); a lone connection's p50 rose from 121 µs to 1.37 ms. The k6 mix at 128k,
+alternating runs:
+
+| build | hold req/s | p50 / p95 / p99 | server CPU, user + sys |
+|---|---|---|---|
+| changes 1-3 | 13,551; 13,542 | 0.9 / 52.7 / 87.0; 0.5 / 46.6 / 78.8 ms | 22 + 67%; 22 + 67% |
+| + batch waits | 13,546; 13,542 | 4.2 / 40.4 / 77.8; 4.4 / 39.9 / 76.8 ms | 14 + 61%; 13 + 62% |
+
+About 55 µs per request against 66 on kali, where the load generator shares the VM and inflates sys time.
+
 ## Next steps, in order of measured size
 
 1. Done: B-tree cursor reads in C for feed and post (098ccd1, feed 40 to 23 µs), and a held read transaction per wake (4dc083f, feed 21 µs, post 10 µs).
 2. Done (S18): reads do not wait for the commit window; checkpoints run on their own thread; the WAL gate keeps the log
    small. Measure the window knee (64, 16, 4, 2, 1 ms) with `mixlat.sh` and `knee2.sh like` on this design.
-3. Batch formation (2 ms or 64 completions): about 3 µs per mix request. Since S18 it also carries the extra sys time
-   of answering reads in their own wake.
+3. Done (S18): batch waits, 256 completions or 1 ms per wake (128k: 89% to 75% CPU).
 4. Pin once and recycle windows (Poller arrays, `Out` buffers): about 2.5 µs, and the GC share falls.
 5. WAL read path (`walFindFrame`, `pcache1Fetch` 3.3%). Done (S18): the checkpoint off the loop.
 6. Task P follow-up: the other three winners need their own toolchains.

@@ -180,6 +180,7 @@ type app struct {
 
 	writeDB         *sql.DB
 	writeConn       *sql.Conn
+	insertPost      *sql.Stmt
 	insertPostsBulk *sql.Stmt
 	insertLikesBulk *sql.Stmt
 	postsExistBulk  *sql.Stmt
@@ -333,6 +334,9 @@ func main() {
 		log.Fatal(err)
 	}
 	ctx := context.Background()
+	if a.insertPost, err = wconn.PrepareContext(ctx, insertPostSQL); err != nil {
+		log.Fatal(err)
+	}
 	if a.insertPostsBulk, err = wconn.PrepareContext(ctx, insertPostsBulkSQL); err != nil {
 		log.Fatal(err)
 	}
@@ -395,6 +399,8 @@ const (
 			'like_count', (SELECT count(*) FROM likes l WHERE l.post_id = p.id)))
 		  FROM posts p JOIN users u ON u.id = p.user_id
 		 WHERE p.id = ?`
+	insertPostSQL = `INSERT INTO posts (user_id, body) VALUES (?, ?)
+		RETURNING id, created_at`
 	insertPostsBulkSQL = `INSERT INTO posts (user_id, body)
 		SELECT CAST(json_extract(value, '$.u') AS INTEGER), json_extract(value, '$.b')
 		  FROM json_each(?1)
@@ -813,7 +819,24 @@ func (a *app) runBatch(jobs []*writeJob) {
 			creates = append(creates, createIn{U: j.userID, B: j.body})
 		}
 	}
-	if len(creates) > 0 {
+	if len(creates) > 0 && len(creates) <= 4 {
+		// Small create groups are cheaper as prepared statements: no JSON
+		// array, json_each, or returned-id sort. They still share the batch
+		// transaction and its single commit.
+		for _, idx := range createIdx {
+			j := jobs[idx]
+			var id int64
+			var created string
+			if err := a.insertPost.QueryRowContext(ctx, j.userID, j.body).Scan(&id, &created); err != nil {
+				ok = false
+				break
+			}
+			results[idx].post = post{
+				ID: id, Body: j.body,
+				CreatedAt: created, Author: j.username,
+			}
+		}
+	} else if len(creates) > 0 {
 		buf, err := json.Marshal(creates)
 		if err != nil {
 			ok = false

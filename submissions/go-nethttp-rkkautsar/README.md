@@ -23,9 +23,10 @@ Serving is direct on `HOST:PORT`, no Nginx.
 - **Write group commit.** One dedicated `*sql.Conn` runs queued create/like
   jobs in one `BEGIN IMMEDIATE … COMMIT`; it waits for `WRITE_BATCH_MS` only
   when at least four jobs are already queued, otherwise it commits
-  immediately. Creates use one multi-row `json_each` insert; likes use one
-  existence query plus one multi-row `INSERT … RETURNING`. Every response
-  waits for the commit.
+  immediately. Creates of four or fewer use a prepared single-row
+  `INSERT … RETURNING`; larger groups use one multi-row `json_each` insert.
+  Likes use one existence query plus one multi-row `INSERT … RETURNING`.
+  Every response waits for the commit.
 - **Four read connections** (`READ_CONNS`), prepared statements, WAL,
   `synchronous=NORMAL`, 16 MiB page cache, mmap disabled by default
   (`SQLITE_MMAP` bytes re-enables it), `_mutex=no`, and WAL autocheckpoint at

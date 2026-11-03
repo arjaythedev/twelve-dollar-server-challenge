@@ -18,6 +18,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <netdb.h>
 #include <netinet/in.h>
@@ -45,6 +46,7 @@ constexpr std::size_t max_response_bytes = 16 * 1024 * 1024;
 constexpr std::size_t max_samples = 20'000'000;
 constexpr unsigned max_timer_batch = 256;
 constexpr double timer_batch_seconds = 0.001;
+constexpr unsigned activation_deadline_grace_ms = 100;
 volatile std::sig_atomic_t interrupted = 0;
 
 void stop_signal(int)
@@ -143,6 +145,17 @@ unsigned integer(std::string_view text, unsigned maximum, std::string_view name)
     {
         throw std::runtime_error(std::string(name) + " must be between 1 and " +
                                  std::to_string(maximum));
+    }
+    return result;
+}
+
+std::uint64_t random_seed(std::string_view text)
+{
+    std::uint64_t result = 0;
+    const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), result);
+    if (error != std::errc{} || end != text.data() + text.size())
+    {
+        throw std::runtime_error("--seed must be an unsigned 64-bit integer");
     }
     return result;
 }
@@ -684,7 +697,14 @@ struct Metrics
     std::uint64_t interrupted_iterations = 0;
     std::uint64_t workflow_errors = 0;
     std::uint64_t connections = 0;
+    std::uint64_t established_connections = 0;
+    std::uint64_t live_connections = 0;
+    std::uint64_t closed_connections = 0;
+    std::uint64_t peak_live_connections = 0;
+    std::uint64_t hold_peak_live_connections = 0;
+    std::uint64_t vus_with_http_response = 0;
     std::uint64_t bytes_received = 0;
+    std::optional<double> target_activation_seconds;
     double blocked_sum = 0;
     double elapsed = 0;
 };
@@ -721,6 +741,8 @@ struct User
     bool started = false;
     bool retiring = false;
     bool stopped = false;
+    bool socket_established = false;
+    bool received_http_response = false;
 };
 
 // Exactly one timer entry per VU, including while an HTTP request is active
@@ -863,6 +885,7 @@ class Load
         while (!timers_.empty() && !interrupted)
         {
             double now = elapsed();
+            observe_connections(now);
             const auto timers_started = now;
             unsigned timers_serviced = 0;
             // A connect call can still stall, so check the time budget between timer services
@@ -958,6 +981,7 @@ class Load
             }
         }
         metrics_.elapsed = elapsed();
+        observe_connections(metrics_.elapsed);
         return std::move(metrics_);
     }
 
@@ -977,6 +1001,32 @@ class Load
         return std::generate_canonical<double, 53>(random_) < probability;
     }
 
+    void observe_connections(double now)
+    {
+        const double hold_end = config_.ramp_up + config_.hold;
+        if ((now >= config_.ramp_up && now < hold_end) ||
+            (last_connection_observation_ < hold_end && now > config_.ramp_up))
+        {
+            metrics_.hold_peak_live_connections =
+                std::max(metrics_.hold_peak_live_connections, metrics_.live_connections);
+        }
+        last_connection_observation_ = now;
+    }
+
+    void connection_established(std::size_t id, double now)
+    {
+        auto &user = users_[id];
+        observe_connections(now);
+        user.socket_established = true;
+        user.request->connecting = false;
+        user.request->connected = now;
+        ++metrics_.established_connections;
+        ++metrics_.live_connections;
+        metrics_.peak_live_connections =
+            std::max(metrics_.peak_live_connections, metrics_.live_connections);
+        observe_connections(now);
+    }
+
     void schedule(std::size_t id)
     {
         auto &user = users_[id];
@@ -994,6 +1044,13 @@ class Load
         auto &user = users_[id];
         if (user.socket.get() >= 0)
         {
+            observe_connections(elapsed());
+            if (user.socket_established)
+            {
+                user.socket_established = false;
+                --metrics_.live_connections;
+                ++metrics_.closed_connections;
+            }
             ::epoll_ctl(epoll_.get(), EPOLL_CTL_DEL, user.socket.get(), nullptr);
             user.socket.reset();
         }
@@ -1104,6 +1161,10 @@ class Load
         {
             user.started = true;
             ++active_;
+            if (active_ == config_.vus && !metrics_.target_activation_seconds)
+            {
+                metrics_.target_activation_seconds = now;
+            }
             user.wake = now + between(0, 5);
             return;
         }
@@ -1243,8 +1304,7 @@ class Load
         interest(id, true, true);
         if (result == 0)
         {
-            user.request->connecting = false;
-            user.request->connected = elapsed();
+            connection_established(id, elapsed());
             write(id, elapsed());
         }
     }
@@ -1303,8 +1363,7 @@ class Load
                 complete(id, false, now, std::strerror(error));
                 return;
             }
-            user.request->connecting = false;
-            user.request->connected = now;
+            connection_established(id, now);
             write(id, now);
             if (user.request.get() != original)
             {
@@ -1379,6 +1438,11 @@ class Load
     void complete(std::size_t id, bool transport_ok, double now, std::string_view error = {})
     {
         auto &user = users_[id];
+        if (transport_ok && user.request->complete && !user.received_http_response)
+        {
+            user.received_http_response = true;
+            ++metrics_.vus_with_http_response;
+        }
         if (now >= user.retire + config_.grace)
         {
             stop(id, user.started);
@@ -1489,6 +1553,7 @@ class Load
     Metrics metrics_;
     Clock::time_point start_{};
     unsigned active_ = 0;
+    double last_connection_observation_ = 0;
 };
 
 double percentile(const std::vector<double> &sorted, double fraction)
@@ -1653,7 +1718,15 @@ Summary summarize(Metrics &metrics, const Config &config)
     const double p99 = percentile(metrics.durations, 0.99);
     const double failure_rate =
         count == 0 ? 0 : static_cast<double>(metrics.failures) / static_cast<double>(count);
-    const bool passed = p95 < 500 && p99 < 1000 && failure_rate < 0.01;
+    const bool target_concurrency_reached = metrics.hold_peak_live_connections >= config.vus;
+    const bool response_coverage_complete = metrics.vus_with_http_response == config.vus;
+    const bool target_activation_on_time =
+        metrics.target_activation_seconds &&
+        *metrics.target_activation_seconds <=
+            config.ramp_up + static_cast<double>(activation_deadline_grace_ms) / 1000;
+    const bool http_metrics_passed = p95 < 500 && p99 < 1000 && failure_rate < 0.01;
+    const bool passed = count != 0 && target_concurrency_reached && response_coverage_complete &&
+                        target_activation_on_time && http_metrics_passed;
     rusage usage{};
     if (::getrusage(RUSAGE_SELF, &usage) != 0)
     {
@@ -1687,8 +1760,31 @@ Summary summarize(Metrics &metrics, const Config &config)
            << ",\"ramp_up_seconds\":" << config.ramp_up << ",\"hold_seconds\":" << config.hold
            << ",\"ramp_down_seconds\":" << config.ramp_down << ",\"grace_seconds\":" << config.grace
            << ",\"request_timeout_seconds\":" << config.timeout
-           << ",\"elapsed_seconds\":" << metrics.elapsed
+           << ",\"elapsed_seconds\":" << metrics.elapsed << ",\"target_activation_seconds\":";
+    if (metrics.target_activation_seconds)
+    {
+        output << *metrics.target_activation_seconds;
+    }
+    else
+    {
+        output << "null";
+    }
+    output << ",\"activation_deadline_grace_ms\":" << activation_deadline_grace_ms
+           << ",\"target_activation_on_time\":" << target_activation_on_time
            << ",\"connections\":" << metrics.connections
+           << ",\"connections_semantics\":\"connect calls returning success or EINPROGRESS, not "
+              "completed handshakes\""
+           << ",\"established_connections\":" << metrics.established_connections
+           << ",\"live_connections\":" << metrics.live_connections
+           << ",\"closed_connections\":" << metrics.closed_connections
+           << ",\"peak_live_connections\":" << metrics.peak_live_connections
+           << ",\"hold_peak_live_connections\":" << metrics.hold_peak_live_connections
+           << ",\"live_connections_semantics\":\"handshaken client sockets still open, including "
+              "retired idle VUs; peer closes counted when observed\""
+           << ",\"vus_with_http_response\":" << metrics.vus_with_http_response
+           << ",\"target_concurrency_reached\":" << target_concurrency_reached
+           << ",\"http_response_coverage_complete\":" << response_coverage_complete
+           << ",\"http_metrics_passed\":" << http_metrics_passed
            << ",\"max_rss_bytes\":" << static_cast<std::uint64_t>(usage.ru_maxrss) * 1024
            << ",\"idle_vu_state_bytes\":" << sizeof(User) + sizeof(std::size_t)
            << ",\"interrupted_iterations\":" << metrics.interrupted_iterations
@@ -1750,6 +1846,7 @@ int main(int argc, char **argv)
         {
             std::cout
                 << "load_generator [--base-url http://HOST:PORT] [--vus N] [--duration 5m]\n"
+                   "  [--seed UINT64]\n"
                    "  [--ramp-up 60s] [--ramp-down 30s] [--graceful-ramp-down 10s]\n"
                    "  [--request-timeout 60s] [--tokens seed/tokens.json] [--summary-export PATH]\n"
                    "  [--local-ips IPv4,IPv4-IPv4] [--ready-file PATH] [--start-gate PATH]\n"
@@ -1787,6 +1884,10 @@ int main(int argc, char **argv)
             if (name == "--base-url")
             {
                 config.base_url = value;
+            }
+            else if (name == "--seed")
+            {
+                config.seed = random_seed(value);
             }
             else if (name == "--vus")
             {
@@ -1887,6 +1988,7 @@ enum class FixtureMode
     workflow,
     failed_feed,
     stalled,
+    partially_stalled,
     closed
 };
 
@@ -1957,6 +2059,7 @@ class Fixture
         std::optional<std::size_t> token;
         std::string selected;
         unsigned stage = 0;
+        bool silent = false;
     };
 
     void send_all(int fd, std::string_view response)
@@ -1981,7 +2084,8 @@ class Fixture
         const auto first_space = request.find(' ');
         const auto second_space = request.find(' ', first_space + 1);
         const auto path = request.substr(first_space + 1, second_space - first_space - 1);
-        if (mode_ == FixtureMode::stalled)
+        if (mode_ == FixtureMode::stalled ||
+            (mode_ == FixtureMode::partially_stalled && client.silent))
         {
             return;
         }
@@ -2131,6 +2235,7 @@ class Fixture
                 ::setsockopt(socket, IPPROTO_TCP, TCP_NODELAY, &enabled, sizeof(enabled));
                 Client client;
                 client.socket.reset(socket);
+                client.silent = connections_ % 2 != 0;
                 clients.push_back(std::move(client));
                 ++connections_;
             }
@@ -2162,6 +2267,22 @@ Metrics fixture_run(Fixture &fixture, Config config)
 void self_test()
 {
     require(duration("1m500ms") == 60.5, "compound duration");
+    require(random_seed("0") == 0 &&
+                random_seed("18446744073709551615") == std::numeric_limits<std::uint64_t>::max(),
+            "fixed RNG seed accepts the full unsigned 64-bit range");
+    for (const auto invalid : {"", "-1", "42x", "18446744073709551616"})
+    {
+        bool rejected = false;
+        try
+        {
+            static_cast<void>(random_seed(invalid));
+        }
+        catch (const std::runtime_error &)
+        {
+            rejected = true;
+        }
+        require(rejected, "invalid fixed RNG seed is rejected");
+    }
     require(local_addresses("127.0.0.2-127.0.0.4,127.0.0.9").size() == 4, "local IPv4 ranges");
     require(create_body({"alice", ""}, 3, 7, "2026-11-02T12:00:00.123Z") ==
                 "{\"body\":\"alice says hi at 2026-11-02T12:00:00.123Z (VU 3, iter 7)\"}",
@@ -2316,7 +2437,7 @@ void self_test()
     config.seed = 42;
     config.diagnostics = true;
     Fixture workflow(FixtureMode::workflow);
-    const auto metrics = fixture_run(workflow, config);
+    auto metrics = fixture_run(workflow, config);
     require(metrics.diagnostics && metrics.diagnostics->requests == metrics.durations.size() &&
                 metrics.diagnostics->workload_start_ns > 0 && metrics.diagnostics->timers > 0 &&
                 metrics.diagnostics->events > 0,
@@ -2335,6 +2456,47 @@ void self_test()
             "all workflow branches");
     require(workflow.connections() == config.vus && metrics.connections == config.vus,
             "independent persistent VU sockets");
+    require(metrics.established_connections == config.vus &&
+                metrics.live_connections == config.vus && metrics.closed_connections == 0 &&
+                metrics.peak_live_connections == config.vus &&
+                metrics.hold_peak_live_connections == config.vus &&
+                metrics.vus_with_http_response == config.vus,
+            "healthy coverage includes successful handshakes and retained idle sockets");
+    require(metrics.target_activation_seconds && summarize(metrics, config).passed,
+            "healthy real workload activates all VUs on time and reaches connection coverage");
+    Metrics late_activation;
+    late_activation.durations = {1};
+    late_activation.hold_peak_live_connections = config.vus;
+    late_activation.vus_with_http_response = config.vus;
+    late_activation.target_activation_seconds = config.ramp_up + 0.100;
+    require(summarize(late_activation, config).passed,
+            "activation deadline includes the explicit 100ms scheduler margin");
+    late_activation.target_activation_seconds = config.ramp_up + 0.101;
+    const auto late_summary = summarize(late_activation, config);
+    const auto late_document = json(late_summary.json);
+    require(late_document != nullptr, "late activation summary JSON");
+    auto *late_generator = yyjson_obj_get(yyjson_doc_get_root(late_document.get()), "generator");
+    require(
+        !late_summary.passed &&
+            yyjson_get_bool(yyjson_obj_get(late_generator, "http_metrics_passed")) &&
+            yyjson_get_bool(yyjson_obj_get(late_generator, "target_concurrency_reached")) &&
+            yyjson_get_bool(yyjson_obj_get(late_generator, "http_response_coverage_complete")) &&
+            !yyjson_get_bool(yyjson_obj_get(late_generator, "target_activation_on_time")) &&
+            yyjson_get_uint(yyjson_obj_get(late_generator, "activation_deadline_grace_ms")) ==
+                100 &&
+            std::abs(yyjson_get_num(yyjson_obj_get(late_generator, "target_activation_seconds")) -
+                     *late_activation.target_activation_seconds) < 1e-12,
+        "late activation cannot pass despite successful HTTP, connection peak and coverage");
+    late_activation.target_activation_seconds.reset();
+    const auto missing_activation = summarize(late_activation, config);
+    const auto missing_document = json(missing_activation.json);
+    require(missing_document != nullptr, "missing activation summary JSON");
+    auto *missing_generator =
+        yyjson_obj_get(yyjson_doc_get_root(missing_document.get()), "generator");
+    require(!missing_activation.passed &&
+                yyjson_is_null(yyjson_obj_get(missing_generator, "target_activation_seconds")) &&
+                !yyjson_get_bool(yyjson_obj_get(missing_generator, "target_activation_on_time")),
+            "missing activation time is explicit and cannot pass");
     require(metrics.interrupted_iterations == 0 && metrics.iterations > 0,
             "retirement finishes iteration");
     Config burst = config;
@@ -2377,6 +2539,23 @@ void self_test()
     require(failed.failures > 0 && failed.endpoint_requests[1] == 0 &&
                 failed.endpoint_requests[2] == 0 && failed.endpoint_requests[3] == 0,
             "failed feed ends iteration");
+    require(failed.vus_with_http_response == config.vus,
+            "HTTP 503 responses count toward VU coverage without passing HTTP thresholds");
+    Config partial_config = config;
+    partial_config.vus = 2;
+    partial_config.ramp_up = 0;
+    partial_config.ramp_down = 0;
+    partial_config.hold = 0.04;
+    partial_config.grace = 0.01;
+    Fixture partial(FixtureMode::partially_stalled);
+    auto incomplete = fixture_run(partial, partial_config);
+    require(incomplete.failures == 0 && !incomplete.durations.empty() &&
+                incomplete.established_connections == partial_config.vus &&
+                incomplete.hold_peak_live_connections == partial_config.vus &&
+                incomplete.vus_with_http_response == 1 && incomplete.interrupted_iterations > 0,
+            "partially silent VUs leave zero HTTP failures but incomplete response coverage");
+    require(!summarize(incomplete, partial_config).passed,
+            "partially silent workload cannot pass using only its completed HTTP responses");
     Fixture closed(FixtureMode::closed);
     config.vus = 1;
     config.hold = 0.04;
@@ -2384,12 +2563,18 @@ void self_test()
     require(reconnected.failures == 0 && reconnected.connections > 1 &&
                 reconnected.endpoint_requests[1] > 0,
             "EOF response reconnects");
+    require(reconnected.established_connections == reconnected.connections &&
+                reconnected.closed_connections + reconnected.live_connections ==
+                    reconnected.established_connections &&
+                reconnected.live_connections <= 1 && reconnected.peak_live_connections == 1 &&
+                reconnected.vus_with_http_response == 1,
+            "reconnections count each handshake and close without duplicating VU coverage");
     Fixture stalled(FixtureMode::stalled);
     config.hold = 0.01;
     config.ramp_up = 0;
     config.ramp_down = 0;
     config.grace = 0.005;
-    const auto canceled = fixture_run(stalled, config);
+    auto canceled = fixture_run(stalled, config);
     require(canceled.diagnostics && canceled.diagnostics->requests == 0,
             "canceled requests omitted from diagnostic latency");
     require(grouped_count(canceled.endpoint_durations) == 0 &&
@@ -2398,6 +2583,10 @@ void self_test()
     require(canceled.interrupted_iterations == 1 && canceled.durations.empty() &&
                 canceled.failures == 0 && canceled.iterations == 0,
             "grace cancellation omits in-flight request");
+    require(canceled.established_connections == 1 && canceled.closed_connections == 1 &&
+                canceled.live_connections == 0 && canceled.vus_with_http_response == 0 &&
+                !summarize(canceled, config).passed,
+            "silent cancellation closes the established socket and cannot pass an empty run");
     Fixture timeout(FixtureMode::stalled);
     config.hold = 0.025;
     config.timeout = 0.005;

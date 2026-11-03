@@ -1,0 +1,64 @@
+{
+  "date": "2026-11-03",
+  "cause": "WSL mirrored networking inherited a seccomp bind notification filter.",
+  "fix": "Restore pre-mirrored .wslconfig (default NAT) and restart Docker/WSL.",
+  "connections": 5000,
+  "source_ips": 32,
+  "probe_sha256": "4763092b5113792799aedc57d7f2dfd895b791ccff27f79fc0d78a44d4363198",
+  "mirrored": [
+    {
+      "elapsed_s": 2.728566511,
+      "cpu_s": 0.309071,
+      "bind_s": 2.54975661
+    },
+    {
+      "elapsed_s": 2.675981508,
+      "cpu_s": 0.30355,
+      "bind_s": 2.500203494
+    },
+    {
+      "elapsed_s": 2.696880414,
+      "cpu_s": 0.308252,
+      "bind_s": 2.518362714
+    }
+  ],
+  "nat": [
+    {
+      "elapsed_s": 0.128817712,
+      "cpu_s": 0.128733,
+      "bind_s": 0.006675734
+    },
+    {
+      "elapsed_s": 0.103070018,
+      "cpu_s": 0.102981,
+      "bind_s": 0.006026894
+    },
+    {
+      "elapsed_s": 0.100878077,
+      "cpu_s": 0.100738,
+      "bind_s": 0.006042228
+    }
+  ],
+  "container_seccomp_filters_before": 3,
+  "container_seccomp_filters_after": 2,
+  "distro_init_seccomp_filters_after": 0,
+  "kernel_wait": "seccomp_do_user_notification.isra.0",
+  "http": {
+    "users": 10000,
+    "ramp_seconds": 1,
+    "hold_seconds": 15,
+    "target_activation_seconds": 1.00067876,
+    "hold_p99_ms": 4.36774448,
+    "requests": 22216,
+    "errors": 0,
+    "passed": true,
+    "psi_io_full_seconds": 15.761329
+  },
+  "generator_validation": "All VUs must activate by ramp end plus 100 ms; connection peak and HTTP coverage remain required.",
+  "psi_note": "io.pressure includes io_uring waits for TCP work; it does not identify filesystem stalls.",
+  "raw_report": "results/load-buildup-fixed-10000-20261103T182618Z-1-fixed/report.json",
+  "sources": [
+    "https://github.com/microsoft/WSL/blob/2.7.3/doc/docs/technical-documentation/localhost.md",
+    "https://github.com/microsoft/WSL2-Linux-Kernel/blob/linux-msft-wsl-6.6.114.1/io_uring/io_uring.c#L2357-L2393"
+  ]
+}

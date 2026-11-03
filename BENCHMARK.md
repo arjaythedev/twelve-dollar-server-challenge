@@ -102,6 +102,19 @@
 | C++ 0.1.0 (leaf-local likes, sanity) | 350,000 | 5 min | 13,071,770 | 32,679.41 | 5.196 ms | 44.310 ms | 1,868.28 ms | 0% | 22.43 us | 1,070.78 MiB |
 | C++ 0.1.0 (per-entry likes, A) | 350,000 | 5 min | 13,074,468 | 32,686.09 | 4.687 ms | 5.986 ms | 58.29 ms | 0% | 22.30 us | 1,031.52 MiB |
 | C++ 0.1.0 (leaf-local likes, B) | 350,000 | 5 min | 13,072,068 | 32,680.13 | 4.604 ms | 5.838 ms | 54.75 ms | 0% | 21.87 us | 1,018.46 MiB |
+| C++ 0.1.0 (CQ rotation baseline) | 70,000 | 15 s | 297,358 | 4,955.91 | 3.624 ms | 4.382 ms | 13.07 ms | 0% | 31.43 us | 436.72 MiB |
+| C++ 0.1.0 (CQ rotation + dispatch/wait cleanup) | 70,000 | 15 s | 297,093 | 4,951.60 | 3.547 ms | 4.379 ms | 11.80 ms | 0% | 31.06 us | 444.19 MiB |
+| C++ 0.1.0 (CQ rotation baseline) | 350,000 | 5 min | 13,072,462 | 32,681.11 | 4.716 ms | 6.182 ms | 128.73 ms | 0% | 22.28 us | 1,059.71 MiB |
+| C++ 0.1.0 (CQ rotation + dispatch/wait cleanup) | 350,000 | 5 min | 13,074,254 | 32,685.60 | 4.686 ms | 6.028 ms | 63.98 ms | 0% | 22.40 us | 1,107.38 MiB |
+| C++ 0.1.0 (PGO plain, 60-s ramp) | 350,000 | 60 s | 4,184,480 | 26,153.00 | 4.558 ms | 5.781 ms | 21.67 ms | 0% | 23.80 us | 982.73 MiB |
+| C++ 0.1.0 (GCC 13 PGO, 60-s ramp) | 350,000 | 60 s | 4,183,847 | 26,148.90 | 4.986 ms | 20.087 ms | 192.38 ms | 0% | 23.11 us | 966.51 MiB |
+| C++ 0.1.0 (ring diagnostics, 60-s ramp) | 350,000 | 30 s | 3,072,657 | 23,635.67 | 4.581 ms | 5.966 ms | 42.38 ms | 0% | 24.35 us | 947.70 MiB |
+
+CQ rotation and dispatch/wait cleanup: 70k A/B CPU/request -1.2%. Matched 350k/5m B/A: CPU/request +0.5%, hold p99 6.12 to 6.05 ms, peak RAM +47.67 MiB. Same seed, fresh seeded databases and generator; zero errors or memory-limit events. Rotation removed after no clear gain; accept/wait cleanup retained. [Data](src/benchmarks/cq-rotation.json).
+
+PGO: CPU/request -2.9%, hold p99 5.87 to 38.71 ms. Both passed; implementation removed. The preliminary 30-s ramp pair missed activation deadlines. [Data](src/benchmarks/pgo.json).
+
+Ring diagnostics: six rings, zero ENOBUFS throughout. Four full-load intervals had CQ depths at most 210, no overflow and no deferred receives. [Data](src/benchmarks/ring-distribution.json).
 
 Leaf-local likes, matched 350k/5m A/B, seed 3132383413, no concurrent builds/probes: CPU/request 22.30 to 21.87 us (-1.9%), hold p99 6.02 to 5.86 ms. Both reached 350k on time with complete response coverage and no errors or memory-limit events. Earlier second-long outliers were not reproduced. [Data](src/benchmarks/leaf-likes.json).
 

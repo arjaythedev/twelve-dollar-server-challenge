@@ -39,14 +39,15 @@
 - [x] Compare idle multishot polls with bounded nonblocking reads. At 300k, CPU/request rose from 28.42 to 30.26 us and p99 from 8.03 to 4,170.84 ms; keep pending receives.
 
 - [ ] Compare lazy ring packing with balanced 4/8/12-ring connection shards where descriptor capacity permits, at the same load and total buffer budget. One issuer and one vCPU remain; compare CPU/request, wakeups, empty CQ scans and p99. More rings add capacity and change locality, not CPU cores.
-  Old 300k/5m trace: rings 0-3 each served about 2M send attempts, but ring 3 had 2.21M ENOBUFS versus 0.33M on ring 2. Recheck after the receive-retry fixes.
+  Old 300k/5m trace: rings 0-3 each served about 2M send attempts, but ring 3 had 2.21M ENOBUFS versus 0.33M on ring 2. Current 350k diagnostics: six rings, zero ENOBUFS, no deferred receives or CQ overflow in four full-load intervals. No balancing change yet.
   Place new accept tickets by live plus reserved slots first, then compare buffer occupancy and deferred-request age as weights. Keep established sockets on their owning ring; migration needs separate lifetime handling. Normalize ENOBUFS by receive attempts before inferring load from the historical share.
 
 - [ ] Compare an exact non-empty-ring bitmap if ring selection becomes hot. Free-slot allocation is already O(1); a Bloom filter adds hashes and false positives before a direct slot lookup.
 
 - [x] Compare a bounded ready queue with round-robin handler dispatch. At 100k, CPU/request changed from 31.05 to 31.32 us and p99 from 27.42 to 32.71 ms; keep inline dispatch.
 
-- [ ] Rotate which ring starts CQ draining each turn, keeping the 256-CQE cap and inline handlers. Compare current per-ring receive/defer metrics; preserve per-connection completion/response order, ring growth during accepts and primary GETEVENTS progress.
+- [x] Compare rotating CQ starts, retaining the 256-CQE cap and fixed ownership. Matched 350k/5m B/A: CPU/request +0.5%, hold p99 -1.2%, zero errors. Restore fixed starts after no clear gain; growth, receive, partial send and shutdown pass in both builds.
+  Track accepts in their handler and inspect deferred receive queues only when the wait decision needs them. Both reductions are visible in optimized assembly; large-load backlog effects remain unmeasured.
 
 - [x] Collect handler, database-method, commit and send-preparation-to-CQE histograms, with per-ring CQ depth/overflow and five-second client/scheduling windows. Send timing includes batching and CQ service delay; CPU samples omit I/O waits.
   A 300k trace captured 2.53- and 1.43-second foreground commits followed by full CQs and CPU saturation. Client scheduling stayed near 1 ms; foreground WAL-header sync under NORMAL is a candidate to measure next.
@@ -179,7 +180,7 @@
 
 - [x] Use `unix-excl` on both database handles ([Kensac](submissions/rust-iouring-kensac/csrc/shim.c), [Pavly](submissions/c-iouring-pavlyhalim/src/db.h)). A small SQLite probe reduced 67,080 measured fcntl64 calls to zero. The short 70k pair used 2.5% less CPU/request with nearly unchanged p99. External SQLite processes must wait until shutdown; keep the checkpoint handle and NORMAL sync.
 
-- [ ] Compare contiguous WAL-write coalescing separately over the stock Unix VFS, retaining external access ([engine.c](submissions/c-iouring-public/components/engine.c)). Target pwrite calls; preserve commit visibility, short-write/error handling and NORMAL sync.
+- [ ] Compare contiguous WAL-write coalescing over `unix-excl` ([Pavly](submissions/c-iouring-pavlyhalim/src/db.h)). Target pwrite calls; preserve commit visibility, short-write/error handling and NORMAL sync. Keep WAL eviction working through the wrapper; it currently requires `xRead == unixRead`.
 
 - [ ] Compare linked shutdown/close with selective CQE suppression only after preserving pending counts, failure paths and final ownership retirement. Target connection churn; ordinary keep-alive requests avoid this work already.
   Targeted cancellation and direct closes are already present: normal EOF skips cancellation; other closes target the owning Operation and retire only after the close CQE ([Ada PR 211](https://github.com/visseranalytics/twelve-dollar-server-challenge/blob/7ff01df614ba46dfe89c6388aab52ed176538873/submissions/ada-native-visseranalytics/src/engine.adb#L252)).
@@ -207,13 +208,13 @@
   Use a 16-MiB budget; random post reads improved without the larger cache's feed regression.
   Keep one database at `SQLITE_PATH`; shard transport metadata and work queues, not database files or schema. Extra connections can isolate I/O waits but share one vCPU and one WAL writer.
 
-- [ ] Compare PGO trained on fresh synthetic data with plain optimization ([build.sh](submissions/c-iouring-pavlyhalim/build.sh)).
-  Keep GCC 13 and object paths stable, use atomic counters for SQLite's two threads, stop cleanly and validate on independent data/seeds. Change neither LTO nor ISA at the same time.
+- [x] Compare PGO trained on fresh synthetic data with plain optimization ([build.sh](submissions/c-iouring-pavlyhalim/build.sh)).
+  Matched 350k: CPU/request -2.9%, hold p99 5.87 to 38.71 ms. Discard the implementation and retain the results; LTO and ISA flags were unchanged.
   SSE2 JSON/UTF-8 scanning already exists and is baseline on x86_64; test wider SIMD for measured hot loops. AVX2/AVX-512 need matching target support or runtime dispatch.
   `S <= 1/((1-p) + p/s)`, with p measured against total CPU including kernel work.
   JSON is currently 1.8% of sampled CPU, so use a fresh profile before spending time on vector width or more encoding specializations.
 
-- [ ] Compare loop unrolling (`-funroll-loops`, `-funroll-all-loops` and unroll limits), then revisit `-flto` and PGO combinations after hot-path changes.
+- [ ] Compare loop unrolling (`-funroll-loops`, `-funroll-all-loops` and unroll limits), then revisit `-flto` after hot-path changes.
   Change one option at a time; compare CPU/request, p99 and code size, and inspect the hot-path assembly for instruction-cache costs.
 
 - [ ] Compare stack-protector, `_FORTIFY_SOURCE` and allocator-hardening settings independently, including disabled variants.

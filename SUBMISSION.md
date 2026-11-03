@@ -25,7 +25,7 @@ Python 3.15 and uv run the dev tools.
 ```sh
 uv run --directory src --locked dev.py check
 uv run --directory src --locked dev.py check --docker
-uv run --directory src --locked dev.py bench --label cpp-50000 --vus 50000
+uv run --directory src --locked dev.py bench --label cpp-350000
 uv run --directory src --locked dev.py profile --label native-10000 --vus 10000 --save profiles/native-10000.json
 uv run --directory src --locked dev.py results
 ```
@@ -34,9 +34,9 @@ Docker checks include transport tests, the 42 official checks and extra HTTP reg
 
 The server container uses 1 CPU, 2 GiB, the official 65,535 file limit and the profile in src/docker/seccomp.json. Each ring's fixed-file table respects that limit. The profile adds only the three io_uring syscalls to Moby's allowlist. No extra capabilities are needed.
 
-Benchmarks and profiles default to a 30-second ramp and 60-second hold. Use `--hold 5m --ramp 60s` for confirmation runs.
+Benchmarks default to 350,000 users, profiles to 5,000. Both use a 30-second ramp and 60-second hold. Use `--hold 5m --ramp 60s` for confirmation runs.
 
-The native C++ generator follows `bench/load.js` with shared tokens and one connection per user. It supports plain HTTP/IPv4 without redirects or compressed responses. Use `--generator k6` for the reference workload. Both save latency, throughput and errors through dev.py. Use `--no-build` to reuse existing images. Counter readers run outside the server's cgroup.
+The native C++ generator follows `bench/load.js` with shared tokens and one connection per user. It runs in its own image, updated when its sources or build settings change, independently of the server image. It supports plain HTTP/IPv4 without redirects or compressed responses. Use `--generator k6` for the reference workload. Both save latency, throughput and errors through dev.py. Use `--no-build` to reuse the server image or `--image <tag>` to select a frozen variant. Counter readers run outside the server's cgroup.
 
 Profiles use a separate perf container in the server's PID namespace. Sampling covers the hold only, at 997 Hz with DWARF stacks and the unchanged release binary. The default `cpu-clock:u` captures user CPU; `--scope all` includes kernel CPU. Cgroup counters record user and system CPU separately. Both generators finish with a 30-second ramp-down and up to 10 seconds of grace.
 

@@ -249,7 +249,7 @@ func main() {
 			return a.muxWriteBatch(reqs)
 		}
 		var writeJobs chan *muxJob
-		if layout != muxMixed && layout != muxInline {
+		if layout != muxMixed {
 			writeJobs = make(chan *muxJob, 256)
 			go runWriteWorker(writeJobs, writeBatch)
 		}

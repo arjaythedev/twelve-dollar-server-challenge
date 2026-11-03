@@ -206,15 +206,13 @@ func newUringMux(handler MuxHandler, feed func() []byte, postBatch func([]int64)
 		conns:      make(map[uint64]*muxConn),
 		jobs:       make(chan *muxJob, workers*4),
 		writeJobs:  writeJobs,
-		responses:  make(chan *muxResp, 1024),
+		responses:  make(chan *muxResp, 4096),
 	}
 	if layout == muxFeedPostSharedWrite {
 		m.feedJobs = make(chan *muxJob, 64)
 		m.postJobs = make(chan *muxJob, 64)
 	}
-	if !m.inline {
-		m.armWake()
-	}
+	m.armWake()
 	if m.inline {
 		return m, nil
 	}
@@ -701,18 +699,15 @@ func (m *uringMux) pollEvents(block bool) {
 	m.drainCQEs()
 }
 
-// flushInlineAll merges all rings' pending reads and writes into one batch.
-// This is the one-thread layout's equivalent of the top entries' per-pass
-// transaction: one feed read, one post batch, and one write COMMIT.
+// flushInlineAll handles the read side on the event loop and hands writes to
+// the dedicated writer. One feed read and one post batch are shared across all
+// rings; the writer owns the COMMIT and returns responses through the wake path.
 func (m *uringMux) flushInlineAll(muxes []*uringMux) {
 	var feedConns []*muxConn
 	var feedOwners []*uringMux
 	var postConns []*muxConn
 	var postOwners []*uringMux
 	var postIDs []int64
-	var writeConns []*muxConn
-	var writeOwners []*uringMux
-	var writeReqs []*httpReq
 	for _, x := range muxes {
 		if len(x.feedPend) > 0 {
 			feedConns = append(feedConns, x.feedPend...)
@@ -730,14 +725,15 @@ func (m *uringMux) flushInlineAll(muxes []*uringMux) {
 			x.postPend = nil
 			x.postIDs = nil
 		}
-		if len(x.writePend) > 0 {
-			writeConns = append(writeConns, x.writePend...)
-			writeReqs = append(writeReqs, x.writeReqs...)
-			for range x.writePend {
-				writeOwners = append(writeOwners, x)
+		if len(x.writePend) > 0 && x.writeJobs != nil {
+			j := &muxJob{write: true, owner: x, conns: x.writePend, reqs: x.writeReqs}
+			select {
+			case x.writeJobs <- j:
+				x.writePend = nil
+				x.writeReqs = nil
+			default:
+				// Writer backlog stays on this ring until the next pass.
 			}
-			x.writePend = nil
-			x.writeReqs = nil
 		}
 	}
 	if len(feedConns) > 0 {
@@ -754,19 +750,6 @@ func (m *uringMux) flushInlineAll(muxes []*uringMux) {
 				pkt = encodeMuxResponse(&capture{status: 500, body: []byte(`{"error":"internal server error"}`)}, false)
 			}
 			postOwners[i].finishJob(&muxResp{c: c, pkt: pkt})
-		}
-	}
-	if len(writeReqs) > 0 {
-		results := m.writeBatch(writeReqs)
-		for i, c := range writeConns {
-			var pkt []byte
-			if i < len(results) {
-				pkt = results[i].packet
-			}
-			if pkt == nil {
-				pkt = encodeMuxResponse(&capture{status: 500, body: []byte(`{"error":"internal server error"}`)}, false)
-			}
-			writeOwners[i].finishJob(&muxResp{c: c, pkt: pkt})
 		}
 	}
 }

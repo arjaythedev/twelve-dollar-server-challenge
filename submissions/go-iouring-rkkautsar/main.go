@@ -15,6 +15,7 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 	"os"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -158,6 +159,8 @@ func main() {
 		layout = muxMixed
 	case "feedpost", "feed-post", "feedpost-shared-write":
 		layout = muxFeedPostSharedWrite
+	case "inline", "one-thread", "onethread":
+		layout = muxInline
 	default:
 		log.Fatalf("unknown MUX_LAYOUT %q", os.Getenv("MUX_LAYOUT"))
 	}
@@ -246,7 +249,7 @@ func main() {
 			return a.muxWriteBatch(reqs)
 		}
 		var writeJobs chan *muxJob
-		if layout != muxMixed {
+		if layout != muxMixed && layout != muxInline {
 			writeJobs = make(chan *muxJob, 256)
 			go runWriteWorker(writeJobs, writeBatch)
 		}
@@ -258,23 +261,44 @@ func main() {
 				return encodeMuxResponse(w, closeAfter), closeAfter
 			}, feed, postBatch, writeBatch, a.coalesce, 1, layout, writeJobs)
 		}
-		started := 0
-		for range shards {
-			mux, err := newMux()
-			if err != nil {
-				log.Printf("raw io_uring mux unavailable: %v", err)
-				continue
-			}
-			started++
-			go func(m *uringMux) {
-				if err := m.serve(host, port); err != nil {
-					log.Printf("raw io_uring mux stopped: %v", err)
+		if layout == muxInline {
+			muxes := make([]*uringMux, 0, shards)
+			for range shards {
+				m, err := newMux()
+				if err != nil {
+					log.Printf("raw io_uring mux unavailable: %v", err)
+					continue
 				}
-			}(mux)
-		}
-		if started > 0 {
-			log.Printf("raw io_uring request mux enabled (%d shards, layout %d)", started, layout)
-			select {}
+				if err := m.listen(host, port); err != nil {
+					log.Printf("raw io_uring listen unavailable: %v", err)
+					continue
+				}
+				muxes = append(muxes, m)
+			}
+			if len(muxes) > 0 {
+				log.Printf("raw io_uring request mux enabled (%d rings, single thread)", len(muxes))
+				runtime.LockOSThread()
+				runInline(muxes)
+			}
+		} else {
+			started := 0
+			for range shards {
+				mux, err := newMux()
+				if err != nil {
+					log.Printf("raw io_uring mux unavailable: %v", err)
+					continue
+				}
+				started++
+				go func(m *uringMux) {
+					if err := m.serve(host, port); err != nil {
+						log.Printf("raw io_uring mux stopped: %v", err)
+					}
+				}(mux)
+			}
+			if started > 0 {
+				log.Printf("raw io_uring request mux enabled (%d shards, layout %d)", started, layout)
+				select {}
+			}
 		}
 	}
 

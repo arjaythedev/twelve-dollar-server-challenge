@@ -27,7 +27,10 @@ statements cache only query plans, as allowed by rule 5.
   worker per shard for feed and post requests, and one writer shared by all shards for
   create/like batches. There is no goroutine per connection and no per-request transport
   goroutine. `MUX_LAYOUT=mixed` instead gives each shard one worker for feed, post, and
-  write jobs; `MUX_LAYOUT=feedpost` gives each shard separate feed and post workers. With
+  write jobs; `MUX_LAYOUT=feedpost` gives each shard separate feed and post workers.
+  `MUX_LAYOUT=inline` is the experimental single-thread layout: one coordinator drives
+  every ring with epoll, merges all rings' feed, post, and write work into one batch, and
+  runs SQLite inline; there are no worker channels or writer goroutine. With
   coalescing enabled, feed requests share one in-flight read, post IDs are served from
   the B-tree path, and the writer batches writes into one transaction. Queued write jobs
   merge only when at least four are already waiting; a nearly empty queue is committed
@@ -92,7 +95,7 @@ statements cache only query plans, as allowed by rule 5.
 | `HOST`, `PORT` | `127.0.0.1`, `3000` | Listen address |
 | `URING` | unset/`1` | `0` selects the Go fallback |
 | `SHARDS` | `4` | io_uring listener shards (four 65k file tables) |
-| `MUX_LAYOUT` | `read` | `read`: one read worker per shard plus one shared writer; `mixed`: one feed/post/write worker per shard; `feedpost`: one feed and one post worker per shard plus one shared writer |
+| `MUX_LAYOUT` | `read` | `read`: one read worker per shard plus one shared writer; `mixed`: one feed/post/write worker per shard; `feedpost`: one feed and one post worker per shard plus one shared writer; `inline`: one thread drives all rings and runs feed/post/write batches in the event loop |
 | `READ_CONNS` | `2` | SQLite read connections |
 | `BTREE` | `1` | `0` disables the B-tree read path and uses SQL only |
 | `STATS` | unset | `1` logs io_uring, B-tree, write and process CPU counters every 10 s |

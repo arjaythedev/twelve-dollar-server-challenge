@@ -90,6 +90,7 @@ const (
 	muxMixed muxLayout = iota
 	muxReadSharedWrite
 	muxFeedPostSharedWrite
+	muxInline
 )
 
 type muxJob struct {
@@ -149,6 +150,7 @@ type uringMux struct {
 	writeReqs    []*httpReq
 	writeBusy    bool
 	sendReady    []*muxConn
+	inline       bool
 }
 
 func newUringMux(handler MuxHandler, feed func() []byte, postBatch func([]int64) map[int64][]byte, writeBatch func([]*httpReq) []readResp, coalesce bool, workers int, layout muxLayout, writeJobs chan *muxJob) (*uringMux, error) {
@@ -194,6 +196,7 @@ func newUringMux(handler MuxHandler, feed func() []byte, postBatch func([]int64)
 		postBatch:  postBatch,
 		writeBatch: writeBatch,
 		coalesce:   coalesce,
+		inline:     layout == muxInline,
 		ring:       ring,
 		brs:        brs,
 		bufGroups:  bufGroups,
@@ -209,7 +212,12 @@ func newUringMux(handler MuxHandler, feed func() []byte, postBatch func([]int64)
 		m.feedJobs = make(chan *muxJob, 64)
 		m.postJobs = make(chan *muxJob, 64)
 	}
-	m.armWake()
+	if !m.inline {
+		m.armWake()
+	}
+	if m.inline {
+		return m, nil
+	}
 	if layout == muxFeedPostSharedWrite {
 		go m.feedWorker()
 		go m.postWorker()
@@ -345,7 +353,7 @@ func runWriteWorker(jobs <-chan *muxJob, writeBatch func([]*httpReq) []readResp)
 	}
 }
 
-func (m *uringMux) serve(host, port string) error {
+func (m *uringMux) listen(host, port string) error {
 	lc := net.ListenConfig{Control: func(_, _ string, conn syscall.RawConn) error {
 		var serr error
 		if err := conn.Control(func(fd uintptr) {
@@ -379,6 +387,13 @@ func (m *uringMux) serve(host, port string) error {
 	m.listener = ln
 	m.listenFD = fd
 	m.armAccept()
+	return nil
+}
+
+func (m *uringMux) serve(host, port string) error {
+	if err := m.listen(host, port); err != nil {
+		return err
+	}
 	m.loop()
 	return nil
 }
@@ -577,6 +592,57 @@ func (m *uringMux) loop() {
 	}
 }
 
+// runInline drives every ring from one OS thread. It polls all rings without
+// blocking, commits the merged batch, then waits for any ring to become
+// readable. The 1 ms epoll timeout is the only sleep in the loop; it prevents
+// a request arriving on a non-zero ring from waiting behind an unbounded
+// ring-0 enter.
+func runInline(muxes []*uringMux) {
+	epfd, err := syscall.EpollCreate1(0)
+	if err != nil {
+		// Fall back to bounded polling; correctness does not depend on epoll.
+		for {
+			for _, m := range muxes {
+				m.pollEvents(false)
+			}
+			muxes[0].flushInlineAll(muxes)
+			for _, m := range muxes {
+				m.pollEvents(false)
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	defer syscall.Close(epfd)
+	for _, m := range muxes {
+		ev := syscall.EpollEvent{Events: syscall.EPOLLIN, Fd: int32(m.ring.fd)}
+		if err := syscall.EpollCtl(epfd, syscall.EPOLL_CTL_ADD, m.ring.fd, &ev); err != nil {
+			return
+		}
+	}
+	events := make([]syscall.EpollEvent, len(muxes))
+	for {
+		for _, m := range muxes {
+			m.pollEvents(false)
+		}
+		muxes[0].flushInlineAll(muxes)
+		for _, m := range muxes {
+			m.pollEvents(false)
+		}
+		n, err := syscall.EpollWait(epfd, events, 1)
+		if err == syscall.EINTR {
+			continue
+		}
+		if err != nil {
+			return
+		}
+		if n > 0 {
+			for _, m := range muxes {
+				m.pollEvents(false)
+			}
+		}
+	}
+}
+
 func (m *uringMux) finishAccept(cqe *rawCQE) {
 	m.acceptArmed = false
 	if cqe.Res >= 0 {
@@ -611,6 +677,98 @@ func (m *uringMux) finishWake() {
 	}
 armed:
 	m.armWake()
+}
+
+// pollEvents runs the transport side only: no SQLite work and no response
+// handoff. The single-thread coordinator calls it for every ring, then commits
+// one merged write batch for all rings.
+func (m *uringMux) pollEvents(block bool) {
+	m.dispatchWaiting()
+	m.submitSends()
+	if block || m.toSub > 0 {
+		min := uint32(0)
+		flags := uint32(0)
+		if block {
+			min = 1
+			flags = 1
+		}
+		rc, err := m.ring.enter(m.toSub, min, flags)
+		if err != nil && err != syscall.EINTR {
+			return
+		}
+		m.toSub -= uint32(rc)
+	}
+	m.drainCQEs()
+}
+
+// flushInlineAll merges all rings' pending reads and writes into one batch.
+// This is the one-thread layout's equivalent of the top entries' per-pass
+// transaction: one feed read, one post batch, and one write COMMIT.
+func (m *uringMux) flushInlineAll(muxes []*uringMux) {
+	var feedConns []*muxConn
+	var feedOwners []*uringMux
+	var postConns []*muxConn
+	var postOwners []*uringMux
+	var postIDs []int64
+	var writeConns []*muxConn
+	var writeOwners []*uringMux
+	var writeReqs []*httpReq
+	for _, x := range muxes {
+		if len(x.feedPend) > 0 {
+			feedConns = append(feedConns, x.feedPend...)
+			for range x.feedPend {
+				feedOwners = append(feedOwners, x)
+			}
+			x.feedPend = nil
+		}
+		if len(x.postPend) > 0 {
+			postConns = append(postConns, x.postPend...)
+			for range x.postPend {
+				postOwners = append(postOwners, x)
+			}
+			postIDs = append(postIDs, x.postIDs...)
+			x.postPend = nil
+			x.postIDs = nil
+		}
+		if len(x.writePend) > 0 {
+			writeConns = append(writeConns, x.writePend...)
+			writeReqs = append(writeReqs, x.writeReqs...)
+			for range x.writePend {
+				writeOwners = append(writeOwners, x)
+			}
+			x.writePend = nil
+			x.writeReqs = nil
+		}
+	}
+	if len(feedConns) > 0 {
+		pkt := m.feed()
+		for i, c := range feedConns {
+			feedOwners[i].finishJob(&muxResp{c: c, pkt: pkt})
+		}
+	}
+	if len(postConns) > 0 {
+		packets := m.postBatch(postIDs)
+		for i, c := range postConns {
+			pkt := packets[postIDs[i]]
+			if pkt == nil {
+				pkt = encodeMuxResponse(&capture{status: 500, body: []byte(`{"error":"internal server error"}`)}, false)
+			}
+			postOwners[i].finishJob(&muxResp{c: c, pkt: pkt})
+		}
+	}
+	if len(writeReqs) > 0 {
+		results := m.writeBatch(writeReqs)
+		for i, c := range writeConns {
+			var pkt []byte
+			if i < len(results) {
+				pkt = results[i].packet
+			}
+			if pkt == nil {
+				pkt = encodeMuxResponse(&capture{status: 500, body: []byte(`{"error":"internal server error"}`)}, false)
+			}
+			writeOwners[i].finishJob(&muxResp{c: c, pkt: pkt})
+		}
+	}
 }
 
 func (m *uringMux) drainCQEs() {
@@ -773,6 +931,13 @@ func (m *uringMux) pump(c *muxConn) {
 		c.busy = true
 		m.writePend = append(m.writePend, c)
 		m.writeReqs = append(m.writeReqs, req)
+		return
+	}
+	if m.inline {
+		c.consume(used)
+		c.busy = true
+		pkt, closeAfter := m.handler(req)
+		m.finishJob(&muxResp{c: c, pkt: pkt, close: closeAfter})
 		return
 	}
 	jobs := m.jobs

@@ -2,7 +2,8 @@
 
 ## Next, in order
 
-- [ ] Compare plain create INSERT plus stored timestamp readback with RETURNING.
+- [ ] Compare leaf-local likes counting with the current per-entry cursor loop and SQL oracle.
+- [ ] Compare PGO with the same GCC 13 build; use separate training and validation data, without changing LTO or ISA flags.
 - [ ] Identify what starts the receive backlog; compare ring distribution and submission timing from the saved trace before another large run.
 - [ ] Check socket/heap/pool memory after draining, then compare allocation reuse and socket-buffer caps in Ideas.md order.
 
@@ -15,6 +16,9 @@
 
 ## Done
 
+- [x] Keep WAL eviction with limit 0: matched 350k NAT runs reduced peak RAM from 1513 to 956 MiB and hold p99 from 11.01 to 5.77 ms; both passed.
+- [x] Use ext4 for Mini runs, verify the generic x86-64 build and fix eviction-induced WAL rereads with journal_size_limit=0. Pass focused tests in both build modes and 200k via VM/LAN: zero errors, hold p99 7.81 ms, peak RAM 1322.78 MiB.
+- [x] Replace create RETURNING with plain INSERT and stored timestamp readback. Verify failed-readback rollback, 64-bit rowids and metadata. Pass both native builds, 42 official and two targeted HTTP checks; native batch-16 CPU/write fell 15%. Confirm at 350k/5m: no errors, p99 5.72 ms; overall CPU unchanged within run variation.
 - [x] Skip the up-front like SELECT, classify FK failures and duplicates with a transaction-local B-tree lookup, and preserve SQL fallback. Pass both native builds, 42 official and five targeted HTTP checks. Confirm with unix-excl at 350k/5m: no errors, p99 5.67 ms, CPU 20.45 us/request.
 - [x] Use unix-excl on both SQLite handles; verify checkpoint concurrency, recovery, fresh reads and HTTP commit ordering in both build modes. Pass 42 official and 19 extra HTTP checks. Short 70k pair: CPU/request -2.5%, p99 nearly unchanged, no errors.
 - [x] Prepare rollback and quarantine unresolved transactions; verify failure injection, read/write rejection and clean reopening. Compare retry-only poll-first omission and bounded response reuse, then confirm at 350k/5m: zero errors, p99 6.82 ms. Pass both native build modes, 42 official and 17 extra HTTP checks.

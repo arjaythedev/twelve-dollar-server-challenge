@@ -87,6 +87,29 @@
 | C++ 0.1.0 (unix-excl baseline) | 70,000 | 15 s | 297,528 | 4,958.73 | 3.671 ms | 4.383 ms | 19.82 ms | 0% | 31.76 us | 519.79 MiB |
 | C++ 0.1.0 (unix-excl) | 70,000 | 15 s | 297,359 | 4,955.91 | 3.570 ms | 4.353 ms | 9.13 ms | 0% | 30.98 us | 505.56 MiB |
 | C++ 0.1.0 (unix-excl + direct like lookup) | 350,000 | 5 min | 13,073,904 | 32,684.68 | 4.481 ms | 5.667 ms | 83.15 ms | 0% | 20.45 us | 1,497.97 MiB |
+| C++ 0.1.0 (create readback) | 350,000 | 5 min | 13,070,456 | 32,676.06 | 4.518 ms | 5.721 ms | 86.62 ms | 0% | 20.73 us | 1,862.91 MiB |
+| C++ 0.1.0 (WAL reuse, target missed) | 350,000 | 60 s | 682,326 | 3,898.98 | 169.765 ms | 509.506 ms | 1,513.86 ms | 0% | 31.75 us | 856.20 MiB |
+| C++ 0.1.0 (WAL limit 0 MiB) | 100,000 | 60 s | 581,721 | 5,540.15 | 79.660 ms | 252.951 ms | 534.84 ms | 0% | 28.65 us | 545.18 MiB |
+| C++ 0.1.0 (WAL limit 4 MiB) | 100,000 | 60 s | 582,631 | 5,548.84 | 267.779 ms | 394.208 ms | 801.64 ms | 0% | 29.88 us | 531.62 MiB |
+| C++ 0.1.0 (WAL limit 16 MiB) | 100,000 | 60 s | 587,167 | 5,592.04 | 138.052 ms | 339.001 ms | 817.57 ms | 0% | 29.28 us | 542.28 MiB |
+| C++ 0.1.0 (no WAL eviction, A/B) | 100,000 | 60 s | 605,395 | 5,765.62 | 64.646 ms | 272.453 ms | 629.07 ms | 0% | 26.84 us | 559.05 MiB |
+| C++ 0.1.0 (WAL eviction + limit 0, A/B) | 100,000 | 60 s | 604,047 | 5,752.81 | 47.184 ms | 285.159 ms | 612.76 ms | 0% | 27.65 us | 502.90 MiB |
+| C++ 0.1.0 (447fb8a, target missed) | 350,000 | 60 s | 617,412 | 3,858.82 | 397.871 ms | 591.293 ms | 1,311.29 ms | 0% | 30.95 us | 833.96 MiB |
+| C++ 0.1.0 (WSL NAT restored, activation gate) | 10,000 | 15 s | 22,216 | 1,110.78 | 4.185 ms | 4.361 ms | 18.41 ms | 0% | 49.50 us | 302.92 MiB |
+| C++ 0.1.0 (no WAL eviction, limit 0, NAT) | 350,000 | 60 s | 4,182,233 | 26,138.87 | 4.679 ms | 6.569 ms | 159.70 ms | 0% | 23.61 us | 1,512.96 MiB |
+| C++ 0.1.0 (WAL eviction, limit 0, NAT) | 350,000 | 60 s | 4,182,593 | 26,141.17 | 4.517 ms | 5.700 ms | 18.08 ms | 0% | 23.44 us | 956.17 MiB |
+
+WAL-reuse Docker run: 258,352 live connections in hold, 280,899 overall; the 350k target was missed. Server CPU 21.66 s, PSI I/O full 81.93 s (includes network CQ waits); no memory-limit events or OOM kills.
+
+WAL limits 0/4/16 MiB, serial 100k runs, seed 42, 30-second ramp and 60-second hold: hold p99 257.24/405.78/351.85 ms; physical reads 1.87/272.55/380.62 MiB. WSL mirrored networking delayed all ramps; these are startup diagnostics. No errors or memory-limit events. [Data](src/benchmarks/wal-cache.json).
+
+WAL paths, same 100k setup: no eviction/default limit versus eviction/limit 0 gave hold p99 275.06/286.29 ms, peak RAM 559.05/502.90 MiB and PSI I/O full 53.14/52.36 s. Mirrored source-bind overhead delayed both ramps. PSI includes idle network CQ waits. [Data](src/benchmarks/wal-cache.json).
+
+447fb8a, 350k target, 60-second ramp/hold: server and generator match the earlier like-values binaries. Only 244,074 connect attempts; kernel sample at 100.82 s showed 176,563 established pairs. Hold p99 4.94 ms, ramp-down p99 717.01 ms; PSI I/O full 81.83 s. Mirrored source-bind overhead; target missed despite the legacy pass flag. Seed content matches the official hash.
+
+WSL mirrored to NAT, same 5k TCP probe, three runs each: median connection setup 2.697 to 0.103 s; source bind 503.7 to 1.21 us/call. 10k HTTP, 1-second ramp/15-second hold: activation 1.0007 s, hold p99 4.37 ms, zero errors. Late ramps now fail validation (100 ms scheduling margin). [Data](src/benchmarks/load-buildup.json).
+
+WAL eviction, NAT 350k, one serial pair, seed 42, 60-second ramp/hold, limit 0 in both: hold p99 11.01 to 5.77 ms; peak RAM 1512.96 to 956.17 MiB; median hold file cache 500.58 to 253.00 MiB. Both reached 350k on time with zero errors or memory-limit events. [Data](src/benchmarks/wal-cache.json).
 
 Statistics include the ramps. RAM is the cgroup peak, including charged file pages. Local results, not an official score or a measured capacity limit.
 
@@ -118,11 +141,15 @@ unix-excl, 70k: one serial pair, 5 s ramp / 15 s hold, different random seeds, n
 
 Prepared Store controls, 20k writes, two reversed pairs: median CPU/write at batch 1/4/16 was 38.98/19.34/9.74 to 38.00/19.16/8.56 us. Outputs and stored counts matched; final checkpoint included, wall time variable. [Data](src/benchmarks/group-commit.json).
 
-Fused like INSERT, 20k writes, two reversed pairs per SQL variant: at batch 16, fresh likes were 5-6% slower, duplicates 13-16% slower and mixed writes 7-9% slower. Outcomes and stored checksums matched. Keep the separate existence check. [Data](src/benchmarks/group-commit.json).
+Fused like INSERT, 20k writes, two reversed pairs per SQL variant: at batch 16, fresh likes were 5-6% slower, duplicates 13-16% slower and mixed writes 7-9% slower. Outcomes and stored checksums matched. Reject the SELECT forms. [Data](src/benchmarks/group-commit.json).
 
 Direct like lookup, 20k writes, two reversed pairs: VALUES plus B-tree fallback reduced batch-16 CPU/write from 4.94 to 4.73 us (fresh), 1.09 to 0.98 us (duplicate), 4.36 to 4.20 us (mixed). Batch-1 mixed was 1.8% slower. Outcomes and stored checksums matched; foreign keys stayed enabled. [Data](src/benchmarks/group-commit.json).
 
 unix-excl + direct like lookup, 350k/5m: hold p99 5.69 ms, no request errors. Combined confirmation without internal telemetry; the isolated Like comparison is the native probe above.
+
+Create without RETURNING, 20k writes, two reversed pairs: CPU/write at batch 1/16 fell from 36.01/7.10 to 31.71/6.03 us. Every returned ID and timestamp matched storage. Store lifecycle and checkpoint worker included. [Data](src/benchmarks/group-commit.json).
+
+Create readback, 350k/5m: no clear overall CPU or latency change. Post-drain memory rose 358.85 MiB, 96.4% in file cache; the physical WAL was 336.92 MiB larger. No memory-limit or OOM events. Different seeds; checkpoint lag versus retained WAL capacity remains unresolved.
 
 CQ burst, 4,096 completions, two reversed pairs: median drain CPU 0.216/0.023/0.021 ms at CQ 2,048/8,192/16,384. SQ 1,024, 256-CQE drains, no loss; larger queues avoided overflow. Kernel microbenchmark, not HTTP throughput. [Data](src/benchmarks/cq-sizing.json).
 
@@ -173,6 +200,48 @@ Accept depth 1 to 64, 512-connection bursts behind a 20-ms handler gate, file li
 Parser reuse, 100k lifecycle cycles, four alternating samples: JWT/body CPU median 29.098 to 20.631 ms, allocations 250,009 to 16. With 25% oversized bodies: 30.288 to 27.834 ms, allocations 250,009 to 275,006 as oversized Exchanges are discarded. Checksums matched. Reset code: 1,335 to 267 bytes.
 
 Header passing, no SQLite, seven confirmation pairs: `AcceptedHead&&` feed -4.86%, post +1.52%, mixed -3.20% (4/7 faster), protected +2.42%. Kept value parameters. [Data](src/benchmarks/headers.json).
+
+## Mini PC, direct Ethernet
+
+Ryzen 7 3750H; server: 1 CPU, 2 GiB. PC generator over 2.5 GbE, 32 destination ports, 70k users, 15-second hold.
+
+| WSL mode | Ramp | Connections | Requests | p95 | p99 | Errors |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| NAT | 5 s | 64,542/70,000 | 171,678 | 740.17 ms | 2,283.10 ms | 0 |
+| Mirrored | 5 s | 70,000/70,000 | 178,305 | 3,557.69 ms | 6,922.62 ms | 0 |
+| Mirrored | 30 s | 70,000/70,000 | 292,572 | 5.21 ms | 6.66 ms | 0 |
+
+With the 30-second ramp, all users received a response; hold p99 was 6.79 ms, maximum 20.65 ms. Same server and generator binaries in all three runs.
+
+Ubuntu 22.04 VM, direct LAN, one destination port and 64 source IPs: 70k users, 30-second ramp, 15-second hold, 293,009 requests, zero errors. p95 4.78 ms, p99 5.98 ms, hold p99 5.76 ms; server peak 761.91 MiB. All 70k connections and source IPs verified on the Mini.
+
+200k users, 90-second ramp, 60-second hold, seed 42. All users received responses; zero errors.
+
+| Filesystem | WAL policy | Requests | Hold p99 | Peak RAM | Physical reads |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Btrfs | Keep | 2,548,997 | 47.90 ms | 2071.98 MiB | 0.00 MiB |
+| Btrfs | Evict | 2,548,715 | 72.77 ms | 1296.30 MiB | 989.18 MiB |
+| ext4 | Keep | 2,549,732 | 6.79 ms | 1590.00 MiB | 0.00 MiB |
+| ext4 | Evict | 2,548,293 | 74.61 ms | 1352.79 MiB | 1475.67 MiB |
+| ext4 | Evict + journal_size_limit=0 | 2,548,677 | 7.81 ms | 1322.78 MiB | 3.56 MiB |
+
+Ext4 runs preloaded only the immutable source outside the server cgroup; all three fresh databases started at 237.65 MiB file cache inside the limit. One run per variant. [WAL data](src/benchmarks/wal-cache.json).
+
+## Mini PC, Linux loopback
+
+Server: 1 CPU, 2 GiB. Generator on the same Mini, one destination port, 64 source IPs, 90-second ramp, 60-second hold.
+
+| Users | Requests | Hold requests/s | p95 | p99 | Max | Errors | Peak RAM |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 200,000 | 2,548,541 | 21,163.90 | 5.82 ms | 13.36 ms | 185.03 ms | 0 | 2,067.75 MiB |
+
+All users received responses; hold p99 was 20.43 ms. Client teardown triggered 26,113 memory.max events and page reclaim, with no OOM kills. Peak briefly exceeded the configured 2 GiB.
+
+Diagnostic repeat, same seed and workload: 2,548,756 requests, zero errors, hold p99 8.41 ms. WAL stayed at 969.03 MiB after 31 observed resets; the final 1,042 logical frames were fully checkpointed. Peak RAM 2,070.32 MiB; 38,977 memory.max events, no OOM kills.
+
+WAL cache eviction, Mini 50k, two reversed pairs, 20-second holds: mean file cache after drain 252.48 to 243.39 MiB; mean hold p99 5.861 to 5.901 ms, zero errors. Peak RAM varied. On Mini and Docker, a residency probe reduced 64.54 MiB of WAL cache to 8 KiB, with rc=0 and fresh reads intact. [Data](src/benchmarks/wal-cache.json).
+
+Docker HTTP comparison remains inconclusive: one run missed target concurrency before the first checkpoint; a diagnostic repeat passed. Both showed substantial I/O wait.
 
 ## Native CPU sampling
 

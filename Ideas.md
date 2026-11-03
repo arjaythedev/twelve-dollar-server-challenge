@@ -93,6 +93,17 @@
 
 - [ ] Compare nice 19 for the checkpoint thread only ([db.h](submissions/c-iouring-pavlyhalim/src/db.h)); measure issuer latency together with checkpoint duration and WAL backlog.
 
+- [x] Drop already-checkpointed WAL pages from Linux's file cache on the checkpoint thread ([public](submissions/c-iouring-public/components/engine.c)). Mini/Docker residency probes confirmed eviction; retain NORMAL sync and pair eviction with WAL-tail truncation below.
+
+- [x] Pair WAL eviction with `journal_size_limit=0` to avoid partial overwrites of cold pages ([public](submissions/c-iouring-public/components/engine.c)). At 200k/ext4, physical reads fell from 1475.67 to 3.56 MiB and hold p99 from 74.61 to 7.81 ms; peak RAM stayed below 2 GiB, with fresh reads and rollback tests intact.
+
+- [x] Compare `journal_size_limit=0` alone with eviction. At 350k/NAT, eviction reduced peak RAM from 1513 to 956 MiB and median hold file cache from 501 to 253 MiB; retain eviction. Truncation needs a WAL reset, while eviction can release completed prefixes earlier.
+
+- [ ] Compare fresh Btrfs CoW and `chattr +C` directories on the same Mini, then ext4 on the same hardware if available. Measure WAL residency, I/O and p99; `+C` also disables data checksums and compression.
+
+- [ ] If WAL backfill falls behind, compare a bounded write gate ([Ada PR 211](https://github.com/visseranalytics/twelve-dollar-server-challenge/blob/7ff01df614ba46dfe89c6388aab52ed176538873/submissions/ada-native-visseranalytics/src/database.adb#L28)). Keep independent reads moving; release held writes after the requested checkpoint pass or a timeout.
+  Add explicit worker retry and reactor wakeup: our worker currently waits for another commit, which a gate could prevent. Preserve pipeline order and commit-before-response; compare WAL backlog, memory and write p99.
+
 - [x] Group up to 16 queued writes without added delay: `C(b) ~= s + a/b`.
   Own job data, isolate failures with savepoints and release responses after commit. Keep reads outside the write transaction.
 
@@ -102,7 +113,7 @@
 
 - [ ] Tune batch size or a collection window from the measured write arrival rate: average collection wait `~= (b-1)/(2*lambda)`.
 
-- [ ] Compare plain create INSERT plus `last_insert_rowid` and stored timestamp lookup against `RETURNING` ([db.h](submissions/c-iouring-pavlyhalim/src/db.h)). Keep the actual stored timestamp and invalidate the batch if readback fails.
+- [x] Use plain create INSERT plus `last_insert_rowid` and stored timestamp lookup instead of `RETURNING` ([db.h](submissions/c-iouring-pavlyhalim/src/db.h)). Native batch-16 CPU/write fell 15%; IDs and timestamps matched storage. Failed readback invalidates the whole batch.
 
 - [x] Compare fused like INSERTs using `WHERE EXISTS` and direct `SELECT FROM posts` ([db.h](submissions/c-iouring-pavlyhalim/src/db.h)). Both lost with SQL fallback; Pavly's B-tree fallback still lost 4-10% at batch 16 with foreign keys enabled. SELECT adds internal statement rollback and coroutine work.
 
@@ -116,6 +127,8 @@
   Collect IDs within one fresh feed snapshot, scan in ID order and restore timestamp order with request-local slots, including gaps and reordered timestamps.
 
 - [x] Deduplicate author IDs within one feed and read them in ID order. Copy post records and author names into request-local arenas; retain the SQL point-read path and remove the unused B-tree point-read API.
+
+- [ ] Count several likes-index cells directly per leaf before advancing the cursor ([Kensac](https://github.com/arjaythedev/twelve-dollar-server-challenge/blob/42981018dc0d4b157d48c22ba15da5c361bf3168/submissions/rust-iouring-kensac/csrc/shim.c#L362)). Avoid one cursor call per like; retain bounded gap skipping, 64-bit counts, interior entries and the generic fallback. Compare dense, sparse, reordered and overflow cases against SQL.
 
 - [ ] Compare locality-aware scheduling of already queued reads by endpoint and nearby post/user IDs. Each request performs its own fresh SQLite read; reuse only SQLite's page cache, never query results.
   Bound queue size and request age, preserve connection order and write/read barriers. Compare FIFO, page-cache misses, CPU/request and p99; locality gains must exceed sorting and waiting costs.
@@ -147,6 +160,9 @@
 
 ## Larger or conditional experiments
 
+- [ ] Compare independent HMAC batches of 1/2/4/8/16 after key-context reuse ([multi-buffer HMAC](submissions/c-iouring-public/third_party/cursed-jwt/src/jwt_mb.inc)). Verify every signature and preserve our parsing, expiry and error behavior. Auth was 1.53% of total CPU; even 2x whole-auth speedup gives only about 0.77% overall.
+  Queue only already-ready headers, flush before waiting and hold Session/Exchange ownership through auth and shutdown. Never reuse verified identities across requests.
+
 - [ ] Consider a create-only preupdate hook if timestamp readback becomes material. It needs `SQLITE_ENABLE_PREUPDATE_HOOK` and unpacks the full inserted record; copy provisional metadata immediately and publish only after successful statement and batch completion.
 
 - [ ] Measure request-local SQLite cache counters, then trace fetch/unpin/rekey/truncate calls and occupancy through a delegating PCACHE2 wrapper (`SQLITE_CONFIG_PCACHE2`, [C](submissions/c-iouring-pavlyhalim/src/db.h)). `pcache1Fetch` self CPU (~2.6%) does not establish a miss rate.
@@ -164,6 +180,7 @@
 - [ ] Compare contiguous WAL-write coalescing separately over the stock Unix VFS, retaining external access ([engine.c](submissions/c-iouring-public/components/engine.c)). Target pwrite calls; preserve commit visibility, short-write/error handling and NORMAL sync.
 
 - [ ] Compare linked shutdown/close with selective CQE suppression only after preserving pending counts, failure paths and final ownership retirement. Target connection churn; ordinary keep-alive requests avoid this work already.
+  Targeted cancellation and direct closes are already present: normal EOF skips cancellation; other closes target the owning Operation and retire only after the close CQE ([Ada PR 211](https://github.com/visseranalytics/twelve-dollar-server-challenge/blob/7ff01df614ba46dfe89c6388aab52ed176538873/submissions/ada-native-visseranalytics/src/engine.adb#L252)).
 
 - [x] Build a small native load generator matching `bench/load.js`: shared tokens, per-user connections and state, the same ramps, think times, write probabilities, checks and latency definitions.
   Use an event loop and timers instead of a JavaScript runtime per user. Compare small runs against k6 before using it for capacity experiments; keep k6 as the reference.
@@ -187,6 +204,7 @@
   Keep one database at `SQLITE_PATH`; shard transport metadata and work queues, not database files or schema. Extra connections can isolate I/O waits but share one vCPU and one WAL writer.
 
 - [ ] Compare PGO trained on fresh synthetic data with plain optimization ([build.sh](submissions/c-iouring-pavlyhalim/build.sh)).
+  Keep GCC 13 and object paths stable, use atomic counters for SQLite's two threads, stop cleanly and validate on independent data/seeds. Change neither LTO nor ISA at the same time.
   SSE2 JSON/UTF-8 scanning already exists and is baseline on x86_64; test wider SIMD for measured hot loops. AVX2/AVX-512 need matching target support or runtime dispatch.
   `S <= 1/((1-p) + p/s)`, with p measured against total CPU including kernel work.
   JSON is currently 1.8% of sampled CPU, so use a fresh profile before spending time on vector width or more encoding specializations.

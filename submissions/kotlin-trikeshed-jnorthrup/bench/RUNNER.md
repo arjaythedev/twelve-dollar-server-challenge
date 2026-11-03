@@ -1,8 +1,6 @@
 # Directions for the benchmark runner
 
-For a person or an agent who runs this entry on the droplet. Every size and time here was measured in a clean
-`ubuntu:24.04` container held to the droplet's limits (1 CPU, 2 GB, no swap); [BENCHMARK.md](../BENCHMARK.md) has
-the tables.
+The scored runtime is Kotlin/Native. Build and load measurements are in [BENCHMARK.md](../BENCHMARK.md).
 
 ## The scored run (nothing extra)
 
@@ -12,9 +10,8 @@ bash build.sh            # TrikeShed at the pinned commit, then feed.kexe (Kotli
 bash start.sh            # serves RUNTIME=kn; first line on stderr: "start.sh: RUNTIME=kn"
 ```
 
-The build peaks at about 1.82 GB of memory and took about 18 minutes in the container. Nothing else should run during
-it. Disk after the build: about 1.0 GB under `/opt` and 2.4 GB in the user's home (Gradle and Kotlin/Native caches).
-Disk is not a constraint.
+The scored build ran with a 1,350 MiB cgroup limit, one CPU and zero swap on Kali. `build.sh` resolves the pinned
+TrikeShed Maven library and runs the native compile and release link in separate Gradle invocations.
 
 ## The other four runtimes (optional; we ask you to score the fastest)
 
@@ -23,7 +20,7 @@ two builds at once, or a build beside a running server, do not fit in 2 GB. Stop
 
 | `RUNTIME=` | Extra install (root) | Build (user, from this folder) | Build memory peak |
 |---|---|---|---|
-| `kn` | none | `bash build.sh` | 1.82 GB |
+| `kn` | none | `bash build.sh` | 1,350 MiB cgroup limit |
 | `graal-static` | none | `/opt/gradle/bin/gradle --no-daemon -q :server:app :server:sqliteLib`, then the `native-image` line in `bench/all1000.sh` | 1.79 GB |
 | `graal-jit` | none | `/opt/gradle/bin/gradle --no-daemon -q :server:app :server:sqliteLib` | not sampled (Gradle heap 1 GB) |
 | `node` | `bash bench/install-extra.sh` | `/opt/gradle/bin/gradle --no-daemon -q -Ptrike.targets=js :server:nodeDist` | 1.26 GB |

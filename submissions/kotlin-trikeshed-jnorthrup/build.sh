@@ -8,14 +8,7 @@
 # liburing's sources and the load generator's module.
 # The other runtimes (graal-static, graal-jit, node, wasi) build from the same tree with bench/all1000.sh.
 #
-# Resource limits (rule 8): the challenge box is a DigitalOcean Basic droplet, Ubuntu 24.04 x86_64, 1 vCPU, 2 GB RAM,
-# no swap. This build and the server share that CPU and RAM with the OS. Gradle runs one target per JVM (below: the JVM
-# target only to fetch SQLite, then Kotlin/Native), with a fixed 600 MB heap, one worker and C1 only (gradle.properties).
-# The same limits were applied for the clean-room test runs (bench/droplet-ci.sh), with cgroup v2 in an ubuntu:24.04
-# container on a WSL2 kernel, not the droplet's kernel:
-#   docker run --cpus=1 --memory=2g --memory-swap=2g ubuntu:24.04
-#   (cpu.max=100000 100000, memory.max=2147483648, memory.swap.max=0)
-# The CPU limit is a quota, not a pinned core (rule 11). Timings from that run are not the droplet's timings.
+# Run the SQLite downloader, native compile and release link in separate Gradle JVMs so clang has room.
 set -euo pipefail
 # glibc keeps one malloc arena per thread; two bound the Gradle JVMs' and the Kotlin/Native compiler's native memory.
 export MALLOC_ARENA_MAX=2
@@ -30,5 +23,7 @@ if [ ! -d trikeshed/TrikeShed/src ]; then
 fi
 if [ -x /opt/graalvm/bin/java ]; then export JAVA_HOME=/opt/graalvm; fi
 GRADLE=${GRADLE:-/opt/gradle/bin/gradle}; [ -x "$GRADLE" ] || GRADLE=gradle
-"$GRADLE" --no-daemon --quiet --console=plain :server:sqliteSource
-"$GRADLE" --no-daemon --quiet --console=plain -Ptrike.targets=linuxX64 :server:linkFeedReleaseExecutableLinuxX64
+gradle=("$GRADLE" --no-daemon --console=plain --configure-on-demand)
+"${gradle[@]}" :server:sqliteSource
+"${gradle[@]}" -Ptrike.targets=linuxX64 :server:compileKotlinLinuxX64
+exec "${gradle[@]}" -Ptrike.targets=linuxX64 :server:linkFeedReleaseExecutableLinuxX64

@@ -21,9 +21,8 @@ lists what was measured, where, and how to run it again.
    holds one descriptor per connection cannot pass about 65,400 users, whatever its speed. The Kotlin/Native server
    takes connections into io_uring direct descriptors (`feedc.def`: 8 rings, each with a sparse direct-descriptor
    table of up to 65,535 slots, provided buffers, one response arena), so its connections do not count against that
-   limit. This page measures 1,000 users only; it makes no claim about a user count above that.
-3. **It fits the build box.** The cold build (install, Gradle, the Kotlin/Native compiler, the link) peaks at 1,817 MB
-   of the 2,048 MB, measured below.
+   limit. The cross-runtime comparison below uses 1,000 users.
+3. **It fits the build box.** The current Maven build runs under a 1,350 MiB limit on Kali with swap disabled.
 
 ## The runtimes
 
@@ -45,11 +44,12 @@ The WASI build is two modules: the server (`server.wasm`) and the stock SQLite a
 `install.sh` (root): apt `aria2 build-essential zlib1g-dev ca-certificates curl git unzip`, then Oracle GraalVM
 25.4.4.1.1 and Gradle 9.6.1 from their official sites through aria2c, each checked against a pinned sha256.
 
-`build.sh` (user): fetches TrikeShed at the pinned commit (`TRIKESHED_COMMIT`, now `20280e86761b3df64cedd4579e311c04411d22b4`,
-on GitHub master), then one Gradle run that downloads SQLite 3.54.0 (checked against sqlite.org's SHA3-256), the
-Kotlin/Native compiler and its toolchain, and links `feed.kexe`.
+`build.sh` imports `borg.trikeshed:TrikeShed:0.1.0-20280e867` from the pinned Maven repository. The source checkout
+at the same revision supplies liburing and its headers. Three single-use Gradle invocations build the SQLite downloader
+and verify the amalgamation, compile the native server KLIB, then link the release executable. The compiler heap starts
+at 64 MiB and can grow to 600 MiB. Finishing the compile before starting the link releases its JVM and native allocations.
 
-Every file the builds download, with its sha256, is in [`bench/DEPS.tsv`](bench/DEPS.tsv) (185 entries: the tools, the
+The downloads from the earlier five-runtime comparison, with their sha256 sums, are in [`bench/DEPS.tsv`](bench/DEPS.tsv) (185 entries: the tools, the
 Kotlin/Native toolchain archives and the Maven artifacts of every runtime). The runtimes the box does not need (Node.js
 24.21.0, wasmtime 46.0.3, wasi-sdk 34) are installed by [`bench/install-extra.sh`](bench/install-extra.sh) the same way.
 
@@ -76,8 +76,8 @@ graal-jit, node and wasi rows ran against an earlier TrikeShed (722dfc5c6 with t
 Two build failures were found this way and fixed in this commit:
 
 - **Kotlin/Native: `Compilation failed: Metaspace`.** The Gradle JVM's class metadata was capped at 384 MB
-  (`gradle.properties`). The container's memory was not the limit: it peaked at 1,553 MB. The cap is now 768 MB, and
-  the build peaks at 1,817 MB.
+  (`gradle.properties`). The container's memory was not the limit: it peaked at 1,553 MB. That run raised the cap to 768 MB, and
+  that build peaked at 1,817 MB.
 - **graal-static: `ld: cannot find -lz`.** The native image links zlib, and `install.sh` did not install
   `zlib1g-dev`. It does now. The image build itself fits (peak RSS 1.84 GiB).
 

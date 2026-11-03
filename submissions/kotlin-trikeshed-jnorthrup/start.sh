@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Runs the server in the foreground. Config: SQLITE_PATH, JWT_SECRET, HOST, PORT.
-# RUNTIME picks the build (build.sh makes all five): kn (default, Kotlin/Native over io_uring direct descriptors),
+# RUNTIME picks the build: kn (default, Kotlin/Native over io_uring direct descriptors, what build.sh makes),
 # graal-static (GraalVM native image), graal-jit (GraalVM JDK), node (Kotlin/JS on Node.js), wasi (Kotlin/Wasm on
-# wasmtime). A runtime whose build is missing falls back along kn, graal-static, graal-jit. The GraalVM builds serve
+# wasmtime); bench/all1000.sh builds all five. A runtime whose build is missing falls back along kn, graal-static,
+# graal-jit. The GraalVM builds serve
 # through the io_uring ring (TRANSPORT=ring) unless TRANSPORT says otherwise; Node and wasmtime poll their sockets.
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -31,9 +32,14 @@ case "$runtime" in
     NODE=/opt/node/bin/node; [ -x "$NODE" ] || NODE=node
     exec "$NODE" "$NODE_MAIN" ;;
   wasi)
-    WASMTIME=/opt/wasmtime/wasmtime; [ -x "$WASMTIME" ] || WASMTIME=wasmtime
-    exec "$WASMTIME" run -W gc=y,function-references=y,exceptions=y -S tcplisten="${HOST:-0.0.0.0}:${PORT:-80}" \
-      --dir "$(dirname "$SQLITE_PATH")" --env SQLITE_PATH --env JWT_SECRET "$WASI_MAIN" ;;
+    # wasmtime 46: the last release with WASI preview 1 sockets (-S preview2=n -S tcplisten; 47 removed them).
+    WASMTIME=$(command -v wasmtime) || { echo "start.sh: no wasmtime on PATH" >&2; exit 1; }
+    "$WASMTIME" --version | grep -qE '^wasmtime (4[0-6]|[1-3][0-9])\.' ||
+      { echo "start.sh: $("$WASMTIME" --version): -S tcplisten needs wasmtime 46 or older" >&2; exit 1; }
+    db_dir=$(dirname "$SQLITE_PATH")
+    exec "$WASMTIME" run -W gc=y,function-references=y,exceptions=y -S preview2=n \
+      -S tcplisten="${HOST:-0.0.0.0}:${PORT:-80}" --dir "$db_dir::$db_dir" \
+      --preload sqlite=server/build/dist/wasi/sqlite.wasm --env SQLITE_PATH --env JWT_SECRET "$WASI_MAIN" ;;
   *)
     echo "start.sh: RUNTIME must be kn, graal-static, graal-jit, node or wasi (got $runtime)" >&2; exit 2 ;;
 esac

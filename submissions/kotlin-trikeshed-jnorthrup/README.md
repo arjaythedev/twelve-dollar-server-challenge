@@ -1,23 +1,30 @@
 # kotlin-trikeshed-jnorthrup
 
-Kotlin with no framework: RelaxFactory's `one.xio` NIO reactor, monomorphized, on one thread, calling SQLite through
-`java.lang.foreign`.
+Kotlin with no framework, one tree, five runtimes. The box serves the Kotlin/Native build: one thread over io_uring
+direct descriptors, with SQLite linked in. The same server code also builds for GraalVM native image, the GraalVM JIT,
+Node.js and WASI (wasmtime). [BENCHMARK.md](BENCHMARK.md) has every runtime built in a 1 CPU / 2 GB / no-swap box, the
+42 checks and a 1,000-user run of each, and why Kotlin/Native is the scored one.
 
 | | |
 |---|---|
-| Language | Kotlin 2.4.21 (Kotlin Multiplatform Gradle project, JVM target 25) |
-| Runtime | Oracle GraalVM 25.4.4.1.1 (JDK 25.0.4.1.1, Graal JIT), the latest release on graalvm.org (25.4), from gds.oracle.com, installed by `install.sh` |
-| Build | Gradle 9.6.1, official distribution, installed by `install.sh` |
-| HTTP | own: RelaxFactory's `one.xio` selector loop, monomorphized per transport state: one unshared `java.nio` selector (epoll) per state class (listen, header read, body read, buffered write) |
-| SQLite | 3.54.0 amalgamation, compiled by `build.sh`; the download is checked against the SHA3-256 sqlite.org publishes |
-| Driver | `java.lang.foreign` (FFM) downcalls into that `libsqlite3`; no JDBC, no JNI |
-| Libraries | TrikeShed (HMAC-SHA256 for JWT, SHA-3), compiled from the checkout `trikeshed/TrikeShed`: the files listed in `trikeshed/sources.txt`, at the commit pinned in `build.sh` |
+| Language | Kotlin 2.4.21 (Kotlin Multiplatform Gradle project) |
+| Runtime (scored, `start.sh` default) | Kotlin/Native linuxX64 executable `feed.kexe`, built by `build.sh` |
+| Other runtimes (`RUNTIME=`) | `graal-static` (native image), `graal-jit` (Oracle GraalVM 25.4.4.1.1 JDK, Graal JIT), `node` (Kotlin/JS on Node.js 24), `wasi` (Kotlin/Wasm on wasmtime 46); built by `bench/all1000.sh` |
+| Build | Gradle 9.6.1, official distribution, and Oracle GraalVM 25.4.4.1.1 as Gradle's JDK, both installed by `install.sh` |
+| HTTP | own, on io_uring: rings with sparse direct-descriptor tables, provided buffers and one response arena (`server/src/nativeInterop/cinterop/feedc.def`, liburing vendored in TrikeShed); sockets live outside the descriptor table |
+| SQLite | 3.54.0 amalgamation, compiled by `build.sh` and linked into `feed.kexe`; the download is checked against the SHA3-256 sqlite.org publishes. `sqlite3.c` is not changed: `server/src/nativeInterop/feedbt.c` includes it whole and adds the B-tree read plans for `GET /feed` and `GET /posts/:id` |
+| Driver | Kotlin/Native cinterop calls into that SQLite (`feedc.def`) |
+| Libraries | TrikeShed (HMAC-SHA256 for JWT, SHA-3, the I/O layer), compiled from the checkout `trikeshed/TrikeShed`: the files listed in `trikeshed/sources.txt`, at the commit pinned in `build.sh` |
 
 ## Nginx or direct
 
 Direct: run with `HOST=0.0.0.0 PORT=80`.
 
 ## What happens per request, and why
+
+This section describes the `graal-jit` runtime (the JVM build, which is where these designs were first measured). The
+Kotlin/Native build keeps the group commit, SQLite settings, JWT and query rules below and replaces the selector loop
+with the io_uring rings in `feedc.def`.
 
 - **One thread.** The selector thread accepts, reads, parses, queries SQLite and writes. The box has 1 vCPU, so there
   are no locks and no hand-offs between threads. It owns four selectors, one per transport state class (listen, header

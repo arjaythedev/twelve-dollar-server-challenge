@@ -244,6 +244,24 @@ What the layer needs to reach the floor, in this order:
 5. On WASI: a reactor over `poll_oneoff`, and socket SQEs over `sock_accept`, `sock_recv` and `sock_send` (wasmtime `-S tcplisten`).
 6. Then the same socket loop over every element: one common echo/HTTP benchmark against each runtime's open window.
 
+## S17. All five runtimes in the droplet's limits, and KN as the scored build (kali, 2026-11-03)
+
+Full write-up for a reader new to this folder: [BENCHMARK.md](BENCHMARK.md). In short:
+- TrikeShed pin 20280e867 (GitHub master). `sources.txt` follows five files TrikeShed moved from posixMain to
+  nativeMain (HomedirGet, IntAccumulator.posix, assert, PosixChannelHandle, PlatformEndianness.posix) and adds
+  BoundedFileReader.kt, which JvmFileOperations now uses.
+- The WASI server is new: `server/src/wasmWasiMain` (Poller over `sock_accept`/`sock_recv`/`sock_send` and
+  `poll_oneoff`, SqliteStore over a second wasm module), on TrikeShed's `Wasi` socket calls (090e75084). It needs
+  wasmtime 46; 47 removed the preview 1 sockets. wasi-libc's preopen scan stops at the listening socket (fd 3), so the
+  bridge registers the directories itself (`__wasilibc_register_preopened_fd`).
+- Clean `ubuntu:24.04` containers at 1 CPU / 2 GB / no swap (`bench/droplet-ci.sh`): kn and graal-static first failed
+  (Metaspace capped at 384 MB; `ld: cannot find -lz`). With 768 MB of metaspace and `zlib1g-dev` both pass: kn 42/42,
+  anon peak 1,817 MB; graal-static 42/42, 1,793 MB.
+- `bench/all1000.sh` on the committed tree: all 7 configurations pass the 42 checks and 1,000 users with 0 failures.
+  Server CPU per request over the 40 s run: kn 156 µs, graal-static ring 201, xio 227, graal-jit xio 479, ring 633,
+  node 652, wasi 4,347. p95 is about 65 ms everywhere: the commit window (next steps, 2).
+- `build.sh` now builds only `feed.kexe`, so `start.sh` serves kn on the box.
+
 ## Next steps, in order of measured size
 
 1. Done: B-tree cursor reads in C for feed and post (098ccd1, feed 40 to 23 µs), and a held read transaction per wake (4dc083f, feed 21 µs, post 10 µs).
@@ -254,9 +272,12 @@ What the layer needs to reach the floor, in this order:
 6. Task P follow-up: the other three winners need their own toolchains.
 7. 128k run with a Linux load generator; SCTP 64k.
 8. The channel layer to the floor (S16, items 1 to 6), in TrikeShed master. Then the server's Poller moves into common code over the elements, and the per-runtime pollers (`Poller.linux.kt`, the JVM `Poller.kt`, `Poller.js.kt`) become elements or go away.
-9. build.sh builds every runtime one after the other (S15: two at once do not fit in 2 GB); install.sh adds Node 24 (node:sqlite), and wasmtime v50.0.1 and wasi-sdk 34 for the wasi build, with pinned sums.
+9. Done (S17): `build.sh` builds kn; `bench/all1000.sh` builds the other four; `bench/install-extra.sh` installs Node
+   24.21.0, wasmtime 46.0.3 and wasi-sdk 34 with pinned sums (`bench/DEPS.tsv`).
 
 ## State
 
-- Challenge repo, branch `sctp`: the five-runtime start.sh, the node build, the native-image handles and S15/S16 (this commit), on 35316a6 (research), 4dc083f (one read transaction per wake), 098ccd1 (B-tree reads). TrikeShed pin 35886891f. `main` is the PR head 87b974c. Push guard on. Nothing pushed.
+- Challenge repo, branch `sctp`: S17 (this commit) on the five-runtime start.sh, the node build, the native-image
+  handles and S15/S16, 35316a6 (research), 4dc083f (one read transaction per wake), 098ccd1 (B-tree reads). TrikeShed
+  pin 20280e867. `main` is the PR head 87b974c. Push guard on. Nothing pushed.
 - Shelved: mingw lines for `trikeshed/build.gradle.kts`, kept as `references/mingw-slice.patch` in the skill `twelve-dollar-kali-loadtest`.

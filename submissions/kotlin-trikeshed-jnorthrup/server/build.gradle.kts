@@ -49,6 +49,16 @@ kotlin {
         }
     }
 
+    // -Ptrike.targets=wasmWasi: Kotlin/Wasm on wasmtime 46 (WASI preview 1 sockets from -S tcplisten), with SQLite as a
+    // second wasm module (sqliteWasm), build/dist/wasi (wasiDist).
+    if ("wasmWasi" in nativeTargets) {
+        @OptIn(org.jetbrains.kotlin.gradle.ExperimentalWasmDsl::class)
+        wasmWasi {
+            nodejs()
+            binaries.executable()
+        }
+    }
+
     sourceSets {
         val commonMain by getting {
             dependencies {
@@ -74,6 +84,34 @@ val app = tasks.register<Sync>("app") {
 if ("js" in nativeTargets) tasks.register<Sync>("nodeDist") {
     from(tasks.named("jsProductionExecutableCompileSync"))
     into(layout.buildDirectory.dir("dist/node"))
+}
+
+// The WASI build: the server module plus sqlite.wasm (the stock amalgamation with the options below and
+// src/wasmWasiMain/c/sqlbridge.c, a WASI reactor that wasmtime preloads as "sqlite"), flat in build/dist/wasi.
+// wasi-sdk's clang from PATH (install.sh links wasm32-wasip1-clang into /usr/local/bin); WASI_SDK=<dir> picks another.
+val wasiClang = providers.environmentVariable("WASI_SDK").map { "$it/bin/wasm32-wasip1-clang" }.orElse("wasm32-wasip1-clang")
+val sqliteExports = listOf("sqlite3_open_v2", "sqlite3_prepare_v2", "sqlite3_step", "sqlite3_reset", "sqlite3_bind_int64",
+    "sqlite3_bind_text", "sqlite3_column_int64", "sqlite3_column_text", "sqlite3_column_bytes", "sqlite3_changes",
+    "sqlite3_errmsg")
+if ("wasmWasi" in nativeTargets) {
+    val sqliteWasm = tasks.register<Exec>("sqliteWasm") {
+        dependsOn(sqliteSource)
+        val dir = sqliteDir.get().asFile
+        val bridge = project.file("src/wasmWasiMain/c/sqlbridge.c")
+        inputs.files(File(dir, "sqlite3.c"), bridge)
+        outputs.file(File(dir, "sqlite.wasm"))
+        workingDir(dir)
+        commandLine(listOf(wasiClang.get(), "-O2", "-mexec-model=reactor") +
+            sqliteOptions + listOf("sqlite3.c", bridge.path, "-o", "sqlite.wasm") +
+            sqliteExports.map { "-Wl,--export=$it" })
+    }
+    tasks.register<Sync>("wasiDist") {
+        from(tasks.named("compileProductionExecutableKotlinWasmWasi"))
+        from(sqliteWasm)
+        include("*.wasm")
+        rename { if (it == "sqlite.wasm") it else "server.wasm" }
+        into(layout.buildDirectory.dir("dist/wasi"))
+    }
 }
 
 // The driver: SQLite 3.54.0 from its amalgamation, built here for this one-thread process.

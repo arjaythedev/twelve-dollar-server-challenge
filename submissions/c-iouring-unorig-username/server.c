@@ -6,27 +6,26 @@
 #include <liburing.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
-#include <signal.h>
+#include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
-#include <sys/eventfd.h>
 #include <sys/mman.h>
 #include <sys/resource.h>
-#include <sys/prctl.h>
 #include <sys/socket.h>
 #include <time.h>
 #include <unistd.h>
-#include "sqlite3.h"
+#include "sqlite3.c"  // one translation unit: reads use its B-tree layer directly
 
 #define MAXREQ (64 * 1024)    // header + body cap per request
 #define BATCH_OUT (4 << 20)   // response bytes held per batch until its commit
 #define MAXSEG 65536          // responses per batch
-#define NBUF 4096             // provided receive buffers per ring
-#define BSZ 2048
+#define NBUF 2048             // provided receive buffers per ring: every one gets touched, so they cost RAM
+#define BSZ 1024
 #define MAXRINGS 32
+#define NLISTEN 8             // SO_REUSEPORT listeners: each has its own accept queue of somaxconn
 
 // A response in flight. who is the connection's receive tag, so a late completion can tell
 // whether the connection it belongs to is still the same one.
@@ -46,22 +45,22 @@ typedef struct {
   struct io_uring_buf_ring *br; char *bufs;
 } ring_t;
 static ring_t R[MAXRINGS];
-static int nrings, lfd, efd = -1;
+static int nrings, lfd[NLISTEN];
 static uint32_t tsize;  // slots per ring
 static sqlite3 *db;
-static sqlite3_stmt *st_feed, *st_fids, *st_flikes, *st_frows, *st_post, *st_ins, *st_like, *st_exists, *st_one, *st_begin, *st_commit, *st_rollback;
+static sqlite3_stmt *st_feed, *st_post, *st_ins, *st_like, *st_one, *st_begin, *st_commit, *st_rollback;
 static time_t started, now_s;
 
 // user_data: low 3 bits tag the operation. A send's user_data is its sop_t pointer (tag 0).
-enum { T_SEND, T_ACCEPT, T_RECV, T_NOP, T_EVFD };
+enum { T_SEND, T_ACCEPT, T_RECV, T_NOP };
 #define RECV_UD(k, slot, gen) (T_RECV | (uint64_t)(k) << 3 | (uint64_t)(slot) << 8 | (uint64_t)(gen) << 32)
 
 // ---------- output: one arena per batch, copied out to sends after COMMIT ----------
 static char *arena; static size_t alen;
 typedef struct { uint64_t who; uint32_t off, len; } seg_t;
 static seg_t segs[MAXSEG]; static int nsegs;
-static uint64_t *deferred, *rearm; static int ndef, nrearm, cap_def, cap_rearm;
-static int arena_full, in_txn, txn_writes, batch_failed;
+static uint64_t *deferred, *rearm, *held; static int ndef, nrearm, nheld, cap_def, cap_rearm, cap_held;
+static int arena_full, in_txn, txn_writes, batch_failed, hold_hit, writes_held;
 
 static inline void put(const void *p, size_t n) { memcpy(arena + alen, p, n); alen += n; }
 #define PUTS(s) put(s, sizeof(s) - 1)
@@ -366,10 +365,41 @@ static const char *auth(const char *h, size_t hl, int64_t *uid, char *uname, siz
 }
 
 // ---------- database ----------
+// Reads walk SQLite's own B-tree cursors, inside the batch's transaction; writes and anything unusual use SQL.
+static Btree *bt;
+static BtCursor *cur_posts, *cur_users, *cur_feed, *cur_likes;
+static Pgno root_posts, root_users, root_feed, root_likes;
+static KeyInfo *ki_feed, *ki_likes;
+static int bt_ok, cur_open;
+
+static void close_cursors(void) {
+  if (!cur_open) return;
+  sqlite3BtreeCloseCursor(cur_posts); sqlite3BtreeCloseCursor(cur_users);
+  sqlite3BtreeCloseCursor(cur_feed); sqlite3BtreeCloseCursor(cur_likes);
+  cur_open = 0;
+}
+static int open_cursors(void) {
+  BtCursor *c[4] = {cur_posts, cur_users, cur_feed, cur_likes};
+  Pgno roots[4] = {root_posts, root_users, root_feed, root_likes};
+  KeyInfo *ki[4] = {NULL, NULL, ki_feed, ki_likes};
+  for (int i = 0; i < 4; i++) {
+    sqlite3BtreeCursorZero(c[i]);
+    if (sqlite3BtreeCursor(bt, roots[i], 0, ki[i], c[i]) != SQLITE_OK) {
+      while (i--) sqlite3BtreeCloseCursor(c[i]);
+      return 0;
+    }
+  }
+  return cur_open = 1;
+}
 static int txn(void) {  // opens the batch transaction on first use
   if (in_txn) return 1;
   int rc = sqlite3_step(st_begin); sqlite3_reset(st_begin);
-  return in_txn = rc == SQLITE_DONE;
+  if (rc != SQLITE_DONE) return 0;
+  if (bt_ok && (sqlite3BtreeBeginTrans(bt, 0, 0) != SQLITE_OK || !open_cursors())) {
+    sqlite3_step(st_rollback); sqlite3_reset(st_rollback);
+    return 0;
+  }
+  return in_txn = 1;
 }
 static int wstep(sqlite3_stmt *s) {  // a write inside the batch transaction
   int rc = sqlite3_step(s);
@@ -377,48 +407,157 @@ static int wstep(sqlite3_stmt *s) {  // a write inside the batch transaction
   return rc;
 }
 static void db_fail(void) {  // a failed statement may have rolled the whole batch back
-  if (in_txn && sqlite3_get_autocommit(db)) { in_txn = 0; if (txn_writes) batch_failed = 1; txn_writes = 0; }
+  if (in_txn && sqlite3_get_autocommit(db)) { close_cursors(); in_txn = 0; if (txn_writes) batch_failed = 1; txn_writes = 0; }
 }
-static void put_post_row(sqlite3_stmt *s, int64_t likes) {  // likes < 0: take column 4
+static void put_post_row(sqlite3_stmt *s) {
   PUTS("{\"id\":"); putu(sqlite3_column_int64(s, 0));
   PUTS(",\"body\":\""); putjs(sqlite3_column_text(s, 1), sqlite3_column_bytes(s, 1));
   PUTS("\",\"created_at\":\""); put(sqlite3_column_text(s, 2), sqlite3_column_bytes(s, 2));
   PUTS("\",\"author\":\""); putjs(sqlite3_column_text(s, 3), sqlite3_column_bytes(s, 3));
-  PUTS("\",\"like_count\":"); putu(likes < 0 ? sqlite3_column_int64(s, 4) : likes); PUTS("}");
+  PUTS("\",\"like_count\":"); putu(sqlite3_column_int64(s, 4)); PUTS("}");
 }
 
-// The feed's newest 20 ids usually sit in a narrow id range. Then one scan of that range in likes and
-// one in posts replace the 20 per-row count and join lookups. Returns 1 when the feed was written,
-// 0 to fall back to the reference query (ids too spread out), -1 on a database error.
-static int feed_range(int close) {
+// A record's columns, decoded in place. Anything unexpected makes the caller fall back to SQL.
+typedef struct { uint32_t type, len; const unsigned char *d; } col_t;
+static inline int rec_cols(BtCursor *c, col_t *out, int nc) {
+  getCellInfo(c);
+  if (c->info.nLocal != c->info.nPayload) return 0;  // spills onto overflow pages
+  const unsigned char *p = c->info.pPayload, *e = p + c->info.nPayload;
+  uint32_t hs, t, i = getVarint32(p, hs);
+  const unsigned char *d = p + hs;
+  if (d > e) return 0;
+  for (int k = 0; k < nc; k++) {
+    if (i >= hs) return 0;
+    i += getVarint32(p + i, t);
+    if (t == 10 || t == 11) return 0;
+    uint32_t l = t >= 12 ? (t - 12) / 2 : sqlite3SmallTypeSizes[t];
+    if (d + l > e) return 0;
+    out[k] = (col_t){t, l, d}; d += l;
+  }
+  return 1;
+}
+static inline int col_text(const col_t *c) { return c->type >= 13 && (c->type & 1); }
+static inline int col_int(const col_t *c, int64_t *v) {
+  if (c->type == 8 || c->type == 9) { *v = c->type - 8; return 1; }
+  if (c->type < 1 || c->type > 6) return 0;
+  int64_t x = (signed char)c->d[0];
+  for (uint32_t i = 1; i < c->len; i++) x = x << 8 | c->d[i];
+  *v = x; return 1;
+}
+// Likes per post for lo <= post_id <= hi from likes_post_id_idx, n[post_id - lo] += 1 per entry, reading the
+// cells of a leaf directly. Returns 1 ok, 0 for a cell of an unexpected form, -1 on error.
+static int count_likes(int64_t lo, int64_t hi, uint32_t *n) {
+  BtCursor *c = cur_likes; Mem m; UnpackedRecord r; int res = 0;
+  memset(&m, 0, sizeof m); m.flags = MEM_Int; m.u.i = lo;
+  memset(&r, 0, sizeof r); r.pKeyInfo = c->pKeyInfo; r.aMem = &m; r.nField = 1; r.default_rc = 1;  // land on the first equal entry
+  if (sqlite3BtreeIndexMoveto(c, &r, &res) != SQLITE_OK) return -1;
+  if (sqlite3BtreeEof(c)) return 1;
+  if (res < 0) {
+    int rc = sqlite3BtreeNext(c, 0);
+    if (rc == SQLITE_DONE) return 1;
+    if (rc != SQLITE_OK) return -1;
+  }
+  for (;;) {
+    MemPage *pg = c->pPage; int i = c->ix, last = pg->leaf ? pg->nCell : i + 1;  // an interior cell: just that one
+    for (; i < last; i++) {
+      const unsigned char *cell = findCell(pg, i) + pg->childPtrSize, *q = cell + 1;
+      uint32_t len = cell[0];
+      if (len >= 0x80 || len < 3 || q + len > pg->aDataEnd) return 0;
+      uint32_t h = q[0], t = q[1]; int64_t v;
+      if (h >= len || h < 3 || t >= 0x80) return 0;
+      if (t >= 1 && t <= 6) {
+        uint32_t k = sqlite3SmallTypeSizes[t];
+        if (h + k > len) return 0;
+        v = (signed char)q[h];
+        for (uint32_t j = 1; j < k; j++) v = v << 8 | q[h + j];
+      } else if (t == 8 || t == 9) v = t - 8;
+      else return 0;
+      if (v > hi) return 1;
+      if (v >= lo) n[v - lo]++;
+    }
+    c->ix = (u16)(last - 1);
+    int rc = sqlite3BtreeNext(c, 0);
+    if (rc == SQLITE_DONE) return 1;
+    if (rc != SQLITE_OK) return -1;
+  }
+}
+static inline int seek_row(BtCursor *c, int64_t id) {  // 1 found, 0 absent, -1 error
+  int res = 0;
+  if (sqlite3BtreeTableMoveto(c, id, 0, &res) != SQLITE_OK) return -1;
+  return res == 0 && c->eState == CURSOR_VALID;
+}
+static inline void put_row(int64_t id, const col_t *body, const unsigned char *ca, uint32_t cal, const col_t *name, uint32_t likes) {
+  PUTS("{\"id\":"); putu(id);
+  PUTS(",\"body\":\""); putjs(body->d, body->len);
+  PUTS("\",\"created_at\":\""); put(ca, cal);
+  PUTS("\",\"author\":\""); putjs(name->d, name->len);
+  PUTS("\",\"like_count\":"); putu(likes); PUTS("}");
+}
+// Author of a post: 1 found, 0 use SQL, -1 error. The cell stays valid while cur_users doesn't move.
+static inline int row_author(int64_t uid, col_t *name) {
+  int rc = seek_row(cur_users, uid); if (rc <= 0) return rc;
+  col_t c[2];
+  if (!rec_cols(cur_users, c, 2) || !col_text(&c[1])) return 0;
+  *name = c[1]; return 1;
+}
+
+#define FEED_N 20
+#define FEED_SPAN 512  // ids this close together share one walk of the likes index
+// The 20 newest off posts_created_at_id_idx, then the rows in ascending id order (consecutive ids are one step
+// along a leaf), then one likes walk. Returns 1 when the feed was written, 0 to use SQL, -1 on a database error.
+static int feed_btree(int close) {
   static char tmp[BATCH_OUT];
-  int64_t ids[20], lo, hi, likes[20] = {0}; int n = 0, rc;
-  while ((rc = sqlite3_step(st_fids)) == SQLITE_ROW) ids[n++] = sqlite3_column_int64(st_fids, 0);
-  sqlite3_reset(st_fids);
-  if (rc != SQLITE_DONE) return -1;
-  lo = hi = n ? ids[0] : 0;
-  for (int i = 1; i < n; i++) { if (ids[i] < lo) lo = ids[i]; if (ids[i] > hi) hi = ids[i]; }
-  if (hi - lo >= 256) return 0;
-  signed char slot[256]; memset(slot, -1, sizeof slot);
-  for (int i = 0; i < n; i++) slot[ids[i] - lo] = i;
-  sqlite3_bind_int64(st_flikes, 1, lo); sqlite3_bind_int64(st_flikes, 2, hi);
-  while ((rc = sqlite3_step(st_flikes)) == SQLITE_ROW) { int k = slot[sqlite3_column_int64(st_flikes, 0) - lo]; if (k >= 0) likes[k]++; }
-  sqlite3_reset(st_flikes);
-  if (rc != SQLITE_DONE) return -1;
-  size_t mark = alen; uint32_t at[20], len[20]; int found = 0;
+  if (!bt_ok) return 0;
+  int64_t ids[FEED_N]; unsigned char ca[FEED_N][32]; uint32_t cal[FEED_N], likes[FEED_N]; int n = 0, empty = 1, ord[FEED_N];
+  if (sqlite3BtreeFirst(cur_feed, &empty) != SQLITE_OK) return -1;
+  if (!empty) for (;;) {
+    col_t c[3];
+    if (!rec_cols(cur_feed, c, 3) || !col_text(&c[0]) || c[0].len > sizeof ca[0] || !col_int(&c[1], &ids[n])) return 0;
+    memcpy(ca[n], c[0].d, c[0].len); cal[n] = c[0].len;
+    if (++n == FEED_N) break;
+    int rc = sqlite3BtreeNext(cur_feed, 0);
+    if (rc == SQLITE_DONE) break;
+    if (rc != SQLITE_OK) return -1;
+  }
+  for (int i = 0; i < n; i++) {  // newest first is normally descending id, so this is usually just a reversal
+    int j = i, v = n - 1 - i;
+    while (j > 0 && ids[ord[j - 1]] > ids[v]) { ord[j] = ord[j - 1]; j--; }
+    ord[j] = v;
+  }
+  memset(likes, 0, sizeof likes);
+  if (n) {
+    int64_t lo = ids[ord[0]], hi = ids[ord[n - 1]];
+    if (hi - lo < FEED_SPAN) {
+      uint32_t span[FEED_SPAN]; memset(span, 0, (hi - lo + 1) * sizeof span[0]);
+      int rc = count_likes(lo, hi, span); if (rc <= 0) return rc;
+      for (int i = 0; i < n; i++) likes[i] = span[ids[i] - lo];
+    } else for (int i = 0; i < n; i++) { int rc = count_likes(ids[i], ids[i], &likes[i]); if (rc <= 0) return rc; }
+  }
+  size_t mark = alen; uint32_t at[FEED_N], len[FEED_N];
   begin_resp(200, close); PUTS("{\"posts\":[");
   size_t rows = alen;
-  sqlite3_bind_int64(st_frows, 1, lo); sqlite3_bind_int64(st_frows, 2, hi);
-  while ((rc = sqlite3_step(st_frows)) == SQLITE_ROW) {
-    int k = slot[sqlite3_column_int64(st_frows, 0) - lo]; if (k < 0) continue;
-    at[k] = alen - rows; put_post_row(st_frows, likes[k]); len[k] = alen - rows - at[k]; found++;
+  for (int k = 0; k < n; k++) {
+    int i = ord[k], rc = seek_row(cur_posts, ids[i]); col_t c[3], name; int64_t uid;
+    if (rc < 0) { alen = mark; return -1; }
+    if (!rc || !rec_cols(cur_posts, c, 3) || !col_text(&c[2]) || !col_int(&c[1], &uid)) { alen = mark; return 0; }
+    rc = row_author(uid, &name);
+    if (rc <= 0) { alen = mark; return rc; }
+    at[i] = alen - rows; put_row(ids[i], &c[2], ca[i], cal[i], &name, likes[i]); len[i] = alen - rows - at[i];
   }
-  sqlite3_reset(st_frows);
-  if (rc != SQLITE_DONE) { alen = mark; return -1; }
-  if (found != n) { alen = mark; return 0; }
   size_t total = alen - rows; memcpy(tmp, arena + rows, total); alen = rows;  // back into feed order
   for (int i = 0; i < n; i++) { if (i) PUTS(","); put(tmp + at[i], len[i]); }
   PUTS("]}"); finish(); return 1;
+}
+// GET /posts/:id. Returns 1 when written, 0 to use SQL (which also answers a missing post), -1 on a database error.
+static int post_btree(int64_t id, int close) {
+  if (!bt_ok) return 0;
+  int rc = seek_row(cur_posts, id); col_t c[4], name; int64_t uid; uint32_t likes = 0;
+  if (rc <= 0) return rc;
+  if (!rec_cols(cur_posts, c, 4) || !col_text(&c[2]) || !col_text(&c[3]) || !col_int(&c[1], &uid)) return 0;
+  if ((rc = row_author(uid, &name)) <= 0) return rc;
+  if ((rc = count_likes(id, id, &likes)) <= 0) return rc;
+  begin_resp(200, close); PUTS("{\"post\":"); put_row(id, &c[2], c[3].d, c[3].len, &name, likes); PUTS("}"); finish();
+  return 1;
 }
 
 // ---------- request handling ----------
@@ -451,11 +590,11 @@ static void handle(const char *m, size_t ml, const char *path, size_t pl, const 
   int rc;
   if (get && pl == 5 && !memcmp(path, "/feed", 5)) {
     if (!txn()) { err(500, "internal server error", close); return; }
-    if ((rc = feed_range(close))) { if (rc < 0) { db_fail(); err(500, "internal server error", close); } return; }
+    if ((rc = feed_btree(close))) { if (rc < 0) { db_fail(); err(500, "internal server error", close); } return; }
     size_t mark = alen;
     begin_resp(200, close); PUTS("{\"posts\":[");
     int i = 0;
-    while ((rc = sqlite3_step(st_feed)) == SQLITE_ROW) { if (i++) PUTS(","); put_post_row(st_feed, -1); }
+    while ((rc = sqlite3_step(st_feed)) == SQLITE_ROW) { if (i++) PUTS(","); put_post_row(st_feed); }
     sqlite3_reset(st_feed);
     if (rc != SQLITE_DONE) { db_fail(); alen = mark; err(500, "internal server error", close); return; }
     PUTS("]}"); finish(); return;
@@ -466,10 +605,11 @@ static void handle(const char *m, size_t ml, const char *path, size_t pl, const 
       int64_t id = parse_id(seg, pl - 7);
       if (id < 0) { err(400, "invalid post id", close); return; }
       if (!txn()) { err(500, "internal server error", close); return; }
+      if ((rc = post_btree(id, close))) { if (rc < 0) { db_fail(); err(500, "internal server error", close); } return; }
       sqlite3_bind_int64(st_post, 1, id);
       size_t mark = alen;
       rc = sqlite3_step(st_post);
-      if (rc == SQLITE_ROW) { begin_resp(200, close); PUTS("{\"post\":"); put_post_row(st_post, -1); PUTS("}"); finish(); }
+      if (rc == SQLITE_ROW) { begin_resp(200, close); PUTS("{\"post\":"); put_post_row(st_post); PUTS("}"); finish(); }
       else if (rc == SQLITE_DONE) err(404, "post not found", close);
       else { db_fail(); alen = mark; err(500, "internal server error", close); }
       sqlite3_reset(st_post); return;
@@ -481,13 +621,16 @@ static void handle(const char *m, size_t ml, const char *path, size_t pl, const 
       int64_t id = parse_id(seg, sl - seg);
       if (id < 0) { err(400, "invalid post id", close); return; }
       if (!txn()) { err(500, "internal server error", close); return; }
+      rc = bt_ok ? seek_row(cur_posts, id) : 1;  // without B-tree reads the statement's own EXISTS decides
+      if (rc < 0) { db_fail(); err(500, "internal server error", close); return; }
+      if (!rc) { err(404, "post not found", close); return; }
       sqlite3_bind_int64(st_like, 1, uid); sqlite3_bind_int64(st_like, 2, id);
       rc = wstep(st_like); sqlite3_reset(st_like);
       if (rc != SQLITE_DONE) { db_fail(); err(500, "internal server error", close); return; }
       int created = sqlite3_changes(db) > 0;
-      if (!created) {
-        sqlite3_bind_int64(st_exists, 1, id);
-        rc = sqlite3_step(st_exists); sqlite3_reset(st_exists);
+      if (!created && !bt_ok) {
+        sqlite3_bind_int64(st_post, 1, id);
+        rc = sqlite3_step(st_post); sqlite3_reset(st_post);
         if (rc == SQLITE_DONE) { err(404, "post not found", close); return; }
         if (rc != SQLITE_ROW) { db_fail(); err(500, "internal server error", close); return; }
       }
@@ -547,6 +690,7 @@ static long serve(char *buf, size_t n, int *closing) {
   while (used < n && !*closing) {
     char *p = buf + used, *e = buf + n;
     if (alen + 2 * MAXREQ > BATCH_OUT || nsegs == MAXSEG) { arena_full = 1; break; }  // the rest waits for the next batch
+    if (writes_held && *p == 'P') { hold_hit = 1; break; }  // a POST waits, unread, until the checkpoint's tail is done
     char *he = memmem(p, e - p, "\r\n\r\n", 4);
     if (!he) { if ((size_t)(e - p) > MAXREQ) return -1; break; }
     char *le = memchr(p, '\r', he + 2 - p);
@@ -555,7 +699,9 @@ static long serve(char *buf, size_t n, int *closing) {
     int http10 = le - sp2 - 1 == 8 && !memcmp(sp2 + 1, "HTTP/1.0", 8);
     const char *authh = NULL; size_t al = 0, clen = 0; int close = http10, expect = 0;
     for (char *h = le + 2; h < he + 2;) {
-      char *hl = memchr(h, '\r', he + 2 - h), *c = memchr(h, ':', hl - h);
+      char *hl = memchr(h, '\r', he + 2 - h), *c;
+      if (!hl) return -1;  // a bare CR just before the end of the head
+      c = memchr(h, ':', hl - h);
       if (c) {
         char *v = c + 1; while (v < hl && (*v == ' ' || *v == '\t')) v++;
         char *ve = hl; while (ve > v && (ve[-1] == ' ' || ve[-1] == '\t')) ve--;
@@ -635,7 +781,7 @@ static void send_bytes(uint64_t who, conn_t *c, const char *p, uint32_t n) {
 }
 
 static void process(uint64_t who, conn_t *c, char *buf, size_t n) {
-  uint32_t start = alen; int closing = 0; arena_full = 0;
+  uint32_t start = alen; int closing = 0; arena_full = hold_hit = 0;
   long used = serve(buf, n, &closing);
   if (used < 0) { alen = start; conn_close(who); return; }
   if (alen > start) segs[nsegs++] = (seg_t){who, start, alen - start};
@@ -646,6 +792,7 @@ static void process(uint64_t who, conn_t *c, char *buf, size_t n) {
     else if (used) memmove(c->in, c->in + used, left);
     c->inlen = left;
     if (arena_full) push(&deferred, &ndef, &cap_def, who);
+    if (hold_hit) push(&held, &nheld, &cap_held, who);
   } else if (c->in) { free(c->in); c->in = NULL; c->inlen = c->incap = 0; }
   if (closing && alen == start) conn_close(who);
 }
@@ -671,6 +818,7 @@ static void send_done(sop_t *o, int res) {
 // Commits the batch, then sends every response produced in it.
 static void flush_batch(void) {
   if (in_txn) {
+    close_cursors();
     int rc = sqlite3_step(st_commit); sqlite3_reset(st_commit);
     if (rc != SQLITE_DONE) { sqlite3_step(st_rollback); sqlite3_reset(st_rollback); if (txn_writes) batch_failed = 1; }
     in_txn = 0; txn_writes = 0;
@@ -685,10 +833,6 @@ static void flush_batch(void) {
 }
 
 // ---------- rings ----------
-static uint64_t evbuf;
-static void arm_evfd(void) {  // extra rings signal this eventfd; ring 0 waits on it
-  struct io_uring_sqe *s = sqe(0); io_uring_prep_read(s, efd, &evbuf, 8, 0); s->user_data = T_EVFD;
-}
 // Some Ubuntu 6.8 kernels (0-136 and later, Launchpad #2162843) refuse a registration whose reserved words
 // are all zero and accept resv[0] = 1; every other kernel takes the zeroes, so those are tried first.
 static struct io_uring_buf_ring *buf_ring(struct io_uring *u) {
@@ -703,9 +847,9 @@ static struct io_uring_buf_ring *buf_ring(struct io_uring *u) {
 }
 static int ring_init(int k) {
   ring_t *r = &R[k];
-  // Ring 0 is the one the loop waits on, so its completions can run in that wait (DEFER_TASKRUN).
+  // DEFER_TASKRUN on every ring: completion work runs when the loop asks, in one batch, never interrupting a pass.
   struct io_uring_params p = {.flags = IORING_SETUP_SUBMIT_ALL | IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_CQSIZE |
-                              (k ? 0 : IORING_SETUP_DEFER_TASKRUN), .cq_entries = 16384};
+                              IORING_SETUP_DEFER_TASKRUN, .cq_entries = 16384};
   if (io_uring_queue_init_params(4096, &r->r, &p) < 0) return -1;
   if (io_uring_register_files_sparse(&r->r, tsize) < 0 || !(r->br = buf_ring(&r->r))) {
     io_uring_queue_exit(&r->r); return -1;
@@ -714,26 +858,26 @@ static int ring_init(int k) {
   r->c = calloc(tsize, sizeof *r->c); r->bufs = malloc((size_t)NBUF * BSZ);
   for (int i = 0; i < NBUF; i++) io_uring_buf_ring_add(r->br, r->bufs + (size_t)i * BSZ, BSZ, i, NBUF - 1, i);
   io_uring_buf_ring_advance(r->br, NBUF);
-  if (k) {
-    if (efd < 0) { efd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK); arm_evfd(); }
-    io_uring_register_eventfd(&r->r, efd);
-    fprintf(stderr, "%u connections: added ring %d\n", k * (tsize - 16), k);
-  }
+  if (k) fprintf(stderr, "%u connections: added ring %d\n", k * (tsize - 16), k);
   nrings = k + 1;
   return 0;
 }
 // Accepts are single-shot, a few in flight, on the first ring with room. An accept that finds its
 // table full has already taken the connection and can only drop it, so tables are never filled to the
 // last slot (closes still in flight may hold a few) and a multishot accept can't be stopped in time.
-#define ACCEPTS 256  // rearmed once per loop pass, so this caps accepts per pass (16 held ramps to ~1.7k/s)
-static int naccepts;
+// Each listener keeps its own share armed: connections are hashed to listeners, so a listener with none armed
+// would leave its queue waiting while accepts armed on idle listeners never complete.
+#define ACCEPTS 64  // per listener, rearmed once per loop pass, so this caps accepts per pass (16 in total held ramps to ~1.7k/s)
+static int armed[NLISTEN];
 static void arm_accepts(void) {
-  for (int k = 0; naccepts < ACCEPTS && k < MAXRINGS;) {
-    if (k == nrings && ring_init(k) < 0) return;  // retried after the next event
-    if (R[k].n + R[k].pend + 16 >= tsize) { k++; continue; }
-    struct io_uring_sqe *s = sqe(k);
-    io_uring_prep_accept_direct(s, lfd, NULL, NULL, 0, IORING_FILE_INDEX_ALLOC); s->user_data = T_ACCEPT;
-    R[k].pend++; naccepts++;
+  for (int l = 0, k = 0; l < NLISTEN; l++) {
+    while (armed[l] < ACCEPTS && k < MAXRINGS) {
+      if (k == nrings && ring_init(k) < 0) return;  // retried after the next event
+      if (R[k].n + R[k].pend + 16 >= tsize) { k++; continue; }
+      struct io_uring_sqe *s = sqe(k);
+      io_uring_prep_accept_direct(s, lfd[l], NULL, NULL, 0, IORING_FILE_INDEX_ALLOC); s->user_data = T_ACCEPT | (uint64_t)l << 3;
+      R[k].pend++; armed[l]++;
+    }
   }
 }
 static void on_cqe(int k, uint64_t ud, int res, unsigned f) {
@@ -741,7 +885,7 @@ static void on_cqe(int k, uint64_t ud, int res, unsigned f) {
   switch (ud & 7) {
     case T_SEND: send_done((sop_t *)(uintptr_t)ud, res); break;
     case T_ACCEPT:
-      r->pend--; naccepts--;
+      r->pend--; armed[ud >> 3]--;
       if (res >= 0) { c = &r->c[res]; c->open = 1; r->n++; arm_recv(RECV_UD(k, res, c->gen)); }
       break;
     case T_RECV:
@@ -757,7 +901,6 @@ static void on_cqe(int k, uint64_t ud, int res, unsigned f) {
         else conn_close(ud);
       }
       break;
-    case T_EVFD: arm_evfd(); break;
   }
 }
 static unsigned drain(int k) {
@@ -767,22 +910,26 @@ static unsigned drain(int k) {
   return n;
 }
 
+#define WAIT_N 128        // completions a busy pass waits for, shared across the rings
+#define WAIT_NS 2000000   // or this long, whichever is first
+static int ck_active(void);
+static void ck_tick(void);
 static void run(void) {
   unsigned seen = 0;
   for (;;) {
     for (int i = 0; i < nrearm; i++) if (conn_of(rearm[i])) arm_recv(rearm[i]);
     nrearm = 0;
     arm_accepts();
-    for (int k = 1; k < nrings; k++)
-      if (io_uring_sq_ready(&R[k].r) || io_uring_cq_has_overflow(&R[k].r)) io_uring_submit_and_get_events(&R[k].r);
-    // Busy (the last pass saw 4+ completions): wait for up to 128 or 6 ms, so a batch, its commit and
-    // its sends cover more requests per wake-up. The target is capped at 40% of open connections so a
-    // few clients without think time never sit out the timeout.
+    uint32_t open = R[0].n;
+    for (int k = 1; k < nrings; k++) { open += R[k].n; io_uring_submit_and_get_events(&R[k].r); }
+    // Busy, or more than one ring to look at: wait for ring 0's share of a batch or a short timeout, whichever is
+    // first. The target is capped by the open connections so a few clients without think time never sit out the timer.
     int rc; struct io_uring_cqe *cq;
-    if (seen >= 4) {
-      uint32_t open = 0; for (int k = 0; k < nrings; k++) open += R[k].n;
-      struct __kernel_timespec ts = {.tv_nsec = 6000000};
-      rc = io_uring_submit_and_wait_timeout(&R[0].r, &cq, open * 2 / 5 > 128 ? 128 : open * 2 / 5 + 1, &ts, NULL);
+    if (seen >= 4 || nrings > 1 || nheld || ck_active()) {
+      unsigned want = seen >= 4 ? WAIT_N / nrings + 1 : 1;
+      if (want > open / 3 + 1) want = open / 3 + 1;
+      struct __kernel_timespec ts = {.tv_nsec = WAIT_NS};
+      rc = io_uring_submit_and_wait_timeout(&R[0].r, &cq, want, &ts, NULL);
     } else rc = io_uring_submit_and_wait(&R[0].r, 1);
     if (rc < 0 && rc != -EINTR && rc != -EBUSY && rc != -ETIME) { fprintf(stderr, "io_uring_enter: %s\n", strerror(-rc)); exit(1); }
     now_s = time(NULL); seen = 0;
@@ -790,6 +937,12 @@ static void run(void) {
     flush_batch();
     while (ndef) {  // requests held back by a full arena
       uint64_t *todo = deferred; int n = ndef; deferred = NULL; ndef = cap_def = 0;
+      for (int i = 0; i < n; i++) { conn_t *c = conn_of(todo[i]); if (c && c->inlen && !c->sending) process(todo[i], c, c->in, c->inlen); }
+      free(todo); flush_batch();
+    }
+    ck_tick();
+    if (nheld && !writes_held) {
+      uint64_t *todo = held; int n = nheld; held = NULL; nheld = cap_held = 0;
       for (int i = 0; i < n; i++) { conn_t *c = conn_of(todo[i]); if (c && c->inlen && !c->sending) process(todo[i], c, c->in, c->inlen); }
       free(todo); flush_batch();
     }
@@ -801,42 +954,121 @@ static sqlite3_stmt *prep(const char *sql) {
   if (sqlite3_prepare_v3(db, sql, -1, SQLITE_PREPARE_PERSISTENT, &s, NULL) != SQLITE_OK) { fprintf(stderr, "prepare: %s: %s\n", sqlite3_errmsg(db), sql); exit(1); }
   return s;
 }
+static Pgno rootpage(const char *name) {
+  sqlite3_stmt *st; Pgno r = 0;
+  if (sqlite3_prepare_v2(db, "SELECT rootpage FROM sqlite_schema WHERE name = ?", -1, &st, NULL) != SQLITE_OK) return 0;
+  sqlite3_bind_text(st, 1, name, -1, SQLITE_STATIC);
+  if (sqlite3_step(st) == SQLITE_ROW) r = sqlite3_column_int(st, 0);
+  sqlite3_finalize(st);
+  return r;
+}
+static int layout_is(const char *sql, const char *want) {  // the decoders assume these exact columns
+  sqlite3_stmt *st; int ok = 0;
+  if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK) return 0;
+  if (sqlite3_step(st) == SQLITE_ROW) { const char *t = (const char *)sqlite3_column_text(st, 0); ok = t && !strcmp(t, want); }
+  sqlite3_finalize(st);
+  return ok;
+}
+static KeyInfo *key_info(int nkey, int nextra, int desc) {
+  KeyInfo *k = sqlite3KeyInfoAlloc(db, nkey, nextra);
+  if (!k) return NULL;
+  for (int i = 0; i < nkey + nextra; i++) k->aColl[i] = db->pDfltColl;
+  for (int i = 0; i < nkey; i++) k->aSortFlags[i] = desc ? KEYINFO_ORDER_DESC : 0;
+  return k;
+}
+static void btree_setup(void) {  // leaves bt_ok 0 (SQL for every read) on anything unexpected
+  bt_ok = ENC(db) == SQLITE_UTF8
+    && layout_is("SELECT group_concat(name) FROM pragma_table_info('posts')", "id,user_id,body,created_at")
+    && layout_is("SELECT group_concat(name) FROM pragma_table_info('users')", "id,username,created_at")
+    && layout_is("SELECT group_concat(name) FROM pragma_index_info('posts_created_at_id_idx')", "created_at,id")
+    && layout_is("SELECT group_concat(name) FROM pragma_index_info('likes_post_id_idx')", "post_id")
+    && layout_is("SELECT group_concat(\"desc\") FROM pragma_index_xinfo('posts_created_at_id_idx') WHERE key", "1,1")
+    && (root_posts = rootpage("posts")) && (root_users = rootpage("users"))
+    && (root_feed = rootpage("posts_created_at_id_idx")) && (root_likes = rootpage("likes_post_id_idx"))
+    && (ki_feed = key_info(2, 1, 1)) && (ki_likes = key_info(1, 1, 0));
+  if (!bt_ok) { fprintf(stderr, "unexpected schema: reads use SQL\n"); return; }
+  bt = db->aDb[0].pBt;
+  cur_posts = malloc(sqlite3BtreeCursorSize()); cur_users = malloc(sqlite3BtreeCursorSize());
+  cur_feed = malloc(sqlite3BtreeCursorSize()); cur_likes = malloc(sqlite3BtreeCursorSize());
+}
+
+// Checkpoints run on a second thread at low priority, on its own connection, so the loop never waits for their
+// fsyncs. A log only restarts once fully copied back, which steady writes prevent; so after the bulk pass new
+// POSTs are held briefly (reads go on) while the thread copies the tail, and the next write restarts the log.
+#define CK_FRAMES 8192
+#define CK_FORCE (4 * CK_FRAMES)  // the thread keeps losing the race: the loop checkpoints by itself
+#define HOLD_MS 250
+enum { CK_IDLE, CK_BULK, CK_BULK_DONE, CK_TAIL, CK_TAIL_DONE };
+static sqlite3 *ckdb;
+static int ck_state, ck_full, wal_frames;
+static pthread_mutex_t ck_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t ck_cv = PTHREAD_COND_INITIALIZER;
+static struct timespec hold_t0;
+static int wal_hook(void *u, sqlite3 *d, const char *n, int frames) { wal_frames = frames; return SQLITE_OK; }
+static void ck_set(int v) {
+  pthread_mutex_lock(&ck_mu); __atomic_store_n(&ck_state, v, __ATOMIC_RELEASE); pthread_cond_signal(&ck_cv); pthread_mutex_unlock(&ck_mu);
+}
+static void *ck_main(void *a) {
+  setpriority(PRIO_PROCESS, (id_t)gettid(), 19);
+  for (;;) {
+    pthread_mutex_lock(&ck_mu);
+    while (ck_state != CK_BULK && ck_state != CK_TAIL) pthread_cond_wait(&ck_cv, &ck_mu);
+    int st = ck_state;
+    pthread_mutex_unlock(&ck_mu);
+    int log = -1, done = -2, rc = sqlite3_wal_checkpoint_v2(ckdb, "main", SQLITE_CHECKPOINT_PASSIVE, &log, &done);
+    __atomic_store_n(&ck_full, rc == SQLITE_OK && log == done, __ATOMIC_RELAXED);
+    ck_set(st + 1);
+  }
+}
+static int ck_active(void) { return __atomic_load_n(&ck_state, __ATOMIC_ACQUIRE) != CK_IDLE; }
+static void ck_tick(void) {  // between batches, with no transaction open
+  switch (__atomic_load_n(&ck_state, __ATOMIC_ACQUIRE)) {
+    case CK_IDLE:
+      if (wal_frames >= CK_FORCE) {
+        int log = 0, done = 0;
+        if (sqlite3_wal_checkpoint_v2(db, "main", SQLITE_CHECKPOINT_PASSIVE, &log, &done) == SQLITE_OK && log == done) wal_frames = 0;
+      } else if (wal_frames >= CK_FRAMES) ck_set(CK_BULK);
+      break;
+    case CK_BULK_DONE:
+      writes_held = 1; clock_gettime(CLOCK_MONOTONIC, &hold_t0); ck_set(CK_TAIL);
+      break;
+    case CK_TAIL_DONE:
+      if (__atomic_load_n(&ck_full, __ATOMIC_RELAXED)) wal_frames = 0;  // the next write restarts the log and the hook reports it
+      writes_held = 0; ck_set(CK_IDLE);
+      break;
+    default:
+      // Saturated, the low-priority thread can't keep up and the log would grow without bound: writes wait for it.
+      if (wal_frames >= CK_FORCE) { writes_held = 1; clock_gettime(CLOCK_MONOTONIC, &hold_t0); break; }
+      if (writes_held) {
+        struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t);
+        if ((t.tv_sec - hold_t0.tv_sec) * 1000 + (t.tv_nsec - hold_t0.tv_nsec) / 1000000 > HOLD_MS) writes_held = 0;
+      }
+  }
+}
+
 static void db_open(const char *path) {
-  if (sqlite3_open_v2(path, &db, SQLITE_OPEN_READWRITE, NULL) != SQLITE_OK) { fprintf(stderr, "open %s: %s\n", path, sqlite3_errmsg(db)); exit(1); }
+  // unix-excl: one process owns the file, the WAL index lives in its heap, and a transaction takes no file locks.
+  int fl = SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX;
+  if (sqlite3_open_v2(path, &db, fl, "unix-excl") != SQLITE_OK) { fprintf(stderr, "open %s: %s\n", path, sqlite3_errmsg(db)); exit(1); }
   sqlite3_busy_timeout(db, 5000);
   char *e = NULL;
-  if (sqlite3_exec(db, "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA mmap_size=1073741824; PRAGMA cache_size=-16000;"
+  if (sqlite3_exec(db, "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA mmap_size=0; PRAGMA cache_size=-65536; PRAGMA wal_autocheckpoint=0;"
                    "SELECT count(*) FROM users WHERE id = 1;", NULL, NULL, &e) != SQLITE_OK) { fprintf(stderr, "pragma: %s\n", e); exit(1); }
-  // The checkpointer process keeps the WAL short. This only fires if it can't keep up (CPU saturated
-  // for a long time), so the WAL stays bounded at about 256 MB.
-  sqlite3_exec(db, "PRAGMA wal_autocheckpoint=65536;", NULL, NULL, NULL);
+  sqlite3_wal_hook(db, wal_hook, NULL);
+  if (sqlite3_open_v2(path, &ckdb, fl, "unix-excl") != SQLITE_OK ||
+      sqlite3_exec(ckdb, "PRAGMA synchronous=NORMAL; PRAGMA wal_autocheckpoint=0; PRAGMA cache_size=16;", NULL, NULL, NULL) != SQLITE_OK) { fprintf(stderr, "checkpoint connection failed\n"); exit(1); }
+  pthread_t t; pthread_attr_t a; pthread_attr_init(&a); pthread_attr_setstacksize(&a, 256 << 10);
+  if (pthread_create(&t, &a, ck_main, NULL)) { fprintf(stderr, "checkpoint thread failed\n"); exit(1); }
+  btree_setup();
   const char *cols = "SELECT p.id, p.body, p.created_at, u.username, (SELECT count(*) FROM likes l WHERE l.post_id = p.id) FROM posts p JOIN users u ON u.id = p.user_id ";
   char sql[512];
   snprintf(sql, sizeof sql, "%sORDER BY p.created_at DESC, p.id DESC LIMIT 20", cols); st_feed = prep(sql);
   snprintf(sql, sizeof sql, "%sWHERE p.id = ?", cols); st_post = prep(sql);
-  st_fids = prep("SELECT id FROM posts ORDER BY created_at DESC, id DESC LIMIT 20");
-  st_flikes = prep("SELECT post_id FROM likes WHERE post_id BETWEEN ? AND ?");
-  st_frows = prep("SELECT p.id, p.body, p.created_at, u.username FROM posts p JOIN users u ON u.id = p.user_id WHERE p.id BETWEEN ? AND ?");
   st_ins = prep("INSERT INTO posts (user_id, body) VALUES (?, ?) RETURNING id, created_at");
-  st_like = prep("INSERT INTO likes (user_id, post_id) SELECT ?1, ?2 WHERE EXISTS (SELECT 1 FROM posts WHERE id = ?2) ON CONFLICT (user_id, post_id) DO NOTHING");
-  st_exists = prep("SELECT 1 FROM posts WHERE id = ?");
+  st_like = prep(bt_ok ? "INSERT INTO likes (user_id, post_id) VALUES (?1, ?2) ON CONFLICT (user_id, post_id) DO NOTHING"
+                       : "INSERT INTO likes (user_id, post_id) SELECT ?1, ?2 WHERE EXISTS (SELECT 1 FROM posts WHERE id = ?2) ON CONFLICT (user_id, post_id) DO NOTHING");
   st_one = prep("SELECT 1");
   st_begin = prep("BEGIN"); st_commit = prep("COMMIT"); st_rollback = prep("ROLLBACK");
-  sqlite3_step(st_feed); sqlite3_reset(st_feed);  // touches the hot pages before the first request
-}
-
-// Checkpoints copy the WAL back into the database and fsync it. Run inline they stall every client for
-// the length of the fsync, so a helper process does them and the event loop never waits on the disk.
-static void checkpointer(const char *path) {
-  prctl(PR_SET_PDEATHSIG, SIGTERM);
-  if (sqlite3_open_v2(path, &db, SQLITE_OPEN_READWRITE, NULL) != SQLITE_OK) exit(1);
-  sqlite3_busy_timeout(db, 100);
-  sqlite3_exec(db, "PRAGMA synchronous=NORMAL; PRAGMA wal_autocheckpoint=0;", NULL, NULL, NULL);
-  for (;;) {
-    int log = 0, done = 0;
-    sqlite3_wal_checkpoint_v2(db, NULL, SQLITE_CHECKPOINT_PASSIVE, &log, &done);
-    usleep(log > 0 && done < log ? 1000 : 10000);
-  }
 }
 
 #ifdef PGO_TRAIN
@@ -849,8 +1081,6 @@ int main(int argc, char **argv) {
   const char *path = getenv("SQLITE_PATH"), *secret = getenv("JWT_SECRET"), *host = getenv("HOST"), *ports = getenv("PORT");
   if (!path || !secret) { fprintf(stderr, "SQLITE_PATH and JWT_SECRET are required\n"); return 1; }
   sqlite3_initialize();  // built with SQLITE_OMIT_AUTOINIT
-  if (argc > 1 && !strcmp(argv[1], "--ckpt")) checkpointer(path);
-  signal(SIGCHLD, SIG_IGN);
   struct rlimit rl; getrlimit(RLIMIT_NOFILE, &rl);
   if (rl.rlim_cur < rl.rlim_max) { rl.rlim_cur = rl.rlim_max; setrlimit(RLIMIT_NOFILE, &rl); }
   tsize = rl.rlim_cur > (1 << 20) ? 1 << 20 : rl.rlim_cur;  // the kernel caps a table at RLIMIT_NOFILE
@@ -859,14 +1089,16 @@ int main(int argc, char **argv) {
   hmac_key(secret);
   started = now_s = time(NULL);
   db_open(path);
-  if (fork() == 0) { char *a[] = {"server", "--ckpt", NULL}; execv("/proc/self/exe", a); _exit(1); }
 
-  lfd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0); int one = 1;
-  setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
-  setsockopt(lfd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);  // accepted sockets inherit it
   struct sockaddr_in a = {.sin_family = AF_INET, .sin_port = htons(ports ? atoi(ports) : 3000)};
   if (inet_pton(AF_INET, host ? host : "0.0.0.0", &a.sin_addr) != 1) { fprintf(stderr, "bad HOST\n"); return 1; }
-  if (bind(lfd, (struct sockaddr *)&a, sizeof a) || listen(lfd, 65535)) { perror("bind/listen"); return 1; }
+  for (int i = 0; i < NLISTEN; i++) {
+    int one = 1; lfd[i] = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    setsockopt(lfd[i], SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    setsockopt(lfd[i], SOL_SOCKET, SO_REUSEPORT, &one, sizeof one);
+    setsockopt(lfd[i], IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);  // accepted sockets inherit it
+    if (bind(lfd[i], (struct sockaddr *)&a, sizeof a) || listen(lfd[i], 65535)) { perror("bind/listen"); return 1; }
+  }
   arena = malloc(BATCH_OUT);
   if (ring_init(0) < 0) { fprintf(stderr, "io_uring setup failed (needs Linux 6.1+ with io_uring enabled)\n"); return 1; }
   run();

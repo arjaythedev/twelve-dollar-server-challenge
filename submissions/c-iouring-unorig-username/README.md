@@ -2,10 +2,10 @@
 
 | | |
 |---|---|
-| Language | C (GCC 13.3, Ubuntu 24.04's `build-essential`), `-O2 -march=x86-64-v2 -flto`, profile-guided |
+| Language | C (GCC 13.3, Ubuntu 24.04's `build-essential`), `-O3 -march=native -flto`, profile-guided, built on the box it runs on |
 | Framework | none: one `io_uring` event loop, hand-written HTTP/1.1, JSON and JWT code |
 | io_uring | liburing 2.12, built from the release tarball (SHA-256 pinned in `build.sh`) |
-| SQLite | 3.54.1, the official amalgamation (SHA-256 pinned in `build.sh`), compiled into the binary |
+| SQLite | 3.54.1, the unmodified official amalgamation (SHA-256 pinned in `build.sh`), one translation unit with the server |
 | Other dependencies | none (SHA-256/HMAC, base64url and JSON are in `server.c`) |
 | **Nginx or direct** | **Direct**: serves `HOST:PORT` itself (`0.0.0.0:80` on the benchmark box) |
 
@@ -21,12 +21,15 @@ SQLITE_PATH=... JWT_SECRET=... HOST=0.0.0.0 PORT=80 bash start.sh
 
 ## Design
 
-- **One process, one thread, one `io_uring` loop.** The box has one vCPU, so threads would only add
-  context switches. Each loop iteration is one `io_uring_enter` that submits everything queued and
-  waits for completions (`DEFER_TASKRUN`, `SINGLE_ISSUER`, so completions are processed in that call).
+- **One event-loop thread.** The box has one vCPU, so more loops would only add context switches. A
+  second thread only runs checkpoints. Every ring is `DEFER_TASKRUN` and `SINGLE_ISSUER`, so a ring's
+  completion work runs when the loop enters that ring and never interrupts a pass. Each pass gives
+  each extra ring one non-blocking `io_uring_enter`, then waits on ring 0.
 - **Wake-ups are batched when busy.** If the last pass handled 4 or more completions, the wait asks for
-  128 completions (capped at 40% of open connections, so a few clients without think time never sit
-  out the timer) or 6 ms, whichever comes first; otherwise it wakes on the first one. Each wake-up then
+  ring 0's share of 128 completions (capped at a third of open connections, so a few clients without
+  think time never sit out the timer) or 2 ms, whichever comes first; otherwise it wakes on the first
+  one. With more than one ring, or while a checkpoint round is running, the wait is always timed, so
+  other rings and held writes never depend on a new event on ring 0. Each wake-up then
   carries more requests, so the syscalls, the batch's `COMMIT` and the send submissions are shared by
   more of them. It only delays when responses are sent, never what they contain: every response still
   waits for its batch's commit.
@@ -35,20 +38,21 @@ SQLITE_PATH=... JWT_SECRET=... HOST=0.0.0.0 PORT=80 bash start.sh
   process descriptor table only holds the listener, the rings and SQLite's files. The kernel caps one
   table at `RLIMIT_NOFILE`, so when a table is full the loop adds another ring (same thread, up to 32)
   and accepts there. With `LimitNOFILE=65535` that is about 2 million clients in one process, instead
-  of forking a new worker every 65,535. Extra rings signal an eventfd that ring 0 reads, so one wait
-  covers all of them.
-- **Accepts are single-shot, 256 in flight.** A multishot accept can't be stopped before its table
-  fills, and the accept that finds the table full has already taken the connection off the queue, so
-  the kernel can only reset it (measured: the client at slot 1,025 got `ECONNRESET`). Single-shot
-  accepts are only issued while a table has room. They are rearmed once per loop pass, so the number
-  in flight caps accepts per pass: with 16, a 330,000-user ramp was accepted at only ~1,700
-  connections/s.
-- **Multishot receives into provided buffer rings** (4,096 x 2 KB per ring). A receive stays armed for
+  of forking a new worker every 65,535.
+- **Eight `SO_REUSEPORT` listeners, single-shot accepts, 64 in flight on each.** A listen queue is
+  capped at `net.core.somaxconn` (4,096 on the box), so eight queues hold 32,000 pending connections
+  through a ramp. A multishot accept can't be stopped before its table fills, and the accept that finds
+  the table full has already taken the connection off the queue, so the kernel can only reset it
+  (measured: the client at slot 1,025 got `ECONNRESET`). Single-shot accepts are only issued while a
+  table has room. Each listener counts its own: connections are hashed to listeners, and with one
+  shared count a listener could end up with none armed while accepts armed on idle listeners never
+  completed (measured: a few hundred requests waited out the client's 60 s timeout after a ramp).
+- **Multishot receives into provided buffer rings** (2,048 x 1 KB per ring, 2 MB rather than 8 MB: the ring cycles through all of them, so all of them stay resident). A receive stays armed for
   the life of the connection; each chunk arrives in a kernel-picked buffer that goes back to the ring as
   soon as it is parsed. Idle clients hold no buffer. A partial request is copied into a per-connection
   buffer until the rest arrives. If the ring ran dry (`ENOBUFS`) the receive is rearmed after the batch.
 - **A transaction per completion batch (group commit).** The first request in a batch that touches the
-  database opens a deferred `BEGIN`; every read and write in the batch runs inside it, and the batch
+  database opens the transaction; every read and write in the batch runs inside it, and the batch
   ends with one `COMMIT`. Responses are written into an arena and only handed to `send` SQEs after that
   `COMMIT` returns, so a `201` always means the row is committed (rule 6). If a commit fails, nothing
   from that batch is sent: those connections are closed instead.
@@ -60,26 +64,38 @@ SQLITE_PATH=... JWT_SECRET=... HOST=0.0.0.0 PORT=80 bash start.sh
   their completion tags, which the kernel looks up in a hash table. Cancelling by descriptor instead
   walks every pending operation on the ring (one receive per open connection): with 20,000 idle
   clients that made each close cost about 300 us of CPU instead of about 20 us.
-- **Feed: newest ids first, then two range scans.** `/feed` first reads the 20 newest ids from the
-  `(created_at, id)` index. When they span fewer than 256 ids (new posts get consecutive ids, so this is
-  the normal case), one scan of `likes_post_id_idx` over that range counts the likes and one scan of
-  `posts` over it fetches the rows, which are then put back in feed order. That replaces 20 separate
-  count subqueries and 20 join lookups. If the ids are spread out, or a row doesn't turn up, it runs the
-  reference query instead. Both run in the batch's read transaction, so they see one snapshot.
-- **Checkpoints happen off the request path.** A small helper process (the same binary, started with
-  `--ckpt`) runs `PASSIVE` checkpoints in a loop, so the event loop never waits on the disk. If the
-  helper can't keep up (CPU pegged for minutes), the server's own `wal_autocheckpoint=65536` still caps
-  the WAL at about 256 MB. Durability is unchanged: WAL with `synchronous=NORMAL`, and a response waits
-  for its `COMMIT`.
+- **Reads use SQLite's B-tree cursors, not its SQL engine.** `server.c` includes the unmodified
+  amalgamation. `/feed` walks `posts_created_at_id_idx` for the 20 newest, counts their likes in one walk
+  of `likes_post_id_idx` (reading a leaf's cells directly), fetches the rows in ascending id order so
+  consecutive ids are one step along a leaf, then looks up each author. `/posts/:id` is the same plan for
+  one row. Records are decoded in place. Every request still reads its rows from SQLite while it is
+  served (rule 5); what is kept between requests is prepared statements, cursor memory, `KeyInfo` objects
+  and root page numbers.
+- **SQL is the fallback.** At startup the server checks the columns and sort order of everything it
+  decodes; on any difference every read uses the reference SQL. At run time any record it doesn't expect
+  (overflow pages, a post without a user, a column of another type, a missing post) sends that request to
+  SQL. Writes always use prepared SQL. A like's post check is a B-tree seek.
+- **Checkpoints run on a second thread at nice 19**, on their own connection, through the `unix-excl` VFS:
+  the process owns the file, the WAL index lives in its heap, and a transaction takes no file locks. After
+  8,192 WAL frames (32 MB) the loop wakes the thread, which runs a `PASSIVE` checkpoint while the loop goes on. A
+  log only restarts once fully copied back, which steady writes prevent, so when the bulk pass ends new
+  POSTs are held unread for at most 250 ms (reads go on) while the thread copies the tail. Past 32,768
+  frames (a CPU saturated long enough to starve the thread; a write-only run reached 1.6 GB of WAL in 40 s
+  without this) writes stay held until the thread finishes, however long that takes, and if the thread is
+  idle the loop checkpoints by itself. Durability is unchanged: WAL with
+  `synchronous=NORMAL`, and a response waits for its `COMMIT`. If a commit fails, nothing from that batch
+  is sent and its connections are closed.
+- **Provided-buffer registration retries.** Ubuntu's 6.8.0-136 and later kernels reject a buffer ring whose
+  reserved words are zero (Launchpad #2162843), which stops a server from starting at all. It retries once
+  with `resv[0] = 1`, which correct kernels never see.
 - **Profile-guided build.** `build.sh` first builds an instrumented binary with `train.c` compiled in.
   It creates a synthetic database (20k users, 200k posts, 600k likes; the schema's tables and indexes,
   none of the challenge seed) and serves 300,000 requests in the benchmark mix from memory: parsing,
   JWT checks, queries, writes and commits. The real binary is then compiled with that profile. The
   training binary and database are deleted; `train.c` is not in the final binary.
-- **SQLite settings**: WAL, `synchronous=NORMAL`, 1 GiB `mmap_size`, a 16 MB page cache, prepared
-  statements built once with `SQLITE_PREPARE_PERSISTENT`. SQLite is compiled single-threaded with
-  unused features left out. A like is one statement, `INSERT ... SELECT ... WHERE EXISTS (post) ON
-  CONFLICT DO NOTHING`, with a post lookup only when nothing was inserted.
+- **SQLite settings**: WAL, `synchronous=NORMAL`, no `mmap`, a 64 MB page cache (a cached page keeps its
+  parsed header and needs no WAL lookup; `mmap` measured 4% more CPU per request), prepared statements built
+  once with `SQLITE_PREPARE_PERSISTENT`, `SQLITE_THREADSAFE=2` with unused features left out.
 - **No caching** (rule 5): every request runs its queries, and every token's HMAC is computed. The only
   thing computed once is the HMAC key schedule derived from `JWT_SECRET`.
 - **Strict input handling** (shared with our epoll entry): a full RFC 8259 JSON validator (duplicate
@@ -92,7 +108,32 @@ SQLITE_PATH=... JWT_SECRET=... HOST=0.0.0.0 PORT=80 bash start.sh
 - **No tuning outside the process** (rule 11): it only raises its own soft descriptor limit to the hard
   limit it was given.
 
-## Local measurements
+## Measurements on x86
+
+On EC2 `m5n.large` (Xeon 8259CL, Cascade Lake like the benchmark box's 8260), booted with one CPU and 2 GB, kernel
+6.8, MTU 1500, a separate load generator running the `bench/load.js` user model with k6-shaped requests, each run on a
+fresh database. CPU per request counts the whole box, softirq included. Same-box runs differ by up to 3%, so these are
+interleaved rounds, not separate sessions. rust-iouring-kensac is built from its own folder. The earlier entry carries
+only the buffer-ring retry, without which it doesn't start on this kernel.
+
+| 250,000 users, 3 interleaved rounds | us CPU/request, whole box | each round |
+|---|---:|---|
+| this entry before the B-tree reads | 23.95 | 24.43, 23.62, 23.79 |
+| this entry | 20.06 | 20.38, 19.65, 20.14 |
+| rust-iouring-kensac | 18.98 | 19.51, 18.65, 18.78 |
+
+`mmap` instead of the page cache: 4% more CPU per request (one run). Batch targets: 128 completions or 2 ms was
+best; 32 or 1 ms and 512 or 8 ms each cost 3 to 6%, and 256 or 4 ms was level (one run each). The earlier design
+held 250,000 on the benchmark box and kensac 310,000, a ratio of 1.24; the same two here measure 1.26.
+
+`test/test.sh` passes all 42. `kill -9` under write load, during checkpoints: all 545,300 acknowledged writes
+present after restart, `integrity_check` ok.
+
+Ideas credited to other entries: B-tree cursor reads, the `unix-excl` VFS, page cache over `mmap`, a nice-19
+checkpoint thread with write holds, `SO_REUSEPORT` listeners and `DEFER_TASKRUN` on every ring from
+rust-iouring-kensac (#264); the `resv[0]` retry from rust-iouring-kensac (#264) and c-iouring-pavlyhalim (#245).
+
+## Earlier measurements (arm64, before the B-tree reads)
 
 Measured in Docker on an Apple-silicon host, native arm64 (Rosetta has no io_uring), server limited to
 one CPU, 2 GB RAM, no swap and 65,535 descriptors, load generators in separate containers. Docker's

@@ -209,7 +209,7 @@
   (global $cu_l (mut i32) (i32.const 0))
   (global $vn (mut i32) (i32.const 0))
   ;; WAL frames that start a checkpoint (CKPT_FRAMES)
-  (global $ck_t (mut i32) (i32.const 128000))
+  (global $ck_t (mut i32) (i32.const 4000))
 
   ;; ---------- memory helpers ----------
   (func $strlen (param $p i32) (result i32)
@@ -2044,8 +2044,8 @@
     (global.set $connb (call $malloc (i32.const 0x1000000)))   ;; CONN, 8 rings x 65536 x 32 bytes
     (global.set $genb (call $malloc (i32.const 0x200000)))     ;; GEN, 8 rings x 65536 x i32
     (if (i32.or (i32.eqz (global.get $connb)) (i32.eqz (global.get $genb))) (then (call $fatal (i32.const 0x101340))))
-    (memory.fill (global.get $connb) (i32.const 0) (i32.const 0x1000000))
-    (memory.fill (global.get $genb) (i32.const 0) (i32.const 0x200000))
+    ;; not zeroed here: a slot's CONN entry is zeroed when a connection lands in it, and a GEN value only has to
+    ;; match itself, so the pages of slots never used stay untouched (not resident: ~9 MB less at 250k users)
     (if (call $ring_setup (i32.const 0)) (then (call $fatal (i32.const 0x101340))))
     (global.set $nmax (i32.const 1))
     (block $rd (loop $rl

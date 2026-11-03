@@ -702,3 +702,109 @@ Default set to 128,000 in app.wat (E36). 42/42 on opt-box, Synteq and the clean 
 build (ci2.sh); kill -9 under load then integrity_check ok (opt-box). Holds of E36 itself: 300k p95 82,
 p99 330, max 1097 ms, 31.7k rps, 91.2 %, 28.78 us/req, 1,210 MB; 320k p95 315, p99 1,005 (fails p99
 by 5 ms), max 2647, 33.6k rps, 95.2 %, 28.33 us/req, 1,259 MB. Same edge as E26-E30.
+
+## S14: a scorer-like harness, and the 210k cliff reproduced (3 Nov, Synteq; TdscWat3 from here on)
+The scorer (7792fa9 = #272): 200,000 held, 210k and up failed ("connection refused", 35 % errors) at ~55 % CPU,
+while TdscWat2's Synteq runs held 300k. The scoring README: a DigitalOcean Basic droplet, 1 vCPU / 2 GB, no swap,
+k6 on another machine, no kernel tuning. Harness `hs.sh` (Synteq `/root/watlab`, scripts copied in
+`/tmp/tdsc-wat3/` on the Mac): the server is a systemd unit as a new non-root user `deploy`, `LimitNOFILE=65535`,
+every other limit systemd's default (memlock 8 MiB), CPU 0, no Restart, fresh seed DB; `ul` on CPUs 1-7 as before;
+samples every 10 s (sockets, cgroup, MemAvailable, slab, TCP pages, WAL size, ul and server RSS). `FAITH=1` starts a
+memory hog (`hog.py`, touched anonymous memory, no swap on Synteq) sized so the server gets what a 1,967 MB box
+leaves it: MemAvailable minus 1,650 MiB minus the load generator's own cost, measured at 11.5 KiB per user (ul RSS
+1,684 MB at 210k = 8.2 KiB/user, plus a client socket ~3.7 KiB: TCP 2.31 + sock_inode 0.81 + filp 0.25 + dentry
+0.19 KiB). Sysctls set to a 2 GB droplet's defaults: tcp_mem 22000 29400 44000, tcp_rmem 4096 131072 6291456,
+tcp_max_orphans 16384, tcp_max_syn_backlog 256 (originals in `/root/watlab/w3/sysctl.orig`: tcp_mem 1572864
+2097152 3145728, rmem 4096 16384 4194304, orphans 1048576, syn_backlog 1024; somaxconn 4096 and min_free_kbytes
+67584 unchanged); to be restored at the end. Build `b7792` = 7792fa9 (opt-box build, AOT on Synteq; app.so
+identical to out/e36). All 2-minute runs at 210,000 users:
+- h1, deploy user, page cache dropped before start, no hog: collapse (13.7k rps, p95 5.3 s, 29.6 % errors,
+  187,533 connect errors), TCP memory 390k pages, server at ~95 % CPU. h2, TdscWat2's root ubs.sh, same app:
+  22.2k rps, p99 4.3 ms. h3, deploy user, no cache drop: 22.2k, p99 51 ms. So the non-root user and limits
+  are not the cause (all 8 rings come up under memlock 8 MiB); a cold or short page cache is.
+- h4 (healthy, 16 GB): server-side kernel memory per connection ~3.7 KiB + ~0.35 KiB of io_uring recv state
+  (io_kiocb, kmalloc-96), ~850 MB at 210k, mostly outside the server's cgroup (allocated in softirq).
+- h5, h6 with FAITH=1: 14.3k / 14.9k rps, p95 3.9 / 5.3 s, p99 5.3 s, 78k / 95k requests stuck in flight, 0 %
+  errors in ul. Reproduced. Sequence: at the end of the ramp the WAL reaches 500 MiB (CKPT_FRAMES 128,000) and the
+  first checkpoint stalls the loop; tens of thousands of sockets queue a request meanwhile, each charging at least a
+  page to tcp_mem, TCP memory jumps to 60-90k pages, past the 2 GB box's hard limit (44,000), the kernel prunes and
+  drops, and CPU per request doubles (ul 13.6 -> 28-30 us/req). The server never catches up; page cache was ~650 MB
+  (DB 243 MB + WAL 500 MB don't fit). Not seen on 16 GB because tcp_mem there is 70x larger.
+- Consult (DeepSeek + Gemini, session 1103-090543-2964): both say "connection refused" (RST to SYN) means no
+  listener, i.e. the process died (OOM kill, or a crash loop past systemd's start limit), not a stall. DeepSeek's
+  tcp_mem formula (/8, 2x mine) is wrong: opt-box (4 GB) has 45114 60155 90228 = /16, so a 2 GB box has ~22.5k/30k/45k
+  as set. Rejected: async DB xSync and journal_mode=MEMORY (rule 6), checkpoint on another thread (one wasm
+  instance, SQLite not shared). ENOBUFS recv is re-armed (checked, `$on_recv`). The scorer's c193a82 notes fit a death:
+  "2-minute probes passed 240k and 260k... the 260k 5-minute hold collapsed at 47 % errors, nearly all connection
+  refused". hs.sh so far protected both the hog and (by size) ul from the OOM killer only by luck: from here ul gets
+  oom_score_adj -1000 too, so a memory death lands on the server, as it would on the droplet.
+
+## E38: CKPT_FRAMES 4,000 vs 16,000 at 250k (3 Nov, Synteq, hs.sh FAITH=1, b7792, env only) — 4,000 better
+Per-second counters added to hs.sh (server CPU and state, read_bytes, kswapd/direct scans, major faults, TcpExt
+PruneCalled / TCPRcvQDrop / TCPMemoryPressures). Two earlier 16k runs at 250k: 25.8k rps p95 2.0 s; and 12.8k rps,
+3.35 % errors: from the end of the ramp kswapd scans ~100-300k pages/10 s, the server reads 150-250 MB/10 s (re-reading
+the 63 MB WAL at each checkpoint, ~every 4 s, once LRU has evicted it), thousands of major faults, PruneCalled
+~300k/10 s, TCPRcvQDrop up to 25k/10 s, D state, CPU ~60 %. MemAvailable (~600 MB) overstates: ~250 MB of it is
+socket inode/dentry slab pinned by open sockets. Interleaved, 2 reps, 2-min:
+- 4,000: 26.1k / 26.3k rps, p95 290 / 215, p99 2,435 / 320 ms, max 5.2 / 0.8 s, read 62 / 44 MB, prune 349 / 578
+- 16,000: 25.7k / 26.0k rps, p95 2,015 / 1,330, p99 5,320 / 5,320 ms, read 82 / 83 MB, prune 904k / 725k
+4k: WAL 16 MB stays cached; p50 rises (6.8-9.9 vs ~2 ms, more checkpoints). The 4k r1 tail: one kswapd event at
+mid-run (47k pages scanned, 361 major faults, 26 MB read, CPU dip, TCP 33k pages). 4k r2 passes at 250k.
+
+## E39: 4,000 and 2,000 frames at 280k (3 Nov, Synteq, hs.sh FAITH=1 with ul OOM-protected) — the scorer's failure reproduced
+Both runs: at the end of the ramp the loop stalls (D state, ~600 MB read in 20 s, major faults), each user's next
+request queues in the kernel, TCP memory reaches 173k pages (676 MB, ~4x tcp_mem's hard limit) and the kernel OOM
+killer kills the server: `watsrv.service: Failed with result 'oom-kill'`, every later dial fails (5.7M / 6.5M
+connect errors = "connection refused", 98-100 % errors). That is the scorer's "connection refused at ~55 % CPU":
+an OOM kill, not a stall. dmesg: "ul invoked oom-killer ... tcp_stream_alloc_skb".
+
+## E40: 4,000 frames at 250k, residency (3 Nov, Synteq) — measurement
+26.3k rps, p95 220, p99 365 ms, 0 errors (4k at 250k: 2 passes of 3). Server smaps at steady state: anon 85 MB,
+libwasmedge.so resident 5.6 MB, io_uring rings 4.2 MB, app.so < 2 MB: the code in use (~7.5 MB) fits the default
+8 MiB RLIMIT_MEMLOCK. `bin/fc` (mincore, `/tmp/tdsc-wat3/fc.c`) now samples the page-cache residency of app.so,
+libwasmedge, feed.db and the WAL every 2 s.
+
+## E41: lock the code in memory (3 Nov, host.c `pincode`, PIN=0 turns it off) — kept for now, no gain shown
+The WAL-sync thread mlocks app.so's code, then the resident pages of the other libraries' code, every 5 s for the
+first minute, until mlock fails at the limit (VmLck reached 8,192 kB). 270k, 4k frames: pinned and unpinned both
+OOM-killed at the end of the ramp (99.0 / 99.6 % errors); the pinned run's trace: kswapd from ~1 GB available,
+then TCP memory 3k -> 90k pages in 10 s, feed.db's page cache 243 MB -> 0, libwasmedge 49 -> 2 MB, disk reads,
+OOM. Memory is the edge at 270k on this harness (the scorer's: f220565 held 270k, died at 280k; c193a82 died in a
+260k hold, so the harness is about right, maybe slightly pessimistic). Server-side kernel memory per connection
+(~3.8 KiB socket + ~0.35 KiB io_uring) is ~41 MB per 10k users and can't be cut, so the room has to come from what
+the loop needs that can be evicted: DB pages, WAL pages, code.
+
+## E42: SQLite page cache 64 -> 256 MiB (3 Nov, b42 = E41 + cache_size=-262144, 4k frames by env) — no effect on RSS
+250k: 26.3k rps, p95 190, p99 290, max 514 ms, 0 errors, 4 MB read, 0 prunes (cleanest 250k so far), but server RSS
+stayed 116 MB: SQLite never held more than ~64 MB, so the larger limit changed nothing and 250k at 4k frames just
+varies (now 3 passes of 4). 270k: OOM-killed (73.6 % errors). Trace: at the end of the ramp feed.db's page cache
+243 -> 0 MB and libwasmedge 49 -> 2 MB within 12 s, then a sustained thrash for 70+ s: TCP memory 100-170k pages,
+PruneCalled ~40k/s, kswapd and direct reclaim every second, major faults, server at 60-100 % CPU, until the OOM kill.
+At 270k this harness's box is full with sockets alone (MemAvailable 550-630 MB, of which ~270 MB is socket
+inode/dentry slab pinned by open sockets). Next: calibrate the harness on a build the scorer has scored.
+
+## C1: calibrating hs.sh on a build the scorer scored (3 Nov, Synteq) — in progress
+f220565 (`out/e26`) on the scorer: 270k held 5 min, 280k probe "connection refused" (71 %). On hs.sh:
+- SRVMB 1650, tcp_mem 22000 29400 44000: 270k OOM-killed at the end of the ramp (99.8 % errors). Too harsh.
+- SRVMB 1800: 270k 14.2k rps, p95 5.3 s, 3.2 % errors, 2.0 GB read; 280k the same. Not killed, but thrashing.
+- SRVMB 1800, tcp_mem doubled to 45000 60000 90000 (on loopback the one global limit also carries the load
+  generator's queued and retransmitted requests, which on the scorer sit on the k6 machines): 270k 12.5k rps,
+  p95 5.3 s; 280k OOM-killed (91 %).
+Snapshot in the 270k thrash: TCP memory 115k pages (450 MB), skbuff_small_head 118 MB, a 512-byte slab
+(pool_workqueue, merged) 87 MB that healthy runs don't have; AnonPages: hog 10.4 GB + ul ~2.2 GB (8.2 KiB/user)
++ server 0.1 GB. A 16 GB box also has two zones (lowmem reserve) and min_free_kbytes 67 MB that a 2 GB droplet
+doesn't lose the same way. Rather than model every term, SRVMB is fitted to the scorer's numbers.
+- SRVMB 2000 (tcp_mem doubled): 270k p99 74 ms, 280k p99 127 ms, both clean: too generous (the scorer killed 280k).
+- SRVMB 1900: 280k p95 695, p99 5.3 s (fails, not killed); 270k (rerun; the first try overlapped an AOT
+  compile on the box and was void) 28.5k rps, p95 70, p99 230 ms, 0 errors: holds, as on the scorer.
+**Calibrated harness from here: hs.sh FAITH=1 SRVMB=1900, tcp_mem 45000 60000 90000.** It matches f220565's
+scorer result (270k held, 280k failed); a bit generous at 280k (fails on latency, the scorer's died).
+
+## E43: 4,000 frames by default + code pinning (E41) + CONN/GEN tables not zero-filled (3 Nov, b43) — kept
+`$ck_t` default 128,000 -> 4,000 (CKPT_FRAMES still overrides), cache_size back to 64 MiB, `memory.fill` of the
+16 MiB CONN and 2 MiB GEN tables dropped (a slot's CONN entry is zeroed when a connection lands in it; a GEN value
+only has to match itself). Calibrated harness, 2-min:
+- 270k: 28.4k rps, p50 16.7, p95 215, p99 330, max 505 ms, 0 errors, 0 MB read, 0 prunes, RSS 119 MB
+- 280k: 29.5k rps, p50 29.8, p95 235, p99 365, max 570 ms, 0 errors, 0 MB read, RSS 141 MB
+(f220565 = e26 on the same harness: 270k p99 230; 280k fails.) p50 is higher than with large checkpoints (one
+every ~1 s now), well inside the limits.

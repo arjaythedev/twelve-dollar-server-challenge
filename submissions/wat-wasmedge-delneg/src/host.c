@@ -148,10 +148,42 @@ static void add(WasmEdge_ModuleInstanceContext *m, const char *name, WasmEdge_Ho
 // file (its own fd: the sync covers the file, whoever wrote it) every 100 ms, so that sync finds little
 // left to write. It only makes data durable sooner; SQLite still does every sync it would do anyway.
 static char *walpath; static int walms;
+
+// Code pinning. On a 2 GB box with ~250k connections the sockets take ~1 GB of kernel memory and the kernel
+// evicts file pages, our machine code among them; the one loop thread then waits on disk for every evicted
+// page while requests pile up in the sockets. mlock keeps the code in memory: all of app.so's code, then the
+// pages of the other libraries' code that are in memory by then (the ones in use), until RLIMIT_MEMLOCK is
+// reached (8 MiB by default; the code in use is ~7 MiB). Repeated for the first minute, while the hot
+// paths come into use. PIN=0 turns it off (A/B runs).
+static int pinfull = 1;
+static void pincode(const char *app) {
+  FILE *f = fopen("/proc/self/maps", "r"); if (!f) return;
+  char line[512]; long ps = sysconf(_SC_PAGESIZE);
+  for (int pass = 0; pass < 2 && pinfull; pass++) {   // pass 0: app.so, pass 1: the rest
+    rewind(f);
+    while (fgets(line, sizeof line, f) && pinfull) {
+      unsigned long lo, hi; char perm[8]; int off = 0;
+      if (sscanf(line, "%lx-%lx %7s %*s %*s %*s %n", &lo, &hi, perm, &off) < 3 || perm[2] != 'x' || !off) continue;
+      char *path = line + off; path[strcspn(path, "\n")] = 0; if (path[0] != '/') continue;
+      if ((strstr(path, app) != NULL) != (pass == 0)) continue;
+      if (pass == 0) { if (mlock((void *)lo, hi - lo)) pinfull = 0; continue; }
+      size_t n = (hi - lo) / ps; unsigned char *v = malloc(n); if (!v) continue;
+      if (!mincore((void *)lo, hi - lo, v))
+        for (size_t i = 0; i < n && pinfull; i++)
+          if ((v[i] & 1) && mlock((void *)(lo + i * ps), ps)) pinfull = 0;
+      free(v);
+    }
+  }
+  fclose(f);
+}
+static const char *appso;
 static void *walsync(void *a) {
-  (void)a; int fd = -1;
-  for (;;) {
+  (void)a; int fd = -1; const char *pv = getenv("PIN"); long t = 0;
+  if (pv && *pv == '0') pinfull = 0;
+  const char *b = strrchr(appso, '/'); b = b ? b + 1 : appso;
+  for (;; t += walms) {
     usleep((useconds_t)walms * 1000);
+    if (pinfull && t % 5000 < walms && t <= 60000) pincode(b);
     if (fd < 0) fd = open(walpath, O_RDONLY | O_CLOEXEC);
     if (fd >= 0) fdatasync(fd);
   }
@@ -190,7 +222,7 @@ int main(int argc, char **argv) {
 
   const char *wm = getenv("WALSYNC_MS"); walms = wm ? atoi(wm) : 100;   // 0: off (for A/B runs)
   if (sp && walms > 0) {
-    walpath = malloc(strlen(sp) + 5); sprintf(walpath, "%s-wal", sp);
+    walpath = malloc(strlen(sp) + 5); sprintf(walpath, "%s-wal", sp); appso = argv[1];
     pthread_t th; pthread_create(&th, NULL, walsync, NULL);
   }
   WasmEdge_String start = WasmEdge_StringCreateByCString("_start");

@@ -40,7 +40,7 @@ typedef struct {
   sop_t *q;                         // responses queued behind the send in flight
   sop_t *out;                       // the send in flight
   uint32_t gen;
-  uint8_t open, closing, sending;
+  uint8_t open, closing, sending, eof, sent100;
 } conn_t;
 // Accepted sockets live in each ring's registered file table, not in the process descriptor table.
 // A table can't be larger than RLIMIT_NOFILE, so more rings are added as tables fill up.
@@ -75,7 +75,7 @@ static void *huge_alloc(size_t n) {
 static char *arena; static size_t alen;
 typedef struct { uint64_t who; uint32_t off, len; } seg_t;
 static seg_t segs[MAXSEG]; static int nsegs;
-static uint64_t *deferred, *rearm, *held; static int ndef, nrearm, nheld, cap_def, cap_rearm, cap_held;
+static uint64_t *deferred, *rearm, *held, *eofs, *limbo; static int ndef, nrearm, nheld, neof, nlimbo, cap_def, cap_rearm, cap_held, cap_eof, cap_limbo;
 static int arena_full, in_txn, txn_writes, batch_failed, hold_hit, writes_held;
 
 static inline void put(const void *p, size_t n) { memcpy(arena + alen, p, n); alen += n; }
@@ -585,7 +585,7 @@ static int post_btree(int64_t id, int close) {
 }
 
 // ---------- request handling ----------
-static int64_t parse_id(const char *s, size_t n) {  // positive decimal integer, else -1 (huge ids map to 0: not found)
+static int64_t parse_id(const char *s, size_t n) {  // positive decimal integer, else -1 (huge ids saturate: not found)
   if (!n) return -1;
   int64_t v = 0;
   for (size_t i = 0; i < n; i++) { if (s[i] < '0' || s[i] > '9') return -1; if (v < 100000000000000000LL) v = v * 10 + s[i] - '0'; else v = 0x7fffffffffffffffLL; }
@@ -676,7 +676,7 @@ static void handle(const char *m, size_t ml, const char *path, size_t pl, const 
     const unsigned char *s = (unsigned char *)txt, *se = s + n; int l;
     while (s < se && (l = jsws_at(s, se))) s += l;
     while (se > s && (l = jsws_before(s, se))) se -= l;
-    if (s == se) { err(400, "body is required", close); return; }
+    if (s == se || !*s) { err(400, "body is required", close); return; }  // length() stops at a NUL, so the CHECK would fail
     size_t chars = 0; for (const unsigned char *c = s; c < se; c++) chars += (*c & 0xc0) != 0x80;
     if (chars > 500) { err(400, "body must be at most 500 characters", close); return; }
     if (!txn()) { err(500, "internal server error", close); return; }
@@ -706,6 +706,7 @@ static void handle(const char *m, size_t ml, const char *path, size_t pl, const 
   err(404, "not found", close);
 }
 
+static uint8_t no_conn, *sent100 = &no_conn;  // the current connection's "100 Continue already sent" flag
 static int hdr_is(const char *p, size_t n, const char *name, size_t nl) { return n == nl && !strncasecmp(p, name, nl); }
 
 // Serves every complete request in buf. Returns bytes consumed, or -1 to drop the connection.
@@ -740,9 +741,10 @@ static long serve(char *buf, size_t n, int *closing) {
     }
     char *body = he + 4;
     if ((size_t)(e - body) < clen) {
-      if (expect && body == e) PUTS("HTTP/1.1 100 Continue\r\n\r\n");
+      if (expect && body == e && !*sent100) { PUTS("HTTP/1.1 100 Continue\r\n\r\n"); *sent100 = 1; }
       break;
     }
+    *sent100 = 0;
     handle(m, sp1 - m, path, sp2 - path, authh, al, body, clen, close);
     if (close) *closing = 1;
     used = body + clen - buf;
@@ -817,6 +819,7 @@ static void send_bytes(uint64_t who, conn_t *c, const char *p, uint32_t n) {
 
 static void process(uint64_t who, conn_t *c, char *buf, size_t n) {
   uint32_t start = alen; int closing = 0; arena_full = hold_hit = 0;
+  sent100 = &c->sent100;
   long used = serve(buf, n, &closing);
   if (used < 0) { alen = start; conn_close(who); return; }
   if (alen > start) segs[nsegs++] = (seg_t){who, start, alen - start};
@@ -829,9 +832,10 @@ static void process(uint64_t who, conn_t *c, char *buf, size_t n) {
     if (arena_full) push(&deferred, &ndef, &cap_def, who);
     if (hold_hit) push(&held, &nheld, &cap_held, who);
   } else if (c->in) { free(c->in); c->in = NULL; c->inlen = c->incap = 0; }
-  if (closing && alen == start) conn_close(who);
+  if (alen == start && (closing || (c->eof && !c->sending && !arena_full && !hold_hit))) conn_close(who);
 }
 static void on_data(uint64_t who, conn_t *c, const char *p, uint32_t n) {
+  if (c->closing) return;  // answering Connection: close, anything after it is ignored
   if (!c->inlen && !c->sending) { process(who, c, (char *)p, n); return; }
   if (c->incap - c->inlen < n) { c->incap = (c->inlen + n) * 2; c->in = realloc(c->in, c->incap); }
   memcpy(c->in + c->inlen, p, n); c->inlen += n;
@@ -841,13 +845,15 @@ static void on_data(uint64_t who, conn_t *c, const char *p, uint32_t n) {
 static void send_done(sop_t *o, int res) {
   uint64_t who = o->who; conn_t *c = conn_of(who);
   if (c && res > 0 && (o->off += res) < o->len) { send_op(o); return; }  // short send: the rest
+  // A closed connection's cancel may still be queued, naming this address: it stays unused until that has gone in.
+  if (!c) { push(&limbo, &nlimbo, &cap_limbo, (uintptr_t)o); return; }
   sop_free(o);
-  if (!c) return;
-  if (res <= 0) { conn_close(who); return; }
+  if (res <= 0) { c->sending = 0; conn_close(who); return; }
   if (c->q) { o = c->q; c->q = NULL; c->out = o; send_op(o); return; }
   c->sending = 0;
   if (c->closing) conn_close(who);
   else if (c->inlen) process(who, c, c->in, c->inlen);  // input that arrived while sending
+  else if (c->eof) conn_close(who);
 }
 
 // Commits the batch, then sends every response produced in it.
@@ -932,8 +938,7 @@ static void on_cqe(int k, uint64_t ud, int res, unsigned f) {
       }
       if (!(f & IORING_CQE_F_MORE) && (c = conn_of(ud))) {
         if (res > 0 || res == -ENOBUFS) push(&rearm, &nrearm, &cap_rearm, ud);  // rearmed once buffers are back
-        else if (c->sending) c->closing = 1;  // EOF: finish the reply in flight first
-        else conn_close(ud);
+        else { c->eof = 1; push(&eofs, &neof, &cap_eof, ud); }  // the same pass may hold this client's last reply
       }
       break;
   }
@@ -966,10 +971,20 @@ static void run(void) {
       struct __kernel_timespec ts = {.tv_nsec = WAIT_NS};
       rc = io_uring_submit_and_wait_timeout(&R[0].r, &cq, want, &ts, NULL);
     } else rc = io_uring_submit_and_wait(&R[0].r, 1);
-    if (rc < 0 && rc != -EINTR && rc != -EBUSY && rc != -ETIME) { fprintf(stderr, "io_uring_enter: %s\n", strerror(-rc)); exit(1); }
+    for (int i = 0; i < nlimbo; i++) sop_free((sop_t *)(uintptr_t)limbo[i]);  // those cancels are in now
+    nlimbo = 0;
+    if (rc < 0 && rc != -EINTR && rc != -EBUSY && rc != -ETIME && rc != -EAGAIN) { fprintf(stderr, "io_uring_enter: %s\n", strerror(-rc)); exit(1); }
     now_s = time(NULL); seen = 0;
     for (int k = 0; k < nrings; k++) seen += drain(k);
     flush_batch();
+    if (neof) {  // clients that finished sending: close once what they sent has been answered
+      for (int i = 0; i < neof; i++) {
+        conn_t *c = conn_of(eofs[i]);
+        if (!c || c->sending) continue;  // the send's completion takes it from here
+        if (c->inlen) process(eofs[i], c, c->in, c->inlen); else conn_close(eofs[i]);
+      }
+      neof = 0; flush_batch();
+    }
     while (ndef) {  // requests held back by a full arena
       uint64_t *todo = deferred; int n = ndef; deferred = NULL; ndef = cap_def = 0;
       for (int i = 0; i < n; i++) { conn_t *c = conn_of(todo[i]); if (c && c->inlen && !c->sending) process(todo[i], c, c->in, c->inlen); }
@@ -1018,6 +1033,7 @@ static void btree_setup(void) {  // leaves bt_ok 0 (SQL for every read) on anyth
     && layout_is("SELECT group_concat(name) FROM pragma_index_info('posts_created_at_id_idx')", "created_at,id")
     && layout_is("SELECT group_concat(name) FROM pragma_index_info('likes_post_id_idx')", "post_id")
     && layout_is("SELECT group_concat(\"desc\") FROM pragma_index_xinfo('posts_created_at_id_idx') WHERE key", "1,1")
+    && layout_is("SELECT group_concat(\"desc\") FROM pragma_index_xinfo('likes_post_id_idx') WHERE key", "0")
     && (root_posts = rootpage("posts")) && (root_users = rootpage("users"))
     && (root_feed = rootpage("posts_created_at_id_idx")) && (root_likes = rootpage("likes_post_id_idx"))
     && (ki_feed = key_info(2, 1, 1)) && (ki_likes = key_info(1, 1, 0));

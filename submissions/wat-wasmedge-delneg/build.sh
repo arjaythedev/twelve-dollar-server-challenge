@@ -17,7 +17,7 @@ fi
 # USE_PREAD: positioned reads/writes (fd_pread/fd_pwrite) instead of a seek before each, one syscall less per page
 F="-O2 -D_GNU_SOURCE -DSQLITE_THREADSAFE=0 -DSQLITE_DEFAULT_MEMSTATUS=0 -DSQLITE_OMIT_LOAD_EXTENSION -DUSE_PREAD"
 # exports: every function app.wat imports from "sq", and the function table (app.wat adds its callbacks to it)
-EX=$(sed -n 's/^ *(import "sq" "\([a-z0-9_]*\)" (func.*/-Wl,--export=\1/p' ../src/app.wat)
+EX="-Wl,--export=ckpt_main $(sed -n 's/^ *(import "sq" "\([a-z0-9_]*\)" (func.*/-Wl,--export=\1/p' ../src/app.wat)"
 $WS/bin/clang --target=wasm32-wasip1 $F -I$SQ -mexec-model=reactor $EX -Wl,--export-table -Wl,--growable-table \
   -Wl,-z,stack-size=1048576 -Wl,--global-base=16777216 -o sq.wasm ../src/sqlite_glue.c   # it #includes $SQ/sqlite3.c
 $T/wabt/bin/wat2wasm --enable-all ../src/app.wat -o app.wasm

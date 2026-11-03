@@ -1019,3 +1019,39 @@ Synteq sysctls restored from w3/sysctl.orig; the calibrated values are in w3/sys
 ## TdscWat4 (3 Nov on): hypotheses first (experiments/hypotheses.md, append-only, locked), then E53+
 Paid calls tally (limit $1): consult 1103-205423-0386 round 1 $0.0233. Total $0.023.
 Boxes: Synteq (harness v2 = hs2.sh/q2.sh, SPIN_NS=10000 unless marked), opt-box (builds).
+
+## E53 (H3): fsync cost against dirty pages, Synteq disk (3 Nov, root, `bin/fsb`, source /tmp/tdsc-wat4/fsb.c)
+A copy of the seed feed.db (243 MB); N random 4 KiB pages read and rewritten in place, then one fdatasync; 3 reps each
+(ms): N=1: 1.3, 1.5, 156 (one outlier, likely an ext4 journal commit); 10: 2.1-2.6; 30: 3.1-4.5; 100: 5.7-7.1 (one 20);
+300: 20-42; 1,000: 73-89; 2,400: 147-150. So ~1.3 ms floor and ~60 us per page above ~100 pages: today's checkpoint
+(~2,400 leaves) is the 150 ms stall measured on the loop. Verdict H3: the cost scales with dirty pages, not a fixed floor,
+so a tail checkpoint of <= ~30 pages costs ~3-5 ms. H1's inline tail is viable if the tail stays that small.
+(/dev/sda1, ext4 commit=30, discard, mq-deadline, non-rotational.)
+
+## E54 (H1): checkpoints on a second wasm instance, first build `h1a` (3 Nov, harness v2, SPIN_NS=10000, 2-minute probes, 210k)
+Build: sqlite_glue.c gets a VFS "shmx" wrapping unix-none with xShmMap/xShmLock/xShmBarrier/xShmUnmap (one memfd mapped by
+the host into a page-aligned 8 MiB slice of each instance's memory; lock words and handshake are host atomics); host.c
+starts a pthread (nice 10) running a second WasmEdge VM on the same app.so (`_initialize`, then `ckpt_main`: own
+connection, PASSIVE on request, polls every 1 ms); app.wat opens with "shmx" and locking_mode NORMAL, and `$ckpt_step`
+calls `ck_tick`: WAL >= 8,000 frames -> bulk pass on the checkpointer; while frames since > CKPT_TAIL (300) another pass;
+then one inline PASSIVE (the tail) and the next write restarts the WAL. SHMX=0 keeps the old path. 42/42 (opt-box).
+Functional check (opt-box, CKPT_FRAMES=200, 3,000 likes over curl): WAL stayed at 1.45 MB (restarts happen), the DB file
+grew, integrity_check ok, 3,000 new likes present.
+Interleaved (b4s = c49b70d with the spin patch, i.e. f5115b9's code; h1as = this build with the spin patch), 0 errors:
+- b4s r1: 21.9k rps, p50 39, p95 460, p99 1,305, max 1,901 ms, 16.16 us/req, prune 96,831
+- h1as r1: 22.0k rps, p50 32, p95 340, p99 690, max 1,159 ms, 18.67 us/req, prune 10,978
+- b4s r2: 22.1k rps, p50 33, p95 410, p99 1,000, max 2,102 ms, 16.48 us/req
+- h1as r2: 22.1k rps, p50 5.4, p95 260, p99 410, max 631 ms, 17.89 us/req
+The tail moves well inside the limits at 210k (both h1 runs pass; both b4 runs fail p99 >= 1 s), but the server process
+spends +1.4-2.5 us per request more. Next (E55): where that comes from, at 150k (below the cliff, CPU per request only).
+
+## E55 (H1/H12): where h1a's extra CPU goes (3 Nov, harness v2, SPIN_NS=10000, 2-minute probes at 150k, below the cliff)
+- b4s: 15.9k rps, p95 127, p99 240 ms, 11.91 us/req, CPU0 busy 63 %
+- h1as: p95 106, p99 215 ms, 13.47 us/req, busy 64 %
+- h1as SHMX=0 (same binary, old exclusive path): p95 129, p99 240 ms, 11.82 us/req, busy 61 %
+- h1as CKPT_NAP_US=20000 (checkpointer polls every 20 ms instead of 1 ms): p95 119, p99 230 ms, 12.50 us/req, busy 62 %
+The new binary costs nothing on the old path. Of h1a's +1.56 us/req, ~1.0 is the checkpointer's 1 ms polling (a
+thread wakeup plus host calls 1,000 times a second, on the same CPU); the rest (~0.6) is the shared mode itself (read
+locks per transaction through host calls, the barrier host call) plus the extra tail checkpoints. Next: h1b with a futex
+wait instead of polling, one host call per xShmLock, and an empty xShmBarrier (an indirect call is a compiler barrier and
+x86 keeps load-load and store-store order, which is all SQLite's two header copies rely on).

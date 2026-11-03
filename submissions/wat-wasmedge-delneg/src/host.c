@@ -19,8 +19,10 @@
 #include <string.h>
 #include <linux/io_uring.h>
 #include <sys/mman.h>
+#include <linux/futex.h>
 #include <sys/syscall.h>
 #include <sys/resource.h>
+#include <sys/mman.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -133,6 +135,64 @@ FN(h_ring_go) { (void)d;
 // WasmEdge reserves the whole 4 GiB range up front and grows memory in place, so it never moves.
 FN(h_membase) { (void)d; (void)in; out[0] = WasmEdge_ValueGenI64((int64_t)(uintptr_t)mem(f, 0, 1)); return WasmEdge_Result_Success; }
 
+// ---- H1 (TdscWat4 experiment): a second instance of the app runs SQLite's checkpoints on its own thread, sharing
+// the wal-index with the loop's instance (src/sqlite_glue.c). shm_map maps one memfd into the calling instance's
+// memory at a page-aligned offset; L[] holds the shm lock words and the checkpoint handshake (real atomics).
+static int L[16], shmfd = -1;
+FN(h_shm_map) { (void)d;
+  uint32_t len = (uint32_t)P(1); uint8_t *p = mem(f, (uint32_t)P(0), len); if (!p || ((uintptr_t)p & 4095)) RET(-EINVAL);
+  if (shmfd < 0 && ((shmfd = memfd_create("walidx", MFD_CLOEXEC)) < 0 || ftruncate(shmfd, len))) RET(-errno);
+  if (mmap(p, len, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, shmfd, 0) == MAP_FAILED) RET(-errno);
+  RET(0);
+}
+FN(h_shm_cas) { (void)d; (void)f; int o = P(1); __atomic_compare_exchange_n(&L[P(0) & 15], &o, P(2), 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); RET(o); }
+FN(h_shm_add) { (void)d; (void)f; RET(__atomic_fetch_add(&L[P(0) & 15], P(1), __ATOMIC_SEQ_CST)); }
+// shm_lock(ofst, n, flags, role) -> 0 | SQLITE_BUSY: SQLite's xShmLock on the words L[0..7] (n > 0: shared count,
+// -1: exclusive), with each role's held locks kept here, so one call per lock change
+static unsigned hs[2], hx[2];
+FN(h_shm_lock) { (void)d; (void)f;
+  int o = P(0), n = P(1), fl = P(2), r = P(3) & 1; unsigned acq = 0;
+  for (int i = o; i < o + n && i < 8; i++) {
+    unsigned b = 1u << i; int v = 0;
+    if (fl & 1) { if (hs[r] & b) __atomic_fetch_sub(&L[i], 1, __ATOMIC_SEQ_CST); if (hx[r] & b) __atomic_store_n(&L[i], 0, __ATOMIC_SEQ_CST); hs[r] &= ~b; hx[r] &= ~b; continue; }
+    if (fl & 4) {
+      if (hs[r] & b) continue;
+      v = __atomic_load_n(&L[i], __ATOMIC_SEQ_CST);
+      do { if (v < 0) RET(5); } while (!__atomic_compare_exchange_n(&L[i], &v, v + 1, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST));
+      hs[r] |= b; continue;
+    }
+    if (hx[r] & b) continue;
+    if (!__atomic_compare_exchange_n(&L[i], &v, -1, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
+      for (int j = o; j < i; j++) if (acq & (1u << j)) __atomic_store_n(&L[j], 0, __ATOMIC_SEQ_CST);
+      hx[r] &= ~acq; RET(5);
+    }
+    hx[r] |= b; acq |= b;
+  }
+  RET(0);
+}
+// ck_wait(): the checkpointer sleeps until L[9] (its state word) is 1; ck_wake(): the loop wakes it
+FN(h_ck_wait) { (void)d; (void)f; (void)in;
+  for (int v; (v = __atomic_load_n(&L[9], __ATOMIC_SEQ_CST)) != 1;) syscall(SYS_futex, &L[9], FUTEX_WAIT_PRIVATE, v, NULL, NULL, 0);
+  RET(0);
+}
+FN(h_ck_wake) { (void)d; (void)f; (void)in; syscall(SYS_futex, &L[9], FUTEX_WAKE_PRIVATE, 1, NULL, NULL, 0); RET(0); }
+FN(h_nap) { (void)d; (void)f; usleep((useconds_t)P(0)); RET(0); }
+static WasmEdge_VMContext *mkvm(const char *app);
+static const char *appso;
+static void *ckthread(void *a) {
+  (void)a; const char *nv = getenv("CKPT_NICE"); setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), nv ? atoi(nv) : 10);
+  WasmEdge_VMContext *vm = mkvm(appso);
+  WasmEdge_String fn[2] = {WasmEdge_StringCreateByCString("_initialize"), WasmEdge_StringCreateByCString("ckpt_main")};
+  WasmEdge_Result r = WasmEdge_VMLoadWasmFromFile(vm, appso);
+  if (WasmEdge_ResultOK(r)) r = WasmEdge_VMValidate(vm);
+  if (WasmEdge_ResultOK(r)) r = WasmEdge_VMInstantiate(vm);
+  if (WasmEdge_ResultOK(r)) r = WasmEdge_VMExecute(vm, fn[0], NULL, 0, NULL, 0);
+  if (WasmEdge_ResultOK(r)) r = WasmEdge_VMExecute(vm, fn[1], NULL, 0, NULL, 0);
+  fprintf(stderr, "checkpointer stopped: %s\n", WasmEdge_ResultGetMessage(r));
+  return NULL;
+}
+FN(h_ckpt_spawn) { (void)d; (void)f; (void)in; pthread_t t; RET(-pthread_create(&t, NULL, ckthread, NULL)); }
+
 static void add(WasmEdge_ModuleInstanceContext *m, const char *name, WasmEdge_HostFunc_t fn, int np) {
   WasmEdge_ValType p[6], r[1] = {np < 0 ? WasmEdge_ValTypeGenI64() : WasmEdge_ValTypeGenI32()};
   if (np < 0) np = 0;
@@ -176,7 +236,6 @@ static void pincode(const char *app) {
   }
   fclose(f);
 }
-static const char *appso;
 static void *walsync(void *a) {
   (void)a; int fd = -1; const char *pv = getenv("PIN"); long t = 0;
   if (pv && *pv == '0') pinfull = 0;
@@ -190,26 +249,23 @@ static void *walsync(void *a) {
   return NULL;
 }
 
-int main(int argc, char **argv) {
-  if (argc < 2) { fprintf(stderr, "usage: %s app.so\n", argv[0]); return 2; }
-  signal(SIGPIPE, SIG_IGN);
-  struct rlimit rl; if (getrlimit(RLIMIT_NOFILE, &rl) == 0) { rl.rlim_cur = rl.rlim_max; setrlimit(RLIMIT_NOFILE, &rl); }
+static WasmEdge_VMContext *mkvm(const char *app) {
   WasmEdge_ConfigureContext *conf = WasmEdge_ConfigureCreate();
   WasmEdge_ConfigureAddHostRegistration(conf, WasmEdge_HostRegistration_Wasi);
   WasmEdge_ConfigureSetRunMode(conf, WasmEdge_RunMode_AOT);   // load the AOT-compiled native code
   WasmEdge_VMContext *vm = WasmEdge_VMCreate(conf, NULL);
 
   // WASI: the SPEC's env vars, and the database's directory pre-opened at the same path
-  static const char *names[] = {"SQLITE_PATH", "JWT_SECRET", "HOST", "PORT", "CKPT_FRAMES", "CKPT_AUTO"};
-  const char *envs[6]; int ne = 0;
-  for (int i = 0; i < 6; i++) {
+  static const char *names[] = {"SQLITE_PATH", "JWT_SECRET", "HOST", "PORT", "CKPT_FRAMES", "CKPT_AUTO", "SHMX", "CKPT_TAIL", "CKPT_NAP_US", "SPIN_NS"};
+  const char *envs[10]; int ne = 0;
+  for (int i = 0; i < 10; i++) {
     const char *v = getenv(names[i]); if (!v) continue;
     char *e = malloc(strlen(names[i]) + strlen(v) + 2); sprintf(e, "%s=%s", names[i], v); envs[ne++] = e;
   }
   const char *sp = getenv("SQLITE_PATH");
   char *dir = dirname(strdup(sp ? sp : "./x")), *pre = malloc(2 * strlen(dir) + 2);
   sprintf(pre, "%s:%s", dir, dir);
-  const char *pres[] = {pre}, *args[] = {argv[1]};
+  const char *pres[] = {pre}, *args[] = {app};
   WasmEdge_ModuleInstanceInitWASI(WasmEdge_VMGetImportModuleContext(vm, WasmEdge_HostRegistration_Wasi),
                                   args, 1, envs, (uint32_t)ne, pres, 1);
 
@@ -217,16 +273,29 @@ int main(int argc, char **argv) {
   WasmEdge_ModuleInstanceContext *m = WasmEdge_ModuleInstanceCreate(sys);
   add(m, "listen", h_listen, 3); add(m, "ring_new", h_ring_new, 2); add(m, "ring_pbuf", h_ring_pbuf, 4);
   add(m, "ring_go", h_ring_go, 6); add(m, "membase", h_membase, -1);
+  add(m, "shm_map", h_shm_map, 2); add(m, "shm_cas", h_shm_cas, 3); add(m, "shm_add", h_shm_add, 2);
+  add(m, "nap", h_nap, 1); add(m, "ckpt_spawn", h_ckpt_spawn, 0);
+  add(m, "shm_lock", h_shm_lock, 4); add(m, "ck_wait", h_ck_wait, 0); add(m, "ck_wake", h_ck_wake, 0);
   WasmEdge_Result r = WasmEdge_VMRegisterModuleFromImport(vm, m);
-  if (!WasmEdge_ResultOK(r)) { fprintf(stderr, "register: %s\n", WasmEdge_ResultGetMessage(r)); return 1; }
+  if (!WasmEdge_ResultOK(r)) { fprintf(stderr, "register: %s\n", WasmEdge_ResultGetMessage(r)); return NULL; }
 
+  return vm;
+}
+
+int main(int argc, char **argv) {
+  if (argc < 2) { fprintf(stderr, "usage: %s app.so\n", argv[0]); return 2; }
+  signal(SIGPIPE, SIG_IGN);
+  struct rlimit rl; if (getrlimit(RLIMIT_NOFILE, &rl) == 0) { rl.rlim_cur = rl.rlim_max; setrlimit(RLIMIT_NOFILE, &rl); }
+  appso = argv[1];
+  WasmEdge_VMContext *vm = mkvm(argv[1]); if (!vm) return 1;
+  const char *sp = getenv("SQLITE_PATH");
   const char *wm = getenv("WALSYNC_MS"); walms = wm ? atoi(wm) : 100;   // 0: off (for A/B runs)
   if (sp && walms > 0) {
-    walpath = malloc(strlen(sp) + 5); sprintf(walpath, "%s-wal", sp); appso = argv[1];
+    walpath = malloc(strlen(sp) + 5); sprintf(walpath, "%s-wal", sp);
     pthread_t th; pthread_create(&th, NULL, walsync, NULL);
   }
   WasmEdge_String start = WasmEdge_StringCreateByCString("_start");
-  r = WasmEdge_VMRunWasmFromFile(vm, argv[1], start, NULL, 0, NULL, 0);
+  WasmEdge_Result r = WasmEdge_VMRunWasmFromFile(vm, argv[1], start, NULL, 0, NULL, 0);
   if (!WasmEdge_ResultOK(r)) { fprintf(stderr, "wasm: %s\n", WasmEdge_ResultGetMessage(r)); return 1; }
   return 0;
 }

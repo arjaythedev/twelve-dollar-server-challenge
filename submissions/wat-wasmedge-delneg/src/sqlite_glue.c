@@ -40,3 +40,83 @@ int cur_seek_int(BtCursor *c, KeyInfo *k, long long key, int default_rc, int *re
 unsigned cur_payload_size(BtCursor *c) { return sqlite3BtreePayloadSize(c); }
 // the record's bytes on the cursor's page; *amt = how many are there (fewer than the size: overflow)
 const u8 *cur_payload(BtCursor *c, u32 *amt) { return sqlite3BtreePayloadFetch(c, amt); }
+
+// ---- H1 (TdscWat4 experiment): the wal-index is shared with a second wasm instance, on a host thread, that runs
+// the checkpoints, so the event loop doesn't wait for their fsyncs. The host maps one memfd into a page-aligned
+// slice of each instance's memory (sys.shm_map); this VFS wraps unix-none and gives the main database file the
+// four shm methods SQLite's WASI build lacks. Lock words and the checkpoint handshake are process-wide words in
+// the host (sys.shm_cas / sys.shm_add: real atomics); each instance keeps its own held-lock masks.
+#define IMP(n) __attribute__((import_module("sys"), import_name(#n)))
+IMP(shm_map) int h_shm_map(void *p, int len);
+IMP(shm_cas) int h_cas(int i, int old, int nw);
+IMP(shm_add) int h_add(int i, int d);
+IMP(nap) int h_nap(int us);
+IMP(shm_lock) int h_lock(int ofst, int n, int flags, int role);   // SQLite xShmLock semantics, held masks per role
+IMP(ck_wait) int h_wait(void);
+IMP(ck_wake) int h_wake(void);
+IMP(ckpt_spawn) int h_spawn(void);
+#define SHMLEN (8 << 20)
+enum { W_NREG = 8, W_ST = 9, W_DONE = 10, W_READY = 11, W_FENCE = 15 };   // W_ST: 0 idle, 1 asked, 2 running, 3 done
+static char *shm;
+static sqlite3_vfs V, *B; static sqlite3_io_methods M;
+static int xMap(sqlite3_file *f, int r, int sz, int ext, void volatile **pp) {
+  (void)f; if ((r + 1) * sz > SHMLEN) return SQLITE_IOERR_SHMSIZE;
+  int n = h_add(W_NREG, 0);
+  if (r >= n) { if (!ext) { *pp = 0; return SQLITE_OK; } while (n <= r) { int p = h_cas(W_NREG, n, r + 1); if (p == n) break; n = p; } }
+  *pp = shm + r * sz; return SQLITE_OK;
+}
+static int role;   // 0: the loop's instance, 1: the checkpointer's
+static int xLk(sqlite3_file *f, int ofst, int n, int fl) { (void)f; return h_lock(ofst, n, fl, role); }
+// an opaque indirect call is a compiler barrier, and x86 keeps load-load and store-store order
+static void xBar(sqlite3_file *f) { (void)f; }
+static int xUnmap(sqlite3_file *f, int del) { (void)f; (void)del; return SQLITE_OK; }
+static int xOpen(sqlite3_vfs *v, sqlite3_filename z, sqlite3_file *f, int fl, int *o) {
+  (void)v; int rc = B->xOpen(B, z, f, fl, o);
+  if (rc == SQLITE_OK && (fl & SQLITE_OPEN_MAIN_DB) && f->pMethods) {
+    if (!M.xClose) { M = *f->pMethods; M.iVersion = 2; M.xShmMap = xMap; M.xShmLock = xLk; M.xShmBarrier = xBar; M.xShmUnmap = xUnmap; }
+    f->pMethods = &M;
+  }
+  return rc;
+}
+static int shmx_setup(void) {
+  char *p = malloc(SHMLEN + 65536); if (!p) return 1;
+  shm = (char *)(((uintptr_t)p + 65535) & ~(uintptr_t)65535);
+  if (h_shm_map(shm, SHMLEN)) return 1;
+  B = sqlite3_vfs_find("unix-none"); if (!B) return 1;
+  V = *B; V.zName = "shmx"; V.xOpen = xOpen; V.pNext = 0;
+  return sqlite3_vfs_register(&V, 0) != SQLITE_OK;
+}
+// the loop's instance: -> "shmx" (open the database with it, locking_mode NORMAL) or 0 (SHMX=0, or setup failed)
+const char *shmx_init(void) {
+  const char *e = getenv("SHMX"); if (e && *e == '0') return 0;
+  if (shmx_setup() || h_spawn()) return 0;
+  return "shmx";
+}
+// the loop, between batches with no transaction open; n = the WAL's frames after the last commit -> what to keep
+static int tailmax = -1;
+int ck_tick(sqlite3 *db, int n, int t) {
+  static int ready;
+  if (!ready) { h_cas(W_READY, 0, 1); ready = 1; const char *e = getenv("CKPT_TAIL"); tailmax = e ? atoi(e) : 300; }
+  static int busy;
+  if (!busy) { if (n < t) return n; busy = 1; h_cas(W_ST, 0, 1); h_wake(); return n; }
+  if (h_add(W_ST, 0) != 3) return n;
+  if (n - h_add(W_DONE, 0) > tailmax) { h_cas(W_ST, 3, 1); h_wake(); return n; }   // another bulk pass on the checkpointer
+  int nl = 0, nd = 0, rc = sqlite3_wal_checkpoint_v2(db, 0, SQLITE_CHECKPOINT_PASSIVE, &nl, &nd);   // the small tail, here
+  h_cas(W_ST, 3, 0); busy = 0;
+  return rc == SQLITE_OK && nl == nd ? 0 : n;
+}
+// the checkpointer's instance (run by the host on its thread): its own connection, PASSIVE checkpoints on request
+void ckpt_main(void) {
+  role = 1; if (shmx_setup()) return;
+  while (!h_add(W_READY, 0)) h_nap(1000);
+  sqlite3 *c; if (sqlite3_open_v2(getenv("SQLITE_PATH"), &c, SQLITE_OPEN_READWRITE, "shmx")) return;
+  int one = 1; sqlite3_file_control(c, "main", SQLITE_FCNTL_PERSIST_WAL, &one);
+  sqlite3_exec(c, "PRAGMA cache_size=16; PRAGMA synchronous=NORMAL;", 0, 0, 0);
+  for (;;) {
+    h_wait();
+    h_cas(W_ST, 1, 2);
+    int nl = 0, nd = 0; sqlite3_wal_checkpoint_v2(c, 0, SQLITE_CHECKPOINT_PASSIVE, &nl, &nd);
+    for (int v = h_add(W_DONE, 0); h_cas(W_DONE, v, nd) != v; v = h_add(W_DONE, 0)) {}
+    h_cas(W_ST, 2, 3);
+  }
+}

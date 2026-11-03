@@ -45,6 +45,8 @@
   (import "sq" "sqlite3_wal_hook" (func $wal_hook (param i32 i32 i32) (result i32)))
   (import "sq" "sqlite3_wal_autocheckpoint" (func $db_autockpt (param i32 i32) (result i32)))
   (import "sq" "sqlite3_wal_checkpoint_v2" (func $wal_ckpt (param i32 i32 i32 i32 i32) (result i32)))
+  (import "sq" "shmx_init" (func $shmx_init (result i32)))   ;; H1: checkpoints on a second instance (sqlite_glue.c)
+  (import "sq" "ck_tick" (func $ck_tick (param i32 i32 i32) (result i32)))
   (import "sq" "getenv" (func $getenv (param i32) (result i32)))
   (import "sq" "malloc" (func $malloc (param i32) (result i32)))
   (import "sq" "free" (func $free (param i32)))
@@ -217,6 +219,7 @@
   (global $ck_t (mut i32) (i32.const 8000))
   (global $wal_n (mut i32) (i32.const 0))   ;; the WAL's size after the last commit, from $wal_cb
   (global $wal_cbi (mut i32) (i32.const 0)) ;; $wal_cb's index in the function table
+  (global $shmx (mut i32) (i32.const 0))    ;; H1: the shared-wal-index VFS's name, or 0
   (global $pc_tmp (mut i32) (i32.const 0))
 
   ;; ---------- memory helpers ----------
@@ -1699,6 +1702,8 @@
   ;; file), once the WAL hook has seen it grow past CKPT_FRAMES. The next write then restarts the WAL.
   ;; With CKPT_AUTO=1, SQLite's wal_autocheckpoint does it inside the commit instead, and this never runs.
   (func $ckpt_step
+    (if (global.get $shmx)
+      (then (global.set $wal_n (call $ck_tick (global.get $db) (global.get $wal_n) (global.get $ck_t))) (return)))
     (if (i32.lt_s (global.get $wal_n) (global.get $ck_t)) (then (return)))
     (global.set $wal_n (i32.const 0))
     (drop (call $wal_ckpt (global.get $db) (i32.const 0) (i32.const 0) (i32.const 0) (i32.const 0))))   ;; PASSIVE
@@ -2093,7 +2098,8 @@
           (br_if $l (i32.lt_u (local.tee $j (i32.add (local.get $j) (i32.const 1))) (i32.const 9))))
         (i32.store (i32.const 0x101480) (i32.const 0x101440))
         (drop (call $config (i32.const 18) (i32.const 0x101480)))))   ;; SQLITE_CONFIG_PCACHE2
-    (call $open_v2 (local.get $path) (i32.const 0x295000) (i32.const 2) (i32.const 0x1013c0)))   ;; READWRITE, "unix-none"
+    (call $open_v2 (local.get $path) (i32.const 0x295000) (i32.const 2)
+      (select (global.get $shmx) (i32.const 0x1013c0) (global.get $shmx))))   ;; READWRITE, "shmx" or "unix-none"
 
   (func $prep (param $sql i32) (result i32)
     (if (call $prepare (global.get $db) (local.get $sql) (i32.const -1) (i32.const 1) (i32.const 0x295004) (i32.const 0))   ;; PERSISTENT
@@ -2113,9 +2119,10 @@
                           (i32.and (i32.ne (local.get $host) (i32.const 0)) (i32.ne (local.get $port) (i32.const 0)))))
       (then (call $fatal (i32.const 0x101180))))
     (call $hmac_init (local.get $key) (call $strlen (local.get $key)))
+    (global.set $shmx (call $shmx_init))
     (if (call $db_open (local.get $path)) (then (call $fatal (i32.const 0x1010c0))))
     (global.set $db (i32.load (i32.const 0x295000)))
-    (if (call $db_exec (global.get $db) (i32.const 0x100d00) (i32.const 0) (i32.const 0) (i32.const 0)) (then (call $fatal (i32.const 0x1010c0))))
+    (if (call $db_exec (global.get $db) (i32.add (i32.const 0x100d00) (select (i32.const 31) (i32.const 0) (global.get $shmx))) (i32.const 0) (i32.const 0) (i32.const 0)) (then (call $fatal (i32.const 0x1010c0))))
     (if (local.tee $k (call $getenv (i32.const 0x100e80)))
       (then (global.set $ck_t (i32.wrap_i64 (call $parse_len (local.get $k) (call $strlen (local.get $k)))))))
     (local.set $k (call $getenv (i32.const 0x100ea0)))

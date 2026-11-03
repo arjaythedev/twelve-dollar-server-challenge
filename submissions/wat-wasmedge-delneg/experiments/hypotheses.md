@@ -133,3 +133,6 @@ Ranking by expected impact / cost (highest first). Order of work: H3, H1 (+H12 i
 9. H10 (medium, small expected)
 10. H15, H1c, H1b (only if H1's results call for them)
 11. H13, H16, H18, H19 (not tested: rule risk or cost; reasons above)
+H3: tested in E53, done: ~1.3 ms floor + ~60 us/page; H1's inline tail viable if <= ~30 pages
+H1: E54 (2-min, 210k): p99 690/410 vs baseline 1,305/1,000; +1.4-2.5 us/req CPU to explain (E55)
+H12: E55: shared mode costs ~0.6 us/req at 150k; 1 ms polling another ~1.0 (fix in h1b)

@@ -444,10 +444,7 @@ static void put_post_row(sqlite3_stmt *s) {
 
 // A record's columns, decoded in place. Anything unexpected makes the caller fall back to SQL.
 typedef struct { uint32_t type, len; const unsigned char *d; } col_t;
-static inline int rec_cols(BtCursor *c, col_t *out, int nc) {
-  getCellInfo(c);
-  if (c->info.nLocal != c->info.nPayload) return 0;  // spills onto overflow pages
-  const unsigned char *p = c->info.pPayload, *e = p + c->info.nPayload;
+static inline int rec_parse(const unsigned char *p, const unsigned char *e, col_t *out, int nc) {
   uint32_t hs, t, i = getVarint32(p, hs);
   const unsigned char *d = p + hs;
   if (d > e) return 0;
@@ -461,6 +458,11 @@ static inline int rec_cols(BtCursor *c, col_t *out, int nc) {
   }
   return 1;
 }
+static inline int rec_cols(BtCursor *c, col_t *out, int nc) {
+  getCellInfo(c);
+  if (c->info.nLocal != c->info.nPayload) return 0;  // spills onto overflow pages
+  return rec_parse(c->info.pPayload, c->info.pPayload + c->info.nPayload, out, nc);
+}
 static inline int col_text(const col_t *c) { return c->type >= 13 && (c->type & 1); }
 static inline int col_int(const col_t *c, int64_t *v) {
   if (c->type == 8 || c->type == 9) { *v = c->type - 8; return 1; }
@@ -469,44 +471,47 @@ static inline int col_int(const col_t *c, int64_t *v) {
   for (uint32_t i = 1; i < c->len; i++) x = x << 8 | c->d[i];
   *v = x; return 1;
 }
-// Likes per post for lo <= post_id <= hi from likes_post_id_idx, n[post_id - lo] += 1 per entry, reading the
-// cells of a leaf directly. Returns 1 ok, 0 for a cell of an unexpected form, -1 on error.
-static int count_likes(int64_t lo, int64_t hi, uint32_t *n) {
-  BtCursor *c = cur_likes; Mem m; UnpackedRecord r; int res = 0;
-  memset(&m, 0, sizeof m); m.flags = MEM_Int; m.u.i = lo;
-  memset(&r, 0, sizeof r); r.pKeyInfo = c->pKeyInfo; r.aMem = &m; r.nField = 1; r.default_rc = 1;  // land on the first equal entry
-  if (sqlite3BtreeIndexMoveto(c, &r, &res) != SQLITE_OK) return -1;
-  if (sqlite3BtreeEof(c)) return 1;
-  if (res < 0) {
-    int rc = sqlite3BtreeNext(c, 0);
-    if (rc == SQLITE_DONE) return 1;
-    if (rc != SQLITE_OK) return -1;
+// Tallies the likes index entries in cells first..last of a page into n[post_id - lo]. Returns 1 to keep walking,
+// 0 on reaching a post past hi, -1 on a cell this code won't decode.
+static int tally_cells(MemPage *pg, int first, int last, int64_t lo, int64_t hi, uint32_t *n) {
+  for (int i = first; i <= last; i++) {
+    const unsigned char *cell = findCell(pg, i) + pg->childPtrSize;
+    uint32_t size, skip = getVarint32(cell, size);
+    col_t key; int64_t post;
+    if (size > pg->maxLocal || cell + skip + size > pg->aDataEnd) return -1;
+    if (!rec_parse(cell + skip, cell + skip + size, &key, 1) || !col_int(&key, &post)) return -1;
+    if (post > hi) return 0;
+    if (post >= lo) n[post - lo]++;
   }
-  for (;;) {
-    MemPage *pg = c->pPage; int i = c->ix, last = pg->leaf ? pg->nCell : i + 1;  // an interior cell: just that one
-    for (; i < last; i++) {
-      const unsigned char *cell = findCell(pg, i) + pg->childPtrSize, *q = cell + 1;
-      uint32_t len = cell[0];
-      if (len >= 0x80 || len < 3 || q + len > pg->aDataEnd) return 0;
-      uint32_t h = q[0], t = q[1]; int64_t v;
-      if (h >= len || h < 3 || t >= 0x80) return 0;
-      if (t >= 1 && t <= 6) {
-        uint32_t k = sqlite3SmallTypeSizes[t];
-        if (h + k > len) return 0;
-        v = (signed char)q[h];
-        for (uint32_t j = 1; j < k; j++) v = v << 8 | q[h + j];
-      } else if (t == 8 || t == 9) v = t - 8;
-      else return 0;
-      if (v > hi) return 1;
-      if (v >= lo) n[v - lo]++;
-    }
-    c->ix = (u16)(last - 1);
-    int rc = sqlite3BtreeNext(c, 0);
-    if (rc == SQLITE_DONE) return 1;
-    if (rc != SQLITE_OK) return -1;
-  }
+  return 1;
 }
-static inline int seek_row(BtCursor *c, int64_t id) {  // 1 found, 0 absent, -1 error
+// Moves the likes cursor to the first entry for a post at or above lo. 1 on an entry, 0 past the end, -1 on error.
+static int likes_from(int64_t lo) {
+  Mem key; UnpackedRecord want; int cmp = 0;
+  memset(&key, 0, sizeof key); key.flags = MEM_Int; key.u.i = lo;
+  memset(&want, 0, sizeof want); want.pKeyInfo = cur_likes->pKeyInfo; want.aMem = &key; want.nField = 1;
+  want.default_rc = 1;  // an entry equal on post_id compares above the key, so the seek stops before the first of them
+  if (sqlite3BtreeIndexMoveto(cur_likes, &want, &cmp) != SQLITE_OK) return -1;
+  if (sqlite3BtreeEof(cur_likes)) return 0;
+  if (cmp >= 0) return 1;
+  int rc = sqlite3BtreeNext(cur_likes, 0);
+  return rc == SQLITE_OK ? 1 : rc == SQLITE_DONE ? 0 : -1;
+}
+// Likes for posts lo..hi, added to n[post - lo], a page at a time. Returns 1 done, 0 for SQL to answer, -1 on error.
+static int count_likes(int64_t lo, int64_t hi, uint32_t *n) {
+  int on = likes_from(lo);
+  while (on == 1) {
+    MemPage *pg = cur_likes->pPage;
+    int last = pg->leaf ? pg->nCell - 1 : cur_likes->ix;  // on an interior page the entry under the cursor is one key
+    int more = tally_cells(pg, cur_likes->ix, last, lo, hi, n);
+    if (more <= 0) return more < 0 ? 0 : 1;
+    cur_likes->ix = (u16)last;
+    on = sqlite3BtreeNext(cur_likes, 0);
+    on = on == SQLITE_OK ? 1 : on == SQLITE_DONE ? 0 : -1;
+  }
+  return on == 0 ? 1 : -1;
+}
+static inline int seek_row(BtCursor *c, int64_t id) {  // is rowid id there? -1 if the seek itself failed
   int res = 0;
   if (sqlite3BtreeTableMoveto(c, id, 0, &res) != SQLITE_OK) return -1;
   return res == 0 && c->eState == CURSOR_VALID;

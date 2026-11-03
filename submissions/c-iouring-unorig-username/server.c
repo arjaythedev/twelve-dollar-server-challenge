@@ -40,13 +40,13 @@ typedef struct {
   sop_t *q;                         // responses queued behind the send in flight
   sop_t *out;                       // the send in flight
   uint32_t gen;
-  uint8_t open, closing, sending, eof, sent100;
+  uint8_t open, closing, sending, eof, sent100, queued, ready;
 } conn_t;
 // Accepted sockets live in each ring's registered file table, not in the process descriptor table.
 // A table can't be larger than RLIMIT_NOFILE, so more rings are added as tables fill up.
 typedef struct {
   struct io_uring r;
-  conn_t *c; uint32_t n, pend;  // open connections, accepts in flight
+  conn_t *c; uint32_t n, pend, reads;  // open connections, accepts in flight, single-shot reads in flight
   struct io_uring_buf_ring *br; char *bufs;
 } ring_t;
 static ring_t R[MAXRINGS];
@@ -57,7 +57,7 @@ static sqlite3_stmt *st_feed, *st_post, *st_ins, *st_like, *st_one, *st_begin, *
 static time_t started, now_s;
 
 // user_data: low 3 bits tag the operation. A send's user_data is its sop_t pointer (tag 0).
-enum { T_SEND, T_ACCEPT, T_RECV, T_NOP };
+enum { T_SEND, T_ACCEPT, T_RECV, T_NOP, T_READ };
 #define RECV_UD(k, slot, gen) (T_RECV | (uint64_t)(k) << 3 | (uint64_t)(slot) << 8 | (uint64_t)(gen) << 32)
 
 // Hot regions sit on huge pages where the kernel offers them (Ubuntu's default THP mode is madvise): a TLB miss
@@ -75,7 +75,7 @@ static void *huge_alloc(size_t n) {
 static char *arena; static size_t alen;
 typedef struct { uint64_t who; uint32_t off, len; } seg_t;
 static seg_t segs[MAXSEG]; static int nsegs;
-static uint64_t *deferred, *rearm, *held, *eofs, *limbo; static int ndef, nrearm, nheld, neof, nlimbo, cap_def, cap_rearm, cap_held, cap_eof, cap_limbo;
+static uint64_t *deferred, *held, *eofs, *limbo; static int ndef, nheld, neof, nlimbo, cap_def, cap_held, cap_eof, cap_limbo;
 static int arena_full, in_txn, txn_writes, batch_failed, hold_hit, writes_held;
 
 static inline void put(const void *p, size_t n) { memcpy(arena + alen, p, n); alen += n; }
@@ -768,6 +768,8 @@ static struct io_uring_sqe *sqe(int k) {
   while (!(s = io_uring_get_sqe(&R[k].r))) io_uring_submit(&R[k].r);
   return s;
 }
+typedef struct { uint64_t *a; int head, n, cap; } fifo_t;
+static fifo_t readq, readyq;  // connections to read, connections with bytes read and not yet answered
 static void conn_close(uint64_t who) {
   int k = K(who), slot = SLOT(who); ring_t *r = &R[k]; conn_t *c = &r->c[slot];
   free(c->in); free(c->q);  // a send still in flight frees its own buffer when it completes
@@ -781,6 +783,9 @@ static void conn_close(uint64_t who) {
   io_uring_prep_cancel64(s, who, 0); s->flags |= IOSQE_IO_HARDLINK; s->user_data = T_NOP;
   if (out) { s = sqe(k); io_uring_prep_cancel64(s, (uintptr_t)out, 0); s->flags |= IOSQE_IO_HARDLINK; s->user_data = T_NOP; }
   s = sqe(k); io_uring_prep_close_direct(s, slot); s->user_data = T_NOP;
+}
+static void queue_read(uint64_t who, conn_t *c) {
+  if (!c->queued) { c->queued = 1; push(&readq.a, &readq.n, &readq.cap, who); }
 }
 static void arm_recv(uint64_t who) {  // multishot: one completion per chunk, into a provided buffer
   struct io_uring_sqe *s = sqe(K(who));
@@ -834,13 +839,36 @@ static void process(uint64_t who, conn_t *c, char *buf, size_t n) {
   } else if (c->in) { free(c->in); c->in = NULL; c->inlen = c->incap = 0; }
   if (alen == start && (closing || (c->eof && !c->sending && !arena_full && !hold_hit))) conn_close(who);
 }
+// After a stall every connection has a request waiting. Letting them sit costs a socket buffer each (3 to 4 KB, toward
+// TCP's limit) and answering them all makes one very long pass, so a pass answers ANSWERS and reads READS: the rest
+// wait on their connection, in a copy the size of the request, on a first-in, first-out list.
+#define ANSWERS 1024
+#define READS 4096
+static int answers_left = ANSWERS;
+static inline uint64_t fifo_pop(fifo_t *f) {
+  uint64_t v = f->a[f->head++];
+  if (f->head == f->n) f->head = f->n = 0;
+  else if (f->head >= 65536 && f->head * 2 >= f->n) { f->n -= f->head; memmove(f->a, f->a + f->head, f->n * sizeof *f->a); f->head = 0; }
+  return v;
+}
 static void on_data(uint64_t who, conn_t *c, const char *p, uint32_t n) {
   if (c->closing) return;  // answering Connection: close, anything after it is ignored
-  if (!c->inlen && !c->sending) { process(who, c, (char *)p, n); return; }
+  int later = c->ready || !answers_left;
+  if (!later) answers_left--;
+  if (!later && !c->inlen && !c->sending) { process(who, c, (char *)p, n); return; }
   if (c->incap - c->inlen < n) { c->incap = (c->inlen + n) * 2; c->in = realloc(c->in, c->incap); }
   memcpy(c->in + c->inlen, p, n); c->inlen += n;
   if (c->inlen > 4 * MAXREQ) { conn_close(who); return; }  // keeps sending but won't read its replies
-  if (!c->sending) process(who, c, c->in, c->inlen);
+  if (later) { if (!c->ready) { c->ready = 1; push(&readyq.a, &readyq.n, &readyq.cap, who); } }
+  else if (!c->sending) process(who, c, c->in, c->inlen);
+}
+static void run_ready(void) {  // with the answers this pass has left, what earlier passes read, oldest first
+  while (answers_left && readyq.n) {
+    uint64_t who = fifo_pop(&readyq); conn_t *c = conn_of(who);
+    if (!c) continue;
+    c->ready = 0;
+    if (c->inlen && !c->sending) { answers_left--; process(who, c, c->in, c->inlen); }
+  }
 }
 static void send_done(sop_t *o, int res) {
   uint64_t who = o->who; conn_t *c = conn_of(who);
@@ -937,11 +965,47 @@ static void on_cqe(int k, uint64_t ud, int res, unsigned f) {
         io_uring_buf_ring_add(r->br, p, BSZ, bid, NBUF - 1, 0); io_uring_buf_ring_advance(r->br, 1);
       }
       if (!(f & IORING_CQE_F_MORE) && (c = conn_of(ud))) {
-        if (res > 0 || res == -ENOBUFS) push(&rearm, &nrearm, &cap_rearm, ud);  // rearmed once buffers are back
+        // Out of buffers: rearming every receive at once would repeat that, so the rest is read in bounded rounds.
+        if (res > 0 || res == -ENOBUFS) queue_read(ud, c);
         else { c->eof = 1; push(&eofs, &neof, &cap_eof, ud); }  // the same pass may hold this client's last reply
       }
       break;
+    case T_READ: {
+      uint64_t who = (ud & ~7ULL) | T_RECV;
+      r->reads--; c = conn_of(who);
+      if (f & IORING_CQE_F_BUFFER) {
+        int bid = f >> IORING_CQE_BUFFER_SHIFT; char *p = r->bufs + (size_t)bid * BSZ;
+        if (c && res > 0) on_data(who, c, p, res);
+        io_uring_buf_ring_add(r->br, p, BSZ, bid, NBUF - 1, 0); io_uring_buf_ring_advance(r->br, 1);
+      }
+      if (!(c = conn_of(who))) break;
+      if (res == BSZ || res == -ENOBUFS) queue_read(who, c);  // a full buffer: there may be more
+      else if (res > 0 || res == -EAGAIN) arm_recv(who);  // drained: back to the multishot receive
+      else { c->eof = 1; push(&eofs, &neof, &cap_eof, who); }
+      break;
+    }
   }
+}
+static unsigned drain(int k);
+// One MSG_DONTWAIT read per queued connection, never more on a ring than it has buffers. They finish inside the submit.
+static unsigned read_rounds(void) {
+  unsigned seen = 0;
+  for (int budget = READS; budget > 0 && readq.n;) {
+    int issued = 0, stop = readq.n - readq.head;
+    for (int i = 0; i < stop && issued < budget; i++) {
+      uint64_t who = fifo_pop(&readq); conn_t *c = conn_of(who); int k = K(who);
+      if (!c) continue;
+      if (R[k].reads >= NBUF) { push(&readq.a, &readq.n, &readq.cap, who); continue; }
+      c->queued = 0; R[k].reads++; issued++;
+      struct io_uring_sqe *s = sqe(k);
+      io_uring_prep_recv(s, SLOT(who), NULL, 0, MSG_DONTWAIT);
+      s->flags |= IOSQE_FIXED_FILE | IOSQE_BUFFER_SELECT; s->buf_group = 0; s->user_data = (who & ~7ULL) | T_READ;
+    }
+    if (!issued) break;
+    budget -= issued;
+    for (int k = 0; k < nrings; k++) { io_uring_submit_and_get_events(&R[k].r); seen += drain(k); }
+  }
+  return seen;
 }
 static unsigned drain(int k) {
   struct io_uring_cqe *cqe; unsigned head, n = 0;
@@ -957,15 +1021,14 @@ static void ck_tick(void);
 static void run(void) {
   unsigned seen = 0;
   for (;;) {
-    for (int i = 0; i < nrearm; i++) if (conn_of(rearm[i])) arm_recv(rearm[i]);
-    nrearm = 0;
     arm_accepts();
     uint32_t open = R[0].n;
     for (int k = 1; k < nrings; k++) { open += R[k].n; io_uring_submit_and_get_events(&R[k].r); }
     // Busy, or more than one ring to look at: wait for ring 0's share of a batch or a short timeout, whichever is
     // first. The target is capped by the open connections so a few clients without think time never sit out the timer.
     int rc; struct io_uring_cqe *cq;
-    if (seen >= 4 || nrings > 1 || nheld || ck_active()) {
+    if (readq.n || readyq.n) rc = io_uring_submit_and_get_events(&R[0].r);  // work is waiting here: no sleeping
+    else if (seen >= 4 || nrings > 1 || nheld || ck_active()) {
       unsigned want = seen >= 4 ? WAIT_N / nrings + 1 : 1;
       if (want > open / 3 + 1) want = open / 3 + 1;
       struct __kernel_timespec ts = {.tv_nsec = WAIT_NS};
@@ -975,7 +1038,12 @@ static void run(void) {
     nlimbo = 0;
     if (rc < 0 && rc != -EINTR && rc != -EBUSY && rc != -ETIME && rc != -EAGAIN) { fprintf(stderr, "io_uring_enter: %s\n", strerror(-rc)); exit(1); }
     now_s = time(NULL); seen = 0;
+    answers_left = ANSWERS;
+    // Requests that just arrived go first. After a stall the backlog has missed any latency target already; answered
+    // first, it would make everything behind it miss too.
     for (int k = 0; k < nrings; k++) seen += drain(k);
+    run_ready();
+    seen += read_rounds();
     flush_batch();
     if (neof) {  // clients that finished sending: close once what they sent has been answered
       for (int i = 0; i < neof; i++) {

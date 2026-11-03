@@ -103,6 +103,14 @@ SQLITE_PATH=... JWT_SECRET=... HOST=0.0.0.0 PORT=80 bash start.sh
   as malformed JSON, whitespace trimmed with JavaScript's `String.prototype.trim` set, and the
   500-character limit counted in code points. JWTs: HS256 only, constant-time signature compare, `exp`
   and `nbf` checked (`exp` is required).
+- **After a stall, reads and answers are bounded.** When the server stops reading, every user with a request in flight
+  leaves it in a socket buffer: a 2 s freeze at 300,000 users measured about 250 MB against TCP's 170 MB hard limit. A receive
+  that runs out of buffers is not rearmed; its connection goes on a read queue, read by single-shot `MSG_DONTWAIT` receives,
+  never more on a ring than it has buffers, and back to a multishot receive once drained. A pass does at most 4,096 of these
+  reads and 1,024 answers. What it reads beyond that waits on its connection in a copy the size of the request, on a list, and
+  while anything waits the loop doesn't sleep. Requests that have just arrived are answered before that list: the backlog has
+  already missed any latency target, and answering it first made the requests behind it miss too (6.2% of all requests over 1 s
+  in a freeze test, against 5.2% this way). The constants come from a sweep; see below.
 - **Hot memory sits on huge pages.** The page cache (one contiguous region instead of a malloc per page,
   through `SQLITE_CONFIG_PAGECACHE`), the receive buffers, the connection tables and the response arena are
   `MADV_HUGEPAGE` regions, which Ubuntu's default THP mode honours. A TLB miss on a VM walks two page tables.
@@ -163,7 +171,7 @@ all 42. `kill -9` under write load, during checkpoints: all 547,182 acknowledged
 ## Credits
 
 Code adapted from rust-iouring-kensac (`csrc/shim.c`, #248 and #264): the checkpoint state machine and thread, `count_likes`,
-and the seek and `KeyInfo` helpers, including some names and comments. Ideas from the same entry: B-tree cursor reads, the
+and the seek and `KeyInfo` helpers, including some names and comments. Ideas from the same entry: bounded reads and answers after a burst (#264, written here for this structure, with the constants and the answer order chosen by the sweep), B-tree cursor reads, the
 `unix-excl` VFS, page cache over `mmap`, write holds, `SO_REUSEPORT` listeners and `DEFER_TASKRUN` on every ring. The `resv[0]`
 retry is also from rust-iouring-kensac and from c-iouring-pavlyhalim (#245).
 

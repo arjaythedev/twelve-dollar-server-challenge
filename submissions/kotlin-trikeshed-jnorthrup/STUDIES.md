@@ -288,11 +288,14 @@ Also: the request head is parsed in one pass, each header line matched first aga
 that position (`Http.kt`, `GET_PLAN`, `POST_PLAN`; captured from 124,884 real k6 requests: GET `Host`, `User-Agent`;
 POST adds `Content-Length`, `Authorization`, `Content-Type`). Its saving is under the 1 µs resolution of `knee2.sh`.
 
+The baseline ("before") is the build that was in kali's tree before this work: the same commit-window design, its
+source commit not recorded (4,111,728 bytes; the box builds of 2fb010a and 1b524df are 4,125,920 and 4,125,928).
+
 `mixlat.sh` (idle box, alternating runs; one GET /feed connection, alone, then beside 64 like-posters):
 
 | build | alone | beside 64 like-posters: req/s, p50 / p90 / p99 |
 |---|---|---|
-| 1b524df | 7,469-7,581 req/s, p50 121 µs | 14-15, 65.8 ms / 82.7 ms / 128.6-132.2 ms |
+| before | 7,469-7,581 req/s, p50 121 µs | 14-15, 65.8 ms / 82.7 ms / 128.6-132.2 ms |
 | change 1 only | 7,382-7,531, 121 µs | 3,040, 288-293 µs / 742-763 µs / 49.2-51.8 ms |
 | changes 1-3 | 7,508-7,539, 121 µs | 3,164-3,200, 274-283 µs / 436-452 µs / 12.0-13.3 ms |
 
@@ -305,12 +308,12 @@ The k6 mix at 128k users (`kn.sh load`, 60 s ramp, 30 s hold, loadgen on the sam
 
 | build | hold req/s | p50 / p95 / p99 | server CPU, user + sys | cgroup memory in the hold |
 |---|---|---|---|---|
-| 1b524df | 13,355 | 149.5 / 239.6 / 270.3 ms | 20 + 61% | ~640 MB, flat |
+| before | 13,355 | 149.5 / 239.6 / 270.3 ms | 20 + 61% | ~640 MB, flat |
 | changes 1-3 | 13,548 | 1.1 / 51.2 / 81.9 ms | 24 + 70% | ~620 MB, flat; WAL 4.5 MB at the end |
 
 The p95 and p99 are now the writes (7.8% of the mix) waiting for their batch. The cost: sys time rose by about 9 to
 16 points, because reads answer in their own wake and the loop makes more, smaller `io_uring_enter` calls. That is the
-next limit (next steps, 3). A second run of 1b524df overlapped another project's Gradle build on kali and is not
+next limit (next steps, 3). A second run of the baseline overlapped another project's Gradle build on kali and is not
 counted.
 
 Batch waits (`feed_enter`, the #1 entry's numbers: kensac `src/main.rs` WAIT_MIN 256, WAIT_NS 1 ms): ring 0 now waits

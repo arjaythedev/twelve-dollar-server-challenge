@@ -1,0 +1,18 @@
+diff --git a/src/Horse.Provider.Epoll.pas b/src/Horse.Provider.Epoll.pas
+index 6ae7c0d..2bb7b9f 100644
+--- a/src/Horse.Provider.Epoll.pas
++++ b/src/Horse.Provider.Epoll.pas
+@@ -3150,11 +3150,11 @@ begin
+         if LContext.FIsKeepAlive and (LContext.BytesReceived = 0) then
+         begin
+-          if LNow - LContext.LastActive > 60000 then
++          if LNow - LContext.LastActive > 70000 then
+             LExpired.Add(LContext);
+         end
+         else
+         begin
+-          if LNow - LContext.LastActive > 60000 then
++          if LNow - LContext.LastActive > 70000 then
+             LExpired.Add(LContext);
+         end;
+       end;

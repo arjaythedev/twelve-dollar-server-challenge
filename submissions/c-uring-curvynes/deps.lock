@@ -1,0 +1,4 @@
+adce02aef5dfd868f7c0b632bd23bc0e79fa710b70d93bfe334c2bd15b21a41d yyjson.h https://raw.githubusercontent.com/ibireme/yyjson/0.10.0/src/yyjson.h
+98489c068ab65298320710e5be4c1090af1b5676e41301a3525b2e732641aace yyjson.c https://raw.githubusercontent.com/ibireme/yyjson/0.10.0/src/yyjson.c
+0a9c8e34352dad46006aa82836d5383bff9dc6bc9ce5a60553c05aa30e6ad1f9 sqlite-3540100.zip https://www.sqlite.org/2026/sqlite-amalgamation-3540100.zip
+682f06733e6db6402c1f904cbbe12b94942a49effc872c9e01db3d7b180917cc liburing.tar.gz https://github.com/axboe/liburing/archive/refs/tags/liburing-2.6.tar.gz

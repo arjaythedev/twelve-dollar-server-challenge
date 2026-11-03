@@ -1,0 +1,129 @@
+--- a/src/server.asm
++++ b/src/server.asm
+@@ -111,6 +111,11 @@
+ connections: resb MAX_FD*64
+ generations: resd MAX_FD
+ timers: resd 256
++; Resumable wheel scan. Cursor uses the same connection-ID-plus-one encoding.
++timer_cursor: resd 1
++timer_scan_active: resd 1
++timer_work_pending: resd 1
++timer_scan_padding: resd 1 ; preserve previous qword alignment
+ input_free: resq 1
+ output_free: resq 1
+ input_bump: resq 1
+@@ -350,6 +355,10 @@
+  lea rsi,[events]
+  mov edx,256
+  mov r10d,1000
++ cmp dword [timer_work_pending],0
++ je .timer_wait_ready
++ xor r10d,r10d ; service I/O without sleeping while timer catch-up remains
++.timer_wait_ready:
+  syscall
+  cmp eax,-4
+  je .loop
+@@ -535,6 +544,13 @@
+  shl rax,6
+  add r8,rax
+  mov eax,[r8+48]
++ ; External close/touch may unlink the suspended scan cursor between rounds.
++ ; Advance before this record is cleared or reused; never retain a stale ID.
++ lea edx,[rdi+1]
++ cmp [timer_cursor],edx
++ jne .cursor_ok
++ mov [timer_cursor],eax
++.cursor_ok:
+  mov ecx,[r8+52]
+  test ecx,ecx
+  jz .head
+@@ -595,29 +611,62 @@
+  LEAVE
+ expire_timers:
+  ENTER
++ mov r12d,128 ; maximum timer records examined/closed in one event-loop round
++ mov r13d,32 ; maximum bucket advances, including empty catch-up buckets
++ mov dword [timer_work_pending],1
+ .tick:
++ ; Finish a suspended bucket even if clock_update still reports the same second.
++ cmp dword [timer_scan_active],0
++ jne .bucket
+  mov rax,[last_tick]
+- cmp rax,[now_sec]
+- jae .done
++ mov rdx,[now_sec]
++ cmp rax,rdx
++ jae .complete
++ test r13d,r13d
++ jz .done
++ dec r13d
++ ; No timer exceeds 120 seconds and the wheel has 256 buckets. After a long
++ ; pause, inspecting the most recent complete revolution covers every linked
++ ; timer; iterating every elapsed second would add unbounded empty work.
++ mov rcx,rdx
++ sub rcx,rax
++ cmp rcx,256
++ jbe .advance
++ lea rax,[rdx-256]
++.advance:
+  inc rax
+  mov [last_tick],rax
+  and eax,255
+- mov ebx,eax
++ lea rdx,[timers]
++ mov eax,[rdx+rax*4]
++ mov [timer_cursor],eax
++ mov dword [timer_scan_active],1
+ .bucket:
+- lea rax,[timers]
+- mov edi,[rax+rbx*4]
++ mov edi,[timer_cursor]
+  test edi,edi
+- jz .tick
++ jz .bucket_done
++ test r12d,r12d
++ jz .done
++ dec r12d
+  dec edi
+  mov eax,edi
+  shl rax,6
+  lea rdx,[connections]
+  add rdx,rax
++ ; Publish next before close_connection: removal/retirement may clear this
++ ; record. timer_remove also maintains the cursor for intervening I/O events.
++ mov eax,[rdx+48]
++ mov [timer_cursor],eax
+  mov rax,[rdx+40]
+  cmp rax,[now_sec]
+- ja .tick
++ ja .bucket
+  call close_connection
+  jmp .bucket
++.bucket_done:
++ mov dword [timer_scan_active],0
++ jmp .tick
++.complete:
++ mov dword [timer_work_pending],0
+ .done: LEAVE
+ map_memory:
+  mov eax,9
+--- a/src/uring.inc
++++ b/src/uring.inc
+@@ -712,6 +712,8 @@
+  mov esi,[rax]
+  mov rax,[r12+32]
+  sub esi,[rax]
++ cmp dword [timer_work_pending],0
++ jne .immediate ; do not multiply timer backlog latency by per-ring waits
+  mov eax,[wait_us]
+  test eax,eax
+  jz .immediate
+@@ -820,6 +822,8 @@
+ .after:
+  cmp qword [rsp],0
+  jne .loop
++ cmp dword [timer_work_pending],0
++ jne .loop ; keep servicing ring/I/O rounds until the wheel scan completes
+  mov eax,232
+  mov edi,[epoll_fd]
+  lea rsi,[events]

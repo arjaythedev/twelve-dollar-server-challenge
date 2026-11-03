@@ -1,0 +1,7 @@
+# Shell scripts must keep LF line endings: CI runs them on Linux.
+*.sh text eol=lf
+*.hphp text eol=lf
+*.c text eol=lf
+*.h text eol=lf
+*.md text eol=lf
+.gitignore text eol=lf

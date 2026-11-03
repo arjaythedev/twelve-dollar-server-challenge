@@ -1,0 +1,6 @@
+.build/
+bin/
+*.o
+swiftpm*/
+Package.resolved.bak
+.DS_Store

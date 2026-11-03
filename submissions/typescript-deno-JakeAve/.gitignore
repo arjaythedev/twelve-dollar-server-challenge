@@ -1,0 +1,8 @@
+bin/
+vendor/
+*.db
+*.db-wal
+*.db-shm
+*.profraw
+scratch/
+.DS_Store

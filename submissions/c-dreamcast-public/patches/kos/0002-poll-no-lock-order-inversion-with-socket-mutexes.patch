@@ -1,0 +1,139 @@
+diff --git a/kernel/libc/koslib/poll.c b/kernel/libc/koslib/poll.c
+index a830e9ed..6eae6ddc 100644
+--- a/kernel/libc/koslib/poll.c
++++ b/kernel/libc/koslib/poll.c
+@@ -59,74 +59,94 @@ void __poll_event_trigger(int fd, short event) {
+     mutex_unlock(&mutex);
+ }
+ 
++static int poll_count(struct pollfd fds[], nfds_t nfds) {
++    int n = 0;
++    nfds_t i;
++
++    for(i = 0; i < nfds; ++i)
++        if(fds[i].revents)
++            ++n;
++
++    return n;
++}
++
+ int poll(struct pollfd fds[], nfds_t nfds, int timeout) {
+     struct poll_int p = { { 0 }, fds, nfds, 0, COND_INITIALIZER };
+     int tmp;
+     nfds_t i;
+     vfs_handler_t *hndl;
+     void *hnd;
++    short ev;
+ 
+-    if(mutex_lock_irqsafe(&mutex))
+-        return -1;
++    /* Called from an interrupt we can neither block on our mutex nor wait: just scan. */
++    if(irq_inside_int()) {
++        for(i = 0; i < nfds; ++i) {
++            hndl = fs_get_handler(fds[i].fd);
++            hnd = fs_get_handle(fds[i].fd);
++            fds[i].revents = !hndl || !hnd ? POLLNVAL :
++                             !hndl->poll ? (POLLRDNORM | POLLWRNORM) & fds[i].events :
++                             hndl->poll(hnd, fds[i].events);
++        }
++
++        tmp = poll_count(fds, nfds);
++        if(!tmp && timeout) {
++            errno = EPERM;
++            return -1;
++        }
++
++        return tmp;
++    }
++
++    /* Register first, so that events triggered while we scan below are not lost. The
++       handlers' poll methods are called without holding our mutex: they take their own
++       locks (net_tcp takes the socket's), and the receive path calls
++       __poll_event_trigger() with those held, so holding ours here would deadlock. */
++    mutex_lock(&mutex);
++
++    for(i = 0; i < nfds; ++i)
++        fds[i].revents = 0;
++
++    LIST_INSERT_HEAD(&poll_list, &p, entry);
++    mutex_unlock(&mutex);
+ 
+     /* Check if any of the fds already match */
+     for(i = 0; i < nfds; ++i) {
+         hndl = fs_get_handler(fds[i].fd);
+         hnd = fs_get_handle(fds[i].fd);
+-        fds[i].revents = 0;
+ 
+         /* If we didn't get one of these, then assume its a bad fd. */
+-        if(!hndl || !hnd) {
+-            fds[i].revents = POLLNVAL;
+-            ++p.nmatched;
+-            continue;
+-        }
++        if(!hndl || !hnd)
++            ev = POLLNVAL;
++        /* Assume its a regular file if there's no poll method in the handler. */
++        else if(!hndl->poll)
++            ev = (POLLRDNORM | POLLWRNORM) & fds[i].events;
++        else
++            ev = hndl->poll(hnd, fds[i].events);
+ 
+-        if(!hndl->poll) {
+-            /* Assume its a regular file if there's no poll method in the
+-               handler. */
+-            if(fds[i].events & (POLLRDNORM | POLLWRNORM)) {
+-                fds[i].revents |= (POLLRDNORM | POLLWRNORM) & fds[i].events;
+-                ++p.nmatched;
+-            }
+-        }
+-        else {
+-            if((fds[i].revents = hndl->poll(hnd, fds[i].events))) {
+-                ++p.nmatched;
+-            }
++        if(ev) {
++            mutex_lock(&mutex);
++            fds[i].revents |= ev;
++            mutex_unlock(&mutex);
+         }
+     }
+ 
++    mutex_lock(&mutex);
++
+     /* If the user specified a 0 timeout, or we've already matched something,
+        bail out now. */
+-    if(p.nmatched || !timeout) {
+-        mutex_unlock(&mutex);
+-        return p.nmatched;
+-    }
+-
+-    /* We can't actually wait while we're in an interrupt, so if we got this far
+-       it is an error. */
+-    if(irq_inside_int()) {
+-        mutex_unlock(&mutex);
+-        errno = EPERM;
+-        return -1;
+-    }
++    tmp = poll_count(fds, nfds);
++    if(tmp || !timeout)
++        goto out;
+ 
+     /* Map to the value used by cond_wait_timed() */
+     if(timeout == -1)
+         timeout = 0;
+ 
+-    /* Add this instance to the list */
+-    LIST_INSERT_HEAD(&poll_list, &p, entry);
+-
+     tmp = errno;
+-    if(cond_wait_timed(&p.cv, &mutex, timeout)) {
++    if(cond_wait_timed(&p.cv, &mutex, timeout))
+         errno = tmp;
+-        tmp = 0;
+-        goto out;
+-    }
+ 
+-    tmp = p.nmatched;
++    tmp = poll_count(fds, nfds);
+ 
+ out:
+     /* Remove this instance from the list */

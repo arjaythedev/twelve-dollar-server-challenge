@@ -2,6 +2,8 @@
 
 How many users can one **$12/month server** (1 vCPU, 2 GB RAM) handle? 
 
+**Leaderboard: [benchmarks.arjaythedev.com/12-dollar-server](https://benchmarks.arjaythedev.com/12-dollar-server)**
+
 I benchmarked 8 languages with basic unoptimized code using language defaults. https://www.youtube.com/watch?v=sQXFhh_PiG4
 
 **Now it's your turn: implement the same API in any language and framework, make it as fast as you can on
@@ -106,3 +108,8 @@ separate machine. Every implementation in the video ran behind Nginx.
 
 **After your pull request is merged**, it waits for the next benchmark batch. I run merged submissions in batches,
 not one at a time, on no fixed schedule, and share the results once a batch is done.
+
+## Results
+
+**[Leaderboard](https://benchmarks.arjaythedev.com/12-dollar-server)**: every submission on the same 1 vCPU / 2 GB box, updated as new PRs are benchmarked.
+The same table, with the per-entry notes, is in [LEADERBOARD.md](LEADERBOARD.md).

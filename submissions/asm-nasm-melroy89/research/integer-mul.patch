@@ -1,0 +1,70 @@
+--- a/src/server.asm
++++ b/src/server.asm
+@@ -1105,15 +1105,37 @@
+ append_uint:
+  sub rsp,40
+  lea rsi,[rsp+32]
++ cmp dword [integer_mode],0
++ jne .mul_start
+  mov ecx,10
+-.loop:
++.div_loop:
+  xor edx,edx
+  div rcx
+  add dl,'0'
+  dec rsi
+  mov [rsi],dl
+  test rax,rax
+- jnz .loop
++ jnz .div_loop
++ jmp .copy
++.mul_start:
++ mov rcx,0xcccccccccccccccd
++.mul_loop:
++ ; q = high64(n * ceil(2^67/10)) >> 3, exact for every unsigned64 n.
++ ; The eight-byte slot above the reverse buffer is outside its20digit extent.
++ mov [rsp+32],rax
++ mul rcx
++ shr rdx,3
++ lea rax,[rdx+rdx*4]
++ add rax,rax
++ sub [rsp+32],rax
++ mov rax,[rsp+32]
++ add al,'0'
++ dec rsi
++ mov [rsi],al
++ mov rax,rdx
++ test rax,rax
++ jnz .mul_loop
++.copy:
+  lea rcx,[rsp+32]
+  sub rcx,rsi
+  rep movsb
+--- a/src/experiments.inc
++++ b/src/experiments.inc
+@@ -33,6 +33,8 @@
+ arg_query_scan: db '--query=scan-ranges',0
+ arg_savepoints_on: db '--savepoints=on',0
+ arg_savepoints_off: db '--savepoints=off',0
++arg_integer_div: db '--integer=div',0
++arg_integer_mul: db '--integer=mul',0
+ arg_quote_scalar: db '--quote=scalar',0
+ arg_quote_vector: db '--quote=vector',0
+ arg_json_sql: db '--json=sql',0
+@@ -51,6 +53,7 @@
+ query_mode: dd 0
+ json_mode: dd 1
+ savepoints_enabled: dd 0
++integer_mode: dd 0
+ section .bss
+ write_error: resd 1
+ group_context: resd 1
+@@ -115,6 +118,8 @@
+  dq arg_query_scan,query_mode,3
+  dq arg_savepoints_on,savepoints_enabled,1
+  dq arg_savepoints_off,savepoints_enabled,0
++ dq arg_integer_div,integer_mode,0
++ dq arg_integer_mul,integer_mode,1
+  dq arg_quote_scalar,quote_vector_enabled,0
+  dq arg_quote_vector,quote_vector_enabled,1
+  dq arg_json_sql,json_mode,0

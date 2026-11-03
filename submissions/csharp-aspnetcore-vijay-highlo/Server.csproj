@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <PublishAot>true</PublishAot>
+    <OptimizationPreference>Speed</OptimizationPreference>
+    <!-- One core: no background GC thread competing with requests. -->
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+    <ConcurrentGarbageCollection>false</ConcurrentGarbageCollection>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <UseSystemResourceKeys>true</UseSystemResourceKeys>
+  </PropertyGroup>
+  <!-- SQLite is compiled from source by build.sh and linked into the binary; calls to it are direct calls. -->
+  <ItemGroup>
+    <DirectPInvoke Include="sqlite3" />
+    <NativeLibrary Include="$(MSBuildThisFileDirectory)native/libsqlite3.a" />
+  </ItemGroup>
+</Project>

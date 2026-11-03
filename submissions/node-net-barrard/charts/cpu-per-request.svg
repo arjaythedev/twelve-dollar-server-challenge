@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 208" width="760" height="208" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif" role="img" aria-label="CPU time per request, by version">
+<style>
+  .bg{fill:#fcfcfb} .t1{fill:#0b0b0b} .t2{fill:#52514e} .mu{fill:#898781}
+  .grid{stroke:#e1e0d9} .axis{stroke:#c3c2b7} .ref{stroke:#52514e}
+  .s1{stroke:#2a78d6} .f1{fill:#2a78d6} .s2{stroke:#eb6834} .f2{fill:#eb6834} .f1l{fill:#86b6ef}
+  @media (prefers-color-scheme: dark){
+    .bg{fill:#1a1a19} .t1{fill:#f0efec} .t2{fill:#c3c2b7}
+    .grid{stroke:#2c2c2a} .axis{stroke:#383835} .ref{stroke:#c3c2b7}
+    .s1{stroke:#3987e5} .f1{fill:#3987e5} .s2{stroke:#d95926} .f2{fill:#d95926} .f1l{fill:#184f95}
+  }</style>
+<rect class="bg" width="760" height="208" rx="8"/>
+<text class="t1" x="24" y="32" font-size="16" font-weight="600">CPU time per request, by version</text>
+<text class="t2" x="24" y="52" font-size="12.5">10,000 users, no CPU limit. Kernel time is the network stack: the same work for any server.</text>
+<rect class="f1" x="24" y="67" width="12" height="12" rx="3"/><text class="t2" x="42" y="77" font-size="12.5">our code + Node (user)</text><rect class="f1l" x="214" y="67" width="12" height="12" rx="3"/><text class="t2" x="232" y="77" font-size="12.5">kernel</text><text class="t1" x="282" y="106" font-size="12.5" text-anchor="end">node:http, JSON built in JS</text><rect class="f1" x="294" y="92" width="287.575" height="20"/><path class="f1l" d="M583.575,92 h95 a4,4 0 0 1 4,4 v12 a4,4 0 0 1 -4,4 h-95 z"/><text class="t1" x="690.575" y="106" font-size="12.5" font-weight="600">157 µs</text><text class="t1" x="282" y="140" font-size="12.5" text-anchor="end">node:http, SQLite builds the JSON</text><rect class="f1" x="294" y="126" width="250.45" height="20"/><path class="f1l" d="M546.45,126 h97.475 a4,4 0 0 1 4,4 v12 a4,4 0 0 1 -4,4 h-97.475 z"/><text class="t1" x="655.9250000000001" y="140" font-size="12.5" font-weight="600">143 µs</text><text class="t1" x="282" y="174" font-size="12.5" text-anchor="end">node:net, hand-rolled HTTP</text><rect class="f1" x="294" y="160" width="198.475" height="20"/><path class="f1l" d="M494.475,160 h92.52499999999999 a4,4 0 0 1 4,4 v12 a4,4 0 0 1 -4,4 h-92.52499999999999 z"/><text class="t1" x="599" y="174" font-size="12.5" font-weight="600">120 µs</text>
+</svg>

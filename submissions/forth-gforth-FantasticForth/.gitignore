@@ -1,0 +1,7 @@
+# gforth's c-library FFI cache (generated at build time)
+.gforth/
+*.so
+# local test databases
+*.db
+*.db-wal
+*.db-shm

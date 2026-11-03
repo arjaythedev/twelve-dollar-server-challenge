@@ -1,0 +1,10 @@
+--- a/src/Doctrine/SqlitePragmasMiddleware.php
++++ b/src/Doctrine/SqlitePragmasMiddleware.php
+@@ -20,6 +20,7 @@
+     public const array PRAGMAS = [
+         'synchronous' => 'NORMAL', // durable at commit in WAL mode (challenge rule 6)
+         'busy_timeout' => '5000',  // wait for the write lock instead of failing with SQLITE_BUSY
++        'cache_size' => '-65536', // experiment: a 64 MiB page cache per connection, as in PR 40
+     ];
+ 
+     public function wrap(Driver $driver): Driver

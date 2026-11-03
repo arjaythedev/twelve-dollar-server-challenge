@@ -1,0 +1,64 @@
+name: twelve-dollar-java
+services:
+  seed:
+    image: twelve-dollar-java-seed:latest
+    build:
+      context: ../..
+      dockerfile: submissions/java-spring-boot-nb-99/Dockerfile
+      target: checks
+    command: /challenge/seed-local.sh
+    volumes:
+      - database:/data
+
+  # The app serves clients directly and is limited to the challenge VPS's
+  # 1 vCPU and 2 GiB of memory without swap, and its 65,535 open files.
+  server:
+    image: twelve-dollar-java-app:latest
+    build:
+      context: ../..
+      dockerfile: submissions/java-spring-boot-nb-99/Dockerfile
+      target: runtime
+      args:
+        MAVEN_PROXY_ENABLED: ${MAVEN_PROXY_ENABLED:-false}
+        MAVEN_PROXY_HOST: ${MAVEN_PROXY_HOST:-localhost}
+        MAVEN_PROXY_PORT: ${MAVEN_PROXY_PORT:-8080}
+    environment:
+      SQLITE_PATH: /data/feed.db
+      JWT_SECRET: twelve-dollar-challenge
+      HOST: 0.0.0.0
+      PORT: "80"
+    volumes:
+      - database:/data
+    ports:
+      - "127.0.0.1:${LOCAL_PORT:-3000}:80"
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "--noproxy", "*", "--fail", "--silent", "http://127.0.0.1/health"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    cpus: 1.0
+    mem_limit: 2g
+    memswap_limit: 2g
+    ulimits:
+      nofile: 65535
+
+  test:
+    image: twelve-dollar-java-test:latest
+    profiles: ["test"]
+    build:
+      context: ../..
+      dockerfile: submissions/java-spring-boot-nb-99/Dockerfile
+      target: checks
+    command: ["/challenge/test/test.sh", "http://server"]
+    environment:
+      NO_PROXY: localhost,127.0.0.1,server
+      no_proxy: localhost,127.0.0.1,server
+    depends_on:
+      server:
+        condition: service_healthy
+
+volumes:
+  database:

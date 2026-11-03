@@ -1,0 +1,12 @@
+/bin/
+/build/
+/third_party/
+/tools/k6/
+*.db
+*.db-wal
+*.db-shm
+*.gcda
+*.gcno
+*.o
+__pycache__/
+/results/

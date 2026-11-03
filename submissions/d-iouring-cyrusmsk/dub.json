@@ -1,0 +1,23 @@
+{
+  "name": "feed-server-uring",
+  "targetType": "executable",
+  "targetPath": "bin",
+  "targetName": "server",
+  "description": "The $12 server challenge API with io_uring, in-tree SQLite and a hand-written JSON path",
+  "license": "MIT",
+  "dependencies": {
+    "during": "~>0.6.0"
+  },
+  "sourcePaths": [
+    "source"
+  ],
+  "dflags": [
+    "-mcpu=native",
+    "-O3",
+    "-release",
+    "-boundscheck=off"
+  ],
+  "lflags": [
+    "sqlite_lib/sqlite3.o"
+  ]
+}

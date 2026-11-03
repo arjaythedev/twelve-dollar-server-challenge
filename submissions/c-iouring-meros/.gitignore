@@ -1,0 +1,5 @@
+# Build output, downloaded dependencies and Nix results
+bin*/
+build*/
+.deps/
+result*

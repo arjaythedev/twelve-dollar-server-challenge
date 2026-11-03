@@ -1,0 +1,302 @@
+{
+  "purpose": "source-only inventory; local draft is excluded from any eventual submission",
+  "files": [
+    {
+      "path": ".dockerignore",
+      "sha256": "27f217fc5465b8cb624dd8922f65dbf92f5ba52605e0f7c25e17f0e969b54fc9",
+      "bytes": 78,
+      "executable": false,
+      "local_draft": false
+    },
+    {
+      "path": ".gitignore",
+      "sha256": "a3c554cf4fce63c5c9c2102ecc249f3ff4fd7e2c0969157fc8b168e48d7fba57",
+      "bytes": 44,
+      "executable": false,
+      "local_draft": false
+    },
+    {
+      "path": "Dockerfile",
+      "sha256": "7c9284300e434ee46365269a82357399f63e8fd49b25df5d1ee0cfbd86509cbe",
+      "bytes": 415,
+      "executable": false,
+      "local_draft": false
+    },
+    {
+      "path": "PERFORMANCE.md",
+      "sha256": "17ecb38d33c89017691634e57bcf4f35ef45e7b8b03dca1052fac4627ec89a3f",
+      "bytes": 23807,
+      "executable": false,
+      "local_draft": false
+    },
+    {
+      "path": "README.md",
+      "sha256": "ae9a6acd8b3678463ebcf2f790c025a9f76aa60a4df14a855d0d2cb1aa9a6eed",
+      "bytes": 7324,
+      "executable": false,
+      "local_draft": false
+    },
+    {
+      "path": "TMP-PR-DESC.md",
+      "sha256": "1d6589286879ab3db31c88a99efbd6e41e3c50689377bc2d4dad0641f25ad8b5",
+      "bytes": 7379,
+      "executable": false,
+      "local_draft": true
+    },
+    {
+      "path": "benchmark.py",
+      "sha256": "1a1796fe5be2edbffd89992a1d01d4b925854176855d15f5f968047da0860577",
+      "bytes": 11352,
+      "executable": false,
+      "local_draft": false
+    },
+    {
+      "path": "build.sh",
+      "sha256": "9bc62326ee8c8699838292257986a8769f494e5bdb63196791deb843b3396468",
+      "bytes": 89,
+      "executable": true,
+      "local_draft": false
+    },
+    {
+      "path": "install.sh",
+      "sha256": "f13c49c369632f320d48a0fc7f559e5f99ad3d146307e7567ab23110d7a328bc",
+      "bytes": 243,
+      "executable": true,
+      "local_draft": false
+    },
+    {
+      "path": "research/field.md",
+      "sha256": "f22655f57691e08d45c96ed915c7d18234e802487be371f36002e43f6b275663",
+      "bytes": 6206,
+      "executable": false,
+      "local_draft": false
+    },
+    {
+      "path": "research/optimization-window.md",
+      "sha256": "28f2796fcea04fa7f2ffd1891be3bccdfa122beedfe475a7f698c03cb23ea155",
+      "bytes": 7210,
+      "executable": false,
+      "local_draft": false
+    },
+    {
+      "path": "src/crypto.asm",
+      "sha256": "51fcd12cdf8e4ed19e55aa7c1b9fa78777e329f3789b3ec6cec058d054c577a1",
+      "bytes": 5535,
+      "executable": false,
+      "local_draft": false
+    },
+    {
+      "path": "src/experiments.inc",
+      "sha256": "9f0943787615f008b6993446a14d78b18ee3000096d1a40c32227e05d59d7a1c",
+      "bytes": 8181,
+      "executable": false,
+      "local_draft": false
+    },
+    {
+      "path": "src/json.asm",
+      "sha256": "ae7737d67b1c09e780970656fd5414c6f8abd4bbdf66b975b86747da0496527f",
+      "bytes": 12706,
+      "executable": false,
+      "local_draft": false
+    },
+    {
+      "path": "src/ranges.inc",
+      "sha256": "bdc9190217a10725e0a1ca871c6cb7d3e5813bec9411e4aa20bcee6d8f3acd32",
+      "bytes": 5562,
+      "executable": false,
+      "local_draft": false
+    },
+    {
+      "path": "src/server.asm",
+      "sha256": "00ec4b07d190687fb18e0fbe3030f09ee76d3447ca8e304fd08814b82595de47",
+      "bytes": 37352,
+      "executable": false,
+      "local_draft": false
+    },
+    {
+      "path": "src/sql.inc",
+      "sha256": "4952971a0df086a24b2d923414fcca67abbf3eeec4bfeb3608c0a2d0dac47fb0",
+      "bytes": 4671,
+      "executable": false,
+      "local_draft": false
+    },
+    {
+      "path": "src/train-sql.inc",
+      "sha256": "cc4b8af0d3c3dcdc60b56f51a104ab860c8b272663b202180f4d5e13b1a1f418",
+      "bytes": 1348,
+      "executable": false,
+      "local_draft": false
+    },
+    {
+      "path": "src/train.asm",
+      "sha256": "0cff004c542203302f7d702c5e04d5f028cdda22ebf6aacd4c7c7b56de3dac39",
+      "bytes": 2298,
+      "executable": false,
+      "local_draft": false
+    },
+    {
+      "path": "src/uring.inc",
+      "sha256": "e58c1f33c22680d1c650280d90995ea54b60143c7cba442f813e5ec72fd9c5ac",
+      "bytes": 22394,
+      "executable": false,
+      "local_draft": false
+    },
+    {
+      "path": "start.sh",
+      "sha256": "8742d39196b740703d4f017f6875477f49c18f4c9fd28ecb27784170d25dc9ac",
+      "bytes": 72,
+      "executable": true,
+      "local_draft": false
+    },
+    {
+      "path": "tests/abi.asm",
+      "sha256": "0fc6928ed0d57c152ded35587c67ddd107485010b72cec3d35f281b83937cfbd",
+      "bytes": 1118,
+      "executable": false,
+      "local_draft": false
+    },
+    {
+      "path": "tests/burst.py",
+      "sha256": "a6d10761b996b8fdb96260ca6f0f050dc4b9700a4cc44052ab3953e946109439",
+      "bytes": 4043,
+      "executable": false,
+      "local_draft": false
+    },
+    {
+      "path": "tests/capacity.py",
+      "sha256": "aefa3996390c117537663639898a79a4d197d9eb845fc85f7620ad8109f69d54",
+      "bytes": 3936,
+      "executable": false,
+      "local_draft": false
+    },
+    {
+      "path": "tests/fault.asm",
+      "sha256": "e0bb7c69bb818fb481f14fa2f67f5318d22beb5744a76836140c1f90470393f1",
+      "bytes": 1164,
+      "executable": false,
+      "local_draft": false
+    },
+    {
+      "path": "tests/faults.py",
+      "sha256": "a1d9fdc45bc5d4b20ed6d1b05c92b63b0621c9ec021d674df64e0c6c7ee50cf6",
+      "bytes": 4325,
+      "executable": false,
+      "local_draft": false
+    },
+    {
+      "path": "tests/integration.py",
+      "sha256": "89f4661fb1fd410e4683dd63aae388aa4ebaa785b88e98f7951383eb93558b20",
+      "bytes": 7662,
+      "executable": false,
+      "local_draft": false
+    },
+    {
+      "path": "tests/matrix.py",
+      "sha256": "85b9c346696bc92c43774e8b202e9f58f05d5d6a055ad7a7293f64b4b8f54386",
+      "bytes": 3916,
+      "executable": false,
+      "local_draft": false
+    },
+    {
+      "path": "tests/mixed-batch.py",
+      "sha256": "b96127dad825d9c26f0f609fda79232906d07f8fee224b2bfe1d9dd26ea2227f",
+      "bytes": 3468,
+      "executable": false,
+      "local_draft": false
+    },
+    {
+      "path": "tests/pressure.py",
+      "sha256": "5b949d5409ca213a631e63897bf02fe4911801985549daa0a4050c16ecf11f9d",
+      "bytes": 2928,
+      "executable": false,
+      "local_draft": false
+    },
+    {
+      "path": "tests/primitives.py",
+      "sha256": "5892529019b6520dbbd1e50d1f2509e9396305737e8e724c0a12f9aacc4b9e67",
+      "bytes": 7039,
+      "executable": false,
+      "local_draft": false
+    },
+    {
+      "path": "tests/ranges.py",
+      "sha256": "ed84ea4cf2f8f6eb3428cab8371f833ac4d513d1db9bad40bb0643292755befe",
+      "bytes": 3132,
+      "executable": false,
+      "local_draft": false
+    },
+    {
+      "path": "tools/build.py",
+      "sha256": "d4a1db9961cbab11a428f3e5aad874b921eda14122890142c68a384924e4f38a",
+      "bytes": 4302,
+      "executable": false,
+      "local_draft": false
+    },
+    {
+      "path": "tools/competitors.py",
+      "sha256": "4fb2da15a6b2bd3057036e36b88b4ab2a681bd0d592196121cb0ca5930c99152",
+      "bytes": 1659,
+      "executable": false,
+      "local_draft": false
+    },
+    {
+      "path": "tools/field.py",
+      "sha256": "ab073e39bcff7646414f8c50aa955d30dedb4cad573e25306a8cefde3b9485ec",
+      "bytes": 4018,
+      "executable": false,
+      "local_draft": false
+    },
+    {
+      "path": "tools/qualify-field.py",
+      "sha256": "8d629f35016d2a10f9a0876490c2426ff2ceb15aaa4eb530e4c036c55a20570c",
+      "bytes": 4994,
+      "executable": false,
+      "local_draft": false
+    },
+    {
+      "path": "tools/query-profile.asm",
+      "sha256": "244dffb25a767aa6d048a4bca8b2c5aa62dec23202e858ef7bb9d1d30b357b53",
+      "bytes": 4835,
+      "executable": false,
+      "local_draft": false
+    },
+    {
+      "path": "tools/query-profile.py",
+      "sha256": "16a27a7c9a96a97dbeef596a41cb191aaecd196b2b1cfb43efa306eb740b02df",
+      "bytes": 2316,
+      "executable": false,
+      "local_draft": false
+    },
+    {
+      "path": "tools/saturation.js",
+      "sha256": "b5e1c161a4dc5dc137f8d12c6c62014e9766e970a2c299d0952fa42569b84163",
+      "bytes": 2593,
+      "executable": false,
+      "local_draft": false
+    },
+    {
+      "path": "tools/screen.py",
+      "sha256": "d288f91a249a41a74a7903449161854f11a48e7ed7278066c24d29a1c41659e3",
+      "bytes": 4170,
+      "executable": false,
+      "local_draft": false
+    },
+    {
+      "path": "tools/verify-image.py",
+      "sha256": "4b48223469133aef888ac4eab7efe774be6b9e77dc48c93bba79c046aa7b1cb6",
+      "bytes": 2995,
+      "executable": false,
+      "local_draft": false
+    }
+  ],
+  "count": 41,
+  "total_bytes": 238879,
+  "generated_directories_excluded": [
+    ".git",
+    "__pycache__",
+    "bin",
+    "build",
+    "deps",
+    "results"
+  ]
+}

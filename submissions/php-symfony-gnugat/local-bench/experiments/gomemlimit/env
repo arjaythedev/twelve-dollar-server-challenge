@@ -1,0 +1,2 @@
+# Experiment: a soft memory limit for Go's GC (unset, FrankenPHP sets it to 90% of the container's memory)
+GOMEMLIMIT=1100MiB

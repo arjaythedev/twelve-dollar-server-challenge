@@ -1,0 +1,53 @@
+# FrankenPHP (Caddy) serving the app directly on HOST:PORT, no Nginx in front.
+# Env placeholders ({$VAR}) are substituted once when the Caddyfile is parsed, never per request.
+{
+	auto_https off
+	admin off
+	log {
+		level WARN
+	}
+	servers {
+		protocols h1
+		timeouts {
+			idle 5m
+		}
+	}
+	frankenphp {
+		num_threads 1
+		php_ini {
+			opcache.enable 1
+			opcache.validate_timestamps 0
+			opcache.max_accelerated_files 20000
+			opcache.interned_strings_buffer 16
+			opcache.jit tracing
+			opcache.jit_buffer_size 64M
+			opcache.preload {$APP_ROOT}/var/cache/prod/App_KernelProdContainer.preload.php
+			realpath_cache_size 4096K
+			realpath_cache_ttl 600
+			memory_limit 128M
+			expose_php 0
+			display_errors 0
+			log_errors 1
+			date.timezone UTC
+			zend.assertions -1
+		}
+	}
+}
+
+http://:{$PORT} {
+	bind {$HOST}
+	route {
+		php_server {
+			root {$APP_ROOT}/public
+			file_server off
+			resolve_root_symlink false
+			worker {
+				file index.php
+				num {$WORKERS:2}
+				match *
+				env APP_ENV prod
+				env APP_DEBUG 0
+			}
+		}
+	}
+}

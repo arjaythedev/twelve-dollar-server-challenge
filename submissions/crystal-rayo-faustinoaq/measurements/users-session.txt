@@ -1,0 +1,11 @@
+2026-10-28T17:34:32Z
+reference users=1000 think-scale=0.01 cpu=9 clients=10-11
+  t= 10s ok=98524 fail=0 p95=14.8ms p99=208.9ms
+  t= 20s ok=193585 fail=0 p95=18.4ms p99=245.8ms
+users=1000 rps=9679 p50=0.7ms p95=18.4ms p99=245.8ms max=344ms err=0.000% pass=true feed/post/like/new=89185/89166/13465/1773
+final RSS KiB: 25840
+rayo users=1000 think-scale=0.01 cpu=9 clients=10-11
+  t= 10s ok=104233 fail=0 p95=5.8ms p99=16.4ms
+  t= 20s ok=208553 fail=0 p95=5.6ms p99=16.9ms
+users=1000 rps=10427 p50=0.6ms p95=5.6ms p99=16.9ms max=37ms err=0.000% pass=true feed/post/like/new=96051/96009/14599/1895
+final RSS KiB: 47776

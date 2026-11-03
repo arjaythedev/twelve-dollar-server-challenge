@@ -1,0 +1,28 @@
+.{
+    .name = .twelve_dollar_iouring,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.15.2",
+    .fingerprint = 0x7e3f50f30fbd1c5c,
+    // Every dependency is pinned to a commit or a release archive, with its hash. SQLite,
+    // libsodium and arnm are the pins gradido-unicorn's fast-servers build carries;
+    // picohttpparser is the request parser h2o uses, on its own.
+    .dependencies = .{
+        .picohttpparser = .{
+            .url = "git+https://github.com/h2o/picohttpparser#465a7ff09fbd3432fe56c673451f5460154d1f07",
+            .hash = "N-V-__8AAC5WAQD4BlNomqrQGM3zkjZ1DuWqKDLMe3FnC2ST",
+        },
+        .libsodium = .{
+            .url = "git+https://github.com/jedisct1/libsodium#77e1ce5d6dee871c49ef211222ba18ef0c486bda",
+            .hash = "N-V-__8AAGV3jgBL34nv4uUihxaCgroWLfj966-SVjBHn9RE",
+        },
+        .arnm = .{
+            .url = "https://github.com/gradido/arnm/archive/refs/tags/v0.8.3.tar.gz",
+            .hash = "arnm-0.8.3-ZdhGsPZrJgAWcLD-KoYpN6RqeIjxCpEZWw1KoIdFRrU4",
+        },
+        .sqlite3 = .{
+            .url = "https://sqlite.org/2026/sqlite-amalgamation-3530200.zip",
+            .hash = "N-V-__8AALc_rgC04POe18O0LKFRm4ouQpLtL3riscEmWp-Q",
+        },
+    },
+    .paths = .{ "build.zig", "build.zig.zon", "src" },
+}

@@ -1,0 +1,9 @@
+{
+	"fileVersion": 1,
+	"versions": {
+		"during": "0.3.0",
+		"eventcore": "0.9.39",
+		"silly": "1.1.1",
+		"taggedalgebraic": "1.0.1"
+	}
+}

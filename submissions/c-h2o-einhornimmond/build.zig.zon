@@ -1,0 +1,35 @@
+.{
+    .name = .twelve_dollar_h2o,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.15.2",
+    .fingerprint = 0x5f129c3c9c6f611a,
+    // Every dependency is pinned to a commit or a release archive, with its hash. They are the
+    // pins gradido-unicorn's fast-servers build carries.
+    .dependencies = .{
+        .h2o = .{
+            .url = "git+https://github.com/h2o/h2o#706842c0f8c0d9422efb97a4d8ef7d6ec9df87b7",
+            .hash = "N-V-__8AACufnwFkhWbkiO3KxcVcasJKyoe9sYRvT0rp5-MI",
+        },
+        .libressl = .{
+            .url = "git+https://github.com/allyourcodebase/libressl?ref=master#8c63fadf71925d74942a847b9a6b3a28930792a3",
+            .hash = "libressl-4.0.0--kqV4FHUAABdqKrbT3i3K-m1m7s_HyZZMMoBpbHjCiNQ",
+        },
+        .zlib = .{
+            .url = "git+https://github.com/allyourcodebase/zlib#c5115f4b69ef660f72a835c6638f80508ef284c7",
+            .hash = "zlib-1.3.1-1-ZZQ7ldENAAA7qJjUXP6E6xnRuV-jDL9dyoJFc_eb3zQ6",
+        },
+        .libsodium = .{
+            .url = "git+https://github.com/jedisct1/libsodium#77e1ce5d6dee871c49ef211222ba18ef0c486bda",
+            .hash = "N-V-__8AAGV3jgBL34nv4uUihxaCgroWLfj966-SVjBHn9RE",
+        },
+        .arnm = .{
+            .url = "https://github.com/gradido/arnm/archive/refs/tags/v0.8.3.tar.gz",
+            .hash = "arnm-0.8.3-ZdhGsPZrJgAWcLD-KoYpN6RqeIjxCpEZWw1KoIdFRrU4",
+        },
+        .sqlite3 = .{
+            .url = "https://sqlite.org/2026/sqlite-amalgamation-3530200.zip",
+            .hash = "N-V-__8AALc_rgC04POe18O0LKFRm4ouQpLtL3riscEmWp-Q",
+        },
+    },
+    .paths = .{ "build.zig", "build.zig.zon", "src" },
+}

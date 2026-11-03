@@ -1,0 +1,5 @@
+source "https://rubygems.org"
+gem "rails", "8.1.4"
+gem "puma", "8.0.2"
+gem "sqlite3", "2.9.6"
+gem "jwt", "3.3.0"

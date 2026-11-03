@@ -1,0 +1,21 @@
+# Rebuild application sources with the already installed pinned dependencies.
+# local.sh up --reuse-image supplies this checkout's existing image names.
+ARG TOOLCHAIN_IMAGE
+ARG RUNTIME_IMAGE
+FROM ${TOOLCHAIN_IMAGE} AS build
+USER root
+WORKDIR /candidate
+COPY src ./src
+COPY build.sh versions.env ./
+RUN chown -R ada:ada /candidate
+USER 10001:10001
+RUN bash build.sh && sha256sum src/* build.sh versions.env > build-sha256.txt
+
+FROM ${RUNTIME_IMAGE}
+COPY --from=build /candidate/bin/server /app/bin/server
+COPY --from=build /candidate/build-sha256.txt /app/build-sha256.txt
+COPY start.sh /app/start.sh
+COPY bench/entrypoint.sh bench/monitor.py /app/bench/
+COPY bench/nginx-main.conf /etc/nginx/ada-benchmark.conf
+RUN chmod 755 /app/start.sh /app/bench/entrypoint.sh && \
+    chmod 644 /app/bench/monitor.py /etc/nginx/ada-benchmark.conf

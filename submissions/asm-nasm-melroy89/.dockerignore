@@ -1,0 +1,9 @@
+*
+!Dockerfile
+!install.sh
+!build.sh
+!start.sh
+!src/
+!src/**
+!tools/
+!tools/**

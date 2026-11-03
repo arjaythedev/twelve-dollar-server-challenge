@@ -1,0 +1,2282 @@
+// server.cid — 100% Pure Cider io_uring Server Implementation
+// Multi-ring direct-descriptor HTTP/1.1 engine for the Twelve Dollar Server Challenge.
+
+extern func syscall(number: i64, a1: i64, a2: i64, a3: i64, a4: i64, a5: i64, a6: i64) -> i64;
+extern func mmap(addr: *void, length: i64, prot: int, flags: int, fd: int, offset: i64) -> *void;
+extern func munmap(addr: *void, length: i64) -> int;
+extern func malloc(size: i64) -> *void;
+extern func realloc(ptr: *void, size: i64) -> *void;
+extern func free(ptr: *void) -> void;
+extern func memcpy(dest: *void, src: *void, n: i64) -> *void;
+extern func memmove(dest: *void, src: *void, n: i64) -> *void;
+extern func memchr(s: *void, c: int, n: i64) -> *void;
+extern func memmem(haystack: *void, haystacklen: i64, needle: *void, needlelen: i64) -> *void;
+extern func strlen(s: *char) -> i64;
+extern func strcmp(s1: *char, s2: *char) -> int;
+extern func strncmp(s1: *char, s2: *char, n: i64) -> int;
+extern func strstr(haystack: *char, needle: *char) -> *char;
+extern func strchr(s: *char, c: int) -> *char;
+extern func strncasecmp(s1: *char, s2: *char, n: i64) -> int;
+extern func puts(s: *char) -> int;
+extern func exit(code: int) -> void;
+extern func getenv(name: *char) -> *char;
+extern func atoi(str: *char) -> int;
+extern func clock_gettime(clk_id: int, tp: *void) -> int;
+extern func time(tloc: *void) -> i64;
+extern func getrlimit(resource: int, rlim: *void) -> int;
+extern func setrlimit(resource: int, rlim: *void) -> int;
+
+extern func socket(domain: int, type_: int, protocol: int) -> int;
+extern func setsockopt(sockfd: int, level: int, optname: int, optval: *void, optlen: u32) -> int;
+extern func bind(sockfd: int, addr: *void, addrlen: u32) -> int;
+extern func listen(sockfd: int, backlog: int) -> int;
+extern func close(fd: int) -> int;
+extern func open(pathname: *char, flags: int) -> int;
+extern func posix_fadvise(fd: int, offset: i64, len: i64, advice: int) -> int;
+extern func htons(hostshort: u16) -> u16;
+extern func inet_pton(af: int, src: *char, dst: *void) -> int;
+
+extern func pthread_create(thread: *u64, attr: *void, start_routine: *void, arg: *void) -> int;
+extern func pthread_join(thread: u64, retval: **void) -> int;
+extern func pthread_mutex_init(mutex: *void, attr: *void) -> int;
+extern func pthread_mutex_lock(mutex: *void) -> int;
+extern func pthread_mutex_unlock(mutex: *void) -> int;
+
+extern func HMAC(evp_md: *void, key: *void, key_len: int, d: *void, n: i64, md: *void, md_len: *u32) -> *void;
+extern func EVP_sha256() -> *void;
+extern func CRYPTO_memcmp(a: *void, b: *void, len: i64) -> int;
+
+extern func sqlite3_open_v2(filename: *char, ppDb: **void, flags: int, zVfs: *char) -> int;
+extern func sqlite3_close(db: *void) -> int;
+extern func sqlite3_exec(db: *void, sql: *char, callback: *void, arg: *void, errmsg: **char) -> int;
+extern func sqlite3_prepare_v2(db: *void, zSql: *char, nByte: int, ppStmt: **void, pzTail: **char) -> int;
+extern func sqlite3_step(stmt: *void) -> int;
+extern func sqlite3_reset(stmt: *void) -> int;
+extern func sqlite3_finalize(stmt: *void) -> int;
+extern func sqlite3_column_int64(stmt: *void, iCol: int) -> i64;
+extern func sqlite3_column_text(stmt: *void, iCol: int) -> *char;
+extern func sqlite3_column_bytes(stmt: *void, iCol: int) -> int;
+extern func sqlite3_bind_int64(stmt: *void, iCol: int, val: i64) -> int;
+extern func sqlite3_bind_text(stmt: *void, iCol: int, val: *char, n: int, destructor: *void) -> int;
+extern func sqlite3_changes(db: *void) -> int;
+extern func sqlite3_errmsg(db: *void) -> *char;
+extern func sqlite3_wal_checkpoint_v2(db: *void, zDb: *char, eMode: int, pnLog: *void, pnCkpt: *void) -> int;
+extern func sqlite3_wal_hook(db: *void, callback: *void, arg: *void) -> *void;
+extern func fast_append_i64(w: *void, val: i64) -> void;
+extern func fast_append_json_string(w: *void, s: *char, slen: int) -> void;
+extern func bt_init(db: *void) -> int;
+extern func bt_feed_json(out_buf: *char, cap: int, out_status: *int) -> int;
+extern func bt_post_json(post_id: i64, out_buf: *char, cap: int, out_status: *int) -> int;
+extern func bt_end_batch() -> void;
+
+const SYS_IO_URING_SETUP: i64 = 425;
+const SYS_IO_URING_ENTER: i64 = 426;
+const SYS_IO_URING_REGISTER: i64 = 427;
+
+const IORING_OP_NOP: u8 = 0 as u8;
+const IORING_OP_ACCEPT: u8 = 13 as u8;
+const IORING_OP_CLOSE: u8 = 19 as u8;
+const IORING_OP_SEND: u8 = 26 as u8;
+const IORING_OP_RECV: u8 = 27 as u8;
+
+const IOSQE_FIXED_FILE: u8 = 0x01 as u8;
+const IOSQE_BUFFER_SELECT: u8 = 0x20 as u8;
+const IOSQE_CQE_SKIP_SUCCESS: u8 = 0x40 as u8;
+
+const IORING_REGISTER_FILES: i64 = 2;
+const IORING_REGISTER_PBUF_RING: i64 = 22;
+const IORING_ENTER_GETEVENTS: i64 = 1;
+const IORING_ENTER_EXT_ARG: i64 = 8;
+const IORING_ACCEPT_MULTISHOT: u16 = 1 as u16;
+const IORING_RECV_MULTISHOT: u16 = 2 as u16;
+const IORING_FILE_INDEX_ALLOC: u32 = 0xffffffff as u32;
+
+const NBUFS: i64 = 4096;
+const BUF_SZ: i64 = 2048;
+const RESP_BUF_SZ: i64 = 8192;
+
+struct KernelTimespec {
+    var tv_sec: i64;
+    var tv_nsec: i64;
+}
+
+struct IoUringGeteventsArg {
+    var sigmask: u64;
+    var sigmask_sz: u32;
+    var min_wait_usec: u32;
+    var ts: u64;
+}
+
+struct RLimit {
+    var rlim_cur: u64;
+    var rlim_max: u64;
+}
+
+struct SockAddrIn {
+    var sin_family: u16;
+    var sin_port: u16;
+    var sin_addr: u32;
+    var sin_zero: [u8; 8];
+}
+
+struct SQRingOffsets {
+    var head: u32;
+    var tail: u32;
+    var ring_mask: u32;
+    var ring_entries: u32;
+    var flags: u32;
+    var dropped: u32;
+    var array: u32;
+    var resv1: u32;
+    var user_addr: u64;
+}
+
+struct CQRingOffsets {
+    var head: u32;
+    var tail: u32;
+    var ring_mask: u32;
+    var ring_entries: u32;
+    var overflow: u32;
+    var cqes: u32;
+    var flags: u32;
+    var resv1: u32;
+    var user_addr: u64;
+}
+
+struct IoUringParams {
+    var sq_entries: u32;
+    var cq_entries: u32;
+    var flags: u32;
+    var sq_thread_cpu: u32;
+    var sq_thread_idle: u32;
+    var features: u32;
+    var wq_fd: u32;
+    var resv0: u32;
+    var resv1: u32;
+    var resv2: u32;
+    var sq_off: SQRingOffsets;
+    var cq_off: CQRingOffsets;
+}
+
+struct IoUringBufReg {
+    var ring_addr: u64;
+    var ring_entries: u32;
+    var bgid: u16;
+    var flags: u16;
+    var resv1: u64;
+    var resv2: u64;
+    var resv3: u64;
+}
+
+struct IoUringBuf {
+    var addr: u64;
+    var len: u32;
+    var bid: u16;
+    var resv: u16;
+}
+
+struct IoUringSqe {
+    var opcode: u8;
+    var flags: u8;
+    var ioprio: u16;
+    var fd: i32;
+    var off: u64;
+    var addr: u64;
+    var len: u32;
+    var rw_flags: u32;
+    var user_data: u64;
+    var buf_index: u16;
+    var personality: u16;
+    var file_index: u32;
+    var opt1: u64;
+    var opt2: u64;
+}
+
+struct IoUringCqe {
+    var user_data: u64;
+    var res: i32;
+    var flags: u32;
+}
+
+struct Buffer {
+    var ptr: *u8;
+    var len: u32;
+    var cap: u32;
+}
+
+struct Conn {
+    var input: Buffer;
+    var output: Buffer;
+    var flight: Buffer;
+    var sent: u32;
+    var gen: u32;
+    var state: u32;
+}
+
+var CONN_LIVE: u32 = 1 as u32;
+var CONN_RECEIVING: u32 = 2 as u32;
+var CONN_SENDING: u32 = 4 as u32;
+var CONN_CLOSING: u32 = 8 as u32;
+var CONN_DIRTY: u32 = 16 as u32;
+var CONN_REARM: u32 = 32 as u32;
+
+struct WorkerState {
+    var id: int;
+    var ring_fd: int;
+    var sq_ptr: *u8;
+    var cq_ptr: *u8;
+    var sqes: *IoUringSqe;
+    var sq_head: *u32;
+    var sq_tail: *u32;
+    var sq_mask: *u32;
+    var sq_array: *u32;
+    var cq_head: *u32;
+    var cq_tail: *u32;
+    var cq_mask: *u32;
+    var cqes: *IoUringCqe;
+    var pbuf_ring_mem: *u8;
+    var pbuf_buf_mem: *u8;
+    var ptail_ptr: *u16;
+    var conns: *Conn;
+    var open_conns: int;
+    var accept_gen: u32;
+    var body_buf: *char;
+    var pool_ptrs: [*u8; 4096];
+    var pool_caps: [u32; 4096];
+    var pool_len: int;
+    var dirty_fds: [i32; 4096];
+    var dirty_count: int;
+    var rearm_fds: *i32;
+    var rearm_head: int;
+    var rearm_tail: int;
+    var rearm_cap: int;
+}
+
+struct AuthClaims {
+    var user_id: i64;
+    var username: [char; 256];
+}
+
+struct BufWriter {
+    var buf: *char;
+    var len: int;
+    var cap: int;
+}
+
+// Global server state
+var g_listen_fd: int = -1;
+var g_db: *void = nil;
+var g_db_mutex: *void = nil;
+var g_secret_ptr: *char = nil;
+var g_start_time: i64 = 0 as i64;
+var g_last_ckpt: i64 = 0 as i64;
+var g_nr_files: i64 = 65535 as i64;
+var g_nworkers: int = 1;
+var g_in_txn: int = 0;
+var g_wal_frames: int = 0;
+
+// Global SQLite statements
+var g_stmt_feed: *void = nil;
+var g_stmt_feed_ids: *void = nil;
+var g_stmt_feed_likes: *void = nil;
+var g_stmt_feed_rows: *void = nil;
+var g_stmt_post: *void = nil;
+var g_stmt_health: *void = nil;
+var g_stmt_check_post: *void = nil;
+var g_stmt_like_exists: *void = nil;
+var g_stmt_insert_like: *void = nil;
+var g_stmt_insert_post: *void = nil;
+var g_stmt_begin: *void = nil;
+var g_stmt_commit: *void = nil;
+var g_stmt_rollback: *void = nil;
+var g_feed_scratch: *char = nil;
+
+func on_wal_hook(arg: *void, db: *void, zDb: *char, nEntry: int) -> int {
+    g_wal_frames = nEntry;
+    return 0;
+}
+
+func ensure_db_txn() -> void {
+    if (g_in_txn == 0) {
+        var stmt_b: *void = g_stmt_begin;
+        sqlite3_step(stmt_b);
+        sqlite3_reset(stmt_b);
+        g_in_txn = 1;
+    }
+}
+
+func buf_append(w: *BufWriter, s: *char, slen: int) -> void {
+    if (w->len + slen >= w->cap) { return; }
+    memcpy((w->buf as i64 + w->len as i64) as *void, s as *void, slen as i64);
+    w->len = w->len + slen;
+    var term: *char = (w->buf as i64 + w->len as i64) as *char;
+    *term = 0 as char;
+}
+
+func buf_append_str(w: *BufWriter, s: *char) -> void {
+    var slen: int = strlen(s) as int;
+    buf_append(w, s, slen);
+}
+
+// Same as buf_append, but without the trailing NUL store. Used for hot JSON
+// serialization where callers always pass an explicit length.
+func buf_append_fast(w: *BufWriter, s: *char, slen: int) -> void {
+    if (w->len + slen >= w->cap) { return; }
+    memcpy((w->buf as i64 + w->len as i64) as *void, s as *void, slen as i64);
+    w->len = w->len + slen;
+}
+
+func buf_append_int(w: *BufWriter, val: i64) -> void {
+    fast_append_i64(w as *void, val);
+}
+
+func buf_append_json_escaped(w: *BufWriter, s: *char, slen: int) -> void {
+    fast_append_json_string(w as *void, s, slen);
+}
+
+func write_error(out_buf: *char, max_len: int, msg: *char) -> int {
+    var writer: BufWriter = BufWriter { buf: out_buf, len: 0, cap: max_len };
+    var pre: string = "{\"error\":\0";
+    buf_append_str(&writer, &pre[0] as *char);
+    buf_append_json_escaped(&writer, msg, strlen(msg) as int);
+    var suf: string = "}\0";
+    buf_append_str(&writer, &suf[0] as *char);
+    return writer.len;
+}
+
+func write_post_json_with_likes(w: *BufWriter, stmt: *void, like_count: i64) -> void {
+    var p0: string = "{\"id\":\0";
+    buf_append_fast(w, &p0[0] as *char, 6);
+    var id: i64 = sqlite3_column_int64(stmt, 0);
+    buf_append_int(w, id);
+
+    var p1: string = ",\"body\":\0";
+    buf_append_fast(w, &p1[0] as *char, 8);
+    var body_ptr: *char = sqlite3_column_text(stmt, 1);
+    var body_len: int = sqlite3_column_bytes(stmt, 1);
+    buf_append_json_escaped(w, body_ptr, body_len);
+
+    var p2: string = ",\"created_at\":\"\0";
+    buf_append_fast(w, &p2[0] as *char, 15);
+    var created_ptr: *char = sqlite3_column_text(stmt, 2);
+    var created_len: int = sqlite3_column_bytes(stmt, 2);
+    buf_append_fast(w, created_ptr, created_len);
+    var q: string = "\"\0";
+    buf_append_fast(w, &q[0] as *char, 1);
+
+    var p3: string = ",\"author\":\0";
+    buf_append_fast(w, &p3[0] as *char, 10);
+    var author_ptr: *char = sqlite3_column_text(stmt, 3);
+    var author_len: int = sqlite3_column_bytes(stmt, 3);
+    buf_append_json_escaped(w, author_ptr, author_len);
+
+    var p4: string = ",\"like_count\":\0";
+    buf_append_fast(w, &p4[0] as *char, 14);
+    buf_append_int(w, like_count);
+
+    var p5: string = "}\0";
+    buf_append_fast(w, &p5[0] as *char, 1);
+}
+
+func write_post_json(w: *BufWriter, stmt: *void) -> void {
+    var like_count: i64 = sqlite3_column_int64(stmt, 4);
+    write_post_json_with_likes(w, stmt, like_count);
+}
+
+func parse_positive_id(s: *char, out_val: *i64) -> int {
+    var slen: int = strlen(s) as int;
+    if (slen == 0) { return 0; }
+    var val: i64 = 0 as i64;
+    var i: int = 0;
+    while (i < slen) {
+        var c: char = s[i];
+        if (c < 48 as char || c > 57 as char) { return 0; }
+        val = val * (10 as i64) + ((c as i64) - (48 as i64));
+        if (val > 999999999999 as i64) { return 0; }
+        i = i + 1;
+    }
+    if (val <= 0 as i64) { return 0; }
+    *out_val = val;
+    return 1;
+}
+
+// Base64URL decoder in pure Cider
+func b64_val(c: char) -> int {
+    if (c >= 65 as char && c <= 90 as char) { return (c as int) - 65; }
+    if (c >= 97 as char && c <= 122 as char) { return (c as int) - 97 + 26; }
+    if (c >= 48 as char && c <= 57 as char) { return (c as int) - 48 + 52; }
+    if (c == 45 as char || c == 43 as char) { return 62; }
+    if (c == 95 as char || c == 47 as char) { return 63; }
+    return -1;
+}
+
+func b64url_decode(src: *char, slen: int, dst: *char, max_dst: int) -> int {
+    var out_len: int = 0;
+    var i: int = 0;
+    while (i < slen) {
+        var remain: int = slen - i;
+        if (remain == 1) { return -1; }
+
+        var v0: int = b64_val(src[i]);
+        var v1: int = b64_val(src[i + 1]);
+        if (v0 < 0 || v1 < 0) { return -1; }
+
+        var v2: int = 0;
+        var v3: int = 0;
+        if (remain >= 3) {
+            v2 = b64_val(src[i + 2]);
+            if (v2 < 0) { return -1; }
+        }
+        if (remain >= 4) {
+            v3 = b64_val(src[i + 3]);
+            if (v3 < 0) { return -1; }
+        }
+
+        if (out_len >= max_dst) { return -1; }
+        dst[out_len] = (((v0 << 2) | (v1 >> 4)) & 255) as char;
+        out_len = out_len + 1;
+
+        if (remain >= 3) {
+            if (out_len >= max_dst) { return -1; }
+            dst[out_len] = ((((v1 & 15) << 4) | (v2 >> 2)) & 255) as char;
+            out_len = out_len + 1;
+        }
+
+        if (remain >= 4) {
+            if (out_len >= max_dst) { return -1; }
+            dst[out_len] = ((((v2 & 3) << 6) | v3) & 255) as char;
+            out_len = out_len + 1;
+            i = i + 4;
+        } else {
+            i = slen;
+        }
+    }
+    if (out_len < max_dst) {
+        dst[out_len] = 0 as char;
+    }
+    return out_len;
+}
+
+func verify_jwt(auth_header: *char, secret: *char, claims: *AuthClaims) -> int {
+    if (auth_header == nil) { return 1; }
+    if (strncmp(auth_header, "Bearer \0", 7 as i64) != 0) { return 1; }
+
+    var token: *char = (auth_header as i64 + 7 as i64) as *char;
+    while (*token == 32 as char) { token = (token as i64 + 1 as i64) as *char; }
+    if (*token == 0 as char) { return 1; }
+
+    var p1: *char = strchr(token, 46); // '.'
+    if (p1 == nil) { return 2; }
+    var p2: *char = strchr((p1 as i64 + 1 as i64) as *char, 46);
+    if (p2 == nil) { return 2; }
+    if (strchr((p2 as i64 + 1 as i64) as *char, 46) != nil) { return 2; } // extra dot
+
+    var h_len: int = (p1 as i64 - token as i64) as int;
+    var p_len: int = (p2 as i64 - p1 as i64 - 1 as i64) as int;
+    var sig_str: *char = (p2 as i64 + 1 as i64) as *char;
+    var s_len: int = strlen(sig_str) as int;
+    if (h_len == 0 || p_len == 0 || s_len == 0) { return 2; }
+
+    // 1. Decode signature
+    var sig_decoded: [char; 64] = uninit;
+    var sig_len: int = b64url_decode(sig_str, s_len, &sig_decoded[0] as *char, 64);
+    if (sig_len != 32) { return 2; }
+
+    // 2. Verify HMAC-SHA256 signature
+    var expected_sig: [char; 64] = uninit;
+    var md_len: u32 = 0 as u32;
+    var sign_len: i64 = (p2 as i64 - token as i64);
+    HMAC(EVP_sha256(), secret as *void, strlen(secret) as int, token as *void, sign_len, &expected_sig[0] as *void, &md_len);
+    if (md_len != 32 as u32) { return 2; }
+    if (CRYPTO_memcmp(&sig_decoded[0] as *void, &expected_sig[0] as *void, 32 as i64) != 0) {
+        return 2;
+    }
+
+    // 3. Decode Header and verify "alg":"HS256"
+    var h_decoded: [char; 512] = uninit;
+    var h_dec_len: int = b64url_decode(token, h_len, &h_decoded[0] as *char, 512);
+    if (h_dec_len <= 0) { return 2; }
+
+    var needle_hs256: string = "\"alg\":\"HS256\"\0";
+    if (strstr(&h_decoded[0] as *char, &needle_hs256[0] as *char) == nil) {
+        return 2; // Not HS256
+    }
+
+    // 4. Decode Payload and verify claims
+    var p_decoded: [char; 2048] = uninit;
+    var p_dec_len: int = b64url_decode((p1 as i64 + 1 as i64) as *char, p_len, &p_decoded[0] as *char, 2048);
+    if (p_dec_len <= 0) { return 2; }
+
+    // Verify "exp"
+    var needle_exp: string = "\"exp\":\0";
+    var exp_ptr: *char = strstr(&p_decoded[0] as *char, &needle_exp[0] as *char);
+    if (exp_ptr == nil) { return 2; }
+    exp_ptr = (exp_ptr as i64 + 6 as i64) as *char;
+    while (*exp_ptr == 32 as char) { exp_ptr = (exp_ptr as i64 + 1 as i64) as *char; }
+    var exp_val: i64 = 0 as i64;
+    while (*exp_ptr >= 48 as char && *exp_ptr <= 57 as char) {
+        exp_val = exp_val * (10 as i64) + ((*exp_ptr as i64) - (48 as i64));
+        exp_ptr = (exp_ptr as i64 + 1 as i64) as *char;
+    }
+    var now: i64 = time(nil);
+    if (exp_val <= now) { return 2; } // Expired
+
+    // Verify "sub":"<user_id>"
+    var needle_sub: string = "\"sub\":\0";
+    var sub_ptr: *char = strstr(&p_decoded[0] as *char, &needle_sub[0] as *char);
+    if (sub_ptr == nil) { return 3; }
+    sub_ptr = (sub_ptr as i64 + 6 as i64) as *char;
+    while (*sub_ptr == 32 as char) { sub_ptr = (sub_ptr as i64 + 1 as i64) as *char; }
+    if (*sub_ptr != 34 as char) { return 3; } // Must be a string
+    sub_ptr = (sub_ptr as i64 + 1 as i64) as *char;
+
+    var uid: i64 = 0 as i64;
+    var uid_digits: int = 0;
+    while (*sub_ptr >= 48 as char && *sub_ptr <= 57 as char) {
+        uid = uid * (10 as i64) + ((*sub_ptr as i64) - (48 as i64));
+        uid_digits = uid_digits + 1;
+        sub_ptr = (sub_ptr as i64 + 1 as i64) as *char;
+    }
+    if (uid_digits == 0 || *sub_ptr != 34 as char || uid <= 0 as i64) {
+        return 3;
+    }
+    claims->user_id = uid;
+
+    // Verify "username":"<name>"
+    var needle_user: string = "\"username\":\0";
+    var user_ptr: *char = strstr(&p_decoded[0] as *char, &needle_user[0] as *char);
+    if (user_ptr == nil) { return 3; }
+    user_ptr = (user_ptr as i64 + 11 as i64) as *char;
+    while (*user_ptr == 32 as char) { user_ptr = (user_ptr as i64 + 1 as i64) as *char; }
+    if (*user_ptr != 34 as char) { return 3; }
+    user_ptr = (user_ptr as i64 + 1 as i64) as *char;
+
+    var u_len: int = 0;
+    while (*user_ptr != 0 as char && *user_ptr != 34 as char && u_len < 255) {
+        claims->username[u_len] = *user_ptr;
+        u_len = u_len + 1;
+        user_ptr = (user_ptr as i64 + 1 as i64) as *char;
+    }
+    if (*user_ptr != 34 as char || u_len == 0) { return 3; }
+    claims->username[u_len] = 0 as char;
+
+    return 0; // Success
+}
+
+func is_whitespace(c: char) -> int {
+    if (c == 32 as char || c == 9 as char || c == 10 as char || c == 13 as char) {
+        return 1;
+    }
+    return 0;
+}
+
+func count_utf8(s: *char, len: int) -> int {
+    var count: int = 0;
+    var i: int = 0;
+    while (i < len) {
+        var b: int = (s[i] as int) & 255;
+        if ((b & 192) != 128) {
+            count = count + 1;
+        }
+        i = i + 1;
+    }
+    return count;
+}
+
+
+func set_json_error(out_err: **char, msg: *char) -> int {
+    *out_err = msg;
+    return 400;
+}
+
+func json_hex4(raw: *char, start: int, end: int) -> int {
+    if (start + 4 > end) { return -1; }
+    var v: int = 0;
+    var k: int = 0;
+    while (k < 4) {
+        var c: char = raw[start + k];
+        var d: int = -1;
+        if (c >= 48 as char && c <= 57 as char) { d = (c as int) - 48; }
+        else if (c >= 65 as char && c <= 70 as char) { d = (c as int) - 55; }
+        else if (c >= 97 as char && c <= 102 as char) { d = (c as int) - 87; }
+        if (d < 0) { return -1; }
+        v = v * 16 + d;
+        k = k + 1;
+    }
+    return v;
+}
+
+func parse_post_json_body(raw: *char, rlen: int, out_buf: *char, max_out: int, out_len: *int, out_err: **char) -> int {
+    var err_json: string = "malformed JSON body\0";
+    var err_long: string = "body must be at most 500 characters\0";
+    var i: int = 0;
+    while (i < rlen && is_whitespace(raw[i]) == 1) { i = i + 1; }
+    if (i >= rlen || raw[i] != 123 as char) { // '{'
+        var err_m: string = "malformed JSON body\0";
+        *out_err = &err_m[0] as *char;
+        return 400;
+    }
+    i = i + 1;
+
+    var found_body: int = 0;
+    var raw_str_start: int = 0;
+    var raw_str_len: int = 0;
+
+    while (i < rlen) {
+        while (i < rlen && is_whitespace(raw[i]) == 1) { i = i + 1; }
+        if (i < rlen && raw[i] == 125 as char) { // '}'
+            i = i + 1;
+            break;
+        }
+        if (i >= rlen || raw[i] != 34 as char) { // '"'
+            var err_m: string = "malformed JSON body\0";
+            *out_err = &err_m[0] as *char;
+            return 400;
+        }
+        i = i + 1;
+
+        var k_start: int = i;
+        while (i < rlen && raw[i] != 34 as char) { i = i + 1; }
+        if (i >= rlen) {
+            var err_m: string = "malformed JSON body\0";
+            *out_err = &err_m[0] as *char;
+            return 400;
+        }
+        var k_len: int = i - k_start;
+        i = i + 1;
+
+        while (i < rlen && is_whitespace(raw[i]) == 1) { i = i + 1; }
+        if (i >= rlen || raw[i] != 58 as char) { // ':'
+            var err_m: string = "malformed JSON body\0";
+            *out_err = &err_m[0] as *char;
+            return 400;
+        }
+        i = i + 1;
+
+        while (i < rlen && is_whitespace(raw[i]) == 1) { i = i + 1; }
+        if (i >= rlen) {
+            var err_m: string = "malformed JSON body\0";
+            *out_err = &err_m[0] as *char;
+            return 400;
+        }
+
+        var is_body_key: int = 0;
+        if (k_len == 4 && raw[k_start] == 98 as char && raw[k_start + 1] == 111 as char &&
+            raw[k_start + 2] == 100 as char && raw[k_start + 3] == 121 as char) {
+            is_body_key = 1;
+        }
+
+        if (raw[i] == 34 as char) {
+            i = i + 1;
+            var v_start: int = i;
+            var in_esc: int = 0;
+            while (i < rlen) {
+                if (in_esc == 1) {
+                    in_esc = 0;
+                } else if (raw[i] == 92 as char) {
+                    in_esc = 1;
+                } else if (raw[i] == 34 as char) {
+                    break;
+                }
+                i = i + 1;
+            }
+            if (i >= rlen) {
+                var err_m: string = "malformed JSON body\0";
+                *out_err = &err_m[0] as *char;
+                return 400;
+            }
+            var v_len: int = i - v_start;
+            i = i + 1;
+
+            if (is_body_key == 1) {
+                found_body = 1;
+                raw_str_start = v_start;
+                raw_str_len = v_len;
+            }
+        } else {
+            if (is_body_key == 1) {
+                var err_m: string = "body is required\0";
+                *out_err = &err_m[0] as *char;
+                return 400;
+            }
+            while (i < rlen && raw[i] != 44 as char && raw[i] != 125 as char) { i = i + 1; }
+        }
+
+        while (i < rlen && is_whitespace(raw[i]) == 1) { i = i + 1; }
+        if (i < rlen && raw[i] == 44 as char) { i = i + 1; }
+    }
+
+    // The top-level object must be closed and followed only by whitespace.
+    if (i == 0 || raw[i - 1] != 125 as char) {
+        return set_json_error(out_err, &err_json[0] as *char);
+    }
+    while (i < rlen && is_whitespace(raw[i]) == 1) { i = i + 1; }
+    if (i != rlen) {
+        return set_json_error(out_err, &err_json[0] as *char);
+    }
+
+    if (found_body == 0) {
+        var err_m: string = "body is required\0";
+        *out_err = &err_m[0] as *char;
+        return 400;
+    }
+
+    // Unescape JSON string
+    var dec_buf: [char; 2048] = uninit;
+    var dec_len: int = 0;
+    var idx: int = raw_str_start;
+    var end_idx: int = raw_str_start + raw_str_len;
+    var simple: int = 1;
+    var scan: int = raw_str_start;
+    while (scan < end_idx) {
+        var sc: char = raw[scan];
+        var su: int = (sc as int) & 255;
+        if (su < 32) {
+            return set_json_error(out_err, &err_json[0] as *char);
+        }
+        if (sc == 92 as char) {
+            simple = 0;
+            break;
+        }
+        scan = scan + 1;
+    }
+    if (simple == 1) {
+        var lo_s: int = raw_str_start;
+        while (lo_s < end_idx && is_whitespace(raw[lo_s]) == 1) { lo_s = lo_s + 1; }
+        var hi_s: int = end_idx;
+        while (hi_s > lo_s && is_whitespace(raw[hi_s - 1]) == 1) { hi_s = hi_s - 1; }
+        if (lo_s == hi_s) {
+            var err_m: string = "body is required\0";
+            *out_err = &err_m[0] as *char;
+            return 400;
+        }
+        var tlen_s: int = hi_s - lo_s;
+        if (count_utf8((raw as i64 + lo_s as i64) as *char, tlen_s) > 500) {
+            var err_m: string = "body must be at most 500 characters\0";
+            *out_err = &err_m[0] as *char;
+            return 400;
+        }
+        if (tlen_s >= max_out) {
+            return set_json_error(out_err, &err_long[0] as *char);
+        }
+        memcpy(out_buf as *void, (raw as i64 + lo_s as i64) as *void, tlen_s as i64);
+        out_buf[tlen_s] = 0 as char;
+        *out_len = tlen_s;
+        return 0;
+    }
+    while (idx < end_idx) {
+        var c: char = raw[idx];
+        if (c == 92 as char) {
+            if (idx + 1 >= end_idx) {
+                return set_json_error(out_err, &err_json[0] as *char);
+            }
+            idx = idx + 1;
+            var ec: char = raw[idx];
+            if (ec == 117 as char) { // \uXXXX
+                if (idx + 4 >= end_idx) {
+                    return set_json_error(out_err, &err_json[0] as *char);
+                }
+                var cp: int = json_hex4(raw, idx + 1, end_idx);
+                if (cp < 0) {
+                    return set_json_error(out_err, &err_json[0] as *char);
+                }
+                idx = idx + 4;
+                if (cp >= 55296 && cp <= 56319) {
+                    if (idx + 6 >= end_idx) {
+                        return set_json_error(out_err, &err_json[0] as *char);
+                    }
+                    if (raw[idx + 1] != 92 as char || raw[idx + 2] != 117 as char) {
+                        return set_json_error(out_err, &err_json[0] as *char);
+                    }
+                    var low: int = json_hex4(raw, idx + 3, end_idx);
+                    if (low < 56320 || low > 57343) {
+                        return set_json_error(out_err, &err_json[0] as *char);
+                    }
+                    cp = 65536 + ((cp - 55296) * 1024) + (low - 56320);
+                    idx = idx + 6;
+                } else if (cp >= 56320 && cp <= 57343) {
+                    return set_json_error(out_err, &err_json[0] as *char);
+                }
+                if (cp == 0) {
+                    return set_json_error(out_err, &err_json[0] as *char);
+                }
+                if (cp < 128) {
+                    if (dec_len + 1 > 2047) { return set_json_error(out_err, &err_long[0] as *char); }
+                    dec_buf[dec_len] = cp as char;
+                    dec_len = dec_len + 1;
+                } else if (cp < 2048) {
+                    if (dec_len + 2 > 2047) { return set_json_error(out_err, &err_long[0] as *char); }
+                    dec_buf[dec_len] = (192 + (cp >> 6)) as char;
+                    dec_buf[dec_len + 1] = (128 + (cp & 63)) as char;
+                    dec_len = dec_len + 2;
+                } else if (cp < 65536) {
+                    if (dec_len + 3 > 2047) { return set_json_error(out_err, &err_long[0] as *char); }
+                    dec_buf[dec_len] = (224 + (cp >> 12)) as char;
+                    dec_buf[dec_len + 1] = (128 + ((cp >> 6) & 63)) as char;
+                    dec_buf[dec_len + 2] = (128 + (cp & 63)) as char;
+                    dec_len = dec_len + 3;
+                } else {
+                    if (cp > 1114111) { return set_json_error(out_err, &err_json[0] as *char); }
+                    if (dec_len + 4 > 2047) { return set_json_error(out_err, &err_long[0] as *char); }
+                    dec_buf[dec_len] = (240 + (cp >> 18)) as char;
+                    dec_buf[dec_len + 1] = (128 + ((cp >> 12) & 63)) as char;
+                    dec_buf[dec_len + 2] = (128 + ((cp >> 6) & 63)) as char;
+                    dec_buf[dec_len + 3] = (128 + (cp & 63)) as char;
+                    dec_len = dec_len + 4;
+                }
+                idx = idx + 1;
+                continue;
+            }
+            if (dec_len >= 2047) { return set_json_error(out_err, &err_long[0] as *char); }
+            if (ec == 34 as char) { dec_buf[dec_len] = 34 as char; }
+            else if (ec == 92 as char) { dec_buf[dec_len] = 92 as char; }
+            else if (ec == 110 as char) { dec_buf[dec_len] = 10 as char; }
+            else if (ec == 114 as char) { dec_buf[dec_len] = 13 as char; }
+            else if (ec == 116 as char) { dec_buf[dec_len] = 9 as char; }
+            else if (ec == 98 as char) { dec_buf[dec_len] = 8 as char; }
+            else if (ec == 102 as char) { dec_buf[dec_len] = 12 as char; }
+            else { return set_json_error(out_err, &err_json[0] as *char); }
+            dec_len = dec_len + 1;
+            idx = idx + 1;
+        } else {
+            if (((c as int) & 255) < 32) { return set_json_error(out_err, &err_json[0] as *char); }
+            if (dec_len >= 2047) { return set_json_error(out_err, &err_long[0] as *char); }
+            dec_buf[dec_len] = c;
+            dec_len = dec_len + 1;
+            idx = idx + 1;
+        }
+    }
+
+    // Trim whitespace
+    var lo: int = 0;
+    while (lo < dec_len && is_whitespace(dec_buf[lo]) == 1) { lo = lo + 1; }
+    var hi: int = dec_len;
+    while (hi > lo && is_whitespace(dec_buf[hi - 1]) == 1) { hi = hi - 1; }
+
+    if (lo == hi) {
+        var err_m: string = "body is required\0";
+        *out_err = &err_m[0] as *char;
+        return 400;
+    }
+
+    var tlen: int = hi - lo;
+    if (count_utf8((&dec_buf[0] as i64 + lo as i64) as *char, tlen) > 500) {
+        var err_m: string = "body must be at most 500 characters\0";
+        *out_err = &err_m[0] as *char;
+        return 400;
+    }
+    if (tlen >= max_out) {
+        return set_json_error(out_err, &err_long[0] as *char);
+    }
+
+    memcpy(out_buf as *void, (&dec_buf[0] as i64 + lo as i64) as *void, tlen as i64);
+    out_buf[tlen] = 0 as char;
+    *out_len = tlen;
+    return 0;
+}
+
+
+func run_reference_feed(out_buf: *char, max_out_len: int, out_status: *int) -> int {
+    var stmt_f: *void = g_stmt_feed;
+    var writer: BufWriter = BufWriter { buf: out_buf, len: 0, cap: max_out_len };
+    var pre: string = "{\"posts\":[\0";
+    buf_append_str(&writer, &pre[0] as *char);
+
+    var count: int = 0;
+    var rc: int = sqlite3_step(stmt_f);
+    while (rc == 100) {
+        if (count > 0) {
+            var comma: string = ",\0";
+            buf_append_str(&writer, &comma[0] as *char);
+        }
+        write_post_json(&writer, stmt_f);
+        count = count + 1;
+        rc = sqlite3_step(stmt_f);
+    }
+    sqlite3_reset(stmt_f);
+
+    if (rc != 101) {
+        *out_status = 500;
+        return write_error(out_buf, max_out_len, "internal server error\0");
+    }
+
+    var suf: string = "]}\0";
+    buf_append_str(&writer, &suf[0] as *char);
+    *out_status = 200;
+    return writer.len;
+}
+
+func handle_feed(out_buf: *char, max_out_len: int, out_status: *int) -> int {
+    // Native B-tree plan: last 20 posts by rowid + one likes index scan.
+    // If anything does not match the expected schema/invariant, fall back to
+    // the reference SQL below.
+    ensure_db_txn();
+    var bt_len: int = bt_feed_json(out_buf, max_out_len, out_status);
+    if (bt_len >= 0) { return bt_len; }
+
+    var ids: [i64; 20] = [0 as i64, ...];
+    var n: int = 0;
+    var stmt_fids: *void = g_stmt_feed_ids;
+    var rc: int = sqlite3_step(stmt_fids);
+    while (rc == 100 && n < 20) {
+        ids[n] = sqlite3_column_int64(stmt_fids, 0);
+        n = n + 1;
+        rc = sqlite3_step(stmt_fids);
+    }
+    sqlite3_reset(stmt_fids);
+    if (n < 20 && rc != 101) {
+        *out_status = 500;
+        return write_error(out_buf, max_out_len, "internal server error\0");
+    }
+    if (n == 0) {
+        var writer: BufWriter = BufWriter { buf: out_buf, len: 0, cap: max_out_len };
+        var empty_feed: string = "{\"posts\":[]}\0";
+        buf_append_str(&writer, &empty_feed[0] as *char);
+        *out_status = 200;
+        return writer.len;
+    }
+
+    var mn: i64 = ids[0];
+    var mx: i64 = ids[0];
+    var k: int = 1;
+    while (k < n) {
+        if (ids[k] < mn) { mn = ids[k]; }
+        if (ids[k] > mx) { mx = ids[k]; }
+        k = k + 1;
+    }
+
+    var diff: i64 = mx - mn;
+    if (diff >= (256 as i64)) {
+        return run_reference_feed(out_buf, max_out_len, out_status);
+    }
+
+    var slots: [int; 256] = [-1, ...];
+    k = 0;
+    while (k < n) {
+        var offset: int = (ids[k] - mn) as int;
+        if (offset >= 0 && offset < 256) {
+            slots[offset] = k;
+        }
+        k = k + 1;
+    }
+
+    var likes: [i64; 20] = [0 as i64, ...];
+    var stmt_flikes: *void = g_stmt_feed_likes;
+    sqlite3_bind_int64(stmt_flikes, 1, mn);
+    sqlite3_bind_int64(stmt_flikes, 2, mx);
+    rc = sqlite3_step(stmt_flikes);
+    while (rc == 100) {
+        var p_id: i64 = sqlite3_column_int64(stmt_flikes, 0);
+        var off: int = (p_id - mn) as int;
+        if (off >= 0 && off < 256) {
+            var s_idx: int = slots[off];
+            if (s_idx >= 0 && s_idx < 20) {
+                likes[s_idx] = likes[s_idx] + (1 as i64);
+            }
+        }
+        rc = sqlite3_step(stmt_flikes);
+    }
+    sqlite3_reset(stmt_flikes);
+
+    if (rc != 101) {
+        *out_status = 500;
+        return write_error(out_buf, max_out_len, "internal server error\0");
+    }
+
+    var seg_pos: [int; 20] = [0, ...];
+    var seg_len: [int; 20] = [0, ...];
+    var found: int = 0;
+
+    var scratch_writer: BufWriter = BufWriter { buf: g_feed_scratch, len: 0, cap: 32768 };
+    var stmt_frows: *void = g_stmt_feed_rows;
+    sqlite3_bind_int64(stmt_frows, 1, mn);
+    sqlite3_bind_int64(stmt_frows, 2, mx);
+    rc = sqlite3_step(stmt_frows);
+    while (rc == 100) {
+        var p_id: i64 = sqlite3_column_int64(stmt_frows, 0);
+        var off: int = (p_id - mn) as int;
+        if (off >= 0 && off < 256) {
+            var s_idx: int = slots[off];
+            if (s_idx >= 0 && s_idx < 20) {
+                seg_pos[s_idx] = scratch_writer.len;
+                write_post_json_with_likes(&scratch_writer, stmt_frows, likes[s_idx]);
+                seg_len[s_idx] = scratch_writer.len - seg_pos[s_idx];
+                found = found + 1;
+            }
+        }
+        rc = sqlite3_step(stmt_frows);
+    }
+    sqlite3_reset(stmt_frows);
+
+    if (rc != 101) {
+        *out_status = 500;
+        return write_error(out_buf, max_out_len, "internal server error\0");
+    }
+
+    if (found != n) {
+        return run_reference_feed(out_buf, max_out_len, out_status);
+    }
+
+    var writer: BufWriter = BufWriter { buf: out_buf, len: 0, cap: max_out_len };
+    var pre: string = "{\"posts\":[\0";
+    buf_append_str(&writer, &pre[0] as *char);
+
+    k = 0;
+    while (k < n) {
+        if (k > 0) {
+            var comma: string = ",\0";
+            buf_append_str(&writer, &comma[0] as *char);
+        }
+        var s_ptr: *char = (g_feed_scratch as i64 + seg_pos[k] as i64) as *char;
+        buf_append_fast(&writer, s_ptr, seg_len[k]);
+        k = k + 1;
+    }
+
+    var suf: string = "]}\0";
+    buf_append_str(&writer, &suf[0] as *char);
+    if (writer.len >= max_out_len) {
+        *out_status = 500;
+        return write_error(out_buf, max_out_len, "internal server error\0");
+    }
+    *out_status = 200;
+    return writer.len;
+}
+
+func handle_request(method: *char, path: *char, auth: *char, body: *char, body_len: int, out_buf: *char, max_out_len: int, out_status: *int, out_is_write: *int) -> int {
+    *out_is_write = 0;
+
+    // 1. GET /health
+    if (strcmp(path, "/health\0") == 0) {
+        if (strcmp(method, "GET\0") != 0) {
+            *out_status = 404;
+            return write_error(out_buf, max_out_len, "not found\0");
+        }
+        var stmt_h: *void = g_stmt_health;
+        var rc: int = sqlite3_step(stmt_h);
+        sqlite3_reset(stmt_h);
+        if (rc != 100 && rc != 101) {
+            *out_status = 503;
+            var writer: BufWriter = BufWriter { buf: out_buf, len: 0, cap: max_out_len };
+            var p0: string = "{\"status\":\"degraded\",\"db\":\"unreachable\",\"error\":\0";
+            buf_append_str(&writer, &p0[0] as *char);
+            var err: *char = sqlite3_errmsg(g_db);
+            buf_append_json_escaped(&writer, err, strlen(err) as int);
+            var p1: string = "}\0";
+            buf_append_str(&writer, &p1[0] as *char);
+            return writer.len;
+        }
+        var now_s: i64 = time(nil);
+        var uptime: i64 = now_s - g_start_time;
+        var writer: BufWriter = BufWriter { buf: out_buf, len: 0, cap: max_out_len };
+        var p0: string = "{\"status\":\"ok\",\"db\":\"ok\",\"uptime_s\":\0";
+        buf_append_str(&writer, &p0[0] as *char);
+        buf_append_int(&writer, uptime);
+        var p1: string = "}\0";
+        buf_append_str(&writer, &p1[0] as *char);
+        *out_status = 200;
+        return writer.len;
+    }
+
+    // 2. GET /feed
+    if (strcmp(path, "/feed\0") == 0) {
+        if (strcmp(method, "GET\0") != 0) {
+            *out_status = 404;
+            return write_error(out_buf, max_out_len, "not found\0");
+        }
+        return handle_feed(out_buf, max_out_len, out_status);
+    }
+
+    // 3. POST /posts
+    if (strcmp(path, "/posts\0") == 0) {
+        if (strcmp(method, "POST\0") != 0) {
+            *out_status = 404;
+            return write_error(out_buf, max_out_len, "not found\0");
+        }
+
+        var claims: AuthClaims = uninit;
+        claims.user_id = 0 as i64;
+        claims.username[0] = 0 as char;
+        var auth_rc: int = verify_jwt(auth, g_secret_ptr, &claims);
+        if (auth_rc == 1) {
+            *out_status = 401;
+            return write_error(out_buf, max_out_len, "missing bearer token\0");
+        }
+        if (auth_rc == 2) {
+            *out_status = 401;
+            return write_error(out_buf, max_out_len, "invalid or expired token\0");
+        }
+        if (auth_rc == 3) {
+            *out_status = 401;
+            return write_error(out_buf, max_out_len, "invalid token payload\0");
+        }
+
+        var trimmed_buf: [char; 2048] = uninit;
+        var trimmed_len: int = 0;
+        var err_msg_ptr: *char = nil;
+        var body_rc: int = parse_post_json_body(body, body_len, &trimmed_buf[0] as *char, 2048, &trimmed_len, &err_msg_ptr);
+        if (body_rc != 0) {
+            *out_status = body_rc;
+            return write_error(out_buf, max_out_len, err_msg_ptr);
+        }
+
+        ensure_db_txn();
+
+        var stmt_ip: *void = g_stmt_insert_post;
+        sqlite3_bind_int64(stmt_ip, 1, claims.user_id);
+        sqlite3_bind_text(stmt_ip, 2, &trimmed_buf[0] as *char, trimmed_len, nil);
+        var rc: int = sqlite3_step(stmt_ip);
+        if (rc != 100) {
+            sqlite3_reset(stmt_ip);
+    
+            *out_status = 500;
+            return write_error(out_buf, max_out_len, "internal server error\0");
+        }
+
+        var new_id: i64 = sqlite3_column_int64(stmt_ip, 0);
+        var created_ptr: *char = sqlite3_column_text(stmt_ip, 1);
+        var created_len: int = sqlite3_column_bytes(stmt_ip, 1);
+
+        var writer: BufWriter = BufWriter { buf: out_buf, len: 0, cap: max_out_len };
+        var p0: string = "{\"post\":{\"id\":\0";
+        buf_append_str(&writer, &p0[0] as *char);
+        buf_append_int(&writer, new_id);
+
+        var p1: string = ",\"body\":\0";
+        buf_append_str(&writer, &p1[0] as *char);
+        buf_append_json_escaped(&writer, &trimmed_buf[0] as *char, trimmed_len);
+
+        var p2: string = ",\"created_at\":\0";
+        buf_append_str(&writer, &p2[0] as *char);
+        buf_append_json_escaped(&writer, created_ptr, created_len);
+
+        var p3: string = ",\"author\":\0";
+        buf_append_str(&writer, &p3[0] as *char);
+        buf_append_json_escaped(&writer, &claims.username[0] as *char, strlen(&claims.username[0] as *char) as int);
+
+        var p4: string = ",\"like_count\":0}}}}\0";
+        buf_append_str(&writer, &p4[0] as *char);
+
+        sqlite3_step(stmt_ip);
+        sqlite3_reset(stmt_ip);
+
+        *out_status = 201;
+        *out_is_write = 1;
+        return writer.len;
+    }
+
+    // 4. Routes under /posts/
+    if (strncmp(path, "/posts/\0", 7 as i64) == 0) {
+        var subpath: *char = (path as i64 + 7 as i64) as *char;
+        var sublen: int = strlen(subpath) as int;
+
+        if (sublen > 5 && strcmp((subpath as i64 + (sublen - 5) as i64) as *char, "/like\0") == 0) {
+            if (strcmp(method, "POST\0") != 0) {
+                *out_status = 404;
+                return write_error(out_buf, max_out_len, "not found\0");
+            }
+
+            // AUTH CHECKED FIRST!
+            var claims: AuthClaims = uninit;
+            claims.user_id = 0 as i64;
+            claims.username[0] = 0 as char;
+            var auth_rc: int = verify_jwt(auth, g_secret_ptr, &claims);
+            if (auth_rc == 1) {
+                *out_status = 401;
+                return write_error(out_buf, max_out_len, "missing bearer token\0");
+            }
+            if (auth_rc == 2) {
+                *out_status = 401;
+                return write_error(out_buf, max_out_len, "invalid or expired token\0");
+            }
+            if (auth_rc == 3) {
+                *out_status = 401;
+                return write_error(out_buf, max_out_len, "invalid token payload\0");
+            }
+
+            var id_len: int = sublen - 5;
+            var id_str: [char; 64] = uninit;
+            if (id_len >= 64) {
+                *out_status = 400;
+                return write_error(out_buf, max_out_len, "invalid post id\0");
+            }
+            memcpy(&id_str[0] as *void, subpath as *void, id_len as i64);
+            id_str[id_len] = 0 as char;
+
+            var post_id: i64 = 0 as i64;
+            if (parse_positive_id(&id_str[0] as *char, &post_id) == 0) {
+                *out_status = 400;
+                return write_error(out_buf, max_out_len, "invalid post id\0");
+            }
+
+            var already_liked: int = 0;
+            var stmt_le: *void = g_stmt_like_exists;
+            sqlite3_bind_int64(stmt_le, 1, claims.user_id);
+            sqlite3_bind_int64(stmt_le, 2, post_id);
+            var le_rc: int = sqlite3_step(stmt_le);
+            sqlite3_reset(stmt_le);
+
+            if (le_rc == 100) {
+                already_liked = 1;
+                *out_status = 200;
+            } else {
+                if (le_rc != 101) {
+                    *out_status = 500;
+                    return write_error(out_buf, max_out_len, "internal server error\0");
+                }
+
+                ensure_db_txn();
+
+                var stmt_l: *void = g_stmt_insert_like;
+                sqlite3_bind_int64(stmt_l, 1, claims.user_id);
+                sqlite3_bind_int64(stmt_l, 2, post_id);
+                var l_rc: int = sqlite3_step(stmt_l);
+                sqlite3_reset(stmt_l);
+
+                if (l_rc != 101) {
+                    *out_status = 500;
+                    return write_error(out_buf, max_out_len, "internal server error\0");
+                }
+
+                var changes: int = sqlite3_changes(g_db);
+                if (changes > 0) {
+                    already_liked = 0;
+                    *out_status = 201;
+                } else {
+                    // Check if post actually exists or was not found
+                    var stmt_c: *void = g_stmt_check_post;
+                    sqlite3_bind_int64(stmt_c, 1, post_id);
+                    var chk_rc: int = sqlite3_step(stmt_c);
+                    sqlite3_reset(stmt_c);
+
+                    if (chk_rc != 100) {
+                        if (chk_rc == 101) {
+                            *out_status = 404;
+                            return write_error(out_buf, max_out_len, "post not found\0");
+                        }
+                        *out_status = 500;
+                        return write_error(out_buf, max_out_len, "internal server error\0");
+                    }
+                    already_liked = 1;
+                    *out_status = 200;
+                }
+            }
+
+            var writer: BufWriter = BufWriter { buf: out_buf, len: 0, cap: max_out_len };
+            var p0: string = "{\"liked\":true,\"already_liked\":\0";
+            buf_append_str(&writer, &p0[0] as *char);
+            if (already_liked == 1) {
+                var t: string = "true\0";
+                buf_append_str(&writer, &t[0] as *char);
+            } else {
+                var f: string = "false\0";
+                buf_append_str(&writer, &f[0] as *char);
+            }
+            var p1: string = ",\"post_id\":\0";
+            buf_append_str(&writer, &p1[0] as *char);
+            buf_append_int(&writer, post_id);
+            var p2: string = "}\0";
+            buf_append_str(&writer, &p2[0] as *char);
+            if (already_liked == 1) {
+                *out_is_write = 0;
+            } else {
+                *out_is_write = 1;
+            }
+            return writer.len;
+        }
+
+        // GET /posts/:id
+        if (strcmp(method, "GET\0") != 0) {
+            *out_status = 404;
+            return write_error(out_buf, max_out_len, "not found\0");
+        }
+
+        var post_id: i64 = 0 as i64;
+        if (parse_positive_id(subpath, &post_id) == 0) {
+            *out_status = 400;
+            return write_error(out_buf, max_out_len, "invalid post id\0");
+        }
+
+        // Native B-tree plan: rowid seek + one likes index point lookup.
+        ensure_db_txn();
+        var bt_post_len: int = bt_post_json(post_id, out_buf, max_out_len, out_status);
+        if (bt_post_len >= 0) { return bt_post_len; }
+
+        var stmt_p: *void = g_stmt_post;
+        sqlite3_bind_int64(stmt_p, 1, post_id);
+        var rc: int = sqlite3_step(stmt_p);
+        if (rc == 100) {
+            var writer: BufWriter = BufWriter { buf: out_buf, len: 0, cap: max_out_len };
+            var pre: string = "{\"post\":\0";
+            buf_append_str(&writer, &pre[0] as *char);
+            write_post_json(&writer, stmt_p);
+            var suf: string = "}\0";
+            buf_append_str(&writer, &suf[0] as *char);
+
+            sqlite3_reset(stmt_p);
+            *out_status = 200;
+            return writer.len;
+        }
+        sqlite3_reset(stmt_p);
+
+        if (rc == 101) {
+            *out_status = 404;
+            return write_error(out_buf, max_out_len, "post not found\0");
+        }
+
+        *out_status = 500;
+        return write_error(out_buf, max_out_len, "internal server error\0");
+    }
+
+    *out_status = 404;
+    return write_error(out_buf, max_out_len, "not found\0");
+}
+
+func status_reason(code: int) -> *char {
+    if (code == 200) { var s: string = "OK\0"; return &s[0] as *char; }
+    if (code == 201) { var s: string = "Created\0"; return &s[0] as *char; }
+    if (code == 400) { var s: string = "Bad Request\0"; return &s[0] as *char; }
+    if (code == 401) { var s: string = "Unauthorized\0"; return &s[0] as *char; }
+    if (code == 404) { var s: string = "Not Found\0"; return &s[0] as *char; }
+    if (code == 503) { var s: string = "Service Unavailable\0"; return &s[0] as *char; }
+    var s: string = "Internal Server Error\0";
+    return &s[0] as *char;
+}
+
+
+func buffer_reserve_pooled(w: *WorkerState, b: *Buffer, needed: u32) -> void {
+    if (needed <= (*b).cap) { return; }
+    if ((*b).cap == (0 as u32) && (*w).pool_len > 0) {
+        (*w).pool_len = (*w).pool_len - 1;
+        var p_idx: int = (*w).pool_len;
+        var p_cap: u32 = (*w).pool_caps[p_idx];
+        if (p_cap >= needed) {
+            (*b).ptr = (*w).pool_ptrs[p_idx];
+            (*b).cap = p_cap;
+            return;
+        }
+        (*w).pool_ptrs[(*w).pool_len] = (*w).pool_ptrs[p_idx];
+        (*w).pool_caps[(*w).pool_len] = p_cap;
+        (*w).pool_len = (*w).pool_len + 1;
+    }
+    var new_cap: u32 = 4096 as u32;
+    while (new_cap < needed) {
+        new_cap = new_cap * (2 as u32);
+    }
+    if ((*b).cap == (0 as u32)) {
+        (*b).ptr = malloc(new_cap as i64) as *u8;
+    } else {
+        (*b).ptr = realloc((*b).ptr as *void, new_cap as i64) as *u8;
+    }
+    (*b).cap = new_cap;
+}
+
+func buffer_reserve(b: *Buffer, needed: u32) -> void {
+    if (needed <= (*b).cap) { return; }
+    var new_cap: u32 = 4096 as u32;
+    while (new_cap < needed) {
+        new_cap = new_cap * (2 as u32);
+    }
+    if ((*b).cap == (0 as u32)) {
+        (*b).ptr = malloc(new_cap as i64) as *u8;
+    } else {
+        (*b).ptr = realloc((*b).ptr as *void, new_cap as i64) as *u8;
+    }
+    (*b).cap = new_cap;
+}
+
+func buffer_extend(b: *Buffer, src: *u8, len: u32) -> void {
+    if (len == (0 as u32)) { return; }
+    buffer_reserve(b, (*b).len + len);
+    memcpy(((*b).ptr + ((*b).len as i64)) as *void, src as *void, len as i64);
+    (*b).len = (*b).len + len;
+}
+
+func buffer_consume(b: *Buffer, n: u32) -> void {
+    if (n >= (*b).len) {
+        (*b).len = 0 as u32;
+        return;
+    }
+    var left: u32 = (*b).len - n;
+    memmove((*b).ptr as *void, ((*b).ptr + (n as i64)) as *void, left as i64);
+    (*b).len = left;
+}
+
+func retire_buffer(w: *WorkerState, b: *Buffer) -> void {
+    if ((*b).cap > (0 as u32)) {
+        if ((*b).cap <= (16384 as u32) && (*w).pool_len < 4096) {
+            var p_idx: int = (*w).pool_len;
+            (*w).pool_ptrs[p_idx] = (*b).ptr;
+            (*w).pool_caps[p_idx] = (*b).cap;
+            (*w).pool_len = (*w).pool_len + 1;
+        } else {
+            free((*b).ptr as *void);
+        }
+        (*b).ptr = nil;
+        (*b).len = 0 as u32;
+        (*b).cap = 0 as u32;
+    }
+}
+
+func append_response(w: *WorkerState, direct_fd: int, status: int, keep_alive: int, body_ptr: *char, body_len: int) -> void {
+    var c: *Conn = (*w).conns + (direct_fd as i64);
+    var needed: u32 = (*c).output.len + (256 as u32) + (body_len as u32);
+    buffer_reserve_pooled(w, &(*c).output, needed);
+
+    var cur_len: int = (*c).output.len as int;
+    var out_p: *char = ((*c).output.ptr as i64 + cur_len as i64) as *char;
+    var writer: BufWriter = BufWriter { buf: out_p, len: 0, cap: 256 };
+
+    if (status == 200 && keep_alive == 1) {
+        var h: string = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: \0";
+        buf_append_str(&writer, &h[0] as *char);
+        buf_append_int(&writer, body_len as i64);
+        var k_str: string = "\r\nConnection: keep-alive\r\n\r\n\0";
+        buf_append_str(&writer, &k_str[0] as *char);
+    } else if (status == 201 && keep_alive == 1) {
+        var h: string = "HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: \0";
+        buf_append_str(&writer, &h[0] as *char);
+        buf_append_int(&writer, body_len as i64);
+        var k_str: string = "\r\nConnection: keep-alive\r\n\r\n\0";
+        buf_append_str(&writer, &k_str[0] as *char);
+    } else {
+        var p0: string = "HTTP/1.1 \0";
+        buf_append_str(&writer, &p0[0] as *char);
+        buf_append_int(&writer, status as i64);
+        var sp: string = " \0";
+        buf_append_str(&writer, &sp[0] as *char);
+        buf_append_str(&writer, status_reason(status));
+        var p1: string = "\r\nContent-Type: application/json\r\nContent-Length: \0";
+        buf_append_str(&writer, &p1[0] as *char);
+        buf_append_int(&writer, body_len as i64);
+        if (keep_alive == 0) {
+            var p2: string = "\r\nConnection: close\r\n\r\n\0";
+            buf_append_str(&writer, &p2[0] as *char);
+        } else {
+            var p3: string = "\r\nConnection: keep-alive\r\n\r\n\0";
+            buf_append_str(&writer, &p3[0] as *char);
+        }
+    }
+
+    var hdr_len: int = writer.len;
+    if (body_len > 0) {
+        memcpy((out_p as i64 + hdr_len as i64) as *void, body_ptr as *void, body_len as i64);
+    }
+    (*c).output.len = (cur_len + hdr_len + body_len) as u32;
+}
+
+func mark_conn_dirty(w: *WorkerState, direct_fd: int) -> void {
+    var c: *Conn = (*w).conns + (direct_fd as i64);
+    if (((*c).state & CONN_DIRTY) == (0 as u32)) {
+        (*c).state = (*c).state | CONN_DIRTY;
+        if ((*w).dirty_count < 4096) {
+            (*w).dirty_fds[(*w).dirty_count] = direct_fd;
+            (*w).dirty_count = (*w).dirty_count + 1;
+        }
+    }
+}
+
+func queue_accept_sqe(w: *WorkerState) -> void {
+    var tail: u32 = *((*w).sq_tail);
+    var idx: u32 = tail & (*((*w).sq_mask));
+    var s: *IoUringSqe = (*w).sqes + (idx as i64);
+    var s_bytes: *u8 = s as *u8;
+    var i: int = 0;
+    while (i < 64) { *(s_bytes + i) = 0 as u8; i = i + 1; }
+    (*s).opcode = IORING_OP_ACCEPT;
+    (*s).fd = g_listen_fd;
+    (*s).ioprio = IORING_ACCEPT_MULTISHOT;
+    (*s).file_index = IORING_FILE_INDEX_ALLOC;
+    (*s).user_data = 1 as u64;
+    *((*w).sq_array + (idx as i64)) = idx;
+    *((*w).sq_tail) = tail + 1;
+}
+
+func queue_recv_sqe(w: *WorkerState, direct_fd: int) -> void {
+    var c: *Conn = (*w).conns + (direct_fd as i64);
+    var tail: u32 = *((*w).sq_tail);
+    var idx: u32 = tail & (*((*w).sq_mask));
+    var s: *IoUringSqe = (*w).sqes + (idx as i64);
+    var s_bytes: *u8 = s as *u8;
+    var i: int = 0;
+    while (i < 64) { *(s_bytes + i) = 0 as u8; i = i + 1; }
+    (*s).opcode = IORING_OP_RECV;
+    (*s).fd = direct_fd;
+    (*s).ioprio = IORING_RECV_MULTISHOT;
+    (*s).flags = (IOSQE_FIXED_FILE | IOSQE_BUFFER_SELECT);
+    (*s).buf_index = 0 as u16;
+    (*s).user_data = (2 as u64) | ((direct_fd as u64) << 8) | (((*c).gen as u64) << 32);
+    *((*w).sq_array + (idx as i64)) = idx;
+    *((*w).sq_tail) = tail + 1;
+}
+
+func rearm_push(w: *WorkerState, fd: i32) -> void {
+    var next_tail: int = (*w).rearm_tail + 1;
+    if (next_tail >= (*w).rearm_cap) { next_tail = 0; }
+    if (next_tail != (*w).rearm_head) {
+        *((*w).rearm_fds + ((*w).rearm_tail as i64)) = fd;
+        (*w).rearm_tail = next_tail;
+    }
+}
+
+func rearm_pop(w: *WorkerState) -> i32 {
+    if ((*w).rearm_head == (*w).rearm_tail) { return -1; }
+    var fd: i32 = *((*w).rearm_fds + ((*w).rearm_head as i64));
+    var next_head: int = (*w).rearm_head + 1;
+    if (next_head >= (*w).rearm_cap) { next_head = 0; }
+    (*w).rearm_head = next_head;
+    return fd;
+}
+
+func queue_send_sqe(w: *WorkerState, direct_fd: int) -> void {
+    var c: *Conn = (*w).conns + (direct_fd as i64);
+    var remaining: u32 = (*c).flight.len - (*c).sent;
+    var send_ptr: i64 = ((*c).flight.ptr as i64) + ((*c).sent as i64);
+
+    var tail: u32 = *((*w).sq_tail);
+    var idx: u32 = tail & (*((*w).sq_mask));
+    var s: *IoUringSqe = (*w).sqes + (idx as i64);
+    var s_bytes: *u8 = s as *u8;
+    var i: int = 0;
+    while (i < 64) { *(s_bytes + i) = 0 as u8; i = i + 1; }
+
+    (*s).opcode = IORING_OP_SEND;
+    (*s).fd = direct_fd;
+    (*s).flags = IOSQE_FIXED_FILE;
+    (*s).addr = send_ptr as u64;
+    (*s).len = remaining;
+    (*s).rw_flags = 0x4000 as u32; // MSG_NOSIGNAL
+    (*s).user_data = (3 as u64) | ((direct_fd as u64) << 8) | (((*c).gen as u64) << 32);
+
+    *((*w).sq_array + (idx as i64)) = idx;
+    *((*w).sq_tail) = tail + 1;
+    (*c).state = (*c).state | CONN_SENDING;
+}
+
+func queue_close_sqe(w: *WorkerState, direct_fd: int) -> void {
+    var c: *Conn = (*w).conns + (direct_fd as i64);
+    (*c).state = 0 as u32;
+    (*c).gen = (*c).gen + (1 as u32);
+    (*w).open_conns = (*w).open_conns - 1;
+    retire_buffer(w, &(*c).input);
+    retire_buffer(w, &(*c).output);
+    retire_buffer(w, &(*c).flight);
+
+    var tail: u32 = *((*w).sq_tail);
+    var idx: u32 = tail & (*((*w).sq_mask));
+    var s: *IoUringSqe = (*w).sqes + (idx as i64);
+    var s_bytes: *u8 = s as *u8;
+    var i: int = 0;
+    while (i < 64) { *(s_bytes + i) = 0 as u8; i = i + 1; }
+
+    (*s).opcode = IORING_OP_CLOSE;
+    (*s).fd = 0;
+    (*s).file_index = (direct_fd + 1) as u32;
+    (*s).flags = IOSQE_CQE_SKIP_SUCCESS;
+    (*s).user_data = 0 as u64;
+
+    *((*w).sq_array + (idx as i64)) = idx;
+    *((*w).sq_tail) = tail + 1;
+}
+
+func flush_pending(w: *WorkerState) -> void {
+    var k: int = 0;
+    while (k < (*w).dirty_count) {
+        var fd: i32 = (*w).dirty_fds[k];
+        var c: *Conn = (*w).conns + (fd as i64);
+        (*c).state = (*c).state & (~CONN_DIRTY);
+        if (((*c).state & CONN_LIVE) != (0 as u32) && ((*c).state & CONN_SENDING) == (0 as u32)) {
+            if ((*c).output.len > (0 as u32)) {
+                (*c).flight = (*c).output;
+                (*c).output.ptr = nil;
+                (*c).output.len = 0 as u32;
+                (*c).output.cap = 0 as u32;
+                (*c).sent = 0 as u32;
+                queue_send_sqe(w, fd);
+            } else if (((*c).state & CONN_CLOSING) != (0 as u32)) {
+                queue_close_sqe(w, fd);
+            }
+        }
+        k = k + 1;
+    }
+    (*w).dirty_count = 0;
+}
+
+func fail_pending_commit(w: *WorkerState) -> void {
+    var k: int = 0;
+    while (k < (*w).dirty_count) {
+        var fd: i32 = (*w).dirty_fds[k];
+        var c: *Conn = (*w).conns + (fd as i64);
+        retire_buffer(w, &(*c).output);
+        var msg: string = "internal server error\0";
+        var n: int = write_error((*w).body_buf, 65536, &msg[0] as *char);
+        append_response(w, fd, 500, 1, (*w).body_buf, n);
+        k = k + 1;
+    }
+}
+
+func process_one_request(w: *WorkerState, direct_fd: int, buf: *char, avail_len: int,
+                         out_consumed: *int, out_keep_alive: *int) -> int {
+    var needle: string = "\r\n\r\n\0";
+    var hdr_end: *char = memmem(buf as *void, avail_len as i64, &needle[0] as *void, 4 as i64) as *char;
+    if (hdr_end == nil) {
+        return 0; // Incomplete header
+    }
+
+    var hdr_len: int = (hdr_end as i64 - buf as i64) as int + 4;
+
+    var space1: *char = memchr(buf as *void, 32, hdr_len as i64) as *char;
+    if (space1 == nil) { return -1; }
+    var m_len: int = (space1 as i64 - buf as i64) as int;
+    var method: [char; 16] = uninit;
+    if (m_len >= 16) { return -1; }
+    memcpy(&method[0] as *void, buf as *void, m_len as i64);
+    method[m_len] = 0 as char;
+
+    var path_start: *char = (space1 as i64 + 1 as i64) as *char;
+    var space2: *char = memchr(path_start as *void, 32, (hdr_len - m_len - 1) as i64) as *char;
+    if (space2 == nil) { return -1; }
+    var p_len: int = (space2 as i64 - path_start as i64) as int;
+    var path: [char; 256] = uninit;
+    if (p_len >= 256) { return -1; }
+    memcpy(&path[0] as *void, path_start as *void, p_len as i64);
+    path[p_len] = 0 as char;
+
+    var auth_hdr: [char; 2048] = uninit;
+    var auth_found: int = 0;
+    var content_length: int = 0;
+    var keep_alive: int = 1;
+
+    var cur: *char = memchr(space2 as *void, 10, (hdr_len - (space2 as i64 - buf as i64)) as i64) as *char;
+    if (cur != nil) { cur = (cur as i64 + 1 as i64) as *char; }
+
+    while (cur != nil && cur < hdr_end) {
+        var next_nl: *char = memchr(cur as *void, 10, (hdr_end as i64 - cur as i64)) as *char;
+        var line_len: int = 0;
+        if (next_nl != nil) {
+            line_len = (next_nl as i64 - cur as i64) as int;
+        } else {
+            line_len = (hdr_end as i64 - cur as i64) as int;
+        }
+
+        var c0: char = *cur;
+        if (c0 == 65 as char || c0 == 97 as char) {
+            if (strncasecmp(cur, "Authorization:\0", 14 as i64) == 0) {
+                var val: *char = (cur as i64 + 14 as i64) as *char;
+                while (*val == 32 as char || *val == 9 as char) { val = (val as i64 + 1 as i64) as *char; }
+                var vlen: int = line_len - 14 - ((val as i64 - (cur as i64 + 14 as i64)) as int);
+                while (vlen > 0 && (val[vlen - 1] == 13 as char || val[vlen - 1] == 32 as char)) { vlen = vlen - 1; }
+                if (vlen > 0 && vlen < 2047) {
+                    memcpy(&auth_hdr[0] as *void, val as *void, vlen as i64);
+                    auth_hdr[vlen] = 0 as char;
+                    auth_found = 1;
+                }
+            }
+        } else if (c0 == 67 as char || c0 == 99 as char) {
+            if (strncasecmp(cur, "Content-Length:\0", 15 as i64) == 0) {
+                var val: *char = (cur as i64 + 15 as i64) as *char;
+                while (*val == 32 as char || *val == 9 as char) { val = (val as i64 + 1 as i64) as *char; }
+                var cl: i64 = 0 as i64;
+                var digits: int = 0;
+                while (*val >= 48 as char && *val <= 57 as char) {
+                    cl = cl * 10 as i64 + ((*val as i64) - 48 as i64);
+                    if (cl > 16384 as i64) { return -1; }
+                    digits = digits + 1;
+                    val = (val as i64 + 1 as i64) as *char;
+                }
+                if (digits == 0) { return -1; }
+                content_length = cl as int;
+            } else if (strncasecmp(cur, "Connection:\0", 11 as i64) == 0) {
+                var val: *char = (cur as i64 + 11 as i64) as *char;
+                while (*val == 32 as char || *val == 9 as char) { val = (val as i64 + 1 as i64) as *char; }
+                if (strncasecmp(val, "close\0", 5 as i64) == 0) {
+                    keep_alive = 0;
+                }
+            }
+        }
+
+        if (next_nl != nil) {
+            cur = (next_nl as i64 + 1 as i64) as *char;
+        } else {
+            cur = nil;
+        }
+    }
+
+    var req_total_i: i64 = hdr_len as i64 + content_length as i64;
+    if (req_total_i > 65536 as i64) { return -1; }
+    if (avail_len as i64 < req_total_i) {
+        return 0; // Incomplete body
+    }
+    var req_total: int = req_total_i as int;
+
+    var body: *char = (buf as i64 + hdr_len as i64) as *char;
+    var auth_ptr: *char = nil;
+    if (auth_found == 1) { auth_ptr = &auth_hdr[0] as *char; }
+
+    var status_code: int = 200;
+    var is_write: int = 0;
+
+    var resp_len: int = handle_request(&method[0] as *char, &path[0] as *char,
+                                       auth_ptr, body, content_length,
+                                       (*w).body_buf, 65536,
+                                       &status_code, &is_write);
+
+    append_response(w, direct_fd, status_code, keep_alive, (*w).body_buf, resp_len);
+    *out_consumed = req_total;
+    *out_keep_alive = keep_alive;
+    return 1;
+}
+
+func process_incoming_data(w: *WorkerState, direct_fd: int, pkt_data: *char, pkt_len: int) -> void {
+    var c: *Conn = (*w).conns + (direct_fd as i64);
+    var input_bytes: *char = pkt_data;
+    var total_len: int = pkt_len;
+
+    if ((*c).input.len as i64 + pkt_len as i64 > 65536 as i64) {
+        queue_close_sqe(w, direct_fd);
+        return;
+    }
+    if ((*c).input.len > (0 as u32)) {
+        buffer_extend(&(*c).input, pkt_data as *u8, pkt_len as u32);
+        input_bytes = (*c).input.ptr as *char;
+        total_len = (*c).input.len as int;
+    }
+
+    var offset: int = 0;
+    while (offset < total_len) {
+        var consumed: int = 0;
+        var keep_alive: int = 1;
+        var cur_buf: *char = (input_bytes as i64 + offset as i64) as *char;
+        var cur_len: int = total_len - offset;
+        var res: int = process_one_request(w, direct_fd, cur_buf, cur_len, &consumed, &keep_alive);
+        if (res == 0) {
+            break;
+        }
+        if (res < 0) {
+            var bad_err: string = "{\"error\":\"malformed request\"}\0";
+            var bad_len: int = strlen(&bad_err[0] as *char) as int;
+            append_response(w, direct_fd, 400, 0, &bad_err[0] as *char, bad_len);
+            mark_conn_dirty(w, direct_fd);
+            (*c).state = (*c).state | CONN_CLOSING;
+            offset = total_len;
+            break;
+        }
+        offset = offset + consumed;
+        mark_conn_dirty(w, direct_fd);
+        if (keep_alive == 0) {
+            (*c).state = (*c).state | CONN_CLOSING;
+            break;
+        }
+    }
+
+    if (((*c).state & CONN_CLOSING) == (0 as u32) && offset < total_len) {
+        var remaining: int = total_len - offset;
+        if ((*c).input.len == (0 as u32)) {
+            buffer_extend(&(*c).input, (input_bytes as i64 + offset as i64) as *u8, remaining as u32);
+        } else {
+            buffer_consume(&(*c).input, offset as u32);
+        }
+    } else {
+        if ((*c).input.cap > (0 as u32)) {
+            retire_buffer(w, &(*c).input);
+        }
+    }
+}
+
+func worker_loop(arg: *void) -> *void {
+    var w: *WorkerState = arg as *WorkerState;
+
+    var params: IoUringParams = uninit;
+    var p_ptr: *u8 = &params as *u8;
+    var i: i64 = 0;
+    while (i < 120) { *(p_ptr + i) = 0 as u8; i = i + 1; }
+
+    params.flags = (8 | 256 | 4096 | 8192) as u32;
+    params.cq_entries = 16384 as u32;
+
+    var ring_fd: i64 = syscall(SYS_IO_URING_SETUP, 8192, &params as i64, 0, 0, 0, 0);
+    if (ring_fd < 0) {
+        var err_m: string = "Failed io_uring_setup in worker\0";
+        puts(&err_m[0] as *char);
+        exit(1);
+    }
+    (*w).ring_fd = ring_fd as int;
+
+    var nr_files: i64 = g_nr_files;
+    var files: *i32 = malloc(nr_files * 4) as *i32;
+    i = 0;
+    while (i < nr_files) { *(files + i) = -1; i = i + 1; }
+    syscall(SYS_IO_URING_REGISTER, ring_fd, IORING_REGISTER_FILES, files as i64, nr_files, 0, 0);
+
+    var buf_mem: *u8 = mmap(nil, NBUFS * BUF_SZ, 3, 0x22, -1, 0) as *u8;
+    var pbuf_ring_mem: *u8 = mmap(nil, NBUFS * 16, 3, 0x21, -1, 0) as *u8;
+    (*w).pbuf_buf_mem = buf_mem;
+    (*w).pbuf_ring_mem = pbuf_ring_mem;
+
+    var reg: IoUringBufReg = uninit;
+    reg.ring_addr = pbuf_ring_mem as u64;
+    reg.ring_entries = NBUFS as u32;
+    reg.bgid = 0 as u16;
+    reg.flags = 0 as u16;
+    reg.resv1 = 0 as u64;
+    reg.resv2 = 0 as u64;
+    reg.resv3 = 0 as u64;
+    syscall(SYS_IO_URING_REGISTER, ring_fd, IORING_REGISTER_PBUF_RING, &reg as i64, 1, 0, 0);
+
+    var pbufs: *IoUringBuf = pbuf_ring_mem as *IoUringBuf;
+    i = 0;
+    while (i < NBUFS) {
+        var b: *IoUringBuf = pbufs + i;
+        (*b).addr = (buf_mem + (i * BUF_SZ)) as u64;
+        (*b).len = BUF_SZ as u32;
+        (*b).bid = i as u16;
+        (*b).resv = 0 as u16;
+        i = i + 1;
+    }
+    var ptail: *u16 = (pbuf_ring_mem + 14) as *u16;
+    *ptail = NBUFS as u16;
+    (*w).ptail_ptr = ptail;
+
+    var sq_size: i64 = (params.sq_off.array as i64) + ((params.sq_entries as i64) * 4);
+    var sq_ptr: *u8 = mmap(nil, sq_size, 3, 1, ring_fd as int, 0) as *u8;
+    var cq_size: i64 = (params.cq_off.cqes as i64) + ((params.cq_entries as i64) * 16);
+    var cq_ptr: *u8 = mmap(nil, cq_size, 3, 1, ring_fd as int, 0x8000000) as *u8;
+    var sqe_size: i64 = (params.sq_entries as i64) * 64;
+    var sqes: *IoUringSqe = mmap(nil, sqe_size, 3, 1, ring_fd as int, 0x10000000) as *IoUringSqe;
+
+    (*w).sq_ptr = sq_ptr;
+    (*w).cq_ptr = cq_ptr;
+    (*w).sqes = sqes;
+    (*w).sq_head = (sq_ptr + (params.sq_off.head as i64)) as *u32;
+    (*w).sq_tail = (sq_ptr + (params.sq_off.tail as i64)) as *u32;
+    (*w).sq_mask = (sq_ptr + (params.sq_off.ring_mask as i64)) as *u32;
+    (*w).sq_array = (sq_ptr + (params.sq_off.array as i64)) as *u32;
+    (*w).cq_head = (cq_ptr + (params.cq_off.head as i64)) as *u32;
+    (*w).cq_tail = (cq_ptr + (params.cq_off.tail as i64)) as *u32;
+    (*w).cq_mask = (cq_ptr + (params.cq_off.ring_mask as i64)) as *u32;
+    (*w).cqes = (cq_ptr + (params.cq_off.cqes as i64)) as *IoUringCqe;
+
+    var conns_mem: *Conn = malloc(nr_files * (64 as i64)) as *Conn;
+    i = 0;
+    while (i < nr_files) {
+        var c: *Conn = conns_mem + i;
+        (*c).state = 0 as u32;
+        (*c).gen = 1 as u32;
+        (*c).sent = 0 as u32;
+        (*c).input.ptr = nil; (*c).input.len = 0 as u32; (*c).input.cap = 0 as u32;
+        (*c).output.ptr = nil; (*c).output.len = 0 as u32; (*c).output.cap = 0 as u32;
+        (*c).flight.ptr = nil; (*c).flight.len = 0 as u32; (*c).flight.cap = 0 as u32;
+        i = i + 1;
+    }
+    (*w).conns = conns_mem;
+    (*w).open_conns = 0;
+    (*w).accept_gen = 1 as u32;
+    (*w).body_buf = malloc(65536) as *char;
+    (*w).pool_len = 0;
+    (*w).dirty_count = 0;
+    (*w).rearm_cap = nr_files as int;
+    (*w).rearm_fds = malloc(nr_files * 4) as *i32;
+    (*w).rearm_head = 0;
+    (*w).rearm_tail = 0;
+
+    var tail: u32 = *((*w).sq_tail);
+    var idx: u32 = tail & (*((*w).sq_mask));
+    var s: *IoUringSqe = sqes + (idx as i64);
+    var s_bytes: *u8 = s as *u8;
+    i = 0;
+    while (i < 64) { *(s_bytes + i) = 0 as u8; i = i + 1; }
+    (*s).opcode = IORING_OP_ACCEPT;
+    (*s).fd = g_listen_fd;
+    (*s).ioprio = IORING_ACCEPT_MULTISHOT;
+    (*s).file_index = IORING_FILE_INDEX_ALLOC;
+    (*s).user_data = 1 as u64;
+    *((*w).sq_array + (idx as i64)) = idx;
+    *((*w).sq_tail) = tail + 1;
+
+    var last_count: int = 0;
+    var ts: KernelTimespec = uninit;
+    var getev_args: IoUringGeteventsArg = uninit;
+    getev_args.sigmask = 0 as u64;
+    getev_args.sigmask_sz = 0 as u32;
+    getev_args.min_wait_usec = 0 as u32;
+    getev_args.ts = (&ts as *void) as u64;
+
+    while (1 == 1) {
+        var cq_h: *u32 = (*w).cq_head;
+        var cq_t: *u32 = (*w).cq_tail;
+        var cq_m: *u32 = (*w).cq_mask;
+        var cqes_arr: *IoUringCqe = (*w).cqes;
+
+        var rearm_pending: int = 0;
+        if ((*w).rearm_head != (*w).rearm_tail) { rearm_pending = 1; }
+
+        var to_sub: u32 = *((*w).sq_tail) - *((*w).sq_head);
+        var wait_nr: int = 1;
+        if (*cq_h != *cq_t) {
+            wait_nr = 0;
+            ts.tv_sec = 0;
+            ts.tv_nsec = 0;
+        } else if (rearm_pending == 1) {
+            ts.tv_sec = 0;
+            ts.tv_nsec = 250000;
+            wait_nr = 0;
+        } else if (last_count >= 4) {
+            ts.tv_sec = 0;
+            ts.tv_nsec = 250000;
+            wait_nr = 32;
+            if ((*w).open_conns < 32 && (*w).open_conns > 0) {
+                wait_nr = (*w).open_conns;
+            }
+        } else {
+            ts.tv_sec = 2;
+            ts.tv_nsec = 0;
+            wait_nr = 1;
+        }
+
+        syscall(SYS_IO_URING_ENTER, ring_fd, to_sub as i64, wait_nr as i64, 9, (&getev_args as *void) as i64, 24);
+
+        var count_this_batch: int = 0;
+        var returned_buffers: int = 0;
+        if (*cq_h != *cq_t) {
+            pthread_mutex_lock(g_db_mutex);
+            while (*cq_h != *cq_t && count_this_batch < 1024) {
+                var c_idx: u32 = (*cq_h) & (*cq_m);
+                var cqe: *IoUringCqe = cqes_arr + (c_idx as i64);
+                var udata: u64 = (*cqe).user_data;
+                var res: i32 = (*cqe).res;
+                var flags: u32 = (*cqe).flags;
+                *cq_h = (*cq_h) + 1;
+                count_this_batch = count_this_batch + 1;
+
+                if (udata == (1 as u64)) {
+                    if (res >= 0) {
+                        var direct_fd: i32 = res;
+                        var c: *Conn = (*w).conns + (direct_fd as i64);
+                        (*c).state = (CONN_LIVE | CONN_RECEIVING);
+                        (*c).gen = (*c).gen + (1 as u32);
+                        (*c).sent = 0 as u32;
+                        (*c).input.ptr = nil; (*c).input.len = 0 as u32; (*c).input.cap = 0 as u32;
+                        (*c).output.ptr = nil; (*c).output.len = 0 as u32; (*c).output.cap = 0 as u32;
+                        (*c).flight.ptr = nil; (*c).flight.len = 0 as u32; (*c).flight.cap = 0 as u32;
+                        (*w).open_conns = (*w).open_conns + 1;
+                        queue_recv_sqe(w, direct_fd);
+                    }
+                    if ((flags & (2 as u32)) == (0 as u32)) {
+                        queue_accept_sqe(w);
+                    }
+                } else if ((udata & 255 as u64) == (2 as u64)) {
+                    var direct_fd: i32 = ((udata >> 8) & 0xffffff) as i32;
+                    var gen: u32 = (udata >> 32) as u32;
+                    var c: *Conn = (*w).conns + (direct_fd as i64);
+
+                    if (((*c).state & CONN_LIVE) != (0 as u32) && (*c).gen == gen) {
+                        if ((flags & (2 as u32)) == (0 as u32)) {
+                            (*c).state = (*c).state & (~CONN_RECEIVING);
+                        }
+                        if (res > 0) {
+                            returned_buffers = returned_buffers + 1;
+                            var flag_int: int = flags as int;
+                            var bid_int: int = flag_int >> 16;
+                            var bid: u16 = (bid_int & 65535) as u16;
+                            var pkt_data: *char = (buf_mem + ((bid as i64) * BUF_SZ)) as *char;
+
+                            if (((*c).state & CONN_CLOSING) == (0 as u32)) {
+                                process_incoming_data(w, direct_fd, pkt_data, res);
+                            }
+
+                            var cur_tail: u16 = *((*w).ptail_ptr);
+                            var b: *IoUringBuf = pbufs + ((cur_tail as i64) & ((NBUFS - 1) as i64));
+                            (*b).addr = (buf_mem + ((bid as i64) * BUF_SZ)) as u64;
+                            (*b).len = BUF_SZ as u32;
+                            (*b).bid = bid;
+                            (*b).resv = 0 as u16;
+                            *((*w).ptail_ptr) = (cur_tail + 1 as u16);
+
+                            if (((*c).state & CONN_RECEIVING) == (0 as u32) && ((*c).state & CONN_CLOSING) == (0 as u32)) {
+                                queue_recv_sqe(w, direct_fd);
+                                (*c).state = (*c).state | CONN_RECEIVING;
+                            }
+                        } else if (res == -105) {
+                            if (((*c).state & CONN_REARM) == (0 as u32)) {
+                                (*c).state = (*c).state | CONN_REARM;
+                                rearm_push(w, direct_fd);
+                            }
+                        } else {
+                            (*c).state = (*c).state | CONN_CLOSING;
+                            if (((*c).state & CONN_SENDING) == (0 as u32) && (*c).output.len == (0 as u32)) {
+                                queue_close_sqe(w, direct_fd);
+                            }
+                        }
+                    }
+                } else if ((udata & 255 as u64) == (3 as u64)) {
+                    var direct_fd: i32 = ((udata >> 8) & 0xffffff) as i32;
+                    var gen: u32 = (udata >> 32) as u32;
+                    var c: *Conn = (*w).conns + (direct_fd as i64);
+                    if (((*c).state & CONN_LIVE) != (0 as u32) && (*c).gen == gen) {
+                        (*c).state = (*c).state & (~CONN_SENDING);
+                        if (res < 0) {
+                            (*c).state = (*c).state | CONN_CLOSING;
+                            retire_buffer(w, &(*c).flight);
+                            retire_buffer(w, &(*c).output);
+                            queue_close_sqe(w, direct_fd);
+                        } else {
+                            (*c).sent = (*c).sent + (res as u32);
+                            if ((*c).sent < (*c).flight.len) {
+                                queue_send_sqe(w, direct_fd);
+                            } else {
+                                retire_buffer(w, &(*c).flight);
+                                (*c).sent = 0 as u32;
+                                if ((*c).output.len > (0 as u32)) {
+                                    (*c).flight = (*c).output;
+                                    (*c).output.ptr = nil;
+                                    (*c).output.len = 0 as u32;
+                                    (*c).output.cap = 0 as u32;
+                                    queue_send_sqe(w, direct_fd);
+                                } else if (((*c).state & CONN_CLOSING) != (0 as u32)) {
+                                    queue_close_sqe(w, direct_fd);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            bt_end_batch();
+
+            if (g_in_txn == 1) {
+                var stmt_c: *void = g_stmt_commit;
+                var commit_rc: int = sqlite3_step(stmt_c);
+                sqlite3_reset(stmt_c);
+                g_in_txn = 0;
+                if (commit_rc != 101) {
+                    var stmt_rb: *void = g_stmt_rollback;
+                    var rb_rc: int = sqlite3_step(stmt_rb);
+                    sqlite3_reset(stmt_rb);
+                    fail_pending_commit(w);
+                }
+            }
+
+            flush_pending(w);
+
+            if (g_wal_frames >= 8192) {
+                var to_sub_now: u32 = *((*w).sq_tail) - *((*w).sq_head);
+                if (to_sub_now > (0 as u32)) {
+                    syscall(SYS_IO_URING_ENTER, (*w).ring_fd as i64, to_sub_now as i64, 0, 0, 0, 0);
+                }
+                sqlite3_wal_checkpoint_v2(g_db, nil, 0, nil, nil);
+                g_wal_frames = 0;
+            }
+            pthread_mutex_unlock(g_db_mutex);
+
+            var budget: int = returned_buffers;
+            if (budget < 32) { budget = 32; }
+            if (budget > 1024) { budget = 1024; }
+
+            while (budget > 0) {
+                var r_fd: i32 = rearm_pop(w);
+                if (r_fd < 0) { break; }
+                var rc_conn: *Conn = (*w).conns + (r_fd as i64);
+                if (((*rc_conn).state & CONN_REARM) != (0 as u32)) {
+                    (*rc_conn).state = (*rc_conn).state & (~CONN_REARM);
+                    if (((*rc_conn).state & CONN_LIVE) != (0 as u32) &&
+                        ((*rc_conn).state & CONN_CLOSING) == (0 as u32) &&
+                        ((*rc_conn).state & CONN_RECEIVING) == (0 as u32)) {
+                        queue_recv_sqe(w, r_fd);
+                        (*rc_conn).state = (*rc_conn).state | CONN_RECEIVING;
+                    }
+                }
+                budget = budget - 1;
+            }
+        }
+
+        last_count = count_this_batch;
+    }
+    return nil;
+}
+
+func _start() -> void {
+    var host_env: *char = getenv("HOST\0");
+    var port_env: *char = getenv("PORT\0");
+    var db_env: *char = getenv("SQLITE_PATH\0");
+    var secret_env: *char = getenv("JWT_SECRET\0");
+
+    var port: int = 80;
+    if (port_env != nil) {
+        port = atoi(port_env);
+    }
+    if (db_env == nil) {
+        var def_db: string = "db.sqlite\0";
+        db_env = &def_db[0] as *char;
+    }
+    if (secret_env == nil) {
+        var def_sec: string = "secret\0";
+        secret_env = &def_sec[0] as *char;
+    }
+    g_secret_ptr = secret_env;
+    g_start_time = time(nil);
+    g_last_ckpt = g_start_time;
+
+    var lim: RLimit = uninit;
+    getrlimit(7, &lim as *void);
+    if (lim.rlim_cur < lim.rlim_max) {
+        lim.rlim_cur = lim.rlim_max;
+        setrlimit(7, &lim as *void);
+    }
+    getrlimit(7, &lim as *void);
+    var target_slots: i64 = 200000 as i64;
+    var slots: i64 = lim.rlim_max as i64;
+    if (slots > target_slots) { slots = target_slots; }
+    if (slots < (4096 as i64)) { slots = 4096 as i64; }
+
+    var workers: int = ((target_slots + slots - (1 as i64)) / slots) as int;
+    if (workers > 8) { workers = 8; }
+    if (workers < 1) { workers = 1; }
+
+    g_nr_files = slots;
+    g_nworkers = workers;
+
+    var db_ptr: *void = nil;
+    var rc: int = sqlite3_open_v2(db_env, &db_ptr, 2 | 4, nil);
+    if (rc != 0) {
+        var err_m: string = "Failed to open SQLite database\0";
+        puts(&err_m[0] as *char);
+        exit(1);
+    }
+    g_db = db_ptr;
+
+    var pragma_sql: string = "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA locking_mode=EXCLUSIVE; PRAGMA foreign_keys=ON; PRAGMA cache_size=-262144; PRAGMA cache_spill=OFF; PRAGMA mmap_size=1073741824; PRAGMA wal_autocheckpoint=0;\0";
+    sqlite3_exec(db_ptr, &pragma_sql[0] as *char, nil, nil, nil);
+    sqlite3_wal_hook(db_ptr, &on_wal_hook as *void, nil);
+
+    var bt_rc: int = bt_init(db_ptr);
+    if (bt_rc != 0) {
+        var bt_err: string = "Failed to initialize native B-tree read plans\0";
+        puts(&bt_err[0] as *char);
+        exit(1);
+    }
+
+    var db_fd: int = open(db_env, 0);
+    if (db_fd >= 0) {
+        posix_fadvise(db_fd, 0 as i64, 0 as i64, 3);
+        close(db_fd);
+    }
+    g_feed_scratch = malloc(32768) as *char;
+
+    var s_feed: string = "SELECT p.id, p.body, p.created_at, u.username, (SELECT count(*) FROM likes l WHERE l.post_id = p.id) FROM posts p JOIN users u ON u.id = p.user_id ORDER BY p.created_at DESC, p.id DESC LIMIT 20;\0";
+    var stmt_f: *void = nil;
+    sqlite3_prepare_v2(db_ptr, &s_feed[0] as *char, -1, &stmt_f, nil);
+    g_stmt_feed = stmt_f;
+
+    var s_feed_ids: string = "SELECT id FROM posts ORDER BY created_at DESC, id DESC LIMIT 20;\0";
+    var stmt_fids: *void = nil;
+    sqlite3_prepare_v2(db_ptr, &s_feed_ids[0] as *char, -1, &stmt_fids, nil);
+    g_stmt_feed_ids = stmt_fids;
+
+    var s_feed_likes: string = "SELECT post_id FROM likes WHERE post_id BETWEEN ?1 AND ?2;\0";
+    var stmt_flikes: *void = nil;
+    sqlite3_prepare_v2(db_ptr, &s_feed_likes[0] as *char, -1, &stmt_flikes, nil);
+    g_stmt_feed_likes = stmt_flikes;
+
+    var s_feed_rows: string = "SELECT p.id, p.body, p.created_at, u.username FROM posts p JOIN users u ON u.id = p.user_id WHERE p.id BETWEEN ?1 AND ?2;\0";
+    var stmt_frows: *void = nil;
+    sqlite3_prepare_v2(db_ptr, &s_feed_rows[0] as *char, -1, &stmt_frows, nil);
+    g_stmt_feed_rows = stmt_frows;
+
+    var s_post: string = "SELECT p.id, p.body, p.created_at, u.username, (SELECT count(*) FROM likes l WHERE l.post_id = p.id) FROM posts p JOIN users u ON u.id = p.user_id WHERE p.id = ?;\0";
+    var stmt_p: *void = nil;
+    sqlite3_prepare_v2(db_ptr, &s_post[0] as *char, -1, &stmt_p, nil);
+    g_stmt_post = stmt_p;
+
+    var s_health: string = "SELECT 1;\0";
+    var stmt_h: *void = nil;
+    sqlite3_prepare_v2(db_ptr, &s_health[0] as *char, -1, &stmt_h, nil);
+    g_stmt_health = stmt_h;
+
+    var s_chk: string = "SELECT 1 FROM posts WHERE id = ?;\0";
+    var stmt_c: *void = nil;
+    sqlite3_prepare_v2(db_ptr, &s_chk[0] as *char, -1, &stmt_c, nil);
+    g_stmt_check_post = stmt_c;
+
+    var s_le: string = "SELECT 1 FROM likes WHERE user_id = ?1 AND post_id = ?2 LIMIT 1;\0";
+    var stmt_le: *void = nil;
+    sqlite3_prepare_v2(db_ptr, &s_le[0] as *char, -1, &stmt_le, nil);
+    g_stmt_like_exists = stmt_le;
+
+    var s_insl: string = "INSERT INTO likes (user_id, post_id) SELECT ?1, ?2 WHERE EXISTS (SELECT 1 FROM posts WHERE id = ?2) ON CONFLICT (user_id, post_id) DO NOTHING;\0";
+    var stmt_l: *void = nil;
+    sqlite3_prepare_v2(db_ptr, &s_insl[0] as *char, -1, &stmt_l, nil);
+    g_stmt_insert_like = stmt_l;
+
+    var s_insp: string = "INSERT INTO posts (user_id, body) VALUES (?, ?) RETURNING id, created_at;\0";
+    var stmt_ip: *void = nil;
+    sqlite3_prepare_v2(db_ptr, &s_insp[0] as *char, -1, &stmt_ip, nil);
+    g_stmt_insert_post = stmt_ip;
+
+    var s_begin: string = "BEGIN;\0";
+    var stmt_b: *void = nil;
+    sqlite3_prepare_v2(db_ptr, &s_begin[0] as *char, -1, &stmt_b, nil);
+    g_stmt_begin = stmt_b;
+
+    var s_commit: string = "COMMIT;\0";
+    var stmt_cm: *void = nil;
+    sqlite3_prepare_v2(db_ptr, &s_commit[0] as *char, -1, &stmt_cm, nil);
+    g_stmt_commit = stmt_cm;
+
+    var s_rollback: string = "ROLLBACK;\0";
+    var stmt_rb: *void = nil;
+    sqlite3_prepare_v2(db_ptr, &s_rollback[0] as *char, -1, &stmt_rb, nil);
+    g_stmt_rollback = stmt_rb;
+
+    g_db_mutex = malloc(64);
+    pthread_mutex_init(g_db_mutex, nil);
+
+    var sfd: int = socket(2, 1, 0);
+    var opt: int = 1;
+    setsockopt(sfd, 1, 2, &opt as *void, 4);
+    setsockopt(sfd, 1, 15, &opt as *void, 4);
+    setsockopt(sfd, 6, 1, &opt as *void, 4);
+
+    var addr: SockAddrIn = uninit;
+    addr.sin_family = 2 as u16;
+    addr.sin_port = htons(port as u16);
+    if (host_env != nil && strcmp(host_env, "0.0.0.0\0") != 0) {
+        inet_pton(2, host_env, &addr.sin_addr as *void);
+    } else {
+        addr.sin_addr = 0 as u32;
+    }
+    var sin_i: int = 0;
+    while (sin_i < 8) { addr.sin_zero[sin_i] = 0 as u8; sin_i = sin_i + 1; }
+
+    if (bind(sfd, &addr as *void, 16) < 0) {
+        var err_m: string = "Failed to bind listening socket\0";
+        puts(&err_m[0] as *char);
+        exit(1);
+    }
+    if (listen(sfd, 65535) < 0) {
+        var err_m: string = "Failed to listen on socket\0";
+        puts(&err_m[0] as *char);
+        exit(1);
+    }
+    g_listen_fd = sfd;
+
+    var workers: *WorkerState = malloc((g_nworkers as i64) * (131072 as i64)) as *WorkerState;
+    var threads: [u64; 8] = [0 as u64, ...];
+
+    var w_id: int = 0;
+    while (w_id < g_nworkers) {
+        var w: *WorkerState = workers + (w_id as i64);
+        (*w).id = w_id;
+        pthread_create(&threads[w_id], nil, &worker_loop as *void, w as *void);
+        w_id = w_id + 1;
+    }
+
+    var ready_msg: string = "Cider io_uring server running with direct descriptors.\0";
+    puts(&ready_msg[0] as *char);
+
+    w_id = 0;
+    while (w_id < g_nworkers) {
+        pthread_join(threads[w_id], nil);
+        w_id = w_id + 1;
+    }
+
+    exit(0);
+}

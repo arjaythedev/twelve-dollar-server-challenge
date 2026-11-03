@@ -1,0 +1,65 @@
+2026-10-28T17:30:14Z
+reference feed connections=256 cpu=9 clients=10-11
+warm RSS KiB: 18292
+Running 15s test @ http://127.0.0.1:18373/
+  2 threads and 256 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency    10.88ms    2.06ms  22.55ms   70.48%
+    Req/Sec    11.61k     0.89k   14.72k    72.00%
+  Latency Distribution
+     50%   10.81ms
+     75%   12.18ms
+     90%   13.48ms
+     99%   16.23ms
+  346620 requests in 15.06s, 1.67GB read
+Requests/sec:  23023.53
+Transfer/sec:    113.67MB
+final RSS KiB: 18356
+rayo feed connections=256 cpu=9 clients=10-11
+warm RSS KiB: 28352
+Running 15s test @ http://127.0.0.1:18373/
+  2 threads and 256 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency    29.91ms   97.27ms 833.69ms   96.31%
+    Req/Sec    10.33k     1.06k   12.29k    84.11%
+  Latency Distribution
+     50%   11.95ms
+     75%   14.36ms
+     90%   17.48ms
+     99%  646.22ms
+  311206 requests in 15.89s, 1.51GB read
+Requests/sec:  19587.54
+Transfer/sec:     97.36MB
+final RSS KiB: 28352
+reference mix connections=256 cpu=9 clients=10-11
+warm RSS KiB: 151276
+Running 15s test @ http://127.0.0.1:18373/
+  2 threads and 256 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     7.14ms    1.48ms  17.27ms   71.35%
+    Req/Sec    17.31k     1.01k   23.24k    72.33%
+  Latency Distribution
+     50%    7.14ms
+     75%    8.06ms
+     90%    8.96ms
+     99%   10.84ms
+  517082 requests in 15.06s, 681.27MB read
+Requests/sec:  34325.12
+Transfer/sec:     45.22MB
+final RSS KiB: 159724
+rayo mix connections=256 cpu=9 clients=10-11
+warm RSS KiB: 163460
+Running 15s test @ http://127.0.0.1:18373/
+  2 threads and 256 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency    27.94ms  100.96ms 825.81ms   95.96%
+    Req/Sec    14.84k     2.09k   18.23k    72.09%
+  Latency Distribution
+     50%    7.81ms
+     75%    9.95ms
+     90%   14.14ms
+     99%  654.34ms
+  445969 requests in 15.85s, 603.27MB read
+Requests/sec:  28138.19
+Transfer/sec:     38.06MB
+final RSS KiB: 176540

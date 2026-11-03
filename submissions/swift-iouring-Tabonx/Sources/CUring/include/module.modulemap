@@ -1,0 +1,4 @@
+module CUring {
+    header "cuuring.h"
+    export *
+}

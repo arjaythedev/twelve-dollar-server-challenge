@@ -1,0 +1,94 @@
+# Invoke through local.sh so each checkout gets its own Compose project.
+services:
+  seed:
+    image: ${ADA_LOCAL_IMAGE:-ada-local:workstation}
+    platform: ${ADA_SERVER_PLATFORM:-linux/amd64}
+    cpus: 1
+    mem_limit: 512m
+    memswap_limit: 512m
+    entrypoint: ["/bin/bash", "-euc"]
+    command:
+      - |
+        if [ ! -f /data/feed.db ]; then
+          cp /seed/feed.db /data/feed.db.tmp
+          chmod 640 /data/feed.db.tmp
+          chown 10001:10001 /data/feed.db.tmp
+          mv /data/feed.db.tmp /data/feed.db
+        fi
+        chown 10001:10001 /data
+        chmod 750 /data
+    volumes:
+      - data:/data
+      - type: bind
+        source: ../../seed/feed.db
+        target: /seed/feed.db
+        read_only: true
+        bind:
+          create_host_path: false
+
+  server:
+    image: ${ADA_LOCAL_IMAGE:-ada-local:workstation}
+    platform: ${ADA_SERVER_PLATFORM:-linux/amd64}
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+    cpus: 1
+    mem_limit: 2g
+    memswap_limit: 2g
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    ports:
+      - "127.0.0.1:${ADA_LOCAL_PORT:-3001}:80"
+    environment:
+      JWT_SECRET: twelve-dollar-challenge
+      ADA_SERVE_MODE: ${ADA_SERVE_MODE:-direct}
+    volumes:
+      - data:/data
+      - type: bind
+        source: ../../bench/nginx.conf
+        target: /challenge-bench.conf
+        read_only: true
+        bind:
+          create_host_path: false
+
+  load:
+    profiles: [load]
+    image: grafana/k6:1.8.2
+    platform: ${ADA_LOAD_PLATFORM:-linux/arm64}
+    user: "0:0"
+    cpus: ${K6_CPUS:-4}
+    mem_limit: ${K6_MEMORY_GB:-4}g
+    memswap_limit: ${K6_MEMORY_GB:-4}g
+    # Client namespace only: allow >28k keep-alive users per generator.
+    # No server or Docker VM kernel setting is changed.
+    sysctls:
+      net.ipv4.ip_local_port_range: "1024 65535"
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    environment:
+      GOMEMLIMIT: ${K6_GOMEMLIMIT:-3GiB}
+    volumes:
+      - type: bind
+        source: ../../bench/load.js
+        target: /scripts/load.js
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ../../seed/tokens.json
+        target: /seed/tokens.json
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${ADA_LOAD_RESULTS:-./benchmark-results/local}
+        target: /results
+        bind:
+          create_host_path: false
+
+volumes:
+  data:

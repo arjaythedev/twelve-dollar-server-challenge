@@ -1,0 +1,2 @@
+# Everything build.sh downloads or builds (toolchain, KallistiOS, SQLite, Flycast, the .elf)
+/build/

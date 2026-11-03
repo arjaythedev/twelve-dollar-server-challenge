@@ -1,0 +1,44 @@
+{
+  "nodes": {
+    "challenge": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1792186386,
+        "narHash": "sha256-UgO0b65TBQo84LnUOanHoz65cLCQey4CQu24gCyr1F4=",
+        "owner": "arjaythedev",
+        "repo": "twelve-dollar-server-challenge",
+        "rev": "c72d994d302e23c9166ea54d5dfe7a238c79bb75",
+        "type": "github"
+      },
+      "original": {
+        "owner": "arjaythedev",
+        "repo": "twelve-dollar-server-challenge",
+        "type": "github"
+      }
+    },
+    "nixpkgs": {
+      "locked": {
+        "lastModified": 1792502884,
+        "narHash": "sha256-IoNisKcGbUjdd45qCqywGMCYmZ5EnkxezvLII0FWwNA=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "02c087f3fe673c9e317f206a627cb6b910336dbe",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "ref": "nixos-unstable",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
+    "root": {
+      "inputs": {
+        "challenge": "challenge",
+        "nixpkgs": "nixpkgs"
+      }
+    }
+  },
+  "root": "root",
+  "version": 7
+}

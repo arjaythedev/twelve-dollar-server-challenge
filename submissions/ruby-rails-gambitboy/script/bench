@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+set -euo pipefail
+APP="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT="$(cd "$APP/../.." && pwd)"
+VUS="${1:-1000}"
+IMAGE=twelve-dollar-rails
+NAME=twelve-dollar-rails-server
+[ -f "$ROOT/seed/feed.db" ] || { echo "no seed/feed.db — run: bash seed/make-seed.sh"; exit 1; }
+
+docker build -t "$IMAGE" -f - "$APP" <<'DOCKERFILE'
+FROM ubuntu:24.04
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y nginx \
+ && rm /etc/nginx/sites-enabled/default \
+ && sed -i 's/^worker_processes .*/worker_processes 1;\nworker_rlimit_nofile 65535;/; s/worker_connections .*/worker_connections 16384;/' /etc/nginx/nginx.conf
+COPY install.sh /tmp/install.sh
+RUN bash /tmp/install.sh
+COPY --chown=ubuntu . /home/ubuntu/app
+USER ubuntu
+RUN bash /home/ubuntu/app/build.sh
+DOCKERFILE
+
+DATA="$(mktemp -d)"
+cp "$ROOT/seed/feed.db" "$DATA/feed.db"
+cleanup() { docker rm -f "$NAME" >/dev/null 2>&1 || true; rm -rf "$DATA"; }
+trap cleanup EXIT
+docker rm -f "$NAME" >/dev/null 2>&1 || true
+
+docker run -d --name "$NAME" --network host --user root \
+  --cpuset-cpus=0 --memory=2g --memory-swap=2g --ulimit nofile=65535:65535 \
+  -v "$DATA:/data" -v "$ROOT/bench/nginx.conf:/etc/nginx/sites-enabled/bench.conf:ro" \
+  -e SQLITE_PATH=/data/feed.db -e JWT_SECRET=twelve-dollar-challenge -e HOST=127.0.0.1 -e PORT=3000 \
+  "$IMAGE" bash -c 'nginx && exec runuser -u ubuntu -- bash /home/ubuntu/app/start.sh' >/dev/null
+
+for _ in $(seq 60); do curl -sf "http://127.0.0.1/health" >/dev/null && break; sleep 1; done
+curl -sf "http://127.0.0.1/health" >/dev/null || { echo "no healthy /health after 60 s"; docker logs "$NAME" | tail -30; exit 1; }
+
+k6_env=(-e VUS="$VUS" -e BASE_URL="http://127.0.0.1" -e TOKENS=/seed/tokens.json)
+[ -n "${DURATION:-}" ] && k6_env+=(-e DURATION="$DURATION")
+[ -n "${RAMP_UP:-}" ] && k6_env+=(-e RAMP_UP="$RAMP_UP")
+
+rc=0
+docker run --rm --network host --ulimit nofile=65535:65535 \
+  -v "$ROOT/bench:/bench:ro" -v "$ROOT/seed:/seed:ro" \
+  grafana/k6 run "${k6_env[@]}" /bench/load.js || rc=$?
+
+echo "server memory peak: $(( $(docker exec "$NAME" cat /sys/fs/cgroup/memory.peak) / 1024 / 1024 )) MB"
+echo "server OOM killed: $(docker inspect -f '{{.State.OOMKilled}}' "$NAME")"
+exit $rc

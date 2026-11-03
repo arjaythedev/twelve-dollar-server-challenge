@@ -1,0 +1,31 @@
+{
+    "name": "pklebba/twelve-dollar-php-symfony",
+    "description": "The $12 Server Challenge: PHP 8.5 + Symfony 8.1 on FrankenPHP (worker mode), SQLite via Doctrine DBAL",
+    "type": "project",
+    "license": "MIT",
+    "require": {
+        "php": ">=8.5",
+        "ext-pdo_sqlite": "*",
+        "doctrine/dbal": "^4.5",
+        "symfony/console": "8.1.*",
+        "symfony/framework-bundle": "8.1.*",
+        "symfony/security-bundle": "8.1.*"
+    },
+    "config": {
+        "optimize-autoloader": true,
+        "platform": {
+            "php": "8.5.12"
+        },
+        "sort-packages": true
+    },
+    "autoload": {
+        "psr-4": {
+            "App\\": "src/"
+        }
+    },
+    "extra": {
+        "symfony": {
+            "require": "8.1.*"
+        }
+    }
+}

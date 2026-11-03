@@ -1,0 +1,11 @@
+name: feed_server
+description: $12 server challenge - Dart raw-socket HTTP server on SQLite.
+version: 1.0.0
+publish_to: none
+
+environment:
+  sdk: ">=3.5.0 <4.0.0"
+
+dependencies:
+  sqlite3: 2.4.7
+  crypto: 3.0.6

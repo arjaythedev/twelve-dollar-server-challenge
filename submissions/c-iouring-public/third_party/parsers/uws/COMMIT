@@ -1,0 +1,1 @@
+uWebSockets v20.80.0 3ffd6f44c9c3c92c96345d9f96bd01ba9c025ab5 (2026-09-03): only the HTTP/1.1 parser headers (src/HttpParser.h + its includes), verbatim

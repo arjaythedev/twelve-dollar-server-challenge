@@ -1,0 +1,21 @@
+name: feed-kemal
+version: 0.1.0
+
+targets:
+  server:
+    main: src/server.cr
+
+dependencies:
+  kemal:
+    github: kemalcr/kemal
+    version: 1.15.0
+  sqlite3:
+    github: crystal-lang/crystal-sqlite3
+    version: 0.24.0
+  jwt:
+    github: crystal-community/jwt
+    version: 1.7.2
+
+crystal: ">= 1.22.0"
+
+license: MIT

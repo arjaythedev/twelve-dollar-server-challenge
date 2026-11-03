@@ -93,7 +93,7 @@ SQLITE_PATH=... JWT_SECRET=... HOST=0.0.0.0 PORT=80 bash start.sh
   none of the challenge seed) and serves 300,000 requests in the benchmark mix from memory: parsing,
   JWT checks, queries, writes and commits. The real binary is then compiled with that profile. The
   training binary and database are deleted; `train.c` is not in the final binary.
-- **SQLite settings**: WAL, `synchronous=NORMAL`, no `mmap`, a 64 MB page cache (a cached page keeps its
+- **SQLite settings**: WAL, `synchronous=NORMAL`, no `mmap`, a 32 MB page cache (a cached page keeps its
   parsed header and needs no WAL lookup; `mmap` measured 4% more CPU per request), prepared statements built
   once with `SQLITE_PREPARE_PERSISTENT`, `SQLITE_THREADSAFE=2` with unused features left out.
 - **No caching** (rule 5): every request runs its queries, and every token's HMAC is computed. The only
@@ -103,6 +103,19 @@ SQLITE_PATH=... JWT_SECRET=... HOST=0.0.0.0 PORT=80 bash start.sh
   as malformed JSON, whitespace trimmed with JavaScript's `String.prototype.trim` set, and the
   500-character limit counted in code points. JWTs: HS256 only, constant-time signature compare, `exp`
   and `nbf` checked (`exp` is required).
+- **Hot memory sits on huge pages.** The page cache (one contiguous region instead of a malloc per page,
+  through `SQLITE_CONFIG_PAGECACHE`), the receive buffers, the connection tables and the response arena are
+  `MADV_HUGEPAGE` regions, which Ubuntu's default THP mode honours. A TLB miss on a VM walks two page tables.
+- **Escaping scans eight bytes at a time.** Output strings almost never need escaping, so a SWAR test finds
+  that out and they go out in one copy.
+- **Send buffers come from a small LIFO pool**, so the next response is written into the buffer used most
+  recently, still in cache, rather than wherever `malloc` finds room.
+- **Memory is budgeted, because on 2 GB it is the next wall.** Each open connection costs about 4.3 KB of
+  kernel memory (measured at 330,000: 3.3 KB unreclaimable slab, 1 KB of dentries and inodes that count as
+  reclaimable but stay pinned while the socket is open), so every 100 MB the process keeps is about 23,000
+  users. The page cache is 32 MB, the receive pools 2 MB per ring, the send pool at most 512 x 8 KB. WAL
+  checkpoints start at 8,192 frames: larger thresholds cost less CPU but keep the WAL in page cache, and
+  32,000 frames brought the out-of-memory kill forward from about 350,000 connections to about 330,000.
 - **HTTP/1.1 keep-alive** with no idle timeout, pipelining, `Connection: close`, HTTP/1.0 and
   `Expect: 100-continue`. Chunked request bodies aren't supported (they're out of scope).
 - **No tuning outside the process** (rule 11): it only raises its own soft descriptor limit to the hard
@@ -119,15 +132,29 @@ only the buffer-ring retry, without which it doesn't start on this kernel.
 | 250,000 users, 3 interleaved rounds | us CPU/request, whole box | each round |
 |---|---:|---|
 | this entry before the B-tree reads | 23.95 | 24.43, 23.62, 23.79 |
-| this entry | 20.06 | 20.38, 19.65, 20.14 |
+| the same design without the additions below | 20.06 | 20.38, 19.65, 20.14 |
+| this entry | 18.01 | 18.58, 17.69, 17.77 |
 | rust-iouring-kensac | 18.98 | 19.51, 18.65, 18.78 |
 
-`mmap` instead of the page cache: 4% more CPU per request (one run). Batch targets: 128 completions or 2 ms was
-best; 32 or 1 ms and 512 or 8 ms each cost 3 to 6%, and 256 or 4 ms was level (one run each). The earlier design
-held 250,000 on the benchmark box and kensac 310,000, a ratio of 1.24; the same two here measure 1.26.
+This entry used less CPU per request than kensac in every round (4.8%, 5.1%, 5.4%). Taking one thing away at a time,
+one run each, so treat these as rough: huge pages about 4%, the escaping scan about 4%, the send pool about 1%. Tried and
+not kept: moving the program text onto a huge page and static linking (level), 1,024 x 1 KB receive buffers (same CPU, but
+p95 over the ramp went from 7 to 118 ms), and `mmap` instead of the page cache (4% more CPU).
 
-`test/test.sh` passes all 42. `kill -9` under write load, during checkpoints: all 545,300 acknowledged writes
-present after restart, `integrity_check` ok.
+Holds, with a real-time process spinning for 20% of the CPU so the core is closer to the benchmark box's. The share was
+picked so kensac at 310,000 reads about the 82% busy the leaderboard shows; 30% made it fail, so this is an approximation:
+
+| Users | this entry | rust-iouring-kensac |
+|---|---|---|
+| 310,000 | pass, p99 18 ms, 79% busy | pass, p99 50 ms, 83% busy |
+| 330,000 | pass twice, p99 22 ms, 83% busy | one pass (p99 65 ms, 88% busy), one out of memory |
+| 345,000 | fail | not run |
+
+Without the spinning process, 330,000 users held for 5 minutes: 34,900 req/s, p95 5 ms, p99 19 ms, no errors. Past about
+350,000 connections the box runs out of memory (one slow ramp; kensac, about 360,000).
+
+`test/test.sh` passes all 42. `kill -9` under write load, during checkpoints: all 564,411 acknowledged writes present
+after restart, `integrity_check` ok.
 
 Ideas credited to other entries: B-tree cursor reads, the `unix-excl` VFS, page cache over `mmap`, a nice-19
 checkpoint thread with write holds, `SO_REUSEPORT` listeners and `DEFER_TASKRUN` on every ring from

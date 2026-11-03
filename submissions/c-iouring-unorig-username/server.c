@@ -24,6 +24,11 @@
 #define MAXSEG 65536          // responses per batch
 #define NBUF 2048             // provided receive buffers per ring: every one gets touched, so they cost RAM
 #define BSZ 1024
+#ifndef CACHE_KB
+#define CACHE_KB 32768        // SQLite page cache
+#endif
+#define STR2(x) #x
+#define STR(x) STR2(x)
 #define MAXRINGS 32
 #define NLISTEN 8             // SO_REUSEPORT listeners: each has its own accept queue of somaxconn
 
@@ -55,6 +60,17 @@ static time_t started, now_s;
 enum { T_SEND, T_ACCEPT, T_RECV, T_NOP };
 #define RECV_UD(k, slot, gen) (T_RECV | (uint64_t)(k) << 3 | (uint64_t)(slot) << 8 | (uint64_t)(gen) << 32)
 
+// Hot regions sit on huge pages where the kernel offers them (Ubuntu's default THP mode is madvise): a TLB miss
+// on a VM walks two page tables.
+static void *huge_alloc(size_t n) {
+  size_t hp = 2u << 20; n = (n + hp - 1) & ~(hp - 1);
+  char *p = mmap(NULL, n + hp, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+  if (p == MAP_FAILED) { perror("mmap"); exit(1); }
+  char *a = (char *)(((uintptr_t)p + hp - 1) & ~(hp - 1));
+  madvise(a, n, MADV_HUGEPAGE);
+  return a;
+}
+
 // ---------- output: one arena per batch, copied out to sends after COMMIT ----------
 static char *arena; static size_t alen;
 typedef struct { uint64_t who; uint32_t off, len; } seg_t;
@@ -72,6 +88,14 @@ static inline void putu(uint64_t v) {
 static const char hexd[] = "0123456789abcdef";
 static void putjs(const unsigned char *s, size_t n) {  // JSON string contents, escaped
   size_t i = 0, run = 0;
+  // Eight bytes at a time until one needs escaping: almost no text does, so it goes out in one copy.
+  #define LO8 0x0101010101010101ULL
+  #define HI8 0x8080808080808080ULL
+  for (; i + 8 <= n; i += 8) {
+    uint64_t v; memcpy(&v, s + i, 8);
+    uint64_t q = v ^ (LO8 * '"'), b = v ^ (LO8 * '\\');
+    if (((v - LO8 * 0x20) | (q - LO8) | (b - LO8)) & ~v & HI8) break;
+  }
   for (; i < n; i++) {
     unsigned char c = s[i];
     if (c >= 0x20 && c != '"' && c != '\\') continue;
@@ -767,9 +791,20 @@ static void send_op(sop_t *o) {
   s->flags |= IOSQE_FIXED_FILE; s->user_data = (uintptr_t)o;
 }
 // One send in flight per connection keeps responses in order; later ones queue behind it.
+// Sends finish inline, so a small LIFO pool keeps handing out the buffer most recently written, still in cache.
+#define POOL_CAP (8192 - sizeof(sop_t))
+#define POOL_MAX 512
+static sop_t *pool[POOL_MAX]; static int npool;
+static inline sop_t *sop_new(uint32_t n) {
+  if (n <= POOL_CAP && npool) return pool[--npool];
+  return malloc(sizeof(sop_t) + (n <= POOL_CAP ? POOL_CAP : n));
+}
+static inline void sop_free(sop_t *o) {
+  if (o->cap == POOL_CAP && npool < POOL_MAX) pool[npool++] = o; else free(o);
+}
 static void send_bytes(uint64_t who, conn_t *c, const char *p, uint32_t n) {
   if (!c->sending) {
-    sop_t *o = malloc(sizeof *o + n); *o = (sop_t){who, n, 0, n}; memcpy(o->d, p, n);
+    sop_t *o = sop_new(n); *o = (sop_t){who, n, 0, n <= POOL_CAP ? (uint32_t)POOL_CAP : n}; memcpy(o->d, p, n);
     c->sending = 1; c->out = o; send_op(o); return;
   }
   sop_t *q = c->q;
@@ -806,7 +841,7 @@ static void on_data(uint64_t who, conn_t *c, const char *p, uint32_t n) {
 static void send_done(sop_t *o, int res) {
   uint64_t who = o->who; conn_t *c = conn_of(who);
   if (c && res > 0 && (o->off += res) < o->len) { send_op(o); return; }  // short send: the rest
-  free(o);
+  sop_free(o);
   if (!c) return;
   if (res <= 0) { conn_close(who); return; }
   if (c->q) { o = c->q; c->q = NULL; c->out = o; send_op(o); return; }
@@ -855,7 +890,7 @@ static int ring_init(int k) {
     io_uring_queue_exit(&r->r); return -1;
   }
   io_uring_register_ring_fd(&r->r);
-  r->c = calloc(tsize, sizeof *r->c); r->bufs = malloc((size_t)NBUF * BSZ);
+  r->c = huge_alloc(tsize * sizeof *r->c); r->bufs = huge_alloc((size_t)NBUF * BSZ);
   for (int i = 0; i < NBUF; i++) io_uring_buf_ring_add(r->br, r->bufs + (size_t)i * BSZ, BSZ, i, NBUF - 1, i);
   io_uring_buf_ring_advance(r->br, NBUF);
   if (k) fprintf(stderr, "%u connections: added ring %d\n", k * (tsize - 16), k);
@@ -1052,7 +1087,7 @@ static void db_open(const char *path) {
   if (sqlite3_open_v2(path, &db, fl, "unix-excl") != SQLITE_OK) { fprintf(stderr, "open %s: %s\n", path, sqlite3_errmsg(db)); exit(1); }
   sqlite3_busy_timeout(db, 5000);
   char *e = NULL;
-  if (sqlite3_exec(db, "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA mmap_size=0; PRAGMA cache_size=-65536; PRAGMA wal_autocheckpoint=0;"
+  if (sqlite3_exec(db, "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA mmap_size=0; PRAGMA cache_size=-" STR(CACHE_KB) "; PRAGMA wal_autocheckpoint=0;"
                    "SELECT count(*) FROM users WHERE id = 1;", NULL, NULL, &e) != SQLITE_OK) { fprintf(stderr, "pragma: %s\n", e); exit(1); }
   sqlite3_wal_hook(db, wal_hook, NULL);
   if (sqlite3_open_v2(path, &ckdb, fl, "unix-excl") != SQLITE_OK ||
@@ -1080,6 +1115,11 @@ int main(int argc, char **argv) {
 #endif
   const char *path = getenv("SQLITE_PATH"), *secret = getenv("JWT_SECRET"), *host = getenv("HOST"), *ports = getenv("PORT");
   if (!path || !secret) { fprintf(stderr, "SQLITE_PATH and JWT_SECRET are required\n"); return 1; }
+  { // One contiguous page cache on huge pages instead of a malloc per page.
+    int hdr = 0; sqlite3_config(SQLITE_CONFIG_PCACHE_HDRSZ, &hdr);
+    int sz = (4096 + hdr + 7) & ~7, npg = CACHE_KB / 4;
+    sqlite3_config(SQLITE_CONFIG_PAGECACHE, huge_alloc((size_t)sz * npg), sz, npg);
+  }
   sqlite3_initialize();  // built with SQLITE_OMIT_AUTOINIT
   struct rlimit rl; getrlimit(RLIMIT_NOFILE, &rl);
   if (rl.rlim_cur < rl.rlim_max) { rl.rlim_cur = rl.rlim_max; setrlimit(RLIMIT_NOFILE, &rl); }
@@ -1099,7 +1139,7 @@ int main(int argc, char **argv) {
     setsockopt(lfd[i], IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);  // accepted sockets inherit it
     if (bind(lfd[i], (struct sockaddr *)&a, sizeof a) || listen(lfd[i], 65535)) { perror("bind/listen"); return 1; }
   }
-  arena = malloc(BATCH_OUT);
+  arena = huge_alloc(BATCH_OUT);
   if (ring_init(0) < 0) { fprintf(stderr, "io_uring setup failed (needs Linux 6.1+ with io_uring enabled)\n"); return 1; }
   run();
 }

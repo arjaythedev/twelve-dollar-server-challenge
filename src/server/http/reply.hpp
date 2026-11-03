@@ -21,6 +21,8 @@ class Reply
     void prepare(Response response, bool close_after);
     msghdr &message();
     bool advance(std::size_t bytes) noexcept;
+    // Recycle only after the terminal send CQE, before producing the next response
+    std::string take_body();
     // The terminal send CQE must arrive before any referenced storage is released
     void reset();
 
@@ -30,6 +32,7 @@ class Reply
     }
 
   private:
+    static constexpr std::size_t max_retained_body_capacity = 8192;
     std::string headers_;
     std::string body_;
     std::array<iovec, 2> vectors_{};

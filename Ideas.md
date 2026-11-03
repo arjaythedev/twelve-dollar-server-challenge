@@ -24,7 +24,7 @@
 
 - [x] Use CQ 8,192 with SQ 1,024 and unchanged work budgets ([Rust](submissions/rust-iouring-kensac/src/main.rs), [C](submissions/c-iouring-pavlyhalim/src/sys.h)). It avoids overflow in the 4,096-completion probe and passes 300k/5m without a clear steady-load gain. Extra CQE storage is 96 KiB per ring; CQ 16,384 gave no added burst benefit.
 
-- [ ] Compare skipping poll-first for deferred ENOBUFS retries, keeping it for idle receives. Normal profiles put `io_arm_poll_handler` near 1% of CPU; poll-task stacks also include useful receive work. Measure retries, kernel CPU and p99.
+- [x] Skip poll-first only for deferred ENOBUFS retries. Four quiet forced-recovery pairs: CPU -8.3%, recovery p50 -1.8%, retry submissions +0.2%; ordinary receives keep poll-first.
 
 - [ ] Compare process-local `SO_RCVBUF` and `SO_SNDBUF` caps only if charged socket-buffer bytes grow; healthy holds mostly charge fixed kernel/slab memory. Measure retransmits, zero-window events and p99; configured caps are not preallocated bytes and explicit settings disable TCP autotuning ([Linux](https://github.com/torvalds/linux/blob/v6.8/Documentation/networking/ip-sysctl.rst)).
 
@@ -78,8 +78,8 @@
 - [x] Move cold parser/buffer/send state behind a lazily owned Exchange ([Rust](https://github.com/arjaythedev/twelve-dollar-server-challenge/blob/4298101/submissions/rust-iouring-kensac/src/main.rs#L133)). Current storage: `56*N + 608*(A+P)`, plus buffers and allocator costs; N is open connections, A is active exchanges, P is pooled exchanges. Keep each parser alive through fragments, auth, pipeline tails and terminal I/O CQEs.
   Bound recycled Exchange/output capacity and discard oversized buffers; a slow send must not pin unrelated responses.
 - [x] Reuse request slots through pooled Exchanges and cleared parser strings. Keep the 8-KiB retention limit, reset identity/body/framing and verify JWTs again for every request.
-- [ ] Compare bounded small response-buffer reuse with release-after-send. Clear contents, regenerate replies from fresh SQLite reads, account retained bytes across all rings and discard oversized storage.
-  Feed serialization currently reserves 8 KiB independently of the Exchange retention cap; the seed golden feed is 5,102 bytes, not a live-workload size bound. Start with output-size and allocation counts before changing either limit.
+- [x] Reuse bounded response storage at the producer and reserve 6 KiB for feeds. Warm bounded replies need no C++ allocations; the 5-KiB probe feed retains 6,419 bytes within the unchanged 8-KiB Exchange cap. Discard large bodies after terminal sends and read SQLite afresh.
+  No extra read CPU gain over the smaller reserve alone was established; retained memory rises.
 - [x] Reuse 16 fixed write-outcome slots and clear used results after publishing replies. Preserve rollback isolation, queued-data ownership and commit-before-response behavior.
 - [ ] Compare create-command string ownership/reuse separately.
 - [ ] Measure request-local auth/JSON scratch: fixed-size signature decoding, HMAC key-context reuse and one UTF-8 trim/count pass. Verify every token again; keep malformed input and Unicode behavior unchanged.
@@ -94,6 +94,8 @@
   Own job data, isolate failures with savepoints and release responses after commit. Keep reads outside the write transaction.
 
 - [x] Reuse prepared transaction/savepoint statements instead of parsing control SQL per write. Keep failure injection on `sqlite3_step` and verify recovery before reuse.
+
+- [x] Prepare ROLLBACK before admission and quarantine unresolved transactions. Test preparation failure, failed read/write rollback, blocked subsequent access and clean reopening.
 
 - [ ] Tune batch size or a collection window from the measured write arrival rate: average collection wait `~= (b-1)/(2*lambda)`.
   Compare `INSERT ... WHERE EXISTS ... ON CONFLICT` for likes and insert + rowid/timestamp lookup against `RETURNING` ([db.h](submissions/c-iouring-pavlyhalim/src/db.h)).

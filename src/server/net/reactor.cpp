@@ -171,13 +171,21 @@ bool Reactor::stopping() const noexcept
 
 void Reactor::receive(Connection &connection)
 {
+    receive(connection, true);
+}
+
+void Reactor::receive(Connection &connection, bool poll_first)
+{
     connection.start_io(Event::receive);
     auto *request = connection.ring.entry(&connection.operation);
     io_uring_prep_recv(request, static_cast<int>(connection.slot.value), nullptr,
                        ReceiveBuffers::size, 0);
     request->flags |= IOSQE_BUFFER_SELECT | IOSQE_FIXED_FILE;
     request->buf_group = ReceiveBuffers::group;
-    request->ioprio |= IORING_RECVSEND_POLL_FIRST;
+    if (poll_first)
+    {
+        request->ioprio |= IORING_RECVSEND_POLL_FIRST;
+    }
 }
 
 void Reactor::send(Connection &connection, msghdr &message)
@@ -302,7 +310,8 @@ void Reactor::retry_receives(Ring &owner)
     {
         auto *connection = owner.deferred_receives.front();
         owner.deferred_receives.pop_front();
-        receive(*connection);
+        // Try deferred receives before arming another poll; empty sockets use normal fallback
+        receive(*connection, false);
     }
 }
 

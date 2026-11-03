@@ -57,6 +57,7 @@ class Reactor
     std::span<const std::unique_ptr<Ring>> rings() const noexcept;
 
   private:
+    void receive(Connection &connection, bool poll_first);
     void accept();
     void poll_satellite(Ring &owner);
     void retry_receives(Ring &owner);

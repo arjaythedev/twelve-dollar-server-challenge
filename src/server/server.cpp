@@ -118,7 +118,8 @@ class Server::State
 
             return;
         }
-        auto response = application.read(std::get<ReadQuery>(*prepared));
+        auto response = application.read(std::get<ReadQuery>(*prepared),
+                                         connection.exchange->reply.take_body());
 #ifdef TDS_DIAGNOSTICS
         sample.reset();
 #endif
@@ -180,7 +181,8 @@ class Server::State
                 try
                 {
                     responses[index] =
-                        application.write_reply(pending_writes.commands[index], outcomes[index]);
+                        application.write_reply(pending_writes.commands[index], outcomes[index],
+                                                connections[index]->exchange->reply.take_body());
                 }
                 catch (const std::exception &error)
                 {

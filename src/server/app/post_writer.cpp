@@ -9,7 +9,7 @@ PostWriter::PostWriter(std::string &output, PostShape shape) : output_(output), 
     reset();
     if (shape_ == PostShape::feed)
     {
-        output_.reserve(8192);
+        output_.reserve(6144);
     }
 }
 

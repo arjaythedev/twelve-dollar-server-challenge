@@ -81,6 +81,9 @@
 | C++ 0.1.0 (primary defer baseline) | 70,000 | 15 s | 297,241 | 4,954.01 | 3.730 ms | 4.445 ms | 9.23 ms | 0% | 35.43 us | 513.67 MiB |
 | C++ 0.1.0 (primary defer) | 70,000 | 15 s | 297,618 | 4,960.22 | 3.623 ms | 4.420 ms | 10.88 ms | 0% | 34.24 us | 546.76 MiB |
 | C++ 0.1.0 (primary defer + fixed CQEs) | 300,000 | 5 min | 11,205,141 | 28,012.82 | 4.844 ms | 6.391 ms | 96.95 ms | 0% | 23.91 us | 1,038.57 MiB |
+| C++ 0.1.0 (ac0dd15 reference) | 350,000 | 5 min | 13,053,479 | 32,633.62 | 5.938 ms | 216.485 ms | 7,944.61 ms | 0% | 22.87 us | 1,213.42 MiB |
+| C++ 0.1.0 (recovery + response reuse) | 350,000 | 5 min | 13,074,570 | 32,686.36 | 5.120 ms | 6.818 ms | 77.46 ms | 0% | 22.72 us | 1,290.85 MiB |
+| C++ 0.1.0 (recovery + response reuse) | 400,000 | 5 min | 14,941,600 | 37,353.95 | 5.307 ms | 7.510 ms | 77.30 ms | 0% | 22.40 us | 1,611.87 MiB |
 
 Statistics include the ramps. RAM is the cgroup peak, including charged file pages. Local results, not an official score or a measured capacity limit.
 
@@ -99,6 +102,14 @@ CQ 8,192, 300k/5m: hold-only p99 6.69 ms. Same generator and work budgets; no cl
 Primary defer, 70k: one serial pair, 5 s ramp / 15 s hold, different random seeds, no telemetry. Excludes the later CQE cursor and ring-span changes. Those reduced `next`/`wait` by 32/22 code bytes; two reversed native pairs gave mixed timings. [Data](src/benchmarks/primary-defer.json).
 
 Primary defer, 300k/5m: includes the fixed CQE cursor and ring span. Hold-only p99 6.34 ms; no telemetry, memory-limit events or OOM kills.
+
+Retry-only poll-first, four quiet pairs: recovery CPU 2.822 to 2.588 us/receive, p50 5.494 to 5.393 ms, retry submissions +0.2%. Forced ENOBUFS recovery, not HTTP throughput. [Data](src/benchmarks/recovery-reuse.json).
+
+Warm response allocations/request: feed 1 to 0, post 3 to 0, missing post 1 to 0, write reply 2 to 0. Retained strings 290 to 6,419 bytes within the 8,192-byte Exchange cap. No additional read CPU gain over reserve-only established. [Data](src/benchmarks/recovery-reuse.json).
+
+350k pair: no telemetry, different random seeds; native probes overlapped the reference. Hold-only p99 123.79 to 6.97 ms. One local pair does not isolate the cause of the tail difference.
+
+400k/5m: same server and generator as 350k, no telemetry or parallel benchmarks. Hold-only p99 7.68 ms; no memory-limit events or OOM kills.
 
 Prepared Store controls, 20k writes, two reversed pairs: median CPU/write at batch 1/4/16 was 38.98/19.34/9.74 to 38.00/19.16/8.56 us. Outputs and stored counts matched; final checkpoint included, wall time variable. [Data](src/benchmarks/group-commit.json).
 

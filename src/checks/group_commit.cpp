@@ -1,4 +1,5 @@
 #include "app/post_writer.hpp"
+#include "sqlite_read.h"
 #include "storage/database.hpp"
 
 #include <sqlite3.h>
@@ -178,6 +179,13 @@ struct Control
     int savepoints = 0;
     int rollbacks_to = 0;
     int releases = 0;
+    int rollback_attempts = 0;
+    int steps = 0;
+    int feed_calls = 0;
+    bool fail_rollback_prepare = false;
+    bool fail_rollback_step = false;
+    bool fail_feed = false;
+    sqlite3 *writer = nullptr;
     std::int64_t visible_posts = -1;
     std::int64_t visible_likes = -1;
 };
@@ -439,9 +447,137 @@ void singleton_and_empty()
             "singleton missing post changed");
     require(control.savepoints == 0, "singleton batches added savepoint overhead");
 }
+
+void rollback_preparation_failure()
+{
+    Fixture fixture;
+    auto reader = open(fixture.path);
+    Control control(reader.get());
+    control.fail_rollback_prepare = true;
+    bool rejected = false;
+    try
+    {
+        Store unavailable(fixture.path);
+    }
+    catch (const std::exception &)
+    {
+        rejected = true;
+    }
+    require(rejected, "store admitted requests without a prepared rollback");
+    control.fail_rollback_prepare = false;
+    Store recovered(fixture.path);
+    const std::array<WriteCommand, 1> jobs{
+        CreatePost{UserId{1}, "first", "recovered after rollback preparation failed"}};
+    require(created(run_batch(recovered, jobs).at(0)).id.value == 2,
+            "rollback preparation failure leaked resources or writes");
+}
+
+void unresolved_rollback(bool read_failure)
+{
+    Fixture fixture;
+    {
+        Store db(fixture.path);
+        auto reader = open(fixture.path);
+        Control control(reader.get());
+        control.fail_rollback_step = true;
+        const auto rejects_read = [](auto &&read) {
+            bool rejected = false;
+            try
+            {
+                read();
+            }
+            catch (const std::exception &)
+            {
+                rejected = true;
+            }
+            require(rejected, "unresolved transaction admitted a read");
+        };
+        if (read_failure)
+        {
+            control.fail_feed = true;
+            rejects_read([&] {
+                read_feed(db);
+            });
+            require(control.feed_calls == 1, "read failure missed the B-tree cursor");
+        }
+        else
+        {
+            control.commit_failure = CommitFailure::busy;
+            const std::array<WriteCommand, 2> jobs{
+                CreatePost{UserId{1}, "first", "uncommitted secret"},
+                LikePost{UserId{2}, PostId{1}}};
+            all_failed(run_batch(db, jobs), jobs.size());
+        }
+        require(control.rollback_attempts == 1 && control.writer &&
+                    sqlite3_get_autocommit(control.writer) == 0,
+                "rollback failure did not leave a real unresolved transaction");
+
+        // Removing the injected fault must not silently readmit the poisoned connection
+        control.fail_feed = false;
+        control.fail_rollback_step = false;
+        control.commit_failure = CommitFailure::none;
+        const int previous_steps = control.steps;
+        const int previous_begins = control.begins;
+        rejects_read([&] {
+            db.health();
+        });
+        rejects_read([&] {
+            read_feed(db);
+        });
+        rejects_read([&] {
+            read_post(db, PostId{1});
+        });
+        const std::array<WriteCommand, 1> rejected{
+            CreatePost{UserId{1}, "first", "must not enter the poisoned connection"}};
+        all_failed(run_batch(db, rejected), rejected.size());
+        require(control.steps == previous_steps && control.begins == previous_begins,
+                "poisoned connection executed another SQLite statement");
+        require(scalar(reader.get(), "SELECT count(*) FROM posts") == 1 &&
+                    scalar(reader.get(), "SELECT count(*) FROM likes") == 0,
+                "unresolved rollback published provisional writes");
+    }
+    Store reopened(fixture.path);
+    auto reader = open(fixture.path);
+    require(scalar(reader.get(), "SELECT count(*) FROM posts") == 1 &&
+                scalar(reader.get(), "SELECT count(*) FROM likes") == 0,
+            "closing the quarantined connection retained provisional writes");
+    const std::array<WriteCommand, 1> jobs{
+        CreatePost{UserId{1}, "first", "fresh connection recovered"}};
+    require(created(run_batch(reopened, jobs).at(0)).id.value == 2,
+            "fresh connection could not recover after quarantine");
+}
 } // namespace
 
 extern "C" int __real_sqlite3_step(sqlite3_stmt *);
+extern "C" int __real_sqlite3_prepare_v3(sqlite3 *, const char *, int, unsigned, sqlite3_stmt **,
+                                         const char **);
+extern "C" int __real_tds_btree_feed_next(tds_btree *, tds_btree_post *);
+
+extern "C" int __wrap_sqlite3_prepare_v3(sqlite3 *db, const char *sql, int length, unsigned flags,
+                                         sqlite3_stmt **statement, const char **tail)
+{
+    if (active && db != active->reader && active->fail_rollback_prepare &&
+        std::string_view(sql) == "ROLLBACK")
+    {
+        *statement = nullptr;
+
+        return SQLITE_NOMEM;
+    }
+
+    return __real_sqlite3_prepare_v3(db, sql, length, flags, statement, tail);
+}
+
+extern "C" int __wrap_tds_btree_feed_next(tds_btree *tree, tds_btree_post *post)
+{
+    if (active && active->fail_feed)
+    {
+        ++active->feed_calls;
+
+        return SQLITE_IOERR;
+    }
+
+    return __real_tds_btree_feed_next(tree, post);
+}
 
 extern "C" int __wrap_sqlite3_step(sqlite3_stmt *statement)
 {
@@ -449,6 +585,8 @@ extern "C" int __wrap_sqlite3_step(sqlite3_stmt *statement)
     auto *db = sqlite3_db_handle(statement);
     if (control && db != control->reader)
     {
+        control->writer = db;
+        ++control->steps;
         const std::string_view command(sqlite3_sql(statement));
         if (command == "BEGIN")
         {
@@ -469,6 +607,14 @@ extern "C" int __wrap_sqlite3_step(sqlite3_stmt *statement)
         else if (command == "RELEASE write_job")
         {
             ++control->releases;
+        }
+        else if (command == "ROLLBACK")
+        {
+            ++control->rollback_attempts;
+            if (control->fail_rollback_step)
+            {
+                return SQLITE_IOERR;
+            }
         }
         else if (command == "COMMIT")
         {
@@ -505,6 +651,9 @@ int main()
         automatic_rollback();
         fatal_error();
         singleton_and_empty();
+        rollback_preparation_failure();
+        unresolved_rollback(false);
+        unresolved_rollback(true);
         std::puts("Group-commit FIFO, isolation, visibility, failure and singleton checks passed");
         return 0;
     }

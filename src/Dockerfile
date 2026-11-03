@@ -15,6 +15,8 @@ COPY checks/btree.cpp ./checks/btree.cpp
 COPY checks/sync.cpp ./checks/sync.cpp
 COPY load ./load
 COPY benchmarks/group_commit.cpp ./benchmarks/group_commit.cpp
+COPY benchmarks/response_reuse.cpp ./benchmarks/response_reuse.cpp
+COPY benchmarks/retry_receive.cpp ./benchmarks/retry_receive.cpp
 ARG TDS_SANITIZERS=OFF
 ARG TDS_DIAGNOSTICS=OFF
 RUN cmake -S . -B out -G Ninja -DCMAKE_BUILD_TYPE=Release -DTDS_SANITIZERS=${TDS_SANITIZERS} -DTDS_DIAGNOSTICS=${TDS_DIAGNOSTICS} \

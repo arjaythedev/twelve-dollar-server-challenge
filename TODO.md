@@ -4,7 +4,6 @@
 
 - [ ] Identify what starts the receive backlog; compare ring distribution and submission timing from the saved trace before another large run.
 - [ ] Check socket/heap/pool memory after draining, then compare allocation reuse and socket-buffer caps in Ideas.md order.
-- [ ] Verify SQLite recovery if ROLLBACK preparation fails; stop database admission if autocommit cannot be restored.
 
 ## Later
 
@@ -15,6 +14,7 @@
 
 ## Done
 
+- [x] Prepare rollback and quarantine unresolved transactions; verify failure injection, read/write rejection and clean reopening. Compare retry-only poll-first omission and bounded response reuse, then confirm at 350k/5m: zero errors, p99 6.82 ms. Pass both native build modes, 42 official and 17 extra HTTP checks.
 - [x] Enable primary-only SINGLE_ISSUER / DEFER_TASKRUN; verify receive, partial send and stop with continuously ready satellites in both build modes. Include fixed 16-byte CQEs and the wait ring span at 300k/5m: zero errors, p99 6.39 ms, CPU 23.91 us/request. Separate native cursor/span timings remain inconclusive.
 - [x] Keep CQ 8,192 after native burst/lifetime checks and a full 300k/5m pass: zero errors, p99 6.58 ms; no clear steady-load gain.
 - [x] Bound load-generator timer batches and report pre-poll gaps; pass conformance checks and confirm at 300k/5m with the same server: zero errors, p99 6.37 ms.

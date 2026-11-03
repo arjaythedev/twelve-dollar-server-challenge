@@ -1,4 +1,5 @@
 #include "app/application.hpp"
+#include "http/exchange.hpp"
 #include "http/session.hpp"
 #include "json.hpp"
 
@@ -444,6 +445,84 @@ void health_and_fail_fast_commit()
     require(!tds::text_value(tds::member(yyjson_doc_get_root(parsed.get()), "error")).empty(),
             "degraded health lost its error detail");
 }
+
+void reused_response_storage()
+{
+    Fixture fixture;
+    tds::Application app(fixture.path, std::string(secret));
+    tds::http::Reply reply;
+    const auto finish = [&](tds::Response response) {
+        reply.prepare(std::move(response), false);
+        const auto &message = reply.message();
+        std::size_t length = 0;
+        for (std::size_t i = 0; i < message.msg_iovlen; ++i)
+        {
+            length += message.msg_iov[i].iov_len;
+        }
+        require(reply.advance(length), "reused response terminal completion");
+        reply.reset();
+    };
+    finish(app.read(tds::ReadQuery{tds::Feed{}}));
+    auto storage = reply.take_body();
+    const auto *buffer = storage.data();
+    require(storage.empty() && storage.capacity() >= 6144, "feed buffer was not retained");
+    auto missing = app.read(tds::ReadQuery{tds::GetPost{tds::PostId{999}}}, std::move(storage));
+    require(missing.body == "{\"error\":\"post not found\"}" && missing.body.data() == buffer,
+            "missing post reused stale bytes or replaced producer storage");
+    finish(std::move(missing));
+
+    auto before = app.read(tds::ReadQuery{tds::GetPost{tds::PostId{1}}}, reply.take_body());
+    require(post_number(before, "like_count") == 0, "initial reused post count");
+    finish(std::move(before));
+    const std::array<tds::WriteCommand, 1> commands{tds::LikePost{tds::UserId{2}, tds::PostId{1}}};
+    std::array<tds::WriteOutcome, 1> outcomes;
+    require(app.commit(commands, outcomes).has_value() && outcomes[0], "reuse write commit");
+    auto written = app.write_reply(commands[0], outcomes[0], reply.take_body());
+    require(written.body == "{\"liked\":true,\"already_liked\":false,\"post_id\":1}" &&
+                written.body.data() == buffer,
+            "write producer did not reuse committed reply storage");
+    finish(std::move(written));
+    auto after = app.read(tds::ReadQuery{tds::GetPost{tds::PostId{1}}}, reply.take_body());
+    require(post_number(after, "like_count") == 1 && after.body.data() == buffer,
+            "reused response cached data across a committed write");
+    finish(std::move(after));
+
+    auto health = app.read(tds::ReadQuery{tds::Health{}}, reply.take_body());
+    require(health.body.starts_with("{\"status\":\"ok\",\"db\":\"ok\",\"uptime_s\":") &&
+                health.body.data() == buffer,
+            "health reused stale output");
+    finish(std::move(health));
+    const tds::WriteOutcome failure =
+        std::unexpected(tds::WriteError{tds::WriteErrorCode::transaction, "fixture failure"});
+    auto error = app.write_reply(commands[0], failure, reply.take_body());
+    require(error.body == "{\"error\":\"internal server error\"}" && error.body.data() == buffer,
+            "write error reused stale output");
+    finish(std::move(error));
+
+    const std::string large(12000, 'x');
+    reply.prepare({tds::Status::ok, large}, false);
+    const auto header_bytes = reply.message().msg_iov[0].iov_len;
+    require(!reply.advance(header_bytes + 5), "oversized partial send completed early");
+    const auto &tail = reply.message();
+    require(tail.msg_iovlen == 1 &&
+                std::string_view(static_cast<const char *>(tail.msg_iov[0].iov_base),
+                                 tail.msg_iov[0].iov_len) == std::string_view(large).substr(5),
+            "oversized body changed before terminal completion");
+    require(reply.advance(large.size() - 5), "oversized terminal completion");
+    reply.reset();
+    require(reply.retained_capacity() < 8192, "oversized reply storage remained retained");
+
+    tds::http::Exchange combined;
+    combined.session.append(std::string(7000, 'x'));
+    combined.reply.prepare(app.read(tds::ReadQuery{tds::Feed{}}), false);
+    const auto &message = combined.reply.message();
+    require(combined.reply.advance(message.msg_iov[0].iov_len + message.msg_iov[1].iov_len),
+            "combined budget response completion");
+    combined.reply.reset();
+    combined.session.reset();
+    require(combined.retained_capacity() > 8192,
+            "combined Exchange accounting omitted retained response storage");
+}
 } // namespace
 
 int main()
@@ -455,7 +534,8 @@ int main()
         fresh_reads_and_write_results();
         fragmented_context_and_pipeline();
         health_and_fail_fast_commit();
-        std::puts("Application preparation, fresh reads, commit replies and HTTP context: 5 groups "
+        reused_response_storage();
+        std::puts("Application preparation, fresh reads, commit replies and HTTP context: 6 groups "
                   "passed");
 
         return 0;

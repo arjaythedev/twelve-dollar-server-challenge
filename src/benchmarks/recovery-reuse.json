@@ -1,0 +1,65 @@
+{
+  "date": "2026-11-03",
+  "reference_commit": "ac0dd15",
+  "http": {
+    "runs": ["reference-ac0dd15-350000-5m", "recovery-reuse-350000-5m"],
+    "users": 350000,
+    "ramp_seconds": 60,
+    "hold_seconds": 300,
+    "diagnostics": false,
+    "server_sha256": ["662a1931a20dacb42f728f9241db3f91d3c4d9df970a5db127b4679b2978abc4", "ba57c5849967c49f03e4de4c9922fcd2a245d3e4160bd6f880d7889dd03010f9"],
+    "hold_p99_ms": [123.794039, 6.96675790001],
+    "context": "One serial local pair, different random seeds; native probes overlapped the reference"
+  },
+  "checks": {
+    "normal_native": "10/10 passed",
+    "diagnostic_native": "10/10 passed",
+    "official_http": "42/42 passed",
+    "http_regressions": "17/17 passed",
+    "rollback": "Preparation failure rejects Store construction; unresolved read/write rollbacks quarantine the connection; reopening discards provisional writes",
+    "negative_control": "Disabling quarantine fails: unresolved transaction admitted a read",
+    "reuse": "Same Reply and allocation across committed writes, exact changed JSON, partial sends, oversized release and aggregate retention",
+    "application_sanitizers": "ASAN and UBSAN passed"
+  },
+  "retry": {
+    "scope": "Single-ring forced ENOBUFS recovery, process CPU, one byte per recovered receive",
+    "pairs": 4,
+    "cycles_per_run": 120,
+    "warmups_per_run": 8,
+    "clients": 1536,
+    "initial_enobufs_per_cycle": 512,
+    "recovered_receives_per_variant": 245760,
+    "total_completed_bytes_per_variant": 737280,
+    "median_cpu_us_per_recovered_receive": [2.8224952636718754, 2.5875143961588543],
+    "median_recovery_p50_ms": [5.49352025, 5.39303725],
+    "retry_submissions": [245760, 246240],
+    "retry_enobufs": [0, 480],
+    "paired_cpu_us": [
+      [2.73167392578125, 2.5699979654947915],
+      [2.8394405110677083, 2.478211116536458],
+      [2.8055500162760416, 2.6192134440104167],
+      [3.0718001953125, 2.605030826822917]
+    ],
+    "initial_comparison": "Six pairs overlapped the 350k reference; mixed late results, followed by the quiet comparison above",
+    "raw": "results/retry-poll-first/"
+  },
+  "response": {
+    "variants": ["baseline8192", "reserve6144", "reuse6144"],
+    "rounds": 3,
+    "order": [[0, 1, 2], [1, 2, 0], [2, 0, 1]],
+    "allocation_scope": "Warm producer-thread C++ operator new calls; SQLite C allocations are not counted",
+    "cpu_scope": "CLOCK_THREAD_CPUTIME_ID, allocation counting disabled",
+    "pooled_string_capacity_bytes": [290, 290, 6419],
+    "combined_retention_limit_bytes": 8192,
+    "cases": [
+      {"name": "feed_small", "response_bytes": 2931, "allocations": [1, 1, 0], "allocated_bytes": [8193, 6145, 0], "median_cpu_ns": [5626.8842, 5146.23108, 5311.08904]},
+      {"name": "feed_seed_sized", "response_bytes": 5051, "allocations": [1, 1, 0], "allocated_bytes": [8193, 6145, 0], "median_cpu_ns": [6003.38362, 5288.49138, 5441.84028]},
+      {"name": "post", "response_bytes": 260, "allocations": [3, 3, 0], "allocated_bytes": [558, 558, 0], "median_cpu_ns": [3356.24548, 3361.17124, 3406.62878]},
+      {"name": "missing", "response_bytes": 26, "allocations": [1, 1, 0], "allocated_bytes": [31, 31, 0], "median_cpu_ns": [2871.55262, 2910.73098, 2877.0134]},
+      {"name": "write_reply", "response_bytes": 49, "allocations": [2, 2, 0], "allocated_bytes": [140, 140, 0], "median_cpu_ns": [172.94782, 182.4521, 148.77732]},
+      {"name": "oversized_feed", "response_bytes": 22051, "allocations": [3, 3, 3], "allocated_bytes": [57347, 43011, 43011], "median_cpu_ns": [36745.1024, 39189.357, 32233.3748]}
+    ],
+    "conclusion": "Bounded warm allocations eliminated; no extra read CPU gain over reserve-only established; retained memory rises",
+    "raw": "src/.build/response-reuse/results.json"
+  }
+}

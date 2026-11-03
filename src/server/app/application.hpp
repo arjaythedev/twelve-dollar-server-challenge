@@ -67,15 +67,16 @@ class Application
     std::expected<AcceptedHead, ApiError> accept_headers(RequestHeadView head) const;
     std::expected<PreparedRequest, ApiError> prepare(const AcceptedHead &head,
                                                      std::string_view body) const;
-    Response read(const ReadQuery &query);
+    Response read(const ReadQuery &query, std::string output = {});
     std::expected<void, WriteError> commit(std::span<const WriteCommand> commands,
                                            std::span<WriteOutcome> outcomes);
-    Response write_reply(const WriteCommand &command, const WriteOutcome &outcome) const;
-    static Response error_response(ApiError error);
+    Response write_reply(const WriteCommand &command, const WriteOutcome &outcome,
+                         std::string output = {}) const;
+    static Response error_response(ApiError error, std::string output = {});
 
   private:
     Store &store();
-    Response health();
+    Response health(std::string output);
 
     std::string database_path_;
     std::string secret_;

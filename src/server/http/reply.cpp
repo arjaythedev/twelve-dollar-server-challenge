@@ -85,7 +85,16 @@ bool Reply::advance(std::size_t bytes) noexcept
 void Reply::reset()
 {
     headers_.clear();
-    std::string{}.swap(body_);
+    body_.clear();
+    if (body_.capacity() > max_retained_body_capacity)
+    {
+        std::string{}.swap(body_);
+    }
+}
+
+std::string Reply::take_body()
+{
+    return std::move(body_);
 }
 
 } // namespace tds::http

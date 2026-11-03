@@ -12,9 +12,9 @@
 
 namespace tds
 {
-Response Application::error_response(ApiError error)
+Response Application::error_response(ApiError error, std::string output)
 {
-    std::string output = "{\"error\":";
+    output = "{\"error\":";
     quote(output, error.message);
     output += '}';
 
@@ -244,7 +244,7 @@ Store &Application::store()
     return *store_;
 }
 
-Response Application::health()
+Response Application::health(std::string output)
 {
     try
     {
@@ -252,27 +252,26 @@ Response Application::health()
     }
     catch (const std::exception &error)
     {
-        std::string output = "{\"status\":\"degraded\",\"db\":\"unreachable\",\"error\":";
+        output = "{\"status\":\"degraded\",\"db\":\"unreachable\",\"error\":";
         quote(output, error.what());
         output += '}';
 
         return {Status::unavailable, std::move(output)};
     }
     const auto elapsed = std::chrono::steady_clock::now() - started_;
-    std::string output = "{\"status\":\"ok\",\"db\":\"ok\",\"uptime_s\":";
+    output = "{\"status\":\"ok\",\"db\":\"ok\",\"uptime_s\":";
     integer(output, std::chrono::duration_cast<std::chrono::seconds>(elapsed).count());
     output += '}';
 
     return {Status::ok, std::move(output)};
 }
 
-Response Application::read(const ReadQuery &query)
+Response Application::read(const ReadQuery &query, std::string output)
 {
     if (std::holds_alternative<Health>(query))
     {
-        return health();
+        return health(std::move(output));
     }
-    std::string output;
     if (std::holds_alternative<Feed>(query))
     {
         PostWriter writer(output, PostShape::feed);
@@ -283,7 +282,7 @@ Response Application::read(const ReadQuery &query)
     PostWriter writer(output, PostShape::single);
     if (!store().post(std::get<GetPost>(query).id, writer))
     {
-        return error_response({Status::not_found, "post not found"});
+        return error_response({Status::not_found, "post not found"}, std::move(output));
     }
 
     return {Status::ok, std::move(output)};
@@ -304,22 +303,22 @@ std::expected<void, WriteError> Application::commit(std::span<const WriteCommand
     return store().commit(commands, outcomes);
 }
 
-Response Application::write_reply(const WriteCommand &command, const WriteOutcome &outcome) const
+Response Application::write_reply(const WriteCommand &command, const WriteOutcome &outcome,
+                                  std::string output) const
 {
     if (!outcome)
     {
         if (outcome.error().code == WriteErrorCode::post_not_found)
         {
-            return error_response({Status::not_found, "post not found"});
+            return error_response({Status::not_found, "post not found"}, std::move(output));
         }
         std::cerr << "request failed: " << outcome.error().message << '\n';
 
-        return error_response({Status::internal_error, "internal server error"});
+        return error_response({Status::internal_error, "internal server error"}, std::move(output));
     }
     if (const auto *create = std::get_if<CreatePost>(&command))
     {
         const auto &created = std::get<CreatedPost>(*outcome);
-        std::string output;
         PostWriter writer(output, PostShape::single);
         writer.append(created.id, create->body,
                       {created.created_at.data(), created.created_at.size()}, create->username, 0);
@@ -328,8 +327,8 @@ Response Application::write_reply(const WriteCommand &command, const WriteOutcom
         return {Status::created, std::move(output)};
     }
     const bool created = std::get<LikeResult>(*outcome) == LikeResult::created;
-    std::string output = created ? "{\"liked\":true,\"already_liked\":false,\"post_id\":"
-                                 : "{\"liked\":true,\"already_liked\":true,\"post_id\":";
+    output = created ? "{\"liked\":true,\"already_liked\":false,\"post_id\":"
+                     : "{\"liked\":true,\"already_liked\":true,\"post_id\":";
     integer(output, std::get<LikePost>(command).post_id.value);
     output += '}';
 

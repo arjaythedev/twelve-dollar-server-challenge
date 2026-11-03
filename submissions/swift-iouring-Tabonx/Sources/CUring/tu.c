@@ -30,17 +30,3 @@ struct io_uring_buf_ring *tu_buffers(struct io_uring *ring, unsigned count, unsi
     struct io_uring_buf_ring *br = io_uring_setup_buf_ring(ring, count, group, 0, &err);
     return err ? 0 : br;
 }
-
-static pthread_mutex_t tu_mutex = PTHREAD_MUTEX_INITIALIZER;
-void tu_lock(void) { pthread_mutex_lock(&tu_mutex); }
-void tu_unlock(void) { pthread_mutex_unlock(&tu_mutex); }
-
-int tu_spawn(void *(*body)(void *), void *arg) {
-    pthread_t t;
-    pthread_attr_t a;
-    pthread_attr_init(&a);
-    pthread_attr_setstacksize(&a, 1 << 20);
-    int rc = pthread_create(&t, &a, body, arg);
-    pthread_attr_destroy(&a);
-    return rc;
-}

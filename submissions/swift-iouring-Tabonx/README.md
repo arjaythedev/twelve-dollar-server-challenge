@@ -1,99 +1,144 @@
-# Swift / io_uring / SQLite
+# Swift, io_uring, and SQLite read straight off the B-tree
 
 | | |
 |---|---|
-| Language | Swift 6.4.1, Swift 6 language mode, no Foundation, stdlib linked statically |
-| Framework | none: io_uring through liburing 2.15, with an epoll fallback |
-| SQLite | 3.54.0 amalgamation with `SQLITE_THREADSAFE=0`, built with profile-guided optimization |
-| JSON / JWT | hand-written parser and writer, SHA-256 and HMAC-SHA256 in Swift |
-| Nginx or direct | direct: serves `0.0.0.0:80` itself |
+| Language | Swift 6.4.1 in Swift 6 language mode, no Foundation, stdlib linked statically |
+| Framework | none. io_uring through liburing 2.15, with an epoll fallback for kernels that refuse it |
+| SQLite | 3.54.0 amalgamation, compiled into the binary with profile-guided optimization |
+| Nginx or direct | direct, on `0.0.0.0:80` |
 
-`install.sh` downloads the Swift 6.4.1 toolchain for Ubuntu 24.04 and checks its SHA-256. `build.sh`
-downloads SQLite and liburing (both SHA-256 checked) and builds them from source. It trains the SQLite
-profile on a synthetic database created from `../../schema.sql`, without seed data. If any PGO step
-fails, it builds SQLite without a profile.
+One thread does everything. It parses HTTP, checks the JWT with its own SHA-256, walks SQLite's
+B-tree, and writes the JSON. A second thread only copies SQLite's write-ahead log back into the
+database file, at nice 19.
 
-## Design
+## Swift without the parts people usually write
 
-- **Connections live in io_uring, not in the descriptor table.** Each ring accepts with multishot
-  accept into its own registered file table (direct descriptors, up to `RLIMIT_NOFILE` slots each).
-  With the box's 65,535 limit, eight rings hold up to 524,280 connections, and the process itself keeps
-  about a dozen descriptors open. A ring that is 1,024 slots from full cancels its accept, so the kernel
-  hands new connections to the next ring. Without that, the first ring takes every connection.
-- **One wait, one batch.** Receives are multishot with a provided-buffer ring of 4,096 × 2 KiB buffers
-  per ring, so an idle connection owns no buffer. Under load a ring waits for 32 completions or 250 µs.
-  When quiet, it wakes on the first completion. Requests are parsed in place in the kernel's buffers and
-  the buffers go back to the ring after the batch.
-- **Group commit.** All requests in a batch run inside one SQLite transaction, under one mutex shared by
-  the rings. Responses, reads included, are submitted only after `COMMIT` succeeds. If it fails, every
-  response in the batch becomes a 500 and its connection closes (rule 6).
-- **Zero-copy responses.** Each batch writes its responses into an arena, headers in front of each
-  body. Sends point straight into it, and the arena is reused only after its last send completes.
-- **SQLite.** One connection with `locking_mode=EXCLUSIVE` and WAL, `synchronous=NORMAL`, a 128 MiB page
-  cache, no mmap and `wal_autocheckpoint=0`. A commit only marks a checkpoint as due once the WAL
-  passes 1,024 frames. The ring runs it after it has submitted the batch's sends, so the checkpoint
-  never delays committed responses. Checkpointing at 1,024 frames instead of 4,096 cost about 7 % less
-  CPU at 200,000 users, because every page read searches the WAL index, which grows with the WAL.
-- **Overload.** After receives run out of buffers, a ring re-arms only about as many as it has
-  buffers to give back, so an overloaded ring doesn't spin on ENOBUFS. Slot tables come from `calloc`,
-  so rings that never fill cost almost no memory.
-- **The feed.** It reads the newest 20 ids from `posts_created_at_id_idx`. When they are contiguous,
-  one range scan of `likes_post_id_idx` is counted row by row (about 7 % cheaper than `GROUP BY` in
-  SQLite) and one rowid range scan returns the rows in feed order. Otherwise the reference query runs.
-- **No JOIN for a single post.** SQLite 3.54 re-prepares
-  `... JOIN users u ON u.id = p.user_id WHERE p.id = ?1` on every step. A scalar subquery for the
-  username keeps the prepared plan.
-- **JWT on every authenticated request.** HS256 only, full JSON validation of header and payload,
-  constant-time signature compare, `exp` checked, pads hashed once at startup.
-- **Fallback.** If the kernel or a sandbox refuses io_uring, the server says so on stderr and runs the
-  same request handling on a single-threaded epoll loop.
+Most of the Swift here looks more like C than like an iOS app, and that was the point of the
+exercise: to see how close Swift gets when you stop reaching for its conveniences.
 
-## Measurements
+- No `String` on the request path. A request is a set of `ByteView`s, a pointer and a length,
+  pointing into the buffer the kernel received into. Header names, routes and JSON keys are
+  `StaticString`s compared byte by byte.
+- Responses go into an `OutBuffer`, a `~Copyable` struct that owns its memory. The compiler
+  refuses to copy it, so there is always exactly one owner and no reference counting.
+- No `Codable`. The JSON reader walks the bytes once, validates the whole document, and calls a
+  non-escaping closure for each top-level member. Strings without escapes come back as views into
+  the request, never copied.
+- SHA-256 and HMAC are written in Swift, about 140 lines.
+- C appears only where Swift can't reach. liburing is mostly macros and inline functions, and the
+  B-tree code needs SQLite's internal headers, so those live in small C targets that Swift imports
+  through module maps.
+- Built with `-Ounchecked` and `-enforce-exclusivity=unchecked`, arithmetic written with the
+  wrapping operators (`&+`, `&-`), so the hot loops carry no overflow or bounds checks.
 
-These are local numbers from Docker on an arm64 Mac, not from the benchmark VPS. The server was pinned
-to one CPU with 2 GB, and the load generator ran on the other CPUs of the same VM.
+## What a framework costs
 
-CPU per request with the load.js mix under wrk (mean of two interleaved 20 s runs). The Hummingbird
-row comes from an earlier session on the same machine:
+Before this entry I put the same request handling behind five different Swift servers and
+measured CPU per request in a 1-CPU Linux container on an M1. The numbers are local and won't
+match the leaderboard, but the gaps between them are what I found interesting:
 
-| Server | µs/req, 256 conns | µs/req, 4096 conns |
-|---|---:|---:|
-| swift-hummingbird-denizak (batch 2: 48,000 users) | 69.0 | 72.6 |
-| go-epoll-MegaPanchamZ (batch 2: 165,000 users) | 8.1 | 8.7 |
-| this entry | 7.6 | 10.3 |
+| Server | µs per request |
+|---|---:|
+| Vapor 4 | 59 |
+| Hummingbird 2 | 40 |
+| SwiftNIO, handler called synchronously on the event loop | 16.5 |
+| plain epoll, no NIO | 11.3 |
+| plain epoll, built as Embedded Swift (no runtime) | 12.0 |
 
-At 4,096 busy connections the Go entry batches better. With think-time users, where every connection
-is mostly idle, the two used about the same CPU: 25 % for Go and 22 % for this entry at 60,000 users.
+The biggest single step is the hop from NIO's event loop into async/await and back, which cost
+more than the whole request did. Dropping the Swift runtime with Embedded Swift changed nothing
+measurable, so the runtime isn't where the time goes. This entry is the plain loop, moved to
+io_uring.
 
-Think-time users, using a C reimplementation of `bench/load.js` that measures latency like k6's
-`http_req_duration` (server and clients on the VM's loopback, 40 s ramp, 60 s hold, the challenge's pass
-criteria). Each row is one run; repeated runs of the same configuration varied by up to 5x in p99.
+## One pass, one transaction
 
-| Users | Server | req/s | p95 | p99 | server CPU | memory peak | result |
-|---:|---|---:|---:|---:|---:|---:|---|
-| 200,000 | rust-epoll-scooter1337 | 21,289 | 8.2 ms | 27.6 ms | 39 % | 422 MB | pass |
-| 200,000 | this entry | 21,297 | 9.7 ms | 23.2 ms | 33 % | 459 MB | pass |
-| 300,000 | rust-epoll-scooter1337 | 31,609 | 65.5 ms | 155.9 ms | 77 % | 757 MB | pass |
-| 300,000 | this entry | 31,678 | 32.8 ms | 131.1 ms | 71 % | 774 MB | pass |
-| 360,000 | both | | | | 99 % | | fail (CPU) |
+The loop waits up to a millisecond for completions, then handles everything that arrived as one
+pass. Every request in the pass runs inside the same SQLite transaction, the pass commits once,
+and only then do its responses go to the kernel. A few dozen requests share each commit, and a
+read never reports a row that might still roll back.
 
-Across four 300,000-user runs this entry's p99 was 131 to 882 ms; across three Rust runs it was 156 to
-882 ms. Both fail at 360,000 users on this VM, where the server and all clients share one kernel.
+The first version of this entry ran eight rings on eight threads that took turns on SQLite
+behind a mutex. On one CPU that buys nothing. The threads never run at once, they just wake each
+other up, and every one of them commits its own small batch.
 
-The io_uring path was tested on arm64 Linux 6.10. Under x86_64 emulation (Rosetta), io_uring isn't
-available, so `test/run.sh` there passed 42/42 on the epoll fallback.
+## Reading SQLite without SQL
 
-## Switches for testing
+A feed is 20 posts with their authors and like counts. As SQL that is a join with a correlated
+subquery, which SQLite compiles to bytecode and runs in its virtual machine. The data access
+underneath is small: walk an index for 20 entries, look up 20 posts by id, look up 20 users by
+id, and count entries in one range of another index.
 
-`start.sh` needs only the variables in SPEC.md. Two optional variables help with testing: `SERVER_RINGS`
-sets the number of rings (default 8), and `SERVER_FORCE_EPOLL=1` runs the epoll fallback.
+`Sources/CSQLite/db.c` does exactly those steps. It `#include`s the unmodified amalgamation so it
+can open SQLite's own B-tree cursors, and Swift decodes the record bytes the cursors point at.
+Nothing is cached between requests, every row comes out of SQLite while the request is served,
+and writes still go through ordinary SQL. The idea comes from
+[rust-iouring-kensac](https://github.com/arjaythedev/twelve-dollar-server-challenge/tree/main/submissions/rust-iouring-kensac).
 
-## Layout
+Things that turned out to matter:
 
-```
-Sources/CSQLite/include/   module map and helpers for sqlite3.h (fetched by build.sh)
-Sources/CShim/             socket, epoll and rlimit setup in C
-Sources/CUring/            liburing helpers: SQE preparation, waits with timeout, threads and the mutex
-Sources/Server/            rings, epoll fallback, SQL, feed, routing, HTTP parsing, JSON, JWT, SHA-256
-pgo/train.c                the SQLite training workload
-```
+- The 20 posts are looked up in ascending id order, the reverse of the feed. SQLite has a fast
+  path for a cursor asked for the id right after the one it is on: it steps to the next cell
+  instead of searching from the root. New posts get consecutive ids, so most lookups are one step.
+- Like counts come from a single walk over `likes_post_id_idx`, counting cells a page at a time
+  without decoding each one.
+- The plan trusts nothing about the data. If an index entry has no row, or a post has no author
+  (where the SQL join would drop it), the plain SQL query answers instead. At startup the server
+  checks the column order of every table and index it decodes and refuses a different schema.
+
+## A checkpoint that never finishes
+
+In WAL mode SQLite appends each commit to a log and later copies the log back into the database.
+The log can only start over once a copy has caught up with all of it. Under a steady stream of
+likes and posts that never happens on its own, because new frames land while the copy runs, and a
+longer log makes every page read slower.
+
+A background thread with its own connection copies the bulk of the log while requests carry on.
+When it finishes, writes wait for at most 250 ms while it copies the last few frames, so the log
+can start over. A waiting write isn't refused. Its bytes stay in the connection's buffer and the
+request runs when the wait ends. Reads never wait.
+
+## Where the connections live
+
+io_uring can accept a socket straight into a ring's own file table, as a direct descriptor that
+never appears in the process's descriptor table. Each ring's table holds as many sockets as
+`RLIMIT_NOFILE` allows, and the server adds another ring when one gets close to full. It moves on
+1,024 slots early, because an accept that finds no free slot has already taken the connection off
+the listen queue and the kernel drops it. Eight listening sockets share the port through
+`SO_REUSEPORT`, so a burst of new connections spreads over eight listen queues.
+
+A connection that is only open costs the server a 64-byte slot. Receives go into a ring of 1,024
+shared 2 KiB buffers that the kernel picks from and the server hands back after each pass, and
+responses are written into a shared arena and sent from there without a copy. That matters more
+than CPU, because the kernel already needs about 3.4 KB for every TCP socket, and the machine has
+2 GB.
+
+I found out how much it matters by getting it wrong. A request that waited out a checkpoint kept a
+4 KB input buffer afterwards, for as long as its connection stayed open. Short local tests never
+showed it. On a real 1 vCPU, 2 GB machine with a few hundred thousand connections, it leaked 2.4 MB
+a second and the kernel killed the server three minutes in. The buffer is now freed the moment it
+is empty.
+
+## Smaller things
+
+- JSON output is scanned eight bytes at a time for characters that need escaping, and copied in
+  one piece when there are none.
+- Every token's signature is checked on every request. The HMAC key's inner and outer blocks are
+  hashed once at startup, so a check hashes only the token plus one more block.
+- SQLite's PGO profile is trained during the build on a synthetic database made from
+  `schema.sql`, running the same reads and writes the server does.
+- `body` is trimmed with the same whitespace set as JavaScript's `trim()` and counted in code
+  points, which is what the schema's `CHECK (length(body) <= 500)` counts.
+
+## Where things live
+
+| | |
+|---|---|
+| `Sources/Server/Ring.swift` | the io_uring loop: rings, accepts, receives, sends, the pass |
+| `Sources/Server/Database.swift` | record decoding, the feed and post plans |
+| `Sources/Server/Service.swift`, `HTTP.swift` | routing, the five endpoints, HTTP framing |
+| `Sources/Server/JSON.swift`, `JWT.swift`, `SHA256.swift` | parsing, escaping, HS256 |
+| `Sources/Server/Bytes.swift` | `ByteView` and `OutBuffer` |
+| `Sources/Server/EpollServer.swift` | the fallback loop for kernels without io_uring |
+| `Sources/CSQLite/db.c` | the amalgamation, B-tree cursors, transactions, the checkpoint thread |
+| `Sources/CUring`, `Sources/CShim` | liburing helpers and socket setup |
+| `pgo/train.c` | the training workload for the SQLite profile |

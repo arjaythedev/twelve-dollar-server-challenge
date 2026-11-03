@@ -3,7 +3,6 @@
 #ifndef CUURING_H
 #define CUURING_H
 #include "liburing.h"
-#include <pthread.h>
 
 enum {
     TU_CQE_F_MORE = IORING_CQE_F_MORE,
@@ -53,12 +52,15 @@ static inline void tu_close(struct io_uring *ring, unsigned slot, unsigned long 
     io_uring_sqe_set_data64(sqe, tag);
 }
 
-/// Cancels the request whose user_data is `target` (used to stop a multishot accept).
+/// Cancels every request whose user_data is `target` (used to stop the multishot accepts).
 static inline void tu_cancel(struct io_uring *ring, unsigned long long target, unsigned long long tag) {
     struct io_uring_sqe *sqe = tu_sqe(ring);
-    io_uring_prep_cancel64(sqe, target, 0);
+    io_uring_prep_cancel64(sqe, target, IORING_ASYNC_CANCEL_ALL);
     io_uring_sqe_set_data64(sqe, tag);
 }
+
+/// Submits what is queued and runs completion work without waiting.
+static inline int tu_poll(struct io_uring *ring) { return io_uring_submit_and_get_events(ring); }
 
 /// Submits, then waits until `min` completions are ready or `timeout_us` passes (0: no timeout).
 int tu_wait(struct io_uring *ring, unsigned min, long timeout_us);
@@ -74,9 +76,4 @@ static inline int tu_buffer_mask(unsigned count) { return io_uring_buf_ring_mask
 
 /// 1 if this process can create a ring with the flags tu_setup uses.
 int tu_probe(void);
-
-/// Threads and one mutex, for running several rings that share the SQLite connection.
-int tu_spawn(void *(*body)(void *), void *arg);
-void tu_lock(void);
-void tu_unlock(void);
 #endif

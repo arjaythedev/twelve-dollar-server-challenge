@@ -12,31 +12,6 @@ func fail(_ message: StaticString) -> Never {
     exit(1)
 }
 
-/// What a worker thread needs to build its ring. Rings are created on the thread that uses them
-/// (IORING_SETUP_SINGLE_ISSUER).
-final class WorkerConfig {
-    let service: FeedService
-    let listener: Int32
-    let slots: Int
-    init(service: FeedService, listener: Int32, slots: Int) {
-        self.service = service
-        self.listener = listener
-        self.slots = slots
-    }
-}
-
-func runWorker(_ config: WorkerConfig) -> Never {
-    guard let w = Worker(service: config.service, listener: config.listener, slots: config.slots) else {
-        fail("io_uring setup failed")
-    }
-    w.run()
-}
-
-/// Thread entry point. A global function, so it isn't isolated to the main actor.
-func workerThread(_ raw: UnsafeMutableRawPointer?) -> UnsafeMutableRawPointer? {
-    runWorker(Unmanaged<WorkerConfig>.fromOpaque(raw.unsafelyUnwrapped).takeUnretainedValue())
-}
-
 @main
 struct Main {
     static func main() {
@@ -59,16 +34,16 @@ struct Main {
         sv_ignore_sigpipe()
         // Each ring's registered file table is capped by RLIMIT_NOFILE; more rings hold more connections.
         let slots = Int(min(sv_raise_nofile(), 65535))
-        let listener = sv_listen(host, port, 65535)
-        guard listener >= 0 else { fail("cannot listen") }
-        var rings = 8
-        if let r = environment("SERVER_RINGS") { rings = max(1, Int(atoi(r))) }
-
-        let config = WorkerConfig(service: service, listener: listener, slots: slots)
-        for _ in 1..<rings {
-            _ = tu_spawn(workerThread, Unmanaged.passRetained(config).toOpaque())
+        var listeners: [Int32] = []
+        for _ in 0..<listenerCount {
+            let fd = sv_listen(host, port, 65535, 1)
+            guard fd >= 0 else { fail("cannot listen") }
+            listeners.append(fd)
         }
-        runWorker(config)
+        guard let server = Server(service: service, listeners: listeners, slots: slots) else {
+            fail("io_uring setup failed")
+        }
+        server.run()
     }
 }
 #else

@@ -102,6 +102,7 @@ class Arguments(argparse.Namespace):
     no_build: bool
     scope: ProfileScope
     diagnostics: bool = False
+    seed: int | None = None
 
 
 class Result(TypedDict):
@@ -378,6 +379,14 @@ def read_results(path: Path) -> list[Result]:
         if "client_sampled_peak_bytes" in row:
             results[-1]["client_sampled_peak_bytes"] = integer(row, "client_sampled_peak_bytes")
     return results
+
+
+def append_result(path: Path, result: Result) -> None:
+    rows = read_json(path) if path.exists() else []
+    if not isinstance(rows, list):
+        raise ValueError("results must be a JSON array")
+    # The display projection omits experiment metadata, so preserve the original records
+    write_json(path, [*rows, result])
 
 
 def summarize(output: Path) -> Result:
@@ -796,6 +805,7 @@ def load_generator(
             "--summary-export",
             summary,
             "--local-ips=127.0.0.2-127.0.0.33",
+            *(["--seed", str(args.seed)] if args.seed is not None else []),
             "--ready-file",
             "/results/generator.ready",
             "--start-gate",
@@ -1482,6 +1492,7 @@ def main() -> None:
         benchmark = actions.add_parser(action, help=description)
         benchmark.add_argument("--label", required=True, help="unique lowercase run name")
         benchmark.add_argument("--vus", type=int, default=5000)
+        benchmark.add_argument("--seed", type=int, help="deterministic C++ workload seed")
         benchmark.add_argument(
             "--hold", default="60s", help="time at target users (default: 60s; confirmation: 5m)"
         )
@@ -1546,6 +1557,10 @@ def main() -> None:
             ):
                 parser.error("positive VUs and a lowercase alphanumeric/hyphen label are required")
             profiling = args.action == "profile"
+            if args.seed is not None and (
+                not 0 <= args.seed < 2**64 or args.k6 is not None or args.generator != "cpp"
+            ):
+                parser.error("--seed requires the C++ generator and an unsigned 64-bit integer")
             duration_seconds(args.ramp)
             duration_seconds(args.hold)
             destination = args.save
@@ -1606,7 +1621,7 @@ def main() -> None:
                 if destination is None:
                     raise ValueError("a result file is required for benchmarks")
                 destination.parent.mkdir(parents=True, exist_ok=True)
-                write_json(destination, [*saved, result])
+                append_result(destination, result)
             if args.diagnostics:
                 workload = mapping(
                     mapping(read_json(output / "k6-summary.json")).get("generator", {})

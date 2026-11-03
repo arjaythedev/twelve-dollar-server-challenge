@@ -742,13 +742,55 @@ static int tds_like_key(tds_btree *reader, i64 *post_id)
     return rc == SQLITE_OK ? tds_integer(&columns[0], post_id) : rc;
 }
 
+static int tds_like_cell(MemPage *page, int index, i64 *post_id)
+{
+    static const u8 sizes[] = {0, 1, 2, 3, 4, 6, 8, 0, 0, 0};
+    const u8 *cell = findCell(page, index);
+    const u8 *data;
+    u32 size;
+    u8 type;
+    u8 rowid_type;
+    tds_column column;
+    if (cell >= page->aDataEnd || page->aDataEnd - cell <= page->childPtrSize)
+    {
+        return SQLITE_MISMATCH;
+    }
+    cell += page->childPtrSize;
+    size = *cell;
+    data = cell + 1;
+    /* Two integer fields fit locally, with one-byte payload and header sizes */
+    if (size < 3 || size > 19 || size > page->maxLocal || (size_t)(page->aDataEnd - data) < size ||
+        data[0] != 3)
+    {
+        return SQLITE_MISMATCH;
+    }
+    type = data[1];
+    rowid_type = data[2];
+    if (type == 0 || type == 7 || type > 9 || rowid_type == 0 || rowid_type == 7 ||
+        rowid_type > 9 || size != 3u + sizes[type] + sizes[rowid_type])
+    {
+        return SQLITE_MISMATCH;
+    }
+    column.type = type;
+    column.data = data + 3;
+    column.size = sizes[type];
+    return tds_integer(&column, post_id);
+}
+
+static void tds_like_position(BtCursor *cursor, int index)
+{
+    /* Cursed cursor bookkeeping: cached cell metadata still describes the old index */
+    cursor->ix = (u16)index;
+    cursor->info.nSize = 0;
+    cursor->curFlags &= (u8) ~(BTCF_ValidNKey | BTCF_ValidOvfl);
+}
+
 static int tds_feed_counts(tds_btree *reader, const int *order)
 {
+    BtCursor *cursor = reader->cursors[TDS_LIKES];
     int skipped = 0;
-    int key_ready = 0;
     int i;
     int rc;
-    i64 post_id = 0;
     for (i = 0; i < reader->feed_batch_count; ++i)
     {
         reader->feed_batch[i].like_count = 0;
@@ -758,32 +800,44 @@ static int tds_feed_counts(tds_btree *reader, const int *order)
         return SQLITE_OK;
     }
     rc = tds_like_seek(reader, reader->feed_batch[order[0]].id);
-    for (i = 0; i < reader->feed_batch_count; ++i)
+    i = 0;
+    while (rc == SQLITE_ROW)
     {
-        tds_feed_entry *entry = &reader->feed_batch[order[i]];
-        while (rc == SQLITE_ROW)
+        MemPage *page = cursor->pPage;
+        int cell = cursor->ix;
+        /* Interior index entries count too, but their successor is in a child page */
+        int end = page->leaf ? page->nCell : cell + 1;
+        for (; cell < end; ++cell)
         {
-            if (!key_ready)
+            tds_feed_entry *entry;
+            i64 post_id;
+            int result = tds_like_cell(page, cell, &post_id);
+            if (result != SQLITE_OK)
             {
-                int result = tds_like_key(reader, &post_id);
+                tds_like_position(cursor, cell);
+                result = tds_like_key(reader, &post_id);
                 if (result != SQLITE_OK)
                 {
                     return result;
                 }
-                key_ready = 1;
             }
-            if (post_id > entry->id)
+            while (post_id > reader->feed_batch[order[i]].id)
             {
-                break;
+                if (++i == reader->feed_batch_count)
+                {
+                    tds_like_position(cursor, cell);
+                    return SQLITE_OK;
+                }
             }
+            entry = &reader->feed_batch[order[i]];
             if (post_id < entry->id)
             {
-                /* Bound unrelated index work before seeking across a gap. */
+                /* Keep the gap budget across seeks, even when feed IDs are far apart */
                 if (skipped == TDS_LIKE_SKIP_BUDGET)
                 {
+                    tds_like_position(cursor, cell);
                     rc = tds_like_seek(reader, entry->id);
-                    key_ready = 0;
-                    continue;
+                    break;
                 }
                 ++skipped;
             }
@@ -795,19 +849,18 @@ static int tds_feed_counts(tds_btree *reader, const int *order)
                 }
                 ++entry->like_count;
             }
-            rc = sqlite3BtreeNext(reader->cursors[TDS_LIKES], 0);
+        }
+        if (cell == end)
+        {
+            tds_like_position(cursor, end - 1);
+            rc = sqlite3BtreeNext(cursor, 0);
             if (rc == SQLITE_OK)
             {
                 rc = SQLITE_ROW;
             }
-            key_ready = 0;
-        }
-        if (rc != SQLITE_ROW && rc != SQLITE_DONE)
-        {
-            return rc;
         }
     }
-    return SQLITE_OK;
+    return rc == SQLITE_DONE ? SQLITE_OK : rc;
 }
 
 static int tds_feed_posts(tds_btree *reader, const int *order)

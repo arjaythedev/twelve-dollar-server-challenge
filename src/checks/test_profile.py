@@ -10,17 +10,22 @@ from dev import (
     Arguments,
     JSONValue,
     LoadGenerator,
+    Result,
     analyze_profile,
+    append_result,
     cpu_delta,
     decode_json,
     duration_seconds,
     kernel_stage,
     load,
+    load_generator,
     mapping,
     parse_counters,
     parse_timings,
     profile_stage,
+    read_json,
     server,
+    write_json,
 )
 
 
@@ -38,6 +43,64 @@ def statistics(samples: int, lost: int = 0) -> str:
 
 
 class NativeProfileTests(unittest.TestCase):
+    def test_cpp_workload_seed_reaches_the_generator(self) -> None:
+        for seed in (None, 3132383413):
+            with (
+                self.subTest(seed=seed),
+                tempfile.TemporaryDirectory() as directory,
+                patch("dev.command", side_effect=["127.0.0.1:6565", "cpp-version\nsha /app/load"]),
+                patch(
+                    "dev.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "[]", "")
+                ),
+            ):
+                output = Path(directory)
+                write_json(output / "environment.json", {"docker_info": {"MemTotal": 24 * 2**30}})
+                args = Arguments(generator="cpp", k6=None, vus=1, hold="60s", ramp="30s", seed=seed)
+                with load_generator(args, "test-container", 3000, output) as generator:
+                    if seed is None:
+                        self.assertNotIn("--seed", generator.invocation)
+                    else:
+                        index = generator.invocation.index("--seed")
+                        self.assertEqual(generator.invocation[index + 1], str(seed))
+
+    def test_benchmark_append_preserves_experiment_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "results.json"
+            previous: JSONValue = {
+                "name": "earlier",
+                "server_sha256": "original",
+                "experiment": {"hold": [1, 2], "wal_cache_eviction": False},
+            }
+            result = Result(
+                date="2026-11-03",
+                name="next",
+                runtime="cpp",
+                load_generator="docker_loopback",
+                sqlite="3.53.1",
+                users=1,
+                hold="60s",
+                ramp="30s",
+                requests=1,
+                rps=1.0,
+                p95_ms=1.0,
+                p99_ms=1.0,
+                max_ms=1.0,
+                error_rate=0.0,
+                cpu_us_per_request=1.0,
+                cpu_scope="server_cgroup",
+                server_peak_bytes=1,
+                passed=True,
+            )
+            append_result(path, result)
+            self.assertEqual(read_json(path), [result])
+            write_json(path, [previous])
+            append_result(path, result)
+            self.assertEqual(read_json(path), [previous, result])
+            write_json(path, {"invalid": "root"})
+            with self.assertRaisesRegex(ValueError, "JSON array"):
+                append_result(path, result)
+            self.assertEqual(read_json(path), {"invalid": "root"})
+
     def test_combined_profile_separates_modes_and_retains_user_caller_frames(self) -> None:
         user = stack(100, ("sqlite3_step", "/app/server"), ("main", "/app/server"))
         kernel = stack(

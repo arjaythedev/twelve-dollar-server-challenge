@@ -476,6 +476,32 @@ void post_existence_fallback()
             "post-cursor failure changed write outcomes instead of using SQL");
 }
 
+void likes_record_fallback()
+{
+    for (const char *key : {"1.5", "zeroblob(2000)"})
+    {
+        Fixture fixture;
+        {
+            auto seed = open(fixture.path);
+            execute(seed.get(), "INSERT INTO posts(id,user_id,body) VALUES(2,1,'second');"
+                                "INSERT INTO likes(user_id,post_id) VALUES(1,1),(2,2)");
+            // SQLite affinity permits unusual keys when the fixture bypasses foreign keys
+            const std::string insert =
+                "INSERT INTO likes(user_id,post_id) VALUES(1," + std::string(key) + ")";
+            execute(seed.get(), insert.c_str());
+        }
+        Store store(fixture.path);
+        auto reader = open(fixture.path);
+        Control control(reader.get());
+        control.fail_feed = true;
+        const auto expected = read_feed(store);
+        control.fail_feed = false;
+        const auto before = control.feed_calls;
+        require(read_feed(store) == expected && control.feed_calls > before,
+                "unsupported likes record changed the SQL fallback response");
+    }
+}
+
 void orphan_like_precedence()
 {
     Fixture fixture;
@@ -670,11 +696,13 @@ extern "C" int __wrap_sqlite3_prepare_v3(sqlite3 *db, const char *sql, int lengt
 
 extern "C" int __wrap_tds_btree_feed_next(tds_btree *tree, tds_btree_post *post)
 {
-    if (active && active->fail_feed)
+    if (active)
     {
         ++active->feed_calls;
-
-        return SQLITE_IOERR;
+        if (active->fail_feed)
+        {
+            return SQLITE_IOERR;
+        }
     }
 
     return __real_tds_btree_feed_next(tree, post);
@@ -757,6 +785,7 @@ int main()
         fatal_error();
         singleton_and_empty();
         post_existence_fallback();
+        likes_record_fallback();
         orphan_like_precedence();
         failed_create_readback();
         created_rowid_boundary();

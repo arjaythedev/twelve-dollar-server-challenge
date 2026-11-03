@@ -2,7 +2,6 @@
 
 ## Next, in order
 
-- [ ] Compare leaf-local likes counting with the current per-entry cursor loop and SQL oracle.
 - [ ] Compare PGO with the same GCC 13 build; use separate training and validation data, without changing LTO or ISA flags.
 - [ ] Identify what starts the receive backlog; compare ring distribution and submission timing from the saved trace before another large run.
 - [ ] Check socket/heap/pool memory after draining, then compare allocation reuse and socket-buffer caps in Ideas.md order.
@@ -16,6 +15,7 @@
 
 ## Done
 
+- [x] Count likes per B-tree leaf, retaining bounded gaps, interior entries and fallback. Pass SQL-oracle, snapshot, signed-ID and overflow checks at 512/4096-byte pages, plus sanitizers. Native feed CPU -8.2% seed, -58.9% dense, -20.1% sparse. Matched 350k/5m A/B: CPU/request -1.9%, hold p99 6.02 to 5.86 ms, zero errors. Earlier tail variability remains unresolved.
 - [x] Keep WAL eviction with limit 0: matched 350k NAT runs reduced peak RAM from 1513 to 956 MiB and hold p99 from 11.01 to 5.77 ms; both passed.
 - [x] Use ext4 for Mini runs, verify the generic x86-64 build and fix eviction-induced WAL rereads with journal_size_limit=0. Pass focused tests in both build modes and 200k via VM/LAN: zero errors, hold p99 7.81 ms, peak RAM 1322.78 MiB.
 - [x] Replace create RETURNING with plain INSERT and stored timestamp readback. Verify failed-readback rollback, 64-bit rowids and metadata. Pass both native builds, 42 official and two targeted HTTP checks; native batch-16 CPU/write fell 15%. Confirm at 350k/5m: no errors, p99 5.72 ms; overall CPU unchanged within run variation.

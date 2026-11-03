@@ -39,7 +39,7 @@
 - [x] Compare idle multishot polls with bounded nonblocking reads. At 300k, CPU/request rose from 28.42 to 30.26 us and p99 from 8.03 to 4,170.84 ms; keep pending receives.
 
 - [ ] Compare lazy ring packing with balanced 4/8/12-ring connection shards where descriptor capacity permits, at the same load and total buffer budget. One issuer and one vCPU remain; compare CPU/request, wakeups, empty CQ scans and p99. More rings add capacity and change locality, not CPU cores.
-  In the 300k/5m trace, rings 0-3 exhausted buffers; ring 4 did not. Ring 3 produced 51.2% of ENOBUFS completions.
+  Old 300k/5m trace: rings 0-3 each served about 2M send attempts, but ring 3 had 2.21M ENOBUFS versus 0.33M on ring 2. Recheck after the receive-retry fixes.
   Place new accept tickets by live plus reserved slots first, then compare buffer occupancy and deferred-request age as weights. Keep established sockets on their owning ring; migration needs separate lifetime handling. Normalize ENOBUFS by receive attempts before inferring load from the historical share.
 
 - [ ] Compare an exact non-empty-ring bitmap if ring selection becomes hot. Free-slot allocation is already O(1); a Bloom filter adds hashes and false positives before a direct slot lookup.
@@ -89,7 +89,7 @@
 - [ ] Compare encoded CQE identities `(event, ring, slot, generation)` with the two Operation records ([C](submissions/c-iouring-pavlyhalim/src/server.c)). Preserve cancellation matching, generation wrap and stale-buffer returns.
 
 - [x] Move PASSIVE checkpoints to a worker with its own SQLite connection. At 100k, p99 fell from 27.42 to 4.71 ms while CPU/request rose from 31.05 to 32.70 us.
-  Coalesce 1,000-frame wakeups, defer partial/failed checkpoints and join before closing connections. Keep commits on the issuer and preserve `synchronous=NORMAL`; confirm WAL backlog and latency at 300k.
+  Coalesce 1,000-frame wakeups, defer partial/failed checkpoints and join before closing connections. Keep commits on the issuer and preserve `synchronous=NORMAL`. The 300k comparison still exposed foreground COMMIT stalls.
 
 - [ ] Compare nice 19 for the checkpoint thread only ([db.h](submissions/c-iouring-pavlyhalim/src/db.h)); measure issuer latency together with checkpoint duration and WAL backlog.
 
@@ -128,9 +128,11 @@
 
 - [x] Deduplicate author IDs within one feed and read them in ID order. Copy post records and author names into request-local arenas; retain the SQL point-read path and remove the unused B-tree point-read API.
 
-- [ ] Count several likes-index cells directly per leaf before advancing the cursor ([Kensac](https://github.com/arjaythedev/twelve-dollar-server-challenge/blob/42981018dc0d4b157d48c22ba15da5c361bf3168/submissions/rust-iouring-kensac/csrc/shim.c#L362)). Avoid one cursor call per like; retain bounded gap skipping, 64-bit counts, interior entries and the generic fallback. Compare dense, sparse, reordered and overflow cases against SQL.
+- [x] Count likes-index cells per leaf before advancing the cursor ([Kensac](https://github.com/arjaythedev/twelve-dollar-server-challenge/blob/42981018dc0d4b157d48c22ba15da5c361bf3168/submissions/rust-iouring-kensac/csrc/shim.c#L362)). Keep bounded gaps, signed 64-bit counts, interior entries and generic/SQL fallbacks. SQL and sanitizer checks passed; native feed CPU fell 8.2% on seed data, 58.9% with dense likes and 20.1% with sparse feed IDs.
 
-- [ ] Compare locality-aware scheduling of already queued reads by endpoint and nearby post/user IDs. Each request performs its own fresh SQLite read; reuse only SQLite's page cache, never query results.
+- [x] Compare removing duplicate feed initialization, together and close-only. Close shrank by 48 bytes, but five native pairs showed no repeatable CPU gain; keep the existing clears. Retain tests for partial/error/empty reuse and zero error/DONE outputs.
+
+- [ ] Compare locality-aware scheduling of queued reads by endpoint and nearby post/user IDs, optionally with separate bounded read/write queues. Each request performs its own fresh SQLite read; reuse only SQLite's page cache, never query results.
   Bound queue size and request age, preserve connection order and write/read barriers. Compare FIFO, page-cache misses, CPU/request and p99; locality gains must exceed sorting and waiting costs.
 
 - [ ] Compare a bounded read transaction for already queued HTTP reads, with a separate SQLite query for every request. Close batch membership before opening its snapshot, keep new arrivals for the next batch and preserve write barriers and connection order.
@@ -187,13 +189,15 @@
 
 - [x] Bound the load generator's due-timer pass to 256 services / 1 ms, checked between calls. Record time from epoll return to the next call separately from dispatch lag. A single blocking syscall can still exceed the budget; causation of earlier server tails remains unproven.
 
+- [x] Fix WSL mirrored-networking source-bind delays with NAT and reject runs that miss the activation deadline.
+
 - [ ] Test multishot receive after the simpler accept and work-budget comparisons.
   It needs separate stable receive/send operation identities, terminal-CQE tracking and bounded `ENOBUFS` rearming; the current one-operation-per-connection model cannot track concurrent receive/send operations.
   Bound queued input while sends are outstanding, preserve HTTP response order and return each selected buffer exactly once, including shutdown and cancellation.
 
 - [ ] Compare a narrow HTTP fast path for fully buffered, ordinary requests with llhttp fallback for everything else, only if parsing remains hot.
   Recognize a proven subset without consuming or mutating parser state before fallback. Preserve content-length/chunked framing, header handling, path decoding, auth-first errors, fragments and pipelining; five routes alone do not make the HTTP grammar small.
-  Measure saved parsing and allocations against the extra checks and duplicated protocol logic. Keep the direct llhttp receive path as the reference.
+  Measure saved parsing and allocations against the extra checks and duplicated protocol logic. Keep the current llhttp parser path as the reference.
 
 - [ ] Benchmark an isolated epoll transport with nonblocking `recv()`/`send()` against io_uring, using the same API/database handlers and request semantics.
   Keep io_uring as the chosen architecture while testing this alternative. Hold connection count, receive/send storage, work budgets, socket options and load setup constant; compare CPU/request, tail latency, memory and errors.

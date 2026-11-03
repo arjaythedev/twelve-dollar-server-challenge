@@ -98,6 +98,14 @@
 | C++ 0.1.0 (WSL NAT restored, activation gate) | 10,000 | 15 s | 22,216 | 1,110.78 | 4.185 ms | 4.361 ms | 18.41 ms | 0% | 49.50 us | 302.92 MiB |
 | C++ 0.1.0 (no WAL eviction, limit 0, NAT) | 350,000 | 60 s | 4,182,233 | 26,138.87 | 4.679 ms | 6.569 ms | 159.70 ms | 0% | 23.61 us | 1,512.96 MiB |
 | C++ 0.1.0 (WAL eviction, limit 0, NAT) | 350,000 | 60 s | 4,182,593 | 26,141.17 | 4.517 ms | 5.700 ms | 18.08 ms | 0% | 23.44 us | 956.17 MiB |
+| C++ 0.1.0 (leaf-local likes) | 350,000 | 5 min | 13,057,941 | 32,644.78 | 45.295 ms | 225.780 ms | 2,826.03 ms | 0% | 22.74 us | 1,053.83 MiB |
+| C++ 0.1.0 (leaf-local likes, sanity) | 350,000 | 5 min | 13,071,770 | 32,679.41 | 5.196 ms | 44.310 ms | 1,868.28 ms | 0% | 22.43 us | 1,070.78 MiB |
+| C++ 0.1.0 (per-entry likes, A) | 350,000 | 5 min | 13,074,468 | 32,686.09 | 4.687 ms | 5.986 ms | 58.29 ms | 0% | 22.30 us | 1,031.52 MiB |
+| C++ 0.1.0 (leaf-local likes, B) | 350,000 | 5 min | 13,072,068 | 32,680.13 | 4.604 ms | 5.838 ms | 54.75 ms | 0% | 21.87 us | 1,018.46 MiB |
+
+Leaf-local likes, matched 350k/5m A/B, seed 3132383413, no concurrent builds/probes: CPU/request 22.30 to 21.87 us (-1.9%), hold p99 6.02 to 5.86 ms. Both reached 350k on time with complete response coverage and no errors or memory-limit events. Earlier second-long outliers were not reproduced. [Data](src/benchmarks/leaf-likes.json).
+
+Sanity repeat, same binaries, seed 3132383413 and limits: hold p99 59.14 ms, no errors or memory-limit events. Builds and short native probes ran alongside it; tail variability remains unexplained. [Data](src/benchmarks/leaf-likes.json).
 
 WAL-reuse Docker run: 258,352 live connections in hold, 280,899 overall; the 350k target was missed. Server CPU 21.66 s, PSI I/O full 81.93 s (includes network CQ waits); no memory-limit events or OOM kills.
 
@@ -178,6 +186,10 @@ The uring rows read CPU counters externally; earlier rows include the in-contain
 [Data](src/benchmarks/results.json). [300k CPU profile](src/profiles/peak-cpu-300000.json). Full logs stay in `results/<run>/`.
 
 Feed batching: native median 10.58 to 9.06 us over five alternating pairs; after cleanup, 10.42 to 9.05 us over three pairs. Outputs matched. [Data](src/benchmarks/feed-batch.json).
+
+Leaf-local likes, five alternating native pairs, 10k feeds/sample: median thread CPU 6.54 to 6.01 us on seed data (-8.2%), 31.57 to 12.99 us with dense likes (-58.9%), 8.03 to 6.42 us with sparse feed IDs (-20.1%). JSON bytes matched. [Data](src/benchmarks/leaf-likes.json).
+
+Feed initialization, five native pairs, 30k feeds/sample: both changes gave paired median CPU +0.8% seed, +3.2% dense, +1.6% sparse. Close-only: -0.1% / +0.2% / +1.9%. Reverted both; outputs matched. [Data](src/benchmarks/feed-init.json).
 
 Group commit, 10,000 valid writes, two reversed pairs: b=1 to b=16 reduced median CPU/write from 63.85 to 51.88 us, WAL frames from 53,424 to 41,488, commits from 10,000 to 625. Outputs/state matched; inline checkpoints, no HTTP timing. b=64 saved more CPU in the mixed test but showed unstable wall time. [Data](src/benchmarks/group-commit.json).
 

@@ -1,0 +1,193 @@
+{
+  "date": "2026-11-03",
+  "measurement": "thread CPU: Store::feed, JSON and byte comparison; no concurrent load",
+  "build": "GCC 13.3, Release, SQLite 3.53.1",
+  "baseline_server_sha256": "76b4755c8982cb4c1a3a3fd55fc4215a9cf02d63248f8849b99837bfecd1082c",
+  "calls_per_sample": 30000,
+  "warmup_calls": 200,
+  "cpu_affinity": 2,
+  "order": [
+    [
+      "baseline",
+      "candidate",
+      "close-only"
+    ],
+    [
+      "candidate",
+      "close-only",
+      "baseline"
+    ],
+    [
+      "close-only",
+      "baseline",
+      "candidate"
+    ],
+    [
+      "baseline",
+      "candidate",
+      "close-only"
+    ],
+    [
+      "candidate",
+      "close-only",
+      "baseline"
+    ]
+  ],
+  "variants": {
+    "baseline": "unchanged",
+    "candidate": "skip close clear and clear output only on non-ROW",
+    "close-only": "skip close clear"
+  },
+  "text_bytes": {
+    "tds_btree_end": {
+      "baseline": 369,
+      "candidate": 321,
+      "close-only": 321
+    },
+    "tds_btree_feed_next": {
+      "baseline": 5487,
+      "candidate": 5659,
+      "close-only": 5487
+    }
+  },
+  "cases": [
+    {
+      "dataset": "seed",
+      "variants": [
+        {
+          "variant": "baseline",
+          "samples": [
+            6.080729,
+            5.784381,
+            5.926044,
+            6.097471,
+            6.22627
+          ],
+          "median_us": 6.080729,
+          "paired_median_change_percent": 0
+        },
+        {
+          "variant": "candidate",
+          "samples": [
+            6.128625,
+            6.181032,
+            5.782364,
+            5.993003,
+            6.55472
+          ],
+          "median_us": 6.128625,
+          "paired_median_change_percent": 0.7876687153793638
+        },
+        {
+          "variant": "close-only",
+          "samples": [
+            6.074404,
+            6.10503,
+            5.882215,
+            5.978091,
+            6.384145
+          ],
+          "median_us": 6.074404,
+          "paired_median_change_percent": -0.1040171334719786
+        }
+      ],
+      "output_bytes": 5102,
+      "hash": "3325a30e3f466185",
+      "outputs_match": true
+    },
+    {
+      "dataset": "dense",
+      "variants": [
+        {
+          "variant": "baseline",
+          "samples": [
+            12.86122,
+            12.941968,
+            12.711788,
+            13.063899,
+            13.176436
+          ],
+          "median_us": 12.941968,
+          "paired_median_change_percent": 0
+        },
+        {
+          "variant": "candidate",
+          "samples": [
+            12.836233,
+            13.356478,
+            12.920095,
+            13.968172,
+            13.752729
+          ],
+          "median_us": 13.356478,
+          "paired_median_change_percent": 3.202835921090208
+        },
+        {
+          "variant": "close-only",
+          "samples": [
+            12.883222,
+            12.844954,
+            12.90119,
+            13.336141,
+            13.141039
+          ],
+          "median_us": 12.90119,
+          "paired_median_change_percent": 0.1710724177022227
+        }
+      ],
+      "output_bytes": 4622,
+      "hash": "f72c74eac9f99212",
+      "outputs_match": true
+    },
+    {
+      "dataset": "sparse",
+      "variants": [
+        {
+          "variant": "baseline",
+          "samples": [
+            6.26659,
+            6.47415,
+            6.292092,
+            6.501962,
+            6.615545
+          ],
+          "median_us": 6.47415,
+          "paired_median_change_percent": 0
+        },
+        {
+          "variant": "candidate",
+          "samples": [
+            6.3654,
+            6.410435,
+            6.342242,
+            6.786337,
+            6.776137
+          ],
+          "median_us": 6.410435,
+          "paired_median_change_percent": 1.5767746094766055
+        },
+        {
+          "variant": "close-only",
+          "samples": [
+            6.844598,
+            6.318383,
+            6.400902,
+            6.812939,
+            6.740712
+          ],
+          "median_us": 6.740712,
+          "paired_median_change_percent": 1.8920134319999393
+        }
+      ],
+      "output_bytes": 4622,
+      "hash": "be2f12b2f9beb296",
+      "outputs_match": true
+    }
+  ],
+  "retained": "baseline",
+  "result": "No repeatable CPU gain; retain baseline initialization",
+  "checks": [
+    "SQL oracle, partial/error/empty feed reuse and zero non-ROW outputs passed",
+    "ASan/UBSan with SQLite assertions passed for both changes"
+  ]
+}

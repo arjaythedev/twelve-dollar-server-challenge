@@ -137,13 +137,22 @@ struct Row
     bool operator==(const Row &) const = default;
 };
 
+void require_empty(const tds_btree_post &row)
+{
+    require(row.id == 0 && row.body == nullptr && row.body_bytes == 0 &&
+                row.created_at == nullptr && row.created_at_bytes == 0 && row.author == nullptr &&
+                row.author_bytes == 0 && row.like_count == 0,
+            "non-ROW result retained a previous output field");
+}
+
 class Fixture
 {
   public:
-    Fixture() : db_(open(file_.path.data()))
+    explicit Fixture(int page_size = 512) : db_(open(file_.path.data()))
     {
+        const std::string page_setting = "PRAGMA page_size=" + std::to_string(page_size);
+        execute(db_.get(), page_setting.c_str());
         execute(db_.get(), R"sql(
-            PRAGMA page_size=512;
             PRAGMA journal_mode=WAL;
             PRAGMA synchronous=NORMAL;
             PRAGMA foreign_keys=ON;
@@ -164,10 +173,10 @@ class Fixture
             CREATE INDEX likes_post_id_idx ON likes(post_id);
         )sql");
         {
-            auto page_size = prepare(db_.get(), "PRAGMA page_size");
-            require(sqlite3_step(page_size.get()) == SQLITE_ROW &&
-                        sqlite3_column_int(page_size.get(), 0) == 512,
-                    "overflow fixture requires 512-byte pages");
+            auto setting = prepare(db_.get(), "PRAGMA page_size");
+            require(sqlite3_step(setting.get()) == SQLITE_ROW &&
+                        sqlite3_column_int(setting.get(), 0) == page_size,
+                    "fixture page size differs from requested size");
         }
         tds_btree *raw = nullptr;
         check(tds_btree_create(db_.get(), &raw));
@@ -188,6 +197,24 @@ class Fixture
     void end_reads()
     {
         tds_btree_end(tree_.get());
+    }
+
+    void begin_reads()
+    {
+        sql("BEGIN");
+        check(tds_btree_begin(tree_.get()));
+    }
+
+    void expect_next(int expected)
+    {
+        tds_btree_post row;
+        std::memset(&row, 0xa5, sizeof(row));
+        require(tds_btree_feed_next(tree_.get(), &row) == expected,
+                "unexpected feed cursor result");
+        if (expected != SQLITE_ROW)
+        {
+            require_empty(row);
+        }
     }
 
     void post(sqlite3_int64 id, sqlite3_int64 user, std::string_view body,
@@ -211,10 +238,18 @@ class Fixture
         {
             check(tds_btree_begin(tree_.get()));
             std::vector<Row> actual;
-            tds_btree_post row{};
+            tds_btree_post row;
             int result;
-            while ((result = tds_btree_feed_next(tree_.get(), &row)) == SQLITE_ROW)
+            for (;;)
             {
+                // Poison each output so the SQL oracle checks every successful assignment
+                std::memset(&row, 0xa5, sizeof(row));
+                result = tds_btree_feed_next(tree_.get(), &row);
+                if (result != SQLITE_ROW)
+                {
+                    require_empty(row);
+                    break;
+                }
                 actual.push_back({row.id,
                                   {row.body, static_cast<std::size_t>(row.body_bytes)},
                                   {row.created_at, static_cast<std::size_t>(row.created_at_bytes)},
@@ -361,6 +396,92 @@ void post_existence()
     fixture.sql("ROLLBACK");
 }
 
+void likes_pages(int page_size)
+{
+    Fixture fixture(page_size);
+    fixture.sql(R"sql(
+        BEGIN;
+        WITH RECURSIVE ids(id) AS (VALUES(1) UNION ALL SELECT id+1 FROM ids WHERE id<257)
+        INSERT INTO users(id,username) SELECT id,'user-' || id FROM ids;
+        WITH RECURSIVE ids(id) AS (VALUES(10000) UNION ALL SELECT id+1 FROM ids WHERE id<10300)
+        INSERT INTO posts(id,user_id,body,created_at) SELECT id,1,'old','2000' FROM ids;
+        INSERT INTO likes(user_id,post_id) SELECT u.id,p.id FROM users u CROSS JOIN posts p;
+    )sql");
+    constexpr std::array<sqlite3_int64, 20> ids{std::numeric_limits<sqlite3_int64>::min(),
+                                                -1099511627777,
+                                                -8388609,
+                                                -32769,
+                                                -129,
+                                                -2,
+                                                -1,
+                                                0,
+                                                1,
+                                                2,
+                                                127,
+                                                128,
+                                                32767,
+                                                32768,
+                                                8388607,
+                                                8388608,
+                                                2147483647,
+                                                2147483648,
+                                                1099511627776,
+                                                std::numeric_limits<sqlite3_int64>::max()};
+    for (std::size_t index = 0; index < ids.size(); ++index)
+    {
+        const std::string timestamp = "2090-01-" + std::to_string(10 + (index * 7) % 20);
+        fixture.post(ids[index], 1, "leaf boundary", timestamp);
+        const std::string likes = "INSERT INTO likes(user_id,post_id) SELECT id," +
+                                  std::to_string(ids[index]) +
+                                  " FROM users WHERE id<=" + std::to_string(1 + (index * 53) % 257);
+        fixture.sql(likes.c_str());
+    }
+    // Exercise the rowid serial types too, independently of the signed post IDs
+    fixture.sql(R"sql(
+        UPDATE likes SET rowid=-9223372036854775808 WHERE user_id=1 AND post_id=0;
+        UPDATE likes SET rowid=9223372036854775807 WHERE user_id=1 AND post_id=1;
+        UPDATE likes SET rowid=0 WHERE user_id=1 AND post_id=2;
+        COMMIT;
+    )sql");
+    const auto previous = fixture.compare(20, [](const char *path) {
+        auto writer = open(path);
+        execute(writer.get(), "DELETE FROM likes WHERE post_id=-129;"
+                              "INSERT INTO likes(user_id,post_id) VALUES(257,1)");
+    });
+    require(fixture.compare(20) != previous, "likes scan retained a previous snapshot");
+    fixture.sql("DELETE FROM likes");
+    fixture.compare(20);
+}
+
+void feed_reset()
+{
+    Fixture fixture;
+    fixture.sql("INSERT INTO users(id,username) VALUES(1,'author');"
+                "INSERT INTO posts(id,user_id,body) VALUES(1,1,'first'),(2,1,'second')");
+    fixture.begin_reads();
+    fixture.expect_next(SQLITE_ROW);
+    fixture.end_reads();
+    fixture.expect_next(SQLITE_MISUSE);
+    fixture.sql("COMMIT; DELETE FROM posts");
+    fixture.compare(0);
+    fixture.sql("PRAGMA foreign_keys=OFF;"
+                "INSERT INTO posts(id,user_id,body) VALUES(1,99,'orphan')");
+    fixture.compare(0);
+    fixture.sql("UPDATE posts SET user_id=1;"
+                "INSERT INTO likes(user_id,post_id) VALUES(1,1.5)");
+    fixture.begin_reads();
+    fixture.expect_next(SQLITE_MISMATCH);
+    fixture.end_reads();
+    fixture.sql("ROLLBACK; DELETE FROM likes; PRAGMA foreign_keys=ON");
+    fixture.compare(1);
+    fixture.begin_reads();
+    fixture.expect_next(SQLITE_ROW);
+    fixture.expect_next(SQLITE_DONE);
+    fixture.expect_next(SQLITE_DONE);
+    fixture.end_reads();
+    fixture.sql("COMMIT");
+}
+
 } // namespace
 
 int main()
@@ -372,7 +493,10 @@ int main()
         mixed_rows(fixture);
         missing_authors(fixture);
         post_existence();
-        std::cout << "B-tree feed rows, snapshots, overflow and join limits passed\n";
+        likes_pages(512);
+        likes_pages(4096);
+        feed_reset();
+        std::cout << "B-tree feed rows, snapshots, overflow, likes pages and join limits passed\n";
     }
     catch (const std::exception &error)
     {

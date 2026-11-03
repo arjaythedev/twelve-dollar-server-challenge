@@ -14,7 +14,7 @@ Needs Linux 6.1 or newer with io_uring enabled (Ubuntu 24.04's 6.8 kernel has it
 ## Running it
 
 ```bash
-sudo bash install.sh   # apt: build-essential, curl, unzip
+sudo bash install.sh   # apt: build-essential, curl, ca-certificates, unzip
 bash build.sh          # downloads and verifies SQLite and liburing, builds bin/server (about 2 minutes)
 SQLITE_PATH=... JWT_SECRET=... HOST=0.0.0.0 PORT=80 bash start.sh
 ```
@@ -55,7 +55,7 @@ SQLITE_PATH=... JWT_SECRET=... HOST=0.0.0.0 PORT=80 bash start.sh
   database opens the transaction; every read and write in the batch runs inside it, and the batch
   ends with one `COMMIT`. Responses are written into an arena and only handed to `send` SQEs after that
   `COMMIT` returns, so a `201` always means the row is committed (rule 6). If a commit fails, nothing
-  from that batch is sent: those connections are closed instead.
+  from a batch with writes is sent: those connections are closed instead.
 - **Sends go through io_uring**, one in flight per connection so responses stay in order (later ones
   queue behind it). Each send owns a copy of its bytes, so the arena is reused immediately and a slow
   reader can never pin it. Short sends resubmit the rest. Closing a connection cancels its pending
@@ -67,7 +67,7 @@ SQLITE_PATH=... JWT_SECRET=... HOST=0.0.0.0 PORT=80 bash start.sh
 - **Reads use SQLite's B-tree cursors, not its SQL engine.** `server.c` includes the unmodified
   amalgamation. `/feed` walks `posts_created_at_id_idx` for the 20 newest, counts their likes in one walk
   of `likes_post_id_idx` (reading a leaf's cells directly), fetches the rows in ascending id order so
-  consecutive ids are one step along a leaf, then looks up each author. `/posts/:id` is the same plan for
+  consecutive ids are usually one step along a leaf, then looks up each author. `/posts/:id` is the same plan for
   one row. Records are decoded in place. Every request still reads its rows from SQLite while it is
   served (rule 5); what is kept between requests is prepared statements, cursor memory, `KeyInfo` objects
   and root page numbers.
@@ -83,8 +83,8 @@ SQLITE_PATH=... JWT_SECRET=... HOST=0.0.0.0 PORT=80 bash start.sh
   frames (a CPU saturated long enough to starve the thread; a write-only run reached 1.6 GB of WAL in 40 s
   without this) writes stay held until the thread finishes, however long that takes, and if the thread is
   idle the loop checkpoints by itself. Durability is unchanged: WAL with
-  `synchronous=NORMAL`, and a response waits for its `COMMIT`. If a commit fails, nothing from that batch
-  is sent and its connections are closed.
+  `synchronous=NORMAL`, and a response waits for its `COMMIT`. If a commit fails, nothing from a batch with
+  writes is sent and its connections are closed.
 - **Provided-buffer registration retries.** Ubuntu's 6.8.0-136 and later kernels reject a buffer ring whose
   reserved words are zero (Launchpad #2162843), which stops a server from starting at all. It retries once
   with `resv[0] = 1`, which correct kernels never see.
@@ -123,42 +123,49 @@ SQLITE_PATH=... JWT_SECRET=... HOST=0.0.0.0 PORT=80 bash start.sh
 
 ## Measurements on x86
 
-On EC2 `m5n.large` (Xeon 8259CL, Cascade Lake like the benchmark box's 8260), booted with one CPU and 2 GB, kernel
-6.8, MTU 1500, a separate load generator running the `bench/load.js` user model with k6-shaped requests, each run on a
-fresh database. CPU per request counts the whole box, softirq included. Same-box runs differ by up to 3%, so these are
-interleaved rounds, not separate sessions. rust-iouring-kensac is built from its own folder. The earlier entry carries
-only the buffer-ring retry, without which it doesn't start on this kernel.
+These are from EC2, not the benchmark box, and they are not a prediction of a score there. `m5n.large` (Xeon 8259CL, Cascade
+Lake like the benchmark box's 8260), booted with one CPU and 2 GB, kernel 6.8, MTU 1500, a separate load generator running
+the `bench/load.js` user model with k6-shaped requests (not k6 itself), each run on a fresh database. CPU per request counts
+the whole box, softirq included. Results shift between instances, so compare only within a table.
+
+rust-iouring-kensac was tested at two commits: `a08915f` on main, which is its merged #248 code (270,000 on the
+leaderboard), and `4298101`, its unmerged #264 (the 310,000 row).
 
 | 250,000 users, 3 interleaved rounds | us CPU/request, whole box | each round |
 |---|---:|---|
-| this entry before the B-tree reads | 23.95 | 24.43, 23.62, 23.79 |
-| the same design without the additions below | 20.06 | 20.38, 19.65, 20.14 |
-| this entry | 18.01 | 18.58, 17.69, 17.77 |
-| rust-iouring-kensac | 18.98 | 19.51, 18.65, 18.78 |
+| this entry | 16.36 | 16.34, 16.36, 16.38 |
+| rust-iouring-kensac #264 | 17.48 | 17.65, 17.45, 17.33 |
+| rust-iouring-kensac #248 | 17.53 | 17.88, 17.32, 17.38 |
 
-This entry used less CPU per request than kensac in every round (4.8%, 5.1%, 5.4%). Taking one thing away at a time,
-one run each, so treat these as rough: huge pages about 4%, the escaping scan about 4%, the send pool about 1%. Tried and
-not kept: moving the program text onto a huge page and static linking (level), 1,024 x 1 KB receive buffers (same CPU, but
-p95 over the ramp went from 7 to 118 ms), and `mmap` instead of the page cache (4% more CPU).
+Taking one thing away at a time from an earlier build, one run each on another instance, so treat these as rough: huge pages
+about 4%, the escaping scan about 4%, the send pool about 1%. Tried and not kept: moving the program text onto a huge page and
+static linking (level), 1,024 x 1 KB receive buffers (same CPU, but p95 over the ramp went from 7 to 118 ms), and `mmap`
+instead of the page cache (4% more CPU).
 
-Holds, with a real-time process spinning for 20% of the CPU so the core is closer to the benchmark box's. The share was
-picked so kensac at 310,000 reads about the 82% busy the leaderboard shows; 30% made it fail, so this is an approximation:
+5-minute holds with a 60 s ramp, with a real-time process spinning for 20% of the CPU to slow the core down. That share is an
+approximation, not a calibration against the benchmark box:
 
-| Users | this entry | rust-iouring-kensac |
+| Users | this entry | rust-iouring-kensac #264 |
 |---|---|---|
-| 310,000 | pass, p99 18 ms, 79% busy | pass, p99 50 ms, 83% busy |
-| 330,000 | pass twice, p99 22 ms, 83% busy | one pass (p99 65 ms, 88% busy), one out of memory |
-| 345,000 | fail | not run |
+| 310,000 | pass, p99 20 ms, 76% busy | pass, p99 52 ms, 78% busy |
+| 330,000 | 2 passes (p99 29 and 35 ms, 80% busy), and 1 out of memory at the end of a ramp | out of memory after about 4 minutes (1 run) |
 
-Without the spinning process, 330,000 users held for 5 minutes: 34,900 req/s, p95 5 ms, p99 19 ms, no errors. Past about
-350,000 connections the box runs out of memory (one slow ramp; kensac, about 360,000).
+Near 330,000 the margin is thin: memory, not CPU, ended those runs. One pass was also killed for memory a second after every
+client disconnected at once, past the end of its scored window. Past about 350,000 connections the box runs out of memory on a
+slow ramp (kensac #248, about 360,000).
 
-`test/test.sh` passes all 42. `kill -9` under write load, during checkpoints: all 564,411 acknowledged writes present
-after restart, `integrity_check` ok.
+This entry recovers from a stall worse than #264 does, which reads in bounded rounds after a burst. Three 2-second freezes at
+300,000 users, one run each: both fail p99 (2.7 and 3.2 s), but p95 over the run is 1,438 ms here and 68 ms for #264.
 
-Ideas credited to other entries: B-tree cursor reads, the `unix-excl` VFS, page cache over `mmap`, a nice-19
-checkpoint thread with write holds, `SO_REUSEPORT` listeners and `DEFER_TASKRUN` on every ring from
-rust-iouring-kensac (#264); the `resv[0]` retry from rust-iouring-kensac (#264) and c-iouring-pavlyhalim (#245).
+A build from clean on the same 2 GB box without swap peaks at 315 MB (maximum resident set size) in 1:38. `test/test.sh` passes
+all 42. `kill -9` under write load, during checkpoints: all 547,182 acknowledged writes present after restart, `integrity_check` ok.
+
+## Credits
+
+Code adapted from rust-iouring-kensac (`csrc/shim.c`, #248 and #264): the checkpoint state machine and thread, `count_likes`,
+and the seek and `KeyInfo` helpers, including some names and comments. Ideas from the same entry: B-tree cursor reads, the
+`unix-excl` VFS, page cache over `mmap`, write holds, `SO_REUSEPORT` listeners and `DEFER_TASKRUN` on every ring. The `resv[0]`
+retry is also from rust-iouring-kensac and from c-iouring-pavlyhalim (#245).
 
 ## Earlier measurements (arm64, before the B-tree reads)
 

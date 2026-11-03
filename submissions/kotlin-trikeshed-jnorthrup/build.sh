@@ -6,8 +6,8 @@
 # The other runtimes (graal-static, graal-jit, node, wasi) build from the same tree with bench/all1000.sh.
 #
 # Resource limits (rule 8): the challenge box is a DigitalOcean Basic droplet, Ubuntu 24.04 x86_64, 1 vCPU, 2 GB RAM,
-# no swap. This build and the server share that CPU and RAM with the OS. Gradle runs with a 1 GB heap, 768 MB of
-# metaspace (the Kotlin/Native compile ran out at 384 MB) and one worker (gradle.properties).
+# no swap. This build and the server share that CPU and RAM with the OS. Gradle runs one target per JVM (below: the JVM
+# target only to fetch SQLite, then Kotlin/Native), with a fixed 600 MB heap and one worker (gradle.properties).
 # The same limits were applied for the clean-room test runs (bench/droplet-ci.sh), with cgroup v2 in an ubuntu:24.04
 # container on a WSL2 kernel, not the droplet's kernel:
 #   docker run --cpus=1 --memory=2g --memory-swap=2g ubuntu:24.04
@@ -25,4 +25,5 @@ if [ ! -d trikeshed/TrikeShed/src ]; then
 fi
 if [ -x /opt/graalvm/bin/java ]; then export JAVA_HOME=/opt/graalvm; fi
 GRADLE=${GRADLE:-/opt/gradle/bin/gradle}; [ -x "$GRADLE" ] || GRADLE=gradle
+"$GRADLE" --no-daemon --quiet --console=plain :server:sqliteSource
 "$GRADLE" --no-daemon --quiet --console=plain -Ptrike.targets=linuxX64 :server:linkFeedReleaseExecutableLinuxX64

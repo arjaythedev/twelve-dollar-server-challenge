@@ -974,3 +974,44 @@ Interleaved, 3 reps of each, 0 errors:
 No loss from the glue cut (paired runs: 1.0-1.8 us/req lower, p95/p99 within the run-to-run spread). The loss in
 C3 is the host cut's (E50): its code is reverted here (host.c back to 232 lines; C total 232 + 42 = 274). What in
 it costs was not found (perf shows no single symbol); the README lists it as tried and dropped.
+
+## E52: 16,000 / 24,000 / 32,000 frames, and the group-commit window (WINDOW_MS), harness v2, 2-minute probes, 0 errors
+Checkpoint size (window 2 ms):
+- 200k: 16,000 p95 240 / 210, p99 445 / 385 (two runs); 32,000 p95 1,485, p99 5,320 (the WAL is reread from
+  disk: 159 MB read during the run; memory pressure)
+- 210k: 8,000 p95 330, p99 500; 16,000 p95 215, p99 390; 24,000 p95 350, p99 960 (13 MB reread)
+- 220k: 16,000 p95 495, p99 3,230; 24,000 p95 5,320 (115 MB reread) -> 220k fails at every size tried
+- 230k: 16,000 p95 4,070
+Group-commit window with 16,000 frames (new env knob WINDOW_MS, default 2 ms as before):
+- 210k: 2 ms p95 230 / p99 410; 5 ms 220 / 395; 10 ms 285 / 695
+- 220k: 5 ms p95 1,385 / p99 5,320; 10 ms 1,170 / 5,320
+The window makes no difference beyond noise at 2-5 ms and hurts at 10. 16,000 frames is the only change that
+moves 210k well inside the limits; 220k is past the edge (CPU 0 busy 94-95 %, page-cache rereads start).
+Next: 5-minute holds, df9da40 against 16,000 frames, at 210k and 215k (h3).
+
+## H3: 5-minute holds, df9da40 against 16,000 frames + WINDOW_MS=5 (harness v2, SPIN_NS=10000, conntrack off on veth0) — 16,000 dropped
+NOTRACK rules for veth0 were added first (Docker on this box turns conntrack on in the root netns; the scorer's
+box has no Docker). Interleaved, 0 errors:
+- df9da40, 210k: p95 350 / 580, p99 555 / 1,430 ms; 0 MB of the database reread from disk -> 1 of 2 pass
+- 16,000 frames, 210k: p95 450 / 410, p99 1,675 / 1,260 ms; 26 / 32 MB reread -> 0 of 2
+- 16,000 frames, 215k: p95 740 / 470, p99 4,350 / 1,765 ms; 47 / 37 MB reread -> 0 of 2
+The harness now matches the scorer at the edge (200k holds, 210k fails about half the time). The bigger WAL
+(63 MB against 32 MB) costs the box page cache: the reads come in the ~15 s after the ramp ends, when the
+sockets' kernel memory peaks, and they block the loop. The 2-minute wins in E52 did not survive 5 minutes.
+Memory at 210k (slabtop, server side): ~4 KB of kernel memory per connection (TCP 2.3 KB, sock_inode 0.8 KB,
+filp, dentry, io_kiocb 0.25 KB + async poll 0.1 KB for the armed recv), ~840 MB in all; server RSS ~150 MB.
+Consult (DeepSeek, Gemini), what next: a longer commit window (Gemini) is already measured worse (E52); a
+native SQLite in the host sharing the wal-index (Gemini) adds a second SQLite to the C, not done; a clustered
+likes key or a stored like count (DeepSeek) changes the schema or comes close to caching, not done without the
+owner. Taken up: check whether 240k's refusals are memory or a queue (next), and whether the p99 spikes line
+up with checkpoints or with reclaim.
+
+## H4: what happens at 240k (df9da40, harness v2, 2-minute probe) — capacity, not a bug
+p50 600, p95/p99 5,320 ms (capped), 0 errors in ul (it waits; k6 on the scorer times out or is reset, not
+seen here), 21.7k req/s against ~25k asked, CPU 0 busy 98 %. ListenOverflows 0, ListenDrops 0, no OOM kill,
+0 MB reread. With the loop behind, nearly every connection holds a request in its socket: TCP memory went
+50k -> 103k pages (tcp_mem 45,000 / 60,000 / 90,000), PruneCalled +48,676, TCPMemoryPressures up. So 240k
+asks for more requests than one vCPU serves; the memory blow-up follows from the backlog.
+Pinning the database's page cache (DeepSeek's idea, to make 16,000 frames safe) is out: a non-root unit has
+RLIMIT_MEMLOCK 8 MiB (VmLck 8,192 kB), which the code pinning already uses.
+Synteq sysctls restored from w3/sysctl.orig; the calibrated values are in w3/sysctl.cal.

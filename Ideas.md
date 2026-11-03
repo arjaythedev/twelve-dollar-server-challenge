@@ -101,7 +101,14 @@
 - [x] Prepare ROLLBACK before admission and quarantine unresolved transactions. Test preparation failure, failed read/write rollback, blocked subsequent access and clean reopening.
 
 - [ ] Tune batch size or a collection window from the measured write arrival rate: average collection wait `~= (b-1)/(2*lambda)`.
-  Compare `INSERT ... WHERE EXISTS ... ON CONFLICT` for likes and insert + rowid/timestamp lookup against `RETURNING` ([db.h](submissions/c-iouring-pavlyhalim/src/db.h)).
+
+- [ ] Compare plain create INSERT plus `last_insert_rowid` and stored timestamp lookup against `RETURNING` ([db.h](submissions/c-iouring-pavlyhalim/src/db.h)). Keep the actual stored timestamp and invalidate the batch if readback fails.
+
+- [x] Compare fused like INSERTs using `WHERE EXISTS` and direct `SELECT FROM posts` ([db.h](submissions/c-iouring-pavlyhalim/src/db.h)). Both lost with SQL fallback; Pavly's B-tree fallback still lost 4-10% at batch 16 with foreign keys enabled. SELECT adds internal statement rollback and coroutine work.
+
+- [x] Keep VALUES for likes and look up post existence only after duplicate or genuine FK failure. Use a transaction-local B-tree cursor with SQL fallback; retain FK checks and missing-post precedence. Batch-16 CPU/write fell 4.4% for fresh likes and 10.4% for duplicates; 350k/5m passed with no errors.
+
+- [ ] Compare removing per-write savepoints for the fixed schema, relying on SQLite's statement rollback for ABORT constraints. Preserve batch failure, rollback quarantine and isolation; `RAISE(FAIL)` and custom trigger side effects need separate handling.
 
 - [x] Compare point lookups with bounded range scans for feed posts. Native feed CPU fell from 10.58 to 9.06 us; whole-server CPU stayed nearly unchanged at 300k.
   `C_point ~= n*a_seek + k_target*s_scan`; `C_range ~= a_seek + k_span*s_scan`.
@@ -139,6 +146,8 @@
   A narrow receive experiment can skip poll-first when `IORING_CQE_F_SOCK_NONEMPTY` reports unread data; keep the current path for idle connections and test fragments, pipelining and terminal completions.
 
 ## Larger or conditional experiments
+
+- [ ] Consider a create-only preupdate hook if timestamp readback becomes material. It needs `SQLITE_ENABLE_PREUPDATE_HOOK` and unpacks the full inserted record; copy provisional metadata immediately and publish only after successful statement and batch completion.
 
 - [ ] Measure request-local SQLite cache counters, then trace fetch/unpin/rekey/truncate calls and occupancy through a delegating PCACHE2 wrapper (`SQLITE_CONFIG_PCACHE2`, [C](submissions/c-iouring-pavlyhalim/src/db.h)). `pcache1Fetch` self CPU (~2.6%) does not establish a miss rate.
   Start with `CACHE_HIT/MISS/USED/SPILL` deltas on each connection's owning thread. Compare the built-in `SQLITE_CONFIG_PAGECACHE` pool before replacing eviction policy; register any PCACHE2 wrapper before SQLite initialization.

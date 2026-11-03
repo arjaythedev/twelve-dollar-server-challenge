@@ -2,6 +2,7 @@
 
 ## Next, in order
 
+- [ ] Compare plain create INSERT plus stored timestamp readback with RETURNING.
 - [ ] Identify what starts the receive backlog; compare ring distribution and submission timing from the saved trace before another large run.
 - [ ] Check socket/heap/pool memory after draining, then compare allocation reuse and socket-buffer caps in Ideas.md order.
 
@@ -14,6 +15,7 @@
 
 ## Done
 
+- [x] Skip the up-front like SELECT, classify FK failures and duplicates with a transaction-local B-tree lookup, and preserve SQL fallback. Pass both native builds, 42 official and five targeted HTTP checks. Confirm with unix-excl at 350k/5m: no errors, p99 5.67 ms, CPU 20.45 us/request.
 - [x] Use unix-excl on both SQLite handles; verify checkpoint concurrency, recovery, fresh reads and HTTP commit ordering in both build modes. Pass 42 official and 19 extra HTTP checks. Short 70k pair: CPU/request -2.5%, p99 nearly unchanged, no errors.
 - [x] Prepare rollback and quarantine unresolved transactions; verify failure injection, read/write rejection and clean reopening. Compare retry-only poll-first omission and bounded response reuse, then confirm at 350k/5m: zero errors, p99 6.82 ms. Pass both native build modes, 42 official and 17 extra HTTP checks.
 - [x] Enable primary-only SINGLE_ISSUER / DEFER_TASKRUN; verify receive, partial send and stop with continuously ready satellites in both build modes. Include fixed 16-byte CQEs and the wait ring span at 300k/5m: zero errors, p99 6.39 ms, CPU 23.91 us/request. Separate native cursor/span timings remain inconclusive.

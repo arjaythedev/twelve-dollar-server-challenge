@@ -86,6 +86,7 @@
 | C++ 0.1.0 (recovery + response reuse) | 400,000 | 5 min | 14,941,600 | 37,353.95 | 5.307 ms | 7.510 ms | 77.30 ms | 0% | 22.40 us | 1,611.87 MiB |
 | C++ 0.1.0 (unix-excl baseline) | 70,000 | 15 s | 297,528 | 4,958.73 | 3.671 ms | 4.383 ms | 19.82 ms | 0% | 31.76 us | 519.79 MiB |
 | C++ 0.1.0 (unix-excl) | 70,000 | 15 s | 297,359 | 4,955.91 | 3.570 ms | 4.353 ms | 9.13 ms | 0% | 30.98 us | 505.56 MiB |
+| C++ 0.1.0 (unix-excl + direct like lookup) | 350,000 | 5 min | 13,073,904 | 32,684.68 | 4.481 ms | 5.667 ms | 83.15 ms | 0% | 20.45 us | 1,497.97 MiB |
 
 Statistics include the ramps. RAM is the cgroup peak, including charged file pages. Local results, not an official score or a measured capacity limit.
 
@@ -116,6 +117,12 @@ Warm response allocations/request: feed 1 to 0, post 3 to 0, missing post 1 to 0
 unix-excl, 70k: one serial pair, 5 s ramp / 15 s hold, different random seeds, no telemetry. CPU/request fell 2.5%; p99 was nearly unchanged. The separate SQLite probe reduced measured fcntl64 calls from 67,080 to zero, excluding startup.
 
 Prepared Store controls, 20k writes, two reversed pairs: median CPU/write at batch 1/4/16 was 38.98/19.34/9.74 to 38.00/19.16/8.56 us. Outputs and stored counts matched; final checkpoint included, wall time variable. [Data](src/benchmarks/group-commit.json).
+
+Fused like INSERT, 20k writes, two reversed pairs per SQL variant: at batch 16, fresh likes were 5-6% slower, duplicates 13-16% slower and mixed writes 7-9% slower. Outcomes and stored checksums matched. Keep the separate existence check. [Data](src/benchmarks/group-commit.json).
+
+Direct like lookup, 20k writes, two reversed pairs: VALUES plus B-tree fallback reduced batch-16 CPU/write from 4.94 to 4.73 us (fresh), 1.09 to 0.98 us (duplicate), 4.36 to 4.20 us (mixed). Batch-1 mixed was 1.8% slower. Outcomes and stored checksums matched; foreign keys stayed enabled. [Data](src/benchmarks/group-commit.json).
+
+unix-excl + direct like lookup, 350k/5m: hold p99 5.69 ms, no request errors. Combined confirmation without internal telemetry; the isolated Like comparison is the native probe above.
 
 CQ burst, 4,096 completions, two reversed pairs: median drain CPU 0.216/0.023/0.021 ms at CQ 2,048/8,192/16,384. SQ 1,024, 256-CQE drains, no loss; larger queues avoided overflow. Kernel microbenchmark, not HTTP throughput. [Data](src/benchmarks/cq-sizing.json).
 

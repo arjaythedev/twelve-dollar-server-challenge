@@ -1758,7 +1758,6 @@
     "name": "unix-excl-candidate-70000",
     "runtime": "C++ 0.1.0",
     "load_generator": "docker_loopback",
-    "generator": "cpp",
     "sqlite": "3.53.1",
     "users": 70000,
     "hold": "15s",
@@ -1773,6 +1772,29 @@
     "cpu_scope": "server_cgroup",
     "server_peak_bytes": 530120704,
     "passed": true,
+    "generator": "cpp",
     "client_sampled_peak_bytes": 301342720
+  },
+  {
+    "date": "2026-11-03",
+    "name": "like-values-350000-5m",
+    "runtime": "C++ 0.1.0",
+    "load_generator": "docker_loopback",
+    "generator": "cpp",
+    "sqlite": "3.53.1",
+    "users": 350000,
+    "hold": "5m",
+    "ramp": "60s",
+    "requests": 13073904,
+    "rps": 32684.6795422,
+    "p95_ms": 4.48102685,
+    "p99_ms": 5.667041,
+    "max_ms": 83.146091,
+    "error_rate": 0.0,
+    "cpu_us_per_request": 20.446162523451296,
+    "cpu_scope": "server_cgroup",
+    "server_peak_bytes": 1570734080,
+    "passed": true,
+    "client_sampled_peak_bytes": 1739042816
   }
 ]

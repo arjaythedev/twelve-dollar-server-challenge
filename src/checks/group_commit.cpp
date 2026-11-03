@@ -185,6 +185,7 @@ struct Control
     bool fail_rollback_prepare = false;
     bool fail_rollback_step = false;
     bool fail_feed = false;
+    bool fail_post_exists = false;
     sqlite3 *writer = nullptr;
     std::int64_t visible_posts = -1;
     std::int64_t visible_likes = -1;
@@ -293,7 +294,7 @@ void fifo_isolation_and_visibility()
     auto reader = open(fixture.path);
     Control control(reader.get());
     const std::string body = "quote \" slash \\ line\n\t\r\b\f\x01 caf\xc3\xa9";
-    const std::array<WriteCommand, 9> jobs{
+    const std::array<WriteCommand, 10> jobs{
         CreatePost{UserId{1}, "first", body},
         LikePost{UserId{2}, PostId{2}},
         LikePost{UserId{2}, PostId{2}},
@@ -303,11 +304,12 @@ void fifo_isolation_and_visibility()
         CreatePost{UserId{1}, "first", ""},
         CreatePost{UserId{2}, "second", "after failed neighbors"},
         LikePost{UserId{1}, PostId{3}},
+        LikePost{UserId{999}, PostId{999}},
     };
     const auto results = run_batch(db, jobs);
     require(results.size() == jobs.size(), "batch lost results");
-    require(control.commits == 1 && control.savepoints == 9 && control.rollbacks_to == 3 &&
-                control.releases == 9,
+    require(control.commits == 1 && control.savepoints == 10 && control.rollbacks_to == 3 &&
+                control.releases == 10,
             "batch did not isolate its writes in one transaction");
     require(control.visible_posts == 1 && control.visible_likes == 0,
             "external reader saw uncommitted batch writes");
@@ -315,7 +317,8 @@ void fifo_isolation_and_visibility()
     require(liked(results[1]) == LikeResult::created &&
                 liked(results[2]) == LikeResult::already_liked && !results[3] &&
                 results[3].error().code == WriteErrorCode::post_not_found &&
-                liked(results[8]) == LikeResult::created,
+                liked(results[8]) == LikeResult::created && !results[9] &&
+                results[9].error().code == WriteErrorCode::post_not_found,
             "FIFO create/like, duplicate or missing-post behavior changed");
     for (const auto index : {4U, 5U, 6U})
     {
@@ -372,18 +375,21 @@ void automatic_rollback()
     Fixture fixture;
     auto reader = open(fixture.path);
     execute(reader.get(), R"sql(
+        INSERT INTO likes(user_id,post_id) VALUES(2,1);
         CREATE TRIGGER abort_batch BEFORE INSERT ON posts WHEN NEW.body='automatic rollback'
         BEGIN SELECT RAISE(ROLLBACK,'automatic rollback'); END;
     )sql");
     Store db(fixture.path);
     Control control(reader.get());
-    const std::array<WriteCommand, 3> jobs{
+    const std::array<WriteCommand, 4> jobs{
+        LikePost{UserId{2}, PostId{1}},
         CreatePost{UserId{1}, "first", "provisional"},
         CreatePost{UserId{1}, "first", "automatic rollback"},
         CreatePost{UserId{1}, "first", "must not run"},
     };
     all_failed(run_batch(db, jobs), jobs.size());
-    require(control.commits == 0 && scalar(reader.get(), "SELECT count(*) FROM posts") == 1,
+    require(control.commits == 0 && scalar(reader.get(), "SELECT count(*) FROM posts") == 1 &&
+                scalar(reader.get(), "SELECT count(*) FROM likes") == 1,
             "automatic rollback retained a batch write or continued the batch");
     const std::array<WriteCommand, 1> recovery{
         CreatePost{UserId{1}, "first", "recovered after automatic rollback"}};
@@ -446,6 +452,48 @@ void singleton_and_empty()
                 missing_results[0].error().code == WriteErrorCode::post_not_found,
             "singleton missing post changed");
     require(control.savepoints == 0, "singleton batches added savepoint overhead");
+}
+
+void post_existence_fallback()
+{
+    Fixture fixture;
+    Store db(fixture.path);
+    auto reader = open(fixture.path);
+    Control control(reader.get());
+    control.fail_post_exists = true;
+    const std::array<WriteCommand, 3> jobs{
+        LikePost{UserId{2}, PostId{1}},
+        LikePost{UserId{2}, PostId{1}},
+        LikePost{UserId{1}, PostId{999}},
+    };
+    const auto results = run_batch(db, jobs);
+    require(liked(results[0]) == LikeResult::created &&
+                liked(results[1]) == LikeResult::already_liked && !results[2] &&
+                results[2].error().code == WriteErrorCode::post_not_found &&
+                scalar(reader.get(), "SELECT count(*) FROM likes") == 1,
+            "post-cursor failure changed write outcomes instead of using SQL");
+}
+
+void orphan_like_precedence()
+{
+    Fixture fixture;
+    auto reader = open(fixture.path);
+    execute(reader.get(), "INSERT INTO likes(user_id,post_id) VALUES(1,999),(999,1)");
+    Store db(fixture.path);
+    Control control(reader.get());
+    const std::array<WriteCommand, 4> jobs{
+        LikePost{UserId{1}, PostId{999}},
+        LikePost{UserId{999}, PostId{1}},
+        LikePost{UserId{999}, PostId{999}},
+        LikePost{UserId{2}, PostId{1}},
+    };
+    const auto results = run_batch(db, jobs);
+    require(!results[0] && results[0].error().code == WriteErrorCode::post_not_found &&
+                liked(results[1]) == LikeResult::already_liked && !results[2] &&
+                results[2].error().code == WriteErrorCode::post_not_found &&
+                liked(results[3]) == LikeResult::created &&
+                scalar(reader.get(), "SELECT count(*) FROM likes") == 3,
+            "orphan duplicates changed missing-post precedence or neighboring writes");
 }
 
 void rollback_preparation_failure()
@@ -552,6 +600,17 @@ extern "C" int __real_sqlite3_step(sqlite3_stmt *);
 extern "C" int __real_sqlite3_prepare_v3(sqlite3 *, const char *, int, unsigned, sqlite3_stmt **,
                                          const char **);
 extern "C" int __real_tds_btree_feed_next(tds_btree *, tds_btree_post *);
+extern "C" int __real_tds_btree_post_exists(tds_btree *, sqlite3_int64);
+
+extern "C" int __wrap_tds_btree_post_exists(tds_btree *tree, sqlite3_int64 id)
+{
+    if (active && active->fail_post_exists)
+    {
+        return SQLITE_IOERR;
+    }
+
+    return __real_tds_btree_post_exists(tree, id);
+}
 
 extern "C" int __wrap_sqlite3_prepare_v3(sqlite3 *db, const char *sql, int length, unsigned flags,
                                          sqlite3_stmt **statement, const char **tail)
@@ -651,6 +710,8 @@ int main()
         automatic_rollback();
         fatal_error();
         singleton_and_empty();
+        post_existence_fallback();
+        orphan_like_precedence();
         rollback_preparation_failure();
         unresolved_rollback(false);
         unresolved_rollback(true);

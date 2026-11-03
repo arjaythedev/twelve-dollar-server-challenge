@@ -99,7 +99,8 @@ target_link_libraries(checkpoint_tests PRIVATE api sqlite)
 add_executable(group_commit_tests checks/group_commit.cpp)
 target_link_libraries(group_commit_tests PRIVATE api sqlite)
 target_link_options(group_commit_tests PRIVATE
-    -Wl,--wrap=sqlite3_step -Wl,--wrap=sqlite3_prepare_v3 -Wl,--wrap=tds_btree_feed_next)
+    -Wl,--wrap=sqlite3_step -Wl,--wrap=sqlite3_prepare_v3 -Wl,--wrap=tds_btree_feed_next
+    -Wl,--wrap=tds_btree_post_exists)
 add_executable(post_writer_tests checks/post_writer.cpp)
 target_link_libraries(post_writer_tests PRIVATE api)
 add_executable(application_tests checks/application.cpp)

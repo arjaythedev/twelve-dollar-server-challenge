@@ -40,11 +40,15 @@ using Connection = std::unique_ptr<sqlite3, Close>;
 
 struct SqlError : std::runtime_error
 {
-    SqlError(sqlite3 *db, int result) : std::runtime_error(sqlite3_errmsg(db)), code(result & 0xff)
+    // Statement reset during unwinding can replace SQLite's extended error code
+    SqlError(sqlite3 *db, int result)
+        : std::runtime_error(sqlite3_errmsg(db)), code(result & 0xff),
+          extended_code(sqlite3_extended_errcode(db))
     {
     }
 
     int code;
+    int extended_code;
 };
 
 void execute(sqlite3 *db, const char *sql)
@@ -364,13 +368,15 @@ class Transactions
 class Transaction
 {
   public:
-    explicit Transaction(Transactions &transactions) : transactions_(transactions)
+    Transaction(Transactions &transactions, tds_btree *tree)
+        : transactions_(transactions), tree_(tree)
     {
         transactions_.begin();
     }
 
     ~Transaction()
     {
+        tds_btree_end(tree_);
         if (!committed_)
         {
             transactions_.rollback();
@@ -382,12 +388,15 @@ class Transaction
 
     void commit()
     {
+        // Cursed but required: SQLite must retire direct cursors before resolving the transaction
+        tds_btree_end(tree_);
         transactions_.commit();
         committed_ = true;
     }
 
   private:
     Transactions &transactions_;
+    tds_btree *tree_;
     bool committed_ = false;
 };
 
@@ -516,8 +525,16 @@ class Store::State
         return result;
     }
 
-    WriteOutcome like_post(UserId user_id, PostId post_id)
+    bool post_exists(PostId post_id)
     {
+        if (tree)
+        {
+            const int result = tds_btree_post_exists(tree.get(), post_id.value);
+            if (result == SQLITE_ROW || result == SQLITE_DONE)
+            {
+                return result == SQLITE_ROW;
+            }
+        }
         bool found = false;
         {
             auto query = exists.use();
@@ -527,11 +544,13 @@ class Store::State
             {
             }
         }
-        if (!found)
-        {
-            return std::unexpected(WriteError{WriteErrorCode::post_not_found, "post not found"});
-        }
 
+        return found;
+    }
+
+    WriteOutcome like_post(UserId user_id, PostId post_id)
+    {
+        try
         {
             auto query = like.use();
             query.bind(1, user_id.value);
@@ -540,9 +559,29 @@ class Store::State
             {
             }
         }
+        catch (const SqlError &error)
+        {
+            // Missing post wins even when both foreign keys are invalid
+            if (error.code != SQLITE_CONSTRAINT ||
+                error.extended_code != SQLITE_CONSTRAINT_FOREIGNKEY ||
+                sqlite3_get_autocommit(db.get()) != 0 || post_exists(post_id))
+            {
+                throw;
+            }
 
-        return WriteValue{sqlite3_changes(db.get()) == 1 ? LikeResult::created
-                                                         : LikeResult::already_liked};
+            return std::unexpected(WriteError{WriteErrorCode::post_not_found, "post not found"});
+        }
+
+        if (sqlite3_changes(db.get()) == 1)
+        {
+            return WriteValue{LikeResult::created};
+        }
+        if (!post_exists(post_id))
+        {
+            return std::unexpected(WriteError{WriteErrorCode::post_not_found, "post not found"});
+        }
+
+        return WriteValue{LikeResult::already_liked};
     }
 
     WriteOutcome apply(const WriteCommand &write)
@@ -670,7 +709,7 @@ std::expected<void, WriteError> Store::commit(std::span<const WriteCommand> comm
 #endif
     try
     {
-        Transaction transaction(state_->transactions);
+        Transaction transaction(state_->transactions, state_->tree.get());
         const bool savepoints = commands.size() > 1;
         for (std::size_t index = 0; index < commands.size(); ++index)
         {
@@ -689,6 +728,7 @@ std::expected<void, WriteError> Store::commit(std::span<const WriteCommand> comm
                 {
                     throw;
                 }
+                tds_btree_end(state_->tree.get());
                 state_->write_rollback_to.execute();
                 outcomes[index] =
                     std::unexpected(WriteError{WriteErrorCode::constraint, error.what()});

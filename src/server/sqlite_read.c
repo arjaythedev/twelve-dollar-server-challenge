@@ -263,7 +263,7 @@ int tds_btree_create(sqlite3 *db, tds_btree **out)
 
 void tds_btree_end(tds_btree *reader)
 {
-    if (!reader)
+    if (!reader || !reader->opened)
     {
         return;
     }
@@ -311,7 +311,7 @@ int tds_btree_begin(tds_btree *reader)
     }
     sqlite3_mutex_enter(reader->db->mutex);
     sqlite3BtreeEnter(reader->tree);
-    if (reader->active || reader->db->autoCommit)
+    if (reader->opened || reader->db->autoCommit)
     {
         rc = SQLITE_MISUSE;
         goto done;
@@ -534,6 +534,56 @@ static int tds_seek_table(BtCursor *cursor, i64 id)
         return rc;
     }
     return comparison == 0 && !sqlite3BtreeEof(cursor) ? SQLITE_ROW : SQLITE_DONE;
+}
+
+int tds_btree_post_exists(tds_btree *reader, sqlite3_int64 id)
+{
+    int rc;
+    u32 cookie;
+    if (!reader)
+    {
+        return SQLITE_MISUSE;
+    }
+    sqlite3_mutex_enter(reader->db->mutex);
+    sqlite3BtreeEnter(reader->tree);
+    if (reader->active || reader->db->autoCommit)
+    {
+        rc = SQLITE_MISUSE;
+        goto done;
+    }
+    rc = sqlite3BtreeBeginTrans(reader->tree, 0, 0);
+    if (rc != SQLITE_OK)
+    {
+        goto done;
+    }
+    sqlite3BtreeGetMeta(reader->tree, BTREE_SCHEMA_VERSION, &cookie);
+    if (cookie != reader->schema_cookie || ENC(reader->db) != SQLITE_UTF8)
+    {
+        rc = SQLITE_SCHEMA;
+        goto done;
+    }
+    if (!(reader->opened & (1u << TDS_POSTS)))
+    {
+        rc = sqlite3BtreeLockTable(reader->tree, (int)reader->roots[TDS_POSTS], 0);
+        if (rc != SQLITE_OK)
+        {
+            goto done;
+        }
+        sqlite3BtreeCursorZero(reader->cursors[TDS_POSTS]);
+        rc = sqlite3BtreeCursor(reader->tree, reader->roots[TDS_POSTS], 0, 0,
+                                reader->cursors[TDS_POSTS]);
+        if (rc != SQLITE_OK)
+        {
+            goto done;
+        }
+        reader->opened |= 1u << TDS_POSTS;
+    }
+    // Keep the cursor within this transaction; every call still performs its own rowid seek
+    rc = tds_seek_table(reader->cursors[TDS_POSTS], id);
+done:
+    sqlite3BtreeLeave(reader->tree);
+    sqlite3_mutex_leave(reader->db->mutex);
+    return rc;
 }
 
 static int tds_seek_ordered(BtCursor *cursor, i64 id, int *started, int *skipped)

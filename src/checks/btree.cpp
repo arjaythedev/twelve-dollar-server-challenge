@@ -180,6 +180,16 @@ class Fixture
         execute(db_.get(), statement);
     }
 
+    int exists(sqlite3_int64 id)
+    {
+        return tds_btree_post_exists(tree_.get(), id);
+    }
+
+    void end_reads()
+    {
+        tds_btree_end(tree_.get());
+    }
+
     void post(sqlite3_int64 id, sqlite3_int64 user, std::string_view body,
               std::string_view timestamp)
     {
@@ -312,6 +322,45 @@ void missing_authors(Fixture &fixture)
     fixture.compare(0);
 }
 
+void post_existence()
+{
+    Fixture fixture;
+    fixture.sql("INSERT INTO users(id,username) VALUES(1,'author')");
+    fixture.post(-9, 1, "negative", "2026-01-01T00:00:00.000Z");
+    fixture.post(1, 1, "first", "2026-01-01T00:00:00.000Z");
+    fixture.post(std::numeric_limits<sqlite3_int64>::max(), 1, "maximum",
+                 "2026-01-01T00:00:00.000Z");
+    require(fixture.exists(1) == SQLITE_MISUSE, "post lookup accepted autocommit mode");
+    fixture.sql("BEGIN");
+    require(fixture.exists(-9) == SQLITE_ROW && fixture.exists(0) == SQLITE_DONE &&
+                fixture.exists(std::numeric_limits<sqlite3_int64>::max()) == SQLITE_ROW &&
+                fixture.exists(std::numeric_limits<sqlite3_int64>::min()) == SQLITE_DONE,
+            "post lookup confused sparse or extreme rowids");
+    fixture.end_reads();
+    fixture.sql("COMMIT; BEGIN; SAVEPOINT lookup");
+    require(fixture.exists(1) == SQLITE_ROW, "post cursor was not retained before a write");
+    fixture.post(2, 1, "provisional", "2026-01-01T00:00:00.000Z");
+    require(fixture.exists(2) == SQLITE_ROW, "post lookup missed this transaction's insert");
+    fixture.end_reads();
+    fixture.sql("ROLLBACK TO lookup; RELEASE lookup");
+    require(fixture.exists(2) == SQLITE_DONE, "post lookup retained a rolled-back row");
+    fixture.end_reads();
+    fixture.sql("COMMIT");
+
+    fixture.compare(3, [&fixture](const char *path) {
+        require(fixture.exists(1) == SQLITE_MISUSE, "post lookup displaced active feed cursors");
+        auto writer = open(path);
+        execute(writer.get(), "INSERT INTO posts(id,user_id,body) VALUES(2,1,'committed later')");
+    });
+    fixture.sql("BEGIN");
+    require(fixture.exists(2) == SQLITE_ROW, "post lookup missed a later committed row");
+    fixture.end_reads();
+    fixture.sql("COMMIT; CREATE INDEX extra_post_body ON posts(body); BEGIN");
+    require(fixture.exists(1) == SQLITE_SCHEMA, "post lookup accepted stale schema metadata");
+    fixture.end_reads();
+    fixture.sql("ROLLBACK");
+}
+
 } // namespace
 
 int main()
@@ -322,6 +371,7 @@ int main()
         fixture.compare(0);
         mixed_rows(fixture);
         missing_authors(fixture);
+        post_existence();
         std::cout << "B-tree feed rows, snapshots, overflow and join limits passed\n";
     }
     catch (const std::exception &error)

@@ -708,5 +708,283 @@
         0
       ]
     }
+  },
+  "like_insert": {
+    "sqlite": "3.53.1",
+    "implementation": "production Store::commit, unix-excl",
+    "jobs_per_sample": 20000,
+    "samples_per_variant": 2,
+    "order": {
+      "exists": [
+        "reference",
+        "candidate",
+        "candidate",
+        "reference"
+      ],
+      "select": [
+        "select",
+        "reference",
+        "reference",
+        "select"
+      ]
+    },
+    "cpu_scope": "whole process, Store open/close and checkpoint worker included; fixture setup excluded",
+    "reference_sql": "SELECT 1 FROM posts WHERE id=?; INSERT INTO likes(user_id,post_id) VALUES(?,?) ON CONFLICT(user_id,post_id) DO NOTHING",
+    "candidate_sql": {
+      "exists": "INSERT INTO likes(user_id,post_id) SELECT ?1,?2 WHERE EXISTS (SELECT 1 FROM posts WHERE id=?2) ON CONFLICT(user_id,post_id) DO NOTHING",
+      "select": "INSERT INTO likes(user_id,post_id) SELECT ?1,id FROM posts WHERE id=?2 ON CONFLICT(user_id,post_id) DO NOTHING"
+    },
+    "candidate_fallback": "Check post existence when sqlite3_changes is zero, distinguishing duplicate from missing post",
+    "workloads": {
+      "fresh": [
+        20000,
+        0,
+        0
+      ],
+      "duplicate": [
+        0,
+        20000,
+        0
+      ],
+      "mixed": [
+        9000,
+        9000,
+        2000
+      ]
+    },
+    "workload_counts": "created, duplicate, missing",
+    "results_and_stored_checksums_match": true,
+    "rows": [
+      {
+        "variant": "exists",
+        "shape": "fresh",
+        "batch": 1,
+        "reference_cpu_us": 31.0905137,
+        "candidate_cpu_us": 28.20399575,
+        "change_percent": -9.284240131419885
+      },
+      {
+        "variant": "exists",
+        "shape": "fresh",
+        "batch": 16,
+        "reference_cpu_us": 4.612626725,
+        "candidate_cpu_us": 4.9025129750000005,
+        "change_percent": 6.284624082604484
+      },
+      {
+        "variant": "exists",
+        "shape": "duplicate",
+        "batch": 1,
+        "reference_cpu_us": 2.184093,
+        "candidate_cpu_us": 2.3271857249999996,
+        "change_percent": 6.551585715443431
+      },
+      {
+        "variant": "exists",
+        "shape": "duplicate",
+        "batch": 16,
+        "reference_cpu_us": 1.1480625249999998,
+        "candidate_cpu_us": 1.299344525,
+        "change_percent": 13.177156880022721
+      },
+      {
+        "variant": "exists",
+        "shape": "mixed",
+        "batch": 1,
+        "reference_cpu_us": 12.426705525,
+        "candidate_cpu_us": 13.197833975000002,
+        "change_percent": 6.205413401393067
+      },
+      {
+        "variant": "exists",
+        "shape": "mixed",
+        "batch": 16,
+        "reference_cpu_us": 4.0168477750000005,
+        "candidate_cpu_us": 4.312996849999999,
+        "change_percent": 7.372673588557865
+      },
+      {
+        "variant": "select",
+        "shape": "fresh",
+        "batch": 1,
+        "reference_cpu_us": 27.844209525,
+        "candidate_cpu_us": 29.2112109,
+        "change_percent": 4.909463756809607
+      },
+      {
+        "variant": "select",
+        "shape": "fresh",
+        "batch": 16,
+        "reference_cpu_us": 4.9153436,
+        "candidate_cpu_us": 5.180702800000001,
+        "change_percent": 5.398589022342226
+      },
+      {
+        "variant": "select",
+        "shape": "duplicate",
+        "batch": 1,
+        "reference_cpu_us": 2.293397175,
+        "candidate_cpu_us": 2.393140625,
+        "change_percent": 4.349157271461279
+      },
+      {
+        "variant": "select",
+        "shape": "duplicate",
+        "batch": 16,
+        "reference_cpu_us": 1.13437405,
+        "candidate_cpu_us": 1.308021475,
+        "change_percent": 15.307774803205355
+      },
+      {
+        "variant": "select",
+        "shape": "mixed",
+        "batch": 1,
+        "reference_cpu_us": 12.542759575,
+        "candidate_cpu_us": 12.96681025,
+        "change_percent": 3.380840336326063
+      },
+      {
+        "variant": "select",
+        "shape": "mixed",
+        "batch": 16,
+        "reference_cpu_us": 3.95253,
+        "candidate_cpu_us": 4.299403025,
+        "change_percent": 8.775974502407324
+      }
+    ],
+    "decision": "rejected; original SQL retained, no HTTP load run",
+    "raw": "results/like-insert/raw.json",
+    "probe": "results/like-insert/probe.cpp"
+  },
+  "like_btree": {
+    "sqlite": "3.53.1",
+    "implementation": "production Store::commit, unix-excl, foreign_keys=ON",
+    "jobs_per_sample": 20000,
+    "samples_per_variant": 2,
+    "order": [
+      "reference",
+      "candidate",
+      "candidate",
+      "reference"
+    ],
+    "batch_sizes": [
+      1,
+      16
+    ],
+    "cpu_scope": "process; includes Store open/close and checkpoint worker; fixture excluded",
+    "variants": {
+      "pavly": "INSERT SELECT WHERE EXISTS, direct B-tree post-existence fallback",
+      "values": "INSERT VALUES, direct post-existence lookup only on duplicate or genuine FK error"
+    },
+    "result_and_stored_checksums_match": true,
+    "rows": [
+      {
+        "variant": "pavly",
+        "shape": "fresh",
+        "reference_cpu_us": [
+          28.001846450000002,
+          4.7551333
+        ],
+        "candidate_cpu_us": [
+          27.253960175,
+          4.958956275
+        ],
+        "change_percent": [
+          -2.67084628271006,
+          4.286377734142599
+        ]
+      },
+      {
+        "variant": "pavly",
+        "shape": "duplicate",
+        "reference_cpu_us": [
+          2.1363016,
+          1.0999488250000002
+        ],
+        "candidate_cpu_us": [
+          2.310825925,
+          1.215307175
+        ],
+        "change_percent": [
+          8.169460950644813,
+          10.487610639522217
+        ]
+      },
+      {
+        "variant": "pavly",
+        "shape": "mixed",
+        "reference_cpu_us": [
+          11.911121175,
+          4.033934875
+        ],
+        "candidate_cpu_us": [
+          12.447354625,
+          4.4309545
+        ],
+        "change_percent": [
+          4.501956130926521,
+          9.841993916671754
+        ]
+      },
+      {
+        "variant": "values",
+        "shape": "fresh",
+        "reference_cpu_us": [
+          26.966012975,
+          4.94337415
+        ],
+        "candidate_cpu_us": [
+          24.369595875,
+          4.727146899999999
+        ],
+        "change_percent": [
+          -9.628479754894137,
+          -4.374082224789744
+        ]
+      },
+      {
+        "variant": "values",
+        "shape": "duplicate",
+        "reference_cpu_us": [
+          2.134570675,
+          1.0912955750000002
+        ],
+        "candidate_cpu_us": [
+          2.126268475,
+          0.9782199249999999
+        ],
+        "change_percent": [
+          -0.38894003825852286,
+          -10.361597040288583
+        ]
+      },
+      {
+        "variant": "values",
+        "shape": "mixed",
+        "reference_cpu_us": [
+          12.116939875,
+          4.360473750000001
+        ],
+        "candidate_cpu_us": [
+          12.338227799999999,
+          4.204422925
+        ],
+        "change_percent": [
+          1.826269068616626,
+          -3.5787585007248435
+        ]
+      }
+    ],
+    "raw": [
+      "results/like-insert/pavly-results.json",
+      "results/like-insert/values-results.json"
+    ],
+    "decision": "Keep VALUES plus direct B-tree fallback; passed like-values-350000-5m with unix-excl, zero request errors",
+    "diagnosis": {
+      "vm_steps": "results/like-insert/vm-steps.json",
+      "statement_journal": "results/like-insert/statement-journal.json",
+      "reference_constraint_difference": "Inspected Pavly and Kensac builds do not enable foreign keys; these comparisons retain foreign_keys=ON",
+      "values_control_flow": "Fresh insert: one VALUES statement; duplicate: direct lookup; genuine FK error: classify missing post in the same active transaction"
+    }
   }
 }

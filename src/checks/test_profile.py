@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from dev import (
+    GENERATOR_IMAGE,
     Arguments,
     JSONValue,
     LoadGenerator,
@@ -16,6 +17,8 @@ from dev import (
     cpu_delta,
     decode_json,
     duration_seconds,
+    ensure_generator,
+    generator_fingerprint,
     kernel_stage,
     load,
     load_generator,
@@ -24,6 +27,8 @@ from dev import (
     parse_timings,
     profile_stage,
     read_json,
+    read_results,
+    run_workload,
     server,
     write_json,
 )
@@ -57,6 +62,7 @@ class NativeProfileTests(unittest.TestCase):
                 write_json(output / "environment.json", {"docker_info": {"MemTotal": 24 * 2**30}})
                 args = Arguments(generator="cpp", k6=None, vus=1, hold="60s", ramp="30s", seed=seed)
                 with load_generator(args, "test-container", 3000, output) as generator:
+                    self.assertIn(GENERATOR_IMAGE, generator.invocation)
                     if seed is None:
                         self.assertNotIn("--seed", generator.invocation)
                     else:
@@ -96,6 +102,8 @@ class NativeProfileTests(unittest.TestCase):
             write_json(path, [previous])
             append_result(path, result)
             self.assertEqual(read_json(path), [previous, result])
+            write_json(path, {"runs": [result], "experiment": {"hold": [1, 2]}})
+            self.assertEqual(read_results(path), [result])
             write_json(path, {"invalid": "root"})
             with self.assertRaisesRegex(ValueError, "JSON array"):
                 append_result(path, result)
@@ -365,3 +373,129 @@ class NativeProfileTests(unittest.TestCase):
         for sample in ("", "10\ninvalid frame", stack(0, ("main", "/app/server")), "10"):
             with self.subTest(sample=sample), self.assertRaises(ValueError):
                 analyze_profile(sample, statistics(1))
+
+
+class GeneratorImageTests(unittest.TestCase):
+    def test_source_fingerprint_changes_for_every_generator_build_input(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, patch("dev.ROOT", Path(directory)):
+            root = Path(directory) / "src"
+            names = ("load/main.cpp", "CMakeLists.txt", "Dockerfile", ".dockerignore")
+            for name in names:
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(name, encoding="utf-8")
+            original = generator_fingerprint()
+            for name in names:
+                with self.subTest(name=name):
+                    path = root / name
+                    path.write_text(name + " changed", encoding="utf-8")
+                    self.assertNotEqual(generator_fingerprint(), original)
+                    path.write_text(name, encoding="utf-8")
+
+    def test_matching_generator_fingerprint_skips_rebuild(self) -> None:
+        with (
+            patch("dev.generator_fingerprint", return_value="current"),
+            patch("dev.command", return_value="current") as command,
+        ):
+            ensure_generator()
+            command.assert_called_once()
+            self.assertEqual(command.call_args.args[:3], ("docker", "image", "inspect"))
+            self.assertEqual(command.call_args.args[-1], GENERATOR_IMAGE)
+
+    def test_missing_or_stale_generator_rebuilds_only_the_generator_target(self) -> None:
+        for cached in ("old", None):
+            with (
+                self.subTest(cached=cached),
+                patch("dev.generator_fingerprint", return_value="current"),
+                patch(
+                    "dev.command",
+                    side_effect=[
+                        cached
+                        if cached is not None
+                        else subprocess.CalledProcessError(1, "inspect"),
+                        "",
+                    ],
+                ) as command,
+            ):
+                ensure_generator()
+                self.assertEqual(command.call_count, 2)
+                build = command.call_args.args
+                self.assertEqual(build[:2], ("docker", "build"))
+                self.assertEqual(build[build.index("--tag") + 1], GENERATOR_IMAGE)
+                self.assertEqual(build[build.index("--target") + 1], "generator")
+                self.assertIn("TDS_BUILD_TARGET=load_generator", build)
+
+    def test_server_choice_cannot_select_an_obsolete_native_generator(self) -> None:
+        captured: list[LoadGenerator] = []
+
+        def loaded(
+            _args: Arguments, generator: LoadGenerator, _observer: str, _output: Path
+        ) -> int:
+            captured.append(generator)
+            return 0
+
+        for image, diagnostics in (
+            ("twelve-dollar-cpp:obsolete", False),
+            ("twelve-dollar-cpp:local-diagnostics", True),
+        ):
+            with (
+                self.subTest(image=image),
+                tempfile.TemporaryDirectory() as directory,
+                patch("dev.ensure_generator") as ensure,
+                patch("dev.server") as server_context,
+                patch("dev.observing") as observer,
+                patch("dev.load", side_effect=loaded),
+                patch(
+                    "dev.command", side_effect=["127.0.0.1:6565", "current\nsha /app/load"]
+                ) as command,
+                patch(
+                    "dev.subprocess.run", return_value=subprocess.CompletedProcess([], 0, "[]", "")
+                ),
+            ):
+
+                def entered_server() -> tuple[str, int]:
+                    ensure.assert_called_once()
+                    return "test-server", 3000
+
+                server_context.return_value.__enter__.side_effect = entered_server
+                observer.return_value.__enter__.return_value = "observer"
+                output = Path(directory)
+                write_json(output / "environment.json", {"docker_info": {"MemTotal": 24 * 2**30}})
+                args = Arguments(
+                    action="bench",
+                    generator="cpp",
+                    k6=None,
+                    vus=1,
+                    hold="60s",
+                    ramp="30s",
+                    diagnostics=diagnostics,
+                )
+                self.assertEqual(run_workload(args, output, image=image), 0)
+                server_context.assert_called_once_with(output, image=image)
+                self.assertIn(GENERATOR_IMAGE, captured[-1].invocation)
+                self.assertNotIn(image, captured[-1].invocation)
+                self.assertEqual("--diagnostics" in captured[-1].invocation, diagnostics)
+                self.assertIn(GENERATOR_IMAGE, command.call_args.args)
+
+    def test_failed_generator_refresh_never_starts_the_server(self) -> None:
+        with (
+            patch("dev.ensure_generator", side_effect=subprocess.CalledProcessError(1, "build")),
+            patch("dev.server") as server_context,
+        ):
+            args = Arguments(action="bench", generator="cpp", k6=None)
+            with self.assertRaises(subprocess.CalledProcessError):
+                run_workload(args, Path("unused"), image="old-server")
+            server_context.assert_not_called()
+
+    def test_k6_does_not_require_the_native_generator_image(self) -> None:
+        with (
+            patch("dev.ensure_generator") as ensure,
+            patch("dev.server") as server_context,
+            patch("dev.observing"),
+            patch("dev.load_generator"),
+            patch("dev.load", return_value=0),
+        ):
+            server_context.return_value.__enter__.return_value = ("test-server", 3000)
+            args = Arguments(action="bench", generator="k6", k6=None, diagnostics=False)
+            self.assertEqual(run_workload(args, Path("unused"), image="server"), 0)
+            ensure.assert_not_called()

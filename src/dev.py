@@ -30,6 +30,8 @@ import psutil
 ROOT = Path(__file__).resolve().parent.parent
 IMAGE = "twelve-dollar-cpp:local"
 PROFILER_IMAGE = "twelve-dollar-profiler:local"
+GENERATOR_IMAGE = "twelve-dollar-generator:local"
+GENERATOR_SOURCE_LABEL = "org.twelve-dollar.generator-source-sha256"
 K6_IMAGE = (
     "grafana/k6:1.3.0@sha256:a90b459a3768c46ad1013da53af24189f735d7112273c6ac3212ca8ed0e18656"
 )
@@ -103,6 +105,7 @@ class Arguments(argparse.Namespace):
     scope: ProfileScope
     diagnostics: bool = False
     seed: int | None = None
+    image: str | None = None
 
 
 class Result(TypedDict):
@@ -344,6 +347,8 @@ def text(row: dict[str, JSONValue], key: str) -> str:
 
 def read_results(path: Path) -> list[Result]:
     rows = read_json(path)
+    if isinstance(rows, dict) and "runs" in rows:
+        rows = rows["runs"]
     if not isinstance(rows, list):
         raise ValueError("results must be a JSON array")
     results: list[Result] = []
@@ -538,6 +543,53 @@ def build(*, tests: bool = False, profiler: bool = False, diagnostics: bool = Fa
     return image
 
 
+def generator_fingerprint() -> str:
+    digest = hashlib.sha256()
+    for name in ("load/main.cpp", "CMakeLists.txt", "Dockerfile", ".dockerignore"):
+        digest.update(name.encode() + b"\0")
+        digest.update((ROOT / "src" / name).read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def ensure_generator() -> None:
+    fingerprint = generator_fingerprint()
+    try:
+        current = command(
+            "docker",
+            "image",
+            "inspect",
+            "--format",
+            '{{index .Config.Labels "' + GENERATOR_SOURCE_LABEL + '"}}',
+            GENERATOR_IMAGE,
+        )
+    except subprocess.CalledProcessError:
+        current = ""
+    if current == fingerprint:
+        return
+    print("Building current native generator...", flush=True)
+    command(
+        "docker",
+        "build",
+        "--progress",
+        "plain",
+        "--platform",
+        "linux/amd64",
+        "--tag",
+        GENERATOR_IMAGE,
+        "--label",
+        f"{GENERATOR_SOURCE_LABEL}={fingerprint}",
+        "--build-arg",
+        "TDS_BUILD_TARGET=load_generator",
+        "--target",
+        "generator",
+        "--file",
+        str(ROOT / "src/Dockerfile"),
+        str(ROOT / "src"),
+        timeout=None,
+    )
+
+
 def cpp_editor(image: str) -> None:
     """Give Windows IntelliSense the headers used by the Linux build."""
     destination = ROOT / "src/.build/editor"
@@ -716,9 +768,8 @@ class LoadGenerator:
 
 @contextmanager
 def load_generator(
-    args: Arguments, container: str, port: int, output: Path, *, image: str | None = None
+    args: Arguments, container: str, port: int, output: Path
 ) -> Generator[LoadGenerator]:
-    image = image or IMAGE
     name: str | None = None
     kind: GeneratorKind = "k6" if args.k6 is not None else args.generator
     if args.k6 is not None:
@@ -760,7 +811,7 @@ def load_generator(
                 "--rm",
                 "--network=none",
                 "--entrypoint=sh",
-                image,
+                GENERATOR_IMAGE,
                 "-c",
                 "/app/load_generator --version; sha256sum /app/load_generator",
             ).splitlines()
@@ -801,7 +852,7 @@ def load_generator(
             *prefix,
             *settings,
             "--entrypoint=/app/load_generator",
-            image,
+            GENERATOR_IMAGE,
             "--summary-export",
             summary,
             "--local-ips=127.0.0.2-127.0.0.33",
@@ -996,7 +1047,11 @@ def load(args: Arguments, generator: LoadGenerator, observer: str, output: Path)
 
 @contextmanager
 def server(
-    output: Path, *, database: Path | None = None, secret: str = JWT_KEY, image: str | None = None
+    output: Path,
+    *,
+    database: Path | None = None,
+    secret: str = JWT_KEY,
+    image: str | None = None,
 ) -> Generator[tuple[str, int]]:
     image = image or IMAGE
     unique = f"td-bench-{uuid.uuid4().hex[:10]}"
@@ -1478,6 +1533,25 @@ def observing(
             subprocess.run(["docker", "rm", "--force", name], capture_output=True, check=False)
 
 
+def run_workload(args: Arguments, output: Path, *, image: str) -> int:
+    if args.k6 is None and args.generator == "cpp":
+        ensure_generator()
+    profiling = args.action == "profile"
+    with server(output, image=image) as (container, port):
+        with (
+            observing(
+                container,
+                output,
+                profiling=profiling,
+                scope=args.scope if profiling else "user",
+                image=image,
+                profiler_image=image_name(profiler=True, diagnostics=args.diagnostics),
+            ) as observer,
+            load_generator(args, container, port, output) as generator,
+        ):
+            return load(args, generator, observer, output)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     actions = parser.add_subparsers(dest="action", required=True)
@@ -1491,7 +1565,12 @@ def main() -> None:
     ):
         benchmark = actions.add_parser(action, help=description)
         benchmark.add_argument("--label", required=True, help="unique lowercase run name")
-        benchmark.add_argument("--vus", type=int, default=5000)
+        benchmark.add_argument(
+            "--vus",
+            type=int,
+            default=350000 if action == "bench" else 5000,
+            help="users (default: %(default)s)",
+        )
         benchmark.add_argument("--seed", type=int, help="deterministic C++ workload seed")
         benchmark.add_argument(
             "--hold", default="60s", help="time at target users (default: 60s; confirmation: 5m)"
@@ -1513,6 +1592,10 @@ def main() -> None:
         benchmark.add_argument(
             "--no-build", action="store_true", help="reuse existing images without rebuilding"
         )
+        if action == "bench":
+            benchmark.add_argument(
+                "--image", help="benchmark an existing runtime image without rebuilding"
+            )
         benchmark.add_argument(
             "--diagnostics",
             action="store_true",
@@ -1533,7 +1616,7 @@ def main() -> None:
             document = read_json(args.file)
             if args.json_output:
                 print(json.dumps(document, allow_nan=False))
-            elif isinstance(document, list):
+            elif isinstance(document, list) or (isinstance(document, dict) and "runs" in document):
                 show_results(read_results(args.file))
             else:
                 report = mapping(document)
@@ -1573,27 +1656,14 @@ def main() -> None:
                 parser.error("run name already exists; choose a new --label")
             output = ROOT / "results" / args.label
             output.mkdir(parents=True, exist_ok=False)
-            runtime_image = image_name(diagnostics=args.diagnostics)
-            profiler_image = image_name(profiler=True, diagnostics=args.diagnostics)
-            if not args.no_build:
+            runtime_image = args.image or image_name(diagnostics=args.diagnostics)
+            if not args.no_build and args.image is None:
                 build(diagnostics=args.diagnostics)
                 if profiling:
                     build(profiler=True, diagnostics=args.diagnostics)
             if args.diagnostics:
                 print("Diagnostics enabled; timing overhead is included in this run.", flush=True)
-            with server(output, image=runtime_image) as (container, port):
-                with (
-                    observing(
-                        container,
-                        output,
-                        profiling=profiling,
-                        scope=args.scope if profiling else "user",
-                        image=runtime_image,
-                        profiler_image=profiler_image,
-                    ) as name,
-                    load_generator(args, container, port, output, image=runtime_image) as generator,
-                ):
-                    code = load(args, generator, name, output)
+            code = run_workload(args, output, image=runtime_image)
             result = summarize(output)
             show_results([result])
             if profiling:

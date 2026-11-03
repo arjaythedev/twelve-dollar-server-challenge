@@ -1810,7 +1810,23 @@ Summary summarize(Metrics &metrics, const Config &config)
         diagnostic_summary(output, *metrics.diagnostics, metrics.elapsed);
     }
     output << "}\n}\n";
-    return {output.str(), passed};
+    // Format once after measurement, so nested diagnostics stay readable too
+    const auto document = json(output.str());
+    if (!document)
+    {
+        throw std::runtime_error("cannot parse generated summary");
+    }
+    std::size_t length = 0;
+    const std::unique_ptr<char, decltype(&std::free)> formatted(
+        yyjson_write(document.get(), YYJSON_WRITE_PRETTY_TWO_SPACES | YYJSON_WRITE_NEWLINE_AT_END,
+                     &length),
+        &std::free);
+    if (!formatted)
+    {
+        throw std::runtime_error("cannot format generated summary");
+    }
+
+    return {std::string(formatted.get(), length), passed};
 }
 
 void write_file(const std::string &path, std::string_view value)

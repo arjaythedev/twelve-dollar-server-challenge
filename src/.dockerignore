@@ -7,5 +7,7 @@
 .vscode
 benchmarks/*
 !benchmarks/group_commit.cpp
+!benchmarks/response_reuse.cpp
+!benchmarks/retry_receive.cpp
 .env
 .env.*

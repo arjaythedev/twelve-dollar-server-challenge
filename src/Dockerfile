@@ -19,8 +19,18 @@ COPY benchmarks/response_reuse.cpp ./benchmarks/response_reuse.cpp
 COPY benchmarks/retry_receive.cpp ./benchmarks/retry_receive.cpp
 ARG TDS_SANITIZERS=OFF
 ARG TDS_DIAGNOSTICS=OFF
+ARG TDS_BUILD_TARGET=all
 RUN cmake -S . -B out -G Ninja -DCMAKE_BUILD_TYPE=Release -DTDS_SANITIZERS=${TDS_SANITIZERS} -DTDS_DIAGNOSTICS=${TDS_DIAGNOSTICS} \
-    && cmake --build out --parallel 2
+    && cmake --build out --target "${TDS_BUILD_TARGET}" --parallel 2
+
+FROM ubuntu:24.04@sha256:78d4744ead1f5b19b04d0df558ab182a5300903900755e515b2ca4d10eb2044d AS generator
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libstdc++6 \
+    && useradd --uid 10001 --create-home benchmark
+WORKDIR /app
+COPY --from=build /build/out/load_generator ./load_generator
+USER 10001:10001
+ENTRYPOINT ["/app/load_generator"]
 
 FROM ubuntu:24.04@sha256:78d4744ead1f5b19b04d0df558ab182a5300903900755e515b2ca4d10eb2044d AS runtime
 RUN apt-get update \
@@ -29,7 +39,6 @@ RUN apt-get update \
     && useradd --uid 10001 --create-home benchmark
 WORKDIR /app
 COPY --from=build /build/out/server ./server
-COPY --from=build /build/out/load_generator ./load_generator
 USER 10001:10001
 ENV HOST=0.0.0.0 PORT=3000 SQLITE_PATH=/data/feed.db
 ENTRYPOINT ["/app/server"]

@@ -4,6 +4,7 @@
 #include <cerrno>
 #include <chrono>
 #include <cstdio>
+#include <memory>
 #include <poll.h>
 #include <stdexcept>
 #include <sys/socket.h>
@@ -22,6 +23,8 @@ using tds::net::Connection;
 using tds::net::Event;
 using tds::net::Operation;
 using tds::net::Reactor;
+using tds::net::ReceiveBufferLease;
+using tds::net::ReceiveBuffers;
 using tds::net::Ring;
 
 void require(bool condition, const char *message)
@@ -206,6 +209,122 @@ void reservation_and_record_guards()
         },
         "store retired before close completion");
     require(store.at(first.value) == address, "idle retirement released the live address");
+}
+
+void exhausted_receive_retries()
+{
+    Reactor reactor("127.0.0.1", 0);
+    reactor.start();
+    auto &owner = *reactor.rings().front();
+    constexpr unsigned clients_count = ReceiveBuffers::count + 512;
+    const auto deadline = Clock::now() + 5s;
+    std::vector<std::unique_ptr<Client>> clients;
+    for (unsigned index = 0; index < clients_count; ++index)
+    {
+        clients.push_back(std::make_unique<Client>(reactor.port()));
+    }
+    unsigned accepted = 0;
+    while (accepted != clients_count)
+    {
+        await_completion(reactor, deadline);
+        reactor.begin_turn();
+        drain_turn(reactor, [](const Completion &completion) {
+            require(completion.kind == CompletionKind::control, "unexpected accept payload");
+        });
+        accepted = 0;
+        for (std::size_t slot = 0; slot < owner.connections.size(); ++slot)
+        {
+            accepted += owner.connections.at(slot) != nullptr;
+        }
+    }
+    owner.submit();
+    for (const auto &client : clients)
+    {
+        client->send_byte();
+    }
+    // Keep every selected buffer in its CQE until the kernel has exhausted the whole pool
+    while (io_uring_cq_ready(&owner.queue) < clients_count && Clock::now() < deadline)
+    {
+        const int result = io_uring_get_events(&owner.queue);
+        require(result >= 0 || result == -EINTR, "exhaustion get events failed");
+    }
+    require(io_uring_cq_ready(&owner.queue) == clients_count, "initial receives did not complete");
+    std::vector<ReceiveBufferLease> held;
+    held.reserve(ReceiveBuffers::count);
+    std::vector<bool> received(owner.connections.size());
+    unsigned total_received = 0;
+    const auto retain = [&](Completion &completion) {
+        if (completion.kind != CompletionKind::received)
+        {
+            require(completion.kind == CompletionKind::control, "unexpected exhaustion send");
+
+            return;
+        }
+        const auto slot = completion.connection->slot.value;
+        require(!received[slot] && completion.result == 1 &&
+                    completion.buffer.bytes().front() == 'x',
+                "exhaustion duplicated or corrupted a receive");
+        received[slot] = true;
+        ++total_received;
+        held.push_back(std::move(completion.buffer));
+    };
+    // Six bounded CQ drains consume the original 1,536 completions without returning buffers
+    for (unsigned turn = 0; turn < clients_count / 256; ++turn)
+    {
+        reactor.begin_turn();
+        drain_turn(reactor, retain);
+    }
+    require(held.size() == ReceiveBuffers::count, "the selected pool was not fully retained");
+
+    const auto control_turn = [&](const auto &handler) {
+        io_uring_prep_nop(owner.entry(nullptr));
+        await_completion(reactor, deadline);
+        reactor.begin_turn();
+        drain_turn(reactor, handler);
+    };
+    constexpr unsigned control_turns = 16;
+    unsigned control_cqes = 0;
+    const auto started = Clock::now();
+    for (unsigned turn = 0; turn < control_turns; ++turn)
+    {
+        control_turn([&](const Completion &completion) {
+            require(completion.kind == CompletionKind::control,
+                    "a receive completed without an available buffer");
+            ++control_cqes;
+        });
+    }
+    const auto elapsed = Clock::now() - started;
+    const auto probes = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count() / 4;
+    std::printf("Receive retry probe: %u control CQEs in %u turns, %.3f ms\n", control_cqes,
+                control_turns, std::chrono::duration<double, std::milli>(elapsed).count());
+    require(control_cqes <= control_turns + 3 + static_cast<unsigned>(probes),
+            "exhausted receive retries kept generating CQEs without buffer progress");
+
+    // No refill yet: a bounded probe must still run, rather than parking the FIFO forever
+    std::this_thread::sleep_for(5ms);
+    control_turn(retain);
+    require(owner.deferred_receives.size() == clients_count - ReceiveBuffers::count - 1,
+            "timed retry did not arm exactly one exhausted receive");
+
+    held.clear();
+    // Return once, then retain the recovered buffers so a second retry wave gets no refill event
+    while (total_received != clients_count)
+    {
+        control_turn(retain);
+    }
+    require(owner.deferred_receives.empty() && held.size() == 512,
+            "one refill did not resume all deferred receives across bounded turns");
+    held.clear();
+    reactor.request_stop();
+    while (reactor.pending_count())
+    {
+        await_completion(reactor, deadline);
+        reactor.begin_turn();
+        drain_turn(reactor, [](const Completion &completion) {
+            require(completion.kind == CompletionKind::control,
+                    "exhaustion shutdown reached application I/O");
+        });
+    }
 }
 
 void close_and_late_accept()
@@ -417,6 +536,7 @@ int main()
     try
     {
         reservation_and_record_guards();
+        exhausted_receive_retries();
         close_and_late_accept();
         ::alarm(0);
         std::puts("I/O reservation, original-CQE lifetime, prompt TCP EOF and late-accept shutdown "

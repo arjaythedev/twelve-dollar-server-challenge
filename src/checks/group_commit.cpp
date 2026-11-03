@@ -399,8 +399,16 @@ void fatal_error()
     require(control.commits == 0 && scalar(reader.get(), "SELECT count(*) FROM posts") == 1 &&
                 scalar(reader.get(), "SELECT count(*) FROM likes") == 0,
             "fatal error retained provisional writes");
-    const std::array<WriteCommand, 1> recovery{LikePost{UserId{2}, PostId{1}}};
-    require(liked(run_batch(db, recovery).at(0)) == LikeResult::created,
+    const std::array<WriteCommand, 2> recovery{
+        LikePost{UserId{2}, PostId{1}},
+        LikePost{UserId{1}, PostId{1}},
+    };
+    const auto recovered = run_batch(db, recovery);
+    require(liked(recovered.at(0)) == LikeResult::created &&
+                liked(recovered.at(1)) == LikeResult::created && control.savepoints == 4 &&
+                control.releases == 3 && control.commits == 1 &&
+                scalar(reader.get(), "SELECT count(*) FROM posts") == 1 &&
+                scalar(reader.get(), "SELECT count(*) FROM likes") == 2,
             "fatal error left writer unusable");
 }
 
@@ -433,17 +441,15 @@ void singleton_and_empty()
 }
 } // namespace
 
-extern "C" int __real_sqlite3_exec(sqlite3 *, const char *, int (*)(void *, int, char **, char **),
-                                   void *, char **);
+extern "C" int __real_sqlite3_step(sqlite3_stmt *);
 
-extern "C" int __wrap_sqlite3_exec(sqlite3 *db, const char *sql,
-                                   int (*callback)(void *, int, char **, char **), void *context,
-                                   char **message)
+extern "C" int __wrap_sqlite3_step(sqlite3_stmt *statement)
 {
     Control *control = active;
-    if (control)
+    auto *db = sqlite3_db_handle(statement);
+    if (control && db != control->reader)
     {
-        const std::string_view command(sql);
+        const std::string_view command(sqlite3_sql(statement));
         if (command == "BEGIN")
         {
             ++control->begins;
@@ -481,13 +487,13 @@ extern "C" int __wrap_sqlite3_exec(sqlite3 *db, const char *sql,
                         return 1;
                     },
                     nullptr);
-                const int result = __real_sqlite3_exec(db, sql, callback, context, message);
+                const int result = __real_sqlite3_step(statement);
                 sqlite3_commit_hook(db, nullptr, nullptr);
                 return result;
             }
         }
     }
-    return __real_sqlite3_exec(db, sql, callback, context, message);
+    return __real_sqlite3_step(statement);
 }
 
 int main()

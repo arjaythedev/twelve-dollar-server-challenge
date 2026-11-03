@@ -561,5 +561,152 @@
   "current_source_sha256": "0bd8bf344324220db59570c69922da10e7d83ec5ec96983cb76a5db0743dde3b",
   "mixed_binary_sha256": "d67535eb218a9cb15fdf1f6137671451d870476a76d9d9b2927d35c352888410",
   "valid_binary_sha256": "b092ae1c31cac7a7b14f62e6f3224c331e53dcd47608eb6fcf8b60294774d9c4",
-  "valid_order": "baseline,16; 16,baseline"
+  "valid_order": "baseline,16; 16,baseline",
+  "prepared_controls": {
+    "date": "2026-11-03",
+    "probe_source": "src/.build/early-submit/store-probe.cpp",
+    "implementation": "production Store::commit",
+    "limits": "1 CPU, 2 GiB",
+    "jobs_per_sample": 20000,
+    "seed_posts": 32768,
+    "workload": "12.5% create, 87.5% unique likes",
+    "order": "baseline,candidate; candidate,baseline for each batch",
+    "cpu_scope": "process CPU including Store construction, checkpoint worker join and final checkpoint",
+    "checks": "same outcomes, stored counts, integrity and foreign keys",
+    "final_posts": 35268,
+    "final_likes": 17500,
+    "outcome_hash_without_timestamps": "21972349288989742",
+    "summary": [
+      {
+        "batch": 1,
+        "before_cpu_us_per_write": 38.9788815,
+        "after_cpu_us_per_write": 37.99967,
+        "change_percent": -2.5121590520754133
+      },
+      {
+        "batch": 4,
+        "before_cpu_us_per_write": 19.3401285,
+        "after_cpu_us_per_write": 19.157572000000002,
+        "change_percent": -0.943925993046002
+      },
+      {
+        "batch": 16,
+        "before_cpu_us_per_write": 9.735338500000001,
+        "after_cpu_us_per_write": 8.564996,
+        "change_percent": -12.021590209729228
+      }
+    ],
+    "samples": [
+      {
+        "batch": 1,
+        "pair": 1,
+        "variant": "baseline",
+        "cpu_us_per_write": 38.771175,
+        "wall_ms": 1312.25001
+      },
+      {
+        "batch": 1,
+        "pair": 1,
+        "variant": "candidate",
+        "cpu_us_per_write": 37.894542,
+        "wall_ms": 934.701312
+      },
+      {
+        "batch": 1,
+        "pair": 2,
+        "variant": "candidate",
+        "cpu_us_per_write": 38.104798,
+        "wall_ms": 1425.470999
+      },
+      {
+        "batch": 1,
+        "pair": 2,
+        "variant": "baseline",
+        "cpu_us_per_write": 39.186588,
+        "wall_ms": 801.603255
+      },
+      {
+        "batch": 4,
+        "pair": 1,
+        "variant": "baseline",
+        "cpu_us_per_write": 17.54901,
+        "wall_ms": 353.196115
+      },
+      {
+        "batch": 4,
+        "pair": 1,
+        "variant": "candidate",
+        "cpu_us_per_write": 17.303491,
+        "wall_ms": 374.116766
+      },
+      {
+        "batch": 4,
+        "pair": 2,
+        "variant": "candidate",
+        "cpu_us_per_write": 21.011653,
+        "wall_ms": 421.390395
+      },
+      {
+        "batch": 4,
+        "pair": 2,
+        "variant": "baseline",
+        "cpu_us_per_write": 21.131247,
+        "wall_ms": 426.110637
+      },
+      {
+        "batch": 16,
+        "pair": 1,
+        "variant": "baseline",
+        "cpu_us_per_write": 9.995588,
+        "wall_ms": 208.962572
+      },
+      {
+        "batch": 16,
+        "pair": 1,
+        "variant": "candidate",
+        "cpu_us_per_write": 8.423102,
+        "wall_ms": 473.50582
+      },
+      {
+        "batch": 16,
+        "pair": 2,
+        "variant": "candidate",
+        "cpu_us_per_write": 8.70689,
+        "wall_ms": 179.842642
+      },
+      {
+        "batch": 16,
+        "pair": 2,
+        "variant": "baseline",
+        "cpu_us_per_write": 9.475089,
+        "wall_ms": 194.408923
+      }
+    ],
+    "codegen_before_after": {
+      "flush_writes_bytes": [
+        3022,
+        2877
+      ],
+      "flush_writes_stack_reserve_bytes": [
+        248,
+        248
+      ],
+      "flush_writes_operator_new_callsites": [
+        1,
+        0
+      ],
+      "store_commit_hot_bytes": [
+        1764,
+        1889
+      ],
+      "store_commit_hot_stack_reserve_bytes": [
+        280,
+        296
+      ],
+      "store_commit_hot_sqlite3_exec_callsites": [
+        4,
+        0
+      ]
+    }
+  }
 }

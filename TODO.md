@@ -2,8 +2,10 @@
 
 ## Next, in order
 
-- [ ] Implement phase 6 admission control; pass the memory-exhaustion and progress tests in plan.md before adoption.
-- [ ] Compare prepared transaction/savepoint statements and inspect the generated code.
+- [ ] Compare primary-only SINGLE_ISSUER / DEFER_TASKRUN with explicit primary GETEVENTS progress on the ready-satellite shortcut; test continuous-satellite traffic without helpers forcing primary progress.
+- [ ] Identify what starts the receive backlog; compare ring distribution and submission timing from the saved trace before another large run.
+- [ ] Check socket/heap/pool memory after draining, then compare allocation reuse and socket-buffer caps in Ideas.md order.
+- [ ] Verify SQLite recovery if ROLLBACK preparation fails; stop database admission if autocommit cannot be restored.
 
 ## Later
 
@@ -14,6 +16,12 @@
 
 ## Done
 
+- [x] Keep CQ 8,192 after native burst/lifetime checks and a full 300k/5m pass: zero errors, p99 6.58 ms; no clear steady-load gain.
+- [x] Bound load-generator timer batches and report pre-poll gaps; pass conformance checks and confirm at 300k/5m with the same server: zero errors, p99 6.37 ms.
+- [x] Prepare transaction/savepoint statements and reuse 16 write-outcome slots; pass recovery/lifetime checks in both build modes, inspect assembly, compare native writes and confirm at 300k/5m: zero errors, p99 7.16 ms.
+- [x] Compare earlier send submission after each ring drain at 70k; revert after no CPU or latency gain.
+- [x] Bound ENOBUFS retries with returned-buffer credits and timed probes; pass exhaustion, one-refill recovery and shutdown checks in both build modes. Short 50k comparison: zero errors, unchanged p99.
+- [x] Remove phase 6, retain its measurements and ideas, and confirm the restored source/binary at 300k/5m: zero errors, p99 threshold still fails.
 - [x] Complete the rewrite comparison against `671fd4e`: short profiles, disassembly and matched 300k runs; no request errors, essentially equal CPU cost.
 - [x] Shut down fixed sockets before unregistering them; verify prompt TCP EOF with an active idle peer, slot reuse and terminal-CQE ownership.
 - [x] Separate transport diagnostics and clarify queued-write ownership; pass both build modes and confirm at 300k. The normal binary is unchanged by diagnostic extraction.

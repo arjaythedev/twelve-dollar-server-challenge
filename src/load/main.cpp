@@ -43,6 +43,8 @@ using Clock = std::chrono::steady_clock;
 constexpr std::string_view version = "0.1.0";
 constexpr std::size_t max_response_bytes = 16 * 1024 * 1024;
 constexpr std::size_t max_samples = 20'000'000;
+constexpr unsigned max_timer_batch = 256;
+constexpr double timer_batch_seconds = 0.001;
 volatile std::sig_atomic_t interrupted = 0;
 
 void stop_signal(int)
@@ -565,6 +567,11 @@ struct DiagnosticWindow
     DiagnosticHistogram request_duration;
     DiagnosticHistogram timer_overdue;
     DiagnosticHistogram epoll_service_lag;
+    std::uint64_t timer_batches = 0;
+    unsigned timer_batch_max_services = 0;
+    double timer_batch_max_ms = 0;
+    std::uint64_t epoll_polls = 0;
+    double epoll_repoll_max_ms = 0;
 };
 
 class Diagnostics
@@ -597,6 +604,27 @@ class Diagnostics
         if (auto *entry = window(serviced))
         {
             entry->epoll_service_lag.record(std::max(0.0, serviced - batch_ready) * 1000);
+        }
+    }
+
+    void timer_batch(double started, double ended, unsigned serviced) noexcept
+    {
+        if (auto *entry = window(ended))
+        {
+            ++entry->timer_batches;
+            entry->timer_batch_max_services = std::max(entry->timer_batch_max_services, serviced);
+            entry->timer_batch_max_ms =
+                std::max(entry->timer_batch_max_ms, (ended - started) * 1000);
+        }
+    }
+
+    void repoll(double started, double previous_return) noexcept
+    {
+        if (auto *entry = window(started))
+        {
+            ++entry->epoll_polls;
+            entry->epoll_repoll_max_ms =
+                std::max(entry->epoll_repoll_max_ms, (started - previous_return) * 1000);
         }
     }
 
@@ -830,11 +858,16 @@ class Load
                     .count());
         }
         double next_progress = 5;
+        double previous_poll_return = 0;
         std::array<epoll_event, 512> events{};
         while (!timers_.empty() && !interrupted)
         {
             double now = elapsed();
-            while (!timers_.empty() && users_[timers_.first()].timer <= now)
+            const auto timers_started = now;
+            unsigned timers_serviced = 0;
+            // A connect call can still stall, so check the time budget between timer services
+            while (!timers_.empty() && users_[timers_.first()].timer <= now &&
+                   timers_serviced < max_timer_batch && now - timers_started < timer_batch_seconds)
             {
                 const auto id = timers_.first();
                 if (metrics_.diagnostics)
@@ -847,6 +880,11 @@ class Load
                     schedule(id);
                 }
                 now = elapsed();
+                ++timers_serviced;
+            }
+            if (metrics_.diagnostics)
+            {
+                metrics_.diagnostics->timer_batch(timers_started, now, timers_serviced);
             }
             if (progress && now >= next_progress)
             {
@@ -863,9 +901,15 @@ class Load
             const auto delay =
                 std::max(0.0, std::min(users_[timers_.first()].timer, next_progress) - now);
             const int wait_ms = static_cast<int>(std::min(1000.0, std::ceil(delay * 1000)));
+            if (metrics_.diagnostics)
+            {
+                // Exclude epoll's intentional wait, but include timer work and prior I/O dispatch
+                metrics_.diagnostics->repoll(elapsed(), previous_poll_return);
+            }
             const int count =
                 ::epoll_wait(epoll_.get(), events.data(), static_cast<int>(events.size()), wait_ms);
             const double batch_ready = metrics_.diagnostics ? elapsed() : 0;
+            previous_poll_return = batch_ready;
             if (count < 0 && errno != EINTR)
             {
                 throw std::runtime_error("epoll_wait: " + std::string(std::strerror(errno)));
@@ -1552,6 +1596,10 @@ void diagnostic_summary(std::ostream &output, const Diagnostics &diagnostics, do
               "idle, retirement, grace and request/connect timeout timers\""
            << ",\"epoll_semantics\":\"epoll_wait return to start of each returned event dispatch, "
               "including stale events; not kernel readiness arrival time\""
+           << ",\"timer_batch_limit\":" << max_timer_batch
+           << ",\"timer_batch_budget_ms\":" << timer_batch_seconds * 1000
+           << ",\"repoll_semantics\":\"previous epoll_wait return to next call; first interval "
+              "starts at workload start; excludes blocking inside epoll_wait\""
            << ",\"windows\":[";
     bool comma = false;
     if (last != DiagnosticWindow::unset)
@@ -1574,7 +1622,11 @@ void diagnostic_summary(std::ostream &output, const Diagnostics &diagnostics, do
             diagnostic_histogram(output, window.timer_overdue);
             output << ",\"epoll_service_lag_ms\":";
             diagnostic_histogram(output, window.epoll_service_lag);
-            output << '}';
+            output << ",\"timer_batches\":" << window.timer_batches
+                   << ",\"timer_batch_max_services\":" << window.timer_batch_max_services
+                   << ",\"timer_batch_max_ms\":" << window.timer_batch_max_ms
+                   << ",\"epoll_polls\":" << window.epoll_polls
+                   << ",\"epoll_repoll_max_ms\":" << window.epoll_repoll_max_ms << '}';
             comma = true;
         }
     }
@@ -2198,10 +2250,17 @@ void self_test()
     diagnostics->request(5, 2);
     diagnostics->timer(5.001, 5);
     diagnostics->epoll(5.002, 5);
+    diagnostics->timer_batch(5, 5.003, 7);
+    diagnostics->repoll(5.005, 5.001);
     require(diagnostics->retained(0).request_duration.count == 1 &&
                 diagnostics->retained(1).request_duration.count == 1 &&
                 std::abs(diagnostics->retained(1).timer_overdue.maximum_ms - 1) < 1e-9 &&
-                std::abs(diagnostics->retained(1).epoll_service_lag.maximum_ms - 2) < 1e-9,
+                std::abs(diagnostics->retained(1).epoll_service_lag.maximum_ms - 2) < 1e-9 &&
+                diagnostics->retained(1).timer_batches == 1 &&
+                diagnostics->retained(1).timer_batch_max_services == 7 &&
+                std::abs(diagnostics->retained(1).timer_batch_max_ms - 3) < 1e-9 &&
+                diagnostics->retained(1).epoll_polls == 1 &&
+                std::abs(diagnostics->retained(1).epoll_repoll_max_ms - 4) < 1e-9,
             "diagnostic window boundaries and service delays");
     diagnostics->timer(640, 639.75);
     diagnostics->request(4.5, 3);
@@ -2278,6 +2337,35 @@ void self_test()
             "independent persistent VU sockets");
     require(metrics.interrupted_iterations == 0 && metrics.iterations > 0,
             "retirement finishes iteration");
+    Config burst = config;
+    burst.vus = 1024;
+    burst.ramp_up = 0;
+    burst.hold = 0.04;
+    burst.ramp_down = 0;
+    burst.grace = 0.2;
+    burst.timeout = 0.2;
+    Fixture activation_burst(FixtureMode::failed_feed);
+    auto bounded = fixture_run(activation_burst, burst);
+    require(bounded.diagnostics && bounded.diagnostics->timers >= burst.vus &&
+                bounded.diagnostics->events > 0 && !bounded.durations.empty(),
+            "overdue activation burst retains timers and services real socket events");
+    const auto &burst_window = bounded.diagnostics->retained(0);
+    require(burst_window.timer_batches > 1 && burst_window.epoll_polls > 1 &&
+                burst_window.timer_batch_max_services > 0 &&
+                burst_window.timer_batch_max_services <= max_timer_batch,
+            "activation timers yield to epoll before exceeding the per-pass limit");
+    const auto bounded_metrics = summarize(bounded, burst);
+    const auto bounded_document = json(bounded_metrics.json);
+    require(bounded_document != nullptr, "bounded activation summary JSON");
+    auto *bounded_diagnostics = yyjson_obj_get(
+        yyjson_obj_get(yyjson_doc_get_root(bounded_document.get()), "generator"), "diagnostics");
+    auto *bounded_window = yyjson_arr_get(yyjson_obj_get(bounded_diagnostics, "windows"), 0);
+    require(yyjson_get_uint(yyjson_obj_get(bounded_window, "timer_batch_max_services")) ==
+                    burst_window.timer_batch_max_services &&
+                yyjson_get_uint(yyjson_obj_get(bounded_window, "epoll_polls")) ==
+                    burst_window.epoll_polls &&
+                yyjson_is_num(yyjson_obj_get(bounded_window, "epoll_repoll_max_ms")),
+            "summary exports timer-budget and pre-poll service gaps");
     Fixture failed_feed(FixtureMode::failed_feed);
     config.hold = 0.04;
     const auto failed = fixture_run(failed_feed, config);

@@ -15,7 +15,11 @@ Ring::Ring(unsigned slots, bool primary) : connections(slots), wake_operation{Ev
     {
         notification = std::make_unique<Descriptor>(::eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK));
     }
-    const int result = io_uring_queue_init(1024, &queue, 0);
+    io_uring_params parameters{};
+    parameters.flags = IORING_SETUP_CQSIZE;
+    // Absorb completion bursts without changing SQ capacity or the bounded CQ drain
+    parameters.cq_entries = 8192;
+    const int result = io_uring_queue_init_params(1024, &queue, &parameters);
     if (result < 0)
     {
         throw std::system_error(-result, std::generic_category(), "io_uring setup");

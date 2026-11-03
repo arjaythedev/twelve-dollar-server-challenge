@@ -180,36 +180,6 @@ class Checkpoints
     std::jthread worker_;
 };
 
-class Transaction
-{
-  public:
-    explicit Transaction(sqlite3 *db) : db_(db)
-    {
-        execute(db_, "BEGIN");
-    }
-
-    ~Transaction()
-    {
-        if (!committed_)
-        {
-            sqlite3_exec(db_, "ROLLBACK", nullptr, nullptr, nullptr);
-        }
-    }
-
-    Transaction(const Transaction &) = delete;
-    Transaction &operator=(const Transaction &) = delete;
-
-    void commit()
-    {
-        execute(db_, "COMMIT");
-        committed_ = true;
-    }
-
-  private:
-    sqlite3 *db_;
-    bool committed_ = false;
-};
-
 struct CloseTree
 {
     void operator()(tds_btree *tree) const noexcept
@@ -323,9 +293,48 @@ class Statement
         return Use(*this);
     }
 
+    void execute()
+    {
+        auto query = use();
+        while (query.next())
+        {
+        }
+    }
+
   private:
     sqlite3 *db_;
     sqlite3_stmt *statement_ = nullptr;
+};
+
+class Transaction
+{
+  public:
+    Transaction(sqlite3 *db, Statement &begin, Statement &commit) : db_(db), commit_(commit)
+    {
+        begin.execute();
+    }
+
+    ~Transaction()
+    {
+        if (!committed_)
+        {
+            sqlite3_exec(db_, "ROLLBACK", nullptr, nullptr, nullptr);
+        }
+    }
+
+    Transaction(const Transaction &) = delete;
+    Transaction &operator=(const Transaction &) = delete;
+
+    void commit()
+    {
+        commit_.execute();
+        committed_ = true;
+    }
+
+  private:
+    sqlite3 *db_;
+    Statement &commit_;
+    bool committed_ = false;
 };
 
 class ReadScope
@@ -334,12 +343,7 @@ class ReadScope
     ReadScope(sqlite3 *db, Statement &begin, Statement &commit, tds_btree &tree)
         : db_(db), commit_(commit), tree_(tree)
     {
-        {
-            auto query = begin.use();
-            while (query.next())
-            {
-            }
-        }
+        begin.execute();
         status_ = tds_btree_begin(&tree_);
     }
 
@@ -363,10 +367,7 @@ class ReadScope
     void commit()
     {
         tds_btree_end(&tree_);
-        auto query = commit_.use();
-        while (query.next())
-        {
-        }
+        commit_.execute();
         committed_ = true;
     }
 
@@ -415,7 +416,10 @@ class Store::State
               INSERT INTO likes(user_id, post_id) VALUES(?, ?)
               ON CONFLICT(user_id, post_id) DO NOTHING
           )sql"),
-          read_begin(db.get(), "BEGIN"), read_commit(db.get(), "COMMIT"), tree(open_tree(db.get())),
+          transaction_begin(db.get(), "BEGIN"), transaction_commit(db.get(), "COMMIT"),
+          write_savepoint(db.get(), "SAVEPOINT write_job"),
+          write_release(db.get(), "RELEASE write_job"),
+          write_rollback_to(db.get(), "ROLLBACK TO write_job"), tree(open_tree(db.get())),
           checkpoints(path)
     {
         sqlite3_wal_autocheckpoint(db.get(), 0);
@@ -513,8 +517,12 @@ class Store::State
     Statement create;
     Statement exists;
     Statement like;
-    Statement read_begin;
-    Statement read_commit;
+    // One synchronous issuer reuses these controls after each read or write transaction finishes
+    Statement transaction_begin;
+    Statement transaction_commit;
+    Statement write_savepoint;
+    Statement write_release;
+    Statement write_rollback_to;
     Tree tree;
 #ifdef TDS_DIAGNOSTICS
     DatabaseTimings timings{"database"};
@@ -544,7 +552,8 @@ void Store::feed(PostWriter &writer)
 #endif
     if (state_->tree)
     {
-        ReadScope read(state_->db.get(), state_->read_begin, state_->read_commit, *state_->tree);
+        ReadScope read(state_->db.get(), state_->transaction_begin, state_->transaction_commit,
+                       *state_->tree);
         if (read.ready())
         {
             tds_btree_post row{};
@@ -608,13 +617,14 @@ std::expected<void, WriteError> Store::commit(std::span<const WriteCommand> comm
 #endif
     try
     {
-        Transaction transaction(state_->db.get());
+        Transaction transaction(state_->db.get(), state_->transaction_begin,
+                                state_->transaction_commit);
         const bool savepoints = commands.size() > 1;
         for (std::size_t index = 0; index < commands.size(); ++index)
         {
             if (savepoints)
             {
-                execute(state_->db.get(), "SAVEPOINT write_job");
+                state_->write_savepoint.execute();
             }
             try
             {
@@ -627,13 +637,13 @@ std::expected<void, WriteError> Store::commit(std::span<const WriteCommand> comm
                 {
                     throw;
                 }
-                execute(state_->db.get(), "ROLLBACK TO write_job");
+                state_->write_rollback_to.execute();
                 outcomes[index] =
                     std::unexpected(WriteError{WriteErrorCode::constraint, error.what()});
             }
             if (savepoints)
             {
-                execute(state_->db.get(), "RELEASE write_job");
+                state_->write_release.execute();
             }
         }
         state_->commit(transaction);

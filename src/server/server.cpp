@@ -161,14 +161,13 @@ class Server::State
             return;
         }
         const auto responses = std::span(pending_writes.responses).first(count);
+        const auto outcomes = std::span(pending_writes.outcomes).first(count);
         try
         {
 #ifdef TDS_DIAGNOSTICS
             diagnostics.write_batch_size.record(count);
             timing::Scope sample(diagnostics.write_batch_wall_ns);
 #endif
-            // Keep the existing per-batch allocation until the architecture comparison passes
-            std::vector<WriteOutcome> outcomes(count);
             const auto committed = application.commit(pending_writes.commands, outcomes);
             // Serialization or send failures must never replay already committed commands
             pending_writes.resolved = true;
@@ -366,12 +365,18 @@ class Server::State
 
         void clear() noexcept
         {
+            // Keep the slots, but release previous results and error strings after publishing
+            for (auto &outcome : std::span(outcomes).first(commands.size()))
+            {
+                outcome.emplace();
+            }
             commands.clear();
             resolved = false;
         }
 
         std::array<Connection *, write_batch_limit> connections{};
         std::array<Response, write_batch_limit> responses{};
+        std::array<WriteOutcome, write_batch_limit> outcomes{};
         std::vector<WriteCommand> commands;
         bool resolved = false;
     } pending_writes;

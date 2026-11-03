@@ -278,8 +278,25 @@ void Reactor::poll_satellite(Ring &owner)
 
 void Reactor::retry_receives(Ring &owner)
 {
-    const auto count = std::min(owner.deferred_receives.size(), static_cast<std::size_t>(256));
-    for (std::size_t index = 0; index < count; ++index)
+    if (owner.deferred_receives.empty())
+    {
+        return;
+    }
+    const auto limit = static_cast<unsigned>(
+        std::min(owner.deferred_receives.size(), static_cast<std::size_t>(256)));
+    auto count = owner.receive_buffers->take_retry_credits(limit);
+    const auto now = std::chrono::steady_clock::now();
+    if (!count)
+    {
+        if (now < owner.next_receive_probe)
+        {
+            return;
+        }
+        // One probe preserves progress when credits were spent on receives that used no buffer
+        count = 1;
+    }
+    owner.next_receive_probe = now + std::chrono::milliseconds(4);
+    for (unsigned index = 0; index < count; ++index)
     {
         auto *connection = owner.deferred_receives.front();
         owner.deferred_receives.pop_front();

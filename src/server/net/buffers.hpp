@@ -2,6 +2,7 @@
 
 #include <liburing.h>
 
+#include <algorithm>
 #include <cstddef>
 #include <memory>
 #include <span>
@@ -31,12 +32,27 @@ class ReceiveBuffers
     {
         io_uring_buf_ring_add(buffers_, data(id), size, id, io_uring_buf_ring_mask(count), 0);
         io_uring_buf_ring_advance(buffers_, 1);
+        if (retry_credits_ < count)
+        {
+            ++retry_credits_;
+        }
+    }
+
+    unsigned take_retry_credits(unsigned limit) noexcept
+    {
+        // Returned buffers prove progress, not availability
+        // Pending receives can consume them before a retry is submitted
+        const auto credits = std::min(retry_credits_, limit);
+        retry_credits_ -= credits;
+
+        return credits;
     }
 
   private:
     io_uring &ring_;
     std::unique_ptr<char[]> storage_;
     io_uring_buf_ring *buffers_ = nullptr;
+    unsigned retry_credits_ = 0;
 };
 
 class ReceiveBufferLease

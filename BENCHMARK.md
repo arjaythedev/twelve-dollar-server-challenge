@@ -1,6 +1,6 @@
 # Benchmarks
 
-2026-11-01 to 2026-11-02. Ryzen 7 7800X3D, Ubuntu 24.04 in Docker Desktop/WSL2. Server: 1 CPU, 2 GiB, no container swap. k6 used the official workload and a fresh database per run, on Windows unless labeled Linux loopback (32 source IPs).
+2026-11-01 to 2026-11-03. Ryzen 7 7800X3D, Ubuntu 24.04 in Docker Desktop/WSL2. Server: 1 CPU, 2 GiB, no container swap. k6 used the official workload and a fresh database per run, on Windows unless labeled Linux loopback (32 source IPs).
 
 | Runtime | Users | Hold | Requests | Requests/s | p95 | p99 | Max | Errors | CPU/request | Peak RAM |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -64,8 +64,40 @@
 | C++ 0.1.0 (rewrite phase 4, 64 IPs) | 300,000 | 60 s | 3,585,799 | 22,411.15 | 5.433 ms | 8.865 ms | 47.29 ms | 0% | 28.22 us | 1,081.30 MiB |
 | C++ 0.1.0 (reference 671fd4e, 64 IPs) | 300,000 | 60 s | 3,586,039 | 22,412.72 | 5.063 ms | 8.395 ms | 63.71 ms | 0% | 26.80 us | 1,005.53 MiB |
 | C++ 0.1.0 (rewrite + TCP close, 64 IPs) | 300,000 | 60 s | 3,587,278 | 22,420.39 | 5.025 ms | 7.690 ms | 99.27 ms | 0% | 26.85 us | 914.77 MiB |
+| C++ 0.1.0 (before admission, 32 IPs) | 10,000 | 15 s | 42,649 | 710.81 | 4.207 ms | 4.412 ms | 9.57 ms | 0% | 55.22 us | 297.06 MiB |
+| C++ 0.1.0 (admission, 32 IPs) | 10,000 | 15 s | 42,328 | 705.46 | 4.203 ms | 4.389 ms | 8.88 ms | 0% | 54.48 us | 292.85 MiB |
+| C++ 0.1.0 (rewrite + admission, 32 IPs) | 300,000 | 5 min | 6,294,188 | 15,735.45 | 48,336.231 ms | 60,000.646 ms | 60,011.26 ms | 6.41% | 56.57 us | 2,052.34 MiB |
+| C++ 0.1.0 (rewrite, admission removed, 32 IPs) | 300,000 | 5 min | 11,129,340 | 27,823.33 | 43.466 ms | 2,070.333 ms | 8,180.12 ms | 0% | 25.90 us | 1,002.36 MiB |
+| C++ 0.1.0 (rewrite diagnostics, 32 IPs) | 300,000 | 90 s | 4,537,988 | 23,884.15 | 4.841 ms | 6.507 ms | 67.49 ms | 0% | 25.98 us | 982.07 MiB |
+| C++ 0.1.0 (rewrite diagnostics, 32 IPs) | 300,000 | 5 min | 11,112,126 | 27,780.31 | 9.961 ms | 2,546.114 ms | 25,461.72 ms | 0% | 25.96 us | 1,088.68 MiB |
+| C++ 0.1.0 (receive-retry baseline) | 50,000 | 15 s | 212,302 | 3,538.33 | 4.213 ms | 4.512 ms | 11.98 ms | 0% | 37.45 us | 419.60 MiB |
+| C++ 0.1.0 (bounded receive retries) | 50,000 | 15 s | 212,665 | 3,544.44 | 4.204 ms | 4.511 ms | 12.44 ms | 0% | 37.12 us | 419.51 MiB |
+| C++ 0.1.0 (submission baseline) | 70,000 | 15 s | 297,811 | 4,963.51 | 3.914 ms | 4.460 ms | 11.84 ms | 0% | 35.72 us | 515.79 MiB |
+| C++ 0.1.0 (early submission, reverted) | 70,000 | 15 s | 297,318 | 4,955.30 | 3.959 ms | 4.501 ms | 66.55 ms | 0% | 36.50 us | 469.75 MiB |
+| C++ 0.1.0 (prepared writes + fixed outcomes) | 70,000 | 15 s | 297,766 | 4,962.74 | 3.838 ms | 4.449 ms | 10.93 ms | 0% | 35.14 us | 501.56 MiB |
+| C++ 0.1.0 (bounded retries + prepared writes) | 300,000 | 5 min | 11,206,244 | 28,015.56 | 5.041 ms | 7.163 ms | 130.40 ms | 0% | 24.94 us | 1,043.15 MiB |
+| C++ 0.1.0 (bounded generator timers) | 300,000 | 5 min | 11,205,720 | 28,014.27 | 4.875 ms | 6.372 ms | 60.26 ms | 0% | 24.68 us | 961.11 MiB |
+| C++ 0.1.0 (CQ 8,192) | 300,000 | 5 min | 11,205,005 | 28,012.47 | 4.925 ms | 6.582 ms | 91.63 ms | 0% | 24.64 us | 948.57 MiB |
 
 Statistics include the ramps. RAM is the cgroup peak, including charged file pages. Local results, not an official score or a measured capacity limit.
+
+Rewrite diagnostics, five minutes: hold-only p99 3,160.56 ms. At 251-281 s, 4,314,459 receive ENOBUFS completions, CQ depth 2,048 and send-to-CQE service up to 700.63 ms; COMMIT max 12.91 ms. Timing overhead included. Full logs: `results/0a3c419-sync-300000-5m/`.
+
+Receive retries, 1,536 clients with all 1,024 buffers held, 16 turns: control CQEs 4,096 to 32 (1.66 to 64.75 ms wall, intentional backoff). One-refill recovery and shutdown passed. The 50k pair ran serially, 5 s ramp / 15 s hold, different random seeds; no clear ordinary-request performance change.
+
+The 70k submission/write runs used 5 s ramp / 15 s hold, serially with different random seeds. Early submission gave no gain and was reverted.
+
+Bounded retries + prepared writes, 300k/5m: hold-only p99 7.36 ms. Release build without telemetry, original generator; the timer-budget change was not included.
+
+Bounded generator timers, 300k/5m: hold-only p99 6.45 ms. Same server binary and CQ 2,048, new generator, different random seed; no internal telemetry.
+
+CQ 8,192, 300k/5m: hold-only p99 6.69 ms. Same generator and work budgets; no clear steady-load gain versus CQ 2,048.
+
+Prepared Store controls, 20k writes, two reversed pairs: median CPU/write at batch 1/4/16 was 38.98/19.34/9.74 to 38.00/19.16/8.56 us. Outputs and stored counts matched; final checkpoint included, wall time variable. [Data](src/benchmarks/group-commit.json).
+
+CQ burst, 4,096 completions, two reversed pairs: median drain CPU 0.216/0.023/0.021 ms at CQ 2,048/8,192/16,384. SQ 1,024, 256-CQE drains, no loss; larger queues avoided overflow. Kernel microbenchmark, not HTTP throughput. [Data](src/benchmarks/cq-sizing.json).
+
+Admission comparison: 5 s ramp, 15 s hold, 30 s down. One pair with different random seeds.
 
 300k feed batch, five minutes: hold-only p99 1,172.77 ms; aggregate p99 749.36 ms.
 
@@ -114,6 +146,8 @@ Parser reuse, 100k lifecycle cycles, four alternating samples: JWT/body CPU medi
 Header passing, no SQLite, seven confirmation pairs: `AcceptedHead&&` feed -4.86%, post +1.52%, mixed -3.20% (4/7 faster), protected +2.42%. Kept value parameters. [Data](src/benchmarks/headers.json).
 
 ## Native CPU sampling
+
+300k backlog, 30-second warm-up and 90-second capture: 80,484 samples, no loss; network 38.7%, io_uring 28.6%, SQL 11.6%. [Data](src/profiles/admission-backlog-300000.json).
 
 Rewrite versus `671fd4e`, 10k users, 30-second warm-up and 60-second capture: hold CPU 47.42 to 45.71 us/request, p99 4.341 to 4.310 ms; aggregate CPU 53.01 to 54.22 us/request. No errors or lost samples. One pair, different random seeds. [Data](src/profiles/architecture-reference-10000.json).
 

@@ -8,6 +8,7 @@
 #include <liburing.h>
 
 #include <cerrno>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -69,6 +70,7 @@ class Ring
     ConnectionStore connections;
     // Deferred records have no SQE in flight and remain owned by connections
     std::deque<Connection *> deferred_receives;
+    std::chrono::steady_clock::time_point next_receive_probe{};
     Operation wake_operation;
     unsigned pending = 0;
     std::size_t shutdown_cursor = 0;

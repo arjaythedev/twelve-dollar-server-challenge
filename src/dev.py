@@ -1324,17 +1324,22 @@ def show_diagnostics(workload: dict[str, JSONValue]) -> None:
     if maximum not in ranked:
         ranked.append(maximum)
     print("Worst client windows (approximate p99 bounds, ms):")
-    print("Window s     Requests         p99 bounds        Max  Timer max  epoll max")
+    print("Window s     Requests         p99 bounds        Max  Timer max  epoll max  Poll gap")
     for row in ranked:
         request = mapping(row["request_duration_ms"])
         timer = mapping(row["timer_overdue_ms"])
         epoll = mapping(row["epoll_service_lag_ms"])
+        poll_gap = (
+            f"{number(row, 'epoll_repoll_max_ms'):8.3f}"
+            if "epoll_repoll_max_ms" in row
+            else "     n/a"
+        )
         print(
             f"{number(row, 'start_s'):4.0f}-{number(row, 'end_s'):<4.0f}  "
             f"{integer(request, 'count'):9}  "
             f"{number(request, 'p99_lower_ms'):9.3f}-{number(request, 'p99_upper_ms'):<9.3f}  "
             f"{number(request, 'max_ms'):9.3f}  "
-            f"{number(timer, 'max_ms'):9.3f}  {number(epoll, 'max_ms'):9.3f}"
+            f"{number(timer, 'max_ms'):9.3f}  {number(epoll, 'max_ms'):9.3f}  {poll_gap}"
         )
 
 

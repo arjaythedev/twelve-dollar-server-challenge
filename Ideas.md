@@ -6,13 +6,29 @@
 
 - [x] Decode index fields from SQLite's local payload; retain the overflow fallback and consume views before any further B-tree call.
 
-- [x] Share 1,024 receive buffers of 4 KiB and handle exhaustion, rearming and cancellation. `M_pool ~= 1024*4096` replaces `N*4096` receive storage.
+- [x] Share 1,024 receive buffers of 4 KiB per ring and handle exhaustion, rearming and cancellation. `M_pool ~= R*1024*4096` replaces `N*4096` receive storage, with R rings and N connections.
 
 - [x] Send headers and the moved response body with one scatter-gather operation; release body storage after the final send completion.
 
 - [x] Use a busy-only 32-CQE / 4-ms wait with idle, accept and shutdown bypasses. An 8-ms wait did not reduce CPU further.
 
-## Next transport comparisons
+## First: transport and memory
+
+- [x] Remove the admission experiment after the 300k/5m regression. If revisited, prevent fresh receive CQEs from overtaking deferred work and bound queued-request age. Its reservation floor permitted at most `128 MiB / 256 KiB = 512` active Exchanges.
+
+- [ ] Separate backlog from leaks with `anon`, socket, file and kernel memory through load, drain and a quiet period. Check live ownership and bounded pool retention; reaching the cgroup limit alone does not identify a leak.
+
+- [x] Bound ENOBUFS retries by returned-buffer credits, capped at 1,024 per ring, plus one no-progress probe per ring every 4 ms. Keep FIFO and the 256-retry turn limit. A single refill must resume multiple retry waves without further buffer returns.
+
+- [x] Compare earlier send submission after each ring drain. No CPU or latency gain at 70k; retain submission at the next wait.
+
+- [x] Use CQ 8,192 with SQ 1,024 and unchanged work budgets ([Rust](submissions/rust-iouring-kensac/src/main.rs), [C](submissions/c-iouring-pavlyhalim/src/sys.h)). It avoids overflow in the 4,096-completion probe and passes 300k/5m without a clear steady-load gain. Extra CQE storage is 96 KiB per ring; CQ 16,384 gave no added burst benefit.
+
+- [ ] Compare skipping poll-first for deferred ENOBUFS retries, keeping it for idle receives. Normal profiles put `io_arm_poll_handler` near 1% of CPU; poll-task stacks also include useful receive work. Measure retries, kernel CPU and p99.
+
+- [ ] Compare process-local `SO_RCVBUF` and `SO_SNDBUF` caps only if charged socket-buffer bytes grow; healthy holds mostly charge fixed kernel/slab memory. Measure retransmits, zero-window events and p99; configured caps are not preallocated bytes and explicit settings disable TCP autotuning ([Linux](https://github.com/torvalds/linux/blob/v6.8/Documentation/networking/ip-sysctl.rst)).
+
+- [ ] Compare one versus eight `SO_REUSEPORT` listeners with the same total pending accepts ([sys.h](submissions/c-iouring-pavlyhalim/src/sys.h)). Target connection ramps and churn separately from established-request throughput.
 
 - [x] Scale direct descriptors across bounded io_uring rings on one thread ([sys.h](submissions/c-iouring-pavlyhalim/src/sys.h)). Direct accept avoids installing ordinary process FDs.
   Keep fixed-file slot indices separate from OS descriptors; a slot index must never reach `Descriptor` or `close()`. Route operations by ring/slot and recycle a slot only after its close CQE.
@@ -23,6 +39,7 @@
 - [x] Compare idle multishot polls with bounded nonblocking reads. At 300k, CPU/request rose from 28.42 to 30.26 us and p99 from 8.03 to 4,170.84 ms; keep pending receives.
 
 - [ ] Compare lazy ring packing with balanced 4/8/12-ring connection shards at the same load and total buffer budget. One issuer and one vCPU remain; compare CPU/request, wakeups, empty CQ scans and p99. More rings add capacity and change locality, not CPU cores.
+  In the 300k/5m trace, rings 0-3 exhausted buffers; ring 4 did not. Ring 3 produced 51.2% of ENOBUFS completions.
 
 - [ ] Compare an exact non-empty-ring bitmap if ring selection becomes hot. Free-slot allocation is already O(1); a Bloom filter adds hashes and false positives before a direct slot lookup.
 
@@ -36,7 +53,7 @@
   Budget socket reads and response work separately: `M_queue ~= Q_kernel*m_kernel + Q_app*m_app`. Drain input within a byte budget before expensive handlers; cap queued input and output, pause new work at a high watermark and resume below a lower one.
   Start with FIFO; compare byte-deficit scheduling for uneven response sizes, with request-age promotion to prevent starvation. Preserve connection/write order and read fresh data when dispatched.
   Test multishot accept separately to reduce accept SQEs and rearming. Count accepted sockets and terminal CQEs correctly, close arrivals during shutdown and rearm after termination.
-  Keep submission, registration and cleanup with one issuer when comparing `SINGLE_ISSUER`/`DEFER_TASKRUN`. Isolate the contribution of the current `IORING_RECVSEND_POLL_FIRST` idle-receive path ([liburing](https://github.com/axboe/liburing/blob/liburing-2.15/man/io_uring_prep_recv.3)).
+  Compare `SINGLE_ISSUER`/`DEFER_TASKRUN` on the primary ring only; keep registration, event processing and cleanup on one thread. The ready-satellite shortcut must service primary events with GETEVENTS even when its SQ is empty. Test primary receive/send/stop progress with continuously ready satellites; helpers that call GETEVENTS themselves can hide starvation. Keep satellite wakeups unchanged ([liburing](https://github.com/axboe/liburing/blob/liburing-2.15/man/io_uring_prep_recv.3)).
 
 - [x] Compare direct receive-buffer parsing against the 4-ms / 32-CQE baseline. The first pair saved memory without a CPU gain; keep the current path for now.
   Parse leased receive bytes directly with llhttp; copy only unconsumed tails across callbacks or sends. Release the lease before auth/handler callbacks and preserve early auth errors, fragments and pipeline order.
@@ -50,21 +67,31 @@
 
 ## Then: storage and measured hot paths
 
+- [ ] If byte-budget admission is revisited, avoid repeated capacity scans: the discarded implementation scanned six times on an ordinary request. Account at scheduling boundaries and preserve low-water recovery for unchanged charges; direct accounting CPU was small in the backlog profile.
+
 - [x] Share immutable parser callbacks and use small parser/connection FSMs. API handlers already live for the server's lifetime; request state and JWT verification remain per request.
 - [ ] Test an event bus only if multiple event consumers justify its routing and lifetime costs.
-- [x] Move cold parser/buffer/send state behind a lazily owned Exchange ([Rust](https://github.com/arjaythedev/twelve-dollar-server-challenge/blob/4298101/submissions/rust-iouring-kensac/src/main.rs#L133)). Storage: `56*N + 584*(A+P)`, plus buffers and allocator costs; N is open connections, A is active exchanges, P is pooled exchanges. Keep each parser alive through fragments, auth, pipeline tails and terminal I/O CQEs.
+- [x] Move cold parser/buffer/send state behind a lazily owned Exchange ([Rust](https://github.com/arjaythedev/twelve-dollar-server-challenge/blob/4298101/submissions/rust-iouring-kensac/src/main.rs#L133)). Current storage: `56*N + 608*(A+P)`, plus buffers and allocator costs; N is open connections, A is active exchanges, P is pooled exchanges. Keep each parser alive through fragments, auth, pipeline tails and terminal I/O CQEs.
   Bound recycled Exchange/output capacity and discard oversized buffers; a slow send must not pin unrelated responses.
-- [x] Reuse cleared request-string buffers in pooled Exchanges; include all request capacities in the 8-KiB retention budget and reset the identity before reuse.
+- [x] Reuse request slots through pooled Exchanges and cleared parser strings. Keep the 8-KiB retention limit, reset identity/body/framing and verify JWTs again for every request.
+- [ ] Compare bounded small response-buffer reuse with release-after-send. Clear contents, regenerate replies from fresh SQLite reads, account retained bytes across all rings and discard oversized storage.
+  Feed serialization currently reserves 8 KiB independently of the Exchange retention cap; the seed golden feed is 5,102 bytes, not a live-workload size bound. Start with output-size and allocation counts before changing either limit.
+- [x] Reuse 16 fixed write-outcome slots and clear used results after publishing replies. Preserve rollback isolation, queued-data ownership and commit-before-response behavior.
+- [ ] Compare create-command string ownership/reuse separately.
+- [ ] Measure request-local auth/JSON scratch: fixed-size signature decoding, HMAC key-context reuse and one UTF-8 trim/count pass. Verify every token again; keep malformed input and Unicode behavior unchanged.
 - [ ] Compare encoded CQE identities `(event, ring, slot, generation)` with the two Operation records ([C](submissions/c-iouring-pavlyhalim/src/server.c)). Preserve cancellation matching, generation wrap and stale-buffer returns.
 
 - [x] Move PASSIVE checkpoints to a worker with its own SQLite connection. At 100k, p99 fell from 27.42 to 4.71 ms while CPU/request rose from 31.05 to 32.70 us.
   Coalesce 1,000-frame wakeups, defer partial/failed checkpoints and join before closing connections. Keep commits on the issuer and preserve `synchronous=NORMAL`; confirm WAL backlog and latency at 300k.
 
+- [ ] Compare nice 19 for the checkpoint thread only ([db.h](submissions/c-iouring-pavlyhalim/src/db.h)); measure issuer latency together with checkpoint duration and WAL backlog.
+
 - [x] Group up to 16 queued writes without added delay: `C(b) ~= s + a/b`.
   Own job data, isolate failures with savepoints and release responses after commit. Keep reads outside the write transaction.
 
+- [x] Reuse prepared transaction/savepoint statements instead of parsing control SQL per write. Keep failure injection on `sqlite3_step` and verify recovery before reuse.
+
 - [ ] Tune batch size or a collection window from the measured write arrival rate: average collection wait `~= (b-1)/(2*lambda)`.
-  Compare prepared transaction/savepoint statements instead of parsing control SQL per write.
   Compare `INSERT ... WHERE EXISTS ... ON CONFLICT` for likes and insert + rowid/timestamp lookup against `RETURNING` ([db.h](submissions/c-iouring-pavlyhalim/src/db.h)).
 
 - [x] Compare point lookups with bounded range scans for feed posts. Native feed CPU fell from 10.58 to 9.06 us; whole-server CPU stayed nearly unchanged at 300k.
@@ -82,17 +109,35 @@
   CQEs already carry `Connection*`, and each ring owns a table indexed by direct slot. Measure construction and destruction before replacing per-connection allocations.
   `M_slots ~= rings*slots_per_ring*sizeof(slot)` plus connection storage. Reuse slab slots only after all operations and cancellation completions are finished; preserve stable addresses or validate generation-tagged handles.
 
+- [ ] Inspect field offsets and padding in Connection, Exchange and operation records before changing layouts. At 300k connections, saving 8 bytes each saves only 2.29 MiB; retain stable addresses and terminal-CQE ownership.
+
 - [ ] Compare receive-pool sizes such as 256 x 4 KiB and 512 x 2 KiB against 1,024 x 4 KiB.
   `M_pool ~= K*B`; measure buffer occupancy, extra receives for fragmented requests, `ENOBUFS`, rearm work and latency during bursts. Reducing the current 4-MiB pool alone saves little of the full server's memory.
   Try dynamic sizing only if the static comparisons show a useful tradeoff. Bound total capacity and keep buffer IDs and leased storage valid through resizing.
+  Compare an aggregate retained-byte cap for pooled Exchanges separately from active-request admission; a per-ring object-count cap alone scales retained capacity with ring count.
 
 - [ ] Compare process-local TCP options independently: `TCP_NODELAY` for small-response latency, `TCP_DEFER_ACCEPT` for connection churn and explicitly uncorked `TCP_CORK` for deliberate coalescing ([TCP options](https://man7.org/linux/man-pages/man7/tcp.7.html)).
   Measure packets, CPU and p99 as well as throughput. The current single header/body send already coalesces application output; corking can add delay, and deferred accept mainly affects connection establishment rather than established keep-alive traffic. Keep system-wide kernel settings unchanged.
+  A narrow receive experiment can skip poll-first when `IORING_CQE_F_SOCK_NONEMPTY` reports unread data; keep the current path for idle connections and test fragments, pipelining and terminal completions.
 
 ## Larger or conditional experiments
 
+- [ ] Compare a SQLite PCACHE2 wrapper only if truncate scans become material ([C](submissions/c-iouring-pavlyhalim/src/db.h)). Existing rewrite profiles put them near 0.2-0.3% of total CPU; preserve page rekeys, truncation and cache lifetimes.
+
+- [ ] Consider bounded, best-effort executable/read-only `mlock` only after major faults coincide with stalls ([Mojo](submissions/mojo-iouring-oh-meh/src/shim.c)). Saved normal 300k runs recorded zero major faults; locked pages reduce reclaimable memory.
+
+- [ ] Compare a lazy Exchange-owned scratch arena only if allocation measurements justify it. Keep fragmented input, queued commands and send bytes valid through their actual lifetimes; `pmr` does not redirect ordinary strings, yyjson or SQLite allocations automatically.
+
+- [ ] Test request-local or negotiated HTTP compression only for large retained replies. Include CPU and scratch memory; the native generator currently cannot decode compressed responses. Hashes can identify payloads but cannot replace the bytes required by the API ([HTTP](https://www.rfc-editor.org/rfc/rfc9110.html#field.accept-encoding)). Direct slot indexing already avoids hash-table lookups for connections.
+
+- [ ] Check external SQLite-access compatibility before comparing `unix-excl` on both database handles ([db.h](submissions/c-iouring-pavlyhalim/src/db.h)). Keep NORMAL sync semantics; compare WAL write coalescing only afterward, with short-write, error and durability checks.
+
+- [ ] Compare linked shutdown/close with selective CQE suppression only after preserving pending counts, failure paths and final ownership retirement. Target connection churn; ordinary keep-alive requests avoid this work already.
+
 - [x] Build a small native load generator matching `bench/load.js`: shared tokens, per-user connections and state, the same ramps, think times, write probabilities, checks and latency definitions.
   Use an event loop and timers instead of a JavaScript runtime per user. Compare small runs against k6 before using it for capacity experiments; keep k6 as the reference.
+
+- [x] Bound the load generator's due-timer pass to 256 services / 1 ms, checked between calls. Record time from epoll return to the next call separately from dispatch lag. A single blocking syscall can still exceed the budget; causation of earlier server tails remains unproven.
 
 - [ ] Test multishot receive after the simpler accept and work-budget comparisons.
   It needs separate stable receive/send operation identities, terminal-CQE tracking and bounded `ENOBUFS` rearming; the current one-operation-per-connection model cannot track concurrent receive/send operations.

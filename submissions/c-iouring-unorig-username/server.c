@@ -781,15 +781,13 @@ static void conn_close(uint64_t who) {
   free(c->in); free(c->q);  // a send still in flight frees its own buffer when it completes
   sop_t *out = c->sending ? c->out : NULL;
   uint32_t g = c->gen + 1; memset(c, 0, sizeof *c); c->gen = g; r->n--;
-  if (io_uring_sq_space_left(&r->r) < 4) io_uring_submit(&r->r);  // keep the chain in one submission
+  if (io_uring_sq_space_left(&r->r) < 3) io_uring_submit(&r->r);  // keep the chain in one submission
   // End the pending receive (and send), then free the slot. They are cancelled by their tags, which the
   // kernel finds in a hash table; cancelling by descriptor would scan every pending operation on the
   // ring, one per open connection.
   struct io_uring_sqe *s = sqe(k);
   io_uring_prep_cancel64(s, who, 0); s->flags |= IOSQE_IO_HARDLINK; s->user_data = T_NOP;
   if (out) { s = sqe(k); io_uring_prep_cancel64(s, (uintptr_t)out, 0); s->flags |= IOSQE_IO_HARDLINK; s->user_data = T_NOP; }
-  // The peer needs its FIN now: on 6.8 a closed fixed file can stay open until older multishot receives end.
-  s = sqe(k); io_uring_prep_shutdown(s, slot, SHUT_RDWR); s->flags |= IOSQE_FIXED_FILE | IOSQE_IO_HARDLINK; s->user_data = T_NOP;
   s = sqe(k); io_uring_prep_close_direct(s, slot); s->user_data = T_NOP;
 }
 static void queue_read(uint64_t who, conn_t *c) {

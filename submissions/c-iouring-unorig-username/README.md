@@ -133,12 +133,8 @@ Lake like the benchmark box's 8260), booted with one CPU and 2 GB, kernel 6.8, M
 a fresh database, `MemoryMax=1750M` (the leaderboard says the app is capped at 1,750 MB but not how, so that is an assumption).
 Compare only within a table: results shift between instances and sessions.
 
-Commits: the tables and the durability and build figures below are from this entry at `40bf738`, not from the later `faffedc`,
-which adds a shutdown to the close chain; rust-iouring-kensac is at `4298101`, its unmerged #264 (the 310,000 row). `faffedc` was
-measured against `40bf738` on one other instance with the same holds, 2 runs each. At 320,000 both passed (p99 210 and 259 ms against
-374 and 212 ms). At 340,000 both failed (p99 38 s and an OOM at 158 s against p99 20 and 41 s). When every client was killed and
-reconnected at 300,000, one run each, `faffedc` was killed for memory and `40bf738` survived. `kill -9` on `faffedc`: all 549,919
-acknowledged writes present, `integrity_check` ok.
+Commits: the tables and the durability and build figures below are from this entry at `40bf738`, whose `server.c` is the one submitted;
+rust-iouring-kensac is at `4298101`, its unmerged #264 (the 310,000 row).
 
 CPU per request, whole box, softirq included, 250,000 users, 3 interleaved rounds, own load generator with k6-shaped requests:
 
@@ -170,6 +166,8 @@ Three freezes (SIGSTOP) at 300,000 users, 3 rounds for 2 s and 2 for 1 s and 4 s
 The answer and read bounds come from a sweep on an earlier build (`c25f357` plus these bounds) with the same 2 s freezes, 2 rounds each, share over 1 s: 1,024 answers and 4,096
 reads 4.72, 4.73%; 1,024 and 8,192 4.61, 4.59%; 1,024 and 2,048 4.71, 5.18%; 2,048 and 4,096 5.80, 4.85%; 3,000 and 4,096 4.94,
 5.01%; 3,000 and 8,192 4.94, 4.83%. The differences among the 1,024 rows are within noise.
+
+Known limit: on Linux 6.8 a closed connection's socket, and the client's EOF, can wait until older connections' receives end. Replies carry `Content-Length`, so clients get every reply. Shutting the socket down first gave immediate EOF, but when every client reconnected at 300,000 users (one run each) that build was killed for memory and this one survived, so it isn't kept.
 
 Tried and not kept: moving the program text onto a huge page and static linking (level), 1,024 x 1 KB receive buffers (same CPU,
 but p95 over the ramp went from 7 to 118 ms), `mmap` instead of the page cache (4% more CPU), and answering the backlog before new

@@ -96,7 +96,7 @@ statements cache only query plans, as allowed by rule 5.
 | `HOST`, `PORT` | `127.0.0.1`, `3000` | Listen address |
 | `URING` | unset/`1` | `0` selects the Go fallback |
 | `SHARDS` | `4` | io_uring listener shards (four 65k file tables) |
-| `MUX_LAYOUT` | `read` | `read`: one read worker per shard plus one shared writer; `mixed`: one feed/post/write worker per shard; `feedpost`: one feed and one post worker per shard plus one shared writer; `inline`: one thread drives all rings and runs feed/post batches in the event loop; one shared writer goroutine commits create/like batches |
+| `MUX_LAYOUT` | `inline` in `start.sh`; binary default `read` | `read`: one read worker per shard plus one shared writer; `mixed`: one feed/post/write worker per shard; `feedpost`: one feed and one post worker per shard plus one shared writer; `inline`: one thread drives all rings and runs feed/post batches in the event loop; one shared writer goroutine commits create/like batches |
 | `READ_CONNS` | `2` | SQLite read connections |
 | `BTREE` | `1` | `0` disables the B-tree read path and uses SQL only |
 | `STATS` | unset | `1` logs io_uring, B-tree, write and process CPU counters every 10 s |

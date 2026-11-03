@@ -9,7 +9,7 @@ compiled ahead of time to native code by WasmEdge, and run by a small C embedder
 |---|---|---|
 | `src/app.wat` | WAT, hand-written | Everything a request touches: the io_uring event loop (it writes every submission entry and reads every completion itself), HTTP/1.1 parsing, routing, JSON reading and writing, base64url, SHA-256 and HMAC for the HS256 JWT check, SQL statement calls, group commit, when to checkpoint the WAL, and the B-tree read paths (record decoding, which cursors to open and seek) |
 | `src/host.c` | C, ~200 lines | WasmEdge embedder: loads the AOT-compiled module, gives it WASI (used only by SQLite for file I/O, env vars and the clock) and five Linux imports: `listen`; `ring_new` (sets up an io_uring and its fixed-file table); `ring_pbuf` (registers a provided-buffer ring that lives in wasm memory); `ring_go` (copies the SQEs the WAT wrote into the ring, calls `io_uring_enter`, copies the completions back); and `membase` (the native address of wasm memory, which the kernel needs for buffer addresses). It also starts one thread that calls `fdatasync` on the WAL file every 100 ms (below). There is no request logic in it |
-| `src/sqlite_glue.c` | C, ~130 lines | `#include`s the stock SQLite amalgamation and exports what the WAT calls: the public SQL API; one-line wrappers over SQLite's B-tree cursor functions (open, first, next, previous, seek, payload); a WAL hook that records the WAL's size, and a passive `sqlite3_wal_checkpoint_v2`; and a page cache that wraps SQLite's default one (below). All of it is SQLite's public API. When to checkpoint is decided in the WAT |
+| `src/sqlite_glue.c` | C, ~40 lines | `#include`s the stock SQLite amalgamation and adds one-line wrappers over SQLite's B-tree cursor functions (open, first, next, previous, seek, payload), which only exist inside SQLite's own translation unit. Everything else the WAT calls directly: SQLite's public API (`build.sh` exports each function `app.wat` imports), and through the exported function table it installs its own WAL hook and page-cache wrapper (below) |
 | SQLite 3.54.1 | C, stock | The amalgamation, unmodified, compiled to wasm with wasi-sdk |
 | wasi-libc | C | From wasi-sdk, for SQLite (malloc, file calls) |
 | `experiments/` | notes, scripts, C | The worklog of every measured change, and `baseline/cserve.c`, the C reference server used to compare WAT with C compiled to wasm. Not built or run by the entry |
@@ -76,10 +76,10 @@ downloaded by `build.sh`:
   `RLIMIT_MEMLOCK`; `PIN=0` turns it off), and the 18 MiB connection tables are no longer zeroed at start,
   so slots that are never used never become resident. SQLite's 64 MiB page cache holds the hot pages in
   the process's own memory, which the kernel can't evict (no swap).
-- **A page-cache fix in the glue.** perf showed `pcache1Truncate` at 1.2% of the CPU. Each commit calls
+- **A page-cache fix.** perf showed `pcache1Truncate` at 1.2% of the CPU. Each commit calls
   it with the database's size, and about one commit in ten made it walk all 8,192 hash slots (~250 µs).
   The cause is SQLite's `balance_nonroot`, which swaps two pages through a temporary page number, the
-  lock-byte page's (262,145 here), and the cache then believes it holds a page that far out. The glue
+  lock-byte page's (262,145 here), and the cache then believes it holds a page that far out. The WAT
   installs a page cache (`SQLITE_CONFIG_PCACHE2`) that wraps SQLite's default one, tracks the highest
   page number it holds (not counting that temporary one) and skips a truncate that is past it. Public
   API only; SQLite's source and internals are untouched. With the first version of this fix, which set

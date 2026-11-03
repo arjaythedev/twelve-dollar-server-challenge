@@ -882,3 +882,20 @@ samp.py, prof.sh, bin/fc, out/b7792..b48, w3/ logs (5 MB). To rerun the calibrat
 `SRVMB=1900 MEAS=300 bash q.sh <name> "<label> <build> <users> [ENV=..]"`.
 Not done: a boot with thash_entries=32768 (M3), back-to-back holds without a restart, CPU work in the app
 (our code is ~9 of ~28 us per request; most of the rest is TCP).
+
+## Cut C (3 Nov, TdscWat3): a separate pass to cut host.c + sqlite_glue.c (232 + 127 = 359 lines at f3e9410)
+Gate for each cut: 42/42, and no speed loss beyond noise in 5-minute holds at 290k on the calibrated harness.
+
+## E49: the glue's public-API wrappers go; the WAT calls SQLite directly (b e49) — kept
+`build.sh` exports from the C module each function `app.wat` imports (sqlite3_exec, _prepare_v3, _step,
+_column_*, _wal_hook, _wal_checkpoint_v2, getenv, malloc, ...) and the function table (`--export-table
+--growable-table`). The WAT grows the table by 10 and fills it from a passive element segment: its own WAL
+hook (`$wal_cb`) and the page-cache wrapper (`$pc_create` .. `$pc_shrink`, installed with sqlite3_config
+GETPCACHE2/PCACHE2; the variadic argument goes as a pointer to it). `ENC(db)` (internal) became `PRAGMA
+encoding`. Dead exports db_last_rowid and mem_realloc dropped. sqlite_glue.c 127 -> 42 lines (the B-tree
+wrappers stay: they call SQLite's internal B-tree functions, reachable only from its translation unit).
+Checked with a throwaway build that logs from the wrapper: 5 caches created, truncates skipped. 42/42.
+Interleaved, 2 reps, 0 errors:
+- e49:         p50 23 / 35, p95 320 / 370, p99 550 / 690, max 1,505 / 1,554 ms, 16.2 / 17.0 us/req
+- head df9da40: p50 44 / 31, p95 420 / 355, p99 850 / 690, max 2,196 / 1,649 ms, 17.1 / 16.8 us/req
+No loss.

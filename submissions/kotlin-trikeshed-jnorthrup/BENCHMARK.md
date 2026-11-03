@@ -11,7 +11,8 @@ lists what was measured, where, and how to run it again.
   each passes the challenge's 42 checks.
 - At 1,000 users every runtime passes with no failed requests. Kotlin/Native uses the least server CPU per request.
 - Nothing here is a cache, a prebuilt binary or a changed SQLite. Every response that follows a write waits for its
-  `COMMIT` (rule 6).
+  `COMMIT` (rule 6). How the SQLite side got here, including what was tried and dropped:
+  [SQLITE-HISTORY.md](SQLITE-HISTORY.md).
 
 ## Why Kotlin/Native is the scored runtime
 

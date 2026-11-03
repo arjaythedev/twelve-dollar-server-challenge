@@ -20,6 +20,13 @@ Node.js and WASI (wasmtime). [BENCHMARK.md](BENCHMARK.md) has every runtime buil
 
 Direct: run with `HOST=0.0.0.0 PORT=80`.
 
+## Scoring request
+
+`start.sh` serves Kotlin/Native by default, and that is the entry's score if only one run is made. All five runtimes
+build and pass in the droplet's limits ([BENCHMARK.md](BENCHMARK.md)). If the batch has room, please also run the
+benchmark with `RUNTIME=graal-static`, `graal-jit`, `node` and `wasi`, and score the fastest.
+[bench/RUNNER.md](bench/RUNNER.md) says how to build and launch each one, one at a time.
+
 ## What happens per request, and why
 
 This section describes the `graal-jit` runtime (the JVM build, which is where these designs were first measured). The

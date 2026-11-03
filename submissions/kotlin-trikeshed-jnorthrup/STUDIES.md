@@ -344,7 +344,7 @@ About 55 µs per request against 66 on kali, where the load generator shares the
 
 ## State
 
-- Challenge repo, branch `sctp`: S17 (this commit) on the five-runtime start.sh, the node build, the native-image
-  handles and S15/S16, 35316a6 (research), 4dc083f (one read transaction per wake), 098ccd1 (B-tree reads). TrikeShed
-  pin 20280e867. `main` is the PR head 87b974c. Push guard on. Nothing pushed.
+- Challenge repo: #128 merged upstream at 2fb010a (scored 175,000). S18 (ae41a19 reads off the commit window,
+  954c594 batch waits) and the KN-only build (1b524df) are in the follow-up PR from branch `reads-off-commit-window`.
+  TrikeShed pin 20280e867. Push guard on; pushes go to the fork's explicit URL.
 - Shelved: mingw lines for `trikeshed/build.gradle.kts`, kept as `references/mingw-slice.patch` in the skill `twelve-dollar-kali-loadtest`.

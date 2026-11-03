@@ -42,7 +42,11 @@
 namespace
 {
 
+#ifdef TDS_DIAGNOSTICS
+static_assert(sizeof(tds::net::Connection) == 64);
+#else
 static_assert(sizeof(tds::net::Connection) == 56);
+#endif
 constexpr std::string_view secret = "transport-secret";
 constexpr std::string_view small_post =
     "{\"post\":{\"id\":1,\"body\":\"seed\",\"created_at\":\"2025-01-01T00:00:00.000Z\","

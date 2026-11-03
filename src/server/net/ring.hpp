@@ -81,7 +81,10 @@ class Ring
         timing::Histogram cq_depth;
         timing::Histogram deferred_receive_depth;
         timing::Histogram send_attempt;
+        timing::Histogram enobufs_to_receive_service;
         std::uint64_t cqes = 0;
+        std::uint64_t receive_submissions = 0;
+        std::uint64_t receive_completions = 0;
         std::uint64_t receive_enobufs = 0;
         std::uint64_t empty_cq_samples = 0;
         std::uint64_t overflow_flag_samples = 0;

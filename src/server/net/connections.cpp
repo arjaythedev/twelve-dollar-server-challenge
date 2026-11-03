@@ -54,6 +54,9 @@ Connection &ConnectionStore::create(Ring &owner, DirectSlot slot)
     auto connection = std::make_unique<Connection>(owner, slot);
     auto &record = *connection;
     records_[slot.value] = std::move(connection);
+#ifdef TDS_DIAGNOSTICS
+    ++live_count_;
+#endif
 
     return record;
 }
@@ -67,6 +70,9 @@ void ConnectionStore::retire(DirectSlot slot)
     }
     record.reset();
     free_slots_.push_back(slot);
+#ifdef TDS_DIAGNOSTICS
+    --live_count_;
+#endif
 }
 
 Connection *ConnectionStore::at(std::size_t index) const noexcept
@@ -80,5 +86,17 @@ std::size_t ConnectionStore::size() const noexcept
 {
     return records_.size();
 }
+
+#ifdef TDS_DIAGNOSTICS
+std::size_t ConnectionStore::live_count() const noexcept
+{
+    return live_count_;
+}
+
+std::size_t ConnectionStore::reserved_count() const noexcept
+{
+    return records_.size() - free_slots_.size() - live_count_;
+}
+#endif
 
 } // namespace tds::net

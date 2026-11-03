@@ -50,16 +50,26 @@ void IoDiagnostics::report(std::span<const std::unique_ptr<net::Ring>> rings, bo
         auto &owner = *rings[index];
         auto &sample = owner.diagnostics;
         const auto overflow = io_uring_smp_load_acquire(owner.queue.cq.koverflow);
-        std::fprintf(stderr,
-                     "%s{\"ring\":%zu,\"cqes\":%" PRIu64 ",\"receive_enobufs\":%" PRIu64
-                     ",\"cq_empty_samples\":%" PRIu64 ",\"cq_overflow_flag_samples\":%" PRIu64
-                     ",\"cq_overflow_counter_delta\":%u,",
-                     index ? "," : "", index, sample.cqes, sample.receive_enobufs,
-                     sample.empty_cq_samples, sample.overflow_flag_samples,
-                     overflow - sample.previous_overflow);
+        // Retries can rejoin the FIFO, so the front need not have the oldest first ENOBUFS
+        const auto *front =
+            owner.deferred_receives.empty() ? nullptr : owner.deferred_receives.front();
+        const auto deferred_front_age = front ? now - front->receive_enobufs_since_ns : 0;
+        std::fprintf(
+            stderr,
+            "%s{\"ring\":%zu,\"cqes\":%" PRIu64 ",\"receive_submissions\":%" PRIu64
+            ",\"receive_completions\":%" PRIu64 ",\"receive_enobufs\":%" PRIu64
+            ",\"live_connection_records\":%zu,\"reserved_accept_slots\":%zu"
+            ",\"deferred_receive_front_enobufs_age_ns\":%" PRIu64 ",\"cq_empty_samples\":%" PRIu64
+            ",\"cq_overflow_flag_samples\":%" PRIu64 ",\"cq_overflow_counter_delta\":%u,",
+            index ? "," : "", index, sample.cqes, sample.receive_submissions,
+            sample.receive_completions, sample.receive_enobufs, owner.connections.live_count(),
+            owner.connections.reserved_count(), deferred_front_age, sample.empty_cq_samples,
+            sample.overflow_flag_samples, overflow - sample.previous_overflow);
         sample.cq_depth.write(stderr, "cq_ready_before_drain", "cqes");
         std::fputc(',', stderr);
         sample.deferred_receive_depth.write(stderr, "deferred_receive_queue_depth", "connections");
+        std::fputc(',', stderr);
+        sample.enobufs_to_receive_service.write(stderr, "enobufs_to_successful_receive_service_ns");
         std::fputc(',', stderr);
         // Each attempt includes submission batching and CQ service delay, not just socket I/O
         sample.send_attempt.write(stderr, "send_attempt_prepare_to_cqe_service_ns");
@@ -67,7 +77,10 @@ void IoDiagnostics::report(std::span<const std::unique_ptr<net::Ring>> rings, bo
         sample.cq_depth.reset();
         sample.deferred_receive_depth.reset();
         sample.send_attempt.reset();
+        sample.enobufs_to_receive_service.reset();
         sample.cqes = 0;
+        sample.receive_submissions = 0;
+        sample.receive_completions = 0;
         sample.receive_enobufs = 0;
         sample.empty_cq_samples = 0;
         sample.overflow_flag_samples = 0;

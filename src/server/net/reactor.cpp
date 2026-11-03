@@ -125,7 +125,6 @@ bool Reactor::next(Completion &completion)
         auto *cqe = &cq_cursor_.cqes[cq_cursor_.head++ & cq_cursor_.mask];
         --owner.pending;
         auto *operation = static_cast<Operation *>(io_uring_cqe_get_data(cqe));
-        accepted_ = accepted_ || (operation && operation->event == Event::accept);
         ++drained_;
         ++turn_count_;
         complete(owner, operation, cqe->res, cqe->flags, completion);
@@ -186,6 +185,10 @@ void Reactor::receive(Connection &connection, bool poll_first)
     {
         request->ioprio |= IORING_RECVSEND_POLL_FIRST;
     }
+#ifdef TDS_DIAGNOSTICS
+    // Count prepared receive SQEs, including retries, rather than enter syscalls
+    ++connection.ring.diagnostics.receive_submissions;
+#endif
 }
 
 void Reactor::send(Connection &connection, msghdr &message)
@@ -387,6 +390,7 @@ void Reactor::complete_wake(Ring &owner, int result)
 
 void Reactor::complete_accept(AcceptTicket &ticket, int result)
 {
+    accepted_ = true;
     auto &owner = *ticket.ring;
     ticket.pending = false;
     if (result >= 0)
@@ -445,9 +449,21 @@ void Reactor::complete_io(Connection &connection, Event event, int result, unsig
         // Close preparation may submit SQEs, so measure service before that extra work
         completion.serviced_ns = timing::now_ns();
     }
-    if (event == Event::receive && result == -ENOBUFS)
+    if (event == Event::receive)
     {
-        ++connection.ring.diagnostics.receive_enobufs;
+        auto &diagnostics = connection.ring.diagnostics;
+        ++diagnostics.receive_completions;
+        if (result == -ENOBUFS)
+        {
+            ++diagnostics.receive_enobufs;
+        }
+        else if (result > 0 && connection.receive_enobufs_since_ns)
+        {
+            // Application-observed deferral includes retry I/O and CQ service, not arrival age
+            diagnostics.enobufs_to_receive_service.record(timing::now_ns() -
+                                                          connection.receive_enobufs_since_ns);
+            connection.receive_enobufs_since_ns = 0;
+        }
     }
 #endif
     connection.finish_io();
@@ -459,6 +475,12 @@ void Reactor::complete_io(Connection &connection, Event event, int result, unsig
     }
     if (!stopping_ && event == Event::receive && result == -ENOBUFS)
     {
+#ifdef TDS_DIAGNOSTICS
+        if (!connection.receive_enobufs_since_ns)
+        {
+            connection.receive_enobufs_since_ns = timing::now_ns();
+        }
+#endif
         connection.ring.deferred_receives.push_back(&connection);
 
         return;
@@ -538,7 +560,6 @@ int Reactor::wait()
     // Accept handling can grow rings, but it never runs while wait submits or polls
     const auto owners = rings();
     auto &primary = owners.front()->queue;
-    bool deferred = false;
     for (std::size_t index = 0; index < owners.size(); ++index)
     {
         const auto &owner = owners[index];
@@ -546,7 +567,6 @@ int Reactor::wait()
         {
             owner->submit();
         }
-        deferred = deferred || !owner->deferred_receives.empty();
     }
     // Cursed: an empty SQ does not mean the primary gets a day off
     // GETEVENTS still runs its deferred work while satellites keep the loop busy
@@ -558,7 +578,20 @@ int Reactor::wait()
         }
     }
     const bool immediate = accepted_ || previous_count_ < 2;
-    if (stopping_ || !(primary.features & IORING_FEAT_EXT_ARG) || (immediate && !deferred))
+    const auto has_deferred_receives = [&owners] {
+        for (const auto &owner : owners)
+        {
+            if (!owner->deferred_receives.empty())
+            {
+                return true;
+            }
+        }
+
+        return false;
+    };
+    // Busy turns and ready satellites do not need to inspect deferred receive queues
+    if (stopping_ || !(primary.features & IORING_FEAT_EXT_ARG) ||
+        (immediate && !has_deferred_receives()))
     {
         return io_uring_submit_and_wait(&primary, 1);
     }

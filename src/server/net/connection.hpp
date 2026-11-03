@@ -138,6 +138,10 @@ struct Connection
     Operation operation;
     Operation close_operation;
     std::unique_ptr<http::Exchange> exchange;
+#ifdef TDS_DIAGNOSTICS
+    // First ENOBUFS service, retained across retries until a successful receive CQE
+    std::uint64_t receive_enobufs_since_ns = 0;
+#endif
     DirectSlot slot;
     bool close_after = false;
 

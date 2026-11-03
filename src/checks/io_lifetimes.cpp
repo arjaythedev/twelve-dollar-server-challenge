@@ -53,6 +53,29 @@ template <class Action> void rejects(Action &&action, const char *message)
     throw std::runtime_error(message);
 }
 
+class FileLimit
+{
+  public:
+    explicit FileLimit(rlim_t soft)
+    {
+        require(::getrlimit(RLIMIT_NOFILE, &previous_) == 0, "read descriptor limit");
+        require(previous_.rlim_cur >= soft, "descriptor limit too low for fixture");
+        const rlimit limited{soft, previous_.rlim_max};
+        require(::setrlimit(RLIMIT_NOFILE, &limited) == 0, "set fixture descriptor limit");
+    }
+
+    ~FileLimit()
+    {
+        ::setrlimit(RLIMIT_NOFILE, &previous_);
+    }
+
+    FileLimit(const FileLimit &) = delete;
+    FileLimit &operator=(const FileLimit &) = delete;
+
+  private:
+    rlimit previous_{};
+};
+
 class Client
 {
   public:
@@ -217,6 +240,10 @@ void reservation_and_record_guards()
     const auto second = store.reserve();
     const auto spare = store.reserve();
     require(!store.has_free_slot(), "reserved slots remained free");
+#ifdef TDS_DIAGNOSTICS
+    require(store.live_count() == 0 && store.reserved_count() == 3,
+            "reservation gauges lost an unaccepted slot");
+#endif
     rejects(
         [&] {
             store.reserve();
@@ -227,6 +254,10 @@ void reservation_and_record_guards()
     const auto *address = &record;
     store.create(owner, second);
     store.release(spare);
+#ifdef TDS_DIAGNOSTICS
+    require(store.live_count() == 2 && store.reserved_count() == 0,
+            "accept and release did not update connection gauges");
+#endif
     require(store.reserve() == spare && store.at(first.value) == address,
             "slot reuse moved a live record");
 
@@ -245,29 +276,21 @@ void reservation_and_record_guards()
         },
         "store retired before close completion");
     require(store.at(first.value) == address, "idle retirement released the live address");
+#ifdef TDS_DIAGNOSTICS
+    require(store.live_count() == 2 && store.reserved_count() == 1,
+            "rejected retirement changed connection gauges");
+    record.start_close();
+    store.retire(first);
+    store.release(spare);
+    require(store.live_count() == 1 && store.reserved_count() == 0,
+            "terminal close or released reservation retained a diagnostic count");
+#endif
 }
 
 void primary_progress_with_ready_satellite()
 {
-    struct RestoreLimit
-    {
-        RestoreLimit()
-        {
-            require(::getrlimit(RLIMIT_NOFILE, &previous) == 0, "read descriptor limit");
-        }
-
-        rlimit previous{};
-
-        ~RestoreLimit()
-        {
-            ::setrlimit(RLIMIT_NOFILE, &previous);
-        }
-    } restore;
-
     constexpr rlim_t slots = 64;
-    require(restore.previous.rlim_cur >= slots, "primary progress test needs 64 descriptors");
-    const rlimit limited{slots, restore.previous.rlim_max};
-    require(::setrlimit(RLIMIT_NOFILE, &limited) == 0, "limit primary progress direct table");
+    FileLimit limited(slots);
 
     // Send storage outlives the reactor, including failure cleanup and terminal cancellation
     std::string payload(256 * 1024, 'y');
@@ -435,6 +458,107 @@ void primary_progress_with_ready_satellite()
     shutdown();
 }
 
+void fixed_cq_order_and_growth()
+{
+    FileLimit limited(32);
+    Reactor reactor("127.0.0.1", 0);
+    reactor.start();
+    require(reactor.rings().size() == 2, "accept reservations did not create two rings");
+    const auto deadline = Clock::now() + 5s;
+    const auto add_nops = [](Ring &ring, unsigned count) {
+        for (unsigned index = 0; index < count; ++index)
+        {
+            io_uring_prep_nop(ring.entry(nullptr));
+        }
+        ring.submit();
+    };
+    for (const auto &ring : reactor.rings())
+    {
+        add_nops(*ring, 8);
+    }
+    await_completion(reactor, deadline);
+    reactor.begin_turn();
+    drain_turn(reactor, [](const Completion &completion) {
+        require(completion.kind == CompletionKind::control, "unexpected setup payload");
+    });
+
+    // The first accept appends a ring that must join the same traversal
+    Client peer(reactor.port());
+    bool accept_ready = false;
+    while (!accept_ready)
+    {
+        await_completion(reactor, deadline);
+        for (const auto &ring : reactor.rings())
+        {
+            unsigned head;
+            io_uring_cqe *cqe;
+            io_uring_for_each_cqe(&ring->queue, head, cqe)
+            {
+                auto *operation = static_cast<Operation *>(io_uring_cqe_get_data(cqe));
+                accept_ready = accept_ready ||
+                               (operation && operation->event == Event::accept && cqe->res >= 0);
+            }
+        }
+        require(Clock::now() < deadline, "accept CQE was not ready before the growth turn");
+    }
+    constexpr std::array<std::size_t, 3> expected{0, 1, 2};
+    for (unsigned turn = 0; turn < 3; ++turn)
+    {
+        std::array<unsigned, 3> heads{};
+        for (std::size_t index = 0; index < reactor.rings().size(); ++index)
+        {
+            auto &ring = *reactor.rings()[index];
+            heads[index] = *ring.queue.cq.khead;
+            add_nops(ring, turn ? 256 : 512);
+        }
+        std::vector<std::size_t> order;
+        const auto observe_advances = [&] {
+            require(reactor.rings().size() <= heads.size(), "unexpected extra ring growth");
+            for (std::size_t index = 0; index < reactor.rings().size(); ++index)
+            {
+                const auto head = *reactor.rings()[index]->queue.cq.khead;
+                if (head != heads[index])
+                {
+                    require(head - heads[index] == 256, "CQ drain exceeded or missed its budget");
+                    order.push_back(index);
+                    heads[index] = head;
+                }
+            }
+        };
+        reactor.begin_turn();
+        Completion completion;
+        bool grew = false;
+        while (reactor.next(completion))
+        {
+            require(completion.kind == CompletionKind::control, "unexpected growth payload");
+            if (turn == 0 && !grew && reactor.rings().size() == 3)
+            {
+                add_nops(*reactor.rings()[2], 512);
+                grew = true;
+            }
+            observe_advances();
+        }
+        observe_advances();
+        reactor.finish_turn();
+        require(reactor.rings().size() == 3, "accept did not grow a third ring during traversal");
+        require(order.size() == 3, "CQ traversal missed or revisited a ring after growth");
+        for (std::size_t index = 0; index < order.size(); ++index)
+        {
+            require(order[index] == expected[index], "CQ traversal did not preserve ring order");
+        }
+    }
+    reactor.request_stop();
+    while (reactor.pending_count())
+    {
+        await_completion(reactor, deadline);
+        reactor.begin_turn();
+        drain_turn(reactor, [](Completion &completion) {
+            completion.buffer.release();
+        });
+    }
+    require(peer.closed(deadline), "shutdown after ring growth did not close the peer");
+}
+
 void exhausted_receive_retries()
 {
     Reactor reactor("127.0.0.1", 0);
@@ -462,6 +586,13 @@ void exhausted_receive_retries()
         }
     }
     owner.submit();
+#ifdef TDS_DIAGNOSTICS
+    require(owner.connections.live_count() == clients_count &&
+                owner.connections.reserved_count() == 64 &&
+                owner.diagnostics.receive_submissions == clients_count &&
+                owner.diagnostics.receive_completions == 0,
+            "idle receive submissions or connection gauges were not counted correctly");
+#endif
     for (const auto &client : clients)
     {
         client->send_byte();
@@ -490,6 +621,10 @@ void exhausted_receive_retries()
                 "exhaustion duplicated or corrupted a receive");
         received[slot] = true;
         ++total_received;
+#ifdef TDS_DIAGNOSTICS
+        require(completion.connection->receive_enobufs_since_ns == 0,
+                "successful receive retained its first ENOBUFS timestamp");
+#endif
         held.push_back(std::move(completion.buffer));
     };
     // Six bounded CQ drains consume the original 1,536 completions without returning buffers
@@ -499,6 +634,20 @@ void exhausted_receive_retries()
         drain_turn(reactor, retain);
     }
     require(held.size() == ReceiveBuffers::count, "the selected pool was not fully retained");
+#ifdef TDS_DIAGNOSTICS
+    std::vector<std::pair<Connection *, std::uint64_t>> first_deferred;
+    for (std::size_t slot = 0; slot < owner.connections.size(); ++slot)
+    {
+        auto *connection = owner.connections.at(slot);
+        if (connection && connection->receive_enobufs_since_ns)
+        {
+            first_deferred.emplace_back(connection, connection->receive_enobufs_since_ns);
+        }
+    }
+    require(first_deferred.size() == clients_count - ReceiveBuffers::count &&
+                owner.diagnostics.enobufs_to_receive_service.count == 0,
+            "first ENOBUFS timestamps missed deferrals or recorded unfinished recovery");
+#endif
 
     const auto control_turn = [&](const auto &handler) {
         io_uring_prep_nop(owner.entry(nullptr));
@@ -529,6 +678,13 @@ void exhausted_receive_retries()
     control_turn(retain);
     require(owner.deferred_receives.size() == clients_count - ReceiveBuffers::count - 1,
             "timed retry did not arm exactly one exhausted receive");
+#ifdef TDS_DIAGNOSTICS
+    for (const auto &[connection, first] : first_deferred)
+    {
+        require(connection->receive_enobufs_since_ns == first,
+                "repeated ENOBUFS restarted the application deferral clock");
+    }
+#endif
 
     held.clear();
     // Return once, then retain the recovered buffers so a second retry wave gets no refill event
@@ -538,6 +694,16 @@ void exhausted_receive_retries()
     }
     require(owner.deferred_receives.empty() && held.size() == 512,
             "one refill did not resume all deferred receives across bounded turns");
+#ifdef TDS_DIAGNOSTICS
+    require(owner.diagnostics.receive_enobufs >= first_deferred.size() &&
+                owner.diagnostics.receive_completions ==
+                    clients_count + owner.diagnostics.receive_enobufs &&
+                owner.diagnostics.receive_submissions == owner.diagnostics.receive_completions,
+            "receive counters included control CQEs or missed retry completions");
+    require(owner.diagnostics.enobufs_to_receive_service.count == first_deferred.size() &&
+                owner.diagnostics.enobufs_to_receive_service.max >= 5'000'000,
+            "recovery timing missed an episode or excluded the buffer-deferred wait");
+#endif
     held.clear();
     reactor.request_stop();
     while (reactor.pending_count())
@@ -733,6 +899,10 @@ void close_and_late_accept()
     for (const auto &ring : reactor.rings())
     {
         auto &connections = ring->connections;
+#ifdef TDS_DIAGNOSTICS
+        require(connections.live_count() == 0 && connections.reserved_count() == 0,
+                "shutdown retained live records or accept reservations in its gauges");
+#endif
         std::vector<bool> returned(connections.size());
         std::size_t count = 0;
         while (connections.has_free_slot())
@@ -761,11 +931,13 @@ int main()
     {
         reservation_and_record_guards();
         primary_progress_with_ready_satellite();
+        fixed_cq_order_and_growth();
         exhausted_receive_retries();
         close_and_late_accept();
         ::alarm(0);
         std::puts(
-            "I/O reservation, primary progress with a ready satellite, original-CQE lifetime, "
+            "I/O reservation, fixed CQ order/growth, primary progress with a ready satellite, "
+            "original-CQE lifetime, "
             "prompt TCP EOF and late-accept shutdown checks passed");
 
         return 0;

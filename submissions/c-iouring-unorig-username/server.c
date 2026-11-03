@@ -7,6 +7,7 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <pthread.h>
+#include <sys/eventfd.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -57,7 +58,7 @@ static sqlite3_stmt *st_feed, *st_post, *st_ins, *st_like, *st_one, *st_begin, *
 static time_t started, now_s;
 
 // user_data: low 3 bits tag the operation. A send's user_data is its sop_t pointer (tag 0).
-enum { T_SEND, T_ACCEPT, T_RECV, T_NOP, T_READ };
+enum { T_SEND, T_ACCEPT, T_RECV, T_NOP, T_READ, T_WAL };
 #define RECV_UD(k, slot, gen) (T_RECV | (uint64_t)(k) << 3 | (uint64_t)(slot) << 8 | (uint64_t)(gen) << 32)
 
 // Hot regions sit on huge pages where the kernel offers them (Ubuntu's default THP mode is madvise): a TLB miss
@@ -76,7 +77,7 @@ static char *arena; static size_t alen;
 typedef struct { uint64_t who; uint32_t off, len; } seg_t;
 static seg_t segs[MAXSEG]; static int nsegs;
 static uint64_t *deferred, *held, *eofs, *limbo; static int ndef, nheld, neof, nlimbo, cap_def, cap_held, cap_eof, cap_limbo;
-static int arena_full, in_txn, txn_writes, batch_failed, hold_hit, writes_held;
+static int arena_full, in_txn, txn_writes, batch_failed, hold_hit, hold_posts;
 
 static inline void put(const void *p, size_t n) { memcpy(arena + alen, p, n); alen += n; }
 #define PUTS(s) put(s, sizeof(s) - 1)
@@ -715,7 +716,7 @@ static long serve(char *buf, size_t n, int *closing) {
   while (used < n && !*closing) {
     char *p = buf + used, *e = buf + n;
     if (alen + 2 * MAXREQ > BATCH_OUT || nsegs == MAXSEG) { arena_full = 1; break; }  // the rest waits for the next batch
-    if (writes_held && *p == 'P') { hold_hit = 1; break; }  // a POST waits, unread, until the checkpoint's tail is done
+    if (hold_posts && *p == 'P') { hold_hit = 1; break; }  // a POST waits, unread, while the last of the log is copied back
     char *he = memmem(p, e - p, "\r\n\r\n", 4);
     if (!he) { if ((size_t)(e - p) > MAXREQ) return -1; break; }
     char *le = memchr(p, '\r', he + 2 - p);
@@ -949,6 +950,11 @@ static void arm_accepts(void) {
     }
   }
 }
+static uint64_t wal_msg, wal_outcome;
+static int wal_replies = -1;
+static void arm_wal_msg(void) {  // the worker's reply arrives as a completion on ring 0
+  struct io_uring_sqe *s = sqe(0); io_uring_prep_read(s, wal_replies, &wal_msg, 8, 0); s->user_data = T_WAL;
+}
 static void on_cqe(int k, uint64_t ud, int res, unsigned f) {
   ring_t *r = &R[k]; conn_t *c;
   switch (ud & 7) {
@@ -970,6 +976,7 @@ static void on_cqe(int k, uint64_t ud, int res, unsigned f) {
         else { c->eof = 1; push(&eofs, &neof, &cap_eof, ud); }  // the same pass may hold this client's last reply
       }
       break;
+    case T_WAL: wal_outcome = res == 8 ? wal_msg : 1; arm_wal_msg(); break;
     case T_READ: {
       uint64_t who = (ud & ~7ULL) | T_RECV;
       r->reads--; c = conn_of(who);
@@ -1016,8 +1023,8 @@ static unsigned drain(int k) {
 
 #define WAIT_N 128        // completions a busy pass waits for, shared across the rings
 #define WAIT_NS 2000000   // or this long, whichever is first
-static int ck_active(void);
-static void ck_tick(void);
+static int wal_hold_over(void);
+static void wal_after_commit(void);
 static void run(void) {
   unsigned seen = 0;
   for (;;) {
@@ -1028,7 +1035,7 @@ static void run(void) {
     // first. The target is capped by the open connections so a few clients without think time never sit out the timer.
     int rc; struct io_uring_cqe *cq;
     if (readq.n || readyq.n) rc = io_uring_submit_and_get_events(&R[0].r);  // work is waiting here: no sleeping
-    else if (seen >= 4 || nrings > 1 || nheld || ck_active()) {
+    else if (seen >= 4 || nrings > 1 || nheld) {
       unsigned want = seen >= 4 ? WAIT_N / nrings + 1 : 1;
       if (want > open / 3 + 1) want = open / 3 + 1;
       struct __kernel_timespec ts = {.tv_nsec = WAIT_NS};
@@ -1058,8 +1065,8 @@ static void run(void) {
       for (int i = 0; i < n; i++) { conn_t *c = conn_of(todo[i]); if (c && c->inlen && !c->sending) process(todo[i], c, c->in, c->inlen); }
       free(todo); flush_batch();
     }
-    ck_tick();
-    if (nheld && !writes_held) {
+    wal_after_commit();
+    if (nheld && wal_hold_over()) {
       uint64_t *todo = held; int n = nheld; held = NULL; nheld = cap_held = 0;
       for (int i = 0; i < n; i++) { conn_t *c = conn_of(todo[i]); if (c && c->inlen && !c->sending) process(todo[i], c, c->in, c->inlen); }
       free(todo); flush_batch();
@@ -1111,58 +1118,50 @@ static void btree_setup(void) {  // leaves bt_ok 0 (SQL for every read) on anyth
   cur_feed = malloc(sqlite3BtreeCursorSize()); cur_likes = malloc(sqlite3BtreeCursorSize());
 }
 
-// Checkpoints run on a second thread at low priority, on its own connection, so the loop never waits for their
-// fsyncs. A log only restarts once fully copied back, which steady writes prevent; so after the bulk pass new
-// POSTs are held briefly (reads go on) while the thread copies the tail, and the next write restarts the log.
-#define CK_FRAMES 8192
-#define CK_FORCE (4 * CK_FRAMES)  // the thread keeps losing the race: the loop checkpoints by itself
-#define HOLD_MS 250
-enum { CK_IDLE, CK_BULK, CK_BULK_DONE, CK_TAIL, CK_TAIL_DONE };
-static sqlite3 *ckdb;
-static int ck_state, ck_full, wal_frames;
-static pthread_mutex_t ck_mu = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t ck_cv = PTHREAD_COND_INITIALIZER;
-static struct timespec hold_t0;
+// The log is copied back by a worker thread at low priority, on its own connection, so the loop never waits for an
+// fsync. The loop alone decides: it asks for a pass by eventfd and the outcome comes back as a ring completion. A
+// log can only restart once all of it is copied, which steady writes prevent, so if frames arrived during a pass the
+// loop stops taking POSTs (reads go on) for one more pass. Past WAL_MAX frames it waits for that pass however long it
+// takes, because a saturated CPU starves the worker and the log would otherwise grow without bound.
+#define WAL_START 8192
+#define WAL_MAX (4 * WAL_START)
+#define POST_WAIT_NS 250000000LL
+enum { WAL_LEFT = 1, WAL_ALL };  // what a pass reports; a counter value, so never 0
+static sqlite3 *wal_db;
+static int wal_asks, wal_frames, wal_asked_at, wal_busy, wal_last_pass;
+static int64_t post_deadline;  // 0: no limit
+static int64_t mono_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1000000000LL + t.tv_nsec; }
 static int wal_hook(void *u, sqlite3 *d, const char *n, int frames) { wal_frames = frames; return SQLITE_OK; }
-static void ck_set(int v) {
-  pthread_mutex_lock(&ck_mu); __atomic_store_n(&ck_state, v, __ATOMIC_RELEASE); pthread_cond_signal(&ck_cv); pthread_mutex_unlock(&ck_mu);
-}
-static void *ck_main(void *a) {
+static void *wal_worker(void *a) {
+  uint64_t go, outcome;
   setpriority(PRIO_PROCESS, (id_t)gettid(), 19);
-  for (;;) {
-    pthread_mutex_lock(&ck_mu);
-    while (ck_state != CK_BULK && ck_state != CK_TAIL) pthread_cond_wait(&ck_cv, &ck_mu);
-    int st = ck_state;
-    pthread_mutex_unlock(&ck_mu);
-    int log = -1, done = -2, rc = sqlite3_wal_checkpoint_v2(ckdb, "main", SQLITE_CHECKPOINT_PASSIVE, &log, &done);
-    __atomic_store_n(&ck_full, rc == SQLITE_OK && log == done, __ATOMIC_RELAXED);
-    ck_set(st + 1);
+  while (read(wal_asks, &go, 8) == 8) {
+    int log = -1, done = -2, rc = sqlite3_wal_checkpoint_v2(wal_db, "main", SQLITE_CHECKPOINT_PASSIVE, &log, &done);
+    outcome = rc == SQLITE_OK && log == done ? WAL_ALL : WAL_LEFT;
+    if (write(wal_replies, &outcome, 8) != 8) return NULL;
   }
+  return NULL;
 }
-static int ck_active(void) { return __atomic_load_n(&ck_state, __ATOMIC_ACQUIRE) != CK_IDLE; }
-static void ck_tick(void) {  // between batches, with no transaction open
-  switch (__atomic_load_n(&ck_state, __ATOMIC_ACQUIRE)) {
-    case CK_IDLE:
-      if (wal_frames >= CK_FORCE) {
-        int log = 0, done = 0;
-        if (sqlite3_wal_checkpoint_v2(db, "main", SQLITE_CHECKPOINT_PASSIVE, &log, &done) == SQLITE_OK && log == done) wal_frames = 0;
-      } else if (wal_frames >= CK_FRAMES) ck_set(CK_BULK);
-      break;
-    case CK_BULK_DONE:
-      writes_held = 1; clock_gettime(CLOCK_MONOTONIC, &hold_t0); ck_set(CK_TAIL);
-      break;
-    case CK_TAIL_DONE:
-      if (__atomic_load_n(&ck_full, __ATOMIC_RELAXED)) wal_frames = 0;  // the next write restarts the log and the hook reports it
-      writes_held = 0; ck_set(CK_IDLE);
-      break;
-    default:
-      // Saturated, the low-priority thread can't keep up and the log would grow without bound: writes wait for it.
-      if (wal_frames >= CK_FORCE) { writes_held = 1; clock_gettime(CLOCK_MONOTONIC, &hold_t0); break; }
-      if (writes_held) {
-        struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t);
-        if ((t.tv_sec - hold_t0.tv_sec) * 1000 + (t.tv_nsec - hold_t0.tv_nsec) / 1000000 > HOLD_MS) writes_held = 0;
-      }
-  }
+static void wal_ask(void) { uint64_t one = 1; wal_busy = 1; wal_asked_at = wal_frames; if (write(wal_asks, &one, 8) != 8) wal_busy = 0; }
+static void wal_copied(uint64_t outcome) {
+  wal_busy = 0;
+  // All copied, and nothing committed since the pass was asked for: the next write restarts the log.
+  if (outcome == WAL_ALL && wal_frames == wal_asked_at) { wal_frames = 0; wal_last_pass = 0; hold_posts = 0; return; }
+  if (wal_last_pass) { wal_last_pass = 0; hold_posts = 0; return; }  // POSTs were let go early, or the pass failed: try again later
+  wal_last_pass = 1; hold_posts = 1;
+  post_deadline = wal_frames >= WAL_MAX ? 0 : mono_ns() + POST_WAIT_NS;
+  wal_ask();
+}
+// Between batches, with no transaction open: a write only restarts the log from a read transaction begun after the
+// last copy, so POSTs can't be let go in the middle of a batch.
+static void wal_after_commit(void) {
+  if (wal_outcome) { uint64_t o = wal_outcome; wal_outcome = 0; wal_copied(o); }
+  if (wal_frames >= WAL_MAX && wal_busy) { hold_posts = 1; post_deadline = 0; }
+  else if (!wal_busy && wal_frames >= WAL_START) wal_ask();
+}
+static int wal_hold_over(void) {
+  if (hold_posts && post_deadline && mono_ns() > post_deadline) hold_posts = 0;
+  return !hold_posts;
 }
 
 static void db_open(const char *path) {
@@ -1174,10 +1173,11 @@ static void db_open(const char *path) {
   if (sqlite3_exec(db, "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA mmap_size=0; PRAGMA cache_size=-" STR(CACHE_KB) "; PRAGMA wal_autocheckpoint=0;"
                    "SELECT count(*) FROM users WHERE id = 1;", NULL, NULL, &e) != SQLITE_OK) { fprintf(stderr, "pragma: %s\n", e); exit(1); }
   sqlite3_wal_hook(db, wal_hook, NULL);
-  if (sqlite3_open_v2(path, &ckdb, fl, "unix-excl") != SQLITE_OK ||
-      sqlite3_exec(ckdb, "PRAGMA synchronous=NORMAL; PRAGMA wal_autocheckpoint=0; PRAGMA cache_size=16;", NULL, NULL, NULL) != SQLITE_OK) { fprintf(stderr, "checkpoint connection failed\n"); exit(1); }
+  wal_asks = eventfd(0, EFD_CLOEXEC); wal_replies = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+  if (wal_asks < 0 || wal_replies < 0 || sqlite3_open_v2(path, &wal_db, fl, "unix-excl") != SQLITE_OK ||
+      sqlite3_exec(wal_db, "PRAGMA synchronous=NORMAL; PRAGMA wal_autocheckpoint=0; PRAGMA cache_size=16;", NULL, NULL, NULL) != SQLITE_OK) { fprintf(stderr, "checkpoint connection failed\n"); exit(1); }
   pthread_t t; pthread_attr_t a; pthread_attr_init(&a); pthread_attr_setstacksize(&a, 256 << 10);
-  if (pthread_create(&t, &a, ck_main, NULL)) { fprintf(stderr, "checkpoint thread failed\n"); exit(1); }
+  if (pthread_create(&t, &a, wal_worker, NULL)) { fprintf(stderr, "checkpoint thread failed\n"); exit(1); }
   btree_setup();
   const char *cols = "SELECT p.id, p.body, p.created_at, u.username, (SELECT count(*) FROM likes l WHERE l.post_id = p.id) FROM posts p JOIN users u ON u.id = p.user_id ";
   char sql[512];
@@ -1225,5 +1225,6 @@ int main(int argc, char **argv) {
   }
   arena = huge_alloc(BATCH_OUT);
   if (ring_init(0) < 0) { fprintf(stderr, "io_uring setup failed (needs Linux 6.1+ with io_uring enabled)\n"); return 1; }
+  arm_wal_msg();
   run();
 }

@@ -75,16 +75,14 @@ SQLITE_PATH=... JWT_SECRET=... HOST=0.0.0.0 PORT=80 bash start.sh
   decodes; on any difference every read uses the reference SQL. At run time any record it doesn't expect
   (overflow pages, a post without a user, a column of another type, a missing post) sends that request to
   SQL. Writes always use prepared SQL. A like's post check is a B-tree seek.
-- **Checkpoints run on a second thread at nice 19**, on their own connection, through the `unix-excl` VFS:
-  the process owns the file, the WAL index lives in its heap, and a transaction takes no file locks. After
-  8,192 WAL frames (32 MB) the loop wakes the thread, which runs a `PASSIVE` checkpoint while the loop goes on. A
-  log only restarts once fully copied back, which steady writes prevent, so when the bulk pass ends new
-  POSTs are held unread for at most 250 ms (reads go on) while the thread copies the tail. Past 32,768
-  frames (a CPU saturated long enough to starve the thread; a write-only run reached 1.6 GB of WAL in 40 s
-  without this) writes stay held until the thread finishes, however long that takes, and if the thread is
-  idle the loop checkpoints by itself. Durability is unchanged: WAL with
-  `synchronous=NORMAL`, and a response waits for its `COMMIT`. If a commit fails, nothing from a batch with
-  writes is sent and its connections are closed.
+- **A worker thread copies the log back, and the event loop decides when.** The worker runs at nice 19 on its own connection,
+  through the `unix-excl` VFS: the process owns the file, the WAL index lives in its heap, and a transaction takes no file locks.
+  The loop asks for a `PASSIVE` pass over an eventfd after 8,192 WAL frames (32 MB) and the outcome comes back on a second
+  eventfd as an ordinary ring completion, so the loop never waits for an fsync. A log only restarts once fully copied, which
+  steady writes prevent, so if frames arrived during a pass, POSTs stay unread for one more pass, for at most 250 ms (reads go
+  on). Past 32,768 frames (a CPU saturated long enough to starve the worker; a write-only run reached 1.6 GB of WAL in 40 s
+  without this) they wait however long that pass takes. Durability is unchanged: WAL with `synchronous=NORMAL`, and a response
+  waits for its `COMMIT`. If a commit fails, nothing from a batch with writes is sent and its connections are closed.
 - **Provided-buffer registration retries.** Ubuntu's 6.8.0-136 and later kernels reject a buffer ring whose
   reserved words are zero (Launchpad #2162843), which stops a server from starting at all. It retries once
   with `resv[0] = 1`, which correct kernels never see.

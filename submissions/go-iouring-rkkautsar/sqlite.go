@@ -168,6 +168,7 @@ const (
 			'like_count', (SELECT count(*) FROM likes l WHERE l.post_id = p.id)))
 		  FROM posts p JOIN users u ON u.id = p.user_id
 		 WHERE p.id = ?`
+	insertPostSQL      = "INSERT INTO posts (user_id, body) VALUES (?, ?) RETURNING id, created_at"
 	insertPostsBulkSQL = `INSERT INTO posts (user_id, body)
 		SELECT CAST(value->>'u' AS INTEGER), value->>'b'
 		  FROM json_each(?1) WHERE true
@@ -215,6 +216,7 @@ func newReadConn(path string) (*readConn, error) {
 
 type writeConn struct {
 	db          *sqliteConn
+	insertPost  *sqliteStmt
 	insertPosts *sqliteStmt
 	insertLike  *sqliteStmt
 	postIn      map[int]*sqliteStmt
@@ -226,6 +228,10 @@ func newWriteConn(path string) (*writeConn, error) {
 		return nil, err
 	}
 	wc := &writeConn{db: db, postIn: make(map[int]*sqliteStmt)}
+	if wc.insertPost, err = db.prepare(insertPostSQL); err != nil {
+		db.close()
+		return nil, err
+	}
 	if wc.insertPosts, err = db.prepare(insertPostsBulkSQL); err != nil {
 		db.close()
 		return nil, err

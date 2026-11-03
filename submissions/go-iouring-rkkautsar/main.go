@@ -433,7 +433,42 @@ func (a *app) applyBatch(jobs []*writeJob) ([]writeResult, bool) {
 		createIdx = append(createIdx, i)
 		creates = append(creates, createInput{UserID: j.userID, Body: j.body})
 	}
-	if len(creates) > 0 {
+	if len(creates) > 0 && len(creates) <= 4 {
+		// Small create groups are cheaper as prepared statements: no JSON
+		// array, json_each, or returned-id sort. They still share the batch
+		// transaction and its single commit.
+		for k, idx := range createIdx {
+			j := jobs[idx]
+			st := w.insertPost
+			st.reset()
+			if err := st.bindInt64(1, j.userID); err != nil {
+				ok = false
+				break
+			}
+			if err := st.bindText(2, j.body); err != nil {
+				ok = false
+				break
+			}
+			row, e := st.step()
+			if e != nil || !row {
+				ok = false
+				break
+			}
+			id := st.columnInt64(0)
+			created := append([]byte(nil), st.columnText(1)...)
+			if row, e = st.step(); e != nil || row {
+				ok = false
+				break
+			}
+			st.reset()
+			results[idx].post = postRow{
+				ID: id, Body: []byte(creates[k].Body), CreatedAt: created, Author: []byte(j.username),
+			}
+		}
+		if !ok {
+			w.insertPost.reset()
+		}
+	} else if len(creates) > 4 {
 		jsonBuf, err := json.Marshal(creates)
 		if err != nil {
 			ok = false

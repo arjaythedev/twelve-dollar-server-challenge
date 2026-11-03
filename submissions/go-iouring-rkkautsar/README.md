@@ -29,9 +29,9 @@ statements cache only query plans, as allowed by rule 5.
   goroutine. `MUX_LAYOUT=mixed` instead gives each shard one worker for feed, post, and
   write jobs; `MUX_LAYOUT=feedpost` gives each shard separate feed and post workers. With
   coalescing enabled, feed requests share one in-flight read, post IDs are served from
-  the B-tree path, and the writer batches writes into one transaction. Queued write jobs
-  merge only when at least four are already waiting; a nearly empty queue is committed
-  immediately instead of paying extra latency for no throughput gain. The SQL fallback
+  the B-tree path, and the writer batches writes into one transaction. All already-queued
+  write jobs merge into the next transaction; no artificial timer is added when the queue
+  is empty. The SQL fallback
   batches post IDs into one `IN` query. With
   `READ_COALESCE=0`, reads go through the generic single-request handler instead, so no
   read result is shared between requests.

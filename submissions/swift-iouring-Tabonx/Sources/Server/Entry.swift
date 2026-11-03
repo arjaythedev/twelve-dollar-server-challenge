@@ -26,10 +26,13 @@ struct Main {
             _ = write(2, error.base, error.count)
             fail(": cannot open the database")
         }
-        if tu_probe() == 0 || environment("SERVER_FORCE_EPOLL") != nil {
-            _ = write(2, "io_uring unavailable, using epoll\n", 34)
+        func runEpoll(_ reason: StaticString) -> Never {
+            _ = write(2, reason.utf8Start, reason.utf8CodeUnitCount)
             guard var server = EpollServer(service: service, host: host, port: port) else { fail("cannot listen") }
             server.run()
+        }
+        if tu_probe() == 0 || environment("SERVER_FORCE_EPOLL") != nil {
+            runEpoll("io_uring unavailable, using epoll\n")
         }
         sv_ignore_sigpipe()
         // Each ring's registered file table is capped by RLIMIT_NOFILE; more rings hold more connections.
@@ -41,7 +44,8 @@ struct Main {
             listeners.append(fd)
         }
         guard let server = Server(service: service, listeners: listeners, slots: slots) else {
-            fail("io_uring setup failed")
+            for fd in listeners { _ = close(fd) }
+            runEpoll("io_uring setup failed, using epoll\n")
         }
         server.run()
     }

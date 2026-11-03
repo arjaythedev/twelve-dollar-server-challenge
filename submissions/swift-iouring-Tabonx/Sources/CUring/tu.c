@@ -1,6 +1,7 @@
 // Helpers declared in cuuring.h that need more than one liburing call.
 #include "cuuring.h"
 #include <string.h>
+#include <sys/mman.h>
 
 int tu_setup(struct io_uring *ring, unsigned entries, unsigned cq_entries) {
     struct io_uring_params p;
@@ -28,5 +29,23 @@ int tu_probe(void) {
 struct io_uring_buf_ring *tu_buffers(struct io_uring *ring, unsigned count, unsigned short group) {
     int err = 0;
     struct io_uring_buf_ring *br = io_uring_setup_buf_ring(ring, count, group, 0, &err);
-    return err ? 0 : br;
+    if (br || err != -EINVAL) return br;
+    // Ubuntu's 6.8.0-136 and later invert the check on the reserved words (Launchpad #2162843):
+    // they refuse all zeroes and accept a nonzero resv[0]. A correct kernel never gets here.
+    size_t size = count * sizeof(struct io_uring_buf);
+    void *memory = mmap(0, size, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+    if (memory == MAP_FAILED) return 0;
+    struct io_uring_buf_reg reg;
+    memset(&reg, 0, sizeof reg);
+    reg.ring_addr = (unsigned long)memory;
+    reg.ring_entries = count;
+    reg.bgid = group;
+    reg.resv[0] = 1;
+    if (io_uring_register_buf_ring(ring, &reg, 0) != 0) {
+        munmap(memory, size);
+        return 0;
+    }
+    br = memory;
+    io_uring_buf_ring_init(br);
+    return br;
 }

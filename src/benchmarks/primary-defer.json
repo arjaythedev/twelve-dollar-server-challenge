@@ -1,0 +1,80 @@
+{
+  "date": "2026-11-03",
+  "http_runs": [
+    "primary-defer-baseline-70000",
+    "primary-defer-candidate-70000",
+    "primary-defer-final-300000-5m"
+  ],
+  "http_scope": "70k pair: primary flags and GETEVENTS only. 300k confirmation: includes fixed CQE cursor and ring span",
+  "checks": {
+    "normal_and_diagnostics": [
+      "io_uring_operations",
+      "transport_lifetimes",
+      "io_lifetime_contract"
+    ],
+    "ready_satellite": [
+      "receive",
+      "partial send with backpressure",
+      "stop, slot retirement and TCP EOF"
+    ],
+    "negative_control": "Without primary GETEVENTS, receive progress fails"
+  },
+  "code_bytes": {
+    "before_flags": {
+      "wait": 513,
+      "wait_cold": 249,
+      "next": 663
+    },
+    "flags_and_getevents": {
+      "wait": 499,
+      "wait_cold": 128,
+      "next": 663
+    },
+    "fixed_cqe_and_ring_span": {
+      "wait": 477,
+      "wait_cold": 126,
+      "next": 631
+    }
+  },
+  "cqe_probe": {
+    "baseline": "Primary flags and GETEVENTS, generic CQE iterator and vector scans",
+    "candidate": "Fixed 16-byte CQE cursor and stable wait ring span",
+    "batch_size": 512,
+    "drain_limit": 256,
+    "warmup_batches": 100,
+    "measured_batches": 4000,
+    "clock": "CLOCK_PROCESS_CPUTIME_ID",
+    "scope": "NOP preparation, submission and CQ dispatch on one ring",
+    "conclusion": "Mixed timings, no reliable runtime gain",
+    "runs": [
+      {
+        "pair": 1,
+        "variant": "before",
+        "completions": 2048000,
+        "cpu_ns_per_cqe": 46.06278,
+        "ring_flags": 77832
+      },
+      {
+        "pair": 1,
+        "variant": "after",
+        "completions": 2048000,
+        "cpu_ns_per_cqe": 43.898488,
+        "ring_flags": 77832
+      },
+      {
+        "pair": 2,
+        "variant": "after",
+        "completions": 2048000,
+        "cpu_ns_per_cqe": 46.445224,
+        "ring_flags": 77832
+      },
+      {
+        "pair": 2,
+        "variant": "before",
+        "completions": 2048000,
+        "cpu_ns_per_cqe": 45.836615,
+        "ring_flags": 77832
+      }
+    ]
+  }
+}

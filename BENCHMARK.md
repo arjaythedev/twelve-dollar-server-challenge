@@ -78,6 +78,9 @@
 | C++ 0.1.0 (bounded retries + prepared writes) | 300,000 | 5 min | 11,206,244 | 28,015.56 | 5.041 ms | 7.163 ms | 130.40 ms | 0% | 24.94 us | 1,043.15 MiB |
 | C++ 0.1.0 (bounded generator timers) | 300,000 | 5 min | 11,205,720 | 28,014.27 | 4.875 ms | 6.372 ms | 60.26 ms | 0% | 24.68 us | 961.11 MiB |
 | C++ 0.1.0 (CQ 8,192) | 300,000 | 5 min | 11,205,005 | 28,012.47 | 4.925 ms | 6.582 ms | 91.63 ms | 0% | 24.64 us | 948.57 MiB |
+| C++ 0.1.0 (primary defer baseline) | 70,000 | 15 s | 297,241 | 4,954.01 | 3.730 ms | 4.445 ms | 9.23 ms | 0% | 35.43 us | 513.67 MiB |
+| C++ 0.1.0 (primary defer) | 70,000 | 15 s | 297,618 | 4,960.22 | 3.623 ms | 4.420 ms | 10.88 ms | 0% | 34.24 us | 546.76 MiB |
+| C++ 0.1.0 (primary defer + fixed CQEs) | 300,000 | 5 min | 11,205,141 | 28,012.82 | 4.844 ms | 6.391 ms | 96.95 ms | 0% | 23.91 us | 1,038.57 MiB |
 
 Statistics include the ramps. RAM is the cgroup peak, including charged file pages. Local results, not an official score or a measured capacity limit.
 
@@ -92,6 +95,10 @@ Bounded retries + prepared writes, 300k/5m: hold-only p99 7.36 ms. Release build
 Bounded generator timers, 300k/5m: hold-only p99 6.45 ms. Same server binary and CQ 2,048, new generator, different random seed; no internal telemetry.
 
 CQ 8,192, 300k/5m: hold-only p99 6.69 ms. Same generator and work budgets; no clear steady-load gain versus CQ 2,048.
+
+Primary defer, 70k: one serial pair, 5 s ramp / 15 s hold, different random seeds, no telemetry. Excludes the later CQE cursor and ring-span changes. Those reduced `next`/`wait` by 32/22 code bytes; two reversed native pairs gave mixed timings. [Data](src/benchmarks/primary-defer.json).
+
+Primary defer, 300k/5m: includes the fixed CQE cursor and ring span. Hold-only p99 6.34 ms; no telemetry, memory-limit events or OOM kills.
 
 Prepared Store controls, 20k writes, two reversed pairs: median CPU/write at batch 1/4/16 was 38.98/19.34/9.74 to 38.00/19.16/8.56 us. Outputs and stored counts matched; final checkpoint included, wall time variable. [Data](src/benchmarks/group-commit.json).
 

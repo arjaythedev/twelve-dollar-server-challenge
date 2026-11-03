@@ -2,7 +2,6 @@
 
 ## Next, in order
 
-- [ ] Compare primary-only SINGLE_ISSUER / DEFER_TASKRUN with explicit primary GETEVENTS progress on the ready-satellite shortcut; test continuous-satellite traffic without helpers forcing primary progress.
 - [ ] Identify what starts the receive backlog; compare ring distribution and submission timing from the saved trace before another large run.
 - [ ] Check socket/heap/pool memory after draining, then compare allocation reuse and socket-buffer caps in Ideas.md order.
 - [ ] Verify SQLite recovery if ROLLBACK preparation fails; stop database admission if autocommit cannot be restored.
@@ -16,6 +15,7 @@
 
 ## Done
 
+- [x] Enable primary-only SINGLE_ISSUER / DEFER_TASKRUN; verify receive, partial send and stop with continuously ready satellites in both build modes. Include fixed 16-byte CQEs and the wait ring span at 300k/5m: zero errors, p99 6.39 ms, CPU 23.91 us/request. Separate native cursor/span timings remain inconclusive.
 - [x] Keep CQ 8,192 after native burst/lifetime checks and a full 300k/5m pass: zero errors, p99 6.58 ms; no clear steady-load gain.
 - [x] Bound load-generator timer batches and report pre-poll gaps; pass conformance checks and confirm at 300k/5m with the same server: zero errors, p99 6.37 ms.
 - [x] Prepare transaction/savepoint statements and reuse 16 write-outcome slots; pass recovery/lifetime checks in both build modes, inspect assembly, compare native writes and confirm at 300k/5m: zero errors, p99 7.16 ms.

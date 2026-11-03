@@ -53,7 +53,11 @@
   Budget socket reads and response work separately: `M_queue ~= Q_kernel*m_kernel + Q_app*m_app`. Drain input within a byte budget before expensive handlers; cap queued input and output, pause new work at a high watermark and resume below a lower one.
   Start with FIFO; compare byte-deficit scheduling for uneven response sizes, with request-age promotion to prevent starvation. Preserve connection/write order and read fresh data when dispatched.
   Test multishot accept separately to reduce accept SQEs and rearming. Count accepted sockets and terminal CQEs correctly, close arrivals during shutdown and rearm after termination.
-  Compare `SINGLE_ISSUER`/`DEFER_TASKRUN` on the primary ring only; keep registration, event processing and cleanup on one thread. The ready-satellite shortcut must service primary events with GETEVENTS even when its SQ is empty. Test primary receive/send/stop progress with continuously ready satellites; helpers that call GETEVENTS themselves can hide starvation. Keep satellite wakeups unchanged ([liburing](https://github.com/axboe/liburing/blob/liburing-2.15/man/io_uring_prep_recv.3)).
+- [x] Enable primary-only `SINGLE_ISSUER`/`DEFER_TASKRUN`, with GETEVENTS on the ready-satellite shortcut. Receive, partial send and stop progress passed with continuously ready satellites; satellite wakeups stay unchanged. Short 70k pair: CPU/request -3.4%, p99 unchanged.
+
+- [x] Use a fixed 16-byte CQE cursor, preserving acquire/release ordering, wraparound and the 256-CQE bound. Dispatch code shrank by 32 bytes; native timing gain remains inconclusive.
+
+- [x] Snapshot the stable ring span in `wait()`, outside accept handling. Repeated vector loads disappeared and code shrank by 22 bytes; native timing gain remains inconclusive.
 
 - [x] Compare direct receive-buffer parsing against the 4-ms / 32-CQE baseline. The first pair saved memory without a CPU gain; keep the current path for now.
   Parse leased receive bytes directly with llhttp; copy only unconsumed tails across callbacks or sends. Release the lease before auth/handler callbacks and preserve early auth errors, fragments and pipeline order.
@@ -100,6 +104,9 @@
   Collect IDs within one fresh feed snapshot, scan in ID order and restore timestamp order with request-local slots, including gaps and reordered timestamps.
 
 - [x] Deduplicate author IDs within one feed and read them in ID order. Copy post records and author names into request-local arenas; retain the SQL point-read path and remove the unused B-tree point-read API.
+
+- [ ] Compare locality-aware scheduling of already queued reads by endpoint and nearby post/user IDs. Each request performs its own fresh SQLite read; reuse only SQLite's page cache, never query results.
+  Bound queue size and request age, preserve connection order and write/read barriers. Compare FIFO, page-cache misses, CPU/request and p99; locality gains must exceed sorting and waiting costs.
 
 - [ ] Compare batched lookups by B-tree level ([bt_seek_many](submissions/c-iouring-pavlyhalim/src/btree.h)).
   Interleave independent descents and fetch shared pages once. Try interpolation from the current page's endpoint keys, with bounded correction and a correct binary-search fallback.

@@ -35,6 +35,7 @@ struct Completion
 class Reactor
 {
   public:
+    // Create, drive and destroy the reactor on the same issuer thread
     Reactor(std::string_view host, std::uint16_t port);
     Reactor(const Reactor &) = delete;
     Reactor &operator=(const Reactor &) = delete;
@@ -74,6 +75,14 @@ class Reactor
     void finish_ring();
     void finish_wakeups();
 
+    struct CqeCursor
+    {
+        io_uring_cqe *cqes = nullptr;
+        unsigned mask = 0;
+        unsigned head = 0;
+        unsigned tail = 0;
+    };
+
     Descriptor listener_;
     Descriptor stop_;
     static constexpr std::size_t max_rings = 16;
@@ -89,7 +98,7 @@ class Reactor
     bool accepted_ = false;
     unsigned turn_count_ = 0;
     std::size_t ring_index_ = 0;
-    io_uring_cqe_iter cq_iterator_{};
+    CqeCursor cq_cursor_{};
     unsigned drained_ = 0;
     bool ring_started_ = false;
 };

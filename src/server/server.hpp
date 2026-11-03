@@ -11,6 +11,7 @@ namespace tds
 class Server
 {
   public:
+    // Construct, run and destroy on one thread; request_stop may be called from another
     Server(std::string_view host, std::uint16_t port, std::string database_path,
            std::string secret);
     ~Server();

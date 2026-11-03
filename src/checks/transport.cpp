@@ -667,6 +667,7 @@ class ChildProcess
 volatile std::sig_atomic_t child_stop_descriptor = -1;
 volatile std::sig_atomic_t child_gate_ready = -1;
 volatile std::sig_atomic_t child_gate_release = -1;
+volatile std::sig_atomic_t child_primary_ring = -1;
 
 void stop_child(int)
 {
@@ -689,11 +690,33 @@ void pause_child(int)
     {
         result = ::write(child_gate_ready, &ready, sizeof(ready));
     } while (result < 0 && errno == EINTR);
-    char released;
-    do
+    // Cursed: pausing handlers does not put deferred kernel work on autopilot
+    // Service the primary ring without consuming any application CQEs
+    pollfd gate{child_gate_release, POLLIN, 0};
+    while (true)
     {
-        result = ::read(child_gate_release, &released, sizeof(released));
-    } while (result < 0 && errno == EINTR);
+        const int polled = ::poll(&gate, 1, 1);
+        if (polled > 0)
+        {
+            char released;
+            do
+            {
+                result = ::read(child_gate_release, &released, sizeof(released));
+            } while (result < 0 && errno == EINTR);
+
+            break;
+        }
+        if (polled < 0 && errno != EINTR)
+        {
+            ::_exit(2);
+        }
+        const auto entered = ::syscall(SYS_io_uring_enter, child_primary_ring, 0, 0,
+                                       IORING_ENTER_GETEVENTS, nullptr, 0);
+        if (entered < 0 && errno != EINTR && errno != EBUSY)
+        {
+            ::_exit(2);
+        }
+    }
     errno = saved_errno;
 }
 
@@ -719,6 +742,9 @@ class RunningServer
                     child_stop_descriptor = server.stop_descriptor();
                     child_gate_ready = gate_ready_.writer();
                     child_gate_release = gate_release_.reader();
+                    const auto initial_rings = ring_fdinfos(::getpid());
+                    require(initial_rings.size() == 1, "one primary ring before startup");
+                    child_primary_ring = std::stoi(initial_rings.front().filename().string());
                     require(std::signal(SIGUSR1, stop_child) != SIG_ERR,
                             "install test stop signal");
                     require(std::signal(SIGUSR2, pause_child) != SIG_ERR,

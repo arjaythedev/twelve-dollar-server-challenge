@@ -110,17 +110,19 @@ bool Reactor::next(Completion &completion)
             owner.diagnostics.overflow_flag_samples +=
                 (io_uring_smp_load_acquire(owner.queue.sq.kflags) & IORING_SQ_CQ_OVERFLOW) != 0;
 #endif
-            cq_iterator_ = io_uring_cqe_iter_init(&owner.queue);
+            // Ring never enables CQE32 or mixed CQEs, so each completion advances one entry
+            auto &cq = owner.queue.cq;
+            cq_cursor_ = {cq.cqes, cq.ring_mask, *cq.khead, io_uring_smp_load_acquire(cq.ktail)};
             drained_ = 0;
             ring_started_ = true;
         }
-        io_uring_cqe *cqe = nullptr;
-        if (drained_ == 256 || !io_uring_cqe_iter_next(&cq_iterator_, &cqe))
+        if (drained_ == 256 || cq_cursor_.head == cq_cursor_.tail)
         {
             finish_ring();
             continue;
         }
 
+        auto *cqe = &cq_cursor_.cqes[cq_cursor_.head++ & cq_cursor_.mask];
         --owner.pending;
         auto *operation = static_cast<Operation *>(io_uring_cqe_get_data(cqe));
         accepted_ = accepted_ || (operation && operation->event == Event::accept);
@@ -524,25 +526,26 @@ void Reactor::complete(Ring &owner, Operation *operation, int result, unsigned f
 
 int Reactor::wait()
 {
-    auto &primary = rings_.front()->queue;
+    // Accept handling can grow rings, but it never runs while wait submits or polls
+    const auto owners = rings();
+    auto &primary = owners.front()->queue;
     bool deferred = false;
-    for (std::size_t index = 0; index < rings_.size(); ++index)
+    for (std::size_t index = 0; index < owners.size(); ++index)
     {
-        const auto &owner = rings_[index];
+        const auto &owner = owners[index];
         if (index)
         {
             owner->submit();
         }
         deferred = deferred || !owner->deferred_receives.empty();
     }
-    // A ready satellite bypasses the primary wait, after all pending sends are submitted
-    for (std::size_t index = 1; index < rings_.size(); ++index)
+    // Cursed: an empty SQ does not mean the primary gets a day off
+    // GETEVENTS still runs its deferred work while satellites keep the loop busy
+    for (std::size_t index = 1; index < owners.size(); ++index)
     {
-        if (io_uring_cq_ready(&rings_[index]->queue))
+        if (io_uring_cq_ready(&owners[index]->queue))
         {
-            rings_.front()->submit();
-
-            return 0;
+            return io_uring_submit_and_get_events(&primary);
         }
     }
     const bool immediate = accepted_ || previous_count_ < 2;

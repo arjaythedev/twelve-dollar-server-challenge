@@ -1,12 +1,16 @@
 #include "net/reactor.hpp"
 
 #include <arpa/inet.h>
+#include <array>
 #include <cerrno>
 #include <chrono>
 #include <cstdio>
+#include <exception>
 #include <memory>
 #include <poll.h>
 #include <stdexcept>
+#include <string>
+#include <sys/resource.h>
 #include <sys/socket.h>
 #include <thread>
 #include <unistd.h>
@@ -52,10 +56,17 @@ template <class Action> void rejects(Action &&action, const char *message)
 class Client
 {
   public:
-    explicit Client(std::uint16_t port)
+    explicit Client(std::uint16_t port, int receive_buffer = 0)
         : descriptor_(::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0))
     {
         require(descriptor_ >= 0, "client socket failed");
+        if (receive_buffer && ::setsockopt(descriptor_, SOL_SOCKET, SO_RCVBUF, &receive_buffer,
+                                           sizeof(receive_buffer)) < 0)
+        {
+            ::close(descriptor_);
+            descriptor_ = -1;
+            throw std::runtime_error("client receive buffer failed");
+        }
         sockaddr_in address{};
         address.sin_family = AF_INET;
         address.sin_port = htons(port);
@@ -94,6 +105,31 @@ class Client
     void send_byte() const
     {
         require(::send(descriptor_, "x", 1, MSG_NOSIGNAL) == 1, "client send failed");
+    }
+
+    std::size_t drain_bytes(char expected) const
+    {
+        std::array<char, 4096> buffer;
+        std::size_t total = 0;
+        while (true)
+        {
+            const auto result = ::recv(descriptor_, buffer.data(), buffer.size(), MSG_DONTWAIT);
+            if (result < 0 && errno == EINTR)
+            {
+                continue;
+            }
+            if (result < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+            {
+                return total;
+            }
+            require(result > 0, "primary send closed or failed before all bytes arrived");
+            const auto count = static_cast<std::size_t>(result);
+            for (std::size_t index = 0; index < count; ++index)
+            {
+                require(buffer[index] == expected, "primary send corrupted its payload");
+            }
+            total += count;
+        }
     }
 
     bool closed(Clock::time_point deadline) const
@@ -209,6 +245,194 @@ void reservation_and_record_guards()
         },
         "store retired before close completion");
     require(store.at(first.value) == address, "idle retirement released the live address");
+}
+
+void primary_progress_with_ready_satellite()
+{
+    struct RestoreLimit
+    {
+        RestoreLimit()
+        {
+            require(::getrlimit(RLIMIT_NOFILE, &previous) == 0, "read descriptor limit");
+        }
+
+        rlimit previous{};
+
+        ~RestoreLimit()
+        {
+            ::setrlimit(RLIMIT_NOFILE, &previous);
+        }
+    } restore;
+
+    constexpr rlim_t slots = 64;
+    require(restore.previous.rlim_cur >= slots, "primary progress test needs 64 descriptors");
+    const rlimit limited{slots, restore.previous.rlim_max};
+    require(::setrlimit(RLIMIT_NOFILE, &limited) == 0, "limit primary progress direct table");
+
+    // Send storage outlives the reactor, including failure cleanup and terminal cancellation
+    std::string payload(256 * 1024, 'y');
+    iovec vector{payload.data(), payload.size()};
+    msghdr message{};
+    message.msg_iov = &vector;
+    message.msg_iovlen = 1;
+    Reactor reactor("127.0.0.1", 0);
+    bool listener_limited = false;
+    for (int descriptor = 0; descriptor < static_cast<int>(slots); ++descriptor)
+    {
+        sockaddr_in address{};
+        socklen_t length = sizeof(address);
+        int listening = 0;
+        socklen_t option_length = sizeof(listening);
+        if (::getsockname(descriptor, reinterpret_cast<sockaddr *>(&address), &length) == 0 &&
+            address.sin_family == AF_INET && address.sin_port == htons(reactor.port()) &&
+            ::getsockopt(descriptor, SOL_SOCKET, SO_ACCEPTCONN, &listening, &option_length) == 0 &&
+            listening)
+        {
+            const int size = 4096;
+            require(::setsockopt(descriptor, SOL_SOCKET, SO_SNDBUF, &size, sizeof(size)) == 0,
+                    "limit primary send buffer");
+            listener_limited = true;
+            break;
+        }
+    }
+    require(listener_limited, "primary progress listener not found");
+    reactor.start();
+    Client peer(reactor.port(), 4096);
+    const auto setup_deadline = Clock::now() + 5s;
+    await_completion(reactor, setup_deadline);
+    reactor.begin_turn();
+    drain_turn(reactor, [](const Completion &completion) {
+        require(completion.kind == CompletionKind::control, "unexpected progress setup payload");
+    });
+    auto &connection = only_connection(reactor);
+    auto &primary = *reactor.rings().front();
+    require(&connection.ring == &primary && reactor.rings().size() == 2,
+            "reserved direct slots did not create a real satellite ring");
+    auto &satellite = *reactor.rings()[1];
+    primary.submit();
+
+    const auto add_satellite_completions = [&](unsigned count) {
+        for (unsigned index = 0; index < count; ++index)
+        {
+            io_uring_prep_nop(satellite.entry(nullptr));
+        }
+        satellite.submit();
+    };
+    add_satellite_completions(512);
+    const auto busy_turn = [&](const auto &handler) {
+        require(io_uring_cq_ready(&satellite.queue) >= 512,
+                "satellite CQ was not ready before the primary wait shortcut");
+        // No get_events, peek_cqe or readiness helper may process primary task work here
+        reactor.begin_turn();
+        drain_turn(reactor, handler);
+        require(io_uring_cq_ready(&satellite.queue) >= 256,
+                "satellite CQ became empty during the bounded production drain");
+        add_satellite_completions(256);
+    };
+    const auto shutdown = [&] {
+        reactor.request_stop();
+        const auto deadline = Clock::now() + 5s;
+        while (reactor.pending_count())
+        {
+            // Cleanup may force events only after the critical production-path checks end
+            await_completion(reactor, deadline);
+            reactor.begin_turn();
+            drain_turn(reactor, [](Completion &completion) {
+                completion.buffer.release();
+            });
+        }
+    };
+    try
+    {
+        peer.send_byte();
+        bool received = false;
+        const auto receive_deadline = Clock::now() + 2s;
+        while (!received)
+        {
+            require(Clock::now() < receive_deadline,
+                    "ready satellite starved the primary receive completion");
+            busy_turn([&](Completion &completion) {
+                if (completion.kind == CompletionKind::received)
+                {
+                    require(!received && completion.connection == &connection &&
+                                completion.result == 1 && completion.buffer.bytes().size() == 1 &&
+                                completion.buffer.bytes().front() == 'x',
+                            "primary receive lost its target or payload");
+                    completion.buffer.release();
+                    received = true;
+                }
+                else
+                {
+                    require(completion.kind == CompletionKind::control,
+                            "unexpected send before the primary send was submitted");
+                }
+            });
+        }
+
+        reactor.send(connection, message);
+        std::size_t sent = 0;
+        std::size_t delivered = 0;
+        bool partial_send = false;
+        const auto read_after = Clock::now() + 20ms;
+        const auto send_deadline = Clock::now() + 2s;
+        while (sent != payload.size() || delivered != payload.size())
+        {
+            require(Clock::now() < send_deadline,
+                    "ready satellite starved the backpressured primary send");
+            busy_turn([&](Completion &completion) {
+                if (completion.kind == CompletionKind::sent)
+                {
+                    require(completion.connection == &connection && completion.result > 0 &&
+                                static_cast<std::size_t>(completion.result) <=
+                                    payload.size() - sent,
+                            "primary send completion lost its target or byte count");
+                    sent += static_cast<std::size_t>(completion.result);
+                    if (sent != payload.size())
+                    {
+                        partial_send = true;
+                        vector.iov_base = payload.data() + sent;
+                        vector.iov_len = payload.size() - sent;
+                        reactor.send(connection, message);
+                    }
+                }
+                else
+                {
+                    require(completion.kind == CompletionKind::control,
+                            "unexpected receive while checking primary send progress");
+                }
+            });
+            if (Clock::now() >= read_after)
+            {
+                delivered += peer.drain_bytes('y');
+                require(delivered <= payload.size(), "primary send duplicated payload bytes");
+            }
+        }
+        require(partial_send, "primary send did not exercise real socket backpressure");
+
+        const auto primary_slot = connection.slot;
+        reactor.receive(connection);
+        reactor.request_stop();
+        const auto stop_deadline = Clock::now() + 2s;
+        while (!reactor.stopping() || primary.connections.at(primary_slot.value))
+        {
+            require(Clock::now() < stop_deadline,
+                    "ready satellite starved primary stop or connection retirement");
+            busy_turn([](const Completion &completion) {
+                require(completion.kind == CompletionKind::control,
+                        "unexpected application I/O while checking primary stop progress");
+            });
+        }
+        require(peer.closed(stop_deadline), "primary retirement did not deliver TCP EOF");
+        require(io_uring_cq_ready(&satellite.queue) >= 512,
+                "satellite CQ was not continuously ready through primary TCP EOF");
+    }
+    catch (...)
+    {
+        const auto failure = std::current_exception();
+        shutdown();
+        std::rethrow_exception(failure);
+    }
+    shutdown();
 }
 
 void exhausted_receive_retries()
@@ -536,11 +760,13 @@ int main()
     try
     {
         reservation_and_record_guards();
+        primary_progress_with_ready_satellite();
         exhausted_receive_retries();
         close_and_late_accept();
         ::alarm(0);
-        std::puts("I/O reservation, original-CQE lifetime, prompt TCP EOF and late-accept shutdown "
-                  "checks passed");
+        std::puts(
+            "I/O reservation, primary progress with a ready satellite, original-CQE lifetime, "
+            "prompt TCP EOF and late-accept shutdown checks passed");
 
         return 0;
     }

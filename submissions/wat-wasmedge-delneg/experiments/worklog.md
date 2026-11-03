@@ -899,3 +899,24 @@ Interleaved, 2 reps, 0 errors:
 - e49:         p50 23 / 35, p95 320 / 370, p99 550 / 690, max 1,505 / 1,554 ms, 16.2 / 17.0 us/req
 - head df9da40: p50 44 / 31, p95 420 / 355, p99 850 / 690, max 2,196 / 1,649 ms, 17.1 / 16.8 us/req
 No loss.
+
+## E50: listen, the provided-buffer ring and the fixed-file table move to the WAT via one `syscall` import (b e50) — kept
+host.c gets one generic import, `syscall(nr, a1..a6)` (i64s, -errno on failure), and the WAT now does
+socket/setsockopt/bind/listen, IORING_REGISTER_PBUF_RING (with the 6.8.0-147 retry), prlimit64 +
+IORING_REGISTER_FILES2, and publishes the buffer-ring tail itself before each `ring_go`. WASI gets the whole
+environment instead of six named variables. host.c 232 -> 202 lines.
+Tried first and dropped: mapping each ring into wasm memory (mmap MAP_FIXED at membase + offset) so the WAT
+could read and write the rings itself and `ring_go`/`ring_new` could go too. The kernel refuses it: mmap of
+an io_uring fd at a caller-chosen address returns EINVAL (io_uring's get_unmapped_area rejects any address);
+NO_MMAP on 6.8 needs one physically contiguous folio. So the rings stay mapped by C, outside wasm memory.
+42/42 (opt-box, and the clean ubuntu:24.04 container build). Interleaved, 2 reps, 0 errors:
+- e50: p50 28 / 30, p95 335 / 335, p99 570 / 570, max 1,146 / 1,249 ms, 16.0 / 16.4 us/req
+- e49: p50 32 / 33, p95 385 / 410, p99 795 / 1,000, max 1,866 / 3,080 ms, 16.3 / 16.4 us/req
+No loss. C lines: #259 195; #272 (7792fa9) 200 + 127 = 327; f3e9410 359; now 202 + 42 = 244.
+
+## Score of PR #288 (3 Nov, benchmark agent's comment at 13:41 UTC, on df9da40)
+200,000 held 5 min on the $12 box (19,619 req/s, p95 229 / p99 356 ms, 0 % errors, 68 % CPU, 32 us/req,
+712 MB peak); 210k and 220k failed the 2-minute probe on p99 (1.5 s / 4.5 s, 0 errors, 69-75 % CPU); 240k
+and 320k failed on connection refused (~80 % errors). A tie with #272, so not merged; the PR stays open.
+Our harness held 290k at ~16 us/req: the droplet spends ~2x the CPU per request, so the harness is far too
+lenient on CPU and tail latency (see M3's hash-chain gap) even though it reproduced the refusals.

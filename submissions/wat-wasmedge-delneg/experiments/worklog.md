@@ -844,3 +844,9 @@ stops pinning) but must be A/B'd on its own (E47); don't headline 300k; the harn
 softirq on the server's one vCPU (on loopback it runs on the client's CPUs) or the scorer's back-to-back probes.
 Rejected: DeepSeek's tcp_mem formula again (/8; opt-box measures /16), the fd-limit worry (fixed-file slots
 don't count against LimitNOFILE; the scorer held 270k with f220565).
+
+## E47: code locking on/off (3 Nov, b46, PIN=0 by env), 5-minute holds at 290k — kept
+Interleaved, 2 reps, 0 errors, ~0 MB read:
+- pinned: p50 21 / 29, p95 315 / 350, p99 530 / 575, max 1,015 / 1,227 ms
+- PIN=0:  p50 44 / 30, p95 395 / 345, p99 720 / 605, max 2,050 / 1,679 ms
+A modest gain in p99 and max. With E45, four 5-minute holds at 290k passed with 8,000 frames and pinning.

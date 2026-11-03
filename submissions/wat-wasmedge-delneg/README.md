@@ -48,23 +48,34 @@ downloaded by `build.sh`:
 - **SQLite:** WAL, `synchronous=NORMAL`, persistent prepared statements, 64 MiB page cache,
   `temp_store=MEMORY` (WASI has no temp directory). WASI has no shared memory, so the connection runs with
   `locking_mode=EXCLUSIVE` (the WAL index lives in its heap); it is the only connection anyway.
-  With no thread or fork in WASI, checkpoints run on the event loop, every 128,000 frames (500 MiB of
-  WAL) instead of SQLite's default 1,000, so one comes every ~25 s at 300,000 users.
-- **WAL flusher thread.** A checkpoint starts by syncing the WAL, which by then holds up to 500 MiB, and
-  the loop waits for it. A thread in `host.c` calls `fdatasync` on the WAL file (through its own
+  With no thread or fork in WASI, checkpoints run on the event loop, every 8,000 frames (32 MiB of
+  WAL) instead of SQLite's default 1,000, so one comes every ~2 s at 300,000 users.
+- **WAL flusher thread.** A checkpoint starts by syncing the WAL, and the loop waits for it. A thread in `host.c` calls `fdatasync` on the WAL file (through its own
   descriptor) every 100 ms, so that sync finds little left to write. It only makes data durable sooner;
   SQLite still makes every sync it would make anyway. At 280,000 users this halved p95 and p99 (below).
 - **Checkpoints are SQLite's own.** `wal_autocheckpoint` is off and a WAL hook records the WAL's size
-  after each commit; once it reaches `CKPT_FRAMES` (128,000), the WAT calls
+  after each commit; once it reaches `CKPT_FRAMES` (8,000), the WAT calls
   `sqlite3_wal_checkpoint_v2(PASSIVE)` after the batch's responses are sent, so that batch does not wait
   for it (the loop does: the copy and the syncs run on it). SQLite does every step and every sync itself,
   through its public API only. `CKPT_AUTO=1` uses `sqlite3_wal_autocheckpoint(CKPT_FRAMES)` instead (the
   checkpoint then runs inside the commit). Each checkpoint stops the loop for a time that grows only
-  slowly with its size, so fewer, larger ones give a better tail: at 300,000 users p99 went from 410-480 ms
-  at 16,000 frames to 143-270 ms at 128,000 (below). The WAL then takes up to ~500 MiB on disk and in the
-  page cache; with `MemoryMax=1200M` the server still ran without errors. An earlier build skipped the
-  checkpoint's database sync and sent it to io_uring, which meant writing SQLite's internal `nBackfill`;
-  that is gone.
+  slowly with its size, so on a box with plenty of memory fewer, larger ones give the better tail (#272
+  used 128,000 frames, 500 MiB of WAL). On the 2 GB box that WAL doesn't stay in the page cache, which is
+  what capped #272 at 200,000 users (next point); 8,000 frames is the size that held best there. An earlier
+  build skipped the checkpoint's database sync and sent it to io_uring, which meant writing SQLite's
+  internal `nBackfill`; that is gone.
+- **Memory on the 2 GB box.** Each open connection costs the kernel ~3.8 KiB (socket, inode, file,
+  dentry) plus ~0.35 KiB for its pending io_uring receive, so 300,000 users take ~1.2 GB before the
+  server does anything. What is left for the page cache is small, and the kernel evicts file pages as the
+  ramp ends: the database, the WAL and our own machine code. With one loop thread, every evicted page it
+  needs is a wait on the disk; meanwhile every user's next request queues in the kernel (each holds at
+  least a page of TCP memory), TCP memory passes its limit, and in the end the OOM killer takes the
+  server. That is the "connection refused" #272 got from 210,000 users on. Three changes keep the loop
+  off the disk: the small WAL above (it stays cached), `mlock` on the code (the WAL thread in `host.c`
+  locks app.so's code and the pages of the libraries' code in use, ~7 MiB, within the default 8 MiB
+  `RLIMIT_MEMLOCK`; `PIN=0` turns it off), and the 18 MiB connection tables are no longer zeroed at start,
+  so slots that are never used never become resident. SQLite's 64 MiB page cache holds the hot pages in
+  the process's own memory, which the kernel can't evict (no swap).
 - **A page-cache fix in the glue.** perf showed `pcache1Truncate` at 1.2% of the CPU. Each commit calls
   it with the database's size, and about one commit in ten made it walk all 8,192 hash slots (~250 µs).
   The cause is SQLite's `balance_nonroot`, which swaps two pages through a temporary page number, the
@@ -92,13 +103,37 @@ downloaded by `build.sh`:
 
 ## Measured
 
-**Scorer-like load, Synteq.** A rented 8 vCPU box with the grader droplet's CPU (Xeon Platinum 8260) and
+**A harness that fails where the scorer did.** Our earlier bench box (below) held 300,000 users with #272,
+which then scored 200,000: on the real 2 GB droplet it was OOM-killed after the ramp ("connection refused"
+from 210,000 on). `experiments/worklog.md` (S14, E37-E47, C1) has how we reproduced that. The harness, on
+the same rented 8 vCPU box: the server is a systemd unit as a non-root user, `LimitNOFILE=65535`, every
+other limit at systemd's default (8 MiB of locked memory), on CPU 0; a memory hog leaves the server what a
+1,967 MB box would, after the load generator's own memory (11.5 KiB per user, measured); `tcp_mem` at
+twice a 2 GB box's default, since on loopback it also carries the load generator's sockets. We fitted the
+hog to a build the scorer has scored: f220565 held 270,000 there and failed at 280,000, and it does the
+same here. What this harness can't show: on loopback the kernel's receive work for the
+server's sockets runs on the load generator's CPUs, while the droplet's single vCPU pays for it, and
+the scorer's probes run back to back.
+
+5-minute holds there (our numbers, not the scorer's), 0 errors in all of them:
+
+| build | users | p95 (ms) | p99 (ms) |
+|---|---|---|---|
+| the same with 4,000 frames (f3e9410) | 280,000 | 280 | 480 |
+| this one | 290,000 (4 holds) | 325, 345, 315, 350 | 600, 585, 530, 575 |
+| this one, without the code locking (`PIN=0`) | 290,000 | 395, 345 | 720, 605 |
+| this one | 300,000 | 440, 625 | 795, 1,945 (in the second the ramp's end evicted the WAL, and checkpoints read it back from disk) |
+| this one | 310,000 | 535 | 1,290 |
+
+At 290,000 users: ~30.4k req/s, ~87% of the CPU (~28.5 µs per request), RSS 115-160 MB.
+
+**Earlier: scorer-like load, Synteq.** A rented 8 vCPU box with the grader droplet's CPU (Xeon Platinum 8260) and
 kernel (6.8.0). The server runs alone on CPU 0 in a scope with `MemoryMax=2G`, with `LimitNOFILE=65535`;
 the load generator (`ul`, C, the `bench/load.js` user loop with its real think times, one keep-alive
 connection per user, 32 source addresses) runs on CPUs 1-7. 60 s ramp, then the measured window.
 `experiments/worklog.md` has every run, including the changes that didn't help.
 
-5-minute holds with SQLite's own checkpoint every 128,000 frames (this commit): at 300,000 users,
+5-minute holds with SQLite's own checkpoint every 128,000 frames (#272): at 300,000 users,
 31.7k req/s, p50 2.1 ms, **p95 82 ms, p99 330 ms, 0 errors**, max 1.1 s, 91% of the CPU (28.8 µs per
 request), 1,210 MB peak (cgroup, page cache included); two earlier holds of the same setting gave p95 63
 and 46 ms / p99 325 and 305 ms, against p95 141 and 152 / p99 425 and 460 every 64,000 frames. At 320,000
@@ -120,7 +155,7 @@ five holds). 330,000 and 340,000 users fail on CPU (97-98%).
 | SQLite's own checkpoint, every 16,000 frames | 300,000 | 225, 255, 265 | 430, 505, 510 | 27.8-28.2 µs |
 | same, with `wal_autocheckpoint` (`CKPT_AUTO=1`) | 300,000 | 250, 255, 275 | 515, 495, 575 | 27.5-28.1 µs |
 | SQLite's own checkpoint, every 64,000 frames | 300,000 | 66, 52, 48 | 230, 210, 193 | 28.1-28.7 µs |
-| SQLite's own checkpoint, every 128,000 frames (this commit) | 300,000 | 24, 51, 28 | 181, 270, 143 | 28.3-29.0 µs |
+| SQLite's own checkpoint, every 128,000 frames (#272) | 300,000 | 24, 51, 28 | 181, 270, 143 | 28.3-29.0 µs |
 | objc-uring-delneg, for reference (1 run) | 280,000 | 11.2 | 23.4 | 25.5 µs |
 
 At 320,000 users the server is at 91-94% of its one CPU, so CPU per request is the next limit.

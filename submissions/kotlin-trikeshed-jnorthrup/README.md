@@ -14,7 +14,7 @@ Node.js and WASI (wasmtime). [BENCHMARK.md](BENCHMARK.md) has every runtime buil
 | HTTP | own, on io_uring: rings with sparse direct-descriptor tables, provided buffers and one response arena (`server/src/nativeInterop/cinterop/feedc.def`, liburing vendored in TrikeShed); sockets live outside the descriptor table |
 | SQLite | 3.54.0 amalgamation, compiled by `build.sh` and linked into `feed.kexe`; the download is checked against the SHA3-256 sqlite.org publishes. `sqlite3.c` is not changed: `server/src/nativeInterop/feedbt.c` includes it whole and adds the B-tree read plans for `GET /feed` and `GET /posts/:id` |
 | Driver | Kotlin/Native cinterop calls into that SQLite (`feedc.def`) |
-| Libraries | TrikeShed (HMAC-SHA256 for JWT, SHA-3, the I/O layer), compiled from the checkout `trikeshed/TrikeShed`: the files listed in `trikeshed/sources.txt`, at the commit pinned in `build.sh` |
+| Libraries | TrikeShed (HMAC-SHA256 for JWT, SHA-3, the I/O layer): the server imports `borg.trikeshed:TrikeShed:0.1.0-20280e867`, every target built by TrikeShed's own build at the commit pinned in `build.sh` and hosted on this fork's branch `trikeshed-m2` (the repository URL is in `settings.gradle.kts`). The load generator still compiles the files listed in `trikeshed/sources.txt` from the checkout `trikeshed/TrikeShed` |
 
 ## Nginx or direct
 

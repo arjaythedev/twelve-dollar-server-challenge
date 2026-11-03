@@ -62,7 +62,16 @@ kotlin {
     sourceSets {
         val commonMain by getting {
             dependencies {
-                implementation(project(":trikeshed"))
+                // TrikeShed as a library, by coordinates (settings.gradle.kts names the repository). Its JVM POM carries
+                // the Oroboros daemon's runtime (GraalVM polyglot, Compose, jmh, scripting); the server loads none of it.
+                implementation("borg.trikeshed:TrikeShed:0.1.0-20280e867") {
+                    for (g in listOf("org.graalvm.polyglot", "org.graalvm.python", "org.graalvm.truffle", "dev.truffleruby",
+                        "org.gwtproject.web.bindery", "org.jetbrains.compose.desktop", "org.jetbrains.compose.foundation",
+                        "org.jetbrains.compose.material3", "org.jetbrains.compose.material", "org.jetbrains.compose.ui",
+                        "org.openjdk.jmh", "org.ow2.asm", "org.xerial", "com.github.luben", "org.slf4j")) exclude(group = g)
+                    for (m in listOf("kotlin-scripting-common", "kotlin-scripting-jvm", "kotlin-scripting-jvm-host"))
+                        exclude(group = "org.jetbrains.kotlin", module = m)
+                }
                 // SctpFeed's owner loop suspends in the reactor (TRANSPORT=sctp): the version the trikeshed slice pins.
                 implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0")
             }

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Builds bin/server as a normal user. Downloads the two pinned C dependencies (checksummed),
-# compiles app.goose to C with the pinned Goose compiler, and links it with net.c and db.c.
+# compiles app.goose to C with the pinned Goose compiler, and links it with uring.c and sqlite.c.
 # Profile-guided: SQLite and the whole program are each trained at build time on a synthetic
 # database of their own (never the challenge seed). PGO=0 skips the training.
 set -euo pipefail
@@ -61,7 +61,7 @@ sqlite_defs=(
   -DHAVE_FDATASYNC=1 -DHAVE_USLEEP=1
 )
 libs=(.deps/liburing/src/liburing.a -lm -pthread)
-units=(.build/app.c net.c db.c)
+units=(.build/app.c uring.c sqlite.c)
 
 extra_objs=()
 compile() { # compile <extra flags...>: every unit, then link
@@ -69,7 +69,7 @@ compile() { # compile <extra flags...>: every unit, then link
   for u in "${units[@]}"; do
     local o=.build/$(basename "${u%.c}").o
     local defs=()
-    [[ $u == db.c ]] && defs=("${sqlite_defs[@]}")
+    [[ $u == sqlite.c ]] && defs=("${sqlite_defs[@]}")
     "$cc" "${common[@]}" "${defs[@]}" "$@" -c "$u" -o "$o"
     objs+=("$o")
   done

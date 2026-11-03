@@ -130,48 +130,65 @@ SQLITE_PATH=... JWT_SECRET=... HOST=0.0.0.0 PORT=80 bash start.sh
 ## Measurements on x86
 
 These are from EC2, not the benchmark box, and they are not a prediction of a score there. `m5n.large` (Xeon 8259CL, Cascade
-Lake like the benchmark box's 8260), booted with one CPU and 2 GB, kernel 6.8, MTU 1500, a separate load generator running
-the `bench/load.js` user model with k6-shaped requests (not k6 itself), each run on a fresh database. CPU per request counts
-the whole box, softirq included. Results shift between instances, so compare only within a table.
+Lake like the benchmark box's 8260), booted with one CPU and 2 GB, kernel 6.8, MTU 1500, a separate load generator, each run on
+a fresh database, `MemoryMax=1750M` (the leaderboard says the app is capped at 1,750 MB but not how, so that is an assumption).
+Compare only within a table: results shift between instances and sessions.
 
-rust-iouring-kensac was tested at two commits: `a08915f` on main, which is its merged #248 code (270,000 on the
-leaderboard), and `4298101`, its unmerged #264 (the 310,000 row).
+Commits: this entry at `40bf738`; rust-iouring-kensac at `4298101`, its unmerged #264 (the 310,000 row).
 
-| 250,000 users, 3 interleaved rounds | us CPU/request, whole box | each round |
+CPU per request, whole box, softirq included, 250,000 users, 3 interleaved rounds, own load generator with k6-shaped requests:
+
+| | us/request | rounds |
 |---|---:|---|
-| this entry | 16.36 | 16.34, 16.36, 16.38 |
-| rust-iouring-kensac #264 | 17.48 | 17.65, 17.45, 17.33 |
-| rust-iouring-kensac #248 | 17.53 | 17.88, 17.32, 17.38 |
+| this entry | 17.34 | 17.20, 17.38, 17.44 |
+| rust-iouring-kensac #264 | 18.23 | 18.17, 18.38, 18.14 |
 
-Taking one thing away at a time from an earlier build, one run each on another instance, so treat these as rough: huge pages
-about 4%, the escaping scan about 4%, the send pool about 1%. Tried and not kept: moving the program text onto a huge page and
-static linking (level), 1,024 x 1 KB receive buffers (same CPU, but p95 over the ramp went from 7 to 118 ms), and `mmap`
-instead of the page cache (4% more CPU).
-
-5-minute holds with a 60 s ramp, with a real-time process spinning for 20% of the CPU to slow the core down. That share is an
-approximation, not a calibration against the benchmark box:
+Holds with `mload` (`bade685`, think scale 1, 60 s timeout), 60 s ramp, 5 minutes, with a real-time process spinning for 20% of
+the CPU to slow the core down. That share is an approximation, not a calibration, though it does put #264's limit where its
+scoring comment does. Fail means p99 over 1 s with no errors; OOM means the process was killed:
 
 | Users | this entry | rust-iouring-kensac #264 |
 |---|---|---|
-| 310,000 | pass, p99 20 ms, 76% busy | pass, p99 52 ms, 78% busy |
-| 330,000 | 2 passes (p99 29 and 35 ms, 80% busy), and 1 out of memory at the end of a ramp | out of memory after about 4 minutes (1 run) |
+| 310,000 | pass, p99 194 ms, WAL 46 MB | pass, p99 170 ms, WAL 49 MB |
+| 320,000 | pass (p99 210 ms) and fail (1.06 s), WAL 54, 78 MB | fail twice (7.9, 5.3 s), WAL 151, 131 MB |
+| 330,000 | fail twice (6.7, 1.66 s), WAL 121, 78 MB | fail twice (50, 43 s), WAL 46, 94 MB |
+| 340,000 | OOM twice, at 190 and 148 s | OOM twice, at 332 and 356 s |
 
-Near 330,000 the margin is thin: memory, not CPU, ended those runs. One pass was also killed for memory a second after every
-client disconnected at once, past the end of its scored window. Past about 350,000 connections the box runs out of memory on a
-slow ramp (kensac #248, about 360,000).
+Three freezes (SIGSTOP) at 300,000 users, 3 rounds for 2 s and 2 for 1 s and 4 s, own load generator. Share of all requests over
+1 s, and time until under 1% of requests take over 100 ms:
 
-This entry recovers from a stall worse than #264 does, which reads in bounded rounds after a burst. Three 2-second freezes at
-300,000 users, one run each: both fail p99 (2.7 and 3.2 s), but p95 over the run is 1,438 ms here and 68 ms for #264.
+| Freeze | this entry | rust-iouring-kensac #264 | TCP memory peak (limits 113 and 170 MB) |
+|---|---|---|---|
+| 1 s | 1.73, 1.65%; 2 to 3 s | 2.19, 2.25%; 2 to 4 s | about 125 MB |
+| 2 s | 4.82, 4.71, 4.69%; 4 to 5 s | 5.88, 5.55, 5.81%; 4 to 7 s | 231 to 251 MB |
+| 4 s | 10.16, 10.15%; 5 to 7 s | 10.61, 10.82%; 5 to 9 s | 500 to 514 MB |
 
-A build from clean on the same 2 GB box without swap peaks at 315 MB (maximum resident set size) in 1:38. `test/test.sh` passes
-all 42. `kill -9` under write load, during checkpoints: all 547,182 acknowledged writes present after restart, `integrity_check` ok.
+The answer and read bounds come from a sweep with the same 2 s freezes, 2 rounds each, share over 1 s: 1,024 answers and 4,096
+reads 4.72, 4.73%; 1,024 and 8,192 4.61, 4.59%; 1,024 and 2,048 4.71, 5.18%; 2,048 and 4,096 5.80, 4.85%; 3,000 and 4,096 4.94,
+5.01%; 3,000 and 8,192 4.94, 4.83%. The differences among the 1,024 rows are within noise.
+
+Tried and not kept: moving the program text onto a huge page and static linking (level), 1,024 x 1 KB receive buffers (same CPU,
+but p95 over the ramp went from 7 to 118 ms), `mmap` instead of the page cache (4% more CPU), and answering the backlog before new
+arrivals. Removing one addition at a time from an earlier build, one run each, so rough: huge pages about 4%, the escaping scan
+about 4%, the send pool about 1%.
+
+Without the spinning process, `mload` at 310,000 and 320,000 users held 5 minutes (p99 73 and 130 ms, WAL 53 and 43 MB, one run each);
+at 340,000 this box runs out of memory or crawls (p99 43 and 52 s, WAL 58 and 124 MB, 2 runs). With the spinning process and my
+load generator, 330,000 failed for both entries (this entry p99 38 s and one OOM; #264 p99 48 and 46 s, 2 runs each). So 330,000
+is past what this box holds reliably, whatever the generator.
+
+A build from clean on the same 2 GB box without swap peaks at 315 MB (maximum resident set size) in 1:40. `test/test.sh` passes all
+42. `kill -9` under write load, during checkpoints: all 552,425 acknowledged writes present after restart, `integrity_check` ok,
+WAL 136 MB.
 
 ## Credits
 
-Code adapted from rust-iouring-kensac (`csrc/shim.c`, #248 and #264): the checkpoint state machine and thread, `count_likes`,
-and the seek and `KeyInfo` helpers, including some names and comments. Ideas from the same entry: bounded reads and answers after a burst (#264, written here for this structure, with the constants and the answer order chosen by the sweep), B-tree cursor reads, the
-`unix-excl` VFS, page cache over `mmap`, write holds, `SO_REUSEPORT` listeners and `DEFER_TASKRUN` on every ring. The `resv[0]`
-retry is also from rust-iouring-kensac and from c-iouring-pavlyhalim (#245).
+Code adapted from rust-iouring-kensac (`csrc/shim.c`, #248 and #264): `key_info`, `seek_row`, `rootpage`, `layout_is`, `prep` and
+the setup of the index seek in `likes_from` follow it closely, including some names. Ideas from the same entry: B-tree cursor
+reads, the `unix-excl` VFS, page cache over `mmap`, a low-priority checkpoint thread with write holds, `SO_REUSEPORT` listeners,
+`DEFER_TASKRUN` on every ring, and bounded reads and answers after a burst (#264). Checkpoint coordination and the likes count
+were rewritten for this entry, and its bounds and answer order were chosen by the sweep above. The `resv[0]` retry is also from
+rust-iouring-kensac and from c-iouring-pavlyhalim (#245).
 
 ## Earlier measurements (arm64, before the B-tree reads)
 

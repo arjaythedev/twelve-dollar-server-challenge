@@ -47,7 +47,7 @@ statements cache only query plans, as allowed by rule 5.
   automatic checkpoint; moving checkpoints to a helper or disabling them was measured
   and worse on this box.
 - **Multishot transport.** Accept and receive are multishot io_uring operations. Receives
-  use registered provided-buffer rings with two 32,768-buffer groups of 1 KiB per shard.
+  use one registered provided-buffer ring of 32,768 1 KiB buffers per shard.
   Each ring uses a 16,384-entry completion queue. Four rings are the default: they cover
   the 260,000 direct-connection slots without exhausting the io_uring locked-memory
   budget, while five rings measured slower at the same load.

@@ -26,7 +26,7 @@ const (
 	readCqEntries = 8192
 	readBufCount  = 32768
 	readBufLen    = 1024
-	readBufGroups = 2
+	readBufGroups = 1
 )
 
 type readBuf struct {

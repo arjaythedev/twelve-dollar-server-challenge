@@ -75,8 +75,9 @@ Connection open(const std::string &path)
     {
         throw std::runtime_error(raw ? sqlite3_errmsg(raw) : "database open failed");
     }
+    // Evicted WAL pages are cold; shrink on reuse so later writes append without rereads
     execute(raw, "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON;"
-                 "PRAGMA cache_size=-16384;");
+                 "PRAGMA cache_size=-16384; PRAGMA journal_size_limit=0;");
     return db;
 }
 
@@ -145,12 +146,13 @@ class Checkpoints
 #endif
                 result = sqlite3_wal_checkpoint_v2(db_.get(), "main", SQLITE_CHECKPOINT_PASSIVE,
                                                    &frames, &checkpointed);
+                if (result == SQLITE_OK)
+                {
+                    tds_wal_drop_checkpointed(db_.get(), checkpointed);
+                }
             }
 #ifdef TDS_DIAGNOSTICS
-            if (frames >= 0 && checkpointed >= 0 && checkpointed <= frames)
-            {
-                timings.backlog.record(static_cast<std::uint64_t>(frames - checkpointed));
-            }
+            timings.record_wal(frames, checkpointed);
             timings.report();
 #endif
             const bool busy = result == SQLITE_BUSY || result == SQLITE_LOCKED;
@@ -473,7 +475,8 @@ class Store::State
               FROM posts p JOIN users u ON u.id = p.user_id
               WHERE p.id = ?
           )sql"),
-          create(db.get(), "INSERT INTO posts(user_id,body) VALUES(?,?) RETURNING id,created_at"),
+          create(db.get(), "INSERT INTO posts(user_id,body) VALUES(?,?)"),
+          created_at(db.get(), "SELECT created_at FROM posts WHERE id=?"),
           exists(db.get(), "SELECT 1 FROM posts WHERE id=?"), like(db.get(), R"sql(
               INSERT INTO likes(user_id, post_id) VALUES(?, ?)
               ON CONFLICT(user_id, post_id) DO NOTHING
@@ -503,16 +506,25 @@ class Store::State
 
     CreatedPost create_post(UserId user_id, std::string_view body)
     {
-        auto query = create.use();
-        query.bind(1, user_id.value);
-        query.bind(2, body);
-        if (!query.next())
         {
-            throw std::runtime_error("insert returned no row");
+            auto query = create.use();
+            query.bind(1, user_id.value);
+            query.bind(2, body);
+            while (query.next())
+            {
+            }
         }
 
-        CreatedPost result{PostId{query.number(0)}, {}};
-        const auto timestamp = query.text(1);
+        // Read SQLite's stored default, keeping timestamp generation inside the database
+        CreatedPost result{PostId{sqlite3_last_insert_rowid(db.get())}, {}};
+        auto query = created_at.use();
+        query.bind(1, result.id.value);
+        if (!query.next())
+        {
+            throw std::runtime_error("inserted post could not be read");
+        }
+
+        const auto timestamp = query.text(0);
         if (timestamp.size() != result.created_at.size())
         {
             throw std::runtime_error("insert returned an invalid timestamp");
@@ -606,6 +618,7 @@ class Store::State
     Statement feed;
     Statement post;
     Statement create;
+    Statement created_at;
     Statement exists;
     Statement like;
     // One synchronous issuer reuses these controls after each read or write transaction finishes

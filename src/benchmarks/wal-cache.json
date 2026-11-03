@@ -1,0 +1,292 @@
+{
+  "date": "2026-11-03",
+  "baseline_sha256": "51eb390d316dd7bf14600f031586bdb9513ec4670f2663c208332b9891cd97ea",
+  "eviction_sha256": "f2df0483708b2bd6c21ba2ed37da2b77411ca1e6a81075e854e426e7ac463c7b",
+  "mini": {
+    "users": 50000,
+    "seed": 42,
+    "ramp_s": 20,
+    "hold_s": 20,
+    "down_s": 5,
+    "grace_s": 5,
+    "runs": [
+      {
+        "variant": "A",
+        "requests": 210699,
+        "hold_p99_ms": 6.19174593,
+        "quiet_file_bytes": 267988992,
+        "peak_bytes": 550490112,
+        "cpu_us_per_request": 54.83574672874575
+      },
+      {
+        "variant": "B",
+        "requests": 211028,
+        "hold_p99_ms": 6.03869578,
+        "quiet_file_bytes": 255471616,
+        "peak_bytes": 555773952,
+        "cpu_us_per_request": 55.008932463938436
+      },
+      {
+        "variant": "B",
+        "requests": 210336,
+        "hold_p99_ms": 5.762952,
+        "quiet_file_bytes": 254951424,
+        "peak_bytes": 534216704,
+        "cpu_us_per_request": 52.163329149551195
+      },
+      {
+        "variant": "A",
+        "requests": 210596,
+        "hold_p99_ms": 5.52954106,
+        "quiet_file_bytes": 261500928,
+        "peak_bytes": 571928576,
+        "cpu_us_per_request": 55.661194894489924
+      }
+    ]
+  },
+  "wal_residency": {
+    "mini": {
+      "wal_bytes": 67671032,
+      "frames": 16425,
+      "checkpointed": 16425,
+      "cached_before_bytes": 67674112,
+      "cached_after_bytes": 8192,
+      "advice_offset": 4096,
+      "advice_length": 67665920,
+      "advice_rc": 0,
+      "advice_wall_ns": 11431819,
+      "fresh_read_passed": true
+    },
+    "docker": {
+      "wal_bytes": 67671032,
+      "frames": 16425,
+      "checkpointed": 16425,
+      "cached_before_bytes": 67674112,
+      "cached_after_bytes": 8192,
+      "advice_offset": 4096,
+      "advice_length": 67665920,
+      "advice_rc": 0,
+      "advice_wall_ns": 8816607,
+      "fresh_read_passed": true
+    }
+  },
+  "docker": {
+    "baseline": {
+      "name": "wal-cache-docker-20261103T154703Z-1-a",
+      "passed": true,
+      "p99_ms": 57.69298827
+    },
+    "eviction_attempt": {
+      "name": "wal-cache-docker-20261103T154703Z-2-b",
+      "passed": false,
+      "hold_live_connections": 3909,
+      "wal_bytes": 795192,
+      "io_stall_s": 45.134668,
+      "eviction_threshold_reached": false
+    },
+    "diagnostic_repeat": {
+      "name": "wal-cache-docker-diagnostic-20261103T155225Z-1-diagnostic",
+      "passed": true,
+      "p99_ms": 54.03605475,
+      "advice_results": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "io_stall_s": 25.78642
+    }
+  },
+  "reuse_probe": {
+    "filesystem": "ext4",
+    "initial_wal_bytes": 67671032,
+    "writes": 4096,
+    "body_bytes": 3500,
+    "keep": {
+      "read_bytes": 51556352,
+      "write_wall_ns": 476895737,
+      "final_frames": 12538,
+      "fresh_read_passed": true
+    },
+    "journal_size_limit_0": {
+      "read_bytes": 12288,
+      "write_wall_ns": 81924658,
+      "final_frames": 12538,
+      "fresh_read_passed": true
+    }
+  },
+  "mini_200k_ext4": {
+    "users": 200000,
+    "seed": 42,
+    "ramp_seconds": 90,
+    "hold_seconds": 60,
+    "runs": [
+      {
+        "variant": "A",
+        "eviction": false,
+        "journal_size_limit": -1,
+        "requests": 2549732,
+        "peak_bytes": 1667235840,
+        "hold_p99_ms": 6.7944122,
+        "physical_read_bytes": 0,
+        "errors": 0
+      },
+      {
+        "variant": "B",
+        "eviction": true,
+        "journal_size_limit": -1,
+        "requests": 2548293,
+        "peak_bytes": 1418498048,
+        "hold_p99_ms": 74.60529655,
+        "physical_read_bytes": 1547354112,
+        "errors": 0
+      },
+      {
+        "variant": "C",
+        "eviction": true,
+        "journal_size_limit": 0,
+        "requests": 2548677,
+        "peak_bytes": 1387032576,
+        "hold_p99_ms": 7.81255438,
+        "physical_read_bytes": 3735552,
+        "errors": 0
+      }
+    ],
+    "raw_summary": "results/vm-200000-ext4-C-20261103T163924Z/summary.json"
+  },
+  "docker_100k_limits": {
+    "networking_mode": "mirrored",
+    "target_activation_on_time": false,
+    "users": 100000,
+    "seed": 42,
+    "ramp_seconds": 30,
+    "hold_seconds": 60,
+    "source_ips": 64,
+    "diagnostics": false,
+    "order_mib": [
+      0,
+      4,
+      16
+    ],
+    "runs": [
+      {
+        "journal_size_limit": 0,
+        "requests": 581721,
+        "hold_p99_ms": 257.24157625,
+        "peak_bytes": 571658240,
+        "physical_read_bytes": 1961984,
+        "cpu_us_per_request": 28.64727248973305,
+        "quiet_file_bytes": 258088960,
+        "quiet_wal_bytes": 2282512
+      },
+      {
+        "journal_size_limit": 4194304,
+        "requests": 582631,
+        "hold_p99_ms": 405.77698536,
+        "peak_bytes": 557445120,
+        "physical_read_bytes": 285790208,
+        "cpu_us_per_request": 29.88118036973659,
+        "quiet_file_bytes": 257589248,
+        "quiet_wal_bytes": 4194304
+      },
+      {
+        "journal_size_limit": 16777216,
+        "requests": 587167,
+        "hold_p99_ms": 351.850633,
+        "peak_bytes": 568619008,
+        "physical_read_bytes": 399106048,
+        "cpu_us_per_request": 29.282803699799206,
+        "quiet_file_bytes": 257224704,
+        "quiet_wal_bytes": 16777216
+      }
+    ],
+    "decision": "No WAL-setting change based on these runs; mirrored networking distorted activation.",
+    "limitations": "One run per limit; delayed activation under WSL mirrored networking; no steady hold comparison.",
+    "raw_summary": "results/wal-limits-docker-100000-20261103T174211Z-report.json"
+  },
+  "docker_100k_paths": {
+    "networking_mode": "mirrored",
+    "target_activation_on_time": false,
+    "users": 100000,
+    "seed": 42,
+    "ramp_seconds": 30,
+    "hold_seconds": 60,
+    "source_ips": 64,
+    "diagnostics": false,
+    "runs": [
+      {
+        "wal_cache_eviction": false,
+        "journal_size_limit": -1,
+        "requests": 605395,
+        "hold_p99_ms": 275.0576731,
+        "peak_bytes": 586203136,
+        "quiet_file_bytes": 279064576,
+        "quiet_wal_bytes": 23142072,
+        "physical_read_bytes": 16384,
+        "io_full_stall_s": 53.136882,
+        "cpu_us_per_request": 26.84155964287779
+      },
+      {
+        "wal_cache_eviction": true,
+        "journal_size_limit": 0,
+        "requests": 604047,
+        "hold_p99_ms": 286.28518441,
+        "peak_bytes": 527327232,
+        "quiet_file_bytes": 256290816,
+        "quiet_wal_bytes": 568592,
+        "physical_read_bytes": 1884160,
+        "io_full_stall_s": 52.35708,
+        "cpu_us_per_request": 27.647224470943485
+      }
+    ],
+    "limitations": "One serial pair; WSL mirrored source-bind overhead delayed both ramps. PSI I/O includes network CQ waits.",
+    "raw_summary": "results/wal-paths-docker-100000-20261103T175406Z-report.json"
+  },
+  "docker_nat_350k_eviction": {
+    "users": 350000,
+    "seed": 42,
+    "ramp_seconds": 60,
+    "hold_seconds": 60,
+    "source_ips": 64,
+    "journal_size_limit": 0,
+    "networking_mode": "nat",
+    "diagnostics": false,
+    "runs": [
+      {
+        "wal_cache_eviction": false,
+        "requests": 4182233,
+        "hold_requests": 2220836,
+        "hold_p95_ms": 4.85080475,
+        "hold_p99_ms": 11.01058795,
+        "hold_max_ms": 159.70005,
+        "peak_bytes": 1586458624,
+        "hold_median_file_bytes": 524898304,
+        "sampled_peak_file_bytes": 903008256,
+        "quiet_file_bytes": 282357760,
+        "physical_read_bytes": 24576,
+        "cpu_us_per_request": 23.613099748388002,
+        "target_activation_seconds": 60.000047998,
+        "passed": true
+      },
+      {
+        "wal_cache_eviction": true,
+        "requests": 4182593,
+        "hold_requests": 2220636,
+        "hold_p95_ms": 4.6182095,
+        "hold_p99_ms": 5.77432464999,
+        "hold_max_ms": 18.080598,
+        "peak_bytes": 1002618880,
+        "hold_median_file_bytes": 265289728,
+        "sampled_peak_file_bytes": 282480640,
+        "quiet_file_bytes": 279359488,
+        "physical_read_bytes": 2822144,
+        "cpu_us_per_request": 23.444239733581536,
+        "target_activation_seconds": 60.000043195,
+        "passed": true
+      }
+    ],
+    "limitations": "One serial pair; 60-second holds.",
+    "raw_summary": "results/wal-eviction-nat-docker-350000-20261103T183941Z-report.json"
+  },
+  "raw_mini": "results/wal-cache-mini-20261103T154627Z/comparison.json"
+}

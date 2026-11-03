@@ -10,6 +10,10 @@ extern "C"
 
     typedef struct tds_btree tds_btree;
 
+    /* Best-effort Linux cache eviction on the exclusively owned checkpoint handle
+     * Only call after a successful checkpoint; the file and its contents stay unchanged */
+    void tds_wal_drop_checkpointed(sqlite3 *db, int frames);
+
     typedef struct tds_btree_post
     {
         sqlite3_int64 id;

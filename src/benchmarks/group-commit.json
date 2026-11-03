@@ -986,5 +986,44 @@
       "reference_constraint_difference": "Inspected Pavly and Kensac builds do not enable foreign keys; these comparisons retain foreign_keys=ON",
       "values_control_flow": "Fresh insert: one VALUES statement; duplicate: direct lookup; genuine FK error: classify missing post in the same active transaction"
     }
+  },
+  "create_readback": {
+    "sqlite": "3.53.1",
+    "implementation": "production Store::commit, unix-excl, FK enabled",
+    "jobs_per_sample": 20000,
+    "order": [
+      "reference",
+      "readback",
+      "readback",
+      "reference"
+    ],
+    "cpu_scope": "process; Store open/close and checkpoint worker included; fixture and verification excluded",
+    "reference": "INSERT VALUES RETURNING id,created_at",
+    "candidate": "INSERT VALUES; sqlite3_last_insert_rowid; SELECT stored created_at",
+    "all_returned_ids_and_timestamps_match_storage": true,
+    "rows": [
+      {
+        "batch": 1,
+        "reference_cpu_us": 36.010411725,
+        "candidate_cpu_us": 31.710469224999997,
+        "change_percent": -11.940831259684803
+      },
+      {
+        "batch": 16,
+        "reference_cpu_us": 7.098111375,
+        "candidate_cpu_us": 6.029036925,
+        "change_percent": -15.061393003290268
+      }
+    ],
+    "raw": "results/create-readback-checks/native-results.json",
+    "probe": "src/.build/fused-like/create-probe.cpp",
+    "checks": [
+      "both native build modes",
+      "42 official HTTP checks",
+      "two targeted HTTP cases",
+      "timestamp readback failure rolls back all batch outcomes",
+      "maximum signed64 rowid"
+    ],
+    "decision": "retained"
   }
 }

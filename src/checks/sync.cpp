@@ -8,7 +8,9 @@
 #include <cstdint>
 #include <cstdio>
 #include <exception>
+#include <memory>
 #include <stdexcept>
+#include <string_view>
 #include <thread>
 #include <unistd.h>
 
@@ -133,6 +135,45 @@ void check_hooks()
     metrics(nested, 1, 0);
     metrics(worker, 1, 1);
 }
+
+void check_wal_report()
+{
+    DatabaseTimings owner("wal-check");
+    owner.record_wal(12000, 11000);
+    owner.record_wal(14000, 14000);
+    owner.record_wal(1000, 900);
+    owner.record_wal(-1, -1);
+    owner.record_wal(50, 51);
+    require(owner.backlog.count == 3 && owner.backlog.total == 1100,
+            "invalid WAL samples changed checkpoint accounting");
+
+    const auto close_file = [](std::FILE *file) noexcept {
+        std::fclose(file);
+    };
+    const std::unique_ptr<std::FILE, decltype(close_file)> output(std::tmpfile(), close_file);
+    require(output != nullptr, "create WAL report capture");
+    const int saved = ::dup(STDERR_FILENO);
+    require(saved >= 0, "save diagnostic output descriptor");
+    const int redirected = ::dup2(::fileno(output.get()), STDERR_FILENO);
+    if (redirected < 0)
+    {
+        ::close(saved);
+        throw std::runtime_error("redirect WAL report");
+    }
+    owner.report(true);
+    std::fflush(stderr);
+    const int restored = ::dup2(saved, STDERR_FILENO);
+    ::close(saved);
+    require(restored >= 0, "restore diagnostic output descriptor");
+
+    std::rewind(output.get());
+    std::array<char, 1024> buffer{};
+    const auto length = std::fread(buffer.data(), 1, buffer.size(), output.get());
+    const std::string_view report(buffer.data(), length);
+    require(report.find("\"wal\":{\"frames\":1000,\"checkpointed\":900,\"observed_resets\":1}") !=
+                std::string_view::npos,
+            "WAL report lost the valid paired snapshot or observed reset");
+}
 } // namespace
 
 int main()
@@ -140,6 +181,7 @@ int main()
     try
     {
         check_hooks();
+        check_wal_report();
         std::puts("Sync forwarding, errno, attribution and repeated installation passed");
         return 0;
     }

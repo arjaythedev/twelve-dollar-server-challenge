@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <span>
@@ -186,6 +187,7 @@ struct Control
     bool fail_rollback_step = false;
     bool fail_feed = false;
     bool fail_post_exists = false;
+    bool fail_created_read = false;
     sqlite3 *writer = nullptr;
     std::int64_t visible_posts = -1;
     std::int64_t visible_likes = -1;
@@ -496,6 +498,46 @@ void orphan_like_precedence()
             "orphan duplicates changed missing-post precedence or neighboring writes");
 }
 
+void failed_create_readback()
+{
+    Fixture fixture;
+    Store db(fixture.path);
+    auto reader = open(fixture.path);
+    Control control(reader.get());
+    control.fail_created_read = true;
+    const std::array<WriteCommand, 2> jobs{
+        LikePost{UserId{2}, PostId{1}},
+        CreatePost{UserId{1}, "first", "must roll back after readback failure"},
+    };
+    all_failed(run_batch(db, jobs), jobs.size());
+    require(control.commits == 0 && scalar(reader.get(), "SELECT count(*) FROM posts") == 1 &&
+                scalar(reader.get(), "SELECT count(*) FROM likes") == 0,
+            "failed timestamp readback published writes or left the batch committed");
+    control.fail_created_read = false;
+    const std::array<WriteCommand, 1> recovery{
+        CreatePost{UserId{1}, "first", "recovered after timestamp readback failure"}};
+    const auto results = run_batch(db, recovery);
+    verify_created(reader.get(), created(results[0]), 2,
+                   "recovered after timestamp readback failure", "first");
+}
+
+void created_rowid_boundary()
+{
+    Fixture fixture;
+    auto reader = open(fixture.path);
+    execute(reader.get(), "UPDATE posts SET id=9223372036854775806");
+    Store db(fixture.path);
+    constexpr auto maximum = std::numeric_limits<std::int64_t>::max();
+    const std::array<WriteCommand, 2> jobs{
+        CreatePost{UserId{1}, "first", "maximum rowid"},
+        LikePost{UserId{2}, PostId{maximum}},
+    };
+    const auto results = run_batch(db, jobs);
+    verify_created(reader.get(), created(results[0]), maximum, "maximum rowid", "first");
+    require(liked(results[1]) == LikeResult::created,
+            "64-bit created rowid was truncated before a following write");
+}
+
 void rollback_preparation_failure()
 {
     Fixture fixture;
@@ -647,6 +689,10 @@ extern "C" int __wrap_sqlite3_step(sqlite3_stmt *statement)
         control->writer = db;
         ++control->steps;
         const std::string_view command(sqlite3_sql(statement));
+        if (control->fail_created_read && command == "SELECT created_at FROM posts WHERE id=?")
+        {
+            return SQLITE_IOERR;
+        }
         if (command == "BEGIN")
         {
             ++control->begins;
@@ -712,6 +758,8 @@ int main()
         singleton_and_empty();
         post_existence_fallback();
         orphan_like_precedence();
+        failed_create_readback();
+        created_rowid_boundary();
         rollback_preparation_failure();
         unresolved_rollback(false);
         unresolved_rollback(true);

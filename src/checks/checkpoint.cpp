@@ -3,10 +3,12 @@
 
 #include <sqlite3.h>
 
+#include <cerrno>
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
+#include <fcntl.h>
 #include <filesystem>
 #include <memory>
 #include <mutex>
@@ -108,7 +110,7 @@ std::int64_t scalar(sqlite3 *db, const char *sql)
 class Fixture
 {
   public:
-    Fixture()
+    explicit Fixture(int page_size = 4096)
     {
         char directory[] = "/tmp/td-checkpoint-XXXXXX";
         const char *created = ::mkdtemp(directory);
@@ -116,6 +118,9 @@ class Fixture
         directory_ = created;
         path = directory_ + "/feed.db";
         auto db = open(path);
+        const std::string pragma = "PRAGMA page_size=" + std::to_string(page_size);
+        require(sqlite3_exec(db.get(), pragma.c_str(), nullptr, nullptr, nullptr) == SQLITE_OK,
+                "fixture page size failed");
         require(sqlite3_exec(db.get(), R"sql(
             CREATE TABLE users(id INTEGER PRIMARY KEY, username TEXT NOT NULL UNIQUE,
               created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')));
@@ -174,6 +179,7 @@ struct Control
     {
         std::lock_guard lock(mutex);
         blocked = false;
+        block_advice = false;
         changed.notify_all();
     }
 
@@ -189,9 +195,14 @@ struct Control
     int injected_result = SQLITE_OK;
     int frames = -1;
     int backfilled = -1;
+    int page_size = 4096;
+    int advice_calls = 0;
+    int advice_result = 0;
     bool fail_second_open = false;
     bool blocked = false;
     bool in_checkpoint = false;
+    bool block_advice = false;
+    bool in_advice = false;
     bool wrong_owner = false;
     bool closed_during_checkpoint = false;
     int failed_start_autocheckpoint = -1;
@@ -250,10 +261,11 @@ void startup_failure()
             "startup failure disabled default checkpoint");
 }
 
-void coalescing_and_freshness()
+void coalescing_and_freshness(int page_size)
 {
-    Fixture fixture;
+    Fixture fixture(page_size);
     Control control;
+    control.page_size = page_size;
     {
         tds::Store db(fixture.path);
         const Unblock unblock{control};
@@ -295,8 +307,17 @@ void coalescing_and_freshness()
                 "feed is stale after create");
         control.release();
         control.wait([&] {
-            return control.finished >= 2 && control.frames == control.backfilled;
+            return control.finished >= 2 && control.frames == control.backfilled &&
+                   control.advice_calls >= 1;
         });
+        const auto previous_wal_bytes = std::filesystem::file_size(fixture.path + "-wal");
+        const auto reused = write_one<tds::CreatedPost>(
+            db, tds::CreatePost{tds::UserId{1}, "first", "fresh post after WAL reuse"});
+        require(std::filesystem::file_size(fixture.path + "-wal") < previous_wal_bytes,
+                "WAL reuse retained evicted pages for partial overwrites");
+        const auto fresh = read_post(db, reused.id);
+        require(fresh && fresh->find("fresh post after WAL reuse") != std::string::npos,
+                "fresh read failed after shrinking the reused WAL");
         {
             std::unique_lock lock(control.mutex);
             require(!control.changed.wait_for(lock, 30ms,
@@ -310,12 +331,18 @@ void coalescing_and_freshness()
     }
     require(!control.wrong_owner && !control.closed_during_checkpoint && control.closes == 2,
             "checkpoint ownership or teardown failed");
+    auto reopened = open(fixture.path);
+    require(scalar(reopened.get(),
+                   "SELECT count(*) FROM pragma_integrity_check WHERE integrity_check <> 'ok'") ==
+                0,
+            "cache eviction changed database integrity after reopen");
 }
 
 void checkpoint_failures()
 {
     Fixture fixture;
     Control control;
+    control.advice_result = EIO;
     {
         tds::Store db(fixture.path);
         control.injected_result = SQLITE_BUSY;
@@ -352,7 +379,8 @@ void checkpoint_failures()
         write_one<tds::CreatedPost>(
             db, tds::CreatePost{tds::UserId{1}, "first", "committed after failed checkpoint"});
         control.wait([&] {
-            return control.finished == previous + 2 && control.frames == control.backfilled;
+            return control.finished == previous + 2 && control.frames == control.backfilled &&
+                   control.advice_calls >= 1;
         });
         require(read_feed(db).find("committed after failed checkpoint") != std::string::npos,
                 "checkpoint failure lost committed data");
@@ -394,6 +422,8 @@ void pinned_reader()
         control.wait([&] {
             return control.finished >= 1 && control.frames > control.backfilled;
         });
+        require(scalar(reader.get(), "SELECT count(*) FROM posts") == 1,
+                "partial checkpoint changed the pinned reader snapshot");
         std::this_thread::sleep_for(30ms);
         int previous = 0;
         {
@@ -417,6 +447,26 @@ void pinned_reader()
     }
     require(!control.wrong_owner && !control.closed_during_checkpoint,
             "partial checkpoint ownership failed");
+}
+
+void shutdown_joins_advice()
+{
+    Fixture fixture;
+    Control control;
+    auto db = std::make_unique<tds::Store>(fixture.path);
+    const Unblock unblock{control};
+    control.block_advice = true;
+    write_until_started(*db, control, 1);
+    control.wait([&] {
+        return control.in_advice;
+    });
+    std::jthread release([&] {
+        std::this_thread::sleep_for(20ms);
+        control.release();
+    });
+    db.reset();
+    require(!control.closed_during_checkpoint && control.closes == 2 && control.advice_calls >= 1,
+            "shutdown released the WAL descriptor during cache eviction");
 }
 } // namespace
 
@@ -466,7 +516,7 @@ extern "C" int __wrap_sqlite3_close(sqlite3 *db)
         if (db == active->writer || db == active->checkpointer)
         {
             ++active->closes;
-            active->closed_during_checkpoint |= active->in_checkpoint;
+            active->closed_during_checkpoint |= active->in_checkpoint || active->in_advice;
         }
         if (db == active->writer && active->fail_second_open)
         {
@@ -478,6 +528,45 @@ extern "C" int __wrap_sqlite3_close(sqlite3 *db)
 }
 
 extern "C" int __real_sqlite3_wal_checkpoint_v2(sqlite3 *, const char *, int, int *, int *);
+
+// SQLite's amalgamation enables 64-bit file offsets
+extern "C" int __real_posix_fadvise64(int, off64_t, off64_t, int);
+
+extern "C" int __wrap_posix_fadvise64(int descriptor, off64_t offset, off64_t length, int advice)
+{
+    Control *control = active;
+    int injected = 0;
+    if (control)
+    {
+        std::unique_lock lock(control->mutex);
+        const long page_size = ::sysconf(_SC_PAGESIZE);
+        const auto checkpoint_end =
+            32 + static_cast<std::int64_t>(control->backfilled) * (control->page_size + 24);
+        require(std::this_thread::get_id() != control->issuer && !control->in_checkpoint,
+                "cache advice escaped the checkpoint worker or preceded checkpoint completion");
+        require(descriptor >= 0 && advice == POSIX_FADV_DONTNEED && offset == page_size &&
+                    length > 0 && length % page_size == 0 && offset + length <= checkpoint_end,
+                "cache advice included the WAL header, a partial page or uncheckpointed frames");
+        ++control->advice_calls;
+        control->in_advice = true;
+        control->changed.notify_all();
+        control->changed.wait(lock, [&] {
+            return !control->block_advice;
+        });
+        injected = control->advice_result;
+    }
+
+    const int result =
+        injected ? injected : __real_posix_fadvise64(descriptor, offset, length, advice);
+    if (control)
+    {
+        std::lock_guard lock(control->mutex);
+        control->in_advice = false;
+        control->changed.notify_all();
+    }
+
+    return result;
+}
 
 extern "C" int __wrap_sqlite3_wal_checkpoint_v2(sqlite3 *db, const char *name, int mode,
                                                 int *frames, int *backfilled)
@@ -523,10 +612,12 @@ int main()
     try
     {
         startup_failure();
-        coalescing_and_freshness();
+        coalescing_and_freshness(4096);
+        coalescing_and_freshness(8192);
         checkpoint_failures();
         pinned_reader();
         shutdown_joins();
+        shutdown_joins_advice();
         std::puts("Checkpoint startup, coalescing, freshness, failure and shutdown passed");
         return 0;
     }

@@ -81,6 +81,7 @@ add_library(api STATIC server/app/application.cpp server/auth.cpp server/storage
 target_link_libraries(api PRIVATE sqlite yyjson OpenSSL::Crypto parsing Threads::Threads)
 target_include_directories(api PUBLIC server)
 if(TDS_DIAGNOSTICS)
+    target_compile_definitions(sqlite PRIVATE TDS_DIAGNOSTICS)
     target_sources(api PRIVATE server/sync_timing.cpp)
     target_sources(transport PRIVATE server/diagnostics/io.cpp)
     target_compile_definitions(api PRIVATE TDS_DIAGNOSTICS)
@@ -114,7 +115,8 @@ target_compile_definitions(sync_tests PRIVATE TDS_DIAGNOSTICS)
 target_link_libraries(sync_tests PRIVATE sqlite Threads::Threads)
 target_link_options(sync_tests PRIVATE -Wl,--wrap=fsync -Wl,--wrap=fdatasync)
 target_link_options(checkpoint_tests PRIVATE
-    -Wl,--wrap=sqlite3_open_v2 -Wl,--wrap=sqlite3_close -Wl,--wrap=sqlite3_wal_checkpoint_v2)
+    -Wl,--wrap=sqlite3_open_v2 -Wl,--wrap=sqlite3_close -Wl,--wrap=sqlite3_wal_checkpoint_v2
+    -Wl,--wrap=posix_fadvise64)
 add_executable(load_generator load/main.cpp)
 target_link_libraries(load_generator PRIVATE llhttp_static yyjson)
 add_executable(group_commit_probe EXCLUDE_FROM_ALL benchmarks/group_commit.cpp)

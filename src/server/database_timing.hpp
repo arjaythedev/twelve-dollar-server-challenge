@@ -40,6 +40,23 @@ class DatabaseTimings
         report(true);
     }
 
+    void record_wal(int frames, int checkpointed) noexcept
+    {
+        if (frames < 0 || checkpointed < 0 || checkpointed > frames)
+        {
+            return;
+        }
+
+        // A large physical WAL can survive a reset, so keep the logical counts together
+        if (wal_frames_ >= 0 && frames < wal_frames_)
+        {
+            ++observed_wal_resets_;
+        }
+        wal_frames_ = frames;
+        wal_checkpointed_ = checkpointed;
+        backlog.record(static_cast<std::uint64_t>(frames - checkpointed));
+    }
+
     void report(bool final = false)
     {
         const auto now = timing::now_ns();
@@ -92,7 +109,15 @@ class DatabaseTimings
             entry.values.write(stderr, entry.name, entry.unit);
             entry.values.reset();
         }
-        std::fprintf(stderr, "},\"sync_cpu_clock_failures\":%llu}\n",
+        std::fputc('}', stderr);
+        if (wal_frames_ >= 0)
+        {
+            std::fprintf(stderr,
+                         ",\"wal\":{\"frames\":%d,\"checkpointed\":%d,\"observed_resets\":%llu}",
+                         wal_frames_, wal_checkpointed_,
+                         static_cast<unsigned long long>(observed_wal_resets_));
+        }
+        std::fprintf(stderr, ",\"sync_cpu_clock_failures\":%llu}\n",
                      static_cast<unsigned long long>(sync[0].cpu_clock_failures +
                                                      sync[1].cpu_clock_failures));
         ::funlockfile(stderr);
@@ -115,6 +140,9 @@ class DatabaseTimings
     const char *owner_;
     std::uint64_t last_report_ = timing::now_ns();
     std::uint64_t last_report_write_ns_ = 0;
+    int wal_frames_ = -1;
+    int wal_checkpointed_ = -1;
+    std::uint64_t observed_wal_resets_ = 0;
 };
 
 class SyncScope;

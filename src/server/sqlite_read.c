@@ -4,6 +4,58 @@
 #include "sqlite_read.h"
 // clang-format on
 
+void tds_wal_drop_checkpointed(sqlite3 *db, int frames)
+{
+    Wal *wal;
+    sqlite3_file *file;
+    i64 end;
+    int page_size;
+    int result;
+    if (frames <= 0)
+    {
+        return;
+    }
+
+    wal = sqlite3BtreePager(db->aDb[0].pBt)->pWal;
+    file = wal ? wal->pWalFd : 0;
+    if (!file || file->pMethods->xRead != unixRead)
+    {
+        return;
+    }
+
+    page_size = osGetpagesize();
+    end = WAL_HDRSIZE + (i64)frames * (sqlite3BtreeGetPageSize(db->aDb[0].pBt) + WAL_FRAME_HDRSIZE);
+    end -= end % page_size;
+    if (end <= page_size)
+    {
+        return;
+    }
+
+    // Slightly cursed: keep SQLites unixFile cast inside its own translation unit
+    // Keep the header page and partial boundary pages; advice never changes file bytes
+    result = posix_fadvise(((unixFile *)file)->h, page_size, end - page_size, POSIX_FADV_DONTNEED);
+#ifdef TDS_DIAGNOSTICS
+    {
+        static _Thread_local unsigned reports;
+        static _Thread_local int reported_error;
+        if (reports < 4 || (result && !reported_error))
+        {
+            struct timespec now = {0, 0};
+            (void)clock_gettime(CLOCK_MONOTONIC, &now);
+            fprintf(stderr,
+                    "TDS_TIMING {\"source\":\"wal_advice\",\"time_ns\":%lld,\"offset\":%d,"
+                    "\"length\":%lld,\"rc\":%d}\n",
+                    (long long)now.tv_sec * 1000000000LL + now.tv_nsec, page_size,
+                    (long long)(end - page_size), result);
+            ++reports;
+            reported_error |= result != 0;
+        }
+    }
+#else
+    (void)result;
+#endif
+}
+
 enum
 {
     TDS_POSTS,

@@ -873,3 +873,12 @@ holds, interleaved, 2 reps, 0 errors:
 - off:      p50 45 / 49, p95 370 / 405, p99 680 / 725, max 1,541 / 2,078 ms, 21 / 0 MB read
 Worse with it (the readahead walk every 100 ms, and it keeps 32 MB hot that the kernel would rather reclaim);
 reverted. The "off" arm is the PR head's code: with E46, 300k now holds in 3 of 4 runs on this harness.
+
+## Wrap-up (3 Nov, TdscWat3)
+Synteq's sysctls restored to `/root/watlab/w3/sysctl.orig` (checked with diff); hog and server stopped; perf data
+deleted. Left on Synteq: user `deploy` (+ /home/deploy/we, the WasmEdge lib copy, 108 MB), hs.sh, q.sh, hog.py,
+samp.py, prof.sh, bin/fc, out/b7792..b48, w3/ logs (5 MB). To rerun the calibrated harness, set tcp_mem
+45000 60000 90000, tcp_rmem 4096 131072 6291456, tcp_max_orphans 16384, tcp_max_syn_backlog 256, then
+`SRVMB=1900 MEAS=300 bash q.sh <name> "<label> <build> <users> [ENV=..]"`.
+Not done: a boot with thash_entries=32768 (M3), back-to-back holds without a restart, CPU work in the app
+(our code is ~9 of ~28 us per request; most of the rest is TCP).

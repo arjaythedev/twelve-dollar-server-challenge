@@ -28,7 +28,7 @@ SQLITE_PATH=... JWT_SECRET=... HOST=0.0.0.0 PORT=80 bash start.sh
 - **Wake-ups are batched when busy.** If the last pass handled 4 or more completions, the wait asks for
   ring 0's share of 128 completions (capped at a third of open connections, so a few clients without
   think time never sit out the timer) or 2 ms, whichever comes first; otherwise it wakes on the first
-  one. With more than one ring, or while a checkpoint round is running, the wait is always timed, so
+  one. With more than one ring, or while POSTs are held, the wait is always timed, so
   other rings and held writes never depend on a new event on ring 0. Each wake-up then
   carries more requests, so the syscalls, the batch's `COMMIT` and the send submissions are shared by
   more of them. It only delays when responses are sent, never what they contain: every response still
@@ -50,7 +50,7 @@ SQLITE_PATH=... JWT_SECRET=... HOST=0.0.0.0 PORT=80 bash start.sh
 - **Multishot receives into provided buffer rings** (2,048 x 1 KB per ring, 2 MB rather than 8 MB: the ring cycles through all of them, so all of them stay resident). A receive stays armed for
   the life of the connection; each chunk arrives in a kernel-picked buffer that goes back to the ring as
   soon as it is parsed. Idle clients hold no buffer. A partial request is copied into a per-connection
-  buffer until the rest arrives. If the ring ran dry (`ENOBUFS`) the receive is rearmed after the batch.
+  buffer until the rest arrives. If the ring ran dry (`ENOBUFS`) the connection goes on a read queue (below).
 - **A transaction per completion batch (group commit).** The first request in a batch that touches the
   database opens the transaction; every read and write in the batch runs inside it, and the batch
   ends with one `COMMIT`. Responses are written into an arena and only handed to `send` SQEs after that
@@ -80,8 +80,7 @@ SQLITE_PATH=... JWT_SECRET=... HOST=0.0.0.0 PORT=80 bash start.sh
   The loop asks for a `PASSIVE` pass over an eventfd after 8,192 WAL frames (32 MB) and the outcome comes back on a second
   eventfd as an ordinary ring completion, so the loop never waits for an fsync. A log only restarts once fully copied, which
   steady writes prevent, so if frames arrived during a pass, POSTs stay unread for one more pass, for at most 250 ms (reads go
-  on). Past 32,768 frames (a CPU saturated long enough to starve the worker; a write-only run reached 1.6 GB of WAL in 40 s
-  without this) they wait however long that pass takes. Durability is unchanged: WAL with `synchronous=NORMAL`, and a response
+  on). Past 32,768 frames (a CPU saturated long enough to starve the worker) they wait however long that pass takes. Durability is unchanged: WAL with `synchronous=NORMAL`, and a response
   waits for its `COMMIT`. If a commit fails, nothing from a batch with writes is sent and its connections are closed.
 - **Provided-buffer registration retries.** Ubuntu's 6.8.0-136 and later kernels reject a buffer ring whose
   reserved words are zero (Launchpad #2162843), which stops a server from starting at all. It retries once
@@ -105,10 +104,10 @@ SQLITE_PATH=... JWT_SECRET=... HOST=0.0.0.0 PORT=80 bash start.sh
   leaves it in a socket buffer: a 2 s freeze at 300,000 users measured about 250 MB against TCP's 170 MB hard limit. A receive
   that runs out of buffers is not rearmed; its connection goes on a read queue, read by single-shot `MSG_DONTWAIT` receives,
   never more on a ring than it has buffers, and back to a multishot receive once drained. A pass does at most 4,096 of these
-  reads and 1,024 answers. What it reads beyond that waits on its connection in a copy the size of the request, on a list, and
+  reads and answers 1,024 requests from reads and that list; requests released from other waits, such as held POSTs, aren't counted. What it reads beyond that waits on its connection in a copy the size of the request, on a list, and
   while anything waits the loop doesn't sleep. Requests that have just arrived are answered before that list: the backlog has
   already missed any latency target, and answering it first made the requests behind it miss too (6.2% of all requests over 1 s
-  in a freeze test, against 5.2% this way). The constants come from a sweep; see below.
+  in a freeze test on an earlier build with 2,048 answers, against 5.2% this way). The constants come from a sweep; see below.
 - **Hot memory sits on huge pages.** The page cache (one contiguous region instead of a malloc per page,
   through `SQLITE_CONFIG_PAGECACHE`), the receive buffers, the connection tables and the response arena are
   `MADV_HUGEPAGE` regions, which Ubuntu's default THP mode honours. A TLB miss on a VM walks two page tables.
@@ -159,11 +158,11 @@ Three freezes (SIGSTOP) at 300,000 users, 3 rounds for 2 s and 2 for 1 s and 4 s
 
 | Freeze | this entry | rust-iouring-kensac #264 | TCP memory peak (limits 113 and 170 MB) |
 |---|---|---|---|
-| 1 s | 1.73, 1.65%; 2 to 3 s | 2.19, 2.25%; 2 to 4 s | about 125 MB |
+| 1 s | 1.73, 1.65%; 2 to 3 s | 2.19, 2.25%; 2 to 4 s | about 125 MB, one run 229 MB |
 | 2 s | 4.82, 4.71, 4.69%; 4 to 5 s | 5.88, 5.55, 5.81%; 4 to 7 s | 231 to 251 MB |
 | 4 s | 10.16, 10.15%; 5 to 7 s | 10.61, 10.82%; 5 to 9 s | 500 to 514 MB |
 
-The answer and read bounds come from a sweep with the same 2 s freezes, 2 rounds each, share over 1 s: 1,024 answers and 4,096
+The answer and read bounds come from a sweep on an earlier build (`c25f357` plus these bounds) with the same 2 s freezes, 2 rounds each, share over 1 s: 1,024 answers and 4,096
 reads 4.72, 4.73%; 1,024 and 8,192 4.61, 4.59%; 1,024 and 2,048 4.71, 5.18%; 2,048 and 4,096 5.80, 4.85%; 3,000 and 4,096 4.94,
 5.01%; 3,000 and 8,192 4.94, 4.83%. The differences among the 1,024 rows are within noise.
 

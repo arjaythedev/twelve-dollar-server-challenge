@@ -105,7 +105,7 @@ downloaded by `build.sh`:
 
 **A harness that fails where the scorer did.** Our earlier bench box (below) held 300,000 users with #272,
 which then scored 200,000: on the real 2 GB droplet it was OOM-killed after the ramp ("connection refused"
-from 210,000 on). `experiments/worklog.md` (S14, E37-E47, C1) has how we reproduced that. The harness, on
+from 210,000 on). `experiments/worklog.md` (S14, E37-E48, C1, M3) has how we reproduced that. The harness, on
 the same rented 8 vCPU box: the server is a systemd unit as a non-root user, `LimitNOFILE=65535`, every
 other limit at systemd's default (8 MiB of locked memory), on CPU 0; a memory hog leaves the server what a
 1,967 MB box would, after the load generator's own memory (11.5 KiB per user, measured); `tcp_mem` at
@@ -122,7 +122,7 @@ the scorer's probes run back to back.
 | the same with 4,000 frames (f3e9410) | 280,000 | 280 | 480 |
 | this one | 290,000 (4 holds) | 325, 345, 315, 350 | 600, 585, 530, 575 |
 | this one, without the code locking (`PIN=0`) | 290,000 | 395, 345 | 720, 605 |
-| this one | 300,000 | 440, 625 | 795, 1,945 (in the second the ramp's end evicted the WAL, and checkpoints read it back from disk) |
+| this one | 300,000 (4 holds) | 440, 625, 370, 405 | 795, 1,945, 680, 725 (in the second the ramp's end evicted the WAL, and checkpoints read it back from disk) |
 | this one | 310,000 | 535 | 1,290 |
 
 At 290,000 users: ~30.4k req/s, ~87% of the CPU (~28.5 µs per request), RSS 115-160 MB.

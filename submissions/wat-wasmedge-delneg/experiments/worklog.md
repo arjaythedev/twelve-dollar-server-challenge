@@ -850,3 +850,26 @@ Interleaved, 2 reps, 0 errors, ~0 MB read:
 - pinned: p50 21 / 29, p95 315 / 350, p99 530 / 575, max 1,015 / 1,227 ms
 - PIN=0:  p50 44 / 30, p95 395 / 345, p99 720 / 605, max 2,050 / 1,679 ms
 A modest gain in p99 and max. With E45, four 5-minute holds at 290k passed with 8,000 frames and pinning.
+
+## PR #288 (3 Nov): follow-up to #272 from `wat-wasm-delneg-3` at c3f81f7
+Clean ubuntu:24.04 container build (opt-box ci2.sh): 42/42. Body through humanizer-v3, every number marked as ours.
+
+## M3: where the CPU goes at 280k (3 Nov, Synteq, calibrated harness, debug-names build of c3f81f7)
+perf record -F 997 on the server for 30 s, 40 s after the ramp (that run: 29.4k rps, p95 325, p99 575 ms).
+By library: kernel 64.6 %, app.so 32.7 %, libc 1.3 %, libwasmedge 1.1 %. Kernel: network/TCP ~32 %, locks 6 %,
+AppArmor's socket hooks 3.5 %, io_uring only 3.0 %, rest (copies, page clears, wakeups) ~20 %. Top symbols:
+sqlite3BtreeTableMoveto 5.8 (mostly the 20 author seeks per /feed), __inet_lookup_established 5.4, record 2.2,
+rep_movs 1.9, pcache1Fetch 1.8, putjson 1.6, BtreeIndexMoveto 1.4, bt_post_out 1.2, getPageNormal 1.2.
+Our code is ~9 of the ~28 us per request; most of the rest is TCP work every entry pays.
+Harness gap found here: the established-socket hash has one bucket per 128 KiB of RAM, 131,072 on this 16 GB box
+(both ends' sockets, ~4 per chain at 280k) against ~16,384 on a 2 GB droplet (~18 per chain at 290k, server side
+only), and every incoming packet walks a chain, so the droplet pays more per request than this box shows. A boot
+with `thash_entries=32768` would match the chain length; not done.
+
+## E48: POSIX_FADV_WILLNEED on the WAL after each 100 ms sync (3 Nov, b48 = c3f81f7 + that, WALWN=0 off) — dropped
+Meant to keep a checkpoint's WAL reads off the disk when the ramp's end squeezes the page cache. 300k 5-minute
+holds, interleaved, 2 reps, 0 errors:
+- WILLNEED: p50 60 / 65, p95 455 / 470, p99 880 / 1,025, max 1,758 / 2,954 ms, 0 MB read
+- off:      p50 45 / 49, p95 370 / 405, p99 680 / 725, max 1,541 / 2,078 ms, 21 / 0 MB read
+Worse with it (the readahead walk every 100 ms, and it keeps 32 MB hot that the kernel would rather reclaim);
+reverted. The "off" arm is the PR head's code: with E46, 300k now holds in 3 of 4 runs on this harness.

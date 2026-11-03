@@ -14,6 +14,7 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <unistd.h>
 #include <utility>
@@ -428,6 +429,11 @@ extern "C" int __wrap_sqlite3_open_v2(const char *path, sqlite3 **db, int flags,
     {
         std::lock_guard lock(control->mutex);
         ++control->opens;
+        if (control->opens <= 2)
+        {
+            require(vfs && std::string_view(vfs) == "unix-excl",
+                    "issuer and checkpoint handles must both use unix-excl");
+        }
         if (control->opens == 2 && control->fail_second_open)
         {
             *db = nullptr;

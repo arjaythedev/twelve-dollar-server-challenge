@@ -84,6 +84,8 @@
 | C++ 0.1.0 (ac0dd15 reference) | 350,000 | 5 min | 13,053,479 | 32,633.62 | 5.938 ms | 216.485 ms | 7,944.61 ms | 0% | 22.87 us | 1,213.42 MiB |
 | C++ 0.1.0 (recovery + response reuse) | 350,000 | 5 min | 13,074,570 | 32,686.36 | 5.120 ms | 6.818 ms | 77.46 ms | 0% | 22.72 us | 1,290.85 MiB |
 | C++ 0.1.0 (recovery + response reuse) | 400,000 | 5 min | 14,941,600 | 37,353.95 | 5.307 ms | 7.510 ms | 77.30 ms | 0% | 22.40 us | 1,611.87 MiB |
+| C++ 0.1.0 (unix-excl baseline) | 70,000 | 15 s | 297,528 | 4,958.73 | 3.671 ms | 4.383 ms | 19.82 ms | 0% | 31.76 us | 519.79 MiB |
+| C++ 0.1.0 (unix-excl) | 70,000 | 15 s | 297,359 | 4,955.91 | 3.570 ms | 4.353 ms | 9.13 ms | 0% | 30.98 us | 505.56 MiB |
 
 Statistics include the ramps. RAM is the cgroup peak, including charged file pages. Local results, not an official score or a measured capacity limit.
 
@@ -110,6 +112,8 @@ Warm response allocations/request: feed 1 to 0, post 3 to 0, missing post 1 to 0
 350k pair: no telemetry, different random seeds; native probes overlapped the reference. Hold-only p99 123.79 to 6.97 ms. One local pair does not isolate the cause of the tail difference.
 
 400k/5m: same server and generator as 350k, no telemetry or parallel benchmarks. Hold-only p99 7.68 ms; no memory-limit events or OOM kills.
+
+unix-excl, 70k: one serial pair, 5 s ramp / 15 s hold, different random seeds, no telemetry. CPU/request fell 2.5%; p99 was nearly unchanged. The separate SQLite probe reduced measured fcntl64 calls from 67,080 to zero, excluding startup.
 
 Prepared Store controls, 20k writes, two reversed pairs: median CPU/write at batch 1/4/16 was 38.98/19.34/9.74 to 38.00/19.16/8.56 us. Outputs and stored counts matched; final checkpoint included, wall time variable. [Data](src/benchmarks/group-commit.json).
 
@@ -164,6 +168,8 @@ Parser reuse, 100k lifecycle cycles, four alternating samples: JWT/body CPU medi
 Header passing, no SQLite, seven confirmation pairs: `AcceptedHead&&` feed -4.86%, post +1.52%, mixed -3.20% (4/7 faster), protected +2.42%. Kept value parameters. [Data](src/benchmarks/headers.json).
 
 ## Native CPU sampling
+
+unix-excl, 350k with the same 30-second warm-up and 90-second capture: CPU/request 24.19 to 21.99 us; hold p99 7.10 to 6.40 ms. No fcntl samples (previously 7.5% of CPU). Network 46.0%, SQL/rows 20.3%, io_uring 11.0%. 65,439 samples, no loss or request errors. Different random seeds. [Data](src/profiles/unix-excl-350000.json).
 
 350k, 30-second warm-up and 90-second capture: 73,713 samples, no loss, 3,143 unresolved leaves. Network 40.7%, SQL/rows 20.9%, files/locks/page cache 12.8%, io_uring 8.6%, response JSON 2.6%. No request errors; hold p99 7.10 ms. Sampling overhead included. [Data](src/profiles/recovery-reuse-350000.json).
 

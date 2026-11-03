@@ -412,6 +412,38 @@ void fragmented_context_and_pipeline()
             "application ID validation preceded malformed framing");
 }
 
+void fresh_join_membership()
+{
+    Fixture fixture;
+    auto writer = open(fixture.path);
+    execute(writer.get(), R"sql(
+        PRAGMA foreign_keys=OFF;
+        DELETE FROM likes;
+        DELETE FROM posts;
+        WITH RECURSIVE ids(id) AS (VALUES(1) UNION ALL SELECT id+1 FROM ids WHERE id<50)
+          INSERT INTO posts(id,user_id,body,created_at)
+          SELECT id,CASE WHEN id>25 THEN 999 ELSE 1 END,'body',
+                 printf('2026-01-01T00:00:%02d.000Z',id)
+          FROM ids;
+    )sql");
+    tds::Application app(fixture.path, std::string(secret));
+    const auto initial = document(app.read(tds::ReadQuery{tds::Feed{}}).body);
+    auto *posts = tds::member(yyjson_doc_get_root(initial.get()), "posts");
+    require(yyjson_arr_size(posts) == 20 &&
+                yyjson_get_sint(tds::member(yyjson_arr_get(posts, 0), "id")) == 25 &&
+                yyjson_get_sint(tds::member(yyjson_arr_get(posts, 19), "id")) == 6,
+            "missing authors were not excluded before applying the feed limit");
+
+    execute(writer.get(), "INSERT INTO users(id,username) VALUES(999,'newly joined')");
+    const auto refreshed = document(app.read(tds::ReadQuery{tds::Feed{}}).body);
+    posts = tds::member(yyjson_doc_get_root(refreshed.get()), "posts");
+    require(yyjson_arr_size(posts) == 20 &&
+                yyjson_get_sint(tds::member(yyjson_arr_get(posts, 0), "id")) == 50 &&
+                yyjson_get_sint(tds::member(yyjson_arr_get(posts, 19), "id")) == 31 &&
+                tds::text_value(tds::member(yyjson_arr_get(posts, 0), "author")) == "newly joined",
+            "feed reused join membership after a second handle committed the missing author");
+}
+
 void health_and_fail_fast_commit()
 {
     Fixture fixture;
@@ -533,9 +565,10 @@ int main()
         owned_create_and_unicode();
         fresh_reads_and_write_results();
         fragmented_context_and_pipeline();
+        fresh_join_membership();
         health_and_fail_fast_commit();
         reused_response_storage();
-        std::puts("Application preparation, fresh reads, commit replies and HTTP context: 6 groups "
+        std::puts("Application preparation, fresh reads, commit replies and HTTP context: 7 groups "
                   "passed");
 
         return 0;

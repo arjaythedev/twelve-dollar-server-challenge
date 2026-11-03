@@ -66,12 +66,35 @@ class HTTPTests(unittest.TestCase):
                     (3, "tie-high", "2025-01-01T00:00:00.000Z"),
                 ],
             )
-        self.container, self.port = self.stack.enter_context(
-            server(self.output, database=self.database, secret=SECRET.decode())
-        )
-        self.connection = self.stack.enter_context(
-            closing(http.client.HTTPConnection("127.0.0.1", self.port, timeout=5))
-        )
+        self._endpoint: tuple[str, int] | None = None
+        self._connection: http.client.HTTPConnection | None = None
+        self._stopped = False
+
+    def start(self) -> tuple[str, int]:
+        if self._stopped:
+            raise AssertionError("the server cannot restart after persistence inspection")
+        if self._endpoint is None:
+            self._endpoint = self.stack.enter_context(
+                server(self.output, database=self.database, secret=SECRET.decode())
+            )
+        return self._endpoint
+
+    @property
+    def container(self) -> str:
+        return self.start()[0]
+
+    @property
+    def port(self) -> int:
+        return self.start()[1]
+
+    @property
+    def connection(self) -> http.client.HTTPConnection:
+        self.start()
+        if self._connection is None:
+            self._connection = self.stack.enter_context(
+                closing(http.client.HTTPConnection("127.0.0.1", self.port, timeout=5))
+            )
+        return self._connection
 
     def request(
         self, method: str, path: str, body: bytes = b"", auth: str | None = None
@@ -82,11 +105,41 @@ class HTTPTests(unittest.TestCase):
         self.assertEqual(response.getheader("content-type"), "application/json")
         return response.status, mapping(decode_json(raw)), raw
 
-    def sql(self, statement: str) -> list[JSONValue]:
-        result = command(
-            "docker", "exec", self.container, "sqlite3", "-json", "/data/feed.db", statement
-        )
-        return array(decode_json(result.encode())) if result else []
+    def fixture_sql(self, statement: str) -> None:
+        if self._endpoint is not None:
+            raise AssertionError("fixture SQL must precede the first HTTP request")
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            connection.executescript(statement)
+
+    def fixture_rows(self, statement: str) -> list[JSONValue]:
+        if self._endpoint is not None:
+            raise AssertionError("fixture references must precede the first HTTP request")
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.row_factory = sqlite3.Row
+            rows = [dict(row) for row in connection.execute(statement)]
+        return array(decode_json(json.dumps(rows).encode()))
+
+    def persisted_rows(self, statement: str) -> list[JSONValue]:
+        if self._endpoint is None:
+            raise AssertionError("persistence inspection requires a completed HTTP request")
+        container, _ = self._endpoint
+        if not self._stopped:
+            if self._connection is not None:
+                self._connection.close()
+            command("docker", "stop", "--time=10", container)
+            self._stopped = True
+            self.assertEqual(
+                command("docker", "inspect", "--format", "{{.State.ExitCode}}", container), "0"
+            )
+        snapshot = self.output / "persisted"
+        if not snapshot.is_dir():
+            snapshot.mkdir()
+            # Copy WAL too, and allow a transient WAL index without changing the stopped volume
+            command("docker", "cp", f"{container}:/data/.", str(snapshot))
+        with closing(sqlite3.connect(snapshot / "feed.db")) as connection:
+            connection.row_factory = sqlite3.Row
+            rows = [dict(row) for row in connection.execute(statement)]
+        return array(decode_json(json.dumps(rows).encode()))
 
     def test_concurrent_write_results_and_constraint_isolation(self) -> None:
         with ExitStack() as connections:
@@ -115,7 +168,7 @@ class HTTPTests(unittest.TestCase):
                     created.append(integer(post, "id"))
             self.assertEqual(len(set(created)), 22)
             self.assertEqual(
-                integer(mapping(self.sql("SELECT count(*) AS n FROM posts")[0]), "n"), 25
+                integer(mapping(self.persisted_rows("SELECT count(*) AS n FROM posts")[0]), "n"), 25
             )
 
     def test_pipelined_like_read_and_duplicate_keep_order(self) -> None:
@@ -208,26 +261,30 @@ class HTTPTests(unittest.TestCase):
         posts = [mapping(value) for value in array(body["posts"])]
         self.assertEqual([post["id"] for post in posts], [3, 2, 1])
         self.assertEqual(list(posts[0]), ["id", "body", "created_at", "author", "like_count"])
-        self.sql("INSERT INTO likes(user_id,post_id) VALUES(1,3)")
+        self.assertEqual(self.request("POST", "/posts/3/like", auth=sign(claims()))[0], 201)
         refreshed = array(self.request("GET", "/feed")[1]["posts"])
         self.assertEqual(mapping(refreshed[0])["like_count"], 1)
         self.assertEqual(mapping(self.request("GET", "/posts/3")[1]["post"])["like_count"], 1)
 
-    def test_empty_feed_and_nonmonotonic_timestamps(self) -> None:
-        self.sql("DELETE FROM posts")
+    def test_empty_feed(self) -> None:
+        self.fixture_sql("DELETE FROM posts")
         self.assertEqual(self.request("GET", "/feed")[:2], (200, {"posts": []}))
+
+    def test_nonmonotonic_timestamps(self) -> None:
         rows = ",".join(
             f"({i},1,'body','2026-01-{31 - i // 2:02}T00:00:00.000Z')" for i in range(1, 32)
         )
-        self.sql(f"INSERT INTO posts(id,user_id,body,created_at) VALUES {rows}")
+        self.fixture_sql(
+            f"DELETE FROM posts; INSERT INTO posts(id,user_id,body,created_at) VALUES {rows}"
+        )
         posts = array(self.request("GET", "/feed")[1]["posts"])
         self.assertEqual(
             [mapping(post)["id"] for post in posts],
             [1, 3, 2, 5, 4, 7, 6, 9, 8, 11, 10, 13, 12, 15, 14, 17, 16, 19, 18, 21],
         )
 
-    def test_feed_batch_reorders_rows_and_refreshes_duplicate_authors(self) -> None:
-        self.sql(
+    def test_feed_batch_reorders_rows_and_deduplicates_authors(self) -> None:
+        self.fixture_sql(
             "DELETE FROM likes; DELETE FROM posts;"
             "INSERT INTO users(id,username) VALUES(-7,'negative'),"
             "(2,replace(hex(zeroblob(5000)),'0','x') || char(0) || ' café'),"
@@ -247,7 +304,7 @@ class HTTPTests(unittest.TestCase):
         rows.extend(
             f"({post_id},1,'skipped','2000-01-01T00:00:00.000Z')" for post_id in range(10000, 10100)
         )
-        self.sql(
+        self.fixture_sql(
             "INSERT INTO posts(id,user_id,body,created_at) VALUES "
             + ",".join(rows)
             + "; INSERT INTO likes(user_id,post_id) SELECT 1,id FROM posts WHERE id<0;"
@@ -260,20 +317,15 @@ class HTTPTests(unittest.TestCase):
         )
 
         def reference_rows() -> list[dict[str, JSONValue]]:
-            # The SQLite CLI truncates TEXT at NUL, so transfer author bytes as hex
-            rows = [mapping(row) for row in self.sql(reference)]
+            # Preserve author bytes exactly, including embedded NULs
+            rows = [mapping(row) for row in self.fixture_rows(reference)]
             return [
                 {**row, "author": bytes.fromhex(json_text(row, "author")).decode("utf-8")}
                 for row in rows
             ]
 
-        self.assertEqual(array(self.request("GET", "/feed")[1]["posts"]), reference_rows())
-        self.sql(
-            "UPDATE users SET username='refreshed' WHERE id=2;"
-            "UPDATE posts SET body='fresh body',created_at='2100-01-01T00:00:00.000Z' "
-            "WHERE id=1000000;"
-        )
-        self.assertEqual(array(self.request("GET", "/feed")[1]["posts"]), reference_rows())
+        expected = reference_rows()
+        self.assertEqual(array(self.request("GET", "/feed")[1]["posts"]), expected)
 
     def test_feed_batch_applies_inner_join_before_limit(self) -> None:
         rows = ",".join(
@@ -281,7 +333,7 @@ class HTTPTests(unittest.TestCase):
             f"'2026-01-01T00:00:{index:02}.000Z')"
             for index in range(1, 51)
         )
-        self.sql(
+        self.fixture_sql(
             "PRAGMA foreign_keys=OFF; DELETE FROM likes; DELETE FROM posts;"
             f"INSERT INTO posts(id,user_id,body,created_at) VALUES {rows};"
         )
@@ -290,13 +342,12 @@ class HTTPTests(unittest.TestCase):
             "FROM posts p JOIN users u ON u.id=p.user_id "
             "ORDER BY p.created_at DESC,p.id DESC LIMIT 20"
         )
-        self.assertEqual(array(self.request("GET", "/feed")[1]["posts"]), self.sql(reference))
-        self.sql("INSERT INTO users(id,username) VALUES(999,'newly joined')")
-        self.assertEqual(array(self.request("GET", "/feed")[1]["posts"]), self.sql(reference))
+        expected = self.fixture_rows(reference)
+        self.assertEqual(array(self.request("GET", "/feed")[1]["posts"]), expected)
 
     def test_special_characters_and_surrogate_username(self) -> None:
         text = 'prefix\0"\\\n\t <>&/ café \N{GRINNING FACE}'
-        self.sql(f"UPDATE users SET username={literal(text)} WHERE id=1")
+        self.fixture_sql(f"UPDATE users SET username={literal(text)} WHERE id=1")
         status, body, _ = self.request(
             "POST", "/posts", json.dumps({"body": text}).encode(), sign(claims(username=text))
         )
@@ -325,15 +376,22 @@ class HTTPTests(unittest.TestCase):
         post_id = integer(post, "id")
         self.assertEqual(post["author"], "token-user")
         self.assertEqual(
-            self.sql(f"SELECT body FROM posts WHERE id={post_id}"), [{"body": "committed"}]
+            mapping(self.request("GET", f"/posts/{post_id}")[1]["post"])["body"], "committed"
         )
         for expected in (201, 200):
             status, result, _ = self.request("POST", f"/posts/{post_id}/like", auth=sign(claims()))
             self.assertEqual(status, expected)
             self.assertEqual(result["already_liked"], expected == 200)
             self.assertEqual(
-                self.sql(f"SELECT count(*) AS n FROM likes WHERE post_id={post_id}"), [{"n": 1}]
+                mapping(self.request("GET", f"/posts/{post_id}")[1]["post"])["like_count"], 1
             )
+        self.assertEqual(
+            self.persisted_rows(
+                f"SELECT body,(SELECT count(*) FROM likes WHERE post_id={post_id}) AS n "
+                f"FROM posts WHERE id={post_id}"
+            ),
+            [{"body": "committed", "n": 1}],
+        )
 
     def test_invalid_json_and_duplicate_keys(self) -> None:
         for raw in (
@@ -377,10 +435,30 @@ class HTTPTests(unittest.TestCase):
             self.request("POST", "/posts", b'{"body":"must not land"}', sign(claims(sub="999")))[0],
             500,
         )
-        self.assertEqual(self.sql("SELECT count(*) AS n FROM posts"), [{"n": 3}])
+        self.assertEqual(len(array(self.request("GET", "/feed")[1]["posts"])), 3)
         self.assertEqual(
             self.request("POST", "/posts", b'{"body":"after failure"}', sign(claims()))[0], 201
         )
+        self.assertEqual(self.persisted_rows("SELECT count(*) AS n FROM posts"), [{"n": 4}])
+
+    def test_external_sqlite_is_busy_until_graceful_stop(self) -> None:
+        self.assertEqual(self.request("GET", "/feed")[0], 200)
+        with self.assertRaises(subprocess.CalledProcessError) as result:
+            command(
+                "docker",
+                "exec",
+                self.container,
+                "sqlite3",
+                "-readonly",
+                "/data/feed.db",
+                "SELECT count(*) FROM posts",
+            )
+        self.assertEqual(result.exception.returncode, sqlite3.SQLITE_BUSY)
+        self.assertIn("database is locked", str(result.exception.stderr))
+        self.assertEqual(self.request("GET", "/health")[0], 200)
+        self.assertEqual(self.request("POST", "/posts/3/like", auth=sign(claims()))[0], 201)
+        self.assertEqual(mapping(self.request("GET", "/posts/3")[1]["post"])["like_count"], 1)
+        self.assertEqual(self.persisted_rows("SELECT count(*) AS n FROM likes"), [{"n": 1}])
 
     def test_health_degrades_without_creating_database(self) -> None:
         missing = self.output / "missing.db"
@@ -397,7 +475,7 @@ class HTTPTests(unittest.TestCase):
 
     def test_integer_boundaries_and_invalid_ids(self) -> None:
         largest = 2**63 - 1
-        self.sql(f"UPDATE posts SET id={largest} WHERE id=3")
+        self.fixture_sql(f"UPDATE posts SET id={largest} WHERE id=3")
         self.assertEqual(
             mapping(self.request("GET", f"/posts/{largest}")[1]["post"])["id"], largest
         )

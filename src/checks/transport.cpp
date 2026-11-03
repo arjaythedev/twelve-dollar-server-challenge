@@ -20,11 +20,13 @@
 #include <exception>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <iostream>
 #include <linux/io_uring.h>
 #include <memory>
 #include <optional>
 #include <poll.h>
+#include <semaphore>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -45,6 +47,15 @@ constexpr std::string_view secret = "transport-secret";
 constexpr std::string_view small_post =
     "{\"post\":{\"id\":1,\"body\":\"seed\",\"created_at\":\"2025-01-01T00:00:00.000Z\","
     "\"author\":\"db-user\",\"like_count\":0}}";
+
+struct CommitGate
+{
+    std::binary_semaphore reached{0};
+    std::binary_semaphore proceed{0};
+    bool reject;
+};
+
+thread_local CommitGate *active_commit_gate = nullptr;
 
 class Client
 {
@@ -156,13 +167,13 @@ class Client
         }
     }
 
-    bool response_available() const
+    bool response_available(int timeout_ms = 0) const
     {
         pollfd socket{fd_, POLLIN, 0};
         int result;
         do
         {
-            result = ::poll(&socket, 1, 0);
+            result = ::poll(&socket, 1, timeout_ms);
         } while (result < 0 && errno == EINTR);
         if (result < 0)
         {
@@ -926,10 +937,6 @@ void exercise_write_batches()
                     std::string::npos,
                 "concurrent committed response belongs to its own command");
     }
-    require(fixture.scalar("SELECT count(*) FROM posts") ==
-                static_cast<std::int64_t>(2 + 3 + count),
-            "acknowledged writes are visible to a separate SQLite reader");
-
     client->send("POST /posts/1/like HTTP/1.1\r\nHost: localhost\r\nAuthorization: " +
                  authorization() + "\r\nContent-Length: 0\r\n\r\n" + get_post());
     require(client->response(tds::Status::created) ==
@@ -943,6 +950,9 @@ void exercise_write_batches()
     require(rejected.response(tds::Status::unauthorized) == "{\"error\":\"missing bearer token\"}",
             "real auth precedes invalid path ID");
     server.stop();
+    require(fixture.scalar("SELECT count(*) FROM posts") ==
+                static_cast<std::int64_t>(2 + 3 + count),
+            "acknowledged writes survive shutdown and separate SQLite inspection");
 }
 
 void exercise_shutdown_pending()
@@ -964,6 +974,77 @@ void exercise_shutdown_pending()
     server.stop();
     require(fixture.scalar("SELECT count(*) FROM posts WHERE body LIKE 'shutdown-%'") <= 2,
             "shutdown does not replay prepared writes");
+}
+
+void exercise_commit_publication()
+{
+    for (const bool reject : {false, true})
+    {
+        Fixture fixture;
+        CommitGate gate{.reject = reject};
+        std::promise<std::pair<std::uint16_t, int>> ready;
+        std::exception_ptr server_error;
+        std::jthread issuer([&] {
+            bool announced = false;
+            try
+            {
+                active_commit_gate = &gate;
+                tds::Server server("127.0.0.1", 0, fixture.path, std::string(secret));
+                ready.set_value({server.port(), server.stop_descriptor()});
+                announced = true;
+                server.run();
+            }
+            catch (...)
+            {
+                server_error = std::current_exception();
+                if (!announced)
+                {
+                    ready.set_exception(server_error);
+                }
+            }
+            active_commit_gate = nullptr;
+        });
+        const auto [port, stop_descriptor] = ready.get_future().get();
+        const auto stop = [&] {
+            const std::uint64_t value = 1;
+            ssize_t written;
+            do
+            {
+                written = ::write(stop_descriptor, &value, sizeof(value));
+            } while (written < 0 && errno == EINTR);
+            issuer.join();
+            if (server_error)
+            {
+                std::rethrow_exception(server_error);
+            }
+            require(written == static_cast<ssize_t>(sizeof(value)), "stop publication issuer");
+        };
+        try
+        {
+            Client client(port);
+            client.send(write_request(R"({"body":"publication"})"));
+            require(gate.reached.try_acquire_for(std::chrono::seconds(5)),
+                    "write reached COMMIT gate");
+            require(!client.response_available(20), "HTTP success escaped before COMMIT resolved");
+            require(fixture.scalar("SELECT count(*) FROM posts WHERE body='publication'") == 0,
+                    "uncommitted row became visible to another in-process SQLite handle");
+            gate.proceed.release();
+            const auto body =
+                client.response(reject ? tds::Status::internal_error : tds::Status::created);
+            require(reject ? body == "{\"error\":\"internal server error\"}"
+                           : body.find("\"body\":\"publication\"") != std::string::npos,
+                    "commit outcome did not control the HTTP reply");
+            require(fixture.scalar("SELECT count(*) FROM posts WHERE body='publication'") ==
+                        (reject ? 0 : 1),
+                    "published response disagreed with committed visibility before shutdown");
+        }
+        catch (...)
+        {
+            stop();
+            throw;
+        }
+        stop();
+    }
 }
 
 void exercise_short_send(RunningServer &server)
@@ -1266,6 +1347,25 @@ void exercise_capacity(std::size_t count, rlim_t descriptor_limit, bool progress
 
 } // namespace
 
+extern "C" int __real_sqlite3_step(sqlite3_stmt *);
+
+extern "C" int __wrap_sqlite3_step(sqlite3_stmt *statement)
+{
+    // Gate COMMIT in-process because unix-excl intentionally excludes external readers
+    const auto *sql = active_commit_gate ? sqlite3_sql(statement) : nullptr;
+    if (sql && std::string_view(sql) == "COMMIT")
+    {
+        auto *gate = std::exchange(active_commit_gate, nullptr);
+        gate->reached.release();
+        if (!gate->proceed.try_acquire_for(std::chrono::seconds(5)) || gate->reject)
+        {
+            return SQLITE_IOERR;
+        }
+    }
+
+    return __real_sqlite3_step(statement);
+}
+
 int main(int argc, char **argv)
 {
     try
@@ -1299,6 +1399,7 @@ int main(int argc, char **argv)
         exercise_request_reuse();
         exercise_write_batches();
         exercise_shutdown_pending();
+        exercise_commit_publication();
         Fixture fixture;
         RunningServer server(fixture);
         exercise(server.port());

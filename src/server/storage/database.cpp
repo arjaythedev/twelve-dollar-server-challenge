@@ -62,8 +62,10 @@ Connection open(const std::string &path)
     install_sync_hooks();
 #endif
     sqlite3 *raw = nullptr;
-    const int result =
-        sqlite3_open_v2(path.c_str(), &raw, SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX, nullptr);
+    // Both handles coordinate WAL locks in-process; external tools must wait until shutdown
+    // locking_mode=EXCLUSIVE would also obstruct our checkpoint connection
+    const int result = sqlite3_open_v2(path.c_str(), &raw,
+                                       SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX, "unix-excl");
     Connection db(raw);
     if (result != SQLITE_OK)
     {

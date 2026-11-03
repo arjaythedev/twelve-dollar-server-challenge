@@ -16,7 +16,7 @@
 
 - [x] Remove the admission experiment after the 300k/5m regression. If revisited, prevent fresh receive CQEs from overtaking deferred work and bound queued-request age. Its reservation floor permitted at most `128 MiB / 256 KiB = 512` active Exchanges.
 
-- [ ] Separate backlog from leaks with `anon`, socket, file and kernel memory through load, drain and a quiet period. Check live ownership and bounded pool retention; reaching the cgroup limit alone does not identify a leak.
+- [ ] Separate backlog from leaks with `anon`, socket, file and kernel memory through load, drain and a quiet period. Check live ownership and bounded pool retention; reaching the cgroup limit alone does not identify a leak. Compare `sock/N_live` and `slab/N_live` at equal connection counts.
 
 - [x] Bound ENOBUFS retries by returned-buffer credits, capped at 1,024 per ring, plus one no-progress probe per ring every 4 ms. Keep FIFO and the 256-retry turn limit. A single refill must resume multiple retry waves without further buffer returns.
 
@@ -38,12 +38,15 @@
 
 - [x] Compare idle multishot polls with bounded nonblocking reads. At 300k, CPU/request rose from 28.42 to 30.26 us and p99 from 8.03 to 4,170.84 ms; keep pending receives.
 
-- [ ] Compare lazy ring packing with balanced 4/8/12-ring connection shards at the same load and total buffer budget. One issuer and one vCPU remain; compare CPU/request, wakeups, empty CQ scans and p99. More rings add capacity and change locality, not CPU cores.
+- [ ] Compare lazy ring packing with balanced 4/8/12-ring connection shards where descriptor capacity permits, at the same load and total buffer budget. One issuer and one vCPU remain; compare CPU/request, wakeups, empty CQ scans and p99. More rings add capacity and change locality, not CPU cores.
   In the 300k/5m trace, rings 0-3 exhausted buffers; ring 4 did not. Ring 3 produced 51.2% of ENOBUFS completions.
+  Place new accept tickets by live plus reserved slots first, then compare buffer occupancy and deferred-request age as weights. Keep established sockets on their owning ring; migration needs separate lifetime handling. Normalize ENOBUFS by receive attempts before inferring load from the historical share.
 
 - [ ] Compare an exact non-empty-ring bitmap if ring selection becomes hot. Free-slot allocation is already O(1); a Bloom filter adds hashes and false positives before a direct slot lookup.
 
 - [x] Compare a bounded ready queue with round-robin handler dispatch. At 100k, CPU/request changed from 31.05 to 31.32 us and p99 from 27.42 to 32.71 ms; keep inline dispatch.
+
+- [ ] Rotate which ring starts CQ draining each turn, keeping the 256-CQE cap and inline handlers. Compare current per-ring receive/defer metrics; preserve per-connection completion/response order, ring growth during accepts and primary GETEVENTS progress.
 
 - [x] Collect handler, database-method, commit and send-preparation-to-CQE histograms, with per-ring CQ depth/overflow and five-second client/scheduling windows. Send timing includes batching and CQ service delay; CPU samples omit I/O waits.
   A 300k trace captured 2.53- and 1.43-second foreground commits followed by full CQs and CPU saturation. Client scheduling stayed near 1 ms; foreground WAL-header sync under NORMAL is a candidate to measure next.
@@ -110,9 +113,15 @@
 - [ ] Compare locality-aware scheduling of already queued reads by endpoint and nearby post/user IDs. Each request performs its own fresh SQLite read; reuse only SQLite's page cache, never query results.
   Bound queue size and request age, preserve connection order and write/read barriers. Compare FIFO, page-cache misses, CPU/request and p99; locality gains must exceed sorting and waiting costs.
 
+- [ ] Compare a bounded read transaction for already queued HTTP reads, with a separate SQLite query for every request. Close batch membership before opening its snapshot, keep new arrivals for the next batch and preserve write barriers and connection order.
+  Amortize snapshot setup without sharing results. `unix-excl` already removes the lock syscalls; measure remaining transaction cost before adding a queue. Verify snapshot visibility with concurrent writes, then compare queue cost and p99.
+
 - [ ] Compare batched lookups by B-tree level ([bt_seek_many](submissions/c-iouring-pavlyhalim/src/btree.h)).
   Interleave independent descents and fetch shared pages once. Try interpolation from the current page's endpoint keys, with bounded correction and a correct binary-search fallback.
   Keep all lookup state within the request. Pin author pages until serialization; copy post bytes before moving cursors.
+  Keep navigation in SQLite's pager/B-tree; logical IDs and timestamps do not identify stable file offsets.
+
+- [ ] Compare a direct B-tree point reader with prepared SQL for `GET /posts/:id`. Include snapshot/cursor setup, author lookup, current like counts and cleanup when measuring VM savings; retain SQL fallback for unsupported cases.
 
 - [ ] Compare stable connection slabs when connection churn, allocation or connection memory is material.
   CQEs already carry `Connection*`, and each ring owns a table indexed by direct slot. Measure construction and destruction before replacing per-connection allocations.
@@ -131,7 +140,9 @@
 
 ## Larger or conditional experiments
 
-- [ ] Compare a SQLite PCACHE2 wrapper only if truncate scans become material ([C](submissions/c-iouring-pavlyhalim/src/db.h)). Existing rewrite profiles put them near 0.2-0.3% of total CPU; preserve page rekeys, truncation and cache lifetimes.
+- [ ] Measure request-local SQLite cache counters, then trace fetch/unpin/rekey/truncate calls and occupancy through a delegating PCACHE2 wrapper (`SQLITE_CONFIG_PCACHE2`, [C](submissions/c-iouring-pavlyhalim/src/db.h)). `pcache1Fetch` self CPU (~2.6%) does not establish a miss rate.
+  Start with `CACHE_HIT/MISS/USED/SPILL` deltas on each connection's owning thread. Compare the built-in `SQLITE_CONFIG_PAGECACHE` pool before replacing eviction policy; register any PCACHE2 wrapper before SQLite initialization.
+  Compare bounded pools, allocators or eviction policies only if cache costs are material; preserve pin/unpin, rekey, truncate and both-handle lifetimes. Truncate scans previously cost only 0.2-0.3% of total CPU. Custom replacement-cache rule status remains unconfirmed.
 
 - [ ] Consider bounded, best-effort executable/read-only `mlock` only after major faults coincide with stalls ([Mojo](submissions/mojo-iouring-oh-meh/src/shim.c)). Saved normal 300k runs recorded zero major faults; locked pages reduce reclaimable memory.
 
@@ -139,7 +150,9 @@
 
 - [ ] Test request-local or negotiated HTTP compression only for large retained replies. Include CPU and scratch memory; the native generator currently cannot decode compressed responses. Hashes can identify payloads but cannot replace the bytes required by the API ([HTTP](https://www.rfc-editor.org/rfc/rfc9110.html#field.accept-encoding)). Direct slot indexing already avoids hash-table lookups for connections.
 
-- [ ] Check external SQLite-access compatibility before comparing `unix-excl` on both database handles ([db.h](submissions/c-iouring-pavlyhalim/src/db.h)). Keep NORMAL sync semantics; compare WAL write coalescing only afterward, with short-write, error and durability checks.
+- [x] Use `unix-excl` on both database handles ([Kensac](submissions/rust-iouring-kensac/csrc/shim.c), [Pavly](submissions/c-iouring-pavlyhalim/src/db.h)). A small SQLite probe reduced 67,080 measured fcntl64 calls to zero. The short 70k pair used 2.5% less CPU/request with nearly unchanged p99. External SQLite processes must wait until shutdown; keep the checkpoint handle and NORMAL sync.
+
+- [ ] Compare contiguous WAL-write coalescing separately over the stock Unix VFS, retaining external access ([engine.c](submissions/c-iouring-public/components/engine.c)). Target pwrite calls; preserve commit visibility, short-write/error handling and NORMAL sync.
 
 - [ ] Compare linked shutdown/close with selective CQE suppression only after preserving pending counts, failure paths and final ownership retirement. Target connection churn; ordinary keep-alive requests avoid this work already.
 

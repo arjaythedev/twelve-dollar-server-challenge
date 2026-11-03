@@ -7,7 +7,7 @@
 //!
 //! Accepts are one-shot and armed only while slots remain: a burst can never
 //! overrun a table, which is how multishot accept loses connections at handover.
-//! Each connection holds one multishot receive into buffers provided with
+//! Each connection holds one receive into buffers provided with
 //! `IORING_OP_PROVIDE_BUFFERS`, which every Linux 5.7+ kernel accepts (the
 //! buffer-ring registration is rejected outright by Ubuntu's 6.8 kernels).
 //! Idle connections own no user-space buffer.
@@ -17,6 +17,7 @@
 //! syscall policy, an old kernel, an ABI mismatch — the caller stays on the other
 //! transport rather than serving from an untested path.
 
+use std::collections::VecDeque;
 use std::mem;
 use std::os::raw::c_int;
 
@@ -24,9 +25,9 @@ use crate::app::App;
 use crate::http;
 use crate::sys;
 use crate::uring::{
-    new_eventfd, read_eventfd, Ring, Sqe, IORING_CQE_F_MORE, IORING_CQE_BUFFER_SHIFT,
-    IORING_ENTER_GETEVENTS, IORING_SETUP_CLAMP, IORING_SETUP_CQSIZE, IORING_SETUP_DEFER_TASKRUN,
-    IORING_SETUP_SINGLE_ISSUER, IORING_SETUP_SUBMIT_ALL, IORING_SETUP_TASKRUN_FLAG,
+    new_eventfd, read_eventfd, Ring, Sqe, IORING_CQE_BUFFER_SHIFT,
+    IORING_ENTER_GETEVENTS, IORING_SETUP_CLAMP, IORING_SETUP_CQSIZE,
+    IORING_SETUP_SINGLE_ISSUER, IORING_SETUP_SUBMIT_ALL,
 };
 
 /// Ring 0 plus seven more, each with the process's descriptor limit.
@@ -42,6 +43,11 @@ const HANDOVER_FREE: u32 = 4096;
 /// ring boundaries for real before the public listener exists. A value of the
 /// `FEED_TABLE` / `FEED_HANDOVER` environment overrides them; unset means the
 /// process limit and the default.
+/// The DB path the writer reopens (same file, second connection).
+fn app_db_path_of(app: &App) -> String {
+    app.db_path().to_string()
+}
+
 fn env_u32(name: &str) -> Option<u32> {
     std::env::var(name).ok().and_then(|s| s.parse().ok())
 }
@@ -70,6 +76,11 @@ fn tag_lane(u: u64) -> u32 {
     ((u >> 24) & 0xff) as u32
 }
 
+#[inline]
+fn conn_tag(kind: u64, slot: u32, lane: u32, generation: u32) -> u64 {
+    tag(kind, slot, lane) | ((generation as u64) << 32)
+}
+
 struct Conn {
     live: bool,
     inbuf: Vec<u8>,
@@ -77,6 +88,16 @@ struct Conn {
     sent: usize,
     close_after: bool,
     send_busy: bool,
+    recv_busy: bool,
+    /// A queued write owns this connection: further requests wait in the
+    /// input buffer until the write commits and its reply is queued.
+    write_parked: bool,
+    /// The generation this conn had when its write was queued (stale
+    /// completions drop).
+    parked_gen: u32,
+    /// A committed writer reply waits here if a prior send still references
+    /// `outbuf`; appending before that send completes could move its storage.
+    pending_writer_reply: Option<(Vec<u8>, bool)>,
 }
 
 impl Conn {
@@ -88,23 +109,41 @@ impl Conn {
             sent: 0,
             close_after: false,
             send_busy: false,
+            recv_busy: false,
+            write_parked: false,
+            parked_gen: 0,
+            pending_writer_reply: None,
         }
+    }
+
+    fn inbuf_has_data(&self) -> bool {
+        !self.inbuf.is_empty()
     }
 }
 
 struct Lane {
     ring: Ring,
     efd: c_int,
+    /// This ring's own listening socket (REUSEPORT group); -1 unassigned.
+    listen_fd: c_int,
+    /// Per-connection-slot generation, bumped at close: a queued write's
+    /// reply is dropped unless the slot still holds its connection.
+    gens: Vec<u32>,
     bufs: Vec<u8>,
     /// Buffers returned since the last flush, as a bitmap.
     pending: Box<[u64]>,
     npending: u32,
+    /// Provided buffers currently in use by published completions.
+    held_bufs: u32,
     free_slots: u32,
     conns: Vec<Conn>,
     accept_inflight: u32,
     accepting: bool,
     /// Connections whose close could not be submitted yet.
     deferred_close: Vec<u32>,
+    /// Starved receives (ENOBUFS) waiting for the ring's buffers to come
+    /// back, oldest first: each pass re-arms at most as many as returned.
+    read_queue: std::collections::VecDeque<u32>,
     /// Connections with output ready, or waiting to be closed.
     dirty: Vec<u32>,
     /// Response buffers taken back after their send completed.
@@ -156,7 +195,10 @@ impl Lane {
             let n = end - start + 1;
             let u = tag(K_PROVIDE, start, lane as u32);
             match self.ring.sqe() {
-                Some(p) => Sqe(p).apply(Sqe::provide_buffers(addr, BUF_SIZE as u32, n, 0, start, u)),
+                Some(p) => {
+                    Sqe(p).apply(Sqe::provide_buffers(addr, BUF_SIZE as u32, n, 0, start, u));
+                    self.held_bufs = self.held_bufs.saturating_sub(n);
+                }
                 None => {
                     // Out of submission slots: keep these for the next pass.
                     for b in start..=end {
@@ -193,6 +235,7 @@ fn bit_set(pending: &[u64], i: u32) -> bool {
 pub struct UringServer {
     lanes: Vec<Lane>,
     ep: c_int,
+    /// The process's sole listening socket.
     listen_fd: c_int,
     accept_lane: usize,
     app: App,
@@ -204,25 +247,36 @@ pub struct UringServer {
     mem: sys::MemGuard,
     /// Set while a memory-pressure hold is active on the accepting lane.
     mem_holding: bool,
+    /// The parked-write queue (None when the writer thread could not start).
+    writer: Option<Box<crate::writer::IssuerQueue>>,
+    /// The wake fd the writer signals; registered in the issuer's epoll.
+    writer_wake_fd: c_int,
 }
 
 impl UringServer {
     fn arm_recv(&mut self, lane: usize, slot: u32) {
-        let u = tag(K_RECV, slot, lane as u32);
         let l = &mut self.lanes[lane];
+        if !l.conns[slot as usize].live || l.conns[slot as usize].recv_busy {
+            return;
+        }
+        let u = conn_tag(K_RECV, slot, lane as u32, l.gens[slot as usize]);
         if let Some(p) = l.ring.sqe() {
-            Sqe(p).apply(Sqe::recv_multishot(slot, 0, u));
+            Sqe(p).apply(Sqe::recv_buffered(slot, 0, u));
+            l.conns[slot as usize].recv_busy = true;
+        } else {
+            l.read_queue.push_back(slot);
         }
     }
 
     /// Tops up this lane's one-shot accepts, never more than its free slots.
     fn arm_accepts(&mut self, lane: usize) {
         let want = self.lanes[lane].free_slots.saturating_sub(1).min(ACCEPTS);
+        let lfd = self.listen_fd;
         while self.lanes[lane].accepting && self.lanes[lane].accept_inflight < want {
             let u = tag(K_ACCEPT, 0, lane as u32);
             let l = &mut self.lanes[lane];
             if let Some(p) = l.ring.sqe() {
-                Sqe(p).apply(Sqe::accept(self.listen_fd, u));
+                Sqe(p).apply(Sqe::accept(lfd, u));
                 l.accept_inflight += 1;
             } else {
                 break;
@@ -243,7 +297,7 @@ impl UringServer {
     /// Opens ring `i` with a fixed-file table sized to this process's limit.
     fn open_lane(&mut self, i: usize) -> bool {
         let table = match self.table_override {
-            Some(t) => t.min(MAX_LANES as u32),
+            Some(t) => t.clamp(2, 1 << 20),
             None => sys::nofile_limit()
                 .saturating_sub(64)
                 .max(64)
@@ -251,9 +305,13 @@ impl UringServer {
                 // inside it so a large nofile limit cannot fail the whole lane.
                 .min(1 << 20),
         };
+        // Reduced limits must leave a reachable handover target. A watermark
+        // above the entire table makes every other lane appear full forever.
+        self.hwm = self.hwm.min((table / 4).max(1));
+        // Every lane must wake epoll independently. DEFER_TASKRUN requires an
+        // enter on that ring before its CQ/eventfd can advance; sleeping in
+        // epoll until that same eventfd fires can strand the next accept lane.
         let flags = IORING_SETUP_SINGLE_ISSUER
-            | IORING_SETUP_DEFER_TASKRUN
-            | IORING_SETUP_TASKRUN_FLAG
             | IORING_SETUP_CQSIZE
             | IORING_SETUP_CLAMP
             | IORING_SETUP_SUBMIT_ALL;
@@ -272,9 +330,13 @@ impl UringServer {
         let mut lane = Lane {
             ring,
             efd: -1,
+            listen_fd: self.listen_fd,
+            gens: vec![0u32; table as usize],
             bufs,
             pending: vec![0u64; Lane::pending_words()].into_boxed_slice(),
             npending: 0,
+            held_bufs: 0,
+            read_queue: VecDeque::new(),
             free_slots: table,
             conns: (0..table).map(|_| Conn::new()).collect(),
             accept_inflight: 0,
@@ -304,7 +366,8 @@ impl UringServer {
             return false;
         }
         lane.efd = efd;
-        if !lane.ring.register_eventfd_async(efd) {
+        let registered = lane.ring.register_eventfd(efd);
+        if !registered {
             eprintln!("io_uring: ring {i}: eventfd registration refused");
             return false;
         }
@@ -326,6 +389,9 @@ impl UringServer {
 
     fn submit_close(&mut self, lane: usize, slot: u32) {
         let l = &mut self.lanes[lane];
+        if !l.conns[slot as usize].live {
+            return;
+        }
         if l.ring.sq_space() < 2 {
             let _ = l.ring.submit(0, 0);
             if l.ring.sq_space() < 2 {
@@ -338,8 +404,9 @@ impl UringServer {
         }
         // Both entries or neither: an SQE taken but not prepared would go out
         // as whatever it held last time.
-        let u_shutdown = tag(K_SHUTDOWN, slot, lane as u32);
-        let u_close = tag(K_CLOSE, slot, lane as u32);
+        let generation = l.gens[slot as usize];
+        let u_shutdown = conn_tag(K_SHUTDOWN, slot, lane as u32, generation);
+        let u_close = conn_tag(K_CLOSE, slot, lane as u32, generation);
         if let Some(p) = l.ring.sqe() {
             Sqe(p).apply(Sqe::shutdown(slot, u_shutdown));
         }
@@ -360,8 +427,9 @@ impl UringServer {
                 l.deferred_close.push(slot);
                 continue;
             }
-            let u_shutdown = tag(K_SHUTDOWN, slot, lane as u32);
-            let u_close = tag(K_CLOSE, slot, lane as u32);
+            let generation = l.gens[slot as usize];
+            let u_shutdown = conn_tag(K_SHUTDOWN, slot, lane as u32, generation);
+            let u_close = conn_tag(K_CLOSE, slot, lane as u32, generation);
             if let Some(p) = l.ring.sqe() {
                 Sqe(p).apply(Sqe::shutdown(slot, u_shutdown));
             }
@@ -380,7 +448,7 @@ impl UringServer {
             }
             (unsafe { c.outbuf.as_ptr().add(c.sent) }, c.outbuf.len() - c.sent)
         };
-        let u = tag(K_SEND, slot, lane as u32);
+        let u = conn_tag(K_SEND, slot, lane as u32, self.lanes[lane].gens[idx]);
         let l = &mut self.lanes[lane];
         if let Some(p) = l.ring.sqe() {
             Sqe(p).apply(Sqe::send(slot, ptr, len, u));
@@ -416,11 +484,37 @@ impl UringServer {
                         }
                         // Cursors must not span a write; the DB layer closes and
                         // reopens them around one.
-                        let close = {
+                        let (close, parked) = {
                             let app = &mut self.app;
                             let out = &mut self.lanes[lane].conns[idx].outbuf;
-                            app.handle(&rq, out)
+                            let mut pk =
+                                crate::app::ParkedOut { out, owns_writes: self.writer.is_some(), job: None };
+                            let closed = app.route(&rq, &mut pk);
+                            (closed, pk.job)
                         };
+                        if let Some(job) = parked {
+                            // The issuer hands the job to the writer queue; the
+                            // reply comes back through the wake fd. The
+                            // pipeline on this connection waits (no recv re-
+                            // arm, no further serve) until the reply is queued.
+                            let gen = self.lanes[lane].gens[idx];
+                            let queued = match &self.writer {
+                                Some(q) => q.enqueue(lane as u32, slot, gen, job),
+                                None => false,
+                            };
+                            if queued {
+                                self.lanes[lane].conns[idx].write_parked = true;
+                                buf.drain(..used);
+                                break;
+                            }
+                            // Queue full: same answer as a failed batch commit.
+                            let c = &mut self.lanes[lane].conns[idx];
+                            c.outbuf.clear();
+                            http::respond(&mut c.outbuf, 503, crate::app::R_INTERNAL);
+                            c.close_after = true;
+                            buf.clear();
+                            break;
+                        }
                         buf.drain(..used);
                         if close {
                             let c = &mut self.lanes[lane].conns[idx];
@@ -457,24 +551,41 @@ impl UringServer {
         {
             if let Ok(Some((rq, used))) = http::parse(data) {
                 if used == data.len() {
-                    let close = {
-                        let l = &mut self.lanes[lane];
-                        if rq.expect_continue {
-                            l.conns[idx]
-                                .outbuf
-                                .extend_from_slice(b"HTTP/1.1 100 Continue\r\n\r\n");
-                        }
+                    // Same routed path as the buffered serve: a write parks in
+                    // the writer queue and the reply arrives through the wake.
+                    let owns = self.writer.is_some();
+                    let (close, parked) = {
                         let app = &mut self.app;
-                        app.handle(&rq, &mut l.conns[idx].outbuf)
+                        let out = &mut self.lanes[lane].conns[idx].outbuf;
+                        let mut pk = crate::app::ParkedOut { out, owns_writes: owns, job: None };
+                        let closed = app.route(&rq, &mut pk);
+                        (closed, pk.job)
                     };
+                    if let Some(job) = parked {
+                        let gen = self.lanes[lane].gens[idx];
+                        let queued = match &self.writer {
+                            Some(q) => q.enqueue(lane as u32, slot, gen, job),
+                            None => false,
+                        };
+                        if queued {
+                            self.lanes[lane].conns[idx].write_parked = true;
+                            // No recv re-arm: the pipeline waits for the commit.
+                            return;
+                        }
+                        let c = &mut self.lanes[lane].conns[idx];
+                        c.outbuf.clear();
+                        http::respond(&mut c.outbuf, 503, crate::app::R_INTERNAL);
+                        c.close_after = true;
+                        self.mark_dirty(lane, slot);
+                        return;
+                    }
                     if close {
                         self.lanes[lane].conns[idx].close_after = true;
                     }
                     self.mark_dirty(lane, slot);
                     return;
                 }
-            }
-        }
+            }        }
         // While a send is in flight the output buffer must not move, so new
         // bytes wait in the input buffer until it completes.
         self.lanes[lane].conns[idx].inbuf.extend_from_slice(data);
@@ -493,6 +604,17 @@ impl UringServer {
         let slot = tag_slot(u);
         let lane = tag_lane(u) as usize;
         if lane >= self.lanes.len() || slot as usize >= self.lanes[lane].conns.len() {
+            return;
+        }
+        if matches!(kind, K_RECV | K_SEND | K_SHUTDOWN | K_CLOSE)
+            && (u >> 32) as u32 != self.lanes[lane].gens[slot as usize]
+        {
+            // A terminated operation can complete after this fixed slot has
+            // been reused. Return its buffer without touching the new socket.
+            if kind == K_RECV && res > 0 {
+                self.lanes[lane].held_bufs += 1;
+                self.lanes[lane].recycle(flags >> IORING_CQE_BUFFER_SHIFT);
+            }
             return;
         }
         match kind {
@@ -528,6 +650,7 @@ impl UringServer {
                 }
             }
             K_RECV => {
+                self.lanes[lane].conns[slot as usize].recv_busy = false;
                 if res > 0 {
                     let bid = flags >> IORING_CQE_BUFFER_SHIFT;
                     let start = bid as usize * BUF_SIZE;
@@ -540,10 +663,14 @@ impl UringServer {
                     // not handed back to the kernel until the pass ends, so it
                     // stays valid for the whole call.
                     let base = self.lanes[lane].bufs.as_ptr();
+                    self.lanes[lane].held_bufs += 1;
                     self.lanes[lane].recycle(bid);
                     let data = unsafe { std::slice::from_raw_parts(base.add(start), n) };
                     self.on_data(lane, slot, data);
-                    if flags & IORING_CQE_F_MORE == 0 && self.lanes[lane].conns[slot as usize].live
+                    // A parked write holds the pipeline: the receive re-arms
+                    // only when the write's reply is queued.
+                    if self.lanes[lane].conns[slot as usize].live
+                        && !self.lanes[lane].conns[slot as usize].write_parked
                     {
                         self.arm_recv(lane, slot);
                     }
@@ -551,11 +678,22 @@ impl UringServer {
                     self.submit_close(lane, slot);
                 } else {
                     let err = -res;
-                    // ENOBUFS: no provided buffer was available; the receive
-                    // must be re-armed. EAGAIN/EINTR/EALREADY likewise.
-                    if err == 105 || err == 11 || err == 4 || err == 114 {
+                    // EAGAIN/EINTR/EALREADY: transient, re-arm as usual.
+                    // ENOBUFS is the storm case: the ring's buffers are out,
+                    // and re-arming every starved receive at once re-arms them
+                    // all into an empty ring (each ends ENOBUFS again). The
+                    // starved connection joins a first-in, first-out queue;
+                    // each pass re-arms at most as many of them as buffers were
+                    // returned, so the queue drains at the rate the ring can
+                    // serve and never regenerates the collapse (the failure
+                    // mode the merged head's 240k probe died in).
+                    if err == 11 || err == 4 || err == 114 {
                         if self.lanes[lane].conns[slot as usize].live {
                             self.arm_recv(lane, slot);
+                        }
+                    } else if err == 105 {
+                        if self.lanes[lane].conns[slot as usize].live {
+                            self.lanes[lane].read_queue.push_back(slot);
                         }
                     } else {
                         self.submit_close(lane, slot);
@@ -571,7 +709,7 @@ impl UringServer {
                 } else if res == 0 {
                     // A send of zero bytes on a non-empty buffer means the peer
                     // is gone; never retry it or this pass never ends.
-                    c.live = false;
+                    self.submit_close(lane, slot);
                     return;
                 } else {
                     let err = -res;
@@ -583,7 +721,7 @@ impl UringServer {
                         return;
                     }
                     if err != 4 {
-                        c.live = false;
+                        self.submit_close(lane, slot);
                         return;
                     }
                 }
@@ -610,10 +748,98 @@ impl UringServer {
             }
             K_CLOSE => {
                 let l = &mut self.lanes[lane];
+                if res < 0 {
+                    eprintln!("io_uring: direct close failed: lane {lane}, slot {slot}, error {}", -res);
+                    l.deferred_close.push(slot);
+                    return;
+                }
                 l.conns[slot as usize] = Conn::new();
+                let gi = slot as usize;
+                if gi < l.gens.len() {
+                    l.gens[gi] = l.gens[gi].wrapping_add(1);
+                }
                 l.free_slots = (l.free_slots + 1).min(l.conns.len() as u32);
             }
             _ => {}
+        }
+    }
+
+    /// Drains the writer's committed replies and submits their sends. A reply
+    /// for a slot whose connection died in the meantime is dropped (the write
+    /// still committed — accepted-request semantics).
+    fn publish_writer_replies(&mut self) {
+        let q = match &self.writer {
+            Some(q) => q,
+            None => return,
+        };
+        for r in q.drain() {
+            let idx = r.slot as usize;
+            if r.lane as usize >= self.lanes.len() || idx >= self.lanes[r.lane as usize].conns.len()
+            {
+                continue;
+            }
+            let lane_live = {
+                let l = &self.lanes[r.lane as usize];
+                let gi = idx.min(l.gens.len() - 1);
+                l.gens[gi] == r.gen && l.conns[idx].live
+            };
+            if !lane_live {
+                continue;
+            }
+            let lane = r.lane as usize;
+            if self.lanes[lane].conns[idx].send_busy {
+                self.lanes[lane].conns[idx].pending_writer_reply = Some((r.bytes, r.close));
+            } else {
+                let c = &mut self.lanes[lane].conns[idx];
+                c.outbuf.extend_from_slice(&r.bytes);
+                c.write_parked = false;
+                c.close_after |= r.close;
+                if c.inbuf_has_data() {
+                    self.serve(lane, r.slot);
+                    let c = &self.lanes[lane].conns[idx];
+                    if !c.write_parked && !c.close_after {
+                        self.arm_recv(lane, r.slot);
+                    }
+                } else if !self.lanes[lane].conns[idx].close_after {
+                    self.arm_recv(lane, r.slot);
+                }
+                self.submit_send(lane, r.slot);
+            }
+        }
+    }
+
+    /// Fair re-arms after a dry ring: at most `free buffers` starved
+    /// connections get their multishot receive back per pass, oldest first,
+    /// so the queue drains at the rate the ring can serve.
+    fn drain_starved(&mut self, lane: usize) {
+        let l = &mut self.lanes[lane];
+        let free = (BUF_COUNT as i64 - l.held_bufs as i64).max(0) as usize;
+        let mut budget = free.min(256);
+        while budget > 0 {
+            match l.read_queue.pop_front() {
+                Some(slot) => {
+                    let idx = slot as usize;
+                    if idx < l.conns.len() && l.conns[idx].live && !l.conns[idx].write_parked {
+                        if l.conns[idx].recv_busy {
+                            continue;
+                        }
+                        let u = conn_tag(K_RECV, slot, lane as u32, l.gens[idx]);
+                        match l.ring.sqe() {
+                            Some(p) => {
+                                Sqe(p).apply(Sqe::recv_buffered(slot, 0, u));
+                                l.conns[idx].recv_busy = true;
+                                budget -= 1;
+                            }
+                            None => {
+                                // SQ full: back at the front for the next pass.
+                                l.read_queue.push_front(slot);
+                                break;
+                            }
+                        }
+                    }
+                }
+                None => break,
+            }
         }
     }
 
@@ -647,9 +873,29 @@ impl UringServer {
                 if idx >= self.lanes[lane].conns.len() {
                     continue;
                 }
-                let (live, busy, pending, close_after) = {
+                let pending_reply = if !self.lanes[lane].conns[idx].send_busy {
+                    self.lanes[lane].conns[idx].pending_writer_reply.take()
+                } else {
+                    None
+                };
+                if let Some((bytes, close)) = pending_reply {
+                    let c = &mut self.lanes[lane].conns[idx];
+                    c.outbuf.extend_from_slice(&bytes);
+                    c.write_parked = false;
+                    c.close_after |= close;
+                    if c.inbuf_has_data() {
+                        self.serve(lane, slot);
+                        let c = &self.lanes[lane].conns[idx];
+                        if !c.write_parked && !c.close_after {
+                            self.arm_recv(lane, slot);
+                        }
+                    } else if !self.lanes[lane].conns[idx].close_after {
+                        self.arm_recv(lane, slot);
+                    }
+                }
+                let (live, busy, pending, close_after, write_parked) = {
                     let c = &self.lanes[lane].conns[idx];
-                    (c.live, c.send_busy, c.sent < c.outbuf.len(), c.close_after)
+                    (c.live, c.send_busy, c.sent < c.outbuf.len(), c.close_after, c.write_parked)
                 };
                 if !live {
                     continue;
@@ -658,7 +904,7 @@ impl UringServer {
                     self.submit_send(lane, slot);
                 } else if !pending && close_after {
                     self.submit_close(lane, slot);
-                } else if !pending {
+                } else if !pending && !write_parked {
                     // Buffered input arrived while a send was in flight.
                     self.serve(lane, slot);
                     let more = {
@@ -676,22 +922,31 @@ impl UringServer {
     }
 
     fn collect(&mut self, lane: usize, out: &mut Vec<(u64, i32, u32)>) {
+        // The per-pass cap: completions beyond it wait in the ring (FIFO) for
+        // the next pass, so one memory-wall pass cannot hold the whole
+        // connection set behind a single slow commit. 1,024 per ring matches
+        // the batch size the writer executes and keeps a pass's worst case in
+        // the tens of milliseconds even with every row a cache miss.
+        const CQ_CAP_PER_LANE: usize = 1024;
         self.lanes[lane]
             .ring
-            .reap(|u, res, flags| out.push((u, res, flags)));
+            .reap_bounded(CQ_CAP_PER_LANE, |u, res, flags| out.push((u, res, flags)));
     }
 
     /// One pass: wait for completions, serve the requests they carried, commit
     /// the batch, then submit the sends and the returned buffers.
     fn pump(&mut self, wait: bool) -> usize {
+        // A bounded reap can leave CQEs after the eventfd counter was drained.
+        // They already represent work: never wait for another notification.
+        let wait = wait && self.lanes.iter().all(|lane| lane.ring.pending() == 0);
         // Wait. One ring: a single enter both submits and sleeps. Several:
         // sleep in epoll across their eventfds and run their task work.
-        if self.lanes.len() == 1 {
+        if self.lanes.len() == 1 && self.writer_wake_fd < 0 {
             if wait {
                 let _ = self.lanes[0].ring.submit(1, IORING_ENTER_GETEVENTS);
             } else {
-                // Deferred task work only runs on an enter, so a non-blocking
-                // pass still has to enter; it just does not wait.
+                // Publish submissions and flush kernel completion overflow
+                // without blocking the self-test driver.
                 let _ = self.lanes[0].ring.submit(0, 0);
                 let _ = self.lanes[0].ring.enter(0, IORING_ENTER_GETEVENTS);
             }
@@ -702,10 +957,17 @@ impl UringServer {
             if n > 0 {
                 for i in 0..n as usize {
                     let fd = sys::event_fd(&events[i]);
+                    if fd == self.writer_wake_fd {
+                        // The writer committed a batch: replies wait in the
+                        // ready queue.
+                        crate::writer::eventdrain(fd);
+                        self.publish_writer_replies();
+                        continue;
+                    }
                     for lane in 0..self.lanes.len() {
                         if self.lanes[lane].efd == fd {
                             read_eventfd(fd);
-                            // Deferred task work runs inside this call.
+                            // Flush kernel completion overflow too.
                             let _ = self.lanes[lane].ring.enter(0, IORING_ENTER_GETEVENTS);
                         }
                     }
@@ -717,7 +979,7 @@ impl UringServer {
             }
         }
 
-        let mut done: Vec<(u64, i32, u32)> = Vec::with_capacity(64);
+        let mut done: Vec<(u64, i32, u32)> = Vec::with_capacity(2048);
         for lane in 0..self.lanes.len() {
             self.collect(lane, &mut done);
         }
@@ -744,7 +1006,11 @@ impl UringServer {
             // this pass cannot classify: be conservative.
             !first.starts_with(b"GET ")
         });
-        self.app.begin_batch(write);
+        // In writer mode the issuer only runs reads: POSTs are parked in the
+        // dedicated writer queue. Taking BEGIN IMMEDIATE here would race the
+        // writer connection for SQLite's single WAL writer lock, even though
+        // the issuer's transaction has no writes of its own.
+        self.app.begin_batch(write && self.writer.is_none());
         for &(u, res, flags) in &done {
             self.handle(u, res, flags);
         }
@@ -756,6 +1022,7 @@ impl UringServer {
         for lane in 0..self.lanes.len() {
             self.lanes[lane].flush_buffers(lane);
             self.retry_deferred(lane);
+            self.drain_starved(lane);
             let _ = self.lanes[lane].ring.submit(0, 0);
         }
         // Accept backpressure on system-wide free memory: an out-of-memory kill
@@ -827,6 +1094,8 @@ pub fn self_test(secret: &str, db_path: &str) -> bool {
         table_override: None,
         mem: sys::MemGuard::new(),
         mem_holding: false,
+        writer: None,
+        writer_wake_fd: -1,
     };
     if !server.open_lane(0) {
         return false;
@@ -911,14 +1180,14 @@ pub fn self_test(secret: &str, db_path: &str) -> bool {
         ok &= h.join().unwrap_or(false);
     }
     drop(server);
+    if !ok {
+        eprintln!("io_uring: protocol self test failed");
+    }
 
     // Ring-boundary stage: a small per-ring table plus a small watermark force
     // the ignored listener to cross from ring 0 to ring 1 while clients are
     // still arriving. Every client must be served after the handover.
-    if ok {
-        ok &= self_test_boundary(secret, db_path, port, lfd);
-    }
-    ok
+    ok && self_test_boundary(secret, db_path, port, lfd)
 }
 
 /// 64 clients against a 32-slot table with a watermark of 8: ring 0 stops
@@ -939,6 +1208,8 @@ fn self_test_boundary(secret: &str, db_path: &str, port: u16, lfd: c_int) -> boo
         table_override: Some(32),
         mem: sys::MemGuard::new(),
         mem_holding: false,
+        writer: None,
+        writer_wake_fd: -1,
     };
     if !server.open_lane(0) {
         return false;
@@ -946,8 +1217,10 @@ fn self_test_boundary(secret: &str, db_path: &str, port: u16, lfd: c_int) -> boo
     server.start_accepting(0);
 
     const CLIENTS: usize = 64;
+    let arrived = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let mut handles = Vec::new();
     for _c in 0..CLIENTS {
+        let arrived = arrived.clone();
         handles.push(std::thread::spawn(move || -> bool {
             use std::io::{Read, Write};
             let mut s = match std::net::TcpStream::connect(("127.0.0.1", port)) {
@@ -964,14 +1237,29 @@ fn self_test_boundary(secret: &str, db_path: &str, port: u16, lfd: c_int) -> boo
             if !buf[..n].starts_with(b"HTTP/1.1 200") {
                 return false;
             }
+            // Keep all sockets alive until all 64 have been answered. Otherwise
+            // a fast client can free its slot and the test may never hand over.
+            arrived.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while arrived.load(std::sync::atomic::Ordering::SeqCst) < CLIENTS {
+                if std::time::Instant::now() >= deadline {
+                    return false;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
             if s.write_all(b"GET /posts/3 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
                 .is_err()
             {
                 return false;
             }
             let mut tail = Vec::new();
-            let n = s.read_to_end(&mut tail).unwrap_or(0);
-            n > 0
+            match s.read_to_end(&mut tail) {
+                Ok(n) => n > 0,
+                Err(e) => {
+                    eprintln!("io_uring: boundary close failed: {e} ({} bytes)", tail.len());
+                    false
+                }
+            }
         }));
     }
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -989,6 +1277,10 @@ fn self_test_boundary(secret: &str, db_path: &str, port: u16, lfd: c_int) -> boo
     // The handover itself must have happened; otherwise table 32 could not hold
     // 64 concurrent clients and the test would be measuring nothing.
     ok &= server.lanes.len() >= 2;
+    if !ok {
+        eprintln!("io_uring: boundary self test failed ({} clients answered)",
+                  arrived.load(std::sync::atomic::Ordering::SeqCst));
+    }
     ok
 }
 
@@ -997,6 +1289,16 @@ fn self_test_boundary(secret: &str, db_path: &str, port: u16, lfd: c_int) -> boo
 #[cfg(test)]
 mod handover_tests {
     use super::*;
+
+    #[test]
+    fn connection_generation_does_not_change_routing() {
+        let u = conn_tag(K_RECV, (1 << 20) - 1, 7, u32::MAX);
+        assert_eq!(tag_kind(u), K_RECV);
+        assert_eq!(tag_slot(u), (1 << 20) - 1);
+        assert_eq!(tag_lane(u), 7);
+        assert_eq!((u >> 32) as u32, u32::MAX);
+        assert_ne!(u, conn_tag(K_RECV, (1 << 20) - 1, 7, 0));
+    }
 
     #[test]
     fn picks_the_next_ring_with_room() {
@@ -1032,6 +1334,18 @@ mod handover_tests {
 pub fn serve(app: App, listen_fd: c_int) -> App {
     let ep = unsafe { sys::epoll_create1(0x80000) };
     assert!(ep >= 0, "epoll_create1 failed");
+    // The writer pair: the issuer's queue + eventfd, and the writer thread's
+    // own connection. Writes park here so the issuer's passes never stall on
+    // a write transaction.
+    let iq: Option<crate::writer::IssuerQueue> =
+        match crate::writer::IssuerQueue::new(&app_db_path_of(&app)) {
+            Ok(q) => Some(q),
+            Err(e) => {
+                eprintln!("writer queue unavailable: {e}; writes run inline");
+                None
+            }
+        };
+    let writer_fd = iq.as_ref().map(|q| q.fd).unwrap_or(-1);
     let mut server = UringServer {
         lanes: Vec::new(),
         ep,
@@ -1042,6 +1356,8 @@ pub fn serve(app: App, listen_fd: c_int) -> App {
         table_override: env_u32("FEED_TABLE"),
         mem: sys::MemGuard::new(),
         mem_holding: false,
+        writer: iq.map(Box::new),
+        writer_wake_fd: writer_fd,
     };
     if !server.open_lane(0) {
         for lane in server.lanes.iter() {
@@ -1050,10 +1366,16 @@ pub fn serve(app: App, listen_fd: c_int) -> App {
         unsafe { sys::close(ep) };
         return server.app;
     }
+    if server.writer_wake_fd >= 0 {
+        let ev = sys::event_for(server.writer_wake_fd, sys::EPOLLIN);
+        unsafe {
+            sys::epoll_ctl(ep, sys::EPOLL_CTL_ADD, server.writer_wake_fd, &ev);
+        }
+    }
     server.start_accepting(0);
     eprintln!(
-        "io_uring: {} direct descriptors in ring 0, {} buffers of {} bytes",
-        server.lanes[0].free_slots, BUF_COUNT, BUF_SIZE
+        "io_uring: {} rings, {} direct descriptors in ring 0, {} buffers of {} bytes",
+        server.lanes.len(), server.lanes[0].free_slots, BUF_COUNT, BUF_SIZE
     );
     server.run()
 }

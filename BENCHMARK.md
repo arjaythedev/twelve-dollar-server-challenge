@@ -165,6 +165,8 @@ Header passing, no SQLite, seven confirmation pairs: `AcceptedHead&&` feed -4.86
 
 ## Native CPU sampling
 
+350k, 30-second warm-up and 90-second capture: 73,713 samples, no loss, 3,143 unresolved leaves. Network 40.7%, SQL/rows 20.9%, files/locks/page cache 12.8%, io_uring 8.6%, response JSON 2.6%. No request errors; hold p99 7.10 ms. Sampling overhead included. [Data](src/profiles/recovery-reuse-350000.json).
+
 300k backlog, 30-second warm-up and 90-second capture: 80,484 samples, no loss; network 38.7%, io_uring 28.6%, SQL 11.6%. [Data](src/profiles/admission-backlog-300000.json).
 
 Rewrite versus `671fd4e`, 10k users, 30-second warm-up and 60-second capture: hold CPU 47.42 to 45.71 us/request, p99 4.341 to 4.310 ms; aggregate CPU 53.01 to 54.22 us/request. No errors or lost samples. One pair, different random seeds. [Data](src/profiles/architecture-reference-10000.json).

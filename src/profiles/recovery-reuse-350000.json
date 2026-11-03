@@ -1,0 +1,260 @@
+{
+  "benchmark": {
+    "date": "2026-11-03",
+    "name": "recovery-reuse-350000-profile",
+    "runtime": "C++ 0.1.0",
+    "load_generator": "docker_loopback",
+    "generator": "cpp",
+    "sqlite": "3.53.1",
+    "users": 350000,
+    "hold": "90s",
+    "ramp": "30s",
+    "requests": 4740916,
+    "rps": 29630.7116749,
+    "p95_ms": 5.0244845,
+    "p99_ms": 6.95261385,
+    "max_ms": 32.128742,
+    "error_rate": 0.0,
+    "cpu_us_per_request": 24.186262739099362,
+    "cpu_scope": "server_cgroup",
+    "server_peak_bytes": 1170968576,
+    "passed": true,
+    "client_sampled_peak_bytes": 1542156288
+  },
+  "profile": {
+    "event": "cpu-clock",
+    "frequency_hz": 997,
+    "stack_bytes": 8192,
+    "samples": 73713,
+    "sampled_cpu_ns": 73934802417,
+    "lost_records": 0,
+    "unresolved_leaf_samples": 3143,
+    "unrooted_samples": 1337,
+    "stages_cpu_ns": {
+      "database_and_rows": 15481443915,
+      "kernel_filesystem": 9474423014,
+      "kernel_network": 30080239910,
+      "kernel_other": 4272818340,
+      "kernel_io_uring": 6386158303,
+      "transport_and_other": 4007020955,
+      "kernel_scheduler": 1133400170,
+      "response_json": 1936810379,
+      "auth": 1129388134,
+      "unknown": 23069207,
+      "request_json": 10030090
+    },
+    "hotspots": [
+      {
+        "symbol": "_raw_spin_unlock_irqrestore",
+        "module": "[kernel.kallsyms]",
+        "cpu_ns": 4763289741,
+        "samples": 4749
+      },
+      {
+        "symbol": "[unknown]",
+        "module": "/usr/lib/x86_64-linux-gnu/libc.so.6",
+        "cpu_ns": 2835506443,
+        "samples": 2827
+      },
+      {
+        "symbol": "pcache1Fetch",
+        "module": "/app/server",
+        "cpu_ns": 1890671965,
+        "samples": 1885
+      },
+      {
+        "symbol": "sqlite3BtreeTableMoveto",
+        "module": "/app/server",
+        "cpu_ns": 1751253714,
+        "samples": 1746
+      },
+      {
+        "symbol": "__inet_lookup_established",
+        "module": "[kernel.kallsyms]",
+        "cpu_ns": 1589769265,
+        "samples": 1585
+      },
+      {
+        "symbol": "finish_task_switch.isra.0",
+        "module": "[kernel.kallsyms]",
+        "cpu_ns": 1296890637,
+        "samples": 1293
+      },
+      {
+        "symbol": "tds_btree_feed_next",
+        "module": "/app/server",
+        "cpu_ns": 1282848511,
+        "samples": 1279
+      },
+      {
+        "symbol": "tcp_ack",
+        "module": "[kernel.kallsyms]",
+        "cpu_ns": 1196589737,
+        "samples": 1193
+      },
+      {
+        "symbol": "srso_alias_safe_ret",
+        "module": "[kernel.kallsyms]",
+        "cpu_ns": 1072216621,
+        "samples": 1069
+      },
+      {
+        "symbol": "exit_to_user_mode_prepare",
+        "module": "[kernel.kallsyms]",
+        "cpu_ns": 1045135378,
+        "samples": 1042
+      },
+      {
+        "symbol": "tds::quote(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >&, std::basic_string_view<char, std::char_traits<char> >)",
+        "module": "/app/server",
+        "cpu_ns": 769307903,
+        "samples": 767
+      },
+      {
+        "symbol": "copyin",
+        "module": "[kernel.kallsyms]",
+        "cpu_ns": 757271795,
+        "samples": 755
+      },
+      {
+        "symbol": "posix_lock_inode",
+        "module": "[kernel.kallsyms]",
+        "cpu_ns": 751253741,
+        "samples": 749
+      },
+      {
+        "symbol": "walMerge",
+        "module": "/app/server",
+        "cpu_ns": 746238696,
+        "samples": 744
+      },
+      {
+        "symbol": "sqlite3VdbeExec",
+        "module": "/app/server",
+        "cpu_ns": 732196570,
+        "samples": 730
+      }
+    ],
+    "syscalls_cpu_ns": {
+      "fsync": 1792377083,
+      "io_uring_enter": 34083248829,
+      "fcntl": 5550651806,
+      "other": 5896689911,
+      "pwrite64": 2578736139,
+      "pread64": 633901688,
+      "read": 276830484,
+      "io_uring_setup": 1003009,
+      "brk": 394182537,
+      "futex": 89267801,
+      "ftruncate": 35105315,
+      "newfstat": 15045135
+    }
+  },
+  "window": {
+    "warmup_s": 30.0,
+    "hold_s": 90.0,
+    "resume_ack_s": 0.000371300004189834,
+    "enable_request_s": 30.222222199998214,
+    "enable_ack_s": 30.405902899998182,
+    "disable_request_s": 120.10551049999776,
+    "disable_ack_s": 120.28472039999906,
+    "cpu": {
+      "cgroup_user_s": 23.0056,
+      "cgroup_system_s": 52.954853,
+      "main_user_s": 23.01,
+      "main_system_s": 52.96,
+      "cgroup_minus_main_s": -0.009547000000004857
+    }
+  },
+  "load_generator": {
+    "name": "td-load",
+    "version": "0.1.0",
+    "transport": "epoll/http1.1/IPv4",
+    "source": "bench/load.js",
+    "passed": true,
+    "checks_passed": true,
+    "vus": 350000,
+    "ramp_up_seconds": 30,
+    "hold_seconds": 90,
+    "ramp_down_seconds": 30,
+    "grace_seconds": 10,
+    "request_timeout_seconds": 60,
+    "elapsed_seconds": 160.000071953,
+    "connections": 350000,
+    "max_rss_bytes": 200118272,
+    "idle_vu_state_bytes": 80,
+    "interrupted_iterations": 180020,
+    "workflow_errors": 0,
+    "bytes_received": 8870338599,
+    "seed": 1914556700,
+    "quantiles": "exact linear interpolation, all completed requests, 24 bytes/request across global+endpoint+phase samples, plus vector capacity, 20 million request limit",
+    "duration_semantics": "send+wait+receive, excludes connect; interrupted requests omitted",
+    "endpoint_requests": {
+      "feed": 2185736,
+      "post": 2185736,
+      "like": 325883,
+      "create": 43561
+    },
+    "endpoint_duration_ms": {
+      "feed": {
+        "count": 2185736,
+        "avg": 2.03112803708,
+        "p95": 5.07969175,
+        "p99": 7.13093840001,
+        "max": 32.128742
+      },
+      "post": {
+        "count": 2185736,
+        "avg": 2.03281022245,
+        "p95": 4.96476425,
+        "p99": 6.79747485,
+        "max": 32.125715
+      },
+      "like": {
+        "count": 325883,
+        "avg": 2.10330468897,
+        "p95": 5.0902027,
+        "p99": 6.90826706,
+        "max": 31.856093
+      },
+      "create": {
+        "count": 43561,
+        "avg": 2.10934340901,
+        "p95": 5.06691199999,
+        "p99": 6.9569604,
+        "max": 28.326637
+      }
+    },
+    "phase_duration_ms": {
+      "ramp_up": {
+        "count": 731655,
+        "avg": 2.08548635549,
+        "p95": 5.1026249,
+        "p99": 7.00769378,
+        "max": 20.775212
+      },
+      "hold": {
+        "count": 3342716,
+        "avg": 2.04140484476,
+        "p95": 5.10336475001,
+        "p99": 7.1017476,
+        "max": 32.128742
+      },
+      "ramp_down": {
+        "count": 654631,
+        "avg": 1.9664532586,
+        "p95": 4.5218395,
+        "p99": 5.989975,
+        "max": 28.326637
+      },
+      "grace": {
+        "count": 11914,
+        "avg": 1.93201999622,
+        "p95": 4.25049799998,
+        "p99": 4.43545036998,
+        "max": 8.62136000001
+      }
+    },
+    "phase_semantics": "classification by completion timestamp; stage boundaries enter the next phase"
+  }
+}

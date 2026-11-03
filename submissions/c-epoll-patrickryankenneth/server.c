@@ -336,7 +336,7 @@ static void db_open(const char *path) {
   if (sqlite3_exec(db, "PRAGMA journal_mode=WAL;PRAGMA synchronous=NORMAL;PRAGMA temp_store=MEMORY;"
                        "PRAGMA mmap_size=0;PRAGMA cache_size=-16384;PRAGMA busy_timeout=5000;",
                    NULL, NULL, &em) != SQLITE_OK) { fprintf(stderr, "pragma: %s\n", em); exit(1); }
-  sqlite3_exec(db, "PRAGMA wal_autocheckpoint=10000;", NULL, NULL, NULL);   /* keep checkpoints out of the commit path */
+  sqlite3_exec(db, "PRAGMA wal_autocheckpoint=500;", NULL, NULL, NULL);   /* small, frequent checkpoints: big inline ones stall the loop on slow disks */
   st_feed = prep(POST_SQL "ORDER BY p.created_at DESC, p.id DESC LIMIT 20");
   st_one = prep(POST_SQL "WHERE p.id=?");
   st_ins = prep("INSERT INTO posts(user_id,body) VALUES(?,?) RETURNING id,created_at");
@@ -948,7 +948,7 @@ static int uring_serve(int lfd, unsigned nofile, const char *host, const char *p
     for (int i = 1; i < NR; i++) ring_flush(&rg[i]);
     uring *r0 = &rg[0];
     __atomic_store_n(r0->sq_tail, r0->sq_local, __ATOMIC_RELEASE);
-    int n = sys_enter_to(r0->fd, r0->to_submit, 1, IORING_ENTER_GETEVENTS, 1000000);
+    int n = sys_enter_to(r0->fd, r0->to_submit, 16, IORING_ENTER_GETEVENTS, 1000000);
     if (n < 0) { if (errno != EINTR && errno != EBUSY && errno != EAGAIN && errno != ETIME) { perror("io_uring_enter"); exit(1); } }
     else r0->to_submit -= (unsigned)n;
     for (int i = 0; i < NR; i++) reap(i);

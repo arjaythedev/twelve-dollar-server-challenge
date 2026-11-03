@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../timing.hpp"
+#include "../telemetry/io_snapshot.hpp"
 #include "buffers.hpp"
 #include "connections.hpp"
 #include "descriptor.hpp"
@@ -16,6 +16,11 @@
 #include <stdexcept>
 #include <system_error>
 #include <vector>
+
+namespace tds::telemetry
+{
+class IoTelemetry;
+}
 
 namespace tds::net
 {
@@ -75,24 +80,21 @@ class Ring
     unsigned pending = 0;
     std::size_t shutdown_cursor = 0;
     bool wake_pending = false;
-#ifdef TDS_DIAGNOSTICS
-    struct Diagnostics
+#if TDS_TELEMETRY_LEVEL >= 1
+    struct Statistics
     {
-        timing::Histogram cq_depth;
-        timing::Histogram deferred_receive_depth;
-        timing::Histogram send_attempt;
-        timing::Histogram enobufs_to_receive_service;
-        std::uint64_t cqes = 0;
-        std::uint64_t receive_submissions = 0;
-        std::uint64_t receive_completions = 0;
-        std::uint64_t receive_enobufs = 0;
-        std::uint64_t empty_cq_samples = 0;
-        std::uint64_t overflow_flag_samples = 0;
+        telemetry::RingCounters totals;
+#if TDS_TELEMETRY_LEVEL == 2
+        telemetry::RingCounters previous;
+        telemetry::RingTimings interval;
+#endif
         unsigned previous_overflow = 0;
-    } diagnostics;
+    } statistics;
 #endif
 
   private:
+    friend class telemetry::IoTelemetry;
+
     static constexpr std::size_t max_pooled_exchanges = 1024;
     static constexpr std::size_t max_retained_capacity = 8192;
     std::vector<std::unique_ptr<http::Exchange>> exchange_pool_;

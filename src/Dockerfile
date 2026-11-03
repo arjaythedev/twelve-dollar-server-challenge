@@ -1,34 +1,39 @@
-FROM ubuntu:24.04@sha256:78d4744ead1f5b19b04d0df558ab182a5300903900755e515b2ca4d10eb2044d AS build
+FROM ubuntu:24.04@sha256:78d4744ead1f5b19b04d0df558ab182a5300903900755e515b2ca4d10eb2044d AS build-base
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     ca-certificates cmake ninja-build make gcc g++ libssl-dev
 WORKDIR /build
 COPY CMakeLists.txt ./
+COPY cmake ./cmake
 COPY server ./server
-COPY checks/transport.cpp ./checks/transport.cpp
-COPY checks/io_lifetimes.cpp ./checks/io_lifetimes.cpp
-COPY checks/checkpoint.cpp ./checks/checkpoint.cpp
-COPY checks/group_commit.cpp ./checks/group_commit.cpp
-COPY checks/post_writer.cpp ./checks/post_writer.cpp
-COPY checks/application.cpp ./checks/application.cpp
-COPY checks/btree.cpp ./checks/btree.cpp
-COPY checks/sync.cpp ./checks/sync.cpp
 COPY load ./load
+COPY benchmarks/CMakeLists.txt ./benchmarks/CMakeLists.txt
 COPY benchmarks/group_commit.cpp ./benchmarks/group_commit.cpp
 COPY benchmarks/response_reuse.cpp ./benchmarks/response_reuse.cpp
 COPY benchmarks/retry_receive.cpp ./benchmarks/retry_receive.cpp
 ARG TDS_SANITIZERS=OFF
-ARG TDS_DIAGNOSTICS=OFF
-ARG TDS_BUILD_TARGET=all
-RUN cmake -S . -B out -G Ninja -DCMAKE_BUILD_TYPE=Release -DTDS_SANITIZERS=${TDS_SANITIZERS} -DTDS_DIAGNOSTICS=${TDS_DIAGNOSTICS} \
+ARG TDS_TELEMETRY=off
+
+FROM build-base AS build
+ARG TDS_BUILD_TARGET=server
+RUN cmake -S . -B out -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF -DTDS_SANITIZERS=${TDS_SANITIZERS} -DTDS_TELEMETRY=${TDS_TELEMETRY} \
     && cmake --build out --target "${TDS_BUILD_TARGET}" --parallel 2
+
+FROM build-base AS test-build
+COPY tests/*.cpp tests/CMakeLists.txt ./tests/
+RUN cmake -S . -B out -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DTDS_SANITIZERS=${TDS_SANITIZERS} -DTDS_TELEMETRY=${TDS_TELEMETRY} \
+    && cmake --build out --parallel 2
+
+FROM build-base AS generator-build
+RUN cmake -S . -B out -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF -DTDS_SANITIZERS=${TDS_SANITIZERS} -DTDS_TELEMETRY=${TDS_TELEMETRY} \
+    && cmake --build out --target load_generator --parallel 2
 
 FROM ubuntu:24.04@sha256:78d4744ead1f5b19b04d0df558ab182a5300903900755e515b2ca4d10eb2044d AS generator
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libstdc++6 \
     && useradd --uid 10001 --create-home benchmark
 WORKDIR /app
-COPY --from=build /build/out/load_generator ./load_generator
+COPY --from=generator-build /build/out/load_generator ./load_generator
 USER 10001:10001
 ENTRYPOINT ["/app/load_generator"]
 

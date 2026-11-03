@@ -1,4 +1,4 @@
-"""HTTP regressions for authentication, fresh reads, JSON and committed writes."""
+"""HTTP regressions for authentication, fresh reads, JSON and committed writes"""
 
 import base64
 import hashlib
@@ -16,8 +16,9 @@ import unittest
 from contextlib import ExitStack, closing
 from pathlib import Path
 
-from dev import ROOT, JSONValue, command, decode_json, integer, mapping, server
-from dev import text as json_text
+from devtools.reports import JSONValue, decode_json, integer, mapping
+from devtools.reports import text as json_text
+from devtools.runtime import ROOT, command, server
 
 SECRET = b"test-secret"
 

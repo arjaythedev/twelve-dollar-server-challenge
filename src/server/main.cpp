@@ -3,6 +3,7 @@
 
 #include "parsing.hpp"
 #include "server.hpp"
+#include "telemetry/config.hpp"
 
 #include <array>
 #include <cerrno>
@@ -235,7 +236,8 @@ int main(int argc, char **argv)
         if (argc == 2 && std::string_view(argv[1]) == "--version")
         {
             std::cout << "{\"runtime\":\"cpp\",\"version\":\"0.1.0\",\"sqlite\":\""
-                      << sqlite3_libversion() << "\",\"transport\":\"io_uring\"}\n";
+                      << sqlite3_libversion() << "\",\"transport\":\"io_uring\",\"telemetry\":\""
+                      << tds::telemetry::name(tds::telemetry::level) << "\"}\n";
             return 0;
         }
         if (argc != 1)

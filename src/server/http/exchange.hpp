@@ -1,5 +1,7 @@
 #pragma once
 
+#include "../telemetry/config.hpp"
+
 #include "reply.hpp"
 #include "session.hpp"
 
@@ -22,7 +24,7 @@ struct Exchange
 
     HttpSession session;
     Reply reply;
-#ifdef TDS_DIAGNOSTICS
+#if TDS_TELEMETRY_LEVEL == 2
     std::uint64_t send_prepared_ns = 0;
     std::uint64_t receive_serviced_ns = 0;
 #endif

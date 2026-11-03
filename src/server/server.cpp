@@ -1,15 +1,11 @@
 #include "server.hpp"
 #include "app/application.hpp"
+#include "diagnostics/io.hpp"
 #include "http/exchange.hpp"
 #include "net/reactor.hpp"
 
-#ifdef TDS_DIAGNOSTICS
-#include "diagnostics/io.hpp"
-#endif
-
 #include <array>
 #include <iostream>
-#include <optional>
 #include <span>
 #include <stdexcept>
 #include <utility>
@@ -50,19 +46,7 @@ class Server::State
 
     void run()
     {
-#ifdef TDS_DIAGNOSTICS
-        diagnostics.start();
-
-        struct FinalReport
-        {
-            State &owner;
-
-            ~FinalReport()
-            {
-                owner.diagnostics.report(owner.reactor.rings(), true);
-            }
-        } report_on_exit{*this};
-#endif
+        const auto report_on_exit = telemetry.run(reactor);
         reactor.start();
         while (reactor.pending_count())
         {
@@ -79,9 +63,7 @@ class Server::State
             // Flush before the reactor waits so a partial batch cannot strand its replies
             flush_writes();
             reactor.finish_turn();
-#ifdef TDS_DIAGNOSTICS
-            diagnostics.report(reactor.rings(), false);
-#endif
+            telemetry.report(reactor, false);
         }
     }
 
@@ -89,23 +71,11 @@ class Server::State
     void dispatch(Connection &connection)
     {
         const auto &session = connection.exchange->session;
-#ifdef TDS_DIAGNOSTICS
-        const bool reading = !std::holds_alternative<CreateHead>(session.accepted_head()) &&
-                             !std::holds_alternative<LikeHead>(session.accepted_head());
-        std::optional<timing::Scope> sample;
-        if (reading)
-        {
-            diagnostics.receive_to_handler_ns.record(timing::now_ns() -
-                                                     connection.exchange->receive_serviced_ns);
-            sample.emplace(diagnostics.handler_wall_ns);
-        }
-#endif
+        auto sample = telemetry.handler(connection);
         auto prepared = application.prepare(session.accepted_head(), session.message().body);
         if (!prepared)
         {
-#ifdef TDS_DIAGNOSTICS
-            sample.reset();
-#endif
+            sample.finish();
             connection.close_after =
                 connection.close_after || prepared.error().status == Status::internal_error;
             respond(connection, Application::error_response(prepared.error()));
@@ -120,17 +90,13 @@ class Server::State
         }
         auto response = application.read(std::get<ReadQuery>(*prepared),
                                          connection.exchange->reply.take_body());
-#ifdef TDS_DIAGNOSTICS
-        sample.reset();
-#endif
+        sample.finish();
         respond(connection, std::move(response));
     }
 
     void send(Connection &connection)
     {
-#ifdef TDS_DIAGNOSTICS
-        connection.exchange->send_prepared_ns = timing::now_ns();
-#endif
+        telemetry.send_prepared(connection);
         auto &message = connection.exchange->reply.message();
         reactor.send(connection, message);
     }
@@ -165,10 +131,7 @@ class Server::State
         const auto outcomes = std::span(pending_writes.outcomes).first(count);
         try
         {
-#ifdef TDS_DIAGNOSTICS
-            diagnostics.write_batch_size.record(count);
-            timing::Scope sample(diagnostics.write_batch_wall_ns);
-#endif
+            const auto sample = telemetry.write_batch(count);
             const auto committed = application.commit(pending_writes.commands, outcomes);
             // Serialization or send failures must never replay already committed commands
             pending_writes.resolved = true;
@@ -277,18 +240,13 @@ class Server::State
 
     void complete_receive(Completion &completion)
     {
+        const auto received = telemetry.receive();
         auto &connection = *completion.connection;
-#ifdef TDS_DIAGNOSTICS
-        const auto received_ns = timing::now_ns();
-#endif
         if (!connection.exchange)
         {
             connection.exchange = connection.ring.acquire_exchange();
         }
-#ifdef TDS_DIAGNOSTICS
-        // A buffered pipeline request keeps this time through earlier response sends
-        connection.exchange->receive_serviced_ns = received_ns;
-#endif
+        received.attach(connection);
         const auto input = completion.buffer.bytes();
         connection.exchange->session.append({input.data(), input.size()});
         completion.buffer.release();
@@ -299,10 +257,7 @@ class Server::State
     {
         auto &connection = *completion.connection;
         const auto result = completion.result;
-#ifdef TDS_DIAGNOSTICS
-        connection.ring.diagnostics.send_attempt.record(completion.serviced_ns -
-                                                        connection.exchange->send_prepared_ns);
-#endif
+        telemetry.send_completed(completion);
         // Fatal and shutdown completions have already started closing in the reactor
         if (connection.io_closing())
         {
@@ -382,9 +337,8 @@ class Server::State
         std::vector<WriteCommand> commands;
         bool resolved = false;
     } pending_writes;
-#ifdef TDS_DIAGNOSTICS
-    diagnostics::IoDiagnostics diagnostics;
-#endif
+
+    [[no_unique_address]] telemetry::IoTelemetry telemetry;
 };
 
 Server::Server(std::string_view host, std::uint16_t port, std::string database_path,

@@ -2,7 +2,70 @@
 // clang-format off
 #include "sqlite3.c"
 #include "sqlite_read.h"
+#include "telemetry/wal_advice.h"
 // clang-format on
+
+#if TDS_TELEMETRY_LEVEL >= 1
+static _Thread_local struct
+{
+    uint64_t calls;
+    uint64_t errors;
+    uint64_t requested_bytes;
+#if TDS_TELEMETRY_LEVEL >= 2
+    uint64_t event_count;
+    uint64_t dropped_events;
+    tds_wal_advice_event events[TDS_WAL_ADVICE_EVENT_CAPACITY];
+#endif
+} wal_advice;
+#endif
+
+static void record_wal_advice(int offset, i64 length, int result)
+{
+#if TDS_TELEMETRY_LEVEL == 1
+    (void)offset;
+#endif
+#if TDS_TELEMETRY_LEVEL >= 1
+    ++wal_advice.calls;
+    wal_advice.errors += result != 0;
+    wal_advice.requested_bytes += (uint64_t)length;
+#if TDS_TELEMETRY_LEVEL >= 2
+    if (wal_advice.event_count < TDS_WAL_ADVICE_EVENT_CAPACITY)
+    {
+        const int saved_errno = errno;
+        struct timespec now = {0, 0};
+        (void)clock_gettime(CLOCK_MONOTONIC, &now);
+        wal_advice.events[wal_advice.event_count++] =
+            (tds_wal_advice_event){(uint64_t)now.tv_sec * 1000000000ULL + (uint64_t)now.tv_nsec,
+                                   (uint64_t)offset, (uint64_t)length, result};
+        errno = saved_errno;
+    }
+    else
+    {
+        ++wal_advice.dropped_events;
+    }
+#endif
+#else
+    (void)offset;
+    (void)length;
+    (void)result;
+#endif
+}
+
+void tds_wal_advice_take(tds_wal_advice_snapshot *snapshot)
+{
+    memset(snapshot, 0, sizeof(*snapshot));
+#if TDS_TELEMETRY_LEVEL >= 1
+    snapshot->calls = wal_advice.calls;
+    snapshot->errors = wal_advice.errors;
+    snapshot->requested_bytes = wal_advice.requested_bytes;
+#if TDS_TELEMETRY_LEVEL >= 2
+    snapshot->event_count = wal_advice.event_count;
+    snapshot->dropped_events = wal_advice.dropped_events;
+    memcpy(snapshot->events, wal_advice.events, sizeof(wal_advice.events));
+#endif
+    memset(&wal_advice, 0, sizeof(wal_advice));
+#endif
+}
 
 void tds_wal_drop_checkpointed(sqlite3 *db, int frames)
 {
@@ -34,26 +97,7 @@ void tds_wal_drop_checkpointed(sqlite3 *db, int frames)
     // Slightly cursed: keep SQLites unixFile cast inside its own translation unit
     // Keep the header page and partial boundary pages; advice never changes file bytes
     result = posix_fadvise(((unixFile *)file)->h, page_size, end - page_size, POSIX_FADV_DONTNEED);
-#ifdef TDS_DIAGNOSTICS
-    {
-        static _Thread_local unsigned reports;
-        static _Thread_local int reported_error;
-        if (reports < 4 || (result && !reported_error))
-        {
-            struct timespec now = {0, 0};
-            (void)clock_gettime(CLOCK_MONOTONIC, &now);
-            fprintf(stderr,
-                    "TDS_TIMING {\"source\":\"wal_advice\",\"time_ns\":%lld,\"offset\":%d,"
-                    "\"length\":%lld,\"rc\":%d}\n",
-                    (long long)now.tv_sec * 1000000000LL + now.tv_nsec, page_size,
-                    (long long)(end - page_size), result);
-            ++reports;
-            reported_error |= result != 0;
-        }
-    }
-#else
-    (void)result;
-#endif
+    record_wal_advice(page_size, end - page_size, result);
 }
 
 enum

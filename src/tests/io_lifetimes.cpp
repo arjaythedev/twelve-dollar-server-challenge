@@ -1,17 +1,25 @@
+#include "diagnostics/io.hpp"
+#include "http/exchange.hpp"
 #include "net/reactor.hpp"
+
+#include <yyjson.h>
 
 #include <arpa/inet.h>
 #include <array>
 #include <cerrno>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <exception>
 #include <memory>
+#include <optional>
 #include <poll.h>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <sys/resource.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <thread>
 #include <unistd.h>
 #include <utility>
@@ -240,7 +248,7 @@ void reservation_and_record_guards()
     const auto second = store.reserve();
     const auto spare = store.reserve();
     require(!store.has_free_slot(), "reserved slots remained free");
-#ifdef TDS_DIAGNOSTICS
+#if TDS_TELEMETRY_LEVEL >= 1
     require(store.live_count() == 0 && store.reserved_count() == 3,
             "reservation gauges lost an unaccepted slot");
 #endif
@@ -254,7 +262,7 @@ void reservation_and_record_guards()
     const auto *address = &record;
     store.create(owner, second);
     store.release(spare);
-#ifdef TDS_DIAGNOSTICS
+#if TDS_TELEMETRY_LEVEL >= 1
     require(store.live_count() == 2 && store.reserved_count() == 0,
             "accept and release did not update connection gauges");
 #endif
@@ -276,7 +284,7 @@ void reservation_and_record_guards()
         },
         "store retired before close completion");
     require(store.at(first.value) == address, "idle retirement released the live address");
-#ifdef TDS_DIAGNOSTICS
+#if TDS_TELEMETRY_LEVEL >= 1
     require(store.live_count() == 2 && store.reserved_count() == 1,
             "rejected retirement changed connection gauges");
     record.start_close();
@@ -586,11 +594,11 @@ void exhausted_receive_retries()
         }
     }
     owner.submit();
-#ifdef TDS_DIAGNOSTICS
+#if TDS_TELEMETRY_LEVEL >= 1
     require(owner.connections.live_count() == clients_count &&
                 owner.connections.reserved_count() == 64 &&
-                owner.diagnostics.receive_submissions == clients_count &&
-                owner.diagnostics.receive_completions == 0,
+                owner.statistics.totals.receive_submissions == clients_count &&
+                owner.statistics.totals.receive_completions == 0,
             "idle receive submissions or connection gauges were not counted correctly");
 #endif
     for (const auto &client : clients)
@@ -621,7 +629,7 @@ void exhausted_receive_retries()
                 "exhaustion duplicated or corrupted a receive");
         received[slot] = true;
         ++total_received;
-#ifdef TDS_DIAGNOSTICS
+#if TDS_TELEMETRY_LEVEL == 2
         require(completion.connection->receive_enobufs_since_ns == 0,
                 "successful receive retained its first ENOBUFS timestamp");
 #endif
@@ -634,7 +642,7 @@ void exhausted_receive_retries()
         drain_turn(reactor, retain);
     }
     require(held.size() == ReceiveBuffers::count, "the selected pool was not fully retained");
-#ifdef TDS_DIAGNOSTICS
+#if TDS_TELEMETRY_LEVEL == 2
     std::vector<std::pair<Connection *, std::uint64_t>> first_deferred;
     for (std::size_t slot = 0; slot < owner.connections.size(); ++slot)
     {
@@ -645,7 +653,7 @@ void exhausted_receive_retries()
         }
     }
     require(first_deferred.size() == clients_count - ReceiveBuffers::count &&
-                owner.diagnostics.enobufs_to_receive_service.count == 0,
+                owner.statistics.interval.enobufs_to_successful_receive_service_ns.count == 0,
             "first ENOBUFS timestamps missed deferrals or recorded unfinished recovery");
 #endif
 
@@ -678,7 +686,7 @@ void exhausted_receive_retries()
     control_turn(retain);
     require(owner.deferred_receives.size() == clients_count - ReceiveBuffers::count - 1,
             "timed retry did not arm exactly one exhausted receive");
-#ifdef TDS_DIAGNOSTICS
+#if TDS_TELEMETRY_LEVEL == 2
     for (const auto &[connection, first] : first_deferred)
     {
         require(connection->receive_enobufs_since_ns == first,
@@ -694,14 +702,18 @@ void exhausted_receive_retries()
     }
     require(owner.deferred_receives.empty() && held.size() == 512,
             "one refill did not resume all deferred receives across bounded turns");
-#ifdef TDS_DIAGNOSTICS
-    require(owner.diagnostics.receive_enobufs >= first_deferred.size() &&
-                owner.diagnostics.receive_completions ==
-                    clients_count + owner.diagnostics.receive_enobufs &&
-                owner.diagnostics.receive_submissions == owner.diagnostics.receive_completions,
+#if TDS_TELEMETRY_LEVEL >= 1
+    require(owner.statistics.totals.receive_enobufs >= clients_count - ReceiveBuffers::count &&
+                owner.statistics.totals.receive_completions ==
+                    clients_count + owner.statistics.totals.receive_enobufs &&
+                owner.statistics.totals.receive_submissions ==
+                    owner.statistics.totals.receive_completions,
             "receive counters included control CQEs or missed retry completions");
-    require(owner.diagnostics.enobufs_to_receive_service.count == first_deferred.size() &&
-                owner.diagnostics.enobufs_to_receive_service.max >= 5'000'000,
+#endif
+#if TDS_TELEMETRY_LEVEL == 2
+    require(owner.statistics.interval.enobufs_to_successful_receive_service_ns.count ==
+                    first_deferred.size() &&
+                owner.statistics.interval.enobufs_to_successful_receive_service_ns.max >= 5'000'000,
             "recovery timing missed an episode or excluded the buffer-deferred wait");
 #endif
     held.clear();
@@ -899,7 +911,7 @@ void close_and_late_accept()
     for (const auto &ring : reactor.rings())
     {
         auto &connections = ring->connections;
-#ifdef TDS_DIAGNOSTICS
+#if TDS_TELEMETRY_LEVEL >= 1
         require(connections.live_count() == 0 && connections.reserved_count() == 0,
                 "shutdown retained live records or accept reservations in its gauges");
 #endif
@@ -921,6 +933,282 @@ void close_and_late_accept()
         }
     }
 }
+
+class TelemetryArtifact
+{
+  public:
+    TelemetryArtifact()
+    {
+        if (const auto *previous = std::getenv("TDS_TELEMETRY_PATH"))
+        {
+            previous_ = previous;
+        }
+        const int descriptor = ::mkstemp(path_.data());
+        require(descriptor >= 0, "create transport telemetry artifact");
+        ::close(descriptor);
+        if (::setenv("TDS_TELEMETRY_PATH", path_.c_str(), 1) != 0)
+        {
+            ::unlink(path_.c_str());
+            throw std::runtime_error("set transport telemetry destination");
+        }
+    }
+
+    ~TelemetryArtifact()
+    {
+        if (previous_)
+        {
+            ::setenv("TDS_TELEMETRY_PATH", previous_->c_str(), 1);
+        }
+        else
+        {
+            ::unsetenv("TDS_TELEMETRY_PATH");
+        }
+        ::unlink(path_.c_str());
+    }
+
+    const char *path() const noexcept
+    {
+        return path_.c_str();
+    }
+
+    bool empty() const
+    {
+        struct stat metadata{};
+        require(::stat(path_.c_str(), &metadata) == 0, "read transport artifact size");
+
+        return metadata.st_size == 0;
+    }
+
+  private:
+    std::string path_ = "/tmp/tds-io-telemetry-XXXXXX";
+    std::optional<std::string> previous_;
+};
+
+#if TDS_TELEMETRY_LEVEL >= 1
+std::uint64_t number(yyjson_val *object, const char *key)
+{
+    const auto *value = yyjson_obj_get(object, key);
+    require(yyjson_is_uint(value), "transport artifact lost an unsigned integer");
+
+    return yyjson_get_uint(value);
+}
+#endif
+
+void telemetry_hook_contracts()
+{
+    using tds::telemetry::IoTelemetry;
+    TelemetryArtifact artifact;
+    FileLimit limited(128);
+    Reactor reactor("127.0.0.1", 0);
+    auto &owner = *reactor.rings().front();
+    const auto slot = owner.connections.reserve();
+    owner.connections.reserve();
+    auto &connection = owner.connections.create(owner, slot);
+    IoTelemetry collector;
+    {
+        const auto run = collector.run(reactor);
+#if TDS_TELEMETRY_LEVEL < 2
+        // Basic and off scopes must not inspect even an absent Exchange
+        const auto inactive_handler = collector.handler(connection);
+        collector.send_prepared(connection);
+        collector.send_completed(Completion{});
+#endif
+        const auto received = collector.receive();
+#if TDS_TELEMETRY_LEVEL == 2
+        const auto before_allocation = tds::timing::now_ns();
+#endif
+        connection.exchange = owner.acquire_exchange();
+        received.attach(connection);
+#if TDS_TELEMETRY_LEVEL == 2
+        const auto receive_ns = connection.exchange->receive_serviced_ns;
+        require(receive_ns > 0 && receive_ns <= before_allocation,
+                "receive service time moved after exchange allocation");
+#endif
+        const auto accept = [&](tds::AcceptedHead head) {
+            auto &session = connection.exchange->session;
+            session.reset();
+            session.append("GET /health HTTP/1.1\r\nHost: local\r\n\r\n");
+            require(session.consume().valid && session.headers_pending(),
+                    "parse hook fixture headers");
+            session.accept_headers(std::move(head));
+            require(session.consume().valid && session.complete(), "complete hook fixture request");
+        };
+        accept(tds::HealthHead{});
+        {
+            auto sample = collector.handler(connection);
+            sample.finish();
+            sample.finish();
+        }
+        try
+        {
+            const auto sample = collector.handler(connection);
+            throw std::runtime_error("handler fixture failure");
+        }
+        catch (const std::runtime_error &)
+        {
+        }
+        accept(tds::CreateHead{});
+        {
+            const auto sample = collector.handler(connection);
+        }
+        accept(tds::LikeHead{{}, "1"});
+        {
+            const auto sample = collector.handler(connection);
+        }
+        try
+        {
+            const auto sample = collector.write_batch(3);
+            throw std::runtime_error("write fixture failure");
+        }
+        catch (const std::runtime_error &)
+        {
+        }
+
+        auto pooled = owner.acquire_exchange();
+        owner.recycle_exchange(std::move(pooled));
+        pooled = owner.acquire_exchange();
+        owner.recycle_exchange(std::move(pooled));
+        Completion completion;
+        IoTelemetry::receive_prepared(connection);
+        IoTelemetry::io_serviced(connection, Event::receive, -ENOBUFS, completion);
+        IoTelemetry::receive_deferred(connection);
+#if TDS_TELEMETRY_LEVEL == 2
+        const auto first_enobufs = connection.receive_enobufs_since_ns;
+        IoTelemetry::receive_deferred(connection);
+        require(first_enobufs > 0 && connection.receive_enobufs_since_ns == first_enobufs,
+                "repeated deferral replaced the first ENOBUFS time");
+#endif
+        IoTelemetry::io_serviced(connection, Event::receive, 1, completion);
+#if TDS_TELEMETRY_LEVEL == 2
+        require(connection.receive_enobufs_since_ns == 0 &&
+                    owner.statistics.interval.enobufs_to_successful_receive_service_ns.count == 1,
+                "successful receive did not resolve its deferral sample");
+#endif
+        for (const int result : {-EAGAIN, -ECANCELED})
+        {
+            collector.send_prepared(connection);
+            IoTelemetry::io_serviced(connection, Event::send, result, completion);
+            completion.connection = &connection;
+            connection.start_close();
+            collector.send_completed(completion);
+        }
+#if TDS_TELEMETRY_LEVEL == 2
+        require(owner.statistics.interval.send_attempt_prepare_to_cqe_service_ns.count == 2 &&
+                    connection.exchange->receive_serviced_ns == receive_ns,
+                "failed or closing sends lost samples or changed buffered receive time");
+#endif
+        IoTelemetry::drain_started(owner);
+        owner.deferred_receives.push_back(&connection);
+        IoTelemetry::drain_finished(owner, 3);
+        owner.deferred_receives.pop_front();
+#if TDS_TELEMETRY_LEVEL >= 1
+        const auto overflow = io_uring_smp_load_acquire(owner.queue.cq.koverflow);
+        owner.statistics.previous_overflow = overflow - 3U;
+#endif
+        collector.report(reactor, false);
+        require(artifact.empty(), "collection wrote a transport artifact before finalization");
+#if TDS_TELEMETRY_LEVEL == 2
+        require(collector.history().size() == 0, "early report captured a profile window");
+#endif
+        collector.report(reactor, true);
+#if TDS_TELEMETRY_LEVEL == 2
+        const auto &window = collector.history().at(0);
+        const auto &ring = window.rings[0];
+        require(window.start_ns > 0 && window.end_ns >= window.start_ns &&
+                    window.timings.handler_wall_ns.count == 2 &&
+                    window.timings.receive_cqe_service_to_handler_start_ns.count == 2 &&
+                    window.timings.write_batch_size.count == 1 &&
+                    window.timings.write_batch_size.total == 3 &&
+                    window.timings.write_batch_wall_ns.count == 1,
+                "profile scope classification, completion or unwind accounting changed");
+        require(ring.counters.cqes == 3 && ring.counters.receive_submissions == 1 &&
+                    ring.counters.receive_completions == 2 && ring.counters.receive_enobufs == 1 &&
+                    ring.counters.cq_overflow_counter_delta == 3 &&
+                    ring.timings.send_attempt_prepare_to_cqe_service_ns.count == 2 &&
+                    ring.timings.deferred_receive_queue_depth.total == 1,
+                "profile window lost ring counters or timing samples");
+        require(owner.statistics.totals.cqes == 3 &&
+                    owner.statistics.interval.send_attempt_prepare_to_cqe_service_ns.count == 0 &&
+                    owner.statistics.previous_overflow == overflow,
+                "profile capture lost cumulative counters or its overflow baseline");
+#endif
+        IoTelemetry::drain_started(owner);
+        IoTelemetry::drain_finished(owner, 2);
+        collector.report(reactor, true);
+#if TDS_TELEMETRY_LEVEL == 2
+        const auto &next = collector.history().at(1);
+        require(next.start_ns == window.end_ns && next.rings[0].counters.cqes == 2 &&
+                    next.rings[0].counters.receive_completions == 0 &&
+                    next.rings[0].counters.cq_overflow_counter_delta == 0 &&
+                    next.timings.handler_wall_ns.count == 0,
+                "consecutive profile windows reused interval values");
+        for (std::size_t index = 0;
+             index < tds::telemetry::History<tds::telemetry::IoSnapshot>::capacity; ++index)
+        {
+            collector.report(reactor, true);
+        }
+        require(
+            collector.history().size() == 128 && collector.history().overwritten() == 2 &&
+                collector.totals().rings[0].counters.cqes == 5 &&
+                collector.totals().timings.handler_wall_ns.count == 2 &&
+                collector.totals().rings[0].timings.send_attempt_prepare_to_cqe_service_ns.count ==
+                    2,
+            "bounded history overwrite lost cumulative transport totals");
+        for (std::size_t index = 1; index < collector.history().size(); ++index)
+        {
+            require(collector.history().at(index - 1).end_ns ==
+                        collector.history().at(index).start_ns,
+                    "profile history is not chronological");
+        }
+#endif
+        require(artifact.empty(), "profile capture formatted or exported transport telemetry");
+    }
+#if TDS_TELEMETRY_LEVEL == 0
+    require(artifact.empty(), "off telemetry exported a transport record");
+#else
+    const auto release = [](yyjson_doc *document) noexcept {
+        yyjson_doc_free(document);
+    };
+    yyjson_read_err error{};
+    const std::unique_ptr<yyjson_doc, decltype(release)> document(
+        yyjson_read_file(artifact.path(), 0, nullptr, &error), release);
+    require(document != nullptr, "parse the single final transport JSON record");
+    auto *root = yyjson_doc_get_root(document.get());
+    const auto *mode = yyjson_obj_get(root, "mode");
+    const auto *source = yyjson_obj_get(root, "source");
+    require(yyjson_is_str(mode) && yyjson_is_str(source) &&
+                std::string_view(yyjson_get_str(mode)) ==
+                    tds::telemetry::name(tds::telemetry::level) &&
+                std::string_view(yyjson_get_str(source)) == "transport",
+            "transport artifact mode or source changed");
+    auto *totals = yyjson_obj_get(root, "totals");
+    auto *rings = yyjson_obj_get(totals, "rings");
+    require(yyjson_is_arr(rings) && yyjson_arr_size(rings) == 1,
+            "transport artifact lost its ring snapshot");
+    auto *ring = yyjson_arr_get(rings, 0);
+    require(number(ring, "cqes") == 5 && number(ring, "receive_submissions") == 1 &&
+                number(ring, "receive_completions") == 2 && number(ring, "receive_enobufs") == 1 &&
+                number(ring, "cq_overflow_counter_delta") == 3 &&
+                number(ring, "exchange_allocations") == 2 &&
+                number(ring, "exchange_pool_hits") == 1 && number(ring, "pooled_exchanges") == 1 &&
+                number(ring, "live_connection_records") == 1 &&
+                number(ring, "reserved_accept_slots") == 1,
+            "transport artifact lost cumulative counters or final gauges");
+    auto *windows = yyjson_obj_get(root, "windows");
+    require(yyjson_is_arr(windows), "transport artifact lost its windows array");
+#if TDS_TELEMETRY_LEVEL == 1
+    require(yyjson_arr_size(windows) == 0 && number(root, "overwritten_windows") == 0 &&
+                yyjson_is_null(yyjson_obj_get(totals, "start_ns")) &&
+                yyjson_obj_get(totals, "metrics") == nullptr &&
+                yyjson_obj_get(ring, "metrics") == nullptr,
+            "basic telemetry retained profile timing data");
+#else
+    require(yyjson_arr_size(windows) == 128 && number(root, "overwritten_windows") == 3 &&
+                number(totals, "start_ns") > 0,
+            "profile final snapshot or explicit overwrite accounting changed");
+#endif
+#endif
+}
 } // namespace
 
 int main()
@@ -934,6 +1222,7 @@ int main()
         fixed_cq_order_and_growth();
         exhausted_receive_retries();
         close_and_late_accept();
+        telemetry_hook_contracts();
         ::alarm(0);
         std::puts(
             "I/O reservation, fixed CQ order/growth, primary progress with a ready satellite, "

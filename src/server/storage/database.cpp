@@ -1,8 +1,7 @@
 #include "database.hpp"
 #include "../app/post_writer.hpp"
-#include "../database_timing.hpp"
+#include "../diagnostics/database.hpp"
 #include "../sqlite_read.h"
-#include "../timing.hpp"
 
 #include <sqlite3.h>
 
@@ -22,11 +21,8 @@ namespace tds
 namespace
 {
 
-#ifdef TDS_DIAGNOSTICS
-using database_timing::DatabaseTimings;
-using database_timing::install_sync_hooks;
-using database_timing::SyncScope;
-#endif
+using telemetry::DatabaseOperation;
+using telemetry::DatabaseTelemetry;
 
 struct Close
 {
@@ -62,9 +58,6 @@ void execute(sqlite3 *db, const char *sql)
 
 Connection open(const std::string &path)
 {
-#ifdef TDS_DIAGNOSTICS
-    install_sync_hooks();
-#endif
     sqlite3 *raw = nullptr;
     // Both handles coordinate WAL locks in-process; external tools must wait until shutdown
     // locking_mode=EXCLUSIVE would also obstruct our checkpoint connection
@@ -119,9 +112,7 @@ class Checkpoints
   private:
     void run(std::stop_token stop)
     {
-#ifdef TDS_DIAGNOSTICS
-        DatabaseTimings timings("checkpoint");
-#endif
+        DatabaseTelemetry diagnostics("checkpoint");
         bool reported_busy = false;
         bool reported_error = false;
         while (!stop.stop_requested())
@@ -140,10 +131,8 @@ class Checkpoints
             int checkpointed = -1;
             int result;
             {
-#ifdef TDS_DIAGNOSTICS
-                timing::Scope measure(timings.checkpoint);
-                SyncScope sync(timings, "checkpoint");
-#endif
+                [[maybe_unused]] const auto sample =
+                    diagnostics.measure(DatabaseOperation::checkpoint);
                 result = sqlite3_wal_checkpoint_v2(db_.get(), "main", SQLITE_CHECKPOINT_PASSIVE,
                                                    &frames, &checkpointed);
                 if (result == SQLITE_OK)
@@ -151,10 +140,12 @@ class Checkpoints
                     tds_wal_drop_checkpointed(db_.get(), checkpointed);
                 }
             }
-#ifdef TDS_DIAGNOSTICS
-            timings.record_wal(frames, checkpointed);
-            timings.report();
+#if TDS_TELEMETRY_LEVEL >= 1
+            tds_wal_advice_snapshot advice{};
+            tds_wal_advice_take(&advice);
+            diagnostics.wal_advice_completed(advice);
 #endif
+            diagnostics.checkpoint_completed(result, frames, checkpointed);
             const bool busy = result == SQLITE_BUSY || result == SQLITE_LOCKED;
             if (busy && !reported_busy)
             {
@@ -497,10 +488,7 @@ class Store::State
 
     void commit(Transaction &transaction)
     {
-#ifdef TDS_DIAGNOSTICS
-        timing::Scope measure(timings.commit);
-        SyncScope sync(timings, "issuer");
-#endif
+        [[maybe_unused]] const auto sample = diagnostics.measure(DatabaseOperation::commit);
         transaction.commit();
     }
 
@@ -600,15 +588,11 @@ class Store::State
     {
         if (const auto *job = std::get_if<CreatePost>(&write))
         {
-#ifdef TDS_DIAGNOSTICS
-            timing::Scope measure(timings.create);
-#endif
+            [[maybe_unused]] const auto sample = diagnostics.measure(DatabaseOperation::create);
             return WriteValue{create_post(job->user_id, job->body)};
         }
         const auto &job = std::get<LikePost>(write);
-#ifdef TDS_DIAGNOSTICS
-        timing::Scope measure(timings.like);
-#endif
+        [[maybe_unused]] const auto sample = diagnostics.measure(DatabaseOperation::like);
 
         return like_post(job.user_id, job.post_id);
     }
@@ -627,9 +611,7 @@ class Store::State
     Statement write_release;
     Statement write_rollback_to;
     Tree tree;
-#ifdef TDS_DIAGNOSTICS
-    DatabaseTimings timings{"database"};
-#endif
+    [[no_unique_address]] DatabaseTelemetry diagnostics{"database"};
     Checkpoints checkpoints;
 };
 
@@ -650,10 +632,8 @@ void Store::health()
 
 void Store::feed(PostWriter &writer)
 {
-#ifdef TDS_DIAGNOSTICS
-    state_->timings.report();
-    timing::Scope measure(state_->timings.feed);
-#endif
+    state_->diagnostics.report();
+    [[maybe_unused]] const auto sample = state_->diagnostics.measure(DatabaseOperation::feed);
     if (state_->tree)
     {
         ReadScope read(state_->transactions, *state_->tree);
@@ -687,10 +667,8 @@ void Store::feed(PostWriter &writer)
 bool Store::post(PostId id, PostWriter &writer)
 {
     state_->transactions.require_ready();
-#ifdef TDS_DIAGNOSTICS
-    state_->timings.report();
-    timing::Scope measure(state_->timings.post);
-#endif
+    state_->diagnostics.report();
+    [[maybe_unused]] const auto sample = state_->diagnostics.measure(DatabaseOperation::post);
     auto query = state_->post.use();
     query.bind(1, id.value);
     if (!query.next())
@@ -717,9 +695,8 @@ std::expected<void, WriteError> Store::commit(std::span<const WriteCommand> comm
     {
         return {};
     }
-#ifdef TDS_DIAGNOSTICS
-    state_->timings.report();
-#endif
+    state_->diagnostics.report();
+    state_->diagnostics.write_batch(static_cast<std::uint64_t>(commands.size()));
     try
     {
         Transaction transaction(state_->transactions, state_->tree.get());
@@ -755,6 +732,7 @@ std::expected<void, WriteError> Store::commit(std::span<const WriteCommand> comm
     }
     catch (const std::exception &error)
     {
+        state_->diagnostics.write_failed();
         const WriteError failure{WriteErrorCode::transaction, error.what()};
         // Transaction unwinding rolls back before provisional outcomes are invalidated
         std::ranges::fill(outcomes, std::unexpected(failure));

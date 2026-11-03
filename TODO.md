@@ -2,7 +2,6 @@
 
 ## Next, in order
 
-- [ ] Simplify dev tooling, telemetry reporting and CMake without changing behavior.
 - [ ] Check socket/heap/pool memory after draining, then compare allocation reuse and socket-buffer caps in Ideas.md order.
 
 ## Later
@@ -14,6 +13,11 @@
 
 ## Done
 
+- [x] Separate off/basic/profile telemetry with typed snapshots and final JSON export. Preserve Release layouts and generated hotpaths; pass all three native modes and HTTP checks.
+- [x] Replace scattered diagnostics with typed owner-local hooks. Preserve timing boundaries, metric output, normal layouts and generated hot-path instructions; pass both native modes and HTTP checks.
+- [x] Separate the CLI, workload lifecycle, reports and checks; use immutable run settings and load each summary once. Preserve CLI output and pass strict typing and 27 tool tests.
+- [x] Separate production builds, CTest tests and benchmark probes; preserve flags and pass all ten native tests in both build modes.
+- [x] Remove PGO tooling and simplify dev CLI/report handling, telemetry resets and shared build settings. Preserve CLI output, compiler flags and runtime layout; pass tool and native checks.
 - [x] Compare GCC 13 PGO: CPU/request -2.9%, hold p99 5.87 to 38.71 ms at 350k. Discard the implementation and retain the results.
 - [x] Measure current per-ring receive outcomes, connection counts and deferred age. At 350k: six rings, zero ENOBUFS, no CQ overflow or deferred receives in four complete full-load intervals. No balancing change.
 - [x] Compare CQ rotation, then restore fixed starts after no clear gain at 350k. Keep accept/wait cleanup. Growth, receive, partial sends and shutdown pass in both builds. Matched 350k/5m B/A: zero errors, CPU/request +0.5%, hold p99 -1.2%.

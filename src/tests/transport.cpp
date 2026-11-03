@@ -1,5 +1,8 @@
 #include "app/application.hpp"
+#include "diagnostics/database.hpp"
+#include "diagnostics/io.hpp"
 #include "http/exchange.hpp"
+#include "net/reactor.hpp"
 #include "net/ring.hpp"
 #include "server.hpp"
 
@@ -35,6 +38,7 @@
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <thread>
+#include <type_traits>
 #include <unistd.h>
 #include <utility>
 #include <vector>
@@ -42,11 +46,35 @@
 namespace
 {
 
-#ifdef TDS_DIAGNOSTICS
-static_assert(sizeof(tds::net::Connection) == 64);
-#else
-static_assert(sizeof(tds::net::Connection) == 56);
-#endif
+template <class T>
+concept ReceiveStamped = requires(T &owner) { owner.receive_enobufs_since_ns; };
+
+template <class T>
+concept ExchangeStamped = requires(T &owner) {
+    owner.receive_serviced_ns;
+    owner.send_prepared_ns;
+};
+
+template <class T>
+concept CompletionStamped = requires(T &owner) { owner.serviced_ns; };
+
+template <class T>
+concept RingProfiled = requires(T &owner) { owner.statistics.interval; };
+
+static_assert(sizeof(tds::net::Connection) == (tds::telemetry::profiling ? 64 : 56));
+static_assert(ReceiveStamped<tds::net::Connection> == tds::telemetry::profiling);
+static_assert(ExchangeStamped<tds::http::Exchange> == tds::telemetry::profiling);
+static_assert(CompletionStamped<tds::net::Completion> == tds::telemetry::profiling);
+static_assert(RingProfiled<tds::net::Ring> == tds::telemetry::profiling);
+static_assert(std::is_empty_v<tds::telemetry::IoTelemetry> == !tds::telemetry::profiling);
+static_assert(std::is_empty_v<tds::telemetry::IoTelemetry::Run> == !tds::telemetry::enabled);
+static_assert(std::is_empty_v<tds::telemetry::IoTelemetry::Handler> == !tds::telemetry::profiling);
+static_assert(std::is_empty_v<tds::telemetry::IoTelemetry::WriteBatch> ==
+              !tds::telemetry::profiling);
+static_assert(std::is_empty_v<tds::telemetry::IoTelemetry::Receive> == !tds::telemetry::profiling);
+static_assert(std::is_empty_v<tds::telemetry::DatabaseTelemetry> == !tds::telemetry::enabled);
+static_assert(std::is_empty_v<tds::telemetry::DatabaseTelemetry::Scope> ==
+              !tds::telemetry::profiling);
 constexpr std::string_view secret = "transport-secret";
 constexpr std::string_view small_post =
     "{\"post\":{\"id\":1,\"body\":\"seed\",\"created_at\":\"2025-01-01T00:00:00.000Z\","

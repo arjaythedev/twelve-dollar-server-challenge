@@ -1,0 +1,17 @@
+function(tds_target_options target)
+    target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror)
+    if(TDS_SANITIZERS)
+        target_compile_options(${target} PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
+        target_link_options(${target} PRIVATE -fsanitize=address,undefined)
+    endif()
+endfunction()
+
+function(tds_add_library target)
+    add_library(${target} ${ARGN})
+    tds_target_options(${target})
+endfunction()
+
+function(tds_add_executable target)
+    add_executable(${target} ${ARGN})
+    tds_target_options(${target})
+endfunction()

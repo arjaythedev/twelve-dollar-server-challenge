@@ -1,4 +1,5 @@
 #include "ring.hpp"
+#include "../diagnostics/io.hpp"
 #include "../http/exchange.hpp"
 
 #include <exception>
@@ -76,10 +77,14 @@ std::unique_ptr<http::Exchange> Ring::acquire_exchange()
 {
     if (exchange_pool_.empty())
     {
-        return std::make_unique<http::Exchange>();
+        auto exchange = std::make_unique<http::Exchange>();
+        telemetry::IoTelemetry::exchange_allocated(*this);
+
+        return exchange;
     }
     auto exchange = std::move(exchange_pool_.back());
     exchange_pool_.pop_back();
+    telemetry::IoTelemetry::exchange_reused(*this);
 
     return exchange;
 }

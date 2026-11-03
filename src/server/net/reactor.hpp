@@ -1,5 +1,6 @@
 #pragma once
 
+#include "../telemetry/config.hpp"
 #include "ring.hpp"
 
 #include <array>
@@ -27,7 +28,7 @@ struct Completion
     Connection *connection = nullptr;
     int result = 0;
     ReceiveBufferLease buffer;
-#ifdef TDS_DIAGNOSTICS
+#if TDS_TELEMETRY_LEVEL == 2
     std::uint64_t serviced_ns = 0;
 #endif
 };
@@ -86,7 +87,7 @@ class Reactor
 
     Descriptor listener_;
     Descriptor stop_;
-    static constexpr std::size_t max_rings = 16;
+    static constexpr std::size_t max_rings = telemetry::io_ring_capacity;
     // Tickets outlive the rings that still have their addresses in CQEs
     std::array<AcceptTicket, 64> accept_tickets_;
     std::vector<std::unique_ptr<Ring>> rings_;

@@ -1,0 +1,9 @@
+tds_add_executable(group_commit_probe EXCLUDE_FROM_ALL group_commit.cpp)
+target_link_libraries(group_commit_probe PRIVATE sqlite Threads::Threads)
+
+tds_add_executable(response_reuse_probe EXCLUDE_FROM_ALL response_reuse.cpp)
+target_link_libraries(response_reuse_probe PRIVATE api transport sqlite)
+target_compile_definitions(response_reuse_probe PRIVATE TDS_RESPONSE_REUSE=1)
+
+tds_add_executable(retry_receive_probe EXCLUDE_FROM_ALL retry_receive.cpp)
+target_link_libraries(retry_receive_probe PRIVATE transport uring)

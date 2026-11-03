@@ -1,4 +1,5 @@
 #include "reactor.hpp"
+#include "../diagnostics/io.hpp"
 
 #include <algorithm>
 #include <arpa/inet.h>
@@ -17,6 +18,8 @@
 
 namespace tds::net
 {
+
+using telemetry::IoTelemetry;
 
 Reactor::Reactor(std::string_view host, std::uint16_t port)
     : listener_(::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0)),
@@ -103,13 +106,7 @@ bool Reactor::next(Completion &completion)
         auto &owner = *rings_[ring_index_];
         if (!ring_started_)
         {
-#ifdef TDS_DIAGNOSTICS
-            const auto depth = io_uring_cq_ready(&owner.queue);
-            owner.diagnostics.cq_depth.record(depth);
-            owner.diagnostics.empty_cq_samples += depth == 0;
-            owner.diagnostics.overflow_flag_samples +=
-                (io_uring_smp_load_acquire(owner.queue.sq.kflags) & IORING_SQ_CQ_OVERFLOW) != 0;
-#endif
+            IoTelemetry::drain_started(owner);
             // Ring never enables CQE32 or mixed CQEs, so each completion advances one entry
             auto &cq = owner.queue.cq;
             cq_cursor_ = {cq.cqes, cq.ring_mask, *cq.khead, io_uring_smp_load_acquire(cq.ktail)};
@@ -140,10 +137,7 @@ void Reactor::finish_ring()
     auto &owner = *rings_[ring_index_];
     // The caller finishes the last CQE, including a full write batch, before CQ advance
     io_uring_cq_advance(&owner.queue, drained_);
-#ifdef TDS_DIAGNOSTICS
-    owner.diagnostics.cqes += drained_;
-    owner.diagnostics.deferred_receive_depth.record(owner.deferred_receives.size());
-#endif
+    IoTelemetry::drain_finished(owner, drained_);
     if (stopping_)
     {
         advance_shutdown(owner);
@@ -185,10 +179,7 @@ void Reactor::receive(Connection &connection, bool poll_first)
     {
         request->ioprio |= IORING_RECVSEND_POLL_FIRST;
     }
-#ifdef TDS_DIAGNOSTICS
-    // Count prepared receive SQEs, including retries, rather than enter syscalls
-    ++connection.ring.diagnostics.receive_submissions;
-#endif
+    IoTelemetry::receive_prepared(connection);
 }
 
 void Reactor::send(Connection &connection, msghdr &message)
@@ -443,29 +434,7 @@ void Reactor::complete_close(Ring &owner, Connection &connection, int result)
 void Reactor::complete_io(Connection &connection, Event event, int result, unsigned flags,
                           ReceiveBufferLease buffer, Completion &completion)
 {
-#ifdef TDS_DIAGNOSTICS
-    if (event == Event::send)
-    {
-        // Close preparation may submit SQEs, so measure service before that extra work
-        completion.serviced_ns = timing::now_ns();
-    }
-    if (event == Event::receive)
-    {
-        auto &diagnostics = connection.ring.diagnostics;
-        ++diagnostics.receive_completions;
-        if (result == -ENOBUFS)
-        {
-            ++diagnostics.receive_enobufs;
-        }
-        else if (result > 0 && connection.receive_enobufs_since_ns)
-        {
-            // Application-observed deferral includes retry I/O and CQ service, not arrival age
-            diagnostics.enobufs_to_receive_service.record(timing::now_ns() -
-                                                          connection.receive_enobufs_since_ns);
-            connection.receive_enobufs_since_ns = 0;
-        }
-    }
-#endif
+    IoTelemetry::io_serviced(connection, event, result, completion);
     connection.finish_io();
     if (event == Event::send)
     {
@@ -475,12 +444,7 @@ void Reactor::complete_io(Connection &connection, Event event, int result, unsig
     }
     if (!stopping_ && event == Event::receive && result == -ENOBUFS)
     {
-#ifdef TDS_DIAGNOSTICS
-        if (!connection.receive_enobufs_since_ns)
-        {
-            connection.receive_enobufs_since_ns = timing::now_ns();
-        }
-#endif
+        IoTelemetry::receive_deferred(connection);
         connection.ring.deferred_receives.push_back(&connection);
 
         return;

@@ -1,17 +1,15 @@
 #pragma once
 
-#ifdef TDS_DIAGNOSTICS
-
 #include <array>
 #include <bit>
 #include <chrono>
-#include <cinttypes>
 #include <cstddef>
 #include <cstdint>
-#include <cstdio>
 
 namespace tds::timing
 {
+
+inline constexpr std::uint64_t report_interval_ns = 5'000'000'000ULL;
 
 inline std::uint64_t now_ns() noexcept
 {
@@ -36,23 +34,18 @@ struct Histogram
         }
     }
 
-    void write(std::FILE *output, const char *name, const char *unit = "ns") const noexcept
+    void merge(const Histogram &other) noexcept
     {
-        std::fprintf(output,
-                     "\"%s\":{\"unit\":\"%s\",\"count\":%" PRIu64 ",\"total\":%" PRIu64
-                     ",\"max\":%" PRIu64 ",\"buckets\":[",
-                     name, unit, count, total, max);
-        bool first = true;
         for (std::size_t index = 0; index < buckets.size(); ++index)
         {
-            if (buckets[index])
-            {
-                std::fprintf(output, "%s[%zu,%" PRIu64 "]", first ? "" : ",", index,
-                             buckets[index]);
-                first = false;
-            }
+            buckets[index] += other.buckets[index];
         }
-        std::fputs("]}", output);
+        count += other.count;
+        total += other.total;
+        if (other.max > max)
+        {
+            max = other.max;
+        }
     }
 
     void reset() noexcept
@@ -87,5 +80,3 @@ class Scope
 };
 
 } // namespace tds::timing
-
-#endif

@@ -1,4 +1,5 @@
 #include "connections.hpp"
+#include "../diagnostics/io.hpp"
 #include "../http/exchange.hpp"
 
 #include <cassert>
@@ -54,9 +55,7 @@ Connection &ConnectionStore::create(Ring &owner, DirectSlot slot)
     auto connection = std::make_unique<Connection>(owner, slot);
     auto &record = *connection;
     records_[slot.value] = std::move(connection);
-#ifdef TDS_DIAGNOSTICS
-    ++live_count_;
-#endif
+    telemetry::IoTelemetry::store_created(*this);
 
     return record;
 }
@@ -70,9 +69,7 @@ void ConnectionStore::retire(DirectSlot slot)
     }
     record.reset();
     free_slots_.push_back(slot);
-#ifdef TDS_DIAGNOSTICS
-    --live_count_;
-#endif
+    telemetry::IoTelemetry::store_retired(*this);
 }
 
 Connection *ConnectionStore::at(std::size_t index) const noexcept
@@ -87,7 +84,7 @@ std::size_t ConnectionStore::size() const noexcept
     return records_.size();
 }
 
-#ifdef TDS_DIAGNOSTICS
+#if TDS_TELEMETRY_LEVEL >= 1
 std::size_t ConnectionStore::live_count() const noexcept
 {
     return live_count_;

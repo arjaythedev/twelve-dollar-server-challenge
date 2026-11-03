@@ -6,8 +6,12 @@
 .git
 .vscode
 benchmarks/*
+!benchmarks/CMakeLists.txt
 !benchmarks/group_commit.cpp
 !benchmarks/response_reuse.cpp
 !benchmarks/retry_receive.cpp
+tests/*
+!tests/CMakeLists.txt
+!tests/*.cpp
 .env
 .env.*

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "../telemetry/config.hpp"
+
 #include <cstdint>
 #include <memory>
 
@@ -138,7 +140,7 @@ struct Connection
     Operation operation;
     Operation close_operation;
     std::unique_ptr<http::Exchange> exchange;
-#ifdef TDS_DIAGNOSTICS
+#if TDS_TELEMETRY_LEVEL == 2
     // First ENOBUFS service, retained across retries until a successful receive CQE
     std::uint64_t receive_enobufs_since_ns = 0;
 #endif

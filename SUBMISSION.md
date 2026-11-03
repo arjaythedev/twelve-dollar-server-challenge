@@ -32,6 +32,17 @@ uv run --directory src --locked dev.py results
 
 Docker checks include transport tests, the 42 official checks and extra HTTP regressions on fresh data. On Windows they also refresh Linux headers for IntelliSense.
 
+Native tests also run directly on Linux with the required io_uring support:
+
+```sh
+bash src/build.sh --tests
+ctest --test-dir src/.build --output-on-failure
+```
+
+Production builds exclude tests. CTest owns native test registration; Docker supplies the Linux test environment on Windows. Diagnostic hooks compile out of normal builds.
+
+`--telemetry off` is the default. `basic` records counters and gauges; `profile` adds timing histograms and bounded five-second history. These modes are independent of perf sampling. Telemetry is serialized after collection stops; `results/<label>/telemetry.json` contains the formatted export. Missing owners or discarded history are marked incomplete.
+
 The server container uses 1 CPU, 2 GiB, the official 65,535 file limit and the profile in src/docker/seccomp.json. Each ring's fixed-file table respects that limit. The profile adds only the three io_uring syscalls to Moby's allowlist. No extra capabilities are needed.
 
 Benchmarks default to 350,000 users, profiles to 5,000. Both use a 30-second ramp and 60-second hold. Use `--hold 5m --ramp 60s` for confirmation runs.

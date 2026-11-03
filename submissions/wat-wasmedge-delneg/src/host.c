@@ -1,16 +1,18 @@
 // host.c: a thin WasmEdge embedder. It runs the AOT-compiled app (hand-written WAT plus stock SQLite) with
-// WASI for SQLite's file I/O, and gives it a raw Linux syscall and the two io_uring calls that touch the
-// kernel's ring buffers as the "sys" import module: the WAT opens the listening socket and registers each
-// ring's file table and receive buffers itself, but the kernel maps the rings only at an address it picks,
-// outside wasm memory, so ring_new maps them and ring_go copies the SQEs the WAT wrote into the ring, enters,
-// and copies the CQEs back. WASI's poll_oneoff would re-register every connection on every call. No request
-// logic lives here. One helper thread fdatasyncs the WAL file every 100 ms (see walsync below).
+// WASI for SQLite's file I/O, and gives it a few raw Linux calls as the "sys" import module: `listen`, and
+// io_uring setup (ring_new: the rings and their sparse fixed-file tables; ring_pbuf: a provided-buffer ring
+// in wasm memory) and one submit/reap call (ring_go: copies the SQEs the WAT wrote into the ring, enters,
+// copies the CQEs back); WASI's poll_oneoff would re-register every connection on every call. No request
+// logic lives here:
+// the WAT builds every SQE and reads every CQE. One helper thread fdatasyncs the WAL file every 100 ms
+// (see walsync below).
 #define _GNU_SOURCE
 #include <wasmedge/wasmedge.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
 #include <libgen.h>
+#include <netinet/in.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -19,6 +21,7 @@
 #include <sys/mman.h>
 #include <sys/syscall.h>
 #include <sys/resource.h>
+#include <sys/socket.h>
 #include <unistd.h>
 
 #define P(i) WasmEdge_ValueGetI32(in[i])
@@ -30,19 +33,22 @@ static inline uint8_t *mem(const WasmEdge_CallingFrameContext *f, uint32_t off, 
 }
 static inline int32_t rv(long r) { return r < 0 ? -errno : (int32_t)r; }
 
-// syscall(nr, a1..a6) -> the result, or -errno. Pointer arguments are native addresses: membase() + offset.
-FN(h_sys) { (void)d; (void)f; int64_t a[7];
-  for (int i = 0; i < 7; i++) a[i] = WasmEdge_ValueGetI64(in[i]);
-  long r = syscall(a[0], a[1], a[2], a[3], a[4], a[5], a[6]);
-  out[0] = WasmEdge_ValueGenI64(r < 0 ? -errno : r); return WasmEdge_Result_Success;
+// listen(ip as s_addr, port, backlog) -> fd | -errno
+FN(h_listen) { (void)d; (void)f;
+  int fd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0); if (fd < 0) RET(-errno);
+  int one = 1; setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+  struct sockaddr_in a; memset(&a, 0, sizeof a);
+  a.sin_family = AF_INET; a.sin_port = htons((uint16_t)P(1)); a.sin_addr.s_addr = (uint32_t)P(0);
+  if (bind(fd, (struct sockaddr *)&a, sizeof a) < 0 || listen(fd, P(2)) < 0) { int e = errno; close(fd); RET(-e); }
+  RET(fd);
 }
-// ---- io_uring. The WAT builds every submission entry (SQE) itself in its own memory and reads the
-// completions (CQEs) back as plain bytes; these calls only move them between wasm memory and the kernel's
-// ring buffers. Ring k: up to 16, ring 0 is the one the WAT waits on.
+// ---- io_uring, raw syscalls. The WAT builds every submission entry (SQE) itself in its own memory and reads
+// the completions (CQEs) back as plain bytes; these calls only move them between wasm memory and the
+// kernel's ring buffers. Ring k: up to 16, ring 0 is the one the WAT waits on.
 typedef struct {
   int fd; unsigned sq_entries, sq_mask, cq_mask, pending;
   unsigned *sq_head, *sq_tail, *sq_flags, *cq_head, *cq_tail;
-  struct io_uring_sqe *sqes; struct io_uring_cqe *cqes;
+  struct io_uring_sqe *sqes; struct io_uring_cqe *cqes; uint16_t *pbuf_tail;
 } Ring;
 static Ring R[16];
 static long enter(Ring *r, unsigned sub, unsigned wait, unsigned flags, int timeout_us) {
@@ -54,9 +60,10 @@ static long enter(Ring *r, unsigned sub, unsigned wait, unsigned flags, int time
   return n < 0 ? -errno : n;
 }
 // ring_new(k, out) -> 0 | -errno: sets up ring k (4096 SQEs, 16384 CQEs; ring 0 runs its completions
-// only when waited on: DEFER_TASKRUN) and maps it; writes the ring fd at out
+// only when waited on: DEFER_TASKRUN) and a sparse fixed-file table as large as RLIMIT_NOFILE allows
+// (up to 65535); writes (ring fd, table size) at out
 FN(h_ring_new) { (void)d;
-  int k = P(0); int32_t *o = (int32_t *)mem(f, (uint32_t)P(1), 4); if (k < 0 || k >= 16 || !o) RET(-EINVAL);
+  int k = P(0); int32_t *o = (int32_t *)mem(f, (uint32_t)P(1), 8); if (k < 0 || k >= 16 || !o) RET(-EINVAL);
   Ring *r = &R[k]; struct io_uring_params p; memset(&p, 0, sizeof p);
   p.flags = IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_COOP_TASKRUN | IORING_SETUP_SUBMIT_ALL | IORING_SETUP_CQSIZE |
             (k == 0 ? IORING_SETUP_DEFER_TASKRUN : 0);
@@ -74,16 +81,34 @@ FN(h_ring_new) { (void)d;
   unsigned *arr = (unsigned *)(sq + p.sq_off.array); for (unsigned i = 0; i < p.sq_entries; i++) arr[i] = i;
   r->cq_head = (unsigned *)(cq + p.cq_off.head); r->cq_tail = (unsigned *)(cq + p.cq_off.tail);
   r->cq_mask = *(unsigned *)(cq + p.cq_off.ring_mask); r->cqes = (struct io_uring_cqe *)(cq + p.cq_off.cqes);
-  o[0] = fd; RET(0);
+  struct rlimit rl; unsigned n = getrlimit(RLIMIT_NOFILE, &rl) == 0 && rl.rlim_cur < 65535 ? (unsigned)rl.rlim_cur : 65535;
+  struct io_uring_rsrc_register rr; memset(&rr, 0, sizeof rr); rr.nr = n; rr.flags = IORING_RSRC_REGISTER_SPARSE;
+  if (syscall(__NR_io_uring_register, fd, IORING_REGISTER_FILES2, &rr, sizeof rr) < 0) RET(-errno);
+  o[0] = fd; o[1] = (int32_t)n; RET(0);
+}
+// ring_pbuf(k, off, entries, group) -> 0 | -errno: registers the provided-buffer ring that the WAT keeps at
+// [off, off + 16 * entries) (page aligned). Ubuntu's 6.8.0-147 kernel refuses the registration when its
+// reserved words are all zero (an inverted check), so a refusal is retried once with resv[0] = 1.
+FN(h_ring_pbuf) { (void)d;
+  Ring *r = &R[P(0) & 15]; uint8_t *p = mem(f, (uint32_t)P(1), (uint32_t)P(2) * 16); if (!p) RET(-EFAULT);
+  struct io_uring_buf_reg g; memset(&g, 0, sizeof g);
+  g.ring_addr = (uint64_t)(uintptr_t)p; g.ring_entries = (uint32_t)P(2); g.bgid = (uint16_t)P(3);
+  if (syscall(__NR_io_uring_register, r->fd, IORING_REGISTER_PBUF_RING, &g, 1) < 0) {
+    int e = errno; g.resv[0] = 1;
+    if (syscall(__NR_io_uring_register, r->fd, IORING_REGISTER_PBUF_RING, &g, 1) < 0) RET(-e);
+  }
+  r->pbuf_tail = (uint16_t *)(p + 14); RET(0);
 }
 // ring_go(k, desc, cqes, max, wait, timeout_us) -> number of CQEs copied to cqes (16 bytes each, up to max).
-// desc = (SQE array offset, SQE count): copies the SQEs into the ring and zeroes the count, then calls io_uring_enter if there is anything to submit or wait >= 0 (waiting for
+// desc = (SQE array offset, SQE count, buffer-ring tail): publishes the tail, copies the SQEs into the ring
+// and zeroes the count, then calls io_uring_enter if there is anything to submit or wait >= 0 (waiting for
 // that many completions, at most timeout_us; -1: none), and copies out the completions.
 FN(h_ring_go) { (void)d;
-  Ring *r = &R[P(0) & 15]; int32_t *ds = (int32_t *)mem(f, (uint32_t)P(1), 8); if (!ds) RET(-EFAULT);
+  Ring *r = &R[P(0) & 15]; int32_t *ds = (int32_t *)mem(f, (uint32_t)P(1), 12); if (!ds) RET(-EFAULT);
   unsigned n = (unsigned)ds[1], max = (unsigned)P(3); int wait = P(4);
   uint8_t *src = mem(f, (uint32_t)ds[0], n ? n * 64 : 1), *cqo = mem(f, (uint32_t)P(2), max ? max * 16 : 1);
   if (!src || !cqo) RET(-EFAULT);
+  if (r->pbuf_tail) __atomic_store_n(r->pbuf_tail, (uint16_t)ds[2], __ATOMIC_RELEASE);
   unsigned tail = *r->sq_tail;
   for (unsigned i = 0; i < n;) {
     unsigned room = r->sq_entries - (tail - __atomic_load_n(r->sq_head, __ATOMIC_ACQUIRE));
@@ -108,10 +133,10 @@ FN(h_ring_go) { (void)d;
 // WasmEdge reserves the whole 4 GiB range up front and grows memory in place, so it never moves.
 FN(h_membase) { (void)d; (void)in; out[0] = WasmEdge_ValueGenI64((int64_t)(uintptr_t)mem(f, 0, 1)); return WasmEdge_Result_Success; }
 
-// a host function of np parameters and one result, all i32 or (wide) all i64
-static void add(WasmEdge_ModuleInstanceContext *m, const char *name, WasmEdge_HostFunc_t fn, int np, int wide) {
-  WasmEdge_ValType p[7], r[1] = {wide ? WasmEdge_ValTypeGenI64() : WasmEdge_ValTypeGenI32()};
-  for (int i = 0; i < np; i++) p[i] = r[0];
+static void add(WasmEdge_ModuleInstanceContext *m, const char *name, WasmEdge_HostFunc_t fn, int np) {
+  WasmEdge_ValType p[6], r[1] = {np < 0 ? WasmEdge_ValTypeGenI64() : WasmEdge_ValTypeGenI32()};
+  if (np < 0) np = 0;
+  for (int i = 0; i < np; i++) p[i] = WasmEdge_ValTypeGenI32();
   WasmEdge_FunctionTypeContext *t = WasmEdge_FunctionTypeCreate(p, (uint32_t)np, r, 1);
   WasmEdge_String s = WasmEdge_StringCreateByCString(name);
   WasmEdge_ModuleInstanceAddFunction(m, s, WasmEdge_FunctionInstanceCreate(t, fn, NULL, 0));
@@ -174,19 +199,24 @@ int main(int argc, char **argv) {
   WasmEdge_ConfigureSetRunMode(conf, WasmEdge_RunMode_AOT);   // load the AOT-compiled native code
   WasmEdge_VMContext *vm = WasmEdge_VMCreate(conf, NULL);
 
-  // WASI: the environment, and the database's directory pre-opened at the same path
-  extern char **environ; uint32_t ne = 0; while (environ[ne]) ne++;
+  // WASI: the SPEC's env vars, and the database's directory pre-opened at the same path
+  static const char *names[] = {"SQLITE_PATH", "JWT_SECRET", "HOST", "PORT", "CKPT_FRAMES", "CKPT_AUTO"};
+  const char *envs[6]; int ne = 0;
+  for (int i = 0; i < 6; i++) {
+    const char *v = getenv(names[i]); if (!v) continue;
+    char *e = malloc(strlen(names[i]) + strlen(v) + 2); sprintf(e, "%s=%s", names[i], v); envs[ne++] = e;
+  }
   const char *sp = getenv("SQLITE_PATH");
   char *dir = dirname(strdup(sp ? sp : "./x")), *pre = malloc(2 * strlen(dir) + 2);
   sprintf(pre, "%s:%s", dir, dir);
   const char *pres[] = {pre}, *args[] = {argv[1]};
   WasmEdge_ModuleInstanceInitWASI(WasmEdge_VMGetImportModuleContext(vm, WasmEdge_HostRegistration_Wasi),
-                                  args, 1, (const char *const *)environ, ne, pres, 1);
+                                  args, 1, envs, (uint32_t)ne, pres, 1);
 
   WasmEdge_String sys = WasmEdge_StringCreateByCString("sys");
   WasmEdge_ModuleInstanceContext *m = WasmEdge_ModuleInstanceCreate(sys);
-  add(m, "syscall", h_sys, 7, 1); add(m, "membase", h_membase, 0, 1);
-  add(m, "ring_new", h_ring_new, 2, 0); add(m, "ring_go", h_ring_go, 6, 0);
+  add(m, "listen", h_listen, 3); add(m, "ring_new", h_ring_new, 2); add(m, "ring_pbuf", h_ring_pbuf, 4);
+  add(m, "ring_go", h_ring_go, 6); add(m, "membase", h_membase, -1);
   WasmEdge_Result r = WasmEdge_VMRegisterModuleFromImport(vm, m);
   if (!WasmEdge_ResultOK(r)) { fprintf(stderr, "register: %s\n", WasmEdge_ResultGetMessage(r)); return 1; }
 

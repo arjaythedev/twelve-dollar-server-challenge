@@ -3,9 +3,8 @@
 ;; Everything a request touches is here: the io_uring event loop, HTTP/1.1 parsing, routing, JSON reading
 ;; and writing, base64url, SHA-256/HMAC for the HS256 JWT check, and the SQL calls. Stock SQLite (compiled
 ;; to wasm with wasi-sdk) is merged in as module "sq"; this module imports its memory, its function table,
-;; SQLite's public API and the B-tree wrappers in src/sqlite_glue.c. "sys" is the host (src/host.c): a raw
-;; Linux syscall, and the io_uring calls that map the kernel's rings and copy SQEs in and CQEs out. This
-;; module opens the socket, registers the rings' file tables and buffers, writes every SQE, reads every CQE.
+;; SQLite's public API and the B-tree wrappers in src/sqlite_glue.c. "sys" is the host's io_uring setup and submit/reap calls (src/host.c):
+;; this module writes the SQEs itself and reads the CQEs the host copies back.
 ;;
 ;; Memory map (this module owns [1 MiB, 16 MiB); SQLite's C stack is below 1 MiB, its data and heap above 16 MiB):
 ;;   0x100000  string constants, NUL-terminated, in 64-byte slots; SQL at 0x100800
@@ -68,14 +67,11 @@
   (import "wasi_snapshot_preview1" "clock_time_get" (func $clock (param i32 i64 i32) (result i32)))
   (import "wasi_snapshot_preview1" "fd_write" (func $fd_write (param i32 i32 i32 i32) (result i32)))
   (import "wasi_snapshot_preview1" "proc_exit" (func $exit (param i32)))
-  ;; the host (src/host.c): a raw Linux syscall (number, six arguments -> result or -errno), the native
-  ;; address of this memory's offset 0 (the kernel needs it for every pointer it is given), and the two io_uring
-  ;; calls that touch the kernel's ring buffers, which only the host can map: ring_new (ring k: the rings,
-  ;; mapped; writes the ring fd at the out pointer) and ring_go (see $go)
-  (import "sys" "syscall" (func $sys (param i64 i64 i64 i64 i64 i64 i64) (result i64)))
-  (import "sys" "membase" (func $membase (result i64)))
-  (import "sys" "ring_new" (func $ring_map (param i32 i32) (result i32)))
+  (import "sys" "listen" (func $listen (param i32 i32 i32) (result i32)))
+  (import "sys" "ring_new" (func $ring_new (param i32 i32) (result i32)))
+  (import "sys" "ring_pbuf" (func $ring_pbuf (param i32 i32 i32 i32) (result i32)))
   (import "sys" "ring_go" (func $ring_go (param i32 i32 i32 i32 i32 i32) (result i32)))
+  (import "sys" "membase" (func $membase (result i64)))
 
   ;; ---------- string constants ----------
   (data (i32.const 0x100000) "HTTP/1.1 200 OK\0d\0a")
@@ -1395,8 +1391,8 @@
   ;; A connection lives in a slot of a ring's fixed-file table, never in the process's fd table, so
   ;; LimitNOFILE=65535 caps each ring's table, not the server: accept moves to the next ring at a high-water
   ;; mark (up to 8 rings, ~490k connections). Its id is cid = ring << 16 | slot.
-  ;; RING table at 0x102000, 64 bytes per ring: 0 SQE staging array, 4 staged SQEs (these two are what
-  ;; $ring_go reads), 8 buffer-ring tail, 12 buffer ring, 16 receive buffers (2048 x 2 KiB), 20 ring fd,
+  ;; RING table at 0x102000, 64 bytes per ring: 0 SQE staging array, 4 staged SQEs, 8 buffer-ring tail
+  ;; (these three are what $ring_go reads), 12 buffer ring, 16 receive buffers (2048 x 2 KiB), 20 ring fd,
   ;; 24 table size, 28 live connections, 32 state (1 accept armed, 2 table full, 4 above the high-water
   ;; mark, 8 watched by ring 0), 36 high-water mark, 40 low gap
   ;; CONN at $connb, 32 bytes per cid: 0 in_ptr, 4 in_len (unfinished request), 8 wire_ptr, 12 wire_len,
@@ -1409,76 +1405,15 @@
   (func $gen (param $cid i32) (result i32) (i32.load (i32.add (global.get $genb) (i32.shl (local.get $cid) (i32.const 2)))))
   (func $rt (param $k i32) (result i32) (i32.add (i32.const 0x102000) (i32.shl (local.get $k) (i32.const 6))))
 
-  ;; ---------- Linux calls: raw syscalls (x86-64 numbers) through the host ----------
-  (func $na (param $p i32) (result i64) (i64.add (global.get $mb) (i64.extend_i32_u (local.get $p))))
-
   ;; submit ring $k's staged SQEs, wait for $wait completions (-1: enter only to submit) for at most $tus
-  ;; microseconds, and append the completions to CQ (0xe00000, 16 bytes each, up to 131,072). The buffer
-  ;; ring's tail (bytes 14-15 of its entry 0) is published first.
+  ;; microseconds, and append the completions to CQ (0xe00000, 16 bytes each, up to 131,072)
   (func $go (param $k i32) (param $wait i32) (param $tus i32)
-    (local $t i32) (local $room i32) (local $n i32)
-    (local.set $t (call $rt (local.get $k)))
-    (i32.store16 offset=14 (i32.load offset=12 (local.get $t)) (i32.load offset=8 (local.get $t)))
+    (local $room i32) (local $n i32)
     (local.set $room (i32.sub (i32.const 131072) (global.get $ncq)))
     (if (i32.gt_u (local.get $room) (i32.const 4096)) (then (local.set $room (i32.const 4096))))
-    (local.set $n (call $ring_go (local.get $k) (local.get $t)
+    (local.set $n (call $ring_go (local.get $k) (call $rt (local.get $k))
       (i32.add (i32.const 0xe00000) (i32.shl (global.get $ncq) (i32.const 4))) (local.get $room) (local.get $wait) (local.get $tus)))
     (if (i32.gt_s (local.get $n) (i32.const 0)) (then (global.set $ncq (i32.add (global.get $ncq) (local.get $n))))))
-
-  ;; ring $k (the host maps it) and its sparse fixed-file table, as large as RLIMIT_NOFILE allows (up to
-  ;; 65535); RING offsets 20 ring fd, 24 table size -> 0, or 1 if that failed
-  (func $ring_new (param $k i32) (result i32)
-    (local $t i32) (local $n i64)
-    (local.set $t (call $rt (local.get $k)))
-    (if (call $ring_map (local.get $k) (i32.add (local.get $t) (i32.const 20))) (then (return (i32.const 1))))
-    ;; prlimit64(0, RLIMIT_NOFILE, NULL, &old), then IORING_REGISTER_FILES2 with IORING_RSRC_REGISTER_SPARSE
-    (local.set $n (i64.const 65535))
-    (if (i64.ge_s (call $sys (i64.const 302) (i64.const 0) (i64.const 7) (i64.const 0) (call $na (i32.const 0x101580))
-                    (i64.const 0) (i64.const 0)) (i64.const 0))
-      (then (if (i64.lt_u (i64.load (i32.const 0x101580)) (local.get $n)) (then (local.set $n (i64.load (i32.const 0x101580)))))))
-    (memory.fill (i32.const 0x101580) (i32.const 0) (i32.const 32))
-    (i32.store (i32.const 0x101580) (i32.wrap_i64 (local.get $n)))
-    (i32.store (i32.const 0x101584) (i32.const 1))
-    (if (i64.lt_s (call $sys (i64.const 427) (i64.load32_u offset=20 (local.get $t)) (i64.const 13) (call $na (i32.const 0x101580))
-                    (i64.const 32) (i64.const 0) (i64.const 0)) (i64.const 0))
-      (then (return (i32.const 1))))
-    (i32.store offset=24 (local.get $t) (i32.wrap_i64 (local.get $n)))
-    (i32.const 0))
-
-  ;; registers ring $k's provided-buffer ring ($n entries at $off, page aligned) as group 0 -> 0, or 1 if that
-  ;; failed. Ubuntu's 6.8.0-147 kernel refuses the registration when its reserved words are all zero (an
-  ;; inverted check), so a refusal is retried once with the first of them set to 1.
-  (func $ring_pbuf (param $k i32) (param $off i32) (param $n i32) (result i32)
-    (memory.fill (i32.const 0x101580) (i32.const 0) (i32.const 40))
-    (i64.store (i32.const 0x101580) (call $na (local.get $off)))
-    (i32.store (i32.const 0x101588) (local.get $n))
-    (if (i64.ge_s (call $sys (i64.const 427) (i64.load32_u offset=20 (call $rt (local.get $k))) (i64.const 22)
-                    (call $na (i32.const 0x101580)) (i64.const 1) (i64.const 0) (i64.const 0)) (i64.const 0))
-      (then (return (i32.const 0))))
-    (i32.store (i32.const 0x101590) (i32.const 1))
-    (i64.lt_s (call $sys (i64.const 427) (i64.load32_u offset=20 (call $rt (local.get $k))) (i64.const 22)
-                (call $na (i32.const 0x101580)) (i64.const 1) (i64.const 0) (i64.const 0)) (i64.const 0)))
-
-  ;; a listening TCP socket on $ip (as s_addr) : $port -> fd, or -1
-  (func $listen (param $ip i32) (param $port i32) (param $backlog i32) (result i32)
-    (local $fd i64)
-    ;; socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0)
-    (local.set $fd (call $sys (i64.const 41) (i64.const 2) (i64.const 0x80801) (i64.const 0) (i64.const 0) (i64.const 0) (i64.const 0)))
-    (if (i64.lt_s (local.get $fd) (i64.const 0)) (then (return (i32.const -1))))
-    (i32.store (i32.const 0x1015b0) (i32.const 1))   ;; setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &1, 4)
-    (drop (call $sys (i64.const 54) (local.get $fd) (i64.const 1) (i64.const 2) (call $na (i32.const 0x1015b0)) (i64.const 4) (i64.const 0)))
-    (i32.store16 (i32.const 0x1015c0) (i32.const 2))   ;; sockaddr_in: AF_INET, port (big-endian), address
-    (i32.store8 (i32.const 0x1015c2) (i32.shr_u (local.get $port) (i32.const 8)))
-    (i32.store8 (i32.const 0x1015c3) (local.get $port))
-    (i32.store (i32.const 0x1015c4) (local.get $ip))
-    (i64.store (i32.const 0x1015c8) (i64.const 0))
-    (if (i64.lt_s (call $sys (i64.const 49) (local.get $fd) (call $na (i32.const 0x1015c0)) (i64.const 16)
-                    (i64.const 0) (i64.const 0) (i64.const 0)) (i64.const 0))
-      (then (return (i32.const -1))))
-    (if (i64.lt_s (call $sys (i64.const 50) (local.get $fd) (i64.extend_i32_u (local.get $backlog))
-                    (i64.const 0) (i64.const 0) (i64.const 0) (i64.const 0)) (i64.const 0))
-      (then (return (i32.const -1))))
-    (i32.wrap_i64 (local.get $fd)))
 
   ;; a zeroed SQE staged on ring $k (staging holds 1024; a full one is submitted first)
   (func $sqe (param $k i32) (param $op i32) (param $fl i32) (param $fd i32) (param $lo i32) (param $hi i32) (result i32)
@@ -1516,13 +1451,13 @@
   (func $ring_setup (param $k i32) (result i32)
     (local $t i32) (local $i i32) (local $n i32) (local $m i32)
     (local.set $t (call $rt (local.get $k)))
-    (if (call $ring_new (local.get $k)) (then (return (i32.const 1))))
+    (if (call $ring_new (local.get $k) (i32.add (local.get $t) (i32.const 20))) (then (return (i32.const 1))))
     (i32.store (local.get $t) (call $malloc (i32.const 65536)))
     (i32.store offset=12 (local.get $t) (i32.and (i32.add (call $malloc (i32.const 0x9000)) (i32.const 4095)) (i32.const -4096)))
     (memory.fill (i32.load offset=12 (local.get $t)) (i32.const 0) (i32.const 0x8000))
     (i32.store offset=16 (local.get $t) (call $malloc (i32.const 0x400000)))
     (if (i32.or (i32.eqz (i32.load offset=16 (local.get $t))) (i32.eqz (i32.load (local.get $t)))) (then (return (i32.const 1))))
-    (if (call $ring_pbuf (local.get $k) (i32.load offset=12 (local.get $t)) (i32.const 2048))
+    (if (call $ring_pbuf (local.get $k) (i32.load offset=12 (local.get $t)) (i32.const 2048) (i32.const 0))
       (then (return (i32.const 1))))
     (block $d (loop $l
       (br_if $d (i32.ge_u (local.get $i) (i32.const 2048)))
@@ -2196,10 +2131,10 @@
     (global.set $st_begin (call $prep (i32.const 0x100ca0)))
     (global.set $st_commit (call $prep (i32.const 0x100cb0)))
     (call $bt_init)
-    (global.set $mb (call $membase))
     (global.set $lfd (call $listen (call $parse_ip (local.get $host))
       (i32.wrap_i64 (call $parse_len (local.get $port) (call $strlen (local.get $port)))) (i32.const 65535)))
     (if (i32.lt_s (global.get $lfd) (i32.const 0)) (then (call $fatal (i32.const 0x101140))))
+    (global.set $mb (call $membase))
     (global.set $connb (call $malloc (i32.const 0x1000000)))   ;; CONN, 8 rings x 65536 x 32 bytes
     (global.set $genb (call $malloc (i32.const 0x200000)))     ;; GEN, 8 rings x 65536 x i32
     (if (i32.or (i32.eqz (global.get $connb)) (i32.eqz (global.get $genb))) (then (call $fatal (i32.const 0x101340))))

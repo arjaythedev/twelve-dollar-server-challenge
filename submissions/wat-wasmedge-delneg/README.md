@@ -8,7 +8,7 @@ compiled ahead of time to native code by WasmEdge, and run by a small C embedder
 | File | Language | What it does |
 |---|---|---|
 | `src/app.wat` | WAT, hand-written | Everything a request touches: the io_uring event loop (it writes every submission entry and reads every completion itself), HTTP/1.1 parsing, routing, JSON reading and writing, base64url, SHA-256 and HMAC for the HS256 JWT check, SQL statement calls, group commit, when to checkpoint the WAL, and the B-tree read paths (record decoding, which cursors to open and seek) |
-| `src/host.c` | C, ~200 lines | WasmEdge embedder: loads the AOT-compiled module, gives it WASI (used only by SQLite for file I/O, env vars and the clock) and four imports: `syscall` (a raw Linux syscall; the WAT uses it to open the listening socket and to register each ring's fixed-file table and provided-buffer ring); `membase` (the native address of wasm memory, which the kernel needs for every pointer); `ring_new` (sets up an io_uring and maps its rings); and `ring_go` (copies the SQEs the WAT wrote into the ring, calls `io_uring_enter`, copies the completions back). It also starts one thread that calls `fdatasync` on the WAL file every 100 ms and pins the code in memory (below). There is no request logic in it |
+| `src/host.c` | C, ~230 lines | WasmEdge embedder: loads the AOT-compiled module, gives it WASI (used only by SQLite for file I/O, env vars and the clock) and five Linux imports: `listen`; `ring_new` (sets up an io_uring and its fixed-file table); `ring_pbuf` (registers a provided-buffer ring that lives in wasm memory); `ring_go` (copies the SQEs the WAT wrote into the ring, calls `io_uring_enter`, copies the completions back); and `membase` (the native address of wasm memory, which the kernel needs for buffer addresses). It also starts one thread that calls `fdatasync` on the WAL file every 100 ms (below). There is no request logic in it |
 | `src/sqlite_glue.c` | C, ~40 lines | `#include`s the stock SQLite amalgamation and adds one-line wrappers over SQLite's B-tree cursor functions (open, first, next, previous, seek, payload), which only exist inside SQLite's own translation unit. Everything else the WAT calls directly: SQLite's public API (`build.sh` exports each function `app.wat` imports), and through the exported function table it installs its own WAL hook and page-cache wrapper (below) |
 | SQLite 3.54.1 | C, stock | The amalgamation, unmodified, compiled to wasm with wasi-sdk |
 | wasi-libc | C | From wasi-sdk, for SQLite (malloc, file calls) |
@@ -19,12 +19,13 @@ The C that stays, and why:
 - `host.c` `main`: something has to create the WasmEdge VM, give it WASI and the "sys" module and run
   the AOT code; the `wasmedge` CLI can add host functions only through a plugin, which would be C too. It also raises the soft `RLIMIT_NOFILE` to
   the hard one and ignores SIGPIPE (one line each).
-- `syscall` and `membase`: WebAssembly has no way to make a Linux call, or to know where its memory is.
-- `ring_new` and `ring_go`: the kernel maps an io_uring's rings only at an address it picks. Mapping them
-  into wasm memory with `MAP_FIXED` fails with EINVAL (we tried: io_uring refuses a caller's address), and
-  `IORING_SETUP_NO_MMAP` on Linux 6.8 needs the rings in one physically contiguous block (a huge page). So
-  the rings are outside wasm memory, and only C can copy SQEs in and CQEs out. `ring_go` also drains CQ
-  overflow.
+- `listen`, `ring_new`, `ring_pbuf`, `ring_go` and `membase`: WebAssembly has no way to make a Linux call
+  or to know where its memory is. The kernel maps an io_uring's rings only at an address it picks: mapping
+  them into wasm memory with `MAP_FIXED` fails with EINVAL (we tried; io_uring refuses a caller's address),
+  and `IORING_SETUP_NO_MMAP` on Linux 6.8 needs the rings in one physically contiguous block (a huge page).
+  So the rings are outside wasm memory, and only C can copy SQEs in and CQEs out; `ring_go` also drains CQ
+  overflow. We also tried one generic `syscall` import with the socket and ring registration in the WAT
+  (30 lines less C): on our scorer-like harness it cost ~0.7 µs per request and more p99, so it was dropped.
 - The WAL thread (`walsync`, with `pincode`): the `fdatasync` every 100 ms has to run beside the event
   loop, and the wasm side runs on a single thread. Pinning runs in the same thread so the loop never waits for it.
 - `sqlite_glue.c`'s B-tree wrappers: they call SQLite's internal B-tree functions, which exist only

@@ -920,3 +920,57 @@ No loss. C lines: #259 195; #272 (7792fa9) 200 + 127 = 327; f3e9410 359; now 202
 and 320k failed on connection refused (~80 % errors). A tie with #272, so not merged; the PR stays open.
 Our harness held 290k at ~16 us/req: the droplet spends ~2x the CPU per request, so the harness is far too
 lenient on CPU and tail latency (see M3's hash-chain gap) even though it reproduced the refusals.
+
+## H2: a harness that fails where the scorer failed #288 (3 Nov, Synteq)
+The loopback harness held 290k; the scorer held df9da40 at 200k and failed 210k/220k on p99 with 0 errors.
+Two gaps found: on loopback the receive softirq runs on the sender's CPU, so the server's CPU never paid for
+TCP receive, and the app ran at ~2x the droplet's speed per request.
+Harness v2 (`hs2.sh` + `ns.sh` on Synteq): the server runs in its own network namespace, created after
+`net.ipv4.tcp_child_ehash_entries=16384` (a 2 GB box's established-hash size; its max_syn_backlog comes out
+128), reached over a veth pair; RPS steers the namespace's receive processing to CPU 0, the server's CPU,
+and the client side's to CPUs 1-7; tcp_rmem/wmem set to a 2 GB box's values; the load generator dials from
+32 source addresses. Same memory hog, systemd unit and limits as before. A harness-only build patch
+(never committed) busy-waits SPIN_NS at the start of each request, to give the app the droplet's speed.
+Calibration on df9da40 (2-minute probes, 0 errors in every run; scorer's numbers in brackets):
+- no spin: 200k p95 175 / p99 285; 220k p95 172 / p99 275 (scorer: fails) -> still lenient
+- SPIN_NS=17000: 200k p95 3,440 (scorer: holds) -> too harsh
+- SPIN_NS=10000: 200k p95 245 / p99 380 [229 / 356]; 210k p99 2,035 [1.5 s, fail]; 220k p99 1,245 [4.5 s, fail]
+So the harness from here on is v2 with SPIN_NS=10000. CPU 0 has no idle time at 200k (busy 86 %, the rest is
+io_uring wait, which 6.8 counts as iowait). Caveat: the app cgroup shows 88 % of CPU 0 here against the
+scorer's 68 %, so cgroup CPU % is not comparable between the two; the latency profile is what matches.
+The #272 code (7792fa9) collapses at 200k on v2 (its 500 MiB WAL is reread from disk under memory pressure);
+the scorer held it there and lost it at 210k, so it sits on a memory edge and is not used for calibration.
+Where the p95 comes from (bpftrace on the loop thread, 200k): every ~2 s the loop stops for ~160 ms, ~140 ms
+of it in 2-3 fsync/fdatasync calls: the inline PASSIVE checkpoint. ~8 % of wall time.
+Considered and not done: a VFS whose DB xSync returns before the sync completes (io_uring FSYNC, writes held
+back until it lands). Consult (DeepSeek and Gemini) both judged it a likely breach of "synchronous=NORMAL" in
+spirit; not built.
+
+## C3: Cut C (4e7ad9d) against df9da40 on harness v2 (SPIN_NS=10000), 5-minute holds at 200k — costs speed
+Interleaved, 2 reps, 0 errors:
+- 4e7ad9d: p50 19 / 24, p95 355 / 375, p99 635 / 630 ms, 17.2 / 16.7 us/req (process CPU)
+- df9da40: p50 14 / 13, p95 330 / 325, p99 520 / 525 ms, 16.6 / 16.1 us/req
+A third pair in the profile runs below gave the same sign (15.33 vs 14.60 us/req; p99 465 vs 435). The loopback
+harness (E49, E50) could not show it: its CPU was never saturated. perf (30 s each, names builds): no single
+symbol stands out; the kernel's share is ~2 points higher with the cuts (47.4 vs 45.3 %), app.so's lower. The
+spin's WASI clock calls show up as libc rwlock + vdso (~13 %) in both; that is the harness, not the app.
+Bisecting: 18c5199 (glue cut only) against df9da40 next.
+
+## E51: checkpoint size on harness v2 (2-minute probes at 210k, 0 errors)
+- 8,000 frames: p95 355, p99 565 (the calibration run with the same build gave p99 2,035: 210k is on the cliff)
+- 2,000 frames: p95 1,015, p99 1,740 -> smaller checkpoints are worse
+Why: a like writes one random leaf of sqlite_autoindex_likes_1 (7,511 leaves in the seed DB; posts_user_id_idx
+has 1,342; the tables and the other indexes grow at their tails). A checkpoint writes each distinct page once,
+so its fsync work is ~min(likes since the last one, 7,511) pages at ~65 us each on this disk (1,000 random
+overwrites + fdatasync: 65 ms; one 4K overwrite 0.8 ms, an extend 2.2 ms). At 2 s per checkpoint that is
+~2,400 leaves (~150 ms, as measured); at 32 s (#272's 128,000 frames) nearly all 7,500, i.e. ~5x fewer page
+writes in total, which is why #272's p95 was 13 ms on the scorer. Bigger checkpoints: less sync work in total,
+longer single stalls (capped near ~0.5 s), more WAL in the page cache. Next: 16,000 and 32,000 frames.
+
+## C4: the glue cut alone (18c5199) against df9da40, same harness and holds — kept; the host cut is dropped
+Interleaved, 3 reps of each, 0 errors:
+- 18c5199: p95 305 / 290 / 340, p99 490 / 440 / 565 ms, 15.8 / 15.6 / 15.4 us/req
+- df9da40: p95 295 / 330 / (c3: 330, 325), p99 455 / 675 / (c3: 520, 525) ms, 17.6 / 16.5 us/req
+No loss from the glue cut (paired runs: 1.0-1.8 us/req lower, p95/p99 within the run-to-run spread). The loss in
+C3 is the host cut's (E50): its code is reverted here (host.c back to 232 lines; C total 232 + 42 = 274). What in
+it costs was not found (perf shows no single symbol); the README lists it as tried and dropped.

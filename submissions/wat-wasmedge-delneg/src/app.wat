@@ -209,7 +209,7 @@
   (global $cu_l (mut i32) (i32.const 0))
   (global $vn (mut i32) (i32.const 0))
   ;; WAL frames that start a checkpoint (CKPT_FRAMES)
-  (global $ck_t (mut i32) (i32.const 4000))
+  (global $ck_t (mut i32) (i32.const 8000))
 
   ;; ---------- memory helpers ----------
   (func $strlen (param $p i32) (result i32)

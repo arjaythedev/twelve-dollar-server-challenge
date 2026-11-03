@@ -808,3 +808,39 @@ only has to match itself). Calibrated harness, 2-min:
 - 280k: 29.5k rps, p50 29.8, p95 235, p99 365, max 570 ms, 0 errors, 0 MB read, RSS 141 MB
 (f220565 = e26 on the same harness: 270k p99 230; 280k fails.) p50 is higher than with large checkpoints (one
 every ~1 s now), well inside the limits.
+
+## E44: E43 at 300k / 320k, and a control (3 Nov, calibrated harness, 2-min)
+- control: 7792fa9 with CKPT_FRAMES=4000 by env only, 280k: 29.3k rps, p50 54, p95 370, p99 980, max 2,122 ms
+  (b43 at 280k: p95 235, p99 365), so pinning and the untouched tables help (one run each)
+- b43 300k: 31.4k rps, p50 73, p95 405, p99 850, max 1,591 ms, 0 errors, 0 MB read, CPU ~88 %
+- b43 320k: 31.2k rps (short of ~33.4k), p50 315, p95 4,020, p99 5,320 ms, 0 errors, CPU 90-91 %: CPU-bound
+  (TCP memory < 35k pages, nothing read from disk). ~28 us/req, as before. Edge ~300-310k on this harness.
+
+## H1: 5-minute holds of b43 (= f3e9410) (3 Nov, calibrated harness)
+- 280k: 29.4k rps, p50 36, p95 280, p99 480, max 1,421 ms, 0 errors, 0 MB read — passes
+- 290k: 30.2k rps, p50 80, p95 515, p99 1,645, max 3,097 ms, 0 errors — fails
+- 300k: 31.2k rps, p50 92, p95 555, p99 1,215, max 2,553 ms, 0 errors — fails
+Not memory any more (no reads, TCP memory < 14k pages, RSS 115 -> 159 MB as SQLite's cache fills): CPU 85-90 %
+(~28.5 us/req) plus the checkpoints' fixed cost (~3 syncs on the loop each, one checkpoint per ~1 s).
+
+## E45: CKPT_FRAMES 8,000 vs 4,000, 5-minute holds at 290k (3 Nov, b43, env; calibrated harness) — 8,000 kept
+Interleaved, 2 reps, 0 errors everywhere, nothing read from disk:
+- 8,000: 30.4k / 30.4k rps, p50 21 / 29, p95 325 / 345, p99 600 / 585, max 1,548 / 1,138 ms, ul us/req 15.8 / 16.3
+- 4,000: 30.3k / 30.4k rps, p50 60 / 56, p95 385 / 360, p99 855 / 740, max 2,220 / 2,168 ms, ul us/req 16.8 / 16.4
+Half as many checkpoints (each ~3 syncs on the loop and a copy of every hot page) for 16 MB more WAL in the
+page cache. (H1's 4k hold at 290k failed; 4k passed both holds here: the edge varies hold to hold.)
+
+## E46: 8,000 frames by default (3 Nov, b46), 5-minute holds — kept
+42/42 (opt-box). Calibrated harness:
+- 300k r1: 31.4k rps, p50 61, p95 440, p99 795, max 1,851 ms, 0 errors — passes (b43, 4k frames, failed here)
+- 310k: 32.3k rps, p50 77, p95 535, p99 1,290, max 2,745 ms, 0 errors — fails
+- 300k r2: 31.2k rps, p50 73, p95 625, p99 1,945, max 19.1 s, 0 errors — fails: at the end of the ramp the page
+  cache was squeezed (feed.db 241 -> 22 MB, WAL 31 -> 18 MB within 30 s), checkpoints read the WAL back
+  (121 MB read), TCP memory spiked to 81k pages; recovered, no OOM. MemAvailable low-water 724 MB (of which
+  ~300 MB is socket inode/dentry slab pinned by open sockets).
+300k is a coin flip on this harness (memory and CPU both run out there); 290k held 2 of 2 (E45).
+Consult (same session, round 2): mlock is a setting inside the process (fails soft here: a failed lock just
+stops pinning) but must be A/B'd on its own (E47); don't headline 300k; the harness can't see the NIC's receive
+softirq on the server's one vCPU (on loopback it runs on the client's CPUs) or the scorer's back-to-back probes.
+Rejected: DeepSeek's tcp_mem formula again (/8; opt-box measures /16), the fd-limit worry (fixed-file slots
+don't count against LimitNOFILE; the scorer held 270k with f220565).

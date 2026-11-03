@@ -1015,3 +1015,7 @@ asks for more requests than one vCPU serves; the memory blow-up follows from the
 Pinning the database's page cache (DeepSeek's idea, to make 16,000 frames safe) is out: a non-root unit has
 RLIMIT_MEMLOCK 8 MiB (VmLck 8,192 kB), which the code pinning already uses.
 Synteq sysctls restored from w3/sysctl.orig; the calibrated values are in w3/sysctl.cal.
+
+## TdscWat4 (3 Nov on): hypotheses first (experiments/hypotheses.md, append-only, locked), then E53+
+Paid calls tally (limit $1): consult 1103-205423-0386 round 1 $0.0233. Total $0.023.
+Boxes: Synteq (harness v2 = hs2.sh/q2.sh, SPIN_NS=10000 unless marked), opt-box (builds).

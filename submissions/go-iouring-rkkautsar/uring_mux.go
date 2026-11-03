@@ -298,16 +298,18 @@ func runWriteWorker(jobs <-chan *muxJob, writeBatch func([]*httpReq) []readResp)
 	for first := range jobs {
 		batch := []*muxJob{first}
 		nreq := len(first.reqs)
-		// Drain everything already queued. This coalesces commits without
-		// adding a deliberate sleep when the queue is empty.
-	collectQueued:
-		for nreq < maxReqs && len(batch) < 16 {
-			select {
-			case j := <-jobs:
-				batch = append(batch, j)
-				nreq += len(j.reqs)
-			default:
-				break collectQueued
+		// Only merge when there is a real backlog. Merging a nearly empty
+		// queue just adds latency to the first batch without reducing commits.
+		if len(jobs) >= 4 {
+		collect:
+			for nreq < maxReqs && len(batch) < 16 {
+				select {
+				case j := <-jobs:
+					batch = append(batch, j)
+					nreq += len(j.reqs)
+				default:
+					break collect
+				}
 			}
 		}
 		timed := statEnabled.Load()

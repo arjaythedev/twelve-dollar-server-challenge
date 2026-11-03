@@ -245,13 +245,13 @@ func main() {
 			idleMS = n
 		}
 	}
-	maxConns := 46000
+	maxConns := 48000
 	if v := os.Getenv("MAX_CONNS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			maxConns = n
 		}
 	}
-	softConns := 44000
+	softConns := 32000
 	if v := os.Getenv("SOFT_CONNS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			softConns = n
@@ -411,11 +411,10 @@ const (
 )
 
 func (a *app) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if a.conns.overSoft() && r.Method != http.MethodPost {
-		// Close after reads, not writes: a client may chain a write on the
-		// same connection (the LG sends like -> create immediately), and a
-		// close here would turn that chained write into an EOF. GETs are the
-		// majority, so the cap still drains.
+	if a.conns.overSoft() {
+		// Advertise close on every response, including writes. A client
+		// that chains a write after this response must open a new socket;
+		// the race to avoid is closing a socket without notice.
 		w.Header().Set("Connection", "close")
 	}
 	switch p := r.URL.Path; p {

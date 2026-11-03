@@ -27,15 +27,21 @@ Serving is direct on `HOST:PORT`, no Nginx.
   existence query plus one multi-row `INSERT … RETURNING`. Every response
   waits for the commit.
 - **Four read connections** (`READ_CONNS`), prepared statements, WAL,
-  `synchronous=NORMAL`, 16 MiB page cache, 256 MiB mmap, `_mutex=no`, and
-  WAL autocheckpoint at 10,000 pages. Connections use a 65 s idle timeout
+  `synchronous=NORMAL`, 16 MiB page cache, mmap disabled by default
+  (`SQLITE_MMAP` bytes re-enables it), `_mutex=no`, and WAL autocheckpoint at
+  10,000 pages. Connections use a 65 s idle timeout
   (`IDLE_TIMEOUT_MS`). It must exceed the load's longest think gap (15 s); the
   earlier 1 s timeout closed every keep-alive socket between requests, and
   clients do not retry a POST that lands on a socket the server just closed.
-  A soft/hard resident cap (`SOFT_CONNS`/`MAX_CONNS`) bounds memory: above
-  soft, read responses send `Connection: close` so the client reconnects after
-  the response; writes are exempt so a chained create is not cut off. Above
-  hard, the oldest idle socket is closed as a backstop.
+  A soft/hard resident cap (`SOFT_CONNS=44000`/`MAX_CONNS=46000`) bounds
+  memory: above soft, read responses send `Connection: close` so the client
+  reconnects after the response; writes are exempt so a chained create is not
+  cut off. Above hard, the oldest idle socket is closed as a backstop.
+- **Memory headroom.** The process sets a 1200 MiB Go soft memory limit when
+  `GOMEMLIMIT` is unset, disables the 256 MiB SQLite mmap by default, and keeps
+  the 16 MiB page cache. The resident cap sits below the official 45k stable
+  point so excess clients recycle through `Connection: close` instead of
+  pushing RSS over the 2 GiB box.
 - `Content-Length` is set; responses are not chunked.
 
 ## Configuration
@@ -46,8 +52,11 @@ Serving is direct on `HOST:PORT`, no Nginx.
 | `JWT_SECRET` | required | HS256 secret |
 | `HOST`, `PORT` | `127.0.0.1`, `3000` | Listen address |
 | `IDLE_TIMEOUT_MS` | `65000` | Keep-alive idle timeout |
-| `MAX_CONNS` | `50000` | Hard resident-connection cap (LRU idle eviction) |
-| `SOFT_CONNS` | `48000` | Above this, responses send `Connection: close` |
+| `GOMEMLIMIT` | `1200MiB` | Go soft heap limit when unset in the environment |
+| `MAX_CONNS` | `46000` | Hard resident-connection cap (LRU idle eviction) |
+| `SOFT_CONNS` | `44000` | Above this, responses send `Connection: close` |
+| `SQLITE_CACHE` | `16384` | SQLite page-cache size in KiB |
+| `SQLITE_MMAP` | `0` | SQLite mmap size in bytes; 0 disables mmap |
 | `WRITE_BATCH_MS` | `10` | Write group-commit window |
 | `READ_CONNS` | `4` | SQLite read connections |
 | `READ_COALESCE` | `1` | In-flight feed/post read sharing |
@@ -58,24 +67,29 @@ Serving is direct on `HOST:PORT`, no Nginx.
 
 Docker load test on one pinned CPU, 1.9 GiB memory, 1.7 GiB Go memory limit,
 four LG clients (60 s ramp, 60 s hold), fresh seed database, tuned defaults.
-The server runs with `SOFT_CONNS=48000`, `MAX_CONNS=50000`,
-`IDLE_TIMEOUT_MS=65000`, `POST_BATCH=1`.
+The 47k row uses the new defaults, `NOFILE=65535`, `GOMEMLIMIT=1200MiB`,
+`SQLITE_MMAP=0`, `SQLITE_CACHE=16384`, and a 120 s hold; the 70k/100k rows used
+the earlier `SOFT_CONNS=48000`, `MAX_CONNS=50000`, 256 MiB mmap,
+`IDLE_TIMEOUT_MS=65000`, and `POST_BATCH=1`. The defaults are now
+`SOFT_CONNS=44000`, `MAX_CONNS=46000`, mmap disabled, and a 1200 MiB Go limit.
 
 | Users | Client results | Server |
 |---:|---|---|
+| 47,000 (new defaults) | p95 13.7–14.2 ms, p99 121–127 ms, 0 errors, ~44k resident | 625 MiB at 30 s ramp, no OOM |
 | 70,000 | p95 345–347 ms, p99 616–620 ms, 0 errors | 940 MiB at 30 s, ~48k resident, no OOM |
 | 100,000 | p95 3.2 s, p99 5.5–6.2 s, 0.4–0.6 % net errors | OOM at 1.855 GiB |
 
-70k passes with four 17,500-user clients. The cap holds ~48k resident
-connections; the excess cycles through `Connection: close` after read
-responses (writes are exempt, so a chained create is not cut off). 100k is past
-the one-vCPU/2 GiB ceiling: the ramp and reconnect churn outrun the cap and the
-server OOMs.
+The 70k run held ~48k resident connections; the excess cycled through
+`Connection: close` after read responses (writes are exempt, so a chained
+create is not cut off). 100k is past the one-vCPU/2 GiB ceiling: the ramp and
+reconnect churn outrun the cap and the server OOMs.
 
-The official service has `LimitNOFILE=65535`; the 50k cap stays below it, so
-the fd limit is not the binding constraint. With the 65 s idle timeout, memory
-is: a net/http connection costs roughly 29 KB including Go runtime and buffers,
-so ~50k resident is the practical ceiling on 2 GiB.
+The official service has `LimitNOFILE=65535`; the 46k hard cap stays below it,
+so the fd limit is not the binding constraint. The official 5-minute rebench
+held 45,000 users at 1,516 MB; 47,000 hit 1.56 GB and failed with 21.7%
+`connection refused`. With the 65 s idle timeout, a net/http connection costs
+roughly 29 KB including Go runtime and buffers, so the 44k soft cap leaves
+headroom on the 2 GiB box instead of trying to hold 47k+ resident.
 
 `test/run.sh` passes **42/42** with the default configuration.
 

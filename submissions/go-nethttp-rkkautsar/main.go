@@ -16,6 +16,7 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 	"os"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -197,6 +198,13 @@ type app struct {
 }
 
 func main() {
+	// A soft Go heap target keeps GC ahead of the 2 GiB cgroup on the
+	// official box. Respect an explicit GOMEMLIMIT, including the one the
+	// Go runtime reads from the environment at startup.
+	if os.Getenv("GOMEMLIMIT") == "" {
+		debug.SetMemoryLimit(1200 << 20)
+	}
+
 	host := envOr("HOST", "127.0.0.1")
 	port := envOr("PORT", "3000")
 	path := os.Getenv("SQLITE_PATH")
@@ -237,13 +245,13 @@ func main() {
 			idleMS = n
 		}
 	}
-	maxConns := 50000
+	maxConns := 46000
 	if v := os.Getenv("MAX_CONNS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			maxConns = n
 		}
 	}
-	softConns := 48000
+	softConns := 44000
 	if v := os.Getenv("SOFT_CONNS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			softConns = n
@@ -256,8 +264,25 @@ func main() {
 		}
 	}
 
+	sqliteCacheKiB := 16384
+	if v := os.Getenv("SQLITE_CACHE"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			sqliteCacheKiB = n
+		}
+	}
+	// Bytes. The default disables mmap so the 256 MiB mapping does not
+	// compete with the connection set on a 2 GiB box.
+	sqliteMmapBytes := int64(0)
+	if v := os.Getenv("SQLITE_MMAP"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n >= 0 {
+			sqliteMmapBytes = n
+		}
+	}
+
 	dsn := path + "?_journal_mode=WAL&_synchronous=NORMAL&_busy_timeout=5000" +
-		"&_cache_size=-16384&_mmap_size=268435456&_mutex=no&_wal_autocheckpoint=10000"
+		"&_cache_size=-" + strconv.Itoa(sqliteCacheKiB) +
+		"&_mmap_size=" + strconv.FormatInt(sqliteMmapBytes, 10) +
+		"&_mutex=no&_wal_autocheckpoint=10000"
 
 	readDB, err := sql.Open("sqlite3", dsn)
 	if err != nil {

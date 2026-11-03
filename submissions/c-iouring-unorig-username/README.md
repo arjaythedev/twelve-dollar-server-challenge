@@ -133,7 +133,12 @@ Lake like the benchmark box's 8260), booted with one CPU and 2 GB, kernel 6.8, M
 a fresh database, `MemoryMax=1750M` (the leaderboard says the app is capped at 1,750 MB but not how, so that is an assumption).
 Compare only within a table: results shift between instances and sessions.
 
-Commits: this entry at `40bf738`; rust-iouring-kensac at `4298101`, its unmerged #264 (the 310,000 row).
+Commits: the tables and the durability and build figures below are from this entry at `40bf738`, not from the later `faffedc`,
+which adds a shutdown to the close chain; rust-iouring-kensac is at `4298101`, its unmerged #264 (the 310,000 row). `faffedc` was
+measured against `40bf738` on one other instance with the same holds, 2 runs each. At 320,000 both passed (p99 210 and 259 ms against
+374 and 212 ms). At 340,000 both failed (p99 38 s and an OOM at 158 s against p99 20 and 41 s). When every client was killed and
+reconnected at 300,000, one run each, `faffedc` was killed for memory and `40bf738` survived. `kill -9` on `faffedc`: all 549,919
+acknowledged writes present, `integrity_check` ok.
 
 CPU per request, whole box, softirq included, 250,000 users, 3 interleaved rounds, own load generator with k6-shaped requests:
 

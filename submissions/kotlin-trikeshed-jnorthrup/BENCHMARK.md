@@ -22,7 +22,8 @@ lists what was measured, where, and how to run it again.
    takes connections into io_uring direct descriptors (`feedc.def`: 8 rings, each with a sparse direct-descriptor
    table of up to 65,535 slots, provided buffers, one response arena), so its connections do not count against that
    limit. The cross-runtime comparison below uses 1,000 users.
-3. **It fits the build box.** The current Maven build runs under a 1,350 MiB limit on Kali with swap disabled.
+3. **It fits the build box.** `build.sh` (TrikeShed compiled from source, four Gradle stages) ran on kali under the
+   rig's limits (1 CPU, MemoryMax=1536M, no swap, clean build folders): rc=0 in 353 s, anon peak 1,220 MB, 42/42 checks.
 
 ## The runtimes
 
@@ -44,10 +45,11 @@ The WASI build is two modules: the server (`server.wasm`) and the stock SQLite a
 `install.sh` (root): apt `aria2 build-essential zlib1g-dev ca-certificates curl git unzip`, then Oracle GraalVM
 25.4.4.1.1 and Gradle 9.6.1 from their official sites through aria2c, each checked against a pinned sha256.
 
-`build.sh` imports `borg.trikeshed:TrikeShed:0.1.0-20280e867` from the pinned Maven repository. The source checkout
-at the same revision supplies liburing and its headers. Three single-use Gradle invocations build the SQLite downloader
-and verify the amalgamation, compile the native server KLIB, then link the release executable. The compiler heap starts
-at 64 MiB and can grow to 600 MiB. Finishing the compile before starting the link releases its JVM and native allocations.
+`build.sh` fetches TrikeShed's source at the pinned commit (`TRIKESHED_COMMIT`, `20280e86761b3df64cedd4579e311c04411d22b4`)
+and compiles it on the box; it uses no prebuilt library and no Maven repository of ours. Four single-use Gradle
+invocations run in order: the SQLite downloader (it verifies the amalgamation), TrikeShed's Kotlin/Native compile, the
+server's Kotlin/Native compile, then the release link. The Gradle heap starts at 64 MiB and can grow to 600 MiB. Each
+stage ends its JVM, so the link starts without the compilers' JVM and native allocations.
 
 The downloads from the earlier five-runtime comparison, with their sha256 sums, are in [`bench/DEPS.tsv`](bench/DEPS.tsv) (185 entries: the tools, the
 Kotlin/Native toolchain archives and the Maven artifacts of every runtime). The runtimes the box does not need (Node.js

@@ -1,14 +1,13 @@
 #!/usr/bin/env bash
 # Builds as a normal user: the Kotlin/Native server (server/build/bin/linuxX64/feedReleaseExecutable/feed.kexe, the
 # runtime start.sh serves by default) with SQLite 3.54.0 linked in from its amalgamation, which the build downloads and
-# checks against the SHA3-256 sqlite.org publishes for it. The server imports TrikeShed as a library,
-# borg.trikeshed:TrikeShed:0.1.0-20280e867, from the Maven repository settings.gradle.kts names (branch trikeshed-m2 of
-# this fork, every target, built by TrikeShed's own build), so this build does not compile TrikeShed. The git checkout
-# trikeshed/TrikeShed (fetched here at the pinned commit when empty; TRIKESHED_URL overrides the repository) supplies
-# liburing's sources and the load generator's module.
+# checks against the SHA3-256 sqlite.org publishes for it. TrikeShed is compiled here from source: the git checkout
+# trikeshed/TrikeShed, fetched at the pinned commit below when empty (TRIKESHED_URL overrides the repository), built by
+# the :trikeshed module. No prebuilt library and no Maven repository of ours is used.
 # The other runtimes (graal-static, graal-jit, node, wasi) build from the same tree with bench/all1000.sh.
 #
-# Run the SQLite downloader, native compile and release link in separate Gradle JVMs so clang has room.
+# Stages, each in its own single-use Gradle JVM, so no JVM holds two compiles and clang and lld have room: the SQLite
+# downloader (JVM target), TrikeShed's Kotlin/Native compile, the server's Kotlin/Native compile, the release link.
 set -euo pipefail
 # glibc keeps one malloc arena per thread; two bound the Gradle JVMs' and the Kotlin/Native compiler's native memory.
 export MALLOC_ARENA_MAX=2
@@ -25,5 +24,6 @@ if [ -x /opt/graalvm/bin/java ]; then export JAVA_HOME=/opt/graalvm; fi
 GRADLE=${GRADLE:-/opt/gradle/bin/gradle}; [ -x "$GRADLE" ] || GRADLE=gradle
 gradle=("$GRADLE" --no-daemon --console=plain --configure-on-demand)
 "${gradle[@]}" :server:sqliteSource
+"${gradle[@]}" -Ptrike.targets=linuxX64 :trikeshed:compileKotlinLinuxX64
 "${gradle[@]}" -Ptrike.targets=linuxX64 :server:compileKotlinLinuxX64
 exec "${gradle[@]}" -Ptrike.targets=linuxX64 :server:linkFeedReleaseExecutableLinuxX64

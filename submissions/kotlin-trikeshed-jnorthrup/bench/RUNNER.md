@@ -10,8 +10,9 @@ bash build.sh            # TrikeShed at the pinned commit, then feed.kexe (Kotli
 bash start.sh            # serves RUNTIME=kn; first line on stderr: "start.sh: RUNTIME=kn"
 ```
 
-The scored build ran with a 1,350 MiB cgroup limit, one CPU and zero swap on Kali. `build.sh` resolves the pinned
-TrikeShed Maven library and runs the native compile and release link in separate Gradle invocations.
+The scored build ran on kali with one CPU, MemoryMax=1536M and no swap: rc=0 in 353 s, anon peak 1,220 MB, 42/42
+checks. `build.sh` compiles TrikeShed from its pinned source and runs four single-use Gradle stages (SQLite download,
+TrikeShed's Kotlin/Native compile, the server's compile, the release link).
 
 ## The other four runtimes (optional; we ask you to score the fastest)
 
@@ -20,7 +21,7 @@ two builds at once, or a build beside a running server, do not fit in 2 GB. Stop
 
 | `RUNTIME=` | Extra install (root) | Build (user, from this folder) | Build memory peak |
 |---|---|---|---|
-| `kn` | none | `bash build.sh` | 1,350 MiB cgroup limit |
+| `kn` | none | `bash build.sh` | 1.22 GB (under a 1,536 MB limit) |
 | `graal-static` | none | `/opt/gradle/bin/gradle --no-daemon -q :server:app :server:sqliteLib`, then the `native-image` line in `bench/all1000.sh` | 1.79 GB |
 | `graal-jit` | none | `/opt/gradle/bin/gradle --no-daemon -q :server:app :server:sqliteLib` | not sampled (Gradle heap 1 GB) |
 | `node` | `bash bench/install-extra.sh` | `/opt/gradle/bin/gradle --no-daemon -q -Ptrike.targets=js :server:nodeDist` | 1.26 GB |

@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
-# Build feed_server.x from source. Requires the optimizing compiler (e.g. ailang-opt11.x).
-# The standard ./ailang.x cannot compile Library.Hash. A copy of the optimizing compiler is
-# bundled in compiler/; set AILANG_COMPILER to use a different one.
+# Build feed_server.x from source with the AILANG compiler that install.sh puts in
+# /usr/local/bin. Set AILANG_COMPILER to use a different one.
 set -euo pipefail
 cd "$(dirname "$0")"
-COMPILER="${AILANG_COMPILER:-$PWD/compiler/ailang-opt11.x}"
+COMPILER="${AILANG_COMPILER:-/usr/local/bin/ailang.x}"
 if [[ ! -x "$COMPILER" ]]; then
-  echo "FAIL missing compiler: $COMPILER (set AILANG_COMPILER)" >&2
+  echo "FAIL missing compiler: $COMPILER (run install.sh, or set AILANG_COMPILER)" >&2
   exit 1
 fi
 export AILANG_LIB_PATH="$PWD/Librarys"

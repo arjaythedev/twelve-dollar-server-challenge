@@ -1,3 +1,2 @@
 feed_server.x
 *.x
-!compiler/ailang-opt11.x

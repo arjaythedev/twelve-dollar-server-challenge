@@ -9,7 +9,7 @@ A submission written in AILANG, a programming language designed for AI-assisted 
 | **SQLite driver** | None. `Library.SQLite` reads and writes the SQLite file directly using memory mapping and write-ahead logging. No `libsqlite3`, no shared libraries |
 | **Authentication** | `Library.Crypto`: JWT HS256, signature and expiry checked on every authenticated request |
 | **Nginx or direct** | **Direct**. Listens on `$HOST:$PORT` (use `0.0.0.0:80`) |
-| **Compiler** | AILANG optimizing compiler `ailang-opt11.x`, bundled in `compiler/` (see below) |
+| **Compiler** | The stock AILANG compiler `ailang.x` from [AiLang-Author/Ailang-Self-Hosting-](https://github.com/AiLang-Author/Ailang-Self-Hosting-), installed by `install.sh` (see below) |
 
 ## How this was built
 
@@ -22,8 +22,8 @@ The folder [`triumvirate-engineering/`](triumvirate-engineering/) holds the work
 ## Build and run
 
 ```bash
-bash install.sh      # does nothing; there is nothing to install
-bash build.sh        # compiles feed_server.ailang with the bundled compiler
+sudo bash install.sh # installs the pinned AILANG compiler to /usr/local/bin/ailang.x
+bash build.sh        # compiles feed_server.ailang
 SQLITE_PATH=/path/to/copy-of-feed.db JWT_SECRET=... HOST=0.0.0.0 PORT=80 bash start.sh
 ```
 
@@ -38,19 +38,13 @@ Check it with the challenge's own tests (from the repository root):
 bash test/run.sh submissions/ailang-native-2paws
 ```
 
-### About the bundled compiler
+### The compiler
 
-This submission includes the AILANG compiler binary in `compiler/ailang-opt11.x` because AILANG is a self-hosting language and its compiler is not currently distributed through a standard Ubuntu/Debian package or a stable official toolchain repository. In other words, this is not a normal third-party runtime dependency or an off-the-shelf binary that changes the server's behavior; it is the project's own bootstrap compiler used to build the server.
+AILANG is self-hosting and has no apt package. Its compiler is one static binary, `ailang.x`, published in the AILANG repository at [AiLang-Author/Ailang-Self-Hosting-](https://github.com/AiLang-Author/Ailang-Self-Hosting-) together with its source.
 
-The compiler source is available upstream in the AILANG self-hosting project, and a source-based build is possible if someone wants to rebuild it locally. The reason the bundled copy is included here is that the optimizer used by `Library.Hash` (specifically `Crc32String`) is not yet published in the upstream self-hosting repo, so the build path is currently a bootstrap convenience rather than a normal package-install flow.
-
-- The bundled binary is an optimizing build that the server needs: `Library.Hash` uses `Crc32String`, which the compiler currently published at [AiLang-Author/Ailang-Self-Hosting-](https://github.com/AiLang-Author/Ailang-Self-Hosting-) does not yet include.
-- When the upstream optimizer is published, `build.sh` can switch to the public compiler and the bundled copy can be removed.
-- sha256 of the bundled compiler: `eb705f6e60ece1bca1c1e8d3103b1a65be162b6fc63c690d85e1675f2efca407`
-- The compiler binary belongs to the AILANG project and is not covered by this repository's MIT license.
-- The server binary `feed_server.x` is built by `build.sh` and is not committed.
-
-This is a deliberate bootstrap exception for a self-hosting language whose compiler is not available via normal package channels. The source is available if needed, and the server itself is still built from source via `build.sh`.
+- `install.sh` downloads `ailang.x` from that repository at a pinned commit (`2c027a8e`, branch `master`), checks its sha256 (`67e25f5b47f77bb461f7b7aad5f719aaa2ea7ddc403a569fe9d3a7962cf65c37`) and installs it to `/usr/local/bin/ailang.x`.
+- `build.sh` compiles the server with it. Set `AILANG_COMPILER` to use a different compiler.
+- No compiler or server binary is committed here. The compiler belongs to the AILANG project and is not covered by this repository's MIT license.
 
 ## How it works
 
@@ -83,6 +77,8 @@ The server ran in a transient systemd scope (`MemoryMax=1800M`, `MemorySwapMax=0
 | 190,000 | 20,408 | 94 | 274 | 0.000 | 99 | 1,095 |
 
 The 200,000 row is the default configuration (three front processes); the 190,000 row ran with `HTTP_FRONTS=2`. 210,000 users failed the same hold (p95 8.1 s, p99 12.0 s, 0 errors): with the CPU already full at 200,000, the extra connections pushed memory to the 1,800 MB limit and the kernel's reclaim stalled the server. No run was OOM-killed. After each passing hold, SQLite's own `PRAGMA integrity_check` on the database and WAL returned `ok`: 66,956 new posts and 501,515 new likes after the 200,000 hold.
+
+These rows were measured with a server built by the AILANG optimizing compiler `ailang-opt11.x`. Built with the stock `ailang.x` that `install.sh` now installs, one 200,000-user hold on the same machine gave 20,422 req/s, p95 868 ms and p99 1,147 ms, with 0 errors.
 
 Memory at 190,000 connections: 1,095 MB peak, against 49 MB idle, or about 5.5 KB per connection. About 4 KB of that is the kernel's own socket memory; most of the rest is database pages in the page cache.
 
@@ -130,6 +126,5 @@ Checking the database with SQLite itself after load runs found bugs in the earli
 | `feed_server.ailang` | The server |
 | `Librarys/Library.HTTP1Front.ailang` | The front processes and their shared-memory rings |
 | `Librarys/` | The AILANG libraries it uses (HTTP, SQLite, JSON, crypto, and so on) |
-| `compiler/` | The bundled AILANG compiler (see above) |
 | `build.sh`, `start.sh`, `install.sh` | The challenge scripts |
 | `triumvirate-engineering/` | Description of the AI working method used, for reference |

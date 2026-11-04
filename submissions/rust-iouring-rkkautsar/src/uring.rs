@@ -321,7 +321,7 @@ impl RingState {
         }
         let multishot = std::env::var("MULTISHOT")
             .map(|v| v != "0")
-            .unwrap_or(false);
+            .unwrap_or(true);
         let buf_ring = if multishot {
             match BufRing::new(&ring) {
                 Ok(b) => Some(b),

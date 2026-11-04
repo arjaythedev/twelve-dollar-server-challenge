@@ -7,23 +7,33 @@ import Feed.Model
 `bin/server --selftest <file>` (run by build.sh after linking) checks the C code that no proof
 covers:
 
-* each leaf (`runtime/leaves.c`, and `idle_pick` in `runtime/uring.c`) against its Lean
-  definition, on random inputs;
+* each leaf of `runtime/leaves.c` (byte operations, HTTP framing, HMAC-SHA256, base64url, the
+  feed's and a post's responses) against its Lean definition, on random inputs (HTTP framing also
+  on their prefixes, and with each byte value in each place of a request where the parser tells
+  bytes apart), and the JSON parser on strings with each byte from 0x80 to 0xff where a UTF-8
+  sequence starts;
+* `Http.parse` against the frames `Feed/Spec/Http.lean` gives a list of inputs, and on random
+  inputs against itself: a prefix of an input reads as a wait or as the whole input does (every
+  prefix of an input of up to 2,048 bytes), and the input reads the same after other bytes;
 * each storage operation of `runtime/db.c` against its meaning in `Feed/Model.lean`, on a random
   database written to `<file>` (ties in `created_at`, gaps in ids, posts whose author row is
   missing, a `users` table of three B-tree levels), before and after random writes; a page is
   compared row by row as the post objects it reads back as;
+* one batch of requests through the handler at `IO` and on the model: the same replies;
 * the grouped rowid search of `runtime/db.c` against SQLite's own on every key of `users` and
   `posts`, and its in-order passes over the indexes (the feed's order, the like counts) against
   SQLite's cursors, also on trees of three levels;
 * a transaction that grows the file and rolls back, and SQLite's integrity check after the writes;
-* SHA-256 and HMAC-SHA256 against the published test vectors.
+* SHA-256, HMAC-SHA256 and base64url against the published test vectors, the MACs also on
+  ranges inside an array, past its end and given backwards;
+* `Jwt.verify` on tokens signed with a key: what RFC 7515 and RFC 7519 make invalid although the
+  signature is right (`crit`, a nested JWT's `cty`, `aud`, padding, bits after the last byte).
 -/
 namespace Feed.Selftest
 open Bytes
 
-/-! The references: the leaves' Lean bodies, restated without `@[extern]` so that they run as
-Lean. Each is tied to its definition by `rfl` or a proof. -/
+/-! The references: the leaves' Lean bodies and the definitions they use, restated without
+`@[extern]` so that they run as Lean. Each is tied to its definition by `rfl`. -/
 
 def refAppendEsc (out src : ByteArray) (lo hi : Nat) : ByteArray := out ++ ⟨(escape (slice src lo hi)).toArray⟩
 def refAppendLitEsc (out lit src : ByteArray) (lo hi : Nat) : ByteArray :=
@@ -51,8 +61,6 @@ def refB64Encode (d : ByteArray) : ByteArray :=
   Jwt.b64Encode.go d 0 (d.size / 3 + 1) (ByteArray.emptyWithCapacity (d.size * 4 / 3 + 4))
 def refB64Decode (a : ByteArray) (lo hi : Nat) : Option ByteArray :=
   let hi := min hi a.size
-  let hi := if hi > lo && a.get! (hi - 1) == 0x3d then hi - 1 else hi
-  let hi := if hi > lo && a.get! (hi - 1) == 0x3d then hi - 1 else hi
   if (hi - lo) % 4 == 1 then none
   else Jwt.b64Decode.go a lo (hi - lo) 0 0 (ByteArray.emptyWithCapacity ((hi - lo) * 3 / 4 + 3))
 
@@ -94,87 +102,6 @@ example : @feedFromPage = @refFeedFromPage := by
   simp only [feedFromPage, refFeedFromPage, renderPage, refRenderGo_eq]
   rfl
 
-/-! HTTP framing: `Http.parse` with the reference byte searches. -/
-
-def refHasToken (a : ByteArray) (hi : Nat) (tok : ByteArray) (i : Nat) : Nat → Bool
-  | 0 => false
-  | f + 1 =>
-    if i ≥ hi then false else
-    let e := refFindByte a 0x2c i hi
-    let s := Http.skipL a i e
-    Http.eqCI a s (Http.skipR a s e) tok || refHasToken a hi tok (e + 1) f
-
-theorem refHasToken_eq (a : ByteArray) (hi : Nat) (tok : ByteArray) :
-    ∀ f i, Http.hasToken.go a hi tok i f = refHasToken a hi tok i f := by
-  intro f
-  induction f with
-  | zero => intros; rfl
-  | succ f ih => intro i; simp only [Http.hasToken.go, refHasToken, ih]; rfl
-
-def refScanHeads (a : ByteArray) (he : Nat) (i : Nat) (h : Http.Heads) : Nat → Http.Heads
-  | 0 => h
-  | f + 1 =>
-    if i ≥ he then h else
-    let le := refFindByte a 0x0d i he
-    let colon := refFindByte a 0x3a i le
-    let h :=
-      if colon ≥ le || colon == i then { h with bad := true } else
-      let vs := Http.skipL a (colon + 1) le
-      let ve := Http.skipR a vs le
-      if Http.eqCI a i colon Http.hContentLength then
-        match Http.parseLen a vs ve with
-        | none => { h with lenBad := true }
-        | some n => match h.len with
-          | none => { h with len := some n }
-          | some m => if m == n then h else { h with lenBad := true }
-      else if Http.eqCI a i colon Http.hAuthorization then { h with hasAuth := true, authLo := vs, authHi := ve }
-      else if Http.eqCI a i colon Http.hConnection then
-        { h with close := h.close || refHasToken a ve Http.tClose vs (ve - vs + 1),
-                 keepAlive := h.keepAlive || refHasToken a ve Http.tKeepAlive vs (ve - vs + 1) }
-      else if Http.eqCI a i colon Http.hTransferEncoding then { h with te := true }
-      else h
-    refScanHeads a he (le + 2) h f
-
-theorem refScanHeads_eq (a : ByteArray) (he : Nat) :
-    ∀ f i h, Http.scanHeads a he i h f = refScanHeads a he i h f := by
-  intro f
-  induction f with
-  | zero => intros; rfl
-  | succ f ih =>
-    intro i h
-    simp only [Http.scanHeads, refScanHeads, ih, Http.hasToken, refHasToken_eq]
-    rfl
-
-def refParse (a : ByteArray) (pos : Nat) : Http.Parse :=
-  let n := a.size
-  let he := refFindHeadEnd a pos n
-  if he ≥ n then (if n - pos > Http.maxHead then .bad 431 else .incomplete) else
-  if he - pos > Http.maxHead then .bad 431 else
-  let le := refFindByte a 0x0d pos he
-  let sp1 := refFindByte a 0x20 pos le
-  let sp2 := refFindByte a 0x20 (sp1 + 1) le
-  if sp1 ≥ le || sp2 ≥ le || sp1 == pos then .bad 400 else
-  let v11 := Http.eqAt a (sp2 + 1) le Http.vHttp11
-  let v10 := Http.eqAt a (sp2 + 1) le Http.vHttp10
-  if !(v11 || v10) then .bad 400 else
-  let method := if Http.eqAt a pos sp1 Http.mGet then Http.Method.get
-    else if Http.eqAt a pos sp1 Http.mPost then Http.Method.post else Http.Method.other
-  let q := refFindByte a 0x3f (sp1 + 1) sp2
-  let h := if le == he then {} else refScanHeads a he (le + 2) {} (he - le)
-  if h.bad || h.lenBad || h.te then .bad 400 else
-  let len := h.len.getD 0
-  if len > Http.maxBody then .bad 413 else
-  let bodyLo := he + 4
-  if bodyLo + len > n then .incomplete else
-  let close := if v11 then h.close else !h.keepAlive
-  .ok { method, pathLo := sp1 + 1, pathHi := q, hasAuth := h.hasAuth, authLo := h.authLo, authHi := h.authHi,
-        bodyLo, bodyHi := bodyLo + len, close, next := bodyLo + len }
-
-example : @Http.parse = @refParse := by
-  funext a pos
-  simp only [Http.parse, refParse, refScanHeads_eq]
-  rfl
-
 /-- `route` with the reference byte search. -/
 def refRoute (a : ByteArray) (r : Http.Req) : Route :=
   let hi := min r.pathHi a.size
@@ -194,6 +121,227 @@ def refRoute (a : ByteArray) (r : Http.Req) : Route :=
   | .other => .notFound
 
 example : @route = @refRoute := rfl
+
+/-! HTTP framing: `Http.parse`, its `scan` and its `finish`, with the reference byte search. -/
+
+def refHeadEnd (a : ByteArray) (hi : Nat) (i : Nat) : Nat → Option Nat
+  | 0 => none
+  | f + 1 =>
+    let c := refFindByte a 0x0d i (hi - 3)
+    if c + 3 < hi then
+      if Http.byte a (c + 1) == 0x0a && Http.byte a (c + 2) == 0x0d && Http.byte a (c + 3) == 0x0a then some c
+      else refHeadEnd a hi (c + 1) f
+    else none
+
+theorem refHeadEnd_eq (a : ByteArray) (hi : Nat) : ∀ f i, Http.headEnd.go a hi i f = refHeadEnd a hi i f := by
+  intro f
+  induction f with
+  | zero => intros; rfl
+  | succ f ih => intro i; simp only [Http.headEnd.go, refHeadEnd, ih]; rfl
+
+def refHasToken (a : ByteArray) (hi : Nat) (tok : ByteArray) (i : Nat) : Nat → Bool
+  | 0 => false
+  | f + 1 =>
+    if i ≥ hi then false else
+    let e := refFindByte a 0x2c i hi
+    let s := Http.skipL a i e
+    Http.eqCI a s (Http.skipR a s e) tok || refHasToken a hi tok (e + 1) f
+
+theorem refHasToken_eq (a : ByteArray) (hi : Nat) (tok : ByteArray) :
+    ∀ f i, Http.hasToken.go a hi tok i f = refHasToken a hi tok i f := by
+  intro f
+  induction f with
+  | zero => intros; rfl
+  | succ f ih => intro i; simp only [Http.hasToken.go, refHasToken, ih]; rfl
+
+def refField (a : ByteArray) (lo hi vs ve : Nat) (f : Http.Fields) : Http.Fields :=
+  if Http.eqCI a lo hi Http.hHost then { f with hosts := f.hosts + 1, hostLo := vs, hostHi := ve }
+  else if Http.eqCI a lo hi Http.hContentLength then
+    if vs < ve && Http.allDigits a vs ve then
+      let z := Http.skipZeros a vs ve
+      if !f.hasLen then { f with hasLen := true, lenLo := z, lenHi := ve }
+      else if Http.sameBytes a f.lenLo f.lenHi z ve then f else { f with lenBad := true }
+    else { f with lenBad := true }
+  else if Http.eqCI a lo hi Http.hAuthorization then { f with auths := f.auths + 1, authLo := vs, authHi := ve }
+  else if Http.eqCI a lo hi Http.hConnection then
+    { f with close := f.close || refHasToken a ve Http.tClose vs (ve - vs + 1),
+             keepAlive := f.keepAlive || refHasToken a ve Http.tKeepAlive vs (ve - vs + 1) }
+  else if Http.eqCI a lo hi Http.hTransferEncoding then { f with coding := true }
+  else f
+
+theorem refField_eq : @Http.field = @refField := by
+  funext a lo hi vs ve f
+  simp only [Http.field, refField, Http.hasToken, refHasToken_eq]
+
+def refFields (a : ByteArray) (he : Nat) (i : Nat) (f : Http.Fields) : Nat → Http.Fields
+  | 0 => { f with bad := true }
+  | fuel + 1 =>
+    let c := Http.tokenEnd a i he
+    if c == i || Http.byte a c != 0x3a then { f with bad := true } else
+    let e := Http.valueEnd a (c + 1) he
+    if Http.byte a e != 0x0d || Http.byte a (e + 1) != 0x0a then { f with bad := true } else
+    let vs := Http.skipL a (c + 1) e
+    let f := refField a i c vs (Http.skipR a vs e) f
+    if he ≤ e then f else refFields a he (e + 2) f fuel
+
+theorem refFields_eq (a : ByteArray) (he : Nat) :
+    ∀ fuel i f, Http.fields a he i f fuel = refFields a he i f fuel := by
+  intro fuel
+  induction fuel with
+  | zero => intros; rfl
+  | succ fuel ih => intro i f; simp only [Http.fields, refFields, refField_eq, ih]
+
+def refScan (a : ByteArray) (pos : Nat) : Http.Scan :=
+  let lim := min a.size (pos + Http.maxHead + 4)
+  let i0 := Http.skipLead a pos
+  let m := Http.tokenEnd a i0 lim
+  let t := Http.targetEnd a (m + 1) (min lim (m + 2 + Http.maxTarget))
+  let sp := i0 < m && Http.byte a m == 0x20
+  if sp && t == m + 2 + Http.maxTarget then .bad 414 else
+  match refHeadEnd a lim i0 (lim - i0) with
+  | none => if pos + Http.maxHead + 4 ≤ a.size then .bad 431 else .incomplete
+  | some he =>
+    let v := t + 1
+    if !(sp && m + 1 < t && Http.byte a t == 0x20 && Http.eqAt a v (v + 7) Http.vHttp1 &&
+        Http.digit (Http.byte a (v + 7)) && Http.byte a (v + 8) == 0x0d && Http.byte a (v + 9) == 0x0a) then
+      .bad 400 else
+    let f := if v + 8 == he then {} else refFields a he (v + 10) {} (he - (v + 10))
+    if f.bad then .bad 400 else .head i0 m t (Http.byte a (v + 7) - 0x30).toNat he f
+
+theorem refScan_eq : @Http.scan = @refScan := by
+  funext a pos
+  simp only [Http.scan, refScan, Http.headEnd, refHeadEnd_eq, refFields_eq]
+  rfl
+
+def refIpv4 (a : ByteArray) (lo hi : Nat) : Bool :=
+  let d1 := refFindByte a 0x2e lo hi
+  let d2 := refFindByte a 0x2e (d1 + 1) hi
+  let d3 := refFindByte a 0x2e (d2 + 1) hi
+  d3 < hi && Http.decOctet a lo d1 && Http.decOctet a (d1 + 1) d2 && Http.decOctet a (d2 + 1) d3 &&
+    Http.decOctet a (d3 + 1) hi
+
+def refGroupsGo (a : ByteArray) (hi : Nat) (v4 : Bool) (i k : Nat) : Nat → Option Nat
+  | 0 => none
+  | f + 1 =>
+    let e := refFindByte a 0x3a i hi
+    if e < hi then (if Http.h16 a i e then refGroupsGo a hi v4 (e + 1) (k + 1) f else none)
+    else if Http.h16 a i hi then some (k + 1)
+    else if v4 && refIpv4 a i hi then some (k + 2)
+    else none
+
+theorem refGroupsGo_eq (a : ByteArray) (hi : Nat) (v4 : Bool) :
+    ∀ f i k, Http.groups.go a hi v4 i k f = refGroupsGo a hi v4 i k f := by
+  intro f
+  induction f with
+  | zero => intros; rfl
+  | succ f ih => intro i k; simp only [Http.groups.go, refGroupsGo, ih]; rfl
+
+def refGroups (a : ByteArray) (lo hi : Nat) (v4 : Bool) : Option Nat :=
+  if hi ≤ lo then some 0 else refGroupsGo a hi v4 lo 0 (hi - lo)
+
+def refIpv6 (a : ByteArray) (lo hi : Nat) : Bool :=
+  let d := Http.doubleColon a lo hi
+  if d < hi then
+    match refGroups a lo d false, refGroups a (d + 2) hi true with
+    | some i, some j => i + j ≤ 7
+    | _, _ => false
+  else refGroups a lo hi true == some 8
+
+def refIpFuture (a : ByteArray) (lo hi : Nat) : Bool :=
+  let d := refFindByte a 0x2e lo hi
+  lo < d && d + 1 < hi && Http.allHex a lo d && Http.allIn Http.userLo Http.userHi a (d + 1) hi
+
+def refIpLiteral (a : ByteArray) (lo hi : Nat) : Bool :=
+  if lo < hi && (Http.byte a lo == 0x76 || Http.byte a lo == 0x56) then refIpFuture a (lo + 1) hi else refIpv6 a lo hi
+
+def refHostEnd (a : ByteArray) (lo hi : Nat) : Option Nat :=
+  if lo < hi && Http.byte a lo == 0x5b then
+    let r := refFindByte a 0x5d lo hi
+    if r < hi && refIpLiteral a (lo + 1) r && Http.portOk a (r + 1) hi then some (r + 1) else none
+  else
+    let c := refFindByte a 0x3a lo hi
+    if Http.uriChars Http.regLo Http.regHi a lo c && Http.portOk a c hi then some c else none
+
+def refHostOk (a : ByteArray) (lo hi : Nat) : Bool := (refHostEnd a lo hi).isSome
+
+def refAuthority (a : ByteArray) (lo hi : Nat) : Bool :=
+  let at_ := refFindByte a 0x40 lo hi
+  if at_ < hi then Http.uriChars Http.userLo Http.userHi a lo at_ && refHostOk a (at_ + 1) hi else refHostOk a lo hi
+
+def refHierPart (a : ByteArray) (lo hi : Nat) : Bool :=
+  if lo + 2 ≤ hi && Http.byte a lo == 0x2f && Http.byte a (lo + 1) == 0x2f then
+    let e := refFindByte a 0x2f (lo + 2) hi
+    refAuthority a (lo + 2) e && Http.uriChars Http.pathLo Http.pathHi a e hi
+  else Http.uriChars Http.pathLo Http.pathHi a lo hi
+
+def refOtherScheme (a : ByteArray) (lo hi : Nat) : Bool :=
+  let c := refFindByte a 0x3a lo hi
+  c < hi && lo < c && Http.alpha (Http.byte a lo) && Http.allIn Http.schemeLo Http.schemeHi a lo c &&
+    !Http.eqCI a lo c Http.kHttp && !Http.eqCI a lo c Http.kHttps && refHierPart a (c + 1) hi
+
+def refAbsolutePath (a : ByteArray) (lo hi : Nat) : Option (Nat × Nat) :=
+  let s := if lo + 7 ≤ hi && Http.eqCI a lo (lo + 7) Http.kHttpSlashes then lo + 7
+    else if lo + 8 ≤ hi && Http.eqCI a lo (lo + 8) Http.kHttpsSlashes then lo + 8 else lo
+  if s == lo then none else
+  let e := refFindByte a 0x2f s hi
+  match refHostEnd a s e with
+  | some h => if s < h && Http.uriChars Http.pathLo Http.pathHi a e hi then some (e, hi) else none
+  | none => none
+
+def refTarget (a : ByteArray) (lo hi : Nat) : Option (Nat × Nat) :=
+  let q := refFindByte a 0x3f lo hi
+  let query := hi ≤ q || Http.uriChars Http.queryLo Http.queryHi a (q + 1) hi
+  if lo < q && Http.byte a lo == 0x2f then
+    if query && Http.uriChars Http.pathLo Http.pathHi a lo q then some (lo, q) else none
+  else match (if query then refAbsolutePath a lo q else none) with
+    | some p => some p
+    | none =>
+      if (hi == lo + 1 && Http.byte a lo == 0x2a) ||
+          (match refHostEnd a lo hi with | some h => h < hi | none => false) ||
+          (query && refOtherScheme a lo q) then some (lo, lo) else none
+
+def refFinish (a : ByteArray) : Http.Scan → Http.Parse
+  | .incomplete => .incomplete
+  | .bad st => .bad st
+  | .head i0 m t minor he f =>
+    if f.coding || f.lenBad || f.auths > 1 then .bad 400 else
+    if !(if f.hosts == 0 then minor == 0 else f.hosts == 1 && refHostOk a f.hostLo f.hostHi) then .bad 400 else
+    match refTarget a (m + 1) t with
+    | none => .bad 400
+    | some (pathLo, pathHi) =>
+      let len := if f.hasLen then Http.lengthOf a f.lenLo f.lenHi else 0
+      if len > Http.maxBody then .bad 413 else
+      let bodyLo := he + 4
+      if bodyLo + len > a.size then .incomplete else
+      let head := Http.eqAt a i0 m Http.mHead
+      let method :=
+        if head || Http.eqAt a i0 m Http.mGet then Http.Method.get
+        else if Http.eqAt a i0 m Http.mPost then Http.Method.post else Http.Method.other
+      .ok { method, pathLo, pathHi, hasAuth := f.auths == 1, authLo := f.authLo, authHi := f.authHi, bodyLo,
+            bodyHi := bodyLo + len, close := f.close || (minor == 0 && !f.keepAlive), next := bodyLo + len, head }
+
+def refParse (a : ByteArray) (pos : Nat) : Http.Parse := refFinish a (refScan a pos)
+
+theorem refIpv6_eq : @Http.ipv6 = @refIpv6 := by
+  funext a lo hi
+  simp only [Http.ipv6, refIpv6, Http.groups, refGroups, refGroupsGo_eq]
+  rfl
+
+theorem refHostEnd_eq : @Http.hostEnd = @refHostEnd := by
+  funext a lo hi
+  simp only [Http.hostEnd, refHostEnd, Http.ipLiteral, refIpLiteral, refIpv6_eq]
+  rfl
+
+theorem refFinish_eq : @Http.finish = @refFinish := by
+  funext a s
+  simp only [Http.finish, refFinish, Http.hostOk, refHostOk, Http.target, refTarget, Http.absolutePath,
+    refAbsolutePath, Http.otherScheme, refOtherScheme, Http.hierPart, refHierPart, Http.authority, refAuthority,
+    Http.hostOk, refHostEnd_eq]
+  rfl
+
+example : @Http.parse = @refParse := by
+  funext a pos
+  simp only [Http.parse, refParse, refFinish_eq, refScan_eq]
 
 /-! JSON input: `Json.decodeString` and `Json.parseTop` with the reference byte operations. -/
 
@@ -238,6 +386,7 @@ theorem refDecodeGo_eq (a : ByteArray) (hi : Nat) :
   | succ f ih => intro i out; simp only [Json.decodeString.go, refDecodeGo, ih]; rfl
 
 def refDecodeString (a : ByteArray) (lo hi : Nat) : ByteArray :=
+  let hi := min hi a.size
   refDecodeGo a hi (lo + 1) (hi - lo) (ByteArray.emptyWithCapacity (hi - lo))
 
 theorem decodeString_eq_ref : @Json.decodeString = @refDecodeString := by
@@ -396,41 +545,22 @@ def checkLeaves (rounds : Nat) : Except String Unit := Id.run do
   for i in [0:rounds] do
     let (out, g1) := g.bytes 40
     let (src, g2) := if i % 2 == 0 then g1.bytes 300 else g1.plainBytes 300
-    let (lit, g3) := g2.bytes 20
-    let (lo, g4) := g3.bound src.size
-    let (hi, g5) := g4.bound src.size
-    let (n, g6) := g5.nat
-    let (b, g7) := g6.byte
+    let (lo, g3) := g2.bound src.size
+    let (hi, g4) := g3.bound src.size
+    let (n, g5) := g4.nat
+    let (b, g6) := g5.byte
     -- room in `out`: usually little, sometimes enough for a leaf to write in place
-    let (big, g7) := g7.below 4
-    let (spare, g8) := g7.below (if big == 0 then 2400 else 80)
-    g := g8
+    let (big, g6) := g6.below 4
+    let (spare, g7) := g6.below (if big == 0 then 2400 else 80)
+    g := g7
     if appendEsc (fresh out spare) src lo hi != refAppendEsc out src lo hi then
       return .error s!"appendEsc differs (round {i})"
-    if appendLitEsc (fresh out spare) lit src lo hi != refAppendLitEsc out lit src lo hi then
-      return .error s!"appendLitEsc differs (round {i})"
     if appendNat (fresh out spare) n != refAppendNat out n then
       return .error s!"appendNat differs (round {i}, n = {n})"
-    if appendLitNat (fresh out spare) lit n != refAppendLitNat out lit n then
-      return .error s!"appendLitNat differs (round {i})"
-    if appendSlice (fresh out spare) src lo hi != refAppendSlice out src lo hi then
-      return .error s!"appendSlice differs (round {i})"
     if appendAll (fresh out spare) src != refAppendAll out src then
       return .error s!"appendAll differs (round {i})"
     if findByte src b lo hi != refFindByte src b lo hi then
       return .error s!"findByte differs (round {i})"
-    if findHeadEnd src lo hi != refFindHeadEnd src lo hi then
-      return .error s!"findHeadEnd differs (round {i})"
-    if (clear (fresh out spare)).size != 0 then
-      return .error s!"clear differs (round {i})"
-    let (c, g9) := g.bound src.size
-    let (names, g10) := if i % 4 < 2 then g9.bytes 40 else g9.plainBytes 40
-    let (ns, g11) := g10.bound names.size
-    let (ne, g12) := g11.bound names.size
-    let (likes, g13) := g12.nat
-    g := g13
-    if postJsonAfter (fresh out spare) lit n src lo c hi names ns ne likes != refPostJsonAfter out lit n src lo c hi names ns ne likes then
-      return .error s!"postJsonAfter differs (round {i})"
   return .ok ()
 
 /-- A range of an array of `size` bytes: usually in order inside it, sometimes anywhere (empty,
@@ -601,7 +731,21 @@ def checkPostResponses (rounds : Nat) : Except String Unit := Id.run do
       return .error s!"respondPost wrote into a shared output (round {i})"
   return .ok ()
 
-/-! ### HTTP requests -/
+/-! ### HTTP requests
+
+The C `Http.parse` (`runtime/leaves.c`) is checked against its Lean definition with each byte value
+in each place of a request where the parser tells bytes apart, and on random request-like inputs
+(after the C1 package's fuzzers): at the start, at the next request, inside, at and past the end,
+with room after the input, and on their prefixes. It is checked against the frames
+`Feed/Spec/Http.lean` gives a list of inputs, examples of the rules of RFC 9112 and RFC 9110 that it
+follows and of each choice listed there (read off the specification, and computed by an executable
+reading of it written apart from the parser), at the start of the input and after other bytes.
+These compare the C with frames read off the specification; the Lean definition computes the
+specification's frames (`Http.parse_view`), so on the random inputs the comparisons with it compare
+the C with the specification too. On those it is also checked against itself: a prefix of an input
+reads as a wait or as the whole input does (`Spec.Http.frame_append`; every prefix of an input of
+up to 2,048 bytes, those of `prefixLengths` of a longer one), and the input reads the same after
+other bytes. -/
 
 def parseEq : Http.Parse → Http.Parse → Bool
   | .incomplete, .incomplete => true
@@ -609,115 +753,651 @@ def parseEq : Http.Parse → Http.Parse → Bool
   | .ok r, .ok q =>
     r.method == q.method && r.pathLo == q.pathLo && r.pathHi == q.pathHi && r.hasAuth == q.hasAuth &&
     r.authLo == q.authLo && r.authHi == q.authHi && r.bodyLo == q.bodyLo && r.bodyHi == q.bodyHi &&
-    r.close == q.close && r.next == q.next
+    r.close == q.close && r.next == q.next && r.head == q.head
   | _, _ => false
 
-def Rng.pick (g : Rng) (xs : Array String) : String × Rng :=
+/-- A parse of the input after `d` other bytes, as without them: the request's positions `d` lower. -/
+def unshift (d : Nat) : Http.Parse → Http.Parse
+  | .ok r =>
+    .ok { r with
+      pathLo := r.pathLo - d, pathHi := r.pathHi - d, authLo := r.authLo - d, authHi := r.authHi - d,
+      bodyLo := r.bodyLo - d, bodyHi := r.bodyHi - d, next := r.next - d }
+  | p => p
+
+/-- A frame as the examples write it: method, HEAD, path, Authorization value, content, close, and
+the length of the request. -/
+inductive Want where
+  | wait
+  | bad (status : Nat)
+  | ok (method : Http.Method) (head : Bool) (path : String) (auth : Option String) (body : String) (close : Bool)
+      (len : Nat)
+
+def rep (n : Nat) (s : String) : String := String.join (List.replicate n s)
+
+/-- The inputs and their frames (`Spec.Http.frame`). -/
+def httpExamples : Array (String × String × Want) := #[
+  ("a request", "GET /feed HTTP/1.1\r\nHost: x\r\n\r\n", .ok .get false "/feed" none "" false 31),
+  ("no Host in HTTP/1.1", "GET /feed HTTP/1.1\r\n\r\n", .bad 400),
+  ("no Host in HTTP/1.0, which closes", "GET /feed HTTP/1.0\r\n\r\n", .ok .get false "/feed" none "" true 22),
+  ("HTTP/1.0 with a bad Host", "GET /feed HTTP/1.0\r\nHost: a b\r\n\r\n", .bad 400),
+  ("HTTP/1.0 keep-alive", "GET /feed HTTP/1.0\r\nConnection: keep-alive\r\n\r\n",
+    .ok .get false "/feed" none "" false 46),
+  ("HTTP/1.0 keep-alive and close", "GET /feed HTTP/1.0\r\nConnection: keep-alive, close\r\n\r\n",
+    .ok .get false "/feed" none "" true 53),
+  ("close among options, any case", "GET /feed HTTP/1.1\r\nHost: x\r\nConnection: Upgrade, CLOSE\r\n\r\n",
+    .ok .get false "/feed" none "" true 59),
+  ("two Host lines", "GET /feed HTTP/1.1\r\nHost: x\r\nHost: x\r\n\r\n", .bad 400),
+  ("Host: a b", "GET /feed HTTP/1.1\r\nHost: a b\r\n\r\n", .bad 400),
+  ("Host: [::1]:3000", "GET /feed HTTP/1.1\r\nHost: [::1]:3000\r\n\r\n", .ok .get false "/feed" none "" false 40),
+  ("Host: [v1.x]", "GET /feed HTTP/1.1\r\nHost: [v1.x]\r\n\r\n", .ok .get false "/feed" none "" false 36),
+  ("Host: [::ffff:1.2.3.4]", "GET /feed HTTP/1.1\r\nHost: [::ffff:1.2.3.4]\r\n\r\n",
+    .ok .get false "/feed" none "" false 46),
+  ("Host: [1::2::3]", "GET /feed HTTP/1.1\r\nHost: [1::2::3]\r\n\r\n", .bad 400),
+  ("Host: [1:2:3:4:5:6::1.2.3.4]", "GET /feed HTTP/1.1\r\nHost: [1:2:3:4:5:6::1.2.3.4]\r\n\r\n", .bad 400),
+  ("Host: u@h", "GET /feed HTTP/1.1\r\nHost: u@h\r\n\r\n", .bad 400),
+  ("an empty Host", "GET /feed HTTP/1.1\r\nHost:\r\n\r\n", .ok .get false "/feed" none "" false 29),
+  ("Host: sub-delims and unreserved", "GET /feed HTTP/1.1\r\nHost: a!$&'()*+,;=-._~b\r\n\r\n",
+    .ok .get false "/feed" none "" false 47),
+  ("Host: a percent-encoding", "GET /feed HTTP/1.1\r\nHost: a%2Fb\r\n\r\n", .ok .get false "/feed" none "" false 35),
+  ("Host: a bad percent-encoding", "GET /feed HTTP/1.1\r\nHost: a%zz\r\n\r\n", .bad 400),
+  ("Host: an empty port", "GET /feed HTTP/1.1\r\nHost: x:\r\n\r\n", .ok .get false "/feed" none "" false 32),
+  ("Host: a port with a letter", "GET /feed HTTP/1.1\r\nHost: x:8a\r\n\r\n", .bad 400),
+  ("Host: two ports", "GET /feed HTTP/1.1\r\nHost: x:80:80\r\n\r\n", .bad 400),
+  ("Host: eight groups", "GET /feed HTTP/1.1\r\nHost: [1:2:3:4:5:6:7:8]\r\n\r\n",
+    .ok .get false "/feed" none "" false 47),
+  ("Host: seven groups", "GET /feed HTTP/1.1\r\nHost: [1:2:3:4:5:6:7]\r\n\r\n", .bad 400),
+  ("Host: nine groups", "GET /feed HTTP/1.1\r\nHost: [1:2:3:4:5:6:7:8:9]\r\n\r\n", .bad 400),
+  ("Host: six groups and an IPv4 address", "GET /feed HTTP/1.1\r\nHost: [1:2:3:4:5:6:1.2.3.4]\r\n\r\n",
+    .ok .get false "/feed" none "" false 51),
+  ("Host: [::]", "GET /feed HTTP/1.1\r\nHost: [::]\r\n\r\n", .ok .get false "/feed" none "" false 34),
+  ("Host: seven groups and ::", "GET /feed HTTP/1.1\r\nHost: [1:2:3:4:5:6:7::]\r\n\r\n",
+    .ok .get false "/feed" none "" false 47),
+  ("Host: eight groups around ::", "GET /feed HTTP/1.1\r\nHost: [1:2:3:4:5:6:7::8]\r\n\r\n", .bad 400),
+  ("Host: an IPv4 address before ::", "GET /feed HTTP/1.1\r\nHost: [1.2.3.4::]\r\n\r\n", .bad 400),
+  ("Host: [::1.2.3.4]", "GET /feed HTTP/1.1\r\nHost: [::1.2.3.4]\r\n\r\n", .ok .get false "/feed" none "" false 41),
+  ("Host: a group of five digits", "GET /feed HTTP/1.1\r\nHost: [12345::]\r\n\r\n", .bad 400),
+  ("Host: a group that is not hex", "GET /feed HTTP/1.1\r\nHost: [g::]\r\n\r\n", .bad 400),
+  ("Host: a group that is not hex, then a colon", "GET /feed HTTP/1.1\r\nHost: [g:1::]\r\n\r\n", .bad 400),
+  ("Host: groups in both cases", "GET /feed HTTP/1.1\r\nHost: [ABCD:abcd::]\r\n\r\n",
+    .ok .get false "/feed" none "" false 43),
+  ("Host: an octet with a leading zero", "GET /feed HTTP/1.1\r\nHost: [::1.2.3.04]\r\n\r\n", .bad 400),
+  ("Host: an octet 00", "GET /feed HTTP/1.1\r\nHost: [::1.2.3.00]\r\n\r\n", .bad 400),
+  ("Host: an octet of 256", "GET /feed HTTP/1.1\r\nHost: [::1.2.3.256]\r\n\r\n", .bad 400),
+  ("Host: octets of 255 and 0", "GET /feed HTTP/1.1\r\nHost: [::255.0.0.255]\r\n\r\n",
+    .ok .get false "/feed" none "" false 45),
+  ("Host: an octet of four digits", "GET /feed HTTP/1.1\r\nHost: [::1.2.3.0004]\r\n\r\n", .bad 400),
+  ("Host: three octets", "GET /feed HTTP/1.1\r\nHost: [::1.2.3]\r\n\r\n", .bad 400),
+  ("Host: five octets", "GET /feed HTTP/1.1\r\nHost: [::1.2.3.4.5]\r\n\r\n", .bad 400),
+  ("Host: an empty octet", "GET /feed HTTP/1.1\r\nHost: [::1..3.4]\r\n\r\n", .bad 400),
+  ("Host: [V1.x]", "GET /feed HTTP/1.1\r\nHost: [V1.x]\r\n\r\n", .ok .get false "/feed" none "" false 36),
+  ("Host: IPvFuture without hex", "GET /feed HTTP/1.1\r\nHost: [v.x]\r\n\r\n", .bad 400),
+  ("Host: IPvFuture with nothing after the dot", "GET /feed HTTP/1.1\r\nHost: [v1.]\r\n\r\n", .bad 400),
+  ("Host: IPvFuture with no dot", "GET /feed HTTP/1.1\r\nHost: [v1]\r\n\r\n", .bad 400),
+  ("Host: IPvFuture that is not hex", "GET /feed HTTP/1.1\r\nHost: [vg.x]\r\n\r\n", .bad 400),
+  ("Host: IPvFuture with a colon", "GET /feed HTTP/1.1\r\nHost: [v1.a:b]\r\n\r\n",
+    .ok .get false "/feed" none "" false 38),
+  ("Host: IPvFuture with a slash", "GET /feed HTTP/1.1\r\nHost: [v1.a/b]\r\n\r\n", .bad 400),
+  ("Host: bytes after the bracket", "GET /feed HTTP/1.1\r\nHost: [::1]x\r\n\r\n", .bad 400),
+  ("Host: no closing bracket", "GET /feed HTTP/1.1\r\nHost: [::1\r\n\r\n", .bad 400),
+  ("Host: []", "GET /feed HTTP/1.1\r\nHost: []\r\n\r\n", .bad 400),
+  ("Host: a bracket in a reg-name", "GET /feed HTTP/1.1\r\nHost: a[::1]\r\n\r\n", .bad 400),
+  ("whitespace before the colon", "POST /posts HTTP/1.1\r\nHost: x\r\nContent-Length : 5\r\n\r\nhello", .bad 400),
+  ("obs-fold", "GET /feed HTTP/1.1\r\nHost: x\r\n x:y\r\n\r\n", .bad 400),
+  ("a bare CR", "GET /feed HTTP/1.1\r\nHost: x\r\r\nConnection: close\r\n\r\n", .bad 400),
+  ("a bare LF", "GET /feed HTTP/1.1\r\nHost: x\nY: z\r\n\r\n", .bad 400),
+  ("NUL in a value", "GET /feed HTTP/1.1\r\nHost: x\r\nConnection: close\x00\r\n\r\n", .bad 400),
+  ("DEL in a value", "GET /feed HTTP/1.1\r\nHost: x\r\nX: a\x7fb\r\n\r\n", .bad 400),
+  ("obs-text in a value", "GET /feed HTTP/1.1\r\nHost: x\r\nX: café\r\n\r\n", .ok .get false "/feed" none "" false 41),
+  ("HTAB inside a value", "GET /feed HTTP/1.1\r\nHost: x\r\nX: a\tb\r\n\r\n", .ok .get false "/feed" none "" false 39),
+  ("a field name of tchars", "GET /feed HTTP/1.1\r\nHost: x\r\n!#$%&'*+-.^_`|~: v\r\n\r\n",
+    .ok .get false "/feed" none "" false 51),
+  ("a field name with (", "GET /feed HTTP/1.1\r\nHost: x\r\nX(: v\r\n\r\n", .bad 400),
+  ("an empty field name", "GET /feed HTTP/1.1\r\nHost: x\r\n: v\r\n\r\n", .bad 400),
+  ("Content-Length with 16 digits", "POST /posts HTTP/1.1\r\nHost: x\r\nContent-Length: 0000000000000005\r\n\r\nhello",
+    .ok .post false "/posts" none "hello" false 72),
+  ("Content-Length 5 and 05", "POST /posts HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\nContent-Length: 05\r\n\r\n" ++
+    "hello",
+    .ok .post false "/posts" none "hello" false 77),
+  ("Content-Length 5 and 6", "POST /posts HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\nContent-Length: 6\r\n\r\nhello",
+    .bad 400),
+  ("Content-Length 5, 5", "POST /posts HTTP/1.1\r\nHost: x\r\nContent-Length: 5, 5\r\n\r\nhello", .bad 400),
+  ("Content-Length over maxBody", "POST /posts HTTP/1.1\r\nHost: x\r\nContent-Length: 16385\r\n\r\n", .bad 413),
+  ("Content-Length maxBody, no content yet", "POST /posts HTTP/1.1\r\nHost: x\r\nContent-Length: 16384\r\n\r\n", .wait),
+  ("Content-Length of 23 digits, twice", "POST /posts HTTP/1.1\r\nHost: x\r\n" ++
+    "Content-Length: 99999999999999999999999\r\nContent-Length: 099999999999999999999999\r\n\r\n",
+    .bad 413),
+  ("two Content-Length of 23 digits that differ", "POST /posts HTTP/1.1\r\nHost: x\r\n" ++
+    "Content-Length: 99999999999999999999999\r\nContent-Length: 99999999999999999999998\r\n\r\n",
+    .bad 400),
+  ("Content-Length 5a", "POST /posts HTTP/1.1\r\nHost: x\r\nContent-Length: 5a\r\n\r\nhello", .bad 400),
+  ("an empty Content-Length", "POST /posts HTTP/1.1\r\nHost: x\r\nContent-Length:\r\n\r\nhello", .bad 400),
+  ("absolute-form", "GET http://127.0.0.1:3000/feed HTTP/1.1\r\nHost: 127.0.0.1:3000\r\n\r\n",
+    .ok .get false "/feed" none "" false 65),
+  ("absolute-form https with a query", "GET https://x/posts/1?a=b HTTP/1.1\r\nHost: x\r\n\r\n",
+    .ok .get false "/posts/1" none "" false 47),
+  ("absolute-form, the scheme in capitals", "GET HTTP://X/feed HTTP/1.1\r\nHost: x\r\n\r\n",
+    .ok .get false "/feed" none "" false 39),
+  ("absolute-form with userinfo", "GET http://u@h/feed HTTP/1.1\r\nHost: x\r\n\r\n", .bad 400),
+  ("absolute-form with an empty host", "GET http:///feed HTTP/1.1\r\nHost: x\r\n\r\n", .bad 400),
+  ("absolute-form with no path", "GET http://x HTTP/1.1\r\nHost: x\r\n\r\n", .ok .get false "" none "" false 34),
+  ("absolute-form with a query and no path", "GET http://x?a=b HTTP/1.1\r\nHost: x\r\n\r\n",
+    .ok .get false "" none "" false 38),
+  ("absolute-form with an IP-literal", "GET http://[::1]:3000/feed HTTP/1.1\r\nHost: x\r\n\r\n",
+    .ok .get false "/feed" none "" false 48),
+  ("absolute-form with an empty port", "GET http://x:/feed HTTP/1.1\r\nHost: x\r\n\r\n",
+    .ok .get false "/feed" none "" false 40),
+  ("absolute-form with a bad port", "GET http://x:a/feed HTTP/1.1\r\nHost: x\r\n\r\n", .bad 400),
+  ("absolute-form with a bad host", "GET http://[::1/feed HTTP/1.1\r\nHost: x\r\n\r\n", .bad 400),
+  ("absolute-form with a fragment", "GET http://x/feed#f HTTP/1.1\r\nHost: x\r\n\r\n", .bad 400),
+  ("absolute-form with a bad path", "GET http://x/fe{d HTTP/1.1\r\nHost: x\r\n\r\n", .bad 400),
+  ("https without //", "GET https:x HTTP/1.1\r\nHost: x\r\n\r\n", .bad 400),
+  ("httpx is another scheme", "GET httpx://x/feed HTTP/1.1\r\nHost: x\r\n\r\n", .ok .get false "" none "" false 40),
+  ("another scheme", "GET ftp://x/feed HTTP/1.1\r\nHost: x\r\n\r\n", .ok .get false "" none "" false 38),
+  ("asterisk-form", "OPTIONS * HTTP/1.1\r\nHost: x\r\n\r\n", .ok .other false "" none "" false 31),
+  ("authority-form", "CONNECT x:80 HTTP/1.1\r\nHost: x\r\n\r\n", .ok .other false "" none "" false 34),
+  ("foo:[", "GET foo:[ HTTP/1.1\r\nHost: x\r\n\r\n", .bad 400),
+  ("foo://[::1", "GET foo://[::1 HTTP/1.1\r\nHost: x\r\n\r\n", .bad 400),
+  ("**", "GET ** HTTP/1.1\r\nHost: x\r\n\r\n", .bad 400),
+  ("authority-form with an empty port", "CONNECT x: HTTP/1.1\r\nHost: x\r\n\r\n", .ok .other false "" none "" false 32),
+  ("authority-form with an IP-literal", "CONNECT [::1]:80 HTTP/1.1\r\nHost: x\r\n\r\n",
+    .ok .other false "" none "" false 38),
+  ("a host without a port", "CONNECT x HTTP/1.1\r\nHost: x\r\n\r\n", .bad 400),
+  ("another scheme with a path", "GET mailto:a@b HTTP/1.1\r\nHost: x\r\n\r\n", .ok .get false "" none "" false 36),
+  ("a scheme with + - .", "GET a+b.c-d:x HTTP/1.1\r\nHost: x\r\n\r\n", .ok .get false "" none "" false 35),
+  ("a scheme that starts with a digit", "GET 1a:x HTTP/1.1\r\nHost: x\r\n\r\n", .bad 400),
+  ("another scheme with an empty path", "GET foo: HTTP/1.1\r\nHost: x\r\n\r\n", .ok .get false "" none "" false 30),
+  ("another scheme with a query", "GET foo:?q HTTP/1.1\r\nHost: x\r\n\r\n", .ok .get false "" none "" false 32),
+  ("another scheme with userinfo", "GET foo://u@h/p HTTP/1.1\r\nHost: x\r\n\r\n", .ok .get false "" none "" false 37),
+  ("another scheme with a colon in the userinfo", "GET foo://u:p@h/x HTTP/1.1\r\nHost: x\r\n\r\n",
+    .ok .get false "" none "" false 39),
+  ("another scheme with a bad userinfo", "GET foo://u[@h/p HTTP/1.1\r\nHost: x\r\n\r\n", .bad 400),
+  ("another scheme with a bad path after its authority", "GET foo://h/a{b HTTP/1.1\r\nHost: x\r\n\r\n", .bad 400),
+  ("another scheme with a bad path", "GET foo:a{b HTTP/1.1\r\nHost: x\r\n\r\n", .bad 400),
+  ("two Authorization lines", "GET /feed HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer a\r\n" ++
+    "Authorization: Bearer b\r\n\r\n",
+    .bad 400),
+  ("Authorization with OWS", "POST /posts HTTP/1.1\r\nHost: x\r\nAuthorization:  Bearer abc  \r\n\r\n",
+    .ok .post false "/posts" (some "Bearer abc") "" false 63),
+  ("HEAD", "HEAD /feed HTTP/1.1\r\nHost: x\r\n\r\n", .ok .get true "/feed" none "" false 32),
+  ("leading empty lines", "\r\n\r\nGET /feed HTTP/1.1\r\nHost: x\r\n\r\n", .ok .get false "/feed" none "" false 35),
+  ("HTTP/1.2", "GET /feed HTTP/1.2\r\nHost: x\r\n\r\n", .ok .get false "/feed" none "" false 31),
+  ("HTTP/1.2 without Host", "GET /feed HTTP/1.2\r\n\r\n", .bad 400),
+  ("HTTP/2.0", "GET /feed HTTP/2.0\r\nHost: x\r\n\r\n", .bad 400),
+  ("http/1.1", "GET /feed http/1.1\r\nHost: x\r\n\r\n", .bad 400),
+  ("HTTP/1.x", "GET /feed HTTP/1.x\r\nHost: x\r\n\r\n", .bad 400),
+  ("a space after the version", "GET /feed HTTP/1.1 \r\nHost: x\r\n\r\n", .bad 400),
+  ("Transfer-Encoding", "POST /posts HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n",
+    .bad 400),
+  ("a method that is not a token", "G(T /feed HTTP/1.1\r\nHost: x\r\n\r\n", .bad 400),
+  ("a method in lowercase", "get /feed HTTP/1.1\r\nHost: x\r\n\r\n", .ok .other false "/feed" none "" false 31),
+  ("post in lowercase", "post /posts HTTP/1.1\r\nHost: x\r\n\r\n", .ok .other false "/posts" none "" false 33),
+  ("a fragment", "GET /feed#x HTTP/1.1\r\nHost: x\r\n\r\n", .bad 400),
+  ("a byte above 0x7f in the target", "GET /caf\xc3\xa9 HTTP/1.1\r\nHost: x\r\n\r\n", .bad 400),
+  ("HTAB in the target", "GET /fe\ted HTTP/1.1\r\nHost: x\r\n\r\n", .bad 400),
+  ("an empty target", "GET  HTTP/1.1\r\nHost: x\r\n\r\n", .bad 400),
+  ("a query only", "GET ? HTTP/1.1\r\nHost: x\r\n\r\n", .bad 400),
+  ("a query", "GET /feed?x=1 HTTP/1.1\r\nHost: x\r\n\r\n", .ok .get false "/feed" none "" false 35),
+  ("a bad percent-encoding", "GET /feed?%zz HTTP/1.1\r\nHost: x\r\n\r\n", .bad 400),
+  ("a percent-encoding", "GET /posts/%31 HTTP/1.1\r\nHost: x\r\n\r\n", .ok .get false "/posts/%31" none "" false 36),
+  ("a target with sub-delims, : and @", "GET /a:b@c;d=e!$&'()*+, HTTP/1.1\r\nHost: x\r\n\r\n",
+    .ok .get false "/a:b@c;d=e!$&'()*+," none "" false 45),
+  ("a target with a cut percent-encoding", "GET /a%2 HTTP/1.1\r\nHost: x\r\n\r\n", .bad 400),
+  ("a target with {", "GET /a{b} HTTP/1.1\r\nHost: x\r\n\r\n", .bad 400),
+  ("a query with / ? : @", "GET /feed?a/b?c:@ HTTP/1.1\r\nHost: x\r\n\r\n", .ok .get false "/feed" none "" false 39),
+  ("a query with a cut percent-encoding", "GET /feed?a%2 HTTP/1.1\r\nHost: x\r\n\r\n", .bad 400),
+  ("an empty query", "GET /feed? HTTP/1.1\r\nHost: x\r\n\r\n", .ok .get false "/feed" none "" false 32),
+  ("no empty line yet", "GET /feed HTTP/1.1\r\nHost: x\r\n", .wait),
+  ("three bytes of the four", "GET /feed HTTP/1.1\r\nHost: x\r\n\r", .wait),
+  ("content not all there", "POST /posts HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n\r\nhel", .wait),
+  ("Expect: 100-continue waits for the content", "POST /posts HTTP/1.1\r\nHost: x\r\nExpect: 100-continue\r\n" ++
+    "Content-Length: 12\r\n\r\n",
+    .wait),
+  ("two requests", "GET /feed HTTP/1.1\r\nHost: x\r\n\r\nGET /health HTTP/1.1\r\n",
+    .ok .get false "/feed" none "" false 31),
+  ("HEAD with content too large", "HEAD /feed HTTP/1.1\r\nHost: x\r\nContent-Length: 20000\r\n\r\n", .bad 413),
+  ("nothing", "", .wait),
+  ("an empty line", "\r\n", .wait),
+  ("a 17,000-byte target", "GET /" ++ rep 16999 "a" ++ " HTTP/1.1\r\nHost: x\r\n\r\n", .bad 414),
+  ("a target of maxTarget bytes", "GET /" ++ rep 8191 "a" ++ " HTTP/1.1\r\nHost: x\r\n\r\n",
+    .ok .get false ("/" ++ rep 8191 "a") none "" false 8218),
+  ("a target of maxTarget + 1 bytes", "GET /" ++ rep 8192 "a" ++ " HTTP/1.1\r\nHost: x\r\n\r\n", .bad 414),
+  ("maxTarget + 1 bytes of target so far", "GET /" ++ rep 8192 "a", .bad 414),
+  ("maxTarget bytes of target so far", "GET /" ++ rep 8191 "a", .wait),
+  ("a LF among maxTarget + 1 bytes of target", "GET /" ++ rep 100 "a" ++ "\n" ++ rep 8200 "a", .wait),
+  ("a CR among maxTarget + 1 bytes of target", "GET /" ++ rep 100 "a" ++ "\r" ++ rep 8200 "a", .wait),
+  ("6,000 empty lines, then a target", rep 6000 "\r\n" ++ "GET /" ++ rep 4383 "a", .bad 431),
+  ("6,000 empty lines, then a longer target", rep 6000 "\r\n" ++ "GET /" ++ rep 8192 "a", .bad 431),
+  ("a long method, then a target", rep 9000 "A" ++ " /" ++ rep 7386 "a", .bad 431),
+  ("a long method, then a longer target", rep 9000 "A" ++ " /" ++ rep 8192 "a", .bad 431),
+  ("a head of maxHead + 4 bytes", "GET /feed HTTP/1.1\r\nHost: x\r\nX: " ++ rep 16352 "a" ++ "\r\n\r\n",
+    .ok .get false "/feed" none "" false 16388),
+  ("the same, one byte short", "GET /feed HTTP/1.1\r\nHost: x\r\nX: " ++ rep 16352 "a" ++ "\r\n\r", .wait),
+  ("the same, three bytes short", "GET /feed HTTP/1.1\r\nHost: x\r\nX: " ++ rep 16352 "a" ++ "\r", .wait),
+  ("a head of maxHead + 5 bytes", "GET /feed HTTP/1.1\r\nHost: x\r\nX: " ++ rep 16353 "a" ++ "\r\n\r\n", .bad 431),
+  ("maxHead + 4 bytes without the end of a head", "GET /feed HTTP/1.1\r\nHost: x\r\nX: " ++ rep 16356 "a", .bad 431),
+  ("maxHead + 3 bytes without the end of a head", "GET /feed HTTP/1.1\r\nHost: x\r\nX: " ++ rep 16355 "a", .wait)]
+
+/-- Whether the parse `p` of `a` at `pos` is the frame `w`. -/
+def frameIs (a : ByteArray) (pos : Nat) (p : Http.Parse) (w : Want) : Bool :=
+  match p, w with
+  | .incomplete, .wait => true
+  | .bad s, .bad t => s == t
+  | .ok r, .ok m head path auth body close len =>
+    r.method == m && r.head == head && slice a r.pathLo r.pathHi == bs path.toUTF8 &&
+      (if r.hasAuth then some (slice a r.authLo r.authHi) else none) == auth.map (bs ·.toUTF8) &&
+      slice a r.bodyLo r.bodyHi == bs body.toUTF8 && r.close == close && r.next == pos + len && r.bodyHi == r.next
+  | _, _ => false
+
+def checkHttpExamples : Except String Unit := Id.run do
+  for (desc, s, w) in httpExamples do
+    let a := s.toUTF8
+    if !frameIs a 0 (Http.parse a 0) w then
+      return .error s!"Http.parse differs from the specification: {desc}"
+    let b := "GET /\r\n".toUTF8 ++ a
+    if !frameIs b 7 (Http.parse b 7) w then
+      return .error s!"Http.parse differs from the specification after other bytes: {desc}"
+  return .ok ()
+
+def Rng.pick {α : Type} [Inhabited α] (g : Rng) (xs : Array α) : α × Rng :=
   let (k, g) := g.below xs.size
   (xs[k]!, g)
 
-def reqMethods : Array String := #["GET", "GET", "POST", "POST", "PUT", "get", "", "GET ", "POSTS", "G"]
-def reqTargets : Array String :=
-  #["/feed", "/posts/12", "/posts", "/posts/7/like", "/health", "/x?y=1", "/a?", "?", "/a b", "", "/posts/1?x?y"]
-def reqVersions : Array String :=
-  #["HTTP/1.1", "HTTP/1.1", "HTTP/1.1", "HTTP/1.0", "HTTP/1.0", "HTTP/2", "http/1.1", "HTTP/1.1 ", " HTTP/1.1", "HTTP/1."]
-def reqHeads : Array String := #[
-  "Host: 10.0.0.1:3000", "User-Agent: k6/1.3.0 (https://k6.io/)", "Content-Length: 0", "Content-Length: 5",
-  "content-length:12", "CONTENT-LENGTH:  3 \t", "Content-Length: 999999999999999", "Content-Length: 1234567890123456",
-  "Content-Length: 1048577", "Content-Length: 1048576", "Content-Length:", "Content-Length: 5a", "Content-Length: -1",
-  "Content-Length : 5", "Content-Length: 05", "Authorization: Bearer abc.def.ghi", "authorization:   tok  ",
-  "AUTHORIZATION:", "Authorization:\t\t", "Connection: close", "Connection: keep-alive", "connection: Keep-Alive, Upgrade",
-  "Connection: ,close ,", "Connection: closed", "Connection:  CLOSE\t,keep-alive", "Connection: ,,", "Connection:",
-  "Transfer-Encoding: chunked", "transfer-encoding:", "NoColonLine", ": empty name", "X-Thing:\tvalue\t",
-  "Content-Type: application/json", "X: a:b:c", "", " Content-Length: 5", "Connection : close"]
-def reqSeps : Array String := #["\r\n", "\r\n", "\r\n", "\r\n", "\r\n", "\r\n", "\r\n", "\n", "\r", "\r\r\n"]
-/-- Header lines that leave a request well formed. -/
-def reqGoodHeads : Array String := #["Host: x", "Authorization: Bearer abc.def.ghi", "Connection: close", "Connection: keep-alive",
-  "connection: Keep-Alive, Upgrade", "Connection: ,close ,", "authorization:   tok  ", "Content-Length: 3", "X-Thing:\tvalue\t"]
-def reqSpecial : Array UInt8 := "\r\n :,?\t/HhCc0123456789".toUTF8.data
+/-- `true` `p` times in a hundred. -/
+def Rng.chance (g : Rng) (p : Nat) : Bool × Rng :=
+  let (k, g) := g.below 100
+  (k < p, g)
 
-/-- A request-like text: mostly well formed, with the header lines and values the parser looks
-at, sometimes broken by a few changed bytes or cut short; sometimes two in a row; sometimes a head
-too large. -/
-def Rng.request (g : Rng) : ByteArray × Rng := Id.run do
+/-- `n` characters of `cs`. -/
+def Rng.chars (g : Rng) (cs : Array Char) (n : Nat) : String × Rng := Id.run do
   let mut g := g
   let mut s := ""
-  let (reqs, g0) := g.below 3
-  -- half of the texts are made of the well-formed parts only
-  let (wf, g0) := g0.below 2
-  g := g0
-  let pick (g : Rng) (all : Array String) (good : Nat) : String × Rng :=
-    if wf == 0 then g.pick (all.extract 0 good) else g.pick all
-  for _ in [0:reqs + 1] do
-    let (m, g1) := pick g reqMethods 5
-    let (t, g2) := pick g1 reqTargets 9
-    let (v, g3) := pick g2 reqVersions 5
-    let (sep, g4) := pick g3 reqSeps 7
-    let (nh, g5) := g4.below 7
-    g := g5
-    s := s ++ m ++ " " ++ t ++ " " ++ v ++ sep
-    for _ in [0:nh] do
-      let (h, g1) := if wf == 0 then g.pick reqGoodHeads else g.pick reqHeads
-      let (sep, g2) := pick g1 reqSeps 7
-      s := s ++ h ++ sep
-      g := g2
-    let (endKind, g6) := g.below 10
-    let (blen, g7) := g6.below 16
-    g := g7
-    if endKind != 0 then s := s ++ "\r\n"
-    s := s ++ String.ofList (List.replicate blen 'b')
-  let (big, g8) := g.below 60
-  g := g8
-  if big == 0 then s := "GET /feed HTTP/1.1\r\nX: " ++ String.ofList (List.replicate 16400 'a') ++ "\r\n\r\n"
-  if big == 1 then s := "GET /feed HTTP/1.1\r\nX: " ++ String.ofList (List.replicate 16370 'a') ++ "\r\n\r\n"
-  if big == 2 then s := String.ofList (List.replicate 16390 'a')
-  let mut a := s.toUTF8
-  -- a few changed bytes
-  let (muts, g9) := g.below 4
-  g := g9
-  for _ in [0:if muts == 0 then 1 else if muts == 1 then 3 else 0] do
-    let (p, g1) := g.below a.size
-    let (k, g2) := g1.below 4
-    let (x, g3) := g2.next
-    g := g3
-    if a.size > 0 then
-      a := a.set! p (if k == 0 then x.toUInt8 else reqSpecial[x.toNat % reqSpecial.size]!)
-  -- sometimes cut short
-  let (cut, g10) := g.below 6
-  let (at_, g11) := g10.below (a.size + 1)
-  g := g11
-  if cut == 0 then a := a.extract 0 at_
-  return (a, g)
+  for _ in [0:n] do
+    let (c, g') := g.pick cs
+    s := s.push c
+    g := g'
+  return (s, g)
 
-/-- `Http.parse` against its Lean definition, at the start, at the next request, inside, at and
-past the end. -/
+def Rng.shuffle {α : Type} [Inhabited α] (g : Rng) (xs : Array α) : Array α × Rng := Id.run do
+  let mut g := g
+  let mut xs := xs
+  for j in [0:xs.size] do
+    let i := xs.size - 1 - j
+    let (k, g') := g.below (i + 1)
+    g := g'
+    let x := xs[i]!
+    xs := (xs.set! i xs[k]!).set! k x
+  return (xs, g)
+
+/-! The parts of request-like inputs, after the C1 package's fuzzers (`fuzz.py`): methods, Host
+values (the first ten valid), origin-form paths (the first nine valid), schemes, versions, field
+lines and line ends. -/
+
+def reqMethods : Array String := #["GET", "GET", "GET", "GET", "GET", "GET", "POST", "POST", "POST", "POST", "HEAD",
+  "HEAD", "PUT", "get", "", "G(T", "OPTIONS", "CONNECT", "X-Y"]
+def reqHosts : Array String := #["x", "10.0.0.1:3000", "127.0.0.1", "localhost:80", "[::1]", "[::1]:3000",
+  "[1:2:3:4:5:6:7:8]", "[::ffff:1.2.3.4]", "[v1.x]", "[V7.a:b]", "", ":80", "a b", "u@h", "[1::2::3]",
+  "[1:2:3:4:5:6:7:8:9]", "[1:2:3:4:5:6::1.2.3.4]", "[::1", "x:y", "%41%42", "%4", "ex%zz", "1.2.3.256",
+  "[1:2:3:4:5:6:1.2.3.4]", "[::1.2.3.4]", "[1::1.2.3.04]", "[fffff::]", "[v.x]", "[vx.y]", "[v1.]", "h:",
+  "x:12345678901234567890"]
+def reqPaths : Array String := #["/feed", "/health", "/posts", "/posts/12", "/posts/7/like", "/", "/a/b/c",
+  "/x?y=1", "/x?", "/%41", "/%4", "/a%zz", "/a:b@c", "/feed#x", "/caf\xe9", "/a\tb", "/a!$&'()*+,;=", "//x",
+  "/?a?b/c"]
+def reqSchemes : Array String := #["http", "https", "HTTP", "Https", "ftp", "foo", "a+b.c-d", "1ab", "htt", "httpx"]
+def reqVersions : Array String := #["HTTP/1.1", "HTTP/1.1", "HTTP/1.1", "HTTP/1.1", "HTTP/1.1", "HTTP/1.1",
+  "HTTP/1.0", "HTTP/1.0", "HTTP/1.0", "HTTP/1.2", "HTTP/1.9", "HTTP/2.0", "HTTP/0.9", "http/1.1", "HTTP/1.",
+  "HTTP/1.1 ", " HTTP/1.1", "HTTP/11", "HTTP/1.x"]
+def reqSeps : Array String := #["\r\n", "\r\n", "\r\n", "\r\n", "\r\n", "\r\n", "\r\n", "\r\n", "\r\n", "\r\n", "\r\n",
+  "\r\n", "\n", "\r", "\r\r\n", "\r\n\r"]
+/-- Field lines that leave a head valid. -/
+def reqGoodHeads : Array String := #["User-Agent: k6/1.3.0 (https://k6.io/)", "Content-Type: application/json",
+  "Accept: */*", "Connection: close", "Connection: keep-alive", "connection: Keep-Alive, Upgrade",
+  "Connection: ,close ,", "Authorization: Bearer abc.def.ghi", "authorization:   tok  ", "X-Thing:\tvalue\t", "X:",
+  "X: a:b:c", "Expect: 100-continue"]
+/-- What a few bytes are changed to: bytes the scan looks for, NUL, DEL, 0x80 and 0xff. -/
+def reqSpecial : Array UInt8 := "\r\n :,?\t/HhCc0123456789@[]%".toUTF8.data ++ #[0x00, 0x7f, 0x80, 0xff]
+
+/-- Octets of IPv4-like text: from 0 to 1000, with leading zeros, and empty. -/
+def reqOctets : Array String := #["", "0", "00", "01", "1", "9", "10", "99", "100", "199", "200", "249", "250", "255",
+  "256", "299", "300", "1000"]
+
+/-- IPv4-like text: one to five octets joined by dots. -/
+def Rng.ipv4 (g : Rng) : String × Rng := Id.run do
+  let (k, g) := g.pick #[4, 4, 4, 4, 3, 5, 1]
+  let mut g := g
+  let mut s := ""
+  for j in [0:k] do
+    let (o, g') := g.pick reqOctets
+    s := s ++ (if j == 0 then "" else ".") ++ o
+    g := g'
+  return (s, g)
+
+/-- IPv6-like text: up to nine groups of up to five hex digits (or "x") joined by ":", the last one
+sometimes IPv4-like, with one "::" in any place half of the time, rarely a second. -/
+def Rng.ipv6 (g : Rng) : String × Rng := Id.run do
+  let (k, g) := g.below 10
+  let mut g := g
+  let mut parts : Array String := #[]
+  for _ in [0:k] do
+    let (len, g1) := g.pick #[1, 1, 2, 3, 4, 4, 0, 5]
+    let (h, g1) := g1.chars "0123456789abcdefABCDEFx".toList.toArray len
+    parts := parts.push h
+    g := g1
+  let (v4, g1) := g.chance 25
+  let (ip, g1) := g1.ipv4
+  if v4 && k > 0 then parts := parts.set! (k - 1) ip
+  let (dc, g1) := g1.chance 50
+  let (at_, g1) := g1.below (k + 1)
+  let (two, g1) := g1.chance 5
+  let s := if dc then ":".intercalate (parts.toList.take at_) ++ "::" ++ ":".intercalate (parts.toList.drop at_)
+    else ":".intercalate parts.toList
+  return (if two then s ++ "::1" else s, g1)
+
+/-- IPvFuture-like text: "v" (or "V", or neither), up to two hex digits, a dot (mostly), up to
+three characters that userinfo may or may not hold. -/
+def Rng.ipFuture (g : Rng) : String × Rng :=
+  let (v, g) := g.pick #["v", "V", "v", ""]
+  let (k, g) := g.below 3
+  let (hs, g) := g.chars "0123456789aFx".toList.toArray k
+  let (dot, g) := g.chance 85
+  let (k', g) := g.below 4
+  let (rest, g) := g.chars "a1-._~!$&'()*+,;=:%@/".toList.toArray k'
+  (v ++ hs ++ (if dot then "." else "") ++ rest, g)
+
+/-- A Host value, or the host and port of an authority: one of `reqHosts`; an IP-literal of
+IPv6-like or IPvFuture-like text; IPv4-like text; a run of characters that a reg-name may or may not
+hold; then, two times in five, a port of up to five digits, or not digits. -/
+def Rng.host (g : Rng) : String × Rng :=
+  let (k, g) := g.below 100
+  let (h, g) :=
+    if k < 35 then g.pick reqHosts
+    else if k < 60 then let (s, g) := g.ipv6; ("[" ++ s ++ "]", g)
+    else if k < 70 then let (s, g) := g.ipFuture; ("[" ++ s ++ "]", g)
+    else if k < 85 then g.ipv4
+    else let (n, g) := g.below 9; g.chars "aZ09-._~!$&'()*+,;=%41:@[]".toList.toArray n
+  let (p, g) := g.below 10
+  let (port, g) := g.chars "0123456789".toList.toArray (p % 6)
+  (if p < 6 then h else if p < 9 then h ++ ":" ++ port else h ++ ":x", g)
+
+/-- A request-target: origin-form; absolute-form of http, https and other schemes (and of
+scheme-like text led by any byte), with and without userinfo, with a host and a path; asterisk-form;
+authority-form; other bytes. -/
+def Rng.target (g : Rng) : String × Rng := Id.run do
+  let (k, g) := g.below 100
+  if k < 50 then return g.pick reqPaths
+  if k < 78 then
+    let (any, g) := g.chance 10
+    let (lead, g) := g.chars "~{|`zZ@[+0a".toList.toArray 1
+    let (sch, g) := if any then (lead ++ "b", g) else g.pick reqSchemes
+    let (sep, g) := g.pick #["://", "://", "://", ":", ":/", "//"]
+    let (user, g) := g.pick #["", "", "", "u@", "u:p@", "@", "u@@", "u[@", "%zz@", "u%41:x@"]
+    let (hk, g) := g.chance 50
+    let (host, g) := if hk then g.host else g.pick (reqHosts.filter (!·.contains ' '))
+    let (path, g) := g.pick #["", "/feed", "/posts/1", "/x?q=1", "?q", "/a#b", "x"]
+    return (sch ++ sep ++ user ++ host ++ path, g)
+  if k < 83 then return g.pick #["*", "*?x", "**"]
+  if k < 93 then
+    let (host, g) := g.host
+    let (port, g) := g.pick #["", ":80", ":", "?x"]
+    return (host ++ port, g)
+  let (n, g) := g.below 7
+  return g.chars "/?:@[]%aA0.-*~{".toList.toArray n
+
+/-- A field line: Host; Content-Length in every form (the content's length, with up to 39 zeros
+before it, 23 and 40 digits, not digits, a list); Authorization; Connection; Transfer-Encoding;
+others; and lines that are not field lines or hold bytes no field value holds. -/
+def Rng.header (g : Rng) (len : Nat) : String × Rng := Id.run do
+  let (k, g) := g.below 100
+  if k < 20 then
+    let (host, g) := g.host
+    return ("Host: " ++ host, g)
+  if k < 35 then
+    let (name, g) := g.pick #["Content-Length", "content-length", "CONTENT-LENGTH"]
+    let (ows, g) := g.pick #["", " ", "\t"]
+    let (zeros, g) := g.below 39
+    let (v, g) := g.pick #[toString len, toString len, rep (zeros + 1) "0" ++ toString len, "", "5a", "-1", "5, 5",
+      "16385", "16384", "99999999999999999999999", " 7 ", "0", "1" ++ rep 39 "0"]
+    return (name ++ ":" ++ ows ++ v, g)
+  if k < 45 then
+    let (name, g) := g.pick #["Authorization", "authorization"]
+    let (ows, g) := g.pick #[" ", "  ", ""]
+    let (v, g) := g.pick #["Bearer abc.def.ghi", "Bearer x", "tok", "", "Bearer abc  "]
+    return (name ++ ":" ++ ows ++ v, g)
+  if k < 55 then
+    let (v, g) := g.pick #["close", "keep-alive", "Keep-Alive, Upgrade", ",close ,", "closed", " CLOSE\t,keep-alive",
+      ",,", "", "keep-alive, close", "upgrade"]
+    return ("Connection: " ++ v, g)
+  if k < 60 then return g.pick #["Transfer-Encoding: chunked", "transfer-encoding:", "TE: trailers"]
+  if k < 68 then
+    return g.pick #["User-Agent: k6/1.3.0 (https://k6.io/)", "Content-Type: application/json", "X: a:b:c",
+      "Expect: 100-continue", "X-Thing:\tvalue\t", "Accept: */*", "X:", "X-\xff: y"]
+  return g.pick #["NoColonLine", ": empty name", " Content-Length: 5", "Connection : close", "\tX: y", "X: a\x00b",
+    "X: a\x7fb", "X: a\x01", "X: \xff\xfe", "X(y): z", "X: a\rb", "X: a\nb", "Host : x", "X\x00: y"]
+
+/-- A request-like text: one to three requests, sometimes after empty lines; half of the texts well
+formed (a Host line nearly always, its value valid seven times in ten, field lines that leave the
+head valid, a Content-Length of the content's length, rarely another field line), half made of any
+of the parts; then up to two bytes changed, and one text in five cut short. -/
+def Rng.request (g : Rng) : ByteArray × Rng := Id.run do
+  let (good, g) := g.chance 50
+  let (reqs, g) := g.pick #[1, 1, 1, 2, 3]
+  let mut g := g
+  let mut s := ""
+  for _ in [0:reqs] do
+    let (lead, g1) := g.chance 10
+    let (nl, g1) := g1.below 3
+    if lead then s := s ++ rep (nl + 1) "\r\n"
+    let (len, g1) := g1.pick #[0, 0, 0, 3, 5, 12]
+    g := g1
+    if good then
+      let (m, g1) := g.pick #["GET", "GET", "POST", "HEAD", "PUT"]
+      let (path, g1) := g1.chance 80
+      let (t, g1) := if path then g1.pick (reqPaths.extract 0 9) else g1.target
+      let (v, g1) := g1.pick #["HTTP/1.1", "HTTP/1.1", "HTTP/1.0", "HTTP/1.2"]
+      s := s ++ m ++ " " ++ t ++ " " ++ v ++ "\r\n"
+      let (host, g1) := g1.chance 95
+      let (valid, g1) := g1.chance 70
+      let (h, g1) := if valid then g1.pick (reqHosts.extract 0 10) else g1.host
+      let mut hs : Array String := if host then #["Host: " ++ h] else #[]
+      let (nh, g1) := g1.below 4
+      g := g1
+      for _ in [0:nh] do
+        let (h, g1) := g.pick reqGoodHeads
+        hs := hs.push h
+        g := g1
+      let (cl, g1) := g.chance 30
+      let (zeros, g1) := g1.below 3
+      if len > 0 || cl then hs := hs.push ("Content-Length: " ++ rep zeros "0" ++ toString len)
+      let (other, g1) := g1.chance 10
+      let (h, g1) := g1.header len
+      if other then hs := hs.push h
+      let (hs', g1) := g1.shuffle hs
+      -- at most one Authorization line
+      let mut auth := false
+      for h in hs' do
+        let isAuth := h.startsWith "Authorization" || h.startsWith "authorization"
+        if !(isAuth && auth) then s := s ++ h ++ "\r\n"
+        auth := auth || isAuth
+      s := s ++ "\r\n" ++ rep len "b"
+      let (more, g1) := g1.chance 30
+      let (extra, g1) := g1.below 6
+      if more then s := s ++ rep extra "b"
+      g := g1
+    else
+      let (m, g1) := g.pick reqMethods
+      let (sp1, g1) := g1.chance 95
+      let (sep1, g1) := if sp1 then (" ", g1) else g1.pick #["  ", "\t", ""]
+      let (t, g1) := g1.target
+      let (sp2, g1) := g1.chance 95
+      let (sep2, g1) := if sp2 then (" ", g1) else g1.pick #["  ", "\t", ""]
+      let (v, g1) := g1.pick reqVersions
+      let (crlf, g1) := g1.chance 90
+      let (eol, g1) := if crlf then ("\r\n", g1) else g1.pick reqSeps
+      s := s ++ m ++ sep1 ++ t ++ sep2 ++ v ++ eol
+      let (host, g1) := g1.chance 85
+      let (h, g1) := g1.pick (reqHosts.extract 0 10)
+      if host then s := s ++ "Host: " ++ h ++ "\r\n"
+      let (nh, g1) := g1.below 6
+      g := g1
+      for _ in [0:nh] do
+        let (h, g1) := g.header len
+        let (crlf, g1) := g1.chance 93
+        let (eol, g1) := if crlf then ("\r\n", g1) else g1.pick reqSeps
+        s := s ++ h ++ eol
+        g := g1
+      let (ends, g1) := g.chance 95
+      if ends then s := s ++ "\r\n"
+      let (blen, g1) := g1.below 17
+      s := s ++ rep blen "b"
+      g := g1
+  let mut a := s.toUTF8
+  let (muts, g1) := g.pick #[0, 0, 0, 0, 1, 2]
+  g := g1
+  for _ in [0:muts] do
+    let (p, g1) := g.below a.size
+    let (b, g1) := g1.pick reqSpecial
+    if a.size > 0 then a := a.set! p b
+    g := g1
+  let (cut, g1) := g.chance 20
+  let (at_, g1) := g1.below (a.size + 1)
+  if cut then a := a.extract 0 at_
+  return (a, g1)
+
+/-- An input at the limits: a request-target of about `maxTarget` bytes, a head of about `maxHead + 4`
+bytes, thousands of empty lines or a method of thousands of bytes before a long target, content of
+about `maxBody` bytes, a byte that ends a target (or does not) inside a long one, thousands of empty
+lines after a field line. -/
+def Rng.big (g : Rng) : ByteArray × Rng := Id.run do
+  let (k, g) := g.below 10
+  let (x, g) := g.below 1000000
+  let (y, g) := g.below 1000000
+  let s :=
+    if k == 0 then "GET /" ++ rep (8185 + x % 16) "a" ++ " HTTP/1.1\r\nHost: x\r\n\r\n"
+    else if k == 1 then "GET /feed HTTP/1.1\r\nHost: x\r\nX: " ++ rep (16340 + x % 21) "a" ++ "\r\n\r\n"
+    else if k == 2 then rep (5990 + x % 21) "\r\n" ++ "GET /" ++ rep (4370 + y % 3831) "a"
+    else if k == 3 then rep (8190 + x % 911) "A" ++ " /" ++ rep (7380 + y % 21) "a"
+    else if k == 4 then "GET /" ++ rep (8180 + x % 21) "a"
+    else if k == 5 then rep (16380 + x % 21) "a"
+    else if k == 6 then rep (8190 + x % 11) "\r\n"
+    else if k == 7 then "POST /posts HTTP/1.1\r\nHost: x\r\nContent-Length: 16384\r\n\r\n" ++ rep (16383 + x % 3) "z"
+    else if k == 8 then
+      "GET /" ++ rep (100 + x % 8901) "a" ++ #["\x00", "\n", "\r", "\t", "\r\n"][y % 5]! ++ rep (y % 9001) "a" ++
+        (if x % 2 == 0 then " HTTP/1.1\r\nHost: x\r\n\r\n" else "")
+    else "GET /feed HTTP/1.1\r\nHost: x\r\nX: " ++ rep (8170 + x % 21) "\r\n"
+  return (s.toUTF8, g)
+
+/-- A request-like text, one in fifty at the limits. -/
+def Rng.input (g : Rng) : ByteArray × Rng :=
+  let (big, g) := g.chance 2
+  if big then g.big else g.request
+
+/-- The prefixes of `a` to check: every one of an input of up to 2,048 bytes; of a longer one, the
+first 64 and the last 8, every 61st, and those around where the scan of the whole input meets a
+limit: the request-target's `maxTarget + 1`st byte, the end of the head, the first `maxHead + 4`
+bytes, the end of the content. -/
+def prefixLengths (a : ByteArray) (whole : Http.Parse) : List Nat :=
+  if a.size ≤ 2048 then List.range a.size else
+  let lim := min a.size (Http.maxHead + 4)
+  let i0 := Http.skipLead a 0
+  let m := Http.tokenEnd a i0 lim
+  let around (c : Nat) := (List.range 9).map (c + · - 4)
+  let edges := around (m + 2 + Http.maxTarget) ++ around lim ++
+    (match Http.headEnd a i0 lim with | some he => around (he + 4) | none => []) ++
+    (match whole with | .ok r => around r.next | _ => [])
+  ((List.range 64 ++ (List.range (a.size / 61)).map (· * 61) ++ (List.range 8).map (a.size - 1 - ·) ++ edges).filter
+    (· < a.size))
+
+/-- On random inputs, every prefix of an input (of a long one, those of `prefixLengths`): the C
+`Http.parse` gives its Lean definition's result, which is a wait or the whole input's; and the input
+reads the same after other bytes. Every kind of frame must come up. -/
 def checkHttp (rounds : Nat) : Except String Unit := Id.run do
   let mut g : Rng := ⟨0x14057b7ef767814f⟩
+  let mut kinds : Array Nat := #[0, 0, 0, 0, 0, 0]
   for i in [0:rounds] do
-    let (a, g1) := g.request
-    let (p, g2) := g1.below (a.size + 1)
+    let (a, g1) := g.input
+    let (pre, g2) := g1.bytes 6
     g := g2
+    let whole := Http.parse a 0
+    if !parseEq whole (refParse a 0) then
+      return .error s!"Http.parse differs from its Lean definition (round {i})"
+    let kind := match whole with
+      | .incomplete => 0 | .ok _ => 1 | .bad 400 => 2 | .bad 413 => 3 | .bad 414 => 4 | .bad 431 => 5 | .bad _ => 6
+    if kind == 6 then return .error s!"Http.parse gives a status it should not (round {i})"
+    kinds := kinds.modify kind (· + 1)
+    for k in prefixLengths a whole do
+      let b := a.extract 0 k
+      let p := Http.parse b 0
+      if !parseEq p (refParse b 0) then
+        return .error s!"Http.parse differs from its Lean definition on a prefix (round {i}, length {k} of {a.size})"
+      if !(parseEq p .incomplete || parseEq p whole) then
+        return .error s!"Http.parse of a prefix differs from the whole input's (round {i}, length {k} of {a.size})"
+    if !parseEq (unshift pre.size (Http.parse (pre ++ a) pre.size)) whole then
+      return .error s!"Http.parse differs after other bytes (round {i})"
+  if kinds.any (· == 0) then return .error s!"the random requests miss a kind of frame: {kinds}"
+  return .ok ()
+
+/-- Where one byte goes in `checkHttpBytes`: between each pair of texts, a byte of a method, a path,
+a query, a field name, a field value, a Host value (a reg-name, IPvFuture, an IPv6 address and its
+IPv4 tail, a port), userinfo, a scheme (its first and a later character), the host of an
+absolute-form and of an authority-form target, a percent-encoding, a Content-Length value, the
+version's minor digit, the end of the request-line, the place of a SP, an empty line before the
+request, a Connection option, a field name's first and last letters, and the whitespace around a
+field value. -/
+def byteSlots : Array (String × String) := #[
+  ("G", "T /feed HTTP/1.1\r\nHost: x\r\n\r\n"),
+  ("GET /fe", "d HTTP/1.1\r\nHost: x\r\n\r\n"),
+  ("GET /feed?a", "b HTTP/1.1\r\nHost: x\r\n\r\n"),
+  ("GET /feed HTTP/1.1\r\nHost: x\r\nX", "Y: z\r\n\r\n"),
+  ("GET /feed HTTP/1.1\r\nHost: x\r\nX: a", "b\r\n\r\n"),
+  ("GET /feed HTTP/1.1\r\nHost: a", "b\r\n\r\n"),
+  ("GET /feed HTTP/1.1\r\nHost: [v1.a", "]\r\n\r\n"),
+  ("GET /feed HTTP/1.1\r\nHost: [v", ".a]\r\n\r\n"),
+  ("GET /feed HTTP/1.1\r\nHost: [::", "]\r\n\r\n"),
+  ("GET /feed HTTP/1.1\r\nHost: [::1.2.3.", "]\r\n\r\n"),
+  ("GET /feed HTTP/1.1\r\nHost: x:8", "\r\n\r\n"),
+  ("GET foo://u", "@h/ HTTP/1.1\r\nHost: x\r\n\r\n"),
+  ("GET a", "b:x HTTP/1.1\r\nHost: x\r\n\r\n"),
+  ("GET ", "b:x HTTP/1.1\r\nHost: x\r\n\r\n"),
+  ("GET http://a", "b/feed HTTP/1.1\r\nHost: x\r\n\r\n"),
+  ("CONNECT a", "b:80 HTTP/1.1\r\nHost: x\r\n\r\n"),
+  ("GET /a%4", " HTTP/1.1\r\nHost: x\r\n\r\n"),
+  ("POST /posts HTTP/1.1\r\nHost: x\r\nContent-Length: 1", "\r\n\r\n0123456789abcdefghij"),
+  ("GET /feed HTTP/1.", "\r\nHost: x\r\n\r\n"),
+  ("GET /feed HTTP/1.1", "\nHost: x\r\n\r\n"),
+  ("GET", "/feed HTTP/1.1\r\nHost: x\r\n\r\n"),
+  ("\r", "GET /feed HTTP/1.1\r\nHost: x\r\n\r\n"),
+  ("GET /feed HTTP/1.0\r\nConnection: ", "lose\r\n\r\n"),
+  ("GET /feed HTTP/1.1\r\n", "ost: x\r\n\r\n"),
+  ("GET /feed HTTP/1.1\r\nHost: x\r\nTransfer-Encodin", ": chunked\r\n\r\n"),
+  ("GET /feed HTTP/1.1\r\nHost:", "x\r\n\r\n"),
+  ("GET /feed HTTP/1.1\r\nHost: x", "\r\n\r\n")]
+
+/-- The C `Http.parse` against its Lean definition with each byte value in each of `byteSlots`, so
+that every byte meets each class of bytes the parser tells apart; also with room after the input. -/
+def checkHttpBytes : Except String Unit := Id.run do
+  for (pre, post) in byteSlots do
+    for b in [0:256] do
+      let a := (pre.toUTF8.push b.toUInt8) ++ post.toUTF8
+      if !parseEq (Http.parse a 0) (refParse a 0) || !parseEq (Http.parse (fresh a 40) 0) (refParse a 0) then
+        return .error s!"Http.parse differs from its Lean definition with byte {b} after {pre.quote}"
+  return .ok ()
+
+/-- The C `Http.parse` against its Lean definition on random inputs, at the start, at the next
+request, inside, at and past the end; and with room after the input, which the C reads 32 bytes at a
+time and must not see. -/
+def checkParse (rounds : Nat) : Except String Unit := Id.run do
+  let mut g : Rng := ⟨0x3c6ef372fe94f82b⟩
+  for i in [0:rounds] do
+    let (a, g1) := g.input
+    let (p, g2) := g1.below (a.size + 1)
+    let (spare, g3) := g2.below 80
+    g := g3
     let next := match refParse a 0 with
       | .ok r => r.next
       | _ => 0
     for pos in [0, next, p, a.size, a.size + 3, 2 ^ 64] do
       if !parseEq (Http.parse a pos) (refParse a pos) then
-        return .error s!"Http.parse differs (round {i}, position {pos})"
-  return .ok ()
-
-/-- `Http.parse` on inputs with room after their bytes (the C search reads 32 bytes at a time
-inside the allocation, past the end of the input, and must not see what lies there). -/
-def checkHttpRoom (rounds : Nat) : Except String Unit := Id.run do
-  let mut g : Rng := ⟨0x3c6ef372fe94f82b⟩
-  for i in [0:rounds] do
-    let (a, g1) := g.request
-    let (spare, g2) := g1.below 80
-    let (p, g3) := g2.below (a.size + 1)
-    g := g3
+        return .error s!"Http.parse differs from its Lean definition (round {i}, position {pos})"
     let b := fresh a spare
-    let next := match refParse a 0 with
-      | .ok r => r.next
-      | _ => 0
     for pos in [0, next, p, a.size] do
       if !parseEq (Http.parse b pos) (refParse a pos) then
         return .error s!"Http.parse differs with room after the input (round {i}, position {pos})"
@@ -734,25 +1414,82 @@ def topEq : Json.Top → Json.Top → Bool
 
 def bytesOf (l : List Nat) : ByteArray := ⟨(l.map Nat.toUInt8).toArray⟩
 
-/-- Strings (with their quotes): escapes of every kind, surrogates paired and lone, UTF-8 valid
-and not (overlong, encoded surrogates, past U+10FFFF, cut short, stray continuation bytes), and
-texts that are not strings at all (a control byte, an unknown escape, bad hex). -/
+/-- Strings (with their quotes): escapes of every kind, surrogates paired and lone, UTF-8 of each
+length with the first and last scalar values of the ranges of RFC 3629 §4, and long strings with
+an escape or non-ASCII text after their first 32 bytes. -/
 def jsonStrs : Array ByteArray := #[
   "\"\"".toUTF8, "\"abc\"".toUTF8, "\"HS256\"".toUTF8, "\"a\\\"b\"".toUTF8, "\"\\\\\"".toUTF8,
   "\"\\/\\b\\f\\n\\r\\t\"".toUTF8, "\"\\u0041\\u00e9\\u4e2d\\u0000\"".toUTF8, "\"\\ud83d\\ude00\"".toUTF8,
   "\"\\ud83d\"".toUTF8, "\"\\ude00x\"".toUTF8, "\"\\ud83d\\u0041\"".toUTF8, "\"\\uD83D\\uDE00\"".toUTF8,
-  "\"é中😀\"".toUTF8,
+  "\"é中😀\"".toUTF8, bytesOf [0x22, 0xe2, 0x82, 0xac, 0xf0, 0x9f, 0x98, 0x80, 0x22],
+  -- U+0080, U+07FF, U+0800, U+0FFF, U+1000, U+CFFF, U+D000, U+D7FF, U+E000, U+FFFF
+  bytesOf [0x22, 0xc2, 0x80, 0xdf, 0xbf, 0xe0, 0xa0, 0x80, 0xe0, 0xbf, 0xbf, 0xe1, 0x80, 0x80, 0xec, 0xbf, 0xbf,
+    0xed, 0x80, 0x80, 0xed, 0x9f, 0xbf, 0xee, 0x80, 0x80, 0xef, 0xbf, 0xbf, 0x22],
+  -- U+10000, U+3FFFF, U+40000, U+FFFFF, U+100000, U+10FFFF
+  bytesOf [0x22, 0xf0, 0x90, 0x80, 0x80, 0xf0, 0xbf, 0xbf, 0xbf, 0xf1, 0x80, 0x80, 0x80, 0xf3, 0xbf, 0xbf, 0xbf,
+    0xf4, 0x80, 0x80, 0x80, 0xf4, 0x8f, 0xbf, 0xbf, 0x22],
   "\"a long string with no escapes at all, longer than thirty-two bytes\"".toUTF8,
   "\"a long string with one escape \\n after more than thirty-two bytes of text\"".toUTF8,
-  bytesOf [0x22, 0xc3, 0x28, 0x22], bytesOf [0x22, 0xe0, 0x80, 0x80, 0x22],
-  bytesOf [0x22, 0xc0, 0xaf, 0x22], bytesOf [0x22, 0xed, 0xa0, 0x80, 0x22], bytesOf [0x22, 0xf4, 0x90, 0x80, 0x80, 0x22],
-  bytesOf [0x22, 0xff, 0x22], bytesOf [0x22, 0xf0, 0x9f, 0x98, 0x22], bytesOf [0x22, 0x80, 0x41, 0x22],
-  bytesOf [0x22, 0xe2, 0x82, 0xac, 0xf0, 0x9f, 0x98, 0x80, 0x22], bytesOf [0x22, 0x61, 0xe2, 0x82, 0x22],
-  -- not strings: the last four
+  "\"a long string with non-ASCII text after thirty-two bytes: café, 中文, 😀\"".toUTF8]
+
+/-- Texts that start like a string and are not one: ill-formed UTF-8 (a continuation byte with no
+lead, a lead cut short, overlong forms, encoded surrogates, values past U+10FFFF, bytes that never
+occur), also after a plain run of 32 bytes; a control byte, an unknown escape, bad hex. -/
+def jsonNonStrs : Array ByteArray := #[
+  bytesOf [0x22, 0x80, 0x41, 0x22], bytesOf [0x22, 0xbf, 0x22], bytesOf [0x22, 0xc3, 0x28, 0x22],
+  bytesOf [0x22, 0x61, 0xe2, 0x82, 0x22], bytesOf [0x22, 0xf0, 0x9f, 0x98, 0x22], bytesOf [0x22, 0xc0, 0xaf, 0x22],
+  bytesOf [0x22, 0xc1, 0xbf, 0x22], bytesOf [0x22, 0xe0, 0x80, 0x80, 0x22], bytesOf [0x22, 0xe0, 0x9f, 0xbf, 0x22],
+  bytesOf [0x22, 0xf0, 0x8f, 0xbf, 0xbf, 0x22], bytesOf [0x22, 0xed, 0xa0, 0x80, 0x22], bytesOf [0x22, 0xed, 0xbf, 0xbf, 0x22],
+  bytesOf [0x22, 0xf4, 0x90, 0x80, 0x80, 0x22], bytesOf [0x22, 0xf5, 0x80, 0x80, 0x80, 0x22], bytesOf [0x22, 0xff, 0x22],
+  "\"a long string with a stray byte after thirty-two bytes: ".toUTF8 ++ bytesOf [0xff, 0x22],
+  "\"a long string with a sequence cut short after thirty-two bytes: ".toUTF8 ++ bytesOf [0xe2, 0x82, 0x22],
   "\"\\uZZZZ\"".toUTF8, "\"\\x\"".toUTF8, "\"\\u12\"".toUTF8, bytesOf [0x22, 0x09, 0x22]]
 
+/-- Scalar values at the ends of the ranges of RFC 3629 §4. -/
+def utf8Edges : Array Nat := #[0x80, 0x7ff, 0x800, 0xfff, 0x1000, 0xcfff, 0xd000, 0xd7ff, 0xe000, 0xffff, 0x10000,
+  0x3ffff, 0x40000, 0xfffff, 0x100000, 0x10ffff]
+/-- Bytes after a byte from 0x80 to 0xff: the ends of the ranges RFC 3629 §4 allows for the next
+byte, and bytes that end a string or start the next character. -/
+def utf8Follow : Array UInt8 := #[0x7f, 0x80, 0x8f, 0x90, 0x9f, 0xa0, 0xbf, 0xc0, 0xff, 0x22, 0x5c, 0x41]
+
+/-- A string (with its quotes) of plain runs, which the C side scans 32 bytes at a time, escapes,
+and UTF-8 sequences of each length at any offset. Unless `clean`, some sequences are ill-formed:
+any byte from 0x80 to 0xff followed by bytes that may not continue it, or a surrogate or a value
+past U+10FFFF written in UTF-8's pattern. -/
+def Rng.jsonStr (g : Rng) (clean : Bool) : ByteArray × Rng := Id.run do
+  let (n, g0) := g.below 6
+  let mut g := g0
+  let mut out := "\"".toUTF8
+  for _ in [0:n] do
+    let (k, g1) := g.below 10
+    let (x, g2) := g1.next
+    let (y, g3) := g2.next
+    g := g3
+    if k < 4 then
+      -- a plain run of up to 40 bytes
+      for j in [0:x.toNat % 41] do
+        let c := (0x20 + (y.toNat + 37 * j) % 0x5f).toUInt8
+        out := out.push (if c == 0x22 || c == 0x5c then 0x2e else c)
+    else if k == 4 then
+      out := out ++ #["\\n", "\\\"", "\\u00e9", "\\ud83d\\ude00", "\\ud800"][x.toNat % 5]!.toUTF8
+    else if k < 8 || clean then
+      -- a scalar value at the end of a range, or any
+      let c := if y % 2 == 0 then utf8Edges[x.toNat % utf8Edges.size]!
+        else let c := 0x80 + x.toNat % (0x110000 - 0x80); if 0xd800 ≤ c && c < 0xe000 then c - 0x800 else c
+      out := Json.pushUtf8 out c
+    else if k == 8 then
+      -- a byte from 0x80 to 0xff and up to three more
+      out := out.push (0x80 + x.toNat % 0x80).toUInt8
+      for j in [0:y.toNat % 4] do
+        out := out.push utf8Follow[((y.toNat / 4) >>> (4 * j)) % utf8Follow.size]!
+    else
+      -- a surrogate or a value past U+10FFFF, in UTF-8's pattern
+      out := Json.pushUtf8 out (if y % 2 == 0 then 0xd800 + x.toNat % 0x800 else 0x110000 + x.toNat % 0x30000)
+  return (out.push 0x22, g)
+
 def jsonKeys : Array String := #["\"alg\"", "\"exp\"", "\"nbf\"", "\"sub\"", "\"username\"", "\"body\"", "\"\\u0061lg\"",
-  "\"ex\\u0070\"", "\"bo\\u0064y\"", "\"user\\u006eame\"", "\"x\"", "\"\"", "\"alg \"", "\"ALG\"", "\"b\\\"ody\""]
+  "\"ex\\u0070\"", "\"bo\\u0064y\"", "\"user\\u006eame\"", "\"x\"", "\"\"", "\"alg \"", "\"ALG\"", "\"b\\\"ody\"",
+  "\"café\"", "\"caf\\u00e9\"", "\"\\u00e9\"", "\"é\"", "\"crit\"", "\"cty\"", "\"aud\"", "\"c\\u0074y\"", "\"AUD\""]
 /-- Numbers: the first thirteen valid. -/
 def jsonNums : Array String := #["0", "-0", "12", "1.5", "1e10", "1E+5", "-1.2e-3", "1700000000", "17000000000000000000000",
   "1e400", "2.0E-2", "9", "-12.50e01", "01", "1.", ".5", "-", "1e", "1e+", "--1"]
@@ -760,11 +1497,19 @@ def jsonWs : Array String := #["", "", "", " ", "\n", "\t ", "\r\n", "  "]
 
 def Rng.wsBytes (g : Rng) : ByteArray × Rng := let (w, g) := g.pick jsonWs; (w.toUTF8, g)
 
+/-- A member name: usually one of `jsonKeys`, sometimes any string. -/
+def Rng.jsonKey (g : Rng) (clean : Bool) : ByteArray × Rng :=
+  let (k, g) := g.below 8
+  if k == 0 then g.jsonStr clean else let (key, g) := g.pick jsonKeys; (key.toUTF8, g)
+
 /-- Scalars, empty containers and broken bits of JSON. -/
 def Rng.jsonScalar (g : Rng) (clean : Bool) : ByteArray × Rng :=
   let (k, g) := g.below 8
   if k < 3 then let (n, g) := g.below (if clean then 13 else jsonNums.size); (jsonNums[n]!.toUTF8, g)
-  else if k < 6 then let (x, g) := g.below (if clean then jsonStrs.size - 4 else jsonStrs.size); (jsonStrs[x]!, g)
+  else if k < 5 then
+    let (x, g) := g.below (if clean then jsonStrs.size else jsonStrs.size + jsonNonStrs.size)
+    (if x < jsonStrs.size then jsonStrs[x]! else jsonNonStrs[x - jsonStrs.size]!, g)
+  else if k == 5 then g.jsonStr clean
   else if k == 6 then let (l, g) := g.below (if clean then 3 else 6); (#["true", "false", "null", "nul", "tru", "fals"][l]!.toUTF8, g)
   else let (l, g) := g.below (if clean then 4 else 11)
     (#["{}", "[]", "{ }", "[ ]", "{,}", "[,]", "[1,]", "{\"a\":}", "{\"a\" 1}", "}", "]"][l]!.toUTF8, g)
@@ -791,11 +1536,11 @@ def Rng.json (g : Rng) (clean : Bool) : Nat → ByteArray × Rng
       let mut g := g0
       let mut out := "{".toUTF8
       for j in [0:n] do
-        let (key, g1) := g.pick jsonKeys
+        let (key, g1) := g.jsonKey clean
         let (v, g2) := g1.json clean d
         let (w1, g3) := g2.wsBytes
         let (w2, g4) := g3.wsBytes
-        out := out ++ (if j == 0 then ByteArray.empty else ",".toUTF8) ++ w1 ++ key.toUTF8 ++ w2 ++ ":".toUTF8 ++ w1 ++ v
+        out := out ++ (if j == 0 then ByteArray.empty else ",".toUTF8) ++ w1 ++ key ++ w2 ++ ":".toUTF8 ++ w1 ++ v
         g := g4
       return (out ++ "}".toUTF8, g)
 
@@ -824,10 +1569,10 @@ def Rng.jsonText (g : Rng) : ByteArray × Rng := Id.run do
       let mut g := g0
       let mut out := "{".toUTF8
       for j in [0:n] do
-        let (key, g1) := g.pick jsonKeys
+        let (key, g1) := g.jsonKey clean
         let (v, g2) := g1.json clean 2
         let (w, g3) := g2.wsBytes
-        out := out ++ (if j == 0 then ByteArray.empty else ",".toUTF8) ++ w ++ key.toUTF8 ++ ":".toUTF8 ++ w ++ v
+        out := out ++ (if j == 0 then ByteArray.empty else ",".toUTF8) ++ w ++ key ++ ":".toUTF8 ++ w ++ v
         g := g3
       return (out ++ "}".toUTF8, g)
   g := g3
@@ -845,12 +1590,14 @@ def Rng.jsonText (g : Rng) : ByteArray × Rng := Id.run do
     g := g5
   return (a, g)
 
-def jsonKeySets : Array (Array ByteArray) := #[#[Jwt.keyAlg], #[Jwt.keyExp, Jwt.keyNbf, Jwt.keySub, Jwt.keyUsername],
-  #[kBodyKey], #[], #["a".toUTF8, Jwt.keyAlg, Jwt.keyAlg, "x".toUTF8, Jwt.keyExp, Jwt.keyNbf, Jwt.keySub, Jwt.keyUsername,
-    kBodyKey, "".toUTF8]]
+def jsonKeySets : Array (Array ByteArray) := #[#[Jwt.keyAlg, Jwt.keyCrit, Jwt.keyCty],
+  #[Jwt.keyExp, Jwt.keyNbf, Jwt.keySub, Jwt.keyUsername, Jwt.keyAud], #[kBodyKey], #[],
+  #["a".toUTF8, Jwt.keyAlg, Jwt.keyAlg, "x".toUTF8, Jwt.keyExp, Jwt.keyNbf, Jwt.keySub, Jwt.keyUsername,
+    kBodyKey, "".toUTF8, "café".toUTF8, "é".toUTF8, Jwt.keyCrit, Jwt.keyCty, Jwt.keyAud]]
 
 /-- `Json.parseTop` and `Json.decodeString` against their Lean definitions: whole texts and
-ranges inside and past them; every string the parser recorded and random ranges decoded. -/
+ranges inside and past them; every string the parser recorded and random ranges decoded, some
+ending past the array (up to 2^64). -/
 def checkJson (rounds : Nat) : Except String Unit := Id.run do
   let mut g : Rng := ⟨0x1b873593cc9e2d51⟩
   for i in [0:rounds] do
@@ -870,8 +1617,37 @@ def checkJson (rounds : Nat) : Except String Unit := Id.run do
         for f in fs do
           if f.kind == .str && Json.decodeString a f.lo f.hi != refDecodeString a f.lo f.hi then
             return .error s!"Json.decodeString differs (round {i}, range {f.lo} {f.hi})"
-    if Json.decodeString a dlo dhi != refDecodeString a dlo dhi then
-      return .error s!"Json.decodeString differs (round {i}, range {dlo} {dhi})"
+    for (l, h) in [(dlo, dhi), (dlo, a.size + 1000), (dlo, 2 ^ 63 - 1), (dlo, 2 ^ 63), (dlo, 2 ^ 64), (2 ^ 64, 2 ^ 64)] do
+      if Json.decodeString a l h != refDecodeString a l h then
+        return .error s!"Json.decodeString differs (round {i}, range {l} {h})"
+  return .ok ()
+
+/-- Each byte from 0x80 to 0xff at the start of a sequence, before bytes at the ends of the ranges
+RFC 3629 §4 allows after it: in a member's value (also after 31 and 32 plain bytes, so that the C
+side meets it inside its 32-byte scan and after one), in a member name, as a whole text and cut
+off by the end of the text. `Json.parseTop` and `Json.decodeString` against their Lean
+definitions, the latter on the recorded value and on the whole text. -/
+def checkUtf8 : Except String Unit := Id.run do
+  let seconds : List Nat := [0x7f, 0x80, 0x8f, 0x90, 0x9f, 0xa0, 0xbf, 0xc0]
+  let tails : List (List Nat) :=
+    [[], [0x7f], [0x80], [0xbf], [0xc0], [0x80, 0x80], [0x80, 0xbf], [0xbf, 0x7f], [0x80, 0xc0], [0xc0, 0x80], [0xbf, 0xbf]]
+  for b in [0x80:0x100] do
+    for c in seconds do
+      for t in tails do
+        let s := b :: c :: t
+        let values := [0, 31, 32].map fun n =>
+          [0x7b, 0x22, 0x62, 0x6f, 0x64, 0x79, 0x22, 0x3a, 0x22] ++ List.replicate n 0x61 ++ s ++ [0x22, 0x7d]
+        for l in values ++ [[0x7b, 0x22] ++ s ++ [0x22, 0x3a, 0x30, 0x7d], [0x22] ++ s ++ [0x22], 0x22 :: s] do
+          let a := bytesOf l
+          let top := Json.parseTop a 0 a.size #[kBodyKey]
+          if !topEq top (refParseTop a 0 a.size #[kBodyKey]) then
+            return .error s!"Json.parseTop differs on {l}"
+          if let .object fs := top then
+            for f in fs do
+              if f.kind == .str && Json.decodeString a f.lo f.hi != refDecodeString a f.lo f.hi then
+                return .error s!"Json.decodeString differs on {l} (range {f.lo} {f.hi})"
+          if Json.decodeString a 0 a.size != refDecodeString a 0 a.size then
+            return .error s!"Json.decodeString differs on {l}"
   return .ok ()
 
 /-! ### Routes -/
@@ -904,7 +1680,8 @@ def checkRoutes (rounds : Nat) : Except String Unit := Id.run do
     let (k, g5) := g4.below 12
     let (x, g6) := g5.below 4
     let (y, g7) := g6.next
-    g := g7
+    let (hd, g8) := g7.below 2
+    g := g8
     let p := path.toUTF8
     let a := pre ++ p ++ post
     let (lo, hi) :=
@@ -916,27 +1693,38 @@ def checkRoutes (rounds : Nat) : Except String Unit := Id.run do
       else if k == 5 then (y.toNat % (a.size + 2), y.toNat / 7 % (a.size + 2))
       else (pre.size, pre.size + p.size)
     let method : Http.Method := if m == 0 then .get else if m == 1 then .post else .other
-    -- method, pathLo, pathHi, hasAuth, authLo, authHi, bodyLo, bodyHi, close, next
-    let r : Http.Req := ⟨method, lo, hi, false, 0, 0, 0, 0, false, 0⟩
+    -- method, pathLo, pathHi, hasAuth, authLo, authHi, bodyLo, bodyHi, close, next, head
+    let r : Http.Req := ⟨method, lo, hi, false, 0, 0, 0, 0, false, 0, hd == 1⟩
     if !routeEq (route a r) (refRoute a r) then
       return .error s!"route differs (round {i}, path {path})"
   return .ok ()
 
-/-- Text that is mostly base64url, sometimes with other bytes or `=` padding. -/
+/-- Text that is mostly base64url: random characters (sometimes another byte or `=`), or the
+encoding of random bytes, the one text that decodes to them, sometimes with its last character
+changed (which mostly sets bits after the last byte); then sometimes `=` padding. -/
 def Rng.b64Text (g : Rng) (maxLen : Nat) : ByteArray × Rng := Id.run do
   let alphabet := "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_".toUTF8
-  let (n, g0) := g.below (maxLen + 1)
+  let (kind, g0) := g.below 2
+  let (n, g0) := g0.below (maxLen + 1)
   let mut g := g0
   let mut a := ByteArray.emptyWithCapacity (n + 2)
-  for _ in [0:n] do
-    let (k, g1) := g.below 50
-    let (x, g2) := g1.next
-    a := a.push (if k == 0 then x.toUInt8 else alphabet.get! (x.toNat % 64))
-    g := g2
-  let (pad, g3) := g.below 4
+  if kind == 0 then
+    for _ in [0:n] do
+      let (k, g1) := g.below 100
+      let (x, g2) := g1.next
+      a := a.push (if k == 0 then x.toUInt8 else if k == 1 then 0x3d else alphabet.get! (x.toNat % 64))
+      g := g2
+  else
+    let (d, g1) := g.bytes (maxLen * 3 / 4)
+    let (k, g2) := g1.below 2
+    let (x, g3) := g2.next
+    g := g3
+    a := refB64Encode d
+    if k == 0 && a.size > 0 then a := a.set! (a.size - 1) (alphabet.get! (x.toNat % 64))
+  let (pad, g4) := g.below 8
   if pad == 1 then a := a.push 0x3d
   if pad == 2 then a := (a.push 0x3d).push 0x3d
-  return (a, g3)
+  return (a, g4)
 
 /-- The JWT leaves (HMAC-SHA256, base64url) against their Lean definitions. -/
 def checkCrypto (rounds : Nat) : Except String Unit := Id.run do
@@ -966,59 +1754,11 @@ def checkCrypto (rounds : Nat) : Except String Unit := Id.run do
 def hex (b : ByteArray) : String :=
   b.foldl (fun s x => s ++ (if x < 16 then "0" else "") ++ String.ofList (Nat.toDigits 16 x.toNat)) ""
 
-/-! ## The idle policy -/
-
-def refPick (budget minIdle timeout n : Nat) (idle : Array Nat) (busy : Array Bool) : Array Bool :=
-  (Idle.pickList ⟨budget, minIdle, timeout⟩ n (idle.toList.zip busy.toList)).toArray
-
-example : @Idle.pick = @refPick := rfl
-
-/-- A small number, or now and then one of up to 62 bits. -/
-def Rng.idleNat (g : Rng) (small : Nat) : Nat × Rng :=
-  let (k, g) := g.below 16
-  let (x, g) := g.next
-  if k == 0 then ((x >>> 2).toNat, g) else ((x.toNat % (max small 1)), g)
-
-/-- `Idle.pick` against its Lean definition: candidates in the transport's order (idle times
-falling, with ties) and in any order, some busy, around the budget and the idle thresholds, with
-and without a timeout, and arrays of different lengths. -/
-def checkIdle (rounds : Nat) : Except String Unit := Id.run do
-  let mut g : Rng := ⟨0x2545f4914f6cdd1d⟩
-  for i in [0:rounds] do
-    let (len, g1) := g.below 48
-    let (budget, g2) := g1.idleNat 64
-    let (n, g3) := g2.idleNat 96
-    let (minIdle, g4) := g3.idleNat 3000
-    let (tk, g5) := g4.below 3
-    let (t, g6) := g5.idleNat 6000
-    let timeout := if tk == 0 then 0 else t
-    let (sorted, g7) := g6.below 2
-    let (top, g8) := g7.idleNat 8000
-    g := g8
-    let mut idle : Array Nat := #[]
-    let mut busy : Array Bool := #[]
-    let mut cur := top
-    for _ in [0:len] do
-      let (d, h1) := g.below 400
-      let (x, h2) := h1.idleNat 8000
-      let (b, h3) := h2.below 5
-      g := h3
-      if sorted == 0 then
-        -- falling, with ties
-        cur := cur - (if d < 100 then 0 else d)
-        idle := idle.push cur
-      else idle := idle.push x
-      busy := busy.push (b == 0)
-    -- now and then the arrays differ in length (the shorter one decides)
-    let (cut, g9) := g.below 8
-    g := g9
-    if cut == 0 then busy := busy.pop
-    if cut == 1 then idle := idle.pop
-    if Idle.pick budget minIdle timeout n idle busy != refPick budget minIdle timeout n idle busy then
-      return .error s!"Idle.pick differs (round {i})"
-  return .ok ()
-
-/-- FIPS 180-4 and RFC 4231 test vectors. -/
+/-- FIPS 180-4 and RFC 4231 test vectors (`Feed/Spec/Sha256Vectors.lean` checks the same ones
+on the specification): SHA-256 through `Sha256.hash`, HMAC-SHA256 through the C `Hmac.mac` on keys
+from `Hmac.Key.of`. Each MAC is taken of the message as a whole, as a range inside a longer array,
+and as a range whose end is past the array's (at 2^64 too); the empty message also as ranges
+given backwards or past the end, which `Hmac.mac` clamps to an empty one. -/
 def checkSha : Except String Unit := do
   let rep (c : Char) (n : Nat) : ByteArray := (String.ofList (List.replicate n c)).toUTF8
   let cases : List (ByteArray × String) := [
@@ -1031,13 +1771,93 @@ def checkSha : Except String Unit := do
     (rep 'a' 1000, "41edece42d63e8d9bf515a9ba6932e1c20cbc9f5a5d134645adb5db1b9737ea3")]
   for (m, want) in cases do
     if hex (Sha256.hash m) != want then throw s!"SHA-256 differs on a {m.size}-byte message"
+  let bytes (b : UInt8) (n : Nat) : ByteArray := ⟨Array.replicate n b⟩
+  -- RFC 4231 §4's seven cases (case 5 truncated to 128 bits, as printed), then the empty message
+  -- under the keys of cases 2 and 6 (the MACs OpenSSL gives)
   let macs : List (ByteArray × ByteArray × String) := [
+    (bytes 0x0b 20, "Hi There".toUTF8, "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"),
     ("Jefe".toUTF8, "what do ya want for nothing?".toUTF8,
       "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"),
-    (⟨Array.replicate 131 0xaa⟩, "Test Using Larger Than Block-Size Key - Hash Key First".toUTF8,
-      "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54")]
+    (bytes 0xaa 20, bytes 0xdd 50, "773ea91e36800e46854db8ebd09181a72959098b3ef8c122d9635514ced565fe"),
+    (⟨(Array.range 25).map (·.toUInt8 + 1)⟩, bytes 0xcd 50,
+      "82558a389a443c0ea4cc819899f2083a85f0faa3e578f8077a2e3ff46729665b"),
+    (bytes 0x0c 20, "Test With Truncation".toUTF8, "a3b6167473100ee06e0c796c2955552b"),
+    (bytes 0xaa 131, "Test Using Larger Than Block-Size Key - Hash Key First".toUTF8,
+      "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54"),
+    (bytes 0xaa 131, ("This is a test using a larger than block-size key and a larger than block-size data. " ++
+      "The key needs to be hashed before being used by the HMAC algorithm.").toUTF8,
+      "9b09ffa71b942fcb27635fbcd5b0e944bfdc63644f0713938a7f51535c3a35e2"),
+    ("Jefe".toUTF8, ByteArray.empty, "923598ca6d64af2a5dba79dcd021a8a0fe5c5f557519adaaf0ad532d4506dd30"),
+    (bytes 0xaa 131, ByteArray.empty, "44b545def5b97eb719d856a15e327833e520e4770619c0e3eefbde24b71285a7")]
   for (k, m, want) in macs do
-    if hex (Hmac.mac (Hmac.Key.of k) m 0 m.size) != want then throw "HMAC-SHA256 differs"
+    let key := Hmac.Key.of k
+    let n := m.size
+    let w := "ab".toUTF8 ++ m ++ "cde".toUTF8   -- m is w[2, 2 + n)
+    let e := "ab".toUTF8 ++ m                   -- and e[2, ∞)
+    let mut ranges : List (ByteArray × Nat × Nat) := [(m, 0, n), (w, 2, 2 + n), (e, 2, n + 100), (e, 2, 2 ^ 64)]
+    if n == 0 then ranges := ranges ++ [(w, 4, 1), (w, 2 ^ 64, 3), (w, 6, 2 ^ 64 + 1), (w, 9, 20)]
+    for (a, lo, hi) in ranges do
+      let mac := Hmac.mac key a lo hi
+      if mac.size != 32 || hex (mac.extract 0 (want.length / 2)) != want then
+        throw s!"HMAC-SHA256 differs on a {n}-byte message, as the range [{lo}, {hi}) of {a.size} bytes"
+
+/-- RFC 4648 §10's vectors in base64url without padding, each of which decodes; with their
+padding, with bits set after the last byte, or of a length 1 mod 4, none does. -/
+def checkB64 : Except String Unit := do
+  let vectors : List (String × String) := [("", ""), ("f", "Zg"), ("fo", "Zm8"), ("foo", "Zm9v"),
+    ("foob", "Zm9vYg"), ("fooba", "Zm9vYmE"), ("foobar", "Zm9vYmFy")]
+  for (d, s) in vectors do
+    let t := s.toUTF8
+    if Jwt.b64Decode t 0 t.size != some d.toUTF8 then throw s!"base64url differs on {s}"
+  for s in ["Zg==", "Zm8=", "Zm9vYg==", "Zm9vYmE=", "Zg=", "Zm9v=", "Zh", "Zm9", "Zm9vYh", "Zm9vYmF", "Z", "Zm9vY"] do
+    let t := s.toUTF8
+    if Jwt.b64Decode t 0 t.size != none then throw s!"base64url decodes {s}"
+
+def resultEq : Jwt.Result → Jwt.Result → Bool
+  | .invalid, .invalid | .badPayload, .badPayload => true
+  | .ok u n, .ok v m => u == v && n == m
+  | _, _ => false
+
+/-- The token `h.p.<signature>` for base64url parts `h` and `p`, signed with `key`. -/
+def signParts (key : Hmac.Key) (h p : ByteArray) : ByteArray :=
+  let hp := h ++ ".".toUTF8 ++ p
+  hp ++ ".".toUTF8 ++ Jwt.b64Encode (Hmac.mac key hp 0 hp.size)
+
+/-- `Jwt.verify` on tokens signed here: valid ones (whose payloads end in groups of each length),
+and what RFC 7515 and RFC 7519 make invalid although the signature is right: `crit`, a `cty` of a
+nested JWT, `aud` (before a bad `sub` is looked at), padding, bits set after the last byte. -/
+def checkTokens : Except String Unit := do
+  let key := Hmac.Key.of "twelve-dollar-challenge".toUTF8
+  let enc (s : String) : ByteArray := Jwt.b64Encode s.toUTF8
+  let sign (h p : String) : ByteArray := signParts key (enc h) (enc p)
+  let hdr := "{\"alg\":\"HS256\",\"typ\":\"JWT\"}"
+  -- 51, 52 and 53 bytes: no padding, two '=' and one '=' in base64
+  let pay := "{\"sub\":\"7\",\"username\":\"u\",\"iat\":1,\"exp\":2000000000}"
+  let pay2 := "{\"sub\":\"7\",\"username\":\"uv\",\"iat\":1,\"exp\":2000000000}"
+  let pay3 := "{\"sub\":\"7\",\"username\":\"uvw\",\"iat\":1,\"exp\":2000000000}"
+  let p2 := enc pay2
+  let p3 := enc pay3
+  let ok : Jwt.Result := .ok 7 "u".toUTF8
+  let cases : List (String × ByteArray × Jwt.Result) := [
+    ("a valid token", sign hdr pay, ok),
+    ("a valid token, two characters in its last group", sign hdr pay2, .ok 7 "uv".toUTF8),
+    ("a valid token, three characters in its last group", sign hdr pay3, .ok 7 "uvw".toUTF8),
+    ("crit", sign "{\"alg\":\"HS256\",\"crit\":[\"x\"],\"x\":1}" pay, .invalid),
+    ("an empty crit", sign "{\"alg\":\"HS256\",\"crit\":[]}" pay, .invalid),
+    ("cty JWT", sign "{\"alg\":\"HS256\",\"cty\":\"JWT\"}" pay, .invalid),
+    ("cty application/jwt", sign "{\"alg\":\"HS256\",\"cty\":\"Application/JWT\"}" pay, .invalid),
+    ("cty JWT, escaped", sign "{\"alg\":\"HS256\",\"cty\":\"\\u004aWT\"}" pay, .invalid),
+    ("another cty", sign "{\"alg\":\"HS256\",\"cty\":\"jwt+json\"}" pay, ok),
+    ("a cty that is not a string", sign "{\"alg\":\"HS256\",\"cty\":1}" pay, ok),
+    ("aud", sign hdr "{\"sub\":\"7\",\"username\":\"u\",\"exp\":2000000000,\"aud\":\"another-service\"}", .invalid),
+    ("aud and a bad sub", sign hdr "{\"sub\":\"x\",\"username\":\"u\",\"exp\":2000000000,\"aud\":[]}", .invalid),
+    ("padding", signParts key (enc hdr) (p2 ++ "==".toUTF8), .invalid),
+    ("one '=' of padding", signParts key (enc hdr) (p3 ++ "=".toUTF8), .invalid),
+    ("a set bit after the last byte", signParts key (enc hdr) (p2.set! (p2.size - 1) (p2.get! (p2.size - 1) + 1)), .invalid),
+    ("a set bit after the last two bytes", signParts key (enc hdr) (p3.set! (p3.size - 1) (p3.get! (p3.size - 1) + 1)),
+      .invalid)]
+  for (what, t, want) in cases do
+    if !resultEq (Jwt.verify key 1700000000 t 0 t.size) want then throw s!"Jwt.verify differs on {what}"
 
 /-! ## Storage operations against the model -/
 
@@ -1168,10 +1988,22 @@ def checkReads (db : DB) (g : Rng) : IO Rng := do
   unless ← Store.commit (m := IO) do throw (IO.userError "commit failed")
   return g
 
-/-- Random writes in one write phase, each compared with the model; the model after them. -/
+/-- Bodies `postText` lets through at the edges of schema.sql's `CHECK (length(body) BETWEEN 1 AND
+500)`, where SQLite's `length` counts the characters before the first NUL: 500 characters of one,
+two, three and four bytes, a NUL after the first character, a NUL as the 500th. -/
+def edgeBodies : Array (List UInt8) :=
+  let rep (s : String) (n : Nat) : List UInt8 := (List.replicate n (Spec.lit s)).flatten
+  #[rep "x" 500, rep "é" 500, rep "中" 500, rep "😀" 500, [0x78, 0], [0x78, 0] ++ rep "y" 498, rep "é" 499 ++ [0]]
+
+/-- Random writes in one write phase, each compared with the model; the model after them. The
+model gives the phase one clock reading: every post gets the `created_at` of the phase's first,
+which differs from the last phase's, and the phase waits 2 ms after that one, so that a time taken
+per insert would differ. Some bodies are at the edges of the schema's CHECK; some start with
+U+0000, which the CHECK refuses (`postText` answers them 500): no row, id 0. -/
 def checkWrites (db : DB) (g : Rng) : IO (DB × Rng) := do
   let mut g := g
   let mut db := db
+  let mut timed := false
   unless ← Store.begin (m := IO) do throw (IO.userError "begin failed")
   Store.endReads (m := IO)
   let maxId := (db.posts.map (·.id)).foldl max 0
@@ -1180,7 +2012,9 @@ def checkWrites (db : DB) (g : Rng) : IO (DB × Rng) := do
     let (uid, g2) := g1.below (nUserIds + 10)
     let (pid, g3) := g2.below (maxId + 20)
     let (body, g4) := g3.text 1 30 bodyChars
-    g := g4
+    let (e, g5) := g4.below 8
+    let (edge, g6) := g5.below edgeBodies.size
+    g := g6
     if k == 0 then
       let got ← Store.postExists (m := IO) pid
       let (want, _) := (Store.postExists (m := Model) pid).run db
@@ -1190,15 +2024,73 @@ def checkWrites (db : DB) (g : Rng) : IO (DB × Rng) := do
       let (want, db') := (Store.insertLike (m := Model) (uid + 1) pid).run db
       unless got == want do throw (IO.userError s!"insertLike {uid + 1} {pid} differs from the model")
       db := db'
+    else if e == 0 then
+      let (created, id) ← Store.insertPost (m := IO) (uid + 1) ⟨(0 :: body).toArray⟩
+      unless id == 0 && created.size == 0 do
+        throw (IO.userError s!"insertPost of a body that starts with U+0000 added a row (id {id})")
     else
+      let body := if e == 1 then edgeBodies[edge]! else body
       let (created, id) ← Store.insertPost (m := IO) (uid + 1) ⟨body.toArray⟩
-      -- the model's clock is SQLite's `now` of this insert
-      let ((created', id'), db') := (Store.insertPost (m := Model) (uid + 1) ⟨body.toArray⟩).run { db with clock := bs created }
+      unless timed do
+        -- the time is taken anew: the last phase's first post is at least 2 ms older
+        if bs created == db.clock then throw (IO.userError "a write phase kept the last phase's created_at")
+        db := { db with clock := bs created }
+        timed := true
+        IO.sleep 2
+      let ((created', id'), db') := (Store.insertPost (m := Model) (uid + 1) ⟨body.toArray⟩).run db
       unless id == id' && created.data == created'.data do
-        throw (IO.userError s!"insertPost differs from the model (id {id} vs {id'})")
+        throw (IO.userError s!"insertPost differs from the model (id {id} vs {id'}, created_at {(String.fromUTF8? created).getD ""} vs {(String.fromUTF8? created').getD ""})")
       db := db'
   unless ← Store.commit (m := IO) do throw (IO.userError "commit failed")
   return (db, g)
+
+/-! ## One batch through the handler, at `IO` and on the model -/
+
+/-- A token for user `uid` named `name`, signed with `key`, that expires at `exp`. -/
+def token (key : Hmac.Key) (uid : Nat) (name : String) (exp : Nat) : ByteArray :=
+  let hp := Jwt.b64Encode "{\"alg\":\"HS256\",\"typ\":\"JWT\"}".toUTF8 ++ ".".toUTF8 ++
+    Jwt.b64Encode ("{\"sub\":\"" ++ toString uid ++ "\",\"username\":\"" ++ name ++ "\",\"exp\":" ++ toString exp ++ "}").toUTF8
+  hp ++ ".".toUTF8 ++ Jwt.b64Encode (Hmac.mac key hp 0 hp.size)
+
+/-- A request with the token and a body (`head` is the method and the path). -/
+def request (head : String) (tok : ByteArray) (body : String) : ByteArray :=
+  head.toUTF8 ++ " HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer ".toUTF8 ++ tok ++
+    s!"\r\nContent-Length: {body.toUTF8.size}\r\n\r\n{body}".toUTF8
+
+/-- `POST /posts` bodies: texts that start with U+0000 once trimmed, which the schema's CHECK
+refuses (500, no row), and four new posts. -/
+def batchBodies : Array String := #["{\"body\":\"\\u0000x\"}", "{\"body\":\"first\"}", "{\"body\":\"  \\u0000\"}",
+  "{\"body\":\"x\\u0000y\"}", "{\"body\":\"\\u0000\"}", "{\"body\":\" second \"}", "{\"body\":\"\\u2028\\u0000x\"}",
+  "{\"body\":\"third\"}"]
+
+/-- The `created_at` of the first post object in a response, if it has one. -/
+def createdIn (b : ByteArray) : Option (List UInt8) :=
+  (List.range b.size).findSome? fun i =>
+    if slice b i (i + kCreated.size) == bs kCreated then some (slice b (i + kCreated.size) (i + kCreated.size + 24))
+    else none
+
+def replyEq (a b : Reply) : Bool := a.resp == b.resp && a.start == b.start && a.consumed == b.consumed && a.flags == b.flags
+
+/-- One batch, a request per connection (the bodies above, a like, the feed, and the post the
+batch inserts first, not found in the batch's snapshot), through `runBatch` at `IO` (the C storage
+on the test database, the C leaves) and on the model, whose clock is the `created_at` of the
+batch's first new post: the same replies, byte for byte. So the bodies that start with U+0000 get
+500 and add no row (`checkReads` after it compares the tables), and the four new posts share
+their `created_at`. The model after it. -/
+def checkBatch (db : DB) : IO DB := do
+  let key := Hmac.Key.of "selftest".toUTF8
+  let tok := token key 1 "user_1" 2000
+  let pid := (db.posts.head?.map (·.id)).getD 1
+  let chunks := batchBodies.map (request "POST /posts" tok) ++ #[request s!"POST /posts/{pid}/like" tok "",
+    request "GET /feed" tok "", request s!"GET /posts/{db.nextPostId}" tok ""]
+  let env : Env := { key, now := 1000, uptime := 7, writesOk := true }
+  let got ← runBatch (m := IO) env chunks
+  let clock := (got.toList.findSome? fun r =>
+    if (bs r.resp).take 12 == Spec.lit "HTTP/1.1 201" then createdIn r.resp else none).getD []
+  let (want, db') := (runBatch (m := Model) env chunks).run { db with clock }
+  unless got.size == want.size && (List.range got.size).all fun i => replyEq got[i]! want[i]! do
+    throw (IO.userError "a batch through the handler at IO differs from the model")
+  return db'
 
 def checkStorage (path : String) : IO Unit := do
   let (db, g) := randomDb ⟨0x2545f4914f6cdd1d⟩
@@ -1213,6 +2105,8 @@ def checkStorage (path : String) : IO Unit := do
     let (db', g') ← checkWrites db g
     db := db'
     g ← checkReads db g'
+  db ← checkBatch db
+  let _ ← checkReads db g
   unless ← integrityOk do throw (IO.userError "the database fails SQLite's integrity check after the writes")
 
 def run (path : String) : IO UInt32 := do
@@ -1228,10 +2122,16 @@ def run (path : String) : IO UInt32 := do
   match checkPostResponses 20000 with
   | .error e => IO.eprintln s!"selftest: {e}"; return 1
   | .ok () => pure ()
-  match checkHttp 20000 with
+  match checkHttpExamples with
   | .error e => IO.eprintln s!"selftest: {e}"; return 1
   | .ok () => pure ()
-  match checkHttpRoom 20000 with
+  match checkHttpBytes with
+  | .error e => IO.eprintln s!"selftest: {e}"; return 1
+  | .ok () => pure ()
+  match checkParse 20000 with
+  | .error e => IO.eprintln s!"selftest: {e}"; return 1
+  | .ok () => pure ()
+  match checkHttp 20000 with
   | .error e => IO.eprintln s!"selftest: {e}"; return 1
   | .ok () => pure ()
   match checkRoutes 20000 with
@@ -1240,10 +2140,16 @@ def run (path : String) : IO UInt32 := do
   match checkJson 20000 with
   | .error e => IO.eprintln s!"selftest: {e}"; return 1
   | .ok () => pure ()
+  match checkUtf8 with
+  | .error e => IO.eprintln s!"selftest: {e}"; return 1
+  | .ok () => pure ()
   match checkSha with
   | .error e => IO.eprintln s!"selftest: {e}"; return 1
   | .ok () => pure ()
-  match checkIdle 20000 with
+  match checkB64 with
+  | .error e => IO.eprintln s!"selftest: {e}"; return 1
+  | .ok () => pure ()
+  match checkTokens with
   | .error e => IO.eprintln s!"selftest: {e}"; return 1
   | .ok () => pure ()
   match checkCrypto 20000 with
@@ -1251,7 +2157,7 @@ def run (path : String) : IO UInt32 := do
   | .ok () => pure ()
   try checkStorage path
   catch e => IO.eprintln s!"selftest: {e}"; return 1
-  IO.println "selftest: the C leaves (bytes, HMAC-SHA256, base64url, post objects, feed pages, HTTP framing, routes, JSON input, the idle policy) agree with their Lean definitions on 20000 random inputs; the storage operations with the model on a random database; the grouped rowid search and the index pass with SQLite's; a rollback and the integrity check; SHA-256 and HMAC with the test vectors"
+  IO.println s!"selftest: the C leaves (bytes, HTTP framing, HMAC-SHA256, base64url, feed pages, the feed's and a post's responses, routes, JSON input) agree with their Lean definitions on 20000 random inputs, HTTP framing also with each byte in {byteSlots.size} places of a request and on the prefixes of 20000 more, and on JSON strings with each byte from 0x80 to 0xff; HTTP framing gives the specification's frames of {httpExamples.size} inputs at the start of the input and after other bytes, and each checked prefix of the 20000 more is a wait or reads as the whole input; the storage operations and a batch through the handler with the model on a random database; the grouped rowid search and the index pass with SQLite's; a rollback and the integrity check; SHA-256, HMAC and base64url with the test vectors; the token checks on signed tokens"
   return 0
 
 end Feed.Selftest

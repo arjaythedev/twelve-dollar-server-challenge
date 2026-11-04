@@ -8,3 +8,17 @@ import Feed.Proofs.Route
 import Feed.Proofs.Decide
 import Feed.Proofs.Batch
 import Feed.Proofs.Idle
+import Feed.Proofs.Views
+import Feed.Proofs.Store
+import Feed.Proofs.Slice
+import Feed.Proofs.Sha256
+import Feed.Proofs.Base64
+import Feed.Proofs.Utf8
+import Feed.Proofs.JsonToken
+import Feed.Proofs.JsonValue
+import Feed.Proofs.Body
+import Feed.Proofs.Auth
+import Feed.Proofs.Uri
+import Feed.Proofs.HttpLines
+import Feed.Proofs.Http
+import Feed.Proofs.EndToEnd

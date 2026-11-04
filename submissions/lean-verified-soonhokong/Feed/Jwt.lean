@@ -4,12 +4,15 @@ import Feed.Sha256
 /-!
 # JWT (HS256) verification
 
-`Authorization: Bearer <header>.<payload>.<signature>`. A token is accepted when the header is
-a JSON object with `"alg":"HS256"`, the signature is the base64url HMAC-SHA256 of
-`<header>.<payload>` under the secret (compared as text, like the `jws` library does, in
-constant time), and the payload is a JSON object whose `exp` is a number greater than the
-current time (and whose `nbf`, if present, is not). Then `sub` must be a string holding a
-positive decimal integer and `username` a string, else the payload is rejected.
+`Authorization: Bearer <header>.<payload>.<signature>`, each part base64url without padding
+(RFC 7515 §2). A token is accepted when the header is a JSON object with `"alg":"HS256"`, no
+`crit` (no extension is understood, RFC 7515 §4.1.11) and no `cty` that names a nested JWT
+(RFC 7519 §7.2 step 8), the signature is the base64url HMAC-SHA256 of `<header>.<payload>` under
+the secret (compared as text, like the `jws` library does, in constant time), and the payload is
+a JSON object whose `exp` is a number greater than the current time, whose `nbf`, if present, is
+not, and that has no `aud` (the server has no name to find in one, RFC 7519 §4.1.3). Then `sub`
+must be a string holding a positive decimal integer and `username` a string, else the payload is
+rejected.
 -/
 namespace Feed.Jwt
 open Json
@@ -31,19 +34,18 @@ def b64Val (c : UInt8) : UInt8 :=
   else if c == 0x5f then 63
   else 64
 
-/-- Decode base64url text `a[lo, hi)` (no padding; a trailing `=` padding is accepted). -/
+/-- Decode base64url text `a[lo, hi)`: `none` if a byte is not a base64url character (`=` is
+not: no padding), the length is 1 mod 4, or the bits after the last whole byte are not zero
+(RFC 4648 §3.5). So the one text that decodes to some bytes is the one `b64Encode` writes. -/
 @[extern "feed_b64_decode"]
 def b64Decode (a : @& ByteArray) (lo hi : @& Nat) : Option ByteArray :=
   let hi := min hi a.size
-  -- strip up to two '=' of padding
-  let hi := if hi > lo && a.get! (hi - 1) == 0x3d then hi - 1 else hi
-  let hi := if hi > lo && a.get! (hi - 1) == 0x3d then hi - 1 else hi
   if (hi - lo) % 4 == 1 then none
   else go lo (hi - lo) 0 0 (ByteArray.emptyWithCapacity ((hi - lo) * 3 / 4 + 3))
 where
-  /-- `acc` holds `nbits` (< 8) pending bits -/
+  /-- `acc` holds `nbits` (< 8) pending bits, which must be zero at the end -/
   go (i : Nat) : Nat → UInt32 → UInt32 → ByteArray → Option ByteArray
-    | 0, _, _, out => some out
+    | 0, acc, _, out => if acc == 0 then some out else none
     | f + 1, acc, nbits, out =>
       let v := b64Val (a.get! i)
       if v == 64 then none else
@@ -86,11 +88,30 @@ where
     | f + 1, acc => go (k + 1) f (acc ||| (x.get! k ^^^ a.get! (lo + k)))
 
 def keyAlg : ByteArray := "alg".toUTF8
+def keyCrit : ByteArray := "crit".toUTF8
+def keyCty : ByteArray := "cty".toUTF8
 def keyExp : ByteArray := "exp".toUTF8
 def keyNbf : ByteArray := "nbf".toUTF8
 def keySub : ByteArray := "sub".toUTF8
 def keyUsername : ByteArray := "username".toUTF8
+def keyAud : ByteArray := "aud".toUTF8
 def hs256 : ByteArray := "HS256".toUTF8
+def ctyJwt : ByteArray := "jwt".toUTF8
+def ctyAppJwt : ByteArray := "application/jwt".toUTF8
+
+/-- Whether `s` is `lit` (lowercase), ignoring ASCII case. -/
+def eqLower (s lit : ByteArray) : Bool :=
+  s.size == lit.size && go 0 lit.size
+where
+  go (k : Nat) : Nat → Bool
+    | 0 => true
+    | f + 1 =>
+      let b := s.get! k
+      (if 0x41 ≤ b && b ≤ 0x5a then b + 32 else b) == lit.get! k && go (k + 1) f
+
+/-- Whether a `cty` value names a nested JWT: `JWT` or `application/jwt`, in any ASCII case (a
+media type, with `application/` implied when there is no `/`, RFC 7515 §4.1.10). -/
+def nestedCty (s : ByteArray) : Bool := eqLower s ctyJwt || eqLower s ctyAppJwt
 
 /-- Whether the decoded bytes are a positive decimal integer without sign or leading zero, and
 its value. -/
@@ -116,15 +137,20 @@ def verify (key : Hmac.Key) (now : Nat) (a : ByteArray) (lo hi : Nat) : Result :
   else
   match b64Decode a lo d1, b64Decode a (d1 + 1) d2 with
   | some h, some p =>
-    match parseTop h 0 h.size #[keyAlg], parseTop p 0 p.size #[keyExp, keyNbf, keySub, keyUsername] with
+    match parseTop h 0 h.size #[keyAlg, keyCrit, keyCty], parseTop p 0 p.size #[keyExp, keyNbf, keySub, keyUsername, keyAud] with
     | .object hf, .object pf =>
       let alg := hf[0]!
+      let cty := hf[2]!
       if alg.kind != .str || decodeString h alg.lo alg.hi != hs256 then .invalid
+      else if hf[1]!.kind != .absent then .invalid
+      else if cty.kind == .str && nestedCty (decodeString h cty.lo cty.hi) then .invalid
       else
       let exp := pf[0]!
       let nbf := pf[1]!
       if exp.kind != .num || !numGt p exp.lo exp.hi now then .invalid
       else if nbf.kind != .absent && (nbf.kind != .num || numGt p nbf.lo nbf.hi now) then .invalid
+      -- `aud` before `sub` and `username`: a token for another audience is invalid, whatever its payload
+      else if pf[4]!.kind != .absent then .invalid
       else
       let sub := pf[2]!
       let user := pf[3]!

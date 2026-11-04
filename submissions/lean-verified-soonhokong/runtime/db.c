@@ -31,6 +31,7 @@ static Pgno root_posts, root_users, root_feed_idx, root_likes_post_idx;
 static KeyInfo *ki_feed_idx, *ki_likes_post_idx;
 static BtCursor *c_posts, *c_users, *c_feed_idx, *c_likes, *c_exists;
 static int reads_open;
+static int phase_now_len;   /* the length of the write phase's created_at once taken (db_phase_now), else 0 */
 static void pins_release(void);
 LEAN_EXPORT lean_obj_res feed_db_commit(void);
 
@@ -284,11 +285,11 @@ static void db_open(const char *path) {
   st_commit = db_prepare("COMMIT");
   st_rollback = db_prepare("ROLLBACK");
   st_health = db_prepare("SELECT 1");
-  /* OR IGNORE: for these values (never NULL; a body the handler checked) the constraints that can
-   * fail are the like's primary key, which it ignores as ON CONFLICT DO NOTHING would, and the
-   * body's CHECK for a body that starts with U+0000 (length() stops at the first NUL), whose row
-   * it skips, so insertPost returns id 0. No constraint can abort the statement, so SQLite needs
-   * no statement journal. created_at is bound in the schema default's format (db_now). */
+  /* OR IGNORE: for these values (never NULL; a body postText accepted, which meets the CHECK on
+   * length(body)) the only constraint that can fail is the like's primary key, which it ignores as
+   * ON CONFLICT DO NOTHING would; and no constraint can abort the statement, so SQLite needs no
+   * statement journal. created_at is bound in the schema default's format, one time per write
+   * phase (db_phase_now). */
   st_like = db_prepare("INSERT OR IGNORE INTO likes (user_id, post_id, created_at) VALUES (?1, ?2, ?3)");
   st_post = db_prepare("INSERT OR IGNORE INTO posts (user_id, body, created_at) VALUES (?1, ?2, ?3)");
   c_posts = malloc((size_t)sqlite3BtreeCursorSize());
@@ -473,6 +474,7 @@ LEAN_EXPORT lean_obj_res feed_db_end_reads(void) {
     sqlite3BtreeCloseCursor(c_likes);
     reads_open = 0;
   }
+  phase_now_len = 0;   /* the write phase begins: its first insert takes the time */
   return io_ok(lean_box(0));
 }
 
@@ -1445,12 +1447,23 @@ static int db_now(char *out) {
   return 24;
 }
 
+/* The created_at of the write phase's rows. The model gives each write phase one clock reading
+ * (DB.clock, Feed/Spec.lean): every post a batch inserts gets the same created_at. So the first
+ * insert after the reads end takes the time (db_now) and the later inserts of the phase reuse it;
+ * a phase runs from feed_db_end_reads to feed_db_commit, which both clear phase_now_len. */
+static char phase_now[32];
+static const char *db_phase_now(int *len) {
+  if (!phase_now_len) phase_now_len = db_now(phase_now);
+  *len = phase_now_len;
+  return phase_now;
+}
+
 /* insertLike uid pid: insert the like unless present. 1 inserted, 0 already there, 2 error. */
 LEAN_EXPORT lean_obj_res feed_db_insert_like(b_lean_obj_arg uidn, b_lean_obj_arg pidn) {
   u64_t uid = nat_u64(uidn), pid = nat_u64(pidn);
   if (uid > (u64_t)INT64_MAX || pid > (u64_t)INT64_MAX) return io_ok(lean_box(2));
-  char now[32];
-  int nl = db_now(now);
+  int nl;
+  const char *now = db_phase_now(&nl);
   sqlite3_bind_int64(st_like, 1, (i64_t)uid);
   sqlite3_bind_int64(st_like, 2, (i64_t)pid);
   sqlite3_bind_text(st_like, 3, now, nl, SQLITE_STATIC);
@@ -1466,8 +1479,8 @@ LEAN_EXPORT lean_obj_res feed_db_insert_post(b_lean_obj_arg uidn, b_lean_obj_arg
   u64_t uid = nat_u64(uidn), id = 0;
   lean_object *created = lean_alloc_sarray(1, 0, 32);
   if (uid <= (u64_t)INT64_MAX) {
-    char now[32];
-    int nl = db_now(now);
+    int nl;
+    const char *now = db_phase_now(&nl);
     sqlite3_bind_int64(st_post, 1, (i64_t)uid);
     sqlite3_bind_text(st_post, 2, (const char *)lean_sarray_cptr(body), (int)lean_sarray_size(body), SQLITE_STATIC);
     sqlite3_bind_text(st_post, 3, now, nl, SQLITE_STATIC);
@@ -1843,6 +1856,7 @@ LEAN_EXPORT lean_obj_res feed_db_create(b_lean_obj_arg path, b_lean_obj_arg scri
 LEAN_EXPORT lean_obj_res feed_db_commit(void) {
 
   if (reads_open) lean_dec(feed_db_end_reads());
+  phase_now_len = 0;   /* the write phase ends */
   if (sqlite3_get_autocommit(db)) return io_ok(lean_box(1));
   if (step_reset(st_commit) == SQLITE_DONE) return io_ok(lean_box(1));
   db_log_error("commit");

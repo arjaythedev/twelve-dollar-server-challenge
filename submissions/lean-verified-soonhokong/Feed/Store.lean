@@ -5,6 +5,11 @@ The handler reads and writes the database only through these operations. Each ha
 meaning over the list model of the tables (`Feed/Model.lean`): the proofs
 are about the handler instantiated with the model; the server runs the same handler code
 instantiated with `IO`, where each operation is a C function over SQLite (`runtime/db.c`).
+What the end-to-end theorems ask of an implementation is `Store.Contract`
+(`Feed/Proofs/Store.lean`): each operation as its meaning says (a page up to `Page.Same`), and
+`insertPost` only for a body that is a post's text as the API takes it (`Spec.Body.accept`), the
+only bodies the handler inserts; schema.sql's CHECK refuses some other bodies, and SQLite adds no
+row for them.
 
 A read returns its rows in a flat form so that a request costs one call and a handful of
 allocations: one byte array with the text and one array of numbers describing each row.

@@ -30,8 +30,10 @@ structure Like where
   postId : Nat
   deriving DecidableEq, Repr, Inhabited
 
-/-- The database: each table as its rows. `clock` is the value SQLite's
-`strftime('%Y-%m-%dT%H:%M:%fZ','now')` yields for the next insert. -/
+/-- The database: each table as its rows. `clock` is the time of the batch's write phase in the
+format of the column default, `strftime('%Y-%m-%dT%H:%M:%fZ','now')`: one clock reading per write
+phase, the `created_at` of every post the phase inserts (`runtime/db.c` takes the time at the
+phase's first insert and reuses it, where the column default would read it at each statement). -/
 structure DB where
   users : List User
   posts : List Post

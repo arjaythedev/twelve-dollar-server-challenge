@@ -7,7 +7,9 @@ import Feed.Proofs.Route
 What `decide` does with one parsed request, on the model: the response the specification gives
 for the request's route, or the write the request asks for. Whether the token and the post body
 are accepted is decided by the handler's own `authenticate` and `postText`, which appear in the
-statement; `Feed.Proofs.Jwt` states what an accepted token satisfies.
+statement; `authenticate_spec` (`Feed/Proofs/Auth.lean`) and `postText_spec`
+(`Feed/Proofs/Body.lean`) say what they decide, and `decide_correct` (`Feed/Proofs/EndToEnd.lean`)
+states the answer with them.
 -/
 namespace Feed
 open Spec Http
@@ -152,5 +154,8 @@ theorem decide_spec (env : Env) (a : ByteArray) (r : Req) (out scratch : ByteArr
     simp only [StateT.run_pure, id_pure, Route.toSpec, expected, Realizes]
     refine ⟨trivial, trivial, ?_⟩
     rw [bs_respondErr, bs_err_body]; rfl
+
+/-- info: 'Feed.decide_spec' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in #print axioms decide_spec
 
 end Feed

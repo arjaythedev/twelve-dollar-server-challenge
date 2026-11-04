@@ -1,9 +1,12 @@
 /-!
 # Byte-level leaves
 
-Each definition here is the specification of one small C function in `runtime/leaves.c`: the
-Lean body is what proofs reason about, `@[extern]` makes compiled code call the C version.
-They are generic byte operations (append, escape, search); nothing in this file knows the API.
+Generic byte operations (append, escape, search); nothing in this file knows the API. Each one
+marked `@[extern]` is the specification of a small C function in `runtime/leaves.c`: the Lean
+body is what proofs reason about, `@[extern]` makes compiled code call the C version. The others
+run as compiled Lean, though no request reaches them: only the Lean bodies of other leaves lead
+to them, and the server replaces those by C (`decide`'s `clear` of an empty buffer compiles to the
+empty array).
 -/
 namespace Feed
 
@@ -42,17 +45,14 @@ def appendNat (out : ByteArray) (n : @& Nat) : ByteArray :=
   out ++ (toString n).toUTF8
 
 /-- `out` followed by `lit` and the escape of `src[lo, hi)`. -/
-@[extern "feed_append_lit_esc"]
 def appendLitEsc (out : ByteArray) (lit src : @& ByteArray) (lo hi : @& Nat) : ByteArray :=
   out ++ lit ++ ⟨(escape (slice src lo hi)).toArray⟩
 
 /-- `out` followed by `lit` and the decimal digits of `n`. -/
-@[extern "feed_append_lit_nat"]
 def appendLitNat (out : ByteArray) (lit : @& ByteArray) (n : @& Nat) : ByteArray :=
   out ++ lit ++ (toString n).toUTF8
 
 /-- `out` followed by `src[lo, hi)`. -/
-@[extern "feed_append_slice"]
 def appendSlice (out : ByteArray) (src : @& ByteArray) (lo hi : @& Nat) : ByteArray :=
   out ++ ⟨(slice src lo hi).toArray⟩
 
@@ -72,7 +72,6 @@ where
 
 /-- The first `i ≥ lo` with `i + 4 ≤ min hi a.size` where `a[i, i+4)` is `\r\n\r\n`, else
 `min hi a.size`: the end of an HTTP head. -/
-@[extern "feed_find_head_end"]
 def findHeadEnd (a : @& ByteArray) (lo hi : @& Nat) : Nat :=
   go lo (min hi a.size + 1 - lo)
 where
@@ -84,8 +83,8 @@ where
         else go (i + 1) fuel
       else min hi a.size
 
-/-- The empty array. The C version keeps the allocation of `a` for reuse when it can. -/
-@[extern "feed_bytes_clear"]
+/-- The empty array, in place of a scratch buffer (the C of `feedFromPage` keeps the buffer's
+allocation for reuse when it can). -/
 def clear (_a : ByteArray) : ByteArray := ByteArray.empty
 
 end Bytes

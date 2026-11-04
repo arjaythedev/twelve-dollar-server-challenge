@@ -19,6 +19,55 @@ echo "== lake: check the proofs, compile Feed/ to C"
 MODS="Main Feed.Bytes Feed.Json Feed.Sha256 Feed.Jwt Feed.Http Feed.Store Feed.Handler Feed.Server Feed.Spec Feed.Model Feed.Selftest"
 lake build Feed $(for m in $MODS; do printf '%s:c ' "$m"; done)
 LEAN_LIB="$(lean --print-prefix)/lib"
+
+echo "== IR closure: the C functions that compiled Lean calls"
+# Besides Lean's own runtime and library, the C emitted for the modules linked into bin/server, the
+# self-test's excepted, calls exactly these C functions: the leaves of runtime/leaves.c, each checked
+# by the self-test against its Lean definition; the storage operations of runtime/db.c
+# (Feed/Store.lean), checked against the model; and what Main calls to start. The list is exact: the
+# build stops at a call to a C function not on it, and at one on it that is no longer called (a
+# leaf whose @[extern] was removed).
+LEAVES="feed_http_parse feed_route feed_json_parse_top feed_json_decode_string feed_hmac_mac
+  feed_b64_encode feed_b64_decode feed_find_byte feed_append_esc feed_append_nat feed_append_all
+  feed_feed_from_page feed_page_authored feed_respond_feed feed_respond_post"
+STORE="feed_db_begin feed_db_feed_page feed_db_post_page feed_db_health feed_db_end_reads feed_db_post_exists
+  feed_db_insert_like feed_db_insert_post feed_db_commit"
+START="feed_db_open feed_transport_run feed_train_run"
+# cnames <file>: the names that preprocessed C on stdin calls, or makes closures of, inside function
+# bodies on the lines from <file>; for a directory <dir>/, the names that its headers declare or
+# define outside bodies.
+cnames() {
+  awk -v src="$1" 'BEGIN { dir = src ~ /\/$/ }
+    /^# [0-9]+ "/ { f = substr($3, 2, length($3) - 2); here = dir ? index(f, src) == 1 : f == src; next }
+    { s = $0; gsub(/"([^"\\]|\\.)*"/, "\"\"", s); c = s
+      if (here && (dir ? depth == 0 : depth > 0)) {
+        if (dir) sub(/\{.*/, "", c)
+        t = c; while (match(t, /[A-Za-z_][A-Za-z0-9_]*\(/)) { print substr(t, RSTART, RLENGTH - 1); t = substr(t, RSTART + RLENGTH) }
+        t = c; while (match(t, /\(void\*\)\([A-Za-z_][A-Za-z0-9_]*\)/)) { print substr(t, RSTART + 8, RLENGTH - 9); t = substr(t, RSTART + RLENGTH) }
+      }
+      depth += gsub(/\{/, "{", s) - gsub(/\}/, "}", s) }'
+}
+IRC=build/ir-closure; rm -rf "$IRC"; mkdir -p "$IRC"
+# Lean's functions: the toolchain's (lean.h, the runtime, Init) and those the linked modules define
+{ nm -g --defined-only "$LEAN_LIB/lean/libleanrt.a" "$LEAN_LIB/lean/libInit.a" 2>/dev/null | awk 'NF == 3 { print $3 }'
+  echo '#include <lean/lean.h>' | cc -E -DNDEBUG -DLEAN_EXPORTING -I"$LEAN_INC" -x c - | cnames "$LEAN_INC/lean/"
+  for m in $MODS; do sed -nE 's/^[A-Za-z_].*[ *]([A-Za-z_][A-Za-z0-9_]*)\(.*\) ?\{$/\1/p' ".lake/build/ir/${m//.//}.c"; done
+} | LC_ALL=C sort -u > "$IRC/lean"
+for m in $MODS; do
+  [ "$m" = Feed.Selftest ] && continue
+  f=".lake/build/ir/${m//.//}.c"
+  cc -E -DNDEBUG -DLEAN_EXPORTING -I"$LEAN_INC" "$f" | cnames "$f" | sed "s/^/$m /"
+done | LC_ALL=C sort -u > "$IRC/calls"
+cut -d' ' -f2 "$IRC/calls" | LC_ALL=C sort -u | LC_ALL=C comm -23 - "$IRC/lean" |
+  { grep -vxE 'if|for|while|switch|return|sizeof|__[A-Za-z0-9_]*' || true; } > "$IRC/foreign"
+printf '%s\n' $LEAVES $STORE $START | LC_ALL=C sort -u > "$IRC/allowed"
+if ! cmp -s "$IRC/foreign" "$IRC/allowed"; then
+  LC_ALL=C comm -23 "$IRC/foreign" "$IRC/allowed" | while read -r x; do
+    echo "compiled Lean calls $x, which is not on the list (in $(awk -v x="$x" '$2 == x { m = m (m ? " " : "") $1 } END { print m }' "$IRC/calls"))"; done
+  LC_ALL=C comm -13 "$IRC/foreign" "$IRC/allowed" | while read -r x; do echo "$x is on the list, but compiled Lean does not call it"; done
+  exit 1
+fi
+echo "compiled Lean calls $(wc -l < "$IRC/foreign") C functions, all on the list: $(echo $LEAVES | wc -w) leaves, $(echo $STORE | wc -w) storage operations, $(echo $START | wc -w) entry points"
 # gcc compiles both the C that Lean emitted and the C runtime (SQLite, storage, leaves, transport),
 # profile-guided: an instrumented build runs a made-up workload (runtime/train.c), then the
 # final build uses the profile. Any failure there falls back to the plain build.

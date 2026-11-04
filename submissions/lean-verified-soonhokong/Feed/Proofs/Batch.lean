@@ -1,4 +1,5 @@
 import Feed.Proofs.Decide
+import Feed.Proofs.HttpLines
 import Feed.Proofs.Write
 import Feed.Server
 
@@ -219,21 +220,79 @@ theorem replies_spec (outs : Array ChunkOut) (results : Array (Nat × ByteArray)
 
 /-! ## One connection's read phase -/
 
+theorem bs_rejectBody (st : Nat) : bs (rejectBody st) = Spec.Http.badBody st := by
+  unfold rejectBody Spec.Http.badBody
+  by_cases h3 : st = 413
+  · subst h3; rfl
+  by_cases h4 : st = 414
+  · subst h4; rfl
+  by_cases h1 : st = 431
+  · subst h1; rfl
+  rw [ite_eq_right (by simpa using h3), ite_eq_right (by simpa using h4), ite_eq_right (by simpa using h1)]
+  split
+  · exact absurd rfl h3
+  · exact absurd rfl h4
+  · exact absurd rfl h1
+  · rfl
+
+/-- The answer to malformed input is the specification's. -/
+theorem bs_respondReject (out : ByteArray) (head : Bool) (st : Nat) :
+    bs (respondReject out head st) = bs out ++ Spec.Http.rejectResponse head st := by
+  have hline : bs (if st == 414 then k414 else statusLine st) = Spec.lit ("HTTP/1.1 " ++ Spec.Http.rejectPhrase st ++
+      "\r\nContent-Type: application/json\r\nContent-Length: ") := by
+    by_cases h : st = 414
+    · subst h; rfl
+    · rw [ite_eq_right (by simpa using h), bs_statusLine, Spec.Http.rejectPhrase, ite_eq_right h]
+  have hsize : (rejectBody st).size = (Spec.Http.badBody st).length := by rw [size_eq_length, bs_rejectBody]
+  unfold respondReject Spec.Http.rejectResponse Spec.Http.rejectHead
+  cases head <;> simp only [Bool.false_eq_true, ↓reduceIte, bs_appendAll, bs_appendNat, hline, hsize, bs_rejectBody,
+    endHeadClose, bs_lit, List.append_assoc]
+
+/-- info: 'Feed.bs_respondReject' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in #print axioms bs_respondReject
+
+/-- The answer to HEAD is the head of the response GET gets, which `x` ends with from `out`'s size. -/
+theorem bs_stripBody (x out : ByteArray) (st : Nat) (b : List UInt8) (close : Bool)
+    (h : bs x = bs out ++ Spec.response st b close) :
+    bs (stripBody x out.size) = bs out ++ Spec.Http.responseHead st b close := by
+  have hsz : x.size = out.size + (Spec.response st b close).length := by
+    rw [size_eq_length x, size_eq_length out, h, List.length_append]
+  have hsl : slice x out.size x.size = Spec.response st b close := by
+    simp only [slice]
+    rw [show x.data.toList = bs x from rfl, h, size_eq_length out, List.drop_left, hsz, size_eq_length out]
+    simp
+  have hlen : 4 ≤ (Spec.Http.responseHead st b close).length := by
+    have h1 : (Spec.lit "\r\nConnection: close\r\n\r\n").length = 23 := rfl
+    have h2 : (Spec.lit "\r\n\r\n").length = 4 := rfl
+    simp only [Spec.Http.responseHead, List.length_append]
+    cases close <;> simp only [Bool.false_eq_true, ↓reduceIte, h1, h2] <;> omega
+  unfold stripBody
+  rw [Http.headEnd_eq x (by omega) (Nat.le_refl _), hsl, crlf2Idx_response]
+  simp only [Option.map_some]
+  rw [show bs (x.extract 0 (out.size + ((Spec.Http.responseHead st b close).length - 4) + 4)) =
+      (bs x).take (out.size + (Spec.Http.responseHead st b close).length) by
+    simp only [bs, ByteArray.data_extract, Array.toList_extract, List.extract, List.drop_zero]
+    congr 1 <;> omega]
+  rw [h, Spec.Http.response_eq_head, size_eq_length out, ← List.append_assoc, List.take_left' (by simp)]
+
+/-- info: 'Feed.bs_stripBody' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in #print axioms bs_stripBody
+
 /-- The specification's read phase of one connection's input `a` from position `pos`, `n`
 requests answered so far: the requests in order, each answered with the specification's outcome
 from the snapshot `db`, until the input runs out, a request is incomplete or malformed, a write
 comes, or the connection is to close. A write is handed over when it is the connection's first
 request of the batch and writes are on; otherwise it waits, with everything after it, for the next
-batch. Result: the answers' bytes, the input used, the transport's flags, the write handed over. -/
+batch. Malformed input gets `Spec.Http.rejectResponse`, and a HEAD request the head of GET's
+response (`Spec.Http.responseHead`). Result: the answers' bytes, the input used, the transport's
+flags, the write handed over. -/
 def specRead (env : Env) (db : DB) (a : ByteArray) :
     Nat → Nat → Nat → List UInt8 × Nat × Nat × Option (Write × Bool)
   | pos, _, 0 => ([], pos, if pos < a.size then 2 else 0, none)
   | pos, n, fuel + 1 =>
     match Http.parse a pos with
     | .incomplete => ([], pos, 0, none)
-    | .bad st =>
-      let e := if st == 413 then Err.tooLarge else if st == 431 then Err.headTooLarge else Err.badRequest
-      (response e.status (bs e.body) true, a.size, 1, none)
+    | .bad st => (Spec.Http.rejectResponse (Spec.Http.headRequest ((bs a).drop pos)) st, a.size, 1, none)
     | .ok r =>
       match expected env db (Spec.route r.method (slice a r.pathLo r.pathHi)) (authenticate env.key env.now a r)
           (postText a r) with
@@ -241,10 +300,11 @@ def specRead (env : Env) (db : DB) (a : ByteArray) :
         if n == 0 && env.writesOk then ([], r.next, if r.next < a.size then 2 else 0, some (w, r.close))
         else ([], pos, 2, none)
       | .reply st body =>
-        if r.close then (response st body r.close, r.next, 1, none)
+        let bytes := if r.head then Spec.Http.responseHead st body r.close else response st body r.close
+        if r.close then (bytes, r.next, 1, none)
         else
           let rest := specRead env db a r.next (n + 1) fuel
-          (response st body r.close ++ rest.1, rest.2)
+          (bytes ++ rest.1, rest.2)
 
 /-- What the transport takes from a connection's read phase. -/
 def ChunkOut.view (o : ChunkOut) : List UInt8 × Nat × Nat × Option (Write × Bool) :=
@@ -265,7 +325,7 @@ theorem readLoop_spec (env : Env) (a : ByteArray) (db : DB) (hsize : db.posts.le
     | incomplete => simp
     | bad st =>
       simp only [StateT.run_pure, id_pure]
-      refine ⟨bs_respondErr _ _ _, ?_, ?_, ?_⟩ <;> trivial
+      refine ⟨by rw [bs_respondReject, Http.headAt_eq], ?_, ?_, ?_⟩ <;> trivial
     | ok r =>
       obtain ⟨hst, hreal⟩ := decide_spec env a r out ByteArray.empty db hsize
       simp only [StateT.run_bind]
@@ -281,11 +341,78 @@ theorem readLoop_spec (env : Env) (a : ByteArray) (db : DB) (hsize : db.posts.le
         split <;> simp [ho]
       | reply status body =>
         obtain ⟨hw, ho⟩ := hreal
+        have hb : bs (if r.head then stripBody st.out out.size else st.out) = bs out ++
+            (if r.head then Spec.Http.responseHead status body r.close else response status body r.close) := by
+          cases r.head
+          · simpa using ho
+          · simpa using bs_stripBody st.out out status body r.close ho
         simp only [hw]
         split
-        · simp [ho]
-        · obtain ⟨h1, h2, h3, h4⟩ := ih r.next (n + 1) st.out
-          exact ⟨by rw [h1, ho, List.append_assoc], h2, h3, h4⟩
+        · exact ⟨hb, rfl, rfl, rfl⟩
+        · obtain ⟨h1, h2, h3, h4⟩ := ih r.next (n + 1) (if r.head then stripBody st.out out.size else st.out)
+          exact ⟨by rw [h1, hb, List.append_assoc], h2, h3, h4⟩
+
+/-- info: 'Feed.readLoop_spec' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in #print axioms readLoop_spec
+
+/-- `specRead` as it was before HEAD and 414 got their own answers (version 011a111), on the parse
+of this version. -/
+def specReadOld (env : Env) (db : DB) (a : ByteArray) :
+    Nat → Nat → Nat → List UInt8 × Nat × Nat × Option (Write × Bool)
+  | pos, _, 0 => ([], pos, if pos < a.size then 2 else 0, none)
+  | pos, n, fuel + 1 =>
+    match Http.parse a pos with
+    | .incomplete => ([], pos, 0, none)
+    | .bad st =>
+      let e := if st == 413 then Err.tooLarge else if st == 431 then Err.headTooLarge else Err.badRequest
+      (response e.status (bs e.body) true, a.size, 1, none)
+    | .ok r =>
+      match expected env db (Spec.route r.method (slice a r.pathLo r.pathHi)) (authenticate env.key env.now a r)
+          (postText a r) with
+      | .write w =>
+        if n == 0 && env.writesOk then ([], r.next, if r.next < a.size then 2 else 0, some (w, r.close))
+        else ([], pos, 2, none)
+      | .reply st body =>
+        if r.close then (response st body r.close, r.next, 1, none)
+        else
+          let rest := specReadOld env db a r.next (n + 1) fuel
+          (response st body r.close ++ rest.1, rest.2)
+
+/-- **What `readLoop_spec` says changed only for HEAD and 414**, and so what `readAll_spec` and
+`runBatch_spec` say, which are stated with `specRead` too: on input in which no request is a HEAD
+request and every malformed one is answered 400, 413 or 431 and does not start with "HEAD ",
+`specRead` is the definition they were stated with before, on this version's parser. -/
+theorem specRead_eq_old (env : Env) (db : DB) (a : ByteArray)
+    (hbad : ∀ p st, Http.parse a p = .bad st →
+      (st = 400 ∨ st = 413 ∨ st = 431) ∧ Spec.Http.headRequest ((bs a).drop p) = false)
+    (hok : ∀ p r, Http.parse a p = .ok r → r.head = false) :
+    ∀ fuel pos n, specRead env db a pos n fuel = specReadOld env db a pos n fuel := by
+  intro fuel
+  induction fuel with
+  | zero => intro pos n; rfl
+  | succ f ih =>
+    intro pos n
+    simp only [specRead, specReadOld]
+    split
+    · rfl
+    · rename_i st hp
+      obtain ⟨hst, hh⟩ := hbad pos st hp
+      rw [hh, Spec.Http.rejectResponse_false (by omega)]
+      rcases hst with rfl | rfl | rfl
+      · rw [bs_err_body]; rfl
+      · rw [bs_err_body]; rfl
+      · rw [bs_err_body]; rfl
+    · rename_i r hp
+      have hr := hok pos r hp
+      split
+      · rfl
+      · simp only [hr, Bool.false_eq_true, ↓reduceIte]
+        split
+        · rfl
+        · rw [ih]
+
+/-- info: 'Feed.specRead_eq_old' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in #print axioms specRead_eq_old
 
 theorem readAll_spec (env : Env) (chunks : Array ByteArray) (db : DB)
     (hsize : db.posts.length < 20 * 2 ^ 63) : ∀ fuel i (outs : Array ChunkOut),
@@ -379,5 +506,8 @@ theorem runBatch_spec (env : Env) (chunks : Array ByteArray) (db : DB)
   rw [replies_spec outs results outs.size 0 0 (Array.mkEmpty outs.size) (by omega)]
   simp only [List.drop_zero, replyBytes_view, hv, hw1]
   simp [Array.mkEmpty, w]
+
+/-- info: 'Feed.runBatch_spec' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in #print axioms runBatch_spec
 
 end Feed

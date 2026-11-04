@@ -197,6 +197,9 @@ theorem feedFromPage_congr (body : ByteArray) (p q : Page) (h : p.Same q) :
   refine ⟨by rw [hb1, hb2], ?_⟩
   simp only [hn1, hn2, hs]
 
+/-- info: 'Feed.feedFromPage_congr' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in #print axioms feedFromPage_congr
+
 /-- **A post's response depends on its page only through what the page reads back as.** -/
 theorem postFromPage_congr (scratch : ByteArray) (id : Nat) (p q : Page) (h : p.Same q) :
     (postFromPage scratch id p).1 = (postFromPage scratch id q).1 ∧
@@ -220,6 +223,9 @@ theorem postFromPage_congr (scratch : ByteArray) (id : Nat) (p q : Page) (h : p.
       · simp [hf, hf'] at h0
       · simp [postFromPage, h8, h8', hf, hf']
 
+/-- info: 'Feed.postFromPage_congr' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in #print axioms postFromPage_congr
+
 /-- **The feed's response from a page, and whether the plan reads further, depend on the page
 only through what it reads back as.** -/
 theorem respondFeed_congr (out : ByteArray) (close : Bool) (p q : Page) (h : p.Same q) :
@@ -232,6 +238,9 @@ theorem respondFeed_congr (out : ByteArray) (close : Bool) (p q : Page) (h : p.S
   rw [authored_eq p feedSize (Bytes.appendAll (Bytes.clear ByteArray.empty) kPosts),
     authored_eq q feedSize (Bytes.appendAll (Bytes.clear ByteArray.empty) kPosts)]
   exact h1
+
+/-- info: 'Feed.respondFeed_congr' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in #print axioms respondFeed_congr
 
 /-- The model's page of the first `want` posts: the feed's body from it has the posts of those
 with an author, at most 20; `Page.authored` counts them; the page has a row per post read. -/
@@ -312,6 +321,9 @@ theorem feedResponse_correct (db : DB) (hsize : db.posts.length < 20 * 2 ^ 63) (
     bs ((feedResponse (m := Model) out close).run db).1 = bs out ++ response 200 (feedJson db.feed) close :=
   feedLoop_spec db close 63 feedSize out hsize
 
+/-- info: 'Feed.feedResponse_correct' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in #print axioms feedResponse_correct
+
 /-! ## One post -/
 
 /-- The model's page of the post with this id: `postFromPage` finds the post exactly when the
@@ -363,6 +375,9 @@ theorem respondPost_congr (out : ByteArray) (id : Nat) (close : Bool) (p q : Pag
   refine ⟨by rw [respondPost, respondPost, bs_respond, bs_respond, h2], ?_⟩
   rw [postFound_eq ByteArray.empty id p, postFound_eq ByteArray.empty id q, h1]
 
+/-- info: 'Feed.respondPost_congr' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in #print axioms respondPost_congr
+
 /-- **`GET /posts/:id` answers the specification**: the post with its author and like count,
 byte for byte, or not found exactly when the specification has no such post (no row, or no
 author row); the response is appended to `out`. -/
@@ -385,5 +400,8 @@ theorem postResponse_correct (db : DB) (out : ByteArray) (pid : Nat) (close : Bo
     rfl
   | some v =>
     simp only [Option.isSome_some, ↓reduceIte, respondPost, bs_respond, hbody v hg]
+
+/-- info: 'Feed.postResponse_correct' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in #print axioms postResponse_correct
 
 end Feed

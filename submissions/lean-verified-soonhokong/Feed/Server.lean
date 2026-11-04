@@ -38,17 +38,43 @@ structure ChunkOut where
 
 def maxPipeline : Nat := 64
 
+/-! ## Answers to malformed input and to HEAD -/
+
+def k414 : ByteArray := lit "HTTP/1.1 414 URI Too Long\r\nContent-Type: application/json\r\nContent-Length: "
+def kUriTooLong : ByteArray := lit "{\"error\":\"uri too long\"}"
+
+/-- The body of the answer to malformed input with status `st`. -/
+def rejectBody (st : Nat) : ByteArray :=
+  if st == 413 then Err.tooLarge.body else if st == 414 then kUriTooLong
+  else if st == 431 then Err.headTooLarge.body else Err.badRequest.body
+
+/-- The answer to malformed input with status `st`, which closes the connection, appended to
+`out`; to a HEAD request without its content (RFC 9110 §9.3.2). 414 has its own status line. -/
+def respondReject (out : ByteArray) (head : Bool) (st : Nat) : ByteArray :=
+  let body := rejectBody st
+  let out := Bytes.appendAll out (if st == 414 then k414 else statusLine st)
+  let out := Bytes.appendNat out body.size
+  let out := Bytes.appendAll out endHeadClose
+  if head then out else Bytes.appendAll out body
+
+/-- The answer to a HEAD request from the answer GET gets, which `x` ends with from `start`: `x`
+up to the end of the first CR LF CR LF from `start` on, which ends the response's head (RFC 9110
+§9.3.2; the head keeps GET's `Content-Length`, §8.6). -/
+def stripBody (x : ByteArray) (start : Nat) : ByteArray :=
+  match Http.headEnd x start x.size with
+  | some e => x.extract 0 (e + 4)
+  | none => x
+
 /-- The requests of one connection's input from `pos`: answer reads until the input ends, a write
 comes, or the connection closes. `n` answers so far, appended to `out`. (The feed and a post are
-written straight into `out`; no scratch buffer is passed along.) -/
+written straight into `out`; no scratch buffer is passed along.) A HEAD request is answered as GET
+without the content. -/
 def readLoop [Monad m] [Store m] (env : Env) (a : ByteArray) (pos n : Nat) (out : ByteArray) : Nat → m ChunkOut
   | 0 => return ⟨out, pos, if pos < a.size then 2 else 0, none⟩
   | fuel + 1 => do
     match Http.parse a pos with
     | .incomplete => return ⟨out, pos, 0, none⟩
-    | .bad st =>
-      let e := if st == 413 then Err.tooLarge else if st == 431 then Err.headTooLarge else Err.badRequest
-      return ⟨respondErr out e true, a.size, 1, none⟩
+    | .bad st => return ⟨respondReject out (Http.headAt a pos) st, a.size, 1, none⟩
     | .ok r =>
       let st ← decide env a r out ByteArray.empty
       match st.write with
@@ -58,8 +84,9 @@ def readLoop [Monad m] [Store m] (env : Env) (a : ByteArray) (pos n : Nat) (out 
           return ⟨st.out, r.next, if r.next < a.size then 2 else 0, some (w, r.close)⟩
         else return ⟨st.out, pos, 2, none⟩
       | none =>
-        if r.close then return ⟨st.out, r.next, 1, none⟩
-        else readLoop env a r.next (n + 1) st.out fuel
+        let o := if r.head then stripBody st.out out.size else st.out
+        if r.close then return ⟨o, r.next, 1, none⟩
+        else readLoop env a r.next (n + 1) o fuel
 
 def readPhase [Monad m] [Store m] (env : Env) (a : ByteArray) : m ChunkOut :=
   readLoop env a 0 0 ByteArray.empty maxPipeline
@@ -159,11 +186,10 @@ def pickList (cfg : Cfg) : Nat → List Cand → List Bool
     if (Decidable.decide (cfg.budget < n) && cfg.spare c) || cfg.expired c then true :: pickList cfg (n - 1) cs
     else false :: pickList cfg n cs
 
-/-- `pickList` on the candidates `(idle[i], busy[i])`. The transport runs the C version
-(`idle_pick` in `runtime/uring.c`, on numbers below 2^63), which the self-test compares with this
-definition. -/
-@[extern "feed_idle_pick"]
-def pick (budget minIdle timeout n : @& Nat) (idle : @& Array Nat) (busy : @& Array Bool) : Array Bool :=
+/-- `pickList` on the candidates `(idle[i], busy[i])`. The transport calls this definition,
+compiled (`feed_idle_pick`). -/
+@[export feed_idle_pick]
+def pick (budget minIdle timeout n : Nat) (idle : Array Nat) (busy : Array Bool) : Array Bool :=
   (pickList ⟨budget, minIdle, timeout⟩ n (idle.toList.zip busy.toList)).toArray
 
 end Idle

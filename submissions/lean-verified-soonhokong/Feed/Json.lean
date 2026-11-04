@@ -7,7 +7,9 @@ A validating JSON parser (RFC 8259) for the two places the API reads JSON: the `
 body and the JWT header and payload. It works on a byte range of the request buffer and does not
 build a tree: it checks the whole text and records, for a few wanted keys of the top-level
 object, the span of the last value with that key (like `JSON.parse`, where a later duplicate key
-wins). Strings are decoded only when the handler needs them.
+wins). A text must be UTF-8 (RFC 8259 §8.1): a string holding a byte sequence that is not
+well-formed UTF-8 (RFC 3629 §4) makes the text malformed. Strings are decoded only when the
+handler needs them.
 -/
 namespace Feed.Json
 
@@ -37,7 +39,21 @@ where
     | 0 => i
     | f + 1 => if i < hi && isWs (byte a i) then go (i + 1) f else i
 
-/-- `i` is just after the opening quote; the index just after the closing quote. -/
+/-- The length of the well-formed UTF-8 sequence (RFC 3629 §4) that starts at `i` with a byte
+of at least 0x80 and ends before `hi`, or 0. -/
+def utf8Len (a : ByteArray) (hi i : Nat) : Nat :=
+  let b := byte a i
+  let t (k : Nat) (l h : UInt8) : Bool := i + k < hi && l ≤ byte a (i + k) && byte a (i + k) ≤ h
+  if 0xc2 ≤ b && b ≤ 0xdf then (if t 1 0x80 0xbf then 2 else 0)
+  else if 0xe0 ≤ b && b ≤ 0xef then
+    (if t 1 (if b == 0xe0 then 0xa0 else 0x80) (if b == 0xed then 0x9f else 0xbf) && t 2 0x80 0xbf then 3 else 0)
+  else if 0xf0 ≤ b && b ≤ 0xf4 then
+    (if t 1 (if b == 0xf0 then 0x90 else 0x80) (if b == 0xf4 then 0x8f else 0xbf) && t 2 0x80 0xbf && t 3 0x80 0xbf
+     then 4 else 0)
+  else 0
+
+/-- `i` is just after the opening quote; the index just after the closing quote. A byte of at
+least 0x80 must start a well-formed UTF-8 sequence, which is skipped whole. -/
 def scanString (a : ByteArray) (hi : Nat) (i : Nat) : Option Nat :=
   go i (hi - i)
 where
@@ -62,7 +78,12 @@ where
             | f' + 5 => go (i + 6) f'
           else none
         else none
-      else go (i + 1) f
+      else if b < 0x80 then go (i + 1) f
+      else match utf8Len a hi i, f with
+        | 2, f' + 1 => go (i + 2) f'
+        | 3, f' + 2 => go (i + 3) f'
+        | 4, f' + 3 => go (i + 4) f'
+        | _, _ => none
 
 /-- Digits from `i`: the index after the last one. -/
 def scanDigits (a : ByteArray) (hi : Nat) (i : Nat) : Nat :=
@@ -158,14 +179,16 @@ def pushUtf8 (out : ByteArray) (c : Nat) : ByteArray :=
   else (((out.push (0xf0 + c / 262144).toUInt8).push (0x80 + c / 4096 % 64).toUInt8).push (0x80 + c / 64 % 64).toUInt8).push (0x80 + c % 64).toUInt8
 
 /-- Decode the string whose text is `a[lo, hi)` (`lo` at the opening quote, `hi` after the closing
-one; it was validated by `scanString`). Escapes become their characters; a lone surrogate
-becomes U+FFFD, as does a byte that is not part of valid UTF-8. The server runs the C version
+one and clamped to the array; it was validated by `scanString`). Escapes become their characters;
+a lone surrogate becomes U+FFFD, as does a byte that is not part of valid UTF-8 (which
+`scanString` rejects, so only a range it did not validate has one). The server runs the C version
 (`runtime/leaves.c`), which the self-test compares with this definition. -/
 @[extern "feed_json_decode_string"]
 def decodeString (a : @& ByteArray) (lo hi : @& Nat) : ByteArray :=
-  go (lo + 1) (hi - lo) (ByteArray.emptyWithCapacity (hi - lo))
+  let hi := min hi a.size
+  go hi (lo + 1) (hi - lo) (ByteArray.emptyWithCapacity (hi - lo))
 where
-  go (i : Nat) : Nat → ByteArray → ByteArray
+  go (hi : Nat) (i : Nat) : Nat → ByteArray → ByteArray
     | 0, out => out
     | f + 1, out =>
       if i + 1 ≥ hi then out else
@@ -176,15 +199,15 @@ where
           let c := hex4 a (i + 2)
           if 0xd800 ≤ c && c < 0xdc00 && i + 12 ≤ hi - 1 && byte a (i + 6) == 0x5c && byte a (i + 7) == 0x75 then
             let d := hex4 a (i + 8)
-            if 0xdc00 ≤ d && d < 0xe000 then go (i + 12) f (pushUtf8 out (0x10000 + (c - 0xd800) * 1024 + (d - 0xdc00)))
-            else go (i + 6) f (pushUtf8 out 0xfffd)
-          else if 0xd800 ≤ c && c < 0xe000 then go (i + 6) f (pushUtf8 out 0xfffd)
-          else go (i + 6) f (pushUtf8 out c)
+            if 0xdc00 ≤ d && d < 0xe000 then go hi (i + 12) f (pushUtf8 out (0x10000 + (c - 0xd800) * 1024 + (d - 0xdc00)))
+            else go hi (i + 6) f (pushUtf8 out 0xfffd)
+          else if 0xd800 ≤ c && c < 0xe000 then go hi (i + 6) f (pushUtf8 out 0xfffd)
+          else go hi (i + 6) f (pushUtf8 out c)
         else
           let c : UInt8 := if e == 0x62 then 0x08 else if e == 0x66 then 0x0c else if e == 0x6e then 0x0a
             else if e == 0x72 then 0x0d else if e == 0x74 then 0x09 else e
-          go (i + 2) f (out.push c)
-      else if b < 0x80 then go (i + 1) f (out.push b)
+          go hi (i + 2) f (out.push c)
+      else if b < 0x80 then go hi (i + 1) f (out.push b)
       else
         -- a UTF-8 sequence: copy it if it is valid, else U+FFFD for its first byte
         let n := if b &&& 0xe0 == 0xc0 then 2 else if b &&& 0xf0 == 0xe0 then 3 else if b &&& 0xf8 == 0xf0 then 4 else 0
@@ -195,9 +218,9 @@ where
             else if n == 3 then ((b &&& 0x0f).toNat * 64 + (byte a (i + 1) &&& 0x3f).toNat) * 64 + (byte a (i + 2) &&& 0x3f).toNat
             else (((b &&& 0x07).toNat * 64 + (byte a (i + 1) &&& 0x3f).toNat) * 64 + (byte a (i + 2) &&& 0x3f).toNat) * 64 + (byte a (i + 3) &&& 0x3f).toNat
           let minCp := if n == 2 then 0x80 else if n == 3 then 0x800 else 0x10000
-          if cp < minCp || (0xd800 ≤ cp && cp < 0xe000) || cp > 0x10ffff then go (i + 1) f (pushUtf8 out 0xfffd)
-          else go (i + n) f (Bytes.appendSlice out a i (i + n))
-        else go (i + 1) f (pushUtf8 out 0xfffd)
+          if cp < minCp || (0xd800 ≤ cp && cp < 0xe000) || cp > 0x10ffff then go hi (i + 1) f (pushUtf8 out 0xfffd)
+          else go hi (i + n) f (Bytes.appendSlice out a i (i + n))
+        else go hi (i + 1) f (pushUtf8 out 0xfffd)
 
 /-! ## Numbers -/
 
@@ -254,9 +277,9 @@ def topMembers (a : ByteArray) (hi : Nat) (keys : Array ByteArray) (i : Nat) (fi
       else if byte a k == 0x2c then topMembers a hi keys (skipWs a hi (k + 1)) false fs f
       else none
 
-/-- The result of parsing `a[lo, hi)` as one JSON value: `malformed` if it is not valid JSON,
-`notObject` if it is valid but not an object, else `object` with the last value of each key in
-`keys` (absent if none). -/
+/-- What `parseTop` finds in `a[lo, hi)`: no JSON text, a JSON text whose value is not an object,
+or an object with the last value of each key in `keys` (absent if none), as `parseTop_spec`
+(`Feed/Proofs/JsonValue.lean`) states. -/
 inductive Top where
   | malformed
   | notObject

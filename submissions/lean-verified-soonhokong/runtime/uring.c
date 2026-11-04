@@ -38,8 +38,9 @@
 #define SQ_ENTRIES 4096
 #define CQ_ENTRIES 65536   /* more than a ring's connections: a burst never spills into the kernel's
                               overflow list, which allocates per completion when memory is shortest */
-#define NBUF 512           /* provided receive buffers per ring: reads are issued for at most this many */
-#define BUFSZ 1024
+static u32_t NBUF = 512;    /* provided receive buffers per ring (a power of two): reads are issued for at most this many;
+                               FEED_NBUF overrides it (for measurements) */
+static u32_t BUFSZ = 1024;  /* FEED_BUFSZ overrides it (for measurements) */
 #define READ_ROUNDS 8      /* read rounds per iteration (each up to NBUF reads per ring) */
 #define CQE_BUDGET 8192    /* completions handled per ring per iteration */
 #define MAX_IN 65536       /* a connection's buffered, unanswered input */
@@ -430,38 +431,11 @@ static void conn_send(ring *r, u32_t slot, lean_object *buf, u32_t off, u32_t le
 }
 
 /* ---- idle connections under a budget ----------------------------------------------------- */
-/* Feed.Idle.pick (Feed/Server.lean; its theorems in Feed/Proofs/Idle.lean): for each of n
- * candidates, whether to close it, when `open` connections are open. The self-test compares this
- * with the Lean definition (feed_idle_pick below); values are below 2^63. */
-static u32_t idle_pick(u64_t budget, u64_t min_idle, u64_t timeout, u64_t open, const u64_t *idle, const u8_t *busy,
-                       u32_t n, u8_t *out) {
-  u32_t k = 0;
-  for (u32_t i = 0; i < n; i++) {
-    int spare = !busy[i] && min_idle <= idle[i];
-    int expired = !busy[i] && timeout > 0 && timeout <= idle[i];
-    out[i] = (u8_t)((budget < open && spare) || expired);
-    if (out[i]) { if (open) open--; k++; }
-  }
-  return k;
-}
-LEAN_EXPORT lean_obj_res feed_idle_pick(b_lean_obj_arg budget, b_lean_obj_arg min_idle, b_lean_obj_arg timeout, b_lean_obj_arg open,
-                                        b_lean_obj_arg idle, b_lean_obj_arg busy) {
-  size_t n = lean_array_size(idle);
-  if (lean_array_size(busy) < n) n = lean_array_size(busy);
-  u64_t *iv = malloc(n * sizeof(u64_t) + 1);
-  u8_t *bv = malloc(2 * n + 1);
-  if (!iv || !bv) abort();
-  for (size_t i = 0; i < n; i++) {
-    iv[i] = nat_u64(lean_array_get_core(idle, i));
-    bv[i] = (u8_t)lean_unbox(lean_array_get_core(busy, i));
-  }
-  idle_pick(nat_u64(budget), nat_u64(min_idle), nat_u64(timeout), nat_u64(open), iv, bv, (u32_t)n, bv + n);
-  lean_object *r = lean_alloc_array(n, n);
-  for (size_t i = 0; i < n; i++) lean_array_set_core(r, i, lean_box(bv[n + i]));
-  free(iv);
-  free(bv);
-  return r;
-}
+/* implemented in Lean: Feed.Idle.pick (Feed/Server.lean; its theorems in Feed/Proofs/Idle.lean):
+ * for each candidate (idle[i] ms, busy[i]), whether to close it, when `open` connections are
+ * open. It consumes its arguments. */
+extern lean_object *feed_idle_pick(lean_object *budget, lean_object *min_idle, lean_object *timeout, lean_object *open,
+                                   lean_object *idle, lean_object *busy);
 
 /* The policy, a safety valve for memory pressure that is off unless configured (idle_setup).
  * Every open connection costs about 4 KB of kernel memory, used or not, and on a 2 GB machine
@@ -469,20 +443,33 @@ LEAN_EXPORT lean_obj_res feed_idle_pick(b_lean_obj_arg budget, b_lean_obj_arg mi
  * the budget (FEED_CONN_BUDGET), the connections idle the longest are closed, as a keep-alive
  * timeout would; with FEED_IDLE_MS set, so is every connection idle that long. Once per
  * iteration, if there is anything to do, the heads of the rings' lists are merged in order of idle
- * time and offered to idle_pick, which never picks a busy one. A connection is busy while it has
- * input not yet answered, an answer being sent or queued, is in the current batch, has no armed
- * poll, or is closing; also, for this iteration, when its ring has completions not yet handled
- * (one may be its input) or no room in the submission queue (a flush there would run completions
- * first). Below 7/8 of the budget nothing is done beyond noting the time of each answer and one
- * comparison per iteration; above, the lists cost two links per answer. */
+ * time and offered to Feed.Idle.pick, which never picks a busy one. A connection is busy while it
+ * has input not yet answered, an answer being sent or queued, is in the current batch, has no
+ * armed poll, or is closing; also, for this iteration, when its ring has completions not yet
+ * handled (one may be its input) or no room in the submission queue (a flush there would run
+ * completions first). Below 7/8 of the budget nothing is done beyond noting the time of each
+ * answer and one comparison per iteration; above, the lists cost two links per answer. */
 static u64_t idle_budget, idle_min_ms = 1000, idle_timeout_ms;
 static u32_t idle_per_iter = 256;
 static long idle_test_delay_us;   /* FEED_IDLE_TEST_DELAY_US, for tests: a pause between deciding closes and submitting them */
 static int idle_due;   /* something may be closed in the next iterations: wake up soon when idle */
 #define CAND_MAX 4096
-static u64_t cand_idle[CAND_MAX];
+static u32_t cand_idle[CAND_MAX];
 static u8_t cand_busy[CAND_MAX], cand_pick[CAND_MAX];
 static u32_t cand_ref[CAND_MAX];
+
+/* Feed.Idle.pick on the first n candidates, into cand_pick (its result has one entry per
+ * candidate: length_pickList). */
+static void pick_candidates(u64_t budget, u64_t open, u32_t n) {
+  lean_object *idle = lean_alloc_array(n, n), *busy = lean_alloc_array(n, n);
+  for (u32_t i = 0; i < n; i++) {
+    lean_array_set_core(idle, i, lean_box(cand_idle[i]));
+    lean_array_set_core(busy, i, lean_box(cand_busy[i]));
+  }
+  lean_object *pick = feed_idle_pick(u64_nat(budget), u64_nat(idle_min_ms), u64_nat(idle_timeout_ms), u64_nat(open), idle, busy);
+  for (u32_t i = 0; i < n; i++) cand_pick[i] = (u8_t)lean_unbox(lean_array_get_core(pick, i));
+  lean_dec(pick);
+}
 
 static inline int conn_busy(const conn *c) {
   return c->state != C_OPEN || c->chunk >= 0 || c->in_len || c->out || c->q || !(c->flags & F_POLL) || (c->flags & F_MRECV) ||
@@ -624,7 +611,7 @@ static void idle_check(void) {
   idle_due = n > 0 || want > 0;
   if (!n) return;
   u32_t k = 0;
-  idle_pick(budget, idle_min_ms, idle_timeout_ms, open, cand_idle, cand_busy, n, cand_pick);
+  pick_candidates(budget, open, n);
   for (u32_t i = 0; i < n; i++) {
     if (!cand_pick[i]) continue;
     ring *r = &rings[cand_ref[i] >> 16];
@@ -1054,7 +1041,7 @@ static inline int ring_pending(ring *r) {
  * its own, and the previous loop. */
 #define ACCEPT_NEXT 8192
 #define ACCEPT_STOP 4096
-#define WAIT_MIN 64
+static u32_t WAIT_MIN = 64;   /* FEED_WAIT_MIN overrides it (for measurements) */
 static void accept_policy(void) {
   if (rings_upfront) {
     for (int i = 0; i < nrings; i++) {
@@ -1188,6 +1175,22 @@ static void present_held(void) {
  * when the CPU is saturated. FEED_PERIOD_US overrides it (for measurements). */
 static long period_us = 2000;
 
+/* Spinning instead of halting. Between batches the loop keeps the CPU: it watches ring 0's
+ * completion queue and task-work flag for up to spin_us (and at most the rest of the period, so by
+ * default for the whole wait) before it sleeps, and the idle wait spins that long before
+ * epoll_wait. A guest whose CPU has nothing to run halts and gives its core back to the host; on a
+ * host that runs other guests there, a halt can cost a wakeup delay and cold caches. This server
+ * uses less CPU per request than the entries above it, so at a given load it halts more often:
+ * on a KVM guest set up like the box, 0.24 halts a request at 290,000 users against 0.10 for
+ * rust-iouring-kensac #264 at 310,000, and the box charged it more CPU per request than that guest
+ * did (README, "Why the loop spins"). Spinning brings it to 0.06, at the same latency there; the
+ * CPU it spends shows in the cgroup's CPU time. Not while the checkpoint thread wants the CPU
+ * (ckpt_wanted): the loop then sleeps as before, so the thread gets the idle time.
+ * FEED_SPIN_US overrides it (0: halt as before). */
+static long spin_us = 2000;
+static u64_t st_spins;
+static inline u32_t cq_ready(ring *r) { return __atomic_load_n(r->cq_ktail, __ATOMIC_ACQUIRE) - *r->cq_khead; }
+
 /* Writes go in at most one batch every write_window_us: a write waits for that batch (reads do
  * not), so a commit carries the writes of several periods and the pages they share (the tail of
  * likes, the head of the feed index, the recent part of likes_post_id_idx) go to the log once
@@ -1213,13 +1216,13 @@ static void stats_tick(void) {
     for (int i = 0; i < nrings; i++) open += rings[i].nopen;
     fprintf(stderr, "stats: open %llu batches %llu chunks/batch %.1f max %llu iters %llu enters %llu sleeps %llu wal %d pauses %llu"
             " (timeouts %llu) spill %u | iter max %.1f ms, batch %.0f ms, reap %.0f ms, nobufs %llu rearms %llu overflow %llu pinned %llu"
-            " | idle closed %llu kept %llu | rings %d syscalls/iter %.1f io_uring_enter %llu wakeups %ld\n", (unsigned long long)open,
+            " | idle closed %llu kept %llu | rings %d syscalls/iter %.1f io_uring_enter %llu wakeups %ld spins %llu\n", (unsigned long long)open,
             (unsigned long long)st_batches, st_batches ? (double)st_reqchunks / (double)st_batches : 0, (unsigned long long)st_max_chunks,
             (unsigned long long)st_iters, (unsigned long long)st_enters, (unsigned long long)st_sleeps, wal_frames,
             (unsigned long long)st_pauses, (unsigned long long)st_pause_timeouts, nspilled, (double)st_iter_max_ns / 1e6, (double)st_batch_ns / 1e6, (double)st_reap_ns / 1e6,
             (unsigned long long)st_nobufs, (unsigned long long)st_rearms, (unsigned long long)st_overflow, (unsigned long long)st_pinned,
             (unsigned long long)st_idle_closed, (unsigned long long)st_idle_kept, nrings,
-            st_iters ? (double)st_sys / (double)st_iters : 0.0, (unsigned long long)st_uring, ru.ru_nvcsw - last_nvcsw);
+            st_iters ? (double)st_sys / (double)st_iters : 0.0, (unsigned long long)st_uring, ru.ru_nvcsw - last_nvcsw, (unsigned long long)st_spins);
   }
   last = now;
   st_batches = st_reqchunks = st_iters = st_enters = st_sleeps = 0;
@@ -1282,6 +1285,10 @@ LEAN_EXPORT lean_obj_res feed_transport_run(b_lean_obj_arg secret) {
   if (per > 1024) per -= 64;
   if (per > 65535) per = 65535;
   if (getenv("FEED_PERIOD_US")) period_us = atol(getenv("FEED_PERIOD_US"));
+  if (getenv("FEED_SPIN_US")) spin_us = atol(getenv("FEED_SPIN_US"));
+  if (getenv("FEED_NBUF")) { u32_t n = (u32_t)atol(getenv("FEED_NBUF")); if (n >= 64 && n <= 32768 && !(n & (n - 1))) NBUF = n; }
+  if (getenv("FEED_BUFSZ")) { u32_t n = (u32_t)atol(getenv("FEED_BUFSZ")); if (n >= 512 && n <= 65536) BUFSZ = n; }
+  if (getenv("FEED_WAIT_MIN")) { u32_t n = (u32_t)atol(getenv("FEED_WAIT_MIN")); if (n >= 1 && n <= 4096) WAIT_MIN = n; }
   if (getenv("FEED_WRITE_WINDOW_US")) write_window_us = atol(getenv("FEED_WRITE_WINDOW_US"));
   if (getenv("FEED_BATCH_TARGET_US")) BATCH_TARGET_NS = (u64_t)atoll(getenv("FEED_BATCH_TARGET_US")) * 1000ull;
   if (getenv("FEED_MAX_BATCH")) max_batch = (u32_t)atol(getenv("FEED_MAX_BATCH"));
@@ -1353,7 +1360,35 @@ LEAN_EXPORT lean_obj_res feed_transport_run(b_lean_obj_arg secret) {
       u64_t since = mono_ns() - last_start, period = (u64_t)period_us * 1000;
       u32_t kf0 = __atomic_load_n(r0->sq_kflags, __ATOMIC_ACQUIRE);
       int rc = 0;
-      if (was_busy && !nspilled && since < period) {
+      if (was_busy && !nspilled && since < period && spin_us && !__atomic_load_n(&ckpt_wanted, __ATOMIC_ACQUIRE)) {
+        /* submit, then spin until WAIT_MIN completions or the period's end; sleep for the rest once
+         * spin_us is spent or the checkpoint thread wants the CPU */
+        do rc = sys_enter(r0, r0->to_submit, 0, IORING_ENTER_GETEVENTS);
+        while (rc < 0 && errno == EINTR);
+        if (rc < 0 && errno != EAGAIN && errno != EBUSY) { perror("io_uring_enter"); exit(1); }
+        st_enters++;
+        if (rc > 0) r0->to_submit -= (u32_t)rc;
+        rc = 0;
+        st_spins++;
+        u64_t t = mono_ns(), end = last_start + period, cap = t + (u64_t)spin_us * 1000;
+        while (t < end && cq_ready(r0) < WAIT_MIN) {
+          if (t >= cap || __atomic_load_n(&ckpt_wanted, __ATOMIC_ACQUIRE)) {
+            int w;
+            do w = sys_enter_wait(r0, 0, WAIT_MIN, end - t);
+            while (w < 0 && errno == EINTR);
+            if (w < 0 && errno != ETIME && errno != EAGAIN && errno != EBUSY) { perror("io_uring_enter"); exit(1); }
+            st_sleeps++;
+            break;
+          }
+          if (__atomic_load_n(r0->sq_kflags, __ATOMIC_ACQUIRE) & IORING_SQ_TASKRUN) {
+            int w;
+            do w = sys_enter(r0, 0, 0, IORING_ENTER_GETEVENTS);
+            while (w < 0 && errno == EINTR);
+            st_enters++;
+          }
+          t = mono_ns();   /* no PAUSE: a long run of PAUSEs makes a KVM host see a spinning vCPU and yield it */
+        }
+      } else if (was_busy && !nspilled && since < period) {
         do rc = sys_enter_wait(r0, r0->to_submit, WAIT_MIN, period - since);
         while (rc < 0 && errno == EINTR);
         if (rc < 0 && errno != ETIME && errno != EAGAIN && errno != EBUSY) { perror("io_uring_enter"); exit(1); }
@@ -1459,6 +1494,17 @@ LEAN_EXPORT lean_obj_res feed_transport_run(b_lean_obj_arg secret) {
     int any = 0;
     for (int i = 0; i < nrings; i++) if (ring_pending(&rings[i])) any = 1;
     if (any) continue;
+    if (spin_us && !__atomic_load_n(&ckpt_wanted, __ATOMIC_ACQUIRE)) {
+      /* spin before the idle wait: new work in any ring ends it */
+      st_spins++;
+      u64_t t = mono_ns(), cap = t + (u64_t)spin_us * 1000;
+      while (t < cap && !__atomic_load_n(&ckpt_wanted, __ATOMIC_ACQUIRE)) {
+        for (int i = 0; i < nrings && !any; i++) if (ring_pending(&rings[i])) any = 1;
+        if (any) break;
+        t = mono_ns();
+      }
+      if (any) continue;
+    }
     struct epoll_event evs[4];
     int n;
     do n = epoll_wait(epfd, evs, 4, idle_due || idle_timeout_ms ? 100 : 1000);

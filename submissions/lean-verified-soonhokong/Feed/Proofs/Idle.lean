@@ -47,6 +47,9 @@ theorem pickList_closed (cfg : Cfg) : ∀ (n : Nat) (cs : List Cand) (k : Nat) (
     simp only [pickList] at hp
     split at hp <;> simp only [List.getElem?_cons_succ] at hp <;> exact pickList_closed cfg _ cs k c h hp
 
+/-- info: 'Feed.Idle.pickList_closed' depends on axioms: [propext, Classical.choice] -/
+#guard_msgs in #print axioms pickList_closed
+
 /-- Without a timeout, exactly as many are closed as the excess over the budget, or every spare
 candidate if there are fewer. -/
 theorem count_pickList (cfg : Cfg) (ht : cfg.timeout = 0) : ∀ (n : Nat) (cs : List Cand),
@@ -59,6 +62,9 @@ theorem count_pickList (cfg : Cfg) (ht : cfg.timeout = 0) : ∀ (n : Nat) (cs : 
     simp only [pickList, hx, Bool.or_false]
     by_cases hb : cfg.budget < n <;> by_cases hs : cfg.spare c = true <;>
       simp [hb, hs, ih1, ih0] <;> omega
+
+/-- info: 'Feed.Idle.count_pickList' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in #print axioms count_pickList
 
 /-- Without a timeout, nothing is closed while the open connections are within the budget. -/
 theorem pickList_none (cfg : Cfg) (ht : cfg.timeout = 0) (n : Nat) (cs : List Cand) (hn : n ≤ cfg.budget) :
@@ -100,6 +106,9 @@ theorem pickList_expired (cfg : Cfg) : ∀ (n : Nat) (cs : List Cand) (k : Nat) 
     simp only [List.getElem?_cons_succ] at h
     simp only [pickList]
     split <;> simp only [List.getElem?_cons_succ] <;> exact pickList_expired cfg _ cs k c h he
+
+/-- info: 'Feed.Idle.pickList_expired' depends on axioms: [propext, Classical.choice] -/
+#guard_msgs in #print axioms pickList_expired
 
 /-- Longest idle first: with the candidates in order of idle time, longest first, every connection
 closed was idle at least as long as every spare connection left open. -/
@@ -146,6 +155,9 @@ theorem pickList_longest (cfg : Cfg) : ∀ (n : Nat) (cs : List Cand), cs.Pairwi
         exact pickList_longest cfg _ cs hs.2 i j ci cj hi hj hpi hpj hsp
       · simp only [hc, Bool.false_eq_true, ↓reduceIte, List.getElem?_cons_succ] at hpi hpj
         exact pickList_longest cfg _ cs hs.2 i j ci cj hi hj hpi hpj hsp
+
+/-- info: 'Feed.Idle.pickList_longest' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in #print axioms pickList_longest
 
 /-! ## The arrays the transport passes -/
 

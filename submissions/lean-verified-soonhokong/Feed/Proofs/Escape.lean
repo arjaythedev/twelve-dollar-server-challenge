@@ -92,4 +92,7 @@ theorem decode_escape (s : List UInt8) : decode (escape s) = some s := by
     have : escape (b :: bs) = escByte b ++ escape bs := by simp [escape]
     rw [this, decode_escByte, ih]; rfl
 
+/-- info: 'Feed.Escape.decode_escape' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in #print axioms decode_escape
+
 end Feed.Escape

@@ -1,17 +1,20 @@
-/* The C leaves: 21 of the 22 Lean definitions that carry `@[extern]` (the 22nd, Feed.Idle.pick, is
- * idle_pick in uring.c). Each function implements the Lean definition its comment names, which is
- * its specification, and `@[extern]` makes the compiled program call this C code instead: the byte
- * operations of Feed/Bytes.lean, HTTP framing (Feed.Http.parse), routing (Feed.route), the JSON of
- * bodies and tokens (Feed.Json.parseTop, decodeString), HMAC-SHA256 (Feed.Hmac.mac), base64url
- * (Feed.Jwt.b64Encode, b64Decode), one post object (Feed.postJsonAfter), the feed's body
- * (Feed.feedFromPage, Feed.Page.authored) and the responses of the feed and of a post
- * (Feed.respondFeed, Feed.respondPost). A proof unfolds the Lean definitions of all but seven,
- * whose results the theorems take as given: Http.parse, Bytes.findHeadEnd, Json.parseTop,
- * Json.decodeString, Hmac.mac, Jwt.b64Encode and Jwt.b64Decode. Five are not called while serving,
- * since their only callers outside the self-test are the Lean bodies of other leaves:
- * Bytes.appendLitEsc, appendLitNat, appendSlice, findHeadEnd and Feed.postJsonAfter.
- * `bin/server --selftest` (Feed/Selftest.lean, run by build.sh) compares each with its Lean
- * definition on random inputs. */
+/* The C leaves: the 15 Lean definitions that carry `@[extern]`. Each function implements the Lean
+ * definition its comment names, which is its specification, and `@[extern]` makes the compiled
+ * program call this C code instead: the byte operations of Feed/Bytes.lean (appendEsc, appendNat,
+ * appendAll, findByte), HTTP framing (Feed.Http.parse), routing (Feed.route), the JSON of bodies and
+ * tokens (Feed.Json.parseTop, decodeString), HMAC-SHA256 (Feed.Hmac.mac), base64url
+ * (Feed.Jwt.b64Encode, b64Decode), the feed's body (Feed.feedFromPage, Feed.Page.authored) and the
+ * responses of the feed and of a post (Feed.respondFeed, Feed.respondPost). The theorems of
+ * Feed/Proofs/ use the Lean definitions of all of them. Those of Hmac.mac, Jwt.b64Encode and
+ * Jwt.b64Decode are proved equal to HMAC-SHA256 and base64url as Feed/Spec/Sha256.lean and
+ * Feed/Spec/Base64.lean write RFC 2104 and RFC 4648, transcriptions that test vectors check
+ * (Feed/Proofs/Sha256.lean, Base64.lean), Json.decodeString's to decode strings as
+ * Feed/Spec/Json.lean writes RFC 8259's (Feed/Proofs/JsonToken.lean), Json.parseTop's to read
+ * RFC 8259's texts as Feed/Spec/Json.lean writes them (Feed/Proofs/JsonValue.lean), and
+ * Http.parse's to frame a connection's input as Feed/Spec/Http.lean writes RFC 9112 and RFC 9110
+ * (Feed/Proofs/Http.lean). check-docs.sh counts them. `bin/server --selftest`
+ * (Feed/Selftest.lean, run by build.sh) compares each leaf with its Lean definition on random
+ * inputs. */
 #include "rt.h"
 #include <immintrin.h>
 #include <stdlib.h>
@@ -85,27 +88,12 @@ static inline void clamp_range(b_lean_obj_arg src, b_lean_obj_arg lon, b_lean_ob
   if (*hi > n) *hi = n;
   if (*lo > *hi) *lo = *hi;
 }
-/* bytes of lit appended, room reserved by the caller */
-static inline void lit_append(lean_object *out, b_lean_obj_arg lit) {
-  size_t len = lean_sarray_size(lit);
-  copy_small(ba_end(out), lean_sarray_cptr(lit), len);
-  ba_grow(out, len);
-}
 
 /* Feed.Bytes.appendEsc: out ++ escape(src[lo, hi)) */
 LEAN_EXPORT lean_obj_res feed_append_esc(lean_obj_arg out, b_lean_obj_arg src, b_lean_obj_arg lon, b_lean_obj_arg hin) {
   u64_t lo, hi;
   clamp_range(src, lon, hin, &lo, &hi);
   out = ba_reserve(out, (size_t)(hi - lo) + 64);
-  return esc_append(out, src, lo, hi);
-}
-
-/* Feed.Bytes.appendLitEsc: out ++ lit ++ escape(src[lo, hi)) */
-LEAN_EXPORT lean_obj_res feed_append_lit_esc(lean_obj_arg out, b_lean_obj_arg lit, b_lean_obj_arg src, b_lean_obj_arg lon, b_lean_obj_arg hin) {
-  u64_t lo, hi;
-  clamp_range(src, lon, hin, &lo, &hi);
-  out = ba_reserve(out, lean_sarray_size(lit) + (size_t)(hi - lo) + 64);
-  lit_append(out, lit);
   return esc_append(out, src, lo, hi);
 }
 
@@ -143,26 +131,6 @@ LEAN_EXPORT lean_obj_res feed_append_nat(lean_obj_arg out, b_lean_obj_arg nn) {
   return out;
 }
 
-/* Feed.Bytes.appendLitNat: out ++ lit ++ decimal digits of n */
-LEAN_EXPORT lean_obj_res feed_append_lit_nat(lean_obj_arg out, b_lean_obj_arg lit, b_lean_obj_arg nn) {
-  out = ba_reserve(out, lean_sarray_size(lit) + 64);
-  lit_append(out, lit);
-  return feed_append_nat(out, nn);
-}
-
-/* Feed.Bytes.appendSlice: out ++ src[lo, hi) */
-LEAN_EXPORT lean_obj_res feed_append_slice(lean_obj_arg out, b_lean_obj_arg src, b_lean_obj_arg lon, b_lean_obj_arg hin) {
-  size_t n = lean_sarray_size(src);
-  u64_t lo = nat_u64(lon), hi = nat_u64(hin);
-  if (hi > n) hi = n;
-  if (lo > hi) lo = hi;
-  size_t len = (size_t)(hi - lo);
-  out = ba_reserve(out, len + 32);
-  copy_small(ba_end(out), lean_sarray_cptr(src) + lo, len);
-  ba_grow(out, len);
-  return out;
-}
-
 /* Feed.Bytes.appendAll: out ++ src */
 LEAN_EXPORT lean_obj_res feed_append_all(lean_obj_arg out, b_lean_obj_arg src) {
   size_t len = lean_sarray_size(src);
@@ -182,226 +150,430 @@ LEAN_EXPORT lean_obj_res feed_find_byte(b_lean_obj_arg a, uint8_t b, b_lean_obj_
   return lean_box(p ? (size_t)(p - lean_sarray_cptr(a)) : (size_t)hi);
 }
 
-/* Feed.Bytes.findHeadEnd: the first i in [lo, hi - 3) with a[i..i+4] = "\r\n\r\n", else hi */
-LEAN_EXPORT lean_obj_res feed_find_head_end(b_lean_obj_arg a, b_lean_obj_arg lon, b_lean_obj_arg hin) {
-  size_t n = lean_sarray_size(a);
-  u64_t lo = nat_u64(lon), hi = nat_u64(hin);
-  if (hi > n) hi = n;
-  const u8_t *s = lean_sarray_cptr(a);
-  size_t i = (size_t)lo;
-  while (i + 4 <= hi) {
-    const u8_t *p = memchr(s + i, '\r', hi - 3 - i);
-    if (!p) break;
-    size_t k = (size_t)(p - s);
-    if (p[1] == '\n' && p[2] == '\r' && p[3] == '\n') return lean_box(k);
-    i = k + 1;
-  }
-  return lean_box((size_t)hi);
-}
-
-/* Feed.Bytes.clear: the empty array (the C version keeps the allocation when it can be reused) */
-LEAN_EXPORT lean_obj_res feed_bytes_clear(lean_obj_arg a) {
-  if (lean_is_exclusive(a)) { lean_to_sarray(a)->m_size = 0; return a; }
-  lean_dec(a);
-  return lean_alloc_sarray(1, 0, 4096);
-}
-
 /* ---- HTTP/1.1 framing: Feed.Http.parse ----------------------------------------------------
- * Each function below is the one of the same name in Feed/Http.lean (and Feed/Bytes.lean), on
- * the raw bytes s[0, n) and machine integers; the self-test compares feed_http_parse with the
- * Lean definition. Indices stay below n + 5 here, far from overflow. */
+ * The byte scan of a request's head (Feed.Http.scan), then the checks of what it finds
+ * (Feed.Http.finish: the Host value, the request-target, the content's length). Each function
+ * below is the one of the same name in Feed/Http.lean, on the raw bytes s[0, n) and machine
+ * integers; the self-test compares feed_http_parse with the Lean definition. A search up to hi
+ * reads no byte at or past hi, except in loads of 32 bytes inside the array's allocation (cap
+ * bytes), where those bytes are masked off. Where a Lean loop carries fuel that never runs out
+ * before the bytes do, the C loop has none, and its comment says why. Indices stay below
+ * n + 16400, far from overflow. */
+/* The classes of Feed/Http.lean's bytes, one bit each: tchar, fieldChar, RFC 3986's sets of a
+ * reg-name, a path, a query, userinfo and a scheme (each from Feed/Http.lean's two words of bits,
+ * as `inSet` reads them), and hex. */
+#define H_TCHAR 1
+#define H_VALUE 2
+#define H_REG 4
+#define H_PATH 8
+#define H_QUERY 16
+#define H_USER 32
+#define H_SCHEME 64
+#define H_HEX 128
+#define H_IN(lo, hi, c) (unsigned)((c) < 64 ? ((lo) >> ((c) & 63)) & 1 : (c) < 128 ? ((hi) >> ((c) & 63)) & 1 : 0)
+#define H_CLASS(c) (H_IN(0x03ff6cfa00000000ull, 0x57ffffffc7fffffeull, c) | \
+  (unsigned)((c) == 0x09 || ((c) >= 0x20 && (c) != 0x7f)) << 1 | \
+  H_IN(0x2bff7fd200000000ull, 0x47fffffe87fffffeull, c) << 2 | H_IN(0x2fffffd200000000ull, 0x47fffffe87ffffffull, c) << 3 | \
+  H_IN(0xafffffd200000000ull, 0x47fffffe87ffffffull, c) << 4 | H_IN(0x2fff7fd200000000ull, 0x47fffffe87fffffeull, c) << 5 | \
+  H_IN(0x03ff680000000000ull, 0x07fffffe07fffffeull, c) << 6 | \
+  (unsigned)(((c) >= 0x30 && (c) <= 0x39) || ((c) >= 0x41 && (c) <= 0x46) || ((c) >= 0x61 && (c) <= 0x66)) << 7)
+#define H_C4(c) H_CLASS(c), H_CLASS((c) + 1), H_CLASS((c) + 2), H_CLASS((c) + 3)
+#define H_C16(c) H_C4(c), H_C4((c) + 4), H_C4((c) + 8), H_C4((c) + 12)
+#define H_C64(c) H_C16(c), H_C16((c) + 16), H_C16((c) + 32), H_C16((c) + 48)
+static const u8_t h_class[256] = { H_C64(0), H_C64(64), H_C64(128), H_C64(192) };
+#define H_NONE SIZE_MAX
 /* `byte a i`: 0 past the end */
 static inline u8_t h_byte(const u8_t *s, size_t n, size_t i) { return i < n ? s[i] : 0; }
 static inline u8_t h_lower(u8_t b) { return b >= 0x41 && b <= 0x5a ? (u8_t)(b + 32) : b; }
-/* Bytes.findByte: the first i in [lo, min hi n) with s[i] = b, else min hi n. The ranges are
- * short (a line, a header value), so 32 bytes are compared at a time inline while a load stays
- * inside the array's allocation (cap bytes); memchr does the rest. */
-static inline size_t h_find(const u8_t *s, size_t n, size_t cap, u8_t b, size_t lo, size_t hi) {
-  if (hi > n) hi = n;
-  if (lo >= hi) return hi;
-  const __m256i vb = _mm256_set1_epi8((char)b);
-  size_t i = lo;
+static inline int h_digit(u8_t c) { return c >= 0x30 && c <= 0x39; }
+static inline int h_alpha(u8_t c) { return (c >= 0x41 && c <= 0x5a) || (c >= 0x61 && c <= 0x7a); }
+/* eqAt: s[lo, hi) is lit[0, m) (m > 0); lit holds no NUL, so no range reaching past the end is */
+static inline int h_eq(const u8_t *s, size_t n, size_t lo, size_t hi, const char *lit, size_t m) {
+  return hi - lo == m && lo + m <= n && memcmp(s + lo, lit, m) == 0;
+}
+/* eqCI: s[lo, hi) is lit[0, m) ignoring ASCII case (lit lowercase, m > 0; lo <= hi <= n) */
+static inline int h_eq_ci(const u8_t *s, size_t lo, size_t hi, const char *lit, size_t m) {
+  if (hi - lo != m) return 0;
+  for (size_t k = 0; k < m; k++) if (h_lower(s[lo + k]) != (u8_t)lit[k]) return 0;
+  return 1;
+}
+/* skipLead: past the empty lines (CR LF) from i on */
+static inline size_t h_skip_lead(const u8_t *s, size_t n, size_t i) {
+  while (i + 1 < n && s[i] == 0x0d && s[i + 1] == 0x0a) i += 2;
+  return i;
+}
+/* tokenEnd: the first byte from i on that is not a tchar, or hi (hi <= n) */
+static inline size_t h_token_end(const u8_t *s, size_t i, size_t hi) {
+  while (i < hi && (h_class[s[i]] & H_TCHAR)) i++;
+  return i;
+}
+/* targetEnd: the first SP, CR or LF from i on, or hi (hi <= n); 32 bytes at a time */
+static inline size_t h_target_end(const u8_t *s, size_t cap, size_t i, size_t hi) {
+  if (i >= hi) return i;
+  const __m256i sp = _mm256_set1_epi8(0x20), cr = _mm256_set1_epi8(0x0d), lf = _mm256_set1_epi8(0x0a);
   while (i + 32 <= cap) {
-    unsigned m = (unsigned)_mm256_movemask_epi8(_mm256_cmpeq_epi8(_mm256_loadu_si256((const __m256i *)(s + i)), vb));
+    __m256i v = _mm256_loadu_si256((const __m256i *)(s + i));
+    unsigned m = (unsigned)_mm256_movemask_epi8(
+        _mm256_or_si256(_mm256_or_si256(_mm256_cmpeq_epi8(v, sp), _mm256_cmpeq_epi8(v, cr)), _mm256_cmpeq_epi8(v, lf)));
     if (hi - i < 32) m &= (1u << (hi - i)) - 1;
     if (m) return i + (size_t)__builtin_ctz(m);
     i += 32;
     if (i >= hi) return hi;
   }
-  const u8_t *p = memchr(s + i, b, hi - i);
-  return p ? (size_t)(p - s) : hi;
+  while (i < hi && s[i] != 0x20 && s[i] != 0x0d && s[i] != 0x0a) i++;
+  return i;
 }
-/* Bytes.findHeadEnd with hi = n: the first i >= lo with i + 4 <= n where s[i, i+4) is \r\n\r\n,
- * else n. 32 candidates at a time while the loads (s[i, i+35)) stay inside the allocation. */
-static inline size_t h_head_end(const u8_t *s, size_t n, size_t cap, size_t lo) {
+/* valueEnd: the first byte from i on that is not a fieldChar (a control other than HTAB, or DEL),
+ * or hi (hi <= n); 32 bytes at a time */
+static inline size_t h_value_end(const u8_t *s, size_t cap, size_t i, size_t hi) {
+  if (i >= hi) return i;
+  const __m256i c1f = _mm256_set1_epi8(0x1f), tab = _mm256_set1_epi8(0x09), del = _mm256_set1_epi8(0x7f);
+  while (i + 32 <= cap) {
+    __m256i v = _mm256_loadu_si256((const __m256i *)(s + i));
+    __m256i ctl = _mm256_andnot_si256(_mm256_cmpeq_epi8(v, tab), _mm256_cmpeq_epi8(_mm256_max_epu8(v, c1f), c1f));
+    unsigned m = (unsigned)_mm256_movemask_epi8(_mm256_or_si256(ctl, _mm256_cmpeq_epi8(v, del)));
+    if (hi - i < 32) m &= (1u << (hi - i)) - 1;
+    if (m) return i + (size_t)__builtin_ctz(m);
+    i += 32;
+    if (i >= hi) return hi;
+  }
+  while (i < hi && (h_class[s[i]] & H_VALUE)) i++;
+  return i;
+}
+/* headEnd: the first i >= lo with i + 4 <= hi where s[i, i + 4) is CR LF CR LF, else H_NONE
+ * (hi <= n); 32 candidates at a time while the loads (s[i, i + 35)) stay inside the allocation */
+static inline size_t h_head_end(const u8_t *s, size_t cap, size_t lo, size_t hi) {
   size_t i = lo;
-  const __m256i cr = _mm256_set1_epi8('\r'), lf = _mm256_set1_epi8('\n');
-  while (i + 4 <= n && i + 35 <= cap) {
+  const __m256i cr = _mm256_set1_epi8(0x0d), lf = _mm256_set1_epi8(0x0a);
+  while (i + 4 <= hi && i + 35 <= cap) {
     __m256i x = _mm256_and_si256(
         _mm256_and_si256(_mm256_cmpeq_epi8(_mm256_loadu_si256((const __m256i *)(s + i)), cr),
                          _mm256_cmpeq_epi8(_mm256_loadu_si256((const __m256i *)(s + i + 1)), lf)),
         _mm256_and_si256(_mm256_cmpeq_epi8(_mm256_loadu_si256((const __m256i *)(s + i + 2)), cr),
                          _mm256_cmpeq_epi8(_mm256_loadu_si256((const __m256i *)(s + i + 3)), lf)));
     unsigned m = (unsigned)_mm256_movemask_epi8(x);
-    size_t left = n - 3 - i;   /* the candidates i + k with i + k + 4 <= n */
+    size_t left = hi - 3 - i;   /* the candidates i + k with i + k + 4 <= hi */
     if (left < 32) m &= (1u << left) - 1;
     if (m) return i + (size_t)__builtin_ctz(m);
-    if (left <= 32) return n;
+    if (left <= 32) return H_NONE;
     i += 32;
   }
-  while (i + 4 <= n) {
-    const u8_t *p = memchr(s + i, '\r', n - 3 - i);
+  while (i + 4 <= hi) {
+    const u8_t *p = memchr(s + i, 0x0d, hi - 3 - i);
     if (!p) break;
     size_t k = (size_t)(p - s);
-    if (p[1] == '\n' && p[2] == '\r' && p[3] == '\n') return k;
+    if (p[1] == 0x0a && p[2] == 0x0d && p[3] == 0x0a) return k;
     i = k + 1;
   }
-  return n;
+  return H_NONE;
 }
-/* eqAt: s[lo, hi) is lit[0, m) */
-static inline int h_eq(const u8_t *s, size_t n, size_t lo, size_t hi, const char *lit, size_t m) {
-  if ((hi > lo ? hi - lo : 0) != m) return 0;
-  if (LIKELY(lo + m <= n)) return memcmp(s + lo, lit, m) == 0;
-  for (size_t k = 0; k < m; k++) if (h_byte(s, n, lo + k) != (u8_t)lit[k]) return 0;
-  return 1;
-}
-/* eqCI: s[lo, hi) is lit[0, m) ignoring ASCII case (lit lowercase) */
-static inline int h_eq_ci(const u8_t *s, size_t n, size_t lo, size_t hi, const char *lit, size_t m) {
-  if ((hi > lo ? hi - lo : 0) != m) return 0;
-  for (size_t k = 0; k < m; k++) if (h_lower(h_byte(s, n, lo + k)) != (u8_t)lit[k]) return 0;
-  return 1;
-}
-static inline size_t h_skip_l(const u8_t *s, size_t n, size_t i, size_t e) {
-  for (size_t f = e > i ? e - i : 0; f > 0; f--) {
-    u8_t b = h_byte(s, n, i);
-    if (b != 0x20 && b != 0x09) break;
-    i++;
-  }
+/* skipL: past the spaces and tabs from i on, not past e (e <= n) */
+static inline size_t h_skip_l(const u8_t *s, size_t i, size_t e) {
+  while (i < e && (s[i] == 0x20 || s[i] == 0x09)) i++;
   return i;
 }
-static inline size_t h_skip_r(const u8_t *s, size_t n, size_t lo, size_t e) {
-  for (size_t f = e > lo ? e - lo : 0; f > 0; f--) {
-    u8_t b = h_byte(s, n, e - 1);
-    if (b != 0x20 && b != 0x09) break;
-    e--;
-  }
+/* skipR: back over the spaces and tabs before e, not before lo (e <= n) */
+static inline size_t h_skip_r(const u8_t *s, size_t lo, size_t e) {
+  while (e > lo && (s[e - 1] == 0x20 || s[e - 1] == 0x09)) e--;
   return e;
 }
-/* parseLen: 1 and the value of the digits s[lo, hi) (at most 15 of them), else 0 */
-static inline int h_parse_len(const u8_t *s, size_t n, size_t lo, size_t hi, u64_t *v) {
-  if (lo >= hi || hi - lo > 15) return 0;
-  u64_t acc = 0;
-  for (size_t i = lo; i < hi; i++) {
-    u8_t c = h_byte(s, n, i);
-    if (c < 0x30 || c > 0x39) return 0;
-    acc = acc * 10 + (u64_t)(c - 0x30);
-  }
-  *v = acc;
-  return 1;
+/* Bytes.findByte: the first i in [lo, hi) with s[i] = b, else hi (hi <= n); the ranges are short */
+static inline size_t h_find(const u8_t *s, u8_t b, size_t lo, size_t hi) {
+  if (lo >= hi) return hi;
+  while (lo < hi && s[lo] != b) lo++;
+  return lo;
 }
-/* hasToken: the comma-separated value s[lo, hi) has the token tok (lowercase) */
-static int h_has_token(const u8_t *s, size_t n, size_t cap, size_t lo, size_t hi, const char *tok, size_t m) {
-  size_t i = lo;
-  for (size_t f = (hi > lo ? hi - lo : 0) + 1; f > 0; f--) {
-    if (i >= hi) return 0;
-    size_t e = h_find(s, n, cap, 0x2c, i, hi), st = h_skip_l(s, n, i, e);
-    if (h_eq_ci(s, n, st, h_skip_r(s, n, st, e), tok, m)) return 1;
+/* hasToken: the comma-separated value s[lo, hi) has the token tok (lowercase); hi <= n. The Lean
+ * definition's fuel, hi - lo + 1, outlasts the commas. */
+static int h_has_token(const u8_t *s, size_t lo, size_t hi, const char *tok, size_t m) {
+  for (size_t i = lo; i < hi;) {
+    size_t e = h_find(s, 0x2c, i, hi), st = h_skip_l(s, i, e);
+    if (h_eq_ci(s, st, h_skip_r(s, st, e), tok, m)) return 1;
     i = e + 1;
   }
   return 0;
 }
+/* allIn, allHex: every byte of s[i, hi) has the class bit k (hi <= n); allDigits: is a digit */
+static inline int h_all_in(const u8_t *s, unsigned k, size_t i, size_t hi) {
+  for (; i < hi; i++) if (!(h_class[s[i]] & k)) return 0;
+  return 1;
+}
+static inline int h_all_digits(const u8_t *s, size_t i, size_t hi) {
+  for (; i < hi; i++) if (!h_digit(s[i])) return 0;
+  return 1;
+}
+/* skipZeros: the first byte from i on that is not "0", or hi (hi <= n) */
+static inline size_t h_skip_zeros(const u8_t *s, size_t i, size_t hi) {
+  while (i < hi && s[i] == 0x30) i++;
+  return i;
+}
+/* sameBytes: s[lo, hi) and s[lo2, hi2) are the same bytes (lo <= hi <= n, lo2 <= hi2 <= n) */
+static inline int h_same_bytes(const u8_t *s, size_t lo, size_t hi, size_t lo2, size_t hi2) {
+  return hi - lo == hi2 - lo2 && memcmp(s + lo, s + lo2, hi - lo) == 0;
+}
+/* Fields: its Nat fields in declaration order, then its Bool fields */
 typedef struct {
-  u64_t len;
-  size_t auth_lo, auth_hi;
-  u8_t has_len, len_bad, has_auth, close, keep_alive, te, bad;
-} heads_t;
-/* scanHeads */
-static void h_scan_heads(const u8_t *s, size_t n, size_t cap, size_t he, size_t i, heads_t *h, size_t fuel) {
-  for (; fuel > 0; fuel--) {
-    if (i >= he) return;
-    size_t le = h_find(s, n, cap, 0x0d, i, he), colon = h_find(s, n, cap, 0x3a, i, le);
-    if (colon >= le || colon == i) h->bad = 1;
-    else {
-      size_t vs = h_skip_l(s, n, colon + 1, le), ve = h_skip_r(s, n, vs, le);
-      switch (colon - i) {   /* the names' lengths: only one can match */
-      case 14:
-        if (h_eq_ci(s, n, i, colon, "content-length", 14)) {
-          u64_t v;
-          if (!h_parse_len(s, n, vs, ve, &v)) h->len_bad = 1;
-          else if (!h->has_len) { h->has_len = 1; h->len = v; }
-          else if (h->len != v) h->len_bad = 1;
-        }
-        break;
-      case 13:
-        if (h_eq_ci(s, n, i, colon, "authorization", 13)) { h->has_auth = 1; h->auth_lo = vs; h->auth_hi = ve; }
-        break;
-      case 10:
-        if (h_eq_ci(s, n, i, colon, "connection", 10)) {
-          h->close = h->close || h_has_token(s, n, cap, vs, ve, "close", 5);
-          h->keep_alive = h->keep_alive || h_has_token(s, n, cap, vs, ve, "keep-alive", 10);
-        }
-        break;
-      case 17:
-        if (h_eq_ci(s, n, i, colon, "transfer-encoding", 17)) h->te = 1;
-        break;
-      }
+  size_t hosts, host_lo, host_hi, auths, auth_lo, auth_hi, len_lo, len_hi;
+  u8_t has_len, len_bad, coding, close, keep_alive, bad;
+} fields_t;
+/* field: the field line with the name s[lo, hi) and the value s[vs, ve), added to f (ve <= n) */
+static void h_field(const u8_t *s, size_t lo, size_t hi, size_t vs, size_t ve, fields_t *f) {
+  switch (hi - lo) {   /* the names' lengths: at most one can match */
+  case 4:
+    if (h_eq_ci(s, lo, hi, "host", 4)) { f->hosts++; f->host_lo = vs; f->host_hi = ve; }
+    break;
+  case 14:
+    if (h_eq_ci(s, lo, hi, "content-length", 14)) {
+      if (vs < ve && h_all_digits(s, vs, ve)) {
+        size_t z = h_skip_zeros(s, vs, ve);
+        if (!f->has_len) { f->has_len = 1; f->len_lo = z; f->len_hi = ve; }
+        else if (!h_same_bytes(s, f->len_lo, f->len_hi, z, ve)) f->len_bad = 1;
+      } else f->len_bad = 1;
     }
-    i = le + 2;
+    break;
+  case 13:
+    if (h_eq_ci(s, lo, hi, "authorization", 13)) { f->auths++; f->auth_lo = vs; f->auth_hi = ve; }
+    break;
+  case 10:
+    if (h_eq_ci(s, lo, hi, "connection", 10)) {
+      f->close = f->close || h_has_token(s, vs, ve, "close", 5);
+      f->keep_alive = f->keep_alive || h_has_token(s, vs, ve, "keep-alive", 10);
+    }
+    break;
+  case 17:
+    if (h_eq_ci(s, lo, hi, "transfer-encoding", 17)) f->coding = 1;
+    break;
   }
+}
+/* fields: the field lines from i to the head's end he (he + 4 <= n). A line that does not end the
+ * head is followed by another at least four bytes on (a name byte, ":", CR, LF), so the Lean
+ * definition's fuel, he - i, lasts until i reaches he, where a line is bad with or without it. */
+static void h_fields(const u8_t *s, size_t cap, size_t he, size_t i, fields_t *f) {
+  for (;;) {
+    size_t c = h_token_end(s, i, he);
+    if (c == i || s[c] != 0x3a) { f->bad = 1; return; }
+    size_t e = h_value_end(s, cap, c + 1, he);
+    if (s[e] != 0x0d || s[e + 1] != 0x0a) { f->bad = 1; return; }
+    size_t vs = h_skip_l(s, c + 1, e);
+    h_field(s, i, c, vs, h_skip_r(s, vs, e), f);
+    if (he <= e) return;
+    i = e + 2;
+  }
+}
+/* what scan finds: H_WAIT, a status (400, 414 or 431), or H_HEAD and the head's parts */
+#define H_WAIT 0
+#define H_HEAD 1
+typedef struct {
+  size_t i0, m, t, minor, he;
+  fields_t f;
+} head_t;
+/* scan: the bytes of the input at pos (maxHead + 4 = 16388, maxTarget = 8192) */
+static unsigned h_scan(const u8_t *s, size_t n, size_t cap, size_t pos, head_t *h) {
+  /* at or past the end: no empty line, no method, no head end, fewer than 16,388 bytes */
+  if (UNLIKELY(pos >= n)) return H_WAIT;
+  size_t lim = n < pos + 16388 ? n : pos + 16388;
+  size_t i0 = h_skip_lead(s, n, pos);
+  size_t m = h_token_end(s, i0, lim);
+  size_t tl = m + 2 + 8192, t = h_target_end(s, cap, m + 1, lim < tl ? lim : tl);
+  int sp = i0 < m && h_byte(s, n, m) == 0x20;
+  if (sp && t == tl) return 414;
+  size_t he = h_head_end(s, cap, i0, lim);
+  if (he == H_NONE) return pos + 16388 <= n ? 431 : H_WAIT;
+  /* the request-line: method SP request-target SP HTTP-version CR LF */
+  size_t v = t + 1;
+  u8_t minor = h_byte(s, n, v + 7);
+  if (!(sp && m + 1 < t && h_byte(s, n, t) == 0x20 && h_eq(s, n, v, v + 7, "HTTP/1.", 7) && h_digit(minor) &&
+        h_byte(s, n, v + 8) == 0x0d && h_byte(s, n, v + 9) == 0x0a))
+    return 400;
+  memset(&h->f, 0, sizeof h->f);
+  if (v + 8 != he) h_fields(s, cap, he, v + 10, &h->f);
+  if (h->f.bad) return 400;
+  h->i0 = i0; h->m = m; h->t = t; h->minor = (size_t)(minor - 0x30); h->he = he;
+  return H_HEAD;
+}
+
+/* The Host value and the request-target (Feed.Http.finish and the deciders before it, RFC 3986's
+ * grammar), on ranges [lo, hi) with hi <= n, inside which every byte they read lies. */
+/* uriChars: s[i, hi) is *( c / pct-encoded ), c of the class bit k; the Lean definition's fuel,
+ * hi - i, outlasts the bytes */
+static inline int h_uri_chars(const u8_t *s, unsigned k, size_t i, size_t hi) {
+  while (i < hi) {
+    u8_t c = s[i];
+    if (h_class[c] & k) i++;
+    else if (c == 0x25 && i + 3 <= hi && (h_class[s[i + 1]] & h_class[s[i + 2]] & H_HEX)) i += 3;
+    else return 0;
+  }
+  return 1;
+}
+/* decOctet: s[lo, hi) is 0 to 255 without a leading zero */
+static int h_dec_octet(const u8_t *s, size_t lo, size_t hi) {
+  if (!(lo < hi && hi <= lo + 3 && h_all_digits(s, lo, hi) && (hi == lo + 1 || s[lo] != 0x30))) return 0;
+  unsigned v = 0;
+  for (size_t i = lo; i < hi; i++) v = v * 10 + (unsigned)(s[i] - 0x30);
+  return v < 256;
+}
+static int h_ipv4(const u8_t *s, size_t lo, size_t hi) {
+  size_t d1 = h_find(s, 0x2e, lo, hi), d2 = h_find(s, 0x2e, d1 + 1, hi), d3 = h_find(s, 0x2e, d2 + 1, hi);
+  return d3 < hi && h_dec_octet(s, lo, d1) && h_dec_octet(s, d1 + 1, d2) && h_dec_octet(s, d2 + 1, d3) &&
+         h_dec_octet(s, d3 + 1, hi);
+}
+static inline int h_h16(const u8_t *s, size_t lo, size_t hi) {
+  return lo < hi && hi <= lo + 4 && h_all_in(s, H_HEX, lo, hi);
+}
+/* groups: the number of h16 groups joined by ":" in s[lo, hi), the last perhaps an IPv4 address
+ * (two) when v4, else H_NONE. A group followed by ":" is followed by the next at least two bytes
+ * on, so the Lean definition's fuel, hi - lo, lasts until the next would start at hi, where none
+ * is found with or without it. */
+static size_t h_groups(const u8_t *s, size_t lo, size_t hi, int v4) {
+  if (hi <= lo) return 0;
+  for (size_t i = lo, k = 0;; k++) {
+    size_t e = h_find(s, 0x3a, i, hi);
+    if (e >= hi) return h_h16(s, i, hi) ? k + 1 : v4 && h_ipv4(s, i, hi) ? k + 2 : H_NONE;
+    if (!h_h16(s, i, e)) return H_NONE;
+    i = e + 1;
+  }
+}
+/* doubleColon: the first "::" in s[lo, hi), else hi; the Lean definition's fuel, hi - lo, lasts
+ * past the last place one fits */
+static size_t h_double_colon(const u8_t *s, size_t lo, size_t hi) {
+  for (size_t i = lo; i + 1 < hi; i++) if (s[i] == 0x3a && s[i + 1] == 0x3a) return i;
+  return hi;
+}
+static int h_ipv6(const u8_t *s, size_t lo, size_t hi) {
+  size_t d = h_double_colon(s, lo, hi);
+  if (d < hi) {
+    size_t i = h_groups(s, lo, d, 0), j = h_groups(s, d + 2, hi, 1);
+    return i != H_NONE && j != H_NONE && i + j <= 7;
+  }
+  return h_groups(s, lo, hi, 1) == 8;
+}
+static int h_ip_future(const u8_t *s, size_t lo, size_t hi) {
+  size_t d = h_find(s, 0x2e, lo, hi);
+  return lo < d && d + 1 < hi && h_all_in(s, H_HEX, lo, d) && h_all_in(s, H_USER, d + 1, hi);
+}
+static int h_ip_literal(const u8_t *s, size_t lo, size_t hi) {
+  if (lo < hi && (s[lo] == 0x76 || s[lo] == 0x56)) return h_ip_future(s, lo + 1, hi);
+  return h_ipv6(s, lo, hi);
+}
+static inline int h_port_ok(const u8_t *s, size_t i, size_t hi) {
+  return hi <= i || (s[i] == 0x3a && h_all_digits(s, i + 1, hi));
+}
+/* hostEnd: the end of the host if s[lo, hi) is uri-host [ ":" port ], else H_NONE */
+static size_t h_host_end(const u8_t *s, size_t lo, size_t hi) {
+  if (lo < hi && s[lo] == 0x5b) {
+    size_t r = h_find(s, 0x5d, lo, hi);
+    return r < hi && h_ip_literal(s, lo + 1, r) && h_port_ok(s, r + 1, hi) ? r + 1 : H_NONE;
+  }
+  size_t c = h_find(s, 0x3a, lo, hi);
+  return h_uri_chars(s, H_REG, lo, c) && h_port_ok(s, c, hi) ? c : H_NONE;
+}
+static int h_authority(const u8_t *s, size_t lo, size_t hi) {
+  size_t at = h_find(s, 0x40, lo, hi);
+  if (at < hi) return h_uri_chars(s, H_USER, lo, at) && h_host_end(s, at + 1, hi) != H_NONE;
+  return h_host_end(s, lo, hi) != H_NONE;
+}
+static int h_hier_part(const u8_t *s, size_t lo, size_t hi) {
+  if (lo + 2 <= hi && s[lo] == 0x2f && s[lo + 1] == 0x2f) {
+    size_t e = h_find(s, 0x2f, lo + 2, hi);
+    return h_authority(s, lo + 2, e) && h_uri_chars(s, H_PATH, e, hi);
+  }
+  return h_uri_chars(s, H_PATH, lo, hi);
+}
+static int h_other_scheme(const u8_t *s, size_t lo, size_t hi) {
+  size_t c = h_find(s, 0x3a, lo, hi);
+  return c < hi && lo < c && h_alpha(s[lo]) && h_all_in(s, H_SCHEME, lo, c) && !h_eq_ci(s, lo, c, "http", 4) &&
+         !h_eq_ci(s, lo, c, "https", 5) && h_hier_part(s, c + 1, hi);
+}
+/* absolutePath: 1 and the path's range if s[lo, hi) is an http or https absolute-form */
+static int h_absolute_path(const u8_t *s, size_t lo, size_t hi, size_t *plo, size_t *phi) {
+  size_t st = lo + 7 <= hi && h_eq_ci(s, lo, lo + 7, "http://", 7) ? lo + 7
+            : lo + 8 <= hi && h_eq_ci(s, lo, lo + 8, "https://", 8) ? lo + 8 : lo;
+  if (st == lo) return 0;
+  size_t e = h_find(s, 0x2f, st, hi), h = h_host_end(s, st, e);
+  if (h == H_NONE || !(st < h && h_uri_chars(s, H_PATH, e, hi))) return 0;
+  *plo = e; *phi = hi;
+  return 1;
+}
+/* target: 1 and the path's range if s[lo, hi) is a request-target */
+static int h_target(const u8_t *s, size_t lo, size_t hi, size_t *plo, size_t *phi) {
+  size_t q = h_find(s, 0x3f, lo, hi);
+  int query = hi <= q || h_uri_chars(s, H_QUERY, q + 1, hi);
+  if (lo < q && s[lo] == 0x2f) {
+    if (!(query && h_uri_chars(s, H_PATH, lo, q))) return 0;
+    *plo = lo; *phi = q;
+    return 1;
+  }
+  if (query && h_absolute_path(s, lo, q, plo, phi)) return 1;
+  size_t h;
+  if ((hi == lo + 1 && s[lo] == 0x2a) || ((h = h_host_end(s, lo, hi)) != H_NONE && h < hi) ||
+      (query && h_other_scheme(s, lo, q))) {
+    *plo = lo; *phi = lo;
+    return 1;
+  }
+  return 0;
+}
+/* lengthOf: the value of the digits s[lo, hi), or maxBody + 1 = 16385 if it is more */
+static size_t h_length_of(const u8_t *s, size_t lo, size_t hi) {
+  size_t acc = 0;
+  for (size_t i = lo; i < hi; i++) {
+    acc = acc * 10 + (u8_t)(s[i] - 0x30);
+    if (acc > 16384) return 16385;
+  }
+  return acc;
 }
 static lean_obj_res h_bad(unsigned st) {
   lean_object *o = lean_alloc_ctor(1, 1, 0);
   lean_ctor_set(o, 0, lean_box(st));
   return o;
 }
-/* Feed.Http.parse: the request at pos of a: incomplete (box 0), bad status (tag 1) or ok (tag 2)
- * with the Req: its Nat fields in declaration order, then method, hasAuth, close as bytes. */
-LEAN_EXPORT lean_obj_res feed_http_parse(b_lean_obj_arg a, b_lean_obj_arg posn) {
-  const u8_t *s = lean_sarray_cptr(a);
-  size_t n = lean_sarray_size(a), cap = lean_sarray_capacity(a);
-  if (UNLIKELY(!lean_is_scalar(posn))) return lean_box(0);   /* past the end: n - pos = 0 */
-  size_t pos = lean_unbox(posn);
-  size_t he = h_head_end(s, n, cap, pos);
-  if (he >= n) return n > pos && n - pos > 16384 ? h_bad(431) : lean_box(0);
-  if (he - pos > 16384) return h_bad(431);
-  size_t le = h_find(s, n, cap, 0x0d, pos, he);
-  size_t sp1 = h_find(s, n, cap, 0x20, pos, le), sp2 = h_find(s, n, cap, 0x20, sp1 + 1, le);
-  if (sp1 >= le || sp2 >= le || sp1 == pos) return h_bad(400);
-  int v11 = h_eq(s, n, sp2 + 1, le, "HTTP/1.1", 8);
-  if (!v11 && !h_eq(s, n, sp2 + 1, le, "HTTP/1.0", 8)) return h_bad(400);
-  u8_t method = h_eq(s, n, pos, sp1, "GET", 3) ? 0 : h_eq(s, n, pos, sp1, "POST", 4) ? 1 : 2;
-  size_t q = h_find(s, n, cap, 0x3f, sp1 + 1, sp2);
-  heads_t h;
-  memset(&h, 0, sizeof h);
-  if (le != he) h_scan_heads(s, n, cap, he, le + 2, &h, he - le);
-  if (h.bad || h.len_bad || h.te) return h_bad(400);
-  u64_t len = h.has_len ? h.len : 0;
-  if (len > 1048576) return h_bad(413);
-  size_t body_lo = he + 4;
+/* finish: the request from the head scan found (maxBody = 16384) */
+static lean_obj_res h_finish(const u8_t *s, size_t n, const head_t *h) {
+  const fields_t *f = &h->f;
+  if (f->coding || f->len_bad || f->auths > 1) return h_bad(400);
+  if (!(f->hosts == 0 ? h->minor == 0 : f->hosts == 1 && h_host_end(s, f->host_lo, f->host_hi) != H_NONE))
+    return h_bad(400);
+  size_t plo, phi;
+  if (!h_target(s, h->m + 1, h->t, &plo, &phi)) return h_bad(400);
+  size_t len = f->has_len ? h_length_of(s, f->len_lo, f->len_hi) : 0;
+  if (len > 16384) return h_bad(413);
+  size_t body_lo = h->he + 4;
   if (body_lo + len > n) return lean_box(0);
-  u8_t close = v11 ? h.close : !h.keep_alive;
-  lean_object *r = lean_alloc_ctor(0, 7, 3);
-  lean_ctor_set(r, 0, lean_box(sp1 + 1));
-  lean_ctor_set(r, 1, lean_box(q));
-  lean_ctor_set(r, 2, lean_box(h.auth_lo));
-  lean_ctor_set(r, 3, lean_box(h.auth_hi));
+  u8_t head = (u8_t)h_eq(s, n, h->i0, h->m, "HEAD", 4);
+  u8_t method = head || h_eq(s, n, h->i0, h->m, "GET", 3) ? 0 : h_eq(s, n, h->i0, h->m, "POST", 4) ? 1 : 2;
+  lean_object *r = lean_alloc_ctor(0, 7, 4);
+  lean_ctor_set(r, 0, lean_box(plo));
+  lean_ctor_set(r, 1, lean_box(phi));
+  lean_ctor_set(r, 2, lean_box(f->auth_lo));
+  lean_ctor_set(r, 3, lean_box(f->auth_hi));
   lean_ctor_set(r, 4, lean_box(body_lo));
   lean_ctor_set(r, 5, lean_box(body_lo + len));
   lean_ctor_set(r, 6, lean_box(body_lo + len));
   lean_ctor_set_uint8(r, sizeof(void *) * 7, method);
-  lean_ctor_set_uint8(r, sizeof(void *) * 7 + 1, h.has_auth);
-  lean_ctor_set_uint8(r, sizeof(void *) * 7 + 2, close);
+  lean_ctor_set_uint8(r, sizeof(void *) * 7 + 1, (u8_t)(f->auths == 1));
+  lean_ctor_set_uint8(r, sizeof(void *) * 7 + 2, (u8_t)(f->close || (h->minor == 0 && !f->keep_alive)));
+  lean_ctor_set_uint8(r, sizeof(void *) * 7 + 3, head);
   lean_object *o = lean_alloc_ctor(2, 1, 0);
   lean_ctor_set(o, 0, r);
   return o;
 }
+/* Feed.Http.parse: finish of scan; incomplete (box 0), bad status (tag 1) or ok (tag 2) with the
+ * Req: its Nat fields in declaration order, then method, hasAuth, close and head as bytes */
+LEAN_EXPORT lean_obj_res feed_http_parse(b_lean_obj_arg a, b_lean_obj_arg posn) {
+  const u8_t *s = lean_sarray_cptr(a);
+  size_t n = lean_sarray_size(a);
+  head_t h;
+  unsigned r = lean_is_scalar(posn) ? h_scan(s, n, lean_sarray_capacity(a), lean_unbox(posn), &h) : H_WAIT;
+  if (r == H_WAIT) return lean_box(0);
+  if (r != H_HEAD) return h_bad(r);
+  return h_finish(s, n, &h);
+}
 
 /* ---- JSON input: Feed.Json.decodeString and Feed.Json.parseTop ---------------------------
  * The functions of Feed/Json.lean on raw bytes. The Lean scanners carry fuel (hi - lo + 1);
- * it never runs out (a value of n bytes is scanned with any fuel >= n: each level of nesting
- * costs two and each earlier element or member one, and each of those has at least as many
- * bytes), so the C versions have none, and nesting is kept on an explicit stack instead of the
- * C stack. */
+ * it never runs out (a value of n bytes is scanned with any fuel >= n, scanValue_complete in
+ * Feed/Proofs/JsonValue.lean: each level of nesting costs two and each earlier element or member
+ * one, and each of those has at least as many bytes), so the C versions have none, and nesting
+ * is kept on an explicit stack instead of the C stack. */
 #define J_NONE SIZE_MAX
 static inline int j_ws(u8_t b) { return b == 0x20 || b == 0x09 || b == 0x0a || b == 0x0d; }
 static inline int j_digit(u8_t b) { return b >= 0x30 && b <= 0x39; }
@@ -410,11 +582,32 @@ static inline size_t j_skip_ws(const u8_t *s, size_t hi, size_t i) {
   while (i < hi && j_ws(s[i])) i++;
   return i;
 }
+/* utf8Len: the length of the well-formed UTF-8 sequence that starts at s[i] >= 0x80 and ends
+ * before hi, or 0 */
+static inline unsigned j_utf8_len(const u8_t *s, size_t hi, size_t i) {
+  u8_t b = s[i];
+  if (b >= 0xc2 && b <= 0xdf) return i + 1 < hi && s[i + 1] >= 0x80 && s[i + 1] <= 0xbf ? 2 : 0;
+  if (b >= 0xe0 && b <= 0xef) {
+    u8_t l = b == 0xe0 ? 0xa0 : 0x80, h = b == 0xed ? 0x9f : 0xbf;
+    return i + 2 < hi && s[i + 1] >= l && s[i + 1] <= h && s[i + 2] >= 0x80 && s[i + 2] <= 0xbf ? 3 : 0;
+  }
+  if (b >= 0xf0 && b <= 0xf4) {
+    u8_t l = b == 0xf0 ? 0x90 : 0x80, h = b == 0xf4 ? 0x8f : 0xbf;
+    return i + 3 < hi && s[i + 1] >= l && s[i + 1] <= h && s[i + 2] >= 0x80 && s[i + 2] <= 0xbf &&
+           s[i + 3] >= 0x80 && s[i + 3] <= 0xbf ? 4 : 0;
+  }
+  return 0;
+}
 /* scanString: i just after the opening quote; the index after the closing quote */
 static size_t j_string(const u8_t *s, size_t hi, size_t i) {
   while (i < hi) {
-    /* 32 bytes at a time while none is a quote, a backslash or a control */
-    while (i + 32 <= hi && !esc_mask32(_mm256_loadu_si256((const __m256i *)(s + i)))) i += 32;
+    /* 32 bytes at a time up to the first quote, backslash, control or byte >= 0x80 */
+    while (i + 32 <= hi) {
+      __m256i v = _mm256_loadu_si256((const __m256i *)(s + i));
+      unsigned m = esc_mask32(v) | (unsigned)_mm256_movemask_epi8(v);
+      if (m) { i += (unsigned)__builtin_ctz(m); break; }
+      i += 32;
+    }
     if (i >= hi) break;
     u8_t b = s[i];
     if (b == 0x22) return i + 1;
@@ -425,7 +618,12 @@ static size_t j_string(const u8_t *s, size_t hi, size_t i) {
       if (e == 0x22 || e == 0x5c || e == 0x2f || e == 0x62 || e == 0x66 || e == 0x6e || e == 0x72 || e == 0x74) i += 2;
       else if (e == 0x75 && i + 6 <= hi && j_hex(s[i + 2]) && j_hex(s[i + 3]) && j_hex(s[i + 4]) && j_hex(s[i + 5])) i += 6;
       else return J_NONE;
-    } else i++;
+    } else if (b < 0x80) i++;
+    else {
+      unsigned k = j_utf8_len(s, hi, i);
+      if (!k) return J_NONE;
+      i += k;
+    }
   }
   return J_NONE;
 }
@@ -564,9 +762,9 @@ static u8_t *j_decode(const u8_t *s, size_t n, size_t i, size_t hi, u8_t *d) {
 }
 /* Feed.Json.decodeString a lo hi */
 LEAN_EXPORT lean_obj_res feed_json_decode_string(b_lean_obj_arg a, b_lean_obj_arg lon, b_lean_obj_arg hin) {
-  u64_t lo = nat_u64(lon), hi = nat_u64(hin);
-  /* ranges that do not fit in memory never occur (the Lean version would allocate hi - lo bytes) */
-  size_t len = hi > lo && hi != UINT64_MAX ? (size_t)(hi - lo) : 0;
+  u64_t lo, hi;
+  clamp_range(a, lon, hin, &lo, &hi);
+  size_t len = (size_t)(hi - lo);
   lean_object *r = lean_alloc_sarray(1, 0, 3 * len + 8);
   if (len) {
     u8_t *d = j_decode(lean_sarray_cptr(a), lean_sarray_size(a), (size_t)lo + 1, (size_t)hi, lean_sarray_cptr(r));
@@ -606,7 +804,7 @@ LEAN_EXPORT lean_obj_res feed_json_parse_top(b_lean_obj_arg a, b_lean_obj_arg lo
     return j != J_NONE && j_skip_ws(s, hi, j) == hi ? lean_box(1) : lean_box(0);
   }
   size_t nk = lean_array_size(keys);
-  /* the last value of each key: kind, lo, hi (the handler asks for at most four keys) */
+  /* the last value of each key: kind, lo, hi (the handler asks for at most five keys) */
   size_t small[3 * 8], *rec = nk <= 8 ? small : malloc(3 * nk * sizeof(size_t));
   for (size_t k = 0; k < 3 * nk; k++) rec[k] = 0;
   i = j_skip_ws(s, hi, i + 1);
@@ -793,33 +991,24 @@ static void sha_block(u32_t h[8], const u8_t *p) {
 }
 static void state_get(b_lean_obj_arg s, u32_t h[8]) { for (int i = 0; i < 8; i++) h[i] = lean_ctor_get_uint32(s, (unsigned)(4 * i)); }
 
-/* Feed.Hmac.mac: HMAC-SHA256 of m[lo, hi) under the key's inner and outer states, as
- * Sha256.finish (from the inner state, 64 bytes already hashed) then one outer block. */
+/* Feed.Hmac.mac: HMAC-SHA256 of m[lo, hi) (hi clamped to the size, lo to hi, as Sha256.finish
+ * does) under the key's inner and outer states, as Sha256.finish (from the inner state, 64 bytes
+ * already hashed) then one outer block. */
 LEAN_EXPORT lean_obj_res feed_hmac_mac(b_lean_obj_arg key, b_lean_obj_arg m, b_lean_obj_arg lon, b_lean_obj_arg hin) {
   u32_t h[8];
   state_get(lean_ctor_get(key, 0), h);
-  size_t size = lean_sarray_size(m);
-  u64_t lo = nat_u64(lon), hi = nat_u64(hin);
-  if (hi > size) hi = size;
+  u64_t lo, hi;
+  clamp_range(m, lon, hin, &lo, &hi);
   const u8_t *s = lean_sarray_cptr(m);
+  u64_t n = hi - lo, full = n / 64;
+  for (u64_t k = 0; k < full; k++) sha_block(h, s + lo + 64 * k);
+  u64_t tl = lo + 64 * full, rem = hi - tl, bits = (64 + n) * 8;
+  size_t len = rem < 56 ? 64 : 128;
   u8_t tail[128];
-  size_t len;
-  if (lo <= hi) {
-    u64_t n = hi - lo, full = n / 64;
-    for (u64_t k = 0; k < full; k++) sha_block(h, s + lo + 64 * k);
-    u64_t tl = lo + 64 * full, rem = hi - tl, bits = (64 + n) * 8;
-    len = rem < 56 ? 64 : 128;
-    memset(tail, 0, len);
-    memcpy(tail, s + tl, (size_t)rem);
-    tail[rem] = 0x80;
-    for (int j = 0; j < 8; j++) tail[len - 1 - (size_t)j] = (u8_t)(bits >> (8 * j));
-  } else {
-    /* an empty range given backwards: the padded tail of the specification has no 0x80 */
-    len = 64;
-    memset(tail, 0, len);
-    u64_t bits = 64 * 8;
-    for (int j = 0; j < 8; j++) tail[len - 1 - (size_t)j] = (u8_t)(bits >> (8 * j));
-  }
+  memset(tail, 0, len);
+  memcpy(tail, s + tl, (size_t)rem);
+  tail[rem] = 0x80;
+  for (int j = 0; j < 8; j++) tail[len - 1 - (size_t)j] = (u8_t)(bits >> (8 * j));
   sha_block(h, tail);
   if (len == 128) sha_block(h, tail + 64);
   u32_t o[8], w[16] = {0};
@@ -857,9 +1046,8 @@ LEAN_EXPORT lean_obj_res feed_b64_encode(b_lean_obj_arg dv) {
   return r;
 }
 
-/* Feed.Jwt.b64Decode: base64url text a[lo, hi) (up to two '=' of padding stripped); none if a
- * character is not base64url or the length is 1 mod 4. Trailing bits that do not make a byte
- * are dropped. */
+/* Feed.Jwt.b64Decode: base64url text a[lo, hi); none if a character is not base64url ('=' is
+ * not: no padding), the length is 1 mod 4, or the bits after the last whole byte are not zero. */
 static const u8_t b64v[256] = {
 #define X64 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64
   X64, X64,
@@ -877,8 +1065,6 @@ LEAN_EXPORT lean_obj_res feed_b64_decode(b_lean_obj_arg a, b_lean_obj_arg lon, b
   const u8_t *s = lean_sarray_cptr(a);
   u64_t lo = nat_u64(lon), hi = nat_u64(hin);
   if (hi > size) hi = size;
-  if (hi > lo && s[hi - 1] == '=') hi--;
-  if (hi > lo && s[hi - 1] == '=') hi--;
   u64_t n = hi > lo ? hi - lo : 0;
   if (n % 4 == 1) return lean_box(0);
   lean_object *r = lean_alloc_sarray(1, 0, n * 3 / 4 + 3);
@@ -892,6 +1078,7 @@ LEAN_EXPORT lean_obj_res feed_b64_decode(b_lean_obj_arg a, b_lean_obj_arg lon, b
     nbits += 6;
     if (nbits >= 8) { nbits -= 8; d[k++] = (u8_t)(acc >> nbits); acc &= (1u << nbits) - 1; }
   }
+  if (acc) { lean_dec(r); return lean_box(0); }   /* the nbits (< 8) bits left over are not zero */
   lean_to_sarray(r)->m_size = k;
   lean_object *o = lean_alloc_ctor(1, 1, 0);
   lean_ctor_set(o, 0, r);
@@ -900,8 +1087,9 @@ LEAN_EXPORT lean_obj_res feed_b64_decode(b_lean_obj_arg a, b_lean_obj_arg lon, b
 
 /* Feed.postJsonAfter: out ++ start ++ digits id ++ ",\"body\":\"" ++ escape(src[b, c)) ++
  * "\",\"created_at\":\"" ++ escape(src[c, e)) ++ "\",\"author\":\"" ++ escape(names[s, t)) ++
- * "\",\"like_count\":" ++ digits likes ++ "}" (one post object; the literals are those of
- * Feed/Handler.lean, which the self-test checks this against).
+ * "\",\"like_count\":" ++ digits likes ++ "}" (one post object, as the feed's and a post's
+ * responses below write it; the literals are those of Feed/Handler.lean, and the self-test checks
+ * those responses against their Lean definitions).
  *
  * The object is written with one reservation: room for every byte escaped to six, so the
  * copies below check no capacity. */
@@ -1008,8 +1196,8 @@ static inline lean_object *obj_nat(lean_object *out, u8_t **d, b_lean_obj_arg n,
   *d = ba_end(out);
   return out;
 }
-/* One post object after `start` (slen bytes), as feed_append_post. `plain`: no byte of src or
- * names needs escaping, so the strings are copied. */
+/* One post object after `start` (slen bytes, at most 16): Feed.postJsonAfter, above. `plain`: no
+ * byte of src or names needs escaping, so the strings are copied. */
 static inline lean_object *post_obj(lean_object *out, const u8_t *start, size_t slen, b_lean_obj_arg idn, b_lean_obj_arg src,
                                     b_lean_obj_arg bn, b_lean_obj_arg cn, b_lean_obj_arg en, b_lean_obj_arg names,
                                     b_lean_obj_arg sn, b_lean_obj_arg tn, b_lean_obj_arg likesn, int plain) {
@@ -1057,17 +1245,12 @@ static inline lean_object *post_obj(lean_object *out, const u8_t *start, size_t 
   lean_to_sarray(out)->m_size = (size_t)(d - lean_sarray_cptr(out));
   return out;
 }
-LEAN_EXPORT lean_obj_res feed_append_post(lean_obj_arg out, b_lean_obj_arg start, b_lean_obj_arg idn, b_lean_obj_arg src,
-                                          b_lean_obj_arg bn, b_lean_obj_arg cn, b_lean_obj_arg en, b_lean_obj_arg names,
-                                          b_lean_obj_arg sn, b_lean_obj_arg tn, b_lean_obj_arg likesn) {
-  /* the start bytes are copied first; reserve them separately when they are long */
-  size_t slen = lean_sarray_size(start);
-  if (UNLIKELY(slen > 16)) {
-    out = ba_reserve(out, slen + 32);
-    lit_append(out, start);
-    return post_obj(out, (const u8_t *)"", 0, idn, src, bn, cn, en, names, sn, tn, likesn, 0);
-  }
-  return post_obj(out, lean_sarray_cptr(start), slen, idn, src, bn, cn, en, names, sn, tn, likesn, 0);
+
+/* Feed.Bytes.clear: the empty array, keeping the allocation of a when it can be reused */
+static lean_object *ba_clear(lean_obj_arg a) {
+  if (lean_is_exclusive(a)) { lean_to_sarray(a)->m_size = 0; return a; }
+  lean_dec(a);
+  return lean_alloc_sarray(1, 0, 4096);
 }
 
 /* Feed.feedFromPage: "{\"posts\":[" ++ the post objects of the rows whose author was found (at
@@ -1078,7 +1261,7 @@ LEAN_EXPORT lean_obj_res feed_append_post(lean_obj_arg out, b_lean_obj_arg start
 LEAN_EXPORT lean_obj_res feed_feed_from_page(lean_obj_arg body, b_lean_obj_arg pg) {
   lean_object *blob = lean_ctor_get(pg, 0), *cols = lean_ctor_get(pg, 1);
   size_t rows = lean_array_size(cols) / 8, n = 0;
-  lean_object *out = feed_bytes_clear(body);
+  lean_object *out = ba_clear(body);
   out = ba_reserve(out, 64);
   lit_bytes(out, "{\"posts\":[", 10);
   int plain = ba_plain(blob);

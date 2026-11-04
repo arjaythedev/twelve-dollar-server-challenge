@@ -34,6 +34,9 @@ theorem perform_like (db : DB) (uid pid : Nat) :
     cases hh : (db.insertLike uid pid).1 <;>
       simp [kLiked, kTrue, kFalse, kLikedPost, kWrapEnd, likeJson]
 
+/-- info: 'Feed.perform_like' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in #print axioms perform_like
+
 theorem DB.nextPostId_pos (db : DB) : db.nextPostId ≠ 0 := by simp [DB.nextPostId]
 
 /-- **A new post answers and writes as the specification says**: the row the insert adds, with
@@ -57,5 +60,8 @@ theorem perform_create (db : DB) (uid : Nat) (text name : ByteArray) :
   have h0 : Spec.lit "\",\"like_count\":0}}" = Spec.lit "\",\"like_count\":" ++ (digits 0 ++ (Spec.lit "}" ++ Spec.lit "}")) := by
     decide
   rw [h0]
+
+/-- info: 'Feed.perform_create' depends on axioms: [propext, Classical.choice, Quot.sound] -/
+#guard_msgs in #print axioms perform_create
 
 end Feed

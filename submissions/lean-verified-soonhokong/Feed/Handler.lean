@@ -84,7 +84,6 @@ def kCommaId : ByteArray := lit ",{\"id\":"
 
 /-- `{"id":…,"body":…,"created_at":…,"author":…,"like_count":…}` from stored text, after
 `start` (the object's first bytes: `kId`, or `kCommaId` after a previous object). -/
-@[extern "feed_append_post"]
 def postJsonAfter (out : ByteArray) (start : @& ByteArray) (id : @& Nat) (src : @& ByteArray) (b c e : @& Nat)
     (names : @& ByteArray) (ns ne : @& Nat) (likes : @& Nat) : ByteArray :=
   let out := Bytes.appendLitNat out start id
@@ -288,7 +287,10 @@ where
 
 def kBodyKey : ByteArray := lit "body"
 
-/-- The trimmed post body of a `POST /posts` request. -/
+/-- The trimmed post body of a `POST /posts` request. A text that starts with U+0000 is answered
+500: SQLite's `length` counts the characters before the first NUL, so schema.sql's
+`CHECK (length(body) BETWEEN 1 AND 500)` refuses it and the insert would add no row (SPEC.md's
+"anything else"). -/
 def postText (a : ByteArray) (r : Req) : Except Err ByteArray :=
   match Json.parseTop a r.bodyLo r.bodyHi #[kBodyKey] with
   | .malformed => .error .malformedJson
@@ -300,6 +302,7 @@ def postText (a : ByteArray) (r : Req) : Except Err ByteArray :=
     let (lo, hi) := trimRange s
     if lo ≥ hi then .error .bodyRequired
     else if codePoints s lo hi > 500 then .error .bodyTooLong
+    else if s.get! lo == 0 then .error .internal
     else .ok (s.extract lo hi)
 
 /-! ## One request -/

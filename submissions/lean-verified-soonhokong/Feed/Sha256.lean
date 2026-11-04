@@ -6,7 +6,8 @@ import Feed.Bytes
 Plain Lean on `UInt32`. The message schedule is a rolling window of sixteen words passed as
 arguments, so the compiled loop keeps everything in registers and allocates nothing.
 HMAC's inner and outer key blocks are compressed once per key (`Hmac.Key`); that is the key
-schedule, every message is still hashed in full.
+schedule, every message is still hashed in full. `Feed/Proofs/Sha256.lean` proves `hash` and
+`Hmac.mac` equal to FIPS 180-4 and RFC 2104 as `Feed/Spec/Sha256.lean` writes them.
 -/
 namespace Feed.Sha256
 
@@ -101,9 +102,11 @@ def digest (s : State) : ByteArray :=
 
 /-- Finish hashing `m[lo, hi)` from state `s`, where `pre` bytes (a multiple of 64) were already
 compressed into `s`: the remaining full blocks, then the padded tail (the last bytes, 0x80, zeros
-to 56 mod 64, the 64-bit big-endian bit length), read in place. -/
+to 56 mod 64, the 64-bit big-endian bit length), read in place. `hi` is clamped to the array and
+`lo` to `hi`, as `slice` reads a range: one given backwards is empty. -/
 def finish (s : State) (pre : Nat) (m : ByteArray) (lo hi : Nat) : State :=
   let hi := min hi m.size
+  let lo := min lo hi
   let n := hi - lo
   let full := n / 64
   let s := blocks s m lo full

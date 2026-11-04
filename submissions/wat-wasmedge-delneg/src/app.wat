@@ -45,7 +45,7 @@
   (import "sq" "sqlite3_wal_hook" (func $wal_hook (param i32 i32 i32) (result i32)))
   (import "sq" "sqlite3_wal_autocheckpoint" (func $db_autockpt (param i32 i32) (result i32)))
   (import "sq" "sqlite3_wal_checkpoint_v2" (func $wal_ckpt (param i32 i32 i32 i32 i32) (result i32)))
-  (import "sq" "shmx_init" (func $shmx_init (result i32)))   ;; H1: checkpoints on a second instance (sqlite_glue.c)
+  (import "sq" "shmx_init" (func $shmx_init (result i32)))   ;; checkpoints on a second instance (sqlite_glue.c)
   (import "sq" "ck_tick" (func $ck_tick (param i32 i32 i32) (result i32)))
   (import "sq" "ck_hold" (func $ck_hold (result i32)))
   (import "sq" "getenv" (func $getenv (param i32) (result i32)))
@@ -220,7 +220,7 @@
   (global $ck_t (mut i32) (i32.const 8000))
   (global $wal_n (mut i32) (i32.const 0))   ;; the WAL's size after the last commit, from $wal_cb
   (global $wal_cbi (mut i32) (i32.const 0)) ;; $wal_cb's index in the function table
-  (global $shmx (mut i32) (i32.const 0))    ;; H1: the shared-wal-index VFS's name, or 0
+  (global $shmx (mut i32) (i32.const 0))    ;; the shared-wal-index VFS's name, or 0
   (global $holdw (mut i32) (i32.const 0))   ;; writes are held: POSTs wait in their connection's pending bytes
   (global $nparked (mut i32) (i32.const 0)) ;; connections to replay when the hold ends, (cid, gen) pairs at $parked
   (global $parked (mut i32) (i32.const 0))
@@ -1719,9 +1719,10 @@
     (global.set $ostart (i32.const 0x400000))
     (call $ckpt_step))
 
-  ;; Checkpoints run here, after the batch's responses are sent and with no transaction open: SQLite's
-  ;; own PASSIVE checkpoint (it syncs the WAL, copies its frames into the database file and syncs that
-  ;; file), once the WAL hook has seen it grow past CKPT_FRAMES. The next write then restarts the WAL.
+  ;; Runs after the batch's responses are sent, with no transaction open. By default ck_tick (sqlite_glue.c)
+  ;; drives the checkpointer instance and says whether writes are held. With SHMX=0 the checkpoint runs here:
+  ;; SQLite's own PASSIVE checkpoint (it syncs the WAL, copies its frames into the database file and syncs
+  ;; that file), once the WAL hook has seen it grow past CKPT_FRAMES. The next write then restarts the WAL.
   ;; With CKPT_AUTO=1, SQLite's wal_autocheckpoint does it inside the commit instead, and this never runs.
   (func $ckpt_step
     (if (global.get $shmx)

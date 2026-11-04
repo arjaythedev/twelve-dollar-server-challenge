@@ -1,9 +1,10 @@
-// The only C in this entry besides stock SQLite and wasi-libc. It compiles the pinned, unmodified
+// The C next to stock SQLite and wasi-libc, other than the embedder. It compiles the pinned, unmodified
 // amalgamation into a WASI reactor module (one translation unit, so SQLite's internal B-tree calls are
-// reachable). src/app.wat calls SQLite's public API directly (build.sh exports each function it imports);
-// these one-line wrappers over SQLite's B-tree cursor layer are the rest. No request logic lives here:
-// which cursors to open, what to seek, how to decode records and when to fall back to SQL are all decided
-// in src/app.wat.
+// reachable). src/app.wat calls SQLite's public API directly (build.sh exports each function it imports).
+// This file adds one-line wrappers over SQLite's B-tree cursor layer, a VFS with shared memory, and the
+// checkpoint logic: ck_tick on the loop's instance, ckpt_main on the checkpointer's. No request logic lives
+// here: which cursors to open, what to seek, how to decode records, when to fall back to SQL and how POSTs
+// are parked during a hold are all decided in src/app.wat.
 #include "sqlite3.c"
 
 _Static_assert(SQLITE_VERSION_NUMBER == 3054001, "the B-tree wrappers below are checked against SQLite 3.54.1");
@@ -41,7 +42,7 @@ unsigned cur_payload_size(BtCursor *c) { return sqlite3BtreePayloadSize(c); }
 // the record's bytes on the cursor's page; *amt = how many are there (fewer than the size: overflow)
 const u8 *cur_payload(BtCursor *c, u32 *amt) { return sqlite3BtreePayloadFetch(c, amt); }
 
-// ---- H1 (TdscWat4 experiment): the wal-index is shared with a second wasm instance, on a host thread, that runs
+// ---- Checkpoints off the loop: the wal-index is shared with a second wasm instance, on a host thread, that runs
 // the checkpoints, so the event loop doesn't wait for their fsyncs. The host maps one memfd into a page-aligned
 // slice of each instance's memory (sys.shm_map); this VFS wraps unix-none and gives the main database file the
 // four shm methods SQLite's WASI build lacks. Lock words and the checkpoint handshake are process-wide words in
@@ -95,7 +96,8 @@ const char *shmx_init(void) {
 // the loop, between batches with no transaction open; n = the WAL's frames after the last commit -> what to keep.
 // Bulk passes on the checkpointer until few frames are left (CKPT_TAIL); then writes are held (the loop parks POSTs, see
 // $on_data in app.wat; reads go on) while the checkpointer copies the rest. With nothing written since, the WAL
-// is then fully copied, and the first write restarts it: no sync ever runs on the loop. A hold ends after
+// is then fully copied, and the first write restarts it. The only sync left on the loop then is SQLite's sync of the
+// WAL's new header at that restart. A hold ends after
 // holdms at the latest (writes go on, the next round tries again), 4x that past 3x the threshold, when the passes
 // aren't catching up. One inline checkpoint only past 8x the threshold, as the last resort, or with CKPT_HOLD=0.
 static int tailmax, holdms, hold, ckpt_log; static long long hold_t0, ev_t0;

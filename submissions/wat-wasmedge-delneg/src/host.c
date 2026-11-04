@@ -5,7 +5,8 @@
 // copies the CQEs back); WASI's poll_oneoff would re-register every connection on every call. No request
 // logic lives here:
 // the WAT builds every SQE and reads every CQE. One helper thread fdatasyncs the WAL file every 100 ms
-// (see walsync below).
+// (see walsync below). A second runs the same app.so in its own VM as the checkpointer (ckthread): the
+// shm_*, ck_* and nap imports give the two instances shared memory for the wal-index, atomics and a futex.
 #define _GNU_SOURCE
 #include <wasmedge/wasmedge.h>
 #include <errno.h>

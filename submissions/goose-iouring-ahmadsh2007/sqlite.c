@@ -113,6 +113,158 @@ int64_t wal_frames(void) { return wal_size; }
 
 void wal_reset(void) { wal_size = 0; }
 
+/* ---- one write per commit ----
+ *
+ * SQLite appends each log frame with two writes, its 24-byte header and then its page, so a
+ * commit of 20 frames is 40 system calls. "goose" is a VFS over unix-excl that gathers a
+ * commit's frames and writes them with one call, at the moment the commit frame's page
+ * arrives: still inside SQLite's own write, so before the frames are entered in the WAL index
+ * and before COMMIT returns, exactly when unix-excl would have finished writing them. Only
+ * writes that continue where the previous one ended are gathered (the frames of a transaction,
+ * the log header after a restart); any other write, and every read, sync, truncate, size query,
+ * file control and close, first writes out what is gathered. The database file itself is opened
+ * straight through unix-excl, untouched. */
+typedef struct {
+  sqlite3_file io;      /* our methods (WAL files only) */
+  sqlite3_file *real;   /* the unix-excl file, which lives right after this struct */
+  u8 *run;              /* gathered bytes, for the file at offset run_at */
+  i64 run_at, next;     /* next: where the previous write ended */
+  int run_len, run_cap;
+  int commit_header;    /* the last write gathered was a commit frame's header */
+} wal_file;
+
+#define RUN_CAP (4 << 20)
+static sqlite3_vfs *base_vfs, goose_vfs;
+static sqlite3_io_methods wal_io;
+
+/* The unix VFS writes at most 0x1ffff bytes per call (it masks the length), so a long run goes
+ * out in pieces under that: one write for a typical commit, two or three for a large one. */
+#define RUN_PIECE 0x1f000
+
+static int run_out(wal_file *w) {
+  int rc = SQLITE_OK;
+  for (int done = 0; done < w->run_len && rc == SQLITE_OK; done += RUN_PIECE) {
+    int n = w->run_len - done < RUN_PIECE ? w->run_len - done : RUN_PIECE;
+    rc = w->real->pMethods->xWrite(w->real, w->run + done, n, w->run_at + done);
+  }
+  w->run_len = 0;
+  w->commit_header = 0;
+  return rc;
+}
+
+static int wal_write(sqlite3_file *f, const void *z, int amt, sqlite3_int64 off) {
+  wal_file *w = (wal_file *)f;
+  int follows = off == w->next || off == 0;
+  w->next = off + amt;
+  if (!follows || w->run_len + amt > RUN_CAP) {
+    int rc = run_out(w);
+    if (rc != SQLITE_OK) return rc;
+    if (!follows) return w->real->pMethods->xWrite(w->real, z, amt, off);
+  }
+  if (w->run_len && w->run_at + w->run_len != off) { /* restarted at the top: a new run */
+    int rc = run_out(w);
+    if (rc != SQLITE_OK) return rc;
+  }
+  if (w->run_len + amt > w->run_cap) {
+    int cap = w->run_cap ? w->run_cap : 1 << 17;
+    while (cap < w->run_len + amt) cap *= 2;
+    u8 *n = sqlite3_realloc(w->run, cap);
+    if (!n) { int rc = run_out(w); return rc != SQLITE_OK ? rc : w->real->pMethods->xWrite(w->real, z, amt, off); }
+    w->run = n;
+    w->run_cap = cap;
+  }
+  if (!w->run_len) w->run_at = off;
+  memcpy(w->run + w->run_len, z, (size_t)amt);
+  w->run_len += amt;
+  if (amt == WAL_FRAME_HDRSIZE && off >= WAL_HDRSIZE) {
+    w->commit_header = sqlite3Get4byte((const u8 *)z + 4) != 0; /* nonzero: database size after a commit */
+    return SQLITE_OK;
+  }
+  if (w->commit_header) return run_out(w); /* the commit frame's page: the transaction is complete */
+  return SQLITE_OK;
+}
+
+static int wal_close(sqlite3_file *f) {
+  wal_file *w = (wal_file *)f;
+  int rc = run_out(w), rc2 = w->real->pMethods->xClose(w->real);
+  sqlite3_free(w->run);
+  w->run = 0;
+  return rc != SQLITE_OK ? rc : rc2;
+}
+static int wal_read(sqlite3_file *f, void *z, int amt, sqlite3_int64 off) {
+  wal_file *w = (wal_file *)f;
+  int rc = run_out(w);
+  return rc != SQLITE_OK ? rc : w->real->pMethods->xRead(w->real, z, amt, off);
+}
+static int wal_truncate(sqlite3_file *f, sqlite3_int64 size) {
+  wal_file *w = (wal_file *)f;
+  int rc = run_out(w);
+  return rc != SQLITE_OK ? rc : w->real->pMethods->xTruncate(w->real, size);
+}
+static int wal_sync(sqlite3_file *f, int flags) {
+  wal_file *w = (wal_file *)f;
+  int rc = run_out(w);
+  return rc != SQLITE_OK ? rc : w->real->pMethods->xSync(w->real, flags);
+}
+static int wal_filesize(sqlite3_file *f, sqlite3_int64 *size) {
+  wal_file *w = (wal_file *)f;
+  int rc = run_out(w);
+  return rc != SQLITE_OK ? rc : w->real->pMethods->xFileSize(w->real, size);
+}
+static int wal_lock(sqlite3_file *f, int l) { return ((wal_file *)f)->real->pMethods->xLock(((wal_file *)f)->real, l); }
+static int wal_unlock(sqlite3_file *f, int l) { return ((wal_file *)f)->real->pMethods->xUnlock(((wal_file *)f)->real, l); }
+static int wal_reserved(sqlite3_file *f, int *out) {
+  return ((wal_file *)f)->real->pMethods->xCheckReservedLock(((wal_file *)f)->real, out);
+}
+static int wal_control(sqlite3_file *f, int op, void *arg) {
+  wal_file *w = (wal_file *)f;
+  int rc = run_out(w);
+  return rc != SQLITE_OK ? rc : w->real->pMethods->xFileControl(w->real, op, arg);
+}
+static int wal_sector(sqlite3_file *f) { return ((wal_file *)f)->real->pMethods->xSectorSize(((wal_file *)f)->real); }
+static int wal_traits(sqlite3_file *f) {
+  return ((wal_file *)f)->real->pMethods->xDeviceCharacteristics(((wal_file *)f)->real);
+}
+
+static int goose_open(sqlite3_vfs *v, sqlite3_filename name, sqlite3_file *f, int flags, int *out) {
+  (void)v;
+  if (!(flags & SQLITE_OPEN_WAL)) return base_vfs->xOpen(base_vfs, name, f, flags, out); /* in place */
+  wal_file *w = (wal_file *)f;
+  memset(w, 0, sizeof *w);
+  w->real = (sqlite3_file *)(w + 1);
+  int rc = base_vfs->xOpen(base_vfs, name, w->real, flags, out);
+  if (rc != SQLITE_OK) { w->io.pMethods = 0; return rc; }
+  w->io.pMethods = &wal_io;
+  return SQLITE_OK;
+}
+
+/* Registers "goose" over unix-excl (once). */
+static int goose_vfs_init(void) {
+  if (base_vfs) return SQLITE_OK;
+  base_vfs = sqlite3_vfs_find("unix-excl");
+  if (!base_vfs) return SQLITE_ERROR;
+  goose_vfs = *base_vfs;
+  goose_vfs.zName = "goose";
+  goose_vfs.pNext = 0;
+  goose_vfs.szOsFile = (int)sizeof(wal_file) + base_vfs->szOsFile;
+  goose_vfs.xOpen = goose_open;
+  memset(&wal_io, 0, sizeof wal_io);
+  wal_io.iVersion = 1; /* a WAL file needs no shared memory and no mmap */
+  wal_io.xClose = wal_close;
+  wal_io.xRead = wal_read;
+  wal_io.xWrite = wal_write;
+  wal_io.xTruncate = wal_truncate;
+  wal_io.xSync = wal_sync;
+  wal_io.xFileSize = wal_filesize;
+  wal_io.xLock = wal_lock;
+  wal_io.xUnlock = wal_unlock;
+  wal_io.xCheckReservedLock = wal_reserved;
+  wal_io.xFileControl = wal_control;
+  wal_io.xSectorSize = wal_sector;
+  wal_io.xDeviceCharacteristics = wal_traits;
+  return sqlite3_vfs_register(&goose_vfs, 0);
+}
+
 /* ---- open ---- */
 
 /* 0, or -1 with the reason appended to err. */
@@ -124,7 +276,8 @@ int32_t db_open(bytes_t path_b, gs_rref err) {
   /* unix-excl: one process holds the file for its whole life, so the WAL index can live in
    * heap memory (no -shm file, no file locks per transaction), shared by the two connections. */
   int flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX;
-  if (sqlite3_initialize() || sqlite3_open_v2(path, &conn, flags, "unix-excl")) { say(err, "open"); return -1; }
+  const char *vfs = getenv("GOOSE_PLAIN_VFS") ? "unix-excl" : "goose"; /* test knob: A/B the write gathering */
+  if (sqlite3_initialize() || goose_vfs_init() || sqlite3_open_v2(path, &conn, flags, vfs)) { say(err, "open"); return -1; }
   /* WAL with synchronous=NORMAL (rule 6). No mmap: a page in SQLite's own cache is found with
    * its parsed header and no WAL-index lookup. Checkpoints only when app.goose asks. */
   if (sqlite3_exec(conn,
@@ -185,7 +338,7 @@ int32_t db_open(bytes_t path_b, gs_rref err) {
   for (int i = 0; i < NTREES; i++)
     if (!(curs[i] = sqlite3_malloc(sqlite3BtreeCursorSize()))) { say(err, "cursor"); return -1; }
   /* The checkpointer's connection reads no tables: a checkpoint copies straight from the log. */
-  if (sqlite3_open_v2(path, &ck_conn, flags, "unix-excl") ||
+  if (sqlite3_open_v2(path, &ck_conn, flags, vfs) ||
       sqlite3_exec(ck_conn, "PRAGMA synchronous=NORMAL; PRAGMA wal_autocheckpoint=0; PRAGMA cache_size=16;", 0, 0, 0)) {
     say(err, "checkpoint connection");
     return -1;
@@ -240,6 +393,7 @@ bool db_commit(void) {
     close_cursors();
     tx_open = false;
     if (tx_lost || run(q_commit) != SQLITE_DONE) ok = false;
+    if (!ok) fprintf(stderr, "commit failed: %s (%d)\n", sqlite3_errmsg(conn), sqlite3_extended_errcode(conn));
     if (!ok && !sqlite3_get_autocommit(conn)) run(q_rollback);
   } else if (tx_lost) {
     ok = false;
@@ -373,7 +527,10 @@ int32_t db_add_post(int64_t user_id, bytes_t body, int64_t *id, gs_rref created)
   }
   sqlite3_reset(q_post);
   sqlite3_clear_bindings(q_post);
-  if (!ok) after_failed_write();
+  if (!ok) {
+    fprintf(stderr, "insert failed: %s (%d)\n", sqlite3_errmsg(conn), sqlite3_extended_errcode(conn));
+    after_failed_write();
+  }
   return ok ? 0 : -1;
 }
 

@@ -39,8 +39,8 @@ typedef struct { uint64_t ud; int32_t res; uint32_t flags; } cqe_t;
 #pragma pack(pop)
 
 #define MAX_RINGS 16
-#define RX_COUNT 4096 /* receive buffers per ring (a power of two): enough that a long pass rarely runs a ring dry */
-#define RX_SIZE 2048
+#define RX_COUNT 16384 /* receive buffers per ring (a power of two): a burst after a long pass must not run a ring dry */
+#define RX_SIZE 1024 /* a request is a few hundred bytes; a longer one spans buffers */
 #define SQ_DEPTH 4096
 #define CQ_DEPTH 65536
 
@@ -83,6 +83,7 @@ static box_t *box_alloc(uint32_t cap) {
 int32_t box_new(void) {
   if (nfree) {
     int32_t h = box_free[--nfree];
+    if (!boxes[h]) boxes[h] = box_alloc(BOX_FIRST);
     boxes[h]->len = 0;
     return h;
   }
@@ -96,13 +97,19 @@ int32_t box_new(void) {
   return nbox++;
 }
 
+/* Spare boxes keep their memory, up to BOX_SPARE of them; past that a dropped box's memory goes
+ * back to the allocator (its number is reused later), so a burst does not pin memory for good. */
+#define BOX_SPARE 8192
+
 void box_drop(int32_t h) {
-  if (boxes[h]->cap > BOX_KEEP) {
+  if (nfree >= BOX_SPARE || boxes[h]->cap > BOX_KEEP) {
     free(boxes[h]);
-    boxes[h] = box_alloc(BOX_FIRST);
+    boxes[h] = NULL;
   }
   box_free[nfree++] = h;
 }
+
+int64_t box_live(void) { return nbox - nfree; }
 
 static inline uint8_t *box_room(int32_t h, uint64_t n) {
   box_t *x = boxes[h];

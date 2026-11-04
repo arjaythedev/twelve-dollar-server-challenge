@@ -35,6 +35,7 @@ extern fn box_put2(box: i32, a: const u8[:], b: const u8[:]);
 extern fn box_len(box: i32) -> i64;
 extern fn box_cut(box: i32, len: i64);
 extern fn box_read(box: i32, out: u8[>..]&);
+extern fn box_live() -> i64;
 extern fn listen_on(host: const u8[:], port: i64, n: i32) -> i32;
 extern fn slot_limit() -> i64;
 extern fn lock_code() -> i64;
@@ -149,8 +150,8 @@ var writes_now = false;   // while held writes are being served
 // thread copies the log back; when that finishes, writes wait while it copies what was written
 // meanwhile, so the next write starts the log over. Past CK_HIGH (the thread is falling behind)
 // writes wait too. A wait lasts at most GATE_US; the loop itself never checkpoints.
-var CK_START = 8192;      // GOOSE_CK_FRAMES (test knob) overrides it
-let CK_HIGH = 24576;
+var CK_START = 16384;     // GOOSE_CK_FRAMES (test knob) overrides it
+var CK_HIGH = 32768;      // CK_START + 16384
 let GATE_US = 150000;
 // The checkpointer runs at nice 19, in the loop's idle time. If the loop has none (overload) and
 // the log is past CK_HIGH, the loop gives the CPU away for YIELD_US of every YIELD_EVERY_US, so
@@ -169,6 +170,11 @@ var st_maxpass = 0;
 var st_gates = 0;
 var st_restarts = 0;
 var st_yields = 0;
+var st_serve_us = 0;     // the longest drain + serve in the interval
+var st_commit_us = 0;    // the longest COMMIT
+var st_nobuf = 0;        // receives that ended for lack of a buffer
+var st_rearms = 0;
+var st_maxcqe = 0;       // the most completions one ring gave one pass
 var st_at = 0;
 
 // ---------------------------------------------------------------------------------------------
@@ -208,8 +214,15 @@ fn main() {
         for k in nrings { drain(k); }
         rx_publish();
         if held.len > 0 && !gate && window_end != 0 && t0 >= window_end { release_held(); }
+        let t1 = if stats_on { clock_us() } else { 0 };
         // No response from this pass reaches the kernel before its COMMIT returns.
-        flush(db_commit());
+        let committed = db_commit();
+        let t2 = if stats_on { clock_us() } else { 0 };
+        if stats_on {
+            st_serve_us = max(st_serve_us, t1 - t0);
+            st_commit_us = max(st_commit_us, t2 - t1);
+        }
+        flush(committed);
         rearm_receives();
         accept_more(t0);
         checkpoints(t0);
@@ -239,7 +252,7 @@ fn startup() -> bool {
     knob.clear();
     if env_get("GOOSE_CK_FRAMES", knob) {
         let f, ok = parse_int(knob);
-        if ok && f >= 256 { CK_START = f; }
+        if ok && f >= 256 { CK_START = f; CK_HIGH = f + 16384; }
     }
     knob.clear();
     stats_on = env_get("GOOSE_STATS", knob);
@@ -299,6 +312,7 @@ fn ud(op: u64, r: i64, gen: u16, slot: i64) -> u64 {
 fn drain(r: i64) {
     cqes.clear();
     ring_reap(r as! i32, cqes);
+    if cqes.len > st_maxcqe { st_maxcqe = cqes.len; }
     for k in cqes.len {
         let e = cqes[k];
         let op = e.ud >> 56;
@@ -348,6 +362,7 @@ fn on_recv(r: i64, slot: i64, gen: u16, res: i32, flags: u32) {
         }
         if (flags & CQE_MORE) == 0 { rearm.push(ci); }
     } else if res > 0 || res == -ENOBUFS {
+        st_nobuf++;
         rearm.push(ci); // the receive ended without a buffer: re-armed once buffers are back
     } else {
         // End of stream or an error: answer what was asked, then close.
@@ -433,6 +448,7 @@ fn flush(committed: bool) {
 }
 
 fn rearm_receives() {
+    st_rearms += rearm.len;
     for k in rearm.len {
         let ci = rearm[k];
         let c = conns[ci];
@@ -572,18 +588,25 @@ fn stats(now: i64) {
     let took = clock_us() - now;
     if took > st_maxpass { st_maxpass = took; }
     if st_at == 0 { st_at = now; }
-    if now - st_at < 5000000 { return; }
+    if now - st_at < 1000000 { return; }
     var open = 0;
     for r in nrings { open += rs[r].open; }
     var m: u8[>..] = [];
-    format(m, "stats: ", st_reqs / 5, " req/s, ", st_passes / 5, " passes/s, max pass ", st_maxpass,
-        " us, open ", open, ", rings ", nrings, ", wal ", wal_frames(), ", gates ", st_gates,
-        ", restarts ", st_restarts, ", yields ", st_yields, ", held ", held.len);
+    format(m, "stats: ", st_reqs, " req/s, ", st_passes, " passes/s, max pass ", st_maxpass,
+        " us (serve ", st_serve_us, ", commit ", st_commit_us, "), max cqes ", st_maxcqe,
+        ", nobuf ", st_nobuf, ", rearms ", st_rearms, ", boxes ", box_live(), ", open ", open,
+        ", rings ", nrings, ", wal ", wal_frames(), ", gates ", st_gates, ", restarts ", st_restarts,
+        ", yields ", st_yields, ", held ", held.len);
     log_line(m);
     st_at = now;
     st_reqs = 0;
     st_passes = 0;
     st_maxpass = 0;
+    st_serve_us = 0;
+    st_commit_us = 0;
+    st_nobuf = 0;
+    st_rearms = 0;
+    st_maxcqe = 0;
 }
 
 

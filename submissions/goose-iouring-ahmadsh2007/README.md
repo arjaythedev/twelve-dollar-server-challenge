@@ -17,26 +17,37 @@ is only what Goose cannot do: talk to the kernel (`uring.c`) and be SQLite (`sql
 | **Nginx or direct** | **Direct**: serves `HOST:PORT` itself (`0.0.0.0:80` on the benchmark box) |
 | Needs | Linux 6.1+ (io_uring with `DEFER_TASKRUN`, multishot receive, provided-buffer rings, direct descriptors); tested on Ubuntu 24.04's 6.8 |
 
-## Since the scored run (260,000 at `204b6b0`)
+## History on the box
 
-The first version's C was a port of rust-iouring-kensac's transport and helpers. This one is a
-new design, and the transport moved into Goose:
+| Commit | Users held | What changed |
+|---|---:|---|
+| `204b6b0` | 260,000 | first version; its C was a port of rust-iouring-kensac's transport and helpers |
+| `67ef830` | 270,000 | the event loop moved into Goose (new `uring.c`, `sqlite.c`), coalesced writes, a new checkpoint policy |
+| this one | (not run yet) | receive buffers that a burst cannot run dry, one write per commit, longer checkpoint cycles |
 
-- **The event loop is Goose.** `uring.c` decides nothing: it makes rings, queues the operation
-  Goose asks for, copies completions out as flat records, and owns the bytes the kernel reads
-  and writes while an operation is in flight (receive buffers, and numbered "boxes" for
-  responses in flight and for requests that arrive in pieces). The connection table, what each
-  completion means, accepts, ring spills, holds, flushing and closing are `app.goose`.
-- **Why it held only 260k.** The box's report (270k and 280k failed on p99 at 4.9 s and 2.2 s
-  with 0 errors and CPU to spare) reproduced locally: on one dedicated vCPU at 260,000
-  connections and twice the user model's rate, the scored build failed (p99 2.4 s, 76 % CPU,
-  WAL at 143 MB) where rust-iouring-kensac held (p99 22 ms). It was the WAL: commits every pass
-  wrote many small sets of frames, the checkpointer at nice 19 fell behind, holds and the
-  loop's own last-resort checkpoint followed. This version holds there with p99 24 ms and 3 %
-  less CPU per request than kensac (measurements below).
-- **Writes are coalesced** (below): one commit per window instead of one per pass.
-- **The checkpoint policy is new and in Goose**, and the loop never checkpoints itself.
-- More receive buffers per ring (4,096), so a long pass rarely runs a ring dry.
+Both scored versions failed just above their score the same way: p99 in seconds with 0 errors
+and CPU to spare (`67ef830`: 280,000 at p99 1.9 s, 78 % CPU). The same signature reproduced
+locally (one dedicated vCPU, the user model at 2-3x its rate), and per-second counters in the
+loop showed what it is:
+
+- **A burst runs a ring out of receive buffers, and the server never catches up.** A pass that
+  runs long lets more messages pile up for the next one than a ring has buffers (4,096 then);
+  the kernel ends each starved connection's multishot receive with `ENOBUFS`, every one must
+  be armed again (58,746 in the worst second of a failing run), which makes the next pass
+  longer still. Each ring now has 16,384 buffers of 1 KB (a request is a few hundred bytes; a
+  longer one spans buffers), the same memory per buffer in use. The failing run (300,000 users
+  at 2.8x) went from p95 573 ms to 42 ms, with no exhausted buffer at all.
+- For `204b6b0` the evidence pointed at the log: per-pass commits wrote many small sets of
+  frames, the checkpointer fell behind (the WAL reached 143 MB against kensac's 24 MB), and
+  holds and the loop's own last-resort checkpoint followed. `67ef830` fixed that (coalesced
+  writes, a checkpoint policy that never runs on the loop).
+- **One write per commit.** SQLite appends each log frame with two system calls, so a commit
+  of twenty frames was forty. A thin VFS over unix-excl now gathers a commit's frames and
+  writes them at once (below): 82 % fewer `pwrite` calls, about 2 % less CPU per request
+  locally, likely more on the box, where a system call costs more.
+- Longer checkpoint cycles (16,384 frames): fewer holds and fewer log restarts (each restart
+  syncs the log's header on the loop, which a VPS disk can make slow), about 3 % less CPU.
+- Spare response buffers are capped, so a burst cannot pin memory for good.
 
 ## What is Goose and what is C
 
@@ -79,7 +90,7 @@ bytes to Goose builders, and Goose's finished responses are copied into a box fo
   (accepts in flight + 64) slots are free, then the next ring with room takes over (one is
   added when none has room, up to 16 rings: over a million connections). Accepts are
   single-shot, 512 in flight, spread over eight `SO_REUSEPORT` listeners (eight accept queues).
-- One **multishot receive** per connection into the ring's provided buffers (4,096 x 2 KB):
+- One **multishot receive** per connection into the ring's provided buffers (16,384 x 1 KB):
   an idle connection holds no buffer, only its 24-byte record in Goose's table.
 - One send in flight per connection; answers to pipelined requests queue behind it, in order.
   Closing is a `SHUTDOWN` hard-linked to a direct `CLOSE`; a generation number in every
@@ -119,18 +130,28 @@ plus one pass, or a checkpoint hold (below).
     query. The column layout of every table and index decoded is checked at startup.
 - **Writes are SQL**: `INSERT … RETURNING id, created_at` and `INSERT … ON CONFLICT DO NOTHING`
   (a new like is told from a repeat by `sqlite3_changes`); the like's 404 check is a seek.
-- WAL, `synchronous=NORMAL`, `unix-excl` VFS (the WAL index in heap memory, no per-transaction
+- WAL, `synchronous=NORMAL`, `unix-excl` (the WAL index in heap memory, no per-transaction
   file locks), 32 MB page cache, `mmap_size=0`, `wal_autocheckpoint=0`.
+- **One write per commit**: the connections open through "goose", a VFS over unix-excl (SQLite's
+  public VFS API). The database file is opened straight through. For the log, writes that
+  continue exactly where the previous one ended (a transaction's frames, the header after a
+  restart) are gathered, and written the moment the commit frame's page arrives: inside
+  SQLite's own write call, so before the frames enter the WAL index and before COMMIT returns,
+  when unix-excl would have finished writing them anyway. Any other write (a checksum rewrite),
+  and every read, sync, truncate, size query, file control and close, first writes out what is
+  gathered. A run goes out in pieces under the unix VFS's 128 KB limit per call. A kill -9 test
+  (16 writers, killed at a random moment, 8 rounds, 63,000 acknowledged posts and 63,000
+  acknowledged likes) found every acknowledged write in the database and `integrity_check` ok.
 
 ## Checkpoints
 
 A thread on its own connection, at nice 19 (so it runs in the loop's idle time), runs a PASSIVE
 checkpoint whenever `app.goose` asks; the policy is Goose's:
 
-- Past 8,192 log frames, ask for one. When it finishes, hold writes (reads go on) and ask for
+- Past 16,384 log frames, ask for one. When it finishes, hold writes (reads go on) and ask for
   another, which copies the frames written meanwhile; when that one has copied the whole log,
   the next write starts the log over. A hold lasts at most 150 ms.
-- If the log passes 24,576 frames while a checkpoint runs (the loop leaving the thread no idle
+- If the log passes 32,768 frames while a checkpoint runs (the loop leaving the thread no idle
   time), writes are held too, and the loop gives the CPU away for 5 ms of every 50 until the
   log is back under, so an overload cannot grow the log without bound.
 - The loop never runs a checkpoint itself.
@@ -191,22 +212,23 @@ a fresh seed copy per run, 60 s ramp and 60 s hold. An M4 core is about three ti
 so think times are divided by 2 (or more) to put the server's vCPU at the box's utilization.
 CPU is the server cgroup's over the hold. rust-iouring-kensac was built from its folder here.
 
-260,000 users at twice the user model's rate (55,000 requests/s), where the box failed the
-scored build:
+300,000 users at 2.8x the user model's rate (88,500 requests/s offered), past the point where
+both scored builds and kensac fail:
 
-| Server | p99 | µs/request | CPU | log at the end |
-|---|---:|---:|---:|---:|
-| **this version** | **24.3 ms** | **10.27** | 57 % | 56 MB |
-| the scored build (`204b6b0`) | 2,359 ms | 14.50 | 76 % | 143 MB |
-| rust-iouring-kensac (#264, 310,000 on the box) | 21.8 ms | 10.57 | 58 % | 24 MB |
+| Server | served req/s | p95 | p99 | µs/request | CPU | peak memory |
+|---|---:|---:|---:|---:|---:|---:|
+| **this version** | **88,622** | **26 ms** | **174 ms** | **8.92** | 79 % | **854 MB** |
+| this version with 4,096 x 2 KB receive buffers | 86,117 | 573 ms | 942 ms | 10.04 | 86 % | 1,232 MB |
+| rust-iouring-kensac (#264, 310,000 on the box) | 81,395 | 1,540 ms | 3,310 ms | 10.62 | 86 % | 1,781 MB |
 
-300,000 users: at 2.6x (82,000 requests/s) this version held (p99 244 ms, 9.63 µs/request,
-79 % CPU) where kensac did not (p99 1,310 ms); at 2.3x both failed (p99 1,376 / 1,130 ms).
-That a lighter load failed where a heavier one passed means at least one intermittent stall is
-left; it is not explained yet. At 3x (overload: every server past its CPU) this version still
-served 66,500 requests/s at 14.6 µs each, against 42,700 at 23.3 for kensac and 37,500 at 26.0
-for the scored build; overload costs grow, and growing less is what keeps a server inside the
-p99 limit at the edge.
+At 3.2x this version is past its CPU (99 %) and fails too (p99 1.4 s), so its local ceiling at
+300,000 users is about 88,000 requests/s; kensac's and `67ef830`'s are under 70,000 (both fail
+at 2.3x).
+
+260,000 users at 2x (55,000 requests/s), where the box failed `204b6b0`: this version 9.3-9.7
+µs/request and p99 22-25 ms in quiet runs, `204b6b0` 14.5 µs/request and p99 2,359 ms, kensac
+10.6 µs/request and p99 22 ms. Runs here vary: a few seconds where the host deschedules the
+VM's vCPU show up as p99 spikes for every server alike.
 
 Behaviour, request for request against rust-iouring-kensac on fresh seed copies: 86
 hand-written raw-request cases (pipelining, requests split byte by byte, every token failure,
@@ -216,8 +238,10 @@ a body nested 300 arrays deep, which this entry accepts (as `JSON.parse` does) a
 rejects. A ring-spill run with 2,000-slot tables (`GOOSE_SLOTS`, test only) served 10,000 users
 across six rings with no errors.
 
-Test-only knobs, never set on the box: `GOOSE_SLOTS`, `GOOSE_WRITE_US`, `GOOSE_CK_FRAMES` and
-`GOOSE_STATS` (a stats line every 5 s).
+Test-only knobs, never set on the box: `GOOSE_SLOTS`, `GOOSE_WRITE_US`, `GOOSE_CK_FRAMES`,
+`GOOSE_PLAIN_VFS` (plain unix-excl, for the comparison above) and `GOOSE_STATS` (a line every
+second: passes, the longest pass split into serving and commit, completions per pass, buffer
+exhaustion and re-arms, boxes in use, the log, gates and restarts).
 
 ## Credit
 

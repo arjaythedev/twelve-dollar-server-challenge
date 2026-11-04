@@ -1,10 +1,10 @@
 use std::collections::HashSet;
 use std::os::fd::RawFd;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, Sender};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::sync::Arc;
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::db::WriteDb;
 use crate::{error, json_string, WriteCmd, WriteKind};
@@ -51,6 +51,10 @@ pub fn spawn(
             }
         };
         let _ = ready.send(());
+        let window_us = std::env::var("WRITE_COALESCE_US")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(100_000);
         loop {
             let first = match rx.recv() {
                 Ok(job) => job,
@@ -59,10 +63,24 @@ pub fn spawn(
 
             let mut jobs = Vec::with_capacity(2048);
             jobs.push(first);
-            while let Ok(job) = rx.try_recv() {
-                jobs.push(job);
-                if jobs.len() >= 2048 {
-                    break;
+            if window_us == 0 {
+                while let Ok(job) = rx.try_recv() {
+                    jobs.push(job);
+                    if jobs.len() >= 2048 {
+                        break;
+                    }
+                }
+            } else {
+                let deadline = Instant::now() + Duration::from_micros(window_us);
+                while jobs.len() < 2048 {
+                    let now = Instant::now();
+                    let Some(remaining) = deadline.checked_duration_since(now) else {
+                        break;
+                    };
+                    match rx.recv_timeout(remaining) {
+                        Ok(job) => jobs.push(job),
+                        Err(RecvTimeoutError::Timeout) | Err(RecvTimeoutError::Disconnected) => break,
+                    }
                 }
             }
 

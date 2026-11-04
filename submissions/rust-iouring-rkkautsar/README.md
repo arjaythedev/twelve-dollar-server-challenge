@@ -26,6 +26,7 @@
 | `SHARDS` | `4` | Independent event-loop/listener shards; one read worker each |
 | `READ_COALESCE` | `1` | `0` disables global feed/post batching |
 | `COALESCE_US` | `10000` | In-flight feed/post coalescing window in microseconds |
+| `WRITE_COALESCE_US` | `100000` | Write group-commit coalescing window in microseconds |
 
 ## Build and run
 

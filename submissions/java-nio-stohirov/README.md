@@ -1,11 +1,11 @@
-# Java + its own epoll event loop
+# Java + io_uring
 
 | | |
 |---|---|
 | Language | Java 25: Eclipse Temurin `jdk-25.0.4.1+1`, official tarball, sha256-pinned in `install.sh` |
-| Framework | None. A hand-written HTTP/1.1 server on Linux `epoll`, called through FFM (no `java.nio` channels) |
-| SQLite driver | No JDBC. Direct FFM (`java.lang.foreign`) bindings to SQLite **3.54.0**, compiled from the amalgamation by `build.sh` (sha256-pinned) |
-| JSON | Responses are built by SQLite (`json_object` / `json_group_array`); a small strict parser reads request bodies and JWTs |
+| Framework | None. A hand-written HTTP/1.1 server on Linux `io_uring`, driven from Java through FFM and shared memory |
+| SQLite driver | No JDBC. FFM (`java.lang.foreign`) bindings to SQLite **3.54.0**, compiled from the amalgamation by `build.sh` (sha256-pinned) |
+| Reads | SQLite's own B-tree cursors, through `csrc/shim.c`, the one C file |
 | Dependencies | Zero Java dependencies. `build.sh` needs only `cc` and the JDK |
 | **Nginx or direct** | **Direct**: serves `0.0.0.0:80` itself |
 
@@ -13,95 +13,125 @@
 
 ```bash
 sudo bash install.sh   # apt: build-essential, curl; Temurin 25 to /opt/jdk
-bash build.sh          # SQLite -> build/libsqlite3.so, sources -> build/server.jar
+bash build.sh          # SQLite + csrc/shim.c -> build/libshim.so, sources -> build/server.jar
 SQLITE_PATH=... JWT_SECRET=... HOST=0.0.0.0 PORT=80 bash start.sh
 ```
 
-The server runs on Linux only (it calls `epoll` directly).
+It needs Linux 6.1 or newer with io_uring allowed, and has no fallback. Docker's default seccomp profile can
+block io_uring, so a container may need `--security-opt seccomp=unconfined`.
+
+## Where the code is
+
+Java does everything it can reach: HTTP, the io_uring rings, JWT, routing, writes and checkpoints. The C shim exists
+because SQLite's B-tree cursors are private to the amalgamation, so nothing outside it can call them.
+
+| | |
+|---|---|
+| `Server.java` | the event loop, connections, HTTP parsing and handlers |
+| `Ring.java` | one io_uring: its queues, direct descriptors and receive buffers |
+| `Db.java`, `Sqlite.java` | the pass's transaction, writes, SQL fallbacks, FFM bindings |
+| `Checkpointer.java` | WAL checkpoints on their own thread |
+| `Sys.java` | system calls through FFM |
+| `Jwt.java`, `Json.java`, `Out.java` | HS256, request JSON, the response arena |
+| `csrc/shim.c` | B-tree reads and their JSON, the transaction around them |
+
+The read plan, the transaction per pass and the checkpoint hold follow
+[`rust-iouring-kensac`](../rust-iouring-kensac), which worked them out first and documents them well.
 
 ## Optimizations, and why
 
-**Process and I/O**
-- **One thread, one SQLite connection, everything inline.** On one vCPU, more threads only add context
-  switches. Every query is an index lookup that takes microseconds, so the event loop calls SQLite
-  directly.
-- **Sockets and epoll through FFM, not `java.nio`.** `accept4`, `epoll_wait`/`epoll_ctl`, `read`, `write` and
-  `close` are FFM downcalls, the same way SQLite is called. `SocketChannel` and `Selector` added work on every
-  connection: `fcntl` calls to make it non-blocking, two `getsockname` calls on accept, deferred deregistration
-  and close in the selector, and several objects and locks per connection. A connection is now an `int` fd in a
-  small object, and `close()` also removes it from the epoll set. At 256k simulated users this cut server CPU
-  from 64% to 56% and moved the local ceiling from about 330k to about 390k users.
-- **No buffers while idle.** One shared native read buffer and one shared response buffer serve every
-  connection. A connection gets its own buffer only while it holds a partial request or a response the socket
-  didn't take yet. 256,000 open connections leave about 10 MB of live heap.
-- **Direct, no Nginx.** Nginx would take CPU from the one core, and `worker_connections 16384` caps it at
-  about 16k users.
-- **Past the descriptor limit: idle eviction.** Connections sit in an LRU list. Within 128 descriptors of the
-  `LimitNOFILE` limit (65,407 connections at 65,535), the server closes the 64 longest-idle connections that
-  have nothing in flight, so `accept` never fails with `EMFILE`. A client that was evicted while idle just
-  reconnects on its next request. Eviction starts this late on purpose: on a 2 GB box the kernel's connection
-  tracking table (65,536 entries) is full at about the same point, and evicting below it would only churn
-  connections that other servers simply keep.
-- **Evictions reset instead of closing gracefully.** An evicted connection gets `SO_LINGER=0` before `close()`,
-  so the close sends RST: no FIN exchange and no TIME_WAIT. Past ~64k users nearly every request reconnects.
-- **Adaptive wake-up batching.** When a wake-up brought fewer than 32 events, the loop parks for 2 ms so
-  the next `epoll_wait` returns many at once. With ~0.1 req/s per user, most wake-ups would otherwise
-  carry a single request. This saves about 10% of CPU for about 2 ms of latency. Busy wake-ups don't
-  park, so the pause never caps throughput.
-- **Listen backlog** of 4096.
+**Connections past the descriptor limit**
+- **Direct descriptors.** Accepted sockets live in a ring's file table, not the process's, so 300,000 connections
+  hold about 25 file descriptors under `LimitNOFILE=65535`. The server no longer closes idle connections, which was
+  the old design's limit: it held 102,000 users at 66% CPU with 0.85% errors, all of them reconnects.
+- **Up to 16 rings, added as needed.** A ring's table can be no larger than `RLIMIT_NOFILE`, so each ring holds 65,535.
+  It starts with one. Accepting moves to the next ring within a margin of full, and the accepts in flight always
+  fit inside that margin, so the kernel is never asked for a slot it doesn't have.
+- **Eight `SO_REUSEPORT` listeners.** A listen queue is capped at `somaxconn`, so eight of them absorb a ramp or a
+  slow pass. Up to 512 accepts stay in flight.
+- **No buffers while idle.** Each connection has one multishot receive on a ring of 1,024 provided 2 KB buffers, and
+  borrows one only while bytes are arriving. A connection is one small Java object.
+
+**The event loop**
+- **One thread drives every ring and runs SQLite inline.** A pass submits what the last pass queued, collects
+  completions, answers requests, commits, and queues the sends. That is one system call per ring per pass, however
+  many requests it holds. There is no `read`, `write`, `accept` or `epoll` system call per request.
+- **Rings are read as shared memory.** Queue entries are read and written from Java with `MemorySegment`, and the JIT
+  compiles that to plain loads and stores with the barriers the protocol needs. Only `io_uring_enter` is a downcall.
+- **`DEFER_TASKRUN` and a batched wait.** Completions run when the loop asks, not by interrupting it. Ring 0 waits for
+  256 completions or 1 ms, so bigger passes share one commit.
+- **Responses come from two off-heap arenas.** Sends use `MSG_DONTWAIT`, so the kernel finishes them while reading the
+  queue and never keeps the address. A short send's remainder is only learned in the next pass, so each pass
+  writes to the arena the last one didn't. A connection has one send in flight, and what it can't take waits on a
+  `POLLOUT` in its own heap buffer.
+- **`SHUTDOWN` hard-linked to a fixed-file `CLOSE`.** The shutdown ends the multishot receive, which would otherwise
+  keep the socket alive. A generation number in `user_data` drops completions meant for a reused slot.
 
 **SQLite**
-- **JSON built in SQL.** Each post object comes out of SQLite as one TEXT column (`json_object`), copied
-  native-to-native into the response buffer: no Java strings, no per-column calls, no escaping in Java.
-- **Feed rows are joined in Java, not by `json_group_array`.** The feed returns one row per post in index
-  order, and Java writes `{"posts":[`, the commas and `]}` around them. Aggregating in SQL needed
-  `json_group_array(… ORDER BY …)`, which builds a temporary sort b-tree on every call and copies the JSON
-  twice more. Splitting it cut the feed query from ~13.9 µs to ~9.7 µs and server CPU per request by ~14%.
-- **FFM instead of JDBC.** Statements are prepared once (`SQLITE_PREPARE_PERSISTENT`) and reused.
-  Short calls (bind, column, changes) are `Linker.Option.critical` downcalls.
-- **`SQLITE_ENABLE_QPSG`.** Without it, the `GET /posts/:id` statement (`p.id = ?1` plus a correlated count)
-  was re-prepared on every bind, because SQLite thought the bound value might change the plan.
-- **Group commit.** Likes and new posts are queued during a wake-up and run together in one
-  `BEGIN IMMEDIATE … COMMIT`. Their responses are written only after `COMMIT` returns (rule 6). Requests
-  pipelined behind a write are answered after it, in order.
-- **Checkpoints on our schedule.** `wal_autocheckpoint=0`. A PASSIVE checkpoint
-  (`sqlite3_wal_checkpoint_v2`) runs between batches about once a second, never inside a request's
-  commit.
-- **Pragmas:** `locking_mode=EXCLUSIVE` (no shared-memory WAL index and no file locking per transaction),
-  `journal_mode=WAL`, `synchronous=NORMAL` (rule 6), `cache_size=-65536`, `temp_store=MEMORY`,
-  `journal_size_limit=64MB`.
-- **Compile options:** `-O2 -march=native` with `THREADSAFE=0`, `DEFAULT_MEMSTATUS=0`,
-  `DEFAULT_WAL_SYNCHRONOUS=1`, `DQS=0`, `LIKE_DOESNT_MATCH_BLOBS`, `MAX_EXPR_DEPTH=0`, `OMIT_DECLTYPE`,
-  `OMIT_DEPRECATED`, `OMIT_PROGRESS_CALLBACK`, `OMIT_SHARED_CACHE`, `OMIT_LOAD_EXTENSION`, `USE_ALLOCA`,
-  `ENABLE_QPSG`.
+- **One transaction per pass.** Reads share a snapshot and writes are group-committed. **No response from a pass is
+  sent until its `COMMIT` returns** (rule 6). If a commit fails, the pass's connections are closed.
+- **Reads go through B-tree cursors, not the SQL engine** (rule 5: every request reads live rows). The feed walks
+  `posts_created_at_id_idx`, looks the posts up in ascending id order so consecutive ids are a step along one leaf,
+  finds the authors, and counts likes in one walk of `likes_post_id_idx`. Data the plan doesn't expect, like a post
+  whose user has no row, is answered by the plain SQL query instead. At startup the server checks the column order of
+  everything it decodes and refuses to run on a different schema.
+- **Checkpoints on their own thread at nice 19**, on a second connection, so the loop never waits for their fsyncs.
+  From 4,096 WAL frames it runs a PASSIVE checkpoint, then holds writes (reads go on, unread writes wait in their
+  connection's buffer) while it copies the last frames, for at most 250 ms. The next write restarts the log. Past
+  65,536 frames the loop checkpoints by itself, as a last resort. This needs `SQLITE_THREADSAFE=2`.
+- **`unix-excl` VFS.** The process keeps an exclusive lock on the file and its two connections share the WAL index in
+  memory: no `-shm` file and no file lock per transaction.
+- **Pragmas:** `journal_mode=WAL`, `synchronous=NORMAL` (rule 6), `cache_size=-65536`, `temp_store=MEMORY`,
+  `mmap_size=0` (a cached page keeps its parsed header and needs no WAL lookup), `journal_size_limit=64MB`,
+  `wal_autocheckpoint=0`.
+- **Compile options:** `-O3 -march=native` with `THREADSAFE=2`, `DEFAULT_MEMSTATUS=0`, `DEFAULT_WAL_SYNCHRONOUS=1`,
+  `DQS=0`, `LIKE_DOESNT_MATCH_BLOBS`, `MAX_EXPR_DEPTH=0`, `OMIT_DECLTYPE`, `OMIT_DEPRECATED`, `OMIT_PROGRESS_CALLBACK`,
+  `OMIT_SHARED_CACHE`, `OMIT_LOAD_EXTENSION`, `OMIT_AUTOINIT`, `OMIT_UTF16`, `OMIT_TRACE`, `OMIT_COMPLETE`, `OMIT_GET_TABLE`,
+  `OMIT_TCL_VARIABLE`, `USE_ALLOCA`, `ENABLE_QPSG`, `HAVE_FDATASYNC`, `HAVE_USLEEP`.
 
 **Requests**
-- **HTTP parsing on raw bytes.** It reads only the request line, `Content-Length`, `Authorization` and
-  `Connection`. Status lines and headers are precomputed, and each response goes out in one `write`.
-- **JWT verified in full on every request** (rule 5). One keyed `javax.crypto.Mac` is reused, the
-  signature is base64url-encoded straight from the digest and compared in constant time, and the token
-  must be HS256 with valid `exp`/`nbf`.
+- **HTTP parsing on raw bytes.** It reads only the request line, `Content-Length`, `Authorization`, `Connection` and
+  `Transfer-Encoding`, and decodes chunked bodies. Status lines and headers are precomputed.
+- **JWT verified in full on every request** (rule 5). One keyed `javax.crypto.Mac` is reused, the signature is
+  compared in constant time, and the token must be HS256 with a valid `exp` (required) and `nbf`.
 
 **JVM**
-- `-XX:+UseSerialGC` (no GC threads competing for the core), a fixed 256 MB heap, `-XX:+AlwaysPreTouch`,
-  `-XX:+UseCompactObjectHeaders`, and capped metaspace, code cache and direct memory. Steady state
-  allocates about 1 MB/s, so a young GC happens every couple of minutes.
+- `-XX:+UseSerialGC` (no GC threads competing for the core), a fixed 128 MB heap, `-XX:+AlwaysPreTouch`,
+  `-XX:+UseCompactObjectHeaders`, `-XX:-UsePerfData`, and capped metaspace, code cache and direct memory. A connection
+  is a 64-byte object. At 300,000 users and 31,800 req/s, a 115-second run had one young GC, of 6.8 ms.
 
 ## Local measurements
 
-These were measured on Docker on an Apple Silicon laptop, not the droplet. The server was pinned to one core
-with `--cpus 1 --memory 2g`, no swap and `nofile=65535`. Load came from a load generator replaying
-`bench/load.js`'s user loop with one keep-alive connection per user, with k6's rules for latency, timeouts and
-retries. Each level was a 60 s ramp and a 2-minute hold.
+These were measured on Docker on an Apple Silicon laptop (Linux 7.0, arm64), not the benchmark box. The server was
+limited to one core, 2 GB, no swap and `nofile=65535`. Load came from `mload`, a C replay of `bench/load.js` from
+`c-iouring-moneebullah25/tools`, in the same network namespace. Each level was a 60 s ramp and a 90 s hold.
 
-| Users | req/s | p95 | p99 | Errors | Server CPU |
-|---|---|---|---|---|---|
-| 128,000 | 13,543 | 11 ms | 28 ms | 0.011% | 31% |
-| 256,000 | 27,086 | 38 ms | 55 ms | 0.0013% | 56% |
-| 320,000 | 33,808 | 57 ms | 68 ms | 0.0009% | 69% |
-| 352,000 | 37,106 | 90 ms | 127 ms | 0.0006% | 76% |
-| 384,000 | 40,578 | 119 ms | 176 ms | 0.0075% | 78% |
-| 416,000 | fails: the core saturates at ~40k req/s | | 6.7 s | 0.34% | 82% |
+| Version | Users | req/s | p95 | p99 | Errors | Connects | Server CPU | RSS |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| epoll + eviction | 102,000 | 10,780 | 6.3 ms | 22.7 ms | 0.011% | 589,982 | 28% | |
+| io_uring | 102,000 | 10,780 | 3.6 ms | 4.7 ms | 0 | 102,000 | 22% | |
+| io_uring | 200,000 | 21,200 | 3.9 ms | 5.1 ms | 0 | 200,000 | 27% | 284 MB |
+| io_uring | 300,000 | 31,800 | 4.6 ms | 5.9 ms | 0 | 300,000 | 32% | 284 MB |
+| io_uring, 5-minute hold | 300,000 | 31,750 | 4.2 ms | 5.5 ms | 0 | 300,000 | 31% | 313 MB |
+
+**These numbers don't predict a score.** Over loopback, the load generator's CPU pays for much of the network work
+that the server pays for on a real box. To calibrate that, two scored entries ran through the same harness:
+
+| Entry | CPU per request here | Scored | Scored users |
+|---|---:|---:|---:|
+| `rust-iouring-kensac` | 12.7 µs | 25 µs | 310,000 |
+| `java-uring-crux` | 19.5 µs | 43 µs | 158,000 |
+| this entry, epoll + eviction | 26 µs | 61 µs | 102,000 |
+| this entry, io_uring | 12.7 µs | not yet | not yet |
+
+**Memory at 300,000 users:** 1,121 MB of kernel socket memory and 313 MB of JVM RSS, plus reclaimable page cache from
+the database. If every client disconnects in the same instant, the kernel charges about a page per socket for the queued
+FINs until the server reads them. When `mload` exited at 300,000 users, that passed the container's 2 GB limit and got
+the server killed, after the hold. With a 4 GB limit the same burst passed and the server stayed healthy with the same
+RSS. A gradual ramp-down shouldn't produce this burst, though that wasn't tested here.
+
+**Durability:** three runs of `kill -9` during about 24,000 writes per second lost none of about 1 million acknowledged
+writes, `integrity_check` was ok each time, and the WAL stayed under 20 MB.
 
 ## License
 

@@ -1,28 +1,44 @@
 package challenge;
 
 import static java.lang.foreign.ValueLayout.JAVA_BYTE;
+import static java.lang.foreign.ValueLayout.JAVA_INT;
+import static java.lang.foreign.ValueLayout.JAVA_LONG;
 
-import java.io.IOException;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
+import java.lang.foreign.ValueLayout;
+import java.lang.invoke.VarHandle;
 import java.net.InetAddress;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.concurrent.locks.LockSupport;
 
+/**
+ * The HTTP/1.1 server: one thread drives every io_uring and runs SQLite inline.
+ *
+ * A pass: submit what the last pass queued and collect completions, handle them (each request runs inside
+ * the pass's one transaction and its response goes into an off-heap arena), commit, then queue one send per
+ * connection. So nothing is sent before its commit, and a pass costs one system call per ring.
+ */
 final class Server {
+    static final int LISTENERS = 8;
+    private static final int MAX_RINGS = 16, BACKLOG = 4096;
+    private static final int MAX_ACCEPTS_IN_FLIGHT = 512;
+    // A pass waits on ring 0 for this many completions or this long, so bigger passes share one COMMIT.
+    private static final int WAIT_MIN = 256;
+    private static final long WAIT_NANOS = 1_000_000L, RETRY_RING_NANOS = 1_000_000_000L;
+
     private static final int READ_CAP = 64 * 1024;
     private static final int MAX_HEAD = 16 * 1024;
     private static final int MAX_BODY = 32 * 1024;
-    private static final int OUT_CAP = 1 << 20;
-    private static final int OUT_RESERVE = 64 * 1024;
-    private static final long CHECKPOINT_NANOS = 1_000_000_000L;
-    private static final int MAX_EVENTS = 4096;
-    // Descriptors kept free for the process itself (it uses about 15), and how many idle connections
-    // one eviction closes. Eviction starts only this close to the limit, so it never starts below the
-    // point where the kernel's connection tracking (65,536 entries on a 2 GB box) is full anyway.
-    private static final int FD_RESERVE = 128, EVICT_BATCH = 64;
+    private static final int OUT_CAP = 4 * 1024 * 1024;
+    // Room one response may need. A feed's worst case: 20 posts of 500 four-byte or escaped characters.
+    private static final int OUT_RESERVE = 512 * 1024;
+    private static final int HOLD = -1;
+
+    // Completion kinds: the top byte of user_data. A send's top bit says which arena it reads from.
+    private static final int ACCEPT = 1, RECV = 2, SEND = 3, POLL = 4, SHUTDOWN = 5, CLOSE = 6;
+    private static final VarHandle INT = ValueLayout.JAVA_INT.varHandle();
 
     private static final int NOT_FOUND = 0, HEALTH = 1, FEED = 2, GET_POST = 3, CREATE = 4, LIKE = 5;
 
@@ -39,289 +55,233 @@ final class Server {
 
     private static byte[] err(String message) { return Out.ascii("{\"error\":\"" + message + "\"}"); }
 
+    /** A connection. Its buffers are null unless it holds a partial request or an unsent response. */
     static final class Conn {
-        final int fd;
-        byte[] left;
+        final Ring ring;
+        final int slot, gen;
+        byte[] left;        // received bytes not yet answered
         byte[] pending;     // response bytes the socket didn't take yet, from pendingFrom on
         int pendingFrom;
-        boolean deferred;
-        boolean closeAfterWrite, closed;
-        Conn prev, next;
+        int stageFrom, stageTo, sendFrom, sendLen, sendArena;
+        boolean staged, sending, parked, closeAfterWrite, eof, closing;
 
-        Conn(int fd) { this.fd = fd; }
+        Conn(Ring ring, int slot, int gen) {
+            this.ring = ring;
+            this.slot = slot;
+            this.gen = gen;
+        }
+
+        /** Its next response can't be built yet, so what arrives waits in left. */
+        boolean busy() { return sending || pending != null || parked || closing; }
     }
 
     private final Db db;
     private final Jwt jwt;
-    private final int ep, listenFd;
+    private final int[] listenFds = new int[LISTENERS];
     private final long startNanos = System.nanoTime();
 
-    private final MemorySegment events = Arena.global().allocate((long) MAX_EVENTS * Sys.EVENT_SIZE, 8);
-    private final MemorySegment in = Arena.global().allocate(READ_CAP);
-    private final MemorySegment wbuf = Arena.global().allocate(OUT_CAP);
+    private final int slots, margin, acceptsPerListener;
+    private final Ring[] rings = new Ring[MAX_RINGS];
+    private int ringCount;
+    private Ring acceptRing;
+    private long retryRingAt;
+    private int nextGen;
+
+    private final MemorySegment waitArg = Arena.global().allocate(24 + 16, 8);
+    private final long waitArgAddr = waitArg.address();
+
+    /**
+     * Two arenas. Sends never outlive the enter that submits them (see Ring.send), but a short send's rest is
+     * only learned in the next pass, so a pass writes to the arena the last pass didn't.
+     */
+    private final Out[] arenas = {new Out(OUT_CAP), new Out(OUT_CAP)};
+    private final int[] sendsInFlight = new int[2];
+    private int arena;
+    private Out out = arenas[0];
+
     private final byte[] rb = new byte[READ_CAP + MAX_HEAD + MAX_BODY];
-    private final Out out = new Out(OUT_CAP);
-    private Conn[] byFd = new Conn[1024];
+    private final ArrayList<Conn> staged = new ArrayList<>(), deferred = new ArrayList<>(), held = new ArrayList<>();
+    private final ArrayList<Conn> retry = new ArrayList<>();
 
-    private final ArrayList<Conn> queue = new ArrayList<>(), batch = new ArrayList<>();
-    private int[] sliceFrom = new int[64], sliceTo = new int[64];
-
-    private Conn lruHead, lruTail;
-    private int conns;
-    private final int maxConns;
-    private long lastCheckpoint = System.nanoTime();
-
-    Server(Db db, Jwt jwt, String host, int port, long maxFds) throws IOException {
+    Server(Db db, Jwt jwt, String host, int port, int slots) throws java.io.IOException {
         this.db = db;
         this.jwt = jwt;
-        maxConns = (int) Math.max(2 * EVICT_BATCH, Math.min(Integer.MAX_VALUE, maxFds) - FD_RESERVE);
-        ep = Sys.epollCreate();
-        listenFd = Sys.listen(InetAddress.getByName(host), port, 4096);
-        Sys.epollCtl(ep, Sys.EPOLL_CTL_ADD, listenFd, Sys.EPOLLIN);
+        this.slots = slots;
+        // Accepts in flight fit inside the margin, so a ring is never asked for a slot it doesn't have.
+        int depth = Math.clamp(slots / 16, LISTENERS, MAX_ACCEPTS_IN_FLIGHT);
+        acceptsPerListener = depth / LISTENERS;
+        margin = Math.min(Math.clamp(slots / 8, depth + 1, 2 * MAX_ACCEPTS_IN_FLIGHT), slots / 4);
+        InetAddress addr = InetAddress.getByName(host);
+        for (int i = 0; i < LISTENERS; i++) listenFds[i] = Sys.listen(addr, port, BACKLOG);
+        waitArg.set(JAVA_LONG, 16, waitArgAddr + 24); // ts
+        waitArg.set(JAVA_LONG, 24, 0L);               // tv_sec
+        waitArg.set(JAVA_LONG, 32, WAIT_NANOS);       // tv_nsec
+        acceptRing = addRing();
+    }
+
+    private Ring addRing() {
+        Ring r = new Ring(slots);
+        rings[ringCount++] = r;
+        return r;
     }
 
     void run() {
-        long batchNanos = Long.getLong("batch.micros", 2000) * 1000;
-        int batchMin = Integer.getInteger("batch.min", 32);
+        fillAccepts();
         while (true) {
-            int n = Sys.epollWait(ep, events, MAX_EVENTS, 1000);
-            if (n < 0) {
-                if (Sys.errno() != Sys.EINTR) throw new IllegalStateException("epoll_wait: errno " + Sys.errno());
-                n = 0;
-            }
-            for (int i = 0; i < n; i++) onEvent(Sys.eventFd(events, i), Sys.eventFlags(events, i));
-            commitPhase();
-            long now = System.nanoTime();
-            if (now - lastCheckpoint >= CHECKPOINT_NANOS) {
-                lastCheckpoint = now;
-                db.checkpointIfDirty();
-            }
-            if (n > 0 && n < batchMin && batchNanos > 0) LockSupport.parkNanos(batchNanos);
+            enterRings();
+            flipArena();
+            for (int i = 0; i < ringCount; i++) drain(rings[i]);
+            resumeParked();
+            endPass();
         }
     }
 
-    private void onEvent(int fd, int flags) {
-        if (fd == listenFd) {
-            accept();
+    /** The last ring goes first and ring 0 waits, so no ring's sends sit behind the wait. */
+    private void enterRings() {
+        for (int i = ringCount - 1; i > 0; i--) rings[i].enter();
+        rings[0].enterAndWait(deferred.isEmpty() ? WAIT_MIN : 0, waitArgAddr, 24);
+    }
+
+    private void flipArena() {
+        int other = 1 - arena;
+        if (sendsInFlight[other] == 0) {
+            arena = other;
+            out = arenas[other];
+            out.pos = 0;
+        } else if (sendsInFlight[arena] == 0) {
+            out.pos = 0;
+        }
+    }
+
+    private void drain(Ring r) {
+        int head = r.cqHead;
+        int tail = (int) INT.getAcquire(r.cq, r.cqTailOff);
+        while (head != tail) {
+            long off = r.cqesOff + (long) (head & r.cqMask) * 16;
+            onCompletion(r, r.cq.get(JAVA_LONG, off), r.cq.get(JAVA_INT, off + 8), r.cq.get(JAVA_INT, off + 12));
+            head++;
+            // Handling these can submit (a close storm queues two entries per connection), and what the
+            // kernel completes meanwhile needs room here, or it goes to a kernel-side overflow list.
+            if ((head & 255) == 0) INT.setRelease(r.cq, r.cqHeadOff, head);
+        }
+        r.cqHead = head;
+        INT.setRelease(r.cq, r.cqHeadOff, head);
+        r.publishBufs();
+    }
+
+    private static long userData(int kind, int gen, int slot) {
+        return (long) kind << 56 | (long) (gen & 0xffffff) << 32 | slot;
+    }
+
+    private void onCompletion(Ring r, long ud, int res, int flags) {
+        int top = (int) (ud >>> 56);
+        int kind = top & 0x7f;
+        int slot = (int) ud;
+        if (kind == ACCEPT) {
+            onAccept(r, slot, res);
             return;
         }
-        // An event can be stale: its fd was closed earlier in this batch, and maybe reused by an accept.
-        Conn c = fd < byFd.length ? byFd[fd] : null;
-        if (c == null) return;
-        try {
-            if (c.pending != null) {
-                if ((flags & (Sys.EPOLLOUT | Sys.EPOLLERR | Sys.EPOLLHUP)) != 0) onWritable(c);
-            } else if ((flags & (Sys.EPOLLIN | Sys.EPOLLERR | Sys.EPOLLHUP)) != 0) {
-                onReadable(c);
+        if (kind == SEND) sendsInFlight[top >>> 7]--;
+        Conn c = r.conns[slot];
+        boolean live = c != null && c.gen == ((int) (ud >>> 32) & 0xffffff);
+        if (kind == RECV) {
+            int bid = (flags & Ring.CQE_F_BUFFER) != 0 ? flags >>> 16 : -1;
+            if (live && !c.closing) onRecv(r, c, res, bid, (flags & Ring.CQE_F_MORE) != 0);
+            if (bid >= 0) r.recycle(bid);
+            return;
+        }
+        if (!live) return;
+        switch (kind) {
+            case SEND -> { if (!c.closing) onSend(c, res, top >>> 7); }
+            case POLL -> { if (!c.closing) flushPending(c); }
+            case CLOSE -> {
+                r.conns[slot] = null;
+                r.open--;
+                if (r.full && r.open + 2 * margin < slots) r.full = false;
             }
-        } catch (Throwable t) {
-            System.err.println("connection error: " + t);
-            close(c);
+            default -> { }
         }
     }
 
-    private void accept() {
-        for (int n = 0; n < 512; n++) {
-            if (conns >= maxConns) evict(maxConns - EVICT_BATCH);
-            int fd = Sys.accept(listenFd);
-            if (fd < 0) {
-                int e = Sys.errno();
-                if (e == Sys.EINTR || e == Sys.ECONNABORTED) continue;
-                if (e == Sys.EMFILE || e == Sys.ENFILE) evict(Math.max(0, conns - EVICT_BATCH));
-                else if (e != Sys.EAGAIN) System.err.println("accept: errno " + e);
-                return;
-            }
-            Sys.setInt(fd, Sys.IPPROTO_TCP, Sys.TCP_NODELAY, 1);
-            if (Sys.epollCtl(ep, Sys.EPOLL_CTL_ADD, fd, Sys.EPOLLIN) != 0) {
-                Sys.close(fd);
-                continue;
-            }
-            Conn c = new Conn(fd);
-            if (fd >= byFd.length) byFd = Arrays.copyOf(byFd, Math.max(fd + 1, byFd.length * 2));
-            byFd[fd] = c;
-            linkTail(c);
-            conns++;
+    private void onAccept(Ring r, int listener, int res) {
+        r.accepts[listener]--;
+        if (res >= 0) {
+            Conn c = new Conn(r, res, nextGen++ & 0xffffff);
+            r.conns[res] = c;
+            r.recv(res, userData(RECV, c.gen, res));
+            if (++r.open + margin >= slots) r.full = true;
+        } else if (res == -Sys.ENFILE) {
+            r.full = true;
         }
     }
 
-    private void evict(int target) {
-        Conn c = lruHead;
-        while (c != null && conns > target) {
-            Conn next = c.next;
-            if (c.pending == null && !c.deferred && c.left == null) {
-                // Abortive close: with SO_LINGER 0, close() resets the connection instead of sending FIN,
-                // so an evicted idle connection costs no FIN exchange and leaves no TIME_WAIT.
-                Sys.lingerZero(c.fd);
-                close(c);
-            }
-            c = next;
+    private void onRecv(Ring r, Conn c, int res, int bid, boolean more) {
+        if (res > 0) {
+            if (bid >= 0) onData(r, c, bid, res);
+            if (!more && !c.closing) rearm(r, c);
+        } else if (res == -Sys.ENOBUFS) {
+            rearm(r, c); // after this pass has returned its buffers
+        } else if (res == 0) {
+            c.eof = true;
+            settle(c);
+        } else {
+            armClose(c);
         }
     }
 
-    private void close(Conn c) {
-        if (c.closed) return;
-        c.closed = true;
-        unlink(c);
-        conns--;
-        c.left = null;
-        c.pending = null;
-        byFd[c.fd] = null;
-        Sys.close(c.fd); // also removes it from the epoll set
+    private static void rearm(Ring r, Conn c) {
+        if (r.rearmCount == r.rearm.length) r.rearm = Arrays.copyOf(r.rearm, r.rearmCount * 2);
+        r.rearm[r.rearmCount++] = c;
     }
 
-    private void linkTail(Conn c) {
-        c.prev = lruTail;
-        c.next = null;
-        if (lruTail != null) lruTail.next = c; else lruHead = c;
-        lruTail = c;
-    }
-
-    private void unlink(Conn c) {
-        if (c.prev != null) c.prev.next = c.next; else lruHead = c.next;
-        if (c.next != null) c.next.prev = c.prev; else lruTail = c.prev;
-        c.prev = c.next = null;
-    }
-
-    private void touch(Conn c) {
-        if (lruTail == c) return;
-        unlink(c);
-        linkTail(c);
-    }
-
-    private static boolean retryable(int errno) { return errno == Sys.EAGAIN || errno == Sys.EINTR; }
-
-    private void onReadable(Conn c) {
+    private void onData(Ring r, Conn c, int bid, int n) {
         int have = c.left == null ? 0 : c.left.length;
-        int room = Math.min(READ_CAP, rb.length - have);
-        if (room <= 0) {
-            close(c);
+        if (have + n > rb.length) {
+            armClose(c);
             return;
         }
-        long r = Sys.read(c.fd, in, room);
-        if (r <= 0) {
-            if (r == 0 || !retryable(Sys.errno())) close(c);
+        if (c.busy()) {
+            byte[] l = have == 0 ? new byte[n] : Arrays.copyOf(c.left, have + n);
+            MemorySegment.copy(r.bufs, JAVA_BYTE, r.bufOffset(bid), l, have, n);
+            c.left = l;
             return;
         }
-        int n = (int) r;
-        touch(c);
         if (have > 0) System.arraycopy(c.left, 0, rb, 0, have);
-        MemorySegment.copy(in, JAVA_BYTE, 0, rb, have, n);
+        MemorySegment.copy(r.bufs, JAVA_BYTE, r.bufOffset(bid), rb, have, n);
         c.left = null;
-        if (c.deferred) {
-            c.left = Arrays.copyOf(rb, have + n);
+        process(c, have + n);
+    }
+
+    /** Runs what the connection has waiting if it can, and closes it if the peer is gone and nothing is owed. */
+    private void settle(Conn c) {
+        if (c.closing) return;
+        if (c.left != null && !c.busy()) {
+            byte[] l = c.left;
+            System.arraycopy(l, 0, rb, 0, l.length);
+            c.left = null;
+            process(c, l.length);
+        }
+        if (c.eof && !c.busy() && !c.staged) armClose(c);
+    }
+
+    /** Answers the requests in rb[0, end), leaving what can't be answered yet in c.left. */
+    private void process(Conn c, int end) {
+        // A second batch in one pass must follow the first in the arena: one connection gets one send.
+        if (c.staged && c.stageTo != out.pos) {
+            c.left = Arrays.copyOf(rb, end);
+            park(c, deferred);
             return;
         }
-        process(c, have + n, false);
-    }
-
-    private void onWritable(Conn c) {
-        byte[] p = c.pending;
-        int len = Math.min(p.length - c.pendingFrom, OUT_CAP);
-        MemorySegment.copy(p, c.pendingFrom, wbuf, JAVA_BYTE, 0, len);
-        long w = Sys.write(c.fd, wbuf, len);
-        if (w < 0) {
-            if (!retryable(Sys.errno())) close(c);
-            return;
-        }
-        c.pendingFrom += (int) w;
-        if (c.pendingFrom < p.length) return;
-        c.pending = null;
-        c.pendingFrom = 0;
-        if (c.closeAfterWrite) {
-            close(c);
-            return;
-        }
-        Sys.epollCtl(ep, Sys.EPOLL_CTL_MOD, c.fd, Sys.EPOLLIN);
-        resume(c);
-    }
-
-    private void resume(Conn c) {
-        if (c.closed || c.left == null || c.deferred || c.pending != null) return;
-        byte[] l = c.left;
-        c.left = null;
-        System.arraycopy(l, 0, rb, 0, l.length);
-        process(c, l.length, false);
-    }
-
-    private void send(Conn c, int from, int to) {
-        if (c.closed || from == to) return;
-        int len = to - from;
-        if (c.pending != null) {
-            int rest = c.pending.length - c.pendingFrom;
-            byte[] p = new byte[rest + len];
-            System.arraycopy(c.pending, c.pendingFrom, p, 0, rest);
-            MemorySegment.copy(out.seg, JAVA_BYTE, from, p, rest, len);
-            c.pending = p;
-            c.pendingFrom = 0;
-            return;
-        }
-        long w = Sys.write(c.fd, out.seg.asSlice(from, len), len);
-        if (w < 0) {
-            if (!retryable(Sys.errno())) {
-                close(c);
-                return;
-            }
-            w = 0;
-        }
-        if (w < len) {
-            c.pending = new byte[len - (int) w];
-            MemorySegment.copy(out.seg, JAVA_BYTE, from + w, c.pending, 0, c.pending.length);
-            c.pendingFrom = 0;
-            Sys.epollCtl(ep, Sys.EPOLL_CTL_MOD, c.fd, Sys.EPOLLOUT);
-        } else if (c.closeAfterWrite) {
-            close(c);
-        }
-    }
-
-    private void commitPhase() {
-        while (!queue.isEmpty()) {
-            batch.clear();
-            batch.addAll(queue);
-            queue.clear();
-            int n = batch.size();
-            if (sliceFrom.length < n) {
-                sliceFrom = new int[n * 2];
-                sliceTo = new int[n * 2];
-            }
-            out.pos = 0;
-            for (int i = 0; i < n; i++) {
-                Conn c = batch.get(i);
-                c.deferred = false;
-                sliceFrom[i] = out.pos;
-                if (!c.closed && c.left != null) {
-                    byte[] l = c.left;
-                    c.left = null;
-                    System.arraycopy(l, 0, rb, 0, l.length);
-                    process(c, l.length, true);
-                }
-                sliceTo[i] = out.pos;
-            }
-            if (db.commit()) {
-                for (int i = 0; i < n; i++) send(batch.get(i), sliceFrom[i], sliceTo[i]);
-            } else {
-                for (int i = 0; i < n; i++) close(batch.get(i));
-            }
-            out.pos = 0;
-            for (int i = 0; i < n; i++) resume(batch.get(i));
-        }
-    }
-
-    private int pathFrom, pathTo, authFrom, authTo, bodyFrom, bodyLen;
-
-    private void process(Conn c, int end, boolean commitMode) {
-        byte[] b = rb;
-        int p = 0;
-        while (p < end && !c.closed) {
+        int start = out.pos, p = 0;
+        while (p < end) {
             if (out.free() < OUT_RESERVE) {
-                if (commitMode) break;
-                flush(c);
-                if (c.pending != null || c.closed) break;
+                park(c, deferred);
+                break;
             }
-            int used = request(c, b, p, end, commitMode);
+            int used = request(c, rb, p, end);
             if (used == 0) break;
-            if (used < 0) {
-                c.deferred = true;
-                queue.add(c);
+            if (used == HOLD) {
+                park(c, held);
                 break;
             }
             p += used;
@@ -330,17 +290,164 @@ final class Server {
                 break;
             }
         }
-        c.left = !c.closed && p < end ? Arrays.copyOfRange(b, p, end) : null;
-        if (!commitMode) flush(c);
+        c.left = p < end ? Arrays.copyOfRange(rb, p, end) : null;
+        if (out.pos > start) stage(c, start);
     }
 
-    private void flush(Conn c) {
-        int n = out.pos;
-        out.pos = 0;
-        send(c, 0, n);
+    private void stage(Conn c, int start) {
+        if (!c.staged) {
+            c.staged = true;
+            c.stageFrom = start;
+            staged.add(c);
+        }
+        c.stageTo = out.pos;
     }
 
-    private int request(Conn c, byte[] b, int p, int end, boolean commitMode) {
+    private static void park(Conn c, ArrayList<Conn> list) {
+        c.parked = true;
+        list.add(c);
+    }
+
+    private void resumeParked() {
+        if (!deferred.isEmpty()) {
+            retry.clear();
+            retry.addAll(deferred);
+            deferred.clear();
+            resume(retry);
+        }
+        if (!held.isEmpty() && !db.writesHeld()) {
+            retry.clear();
+            retry.addAll(held);
+            held.clear();
+            resume(retry);
+        }
+    }
+
+    private void resume(ArrayList<Conn> list) {
+        for (int i = 0, n = list.size(); i < n; i++) {
+            Conn c = list.get(i);
+            c.parked = false;
+            if (c.pending != null && !c.sending) flushPending(c);
+            settle(c);
+        }
+    }
+
+    private void endPass() {
+        boolean committed = db.commit();
+        for (int i = 0, n = staged.size(); i < n; i++) {
+            Conn c = staged.get(i);
+            c.staged = false;
+            if (c.closing) continue;
+            if (committed) startSend(c);
+            else armClose(c);
+        }
+        staged.clear();
+        db.tick();
+        for (int i = 0; i < ringCount; i++) {
+            Ring r = rings[i];
+            for (int k = 0; k < r.rearmCount; k++) {
+                Conn c = r.rearm[k];
+                if (!c.closing) r.recv(c.slot, userData(RECV, c.gen, c.slot));
+                r.rearm[k] = null;
+            }
+            r.rearmCount = 0;
+        }
+        fillAccepts();
+    }
+
+    private void startSend(Conn c) {
+        c.sending = true;
+        c.sendArena = arena;
+        c.sendFrom = c.stageFrom;
+        c.sendLen = c.stageTo - c.stageFrom;
+        sendsInFlight[arena]++;
+        c.ring.send(c.slot, out.address(c.sendFrom), c.sendLen, userData(SEND | arena << 7, c.gen, c.slot));
+    }
+
+    private void onSend(Conn c, int res, int fromArena) {
+        c.sending = false;
+        if (res < 0 && res != -Sys.EAGAIN && res != -Sys.EINTR) {
+            armClose(c);
+            return;
+        }
+        int sent = Math.max(res, 0);
+        if (c.pending != null) {
+            c.pendingFrom += sent;
+            if (c.pendingFrom < c.pending.length) {
+                armPollOut(c);
+                return;
+            }
+            c.pending = null;
+            c.pendingFrom = 0;
+        } else if (sent < c.sendLen) {
+            // The socket buffer is full. The arena is still intact: this pass writes to the other one.
+            c.pending = new byte[c.sendLen - sent];
+            MemorySegment.copy(arenas[fromArena].seg, JAVA_BYTE, c.sendFrom + sent, c.pending, 0, c.pending.length);
+            c.pendingFrom = 0;
+            armPollOut(c);
+            return;
+        }
+        if (c.closeAfterWrite) armClose(c);
+        else settle(c);
+    }
+
+    private void armPollOut(Conn c) {
+        c.ring.pollWritable(c.slot, userData(POLL, c.gen, c.slot));
+    }
+
+    /** The socket can take more: sends the next part of what it refused, through this pass's arena. */
+    private void flushPending(Conn c) {
+        int n = Math.min(c.pending.length - c.pendingFrom, out.free() - OUT_RESERVE);
+        if (n <= 0 || c.staged && c.stageTo != out.pos) {
+            if (!c.parked) park(c, deferred);
+            return;
+        }
+        int start = out.pos;
+        out.put(c.pending, c.pendingFrom, n);
+        stage(c, start);
+    }
+
+    private void armClose(Conn c) {
+        if (c.closing) return;
+        c.closing = true;
+        c.left = null;
+        c.pending = null;
+        c.ring.shutdownAndClose(c.slot, userData(SHUTDOWN, c.gen, c.slot), userData(CLOSE, c.gen, c.slot));
+    }
+
+    /** New connections go to one ring, the first with room. Accepts already in flight fit in its margin. */
+    private void fillAccepts() {
+        if (acceptRing.full && !moveAcceptRing()) return;
+        Ring r = acceptRing;
+        for (int li = 0; li < LISTENERS; li++) {
+            while (r.accepts[li] < acceptsPerListener) {
+                r.accept(listenFds[li], userData(ACCEPT, 0, li));
+                r.accepts[li]++;
+            }
+        }
+    }
+
+    private boolean moveAcceptRing() {
+        for (int i = 0; i < ringCount; i++) {
+            if (!rings[i].full) {
+                acceptRing = rings[i];
+                return true;
+            }
+        }
+        if (ringCount == MAX_RINGS || System.nanoTime() < retryRingAt) return false;
+        try {
+            acceptRing = addRing();
+            return true;
+        } catch (RuntimeException e) {
+            System.err.println("can't add a ring: " + e.getMessage());
+            retryRingAt = System.nanoTime() + RETRY_RING_NANOS;
+            return false;
+        }
+    }
+
+    private int pathFrom, pathTo, authFrom, authTo, bodyFrom, bodyLen;
+
+    private int request(Conn c, byte[] b, int p, int end) {
         int he = headerEnd(b, p, end);
         if (he < 0) {
             if (end - p > MAX_HEAD) return reject(c, Out.S431, E_TOO_LARGE, end - p);
@@ -423,8 +530,8 @@ final class Server {
         bodyFrom = he;
 
         int route = route(b, isGet, isPost);
-        if (!commitMode && (route == CREATE || route == LIKE)) return -1;
-        // Only now, since a deferred request is parsed again from its raw bytes.
+        if ((route == CREATE || route == LIKE) && db.writesHeld()) return HOLD;
+        // Only now, since a held request is parsed again from its raw bytes.
         if (chunked) chunked(b, he, msgEnd, true);
         c.closeAfterWrite = http11 ? connClose : !connKeepAlive;
         out.close = c.closeAfterWrite;

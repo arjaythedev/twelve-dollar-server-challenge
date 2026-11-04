@@ -1152,3 +1152,16 @@ A step, not a trim: p95 falls 30-fold, us/req 17.3 -> 15.3. This matches the f22
 Checks: 42/42. h1check.py: 672 checks 0 stale, 4,122 acked 0 missing after kill -9, integrity ok (CKPT_FRAMES=100). holdcheck.py (new, raw sockets through constant holds): 1,193 split POSTs, 1,115 pipelined
 POST+GET+POST in order, 1,143 POSTs over 3 KiB split, 1,137 closes right after a POST; 0 bad, 0 of 4,566 acked missing after kill -9, integrity ok.
 
+## E65-E67 (H1c): the k5 runs that finished the picture (4 Nov, harness v3, cap 3,000 unless noted, 0 errors unless noted)
+2-minute probes: k4 280k 745/1,275; k5 240k without the cap 5/36; k5 CKPT_HOLD=50 240k 5/27. k5 300k p95 5,320, 1.3 % errors, tcp up to 173k pages; 320k and 340k: the OOM killer took the server (global OOM, E39's "refused"),
+so memory ends this harness somewhere between 280k and 300k whatever the loop does.
+5-minute holds tell a different story from the 2-minute probes: k5 280k 3,110/5,320 (fail), k4 260k 860/1,255 (fail). k5's WAL stepped 49, 73, 91, 95 MB: 95 MB is the 3x force limit (24,000 frames), so the passes weren't catching up
+(tail target 300 frames with new frames arriving while each pass runs) and the inline last resort fired, seconds of stall on the loop at 3,000 IOPS, then ~3 MB/s of rereads. Also seen: feed.db in page cache goes from 243 MB to ~25 MB at
+the end of the ramp at 240k and up, memory pressure from the sockets; the 64 MiB SQLite cache and few rereads carry it until a long stall.
+
+## E68 (H1c, k6): hold earlier, longer, and no inline last resort short of 8x (4 Nov, harness v3, cap 3,000, 5-minute holds, 0 errors)
+k6: hold from 1,000 frames left, 500 ms limit (2 s past 3x), inline only past 8x the threshold. New CKPT_LOG=1 logs every step. wasm sha256 2b453565. 42/42, holdcheck.py 0 bad, 0 of 1,430 missing after kill -9.
+- 260k: k6 p50 1.35, p95 42, p99 280, max 756 ms, 15.2 us/req, RSS 162 MB (k4 860/1,255 fail)
+- 280k: k6 p50 1.9, p95 280, p99 1,050, max 5,810 ms, 17.2 us/req (k5 3,110/5,320): just over the p99 limit
+Event log at 260k: 195 checkpoints in 300 s, 428 bulk passes, 109 holds that timed out, tail pass p50 371, p90 463 ms: the tail is slow under the cap, holds are often lost. GET traffic flows through all of it.
+

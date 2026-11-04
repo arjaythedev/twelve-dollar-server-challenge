@@ -161,4 +161,5 @@ H24: E63: CKPT_TAIL=30 changes nothing, the inline fsync's cost doesn't depend o
 H27: E63: CKPT_NICE 0 vs 10 within noise; dead
 H11: dead by source: sqlite3BtreeTableMoveto only shortcuts to key+1 (BtreeNext); other seeks start with moveToRoot, so sorting 20 scattered ids saves no descent
 H1c: E64: k5, no sync on the loop: 240k p95/p99 17/164 vs k4 525/770; 280k 65/235, k4 fails. Holds next
+H1c: E68: k6 (hold from 1,000 frames left, 500 ms limit, no inline before 8x): 5-min hold 260k p95/p99 42/280 vs k4 860/1,255; 280k 280/1,050. Repeats next
 

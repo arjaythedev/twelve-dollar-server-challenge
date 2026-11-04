@@ -110,6 +110,7 @@ static void arm_accept(int r) {
         if (!(g_accept_armed[r] & (1u << l))) {
             sqe_accept_multishot(ring_sqe(&g_rings[r]), g_listen_fds[l], MAKE_UD(OP_ACCEPT, r, l, 0));
             g_accept_armed[r] |= (uint8_t)(1u << l);
+            g_accept_cancelling[r] &= (uint8_t)~(1u << l);
         }
     }
 }
@@ -157,8 +158,8 @@ int main() {
 
     struct rlimit rl;
     if (getrlimit(RLIMIT_NOFILE, &rl) == 0) {
-        if (rl.rlim_cur < 65536) {
-            rl.rlim_cur = (rl.rlim_max >= 65536) ? 65536 : rl.rlim_max;
+        if (rl.rlim_cur < rl.rlim_max) {
+            rl.rlim_cur = rl.rlim_max;
             setrlimit(RLIMIT_NOFILE, &rl);
         }
     }
@@ -285,6 +286,9 @@ int main() {
 
                 head++;
                 count++;
+                if ((count & 63) == 0) {
+                    STORE_REL(ring->cq_head, head);
+                }
 
                 switch (op) {
                     case OP_ACCEPT: {
@@ -310,6 +314,8 @@ int main() {
                     }
 
                     case OP_CANCEL: {
+                        unsigned l = slot;
+                        g_accept_cancelling[ring_idx] &= (uint8_t)~(1u << l);
                         break;
                     }
 

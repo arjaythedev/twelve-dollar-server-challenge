@@ -364,6 +364,7 @@ static inline void sqe_shutdown_close(struct ring *r, unsigned slot, uint64_t ud
   s = ring_sqe(r);
   s->opcode = IORING_OP_CLOSE;
   s->file_index = slot + 1;
+  s->flags = IOSQE_CQE_SKIP_SUCCESS;
   s->user_data = ud;
 }
 

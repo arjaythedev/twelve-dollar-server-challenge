@@ -16,6 +16,11 @@ const (
 	OFF_SQES    = 0x10000000
 
 	IORING_ENTER_GETEVENTS = 1 << 0
+
+	IORING_SETUP_SUBMIT_ALL    = 1 << 7
+	IORING_SETUP_COOP_TASKRUN  = 1 << 8
+	IORING_SETUP_SINGLE_ISSUER = 1 << 12
+	IORING_SETUP_DEFER_TASKRUN = 1 << 13
 )
 
 // Các Opcode cơ bản
@@ -79,9 +84,10 @@ type IOUring struct {
 	cq CQRing
 }
 
-// NewRing khởi tạo ring
+// NewRing khởi tạo ring với các cờ tối ưu nhân Linux (SINGLE_ISSUER + DEFER_TASKRUN)
 func NewRing(size int) (*IOUring, error) {
 	var params RingParams
+	params.Flags = IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN | IORING_SETUP_SUBMIT_ALL
 
 	fd, _, errno := syscall.Syscall6(
 		SYS_IO_URING_SETUP,
@@ -179,7 +185,9 @@ func (io *IOUring) SendTasks(requests []SendInfo) (int, error) {
 				SYS_IO_URING_ENTER,
 				uintptr(io.fd),
 				uintptr(io.sq.toSubmit),
-				0, 0, 0, 0,
+				0,
+				uintptr(IORING_ENTER_GETEVENTS),
+				0, 0,
 			)
 			if errno != 0 && errno != syscall.EINTR && errno != syscall.EAGAIN {
 				return totalSubmitted, errno
@@ -229,6 +237,107 @@ func (io *IOUring) RecieveOutputTasks(out []ReadInfo, waitMin uint32) (int, erro
 
 	if count > 0 {
 		atomic.StoreUint32(io.cq.head, head)
+	}
+
+	return count, nil
+}
+
+// SubmitAndRecieve: Unified Single-Syscall nộp lô requests mới (SQ) VÀ gặt kết quả (CQ)
+// Giảm 50% chi phí gọi Syscall, tự động tận dụng Natural Batching và 0-syscall khi RAM đã có sẵn việc!
+func (io *IOUring) SubmitAndRecieve(requests []SendInfo, out []ReadInfo, waitMin uint32) (int, error) {
+	// 1. Điền toàn bộ requests vào Submission Queue (SQ) trên RAM
+	i := 0
+	for i < len(requests) {
+		head := atomic.LoadUint32(io.sq.head)
+
+		for i < len(requests) && io.sq.localTail-head < io.sq.entries {
+			req := requests[i]
+			s := &io.sq.sqes[io.sq.localTail&io.sq.mask]
+			*s = rawSQE{
+				Opcode:   req.Opcode,
+				FD:       req.FD,
+				Off:      req.Off,
+				UserData: req.UserData,
+			}
+			if len(req.Buf) > 0 {
+				s.Addr = uint64(uintptr(unsafe.Pointer(&req.Buf[0])))
+				s.Len = uint32(len(req.Buf))
+			}
+
+			io.sq.localTail++
+			io.sq.toSubmit++
+			i++
+		}
+
+		// Nếu danh sách nộp quá lớn vượt quá kích thước Ring, xả bớt trước (minComplete=0)
+		if i < len(requests) && io.sq.toSubmit > 0 {
+			atomic.StoreUint32(io.sq.tail, io.sq.localTail)
+			n, _, errno := syscall.Syscall6(
+				SYS_IO_URING_ENTER,
+				uintptr(io.fd),
+				uintptr(io.sq.toSubmit),
+				0,
+				uintptr(IORING_ENTER_GETEVENTS),
+				0, 0,
+			)
+			if errno != 0 && errno != syscall.EINTR && errno != syscall.EAGAIN {
+				return 0, errno
+			}
+			io.sq.toSubmit -= uint32(n)
+		}
+	}
+
+	if io.sq.toSubmit > 0 {
+		atomic.StoreUint32(io.sq.tail, io.sq.localTail)
+	}
+
+	// 2. Kiểm tra hàng đợi hoàn thành (CQ)
+	cqHead := *io.cq.head
+	cqTail := atomic.LoadUint32(io.cq.tail)
+
+	// 3. Gọi ĐÚNG 1 SYSCALL DUY NHẤT nếu có việc cần Submit HOẶC CQ đang rỗng cần Wait
+	flags := uint32(IORING_ENTER_GETEVENTS)
+	minComplete := uint32(0)
+	if cqHead == cqTail && waitMin > 0 {
+		minComplete = waitMin
+	}
+
+	for io.sq.toSubmit > 0 || (cqHead == cqTail && minComplete > 0) {
+		n, _, errno := syscall.Syscall6(
+			SYS_IO_URING_ENTER,
+			uintptr(io.fd),
+			uintptr(io.sq.toSubmit),
+			uintptr(minComplete),
+			uintptr(flags),
+			0, 0,
+		)
+		if errno == syscall.EINTR {
+			continue
+		}
+		if errno != 0 && errno != syscall.EAGAIN {
+			return 0, errno
+		}
+		io.sq.toSubmit -= uint32(n)
+		cqTail = atomic.LoadUint32(io.cq.tail)
+		minComplete = 0
+	}
+
+	// 4. Thu hoạch (Drain) toàn bộ kết quả đã xong trong CQ Ring trên RAM
+	count := 0
+	maxCap := len(out)
+
+	for cqHead != cqTail && count < maxCap {
+		raw := &io.cq.cqes[cqHead&io.cq.mask]
+		out[count] = ReadInfo{
+			UserData: raw.UserData,
+			Res:      raw.Res,
+		}
+		count++
+		cqHead++
+	}
+
+	if count > 0 {
+		atomic.StoreUint32(io.cq.head, cqHead)
 	}
 
 	return count, nil

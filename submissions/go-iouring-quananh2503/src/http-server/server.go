@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"runtime"
 	"strconv"
 	"syscall"
 
@@ -132,38 +133,32 @@ func NewServer(cfg Config) (*Server, error) {
 	}, nil
 }
 
-// Run khởi chạy vòng lặp Proactor Event Loop
+// Run khởi chạy vòng lặp Proactor Event Loop (Unified Single-Syscall)
 func (s *Server) Run() error {
+	runtime.LockOSThread()
 	log.Printf("Server đang chạy tại http://%s:%s (Pure Go + io_uring)", s.cfg.Host, s.cfg.Port)
 
 	for {
-		// 1. Chờ ít nhất 1 kết quả hoàn tất từ CQ ring (waitMin = 1)
-		count, err := s.ring.RecieveOutputTasks(s.tasks, 1)
+		// 1. Unified Syscall: Vừa nộp toàn bộ s.outTasks đợt trước, vừa gặt s.tasks cho đợt này!
+		count, err := s.ring.SubmitAndRecieve(s.outTasks, s.tasks, 1)
 		if err != nil {
 			if err == syscall.EINTR {
 				continue
 			}
-			return fmt.Errorf("lỗi RecieveOutputTasks: %w", err)
+			return fmt.Errorf("lỗi SubmitAndRecieve: %w", err)
 		}
+
+		s.outTasks = s.outTasks[:0] // Reset slice về 0 phần tử mà không cấp phát lại (Zero-Alloc)
 
 		if count == 0 {
 			continue
 		}
-
-		s.outTasks = s.outTasks[:0] // Reset slice về 0 phần tử mà không cấp phát lại (Zero-Alloc)
 
 		// 2. Single-Pass Parse: phân loại completions vào EventBatch sạch
 		s.parser.Parse(s.tasks[:count], s.batch, &s.outTasks)
 
 		// 3. Dispatch: 6 Systems xử lý theo chùm
 		s.sysMgr.Dispatch(s.batch, &s.outTasks)
-
-		// 4. Batch Submit: Nộp toàn bộ các task tích lũy một lần duy nhất ở cuối vòng lặp
-		if len(s.outTasks) > 0 {
-			if _, err := s.ring.SendTasks(s.outTasks); err != nil {
-				log.Printf("Lỗi SendTasks batch cuối loop: %v", err)
-			}
-		}
 	}
 }
 

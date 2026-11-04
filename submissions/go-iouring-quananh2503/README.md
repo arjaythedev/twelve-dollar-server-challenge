@@ -39,3 +39,33 @@ Passed 100% of the official challenge test suite:
 PORT=3125 bash test/run.sh submissions/go-iouring-quananh2503
 # passed=42 failed=0
 ```
+
+---
+
+## Ongoing Optimization & Investigation (Current State)
+
+### 1. Phân Tích Điểm Nghẽn (Profiling & Analysis)
+- **Go pprof & Linux Perf Findings:** 
+  - Toàn bộ tầng SQLite B-tree & CGO chỉ chiếm **~5-9%** CPU của ứng dụng.
+  - HTTP Parser chỉ chiếm **< 0.25%** CPU.
+  - Vòng lặp giao tiếp `io_uring` (`SubmitAndRecieve` / `Syscall6`) chiếm tới **>90%** CPU của tiến trình Go. Do đó, tối ưu thêm SQLite hay Parser không còn ý nghĩa.
+
+### 2. Cải Tiến Đã Thực Hiện (Step 1)
+- **Single-Syscall (`SubmitAndRecieve`):** Gộp chung quá trình nộp task (SQ) và thu hoạch kết quả (CQ) vào duy nhất 1 lần gọi `io_uring_enter`.
+- **Cờ Kernel (`DEFER_TASKRUN` + `SINGLE_ISSUER` + `SUBMIT_ALL`):** Bật các cờ nhân Linux và khóa cứng goroutine vào OS thread (`runtime.LockOSThread()`) để triệt tiêu việc Kernel ngắt CPU không đồng bộ khi nhận packet mạng.
+- **Kết quả đo thực tế (20.000 VUs):**
+  - Tranh chấp spinlock kernel (`native_queued_spin_lock`) giảm 70% (từ 14.47% xuống 4.49%).
+  - Độ trễ đuôi $p99$ giảm 50% (từ 1.28s xuống **653.47 ms**), chính thức đạt chuẩn SPEC ($p99 < 1.0s$).
+  - Error rate: **0.00%** (0 lỗi trên 247.535 requests).
+
+### 3. Kiểm Thử Bão Hòa Tải Cao (~3.800 – 5.000 req/s) & Phát Hiện Điểm Gãy
+- Khi ép tải lên đỉnh ~5.000 req/s (20.000 VUs, `SLEEP_FACTOR=0.35`):
+  - Phục vụ **490.069 requests** với **0.00% lỗi**, median latency đạt **362.54 µs**.
+  - Tuy nhiên, độ trễ $p99$ dội lên **1.20s** (vượt chuẩn 1.0s).
+- **Nguyên nhân cốt lõi:** Cơ chế Ping-Pong 2 pha (`OpSend` hoàn thành sinh `EventSend` $\to$ đánh thức vòng lặp chỉ để nộp lại `OpRecv`). Ở 5.000 req/s, hàng nghìn micro-batch rỗng sinh ra mỗi giây tạo ra "cửa sổ mù" (blind window) trên các socket đang gửi response, khiến 1% request đuôi bị tích lũy trễ trong hàng đợi TCP của Kernel.
+
+### 4. Kế Hoạch Đang Triển Khai Tiếp Theo (Next Steps)
+- [ ] **Bật cờ `IOSQE_CQE_SKIP_SUCCESS` (1 << 6):** Bỏ qua hoàn toàn CQE khi gửi response thành công và khi đóng socket (`OpClose`). Triệt tiêu 100% các sự kiện `EventSend` vô ích.
+- [ ] **Provided Buffer Ring (`IORING_REGISTER_PBUF_RING`):** Đăng ký bể chứa buffer dùng chung giữa Go và Kernel, trả buffer bằng atomic ở User-space (0 syscall).
+- [ ] **Multishot Recv (`IORING_RECV_MULTISHOT`):** Treo lệnh đọc vĩnh viễn trên socket từ lúc accept; không bao giờ cần re-arm lại `OpRecv` thủ công sau mỗi request.
+

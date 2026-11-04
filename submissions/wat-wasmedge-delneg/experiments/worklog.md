@@ -1207,6 +1207,6 @@ k7 = wasm ba492bfc, CKPT_TAIL=200, CKPT_NICE=0.
 - 280k: OOM-killed (41 % errors); 81/340/2,016 pass
 - CKPT_FRAMES=4000: 280k and 290k OOM-killed; no help (H4)
 drop_caches narrowed the hog's noise but didn't remove it (10,367-10,522 MiB, not monotonic in users). The wall is memory: 2.5 GB of slab at 280k on this box counts both ends, sockets dominate, RSS 164 MB of which SQLite's cache is 64. A stall burst of tcp pages then tips it over. f220565 on the scorer held 270k and died at 280k, so 260-270k is what I'd expect there; unchecked until scored.
-Summary against the brief's bar: 5-minute holds with 0 errors, final settings or within one knob of them: 260k passes on cap 3,000 (5 of 5 incl. E71-E72), 260k at cap 1,500 (1 of 1); baseline fails 210k at both caps and at 240k. Spin harness v2 220k 3/25 vs 925/2,440.
+Summary against the brief's bar: 5-minute holds with 0 errors, final settings or within one knob of them: 260k passes on cap 3,000 (4 of 4: k6 twice, k7 twice), 260k at cap 1,500 (1 of 1); baseline fails 210k at both caps and at 240k. Spin harness v2 220k 3/25 vs 925/2,440.
 Not done: the scorer itself. Every number here is Synteq. C is host.c 304 + sqlite_glue.c 146 lines; a WAT port of the VFS could cut that, not attempted.
 

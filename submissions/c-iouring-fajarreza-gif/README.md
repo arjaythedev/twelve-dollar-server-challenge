@@ -11,9 +11,10 @@ Unlike submissions that hack private B-tree headers (`sqlite3BtreeCursor`) or co
 | Component | Choice / Version |
 |---|---|
 | **Language / Compiler** | C11, GCC 13+ (`-O3 -march=native`) |
-| **Event Loop** | Linux `io_uring` direct Linux ABI syscalls (zero external `liburing` dependency) |
-| **Direct Descriptors** | `IORING_REGISTER_FILES` + `IORING_FILE_INDEX_ALLOC` |
-| **Kernel Buffers** | `IORING_REGISTER_PBUF_RING` (provided buffer ring, 2 KB chunks) |
+| **Event Loop** | 6 io_uring rings (primary + 5 eventfd-multiplexed secondary rings, zero liburing) |
+| **Direct Descriptors** | 6 rings × 55,000 slots = **330,000 direct descriptors** (`IORING_FILE_INDEX_ALLOC`) |
+| **Kernel Buffers** | `IORING_REGISTER_PBUF_RING` (6 × 1,024 × 2 KB provided buffer rings) |
+| **Listen Sockets** | 6 sockets with `SO_REUSEPORT` on port 80 (combined 24,576 listen queue) |
 | **Database** | Official unmodified SQLite 3.53.2+ amalgamation compiled to `sqlite3.o` |
 | **Database API** | 100% public SQLite C API (`sqlite3.h`), persistent statements, zero B-tree hacks |
 | **Crypto** | Zero-alloc HMAC-SHA256 with precomputed key schedules (~83 ns / token) |
@@ -35,8 +36,8 @@ Unlike submissions that hack private B-tree headers (`sqlite3BtreeCursor`) or co
 4. **Group Commit for Durable Writes:**
    All write requests (`POST /posts`, `POST /posts/:id/like`) arriving in the same event loop cycle are grouped within one `BEGIN IMMEDIATE` ... `COMMIT` transaction. Full WAL durability (`synchronous=NORMAL`) is preserved while avoiding disk I/O serialization bottlenecks.
 
-5. **Direct Descriptors & Multishot Accept:**
-   Multishot accept (`IORING_OP_ACCEPT` with `IORING_ACCEPT_MULTISHOT`) dynamically allocates slots in the registered file table (`IORING_FILE_INDEX_ALLOC`), eliminating descriptor table contention.
+5. **6 Rings & 330,000 Direct Descriptors:**
+   While Linux enforces a 65,535 direct-descriptor limit per single ring (`LimitNOFILE`), the server opens 6 `io_uring` rings multiplexed by a single thread via `eventfd` and 6 `SO_REUSEPORT` listeners. This scales live connection capacity to 330,000 simultaneous keep-alive sockets without reconnection overhead. Multishot accept (`IORING_OP_ACCEPT` with `IORING_ACCEPT_MULTISHOT`) dynamically allocates slots in each ring's registered file table (`IORING_FILE_INDEX_ALLOC`).
 
 6. **Provided Buffer Rings (`IORING_REGISTER_PBUF_RING`):**
    Inbound socket data is placed directly by the kernel into a provided buffer ring. Buffers are returned with an atomic store (`STORE_REL(&br->tail)`), requiring zero system calls for buffer management.

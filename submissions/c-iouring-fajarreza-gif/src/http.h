@@ -122,26 +122,52 @@ static inline int http_parse_request(const char *buf, size_t len, http_request_t
     return 0;
 }
 
-/* Fast JSON string escaper */
+/* Fast JSON string escaper using 256-byte sparse index table -> content table */
+static const char JSON_ESC_CONTENT[40][7] = {
+    "",         // 0: plain byte
+    "\\\"",     // 1: "
+    "\\\\",     // 2: \
+    "\\b",      // 3: \b
+    "\\f",      // 4: \f
+    "\\n",      // 5: \n
+    "\\r",      // 6: \r
+    "\\t",      // 7: \t
+    "\\u0000", "\\u0001", "\\u0002", "\\u0003", "\\u0004", "\\u0005", "\\u0006", "\\u0007",
+    "\\u0008", "\\u0009", "\\u000a", "\\u000b", "\\u000c", "\\u000d", "\\u000e", "\\u000f",
+    "\\u0010", "\\u0011", "\\u0012", "\\u0013", "\\u0014", "\\u0015", "\\u0016", "\\u0017",
+    "\\u0018", "\\u0019", "\\u001a", "\\u001b", "\\u001c", "\\u001d", "\\u001e", "\\u001f"
+};
+
+static const uint8_t JSON_ESC_MAP[256] = {
+     8,  9, 10, 11, 12, 13, 14, 15,  3,  7,  5, 19,  4,  6, 22, 23,
+    24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39,
+     0,  0,  1,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+     0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+     0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+     0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  2,  0,  0,  0,
+     0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+     0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+     0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+     0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+     0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+     0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+     0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+     0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+     0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+     0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0
+};
+
 static inline size_t json_escape_string(const char *src, size_t src_len, char *dst, size_t dst_cap) {
     size_t o = 0;
     for (size_t i = 0; i < src_len && o + 6 < dst_cap; i++) {
         unsigned char c = (unsigned char)src[i];
-        switch (c) {
-            case '"':  dst[o++] = '\\'; dst[o++] = '"'; break;
-            case '\\': dst[o++] = '\\'; dst[o++] = '\\'; break;
-            case '\b': dst[o++] = '\\'; dst[o++] = 'b'; break;
-            case '\f': dst[o++] = '\\'; dst[o++] = 'f'; break;
-            case '\n': dst[o++] = '\\'; dst[o++] = 'n'; break;
-            case '\r': dst[o++] = '\\'; dst[o++] = 'r'; break;
-            case '\t': dst[o++] = '\\'; dst[o++] = 't'; break;
-            default:
-                if (c < 0x20) {
-                    o += snprintf(dst + o, dst_cap - o, "\\u%04x", c);
-                } else {
-                    dst[o++] = (char)c;
-                }
-                break;
+        uint8_t idx = JSON_ESC_MAP[c];
+        if (__builtin_expect(idx == 0, 1)) {
+            dst[o++] = (char)c;
+        } else {
+            size_t len = (idx < 8) ? 2 : 6;
+            memcpy(dst + o, JSON_ESC_CONTENT[idx], len);
+            o += len;
         }
     }
     return o;

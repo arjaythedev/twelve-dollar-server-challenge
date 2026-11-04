@@ -123,6 +123,9 @@
 | C++ 0.1.0 ([WAL prefix, late ramp](src/runs/429574d/wal-prefix-350000/summary.json)) | 350,000 | 60 s | 3,577,417 | 27,518.57 | 19.501 ms | 207.826 ms | 1,793.24 ms | 0% | 22.92 us | 972.70 MiB |
 | C++ 0.1.0 ([WAL incremental ranges](src/runs/429574d/wal-ranges-350000/summary.json)) | 350,000 | 60 s | 3,623,942 | 27,876.33 | 21.822 ms | 256.502 ms | 2,283.99 ms | 0% | 22.72 us | 975.56 MiB |
 | C++ 0.1.0 ([WAL prefix, repeat](src/runs/429574d/wal-prefix-350000-repeat/summary.json)) | 350,000 | 60 s | 3,628,407 | 27,910.68 | 15.379 ms | 22.006 ms | 53.36 ms | 0% | 22.03 us | 951.92 MiB |
+| C++ 0.1.0 ([POLL_FIRST, late ramp](src/runs/701bae9/receive-pollfirst-350000/summary.json)) | 350,000 | 60 s | 3,551,100 | 27,315.98 | 19.677 ms | 72.775 ms | 1,332.56 ms | 0% | 23.06 us | 954.14 MiB |
+| C++ 0.1.0 ([Receive hint](src/runs/701bae9/receive-hint-350000/summary.json)) | 350,000 | 60 s | 3,619,164 | 27,839.62 | 21.647 ms | 596.224 ms | 5,252.42 ms | 0% | 23.74 us | 981.70 MiB |
+| C++ 0.1.0 ([POLL_FIRST, repeat](src/runs/701bae9/receive-pollfirst-350000-repeat/summary.json)) | 350,000 | 60 s | 3,627,168 | 27,901.24 | 16.765 ms | 28.216 ms | 169.15 ms | 0% | 23.41 us | 948.54 MiB |
 
 WAL coalescing, 350k short pair: cap 32, CQ 128/8 ms, seed 20261104, fresh seed copies, telemetry/perf off. CPU/request -1.84%, kernel CPU -2.04%; hold p99 20.90 to 20.96 ms. [Data](src/runs/79cd8ce/wal-coalescing-350000-comparison/summary.json).
 
@@ -149,6 +152,20 @@ Deferred savepoint RELEASE, production Store, fresh seeded DB per pass, 20k writ
 WAL range advice, four reversed native pairs: repeated-prefix calls 1,000 to 1, helper CPU -41.7%; growing-prefix CPU -6.0%. Release/profile contracts passed. The 350k control repeat versus candidate used 22.03/22.72 us/request, hold p99 22.77/408.79 ms and RAM 951.92/975.56 MiB, zero errors. Initial control activated late. No full-server gain; candidate discarded. [Native](src/runs/429574d/wal-range-native/summary.json), [350k](src/runs/429574d/wal-ranges-350000-comparison/summary.json).
 
 Borrowed create body, four reversed native pairs per workload, cap 32, 20k writes per pass: median foreground CPU +12.6% valid (all pairs slower), -3.0% mixed (inconsistent). WAL-range candidate fixed in both. Equal outcomes/rows/timestamps; lifetime, Unicode and rollback tests passed. Discarded; retain TRANSIENT binding. [Data](src/runs/429574d/create-body-borrow-native/summary.json).
+
+Receive hint, four reversed native TCP pairs, telemetry off: queued-stream issuer CPU -17.8%, kernel CPU -26.5% per 4 KiB; all pairs improved. Empty pingpong inconclusive. Counted pass: POLL_FIRST 1,026 to 2 with equal receives; Connection 56 bytes. Five off-mode contracts and profile I/O lifetimes passed. Producer CPU excluded; no HTTP/p99 claim. [Data](src/runs/701bae9/receive-hint-native/summary.json).
+
+Receive hint, matched 350k pair, cap 32 / CQ 128/8 ms fixed: CPU 23.41 to 23.74 us/request (+1.4%), kernel CPU 17.46 to 17.86 (+2.3%), hold p99 30.16 to 1061.67 ms, zero errors. Same seed/generator, fresh seed copies, telemetry/perf off. Initial control missed activation (31.179s); one valid repeat replaced it. Hint removed; tail cause unresolved. [Data](src/runs/701bae9/receive-hint-350000-comparison/summary.json).
+
+Multishot receive, WSL 6.18.54.1, four reversed native pairs: queued-stream issuer CPU -60.4%, kernel CPU -61.3% per 4 KiB; all pairs improved. Pingpong inconclusive. Counted pingpong receive SQEs 128 to 1, equal bytes/ACKs, 4-MiB pool. Six contracts passed after adapting the old fdinfo test to sparse listings. Producer/setup/teardown CPU excluded; isolated backend, no HTTP or Linux 6.8 claim. [Data](src/runs/701bae9/multishot-receive-native-v2/summary.json).
+
+Multishot profile, same 6.18 kernel, 9,819 samples, no loss, one actor PID per capture: sampled stream io_uring CPU 0.616 to 0.102 us/4 KiB, network CPU 1.043 to 0.588. Pingpong network cost stays near 27 us/request; 100k receive SQEs become one, but 100k reply sends and loopback peer wakeups remain. Instrumented single-socket profiles, separate counted passes, producer excluded. [Data](src/runs/701bae9/multishot-receive-profile-all/summary.json).
+
+Multishot, 16/128/512 sockets, CQ 128/8 ms, four rotated pairs: median paired CPU change, stream -62.2/-40.8/-42.8%, pingpong -31.0/-8.5/-4.8%. All stream pairs improved; 512-socket pingpong was mixed. The 128-socket stream took 56.1% longer in the median pair. The 16-socket case is sensitive to the CQ wait target. Same useful work and 4-MiB pool; actor CPU only, telemetry/perf off, WSL 6.18, no HTTP integration. [Data](src/runs/701bae9/multishot-receive-many/summary.json).
+
+Native multishot wait policies, four rotated rounds: at 128 sockets, ready-first stream wall 275.66 to 87.26 ms; pingpong p99 16.83 to 9.21 ms, actor CPU 4.72 to 4.67 us/request. Wait-one reaches 0.83 ms at 5.56 us/request. Same drain/pool budget; raw pingpong RTT, no HTTP claim. Six suites passed. [Data](src/runs/701bae9/multishot-wait-policies/summary.json).
+
+Primary-ready HTTP A/B, 350k/60s hold, WSL 6.18: CPU 20.95 to 22.38 us/request (+6.9%), hold p95 10.76 to 14.23 ms, hold p99 18.11 to 58.87 ms, peak RAM 1789.23 to 1854.99 MiB. Same seed/generator, fresh seeded copies, telemetry/perf off, zero errors. Remove the production candidate; retain experiments and results. [Data](src/runs/701bae9/ready-cq-http-comparison/summary.json).
 
 CQ rotation and dispatch/wait cleanup: 70k A/B CPU/request -1.2%. Matched 350k/5m B/A: CPU/request +0.5%, hold p99 6.12 to 6.05 ms, peak RAM +47.67 MiB. Same seed, fresh seeded databases and generator; zero errors or memory-limit events. Rotation removed after no clear gain; accept/wait cleanup retained. [Data](src/runs/legacy/benchmark-cq-rotation/summary.json).
 

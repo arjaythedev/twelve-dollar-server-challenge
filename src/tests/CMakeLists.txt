@@ -5,6 +5,10 @@ target_link_options(transport_tests PRIVATE -Wl,--wrap=sqlite3_step)
 tds_add_executable(io_lifetime_tests io_lifetimes.cpp)
 target_link_libraries(io_lifetime_tests PRIVATE transport uring llhttp_static yyjson)
 
+tds_add_executable(receive_backend_tests receive_backend.cpp)
+target_link_libraries(receive_backend_tests PRIVATE transport uring Threads::Threads)
+target_compile_definitions(receive_backend_tests PRIVATE TDS_RECEIVE_COUNTS=1)
+
 tds_add_executable(checkpoint_tests checkpoint.cpp)
 target_link_libraries(checkpoint_tests PRIVATE api sqlite)
 target_compile_definitions(checkpoint_tests PRIVATE TDS_TELEMETRY_LEVEL=${telemetry_level})
@@ -70,6 +74,7 @@ target_link_options(load_activation_tests PRIVATE
 add_test(NAME io_uring_operations COMMAND server --self-test)
 add_test(NAME transport_lifetimes COMMAND transport_tests)
 add_test(NAME io_lifetime_contract COMMAND io_lifetime_tests)
+add_test(NAME receive_backend_contract COMMAND receive_backend_tests)
 add_test(NAME checkpoint_lifetimes COMMAND checkpoint_tests)
 add_test(NAME group_commit_contract COMMAND group_commit_tests)
 add_test(NAME post_writer_bytes COMMAND post_writer_tests)
@@ -86,7 +91,7 @@ add_test(NAME load_generator_conformance COMMAND load_tests)
 add_test(NAME load_generator_latencies COMMAND latency_tests)
 add_test(NAME load_generator_activation COMMAND load_activation_tests)
 
-set_tests_properties(io_uring_operations transport_lifetimes io_lifetime_contract
+set_tests_properties(io_uring_operations transport_lifetimes io_lifetime_contract receive_backend_contract
     PROPERTIES LABELS "native;transport;integration")
 set_tests_properties(checkpoint_lifetimes group_commit_contract application_contract btree_feed btree_post_contract wal_vfs_contract
     PROPERTIES LABELS "native;database;integration")

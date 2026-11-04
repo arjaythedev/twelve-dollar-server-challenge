@@ -21,6 +21,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <exception>
+#include <fcntl.h>
 #include <filesystem>
 #include <fstream>
 #include <future>
@@ -1239,6 +1240,36 @@ void exercise(std::uint16_t port)
 
 std::optional<std::size_t> registered_files(const std::vector<std::filesystem::path> &infos)
 {
+    static const bool sparse_listing = [] {
+        // Cursed procfs ABI: 6.18 hides holes, while older kernels print <none> for each one
+        // Probe a quiet two-slot table so an empty sparse table is not mistaken for a failed lock
+        tds::net::Ring probe(2, true);
+        tds::net::Descriptor file(::open("/dev/null", O_RDONLY | O_CLOEXEC));
+        const int descriptor = file.get();
+        require(io_uring_register_files_update(&probe.queue, 0, &descriptor, 1) == 1,
+                "fdinfo format probe registration");
+        std::ifstream stream("/proc/self/fdinfo/" + std::to_string(probe.queue.ring_fd));
+        bool table = false;
+        unsigned rows = 0;
+        for (std::string line; std::getline(stream, line);)
+        {
+            if (line.starts_with("UserFiles:"))
+            {
+                table = true;
+            }
+            else if (line.starts_with("UserBufs:"))
+            {
+                break;
+            }
+            else if (table)
+            {
+                ++rows;
+            }
+        }
+        require(rows == 1 || rows == 2, "unrecognized registered-file listing");
+
+        return rows == 1;
+    }();
     std::size_t count = 0;
     for (const auto &info : infos)
     {
@@ -1271,8 +1302,8 @@ std::optional<std::size_t> registered_files(const std::vector<std::filesystem::p
                 }
             }
         }
-        // fdinfo omits table entries when its nonblocking kernel lock attempt fails.
-        if (!files || observed != expected)
+        // Old kernels can print the header without rows when their trylock fails
+        if (!files || (!sparse_listing && observed != expected) || observed > expected)
         {
             return std::nullopt;
         }

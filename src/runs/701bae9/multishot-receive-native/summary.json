@@ -1,0 +1,33 @@
+{
+  "measurement": {},
+  "schema_version": 1,
+  "anchor": "701bae959fb2e12f95652f78768643fc5ce0d30c",
+  "label": "multishot-receive-native",
+  "kind": "probe",
+  "started_at": "2026-11-04T21:42:12.432826+00:00",
+  "status": "failed",
+  "finished_at": "2026-11-04T21:43:20.192666+00:00",
+  "exit_code": 1,
+  "error": "CalledProcessError(8, ('docker', 'run', '--name=td-multishot-8f4862a9', '--network=none', '--cpus=1', '--memory=2g', '--memory-swap=2g', '--security-opt', 'seccomp=D:\\\\Projects\\\\Optimization Problems\\\\twelve-dollar-server-challenge\\\\src\\\\docker\\\\seccomp.json', '--mount', 'type=bind,source=C:\\\\Users\\\\Admin\\\\AppData\\\\Local\\\\Temp\\\\twelve-dollar-source-7gygsisd\\\\source\\\\src,target=/source,readonly', '--entrypoint=sh', 'bbb1c093335ca96e84aae7f297a2ceebf42faab292ea35f63f94283bb115a779', '-ec', 'set -eu\\nfind /source/server /source/tests /source/benchmarks /source/cmake -type f -exec sh -c \\'\\nfor source do\\n    target=/build/${source#/source/}\\n    mkdir -p \"$(dirname \"$target\")\"\\n    cmp -s \"$source\" \"$target\" || cp \"$source\" \"$target\"\\ndone\\' sh {} +\\ncp /source/CMakeLists.txt /build/CMakeLists.txt\\ncmake -S /build -B /build/out -DBUILD_TESTING=ON -DTDS_TELEMETRY=off -DTDS_SANITIZERS=OFF\\ncmake --build /build/out --target server receive_probe receive_count_probe receive_backend_tests io_lifetime_tests transport_tests parser_tests session_tests --parallel 2\\nctest --test-dir /build/out --output-on-failure -R \\'^(receive_backend_contract|io_uring_operations|io_lifetime_contract|transport_lifetimes|parser_contract|session_contract)$\\'\\nmkdir /tmp/multishot-results\\ncp /build/out/server /tmp/multishot-results/server\\ncp /build/out/benchmarks/receive_probe /tmp/multishot-results/probe\\ncp /build/out/benchmarks/receive_count_probe /tmp/multishot-results/counts\\nuname -r > /tmp/multishot-results/kernel.txt\\nobjdump -d -C /tmp/multishot-results/probe > /tmp/multishot-results/probe.asm\\nfor case in stream idle; do\\n    if [ \"$case\" = stream ]; then units=1024; else units=128; fi\\n    for mode in one multi; do\\n        /tmp/multishot-results/counts \"$mode\" \"$case\" \"$units\" > \"/tmp/multishot-results/$case-$mode-counts.json\"\\n    done\\ndone\\nfor round in 0 1 2 3; do\\n    if [ $((round % 2)) = 0 ]; then modes=\"one multi\"; else modes=\"multi one\"; fi\\n    for case in stream idle; do\\n        if [ \"$case\" = stream ]; then units=65536; else units=10000; fi\\n        for mode in $modes; do\\n            /tmp/multishot-results/probe \"$mode\" \"$case\" \"$units\" > \"/tmp/multishot-results/$round-$case-$mode.json\"\\n        done\\n    done\\ndone\\n'))",
+  "secondary_errors": [],
+  "workload": {
+    "kind": "isolated_tcp_receive",
+    "stream_4k_units": 65536,
+    "idle_requests": 10000,
+    "pairs": 4
+  },
+  "instruments": {
+    "server_telemetry": "off",
+    "perf": "off",
+    "counts_in_separate_binary": true
+  },
+  "provenance": {
+    "source": {
+      "base_commit": "701bae959fb2e12f95652f78768643fc5ce0d30c",
+      "patch_sha256": "d6436f15ed3f2c17fc5b484acd2bfc39efc47ecb2c0b487fd5906d63907bd4ec",
+      "source_sha256": "82a1de7399442483d08b1492ad4d3cfec757a90d6631d58364e97419a233f75d",
+      "patch": "source.patch"
+    },
+    "binary": null
+  }
+}

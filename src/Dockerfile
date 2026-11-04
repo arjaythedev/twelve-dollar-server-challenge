@@ -24,6 +24,8 @@ COPY benchmarks/CMakeLists.txt ./benchmarks/CMakeLists.txt
 COPY benchmarks/group_commit.cpp ./benchmarks/group_commit.cpp
 COPY benchmarks/response_reuse.cpp ./benchmarks/response_reuse.cpp
 COPY benchmarks/retry_receive.cpp ./benchmarks/retry_receive.cpp
+COPY benchmarks/receive.cpp ./benchmarks/receive.cpp
+COPY benchmarks/receive_backend.hpp ./benchmarks/receive_backend.hpp
 COPY benchmarks/telemetry.cpp ./benchmarks/telemetry.cpp
 COPY benchmarks/history.cpp ./benchmarks/history.cpp
 COPY benchmarks/wal_advice.cpp ./benchmarks/wal_advice.cpp

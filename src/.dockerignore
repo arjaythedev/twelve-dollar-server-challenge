@@ -11,6 +11,8 @@ benchmarks/*
 !benchmarks/group_commit.cpp
 !benchmarks/response_reuse.cpp
 !benchmarks/retry_receive.cpp
+!benchmarks/receive.cpp
+!benchmarks/receive_backend.hpp
 !benchmarks/telemetry.cpp
 !benchmarks/history.cpp
 !benchmarks/wal_advice.cpp

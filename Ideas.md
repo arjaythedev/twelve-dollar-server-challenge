@@ -8,6 +8,10 @@ Unchecked items are experiments; checked items include completed work and discar
 
 - [x] Profile the selected policy at 350k for five minutes ([results](src/runs/d297ca9/baseline-full-profile-350000-5m-analysis/summary.json)): 47.2% networking, 19.1% database/rows, 10.0% io_uring and 9.2% filesystem CPU. No lost perf records; Docker loopback costs may differ from a real NIC.
 
+- [x] Isolate the 128-socket multishot stall ([data](src/runs/701bae9/multishot-128-analysis/summary.json)): a ready CQE waits 8.03 ms at target 128; changing only the target to 32 cuts native wall time from 309 to 58 ms. Keep kernel wake minimum separate from the user-space drain budget. Exact task-work and buffer-return ages remain unmeasured.
+
+- [x] Test primary-ready draining in HTTP ([pair](src/runs/701bae9/ready-cq-http-comparison/summary.json)): CPU +6.9%, hold p99 18.11 to 58.87 ms, zero errors. Remove the candidate after no demonstrated gain; one pair does not establish a universal regression.
+
 - [ ] Trace enter duration, requested/returned CQ sizes, pending-SQ age and completion-to-dispatch delay only where needed to explain queue behavior. Existing send timing combines submission, kernel and CQ-service waits; CPU samples exclude blocked time. Exact CQ-post timing needs kernel tracing.
 
 - [ ] Compare one versus two generator workers if higher loads exhaust the optimized single worker. Use a shared start gate, disjoint VUs/source IPs and fixed worker seeds; merge latency samples before calculating percentiles.
@@ -65,7 +69,9 @@ Unchecked items are experiments; checked items include completed work and discar
 
 - [ ] Compare process-local `TCP_DEFER_ACCEPT` for churn and explicitly uncorked `TCP_CORK` for deliberate coalescing ([TCP options](https://man7.org/linux/man-pages/man7/tcp.7.html)).
   Accepted sockets use direct descriptors: never pass a fixed-file slot to `setsockopt()`. Check supported io_uring socket commands or listener-option inheritance first. Measure packets, CPU and p99; the existing single header/body send already coalesces output, corking can delay it, and deferred accept mainly affects establishment. Keep system-wide kernel settings unchanged.
-  Separately skip poll-first when `IORING_CQE_F_SOCK_NONEMPTY` reports unread data; retain the idle path and test fragments, pipelining and terminal completions.
+
+- [x] Discard the `SOCK_NONEMPTY` receive hint after the [350k pair](src/runs/701bae9/receive-hint-350000-comparison/summary.json). Restore unconditional POLL_FIRST for ordinary receives; retain the explicit no-poll ENOBUFS retry.
+  Four reversed native pairs: queued-stream CPU -17.8%, kernel CPU -26.5%; empty pingpong inconclusive. Counted pass: 1,026 to 2 poll-first SQEs; Connection stays 56 bytes, lifetime tests passed. The [350k pair](src/runs/701bae9/receive-hint-350000-comparison/summary.json) showed CPU +1.4%, kernel CPU +2.3% and hold p99 30.16 to 1061.67 ms, zero errors. No HTTP gain confirmed; this single pair does not establish the cause of the tail spike.
 
 - [ ] Compare process-local `SO_RCVBUF` and `SO_SNDBUF` caps only if charged socket-buffer bytes grow; healthy holds mostly charge fixed kernel/slab memory. Measure retransmits, zero-window events and p99; configured caps are not preallocated bytes and explicit settings disable TCP autotuning ([Linux](https://github.com/torvalds/linux/blob/v6.8/Documentation/networking/ip-sysctl.rst)).
   Use the same direct-descriptor-safe option path as the TCP comparison above.
@@ -84,6 +90,8 @@ Unchecked items are experiments; checked items include completed work and discar
   `M_slots ~= rings*slots_per_ring*sizeof(slot)` plus connection storage. Reuse slab slots only after all operations and cancellation completions are finished; preserve stable addresses or validate generation-tagged handles.
 
 - [ ] Inspect field offsets and padding in Connection, Exchange and operation records before changing layouts. At 300k connections, saving 8 bytes each saves only 2.29 MiB; retain stable addresses and terminal-CQE ownership.
+
+- [ ] Compare AoS, SoA and small AoSoA blocks for hot connection/operation state when designing independent RX/TX. Group fields consumed by one CQE; use contiguous arrays for measured bulk scans. Keep cold parser/reply storage separate and preserve stable operation identities. Measure bytes, cache misses, CPU and p99 before coupling layout changes to SIMD.
 
 - [ ] Compare receive-pool sizes such as 256 x 4 KiB and 512 x 2 KiB against 1,024 x 4 KiB.
   `M_pool ~= K*B`; measure buffer occupancy, extra receives for fragmented requests, `ENOBUFS`, rearm work and latency during bursts. Reducing the current 4-MiB pool alone saves little of the full server's memory.
@@ -155,10 +163,17 @@ Unchecked items are experiments; checked items include completed work and discar
   Recognize a proven subset without consuming or mutating parser state before fallback. Preserve content-length/chunked framing, header handling, path decoding, auth-first errors, fragments and pipelining; five routes alone do not make the HTTP grammar small.
   Measure saved parsing and allocations against the extra checks and duplicated protocol logic. Keep the current llhttp parser path as the reference.
 
-- [ ] Test multishot receive after the simpler accept and work-budget comparisons.
-  Start with fixed-work native messages against the current one-shot RECV/POLL_FIRST path; compare SQEs/CQEs, CPU, buffer pressure and memory before HTTP integration. Generator think times are 3-8 seconds, so simply skipping POLL_FIRST mostly targets fragments and pipelines.
+- [x] Compare isolated multishot against one-shot POLL_FIRST ([native](src/runs/701bae9/multishot-receive-native-v2/summary.json)). Under WSL 6.18.54.1, four pairs improved queued-stream CPU 60.4% and kernel CPU 61.3%; pingpong was inconclusive. Counted pingpong receive SQEs fell 128 to 1, with equal bytes/ACKs and the same 4-MiB pool. Six contracts passed; production integration remains open.
+  The [CPU profile](src/runs/701bae9/multishot-receive-profile-all/summary.json) removes repeated receive preparation and polling from the stream. Pingpong still sends 100k replies; its dominant unlock samples are loopback peer wakeups under SEND. Compare multiple connections before projecting this onto HTTP or a remote client.
+
+- [x] Compare multiple connections and CQ 128/8-ms batching ([data](src/runs/701bae9/multishot-receive-many/summary.json)). At 128/512 sockets, median paired stream CPU fell 40.8/42.8%; pingpong fell 8.5/4.8%, with mixed signs at 512. The 128-socket stream took longer despite lower CPU. Keep equal-work checks and shared-pool lifetime tests; HTTP gains remain unmeasured.
+
+- [x] Compare native ready-first policies ([data](src/runs/701bae9/multishot-wait-policies/summary.json)): at 128 sockets, ready-first cuts stream wall time from 276 to 87 ms. Pingpong p99 falls from 16.83 to 9.21 ms at 4.72 to 4.67 us/request. Wait-one reaches 0.83 ms but costs 5.56 us/request; keep this as a measured tradeoff, not an HTTP gain.
+
+- [ ] Prototype independent RX/TX with bounded input while replies are pending; compare CPU and tails before keeping it. Preserve the current parser, Reply, write batching and SQLite paths.
   It needs separate stable receive/send operation identities, terminal-CQE tracking and bounded `ENOBUFS` rearming; the current one-operation-per-connection model cannot track concurrent receive/send operations.
   Bound queued input while sends are outstanding, preserve HTTP response order and return each selected buffer exactly once, including shutdown and cancellation.
+  Compare [Rust's stable wire/output ownership](submissions/rust-iouring-kensac/src/main.rs) with [C's multishot poll and gated reads](submissions/c-iouring-pavlyhalim/src/server.c). Their current sources use different receive strategies; the local leaderboard may refer to newer scored revisions.
 
 - [ ] Consider zero-copy sends only for measured large responses; include notification CQEs, retained bytes and longer buffer lifetimes. Keep partial-send and cancellation ownership explicit.
 

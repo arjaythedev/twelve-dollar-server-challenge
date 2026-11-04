@@ -1,0 +1,132 @@
+{
+  "measurement": {
+    "variants": [
+      {
+        "run": "receive-pollfirst-350000-repeat",
+        "summary_sha256": "d06161130201368464484f4755e638519f04b4f654ab3ae564a174bc82cfbb1e",
+        "receive_hint": false,
+        "status": "passed",
+        "performance_passed": true,
+        "requests": 3627168,
+        "cpu_us_per_request": 23.40726043017583,
+        "user_cpu_us_per_request": 5.9459242031248625,
+        "kernel_cpu_us_per_request": 17.461335951353785,
+        "hold_requests": 2222834,
+        "hold_rps": 37047.23333333333,
+        "hold_cpu_us_per_request_approx": 20.446770541166035,
+        "hold_kernel_us_per_request_approx": 14.786263801169524,
+        "hold_namespace_out_segments_approx": 6802085.570468506,
+        "hold_namespace_segments_per_request_approx": 3.0600960622648863,
+        "hold_retrans_segments_approx": 0.0,
+        "p95_ms": 16.7651551,
+        "p99_ms": 28.21562465,
+        "hold_p99_ms": 30.16485322,
+        "max_ms": 169.149369,
+        "server_peak_bytes": 994619392,
+        "error_rate": 0.0,
+        "binary": {
+          "server": {
+            "image_id": "sha256:875550d6408956fa664f0c05418a542f56dac05abc0ac42049e20f834ffe14f8",
+            "sha256": "5c6c8150ce9e38c9c57d7aff4071d6e0fa0a02ea3a86255e2d63277849db828b"
+          },
+          "generator": {
+            "image_id": "sha256:cf6f3a47be9e38b08f182de5bc2d7c907b6bb5af71ca73620524a17db896f49d",
+            "sha256": "f2634e9500b5017ee4c3ca77329ea8a98c54544b92e972ba9ba637fba69a4a1e"
+          }
+        }
+      },
+      {
+        "run": "receive-hint-350000",
+        "summary_sha256": "5096e288cebec87ed298de4a8fbc499c93cbbb51a7540030f9a28ea417876642",
+        "receive_hint": true,
+        "status": "passed",
+        "performance_passed": true,
+        "requests": 3619164,
+        "cpu_us_per_request": 23.738450647718643,
+        "user_cpu_us_per_request": 5.880035831479314,
+        "kernel_cpu_us_per_request": 17.858415092546235,
+        "hold_requests": 2222022,
+        "hold_rps": 37033.7,
+        "hold_cpu_us_per_request_approx": 20.89533285926579,
+        "hold_kernel_us_per_request_approx": 15.26947199159348,
+        "hold_namespace_out_segments_approx": 6952568.59396789,
+        "hold_namespace_segments_per_request_approx": 3.1289377845799415,
+        "hold_retrans_segments_approx": 0.0,
+        "p95_ms": 21.6467451,
+        "p99_ms": 596.22400083,
+        "hold_p99_ms": 1061.66791555,
+        "max_ms": 5252.419388,
+        "server_peak_bytes": 1029386240,
+        "error_rate": 0.0,
+        "binary": {
+          "server": {
+            "image_id": "sha256:9d523d91c434f4d5c01db4e9a92803bfed571feaf20bca72ae9a5e242d3a96bb",
+            "sha256": "05642f896218ef9513485df3606811b8ceac464f9707066de05766b55ae03834"
+          },
+          "generator": {
+            "image_id": "sha256:cf6f3a47be9e38b08f182de5bc2d7c907b6bb5af71ca73620524a17db896f49d",
+            "sha256": "f2634e9500b5017ee4c3ca77329ea8a98c54544b92e972ba9ba637fba69a4a1e"
+          }
+        }
+      }
+    ],
+    "changes": {
+      "cpu_us_per_request_change_percent": 1.4149038010268677,
+      "user_cpu_us_per_request_change_percent": -1.1081266661778333,
+      "kernel_cpu_us_per_request_change_percent": 2.2740478867063096,
+      "hold_cpu_us_per_request_approx_change_percent": 2.193805213379063,
+      "hold_kernel_us_per_request_approx_change_percent": 3.2679532633912434,
+      "hold_namespace_segments_per_request_approx_change_percent": 2.2496588641110593
+    },
+    "all_runs_passed": true,
+    "same_seed_sha256": "283c965b2a82c902a74dfe2ee10e1361a6c850a7189a8b939e51d1509b156b22",
+    "same_generator_binary": true,
+    "only_changed_source_files": [
+      "src/server/net/connection.hpp",
+      "src/server/net/reactor.cpp"
+    ],
+    "native_contract": "../receive-hint-native/summary.json",
+    "native_binary_matches": true,
+    "fixed": {
+      "post_reader": "B-tree",
+      "wal_coalescing": true,
+      "write_cap": 32,
+      "cq_target": 128,
+      "cq_timeout_ms": 8
+    },
+    "limits": "One sequential local WSL6.6 A/B pair. Hold CPU/segments use linearly interpolated 2s server snapshots at 30/90s. Namespace TCP segment counters include both generator and server, not physical-NIC packet counts. Whole-run CPU includes connection setup and teardown. Initial A activated late; primary pair is B followed by one A repeat with the original frozen image/source. No repeated ABBA comparison. Native performance gains came from queued streams, unlike this closed-loop HTTP workload.",
+    "initial_control": {
+      "summary": "../receive-pollfirst-350000/summary.json",
+      "summary_sha256": "2ad91c7c674437c3a6add6bef68863322bccd587eabdf05d777d5f2b38c1b208",
+      "status": "failed",
+      "reason": "Target reached at 31.179s, outside 30.100s activation deadline; retained as an invalid attempt",
+      "included_in_primary_pair": false
+    }
+  },
+  "schema_version": 1,
+  "anchor": "701bae959fb2e12f95652f78768643fc5ce0d30c",
+  "label": "receive-hint-350000-comparison",
+  "kind": "comparison",
+  "started_at": "2026-11-04T21:16:15.598360+00:00",
+  "status": "passed",
+  "finished_at": "2026-11-04T21:16:15.601870+00:00",
+  "exit_code": 0,
+  "error": null,
+  "secondary_errors": [],
+  "workload": {
+    "generator": "cpp",
+    "vus": 350000,
+    "ramp": "30s",
+    "hold": "60s",
+    "seed": 20261104
+  },
+  "instruments": {
+    "server_telemetry": "off",
+    "perf": "off",
+    "client_diagnostics": false
+  },
+  "provenance": {
+    "source": null,
+    "binary": null
+  }
+}

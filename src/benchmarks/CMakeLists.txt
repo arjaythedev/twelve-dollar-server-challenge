@@ -32,6 +32,14 @@ target_compile_definitions(response_reuse_probe PRIVATE TDS_RESPONSE_REUSE=1)
 tds_add_executable(retry_receive_probe EXCLUDE_FROM_ALL retry_receive.cpp)
 target_link_libraries(retry_receive_probe PRIVATE transport uring)
 
+tds_add_executable(receive_probe EXCLUDE_FROM_ALL receive.cpp)
+target_link_libraries(receive_probe PRIVATE transport uring)
+target_compile_definitions(receive_probe PRIVATE TDS_RECEIVE_COUNTS=0)
+
+tds_add_executable(receive_count_probe EXCLUDE_FROM_ALL receive.cpp)
+target_link_libraries(receive_count_probe PRIVATE transport uring)
+target_compile_definitions(receive_count_probe PRIVATE TDS_RECEIVE_COUNTS=1)
+
 if(TDS_TELEMETRY STREQUAL "profile")
     tds_add_executable(telemetry_probe EXCLUDE_FROM_ALL telemetry.cpp)
     target_link_libraries(telemetry_probe PRIVATE transport api sqlite)

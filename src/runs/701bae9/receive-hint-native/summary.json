@@ -1,0 +1,469 @@
+{
+  "measurement": {
+    "cases": {
+      "stream": {
+        "paired_cpu_change_percent": [
+          -19.750148205896203,
+          -20.681078817836706,
+          -13.429271007424104,
+          -15.76779822795842
+        ],
+        "paired_kernel_cpu_change_percent": [
+          -25.178325616318354,
+          -27.783929894929592,
+          -30.563863963664563,
+          -7.0189033023380425
+        ],
+        "control_cpu_ns_per_unit": [
+          2091.745407104492,
+          2121.506332397461,
+          2147.113494873047,
+          2176.685791015625
+        ],
+        "candidate_cpu_ns_per_unit": [
+          1678.6225891113281,
+          1682.7559356689453,
+          1858.7718048095703,
+          1833.4703674316406
+        ],
+        "control_kernel_ns_per_unit": [
+          1828.9947509765625,
+          1749.9542236328125,
+          1652.89306640625,
+          1595.03173828125
+        ],
+        "candidate_kernel_ns_per_unit": [
+          1368.4844970703125,
+          1263.7481689453125,
+          1147.705078125,
+          1483.0780029296875
+        ],
+        "median_cpu_change_percent": -17.75897321692731,
+        "median_kernel_cpu_change_percent": -26.481127755623973
+      },
+      "idle": {
+        "paired_cpu_change_percent": [
+          0.01846490634629383,
+          -1.3456961938545065,
+          -0.15333181955643482,
+          -3.157556522778482
+        ],
+        "paired_kernel_cpu_change_percent": [
+          -2.566813460647277,
+          -0.7448449480631503,
+          3.934708506624429,
+          -3.660961420456188
+        ],
+        "control_cpu_ns_per_unit": [
+          38014.2735,
+          37755.2751,
+          38726.5345,
+          39170.7699
+        ],
+        "candidate_cpu_ns_per_unit": [
+          38021.2928,
+          37247.2038,
+          38667.1544,
+          37933.9307
+        ],
+        "control_kernel_ns_per_unit": [
+          36036.9,
+          35591.3,
+          37052.3,
+          37970.9
+        ],
+        "candidate_kernel_ns_per_unit": [
+          35111.9,
+          35326.2,
+          38510.2,
+          36580.8
+        ],
+        "median_cpu_change_percent": -0.7495140067054706,
+        "median_kernel_cpu_change_percent": -1.6558292043552136
+      }
+    },
+    "counted_passes": {
+      "stream": {
+        "control": {
+          "case": "queued_stream",
+          "bytes": 4194304,
+          "receive_cqes": 1026,
+          "sends": 0,
+          "server_thread_cpu_ns": 4808158,
+          "server_user_us": 1042,
+          "server_system_us": 3770,
+          "wall_ns": 4915220,
+          "connection_bytes": 56,
+          "counted": 1,
+          "receive_sqes": 1026,
+          "poll_first_sqes": 1026
+        },
+        "candidate": {
+          "case": "queued_stream",
+          "bytes": 4194304,
+          "receive_cqes": 1026,
+          "sends": 0,
+          "server_thread_cpu_ns": 4877499,
+          "server_user_us": 0,
+          "server_system_us": 4880,
+          "wall_ns": 4966663,
+          "connection_bytes": 56,
+          "counted": 1,
+          "receive_sqes": 1026,
+          "poll_first_sqes": 2
+        }
+      },
+      "idle": {
+        "control": {
+          "case": "empty_pingpong",
+          "bytes": 4096,
+          "receive_cqes": 128,
+          "sends": 128,
+          "server_thread_cpu_ns": 5294114,
+          "server_user_us": 0,
+          "server_system_us": 5297,
+          "wall_ns": 10169782,
+          "connection_bytes": 56,
+          "counted": 1,
+          "receive_sqes": 128,
+          "poll_first_sqes": 128
+        },
+        "candidate": {
+          "case": "empty_pingpong",
+          "bytes": 4096,
+          "receive_cqes": 128,
+          "sends": 128,
+          "server_thread_cpu_ns": 5142677,
+          "server_user_us": 0,
+          "server_system_us": 5146,
+          "wall_ns": 9716324,
+          "connection_bytes": 56,
+          "counted": 1,
+          "receive_sqes": 128,
+          "poll_first_sqes": 128
+        }
+      }
+    },
+    "samples": [
+      {
+        "case": "queued_stream",
+        "bytes": 268435456,
+        "receive_cqes": 65538,
+        "sends": 0,
+        "server_thread_cpu_ns": 137084627,
+        "server_user_us": 17424,
+        "server_system_us": 119865,
+        "wall_ns": 149335914,
+        "connection_bytes": 56,
+        "counted": 0,
+        "receive_sqes": 0,
+        "poll_first_sqes": 0,
+        "round": 0,
+        "mode": "control"
+      },
+      {
+        "case": "queued_stream",
+        "bytes": 268435456,
+        "receive_cqes": 65537,
+        "sends": 0,
+        "server_thread_cpu_ns": 110010210,
+        "server_user_us": 20329,
+        "server_system_us": 89685,
+        "wall_ns": 141457592,
+        "connection_bytes": 56,
+        "counted": 0,
+        "receive_sqes": 0,
+        "poll_first_sqes": 0,
+        "round": 0,
+        "mode": "candidate"
+      },
+      {
+        "case": "queued_stream",
+        "bytes": 268435456,
+        "receive_cqes": 65537,
+        "sends": 0,
+        "server_thread_cpu_ns": 139035039,
+        "server_user_us": 24353,
+        "server_system_us": 114685,
+        "wall_ns": 166477849,
+        "connection_bytes": 56,
+        "counted": 0,
+        "receive_sqes": 0,
+        "poll_first_sqes": 0,
+        "round": 1,
+        "mode": "control"
+      },
+      {
+        "case": "queued_stream",
+        "bytes": 268435456,
+        "receive_cqes": 65538,
+        "sends": 0,
+        "server_thread_cpu_ns": 110281093,
+        "server_user_us": 27464,
+        "server_system_us": 82821,
+        "wall_ns": 134058476,
+        "connection_bytes": 56,
+        "counted": 0,
+        "receive_sqes": 0,
+        "poll_first_sqes": 0,
+        "round": 1,
+        "mode": "candidate"
+      },
+      {
+        "case": "queued_stream",
+        "bytes": 268435456,
+        "receive_cqes": 65537,
+        "sends": 0,
+        "server_thread_cpu_ns": 140713230,
+        "server_user_us": 32392,
+        "server_system_us": 108324,
+        "wall_ns": 160115563,
+        "connection_bytes": 56,
+        "counted": 0,
+        "receive_sqes": 0,
+        "poll_first_sqes": 0,
+        "round": 2,
+        "mode": "control"
+      },
+      {
+        "case": "queued_stream",
+        "bytes": 268435456,
+        "receive_cqes": 65538,
+        "sends": 0,
+        "server_thread_cpu_ns": 121816469,
+        "server_user_us": 46604,
+        "server_system_us": 75216,
+        "wall_ns": 141384975,
+        "connection_bytes": 56,
+        "counted": 0,
+        "receive_sqes": 0,
+        "poll_first_sqes": 0,
+        "round": 2,
+        "mode": "candidate"
+      },
+      {
+        "case": "queued_stream",
+        "bytes": 268435456,
+        "receive_cqes": 65538,
+        "sends": 0,
+        "server_thread_cpu_ns": 142651280,
+        "server_user_us": 38123,
+        "server_system_us": 104532,
+        "wall_ns": 170081450,
+        "connection_bytes": 56,
+        "counted": 0,
+        "receive_sqes": 0,
+        "poll_first_sqes": 0,
+        "round": 3,
+        "mode": "control"
+      },
+      {
+        "case": "queued_stream",
+        "bytes": 268435456,
+        "receive_cqes": 65536,
+        "sends": 0,
+        "server_thread_cpu_ns": 120158314,
+        "server_user_us": 22966,
+        "server_system_us": 97195,
+        "wall_ns": 135931454,
+        "connection_bytes": 56,
+        "counted": 0,
+        "receive_sqes": 0,
+        "poll_first_sqes": 0,
+        "round": 3,
+        "mode": "candidate"
+      },
+      {
+        "case": "empty_pingpong",
+        "bytes": 320000,
+        "receive_cqes": 10000,
+        "sends": 10000,
+        "server_thread_cpu_ns": 380142735,
+        "server_user_us": 19777,
+        "server_system_us": 360369,
+        "wall_ns": 788987922,
+        "connection_bytes": 56,
+        "counted": 0,
+        "receive_sqes": 0,
+        "poll_first_sqes": 0,
+        "round": 0,
+        "mode": "control"
+      },
+      {
+        "case": "empty_pingpong",
+        "bytes": 320000,
+        "receive_cqes": 10000,
+        "sends": 10000,
+        "server_thread_cpu_ns": 380212928,
+        "server_user_us": 29097,
+        "server_system_us": 351119,
+        "wall_ns": 779324968,
+        "connection_bytes": 56,
+        "counted": 0,
+        "receive_sqes": 0,
+        "poll_first_sqes": 0,
+        "round": 0,
+        "mode": "candidate"
+      },
+      {
+        "case": "empty_pingpong",
+        "bytes": 320000,
+        "receive_cqes": 10000,
+        "sends": 10000,
+        "server_thread_cpu_ns": 377552751,
+        "server_user_us": 21643,
+        "server_system_us": 355913,
+        "wall_ns": 770808335,
+        "connection_bytes": 56,
+        "counted": 0,
+        "receive_sqes": 0,
+        "poll_first_sqes": 0,
+        "round": 1,
+        "mode": "control"
+      },
+      {
+        "case": "empty_pingpong",
+        "bytes": 320000,
+        "receive_cqes": 10000,
+        "sends": 10000,
+        "server_thread_cpu_ns": 372472038,
+        "server_user_us": 19214,
+        "server_system_us": 353262,
+        "wall_ns": 754028218,
+        "connection_bytes": 56,
+        "counted": 0,
+        "receive_sqes": 0,
+        "poll_first_sqes": 0,
+        "round": 1,
+        "mode": "candidate"
+      },
+      {
+        "case": "empty_pingpong",
+        "bytes": 320000,
+        "receive_cqes": 10000,
+        "sends": 10000,
+        "server_thread_cpu_ns": 387265345,
+        "server_user_us": 16745,
+        "server_system_us": 370523,
+        "wall_ns": 777963871,
+        "connection_bytes": 56,
+        "counted": 0,
+        "receive_sqes": 0,
+        "poll_first_sqes": 0,
+        "round": 2,
+        "mode": "control"
+      },
+      {
+        "case": "empty_pingpong",
+        "bytes": 320000,
+        "receive_cqes": 10000,
+        "sends": 10000,
+        "server_thread_cpu_ns": 386671544,
+        "server_user_us": 1577,
+        "server_system_us": 385102,
+        "wall_ns": 769718134,
+        "connection_bytes": 56,
+        "counted": 0,
+        "receive_sqes": 0,
+        "poll_first_sqes": 0,
+        "round": 2,
+        "mode": "candidate"
+      },
+      {
+        "case": "empty_pingpong",
+        "bytes": 320000,
+        "receive_cqes": 10000,
+        "sends": 10000,
+        "server_thread_cpu_ns": 391707699,
+        "server_user_us": 12003,
+        "server_system_us": 379709,
+        "wall_ns": 782375471,
+        "connection_bytes": 56,
+        "counted": 0,
+        "receive_sqes": 0,
+        "poll_first_sqes": 0,
+        "round": 3,
+        "mode": "control"
+      },
+      {
+        "case": "empty_pingpong",
+        "bytes": 320000,
+        "receive_cqes": 10000,
+        "sends": 10000,
+        "server_thread_cpu_ns": 379339307,
+        "server_user_us": 13537,
+        "server_system_us": 365808,
+        "wall_ns": 759886512,
+        "connection_bytes": 56,
+        "counted": 0,
+        "receive_sqes": 0,
+        "poll_first_sqes": 0,
+        "round": 3,
+        "mode": "candidate"
+      }
+    ],
+    "contracts": {
+      "control_off": [
+        "io_lifetime_contract"
+      ],
+      "candidate_off": [
+        "io_uring_operations",
+        "io_lifetime_contract",
+        "transport_lifetimes",
+        "parser_contract",
+        "session_contract"
+      ],
+      "candidate_profile": [
+        "io_lifetime_contract"
+      ]
+    },
+    "fixed": {
+      "cq_target": 128,
+      "cq_timeout_ms": 8,
+      "buffer_bytes": 4096,
+      "receive_buffers": 1024,
+      "write_cap": 32
+    },
+    "limits": "Native fixed-work TCP loopback, four rotated pairs. Issuer thread CPU and RUSAGE_SELF user/system exclude the separate producer process; same 1-CPU container, producer start gate. Connection setup/teardown outside clocks. Stream unit is 4096 useful bytes, not an HTTP request. Idle pingpong is 32 bytes plus one-byte acknowledgement, no production think times. Counts come from separate instrumented binaries. No HTTP/VPS/capacity/p99 claim."
+  },
+  "schema_version": 1,
+  "anchor": "701bae959fb2e12f95652f78768643fc5ce0d30c",
+  "label": "receive-hint-native",
+  "kind": "probe",
+  "started_at": "2026-11-04T21:00:10.632094+00:00",
+  "status": "passed",
+  "finished_at": "2026-11-04T21:02:29.736771+00:00",
+  "exit_code": 0,
+  "error": null,
+  "secondary_errors": [],
+  "workload": {
+    "kind": "one_shot_tcp_receive",
+    "stream_units": 65536,
+    "idle_requests": 10000,
+    "pairs": 4
+  },
+  "instruments": {
+    "server_telemetry": "off",
+    "perf": "off",
+    "counts_timed_separately": true
+  },
+  "provenance": {
+    "source": {
+      "base_commit": "701bae959fb2e12f95652f78768643fc5ce0d30c",
+      "patch_sha256": "567c9ad8fb782bb824ada1f6c9d45ddc99177afd21868d35b519aa3c5b6974b1",
+      "source_sha256": "59143058469139989eef96bc66cbe82378d5be195e1020ec0af35e921046772d",
+      "patch": "source.patch"
+    },
+    "binary": {
+      "control": {
+        "sha256": "08f312884d6402a02945e7d1075bba5180cde5eb89451a914723310f9f7541f4"
+      },
+      "candidate": {
+        "sha256": "2341ca2739e568ad7303c3e8b4b77d528038946b5b7b4fea1b933adcd9a0cc1a"
+      },
+      "server": {
+        "sha256": "05642f896218ef9513485df3606811b8ceac464f9707066de05766b55ae03834"
+      }
+    }
+  }
+}

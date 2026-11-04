@@ -136,6 +136,7 @@ type FeedSystem struct {
 	bodyW    *PacketWriter
 	SendPool *BufferPool
 	RecvPool *BufferPool
+	feedBuf  []byte
 }
 
 func NewFeedSystem(db *DB, sendPool, recvPool *BufferPool) *FeedSystem {
@@ -145,6 +146,7 @@ func NewFeedSystem(db *DB, sendPool, recvPool *BufferPool) *FeedSystem {
 		bodyW:    NewPacketWriter(16384),
 		SendPool: sendPool,
 		RecvPool: recvPool,
+		feedBuf:  make([]byte, 65536),
 	}
 }
 
@@ -153,10 +155,10 @@ func (s *FeedSystem) Process(events []FeedEvent, outTasks *[]iouring.SendInfo) {
 		return
 	}
 
-	// 1 lần đọc C duy nhất cho toàn bộ batch FeedEvents
-	feedData, err := sqlite.GetFeed()
-	if err == nil && len(feedData) > 0 {
-		buildHTTPResponse(s.writer, "200 OK", feedData)
+	// 1 lần đọc C duy nhất vào buffer pre-allocated cho toàn bộ batch FeedEvents (Zero Allocation)
+	n, err := sqlite.GetFeedInto(s.feedBuf)
+	if err == nil && n > 0 {
+		buildHTTPResponse(s.writer, "200 OK", s.feedBuf[:n])
 	} else {
 		s.bodyW.Reset()
 		s.bodyW.WriteString(`{"error":"internal server error"}`)

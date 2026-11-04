@@ -300,7 +300,7 @@ int init_feed_engine(const char *db_path) {
         return -1;
     }
     sqlite3_busy_timeout(g_engine.db, 5000);
-    sqlite3_exec(g_engine.db, "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA mmap_size=0; PRAGMA cache_size=-64000; PRAGMA temp_store=MEMORY;", NULL, NULL, NULL);
+    sqlite3_exec(g_engine.db, "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA wal_autocheckpoint=0; PRAGMA mmap_size=0; PRAGMA cache_size=-64000; PRAGMA temp_store=MEMORY;", NULL, NULL, NULL);
 
     g_engine.bt = g_engine.db->aDb[0].pBt;
     if (!g_engine.bt) return -2;
@@ -440,21 +440,6 @@ int post_exists(int64_t id) {
     return (res == 0) ? 1 : 0;
 }
 
-typedef struct {
-    int64_t id;
-    int orig_idx;
-} PostQuery;
-
-static int cmp_post_query(const void *a, const void *b) {
-    const PostQuery *qa = (const PostQuery *)a;
-    const PostQuery *qb = (const PostQuery *)b;
-    if (qa->id < qb->id) return -1;
-    if (qa->id > qb->id) return 1;
-    return 0;
-}
-
-static PostQuery s_qbuf[4096];
-
 int get_posts_batch(const int64_t *ids, int n, char *out_buf, int out_cap, PostBatchItem *items) {
     if (!g_engine.bt) return -1;
     if (n <= 0) return 0;
@@ -463,68 +448,31 @@ int get_posts_batch(const int64_t *ids, int n, char *out_buf, int out_cap, PostB
         return -2;
     }
 
-    PostQuery *q = s_qbuf;
-    PostQuery *heap_q = NULL;
-    if (n > 4096) {
-        heap_q = (PostQuery *)sqlite3_malloc((int)(n * sizeof(PostQuery)));
-        if (!heap_q) {
-            sqlite3BtreeCommit(g_engine.bt);
-            return -3;
-        }
-        q = heap_q;
-    }
-
-    for (int i = 0; i < n; i++) {
-        q[i].id = ids[i];
-        q[i].orig_idx = i;
-    }
-
-    qsort(q, n, sizeof(PostQuery), cmp_post_query);
-
     jout o = {out_buf, out_cap, 0, 0};
 
-    int prev_status = 0;
-    int prev_offset = 0;
-    int prev_len = 0;
-
     for (int i = 0; i < n; i++) {
-        int64_t id = q[i].id;
-        int orig = q[i].orig_idx;
-
-        if (i > 0 && id == q[i - 1].id) {
-            // Tối ưu CP: Trùng ID trong cùng batch -> dùng lại JSON đã render, bỏ qua B-Tree!
-            items[orig].status = prev_status;
-            items[orig].offset = prev_offset;
-            items[orig].len = prev_len;
-            continue;
-        }
-
+        int64_t id = ids[i];
         int start_offset = o.n;
         jraw(&o, "{\"post\":", 8);
         int rc = emit_post(&g_engine, (sqlite3_int64)id, &o);
         if (rc == SQLITE_NOTFOUND) {
             o.n = start_offset; // rollback buffer
-            prev_status = 404;
-            prev_offset = 0;
-            prev_len = 0;
+            items[i].status = 404;
+            items[i].offset = 0;
+            items[i].len = 0;
         } else if (rc != SQLITE_OK || o.err) {
             o.n = start_offset; // rollback buffer
-            prev_status = -3;
-            prev_offset = 0;
-            prev_len = 0;
+            items[i].status = -3;
+            items[i].offset = 0;
+            items[i].len = 0;
         } else {
             jch(&o, '}');
-            prev_status = 200;
-            prev_offset = start_offset;
-            prev_len = o.n - start_offset;
+            items[i].status = 200;
+            items[i].offset = start_offset;
+            items[i].len = o.n - start_offset;
         }
-
-        items[orig].status = prev_status;
-        items[orig].offset = prev_offset;
-        items[orig].len = prev_len;
     }
 
-    if (heap_q) sqlite3_free(heap_q);
     sqlite3BtreeCommit(g_engine.bt);
     return 0;
 }
@@ -610,26 +558,6 @@ int create_posts_batch(
     return 0;
 }
 
-typedef struct {
-    int64_t post_id;
-    int64_t user_id;
-    int orig_idx;
-} LikeReq;
-
-static int cmp_like_req(const void *a, const void *b) {
-    const LikeReq *qa = (const LikeReq *)a;
-    const LikeReq *qb = (const LikeReq *)b;
-    if (qa->post_id != qb->post_id) {
-        return (qa->post_id < qb->post_id) ? -1 : 1;
-    }
-    if (qa->user_id != qb->user_id) {
-        return (qa->user_id < qb->user_id) ? -1 : 1;
-    }
-    return 0;
-}
-
-static LikeReq s_like_buf[4096];
-
 int insert_likes_batch(
     const int64_t *user_ids,
     const int64_t *post_ids,
@@ -639,44 +567,22 @@ int insert_likes_batch(
     if (!g_engine.db || !g_engine.stmt_insert_like || !g_engine.post) return -1;
     if (n <= 0) return 0;
 
-    LikeReq *q = s_like_buf;
-    LikeReq *heap_q = NULL;
-    if (n > 4096) {
-        heap_q = (LikeReq *)sqlite3_malloc((int)(n * sizeof(LikeReq)));
-        if (!heap_q) return -3;
-        q = heap_q;
-    }
-
-    for (int i = 0; i < n; i++) {
-        q[i].post_id = post_ids[i];
-        q[i].user_id = user_ids[i];
-        q[i].orig_idx = i;
-    }
-
-    // Tối ưu CP: Sort theo post_id, sau đó user_id
-    qsort(q, n, sizeof(LikeReq), cmp_like_req);
-
-    // Mở 1 Write Transaction cho cả batch (Group Commit)
     int rc = sqlite3_exec(g_engine.db, "BEGIN IMMEDIATE;", NULL, NULL, NULL);
     if (rc != SQLITE_OK) {
         for (int retry = 0; retry < 5 && rc != SQLITE_OK; retry++) {
             rc = sqlite3_exec(g_engine.db, "BEGIN IMMEDIATE;", NULL, NULL, NULL);
         }
-        if (rc != SQLITE_OK) {
-            if (heap_q) sqlite3_free(heap_q);
-            return -2;
-        }
+        if (rc != SQLITE_OK) return -2;
     }
 
     int64_t last_post_id = -1;
     int last_post_exists = 0;
 
     for (int i = 0; i < n; i++) {
-        int orig = q[i].orig_idx;
-        int64_t pid = q[i].post_id;
-        int64_t uid = q[i].user_id;
+        int64_t pid = post_ids[i];
+        int64_t uid = user_ids[i];
 
-        // 1. Kiểm tra post tồn tại
+        // 1. Kiểm tra post tồn tại (tận dụng mảng đã sort theo post_id từ Go)
         if (i == 0 || pid != last_post_id) {
             int res = 0;
             int mrc = sqlite3BtreeTableMoveto(g_engine.post, (sqlite3_int64)pid, 0, &res);
@@ -685,39 +591,26 @@ int insert_likes_batch(
         }
 
         if (!last_post_exists) {
-            results[orig] = 404; // Post not found
+            results[i] = 404; // Post not found
             continue;
         }
 
-        // 2. Tối ưu: Kiểm tra trùng (user_id, post_id) ngay trong cùng batch
-        if (i > 0 && pid == q[i-1].post_id && uid == q[i-1].user_id) {
-            results[orig] = 200; // already liked
-            continue;
-        }
-
-        // 3. Thực thi INSERT INTO likes ON CONFLICT DO NOTHING
+        // 2. Thực thi INSERT INTO likes ON CONFLICT DO NOTHING
         sqlite3_bind_int64(g_engine.stmt_insert_like, 1, uid);
         sqlite3_bind_int64(g_engine.stmt_insert_like, 2, pid);
 
         rc = sqlite3_step(g_engine.stmt_insert_like);
         if (rc == SQLITE_DONE) {
             int changes = sqlite3_changes(g_engine.db);
-            if (changes == 1) {
-                results[orig] = 201; // First like
-            } else {
-                results[orig] = 200; // Already liked
-            }
+            results[i] = (changes == 1) ? 201 : 200;
         } else {
-            results[orig] = 500;
+            results[i] = 500;
         }
 
         sqlite3_reset(g_engine.stmt_insert_like);
-        sqlite3_clear_bindings(g_engine.stmt_insert_like);
     }
 
     sqlite3_exec(g_engine.db, "COMMIT;", NULL, NULL, NULL);
-
-    if (heap_q) sqlite3_free(heap_q);
     return 0;
 }
 

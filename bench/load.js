@@ -42,7 +42,8 @@ export const options = {
   summaryTrendStats: ['avg', 'med', 'p(95)', 'p(99)', 'max'],
 };
 
-const between = (lo, hi) => lo + Math.random() * (hi - lo);
+const SLEEP_FACTOR = Number(__ENV.SLEEP_FACTOR || 1.0);
+const between = (lo, hi) => (lo + Math.random() * (hi - lo)) * SLEEP_FACTOR;
 
 export default function () {
   const user = tokens[(__VU - 1) % tokens.length];

@@ -8,14 +8,41 @@ package sqlite
 import "C"
 
 import (
+	"cmp"
 	"errors"
+	"slices"
 	"sync"
 	"unsafe"
 )
 
+type postOrder struct {
+	id      int64
+	origIdx int32
+}
+
+type likeOrder struct {
+	postID  int64
+	userID  int64
+	origIdx int32
+}
+
 var (
 	feedMu sync.Mutex
 	buf    = make([]byte, 65536)
+
+	// Bộ đệm pre-allocated cho GetPostsBatch (Zero Allocation)
+	postOrderBuf  = make([]postOrder, 4096)
+	postUniqueIDs = make([]int64, 4096)
+	postMap       = make([]int32, 4096)
+	postRawItems  = make([]PostBatchItem, 4096)
+
+	// Bộ đệm pre-allocated cho InsertLikesBatch (Zero Allocation)
+	likeOrderBuf   = make([]likeOrder, 4096)
+	likeUniqueUIDs = make([]int64, 4096)
+	likeUniquePIDs = make([]int64, 4096)
+	likeMap        = make([]int32, 4096)
+	likeIsDup      = make([]bool, 4096)
+	likeRawRes     = make([]int32, 4096)
 )
 
 // InitFeedEngine mở SQLite và khởi tạo các con trỏ B-tree
@@ -123,6 +150,7 @@ type PostBatchItem struct {
 }
 
 // GetPostsBatch đọc một batch bài viết theo mảng ids trong 1 CGO call & 1 transaction duy nhất
+// Go thực hiện sort & deduplication trước (Zero-Alloc), C chỉ duyệt B-tree bốc dữ liệu thuần túy
 func GetPostsBatch(ids []int64, outBuf []byte, items []PostBatchItem) error {
 	feedMu.Lock()
 	defer feedMu.Unlock()
@@ -132,17 +160,52 @@ func GetPostsBatch(ids []int64, outBuf []byte, items []PostBatchItem) error {
 		return nil
 	}
 
+	if n > len(postOrderBuf) {
+		postOrderBuf = make([]postOrder, n)
+		postUniqueIDs = make([]int64, n)
+		postMap = make([]int32, n)
+		postRawItems = make([]PostBatchItem, n)
+	}
+
+	for i := 0; i < n; i++ {
+		postOrderBuf[i] = postOrder{id: ids[i], origIdx: int32(i)}
+	}
+
+	// 1. Go sort theo ID để tối ưu cache locality của B-Tree
+	slices.SortFunc(postOrderBuf[:n], func(a, b postOrder) int {
+		return cmp.Compare(a.id, b.id)
+	})
+
+	// 2. Go dedup: lọc mảng Unique IDs và map lại chỉ mục ban đầu
+	numUnique := 0
+	for i := 0; i < n; i++ {
+		id := postOrderBuf[i].id
+		if i == 0 || id != postOrderBuf[i-1].id {
+			postUniqueIDs[numUnique] = id
+			numUnique++
+		}
+		postMap[postOrderBuf[i].origIdx] = int32(numUnique - 1)
+	}
+
+	// 3. CGO call duy nhất: C chỉ duyệt đúng numUnique IDs, không sort, không malloc
 	rc := C.get_posts_batch(
-		(*C.int64_t)(unsafe.Pointer(&ids[0])),
-		C.int(n),
+		(*C.int64_t)(unsafe.Pointer(&postUniqueIDs[0])),
+		C.int(numUnique),
 		(*C.char)(unsafe.Pointer(&outBuf[0])),
 		C.int(len(outBuf)),
-		(*C.PostBatchItem)(unsafe.Pointer(&items[0])),
+		(*C.PostBatchItem)(unsafe.Pointer(&postRawItems[0])),
 	)
 
 	if rc != 0 {
 		return errors.New("get_posts_batch thất bại")
 	}
+
+	// 4. Map kết quả về đúng thứ tự ban đầu (các ID trùng lặp tái sử dụng cùng JSON offset)
+	for i := 0; i < n; i++ {
+		uIdx := postMap[i]
+		items[i] = postRawItems[uIdx]
+	}
+
 	return nil
 }
 
@@ -227,7 +290,7 @@ func CreatePostsBatch(
 }
 
 // InsertLikesBatch chèn một batch lượt like trong 1 CGO call & 1 transaction duy nhất (Group Commit)
-// results: 201 (vừa like), 200 (đã like trước đó), 404 (post không tồn tại), 500 (lỗi)
+// Go thực hiện sort & deduplication trước (Zero-Alloc), C chỉ duyệt insert và ghi kết quả vào mảng results
 func InsertLikesBatch(userIDs, postIDs []int64, results []int32) error {
 	feedMu.Lock()
 	defer feedMu.Unlock()
@@ -237,16 +300,74 @@ func InsertLikesBatch(userIDs, postIDs []int64, results []int32) error {
 		return nil
 	}
 
+	if n > len(likeOrderBuf) {
+		likeOrderBuf = make([]likeOrder, n)
+		likeUniqueUIDs = make([]int64, n)
+		likeUniquePIDs = make([]int64, n)
+		likeMap = make([]int32, n)
+		likeIsDup = make([]bool, n)
+		likeRawRes = make([]int32, n)
+	}
+
+	for i := 0; i < n; i++ {
+		likeOrderBuf[i] = likeOrder{
+			postID:  postIDs[i],
+			userID:  userIDs[i],
+			origIdx: int32(i),
+		}
+	}
+
+	// 1. Go sort theo postID, rồi userID để tối ưu cache B-Tree
+	slices.SortFunc(likeOrderBuf[:n], func(a, b likeOrder) int {
+		if a.postID != b.postID {
+			return cmp.Compare(a.postID, b.postID)
+		}
+		return cmp.Compare(a.userID, b.userID)
+	})
+
+	// 2. Go dedup: lọc unique và phát hiện trùng lặp trong batch
+	numUnique := 0
+	for i := 0; i < n; i++ {
+		curr := &likeOrderBuf[i]
+		if i == 0 || curr.postID != likeOrderBuf[i-1].postID || curr.userID != likeOrderBuf[i-1].userID {
+			likeUniquePIDs[numUnique] = curr.postID
+			likeUniqueUIDs[numUnique] = curr.userID
+			likeIsDup[curr.origIdx] = false
+			numUnique++
+		} else {
+			likeIsDup[curr.origIdx] = true
+		}
+		likeMap[curr.origIdx] = int32(numUnique - 1)
+	}
+
+	// 3. CGO call duy nhất: C mở transaction, kiểm tra tồn tại và insert
 	rc := C.insert_likes_batch(
-		(*C.int64_t)(unsafe.Pointer(&userIDs[0])),
-		(*C.int64_t)(unsafe.Pointer(&postIDs[0])),
-		C.int(n),
-		(*C.int32_t)(unsafe.Pointer(&results[0])),
+		(*C.int64_t)(unsafe.Pointer(&likeUniqueUIDs[0])),
+		(*C.int64_t)(unsafe.Pointer(&likeUniquePIDs[0])),
+		C.int(numUnique),
+		(*C.int32_t)(unsafe.Pointer(&likeRawRes[0])),
 	)
 
 	if rc != 0 {
 		return errors.New("insert_likes_batch thất bại")
 	}
+
+	// 4. Map kết quả về mảng results ban đầu của Go
+	for i := 0; i < n; i++ {
+		uIdx := likeMap[i]
+		res := likeRawRes[uIdx]
+		if likeIsDup[i] {
+			// Cùng user like cùng post trong 1 batch: nếu post tồn tại thì coi như already liked
+			if res == 201 || res == 200 {
+				results[i] = 200
+			} else {
+				results[i] = res
+			}
+		} else {
+			results[i] = res
+		}
+	}
+
 	return nil
 }
 

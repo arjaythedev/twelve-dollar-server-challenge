@@ -491,6 +491,7 @@ Function.Front.OnReq {
             HTTP1.CSet(v, HTTP1Off.FD, -2)
             HTTP1.CSet(v, HTTP1Off.STATE, 1)
             HTTP1.CSet(v, HTTP1Off.DEFER, 0)
+            HTTP1.CSet(v, HTTP1Off.WSEQ, 0)
             HTTP1.CSet(v, HTTP1Off.FILL, 0)
             HTTP1.CSet(v, HTTP1Off.HDR_END, 0)
             HTTP1.CSet(v, HTTP1Off.CLEN, 0)

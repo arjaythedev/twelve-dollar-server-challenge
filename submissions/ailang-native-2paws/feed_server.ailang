@@ -22,6 +22,8 @@ FixedPool.FeedSt {
     "start": Initialize=0, CanChange=True
     "ok": Initialize=0, CanChange=True
     "uname": Initialize=0, CanChange=True
+    // The new post's trimmed body, copied out of the scratch arena (at most 500 bytes)
+    "body": Initialize=0, CanChange=True
 }
 
 Function.Feed.NowUnix {
@@ -640,55 +642,78 @@ Function.Feed.JsonObjectOk {
     }
 }
 
-Function.Feed.DoCreate {
+// Validate the POST /posts body and copy its trimmed text to FeedSt.body. Returns 0, or
+// 1 malformed JSON, 2 body missing or empty, 3 body too long. Run inside a scratch arena.
+Function.Feed.ParseBody {
     Input: conn: Address
+    Output: Integer
     Body: {
-        aok = Feed.AuthOrErr(conn)
-        IfCondition EqualTo(aok, 0) ThenBlock: { ReturnValue(0) }
         raw = HTTP1.Body(conn)
         n = HTTP1.BodyLen(conn)
         IfCondition LessEqual(n, 0) ThenBlock: {
-            Feed.Err(conn, 400, "malformed JSON body")
-            ReturnValue(0)
+            ReturnValue(1)
         }
         copy = Allocate(Add(n, 1))
         MemoryCopy(copy, raw, n)
         SetByte(copy, n, 0)
         jok = Feed.JsonObjectOk(copy, n)
         IfCondition EqualTo(jok, 0) ThenBlock: {
-            Feed.Err(conn, 400, "malformed JSON body")
-            ReturnValue(0)
+            ReturnValue(1)
         }
         tag = ParseJSON(copy)
         IfCondition EqualTo(tag, 0) ThenBlock: {
-            Feed.Err(conn, 400, "malformed JSON body")
-            ReturnValue(0)
+            ReturnValue(1)
         }
         obj = JSON.AsObject(tag)
         IfCondition EqualTo(obj, 0) ThenBlock: {
-            Feed.Err(conn, 400, "malformed JSON body")
-            ReturnValue(0)
+            ReturnValue(1)
         }
         ty = JSON.GetType(obj, "body")
         IfCondition NotEqual(ty, 1) ThenBlock: {
-            Feed.Err(conn, 400, "body is required")
-            ReturnValue(0)
+            ReturnValue(2)
         }
         body = JSON.GetString(obj, "body")
         IfCondition EqualTo(body, 0) ThenBlock: {
-            Feed.Err(conn, 400, "body is required")
-            ReturnValue(0)
+            ReturnValue(2)
         }
         trimmed = Feed.TrimCopy(body)
         tlen = StringLength(trimmed)
         IfCondition EqualTo(tlen, 0) ThenBlock: {
+            ReturnValue(2)
+        }
+        IfCondition GreaterThan(tlen, 500) ThenBlock: {
+            ReturnValue(3)
+        }
+        MemoryCopy(FeedSt.body, trimmed, tlen)
+        SetByte(FeedSt.body, tlen, 0)
+        ReturnValue(0)
+    }
+}
+
+Function.Feed.DoCreate {
+    Input: conn: Address
+    Body: {
+        aok = Feed.AuthOrErr(conn)
+        IfCondition EqualTo(aok, 0) ThenBlock: { ReturnValue(0) }
+        // The body's copy, parse tree and trimmed text come from the scratch arena and
+        // are dropped together; the body is copied out first.
+        Arena_ScratchBegin()
+        bad = Feed.ParseBody(conn)
+        Arena_ScratchEnd()
+        IfCondition EqualTo(bad, 1) ThenBlock: {
+            Feed.Err(conn, 400, "malformed JSON body")
+            ReturnValue(0)
+        }
+        IfCondition EqualTo(bad, 2) ThenBlock: {
             Feed.Err(conn, 400, "body is required")
             ReturnValue(0)
         }
-        IfCondition GreaterThan(tlen, 500) ThenBlock: {
+        IfCondition EqualTo(bad, 3) ThenBlock: {
             Feed.Err(conn, 400, "body must be at most 500 characters")
             ReturnValue(0)
         }
+        trimmed = FeedSt.body
+        tlen = StringLength(trimmed)
         uid = Crypto.JWT_Uid()
         created = Feed.NowISO()
         nid = SQLite.InsertPost(uid, trimmed, created)
@@ -772,6 +797,14 @@ Function.Feed.CommitBatch {
     Input: unused: Address
     Body: {
         SQLite.Commit()
+        HTTP1St.commit_seq = SQLiteIo.commit_seq
+    }
+}
+
+Function.Feed.WaitDone {
+    Input: seq: Integer
+    Body: {
+        SQLite.IoWait(seq)
     }
 }
 
@@ -865,6 +898,7 @@ Function.Feed.Ring {
     Body: {
         IfCondition EqualTo(n, Feed.SYNC_TAG) ThenBlock: {
             SQLite.SyncDone()
+            HTTP1.FlushPending()
             ReturnValue(0)
         }
         Front.OnReq(n)
@@ -875,6 +909,7 @@ SubRoutine.Main {
     // Lazily built tables must not come from the scratch arena used in Auth
     Crypto.EnsureInit()
     FeedSt.uname = Allocate(256)
+    FeedSt.body = Allocate(512)
     FeedSt.out = Allocate(FeedSt.cap)
     FeedSt.ts = Allocate(16)
     FeedSt.iso = Allocate(32)
@@ -919,7 +954,7 @@ SubRoutine.Main {
         }
         HTTP1St.reuseport = 1
     }
-    // WAL fdatasyncs for checkpoints run in their own process
+    // Every file write (WAL frames, checkpoints, fdatasync) runs in the I/O process
     SQLite.StartSyncer(path)
     dbok = SQLite.Open(path)
     FeedSt.ok = dbok
@@ -929,6 +964,11 @@ SubRoutine.Main {
     }
     SQLiteDB.auto_commit = 0
     HTTP1St.commit_fn = AddressOf(Feed.CommitBatch)
+    // Write responses wait for their commit's mark from the I/O process
+    IfCondition NotEqual(SQLiteIo.blk, 0) ThenBlock: {
+        HTTP1St.done_ptr = Add(SQLiteIo.blk, 8)
+        HTTP1St.wait_fn = AddressOf(Feed.WaitDone)
+    }
     fd = HTTP1.Listen(host, port)
     IfCondition LessThan(fd, 0) ThenBlock: {
         PrintMessage("FAIL listen\n")

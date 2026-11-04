@@ -210,7 +210,7 @@ Function.IHash.Create {
     Output: Address
     Body: {
         Arrays_EnsureArena()
-        hash_table = Arena_Alloc24()
+        hash_table = Arena_Alloc(24)
         StoreValue(hash_table, bucket_count)
         StoreValue(Add(hash_table, 8), 0)
         buckets = Arena_ArrayCreate(bucket_count)
@@ -233,7 +233,7 @@ Function.IHash.Insert {
         bucket_count = Dereference(hash_table)
         buckets = Dereference(Add(hash_table, 16))
         hash = IHash.HashInt(key, bucket_count)
-        new_node = Arena_Alloc24()
+        new_node = Arena_Alloc(24)
         StoreValue(new_node, key)
         StoreValue(Add(new_node, 8), value)
         head = ArrayGet(buckets, hash)
@@ -279,13 +279,13 @@ Function.IHash.Destroy {
             current = ArrayGet(buckets, idx)
             WhileLoop NotEqual(current, 0) {
                 next = Dereference(Add(current, 16))
-                Arena_Free24(current)
+                Arena_Free(current, 24)
                 current = next
             }
             idx = Add(idx, 1)
         }
         Arena_ArrayDestroy(buckets)
-        Arena_Free24(hash_table)
+        Arena_Free(hash_table, 24)
         ReturnValue(1)
     }
 }
@@ -299,7 +299,7 @@ Function.SHash.Create {
     Output: Address
     Body: {
         Arrays_EnsureArena()
-        hash_table = Arena_Alloc24()
+        hash_table = Arena_Alloc(24)
         StoreValue(hash_table, bucket_count)
         StoreValue(Add(hash_table, 8), 0)
         buckets = Arena_ArrayCreate(bucket_count)
@@ -346,7 +346,7 @@ Function.SHash.Insert {
             current = Dereference(Add(current, 16))
         }
         
-        new_node = Arena_Alloc24()
+        new_node = Arena_Alloc(24)
         key_copy = Helpers.StringCopy(key)
         StoreValue(new_node, key_copy)
         StoreValue(Add(new_node, 8), value)
@@ -435,7 +435,7 @@ Function.SHash.Delete {
                 }
                 sk_len = StringLength(stored_key)
                 Deallocate(stored_key, Add(sk_len, 1))
-                Arena_Free24(current)
+                Arena_Free(current, 24)
                 item_count = Dereference(Add(hash_table, 8))
                 StoreValue(Add(hash_table, 8), Subtract(item_count, 1))
                 ReturnValue(value)
@@ -486,13 +486,13 @@ Function.SHash.Destroy {
                 key = Dereference(current)
                 key_len = StringLength(key)
                 Deallocate(key, Add(key_len, 1))
-                Arena_Free24(current)
+                Arena_Free(current, 24)
                 current = next
             }
             idx = Add(idx, 1)
         }
         Arena_ArrayDestroy(buckets)
-        Arena_Free24(hash_table)
+        Arena_Free(hash_table, 24)
         ReturnValue(1)
     }
 }
@@ -528,7 +528,7 @@ Function.SHash.InsertAddr {
             }
             current = Dereference(Add(current, 16))
         }
-        new_node = Arena_Alloc24()
+        new_node = Arena_Alloc(24)
         key_copy = Helpers.StringCopy(key)
         StoreValue(new_node, key_copy)
         StoreValue(Add(new_node, 8), value)
@@ -617,7 +617,7 @@ Function.SHash.DeleteAddr {
                 }
                 sk_len = StringLength(stored_key)
                 Deallocate(stored_key, Add(sk_len, 1))
-                Arena_Free24(current)
+                Arena_Free(current, 24)
                 item_count = Dereference(Add(hash_table, 8))
                 StoreValue(Add(hash_table, 8), Subtract(item_count, 1))
                 ReturnValue(value)
@@ -637,7 +637,7 @@ Function.List.Create {
     Output: Address
     Body: {
         Arrays_EnsureArena()
-        list = Arena_Alloc24()
+        list = Arena_Alloc(24)
         StoreValue(list, 0)
         StoreValue(Add(list, 8), 0)
         StoreValue(Add(list, 16), 0)
@@ -650,7 +650,7 @@ Function.List.Append {
     Input: value: Integer
     Output: Integer
     Body: {
-        new_node = Arena_Alloc24()
+        new_node = Arena_Alloc(24)
         StoreValue(new_node, value)
         StoreValue(Add(new_node, 8), 0)
         head = Dereference(list)
@@ -673,7 +673,7 @@ Function.List.Prepend {
     Input: value: Integer
     Output: Integer
     Body: {
-        new_node = Arena_Alloc24()
+        new_node = Arena_Alloc(24)
         StoreValue(new_node, value)
         head = Dereference(list)
         StoreValue(Add(new_node, 8), head)
@@ -703,7 +703,7 @@ Function.List.PopFront {
         }
         size = Dereference(Add(list, 16))
         StoreValue(Add(list, 16), Subtract(size, 1))
-        Arena_Free24(head)
+        Arena_Free(head, 24)
         ReturnValue(value)
     }
 }
@@ -719,7 +719,7 @@ Function.List.PopBack {
         head = Dereference(list)
         IfCondition EqualTo(head, tail) ThenBlock: {
             value = Dereference(tail)
-            Arena_Free24(tail)
+            Arena_Free(tail, 24)
             StoreValue(list, 0)
             StoreValue(Add(list, 8), 0)
             StoreValue(Add(list, 16), 0)
@@ -730,7 +730,7 @@ Function.List.PopBack {
             current = Dereference(Add(current, 8))
         }
         value = Dereference(tail)
-        Arena_Free24(tail)
+        Arena_Free(tail, 24)
         StoreValue(Add(current, 8), 0)
         StoreValue(Add(list, 8), current)
         size = Dereference(Add(list, 16))
@@ -757,10 +757,10 @@ Function.List.Destroy {
         head = Dereference(list)
         WhileLoop NotEqual(head, 0) {
             next = Dereference(Add(head, 8))
-            Arena_Free24(head)
+            Arena_Free(head, 24)
             head = next
         }
-        Arena_Free24(list)
+        Arena_Free(list, 24)
         ReturnValue(1)
     }
 }
@@ -780,10 +780,10 @@ Function.List.DestroyDeep {
                 value_len = StringLength(value)
                 Deallocate(value, Add(value_len, 1))
             }
-            Arena_Free24(head)
+            Arena_Free(head, 24)
             head = next
         }
-        Arena_Free24(list)
+        Arena_Free(list, 24)
         ReturnValue(1)
     }
 }

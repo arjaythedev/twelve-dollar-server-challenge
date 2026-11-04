@@ -38,6 +38,8 @@ FixedPool.HTTP1Off {
     "VFRONT": Initialize=176
     "VIDX": Initialize=184
     "VGEN": Initialize=192
+    // Ticket of a response waiting for its commit to reach the disk queue (0: none)
+    "WSEQ": Initialize=200
     "SLOT": Initialize=256
 }
 
@@ -59,6 +61,17 @@ FixedPool.HTTP1St {
     "defer_n": Initialize=0, CanChange=True
     "defer_cap": Initialize=512, CanChange=True
     "commit_fn": Initialize=0, CanChange=True
+    // With done_ptr set, a commit_fn stores its commit number in commit_seq and the
+    // deferred responses wait until Dereference(done_ptr) reaches it; wait_fn(seq)
+    // blocks for that when the pending queue is full.
+    "commit_seq": Initialize=0, CanChange=True
+    "done_ptr": Initialize=0, CanChange=True
+    "wait_fn": Initialize=0, CanChange=True
+    "pend": Initialize=0, CanChange=True
+    "pend_cap": Initialize=65536, CanChange=True
+    "pend_head": Initialize=0, CanChange=True
+    "pend_tail": Initialize=0, CanChange=True
+    "ticket": Initialize=0, CanChange=True
     "scratch_in": Initialize=0, CanChange=True
     "scratch_out": Initialize=0, CanChange=True
     "pool": Initialize=0, CanChange=True
@@ -160,6 +173,7 @@ Function.HTTP1.ClearConn {
         HTTP1.CSet(conn, HTTP1Off.OUT_SENT, 0)
         HTTP1.CSet(conn, HTTP1Off.HDR_END, 0)
         HTTP1.CSet(conn, HTTP1Off.DEFER, 0)
+        HTTP1.CSet(conn, HTTP1Off.WSEQ, 0)
         fd = HTTP1.CGet(conn, HTTP1Off.FD)
         IfCondition GreaterThan(fd, 0) ThenBlock: {
             Epoll.Del(HTTP1St.epfd, fd)
@@ -750,32 +764,98 @@ Function.HTTP1.BodyLen {
     }
 }
 
+Function.HTTP1.FlushOne {
+    Input: conn: Address
+    Body: {
+        HTTP1.CSet(conn, HTTP1Off.DEFER, 0)
+        HTTP1.CSet(conn, HTTP1Off.WSEQ, 0)
+        fd = HTTP1.CGet(conn, HTTP1Off.FD)
+        live = 0
+        IfCondition GreaterThan(fd, 0) ThenBlock: { live = 1 }
+        IfCondition EqualTo(fd, -2) ThenBlock: { live = 1 }
+        IfCondition EqualTo(live, 1) ThenBlock: {
+            fr = HTTP1.Flush(conn)
+            IfCondition EqualTo(fr, -1) ThenBlock: {
+                HTTP1.ClearConn(conn)
+            }
+            IfCondition EqualTo(fr, 1) ThenBlock: {
+                keep = HTTP1.CGet(conn, HTTP1Off.KEEP)
+                IfCondition EqualTo(keep, 0) ThenBlock: {
+                    HTTP1.ClearConn(conn)
+                } ElseBlock: {
+                    HTTP1.ResetParse(conn)
+                    HTTP1.ReleaseOut(conn)
+                }
+            }
+        }
+    }
+}
+
 Function.HTTP1.FlushDeferred {
     Body: {
         n = HTTP1St.defer_n
         i = 0
         WhileLoop LessThan(i, n) {
             conn = Dereference(Add(HTTP1St.defer_list, Multiply(i, 8)))
-            HTTP1.CSet(conn, HTTP1Off.DEFER, 0)
-            fd = HTTP1.CGet(conn, HTTP1Off.FD)
-            live = 0
-            IfCondition GreaterThan(fd, 0) ThenBlock: { live = 1 }
-            IfCondition EqualTo(fd, -2) ThenBlock: { live = 1 }
-            IfCondition EqualTo(live, 1) ThenBlock: {
-                fr = HTTP1.Flush(conn)
-                IfCondition EqualTo(fr, -1) ThenBlock: {
-                    HTTP1.ClearConn(conn)
-                }
-                IfCondition EqualTo(fr, 1) ThenBlock: {
-                    keep = HTTP1.CGet(conn, HTTP1Off.KEEP)
-                    IfCondition EqualTo(keep, 0) ThenBlock: {
-                        HTTP1.ClearConn(conn)
-                    } ElseBlock: {
-                        HTTP1.ResetParse(conn)
-                        HTTP1.ReleaseOut(conn)
-                    }
-                }
+            HTTP1.FlushOne(conn)
+            i = Add(i, 1)
+        }
+        HTTP1St.defer_n = 0
+    }
+}
+
+// Send the waiting responses whose commit is done, oldest first. An entry whose ticket
+// no longer matches belongs to a connection that closed (and maybe was reused).
+Function.HTTP1.FlushPending {
+    Body: {
+        IfCondition EqualTo(HTTP1St.done_ptr, 0) ThenBlock: { ReturnValue(0) }
+        done = Dereference(HTTP1St.done_ptr)
+        mask = Subtract(HTTP1St.pend_cap, 1)
+        WhileLoop LessThan(HTTP1St.pend_tail, HTTP1St.pend_head) {
+            e = Add(HTTP1St.pend, Multiply(BitwiseAnd(HTTP1St.pend_tail, mask), 24))
+            IfCondition GreaterThan(Dereference(Add(e, 16)), done) ThenBlock: { ReturnValue(0) }
+            conn = Dereference(e)
+            IfCondition EqualTo(HTTP1.CGet(conn, HTTP1Off.WSEQ), Dereference(Add(e, 8))) ThenBlock: {
+                IfCondition EqualTo(HTTP1.CGet(conn, HTTP1Off.DEFER), 1) ThenBlock: { HTTP1.FlushOne(conn) }
             }
+            HTTP1St.pend_tail = Add(HTTP1St.pend_tail, 1)
+        }
+    }
+}
+
+// After commit_fn: send the deferred responses now, or queue them until their commit
+// is done.
+Function.HTTP1.AfterCommit {
+    Body: {
+        IfCondition EqualTo(HTTP1St.done_ptr, 0) ThenBlock: {
+            HTTP1.FlushDeferred()
+            ReturnValue(0)
+        }
+        seq = HTTP1St.commit_seq
+        IfCondition GreaterEqual(Dereference(HTTP1St.done_ptr), seq) ThenBlock: {
+            HTTP1.FlushPending()
+            HTTP1.FlushDeferred()
+            ReturnValue(0)
+        }
+        IfCondition EqualTo(HTTP1St.pend, 0) ThenBlock: {
+            HTTP1St.pend = Allocate(Multiply(HTTP1St.pend_cap, 24))
+        }
+        mask = Subtract(HTTP1St.pend_cap, 1)
+        n = HTTP1St.defer_n
+        i = 0
+        WhileLoop LessThan(i, n) {
+            IfCondition GreaterEqual(Subtract(HTTP1St.pend_head, HTTP1St.pend_tail), HTTP1St.pend_cap) ThenBlock: {
+                CallIndirect(HTTP1St.wait_fn, Dereference(Add(Add(HTTP1St.pend, Multiply(BitwiseAnd(HTTP1St.pend_tail, mask), 24)), 16)))
+                HTTP1.FlushPending()
+            }
+            conn = Dereference(Add(HTTP1St.defer_list, Multiply(i, 8)))
+            HTTP1St.ticket = Add(HTTP1St.ticket, 1)
+            HTTP1.CSet(conn, HTTP1Off.WSEQ, HTTP1St.ticket)
+            e = Add(HTTP1St.pend, Multiply(BitwiseAnd(HTTP1St.pend_head, mask), 24))
+            StoreValue(e, conn)
+            StoreValue(Add(e, 8), HTTP1St.ticket)
+            StoreValue(Add(e, 16), seq)
+            HTTP1St.pend_head = Add(HTTP1St.pend_head, 1)
             i = Add(i, 1)
         }
         HTTP1St.defer_n = 0
@@ -790,8 +870,9 @@ Function.HTTP1.Defer {
             IfCondition NotEqual(fn, 0) ThenBlock: {
                 CallIndirect(fn, conn)
             }
-            HTTP1.FlushDeferred()
+            HTTP1.AfterCommit()
         }
+        HTTP1.CSet(conn, HTTP1Off.WSEQ, 0)
         i = HTTP1St.defer_n
         StoreValue(Add(HTTP1St.defer_list, Multiply(i, 8)), conn)
         HTTP1St.defer_n = Add(i, 1)
@@ -980,8 +1061,9 @@ Function.HTTP1.Serve {
                 IfCondition NotEqual(fn, 0) ThenBlock: {
                     CallIndirect(fn, HTTP1St.slots)
                 }
-                HTTP1.FlushDeferred()
+                HTTP1.AfterCommit()
             }
+            HTTP1.FlushPending()
             IfCondition NotEqual(HTTP1St.tick_fn, 0) ThenBlock: {
                 CallIndirect(HTTP1St.tick_fn, 0)
             }

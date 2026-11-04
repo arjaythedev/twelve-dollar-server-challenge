@@ -13,6 +13,7 @@ export PORT="${PORT:-3000}"
 export HTTP_NSLOT="${HTTP_NSLOT:-65520}"
 # Front processes, each with its own descriptor limit and HTTP_NSLOT more
 # connections; requests reach the one database process through shared memory.
-export HTTP_FRONTS="${HTTP_FRONTS:-1}"
+# Three fronts and the database process hold up to 262,080 connections.
+export HTTP_FRONTS="${HTTP_FRONTS:-3}"
 export HTTP_BUFSZ="${HTTP_BUFSZ:-8192}"
 exec ./feed_server.x

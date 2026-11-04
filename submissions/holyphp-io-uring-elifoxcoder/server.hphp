@@ -1711,12 +1711,20 @@ class Server {
                 sqlite_bind_int($this->insPost, 1, $r["uid"]);
                 sqlite_bind_text($this->insPost, 2, $r["text"]);
                 $rc = sqlite_step($this->insPost);
-                if ($rc != 100) { $ok = false; break; }
+                if ($rc != 100) {
+                    /* sqlite3_step errors leave the statement active until it
+                     * is reset; do that before rolling back the batch. */
+                    sqlite_reset($this->insPost);
+                    sqlite_clear_bindings($this->insPost);
+                    $ok = false;
+                    break;
+                }
                 $pid = sqlite_column_int($this->insPost, 0);
                 $cat = sqlite_column_text($this->insPost, 1);
-                sqlite_step($this->insPost);
+                $done = sqlite_step($this->insPost);
                 sqlite_reset($this->insPost);
                 sqlite_clear_bindings($this->insPost);
+                if ($done != 101) { $ok = false; break; }
                 /* build the body here instead of asking SQLite's JSON
                  * functions to format it inside the statement */
                 $sb = sb_new();

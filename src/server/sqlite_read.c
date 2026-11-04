@@ -2,6 +2,7 @@
 // clang-format off
 #include "sqlite3.c"
 #include "sqlite_read.h"
+#include "storage/wal_vfs.hpp"
 #include "telemetry/wal_advice.h"
 // clang-format on
 
@@ -99,7 +100,7 @@ void tds_wal_drop_checkpointed(sqlite3 *db, int frames, unsigned event_capacity)
     }
 
     wal = sqlite3BtreePager(db->aDb[0].pBt)->pWal;
-    file = wal ? wal->pWalFd : 0;
+    file = wal ? tds_wal_unwrap(wal->pWalFd) : 0;
     if (!file || file->pMethods->xRead != unixRead)
     {
         return;

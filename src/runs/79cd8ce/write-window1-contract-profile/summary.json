@@ -1,0 +1,30 @@
+{
+  "measurement": {},
+  "schema_version": 1,
+  "anchor": "79cd8ced2cd0aa16d957c53791a3afa958d0b9c1",
+  "label": "write-window1-contract-profile",
+  "kind": "probe",
+  "started_at": "2026-11-04T17:05:08.805824+00:00",
+  "status": "failed",
+  "finished_at": "2026-11-04T17:06:20.915250+00:00",
+  "exit_code": 1,
+  "error": "CalledProcessError(8, ('docker', 'run', '--name=tds-wait-contract-cdc6a613', '--network=none', '--cpus=1', '--memory=2g', '--security-opt=seccomp=C:\\\\Users\\\\Admin\\\\AppData\\\\Local\\\\Temp\\\\twelve-dollar-source-9yzzr2zb\\\\source\\\\src\\\\docker\\\\seccomp.json', '--mount', 'type=bind,source=C:\\\\Users\\\\Admin\\\\AppData\\\\Local\\\\Temp\\\\twelve-dollar-source-9yzzr2zb\\\\source\\\\src,target=/source,readonly', '--entrypoint=sh', 'sha256:bbb1c093335ca96e84aae7f297a2ceebf42faab292ea35f63f94283bb115a779', '-ec', \"set -eu\\ncp -a /source/server/. /build/server/\\ncp -a /source/tests/. /build/tests/\\ncp -a /source/cmake/. /build/cmake/\\ncp /source/CMakeLists.txt /build/CMakeLists.txt\\ncmake -S /build -B /build/out -DBUILD_TESTING=ON -DTDS_TELEMETRY=profile\\ncmake --build /build/out --target server transport_tests io_lifetime_tests group_commit_tests application_tests checkpoint_tests telemetry_tests --parallel 2\\nctest --test-dir /build/out --output-on-failure -R 'io_uring_operations|transport_lifetimes|io_lifetime_contract|group_commit_contract|application_contract|checkpoint_lifetimes|telemetry_contract'\\n\"))",
+  "secondary_errors": [],
+  "workload": {
+    "kind": "cq_batch_transport_contract"
+  },
+  "instruments": {
+    "server_telemetry": "profile",
+    "perf": "off",
+    "client_diagnostics": false
+  },
+  "provenance": {
+    "source": {
+      "base_commit": "79cd8ced2cd0aa16d957c53791a3afa958d0b9c1",
+      "patch_sha256": "20a66ffdbee8355b9886066c83b34e9212fa20317a6aa23e3cc607be58ce43ba",
+      "source_sha256": "481d627b70a8be6ccca764907adf3010b467a2764c5d992711b9eba55c9afbba",
+      "patch": "source.patch"
+    },
+    "binary": null
+  }
+}

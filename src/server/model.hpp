@@ -76,7 +76,7 @@ struct WriteError
     std::string message;
 };
 
-inline constexpr std::size_t write_batch_limit = 16;
+inline constexpr std::size_t write_batch_limit = 32;
 
 using ReadQuery = std::variant<Health, Feed, GetPost>;
 using WriteCommand = std::variant<CreatePost, LikePost>;

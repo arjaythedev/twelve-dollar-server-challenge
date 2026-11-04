@@ -1,6 +1,10 @@
 tds_add_executable(group_commit_probe EXCLUDE_FROM_ALL group_commit.cpp)
 target_link_libraries(group_commit_probe PRIVATE sqlite Threads::Threads)
 
+tds_add_executable(wal_vfs_probe EXCLUDE_FROM_ALL wal_vfs.cpp)
+target_include_directories(wal_vfs_probe PRIVATE "${PROJECT_SOURCE_DIR}/server")
+target_link_libraries(wal_vfs_probe PRIVATE sqlite)
+
 tds_add_executable(response_reuse_probe EXCLUDE_FROM_ALL response_reuse.cpp)
 target_link_libraries(response_reuse_probe PRIVATE api transport sqlite)
 target_compile_definitions(response_reuse_probe PRIVATE TDS_RESPONSE_REUSE=1)

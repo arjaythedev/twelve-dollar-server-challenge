@@ -5,7 +5,7 @@ FetchContent_Declare(sqlite
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE
 )
 FetchContent_MakeAvailable(sqlite)
-tds_add_library(sqlite STATIC server/sqlite_read.c)
+tds_add_library(sqlite STATIC server/sqlite_read.c server/storage/wal_vfs.cpp)
 target_include_directories(sqlite SYSTEM PUBLIC ${sqlite_SOURCE_DIR})
 target_compile_definitions(sqlite PRIVATE SQLITE_THREADSAFE=2)
 target_link_libraries(sqlite PUBLIC ${CMAKE_DL_LIBS})

@@ -1,0 +1,154 @@
+{
+  "measurement": {
+    "variants": [
+      {
+        "run": "write-window0-350000",
+        "summary_sha256": "79bfdf73b40c5d541bbba7c0ca6f74c07a1bfebd3e87683b694c4df90c538c2b",
+        "status": "passed",
+        "window_ms": 0,
+        "workload": {
+          "generator": "cpp",
+          "vus": 350000,
+          "ramp": "30s",
+          "hold": "60s",
+          "seed": 20261104
+        },
+        "instruments": {
+          "server_telemetry": "off",
+          "client_diagnostics": false,
+          "perf": "off"
+        },
+        "binary": {
+          "server": {
+            "image_id": "sha256:26bc03251295b67f54033099022ae22cf4a791dc89fc82c81aa93f92eaf94b35",
+            "sha256": "5e06a676d66148e86b1672170a8831a74b53b1988c1d4f3b12b8cee20af5a505"
+          },
+          "generator": {
+            "image_id": "sha256:0f33d6a292cd1137bf8f1645e799e916b9f28e3131ec8eea3c99da61fc3116cd",
+            "sha256": "f2634e9500b5017ee4c3ca77329ea8a98c54544b92e972ba9ba637fba69a4a1e"
+          }
+        },
+        "requests": 3623829,
+        "cpu_us_per_request": 21.304001651292044,
+        "user_cpu_us_per_request": 5.947721595031112,
+        "kernel_cpu_us_per_request": 15.356280332212144,
+        "p99_ms": 181.6486228,
+        "hold_p99_ms": 304.815955,
+        "hold_rps": 37016.683333333334,
+        "server_peak_bytes": 1014812672,
+        "error_rate": 0.0,
+        "generator_activation_on_time": true
+      },
+      {
+        "run": "write-window1-350000",
+        "summary_sha256": "8dfe514e8cd188aef83fc0435ee15ee98b4e7201d8e307c8e6ba533a8a6ab346",
+        "status": "passed",
+        "window_ms": 1,
+        "workload": {
+          "generator": "cpp",
+          "vus": 350000,
+          "ramp": "30s",
+          "hold": "60s",
+          "seed": 20261104
+        },
+        "instruments": {
+          "server_telemetry": "off",
+          "client_diagnostics": false,
+          "perf": "off"
+        },
+        "binary": {
+          "server": {
+            "image_id": "sha256:d6e96e95043877f79b5a6945626643ce6a0775bfe00c8a23c38a27f86b5dbed9",
+            "sha256": "81bf9ca4d19e25c630c6000dcc71e4bfcd9e433aff0d0a9476fd550f0bb8f430"
+          },
+          "generator": {
+            "image_id": "sha256:0f33d6a292cd1137bf8f1645e799e916b9f28e3131ec8eea3c99da61fc3116cd",
+            "sha256": "f2634e9500b5017ee4c3ca77329ea8a98c54544b92e972ba9ba637fba69a4a1e"
+          }
+        },
+        "requests": 3627595,
+        "cpu_us_per_request": 21.134207649971952,
+        "user_cpu_us_per_request": 5.86142251271159,
+        "kernel_cpu_us_per_request": 15.272785137260362,
+        "p99_ms": 18.10052246,
+        "hold_p99_ms": 18.87125342,
+        "hold_rps": 37056.23333333333,
+        "server_peak_bytes": 1017790464,
+        "error_rate": 0.0,
+        "generator_activation_on_time": true
+      },
+      {
+        "run": "write-window0-control-repeat-350000",
+        "summary_sha256": "6c9ec7abdcdfcc9211389abcd81f203d7472dedfe3f07ab76f72686a3dc8c893",
+        "status": "passed",
+        "window_ms": 0,
+        "workload": {
+          "generator": "cpp",
+          "vus": 350000,
+          "ramp": "30s",
+          "hold": "60s",
+          "seed": 20261104
+        },
+        "instruments": {
+          "server_telemetry": "off",
+          "client_diagnostics": false,
+          "perf": "off"
+        },
+        "binary": {
+          "server": {
+            "image_id": "sha256:26bc03251295b67f54033099022ae22cf4a791dc89fc82c81aa93f92eaf94b35",
+            "sha256": "5e06a676d66148e86b1672170a8831a74b53b1988c1d4f3b12b8cee20af5a505"
+          },
+          "generator": {
+            "image_id": "sha256:0f33d6a292cd1137bf8f1645e799e916b9f28e3131ec8eea3c99da61fc3116cd",
+            "sha256": "f2634e9500b5017ee4c3ca77329ea8a98c54544b92e972ba9ba637fba69a4a1e"
+          }
+        },
+        "requests": 3628248,
+        "cpu_us_per_request": 20.518292850984828,
+        "user_cpu_us_per_request": 5.448101673314503,
+        "kernel_cpu_us_per_request": 15.070191453285442,
+        "p99_ms": 19.32734215,
+        "hold_p99_ms": 20.121018,
+        "hold_rps": 37054.61666666667,
+        "server_peak_bytes": 1071661056,
+        "error_rate": 0.0,
+        "generator_activation_on_time": true
+      }
+    ],
+    "native_contracts": [
+      "write-window1-contract-profile-v2",
+      "write-window1-contract-off"
+    ],
+    "decision": "Discard cross-turn deadlines; keep cap32 and end-turn flushing. A/B/A does not demonstrate a CPU saving from 1ms.",
+    "limits": "Sequential local Docker loopback comparisons. First control had a tail spike. No profile instrumentation or internal batch counters in these workload runs."
+  },
+  "schema_version": 1,
+  "anchor": "79cd8ced2cd0aa16d957c53791a3afa958d0b9c1",
+  "label": "write-window-comparison",
+  "kind": "comparison",
+  "started_at": "2026-11-04T17:33:17.909975+00:00",
+  "status": "passed",
+  "finished_at": "2026-11-04T17:33:17.911269+00:00",
+  "exit_code": 0,
+  "error": null,
+  "secondary_errors": [],
+  "workload": {
+    "vus": 350000,
+    "seed": 20261104,
+    "ramp": "30s",
+    "hold": "60s",
+    "sql_write_cap": 32,
+    "busy_cq_target": 128,
+    "busy_timeout_ms": 8
+  },
+  "instruments": {
+    "server_telemetry": "off",
+    "perf": "off",
+    "client_diagnostics": false
+  },
+  "provenance": {
+    "source": null,
+    "binary": null
+  }
+}

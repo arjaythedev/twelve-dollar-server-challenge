@@ -1,0 +1,33 @@
+{
+  "collection_errors": [
+    "Missing workload artifacts: run.json, k6-summary.json, environment.json, samples.json"
+  ],
+  "schema_version": 1,
+  "anchor": "79cd8ced2cd0aa16d957c53791a3afa958d0b9c1",
+  "label": "wal-plain-350000",
+  "kind": "workload",
+  "started_at": "2026-11-04T17:46:14.562687+00:00",
+  "status": "failed",
+  "finished_at": "2026-11-04T17:46:16.761116+00:00",
+  "exit_code": 1,
+  "error": "Command ('docker', 'build', '--progress=plain', '--platform=linux/amd64', '--tag=twelve-dollar-build:d7108ca8d25349b4ae9f24beaae418a8', '--target=final', '--build-arg=TDS_TELEMETRY=off', '--label=org.twelve-dollar.source-sha256=03e97f0b99719c2f7239a0010fbb80b94ad223e25a17aeee00bae134728232a4', '--label=org.twelve-dollar.patch-sha256=32a746682d0c3d933f7aebbea642bdc0a9599f4cee14e6f8ba48d727b6ce55ab', '--label=org.twelve-dollar.base-commit=79cd8ced2cd0aa16d957c53791a3afa958d0b9c1', '--label=org.twelve-dollar.build-spec={\"build_type\":\"Release\",\"generator_only\":false,\"platform\":\"linux/amd64\",\"sanitizers\":false,\"target\":\"final\",\"telemetry\":\"off\"}', '--file=C:\\\\Users\\\\Admin\\\\AppData\\\\Local\\\\Temp\\\\twelve-dollar-source-cp43l62i\\\\source\\\\src\\\\Dockerfile', 'C:\\\\Users\\\\Admin\\\\AppData\\\\Local\\\\Temp\\\\twelve-dollar-source-cp43l62i\\\\source\\\\src') returned non-zero exit status 1.",
+  "secondary_errors": [
+    "Missing workload artifacts: run.json, k6-summary.json, environment.json, samples.json"
+  ],
+  "workload": {
+    "generator": "cpp",
+    "vus": 350000,
+    "ramp": "30s",
+    "hold": "60s",
+    "seed": 20261104
+  },
+  "instruments": {
+    "server_telemetry": "off",
+    "client_diagnostics": false,
+    "perf": "off"
+  },
+  "provenance": {
+    "source": null,
+    "binary": null
+  }
+}

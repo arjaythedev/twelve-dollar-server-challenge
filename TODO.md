@@ -3,10 +3,9 @@
 Reference: `d297ca9`, 128 CQEs / 8 ms, 4-ms receive probes and 16 writes per transaction. Use 350k VUs, seed `20261104`, a fresh seeded database and 30s ramp. Profile for 5 minutes; short comparisons use 60s hold.
 
 - [x] Capture the [five-minute profile](src/runs/d297ca9/baseline-full-profile-350000-5m-analysis/summary.json): 217,114 CPU samples, no lost records, 20.56 us/request and zero HTTP errors. Recover the saved data after the original decoder timeout
-- [x] Record the 16/32-write comparison with CQ and timeout fixed: 32 used 3.2% less CPU and 2.4% less kernel CPU; keep 16 for the profiling reference until review
-- [ ] Compare cross-turn write accumulation first: use cap 32, compare 0 and 1 ms, then 2 ms only if useful. Reuse the bounded FIFO, start the deadline at its oldest command and keep SQLite transactions closed until flush
-  Bound every reactor wait, including idle/EINTR paths; check expiry during busy drains. Preserve pipeline order, commit-before-response and shutdown discard. Keep immediate flushing without EXT_ARG. Test sparse singleton expiry, capacity, busy satellites, errors and stop; record flush reason, batch size and queue age
-- [ ] Compare bounded contiguous WAL-write coalescing next: foreground pwrite paths use 4.8% of long-profile CPU, an upper bound. Flush commit bytes before NORMAL visibility, preserving short writes, errors and eviction
+- [x] Keep cap 32 after the 16/32-write comparison: 3.2% less CPU and 2.4% less kernel CPU in the short pair. The historical full-profile reference remains cap 16
+- [x] Test cross-turn write accumulation at cap 32 ([0/1/0-ms comparison](src/runs/79cd8ce/write-window-comparison/summary.json)): 21.30 / 21.13 / 20.52 us/request. No demonstrated CPU gain; remove the deadline path and keep end-turn flushing. Off/profile lifetime, ordering, error and shutdown tests passed
+- [x] Compare bounded WAL-write coalescing ([350k pair](src/runs/79cd8ce/wal-coalescing-350000-comparison/summary.json)): 20.78 to 20.40 us/request (-1.84%), kernel CPU -2.04%, p99 20.11 to 20.28 ms, zero errors. Keep the candidate; five native contracts passed, including commit visibility, rollback, errors and eviction
 - [ ] Compare direct B-tree post reads later: the complete route uses 4.5% of long-profile CPU, including necessary traversal and output
 - [ ] Compare checkpoint notification cadence and non-repeated eviction ranges separately if their measured costs justify them; advice uses only 0.72% of long-profile CPU
 - [ ] Screen parameterless-statement cleanup and create-only borrowed body bindings separately in native probes; their sampled cost is tiny

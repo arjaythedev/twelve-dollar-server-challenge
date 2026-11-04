@@ -20,7 +20,8 @@ Unchecked items are experiments; checked items include completed work and discar
 ### 2. Common-request CPU
 
 - [ ] Compare a direct B-tree point reader with prepared SQL for `GET /posts/:id` ([current SQL path](src/server/storage/database.cpp), [feed cursor API](src/server/sqlite_read.h)). Post reads were about 46% of requests in the historical 350k profile; confirm their current CPU share.
-  Include fresh snapshot/cursor setup, author lookup, current like counts and cleanup. Reuse request-local feed primitives, preserve missing-post/error behavior and retain SQL fallback for unsupported cases; compare route CPU and whole-server CPU/request.
+  Try a one-shot read-only B-tree transaction, avoiding SQL BEGIN/COMMIT and the unused feed cursor. Copy post/author bytes before closing cursors; preserve one fresh snapshot, current like counts, missing-author JOIN behavior and SQL fallback after cleanup.
+  Compare the complete Application read path and identical JSON, including snapshot setup/teardown. Test schema cookie/generation changes and failures before any cursor opens; an owned transaction still needs cleanup there.
   The current five-minute profile attributes 4.5% of CPU to the whole route, including required work; this is an upper bound for a replacement.
 
 - [ ] Skip storing irrelevant header values in [Parser callbacks](src/server/http/parser.cpp), while llhttp still validates every byte and handles framing. Match fragmented, case-insensitive `authorization` fields and copy only required request data.
@@ -95,12 +96,9 @@ Unchecked items are experiments; checked items include completed work and discar
 - [ ] If WAL backfill falls behind, compare a bounded write gate ([Ada PR 211](https://github.com/visseranalytics/twelve-dollar-server-challenge/blob/7ff01df614ba46dfe89c6388aab52ed176538873/submissions/ada-native-visseranalytics/src/database.adb#L28)). Keep independent reads moving; release held writes after the requested checkpoint pass or a timeout.
   Add explicit worker retry and reactor wakeup: our worker currently waits for another commit, which a gate could prevent. Preserve pipeline order and commit-before-response; compare WAL backlog, memory and write p99.
 
-- [x] Compare write-batch caps 16 and 32 with 128 CQEs / 8 ms fixed ([pair](src/runs/d297ca9/sql-write16-vs32-350000/summary.json)). The short 350k pair used 3.2% less CPU and 2.4% less kernel CPU at 32; average batch size rose from 5.56 to 5.99. The control's tail spike prevents attributing the p99 improvement to this change. Keep 16 for the full-profile reference until review.
+- [x] Compare write-batch caps 16 and 32 with 128 CQEs / 8 ms fixed ([pair](src/runs/d297ca9/sql-write16-vs32-350000/summary.json)). Keep 32: the short 350k pair used 3.2% less CPU and 2.4% less kernel CPU; average batch size rose from 5.56 to 5.99. The control's tail spike prevents attributing the p99 improvement to this change. The historical full-profile reference remains cap 16.
 
-- [ ] Compare bounded FIFO writes across reactor turns, flushing at capacity or the oldest command's deadline. Current end-turn flushing limits collection even with a larger cap; the CQ timeout is not a write window. Compare 0/1 ms first at a fixed cap, then 2 ms if promising.
-  Keep commands outside SQLite transactions until flush, bound reactor waits and busy-drain overshoot, and preserve FIFO, pipeline visibility, commit-before-response and shutdown discard. Without EXT_ARG, keep immediate flushing rather than exposing liburing's hidden timeout SQE to raw CQ dispatch.
-  At about 2,900 writes/s, 2 ms spans roughly 5.8 arrivals; bursts determine actual batch growth. Fewer commits save only their fixed cost, not all request CPU. Record flush reason, batch-size distribution and queue age; existing diagnostics already cover batch sizes.
-  The long profile attributes 10.1% of CPU to all write-batch work and 7.2% to SQLite commit phases, with overlapping WAL costs. These are ceilings, not additive savings estimates.
+- [x] Compare bounded FIFO writes across reactor turns ([0/1/0 ms, cap 32](src/runs/79cd8ce/write-window-comparison/summary.json)): 21.30 / 21.13 / 20.52 us/request. Discard the deadline path: no demonstrated CPU gain. Preserve the tested source patches and results; keep end-turn flushing.
 
 - [ ] Compare removing per-write savepoints for the fixed schema, relying on SQLite's statement rollback for ABORT constraints. Preserve batch failure, rollback quarantine and isolation; `RAISE(FAIL)` and custom trigger side effects need separate handling.
 
@@ -115,8 +113,8 @@ Unchecked items are experiments; checked items include completed work and discar
   Keep all lookup state within the request. Pin author pages until serialization; copy post bytes before moving cursors.
   Keep navigation in SQLite's pager/B-tree; logical IDs and timestamps do not identify stable file offsets.
 
-- [ ] Compare contiguous WAL-write coalescing over `unix-excl` ([Pavly](submissions/c-iouring-pavlyhalim/src/db.h)). Target pwrite calls; preserve commit visibility, short-write/error handling and NORMAL sync. Keep WAL eviction working through the wrapper; it currently requires `xRead == unixRead`.
-  The current five-minute profile attributes 4.8% of CPU to foreground pwrite paths, an upper bound rather than expected savings. Flush buffered commit bytes before SQLite publishes NORMAL commit visibility; flushing only at xSync is insufficient.
+- [x] Coalesce contiguous WAL appends over `unix-excl` ([Pavly](submissions/c-iouring-pavlyhalim/src/db.h), [350k pair](src/runs/79cd8ce/wal-coalescing-350000-comparison/summary.json)): CPU/request -1.84%, kernel CPU -2.04%, p99 20.11 to 20.28 ms, zero errors. Native write calls fell from 2,816 to 151 with equal bytes and syncs.
+  Flush complete commit frames before NORMAL visibility; existing header-only rewrites pass through immediately. The bounded wrapper preserves errors and unwraps the native file for WAL eviction. One local short pair; the VPS remains untested.
 
 - [ ] Compare checkpoint notification by newly committed frames and generation-aware eviction of only new completed ranges, separately. The current threshold uses absolute WAL frames and advice repeats the completed prefix. Preserve partial-checkpoint retries and memory bounds; 128/8-ms collection has already removed most historical checkpoint churn.
 
@@ -131,6 +129,9 @@ Unchecked items are experiments; checked items include completed work and discar
 ## Conditional: larger changes and build experiments
 
 ### Protocol, authentication and alternative transport
+
+- [ ] Research userspace TCP only after establishing a target-compatible packet path. F-Stack/DPDK and AF_XDP need privileged traffic steering; ordinary virtio can support DPDK, but stock Linux 6.8 virtio does not establish AF_XDP zero-copy support. IX requires unsupported hardware/modules; mTCP/IX remain architecture references.
+  One vCPU must service TCP timers and SQLite together. Confirm challenge rules, device access and affinity behavior before implementation; current loopback CPU shares are not projected savings ([AF_XDP 6.8](https://www.kernel.org/doc/html/v6.8/networking/af_xdp.html), [DPDK virtio](https://doc.dpdk.org/guides/nics/virtio.html)).
 
 - [ ] Measure request-local auth/JSON scratch: fixed-size signature decoding, HMAC key-context reuse and one UTF-8 trim/count pass. Verify every token again; keep malformed input and Unicode behavior unchanged.
 

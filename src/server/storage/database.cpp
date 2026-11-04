@@ -1,4 +1,5 @@
 #include "database.hpp"
+#include "wal_vfs.hpp"
 #include "../app/post_writer.hpp"
 #include "../diagnostics/database.hpp"
 #include "../sqlite_read.h"
@@ -62,7 +63,8 @@ Connection open(const std::string &path)
     // Both handles coordinate WAL locks in-process; external tools must wait until shutdown
     // locking_mode=EXCLUSIVE would also obstruct our checkpoint connection
     const int result = sqlite3_open_v2(path.c_str(), &raw,
-                                       SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX, "unix-excl");
+                                       SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX,
+                                       storage::wal_vfs_name());
     Connection db(raw);
     if (result != SQLITE_OK)
     {

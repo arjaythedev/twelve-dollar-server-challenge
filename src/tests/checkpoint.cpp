@@ -2,6 +2,7 @@
 #include "diagnostics/database.hpp"
 #include "sqlite_read.h"
 #include "storage/database.hpp"
+#include "storage/wal_vfs.hpp"
 
 #include <sqlite3.h>
 
@@ -677,8 +678,11 @@ extern "C" int __wrap_sqlite3_open_v2(const char *path, sqlite3 **db, int flags,
         ++control->opens;
         if (control->opens <= 2)
         {
-            require(vfs && std::string_view(vfs) == "unix-excl",
-                    "issuer and checkpoint handles must both use unix-excl");
+            auto *adapter = sqlite3_vfs_find(tds::storage::wal_vfs_name());
+            auto *parent = sqlite3_vfs_find("unix-excl");
+            require(vfs && adapter && parent && sqlite3_vfs_find(vfs) == adapter &&
+                        adapter->pAppData == parent,
+                    "issuer and checkpoint handles must both use the WAL adapter over unix-excl");
         }
         if (control->opens == 2 && control->fail_second_open)
         {

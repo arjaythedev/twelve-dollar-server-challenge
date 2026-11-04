@@ -1,0 +1,45 @@
+{
+  "measurement": {
+    "native_tests": [
+      "io_uring_operations",
+      "transport_lifetimes",
+      "io_lifetime_contract",
+      "group_commit_contract",
+      "application_contract",
+      "checkpoint_lifetimes",
+      "telemetry_contract"
+    ],
+    "passed": true
+  },
+  "schema_version": 1,
+  "anchor": "79cd8ced2cd0aa16d957c53791a3afa958d0b9c1",
+  "label": "write-window1-contract-off",
+  "kind": "probe",
+  "started_at": "2026-11-04T17:10:19.692931+00:00",
+  "status": "passed",
+  "finished_at": "2026-11-04T17:11:32.692495+00:00",
+  "exit_code": 0,
+  "error": null,
+  "secondary_errors": [],
+  "workload": {
+    "kind": "cq_batch_transport_contract"
+  },
+  "instruments": {
+    "server_telemetry": "off",
+    "perf": "off",
+    "client_diagnostics": false
+  },
+  "provenance": {
+    "source": {
+      "base_commit": "79cd8ced2cd0aa16d957c53791a3afa958d0b9c1",
+      "patch_sha256": "b9ef4be6a0dd7b170614384074b7142eca507828b47b05c2cdf37d020116dca2",
+      "source_sha256": "c6d82b172e1529e5fa6868584c0939e5f85bafbdbf8396c8f3c823bfc68b1bdb",
+      "patch": "source.patch"
+    },
+    "binary": {
+      "server": {
+        "sha256": "81bf9ca4d19e25c630c6000dcc71e4bfcd9e433aff0d0a9476fd550f0bb8f430"
+      }
+    }
+  }
+}

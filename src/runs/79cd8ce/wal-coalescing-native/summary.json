@@ -1,0 +1,30 @@
+{
+  "measurement": {},
+  "schema_version": 1,
+  "anchor": "79cd8ced2cd0aa16d957c53791a3afa958d0b9c1",
+  "label": "wal-coalescing-native",
+  "kind": "probe",
+  "started_at": "2026-11-04T17:39:13.233970+00:00",
+  "status": "failed",
+  "finished_at": "2026-11-04T17:40:09.728914+00:00",
+  "exit_code": 1,
+  "error": "CalledProcessError(8, ('docker', 'run', '--name=td-wal-vfs-70ac464b', '--network=none', '--cpus=1', '--memory=2g', '--mount', 'type=bind,source=C:\\\\Users\\\\Admin\\\\AppData\\\\Local\\\\Temp\\\\twelve-dollar-source-xd1ozcx9\\\\source\\\\src,target=/source,readonly', '--entrypoint=sh', 'sha256:bbb1c093335ca96e84aae7f297a2ceebf42faab292ea35f63f94283bb115a779', '-ec', 'set -eu\\nfind /source/server /source/tests /source/benchmarks /source/cmake -type f -exec sh -c \\'\\nfor source do\\n    target=/build/${source#/source/}\\n    mkdir -p \"$(dirname \"$target\")\"\\n    cmp -s \"$source\" \"$target\" || cp \"$source\" \"$target\"\\ndone\\' sh {} +\\ncmp -s /source/CMakeLists.txt /build/CMakeLists.txt || cp /source/CMakeLists.txt /build/CMakeLists.txt\\ncmake -S /build -B /build/out -DBUILD_TESTING=ON -DTDS_TELEMETRY=off\\ncmake --build /build/out --target server wal_vfs_tests wal_vfs_probe group_commit_tests checkpoint_tests application_tests btree_tests --parallel 2\\nctest --test-dir /build/out --output-on-failure -R \\'wal_vfs_contract|group_commit_contract|checkpoint_lifetimes|application_contract|btree_feed\\'\\n/build/out/benchmarks/wal_vfs_probe > /tmp/wal-probe.json\\ncat /tmp/wal-probe.json\\n'))",
+  "secondary_errors": [],
+  "workload": {
+    "kind": "wal_vfs_native"
+  },
+  "instruments": {
+    "server_telemetry": "off",
+    "perf": "off",
+    "client_diagnostics": false
+  },
+  "provenance": {
+    "source": {
+      "base_commit": "79cd8ced2cd0aa16d957c53791a3afa958d0b9c1",
+      "patch_sha256": "d1a29ee41cfe27e01fd359ef61d2be3e065f1aa7112640f68dd1d959416910e4",
+      "source_sha256": "ba0d6e1be6569b2d91cf976ecc82d2e8109ca73051a2c5bb01f6fa6a55f1b66b",
+      "patch": "source.patch"
+    },
+    "binary": null
+  }
+}

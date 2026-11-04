@@ -1,6 +1,6 @@
 # Benchmarks
 
-2026-11-01 to 2026-11-03. Ryzen 7 7800X3D, Ubuntu 24.04 in Docker Desktop/WSL2. Server: 1 CPU, 2 GiB, no container swap. k6 used the official workload and a fresh database per run, on Windows unless labeled Linux loopback (32 source IPs).
+2026-11-01 to 2026-11-04. Ryzen 7 7800X3D, Ubuntu 24.04 in Docker Desktop/WSL2. Server: 1 CPU, 2 GiB, no container swap. k6 used the official workload and a fresh database per run, on Windows unless labeled Linux loopback (32 source IPs).
 
 | Runtime | Users | Hold | Requests | Requests/s | p95 | p99 | Max | Errors | CPU/request | Peak RAM |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -109,6 +109,10 @@
 | C++ 0.1.0 (PGO plain, 60-s ramp) | 350,000 | 60 s | 4,184,480 | 26,153.00 | 4.558 ms | 5.781 ms | 21.67 ms | 0% | 23.80 us | 982.73 MiB |
 | C++ 0.1.0 (GCC 13 PGO, 60-s ramp) | 350,000 | 60 s | 4,183,847 | 26,148.90 | 4.986 ms | 20.087 ms | 192.38 ms | 0% | 23.11 us | 966.51 MiB |
 | C++ 0.1.0 (ring diagnostics, 60-s ramp) | 350,000 | 30 s | 3,072,657 | 23,635.67 | 4.581 ms | 5.966 ms | 42.38 ms | 0% | 24.35 us | 947.70 MiB |
+| C++ 0.1.0 ([WAL plain, Linux loopback](src/runs/79cd8ce/wal-plain-350000-v2/summary.json)) | 350,000 | 60 s | 3,628,673 | 27,912.89 | 14.093 ms | 20.111 ms | 38.67 ms | 0% | 20.78 us | 991.79 MiB |
+| C++ 0.1.0 ([WAL coalesced, Linux loopback](src/runs/79cd8ce/wal-coalesced-350000/summary.json)) | 350,000 | 60 s | 3,627,973 | 27,907.46 | 14.217 ms | 20.281 ms | 90.69 ms | 0% | 20.40 us | 965.11 MiB |
+
+WAL coalescing, 350k short pair: cap 32, CQ 128/8 ms, seed 20261104, fresh seed copies, telemetry/perf off. CPU/request -1.84%, kernel CPU -2.04%; hold p99 20.90 to 20.96 ms. [Data](src/runs/79cd8ce/wal-coalescing-350000-comparison/summary.json).
 
 CQ rotation and dispatch/wait cleanup: 70k A/B CPU/request -1.2%. Matched 350k/5m B/A: CPU/request +0.5%, hold p99 6.12 to 6.05 ms, peak RAM +47.67 MiB. Same seed, fresh seeded databases and generator; zero errors or memory-limit events. Rotation removed after no clear gain; accept/wait cleanup retained. [Data](src/runs/legacy/benchmark-cq-rotation/summary.json).
 

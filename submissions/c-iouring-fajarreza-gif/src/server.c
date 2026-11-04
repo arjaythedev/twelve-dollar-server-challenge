@@ -21,7 +21,7 @@
 #define NUM_RINGS 8
 #define MAX_SLOTS_PER_RING 55000
 #define TOTAL_MAX_SLOTS (NUM_RINGS * MAX_SLOTS_PER_RING)
-#define PBUF_ENTRIES 4096
+#define PBUF_ENTRIES 2048
 #define PBUF_SIZE 1024
 #define RESP_POOL_SIZE 2048
 #define RESP_BUF_SIZE 8192
@@ -197,9 +197,9 @@ int main() {
     for (int i = 0; i < NUM_RINGS; i++) {
         int defer = (i == 0) ? 1 : 0;
         const char *err = NULL;
-        unsigned cq = 65536;
-        while (ring_init(&g_rings[i], 4096, cq, g_slots_per_ring, PBUF_ENTRIES, PBUF_SIZE, defer, &err) != 0) {
-            if (cq <= 8192) {
+        unsigned cq = 8192;
+        while (ring_init(&g_rings[i], 2048, cq, g_slots_per_ring, PBUF_ENTRIES, PBUF_SIZE, defer, &err) != 0) {
+            if (cq <= 2048) {
                 fprintf(stderr, "Failed to initialize io_uring ring %d: %s (errno %d: %s)\n",
                         i, err ? err : "unknown", errno, strerror(errno));
                 return 1;

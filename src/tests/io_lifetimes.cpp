@@ -4,6 +4,7 @@
 
 #include <yyjson.h>
 
+#include <algorithm>
 #include <arpa/inet.h>
 #include <array>
 #include <cerrno>
@@ -295,6 +296,128 @@ void reservation_and_record_guards()
 #endif
 }
 
+void satellite_wake_read_lifetime()
+{
+    FileLimit limited(32);
+    Reactor reactor("127.0.0.1", 0);
+    reactor.start();
+    require(reactor.rings().size() == 2, "wake-read fixture did not create a satellite");
+    auto &primary = *reactor.rings().front();
+    auto &satellite = *reactor.rings()[1];
+    const auto quiet_pending = reactor.pending_count();
+    for (const auto &ring : reactor.rings())
+    {
+        ring->submit();
+    }
+    require(io_uring_get_events(&primary.queue) >= 0 && io_uring_cq_ready(&primary.queue) == 0 &&
+                satellite.wake_pending && satellite.wake_counter == 0 &&
+                reactor.pending_count() == quiet_pending,
+            "empty satellite read completed instead of remaining pending");
+
+    const auto deadline = Clock::now() + 2s;
+    for (const unsigned burst : {1U, 64U, 3U, 1U})
+    {
+        // The burst of 64 completes before submission of the newly armed primary read
+        const bool already_signaled = burst == 64;
+        if (!already_signaled)
+        {
+            primary.submit();
+            require(io_uring_get_events(&primary.queue) >= 0 &&
+                        io_uring_cq_ready(&primary.queue) == 0 && satellite.wake_pending &&
+                        satellite.wake_counter == 0,
+                    "rearmed empty satellite read did not remain pending");
+        }
+        for (unsigned index = 0; index < burst; ++index)
+        {
+            io_uring_prep_nop(satellite.entry(nullptr));
+        }
+        satellite.submit();
+        require(io_uring_cq_ready(&satellite.queue) == burst,
+                "satellite NOP burst did not produce the expected CQEs");
+        if (already_signaled)
+        {
+            pollfd ready{satellite.notification->get(), POLLIN, 0};
+            require(::poll(&ready, 1, 0) == 1 && (ready.revents & POLLIN),
+                    "satellite burst did not signal before the read was submitted");
+            primary.submit();
+        }
+        while (io_uring_cq_ready(&primary.queue) == 0)
+        {
+            require(Clock::now() < deadline, "satellite wake read did not complete");
+            const int result = io_uring_get_events(&primary.queue);
+            require(result >= 0 || result == -EINTR, "wake-read get events failed");
+        }
+        io_uring_cqe *wake = nullptr;
+        require(io_uring_peek_cqe(&primary.queue, &wake) == 0 &&
+                    io_uring_cqe_get_data(wake) == &satellite.wake_operation &&
+                    wake->res == static_cast<int>(sizeof(satellite.wake_counter)) &&
+                    wake->flags == 0 && satellite.wake_counter > 0 &&
+                    satellite.wake_counter <= burst,
+                "satellite wake read lost its eight-byte result, counter or owner");
+        std::uint64_t residual = 0;
+        require(::read(satellite.notification->get(), &residual, sizeof(residual)) == -1 &&
+                    errno == EAGAIN,
+                "completed satellite read did not reset the eventfd counter");
+
+        reactor.begin_turn();
+        unsigned completions = 0;
+        drain_turn(reactor, [&](const Completion &completion) {
+            require(completion.kind == CompletionKind::control,
+                    "satellite NOP burst exposed application I/O");
+            ++completions;
+        });
+        require(completions == burst + 1 && reactor.pending_count() == quiet_pending &&
+                    satellite.wake_pending && satellite.wake_counter == 0 &&
+                    io_uring_cq_ready(&primary.queue) == 0 &&
+                    io_uring_cq_ready(&satellite.queue) == 0,
+                "wake drain lost a completion, ownership or its next empty read");
+    }
+
+    primary.submit();
+    require(io_uring_get_events(&primary.queue) >= 0 && io_uring_cq_ready(&primary.queue) == 0 &&
+                satellite.wake_pending,
+            "shutdown fixture did not retain a pending empty wake read");
+    reactor.request_stop();
+    while (reactor.pending_count())
+    {
+        await_completion(reactor, deadline);
+        reactor.begin_turn();
+        drain_turn(reactor, [](const Completion &completion) {
+            require(completion.kind == CompletionKind::control,
+                    "wake-read shutdown exposed application I/O");
+        });
+    }
+    require(reactor.stopping() && !satellite.wake_pending && primary.pending == 0 &&
+                satellite.pending == 0 && io_uring_cq_ready(&primary.queue) == 0 &&
+                io_uring_cq_ready(&satellite.queue) == 0,
+            "shutdown retained the original wake read, a cancel CQE or satellite ownership");
+
+    struct Unwind
+    {
+    };
+
+    try
+    {
+        // Unwinding must cancel the primary read before releasing satellite-owned storage
+        Reactor interrupted("127.0.0.1", 0);
+        interrupted.start();
+        require(interrupted.rings().size() == 2, "unwind fixture did not create a satellite");
+        for (const auto &ring : interrupted.rings())
+        {
+            ring->submit();
+        }
+        auto &owner = *interrupted.rings().front();
+        const auto &target = *interrupted.rings()[1];
+        require(io_uring_get_events(&owner.queue) >= 0 && io_uring_cq_ready(&owner.queue) == 0 &&
+                    target.wake_pending && target.wake_counter == 0,
+                "unwind fixture did not retain a quiet pending read");
+        throw Unwind{};
+    }
+    catch (const Unwind &)
+    {
+    }
+}
+
 void primary_progress_with_ready_satellite()
 {
     constexpr rlim_t slots = 64;
@@ -339,6 +462,8 @@ void primary_progress_with_ready_satellite()
     auto &primary = *reactor.rings().front();
     require(&connection.ring == &primary && reactor.rings().size() == 2,
             "reserved direct slots did not create a real satellite ring");
+    require(primary.queue.flags & IORING_SETUP_TASKRUN_FLAG,
+            "primary deferred work does not advertise TASKRUN");
     auto &satellite = *reactor.rings()[1];
     primary.submit();
 
@@ -375,6 +500,35 @@ void primary_progress_with_ready_satellite()
     };
     try
     {
+        // Settle the satellite notification before exercising a clean empty primary
+        int settled;
+        do
+        {
+            settled = io_uring_submit_and_get_events(&primary.queue);
+        } while (settled == -EINTR);
+        require(settled >= 0, "settle the primary satellite notification");
+        reactor.begin_turn();
+        drain_turn(reactor, [](const Completion &completion) {
+            require(completion.kind == CompletionKind::control,
+                    "unexpected application I/O before the clean primary turn");
+        });
+        primary.submit();
+        require(io_uring_sq_ready(&primary.queue) == 0 && io_uring_cq_ready(&primary.queue) == 0 &&
+                    !(io_uring_smp_load_acquire(primary.queue.sq.kflags) &
+                      (IORING_SQ_TASKRUN | IORING_SQ_CQ_OVERFLOW)) &&
+                    io_uring_cq_ready(&satellite.queue) == 256,
+                "clean primary fixture retained work or lost its ready satellite");
+        reactor.begin_turn();
+        unsigned quiet_count = 0;
+        drain_turn(reactor, [&](const Completion &completion) {
+            require(completion.kind == CompletionKind::control,
+                    "clean primary turn exposed application I/O");
+            ++quiet_count;
+        });
+        require(quiet_count == 256 && io_uring_cq_ready(&primary.queue) == 0,
+                "clean empty primary did not service its ready satellite");
+        add_satellite_completions(512);
+
         peer.send_byte();
         bool received = false;
         const auto receive_deadline = Clock::now() + 2s;
@@ -778,6 +932,59 @@ void fixed_cq_order_and_growth()
         });
     }
     require(peer.closed(deadline), "shutdown after ring growth did not close the peer");
+}
+
+void cq_wrap_and_last_consumer_publication()
+{
+    FileLimit limited(64);
+    Reactor reactor("127.0.0.1", 0);
+    auto &primary = *reactor.rings().front();
+    const auto publish = [&](unsigned count) {
+        for (unsigned index = 0; index < count; ++index)
+        {
+            io_uring_prep_nop(primary.entry(nullptr));
+        }
+        int result;
+        do
+        {
+            result = io_uring_submit_and_wait(&primary.queue, count);
+        } while (result == -EINTR);
+        require(result >= 0 && io_uring_cq_ready(&primary.queue) == count,
+                "CQ wrap fixture did not publish its real NOP batch");
+    };
+    const auto consume = [&](unsigned count) {
+        const auto head = io_uring_smp_load_acquire(primary.queue.cq.khead);
+        reactor.begin_turn();
+        Completion completion;
+        for (unsigned index = 0; index < count; ++index)
+        {
+            require(reactor.next(completion) && completion.kind == CompletionKind::control,
+                    "CQ cursor lost a NOP before its bounded snapshot ended");
+            require(io_uring_smp_load_acquire(primary.queue.cq.khead) == head,
+                    "CQ head advanced before the last completion consumer finished");
+        }
+        require(!reactor.next(completion), "CQ cursor exceeded its bounded snapshot");
+        reactor.finish_turn();
+        require(io_uring_smp_load_acquire(primary.queue.cq.khead) == head + count,
+                "CQ finish did not publish the complete consumed batch");
+    };
+
+    // Reach the physical wrap with real completions instead of rewriting shared cursors
+    unsigned prefix = primary.queue.cq.ring_entries - 128;
+    while (prefix)
+    {
+        const auto count = std::min(prefix, 256U);
+        publish(count);
+        consume(count);
+        prefix -= count;
+    }
+    publish(512);
+    consume(256);
+    require(io_uring_cq_ready(&primary.queue) == 256,
+            "CQ wrap consumed the next turn's batch or lost its cap");
+    consume(256);
+    require(primary.pending == 0 && io_uring_cq_ready(&primary.queue) == 0,
+            "CQ wrap retained or duplicated a completion");
 }
 
 void exhausted_receive_retries()
@@ -1535,10 +1742,12 @@ int main()
     try
     {
         reservation_and_record_guards();
+        satellite_wake_read_lifetime();
         primary_progress_with_ready_satellite();
         primary_progress_after_hot_turn();
         empty_primary_turn_returns_to_blocking_wait();
         fixed_cq_order_and_growth();
+        cq_wrap_and_last_consumer_publication();
         exhausted_receive_retries();
         close_and_late_accept();
         telemetry_hook_contracts();
@@ -1546,11 +1755,12 @@ int main()
         telemetry_history_growth_after_wrap();
 #endif
         ::alarm(0);
-        std::puts(
-            "I/O reservation, fixed CQ order/growth, primary progress with a ready satellite, "
-            "sparse timed and idle primary waits, "
-            "original-CQE lifetime, "
-            "prompt TCP EOF and late-accept shutdown checks passed");
+        std::puts("I/O reservation, satellite wake-read ownership, fixed CQ order/growth, "
+                  "primary progress with a ready satellite, "
+                  "CQ wrap and last-consumer publication, "
+                  "sparse timed and idle primary waits, "
+                  "original-CQE lifetime, "
+                  "prompt TCP EOF and late-accept shutdown checks passed");
 
         return 0;
     }

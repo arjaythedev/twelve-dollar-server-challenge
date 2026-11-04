@@ -95,8 +95,10 @@ Assign disjoint files before each implementation batch. Agents preserve concurre
 - [x] Optimize the single-worker generator: prepare sockets before the start gate and reuse immutable request bytes, preserving HTTP checks and workload timing
 - [x] Validate generator CPU headroom with repeated short 350k runs, the 100ms activation margin and exact latency aggregation; one worker has sufficient reserve
 - [x] Check probabilities and think times against `bench/load.js`; exclude client preparation from HTTP duration and begin think time after response processing
-- [x] Compare CQ waits with focused I/O tests and a short 350k A/B; keep `wait_nr=1`
-- [ ] Reduce wait-one CPU costs without losing write batching or tail latency; stay compatible with stock Linux 6.8
+- [x] Compare CQ targets 1/32/64/128 at 350k; keep 128-CQE / 8-ms collection and 4-ms receive-retry probes, retaining 32/4 ms as the reference
+- [x] Simplify CQ dispatch and use TASKRUN-aware primary submission; verify wraparound, ready-satellite progress and shutdown
+- [x] Replace satellite poll plus synchronous read with an io_uring read; verify notification bursts, cancellation and primary-first teardown
+- [ ] Compare write-batch caps 16 and 32 with the selected CQ policy; cap 16 was reached by 13.8% of full-hold batches
 - [ ] Compare direct B-tree post reads with prepared SQL, including the complete request lifecycle and fallback behavior
 
 ## Later

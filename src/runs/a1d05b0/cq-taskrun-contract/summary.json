@@ -1,0 +1,41 @@
+{
+  "measurement": {
+    "native_tests": [
+      "io_uring_operations",
+      "transport_lifetimes",
+      "io_lifetime_contract"
+    ],
+    "passed": true
+  },
+  "schema_version": 1,
+  "anchor": "a1d05b00d865b61613446783f3eabddd5e2ff3c7",
+  "label": "cq-taskrun-contract",
+  "kind": "probe",
+  "started_at": "2026-11-04T15:04:36.398912+00:00",
+  "status": "passed",
+  "finished_at": "2026-11-04T15:04:51.083973+00:00",
+  "exit_code": 0,
+  "error": null,
+  "secondary_errors": [],
+  "workload": {
+    "kind": "cq_batch_transport_contract"
+  },
+  "instruments": {
+    "server_telemetry": "profile",
+    "perf": "off",
+    "client_diagnostics": false
+  },
+  "provenance": {
+    "source": {
+      "base_commit": "a1d05b00d865b61613446783f3eabddd5e2ff3c7",
+      "patch_sha256": "a9c4a477da3a98ac1fd04a72424ba571922fd972f897bfc06af3096b3b79aabb",
+      "source_sha256": "9a890298c9961f5af678cb2c58921ab5de8b280ff46766062835ece3654ffcd2",
+      "patch": "source.patch"
+    },
+    "binary": {
+      "server": {
+        "sha256": "ac893876eec5a9d600ec195e63af656c816cb070ff77fa043456476e3e41a00d"
+      }
+    }
+  }
+}

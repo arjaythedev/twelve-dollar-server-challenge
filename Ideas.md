@@ -12,9 +12,6 @@ Unchecked items are experiments; checked items include completed work and discar
 - [ ] Compare one versus two generator workers if higher loads exhaust the optimized single worker. Use a shared start gate, disjoint VUs/source IPs and fixed worker seeds; merge latency samples before calculating percentiles.
   Preserve total load and API checks. Reject late activation, incomplete response coverage and workflow failures; report client CPU, timer lag and epoll service lag separately. Repeat server comparisons with the same worker split.
 
-- [ ] Reduce the CPU cost of `wait_nr=1` in [Reactor::wait](src/server/net/reactor.cpp) while preserving its latency benefit and ready-CQE bulk drain. Compare 50/100/250/500 us collection budgets and track write-batch sizes as well as CPU/request.
-  On stock Linux 6.8, test a bounded two-stage wait: collect up to 32 CQEs briefly, then wait for one if none are ready, within the remaining 4-ms outer deadline. Preserve idle/accept/shutdown bypasses and primary GETEVENTS progress. Native `IORING_FEAT_MIN_TIMEOUT` needs Linux 6.12+ and is unavailable on the target VPS ([liburing](https://github.com/axboe/liburing/blob/liburing-2.15/man/io_uring_submit_and_wait_min_timeout.3)).
-
 - [ ] Compare bounded handler/CQ work and age-aware batching after separating wait costs. The current CQ drain already caps each ring at 256 entries; compare elapsed-time limits and oldest-response age without waiting while application work is ready.
   `C ~= C_enter/requests_per_enter + C_other`. Submit pending sends promptly; the earlier per-ring submission comparison found no gain.
   Budget socket input and handler/output work separately: `M_queue ~= Q_kernel*m_kernel + Q_app*m_app`. Start with bounded FIFO and high/low watermarks; try byte-deficit scheduling with age promotion only for measured size imbalance. Preserve connection/write order and fresh reads.
@@ -52,6 +49,8 @@ Unchecked items are experiments; checked items include completed work and discar
 - [ ] Compare one versus eight `SO_REUSEPORT` listeners with the same total pending accepts ([sys.h](submissions/c-iouring-pavlyhalim/src/sys.h)). Target connection ramps and churn separately from established-request throughput.
 
 - [ ] Compare multishot accept separately to reduce accept SQEs and rearming. Count accepted sockets and terminal CQEs correctly, close arrivals during shutdown and rearm after termination.
+
+- [ ] Compare persistent satellite notification polls with the one-shot wake READ ([C on_evfd](submissions/c-iouring-pavlyhalim/src/server.c)). The reference leaves the counter unread and rearms only after a terminal CQE. Probe repeated wakeups, MORE accounting, cancellation and overflow before changing ownership.
 
 - [ ] Compare process-local TCP options independently: `TCP_NODELAY` for small responses, `TCP_DEFER_ACCEPT` for churn and explicitly uncorked `TCP_CORK` for deliberate coalescing ([TCP options](https://man7.org/linux/man-pages/man7/tcp.7.html)).
   Accepted sockets use direct descriptors: never pass a fixed-file slot to `setsockopt()`. Check supported io_uring socket commands or listener-option inheritance first. Measure packets, CPU and p99; the existing single header/body send already coalesces output, corking can delay it, and deferred accept mainly affects establishment. Keep system-wide kernel settings unchanged.
@@ -96,7 +95,9 @@ Unchecked items are experiments; checked items include completed work and discar
 - [ ] If WAL backfill falls behind, compare a bounded write gate ([Ada PR 211](https://github.com/visseranalytics/twelve-dollar-server-challenge/blob/7ff01df614ba46dfe89c6388aab52ed176538873/submissions/ada-native-visseranalytics/src/database.adb#L28)). Keep independent reads moving; release held writes after the requested checkpoint pass or a timeout.
   Add explicit worker retry and reactor wakeup: our worker currently waits for another commit, which a gate could prevent. Preserve pipeline order and commit-before-response; compare WAL backlog, memory and write p99.
 
-- [ ] Tune batch size or a collection window from the measured write arrival rate: average collection wait `~= (b-1)/(2*lambda)`.
+- [ ] Compare write-batch caps 16 and 32 with the selected 128-CQE / 8-ms policy. Cap 16 now binds in 13.8% of full-hold batches, containing 38.7% of writes; larger receive pools and CQs showed no pressure in that run.
+  Preserve per-command rollback, connection order and commit-before-response. Average collection wait `~= (b-1)/(2*lambda)`; compare kernel/user CPU per request, commits and p99 before adding another queue.
+  Rust and C commit across a turn, while our CQ drain stops at 256 entries per ring and SQL commits at 16 writes. Test those limits separately; their larger CQ targets alone do not reproduce their transaction batching.
 
 - [ ] Compare removing per-write savepoints for the fixed schema, relying on SQLite's statement rollback for ABORT constraints. Preserve batch failure, rollback quarantine and isolation; `RAISE(FAIL)` and custom trigger side effects need separate handling.
 
@@ -176,9 +177,12 @@ Unchecked items are experiments; checked items include completed work and discar
 
 - [x] Send headers and the moved response body with one scatter-gather operation; release body storage after the final send completion.
 
-- [x] Compare busy-only 32-CQE / 4-ms waits with idle, accept and shutdown bypasses. An 8-ms wait did not reduce CPU further.
+- [x] Compare CQ targets and timeouts separately with the same current generator ([comparison](src/runs/a1d05b0/cq-wait-comparison-350000/summary.json)). The 32/64/128 targets at 4 ms plateaued around 23.4 us/request; 128/2 ms used 25.69, while 128/8 ms reached 21.45, including 15.62 kernel us/request, with 18.82-ms p99 and no errors.
+  Keep idle/accept/shutdown bypasses, the 256-CQE drain cap and 4-ms deferred-receive probes. Mean SQL batch size rose from 3.41 to 5.33 versus 32 / 4 ms. The current-generator wait-one control used 28.55 us/request; earlier comparisons had activation failures.
 
-- [x] Keep `wait_nr=1` and the existing bulk drain. The short 350k pair lowered p99 but used about 15% more server CPU, with smaller write batches. The [control](src/runs/f5874c6/wait-one-control-350000/summary.json) missed the generator activation deadline; the [candidate](src/runs/f5874c6/wait-one-candidate-350000/summary.json) passed. Treat the comparison as provisional.
+- [x] Discard the 250-us two-stage collection experiment: hold CPU fell only about 0.85%, with little change in write-batch size. Extra wait logic was not justified. Native `IORING_FEAT_MIN_TIMEOUT` requires Linux 6.12+; keep the implementation compatible with stock 6.8.
+
+- [x] Read satellite eventfds directly through io_uring, removing the separate read syscall. Rotated native probes saved 6-22% CPU per notification; the [350k pair](src/runs/a1d05b0/cq-batch128-8ms-read-350000/summary.json) changed total CPU/request by about -0.7%, too little to isolate a whole-server gain. Empty reads, repeated bursts, ready-satellite progress and stop pass; destroy the primary before its satellite read buffers.
 
 - [x] Remove the admission experiment after the 300k/5m regression. Revisit only under the bounded-admission idea above.
 
@@ -206,9 +210,9 @@ Unchecked items are experiments; checked items include completed work and discar
 - [x] Collect handler, database-method, commit and send-preparation-to-CQE histograms, with per-ring CQ depth/overflow and five-second client/scheduling windows. Send timing includes batching and CQ service delay; CPU samples omit I/O waits.
   A 300k trace captured 2.53- and 1.43-second foreground commits followed by full CQs and CPU saturation. Client scheduling stayed near 1 ms; foreground WAL-header sync under NORMAL is a candidate to measure next.
 
-- [x] Enable primary-only `SINGLE_ISSUER`/`DEFER_TASKRUN`, with GETEVENTS on the ready-satellite shortcut. Receive, partial send and stop progress passed with continuously ready satellites; satellite wakeups stay unchanged. Short 70k pair: CPU/request -3.4%, p99 unchanged.
+- [x] Enable primary-only `SINGLE_ISSUER`/`DEFER_TASKRUN` and `TASKRUN_FLAG`. On a ready-satellite turn, submit enters GETEVENTS only when pending submissions, deferred work or overflow require it. Receive, partial send and stop progress pass with continuously ready satellites; the small cleanup alone showed no clear whole-server CPU gain.
 
-- [x] Use a fixed 16-byte CQE cursor, preserving acquire/release ordering, wraparound and the 256-CQE bound. Dispatch code shrank by 32 bytes; native timing gain remains inconclusive.
+- [x] Use a fixed 16-byte CQE cursor and cap its opening snapshot at 256 entries. Publish the consumed head after the last consumer and accumulate the turn count once per ring. Wraparound and last-consumer tests pass; optimized dispatch removes two instructions per completion, without claiming a separate whole-server speedup.
 
 - [x] Snapshot the stable ring span in `wait()`, outside accept handling. Repeated vector loads disappeared and code shrank by 22 bytes; native timing gain remains inconclusive.
 

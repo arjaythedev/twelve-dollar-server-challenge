@@ -76,6 +76,8 @@ class Ring
     // Deferred records have no SQE in flight and remain owned by connections
     std::deque<Connection *> deferred_receives;
     std::chrono::steady_clock::time_point next_receive_probe{};
+    // Written by the primary ring until the terminal wake CQE is consumed
+    std::uint64_t wake_counter = 0;
     Operation wake_operation;
     unsigned pending = 0;
     std::size_t shutdown_cursor = 0;

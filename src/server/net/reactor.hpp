@@ -38,6 +38,7 @@ class Reactor
   public:
     // Create, drive and destroy the reactor on the same issuer thread
     Reactor(std::string_view host, std::uint16_t port);
+    ~Reactor();
     Reactor(const Reactor &) = delete;
     Reactor &operator=(const Reactor &) = delete;
 
@@ -60,7 +61,7 @@ class Reactor
   private:
     void receive(Connection &connection, bool poll_first);
     void accept();
-    void poll_satellite(Ring &owner);
+    void arm_wake(Ring &owner);
     void retry_receives(Ring &owner);
     void cancel(Ring &owner, Operation &operation);
     void stop_all();

@@ -18,7 +18,6 @@
 
 namespace tds::net
 {
-
 using telemetry::IoTelemetry;
 
 Reactor::Reactor(std::string_view host, std::uint16_t port)
@@ -62,6 +61,12 @@ Reactor::Reactor(std::string_view host, std::uint16_t port)
         throw std::runtime_error("file limit leaves no direct descriptor slots");
     }
     rings_.push_back(std::make_unique<Ring>(table_size_, true));
+}
+
+Reactor::~Reactor()
+{
+    // The primary owns wake READs into satellites, so stop it before their storage dies
+    rings_.front().reset();
 }
 
 void Reactor::start()
@@ -109,11 +114,13 @@ bool Reactor::next(Completion &completion)
             IoTelemetry::drain_started(owner);
             // Ring never enables CQE32 or mixed CQEs, so each completion advances one entry
             auto &cq = owner.queue.cq;
-            cq_cursor_ = {cq.cqes, cq.ring_mask, *cq.khead, io_uring_smp_load_acquire(cq.ktail)};
+            const auto head = *cq.khead;
+            const auto ready = io_uring_smp_load_acquire(cq.ktail) - head;
+            cq_cursor_ = {cq.cqes, cq.ring_mask, head, head + std::min(ready, 256U)};
             drained_ = 0;
             ring_started_ = true;
         }
-        if (drained_ == 256 || cq_cursor_.head == cq_cursor_.tail)
+        if (cq_cursor_.head == cq_cursor_.tail)
         {
             finish_ring();
             continue;
@@ -123,7 +130,6 @@ bool Reactor::next(Completion &completion)
         --owner.pending;
         auto *operation = static_cast<Operation *>(io_uring_cqe_get_data(cqe));
         ++drained_;
-        ++turn_count_;
         complete(owner, operation, cqe->res, cqe->flags, completion);
 
         return true;
@@ -136,7 +142,11 @@ void Reactor::finish_ring()
 {
     auto &owner = *rings_[ring_index_];
     // The caller finishes the last CQE, including a full write batch, before CQ advance
-    io_uring_cq_advance(&owner.queue, drained_);
+    if (drained_)
+    {
+        io_uring_smp_store_release(owner.queue.cq.khead, cq_cursor_.head);
+        turn_count_ += drained_;
+    }
     IoTelemetry::drain_finished(owner, drained_);
     if (stopping_)
     {
@@ -263,7 +273,7 @@ void Reactor::accept()
             auto owner = std::make_unique<Ring>(table_size_, false);
             accepting = owner.get();
             rings_.push_back(std::move(owner));
-            poll_satellite(*accepting);
+            arm_wake(*accepting);
         }
         ticket.ring = accepting;
         ticket.slot = accepting->connections.reserve();
@@ -273,10 +283,12 @@ void Reactor::accept()
     }
 }
 
-void Reactor::poll_satellite(Ring &owner)
+void Reactor::arm_wake(Ring &owner)
 {
-    io_uring_prep_poll_add(rings_.front()->entry(&owner.wake_operation), owner.notification->get(),
-                           POLLIN);
+    // Let the pending read sleep in io_uring instead of polling and issuing another syscall
+    owner.wake_counter = 0;
+    io_uring_prep_read(rings_.front()->entry(&owner.wake_operation), owner.notification->get(),
+                       &owner.wake_counter, sizeof(owner.wake_counter), 0);
     owner.wake_pending = true;
 }
 
@@ -356,26 +368,17 @@ void Reactor::advance_shutdown(Ring &owner)
 void Reactor::complete_wake(Ring &owner, int result)
 {
     owner.wake_pending = false;
-    if (result >= 0)
+    if (result >= 0 && result != static_cast<int>(sizeof(owner.wake_counter)))
     {
-        std::uint64_t notifications = 0;
-        ssize_t read;
-        do
-        {
-            read = ::read(owner.notification->get(), &notifications, sizeof(notifications));
-        } while (read < 0 && errno == EINTR);
-        if (read < 0 && errno != EAGAIN)
-        {
-            throw std::system_error(errno, std::generic_category(), "ring notification");
-        }
+        throw std::runtime_error("short ring notification read");
     }
-    else if (result != -ECANCELED && result != -EINTR)
+    if (result < 0 && result != -ECANCELED && result != -EINTR)
     {
-        throw std::system_error(-result, std::generic_category(), "ring poll");
+        throw std::system_error(-result, std::generic_category(), "ring notification read");
     }
     if (!closing_wakeups_)
     {
-        poll_satellite(owner);
+        arm_wake(owner);
     }
 }
 
@@ -540,12 +543,12 @@ int Reactor::wait()
         }
     }
     // Cursed: an empty SQ does not mean the primary gets a day off
-    // GETEVENTS still runs its deferred work while satellites keep the loop busy
+    // TASKRUN and overflow flags make submit enter GETEVENTS when progress is needed
     for (std::size_t index = 1; index < owners.size(); ++index)
     {
         if (io_uring_cq_ready(&owners[index]->queue))
         {
-            return io_uring_submit_and_get_events(&primary);
+            return io_uring_submit(&primary);
         }
     }
     const bool immediate = accepted_ || previous_count_ < 2;
@@ -560,17 +563,20 @@ int Reactor::wait()
 
         return false;
     };
-    // Busy turns and ready satellites do not need to inspect deferred receive queues
+    // A quiet turn can block only when no deferred receive needs a timed probe
     if (stopping_ || !(primary.features & IORING_FEAT_EXT_ARG) ||
         (immediate && !has_deferred_receives()))
     {
         return io_uring_submit_and_wait(&primary, 1);
     }
-    __kernel_timespec timeout{0, 4'000'000};
+    // Exhausted receive queues keep their 4-ms probe even while busy turns collect longer
+    const auto wait_ns = !immediate && !has_deferred_receives() ? 8'000'000 : 4'000'000;
+    __kernel_timespec timeout{0, wait_ns};
     io_uring_cqe *first = nullptr;
 
-    // Wake on the first CQE; next() still drains the completions already queued
-    return io_uring_submit_and_wait_timeout(&primary, &first, 1, &timeout, nullptr);
+    // Keep sparse retry turns prompt; busy turns collect CQEs for larger write batches
+    return io_uring_submit_and_wait_timeout(&primary, &first, immediate ? 1 : 128, &timeout,
+                                            nullptr);
 }
 
 void Reactor::finish_wakeups()

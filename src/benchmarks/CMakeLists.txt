@@ -1,5 +1,5 @@
 tds_add_executable(group_commit_probe EXCLUDE_FROM_ALL group_commit.cpp)
-target_link_libraries(group_commit_probe PRIVATE sqlite Threads::Threads)
+target_link_libraries(group_commit_probe PRIVATE api sqlite Threads::Threads)
 
 tds_add_executable(wal_vfs_probe EXCLUDE_FROM_ALL wal_vfs.cpp)
 target_include_directories(wal_vfs_probe PRIVATE "${PROJECT_SOURCE_DIR}/server")

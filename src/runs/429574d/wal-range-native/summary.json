@@ -1,0 +1,604 @@
+{
+  "measurement": {
+    "release_contracts_passed": true,
+    "profile_checkpoint_contract_passed": true,
+    "tests": [
+      "checkpoint_lifetimes",
+      "wal_vfs_contract",
+      "group_commit_contract",
+      "application_contract"
+    ],
+    "cases": {
+      "repeated": {
+        "paired_cpu_change_percent": [
+          -49.740799055907125,
+          -27.65387947257475,
+          -41.03265122106649,
+          -42.34540433572219
+        ],
+        "control_cpu_ns_per_attempt": [
+          2284.521,
+          2069.753,
+          2038.423,
+          2057.189
+        ],
+        "candidate_cpu_ns_per_attempt": [
+          1148.182,
+          1497.386,
+          1202.004,
+          1186.064
+        ],
+        "untimed_count_passes": {
+          "control": {
+            "case": "repeated",
+            "attempts": 1000,
+            "cpu_ns": 0,
+            "count_pass": true,
+            "incremental": false,
+            "expected_calls": 1000,
+            "expected_bytes": 8458240000,
+            "coverage_bytes": 8458240,
+            "resident_bytes_measured": false,
+            "real_advice": true,
+            "event_capacity": 0,
+            "synthetic_fresh_state": false
+          },
+          "candidate": {
+            "case": "repeated",
+            "attempts": 1000,
+            "cpu_ns": 0,
+            "count_pass": true,
+            "incremental": true,
+            "expected_calls": 1,
+            "expected_bytes": 8458240,
+            "coverage_bytes": 8458240,
+            "resident_bytes_measured": false,
+            "real_advice": true,
+            "event_capacity": 0,
+            "synthetic_fresh_state": false
+          }
+        },
+        "median_cpu_change_percent": -41.68902777839434
+      },
+      "growing": {
+        "paired_cpu_change_percent": [
+          -7.795456399745515,
+          -3.3483574230954383,
+          -9.36967151025695,
+          -4.1934337156877
+        ],
+        "control_cpu_ns_per_attempt": [
+          2120.389,
+          1952.42,
+          2266.707,
+          2005.731
+        ],
+        "candidate_cpu_ns_per_attempt": [
+          1955.095,
+          1887.046,
+          2054.324,
+          1921.622
+        ],
+        "untimed_count_passes": {
+          "control": {
+            "case": "growing",
+            "attempts": 1000,
+            "cpu_ns": 0,
+            "count_pass": true,
+            "incremental": false,
+            "expected_calls": 1000,
+            "expected_bytes": 2060103680,
+            "coverage_bytes": 4116480,
+            "resident_bytes_measured": false,
+            "real_advice": true,
+            "event_capacity": 0,
+            "synthetic_fresh_state": false
+          },
+          "candidate": {
+            "case": "growing",
+            "attempts": 1000,
+            "cpu_ns": 0,
+            "count_pass": true,
+            "incremental": true,
+            "expected_calls": 1000,
+            "expected_bytes": 4116480,
+            "coverage_bytes": 4116480,
+            "resident_bytes_measured": false,
+            "real_advice": true,
+            "event_capacity": 0,
+            "synthetic_fresh_state": false
+          }
+        },
+        "median_cpu_change_percent": -5.994445057716607
+      },
+      "fresh": {
+        "paired_cpu_change_percent": [
+          20.08365760452493,
+          -15.616386952405549,
+          -11.570238582575666,
+          4.567881875615143
+        ],
+        "control_cpu_ns_per_attempt": [
+          2177.447,
+          2904.75,
+          2474.573,
+          2027.964
+        ],
+        "candidate_cpu_ns_per_attempt": [
+          2614.758,
+          2451.133,
+          2188.259,
+          2120.599
+        ],
+        "untimed_count_passes": {
+          "control": {
+            "case": "fresh",
+            "attempts": 1000,
+            "cpu_ns": 0,
+            "count_pass": true,
+            "incremental": false,
+            "expected_calls": 1000,
+            "expected_bytes": 8458240000,
+            "coverage_bytes": 8458240,
+            "resident_bytes_measured": false,
+            "real_advice": true,
+            "event_capacity": 0,
+            "synthetic_fresh_state": true
+          },
+          "candidate": {
+            "case": "fresh",
+            "attempts": 1000,
+            "cpu_ns": 0,
+            "count_pass": true,
+            "incremental": true,
+            "expected_calls": 1000,
+            "expected_bytes": 8458240000,
+            "coverage_bytes": 8458240,
+            "resident_bytes_measured": false,
+            "real_advice": true,
+            "event_capacity": 0,
+            "synthetic_fresh_state": true
+          }
+        },
+        "median_cpu_change_percent": -3.5011783534802614
+      }
+    },
+    "samples": [
+      {
+        "case": "repeated",
+        "attempts": 1000,
+        "cpu_ns": 2284521,
+        "count_pass": false,
+        "incremental": false,
+        "expected_calls": 1000,
+        "expected_bytes": 8458240000,
+        "coverage_bytes": 8458240,
+        "resident_bytes_measured": false,
+        "real_advice": true,
+        "event_capacity": 0,
+        "synthetic_fresh_state": false,
+        "round": 0,
+        "mode": "control"
+      },
+      {
+        "case": "repeated",
+        "attempts": 1000,
+        "cpu_ns": 1148182,
+        "count_pass": false,
+        "incremental": true,
+        "expected_calls": 1,
+        "expected_bytes": 8458240,
+        "coverage_bytes": 8458240,
+        "resident_bytes_measured": false,
+        "real_advice": true,
+        "event_capacity": 0,
+        "synthetic_fresh_state": false,
+        "round": 0,
+        "mode": "candidate"
+      },
+      {
+        "case": "repeated",
+        "attempts": 1000,
+        "cpu_ns": 2069753,
+        "count_pass": false,
+        "incremental": false,
+        "expected_calls": 1000,
+        "expected_bytes": 8458240000,
+        "coverage_bytes": 8458240,
+        "resident_bytes_measured": false,
+        "real_advice": true,
+        "event_capacity": 0,
+        "synthetic_fresh_state": false,
+        "round": 1,
+        "mode": "control"
+      },
+      {
+        "case": "repeated",
+        "attempts": 1000,
+        "cpu_ns": 1497386,
+        "count_pass": false,
+        "incremental": true,
+        "expected_calls": 1,
+        "expected_bytes": 8458240,
+        "coverage_bytes": 8458240,
+        "resident_bytes_measured": false,
+        "real_advice": true,
+        "event_capacity": 0,
+        "synthetic_fresh_state": false,
+        "round": 1,
+        "mode": "candidate"
+      },
+      {
+        "case": "repeated",
+        "attempts": 1000,
+        "cpu_ns": 2038423,
+        "count_pass": false,
+        "incremental": false,
+        "expected_calls": 1000,
+        "expected_bytes": 8458240000,
+        "coverage_bytes": 8458240,
+        "resident_bytes_measured": false,
+        "real_advice": true,
+        "event_capacity": 0,
+        "synthetic_fresh_state": false,
+        "round": 2,
+        "mode": "control"
+      },
+      {
+        "case": "repeated",
+        "attempts": 1000,
+        "cpu_ns": 1202004,
+        "count_pass": false,
+        "incremental": true,
+        "expected_calls": 1,
+        "expected_bytes": 8458240,
+        "coverage_bytes": 8458240,
+        "resident_bytes_measured": false,
+        "real_advice": true,
+        "event_capacity": 0,
+        "synthetic_fresh_state": false,
+        "round": 2,
+        "mode": "candidate"
+      },
+      {
+        "case": "repeated",
+        "attempts": 1000,
+        "cpu_ns": 2057189,
+        "count_pass": false,
+        "incremental": false,
+        "expected_calls": 1000,
+        "expected_bytes": 8458240000,
+        "coverage_bytes": 8458240,
+        "resident_bytes_measured": false,
+        "real_advice": true,
+        "event_capacity": 0,
+        "synthetic_fresh_state": false,
+        "round": 3,
+        "mode": "control"
+      },
+      {
+        "case": "repeated",
+        "attempts": 1000,
+        "cpu_ns": 1186064,
+        "count_pass": false,
+        "incremental": true,
+        "expected_calls": 1,
+        "expected_bytes": 8458240,
+        "coverage_bytes": 8458240,
+        "resident_bytes_measured": false,
+        "real_advice": true,
+        "event_capacity": 0,
+        "synthetic_fresh_state": false,
+        "round": 3,
+        "mode": "candidate"
+      },
+      {
+        "case": "growing",
+        "attempts": 1000,
+        "cpu_ns": 2120389,
+        "count_pass": false,
+        "incremental": false,
+        "expected_calls": 1000,
+        "expected_bytes": 2060103680,
+        "coverage_bytes": 4116480,
+        "resident_bytes_measured": false,
+        "real_advice": true,
+        "event_capacity": 0,
+        "synthetic_fresh_state": false,
+        "round": 0,
+        "mode": "control"
+      },
+      {
+        "case": "growing",
+        "attempts": 1000,
+        "cpu_ns": 1955095,
+        "count_pass": false,
+        "incremental": true,
+        "expected_calls": 1000,
+        "expected_bytes": 4116480,
+        "coverage_bytes": 4116480,
+        "resident_bytes_measured": false,
+        "real_advice": true,
+        "event_capacity": 0,
+        "synthetic_fresh_state": false,
+        "round": 0,
+        "mode": "candidate"
+      },
+      {
+        "case": "growing",
+        "attempts": 1000,
+        "cpu_ns": 1952420,
+        "count_pass": false,
+        "incremental": false,
+        "expected_calls": 1000,
+        "expected_bytes": 2060103680,
+        "coverage_bytes": 4116480,
+        "resident_bytes_measured": false,
+        "real_advice": true,
+        "event_capacity": 0,
+        "synthetic_fresh_state": false,
+        "round": 1,
+        "mode": "control"
+      },
+      {
+        "case": "growing",
+        "attempts": 1000,
+        "cpu_ns": 1887046,
+        "count_pass": false,
+        "incremental": true,
+        "expected_calls": 1000,
+        "expected_bytes": 4116480,
+        "coverage_bytes": 4116480,
+        "resident_bytes_measured": false,
+        "real_advice": true,
+        "event_capacity": 0,
+        "synthetic_fresh_state": false,
+        "round": 1,
+        "mode": "candidate"
+      },
+      {
+        "case": "growing",
+        "attempts": 1000,
+        "cpu_ns": 2266707,
+        "count_pass": false,
+        "incremental": false,
+        "expected_calls": 1000,
+        "expected_bytes": 2060103680,
+        "coverage_bytes": 4116480,
+        "resident_bytes_measured": false,
+        "real_advice": true,
+        "event_capacity": 0,
+        "synthetic_fresh_state": false,
+        "round": 2,
+        "mode": "control"
+      },
+      {
+        "case": "growing",
+        "attempts": 1000,
+        "cpu_ns": 2054324,
+        "count_pass": false,
+        "incremental": true,
+        "expected_calls": 1000,
+        "expected_bytes": 4116480,
+        "coverage_bytes": 4116480,
+        "resident_bytes_measured": false,
+        "real_advice": true,
+        "event_capacity": 0,
+        "synthetic_fresh_state": false,
+        "round": 2,
+        "mode": "candidate"
+      },
+      {
+        "case": "growing",
+        "attempts": 1000,
+        "cpu_ns": 2005731,
+        "count_pass": false,
+        "incremental": false,
+        "expected_calls": 1000,
+        "expected_bytes": 2060103680,
+        "coverage_bytes": 4116480,
+        "resident_bytes_measured": false,
+        "real_advice": true,
+        "event_capacity": 0,
+        "synthetic_fresh_state": false,
+        "round": 3,
+        "mode": "control"
+      },
+      {
+        "case": "growing",
+        "attempts": 1000,
+        "cpu_ns": 1921622,
+        "count_pass": false,
+        "incremental": true,
+        "expected_calls": 1000,
+        "expected_bytes": 4116480,
+        "coverage_bytes": 4116480,
+        "resident_bytes_measured": false,
+        "real_advice": true,
+        "event_capacity": 0,
+        "synthetic_fresh_state": false,
+        "round": 3,
+        "mode": "candidate"
+      },
+      {
+        "case": "fresh",
+        "attempts": 1000,
+        "cpu_ns": 2177447,
+        "count_pass": false,
+        "incremental": false,
+        "expected_calls": 1000,
+        "expected_bytes": 8458240000,
+        "coverage_bytes": 8458240,
+        "resident_bytes_measured": false,
+        "real_advice": true,
+        "event_capacity": 0,
+        "synthetic_fresh_state": true,
+        "round": 0,
+        "mode": "control"
+      },
+      {
+        "case": "fresh",
+        "attempts": 1000,
+        "cpu_ns": 2614758,
+        "count_pass": false,
+        "incremental": true,
+        "expected_calls": 1000,
+        "expected_bytes": 8458240000,
+        "coverage_bytes": 8458240,
+        "resident_bytes_measured": false,
+        "real_advice": true,
+        "event_capacity": 0,
+        "synthetic_fresh_state": true,
+        "round": 0,
+        "mode": "candidate"
+      },
+      {
+        "case": "fresh",
+        "attempts": 1000,
+        "cpu_ns": 2904750,
+        "count_pass": false,
+        "incremental": false,
+        "expected_calls": 1000,
+        "expected_bytes": 8458240000,
+        "coverage_bytes": 8458240,
+        "resident_bytes_measured": false,
+        "real_advice": true,
+        "event_capacity": 0,
+        "synthetic_fresh_state": true,
+        "round": 1,
+        "mode": "control"
+      },
+      {
+        "case": "fresh",
+        "attempts": 1000,
+        "cpu_ns": 2451133,
+        "count_pass": false,
+        "incremental": true,
+        "expected_calls": 1000,
+        "expected_bytes": 8458240000,
+        "coverage_bytes": 8458240,
+        "resident_bytes_measured": false,
+        "real_advice": true,
+        "event_capacity": 0,
+        "synthetic_fresh_state": true,
+        "round": 1,
+        "mode": "candidate"
+      },
+      {
+        "case": "fresh",
+        "attempts": 1000,
+        "cpu_ns": 2474573,
+        "count_pass": false,
+        "incremental": false,
+        "expected_calls": 1000,
+        "expected_bytes": 8458240000,
+        "coverage_bytes": 8458240,
+        "resident_bytes_measured": false,
+        "real_advice": true,
+        "event_capacity": 0,
+        "synthetic_fresh_state": true,
+        "round": 2,
+        "mode": "control"
+      },
+      {
+        "case": "fresh",
+        "attempts": 1000,
+        "cpu_ns": 2188259,
+        "count_pass": false,
+        "incremental": true,
+        "expected_calls": 1000,
+        "expected_bytes": 8458240000,
+        "coverage_bytes": 8458240,
+        "resident_bytes_measured": false,
+        "real_advice": true,
+        "event_capacity": 0,
+        "synthetic_fresh_state": true,
+        "round": 2,
+        "mode": "candidate"
+      },
+      {
+        "case": "fresh",
+        "attempts": 1000,
+        "cpu_ns": 2027964,
+        "count_pass": false,
+        "incremental": false,
+        "expected_calls": 1000,
+        "expected_bytes": 8458240000,
+        "coverage_bytes": 8458240,
+        "resident_bytes_measured": false,
+        "real_advice": true,
+        "event_capacity": 0,
+        "synthetic_fresh_state": true,
+        "round": 3,
+        "mode": "control"
+      },
+      {
+        "case": "fresh",
+        "attempts": 1000,
+        "cpu_ns": 2120599,
+        "count_pass": false,
+        "incremental": true,
+        "expected_calls": 1000,
+        "expected_bytes": 8458240000,
+        "coverage_bytes": 8458240,
+        "resident_bytes_measured": false,
+        "real_advice": true,
+        "event_capacity": 0,
+        "synthetic_fresh_state": true,
+        "round": 3,
+        "mode": "candidate"
+      }
+    ],
+    "limits": "Fixed checkpointed WAL, real fadvise; CPU executable has no syscall wrapper. Count executable separately asserts calls/ranges/bytes and integrity. Fresh case initializes state each attempt, not actual WAL resets inside clock. No residency/RAM or full-server performance measured; advisory success is not guaranteed eviction. Notification cadence unchanged."
+  },
+  "schema_version": 1,
+  "anchor": "429574d5495f4abaf8b1c5d4b1df1552c5e2e35f",
+  "label": "wal-range-native",
+  "kind": "probe",
+  "started_at": "2026-11-04T20:14:01.742101+00:00",
+  "status": "passed",
+  "finished_at": "2026-11-04T20:16:32.365600+00:00",
+  "exit_code": 0,
+  "error": null,
+  "secondary_errors": [],
+  "workload": {
+    "kind": "wal_advice_ranges",
+    "pairs": 4,
+    "attempts_per_case": 1000,
+    "cases": [
+      "repeated",
+      "growing",
+      "fresh"
+    ]
+  },
+  "instruments": {
+    "server_telemetry": "off",
+    "perf": "off",
+    "counting": "separate untimed executable"
+  },
+  "provenance": {
+    "source": {
+      "base_commit": "429574d5495f4abaf8b1c5d4b1df1552c5e2e35f",
+      "patch_sha256": "a070d43c16125d1651e94328e980b72c3ee861260a8fdf900f5bf7dfb6e413d2",
+      "source_sha256": "1281b0e927b3e7e5f5b811dbbf99603c12b182026461789ac7532a765bf57605",
+      "patch": "source.patch"
+    },
+    "binary": {
+      "control": {
+        "sha256": "31f2758cdb3395cdcd06eff79863d37db551389f0087bb8100c4c94d41c60271"
+      },
+      "candidate": {
+        "sha256": "893d9341fd297720000cd5d44747d80d2bd486918c4dd20de5933d3820ecd16a"
+      },
+      "control-count": {
+        "sha256": "ba57f3c026371e593eab1bf645bd6db139dbdd91ceb497e6850763f4a446167d"
+      },
+      "candidate-count": {
+        "sha256": "7698ccd64277251f864cb87532a367b63ea3f8661cc6a841360c847372988dae"
+      },
+      "server": {
+        "sha256": "571c4ad644cdc67de91a4f6f1bf274a630c703622c9c9419d1276aabb592ebbb"
+      }
+    }
+  }
+}

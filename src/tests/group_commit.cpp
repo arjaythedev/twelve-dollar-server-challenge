@@ -313,6 +313,8 @@ void fifo_isolation_and_visibility()
     require(control.commits == 1 && control.savepoints == 10 && control.rollbacks_to == 3 &&
                 control.releases == 10,
             "batch did not isolate its writes in one transaction");
+    std::printf("canonical batch: savepoints=%d releases=%d rollback_to=%d commits=%d\n",
+                control.savepoints, control.releases, control.rollbacks_to, control.commits);
     require(control.visible_posts == 1 && control.visible_likes == 0,
             "external reader saw uncommitted batch writes");
     verify_created(reader.get(), created(results[0]), 2, body, "first");
@@ -456,8 +458,8 @@ void automatic_rollback()
 void fatal_error()
 {
     Fixture fixture;
-    Store db(fixture.path);
     auto reader = open(fixture.path);
+    Store db(fixture.path);
     Control control(reader.get());
     control.fail_savepoint = 2;
     const std::array<WriteCommand, 3> jobs{
@@ -480,6 +482,102 @@ void fatal_error()
                 scalar(reader.get(), "SELECT count(*) FROM posts") == 1 &&
                 scalar(reader.get(), "SELECT count(*) FROM likes") == 2,
             "fatal error left writer unusable");
+}
+
+void trigger_statement_isolation(bool temporary, bool like)
+{
+    Fixture fixture;
+    auto reader = open(fixture.path);
+    Store db(fixture.path);
+    Control control(reader.get());
+    const std::array<WriteCommand, 1> warm{CreatePost{UserId{1}, "first", "before schema change"}};
+    require(created(run_batch(db, warm).at(0)).id.value == 2 && control.writer,
+            "schema-change fixture did not capture the writer");
+    const std::string trigger =
+        std::string("CREATE ") + (temporary ? "TEMP " : "") +
+        "TRIGGER partial_failure AFTER INSERT ON " + (temporary ? "main." : "") +
+        (like ? "likes WHEN NEW.user_id=2" : "posts WHEN NEW.body='fail'") +
+        " BEGIN INSERT INTO posts(user_id,body) VALUES(1,'trigger side effect'); "
+        "SELECT RAISE(FAIL,'partial statement'); END";
+    execute(temporary ? control.writer : reader.get(), trigger.c_str());
+    const auto before_savepoints = control.savepoints;
+    const auto before_rollbacks = control.rollbacks_to;
+    const auto before_releases = control.releases;
+    const std::array<WriteCommand, 3> jobs{
+        CreatePost{UserId{1}, "first", "before failed statement"},
+        like ? WriteCommand{LikePost{UserId{2}, PostId{1}}}
+             : WriteCommand{CreatePost{UserId{1}, "first", "fail"}},
+        like ? WriteCommand{LikePost{UserId{1}, PostId{1}}}
+             : WriteCommand{CreatePost{UserId{1}, "first", "after failed statement"}},
+    };
+    const auto outcomes = run_batch(db, jobs);
+    const auto releases = control.releases - before_releases;
+    require(created(outcomes[0]).id.value == 3 && !outcomes[1] &&
+                outcomes[1].error().code == WriteErrorCode::constraint && outcomes[2] &&
+                control.savepoints - before_savepoints == 3 &&
+                control.rollbacks_to - before_rollbacks == 1 && (releases == 0 || releases == 3),
+            "main/temp trigger failed to retain per-request rollback after schema change");
+    require(scalar(reader.get(),
+                   "SELECT count(*) FROM posts WHERE body IN ('fail','trigger side effect')") ==
+                    0 &&
+                scalar(reader.get(), "SELECT count(*) FROM posts") == (like ? 3 : 4) &&
+                scalar(reader.get(), "SELECT count(*) FROM likes") == (like ? 1 : 0),
+            "RAISE(FAIL) retained partial writes or discarded neighboring requests");
+    if (like)
+    {
+        require(liked(outcomes[2]) == LikeResult::created, "later valid like was lost");
+    }
+    else
+    {
+        require(created(outcomes[2]).id.value == 4, "failed create consumed a persistent row ID");
+    }
+}
+
+void full_batch_trigger_pages()
+{
+    Fixture fixture;
+    auto reader = open(fixture.path);
+    Store db(fixture.path);
+    execute(reader.get(), R"sql(
+        CREATE TRIGGER stress_write AFTER INSERT ON posts WHEN NEW.body LIKE 'stress:%'
+        BEGIN
+          INSERT INTO likes(user_id,post_id) VALUES(2,NEW.id);
+          SELECT CASE WHEN NEW.body='stress:fail' THEN RAISE(FAIL,'partial trigger') END;
+        END;
+    )sql");
+    Control control(reader.get());
+    for (unsigned pass = 0; pass < 3; ++pass)
+    {
+        std::vector<WriteCommand> jobs;
+        for (std::size_t index = 0; index < tds::write_batch_limit; ++index)
+        {
+            jobs.emplace_back(
+                CreatePost{UserId{1}, "first",
+                           index == 16 ? "stress:fail" : "stress:" + std::to_string(index)});
+        }
+        const auto outcomes = run_batch(db, jobs);
+        std::int64_t next_id = 2 + static_cast<std::int64_t>(pass * 31);
+        for (std::size_t index = 0; index < jobs.size(); ++index)
+        {
+            if (index == 16)
+            {
+                require(!outcomes[index] &&
+                            outcomes[index].error().code == WriteErrorCode::constraint,
+                        "middle trigger failure did not remain request-local");
+            }
+            else
+            {
+                require(created(outcomes[index]).id.value == next_id++,
+                        "nested savepoints lost a successful neighbor or row ID");
+            }
+        }
+        const auto writes = static_cast<std::int64_t>((pass + 1) * 31);
+        require(scalar(reader.get(), "SELECT count(*) FROM posts") == 1 + writes &&
+                    scalar(reader.get(), "SELECT count(*) FROM likes") == writes &&
+                    scalar(reader.get(), "SELECT count(*) FROM posts WHERE body='stress:fail'") ==
+                        0,
+                "nested savepoints retained failed post/like pages or failed to close at commit");
+    }
 }
 
 void singleton_and_empty()
@@ -838,6 +936,11 @@ int main()
         failed_commits();
         automatic_rollback();
         fatal_error();
+        trigger_statement_isolation(false, false);
+        trigger_statement_isolation(false, true);
+        trigger_statement_isolation(true, false);
+        trigger_statement_isolation(true, true);
+        full_batch_trigger_pages();
         singleton_and_empty();
         post_existence_fallback();
         likes_record_fallback();

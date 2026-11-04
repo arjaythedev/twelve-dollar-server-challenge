@@ -120,6 +120,9 @@
 | C++ 0.1.0 ([session erase](src/runs/146d5f2/session-erase-350000/summary.json)) | 350,000 | 60 s | 3,627,150 | 27,901.04 | 10.729 ms | 17.833 ms | 35.69 ms | 0% | 20.43 us | 977.52 MiB |
 | C++ 0.1.0 ([session offset, late ramp](src/runs/146d5f2/session-offset-350000/summary.json)) | 350,000 | 60 s | 3,611,569 | 27,781.34 | 10.668 ms | 18.517 ms | 56.33 ms | 0% | 20.88 us | 955.99 MiB |
 | C++ 0.1.0 ([session offset, repeat](src/runs/146d5f2/session-offset-350000-repeat/summary.json)) | 350,000 | 60 s | 3,627,468 | 27,903.42 | 14.139 ms | 20.115 ms | 57.74 ms | 0% | 20.28 us | 984.40 MiB |
+| C++ 0.1.0 ([WAL prefix, late ramp](src/runs/429574d/wal-prefix-350000/summary.json)) | 350,000 | 60 s | 3,577,417 | 27,518.57 | 19.501 ms | 207.826 ms | 1,793.24 ms | 0% | 22.92 us | 972.70 MiB |
+| C++ 0.1.0 ([WAL incremental ranges](src/runs/429574d/wal-ranges-350000/summary.json)) | 350,000 | 60 s | 3,623,942 | 27,876.33 | 21.822 ms | 256.502 ms | 2,283.99 ms | 0% | 22.72 us | 975.56 MiB |
+| C++ 0.1.0 ([WAL prefix, repeat](src/runs/429574d/wal-prefix-350000-repeat/summary.json)) | 350,000 | 60 s | 3,628,407 | 27,910.68 | 15.379 ms | 22.006 ms | 53.36 ms | 0% | 22.03 us | 951.92 MiB |
 
 WAL coalescing, 350k short pair: cap 32, CQ 128/8 ms, seed 20261104, fresh seed copies, telemetry/perf off. CPU/request -1.84%, kernel CPU -2.04%; hold p99 20.90 to 20.96 ms. [Data](src/runs/79cd8ce/wal-coalescing-350000-comparison/summary.json).
 
@@ -140,6 +143,12 @@ Session input offset, four reversed pairs of 1M requests/case: contiguous-body C
 Session offset, 350k control/repeat: total CPU -0.73%, approximate hold CPU +0.50%, hold p99 18.56 to 21.02 ms, zero errors. No demonstrated full-server gain. First offset attempt missed activation (30.257s; deadline 30.100s); its failed result is retained. [Data](src/runs/146d5f2/session-offset-350000-comparison/summary.json).
 
 Parser buffers, four reversed pairs: Parser 336 to 304 bytes; first authenticated request 2 to 1 C++ allocations, warm 0 in both. Median CPU -1.4% GET, -2.8% auth and -2.7% fragmented auth, with outliers. Fragmented retained-capacity sum 502 to 540 (includes SSO). Four contracts passed; native only. [Data](src/runs/89b5d0c/parser-buffers-native/summary.json).
+
+Deferred savepoint RELEASE, production Store, fresh seeded DB per pass, 20k writes: batch 32 median foreground CPU +116.9% valid / +131.1% mixed across four reversed pairs each. Outcomes, stored rows and timestamps matched; six contracts passed, including FAIL triggers and rollback quarantine. Candidate discarded. Batch 1 unchanged path was a one-pair control. [Data](src/runs/429574d/savepoint-release-native/summary.json).
+
+WAL range advice, four reversed native pairs: repeated-prefix calls 1,000 to 1, helper CPU -41.7%; growing-prefix CPU -6.0%. Release/profile contracts passed. The 350k control repeat versus candidate used 22.03/22.72 us/request, hold p99 22.77/408.79 ms and RAM 951.92/975.56 MiB, zero errors. Initial control activated late. No full-server gain; candidate discarded. [Native](src/runs/429574d/wal-range-native/summary.json), [350k](src/runs/429574d/wal-ranges-350000-comparison/summary.json).
+
+Borrowed create body, four reversed native pairs per workload, cap 32, 20k writes per pass: median foreground CPU +12.6% valid (all pairs slower), -3.0% mixed (inconsistent). WAL-range candidate fixed in both. Equal outcomes/rows/timestamps; lifetime, Unicode and rollback tests passed. Discarded; retain TRANSIENT binding. [Data](src/runs/429574d/create-body-borrow-native/summary.json).
 
 CQ rotation and dispatch/wait cleanup: 70k A/B CPU/request -1.2%. Matched 350k/5m B/A: CPU/request +0.5%, hold p99 6.12 to 6.05 ms, peak RAM +47.67 MiB. Same seed, fresh seeded databases and generator; zero errors or memory-limit events. Rotation removed after no clear gain; accept/wait cleanup retained. [Data](src/runs/legacy/benchmark-cq-rotation/summary.json).
 

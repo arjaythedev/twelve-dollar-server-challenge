@@ -111,6 +111,7 @@ Unchecked items are experiments; checked items include completed work and discar
 - [x] Compare bounded FIFO writes across reactor turns ([0/1/0 ms, cap 32](src/runs/79cd8ce/write-window-comparison/summary.json)): 21.30 / 21.13 / 20.52 us/request. Discard the deadline path: no demonstrated CPU gain. Preserve the tested source patches and results; keep end-turn flushing.
 
 - [ ] Compare removing per-write savepoints for the fixed schema, relying on SQLite's statement rollback for ABORT constraints. Preserve batch failure, rollback quarantine and isolation; `RAISE(FAIL)` and custom trigger side effects need separate handling.
+  Deferring RELEASE while nesting marks was rejected: [production probe](src/runs/429574d/savepoint-release-native/summary.json), batch 32 median foreground CPU +116.9% valid / +131.1% mixed, all eight pairs slower. Constraints and trigger isolation passed; retained pager/subjournal work is a likely cost. Keep per-write RELEASE.
 
 - [ ] Compare locality-aware scheduling of queued reads by endpoint and nearby post/user IDs, optionally with separate bounded read/write queues. Each request performs its own fresh SQLite read; reuse only SQLite's page cache, never query results.
   Bound queue size and request age, preserve connection order and write/read barriers. Compare FIFO, page-cache misses, CPU/request and p99; locality gains must exceed sorting and waiting costs.
@@ -126,7 +127,9 @@ Unchecked items are experiments; checked items include completed work and discar
 - [x] Coalesce contiguous WAL appends over `unix-excl` ([Pavly](submissions/c-iouring-pavlyhalim/src/db.h), [350k pair](src/runs/79cd8ce/wal-coalescing-350000-comparison/summary.json)): CPU/request -1.84%, kernel CPU -2.04%, p99 20.11 to 20.28 ms, zero errors. Native write calls fell from 2,816 to 151 with equal bytes and syncs.
   Flush complete commit frames before NORMAL visibility; existing header-only rewrites pass through immediately. The bounded wrapper preserves errors and unwraps the native file for WAL eviction. One local short pair; the VPS remains untested.
 
-- [ ] Compare checkpoint notification by newly committed frames and generation-aware eviction of only new completed ranges, separately. The current threshold uses absolute WAL frames and advice repeats the completed prefix. Preserve partial-checkpoint retries and memory bounds; 128/8-ms collection has already removed most historical checkpoint churn.
+- [ ] Compare checkpoint notification by newly committed frames. The current threshold uses absolute WAL frames. Preserve partial-checkpoint retries and memory bounds; advice used only 0.72% of long-profile CPU.
+
+- [x] Compare generation-aware eviction of only new completed WAL ranges. [Native helper CPU](src/runs/429574d/wal-range-native/summary.json) fell 41.7% for repeated prefixes and 6.0% for growing ranges, but the [350k pair](src/runs/429574d/wal-ranges-350000-comparison/summary.json) showed CPU +3.09%, hold p99 22.77 to 408.79 ms and RAM +23.64 MiB. Discard the candidate; host variability prevents attributing the stalls. Keep existing advice and notification cadence.
 
 - [ ] Compare fresh Btrfs CoW and `chattr +C` directories on the same Mini, then ext4 on the same hardware if available. Measure WAL residency, I/O and p99; `+C` also disables data checksums and compression.
 
@@ -134,7 +137,7 @@ Unchecked items are experiments; checked items include completed work and discar
 
 - [ ] Native-screen binding cleanup for parameterless transaction statements, retaining reset and errors. Disassembly shows `2*N+2` unnecessary clear calls per multi-write batch, but all clear_bindings together sampled only 0.037% of current short-profile CPU.
 
-- [ ] Native-screen a create-only borrowed body binding against `SQLITE_TRANSIENT`. Keep command bytes alive through step, reset and clear; test Unicode, constraints and rollback. The initial copy exists in assembly, but current sampling cannot resolve a useful gain.
+- [x] Compare create-only borrowed body binding against `SQLITE_TRANSIENT` ([native](src/runs/429574d/create-body-borrow-native/summary.json)). Discard it: valid 32-write batches used 12.6% more foreground CPU, all four pairs slower; mixed results were inconsistent. Unicode, binding lifetime and rollback contracts passed. Native runs held the WAL-range candidate fixed; no HTTP gain measured.
 
 ## Conditional: larger changes and build experiments
 

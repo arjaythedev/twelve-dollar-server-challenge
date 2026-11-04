@@ -1,0 +1,155 @@
+{
+  "benchmark": {
+    "date": "2026-11-04",
+    "name": "wal-prefix-350000",
+    "runtime": "C++ 0.1.0",
+    "load_generator": "docker_loopback",
+    "generator": "cpp",
+    "sqlite": "3.53.1",
+    "users": 350000,
+    "hold": "60s",
+    "ramp": "30s",
+    "requests": 3577417,
+    "rps": 27518.570633,
+    "p95_ms": 19.5014488,
+    "p99_ms": 207.82643664,
+    "max_ms": 1793.23788,
+    "error_rate": 0.0,
+    "cpu_us_per_request": 22.91719248832328,
+    "cpu_scope": "server_cgroup",
+    "server_peak_bytes": 1019944960,
+    "passed": false,
+    "client_sampled_peak_bytes": 1470767104
+  },
+  "load_generator": {
+    "name": "td-load",
+    "version": "0.1.0",
+    "seed": 20261104,
+    "vus": 350000,
+    "passed": false,
+    "checks_passed": true,
+    "workflow_errors": 0,
+    "ramp_up_seconds": 30,
+    "target_activation_seconds": 31.093521483,
+    "activation_deadline_grace_ms": 100,
+    "target_activation_on_time": false,
+    "prepared_sockets": 350000,
+    "socket_preparation_seconds": 3.160511494,
+    "duration_semantics": "send+wait+receive, excludes connection acquisition and client request preparation; interrupted requests omitted",
+    "target_concurrency_reached": true,
+    "http_response_coverage_complete": true,
+    "http_metrics_passed": true,
+    "peak_live_connections": 350000,
+    "hold_peak_live_connections": 350000,
+    "max_rss_bytes": 158916608,
+    "idle_vu_state_bytes": 88,
+    "interrupted_iterations": 178553,
+    "endpoint_requests": {
+      "feed": 1649716,
+      "post": 1649716,
+      "like": 245288,
+      "create": 32697
+    },
+    "endpoint_duration_ms": {
+      "feed": {
+        "count": 1649716,
+        "avg": 13.5252070771,
+        "p95": 20.0553125,
+        "p99": 256.2577629,
+        "max": 1793.23788
+      },
+      "post": {
+        "count": 1649716,
+        "avg": 11.4687176971,
+        "p95": 19.09218575,
+        "p99": 190.5244181,
+        "max": 1774.084774
+      },
+      "like": {
+        "count": 245288,
+        "avg": 9.4089856499,
+        "p95": 18.8096854,
+        "p99": 115.79058179,
+        "max": 1637.473261
+      },
+      "create": {
+        "count": 32697,
+        "avg": 9.72425529776,
+        "p95": 18.598313,
+        "p99": 133.29370388,
+        "max": 1259.320845
+      }
+    },
+    "phase_duration_ms": {
+      "ramp_up": {
+        "count": 683823,
+        "avg": 4.41862036234,
+        "p95": 10.5103724,
+        "p99": 16.19079212,
+        "max": 36.938907
+      },
+      "hold": {
+        "count": 2222727,
+        "avg": 16.8920134368,
+        "p95": 27.6991537,
+        "p99": 413.7123727,
+        "max": 1793.23788
+      },
+      "ramp_down": {
+        "count": 658979,
+        "avg": 4.91901974953,
+        "p95": 13.4654756,
+        "p99": 19.40858434,
+        "max": 31.897737
+      },
+      "grace": {
+        "count": 11888,
+        "avg": 4.14902022418,
+        "p95": 8.43301870001,
+        "p99": 9.23782585,
+        "max": 17.401337
+      }
+    }
+  },
+  "collection_errors": [],
+  "schema_version": 1,
+  "anchor": "429574d5495f4abaf8b1c5d4b1df1552c5e2e35f",
+  "label": "wal-prefix-350000",
+  "kind": "workload",
+  "started_at": "2026-11-04T20:20:02.551136+00:00",
+  "status": "failed",
+  "finished_at": "2026-11-04T20:22:33.108468+00:00",
+  "exit_code": 99,
+  "error": null,
+  "secondary_errors": [],
+  "workload": {
+    "generator": "cpp",
+    "vus": 350000,
+    "ramp": "30s",
+    "hold": "60s",
+    "seed": 20261104
+  },
+  "instruments": {
+    "server_telemetry": "off",
+    "perf": "off",
+    "client_diagnostics": false
+  },
+  "provenance": {
+    "source": {
+      "base_commit": "429574d5495f4abaf8b1c5d4b1df1552c5e2e35f",
+      "patch_sha256": "1d8a227621e9cdc7bd02e4da30e45e670f7a34af1f83ac8695c27984d812c477",
+      "source_sha256": "d9b8a90313fe578f120b1470104ec7e80dc4f92e1e14aa7b97635593fb1f7186",
+      "patch": "source.patch"
+    },
+    "binary": {
+      "server": {
+        "image_id": "sha256:d90037ed21eee80e2892055eb0335138267acbda99c46d08937f9460203bca7e",
+        "sha256": "5c6c8150ce9e38c9c57d7aff4071d6e0fa0a02ea3a86255e2d63277849db828b"
+      },
+      "generator": {
+        "image_id": "sha256:b0fd9043f3904206d2a8bb398923eb1b2f9206705eb750bf908a4e35fc01063a",
+        "sha256": "f2634e9500b5017ee4c3ca77329ea8a98c54544b92e972ba9ba637fba69a4a1e"
+      }
+    }
+  }
+}

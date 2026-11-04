@@ -86,7 +86,72 @@ static inline int db_check_post_exists(int64_t post_id) {
     return (rc == SQLITE_ROW);
 }
 
+#ifndef USE_FAST_SERIALIZE
+#define USE_FAST_SERIALIZE 1
+#endif
+
+/* Fast integer-to-string formatters for zero-strlen serialization */
+static inline char *fast_u64toa(uint64_t v, char *p) {
+    char temp[24];
+    int i = 0;
+    if (v == 0) { *p++ = '0'; return p; }
+    while (v > 0) {
+        temp[i++] = (char)('0' + (v % 10));
+        v /= 10;
+    }
+    while (i > 0) {
+        *p++ = temp[--i];
+    }
+    return p;
+}
+
+static inline char *fast_i64toa(int64_t v, char *p) {
+    if (v < 0) {
+        *p++ = '-';
+        v = -v;
+    }
+    return fast_u64toa((uint64_t)v, p);
+}
+
 static inline size_t db_query_feed(char *out, size_t cap) {
+#if USE_FAST_SERIALIZE
+    char *p = out;
+    memcpy(p, "{\"posts\":[", 10); p += 10;
+
+    int first = 1;
+    char esc_body[2048];
+    while (sqlite3_step(g_db_ctx.stmt_feed) == SQLITE_ROW) {
+        if (!first) *p++ = ',';
+        first = 0;
+
+        int64_t id = sqlite3_column_int64(g_db_ctx.stmt_feed, 0);
+        const char *body = (const char*)sqlite3_column_text(g_db_ctx.stmt_feed, 1);
+        int body_bytes = sqlite3_column_bytes(g_db_ctx.stmt_feed, 1);
+        const char *created_at = (const char*)sqlite3_column_text(g_db_ctx.stmt_feed, 2);
+        const char *author = (const char*)sqlite3_column_text(g_db_ctx.stmt_feed, 3);
+        int author_bytes = sqlite3_column_bytes(g_db_ctx.stmt_feed, 3);
+        int64_t likes = sqlite3_column_int64(g_db_ctx.stmt_feed, 4);
+
+        size_t esc_len = json_escape_string(body, (size_t)body_bytes, esc_body, sizeof(esc_body));
+
+        memcpy(p, "{\"id\":", 6); p += 6;
+        p = fast_i64toa(id, p);
+        memcpy(p, ",\"body\":\"", 9); p += 9;
+        memcpy(p, esc_body, esc_len); p += esc_len;
+        memcpy(p, "\",\"created_at\":\"", 16); p += 16;
+        memcpy(p, created_at, 24); p += 24;
+        memcpy(p, "\",\"author\":\"", 12); p += 12;
+        memcpy(p, author, (size_t)author_bytes); p += author_bytes;
+        memcpy(p, "\",\"like_count\":", 15); p += 15;
+        p = fast_i64toa(likes, p);
+        *p++ = '}';
+    }
+    sqlite3_reset(g_db_ctx.stmt_feed);
+
+    *p++ = ']';
+    *p++ = '}';
+    return (size_t)(p - out);
+#else
     size_t o = 0;
     o += snprintf(out + o, cap - o, "{\"posts\":[");
 
@@ -115,6 +180,7 @@ static inline size_t db_query_feed(char *out, size_t cap) {
     if (o < cap) out[o++] = ']';
     if (o < cap) out[o++] = '}';
     return o;
+#endif
 }
 
 static inline int db_query_post(int64_t post_id, char *out, size_t cap, size_t *out_len) {
@@ -131,12 +197,32 @@ static inline int db_query_post(int64_t post_id, char *out, size_t cap, size_t *
     int body_bytes = sqlite3_column_bytes(g_db_ctx.stmt_post, 1);
     const char *created_at = (const char*)sqlite3_column_text(g_db_ctx.stmt_post, 2);
     const char *author = (const char*)sqlite3_column_text(g_db_ctx.stmt_post, 3);
+    int author_bytes = sqlite3_column_bytes(g_db_ctx.stmt_post, 3);
     int64_t likes = sqlite3_column_int64(g_db_ctx.stmt_post, 4);
 
     char esc_body[2048];
     size_t esc_len = json_escape_string(body, (size_t)body_bytes, esc_body, sizeof(esc_body));
-    esc_body[esc_len] = '\0';
 
+#if USE_FAST_SERIALIZE
+    char *p = out;
+    memcpy(p, "{\"post\":{\"id\":", 14); p += 14;
+    p = fast_i64toa(id, p);
+    memcpy(p, ",\"body\":\"", 9); p += 9;
+    memcpy(p, esc_body, esc_len); p += esc_len;
+    memcpy(p, "\",\"created_at\":\"", 16); p += 16;
+    memcpy(p, created_at, 24); p += 24;
+    memcpy(p, "\",\"author\":\"", 12); p += 12;
+    memcpy(p, author, (size_t)author_bytes); p += author_bytes;
+    memcpy(p, "\",\"like_count\":", 15); p += 15;
+    p = fast_i64toa(likes, p);
+    *p++ = '}';
+    *p++ = '}';
+    *out_len = (size_t)(p - out);
+    sqlite3_reset(g_db_ctx.stmt_post);
+    sqlite3_clear_bindings(g_db_ctx.stmt_post);
+    return 1;
+#else
+    esc_body[esc_len] = '\0';
     int written = snprintf(out, cap,
         "{\"post\":{\"id\":%lld,\"body\":\"%s\",\"created_at\":\"%s\",\"author\":\"%s\",\"like_count\":%lld}}",
         (long long)id, esc_body, created_at, author, (long long)likes);
@@ -147,6 +233,7 @@ static inline int db_query_post(int64_t post_id, char *out, size_t cap, size_t *
     if (written < 0 || (size_t)written >= cap) return 0;
     *out_len = (size_t)written;
     return 1;
+#endif
 }
 
 static inline int db_create_post(int64_t user_id, const char *body, size_t body_len,

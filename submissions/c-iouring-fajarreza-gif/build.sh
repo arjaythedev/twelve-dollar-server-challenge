@@ -37,8 +37,10 @@ if [ ! -f "$DIR/bin/sqlite3.o" ]; then
         -c "$SQLITE_SRC/sqlite3.c" -o "$DIR/bin/sqlite3.o"
 fi
 
-echo "== [Server] Compiling c-iouring-fajarreza-gif..."
-gcc -O3 $MARCH \
+SERIALIZE_FLAG="-DUSE_FAST_SERIALIZE=${FAST_SERIALIZE:-1}"
+
+echo "== [Server] Compiling c-iouring-fajarreza-gif (FAST_SERIALIZE=${FAST_SERIALIZE:-1})..."
+gcc -O3 $MARCH $SERIALIZE_FLAG \
     -I"$DIR/src" \
     -I"$SQLITE_SRC" \
     "$DIR/src/server.c" "$DIR/bin/sqlite3.o" \

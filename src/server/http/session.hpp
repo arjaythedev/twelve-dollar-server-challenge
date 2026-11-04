@@ -51,7 +51,7 @@ class HttpSession
 
     bool has_input() const noexcept
     {
-        return !input_.empty();
+        return consumed_ != input_.size();
     }
 
     std::size_t retained_capacity() const noexcept
@@ -65,6 +65,7 @@ class HttpSession
   private:
     Parser parser_;
     std::string input_;
+    std::size_t consumed_ = 0;
     std::optional<AcceptedHead> accepted_;
 };
 

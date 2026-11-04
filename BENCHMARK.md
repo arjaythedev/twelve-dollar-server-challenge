@@ -117,6 +117,9 @@
 | C++ 0.1.0 ([SQL repeat, Linux loopback](src/runs/6cd248e/post-sql-control-350000/summary.json)) | 350,000 | 60 s | 3,627,060 | 27,900.47 | 13.586 ms | 19.839 ms | 39.52 ms | 0% | 20.92 us | 948.48 MiB |
 | C++ 0.1.0 ([TCP_NODELAY off](src/runs/6cd248e/tcp-nodelay-off-350000/summary.json)) | 350,000 | 60 s | 3,627,480 | 27,903.47 | 13.597 ms | 19.681 ms | 37.49 ms | 0% | 20.27 us | 983.29 MiB |
 | C++ 0.1.0 ([TCP_NODELAY on](src/runs/6cd248e/tcp-nodelay-on-350000/summary.json)) | 350,000 | 60 s | 3,629,137 | 27,916.31 | 13.845 ms | 19.800 ms | 38.51 ms | 0% | 20.27 us | 945.91 MiB |
+| C++ 0.1.0 ([session erase](src/runs/146d5f2/session-erase-350000/summary.json)) | 350,000 | 60 s | 3,627,150 | 27,901.04 | 10.729 ms | 17.833 ms | 35.69 ms | 0% | 20.43 us | 977.52 MiB |
+| C++ 0.1.0 ([session offset, late ramp](src/runs/146d5f2/session-offset-350000/summary.json)) | 350,000 | 60 s | 3,611,569 | 27,781.34 | 10.668 ms | 18.517 ms | 56.33 ms | 0% | 20.88 us | 955.99 MiB |
+| C++ 0.1.0 ([session offset, repeat](src/runs/146d5f2/session-offset-350000-repeat/summary.json)) | 350,000 | 60 s | 3,627,468 | 27,903.42 | 14.139 ms | 20.115 ms | 57.74 ms | 0% | 20.28 us | 984.40 MiB |
 
 WAL coalescing, 350k short pair: cap 32, CQ 128/8 ms, seed 20261104, fresh seed copies, telemetry/perf off. CPU/request -1.84%, kernel CPU -2.04%; hold p99 20.90 to 20.96 ms. [Data](src/runs/79cd8ce/wal-coalescing-350000-comparison/summary.json).
 
@@ -131,6 +134,10 @@ TCP_NODELAY, matched 350k short pair: total CPU -0.03%, approximate hold CPU +0.
 Native HTTP, four reversed pairs: median parser CPU -2.5% common GET, -3.0% authenticated and -2.2% fragmented auth; long ignored-header CPU inconclusive. Reply CPU -12.7% recycled and -4.3% fresh. Equal output, unchanged 336-byte Parser, four contracts passed. Individual pairs were noisy; no whole-server gain measured. [Data](src/runs/6cd248e/http-disassembly-native/summary.json).
 
 Duplicate post-read initialization, four reversed pairs of 500k reads: CPU changes -12.4% to +20.2%, no reliable gain. Equal responses and two contracts passed; candidate discarded. [Data](src/runs/6cd248e/post-initialization-native/summary.json).
+
+Session input offset, four reversed pairs of 1M requests/case: contiguous-body CPU -4.6%, pipeline32 -13.8%, both improving in every pair. GET, pipeline8 and fragmented-body results inconclusive. Session 448 to 456 bytes, retained capacity unchanged, equal outputs and four contracts passed. Native only. [Data](src/runs/146d5f2/session-offset-native/summary.json).
+
+Session offset, 350k control/repeat: total CPU -0.73%, approximate hold CPU +0.50%, hold p99 18.56 to 21.02 ms, zero errors. No demonstrated full-server gain. First offset attempt missed activation (30.257s; deadline 30.100s); its failed result is retained. [Data](src/runs/146d5f2/session-offset-350000-comparison/summary.json).
 
 CQ rotation and dispatch/wait cleanup: 70k A/B CPU/request -1.2%. Matched 350k/5m B/A: CPU/request +0.5%, hold p99 6.12 to 6.05 ms, peak RAM +47.67 MiB. Same seed, fresh seeded databases and generator; zero errors or memory-limit events. Rotation removed after no clear gain; accept/wait cleanup retained. [Data](src/runs/legacy/benchmark-cq-rotation/summary.json).
 

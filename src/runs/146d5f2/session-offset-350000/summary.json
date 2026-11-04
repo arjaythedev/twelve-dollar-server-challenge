@@ -1,0 +1,155 @@
+{
+  "benchmark": {
+    "date": "2026-11-04",
+    "name": "session-offset-350000",
+    "runtime": "C++ 0.1.0",
+    "load_generator": "docker_loopback",
+    "generator": "cpp",
+    "sqlite": "3.53.1",
+    "users": 350000,
+    "hold": "60s",
+    "ramp": "30s",
+    "requests": 3611569,
+    "rps": 27781.3419738,
+    "p95_ms": 10.6679752,
+    "p99_ms": 18.51720432,
+    "max_ms": 56.325768,
+    "error_rate": 0.0,
+    "cpu_us_per_request": 20.881839444296926,
+    "cpu_scope": "server_cgroup",
+    "server_peak_bytes": 1002430464,
+    "passed": false,
+    "client_sampled_peak_bytes": 1470771200
+  },
+  "load_generator": {
+    "name": "td-load",
+    "version": "0.1.0",
+    "seed": 20261104,
+    "vus": 350000,
+    "passed": false,
+    "checks_passed": true,
+    "workflow_errors": 0,
+    "ramp_up_seconds": 30,
+    "target_activation_seconds": 30.257397814,
+    "activation_deadline_grace_ms": 100,
+    "target_activation_on_time": false,
+    "prepared_sockets": 350000,
+    "socket_preparation_seconds": 2.647469915,
+    "duration_semantics": "send+wait+receive, excludes connection acquisition and client request preparation; interrupted requests omitted",
+    "target_concurrency_reached": true,
+    "http_response_coverage_complete": true,
+    "http_metrics_passed": true,
+    "peak_live_connections": 350000,
+    "hold_peak_live_connections": 350000,
+    "max_rss_bytes": 159981568,
+    "idle_vu_state_bytes": 88,
+    "interrupted_iterations": 179227,
+    "endpoint_requests": {
+      "feed": 1665493,
+      "post": 1665493,
+      "like": 247512,
+      "create": 33071
+    },
+    "endpoint_duration_ms": {
+      "feed": {
+        "count": 1665493,
+        "avg": 4.66238236118,
+        "p95": 10.890377,
+        "p99": 18.6936464,
+        "max": 56.325768
+      },
+      "post": {
+        "count": 1665493,
+        "avg": 4.4817109499,
+        "p95": 10.425388,
+        "p99": 18.2973792,
+        "max": 40.57629
+      },
+      "like": {
+        "count": 247512,
+        "avg": 4.60930565083,
+        "p95": 10.69886415,
+        "p99": 18.6632774,
+        "max": 41.856079
+      },
+      "create": {
+        "count": 33071,
+        "avg": 4.41928648901,
+        "p95": 10.631701,
+        "p99": 18.3863385,
+        "max": 43.393022
+      }
+    },
+    "phase_duration_ms": {
+      "ramp_up": {
+        "count": 704538,
+        "avg": 4.38600508632,
+        "p95": 10.2684851,
+        "p99": 15.6420062,
+        "max": 26.645729
+      },
+      "hold": {
+        "count": 2233556,
+        "avg": 4.78816670399,
+        "p95": 11.861329,
+        "p99": 19.9162365,
+        "max": 56.325768
+      },
+      "ramp_down": {
+        "count": 661779,
+        "avg": 4.05618742936,
+        "p95": 8.94691870001,
+        "p99": 10.55755942,
+        "max": 27.705111
+      },
+      "grace": {
+        "count": 11696,
+        "avg": 4.05153057892,
+        "p95": 8.33326425,
+        "p99": 8.67598970001,
+        "max": 17.34689
+      }
+    }
+  },
+  "collection_errors": [],
+  "schema_version": 1,
+  "anchor": "146d5f21077f4989ecb75181cf5396d9b04a0c2d",
+  "label": "session-offset-350000",
+  "kind": "workload",
+  "started_at": "2026-11-04T19:29:17.263425+00:00",
+  "status": "failed",
+  "finished_at": "2026-11-04T19:31:46.308928+00:00",
+  "exit_code": 99,
+  "error": null,
+  "secondary_errors": [],
+  "workload": {
+    "generator": "cpp",
+    "vus": 350000,
+    "ramp": "30s",
+    "hold": "60s",
+    "seed": 20261104
+  },
+  "instruments": {
+    "server_telemetry": "off",
+    "perf": "off",
+    "client_diagnostics": false
+  },
+  "provenance": {
+    "source": {
+      "base_commit": "146d5f21077f4989ecb75181cf5396d9b04a0c2d",
+      "patch_sha256": "8024249c229890f27f4af8f12083b52168e8cca7f7616dd4ec0d9dced9f5b4fd",
+      "source_sha256": "170e7f8c5fa6693d360d6ef86411e6299f899e479d23636f41c487a7f928845e",
+      "patch": "source.patch"
+    },
+    "binary": {
+      "server": {
+        "image_id": "sha256:9130290028d2f8f6cab351e68af2ce2630f92b1cc2d71d0e741857bbd35baf60",
+        "sha256": "7c09b4a476d614eb520a059778e53c13ef0c93a45541ab0814761e7b540847ba"
+      },
+      "generator": {
+        "image_id": "sha256:b0fd9043f3904206d2a8bb398923eb1b2f9206705eb750bf908a4e35fc01063a",
+        "sha256": "f2634e9500b5017ee4c3ca77329ea8a98c54544b92e972ba9ba637fba69a4a1e"
+      }
+    }
+  }
+}

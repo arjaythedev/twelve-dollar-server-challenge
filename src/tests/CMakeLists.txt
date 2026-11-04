@@ -24,6 +24,9 @@ target_link_libraries(post_writer_tests PRIVATE api)
 tds_add_executable(parser_tests parser.cpp)
 target_link_libraries(parser_tests PRIVATE transport)
 
+tds_add_executable(session_tests session.cpp)
+target_link_libraries(session_tests PRIVATE transport)
+
 tds_add_executable(reply_tests reply.cpp "${PROJECT_SOURCE_DIR}/server/http/reply.cpp")
 target_include_directories(reply_tests PRIVATE "${PROJECT_SOURCE_DIR}/server")
 
@@ -71,6 +74,7 @@ add_test(NAME checkpoint_lifetimes COMMAND checkpoint_tests)
 add_test(NAME group_commit_contract COMMAND group_commit_tests)
 add_test(NAME post_writer_bytes COMMAND post_writer_tests)
 add_test(NAME parser_contract COMMAND parser_tests)
+add_test(NAME session_contract COMMAND session_tests)
 add_test(NAME reply_bytes COMMAND reply_tests)
 add_test(NAME application_contract COMMAND application_tests)
 add_test(NAME btree_feed COMMAND btree_tests)
@@ -86,7 +90,8 @@ set_tests_properties(io_uring_operations transport_lifetimes io_lifetime_contrac
     PROPERTIES LABELS "native;transport;integration")
 set_tests_properties(checkpoint_lifetimes group_commit_contract application_contract btree_feed btree_post_contract wal_vfs_contract
     PROPERTIES LABELS "native;database;integration")
-set_tests_properties(post_writer_bytes parser_contract reply_bytes PROPERTIES LABELS "native;unit")
+set_tests_properties(post_writer_bytes parser_contract session_contract reply_bytes
+    PROPERTIES LABELS "native;unit")
 set_tests_properties(sync_timing_contract PROPERTIES LABELS "native;database;unit")
 set_tests_properties(telemetry_contract PROPERTIES LABELS "native;unit")
 set_tests_properties(load_generator_conformance PROPERTIES LABELS "native;generator;integration")

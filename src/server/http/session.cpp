@@ -7,16 +7,28 @@ namespace tds::http
 
 void HttpSession::append(std::string_view bytes)
 {
+    if (consumed_ != 0 && bytes.size() > input_.capacity() - input_.size())
+    {
+        // Reclaim the consumed prefix only when appending would otherwise grow the buffer
+        input_.erase(0, consumed_);
+        consumed_ = 0;
+    }
     input_.append(bytes);
 }
 
 ParseResult HttpSession::consume()
 {
-    const auto result = parser_.parse(input_);
-    if (result.valid)
+    const std::string_view unread(input_.data() + consumed_, input_.size() - consumed_);
+    const auto result = parser_.parse(unread);
+    if (!result.valid)
     {
-        // A header pause leaves the body here, a message pause leaves the next pipeline request
-        input_.erase(0, result.consumed);
+        return result;
+    }
+    consumed_ += result.consumed;
+    if (consumed_ == input_.size())
+    {
+        input_.clear();
+        consumed_ = 0;
     }
 
     return result;

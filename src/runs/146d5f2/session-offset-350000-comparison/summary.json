@@ -1,0 +1,163 @@
+{
+  "measurement": {
+    "variants": [
+      {
+        "run": "session-erase-350000",
+        "summary_sha256": "35233daa5bf79fab530cb618633064c52281ce55af117c6a00506c2567dfccf7",
+        "status": "passed",
+        "performance_passed": true,
+        "requests": 3627150,
+        "cpu_us_per_request": 20.425906565760997,
+        "user_cpu_us_per_request": 5.408517982438002,
+        "kernel_cpu_us_per_request": 15.017388859021546,
+        "hold_requests": 2223020,
+        "hold_rps": 37050.333333333336,
+        "hold_cpu_us_per_request_approx": 18.511389173329608,
+        "hold_kernel_cpu_us_per_request_approx": 13.398081083528822,
+        "p95_ms": 10.72880635,
+        "p99_ms": 17.83267513,
+        "hold_p99_ms": 18.56445974,
+        "max_ms": 35.686854,
+        "error_rate": 0.0,
+        "server_peak_bytes": 1025007616,
+        "generator_rss_bytes": 160096256,
+        "activation_on_time": true,
+        "target_activation_seconds": 30.001080273,
+        "binary": {
+          "server": {
+            "image_id": "sha256:cd7c93819e85d057790a6579560ad08be81c7dff854642f6e6c13124e56a5922",
+            "sha256": "0aa082f43e0b198cf963072814c9d5f124cd1816a1ae75e9b0c5ef80d8e551a0"
+          },
+          "generator": {
+            "image_id": "sha256:b0fd9043f3904206d2a8bb398923eb1b2f9206705eb750bf908a4e35fc01063a",
+            "sha256": "f2634e9500b5017ee4c3ca77329ea8a98c54544b92e972ba9ba637fba69a4a1e"
+          }
+        }
+      },
+      {
+        "run": "session-offset-350000",
+        "summary_sha256": "cdfcaedb6a321a5efc5ebbb89c4078840ea93c433c37b14d92bdad4c1557baf1",
+        "status": "failed",
+        "performance_passed": false,
+        "requests": 3611569,
+        "cpu_us_per_request": 20.881839444296926,
+        "user_cpu_us_per_request": 5.550817110236576,
+        "kernel_cpu_us_per_request": 15.331022057172381,
+        "hold_requests": 2233556,
+        "hold_rps": 37225.933333333334,
+        "hold_cpu_us_per_request_approx": 18.7193421814909,
+        "hold_kernel_cpu_us_per_request_approx": 13.429255372852701,
+        "p95_ms": 10.6679752,
+        "p99_ms": 18.51720432,
+        "hold_p99_ms": 19.9162365,
+        "max_ms": 56.325768,
+        "error_rate": 0.0,
+        "server_peak_bytes": 1002430464,
+        "generator_rss_bytes": 159981568,
+        "activation_on_time": false,
+        "target_activation_seconds": 30.257397814,
+        "binary": {
+          "server": {
+            "image_id": "sha256:9130290028d2f8f6cab351e68af2ce2630f92b1cc2d71d0e741857bbd35baf60",
+            "sha256": "7c09b4a476d614eb520a059778e53c13ef0c93a45541ab0814761e7b540847ba"
+          },
+          "generator": {
+            "image_id": "sha256:b0fd9043f3904206d2a8bb398923eb1b2f9206705eb750bf908a4e35fc01063a",
+            "sha256": "f2634e9500b5017ee4c3ca77329ea8a98c54544b92e972ba9ba637fba69a4a1e"
+          }
+        }
+      },
+      {
+        "run": "session-offset-350000-repeat",
+        "summary_sha256": "d846378ce707f1dda6d9cdb56db067664eab19d958ce20e5abc575a9c7985138",
+        "status": "passed",
+        "performance_passed": true,
+        "requests": 3627468,
+        "cpu_us_per_request": 20.276593480631668,
+        "user_cpu_us_per_request": 5.418958623480621,
+        "kernel_cpu_us_per_request": 14.857634857151048,
+        "hold_requests": 2222757,
+        "hold_rps": 37045.95,
+        "hold_cpu_us_per_request_approx": 18.603815412991562,
+        "hold_kernel_cpu_us_per_request_approx": 13.181999928811925,
+        "p95_ms": 14.1385801,
+        "p99_ms": 20.11540956,
+        "hold_p99_ms": 21.01946308,
+        "max_ms": 57.739654,
+        "error_rate": 0.0,
+        "server_peak_bytes": 1032216576,
+        "generator_rss_bytes": 160063488,
+        "activation_on_time": true,
+        "target_activation_seconds": 30.000245863,
+        "binary": {
+          "server": {
+            "image_id": "sha256:9130290028d2f8f6cab351e68af2ce2630f92b1cc2d71d0e741857bbd35baf60",
+            "sha256": "7c09b4a476d614eb520a059778e53c13ef0c93a45541ab0814761e7b540847ba"
+          },
+          "generator": {
+            "image_id": "sha256:b0fd9043f3904206d2a8bb398923eb1b2f9206705eb750bf908a4e35fc01063a",
+            "sha256": "f2634e9500b5017ee4c3ca77329ea8a98c54544b92e972ba9ba637fba69a4a1e"
+          }
+        }
+      }
+    ],
+    "changes": {
+      "cpu_us_per_request_change_percent": -0.7309985710970412,
+      "user_cpu_us_per_request_change_percent": 0.19304070128860484,
+      "kernel_cpu_us_per_request_change_percent": -1.0637934688261574,
+      "hold_cpu_us_per_request_approx_change_percent": 0.4992939146626352,
+      "hold_kernel_cpu_us_per_request_approx_change_percent": -1.6127768847625568
+    },
+    "comparison_runs": [
+      "session-erase-350000",
+      "session-offset-350000-repeat"
+    ],
+    "comparison_valid": true,
+    "selected_runs_passed": true,
+    "all_attempts_passed": false,
+    "first_candidate_attempt": "Reached target after30.257s; fixed deadline30.100s. Preserved as failed; same image repeated once with unchanged parameters.",
+    "same_seed_sha256": "283c965b2a82c902a74dfe2ee10e1361a6c850a7189a8b939e51d1509b156b22",
+    "same_generator_binary": true,
+    "fresh_seed_copy_each_run": true,
+    "only_changed_source_files": [
+      "src/server/http/session.cpp",
+      "src/server/http/session.hpp"
+    ],
+    "native_contract": "../session-offset-native/summary.json",
+    "native_binary_matches": true,
+    "fixed": {
+      "post_reader": "B-tree",
+      "wal_coalescing": true,
+      "write_cap": 32,
+      "cq_target": 128,
+      "cq_timeout_ms": 8
+    },
+    "limits": "One sequential local Docker/WSL6.6 A/B pair. Hold CPU uses interpolated 2s samples at30/90s; whole-run CPU includes connection setup/teardown. HTTP latency is client-observed loopback, not VPS6.8 or remote-NIC performance."
+  },
+  "schema_version": 1,
+  "anchor": "146d5f21077f4989ecb75181cf5396d9b04a0c2d",
+  "label": "session-offset-350000-comparison",
+  "kind": "comparison",
+  "started_at": "2026-11-04T19:35:22.022276+00:00",
+  "status": "passed",
+  "finished_at": "2026-11-04T19:35:22.024684+00:00",
+  "exit_code": 0,
+  "error": null,
+  "secondary_errors": [],
+  "workload": {
+    "generator": "cpp",
+    "vus": 350000,
+    "ramp": "30s",
+    "hold": "60s",
+    "seed": 20261104
+  },
+  "instruments": {
+    "server_telemetry": "off",
+    "perf": "off",
+    "client_diagnostics": false
+  },
+  "provenance": {
+    "source": null,
+    "binary": null
+  }
+}

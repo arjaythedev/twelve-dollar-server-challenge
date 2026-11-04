@@ -29,7 +29,7 @@ Unchecked items are experiments; checked items include completed work and discar
 
 - [x] Discard skipping duplicate point-read initialization ([screen](src/runs/6cd248e/post-initialization-native/summary.json)): assembly removes the expected stores and contracts pass, but four pairs range from -12.4% to +20.2% CPU. No reliable gain; keep the existing initializers.
 
-- [ ] Native-screen a consumed offset in `HttpSession::consume` before moving retained body/pipeline tails. Preserve bounds, fragmented input and response order; ordinary GETs usually have no tail, so start with body/pipeline cases.
+- [x] Keep a consumed-input offset in `HttpSession` ([native screen](src/runs/146d5f2/session-offset-native/summary.json)): median CPU -4.6% for contiguous bodies and -13.8% for 32-request pipelines, with all four pairs improving. GET and fragmented-body results remain inconclusive. `consume` no longer moves tails; append compacts only when needed. Session size +8 bytes, retained capacities unchanged, four contracts passed. The [350k control/repeat](src/runs/146d5f2/session-offset-350000-comparison/summary.json) found no full-server gain: total CPU -0.73%, approximate hold CPU +0.50%; first offset attempt activated late.
 
 - [ ] Revisit direct receive-buffer parsing only for a measured frequent case of a complete ordinary request, with the current Session-copy path for fragments and retained tails ([receive handler](src/server/server.cpp)).
   The broader leased-buffer experiment found no CPU gain. Keep llhttp, request-owned fields before releasing the lease, early auth errors and pipeline order; compare copies, CPU and memory before expanding it.

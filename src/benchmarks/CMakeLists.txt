@@ -11,6 +11,9 @@ target_link_libraries(btree_post_probe PRIVATE api sqlite)
 tds_add_executable(parser_probe EXCLUDE_FROM_ALL parser.cpp)
 target_link_libraries(parser_probe PRIVATE transport)
 
+tds_add_executable(session_probe EXCLUDE_FROM_ALL session.cpp)
+target_link_libraries(session_probe PRIVATE transport)
+
 tds_add_executable(reply_probe EXCLUDE_FROM_ALL reply.cpp
     "${PROJECT_SOURCE_DIR}/server/http/reply.cpp")
 target_include_directories(reply_probe PRIVATE "${PROJECT_SOURCE_DIR}/server")

@@ -11,8 +11,9 @@ extern "C"
     typedef struct tds_btree tds_btree;
 
     /* Best-effort Linux cache eviction on the exclusively owned checkpoint handle
-     * Only call after a successful checkpoint; the file and its contents stay unchanged */
-    void tds_wal_drop_checkpointed(sqlite3 *db, int frames);
+     * Only call after a successful checkpoint; the file and its contents stay unchanged
+     * event_capacity is the caller's remaining diagnostic-event capacity, capped at 16 */
+    void tds_wal_drop_checkpointed(sqlite3 *db, int frames, unsigned event_capacity);
 
     typedef struct tds_btree_post
     {

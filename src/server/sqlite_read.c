@@ -19,8 +19,11 @@ static _Thread_local struct
 } wal_advice;
 #endif
 
-static void record_wal_advice(int offset, i64 length, int result)
+static void record_wal_advice(int offset, i64 length, int result, unsigned event_capacity)
 {
+#if TDS_TELEMETRY_LEVEL < 2
+    (void)event_capacity;
+#endif
 #if TDS_TELEMETRY_LEVEL == 1
     (void)offset;
 #endif
@@ -29,7 +32,8 @@ static void record_wal_advice(int offset, i64 length, int result)
     wal_advice.errors += result != 0;
     wal_advice.requested_bytes += (uint64_t)length;
 #if TDS_TELEMETRY_LEVEL >= 2
-    if (wal_advice.event_count < TDS_WAL_ADVICE_EVENT_CAPACITY)
+    if (wal_advice.event_count < event_capacity &&
+        wal_advice.event_count < TDS_WAL_ADVICE_EVENT_CAPACITY)
     {
         const int saved_errno = errno;
         struct timespec now = {0, 0};
@@ -53,21 +57,36 @@ static void record_wal_advice(int offset, i64 length, int result)
 
 void tds_wal_advice_take(tds_wal_advice_snapshot *snapshot)
 {
-    memset(snapshot, 0, sizeof(*snapshot));
 #if TDS_TELEMETRY_LEVEL >= 1
     snapshot->calls = wal_advice.calls;
     snapshot->errors = wal_advice.errors;
     snapshot->requested_bytes = wal_advice.requested_bytes;
+#else
+    snapshot->calls = 0;
+    snapshot->errors = 0;
+    snapshot->requested_bytes = 0;
+#endif
 #if TDS_TELEMETRY_LEVEL >= 2
     snapshot->event_count = wal_advice.event_count;
     snapshot->dropped_events = wal_advice.dropped_events;
-    memcpy(snapshot->events, wal_advice.events, sizeof(wal_advice.events));
+    memcpy(snapshot->events, wal_advice.events,
+           (size_t)wal_advice.event_count * sizeof(*snapshot->events));
+#else
+    snapshot->event_count = 0;
+    snapshot->dropped_events = 0;
 #endif
-    memset(&wal_advice, 0, sizeof(wal_advice));
+#if TDS_TELEMETRY_LEVEL >= 1
+    wal_advice.calls = 0;
+    wal_advice.errors = 0;
+    wal_advice.requested_bytes = 0;
+#if TDS_TELEMETRY_LEVEL >= 2
+    wal_advice.event_count = 0;
+    wal_advice.dropped_events = 0;
+#endif
 #endif
 }
 
-void tds_wal_drop_checkpointed(sqlite3 *db, int frames)
+void tds_wal_drop_checkpointed(sqlite3 *db, int frames, unsigned event_capacity)
 {
     Wal *wal;
     sqlite3_file *file;
@@ -97,7 +116,7 @@ void tds_wal_drop_checkpointed(sqlite3 *db, int frames)
     // Slightly cursed: keep SQLites unixFile cast inside its own translation unit
     // Keep the header page and partial boundary pages; advice never changes file bytes
     result = posix_fadvise(((unixFile *)file)->h, page_size, end - page_size, POSIX_FADV_DONTNEED);
-    record_wal_advice(page_size, end - page_size, result);
+    record_wal_advice(page_size, end - page_size, result, event_capacity);
 }
 
 enum

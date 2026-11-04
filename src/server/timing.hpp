@@ -26,7 +26,6 @@ struct Histogram
         // Zero and one share bucket zero; remaining buckets contain floor(log2(value))
         const auto index = value ? std::bit_width(value) - 1U : 0U;
         ++buckets[static_cast<std::size_t>(index)];
-        ++count;
         total += value;
         if (value > max)
         {
@@ -40,7 +39,6 @@ struct Histogram
         {
             buckets[index] += other.buckets[index];
         }
-        count += other.count;
         total += other.total;
         if (other.max > max)
         {
@@ -53,8 +51,19 @@ struct Histogram
         *this = Histogram{};
     }
 
+    [[nodiscard]] std::uint64_t count() const noexcept
+    {
+        // Counting is cold; unsigned addition preserves the original wraparound semantics
+        std::uint64_t samples = 0;
+        for (const auto bucket : buckets)
+        {
+            samples += bucket;
+        }
+
+        return samples;
+    }
+
     std::array<std::uint64_t, 64> buckets{};
-    std::uint64_t count = 0;
     std::uint64_t total = 0;
     std::uint64_t max = 0;
 };

@@ -77,7 +77,7 @@ class Json
     {
         auto *series = object();
         text(series, "unit", unit);
-        number(series, "count", values.count);
+        number(series, "count", values.count());
         number(series, "total", values.total);
         number(series, "max", values.max);
         auto *buckets = array();

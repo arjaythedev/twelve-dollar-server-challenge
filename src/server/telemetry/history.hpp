@@ -1,11 +1,10 @@
 #pragma once
 
-#include <array>
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
-#include <memory>
 #include <type_traits>
+#include <vector>
 
 namespace tds::telemetry
 {
@@ -15,31 +14,42 @@ template <typename Snapshot> class History
   public:
     static constexpr std::size_t capacity = 128;
 
-    void push(const Snapshot &snapshot) noexcept
+    History()
     {
-        static_assert(std::is_nothrow_copy_assignable_v<Snapshot>);
-        (*slots_)[next_] = snapshot;
-        next_ = (next_ + 1) % capacity;
-        if (size_ < capacity)
+        slots_.reserve(capacity);
+    }
+
+    History(const History &) = delete;
+    History &operator=(const History &) = delete;
+
+    // Slots stay at fixed addresses and retain their values when reused
+    [[nodiscard]] Snapshot &next() noexcept
+    {
+        static_assert(std::is_nothrow_default_constructible_v<Snapshot>);
+        if (slots_.size() < capacity)
         {
-            ++size_;
+            slots_.emplace_back();
         }
         else
         {
             ++overwritten_;
         }
+        auto &snapshot = slots_[next_];
+        next_ = (next_ + 1) % capacity;
+
+        return snapshot;
     }
 
     [[nodiscard]] std::size_t size() const noexcept
     {
-        return size_;
+        return slots_.size();
     }
 
     [[nodiscard]] const Snapshot &at(std::size_t index) const noexcept
     {
-        assert(index < size_);
+        assert(index < size());
 
-        return (*slots_)[(next_ + capacity - size_ + index) % capacity];
+        return slots_[(next_ + capacity - size() + index) % capacity];
     }
 
     [[nodiscard]] std::uint64_t overwritten() const noexcept
@@ -48,11 +58,9 @@ template <typename Snapshot> class History
     }
 
   private:
-    // Allocate once, before measuring, and never grow while handling requests
-    std::unique_ptr<std::array<Snapshot, capacity>> slots_ =
-        std::make_unique<std::array<Snapshot, capacity>>();
+    // Reserve once before requests, construct each slot only on its first capture
+    std::vector<Snapshot> slots_;
     std::size_t next_ = 0;
-    std::size_t size_ = 0;
     std::uint64_t overwritten_ = 0;
 };
 

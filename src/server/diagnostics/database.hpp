@@ -45,9 +45,8 @@ class DatabaseTelemetry
 
       private:
 #if TDS_TELEMETRY_LEVEL >= 2
-        DatabaseTelemetry &owner_;
-        DatabaseOperation operation_;
         std::uint64_t started_ns_;
+        timing::Histogram &histogram_;
         std::optional<SyncScope> sync_;
 #endif
     };
@@ -130,6 +129,15 @@ class DatabaseTelemetry
         return Scope(*this, operation);
     }
 
+    unsigned remaining_advice_events() const noexcept
+    {
+#if TDS_TELEMETRY_LEVEL >= 2
+        return static_cast<unsigned>(advice_events_.size() - advice_event_count_);
+#else
+        return 0;
+#endif
+    }
+
   private:
 #if TDS_TELEMETRY_LEVEL >= 1
     static std::uint64_t &operation_count(telemetry::DatabaseCounters &counters,
@@ -168,8 +176,10 @@ class DatabaseTelemetry
 #endif
 
 #if TDS_TELEMETRY_LEVEL >= 2
-    timing::Histogram &histogram(DatabaseOperation operation) noexcept;
+    timing::Histogram &start_operation(DatabaseOperation operation) noexcept;
     void flush_window(std::uint64_t now_ns, bool final) noexcept;
+    // Periodic snapshot and merge work belongs outside the ordinary deadline check
+    [[gnu::noinline]] void capture_window(std::uint64_t now_ns) noexcept;
 
     std::uint64_t started_ns_ = timing::now_ns();
     std::uint64_t last_report_ns_ = started_ns_;

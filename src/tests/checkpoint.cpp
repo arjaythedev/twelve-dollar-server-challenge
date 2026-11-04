@@ -1,4 +1,6 @@
 #include "app/post_writer.hpp"
+#include "diagnostics/database.hpp"
+#include "sqlite_read.h"
 #include "storage/database.hpp"
 
 #include <sqlite3.h>
@@ -6,10 +8,13 @@
 #include <cerrno>
 #include <chrono>
 #include <condition_variable>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <exception>
 #include <fcntl.h>
 #include <filesystem>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -155,6 +160,197 @@ class Fixture
 
 struct Control;
 Control *active = nullptr;
+
+struct AdviceProbe;
+thread_local AdviceProbe *advice_probe = nullptr;
+
+struct AdviceProbe
+{
+    explicit AdviceProbe(int checkpointed) : frames(checkpointed)
+    {
+        require(active == nullptr && advice_probe == nullptr, "overlapping advice probes");
+        advice_probe = this;
+    }
+
+    ~AdviceProbe()
+    {
+        advice_probe = nullptr;
+    }
+
+    int frames;
+    int result = 0;
+    std::uint64_t calls = 0;
+    std::uint64_t forwarded = 0;
+    std::uint64_t length = 0;
+};
+
+int prepare_advice(sqlite3 *db)
+{
+    require(sqlite3_exec(db,
+                         "PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;"
+                         "CREATE TABLE advice_probe(value BLOB);"
+                         "INSERT INTO advice_probe VALUES(zeroblob(16384));",
+                         nullptr, nullptr, nullptr) == SQLITE_OK,
+            "prepare advice WAL failed");
+    int frames = -1;
+    int checkpointed = -1;
+    require(sqlite3_wal_checkpoint_v2(db, "main", SQLITE_CHECKPOINT_PASSIVE, &frames,
+                                      &checkpointed) == SQLITE_OK &&
+                frames == checkpointed && frames > 1,
+            "prepare advice checkpoint failed");
+    return checkpointed;
+}
+
+void advice_totals(const tds_wal_advice_snapshot &snapshot, std::uint64_t calls,
+                   std::uint64_t errors, std::uint64_t length, std::uint64_t events,
+                   std::uint64_t dropped)
+{
+    require(snapshot.calls == (tds::telemetry::enabled ? calls : 0) &&
+                snapshot.errors == (tds::telemetry::enabled ? errors : 0) &&
+                snapshot.requested_bytes == (tds::telemetry::enabled ? calls * length : 0) &&
+                snapshot.event_count == (tds::telemetry::profiling ? events : 0) &&
+                snapshot.dropped_events == (tds::telemetry::profiling ? dropped : 0),
+            "advice snapshot lost mode-specific counts, bytes, events or losses");
+}
+
+void advice_empty(tds_wal_advice_snapshot &snapshot)
+{
+    snapshot.calls = snapshot.errors = snapshot.requested_bytes = snapshot.event_count =
+        snapshot.dropped_events = std::numeric_limits<std::uint64_t>::max();
+    tds_wal_advice_take(&snapshot);
+    advice_totals(snapshot, 0, 0, 0, 0, 0);
+}
+
+void advice_call(sqlite3 *db, int frames, unsigned capacity)
+{
+    errno = EDOM;
+    tds_wal_drop_checkpointed(db, frames, capacity);
+    require(errno == EDOM, "advice recording changed errno");
+}
+
+void advice_storage()
+{
+    Fixture fixture;
+    auto db = open(fixture.path);
+    const int frames = prepare_advice(db.get());
+    AdviceProbe probe(frames);
+    tds_wal_advice_snapshot snapshot;
+    advice_empty(snapshot);
+    advice_call(db.get(), 0, TDS_WAL_ADVICE_EVENT_CAPACITY);
+    advice_call(db.get(), -1, TDS_WAL_ADVICE_EVENT_CAPACITY);
+    advice_empty(snapshot);
+    require(probe.calls == 0, "empty checkpoint issued cache advice");
+
+    const auto started = tds::timing::now_ns();
+    constexpr unsigned accumulated = TDS_WAL_ADVICE_EVENT_CAPACITY + 3;
+    for (unsigned index = 0; index < accumulated; ++index)
+    {
+        probe.result = index % 3 == 0 ? EIO : 0;
+        advice_call(db.get(), frames, std::numeric_limits<unsigned>::max());
+    }
+    const auto finished = tds::timing::now_ns();
+    tds_wal_advice_take(&snapshot);
+    advice_totals(snapshot, accumulated, 7, probe.length, TDS_WAL_ADVICE_EVENT_CAPACITY, 3);
+    require(probe.calls == accumulated && probe.forwarded == accumulated - 7,
+            "advice did not forward successful calls exactly once");
+    std::uint64_t previous = started;
+    for (std::uint64_t index = 0; index < snapshot.event_count; ++index)
+    {
+        const auto &event = snapshot.events[index];
+        require(event.time_ns >= previous && event.time_ns <= finished &&
+                    event.offset == static_cast<std::uint64_t>(::sysconf(_SC_PAGESIZE)) &&
+                    event.length == probe.length && event.result == (index % 3 == 0 ? EIO : 0),
+                "advice prefix lost monotonic time, range or result");
+        previous = event.time_ns;
+    }
+    advice_empty(snapshot);
+
+    probe.result = 0;
+    for (unsigned index = 0; index < 5; ++index)
+    {
+        advice_call(db.get(), frames, 3);
+    }
+    tds_wal_advice_take(&snapshot);
+    advice_totals(snapshot, 5, 0, probe.length, 3, 2);
+    advice_empty(snapshot);
+
+    probe.result = EIO;
+    for (unsigned index = 0; index < 4; ++index)
+    {
+        advice_call(db.get(), frames, 0);
+    }
+    tds_wal_advice_take(&snapshot);
+    advice_totals(snapshot, 4, 4, probe.length, 0, 4);
+    advice_empty(snapshot);
+
+    {
+        tds::telemetry::DatabaseTelemetry owner("advice_capacity");
+        for (unsigned index = 0; index < 20; ++index)
+        {
+            const unsigned remaining =
+                index < TDS_WAL_ADVICE_EVENT_CAPACITY ? TDS_WAL_ADVICE_EVENT_CAPACITY - index : 0;
+            require(owner.remaining_advice_events() == (tds::telemetry::profiling ? remaining : 0),
+                    "advice owner reported the wrong remaining capacity");
+            probe.result = index % 2 == 0 ? 0 : EIO;
+            advice_call(db.get(), frames, owner.remaining_advice_events());
+            tds_wal_advice_take(&snapshot);
+            advice_totals(snapshot, 1, index % 2, probe.length, remaining ? 1 : 0,
+                          remaining ? 0 : 1);
+            owner.wal_advice_completed(snapshot);
+        }
+#if TDS_TELEMETRY_LEVEL >= 1
+        const auto totals = owner.snapshot();
+        require(totals.wal_advice.calls == 20 && totals.wal_advice.errors == 10 &&
+                    totals.wal_advice.requested_bytes == 20 * probe.length,
+                "saturated owner lost aggregate advice counts");
+#endif
+    }
+    {
+        tds::telemetry::DatabaseTelemetry owner("new_advice_owner");
+        require(owner.remaining_advice_events() ==
+                    (tds::telemetry::profiling ? TDS_WAL_ADVICE_EVENT_CAPACITY : 0),
+                "new advice owner inherited an earlier owner's capacity");
+        probe.result = 0;
+        advice_call(db.get(), frames, owner.remaining_advice_events());
+        tds_wal_advice_take(&snapshot);
+        advice_totals(snapshot, 1, 0, probe.length, 1, 0);
+    }
+    advice_empty(snapshot);
+
+    advice_call(db.get(), frames, TDS_WAL_ADVICE_EVENT_CAPACITY);
+    advice_call(db.get(), frames, TDS_WAL_ADVICE_EVENT_CAPACITY);
+    std::exception_ptr worker_error;
+    std::jthread worker([&] {
+        try
+        {
+            Fixture worker_fixture;
+            auto worker_db = open(worker_fixture.path);
+            const int worker_frames = prepare_advice(worker_db.get());
+            AdviceProbe worker_probe(worker_frames);
+            tds_wal_advice_snapshot worker_snapshot;
+            advice_empty(worker_snapshot);
+            for (unsigned index = 0; index < 7; ++index)
+            {
+                advice_call(worker_db.get(), worker_frames, TDS_WAL_ADVICE_EVENT_CAPACITY);
+            }
+            tds_wal_advice_take(&worker_snapshot);
+            advice_totals(worker_snapshot, 7, 0, worker_probe.length, 7, 0);
+            advice_empty(worker_snapshot);
+        }
+        catch (...)
+        {
+            worker_error = std::current_exception();
+        }
+    });
+    worker.join();
+    if (worker_error)
+    {
+        std::rethrow_exception(worker_error);
+    }
+    tds_wal_advice_take(&snapshot);
+    advice_totals(snapshot, 2, 0, probe.length, 2, 0);
+    advice_empty(snapshot);
+}
 
 struct Control
 {
@@ -534,6 +730,22 @@ extern "C" int __real_posix_fadvise64(int, off64_t, off64_t, int);
 
 extern "C" int __wrap_posix_fadvise64(int descriptor, off64_t offset, off64_t length, int advice)
 {
+    if (AdviceProbe *probe = advice_probe)
+    {
+        const auto page_size = ::sysconf(_SC_PAGESIZE);
+        const auto end = 32 + static_cast<std::int64_t>(probe->frames) * (4096 + 24);
+        require(descriptor >= 0 && offset == page_size && length > 0 && length % page_size == 0 &&
+                    offset + length == end - end % page_size && advice == POSIX_FADV_DONTNEED,
+                "direct advice changed the descriptor, range or operation");
+        ++probe->calls;
+        probe->length = static_cast<std::uint64_t>(length);
+        if (probe->result)
+        {
+            return probe->result;
+        }
+        ++probe->forwarded;
+        return __real_posix_fadvise64(descriptor, offset, length, advice);
+    }
     Control *control = active;
     int injected = 0;
     if (control)
@@ -611,6 +823,7 @@ int main()
 {
     try
     {
+        advice_storage();
         startup_failure();
         coalescing_and_freshness(4096);
         coalescing_and_freshness(8192);
@@ -618,7 +831,8 @@ int main()
         pinned_reader();
         shutdown_joins();
         shutdown_joins_advice();
-        std::puts("Checkpoint startup, coalescing, freshness, failure and shutdown passed");
+        std::puts("Checkpoint startup, advice storage, coalescing, freshness, failure and shutdown "
+                  "passed");
         return 0;
     }
     catch (const std::exception &error)

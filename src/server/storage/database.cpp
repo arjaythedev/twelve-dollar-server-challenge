@@ -137,11 +137,12 @@ class Checkpoints
                                                    &frames, &checkpointed);
                 if (result == SQLITE_OK)
                 {
-                    tds_wal_drop_checkpointed(db_.get(), checkpointed);
+                    tds_wal_drop_checkpointed(db_.get(), checkpointed,
+                                              diagnostics.remaining_advice_events());
                 }
             }
 #if TDS_TELEMETRY_LEVEL >= 1
-            tds_wal_advice_snapshot advice{};
+            tds_wal_advice_snapshot advice;
             tds_wal_advice_take(&advice);
             diagnostics.wal_advice_completed(advice);
 #endif

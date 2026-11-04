@@ -7,3 +7,16 @@ target_compile_definitions(response_reuse_probe PRIVATE TDS_RESPONSE_REUSE=1)
 
 tds_add_executable(retry_receive_probe EXCLUDE_FROM_ALL retry_receive.cpp)
 target_link_libraries(retry_receive_probe PRIVATE transport uring)
+
+if(TDS_TELEMETRY STREQUAL "profile")
+    tds_add_executable(telemetry_probe EXCLUDE_FROM_ALL telemetry.cpp)
+    target_link_libraries(telemetry_probe PRIVATE transport api sqlite)
+
+    tds_add_executable(history_probe EXCLUDE_FROM_ALL history.cpp)
+    target_link_libraries(history_probe PRIVATE transport api sqlite)
+
+    tds_add_executable(wal_advice_probe EXCLUDE_FROM_ALL wal_advice.cpp)
+    target_link_libraries(wal_advice_probe PRIVATE api sqlite)
+    target_compile_definitions(wal_advice_probe PRIVATE TDS_TELEMETRY_LEVEL=2)
+    target_link_options(wal_advice_probe PRIVATE -Wl,--wrap=posix_fadvise64)
+endif()

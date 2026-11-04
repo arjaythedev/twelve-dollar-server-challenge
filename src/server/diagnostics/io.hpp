@@ -10,7 +10,6 @@ namespace tds::net
 class ConnectionStore;
 class Reactor;
 class Ring;
-enum class Event;
 struct Completion;
 struct Connection;
 } // namespace tds::net
@@ -149,6 +148,7 @@ class IoTelemetry
 #if TDS_TELEMETRY_LEVEL == 2
     void report(const net::Reactor &reactor, bool force = false) noexcept;
     static void send_prepared(net::Connection &connection) noexcept;
+    static void send_serviced(net::Completion &completion) noexcept;
     static void send_completed(const net::Completion &completion) noexcept;
     static void receive_deferred(net::Connection &connection) noexcept;
 
@@ -170,6 +170,10 @@ class IoTelemetry
     {
     }
 
+    static void send_serviced(net::Completion &) noexcept
+    {
+    }
+
     static void send_completed(const net::Completion &) noexcept
     {
     }
@@ -183,8 +187,7 @@ class IoTelemetry
     static void drain_started(net::Ring &owner) noexcept;
     static void drain_finished(net::Ring &owner, unsigned drained) noexcept;
     static void receive_prepared(net::Connection &connection) noexcept;
-    static void io_serviced(net::Connection &connection, net::Event event, int result,
-                            net::Completion &completion) noexcept;
+    static void receive_completed(net::Connection &connection, int result) noexcept;
     static void store_created(net::ConnectionStore &owner) noexcept;
     static void store_retired(net::ConnectionStore &owner) noexcept;
     static void exchange_allocated(net::Ring &owner) noexcept;
@@ -202,7 +205,7 @@ class IoTelemetry
     {
     }
 
-    static void io_serviced(net::Connection &, net::Event, int, net::Completion &) noexcept
+    static void receive_completed(net::Connection &, int) noexcept
     {
     }
 
@@ -231,6 +234,8 @@ class IoTelemetry
 #endif
 #if TDS_TELEMETRY_LEVEL == 2
     void start() noexcept;
+    // Keep periodic snapshot and merge work out of the per-turn deadline check
+    [[gnu::noinline]] void capture(const net::Reactor &reactor, std::uint64_t now) noexcept;
 
     IoTimings interval_;
     IoSnapshot totals_;

@@ -653,7 +653,7 @@ void exhausted_receive_retries()
         }
     }
     require(first_deferred.size() == clients_count - ReceiveBuffers::count &&
-                owner.statistics.interval.enobufs_to_successful_receive_service_ns.count == 0,
+                owner.statistics.interval.enobufs_to_successful_receive_service_ns.count() == 0,
             "first ENOBUFS timestamps missed deferrals or recorded unfinished recovery");
 #endif
 
@@ -711,7 +711,7 @@ void exhausted_receive_retries()
             "receive counters included control CQEs or missed retry completions");
 #endif
 #if TDS_TELEMETRY_LEVEL == 2
-    require(owner.statistics.interval.enobufs_to_successful_receive_service_ns.count ==
+    require(owner.statistics.interval.enobufs_to_successful_receive_service_ns.count() ==
                     first_deferred.size() &&
                 owner.statistics.interval.enobufs_to_successful_receive_service_ns.max >= 5'000'000,
             "recovery timing missed an episode or excluded the buffer-deferred wait");
@@ -1070,7 +1070,7 @@ void telemetry_hook_contracts()
         owner.recycle_exchange(std::move(pooled));
         Completion completion;
         IoTelemetry::receive_prepared(connection);
-        IoTelemetry::io_serviced(connection, Event::receive, -ENOBUFS, completion);
+        IoTelemetry::receive_completed(connection, -ENOBUFS);
         IoTelemetry::receive_deferred(connection);
 #if TDS_TELEMETRY_LEVEL == 2
         const auto first_enobufs = connection.receive_enobufs_since_ns;
@@ -1078,22 +1078,23 @@ void telemetry_hook_contracts()
         require(first_enobufs > 0 && connection.receive_enobufs_since_ns == first_enobufs,
                 "repeated deferral replaced the first ENOBUFS time");
 #endif
-        IoTelemetry::io_serviced(connection, Event::receive, 1, completion);
+        IoTelemetry::receive_completed(connection, 1);
 #if TDS_TELEMETRY_LEVEL == 2
         require(connection.receive_enobufs_since_ns == 0 &&
-                    owner.statistics.interval.enobufs_to_successful_receive_service_ns.count == 1,
+                    owner.statistics.interval.enobufs_to_successful_receive_service_ns.count() == 1,
                 "successful receive did not resolve its deferral sample");
 #endif
         for (const int result : {-EAGAIN, -ECANCELED})
         {
             collector.send_prepared(connection);
-            IoTelemetry::io_serviced(connection, Event::send, result, completion);
+            IoTelemetry::send_serviced(completion);
             completion.connection = &connection;
+            completion.result = result;
             connection.start_close();
             collector.send_completed(completion);
         }
 #if TDS_TELEMETRY_LEVEL == 2
-        require(owner.statistics.interval.send_attempt_prepare_to_cqe_service_ns.count == 2 &&
+        require(owner.statistics.interval.send_attempt_prepare_to_cqe_service_ns.count() == 2 &&
                     connection.exchange->receive_serviced_ns == receive_ns,
                 "failed or closing sends lost samples or changed buffered receive time");
 #endif
@@ -1115,20 +1116,23 @@ void telemetry_hook_contracts()
         const auto &window = collector.history().at(0);
         const auto &ring = window.rings[0];
         require(window.start_ns > 0 && window.end_ns >= window.start_ns &&
-                    window.timings.handler_wall_ns.count == 2 &&
-                    window.timings.receive_cqe_service_to_handler_start_ns.count == 2 &&
-                    window.timings.write_batch_size.count == 1 &&
+                    window.timings.handler_wall_ns.count() == 2 &&
+                    window.timings.receive_cqe_service_to_handler_start_ns.count() == 2 &&
+                    window.timings.write_batch_size.count() == 1 &&
                     window.timings.write_batch_size.total == 3 &&
-                    window.timings.write_batch_wall_ns.count == 1,
+                    window.timings.write_batch_wall_ns.count() == 1,
                 "profile scope classification, completion or unwind accounting changed");
         require(ring.counters.cqes == 3 && ring.counters.receive_submissions == 1 &&
                     ring.counters.receive_completions == 2 && ring.counters.receive_enobufs == 1 &&
                     ring.counters.cq_overflow_counter_delta == 3 &&
-                    ring.timings.send_attempt_prepare_to_cqe_service_ns.count == 2 &&
+                    ring.counters.empty_cq_samples == 1 &&
+                    ring.timings.cq_ready_before_drain.count() == 1 &&
+                    ring.timings.cq_ready_before_drain.total == 0 &&
+                    ring.timings.send_attempt_prepare_to_cqe_service_ns.count() == 2 &&
                     ring.timings.deferred_receive_queue_depth.total == 1,
                 "profile window lost ring counters or timing samples");
         require(owner.statistics.totals.cqes == 3 &&
-                    owner.statistics.interval.send_attempt_prepare_to_cqe_service_ns.count == 0 &&
+                    owner.statistics.interval.send_attempt_prepare_to_cqe_service_ns.count() == 0 &&
                     owner.statistics.previous_overflow == overflow,
                 "profile capture lost cumulative counters or its overflow baseline");
 #endif
@@ -1140,20 +1144,23 @@ void telemetry_hook_contracts()
         require(next.start_ns == window.end_ns && next.rings[0].counters.cqes == 2 &&
                     next.rings[0].counters.receive_completions == 0 &&
                     next.rings[0].counters.cq_overflow_counter_delta == 0 &&
-                    next.timings.handler_wall_ns.count == 0,
+                    next.rings[0].counters.empty_cq_samples == 1 &&
+                    next.rings[0].timings.cq_ready_before_drain.count() == 1 &&
+                    next.rings[0].timings.cq_ready_before_drain.total == 0 &&
+                    next.timings.handler_wall_ns.count() == 0,
                 "consecutive profile windows reused interval values");
         for (std::size_t index = 0;
              index < tds::telemetry::History<tds::telemetry::IoSnapshot>::capacity; ++index)
         {
             collector.report(reactor, true);
         }
-        require(
-            collector.history().size() == 128 && collector.history().overwritten() == 2 &&
-                collector.totals().rings[0].counters.cqes == 5 &&
-                collector.totals().timings.handler_wall_ns.count == 2 &&
-                collector.totals().rings[0].timings.send_attempt_prepare_to_cqe_service_ns.count ==
-                    2,
-            "bounded history overwrite lost cumulative transport totals");
+        require(collector.history().size() == 128 && collector.history().overwritten() == 2 &&
+                    collector.totals().rings[0].counters.cqes == 5 &&
+                    collector.totals().timings.handler_wall_ns.count() == 2 &&
+                    collector.totals()
+                            .rings[0]
+                            .timings.send_attempt_prepare_to_cqe_service_ns.count() == 2,
+                "bounded history overwrite lost cumulative transport totals");
         for (std::size_t index = 1; index < collector.history().size(); ++index)
         {
             require(collector.history().at(index - 1).end_ns ==
@@ -1209,6 +1216,103 @@ void telemetry_hook_contracts()
 #endif
 #endif
 }
+
+#if TDS_TELEMETRY_LEVEL == 2
+void telemetry_history_growth_after_wrap()
+{
+    using namespace tds::telemetry;
+    TelemetryArtifact artifact;
+    FileLimit limited(32);
+    Reactor reactor("127.0.0.1", 0);
+    IoTelemetry collector;
+    const auto run = collector.run(reactor);
+    constexpr auto capacity = History<IoSnapshot>::capacity;
+    auto &primary = *reactor.rings().front();
+    IoTelemetry::drain_finished(primary, 3);
+    primary.statistics.interval.cq_ready_before_drain.record(9);
+    {
+        const auto batch = collector.write_batch(7);
+    }
+    for (std::size_t index = 0; index < capacity + 2; ++index)
+    {
+        collector.report(reactor, true);
+    }
+    require(collector.history().size() == capacity && collector.history().overwritten() == 2 &&
+                collector.history().at(0).ring_count == 1 &&
+                collector.history().at(capacity - 1).rings[0].counters.cqes == 0 &&
+                collector.history().at(capacity - 1).timings.write_batch_size.count() == 0 &&
+                collector.totals().rings[0].counters.cqes == 3 &&
+                collector.totals().rings[0].timings.cq_ready_before_drain.total == 9 &&
+                collector.totals().timings.write_batch_size.total == 7,
+            "single-ring history wrap retained interval data or lost cumulative samples");
+
+    reactor.start();
+    require(reactor.rings().size() == 2, "accept reservations did not grow the profile reactor");
+    collector.report(reactor, true);
+    const auto &second = collector.history().at(capacity - 1);
+    require(second.ring_count == 2 && second.rings[1].ring == 1 &&
+                second.rings[1].reserved_accept_slots == 32 &&
+                second.rings[1].live_connection_records == 0 &&
+                second.rings[1].timings.cq_ready_before_drain.count() == 0 &&
+                collector.totals().ring_count == 2,
+            "a reused history slot missed the first dynamically added ring");
+
+    Client peer(reactor.port());
+    const auto deadline = Clock::now() + 5s;
+    while (reactor.rings().size() < 3)
+    {
+        await_completion(reactor, deadline);
+        reactor.begin_turn();
+        drain_turn(reactor, [](const Completion &completion) {
+            require(completion.kind == CompletionKind::control,
+                    "unexpected application payload during profile ring growth");
+        });
+        require(Clock::now() < deadline, "profile ring growth timed out");
+    }
+    require(reactor.rings().size() == 3, "accept grew an unexpected number of profile rings");
+    auto &third = *reactor.rings()[2];
+    third.statistics.interval = {};
+    third.statistics.interval.cq_ready_before_drain.record(17);
+    collector.report(reactor, true);
+    const auto &latest = collector.history().at(capacity - 1);
+    require(collector.history().at(0).ring_count == 1 && latest.ring_count == 3 &&
+                latest.rings[2].ring == 2 && latest.rings[2].reserved_accept_slots == 1 &&
+                latest.rings[2].live_connection_records == 0 &&
+                latest.rings[2].timings.cq_ready_before_drain.count() == 1 &&
+                latest.rings[2].timings.cq_ready_before_drain.total == 17 &&
+                collector.totals().ring_count == 3 &&
+                collector.totals().rings[2].timings.cq_ready_before_drain.total == 17,
+            "wrapped history growth missed a new ring or changed earlier window sizes");
+    for (std::size_t index = 0; index < capacity; ++index)
+    {
+        collector.report(reactor, true);
+    }
+    for (std::size_t index = 0; index < capacity; ++index)
+    {
+        const auto &window = collector.history().at(index);
+        require(window.ring_count == 3 && window.rings[2].ring == 2 &&
+                    window.rings[2].timings.cq_ready_before_drain.count() == 0 &&
+                    window.timings.write_batch_size.count() == 0 &&
+                    (index == 0 || window.start_ns == collector.history().at(index - 1).end_ns),
+                "ring growth left stale interval data or broke chronological slot reuse");
+    }
+    require(collector.history().overwritten() == capacity + 4 &&
+                collector.totals().timings.write_batch_size.total == 7 &&
+                collector.totals().rings[2].timings.cq_ready_before_drain.total == 17 &&
+                artifact.empty(),
+            "post-growth history wrap changed cumulative totals, loss counts or export timing");
+    reactor.request_stop();
+    while (reactor.pending_count())
+    {
+        await_completion(reactor, deadline);
+        reactor.begin_turn();
+        drain_turn(reactor, [](Completion &completion) {
+            completion.buffer.release();
+        });
+    }
+    require(peer.closed(deadline), "profile ring-growth shutdown did not close the peer");
+}
+#endif
 } // namespace
 
 int main()
@@ -1223,6 +1327,9 @@ int main()
         exhausted_receive_retries();
         close_and_late_accept();
         telemetry_hook_contracts();
+#if TDS_TELEMETRY_LEVEL == 2
+        telemetry_history_growth_after_wrap();
+#endif
         ::alarm(0);
         std::puts(
             "I/O reservation, fixed CQ order/growth, primary progress with a ready satellite, "

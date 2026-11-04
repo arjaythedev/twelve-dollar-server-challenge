@@ -31,7 +31,8 @@ extern "C"
         tds_wal_advice_event events[TDS_WAL_ADVICE_EVENT_CAPACITY];
     } tds_wal_advice_snapshot;
 
-    /* Transfer and reset the calling checkpoint thread's accumulated advice data */
+    /* Transfer and reset the calling checkpoint thread's accumulated advice data
+     * All scalar fields are overwritten; only events[0, event_count) are valid */
     void tds_wal_advice_take(tds_wal_advice_snapshot *snapshot);
 
 #ifdef __cplusplus

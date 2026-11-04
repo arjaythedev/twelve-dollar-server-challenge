@@ -120,6 +120,12 @@ void IoTelemetry::send_prepared(net::Connection &connection) noexcept
     connection.exchange->send_prepared_ns = timing::now_ns();
 }
 
+void IoTelemetry::send_serviced(net::Completion &completion) noexcept
+{
+    // Close preparation may submit SQEs, so measure service before that extra work
+    completion.serviced_ns = timing::now_ns();
+}
+
 void IoTelemetry::send_completed(const net::Completion &completion) noexcept
 {
     auto &connection = *completion.connection;
@@ -162,34 +168,23 @@ void IoTelemetry::receive_prepared(net::Connection &connection) noexcept
     ++connection.ring.statistics.totals.receive_submissions;
 }
 
-void IoTelemetry::io_serviced(net::Connection &connection, net::Event event, int result,
-                              [[maybe_unused]] net::Completion &completion) noexcept
+void IoTelemetry::receive_completed(net::Connection &connection, int result) noexcept
 {
-#if TDS_TELEMETRY_LEVEL == 2
-    if (event == net::Event::send)
+    auto &sample = connection.ring.statistics;
+    ++sample.totals.receive_completions;
+    if (result == -ENOBUFS)
     {
-        // Close preparation may submit SQEs, so measure service before that extra work
-        completion.serviced_ns = timing::now_ns();
+        ++sample.totals.receive_enobufs;
+    }
+#if TDS_TELEMETRY_LEVEL == 2
+    else if (result > 0 && connection.receive_enobufs_since_ns)
+    {
+        // Deferral includes retry I/O and CQ service, not socket arrival age
+        sample.interval.enobufs_to_successful_receive_service_ns.record(
+            timing::now_ns() - connection.receive_enobufs_since_ns);
+        connection.receive_enobufs_since_ns = 0;
     }
 #endif
-    if (event == net::Event::receive)
-    {
-        auto &sample = connection.ring.statistics;
-        ++sample.totals.receive_completions;
-        if (result == -ENOBUFS)
-        {
-            ++sample.totals.receive_enobufs;
-        }
-#if TDS_TELEMETRY_LEVEL == 2
-        else if (result > 0 && connection.receive_enobufs_since_ns)
-        {
-            // Deferral includes retry I/O and CQ service, not socket arrival age
-            sample.interval.enobufs_to_successful_receive_service_ns.record(
-                timing::now_ns() - connection.receive_enobufs_since_ns);
-            connection.receive_enobufs_since_ns = 0;
-        }
-#endif
-    }
 }
 
 void IoTelemetry::store_created(net::ConnectionStore &owner) noexcept
@@ -251,8 +246,12 @@ void IoTelemetry::report(const net::Reactor &reactor, bool force) noexcept
     {
         return;
     }
+    capture(reactor, now);
+}
 
-    IoSnapshot window;
+void IoTelemetry::capture(const net::Reactor &reactor, std::uint64_t now) noexcept
+{
+    auto &window = history_.next();
     window.start_ns = totals_.end_ns;
     window.end_ns = now;
     window.timings = interval_;
@@ -264,19 +263,17 @@ void IoTelemetry::report(const net::Reactor &reactor, bool force) noexcept
     for (std::size_t index = 0; index < rings.size(); ++index)
     {
         auto &owner = *rings[index];
-        const auto snapshot = snapshot_ring(owner, index, now);
         auto &interval = window.rings[index];
-        interval = snapshot;
-        interval.counters = difference(snapshot.counters, owner.statistics.previous);
-        owner.statistics.previous = snapshot.counters;
+        interval = snapshot_ring(owner, index, now);
 
         auto cumulative_timings = totals_.rings[index].timings;
-        merge(cumulative_timings, snapshot.timings);
-        totals_.rings[index] = snapshot;
+        merge(cumulative_timings, interval.timings);
+        totals_.rings[index] = interval;
         totals_.rings[index].timings = cumulative_timings;
+        interval.counters = difference(interval.counters, owner.statistics.previous);
+        owner.statistics.previous = totals_.rings[index].counters;
         owner.statistics.interval = {};
     }
-    history_.push(window);
     totals_.end_ns = now;
 }
 #endif

@@ -1,6 +1,6 @@
 # TODO
 
-Status: Telemetry work is paused. Phases 1 through 3 and the additional runtime cleanup are complete and checkpointed.
+Status: Cleanup complete. Strict tooling checks, all three native telemetry modes and official/HTTP checks pass.
 
 ## Target
 
@@ -43,7 +43,7 @@ Preserve the existing uncommitted telemetry changes and their results. Do not de
 - [x] Configure generator builds with only llhttp and yyjson. Share dependency pins and remove unused server/probe inputs from the generator build and fingerprint
 - [x] Fix stale `src/checks` editor paths
 - [x] Reuse the tested server for HTTP checks only if flags and binary identity match. Keep required submission scripts and active editor support
-- [x] Pass CLI/default/error tests, instrument-combination tests, strict Python checks and targeted build checks; preserve workload failures when collection or cleanup also fails
+- [x] Pass CLI/default/error tests, instrument-combination tests, strict Python checks and targeted build checks; persist generator errors before final collection
 - [x] Simplify runtime ownership and report evaluation, remove duplicated parsing and plumbing, and keep the default result view compact. Check whether the server export needs changes
 - [x] Remove repeated image verification and generator control logic, use normalized workload settings directly, and commit the completed tooling separately
 
@@ -57,24 +57,24 @@ Preserve the existing uncommitted telemetry changes and their results. Do not de
 
 ### 4. Telemetry hot paths
 
-- [ ] Derive histogram counts from buckets when reporting instead of updating a redundant count per sample
+- [x] Derive histogram counts from buckets when reporting: keep the smaller histogram and measured record-path improvement
 - [x] Test cumulative DB counters with interval deltas: rejected because the controlled probe did not isolate a benefit
-- [ ] Reuse the reactor CQ snapshot and remove basic-mode send hooks that do nothing. Preserve acquire ordering and test receive/send/retry/shutdown paths
-- [ ] Compare candidates separately with equal native-probe sample counts and unchanged clocks. Freeze generator, seed, settings and limits for workload pairs; record negative results and discard inconclusive changes
+- [x] Reject CQ snapshot reuse after the controlled comparison; keep the split hooks that remove the basic-mode send call. Preserve receive/send/retry/shutdown coverage
+- [x] Compare hot-path candidates separately with equal native-probe sample counts and unchanged clocks; preserve retained and negative results under `src/runs/`
 
 ### 5. Telemetry storage and cold paths
 
-- [ ] Fill history slots directly to remove temporary snapshots/copies; preserve chronology, totals, wrap and loss accounting
-- [ ] Test demand-driven history storage with dynamic ring growth and the same 128-window capacity. Compare startup/RAM and periodic capture costs separately
-- [ ] Remove redundant WAL-advice initialization/copies and stop constructing events that cannot be retained, preserving aggregate and dropped counts
-- [ ] Keep off/basic/profile contracts, worker ownership, sync forwarding and errno intact. Do not merge timestamps, remove CPU clocks or introduce sampling in this cleanup
-- [ ] Pass all three native modes, histogram edge cases, ring-growth/history-wrap and telemetry-export tests
+- [x] Fill history slots directly to remove temporary snapshots/copies; preserve chronology, totals, wrap and loss accounting
+- [x] Keep demand-driven history storage after the startup/RAM and saturated-capture comparison; preserve dynamic ring growth and 128-window capacity
+- [x] Remove redundant WAL-advice initialization/copies and stop constructing events that cannot be retained, preserving aggregate and dropped counts
+- [x] Keep worker ownership, sync forwarding, errno and existing clocks intact; preserve counts in focused tests and the controlled comparison
+- [x] Pass all three native modes, histogram edge cases, ring-growth/history-wrap and telemetry-export tests
 
 ### 6. Finish
 
-- [ ] Update concise usage docs and links. Remove obsolete files/readers only after retained data has a supported path
-- [ ] Run strict tooling checks, relevant native tests and official/HTTP checks once integrated. Use short comparisons, no large load tests
-- [ ] Review the final diff and remaining TODOs. Commit and push only when requested
+- [x] Update concise usage docs and links; retain the JSON reader for older experiment formats
+- [x] Pass strict tooling checks, 36 native tests across three modes, 42 official checks and 19 HTTP regressions. Record short comparisons without large load tests
+- [x] Review the final diff and remaining TODOs; verify archived data and source patches. Commit and push only when requested
 
 ## Ownership
 

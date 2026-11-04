@@ -4,16 +4,19 @@
 
 #include <yyjson.h>
 
+#include <algorithm>
 #include <array>
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <unistd.h>
 #include <vector>
 
@@ -107,7 +110,7 @@ void check_history_and_histograms()
     History<std::uint64_t> history;
     for (std::uint64_t index = 0; index < history.capacity + 17; ++index)
     {
-        history.push(index);
+        history.next() = index;
     }
     require(history.size() == history.capacity && history.overwritten() == 17,
             "history did not bound storage or account overwritten windows");
@@ -116,13 +119,149 @@ void check_history_and_histograms()
         require(history.at(index) == index + 17, "history lost chronological order after wrap");
     }
     tds::timing::Histogram first, second;
+    require(first.count() == 0 && first.total == 0 && first.max == 0,
+            "empty histogram fabricated samples");
     first.record(0);
     first.record(1);
     second.record(8);
     first.merge(second);
-    require(first.count == 3 && first.total == 9 && first.max == 8 && first.buckets[0] == 2 &&
+    require(first.count() == 3 && first.total == 9 && first.max == 8 && first.buckets[0] == 2 &&
                 first.buckets[3] == 1,
             "merged histogram changed sample counts or bucket bounds");
+    first.reset();
+    require(first.count() == 0 && first.total == 0 && first.max == 0 &&
+                first.buckets == std::array<std::uint64_t, 64>{},
+            "histogram reset retained values");
+    for (unsigned exponent = 0; exponent < 64; ++exponent)
+    {
+        first.reset();
+        const auto boundary = std::uint64_t{1} << exponent;
+        first.record(boundary - 1);
+        first.record(boundary);
+        require(first.count() == 2 && first.total == boundary + boundary - 1 &&
+                    first.max == boundary && first.buckets[exponent] == (exponent == 0 ? 2U : 1U) &&
+                    (exponent == 0 || first.buckets[exponent - 1] == 1),
+                "power-of-two histogram boundary changed");
+    }
+    first.reset();
+    first.record(std::numeric_limits<std::uint64_t>::max());
+    first.record(1);
+    require(first.count() == 2 && first.total == 0 &&
+                first.max == std::numeric_limits<std::uint64_t>::max() && first.buckets[0] == 1 &&
+                first.buckets[63] == 1,
+            "maximum histogram value or unsigned total wrap changed");
+    first.reset();
+    second.reset();
+    first.record(0);
+    second.record(2);
+    for (unsigned doubling = 0; doubling < 63; ++doubling)
+    {
+        first.merge(first);
+        second.merge(second);
+    }
+    require(first.count() == (std::uint64_t{1} << 63) && first.total == 0 && second.total == 0,
+            "large histogram counts or totals lost unsigned precision");
+    first.merge(second);
+    require(first.count() == 0 && first.max == 2 && first.buckets[0] == (std::uint64_t{1} << 63) &&
+                first.buckets[1] == (std::uint64_t{1} << 63),
+            "derived count did not preserve unsigned wrap across different buckets");
+    first.record(3);
+    first.merge(first);
+    require(first.count() == 2 && first.buckets[0] == 0 && first.buckets[1] == 2 &&
+                first.total == 6 && first.max == 3,
+            "recording or merging a wrapped histogram changed its aggregates");
+}
+
+struct CountedSnapshot
+{
+    static inline std::size_t constructions = 0;
+    static inline std::size_t copies = 0;
+    static inline std::size_t moves = 0;
+    static inline std::size_t assignments = 0;
+    static inline std::size_t destructions = 0;
+
+    CountedSnapshot() noexcept
+    {
+        ++constructions;
+    }
+
+    CountedSnapshot(const CountedSnapshot &other) noexcept : value(other.value)
+    {
+        ++copies;
+    }
+
+    CountedSnapshot(CountedSnapshot &&other) noexcept : value(other.value)
+    {
+        ++moves;
+    }
+
+    CountedSnapshot &operator=(const CountedSnapshot &other) noexcept
+    {
+        value = other.value;
+        ++assignments;
+
+        return *this;
+    }
+
+    ~CountedSnapshot()
+    {
+        ++destructions;
+    }
+
+    std::uint64_t value = 0;
+};
+
+void check_lazy_history_slots()
+{
+    using CountedHistory = History<CountedSnapshot>;
+    static_assert(!std::is_copy_constructible_v<CountedHistory> &&
+                  !std::is_copy_assignable_v<CountedHistory>);
+    static_assert(!std::is_move_constructible_v<CountedHistory> &&
+                  !std::is_move_assignable_v<CountedHistory>);
+    static_assert(!std::is_nothrow_default_constructible_v<CountedHistory>);
+    {
+        CountedHistory history;
+        require(history.size() == 0 && history.overwritten() == 0 &&
+                    CountedSnapshot::constructions == 0,
+                "empty history constructed snapshots before their first capture");
+        std::array<CountedSnapshot *, CountedHistory::capacity> addresses{};
+        constexpr std::size_t windows = CountedHistory::capacity * 3 + 17;
+        for (std::size_t index = 0; index < windows; ++index)
+        {
+            auto &slot = history.next();
+            const auto position = index % CountedHistory::capacity;
+            if (index < CountedHistory::capacity)
+            {
+                require(slot.value == 0 && CountedSnapshot::constructions == index + 1,
+                        "first capture did not construct exactly one initialized slot");
+                addresses[position] = &slot;
+            }
+            else
+            {
+                require(&slot == addresses[position] &&
+                            slot.value == index - CountedHistory::capacity + 1 &&
+                            CountedSnapshot::constructions == CountedHistory::capacity,
+                        "wrapped history moved, reconstructed or reset a retained slot");
+            }
+            slot.value = index + 1;
+            const auto retained = std::min(index + 1, CountedHistory::capacity);
+            require(history.size() == retained && history.overwritten() == index + 1 - retained,
+                    "growing history changed its retained or overwritten counts");
+            for (std::size_t chronological = 0; chronological < retained; ++chronological)
+            {
+                const auto original = index + 1 - retained + chronological;
+                require(&history.at(chronological) ==
+                                addresses[original % CountedHistory::capacity] &&
+                            history.at(chronological).value == original + 1,
+                        "history growth or wrap changed slot addresses or chronology");
+            }
+        }
+        require(CountedSnapshot::copies == 0 && CountedSnapshot::moves == 0 &&
+                    CountedSnapshot::assignments == 0 && CountedSnapshot::destructions == 0,
+                "direct history capture copied, moved or destroyed a snapshot");
+    }
+    require(CountedSnapshot::destructions == CountedHistory::capacity,
+            "history did not destroy exactly its constructed snapshots");
 }
 
 void check_transport_export()
@@ -150,7 +289,7 @@ void check_transport_export()
             "64-bit counters lost precision during JSON export");
     History<IoSnapshot> windows;
     totals.start_ns = 10;
-    windows.push(totals);
+    windows.next() = totals;
     write_report(IoReport{Level::profile, totals, &windows, 17});
     records = destination.read();
     root = yyjson_doc_get_root(records.back().get());
@@ -201,6 +340,7 @@ int main()
     try
     {
         check_history_and_histograms();
+        check_lazy_history_slots();
         check_transport_export();
         check_database_export();
         std::puts("Bounded history, histogram merge and typed JSON export passed");

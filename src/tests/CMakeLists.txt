@@ -7,6 +7,7 @@ target_link_libraries(io_lifetime_tests PRIVATE transport uring llhttp_static yy
 
 tds_add_executable(checkpoint_tests checkpoint.cpp)
 target_link_libraries(checkpoint_tests PRIVATE api sqlite)
+target_compile_definitions(checkpoint_tests PRIVATE TDS_TELEMETRY_LEVEL=${telemetry_level})
 target_link_options(checkpoint_tests PRIVATE
     -Wl,--wrap=sqlite3_open_v2 -Wl,--wrap=sqlite3_close -Wl,--wrap=sqlite3_wal_checkpoint_v2
     -Wl,--wrap=posix_fadvise64)

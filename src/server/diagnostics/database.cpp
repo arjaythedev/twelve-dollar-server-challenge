@@ -63,9 +63,8 @@ DatabaseTelemetry::~DatabaseTelemetry()
 
 #if TDS_TELEMETRY_LEVEL >= 2
 DatabaseTelemetry::Scope::Scope(DatabaseTelemetry &owner, DatabaseOperation operation) noexcept
-    : owner_(owner), operation_(operation), started_ns_(timing::now_ns())
+    : started_ns_(timing::now_ns()), histogram_(owner.start_operation(operation))
 {
-    owner.count(operation);
     if (operation == DatabaseOperation::commit || operation == DatabaseOperation::checkpoint)
     {
         sync_.emplace(owner.interval_timing_.sync, owner.slow_sync_,
@@ -78,24 +77,36 @@ DatabaseTelemetry::Scope::~Scope()
 {
     // Restore outer sync attribution before ending the enclosing operation
     sync_.reset();
-    owner_.histogram(operation_).record(timing::now_ns() - started_ns_);
+    histogram_.record(timing::now_ns() - started_ns_);
 }
 
-timing::Histogram &DatabaseTelemetry::histogram(DatabaseOperation operation) noexcept
+timing::Histogram &DatabaseTelemetry::start_operation(DatabaseOperation operation) noexcept
 {
     switch (operation)
     {
     case DatabaseOperation::feed:
+        ++totals_.feed;
+        ++interval_.feed;
         return interval_timing_.feed;
     case DatabaseOperation::post:
+        ++totals_.post;
+        ++interval_.post;
         return interval_timing_.post;
     case DatabaseOperation::create:
+        ++totals_.create;
+        ++interval_.create;
         return interval_timing_.create;
     case DatabaseOperation::like:
+        ++totals_.like;
+        ++interval_.like;
         return interval_timing_.like;
     case DatabaseOperation::commit:
+        ++totals_.commits;
+        ++interval_.commits;
         return interval_timing_.commit;
     case DatabaseOperation::checkpoint:
+        ++totals_.checkpoints;
+        ++interval_.checkpoints;
         return interval_timing_.checkpoint;
     }
     std::unreachable();
@@ -113,8 +124,18 @@ void DatabaseTelemetry::flush_window(std::uint64_t now_ns, bool final) noexcept
     {
         return;
     }
-    history_.push(
-        {now_ns, now_ns - last_report_ns_, interval_, wal_, interval_advice_, interval_timing_});
+    capture_window(now_ns);
+}
+
+void DatabaseTelemetry::capture_window(std::uint64_t now_ns) noexcept
+{
+    auto &window = history_.next();
+    window.time_ns = now_ns;
+    window.interval_ns = now_ns - last_report_ns_;
+    window.counters = interval_;
+    window.wal = wal_;
+    window.wal_advice = interval_advice_;
+    window.timings = interval_timing_;
     merge(cumulative_timing_, interval_timing_);
     interval_ = {};
     interval_advice_ = {};

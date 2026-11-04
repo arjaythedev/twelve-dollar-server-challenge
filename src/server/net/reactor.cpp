@@ -434,7 +434,14 @@ void Reactor::complete_close(Ring &owner, Connection &connection, int result)
 void Reactor::complete_io(Connection &connection, Event event, int result, unsigned flags,
                           ReceiveBufferLease buffer, Completion &completion)
 {
-    IoTelemetry::io_serviced(connection, event, result, completion);
+    if (event == Event::send)
+    {
+        IoTelemetry::send_serviced(completion);
+    }
+    else
+    {
+        IoTelemetry::receive_completed(connection, result);
+    }
     connection.finish_io();
     if (event == Event::send)
     {

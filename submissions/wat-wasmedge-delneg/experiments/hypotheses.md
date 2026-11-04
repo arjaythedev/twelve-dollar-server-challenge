@@ -162,4 +162,9 @@ H27: E63: CKPT_NICE 0 vs 10 within noise; dead
 H11: dead by source: sqlite3BtreeTableMoveto only shortcuts to key+1 (BtreeNext); other seeks start with moveToRoot, so sorting 20 scattered ids saves no descent
 H1c: E64: k5, no sync on the loop: 240k p95/p99 17/164 vs k4 525/770; 280k 65/235, k4 fails. Holds next
 H1c: E68: k6 (hold from 1,000 frames left, 500 ms limit, no inline before 8x): 5-min hold 260k p95/p99 42/280 vs k4 860/1,255; 280k 280/1,050. Repeats next
+H2: E77: a cap of 1,500 IOPS gives the baseline a failure like the scorer's at 210k (p99 1,970 vs 1.5 s); no such cliff at 3,000+ (E61)
+H1c: E73, E74, E77: repeated 5-min holds: 280k passes 4 of 4 with tail <= 400 at cap 3,000; 260k passes at cap 1,500 (b4 fails 210k); v2 220k 3/25 vs b4 925/2,440
+H22 (context): E76: memory is the wall; SRVMB 1650 thrashes k6 at 240k
+H27: E78: alive after all with the hold: 290k passes twice at nice 0, fails twice at nice 10; default now 0
+H24: E78: with a hold the tail target matters: 200 best at 280-290k; default now 200
 

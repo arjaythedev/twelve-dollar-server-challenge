@@ -182,7 +182,7 @@ FN(h_nap) { (void)d; (void)f; usleep((useconds_t)P(0)); RET(0); }
 static WasmEdge_VMContext *mkvm(const char *app);
 static const char *appso;
 static void *ckthread(void *a) {
-  (void)a; const char *nv = getenv("CKPT_NICE"); setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), nv ? atoi(nv) : 10);
+  (void)a; const char *nv = getenv("CKPT_NICE"); setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), nv ? atoi(nv) : 0);
   WasmEdge_VMContext *vm = mkvm(appso);
   WasmEdge_String fn[2] = {WasmEdge_StringCreateByCString("_initialize"), WasmEdge_StringCreateByCString("ckpt_main")};
   WasmEdge_Result r = WasmEdge_VMLoadWasmFromFile(vm, appso);

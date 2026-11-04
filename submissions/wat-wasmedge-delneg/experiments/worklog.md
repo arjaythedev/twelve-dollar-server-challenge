@@ -1178,3 +1178,20 @@ DeepSeek round 3 on H1c. Taken: test slower disks and a read cap with less memor
 Rejected after checking the code: "n drifts" (n is SQLite's own mxFrame from the WAL hook), "stranger gets a response" (replay checks the generation, holdcheck.py closes mid-hold), "replay re-arms a bulk pass each cycle" (after a restart n starts from 0; bulk starts at 8,000).
 "The hold doesn't save disk work": true and beside the point, it moves the sync off the loop.
 
+## E73 (H1c, H24, H27): repeats of k6 with a smaller tail target (4 Nov, harness v3, cap 3,000, 5-minute holds, 0 errors; ms p95/p99/max)
+- 280k CKPT_TAIL=400: 75/310/794, 126/420/1,645, 77/325/1,102: passes three times of three
+- 280k CKPT_TAIL=200: 53/295/665, 14.82 us/req
+- 280k CKPT_TAIL=400 CKPT_NICE=0: 76/320/679
+- 290k CKPT_TAIL=400: 270/1,210/4,653 (fail); with CKPT_NICE=0: 280/870/2,883 (pass, one run)
+Default becomes CKPT_TAIL=200. Clearly above 200k here, the bar for stopping; what's left is the checks that decide how far this harness can be believed: E74 (spin harness), E76 (less memory, read cap), E77 (half the IOPS), then E78 and the last open verdicts.
+
+## E74, E76, E77 (H1c): other calibrations (4 Nov, 5-minute holds, 0 errors; ms p95/p99/max)
+Spin harness v2, 220k, SPIN_NS=10000: k6 CKPT_TAIL=400 3.25/25/279, CPU 0 66 %; b4 925/2,440/4,023, CPU 0 94 %. So on v2 the checkpoint fsync was most of what looked like CPU in E58: iowait 34 % against 6 %.
+Half the IOPS (cap 1,500 writes and 1,500 reads, SRVMB=1900, CKPT_TAIL=200): k6 240k 69/440/1,193, 260k 90/455/1,417; b4 210k 1,405/1,970/2,950 FAIL. The baseline's failure here looks like the scorer's 210k (p99 1.5 s), which E61 couldn't reproduce with cap 3,000-8,000.
+Less memory (SRVMB=1650, cap 3,000 writes and reads, CKPT_TAIL=200): k6 240k 3,495/5,320, 658 MB read; 260k 5,320/5,320, 1,787 MB read, 17k rps; b4 210k 640/820. All page-cache thrash; E39-era calibration already called SRVMB 1650 too harsh (f220565 OOM-killed at 270k there, while it held 270k on the scorer), and fitted 1900 to those scorer numbers. So this doesn't count against k6, but it is the real wall: memory ends the climb with or without the hold, and the scorer killed f220565 at 280k.
+
+## E78 (H27, H24): nice and tail at the edge (4 Nov, harness v3, cap 3,000, 5-minute holds, 0 errors; ms p95/p99/max)
+- 290k: CKPT_TAIL=200 CKPT_NICE=0 98/350/969; CKPT_TAIL=400 CKPT_NICE=0 280/870/2,883; CKPT_TAIL=200 nice 10 1,075/3,305/9,974 FAIL; CKPT_TAIL=400 nice 10 270/1,210/4,653 FAIL
+- 280k: CKPT_TAIL=200 CKPT_NICE=0 74/320/819; CKPT_TAIL=200 nice 10 53/295/665, 59/300/846
+H27 reverses E63's "within noise": with the hold the checkpointer's speed sets how long POSTs wait, and at 290k a niced one loses on a loaded CPU. Defaults now CKPT_TAIL=200 and CKPT_NICE=0 (build k7, wasm ba492bfc, 42/42, h1check 391 checks 0 stale, 0 of 2,270 missing after kill -9; holdcheck 0 bad, 0 of 2,156 missing).
+

@@ -93,7 +93,7 @@ const char *shmx_init(void) {
   return "shmx";
 }
 // the loop, between batches with no transaction open; n = the WAL's frames after the last commit -> what to keep.
-// Bulk passes on the checkpointer until few frames are left; then writes are held (the loop parks POSTs, see
+// Bulk passes on the checkpointer until few frames are left (CKPT_TAIL); then writes are held (the loop parks POSTs, see
 // $on_data in app.wat; reads go on) while the checkpointer copies the rest. With nothing written since, the WAL
 // is then fully copied, and the first write restarts it: no sync ever runs on the loop. A hold ends after
 // holdms at the latest (writes go on, the next round tries again), 4x that past 3x the threshold, when the passes
@@ -112,7 +112,7 @@ int ck_tick(sqlite3 *db, int n, int t) {
   static int ready, busy;
   if (!ready) {
     h_cas(W_READY, 0, 1); ready = 1;
-    const char *e = getenv("CKPT_TAIL"); tailmax = e ? atoi(e) : 1000;
+    const char *e = getenv("CKPT_TAIL"); tailmax = e ? atoi(e) : 200;
     e = getenv("CKPT_HOLD"); holdms = e ? atoi(e) : 500;
     e = getenv("CKPT_LOG"); ckpt_log = e && *e == '1';
   }

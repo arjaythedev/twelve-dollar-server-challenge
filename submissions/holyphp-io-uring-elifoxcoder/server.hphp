@@ -271,6 +271,8 @@ class Json {
 
 class Server {
     pub int $srv = 0;
+    pub array $listeners = [];
+    pub int $listenerIds = 0;
     pub int $db = 0;
     pub string $secret = "";
     pub string $jwtVerifier = "";
@@ -480,24 +482,54 @@ class Server {
         }
 
         $addr = "tcp://" . $host . ":" . $port;
-        $srv = stream_socket_server($addr);
-        if ($srv === false || intval($srv) <= 0) {
-            /* Direct mode failed (typically because Nginx already owns :80).
-             * Fall back to the Nginx upstream address instead of dying, so
-             * the service always comes up. */
-            $addr = "tcp://127.0.0.1:3000";
-            $srv = stream_socket_server($addr);
-            if ($srv === false || intval($srv) <= 0) {
-                echo "fatal: cannot listen on " . $host . ":" . $port . " or 127.0.0.1:3000\n";
-                return false;
+        $listeners = [];
+        $groupOk = true;
+        $wantListeners = 8;
+        $listenerEnv = getenv("HPHP_LISTENERS");
+        if ($listenerEnv != "") {
+            $configuredListeners = intval($listenerEnv);
+            if ($configuredListeners >= 1 && $configuredListeners <= 8) {
+                $wantListeners = $configuredListeners;
             }
         }
-        $this->srv = intval($srv);
-        /* TCP_NODELAY is inherited by accepted sockets on Linux, so set it
-         * once on the listener instead of paying a setsockopt per accepted
-         * connection (tens of thousands per second in the shed regime). */
-        stream_set_nodelay($srv);
-        epoll_add($this->srv);
+        if ($wantListeners == 1) {
+            $ls = stream_socket_server($addr);
+            if ($ls === false || intval($ls) <= 0) { $groupOk = false; }
+            else { $listeners[] = intval($ls); }
+        } else {
+            for ($i = 0; $i < $wantListeners; $i++) {
+                $ls = stream_socket_server_reuseport($addr);
+                if ($ls === false || intval($ls) <= 0) { $groupOk = false; break; }
+                $listeners[] = intval($ls);
+            }
+        }
+        if (!$groupOk) {
+            foreach ($listeners as $ls) { stream_close($ls); }
+            $listeners = [];
+            $srv = stream_socket_server($addr);
+            if ($srv === false || intval($srv) <= 0) {
+                /* Direct mode failed (typically because Nginx already owns :80).
+                 * Fall back to the Nginx upstream address instead of dying, so
+                 * the service always comes up. */
+                $addr = "tcp://127.0.0.1:3000";
+                $srv = stream_socket_server($addr);
+                if ($srv === false || intval($srv) <= 0) {
+                    echo "fatal: cannot listen on " . $host . ":" . $port . " or 127.0.0.1:3000\n";
+                    return false;
+                }
+            }
+            $listeners[] = intval($srv);
+        }
+        $this->listeners = $listeners;
+        $this->srv = $listeners[0];
+        $this->listenerIds = iarr_new(65536);
+        /* TCP_NODELAY is inherited by accepted sockets on Linux. Register
+         * the full reuseport group before the runtime arms its accept batch. */
+        foreach ($this->listeners as $ls) {
+            stream_set_nodelay($ls);
+            iarr_set($this->listenerIds, $ls, 1);
+            epoll_add($ls);
+        }
         /* Handles are either real fds (< 65536) or direct-descriptor handles
          * (65536 + ring * 65536 + slot). The runtime supports eight rings;
          * reserve the full handle range even when fewer rings start. */
@@ -575,7 +607,7 @@ class Server {
             $i = 0; $n = iarr_len($this->readyIds);
             while ($i < $n) {
                 $fd = iarr_get($this->readyIds, $i);
-                if ($fd == $this->srv) { $this->accept_all(); $i = $i + 1; continue; }
+                if ($fd == $this->srv || ($fd < 65536 && iarr_get($this->listenerIds, $fd) != 0)) { $this->accept_all($fd); $i = $i + 1; continue; }
                 if (!(iarr_get($this->socks, $fd) != 0)) { $i = $i + 1; continue; }
                 if (isset($this->out[$fd])) { $i = $i + 1; continue; }
                 $this->read_fd($fd);
@@ -590,7 +622,7 @@ class Server {
         }
         foreach ($this->ready as $h) {
             $fd = intval($h);
-            if ($fd == $this->srv) { $this->accept_all(); continue; }
+            if ($fd == $this->srv || ($fd < 65536 && iarr_get($this->listenerIds, $fd) != 0)) { $this->accept_all($fd); continue; }
             if (!(iarr_get($this->socks, $fd) != 0)) { continue; }
             if (isset($this->out[$fd])) { continue; }   /* write still pending */
             $this->read_fd($fd);
@@ -647,15 +679,15 @@ class Server {
         }
     }
 
-    public function accept_all(): void {
+    public function accept_all(int $listener): void {
         while (true) {
-            $s = stream_socket_accept2($this->srv, 0);
+            $s = stream_socket_accept2($listener, 0);
             if ($s === false) {
                 /* Only a real descriptor shortage may pause the listener. An
                  * accept that simply finds the queue empty (EAGAIN) must not:
                  * at the shedding threshold that stalled every reconnect. */
-                if ($this->paused == 0 && accept_emfile()) {
-                    epoll_del($this->srv);
+                if ($this->paused == 0 && accept_emfile() && !uring_direct()) {
+                    foreach ($this->listeners as $ls) { epoll_del($ls); }
                     $this->paused = 1;
                 }
                 return;
@@ -718,7 +750,7 @@ class Server {
         /* room again: watch the listener */
         if ($this->paused == 1 && $this->nconn < $this->shedAt) {
             $this->paused = 0;
-            epoll_add($this->srv);
+            foreach ($this->listeners as $ls) { epoll_add($ls); }
         }
     }
 

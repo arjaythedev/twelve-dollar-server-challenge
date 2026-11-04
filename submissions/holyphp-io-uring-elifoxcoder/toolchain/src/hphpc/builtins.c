@@ -294,6 +294,7 @@ void builtins_init(void) {
     add("http_request",  B_MISC,    ty_mixed,  false, false);
     /* sockets — the transport layer for library code (lib/websocket.hphp) */
     add("stream_socket_server", B_MISC, ty_mixed,  false, false);
+    add("stream_socket_server_reuseport", B_MISC, ty_mixed, false, false);
     add("stream_socket_client", B_MISC, ty_mixed,  false, false);
     add("stream_socket_accept", B_MISC, ty_mixed,  false, false);
     add("stream_socket_accept2", B_MISC, ty_mixed, false, false);   /* (srv, timeoutMs): false on timeout */

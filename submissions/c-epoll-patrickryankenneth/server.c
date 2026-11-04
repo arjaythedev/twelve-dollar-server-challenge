@@ -20,7 +20,7 @@
 #include <poll.h>
 #include <sys/mman.h>
 #include <sys/syscall.h>
-#include "sqlite3.h"
+#include "build/sqlite3.c"   /* one translation unit with the amalgamation */
 
 /* ---------------------------------------------------------------- SHA-256 / HMAC */
 typedef struct { uint32_t h[8]; uint8_t b[64]; uint64_t len; size_t bl; } sha_ctx;

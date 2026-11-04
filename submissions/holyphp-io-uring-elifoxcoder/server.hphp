@@ -379,8 +379,7 @@ class Server {
 
         $bgCheckpoint = getenv("HPHP_BG_CHECKPOINT") == "1";
         $this->bgCheckpoint = $bgCheckpoint;
-        if ($bgCheckpoint) { $db = sqlite_open_vfs($path, "unix-excl"); }
-        else { $db = sqlite_open($path); }
+        $db = sqlite_open($path);
         if ($db == 0) {
             echo "fatal: cannot open sqlite database " . $path . "\n";
             return false;
@@ -389,8 +388,8 @@ class Server {
         sqlite_busy_timeout($db, 5000);
         sqlite_exec($db, "PRAGMA journal_mode=WAL");
         sqlite_exec($db, "PRAGMA synchronous=NORMAL");
-        /* unix-excl uses an in-process WAL index shared by both SQLite
-         * connections, while preventing a second process from opening it. */
+        /* Both connections use SQLite's default unix VFS so they see the same
+         * shared WAL index. The unix-excl VFS is for single-connection use. */
         if (!$bgCheckpoint) { sqlite_exec($db, "PRAGMA locking_mode=EXCLUSIVE"); }
         sqlite_exec($db, "PRAGMA temp_store=MEMORY");
         sqlite_exec($db, "PRAGMA cache_size=-65536");

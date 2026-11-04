@@ -8759,9 +8759,12 @@ hval hpbi_sqlite_bg_checkpoint_start(hval dbv, hval pathv, hval framesv, hval ho
     int hold_ms = (int)hp_val_to_int(holdv);
     if (!db || !path || frames < 1 || hold_ms < 1 || sqlite3_threadsafe() == 0 || w->started)
         return hp_of_bool(false);
+    /* Use the same VFS as the request connection. unix-excl keeps its WAL
+     * index in connection-local heap memory; a second connection using that
+     * VFS cannot safely checkpoint a database opened by the default unix VFS. */
     int rc = sqlite3_open_v2(path->data, &ckdb,
                              SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX,
-                             "unix-excl");
+                             NULL);
     if (rc != SQLITE_OK) {
         if (ckdb) sqlite3_close(ckdb);
         return hp_of_bool(false);

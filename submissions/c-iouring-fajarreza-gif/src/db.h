@@ -18,6 +18,8 @@ typedef struct {
     sqlite3_stmt *stmt_health;
     sqlite3_stmt *stmt_begin;
     sqlite3_stmt *stmt_commit;
+    sqlite3_stmt *stmt_read_begin;
+    sqlite3_stmt *stmt_read_commit;
 } db_ctx_t;
 
 static db_ctx_t g_db_ctx;
@@ -27,12 +29,14 @@ static inline int db_init(const char *path) {
         return -1;
     }
 
-    // Modern SQLite Pragmas for peak single-core memory-mapped performance
+    // Modern SQLite Pragmas: 8MB page cache, 0 mmap (low RAM footprint & fast WAL lookups)
     sqlite3_exec(g_db_ctx.db, "PRAGMA journal_mode = WAL;", NULL, NULL, NULL);
     sqlite3_exec(g_db_ctx.db, "PRAGMA synchronous = NORMAL;", NULL, NULL, NULL);
-    sqlite3_exec(g_db_ctx.db, "PRAGMA mmap_size = 268435456;", NULL, NULL, NULL); // 256MB mmap
-    sqlite3_exec(g_db_ctx.db, "PRAGMA cache_size = -64000;", NULL, NULL, NULL);   // 64MB cache
+    sqlite3_exec(g_db_ctx.db, "PRAGMA mmap_size = 0;", NULL, NULL, NULL);
+    sqlite3_exec(g_db_ctx.db, "PRAGMA cache_size = -8192;", NULL, NULL, NULL);   // 8MB cache
     sqlite3_exec(g_db_ctx.db, "PRAGMA temp_store = MEMORY;", NULL, NULL, NULL);
+    sqlite3_exec(g_db_ctx.db, "PRAGMA journal_size_limit = 67108864;", NULL, NULL, NULL);
+    sqlite3_exec(g_db_ctx.db, "PRAGMA wal_autocheckpoint = 1000;", NULL, NULL, NULL);
     sqlite3_exec(g_db_ctx.db, "PRAGMA busy_timeout = 5000;", NULL, NULL, NULL);
 
     // Prepare persistent statements
@@ -65,6 +69,12 @@ static inline int db_init(const char *path) {
     const char *sql_commit = "COMMIT;";
     if (sqlite3_prepare_v3(g_db_ctx.db, sql_commit, -1, SQLITE_PREPARE_PERSISTENT, &g_db_ctx.stmt_commit, NULL) != SQLITE_OK) return -1;
 
+    const char *sql_read_begin = "BEGIN;";
+    if (sqlite3_prepare_v3(g_db_ctx.db, sql_read_begin, -1, SQLITE_PREPARE_PERSISTENT, &g_db_ctx.stmt_read_begin, NULL) != SQLITE_OK) return -1;
+
+    const char *sql_read_commit = "COMMIT;";
+    if (sqlite3_prepare_v3(g_db_ctx.db, sql_read_commit, -1, SQLITE_PREPARE_PERSISTENT, &g_db_ctx.stmt_read_commit, NULL) != SQLITE_OK) return -1;
+
     return 0;
 }
 
@@ -76,6 +86,16 @@ static inline void db_begin() {
 static inline void db_commit() {
     sqlite3_step(g_db_ctx.stmt_commit);
     sqlite3_reset(g_db_ctx.stmt_commit);
+}
+
+static inline void db_begin_read() {
+    sqlite3_step(g_db_ctx.stmt_read_begin);
+    sqlite3_reset(g_db_ctx.stmt_read_begin);
+}
+
+static inline void db_commit_read() {
+    sqlite3_step(g_db_ctx.stmt_read_commit);
+    sqlite3_reset(g_db_ctx.stmt_read_commit);
 }
 
 static inline int db_check_post_exists(int64_t post_id) {

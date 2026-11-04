@@ -18,13 +18,13 @@
 #include "http.h"
 #include "db.h"
 
-#define NUM_RINGS 6
-#define MAX_SLOTS_PER_RING 55000
+#define NUM_RINGS 8
+#define MAX_SLOTS_PER_RING 45000
 #define TOTAL_MAX_SLOTS (NUM_RINGS * MAX_SLOTS_PER_RING)
 #define PBUF_ENTRIES 1024
 #define PBUF_SIZE 2048
-#define RESP_POOL_SIZE 4096
-#define RESP_BUF_SIZE 16384
+#define RESP_POOL_SIZE 1024
+#define RESP_BUF_SIZE 8192
 
 enum {
     OP_ACCEPT = 1,
@@ -95,6 +95,9 @@ static struct ring g_rings[NUM_RINGS];
 static int g_listen_fds[NUM_RINGS];
 static int g_efds[NUM_RINGS];
 static unsigned g_active_conns = 0;
+static unsigned g_ring_conns[NUM_RINGS];
+#define ACCEPT_MARGIN 1024
+#define RECYCLE_MARGIN 2048
 static int g_accept_armed[NUM_RINGS];
 static unsigned g_slots_per_ring = MAX_SLOTS_PER_RING;
 
@@ -104,12 +107,13 @@ static void close_conn(int ring_idx, unsigned slot, uint16_t gen) {
     g_conns[ring_idx][slot].poll_armed = 0;
     g_conns[ring_idx][slot].gen++;
     if (g_active_conns > 0) g_active_conns--;
+    if (g_ring_conns[ring_idx] > 0) g_ring_conns[ring_idx]--;
 
     uint64_t poll_ud = MAKE_UD(OP_POLL, ring_idx, slot, gen);
     uint64_t close_ud = MAKE_UD(OP_CLOSE, ring_idx, slot, g_conns[ring_idx][slot].gen);
     sqe_shutdown_close(&g_rings[ring_idx], slot, close_ud, poll_ud, close_ud);
 
-    if (!g_accept_armed[ring_idx] && g_listen_fds[ring_idx] >= 0) {
+    if (!g_accept_armed[ring_idx] && g_listen_fds[ring_idx] >= 0 && g_ring_conns[ring_idx] + ACCEPT_MARGIN < g_slots_per_ring) {
         sqe_accept_multishot(ring_sqe(&g_rings[ring_idx]), g_listen_fds[ring_idx], MAKE_UD(OP_ACCEPT, ring_idx, 0, 0));
         g_accept_armed[ring_idx] = 1;
     }
@@ -141,8 +145,8 @@ int main() {
     const char *port_str = getenv("PORT");
     int port = port_str ? atoi(port_str) : 80;
 
-    printf("Starting c-iouring-fajarreza-gif (6 rings, %u slots/ring, %u total) on %s:%d\n",
-           g_slots_per_ring, g_slots_per_ring * NUM_RINGS, host, port);
+    printf("Starting c-iouring-fajarreza-gif (%d rings, %u slots/ring, %u total) on %s:%d\n",
+           NUM_RINGS, g_slots_per_ring, g_slots_per_ring * NUM_RINGS, host, port);
     printf("SQLite DB: %s\n", sqlite_path);
 
     jwt_init(jwt_secret);
@@ -192,6 +196,9 @@ int main() {
         setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
         setsockopt(listen_fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
         setsockopt(listen_fd, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
+        int buf_sz = 8192;
+        setsockopt(listen_fd, SOL_SOCKET, SO_RCVBUF, &buf_sz, sizeof(buf_sz));
+        setsockopt(listen_fd, SOL_SOCKET, SO_SNDBUF, &buf_sz, sizeof(buf_sz));
 
         if (bind(listen_fd, (struct sockaddr*)&sin, sizeof(sin)) != 0) {
             perror("bind");
@@ -208,18 +215,24 @@ int main() {
         ring_submit(&g_rings[i], 0, 0, NULL, 0);
     }
 
-    printf("Listening on %s:%d (6 io_uring rings ready)\n", host, port);
+    printf("Listening on %s:%d (%d io_uring rings ready)\n", host, port, NUM_RINGS);
+
+    unsigned last_pass_count = 0;
 
     // Event loop
     while (1) {
-        // Wait on ring 0 (which wakes on ring 0 events or any secondary ring eventfd)
-        long ret = ring_wait(&g_rings[0], 1, 100);
+        // Adaptive wait: when busy, wait for up to 16 completions (or 1ms timeout) to amortize syscalls & SQLite transactions
+        unsigned min_wait = (last_pass_count >= 8) ? 16 : 1;
+        unsigned wait_ms = (last_pass_count >= 8) ? 1 : 50;
+        long ret = ring_wait(&g_rings[0], min_wait, wait_ms);
         if (ret < 0 && ret != -EINTR && ret != -ETIME) {
             fprintf(stderr, "ring_wait error: %ld\n", ret);
             break;
         }
 
         g_num_pending_writes = 0;
+        int read_trans_open = 0;
+        unsigned pass_completions = 0;
 
         for (int r = 0; r < NUM_RINGS; r++) {
             struct ring *ring = &g_rings[r];
@@ -239,6 +252,7 @@ int main() {
 
                 head++;
                 count++;
+                pass_completions++;
 
                 switch (op) {
                     case OP_ACCEPT: {
@@ -250,12 +264,13 @@ int main() {
                                 g_conns[ring_idx][new_slot].keep_alive = 1;
                                 g_conns[ring_idx][new_slot].poll_armed = 1;
                                 g_active_conns++;
+                                g_ring_conns[ring_idx]++;
                                 sqe_poll_conn(ring_sqe(ring), new_slot, MAKE_UD(OP_POLL, ring_idx, new_slot, g_conns[ring_idx][new_slot].gen));
                             }
                         }
                         if (!(flags & IORING_CQE_F_MORE) || res < 0) {
                             g_accept_armed[ring_idx] = 0;
-                            if (g_active_conns < g_slots_per_ring * NUM_RINGS) {
+                            if (g_ring_conns[ring_idx] + ACCEPT_MARGIN < g_slots_per_ring) {
                                 sqe_accept_multishot(ring_sqe(ring), g_listen_fds[ring_idx], MAKE_UD(OP_ACCEPT, ring_idx, 0, 0));
                                 g_accept_armed[ring_idx] = 1;
                             }
@@ -312,10 +327,9 @@ int main() {
                                 char *resp = g_resp_pool[resp_idx];
                                 size_t resp_len = 0;
 
-                                // Valve threshold: emergency load shedding only near 314,000 connections
+                                // Per-ring graceful recycle: recycle idle keep-alive connections when a ring is within 2048 of its slot limit
                                 int keep_alive = req.keep_alive;
-                                unsigned total_cap = g_slots_per_ring * NUM_RINGS;
-                                if (g_active_conns >= (total_cap > 16384 ? total_cap - 16384 : total_cap * 3 / 4)) {
+                                if (g_ring_conns[ring_idx] + RECYCLE_MARGIN >= g_slots_per_ring) {
                                     keep_alive = 0;
                                 }
                                 g_conns[ring_idx][slot].keep_alive = keep_alive;
@@ -330,6 +344,7 @@ int main() {
                                     size_t blen = db_health(body, sizeof(body), uptime);
                                     resp_len = format_response(resp, RESP_BUF_SIZE, 200, "OK", body, blen, keep_alive);
                                 } else if (req.method == METHOD_GET && req.path_len == 5 && memcmp(req.path, "/feed", 5) == 0) {
+                                    if (!read_trans_open) { db_begin_read(); read_trans_open = 1; }
                                     char body[RESP_BUF_SIZE - 256];
                                     size_t blen = db_query_feed(body, sizeof(body));
                                     resp_len = format_response(resp, RESP_BUF_SIZE, 200, "OK", body, blen, keep_alive);
@@ -348,6 +363,7 @@ int main() {
                                         int64_t post_id = strtoll(id_str, NULL, 10);
                                         char body[RESP_BUF_SIZE - 256];
                                         size_t blen = 0;
+                                        if (!read_trans_open) { db_begin_read(); read_trans_open = 1; }
                                         if (!db_query_post(post_id, body, sizeof(body), &blen)) {
                                             resp_len = format_error(resp, RESP_BUF_SIZE, 404, "Not Found", "post not found", keep_alive);
                                         } else {
@@ -431,6 +447,7 @@ int main() {
                                                 resp_len = format_error(resp, RESP_BUF_SIZE, 400, "Bad Request", "invalid post id", keep_alive);
                                             } else {
                                                 int64_t post_id = strtoll(id_str, NULL, 10);
+                                                if (!read_trans_open) { db_begin_read(); read_trans_open = 1; }
                                                 if (!db_check_post_exists(post_id)) {
                                                     resp_len = format_error(resp, RESP_BUF_SIZE, 404, "Not Found", "post not found", keep_alive);
                                                 } else {
@@ -506,6 +523,10 @@ int main() {
             }
         } // end for (int r = 0; r < NUM_RINGS; r++)
 
+        if (read_trans_open) {
+            db_commit_read();
+        }
+
         // Process group commit for pending writes
         if (g_num_pending_writes > 0) {
             db_begin();
@@ -535,6 +556,8 @@ int main() {
             }
             db_commit();
         }
+
+        last_pass_count = pass_completions;
 
         // Publish returned buffers and flush pending submissions across all rings
         for (int r = 0; r < NUM_RINGS; r++) {

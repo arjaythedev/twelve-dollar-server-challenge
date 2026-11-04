@@ -1402,6 +1402,29 @@ class CanonicalCliTests(unittest.TestCase):
 
 
 class ToolBoundaryTests(unittest.TestCase):
+    def test_generator_summary_explains_late_activation_and_keeps_process_rss(self) -> None:
+        generator: dict[str, JSONValue] = {
+            "passed": False,
+            "http_metrics_passed": True,
+            "ramp_up_seconds": 30,
+            "target_activation_seconds": 30.159984616,
+            "activation_deadline_grace_ms": 100,
+            "target_activation_on_time": False,
+            "max_rss_bytes": 163303424,
+            "idle_vu_state_bytes": 88,
+            "interrupted_iterations": 179495,
+        }
+        summary = reports.workload_summary(generator)
+        self.assertEqual(summary, generator)
+        with patch("sys.stdout", new_callable=StringIO) as output:
+            reports.show_latency_breakdown(summary)
+        self.assertIn("155.74 MiB", output.getvalue())
+        self.assertIn("30.160s (deadline 30.100s)", output.getvalue())
+        generator["target_activation_seconds"] = None
+        with patch("sys.stdout", new_callable=StringIO) as output:
+            reports.show_latency_breakdown(reports.workload_summary(generator))
+        self.assertIn("target users were not activated", output.getvalue())
+
     def test_workload_settings_are_explicit_and_duration_parsing_is_cached(self) -> None:
         config = RunConfig(
             label="cached", vus=7, ramp="15s", hold="45s", seed=42, telemetry="profile", perf="all"

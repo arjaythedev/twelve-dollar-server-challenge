@@ -636,6 +636,20 @@ def show_profile(profile: dict[str, JSONValue]) -> None:
 
 
 def show_latency_breakdown(workload: dict[str, JSONValue]) -> None:
+    if "max_rss_bytes" in workload:
+        print(f"Generator process peak RSS: {integer(workload, 'max_rss_bytes') / 2**20:.2f} MiB")
+    if workload.get("target_activation_on_time") is False:
+        if workload.get("target_activation_seconds") is None:
+            print("Generator ramp-up failed: target users were not activated")
+        else:
+            deadline = (
+                number(workload, "ramp_up_seconds")
+                + number(workload, "activation_deadline_grace_ms") / 1000
+            )
+            print(
+                f"Generator ramp-up late: {number(workload, 'target_activation_seconds'):.3f}s "
+                f"(deadline {deadline:.3f}s)"
+            )
     for key, title in (
         ("endpoint_duration_ms", "Endpoint latency"),
         ("phase_duration_ms", "Phase latency"),
@@ -898,10 +912,18 @@ def workload_summary(workload: dict[str, JSONValue]) -> dict[str, JSONValue]:
         "passed",
         "checks_passed",
         "workflow_errors",
+        "ramp_up_seconds",
+        "target_activation_seconds",
+        "activation_deadline_grace_ms",
+        "target_activation_on_time",
         "target_concurrency_reached",
         "http_response_coverage_complete",
+        "http_metrics_passed",
         "peak_live_connections",
         "hold_peak_live_connections",
+        "max_rss_bytes",
+        "idle_vu_state_bytes",
+        "interrupted_iterations",
         "endpoint_requests",
         "endpoint_duration_ms",
         "phase_duration_ms",

@@ -25,12 +25,12 @@ const MAXREQ = 64 * 1024; // header + body cap per request
 const BATCH_OUT = 4 << 20; // response bytes held per batch until its commit
 const MAXSEG = 65536; // responses per batch
 const NBUF = 4096; // provided receive buffers per ring
-const BSZ = 2048;
+const BSZ = 1024;
 const MAXRINGS = 32;
 const NL = 8; // SO_REUSEPORT listeners: each listen queue is capped at somaxconn (4096)
 const POOL_CAP = 8192; // send buffers of this size are recycled instead of malloc/free per response
 const BATCH_WAIT_NS = 2_000_000; // busy-loop wait for more completions (A/B this: 0, 1, 2, 6 ms)
-const BATCH_MAX = 64;
+const BATCH_MAX = 128;
 const gpa = std.heap.c_allocator;
 
 // ---------- libc ----------
@@ -48,6 +48,7 @@ extern "c" fn prctl(option: c_int, ...) c_int;
 extern "c" fn syscall(number: c_long, ...) c_long;
 extern "c" fn __errno_location() *c_int;
 extern "c" fn mmap(addr: ?*anyopaque, len: usize, prot: c_int, flags: c_int, fd: c_int, off: i64) usize;
+extern "c" fn madvise(addr: ?*anyopaque, len: usize, advice: c_int) c_int;
 extern "c" fn eventfd(initval: c_uint, flags: c_int) c_int;
 extern "c" fn socket(domain: c_int, kind: c_int, protocol: c_int) c_int;
 extern "c" fn setsockopt(fd: c_int, level: c_int, name: c_int, val: *const anyopaque, len: u32) c_int;
@@ -137,6 +138,7 @@ const c = struct {
     pub extern "c" fn bt_end() void;
     pub extern "c" fn bt_feed(out: [*]bt_post, n: *c_int, buf: [*]u8, cap: usize) c_int;
     pub extern "c" fn bt_post_get(id: i64, out: *bt_post, buf: [*]u8, cap: usize) c_int;
+    pub extern "c" fn bt_note_insert(id: i64, ca: [*]const u8, ca_len: c_int) void;
 };
 
 // ---------- io_uring ABI (linux/io_uring.h; constants verified against the header) ----------
@@ -1237,14 +1239,16 @@ fn handle(m: []const u8, path0: []const u8, authh: ?[]const u8, body: []const u8
             dbFail();
             return err(500, "internal server error", close);
         }
+        const nid = c.sqlite3_column_int64(st_ins, 0);
+        const nca = col(st_ins, 1);
         const mark = alen;
         beginResp(201, close);
         put("{\"post\":{\"id\":");
-        putu(@intCast(c.sqlite3_column_int64(st_ins, 0)));
+        putu(@intCast(nid));
         put(",\"body\":\"");
         putjs(txt[s..se]);
         put("\",\"created_at\":\"");
-        put(col(st_ins, 1));
+        put(nca);
         put("\",\"author\":\"");
         putjs(a.uname[0..a.unl]);
         put("\",\"like_count\":0}}");
@@ -1256,6 +1260,7 @@ fn handle(m: []const u8, path0: []const u8, authh: ?[]const u8, body: []const u8
             alen = mark;
             err(500, "internal server error", close);
         }
+        if (rc == c.SQLITE_DONE and nca.len <= 32) c.bt_note_insert(nid, nca.ptr, @intCast(nca.len));
         return;
     }
     if (get and std.mem.eql(u8, path, "/health")) {
@@ -1353,7 +1358,7 @@ fn sqe(k: usize) *Sqe {
     }
 }
 fn freeSop(o: *Sop) void {
-    if (o.d.len == POOL_CAP and sop_pool.items.len < 8192) {
+    if (o.d.len == POOL_CAP and sop_pool.items.len < 512) {
         if (sop_pool.append(gpa, o)) |_| {
             return;
         } else |_| {}
@@ -1587,6 +1592,9 @@ fn setupBufRing(r: *Ring) bool {
     r.br_local = 0;
     return true;
 }
+fn huge(p: []const u8) void {
+    _ = madvise(@ptrFromInt(@intFromPtr(p.ptr)), p.len, 14); // MADV_HUGEPAGE; harmless where THP is off
+}
 fn ringInit(k: usize) bool {
     const r = &R[k];
     // Ring 0 is the one the loop waits on, so its completions can run in that wait (DEFER_TASKRUN).
@@ -1596,7 +1604,9 @@ fn ringInit(k: usize) bool {
     if (uringRegister(&r.r, REG_FILES2, @intFromPtr(&rr), @sizeOf(RsrcReg)) < 0) return fail(&r.r);
     r.c = gpa.alloc(Conn, tsize) catch @panic("out of memory");
     @memset(r.c, .{});
+    huge(std.mem.sliceAsBytes(r.c));
     r.bufs = gpa.alloc(u8, NBUF * BSZ) catch @panic("out of memory");
+    huge(r.bufs);
     if (!setupBufRing(r)) return fail(&r.r);
     for (0..NBUF) |i| brAdd(r, @intCast(i), @intCast(i));
     brAdvance(r, NBUF);
@@ -1777,7 +1787,7 @@ fn dbOpen(path: [:0]const u8) void {
     }
     // The checkpointer process keeps the WAL short. This only fires if it can't keep up (CPU saturated
     // for a long time), so the WAL stays bounded at about 256 MB.
-    _ = c.sqlite3_exec(db, "PRAGMA wal_autocheckpoint=65536;", null, null, null);
+    _ = c.sqlite3_exec(db, "PRAGMA wal_autocheckpoint=8192;", null, null, null);
     const cols = "SELECT p.id, p.body, p.created_at, u.username, (SELECT count(*) FROM likes l WHERE l.post_id = p.id) FROM posts p JOIN users u ON u.id = p.user_id ";
     st_feed = prep(cols ++ "ORDER BY p.created_at DESC, p.id DESC LIMIT 20");
     st_post = prep(cols ++ "WHERE p.id = ?");
@@ -1837,6 +1847,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     now_s = started;
     segs = try gpa.alloc(Seg, MAXSEG);
     arena = try gpa.alloc(u8, BATCH_OUT);
+    huge(arena);
 
     dbOpen(path);
     if (fork() == 0) {

@@ -24,13 +24,21 @@ design and fixes that, plus the loop-level items the top entries share:
   rows in **ascending id order** (cursor fast path stays on one leaf); authors likewise;
   like counts from **one range walk of `likes_post_id_idx`** when the id span is < 512,
   counting leaf cells directly, per-post seeks otherwise.
+- **v2 fast feed (the Lean/Mojo invariant plan):** when post ids are dense (1..N) and
+  `created_at` never decreases with id, feed order *is* rowid order and the feed is simply
+  the posts table's last 20 rows — no index walk, no per-row seeks. A full scan at startup
+  verifies the invariant (~0.3 s on the seed), every insert is checked against it
+  (`bt_note_insert`), and the walk re-validates ids/timestamps as it serves; any violation
+  disables the plan permanently and the index plan above takes over.
 - Schema layout is verified at startup; any surprise (missing author row, overflow page,
   unexpected type) falls back to the original SQL plans (the original `feedRange` plan,
   then the reference query), so JOIN semantics are preserved exactly.
-- Local in-process measurement on the seed DB: B-tree feed 6.6–7.9 µs vs 12.7–15.2 µs for
-  the best SQL plan and ~20–21.5 µs for the reference query; `/posts/:id` 0.8–1.0 µs vs
-  1.35–1.38 µs SQL. End-to-end (epoll twin of this exact handler/DB code, 1 core, official
-  k6 mix): 33.9 → 28.8 µs/req median (−15%).
+- Local in-process measurement on the seed DB (matched conditions): B-tree feed **7.0 µs
+  (fast plan) vs 8.6 µs (index plan)** vs 12.7–13.7 µs for the best SQL plan and ~21 µs
+  for the reference query, with identical result checksums across plans. End-to-end
+  (epoll twin of this exact handler/DB code, 1 core, official k6 mix): the B-tree layer
+  measured 33.9 → 28.8 µs/req (−15%) against the SQL original, and v2 measured a further
+  32.9 → 30.4 µs/req (−8%) against v1 in a same-conditions A/B.
 
 **SQLite build / config**
 - `-O3 -march=native` (the build runs on the benchmark box) instead of `-O2 -march=x86-64-v2`,
@@ -47,8 +55,14 @@ design and fixes that, plus the loop-level items the top entries share:
   instead of re-arming every multishot at once and draining the buffer ring again.
 - 8 `SO_REUSEPORT` listeners (accept queues total ~32k instead of 4k), 512 single-shot
   accepts in flight, spread over the listeners with fewest in flight.
-- Send buffers recycled through a LIFO pool instead of malloc/free per response.
-- Checkpointer is a helper process at nice(19); batching wait 2 ms / 64 completions.
+- Send buffers recycled through a LIFO pool instead of malloc/free per response; the pool
+  is capped at 512 buffers (v2: the v1 cap of 8192 could pin up to 64 MB at the memory wall).
+- Checkpointer is a helper process at nice(19); batching wait 2 ms / 128 completions (v2,
+  matching the same author's C entry).
+- v2 memory diet for the connection wall: receive buffers 2 KB → 1 KB (halves the buffer
+  rings, ~24 MB at 6 rings), `wal_autocheckpoint` 65536 → 8192 frames so the WAL file —
+  and its page-cache footprint — is bounded at ~32 MB, and `MADV_HUGEPAGE` on the batch
+  arena, buffer rings and connection tables.
 - Two type errors in the 0.17 port as written are fixed (`bind_text` many-pointer,
   ring-flags cast); the port's own unit tests (SIMD JSON escaper, HMAC vs std) pass.
 
@@ -70,12 +84,21 @@ design and fixes that, plus the loop-level items the top entries share:
   listeners bind, it stops only at ring creation).
 - Official `bench/load.js`, 2,000 users, real think times, 1 core: 19,687 requests, 0
   failures, 100% checks.
-- Write-heavy stability (like/post probabilities ~10× the official mix): 472,945 requests,
-  0 failures; `PRAGMA integrity_check` ok; all writes present afterwards.
+- Write-heavy stability (like/post probabilities ~10× the official mix): v1 ran 472,945
+  requests, 0 failures; the v2 code ran 304,646 requests, 0 failures; both end with
+  `PRAGMA integrity_check` ok and every write present. Under that saturation the v2 WAL
+  stays at its ~32 MB autocheckpoint ceiling instead of growing to the v1 run's ~256 MB.
+- v2 additionally: official `bench/load.js` sanity re-run (2,000 users): 19,125 requests,
+  0 failures, 100% checks; the full `test/run.sh` suite passes 42/42 with the fast feed
+  live (including "new post is at the top of the feed", which exercises the insert →
+  invariant-tracking → fast-feed path).
 
 ## Projected score
-Applying the measured −15% CPU/req to the original entry's published 32 µs/req gives
-≈27 µs/req, i.e. ≈26,800 req/s and roughly **276,000 users held** — top-10 territory,
-from 235,000. The loop improvements above (bounded reads, REUSEPORT, send pool) target
-stall recovery and the memory wall rather than steady-state CPU, so they may add more on
-the real box; they are not in the projection.
+Applying the measured CPU/req ratios to the original entry's published 32 µs/req: the
+B-tree layer gives ≈27 µs/req (~276,000 users), and v2's further −8% gives ≈25 µs/req,
+i.e. ≈29,000 req/s and roughly **300,000 users held** — around #1's current 310,000,
+from 235,000. Stated as a projection, not a measured score: the local sandbox caps at
+~3,500 connections and blocks io_uring, so behaviour at the memory wall (where ~340,000
+would need ≈22 µs/req *and* ~1.46 GB of kernel socket memory alone) cannot be verified
+locally. The v2 memory diet is aimed at that wall; the checkpoint write-gate remains the
+known unadopted technique.

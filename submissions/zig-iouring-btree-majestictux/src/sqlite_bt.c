@@ -9,6 +9,11 @@
 //     path keeps each cursor on its leaf instead of descending root-to-leaf per row
 //   * like counting inside a narrow id range decodes index leaf cells directly, a leaf at a time
 //     (also the #1 entry's technique), with the plain cursor walk kept as a fallback
+//   * v2: an invariant fast feed — when post ids are dense (1..N) and created_at never decreases
+//     with id, feed order IS rowid order and the feed is the posts table's last 20 rows (the Lean
+//     and Mojo entries' plan). Verified by a full scan in bt_init, maintained by bt_note_insert
+//     after every insert, self-checked on every serve; any violation disables it for good and
+//     the index plan below (then SQL) takes over.
 #include "sqlite3.c"
 
 #include "sqlite_bt.h"
@@ -19,6 +24,13 @@ static KeyInfo *ki_feed, *ki_likes;
 static UnpackedRecord *key_likes;
 static BtCursor *c_posts, *c_users, *c_feed, *c_likes;
 static int open_now;
+
+// Invariant fast-feed state (see header comment). inv_max_* describe the newest post row.
+static int inv_ok;
+static i64 inv_max_id;
+static char inv_max_ca[32];
+static int inv_ca_len;
+static void inv_scan(void);
 
 int bt_init(sqlite3 *db) {
   Table *tp = sqlite3FindTable(db, "posts", "main"), *tu = sqlite3FindTable(db, "users", "main");
@@ -39,7 +51,9 @@ int bt_init(sqlite3 *db) {
   for (int i = 0; i < key_likes->nField; i++) key_likes->aMem[i].flags = MEM_Null, key_likes->aMem[i].db = db;
   int sz = sqlite3BtreeCursorSize();
   c_posts = sqlite3MallocZero(sz), c_users = sqlite3MallocZero(sz), c_feed = sqlite3MallocZero(sz), c_likes = sqlite3MallocZero(sz);
-  return key_likes && c_posts && c_users && c_feed && c_likes ? 0 : -1;
+  if (!(key_likes && c_posts && c_users && c_feed && c_likes)) return -1;
+  inv_scan();
+  return 0;
 }
 
 // Inside the caller's BEGIN ... COMMIT: opens the read transaction and the four cursors.
@@ -128,20 +142,26 @@ static char *put(char **w, char *end, const u8 *s, u32 n) {
   return d;
 }
 
-// Loads post row `id` (body, created_at, user_id). 1 found, 0 no such post, -1 fall back to SQL.
-static int load_row(i64 id, bt_post *o, i64 *uid, char **w, char *end) {
-  int res;
+// Decodes the post row under the posts cursor. 1 ok, -1 fall back to SQL.
+static int load_cur(bt_post *o, i64 *uid, char **w, char *end) {
   u32 sz;
-  if (sqlite3BtreeTableMoveto(c_posts, id, 0, &res) != SQLITE_OK) return -1;
-  if (res != 0 || sqlite3BtreeEof(c_posts)) return 0;
   const u8 *p = cell(c_posts, &sz);
   col_t c[4];
   // posts(id INTEGER PRIMARY KEY, user_id, body, created_at): id is the rowid, stored as NULL.
   if (!p || rec_split(p, sz, c, 4) != 4 || !col_text(&c[2]) || !col_text(&c[3])) return -1;
   if (col_int(&c[1], uid)) return -1;
-  o->id = id;
+  o->id = sqlite3BtreeIntegerKey(c_posts);
   if (!(o->body = put(w, end, c[2].p, c[2].n)) || !(o->ca = put(w, end, c[3].p, c[3].n))) return -1;
   o->bl = (int)c[2].n, o->cl = (int)c[3].n;
+  return 1;
+}
+
+// Loads post row `id` (body, created_at, user_id). 1 found, 0 no such post, -1 fall back to SQL.
+static int load_row(i64 id, bt_post *o, i64 *uid, char **w, char *end) {
+  int res;
+  if (sqlite3BtreeTableMoveto(c_posts, id, 0, &res) != SQLITE_OK) return -1;
+  if (res != 0 || sqlite3BtreeEof(c_posts)) return 0;
+  if (load_cur(o, uid, w, end) != 1 || o->id != id) return -1;
   return 1;
 }
 
@@ -279,9 +299,113 @@ static int count_one(bt_post *o) {
   }
 }
 
+// ---------------------------------------------------------------- invariant fast feed
+
+// One full pass over the posts table at startup: ids exactly 1..N and every created_at
+// (fixed 24-byte ISO-8601, so memcmp is chronological order) >= its predecessor's.
+static void inv_scan(void) {
+  inv_ok = 0, inv_max_id = 0, inv_ca_len = 0;
+  BtCursor *cur = sqlite3MallocZero(sqlite3BtreeCursorSize());
+  if (!cur) return;
+  if (sqlite3BtreeBeginTrans(bt, 0, 0) != SQLITE_OK) { sqlite3_free(cur); return; }
+  int ok = 0;
+  if (sqlite3BtreeCursor(bt, root_posts, 0, 0, cur) == SQLITE_OK) {
+    int res = 0;
+    int rc0 = sqlite3BtreeFirst(cur, &res);
+    if (rc0 == SQLITE_OK && res) {
+      ok = 1;  // empty table: the invariant holds vacuously
+    } else if (rc0 == SQLITE_OK) {
+      ok = 1;
+      i64 prev_id = 0;
+      char prev_ca[24];
+      int first = 1;
+      for (;;) {
+        u32 sz;
+        const u8 *p = cell(cur, &sz);
+        col_t c[4];
+        i64 id = sqlite3BtreeIntegerKey(cur);
+        if (!p || rec_split(p, sz, c, 4) != 4 || !col_text(&c[3]) || c[3].n != 24) { ok = 0; break; }
+        if (first) {
+          if (id != 1) { ok = 0; break; }
+          first = 0;
+        } else if (id != prev_id + 1 || memcmp(c[3].p, prev_ca, 24) < 0) { ok = 0; break; }
+        prev_id = id;
+        memcpy(prev_ca, c[3].p, 24);
+        inv_max_id = id;
+        memcpy(inv_max_ca, c[3].p, 24);
+        inv_max_ca[24] = 0, inv_ca_len = 24;
+        int rc = sqlite3BtreeNext(cur, 0);
+        if (rc == SQLITE_DONE) break;
+        if (rc != SQLITE_OK) { ok = 0; break; }
+      }
+    }
+    sqlite3BtreeCloseCursor(cur);
+  }
+  sqlite3BtreeCommit(bt);
+  sqlite3_free(cur);
+  inv_ok = ok;
+}
+
+// Called after every successful post insert. A row that breaks density or monotonicity
+// (e.g. the clock stepped back) disables the fast plan for good — the safe direction.
+void bt_note_insert(long long id, const char *ca, int ca_len) {
+  if (!inv_ok) return;
+  if (id != inv_max_id + 1 || ca_len != 24 || (inv_ca_len == 24 && memcmp(ca, inv_max_ca, 24) < 0)) {
+    inv_ok = 0;
+    return;
+  }
+  inv_max_id = id;
+  memcpy(inv_max_ca, ca, 24);
+  inv_max_ca[24] = 0, inv_ca_len = 24;
+}
+
+void bt_bench_disable_inv(void) { inv_ok = 0; }  // benchmark hook only; the server never calls it
+
+// The feed as the posts table's last 20 rows, walked backwards from the tail leaf.
+// Self-checks as it goes (consecutive ids, non-increasing created_at); -1 abandons the plan.
+static int feed_fast(bt_post *o, int *n_out, char *buf, size_t cap) {
+  char *w = buf, *end = buf + cap;
+  int res;
+  *n_out = 0;
+  if (sqlite3BtreeLast(c_posts, &res) != SQLITE_OK) return -1;
+  if (res) return 0;  // empty table
+  i64 uids[20];
+  int n = 0;
+  i64 expect = -1;
+  while (n < 20) {
+    i64 id = sqlite3BtreeIntegerKey(c_posts);
+    if (expect >= 0 && id != expect) return -1;
+    if (load_cur(&o[n], &uids[n], &w, end) != 1 || o[n].id != id) return -1;
+    if (n > 0 && (o[n].cl != 24 || o[n - 1].cl != 24 || memcmp(o[n].ca, o[n - 1].ca, 24) > 0)) return -1;
+    n++;
+    expect = id - 1;
+    if (expect < 1) break;
+    int rc = sqlite3BtreePrevious(c_posts, 0);
+    if (rc == SQLITE_DONE) break;
+    if (rc != SQLITE_OK) return -1;
+  }
+  int ord[20];
+  for (int i = 0; i < n; i++) ord[i] = i;
+  for (int i = 1; i < n; i++) {  // authors in ascending user-id order, as in the index plan
+    int t = ord[i], j = i - 1;
+    while (j >= 0 && uids[ord[j]] > uids[t]) { ord[j + 1] = ord[j]; j--; }
+    ord[j + 1] = t;
+  }
+  for (int i = 0; i < n; i++)
+    if (load_user(uids[ord[i]], &o[ord[i]], &w, end) <= 0) return -1;
+  *n_out = n;
+  if (!n) return 0;
+  return count_range(o, n, o[n - 1].id, o[0].id);  // ids are consecutive: the span is n-1
+}
+
 // ---------------------------------------------------------------- entry points
 
 int bt_feed(bt_post *o, int *n_out, char *buf, size_t cap) {
+  if (inv_ok) {
+    if (feed_fast(o, n_out, buf, cap) == 0) return 0;
+    inv_ok = 0;  // the fast plan hit something unexpected: index plan from now on
+    *n_out = 0;
+  }
   char *w = buf, *end = buf + cap;
   int res;
   *n_out = 0;

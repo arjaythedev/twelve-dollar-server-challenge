@@ -271,9 +271,9 @@ def load_saved_report(path: Path) -> JSONValue:
             return load_saved_report(path.parent)
         return read_json(path)
     manifest_path = path / "manifest.json"
+    summary = path / "summary.json"
     if manifest_path.is_file():
         manifest = mapping(read_json(manifest_path))
-        summary = path / "summary.json"
         provenance = manifest.get("provenance")
         source = provenance.get("source") if isinstance(provenance, dict) else None
         if isinstance(source, dict):
@@ -287,14 +287,16 @@ def load_saved_report(path: Path) -> JSONValue:
         ):
             raise ValueError(f"summary does not match its manifest: {summary}")
         return read_json(summary)
+    if summary.is_file():
+        return read_json(summary)
     if not path.is_dir():
         raise FileNotFoundError(path)
-    manifests = sorted({*path.glob("*/manifest.json"), *path.glob("*/*/manifest.json")})
-    if not manifests:
+    summaries = sorted({*path.glob("*/summary.json"), *path.glob("*/*/summary.json")})
+    if not summaries:
         raise ValueError(f"no saved runs in {path}")
     entries: list[JSONValue] = []
-    for file in manifests:
-        entries.append({"manifest": read_json(file), "summary": load_saved_report(file.parent)})
+    for file in summaries:
+        entries.append({"label": file.parent.name, "summary": load_saved_report(file.parent)})
     return {"kind": "run_collection", "schema_version": 1, "entries": entries}
 
 
@@ -776,9 +778,12 @@ def show_saved_report(document: JSONValue) -> None:
             raise ValueError("unsupported run collection")
         print("Run                                      Status       Kind")
         for value in values:
-            manifest = mapping(mapping(value)["manifest"])
+            entry = mapping(value)
+            summary = entry["summary"]
+            metadata = summary if isinstance(summary, dict) else {}
             print(
-                f"{text(manifest, 'label'):40} {text(manifest, 'status'):12} {text(manifest, 'kind')}"
+                f"{text(entry, 'label'):40} {metadata.get('status', 'archived'):12} "
+                f"{metadata.get('kind', 'legacy')}"
             )
     elif kind == "raw_archive":
         print(

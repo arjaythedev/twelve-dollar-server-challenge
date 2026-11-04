@@ -23,6 +23,33 @@ SOURCE = "c" * 64
 
 
 class RunRecordTests(unittest.TestCase):
+    def test_published_summary_loads_without_local_manifest_or_patch(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            run = create_run(root / "local", ANCHOR, "published", {}, {}, {}, kind="probe")
+            run.record_source(BASE, b"local patch\n", SOURCE)
+            run.finish("passed", {"measurement": {"samples": 17}}, 0)
+            original = (run.path / "summary.json").read_bytes()
+            destination = root / "published" / ANCHOR[:7] / "published"
+            destination.mkdir(parents=True)
+            (destination / "summary.json").write_bytes(original)
+
+            for path in (destination, destination / "summary.json"):
+                self.assertEqual(load_saved_report(path), read_json(run.path / "summary.json"))
+            for path in (destination.parent, destination.parent.parent):
+                collection = mapping(load_saved_report(path))
+                entries = collection["entries"]
+                assert isinstance(entries, list)
+                self.assertEqual(len(entries), 1)
+                self.assertEqual(mapping(entries[0])["label"], "published")
+                with patch("sys.stdout", new_callable=StringIO) as output:
+                    show_saved_report(collection)
+                self.assertIn("published", output.getvalue())
+                self.assertIn("passed", output.getvalue())
+            self.assertFalse((destination / "manifest.json").exists())
+            self.assertFalse((destination / "source.patch").exists())
+            self.assertEqual((destination / "summary.json").read_bytes(), original)
+
     def test_altered_source_patch_cannot_be_reported_as_a_successful_run(self) -> None:
         with TemporaryDirectory() as directory:
             run = create_run(Path(directory), ANCHOR, "altered-patch", {}, {}, {})

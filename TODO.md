@@ -10,13 +10,13 @@ The experiment anchor is HEAD when a run starts. The first group starts at `b593
 
 ```text
 src/runs/<anchor>/<run>/
-  manifest.json
-  summary.json
-  source.patch         # changes used by this tested variant
-  raw/                 # ignored by Git
+  summary.json         # tracked results
+  manifest.json        # local
+  source.patch         # local tested changes
+  raw/                 # local logs and profiles
 ```
 
-Track compact manifests, summaries and source patches. Keep detailed logs, telemetry and perf data in `raw/`. Record the anchor, effective workload/instrument settings, status, observer checkout and verified build/source/binary identities for each variant. Keep unknown provenance unknown.
+Track result summaries only. Manifests, source patches, raw data and archive inventories stay local. Record the anchor, effective workload/instrument settings, status, observer checkout and verified build/source/binary identities for each variant. Keep unknown provenance unknown.
 
 Capture staged and unstaged source changes and new build-input files against the measured base commit. Exclude run output and caches. Generate the patch and build from the same frozen inputs. Use image tags `<commit12>-<patch12>-<build12>`; record full hashes, build settings, image ID and binary hash in the manifest. The build hash distinguishes targets, telemetry modes, compiler options and toolchain/base-image versions. Each tested variant owns its patch; comparisons reference those runs.
 

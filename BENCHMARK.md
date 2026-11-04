@@ -252,6 +252,23 @@ Ubuntu 22.04 VM, direct LAN, one destination port and 64 source IPs: 70k users, 
 
 Ext4 runs preloaded only the immutable source outside the server cgroup; all three fresh databases started at 237.65 MiB file cache inside the limit. One run per variant. [WAL data](src/runs/legacy/benchmark-wal-cache/summary.json).
 
+## Infrastructure probes
+
+2026-11-04, Docker, CPU 2, ABBA order. Native thread CPU, profile telemetry, equal work and verified counters. [Data](src/runs/ad9c8e6/telemetry-cold-abba/summary.json).
+
+| Metric | Before | After |
+| --- | ---: | ---: |
+| I/O window capture | 1.859 us | 0.400 us |
+| DB window capture | 0.445 us | 0.322 us |
+| WAL advice, retained events | 251.3 ns | 165.8 ns |
+| WAL advice, full event buffer | 230.0 ns | 143.1 ns |
+| Empty histories, resident memory | 6.19 MiB | 76 KiB |
+| 128 windows, construction + first fill | 4.33 ms | 3.88 ms |
+
+Lazy storage moves initialization to first fill; full histories use roughly the same RAM. WAL advice is stubbed in the timing probe; native tests check real forwarding. These are telemetry costs, not HTTP latency results.
+
+Exact generator samples, 2M entries: peak RSS 59.07 to 34.96 MiB; collection plus final aggregation CPU 462.22 to 251.50 ms. [Data](src/runs/a68fdc9/generator-samples-2m/summary.json).
+
 ## Mini PC, Linux loopback
 
 Server: 1 CPU, 2 GiB. Generator on the same Mini, one destination port, 64 source IPs, 90-second ramp, 60-second hold.
@@ -269,6 +286,8 @@ WAL cache eviction, Mini 50k, two reversed pairs, 20-second holds: mean file cac
 Docker HTTP comparison remains inconclusive: one run missed target concurrency before the first checkpoint; a diagnostic repeat passed. Both showed substantial I/O wait.
 
 ## Native CPU sampling
+
+Telemetry cleanup, 350k, 30s ramp / 60s capture, perf all + profile telemetry + client diagnostics: 3,625,395 requests, 0 errors, p99 7.37 ms (hold 10.73 ms), 24.34 us/request, 992.11 MiB server peak. Generator process peak RSS 155.74 MiB; sampled cgroup peak 1,405.16 MiB. Failed the generator ramp deadline: 30.160s versus 30.100s. [Data](src/runs/4ec3f7a/telemetry-cleanup-350000/summary.json).
 
 unix-excl, 350k with the same 30-second warm-up and 90-second capture: CPU/request 24.19 to 21.99 us; hold p99 7.10 to 6.40 ms. No fcntl samples (previously 7.5% of CPU). Network 46.0%, SQL/rows 20.3%, io_uring 11.0%. 65,439 samples, no loss or request errors. Different random seeds. [Data](src/runs/legacy/profile-unix-excl-350000/summary.json).
 

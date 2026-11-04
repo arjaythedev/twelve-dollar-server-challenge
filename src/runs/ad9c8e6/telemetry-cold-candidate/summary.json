@@ -1,0 +1,42 @@
+{
+  "measurement": {
+    "image_id": "sha256:d08c9160eba9030b583c33fe6020e5523226a7341dfda6221932717d435ab779",
+    "tests": "4 focused native contracts passed"
+  },
+  "schema_version": 1,
+  "anchor": "ad9c8e61a2d022c9e09b367e10686a15fe44c716",
+  "label": "telemetry-cold-candidate",
+  "kind": "probe",
+  "started_at": "2026-11-04T12:41:32.699569+00:00",
+  "status": "passed",
+  "finished_at": "2026-11-04T12:42:40.588838+00:00",
+  "exit_code": 0,
+  "error": null,
+  "secondary_errors": [],
+  "workload": {
+    "kind": "telemetry_cold_probe"
+  },
+  "instruments": {
+    "server_telemetry": "profile",
+    "perf": "off",
+    "client_diagnostics": false
+  },
+  "provenance": {
+    "source": {
+      "base_commit": "ad9c8e61a2d022c9e09b367e10686a15fe44c716",
+      "patch_sha256": "9614eba40aa7369e28a54d026aa231a42e5ae325c52641d4ebb7bd3f8af0831a",
+      "source_sha256": "e855d51790a07c9bacba5cbf29f90181896b4018967ed0e0308b1394e280df49",
+      "patch": "source.patch"
+    },
+    "binary": {
+      "history_probe": {
+        "sha256": "fa21f949731fd911dff08a0e391a82e095557241d97d9a9f10519b05c87c24e6",
+        "build_image_id": "sha256:d08c9160eba9030b583c33fe6020e5523226a7341dfda6221932717d435ab779"
+      },
+      "wal_advice_probe": {
+        "sha256": "dc5bb1e74b38b3576740e615db02d46430c6e37e11b6586a5ec532f3930b7f67",
+        "build_image_id": "sha256:d08c9160eba9030b583c33fe6020e5523226a7341dfda6221932717d435ab779"
+      }
+    }
+  }
+}

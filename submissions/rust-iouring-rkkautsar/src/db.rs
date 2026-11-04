@@ -66,6 +66,8 @@ extern "C" {
     fn sqlite3_changes(db: *mut Sqlite3) -> c_int;
 
     fn btree_reader_free(reader: *mut BtreeReader);
+    pub(crate) fn btree_stats_enable(on: c_int);
+    pub(crate) fn btree_stats(out: *mut u64);
     fn btree_reader_new(
         db: *mut Sqlite3,
         posts_root: u32,

@@ -1,9 +1,10 @@
 use std::collections::{HashMap, HashSet};
 use std::os::fd::RawFd;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, Sender};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::sync::Arc;
 use std::thread;
+use std::time::{Duration, Instant};
 
 use crate::db::ReadDb;
 use crate::response_bytes;
@@ -35,6 +36,28 @@ pub struct PostReply {
     pub packets: Option<Arc<HashMap<i64, Option<Arc<PostResponse>>>>>,
 }
 
+fn coalesce_requests<T>(rx: &Receiver<T>, first: T, window_us: u64) -> Vec<T> {
+    let mut requests = vec![first];
+    if window_us == 0 {
+        while let Ok(req) = rx.try_recv() {
+            requests.push(req);
+        }
+        return requests;
+    }
+    let deadline = Instant::now() + Duration::from_micros(window_us);
+    loop {
+        let now = Instant::now();
+        let Some(remaining) = deadline.checked_duration_since(now) else {
+            break;
+        };
+        match rx.recv_timeout(remaining) {
+            Ok(req) => requests.push(req),
+            Err(RecvTimeoutError::Timeout) | Err(RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    requests
+}
+
 fn refresh_if_dirty(read: &mut ReadDb, dirty: &AtomicU64, seen: &mut u64) {
     let generation = dirty.load(Ordering::Relaxed);
     if generation != *seen {
@@ -58,11 +81,12 @@ pub fn spawn_feed(path: String, rx: Receiver<FeedRequest>, dirty: Arc<AtomicU64>
                 }
             };
             let mut seen = dirty.load(Ordering::Relaxed);
+            let window_us = std::env::var("COALESCE_US")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(10_000);
             while let Ok(first) = rx.recv() {
-                let mut requests = vec![first];
-                while let Ok(req) = rx.try_recv() {
-                    requests.push(req);
-                }
+                let requests = coalesce_requests(&rx, first, window_us);
                 refresh_if_dirty(&mut read, &dirty, &mut seen);
                 let body = read.feed().ok().map(Arc::new);
                 for req in requests {
@@ -94,11 +118,12 @@ pub fn spawn_post(path: String, rx: Receiver<PostRequest>, dirty: Arc<AtomicU64>
                 }
             };
             let mut seen = dirty.load(Ordering::Relaxed);
+            let window_us = std::env::var("COALESCE_US")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(10_000);
             while let Ok(first) = rx.recv() {
-                let mut requests = vec![first];
-                while let Ok(req) = rx.try_recv() {
-                    requests.push(req);
-                }
+                let requests = coalesce_requests(&rx, first, window_us);
                 refresh_if_dirty(&mut read, &dirty, &mut seen);
                 let mut ids = HashSet::new();
                 for req in &requests {

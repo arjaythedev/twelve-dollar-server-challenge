@@ -5,7 +5,7 @@ use std::sync::mpsc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 mod checkpoint;
 mod db;
@@ -57,10 +57,36 @@ fn main() -> io::Result<()> {
     let dirty = Arc::new(AtomicU64::new(0));
     writer::spawn(db_path.clone(), job_rx, dirty.clone(), ready_tx);
     let _ = ready_rx.recv();
+    if stats::enabled() {
+        unsafe { db::btree_stats_enable(1) };
+        thread::Builder::new()
+            .name("btree-stats".into())
+            .spawn(|| loop {
+                thread::sleep(Duration::from_secs(5));
+                let mut v = [0u64; 4];
+                unsafe { db::btree_stats(v.as_mut_ptr()) };
+                let f = if v[0] > 0 { v[1] / v[0] / 1000 } else { 0 };
+                let p = if v[2] > 0 { v[3] / v[2] / 1000 } else { 0 };
+                eprintln!(
+                    "btree feed_calls={} feed_avg_us={} post_calls={} post_avg_us={}",
+                    v[0], f, v[2], p
+                );
+            })
+            .ok();
+    }
     let (feed_tx, feed_rx) = mpsc::channel();
-    let (post_tx, post_rx) = mpsc::channel();
     reader::spawn_feed(db_path.clone(), feed_rx, dirty.clone());
-    reader::spawn_post(db_path.clone(), post_rx, dirty.clone());
+    let post_workers = env::var("POST_WORKERS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(1)
+        .clamp(1, 4);
+    let mut post_txs = Vec::with_capacity(post_workers);
+    for _ in 0..post_workers {
+        let (post_tx, post_rx) = mpsc::channel();
+        reader::spawn_post(db_path.clone(), post_rx, dirty.clone());
+        post_txs.push(post_tx);
+    }
 
     let mut handles = Vec::with_capacity(shards);
     for shard in 0..shards {
@@ -72,7 +98,7 @@ fn main() -> io::Result<()> {
         }
         let write_tx = job_tx.clone();
         let feed_tx = feed_tx.clone();
-        let post_tx = post_tx.clone();
+        let post_tx = post_txs[shard % post_workers].clone();
         let path = db_path.clone();
         let secret = secret.clone();
         let addr = addr.clone();

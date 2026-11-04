@@ -1,0 +1,3326 @@
+diff --git a/bench/load.js b/bench/load.js
+index f4066f789ec9303a1525aaeabbe987ac4102cb2f..6026dccde47d3ea2c63079bd445582cc163764cf 100644
+--- a/bench/load.js
++++ b/bench/load.js
+@@ -1,70 +1,70 @@
+-/**
+- * The load test. One virtual user (VU) = one person browsing the feed, with think time.
+- * A submission's score is the highest VUS that passes a 5-minute hold (see README.md).
+- *
+- *   k6 run -e VUS=2000 bench/load.js
+- *   k6 run -e BASE_URL=http://10.0.0.5 -e VUS=8000 bench/load.js
+- *
+- * Env: BASE_URL (default http://127.0.0.1:3000), VUS (default 100), DURATION (default 5m),
+- *      RAMP_UP (default 60s), TOKENS (default seed/tokens.json).
+- *
+- * User loop: GET /feed -> think 3-7 s -> GET /posts/:id (one from the feed) -> think 3-8 s
+- *   -> like it (15% chance) -> write a post (2% chance) -> idle 5-15 s -> repeat.
+- *
+- * Pass: p95 < 500 ms, p99 < 1000 ms, under 1% failed requests (k6 exits non-zero on a fail).
+- */
+-import http from 'k6/http';
+-import { check, sleep } from 'k6';
+-import { SharedArray } from 'k6/data';
+-
+-const BASE_URL = __ENV.BASE_URL || 'http://127.0.0.1:3000';
+-const VUS = Number(__ENV.VUS || 100);
+-const LIKE_PROB = 0.15;
+-const POST_PROB = 0.02;
+-const tokens = new SharedArray('tokens', () => JSON.parse(open(__ENV.TOKENS || '../seed/tokens.json')));
+-
+-export const options = {
+-  scenarios: {
+-    users: {
+-      executor: 'ramping-vus',
+-      stages: [
+-        { duration: __ENV.RAMP_UP || '60s', target: VUS },
+-        { duration: __ENV.DURATION || '5m', target: VUS },
+-        { duration: '30s', target: 0 },
+-      ],
+-      gracefulRampDown: '10s',
+-    },
+-  },
+-  thresholds: {
+-    http_req_duration: ['p(95)<500', 'p(99)<1000'],
+-    http_req_failed: ['rate<0.01'],
+-  },
+-  summaryTrendStats: ['avg', 'med', 'p(95)', 'p(99)', 'max'],
+-};
+-
+-const between = (lo, hi) => lo + Math.random() * (hi - lo);
+-
+-export default function () {
+-  const user = tokens[(__VU - 1) % tokens.length];
+-  const auth = { headers: { Authorization: `Bearer ${user.token}`, 'Content-Type': 'application/json' } };
+-  if (__ITER === 0) sleep(between(0, 5)); // spread out VUs that start in the same tick
+-
+-  const feed = http.get(`${BASE_URL}/feed`, { tags: { name: 'GET /feed' } });
+-  if (!check(feed, { 'feed 200': (r) => r.status === 200 })) { sleep(between(3, 7)); return; }
+-  const posts = feed.json('posts');
+-  const post = posts[Math.floor(Math.random() * posts.length)];
+-  sleep(between(3, 7));
+-
+-  check(http.get(`${BASE_URL}/posts/${post.id}`, { tags: { name: 'GET /posts/:id' } }), { 'post 200': (r) => r.status === 200 });
+-  sleep(between(3, 8));
+-
+-  if (Math.random() < LIKE_PROB) {
+-    const r = http.post(`${BASE_URL}/posts/${post.id}/like`, null, { ...auth, tags: { name: 'POST /posts/:id/like' } });
+-    check(r, { 'like 200/201': (r) => r.status === 200 || r.status === 201 });
+-  }
+-  if (Math.random() < POST_PROB) {
+-    const body = JSON.stringify({ body: `${user.username} says hi at ${new Date().toISOString()} (VU ${__VU}, iter ${__ITER})` });
+-    check(http.post(`${BASE_URL}/posts`, body, { ...auth, tags: { name: 'POST /posts' } }), { 'create 201': (r) => r.status === 201 });
+-  }
+-  sleep(between(5, 15));
+-}
++/**
++ * The load test. One virtual user (VU) = one person browsing the feed, with think time.
++ * A submission's score is the highest VUS that passes a 5-minute hold (see README.md).
++ *
++ *   k6 run -e VUS=2000 bench/load.js
++ *   k6 run -e BASE_URL=http://10.0.0.5 -e VUS=8000 bench/load.js
++ *
++ * Env: BASE_URL (default http://127.0.0.1:3000), VUS (default 100), DURATION (default 5m),
++ *      RAMP_UP (default 60s), TOKENS (default seed/tokens.json).
++ *
++ * User loop: GET /feed -> think 3-7 s -> GET /posts/:id (one from the feed) -> think 3-8 s
++ *   -> like it (15% chance) -> write a post (2% chance) -> idle 5-15 s -> repeat.
++ *
++ * Pass: p95 < 500 ms, p99 < 1000 ms, under 1% failed requests (k6 exits non-zero on a fail).
++ */
++import http from 'k6/http';
++import { check, sleep } from 'k6';
++import { SharedArray } from 'k6/data';
++
++const BASE_URL = __ENV.BASE_URL || 'http://127.0.0.1:3000';
++const VUS = Number(__ENV.VUS || 100);
++const LIKE_PROB = 0.15;
++const POST_PROB = 0.02;
++const tokens = new SharedArray('tokens', () => JSON.parse(open(__ENV.TOKENS || '../seed/tokens.json')));
++
++export const options = {
++  scenarios: {
++    users: {
++      executor: 'ramping-vus',
++      stages: [
++        { duration: __ENV.RAMP_UP || '60s', target: VUS },
++        { duration: __ENV.DURATION || '5m', target: VUS },
++        { duration: '30s', target: 0 },
++      ],
++      gracefulRampDown: '10s',
++    },
++  },
++  thresholds: {
++    http_req_duration: ['p(95)<500', 'p(99)<1000'],
++    http_req_failed: ['rate<0.01'],
++  },
++  summaryTrendStats: ['avg', 'med', 'p(95)', 'p(99)', 'max'],
++};
++
++const between = (lo, hi) => lo + Math.random() * (hi - lo);
++
++export default function () {
++  const user = tokens[(__VU - 1) % tokens.length];
++  const auth = { headers: { Authorization: `Bearer ${user.token}`, 'Content-Type': 'application/json' } };
++  if (__ITER === 0) sleep(between(0, 5)); // spread out VUs that start in the same tick
++
++  const feed = http.get(`${BASE_URL}/feed`, { tags: { name: 'GET /feed' } });
++  if (!check(feed, { 'feed 200': (r) => r.status === 200 })) { sleep(between(3, 7)); return; }
++  const posts = feed.json('posts');
++  const post = posts[Math.floor(Math.random() * posts.length)];
++  sleep(between(3, 7));
++
++  check(http.get(`${BASE_URL}/posts/${post.id}`, { tags: { name: 'GET /posts/:id' } }), { 'post 200': (r) => r.status === 200 });
++  sleep(between(3, 8));
++
++  if (Math.random() < LIKE_PROB) {
++    const r = http.post(`${BASE_URL}/posts/${post.id}/like`, null, { ...auth, tags: { name: 'POST /posts/:id/like' } });
++    check(r, { 'like 200/201': (r) => r.status === 200 || r.status === 201 });
++  }
++  if (Math.random() < POST_PROB) {
++    const body = JSON.stringify({ body: `${user.username} says hi at ${new Date().toISOString()} (VU ${__VU}, iter ${__ITER})` });
++    check(http.post(`${BASE_URL}/posts`, body, { ...auth, tags: { name: 'POST /posts' } }), { 'create 201': (r) => r.status === 201 });
++  }
++  sleep(between(5, 15));
++}
+diff --git a/schema.sql b/schema.sql
+index 191a3e11f4ceadfcb052d95e5624718eb71f1836..3aa50124b83ac578c6eba23b1e5e8f953731de14 100644
+--- a/schema.sql
++++ b/schema.sql
+@@ -1,26 +1,26 @@
+--- The database every submission uses (SQLite). seed/make-seed.sh builds seed/feed.db from it.
+--- The schema is fixed: submissions may not add or change tables, columns, indexes or triggers.
+--- Timestamps are TEXT in the exact wire format (YYYY-MM-DDTHH:MM:SS.mmmZ, UTC), which also sorts correctly.
+-CREATE TABLE users (
+-  id          INTEGER PRIMARY KEY,
+-  username    TEXT NOT NULL UNIQUE,
+-  created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+-);
+-
+-CREATE TABLE posts (
+-  id          INTEGER PRIMARY KEY,
+-  user_id     INTEGER NOT NULL REFERENCES users(id),
+-  body        TEXT NOT NULL CHECK (length(body) BETWEEN 1 AND 500),
+-  created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+-);
+-
+-CREATE TABLE likes (
+-  user_id     INTEGER NOT NULL REFERENCES users(id),
+-  post_id     INTEGER NOT NULL REFERENCES posts(id),
+-  created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+-  PRIMARY KEY (user_id, post_id)
+-);
+-
+-CREATE INDEX posts_created_at_id_idx ON posts (created_at DESC, id DESC);
+-CREATE INDEX posts_user_id_idx       ON posts (user_id);
+-CREATE INDEX likes_post_id_idx       ON likes (post_id);
++-- The database every submission uses (SQLite). seed/make-seed.sh builds seed/feed.db from it.
++-- The schema is fixed: submissions may not add or change tables, columns, indexes or triggers.
++-- Timestamps are TEXT in the exact wire format (YYYY-MM-DDTHH:MM:SS.mmmZ, UTC), which also sorts correctly.
++CREATE TABLE users (
++  id          INTEGER PRIMARY KEY,
++  username    TEXT NOT NULL UNIQUE,
++  created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
++);
++
++CREATE TABLE posts (
++  id          INTEGER PRIMARY KEY,
++  user_id     INTEGER NOT NULL REFERENCES users(id),
++  body        TEXT NOT NULL CHECK (length(body) BETWEEN 1 AND 500),
++  created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
++);
++
++CREATE TABLE likes (
++  user_id     INTEGER NOT NULL REFERENCES users(id),
++  post_id     INTEGER NOT NULL REFERENCES posts(id),
++  created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
++  PRIMARY KEY (user_id, post_id)
++);
++
++CREATE INDEX posts_created_at_id_idx ON posts (created_at DESC, id DESC);
++CREATE INDEX posts_user_id_idx       ON posts (user_id);
++CREATE INDEX likes_post_id_idx       ON likes (post_id);
+diff --git a/src/.dockerignore b/src/.dockerignore
+index 2326d402e9d8fb2e8bfa3b3431f3c89e91373896..5dcdb74cfba9d526ce746a7d1b61bffc38ce8347 100644
+--- a/src/.dockerignore
++++ b/src/.dockerignore
+@@ -1,6 +1,7 @@
+ .venv
+ .ruff_cache
+ .build
++runs
+ **/__pycache__
+ **/*.pyc
+ .git
+@@ -10,6 +11,7 @@ benchmarks/*
+ !benchmarks/group_commit.cpp
+ !benchmarks/response_reuse.cpp
+ !benchmarks/retry_receive.cpp
++!benchmarks/telemetry.cpp
+ tests/*
+ !tests/CMakeLists.txt
+ !tests/*.cpp
+diff --git a/src/Dockerfile b/src/Dockerfile
+index 5ec95bd704f22d30476f26c78b074c4e7da3c5c7..0db1eadb1fa4040f4666ccd6bc09ba2036842245 100644
+--- a/src/Dockerfile
++++ b/src/Dockerfile
+@@ -3,6 +3,7 @@ RUN apt-get update \
+     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+     ca-certificates cmake ninja-build make gcc g++ libssl-dev
+ WORKDIR /build
++RUN { g++ --version; sha256sum /usr/bin/g++ /usr/bin/ld; dpkg-query -W; } > /etc/tds-toolchain
+ COPY CMakeLists.txt ./
+ COPY cmake ./cmake
+ COPY server ./server
+@@ -11,6 +12,7 @@ COPY benchmarks/CMakeLists.txt ./benchmarks/CMakeLists.txt
+ COPY benchmarks/group_commit.cpp ./benchmarks/group_commit.cpp
+ COPY benchmarks/response_reuse.cpp ./benchmarks/response_reuse.cpp
+ COPY benchmarks/retry_receive.cpp ./benchmarks/retry_receive.cpp
++COPY benchmarks/telemetry.cpp ./benchmarks/telemetry.cpp
+ ARG TDS_SANITIZERS=OFF
+ ARG TDS_TELEMETRY=off
+ 
+@@ -33,6 +35,7 @@ RUN apt-get update \
+     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libstdc++6 \
+     && useradd --uid 10001 --create-home benchmark
+ WORKDIR /app
++COPY --from=generator-build /etc/tds-toolchain /etc/tds-toolchain
+ COPY --from=generator-build /build/out/load_generator ./load_generator
+ USER 10001:10001
+ ENTRYPOINT ["/app/load_generator"]
+@@ -43,6 +46,7 @@ RUN apt-get update \
+     libstdc++6 libssl3t64 curl jq openssl sqlite3 \
+     && useradd --uid 10001 --create-home benchmark
+ WORKDIR /app
++COPY --from=build /etc/tds-toolchain /etc/tds-toolchain
+ COPY --from=build /build/out/server ./server
+ USER 10001:10001
+ ENV HOST=0.0.0.0 PORT=3000 SQLITE_PATH=/data/feed.db
+diff --git a/src/benchmarks/CMakeLists.txt b/src/benchmarks/CMakeLists.txt
+index 8f0b49d90ad472ce5560f0c69049ad4cecadeb53..6f392b560de6007611a8a5189099fe4736b515ef 100644
+--- a/src/benchmarks/CMakeLists.txt
++++ b/src/benchmarks/CMakeLists.txt
+@@ -7,3 +7,8 @@ target_compile_definitions(response_reuse_probe PRIVATE TDS_RESPONSE_REUSE=1)
+ 
+ tds_add_executable(retry_receive_probe EXCLUDE_FROM_ALL retry_receive.cpp)
+ target_link_libraries(retry_receive_probe PRIVATE transport uring)
++
++if(TDS_TELEMETRY STREQUAL "profile")
++    tds_add_executable(telemetry_probe EXCLUDE_FROM_ALL telemetry.cpp)
++    target_link_libraries(telemetry_probe PRIVATE transport api sqlite)
++endif()
+diff --git a/src/benchmarks/telemetry.cpp b/src/benchmarks/telemetry.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..7ed08631e827e60203829ec7d0701d2802bb0d5a
+--- /dev/null
++++ b/src/benchmarks/telemetry.cpp
+@@ -0,0 +1,187 @@
++#include "diagnostics/database.hpp"
++#include "diagnostics/io.hpp"
++#include "http/exchange.hpp"
++#include "net/reactor.hpp"
++
++#include <array>
++#include <cinttypes>
++#include <cstddef>
++#include <cstdint>
++#include <cstdio>
++#include <cstdlib>
++#include <stdexcept>
++#include <time.h>
++#include <utility>
++
++namespace
++{
++static_assert(tds::telemetry::profiling);
++constexpr std::uint64_t calls = 500'000;
++constexpr std::array names{"io_ns_per_call",
++                           "database_ns_per_call",
++                           "handler_active_ns_per_call",
++                           "handler_write_ns_per_call",
++                           "receive_ns_per_call",
++                           "database_scope_ns_per_call",
++                           "database_sync_scope_ns_per_call"};
++using Sample = std::array<double, names.size()>;
++
++void require(bool condition, const char *message)
++{
++    if (!condition)
++    {
++        throw std::runtime_error(message);
++    }
++}
++
++std::uint64_t cpu_ns()
++{
++    timespec value{};
++    require(::clock_gettime(CLOCK_THREAD_CPUTIME_ID, &value) == 0, "read probe CPU clock");
++
++    return static_cast<std::uint64_t>(value.tv_sec) * 1'000'000'000ULL +
++           static_cast<std::uint64_t>(value.tv_nsec);
++}
++
++template <class Work> double measure(Work &&work)
++{
++    const auto started = cpu_ns();
++    for (std::uint64_t call = 0; call < calls; ++call)
++    {
++        work(call);
++    }
++
++    return static_cast<double>(cpu_ns() - started) / static_cast<double>(calls);
++}
++} // namespace
++
++int main()
++{
++    try
++    {
++        // Final export is outside the timed loops and discarded by this probe
++        require(::setenv("TDS_TELEMETRY_PATH", "/dev/null", 1) == 0,
++                "set probe export destination");
++        tds::net::Reactor reactor("127.0.0.1", 0);
++        auto &ring = *reactor.rings().front();
++        auto &connection = ring.connections.create(ring, ring.connections.reserve());
++        connection.exchange = ring.acquire_exchange();
++        tds::telemetry::IoTelemetry io;
++        const auto run = io.run(reactor);
++        io.receive().attach(connection);
++        tds::telemetry::DatabaseTelemetry database("database");
++        const auto accept = [&](tds::AcceptedHead head) {
++            auto &session = connection.exchange->session;
++            session.reset();
++            session.append("GET /health HTTP/1.1\r\nHost: local\r\n\r\n");
++            require(session.consume().valid && session.headers_pending(), "parse probe headers");
++            session.accept_headers(std::move(head));
++            require(session.consume().valid && session.complete(), "complete probe request");
++        };
++        for (unsigned index = 0; index < 5000; ++index)
++        {
++            io.report(reactor);
++            database.report();
++        }
++        std::array<Sample, 5> samples{};
++        for (std::size_t index = 0; index < samples.size(); ++index)
++        {
++            for (std::size_t offset = 0; offset < names.size(); ++offset)
++            {
++                // Reverse scenario order to reduce a fixed warmup/frequency bias
++                const auto scenario = index % 2 ? names.size() - 1 - offset : offset;
++                auto &value = samples[index][scenario];
++                switch (scenario)
++                {
++                case 0:
++                    value = measure([&](std::uint64_t) {
++                        io.report(reactor);
++                    });
++                    break;
++                case 1:
++                    value = measure([&](std::uint64_t) {
++                        database.report();
++                    });
++                    break;
++                case 2:
++                    accept(tds::HealthHead{});
++                    value = measure([&](std::uint64_t) {
++                        auto sample = io.handler(connection);
++                        sample.finish();
++                    });
++                    break;
++                case 3:
++                    accept(tds::CreateHead{});
++                    value = measure([&](std::uint64_t) {
++                        const auto sample = io.handler(connection);
++                    });
++                    break;
++                case 4:
++                    value = measure([&](std::uint64_t) {
++                        io.receive().attach(connection);
++                    });
++                    break;
++                case 5:
++                    value = measure([&](std::uint64_t call) {
++                        constexpr std::array operations{tds::telemetry::DatabaseOperation::feed,
++                                                        tds::telemetry::DatabaseOperation::post,
++                                                        tds::telemetry::DatabaseOperation::create,
++                                                        tds::telemetry::DatabaseOperation::like};
++                        const auto sample = database.measure(operations[call % operations.size()]);
++                    });
++                    break;
++                case 6:
++                    value = measure([&](std::uint64_t call) {
++                        const auto operation = call % 2
++                                                   ? tds::telemetry::DatabaseOperation::checkpoint
++                                                   : tds::telemetry::DatabaseOperation::commit;
++                        const auto sample = database.measure(operation);
++                    });
++                    break;
++                }
++            }
++        }
++        require(!io.history().size() && !database.windows().size(),
++                "probe crossed a report deadline, discard the sample");
++        const auto expected = calls * samples.size();
++        io.report(reactor, true);
++        const auto &io_times = io.totals().timings;
++        require(io_times.handler_wall_ns.count == expected &&
++                    io_times.receive_cqe_service_to_handler_start_ns.count == expected &&
++                    connection.exchange->receive_serviced_ns > 0,
++                "probe changed active/write handler counts or lost receive timestamps");
++        const auto db = database.snapshot();
++        require(
++            db.counters.feed == expected / 4 && db.counters.post == expected / 4 &&
++                db.counters.create == expected / 4 && db.counters.like == expected / 4 &&
++                db.counters.commits == expected / 2 && db.counters.checkpoints == expected / 2 &&
++                db.timings.feed.count == expected / 4 && db.timings.post.count == expected / 4 &&
++                db.timings.create.count == expected / 4 && db.timings.like.count == expected / 4 &&
++                db.timings.commit.count == expected / 2 &&
++                db.timings.checkpoint.count == expected / 2 && db.timings.sync[0].calls == 0 &&
++                db.timings.sync[1].calls == 0,
++            "probe changed database operation counts or timing samples");
++        std::printf("{\"calls_per_sample\":%" PRIu64 ",\"verified_handler_samples\":%" PRIu64
++                    ",\"verified_database_samples\":%" PRIu64 ",\"samples\":[",
++                    calls, io_times.handler_wall_ns.count, expected * 2);
++        for (std::size_t index = 0; index < samples.size(); ++index)
++        {
++            std::fputs(index ? ",{" : "{", stdout);
++            for (std::size_t scenario = 0; scenario < names.size(); ++scenario)
++            {
++                std::printf("%s\"%s\":%.6f", scenario ? "," : "", names[scenario],
++                            samples[index][scenario]);
++            }
++            std::fputc('}', stdout);
++        }
++        std::puts("]}");
++
++        return 0;
++    }
++    catch (const std::exception &error)
++    {
++        std::fprintf(stderr, "%s\n", error.what());
++
++        return 1;
++    }
++}
+diff --git a/src/dev.py b/src/dev.py
+index a9828c9766795f00fd1882ec52516642101ecd66..f0239a766e178cb938ce7af9a11132e42fc3cd86 100644
+--- a/src/dev.py
++++ b/src/dev.py
+@@ -3,11 +3,10 @@
+ import argparse
+ import json
+ import subprocess
++import sys
+ from pathlib import Path
+ 
+-from devtools import checks, reports, runtime
+-
+-DEFAULT_RESULTS = runtime.ROOT / "src/benchmarks/results.json"
++from devtools import checks, reports, runs, runtime, sources
+ 
+ 
+ class Arguments(argparse.Namespace):
+@@ -20,7 +19,7 @@ class Arguments(argparse.Namespace):
+     k6: Path | None
+     generator: runtime.GeneratorKind
+     save: Path | None
+-    file: Path
++    file: Path | None
+     json_output: bool
+     no_build: bool
+     scope: reports.ProfileScope
+@@ -82,9 +81,7 @@ def build_parser() -> argparse.ArgumentParser:
+         generator.add_argument(
+             "--k6", type=Path, help="native k6 executable; defaults to pinned Linux k6 in Docker"
+         )
+-        benchmark.add_argument(
+-            "--save", type=Path, default=DEFAULT_RESULTS if action == "bench" else None
+-        )
++        benchmark.add_argument("--save", type=Path, help="export this run's summary as JSON")
+         benchmark.add_argument(
+             "--no-build", action="store_true", help="reuse existing images without rebuilding"
+         )
+@@ -101,13 +98,176 @@ def build_parser() -> argparse.ArgumentParser:
+         if action == "profile":
+             benchmark.add_argument("--scope", choices=("user", "kernel", "all"), default="user")
+     results = actions.add_parser("results", help="display saved benchmark results")
+-    results.add_argument("file", type=Path, nargs="?", default=DEFAULT_RESULTS)
++    results.add_argument("file", type=Path, nargs="?")
+     results.add_argument(
+         "--json", action="store_true", dest="json_output", help="emit JSON for other tools"
+     )
+     return parser
+ 
+ 
++def _record_image(run: runs.RunRecord, component: str, image: str) -> dict[str, reports.JSONValue]:
++    identity = runtime.image_identity(image, "/app/server")
++    run.record_build(component, identity)
++    run.record_binary(
++        component,
++        {"image_id": identity["image_id"], "sha256": identity["binary_sha256"]},
++    )
++    return identity
++
++
++def _measure(args: Arguments, run: runs.RunRecord, source: sources.SourceSnapshot) -> int:
++    if source.base_commit != run.manifest["anchor"]:
++        raise RuntimeError("HEAD changed while capturing the run's build inputs")
++    source_identity: dict[str, reports.JSONValue] = {
++        "base_commit": source.base_commit,
++        "patch_sha256": source.patch_sha256,
++        "source_sha256": source.source_sha256,
++    }
++    (run.raw / "observer.patch").write_bytes(source.patch)
++    run.record_observer({**source_identity, "patch": "raw/observer.patch"})
++    image = args.image or runtime.image_name(telemetry=args.telemetry)
++    rebuilt = not args.no_build and args.image is None
++    if rebuilt:
++        image = runtime.build(telemetry=args.telemetry, source=source)
++    identity = _record_image(run, "server", image)
++    if identity["source"] == source_identity:
++        run.record_source(source.base_commit, source.patch, source.source_sha256)
++    elif rebuilt:
++        raise RuntimeError("built server image source does not match the frozen build inputs")
++    profiler_image = None
++    if args.action == "profile":
++        profiler_image = (
++            runtime.build(profiler=True, telemetry=args.telemetry, source=source)
++            if rebuilt
++            else runtime.image_name(profiler=True, telemetry=args.telemetry)
++        )
++        profiler_image = reports.text(_record_image(run, "profiler", profiler_image), "image_id")
++    if args.telemetry != "off":
++        print(f"Server telemetry: {args.telemetry}; collection overhead is included.", flush=True)
++    return runtime.run_workload(
++        workload_config(args),
++        run.raw,
++        image=reports.text(identity, "image_id"),
++        source=source,
++        profiler_image=profiler_image,
++    )
++
++
++def _error_code(error: BaseException) -> int:
++    if isinstance(error, KeyboardInterrupt):
++        return 130
++    return error.returncode if isinstance(error, subprocess.CalledProcessError) else 1
++
++
++def _error_text(error: BaseException) -> str:
++    return "interrupted" if isinstance(error, KeyboardInterrupt) else str(error)
++
++
++def _collection_errors(value: reports.JSONValue) -> list[str]:
++    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
++        raise ValueError("collection errors must be an array of strings")
++    return [item for item in value if isinstance(item, str)]
++
++
++def execute_workload(args: Arguments) -> int:
++    anchor = runtime.command("git", "-C", str(runtime.ROOT), "rev-parse", "HEAD")
++    generator = "k6" if args.k6 is not None else args.generator
++    run = runs.create_run(
++        runtime.ROOT,
++        anchor,
++        args.label,
++        {
++            "generator": generator,
++            "vus": args.vus,
++            "ramp": args.ramp,
++            "hold": args.hold,
++            "seed": args.seed,
++        },
++        {
++            "server_telemetry": args.telemetry,
++            "client_diagnostics": generator == "cpp" and args.telemetry == "profile",
++            "perf": args.scope if args.action == "profile" else "off",
++        },
++        {"base_commit": anchor},
++    )
++    primary: BaseException | None = None
++    code = 1
++    secondary: list[str] = []
++    try:
++        with sources.capture(runtime.ROOT) as source:
++            try:
++                code = _measure(args, run, source)
++            except (Exception, KeyboardInterrupt) as error:
++                primary = error
++                code = _error_code(error)
++    except (Exception, KeyboardInterrupt) as error:
++        if primary is None:
++            primary = error
++            code = _error_code(error)
++        else:
++            secondary.append(_error_text(error))
++    if primary is not None:
++        secondary.extend(getattr(primary, "__notes__", []))
++    summary: dict[str, reports.JSONValue] = {}
++    try:
++        summary = reports.run_summary(run.raw, label=args.label)
++        secondary.extend(_collection_errors(summary.get("collection_errors", [])))
++        measured_run = run.raw / "run.json"
++        if (
++            primary is not None
++            and not isinstance(primary, KeyboardInterrupt)
++            and measured_run.is_file()
++        ):
++            measured_code = reports.integer(
++                reports.mapping(reports.read_json(measured_run)), "exit_code"
++            )
++            if measured_code != 0:
++                code = measured_code
++                secondary.append(_error_text(primary))
++                primary = None
++        if args.telemetry != "off" and not (run.raw / "telemetry.json").is_file():
++            secondary.append("requested server telemetry export is missing")
++        generator_identity = run.raw / "generator-image.json"
++        if generator_identity.is_file():
++            identity = reports.mapping(reports.read_json(generator_identity))
++            run.record_build("generator", identity)
++            run.record_binary(
++                "generator",
++                {"image_id": identity["image_id"], "sha256": identity["binary_sha256"]},
++            )
++    except Exception as error:
++        secondary.append(_error_text(error))
++    secondary = list(dict.fromkeys(secondary))
++    if code == 0 and secondary:
++        code = 1
++    status: runs.TerminalStatus = (
++        "interrupted"
++        if isinstance(primary, KeyboardInterrupt) or code == 130
++        else "passed"
++        if code == 0
++        else "failed"
++    )
++    message = (
++        _error_text(primary)
++        if primary is not None
++        else f"load generator exited {code}"
++        if code not in (0, 1)
++        else None
++    )
++    run.finish(status, summary, code, message, secondary)
++    saved = reports.read_json(run.path / "summary.json")
++    if args.save is not None:
++        args.save.parent.mkdir(parents=True, exist_ok=True)
++        reports.write_json(args.save, saved)
++    reports.show_saved_report(saved)
++    if message is not None:
++        print(message, file=sys.stderr)
++    for failure in secondary:
++        print(failure, file=sys.stderr)
++    print(f"Run: {run.path}", flush=True)
++    return code
++
++
+ def main() -> None:
+     parser = build_parser()
+     args = parser.parse_args(namespace=Arguments())
+@@ -115,7 +275,11 @@ def main() -> None:
+         if args.action == "check":
+             checks.check(args.docker)
+         elif args.action == "results":
+-            document = reports.read_json(args.file)
++            file = args.file
++            if file is None:
++                anchor = runtime.command("git", "-C", str(runtime.ROOT), "rev-parse", "HEAD")
++                file = runtime.ROOT / "src" / "runs" / anchor[:7]
++            document = reports.load_saved_report(file)
+             if args.json_output:
+                 print(json.dumps(document, allow_nan=False))
+             else:
+@@ -129,50 +293,15 @@ def main() -> None:
+                 or any(c not in "abcdefghijklmnopqrstuvwxyz0123456789-" for c in args.label)
+             ):
+                 parser.error("positive VUs and a lowercase alphanumeric/hyphen label are required")
+-            profiling = args.action == "profile"
+             if args.seed is not None and (
+                 not 0 <= args.seed < 2**64 or args.k6 is not None or args.generator != "cpp"
+             ):
+                 parser.error("--seed requires the C++ generator and an unsigned 64-bit integer")
+             reports.duration_seconds(args.ramp)
+             reports.duration_seconds(args.hold)
+-            destination = args.save
+-            saved = (
+-                reports.parse_results(reports.read_json(destination))
+-                if not profiling and destination is not None and destination.exists()
+-                else []
+-            )
+-            if any(row["name"] == args.label for row in saved):
+-                parser.error("run name already exists; choose a new --label")
+-            output = runtime.ROOT / "results" / args.label
+-            output.mkdir(parents=True, exist_ok=False)
+-            runtime_image = args.image or runtime.image_name(telemetry=args.telemetry)
+-            if not args.no_build and args.image is None:
+-                runtime.build(telemetry=args.telemetry)
+-                if profiling:
+-                    runtime.build(profiler=True, telemetry=args.telemetry)
+-            if args.telemetry != "off":
+-                print(
+-                    f"Server telemetry: {args.telemetry}; collection overhead is included.",
+-                    flush=True,
+-                )
+-            code = runtime.run_workload(workload_config(args), output, image=runtime_image)
+-            run_report = reports.summarize(output)
+-            result = run_report.result
+-            reports.show_results([result])
+-            workload = run_report.generator
+-            if profiling:
+-                reports.save_profile_result(output, result, workload, destination)
+-            else:
+-                if destination is None:
+-                    raise ValueError("a result file is required for benchmarks")
+-                destination.parent.mkdir(parents=True, exist_ok=True)
+-                reports.append_result(destination, result)
+-            if args.telemetry == "profile":
+-                reports.show_diagnostics(workload)
+-            if args.telemetry != "off":
+-                reports.show_telemetry(reports.read_json(output / "telemetry.json"))
+-            raise SystemExit(code)
++            if args.save is not None and args.save.exists():
++                raise FileExistsError("summary export already exists; choose a new --save path")
++            raise SystemExit(execute_workload(args))
+     except subprocess.CalledProcessError as error:
+         if error.stdout:
+             print(error.stdout)
+diff --git a/src/devtools/reports.py b/src/devtools/reports.py
+index 3bda63ae26ba344f5deae082d076439e358e27ca..88aa57f43fc53dba0a9dd6550c3b0b9cf256912f 100644
+--- a/src/devtools/reports.py
++++ b/src/devtools/reports.py
+@@ -1,5 +1,6 @@
+ """JSON reports, performance parsing and saved result rendering"""
+ 
++import hashlib
+ import json
+ import math
+ import re
+@@ -274,6 +275,31 @@ def read_json(path: Path) -> JSONValue:
+     return decode_json(path.read_bytes())
+ 
+ 
++def load_saved_report(path: Path) -> JSONValue:
++    if path.is_file():
++        return read_json(path)
++    manifest_path = path / "manifest.json"
++    if manifest_path.is_file():
++        manifest = mapping(read_json(manifest_path))
++        summary = path / "summary.json"
++        expected = manifest.get("summary_sha256")
++        if (
++            isinstance(expected, str)
++            and hashlib.sha256(summary.read_bytes()).hexdigest() != expected
++        ):
++            raise ValueError(f"summary does not match its manifest: {summary}")
++        return read_json(summary)
++    if not path.is_dir():
++        raise FileNotFoundError(path)
++    manifests = sorted({*path.glob("*/manifest.json"), *path.glob("*/*/manifest.json")})
++    if not manifests:
++        raise ValueError(f"no saved runs in {path}")
++    entries: list[JSONValue] = []
++    for file in manifests:
++        entries.append({"manifest": read_json(file), "summary": load_saved_report(file.parent)})
++    return {"kind": "run_collection", "schema_version": 1, "entries": entries}
++
++
+ def mapping(value: JSONValue) -> dict[str, JSONValue]:
+     if not isinstance(value, dict):
+         raise ValueError("expected a JSON object")
+@@ -349,7 +375,7 @@ def append_result(path: Path, result: Result) -> None:
+     write_json(path, [*rows, result])
+ 
+ 
+-def summarize(output: Path) -> RunReport:
++def summarize(output: Path, *, label: str | None = None) -> RunReport:
+     run = mapping(read_json(output / "run.json"))
+     summary = mapping(read_json(output / "k6-summary.json"))
+     environment = mapping(read_json(output / "environment.json"))
+@@ -377,7 +403,7 @@ def summarize(output: Path) -> RunReport:
+         raise ValueError("no HTTP requests were measured")
+     result = Result(
+         date=datetime.fromtimestamp((output / "run.json").stat().st_mtime, UTC).date().isoformat(),
+-        name=output.name,
++        name=label or output.name,
+         runtime=f"C++ {text(runtime, 'version')}",
+         load_generator=text(run, "load_generator") if "load_generator" in run else "native",
+         generator=text(run, "generator") if "generator" in run else "k6",
+@@ -714,7 +740,74 @@ def show_diagnostics(workload: dict[str, JSONValue]) -> None:
+         )
+ 
+ 
++def show_telemetry_probe(report: dict[str, JSONValue]) -> None:
++    medians = mapping(report["medians"])
++    before = mapping(medians["before"])
++    after = mapping(medians["after"])
++    reduction = mapping(report["reduction_percent"])
++    print("Telemetry hooks (thread CPU per call)")
++    print("Path                        Before ns   After ns  Reduction")
++    for key in before:
++        label = key.removesuffix("_ns_per_call").replace("_", " ")
++        print(
++            f"{label:26}  {number(before, key):9.2f}  {number(after, key):9.2f}"
++            f"  {number(reduction, key):8.2f}%"
++        )
++
++
+ def show_saved_report(document: JSONValue) -> None:
++    if isinstance(document, dict) and document.get("kind") == "run_collection":
++        values = document.get("entries")
++        if document.get("schema_version") != 1 or not isinstance(values, list):
++            raise ValueError("unsupported run collection")
++        print("Run                                      Status       Kind")
++        for value in values:
++            manifest = mapping(mapping(value)["manifest"])
++            print(
++                f"{text(manifest, 'label'):40} {text(manifest, 'status'):12} {text(manifest, 'kind')}"
++            )
++        return
++    if isinstance(document, dict) and document.get("kind") == "raw_archive":
++        print(
++            f"{text(document, 'name')}: {integer(document, 'file_count')} files, "
++            f"{integer(document, 'size_bytes')} bytes"
++        )
++        return
++    if isinstance(document, dict) and document.get("kind") == "workload":
++        if document.get("schema_version") != 1:
++            raise ValueError("unsupported run summary version")
++        print(f"Run: {document.get('label', '')} ({text(document, 'status')})")
++        benchmark = document.get("benchmark")
++        if isinstance(benchmark, dict):
++            show_results(parse_results([benchmark]))
++        else:
++            print("No complete HTTP measurements available")
++        profile = document.get("profile")
++        if isinstance(profile, dict):
++            show_profile(profile)
++        workload = mapping(document.get("load_generator", {}))
++        show_latency_breakdown(workload)
++        show_diagnostics(workload)
++        telemetry = document.get("server_telemetry")
++        if isinstance(telemetry, dict):
++            print(
++                f"Server telemetry ({telemetry['mode']}): "
++                f"{telemetry['dropped_events']} dropped events, "
++                f"{telemetry['overwritten_windows']} overwritten windows"
++            )
++        if document.get("error"):
++            print(f"Error: {document['error']}")
++        errors = document.get("secondary_errors", [])
++        if isinstance(errors, list):
++            for error in errors:
++                print(f"Collection: {error}")
++        return
++    if isinstance(document, dict) and document.get("kind") in (
++        "telemetry_gate_probe",
++        "telemetry_hook_probe",
++    ):
++        show_telemetry_probe(document)
++        return
+     if isinstance(document, dict) and document.get("kind") == "server_telemetry":
+         show_telemetry(document)
+         return
+@@ -722,6 +815,8 @@ def show_saved_report(document: JSONValue) -> None:
+         show_results(parse_results(document))
+         return
+     report = mapping(document)
++    if not any(key in report for key in ("rows", "profile", "generator", "load_generator")):
++        raise ValueError("unsupported saved report; use --json to inspect the document")
+     if "rows" in report:
+         show_group_commits(report)
+         return
+@@ -886,25 +981,49 @@ def telemetry_summary(document: JSONValue) -> dict[str, JSONValue]:
+     return summary
+ 
+ 
+-def save_profile_result(
+-    output: Path, result: Result, workload: dict[str, JSONValue], destination: Path | None
+-) -> None:
+-    saved = mapping(read_json(output / "profile.json"))
+-    profile = mapping(saved.get("profile", saved))
+-    window = mapping(read_json(output / "window.json"))
+-    report: dict[str, object] = {
+-        "benchmark": result,
+-        "profile": profile,
+-        "window": {key: value for key, value in window.items() if not key.startswith("cgroup_")},
+-    }
+-    if workload:
+-        report["load_generator"] = workload_summary(workload)
++def run_summary(output: Path, *, label: str) -> dict[str, JSONValue]:
++    report: dict[str, JSONValue] = {}
++    errors: list[JSONValue] = []
++    required = ("run.json", "k6-summary.json", "environment.json", "samples.json")
++    missing = [name for name in required if not (output / name).is_file()]
++    if missing:
++        errors.append("Missing workload artifacts: " + ", ".join(missing))
++    else:
++        try:
++            measured = summarize(output, label=label)
++            report["benchmark"] = cast(JSONValue, measured.result)
++            if measured.generator:
++                report["load_generator"] = workload_summary(measured.generator)
++        except (OSError, ValueError, KeyError) as error:
++            errors.append(f"Workload summary: {error}")
++    for filename, key in (("perf-analysis.json", "profile"), ("window.json", "window")):
++        path = output / filename
++        if path.is_file():
++            try:
++                value = mapping(read_json(path))
++                report[key] = {
++                    name: item for name, item in value.items() if not name.startswith("cgroup_")
++                }
++            except (OSError, ValueError, KeyError) as error:
++                errors.append(f"{filename}: {error}")
+     telemetry = output / "telemetry.json"
+     if telemetry.is_file():
+-        report["server_telemetry"] = telemetry_summary(read_json(telemetry))
+-    write_json(output / "profile.json", report)
+-    if destination is not None:
+-        destination.parent.mkdir(parents=True, exist_ok=True)
+-        write_json(destination, report)
+-    show_profile(profile)
+-    show_latency_breakdown(workload)
++        try:
++            raw = mapping(read_json(telemetry))
++            report["server_telemetry"] = telemetry_summary(raw)
++            collection = raw.get("collection_errors", [])
++            if isinstance(collection, list):
++                errors.extend(collection)
++        except (OSError, ValueError, KeyError) as error:
++            errors.append(f"Telemetry summary: {error}")
++    cleanup = output / "collection-errors.json"
++    if cleanup.is_file():
++        try:
++            values = read_json(cleanup)
++            if not isinstance(values, list):
++                raise ValueError("collection errors must be an array")
++            errors.extend(values)
++        except (OSError, ValueError) as error:
++            errors.append(f"Cleanup report: {error}")
++    report["collection_errors"] = errors
++    return report
+diff --git a/src/devtools/runs.py b/src/devtools/runs.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..c80ad9c5de3a1f29b0fd10198cf06373470bd5c4
+--- /dev/null
++++ b/src/devtools/runs.py
+@@ -0,0 +1,190 @@
++"""Canonical run records with explicit measured provenance and terminal summaries"""
++
++import hashlib
++import re
++from copy import deepcopy
++from dataclasses import dataclass, field
++from datetime import UTC, datetime
++from pathlib import Path
++from typing import Literal
++
++from devtools.reports import JSONValue, mapping, write_json
++
++type TerminalStatus = Literal["passed", "failed", "interrupted"]
++
++_COMMIT = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
++_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
++_LABEL = re.compile(r"[a-z0-9][a-z0-9._-]{0,95}\Z")
++_RESERVED_NAMES = frozenset(
++    {
++        "con",
++        "prn",
++        "aux",
++        "nul",
++        *(f"com{i}" for i in range(1, 10)),
++        *(f"lpt{i}" for i in range(1, 10)),
++    }
++)
++
++
++def _timestamp() -> str:
++    return datetime.now(UTC).isoformat()
++
++
++def _validate_label(label: str) -> None:
++    if (
++        _LABEL.fullmatch(label) is None
++        or label.endswith(".")
++        or label.split(".", 1)[0] in _RESERVED_NAMES
++    ):
++        raise ValueError("run label must be a safe lowercase name of at most 96 characters")
++
++
++@dataclass
++class RunRecord:
++    path: Path
++    _manifest: dict[str, JSONValue] = field(repr=False)
++
++    @property
++    def raw(self) -> Path:
++        return self.path / "raw"
++
++    @property
++    def manifest(self) -> dict[str, JSONValue]:
++        return deepcopy(self._manifest)
++
++    def _require_running(self) -> None:
++        if self._manifest["status"] != "running":
++            raise RuntimeError("run is already finished")
++
++    def _record_identity(
++        self, category: str, component: str, identity: dict[str, JSONValue]
++    ) -> None:
++        self._require_running()
++        if not component:
++            raise ValueError("provenance component must not be empty")
++        manifest = deepcopy(self._manifest)
++        provenance = mapping(manifest["provenance"])
++        identities = mapping(provenance[category]) if provenance[category] is not None else {}
++        identities[component] = deepcopy(identity)
++        provenance[category] = identities
++        write_json(self.path / "manifest.json", manifest)
++        self._manifest = manifest
++
++    def record_source(self, base_commit: str, patch: bytes, source_sha256: str) -> None:
++        """Record verified tested inputs, never an unrelated observer checkout"""
++        self._require_running()
++        if mapping(self._manifest["provenance"])["source"] is not None:
++            raise RuntimeError("tested source is already recorded")
++        if _COMMIT.fullmatch(base_commit) is None:
++            raise ValueError("source base_commit must be a full Git commit hash")
++        if _SHA256.fullmatch(source_sha256) is None:
++            raise ValueError("source_sha256 must be a full SHA-256 hash")
++        manifest = deepcopy(self._manifest)
++        mapping(manifest["provenance"])["source"] = {
++            "base_commit": base_commit,
++            "patch_sha256": hashlib.sha256(patch).hexdigest(),
++            "source_sha256": source_sha256,
++            "patch": "source.patch",
++        }
++        destination = self.path / "source.patch"
++        temporary = destination.with_suffix(".patch.tmp")
++        temporary.write_bytes(patch)
++        temporary.replace(destination)
++        write_json(self.path / "manifest.json", manifest)
++        self._manifest = manifest
++
++    def record_build(self, component: str, identity: dict[str, JSONValue]) -> None:
++        self._record_identity("build", component, identity)
++
++    def record_binary(self, component: str, identity: dict[str, JSONValue]) -> None:
++        self._record_identity("binary", component, identity)
++
++    def record_observer(self, identity: dict[str, JSONValue]) -> None:
++        self._require_running()
++        manifest = deepcopy(self._manifest)
++        mapping(manifest["provenance"])["observer"] = deepcopy(identity)
++        write_json(self.path / "manifest.json", manifest)
++        self._manifest = manifest
++
++    def finish(
++        self,
++        status: TerminalStatus,
++        summary: dict[str, JSONValue],
++        exit_code: int,
++        error: str | None = None,
++        secondary_errors: list[str] | None = None,
++    ) -> None:
++        self._require_running()
++        if status not in ("passed", "failed", "interrupted"):
++            raise ValueError(f"invalid terminal run status: {status}")
++        finished_at = _timestamp()
++        failures: list[JSONValue] = list(secondary_errors or [])
++        terminal: dict[str, JSONValue] = {
++            key: self._manifest[key]
++            for key in ("schema_version", "anchor", "label", "kind", "started_at")
++        }
++        terminal.update(
++            status=status,
++            finished_at=finished_at,
++            exit_code=exit_code,
++            error=error,
++            secondary_errors=failures,
++        )
++        document = deepcopy(summary)
++        document.update(terminal)
++        manifest = deepcopy(self._manifest)
++        manifest.update(terminal)
++        # Commit the terminal manifest only after its complete summary is in place
++        destination = self.path / "summary.json"
++        write_json(destination, document)
++        manifest["summary_sha256"] = hashlib.sha256(destination.read_bytes()).hexdigest()
++        write_json(self.path / "manifest.json", manifest)
++        self._manifest = manifest
++
++
++def create_run(
++    root: Path,
++    anchor: str,
++    label: str,
++    workload: dict[str, JSONValue],
++    instruments: dict[str, JSONValue],
++    observer: dict[str, JSONValue],
++) -> RunRecord:
++    """Reserve one run without overwriting earlier measurements"""
++    if _COMMIT.fullmatch(anchor) is None:
++        raise ValueError("run anchor must be a full Git commit hash")
++    _validate_label(label)
++    root = root.resolve()
++    runs = (root / "src" / "runs").resolve()
++    path = (runs / anchor[:7] / label).resolve()
++    if not runs.is_relative_to(root) or not path.is_relative_to(runs):
++        raise ValueError("run path must stay inside src/runs")
++    manifest: dict[str, JSONValue] = {
++        "schema_version": 1,
++        "anchor": anchor,
++        "label": label,
++        "kind": "workload",
++        "status": "running",
++        "started_at": _timestamp(),
++        "finished_at": None,
++        "exit_code": None,
++        "error": None,
++        "secondary_errors": [],
++        "provenance": {
++            "observer": deepcopy(observer),
++            "source": None,
++            "build": None,
++            "binary": None,
++        },
++        "workload": deepcopy(workload),
++        "instruments": deepcopy(instruments),
++    }
++    path.mkdir(parents=True, exist_ok=False)
++    (path / "raw").mkdir()
++    write_json(
++        path / "summary.json",
++        {key: value for key, value in manifest.items() if key != "provenance"},
++    )
++    write_json(path / "manifest.json", manifest)
++    return RunRecord(path, manifest)
+diff --git a/src/devtools/runtime.py b/src/devtools/runtime.py
+index 24baa56dfcff4e0a3a7834d57ae567c26e26fcc8..0e7cfb9b4be9efab2524f35aff51a92729aa0572 100644
+--- a/src/devtools/runtime.py
++++ b/src/devtools/runtime.py
+@@ -2,10 +2,12 @@
+ 
+ import hashlib
+ import http.client
++import json
+ import platform
+ import shlex
+ import socket
+ import subprocess
++import sys
+ import time
+ import uuid
+ from collections.abc import Generator
+@@ -16,13 +18,17 @@ from typing import Literal
+ 
+ import psutil
+ 
+-from . import reports
++from . import reports, sources
+ 
+ ROOT = Path(__file__).resolve().parents[2]
+ IMAGE = "twelve-dollar-cpp:local"
+ PROFILER_IMAGE = "twelve-dollar-profiler:local"
+ GENERATOR_IMAGE = "twelve-dollar-generator:local"
+ GENERATOR_SOURCE_LABEL = "org.twelve-dollar.generator-source-sha256"
++SOURCE_LABEL = "org.twelve-dollar.source-sha256"
++PATCH_LABEL = "org.twelve-dollar.patch-sha256"
++COMMIT_LABEL = "org.twelve-dollar.base-commit"
++BUILD_LABEL = "org.twelve-dollar.build-spec"
+ K6_IMAGE = (
+     "grafana/k6:1.3.0@sha256:a90b459a3768c46ad1013da53af24189f735d7112273c6ac3212ca8ed0e18656"
+ )
+@@ -57,6 +63,77 @@ def file_hash(path: Path) -> str:
+         return hashlib.file_digest(source, "sha256").hexdigest()
+ 
+ 
++def image_identity(image: str, binary: str) -> dict[str, reports.JSONValue]:
++    inspected = reports.mapping(
++        reports.decode_json(
++            command("docker", "image", "inspect", "--format", "{{json .}}", image).encode()
++        )
++    )
++    identity = reports.text(inspected, "Id")
++    labels = reports.mapping(reports.mapping(inspected["Config"]).get("Labels") or {})
++    source: dict[str, reports.JSONValue] | None = None
++    values = {
++        "base_commit": labels.get(COMMIT_LABEL),
++        "patch_sha256": labels.get(PATCH_LABEL),
++        "source_sha256": labels.get(SOURCE_LABEL),
++    }
++    if all(
++        isinstance(value, str)
++        and len(value) in ((40, 64) if key == "base_commit" else (64,))
++        and all(character in "0123456789abcdef" for character in value)
++        for key, value in values.items()
++    ):
++        source = values
++    spec = labels.get(BUILD_LABEL)
++    try:
++        toolchain = command(
++            "docker",
++            "run",
++            "--rm",
++            "--network=none",
++            "--entrypoint=cat",
++            identity,
++            "/etc/tds-toolchain",
++        )
++    except subprocess.CalledProcessError:
++        toolchain = None
++    return {
++        "image_id": identity,
++        "repo_digests": inspected.get("RepoDigests", []),
++        "source": source,
++        "build_spec": reports.decode_json(spec.encode()) if isinstance(spec, str) else None,
++        "toolchain_sha256": hashlib.sha256(toolchain.encode()).hexdigest() if toolchain else None,
++        "build_sha256": hashlib.sha256(
++            (spec + "\n" + toolchain + "\n" + identity).encode()
++        ).hexdigest()
++        if isinstance(spec, str) and toolchain is not None
++        else None,
++        "binary_sha256": command(
++            "docker", "run", "--rm", "--network=none", "--entrypoint=sha256sum", identity, binary
++        ).split()[0],
++    }
++
++
++@contextmanager
++def preserving_failure(output: Path, stage: str) -> Generator[None]:
++    # Cleanup runs while the original exception is still active, so keep it in charge
++    primary = sys.exception()
++    try:
++        yield
++    except Exception as error:
++        message = f"{stage}: {error}"
++        path = output / "collection-errors.json"
++        try:
++            previous = reports.read_json(path) if path.is_file() else []
++            errors = previous if isinstance(previous, list) else [previous]
++            reports.write_json(path, [*errors, message])
++        except OSError:
++            print(message, flush=True)
++        if primary is None:
++            raise
++        primary.add_note(message)
++
++
+ def counters(observer: str) -> dict[str, reports.JSONValue]:
+     # Read through the server's root, but run the reader in a separate cgroup
+     root = "/proc/1/root/sys/fs/cgroup"
+@@ -138,32 +215,102 @@ def image_name(*, profiler: bool = False, telemetry: reports.TelemetryMode = "of
+ 
+ 
+ def build(
+-    *, tests: bool = False, profiler: bool = False, telemetry: reports.TelemetryMode = "off"
++    *,
++    tests: bool = False,
++    profiler: bool = False,
++    telemetry: reports.TelemetryMode = "off",
++    generator: bool = False,
++    source: sources.SourceSnapshot | None = None,
+ ) -> str:
++    if source is None:
++        with sources.capture(ROOT) as snapshot:
++            return build(
++                tests=tests,
++                profiler=profiler,
++                telemetry=telemetry,
++                generator=generator,
++                source=snapshot,
++            )
+     print("Building profiler image..." if profiler else "Building C++ image...", flush=True)
+-    image = image_name(profiler=profiler, telemetry=telemetry) + ("-build" if tests else "")
+-    command(
+-        "docker",
+-        "build",
+-        "--progress",
+-        "plain",
+-        "--platform",
+-        "linux/amd64",
+-        "--tag",
+-        image,
+-        "--build-arg",
+-        f"TDS_TELEMETRY={telemetry}",
+-        *(["--target", "profiler"] if profiler else ["--target", "test-build"] if tests else []),
+-        "--file",
+-        str(ROOT / "src/Dockerfile"),
+-        str(ROOT / "src"),
+-        timeout=None,
++    target = (
++        "generator" if generator else "profiler" if profiler else "test-build" if tests else "final"
+     )
+-    return image
++    spec: dict[str, reports.JSONValue] = {
++        "platform": "linux/amd64",
++        "target": target,
++        "telemetry": telemetry,
++        "sanitizers": False,
++        "build_type": "Release",
++    }
++    encoded = json.dumps(spec, sort_keys=True, separators=(",", ":"))
++    temporary = f"twelve-dollar-build:{uuid.uuid4().hex}"
++    try:
++        command(
++            "docker",
++            "build",
++            "--progress",
++            "plain",
++            "--platform",
++            "linux/amd64",
++            "--tag",
++            temporary,
++            "--target",
++            target,
++            "--build-arg",
++            f"TDS_TELEMETRY={telemetry}",
++            "--label",
++            f"{SOURCE_LABEL}={source.source_sha256}",
++            "--label",
++            f"{PATCH_LABEL}={source.patch_sha256}",
++            "--label",
++            f"{COMMIT_LABEL}={source.base_commit}",
++            "--label",
++            f"{BUILD_LABEL}={encoded}",
++            *(
++                ["--label", f"{GENERATOR_SOURCE_LABEL}={generator_fingerprint(source.context)}"]
++                if generator
++                else []
++            ),
++            "--file",
++            str(source.context / "Dockerfile"),
++            str(source.context),
++            timeout=None,
++        )
++        identity = command("docker", "image", "inspect", "--format", "{{.Id}}", temporary)
++        toolchain = command(
++            "docker",
++            "run",
++            "--rm",
++            "--network=none",
++            "--entrypoint=cat",
++            identity,
++            "/etc/tds-toolchain",
++        )
++        build_hash = hashlib.sha256(
++            (encoded + "\n" + toolchain + "\n" + identity).encode()
++        ).hexdigest()
++        repository = (
++            GENERATOR_IMAGE.split(":")[0]
++            if generator
++            else (PROFILER_IMAGE.split(":")[0] if profiler else IMAGE.split(":")[0])
++        )
++        image = (
++            f"{repository}:{source.base_commit[:12]}-{source.patch_sha256[:12]}-{build_hash[:12]}"
++        )
++        command("docker", "image", "tag", identity, image)
++        alias = (
++            GENERATOR_IMAGE
++            if generator
++            else image_name(profiler=profiler, telemetry=telemetry) + ("-build" if tests else "")
++        )
++        command("docker", "image", "tag", identity, alias)
++        return image
++    finally:
++        subprocess.run(["docker", "image", "rm", temporary], capture_output=True, check=False)
+ 
+ 
+-def generator_fingerprint() -> str:
+-    source = ROOT / "src"
++def generator_fingerprint(source: Path | None = None) -> str:
++    source = source or ROOT / "src"
+     inputs = [
+         source / name for name in ("load/main.cpp", "CMakeLists.txt", "Dockerfile", ".dockerignore")
+     ]
+@@ -178,8 +325,11 @@ def generator_fingerprint() -> str:
+     return digest.hexdigest()
+ 
+ 
+-def ensure_generator() -> None:
+-    fingerprint = generator_fingerprint()
++def ensure_generator(source: sources.SourceSnapshot | None = None) -> str:
++    if source is None:
++        with sources.capture(ROOT) as snapshot:
++            return ensure_generator(snapshot)
++    fingerprint = generator_fingerprint(source.context)
+     try:
+         current = command(
+             "docker",
+@@ -192,26 +342,9 @@ def ensure_generator() -> None:
+     except subprocess.CalledProcessError:
+         current = ""
+     if current == fingerprint:
+-        return
++        return command("docker", "image", "inspect", "--format", "{{.Id}}", GENERATOR_IMAGE)
+     print("Building current native generator...", flush=True)
+-    command(
+-        "docker",
+-        "build",
+-        "--progress",
+-        "plain",
+-        "--platform",
+-        "linux/amd64",
+-        "--tag",
+-        GENERATOR_IMAGE,
+-        "--label",
+-        f"{GENERATOR_SOURCE_LABEL}={fingerprint}",
+-        "--target",
+-        "generator",
+-        "--file",
+-        str(ROOT / "src/Dockerfile"),
+-        str(ROOT / "src"),
+-        timeout=None,
+-    )
++    return build(generator=True, source=source)
+ 
+ 
+ @dataclass(frozen=True)
+@@ -247,7 +380,13 @@ class LoadGenerator:
+ 
+ @contextmanager
+ def load_generator(
+-    config: RunConfig, container: str, port: int, output: Path
++    config: RunConfig,
++    container: str,
++    port: int,
++    output: Path,
++    *,
++    image: str = GENERATOR_IMAGE,
++    workspace: Path | None = None,
+ ) -> Generator[LoadGenerator]:
+     name: str | None = None
+     kind: GeneratorKind = "k6" if config.k6 is not None else config.generator
+@@ -280,7 +419,8 @@ def load_generator(
+             f"--memory-swap={client_memory}",
+             f"--network=container:{container}",
+             "--ulimit=nofile=1048576:1048576",
+-            f"--mount=type=bind,source={ROOT},target=/work,readonly",
++            f"--mount=type=bind,source={workspace or ROOT},target=/work,readonly",
++            f"--mount=type=bind,source={ROOT / 'seed'},target=/seed,readonly",
+             f"--mount=type=bind,source={output},target=/results",
+         ]
+         if kind == "cpp":
+@@ -290,11 +430,14 @@ def load_generator(
+                 "--rm",
+                 "--network=none",
+                 "--entrypoint=sh",
+-                GENERATOR_IMAGE,
++                image,
+                 "-c",
+                 "/app/load_generator --version; sha256sum /app/load_generator",
+             ).splitlines()
+             version, sha256 = metadata[0], metadata[1].split()[0]
++            reports.write_json(
++                output / "generator-image.json", image_identity(image, "/app/load_generator")
++            )
+         else:
+             prefix += [f"--env=GOMEMLIMIT={client_memory * 9 // 10}B", K6_IMAGE]
+             version = command("docker", "run", "--rm", "--network=none", K6_IMAGE, "version")
+@@ -311,7 +454,7 @@ def load_generator(
+         target = "http://127.0.0.1:3000"
+         summary, tokens, script = (
+             "/results/k6-summary.json",
+-            "/work/seed/tokens.json",
++            "/seed/tokens.json",
+             "/work/bench/load.js",
+         )
+     settings = [
+@@ -331,7 +474,7 @@ def load_generator(
+             *prefix,
+             *settings,
+             "--entrypoint=/app/load_generator",
+-            GENERATOR_IMAGE,
++            image,
+             "--summary-export",
+             summary,
+             "--local-ips=127.0.0.2-127.0.0.33",
+@@ -359,10 +502,13 @@ def load_generator(
+     try:
+         yield LoadGenerator(invocation, api_port, version, sha256, name, kind)
+     finally:
+-        if name is not None:
+-            inspected = subprocess.run(["docker", "inspect", name], capture_output=True, text=True)
+-            (output / "load-generator.json").write_text(inspected.stdout, encoding="utf-8")
+-            subprocess.run(["docker", "rm", "--force", name], capture_output=True, check=False)
++        with preserving_failure(output, "generator cleanup"):
++            if name is not None:
++                inspected = subprocess.run(
++                    ["docker", "inspect", name], capture_output=True, text=True
++                )
++                (output / "load-generator.json").write_text(inspected.stdout, encoding="utf-8")
++                subprocess.run(["docker", "rm", "--force", name], capture_output=True, check=False)
+ 
+ 
+ def load(config: RunConfig, generator: LoadGenerator, observer: str, output: Path) -> int:
+@@ -536,6 +682,7 @@ def server(
+     secret: str = JWT_KEY,
+     image: str | None = None,
+     telemetry: reports.TelemetryMode = "off",
++    workspace: Path | None = None,
+ ) -> Generator[tuple[str, int]]:
+     image = image or image_name(telemetry=telemetry)
+     unique = f"td-bench-{uuid.uuid4().hex[:10]}"
+@@ -618,6 +765,11 @@ def server(
+             raise RuntimeError(
+                 f"server telemetry mode is {actual_telemetry!r}, requested {telemetry!r}"
+             )
++        inspected = reports.decode_json(command("docker", "inspect", unique).encode())
++        if not isinstance(inspected, list) or len(inspected) != 1:
++            raise RuntimeError("expected one running server container")
++        running_image = reports.text(reports.mapping(inspected[0]), "Image")
++        identity = image_identity(running_image, "/app/server")
+         reports.write_json(
+             output / "environment.json",
+             {
+@@ -627,8 +779,11 @@ def server(
+                 "docker_info": reports.decode_json(
+                     command("docker", "info", "--format", "{{json .}}").encode()
+                 ),
+-                "container": reports.decode_json(command("docker", "inspect", unique).encode()),
+-                "image": reports.decode_json(command("docker", "image", "inspect", image).encode()),
++                "container": inspected,
++                "image": reports.decode_json(
++                    command("docker", "image", "inspect", running_image).encode()
++                ),
++                "server_identity": identity,
+                 "runtime": version,
+                 "telemetry": telemetry,
+                 "telemetry_mode_verified": actual_telemetry is not None,
+@@ -644,32 +799,37 @@ def server(
+                 "git_commit": command("git", "-C", str(ROOT), "rev-parse", "HEAD"),
+                 "git_status": command("git", "-C", str(ROOT), "status", "--short"),
+                 "workload_sha256": hashlib.sha256(
+-                    (ROOT / "bench/load.js").read_bytes()
++                    ((workspace or ROOT) / "bench/load.js").read_bytes()
+                 ).hexdigest(),
+                 "seed_sha256": file_hash(seed) if seed.is_file() else None,
+             },
+         )
+         yield unique, port
+     finally:
+-        try:
+-            subprocess.run(
+-                ["docker", "stop", "--time=10", unique],
+-                capture_output=True,
+-                check=False,
+-                timeout=20,
+-            )
+-        except subprocess.TimeoutExpired:
+-            print("Server stop timed out; removing the container.", flush=True)
+-        try:
+-            state = subprocess.run(["docker", "inspect", unique], capture_output=True, text=True)
+-            (output / "container-final.json").write_text(state.stdout, encoding="utf-8")
+-            logs = subprocess.run(["docker", "logs", unique], capture_output=True, text=True)
+-            (output / "server.log").write_text(logs.stdout + logs.stderr, encoding="utf-8")
+-            if telemetry != "off":
+-                collect_telemetry(unique, output, telemetry)
+-        finally:
+-            subprocess.run(["docker", "rm", "--force", unique], capture_output=True, check=False)
+-            command("docker", "volume", "rm", volume)
++        with preserving_failure(output, "server cleanup"):
++            try:
++                subprocess.run(
++                    ["docker", "stop", "--time=10", unique],
++                    capture_output=True,
++                    check=False,
++                    timeout=20,
++                )
++            except subprocess.TimeoutExpired:
++                print("Server stop timed out; removing the container.", flush=True)
++            try:
++                state = subprocess.run(
++                    ["docker", "inspect", unique], capture_output=True, text=True
++                )
++                (output / "container-final.json").write_text(state.stdout, encoding="utf-8")
++                logs = subprocess.run(["docker", "logs", unique], capture_output=True, text=True)
++                (output / "server.log").write_text(logs.stdout + logs.stderr, encoding="utf-8")
++                if telemetry != "off":
++                    collect_telemetry(unique, output, telemetry)
++            finally:
++                subprocess.run(
++                    ["docker", "rm", "--force", unique], capture_output=True, check=False
++                )
++                command("docker", "volume", "rm", volume)
+ 
+ 
+ def collect_telemetry(container: str, output: Path, mode: reports.TelemetryMode) -> None:
+@@ -735,7 +895,7 @@ def collect_profile(
+     (output / "stacks.txt").write_text(stacks + "\n", encoding="utf-8")
+     (output / "perf-stats.txt").write_text(statistics + "\n", encoding="utf-8")
+     reports.write_json(
+-        output / "profile.json", reports.analyze_profile(stacks, statistics, scope=scope)
++        output / "perf-analysis.json", reports.analyze_profile(stacks, statistics, scope=scope)
+     )
+ 
+ 
+@@ -814,26 +974,41 @@ def observing(
+         yield name
+         completed = True
+     finally:
+-        try:
+-            if created and profiling:
+-                command("docker", "stop", "--signal", "SIGINT", "--timeout", "15", name)
+-                logs = subprocess.run(["docker", "logs", name], capture_output=True, text=True)
+-                (output / "perf.log").write_text(logs.stdout + logs.stderr, encoding="utf-8")
+-                exit_code = command("docker", "inspect", "--format", "{{.State.ExitCode}}", name)
+-                if exit_code not in ("0", "130"):
+-                    raise RuntimeError(f"perf exited with {exit_code}; see perf.log")
+-                command("docker", "cp", f"{name}:/tmp/perf.data", str(output / "perf.data"))
+-                if completed:
+-                    collect_profile(container, output, scope=scope, image=profiler_image)
+-        finally:
+-            subprocess.run(["docker", "rm", "--force", name], capture_output=True, check=False)
+-
+-
+-def run_workload(config: RunConfig, output: Path, *, image: str) -> int:
++        with preserving_failure(output, "profiler cleanup"):
++            try:
++                if created and profiling:
++                    command("docker", "stop", "--signal", "SIGINT", "--timeout", "15", name)
++                    logs = subprocess.run(["docker", "logs", name], capture_output=True, text=True)
++                    (output / "perf.log").write_text(logs.stdout + logs.stderr, encoding="utf-8")
++                    exit_code = command(
++                        "docker", "inspect", "--format", "{{.State.ExitCode}}", name
++                    )
++                    if exit_code not in ("0", "130"):
++                        raise RuntimeError(f"perf exited with {exit_code}; see perf.log")
++                    command("docker", "cp", f"{name}:/tmp/perf.data", str(output / "perf.data"))
++                    if completed:
++                        collect_profile(container, output, scope=scope, image=profiler_image)
++            finally:
++                subprocess.run(["docker", "rm", "--force", name], capture_output=True, check=False)
++
++
++def run_workload(
++    config: RunConfig,
++    output: Path,
++    *,
++    image: str,
++    source: sources.SourceSnapshot | None = None,
++    profiler_image: str | None = None,
++) -> int:
++    generator_image = GENERATOR_IMAGE
+     if config.k6 is None and config.generator == "cpp":
+-        ensure_generator()
++        generator_image = ensure_generator(source)
+     profiling = config.mode == "profile"
+-    with server(output, image=image, telemetry=config.telemetry) as (container, port):
++    workspace = source.root if source is not None else ROOT
++    with server(output, image=image, telemetry=config.telemetry, workspace=workspace) as (
++        container,
++        port,
++    ):
+         with (
+             observing(
+                 container,
+@@ -841,8 +1016,11 @@ def run_workload(config: RunConfig, output: Path, *, image: str) -> int:
+                 profiling=profiling,
+                 scope=config.scope if profiling else "user",
+                 image=image,
+-                profiler_image=image_name(profiler=True, telemetry=config.telemetry),
++                profiler_image=profiler_image
++                or image_name(profiler=True, telemetry=config.telemetry),
+             ) as observer,
+-            load_generator(config, container, port, output) as generator,
++            load_generator(
++                config, container, port, output, image=generator_image, workspace=workspace
++            ) as generator,
+         ):
+             return load(config, generator, observer, output)
+diff --git a/src/devtools/sources.py b/src/devtools/sources.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..c0336c82a9f6f5ece74cc4dfaa1f38c47d169647
+--- /dev/null
++++ b/src/devtools/sources.py
+@@ -0,0 +1,342 @@
++"""Freeze build inputs and verify their exact patch without changing the checkout."""
++
++import hashlib
++import os
++import shutil
++import stat
++import subprocess
++import tempfile
++from collections.abc import Generator, Mapping
++from contextlib import contextmanager
++from dataclasses import dataclass, field
++from pathlib import Path, PurePosixPath
++
++ROOT = Path(__file__).resolve().parents[2]
++_NATIVE_SUFFIXES = frozenset(
++    {".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx", ".inc", ".inl", ".ipp", ".s", ".asm"}
++)
++_EXCLUDED_DIRECTORIES = frozenset(
++    {
++        ".git",
++        ".venv",
++        ".build",
++        ".cache",
++        ".ruff_cache",
++        ".mypy_cache",
++        ".pytest_cache",
++        "__pycache__",
++        "CMakeFiles",
++    }
++)
++_ROOT_INPUTS = frozenset({"bench/load.js", "schema.sql"})
++_SRC_INPUTS = frozenset(
++    {
++        ".dockerignore",
++        ".gitattributes",
++        ".python-version",
++        "CMakeLists.txt",
++        "Dockerfile",
++        "dev.py",
++        "pyproject.toml",
++        "uv.lock",
++        "docker/seccomp.json",
++    }
++)
++_SRC_DIRECTORIES = frozenset(
++    {"cmake", "server", "load", "devtools", "tests", "benchmarks", "docker"}
++)
++_GIT_ENVIRONMENT = frozenset(
++    {
++        "GIT_DIR",
++        "GIT_WORK_TREE",
++        "GIT_INDEX_FILE",
++        "GIT_OBJECT_DIRECTORY",
++        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
++        "GIT_COMMON_DIR",
++        "GIT_PREFIX",
++    }
++)
++
++
++@dataclass(frozen=True)
++class SourceFile:
++    path: str
++    mode: str
++    data: bytes = field(repr=False)
++
++    @property
++    def sha256(self) -> str:
++        return hashlib.sha256(self.data).hexdigest()
++
++
++@dataclass(frozen=True)
++class SourceSnapshot:
++    """Own a captured repository subset until its capture context exits.
++
++    Build only from ``context``; callers must not modify the owned temporary files.
++    ``files`` and ``patch`` retain the exact captured bytes independently of disk.
++    """
++
++    root: Path
++    context: Path
++    base_commit: str
++    patch_sha256: str
++    source_sha256: str
++    patch: bytes = field(repr=False)
++    files: tuple[SourceFile, ...] = field(repr=False)
++
++    def write_patch(self, destination: Path) -> None:
++        destination.write_bytes(self.patch)
++
++
++def _git(
++    root: Path,
++    *arguments: str,
++    data: bytes | None = None,
++    environment: Mapping[str, str] | None = None,
++) -> bytes:
++    executable = shutil.which("git")
++    if executable is None:
++        raise RuntimeError("Git is required to capture build inputs")
++    variables = {key: value for key, value in os.environ.items() if key not in _GIT_ENVIRONMENT}
++    if environment is not None:
++        variables.update(environment)
++    result = subprocess.run(  # noqa: S603 - fixed Git executable, arguments, and no shell
++        [executable, "-C", str(root), *arguments],
++        input=data,
++        capture_output=True,
++        check=True,
++        env=variables,
++    )
++    return result.stdout
++
++
++def _is_input(name: str) -> bool:
++    path = PurePosixPath(name)
++    if any(part in _EXCLUDED_DIRECTORIES for part in path.parts):
++        return False
++    if path.name == ".env" or path.name.startswith(".env."):
++        return False
++    if path.suffix.lower() in {".pyc", ".pyo", ".o", ".obj", ".a", ".so", ".dll", ".exe"}:
++        return False
++    if name in _ROOT_INPUTS:
++        return True
++    if len(path.parts) < 2 or path.parts[0] != "src":
++        return False
++    relative = PurePosixPath(*path.parts[1:])
++    if relative.as_posix() in _SRC_INPUTS:
++        return True
++    if len(relative.parts) == 1:
++        return relative.suffix == ".sh" or relative.name.startswith("Dockerfile.")
++    directory = relative.parts[0]
++    if directory in {"cmake", "server", "load"}:
++        return True
++    if directory == "devtools":
++        return relative.suffix == ".py"
++    if directory in {"tests", "benchmarks"}:
++        return (
++            relative.name == "CMakeLists.txt"
++            or relative.suffix.lower() in _NATIVE_SUFFIXES
++            or relative.suffix == ".cmake"
++            or (directory == "tests" and relative.suffix == ".py")
++        )
++    return False
++
++
++def _base_modes(root: Path, commit: str) -> dict[str, str]:
++    result: dict[str, str] = {}
++    for record in _git(root, "ls-tree", "-rz", commit, "--", "src", *_ROOT_INPUTS).split(b"\0"):
++        if not record:
++            continue
++        metadata, raw_path = record.split(b"\t", 1)
++        name = os.fsdecode(raw_path)
++        if _is_input(name):
++            mode, kind, _ = metadata.decode("ascii").split()
++            if kind != "blob" or mode not in {"100644", "100755"}:
++                raise ValueError(f"Unsupported build input mode {mode}: {name}")
++            result[name] = mode
++    return result
++
++
++def _index_modes(root: Path) -> dict[str, str]:
++    result: dict[str, str] = {}
++    for record in _git(root, "ls-files", "--stage", "-z", "--", "src", *_ROOT_INPUTS).split(b"\0"):
++        if record:
++            metadata, raw_path = record.split(b"\t", 1)
++            mode, _, stage = metadata.decode("ascii").split()
++            name = os.fsdecode(raw_path)
++            if _is_input(name):
++                if stage != "0":
++                    raise ValueError(f"Unresolved build input conflict: {name}")
++                result[name] = mode
++    return result
++
++
++def _walk_error(error: OSError) -> None:
++    raise error
++
++
++def _freeze(root: Path, base_modes: Mapping[str, str]) -> tuple[SourceFile, ...]:
++    names = set(base_modes)
++    index_modes = _index_modes(root)
++    for directory in (root / "src", root / "bench"):
++        if not directory.exists():
++            continue
++        for parent, directories, files in directory.walk(on_error=_walk_error):
++            directories[:] = sorted(
++                name
++                for name in directories
++                if name not in _EXCLUDED_DIRECTORIES
++                and (parent != root / "src" or name in _SRC_DIRECTORIES)
++                and parent != root / "bench"
++            )
++            for name in files:
++                relative = (parent / name).relative_to(root).as_posix()
++                if _is_input(relative):
++                    names.add(relative)
++    names.update(name for name in _ROOT_INPUTS if (root / name).exists())
++    frozen: list[SourceFile] = []
++    for name in sorted(names):
++        path = root / name
++        try:
++            metadata = path.lstat()
++        except FileNotFoundError:
++            continue
++        if not stat.S_ISREG(metadata.st_mode):
++            raise ValueError(f"Build input must be a regular file: {name}")
++        # Windows lacks executable bits, so retain Git's index/base mode there.
++        executable = (
++            index_modes.get(name, base_modes.get(name, "100644")) == "100755"
++            if os.name == "nt"
++            else bool(metadata.st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH))
++        )
++        frozen.append(SourceFile(name, "100755" if executable else "100644", path.read_bytes()))
++    return tuple(frozen)
++
++
++def _source_hash(files: tuple[SourceFile, ...]) -> str:
++    digest = hashlib.sha256(b"twelve-dollar-source-v1\0")
++    for source in files:
++        name = os.fsencode(source.path)
++        digest.update(len(name).to_bytes(8, "big"))
++        digest.update(name)
++        digest.update(source.mode.encode("ascii"))
++        digest.update(len(source.data).to_bytes(8, "big"))
++        digest.update(source.data)
++    return digest.hexdigest()
++
++
++def _patch(
++    root: Path,
++    temporary: Path,
++    base_commit: str,
++    base_modes: Mapping[str, str],
++    files: tuple[SourceFile, ...],
++) -> bytes:
++    repository = temporary / "verification"
++    repository.mkdir()
++    object_format = _git(root, "rev-parse", "--show-object-format").decode("ascii").strip()
++    _git(repository, "init", "--quiet", f"--object-format={object_format}")
++    objects = _git(root, "rev-parse", "--path-format=absolute", "--git-path", "objects")
++    environment = {"GIT_ALTERNATE_OBJECT_DIRECTORIES": os.fsdecode(objects).strip()}
++    _git(repository, "read-tree", base_commit, environment=environment)
++    blobs = temporary / "blobs"
++    blobs.mkdir()
++    paths: list[str] = []
++    for number, source in enumerate(files):
++        path = blobs / str(number)
++        path.write_bytes(source.data)
++        paths.append(path.as_posix())
++    hashes = _git(
++        repository,
++        "hash-object",
++        "-w",
++        "--no-filters",
++        "--stdin-paths",
++        data="".join(path + "\n" for path in paths).encode(),
++        environment=environment,
++    ).splitlines()
++    records = bytearray()
++    current_names = {source.path for source in files}
++    for name in sorted(set(base_modes) - current_names):
++        records.extend(b"0 " + b"0" * len(base_commit) + b"\t" + os.fsencode(name) + b"\0")
++    for source, object_hash in zip(files, hashes, strict=True):
++        records.extend(
++            source.mode.encode("ascii")
++            + b" "
++            + object_hash
++            + b"\t"
++            + os.fsencode(source.path)
++            + b"\0"
++        )
++    _git(
++        repository,
++        "update-index",
++        "-z",
++        "--index-info",
++        data=bytes(records),
++        environment=environment,
++    )
++    expected_tree = _git(repository, "write-tree", environment=environment)
++    patch = _git(
++        repository,
++        "diff",
++        "--cached",
++        "--binary",
++        "--full-index",
++        "--no-renames",
++        "--no-ext-diff",
++        "--no-textconv",
++        "--no-color",
++        "--unified=3",
++        "--src-prefix=a/",
++        "--dst-prefix=b/",
++        "--diff-algorithm=myers",
++        "--no-indent-heuristic",
++        base_commit,
++        "--",
++        environment=environment,
++    )
++    _git(repository, "read-tree", base_commit, environment=environment)
++    if patch:
++        _git(
++            repository,
++            "apply",
++            "--cached",
++            "--binary",
++            "--whitespace=nowarn",
++            data=patch,
++            environment=environment,
++        )
++    if _git(repository, "write-tree", environment=environment) != expected_tree:
++        raise RuntimeError("Captured source patch did not reconstruct the frozen inputs")
++    return patch
++
++
++@contextmanager
++def capture(root: Path = ROOT) -> Generator[SourceSnapshot]:
++    """Capture HEAD and current build-input bytes, independently of staging state."""
++    root = root.resolve()
++    base_commit = _git(root, "rev-parse", "--verify", "HEAD^{commit}").decode("ascii").strip()
++    base_modes = _base_modes(root, base_commit)
++    files = _freeze(root, base_modes)
++    with tempfile.TemporaryDirectory(prefix="twelve-dollar-source-") as directory:
++        temporary = Path(directory)
++        frozen = temporary / "source"
++        context = frozen / "src"
++        context.mkdir(parents=True)
++        for source in files:
++            destination = frozen / source.path
++            destination.parent.mkdir(parents=True, exist_ok=True)
++            destination.write_bytes(source.data)
++            destination.chmod(0o755 if source.mode == "100755" else 0o644)
++        patch = _patch(root, temporary, base_commit, base_modes, files)
++        yield SourceSnapshot(
++            root=frozen,
++            context=context,
++            base_commit=base_commit,
++            patch_sha256=hashlib.sha256(patch).hexdigest(),
++            source_sha256=_source_hash(files),
++            patch=patch,
++            files=files,
++        )
+diff --git a/src/pyproject.toml b/src/pyproject.toml
+index 10508f248b8752d16a566ca6d1580b640f2c2bed..ddd3a658d7315e177eea61d88aff83bbabd32ad4 100644
+--- a/src/pyproject.toml
++++ b/src/pyproject.toml
+@@ -20,7 +20,7 @@ link-mode = "copy"
+ 
+ [tool.pyright]
+ include = ["."]
+-exclude = [".venv", ".build", "**/__pycache__"]
++exclude = [".venv", ".build", "runs", "**/__pycache__"]
+ typeCheckingMode = "strict"
+ pythonVersion = "3.15"
+ venvPath = "."
+@@ -30,6 +30,7 @@ reportUnnecessaryTypeIgnoreComment = "error"
+ [tool.ruff]
+ target-version = "py315"
+ line-length = 100
++extend-exclude = ["runs"]
+ 
+ [tool.ruff.lint]
+ select = ["E4", "E7", "E9", "F", "I", "UP", "ANN", "B", "RUF", "S"]
+diff --git a/src/server/diagnostics/database.cpp b/src/server/diagnostics/database.cpp
+index b4cc7a30cc4d9b915ecc4f514104498600d865ee..b4fbe3e0e3d09920dfcfaaf3e7ada42c04b493c1 100644
+--- a/src/server/diagnostics/database.cpp
++++ b/src/server/diagnostics/database.cpp
+@@ -63,9 +63,8 @@ DatabaseTelemetry::~DatabaseTelemetry()
+ 
+ #if TDS_TELEMETRY_LEVEL >= 2
+ DatabaseTelemetry::Scope::Scope(DatabaseTelemetry &owner, DatabaseOperation operation) noexcept
+-    : owner_(owner), operation_(operation), started_ns_(timing::now_ns())
++    : started_ns_(timing::now_ns()), histogram_(owner.start_operation(operation))
+ {
+-    owner.count(operation);
+     if (operation == DatabaseOperation::commit || operation == DatabaseOperation::checkpoint)
+     {
+         sync_.emplace(owner.interval_timing_.sync, owner.slow_sync_,
+@@ -78,24 +77,36 @@ DatabaseTelemetry::Scope::~Scope()
+ {
+     // Restore outer sync attribution before ending the enclosing operation
+     sync_.reset();
+-    owner_.histogram(operation_).record(timing::now_ns() - started_ns_);
++    histogram_.record(timing::now_ns() - started_ns_);
+ }
+ 
+-timing::Histogram &DatabaseTelemetry::histogram(DatabaseOperation operation) noexcept
++timing::Histogram &DatabaseTelemetry::start_operation(DatabaseOperation operation) noexcept
+ {
+     switch (operation)
+     {
+     case DatabaseOperation::feed:
++        ++totals_.feed;
++        ++interval_.feed;
+         return interval_timing_.feed;
+     case DatabaseOperation::post:
++        ++totals_.post;
++        ++interval_.post;
+         return interval_timing_.post;
+     case DatabaseOperation::create:
++        ++totals_.create;
++        ++interval_.create;
+         return interval_timing_.create;
+     case DatabaseOperation::like:
++        ++totals_.like;
++        ++interval_.like;
+         return interval_timing_.like;
+     case DatabaseOperation::commit:
++        ++totals_.commits;
++        ++interval_.commits;
+         return interval_timing_.commit;
+     case DatabaseOperation::checkpoint:
++        ++totals_.checkpoints;
++        ++interval_.checkpoints;
+         return interval_timing_.checkpoint;
+     }
+     std::unreachable();
+@@ -113,6 +124,11 @@ void DatabaseTelemetry::flush_window(std::uint64_t now_ns, bool final) noexcept
+     {
+         return;
+     }
++    capture_window(now_ns);
++}
++
++void DatabaseTelemetry::capture_window(std::uint64_t now_ns) noexcept
++{
+     history_.push(
+         {now_ns, now_ns - last_report_ns_, interval_, wal_, interval_advice_, interval_timing_});
+     merge(cumulative_timing_, interval_timing_);
+diff --git a/src/server/diagnostics/database.hpp b/src/server/diagnostics/database.hpp
+index 4468ef4f70bc31098c9694e8d8daa1c7fdbc82d4..3b5fb3c27d4336939ec9f45d175bce902473f5e3 100644
+--- a/src/server/diagnostics/database.hpp
++++ b/src/server/diagnostics/database.hpp
+@@ -45,9 +45,8 @@ class DatabaseTelemetry
+ 
+       private:
+ #if TDS_TELEMETRY_LEVEL >= 2
+-        DatabaseTelemetry &owner_;
+-        DatabaseOperation operation_;
+         std::uint64_t started_ns_;
++        timing::Histogram &histogram_;
+         std::optional<SyncScope> sync_;
+ #endif
+     };
+@@ -168,8 +167,10 @@ class DatabaseTelemetry
+ #endif
+ 
+ #if TDS_TELEMETRY_LEVEL >= 2
+-    timing::Histogram &histogram(DatabaseOperation operation) noexcept;
++    timing::Histogram &start_operation(DatabaseOperation operation) noexcept;
+     void flush_window(std::uint64_t now_ns, bool final) noexcept;
++    // Snapshot construction needs a large frame, the ordinary deadline check does not
++    [[gnu::noinline]] void capture_window(std::uint64_t now_ns) noexcept;
+ 
+     std::uint64_t started_ns_ = timing::now_ns();
+     std::uint64_t last_report_ns_ = started_ns_;
+diff --git a/src/server/diagnostics/io.cpp b/src/server/diagnostics/io.cpp
+index 1218e81b9af2ec3bc4a167ab0fa7782adae9cc5b..72669acddb76627bf0f77b75a435212283c363f7 100644
+--- a/src/server/diagnostics/io.cpp
++++ b/src/server/diagnostics/io.cpp
+@@ -251,7 +251,11 @@ void IoTelemetry::report(const net::Reactor &reactor, bool force) noexcept
+     {
+         return;
+     }
++    capture(reactor, now);
++}
+ 
++void IoTelemetry::capture(const net::Reactor &reactor, std::uint64_t now) noexcept
++{
+     IoSnapshot window;
+     window.start_ns = totals_.end_ns;
+     window.end_ns = now;
+diff --git a/src/server/diagnostics/io.hpp b/src/server/diagnostics/io.hpp
+index fcda87077ba8d907d9c80d6b08e078338882a719..ad6e2b5702c5051102a4818ae4226dee8dc25957 100644
+--- a/src/server/diagnostics/io.hpp
++++ b/src/server/diagnostics/io.hpp
+@@ -231,6 +231,8 @@ class IoTelemetry
+ #endif
+ #if TDS_TELEMETRY_LEVEL == 2
+     void start() noexcept;
++    // Keep the cursed 40-KiB snapshot frame out of the per-turn deadline check
++    [[gnu::noinline]] void capture(const net::Reactor &reactor, std::uint64_t now) noexcept;
+ 
+     IoTimings interval_;
+     IoSnapshot totals_;
+diff --git a/src/tests/sync.cpp b/src/tests/sync.cpp
+index 4867eaa3d0aff8895d6ffb3f191d60dd2565255c..e74861dc0ffa79829d62c37290e4e07e48aa7edb 100644
+--- a/src/tests/sync.cpp
++++ b/src/tests/sync.cpp
+@@ -373,6 +373,36 @@ void check_history_bounds()
+     }
+ }
+ 
++void check_overlapping_operation_scopes()
++{
++    Artifact artifact;
++    DatabaseTelemetry first("database"), second("database");
++    const auto started = first.snapshot().time_ns;
++    {
++        const auto feed = first.measure(DatabaseOperation::feed);
++        {
++            const auto post = second.measure(DatabaseOperation::post);
++            const auto like = first.measure(DatabaseOperation::like);
++        }
++        const auto before = first.snapshot();
++        require(before.timings.feed.count == 0 && before.timings.like.count == 1 &&
++                    second.snapshot().timings.post.count == 1,
++                "overlapping operation scopes lost owner or operation attribution");
++        first.record_window(started + tds::timing::report_interval_ns);
++    }
++    const auto completed = first.snapshot();
++    require(completed.counters.feed == 1 && completed.timings.feed.count == 1 &&
++                completed.timings.like.count == 1 && completed.timings.post.count == 0 &&
++                first.windows().at(0).counters.feed == 1 &&
++                first.windows().at(0).timings.feed.count == 0,
++            "a reporting window reassigned or lost an in-flight operation timing");
++    first.record_window(started + 2 * tds::timing::report_interval_ns);
++    require(first.windows().at(1).counters.feed == 0 &&
++                first.windows().at(1).timings.feed.count == 1 &&
++                second.snapshot().counters.post == 1 && second.snapshot().timings.feed.count == 0,
++            "operation completion was not retained by its owner in the finishing interval");
++}
++
+ } // namespace
+ 
+ int main()
+@@ -384,6 +414,7 @@ int main()
+         check_hooks();
+         check_wal_snapshots();
+         check_operation_scopes();
++        check_overlapping_operation_scopes();
+         check_history_bounds();
+         original_sync = real;
+         std::puts("Sync forwarding, errno, typed attribution, bounded history and final artifacts "
+diff --git a/src/tests/test_dev.py b/src/tests/test_dev.py
+index ca5941dab578c8e61b727f5ced13947722066822..bebfbd5cff97fd5c5d87f278da5fc918f2934b47 100644
+--- a/src/tests/test_dev.py
++++ b/src/tests/test_dev.py
+@@ -1,9 +1,11 @@
+ """Tests for dev tooling, workload orchestration and profile analysis"""
+ 
++import hashlib
+ import json
+ import subprocess
+ import tempfile
+ import unittest
++from collections.abc import Callable
+ from dataclasses import FrozenInstanceError
+ from io import StringIO
+ from pathlib import Path
+@@ -41,6 +43,7 @@ from devtools.runtime import (
+     run_workload,
+     server,
+ )
++from devtools.sources import SourceSnapshot
+ 
+ 
+ def stack(period: int, *frames: tuple[str, str]) -> str:
+@@ -67,6 +70,9 @@ class NativeProfileTests(unittest.TestCase):
+                     side_effect=["127.0.0.1:6565", "cpp-version\nsha /app/load"],
+                 ),
+                 patch(
++                    "devtools.runtime.image_identity", return_value={"image_id": GENERATOR_IMAGE}
++                ),
++                patch(
+                     "devtools.runtime.subprocess.run",
+                     return_value=subprocess.CompletedProcess([], 0, "[]", ""),
+                 ),
+@@ -260,11 +266,14 @@ class NativeProfileTests(unittest.TestCase):
+ 
+     def test_stop_timeout_preserves_failure_and_removes_owned_resources(self) -> None:
+         def response(*args: str) -> str:
+-            return "127.0.0.1:12345" if args[:2] == ("docker", "port") else "{}"
++            if args[:2] == ("docker", "port"):
++                return "127.0.0.1:12345"
++            return '[{"Image":"server-pinned"}]' if args[:2] == ("docker", "inspect") else "{}"
+ 
+         with (
+             tempfile.TemporaryDirectory() as directory,
+             patch("devtools.runtime.command", side_effect=response) as command,
++            patch("devtools.runtime.image_identity", return_value={"image_id": "server-pinned"}),
+             patch("devtools.runtime.healthy", return_value=True),
+             patch("devtools.runtime.subprocess.run") as run,
+             patch("builtins.print"),
+@@ -433,8 +442,8 @@ class GeneratorImageTests(unittest.TestCase):
+             patch("devtools.runtime.generator_fingerprint", return_value="current"),
+             patch("devtools.runtime.command", return_value="current") as command,
+         ):
+-            ensure_generator()
+-            command.assert_called_once()
++            self.assertEqual(ensure_generator(make_snapshot(runtime.ROOT)), "current")
++            self.assertEqual(command.call_count, 2)
+             self.assertEqual(command.call_args.args[:3], ("docker", "image", "inspect"))
+             self.assertEqual(command.call_args.args[-1], GENERATOR_IMAGE)
+ 
+@@ -452,14 +461,12 @@ class GeneratorImageTests(unittest.TestCase):
+                         "",
+                     ],
+                 ) as command,
++                patch("devtools.runtime.build", return_value="generator-pinned") as build,
+             ):
+-                ensure_generator()
+-                self.assertEqual(command.call_count, 2)
+-                build = command.call_args.args
+-                self.assertEqual(build[:2], ("docker", "build"))
+-                self.assertEqual(build[build.index("--tag") + 1], GENERATOR_IMAGE)
+-                self.assertEqual(build[build.index("--target") + 1], "generator")
+-                self.assertNotIn("TDS_BUILD_TARGET=load_generator", build)
++                source = make_snapshot(runtime.ROOT)
++                self.assertEqual(ensure_generator(source), "generator-pinned")
++                command.assert_called_once()
++                build.assert_called_once_with(generator=True, source=source)
+ 
+     def test_server_choice_cannot_select_an_obsolete_native_generator(self) -> None:
+         captured: list[LoadGenerator] = []
+@@ -479,7 +486,9 @@ class GeneratorImageTests(unittest.TestCase):
+             with (
+                 self.subTest(image=image),
+                 tempfile.TemporaryDirectory() as directory,
+-                patch("devtools.runtime.ensure_generator") as ensure,
++                patch(
++                    "devtools.runtime.ensure_generator", return_value="generator-pinned"
++                ) as ensure,
+                 patch("devtools.runtime.server") as server_context,
+                 patch("devtools.runtime.observing") as observer,
+                 patch("devtools.runtime.load", side_effect=loaded),
+@@ -488,6 +497,9 @@ class GeneratorImageTests(unittest.TestCase):
+                     side_effect=["127.0.0.1:6565", "current\nsha /app/load"],
+                 ) as command,
+                 patch(
++                    "devtools.runtime.image_identity", return_value={"image_id": "generator-pinned"}
++                ),
++                patch(
+                     "devtools.runtime.subprocess.run",
+                     return_value=subprocess.CompletedProcess([], 0, "[]", ""),
+                 ),
+@@ -512,11 +524,13 @@ class GeneratorImageTests(unittest.TestCase):
+                     telemetry=telemetry,
+                 )
+                 self.assertEqual(run_workload(args, output, image=image), 0)
+-                server_context.assert_called_once_with(output, image=image, telemetry=telemetry)
+-                self.assertIn(GENERATOR_IMAGE, captured[-1].invocation)
++                server_context.assert_called_once_with(
++                    output, image=image, telemetry=telemetry, workspace=runtime.ROOT
++                )
++                self.assertIn("generator-pinned", captured[-1].invocation)
+                 self.assertNotIn(image, captured[-1].invocation)
+                 self.assertEqual("--diagnostics" in captured[-1].invocation, telemetry == "profile")
+-                self.assertIn(GENERATOR_IMAGE, command.call_args.args)
++                self.assertIn("generator-pinned", command.call_args.args)
+ 
+     def test_failed_generator_refresh_never_starts_the_server(self) -> None:
+         with (
+@@ -562,6 +576,334 @@ class GeneratorImageTests(unittest.TestCase):
+             ensure.assert_not_called()
+ 
+ 
++CLI_ANCHOR = "a" * 40
++CLI_PATCH = b"captured source bytes\n"
++CLI_SOURCE = "b" * 64
++
++
++def make_snapshot(root: Path) -> SourceSnapshot:
++    return SourceSnapshot(
++        root=root,
++        context=root / "src",
++        base_commit=CLI_ANCHOR,
++        patch_sha256=hashlib.sha256(CLI_PATCH).hexdigest(),
++        source_sha256=CLI_SOURCE,
++        patch=CLI_PATCH,
++        files=(),
++    )
++
++
++def canonical_path(root: Path, label: str) -> Path:
++    return root / "src" / "runs" / CLI_ANCHOR[:7] / label
++
++
++def write_cli_workload(config: RunConfig, output: Path, code: int = 0) -> int:
++    write_json(
++        output / "run.json",
++        {
++            "arguments": [f"VUS={config.vus}", f"DURATION={config.hold}", f"RAMP_UP={config.ramp}"],
++            "exit_code": code,
++            "cgroup_before": {"usage_usec": 100},
++            "cgroup_after": {"usage_usec": 120, "memory_peak": 4096, "oom_kill": 0},
++            "cpu_scope": "server_cgroup",
++            "load_generator": "docker_loopback",
++            "generator": "cpp",
++        },
++    )
++    write_json(
++        output / "k6-summary.json",
++        {
++            "metrics": {
++                "http_reqs": {"count": 2, "rate": 1},
++                "http_req_duration": {"p(95)": 1, "p(99)": 1, "max": 2},
++                "http_req_failed": {"value": 0},
++                "checks": {"fails": 0 if code == 0 else 1},
++            },
++            "generator": {"seed": 42, "workflow_errors": 0},
++        },
++    )
++    write_json(output / "environment.json", {"runtime": {"version": "0.1.0", "sqlite": "3.53.1"}})
++    write_json(output / "samples.json", [])
++    if config.telemetry != "off":
++        rows = "".join(
++            telemetry_record(source, mode=config.telemetry)
++            for source in ("transport", "database", "checkpoint")
++        )
++        write_json(output / "telemetry.json", parse_telemetry(rows, expected_mode=config.telemetry))
++    return code
++
++
++def invoke_cli(
++    test: unittest.TestCase,
++    root: Path,
++    arguments: list[str],
++    *,
++    workload: Callable[[RunConfig, Path], int] | BaseException | None = None,
++    known_source: bool = True,
++    capture_error: BaseException | None = None,
++) -> int | str | None:
++    snapshot = make_snapshot(root)
++    identity: dict[str, JSONValue] = {
++        "image_id": "sha256:" + "d" * 64,
++        "binary_sha256": "e" * 64,
++        "repo_digests": [],
++        "build_spec": {"telemetry": "off"},
++        "toolchain_sha256": "f" * 64,
++        "source": {
++            "base_commit": CLI_ANCHOR,
++            "patch_sha256": snapshot.patch_sha256,
++            "source_sha256": CLI_SOURCE,
++        }
++        if known_source
++        else None,
++    }
++
++    def completed(
++        config: RunConfig,
++        output: Path,
++        *,
++        image: str,
++        source: SourceSnapshot | None = None,
++        profiler_image: str | None = None,
++    ) -> int:
++        test.assertEqual(image, identity["image_id"])
++        test.assertIs(source, snapshot)
++        test.assertEqual(output.name, "raw")
++        if config.mode == "profile":
++            test.assertEqual(profiler_image, identity["image_id"])
++        if isinstance(workload, BaseException):
++            raise workload
++        return (workload or write_cli_workload)(config, output)
++
++    with (
++        patch("devtools.runtime.ROOT", root),
++        patch("devtools.runtime.command", return_value=CLI_ANCHOR),
++        patch("devtools.sources.capture") as capture,
++        patch("devtools.runtime.build", return_value="content-addressed-image"),
++        patch("devtools.runtime.image_identity", return_value=identity),
++        patch("devtools.runtime.run_workload", side_effect=completed),
++        patch("devtools.reports.show_saved_report"),
++        patch("sys.argv", ["dev.py", *arguments]),
++        patch("sys.stderr", StringIO()),
++        patch("builtins.print"),
++    ):
++        capture.return_value.__enter__.return_value = snapshot
++        capture.return_value.__enter__.side_effect = capture_error
++        with test.assertRaises(SystemExit) as stopped:
++            dev.main()
++        return stopped.exception.code
++
++
++class CanonicalCliTests(unittest.TestCase):
++    def test_nonzero_workload_keeps_exit_code_and_failed_benchmark(self) -> None:
++        with tempfile.TemporaryDirectory() as directory:
++            root = Path(directory)
++            code = invoke_cli(
++                self,
++                root,
++                ["bench", "--label", "thresholds"],
++                workload=lambda config, output: write_cli_workload(config, output, 99),
++            )
++            self.assertEqual(code, 99)
++            saved = mapping(read_json(canonical_path(root, "thresholds") / "summary.json"))
++            self.assertEqual((saved["status"], saved["exit_code"]), ("failed", 99))
++            self.assertFalse(mapping(saved["benchmark"])["passed"])
++
++    def test_nonzero_workload_is_preserved_when_cleanup_also_raises(self) -> None:
++        def failed_cleanup(config: RunConfig, output: Path) -> int:
++            write_cli_workload(config, output, 99)
++            raise RuntimeError("server cleanup failed")
++
++        with tempfile.TemporaryDirectory() as directory:
++            root = Path(directory)
++            code = invoke_cli(
++                self, root, ["bench", "--label", "threshold-cleanup"], workload=failed_cleanup
++            )
++            self.assertEqual(code, 99)
++            saved = mapping(read_json(canonical_path(root, "threshold-cleanup") / "summary.json"))
++            self.assertEqual(saved["error"], "load generator exited 99")
++            self.assertEqual(saved["secondary_errors"], ["server cleanup failed"])
++
++    def test_bounded_telemetry_loss_remains_visible_without_failing_http_workload(self) -> None:
++        def bounded(config: RunConfig, output: Path) -> int:
++            code = write_cli_workload(config, output)
++            telemetry = mapping(read_json(output / "telemetry.json"))
++            telemetry.update(complete=False, dropped_events=3)
++            write_json(output / "telemetry.json", telemetry)
++            return code
++
++        with tempfile.TemporaryDirectory() as directory:
++            root = Path(directory)
++            code = invoke_cli(
++                self,
++                root,
++                ["bench", "--label", "bounded", "--telemetry", "basic"],
++                workload=bounded,
++            )
++            self.assertEqual(code, 0)
++            saved = mapping(read_json(canonical_path(root, "bounded") / "summary.json"))
++            self.assertEqual(saved["status"], "passed")
++            telemetry = mapping(saved["server_telemetry"])
++            self.assertFalse(telemetry["complete"])
++            self.assertEqual(telemetry["dropped_events"], 3)
++
++    def test_initialization_and_capture_failures_still_finish_without_benchmark(self) -> None:
++        with tempfile.TemporaryDirectory() as directory:
++            root = Path(directory)
++            for label, failure in (("initialize", "init"), ("capture", "capture")):
++                with self.subTest(failure=failure):
++                    code = invoke_cli(
++                        self,
++                        root,
++                        ["bench", "--label", label],
++                        workload=RuntimeError("initialization failed")
++                        if failure == "init"
++                        else None,
++                        capture_error=RuntimeError("capture failed")
++                        if failure == "capture"
++                        else None,
++                    )
++                    self.assertEqual(code, 1)
++                    saved = mapping(read_json(canonical_path(root, label) / "summary.json"))
++                    self.assertEqual(saved["status"], "failed")
++                    self.assertNotIn("benchmark", saved)
++                    self.assertEqual(
++                        saved["error"],
++                        "initialization failed" if failure == "init" else "capture failed",
++                    )
++
++    def test_keyboard_interrupt_finishes_with_130(self) -> None:
++        with tempfile.TemporaryDirectory() as directory:
++            root = Path(directory)
++            self.assertEqual(
++                invoke_cli(
++                    self, root, ["bench", "--label", "interrupt"], workload=KeyboardInterrupt()
++                ),
++                130,
++            )
++            saved = mapping(read_json(canonical_path(root, "interrupt") / "summary.json"))
++            self.assertEqual((saved["status"], saved["error"]), ("interrupted", "interrupted"))
++
++    def test_primary_failure_and_multiple_cleanup_failures_remain_distinct(self) -> None:
++        error = RuntimeError("workload failed")
++        error.add_note("server cleanup failed")
++        error.add_note("generator cleanup failed")
++
++        def failed(config: RunConfig, output: Path) -> int:
++            write_cli_workload(config, output)
++            write_json(
++                output / "collection-errors.json",
++                ["server cleanup failed", "generator cleanup failed"],
++            )
++            raise error
++
++        with tempfile.TemporaryDirectory() as directory:
++            root = Path(directory)
++            self.assertEqual(
++                invoke_cli(self, root, ["bench", "--label", "cleanup"], workload=failed), 1
++            )
++            saved = mapping(read_json(canonical_path(root, "cleanup") / "summary.json"))
++            self.assertEqual(saved["error"], "workload failed")
++            self.assertEqual(
++                saved["secondary_errors"], ["server cleanup failed", "generator cleanup failed"]
++            )
++
++    def test_missing_requested_telemetry_fails_collection_without_changing_http_pass(self) -> None:
++        def missing(config: RunConfig, output: Path) -> int:
++            code = write_cli_workload(config, output)
++            (output / "telemetry.json").unlink()
++            return code
++
++        with tempfile.TemporaryDirectory() as directory:
++            root = Path(directory)
++            self.assertEqual(
++                invoke_cli(
++                    self,
++                    root,
++                    ["bench", "--label", "missing", "--telemetry", "basic"],
++                    workload=missing,
++                ),
++                1,
++            )
++            saved = mapping(read_json(canonical_path(root, "missing") / "summary.json"))
++            self.assertEqual(saved["status"], "failed")
++            self.assertTrue(mapping(saved["benchmark"])["passed"])
++            self.assertEqual(
++                saved["secondary_errors"], ["requested server telemetry export is missing"]
++            )
++
++    def test_reused_unknown_image_records_binary_and_observer_without_claiming_source(self) -> None:
++        with tempfile.TemporaryDirectory() as directory:
++            root = Path(directory)
++            self.assertEqual(
++                invoke_cli(
++                    self,
++                    root,
++                    ["bench", "--label", "reference", "--image", "historical"],
++                    known_source=False,
++                ),
++                0,
++            )
++            path = canonical_path(root, "reference")
++            provenance = mapping(mapping(read_json(path / "manifest.json"))["provenance"])
++            self.assertIsNone(provenance["source"])
++            self.assertFalse((path / "source.patch").exists())
++            self.assertEqual((path / "raw" / "observer.patch").read_bytes(), CLI_PATCH)
++            self.assertEqual(mapping(mapping(provenance["binary"])["server"])["sha256"], "e" * 64)
++
++    def test_perf_analysis_stays_raw_when_final_summary_is_written(self) -> None:
++        profile: dict[str, JSONValue] = {
++            "event": "cpu-clock:u",
++            "samples": 1,
++            "sampled_cpu_ns": 100,
++            "lost_records": 0,
++            "unresolved_leaf_samples": 0,
++            "unrooted_samples": 0,
++            "stages_cpu_ns": {"auth": 100},
++            "hotspots": [],
++        }
++
++        def profiled(config: RunConfig, output: Path) -> int:
++            code = write_cli_workload(config, output)
++            write_json(output / "perf-analysis.json", profile)
++            write_json(output / "window.json", {"hold_s": 60})
++            return code
++
++        with tempfile.TemporaryDirectory() as directory:
++            root = Path(directory)
++            self.assertEqual(
++                invoke_cli(self, root, ["profile", "--label", "perf"], workload=profiled), 0
++            )
++            path = canonical_path(root, "perf")
++            self.assertEqual(read_json(path / "raw" / "perf-analysis.json"), profile)
++            saved = mapping(read_json(path / "summary.json"))
++            self.assertEqual(saved["profile"], profile)
++            self.assertEqual(mapping(saved["benchmark"])["name"], "perf")
++
++    def test_unknown_result_format_fails_explicitly(self) -> None:
++        with tempfile.TemporaryDirectory() as directory:
++            path = Path(directory) / "unsupported.json"
++            write_json(path, {"unrecognized": True})
++            with (
++                patch("sys.argv", ["dev.py", "results", str(path)]),
++                patch("sys.stderr", StringIO()) as stderr,
++            ):
++                with self.assertRaises(SystemExit) as stopped:
++                    dev.main()
++            self.assertEqual(stopped.exception.code, 1)
++            self.assertIn("unsupported", stderr.getvalue().lower())
++
++    def test_default_results_selects_the_current_anchor(self) -> None:
++        with (
++            patch("sys.argv", ["dev.py", "results", "--json"]),
++            patch("devtools.runtime.command", return_value=CLI_ANCHOR),
++            patch("devtools.reports.load_saved_report", return_value=[]) as read,
++            patch("builtins.print"),
++        ):
++            dev.main()
++            read.assert_called_once_with(runtime.ROOT / "src" / "runs" / CLI_ANCHOR[:7])
++
++
+ class ToolBoundaryTests(unittest.TestCase):
+     def test_parser_creates_an_immutable_workload_snapshot_without_cli_options(self) -> None:
+         for mode, expected_vus in (("bench", 350000), ("profile", 5000)):
+@@ -598,56 +940,37 @@ class ToolBoundaryTests(unittest.TestCase):
+                 self.assertEqual(stopped.exception.code, exit_code)
+                 run.assert_not_called()
+ 
++    def test_summary_export_does_not_overwrite_historical_measurements(self) -> None:
++        with tempfile.TemporaryDirectory() as directory:
++            destination = Path(directory) / "historical.json"
++            original = b'[{"old_measurement":true}]\n'
++            destination.write_bytes(original)
++            with (
++                patch(
++                    "sys.argv", ["dev.py", "bench", "--label", "export", "--save", str(destination)]
++                ),
++                patch("sys.stderr", StringIO()),
++                patch("devtools.runtime.command") as command,
++            ):
++                with self.assertRaises(SystemExit) as stopped:
++                    dev.main()
++                self.assertEqual(stopped.exception.code, 1)
++                command.assert_not_called()
++            self.assertEqual(destination.read_bytes(), original)
++
+     def test_cli_reuses_the_report_summary_for_diagnostics(self) -> None:
+         metadata: dict[str, JSONValue] = {"seed": 42, "workflow_errors": 0}
+ 
+-        def completed(config: RunConfig, output: Path, *, image: str) -> int:
+-            self.assertEqual((config.vus, config.telemetry, image), (7, "profile", "old-runtime"))
+-            write_json(
+-                output / "run.json",
+-                {
+-                    "arguments": ["VUS=7", "DURATION=60s", "RAMP_UP=30s"],
+-                    "exit_code": 0,
+-                    "cgroup_before": {"usage_usec": 100},
+-                    "cgroup_after": {"usage_usec": 120, "memory_peak": 4096, "oom_kill": 0},
+-                    "cpu_scope": "server_cgroup",
+-                    "load_generator": "docker_loopback",
+-                    "generator": "cpp",
+-                },
+-            )
+-            write_json(
+-                output / "k6-summary.json",
+-                {
+-                    "metrics": {
+-                        "http_reqs": {"count": 2, "rate": 1},
+-                        "http_req_duration": {"p(95)": 1, "p(99)": 1, "max": 2},
+-                        "http_req_failed": {"value": 0},
+-                        "checks": {"fails": 0},
+-                    },
+-                    "generator": metadata,
+-                },
+-            )
+-            write_json(
+-                output / "environment.json", {"runtime": {"version": "0.1.0", "sqlite": "3.53.1"}}
+-            )
+-            write_json(output / "samples.json", [])
+-            write_json(output / "telemetry.json", parse_telemetry("", expected_mode="profile"))
+-            return 0
+-
+         with tempfile.TemporaryDirectory() as directory:
+             root = Path(directory)
+             destination = root / "saved.json"
+             with (
+-                patch("devtools.runtime.ROOT", root),
+-                patch("devtools.runtime.run_workload", side_effect=completed),
+                 patch("devtools.reports.read_json", wraps=reports.read_json) as read,
+-                patch("devtools.reports.show_results"),
+-                patch("devtools.reports.show_diagnostics") as show,
+-                patch("builtins.print"),
+-                patch(
+-                    "sys.argv",
++            ):
++                code = invoke_cli(
++                    self,
++                    root,
+                     [
+-                        "dev.py",
+                         "bench",
+                         "--label",
+                         "single-read",
+@@ -660,17 +983,23 @@ class ToolBoundaryTests(unittest.TestCase):
+                         "--save",
+                         str(destination),
+                     ],
+-                ),
+-            ):
+-                with self.assertRaises(SystemExit) as stopped:
+-                    dev.main()
+-                self.assertEqual(stopped.exception.code, 0)
+-                summary = root / "results" / "single-read" / "k6-summary.json"
+-                self.assertEqual(sum(call.args == (summary,) for call in read.call_args_list), 1)
+-                show.assert_called_once_with(metadata)
+-            saved = parse_results(read_json(destination))
+-            self.assertEqual(saved[0]["cpu_scope"], "server_cgroup")
+-            self.assertEqual(saved[0]["cpu_us_per_request"], 10)
++                )
++                self.assertEqual(code, 0)
++                raw = canonical_path(root, "single-read") / "raw" / "k6-summary.json"
++                self.assertEqual(sum(call.args == (raw,) for call in read.call_args_list), 1)
++            saved = mapping(read_json(destination))
++            result = mapping(saved["benchmark"])
++            self.assertEqual(result["name"], "single-read")
++            self.assertEqual(result["cpu_scope"], "server_cgroup")
++            self.assertEqual(result["cpu_us_per_request"], 10)
++            self.assertEqual(saved["load_generator"], metadata)
++            self.assertEqual(
++                read_json(destination),
++                read_json(canonical_path(root, "single-read") / "summary.json"),
++            )
++            self.assertEqual(
++                (canonical_path(root, "single-read") / "source.patch").read_bytes(), CLI_PATCH
++            )
+ 
+     def test_workload_failure_unwinds_generator_observer_and_server(self) -> None:
+         cleanup: list[str] = []
+@@ -853,11 +1182,25 @@ class TelemetryTests(unittest.TestCase):
+     def test_build_modes_are_explicit_and_perf_stays_independent(self) -> None:
+         modes: tuple[reports.TelemetryMode, ...] = ("off", "basic", "profile")
+         for mode in modes:
+-            with self.subTest(mode=mode), patch("devtools.runtime.command") as command:
+-                image = runtime.build(telemetry=mode)
+-                self.assertEqual(image, runtime.IMAGE + ("" if mode == "off" else f"-{mode}"))
+-                self.assertIn(f"TDS_TELEMETRY={mode}", command.call_args.args)
+-                self.assertNotIn("TDS_DIAGNOSTICS=ON", command.call_args.args)
++            with (
++                self.subTest(mode=mode),
++                patch("devtools.runtime.command", return_value="verified-identity") as command,
++                patch(
++                    "devtools.runtime.subprocess.run",
++                    return_value=subprocess.CompletedProcess([], 0, "", ""),
++                ),
++            ):
++                source = make_snapshot(runtime.ROOT)
++                image = runtime.build(telemetry=mode, source=source)
++                self.assertTrue(
++                    image.startswith(
++                        f"twelve-dollar-cpp:{CLI_ANCHOR[:12]}-{source.patch_sha256[:12]}-"
++                    )
++                )
++                invocation = command.call_args_list[0].args
++                self.assertEqual(invocation[:2], ("docker", "build"))
++                self.assertIn(f"TDS_TELEMETRY={mode}", invocation)
++                self.assertNotIn("TDS_DIAGNOSTICS=ON", invocation)
+         with (
+             patch("devtools.runtime.server") as server_context,
+             patch("devtools.runtime.observing") as observer,
+@@ -872,7 +1215,7 @@ class TelemetryTests(unittest.TestCase):
+             self.assertTrue(observer.call_args.kwargs["profiling"])
+             self.assertEqual(observer.call_args.kwargs["profiler_image"], runtime.PROFILER_IMAGE)
+             server_context.assert_called_once_with(
+-                Path("unused"), image=runtime.IMAGE, telemetry="off"
++                Path("unused"), image=runtime.IMAGE, telemetry="off", workspace=runtime.ROOT
+             )
+ 
+     def test_export_is_copied_after_stop_and_before_container_removal(self) -> None:
+@@ -884,6 +1227,8 @@ class TelemetryTests(unittest.TestCase):
+                 return "127.0.0.1:12345"
+             if args[-1] == "--version":
+                 return '{"telemetry":"profile"}'
++            if args[:2] == ("docker", "inspect"):
++                return '[{"Image":"server-pinned"}]'
+             return "{}"
+ 
+         def run(args: list[str], **_options: object) -> subprocess.CompletedProcess[str]:
+@@ -898,6 +1243,7 @@ class TelemetryTests(unittest.TestCase):
+         with (
+             tempfile.TemporaryDirectory() as directory,
+             patch("devtools.runtime.command", side_effect=command),
++            patch("devtools.runtime.image_identity", return_value={"image_id": "server-pinned"}),
+             patch("devtools.runtime.healthy", return_value=True),
+             patch("devtools.runtime.subprocess.run", side_effect=run),
+         ):
+@@ -917,6 +1263,8 @@ class TelemetryTests(unittest.TestCase):
+             del timeout
+             if args[:2] == ("docker", "port"):
+                 return "127.0.0.1:12345"
++            if args[:2] == ("docker", "inspect"):
++                return '[{"Image":"server-pinned"}]'
+             return '{"telemetry":"basic"}' if args[-1] == "--version" else "{}"
+ 
+         def run(args: list[str], **_options: object) -> subprocess.CompletedProcess[str]:
+@@ -927,6 +1275,7 @@ class TelemetryTests(unittest.TestCase):
+         with (
+             tempfile.TemporaryDirectory() as directory,
+             patch("devtools.runtime.command", side_effect=command) as commands,
++            patch("devtools.runtime.image_identity", return_value={"image_id": "server-pinned"}),
+             patch("devtools.runtime.healthy", return_value=True),
+             patch("devtools.runtime.subprocess.run", side_effect=run) as runs,
+             patch("builtins.print"),
+diff --git a/src/tests/test_runs.py b/src/tests/test_runs.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..b288739ff7cbc95f9bed28d1da0f52586d64a41d
+--- /dev/null
++++ b/src/tests/test_runs.py
+@@ -0,0 +1,208 @@
++"""Pure filesystem tests for run lifecycle and provenance"""
++
++import hashlib
++import tempfile
++import unittest
++from pathlib import Path
++from unittest.mock import patch
++
++from devtools.reports import JSONValue, mapping, read_json, write_json
++from devtools.runs import TerminalStatus, create_run
++
++ANCHOR = "a" * 40
++BASE = "b" * 40
++SOURCE = "c" * 64
++
++
++class RunRecordTests(unittest.TestCase):
++    def test_reserves_unique_directory_and_keeps_unknown_provenance_unknown(self) -> None:
++        with tempfile.TemporaryDirectory() as directory:
++            root = Path(directory)
++            run = create_run(root, ANCHOR, "reference", {"vus": 5000}, {}, {"commit": BASE})
++            self.assertEqual(run.path, root / "src" / "runs" / ANCHOR[:7] / "reference")
++            self.assertTrue(run.raw.is_dir())
++            self.assertFalse((run.path / "source.patch").exists())
++            manifest = mapping(read_json(run.path / "manifest.json"))
++            self.assertEqual(manifest["anchor"], ANCHOR)
++            self.assertEqual(manifest["status"], "running")
++            self.assertEqual(
++                manifest["provenance"],
++                {"observer": {"commit": BASE}, "source": None, "build": None, "binary": None},
++            )
++            self.assertEqual(mapping(read_json(run.path / "summary.json"))["status"], "running")
++            with self.assertRaises(FileExistsError):
++                create_run(root, ANCHOR, "reference", {}, {}, {})
++            self.assertEqual(read_json(run.path / "manifest.json"), manifest)
++
++    def test_label_and_anchor_validation_prevent_path_escape(self) -> None:
++        invalid_labels = (
++            "",
++            ".",
++            "..",
++            "../escape",
++            "nested/run",
++            "nested\\run",
++            "C:\\escape",
++            "/escape",
++            "Uppercase",
++            "trailing.",
++            "space name",
++            "a" * 97,
++            "con",
++            "lpt1.txt",
++        )
++        with tempfile.TemporaryDirectory() as directory:
++            root = Path(directory)
++            for label in invalid_labels:
++                with self.subTest(label=label), self.assertRaises(ValueError):
++                    create_run(root, ANCHOR, label, {}, {}, {})
++            for anchor in ("", "abcdef0", "../" + "a" * 40, "z" * 40):
++                with self.subTest(anchor=anchor), self.assertRaises(ValueError):
++                    create_run(root, anchor, "valid", {}, {}, {})
++            self.assertFalse((root / "src").exists())
++
++    def test_resolved_output_path_must_stay_inside_runs(self) -> None:
++        with tempfile.TemporaryDirectory() as directory:
++            root = Path(directory)
++            escaped = root.parent / "escaped-run"
++            original = Path.resolve
++
++            def resolve(path: Path) -> Path:
++                return escaped if path.name == "escape" else original(path)
++
++            with (
++                patch.object(Path, "resolve", resolve),
++                self.assertRaisesRegex(ValueError, "inside src/runs"),
++            ):
++                create_run(root, ANCHOR, "escape", {}, {}, {})
++            self.assertFalse((root / "src").exists())
++
++    def test_source_patch_preserves_exact_bytes_and_full_hashes(self) -> None:
++        data = b"diff --git a/file b/file\r\n+binary:\x00\xff\n"
++        with tempfile.TemporaryDirectory() as directory:
++            run = create_run(Path(directory), ANCHOR, "candidate", {}, {}, {})
++            run.record_source(BASE, data, SOURCE)
++            self.assertEqual((run.path / "source.patch").read_bytes(), data)
++            provenance = mapping(run.manifest["provenance"])
++            self.assertEqual(
++                provenance["source"],
++                {
++                    "base_commit": BASE,
++                    "patch_sha256": hashlib.sha256(data).hexdigest(),
++                    "source_sha256": SOURCE,
++                    "patch": "source.patch",
++                },
++            )
++            self.assertIsNone(provenance["build"])
++            self.assertIsNone(provenance["binary"])
++            with self.assertRaisesRegex(RuntimeError, "already recorded"):
++                run.record_source(BASE, b"different patch", SOURCE)
++            self.assertEqual((run.path / "source.patch").read_bytes(), data)
++
++    def test_settings_and_measured_identities_remain_independent(self) -> None:
++        instruments: dict[str, JSONValue] = {
++            "server_telemetry": "off",
++            "client_diagnostics": True,
++            "perf": "kernel",
++        }
++        workload: dict[str, JSONValue] = {"vus": 17, "seed": 31}
++        observer: dict[str, JSONValue] = {"commit": ANCHOR, "dirty": True}
++        build: dict[str, JSONValue] = {"sha256": "d" * 64, "settings": {"telemetry": "off"}}
++        with tempfile.TemporaryDirectory() as directory:
++            run = create_run(
++                Path(directory), ANCHOR, "independent", workload, instruments, observer
++            )
++            run.record_build("server", build)
++            run.record_binary("server", {"image_id": "sha256:" + "e" * 64, "sha256": "f" * 64})
++            instruments["server_telemetry"] = "profile"
++            workload["vus"] = 99
++            observer["commit"] = BASE
++            mapping(build["settings"])["telemetry"] = "profile"
++            manifest = run.manifest
++            self.assertEqual(
++                manifest["instruments"],
++                {"server_telemetry": "off", "client_diagnostics": True, "perf": "kernel"},
++            )
++            self.assertEqual(manifest["workload"], {"vus": 17, "seed": 31})
++            provenance = mapping(manifest["provenance"])
++            self.assertEqual(provenance["observer"], {"commit": ANCHOR, "dirty": True})
++            self.assertIsNone(provenance["source"])
++            self.assertEqual(
++                mapping(provenance["build"])["server"],
++                {"sha256": "d" * 64, "settings": {"telemetry": "off"}},
++            )
++            self.assertEqual(
++                mapping(provenance["binary"])["server"],
++                {"image_id": "sha256:" + "e" * 64, "sha256": "f" * 64},
++            )
++            manifest["status"] = "failed"
++            self.assertEqual(run.manifest["status"], "running")
++
++    def test_terminal_statuses_preserve_optional_payload_and_primary_error(self) -> None:
++        cases: tuple[tuple[TerminalStatus, int, str | None], ...] = (
++            ("passed", 0, None),
++            ("failed", 7, "workload exited 7"),
++            ("interrupted", 130, "interrupted"),
++        )
++        with tempfile.TemporaryDirectory() as directory:
++            for status, exit_code, error in cases:
++                with self.subTest(status=status):
++                    run = create_run(Path(directory), ANCHOR, status, {}, {}, {})
++                    payload: dict[str, JSONValue] = (
++                        {"benchmark": {"requests": 3}} if status == "passed" else {}
++                    )
++                    run.finish(
++                        status, payload, exit_code, error, ["collection failed", "cleanup failed"]
++                    )
++                    summary = mapping(read_json(run.path / "summary.json"))
++                    manifest = mapping(read_json(run.path / "manifest.json"))
++                    for document in (summary, manifest):
++                        self.assertEqual(document["status"], status)
++                        self.assertEqual(document["exit_code"], exit_code)
++                        self.assertEqual(document["error"], error)
++                        self.assertEqual(
++                            document["secondary_errors"], ["collection failed", "cleanup failed"]
++                        )
++                        self.assertIsInstance(document["finished_at"], str)
++                    self.assertEqual(
++                        manifest["summary_sha256"],
++                        hashlib.sha256((run.path / "summary.json").read_bytes()).hexdigest(),
++                    )
++                    self.assertEqual("benchmark" in summary, status == "passed")
++                    with self.assertRaisesRegex(RuntimeError, "finished"):
++                        run.finish(status, {}, exit_code)
++                    with self.assertRaisesRegex(RuntimeError, "finished"):
++                        run.record_build("server", {})
++
++    def test_failed_summary_write_does_not_commit_terminal_manifest(self) -> None:
++        with tempfile.TemporaryDirectory() as directory:
++            run = create_run(Path(directory), ANCHOR, "write-failure", {}, {}, {})
++            with patch("devtools.runs.write_json", side_effect=OSError("disk full")):
++                with self.assertRaisesRegex(OSError, "disk full"):
++                    run.finish("failed", {}, 1, "workload failed")
++            self.assertEqual(run.manifest["status"], "running")
++            self.assertEqual(mapping(read_json(run.path / "manifest.json"))["status"], "running")
++            run.finish("failed", {}, 1, "workload failed")
++            self.assertEqual(run.manifest["status"], "failed")
++
++    def test_terminal_manifest_is_committed_after_complete_summary(self) -> None:
++        with tempfile.TemporaryDirectory() as directory:
++            run = create_run(Path(directory), ANCHOR, "manifest-failure", {}, {}, {})
++
++            def fail_manifest(path: Path, value: object) -> None:
++                if path.name == "manifest.json":
++                    raise OSError("manifest unavailable")
++                write_json(path, value)
++
++            with patch("devtools.runs.write_json", side_effect=fail_manifest):
++                with self.assertRaisesRegex(OSError, "manifest unavailable"):
++                    run.finish("interrupted", {}, 130, "interrupted")
++            self.assertEqual(run.manifest["status"], "running")
++            self.assertEqual(mapping(read_json(run.path / "manifest.json"))["status"], "running")
++            self.assertEqual(mapping(read_json(run.path / "summary.json"))["status"], "interrupted")
++            run.finish("interrupted", {}, 130, "interrupted")
++            self.assertEqual(run.manifest["status"], "interrupted")
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/src/tests/test_sources.py b/src/tests/test_sources.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..4ad1798cf1c1c30f2449bc20d09f146dfe0f7a65
+--- /dev/null
++++ b/src/tests/test_sources.py
+@@ -0,0 +1,233 @@
++"""Source identity and exact patch reconstruction in disposable Git repositories."""
++
++import hashlib
++import os
++import shutil
++import subprocess
++import tempfile
++import unittest
++from dataclasses import FrozenInstanceError
++from pathlib import Path
++from unittest.mock import patch
++
++from devtools import sources
++
++
++def git(root: Path, *arguments: str, data: bytes | None = None) -> bytes:
++    executable = shutil.which("git")
++    if executable is None:
++        raise RuntimeError("Git is required for source tests")
++    return subprocess.run(  # noqa: S603 - disposable local Git repository, no shell
++        [executable, "-C", str(root), *arguments],
++        input=data,
++        capture_output=True,
++        check=True,
++    ).stdout
++
++
++class SourceTests(unittest.TestCase):
++    def setUp(self) -> None:
++        temporary = tempfile.TemporaryDirectory(prefix="twelve-dollar-source-test-")
++        self.addCleanup(temporary.cleanup)
++        self.directory = Path(temporary.name)
++        self.root = self.directory / "checkout"
++        self.root.mkdir()
++        git(self.root, "init", "--quiet")
++        git(self.root, "config", "user.name", "Source Test")
++        git(self.root, "config", "user.email", "source-test@example.invalid")
++        git(self.root, "config", "core.autocrlf", "false")
++        self.write("src/Dockerfile", b"FROM scratch\nCOPY server /source\n")
++        self.write("src/CMakeLists.txt", b"project(example)\n")
++        self.write("src/server/main.cpp", b"base\n")
++        self.write("src/server/deleted.hpp", b"delete me\n")
++        self.write("src/server/data.bin", b"\x00old\xff\n")
++        self.write("src/build.sh", b"#!/bin/sh\ntrue\n")
++        self.write("src/benchmarks/results.json", b"[]\n")
++        self.write("src/tests/native.cpp", b"native test\n")
++        self.write("src/cmake/dependencies.cmake", b"pinned dependency\n")
++        self.write("src/uv.lock", b"version = 1\n")
++        self.write("src/docker/seccomp.json", b'{"defaultAction":"SCMP_ACT_ALLOW"}\n')
++        self.write("bench/load.js", b"workload\n")
++        self.write("schema.sql", b"CREATE TABLE example(id INTEGER);\n")
++        self.write("README.md", b"outside source identity\n")
++        git(self.root, "add", "--all")
++        git(self.root, "commit", "--quiet", "--message=base")
++        self.base = git(self.root, "rev-parse", "HEAD").decode("ascii").strip()
++
++    def write(self, name: str, data: bytes) -> Path:
++        path = self.root / name
++        path.parent.mkdir(parents=True, exist_ok=True)
++        path.write_bytes(data)
++        return path
++
++    def assert_reconstructs(self, snapshot: sources.SourceSnapshot) -> None:
++        reconstruction = self.directory / "reconstruction"
++        git(
++            self.directory, "clone", "--quiet", "--no-checkout", str(self.root), str(reconstruction)
++        )
++        git(reconstruction, "read-tree", snapshot.base_commit)
++        if snapshot.patch:
++            git(reconstruction, "apply", "--cached", "--binary", data=snapshot.patch)
++        for source in snapshot.files:
++            self.assertEqual(git(reconstruction, "show", ":" + source.path), source.data)
++            entry = git(reconstruction, "ls-files", "--stage", "--", source.path)
++            self.assertEqual(entry.split(maxsplit=1)[0].decode("ascii"), source.mode)
++        self.assertEqual(git(reconstruction, "show", ":README.md"), b"outside source identity\n")
++        self.assertNotIn(b"src/server/deleted.hpp", git(reconstruction, "ls-files"))
++
++    def test_staged_unstaged_new_deleted_and_binary_inputs_reconstruct(self) -> None:
++        self.write("src/server/main.cpp", b"staged\n")
++        git(self.root, "add", "src/server/main.cpp")
++        self.write("src/server/main.cpp", b"staged\nunstaged\n")
++        self.write("src/server/new.hpp", b"new header\n")
++        self.write("src/server/data.bin", b"\x00new\xfe\x01\n")
++        self.write("src/server/new.bin", b"\x00new input\xff\n")
++        (self.root / "src/server/deleted.hpp").unlink()
++        self.write("README.md", b"unrelated dirty documentation\n")
++        index = (self.root / ".git/index").read_bytes()
++        status = git(self.root, "status", "--porcelain=v1", "-z")
++        refs = git(self.root, "show-ref")
++        objects = sorted(
++            path.relative_to(self.root) for path in (self.root / ".git/objects").rglob("*")
++        )
++
++        with sources.capture(self.root) as snapshot:
++            self.assertEqual(snapshot.base_commit, self.base)
++            self.assertEqual(snapshot.context, snapshot.root / "src")
++            self.assertEqual(snapshot.patch_sha256, hashlib.sha256(snapshot.patch).hexdigest())
++            self.assertEqual(len(snapshot.source_sha256), 64)
++            self.assertIn(b"GIT binary patch", snapshot.patch)
++            self.assertIn(b"new file mode", snapshot.patch)
++            self.assertIn(b"deleted file mode", snapshot.patch)
++            self.assertIn(b"staged\n+unstaged", snapshot.patch)
++            self.assertNotIn(b"README.md", snapshot.patch)
++            self.assert_reconstructs(snapshot)
++            destination = self.directory / "source.patch"
++            snapshot.write_patch(destination)
++            self.assertEqual(destination.read_bytes(), snapshot.patch)
++
++        self.assertFalse(snapshot.context.exists())
++        self.assertEqual((self.root / ".git/index").read_bytes(), index)
++        self.assertEqual(git(self.root, "status", "--porcelain=v1", "-z"), status)
++        self.assertEqual(git(self.root, "show-ref"), refs)
++        self.assertEqual(
++            sorted(path.relative_to(self.root) for path in (self.root / ".git/objects").rglob("*")),
++            objects,
++        )
++
++    def test_outputs_caches_environment_and_upstream_are_excluded(self) -> None:
++        excluded = {
++            "src/benchmarks/results.json": b"changed result\n",
++            "src/benchmarks/new-results.json": b"new result\n",
++            "src/profiles/report.json": b"profile result\n",
++            "src/runs/base/run/source.patch": b"previous patch\n",
++            "src/runs/base/run/summary.json": b"run result\n",
++            "src/.build/server/generated.cpp": b"cache\n",
++            "src/.venv/lib/generated.py": b"environment\n",
++            "src/server/__pycache__/cache.pyc": b"cache\n",
++            "src/server/.env": b"environment\n",
++            "src/.env.local": b"environment\n",
++            "seed/feed.db": b"seed\n",
++            "submissions/other/server.cpp": b"upstream\n",
++            "results/report.json": b"result\n",
++        }
++        for name, data in excluded.items():
++            self.write(name, data)
++        self.write("src/benchmarks/new_probe.cpp", b"new native probe\n")
++        self.write("src/tests/new_test.cpp", b"new native test\n")
++        self.write("src/devtools/new_tool.py", b"new run tool\n")
++        self.write(".gitignore", b"src/server/ignored.hpp\n")
++        self.write("src/server/ignored.hpp", b"ignored but consumed by the build\n")
++        with sources.capture(self.root) as snapshot:
++            names = {source.path for source in snapshot.files}
++            self.assertFalse(names.intersection(excluded))
++            for name in (
++                "src/benchmarks/new_probe.cpp",
++                "src/tests/new_test.cpp",
++                "src/devtools/new_tool.py",
++                "src/server/ignored.hpp",
++                "src/cmake/dependencies.cmake",
++                "src/uv.lock",
++                "src/docker/seccomp.json",
++                "bench/load.js",
++                "schema.sql",
++            ):
++                self.assertIn(name, names)
++                self.assertEqual(
++                    (snapshot.root / name).read_bytes(), (self.root / name).read_bytes()
++                )
++            for name in excluded:
++                self.assertFalse((snapshot.root / name).exists())
++
++    def test_raw_crlf_is_not_normalized_by_git_attributes(self) -> None:
++        self.write("src/.gitattributes", b"*.cpp text eol=lf\n")
++        git(self.root, "add", "src/.gitattributes")
++        git(self.root, "commit", "--quiet", "--message=attributes")
++        git(self.root, "config", "core.autocrlf", "true")
++        self.write("src/server/main.cpp", b"staged\r\n")
++        git(self.root, "add", "src/server/main.cpp")
++        self.write("src/server/main.cpp", b"staged\r\nunstaged\r\n")
++        (self.root / "src/server/deleted.hpp").unlink()
++        with sources.capture(self.root) as snapshot:
++            self.assertEqual(
++                (snapshot.context / "server/main.cpp").read_bytes(), b"staged\r\nunstaged\r\n"
++            )
++            self.assertIn(b"+staged\r\n+unstaged\r\n", snapshot.patch)
++            self.assert_reconstructs(snapshot)
++
++    def test_changes_after_freeze_cannot_change_patch_or_build_context(self) -> None:
++        self.write("src/server/main.cpp", b"measured bytes\n")
++        real_patch = sources._patch  # pyright: ignore[reportPrivateUsage]
++
++        def mutate_then_patch(
++            root: Path,
++            temporary: Path,
++            base_commit: str,
++            base_modes: dict[str, str],
++            files: tuple[sources.SourceFile, ...],
++        ) -> bytes:
++            self.write("src/server/main.cpp", b"edited during patch generation\n")
++            self.write("src/server/later.hpp", b"created after capture\n")
++            return real_patch(root, temporary, base_commit, base_modes, files)
++
++        with (
++            patch.object(sources, "_patch", side_effect=mutate_then_patch),
++            sources.capture(self.root) as snapshot,
++        ):
++            self.assertEqual(
++                (snapshot.context / "server/main.cpp").read_bytes(), b"measured bytes\n"
++            )
++            self.assertIn(b"+measured bytes", snapshot.patch)
++            self.assertNotIn(b"edited during", snapshot.patch)
++            self.assertNotIn(b"later.hpp", snapshot.patch)
++            self.assertFalse((snapshot.context / "server/later.hpp").exists())
++            with self.assertRaises(FrozenInstanceError):
++                setattr(snapshot, "base_commit", "changed")  # noqa: B010 - test runtime immutability
++            original_hash = snapshot.source_sha256
++        with sources.capture(self.root) as following:
++            self.assertNotEqual(following.source_sha256, original_hash)
++
++    def test_hashes_are_stable_and_executable_modes_are_preserved(self) -> None:
++        script = self.root / "src/build.sh"
++        if os.name != "nt":
++            script.chmod(0o755)
++        git(self.root, "update-index", "--chmod=+x", "src/build.sh")
++        with sources.capture(self.root) as first:
++            hashes = (first.patch_sha256, first.source_sha256)
++            source = next(source for source in first.files if source.path == "src/build.sh")
++            self.assertEqual(source.mode, "100755")
++            self.assertIn(b"old mode 100644\nnew mode 100755", first.patch)
++            if os.name != "nt":
++                self.assertTrue((first.context / "build.sh").stat().st_mode & 0o111)
++        with sources.capture(self.root) as second:
++            self.assertEqual((second.patch_sha256, second.source_sha256), hashes)
++
++    def test_unchanged_inputs_have_a_verified_empty_patch(self) -> None:
++        with sources.capture(self.root) as snapshot:
++            self.assertEqual(snapshot.patch, b"")
++            self.assertEqual(snapshot.patch_sha256, hashlib.sha256(b"").hexdigest())
++            self.assertEqual(snapshot.base_commit, self.base)
++
++
++if __name__ == "__main__":
++    unittest.main()

@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "anchor": "a68fdc9f0773dac5fd058e80ef9da3fce5c47fbe",
+  "label": "telemetry-count-baseline",
+  "kind": "probe",
+  "status": "passed",
+  "started_at": "2026-11-04T01:10:45.416743+00:00",
+  "finished_at": "2026-11-04T01:11:42.593698+00:00",
+  "exit_code": 0,
+  "error": null,
+  "secondary_errors": [],
+  "provenance": {
+    "observer": {
+      "base_commit": "a68fdc9f0773dac5fd058e80ef9da3fce5c47fbe"
+    },
+    "source": {
+      "base_commit": "a68fdc9f0773dac5fd058e80ef9da3fce5c47fbe",
+      "patch_sha256": "3c9499e21d07dde46ed1205f24859fec40febe953bc01e4e4b35d1ffdfeb606a",
+      "source_sha256": "6a6bd894faebaa304aa0080461b706d7c89f0968b8089412d282e195d570249a",
+      "patch": "source.patch"
+    },
+    "build": {
+      "test-build": {
+        "image_id": "sha256:b9793fd04999064549d98103c42961a7ab6b91961ac3d6e6fc01c8eaf6121362",
+        "repo_digests": [
+          "twelve-dollar-cpp@sha256:b9793fd04999064549d98103c42961a7ab6b91961ac3d6e6fc01c8eaf6121362"
+        ],
+        "source": {
+          "base_commit": "a68fdc9f0773dac5fd058e80ef9da3fce5c47fbe",
+          "patch_sha256": "3c9499e21d07dde46ed1205f24859fec40febe953bc01e4e4b35d1ffdfeb606a",
+          "source_sha256": "6a6bd894faebaa304aa0080461b706d7c89f0968b8089412d282e195d570249a"
+        },
+        "build_spec": {
+          "build_type": "Release",
+          "generator_only": false,
+          "platform": "linux/amd64",
+          "sanitizers": false,
+          "target": "test-build",
+          "telemetry": "profile"
+        },
+        "toolchain_sha256": "17d3f8d832212ffea36d7d2c37cb4b22a39b964b92e0ae404f7658592a69a423",
+        "build_sha256": "57553aeed376b3ed90c64669776b60a6c79fb278f8b3245c01a614758a99ec08",
+        "binary_sha256": "6b2ae7cf6c80af7870e1f524b2694f89b60af9988c7f0f0b76313ea088cd7f46"
+      }
+    },
+    "binary": {
+      "telemetry_probe": {
+        "sha256": "f5228d6de8dfeea15cfa07b775f056ded78999a2b927ff5450f89c6316512aed",
+        "build_image_id": "sha256:b9793fd04999064549d98103c42961a7ab6b91961ac3d6e6fc01c8eaf6121362",
+        "path": "raw/telemetry_probe"
+      }
+    }
+  },
+  "workload": {
+    "kind": "telemetry_native_probe",
+    "calls_per_sample": 500000
+  },
+  "instruments": {
+    "server_telemetry": "profile",
+    "perf": "off",
+    "client_diagnostics": false
+  },
+  "summary_sha256": "c15da014477ec3743496588ead45707c1f1e040b689d2c3d0fa093870262ac3a"
+}

@@ -1,0 +1,55 @@
+{
+  "measurement": {
+    "medians": {
+      "io_ns_per_call": 20.46585,
+      "database_ns_per_call": 20.26985,
+      "handler_active_ns_per_call": 62.86041,
+      "handler_write_ns_per_call": 1.89532,
+      "receive_ns_per_call": 20.080998,
+      "database_scope_ns_per_call": 43.452892,
+      "database_sync_scope_ns_per_call": 43.02081,
+      "histogram_record_ns_per_call": 1.31093
+    },
+    "processes": 3,
+    "samples_per_process": 5,
+    "calls_per_sample": 500000,
+    "verified_handler_samples": 2500000,
+    "verified_database_samples": 5000000,
+    "verified_histogram_samples": 2500000,
+    "binary_sha256": "04bb74b3b3ffb71e521c381cd12a5f5ac20d47f548a90d5233043fe533dca758"
+  },
+  "schema_version": 1,
+  "anchor": "b5dedcbc093af5f949e89fa108faa941799f1405",
+  "label": "telemetry-cq-candidate",
+  "kind": "probe",
+  "started_at": "2026-11-04T01:22:48.111358+00:00",
+  "status": "passed",
+  "finished_at": "2026-11-04T01:23:47.039493+00:00",
+  "exit_code": 0,
+  "error": null,
+  "secondary_errors": [],
+  "workload": {
+    "kind": "telemetry_native_probe",
+    "calls_per_sample": 500000
+  },
+  "instruments": {
+    "server_telemetry": "profile",
+    "perf": "off",
+    "client_diagnostics": false
+  },
+  "provenance": {
+    "source": {
+      "base_commit": "b5dedcbc093af5f949e89fa108faa941799f1405",
+      "patch_sha256": "74269411ddfe5ad333af8752988097ca3375565f78c26b92c249dccd28ae11d0",
+      "source_sha256": "4ab737890f56b4ff3904f2a107020b018539630d22c15bf3761136ee85b00192",
+      "patch": "source.patch"
+    },
+    "binary": {
+      "telemetry_probe": {
+        "sha256": "04bb74b3b3ffb71e521c381cd12a5f5ac20d47f548a90d5233043fe533dca758",
+        "build_image_id": "sha256:d2c0fe26db0743ffb7426f134d80ce34f27b5adb2e5b56f5e9a952ae72c9f1a2",
+        "path": "raw/telemetry_probe"
+      }
+    }
+  }
+}

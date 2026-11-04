@@ -1,0 +1,41 @@
+{
+  "measurement": {
+    "native_tests": 12,
+    "generator_binary_equal": true,
+    "sample_bytes": 16,
+    "test_image": "sha256:20ae2f460f26f77604f6400f3000e7c657a91211259f1c4af7ad2f83068726c1",
+    "generator_image": "sha256:dff9d6085c466218640b7b84c6164084da2149a5bef84c765f58363a99d6e492"
+  },
+  "schema_version": 1,
+  "anchor": "f33df997b359d97997088098d7012ee60ed269ef",
+  "label": "generator-refactor-contract-fixed",
+  "kind": "probe",
+  "started_at": "2026-11-04T01:02:38.941974+00:00",
+  "status": "passed",
+  "finished_at": "2026-11-04T01:03:45.353465+00:00",
+  "exit_code": 0,
+  "error": null,
+  "secondary_errors": [],
+  "workload": {
+    "kind": "native_tests"
+  },
+  "instruments": {
+    "server_telemetry": "off",
+    "perf": "off",
+    "client_diagnostics": false
+  },
+  "provenance": {
+    "source": {
+      "base_commit": "f33df997b359d97997088098d7012ee60ed269ef",
+      "patch_sha256": "c9a12e30ff539287a68504196f66de16402fea09342c36ed9886a8644105f7ae",
+      "source_sha256": "615028338307413bf39cc2d3c4fa010689e08b686978c890bef80dd768f2f2df",
+      "patch": "source.patch"
+    },
+    "binary": {
+      "generator": {
+        "image_id": "sha256:20ae2f460f26f77604f6400f3000e7c657a91211259f1c4af7ad2f83068726c1",
+        "sha256": "c584e6751f6c73ced9b8042e7437cd95d160f82f3cc9242975a9a46f5698ebd0"
+      }
+    }
+  }
+}

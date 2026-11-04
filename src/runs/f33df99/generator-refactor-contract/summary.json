@@ -1,0 +1,30 @@
+{
+  "measurement": {},
+  "schema_version": 1,
+  "anchor": "f33df997b359d97997088098d7012ee60ed269ef",
+  "label": "generator-refactor-contract",
+  "kind": "probe",
+  "started_at": "2026-11-04T01:00:42.971398+00:00",
+  "status": "failed",
+  "finished_at": "2026-11-04T01:01:02.064446+00:00",
+  "exit_code": 1,
+  "error": "Command ('docker', 'build', '--progress', 'plain', '--platform', 'linux/amd64', '--tag', 'twelve-dollar-build:5266915fa6464402bbc8a1f07da7a598', '--target', 'test-build', '--build-arg', 'TDS_TELEMETRY=off', '--label', 'org.twelve-dollar.source-sha256=758ea85ed841fe1fb69e251fbb187017b9dc185c7a0f8dfef25c93274fe83af1', '--label', 'org.twelve-dollar.patch-sha256=63ccc0a4a738e4835dc1f4d58151e0cfbb0fc0d7024eef83602bcdd8424fac82', '--label', 'org.twelve-dollar.base-commit=f33df997b359d97997088098d7012ee60ed269ef', '--label', 'org.twelve-dollar.build-spec={\"build_type\":\"Release\",\"generator_only\":false,\"platform\":\"linux/amd64\",\"sanitizers\":false,\"target\":\"test-build\",\"telemetry\":\"off\"}', '--file', 'C:\\\\Users\\\\Admin\\\\AppData\\\\Local\\\\Temp\\\\twelve-dollar-source-lmwlhus3\\\\source\\\\src\\\\Dockerfile', 'C:\\\\Users\\\\Admin\\\\AppData\\\\Local\\\\Temp\\\\twelve-dollar-source-lmwlhus3\\\\source\\\\src') returned non-zero exit status 1.",
+  "secondary_errors": [],
+  "workload": {
+    "kind": "native_tests"
+  },
+  "instruments": {
+    "server_telemetry": "off",
+    "perf": "off",
+    "client_diagnostics": false
+  },
+  "provenance": {
+    "source": {
+      "base_commit": "f33df997b359d97997088098d7012ee60ed269ef",
+      "patch_sha256": "63ccc0a4a738e4835dc1f4d58151e0cfbb0fc0d7024eef83602bcdd8424fac82",
+      "source_sha256": "758ea85ed841fe1fb69e251fbb187017b9dc185c7a0f8dfef25c93274fe83af1",
+      "patch": "source.patch"
+    },
+    "binary": null
+  }
+}

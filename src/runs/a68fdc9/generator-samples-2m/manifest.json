@@ -1,0 +1,99 @@
+{
+  "schema_version": 1,
+  "anchor": "a68fdc9f0773dac5fd058e80ef9da3fce5c47fbe",
+  "label": "generator-samples-2m",
+  "kind": "probe",
+  "status": "passed",
+  "started_at": "2026-11-04T01:06:20.166424+00:00",
+  "finished_at": "2026-11-04T01:06:27.738889+00:00",
+  "exit_code": 0,
+  "error": null,
+  "secondary_errors": [],
+  "provenance": {
+    "observer": {
+      "base_commit": "a68fdc9f0773dac5fd058e80ef9da3fce5c47fbe"
+    },
+    "source": {
+      "base_commit": "f33df997b359d97997088098d7012ee60ed269ef",
+      "patch_sha256": "c9a12e30ff539287a68504196f66de16402fea09342c36ed9886a8644105f7ae",
+      "source_sha256": "615028338307413bf39cc2d3c4fa010689e08b686978c890bef80dd768f2f2df",
+      "patch": "source.patch"
+    },
+    "build": {
+      "test-build-generator": {
+        "image_id": "sha256:20ae2f460f26f77604f6400f3000e7c657a91211259f1c4af7ad2f83068726c1",
+        "repo_digests": [
+          "twelve-dollar-cpp@sha256:20ae2f460f26f77604f6400f3000e7c657a91211259f1c4af7ad2f83068726c1"
+        ],
+        "source": {
+          "base_commit": "f33df997b359d97997088098d7012ee60ed269ef",
+          "patch_sha256": "c9a12e30ff539287a68504196f66de16402fea09342c36ed9886a8644105f7ae",
+          "source_sha256": "615028338307413bf39cc2d3c4fa010689e08b686978c890bef80dd768f2f2df"
+        },
+        "build_spec": {
+          "build_type": "Release",
+          "generator_only": false,
+          "platform": "linux/amd64",
+          "sanitizers": false,
+          "target": "test-build",
+          "telemetry": "off"
+        },
+        "toolchain_sha256": "17d3f8d832212ffea36d7d2c37cb4b22a39b964b92e0ae404f7658592a69a423",
+        "build_sha256": "8142fc8130e92bf74de25c17deea83e453029c0af49ec1150c566bf617c1912b",
+        "binary_sha256": "c584e6751f6c73ced9b8042e7437cd95d160f82f3cc9242975a9a46f5698ebd0"
+      },
+      "probe-runtime": {
+        "image_id": "sha256:20ae2f460f26f77604f6400f3000e7c657a91211259f1c4af7ad2f83068726c1",
+        "repo_digests": [
+          "twelve-dollar-cpp@sha256:20ae2f460f26f77604f6400f3000e7c657a91211259f1c4af7ad2f83068726c1"
+        ],
+        "source": {
+          "base_commit": "f33df997b359d97997088098d7012ee60ed269ef",
+          "patch_sha256": "c9a12e30ff539287a68504196f66de16402fea09342c36ed9886a8644105f7ae",
+          "source_sha256": "615028338307413bf39cc2d3c4fa010689e08b686978c890bef80dd768f2f2df"
+        },
+        "build_spec": {
+          "build_type": "Release",
+          "generator_only": false,
+          "platform": "linux/amd64",
+          "sanitizers": false,
+          "target": "test-build",
+          "telemetry": "off"
+        },
+        "toolchain_sha256": "17d3f8d832212ffea36d7d2c37cb4b22a39b964b92e0ae404f7658592a69a423",
+        "build_sha256": "8142fc8130e92bf74de25c17deea83e453029c0af49ec1150c566bf617c1912b",
+        "binary_sha256": "c584e6751f6c73ced9b8042e7437cd95d160f82f3cc9242975a9a46f5698ebd0"
+      }
+    },
+    "binary": {
+      "test-build-generator": {
+        "image_id": "sha256:20ae2f460f26f77604f6400f3000e7c657a91211259f1c4af7ad2f83068726c1",
+        "sha256": "c584e6751f6c73ced9b8042e7437cd95d160f82f3cc9242975a9a46f5698ebd0"
+      },
+      "probe-runtime": {
+        "image_id": "sha256:20ae2f460f26f77604f6400f3000e7c657a91211259f1c4af7ad2f83068726c1",
+        "sha256": "c584e6751f6c73ced9b8042e7437cd95d160f82f3cc9242975a9a46f5698ebd0"
+      },
+      "samples-probe": {
+        "sha256": "53213cad68a58072e9a81bcc740c6ea7bfa64e73da152d7077156e4b79eb537c",
+        "image_id": "sha256:20ae2f460f26f77604f6400f3000e7c657a91211259f1c4af7ad2f83068726c1"
+      }
+    }
+  },
+  "workload": {
+    "samples": 2000000,
+    "order": [
+      "old",
+      "new",
+      "new",
+      "old"
+    ],
+    "cpus": 1
+  },
+  "instruments": {
+    "server_telemetry": "off",
+    "perf": "off",
+    "client_diagnostics": false
+  },
+  "summary_sha256": "fb24a9ad947503122bfbd34bc8cfb41e00c9b21ba0c2a92443343bd592224c1b"
+}

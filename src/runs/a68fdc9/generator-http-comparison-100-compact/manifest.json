@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "anchor": "a68fdc9f0773dac5fd058e80ef9da3fce5c47fbe",
+  "label": "generator-http-comparison-100-compact",
+  "kind": "comparison",
+  "status": "passed",
+  "started_at": "2026-11-04T01:11:34.981013+00:00",
+  "finished_at": "2026-11-04T01:11:34.985614+00:00",
+  "exit_code": 0,
+  "error": null,
+  "secondary_errors": [],
+  "provenance": {
+    "observer": {
+      "base_commit": "a68fdc9f0773dac5fd058e80ef9da3fce5c47fbe"
+    },
+    "source": null,
+    "build": null,
+    "binary": null
+  },
+  "workload": {
+    "vus": 100,
+    "ramp": "1s",
+    "hold": "15s",
+    "ramp_down": "30s",
+    "grace": "10s",
+    "seed": 20261104
+  },
+  "instruments": {
+    "server_telemetry": "off",
+    "perf": "off",
+    "client_diagnostics": true
+  },
+  "summary_sha256": "4ddb39716b02124354d0931661d97a16b1a1aa16a55fbbd867374d365ff57a39"
+}

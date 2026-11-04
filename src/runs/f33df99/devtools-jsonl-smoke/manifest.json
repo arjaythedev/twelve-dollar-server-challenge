@@ -1,0 +1,94 @@
+{
+  "schema_version": 1,
+  "anchor": "f33df997b359d97997088098d7012ee60ed269ef",
+  "label": "devtools-jsonl-smoke",
+  "kind": "workload",
+  "status": "passed",
+  "started_at": "2026-11-04T00:53:58.231074+00:00",
+  "finished_at": "2026-11-04T00:55:49.298630+00:00",
+  "exit_code": 0,
+  "error": null,
+  "secondary_errors": [],
+  "provenance": {
+    "observer": {
+      "base_commit": "f33df997b359d97997088098d7012ee60ed269ef",
+      "patch_sha256": "b173a0b469c70799df456de13f504feff8b8dd57e956b5579a913d1c22686e30",
+      "source_sha256": "1d60627894c06bdf577a3b3e1a16a13765c1084cd16e595589cd4db558f7c0a9",
+      "patch": "raw/observer.patch"
+    },
+    "source": {
+      "base_commit": "f33df997b359d97997088098d7012ee60ed269ef",
+      "patch_sha256": "b173a0b469c70799df456de13f504feff8b8dd57e956b5579a913d1c22686e30",
+      "source_sha256": "1d60627894c06bdf577a3b3e1a16a13765c1084cd16e595589cd4db558f7c0a9",
+      "patch": "source.patch"
+    },
+    "build": {
+      "server": {
+        "image_id": "sha256:c53428a93e3f144d898411d41ad95796bbc2d82e7dac1d4c6cbd63a020838267",
+        "repo_digests": [
+          "twelve-dollar-cpp@sha256:c53428a93e3f144d898411d41ad95796bbc2d82e7dac1d4c6cbd63a020838267"
+        ],
+        "source": {
+          "base_commit": "f33df997b359d97997088098d7012ee60ed269ef",
+          "patch_sha256": "b173a0b469c70799df456de13f504feff8b8dd57e956b5579a913d1c22686e30",
+          "source_sha256": "1d60627894c06bdf577a3b3e1a16a13765c1084cd16e595589cd4db558f7c0a9"
+        },
+        "build_spec": {
+          "build_type": "Release",
+          "generator_only": false,
+          "platform": "linux/amd64",
+          "sanitizers": false,
+          "target": "final",
+          "telemetry": "profile"
+        },
+        "toolchain_sha256": "17d3f8d832212ffea36d7d2c37cb4b22a39b964b92e0ae404f7658592a69a423",
+        "build_sha256": "666025b6d8720c9647599a510fed938365a72ee148f49925e7796f772643bd52",
+        "binary_sha256": "6b2ae7cf6c80af7870e1f524b2694f89b60af9988c7f0f0b76313ea088cd7f46"
+      },
+      "generator": {
+        "image_id": "sha256:271719fbe372ce95beba63b7d00a0499670f63170cb96d5b74d92cffbb98eb14",
+        "repo_digests": [
+          "twelve-dollar-generator@sha256:271719fbe372ce95beba63b7d00a0499670f63170cb96d5b74d92cffbb98eb14"
+        ],
+        "source": {
+          "base_commit": "f33df997b359d97997088098d7012ee60ed269ef",
+          "patch_sha256": "b173a0b469c70799df456de13f504feff8b8dd57e956b5579a913d1c22686e30",
+          "source_sha256": "1d60627894c06bdf577a3b3e1a16a13765c1084cd16e595589cd4db558f7c0a9"
+        },
+        "build_spec": {
+          "build_type": "Release",
+          "generator_only": true,
+          "platform": "linux/amd64",
+          "sanitizers": false,
+          "target": "generator"
+        },
+        "toolchain_sha256": "adf2f42419414e37a94f4569fe419eadcefc53887c6cbe407d420c4bb0f34580",
+        "build_sha256": "8181f2919cb45a0fbece513b7443f31716fe7d498775d2fb1e6da8d094033ed2",
+        "binary_sha256": "1b497eec67bc026e3248664cc55a588341302d79ac46ef64e1c5a7c276d2ff3c"
+      }
+    },
+    "binary": {
+      "server": {
+        "image_id": "sha256:c53428a93e3f144d898411d41ad95796bbc2d82e7dac1d4c6cbd63a020838267",
+        "sha256": "6b2ae7cf6c80af7870e1f524b2694f89b60af9988c7f0f0b76313ea088cd7f46"
+      },
+      "generator": {
+        "image_id": "sha256:271719fbe372ce95beba63b7d00a0499670f63170cb96d5b74d92cffbb98eb14",
+        "sha256": "1b497eec67bc026e3248664cc55a588341302d79ac46ef64e1c5a7c276d2ff3c"
+      }
+    }
+  },
+  "workload": {
+    "generator": "cpp",
+    "vus": 100,
+    "ramp": "1s",
+    "hold": "15s",
+    "seed": 20261104
+  },
+  "instruments": {
+    "server_telemetry": "profile",
+    "client_diagnostics": true,
+    "perf": "off"
+  },
+  "summary_sha256": "9fa71cb11c525a2475bc0dd4d18a81cb059c22834a1ed6915eacb9c745e1675b"
+}

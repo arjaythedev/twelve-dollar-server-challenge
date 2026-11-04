@@ -1,0 +1,82 @@
+{
+  "measurement": {
+    "order": [
+      "before",
+      "after",
+      "after",
+      "before"
+    ],
+    "variants": {
+      "before": {
+        "process_medians_ns": [
+          1.305642,
+          1.43156
+        ],
+        "median_ns_per_call": 1.368601,
+        "verified_samples": 5000000
+      },
+      "after": {
+        "process_medians_ns": [
+          1.433302,
+          1.495822
+        ],
+        "median_ns_per_call": 1.464562,
+        "verified_samples": 5000000
+      }
+    },
+    "change_percent": 7.011612588329252,
+    "scope": "Empty real CQ snapshot and profile telemetry hook, thread CPU clocks outside loops",
+    "basic_code_generation": {
+      "compiled": true,
+      "runtime_tested": false,
+      "old_unconditional_hook": "io_serviced",
+      "candidate_hook": "receive_completed",
+      "candidate_send_hook_relocation": false,
+      "object_sha256": "def00b1e1b246163b748d8b7087c160ebcf4823a231f0af491b7193087815c0b",
+      "scope": "Actual frozen reactor source compiled with telemetry basic; not a basic runtime test"
+    }
+  },
+  "schema_version": 1,
+  "anchor": "b5dedcbc093af5f949e89fa108faa941799f1405",
+  "label": "telemetry-cq-rotated-control",
+  "kind": "comparison",
+  "started_at": "2026-11-04T01:27:49.467315+00:00",
+  "status": "passed",
+  "finished_at": "2026-11-04T01:27:53.420900+00:00",
+  "exit_code": 0,
+  "error": null,
+  "secondary_errors": [],
+  "workload": {
+    "calls_per_sample": 500000,
+    "samples_per_process": 5,
+    "order": [
+      "before",
+      "after",
+      "after",
+      "before"
+    ],
+    "cpu_set": "2"
+  },
+  "instruments": {
+    "server_telemetry": "profile",
+    "perf": "off",
+    "client_diagnostics": false
+  },
+  "provenance": {
+    "source": null,
+    "binary": {
+      "before": {
+        "image_id": "sha256:0dcd8325b7fccf91d682f2ffa6e99325225b02996ff7aff78ec0ae897c94aec4",
+        "sha256": "620b3b87db2798248df61e2dd41c12d4cbed1e4eea5e917c72eb9119e950517e"
+      },
+      "after": {
+        "image_id": "sha256:d2c0fe26db0743ffb7426f134d80ce34f27b5adb2e5b56f5e9a952ae72c9f1a2",
+        "sha256": "493aefe9a201f4134b905aa270fcfe361c68568e038374f021df071db63cfdbe"
+      },
+      "basic-reactor-object": {
+        "image_id": "sha256:d2c0fe26db0743ffb7426f134d80ce34f27b5adb2e5b56f5e9a952ae72c9f1a2",
+        "sha256": "def00b1e1b246163b748d8b7087c160ebcf4823a231f0af491b7193087815c0b"
+      }
+    }
+  }
+}

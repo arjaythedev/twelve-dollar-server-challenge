@@ -52,9 +52,22 @@ static void jraw(jout *o, const char *s, int n) {
 static void jch(jout *o, char c) { jraw(o, &c, 1); }
 
 static void jint(jout *o, sqlite3_int64 v) {
-  char b[32];
-  int n = snprintf(b, sizeof(b), "%lld", (long long)v);
-  jraw(o, b, n);
+  char b[24];
+  int n = 0;
+  uint64_t u;
+  if (v < 0) {
+    u = (uint64_t)(-(v + 1)) + 1;
+  } else {
+    u = (uint64_t)v;
+  }
+  do {
+    b[n++] = (char)('0' + (u % 10));
+    u /= 10;
+  } while (u);
+  if (v < 0) b[n++] = '-';
+  char out[24];
+  for (int i = 0; i < n; i++) out[i] = b[n - 1 - i];
+  jraw(o, out, n);
 }
 
 static void jstr(jout *o, const unsigned char *s, int n) {
@@ -270,6 +283,54 @@ static const unsigned char *payload(BtCursor *c, u32 *n) {
   return (const unsigned char *)sqlite3BtreePayloadFetch(c, n);
 }
 
+static int get_varint(const unsigned char *p, u32 n, uint64_t *out, int *used) {
+  uint64_t v = 0;
+  for (int i = 0; i < n && i < 9; i++) {
+    unsigned char c = p[i];
+    if (i == 8) {
+      v = (v << 8) | c;
+      *out = v;
+      *used = 9;
+      return SQLITE_OK;
+    }
+    v = (v << 7) | (c & 0x7f);
+    if (!(c & 0x80)) {
+      *out = v;
+      *used = i + 1;
+      return SQLITE_OK;
+    }
+  }
+  return SQLITE_CORRUPT;
+}
+
+/* Decode field 0 of a record when it is an integer. */
+static int first_int(const unsigned char *p, u32 n, sqlite3_int64 *out) {
+  uint64_t hdr;
+  int hl;
+  if (get_varint(p, n, &hdr, &hl) != SQLITE_OK || hdr > n || hdr <= (uint64_t)hl) {
+    return SQLITE_CORRUPT;
+  }
+  uint64_t st;
+  int sl;
+  if (get_varint(p + hl, n - hl, &st, &sl) != SQLITE_OK || (uint64_t)hl + (uint64_t)sl > hdr) {
+    return SQLITE_CORRUPT;
+  }
+  if (st == 8) {
+    *out = 0;
+    return SQLITE_OK;
+  }
+  if (st == 9) {
+    *out = 1;
+    return SQLITE_OK;
+  }
+  if (st == 0) return SQLITE_NOTFOUND;
+  if (st < 1 || st > 6) return SQLITE_NOTFOUND;
+  uint64_t off = (uint64_t)hl + (uint64_t)sl;
+  if (off + st > n) return SQLITE_CORRUPT;
+  *out = read_int(p + off, (int)st);
+  return SQLITE_OK;
+}
+
 static int like_count(BtreeReader *r, sqlite3_int64 post_id, jout *o) {
   Mem *m = &r->likeFind->aMem[0];
   m->flags = MEM_Int;
@@ -295,9 +356,11 @@ static int like_count(BtreeReader *r, sqlite3_int64 post_id, jout *o) {
     u32 n;
     const unsigned char *p = payload(r->like, &n);
     if (!p) return SQLITE_CORRUPT;
-    val f[1];
-    if (parse_vals(p, n, f, 1) != SQLITE_OK) return SQLITE_CORRUPT;
-    if (f[0].kind != V_INT || f[0].i != post_id) break;
+    sqlite3_int64 key;
+    int ir = first_int(p, n, &key);
+    if (ir == SQLITE_NOTFOUND) break;
+    if (ir != SQLITE_OK) return SQLITE_CORRUPT;
+    if (key != post_id) break;
     count++;
     rc = sqlite3BtreeNext(r->like, 0);
     if (rc != SQLITE_OK) return rc;

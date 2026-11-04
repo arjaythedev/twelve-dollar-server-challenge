@@ -552,7 +552,6 @@ pub struct WriteDb {
 impl WriteDb {
     pub fn open(path: &str) -> Result<Self, String> {
         let db = Db::open(path)?;
-        db.exec("PRAGMA wal_autocheckpoint=0")?;
         db.exec("PRAGMA foreign_keys=ON")?;
         Ok(Self { db })
     }

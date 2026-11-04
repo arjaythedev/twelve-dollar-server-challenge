@@ -5,13 +5,13 @@ use std::mem::size_of;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::os::fd::{AsRawFd, RawFd};
 use std::sync::mpsc::{Receiver, Sender};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use io_uring::{cqueue, opcode, squeue, types, IoUring};
 
 use super::{parse_request, response_bytes, App, Handled, ParseResult};
-use crate::reader::{ReadBatch, ReadMsg, ReadResponse};
+use crate::reader::{FeedReply, FeedRequest, PostReply, PostRequest, PostResponse};
 use crate::stats;
 use crate::writer::{WriteJob, WriteResult};
 
@@ -88,6 +88,7 @@ impl Conn {
     }
 }
 
+#[derive(Clone, Copy)]
 pub(crate) struct ReadJob {
     pub ring: usize,
     pub slot: u32,
@@ -101,6 +102,16 @@ pub(crate) struct ReadJob {
 pub(crate) enum ReadKind {
     Feed,
     Post(i64),
+}
+
+struct FeedPending {
+    jobs: Vec<ReadJob>,
+    rx: Receiver<FeedReply>,
+}
+
+struct PostPending {
+    jobs: Vec<ReadJob>,
+    rx: Receiver<PostReply>,
 }
 
 #[repr(C)]
@@ -429,7 +440,10 @@ fn process_input(
     c: &mut Conn,
     app: &mut App,
     write_tx: &Sender<WriteJob>,
-    reads: &mut Vec<ReadJob>,
+    write_result_tx: &Sender<WriteResult>,
+    write_event_fd: RawFd,
+    feed_reads: &mut Vec<ReadJob>,
+    post_reads: &mut Vec<ReadJob>,
 ) -> io::Result<()> {
     if c.writing || c.write_pending || c.close_after {
         return Ok(());
@@ -464,7 +478,7 @@ fn process_input(
                     arm_write(ring, slot, c)
                 }
                 Handled::Feed => {
-                    reads.push(ReadJob {
+                    feed_reads.push(ReadJob {
                         ring: ring_idx,
                         slot,
                         gen: c.gen,
@@ -475,7 +489,7 @@ fn process_input(
                     Ok(())
                 }
                 Handled::Post(id) => {
-                    reads.push(ReadJob {
+                    post_reads.push(ReadJob {
                         ring: ring_idx,
                         slot,
                         gen: c.gen,
@@ -498,6 +512,8 @@ fn process_input(
                         at: stats::mark(),
                         stat,
                         cmd,
+                        result_tx: write_result_tx.clone(),
+                        event_fd: write_event_fd,
                     };
                     if write_tx.send(job).is_err() {
                         queue_reply(c, 500, &super::error("internal server error"), true);
@@ -518,7 +534,10 @@ fn after_write(
     c: &mut Conn,
     app: &mut App,
     write_tx: &Sender<WriteJob>,
-    reads: &mut Vec<ReadJob>,
+    write_result_tx: &Sender<WriteResult>,
+    write_event_fd: RawFd,
+    feed_reads: &mut Vec<ReadJob>,
+    post_reads: &mut Vec<ReadJob>,
     res: i32,
 ) -> io::Result<bool> {
     c.writing = false;
@@ -528,7 +547,7 @@ fn after_write(
         if c.close_after {
             return Ok(true);
         }
-        process_input(ring, ring_idx, slot, c, app, write_tx, reads)?;
+        process_input(ring, ring_idx, slot, c, app, write_tx, write_result_tx, write_event_fd, feed_reads, post_reads)?;
         return Ok(false);
     }
     arm_write(ring, slot, c)?;
@@ -540,7 +559,10 @@ fn process_ring(
     r: &mut RingState,
     app: &mut App,
     write_tx: &Sender<WriteJob>,
-    reads: &mut Vec<ReadJob>,
+    write_result_tx: &Sender<WriteResult>,
+    write_event_fd: RawFd,
+    feed_reads: &mut Vec<ReadJob>,
+    post_reads: &mut Vec<ReadJob>,
 ) -> io::Result<()> {
     let mut cqes = std::mem::take(&mut r.cqes);
     cqes.clear();
@@ -598,7 +620,10 @@ fn process_ring(
                                 c,
                                 app,
                                 write_tx,
-                                reads,
+                                write_result_tx,
+                                write_event_fd,
+                                feed_reads,
+                                post_reads,
                             )?;
                             false
                         }
@@ -639,7 +664,10 @@ fn process_ring(
                                     c,
                                     app,
                                     write_tx,
-                                    reads,
+                                    write_result_tx,
+                                    write_event_fd,
+                                    feed_reads,
+                                    post_reads,
                                 )?;
                                 if !cqueue::more(flags) {
                                     let _ = arm_read(&mut r.ring, slot, c);
@@ -694,7 +722,7 @@ fn process_ring(
             }
             match tag {
                 TAG_WRITE => {
-                    after_write(&mut r.ring, ring_idx, slot, c, app, write_tx, reads, res as i32)?
+                    after_write(&mut r.ring, ring_idx, slot, c, app, write_tx, write_result_tx, write_event_fd, feed_reads, post_reads, res as i32)?
                 }
                 _ => false,
             }
@@ -708,53 +736,60 @@ fn process_ring(
     Ok(())
 }
 
-fn flush_reads(
+fn flush_feed(
     reads: &mut Vec<ReadJob>,
-    pending: &mut Option<Arc<ReadBatch>>,
-    read_tx: &Sender<ReadMsg>,
+    pending: &mut Option<FeedPending>,
+    tx: &Sender<FeedRequest>,
+    event_fd: RawFd,
 ) {
     if pending.is_some() || reads.is_empty() {
         return;
     }
     let take = reads.len().min(MAX_READ_BATCH);
-    let items: Vec<ReadJob> = reads.drain(..take).collect();
-    let batch = Arc::new(ReadBatch { items });
-    if read_tx.send(ReadMsg::Batch(batch.clone())).is_ok() {
-        *pending = Some(batch);
+    let jobs: Vec<ReadJob> = reads.drain(..take).collect();
+    let (reply, rx) = std::sync::mpsc::channel();
+    if tx.send(FeedRequest { jobs: jobs.clone(), reply, event_fd }).is_ok() {
+        *pending = Some(FeedPending { jobs, rx });
     }
 }
 
-fn process_reader(
+fn flush_post(
+    reads: &mut Vec<ReadJob>,
+    pending: &mut Option<PostPending>,
+    tx: &Sender<PostRequest>,
+    event_fd: RawFd,
+) {
+    if pending.is_some() || reads.is_empty() {
+        return;
+    }
+    let take = reads.len().min(MAX_READ_BATCH);
+    let jobs: Vec<ReadJob> = reads.drain(..take).collect();
+    let (reply, rx) = std::sync::mpsc::channel();
+    if tx.send(PostRequest { jobs: jobs.clone(), reply, event_fd }).is_ok() {
+        *pending = Some(PostPending { jobs, rx });
+    }
+}
+
+fn process_feed(
     app: &mut App,
     rings: &mut [RingState],
-    pending: &mut Option<Arc<ReadBatch>>,
-    rx: &Receiver<ReadResponse>,
+    pending: &mut Option<FeedPending>,
     write_rx: &Receiver<WriteResult>,
-    read_tx: &Sender<ReadMsg>,
-    reads: &mut Vec<ReadJob>,
 ) {
-    let mut dirty = 0u64;
-    while let Ok(resp) = rx.try_recv() {
-        let Some(batch) = pending.take() else {
-            continue;
+    loop {
+        let reply = match pending.as_ref().and_then(|p| p.rx.try_recv().ok()) {
+            Some(reply) => reply,
+            None => break,
         };
-        flush_reads(reads, pending, read_tx);
-        let feed_packets = match &resp.feed {
-            Some(body) => Some((
+        let Some(p) = pending.take() else { break };
+        let feed_packets = reply.body.as_ref().map(|body| {
+            (
                 Arc::new(response_bytes(200, body, false)),
                 Arc::new(response_bytes(200, body, true)),
-            )),
-            None => None,
-        };
-        let mut post_idx = 0usize;
-        for (idx, job) in batch.items.iter().enumerate() {
-            let post_slot = if matches!(job.kind, ReadKind::Post(_)) {
-                let slot = post_idx;
-                post_idx += 1;
-                Some(slot)
-            } else {
-                None
-            };
+            )
+        });
+        let mut dirty = 0u64;
+        for (i, job) in p.jobs.iter().enumerate() {
             let Some(r) = rings.get_mut(job.ring) else {
                 continue;
             };
@@ -764,32 +799,84 @@ fn process_reader(
             if c.gen != job.gen {
                 continue;
             }
-            match job.kind {
-                ReadKind::Feed => match &feed_packets {
-                    Some((normal, close_packet)) => {
-                        let packet = if job.close { close_packet.clone() } else { normal.clone() };
-                        queue_shared(c, packet, job.close);
-                        stats::record(stats::FEED, job.at);
-                    }
-                    None => queue_reply(c, 500, &super::error("internal server error"), true),
-                },
-                ReadKind::Post(_) => {
-                    let found = post_slot.and_then(|i| resp.posts.get(i));
-                    match found {
-                        Some(Some(p)) => {
-                        let packet = if job.close {
-                            p.close.as_ref().unwrap_or(&p.normal).clone()
-                        } else {
-                            p.normal.clone()
-                        };
-                        queue_shared(c, packet, job.close);
-                        stats::record(stats::POST, job.at);
-                    }
-                    _ => {
-                        queue_reply(c, 404, &super::error("post not found"), job.close);
-                        stats::record(stats::POST, job.at);
-                    }
-                    }
+            match &feed_packets {
+                Some((normal, close_packet)) => {
+                    let packet = if job.close { close_packet.clone() } else { normal.clone() };
+                    queue_shared(c, packet, job.close);
+                    stats::record(stats::FEED, job.at);
+                }
+                None => queue_reply(c, 500, &super::error("internal server error"), true),
+            }
+            let close_now = c.close_after && c.out.len() == 0;
+            if close_now {
+                let _ = finish_close(&mut r.ring, &mut r.conns, job.slot);
+            } else {
+                let _ = arm_write(&mut r.ring, job.slot, c);
+                dirty |= 1u64 << job.ring;
+            }
+            if i % 256 == 255 {
+                process_writer(app, rings, write_rx);
+            }
+        }
+        if dirty != 0 {
+            for (i, r) in rings.iter_mut().enumerate() {
+                if dirty & (1u64 << i) != 0 {
+                    let _ = r.ring.submit();
+                }
+            }
+        }
+    }
+}
+
+fn process_post(
+    app: &mut App,
+    rings: &mut [RingState],
+    pending: &mut Option<PostPending>,
+    write_rx: &Receiver<WriteResult>,
+) {
+    loop {
+        let reply = match pending.as_ref().and_then(|p| p.rx.try_recv().ok()) {
+            Some(reply) => reply,
+            None => break,
+        };
+        let Some(p) = pending.take() else { break };
+        let mut dirty = 0u64;
+        for (i, job) in p.jobs.iter().enumerate() {
+            let Some(r) = rings.get_mut(job.ring) else {
+                continue;
+            };
+            let Some(c) = r.conns.get_mut(&job.slot) else {
+                continue;
+            };
+            if c.gen != job.gen {
+                continue;
+            }
+            let id = match job.kind {
+                ReadKind::Post(id) => id,
+                _ => continue,
+            };
+            let post = reply
+                .packets
+                .as_ref()
+                .and_then(|map| map.get(&id).cloned())
+                .flatten();
+            match post {
+                Some(post) => {
+                    let packet = if job.close {
+                        post.close.as_ref().unwrap_or(&post.normal).clone()
+                    } else {
+                        post.normal.clone()
+                    };
+                    queue_shared(c, packet, job.close);
+                    stats::record(stats::POST, job.at);
+                }
+                None if reply.packets.is_some() => {
+                    queue_reply(c, 404, &super::error("post not found"), job.close);
+                    stats::record(stats::POST, job.at);
+                }
+                None => {
+                    queue_reply(c, 500, &super::error("internal server error"), true);
+                    stats::record(stats::POST, job.at);
                 }
             }
             let close_now = c.close_after && c.out.len() == 0;
@@ -799,15 +886,15 @@ fn process_reader(
                 let _ = arm_write(&mut r.ring, job.slot, c);
                 dirty |= 1u64 << job.ring;
             }
-            if idx % 256 == 255 {
-                process_writer(app, rings, write_rx, read_tx);
+            if i % 256 == 255 {
+                process_writer(app, rings, write_rx);
             }
         }
-    }
-    if dirty != 0 {
-        for (i, r) in rings.iter_mut().enumerate() {
-            if dirty & (1u64 << i) != 0 {
-                let _ = r.ring.submit();
+        if dirty != 0 {
+            for (i, r) in rings.iter_mut().enumerate() {
+                if dirty & (1u64 << i) != 0 {
+                    let _ = r.ring.submit();
+                }
             }
         }
     }
@@ -817,7 +904,6 @@ fn process_writer(
     app: &mut App,
     rings: &mut [RingState],
     rx: &Receiver<WriteResult>,
-    read_tx: &Sender<ReadMsg>,
 ) {
     let mut dirty = 0u64;
     while let Ok(result) = rx.try_recv() {
@@ -825,11 +911,9 @@ fn process_writer(
         if result.feed_dirty {
             app.read.invalidate_feed();
             app.read.invalidate_post();
-            let _ = read_tx.send(ReadMsg::Dirty { feed: true, like: false });
         }
         if result.like_dirty {
             app.read.invalidate_like();
-            let _ = read_tx.send(ReadMsg::Dirty { feed: false, like: true });
         }
         let Some(r) = rings.get_mut(result.ring) else {
             continue;
@@ -864,62 +948,70 @@ fn process_writer(
     }
 }
 
-pub fn run(
-    mut app: App,
+pub fn run_shard(
+    db_path: String,
+    secret: Vec<u8>,
+    coalesce: bool,
     addr: String,
     write_tx: Sender<WriteJob>,
-    write_rx: Receiver<WriteResult>,
-    event_fd: RawFd,
-    read_tx: Sender<ReadMsg>,
-    read_res_rx: Receiver<ReadResponse>,
-    read_event_fd: RawFd,
+    write_result_tx: Sender<WriteResult>,
+    write_res_rx: Receiver<WriteResult>,
+    write_event_fd: RawFd,
+    feed_tx: Sender<FeedRequest>,
+    post_tx: Sender<PostRequest>,
+    dirty: Arc<AtomicU64>,
+    shard: usize,
 ) -> io::Result<()> {
-    let shards = std::env::var("SHARDS")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(4)
-        .clamp(1, MAX_RINGS);
-    let mut rings = Vec::with_capacity(shards);
-    for _ in 0..shards {
-        rings.push(RingState::new(&addr)?);
+    let mut app = App::open(&db_path, secret, coalesce)
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    let mut ring = RingState::new(&addr)?;
+    let read_event_fd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC) };
+    if read_event_fd < 0 {
+        return Err(io::Error::last_os_error());
     }
-    unsafe {
-        let name = b"event-loop\0";
-        libc::prctl(libc::PR_SET_NAME, name.as_ptr() as libc::c_ulong, 0, 0, 0);
-    }
-    let mut reads: Vec<ReadJob> = Vec::new();
-    let mut pending: Option<Arc<ReadBatch>> = None;
-    let mut fds: Vec<libc::pollfd> = Vec::with_capacity(MAX_RINGS + 2);
+    let _ = shard;
+    let mut feed_reads: Vec<ReadJob> = Vec::new();
+    let mut post_reads: Vec<ReadJob> = Vec::new();
+    let mut feed_pending: Option<FeedPending> = None;
+    let mut post_pending: Option<PostPending> = None;
+    let mut fds: Vec<libc::pollfd> = Vec::with_capacity(3);
     loop {
-        process_writer(&mut app, &mut rings, &write_rx, &read_tx);
-        process_reader(&mut app, &mut rings, &mut pending, &read_res_rx, &write_rx, &read_tx, &mut reads);
+        process_writer(&mut app, std::slice::from_mut(&mut ring), &write_res_rx);
+        process_feed(
+            &mut app,
+            std::slice::from_mut(&mut ring),
+            &mut feed_pending,
+            &write_res_rx,
+        );
+        process_post(
+            &mut app,
+            std::slice::from_mut(&mut ring),
+            &mut post_pending,
+            &write_res_rx,
+        );
         app.read.refresh();
-        for ri in 0..rings.len() {
-            process_ring(ri, &mut rings[ri], &mut app, &write_tx, &mut reads)?;
-            process_writer(&mut app, &mut rings, &write_rx, &read_tx);
-            process_reader(&mut app, &mut rings, &mut pending, &read_res_rx, &write_rx, &read_tx, &mut reads);
-        }
-        flush_reads(&mut reads, &mut pending, &read_tx);
-        process_writer(&mut app, &mut rings, &write_rx, &read_tx);
-        process_reader(&mut app, &mut rings, &mut pending, &read_res_rx, &write_rx, &read_tx, &mut reads);
-        let total: usize = rings.iter().map(|r| r.conns.len()).sum();
-        let need_ring = rings.iter().any(|r| r.accept_paused)
-            || (rings.len() < MAX_RINGS && total >= NEW_RING_AT * rings.len());
-        if need_ring && rings.len() < MAX_RINGS {
-            match RingState::new(&addr) {
-                Ok(r) => rings.push(r),
-                Err(e) => eprintln!("ring add failed: {e}"),
-            }
-        }
+        process_ring(
+            0,
+            &mut ring,
+            &mut app,
+            &write_tx,
+            &write_result_tx,
+            write_event_fd,
+            &mut feed_reads,
+            &mut post_reads,
+        )?;
+        process_writer(&mut app, std::slice::from_mut(&mut ring), &write_res_rx);
+        flush_feed(&mut feed_reads, &mut feed_pending, &feed_tx, read_event_fd);
+        flush_post(&mut post_reads, &mut post_pending, &post_tx, read_event_fd);
 
         fds.clear();
-        fds.extend(rings.iter().map(|r| libc::pollfd {
-            fd: r.ring.as_raw_fd(),
+        fds.push(libc::pollfd {
+            fd: ring.ring.as_raw_fd(),
             events: libc::POLLIN,
             revents: 0,
-        }));
+        });
         fds.push(libc::pollfd {
-            fd: event_fd,
+            fd: write_event_fd,
             events: libc::POLLIN,
             revents: 0,
         });
@@ -938,7 +1030,7 @@ pub fn run(
         let mut val = 0u64;
         unsafe {
             libc::read(
-                event_fd,
+                write_event_fd,
                 &mut val as *mut u64 as *mut libc::c_void,
                 size_of::<u64>(),
             );
@@ -948,8 +1040,20 @@ pub fn run(
                 size_of::<u64>(),
             );
         }
-        process_writer(&mut app, &mut rings, &write_rx, &read_tx);
-        process_reader(&mut app, &mut rings, &mut pending, &read_res_rx, &write_rx, &read_tx, &mut reads);
-        flush_reads(&mut reads, &mut pending, &read_tx);
+        process_writer(&mut app, std::slice::from_mut(&mut ring), &write_res_rx);
+        process_feed(
+            &mut app,
+            std::slice::from_mut(&mut ring),
+            &mut feed_pending,
+            &write_res_rx,
+        );
+        process_post(
+            &mut app,
+            std::slice::from_mut(&mut ring),
+            &mut post_pending,
+            &write_res_rx,
+        );
+        flush_feed(&mut feed_reads, &mut feed_pending, &feed_tx, read_event_fd);
+        flush_post(&mut post_reads, &mut post_pending, &post_tx, read_event_fd);
     }
 }

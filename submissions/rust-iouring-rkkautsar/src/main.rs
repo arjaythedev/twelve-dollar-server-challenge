@@ -2,6 +2,9 @@ use std::env;
 use std::io;
 use std::io::Write as _;
 use std::sync::mpsc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::thread;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 mod checkpoint;
@@ -41,34 +44,77 @@ fn main() -> io::Result<()> {
     let port = env::var("PORT").unwrap_or_else(|_| "3000".to_string());
     let db_path = env::var("SQLITE_PATH").expect("SQLITE_PATH");
     let secret = env::var("JWT_SECRET").expect("JWT_SECRET").into_bytes();
-
     let coalesce = env::var("READ_COALESCE").map(|v| v != "0").unwrap_or(true);
-    let (job_tx, job_rx) = mpsc::channel();
-    let (res_tx, res_rx) = mpsc::channel();
-    let (ready_tx, ready_rx) = mpsc::channel();
-    let event_fd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC) };
-    if event_fd < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    writer::spawn(db_path.clone(), job_rx, res_tx, event_fd, ready_tx);
-    let _ = ready_rx.recv();
-    checkpoint::spawn(db_path.clone());
-    let (read_tx, read_rx) = mpsc::channel();
-    let (read_res_tx, read_res_rx) = mpsc::channel();
-    let read_event_fd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC) };
-    if read_event_fd < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    reader::spawn(db_path.clone(), read_rx, read_res_tx, read_event_fd);
-    let read = ReadDb::open(&db_path).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-    let app = App {
-        read,
-        coalesce,
-        secret,
-        started: Instant::now(),
-    };
+    let shards = env::var("SHARDS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(4)
+        .clamp(1, 16);
     let addr = format!("{host}:{port}");
-    uring::run(app, addr, job_tx, res_rx, event_fd, read_tx, read_res_rx, read_event_fd)
+
+    let (job_tx, job_rx) = mpsc::channel();
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let dirty = Arc::new(AtomicU64::new(0));
+    writer::spawn(db_path.clone(), job_rx, dirty.clone(), ready_tx);
+    let _ = ready_rx.recv();
+    let (feed_tx, feed_rx) = mpsc::channel();
+    let (post_tx, post_rx) = mpsc::channel();
+    reader::spawn_feed(db_path.clone(), feed_rx, dirty.clone());
+    reader::spawn_post(db_path.clone(), post_rx, dirty.clone());
+
+    let mut handles = Vec::with_capacity(shards);
+    for shard in 0..shards {
+        let (res_tx, res_rx) = mpsc::channel();
+        let write_event_fd =
+            unsafe { libc::eventfd(0, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC) };
+        if write_event_fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let write_tx = job_tx.clone();
+        let feed_tx = feed_tx.clone();
+        let post_tx = post_tx.clone();
+        let path = db_path.clone();
+        let secret = secret.clone();
+        let addr = addr.clone();
+        let dirty = dirty.clone();
+        handles.push(
+            thread::Builder::new()
+                .name(format!("shard-{shard}"))
+                .spawn(move || {
+                    if let Err(e) = uring::run_shard(
+                        path,
+                        secret,
+                        coalesce,
+                        addr,
+                        write_tx,
+                        res_tx,
+                        res_rx,
+                        write_event_fd,
+                        feed_tx,
+                        post_tx,
+                        dirty,
+                        shard,
+                    ) {
+                        eprintln!("shard {shard} stopped: {e}");
+                    }
+                })?,
+        );
+    }
+    for handle in handles {
+        let _ = handle.join();
+    }
+    Ok(())
+}
+
+impl App {
+    pub(crate) fn open(path: &str, secret: Vec<u8>, coalesce: bool) -> Result<Self, String> {
+        Ok(Self {
+            read: ReadDb::open(path)?,
+            coalesce,
+            secret,
+            started: Instant::now(),
+        })
+    }
 }
 
 pub(crate) struct App {

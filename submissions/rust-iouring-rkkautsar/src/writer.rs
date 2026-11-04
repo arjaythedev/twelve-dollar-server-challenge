@@ -1,6 +1,8 @@
 use std::collections::HashSet;
 use std::os::fd::RawFd;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
+use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
 
@@ -15,6 +17,8 @@ pub struct WriteJob {
     pub at: Option<Instant>,
     pub stat: usize,
     pub cmd: WriteCmd,
+    pub result_tx: Sender<WriteResult>,
+    pub event_fd: RawFd,
 }
 
 pub struct WriteResult {
@@ -33,8 +37,7 @@ pub struct WriteResult {
 pub fn spawn(
     path: String,
     rx: Receiver<WriteJob>,
-    tx: Sender<WriteResult>,
-    event_fd: RawFd,
+    dirty: Arc<AtomicU64>,
     ready: Sender<()>,
 ) {
     thread::Builder::new()
@@ -54,11 +57,11 @@ pub fn spawn(
                 Err(_) => break,
             };
 
-            let mut jobs = Vec::with_capacity(64);
+            let mut jobs = Vec::with_capacity(2048);
             jobs.push(first);
             while let Ok(job) = rx.try_recv() {
                 jobs.push(job);
-                if jobs.len() >= 64 {
+                if jobs.len() >= 2048 {
                     break;
                 }
             }
@@ -69,14 +72,28 @@ pub fn spawn(
                 .map(|_| (500, error("internal server error")))
                 .collect();
 
-            let mut pair_count = 0usize;
+            let mut batch_ok = began;
             if began {
                 {
-                    let mut create = db
-                        .prepare("INSERT INTO posts (user_id, body) VALUES (?1, ?2) RETURNING id, created_at")
+                    let mut bulk_create = db
+                        .prepare(
+                            "INSERT INTO posts (user_id, body)
+                             SELECT CAST(value->>0 AS INTEGER), CAST(value->>1 AS TEXT)
+                               FROM json_each(?1)
+                             RETURNING id, created_at",
+                        )
                         .ok();
-                    let mut exists = db.prepare("SELECT 1 FROM posts WHERE id = ?1").ok();
                     let mut bulk_like = db
+                        .prepare(
+                            "INSERT INTO likes (user_id, post_id)
+                             SELECT CAST(value->>0 AS INTEGER), CAST(value->>1 AS INTEGER)
+                               FROM json_each(?1)
+                              WHERE 1
+                              ON CONFLICT (user_id, post_id) DO NOTHING
+                             RETURNING user_id, post_id",
+                        )
+                        .ok();
+                    let mut bulk_like_filtered = db
                         .prepare(
                             "INSERT INTO likes (user_id, post_id)
                              SELECT CAST(value->>0 AS INTEGER), CAST(value->>1 AS INTEGER)
@@ -87,105 +104,254 @@ pub fn spawn(
                              RETURNING user_id, post_id",
                         )
                         .ok();
+                    let mut bulk_exists = db
+                        .prepare(
+                            "SELECT CAST(value AS INTEGER)
+                               FROM json_each(?1)
+                              WHERE CAST(value AS INTEGER) IN (SELECT id FROM posts)",
+                        )
+                        .ok();
 
+                    let mut create_jobs: Vec<(usize, String, String)> = Vec::new();
+                    let mut creates: Vec<(i64, String)> = Vec::new();
                     let mut pairs: Vec<[i64; 2]> = Vec::new();
                     let mut pair_jobs: Vec<usize> = Vec::new();
 
                     for (i, job) in jobs.iter().enumerate() {
-                        match (&mut create, &job.cmd.kind) {
-                            (Some(create), WriteKind::Create {
+                        match &job.cmd.kind {
+                            WriteKind::Create {
                                 user_id,
                                 username,
                                 body,
-                            }) => {
-                                create.reset();
-                                create.bind_i64(1, *user_id);
-                                create.bind_text(2, body);
-                                if let Ok(true) = create.step() {
-                                    let id = create.column_i64(0);
-                                    let created_at = create.column_text(1);
-                                    let body_json = json_string(body);
-                                    let author_json = json_string(username);
-                                    let created_json = json_string(&created_at);
-                                    results[i] = (
+                            } => {
+                                create_jobs.push((i, body.clone(), username.clone()));
+                                creates.push((*user_id, body.clone()));
+                            }
+                            WriteKind::Like { user_id, post_id } => {
+                                pairs.push([*user_id, *post_id]);
+                                pair_jobs.push(i);
+                            }
+                        }
+                    }
+
+                    if !creates.is_empty() {
+                        let json = serde_json::to_string(&creates).unwrap_or_else(|_| "[]".to_string());
+                        let mut rows: Vec<(i64, String)> = Vec::with_capacity(creates.len());
+                        match bulk_create.as_mut() {
+                            Some(st) => {
+                                st.reset();
+                                st.bind_text(1, &json);
+                                loop {
+                                    match st.step() {
+                                        Ok(true) => {
+                                            rows.push((st.column_i64(0), st.column_text(1)));
+                                        }
+                                        Ok(false) => break,
+                                        Err(_) => {
+                                            batch_ok = false;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            None => batch_ok = false,
+                        }
+                        if batch_ok && rows.len() == creates.len() {
+                            rows.sort_unstable_by_key(|row| row.0);
+                            for ((i, body, username), (id, created_at)) in
+                                create_jobs.iter().zip(rows.iter())
+                            {
+                                let body_json = json_string(body);
+                                let author_json = json_string(username);
+                                let created_json = json_string(created_at);
+                                results[*i] = (
+                                    201,
+                                    format!(
+                                        "{{\"post\":{{\"id\":{id},\"body\":{body_json},\"created_at\":{created_json},\"author\":{author_json},\"like_count\":0}}}}"
+                                    )
+                                    .into_bytes(),
+                                );
+                            }
+                        } else {
+                            batch_ok = false;
+                        }
+                    }
+
+                    if batch_ok && !pairs.is_empty() {
+                        let json = serde_json::to_string(&pairs).unwrap_or_else(|_| "[]".to_string());
+                        let mut inserted: HashSet<(i64, i64)> = HashSet::with_capacity(pairs.len());
+                        let mut fallback = false;
+
+                        // Optimistic path: no post-existence pre-check.  The
+                        // FK on likes rejects a missing post; duplicate likes
+                        // simply return no row.
+                        match bulk_like.as_mut() {
+                            Some(st) => {
+                                st.reset();
+                                st.bind_text(1, &json);
+                                loop {
+                                    match st.step() {
+                                        Ok(true) => {
+                                            inserted.insert((st.column_i64(0), st.column_i64(1)));
+                                        }
+                                        Ok(false) => break,
+                                        Err(_) => {
+                                            fallback = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            None => batch_ok = false,
+                        }
+
+                        let mut existing: HashSet<i64> = HashSet::new();
+                        if batch_ok {
+                            if fallback {
+                                // A missing post aborted the optimistic
+                                // statement.  Resolve the whole batch, then
+                                // insert only candidates that exist.
+                                let unique_posts: Vec<i64> =
+                                    pairs.iter().map(|pair| pair[1]).collect::<HashSet<_>>().into_iter().collect();
+                                let json = serde_json::to_string(&unique_posts)
+                                    .unwrap_or_else(|_| "[]".to_string());
+                                match bulk_exists.as_mut() {
+                                    Some(st) => {
+                                        st.reset();
+                                        st.bind_text(1, &json);
+                                        loop {
+                                            match st.step() {
+                                                Ok(true) => {
+                                                    existing.insert(st.column_i64(0));
+                                                }
+                                                Ok(false) => break,
+                                                Err(_) => {
+                                                    batch_ok = false;
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    None => batch_ok = false,
+                                }
+                                if batch_ok {
+                                    let candidates: Vec<[i64; 2]> = pairs
+                                        .iter()
+                                        .filter(|pair| existing.contains(&pair[1]))
+                                        .copied()
+                                        .collect();
+                                    if !candidates.is_empty() {
+                                        let json = serde_json::to_string(&candidates)
+                                            .unwrap_or_else(|_| "[]".to_string());
+                                        match bulk_like_filtered.as_mut() {
+                                            Some(st) => {
+                                                st.reset();
+                                                st.bind_text(1, &json);
+                                                loop {
+                                                    match st.step() {
+                                                        Ok(true) => {
+                                                            inserted.insert((
+                                                                st.column_i64(0),
+                                                                st.column_i64(1),
+                                                            ));
+                                                        }
+                                                        Ok(false) => break,
+                                                        Err(_) => {
+                                                            batch_ok = false;
+                                                            break;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            None => batch_ok = false,
+                                        }
+                                    }
+                                }
+                            } else {
+                                // Existence is needed only for pairs that
+                                // produced no row: duplicate likes.
+                                let missing: Vec<i64> = pairs
+                                    .iter()
+                                    .filter(|pair| !inserted.contains(&(pair[0], pair[1])))
+                                    .map(|pair| pair[1])
+                                    .collect::<HashSet<_>>()
+                                    .into_iter()
+                                    .collect();
+                                if !missing.is_empty() {
+                                    let json = serde_json::to_string(&missing)
+                                        .unwrap_or_else(|_| "[]".to_string());
+                                    match bulk_exists.as_mut() {
+                                        Some(st) => {
+                                            st.reset();
+                                            st.bind_text(1, &json);
+                                            loop {
+                                                match st.step() {
+                                                    Ok(true) => {
+                                                        existing.insert(st.column_i64(0));
+                                                    }
+                                                    Ok(false) => break,
+                                                    Err(_) => {
+                                                        batch_ok = false;
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        None => batch_ok = false,
+                                    }
+                                }
+                            }
+                        }
+
+                        if batch_ok {
+                            for (pair, i) in pairs.iter().zip(pair_jobs.iter()) {
+                                if !fallback && inserted.remove(&(pair[0], pair[1])) {
+                                    results[*i] = (
                                         201,
                                         format!(
-                                            "{{\"post\":{{\"id\":{id},\"body\":{body_json},\"created_at\":{created_json},\"author\":{author_json},\"like_count\":0}}}}"
+                                            "{{\"liked\":true,\"already_liked\":false,\"post_id\":{}}}",
+                                            pair[1]
+                                        )
+                                        .into_bytes(),
+                                    );
+                                } else if fallback && !existing.contains(&pair[1]) {
+                                    results[*i] = (404, error("post not found"));
+                                } else if !fallback && !existing.contains(&pair[1]) {
+                                    results[*i] = (404, error("post not found"));
+                                } else if inserted.remove(&(pair[0], pair[1])) {
+                                    results[*i] = (
+                                        201,
+                                        format!(
+                                            "{{\"liked\":true,\"already_liked\":false,\"post_id\":{}}}",
+                                            pair[1]
+                                        )
+                                        .into_bytes(),
+                                    );
+                                } else {
+                                    results[*i] = (
+                                        200,
+                                        format!(
+                                            "{{\"liked\":true,\"already_liked\":true,\"post_id\":{}}}",
+                                            pair[1]
                                         )
                                         .into_bytes(),
                                     );
                                 }
                             }
-                            (_, WriteKind::Like { user_id, post_id }) => {
-                                pairs.push([*user_id, *post_id]);
-                                pair_jobs.push(i);
-                            }
-                            _ => {}
-                        }
-                    }
-
-                    pair_count = pairs.len();
-                    if !pairs.is_empty() {
-                        if let Some(bulk_like) = bulk_like.as_mut() {
-                            let json = serde_json::to_string(&pairs).unwrap_or_else(|_| "[]".to_string());
-                            bulk_like.reset();
-                            bulk_like.bind_text(1, &json);
-                            let mut inserted: HashSet<(i64, i64)> = HashSet::with_capacity(pairs.len());
-                            let mut bulk_ok = true;
-                            loop {
-                                match bulk_like.step() {
-                                    Ok(true) => {
-                                        inserted.insert((bulk_like.column_i64(0), bulk_like.column_i64(1)));
-                                    }
-                                    Ok(false) => break,
-                                    Err(_) => {
-                                        bulk_ok = false;
-                                        break;
-                                    }
-                                }
-                            }
-                            if bulk_ok {
-                                for (pair, i) in pairs.iter().zip(pair_jobs.iter()) {
-                                    if inserted.contains(&(pair[0], pair[1])) {
-                                        results[*i] = (
-                                            201,
-                                            format!(
-                                                "{{\"liked\":true,\"already_liked\":false,\"post_id\":{}}}",
-                                                pair[1]
-                                            )
-                                            .into_bytes(),
-                                        );
-                                    } else if let Some(exists) = exists.as_mut() {
-                                        exists.reset();
-                                        exists.bind_i64(1, pair[1]);
-                                        match exists.step() {
-                                            Ok(true) => {
-                                                results[*i] = (
-                                                    200,
-                                                    format!(
-                                                        "{{\"liked\":true,\"already_liked\":true,\"post_id\":{}}}",
-                                                        pair[1]
-                                                    )
-                                                    .into_bytes(),
-                                                );
-                                            }
-                                            Ok(false) => {
-                                                results[*i] = (404, error("post not found"));
-                                            }
-                                            Err(_) => {}
-                                        }
-                                    }
-                                }
-                            }
                         }
                     }
                 }
-                committed = db.commit().is_ok();
+                if batch_ok {
+                    committed = db.commit().is_ok();
+                }
                 if !committed {
                     let _ = db.rollback();
+                } else if !jobs.is_empty() {
+                    dirty.fetch_add(1, Ordering::Relaxed);
                 }
             }
 
+            let mut wake_fds: Vec<RawFd> = Vec::new();
             for (i, job) in jobs.into_iter().enumerate() {
                 let (status, body) = if committed {
                     results.get(i).cloned().unwrap_or_else(|| (500, error("internal server error")))
@@ -195,7 +361,9 @@ pub fn spawn(
                 let close = job.close || !committed;
                 let feed_dirty = matches!(job.cmd.kind, WriteKind::Create { .. });
                 let like_dirty = matches!(job.cmd.kind, WriteKind::Like { .. });
-                if tx
+                wake_fds.push(job.event_fd);
+                if job
+                    .result_tx
                     .send(WriteResult {
                         ring: job.ring,
                         slot: job.slot,
@@ -213,13 +381,17 @@ pub fn spawn(
                     return;
                 }
             }
+            wake_fds.sort_unstable();
+            wake_fds.dedup();
             let one = 1u64;
-            unsafe {
-                libc::write(
-                    event_fd,
-                    &one as *const u64 as *const libc::c_void,
-                    std::mem::size_of::<u64>(),
-                );
+            for event_fd in wake_fds {
+                unsafe {
+                    libc::write(
+                        event_fd,
+                        &one as *const u64 as *const libc::c_void,
+                        std::mem::size_of::<u64>(),
+                    );
+                }
             }
         }
     });

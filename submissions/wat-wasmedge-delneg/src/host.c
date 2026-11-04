@@ -13,6 +13,7 @@
 #include <pthread.h>
 #include <libgen.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -39,6 +40,7 @@ static inline int32_t rv(long r) { return r < 0 ? -errno : (int32_t)r; }
 FN(h_listen) { (void)d; (void)f;
   int fd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0); if (fd < 0) RET(-errno);
   int one = 1; setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+  const char *nd = getenv("NODELAY"); if (!nd || *nd != '0') setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
   struct sockaddr_in a; memset(&a, 0, sizeof a);
   a.sin_family = AF_INET; a.sin_port = htons((uint16_t)P(1)); a.sin_addr.s_addr = (uint32_t)P(0);
   if (bind(fd, (struct sockaddr *)&a, sizeof a) < 0 || listen(fd, P(2)) < 0) { int e = errno; close(fd); RET(-e); }
@@ -207,7 +209,7 @@ static void add(WasmEdge_ModuleInstanceContext *m, const char *name, WasmEdge_Ho
 // 64 MiB written since the last one, and the event loop waits for it. This thread fdatasyncs the WAL
 // file (its own fd: the sync covers the file, whoever wrote it) every 100 ms, so that sync finds little
 // left to write. It only makes data durable sooner; SQLite still does every sync it would do anyway.
-static char *walpath; static int walms;
+static char *walpath; static int walms, walon = 1;
 
 // Code pinning. On a 2 GB box with ~250k connections the sockets take ~1 GB of kernel memory and the kernel
 // evicts file pages, our machine code among them; the one loop thread then waits on disk for every evicted
@@ -238,13 +240,14 @@ static void pincode(const char *app) {
 }
 static void *walsync(void *a) {
   (void)a; int fd = -1; const char *pv = getenv("PIN"); long t = 0;
+  const char *wv = getenv("WALSYNC"); if (wv && *wv == '0') walon = 0;   // off: this thread only pins code
   if (pv && *pv == '0') pinfull = 0;
   const char *b = strrchr(appso, '/'); b = b ? b + 1 : appso;
   for (;; t += walms) {
     usleep((useconds_t)walms * 1000);
     if (pinfull && t % 5000 < walms && t <= 60000) pincode(b);
     if (fd < 0) fd = open(walpath, O_RDONLY | O_CLOEXEC);
-    if (fd >= 0) fdatasync(fd);
+    if (fd >= 0 && walon) fdatasync(fd);
   }
   return NULL;
 }

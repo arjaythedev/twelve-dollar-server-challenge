@@ -337,23 +337,41 @@
     (select (i32.add (local.get $d) (i32.const 48)) (i32.add (local.get $d) (i32.const 87))
             (i32.lt_u (local.get $d) (i32.const 10))))
 
+  ;; does this block hold a '"', a '\' or a control character?
+  (func $json_bad (param $v v128) (result i32)
+    (v128.any_true (v128.or (v128.or
+      (i8x16.eq (local.get $v) (v128.const i8x16 34 34 34 34 34 34 34 34 34 34 34 34 34 34 34 34))
+      (i8x16.eq (local.get $v) (v128.const i8x16 92 92 92 92 92 92 92 92 92 92 92 92 92 92 92 92)))
+      (i8x16.lt_u (local.get $v) (v128.const i8x16 32 32 32 32 32 32 32 32 32 32 32 32 32 32 32 32)))))
+
   ;; a JSON string, quoted and escaped
   (func $putjson (param $p i32) (param $n i32)
-    (local $e i32) (local $st i32) (local $c i32) (local $v v128)
+;; ($w stays in a local during the fast path; the bytes after the last full 16 are checked with one overlapping load)
+    (local $e i32) (local $st i32) (local $c i32) (local $v v128) (local $d i32) (local $r i32)
     (local.set $e (i32.add (local.get $p) (local.get $n)))
-    (call $putc (i32.const 34))
+    (local.set $d (global.get $w))
+    (i32.store8 (local.get $d) (i32.const 34))
+    (local.set $d (i32.add (local.get $d) (i32.const 1)))
     ;; 16 bytes at a time while none of them is '"', '\' or a control character
-    (block $slow (loop $fast
-      (br_if $slow (i32.gt_u (i32.add (local.get $p) (i32.const 16)) (local.get $e)))
-      (local.set $v (v128.load (local.get $p)))
-      (br_if $slow (v128.any_true (v128.or (v128.or
-        (i8x16.eq (local.get $v) (v128.const i8x16 34 34 34 34 34 34 34 34 34 34 34 34 34 34 34 34))
-        (i8x16.eq (local.get $v) (v128.const i8x16 92 92 92 92 92 92 92 92 92 92 92 92 92 92 92 92)))
-        (i8x16.lt_u (local.get $v) (v128.const i8x16 32 32 32 32 32 32 32 32 32 32 32 32 32 32 32 32)))))
-      (v128.store (global.get $w) (local.get $v))
-      (global.set $w (i32.add (global.get $w) (i32.const 16)))
-      (local.set $p (i32.add (local.get $p) (i32.const 16)))
-      (br $fast)))
+    (block $slow
+      (block $tail (loop $fast
+        (br_if $tail (i32.gt_u (i32.add (local.get $p) (i32.const 16)) (local.get $e)))
+        (local.set $v (v128.load (local.get $p)))
+        (br_if $slow (call $json_bad (local.get $v)))
+        (v128.store (local.get $d) (local.get $v))
+        (local.set $d (i32.add (local.get $d) (i32.const 16)))
+        (local.set $p (i32.add (local.get $p) (i32.const 16)))
+        (br $fast)))
+      (local.set $r (i32.sub (local.get $e) (local.get $p)))
+      (br_if $slow (i32.lt_u (local.get $n) (i32.const 16)))
+      (local.set $v (v128.load (i32.sub (local.get $e) (i32.const 16))))
+      (br_if $slow (call $json_bad (local.get $v)))
+      (local.set $d (i32.add (local.get $d) (local.get $r)))
+      (v128.store (i32.sub (local.get $d) (i32.const 16)) (local.get $v))
+      (i32.store8 (local.get $d) (i32.const 34))
+      (global.set $w (i32.add (local.get $d) (i32.const 1)))
+      (return))
+    (global.set $w (local.get $d))
     (local.set $st (local.get $p))
     (block $d (loop $l
       (br_if $d (i32.ge_u (local.get $p) (local.get $e)))

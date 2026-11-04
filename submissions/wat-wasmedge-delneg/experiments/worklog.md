@@ -1080,3 +1080,18 @@ x86 keeps load-load and store-store order, which is all SQLite's two header copi
 - 150k: b4s p95 118, p99 220, 11.96 us/req; h1bs p95 106, p99 215, 11.79 us/req -> the overhead is gone (E55 had +1.56)
 - 210k: h1bs r1 p50 5.8, p95 275, p99 440, max 744 ms, 16.15 us/req; b4s p50 38, p95 350, p99 550, max 967 ms, 17.07; h1bs r2 p50 3.6, p95 240, p99 390, max 601 ms, 15.59
 With E54's two baseline runs, b4 at 210k is p99 1,305 / 1,000 / 550 and h1 is 690 / 410 / 440 / 390. CPU 0 is busy 88 % against 91 %.
+
+## E59 (H10, H5b): WAT against clang -O3 and rustc opt-level=3 wasm, routine by routine (4 Nov, opt-box, AOT --optimize=3, one CPU, best of 5, source /tmp/tdsc-wat4/cmp, ~/watlab/compilers)
+ns per call, all merged and put through wasm-opt -O3 like the entry; WAT = the functions copied out of app.wat:
+- SHA-256 block: WAT 205, C 219, Rust 215. A hand-written round loop beats both compilers; nothing to learn there.
+- integer formatting (6 digits): WAT 9.8, C 11.8, Rust 12.5.
+- JSON string, 12 / 47 / 200 clean bytes: WAT 12.7 / 18.6 / 21.9; C 9.2 / 12.8 / 17.5; Rust 9.4 / 13.0 / 17.5.
+  The compilers keep the write cursor in a local for the whole loop; our WAT wrote the global $w on every step and
+  called $put/$putc for the rest. Taken from them: the local cursor. Added beyond them: the bytes after the last full 16
+  are checked with one overlapping 16-byte load, instead of a byte loop.
+  New $putjson: 12.9 / 5.9 / 15.7 ns (the short case is unchanged, it has no full block). A differential check against the
+  C version: 0 mismatches over 3M random strings with quotes, backslashes and control characters.
+  At ~40 putjson calls per /feed (20 bodies, 20 usernames) that is at most ~0.3 us per /feed, ~0.15 us per request.
+- memory.copy (H5b): 8-40 bytes 5.8 ns against an inline loop's 2.4-3.2; 100-200 bytes 6.3-7.0 against 6.7-8.6. So the runtime
+  call costs ~3 ns on small copies, not the tens of ns we assumed. SQLite's copies aren't worth replacing: dead.
+The compiler output has no trick that moves the total: our own code is a small slice of ~28-35 us and most of it matches or beats them.

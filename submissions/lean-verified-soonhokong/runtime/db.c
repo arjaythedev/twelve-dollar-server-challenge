@@ -97,13 +97,17 @@ static int CKPT_FRAMES = 500;      /* FEED_CKPT_FRAMES overrides it (for measure
                                       (30d259c) used 500 when the box held it at 290,000 (see
                                       write_window_us in uring.c). A checkpoint copies each page once
                                       however many frames it has, so larger ones write fewer pages */
-static int WAL_PAUSE_FRAMES = 8192;   /* see db_writes_ok; FEED_WAL_PAUSE_FRAMES overrides it (for measurements) */
-static int pause_at = 8192;
+static int WAL_PAUSE_FRAMES = 4096;   /* see db_writes_ok; FEED_WAL_PAUSE_FRAMES overrides it (for measurements) */
+static int pause_at = 4096;
 /* On one vCPU a checkpoint pass at the request thread's priority takes the CPU from the loop for
  * the length of the pass (c-iouring-public #158 measured passes of 300-430 ms at the memory wall,
- * as c-iouring-pavlyhalim #245's README cites); at nice 19 it runs while the loop waits between
- * batches. FEED_CKPT_NICE overrides it. */
-static int ckpt_nice = 19;
+ * as c-iouring-pavlyhalim #245's README cites). At nice 19 it ran only while the loop waited
+ * between batches, and c-iouring-pavlyhalim #278 found such a thread starved on the box once the
+ * CPU saturated (about 1.4 % of the CPU, where its checkpoints needed about 4.5 % at 300,000 users;
+ * the log grew to 970,000 frames); at nice 10 its log stayed under 4,300 frames at 310,000 users.
+ * At nice 10 the thread gets about a tenth of the CPU while the loop is busy (scheduler weights 110
+ * against 1024). FEED_CKPT_NICE overrides it. */
+static int ckpt_nice = 10;
 static u64_t WAL_PAUSE_NS = 300000000ull;  /* the longest write pause (below); FEED_PAUSE_MS overrides it */
 static sqlite3 *ckpt_db;
 static pthread_mutex_t ckpt_mu = PTHREAD_MUTEX_INITIALIZER;

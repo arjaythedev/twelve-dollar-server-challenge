@@ -420,7 +420,7 @@ insert: the posts of one batch share their `created_at`, and the feed orders the
 post's id comes from `sqlite3_last_insert_rowid` instead of `RETURNING`. Checkpoints run on a
 second thread with its own connection every 500 frames (passive, so the request thread never
 waits on an fsync). SQLite restarts the WAL only when a writer finds it fully checkpointed, which
-never happens under constant writes; past 8,192 frames, writes pause (reads go on) until a
+never happens under constant writes; past 4,096 frames, writes pause (reads go on) until a
 checkpoint has copied what is left, at most 300 ms (a few milliseconds on a fast disk; more where
 writes per second are limited, as on the cloud VM's volume). A VFS shim (`runtime/walvfs.c`)
 issues each commit's WAL frames in writes of up to 64 KiB (one write for a commit of up to 15
@@ -526,9 +526,10 @@ second and the hold passed with p99 14 ms. The rest is 512 receive buffers of 1 
 completion queues larger than a ring's connections (an overflow would allocate per completion when
 memory is shortest), and the first 8 MB of the code locked in memory as it first runs (reclaim would
 otherwise take the program's own pages back and the loop would stall reading them from disk).
-Checkpoints run at nice 19, so on one vCPU they take the CPU only while the loop waits between
-batches, and with `FEED_SPIN_US` the loop does not spin while one is due or running (The spin); the
-result that nice 19 came from has since been withdrawn (Credits). Ubuntu's 6.8 kernels
+Checkpoints run at nice 10: on one vCPU they get about a tenth of the CPU while the loop is busy and
+all of it while the loop waits between batches (at nice 19, the setting before, such a thread
+starved on the box once the CPU saturated: Credits, #278), and with `FEED_SPIN_US` the loop does not
+spin while one is due or running (The spin). Ubuntu's 6.8 kernels
 from 6.8.0-136 on (and the cloud VM's 6.8 kernel) reject the registration of provided-buffer rings
 with a zero reserved field (Launchpad #2162843); the server retries with a nonzero one, which those
 kernels accept and a correct kernel never sees.
@@ -803,7 +804,8 @@ Where an entry's code is not named below, the idea came from its README and the 
   more than the ring's buffers (the burst path of the receive, and with polls every read), polls for
   readiness, removing the poll before a close, 65,536-entry completion queues, smaller rings on
   `ENOMEM`, keeping the server's own memory small at the memory wall (the 48 MB cache here came from
-  our runs on the cloud VM), checkpoints at nice 19, locking the code (c-iouring-public #158 had it
+  our runs on the cloud VM), checkpoints at a low priority (nice 19 there, nice 10 here, as
+  c-iouring-pavlyhalim #278 found), locking the code (c-iouring-public #158 had it
   first), its 90 s keep-alive close, and its memory valve, off by default because it did not pay
   (the idle policy here is off by default too).
 * **rust-iouring-kensac #264** (its README, Connections, and the receive, read and pass-loop code
@@ -829,9 +831,9 @@ Where an entry's code is not named below, the idea came from its README and the 
   crystal-epoll-faustinoaq #193 had the checkpoint read and c-iouring-raoz #26 the
   `PROVIDE_BUFFERS` runs earlier.
 * **c-iouring-moneebullah25 #228** (first in #156): pausing writes, reads going on, past 8,192 log
-  frames until the log can restart; #153's and #224's READMEs explain why group commit needs it.
-  Its README also protects memory by closing keep-alives idle for 60 s and by shedding connections
-  near a connection cap, the two settings of the idle policy here (`FEED_IDLE_MS`,
+  frames (4,096 here) until the log can restart; #153's and #224's READMEs explain why group commit
+  needs it. Its README also protects memory by closing keep-alives idle for 60 s and by shedding
+  connections near a connection cap, the two settings of the idle policy here (`FEED_IDLE_MS`,
   `FEED_CONN_BUDGET`); the policy's choice, its Lean definition, its theorems and its C are ours.
 * **v-epoll-i098 #191.** The feed plan: the newest ids from `posts_created_at_id_idx`, one scan of
   `posts` when they are consecutive, one range scan of `likes_post_id_idx` (#153's `feed_tail` and
@@ -846,7 +848,7 @@ Where an entry's code is not named below, the idea came from its README and the 
   gives it about 1.4 % of the CPU, where the checkpoint needs about 4.5 % at 300,000 users, and in
   #278's load tests at 300,000 to 310,000 users it barely progressed for the rest of the hold (the
   log grew to 970,000 frames); at nice 10 the log stayed under 4,300 frames at 310,000 users, and
-  #278 runs the thread at nice 10. This entry still runs it at nice 19.
+  #278 runs the thread at nice 10, as this entry now does.
 
 Related, and not a source as far as we know: c-epoll-TheFirstIstari #64 closes its oldest idle
 keep-alive connections under file-descriptor pressure, as the idle policy here does under a

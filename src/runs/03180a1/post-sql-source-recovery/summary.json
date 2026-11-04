@@ -1,0 +1,40 @@
+{
+  "measurement": {
+    "load_run": "../post-sql-350000/summary.json",
+    "reconstruction": "native common-case source plus SQL-control preprocessor selection",
+    "source_and_patch_hash_match_image": true,
+    "reason": "Observer checkout was formatted between build and workload capture; the recorded server image remained unchanged"
+  },
+  "schema_version": 1,
+  "anchor": "03180a110fc85429171d6956bfeb2067876d4c6d",
+  "label": "post-sql-source-recovery",
+  "kind": "probe",
+  "started_at": "2026-11-04T18:21:40.361603+00:00",
+  "status": "passed",
+  "finished_at": "2026-11-04T18:21:40.366162+00:00",
+  "exit_code": 0,
+  "error": null,
+  "secondary_errors": [],
+  "workload": {
+    "kind": "source_provenance_recovery"
+  },
+  "instruments": {
+    "server_telemetry": "off",
+    "perf": "off",
+    "client_diagnostics": false
+  },
+  "provenance": {
+    "source": {
+      "base_commit": "03180a110fc85429171d6956bfeb2067876d4c6d",
+      "patch_sha256": "a8c898cc3ce50446f15d2785b6134ef4db7f85fc32603b1f528571e6d6bf8303",
+      "source_sha256": "ab33c59185e15261fa4bb79ef5fea049da177dfcd7b5c57e0c23f1f84c0cf700",
+      "patch": "source.patch"
+    },
+    "binary": {
+      "server": {
+        "image_id": "sha256:cff57ee75543444de25ecb9ab0e5eb090408c4ef2933b895fb49081c0cf85413",
+        "sha256": "d0b2bc840300e2e405ca5f480ae719633def608158d732a0d6b512c7df937551"
+      }
+    }
+  }
+}

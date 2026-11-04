@@ -168,9 +168,11 @@ struct tds_btree
 {
     sqlite3 *db;
     Btree *tree;
+    Schema *schema;
     Pgno roots[TDS_CURSOR_COUNT];
     Pgno likes_table;
     u32 schema_cookie;
+    int schema_generation;
     KeyInfo *likes_key;
     KeyInfo *feed_key;
     BtCursor *cursors[TDS_CURSOR_COUNT];
@@ -291,6 +293,8 @@ static int tds_schema(tds_btree *reader)
     reader->roots[TDS_FEED] = feed_index->tnum;
     reader->likes_table = likes->tnum;
     reader->schema_cookie = (u32)db->aDb[0].pSchema->schema_cookie;
+    reader->schema = db->aDb[0].pSchema;
+    reader->schema_generation = reader->schema->iGeneration;
     reader->likes_key = tds_key_info(db, like_index);
     reader->feed_key = tds_key_info(db, feed_index);
     return reader->likes_key && reader->feed_key ? SQLITE_OK : SQLITE_NOMEM;
@@ -316,7 +320,7 @@ static void tds_close_cursors(tds_btree *reader)
     reader->index_record.size = 0;
     reader->feed_posts.size = 0;
     reader->feed_users.size = 0;
-    memset(reader->feed_batch, 0, sizeof(reader->feed_batch));
+    /* Feed batches initialize their entries when filled, including after point reads */
 }
 
 int tds_btree_create(sqlite3 *db, tds_btree **out)
@@ -849,21 +853,21 @@ static void tds_like_position(BtCursor *cursor, int index)
     cursor->curFlags &= (u8) ~(BTCF_ValidNKey | BTCF_ValidOvfl);
 }
 
-static int tds_feed_counts(tds_btree *reader, const int *order)
+static int tds_like_counts(tds_btree *reader, tds_feed_entry *entries, int count, const int *order)
 {
     BtCursor *cursor = reader->cursors[TDS_LIKES];
     int skipped = 0;
     int i;
     int rc;
-    for (i = 0; i < reader->feed_batch_count; ++i)
+    for (i = 0; i < count; ++i)
     {
-        reader->feed_batch[i].like_count = 0;
+        entries[i].like_count = 0;
     }
-    if (!reader->feed_batch_count)
+    if (!count)
     {
         return SQLITE_OK;
     }
-    rc = tds_like_seek(reader, reader->feed_batch[order[0]].id);
+    rc = tds_like_seek(reader, entries[order[0]].id);
     i = 0;
     while (rc == SQLITE_ROW)
     {
@@ -885,15 +889,15 @@ static int tds_feed_counts(tds_btree *reader, const int *order)
                     return result;
                 }
             }
-            while (post_id > reader->feed_batch[order[i]].id)
+            while (post_id > entries[order[i]].id)
             {
-                if (++i == reader->feed_batch_count)
+                if (++i == count)
                 {
                     tds_like_position(cursor, cell);
                     return SQLITE_OK;
                 }
             }
-            entry = &reader->feed_batch[order[i]];
+            entry = &entries[order[i]];
             if (post_id < entry->id)
             {
                 /* Keep the gap budget across seeks, even when feed IDs are far apart */
@@ -925,6 +929,147 @@ static int tds_feed_counts(tds_btree *reader, const int *order)
         }
     }
     return rc == SQLITE_DONE ? SQLITE_OK : rc;
+}
+
+static int tds_post_read(tds_btree *reader, i64 id, tds_btree_post *out)
+{
+    tds_column post[4];
+    tds_column user[3];
+    tds_feed_entry entry = {0};
+    const int order = 0;
+    i64 user_id;
+    int rc = tds_seek_table(reader->cursors[TDS_POSTS], id);
+    if (rc != SQLITE_ROW)
+    {
+        return rc;
+    }
+    rc = tds_record_read(reader, TDS_POSTS, &reader->feed_posts);
+    if (rc == SQLITE_OK)
+    {
+        rc = tds_record_columns(reader->feed_posts.data, reader->feed_posts.size, 4, post);
+    }
+    if (rc != SQLITE_OK)
+    {
+        return rc;
+    }
+    if (tds_integer(&post[1], &user_id) != SQLITE_OK || !tds_text(&post[2]) || !tds_text(&post[3]))
+    {
+        return SQLITE_MISMATCH;
+    }
+    rc = tds_seek_table(reader->cursors[TDS_USERS], user_id);
+    if (rc != SQLITE_ROW)
+    {
+        return rc;
+    }
+    rc = tds_record_read(reader, TDS_USERS, &reader->feed_users);
+    if (rc == SQLITE_OK)
+    {
+        rc = tds_record_columns(reader->feed_users.data, reader->feed_users.size, 3, user);
+    }
+    if (rc != SQLITE_OK)
+    {
+        return rc;
+    }
+    if (!tds_text(&user[1]))
+    {
+        return SQLITE_MISMATCH;
+    }
+    entry.id = id;
+    rc = tds_like_counts(reader, &entry, 1, &order);
+    if (rc != SQLITE_OK)
+    {
+        return rc;
+    }
+    out->id = id;
+    out->body = (const char *)post[2].data;
+    out->body_bytes = (int)post[2].size;
+    out->created_at = (const char *)post[3].data;
+    out->created_at_bytes = (int)post[3].size;
+    out->author = (const char *)user[1].data;
+    out->author_bytes = (int)user[1].size;
+    out->like_count = entry.like_count;
+    return SQLITE_ROW;
+}
+
+int tds_btree_get_post(tds_btree *reader, sqlite3_int64 id, tds_btree_post *out)
+{
+    tds_btree_post row = {0};
+    sqlite3 *db;
+    int cookie;
+    int i;
+    int rc;
+    int ended;
+    if (!out)
+    {
+        return SQLITE_MISUSE;
+    }
+    memset(out, 0, sizeof(*out));
+    if (!reader)
+    {
+        return SQLITE_MISUSE;
+    }
+    db = reader->db;
+    sqlite3_mutex_enter(db->mutex);
+    if (!db->autoCommit || db->nVdbeActive || db->nVdbeExec || reader->active || reader->opened)
+    {
+        rc = SQLITE_MISUSE;
+        goto done;
+    }
+    if (reader->tree != db->aDb[0].pBt || reader->schema != db->aDb[0].pSchema ||
+        !DbHasProperty(db, 0, DB_SchemaLoaded) || ENC(db) != SQLITE_UTF8 ||
+        reader->schema_generation != reader->schema->iGeneration)
+    {
+        rc = SQLITE_SCHEMA;
+        goto done;
+    }
+    sqlite3BtreeEnter(reader->tree);
+    if (sqlite3BtreeTxnState(reader->tree) != SQLITE_TXN_NONE)
+    {
+        rc = SQLITE_MISUSE;
+        goto leave;
+    }
+    rc = sqlite3BtreeBeginTrans(reader->tree, 0, &cookie);
+    if (rc == SQLITE_OK && (u32)cookie != reader->schema_cookie)
+    {
+        rc = SQLITE_SCHEMA;
+    }
+    for (i = TDS_POSTS; rc == SQLITE_OK && i < TDS_FEED; ++i)
+    {
+        KeyInfo *key = i == TDS_LIKES ? reader->likes_key : 0;
+        Pgno table = i == TDS_LIKES ? reader->likes_table : reader->roots[i];
+        rc = sqlite3BtreeLockTable(reader->tree, (int)table, 0);
+        if (rc != SQLITE_OK)
+        {
+            break;
+        }
+        sqlite3BtreeCursorZero(reader->cursors[i]);
+        rc = sqlite3BtreeCursor(reader->tree, reader->roots[i], 0, key, reader->cursors[i]);
+        if (rc == SQLITE_OK)
+        {
+            reader->opened |= 1u << i;
+        }
+    }
+    if (rc == SQLITE_OK)
+    {
+        rc = tds_post_read(reader, id, &row);
+    }
+    /* Cursed ownership detail: schema failure can own a snapshot without opening any cursor */
+    tds_close_cursors(reader);
+    /* Read-only phase one is a no-op, phase two releases the pager and WAL read mark */
+    ended = sqlite3BtreeCommitPhaseTwo(reader->tree, 0);
+    if (ended != SQLITE_OK)
+    {
+        rc = ended;
+    }
+leave:
+    sqlite3BtreeLeave(reader->tree);
+done:
+    sqlite3_mutex_leave(db->mutex);
+    if (rc == SQLITE_ROW)
+    {
+        *out = row;
+    }
+    return rc;
 }
 
 static int tds_feed_posts(tds_btree *reader, const int *order)
@@ -1054,7 +1199,7 @@ static int tds_feed_materialize(tds_btree *reader)
         }
         order[j] = i;
     }
-    rc = tds_feed_counts(reader, order);
+    rc = tds_like_counts(reader, reader->feed_batch, reader->feed_batch_count, order);
     if (rc == SQLITE_OK)
     {
         rc = tds_feed_posts(reader, order);

@@ -15,6 +15,7 @@ benchmarks/*
 !benchmarks/history.cpp
 !benchmarks/wal_advice.cpp
 !benchmarks/wal_vfs.cpp
+!benchmarks/btree_post.cpp
 tests/*
 !tests/CMakeLists.txt
 !tests/*.cpp

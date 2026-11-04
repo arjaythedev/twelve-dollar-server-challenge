@@ -1,8 +1,8 @@
 #include "database.hpp"
-#include "wal_vfs.hpp"
 #include "../app/post_writer.hpp"
 #include "../diagnostics/database.hpp"
 #include "../sqlite_read.h"
+#include "wal_vfs.hpp"
 
 #include <sqlite3.h>
 
@@ -62,9 +62,8 @@ Connection open(const std::string &path)
     sqlite3 *raw = nullptr;
     // Both handles coordinate WAL locks in-process; external tools must wait until shutdown
     // locking_mode=EXCLUSIVE would also obstruct our checkpoint connection
-    const int result = sqlite3_open_v2(path.c_str(), &raw,
-                                       SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX,
-                                       storage::wal_vfs_name());
+    const int result = sqlite3_open_v2(
+        path.c_str(), &raw, SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX, storage::wal_vfs_name());
     Connection db(raw);
     if (result != SQLITE_OK)
     {
@@ -672,6 +671,27 @@ bool Store::post(PostId id, PostWriter &writer)
     state_->transactions.require_ready();
     state_->diagnostics.report();
     [[maybe_unused]] const auto sample = state_->diagnostics.measure(DatabaseOperation::post);
+#ifndef TDS_POST_SQL_CONTROL
+    if (state_->tree)
+    {
+        tds_btree_post row{};
+        const int result = tds_btree_get_post(state_->tree.get(), id.value, &row);
+        if (result == SQLITE_DONE)
+        {
+            return false;
+        }
+        if (result == SQLITE_ROW)
+        {
+            // The bridge owns these bytes after releasing its per-request SQLite snapshot
+            write_post(writer, row);
+            writer.finish();
+
+            return true;
+        }
+        // Failed direct reads retire their snapshot before the prepared statement takes over
+        state_->transactions.require_ready();
+    }
+#endif
     auto query = state_->post.use();
     query.bind(1, id.value);
     if (!query.next())

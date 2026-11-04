@@ -19,10 +19,9 @@ Unchecked items are experiments; checked items include completed work and discar
 
 ### 2. Common-request CPU
 
-- [ ] Compare a direct B-tree point reader with prepared SQL for `GET /posts/:id` ([current SQL path](src/server/storage/database.cpp), [feed cursor API](src/server/sqlite_read.h)). Post reads were about 46% of requests in the historical 350k profile; confirm their current CPU share.
-  Try a one-shot read-only B-tree transaction, avoiding SQL BEGIN/COMMIT and the unused feed cursor. Copy post/author bytes before closing cursors; preserve one fresh snapshot, current like counts, missing-author JOIN behavior and SQL fallback after cleanup.
-  Compare the complete Application read path and identical JSON, including snapshot setup/teardown. Test schema cookie/generation changes and failures before any cursor opens; an owned transaction still needs cleanup there.
-  The current five-minute profile attributes 4.5% of CPU to the whole route, including required work; this is an upper bound for a replacement.
+- [x] Compare the direct B-tree reader for `GET /posts/:id` against prepared SQL. The [native probe](src/runs/03180a1/btree-post-common-native/summary.json) used 22.4% less CPU; the [350k pair](src/runs/03180a1/post-btree-350000-comparison/summary.json) used 0.74% less total CPU and 3.83% less user CPU, with kernel CPU effectively unchanged and zero errors.
+  The reader owns one fresh snapshot, copies post/author bytes before cleanup and retains SQL fallback for unsupported schema or read errors. Snapshot, schema, allocation-error and borrowed-transaction contracts passed.
+  The complete post route used 4.5% of CPU in the five-minute profile, including required traversal and output. Native savings do not apply to the whole server.
 
 - [ ] Skip storing irrelevant header values in [Parser callbacks](src/server/http/parser.cpp), while llhttp still validates every byte and handles framing. Match fragmented, case-insensitive `authorization` fields and copy only required request data.
   Preserve existing field/value size limits, duplicate-header behavior, early auth errors, fragments, chunking and pipelining. Measure copies/allocations before considering a second HTTP parser.
@@ -54,6 +53,7 @@ Unchecked items are experiments; checked items include completed work and discar
   Low priority after READ: the current short profile no longer identifies wakeup handling as a significant hotspot; symbol attribution can omit inlined work.
 
 - [ ] Compare process-local TCP options independently: `TCP_NODELAY` for small responses, `TCP_DEFER_ACCEPT` for churn and explicitly uncorked `TCP_CORK` for deliberate coalescing ([TCP options](https://man7.org/linux/man-pages/man7/tcp.7.html)).
+  Screen listener `TCP_NODELAY` off/on first, verifying inheritance on accepted sockets before HTTP tests. The listener currently sets only `SO_REUSEADDR`; Pavly enables NODELAY. Extra packets can increase CPU, so compare packet counts alongside latency.
   Accepted sockets use direct descriptors: never pass a fixed-file slot to `setsockopt()`. Check supported io_uring socket commands or listener-option inheritance first. Measure packets, CPU and p99; the existing single header/body send already coalesces output, corking can delay it, and deferred accept mainly affects establishment. Keep system-wide kernel settings unchanged.
   Separately skip poll-first when `IORING_CQE_F_SOCK_NONEMPTY` reports unread data; retain the idle path and test fragments, pipelining and terminal completions.
 
@@ -143,6 +143,7 @@ Unchecked items are experiments; checked items include completed work and discar
   Measure saved parsing and allocations against the extra checks and duplicated protocol logic. Keep the current llhttp parser path as the reference.
 
 - [ ] Test multishot receive after the simpler accept and work-budget comparisons.
+  Start with fixed-work native messages against the current one-shot RECV/POLL_FIRST path; compare SQEs/CQEs, CPU, buffer pressure and memory before HTTP integration. Generator think times are 3-8 seconds, so simply skipping POLL_FIRST mostly targets fragments and pipelines.
   It needs separate stable receive/send operation identities, terminal-CQE tracking and bounded `ENOBUFS` rearming; the current one-operation-per-connection model cannot track concurrent receive/send operations.
   Bound queued input while sends are outstanding, preserve HTTP response order and return each selected buffer exactly once, including shutdown and cancellation.
 

@@ -39,6 +39,12 @@ extern "C"
      * Return ROW, DONE, or an error requiring SQL fallback; end before COMMIT/ROLLBACK */
     int tds_btree_post_exists(tds_btree *reader, sqlite3_int64 id);
 
+    /* Own one fresh read snapshot in autocommit mode with no active SQL or bridge cursors
+     * Return ROW, DONE for a missing post/author, or an error requiring SQL fallback
+     * Non-ROW output is zeroed and every owned cursor/transaction ends before return
+     * Copied UTF-8 text survives until the next bridge call, end, or destroy */
+    int tds_btree_get_post(tds_btree *reader, sqlite3_int64 id, tds_btree_post *out);
+
     /* Return ROW, DONE, or a SQLite error. Other errors require the SQL fallback.
      * Text is UTF-8, need not be terminated, and survives until the next read/end. */
     int tds_btree_feed_next(tds_btree *reader, tds_btree_post *out);

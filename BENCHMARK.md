@@ -111,8 +111,14 @@
 | C++ 0.1.0 (ring diagnostics, 60-s ramp) | 350,000 | 30 s | 3,072,657 | 23,635.67 | 4.581 ms | 5.966 ms | 42.38 ms | 0% | 24.35 us | 947.70 MiB |
 | C++ 0.1.0 ([WAL plain, Linux loopback](src/runs/79cd8ce/wal-plain-350000-v2/summary.json)) | 350,000 | 60 s | 3,628,673 | 27,912.89 | 14.093 ms | 20.111 ms | 38.67 ms | 0% | 20.78 us | 991.79 MiB |
 | C++ 0.1.0 ([WAL coalesced, Linux loopback](src/runs/79cd8ce/wal-coalesced-350000/summary.json)) | 350,000 | 60 s | 3,627,973 | 27,907.46 | 14.217 ms | 20.281 ms | 90.69 ms | 0% | 20.40 us | 965.11 MiB |
+| C++ 0.1.0 ([SQL post, Linux loopback](src/runs/03180a1/post-sql-350000/summary.json)) | 350,000 | 60 s | 3,627,917 | 27,906.87 | 13.911 ms | 20.169 ms | 82.00 ms | 0% | 20.10 us | 967.48 MiB |
+| C++ 0.1.0 ([B-tree post, Linux loopback](src/runs/03180a1/post-btree-350000/summary.json)) | 350,000 | 60 s | 3,627,802 | 27,905.97 | 13.356 ms | 19.688 ms | 116.18 ms | 0% | 19.95 us | 965.43 MiB |
 
 WAL coalescing, 350k short pair: cap 32, CQ 128/8 ms, seed 20261104, fresh seed copies, telemetry/perf off. CPU/request -1.84%, kernel CPU -2.04%; hold p99 20.90 to 20.96 ms. [Data](src/runs/79cd8ce/wal-coalescing-350000-comparison/summary.json).
+
+Direct post reads, native Application path including JSON, six rotated 50k-request pairs: 0/1/4/16 likes, 20% misses, telemetry off. Reused output: 1.72 to 1.34 us/read (-22.4%); fresh output: 1.75 to 1.42 us/read. Identical status/JSON; six native contracts passed. No HTTP transport. [Data](src/runs/03180a1/btree-post-common-native/summary.json). The earlier 0/1/32/257-like fixture measured -39.6% ([data](src/runs/03180a1/btree-post-native/summary.json)).
+
+Direct post reads, 350k short pair with WAL coalescing, cap 32 and CQ 128/8 ms fixed: total CPU -0.74%, user CPU -3.83%, kernel CPU +0.40%; hold p99 21.22 to 20.65 ms. Same seed and generator, fresh seed copies, telemetry/perf off, zero errors. [Data](src/runs/03180a1/post-btree-350000-comparison/summary.json).
 
 CQ rotation and dispatch/wait cleanup: 70k A/B CPU/request -1.2%. Matched 350k/5m B/A: CPU/request +0.5%, hold p99 6.12 to 6.05 ms, peak RAM +47.67 MiB. Same seed, fresh seeded databases and generator; zero errors or memory-limit events. Rotation removed after no clear gain; accept/wait cleanup retained. [Data](src/runs/legacy/benchmark-cq-rotation/summary.json).
 

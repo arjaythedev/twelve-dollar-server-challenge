@@ -28,6 +28,7 @@ COPY benchmarks/telemetry.cpp ./benchmarks/telemetry.cpp
 COPY benchmarks/history.cpp ./benchmarks/history.cpp
 COPY benchmarks/wal_advice.cpp ./benchmarks/wal_advice.cpp
 COPY benchmarks/wal_vfs.cpp ./benchmarks/wal_vfs.cpp
+COPY benchmarks/btree_post.cpp ./benchmarks/btree_post.cpp
 ARG TDS_TELEMETRY=off
 
 FROM build-base AS build

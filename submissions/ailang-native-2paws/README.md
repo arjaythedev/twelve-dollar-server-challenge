@@ -82,7 +82,7 @@ These rows were measured with a server built by the AILANG optimizing compiler `
 
 Memory at 190,000 connections: 1,095 MB peak, against 49 MB idle, or about 5.5 KB per connection. About 4 KB of that is the kernel's own socket memory; most of the rest is database pages in the page cache.
 
-**Above the connection limit:** each process accepts at most `HTTP_NSLOT` connections, so the default four processes hold 262,080. A connection beyond that is accepted and closed at once, so the client sees it closed, and the server keeps serving the connections it has. With a single process (`HTTP_FRONTS=0`) that limit is 65,520; it held 65,500 users with 0 errors. If `HTTP_NSLOT` is set above the descriptor limit, new connections wait in the kernel's backlog instead and the server spends its time retrying `accept`, which is why the default stays under it.
+**Above the connection limit:** each process accepts at most `HTTP_NSLOT` connections, so the default three front processes and the database process hold 262,080 together. A connection beyond that is accepted and closed at once, so the client sees it closed, and the server keeps serving the connections it has. With a single process (`HTTP_FRONTS=0`) that limit is 65,520; it held 65,500 users with 0 errors. If `HTTP_NSLOT` is set above the descriptor limit, new connections wait in the kernel's backlog instead and the server spends its time retrying `accept`, which is why the default stays under it.
 
 ### Without memory or descriptor limits (earlier build)
 

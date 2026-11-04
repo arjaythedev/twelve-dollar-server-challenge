@@ -85,3 +85,12 @@
 {"id": "E64", "box": "synteq", "harness": "v3 cap 3000, 2-min", "hyp": "H1c", "reps": {"k5_240": [16.6, 164], "k5_260": [18, 124], "k5_280": [65, 235]}, "status": "step change; 5-min next"}
 {"id": "E67", "box": "synteq", "harness": "v3 cap 3000, 5-min", "hyp": "H1c", "reps": {"k5_280": [3110, 5320], "k4_260": [860, 1255]}, "status": "k5 fails: 3x inline fired"}
 {"id": "E68", "box": "synteq", "harness": "v3 cap 3000, 5-min", "hyp": "H1c", "reps": {"k6_260": [42, 280], "k6_280": [280, 1050], "k6n0_280": [260, 770]}, "status": "k6 passes 260k; 280k borderline; repeats running"}
+{"id": "E73", "box": "synteq", "harness": "v3 cap 3000, 5-min", "hyp": "H1c,H24", "reps": {"t400_280": [[75, 310], [126, 420], [77, 325]], "t200_280": [[53, 295], [59, 300]], "t400_290": [270, 1210]}, "status": "passes 280k"}
+{"id": "E74", "box": "synteq", "harness": "v2 spin, 5-min, 220k", "hyp": "H1c", "reps": {"k6s": [3.25, 25], "b4s": [925, 2440]}, "status": "k6 far ahead"}
+{"id": "E75", "box": "synteq", "harness": "v3 cap 3000, 2-min", "hyp": "H21,H23,H22,H6", "status": "H21 small gain kept; H23 no change; H22 dead; H6 noise"}
+{"id": "E76", "box": "synteq", "harness": "v3 SRVMB=1650 + read cap 3000, 5-min", "reps": {"b4_210": [640, 820], "k6_240": [3495, 5320], "k6_260": [5320, 5320]}, "status": "thrash; calibration known too harsh"}
+{"id": "E77", "box": "synteq", "harness": "v3 cap 1500 r+w, 5-min", "reps": {"k6_240": [69, 440], "k6_260": [90, 455], "b4_210": [1405, 1970]}, "status": "k6 passes; baseline fails like the scorer"}
+{"id": "E78", "box": "synteq", "harness": "v3 cap 3000, 5-min", "hyp": "H27,H24", "reps": {"t200n0_290": [98, 350], "t200_290": [1075, 3305], "t200n0_280": [74, 320]}, "status": "nice 0, tail 200 default"}
+{"id": "E79", "box": "synteq", "harness": "v3 cap 3000, 5-min", "reps": {"k7_290": "OOM", "k7_280": "OOM"}, "status": "hog 86 MB bigger; margin < 90 MB at 280-290k"}
+{"id": "E80", "box": "synteq", "harness": "v3 cap 3000, DROP=1, 5-min", "reps": {"k7_270": [[51, 305], [255, 1035]], "k7_280": ["OOM", [81, 340]], "f4000_280": "OOM", "f4000_290": "OOM"}, "status": "memory wall 270-280k"}
+{"id": "E81", "box": "synteq", "harness": "v3 cap 3000, DROP=1, 5-min", "reps": {"k7_260": [[56, 335], [52, 355]], "b4_210": [670, 855]}, "status": "k7 passes 260k twice; baseline fails 210k"}

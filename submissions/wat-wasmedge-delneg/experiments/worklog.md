@@ -1195,3 +1195,18 @@ Less memory (SRVMB=1650, cap 3,000 writes and reads, CKPT_TAIL=200): k6 240k 3,4
 - 280k: CKPT_TAIL=200 CKPT_NICE=0 74/320/819; CKPT_TAIL=200 nice 10 53/295/665, 59/300/846
 H27 reverses E63's "within noise": with the hold the checkpointer's speed sets how long POSTs wait, and at 290k a niced one loses on a loaded CPU. Defaults now CKPT_TAIL=200 and CKPT_NICE=0 (build k7, wasm ba492bfc, 42/42, h1check 391 checks 0 stale, 0 of 2,270 missing after kill -9; holdcheck 0 bad, 0 of 2,156 missing).
 
+## E75, E79 (H21, H23, H22, H6; memory margin) (4 Nov, harness v3, cap 3,000, CKPT_TAIL=200)
+2-minute A/Bs at 270k, ms p95/p99, us/req, two reps each: NODELAY on 24/194 14.50, 29/210 13.69; off 33/205 15.36, 33/210 15.59 (H21: small gain, keep). WALSYNC=0 23/193 14.27, 24/184 14.60 (H23: the flusher no longer buys any latency; left in, it keeps the loss window after a power cut at 100 ms). 
+k6 with a 16 MiB cache at 290k, nice 10: 2,085/5,320, RSS only ~17 MB lower (H22: dead, the pages it stops caching come back as page cache or disk reads). wasm-opt -O4 --converge against -O3 at 150k: 13.71, 13.68 vs 14.73, 13.97 us/req, p95 2.7 both, 432 B smaller (H6: within noise of what E56 calls noise, not taken).
+E79, 5-minute holds, k7: 290k OOM-killed 1 min into the hold (96.7 % errors), 280k OOM-killed 3 min in. Same settings on k6 passed at 15:46-16:00 (E78). The two runs differ in one thing: the hog was 86 MB bigger (10,382 against 10,296 MiB at 280k), since it's sized from MemAvailable, which read higher after the AOT step; memory snapshots otherwise match within 1 MB (AnonPages +88 MB, MemAvailable -88 MB, slab equal). So the margin at 280-290k is under ~90 MB: a harness measurement error of that size flips a pass into an OOM kill. Rerun with drop_caches before sizing the hog (E80).
+
+## E80, E81 (H1c): the final build against the memory wall (4 Nov, harness v3, cap 3,000, SRVMB=1900, drop_caches before sizing the hog, 5-minute holds; ms p95/p99/max)
+k7 = wasm ba492bfc, CKPT_TAIL=200, CKPT_NICE=0.
+- 260k: 56/335/1,716, 52/355/2,536. Passes twice, 0 errors. Baseline b4 at 210k: 670/855/1,331, p95 FAIL.
+- 270k: 51/305/825 pass; 255/1,035/4,999 fails p99 by 35 ms
+- 280k: OOM-killed (41 % errors); 81/340/2,016 pass
+- CKPT_FRAMES=4000: 280k and 290k OOM-killed; no help (H4)
+drop_caches narrowed the hog's noise but didn't remove it (10,367-10,522 MiB, not monotonic in users). The wall is memory: 2.5 GB of slab at 280k on this box counts both ends, sockets dominate, RSS 164 MB of which SQLite's cache is 64. A stall burst of tcp pages then tips it over. f220565 on the scorer held 270k and died at 280k, so 260-270k is what I'd expect there; unchecked until scored.
+Summary against the brief's bar: 5-minute holds with 0 errors, final settings or within one knob of them: 260k passes on cap 3,000 (5 of 5 incl. E71-E72), 260k at cap 1,500 (1 of 1); baseline fails 210k at both caps and at 240k. Spin harness v2 220k 3/25 vs 925/2,440.
+Not done: the scorer itself. Every number here is Synteq. C is host.c 304 + sqlite_glue.c 146 lines; a WAT port of the VFS could cut that, not attempted.
+

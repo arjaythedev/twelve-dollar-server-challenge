@@ -167,4 +167,20 @@ H1c: E73, E74, E77: repeated 5-min holds: 280k passes 4 of 4 with tail <= 400 at
 H22 (context): E76: memory is the wall; SRVMB 1650 thrashes k6 at 240k
 H27: E78: alive after all with the hold: 290k passes twice at nice 0, fails twice at nice 10; default now 0
 H24: E78: with a hold the tail target matters: 200 best at 280-290k; default now 200
+H21: E75: small gain (15 % fewer p95 ms, ~1 us/req); kept
+H23: E75: no latency change with WALSYNC=0; flusher kept for the 100 ms loss window, can go if Denis prefers less C
+H22: E75: dead, 16 MiB cache worse at 290k
+H6: E75: within noise, not taken
+H1c: E80, E81: k7 260k 56/335, 52/355; 270k 51/305, 255/1,035; 280k OOM, 81/340. Memory wall at 270-280k. HELPS, the result of this round
+H1: helps only with H1c: the second instance alone gave little under the cap (E62), and the hold needs it
+H4: E80: CKPT_FRAMES=4000 no help at the wall; with no stall on the loop the threshold stopped mattering. Dead
+H2: done (E61, E77): harness v3; cap 1,500 reproduces the baseline's 210k failure
+H20: dead: "240k is pure capacity" is wrong; 280k passes when memory lasts, at 16 us/req
+H1b: not needed, two VMs in one process work
+H13: untested: VACUUM to 8-16 KiB pages at start risks the 60 s health limit; less page-write work no longer matters without a loop stall
+H15: untested: tcp stays < 1,000 pages when the loop doesn't stall; only post-stall bursts remain, and buffer limits there would drop data, not save the run
+H16: blocked: threads/shared memory stay rejected, H1 got the same result without them
+H17, H25: no new reason beyond E19's noise; untested
+H18: blocked: wasi-sdk has no profile runtime for wasm32-wasip1
+H19: untested: expected ~1 % of CPU; CPU is not the limit now, memory is
 

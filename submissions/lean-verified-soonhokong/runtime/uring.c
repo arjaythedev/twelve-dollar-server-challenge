@@ -1175,30 +1175,29 @@ static void present_held(void) {
  * when the CPU is saturated. FEED_PERIOD_US overrides it (for measurements). */
 static long period_us = 2000;
 
-/* Spinning instead of halting. Between batches the loop keeps the CPU: it watches ring 0's
- * completion queue and task-work flag for up to spin_us (and at most the rest of the period, so by
- * default for the whole wait) before it sleeps, and the idle wait spins that long before
- * epoll_wait. A guest whose CPU has nothing to run halts and gives its core back to the host; on a
- * host that runs other guests there, a halt can cost a wakeup delay and cold caches. This server
- * uses less CPU per request than the entries above it, so at a given load it halts more often:
- * on a KVM guest set up like the box, 0.24 halts a request at 290,000 users against 0.10 for
- * rust-iouring-kensac #264 at 310,000, and the box charged it more CPU per request than that guest
- * did (README, "Why the loop spins"). Spinning brings it to 0.06, at the same latency there; the
- * CPU it spends shows in the cgroup's CPU time. Not while the checkpoint thread wants the CPU
- * (ckpt_wanted): the loop then sleeps as before, so the thread gets the idle time.
- * FEED_SPIN_US overrides it (0: halt as before). */
-static long spin_us = 2000;
+/* Spinning instead of halting, off by default. With FEED_SPIN_US set, between batches the loop
+ * keeps the CPU: it watches ring 0's completion queue and task-work flag for up to spin_us (and at
+ * most the rest of the period) before it sleeps, and the idle wait spins that long before
+ * epoll_wait. A guest whose CPU has nothing to run halts and gives its core back to the host. On a
+ * KVM guest set up like the box this server halted 0.24 times a request at 290,000 users against
+ * 0.10 for rust-iouring-kensac #264 at 310,000, and 2,000 µs of spinning brought it to 0.06 at the
+ * same latency there. On the box it did not move the ceiling: 307205a, which spun by default, held
+ * 280,000 users as fe89683 did (README, "The spin"). Not while the checkpoint thread wants the CPU
+ * (ckpt_wanted): the loop then sleeps, so the thread gets the idle time. */
+static long spin_us;
 static u64_t st_spins;
 static inline u32_t cq_ready(ring *r) { return __atomic_load_n(r->cq_ktail, __ATOMIC_ACQUIRE) - *r->cq_khead; }
 
 /* Writes go in at most one batch every write_window_us: a write waits for that batch (reads do
  * not), so a commit carries the writes of several periods and the pages they share (the tail of
  * likes, the head of the feed index, the recent part of likes_post_id_idx) go to the log once
- * instead of once per period. At 350,000 users a 10 ms window wrote about 7,400 log frames a
- * second (30 MB/s, at the 3,000 IOPS of the VM's volume once checkpoints copy them); 50 ms, with
- * checkpoints every 2,000 frames (db.c), used 9 % less CPU in that hold, and disk writes fell from
- * about 2,900 to 2,100 a second. A write then waits up to 50 ms. FEED_WRITE_WINDOW_US overrides it. */
-static long write_window_us = 50000;
+ * instead of once per period. 10 ms, with checkpoints every 500 frames (db.c), is what PR #271's
+ * version (30d259c) used when the box held it at 290,000 users. On the cloud VM at 350,000 users
+ * 50 ms with checkpoints every 2,000 frames used 9 % less CPU, and disk writes fell from about
+ * 2,900 to 2,100 a second; fe89683 and 307205a, which used them, held 280,000 on the box, where the
+ * likes and new posts were the slow part at the edge. A write waits up to 10 ms for its batch.
+ * FEED_WRITE_WINDOW_US overrides it. */
+static long write_window_us = 10000;
 static u64_t last_write_batch;
 
 static void stats_tick(void) {

@@ -93,9 +93,10 @@ static void db_check_layout(void) {
  * in the WAL, synchronous=NORMAL). The WAL restarts from the beginning only when a writer finds
  * it fully checkpointed, so after a checkpoint that copied everything the request thread's next
  * commit starts the log over and it stays small. */
-static int CKPT_FRAMES = 2000;     /* FEED_CKPT_FRAMES overrides it (for measurements); a checkpoint copies each
-                                      page once however many frames it has, so fewer, larger checkpoints
-                                      write fewer pages to the database file */
+static int CKPT_FRAMES = 500;      /* FEED_CKPT_FRAMES overrides it (for measurements); PR #271's version
+                                      (30d259c) used 500 when the box held it at 290,000 (see
+                                      write_window_us in uring.c). A checkpoint copies each page once
+                                      however many frames it has, so larger ones write fewer pages */
 static int WAL_PAUSE_FRAMES = 8192;   /* see db_writes_ok; FEED_WAL_PAUSE_FRAMES overrides it (for measurements) */
 static int pause_at = 8192;
 /* On one vCPU a checkpoint pass at the request thread's priority takes the CPU from the loop for

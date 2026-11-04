@@ -16,7 +16,7 @@ each leaf against its definition.
 | Language | Lean 4.37.0 nightly 2026-10-30 (handler and proofs), compiled to C by the Lean compiler; that C and the C runtime built by gcc `-O3 -march=native`, profile-guided |
 | Framework | none |
 | Database | SQLite 3.54.1 amalgamation in-process: reads of its B-tree pages through its pager, writes as prepared SQL |
-| Transport | io_uring (Linux ≥ 6.1), one thread (it spins between batches), HTTP/1.1 keep-alive, one multishot receive per connection (Linux ≥ 6.8; before 6.8 a poll of its direct descriptor) |
+| Transport | io_uring (Linux ≥ 6.1), one thread, HTTP/1.1 keep-alive, one multishot receive per connection (Linux ≥ 6.8; before 6.8 a poll of its direct descriptor) |
 | **Nginx or direct** | **Direct**: serves `HOST:PORT` itself (`0.0.0.0:80`), no Nginx |
 | Dependencies | Lean toolchain and SQLite, pinned by version and SHA-256 |
 
@@ -349,7 +349,7 @@ Not proved, and how it is checked instead where it is:
   peer's FIN it answers the complete requests it has, drops an unfinished one and closes; a failed
   send closes the connection; a connection closed while its input waited for the batch gets no
   reply. That every complete request is answered in the end rests on it too: held input waits for a
-  batch that may write, which comes 50 ms after the last unless writes are paused (at most 300 ms,
+  batch that may write, which comes 10 ms after the last unless writes are paused (at most 300 ms,
   `runtime/db.c`). It chooses the idle connections to close by calling `Feed.Idle.pick`, compiled
   Lean. The WAL shim (`runtime/walvfs.c`) only merges the write calls of one commit; the page cache
   wrapper (`runtime/db.c`) only skips a scan that would find nothing.
@@ -362,24 +362,25 @@ of that time; each says where it was taken (the setups are under Measurements).
 
 **Batches.** Each event-loop iteration hands the new input of every connection to Lean in one call
 (`Feed.batch`). The batch is one SQLite transaction: all reads use one snapshot, through B-tree
-cursors opened once per batch and the batch's pages (Reads, below); the writes follow in
-connection order as prepared statements; then one commit. Answers are sent after the commit, so a
-201 is always committed (WAL, `synchronous=NORMAL`: a commit survives a crash of the process, and a
-power loss or a crash of the machine can roll back the most recent ones). While busy, after an
-iteration that finished early the loop waits until ring 0 has 64 completions or 2 ms have passed
-since that iteration began, spinning by default (Why the loop spins, below), so a batch collects
-everything that arrived meanwhile (many requests then share one iteration, one transaction, one
-Lean call and one burst of sends); under saturation iterations run back to back.
+cursors opened once per batch and the batch's pages (Reads, below); the writes follow in connection
+order as prepared statements; then one commit. Answers are sent after the commit, so a 201 is always
+committed (WAL, `synchronous=NORMAL`: a commit survives a crash of the process, and a power loss or
+a crash of the machine can roll back the most recent ones). While busy, after an iteration that
+finished early the loop waits until ring 0 has 64 completions or 2 ms have passed since that
+iteration began (with `FEED_SPIN_US` it spins meanwhile: The spin, below), so a batch collects
+everything that arrived meanwhile (many requests then share one iteration, one transaction, one Lean
+call and one burst of sends); under saturation iterations run back to back.
 
-**Writes in fewer batches.** A batch may write at most every 50 ms (`writesOk` is false in the
+**Writes in fewer batches.** A batch may write at most every 10 ms (`writesOk` is false in the
 batches between); a write waits for that batch, reads do not. A commit then carries the writes of
-many periods, and the pages they share (the end of `likes`, the start of the feed index, the
-recent part of `likes_post_id_idx`) go to the log once per commit instead of once per period. On
-the cloud VM at 350,000 users, a 10 ms window wrote about 7,400 log frames a second (30 MB/s, and
-the volume's 3,000 writes per second were in use once checkpoints copied them); 50 ms, with
-checkpoints every 2,000 frames, used 9 % less CPU in the same hold, and disk writes fell from about
-2,900 to 2,100 a second. A write waits up to 50 ms for its batch while writes are not paused
-(Writes, below); in that hold likes took p50 30 ms and p99 106 ms, and reads p99 9 ms.
+several periods, and the pages they share (the end of `likes`, the start of the feed index, the
+recent part of `likes_post_id_idx`) go to the log once per commit instead of once per period. The
+window and the checkpoints every 500 frames (Writes, below) are what PR #271's version (30d259c)
+used when the box held it at 290,000 users. On the cloud VM at 350,000 users a 50 ms window with
+checkpoints every 2,000 frames used 9 % less CPU in the same hold, and disk writes fell from about
+2,900 to 2,100 a second (a 10 ms window wrote about 7,400 log frames a second, 30 MB/s); fe89683
+and 307205a used those and held 280,000 on the box, where the likes and new posts were the slow
+part at the edge. A write waits up to 10 ms for its batch while writes are not paused.
 
 **Overload.** When more input arrives than an iteration can serve in about 6 ms, the batch is
 capped: the input that arrived since the last iteration goes first and connections left over
@@ -417,7 +418,7 @@ journal. A body that starts with U+0000 once trimmed is answered 500 before it i
 each write phase one clock reading, so the time is taken once per write phase, at its first
 insert: the posts of one batch share their `created_at`, and the feed orders them by id. A new
 post's id comes from `sqlite3_last_insert_rowid` instead of `RETURNING`. Checkpoints run on a
-second thread with its own connection every 2,000 frames (passive, so the request thread never
+second thread with its own connection every 500 frames (passive, so the request thread never
 waits on an fsync). SQLite restarts the WAL only when a writer finds it fully checkpointed, which
 never happens under constant writes; past 8,192 frames, writes pause (reads go on) until a
 checkpoint has copied what is left, at most 300 ms (a few milliseconds on a fast disk; more where
@@ -454,8 +455,8 @@ connections fill them (ring 0 at startup, each later one 8,192 connections befor
 it is full), so only as many are busy as the connection count needs. The loop enters each ring
 once per iteration, in #264's order: each other ring submits what the last batch queued and runs
 its task work, then ring 0 submits, and the loop waits for 64 completions on it or the rest of its
-2 ms period: by default it spins on ring 0's completion queue (Why the loop spins, below), and with
-`FEED_SPIN_US=0` it waits in a timed `io_uring_enter`. Input that reaches another ring during that
+2 ms period in a timed `io_uring_enter` (with `FEED_SPIN_US` it spins on ring 0's completion queue
+instead: The spin, below). Input that reaches another ring during that
 wait is read in the next iteration. On the local harness at 280,000 users (`FEED_STATS`, with the
 multishot receive below and the timed wait) that made 0.079 calls of `io_uring_enter` per request
 against 0.207 for the previous design, and about 540 wakeups of the loop a second against 480.
@@ -511,23 +512,23 @@ SIGTERM every listener closes first, and the signal handler also wakes the loop'
 local test with 2,000 idle connections the process exited after 0.010 s, against 0.51 s before).
 
 **Memory.** The kernel keeps about 4 KB per open connection (TCP socket, inode, file, the armed
-receive or poll), most of it outside the server's cgroup on 6.8 (in a local test on 6.12, about
-3.9 KB per connection was charged to it), so on a 2 GB machine the connections can set the limit
-before the CPU does. On the cloud VM (1,903 MB) they did for PR #271's version: near 350,000
-connections the page cache that was left was too small for the database's working set, and
-requests started waiting on disk reads. The box found that version CPU-bound at 290,000 users, and
-on the KVM guest (1,968 MB) fe89683's code had 399 MB available at 360,000. The server keeps little
-memory of its own, except where a miss would reach the disk: SQLite's cache is 48 MB, enough for
-the writes' working set (the likes primary-key index is 29.5 MB in the seed, and each like reads a
-random leaf of it). With 8 MB, on the cloud VM at 350,000 users, the end of the ramp evicted the
-page cache and the loop read about 1,000 pages a second from disk for 40 s (p99 6 s); with 48 MB it
-read about 10 a second and the hold passed with p99 14 ms. The rest is 512 receive buffers of 1 KB
-per ring, completion queues larger than a ring's connections (an overflow would allocate per
-completion when memory is shortest), and the first 8 MB of the code locked in memory as it first
-runs (reclaim would otherwise take the program's own pages back and the loop would stall reading
-them from disk). Checkpoints run at nice 19, so on one vCPU they take the CPU only while the loop
-waits between batches, and the loop does not spin while one is due or running (Why the loop
-spins); the result that nice 19 came from has since been withdrawn (Credits). Ubuntu's 6.8 kernels
+receive or poll), most of it outside the server's cgroup on 6.8 (in a local test on 6.12, about 3.9
+KB per connection was charged to it), so on a 2 GB machine the connections can set the limit before
+the CPU does. On the cloud VM (1,903 MB) they did for PR #271's version: near 350,000 connections
+the page cache that was left was too small for the database's working set, and requests started
+waiting on disk reads. The box found that version CPU-bound at 290,000 users, and on the KVM guest
+(1,968 MB) fe89683's code had 399 MB available at 360,000. The server keeps little memory of its
+own, except where a miss would reach the disk: SQLite's cache is 48 MB, enough for the writes'
+working set (the likes primary-key index is 29.5 MB in the seed, and each like reads a random leaf
+of it). With 8 MB, on the cloud VM at 350,000 users, the end of the ramp evicted the page cache and
+the loop read about 1,000 pages a second from disk for 40 s (p99 6 s); with 48 MB it read about 10 a
+second and the hold passed with p99 14 ms. The rest is 512 receive buffers of 1 KB per ring,
+completion queues larger than a ring's connections (an overflow would allocate per completion when
+memory is shortest), and the first 8 MB of the code locked in memory as it first runs (reclaim would
+otherwise take the program's own pages back and the loop would stall reading them from disk).
+Checkpoints run at nice 19, so on one vCPU they take the CPU only while the loop waits between
+batches, and with `FEED_SPIN_US` the loop does not spin while one is due or running (The spin); the
+result that nice 19 came from has since been withdrawn (Credits). Ubuntu's 6.8 kernels
 from 6.8.0-136 on (and the cloud VM's 6.8 kernel) reject the registration of provided-buffer rings
 with a zero reserved field (Launchpad #2162843); the server retries with a nonzero one, which those
 kernels accept and a correct kernel never sees.
@@ -554,24 +555,26 @@ answered. Input that arrives between the removal and the close is lost with the 
 local test with requests 990 to 1,010 ms apart around a 1,000 ms timeout, 10 of 30,000 requests got
 EOF or a reset, and the client sent them again.
 
-### Why the loop spins
+### The spin
 
-By default the loop keeps the CPU between batches. After an iteration that finished early it
-watches ring 0's completion queue and task-work flag until 64 completions are in or the 2 ms period
-ends, for at most `FEED_SPIN_US` (2,000 µs, so by default for the whole wait), and with nothing to
-do it spins as long before `epoll_wait`. It issues no PAUSE while it spins: a long run of PAUSEs
-makes a KVM host see a spinning vCPU and yield it. While the checkpoint thread wants the CPU (a
-checkpoint is due or running) the loop does not spin and sleeps as before, so the thread gets the
-idle time. With `FEED_RINGS_UPFRONT` or the idle policy, which keep the previous ring design, it
-sleeps between busy iterations as before; `FEED_SPIN_US=0` turns the spin off.
+With `FEED_SPIN_US` set, the loop keeps the CPU between batches: after an iteration that finished
+early it watches ring 0's completion queue and task-work flag until 64 completions are in, the 2 ms
+period ends or `FEED_SPIN_US` has passed, and with nothing to do it spins as long before
+`epoll_wait`. It issues no PAUSE while it spins (a long run of PAUSEs makes a KVM host see a
+spinning vCPU and yield it), and it does not spin while the checkpoint thread wants the CPU (a
+checkpoint is due or running). With `FEED_RINGS_UPFRONT` or the idle policy, which keep the
+previous ring design, it sleeps between busy iterations. The spin is off by default: 307205a, which
+spun for up to 2,000 µs by default, held the same 280,000 users on the box as fe89683 (below).
 
-The reason is a difference between the box and the KVM guest (Measurements). On the guest,
-fe89683's code used 15 % less CPU per user than #264; on the box it used as much CPU per request
-as #264 (25 µs), and it failed 290,000 users on p99 at about 77 % of the CPU, where #264 held
-310,000 at 82 %. Models on the guest of the disk, the memory, the caches and the network did not
-reproduce that: a 150 ms flush, a limit of 4,000 writes a second, 150 to 450 MB less memory, two
-cache-sweeping neighbours on the socket and a busy network path each slowed #264 as much as
-fe89683's code, or more.
+The spin was an attempt at a difference between the box and the KVM guest (Measurements). On the
+guest, fe89683's code used 15 % less CPU per user than #264; on the box it used as much CPU per
+request as #264 (25 µs), and it failed 290,000 users on p99 at about 77 % of the CPU, where #264
+held 310,000 at 82 %. Models on the guest of the disk, the memory, the caches and the network did
+not reproduce that: a 150 ms flush, a limit of 4,000 writes a second, 150 to 450 MB less memory,
+two cache-sweeping neighbours on the socket and a busy network path each slowed #264 as much as
+fe89683's code, or more. So did a guest CPU without `IA32_ARCH_CAPABILITIES`, whose kernel then
+turns on page-table isolation and buffer clearing: in 2-minute probes it added 2.4 % to the CPU of
+307205a's code without the spin at 290,000 users and 3.5 % to #264's at 310,000.
 
 One count tracked the box: halts per request, the times the guest's CPU went idle (HLT exits,
 counted by the host's KVM) for each request served. In 2-minute probes on the guest, each entry
@@ -605,39 +608,45 @@ started k6 up to 46 s apart, and as the first one's connections closed, the othe
 the guest ran out of memory and the kernel killed the server (the first generator's p99 225 ms and
 no errors; the other four's 1.6 to 6.5 % errors).
 
-Four points make a correlation, and none of this was measured on the box, which itself varies by
-about 8 % in CPU per request from one day to the next (#245 used 26 µs per request on 1 November,
-its `db.h` tuning #278 28 µs on 2 November). The spin makes this entry's CPU % and µs per request
-on the leaderboard read high, since the cgroup's CPU time includes the spinning; `FEED_SPIN_US=0`
-turns it off.
+On the box the spin did not raise the ceiling: 307205a held 280,000 users for 5 minutes with p99
+188 ms (fe89683: 359 ms), at 93 % of the CPU and 31 µs per request with the spinning counted, and
+failed the 2-minute probes at 290,000 and 300,000 on p99 (3.3 s and 4.2 s; fe89683: 1.5 s and 1.9
+s). The halts tracked the four entries' box penalty without causing it, or the spin cost as much as
+it saved; which, one run on the box cannot say, and the box itself varies by about 8 % in CPU per
+request from one day to the next (#245 used 26 µs per request on 1 November, its `db.h` tuning #278
+28 µs on 2 November). The difference between the box and the guest remains unexplained.
 
 ## Measurements
 
 Each number says where it was taken: the challenge's box, a KVM guest set up like the box, a cloud
 VM set up like the box, the local harness, or the in-process benchmark. Only the box's numbers are
-box results. Three versions appear: PR #271's version (30d259c); fe89683, the version before this
-one, which the challenge scored as PR #286; and this version. This version's code differs from
+box results. Four versions appear: PR #271's version (30d259c); fe89683, which the challenge
+scored as PR #286; 307205a, which it scored next; and this version. 307205a's code differs from
 fe89683's in HTTP framing, written to `Feed/Spec/Http.lean` (with 414 and HEAD), in the checks the
 specifications added (well-formed UTF-8 in JSON, base64url without `=` or nonzero bits after the
 last byte, `crit`, `cty` and `aud` in tokens), in one `created_at` per write phase, in the idle
-policy run as compiled Lean, and in the spin (Design). The C version of the new parser costs about
-0.05 µs per request more than the old one: `Feed.batch` alone, without the transport, on the load
-mix in batches of 64, takes 2.28 µs per request at this version and 2.23 µs at 6803ea6, fe89683's
-code (medians of interleaved runs on one core; 2.89 µs while the parser ran as compiled Lean).
+policy run as compiled Lean, and in the spin. This version differs from 307205a in three defaults:
+no spin, a 10 ms write window and checkpoints every 500 frames, the last two as in 30d259c
+(Design). The C version of the new parser costs about 0.05 µs per request more than the old one:
+`Feed.batch` alone, without the transport, on the load mix in batches of 64, takes 2.28 µs per
+request at 307205a and 2.23 µs at 6803ea6, fe89683's code (medians of interleaved runs on one core;
+2.89 µs while the parser ran as compiled Lean).
 
 ### On the challenge's box
 
 The challenge measured fe89683 on 3 November 2026: it held 280,000 users for 5 minutes (26,678
 requests a second, p95 44.9 ms, p99 359 ms, no errors) at 74 % of the CPU and 25 µs of CPU per
-request (peak memory 1,390 MB). 290,000 and 300,000 failed the 2-minute probe on p99 (1.5 s and
-1.9 s, no errors), and 320,000 on p95 (5.2 s, at 93 % of the CPU). At the edge the likes and new
-posts were the slow part: in the hold their p99 was about 570 ms, against about 330 ms for reads.
-The challenge measured PR #271's version (30d259c), whose code fe89683 builds on, on 2 November
+request (peak memory 1,390 MB). 290,000 and 300,000 failed the 2-minute probe on p99 (1.5 s and 1.9
+s, no errors), and 320,000 on p95 (5.2 s, at 93 % of the CPU). At the edge the likes and new posts
+were the slow part: in the hold their p99 was about 570 ms, against about 330 ms for reads. It
+measured 307205a on 4 November 2026: 280,000 users held for 5 minutes (26,738 requests a second,
+p95 40.6 ms, p99 188 ms, no errors) at 93 % of the CPU and 31 µs of CPU per request, the spinning
+included (peak memory 1,446 MB); 290,000 and 300,000 failed the 2-minute probe on p99 (3.3 s and 4.2
+s). The challenge measured PR #271's version (30d259c), whose code fe89683 builds on, on 2 November
 2026: it held 290,000 users for 5 minutes (27,560 requests a second, p95 30.7 ms, p99 300 ms, no
 errors) at 82 % of the CPU and 27 µs of CPU per request (peak memory 1,107 MB), and 300,000 failed
 the 2-minute probe on p99 (2.1 s). rust-iouring-kensac #264, first at 310,000, used 25 µs per
-request at 82 % of the CPU there (p99 190 ms). This version, with the spin, has not been measured
-on the box.
+request at 82 % of the CPU there (p99 190 ms). This version has not been measured on the box.
 
 ### On a KVM guest set up like the box
 
@@ -661,7 +670,7 @@ the receive became the default, with `FEED_MSRECV=1`: the code path fe89683 take
 | c-iouring-pavlyhalim #245 (295,000) | 290,000 fail (p99 1,006 ms); 300,000 pass (74.3 %, 912 ms) | 300,000 (290,000 failed) |
 | PR #271's version, 30d259c (290,000) | 290,000 pass (70.1 %, 20 ms); 300,000 pass (72.9 %, 26 ms) | 300,000 or more |
 | fe89683's code (280,000) | 330,000 pass (70.1 %, 163 ms); 340,000 pass (72.8 %, 55 ms); 350,000 pass (75.0 %, 90 ms); 360,000 pass (77.8 %, 125 ms); 370,000 pass (79.7 %, 148 ms, 0.05 % errors) | 370,000 or more |
-| this version (not measured on the box) | 300,000 pass (87.9 %, 55 ms); 330,000 pass (90.1 %, 145 ms); 360,000: six of seven pass (88.7 to 89.9 %, 284 to 842 ms), one fail (the guest ran out of memory at the end: Why the loop spins) | 360,000 or more |
+| 307205a, with the spin (280,000) | 300,000 pass (87.9 %, 55 ms); 330,000 pass (90.1 %, 145 ms); 360,000: six of seven pass (88.7 to 89.9 %, 284 to 842 ms), one fail (the guest ran out of memory at the end: The spin) | 360,000 or more |
 
 The guest scored #264 and #245 2 to 3 % above their box scores and #257 at least 2 % above
 (320,000 was not run), and PR #271's version at least one step above its box score: 300,000 passed
@@ -669,8 +678,8 @@ there and failed on the box. It also favored that version against #264: on the g
 less CPU per user than #264 (70.1 % at 290,000 against 78.1 % at 310,000), on the box 8 % more per
 request (27 against 25 µs). It favored fe89683's code more: there that code used 15 % less CPU per
 user than #264 and passed every hold from 330,000 to 370,000, with 399 MB of memory still available
-at 360,000, and the box held it at 280,000, at #264's 25 µs per request. Design's "Why the loop
-spins" is about that difference.
+at 360,000, and the box held it at 280,000, at #264's 25 µs per request. Design's "The spin" is
+about that difference. This version has not been measured on the guest.
 
 Stand-ins tried before the guest: a 1-vCPU slice of a larger cloud VM with a CPU-bound load on its
 sibling hyperthread held PR #271's version at 330,000 (box: 290,000) and #264 at 310,000 (its box
@@ -740,12 +749,12 @@ The design and the code of this entry are ours, except what the next subsection 
   the responses written in place after their heads; the overload cap and its delayed-ACK reasoning;
   the write window's size; `INSERT OR IGNORE` without a statement journal; the WAL pause's 300 ms
   limit; the 2 ms iteration period (#233 and #245 also wait up to 2 ms while busy); `train.c`; the
-  spin between batches without PAUSE, which stops while a checkpoint is due or running.
+  optional spin between batches without PAUSE, which stops while a checkpoint is due or running.
 * **The measurement setup** in Measurements: a KVM guest set up like the box and calibrated
   against three other entries' box scores; the finding there that readiness polls left 1 to 2 % of
   requests at 1.5 to 3.7 s, which made the receive the default; and the count of halts per request,
   which tracked how much more CPU per request the box charged four entries than the guest did and
-  led to the spin (Why the loop spins).
+  led to the spin, which did not raise this entry's score on the box (The spin).
 
 ### From other entries
 
@@ -802,8 +811,8 @@ Where an entry's code is not named below, the idea came from its README and the 
   into the ring's provided buffers, and after a burst (`ENOBUFS`) the connection is read through the
   read queue until a read shows the socket drained, then the receive is armed again. The order in
   which the loop enters the rings: every other ring submits and runs its deferred task work without
-  waiting, then ring 0 submits and waits in a timed `io_uring_enter` (by default this entry now
-  spins there: Why the loop spins), where the previous loop entered every ring twice and slept
+  waiting, then ring 0 submits and waits in a timed `io_uring_enter` (with `FEED_SPIN_US` this
+  entry spins there: The spin), where the previous loop entered every ring twice and slept
   between iterations. It also makes rings as they fill. The C is ours, its completion handling
   following that of `src/main.rs`; arming the receive on the `FIXED_FD_INSTALL` descriptor is ours,
   and a close cancels the receive by its `user_data`, hard-linked to the close, as #245's close
@@ -844,7 +853,8 @@ keep-alive connections under file-descriptor pressure, as the idle policy here d
 budget; c-iouring-public #158's memory floors, off by default, close keep-alives idle for 20 s
 or more when less than 120 MB is available; and rust-epoll-scooter1337 #82's epoll path, with
 `--spin-us` (off by default), polls without sleeping for that long after events arrive, as the
-loop here spins between batches (its README says earlier busy-poll tests showed no reliable gain).
+loop here spins between batches with `FEED_SPIN_US` (its README says earlier busy-poll tests showed
+no reliable gain).
 
 ## Build and run
 
@@ -859,8 +869,8 @@ loop here spins between batches (its README says earlier busy-poll tests showed 
   747 MB resident, `lake` 668 MB and gcc's `cc1` 505 MB.
 * `start.sh`: `bin/server` in the foreground, configured by `SQLITE_PATH`, `JWT_SECRET`, `HOST`,
   `PORT`; it sets `UV_USE_IO_URING=0`, so the Lean runtime's libuv opens no io_uring of its own.
-  The `FEED_*` environment variables override defaults for measurements, turn the spin off
-  (`FEED_SPIN_US=0`) or turn on the idle policy; `start.sh` sets none of them.
+  The `FEED_*` environment variables override defaults for measurements, turn on the spin
+  (`FEED_SPIN_US`) or turn on the idle policy; `start.sh` sets none of them.
 * `check-docs.sh` (not run by `build.sh`): `CheckDocs.lean` checks what the docs say of the proofs
   that no theorem states. The statements still to prove, in the module docs of `Feed/Proofs/`,
   must type-check against the code, and one the code has as a theorem must be out of the doc (none

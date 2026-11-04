@@ -7,6 +7,7 @@
 #include <array>
 #include <cerrno>
 #include <charconv>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <exception>
@@ -51,6 +52,24 @@ struct InterestProbe
 
 InterestProbe interests;
 
+struct PreparationProbe
+{
+    bool active = false;
+    std::uint64_t connects = 0;
+    std::uint64_t sends = 0;
+};
+
+PreparationProbe preparation;
+
+struct ReuseProbe
+{
+    bool active = false;
+    unsigned delays = 0;
+};
+
+ReuseProbe reuse;
+constexpr auto reuse_probe_delay = std::chrono::milliseconds(25);
+
 void require(bool condition, std::string_view message)
 {
     if (!condition)
@@ -65,7 +84,8 @@ enum class FixtureMode
     failed_feed,
     stalled,
     partially_stalled,
-    closed
+    closed,
+    custom_target
 };
 
 class Fixture
@@ -109,7 +129,13 @@ class Fixture
 
     [[nodiscard]] Endpoint target() const
     {
-        return endpoint("http://127.0.0.1:" + std::to_string(port_));
+        auto result = endpoint("http://127.0.0.1:" + std::to_string(port_));
+        if (mode_ == FixtureMode::custom_target)
+        {
+            result.authority = "fixture.example:8080";
+            result.prefix = "/custom/api";
+        }
+        return result;
     }
 
     void check()
@@ -159,7 +185,13 @@ class Fixture
     {
         const auto first_space = request.find(' ');
         const auto second_space = request.find(' ', first_space + 1);
-        const auto path = request.substr(first_space + 1, second_space - first_space - 1);
+        auto path = request.substr(first_space + 1, second_space - first_space - 1);
+        const auto expected_target = target();
+        require(request.find("\r\nHost: " + expected_target.authority + "\r\n") !=
+                    std::string_view::npos,
+                "request authority");
+        require(path.starts_with(expected_target.prefix), "request path prefix");
+        path.remove_prefix(expected_target.prefix.size());
         if (mode_ == FixtureMode::stalled ||
             (mode_ == FixtureMode::partially_stalled && client.silent))
         {
@@ -186,12 +218,22 @@ class Fixture
                 // Chunked framing and an informational response exercise the live socket path
                 send_all(client.socket.get(), "HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 "
                                               "OK\r\nTransfer-Encoding: chunked\r\n\r\n");
-                send_all(client.socket.get(),
-                         "1d\r\n{\"posts\":[{\"id\":7},{\"id\":9}]}\r\n0\r\n\r\n");
+                if (mode_ == FixtureMode::custom_target)
+                {
+                    send_all(client.socket.get(),
+                             "27\r\n{\"posts\":[{\"id\":18446744073709551615}]}\r\n0\r\n\r\n");
+                }
+                else
+                {
+                    send_all(client.socket.get(),
+                             "1d\r\n{\"posts\":[{\"id\":7},{\"id\":9}]}\r\n0\r\n\r\n");
+                }
             }
             return;
         }
-        if (path == "/posts/7" || path == "/posts/9")
+        const auto wide_id = mode_ == FixtureMode::custom_target;
+        if ((!wide_id && (path == "/posts/7" || path == "/posts/9")) ||
+            (wide_id && path == "/posts/18446744073709551615"))
         {
             require(client.stage == 1 || mode_ == FixtureMode::closed, "workflow post order");
             client.selected = path;
@@ -213,7 +255,8 @@ class Fixture
         client.token = token;
         require(request.find("Content-Type: application/json\r\n") != std::string_view::npos,
                 "POST content type");
-        if (path == "/posts/7/like" || path == "/posts/9/like")
+        if ((!wide_id && (path == "/posts/7/like" || path == "/posts/9/like")) ||
+            (wide_id && path == "/posts/18446744073709551615/like"))
         {
             require(client.stage == 2 && path == client.selected + "/like", "workflow like order");
             client.stage = 3;
@@ -326,7 +369,7 @@ class Fixture
     std::jthread worker_;
 };
 
-Metrics fixture_run(Fixture &fixture, RuntimeConfig config)
+Metrics fixture_run(Fixture &fixture, RuntimeConfig config, bool prepare = false)
 {
     std::vector<Token> tokens;
     for (unsigned index = 0; index < 3; ++index)
@@ -335,6 +378,14 @@ Metrics fixture_run(Fixture &fixture, RuntimeConfig config)
                           "Authorization: Bearer token" + std::to_string(index) + "\r\n"});
     }
     Load load(config, fixture.target(), std::move(tokens), "127.0.0.2-127.0.0.5");
+    if (prepare)
+    {
+        preparation = {true, 0, 0};
+        load.prepare_sockets();
+        preparation.active = false;
+        require(preparation.connects == 0 && preparation.sends == 0,
+                "socket preparation does not connect or send HTTP");
+    }
     auto metrics = load.run(false);
     fixture.check();
     metrics.latencies.prepare();
@@ -592,6 +643,49 @@ void self_test()
             "healthy coverage includes successful handshakes and retained idle sockets");
     require(metrics.target_activation_seconds && summarize(metrics, config).passed,
             "healthy real workload activates all VUs on time and reaches connection coverage");
+    require(metrics.prepared_sockets == 0 && metrics.socket_preparation_seconds == 0,
+            "cold workflow reports no socket preparation");
+    Fixture prepared_workflow(FixtureMode::custom_target);
+    auto prepared = fixture_run(prepared_workflow, config, true);
+    require(prepared.prepared_sockets == config.vus &&
+                std::isfinite(prepared.socket_preparation_seconds) &&
+                prepared.socket_preparation_seconds >= 0 && prepared.connections == config.vus &&
+                prepared.established_connections == config.vus &&
+                prepared.closed_connections == 0 && prepared.live_connections == config.vus &&
+                prepared_workflow.connections() == config.vus,
+            "prepared sockets count only handshakes during the real workflow");
+    require(prepared.failures == 0 && prepared.workflow_errors == 0 &&
+                prepared.endpoint_requests[0] > 0 && prepared.endpoint_requests[1] > 0 &&
+                prepared.endpoint_requests[2] > 0 && prepared.endpoint_requests[3] > 0,
+            "prepared workflow preserves custom authority, path prefix and unsigned 64-bit IDs");
+    const auto prepared_summary = summarize(prepared, config);
+    const auto prepared_document = json(prepared_summary.json);
+    require(prepared_document != nullptr, "prepared workflow summary JSON");
+    auto *prepared_generator =
+        yyjson_obj_get(yyjson_doc_get_root(prepared_document.get()), "generator");
+    auto *prepared_count = yyjson_obj_get(prepared_generator, "prepared_sockets");
+    auto *prepared_seconds = yyjson_obj_get(prepared_generator, "socket_preparation_seconds");
+    require(yyjson_is_uint(prepared_count) &&
+                yyjson_get_uint(prepared_count) == prepared.prepared_sockets &&
+                yyjson_is_num(prepared_seconds) &&
+                std::abs(yyjson_get_num(prepared_seconds) - prepared.socket_preparation_seconds) <
+                    1e-9,
+            "summary reports exact prepared socket count and preparation duration");
+    RuntimeConfig reuse_config = config;
+    reuse_config.vus = 1;
+    reuse_config.ramp_up = 0;
+    reuse_config.hold = 0.08;
+    reuse_config.ramp_down = 0;
+    reuse_config.grace = 0.1;
+    reuse_config.timeout = 0.2;
+    Fixture delayed_reuse(FixtureMode::workflow);
+    reuse = {true, 0};
+    const auto delayed = fixture_run(delayed_reuse, reuse_config);
+    reuse.active = false;
+    require(reuse.delays == 1 && delayed.failures == 0 && delayed.endpoint_requests[1] > 0 &&
+                delayed.connections == 1 &&
+                delayed.blocked_sum >= std::chrono::duration<double>(reuse_probe_delay).count(),
+            "reused-socket probing is blocked time before HTTP measurement starts");
     Metrics late_activation;
     late_activation.latencies.record(1, EndpointKind::feed, Phase::hold);
     late_activation.hold_peak_live_connections = config.vus;
@@ -687,9 +781,9 @@ void self_test()
     Fixture closed(FixtureMode::closed);
     config.vus = 1;
     config.hold = 0.04;
-    const auto reconnected = fixture_run(closed, config);
+    const auto reconnected = fixture_run(closed, config, true);
     require(reconnected.failures == 0 && reconnected.connections > 1 &&
-                reconnected.endpoint_requests[1] > 0,
+                reconnected.endpoint_requests[1] > 0 && reconnected.prepared_sockets == 1,
             "EOF response reconnects");
     require(reconnected.established_connections == reconnected.connections &&
                 reconnected.closed_connections + reconnected.live_connections ==
@@ -769,6 +863,10 @@ extern "C" ssize_t __real_send(int socket, const void *buffer, std::size_t size,
 
 extern "C" ssize_t __wrap_send(int socket, const void *buffer, std::size_t size, int flags)
 {
+    if (std::this_thread::get_id() == load_test_thread && preparation.active)
+    {
+        ++preparation.sends;
+    }
     if (std::this_thread::get_id() == load_test_thread && interests.force_partial)
     {
         const auto registration = interests.registered.find(socket);
@@ -791,13 +889,39 @@ extern "C" ssize_t __wrap_send(int socket, const void *buffer, std::size_t size,
         }
         if (socket == interests.partial_descriptor && interests.partial_stage == 2)
         {
-            interests.retry_without_write_interest =
-                registration == interests.registered.end() ||
-                (registration->second & EPOLLOUT) == 0;
+            interests.retry_without_write_interest = registration == interests.registered.end() ||
+                                                     (registration->second & EPOLLOUT) == 0;
             interests.partial_stage = 3;
         }
     }
     return __real_send(socket, buffer, size, flags);
+}
+
+extern "C" int __real_connect(int socket, const sockaddr *address, socklen_t length);
+
+extern "C" int __wrap_connect(int socket, const sockaddr *address, socklen_t length)
+{
+    if (std::this_thread::get_id() == load_test_thread && preparation.active)
+    {
+        ++preparation.connects;
+    }
+    return __real_connect(socket, address, length);
+}
+
+extern "C" ssize_t __real_recv(int socket, void *buffer, std::size_t size, int flags);
+
+extern "C" ssize_t __wrap_recv(int socket, void *buffer, std::size_t size, int flags)
+{
+    const auto received = __real_recv(socket, buffer, size, flags);
+    const int saved_errno = errno;
+    if (std::this_thread::get_id() == load_test_thread && reuse.active && (flags & MSG_PEEK) != 0)
+    {
+        reuse.active = false;
+        ++reuse.delays;
+        std::this_thread::sleep_for(reuse_probe_delay);
+    }
+    errno = saved_errno;
+    return received;
 }
 
 int main()

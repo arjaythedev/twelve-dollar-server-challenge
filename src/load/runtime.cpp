@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cerrno>
+#include <charconv>
 #include <cmath>
 #include <cstring>
 #include <ctime>
@@ -17,6 +18,16 @@
 
 namespace loadgen
 {
+namespace
+{
+void append_integer(std::string &output, std::uint64_t value)
+{
+    std::array<char, std::numeric_limits<std::uint64_t>::digits10 + 1> digits;
+    const auto result = std::to_chars(digits.data(), digits.data() + digits.size(), value);
+    output.append(digits.data(), static_cast<std::size_t>(result.ptr - digits.data()));
+}
+} // namespace
+
 volatile std::sig_atomic_t interrupted = 0;
 
 void stop_signal(int)
@@ -90,6 +101,12 @@ Load::Load(RuntimeConfig config, Endpoint target, std::vector<Token> tokens,
       local_ips_(local_addresses(local_ips)), random_(config_.seed),
       epoll_(::epoll_create1(EPOLL_CLOEXEC)), users_(config_.vus), timers_(users_.size())
 {
+    request_headers_ =
+        " HTTP/1.1\r\nHost: " + target_.authority +
+        "\r\nUser-Agent: native-load/0.1.0\r\nAccept: */*\r\nConnection: keep-alive\r\n";
+    feed_request_ = "GET " + target_.prefix + "/feed" + request_headers_ + "\r\n";
+    get_post_prefix_ = "GET " + target_.prefix + "/posts/";
+    write_post_prefix_ = "POST " + target_.prefix + "/posts";
     if (epoll_.get() < 0)
     {
         throw std::runtime_error("epoll_create1: " + std::string(std::strerror(errno)));
@@ -112,6 +129,23 @@ Load::Load(RuntimeConfig config, Endpoint target, std::vector<Token> tokens,
                       config_.ramp_down * static_cast<double>(config_.vus - id) / config_.vus;
         schedule(id);
     }
+}
+
+void Load::prepare_sockets()
+{
+    const auto started = Clock::now();
+    for (std::size_t id = 0; id < users_.size() && !interrupted; ++id)
+    {
+        auto socket = make_socket(id);
+        if (socket.get() < 0)
+        {
+            throw std::runtime_error("prepare socket: " + std::string(std::strerror(errno)));
+        }
+        users_[id].prepared_socket = std::move(socket);
+        ++metrics_.prepared_sockets;
+    }
+    metrics_.socket_preparation_seconds =
+        std::chrono::duration<double>(Clock::now() - started).count();
 }
 
 Metrics Load::run(bool progress)
@@ -447,40 +481,46 @@ void Load::send_request(std::size_t id, Step step, double now)
     request->queued = now;
     request->connected = now;
     request->deadline = now + config_.timeout;
-    const bool post = step == Step::like || step == Step::create;
-    std::string path = target_.prefix;
     if (step == Step::feed)
     {
-        path += "/feed";
-    }
-    else if (step == Step::create)
-    {
-        path += "/posts";
+        request->wire = feed_request_;
     }
     else
     {
-        path += "/posts/" + std::to_string(user.post_id);
-        if (step == Step::like)
-        {
-            path += "/like";
-        }
-    }
-    request->outgoing =
-        std::string(post ? "POST " : "GET ") + path + " HTTP/1.1\r\nHost: " + target_.authority +
-        "\r\nUser-Agent: native-load/0.1.0\r\nAccept: */*\r\nConnection: keep-alive\r\n";
-    if (post)
-    {
+        const bool post = step == Step::like || step == Step::create;
         const auto &token = tokens_[id % tokens_.size()];
-        const std::string body =
+        const auto body =
             step == Step::create ? create_body(token, id + 1, user.iteration, timestamp()) : "";
-        request->outgoing +=
-            token.authorization +
-            "Content-Type: application/json\r\nContent-Length: " + std::to_string(body.size()) +
-            "\r\n\r\n" + body;
-    }
-    else
-    {
-        request->outgoing += "\r\n";
+        auto &outgoing = request->outgoing;
+        outgoing.reserve(write_post_prefix_.size() + request_headers_.size() +
+                         (post ? token.authorization.size() + body.size() + 96 : 24));
+        outgoing += post ? write_post_prefix_ : get_post_prefix_;
+        if (step != Step::create)
+        {
+            if (post)
+            {
+                outgoing += '/';
+            }
+            append_integer(outgoing, user.post_id);
+            if (step == Step::like)
+            {
+                outgoing += "/like";
+            }
+        }
+        outgoing += request_headers_;
+        if (post)
+        {
+            outgoing += token.authorization;
+            outgoing += "Content-Type: application/json\r\nContent-Length: ";
+            append_integer(outgoing, body.size());
+            outgoing += "\r\n\r\n";
+            outgoing += body;
+        }
+        else
+        {
+            outgoing += "\r\n";
+        }
+        request->wire = outgoing;
     }
     user.request = std::move(request);
     if (user.socket.get() >= 0)
@@ -498,29 +538,27 @@ void Load::send_request(std::size_t id, Step step, double now)
     }
     else
     {
-        write(id, now);
+        // Match the transport clock: request formatting and idle-socket probing are blocked time
+        user.request->connected = elapsed();
+        write(id, user.request->connected);
     }
 }
 
-void Load::connect(std::size_t id, double now)
+Descriptor Load::make_socket(std::size_t id)
 {
-    auto &user = users_[id];
-    user.request->connecting = true;
-    user.socket.reset(::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0));
-    if (user.socket.get() < 0)
+    Descriptor socket(::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0));
+    if (socket.get() < 0)
     {
-        complete(id, false, now, std::strerror(errno));
-        return;
+        return socket;
     }
-    ++user.generation;
     const int enabled = 1;
-    if (::setsockopt(user.socket.get(), IPPROTO_TCP, TCP_NODELAY, &enabled, sizeof(enabled)) != 0)
+    if (::setsockopt(socket.get(), IPPROTO_TCP, TCP_NODELAY, &enabled, sizeof(enabled)) != 0)
     {
         throw std::runtime_error("TCP_NODELAY: " + std::string(std::strerror(errno)));
     }
     if (!local_ips_.empty())
     {
-        if (::setsockopt(user.socket.get(), IPPROTO_IP, IP_BIND_ADDRESS_NO_PORT, &enabled,
+        if (::setsockopt(socket.get(), IPPROTO_IP, IP_BIND_ADDRESS_NO_PORT, &enabled,
                          sizeof(enabled)) != 0)
         {
             throw std::runtime_error("IP_BIND_ADDRESS_NO_PORT: " +
@@ -529,13 +567,31 @@ void Load::connect(std::size_t id, double now)
         sockaddr_in local{};
         local.sin_family = AF_INET;
         local.sin_addr = local_ips_[id % local_ips_.size()];
-        if (::bind(user.socket.get(), reinterpret_cast<const sockaddr *>(&local), sizeof(local)) !=
-            0)
+        if (::bind(socket.get(), reinterpret_cast<const sockaddr *>(&local), sizeof(local)) != 0)
         {
             throw std::runtime_error("bind local IPv4 address: " +
                                      std::string(std::strerror(errno)));
         }
     }
+
+    return socket;
+}
+
+void Load::connect(std::size_t id, double now)
+{
+    auto &user = users_[id];
+    user.request->connecting = true;
+    user.socket = std::move(user.prepared_socket);
+    if (user.socket.get() < 0)
+    {
+        user.socket = make_socket(id);
+    }
+    if (user.socket.get() < 0)
+    {
+        complete(id, false, now, std::strerror(errno));
+        return;
+    }
+    ++user.generation;
     const int result =
         ::connect(user.socket.get(), reinterpret_cast<const sockaddr *>(&target_.address),
                   sizeof(target_.address));
@@ -557,10 +613,10 @@ void Load::write(std::size_t id, double now)
 {
     auto &user = users_[id];
     auto &request = *user.request;
-    while (request.sent < request.outgoing.size())
+    while (request.sent < request.wire.size())
     {
-        const auto written = ::send(user.socket.get(), request.outgoing.data() + request.sent,
-                                    request.outgoing.size() - request.sent, MSG_NOSIGNAL);
+        const auto written = ::send(user.socket.get(), request.wire.data() + request.sent,
+                                    request.wire.size() - request.sent, MSG_NOSIGNAL);
         if (written > 0)
         {
             request.sent += static_cast<std::size_t>(written);
@@ -581,6 +637,7 @@ void Load::write(std::size_t id, double now)
         }
     }
     // Request strings and response bodies exist only during active I/O
+    request.wire = {};
     std::string{}.swap(request.outgoing);
     interest(id, false);
 }
@@ -614,7 +671,7 @@ void Load::io(std::size_t id, std::uint32_t events, double now)
             return;
         }
     }
-    else if ((events & EPOLLOUT) != 0 && !user.request->outgoing.empty())
+    else if ((events & EPOLLOUT) != 0 && !user.request->wire.empty())
     {
         write(id, now);
         if (user.request.get() != original)
@@ -739,13 +796,16 @@ void Load::complete(std::size_t id, bool transport_ok, double now, std::string_v
         if (!check_ok)
         {
             user.step = Step::finish;
-            user.wake = now + between(3, 7);
+            const auto think = between(3, 7);
+            user.wake = elapsed() + think;
         }
         else if (const auto post = pick_post(request->body, random_))
         {
             user.post_id = *post;
             user.step = Step::post;
-            user.wake = now + between(3, 7);
+            // Parsing the actual feed happens before the browsing think time starts
+            const auto think = between(3, 7);
+            user.wake = elapsed() + think;
         }
         else
         {
@@ -758,15 +818,17 @@ void Load::complete(std::size_t id, bool transport_ok, double now, std::string_v
             finish_iteration(id, now);
         }
         break;
-    case Step::post:
+    case Step::post: {
         user.step = Step::actions;
-        user.wake = now + between(3, 8);
+        const auto think = between(3, 8);
+        user.wake = elapsed() + think;
         break;
+    }
     case Step::like:
-        create_or_idle(id, now);
+        create_or_idle(id, elapsed());
         break;
     case Step::create:
-        idle(user, now);
+        idle(user, elapsed());
         break;
     default:
         throw std::logic_error("completed non-request step");

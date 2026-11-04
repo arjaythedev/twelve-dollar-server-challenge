@@ -40,7 +40,8 @@ target_link_libraries(telemetry_tests PRIVATE telemetry_output yyjson)
 
 tds_add_executable(load_tests load.cpp)
 target_link_libraries(load_tests PRIVATE load_core)
-target_link_options(load_tests PRIVATE -Wl,--wrap=epoll_ctl -Wl,--wrap=send)
+target_link_options(load_tests PRIVATE
+    -Wl,--wrap=epoll_ctl -Wl,--wrap=send -Wl,--wrap=connect -Wl,--wrap=recv)
 tds_add_executable(latency_tests latencies.cpp)
 target_link_libraries(latency_tests PRIVATE load_core)
 

@@ -83,6 +83,8 @@ struct Request
 {
     llhttp_t parser{};
     std::string outgoing;
+    // Borrow the immutable feed template or this request's outgoing bytes until send completes
+    std::string_view wire;
     std::string body;
     std::size_t sent = 0;
     double queued = 0;
@@ -161,6 +163,7 @@ Phase completion_phase(const RuntimeConfig &config, double completed);
 struct User
 {
     Descriptor socket;
+    Descriptor prepared_socket;
     std::unique_ptr<Request> request;
     std::uint64_t iteration = 0;
     std::uint64_t post_id = 0;
@@ -304,6 +307,8 @@ class Load
     Load(RuntimeConfig config, Endpoint target, std::vector<Token> tokens,
          std::string_view local_ips = {});
 
+    // Prepare client resources before the start gate, without connecting to the server
+    void prepare_sockets();
     Metrics run(bool progress = true);
 
   private:
@@ -322,6 +327,7 @@ class Load
     void create_or_idle(std::size_t id, double now);
     void tick(std::size_t id, double now);
     void send_request(std::size_t id, Step step, double now);
+    Descriptor make_socket(std::size_t id);
     void connect(std::size_t id, double now);
     void write(std::size_t id, double now);
     void io(std::size_t id, std::uint32_t events, double now);
@@ -329,6 +335,10 @@ class Load
 
     RuntimeConfig config_;
     Endpoint target_;
+    std::string request_headers_;
+    std::string feed_request_;
+    std::string get_post_prefix_;
+    std::string write_post_prefix_;
     std::vector<Token> tokens_;
     std::vector<in_addr> local_ips_;
     std::mt19937_64 random_;

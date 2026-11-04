@@ -28,6 +28,7 @@ int main(int argc, char **argv)
         std::signal(SIGTERM, &stop_signal);
         Load load(options.runtime, endpoint(options.base_url), read_tokens(options.tokens),
                   options.local_ips);
+        load.prepare_sockets();
         if (!options.ready_file.empty())
         {
             write_file(options.ready_file, "ready\n");

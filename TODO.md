@@ -92,7 +92,9 @@ Assign disjoint files before each implementation batch. Agents preserve concurre
 
 ## Next
 
-- [ ] Validate generator CPU headroom at 350k, including a one/two-worker comparison; keep the 100ms activation margin and exact latency aggregation
+- [x] Optimize the single-worker generator: prepare sockets before the start gate and reuse immutable request bytes, preserving HTTP checks and workload timing
+- [x] Validate generator CPU headroom with repeated short 350k runs, the 100ms activation margin and exact latency aggregation; one worker has sufficient reserve
+- [x] Check probabilities and think times against `bench/load.js`; exclude client preparation from HTTP duration and begin think time after response processing
 - [x] Compare CQ waits with focused I/O tests and a short 350k A/B; keep `wait_nr=1`
 - [ ] Reduce wait-one CPU costs without losing write batching or tail latency; stay compatible with stock Linux 6.8
 - [ ] Compare direct B-tree post reads with prepared SQL, including the complete request lifecycle and fallback behavior

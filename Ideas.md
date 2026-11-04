@@ -9,7 +9,7 @@ Unchecked items are experiments; checked items include completed work and discar
 - [ ] Measure the current split between user space, kernel networking, io_uring and filesystem work at low and high load. The [historical 350k profile](src/runs/legacy/profile-unix-excl-350000/summary.json) sampled 30.19 of 65.64 CPU-seconds in kernel networking; Docker loopback costs may differ from a real NIC.
   Record enter duration, requested/returned CQ batch sizes, pending-SQ age and completion-to-dispatch delay separately. Existing send-preparation-to-CQE timing combines submission, kernel and CQ-service waits; CPU samples exclude blocked time. Use kernel tracing when exact CQ-post timing is needed.
 
-- [ ] Validate generator headroom at 350k with one versus two workers. Use a shared start gate, disjoint VUs/source IPs and fixed worker seeds; merge latency samples before calculating percentiles.
+- [ ] Compare one versus two generator workers if higher loads exhaust the optimized single worker. Use a shared start gate, disjoint VUs/source IPs and fixed worker seeds; merge latency samples before calculating percentiles.
   Preserve total load and API checks. Reject late activation, incomplete response coverage and workflow failures; report client CPU, timer lag and epoll service lag separately. Repeat server comparisons with the same worker split.
 
 - [ ] Reduce the CPU cost of `wait_nr=1` in [Reactor::wait](src/server/net/reactor.cpp) while preserving its latency benefit and ready-CQE bulk drain. Compare 50/100/250/500 us collection budgets and track write-batch sizes as well as CPU/request.
@@ -285,7 +285,11 @@ Unchecked items are experiments; checked items include completed work and discar
 
 - [x] Bound the load generator's due-timer pass to 256 services / 1 ms, checked between calls. Record time from epoll return to the next call separately from dispatch lag. A single blocking syscall can still exceed the budget; causation of earlier server tails remains unproven.
 
-- [x] Keep timer metadata together, move heap entries only in the required direction, skip unchanged epoll registrations and remove receive-buffer zeroing. Ordering, partial sends, reconnects and exact latency tests pass; storage remains 88 bytes/VU. Generator headroom under 350k load still needs validation.
+- [x] Keep timer metadata together, move heap entries only in the required direction, skip unchanged epoll registrations and remove receive-buffer zeroing. Ordering, partial sends, reconnects and exact latency tests pass; storage remains 88 bytes/VU.
+
+- [x] Prepare first-use sockets before the start gate and cache immutable HTTP request bytes. Actual TCP connects and requests stay at their scheduled wake; fresh feed IDs and full response checks remain. Repeated short 350k runs retain CPU reserve ([results](src/runs/49f625b/generator-capacity-comparison/summary.json)).
+
+- [x] Match the healthy `bench/load.js` workflow: 15% likes and independent 2% creates, with the same think-time ranges. Exclude local request preparation from HTTP duration and start think time after response processing. k6 remains the reference for redirects and automatic stale-connection retries.
 
 - [x] Fix WSL mirrored-networking source-bind delays with NAT and reject runs that miss the activation deadline.
 

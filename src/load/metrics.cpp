@@ -371,6 +371,8 @@ Summary summarize(Metrics &metrics, const RuntimeConfig &config)
     }
     output << ",\"activation_deadline_grace_ms\":" << activation_deadline_grace_ms
            << ",\"target_activation_on_time\":" << target_activation_on_time
+           << ",\"prepared_sockets\":" << metrics.prepared_sockets
+           << ",\"socket_preparation_seconds\":" << metrics.socket_preparation_seconds
            << ",\"connections\":" << metrics.connections
            << ",\"connections_semantics\":\"connect calls returning success or EINPROGRESS, not "
               "completed handshakes\""
@@ -393,8 +395,8 @@ Summary summarize(Metrics &metrics, const RuntimeConfig &config)
            << ",\"quantiles\":\"exact linear interpolation, all completed requests, 16 "
               "bytes/request tagged chunk store with at most 1 MiB unused sample capacity, 20 "
               "million request limit\""
-           << ",\"duration_semantics\":\"send+wait+receive, excludes connect; interrupted requests "
-              "omitted\""
+           << ",\"duration_semantics\":\"send+wait+receive, excludes connection acquisition and "
+              "client request preparation; interrupted requests omitted\""
            << ",\"endpoint_requests\":{\"feed\":" << metrics.endpoint_requests[0]
            << ",\"post\":" << metrics.endpoint_requests[1]
            << ",\"like\":" << metrics.endpoint_requests[2]

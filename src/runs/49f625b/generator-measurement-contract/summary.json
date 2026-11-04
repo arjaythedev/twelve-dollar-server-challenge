@@ -1,0 +1,48 @@
+{
+  "measurement": {
+    "native_tests": [
+      "load_generator_conformance",
+      "load_generator_latencies",
+      "load_generator_activation"
+    ],
+    "passed": true,
+    "negative_reuse_clock_rejected": true
+  },
+  "schema_version": 1,
+  "anchor": "49f625b266a896ce1386b17a568c443d77ff8f1a",
+  "label": "generator-measurement-contract",
+  "kind": "probe",
+  "started_at": "2026-11-04T14:35:23.234474+00:00",
+  "status": "passed",
+  "finished_at": "2026-11-04T14:35:43.452289+00:00",
+  "exit_code": 0,
+  "error": null,
+  "secondary_errors": [],
+  "workload": {
+    "kind": "native_generator_contract"
+  },
+  "instruments": {
+    "server_telemetry": "off",
+    "perf": "off",
+    "client_diagnostics": false
+  },
+  "provenance": {
+    "source": {
+      "base_commit": "49f625b266a896ce1386b17a568c443d77ff8f1a",
+      "patch_sha256": "d470add4434c3d501e58c96d9e86ec45cf46e6e6eade739edc79f05835465d04",
+      "source_sha256": "bf3a3bfcea9808266c186a4011bc6e202b63983b24f744f8225e9ebb3b2d06da",
+      "patch": "source.patch"
+    },
+    "binary": {
+      "load": {
+        "sha256": "c67ae15b2d722348cdd3c9097b2269941e06ff513c5914cea5120ab166387290"
+      },
+      "latencies": {
+        "sha256": "c89353622b7acb5291b15014da0c386cda8fb113fad2d0b047bd5456e4e67a8c"
+      },
+      "load_activation": {
+        "sha256": "7bba9dc412ca8ff3773467f7969f1f2ba5c9bf4dd2f9459152312c8c18b7f178"
+      }
+    }
+  }
+}

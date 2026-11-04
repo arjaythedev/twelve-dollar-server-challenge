@@ -302,7 +302,9 @@ struct Metrics
     std::uint64_t hold_peak_live_connections = 0;
     std::uint64_t vus_with_http_response = 0;
     std::uint64_t bytes_received = 0;
+    std::uint64_t prepared_sockets = 0;
     std::optional<double> target_activation_seconds;
+    double socket_preparation_seconds = 0;
     double blocked_sum = 0;
     double elapsed = 0;
 };

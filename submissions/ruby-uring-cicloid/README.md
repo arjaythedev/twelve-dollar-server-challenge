@@ -64,9 +64,9 @@ Settings (environment variables, both optional):
 | Variable | Default | Effect |
 |---|---|---|
 | `CONNECTIONS` | unset | `epoll` forces the fallback layer |
-| `URING_RINGS` | `2` | io_uring rings; each holds up to the soft `RLIMIT_NOFILE` (at most 65,535) connections |
+| `URING_RINGS` | `4` | io_uring rings; each holds up to the soft `RLIMIT_NOFILE` (at most 65,535) connections |
 
-With `LimitNOFILE=65535` and two rings, the server can hold 131,070 connections while the process
+With `LimitNOFILE=65535` and four rings, the server can hold 262,140 connections while the process
 itself keeps about 15 descriptors open.
 
 ## Optimizations, and why
@@ -82,7 +82,7 @@ version keeps the Async reactor and replaces the HTTP server.
   `uring_server.rb` accepts every connection straight into a slot of an io_uring ring's registered
   file table (accept with `IORING_FILE_INDEX_ALLOC`). Those slots aren't process
   descriptors, so they don't count against `RLIMIT_NOFILE`. The kernel caps each ring's table at
-  that limit, but every ring has its own table, so two rings hold 131,070 connections. Each
+  that limit, but every ring has its own table, so four rings hold 262,140 connections. Each
   connection has one multishot receive armed for its whole life, filled from a group of provided
   buffers, so there is no `epoll_wait`, no per-read syscall, and no Ruby `Socket` object per
   connection. One Async task per ring waits on the ring's eventfd through the reactor. Responses are
@@ -171,7 +171,7 @@ version keeps the Async reactor and replaces the HTTP server.
   connection layer's capacity, so clients aren't forced to reconnect under normal load: past it less
   1,280, responses other than the feed close (a client thinks longest after a post, so its slot stays
   free longest), and past it less 256, every response closes. With io_uring that capacity is
-  131,070; with epoll it's the descriptor limit.
+  262,140; with epoll it's the descriptor limit.
 - **TCP_NODELAY is set on the listener** and inherited by accepted sockets on Linux, so there is
   no `setsockopt` per connection.
 

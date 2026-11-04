@@ -409,6 +409,22 @@ def load(config: RunConfig, generator: LoadGenerator, observer: str, output: Pat
                             raise error from None
                         break
                 code = child.wait(timeout=15)
+                measured: dict[str, reports.JSONValue] = {
+                    "arguments": list(generator.invocation),
+                    "workload": config.workload,
+                    "exit_code": code,
+                    "wall_seconds": time.monotonic() - started,
+                    "cgroup_before": before,
+                    "cpu_scope": "server_cgroup",
+                    "clock_ticks_per_second": ticks,
+                    "initial_generator_status": status,
+                    "load_generator": "docker_loopback",
+                    "generator": generator.kind,
+                    "telemetry": config.telemetry,
+                    "load_generator_version": generator.version,
+                    "load_generator_sha256": generator.sha256,
+                }
+                reports.write_json(output / "run.json", measured)
                 if profiling and profile_after is None:
                     raise RuntimeError("load ended before the profile window completed")
             finally:
@@ -417,26 +433,10 @@ def load(config: RunConfig, generator: LoadGenerator, observer: str, output: Pat
                     child.wait(timeout=15)
                 reports.write_json(output / "samples.json", samples)
     after = counters(observer)
-    reports.write_json(
-        output / "run.json",
-        {
-            "arguments": generator.invocation,
-            "workload": config.workload,
-            "exit_code": code,
-            "wall_seconds": time.monotonic() - started,
-            "cgroup_before": before,
-            "cgroup_after": after,
-            "cpu_scope": "server_cgroup",
-            "clock_ticks_per_second": ticks,
-            "initial_generator_status": status,
-            "cpu": reports.cpu_delta(before, after, ticks),
-            "load_generator": "docker_loopback",
-            "generator": generator.kind,
-            "telemetry": config.telemetry,
-            "load_generator_version": generator.version,
-            "load_generator_sha256": generator.sha256,
-        },
-    )
+    measured["wall_seconds"] = time.monotonic() - started
+    measured["cgroup_after"] = after
+    measured["cpu"] = dict(reports.cpu_delta(before, after, ticks))
+    reports.write_json(output / "run.json", measured)
     print(f"{generator.kind} exit={code}; results={output}", flush=True)
     if code not in (0, 99):
         raise RuntimeError("load generator aborted or failed; inspect load.log")

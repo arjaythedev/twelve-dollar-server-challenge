@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from collections.abc import Callable
 from dataclasses import FrozenInstanceError
+from functools import partial
 from io import StringIO
 from pathlib import Path
 from types import TracebackType
@@ -1054,6 +1055,99 @@ class CanonicalCliTests(unittest.TestCase):
             self.assertEqual(saved["error"], "load generator exited 99")
             self.assertEqual(saved["secondary_errors"], ["server cleanup failed"])
 
+    def test_generator_exit_survives_failures_at_the_load_collection_boundary(self) -> None:
+        def collected(
+            config: RunConfig,
+            output: Path,
+            *,
+            generator_code: int,
+            stage: str,
+            failure: BaseException,
+        ) -> int:
+            generator = LoadGenerator(["load_generator"], 0, "test", "test", "load", kind="cpp")
+            snapshot: dict[str, JSONValue] = {"usage_usec": 0}
+            write_json(
+                output / "environment.json",
+                {"runtime": {"version": "0.1.0", "sqlite": "3.53.1"}},
+            )
+            write_json(
+                output / "k6-summary.json",
+                {
+                    "metrics": {
+                        "http_reqs": {"count": 2, "rate": 1},
+                        "http_req_duration": {"p(95)": 1, "p(99)": 1, "max": 2},
+                        "http_req_failed": {"value": 0},
+                        "checks": {"fails": int(generator_code != 0)},
+                    }
+                },
+            )
+            (output / "generator.ready").touch()
+            self.assertFalse((output / "run.json").exists())
+
+            def saved(path: Path, value: object, *, compact: bool = False) -> None:
+                if stage == "samples" and path == output / "samples.json":
+                    raise failure
+                write_json(path, value, compact=compact)
+
+            with (
+                patch("devtools.runtime.subprocess.Popen") as launch,
+                patch("devtools.runtime.container_command", return_value="100"),
+                patch(
+                    "devtools.runtime.counters",
+                    side_effect=[snapshot, failure] if stage == "counters" else [snapshot],
+                ),
+                patch("devtools.runtime.reports.write_json", side_effect=saved),
+            ):
+                child = launch.return_value.__enter__.return_value
+                child.wait.return_value = generator_code
+                child.poll.side_effect = lambda: (
+                    generator_code if (output / "generator.start").exists() else None
+                )
+                return load(config, generator, "observer", output)
+
+        cases: list[tuple[int, str, BaseException]] = [
+            (code, stage, (RuntimeError if stage == "counters" else OSError)(f"{stage} failed"))
+            for code in (0, 99, 130)
+            for stage in ("counters", "samples")
+        ]
+        cases.append((99, "counters", KeyboardInterrupt()))
+        for index, (generator_code, stage, failure) in enumerate(cases):
+            with self.subTest(code=generator_code, stage=stage, failure=type(failure).__name__):
+                with TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    label = f"collection-{index}"
+                    code = invoke_cli(
+                        self,
+                        root,
+                        ["bench", "--label", label],
+                        workload=partial(
+                            collected,
+                            generator_code=generator_code,
+                            stage=stage,
+                            failure=failure,
+                        ),
+                    )
+                    expected = (
+                        130 if isinstance(failure, KeyboardInterrupt) else generator_code or 1
+                    )
+                    saved = mapping(read_json(canonical_path(root, label) / "summary.json"))
+                    self.assertEqual(code, expected)
+                    self.assertEqual(saved["exit_code"], expected)
+                    self.assertEqual(
+                        saved["status"], "interrupted" if expected == 130 else "failed"
+                    )
+                    if isinstance(failure, KeyboardInterrupt):
+                        self.assertEqual(saved["error"], "interrupted")
+                    elif generator_code == 0:
+                        self.assertEqual(saved["error"], f"{stage} failed")
+                    else:
+                        self.assertEqual(saved["error"], f"load generator exited {generator_code}")
+                        secondary = saved["secondary_errors"]
+                        assert isinstance(secondary, list)
+                        self.assertIn(f"{stage} failed", secondary)
+                    measured = mapping(read_json(canonical_path(root, label) / "raw" / "run.json"))
+                    self.assertEqual(measured["exit_code"], generator_code)
+
     def test_bounded_telemetry_loss_remains_visible_without_failing_http_workload(self) -> None:
         def bounded(config: RunConfig, output: Path) -> int:
             code = write_cli_workload(config, output)
@@ -1228,6 +1322,55 @@ class CanonicalCliTests(unittest.TestCase):
                     dev.main()
             self.assertEqual(stopped.exception.code, 1)
             self.assertIn("unsupported", stderr.getvalue().lower())
+
+    def test_experimental_runs_and_rows_explain_the_json_fallback(self) -> None:
+        for name in (
+            "benchmark-accept-depth",
+            "profile-architecture-reference-10000",
+            "benchmark-encoding",
+        ):
+            with self.subTest(name=name):
+                path = runtime.ROOT / "src" / "runs" / "legacy" / name / "summary.json"
+                original = path.read_bytes()
+                with (
+                    patch("sys.argv", ["dev.py", "results", str(path)]),
+                    patch("sys.stderr", new_callable=StringIO) as stderr,
+                ):
+                    with self.assertRaises(SystemExit) as stopped:
+                        dev.main()
+                self.assertEqual(stopped.exception.code, 1)
+                self.assertEqual(
+                    stderr.getvalue(),
+                    "unsupported saved report; use --json to inspect the document\n",
+                )
+                with (
+                    patch("sys.argv", ["dev.py", "results", str(path), "--json"]),
+                    patch("sys.stdout", new_callable=StringIO) as stdout,
+                ):
+                    dev.main()
+                self.assertEqual(decode_json(stdout.getvalue().encode()), decode_json(original))
+                self.assertEqual(path.read_bytes(), original)
+
+    def test_known_legacy_runs_and_group_commit_rows_still_render(self) -> None:
+        root = runtime.ROOT / "src" / "runs" / "legacy"
+        results = reports.load_saved_report(root / "benchmark-results")
+        assert isinstance(results, list)
+        legacy_result = dict(mapping(results[0]))
+        legacy_result.pop("load_generator", None)
+        legacy_result.pop("cpu_scope", None)
+        groups = reports.load_saved_report(root / "benchmark-group-commit")
+        cases: tuple[tuple[JSONValue, str], ...] = (
+            (results, "probe-1000"),
+            ({"runs": [legacy_result]}, "probe-1000"),
+            (groups, "Mixed writes"),
+        )
+        for document, expected in cases:
+            with self.subTest(expected=expected):
+                original = json.dumps(document)
+                with patch("sys.stdout", new_callable=StringIO) as stdout:
+                    reports.show_saved_report(document)
+                self.assertIn(expected, stdout.getvalue())
+                self.assertEqual(json.dumps(document), original)
 
     def test_default_results_selects_the_current_anchor(self) -> None:
         with TemporaryDirectory() as directory:

@@ -733,8 +733,18 @@ def show_telemetry_probe(report: dict[str, JSONValue]) -> None:
         )
 
 
+def _has_rows(value: JSONValue, required: frozenset[str]) -> bool:
+    return isinstance(value, list) and all(
+        isinstance(row, dict) and required <= row.keys() for row in value
+    )
+
+
 def show_saved_report(document: JSONValue) -> None:
+    unsupported = "unsupported saved report; use --json to inspect the document"
+    result_fields = Result.__required_keys__ - {"load_generator", "cpu_scope"}
     if isinstance(document, list):
+        if not _has_rows(document, result_fields):
+            raise ValueError(unsupported)
         show_results(parse_results(document))
         return
     report = mapping(document)
@@ -780,8 +790,15 @@ def show_saved_report(document: JSONValue) -> None:
     elif kind == "server_telemetry":
         show_telemetry(report)
     elif "runs" in report:
+        if not _has_rows(report["runs"], result_fields):
+            raise ValueError(unsupported)
         show_results(parse_results(report))
     elif "rows" in report:
+        fields = frozenset(
+            ("mode", "batch", "cpu_us_per_job", "wall_us_per_job", "wal_appended_frames", "commits")
+        )
+        if not all(_has_rows(report.get(key, []), fields) for key in ("rows", "valid_rows")):
+            raise ValueError(unsupported)
         show_group_commits(report)
     elif kind == "workload" or any(
         key in report for key in ("profile", "generator", "load_generator")
@@ -800,7 +817,7 @@ def show_saved_report(document: JSONValue) -> None:
         if isinstance(telemetry, dict):
             show_telemetry(telemetry)
     else:
-        raise ValueError("unsupported saved report; use --json to inspect the document")
+        raise ValueError(unsupported)
     if report.get("error"):
         print(f"Error: {report['error']}")
     errors = report.get("secondary_errors", [])

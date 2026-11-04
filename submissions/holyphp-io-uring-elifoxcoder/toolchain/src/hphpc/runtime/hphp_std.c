@@ -2115,8 +2115,11 @@ static bool sock_split_addr(hstr *addr, char *host, size_t hsz, char *port, size
     return port[0] != 0;
 }
 
-hval hpbi_stream_socket_server(hval addr) {
+static hval hp_stream_socket_server_impl(hval addr, int reuseport) {
     hp_net_init();
+#if defined(_WIN32) || !defined(SO_REUSEPORT)
+    if (reuseport) return hp_of_bool(false);
+#endif
     char host[256], port[32];
     if (!sock_split_addr(hp_val_to_str(addr), host, sizeof host, port, sizeof port))
         return hp_of_int(-1);
@@ -2131,7 +2134,18 @@ hval hpbi_stream_socket_server(hval addr) {
     if (s == HP_SOCK_BAD) { freeaddrinfo(res); return hp_of_int(-1); }
     int yes = 1;
     setsockopt(s, SOL_SOCKET, SO_REUSEADDR, (const char *)&yes, sizeof yes);
-    if (bind(s, res->ai_addr, (int)res->ai_addrlen) != 0 || listen(s, 4096) != 0) {
+    if (reuseport) {
+#if !defined(_WIN32) && defined(SO_REUSEPORT)
+        if (setsockopt(s, SOL_SOCKET, SO_REUSEPORT,
+                       (const char *)&yes, sizeof yes) != 0) {
+            freeaddrinfo(res);
+            hp_sock_close(s);
+            return hp_of_bool(false);
+        }
+#endif
+    }
+    int backlog = reuseport ? 65535 : 4096;
+    if (bind(s, res->ai_addr, (int)res->ai_addrlen) != 0 || listen(s, backlog) != 0) {
         freeaddrinfo(res);
         hp_sock_close(s);
         return hp_of_bool(false);   /* PHP-style: failure is falsy */
@@ -2141,6 +2155,14 @@ hval hpbi_stream_socket_server(hval addr) {
     hp_sockrec *sr = sockrec((intptr_t)s, true);
     if (sr) sr->listener = true;
     return hp_of_int((int64_t)(intptr_t)s);
+}
+
+hval hpbi_stream_socket_server(hval addr) {
+    return hp_stream_socket_server_impl(addr, 0);
+}
+
+hval hpbi_stream_socket_server_reuseport(hval addr) {
+    return hp_stream_socket_server_impl(addr, 1);
 }
 
 hval hpbi_stream_socket_client(hval addr) {
@@ -2579,6 +2601,7 @@ static _Thread_local int g_epfd = -1;
 #define HP_UR_KIND        0xff
 #define HP_UR_OP_ASYNC_CANCEL 14
 #define HP_UR_ASYNC_CANCEL_USERDATA (1U << 4)
+#define HP_UR_ASYNC_CANCEL_ALL (1U << 0)
 #define HP_UR_REGISTER_FILES        2
 #define HP_UR_REGISTER_FILES_UPDATE 6
 #define HP_UR_REGISTER_FILES2       13   /* sparse table registration */
@@ -2897,6 +2920,7 @@ struct hp_uring_ring {
     uint32_t accept_armed;                 /* single-shot accepts in flight */
     uint32_t live;                         /* installed direct descriptors */
     uint32_t accept_margin;                /* reserve for accepts already in flight */
+    uint16_t accepts_by_listener[16];      /* one-shot accepts on each reuseport fd */
     int accept_resume;                     /* table reopened after the close hysteresis */
     int accepting;                          /* Rust ring state: keep its accept queue filled */
     int accept_full;      /* this ring's direct table is full */
@@ -2906,6 +2930,7 @@ struct hp_uring_ring {
     socklen_t accept_len;
 };
 #define HP_UR_RINGS_MAX        8
+#define HP_UR_LISTENERS_MAX    16
 #define HP_UR_SLOTS_PER_RING   65536U
 static _Thread_local struct hp_uring_ring hp_ur_rings[HP_UR_RINGS_MAX];
 static _Thread_local int hp_ur_nrings;
@@ -2942,6 +2967,36 @@ static _Thread_local uint32_t hp_ur_acceptq_cap, hp_ur_acceptq_len, hp_ur_accept
 /* Listener state: accept on one ring at a time, spilling when its table fills. */
 static _Thread_local hp_sock hp_ur_listen_fd = -1;
 static _Thread_local int hp_ur_listen_on = 0;
+static _Thread_local hp_sock hp_ur_listen_fds[HP_UR_LISTENERS_MAX];
+static _Thread_local uint32_t hp_ur_listen_count;
+static _Thread_local uint32_t hp_ur_accept_listener_cursor;
+
+static int hp_ur_listener_find(hp_sock fd) {
+    for (int i = 0; i < HP_UR_LISTENERS_MAX; i++)
+        if (hp_ur_listen_fds[i] == fd) return i;
+    return -1;
+}
+
+static bool hp_ur_listener_add(hp_sock fd) {
+    if (hp_ur_listener_find(fd) >= 0) return true;
+    for (int i = 0; i < HP_UR_LISTENERS_MAX; i++) {
+        if (hp_ur_listen_fds[i] != 0) continue;
+        hp_ur_listen_fds[i] = fd;
+        hp_ur_listen_count++;
+        if (hp_ur_listen_fd < 0) hp_ur_listen_fd = fd;
+        hp_ur_listen_on = 1;
+        return true;
+    }
+    return false;
+}
+
+static hp_sock hp_ur_listener_next(void) {
+    for (int i = 0; i < HP_UR_LISTENERS_MAX; i++) {
+        uint32_t at = hp_ur_accept_listener_cursor++ % HP_UR_LISTENERS_MAX;
+        if (hp_ur_listen_fds[at] > 0) return hp_ur_listen_fds[at];
+    }
+    return -1;
+}
 
 uint64_t hp_st[HP_ST_N];   /* runtime counters, see hphp_rt.h */
 static _Thread_local uint64_t hp_ur_readq_enqueues, hp_ur_readq_completions;
@@ -3380,25 +3435,45 @@ static void hp_ur_free_fd(hp_sock fd) {
             return;
         }
     }
-    /* A paused direct listener keeps its real fd open; cancel the armed
-     * multishot accept on every ring so later completions cannot create
-     * orphan handles. */
+    /* A direct listener can be one member of a SO_REUSEPORT group. Cancel
+     * every accept for this fd, subtract only its in-flight count, and keep
+     * the remaining listener queues accepting. */
     if (st->listener && hp_ur_direct == 1) {
+        int li = hp_ur_listener_find(fd);
         for (int r = 0; r < hp_ur_nrings; r++) {
-            if (!hp_ur_rings[r].accept_armed) continue;
+            struct hp_uring_ring *rg = &hp_ur_rings[r];
+            uint32_t pending = li >= 0 ? rg->accepts_by_listener[li] : 0;
+            if (!pending) continue;
             hp_ur_cur = &hp_ur_rings[r];
             struct hp_uring_sqe s;
             memset(&s, 0, sizeof s);
             s.opcode = HP_UR_OP_ASYNC_CANCEL;
             s.fd = -1;
             s.addr = hp_ur_ud(st, fd, HP_UR_KIND_ACCEPT);
-            s.cancel_flags = HP_UR_ASYNC_CANCEL_USERDATA;
+            s.cancel_flags = HP_UR_ASYNC_CANCEL_USERDATA |
+                             HP_UR_ASYNC_CANCEL_ALL;
             hp_ur_sq_push(&s);
-            hp_ur_rings[r].accept_armed = 0;
+            if (hp_ur_accept_depth)
+                rg->accept_armed = rg->accept_armed >= pending
+                    ? rg->accept_armed - pending : 0;
+            else
+                rg->accept_armed = 0;
+            if (li >= 0) rg->accepts_by_listener[li] = 0;
         }
         hp_ur_cur = &hp_ur_rings[0];
-        hp_ur_listen_on = 0;
+        if (li >= 0) {
+            hp_ur_listen_fds[li] = 0;
+            if (hp_ur_listen_count) hp_ur_listen_count--;
+        }
         hp_ur_listen_fd = -1;
+        for (int i = 0; i < HP_UR_LISTENERS_MAX; i++) {
+            if (hp_ur_listen_fds[i] > 0) {
+                hp_ur_listen_fd = hp_ur_listen_fds[i];
+                break;
+            }
+        }
+        hp_ur_listen_on = hp_ur_listen_count != 0;
+        if (hp_ur_listen_on) hp_ur_arm_all_accepts();
     }
     /* A direct descriptor is owned by the ring, not by the process fd
      * table: after a deferred close it must be released explicitly. */
@@ -4052,8 +4127,9 @@ static bool hp_uring_arm_poll(hp_sock fd) {
 static bool hp_uring_arm_accept(hp_sock fd, int ring) {
     if (ring < 0 || ring >= hp_ur_nrings) return false;
     struct hp_uring_ring *rg = &hp_ur_rings[ring];
+    int li = hp_ur_listener_find(fd);
     struct hp_urfds *st = hp_ur_st_of(fd);
-    if (!st || !st->listener) return false;
+    if (!st || !st->listener || li < 0) return false;
     if (hp_ur_direct != 1) return false;
     if (hp_ur_accept_depth) {
         uint32_t ceiling = rg->dircap > rg->accept_margin
@@ -4074,7 +4150,7 @@ static bool hp_uring_arm_accept(hp_sock fd, int ring) {
     s.opcode = HP_UR_OP_ACCEPT;
     s.fd = (int)fd;
     /* Null sockaddr pointers match Rust's accept entries and avoid sharing
-     * mutable address storage across the 64 outstanding one-shot accepts. */
+     * mutable address storage across the bounded one-shot accepts. */
     if (!hp_ur_accept_depth) {
         s.addr = (uint64_t)(uintptr_t)&rg->accept_addr;
         s.addr2 = (uint64_t)(uintptr_t)&rg->accept_len;
@@ -4089,8 +4165,13 @@ static bool hp_uring_arm_accept(hp_sock fd, int ring) {
         hp_st[HP_ST_ARM_FAIL]++;
         return false;
     }
-    if (hp_ur_accept_depth) rg->accept_armed++;
-    else rg->accept_armed = 1;
+    if (hp_ur_accept_depth) {
+        rg->accept_armed++;
+        rg->accepts_by_listener[li]++;
+    } else {
+        rg->accept_armed = 1;
+        rg->accepts_by_listener[li] = 1;
+    }
     return true;
 }
 
@@ -4098,7 +4179,7 @@ static bool hp_uring_arm_accept(hp_sock fd, int ring) {
  * the current ring reaches its safety margin. A ring reopened by closes can
  * accept again alongside the active spill ring, as in Rust's close path. */
 static void hp_ur_arm_all_accepts(void) {
-    if (!hp_ur_listen_on || hp_ur_listen_fd < 0 || hp_ur_direct != 1) return;
+    if (!hp_ur_listen_on || hp_ur_listen_count == 0 || hp_ur_direct != 1) return;
     if (hp_ur_accept_depth) {
         for (int r = 0; r < hp_ur_nrings; r++) {
             struct hp_uring_ring *rg = &hp_ur_rings[r];
@@ -4114,7 +4195,8 @@ static void hp_ur_arm_all_accepts(void) {
             while (rg->accept_armed < hp_ur_accept_depth &&
                    !rg->accept_full) {
                 uint32_t before = rg->accept_armed;
-                if (!hp_uring_arm_accept(hp_ur_listen_fd, r) ||
+                hp_sock lfd = hp_ur_listener_next();
+                if (lfd < 0 || !hp_uring_arm_accept(lfd, r) ||
                     rg->accept_armed == before) break;
             }
         }
@@ -4134,7 +4216,8 @@ static void hp_ur_arm_all_accepts(void) {
                 while (rg->accept_armed < hp_ur_accept_depth &&
                        !rg->accept_full) {
                     uint32_t before = rg->accept_armed;
-                    if (!hp_uring_arm_accept(hp_ur_listen_fd, r) ||
+                    hp_sock lfd = hp_ur_listener_next();
+                    if (lfd < 0 || !hp_uring_arm_accept(lfd, r) ||
                         rg->accept_armed == before) break;
                 }
                 break;
@@ -4146,7 +4229,8 @@ static void hp_ur_arm_all_accepts(void) {
     for (int r = 0; r < hp_ur_nrings; r++) {
         if (hp_ur_rings[r].accept_armed || hp_ur_rings[r].accept_full) continue;
         hp_ur_cur = &hp_ur_rings[r];
-        if (!hp_uring_arm_accept(hp_ur_listen_fd, r)) {
+        hp_sock lfd = hp_ur_listener_next();
+        if (lfd < 0 || !hp_uring_arm_accept(lfd, r)) {
             /* a full SQ is retried on the next cycle */
             if (hp_ur_rings[r].accept_armed) continue;
         }
@@ -4604,12 +4688,18 @@ static int hp_ur_drain_ring(HpFdList *in) {
                 continue;
             }
             int rr = (int)(hp_ur_cur - hp_ur_rings);
+            int li = hp_ur_listener_find(fd);
             if (hp_ur_accept_depth) {
                 if (hp_ur_rings[rr].accept_armed)
                     hp_ur_rings[rr].accept_armed--;
+                if (li >= 0 && hp_ur_rings[rr].accepts_by_listener[li])
+                    hp_ur_rings[rr].accepts_by_listener[li]--;
             } else {
                 hp_ur_rings[rr].accept_armed =
                     (c->flags & HP_UR_CQE_F_MORE) ? 1 : 0;
+                if (li >= 0)
+                    hp_ur_rings[rr].accepts_by_listener[li] =
+                        (c->flags & HP_UR_CQE_F_MORE) ? 1 : 0;
             }
             if (c->res >= 0) {
                 uint32_t idx = (uint32_t)c->res;
@@ -4651,8 +4741,11 @@ static int hp_ur_drain_ring(HpFdList *in) {
                             c->res == -ENOMEM)) {
                     hp_ur_rings[rr].accept_full = 1;
                     hp_ur_rings[rr].accepting = 0;
-                    if (!hp_ur_accept_depth)
+                    if (!hp_ur_accept_depth) {
                         hp_ur_rings[rr].accept_armed = 0;
+                        if (li >= 0)
+                            hp_ur_rings[rr].accepts_by_listener[li] = 0;
+                    }
                     g_accept_errno = 0;
                 } else {
                     g_accept_errno = (int)(-c->res);
@@ -4662,12 +4755,15 @@ static int hp_ur_drain_ring(HpFdList *in) {
                     }
                 }
             }
-            /* In Rust-compatible mode the bounded accept queue is refilled
-             * after this ring's CQ has been drained. */
-            if (!hp_ur_accept_depth && st->listener &&
-                !hp_ur_rings[rr].accept_armed &&
-                hp_ur_direct == 1 &&
-                (c->res >= 0 || c->res == -EAGAIN || c->res == -EINTR))
+            /* Keep at least one accept pending on the listener that completed.
+             * SO_REUSEPORT hashes each new flow to one listener; refilling only
+             * the global ring depth can leave that listener with no accept SQE
+             * while its queue has connections, and the ring then sleeps on the
+             * other listeners. */
+            if (st->listener && hp_ur_direct == 1 &&
+                (c->res >= 0 || c->res == -EAGAIN || c->res == -EINTR) &&
+                (!hp_ur_accept_depth ||
+                 hp_ur_rings[rr].accept_armed < hp_ur_accept_depth))
                 hp_uring_arm_accept(fd, rr);
             continue;
         }
@@ -5138,12 +5234,12 @@ hval hpbi_epoll_add(hval s) {
             if (hp_ur_dbg)
                 fprintf(stderr, "[ur] add fd=%d listener=%d\n", (int)fd, st->listener);
             if (st->listener) {
-                /* direct mode accepts straight into the registered tables:
-                 * one multishot accept per ring replaces poll + accept4 */
+                /* Register every member of a reuseport listener group first.
+                 * The event loop arms the bounded accept queues after startup,
+                 * so the first ring can distribute them across the full group. */
                 if (hp_ur_direct == 1) {
-                    hp_ur_listen_fd = fd;
-                    hp_ur_listen_on = 1;
-                    hp_ur_arm_all_accepts();
+                    if (!hp_ur_listener_add(fd))
+                        return hp_of_bool(false);
                 } else {
                     hp_uring_arm_poll(fd);
                 }

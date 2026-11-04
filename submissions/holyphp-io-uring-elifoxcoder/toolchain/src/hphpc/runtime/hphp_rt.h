@@ -486,6 +486,7 @@ hval hpbi_sha1(hval s, hval raw_output);  /* real SHA-1; raw=true -> 20 bytes */
 
 /* sockets (see hphp_std.c) — handles are integers, non-blocking by default */
 hval hpbi_stream_socket_server(hval addr);       /* "tcp://host:port" */
+hval hpbi_stream_socket_server_reuseport(hval addr); /* SO_REUSEPORT listener */
 hval hpbi_stream_socket_client(hval addr);
 hval hpbi_stream_socket_accept(hval srv);
 hval hpbi_stream_set_blocking(hval s, hval block);

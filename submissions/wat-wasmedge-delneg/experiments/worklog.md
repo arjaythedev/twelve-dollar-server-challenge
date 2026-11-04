@@ -1017,7 +1017,7 @@ RLIMIT_MEMLOCK 8 MiB (VmLck 8,192 kB), which the code pinning already uses.
 Synteq sysctls restored from w3/sysctl.orig; the calibrated values are in w3/sysctl.cal.
 
 ## TdscWat4 (3 Nov on): hypotheses first (experiments/hypotheses.md, append-only, locked), then E53+
-Paid calls tally (limit $1): consult 1103-205423-0386 round 1 $0.0233, round 2 $0.0177. Total $0.041.
+Paid calls tally (limit $1): consult 1103-205423-0386 round 1 $0.0233, round 2 $0.0177, round 3 $0.0087. Total $0.050.
 Boxes: Synteq (harness v2 = hs2.sh/q2.sh, SPIN_NS=10000 unless marked), opt-box (builds).
 
 ## E53 (H3): fsync cost against dirty pages, Synteq disk (3 Nov, root, `bin/fsb`, source /tmp/tdsc-wat4/fsb.c)
@@ -1164,4 +1164,17 @@ k6: hold from 1,000 frames left, 500 ms limit (2 s past 3x), inline only past 8x
 - 260k: k6 p50 1.35, p95 42, p99 280, max 756 ms, 15.2 us/req, RSS 162 MB (k4 860/1,255 fail)
 - 280k: k6 p50 1.9, p95 280, p99 1,050, max 5,810 ms, 17.2 us/req (k5 3,110/5,320): just over the p99 limit
 Event log at 260k: 195 checkpoints in 300 s, 428 bulk passes, 109 holds that timed out, tail pass p50 371, p90 463 ms: the tail is slow under the cap, holds are often lost. GET traffic flows through all of it.
+
+## E69-E72 (H1c, H24): repeats and the tail target (4 Nov, harness v3, 5-minute holds, 0 errors; pass = p95<500, p99<1,000)
+- b4 (the df9da40-style baseline) 240k cap 3,000: p50 124, p95 860, p99 1,175, max 1,799: FAIL
+- k4 (H1 with inline tail) 260k cap 3,000: 860/1,255: FAIL
+- k6 260k cap 3,000: 42/280, repeat 47/280, max 756/690
+- k6 270k cap 3,000: 74/315, max 970
+- k6 280k cap 3,000: 280/1,050 (fail by 50 ms), CKPT_NICE=0 260/770, CKPT_TAIL=400 75/310, max 794
+- k6 260k no cap: 14/81, max 561
+CKPT_TAIL=400 beats 1,000 at 280k: fewer lost holds, one run each so far. H24's "the tail's size doesn't matter" (E63) was for an inline tail; with a hold it does.
+
+DeepSeek round 3 on H1c. Taken: test slower disks and a read cap with less memory (E76, E77), since the harness caps writes only and the page cache collapses at ramp end; holds must stay short of the p95/p99 budget on a slower disk.
+Rejected after checking the code: "n drifts" (n is SQLite's own mxFrame from the WAL hook), "stranger gets a response" (replay checks the generation, holdcheck.py closes mid-hold), "replay re-arms a bulk pass each cycle" (after a restart n starts from 0; bulk starts at 8,000).
+"The hold doesn't save disk work": true and beside the point, it moves the sync off the loop.
 

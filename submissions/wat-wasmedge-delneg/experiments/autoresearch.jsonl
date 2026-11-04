@@ -73,3 +73,15 @@
 {"id":"E52","box":"synteq","harness":"v2, SPIN_NS=10000, 2-min probes","what":"checkpoint frames 16k/24k/32k; WINDOW_MS 2/5/10","reps":{"210k":{"8k":{"p95":330,"p99":500},"16k":{"p95":215,"p99":390},"24k":{"p95":350,"p99":960}},"220k_16k":{"p95":495,"p99":3230},"win_210k_16k":{"2":[230,410],"5":[220,395],"10":[285,695]}},"status":"16k frames pending 5-min holds; window no effect"}
 {"id":"H3","box":"synteq","harness":"v2 + NOTRACK, SPIN_NS=10000, 5-min holds","what":"df9da40 vs CKPT_FRAMES=16000 WINDOW_MS=5","reps":{"hd_210k":{"p95":[350,580],"p99":[555,1430],"rdMB":[0,0]},"c_210k":{"p95":[450,410],"p99":[1675,1260],"rdMB":[26,32]},"c_215k":{"p95":[740,470],"p99":[4350,1765],"rdMB":[47,37]}},"status":"16k frames dropped (page-cache rereads); WINDOW_MS dropped"}
 {"id":"H4","box":"synteq","harness":"v2 + NOTRACK, SPIN_NS=10000, 2-min","what":"df9da40 at 240k","result":"p95/p99 5320, 21.7k rps, CPU0 98%, ListenOverflows 0, no OOM, TCP mem 50k->103k pages, PruneCalled +48676","status":"capacity limit, not a listen/OOM bug"}
+{"id": "E53", "box": "synteq", "harness": "direct", "hyp": "H3", "result": "fsync ~1.3 ms floor + ~60 us/page; 2,400 pages ~150 ms", "status": "done"}
+{"id": "E54-E56", "box": "synteq", "harness": "v2 SPIN_NS=10000, 2-min, 210k", "hyp": "H1,H12", "reps": {"b4_p99": [1305, 1000, 550], "h1_p99": [690, 410, 440, 390]}, "status": "H1 helps on v2; shared mode costs nothing"}
+{"id": "E57", "box": "opt-box+synteq", "hyp": "H5,H7,H8,H9,H14", "status": "all dead"}
+{"id": "E58", "box": "synteq", "harness": "v2, 5-min, 220k", "reps": {"h1b": [715, 1380], "b4": [735, 1215]}, "status": "both fail on CPU; v2 can't judge past 210k"}
+{"id": "E59", "box": "opt-box", "harness": "microbench", "hyp": "H10,H5b", "result": "WAT beats C/Rust on SHA, putu; JSON fixed ~0.15 us/req", "status": "kept"}
+{"id": "E60", "box": "opt-box", "harness": "h1check.py", "result": "0 stale of 16,260+15,927; 0 missing of 110,378/107,933/70,573 after kill -9", "status": "safe"}
+{"id": "E61", "box": "synteq", "harness": "v3 cap sweep", "result": "CPU 64-68% matches scorer, no cliff at 210k", "status": "harness caveat"}
+{"id": "E62", "box": "synteq", "harness": "v3 cap 3000, 2-min", "hyp": "H1,H26", "reps": {"k3_240": [535, 780], "b4_240": [625, 895], "k3_260": [665, 1025], "b4_260": [680, 985]}, "status": "inline tail stalls the loop"}
+{"id": "E63", "box": "synteq", "harness": "v3 cap 3000, 2-min", "hyp": "H24,H26,H27", "reps": {"k4_260": [600, 875], "k4t30_260": [585, 855], "k4t30n0_260": [560, 840]}, "status": "tail size and nice: nothing; ENOBUFS 0"}
+{"id": "E64", "box": "synteq", "harness": "v3 cap 3000, 2-min", "hyp": "H1c", "reps": {"k5_240": [16.6, 164], "k5_260": [18, 124], "k5_280": [65, 235]}, "status": "step change; 5-min next"}
+{"id": "E67", "box": "synteq", "harness": "v3 cap 3000, 5-min", "hyp": "H1c", "reps": {"k5_280": [3110, 5320], "k4_260": [860, 1255]}, "status": "k5 fails: 3x inline fired"}
+{"id": "E68", "box": "synteq", "harness": "v3 cap 3000, 5-min", "hyp": "H1c", "reps": {"k6_260": [42, 280], "k6_280": [280, 1050], "k6n0_280": [260, 770]}, "status": "k6 passes 260k; 280k borderline; repeats running"}

@@ -139,6 +139,8 @@ Session input offset, four reversed pairs of 1M requests/case: contiguous-body C
 
 Session offset, 350k control/repeat: total CPU -0.73%, approximate hold CPU +0.50%, hold p99 18.56 to 21.02 ms, zero errors. No demonstrated full-server gain. First offset attempt missed activation (30.257s; deadline 30.100s); its failed result is retained. [Data](src/runs/146d5f2/session-offset-350000-comparison/summary.json).
 
+Parser buffers, four reversed pairs: Parser 336 to 304 bytes; first authenticated request 2 to 1 C++ allocations, warm 0 in both. Median CPU -1.4% GET, -2.8% auth and -2.7% fragmented auth, with outliers. Fragmented retained-capacity sum 502 to 540 (includes SSO). Four contracts passed; native only. [Data](src/runs/89b5d0c/parser-buffers-native/summary.json).
+
 CQ rotation and dispatch/wait cleanup: 70k A/B CPU/request -1.2%. Matched 350k/5m B/A: CPU/request +0.5%, hold p99 6.12 to 6.05 ms, peak RAM +47.67 MiB. Same seed, fresh seeded databases and generator; zero errors or memory-limit events. Rotation removed after no clear gain; accept/wait cleanup retained. [Data](src/runs/legacy/benchmark-cq-rotation/summary.json).
 
 PGO: CPU/request -2.9%, hold p99 5.87 to 38.71 ms. Both passed; implementation removed. The preliminary 30-s ramp pair missed activation deadlines. [Data](src/runs/legacy/benchmark-pgo/summary.json).

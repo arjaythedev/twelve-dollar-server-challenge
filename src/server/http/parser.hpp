@@ -64,9 +64,9 @@ class Parser
 
     std::size_t scratch_capacity() const noexcept
     {
-        return url_.capacity() + field_.capacity() + value_.capacity() +
-               request_.method.capacity() + request_.path.capacity() +
-               request_.authorization.capacity() + request_.body.capacity();
+        return url_.capacity() + value_.capacity() + request_.method.capacity() +
+               request_.path.capacity() + request_.authorization.capacity() +
+               request_.body.capacity();
     }
 
     void reset();
@@ -82,7 +82,6 @@ class Parser
 
     static int on_url(llhttp_t *parser, const char *data, std::size_t length);
     static int on_header_field(llhttp_t *parser, const char *data, std::size_t length);
-    static int on_header_field_complete(llhttp_t *parser);
     static int on_header_value(llhttp_t *parser, const char *data, std::size_t length);
     static int on_header_value_complete(llhttp_t *parser);
     static int on_headers_complete(llhttp_t *parser);
@@ -94,10 +93,10 @@ class Parser
     llhttp_t parser_{};
     Message request_;
     std::string url_;
-    std::string field_;
     std::string value_;
+    std::uint16_t field_size_ = 0;
     std::uint16_t value_size_ = 0;
-    bool capture_value_ = false;
+    bool authorization_prefix_ = true;
     Phase phase_ = Phase::headers;
     Status error_ = Status::bad_request;
 };

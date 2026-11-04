@@ -25,6 +25,10 @@ Unchecked items are experiments; checked items include completed work and discar
 
 - [x] Skip irrelevant header values while llhttp retains validation, framing and size limits. The [native screen](src/runs/6cd248e/http-disassembly-native/summary.json) used 2-3% less parser CPU for common/auth/fragmented requests; `sizeof(Parser)` stays 336 bytes. Fragmentation, duplicate auth, limits and pipeline contracts passed.
 
+- [x] Match header names incrementally and swap completed authorization storage ([probe](src/runs/89b5d0c/parser-buffers-native/summary.json)): Parser 336 to 304 bytes, first authenticated request 2 to 1 C++ allocations, warm 0 in both. Keep staging for partial/invalid duplicates and trailers. Fragmented-auth capacity rises 502 to 540; native CPU medians are slightly lower but noisy. No whole-server gain measured.
+
+- [ ] Screen outlining authorization publication if its inlined SSO swap and stack-canary prologue measurably burden ordinary header completion. Preserve protection and publication semantics; measure before adding a separate call.
+
 - [x] Use static status lines and direct decimal output in `Reply::prepare`. The [native screen](src/runs/6cd248e/http-disassembly-native/summary.json) saved median 12.7% CPU with recycled storage and 4.3% with fresh objects; individual pairs were noisy. Byte output and partial-send contracts passed. GCC still copies the body-length lookup table; no whole-server or total-stack gain established.
 
 - [x] Discard skipping duplicate point-read initialization ([screen](src/runs/6cd248e/post-initialization-native/summary.json)): assembly removes the expected stores and contracts pass, but four pairs range from -12.4% to +20.2% CPU. No reliable gain; keep the existing initializers.

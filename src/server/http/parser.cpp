@@ -8,6 +8,8 @@ namespace tds::http
 namespace
 {
 
+constexpr std::string_view authorization_header = "authorization";
+
 int append_fragment(std::string &target, const char *data, std::size_t length)
 {
     if (length > 16384 - target.size())
@@ -25,7 +27,6 @@ constinit const llhttp_settings_t Parser::settings_ = []() constexpr {
     llhttp_settings_t settings{};
     settings.on_url = on_url;
     settings.on_header_field = on_header_field;
-    settings.on_header_field_complete = on_header_field_complete;
     settings.on_header_value = on_header_value;
     settings.on_header_value_complete = on_header_value_complete;
     settings.on_headers_complete = on_headers_complete;
@@ -58,10 +59,10 @@ void Parser::reset()
     request_.body.clear();
     request_.keep_alive = true;
     url_.clear();
-    field_.clear();
     value_.clear();
+    field_size_ = 0;
     value_size_ = 0;
-    capture_value_ = false;
+    authorization_prefix_ = true;
     phase_ = Phase::headers;
     error_ = Status::bad_request;
     llhttp_init(&parser_, HTTP_REQUEST, &settings_);
@@ -77,7 +78,37 @@ int Parser::on_url(llhttp_t *parser, const char *data, std::size_t length)
 int Parser::on_header_field(llhttp_t *parser, const char *data, std::size_t length)
 {
     auto &self = *static_cast<Parser *>(parser->data);
-    return append_fragment(self.field_, data, length);
+    if (length > 16384U - self.field_size_)
+    {
+        return -1;
+    }
+    if (self.authorization_prefix_)
+    {
+        // A matching prefix is at most thirteen bytes, even when llhttp splits the field
+        if (length > authorization_header.size() - self.field_size_)
+        {
+            self.authorization_prefix_ = false;
+        }
+        else
+        {
+            for (std::size_t i = 0; i < length; ++i)
+            {
+                char byte = data[i];
+                if (byte >= 'A' && byte <= 'Z')
+                {
+                    byte = static_cast<char>(byte + ('a' - 'A'));
+                }
+                if (byte != authorization_header[self.field_size_ + i])
+                {
+                    self.authorization_prefix_ = false;
+                    break;
+                }
+            }
+        }
+    }
+    self.field_size_ = static_cast<std::uint16_t>(self.field_size_ + length);
+
+    return 0;
 }
 
 int Parser::on_header_value(llhttp_t *parser, const char *data, std::size_t length)
@@ -89,36 +120,9 @@ int Parser::on_header_value(llhttp_t *parser, const char *data, std::size_t leng
         return -1;
     }
     self.value_size_ = static_cast<std::uint16_t>(self.value_size_ + length);
-    if (self.capture_value_)
+    if (self.authorization_prefix_ && self.field_size_ == authorization_header.size())
     {
         self.value_.append(data, length);
-    }
-
-    return 0;
-}
-
-int Parser::on_header_field_complete(llhttp_t *parser)
-{
-    auto &self = *static_cast<Parser *>(parser->data);
-    constexpr std::string_view authorization = "authorization";
-    self.capture_value_ = self.field_.size() == authorization.size();
-    if (!self.capture_value_)
-    {
-        return 0;
-    }
-    for (std::size_t i = 0; i < authorization.size(); ++i)
-    {
-        char c = self.field_[i];
-        if (c >= 'A' && c <= 'Z')
-        {
-            c = static_cast<char>(c + ('a' - 'A'));
-        }
-        if (c != authorization[i])
-        {
-            self.capture_value_ = false;
-
-            return 0;
-        }
     }
 
     return 0;
@@ -127,14 +131,15 @@ int Parser::on_header_field_complete(llhttp_t *parser)
 int Parser::on_header_value_complete(llhttp_t *parser)
 {
     auto &self = *static_cast<Parser *>(parser->data);
-    if (self.capture_value_)
+    if (self.authorization_prefix_ && self.field_size_ == authorization_header.size())
     {
-        self.request_.authorization = self.value_;
+        // Publish only completed values, so a partial duplicate cannot replace valid auth
+        self.request_.authorization.swap(self.value_);
     }
-    self.field_.clear();
     self.value_.clear();
+    self.field_size_ = 0;
     self.value_size_ = 0;
-    self.capture_value_ = false;
+    self.authorization_prefix_ = true;
     return 0;
 }
 

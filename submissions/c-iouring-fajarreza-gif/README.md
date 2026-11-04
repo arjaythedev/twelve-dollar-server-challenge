@@ -59,3 +59,9 @@ Unlike submissions that hack private B-tree headers (`sqlite3BtreeCursor`) or co
   * **Median latency:** ~300 µs
   * **p95 latency:** ~590 µs
   * **p99 latency:** ~790 µs
+
+---
+
+## Acknowledgements & Credits
+
+- The low-level `io_uring` direct Linux ABI syscall wrapper (`src/sys.h`) and SHA-256 implementation (`src/sha256.h`) are adapted from and credit the work of **Pavly Halim** ([`c-iouring-pavlyhalim`, PR #245](https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/245)). Server event loop handling, HTTP parser, JWT token verification, and clean SQLite database engine are independent implementations.

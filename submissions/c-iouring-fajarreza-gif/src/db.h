@@ -115,15 +115,13 @@ static inline char *fast_i64toa(int64_t v, char *p) {
 
 static inline size_t db_query_feed(char *out, size_t cap) {
 #if USE_FAST_SERIALIZE
+    if (cap < 16) return 0;
     char *p = out;
     memcpy(p, "{\"posts\":[", 10); p += 10;
 
     int first = 1;
-    char esc_body[2048];
+    char esc_body[3584];
     while (sqlite3_step(g_db_ctx.stmt_feed) == SQLITE_ROW) {
-        if (!first) *p++ = ',';
-        first = 0;
-
         int64_t id = sqlite3_column_int64(g_db_ctx.stmt_feed, 0);
         const char *body = (const char*)sqlite3_column_text(g_db_ctx.stmt_feed, 1);
         int body_bytes = sqlite3_column_bytes(g_db_ctx.stmt_feed, 1);
@@ -133,6 +131,14 @@ static inline size_t db_query_feed(char *out, size_t cap) {
         int64_t likes = sqlite3_column_int64(g_db_ctx.stmt_feed, 4);
 
         size_t esc_len = json_escape_string(body, (size_t)body_bytes, esc_body, sizeof(esc_body));
+
+        // Ensure post fits within cap before writing
+        if ((size_t)(p - out) + esc_len + (size_t)author_bytes + 140 >= cap) {
+            break;
+        }
+
+        if (!first) *p++ = ',';
+        first = 0;
 
         memcpy(p, "{\"id\":", 6); p += 6;
         p = fast_i64toa(id, p);
@@ -156,7 +162,7 @@ static inline size_t db_query_feed(char *out, size_t cap) {
     o += snprintf(out + o, cap - o, "{\"posts\":[");
 
     int first = 1;
-    char esc_body[2048];
+    char esc_body[3584];
     while (sqlite3_step(g_db_ctx.stmt_feed) == SQLITE_ROW) {
         if (!first && o < cap) out[o++] = ',';
         first = 0;
@@ -200,10 +206,15 @@ static inline int db_query_post(int64_t post_id, char *out, size_t cap, size_t *
     int author_bytes = sqlite3_column_bytes(g_db_ctx.stmt_post, 3);
     int64_t likes = sqlite3_column_int64(g_db_ctx.stmt_post, 4);
 
-    char esc_body[2048];
+    char esc_body[3584];
     size_t esc_len = json_escape_string(body, (size_t)body_bytes, esc_body, sizeof(esc_body));
 
 #if USE_FAST_SERIALIZE
+    if (esc_len + (size_t)author_bytes + 140 >= cap) {
+        sqlite3_reset(g_db_ctx.stmt_post);
+        sqlite3_clear_bindings(g_db_ctx.stmt_post);
+        return 0;
+    }
     char *p = out;
     memcpy(p, "{\"post\":{\"id\":", 14); p += 14;
     p = fast_i64toa(id, p);
@@ -251,7 +262,7 @@ static inline int db_create_post(int64_t user_id, const char *body, size_t body_
     int64_t new_id = sqlite3_column_int64(g_db_ctx.stmt_post_create, 0);
     const char *created_at = (const char*)sqlite3_column_text(g_db_ctx.stmt_post_create, 1);
 
-    char esc_body[2048];
+    char esc_body[3584];
     size_t esc_len = json_escape_string(body, body_len, esc_body, sizeof(esc_body));
     esc_body[esc_len] = '\0';
 

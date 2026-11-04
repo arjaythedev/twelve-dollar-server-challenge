@@ -22,7 +22,7 @@
 #define PBUF_ENTRIES 4096
 #define PBUF_SIZE 2048
 #define RESP_POOL_SIZE 4096
-#define RESP_BUF_SIZE 8192
+#define RESP_BUF_SIZE 16384
 
 enum {
     OP_ACCEPT = 1,
@@ -85,16 +85,26 @@ static pending_write_t g_pending_writes[MAX_PENDING_WRITES];
 static int g_num_pending_writes = 0;
 
 static time_t g_server_start_time = 0;
+static unsigned g_nslots = MAX_SLOTS;
+static unsigned g_active_conns = 0;
+static int g_accept_armed = 0;
+static int g_listen_fd = -1;
 
 static void close_conn(struct ring *r, unsigned slot, uint16_t gen) {
     if (slot >= MAX_SLOTS || !g_conns[slot].open || g_conns[slot].gen != gen) return;
     g_conns[slot].open = 0;
     g_conns[slot].poll_armed = 0;
     g_conns[slot].gen++;
+    if (g_active_conns > 0) g_active_conns--;
 
     uint64_t poll_ud = MAKE_UD(OP_POLL, slot, gen);
     uint64_t close_ud = MAKE_UD(OP_CLOSE, slot, g_conns[slot].gen);
     sqe_shutdown_close(r, slot, close_ud, poll_ud, close_ud);
+
+    if (!g_accept_armed && g_listen_fd >= 0) {
+        sqe_accept_multishot(ring_sqe(r), g_listen_fd, MAKE_UD(OP_ACCEPT, 0, 0));
+        g_accept_armed = 1;
+    }
 }
 
 int main() {
@@ -110,6 +120,7 @@ int main() {
     }
     getrlimit(RLIMIT_NOFILE, &rl);
     unsigned nslots = (rl.rlim_cur < MAX_SLOTS) ? (unsigned)rl.rlim_cur : MAX_SLOTS;
+    g_nslots = nslots;
 
     const char *sqlite_path = getenv("SQLITE_PATH");
     if (!sqlite_path) sqlite_path = "feed.db";
@@ -150,6 +161,7 @@ int main() {
     // Create listening socket
     int listen_fd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
     if (listen_fd < 0) { perror("socket"); return 1; }
+    g_listen_fd = listen_fd;
 
     int opt = 1;
     setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
@@ -173,6 +185,7 @@ int main() {
 
     // Arm multishot accept
     sqe_accept_multishot(ring_sqe(&ring), listen_fd, MAKE_UD(OP_ACCEPT, 0, 0));
+    g_accept_armed = 1;
     ring_submit(&ring, 0, 0, NULL, 0);
 
     printf("Listening on %s:%d (io_uring ready)\n", host, port);
@@ -213,12 +226,17 @@ int main() {
                             g_conns[new_slot].open = 1;
                             g_conns[new_slot].keep_alive = 1;
                             g_conns[new_slot].poll_armed = 1;
+                            g_active_conns++;
                             // Arm multishot poll
                             sqe_poll_conn(ring_sqe(&ring), new_slot, MAKE_UD(OP_POLL, new_slot, g_conns[new_slot].gen));
                         }
-                    } else if (res == -ECANCELED || res == -EINVAL) {
-                        // Re-arm accept if needed
-                        sqe_accept_multishot(ring_sqe(&ring), listen_fd, MAKE_UD(OP_ACCEPT, 0, 0));
+                    }
+                    if (!(flags & IORING_CQE_F_MORE) || res < 0) {
+                        g_accept_armed = 0;
+                        if (g_active_conns < g_nslots) {
+                            sqe_accept_multishot(ring_sqe(&ring), listen_fd, MAKE_UD(OP_ACCEPT, 0, 0));
+                            g_accept_armed = 1;
+                        }
                     }
                     break;
                 }
@@ -262,20 +280,27 @@ int main() {
 
                             char *resp = g_resp_pool[resp_idx];
                             size_t resp_len = 0;
-                            g_conns[slot].keep_alive = req.keep_alive;
+
+                            // Load shedding valve: force Connection: close when open connections approach limit
+                            int keep_alive = req.keep_alive;
+                            if (g_active_conns >= (g_nslots > 8192 ? g_nslots - 8192 : g_nslots * 3 / 4)) {
+                                keep_alive = 0;
+                            }
+                            g_conns[slot].keep_alive = keep_alive;
 
                             if (parse_rc != 0) {
-                                resp_len = format_error(resp, RESP_BUF_SIZE, 400, "Bad Request", "malformed request", 0);
+                                keep_alive = 0;
                                 g_conns[slot].keep_alive = 0;
+                                resp_len = format_error(resp, RESP_BUF_SIZE, 400, "Bad Request", "malformed request", 0);
                             } else if (req.method == METHOD_GET && req.path_len == 7 && memcmp(req.path, "/health", 7) == 0) {
                                 char body[256];
                                 int64_t uptime = (int64_t)(time(NULL) - g_server_start_time);
                                 size_t blen = db_health(body, sizeof(body), uptime);
-                                resp_len = format_response(resp, RESP_BUF_SIZE, 200, "OK", body, blen, req.keep_alive);
+                                resp_len = format_response(resp, RESP_BUF_SIZE, 200, "OK", body, blen, keep_alive);
                             } else if (req.method == METHOD_GET && req.path_len == 5 && memcmp(req.path, "/feed", 5) == 0) {
                                 char body[RESP_BUF_SIZE - 256];
                                 size_t blen = db_query_feed(body, sizeof(body));
-                                resp_len = format_response(resp, RESP_BUF_SIZE, 200, "OK", body, blen, req.keep_alive);
+                                resp_len = format_response(resp, RESP_BUF_SIZE, 200, "OK", body, blen, keep_alive);
                             } else if (req.method == METHOD_GET && req.path_len > 7 && memcmp(req.path, "/posts/", 7) == 0) {
                                 const char *id_str = req.path + 7;
                                 size_t id_len = req.path_len - 7;
@@ -286,40 +311,40 @@ int main() {
                                 if (id_str[0] == '0') valid_id = 0; // positive integer only
 
                                 if (!valid_id) {
-                                    resp_len = format_error(resp, RESP_BUF_SIZE, 400, "Bad Request", "invalid post id", req.keep_alive);
+                                    resp_len = format_error(resp, RESP_BUF_SIZE, 400, "Bad Request", "invalid post id", keep_alive);
                                 } else {
                                     int64_t post_id = strtoll(id_str, NULL, 10);
                                     char body[RESP_BUF_SIZE - 256];
                                     size_t blen = 0;
                                     if (!db_query_post(post_id, body, sizeof(body), &blen)) {
-                                        resp_len = format_error(resp, RESP_BUF_SIZE, 404, "Not Found", "post not found", req.keep_alive);
+                                        resp_len = format_error(resp, RESP_BUF_SIZE, 404, "Not Found", "post not found", keep_alive);
                                     } else {
-                                        resp_len = format_response(resp, RESP_BUF_SIZE, 200, "OK", body, blen, req.keep_alive);
+                                        resp_len = format_response(resp, RESP_BUF_SIZE, 200, "OK", body, blen, keep_alive);
                                     }
                                 }
                             } else if (req.method == METHOD_POST && req.path_len == 6 && memcmp(req.path, "/posts", 6) == 0) {
                                 // Auth check first
                                 if (!req.has_auth_header || !req.is_bearer) {
-                                    resp_len = format_error(resp, RESP_BUF_SIZE, 401, "Unauthorized", "missing bearer token", req.keep_alive);
+                                    resp_len = format_error(resp, RESP_BUF_SIZE, 401, "Unauthorized", "missing bearer token", keep_alive);
                                 } else {
                                     int64_t user_id = 0;
                                     char username[128] = {0};
                                     int vrc = jwt_verify(req.auth_token, req.auth_token_len, (int64_t)time(NULL), &user_id, username, sizeof(username));
                                     if (vrc == JWT_ERR_INVALID) {
-                                        resp_len = format_error(resp, RESP_BUF_SIZE, 401, "Unauthorized", "invalid or expired token", req.keep_alive);
+                                        resp_len = format_error(resp, RESP_BUF_SIZE, 401, "Unauthorized", "invalid or expired token", keep_alive);
                                     } else if (vrc == JWT_ERR_PAYLOAD) {
-                                        resp_len = format_error(resp, RESP_BUF_SIZE, 401, "Unauthorized", "invalid token payload", req.keep_alive);
+                                        resp_len = format_error(resp, RESP_BUF_SIZE, 401, "Unauthorized", "invalid token payload", keep_alive);
                                     } else {
                                         // Body parsing
                                         char body_trimmed[512];
                                         size_t body_trimmed_len = 0;
                                         int prc = parse_post_body(req.body, req.body_len, body_trimmed, sizeof(body_trimmed), &body_trimmed_len);
                                         if (prc == POST_BODY_MALFORMED) {
-                                            resp_len = format_error(resp, RESP_BUF_SIZE, 400, "Bad Request", "malformed JSON body", req.keep_alive);
+                                            resp_len = format_error(resp, RESP_BUF_SIZE, 400, "Bad Request", "malformed JSON body", keep_alive);
                                         } else if (prc == POST_BODY_REQUIRED) {
-                                            resp_len = format_error(resp, RESP_BUF_SIZE, 400, "Bad Request", "body is required", req.keep_alive);
+                                            resp_len = format_error(resp, RESP_BUF_SIZE, 400, "Bad Request", "body is required", keep_alive);
                                         } else if (prc == POST_BODY_TOO_LONG) {
-                                            resp_len = format_error(resp, RESP_BUF_SIZE, 400, "Bad Request", "body must be at most 500 characters", req.keep_alive);
+                                            resp_len = format_error(resp, RESP_BUF_SIZE, 400, "Bad Request", "body must be at most 500 characters", keep_alive);
                                         } else {
                                             // Queue write for group commit
                                             if (g_num_pending_writes < MAX_PENDING_WRITES) {
@@ -328,7 +353,7 @@ int main() {
                                                 pw->gen = gen;
                                                 pw->is_like = 0;
                                                 pw->resp_idx = resp_idx;
-                                                pw->keep_alive = req.keep_alive;
+                                                pw->keep_alive = keep_alive;
                                                 pw->user_id = user_id;
                                                 memcpy(pw->author, username, sizeof(pw->author));
                                                 memcpy(pw->body, body_trimmed, body_trimmed_len);
@@ -340,7 +365,7 @@ int main() {
                                                 char res_body[1024];
                                                 size_t res_len = 0;
                                                 db_create_post(user_id, body_trimmed, body_trimmed_len, username, res_body, sizeof(res_body), &res_len);
-                                                resp_len = format_response(resp, RESP_BUF_SIZE, 201, "Created", res_body, res_len, req.keep_alive);
+                                                resp_len = format_response(resp, RESP_BUF_SIZE, 201, "Created", res_body, res_len, keep_alive);
                                             }
                                         }
                                     }
@@ -350,15 +375,15 @@ int main() {
                                        memcmp(req.path + req.path_len - 5, "/like", 5) == 0) {
                                 // Auth check FIRST (before id check!)
                                 if (!req.has_auth_header || !req.is_bearer) {
-                                    resp_len = format_error(resp, RESP_BUF_SIZE, 401, "Unauthorized", "missing bearer token", req.keep_alive);
+                                    resp_len = format_error(resp, RESP_BUF_SIZE, 401, "Unauthorized", "missing bearer token", keep_alive);
                                 } else {
                                     int64_t user_id = 0;
                                     char username[128] = {0};
                                     int vrc = jwt_verify(req.auth_token, req.auth_token_len, (int64_t)time(NULL), &user_id, username, sizeof(username));
                                     if (vrc == JWT_ERR_INVALID) {
-                                        resp_len = format_error(resp, RESP_BUF_SIZE, 401, "Unauthorized", "invalid or expired token", req.keep_alive);
+                                        resp_len = format_error(resp, RESP_BUF_SIZE, 401, "Unauthorized", "invalid or expired token", keep_alive);
                                     } else if (vrc == JWT_ERR_PAYLOAD) {
-                                        resp_len = format_error(resp, RESP_BUF_SIZE, 401, "Unauthorized", "invalid token payload", req.keep_alive);
+                                        resp_len = format_error(resp, RESP_BUF_SIZE, 401, "Unauthorized", "invalid token payload", keep_alive);
                                     } else {
                                         // Now validate post id
                                         const char *id_str = req.path + 7;
@@ -370,11 +395,11 @@ int main() {
                                         if (id_str[0] == '0') valid_id = 0;
 
                                         if (!valid_id) {
-                                            resp_len = format_error(resp, RESP_BUF_SIZE, 400, "Bad Request", "invalid post id", req.keep_alive);
+                                            resp_len = format_error(resp, RESP_BUF_SIZE, 400, "Bad Request", "invalid post id", keep_alive);
                                         } else {
                                             int64_t post_id = strtoll(id_str, NULL, 10);
                                             if (!db_check_post_exists(post_id)) {
-                                                resp_len = format_error(resp, RESP_BUF_SIZE, 404, "Not Found", "post not found", req.keep_alive);
+                                                resp_len = format_error(resp, RESP_BUF_SIZE, 404, "Not Found", "post not found", keep_alive);
                                             } else {
                                                 // Queue like for group commit
                                                 if (g_num_pending_writes < MAX_PENDING_WRITES) {
@@ -383,7 +408,7 @@ int main() {
                                                     pw->gen = gen;
                                                     pw->is_like = 1;
                                                     pw->resp_idx = resp_idx;
-                                                    pw->keep_alive = req.keep_alive;
+                                                    pw->keep_alive = keep_alive;
                                                     pw->user_id = user_id;
                                                     pw->post_id = post_id;
                                                     resp_idx = -1; // Queued
@@ -394,14 +419,14 @@ int main() {
                                                     db_like_post(user_id, post_id, &already_liked, res_body, sizeof(res_body), &res_len);
                                                     int st = already_liked ? 200 : 201;
                                                     const char *st_str = already_liked ? "OK" : "Created";
-                                                    resp_len = format_response(resp, RESP_BUF_SIZE, st, st_str, res_body, res_len, req.keep_alive);
+                                                    resp_len = format_response(resp, RESP_BUF_SIZE, st, st_str, res_body, res_len, keep_alive);
                                                 }
                                             }
                                         }
                                     }
                                 }
                             } else {
-                                resp_len = format_error(resp, RESP_BUF_SIZE, 404, "Not Found", "not found", req.keep_alive);
+                                resp_len = format_error(resp, RESP_BUF_SIZE, 404, "Not Found", "not found", keep_alive);
                             }
 
                             // Return received buffer back to provided buffer ring

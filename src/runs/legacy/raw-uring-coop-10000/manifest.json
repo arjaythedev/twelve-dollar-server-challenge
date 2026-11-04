@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "anchor": null,
+  "label": "raw-uring-coop-10000",
+  "kind": "raw_archive",
+  "status": "archived",
+  "legacy": {
+    "original_paths": [
+      "results/uring-coop-10000"
+    ]
+  },
+  "provenance": {
+    "source": null,
+    "build": null,
+    "binary": null,
+    "observer": null
+  },
+  "workload": null,
+  "instruments": null,
+  "summary_sha256": "8b9dd913826ac7c61f3d7d0e80fac395e7b60898c08db4f18947761b04c79e61",
+  "raw_files": [
+    {
+      "path": "raw/container-final.json",
+      "size_bytes": 22976,
+      "sha256": "94283f5c4b44bd5a7641377cbd85b6e40368b8c1192db24dc9a5d8898b3170cd"
+    },
+    {
+      "path": "raw/environment.json",
+      "size_bytes": 44499,
+      "sha256": "35f2f87c439a4a1340db8ba2620478edbe268fac0c08e4b6e80dfe670603acb9"
+    },
+    {
+      "path": "raw/k6-summary.json",
+      "size_bytes": 4058,
+      "sha256": "3fcac3bdb310bfd9cf3ee4182efe8ad77d3f20ccc2bd1097294d004fb35293f4"
+    },
+    {
+      "path": "raw/k6.log",
+      "size_bytes": 1167,
+      "sha256": "72522e7cc6b1b8793cc52b2c14e7a9716ecd460a7d5131865b9ef9b6402f04dd"
+    },
+    {
+      "path": "raw/run.json",
+      "size_bytes": 2315,
+      "sha256": "4c5d2a2cbc30e56add9505e9a29924bedc3a9ca95996a53cc004c6f33a561e59"
+    },
+    {
+      "path": "raw/samples.json",
+      "size_bytes": 38858,
+      "sha256": "24476b537b3cc564225933bd7e08675bef9eee5a2c75d433f071a1e71a0cdd51"
+    },
+    {
+      "path": "raw/server.log",
+      "size_bytes": 44,
+      "sha256": "ff30254619d236aa9015f60ef81c16bb2530551aac96d001e5b48039e0e336a3"
+    }
+  ]
+}

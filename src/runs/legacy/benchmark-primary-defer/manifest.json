@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "anchor": null,
+  "label": "benchmark-primary-defer",
+  "kind": "legacy",
+  "status": "archived",
+  "legacy": {
+    "original_paths": [
+      "src/benchmarks/primary-defer.json"
+    ]
+  },
+  "provenance": {
+    "source": null,
+    "build": null,
+    "binary": null,
+    "observer": null
+  },
+  "workload": null,
+  "instruments": null,
+  "summary_sha256": "18c9e791f41117298ad266e61aae22d7aa5a2c0979849682ef0ed97eb1474620"
+}

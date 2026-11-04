@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "anchor": null,
+  "label": "profile-cache16-10000",
+  "kind": "legacy",
+  "status": "archived",
+  "legacy": {
+    "original_paths": [
+      "src/profiles/cache16-10000.json"
+    ]
+  },
+  "provenance": {
+    "source": null,
+    "build": null,
+    "binary": null,
+    "observer": null
+  },
+  "workload": null,
+  "instruments": null,
+  "summary_sha256": "8bb5c81b04894698890fb73cfaf4754f7d8073455202e769ad5807f781761f9c"
+}

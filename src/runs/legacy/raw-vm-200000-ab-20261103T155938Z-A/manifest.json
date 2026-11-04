@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "anchor": null,
+  "label": "raw-vm-200000-ab-20261103T155938Z-A",
+  "kind": "raw_archive",
+  "status": "archived",
+  "legacy": {
+    "original_paths": [
+      "results/vm-200000-ab-20261103T155938Z-A"
+    ]
+  },
+  "provenance": {
+    "source": null,
+    "build": null,
+    "binary": null,
+    "observer": null
+  },
+  "workload": null,
+  "instruments": null,
+  "summary_sha256": "1bb10e36a9194dc251d95684b783f6dbafbd708621e69ecadbbd0e37e6021e1c",
+  "raw_files": [
+    {
+      "path": "raw/load-summary.json",
+      "size_bytes": 2751,
+      "sha256": "f60523bb3f174d88f637e065f6881c1fc8a3504b6dcce3e6c98e61dee7b84ab2"
+    }
+  ]
+}

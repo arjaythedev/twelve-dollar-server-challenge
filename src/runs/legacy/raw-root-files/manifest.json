@@ -1,0 +1,100 @@
+{
+  "schema_version": 1,
+  "anchor": null,
+  "label": "raw-root-files",
+  "kind": "raw_archive",
+  "status": "archived",
+  "legacy": {
+    "original_paths": [
+      "results/baseline-server.log",
+      "results/baseline-verification.json",
+      "results/cpp-cleanup-build.log",
+      "results/dev-tool-smoke.json",
+      "results/pyright-final.json",
+      "results/pyright-initial.json",
+      "results/wal-cache-docker-probe.json",
+      "results/wal-eviction-nat-docker-350000-20261103T183941Z-report.json",
+      "results/wal-eviction-nat-docker-350000-20261103T183941Z.json",
+      "results/wal-limits-docker-100000-20261103T174211Z-report.json",
+      "results/wal-limits-docker-100000-20261103T174211Z.json",
+      "results/wal-paths-docker-100000-20261103T175406Z-report.json",
+      "results/wal-paths-docker-100000-20261103T175406Z.json"
+    ]
+  },
+  "provenance": {
+    "source": null,
+    "build": null,
+    "binary": null,
+    "observer": null
+  },
+  "workload": null,
+  "instruments": null,
+  "summary_sha256": "4c025ec0b69bf18a38daab737d1bf89851925549a49b93774ef7364c42b21de8",
+  "raw_files": [
+    {
+      "path": "raw/baseline-server.log",
+      "size_bytes": 190,
+      "sha256": "c1132edca983ac354e70b394e82cd95545007b685b1ba2f918989cda81f59c51"
+    },
+    {
+      "path": "raw/baseline-verification.json",
+      "size_bytes": 274,
+      "sha256": "71a2fee9772cc3b9fbeb3be8295ea1c6665c914dd56b940968fe4ded5df214f2"
+    },
+    {
+      "path": "raw/cpp-cleanup-build.log",
+      "size_bytes": 12014,
+      "sha256": "95ad8d90ed6218bb9f229a6f73d484a68bdcf1523cfa8e364b93855803c3f56c"
+    },
+    {
+      "path": "raw/dev-tool-smoke.json",
+      "size_bytes": 378,
+      "sha256": "93ea2c23b4a0a8a1c0b3ee74a19c48786ff169b213ffac1b15659e8f1360ca70"
+    },
+    {
+      "path": "raw/pyright-final.json",
+      "size_bytes": 252,
+      "sha256": "52f552aed92e4771338fa0b0ab7b200fdf06a4ebfd41b6840c57fbee3e1fc7cc"
+    },
+    {
+      "path": "raw/pyright-initial.json",
+      "size_bytes": 252,
+      "sha256": "8b89c26a8ba5ecdf3bc99a323308cf40823c7bb09627a60cab8e041844d4eb5b"
+    },
+    {
+      "path": "raw/wal-cache-docker-probe.json",
+      "size_bytes": 279,
+      "sha256": "e6b9e813788a6c99073ffc9fa16047343af604352cc56b042f6705d3e26b5aa1"
+    },
+    {
+      "path": "raw/wal-eviction-nat-docker-350000-20261103T183941Z-report.json",
+      "size_bytes": 806021,
+      "sha256": "5ea897c8e642c00bd0c6a59a0c4817a4d47310e5bb9b945f482456bda30b6986"
+    },
+    {
+      "path": "raw/wal-eviction-nat-docker-350000-20261103T183941Z.json",
+      "size_bytes": 3449,
+      "sha256": "5655de8e7475f7917082eabf944e53f2361cc4f2ebcc7bd08dc00e9a99371cc1"
+    },
+    {
+      "path": "raw/wal-limits-docker-100000-20261103T174211Z-report.json",
+      "size_bytes": 700129,
+      "sha256": "933fe35dc1e9d0b1e27ce42f25b9b9284bd9bf1889ccb5d3c06903939da3a932"
+    },
+    {
+      "path": "raw/wal-limits-docker-100000-20261103T174211Z.json",
+      "size_bytes": 3407,
+      "sha256": "8e9e93c01c3009050aa9d7b6569d7bd99a6658755b00e8a1dd1efa1b1167678b"
+    },
+    {
+      "path": "raw/wal-paths-docker-100000-20261103T175406Z-report.json",
+      "size_bytes": 468410,
+      "sha256": "c00c9b1e3c6a958ce108cad42a04d98e3f4e045bd9f545f8d871271221d4e586"
+    },
+    {
+      "path": "raw/wal-paths-docker-100000-20261103T175406Z.json",
+      "size_bytes": 2382,
+      "sha256": "2b9202e4acc51eaa2cbff40ccdcec09c6fdd189b85930e35eac0d1f775bf1ea0"
+    }
+  ]
+}

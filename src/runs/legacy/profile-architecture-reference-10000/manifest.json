@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "anchor": null,
+  "label": "profile-architecture-reference-10000",
+  "kind": "legacy",
+  "status": "archived",
+  "legacy": {
+    "original_paths": [
+      "src/profiles/architecture-reference-10000.json"
+    ]
+  },
+  "provenance": {
+    "source": null,
+    "build": null,
+    "binary": null,
+    "observer": null
+  },
+  "workload": null,
+  "instruments": null,
+  "summary_sha256": "db9f7bf167066379c5b5fc238c8ddf2e439788121ae02672439fe74e6c006c20"
+}

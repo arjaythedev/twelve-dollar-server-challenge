@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "anchor": null,
+  "label": "raw-sync-hook-http-likes",
+  "kind": "raw_archive",
+  "status": "archived",
+  "legacy": {
+    "original_paths": [
+      "results/sync-hook-http-likes"
+    ]
+  },
+  "provenance": {
+    "source": null,
+    "build": null,
+    "binary": null,
+    "observer": null
+  },
+  "workload": null,
+  "instruments": null,
+  "summary_sha256": "bb246b207dbcf3eb6ce2cf42c12ec90ece5dac4250aa712e879851fb3658b496",
+  "raw_files": [
+    {
+      "path": "raw/container-final.json",
+      "size_bytes": 22797,
+      "sha256": "2408262914b83ed393cc4444e624bba2f5aac6e40984fdd08ed079060fae1822"
+    },
+    {
+      "path": "raw/environment.json",
+      "size_bytes": 46995,
+      "sha256": "57ee43a3f19c4d8bbdc70b5156100f222fa6a8cf9c1484feffbcee11f8ad12ea"
+    },
+    {
+      "path": "raw/server.log",
+      "size_bytes": 2884,
+      "sha256": "6e5d58352c285386f0b42eddc497ea071e815b8dfac056592b0fda245c4f6400"
+    },
+    {
+      "path": "raw/timings.json",
+      "size_bytes": 6899,
+      "sha256": "15abf805424fbd403b6493120a08b2af27b35a7d180d2dd00922ee4de84c6473"
+    }
+  ]
+}

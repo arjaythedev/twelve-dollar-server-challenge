@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "anchor": null,
+  "label": "raw-cpp-cleanup-check",
+  "kind": "raw_archive",
+  "status": "archived",
+  "legacy": {
+    "original_paths": [
+      "results/cpp-cleanup-check"
+    ]
+  },
+  "provenance": {
+    "source": null,
+    "build": null,
+    "binary": null,
+    "observer": null
+  },
+  "workload": null,
+  "instruments": null,
+  "summary_sha256": "fbf970764e3c0228057c6c1d9d498d8f70f597977e98abd453da15995e359c1f",
+  "raw_files": [
+    {
+      "path": "raw/official-tests.txt",
+      "size_bytes": 1803,
+      "sha256": "80a91159af8eb20d7db2c84624f6225e1f9f1be54d9c95d6ae9ca64a7ec56f64"
+    },
+    {
+      "path": "raw/server.log",
+      "size_bytes": 44,
+      "sha256": "ff30254619d236aa9015f60ef81c16bb2530551aac96d001e5b48039e0e336a3"
+    }
+  ]
+}

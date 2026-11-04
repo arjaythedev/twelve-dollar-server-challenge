@@ -1,0 +1,83 @@
+{
+  "schema_version": 1,
+  "anchor": null,
+  "label": "raw-mini-direct-mirrored-ramp30-70000-20261103T142315Z",
+  "kind": "raw_archive",
+  "status": "archived",
+  "legacy": {
+    "original_paths": [
+      "results/mini-direct-mirrored-ramp30-70000-20261103T142315Z"
+    ]
+  },
+  "provenance": {
+    "source": null,
+    "build": null,
+    "binary": null,
+    "observer": null
+  },
+  "workload": null,
+  "instruments": null,
+  "summary_sha256": "f57666cda34bebab23e373c241dd59b514cb821d7222a6112f512b05d0c28209",
+  "raw_files": [
+    {
+      "path": "raw/cgroup-after.json",
+      "size_bytes": 4706,
+      "sha256": "264c3af59947c071ec6422eddfd94d158c93b3f3698fadf3d3d4943a893cb031"
+    },
+    {
+      "path": "raw/cgroup-before.json",
+      "size_bytes": 4591,
+      "sha256": "ff055598955d5a53f04a2389409d3e88c0b5318c921533724cd0ddf04cc51e75"
+    },
+    {
+      "path": "raw/client-exit.txt",
+      "size_bytes": 3,
+      "sha256": "13bf7b3039c63bf5a50491fa3cfd8eb4e699d1ba1436315aef9cbe5711530354"
+    },
+    {
+      "path": "raw/client-net-after.txt",
+      "size_bytes": 3954,
+      "sha256": "6712bdc491dce3755cb265efa4a3eec9fd46ef7301b472c9f7553f9ae9541068"
+    },
+    {
+      "path": "raw/client-net-before.txt",
+      "size_bytes": 3830,
+      "sha256": "7315f6df8be03a7a7dd9037385c7d047085e8230e636ecb63b8085ce61393c27"
+    },
+    {
+      "path": "raw/client.log",
+      "size_bytes": 4023,
+      "sha256": "ad0fef9d8711171071cb01185d480970ee4b911594e77f779f2887ad781b9094"
+    },
+    {
+      "path": "raw/load-summary.json",
+      "size_bytes": 3518,
+      "sha256": "4bf08a291429691ba54d6828f5e474a05458bf7b60268e6bc4a64f82e4fc99bf"
+    },
+    {
+      "path": "raw/mini-net-after.txt",
+      "size_bytes": 8039,
+      "sha256": "a5a4deace5aff52e05c590225aab58a032b398ed053fdf028c8a67ee2fa44c26"
+    },
+    {
+      "path": "raw/mini-net-before.txt",
+      "size_bytes": 8025,
+      "sha256": "1120f0d9613feb3268bdfa57ef8949431c577bcd703ddbc2037e1dd5bf774d72"
+    },
+    {
+      "path": "raw/placement.json",
+      "size_bytes": 6449,
+      "sha256": "44a9f2954ccc57f93d08ebbed4c696ac73bd1d5038f88b9bf138660112aeebf9"
+    },
+    {
+      "path": "raw/windows-cpu-after.json",
+      "size_bytes": 1046,
+      "sha256": "a0c819b9eca51233ac1406c9808bf5935dbe02e3eef942007dadd809a40a47fb"
+    },
+    {
+      "path": "raw/windows-cpu-before.json",
+      "size_bytes": 1046,
+      "sha256": "5ecbd7a3e0f87e9ba46a5c11a4ffb7026c6025182b9f4c0cc25035f600359830"
+    }
+  ]
+}

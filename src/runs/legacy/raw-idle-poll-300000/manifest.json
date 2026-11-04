@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "anchor": null,
+  "label": "raw-idle-poll-300000",
+  "kind": "raw_archive",
+  "status": "archived",
+  "legacy": {
+    "original_paths": [
+      "results/idle-poll-300000"
+    ]
+  },
+  "provenance": {
+    "source": null,
+    "build": null,
+    "binary": null,
+    "observer": null
+  },
+  "workload": null,
+  "instruments": null,
+  "summary_sha256": "3d9c7b120074e90a48310c5d66634f54e8627d4f6ca480c18f9bb5be0b9d9881",
+  "raw_files": [
+    {
+      "path": "raw/container-final.json",
+      "size_bytes": 23390,
+      "sha256": "376616f48a5494e0b8a7a82904253c48d65836dd99bddfddac4f23f16a692b28"
+    },
+    {
+      "path": "raw/environment.json",
+      "size_bytes": 46004,
+      "sha256": "2efa903b7c2315fc83b5bfea95399d7dd58462960e7b78b78cd7de4453d3dab8"
+    },
+    {
+      "path": "raw/perf.data",
+      "size_bytes": 21092,
+      "sha256": "7610a85eb3ee8fcc1b3c1c6ec0672ec3a580845cb69bf31d32cf7be7ec09f8b3"
+    },
+    {
+      "path": "raw/perf.log",
+      "size_bytes": 127,
+      "sha256": "2aea5a4063ad3108d9c5be2c53be60f61f56828702145b8ce3fd2e846e428444"
+    },
+    {
+      "path": "raw/sampler.json",
+      "size_bytes": 7204,
+      "sha256": "63970595d2e44b0b7c9c73ce9830206d4353faf402449036478bf2acdc13e5bf"
+    },
+    {
+      "path": "raw/server.log",
+      "size_bytes": 44,
+      "sha256": "ff30254619d236aa9015f60ef81c16bb2530551aac96d001e5b48039e0e336a3"
+    }
+  ]
+}

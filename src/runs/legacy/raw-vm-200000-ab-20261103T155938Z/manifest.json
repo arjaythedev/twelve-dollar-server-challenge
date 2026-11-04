@@ -1,0 +1,143 @@
+{
+  "schema_version": 1,
+  "anchor": null,
+  "label": "raw-vm-200000-ab-20261103T155938Z",
+  "kind": "raw_archive",
+  "status": "archived",
+  "legacy": {
+    "original_paths": [
+      "results/vm-200000-ab-20261103T155938Z"
+    ]
+  },
+  "provenance": {
+    "source": null,
+    "build": null,
+    "binary": null,
+    "observer": null
+  },
+  "workload": null,
+  "instruments": null,
+  "summary_sha256": "13b773f12cf9adddc48da16e969f10407474247a6f4a73821c35c10aa2d8a4c1",
+  "raw_files": [
+    {
+      "path": "raw/A/cgroup-after.json",
+      "size_bytes": 4624,
+      "sha256": "80a1c55de50fbe9752e64fa89eb4d71f09815ffeca26c84db3363d05bc177f31"
+    },
+    {
+      "path": "raw/A/cgroup-before.json",
+      "size_bytes": 4430,
+      "sha256": "463079edd1036b6c43d88a7a88da7ed4ae31c4ea025fb128ac33a25a683fb063"
+    },
+    {
+      "path": "raw/A/cgroup-quiet-10s.json",
+      "size_bytes": 4603,
+      "sha256": "a4489f6a1c677c6098b4d407071f89e7bd92c4f8067c75d1a0eb7c20b1308db2"
+    },
+    {
+      "path": "raw/A/client-limits.txt",
+      "size_bytes": 1363,
+      "sha256": "4868b63160dbcd4f1606aebfc9a3e9f7e970c8146f58b74baf9a0f56e267b7ba"
+    },
+    {
+      "path": "raw/A/client.log",
+      "size_bytes": 4498,
+      "sha256": "359f130fa1357c584e56249416397b1db0bba89b75537aa01a04a3274169a0cd"
+    },
+    {
+      "path": "raw/A/hashes.sha256",
+      "size_bytes": 262,
+      "sha256": "5d9b0894ab7c35103a5dec1f6b3757f6c032f18a86a755bc86edb18c3958fe55"
+    },
+    {
+      "path": "raw/A/kernel.txt",
+      "size_bytes": 124,
+      "sha256": "f483997384e23a291b25ba644cfce412d1e8fb1d901d2eed713824f45105006f"
+    },
+    {
+      "path": "raw/A/load-summary.json",
+      "size_bytes": 2751,
+      "sha256": "f60523bb3f174d88f637e065f6881c1fc8a3504b6dcce3e6c98e61dee7b84ab2"
+    },
+    {
+      "path": "raw/A/peers.json",
+      "size_bytes": 3519,
+      "sha256": "6f0138d72879f2aa716b02e1738616b68d8aa9e3a566232d9bad4dd983a61885"
+    },
+    {
+      "path": "raw/A/samples.jsonl",
+      "size_bytes": 387772,
+      "sha256": "194d25c571e3aa7ac6fdc66e094c52665ac400d6bfbf7c34926399c9ff011e77"
+    },
+    {
+      "path": "raw/A/server.log",
+      "size_bytes": 91,
+      "sha256": "3ee0fd76b010399a9cd7e8b28d2422b34a732a523d0e3ebd335c81a7726ac261"
+    },
+    {
+      "path": "raw/B/cgroup-after.json",
+      "size_bytes": 4580,
+      "sha256": "ef82e439a69ef6aa456f692b68725852bead7885820f36d6d330a692460242b2"
+    },
+    {
+      "path": "raw/B/cgroup-before.json",
+      "size_bytes": 4432,
+      "sha256": "98a0af845ab7419e5b66170dd333eff263016fad563e8d2ba4c57ee4da53c415"
+    },
+    {
+      "path": "raw/B/cgroup-quiet-10s.json",
+      "size_bytes": 4558,
+      "sha256": "5535dd01da3923e11c9625766c4f0b4e60c2bfafefa9c7aa135ba26019d88dd6"
+    },
+    {
+      "path": "raw/B/client-limits.txt",
+      "size_bytes": 1363,
+      "sha256": "4868b63160dbcd4f1606aebfc9a3e9f7e970c8146f58b74baf9a0f56e267b7ba"
+    },
+    {
+      "path": "raw/B/client.log",
+      "size_bytes": 4491,
+      "sha256": "fde493cd90d1ad64d1ab0de960211d92107d981b1aa491503e6ad496ff87af55"
+    },
+    {
+      "path": "raw/B/hashes.sha256",
+      "size_bytes": 262,
+      "sha256": "5d9b0894ab7c35103a5dec1f6b3757f6c032f18a86a755bc86edb18c3958fe55"
+    },
+    {
+      "path": "raw/B/kernel.txt",
+      "size_bytes": 124,
+      "sha256": "f483997384e23a291b25ba644cfce412d1e8fb1d901d2eed713824f45105006f"
+    },
+    {
+      "path": "raw/B/load-summary.json",
+      "size_bytes": 2744,
+      "sha256": "13987c489b85c45723ec3d4282890266b78d4a9c0699b3b5abf1b408e3e3b8c4"
+    },
+    {
+      "path": "raw/B/peers.json",
+      "size_bytes": 3521,
+      "sha256": "43cf29847dcdab1ec8aeb789736c8464688c454853670633358ca439f6ca151d"
+    },
+    {
+      "path": "raw/B/samples.jsonl",
+      "size_bytes": 388775,
+      "sha256": "d27ac3c9f9337a0b1479559843fcaaf62970e38941afb460adcb4b6e6fab76e3"
+    },
+    {
+      "path": "raw/B/server.log",
+      "size_bytes": 91,
+      "sha256": "3ee0fd76b010399a9cd7e8b28d2422b34a732a523d0e3ebd335c81a7726ac261"
+    },
+    {
+      "path": "raw/cleanup.json",
+      "size_bytes": 91,
+      "sha256": "534b3826036d591140d4d5e2d4b6171bc796f0f5dadcb88d58ec7052074442d3"
+    },
+    {
+      "path": "raw/summary.json",
+      "size_bytes": 3579,
+      "sha256": "fdbabe1407e483c3604625ea8a82e3832a1faf8960fda62231870c9d29b37cb4"
+    }
+  ]
+}

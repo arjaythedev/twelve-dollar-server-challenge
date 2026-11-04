@@ -1,0 +1,88 @@
+{
+  "schema_version": 1,
+  "anchor": null,
+  "label": "raw-unix-excl-http-checks",
+  "kind": "raw_archive",
+  "status": "archived",
+  "legacy": {
+    "original_paths": [
+      "results/unix-excl-http-checks"
+    ]
+  },
+  "provenance": {
+    "source": null,
+    "build": null,
+    "binary": null,
+    "observer": null
+  },
+  "workload": null,
+  "instruments": null,
+  "summary_sha256": "702b26a644fd063f885905a3f101d0e6881b7eae06e0b8b5699306225bd2a763",
+  "raw_files": [
+    {
+      "path": "raw/container-final.json",
+      "size_bytes": 22797,
+      "sha256": "4793f07f1c2b8540d4cf964030dc0c72859ee4aa2841001c4433d1e3112d264f"
+    },
+    {
+      "path": "raw/diagnostics-build.log",
+      "size_bytes": 260,
+      "sha256": "7cf208bace7f339e61a1279fea6d2862efe9b8f27d21c7e4a44578e0f9aa61b5"
+    },
+    {
+      "path": "raw/diagnostics-publication.log",
+      "size_bytes": 371,
+      "sha256": "2d0228366b9fa6c4b3a8b648b7eb29bed83f1be807fbb968656482a17ef1dabd"
+    },
+    {
+      "path": "raw/environment.json",
+      "size_bytes": 45670,
+      "sha256": "75fea48225be00f7959a7a14ce5242bdc390294388dbb7add187937e821bb83d"
+    },
+    {
+      "path": "raw/http-initial.log",
+      "size_bytes": 2131,
+      "sha256": "12a418294895f1df05240a16a380d0dbafe1e84d86cd88c449b9fa41817515e9"
+    },
+    {
+      "path": "raw/http-targeted.log",
+      "size_bytes": 1039,
+      "sha256": "34052beed32aa6c504c72e5adffcba6b3d93717866582f83b88749f7031ae195"
+    },
+    {
+      "path": "raw/normal-build.log",
+      "size_bytes": 260,
+      "sha256": "7cf208bace7f339e61a1279fea6d2862efe9b8f27d21c7e4a44578e0f9aa61b5"
+    },
+    {
+      "path": "raw/normal-publication.log",
+      "size_bytes": 371,
+      "sha256": "5c3077d4906ea15044c2782bb8ef4956e92d358ded17e999aee85cdb9f9d2f29"
+    },
+    {
+      "path": "raw/official-tests.txt",
+      "size_bytes": 1803,
+      "sha256": "62c0193cbfcd21863fbae8aff6f11db2cbfe56b8d1f69655f4eac99256b28d8b"
+    },
+    {
+      "path": "raw/probe.cpp",
+      "size_bytes": 11600,
+      "sha256": "068c8eedbe56404f1a665638166bd7a6e27c74c4e6ce48bb4d9c0d0578549b3b"
+    },
+    {
+      "path": "raw/results.json",
+      "size_bytes": 2355,
+      "sha256": "b70b27146471d88311ef75511f7ed101ad542eca57f4e012d74057975d2b9bf1"
+    },
+    {
+      "path": "raw/server.log",
+      "size_bytes": 44,
+      "sha256": "ff30254619d236aa9015f60ef81c16bb2530551aac96d001e5b48039e0e336a3"
+    },
+    {
+      "path": "raw/summary.json",
+      "size_bytes": 2001,
+      "sha256": "2190543fa3b022c50dc39684086affd7c002d6c10c201e404d1280ad6def7b9b"
+    }
+  ]
+}

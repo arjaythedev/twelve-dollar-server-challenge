@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "anchor": null,
+  "label": "raw-uring-batch-50000-linux",
+  "kind": "raw_archive",
+  "status": "archived",
+  "legacy": {
+    "original_paths": [
+      "results/uring-batch-50000-linux"
+    ]
+  },
+  "provenance": {
+    "source": null,
+    "build": null,
+    "binary": null,
+    "observer": null
+  },
+  "workload": null,
+  "instruments": null,
+  "summary_sha256": "98c6473a1e2f50087252d55db71608a244a02d2b643d337ccf76669d6e9640c0",
+  "raw_files": [
+    {
+      "path": "raw/container-final.json",
+      "size_bytes": 23387,
+      "sha256": "376b7ee1bc0eadf1e415baecaf3aa9c9b3ebadf65256c4c77c5e6e257de10caf"
+    },
+    {
+      "path": "raw/environment.json",
+      "size_bytes": 44938,
+      "sha256": "c4de6534ea96fb728306203e8a413cacd23be147bdf31409de1fedd5db3a595d"
+    },
+    {
+      "path": "raw/k6-summary.json",
+      "size_bytes": 4265,
+      "sha256": "6031d49633aaf1ecb09d531b0728ef354dcbbfe6959034f4b0fd43f31d597725"
+    },
+    {
+      "path": "raw/k6.log",
+      "size_bytes": 1173764,
+      "sha256": "55096b1500b59436aee3ad3f20d7c4a76909bbbd55cc699cd98fec8440cf5384"
+    },
+    {
+      "path": "raw/load-generator.json",
+      "size_bytes": 8690,
+      "sha256": "152792bc42f98baccb0c8655c59ef439a21b6dd899cf6158c336ca3f69baabd9"
+    },
+    {
+      "path": "raw/run.json",
+      "size_bytes": 2721,
+      "sha256": "a9113e4ce925833db00c6a1033349730d6fd15110fedb38196ab56c992a040ba"
+    },
+    {
+      "path": "raw/samples.json",
+      "size_bytes": 40490,
+      "sha256": "e61908a1db3e3c36a090f4f861eedc00aa1cb24e8fee92469ed1a132d223fced"
+    },
+    {
+      "path": "raw/server.log",
+      "size_bytes": 44,
+      "sha256": "ff30254619d236aa9015f60ef81c16bb2530551aac96d001e5b48039e0e336a3"
+    }
+  ]
+}

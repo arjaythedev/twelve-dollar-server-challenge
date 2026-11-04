@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "anchor": null,
+  "label": "raw-mini-pc-wsl-70000-20261103T140000Z",
+  "kind": "raw_archive",
+  "status": "archived",
+  "legacy": {
+    "original_paths": [
+      "results/mini-pc-wsl-70000-20261103T140000Z"
+    ]
+  },
+  "provenance": {
+    "source": null,
+    "build": null,
+    "binary": null,
+    "observer": null
+  },
+  "workload": null,
+  "instruments": null,
+  "summary_sha256": "4c1f8df68d142117ab04ae0896cd79e9d19a2559d518f980f1b2d56b6b1034a6",
+  "raw_files": [
+    {
+      "path": "raw/cgroup-after.json",
+      "size_bytes": 4636,
+      "sha256": "15d19075b0203ce8b25948ffdeef063c7f53022225fcce386effc6f96359ac6f"
+    },
+    {
+      "path": "raw/cgroup-before.json",
+      "size_bytes": 4568,
+      "sha256": "6b403a2743c106c8261b9d23830fa90fda04aec5f25e5a1c0ca0500bd2dc18e8"
+    },
+    {
+      "path": "raw/client-exit.txt",
+      "size_bytes": 4,
+      "sha256": "2dd9964aa7c59c01362061846da85dcf727bb9f7f25e6b1c67ff342e6ef8c69c"
+    },
+    {
+      "path": "raw/client.log",
+      "size_bytes": 3909,
+      "sha256": "8a5a5525c045f92bb1528a8074ee981d7234f3e4e93120a0e1018c22be492a47"
+    },
+    {
+      "path": "raw/load-summary.json",
+      "size_bytes": 3656,
+      "sha256": "09a35dbb6ca55263ca1d10688e9c30f8b898a820755c21fba3e15e7b22d30f9f"
+    }
+  ]
+}

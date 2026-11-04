@@ -1,0 +1,308 @@
+{
+  "schema_version": 1,
+  "anchor": null,
+  "label": "raw-wal-cache-mini-20261103T154627Z",
+  "kind": "raw_archive",
+  "status": "archived",
+  "legacy": {
+    "original_paths": [
+      "results/wal-cache-mini-20261103T154627Z"
+    ]
+  },
+  "provenance": {
+    "source": null,
+    "build": null,
+    "binary": null,
+    "observer": null
+  },
+  "workload": null,
+  "instruments": null,
+  "summary_sha256": "fc01c820f4a38da345e040a947ef476f9d033d367ad6a2f2dd82d2a0cab9d70e",
+  "raw_files": [
+    {
+      "path": "raw/comparison.json",
+      "size_bytes": 8604,
+      "sha256": "fdf654477c1639900e54e29884c52fd56a532483cd6a8aca5fa91f93cbb836a8"
+    },
+    {
+      "path": "raw/index.json",
+      "size_bytes": 1719,
+      "sha256": "a3680a2859fdceca0699d4a7076cf7aebb35239db9934e1c84fd541fe0a8eb66"
+    },
+    {
+      "path": "raw/residency-probe-20261103T155406Z/cleanup.json",
+      "size_bytes": 38,
+      "sha256": "0373de39fd5c338b8d021a23a2874402b9da33f2a0f995a9fb85106ab00b5b20"
+    },
+    {
+      "path": "raw/residency-probe-20261103T155406Z/controller.log",
+      "size_bytes": 342,
+      "sha256": "1ae574c7beb6734bc7700233ba881243aa89fb1d4bbbb51c36cb45ab22490300"
+    },
+    {
+      "path": "raw/residency-probe-20261103T155406Z/exit-code.txt",
+      "size_bytes": 2,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "path": "raw/residency-probe-20261103T155406Z/kernel.txt",
+      "size_bytes": 108,
+      "sha256": "0764e1c6fcf41f4ed4928789a226945da6446d8ff28bfded3480f469af6af5ab"
+    },
+    {
+      "path": "raw/residency-probe-20261103T155406Z/limits.txt",
+      "size_bytes": 1385,
+      "sha256": "5509651a18db9c9f7190c5fd37954ee09e0f06d3b4dbabac68ad0e6492e77fb0"
+    },
+    {
+      "path": "raw/residency-probe-20261103T155406Z/stderr.log",
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "raw/residency-probe-20261103T155406Z/stdout.json",
+      "size_bytes": 227,
+      "sha256": "ffce3526a4a34d47303ba1a8cc7a3ea9aa58cd9890a08ca90a43e2d09492fc90"
+    },
+    {
+      "path": "raw/wal-cache-ab-20261103T154627Z-1-A/cgroup-after.json",
+      "size_bytes": 4553,
+      "sha256": "ece101183ab1da23725bef41ce62ede6f4f8cb132705f53c4fd136ef37a33047"
+    },
+    {
+      "path": "raw/wal-cache-ab-20261103T154627Z-1-A/cgroup-before.json",
+      "size_bytes": 4442,
+      "sha256": "fa54ca68b81555b9b7c36f4302d3a9364d398de34182235128f9b23b24180b1f"
+    },
+    {
+      "path": "raw/wal-cache-ab-20261103T154627Z-1-A/cgroup-quiet-10s.json",
+      "size_bytes": 4528,
+      "sha256": "031c528633810382c2d226975194e6bede3fd242a05ce027971e3ab7a5c00b49"
+    },
+    {
+      "path": "raw/wal-cache-ab-20261103T154627Z-1-A/client-controller.log",
+      "size_bytes": 350,
+      "sha256": "f849114b0bf86e6a22b9dfc7ae981953a21ebcf4485f5da9bd02e84fc4917a03"
+    },
+    {
+      "path": "raw/wal-cache-ab-20261103T154627Z-1-A/client-limits.txt",
+      "size_bytes": 1385,
+      "sha256": "0cc227fd6394bf308bd2ac53b05ca12de35492d5d6fd305dc209134d737e8cfe"
+    },
+    {
+      "path": "raw/wal-cache-ab-20261103T154627Z-1-A/client.log",
+      "size_bytes": 3138,
+      "sha256": "e4a6e5dc0726dbe2ee22b5eb29e05c7982230cb5c73d8a15ab01c6a2fe13eb32"
+    },
+    {
+      "path": "raw/wal-cache-ab-20261103T154627Z-1-A/compact.json",
+      "size_bytes": 1423,
+      "sha256": "a364f45c68d171ff26c9121a44a5354ec20cf3a6ff77b20d50ea4ebc9a9f3468"
+    },
+    {
+      "path": "raw/wal-cache-ab-20261103T154627Z-1-A/load-summary.json",
+      "size_bytes": 2673,
+      "sha256": "472f5dc1a1ed899830563cb058d5117476f371c49e110880ad0d2a12e4e053c6"
+    },
+    {
+      "path": "raw/wal-cache-ab-20261103T154627Z-1-A/measurement.json",
+      "size_bytes": 404,
+      "sha256": "3652f01bdc5f6bc16f2e3d00dbefc88654dd346d16f74f94f4e64f652775ffa7"
+    },
+    {
+      "path": "raw/wal-cache-ab-20261103T154627Z-1-A/samples.jsonl",
+      "size_bytes": 102240,
+      "sha256": "a8f44d15b076a9c788793f6506bd1789c991e7894a79bfaf6232392f6a955276"
+    },
+    {
+      "path": "raw/wal-cache-ab-20261103T154627Z-1-A/server-controller.log",
+      "size_bytes": 346,
+      "sha256": "b9eef519284f94e6d775827058a95cdbd293fdaa3977017f56455f1cc7245e44"
+    },
+    {
+      "path": "raw/wal-cache-ab-20261103T154627Z-1-A/server.log",
+      "size_bytes": 44,
+      "sha256": "d7be4fa448efc076f5210ed23e923ead2cfd6bba5c4047fd2f77f408d77b3c06"
+    },
+    {
+      "path": "raw/wal-cache-ab-20261103T154627Z-2-B/cgroup-after.json",
+      "size_bytes": 4564,
+      "sha256": "ee1a6efa2ea01f028605bff16176c0359d822a9f485611a7e250358e23fa81fc"
+    },
+    {
+      "path": "raw/wal-cache-ab-20261103T154627Z-2-B/cgroup-before.json",
+      "size_bytes": 4454,
+      "sha256": "559f77feebf2a4580f5ae2c6b1eab07c291a8163dabdfa6d667b97f5b845ced0"
+    },
+    {
+      "path": "raw/wal-cache-ab-20261103T154627Z-2-B/cgroup-quiet-10s.json",
+      "size_bytes": 4537,
+      "sha256": "221ea2fc8aa77734dc74cd3050a1ee9c46140c409b0e0e8cbaf13e05fc0098e1"
+    },
+    {
+      "path": "raw/wal-cache-ab-20261103T154627Z-2-B/client-controller.log",
+      "size_bytes": 301,
+      "sha256": "473b0fdd45bf54c17a9cc5738366ef9051ae1ecff677e14b050f74faa053ca51"
+    },
+    {
+      "path": "raw/wal-cache-ab-20261103T154627Z-2-B/client-limits.txt",
+      "size_bytes": 1385,
+      "sha256": "0cc227fd6394bf308bd2ac53b05ca12de35492d5d6fd305dc209134d737e8cfe"
+    },
+    {
+      "path": "raw/wal-cache-ab-20261103T154627Z-2-B/client.log",
+      "size_bytes": 3147,
+      "sha256": "d6922bc28fdb6bcc0b615884400e43384f4a274103a0f8426593cde9c373fe12"
+    },
+    {
+      "path": "raw/wal-cache-ab-20261103T154627Z-2-B/compact.json",
+      "size_bytes": 1433,
+      "sha256": "9f53fe853800410529015da59906b15ad50dc97b63761e82f3aca7a4b6feebcf"
+    },
+    {
+      "path": "raw/wal-cache-ab-20261103T154627Z-2-B/load-summary.json",
+      "size_bytes": 2682,
+      "sha256": "5c61fd76b38cec737375759a29b60e54eb59243dd307b91c53238e678558f8a7"
+    },
+    {
+      "path": "raw/wal-cache-ab-20261103T154627Z-2-B/measurement.json",
+      "size_bytes": 404,
+      "sha256": "353d76350f3971eb2b3371f32c159355506b4b8317d786aee82676faf7548bbe"
+    },
+    {
+      "path": "raw/wal-cache-ab-20261103T154627Z-2-B/samples.jsonl",
+      "size_bytes": 102472,
+      "sha256": "3fa11d802d95b402460028070f4490eb9544d3d4fc0a2d171fcf2e0778dfa250"
+    },
+    {
+      "path": "raw/wal-cache-ab-20261103T154627Z-2-B/server-controller.log",
+      "size_bytes": 357,
+      "sha256": "f27a3967b56c5d2f39f852952e27471ee4c0cfbf62da12925ba8c49637cad08a"
+    },
+    {
+      "path": "raw/wal-cache-ab-20261103T154627Z-2-B/server.log",
+      "size_bytes": 44,
+      "sha256": "d7be4fa448efc076f5210ed23e923ead2cfd6bba5c4047fd2f77f408d77b3c06"
+    },
+    {
+      "path": "raw/wal-cache-ab-20261103T154627Z-3-B/cgroup-after.json",
+      "size_bytes": 4563,
+      "sha256": "c8fdc1fdba0c78981ed106a82380349519f41fb5c902097808462ccceb1e49c5"
+    },
+    {
+      "path": "raw/wal-cache-ab-20261103T154627Z-3-B/cgroup-before.json",
+      "size_bytes": 4448,
+      "sha256": "98cf16ca1f70f17b09f4cd47b534f97e7a6a7ecac49019697180f0385f47bff8"
+    },
+    {
+      "path": "raw/wal-cache-ab-20261103T154627Z-3-B/cgroup-quiet-10s.json",
+      "size_bytes": 4538,
+      "sha256": "e31ccb62faade83f5e1823b86657923b133ebb96f79cb2c197580e145327a543"
+    },
+    {
+      "path": "raw/wal-cache-ab-20261103T154627Z-3-B/client-controller.log",
+      "size_bytes": 301,
+      "sha256": "6f99ef8bdfd0933e71be8d96e5eb1d490cf14e0147ae203ba31c6b67cb4aaedd"
+    },
+    {
+      "path": "raw/wal-cache-ab-20261103T154627Z-3-B/client-limits.txt",
+      "size_bytes": 1385,
+      "sha256": "0cc227fd6394bf308bd2ac53b05ca12de35492d5d6fd305dc209134d737e8cfe"
+    },
+    {
+      "path": "raw/wal-cache-ab-20261103T154627Z-3-B/client.log",
+      "size_bytes": 3132,
+      "sha256": "d99b68c3d0cba167ca6d783296df293af244dd46c39462da1a680e88ebe60e6e"
+    },
+    {
+      "path": "raw/wal-cache-ab-20261103T154627Z-3-B/compact.json",
+      "size_bytes": 1432,
+      "sha256": "d5357456379cd3c29df93b1a5db8f13ae15c095cb5a407a252692422d802f882"
+    },
+    {
+      "path": "raw/wal-cache-ab-20261103T154627Z-3-B/load-summary.json",
+      "size_bytes": 2667,
+      "sha256": "dec4e9b44edc728ab502c6ffa7d423bf04fd124d6446d0c886930925ea568deb"
+    },
+    {
+      "path": "raw/wal-cache-ab-20261103T154627Z-3-B/measurement.json",
+      "size_bytes": 404,
+      "sha256": "90ae48da867a75bcf94d19cd939fe7f7b7d1dc8f808de0049157fbc83a1d25c3"
+    },
+    {
+      "path": "raw/wal-cache-ab-20261103T154627Z-3-B/samples.jsonl",
+      "size_bytes": 102443,
+      "sha256": "3988cefa1215afc1c014490afbd68b3a095ce856781540e61d824fb1ced82b89"
+    },
+    {
+      "path": "raw/wal-cache-ab-20261103T154627Z-3-B/server-controller.log",
+      "size_bytes": 357,
+      "sha256": "6ea7b0b070d7361d7e7c8cbd3203dbe721078a03a50f4828d8f8efd65eace5fd"
+    },
+    {
+      "path": "raw/wal-cache-ab-20261103T154627Z-3-B/server.log",
+      "size_bytes": 44,
+      "sha256": "d7be4fa448efc076f5210ed23e923ead2cfd6bba5c4047fd2f77f408d77b3c06"
+    },
+    {
+      "path": "raw/wal-cache-ab-20261103T154627Z-4-A/cgroup-after.json",
+      "size_bytes": 4555,
+      "sha256": "50d2d0f88acbdb4a367adfcba05dca428984a86af2a53abed766d4990c671cde"
+    },
+    {
+      "path": "raw/wal-cache-ab-20261103T154627Z-4-A/cgroup-before.json",
+      "size_bytes": 4455,
+      "sha256": "91674e34f7435cb399658ecb53a5145794854b955ecebcb2cdd892ae65725fd1"
+    },
+    {
+      "path": "raw/wal-cache-ab-20261103T154627Z-4-A/cgroup-quiet-10s.json",
+      "size_bytes": 4526,
+      "sha256": "d245ea7e6dd7d84a685e2d88dbab012e571460ef4dd1bfdb5a3e336851ca8aa7"
+    },
+    {
+      "path": "raw/wal-cache-ab-20261103T154627Z-4-A/client-controller.log",
+      "size_bytes": 299,
+      "sha256": "3448d41bdb4a045885ead229c22e3d1fe9994b0583fb8b4d94161c682aaf419f"
+    },
+    {
+      "path": "raw/wal-cache-ab-20261103T154627Z-4-A/client-limits.txt",
+      "size_bytes": 1385,
+      "sha256": "0cc227fd6394bf308bd2ac53b05ca12de35492d5d6fd305dc209134d737e8cfe"
+    },
+    {
+      "path": "raw/wal-cache-ab-20261103T154627Z-4-A/client.log",
+      "size_bytes": 3137,
+      "sha256": "9720c274a8939226d497dce5d818e6c524e4ea52425fe1b4292088972ea4e546"
+    },
+    {
+      "path": "raw/wal-cache-ab-20261103T154627Z-4-A/compact.json",
+      "size_bytes": 1422,
+      "sha256": "a649d61e7c1eabe64609d53f6685a6133ca6a518bc37f2bee30a98ec40129f60"
+    },
+    {
+      "path": "raw/wal-cache-ab-20261103T154627Z-4-A/load-summary.json",
+      "size_bytes": 2672,
+      "sha256": "5368da0a851aa6046ee5c3766a21454f10e7226efbb65b614d764b09ca409bd2"
+    },
+    {
+      "path": "raw/wal-cache-ab-20261103T154627Z-4-A/measurement.json",
+      "size_bytes": 404,
+      "sha256": "765eae0edc38af9a70ab3b41d5703cbbfb510c656d97b8f27523505da9580fc2"
+    },
+    {
+      "path": "raw/wal-cache-ab-20261103T154627Z-4-A/samples.jsonl",
+      "size_bytes": 102300,
+      "sha256": "6f1d6e4c0c6fb5ff23c07b9c46081862ceec3b93f29f0f37d1c689da2abf0401"
+    },
+    {
+      "path": "raw/wal-cache-ab-20261103T154627Z-4-A/server-controller.log",
+      "size_bytes": 346,
+      "sha256": "c786f6e79b4efe5934acc05857d80f883343a42747c9967417f38cfd0594b1c5"
+    },
+    {
+      "path": "raw/wal-cache-ab-20261103T154627Z-4-A/server.log",
+      "size_bytes": 44,
+      "sha256": "d7be4fa448efc076f5210ed23e923ead2cfd6bba5c4047fd2f77f408d77b3c06"
+    }
+  ]
+}

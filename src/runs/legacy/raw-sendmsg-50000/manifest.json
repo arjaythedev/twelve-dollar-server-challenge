@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "anchor": null,
+  "label": "raw-sendmsg-50000",
+  "kind": "raw_archive",
+  "status": "archived",
+  "legacy": {
+    "original_paths": [
+      "results/sendmsg-50000"
+    ]
+  },
+  "provenance": {
+    "source": null,
+    "build": null,
+    "binary": null,
+    "observer": null
+  },
+  "workload": null,
+  "instruments": null,
+  "summary_sha256": "61c01b23ad5183c208c51a01ea80d5a36e63c62237a85a78f2454aaf02d21a32",
+  "raw_files": [
+    {
+      "path": "raw/container-final.json",
+      "size_bytes": 23388,
+      "sha256": "8473bd1540ba6429c96e11a3d53e0bfb49a9cd3a260cad3c5374017cf8e1ba45"
+    },
+    {
+      "path": "raw/environment.json",
+      "size_bytes": 45400,
+      "sha256": "315fb8935562f9a83617f8b833e33df6251926f25d54db2da7e2ffb63896a367"
+    },
+    {
+      "path": "raw/k6-summary.json",
+      "size_bytes": 4171,
+      "sha256": "c13f2d27e4d2924aaf2054b2b39cd67433a83040db05ad5eaf88ece4764100c2"
+    },
+    {
+      "path": "raw/k6.log",
+      "size_bytes": 1179,
+      "sha256": "3984fdab3c68e99c3eec2be47f4bd72e6a58d96ffab988c688bd85a64307e8bb"
+    },
+    {
+      "path": "raw/load-generator.json",
+      "size_bytes": 8669,
+      "sha256": "f5c2212747b3318df0e93b3ce8b799083d1602cb11be872a6c254ac65a098e6d"
+    },
+    {
+      "path": "raw/run.json",
+      "size_bytes": 2708,
+      "sha256": "76115ba1d598495536d69003f96baf21f6df54d330e1a96aed221420f364d7ba"
+    },
+    {
+      "path": "raw/samples.json",
+      "size_bytes": 40503,
+      "sha256": "d3c57c7c2e3d68c4855f6e6eec7693d42a06b1b8c25f295aa9ca7cd3dab0ec25"
+    },
+    {
+      "path": "raw/server.log",
+      "size_bytes": 44,
+      "sha256": "ff30254619d236aa9015f60ef81c16bb2530551aac96d001e5b48039e0e336a3"
+    }
+  ]
+}

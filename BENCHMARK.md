@@ -110,31 +110,31 @@
 | C++ 0.1.0 (GCC 13 PGO, 60-s ramp) | 350,000 | 60 s | 4,183,847 | 26,148.90 | 4.986 ms | 20.087 ms | 192.38 ms | 0% | 23.11 us | 966.51 MiB |
 | C++ 0.1.0 (ring diagnostics, 60-s ramp) | 350,000 | 30 s | 3,072,657 | 23,635.67 | 4.581 ms | 5.966 ms | 42.38 ms | 0% | 24.35 us | 947.70 MiB |
 
-CQ rotation and dispatch/wait cleanup: 70k A/B CPU/request -1.2%. Matched 350k/5m B/A: CPU/request +0.5%, hold p99 6.12 to 6.05 ms, peak RAM +47.67 MiB. Same seed, fresh seeded databases and generator; zero errors or memory-limit events. Rotation removed after no clear gain; accept/wait cleanup retained. [Data](src/benchmarks/cq-rotation.json).
+CQ rotation and dispatch/wait cleanup: 70k A/B CPU/request -1.2%. Matched 350k/5m B/A: CPU/request +0.5%, hold p99 6.12 to 6.05 ms, peak RAM +47.67 MiB. Same seed, fresh seeded databases and generator; zero errors or memory-limit events. Rotation removed after no clear gain; accept/wait cleanup retained. [Data](src/runs/legacy/benchmark-cq-rotation/summary.json).
 
-PGO: CPU/request -2.9%, hold p99 5.87 to 38.71 ms. Both passed; implementation removed. The preliminary 30-s ramp pair missed activation deadlines. [Data](src/benchmarks/pgo.json).
+PGO: CPU/request -2.9%, hold p99 5.87 to 38.71 ms. Both passed; implementation removed. The preliminary 30-s ramp pair missed activation deadlines. [Data](src/runs/legacy/benchmark-pgo/summary.json).
 
-Ring diagnostics: six rings, zero ENOBUFS throughout. Four full-load intervals had CQ depths at most 210, no overflow and no deferred receives. [Data](src/benchmarks/ring-distribution.json).
+Ring diagnostics: six rings, zero ENOBUFS throughout. Four full-load intervals had CQ depths at most 210, no overflow and no deferred receives. [Data](src/runs/legacy/benchmark-ring-distribution/summary.json).
 
-Leaf-local likes, matched 350k/5m A/B, seed 3132383413, no concurrent builds/probes: CPU/request 22.30 to 21.87 us (-1.9%), hold p99 6.02 to 5.86 ms. Both reached 350k on time with complete response coverage and no errors or memory-limit events. Earlier second-long outliers were not reproduced. [Data](src/benchmarks/leaf-likes.json).
+Leaf-local likes, matched 350k/5m A/B, seed 3132383413, no concurrent builds/probes: CPU/request 22.30 to 21.87 us (-1.9%), hold p99 6.02 to 5.86 ms. Both reached 350k on time with complete response coverage and no errors or memory-limit events. Earlier second-long outliers were not reproduced. [Data](src/runs/legacy/benchmark-leaf-likes/summary.json).
 
-Sanity repeat, same binaries, seed 3132383413 and limits: hold p99 59.14 ms, no errors or memory-limit events. Builds and short native probes ran alongside it; tail variability remains unexplained. [Data](src/benchmarks/leaf-likes.json).
+Sanity repeat, same binaries, seed 3132383413 and limits: hold p99 59.14 ms, no errors or memory-limit events. Builds and short native probes ran alongside it; tail variability remains unexplained. [Data](src/runs/legacy/benchmark-leaf-likes/summary.json).
 
 WAL-reuse Docker run: 258,352 live connections in hold, 280,899 overall; the 350k target was missed. Server CPU 21.66 s, PSI I/O full 81.93 s (includes network CQ waits); no memory-limit events or OOM kills.
 
-WAL limits 0/4/16 MiB, serial 100k runs, seed 42, 30-second ramp and 60-second hold: hold p99 257.24/405.78/351.85 ms; physical reads 1.87/272.55/380.62 MiB. WSL mirrored networking delayed all ramps; these are startup diagnostics. No errors or memory-limit events. [Data](src/benchmarks/wal-cache.json).
+WAL limits 0/4/16 MiB, serial 100k runs, seed 42, 30-second ramp and 60-second hold: hold p99 257.24/405.78/351.85 ms; physical reads 1.87/272.55/380.62 MiB. WSL mirrored networking delayed all ramps; these are startup diagnostics. No errors or memory-limit events. [Data](src/runs/legacy/benchmark-wal-cache/summary.json).
 
-WAL paths, same 100k setup: no eviction/default limit versus eviction/limit 0 gave hold p99 275.06/286.29 ms, peak RAM 559.05/502.90 MiB and PSI I/O full 53.14/52.36 s. Mirrored source-bind overhead delayed both ramps. PSI includes idle network CQ waits. [Data](src/benchmarks/wal-cache.json).
+WAL paths, same 100k setup: no eviction/default limit versus eviction/limit 0 gave hold p99 275.06/286.29 ms, peak RAM 559.05/502.90 MiB and PSI I/O full 53.14/52.36 s. Mirrored source-bind overhead delayed both ramps. PSI includes idle network CQ waits. [Data](src/runs/legacy/benchmark-wal-cache/summary.json).
 
 447fb8a, 350k target, 60-second ramp/hold: server and generator match the earlier like-values binaries. Only 244,074 connect attempts; kernel sample at 100.82 s showed 176,563 established pairs. Hold p99 4.94 ms, ramp-down p99 717.01 ms; PSI I/O full 81.83 s. Mirrored source-bind overhead; target missed despite the legacy pass flag. Seed content matches the official hash.
 
-WSL mirrored to NAT, same 5k TCP probe, three runs each: median connection setup 2.697 to 0.103 s; source bind 503.7 to 1.21 us/call. 10k HTTP, 1-second ramp/15-second hold: activation 1.0007 s, hold p99 4.37 ms, zero errors. Late ramps now fail validation (100 ms scheduling margin). [Data](src/benchmarks/load-buildup.json).
+WSL mirrored to NAT, same 5k TCP probe, three runs each: median connection setup 2.697 to 0.103 s; source bind 503.7 to 1.21 us/call. 10k HTTP, 1-second ramp/15-second hold: activation 1.0007 s, hold p99 4.37 ms, zero errors. Late ramps now fail validation (100 ms scheduling margin). [Data](src/runs/legacy/benchmark-load-buildup/summary.json).
 
-WAL eviction, NAT 350k, one serial pair, seed 42, 60-second ramp/hold, limit 0 in both: hold p99 11.01 to 5.77 ms; peak RAM 1512.96 to 956.17 MiB; median hold file cache 500.58 to 253.00 MiB. Both reached 350k on time with zero errors or memory-limit events. [Data](src/benchmarks/wal-cache.json).
+WAL eviction, NAT 350k, one serial pair, seed 42, 60-second ramp/hold, limit 0 in both: hold p99 11.01 to 5.77 ms; peak RAM 1512.96 to 956.17 MiB; median hold file cache 500.58 to 253.00 MiB. Both reached 350k on time with zero errors or memory-limit events. [Data](src/runs/legacy/benchmark-wal-cache/summary.json).
 
 Statistics include the ramps. RAM is the cgroup peak, including charged file pages. Local results, not an official score or a measured capacity limit.
 
-Rewrite diagnostics, five minutes: hold-only p99 3,160.56 ms. At 251-281 s, 4,314,459 receive ENOBUFS completions, CQ depth 2,048 and send-to-CQE service up to 700.63 ms; COMMIT max 12.91 ms. Timing overhead included. Full logs: `results/0a3c419-sync-300000-5m/`.
+Rewrite diagnostics, five minutes: hold-only p99 3,160.56 ms. At 251-281 s, 4,314,459 receive ENOBUFS completions, CQ depth 2,048 and send-to-CQE service up to 700.63 ms; COMMIT max 12.91 ms. Timing overhead included. Full logs: `src/runs/legacy/raw-0a3c419-sync-300000-5m/raw/`.
 
 Receive retries, 1,536 clients with all 1,024 buffers held, 16 turns: control CQEs 4,096 to 32 (1.66 to 64.75 ms wall, intentional backoff). One-refill recovery and shutdown passed. The 50k pair ran serially, 5 s ramp / 15 s hold, different random seeds; no clear ordinary-request performance change.
 
@@ -146,13 +146,13 @@ Bounded generator timers, 300k/5m: hold-only p99 6.45 ms. Same server binary and
 
 CQ 8,192, 300k/5m: hold-only p99 6.69 ms. Same generator and work budgets; no clear steady-load gain versus CQ 2,048.
 
-Primary defer, 70k: one serial pair, 5 s ramp / 15 s hold, different random seeds, no telemetry. Excludes the later CQE cursor and ring-span changes. Those reduced `next`/`wait` by 32/22 code bytes; two reversed native pairs gave mixed timings. [Data](src/benchmarks/primary-defer.json).
+Primary defer, 70k: one serial pair, 5 s ramp / 15 s hold, different random seeds, no telemetry. Excludes the later CQE cursor and ring-span changes. Those reduced `next`/`wait` by 32/22 code bytes; two reversed native pairs gave mixed timings. [Data](src/runs/legacy/benchmark-primary-defer/summary.json).
 
 Primary defer, 300k/5m: includes the fixed CQE cursor and ring span. Hold-only p99 6.34 ms; no telemetry, memory-limit events or OOM kills.
 
-Retry-only poll-first, four quiet pairs: recovery CPU 2.822 to 2.588 us/receive, p50 5.494 to 5.393 ms, retry submissions +0.2%. Forced ENOBUFS recovery, not HTTP throughput. [Data](src/benchmarks/recovery-reuse.json).
+Retry-only poll-first, four quiet pairs: recovery CPU 2.822 to 2.588 us/receive, p50 5.494 to 5.393 ms, retry submissions +0.2%. Forced ENOBUFS recovery, not HTTP throughput. [Data](src/runs/legacy/benchmark-recovery-reuse/summary.json).
 
-Warm response allocations/request: feed 1 to 0, post 3 to 0, missing post 1 to 0, write reply 2 to 0. Retained strings 290 to 6,419 bytes within the 8,192-byte Exchange cap. No additional read CPU gain over reserve-only established. [Data](src/benchmarks/recovery-reuse.json).
+Warm response allocations/request: feed 1 to 0, post 3 to 0, missing post 1 to 0, write reply 2 to 0. Retained strings 290 to 6,419 bytes within the 8,192-byte Exchange cap. No additional read CPU gain over reserve-only established. [Data](src/runs/legacy/benchmark-recovery-reuse/summary.json).
 
 350k pair: no telemetry, different random seeds; native probes overlapped the reference. Hold-only p99 123.79 to 6.97 ms. One local pair does not isolate the cause of the tail difference.
 
@@ -160,19 +160,19 @@ Warm response allocations/request: feed 1 to 0, post 3 to 0, missing post 1 to 0
 
 unix-excl, 70k: one serial pair, 5 s ramp / 15 s hold, different random seeds, no telemetry. CPU/request fell 2.5%; p99 was nearly unchanged. The separate SQLite probe reduced measured fcntl64 calls from 67,080 to zero, excluding startup.
 
-Prepared Store controls, 20k writes, two reversed pairs: median CPU/write at batch 1/4/16 was 38.98/19.34/9.74 to 38.00/19.16/8.56 us. Outputs and stored counts matched; final checkpoint included, wall time variable. [Data](src/benchmarks/group-commit.json).
+Prepared Store controls, 20k writes, two reversed pairs: median CPU/write at batch 1/4/16 was 38.98/19.34/9.74 to 38.00/19.16/8.56 us. Outputs and stored counts matched; final checkpoint included, wall time variable. [Data](src/runs/legacy/benchmark-group-commit/summary.json).
 
-Fused like INSERT, 20k writes, two reversed pairs per SQL variant: at batch 16, fresh likes were 5-6% slower, duplicates 13-16% slower and mixed writes 7-9% slower. Outcomes and stored checksums matched. Reject the SELECT forms. [Data](src/benchmarks/group-commit.json).
+Fused like INSERT, 20k writes, two reversed pairs per SQL variant: at batch 16, fresh likes were 5-6% slower, duplicates 13-16% slower and mixed writes 7-9% slower. Outcomes and stored checksums matched. Reject the SELECT forms. [Data](src/runs/legacy/benchmark-group-commit/summary.json).
 
-Direct like lookup, 20k writes, two reversed pairs: VALUES plus B-tree fallback reduced batch-16 CPU/write from 4.94 to 4.73 us (fresh), 1.09 to 0.98 us (duplicate), 4.36 to 4.20 us (mixed). Batch-1 mixed was 1.8% slower. Outcomes and stored checksums matched; foreign keys stayed enabled. [Data](src/benchmarks/group-commit.json).
+Direct like lookup, 20k writes, two reversed pairs: VALUES plus B-tree fallback reduced batch-16 CPU/write from 4.94 to 4.73 us (fresh), 1.09 to 0.98 us (duplicate), 4.36 to 4.20 us (mixed). Batch-1 mixed was 1.8% slower. Outcomes and stored checksums matched; foreign keys stayed enabled. [Data](src/runs/legacy/benchmark-group-commit/summary.json).
 
 unix-excl + direct like lookup, 350k/5m: hold p99 5.69 ms, no request errors. Combined confirmation without internal telemetry; the isolated Like comparison is the native probe above.
 
-Create without RETURNING, 20k writes, two reversed pairs: CPU/write at batch 1/16 fell from 36.01/7.10 to 31.71/6.03 us. Every returned ID and timestamp matched storage. Store lifecycle and checkpoint worker included. [Data](src/benchmarks/group-commit.json).
+Create without RETURNING, 20k writes, two reversed pairs: CPU/write at batch 1/16 fell from 36.01/7.10 to 31.71/6.03 us. Every returned ID and timestamp matched storage. Store lifecycle and checkpoint worker included. [Data](src/runs/legacy/benchmark-group-commit/summary.json).
 
 Create readback, 350k/5m: no clear overall CPU or latency change. Post-drain memory rose 358.85 MiB, 96.4% in file cache; the physical WAL was 336.92 MiB larger. No memory-limit or OOM events. Different seeds; checkpoint lag versus retained WAL capacity remains unresolved.
 
-CQ burst, 4,096 completions, two reversed pairs: median drain CPU 0.216/0.023/0.021 ms at CQ 2,048/8,192/16,384. SQ 1,024, 256-CQE drains, no loss; larger queues avoided overflow. Kernel microbenchmark, not HTTP throughput. [Data](src/benchmarks/cq-sizing.json).
+CQ burst, 4,096 completions, two reversed pairs: median drain CPU 0.216/0.023/0.021 ms at CQ 2,048/8,192/16,384. SQ 1,024, 256-CQE drains, no loss; larger queues avoided overflow. Kernel microbenchmark, not HTTP throughput. [Data](src/runs/legacy/benchmark-cq-sizing/summary.json).
 
 Admission comparison: 5 s ramp, 15 s hold, 30 s down. One pair with different random seeds.
 
@@ -188,7 +188,7 @@ Admission comparison: 5 s ramp, 15 s hold, 30 s down. One pair with different ra
 
 Normal repeat: same server/client/seed/workload hashes, different RNG seed; p99 rose from 749.36 to 1,702.04 ms. No memory-limit or reclaim events.
 
-Diagnostics: foreground COMMIT maxima 2,526.89 and 1,426.01 ms; full CQs and CPU saturation afterward. Client timer p99 about 1.1 ms, epoll p99 below 0.25 ms. Memory limit reached during hold, no OOM. [Data](src/profiles/stalls-300000.json).
+Diagnostics: foreground COMMIT maxima 2,526.89 and 1,426.01 ms; full CQs and CPU saturation afterward. Client timer p99 about 1.1 ms, epoll p99 below 0.25 ms. Memory limit reached during hold, no OOM. [Data](src/runs/legacy/profile-stalls-300000/summary.json).
 
 Low-hanging and direct-descriptor pairs ran one baseline and one candidate concurrently. Direct-descriptor pairs used the official 65,535 file limit.
 
@@ -196,15 +196,15 @@ Transport check: 70,000 open connections with `RLIMIT_NOFILE=65535`, two rings, 
 
 The uring rows read CPU counters externally; earlier rows include the in-container counter reader. Their CPU/request values are not directly comparable.
 
-[Data](src/benchmarks/results.json). [300k CPU profile](src/profiles/peak-cpu-300000.json). Full logs stay in `results/<run>/`.
+[Data](src/runs/legacy/benchmark-results/summary.json). [300k CPU profile](src/runs/legacy/profile-peak-cpu-300000/summary.json). Full logs stay in `results/<run>/`.
 
-Feed batching: native median 10.58 to 9.06 us over five alternating pairs; after cleanup, 10.42 to 9.05 us over three pairs. Outputs matched. [Data](src/benchmarks/feed-batch.json).
+Feed batching: native median 10.58 to 9.06 us over five alternating pairs; after cleanup, 10.42 to 9.05 us over three pairs. Outputs matched. [Data](src/runs/legacy/benchmark-feed-batch/summary.json).
 
-Leaf-local likes, five alternating native pairs, 10k feeds/sample: median thread CPU 6.54 to 6.01 us on seed data (-8.2%), 31.57 to 12.99 us with dense likes (-58.9%), 8.03 to 6.42 us with sparse feed IDs (-20.1%). JSON bytes matched. [Data](src/benchmarks/leaf-likes.json).
+Leaf-local likes, five alternating native pairs, 10k feeds/sample: median thread CPU 6.54 to 6.01 us on seed data (-8.2%), 31.57 to 12.99 us with dense likes (-58.9%), 8.03 to 6.42 us with sparse feed IDs (-20.1%). JSON bytes matched. [Data](src/runs/legacy/benchmark-leaf-likes/summary.json).
 
-Feed initialization, five native pairs, 30k feeds/sample: both changes gave paired median CPU +0.8% seed, +3.2% dense, +1.6% sparse. Close-only: -0.1% / +0.2% / +1.9%. Reverted both; outputs matched. [Data](src/benchmarks/feed-init.json).
+Feed initialization, five native pairs, 30k feeds/sample: both changes gave paired median CPU +0.8% seed, +3.2% dense, +1.6% sparse. Close-only: -0.1% / +0.2% / +1.9%. Reverted both; outputs matched. [Data](src/runs/legacy/benchmark-feed-init/summary.json).
 
-Group commit, 10,000 valid writes, two reversed pairs: b=1 to b=16 reduced median CPU/write from 63.85 to 51.88 us, WAL frames from 53,424 to 41,488, commits from 10,000 to 625. Outputs/state matched; inline checkpoints, no HTTP timing. b=64 saved more CPU in the mixed test but showed unstable wall time. [Data](src/benchmarks/group-commit.json).
+Group commit, 10,000 valid writes, two reversed pairs: b=1 to b=16 reduced median CPU/write from 63.85 to 51.88 us, WAL frames from 53,424 to 41,488, commits from 10,000 to 625. Outputs/state matched; inline checkpoints, no HTTP timing. b=64 saved more CPU in the mixed test but showed unstable wall time. [Data](src/runs/legacy/benchmark-group-commit/summary.json).
 
 Batch cleanup: `flush_writes` code 3,966 to 2,570 bytes, reserved stack 984 to 184 bytes; total executable text 3,332 bytes smaller.
 
@@ -216,15 +216,15 @@ Release LTO, seven alternating CPU comparisons: feed medians 10.358 to 10.227 us
 
 GCC13 to GCC16 (C++23/GNU17), 7 pairs: feed 10.147 to 10.279 us; post 4.081 to 4.127 us. GCC16 needed a SQLite warning exception.
 
-SQLite page cache, 2 to 16 MiB, five alternating pairs: random-post CPU median change -12.6%, misses -37.3%, feed unchanged. JSON hashes matched. Mixed 10k profile: 51.85 us/request, no errors, no clear overall CPU change. [Data](src/profiles/cache16-10000.json).
+SQLite page cache, 2 to 16 MiB, five alternating pairs: random-post CPU median change -12.6%, misses -37.3%, feed unchanged. JSON hashes matched. Mixed 10k profile: 51.85 us/request, no errors, no clear overall CPU change. [Data](src/runs/legacy/profile-cache16-10000/summary.json).
 
-Load generator, 10k users / 60 s: sampled client cgroup peak 2,775.08 MiB (k6) versus 52.63 MiB (native); 795.95 versus 797.57 requests/s, no errors. Native process peak RSS: 24.05 MiB. [Data](src/profiles/cpp-load-10000.json).
+Load generator, 10k users / 60 s: sampled client cgroup peak 2,775.08 MiB (k6) versus 52.63 MiB (native); 795.95 versus 797.57 requests/s, no errors. Native process peak RSS: 24.05 MiB. [Data](src/runs/legacy/profile-cpp-load-10000/summary.json).
 
-Accept depth 1 to 64, 512-connection bursts behind a 20-ms handler gate, file limit 256: actual accepts during the gate 1 to 64; after-release p99 10.223 to 6.106 ms and 9.011 to 6.281 ms. All responses passed. [Data](src/benchmarks/accept-depth.json).
+Accept depth 1 to 64, 512-connection bursts behind a 20-ms handler gate, file limit 256: actual accepts during the gate 1 to 64; after-release p99 10.223 to 6.106 ms and 9.011 to 6.281 ms. All responses passed. [Data](src/runs/legacy/benchmark-accept-depth/summary.json).
 
 Parser reuse, 100k lifecycle cycles, four alternating samples: JWT/body CPU median 29.098 to 20.631 ms, allocations 250,009 to 16. With 25% oversized bodies: 30.288 to 27.834 ms, allocations 250,009 to 275,006 as oversized Exchanges are discarded. Checksums matched. Reset code: 1,335 to 267 bytes.
 
-Header passing, no SQLite, seven confirmation pairs: `AcceptedHead&&` feed -4.86%, post +1.52%, mixed -3.20% (4/7 faster), protected +2.42%. Kept value parameters. [Data](src/benchmarks/headers.json).
+Header passing, no SQLite, seven confirmation pairs: `AcceptedHead&&` feed -4.86%, post +1.52%, mixed -3.20% (4/7 faster), protected +2.42%. Kept value parameters. [Data](src/runs/legacy/benchmark-headers/summary.json).
 
 ## Mini PC, direct Ethernet
 
@@ -250,7 +250,7 @@ Ubuntu 22.04 VM, direct LAN, one destination port and 64 source IPs: 70k users, 
 | ext4 | Evict | 2,548,293 | 74.61 ms | 1352.79 MiB | 1475.67 MiB |
 | ext4 | Evict + journal_size_limit=0 | 2,548,677 | 7.81 ms | 1322.78 MiB | 3.56 MiB |
 
-Ext4 runs preloaded only the immutable source outside the server cgroup; all three fresh databases started at 237.65 MiB file cache inside the limit. One run per variant. [WAL data](src/benchmarks/wal-cache.json).
+Ext4 runs preloaded only the immutable source outside the server cgroup; all three fresh databases started at 237.65 MiB file cache inside the limit. One run per variant. [WAL data](src/runs/legacy/benchmark-wal-cache/summary.json).
 
 ## Mini PC, Linux loopback
 
@@ -264,33 +264,33 @@ All users received responses; hold p99 was 20.43 ms. Client teardown triggered 2
 
 Diagnostic repeat, same seed and workload: 2,548,756 requests, zero errors, hold p99 8.41 ms. WAL stayed at 969.03 MiB after 31 observed resets; the final 1,042 logical frames were fully checkpointed. Peak RAM 2,070.32 MiB; 38,977 memory.max events, no OOM kills.
 
-WAL cache eviction, Mini 50k, two reversed pairs, 20-second holds: mean file cache after drain 252.48 to 243.39 MiB; mean hold p99 5.861 to 5.901 ms, zero errors. Peak RAM varied. On Mini and Docker, a residency probe reduced 64.54 MiB of WAL cache to 8 KiB, with rc=0 and fresh reads intact. [Data](src/benchmarks/wal-cache.json).
+WAL cache eviction, Mini 50k, two reversed pairs, 20-second holds: mean file cache after drain 252.48 to 243.39 MiB; mean hold p99 5.861 to 5.901 ms, zero errors. Peak RAM varied. On Mini and Docker, a residency probe reduced 64.54 MiB of WAL cache to 8 KiB, with rc=0 and fresh reads intact. [Data](src/runs/legacy/benchmark-wal-cache/summary.json).
 
 Docker HTTP comparison remains inconclusive: one run missed target concurrency before the first checkpoint; a diagnostic repeat passed. Both showed substantial I/O wait.
 
 ## Native CPU sampling
 
-unix-excl, 350k with the same 30-second warm-up and 90-second capture: CPU/request 24.19 to 21.99 us; hold p99 7.10 to 6.40 ms. No fcntl samples (previously 7.5% of CPU). Network 46.0%, SQL/rows 20.3%, io_uring 11.0%. 65,439 samples, no loss or request errors. Different random seeds. [Data](src/profiles/unix-excl-350000.json).
+unix-excl, 350k with the same 30-second warm-up and 90-second capture: CPU/request 24.19 to 21.99 us; hold p99 7.10 to 6.40 ms. No fcntl samples (previously 7.5% of CPU). Network 46.0%, SQL/rows 20.3%, io_uring 11.0%. 65,439 samples, no loss or request errors. Different random seeds. [Data](src/runs/legacy/profile-unix-excl-350000/summary.json).
 
-350k, 30-second warm-up and 90-second capture: 73,713 samples, no loss, 3,143 unresolved leaves. Network 40.7%, SQL/rows 20.9%, files/locks/page cache 12.8%, io_uring 8.6%, response JSON 2.6%. No request errors; hold p99 7.10 ms. Sampling overhead included. [Data](src/profiles/recovery-reuse-350000.json).
+350k, 30-second warm-up and 90-second capture: 73,713 samples, no loss, 3,143 unresolved leaves. Network 40.7%, SQL/rows 20.9%, files/locks/page cache 12.8%, io_uring 8.6%, response JSON 2.6%. No request errors; hold p99 7.10 ms. Sampling overhead included. [Data](src/runs/legacy/profile-recovery-reuse-350000/summary.json).
 
-300k backlog, 30-second warm-up and 90-second capture: 80,484 samples, no loss; network 38.7%, io_uring 28.6%, SQL 11.6%. [Data](src/profiles/admission-backlog-300000.json).
+300k backlog, 30-second warm-up and 90-second capture: 80,484 samples, no loss; network 38.7%, io_uring 28.6%, SQL 11.6%. [Data](src/runs/legacy/profile-admission-backlog-300000/summary.json).
 
-Rewrite versus `671fd4e`, 10k users, 30-second warm-up and 60-second capture: hold CPU 47.42 to 45.71 us/request, p99 4.341 to 4.310 ms; aggregate CPU 53.01 to 54.22 us/request. No errors or lost samples. One pair, different random seeds. [Data](src/profiles/architecture-reference-10000.json).
+Rewrite versus `671fd4e`, 10k users, 30-second warm-up and 60-second capture: hold CPU 47.42 to 45.71 us/request, p99 4.341 to 4.310 ms; aggregate CPU 53.01 to 54.22 us/request. No errors or lost samples. One pair, different random seeds. [Data](src/runs/legacy/profile-architecture-reference-10000/summary.json).
 
 50,000 users before the B-tree change, 30-second ramp and 60-second capture. User CPU: SQL/rows 68.5%, transport/other 21.9%, response JSON 4.9%, auth 4.6%.
 
 5,443 samples, no loss, 775 unresolved leaves. Hold CPU: 5.915 s user, 9.306 s system.
 
-[Data](src/profiles/native-50000.json). Raw capture: `results/native-current-50000/`.
+[Data](src/runs/legacy/profile-native-50000/summary.json). Raw capture: `src/runs/legacy/raw-native-current-50000/raw/`.
 
 Kernel capture after the B-tree change, same load and window: network/socket paths 57.7%, io_uring 19.1%, files/locks/page cache 15.6%. Attribution follows stack paths. By syscall, including nested work: io_uring_enter 76.1%, fcntl/unixShmLock 10.6%, pwrite64 4.5%, fsync 2.2%, pread64 1.0%. 8,017 samples, no loss, two unresolved leaves. Hold CPU: 4.963 s user, 8.784 s system. No request errors. Loopback includes peer/ACK work in server context; WAL versus checkpoint writes remain unresolved.
 
-[Data](src/profiles/kernel-50000.json). Raw capture: `results/kernel-btree-50000/`.
+[Data](src/runs/legacy/profile-kernel-50000/summary.json). Raw capture: `src/runs/legacy/raw-kernel-btree-50000/raw/`.
 
-Current combined capture, same load and window: network 38.2%, SQL/rows 21.8%, io_uring 12.8%, files/locks/page cache 10.9%, JSON 2.1%, auth 2.0% of sampled CPU. 10,549 samples, no loss, 435 unresolved leaves. No request errors. [Data](src/profiles/combined-50000.json).
+Current combined capture, same load and window: network 38.2%, SQL/rows 21.8%, io_uring 12.8%, files/locks/page cache 10.9%, JSON 2.1%, auth 2.0% of sampled CPU. 10,549 samples, no loss, 435 unresolved leaves. No request errors. [Data](src/runs/legacy/profile-combined-50000/summary.json).
 
-Compact transport, 10,000 users, 30-second ramp and 60-second capture: network 37.1%, SQL/rows 20.4%, io_uring 17.9%, files/locks/page cache 9.7%. Leaf CPU: interrupt unlock 10.8%, `finish_task_switch` 8.4%. 2,657 samples, no loss, 101 unresolved leaves, no request errors. [Data](src/profiles/compact-10000.json).
+Compact transport, 10,000 users, 30-second ramp and 60-second capture: network 37.1%, SQL/rows 20.4%, io_uring 17.9%, files/locks/page cache 9.7%. Leaf CPU: interrupt unlock 10.8%, `finish_task_switch` 8.4%. 2,657 samples, no loss, 101 unresolved leaves, no request errors. [Data](src/runs/legacy/profile-compact-10000/summary.json).
 
 ## Request-path sampling
 
@@ -308,4 +308,4 @@ Python 3.15.2, 5,000 users, five-minute hold. External CPU/wall samplers at 1 kH
 
 These are sampling estimates, not exact function timings. Stack-read failures: CPU 2.58%, wall 2.44%. Body-JSON parsing and GC had no captured samples; that does not establish zero cost.
 
-Raw samples and flamegraphs: `results/request-profile-5000/`.
+Raw samples and flamegraphs: `src/runs/legacy/raw-request-profile-5000/raw/`.

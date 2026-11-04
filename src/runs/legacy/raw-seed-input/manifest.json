@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "anchor": null,
+  "label": "raw-seed-input",
+  "kind": "raw_archive",
+  "status": "archived",
+  "legacy": {
+    "original_paths": [
+      "results/seed-input"
+    ]
+  },
+  "provenance": {
+    "source": null,
+    "build": null,
+    "binary": null,
+    "observer": null
+  },
+  "workload": null,
+  "instruments": null,
+  "summary_sha256": "11bf8f3d745fcb16f311c8c79b5c1de5dcd2823bf980b6e099afd4f979908564",
+  "raw_files": [
+    {
+      "path": "raw/likes.tsv",
+      "size_bytes": 75709498,
+      "sha256": "627c2d0aa7860a3a6e7788f700adc953e05fac967a5d9b5b21dcad06bd412b37"
+    },
+    {
+      "path": "raw/posts.tsv",
+      "size_bytes": 83493309,
+      "sha256": "693d608b9021baab866b2866fb2d950262fbd90e6fcef70aef10f5281d5c1293"
+    },
+    {
+      "path": "raw/tokens.json",
+      "size_bytes": 4859318,
+      "sha256": "84ce14c4ca6852d932fb2fd4f2a5132f0908acd4d16d167d861714a20f4e0d11"
+    },
+    {
+      "path": "raw/users.tsv",
+      "size_bytes": 2482690,
+      "sha256": "304767a5b65fd97d7a5a0abbdef4a063cfab99ff08bd045126de3ba53c139bb8"
+    }
+  ]
+}

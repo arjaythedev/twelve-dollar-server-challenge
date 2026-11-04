@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "anchor": null,
+  "label": "profile-receive-drain-100000",
+  "kind": "legacy",
+  "status": "archived",
+  "legacy": {
+    "original_paths": [
+      "src/profiles/receive-drain-100000.json"
+    ]
+  },
+  "provenance": {
+    "source": null,
+    "build": null,
+    "binary": null,
+    "observer": null
+  },
+  "workload": null,
+  "instruments": null,
+  "summary_sha256": "7a1d9df5186d38d96f14d301a83708210893096297ecdca8309ef923bee41eb7"
+}

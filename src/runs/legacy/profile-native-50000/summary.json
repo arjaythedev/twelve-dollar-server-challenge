@@ -1,0 +1,148 @@
+{
+  "benchmark": {
+    "date": "2026-11-01",
+    "name": "native-current-50000",
+    "runtime": "C++ 0.1.0",
+    "load_generator": "docker_loopback",
+    "sqlite": "3.53.1",
+    "users": 50000,
+    "hold": "60s",
+    "ramp": "30s",
+    "requests": 517982,
+    "rps": 3982.16087117429,
+    "p95_ms": 2.739525199999999,
+    "p99_ms": 19.41123775,
+    "max_ms": 72.519807,
+    "error_rate": 0.0,
+    "cpu_us_per_request": 52.56397905718732,
+    "cpu_scope": "server_cgroup",
+    "server_peak_bytes": 726233088,
+    "passed": true
+  },
+  "profile": {
+    "event": "cpu-clock:u",
+    "frequency_hz": 997,
+    "stack_bytes": 8192,
+    "samples": 5443,
+    "sampled_cpu_ns": 5459377987,
+    "lost_records": 0,
+    "unresolved_leaf_samples": 775,
+    "unrooted_samples": 5,
+    "stages_cpu_ns": {
+      "transport_and_other": 1194583719,
+      "database_and_rows": 3742226579,
+      "auth": 250752250,
+      "response_json": 265797385,
+      "request_json": 2006018,
+      "unknown": 4012036
+    },
+    "hotspots": [
+      {
+        "symbol": "[unknown]",
+        "module": "/usr/lib/x86_64-linux-gnu/libc.so.6",
+        "cpu_ns": 710130372,
+        "samples": 708
+      },
+      {
+        "symbol": "sqlite3VdbeExec",
+        "module": "/app/server",
+        "cpu_ns": 595787346,
+        "samples": 594
+      },
+      {
+        "symbol": "sqlite3BtreeTableMoveto",
+        "module": "/app/server",
+        "cpu_ns": 468405203,
+        "samples": 467
+      },
+      {
+        "symbol": "pcache1Fetch",
+        "module": "/app/server",
+        "cpu_ns": 455366086,
+        "samples": 454
+      },
+      {
+        "symbol": "sqlite3BtreeIndexMoveto",
+        "module": "/app/server",
+        "cpu_ns": 177532593,
+        "samples": 177
+      },
+      {
+        "symbol": "sqlite3GetVarint",
+        "module": "/app/server",
+        "cpu_ns": 169508521,
+        "samples": 169
+      },
+      {
+        "symbol": "tds::quote(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >&, std::basic_string_view<char, std::char_traits<char> >)",
+        "module": "/app/server",
+        "cpu_ns": 165496485,
+        "samples": 165
+      },
+      {
+        "symbol": "llhttp__internal__run",
+        "module": "/app/server",
+        "cpu_ns": 135406215,
+        "samples": 135
+      },
+      {
+        "symbol": "tds::Server::State::respond(tds::Server::State::Connection&, tds::Response)",
+        "module": "/app/server",
+        "cpu_ns": 127382143,
+        "samples": 127
+      },
+      {
+        "symbol": "vdbeRecordCompareInt",
+        "module": "/app/server",
+        "cpu_ns": 126379134,
+        "samples": 126
+      },
+      {
+        "symbol": "tds::Server::run()",
+        "module": "/app/server",
+        "cpu_ns": 88264792,
+        "samples": 88
+      },
+      {
+        "symbol": "tds::Server::State::complete(tds::Server::State::Operation*, int)",
+        "module": "/app/server",
+        "cpu_ns": 88264792,
+        "samples": 88
+      },
+      {
+        "symbol": "getPageNormal",
+        "module": "/app/server",
+        "cpu_ns": 78234702,
+        "samples": 78
+      },
+      {
+        "symbol": "malloc",
+        "module": "/usr/lib/x86_64-linux-gnu/libc.so.6",
+        "cpu_ns": 69207621,
+        "samples": 69
+      },
+      {
+        "symbol": "[unknown]",
+        "module": "/usr/lib/x86_64-linux-gnu/libcrypto.so.3",
+        "cpu_ns": 63189567,
+        "samples": 63
+      }
+    ]
+  },
+  "window": {
+    "warmup_s": 30.0,
+    "hold_s": 60.0,
+    "resume_ack_s": 0.0020122999558225274,
+    "enable_request_s": 30.285023999982513,
+    "enable_ack_s": 30.477935899980366,
+    "disable_request_s": 90.05720150005072,
+    "disable_ack_s": 90.33751610002946,
+    "cpu": {
+      "cgroup_user_s": 5.915089,
+      "cgroup_system_s": 9.306151,
+      "main_user_s": 5.92,
+      "main_system_s": 9.31,
+      "cgroup_minus_main_s": -0.008760000000000545
+    }
+  }
+}

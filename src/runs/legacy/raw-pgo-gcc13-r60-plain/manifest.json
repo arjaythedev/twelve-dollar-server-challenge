@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "anchor": null,
+  "label": "raw-pgo-gcc13-r60-plain",
+  "kind": "raw_archive",
+  "status": "archived",
+  "legacy": {
+    "original_paths": [
+      "results/pgo-gcc13-r60-plain"
+    ]
+  },
+  "provenance": {
+    "source": null,
+    "build": null,
+    "binary": null,
+    "observer": null
+  },
+  "workload": null,
+  "instruments": null,
+  "summary_sha256": "6bb1ad5275edb0975f3423e5ecbff4c000e3dd679351ea2b5d33e56f3e9953b3",
+  "raw_files": [
+    {
+      "path": "raw/container-final.json",
+      "size_bytes": 22817,
+      "sha256": "87ecd3b893ed03644764e8cefd13a280a08863b6ace2de06c1be3ba912f0ee1a"
+    },
+    {
+      "path": "raw/environment.json",
+      "size_bytes": 45478,
+      "sha256": "8e60125b2107e809b78353153a972e35a01e483a9914c95b0acb3c01cc81c821"
+    },
+    {
+      "path": "raw/generator.ready",
+      "size_bytes": 6,
+      "sha256": "ed1a545bb85e55816bbf9566b028b2a0bc456b88f49f6f266c0401048824194b"
+    },
+    {
+      "path": "raw/generator.start",
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "raw/k6-summary.json",
+      "size_bytes": 2854,
+      "sha256": "484754b2bd0f8d3977f1830e0ba744cf258552e9b5b1bfb926139a2dbd3261d7"
+    },
+    {
+      "path": "raw/load-generator.json",
+      "size_bytes": 8486,
+      "sha256": "67e095efc2224f7e9628936c69e2561e248b158eae34e45a1ad0cfee9e6356dd"
+    },
+    {
+      "path": "raw/load.log",
+      "size_bytes": 4459,
+      "sha256": "eaafed980f31395e7d841f2957c5ecc34bf7829b59431ebc55c5bb87f88905af"
+    },
+    {
+      "path": "raw/run.json",
+      "size_bytes": 7780,
+      "sha256": "7311f6755fa542e54c98f36f6a681cdfec92d6dcf7b95f41a27aa5a53756eed4"
+    },
+    {
+      "path": "raw/samples.json",
+      "size_bytes": 283294,
+      "sha256": "5f53286fcf086b81c38c20988b889575b6d3b4ab53ac7ff263738529c3ba0487"
+    },
+    {
+      "path": "raw/server.log",
+      "size_bytes": 44,
+      "sha256": "ff30254619d236aa9015f60ef81c16bb2530551aac96d001e5b48039e0e336a3"
+    }
+  ]
+}

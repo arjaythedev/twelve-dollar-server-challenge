@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "anchor": null,
+  "label": "profile-admission-backlog-300000",
+  "kind": "legacy",
+  "status": "archived",
+  "legacy": {
+    "original_paths": [
+      "src/profiles/admission-backlog-300000.json"
+    ]
+  },
+  "provenance": {
+    "source": null,
+    "build": null,
+    "binary": null,
+    "observer": null
+  },
+  "workload": null,
+  "instruments": null,
+  "summary_sha256": "818aadd2758114550f39d5aac90560c7b327563a228aab366793250898063ecd"
+}

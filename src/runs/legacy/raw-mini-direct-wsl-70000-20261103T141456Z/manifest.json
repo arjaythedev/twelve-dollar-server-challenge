@@ -1,0 +1,88 @@
+{
+  "schema_version": 1,
+  "anchor": null,
+  "label": "raw-mini-direct-wsl-70000-20261103T141456Z",
+  "kind": "raw_archive",
+  "status": "archived",
+  "legacy": {
+    "original_paths": [
+      "results/mini-direct-wsl-70000-20261103T141456Z"
+    ]
+  },
+  "provenance": {
+    "source": null,
+    "build": null,
+    "binary": null,
+    "observer": null
+  },
+  "workload": null,
+  "instruments": null,
+  "summary_sha256": "2925395d7f9b983dd39618476a5de25884f3a6e21db6dfaf0bd662e1729afb43",
+  "raw_files": [
+    {
+      "path": "raw/cgroup-after.json",
+      "size_bytes": 4675,
+      "sha256": "6a90b98cd52defc139276028c6aab9ea038eabdb8e1f640de96957947cbf1c27"
+    },
+    {
+      "path": "raw/cgroup-before.json",
+      "size_bytes": 4581,
+      "sha256": "9e4f24085e79b8f94974b92847305245a0ba2e5e6fcd9fa8241b0043ba89cd1a"
+    },
+    {
+      "path": "raw/client-exit.txt",
+      "size_bytes": 4,
+      "sha256": "2dd9964aa7c59c01362061846da85dcf727bb9f7f25e6b1c67ff342e6ef8c69c"
+    },
+    {
+      "path": "raw/client-net-after.txt",
+      "size_bytes": 4056,
+      "sha256": "25e500fa923353ba65659cfdb8ca725cc0d68539b37cbfb4c3d2eb4520a10dc9"
+    },
+    {
+      "path": "raw/client-net-before.txt",
+      "size_bytes": 4046,
+      "sha256": "3de3373edee2a1102ff3d7440c4dfbc21577650f91c574d48eded66e98cffa7a"
+    },
+    {
+      "path": "raw/client.log",
+      "size_bytes": 3819,
+      "sha256": "4adfde97beaef51cb570e90f1fc69a8a1e7351f287ab80e42a9a8e20d08261f1"
+    },
+    {
+      "path": "raw/load-summary.json",
+      "size_bytes": 3561,
+      "sha256": "39c437017ff4d25cf40568d054de56eef9c809f9f5fff37bf7c4b515194cb513"
+    },
+    {
+      "path": "raw/mini-net-after.txt",
+      "size_bytes": 5577,
+      "sha256": "159bfc1f0a5a83a998b216185ff7f5ea6c753e62c7c4d65198a43926e44dd696"
+    },
+    {
+      "path": "raw/mini-net-before.txt",
+      "size_bytes": 5567,
+      "sha256": "0ad87d93507dbc3ebc6c1ee5e98d2aedf3b808a4f82c841d13085fc07b4feae2"
+    },
+    {
+      "path": "raw/placement.json",
+      "size_bytes": 6477,
+      "sha256": "5f024a571b992cc124de0fdb4ee0b77fec40edc781bcc17bd86bea8f236dbc7c"
+    },
+    {
+      "path": "raw/server.log",
+      "size_bytes": 44,
+      "sha256": "d7be4fa448efc076f5210ed23e923ead2cfd6bba5c4047fd2f77f408d77b3c06"
+    },
+    {
+      "path": "raw/windows-net-after.json",
+      "size_bytes": 190,
+      "sha256": "ee82f7b24752f81f66158402b1b816b3f2adde4f13edb3345afaa8b6356c8d7f"
+    },
+    {
+      "path": "raw/windows-net-before.json",
+      "size_bytes": 183,
+      "sha256": "71c0414077da065cf0c47c5b3389c4f8a38c0d758a4ab5a4965b10775010dcd8"
+    }
+  ]
+}

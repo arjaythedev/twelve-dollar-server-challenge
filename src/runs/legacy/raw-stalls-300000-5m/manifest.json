@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "anchor": null,
+  "label": "raw-stalls-300000-5m",
+  "kind": "raw_archive",
+  "status": "archived",
+  "legacy": {
+    "original_paths": [
+      "results/stalls-300000-5m"
+    ]
+  },
+  "provenance": {
+    "source": null,
+    "build": null,
+    "binary": null,
+    "observer": null
+  },
+  "workload": null,
+  "instruments": null,
+  "summary_sha256": "b7cf7524229bcbdfc7618791e350daab2e7939316333f5a9398d67f2054eeae2",
+  "raw_files": [
+    {
+      "path": "raw/container-final.json",
+      "size_bytes": 22809,
+      "sha256": "ba66c7e63d0f6e06de00e6344958d5c64afccca84880d5cbefeb8198f263366b"
+    },
+    {
+      "path": "raw/environment.json",
+      "size_bytes": 46680,
+      "sha256": "a19fc0ee90a8dcca60a4a74026d3ebf4edb140021a53f14cb0f0e5109713b337"
+    },
+    {
+      "path": "raw/generator.ready",
+      "size_bytes": 6,
+      "sha256": "ed1a545bb85e55816bbf9566b028b2a0bc456b88f49f6f266c0401048824194b"
+    },
+    {
+      "path": "raw/generator.start",
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "raw/k6-summary.json",
+      "size_bytes": 601099,
+      "sha256": "c8b38439b7e706a562162ef6c20a7461c940f7dbd0efddf2b275e57490093efb"
+    },
+    {
+      "path": "raw/load-generator.json",
+      "size_bytes": 8429,
+      "sha256": "ffa6e461834910a6297c5aba5add022c0ac70c52ba94ab0eb054ba324cb34f76"
+    },
+    {
+      "path": "raw/load.log",
+      "size_bytes": 605208,
+      "sha256": "fc980c661c0cc80e4395830ee8f39be8558d79710003dba956475380b573c4a1"
+    },
+    {
+      "path": "raw/run.json",
+      "size_bytes": 7655,
+      "sha256": "7a680ba2f4c63b767e16f18d7b0e91fa4f887d0d09eb570df64c9d352af9591a"
+    },
+    {
+      "path": "raw/samples.json",
+      "size_bytes": 659296,
+      "sha256": "0723329616f461c0ed038b104ca43901be21487ee2b9da7b7cdb64b359824226"
+    },
+    {
+      "path": "raw/server.log",
+      "size_bytes": 308761,
+      "sha256": "f92bef610c7d804154c9d3db089f1862eb2f2c8993cca36083f30ec4e9665ce7"
+    },
+    {
+      "path": "raw/timings.json",
+      "size_bytes": 1084178,
+      "sha256": "3cd9b32b781ee8e3a85f5ea5d7e8a92a38a6517b74c051fbb7bb5219fab36906"
+    }
+  ]
+}

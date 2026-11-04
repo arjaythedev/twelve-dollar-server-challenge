@@ -1,0 +1,320 @@
+{
+  "kind": "telemetry_hook_probe",
+  "baseline": "telemetry-gates-tests (b59374c + deadline/capture split)",
+  "telemetry": "profile",
+  "scope": "isolated_hooks_only",
+  "cpu_clock": "CLOCK_THREAD_CPUTIME_ID",
+  "cpuset_cpu": 2,
+  "calls_per_sample": 500000,
+  "order": [
+    "after",
+    "before",
+    "before",
+    "after"
+  ],
+  "medians": {
+    "before": {
+      "io_ns_per_call": 20.128163,
+      "database_ns_per_call": 19.759178,
+      "handler_active_ns_per_call": 63.737742999999995,
+      "handler_write_ns_per_call": 2.18906,
+      "receive_ns_per_call": 20.061111,
+      "database_scope_ns_per_call": 49.532326999999995,
+      "database_sync_scope_ns_per_call": 43.507344
+    },
+    "after": {
+      "io_ns_per_call": 20.690612,
+      "database_ns_per_call": 20.552946,
+      "handler_active_ns_per_call": 65.469233,
+      "handler_write_ns_per_call": 2.3198280000000002,
+      "receive_ns_per_call": 20.244129,
+      "database_scope_ns_per_call": 46.617103,
+      "database_sync_scope_ns_per_call": 45.068946
+    }
+  },
+  "reduction_percent": {
+    "io_ns_per_call": -2.7943384599975696,
+    "database_ns_per_call": -4.017211647164665,
+    "handler_active_ns_per_call": -2.7165850538510616,
+    "handler_write_ns_per_call": -5.973705608800128,
+    "receive_ns_per_call": -0.9123024143578018,
+    "database_scope_ns_per_call": 5.88549776795263,
+    "database_sync_scope_ns_per_call": -3.5892836850716314
+  },
+  "retained": [
+    "Cache the operation histogram in DatabaseTelemetry::Scope"
+  ],
+  "scope_bytes": {
+    "before": 64,
+    "after": 56
+  },
+  "assembly_bytes": {
+    "scope_constructor": {
+      "before": 266,
+      "after": 329
+    },
+    "scope_destructor": {
+      "before": 252,
+      "after": 135
+    }
+  },
+  "rejected": {
+    "handler_receive_inlining": {
+      "medians": {
+        "before": {
+          "io_ns_per_call": 20.452254,
+          "database_ns_per_call": 20.246864000000002,
+          "handler_active_ns_per_call": 63.303251,
+          "handler_write_ns_per_call": 2.088228,
+          "receive_ns_per_call": 19.943527,
+          "database_scope_ns_per_call": 48.947331,
+          "database_sync_scope_ns_per_call": 44.353883
+        },
+        "after": {
+          "io_ns_per_call": 20.859997999999997,
+          "database_ns_per_call": 20.468164,
+          "handler_active_ns_per_call": 63.456482,
+          "handler_write_ns_per_call": 1.478358,
+          "receive_ns_per_call": 19.809322,
+          "database_scope_ns_per_call": 44.105760000000004,
+          "database_sync_scope_ns_per_call": 42.971647000000004
+        }
+      },
+      "dispatch_bytes": {
+        "before": 5785,
+        "after": 6312
+      },
+      "reason": "No active-handler or receive gain; dispatch grew 9.1%"
+    },
+    "histogram_or_one": "No demonstrated gain over current zero handling",
+    "direct_clock_gettime": "Unchanged clock source and failure behavior"
+  },
+  "validation": {
+    "native_tests": {
+      "off": 11,
+      "basic": 11,
+      "profile": 11
+    },
+    "samples_per_invocation": {
+      "handler": 2500000,
+      "database": 5000000
+    },
+    "clocks_and_boundaries": "unchanged",
+    "http_workload_performance": "not measured",
+    "sync_scope_gain": "not established"
+  },
+  "runs": [
+    {
+      "variant": "after",
+      "calls_per_sample": 500000,
+      "verified_handler_samples": 2500000,
+      "verified_database_samples": 5000000,
+      "samples": [
+        {
+          "io_ns_per_call": 24.529502,
+          "database_ns_per_call": 23.007538,
+          "handler_active_ns_per_call": 72.783626,
+          "handler_write_ns_per_call": 2.270374,
+          "receive_ns_per_call": 22.383654,
+          "database_scope_ns_per_call": 47.895062,
+          "database_sync_scope_ns_per_call": 46.679682
+        },
+        {
+          "io_ns_per_call": 21.8342,
+          "database_ns_per_call": 21.08743,
+          "handler_active_ns_per_call": 65.55535,
+          "handler_write_ns_per_call": 2.460716,
+          "receive_ns_per_call": 21.195236,
+          "database_scope_ns_per_call": 45.789892,
+          "database_sync_scope_ns_per_call": 46.9301
+        },
+        {
+          "io_ns_per_call": 21.01252,
+          "database_ns_per_call": 20.4291,
+          "handler_active_ns_per_call": 63.936154,
+          "handler_write_ns_per_call": 2.369282,
+          "receive_ns_per_call": 20.184304,
+          "database_scope_ns_per_call": 48.933458,
+          "database_sync_scope_ns_per_call": 45.060084
+        },
+        {
+          "io_ns_per_call": 20.851742,
+          "database_ns_per_call": 20.676792,
+          "handler_active_ns_per_call": 66.158918,
+          "handler_write_ns_per_call": 2.195332,
+          "receive_ns_per_call": 20.303954,
+          "database_scope_ns_per_call": 50.140196,
+          "database_sync_scope_ns_per_call": 45.077808
+        },
+        {
+          "io_ns_per_call": 20.529482,
+          "database_ns_per_call": 21.370758,
+          "handler_active_ns_per_call": 70.676572,
+          "handler_write_ns_per_call": 2.629768,
+          "receive_ns_per_call": 21.532838,
+          "database_scope_ns_per_call": 50.10425,
+          "database_sync_scope_ns_per_call": 55.644466
+        }
+      ]
+    },
+    {
+      "variant": "before",
+      "calls_per_sample": 500000,
+      "verified_handler_samples": 2500000,
+      "verified_database_samples": 5000000,
+      "samples": [
+        {
+          "io_ns_per_call": 21.238006,
+          "database_ns_per_call": 20.939802,
+          "handler_active_ns_per_call": 68.946734,
+          "handler_write_ns_per_call": 2.25192,
+          "receive_ns_per_call": 23.925004,
+          "database_scope_ns_per_call": 52.940728,
+          "database_sync_scope_ns_per_call": 47.900974
+        },
+        {
+          "io_ns_per_call": 20.059518,
+          "database_ns_per_call": 19.710814,
+          "handler_active_ns_per_call": 64.619204,
+          "handler_write_ns_per_call": 2.356798,
+          "receive_ns_per_call": 20.116466,
+          "database_scope_ns_per_call": 50.684954,
+          "database_sync_scope_ns_per_call": 48.786654
+        },
+        {
+          "io_ns_per_call": 19.789826,
+          "database_ns_per_call": 19.743278,
+          "handler_active_ns_per_call": 62.856282,
+          "handler_write_ns_per_call": 2.154194,
+          "receive_ns_per_call": 20.005756,
+          "database_scope_ns_per_call": 47.691184,
+          "database_sync_scope_ns_per_call": 43.440166
+        },
+        {
+          "io_ns_per_call": 20.196808,
+          "database_ns_per_call": 19.49836,
+          "handler_active_ns_per_call": 62.28706,
+          "handler_write_ns_per_call": 2.061718,
+          "receive_ns_per_call": 21.448378,
+          "database_scope_ns_per_call": 52.496556,
+          "database_sync_scope_ns_per_call": 46.826924
+        },
+        {
+          "io_ns_per_call": 19.6292,
+          "database_ns_per_call": 19.420244,
+          "handler_active_ns_per_call": 62.098262,
+          "handler_write_ns_per_call": 2.592546,
+          "receive_ns_per_call": 19.830142,
+          "database_scope_ns_per_call": 47.776506,
+          "database_sync_scope_ns_per_call": 43.017344
+        }
+      ]
+    },
+    {
+      "variant": "before",
+      "calls_per_sample": 500000,
+      "verified_handler_samples": 2500000,
+      "verified_database_samples": 5000000,
+      "samples": [
+        {
+          "io_ns_per_call": 23.251122,
+          "database_ns_per_call": 21.671182,
+          "handler_active_ns_per_call": 67.713504,
+          "handler_write_ns_per_call": 2.971006,
+          "receive_ns_per_call": 23.790828,
+          "database_scope_ns_per_call": 55.10435,
+          "database_sync_scope_ns_per_call": 46.986826
+        },
+        {
+          "io_ns_per_call": 23.535062,
+          "database_ns_per_call": 22.394894,
+          "handler_active_ns_per_call": 67.721848,
+          "handler_write_ns_per_call": 2.223926,
+          "receive_ns_per_call": 22.279296,
+          "database_scope_ns_per_call": 50.274072,
+          "database_sync_scope_ns_per_call": 42.665676
+        },
+        {
+          "io_ns_per_call": 22.432948,
+          "database_ns_per_call": 22.301718,
+          "handler_active_ns_per_call": 67.82851,
+          "handler_write_ns_per_call": 2.065144,
+          "receive_ns_per_call": 19.596638,
+          "database_scope_ns_per_call": 47.55158,
+          "database_sync_scope_ns_per_call": 43.239806
+        },
+        {
+          "io_ns_per_call": 19.55528,
+          "database_ns_per_call": 19.775078,
+          "handler_active_ns_per_call": 61.80105,
+          "handler_write_ns_per_call": 2.069694,
+          "receive_ns_per_call": 19.839118,
+          "database_scope_ns_per_call": 48.790582,
+          "database_sync_scope_ns_per_call": 42.63682
+        },
+        {
+          "io_ns_per_call": 19.559066,
+          "database_ns_per_call": 19.266892,
+          "handler_active_ns_per_call": 61.119922,
+          "handler_write_ns_per_call": 2.08871,
+          "receive_ns_per_call": 19.790414,
+          "database_scope_ns_per_call": 48.724308,
+          "database_sync_scope_ns_per_call": 43.574522
+        }
+      ]
+    },
+    {
+      "variant": "after",
+      "calls_per_sample": 500000,
+      "verified_handler_samples": 2500000,
+      "verified_database_samples": 5000000,
+      "samples": [
+        {
+          "io_ns_per_call": 21.965198,
+          "database_ns_per_call": 22.582392,
+          "handler_active_ns_per_call": 65.383116,
+          "handler_write_ns_per_call": 2.498528,
+          "receive_ns_per_call": 24.208362,
+          "database_scope_ns_per_call": 47.444314,
+          "database_sync_scope_ns_per_call": 47.876436
+        },
+        {
+          "io_ns_per_call": 19.559046,
+          "database_ns_per_call": 19.27148,
+          "handler_active_ns_per_call": 62.80849,
+          "handler_write_ns_per_call": 2.056548,
+          "receive_ns_per_call": 19.943878,
+          "database_scope_ns_per_call": 42.108818,
+          "database_sync_scope_ns_per_call": 44.194178
+        },
+        {
+          "io_ns_per_call": 19.47126,
+          "database_ns_per_call": 19.275428,
+          "handler_active_ns_per_call": 62.179256,
+          "handler_write_ns_per_call": 2.05751,
+          "receive_ns_per_call": 19.473042,
+          "database_scope_ns_per_call": 43.430408,
+          "database_sync_scope_ns_per_call": 42.502546
+        },
+        {
+          "io_ns_per_call": 19.747504,
+          "database_ns_per_call": 19.384596,
+          "handler_active_ns_per_call": 65.83827,
+          "handler_write_ns_per_call": 2.102836,
+          "receive_ns_per_call": 19.600886,
+          "database_scope_ns_per_call": 42.459062,
+          "database_sync_scope_ns_per_call": 41.729436
+        },
+        {
+          "io_ns_per_call": 19.500536,
+          "database_ns_per_call": 19.39722,
+          "handler_active_ns_per_call": 62.196936,
+          "handler_write_ns_per_call": 2.514418,
+          "receive_ns_per_call": 19.624872,
+          "database_scope_ns_per_call": 42.624838,
+          "database_sync_scope_ns_per_call": 43.238306
+        }
+      ]
+    }
+  ]
+}

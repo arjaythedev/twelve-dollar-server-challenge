@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "anchor": null,
+  "label": "raw-uring-defer-50000",
+  "kind": "raw_archive",
+  "status": "archived",
+  "legacy": {
+    "original_paths": [
+      "results/uring-defer-50000"
+    ]
+  },
+  "provenance": {
+    "source": null,
+    "build": null,
+    "binary": null,
+    "observer": null
+  },
+  "workload": null,
+  "instruments": null,
+  "summary_sha256": "96a1befd5759274474217a64544f9352ea526268c8dfa173c92dbba916abfda6",
+  "raw_files": [
+    {
+      "path": "raw/container-final.json",
+      "size_bytes": 23388,
+      "sha256": "69754f369e6afc6179d19f4606dc3a177733fa430c6368af77fd6ba0046230fb"
+    },
+    {
+      "path": "raw/environment.json",
+      "size_bytes": 45254,
+      "sha256": "121008ce7bd137325b14724a3e3e53f429437b66bac855a6049e457c3a66e83d"
+    },
+    {
+      "path": "raw/k6-summary.json",
+      "size_bytes": 4221,
+      "sha256": "f64ccb0206c8e530e4c4b03461c34e16b4d0ea5bfeb2ec4c3ca36ced5ea7c30b"
+    },
+    {
+      "path": "raw/k6.log",
+      "size_bytes": 1166,
+      "sha256": "50af88258a4bbc32e8c64623f268439ca5a56055aabe4d2d9d7458c67ead457c"
+    },
+    {
+      "path": "raw/load-generator.json",
+      "size_bytes": 8676,
+      "sha256": "6345d3124e154edf9fce3d5f16ffada03e674f146d57d4c903ce4a2a6d17e1b3"
+    },
+    {
+      "path": "raw/run.json",
+      "size_bytes": 2712,
+      "sha256": "8b84c3b12bb36c5297ab7f3e25464ffb95726256a2f84cf09d778ade684bec26"
+    },
+    {
+      "path": "raw/samples.json",
+      "size_bytes": 41164,
+      "sha256": "0eceb676b8fff7f5cff6559cf4fef5d0370b1fc7705358dfbd210a834eb06490"
+    },
+    {
+      "path": "raw/server.log",
+      "size_bytes": 44,
+      "sha256": "ff30254619d236aa9015f60ef81c16bb2530551aac96d001e5b48039e0e336a3"
+    }
+  ]
+}

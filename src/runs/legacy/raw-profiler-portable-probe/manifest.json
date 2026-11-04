@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "anchor": null,
+  "label": "raw-profiler-portable-probe",
+  "kind": "raw_archive",
+  "status": "archived",
+  "legacy": {
+    "original_paths": [
+      "results/profiler-portable-probe"
+    ]
+  },
+  "provenance": {
+    "source": null,
+    "build": null,
+    "binary": null,
+    "observer": null
+  },
+  "workload": null,
+  "instruments": null,
+  "summary_sha256": "b0f8eabe64fc1df2873fa9369e1a9afb0e81714c183c70892fdcd36fe98211c4",
+  "raw_files": [
+    {
+      "path": "raw/container-final.json",
+      "size_bytes": 9135,
+      "sha256": "fcb20c7ed9195a6cb02b175ce03fc4b8567019edaafa56c6ad0dc541c9349b57"
+    },
+    {
+      "path": "raw/cpu-sampler.log",
+      "size_bytes": 475,
+      "sha256": "2f309f3d072d4c06134e52369caa209702e60ea442e4859ebb8e3680a277d5b3"
+    },
+    {
+      "path": "raw/cpu.bin",
+      "size_bytes": 2949,
+      "sha256": "c84b34350d62475e2dcb03fabc41f8cf37e9adbab9146113e27a0e76bc379819"
+    },
+    {
+      "path": "raw/cpu.collapsed",
+      "size_bytes": 9143,
+      "sha256": "c1c32af91a221841830c4c0f34c7aa886f080d60dd89da013fff88adb1d6545d"
+    },
+    {
+      "path": "raw/cpu.html",
+      "size_bytes": 640691,
+      "sha256": "9a0d06e70bcef56350b496e121591d60402e4eed37527fc3f78bca75d7133abf"
+    },
+    {
+      "path": "raw/environment.json",
+      "size_bytes": 30887,
+      "sha256": "000dd3f03b7fe73d9347a5420bfc772a22f5d592d577376c9aa312c8ba2d2b42"
+    },
+    {
+      "path": "raw/server.log",
+      "size_bytes": 181,
+      "sha256": "915513a73a5ff6ede995675310c6c5012dfc6c75a4a7e26e03a90a423a40bd55"
+    },
+    {
+      "path": "raw/wall-sampler.log",
+      "size_bytes": 473,
+      "sha256": "34bc16d838070a750442f1a99ec43d2e3d5b7681d975dc161fa0cd6b62005bef"
+    },
+    {
+      "path": "raw/wall.bin",
+      "size_bytes": 1932,
+      "sha256": "d54d7a633cd5fc142adaff693429626fcd5cfaccdcce9b2d9ae81a3104ea792b"
+    },
+    {
+      "path": "raw/wall.collapsed",
+      "size_bytes": 2645,
+      "sha256": "542db30052594b9ff441a42af25ca01e631658623e56de7baaa00a026c42b5cc"
+    },
+    {
+      "path": "raw/wall.html",
+      "size_bytes": 638262,
+      "sha256": "3723624a04452af772b5bb65ad7c7188391849bd4024cb45313ec21e87dffa3c"
+    }
+  ]
+}

@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "anchor": null,
+  "label": "raw-json-native-5000",
+  "kind": "raw_archive",
+  "status": "archived",
+  "legacy": {
+    "original_paths": [
+      "results/json-native-5000"
+    ]
+  },
+  "provenance": {
+    "source": null,
+    "build": null,
+    "binary": null,
+    "observer": null
+  },
+  "workload": null,
+  "instruments": null,
+  "summary_sha256": "721d033163f18321d2b654f53d3b883d0651f4e57ed4ae8808e7aa2653991525",
+  "raw_files": [
+    {
+      "path": "raw/container-final.json",
+      "size_bytes": 9178,
+      "sha256": "36f2cdc3899234fbc3f59aa3d29e468f43dc3d00b4b36757e4e9c706085fc186"
+    },
+    {
+      "path": "raw/environment.json",
+      "size_bytes": 31519,
+      "sha256": "f63d83274fc3f0c5a87fac13c3e60d1814cf53481646c2afdfb86afb226ba80b"
+    },
+    {
+      "path": "raw/k6-summary.json",
+      "size_bytes": 4026,
+      "sha256": "a7655c64c89bea189f84766a9a0feff9acfdbf916c8b6d96a68bbdcace37442f"
+    },
+    {
+      "path": "raw/k6.log",
+      "size_bytes": 1169,
+      "sha256": "9f8ef2c433d9be99d886423cfeb826f721153b4f259a304202ee164172b8311c"
+    },
+    {
+      "path": "raw/run.json",
+      "size_bytes": 1748,
+      "sha256": "76d167d29ea2fd4fd88bf98b9914232c240e0e1d495c7eca012af92d47317583"
+    },
+    {
+      "path": "raw/samples.json",
+      "size_bytes": 39245,
+      "sha256": "e61e2b33fbabaa2ef65f74df2e8cd2286eb56b59e52684c20e8d551949de35cf"
+    },
+    {
+      "path": "raw/server.log",
+      "size_bytes": 181,
+      "sha256": "915513a73a5ff6ede995675310c6c5012dfc6c75a4a7e26e03a90a423a40bd55"
+    }
+  ]
+}

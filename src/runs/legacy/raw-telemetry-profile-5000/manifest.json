@@ -1,0 +1,118 @@
+{
+  "schema_version": 1,
+  "anchor": null,
+  "label": "raw-telemetry-profile-5000",
+  "kind": "raw_archive",
+  "status": "archived",
+  "legacy": {
+    "original_paths": [
+      "results/telemetry-profile-5000"
+    ]
+  },
+  "provenance": {
+    "source": null,
+    "build": null,
+    "binary": null,
+    "observer": null
+  },
+  "workload": null,
+  "instruments": null,
+  "summary_sha256": "85545ddea3cfd3fb32844fc1936c0c7ccdd1c3062966825aa6bbd0125ea9aa83",
+  "raw_files": [
+    {
+      "path": "raw/container-final.json",
+      "size_bytes": 22866,
+      "sha256": "ba8412f6d5df45ebfb495ff227f14faafe34806d930e4a171580bade60851d8e"
+    },
+    {
+      "path": "raw/environment.json",
+      "size_bytes": 46741,
+      "sha256": "786b5121c7a57f9164a38adb788187e5e02a544f7501ec58aac2b6a6c56d16b3"
+    },
+    {
+      "path": "raw/generator.ready",
+      "size_bytes": 6,
+      "sha256": "ed1a545bb85e55816bbf9566b028b2a0bc456b88f49f6f266c0401048824194b"
+    },
+    {
+      "path": "raw/generator.start",
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "raw/k6-summary.json",
+      "size_bytes": 515486,
+      "sha256": "81054d61106bedd31edb3f197a65d03b351519805acdeea428677c540a8e199a"
+    },
+    {
+      "path": "raw/load-generator.json",
+      "size_bytes": 8558,
+      "sha256": "7463fbb6fd0e3c891b1ed20f29a74ca0017bf4e44016873443ad50f01af062a6"
+    },
+    {
+      "path": "raw/load.log",
+      "size_bytes": 516688,
+      "sha256": "5f4cc5154cd072ecc5634950776656a948b34a0d0c5ef87699eda1cde3e55dc8"
+    },
+    {
+      "path": "raw/perf-stats.txt",
+      "size_bytes": 617,
+      "sha256": "169d1dd1bf010231d39125cfe201415c9d4ebdf8fad738728c8a3ab9dd024696"
+    },
+    {
+      "path": "raw/perf.data",
+      "size_bytes": 13815920,
+      "sha256": "b0d9897cfdd30d28d833658e81942230c80652a3096096e1607dc201d82664b5"
+    },
+    {
+      "path": "raw/perf.log",
+      "size_bytes": 177,
+      "sha256": "6e953b07f5bb199776804d521b6662ade98be512cbc8c3907cc3e2802cde3401"
+    },
+    {
+      "path": "raw/profile.json",
+      "size_bytes": 19118,
+      "sha256": "0238b9a9aaf0d8a79d4ff24afcbdc3a1a6e9891d79bf9f2d660fe0386a750d83"
+    },
+    {
+      "path": "raw/run.json",
+      "size_bytes": 7754,
+      "sha256": "5928bf3ac94a082983fd1e7e0d9e87dc33e6d5b43a40ac0e101d0e87f8381cae"
+    },
+    {
+      "path": "raw/sampler.json",
+      "size_bytes": 7211,
+      "sha256": "366ca54bbc701296a8a7af639f2509517aa8b248c37ceae67c65a9c0e07dfd81"
+    },
+    {
+      "path": "raw/samples.json",
+      "size_bytes": 221313,
+      "sha256": "a590b39ea77208063be63af13eb91fa31452dcbf6e3afa10071a9b670234c745"
+    },
+    {
+      "path": "raw/server.log",
+      "size_bytes": 44,
+      "sha256": "ff30254619d236aa9015f60ef81c16bb2530551aac96d001e5b48039e0e336a3"
+    },
+    {
+      "path": "raw/stacks.txt",
+      "size_bytes": 2655611,
+      "sha256": "3f624e5d0f3607fcb98f68486ccb1d93bebef6d195d99c5bfa7cd5435e1e7adf"
+    },
+    {
+      "path": "raw/telemetry.json",
+      "size_bytes": 114353,
+      "sha256": "6dcbc5af16d60dfe33ef455f911a57dab68cc37424ff77b33be17eddedf6ece0"
+    },
+    {
+      "path": "raw/telemetry.jsonl",
+      "size_bytes": 114115,
+      "sha256": "2d9c14f79e38b4ccacd029763451a8eb2247f0cb44e5a845e68b48a45c1fcf4e"
+    },
+    {
+      "path": "raw/window.json",
+      "size_bytes": 6551,
+      "sha256": "e882663723e9dc22f1f06774c8911c04106050192dc95119ee9fc7fc4a482961"
+    }
+  ]
+}

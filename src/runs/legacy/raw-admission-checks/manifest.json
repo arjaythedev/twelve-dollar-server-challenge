@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "anchor": null,
+  "label": "raw-admission-checks",
+  "kind": "raw_archive",
+  "status": "archived",
+  "legacy": {
+    "original_paths": [
+      "results/admission-checks"
+    ]
+  },
+  "provenance": {
+    "source": null,
+    "build": null,
+    "binary": null,
+    "observer": null
+  },
+  "workload": null,
+  "instruments": null,
+  "summary_sha256": "0e5935f4a0e3c476abf161e6a09f58ff06aa690a3c07c3197e735fcb46e6f4e1",
+  "raw_files": []
+}

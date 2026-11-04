@@ -1,6 +1,7 @@
 .venv
 .ruff_cache
 .build
+runs
 **/__pycache__
 **/*.pyc
 .git

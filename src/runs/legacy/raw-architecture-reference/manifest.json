@@ -1,0 +1,183 @@
+{
+  "schema_version": 1,
+  "anchor": null,
+  "label": "raw-architecture-reference",
+  "kind": "raw_archive",
+  "status": "archived",
+  "legacy": {
+    "original_paths": [
+      "results/architecture-reference"
+    ]
+  },
+  "provenance": {
+    "source": null,
+    "build": null,
+    "binary": null,
+    "observer": null
+  },
+  "workload": null,
+  "instruments": null,
+  "summary_sha256": "4d83e773bc872353d07b8e3d1613263d48b6e5a20d72f7d92020c2554992073e",
+  "raw_files": [
+    {
+      "path": "raw/671fd4e-server",
+      "size_bytes": 2049192,
+      "sha256": "fee8a294420d0e06384d0da2b3a7b0767119fbc3f91b6b127e9ef573ce35eced"
+    },
+    {
+      "path": "raw/asm/671fd4e-.txt",
+      "size_bytes": 57996,
+      "sha256": "18395f650ad4529470700b9fa32ef7e0f57f8319ac2238bdb4102ee616e20500"
+    },
+    {
+      "path": "raw/asm/671fd4e-Database-feed_abi_cxx11_.txt",
+      "size_bytes": 41699,
+      "sha256": "962cda0ddaac999cdb1d39d94dc1e52756301f5043082fe3302204007171f1bd"
+    },
+    {
+      "path": "raw/asm/671fd4e-Database-post_abi_cxx11_.txt",
+      "size_bytes": 17093,
+      "sha256": "1671b4ddb2fd877750f1c146f149ed742e7fb3c81895298677cdbec0ff38181b"
+    },
+    {
+      "path": "raw/asm/671fd4e-Server-State-process.txt",
+      "size_bytes": 115066,
+      "sha256": "b068cfeed1c3023ab3061383ec7c07df5885753e5c2dfbbaa3b6faab4f182769"
+    },
+    {
+      "path": "raw/asm/671fd4e-Server-State-receive.txt",
+      "size_bytes": 7601,
+      "sha256": "769860cf25412a20065f80fcd71890f065e47f9f473ae7ca17e8b55e9b791bb7"
+    },
+    {
+      "path": "raw/asm/671fd4e-Server-State-run.txt",
+      "size_bytes": 172729,
+      "sha256": "11a3ea51a0e3c03e1cc8407891b836a3e64223c286f63b026279bf526a185571"
+    },
+    {
+      "path": "raw/asm/671fd4e-transport-Ring-acquire_exchange.txt",
+      "size_bytes": 3485,
+      "sha256": "cae7fd1eee3398860f572d2d2a7d81a091f431cb8142215fbe09dc5642ea9c6e"
+    },
+    {
+      "path": "raw/asm/671fd4e.nm.txt",
+      "size_bytes": 164717,
+      "sha256": "8bd4ab1fa6853acb03db59988cea6465ff79b8c40967b1f2e004f4c72d3d4650"
+    },
+    {
+      "path": "raw/asm/calls.json",
+      "size_bytes": 103186,
+      "sha256": "135282f8b33cae6792bf173281eb3249c9c5207961c9f3f670e2c8f8c7926c73"
+    },
+    {
+      "path": "raw/asm/collect.py",
+      "size_bytes": 2282,
+      "sha256": "61cf235eff300dd7d67a3c4e9d30833de35c89334242bb606481cc060a82f216"
+    },
+    {
+      "path": "raw/asm/current-Application-read.txt",
+      "size_bytes": 16745,
+      "sha256": "08caf8fedb863dc8b983ff50bf722d0328bd3e6745d0c4160783a23f27554a34"
+    },
+    {
+      "path": "raw/asm/current-net-ConnectionStore-create.txt",
+      "size_bytes": 9400,
+      "sha256": "cab1f86e3077de9f0922dfacb941647f40180d44e9557e5f694e3e0013913145"
+    },
+    {
+      "path": "raw/asm/current-net-Reactor-close.txt",
+      "size_bytes": 5076,
+      "sha256": "053af22b9c56e9ca8a0d95375748bc95cc4b8c7065454ee952a77bd6810c2c2f"
+    },
+    {
+      "path": "raw/asm/current-net-Reactor-complete.txt",
+      "size_bytes": 14786,
+      "sha256": "e585c6e2615dcc612c9412096ee7c7da31c1e8e5a92405a5aedc87517df60c52"
+    },
+    {
+      "path": "raw/asm/current-net-Reactor-complete_io.txt",
+      "size_bytes": 19381,
+      "sha256": "d6c88dd7ddf100ccb112996f3d6800a66b89c73a8a623d2d5261d32770f13139"
+    },
+    {
+      "path": "raw/asm/current-net-Reactor-complete_shutdown.txt",
+      "size_bytes": 5312,
+      "sha256": "6f0e622e6ff3b461e6061145596ed8335a3d39ceff118407b79747562d7742d2"
+    },
+    {
+      "path": "raw/asm/current-net-Reactor-next.txt",
+      "size_bytes": 9000,
+      "sha256": "837691b23ba33ee91e3c2d969d8d6af32abb4c44e9921eeb5490d45011a2fd73"
+    },
+    {
+      "path": "raw/asm/current-net-Reactor-receive.txt",
+      "size_bytes": 5169,
+      "sha256": "7256b4ba942fb8343b99c8e19dfd8c589ae18a3be4e952ceef443ff1bf48984b"
+    },
+    {
+      "path": "raw/asm/current-net-Reactor-send.txt",
+      "size_bytes": 5086,
+      "sha256": "3517528df89398f9737fc7ebccc96349063a34b9ff971e86b89ab9a6e15fa36e"
+    },
+    {
+      "path": "raw/asm/current-net-Ring-acquire_exchange.txt",
+      "size_bytes": 3417,
+      "sha256": "93c9d538493d355b95b0423d2f0ddd8e391709f2391e9f9c6830ebad77688453"
+    },
+    {
+      "path": "raw/asm/current-PostWriter-append.txt",
+      "size_bytes": 62263,
+      "sha256": "55fc94a1f03308441f2f952158c6b91d72a290a13054cf347e386c3b393885f9"
+    },
+    {
+      "path": "raw/asm/current-PostWriter-finish.txt",
+      "size_bytes": 9862,
+      "sha256": "cd67fdcb719d32639bca1e3763b2e4636c3b17f8f1e2678b24908edb74bcd532"
+    },
+    {
+      "path": "raw/asm/current-PostWriter-PostWriter.txt",
+      "size_bytes": 12567,
+      "sha256": "99dc221fc0f51faaba924efb9af47e2b75abd7f4a5528a9180035391ff7251ed"
+    },
+    {
+      "path": "raw/asm/current-PostWriter-reset.txt",
+      "size_bytes": 6662,
+      "sha256": "dfb384753d3f0a66ccdeebe0d23dced2a68894565df45135ef733e82af4d364d"
+    },
+    {
+      "path": "raw/asm/current-Server-State-run.txt",
+      "size_bytes": 32651,
+      "sha256": "95e49f9f11f7b8d52aa0c6d2e54cff018888487e8fdeb6b08e62f5034a9af4d6"
+    },
+    {
+      "path": "raw/asm/current-Store-feed.txt",
+      "size_bytes": 12391,
+      "sha256": "b7bb01390f2dbea38c41da1e1671c275dd129f35758e5bcfe90a25ee3e62da4d"
+    },
+    {
+      "path": "raw/asm/current-Store-post.txt",
+      "size_bytes": 7478,
+      "sha256": "250ee08b8f0ae9ef4c6d063563a13e10a9c84f22a06347fa8b1d76bc03508733"
+    },
+    {
+      "path": "raw/asm/current.nm.txt",
+      "size_bytes": 166027,
+      "sha256": "ca89fa829f13541c27d1042e6f62a0adb97603b674790d676531e5f491c239f8"
+    },
+    {
+      "path": "raw/asm/findings.txt",
+      "size_bytes": 8465,
+      "sha256": "f36c4368ca88304aca98cba7bd953ee074759a8b64e46068a357828dbc3cf774"
+    },
+    {
+      "path": "raw/comparison.json",
+      "size_bytes": 2933,
+      "sha256": "db9f7bf167066379c5b5fc238c8ddf2e439788121ae02672439fe74e6c006c20"
+    },
+    {
+      "path": "raw/current-server",
+      "size_bytes": 2047616,
+      "sha256": "e5490e8487f11047e3a537cd9fb972e16ca016c5b5ea1ab4c447fea0a0d98373"
+    }
+  ]
+}

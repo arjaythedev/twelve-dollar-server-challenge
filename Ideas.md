@@ -52,7 +52,7 @@
 - [x] Collect handler, database-method, commit and send-preparation-to-CQE histograms, with per-ring CQ depth/overflow and five-second client/scheduling windows. Send timing includes batching and CQ service delay; CPU samples omit I/O waits.
   A 300k trace captured 2.53- and 1.43-second foreground commits followed by full CQs and CPU saturation. Client scheduling stayed near 1 ms; foreground WAL-header sync under NORMAL is a candidate to measure next.
 
-- [ ] Bound CQ draining and handler work before extending completion waits further. Network/socket paths account for 40.2% and io_uring for 12.0% of sampled CPU in the [100k profile](src/profiles/exchange-100000.json).
+- [ ] Bound CQ draining and handler work before extending completion waits further. Network/socket paths account for 40.2% and io_uring for 12.0% of sampled CPU in the [100k profile](src/runs/legacy/profile-exchange-100000/summary.json).
   Measure requests/enter, CQ batch sizes and CPU/request: `C ~= C_enter/requests_per_enter + C_other`. Adapt batching to queue depth and oldest response age; cap CQ drains by count or elapsed time, submit pending sends promptly and avoid waiting while application work is ready.
   Budget socket reads and response work separately: `M_queue ~= Q_kernel*m_kernel + Q_app*m_app`. Drain input within a byte budget before expensive handlers; cap queued input and output, pause new work at a high watermark and resume below a lower one.
   Start with FIFO; compare byte-deficit scheduling for uneven response sizes, with request-age promotion to prevent starvation. Preserve connection/write order and read fresh data when dispatched.

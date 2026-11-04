@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "anchor": null,
+  "label": "raw-cq8192-300000-5m",
+  "kind": "raw_archive",
+  "status": "archived",
+  "legacy": {
+    "original_paths": [
+      "results/cq8192-300000-5m"
+    ]
+  },
+  "provenance": {
+    "source": null,
+    "build": null,
+    "binary": null,
+    "observer": null
+  },
+  "workload": null,
+  "instruments": null,
+  "summary_sha256": "d61f0fcdf4ccc60ce122153bbb990efe15e02b399790b77155c4b91b5a858946",
+  "raw_files": [
+    {
+      "path": "raw/benchmark.json",
+      "size_bytes": 603,
+      "sha256": "0940b3149ff1f0a3acc3dc35f00e0ec5a29ae8728942e7c48bd4953c7b8f69c7"
+    },
+    {
+      "path": "raw/container-final.json",
+      "size_bytes": 22845,
+      "sha256": "7a981bd12cea71d361169bd4518b388de331065fe7d270c2d4df3787bae38f1e"
+    },
+    {
+      "path": "raw/environment.json",
+      "size_bytes": 45731,
+      "sha256": "61f396a31e3c8f9b2b9e7a6ae9349736abf97574777091a33e5958a64ce69c9e"
+    },
+    {
+      "path": "raw/generator.ready",
+      "size_bytes": 6,
+      "sha256": "ed1a545bb85e55816bbf9566b028b2a0bc456b88f49f6f266c0401048824194b"
+    },
+    {
+      "path": "raw/generator.start",
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "raw/k6-summary.json",
+      "size_bytes": 2251,
+      "sha256": "6824ba15676aea7fa5d5a087e2ed0d8a279f453d4e3cc6d4f298b2f209b38d0f"
+    },
+    {
+      "path": "raw/load-generator.json",
+      "size_bytes": 8400,
+      "sha256": "e766f2b5b56af8f127377819505d9adaa2786fa042110b7659f0fa8ea7c1fa21"
+    },
+    {
+      "path": "raw/load.log",
+      "size_bytes": 6362,
+      "sha256": "4b8de8ca882fee818de336fb9979de4b6d4b62c75453a6c199f4e9556ef1b4a1"
+    },
+    {
+      "path": "raw/run.json",
+      "size_bytes": 7773,
+      "sha256": "34d9d3d868d9b7131849a5e89e82e90eff82153b6c5ef81390e50c547b39f92b"
+    },
+    {
+      "path": "raw/samples.json",
+      "size_bytes": 692057,
+      "sha256": "629ca26d19580774cd887492b06a058adf632fc49653a85f782f458adb5d0370"
+    },
+    {
+      "path": "raw/server.log",
+      "size_bytes": 92,
+      "sha256": "e0143cc29d997aef94036ddd79cf8ed9a9b9442b6b31c7bf58adf4718fa66fc1"
+    }
+  ]
+}

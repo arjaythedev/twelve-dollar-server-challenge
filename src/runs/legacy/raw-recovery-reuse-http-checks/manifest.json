@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "anchor": null,
+  "label": "raw-recovery-reuse-http-checks",
+  "kind": "raw_archive",
+  "status": "archived",
+  "legacy": {
+    "original_paths": [
+      "results/recovery-reuse-http-checks"
+    ]
+  },
+  "provenance": {
+    "source": null,
+    "build": null,
+    "binary": null,
+    "observer": null
+  },
+  "workload": null,
+  "instruments": null,
+  "summary_sha256": "1693a68d4236de8701c136794c181bdefaeb9b95ce96e876f0b1fdf5c0448baf",
+  "raw_files": [
+    {
+      "path": "raw/container-final.json",
+      "size_bytes": 22796,
+      "sha256": "3564226b99a541d811e8d3331054629b187e9698c30205d4c654abe2a58f6fd5"
+    },
+    {
+      "path": "raw/environment.json",
+      "size_bytes": 45892,
+      "sha256": "23b30b0d7ecfcd56db311abc707966774b761790e0ff3dbb500c06b7dcf3a2ae"
+    },
+    {
+      "path": "raw/native-diagnostics.log",
+      "size_bytes": 38004,
+      "sha256": "b1a33478fd55132a5fce3d90a367b661a14703a00a301bf81908f9aabc896fe6"
+    },
+    {
+      "path": "raw/native-normal.log",
+      "size_bytes": 8888,
+      "sha256": "d091e3d1ea97df370ddff77995e93265fdb93ba9ff53272ff48d7215ee52d493"
+    },
+    {
+      "path": "raw/official-tests.txt",
+      "size_bytes": 1803,
+      "sha256": "6d060162c87628bd1d194d538537d5b6483e34da807ef4b1a16c14b6a6c192c3"
+    },
+    {
+      "path": "raw/server.log",
+      "size_bytes": 44,
+      "sha256": "ff30254619d236aa9015f60ef81c16bb2530551aac96d001e5b48039e0e336a3"
+    }
+  ]
+}

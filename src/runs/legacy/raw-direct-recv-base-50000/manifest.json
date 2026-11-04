@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "anchor": null,
+  "label": "raw-direct-recv-base-50000",
+  "kind": "raw_archive",
+  "status": "archived",
+  "legacy": {
+    "original_paths": [
+      "results/direct-recv-base-50000"
+    ]
+  },
+  "provenance": {
+    "source": null,
+    "build": null,
+    "binary": null,
+    "observer": null
+  },
+  "workload": null,
+  "instruments": null,
+  "summary_sha256": "695ad5caf783d0ebd45afb5113956b947780fdedf6ddbf4ad5405f1b26ebcef0",
+  "raw_files": [
+    {
+      "path": "raw/container-final.json",
+      "size_bytes": 23388,
+      "sha256": "19790899fa55d9d55526c81430d16c2fe89d5c99c8ebb182b66c07b3d8610584"
+    },
+    {
+      "path": "raw/environment.json",
+      "size_bytes": 51769,
+      "sha256": "c77e4c14ee205716dcfc43f4c50368273ce6f0a70b0ab692c007b3ddd965b057"
+    },
+    {
+      "path": "raw/k6-summary.json",
+      "size_bytes": 4205,
+      "sha256": "b56e8b322985488460925472518ddf2c771a9f3d06d18454f27a59e1599e7b5a"
+    },
+    {
+      "path": "raw/k6.log",
+      "size_bytes": 1168,
+      "sha256": "fb31e75f210813f6a361e07c2998c13a775808a5df0a8b0427e89c1d38060e8c"
+    },
+    {
+      "path": "raw/load-generator.json",
+      "size_bytes": 8687,
+      "sha256": "1a4378085ecd555067e4f91b9b9bc836f36a5885a3c58f237330302961b5ba9d"
+    },
+    {
+      "path": "raw/run.json",
+      "size_bytes": 2717,
+      "sha256": "f1355970184348f9de09050546e002219713d8054629793a0113d3155e9de5ce"
+    },
+    {
+      "path": "raw/samples.json",
+      "size_bytes": 40478,
+      "sha256": "b98fea846d6863b808a61c88b663493b290a609f66fc363b42322d412ed3572f"
+    },
+    {
+      "path": "raw/server.log",
+      "size_bytes": 44,
+      "sha256": "ff30254619d236aa9015f60ef81c16bb2530551aac96d001e5b48039e0e336a3"
+    }
+  ]
+}

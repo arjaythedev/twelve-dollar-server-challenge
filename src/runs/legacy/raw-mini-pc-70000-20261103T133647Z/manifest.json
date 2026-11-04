@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "anchor": null,
+  "label": "raw-mini-pc-70000-20261103T133647Z",
+  "kind": "raw_archive",
+  "status": "archived",
+  "legacy": {
+    "original_paths": [
+      "results/mini-pc-70000-20261103T133647Z"
+    ]
+  },
+  "provenance": {
+    "source": null,
+    "build": null,
+    "binary": null,
+    "observer": null
+  },
+  "workload": null,
+  "instruments": null,
+  "summary_sha256": "c114aa73aee6ec9d898877fd98fd5b7655d4c4b74c3acc9f368f503fd20b5b3b",
+  "raw_files": [
+    {
+      "path": "raw/cgroup-after.json",
+      "size_bytes": 14495,
+      "sha256": "57a7ae9ec28b8674a881f3c3c0b4e53ec8d748abf47583e81a22a3dcdeb5a1eb"
+    },
+    {
+      "path": "raw/cgroup-before.json",
+      "size_bytes": 14395,
+      "sha256": "9495285fcbf8e4e312050256f75cd25fd9b30b650dfab8330e294c9f9e9c6e73"
+    },
+    {
+      "path": "raw/client-container.json",
+      "size_bytes": 5114,
+      "sha256": "31386b1ab196ba66a83901ccc87e920ff98199750961651e423131884c20b72d"
+    },
+    {
+      "path": "raw/client.log",
+      "size_bytes": 3706,
+      "sha256": "92867c44e0ab8be21c9aa818b7af59737a4c6415cc57ab4bf0a48e89aff7d568"
+    },
+    {
+      "path": "raw/hashes.sha256",
+      "size_bytes": 680,
+      "sha256": "5b88b0116d1449d38a474e473592faa62b22b09436a0c7c01f703ee36e1d5a41"
+    },
+    {
+      "path": "raw/kernel.txt",
+      "size_bytes": 108,
+      "sha256": "0764e1c6fcf41f4ed4928789a226945da6446d8ff28bfded3480f469af6af5ab"
+    },
+    {
+      "path": "raw/load-summary.json",
+      "size_bytes": 3176,
+      "sha256": "d53cdacb8e32dbe73b33057fd19999fe120fe84a0f7a0219bdaa65796e999a98"
+    },
+    {
+      "path": "raw/placement.json",
+      "size_bytes": 1696,
+      "sha256": "81e3d113299ef572722068fba694df17c7df19c2aa4cfa44ab04b86659eccc66"
+    },
+    {
+      "path": "raw/server.log",
+      "size_bytes": 115298,
+      "sha256": "ecd3b1643f6c16cafb6755de061cc948538764b9a3543c0b9551d5d16c103f8c"
+    }
+  ]
+}

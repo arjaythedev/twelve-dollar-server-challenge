@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "anchor": null,
+  "label": "raw-mini-native-70000-20261103T140448Z",
+  "kind": "raw_archive",
+  "status": "archived",
+  "legacy": {
+    "original_paths": [
+      "results/mini-native-70000-20261103T140448Z"
+    ]
+  },
+  "provenance": {
+    "source": null,
+    "build": null,
+    "binary": null,
+    "observer": null
+  },
+  "workload": null,
+  "instruments": null,
+  "summary_sha256": "79598d69146d63803fb949a2e8bbea66875f39230665076836f1be741567da72",
+  "raw_files": [
+    {
+      "path": "raw/cgroup-after.json",
+      "size_bytes": 4686,
+      "sha256": "479694e2c811a6a6e4064309776810c3877eb2a91af47b5967902d24ba4f1eca"
+    },
+    {
+      "path": "raw/cgroup-before.json",
+      "size_bytes": 4568,
+      "sha256": "90214b3b4825c9cf2779cb9f9ce9cc6cb07dc6f33146fdbe7d9f8e33323f5f6f"
+    },
+    {
+      "path": "raw/client-exit.txt",
+      "size_bytes": 3,
+      "sha256": "13bf7b3039c63bf5a50491fa3cfd8eb4e699d1ba1436315aef9cbe5711530354"
+    },
+    {
+      "path": "raw/client.log",
+      "size_bytes": 3767,
+      "sha256": "4ca7bb5ee46bfa41a32cab07f686b1869ee1b81fdd9c8877bbabf6e7099e33a1"
+    },
+    {
+      "path": "raw/load-summary.json",
+      "size_bytes": 3508,
+      "sha256": "db4c87b1c09f27a7260eddf5a449db2b8e04dd68f2f63ac75ad9cdde37f9e8da"
+    },
+    {
+      "path": "raw/placement.json",
+      "size_bytes": 6195,
+      "sha256": "6fbc48f6d217d15271f7d65f699f6b289534b8d53031cc6a3bbadfd9e6f29d59"
+    },
+    {
+      "path": "raw/server.log",
+      "size_bytes": 44,
+      "sha256": "d7be4fa448efc076f5210ed23e923ead2cfd6bba5c4047fd2f77f408d77b3c06"
+    }
+  ]
+}

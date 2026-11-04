@@ -1,0 +1,88 @@
+{
+  "schema_version": 1,
+  "anchor": null,
+  "label": "raw-like-insert",
+  "kind": "raw_archive",
+  "status": "archived",
+  "legacy": {
+    "original_paths": [
+      "results/like-insert"
+    ]
+  },
+  "provenance": {
+    "source": null,
+    "build": null,
+    "binary": null,
+    "observer": null
+  },
+  "workload": null,
+  "instruments": null,
+  "summary_sha256": "436017f3e6e0d84318e2cebfc2cd72b0d75093ef40e6aad372e75551ef9d9fae",
+  "raw_files": [
+    {
+      "path": "raw/bytecode-existence.txt",
+      "size_bytes": 192,
+      "sha256": "47d24e49ca9262fadee83832383087bdb681d4c39ec8a33eb9ac35f9afa4a296"
+    },
+    {
+      "path": "raw/bytecode-exists.txt",
+      "size_bytes": 1441,
+      "sha256": "f93216d47a4b7ef4aa4a78424d1b3cf3c771dc4a926dfe544044fb48925d073b"
+    },
+    {
+      "path": "raw/bytecode-reference.txt",
+      "size_bytes": 1176,
+      "sha256": "6bce3c35a7e335641dade49252f07e094ec1c7736f374774f1371db8ac740ed7"
+    },
+    {
+      "path": "raw/bytecode-select.txt",
+      "size_bytes": 1372,
+      "sha256": "7ae10c1b00ed5915c2cfdaa68a455b727d5b8f3a30c5da789b2ee2e9c5ef1142"
+    },
+    {
+      "path": "raw/explain.cpp",
+      "size_bytes": 7354,
+      "sha256": "d4a26cda00cd6ab8fc2afc8cd09e3b2b1f036c1a49713a7c2b23cb8c6657d46f"
+    },
+    {
+      "path": "raw/journal.c",
+      "size_bytes": 2495,
+      "sha256": "67626d75aef0cdcdbe6f8872d287455921c04b85bd75184d9c3f03875db79772"
+    },
+    {
+      "path": "raw/last-native-test.log",
+      "size_bytes": 720,
+      "sha256": "6a6ca06b1e14751d2a1b86dfdc476a4d40d6352234ee35b54521667665b4b025"
+    },
+    {
+      "path": "raw/pavly-results.json",
+      "size_bytes": 5689,
+      "sha256": "8611cc2ffb9cbd265eb3f7ab213661540a6d13f2d8fbcdbb9fc9f64705eeb658"
+    },
+    {
+      "path": "raw/probe.cpp",
+      "size_bytes": 6054,
+      "sha256": "4c3ffa98deb9eb3852cba35ce51510a94e87c24cdbc34ad6e9f1fc26770465b1"
+    },
+    {
+      "path": "raw/raw.json",
+      "size_bytes": 12627,
+      "sha256": "f6ef3a72537ee4d65b634ecd3becb0b1add5bc6c97e2096b50edabf1b2821a8b"
+    },
+    {
+      "path": "raw/statement-journal.json",
+      "size_bytes": 697,
+      "sha256": "0e32f2b5c3f89019843bbc3e4d6fdfb6643363d352e50b7b27efc5dd8d5a09a8"
+    },
+    {
+      "path": "raw/values-results.json",
+      "size_bytes": 5702,
+      "sha256": "1f845f42a96baf0624d8d105afddb906c84b4ccfe3650dc0c68feb781d9c3c78"
+    },
+    {
+      "path": "raw/vm-steps.json",
+      "size_bytes": 2036,
+      "sha256": "dd9b3a25e313d97179922d99213912b74e3b180e3ca0a0b1e019da5b55e8db80"
+    }
+  ]
+}

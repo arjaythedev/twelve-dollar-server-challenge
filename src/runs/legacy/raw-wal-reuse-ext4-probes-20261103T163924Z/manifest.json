@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "anchor": null,
+  "label": "raw-wal-reuse-ext4-probes-20261103T163924Z",
+  "kind": "raw_archive",
+  "status": "archived",
+  "legacy": {
+    "original_paths": [
+      "results/wal-reuse-ext4-probes-20261103T163924Z"
+    ]
+  },
+  "provenance": {
+    "source": null,
+    "build": null,
+    "binary": null,
+    "observer": null
+  },
+  "workload": null,
+  "instruments": null,
+  "summary_sha256": "693cb948def68aa833d4fde6a63737d3e409691c9554a62bd631465f529455d1",
+  "raw_files": [
+    {
+      "path": "raw/keep-actual.json",
+      "size_bytes": 371,
+      "sha256": "d0db10b3a337c58a7b8b582f0dff154d663b74134a5790cb6bf59876f86decdd"
+    },
+    {
+      "path": "raw/truncate-actual.json",
+      "size_bytes": 371,
+      "sha256": "72c4f9ac2f8d12a229c97fc39ca41614ec26caae6de6e2ee6decf032ae8c5545"
+    }
+  ]
+}

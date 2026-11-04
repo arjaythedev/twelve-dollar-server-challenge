@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "anchor": null,
+  "label": "raw-ubuntu-correctness",
+  "kind": "raw_archive",
+  "status": "archived",
+  "legacy": {
+    "original_paths": [
+      "results/ubuntu-correctness"
+    ]
+  },
+  "provenance": {
+    "source": null,
+    "build": null,
+    "binary": null,
+    "observer": null
+  },
+  "workload": null,
+  "instruments": null,
+  "summary_sha256": "bf4176c4de9ed90836b224ee96527d1018de34ff9d2364c5f4484ee8c13bdab1",
+  "raw_files": [
+    {
+      "path": "raw/environment.json",
+      "size_bytes": 30850,
+      "sha256": "a5c59873a7714ade49fcbad73fe5c02e2c9444dcb1f9e5803b463febef2bf378"
+    },
+    {
+      "path": "raw/official-tests.txt",
+      "size_bytes": 1803,
+      "sha256": "1b18f4955f58ced8460f62566da7bfbdddc02da737da9ce42876d455ae8cbc2d"
+    },
+    {
+      "path": "raw/server.log",
+      "size_bytes": 181,
+      "sha256": "fe9d0f55e5ade98a4dce362bb149a1708078ae2ae2d7fe36ec239e571834e1a1"
+    }
+  ]
+}

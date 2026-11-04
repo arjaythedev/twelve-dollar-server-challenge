@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "anchor": null,
+  "label": "raw-python315-5000",
+  "kind": "raw_archive",
+  "status": "archived",
+  "legacy": {
+    "original_paths": [
+      "results/python315-5000"
+    ]
+  },
+  "provenance": {
+    "source": null,
+    "build": null,
+    "binary": null,
+    "observer": null
+  },
+  "workload": null,
+  "instruments": null,
+  "summary_sha256": "cc42a478e47bb8393dfdfe20f72dfd6f8e302d2d548a4643f9ae59142664a5af",
+  "raw_files": [
+    {
+      "path": "raw/container-final.json",
+      "size_bytes": 9133,
+      "sha256": "46dfc8a52685a922d0158fb76f28170b27b5a6337c54d8de6e2722f696826236"
+    },
+    {
+      "path": "raw/environment.json",
+      "size_bytes": 30783,
+      "sha256": "d437f9e42afe556d98ef9c3d238946abebccff6641b1a6cf39daed7e6a8363f0"
+    },
+    {
+      "path": "raw/k6-summary.json",
+      "size_bytes": 3896,
+      "sha256": "cfcb00cf30e823c8bf3944ecd2352f6ee442a3326340dfbb88980269807c6102"
+    },
+    {
+      "path": "raw/k6.log",
+      "size_bytes": 1175,
+      "sha256": "5bf44fb6993684254e771d1ba015e0623287298af9d1dcc967cb947dbefeb2bb"
+    },
+    {
+      "path": "raw/run.json",
+      "size_bytes": 1746,
+      "sha256": "35ccc8ca1acd73aebfc79e1754c02586f8ebdaeca75c6912c71229f644bf6e93"
+    },
+    {
+      "path": "raw/samples.json",
+      "size_bytes": 120652,
+      "sha256": "97ce214b0fd4004bb6185581aba38780dff0384af3b17e3564cc0a6ef326050e"
+    },
+    {
+      "path": "raw/server.log",
+      "size_bytes": 181,
+      "sha256": "915513a73a5ff6ede995675310c6c5012dfc6c75a4a7e26e03a90a423a40bd55"
+    }
+  ]
+}

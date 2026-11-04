@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "anchor": null,
+  "label": "raw-request-profile-smoke",
+  "kind": "raw_archive",
+  "status": "archived",
+  "legacy": {
+    "original_paths": [
+      "results/request-profile-smoke"
+    ]
+  },
+  "provenance": {
+    "source": null,
+    "build": null,
+    "binary": null,
+    "observer": null
+  },
+  "workload": null,
+  "instruments": null,
+  "summary_sha256": "5e5a412ca9f398483b1e11b617e48a8214c9c6ea4c9696afb02deee191749cd5",
+  "raw_files": [
+    {
+      "path": "raw/container-final.json",
+      "size_bytes": 9134,
+      "sha256": "a4b0cad7a065e32a7e292138fed00c8df3a423de93aee11ccf18843867c2222c"
+    },
+    {
+      "path": "raw/cpu-sampler.log",
+      "size_bytes": 465,
+      "sha256": "2feb44af74c80593f503557da15ae35120710531d7a68a2c77e47ade15a0cfce"
+    },
+    {
+      "path": "raw/cpu.bin",
+      "size_bytes": 1153,
+      "sha256": "e993debe4ad39f306e1dee148fcec6d407ebbde815f932559ab45e3649348c41"
+    },
+    {
+      "path": "raw/environment.json",
+      "size_bytes": 30823,
+      "sha256": "4a30026bdfc7c7a4a1e8fe4456704ca16484d36915efac5702febc86d2a38552"
+    },
+    {
+      "path": "raw/k6-summary.json",
+      "size_bytes": 3721,
+      "sha256": "dec103676beb3ad3a285d60c2d4a5d6e947cf61cf08cfbd44cc551b692aa4fc0"
+    },
+    {
+      "path": "raw/k6.log",
+      "size_bytes": 1100,
+      "sha256": "4606e6c5c054cfcf6542e4de41b1da145a4c43b253c2b39826821558d443d465"
+    },
+    {
+      "path": "raw/run.json",
+      "size_bytes": 1742,
+      "sha256": "8c0b5b89a7a962c6e6bb50abb5b671f339e316d319892e4bbd3fe97eee2a464e"
+    },
+    {
+      "path": "raw/samples.json",
+      "size_bytes": 12969,
+      "sha256": "8a79cdced74c19dbe7054242515bd81a8575986c99e56558e4551726916b6d1e"
+    },
+    {
+      "path": "raw/server.log",
+      "size_bytes": 181,
+      "sha256": "915513a73a5ff6ede995675310c6c5012dfc6c75a4a7e26e03a90a423a40bd55"
+    },
+    {
+      "path": "raw/wall-sampler.log",
+      "size_bytes": 463,
+      "sha256": "2d1fbfe75e925749dfa3cbf116d79402349ae5df9991275709a375a224fae50b"
+    },
+    {
+      "path": "raw/wall.bin",
+      "size_bytes": 161,
+      "sha256": "b2d6d84620b87a1c97257c60d84d377210fd525699b3eef5709e4b21b0137bc4"
+    }
+  ]
+}

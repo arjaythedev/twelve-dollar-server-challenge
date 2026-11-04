@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "anchor": null,
+  "label": "raw-typed-pipeline-check",
+  "kind": "raw_archive",
+  "status": "archived",
+  "legacy": {
+    "original_paths": [
+      "results/typed-pipeline-check"
+    ]
+  },
+  "provenance": {
+    "source": null,
+    "build": null,
+    "binary": null,
+    "observer": null
+  },
+  "workload": null,
+  "instruments": null,
+  "summary_sha256": "add5017033bf08aafd8413102b5fc5c7784e258adfc83310d0681c169b746672",
+  "raw_files": [
+    {
+      "path": "raw/container-final.json",
+      "size_bytes": 22797,
+      "sha256": "87b85cae9be9461c275b434e4f3917e1ace028f7e526819215ff6840f9f3ad80"
+    },
+    {
+      "path": "raw/environment.json",
+      "size_bytes": 45171,
+      "sha256": "04d3f58c9b378f0f5f782b99688196d12d12ee0bb9aaba307057589e9e6e7d33"
+    },
+    {
+      "path": "raw/official-tests.txt",
+      "size_bytes": 1803,
+      "sha256": "4457e513d7e8fd595c2795753f081530d62521b039a749979c39c36374d1ed10"
+    },
+    {
+      "path": "raw/server.log",
+      "size_bytes": 44,
+      "sha256": "ff30254619d236aa9015f60ef81c16bb2530551aac96d001e5b48039e0e336a3"
+    }
+  ]
+}

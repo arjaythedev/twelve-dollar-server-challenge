@@ -1,0 +1,152 @@
+{
+  "kind": "telemetry_gate_probe",
+  "baseline_commit": "b59374c",
+  "telemetry": "profile",
+  "scope": "not_due_report_calls_only",
+  "cpu_clock": "CLOCK_THREAD_CPUTIME_ID",
+  "cpuset_cpu": 2,
+  "calls_per_sample": 1000000,
+  "order": [
+    "after",
+    "before",
+    "before",
+    "after"
+  ],
+  "runs": [
+    {
+      "variant": "after",
+      "calls_per_sample": 1000000,
+      "samples": [
+        {
+          "io_ns_per_call": 20.393101,
+          "database_ns_per_call": 21.318736
+        },
+        {
+          "io_ns_per_call": 20.03468,
+          "database_ns_per_call": 19.677341
+        },
+        {
+          "io_ns_per_call": 20.77124,
+          "database_ns_per_call": 21.29754
+        },
+        {
+          "io_ns_per_call": 21.78697,
+          "database_ns_per_call": 21.54995
+        },
+        {
+          "io_ns_per_call": 21.371611,
+          "database_ns_per_call": 21.316757
+        }
+      ]
+    },
+    {
+      "variant": "before",
+      "calls_per_sample": 1000000,
+      "samples": [
+        {
+          "io_ns_per_call": 40.623894,
+          "database_ns_per_call": 22.807113
+        },
+        {
+          "io_ns_per_call": 41.427248,
+          "database_ns_per_call": 20.351834
+        },
+        {
+          "io_ns_per_call": 40.238172,
+          "database_ns_per_call": 20.713721
+        },
+        {
+          "io_ns_per_call": 45.51005,
+          "database_ns_per_call": 23.684957
+        },
+        {
+          "io_ns_per_call": 44.944516,
+          "database_ns_per_call": 21.196373
+        }
+      ]
+    },
+    {
+      "variant": "before",
+      "calls_per_sample": 1000000,
+      "samples": [
+        {
+          "io_ns_per_call": 47.364523,
+          "database_ns_per_call": 22.287581
+        },
+        {
+          "io_ns_per_call": 40.87929,
+          "database_ns_per_call": 20.542766
+        },
+        {
+          "io_ns_per_call": 40.588137,
+          "database_ns_per_call": 20.733037
+        },
+        {
+          "io_ns_per_call": 42.717223,
+          "database_ns_per_call": 22.911638
+        },
+        {
+          "io_ns_per_call": 43.37894,
+          "database_ns_per_call": 20.415805
+        }
+      ]
+    },
+    {
+      "variant": "after",
+      "calls_per_sample": 1000000,
+      "samples": [
+        {
+          "io_ns_per_call": 19.663164,
+          "database_ns_per_call": 19.311165
+        },
+        {
+          "io_ns_per_call": 20.032997,
+          "database_ns_per_call": 20.145425
+        },
+        {
+          "io_ns_per_call": 20.702305,
+          "database_ns_per_call": 19.84494
+        },
+        {
+          "io_ns_per_call": 20.995186,
+          "database_ns_per_call": 20.27092
+        },
+        {
+          "io_ns_per_call": 21.853862,
+          "database_ns_per_call": 21.861818
+        }
+      ]
+    }
+  ],
+  "medians": {
+    "before": {
+      "io_ns_per_call": 42.0722355,
+      "database_ns_per_call": 20.964705000000002
+    },
+    "after": {
+      "io_ns_per_call": 20.7367725,
+      "database_ns_per_call": 20.78423
+    }
+  },
+  "reduction_percent": {
+    "io_ns_per_call": 50.71150307665491,
+    "database_ns_per_call": 0.8608516074993688
+  },
+  "assembly": {
+    "io_gate": {
+      "before_stack_bytes": 43000,
+      "after_stack_bytes": 24
+    },
+    "database_gate": {
+      "before_stack_bytes": 6168,
+      "after_stack_bytes": 0
+    },
+    "snapshot_stack_protection": "preserved"
+  },
+  "validation": {
+    "native_tests_passed": 11,
+    "clock_reads": "unchanged",
+    "sample_coverage": "unchanged",
+    "snapshot_deadlines": "unchanged"
+  }
+}

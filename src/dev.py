@@ -7,7 +7,7 @@ from pathlib import Path
 
 from devtools import checks, reports, runtime
 
-DEFAULT_RESULTS = runtime.ROOT / "src/benchmarks/results.json"
+DEFAULT_RESULTS = runtime.ROOT / "src/runs/legacy/benchmark-results/summary.json"
 
 
 class Arguments(argparse.Namespace):

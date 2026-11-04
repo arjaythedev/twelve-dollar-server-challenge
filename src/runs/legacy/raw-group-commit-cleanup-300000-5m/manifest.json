@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "anchor": null,
+  "label": "raw-group-commit-cleanup-300000-5m",
+  "kind": "raw_archive",
+  "status": "archived",
+  "legacy": {
+    "original_paths": [
+      "results/group-commit-cleanup-300000-5m"
+    ]
+  },
+  "provenance": {
+    "source": null,
+    "build": null,
+    "binary": null,
+    "observer": null
+  },
+  "workload": null,
+  "instruments": null,
+  "summary_sha256": "4b72a41bbdd6acdf5122f2ceb86bced3a0361f71e63760542f8cf9c512390da1",
+  "raw_files": [
+    {
+      "path": "raw/container-final.json",
+      "size_bytes": 22797,
+      "sha256": "22d235c35d3cdb3032299944d1b6f304169a8bcfad7fd45453d10c3c0a91eafc"
+    },
+    {
+      "path": "raw/environment.json",
+      "size_bytes": 45042,
+      "sha256": "9c5fac401e012c047ab92aae3312e3fb534ed2271a7a4ad132cf3dca60a48d72"
+    },
+    {
+      "path": "raw/generator.ready",
+      "size_bytes": 6,
+      "sha256": "ed1a545bb85e55816bbf9566b028b2a0bc456b88f49f6f266c0401048824194b"
+    },
+    {
+      "path": "raw/generator.start",
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "raw/k6-summary.json",
+      "size_bytes": 2256,
+      "sha256": "6ef4999f419d60b9fe7419fb7916283fc015103c686170ae2ce52526d372fac1"
+    },
+    {
+      "path": "raw/load-generator.json",
+      "size_bytes": 8380,
+      "sha256": "96eabcaf46ea9272e9e712de0e0a44bbc97e3dd538e6d1a0080eb19db63a7195"
+    },
+    {
+      "path": "raw/load.log",
+      "size_bytes": 6368,
+      "sha256": "ac65662caba42ab7929eb143873c657138ab063e5a4314a329afc89116300880"
+    },
+    {
+      "path": "raw/run.json",
+      "size_bytes": 7736,
+      "sha256": "f7a568faca3109b1b8c54dd2d2be323725d59cf55b5a4f98a41f58882f304ddd"
+    },
+    {
+      "path": "raw/samples.json",
+      "size_bytes": 696724,
+      "sha256": "864b5cf34bb94d24c0dd0a1165fd874763a1437901c1e90f16b65e2974a8b986"
+    },
+    {
+      "path": "raw/server.log",
+      "size_bytes": 92,
+      "sha256": "e0143cc29d997aef94036ddd79cf8ed9a9b9442b6b31c7bf58adf4718fa66fc1"
+    }
+  ]
+}

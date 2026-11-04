@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "anchor": null,
+  "label": "raw-json-encoding-final-linux",
+  "kind": "raw_archive",
+  "status": "archived",
+  "legacy": {
+    "original_paths": [
+      "results/json-encoding-final-linux"
+    ]
+  },
+  "provenance": {
+    "source": null,
+    "build": null,
+    "binary": null,
+    "observer": null
+  },
+  "workload": null,
+  "instruments": null,
+  "summary_sha256": "5f7b085ac8189e6becbf2f5bfb7696a8c5a810ed046054af7cb13ff733cbc2a7",
+  "raw_files": [
+    {
+      "path": "raw/container-final.json",
+      "size_bytes": 9133,
+      "sha256": "800a7238f65975099ed61ae2aef564be905b062b2e7a253463ce0fab20bd0e2d"
+    },
+    {
+      "path": "raw/environment.json",
+      "size_bytes": 31355,
+      "sha256": "358cb872c98b3c4fc42b6ebe2c306b09d00622330ca87a3464a3fd32e6222044"
+    },
+    {
+      "path": "raw/server.log",
+      "size_bytes": 181,
+      "sha256": "915513a73a5ff6ede995675310c6c5012dfc6c75a4a7e26e03a90a423a40bd55"
+    }
+  ]
+}

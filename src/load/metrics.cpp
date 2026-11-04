@@ -386,7 +386,7 @@ Summary summarize(Metrics &metrics, const RuntimeConfig &config)
            << ",\"http_response_coverage_complete\":" << response_coverage_complete
            << ",\"http_metrics_passed\":" << http_metrics_passed
            << ",\"max_rss_bytes\":" << static_cast<std::uint64_t>(usage.ru_maxrss) * 1024
-           << ",\"idle_vu_state_bytes\":" << sizeof(User) + sizeof(std::size_t)
+           << ",\"idle_vu_state_bytes\":" << sizeof(User) + Timers::per_user_bytes
            << ",\"interrupted_iterations\":" << metrics.interrupted_iterations
            << ",\"workflow_errors\":" << metrics.workflow_errors
            << ",\"bytes_received\":" << metrics.bytes_received << ",\"seed\":" << config.seed

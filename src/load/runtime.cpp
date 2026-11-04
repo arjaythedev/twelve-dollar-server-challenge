@@ -88,7 +88,7 @@ Load::Load(RuntimeConfig config, Endpoint target, std::vector<Token> tokens,
            std::string_view local_ips)
     : config_(std::move(config)), target_(std::move(target)), tokens_(std::move(tokens)),
       local_ips_(local_addresses(local_ips)), random_(config_.seed),
-      epoll_(::epoll_create1(EPOLL_CLOEXEC)), users_(config_.vus), timers_(users_)
+      epoll_(::epoll_create1(EPOLL_CLOEXEC)), users_(config_.vus), timers_(users_.size())
 {
     if (epoll_.get() < 0)
     {
@@ -133,13 +133,13 @@ Metrics Load::run(bool progress)
         const auto timers_started = now;
         unsigned timers_serviced = 0;
         // A connect call can still stall, so check the time budget between timer services
-        while (!timers_.empty() && users_[timers_.first()].timer <= now &&
+        while (!timers_.empty() && timers_.due(timers_.first()) <= now &&
                timers_serviced < max_timer_batch && now - timers_started < timer_batch_seconds)
         {
             const auto id = timers_.first();
             if (metrics_.diagnostics)
             {
-                metrics_.diagnostics->timer(now, users_[id].timer);
+                metrics_.diagnostics->timer(now, timers_.due(id));
             }
             tick(id, now);
             if (!users_[id].stopped)
@@ -166,7 +166,7 @@ Metrics Load::run(bool progress)
             break;
         }
         const auto delay =
-            std::max(0.0, std::min(users_[timers_.first()].timer, next_progress) - now);
+            std::max(0.0, std::min(timers_.due(timers_.first()), next_progress) - now);
         const int wait_ms = static_cast<int>(std::min(1000.0, std::ceil(delay * 1000)));
         if (metrics_.diagnostics)
         {
@@ -192,11 +192,11 @@ Metrics Load::run(bool progress)
             {
                 metrics_.diagnostics->epoll(event_time, batch_ready);
             }
-            if (!user.stopped && user.timer <= event_time)
+            if (!user.stopped && timers_.due(id) <= event_time)
             {
                 if (metrics_.diagnostics)
                 {
-                    metrics_.diagnostics->timer(event_time, user.timer);
+                    metrics_.diagnostics->timer(event_time, timers_.due(id));
                 }
                 tick(id, event_time);
                 if (!user.stopped)
@@ -273,13 +273,13 @@ void Load::connection_established(std::size_t id, double now)
 void Load::schedule(std::size_t id)
 {
     auto &user = users_[id];
-    user.timer = user.request ? user.request->deadline : user.wake;
+    auto due = user.request ? user.request->deadline : user.wake;
     if (user.request && user.request->connecting)
     {
-        user.timer = std::min(user.timer, user.request->queued + 30);
+        due = std::min(due, user.request->queued + 30);
     }
-    user.timer = std::min(user.timer, user.retire + (user.retiring ? config_.grace : 0));
-    timers_.update(id);
+    due = std::min(due, user.retire + (user.retiring ? config_.grace : 0));
+    timers_.update(id, due);
 }
 
 void Load::close(std::size_t id)
@@ -302,6 +302,10 @@ void Load::close(std::size_t id)
 void Load::interest(std::size_t id, bool write_ready, bool add)
 {
     auto &user = users_[id];
+    if (!add && user.write_interest == write_ready)
+    {
+        return;
+    }
     epoll_event event{};
     event.events = EPOLLIN | EPOLLRDHUP | (write_ready ? static_cast<std::uint32_t>(EPOLLOUT) : 0U);
     event.data.u64 = (static_cast<std::uint64_t>(user.generation) << 32) | id;
@@ -310,6 +314,7 @@ void Load::interest(std::size_t id, bool write_ready, bool add)
     {
         throw std::runtime_error("epoll_ctl: " + std::string(std::strerror(errno)));
     }
+    user.write_interest = write_ready;
 }
 
 void Load::stop(std::size_t id, bool iteration_interrupted)
@@ -621,7 +626,7 @@ void Load::io(std::size_t id, std::uint32_t events, double now)
     {
         return;
     }
-    std::array<char, 16384> buffer{};
+    std::array<char, 16384> buffer;
     std::size_t remaining = 256 * 1024;
     while (user.request && remaining > 0)
     {

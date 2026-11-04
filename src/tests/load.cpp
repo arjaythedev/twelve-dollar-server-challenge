@@ -22,14 +22,34 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <sys/epoll.h>
 #include <sys/socket.h>
 #include <thread>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
 namespace
 {
 using namespace loadgen;
+
+const auto load_test_thread = std::this_thread::get_id();
+
+struct InterestProbe
+{
+    std::unordered_map<int, std::uint32_t> registered;
+    std::uint64_t adds = 0;
+    std::uint64_t modifies = 0;
+    std::uint64_t redundant_modifies = 0;
+    std::uint64_t missing_initial_write_interest = 0;
+    int partial_descriptor = -1;
+    unsigned partial_stage = 0;
+    bool force_partial = false;
+    bool retry_without_write_interest = false;
+    bool partial_write_interest_removed = false;
+};
+
+InterestProbe interests;
 
 void require(bool condition, std::string_view message)
 {
@@ -379,11 +399,10 @@ void self_test()
     Request extra(Step::feed);
     require(!extra.receive(responses[0] + "unexpected"), "unsolicited response bytes rejected");
     std::vector<User> users(10);
-    Timers timers(users);
+    Timers timers(users.size());
     for (std::size_t id = 0; id < users.size(); ++id)
     {
-        users[id].timer = static_cast<double>(10 - id);
-        timers.update(id);
+        timers.update(id, static_cast<double>(10 - id));
     }
     for (std::size_t id = users.size(); id > 0; --id)
     {
@@ -391,6 +410,39 @@ void self_test()
         timers.remove(id - 1);
     }
     require(timers.empty(), "timer removal");
+    constexpr std::size_t timer_count = 257;
+    Timers randomized_timers(timer_count);
+    std::vector<double> expected_due(timer_count);
+    std::vector<std::size_t> remaining;
+    for (std::size_t id = 0; id < timer_count; ++id)
+    {
+        remaining.push_back(id);
+    }
+    std::mt19937_64 timer_random(20261104);
+    for (std::size_t operation = 0; !remaining.empty(); ++operation)
+    {
+        const auto expected = *std::min_element(
+            remaining.begin(), remaining.end(), [&](std::size_t left, std::size_t right) {
+                return expected_due[left] < expected_due[right] ||
+                       (expected_due[left] == expected_due[right] && left < right);
+            });
+        require(randomized_timers.first() == expected, "timer root matches sorted deadline/id");
+        const auto offset = static_cast<std::size_t>(timer_random() % remaining.size());
+        const auto id = remaining[offset];
+        if (operation % 17 == 0)
+        {
+            randomized_timers.remove(id);
+            remaining.erase(remaining.begin() + static_cast<std::ptrdiff_t>(offset));
+        }
+        else
+        {
+            expected_due[id] = static_cast<double>(timer_random() % 11);
+            randomized_timers.update(id, expected_due[id]);
+            require(randomized_timers.due(id) == expected_due[id],
+                    "timer owner retains updated deadlines");
+        }
+    }
+    require(randomized_timers.empty(), "arbitrary timer removal drains the heap");
     const std::vector<double> samples{0, 1, 2, 3};
     require(percentile(samples, 0.5) == 1.5 && std::abs(percentile(samples, 0.95) - 2.85) < 1e-12,
             "linear quantiles");
@@ -501,8 +553,18 @@ void self_test()
     config.time_scale = 0.0001;
     config.seed = 42;
     config.diagnostics = true;
+    require(sizeof(User) == 64 && sizeof(User) + Timers::per_user_bytes == 88,
+            "interest tracking fits existing VU state padding");
     Fixture workflow(FixtureMode::workflow);
+    interests.force_partial = true;
     auto metrics = fixture_run(workflow, config);
+    interests.force_partial = false;
+    require(interests.partial_stage == 3 && !interests.retry_without_write_interest &&
+                interests.partial_write_interest_removed,
+            "partial reused-socket send enables EPOLLOUT after EAGAIN and removes it after retry");
+    require(interests.adds == metrics.connections && interests.modifies == interests.adds + 2 &&
+                interests.redundant_modifies == 0 && interests.missing_initial_write_interest == 0,
+            "register once per connection and modify only for actual write-interest transitions");
     require(metrics.diagnostics && metrics.diagnostics->requests == metrics.latencies.size() &&
                 metrics.diagnostics->workload_start_ns > 0 && metrics.diagnostics->timers > 0 &&
                 metrics.diagnostics->events > 0,
@@ -662,9 +724,81 @@ void self_test()
     require(timed_out.failures > 0 && timed_out.checks_failed[0] > 0 &&
                 timed_out.latencies.summary().overall.minimum >= 5,
             "request timeout is a real failed sample");
+    require(interests.redundant_modifies == 0 && interests.missing_initial_write_interest == 0,
+            "reconnects always register initial write interest without redundant MOD calls");
     std::cout << "Load parser, timer, payload, quantile, socket and workflow tests passed\n";
 }
 } // namespace
+
+extern "C" int __real_epoll_ctl(int descriptor, int operation, int socket, epoll_event *event);
+
+extern "C" int __wrap_epoll_ctl(int descriptor, int operation, int socket, epoll_event *event)
+{
+    const int result = __real_epoll_ctl(descriptor, operation, socket, event);
+    if (result != 0 || std::this_thread::get_id() != load_test_thread)
+    {
+        return result;
+    }
+    if (operation == EPOLL_CTL_DEL)
+    {
+        interests.registered.erase(socket);
+        return result;
+    }
+    if (operation == EPOLL_CTL_ADD)
+    {
+        ++interests.adds;
+        interests.missing_initial_write_interest += (event->events & EPOLLOUT) == 0;
+    }
+    else if (operation == EPOLL_CTL_MOD)
+    {
+        ++interests.modifies;
+        const auto previous = interests.registered.find(socket);
+        interests.redundant_modifies +=
+            previous != interests.registered.end() && previous->second == event->events;
+        if (socket == interests.partial_descriptor && interests.partial_stage == 3 &&
+            (event->events & EPOLLOUT) == 0)
+        {
+            interests.partial_write_interest_removed = true;
+        }
+    }
+    interests.registered[socket] = event->events;
+    return result;
+}
+
+extern "C" ssize_t __real_send(int socket, const void *buffer, std::size_t size, int flags);
+
+extern "C" ssize_t __wrap_send(int socket, const void *buffer, std::size_t size, int flags)
+{
+    if (std::this_thread::get_id() == load_test_thread && interests.force_partial)
+    {
+        const auto registration = interests.registered.find(socket);
+        if (interests.partial_stage == 0 && registration != interests.registered.end() &&
+            (registration->second & EPOLLOUT) == 0 && size > 7)
+        {
+            const auto sent = __real_send(socket, buffer, 7, flags);
+            if (sent > 0)
+            {
+                interests.partial_descriptor = socket;
+                interests.partial_stage = 1;
+            }
+            return sent;
+        }
+        if (socket == interests.partial_descriptor && interests.partial_stage == 1)
+        {
+            interests.partial_stage = 2;
+            errno = EAGAIN;
+            return -1;
+        }
+        if (socket == interests.partial_descriptor && interests.partial_stage == 2)
+        {
+            interests.retry_without_write_interest =
+                registration == interests.registered.end() ||
+                (registration->second & EPOLLOUT) == 0;
+            interests.partial_stage = 3;
+        }
+    }
+    return __real_send(socket, buffer, size, flags);
+}
 
 int main()
 {

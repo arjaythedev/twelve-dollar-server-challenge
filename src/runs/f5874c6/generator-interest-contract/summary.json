@@ -1,0 +1,47 @@
+{
+  "measurement": {
+    "native_tests": [
+      "load_generator_conformance",
+      "load_generator_latencies",
+      "load_generator_activation"
+    ],
+    "passed": true
+  },
+  "schema_version": 1,
+  "anchor": "f5874c6197b005b68a1c49591275569aef9adf3c",
+  "label": "generator-interest-contract",
+  "kind": "probe",
+  "started_at": "2026-11-04T14:00:00.270764+00:00",
+  "status": "passed",
+  "finished_at": "2026-11-04T14:00:13.819216+00:00",
+  "exit_code": 0,
+  "error": null,
+  "secondary_errors": [],
+  "workload": {
+    "kind": "native_generator_contract"
+  },
+  "instruments": {
+    "server_telemetry": "off",
+    "perf": "off",
+    "client_diagnostics": false
+  },
+  "provenance": {
+    "source": {
+      "base_commit": "f5874c6197b005b68a1c49591275569aef9adf3c",
+      "patch_sha256": "5c4a3d45117a4b96babf7c6d29b6c60a10f19552dcfd051152847ef44737117a",
+      "source_sha256": "ac3816c874b7852fc7731cb1c2976ef6e4781c53a96a80020acc15b7f0fd6da7",
+      "patch": "source.patch"
+    },
+    "binary": {
+      "load": {
+        "sha256": "385ffdf7624d4ed25aca76ae1b220c3c144bba68043ffacb7b3b1b7bc83ef988"
+      },
+      "latencies": {
+        "sha256": "41c110bf60ec980b0858f736db374d36771b2efe74c4b2b5862cc3112c43ac15"
+      },
+      "load_activation": {
+        "sha256": "45bcaf14bbb4cc67b765ec1507e2ad4fc764e7f48ac47f3393f9432a0546db87"
+      }
+    }
+  }
+}

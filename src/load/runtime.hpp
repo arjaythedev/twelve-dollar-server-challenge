@@ -166,8 +166,6 @@ struct User
     std::uint64_t post_id = 0;
     double wake = 0;
     double retire = 0;
-    double timer = 0;
-    std::size_t heap_position = 0;
     std::uint32_t generation = 0;
     Step step = Step::feed;
     bool started = false;
@@ -175,20 +173,29 @@ struct User
     bool stopped = false;
     bool socket_established = false;
     bool received_http_response = false;
+    bool write_interest = false;
 };
 
 // Exactly one timer entry per VU, including while an HTTP request is active
 class Timers
 {
-  public:
-    explicit Timers(std::vector<User> &users) : users_(users)
+    // Keep scheduler metadata together instead of walking the transport state
+    struct Entry
     {
-        heap_.reserve(users.size());
-        for (std::size_t id = 0; id < users.size(); ++id)
+        double due = 0;
+        std::size_t position = 0;
+    };
+
+  public:
+    static constexpr std::size_t per_user_bytes = sizeof(Entry) + sizeof(std::size_t);
+
+    explicit Timers(std::size_t count) : entries_(count)
+    {
+        heap_.reserve(count);
+        for (std::size_t id = 0; id < count; ++id)
         {
-            users[id].heap_position = heap_.size();
+            entries_[id].position = id;
             heap_.push_back(id);
-            up(heap_.size() - 1);
         }
     }
 
@@ -202,69 +209,92 @@ class Timers
         return heap_.front();
     }
 
-    void update(std::size_t id)
+    [[nodiscard]] double due(std::size_t id) const
     {
-        const auto position = users_[id].heap_position;
-        up(position);
-        down(users_[id].heap_position);
+        return entries_[id].due;
+    }
+
+    void update(std::size_t id, double due)
+    {
+        const auto previous = entries_[id].due;
+        entries_[id].due = due;
+        const auto position = entries_[id].position;
+        if (due < previous)
+        {
+            up(position);
+        }
+        else if (due > previous)
+        {
+            down(position);
+        }
     }
 
     void remove(std::size_t id)
     {
-        const auto position = users_[id].heap_position;
-        exchange(position, heap_.size() - 1);
+        const auto position = entries_[id].position;
+        const auto moved = heap_.back();
         heap_.pop_back();
         if (position < heap_.size())
         {
-            const auto moved = heap_[position];
-            up(position);
-            down(users_[moved].heap_position);
+            place(position, moved);
+            if (!up(position))
+            {
+                down(position);
+            }
         }
     }
 
   private:
-    bool earlier(std::size_t left, std::size_t right) const
+    bool earlier(std::size_t a, std::size_t b) const
     {
-        const auto a = heap_[left];
-        const auto b = heap_[right];
-        return users_[a].timer < users_[b].timer || (users_[a].timer == users_[b].timer && a < b);
+        return entries_[a].due < entries_[b].due || (entries_[a].due == entries_[b].due && a < b);
     }
 
-    void exchange(std::size_t left, std::size_t right)
+    void place(std::size_t position, std::size_t id)
     {
-        std::swap(heap_[left], heap_[right]);
-        users_[heap_[left]].heap_position = left;
-        users_[heap_[right]].heap_position = right;
+        heap_[position] = id;
+        entries_[id].position = position;
     }
 
-    void up(std::size_t position)
+    bool up(std::size_t position)
     {
-        while (position > 0 && earlier(position, (position - 1) / 2))
+        const auto original = position;
+        const auto id = heap_[position];
+        while (position > 0)
         {
-            exchange(position, (position - 1) / 2);
-            position = (position - 1) / 2;
+            const auto parent = (position - 1) / 2;
+            if (!earlier(id, heap_[parent]))
+            {
+                break;
+            }
+            place(position, heap_[parent]);
+            position = parent;
         }
+        place(position, id);
+        return position != original;
     }
 
     void down(std::size_t position)
     {
+        const auto id = heap_[position];
         while (position * 2 + 1 < heap_.size())
         {
             auto child = position * 2 + 1;
-            if (child + 1 < heap_.size() && earlier(child + 1, child))
+            if (child + 1 < heap_.size() && earlier(heap_[child + 1], heap_[child]))
             {
                 ++child;
             }
-            if (!earlier(child, position))
+            if (!earlier(heap_[child], id))
             {
                 break;
             }
-            exchange(position, child);
+            place(position, heap_[child]);
             position = child;
         }
+        place(position, id);
     }
 
-    std::vector<User> &users_;
+    std::vector<Entry> entries_;
     std::vector<std::size_t> heap_;
 };
 

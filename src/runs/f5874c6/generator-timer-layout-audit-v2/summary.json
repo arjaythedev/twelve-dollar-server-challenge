@@ -1,0 +1,73 @@
+{
+  "measurement": {
+    "before_seconds": [
+      0.405064027,
+      0.396197272,
+      0.434871369,
+      0.429251741,
+      0.436526673,
+      0.401495197
+    ],
+    "after_seconds": [
+      0.290768242,
+      0.29147812,
+      0.298305734,
+      0.30021926,
+      0.299133617,
+      0.292793572
+    ],
+    "before_median_seconds": 0.417157884,
+    "after_median_seconds": 0.295549653,
+    "median_ratio_after_before": 0.7084839202032198,
+    "root_order_checksum": 4024419698286005904,
+    "tests_passed": [
+      "load",
+      "latencies",
+      "load_activation"
+    ],
+    "idle_vu_bytes_before": 88,
+    "idle_vu_bytes_after": 88,
+    "limitations": "isolated timer replay; does not establish networked activation timing"
+  },
+  "schema_version": 1,
+  "anchor": "f5874c6197b005b68a1c49591275569aef9adf3c",
+  "label": "generator-timer-layout-audit-v2",
+  "kind": "probe",
+  "started_at": "2026-11-04T13:43:39.876214+00:00",
+  "status": "passed",
+  "finished_at": "2026-11-04T13:44:05.880575+00:00",
+  "exit_code": 0,
+  "error": null,
+  "secondary_errors": [],
+  "workload": {
+    "kind": "generator_timer_layout",
+    "users": 350000,
+    "updates_per_sample": 2000000,
+    "order": "ABBAABBAABBA",
+    "network": "none"
+  },
+  "instruments": {
+    "server_telemetry": "off",
+    "perf": "off",
+    "client_diagnostics": false
+  },
+  "provenance": {
+    "source": {
+      "base_commit": "f5874c6197b005b68a1c49591275569aef9adf3c",
+      "patch_sha256": "0973652a7a6c8590a650d72c82c4526fd5b61c82488296e705d12cced3b937e9",
+      "source_sha256": "2c599d3f8f1a9f708c3dfd37715acb3b7272dad442b083fc11f0dac3032beb07",
+      "patch": "source.patch"
+    },
+    "binary": {
+      "load": {
+        "sha256": "0a6cf2ed9e441198e418a50edc4e67ea011f5081e8b2695db85ad32b7954b931"
+      },
+      "latencies": {
+        "sha256": "22fefa46d4ca687b86ac952c08e08d076990ebe12fe67e4fc12fe23e5616c341"
+      },
+      "load_activation": {
+        "sha256": "79b607bea6d90e6bffe1075da5a65a44dd5bc1ba06dbebf51c1ae4586f8a871f"
+      }
+    }
+  }
+}

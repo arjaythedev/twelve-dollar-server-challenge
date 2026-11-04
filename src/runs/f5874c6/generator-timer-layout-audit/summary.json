@@ -1,0 +1,29 @@
+{
+  "measurement": {},
+  "schema_version": 1,
+  "anchor": "f5874c6197b005b68a1c49591275569aef9adf3c",
+  "label": "generator-timer-layout-audit",
+  "kind": "probe",
+  "started_at": "2026-11-04T13:43:27.909056+00:00",
+  "status": "failed",
+  "finished_at": "2026-11-04T13:43:28.057398+00:00",
+  "exit_code": 1,
+  "error": "FileNotFoundError(2, 'No such file or directory')",
+  "secondary_errors": [],
+  "workload": {
+    "kind": "generator_timer_layout",
+    "users": 350000,
+    "updates_per_sample": 2000000,
+    "order": "ABBAABBAABBA",
+    "network": "none"
+  },
+  "instruments": {
+    "server_telemetry": "off",
+    "perf": "off",
+    "client_diagnostics": false
+  },
+  "provenance": {
+    "source": null,
+    "binary": null
+  }
+}

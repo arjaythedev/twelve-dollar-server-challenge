@@ -40,8 +40,14 @@ target_link_libraries(telemetry_tests PRIVATE telemetry_output yyjson)
 
 tds_add_executable(load_tests load.cpp)
 target_link_libraries(load_tests PRIVATE load_core)
+target_link_options(load_tests PRIVATE -Wl,--wrap=epoll_ctl -Wl,--wrap=send)
 tds_add_executable(latency_tests latencies.cpp)
 target_link_libraries(latency_tests PRIVATE load_core)
+
+tds_add_executable(load_activation_tests load_activation.cpp)
+target_link_libraries(load_activation_tests PRIVATE load_core)
+target_link_options(load_activation_tests PRIVATE
+    -Wl,--wrap=epoll_wait -Wl,--wrap=_ZNSt6chrono3_V212steady_clock3nowEv)
 
 add_test(NAME io_uring_operations COMMAND server --self-test)
 add_test(NAME transport_lifetimes COMMAND transport_tests)
@@ -55,6 +61,7 @@ add_test(NAME sync_timing_contract COMMAND sync_tests)
 add_test(NAME telemetry_contract COMMAND telemetry_tests)
 add_test(NAME load_generator_conformance COMMAND load_tests)
 add_test(NAME load_generator_latencies COMMAND latency_tests)
+add_test(NAME load_generator_activation COMMAND load_activation_tests)
 
 set_tests_properties(io_uring_operations transport_lifetimes io_lifetime_contract
     PROPERTIES LABELS "native;transport;integration")
@@ -65,6 +72,7 @@ set_tests_properties(sync_timing_contract PROPERTIES LABELS "native;database;uni
 set_tests_properties(telemetry_contract PROPERTIES LABELS "native;unit")
 set_tests_properties(load_generator_conformance PROPERTIES LABELS "native;generator;integration")
 set_tests_properties(load_generator_latencies PROPERTIES LABELS "native;generator;unit")
+set_tests_properties(load_generator_activation PROPERTIES LABELS "native;generator;unit")
 set_tests_properties(checkpoint_lifetimes group_commit_contract io_lifetime_contract
     PROPERTIES TIMEOUT 15)
 

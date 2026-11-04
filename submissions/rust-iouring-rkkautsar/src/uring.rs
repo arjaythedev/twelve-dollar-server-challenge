@@ -28,7 +28,8 @@ const RING_ENTRIES: u32 = 4_096;
 const NEW_RING_AT: usize = 65_000;
 const MAX_RINGS: usize = 16;
 const MAX_READ_BATCH: usize = 8192;
-const READ_BUF: usize = 1_024;
+const READ_BUF: usize = 2_048;
+const BUF_READ: usize = 1_024;
 const BUF_RING_ENTRIES: u16 = 32_768;
 const BUF_GROUP: u16 = 1;
 
@@ -63,19 +64,23 @@ impl OutBuf {
 
 struct Conn {
     input: Vec<u8>,
+    read: Option<Box<[u8; READ_BUF]>>,
     out: OutBuf,
     gen: u32,
+    multishot: bool,
     writing: bool,
     write_pending: bool,
     close_after: bool,
 }
 
 impl Conn {
-    fn new(gen: u32) -> Self {
+    fn new(gen: u32, multishot: bool) -> Self {
         Self {
             input: Vec::new(),
+            read: if multishot { None } else { Some(Box::new([0u8; READ_BUF])) },
             out: OutBuf::Empty,
             gen,
+            multishot,
             writing: false,
             write_pending: false,
             close_after: false,
@@ -124,7 +129,7 @@ impl BufRing {
         if mem.is_null() {
             return Err(io::Error::from_raw_os_error(libc::ENOMEM));
         }
-        let bufs = vec![0u8; entries as usize * READ_BUF].into_boxed_slice();
+        let bufs = vec![0u8; entries as usize * BUF_READ].into_boxed_slice();
         unsafe {
             if let Err(e) = ring.submitter().register_buf_ring_with_flags(
                 mem as u64,
@@ -145,8 +150,8 @@ impl BufRing {
         };
         for bid in 0..entries {
             let e = UringBuf {
-                addr: unsafe { br.bufs.as_ptr().add(bid as usize * READ_BUF) as u64 },
-                len: READ_BUF as u32,
+                addr: unsafe { br.bufs.as_ptr().add(bid as usize * BUF_READ) as u64 },
+                len: BUF_READ as u32,
                 bid,
                 resv: 0,
             };
@@ -160,13 +165,13 @@ impl BufRing {
     }
 
     fn put(&mut self, bid: u16) {
-        if (bid as usize) >= self.bufs.len() / READ_BUF {
+        if (bid as usize) >= self.bufs.len() / BUF_READ {
             return;
         }
         let slot = ((self.tail & self.mask) as usize);
         let e = UringBuf {
-            addr: unsafe { self.bufs.as_ptr().add(bid as usize * READ_BUF) as u64 },
-            len: READ_BUF as u32,
+            addr: unsafe { self.bufs.as_ptr().add(bid as usize * BUF_READ) as u64 },
+            len: BUF_READ as u32,
             bid,
             resv: 0,
         };
@@ -189,7 +194,8 @@ struct RingState {
     listener: i32,
     conns: HashMap<u32, Conn>,
     cqes: Vec<(u64, i32, u32)>,
-    buf_ring: BufRing,
+    multishot: bool,
+    buf_ring: Option<BufRing>,
     next_gen: u32,
     accepting: bool,
     accept_paused: bool,
@@ -313,18 +319,26 @@ impl RingState {
             }
             return Err(e);
         }
-        let buf_ring = match BufRing::new(&ring) {
-            Ok(b) => b,
-            Err(e) => {
-                unsafe { libc::close(listener) };
-                return Err(e);
+        let multishot = std::env::var("MULTISHOT")
+            .map(|v| v != "0")
+            .unwrap_or(false);
+        let buf_ring = if multishot {
+            match BufRing::new(&ring) {
+                Ok(b) => Some(b),
+                Err(e) => {
+                    unsafe { libc::close(listener) };
+                    return Err(e);
+                }
             }
+        } else {
+            None
         };
         let mut state = Self {
             ring,
             listener,
             conns: HashMap::with_capacity(32_768),
             cqes: Vec::with_capacity(256),
+            multishot,
             buf_ring,
             next_gen: 1,
             accepting: false,
@@ -353,11 +367,15 @@ fn arm_read(ring: &mut IoUring, slot: u32, c: &mut Conn) -> io::Result<()> {
     if c.close_after {
         return Ok(());
     }
-    let entry = opcode::RecvMulti::new(types::Fixed(slot), BUF_GROUP)
-        .len(0)
-        .build()
-        .user_data(ud(slot, c.gen, TAG_READ));
-    push(ring, entry)
+    let entry = if c.multishot {
+        opcode::RecvMulti::new(types::Fixed(slot), BUF_GROUP)
+            .len(0)
+            .build()
+    } else {
+        let buf = c.read.as_mut().unwrap();
+        opcode::Recv::new(types::Fixed(slot), buf.as_mut_ptr(), READ_BUF as u32).build()
+    };
+    push(ring, entry.user_data(ud(slot, c.gen, TAG_READ)))
 }
 
 fn arm_write(ring: &mut IoUring, slot: u32, c: &mut Conn) -> io::Result<()> {
@@ -417,7 +435,13 @@ fn process_input(
         return Ok(());
     }
     match parse_request(&c.input) {
-        ParseResult::Incomplete => Ok(()),
+        ParseResult::Incomplete => {
+            if c.multishot {
+                Ok(())
+            } else {
+                arm_read(ring, slot, c)
+            }
+        }
         ParseResult::Bad => {
             queue_reply(c, 400, br#"{"error":"bad request"}"#, true);
             arm_write(ring, slot, c)
@@ -532,7 +556,7 @@ fn process_ring(
                 let slot = res as u32;
                 let gen = r.next_gen;
                 r.next_gen = r.next_gen.wrapping_add(1).max(1);
-                r.conns.insert(slot, Conn::new(gen));
+                r.conns.insert(slot, Conn::new(gen, r.multishot));
                 if let Some(c) = r.conns.get_mut(&slot) {
                     arm_read(&mut r.ring, slot, c)?;
                 }
@@ -554,27 +578,60 @@ fn process_ring(
         }
         let (slot, gen, tag) = split_ud(user);
         if tag == TAG_READ {
+            if !r.multishot {
+                let close_now = if let Some(c) = r.conns.get_mut(&slot) {
+                    if c.gen != gen {
+                        false
+                    } else if res <= 0 {
+                        true
+                    } else {
+                        let n = res as usize;
+                        if c.input.len() + n > (1 << 20) {
+                            true
+                        } else {
+                            let data = &c.read.as_ref().unwrap()[..n];
+                            c.input.extend_from_slice(data);
+                            process_input(
+                                &mut r.ring,
+                                ring_idx,
+                                slot,
+                                c,
+                                app,
+                                write_tx,
+                                reads,
+                            )?;
+                            false
+                        }
+                    }
+                } else {
+                    false
+                };
+                if close_now {
+                    let _ = finish_close(&mut r.ring, &mut r.conns, slot);
+                }
+                continue;
+            }
             let bid = cqueue::buffer_select(flags);
             let close_now = if let Some(c) = r.conns.get_mut(&slot) {
                 if c.gen != gen {
                     if let Some(bid) = bid {
-                        r.buf_ring.put(bid);
+                        r.buf_ring.as_mut().unwrap().put(bid);
                     }
                     false
                 } else if res > 0 {
                     match bid {
                         Some(bid) if (bid as usize) < BUF_RING_ENTRIES as usize => {
                             let n = res as usize;
-                            if n > READ_BUF || c.input.len() + n > (1 << 20) {
-                                r.buf_ring.put(bid);
+                            if n > BUF_READ || c.input.len() + n > (1 << 20) {
+                                r.buf_ring.as_mut().unwrap().put(bid);
                                 true
                             } else {
-                                let start = bid as usize * READ_BUF;
+                                let start = bid as usize * BUF_READ;
                                 {
-                                    let data = &r.buf_ring.bufs[start..start + n];
+                                    let data = &r.buf_ring.as_ref().unwrap().bufs[start..start + n];
                                     c.input.extend_from_slice(data);
                                 }
-                                r.buf_ring.put(bid);
+                                r.buf_ring.as_mut().unwrap().put(bid);
                                 process_input(
                                     &mut r.ring,
                                     ring_idx,
@@ -594,7 +651,7 @@ fn process_ring(
                     }
                 } else {
                     if let Some(bid) = bid {
-                        r.buf_ring.put(bid);
+                        r.buf_ring.as_mut().unwrap().put(bid);
                     }
                     if res == -libc::ENOBUFS
                         || res == -libc::EAGAIN
@@ -608,7 +665,7 @@ fn process_ring(
                 }
             } else {
                 if let Some(bid) = bid {
-                    r.buf_ring.put(bid);
+                    r.buf_ring.as_mut().unwrap().put(bid);
                 }
                 false
             };

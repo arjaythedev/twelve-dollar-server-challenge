@@ -1055,3 +1055,28 @@ thread wakeup plus host calls 1,000 times a second, on the same CPU); the rest (
 locks per transaction through host calls, the barrier host call) plus the extra tail checkpoints. Next: h1b with a futex
 wait instead of polling, one host call per xShmLock, and an empty xShmBarrier (an indirect call is a compiler barrier and
 x86 keeps load-load and store-store order, which is all SQLite's two header copies rely on).
+
+## E57: verdicts by measurement and arithmetic, no server runs (H5, H7, H8, H9, H14) (3 Nov)
+- H5: SQLite built with `-mno-bulk-memory` gives a byte-identical merged.opt.wasm (sha256 1f27de56... both ways): clang
+  then calls wasi-libc's memcpy/memset, which are themselves `memory.copy`/`memory.fill`, and wasm-opt -O3 inlines them
+  back (sq.wasm: 320 copies / 159 fills; merged: 334 / 165). The flag can't remove them. Avoiding them needs our own
+  memcpy/memset in the glue (a loop the AOT may turn back into a native call). Upper bound from M3's profile:
+  libwasmedge 1.1 % + libc 1.3 % of CPU. Left as a low-value follow-up (H5b), not built.
+- H7 (JWT offload): only likes and posts carry a JWT, 0.17 of every 2.17 requests (7.8 %). The HMAC pads are set up once
+  at start (`$hmac_init`), so a check is ~3 SHA-256 blocks (~1 us in wasm at a few hundred MB/s). Averaged over all
+  requests that is < 0.1 us of ~28-35 us. A plugin (wasi_crypto) or a native host import can't save more than that, and
+  the Xeon 8260 has no SHA-NI. Dead.
+- H8 (HTTP compression): /feed is 5,102 bytes (4 TCP segments), GET /posts/:id 361. gzip -1 makes /feed 1,982 bytes, but
+  zlib level 1 costs 38.5 us per /feed natively (opt-box, Python's zlib): more than the whole request costs today, for ~2
+  fewer segments (a few us of kernel at most). k6 decompresses gzip and probably sends Accept-Encoding (unverified, from
+  memory of k6's Go client); load.js sets only Authorization and Content-Type. Dead on CPU, whatever k6 sends.
+- H9 (C -> Rust): the host binary doesn't appear in M3's profile (kernel 64.6 + app.so 32.7 + libc 1.3 + libwasmedge 1.1 =
+  99.7 %): <= 0.3 % of CPU, the same LLVM code either way, not fewer lines, and a Rust toolchain to pin in install.sh.
+  No speed to gain. Dead for speed (only a matter of taste).
+- H14 (registered ring fd): S12 counted 79,704 io_uring_enter in 20 s at 31.6k req/s, 0.13 per request; skipping the
+  fdget/fput (~50 ns) saves < 0.01 us/req. Dead.
+
+## E56 (H1): h1b = futex instead of polling, one host call per xShmLock, empty xShmBarrier (3 Nov, harness v2, SPIN_NS=10000, 2-minute probes, 0 errors)
+- 150k: b4s p95 118, p99 220, 11.96 us/req; h1bs p95 106, p99 215, 11.79 us/req -> the overhead is gone (E55 had +1.56)
+- 210k: h1bs r1 p50 5.8, p95 275, p99 440, max 744 ms, 16.15 us/req; b4s p50 38, p95 350, p99 550, max 967 ms, 17.07; h1bs r2 p50 3.6, p95 240, p99 390, max 601 ms, 15.59
+With E54's two baseline runs, b4 at 210k is p99 1,305 / 1,000 / 550 and h1 is 690 / 410 / 440 / 390. CPU 0 is busy 88 % against 91 %.

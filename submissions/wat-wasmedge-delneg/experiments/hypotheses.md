@@ -136,3 +136,10 @@ Ranking by expected impact / cost (highest first). Order of work: H3, H1 (+H12 i
 H3: tested in E53, done: ~1.3 ms floor + ~60 us/page; H1's inline tail viable if <= ~30 pages
 H1: E54 (2-min, 210k): p99 690/410 vs baseline 1,305/1,000; +1.4-2.5 us/req CPU to explain (E55)
 H12: E55: shared mode costs ~0.6 us/req at 150k; 1 ms polling another ~1.0 (fix in h1b)
+H5: E57: -mno-bulk-memory is a no-op (byte-identical module); own memcpy in glue = H5b, low value, not built
+H7: E57: dead (7.8 % of requests carry a JWT; < 0.1 us/req to gain)
+H8: E57: dead (gzip-1 of /feed costs 38.5 us natively for ~2 fewer segments)
+H9: E57: dead for speed (host <= 0.3 % of CPU)
+H14: E57: dead (0.13 enters per request)
+H12: E56: with futex + one host call per lock the shared mode costs nothing measurable (11.79 vs 11.96 us/req at 150k)
+H1: E56 (2-min, 210k): h1b p99 440/390 vs baseline 550 (and 1,305/1,000 in E54), 15.6-16.2 vs 17.1 us/req. 5-min holds next

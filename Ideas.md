@@ -19,12 +19,17 @@ Unchecked items are experiments; checked items include completed work and discar
 
 ### 2. Common-request CPU
 
-- [x] Compare the direct B-tree reader for `GET /posts/:id` against prepared SQL. The [native probe](src/runs/03180a1/btree-post-common-native/summary.json) used 22.4% less CPU; the [350k pair](src/runs/03180a1/post-btree-350000-comparison/summary.json) used 0.74% less total CPU and 3.83% less user CPU, with kernel CPU effectively unchanged and zero errors.
+- [x] Compare the direct B-tree reader for `GET /posts/:id` against prepared SQL. The [native probe](src/runs/03180a1/btree-post-common-native/summary.json) used 22.4% less CPU. The initial -0.74% HTTP pair was not confirmed: [A/B/B/A](src/runs/6cd248e/post-btree-abba-350000/summary.json) averaged +1.79% CPU for B-tree, including one p99 failure with zero HTTP errors. Stall cause remains unknown.
   The reader owns one fresh snapshot, copies post/author bytes before cleanup and retains SQL fallback for unsupported schema or read errors. Snapshot, schema, allocation-error and borrowed-transaction contracts passed.
   The complete post route used 4.5% of CPU in the five-minute profile, including required traversal and output. Native savings do not apply to the whole server.
 
-- [ ] Skip storing irrelevant header values in [Parser callbacks](src/server/http/parser.cpp), while llhttp still validates every byte and handles framing. Match fragmented, case-insensitive `authorization` fields and copy only required request data.
-  Preserve existing field/value size limits, duplicate-header behavior, early auth errors, fragments, chunking and pipelining. Measure copies/allocations before considering a second HTTP parser.
+- [x] Skip irrelevant header values while llhttp retains validation, framing and size limits. The [native screen](src/runs/6cd248e/http-disassembly-native/summary.json) used 2-3% less parser CPU for common/auth/fragmented requests; `sizeof(Parser)` stays 336 bytes. Fragmentation, duplicate auth, limits and pipeline contracts passed.
+
+- [x] Use static status lines and direct decimal output in `Reply::prepare`. The [native screen](src/runs/6cd248e/http-disassembly-native/summary.json) saved median 12.7% CPU with recycled storage and 4.3% with fresh objects; individual pairs were noisy. Byte output and partial-send contracts passed. GCC still copies the body-length lookup table; no whole-server or total-stack gain established.
+
+- [x] Discard skipping duplicate point-read initialization ([screen](src/runs/6cd248e/post-initialization-native/summary.json)): assembly removes the expected stores and contracts pass, but four pairs range from -12.4% to +20.2% CPU. No reliable gain; keep the existing initializers.
+
+- [ ] Native-screen a consumed offset in `HttpSession::consume` before moving retained body/pipeline tails. Preserve bounds, fragmented input and response order; ordinary GETs usually have no tail, so start with body/pipeline cases.
 
 - [ ] Revisit direct receive-buffer parsing only for a measured frequent case of a complete ordinary request, with the current Session-copy path for fragments and retained tails ([receive handler](src/server/server.cpp)).
   The broader leased-buffer experiment found no CPU gain. Keep llhttp, request-owned fields before releasing the lease, early auth errors and pipeline order; compare copies, CPU and memory before expanding it.
@@ -52,8 +57,9 @@ Unchecked items are experiments; checked items include completed work and discar
 - [ ] Compare persistent satellite notification polls with the one-shot wake READ ([C on_evfd](submissions/c-iouring-pavlyhalim/src/server.c)). The reference leaves the counter unread and rearms only after a terminal CQE. Probe repeated wakeups, MORE accounting, cancellation and overflow before changing ownership.
   Low priority after READ: the current short profile no longer identifies wakeup handling as a significant hotspot; symbol attribution can omit inlined work.
 
-- [ ] Compare process-local TCP options independently: `TCP_NODELAY` for small responses, `TCP_DEFER_ACCEPT` for churn and explicitly uncorked `TCP_CORK` for deliberate coalescing ([TCP options](https://man7.org/linux/man-pages/man7/tcp.7.html)).
-  Screen listener `TCP_NODELAY` off/on first, verifying inheritance on accepted sockets before HTTP tests. The listener currently sets only `SO_REUSEADDR`; Pavly enables NODELAY. Extra packets can increase CPU, so compare packet counts alongside latency.
+- [x] Compare listener `TCP_NODELAY` off/on ([pair](src/runs/6cd248e/tcp-nodelay-350000-comparison/summary.json)): CPU/request -0.03%, approximate hold CPU +0.35%, namespace TCP segments/request about 3.0534 in both, zero errors. No demonstrated gain; remove the candidate. Native inheritance and transport checks passed.
+
+- [ ] Compare process-local `TCP_DEFER_ACCEPT` for churn and explicitly uncorked `TCP_CORK` for deliberate coalescing ([TCP options](https://man7.org/linux/man-pages/man7/tcp.7.html)).
   Accepted sockets use direct descriptors: never pass a fixed-file slot to `setsockopt()`. Check supported io_uring socket commands or listener-option inheritance first. Measure packets, CPU and p99; the existing single header/body send already coalesces output, corking can delay it, and deferred accept mainly affects establishment. Keep system-wide kernel settings unchanged.
   Separately skip poll-first when `IORING_CQE_F_SOCK_NONEMPTY` reports unread data; retain the idle path and test fragments, pipelining and terminal completions.
 
@@ -286,7 +292,7 @@ Unchecked items are experiments; checked items include completed work and discar
 
 - [x] Count likes-index cells per leaf before advancing the cursor ([Kensac](https://github.com/arjaythedev/twelve-dollar-server-challenge/blob/42981018dc0d4b157d48c22ba15da5c361bf3168/submissions/rust-iouring-kensac/csrc/shim.c#L362)). Keep bounded gaps, signed 64-bit counts, interior entries and generic/SQL fallbacks. SQL and sanitizer checks passed; native feed CPU fell 8.2% on seed data, 58.9% with dense likes and 20.1% with sparse feed IDs.
 
-- [x] Compare removing duplicate feed initialization, together and close-only. Close shrank by 48 bytes, but five native pairs showed no repeatable CPU gain; keep the existing clears. Retain tests for partial/error/empty reuse and zero error/DONE outputs.
+- [x] Compare removing duplicate feed initialization, together and close-only. Close shrank by 48 bytes, but five native pairs showed no repeatable CPU gain. The standalone change was discarded; retain tests for partial/error/empty reuse and zero error/DONE outputs.
 
 - [x] Use `unix-excl` on both database handles ([Kensac](submissions/rust-iouring-kensac/csrc/shim.c), [Pavly](submissions/c-iouring-pavlyhalim/src/db.h)). A small SQLite probe reduced 67,080 measured fcntl64 calls to zero. The short 70k pair used 2.5% less CPU/request with nearly unchanged p99. External SQLite processes must wait until shutdown; keep the checkpoint handle and NORMAL sync.
 

@@ -21,6 +21,12 @@ target_link_options(group_commit_tests PRIVATE
 tds_add_executable(post_writer_tests post_writer.cpp)
 target_link_libraries(post_writer_tests PRIVATE api)
 
+tds_add_executable(parser_tests parser.cpp)
+target_link_libraries(parser_tests PRIVATE transport)
+
+tds_add_executable(reply_tests reply.cpp "${PROJECT_SOURCE_DIR}/server/http/reply.cpp")
+target_include_directories(reply_tests PRIVATE "${PROJECT_SOURCE_DIR}/server")
+
 tds_add_executable(application_tests application.cpp)
 target_link_libraries(application_tests PRIVATE api transport OpenSSL::Crypto sqlite yyjson)
 
@@ -64,6 +70,8 @@ add_test(NAME io_lifetime_contract COMMAND io_lifetime_tests)
 add_test(NAME checkpoint_lifetimes COMMAND checkpoint_tests)
 add_test(NAME group_commit_contract COMMAND group_commit_tests)
 add_test(NAME post_writer_bytes COMMAND post_writer_tests)
+add_test(NAME parser_contract COMMAND parser_tests)
+add_test(NAME reply_bytes COMMAND reply_tests)
 add_test(NAME application_contract COMMAND application_tests)
 add_test(NAME btree_feed COMMAND btree_tests)
 add_test(NAME btree_post_contract COMMAND btree_post_tests)
@@ -78,7 +86,7 @@ set_tests_properties(io_uring_operations transport_lifetimes io_lifetime_contrac
     PROPERTIES LABELS "native;transport;integration")
 set_tests_properties(checkpoint_lifetimes group_commit_contract application_contract btree_feed btree_post_contract wal_vfs_contract
     PROPERTIES LABELS "native;database;integration")
-set_tests_properties(post_writer_bytes PROPERTIES LABELS "native;unit")
+set_tests_properties(post_writer_bytes parser_contract reply_bytes PROPERTIES LABELS "native;unit")
 set_tests_properties(sync_timing_contract PROPERTIES LABELS "native;database;unit")
 set_tests_properties(telemetry_contract PROPERTIES LABELS "native;unit")
 set_tests_properties(load_generator_conformance PROPERTIES LABELS "native;generator;integration")

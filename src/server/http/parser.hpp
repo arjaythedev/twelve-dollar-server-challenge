@@ -82,6 +82,7 @@ class Parser
 
     static int on_url(llhttp_t *parser, const char *data, std::size_t length);
     static int on_header_field(llhttp_t *parser, const char *data, std::size_t length);
+    static int on_header_field_complete(llhttp_t *parser);
     static int on_header_value(llhttp_t *parser, const char *data, std::size_t length);
     static int on_header_value_complete(llhttp_t *parser);
     static int on_headers_complete(llhttp_t *parser);
@@ -95,6 +96,8 @@ class Parser
     std::string url_;
     std::string field_;
     std::string value_;
+    std::uint16_t value_size_ = 0;
+    bool capture_value_ = false;
     Phase phase_ = Phase::headers;
     Status error_ = Status::bad_request;
 };

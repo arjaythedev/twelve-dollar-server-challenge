@@ -1,0 +1,155 @@
+{
+  "benchmark": {
+    "date": "2026-11-04",
+    "name": "tcp-nodelay-off-350000",
+    "runtime": "C++ 0.1.0",
+    "load_generator": "docker_loopback",
+    "generator": "cpp",
+    "sqlite": "3.53.1",
+    "users": 350000,
+    "hold": "60s",
+    "ramp": "30s",
+    "requests": 3627480,
+    "rps": 27903.4689928,
+    "p95_ms": 13.59678515,
+    "p99_ms": 19.68127704,
+    "max_ms": 37.487704,
+    "error_rate": 0.0,
+    "cpu_us_per_request": 20.271758079989414,
+    "cpu_scope": "server_cgroup",
+    "server_peak_bytes": 1031053312,
+    "passed": true,
+    "client_sampled_peak_bytes": 1471225856
+  },
+  "load_generator": {
+    "name": "td-load",
+    "version": "0.1.0",
+    "seed": 20261104,
+    "vus": 350000,
+    "passed": true,
+    "checks_passed": true,
+    "workflow_errors": 0,
+    "ramp_up_seconds": 30,
+    "target_activation_seconds": 30.00011917,
+    "activation_deadline_grace_ms": 100,
+    "target_activation_on_time": true,
+    "prepared_sockets": 350000,
+    "socket_preparation_seconds": 2.555101713,
+    "duration_semantics": "send+wait+receive, excludes connection acquisition and client request preparation; interrupted requests omitted",
+    "target_concurrency_reached": true,
+    "http_response_coverage_complete": true,
+    "http_metrics_passed": true,
+    "peak_live_connections": 350000,
+    "hold_peak_live_connections": 350000,
+    "max_rss_bytes": 160100352,
+    "idle_vu_state_bytes": 88,
+    "interrupted_iterations": 179675,
+    "endpoint_requests": {
+      "feed": 1673371,
+      "post": 1673371,
+      "like": 247987,
+      "create": 32751
+    },
+    "endpoint_duration_ms": {
+      "feed": {
+        "count": 1673371,
+        "avg": 4.91599077311,
+        "p95": 13.6010325,
+        "p99": 19.6182202,
+        "max": 35.559807
+      },
+      "post": {
+        "count": 1673371,
+        "avg": 4.80315613754,
+        "p95": 13.499653,
+        "p99": 19.6129225,
+        "max": 35.987839
+      },
+      "like": {
+        "count": 247987,
+        "avg": 5.02610290471,
+        "p95": 14.2138189,
+        "p99": 20.43817478,
+        "max": 37.487704
+      },
+      "create": {
+        "count": 32751,
+        "avg": 4.75825853794,
+        "p95": 13.302285,
+        "p99": 20.1600705,
+        "max": 37.412468
+      }
+    },
+    "phase_duration_ms": {
+      "ramp_up": {
+        "count": 732327,
+        "avg": 4.03659384398,
+        "p95": 9.6763447,
+        "p99": 14.2888628,
+        "max": 24.056506
+      },
+      "hold": {
+        "count": 2222341,
+        "avg": 5.19860375917,
+        "p95": 15.270429,
+        "p99": 20.5188222,
+        "max": 37.487704
+      },
+      "ramp_down": {
+        "count": 661185,
+        "avg": 4.70228446003,
+        "p95": 12.16732,
+        "p99": 18.500978,
+        "max": 30.093217
+      },
+      "grace": {
+        "count": 11627,
+        "avg": 4.10489412385,
+        "p95": 8.3677763,
+        "p99": 9.92735366,
+        "max": 16.992271
+      }
+    }
+  },
+  "collection_errors": [],
+  "schema_version": 1,
+  "anchor": "6cd248ecc849dede634a11598c749927a9eae289",
+  "label": "tcp-nodelay-off-350000",
+  "kind": "workload",
+  "started_at": "2026-11-04T18:48:10.319885+00:00",
+  "status": "passed",
+  "finished_at": "2026-11-04T18:50:38.266198+00:00",
+  "exit_code": 0,
+  "error": null,
+  "secondary_errors": [],
+  "workload": {
+    "generator": "cpp",
+    "vus": 350000,
+    "ramp": "30s",
+    "hold": "60s",
+    "seed": 20261104
+  },
+  "instruments": {
+    "server_telemetry": "off",
+    "perf": "off",
+    "client_diagnostics": false
+  },
+  "provenance": {
+    "source": {
+      "base_commit": "6cd248ecc849dede634a11598c749927a9eae289",
+      "patch_sha256": "be2f8cff32a50c583a8910238b02523419f89c722a5b07ea90db7f1e4a509aa9",
+      "source_sha256": "3c9857ba6fdfdaf7bc54bdc7e9355df0d521d0bac4c82b45fcba6e74ed98c3c3",
+      "patch": "source.patch"
+    },
+    "binary": {
+      "server": {
+        "image_id": "sha256:0839d35b5b86087247e62bd49beb89487be202f428f657c4112d2d73ea7248e0",
+        "sha256": "c87cf3460112ea336b28ae5f6d5fb261551fa362979a3f48db5c35366f5f36a6"
+      },
+      "generator": {
+        "image_id": "sha256:d76cca3b1f092fa3fdc84f360c0853686d429dca8bf2c1a9019e895abbac43a6",
+        "sha256": "f2634e9500b5017ee4c3ca77329ea8a98c54544b92e972ba9ba637fba69a4a1e"
+      }
+    }
+  }
+}

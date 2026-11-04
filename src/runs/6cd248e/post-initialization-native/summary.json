@@ -1,0 +1,270 @@
+{
+  "measurement": {
+    "tests": [
+      "btree_post_contract",
+      "group_commit_contract"
+    ],
+    "tests_passed": true,
+    "samples": [
+      {
+        "fixture_like_counts": [
+          0,
+          1,
+          4,
+          16
+        ],
+        "fixture_mean_likes": 5.25,
+        "fixture_miss_fraction": 0.2,
+        "requests": 500000,
+        "existing": 400000,
+        "missing": 100000,
+        "response_digest": 8552515511460167321,
+        "response_bytes": 90531251,
+        "status_sum": 120400000,
+        "reused_cpu_ns": 683318091,
+        "reused_wall_ns": 683382057,
+        "fresh_output_cpu_ns": 701724418,
+        "fresh_output_wall_ns": 701756224,
+        "lifecycle_cpu_ns": 745891581,
+        "canonical_sql_vm_steps": 17893751,
+        "vm_steps_scope": "separate untimed prepared SQL oracle pass",
+        "timing_scope": "full Application read with fresh snapshot and JSON serialization",
+        "lifecycle_scope": "fresh Application, lazy Store initialization, full request pass, shutdown",
+        "round": 0,
+        "mode": "control"
+      },
+      {
+        "fixture_like_counts": [
+          0,
+          1,
+          4,
+          16
+        ],
+        "fixture_mean_likes": 5.25,
+        "fixture_miss_fraction": 0.2,
+        "requests": 500000,
+        "existing": 400000,
+        "missing": 100000,
+        "response_digest": 8552515511460167321,
+        "response_bytes": 90531251,
+        "status_sum": 120400000,
+        "reused_cpu_ns": 821502517,
+        "reused_wall_ns": 822182741,
+        "fresh_output_cpu_ns": 850616904,
+        "fresh_output_wall_ns": 850655250,
+        "lifecycle_cpu_ns": 696519476,
+        "canonical_sql_vm_steps": 17893751,
+        "vm_steps_scope": "separate untimed prepared SQL oracle pass",
+        "timing_scope": "full Application read with fresh snapshot and JSON serialization",
+        "lifecycle_scope": "fresh Application, lazy Store initialization, full request pass, shutdown",
+        "round": 0,
+        "mode": "candidate"
+      },
+      {
+        "fixture_like_counts": [
+          0,
+          1,
+          4,
+          16
+        ],
+        "fixture_mean_likes": 5.25,
+        "fixture_miss_fraction": 0.2,
+        "requests": 500000,
+        "existing": 400000,
+        "missing": 100000,
+        "response_digest": 8552515511460167321,
+        "response_bytes": 90531251,
+        "status_sum": 120400000,
+        "reused_cpu_ns": 798761385,
+        "reused_wall_ns": 798818917,
+        "fresh_output_cpu_ns": 735208059,
+        "fresh_output_wall_ns": 735248282,
+        "lifecycle_cpu_ns": 771033676,
+        "canonical_sql_vm_steps": 17893751,
+        "vm_steps_scope": "separate untimed prepared SQL oracle pass",
+        "timing_scope": "full Application read with fresh snapshot and JSON serialization",
+        "lifecycle_scope": "fresh Application, lazy Store initialization, full request pass, shutdown",
+        "round": 1,
+        "mode": "control"
+      },
+      {
+        "fixture_like_counts": [
+          0,
+          1,
+          4,
+          16
+        ],
+        "fixture_mean_likes": 5.25,
+        "fixture_miss_fraction": 0.2,
+        "requests": 500000,
+        "existing": 400000,
+        "missing": 100000,
+        "response_digest": 8552515511460167321,
+        "response_bytes": 90531251,
+        "status_sum": 120400000,
+        "reused_cpu_ns": 699971691,
+        "reused_wall_ns": 700004867,
+        "fresh_output_cpu_ns": 735285186,
+        "fresh_output_wall_ns": 735318665,
+        "lifecycle_cpu_ns": 695832586,
+        "canonical_sql_vm_steps": 17893751,
+        "vm_steps_scope": "separate untimed prepared SQL oracle pass",
+        "timing_scope": "full Application read with fresh snapshot and JSON serialization",
+        "lifecycle_scope": "fresh Application, lazy Store initialization, full request pass, shutdown",
+        "round": 1,
+        "mode": "candidate"
+      },
+      {
+        "fixture_like_counts": [
+          0,
+          1,
+          4,
+          16
+        ],
+        "fixture_mean_likes": 5.25,
+        "fixture_miss_fraction": 0.2,
+        "requests": 500000,
+        "existing": 400000,
+        "missing": 100000,
+        "response_digest": 8552515511460167321,
+        "response_bytes": 90531251,
+        "status_sum": 120400000,
+        "reused_cpu_ns": 695194139,
+        "reused_wall_ns": 695235180,
+        "fresh_output_cpu_ns": 724321616,
+        "fresh_output_wall_ns": 724359569,
+        "lifecycle_cpu_ns": 673785178,
+        "canonical_sql_vm_steps": 17893751,
+        "vm_steps_scope": "separate untimed prepared SQL oracle pass",
+        "timing_scope": "full Application read with fresh snapshot and JSON serialization",
+        "lifecycle_scope": "fresh Application, lazy Store initialization, full request pass, shutdown",
+        "round": 2,
+        "mode": "control"
+      },
+      {
+        "fixture_like_counts": [
+          0,
+          1,
+          4,
+          16
+        ],
+        "fixture_mean_likes": 5.25,
+        "fixture_miss_fraction": 0.2,
+        "requests": 500000,
+        "existing": 400000,
+        "missing": 100000,
+        "response_digest": 8552515511460167321,
+        "response_bytes": 90531251,
+        "status_sum": 120400000,
+        "reused_cpu_ns": 656930659,
+        "reused_wall_ns": 656961654,
+        "fresh_output_cpu_ns": 691632881,
+        "fresh_output_wall_ns": 691670290,
+        "lifecycle_cpu_ns": 643782312,
+        "canonical_sql_vm_steps": 17893751,
+        "vm_steps_scope": "separate untimed prepared SQL oracle pass",
+        "timing_scope": "full Application read with fresh snapshot and JSON serialization",
+        "lifecycle_scope": "fresh Application, lazy Store initialization, full request pass, shutdown",
+        "round": 2,
+        "mode": "candidate"
+      },
+      {
+        "fixture_like_counts": [
+          0,
+          1,
+          4,
+          16
+        ],
+        "fixture_mean_likes": 5.25,
+        "fixture_miss_fraction": 0.2,
+        "requests": 500000,
+        "existing": 400000,
+        "missing": 100000,
+        "response_digest": 8552515511460167321,
+        "response_bytes": 90531251,
+        "status_sum": 120400000,
+        "reused_cpu_ns": 664292993,
+        "reused_wall_ns": 664324563,
+        "fresh_output_cpu_ns": 749056885,
+        "fresh_output_wall_ns": 749096596,
+        "lifecycle_cpu_ns": 702660132,
+        "canonical_sql_vm_steps": 17893751,
+        "vm_steps_scope": "separate untimed prepared SQL oracle pass",
+        "timing_scope": "full Application read with fresh snapshot and JSON serialization",
+        "lifecycle_scope": "fresh Application, lazy Store initialization, full request pass, shutdown",
+        "round": 3,
+        "mode": "control"
+      },
+      {
+        "fixture_like_counts": [
+          0,
+          1,
+          4,
+          16
+        ],
+        "fixture_mean_likes": 5.25,
+        "fixture_miss_fraction": 0.2,
+        "requests": 500000,
+        "existing": 400000,
+        "missing": 100000,
+        "response_digest": 8552515511460167321,
+        "response_bytes": 90531251,
+        "status_sum": 120400000,
+        "reused_cpu_ns": 758212089,
+        "reused_wall_ns": 758247638,
+        "fresh_output_cpu_ns": 715013237,
+        "fresh_output_wall_ns": 715072426,
+        "lifecycle_cpu_ns": 650501154,
+        "canonical_sql_vm_steps": 17893751,
+        "vm_steps_scope": "separate untimed prepared SQL oracle pass",
+        "timing_scope": "full Application read with fresh snapshot and JSON serialization",
+        "lifecycle_scope": "fresh Application, lazy Store initialization, full request pass, shutdown",
+        "round": 3,
+        "mode": "candidate"
+      }
+    ],
+    "paired_cpu_change_percent": [
+      20.22256220346432,
+      -12.36786052195049,
+      -5.503999221719558,
+      14.138203622448863
+    ],
+    "median_paired_cpu_change_percent": 4.317102200364653,
+    "limits": "Fixed-work full Application::read native probe; no HTTP/network or VPS claim. Only SQL initializers differ between control and candidate."
+  },
+  "schema_version": 1,
+  "anchor": "6cd248ecc849dede634a11598c749927a9eae289",
+  "label": "post-initialization-native",
+  "kind": "probe",
+  "started_at": "2026-11-04T18:59:46.783730+00:00",
+  "status": "passed",
+  "finished_at": "2026-11-04T19:01:40.850796+00:00",
+  "exit_code": 0,
+  "error": null,
+  "secondary_errors": [],
+  "workload": {
+    "kind": "post_initialization",
+    "requests_per_pass": 500000,
+    "pairs": 4
+  },
+  "instruments": {
+    "server_telemetry": "off",
+    "perf": "off"
+  },
+  "provenance": {
+    "source": {
+      "base_commit": "6cd248ecc849dede634a11598c749927a9eae289",
+      "patch_sha256": "7d6ee5b90ef5a2ec6259ca4c2a53efdfee28dba5f672319bad67b13463826c4a",
+      "source_sha256": "295e578d4a5ff7aae74e73ac030da2328358fef3f77f148638d262ebe1e443aa",
+      "patch": "source.patch"
+    },
+    "binary": {
+      "control": {
+        "sha256": "c598faeafed5af7b031a6939a81e72787df3793602c3554d07a23ba4976d6718"
+      },
+      "candidate": {
+        "sha256": "9785101a6488da8c3873263cc6ebe144e772d87cacbac811de1ad13153261e5e"
+      }
+    }
+  }
+}

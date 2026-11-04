@@ -1,0 +1,42 @@
+{
+  "measurement": {
+    "native_tests": [
+      "io_uring_operations",
+      "transport_lifetimes",
+      "io_lifetime_contract",
+      "tcp_options_contract"
+    ],
+    "passed": true
+  },
+  "schema_version": 1,
+  "anchor": "6cd248ecc849dede634a11598c749927a9eae289",
+  "label": "tcp-nodelay-contract",
+  "kind": "probe",
+  "started_at": "2026-11-04T18:38:27.795948+00:00",
+  "status": "passed",
+  "finished_at": "2026-11-04T18:39:30.851447+00:00",
+  "exit_code": 0,
+  "error": null,
+  "secondary_errors": [],
+  "workload": {
+    "kind": "tcp_listener_options_contract"
+  },
+  "instruments": {
+    "server_telemetry": "off",
+    "perf": "off",
+    "client_diagnostics": false
+  },
+  "provenance": {
+    "source": {
+      "base_commit": "6cd248ecc849dede634a11598c749927a9eae289",
+      "patch_sha256": "88375c9885a6c937bdd30fbd0c693ab8708cbaaeff17388563595fe76cccd570",
+      "source_sha256": "8c07cd095afd7a3612d64e17671fc5c89db2475e9230716a8940d6fd3df0a7aa",
+      "patch": "source.patch"
+    },
+    "binary": {
+      "server": {
+        "sha256": "cd38a309f8962ad5f8dac7658a37450ff7e1bc1bd43c73a9652b905d3b48a0e1"
+      }
+    }
+  }
+}

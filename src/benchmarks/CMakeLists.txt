@@ -8,6 +8,13 @@ target_link_libraries(wal_vfs_probe PRIVATE sqlite)
 tds_add_executable(btree_post_probe EXCLUDE_FROM_ALL btree_post.cpp)
 target_link_libraries(btree_post_probe PRIVATE api sqlite)
 
+tds_add_executable(parser_probe EXCLUDE_FROM_ALL parser.cpp)
+target_link_libraries(parser_probe PRIVATE transport)
+
+tds_add_executable(reply_probe EXCLUDE_FROM_ALL reply.cpp
+    "${PROJECT_SOURCE_DIR}/server/http/reply.cpp")
+target_include_directories(reply_probe PRIVATE "${PROJECT_SOURCE_DIR}/server")
+
 # The control replaces only Store's object file; production has no runtime backend switch
 tds_add_executable(btree_post_sql_probe EXCLUDE_FROM_ALL btree_post.cpp
     "${PROJECT_SOURCE_DIR}/server/storage/database.cpp")

@@ -1,5 +1,8 @@
 #include "reply.hpp"
 
+#include <array>
+#include <charconv>
+#include <limits>
 #include <string_view>
 #include <utility>
 
@@ -8,26 +11,35 @@ namespace tds::http
 namespace
 {
 
-std::string_view reason(Status status)
+void append_decimal(std::string &output, std::size_t value)
+{
+    std::array<char, std::numeric_limits<std::size_t>::digits10 + 1> digits;
+    const auto converted = std::to_chars(digits.data(), digits.data() + digits.size(), value);
+    output.append(digits.data(), static_cast<std::size_t>(converted.ptr - digits.data()));
+}
+
+std::string_view status_line(Status status)
 {
     switch (status)
     {
     case Status::ok:
-        return "OK";
+        return "HTTP/1.1 200 OK\r\n";
     case Status::created:
-        return "Created";
+        return "HTTP/1.1 201 Created\r\n";
     case Status::bad_request:
-        return "Bad Request";
+        return "HTTP/1.1 400 Bad Request\r\n";
     case Status::unauthorized:
-        return "Unauthorized";
+        return "HTTP/1.1 401 Unauthorized\r\n";
     case Status::not_found:
-        return "Not Found";
+        return "HTTP/1.1 404 Not Found\r\n";
     case Status::too_large:
-        return "Payload Too Large";
+        return "HTTP/1.1 413 Payload Too Large\r\n";
+    case Status::internal_error:
+        return "HTTP/1.1 500 Internal Server Error\r\n";
     case Status::unavailable:
-        return "Service Unavailable";
+        return "HTTP/1.1 503 Service Unavailable\r\n";
     default:
-        return "Internal Server Error";
+        return {};
     }
 }
 
@@ -36,12 +48,19 @@ std::string_view reason(Status status)
 void Reply::prepare(Response response, bool close_after)
 {
     headers_.clear();
-    headers_ += "HTTP/1.1 ";
-    headers_ += std::to_string(static_cast<unsigned>(response.status));
-    headers_ += ' ';
-    headers_ += reason(response.status);
-    headers_ += "\r\nContent-Type: application/json\r\nContent-Length: ";
-    headers_ += std::to_string(response.body.size());
+    const auto line = status_line(response.status);
+    if (line.empty())
+    {
+        headers_ += "HTTP/1.1 ";
+        append_decimal(headers_, static_cast<std::size_t>(response.status));
+        headers_ += " Internal Server Error\r\n";
+    }
+    else
+    {
+        headers_ += line;
+    }
+    headers_ += "Content-Type: application/json\r\nContent-Length: ";
+    append_decimal(headers_, response.body.size());
     headers_ += "\r\n";
     if (close_after)
     {

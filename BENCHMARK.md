@@ -113,12 +113,24 @@
 | C++ 0.1.0 ([WAL coalesced, Linux loopback](src/runs/79cd8ce/wal-coalesced-350000/summary.json)) | 350,000 | 60 s | 3,627,973 | 27,907.46 | 14.217 ms | 20.281 ms | 90.69 ms | 0% | 20.40 us | 965.11 MiB |
 | C++ 0.1.0 ([SQL post, Linux loopback](src/runs/03180a1/post-sql-350000/summary.json)) | 350,000 | 60 s | 3,627,917 | 27,906.87 | 13.911 ms | 20.169 ms | 82.00 ms | 0% | 20.10 us | 967.48 MiB |
 | C++ 0.1.0 ([B-tree post, Linux loopback](src/runs/03180a1/post-btree-350000/summary.json)) | 350,000 | 60 s | 3,627,802 | 27,905.97 | 13.356 ms | 19.688 ms | 116.18 ms | 0% | 19.95 us | 965.43 MiB |
+| C++ 0.1.0 ([B-tree repeat, p99 fail](src/runs/6cd248e/post-btree-control-350000/summary.json)) | 350,000 | 60 s | 3,614,704 | 27,805.34 | 67.854 ms | 1,002.484 ms | 4,868.32 ms | 0% | 21.80 us | 991.77 MiB |
+| C++ 0.1.0 ([SQL repeat, Linux loopback](src/runs/6cd248e/post-sql-control-350000/summary.json)) | 350,000 | 60 s | 3,627,060 | 27,900.47 | 13.586 ms | 19.839 ms | 39.52 ms | 0% | 20.92 us | 948.48 MiB |
+| C++ 0.1.0 ([TCP_NODELAY off](src/runs/6cd248e/tcp-nodelay-off-350000/summary.json)) | 350,000 | 60 s | 3,627,480 | 27,903.47 | 13.597 ms | 19.681 ms | 37.49 ms | 0% | 20.27 us | 983.29 MiB |
+| C++ 0.1.0 ([TCP_NODELAY on](src/runs/6cd248e/tcp-nodelay-on-350000/summary.json)) | 350,000 | 60 s | 3,629,137 | 27,916.31 | 13.845 ms | 19.800 ms | 38.51 ms | 0% | 20.27 us | 945.91 MiB |
 
 WAL coalescing, 350k short pair: cap 32, CQ 128/8 ms, seed 20261104, fresh seed copies, telemetry/perf off. CPU/request -1.84%, kernel CPU -2.04%; hold p99 20.90 to 20.96 ms. [Data](src/runs/79cd8ce/wal-coalescing-350000-comparison/summary.json).
 
 Direct post reads, native Application path including JSON, six rotated 50k-request pairs: 0/1/4/16 likes, 20% misses, telemetry off. Reused output: 1.72 to 1.34 us/read (-22.4%); fresh output: 1.75 to 1.42 us/read. Identical status/JSON; six native contracts passed. No HTTP transport. [Data](src/runs/03180a1/btree-post-common-native/summary.json). The earlier 0/1/32/257-like fixture measured -39.6% ([data](src/runs/03180a1/btree-post-native/summary.json)).
 
 Direct post reads, 350k short pair with WAL coalescing, cap 32 and CQ 128/8 ms fixed: total CPU -0.74%, user CPU -3.83%, kernel CPU +0.40%; hold p99 21.22 to 20.65 ms. Same seed and generator, fresh seed copies, telemetry/perf off, zero errors. [Data](src/runs/03180a1/post-btree-350000-comparison/summary.json).
+
+Reverse control with identical binaries completes A/B/B/A: weighted SQL 20.51 versus B-tree 20.88 us/request (+1.79%). B repeat failed p99 (hold 1,296 ms, max 4,868 ms), zero errors; SQL repeat passed. Initial HTTP gain not confirmed. [Data](src/runs/6cd248e/post-btree-abba-350000/summary.json).
+
+TCP_NODELAY, matched 350k short pair: total CPU -0.03%, approximate hold CPU +0.35%, p99 19.68 to 19.80 ms, zero errors. Hold namespace TCP segments/request about 3.0534 in both (both peers included). Candidate discarded. [Data](src/runs/6cd248e/tcp-nodelay-350000-comparison/summary.json).
+
+Native HTTP, four reversed pairs: median parser CPU -2.5% common GET, -3.0% authenticated and -2.2% fragmented auth; long ignored-header CPU inconclusive. Reply CPU -12.7% recycled and -4.3% fresh. Equal output, unchanged 336-byte Parser, four contracts passed. Individual pairs were noisy; no whole-server gain measured. [Data](src/runs/6cd248e/http-disassembly-native/summary.json).
+
+Duplicate post-read initialization, four reversed pairs of 500k reads: CPU changes -12.4% to +20.2%, no reliable gain. Equal responses and two contracts passed; candidate discarded. [Data](src/runs/6cd248e/post-initialization-native/summary.json).
 
 CQ rotation and dispatch/wait cleanup: 70k A/B CPU/request -1.2%. Matched 350k/5m B/A: CPU/request +0.5%, hold p99 6.12 to 6.05 ms, peak RAM +47.67 MiB. Same seed, fresh seeded databases and generator; zero errors or memory-limit events. Rotation removed after no clear gain; accept/wait cleanup retained. [Data](src/runs/legacy/benchmark-cq-rotation/summary.json).
 

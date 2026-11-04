@@ -99,13 +99,14 @@ allocation-stable for a long-running server. All of this is generic:
   `HPHP_DIRECT=1` (default in `start.sh`), each ring registers a sparse
   65535-slot file table (`IORING_REGISTER_FILES2` +
   `IORING_RSRC_REGISTER_SPARSE`, clamped to `RLIMIT_NOFILE`) and accepts
-  straight into it with one multishot accept. Connections then use multishot
+  straight into it with a bounded queue of 512 single-shot accepts per ring
+  (matching the Rust leader's in-flight accept depth). Connections then use multishot
   recv over a provided-buffer ring (one SQE for the connection's lifetime,
   data copied into the connection's own buffer, buffer id returned at once),
   fixed-file sends, and ring CLOSE. Direct handles live above every real fd,
   so the 65535 fd limit no longer caps held connections. `HPHP_RINGS`
-  (default 5) creates five rings, each with its own sparse table and buffer
-  ring: ~327k direct slots. A registered eventfd per ring keeps CQ wakeups
+  (default 6) creates six rings, each with its own sparse table and buffer
+  ring: ~393k direct slots at the default. A registered eventfd per ring keeps CQ wakeups
   reliable with `DEFER_TASKRUN`; wait/retry/close paths are ring-aware, and a
   full ring disables only its own accept. Locally: 42/42 with five rings,
   80,000 concurrent connections from eight parallel clients with

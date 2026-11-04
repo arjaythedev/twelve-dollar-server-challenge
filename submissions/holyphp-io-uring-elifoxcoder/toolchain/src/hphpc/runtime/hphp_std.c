@@ -2604,7 +2604,7 @@ static _Thread_local int g_epfd = -1;
 #define HP_UR_IOSQE_FIXED_FILE    (1U << 0)
 #define HP_UR_IOSQE_BUFFER_SELECT (1U << 5)
 #define HP_UR_ACCEPT_MULTISHOT    (1U << 0)
-#define HP_UR_ACCEPT_DEPTH        64U
+#define HP_UR_ACCEPT_DEPTH        512U
 #define HP_UR_RECV_MULTISHOT      (1U << 1)
 #define HP_UR_RECVSEND_POLL_FIRST (1U << 0)
 #define HP_UR_CQE_F_BUFFER         (1U << 0)
@@ -2905,7 +2905,7 @@ struct hp_uring_ring {
     struct sockaddr_storage accept_addr;
     socklen_t accept_len;
 };
-#define HP_UR_RINGS_MAX        5
+#define HP_UR_RINGS_MAX        8
 #define HP_UR_SLOTS_PER_RING   65536U
 static _Thread_local struct hp_uring_ring hp_ur_rings[HP_UR_RINGS_MAX];
 static _Thread_local int hp_ur_nrings;

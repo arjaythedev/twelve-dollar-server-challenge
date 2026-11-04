@@ -6,5 +6,9 @@
     "editorconfig.editorconfig",
     "tamasfe.even-better-toml",
     "ms-vscode.cpptools"
+  ],
+  "unwantedRecommendations": [
+    "ms-python.black-formatter",
+    "ms-python.autopep8"
   ]
 }

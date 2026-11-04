@@ -19,12 +19,13 @@
 #include "db.h"
 
 #define NUM_RINGS 8
-#define MAX_SLOTS_PER_RING 45000
+#define MAX_SLOTS_PER_RING 55000
 #define TOTAL_MAX_SLOTS (NUM_RINGS * MAX_SLOTS_PER_RING)
 #define PBUF_ENTRIES 1024
 #define PBUF_SIZE 2048
 #define RESP_POOL_SIZE 1024
 #define RESP_BUF_SIZE 8192
+#define ACCEPT_MARGIN 2048
 
 enum {
     OP_ACCEPT = 1,
@@ -32,7 +33,8 @@ enum {
     OP_RECV = 3,
     OP_SEND = 4,
     OP_CLOSE = 5,
-    OP_EVENTFD = 6
+    OP_EVENTFD = 6,
+    OP_CANCEL = 7
 };
 
 #define MAKE_UD(op, ring, slot, gen) \
@@ -96,10 +98,49 @@ static int g_listen_fds[NUM_RINGS];
 static int g_efds[NUM_RINGS];
 static unsigned g_active_conns = 0;
 static unsigned g_ring_conns[NUM_RINGS];
-#define ACCEPT_MARGIN 1024
-#define RECYCLE_MARGIN 2048
-static int g_accept_armed[NUM_RINGS];
+static int g_accept_ring = 0;
+static uint16_t g_accept_epoch = 1;
+static int g_accept_armed = 0;
+static int g_accept_paused = 0;
 static unsigned g_slots_per_ring = MAX_SLOTS_PER_RING;
+
+static void arm_accept(int r) {
+    g_accept_epoch++;
+    for (int l = 0; l < NUM_RINGS; l++) {
+        sqe_accept_multishot(ring_sqe(&g_rings[r]), g_listen_fds[l], MAKE_UD(OP_ACCEPT, r, l, g_accept_epoch));
+    }
+    g_accept_ring = r;
+    g_accept_armed = 1;
+    g_accept_paused = 0;
+}
+
+static void move_accept(void) {
+    int old = g_accept_ring;
+    if (g_accept_armed) {
+        for (int l = 0; l < NUM_RINGS; l++) {
+            sqe_cancel(ring_sqe(&g_rings[old]),
+                       MAKE_UD(OP_ACCEPT, old, l, g_accept_epoch),
+                       MAKE_UD(OP_CANCEL, old, l, 0));
+        }
+        g_accept_armed = 0;
+    }
+    int best = -1;
+    unsigned max_free = 0;
+    for (int r = 0; r < NUM_RINGS; r++) {
+        if (g_slots_per_ring > g_ring_conns[r]) {
+            unsigned free_slots = g_slots_per_ring - g_ring_conns[r];
+            if (free_slots > max_free) {
+                max_free = free_slots;
+                best = r;
+            }
+        }
+    }
+    if (best >= 0 && max_free >= ACCEPT_MARGIN) {
+        arm_accept(best);
+    } else {
+        g_accept_paused = 1;
+    }
+}
 
 static void close_conn(int ring_idx, unsigned slot, uint16_t gen) {
     if (ring_idx >= NUM_RINGS || slot >= g_slots_per_ring || !g_conns[ring_idx][slot].open || g_conns[ring_idx][slot].gen != gen) return;
@@ -113,9 +154,8 @@ static void close_conn(int ring_idx, unsigned slot, uint16_t gen) {
     uint64_t close_ud = MAKE_UD(OP_CLOSE, ring_idx, slot, g_conns[ring_idx][slot].gen);
     sqe_shutdown_close(&g_rings[ring_idx], slot, close_ud, poll_ud, close_ud);
 
-    if (!g_accept_armed[ring_idx] && g_listen_fds[ring_idx] >= 0 && g_ring_conns[ring_idx] + ACCEPT_MARGIN < g_slots_per_ring) {
-        sqe_accept_multishot(ring_sqe(&g_rings[ring_idx]), g_listen_fds[ring_idx], MAKE_UD(OP_ACCEPT, ring_idx, 0, 0));
-        g_accept_armed[ring_idx] = 1;
+    if (g_accept_paused && (g_slots_per_ring - g_ring_conns[ring_idx]) >= 2 * ACCEPT_MARGIN) {
+        move_accept();
     }
 }
 
@@ -196,9 +236,6 @@ int main() {
         setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
         setsockopt(listen_fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
         setsockopt(listen_fd, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
-        int buf_sz = 8192;
-        setsockopt(listen_fd, SOL_SOCKET, SO_RCVBUF, &buf_sz, sizeof(buf_sz));
-        setsockopt(listen_fd, SOL_SOCKET, SO_SNDBUF, &buf_sz, sizeof(buf_sz));
 
         if (bind(listen_fd, (struct sockaddr*)&sin, sizeof(sin)) != 0) {
             perror("bind");
@@ -208,23 +245,17 @@ int main() {
             perror("listen");
             return 1;
         }
-
-        // Arm multishot accept on ring i
-        sqe_accept_multishot(ring_sqe(&g_rings[i]), listen_fd, MAKE_UD(OP_ACCEPT, i, 0, 0));
-        g_accept_armed[i] = 1;
-        ring_submit(&g_rings[i], 0, 0, NULL, 0);
     }
+
+    // Arm initial multishot accepts for all listeners on active ring 0
+    arm_accept(0);
+    ring_submit(&g_rings[0], 0, 0, NULL, 0);
 
     printf("Listening on %s:%d (%d io_uring rings ready)\n", host, port, NUM_RINGS);
 
-    unsigned last_pass_count = 0;
-
     // Event loop
     while (1) {
-        // Adaptive wait: when busy, wait for up to 16 completions (or 1ms timeout) to amortize syscalls & SQLite transactions
-        unsigned min_wait = (last_pass_count >= 8) ? 16 : 1;
-        unsigned wait_ms = (last_pass_count >= 8) ? 1 : 50;
-        long ret = ring_wait(&g_rings[0], min_wait, wait_ms);
+        long ret = ring_wait(&g_rings[0], 1, 50);
         if (ret < 0 && ret != -EINTR && ret != -ETIME) {
             fprintf(stderr, "ring_wait error: %ld\n", ret);
             break;
@@ -232,7 +263,6 @@ int main() {
 
         g_num_pending_writes = 0;
         int read_trans_open = 0;
-        unsigned pass_completions = 0;
 
         for (int r = 0; r < NUM_RINGS; r++) {
             struct ring *ring = &g_rings[r];
@@ -252,10 +282,12 @@ int main() {
 
                 head++;
                 count++;
-                pass_completions++;
 
                 switch (op) {
                     case OP_ACCEPT: {
+                        unsigned listener_idx = slot;
+                        uint16_t epoch = gen;
+                        int cur = (ring_idx == (unsigned)g_accept_ring && epoch == g_accept_epoch && g_accept_armed);
                         if (res >= 0) {
                             unsigned new_slot = (unsigned)res;
                             if (new_slot < g_slots_per_ring) {
@@ -266,15 +298,20 @@ int main() {
                                 g_active_conns++;
                                 g_ring_conns[ring_idx]++;
                                 sqe_poll_conn(ring_sqe(ring), new_slot, MAKE_UD(OP_POLL, ring_idx, new_slot, g_conns[ring_idx][new_slot].gen));
+                                if (cur && g_ring_conns[ring_idx] + ACCEPT_MARGIN >= g_slots_per_ring) {
+                                    move_accept();
+                                }
                             }
+                        } else if ((res == -ENFILE || res == -EMFILE) && cur) {
+                            move_accept();
                         }
-                        if (!(flags & IORING_CQE_F_MORE) || res < 0) {
-                            g_accept_armed[ring_idx] = 0;
-                            if (g_ring_conns[ring_idx] + ACCEPT_MARGIN < g_slots_per_ring) {
-                                sqe_accept_multishot(ring_sqe(ring), g_listen_fds[ring_idx], MAKE_UD(OP_ACCEPT, ring_idx, 0, 0));
-                                g_accept_armed[ring_idx] = 1;
-                            }
+                        if (!(flags & IORING_CQE_F_MORE) && cur && res != -ECANCELED) {
+                            sqe_accept_multishot(ring_sqe(ring), g_listen_fds[listener_idx], MAKE_UD(OP_ACCEPT, ring_idx, listener_idx, epoch));
                         }
+                        break;
+                    }
+
+                    case OP_CANCEL: {
                         break;
                     }
 
@@ -327,11 +364,7 @@ int main() {
                                 char *resp = g_resp_pool[resp_idx];
                                 size_t resp_len = 0;
 
-                                // Per-ring graceful recycle: recycle idle keep-alive connections when a ring is within 2048 of its slot limit
                                 int keep_alive = req.keep_alive;
-                                if (g_ring_conns[ring_idx] + RECYCLE_MARGIN >= g_slots_per_ring) {
-                                    keep_alive = 0;
-                                }
                                 g_conns[ring_idx][slot].keep_alive = keep_alive;
 
                                 if (parse_rc != 0) {
@@ -557,12 +590,12 @@ int main() {
             db_commit();
         }
 
-        last_pass_count = pass_completions;
-
         // Publish returned buffers and flush pending submissions across all rings
         for (int r = 0; r < NUM_RINGS; r++) {
             ring_buf_publish(&g_rings[r]);
-            ring_submit(&g_rings[r], 0, 0, NULL, 0);
+            if (ring_pending_submit(&g_rings[r]) > 0) {
+                ring_submit(&g_rings[r], 0, 0, NULL, 0);
+            }
         }
     }
 

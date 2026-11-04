@@ -11,9 +11,9 @@
 //
 // Single API prefix: Hash.*
 //
-// Memory layout — Header (72 bytes):
+// Memory layout — Header (80 bytes):
 //   [magic:8][capacity:8][size:8][entries_ptr:8][order_arr:8]
-//   [bump:8][bump_end:8][chunk:8][key_free:8]
+//   [bump:8][bump_end:8][chunk:8][key_free:8][tombstones:8]
 //   order_arr is an Array of key pointers in insertion order (Python 3.7+)
 //   Key bytes live in chunk blocks owned by the table. A live key pointer
 //   stays put across resize. Delete recycles the cell onto key_free.
@@ -102,7 +102,7 @@ Function.Hash.Create {
         }
         capacity = p
 
-        header = Allocate(72)
+        header = Allocate(80)
         StoreValue(header, HashMagic.MAGIC)
         StoreValue(Add(header, 8),  capacity)
         StoreValue(Add(header, 16), 0)
@@ -118,6 +118,7 @@ Function.Hash.Create {
         StoreValue(Add(header, 48), 0)
         StoreValue(Add(header, 56), 0)
         StoreValue(Add(header, 64), 0)
+        StoreValue(Add(header, 72), 0)
         ReturnValue(header)
     }
 }
@@ -196,9 +197,17 @@ Function.Hash.FindSlot {
 Function.Hash.Resize {
     Input: table: Address
     Body: {
+        Hash.RehashTo(table, Multiply(Dereference(Add(table, 8)), 2))
+    }
+}
+
+// Rebuild the slot array at new_cap, dropping tombstones
+Function.Hash.RehashTo {
+    Input: table: Address
+    Input: new_cap: Integer
+    Body: {
         old_cap     = Dereference(Add(table, 8))
         old_entries = Dereference(Add(table, 24))
-        new_cap     = Multiply(old_cap, 2)
 
         new_bytes = Multiply(new_cap, 32)
         new_entries = Allocate(new_bytes)
@@ -234,6 +243,7 @@ Function.Hash.Resize {
         Deallocate(old_entries, Multiply(old_cap, 32))
         StoreValue(Add(table, 8),  new_cap)
         StoreValue(Add(table, 24), new_entries)
+        StoreValue(Add(table, 72), 0)
     }
 }
 
@@ -387,9 +397,16 @@ Function.Hash.Set {
         size = Dereference(Add(table, 16))
         ents = Dereference(Add(table, 24))
 
-        // Resize at 70% load
-        IfCondition GreaterThan(size, Divide(Multiply(cap, 7), 10)) ThenBlock: {
-            Hash.Resize(table)
+        // Rebuild at 70% load, tombstones included: deletes leave tombstones,
+        // and a table full of them has no empty slot to end a probe. Double
+        // only when the live entries need it.
+        tombs = Dereference(Add(table, 72))
+        IfCondition GreaterThan(Add(size, tombs), Divide(Multiply(cap, 7), 10)) ThenBlock: {
+            IfCondition GreaterThan(size, Divide(Multiply(cap, 7), 20)) ThenBlock: {
+                Hash.Resize(table)
+            } ElseBlock: {
+                Hash.RehashTo(table, cap)
+            }
             cap  = Dereference(Add(table, 8))
             ents = Dereference(Add(table, 24))
         }
@@ -410,6 +427,7 @@ Function.Hash.Set {
                 ins = slot
                 IfCondition NotEqual(tomb, -1) ThenBlock: {
                     ins = tomb
+                    StoreValue(Add(table, 72), Subtract(Dereference(Add(table, 72)), 1))
                 }
                 ioff  = Multiply(ins, 32)
                 klen  = StringLength(key)
@@ -444,6 +462,22 @@ Function.Hash.Set {
             i = Add(i, 1)
         }
 
+        // No empty slot anywhere: reuse the first tombstone
+        IfCondition NotEqual(tomb, -1) ThenBlock: {
+            ioff  = Multiply(tomb, 32)
+            klen  = StringLength(key)
+            kcopy = Hash.KeyBytes(table, key, klen)
+            StoreValue(Add(ents, ioff),        h)
+            StoreValue(Add(ents, Add(ioff, 8)),  kcopy)
+            StoreValue(Add(ents, Add(ioff, 16)), value)
+            StoreValue(Add(table, 16), Add(size, 1))
+            StoreValue(Add(table, 72), Subtract(Dereference(Add(table, 72)), 1))
+            ord = Dereference(Add(table, 32))
+            IfCondition EqualTo(Array.IsArray(ord), 1) ThenBlock: {
+                Hash.OrderPush(ord, kcopy)
+            }
+            ReturnValue(1)
+        }
         ReturnValue(0)
     }
 }
@@ -524,6 +558,7 @@ Function.Hash.Delete {
         StoreValue(Add(ents, Add(off, 8)),  0)
         StoreValue(Add(ents, Add(off, 16)), 0)
         StoreValue(Add(table, 16), Subtract(size, 1))
+        StoreValue(Add(table, 72), Add(Dereference(Add(table, 72)), 1))
         ReturnValue(1)
     }
 }
@@ -557,6 +592,9 @@ Function.Hash.Clear {
         Hash.FreeChunks(table)
         MemorySet(ents, 0, Multiply(cap, 32))
         StoreValue(Add(table, 16), 0)
+        StoreValue(Add(table, 72), 0)
+        old_ord = Dereference(Add(table, 32))
+        IfCondition EqualTo(Array.IsArray(old_ord), 1) ThenBlock: { Array.Destroy(old_ord) }
         StoreValue(Add(table, 32), Array.Create(8))
     }
 }
@@ -640,6 +678,7 @@ Function.Hash.Values {
             Array.Push(result, Hash.Get(table, Array.Get(keys, i)))
             i = Add(i, 1)
         }
+        Array.Destroy(keys)
         ReturnValue(result)
     }
 }
@@ -681,7 +720,7 @@ Function.Hash.Destroy {
         ents = Dereference(Add(table, 24))
         Hash.FreeChunks(table)
         Deallocate(ents, Multiply(cap, 32))
-        Deallocate(table, 72)
+        Deallocate(table, 80)
     }
 }
 

@@ -29,6 +29,15 @@ FixedPool.HTTP1Off {
     "OUT_SENT": Initialize=128
     "HDR_END": Initialize=136
     "DEFER": Initialize=144
+    "PRIV_IN": Initialize=152
+    "PRIV_OUT": Initialize=160
+    // Bumped on every accept, so a late reply cannot reach a reused slot
+    "GEN": Initialize=168
+    // Virtual connection (FD = -2): the front process, slot and generation
+    // the request came from
+    "VFRONT": Initialize=176
+    "VIDX": Initialize=184
+    "VGEN": Initialize=192
     "SLOT": Initialize=256
 }
 
@@ -50,6 +59,61 @@ FixedPool.HTTP1St {
     "defer_n": Initialize=0, CanChange=True
     "defer_cap": Initialize=512, CanChange=True
     "commit_fn": Initialize=0, CanChange=True
+    "scratch_in": Initialize=0, CanChange=True
+    "scratch_out": Initialize=0, CanChange=True
+    "pool": Initialize=0, CanChange=True
+    "reuseport": Initialize=0, CanChange=True
+    // CallIndirect(ring_fn, n) when the eventfd tagged RING_TAG + n is ready
+    "ring_fn": Initialize=0, CanChange=True
+    // CallIndirect(vsend_fn, conn) sends a virtual connection's response
+    "vsend_fn": Initialize=0, CanChange=True
+    // CallIndirect(tick_fn, 0) once per event-loop pass, after the commit
+    "tick_fn": Initialize=0, CanChange=True
+}
+
+FixedPool.HTTP1Ring {
+    "TAG": Initialize=2147483392
+    "MAX": Initialize=64
+}
+
+// Free list of bufsz buffers, linked through their first word
+Function.HTTP1.PoolGet {
+    Output: Address
+    Body: {
+        b = HTTP1St.pool
+        IfCondition EqualTo(b, 0) ThenBlock: { ReturnValue(Allocate(HTTP1St.bufsz)) }
+        HTTP1St.pool = Dereference(b)
+        ReturnValue(b)
+    }
+}
+
+Function.HTTP1.PoolPut {
+    Input: b: Address
+    Body: {
+        IfCondition EqualTo(b, 0) ThenBlock: { ReturnValue(0) }
+        StoreValue(b, HTTP1St.pool)
+        HTTP1St.pool = b
+    }
+}
+
+// Give back the connection's private buffers; it reads and writes the
+// shared ones until it needs a private buffer again.
+Function.HTTP1.ReleaseIn {
+    Input: conn: Address
+    Body: {
+        HTTP1.PoolPut(HTTP1.CGet(conn, HTTP1Off.PRIV_IN))
+        HTTP1.CSet(conn, HTTP1Off.PRIV_IN, 0)
+        HTTP1.CSet(conn, HTTP1Off.BUF, HTTP1St.scratch_in)
+    }
+}
+
+Function.HTTP1.ReleaseOut {
+    Input: conn: Address
+    Body: {
+        HTTP1.PoolPut(HTTP1.CGet(conn, HTTP1Off.PRIV_OUT))
+        HTTP1.CSet(conn, HTTP1Off.PRIV_OUT, 0)
+        HTTP1.CSet(conn, HTTP1Off.OUT, HTTP1St.scratch_out)
+    }
 }
 
 Function.HTTP1.ConnAt {
@@ -102,6 +166,8 @@ Function.HTTP1.ClearConn {
             Socket.Close(fd)
         }
         HTTP1.CSet(conn, HTTP1Off.FD, -1)
+        HTTP1.ReleaseIn(conn)
+        HTTP1.ReleaseOut(conn)
     }
 }
 
@@ -127,6 +193,9 @@ Function.HTTP1.Listen {
         fd = Socket.Create(2, 1)
         IfCondition LessThan(fd, 0) ThenBlock: { ReturnValue(-1) }
         Socket.SetReuseAddr(fd)
+        IfCondition EqualTo(HTTP1St.reuseport, 1) ThenBlock: {
+            Socket.SetSockInt(fd, SockOpt.SOL_SOCKET, 15)
+        }
         bn = Socket.BindInet(fd, host, port)
         IfCondition LessThan(bn, 0) ThenBlock: {
             Socket.Close(fd)
@@ -151,15 +220,19 @@ Function.HTTP1.Listen {
         HTTP1St.listen = fd
         HTTP1St.epfd = epfd
         nslot = HTTP1St.nslot
+        HTTP1St.scratch_in = Allocate(HTTP1St.bufsz)
+        HTTP1St.scratch_out = Allocate(HTTP1St.bufsz)
         HTTP1St.slots = Allocate(Multiply(nslot, HTTP1Off.SLOT))
         i = 0
         WhileLoop LessThan(i, nslot) {
             conn = HTTP1.ConnAt(i)
             HTTP1.CSet(conn, HTTP1Off.FD, -1)
             HTTP1.CSet(conn, HTTP1Off.STATE, 0)
-            HTTP1.CSet(conn, HTTP1Off.BUF, Allocate(HTTP1St.bufsz))
+            HTTP1.CSet(conn, HTTP1Off.BUF, HTTP1St.scratch_in)
             HTTP1.CSet(conn, HTTP1Off.CAP, HTTP1St.bufsz)
-            HTTP1.CSet(conn, HTTP1Off.OUT, Allocate(HTTP1St.bufsz))
+            HTTP1.CSet(conn, HTTP1Off.OUT, HTTP1St.scratch_out)
+            HTTP1.CSet(conn, HTTP1Off.PRIV_IN, 0)
+            HTTP1.CSet(conn, HTTP1Off.PRIV_OUT, 0)
             HTTP1.CSet(conn, HTTP1Off.FILL, 0)
             i = Add(i, 1)
         }
@@ -207,6 +280,7 @@ Function.HTTP1.Accept {
             }
             conn = HTTP1.ConnAt(idx)
             HTTP1.CSet(conn, HTTP1Off.FD, cli)
+            HTTP1.CSet(conn, HTTP1Off.GEN, Add(HTTP1.CGet(conn, HTTP1Off.GEN), 1))
             HTTP1.ResetParse(conn)
             HTTP1.CSet(conn, HTTP1Off.FILL, 0)
             data = Add(idx, 1)
@@ -618,6 +692,9 @@ Function.HTTP1.Flush {
     Output: Integer
     Body: {
         fd = HTTP1.CGet(conn, HTTP1Off.FD)
+        IfCondition EqualTo(fd, -2) ThenBlock: {
+            ReturnValue(CallIndirect(HTTP1St.vsend_fn, conn))
+        }
         out = HTTP1.CGet(conn, HTTP1Off.OUT)
         ol = HTTP1.CGet(conn, HTTP1Off.OUT_LEN)
         sent = HTTP1.CGet(conn, HTTP1Off.OUT_SENT)
@@ -681,7 +758,10 @@ Function.HTTP1.FlushDeferred {
             conn = Dereference(Add(HTTP1St.defer_list, Multiply(i, 8)))
             HTTP1.CSet(conn, HTTP1Off.DEFER, 0)
             fd = HTTP1.CGet(conn, HTTP1Off.FD)
-            IfCondition GreaterThan(fd, 0) ThenBlock: {
+            live = 0
+            IfCondition GreaterThan(fd, 0) ThenBlock: { live = 1 }
+            IfCondition EqualTo(fd, -2) ThenBlock: { live = 1 }
+            IfCondition EqualTo(live, 1) ThenBlock: {
                 fr = HTTP1.Flush(conn)
                 IfCondition EqualTo(fr, -1) ThenBlock: {
                     HTTP1.ClearConn(conn)
@@ -692,6 +772,7 @@ Function.HTTP1.FlushDeferred {
                         HTTP1.ClearConn(conn)
                     } ElseBlock: {
                         HTTP1.ResetParse(conn)
+                        HTTP1.ReleaseOut(conn)
                     }
                 }
             }
@@ -721,6 +802,7 @@ Function.HTTP1.Defer {
 Function.HTTP1.HandleReady {
     Input: conn: Address
     Body: {
+        HTTP1.CSet(conn, HTTP1Off.OUT, HTTP1St.scratch_out)
         HTTP1St.cur = conn
         h = HTTP1St.handler
         CallIndirect(h, conn)
@@ -728,7 +810,64 @@ Function.HTTP1.HandleReady {
     }
 }
 
+// Requests are read and responses built in two shared buffers, so an idle
+// keep-alive connection holds no buffer pages. Only what must outlive this
+// call is copied to the connection's own buffers: a partial request, a
+// response deferred to the group commit, or a response the socket did not
+// take in full.
 Function.HTTP1.OnConn {
+    Input: idx: Integer
+    Body: {
+        conn = HTTP1.ConnAt(idx)
+        st = HTTP1.CGet(conn, HTTP1Off.STATE)
+        fill = HTTP1.CGet(conn, HTTP1Off.FILL)
+        IfCondition NotEqual(st, 3) ThenBlock: {
+            IfCondition EqualTo(fill, 0) ThenBlock: {
+                HTTP1.CSet(conn, HTTP1Off.BUF, HTTP1St.scratch_in)
+            }
+        }
+        HTTP1.OnConnInner(idx)
+        HTTP1.Unshare(conn)
+    }
+}
+
+Function.HTTP1.Unshare {
+    Input: conn: Address
+    Body: {
+        fill = HTTP1.CGet(conn, HTTP1Off.FILL)
+        IfCondition EqualTo(HTTP1.CGet(conn, HTTP1Off.BUF), HTTP1St.scratch_in) ThenBlock: {
+            IfCondition GreaterThan(fill, 0) ThenBlock: {
+                b = HTTP1.PoolGet()
+                MemoryCopy(b, HTTP1St.scratch_in, fill)
+                HTTP1.CSet(conn, HTTP1Off.BUF, b)
+                HTTP1.CSet(conn, HTTP1Off.PRIV_IN, b)
+            }
+        } ElseBlock: {
+            IfCondition EqualTo(fill, 0) ThenBlock: { HTTP1.ReleaseIn(conn) }
+        }
+        pending = 0
+        IfCondition EqualTo(HTTP1.CGet(conn, HTTP1Off.DEFER), 1) ThenBlock: { pending = 1 }
+        IfCondition GreaterThan(HTTP1.CGet(conn, HTTP1Off.FD), 0) ThenBlock: {
+            IfCondition LessThan(HTTP1.CGet(conn, HTTP1Off.OUT_SENT), HTTP1.CGet(conn, HTTP1Off.OUT_LEN)) ThenBlock: { pending = 1 }
+        }
+        IfCondition EqualTo(HTTP1.CGet(conn, HTTP1Off.OUT), HTTP1St.scratch_out) ThenBlock: {
+            IfCondition EqualTo(pending, 1) ThenBlock: {
+                b = HTTP1.CGet(conn, HTTP1Off.PRIV_OUT)
+                IfCondition EqualTo(b, 0) ThenBlock: { b = HTTP1.PoolGet() }
+                ol = HTTP1.CGet(conn, HTTP1Off.OUT_LEN)
+                IfCondition GreaterThan(ol, 0) ThenBlock: {
+                    MemoryCopy(b, HTTP1St.scratch_out, ol)
+                }
+                HTTP1.CSet(conn, HTTP1Off.OUT, b)
+                HTTP1.CSet(conn, HTTP1Off.PRIV_OUT, b)
+            }
+        } ElseBlock: {
+            IfCondition EqualTo(pending, 0) ThenBlock: { HTTP1.ReleaseOut(conn) }
+        }
+    }
+}
+
+Function.HTTP1.OnConnInner {
     Input: idx: Integer
     Body: {
         conn = HTTP1.ConnAt(idx)
@@ -828,7 +967,11 @@ Function.HTTP1.Serve {
                 IfCondition EqualTo(data, 0) ThenBlock: {
                     HTTP1.Accept()
                 } ElseBlock: {
-                    HTTP1.OnConn(Subtract(data, 1))
+                    IfCondition GreaterEqual(data, HTTP1Ring.TAG) ThenBlock: {
+                        CallIndirect(HTTP1St.ring_fn, Subtract(data, HTTP1Ring.TAG))
+                    } ElseBlock: {
+                        HTTP1.OnConn(Subtract(data, 1))
+                    }
                 }
                 i = Add(i, 1)
             }
@@ -838,6 +981,9 @@ Function.HTTP1.Serve {
                     CallIndirect(fn, HTTP1St.slots)
                 }
                 HTTP1.FlushDeferred()
+            }
+            IfCondition NotEqual(HTTP1St.tick_fn, 0) ThenBlock: {
+                CallIndirect(HTTP1St.tick_fn, 0)
             }
         }
     }

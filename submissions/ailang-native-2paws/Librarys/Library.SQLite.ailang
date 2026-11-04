@@ -18,6 +18,12 @@ FixedPool.SQLiteSys {
     "WRITE": Initialize=1
     "PWRITE": Initialize=18
     "FDATASYNC": Initialize=75
+    "FTRUNCATE": Initialize=77
+    "MUNMAP": Initialize=11
+    "READ": Initialize=0
+    "FORK": Initialize=57
+    "PRCTL": Initialize=157
+    "EVENTFD2": Initialize=290
     "CLOCK": Initialize=228
     "O_RDONLY": Initialize=0
     "O_RDWR": Initialize=2
@@ -46,6 +52,29 @@ FixedPool.SQLiteDB {
     "path": Initialize=0, CanChange=True
     "overlay": Initialize=0, CanChange=True
     "txn": Initialize=0, CanChange=True
+    // Pages written to the WAL since the last checkpoint, and the WAL size
+    // at which they are copied into the database file and the WAL restarts
+    "ckpt": Initialize=0, CanChange=True
+    "ckpt_at": Initialize=4194304, CanChange=True
+    // WAL size at the last write-back, and the size at which the WAL restarts
+    "bf_at": Initialize=0, CanChange=True
+    "reset_at": Initialize=67108864, CanChange=True
+    // Syncer process: eventfds to ask for a WAL fdatasync and to hear it is
+    // done, the pages frozen for that sync, and the WAL size they cover
+    "sync_req": Initialize=-1, CanChange=True
+    "sync_done": Initialize=-1, CanChange=True
+    "sync_buf": Initialize=0, CanChange=True
+    "inflight": Initialize=0, CanChange=True
+    "sync_ready": Initialize=0, CanChange=True
+    // 1: WAL fdatasync before a write-back. 2: database fdatasync before the
+    // WAL restarts.
+    "sync_kind": Initialize=0, CanChange=True
+    "frz": Initialize=0, CanChange=True
+    "frz_at": Initialize=0, CanChange=True
+    // Previous mapping, unmapped at the next remap so no pointer taken
+    // during the current request outlives it
+    "old_map": Initialize=0, CanChange=True
+    "old_size": Initialize=0, CanChange=True
     "keybuf": Initialize=0, CanChange=True
     "npages": Initialize=0, CanChange=True
     "wal_fd": Initialize=0, CanChange=True
@@ -462,6 +491,8 @@ Function.SQLite.Open {
         SQLiteDB.keybuf = Allocate(24)
         SQLiteDB.overlay = Hash.Create(64)
         SQLiteDB.txn = Hash.Create(64)
+        SQLiteDB.ckpt = Hash.Create(256)
+        SQLiteDB.frz = Hash.Create(256)
         SQLiteFeed.slots = Allocate(1280)
         SQLiteCnt.leaf = 0
         SQLiteCnt.first = 0
@@ -1938,7 +1969,8 @@ Function.SQLite.LoadWal {
             ReturnValue(0)
         }
         magic = SQLite.BE32(mp, 0)
-        IfCondition NotEqual(magic, 931135106) ThenBlock: {
+        // 0x377F0682: WAL with little-endian checksums
+        IfCondition NotEqual(magic, 931071618) ThenBlock: {
             SystemCall(SQLiteSys.CLOSE, fd, 0, 0)
             ReturnValue(0)
         }
@@ -1996,7 +2028,9 @@ Function.SQLite.WalEnsure {
         }
         hdr = Allocate(32)
         MemorySet(hdr, 0, 32)
-        SQLite.PutBE32(hdr, 0, 931135106)
+        // 0x377F0682: WAL with little-endian checksums. SQLite ignores a WAL
+        // with any other magic.
+        SQLite.PutBE32(hdr, 0, 931071618)
         SQLite.PutBE32(hdr, 4, 3007000)
         SQLite.PutBE32(hdr, 8, SQLiteDB.page)
         ts = Allocate(16)
@@ -2057,6 +2091,16 @@ Function.SQLite.Commit {
     Output: Integer
     Body: {
         IfCondition EqualTo(SQLiteDB.txn, 0) ThenBlock: { ReturnValue(1) }
+        IfCondition EqualTo(Hash.Size(SQLiteDB.txn), 0) ThenBlock: { ReturnValue(1) }
+        // SQLite reads the page count from page 1 (offset 28) whenever the
+        // change counter matches version-valid-for, WAL or not. Log page 1
+        // with the new count in the commit that grew the file, as SQLite
+        // does, or every page added after the seed is past its end.
+        p1 = SQLite.Page(1)
+        IfCondition NotEqual(SQLite.BE32(p1, 28), SQLiteDB.npages) ThenBlock: {
+            p1 = SQLite.Dirty(1)
+            SQLite.PutBE32(p1, 28, SQLiteDB.npages)
+        }
         vals = Hash.Values(SQLiteDB.txn)
         n = Array.Size(vals)
         IfCondition EqualTo(n, 0) ThenBlock: { ReturnValue(1) }
@@ -2067,9 +2111,13 @@ Function.SQLite.Commit {
             cmt = 0
             IfCondition EqualTo(i, last) ThenBlock: { cmt = 1 }
             SQLite.WalFrame(pgno, cmt)
+            Hash.Set(SQLiteDB.ckpt, SQLite.PageKey(pgno), pgno)
             i = Add(i, 1)
         }
+        Array.Destroy(vals)
         Hash.Clear(SQLiteDB.txn)
+        SQLite.SyncApply()
+        SQLite.CkptMaybe()
         SQLiteCnt.leaf = 0
         SQLiteCnt.first = 0
         SQLiteCnt.last = 0
@@ -2088,6 +2136,270 @@ Function.SQLite.Commit {
             SQLiteDB.users_dirty = 0
         }
         ReturnValue(1)
+    }
+}
+
+// Copy every page committed since the last checkpoint into the database
+// file, then restart the WAL. Reads are unaffected: the overlay keeps the
+// newest copy of each page. The next commit writes a fresh WAL header with
+// new salts, so frames from before the restart are never replayed. Without
+// this the WAL grows for as long as the server runs, and every page of it
+// is charged to the process as file cache.
+// Copy the pages in `set` back into the database and drop their overlay
+// copies. Pages also in `skip` were committed again after the frames that
+// were synced, so they wait for the next round. The caller has made the WAL
+// frames for these pages durable.
+Function.SQLite.Backfill {
+    Input: set: Address
+    Input: skip: Address
+    Body: {
+        vals = Hash.Values(set)
+        n = Array.Size(vals)
+        ps = SQLiteDB.page
+        i = 0
+        WhileLoop LessThan(i, n) {
+            pgno = Array.Get(vals, i)
+            key = SQLite.PageKey(pgno)
+            later = 0
+            IfCondition NotEqual(skip, 0) ThenBlock: {
+                IfCondition NotEqual(Hash.Get(skip, key), 0) ThenBlock: { later = 1 }
+            }
+            page = SQLite.Page(pgno)
+            IfCondition EqualTo(later, 0) ThenBlock: {
+                IfCondition NotEqual(page, 0) ThenBlock: {
+                    off = Multiply(Subtract(pgno, 1), ps)
+                    SystemCall(SQLiteSys.PWRITE, SQLiteDB.fd, page, ps, off)
+                    // Inside the mapping the file now has this page, and the
+                    // read-only private mapping shows it, so drop the copy.
+                    IfCondition LessThan(off, SQLiteDB.size) ThenBlock: {
+                        key = SQLite.PageKey(pgno)
+                        ov = Hash.Get(SQLiteDB.overlay, key)
+                        IfCondition NotEqual(ov, 0) ThenBlock: {
+                            Hash.Delete(SQLiteDB.overlay, key)
+                            Deallocate(ov, ps)
+                            SQLiteDB.dirty_n = Subtract(SQLiteDB.dirty_n, 1)
+                        }
+                    }
+                }
+            }
+            i = Add(i, 1)
+        }
+        Array.Destroy(vals)
+        Hash.Clear(set)
+    }
+}
+
+// Every 64 MB of WAL: with every committed page in the database and the
+// database on disk, the WAL restarts. Synchronous, so it is kept rare.
+Function.SQLite.ResetWal {
+    Body: {
+        IfCondition GreaterEqual(SQLiteDB.wal_fd, 0) ThenBlock: {
+            SystemCall(SQLiteSys.FDATASYNC, SQLiteDB.wal_fd, 0, 0)
+        }
+        SQLite.Backfill(SQLiteDB.ckpt, 0)
+        SystemCall(SQLiteSys.FDATASYNC, SQLiteDB.fd, 0, 0)
+        IfCondition GreaterEqual(SQLiteDB.wal_fd, 0) ThenBlock: {
+            SystemCall(SQLiteSys.FTRUNCATE, SQLiteDB.wal_fd, 0, 0)
+            SystemCall(SQLiteSys.CLOSE, SQLiteDB.wal_fd, 0, 0)
+        }
+        SQLiteDB.wal_fd = Subtract(0, 1)
+        SQLiteDB.wal_size = 0
+        SQLiteDB.bf_at = 0
+    }
+}
+
+Function.SQLite.AfterBackfill {
+    Body: {
+        IfCondition LessThan(SQLiteDB.sync_req, 0) ThenBlock: {
+            IfCondition GreaterEqual(SQLiteDB.wal_size, SQLiteDB.reset_at) ThenBlock: {
+                SQLite.ResetWal()
+            }
+        }
+        need = Multiply(SQLiteDB.npages, SQLiteDB.page)
+        IfCondition GreaterEqual(Subtract(need, SQLiteDB.size), 4194304) ThenBlock: {
+            SQLite.Remap(need)
+        }
+        // Row and count caches may point into pages just dropped
+        SQLite.ClearRowCache()
+        SQLiteCnt.leaf = 0
+        SQLiteCnt.first = 0
+        SQLiteCnt.last = 0
+        SQLiteCnt.lo = 0
+        SQLiteCnt.prev = 0
+        SQLiteCnt.ncells = 0
+    }
+}
+
+// synchronous=NORMAL order: no page reaches the database before its WAL
+// frames are on disk, and the WAL never restarts before the database is.
+// The WAL fdatasync runs in the syncer process so commits keep going; without
+// one, it runs here.
+Function.SQLite.CkptMaybe {
+    Body: {
+        IfCondition LessThan(Subtract(SQLiteDB.wal_size, SQLiteDB.bf_at), SQLiteDB.ckpt_at) ThenBlock: { ReturnValue(0) }
+        IfCondition LessThan(SQLiteDB.sync_req, 0) ThenBlock: {
+            IfCondition GreaterEqual(SQLiteDB.wal_fd, 0) ThenBlock: {
+                SystemCall(SQLiteSys.FDATASYNC, SQLiteDB.wal_fd, 0, 0)
+            }
+            SQLite.Backfill(SQLiteDB.ckpt, 0)
+            SQLiteDB.bf_at = SQLiteDB.wal_size
+            SQLite.AfterBackfill()
+            ReturnValue(0)
+        }
+        IfCondition EqualTo(SQLiteDB.inflight, 1) ThenBlock: { ReturnValue(0) }
+        t = SQLiteDB.frz
+        SQLiteDB.frz = SQLiteDB.ckpt
+        SQLiteDB.ckpt = t
+        SQLiteDB.frz_at = SQLiteDB.wal_size
+        SQLite.SyncAsk(1)
+    }
+}
+
+Function.SQLite.SyncAsk {
+    Input: kind: Integer
+    Body: {
+        SQLiteDB.inflight = 1
+        SQLiteDB.sync_kind = kind
+        StoreValue(SQLiteDB.sync_buf, kind)
+        SystemCall(SQLiteSys.WRITE, SQLiteDB.sync_req, SQLiteDB.sync_buf, 8)
+    }
+}
+
+// The database file is on disk up to the last write-back. Restart the WAL
+// and log again the pages committed since, which the file does not have yet.
+// No fdatasync here: power loss can drop those latest commits, never leave
+// the file inconsistent, as with synchronous=NORMAL.
+Function.SQLite.RestartWal {
+    Body: {
+        IfCondition GreaterEqual(SQLiteDB.wal_fd, 0) ThenBlock: {
+            SystemCall(SQLiteSys.FTRUNCATE, SQLiteDB.wal_fd, 0, 0)
+            SystemCall(SQLiteSys.CLOSE, SQLiteDB.wal_fd, 0, 0)
+        }
+        SQLiteDB.wal_fd = Subtract(0, 1)
+        SQLiteDB.wal_size = 0
+        SQLiteDB.bf_at = 0
+        vals = Hash.Values(SQLiteDB.ckpt)
+        n = Array.Size(vals)
+        last = Subtract(n, 1)
+        i = 0
+        WhileLoop LessThan(i, n) {
+            cmt = 0
+            IfCondition EqualTo(i, last) ThenBlock: { cmt = 1 }
+            SQLite.WalFrame(Array.Get(vals, i), cmt)
+            i = Add(i, 1)
+        }
+        Array.Destroy(vals)
+    }
+}
+
+// The syncer finished the WAL fdatasync asked for in CkptMaybe. This can
+// arrive between requests, with uncommitted pages in the transaction, so the
+// write-back waits for the next Commit.
+Function.SQLite.SyncDone {
+    Body: {
+        SystemCall(SQLiteSys.READ, SQLiteDB.sync_done, SQLiteDB.sync_buf, 8)
+        IfCondition EqualTo(SQLiteDB.inflight, 1) ThenBlock: { SQLiteDB.sync_ready = 1 }
+    }
+}
+
+// In Commit, with the transaction empty: write back the frozen pages
+Function.SQLite.SyncApply {
+    Body: {
+        IfCondition EqualTo(SQLiteDB.sync_ready, 0) ThenBlock: { ReturnValue(0) }
+        SQLiteDB.sync_ready = 0
+        SQLiteDB.inflight = 0
+        IfCondition EqualTo(SQLiteDB.sync_kind, 2) ThenBlock: {
+            SQLite.RestartWal()
+            ReturnValue(0)
+        }
+        SQLite.Backfill(SQLiteDB.frz, SQLiteDB.ckpt)
+        SQLiteDB.bf_at = SQLiteDB.frz_at
+        SQLite.AfterBackfill()
+        IfCondition GreaterEqual(SQLiteDB.wal_size, SQLiteDB.reset_at) ThenBlock: {
+            SQLite.SyncAsk(2)
+        }
+    }
+}
+
+// Fork the syncer before the database opens. It waits on sync_req, then
+// fdatasyncs the WAL (request 1) or the database (request 2) by path (an
+// fsync acts on the file, not the descriptor) and signals sync_done.
+// Returns only in the parent.
+Function.SQLite.StartSyncer {
+    Input: path: Address
+    Body: {
+        SQLiteDB.sync_buf = Allocate(8)
+        SQLiteDB.sync_req = SystemCall(SQLiteSys.EVENTFD2, 0, 0)
+        SQLiteDB.sync_done = SystemCall(SQLiteSys.EVENTFD2, 0, 2048)
+        IfCondition Or(LessThan(SQLiteDB.sync_req, 0), LessThan(SQLiteDB.sync_done, 0)) ThenBlock: {
+            SQLiteDB.sync_req = -1
+            ReturnValue(0)
+        }
+        pid = SystemCall(SQLiteSys.FORK)
+        IfCondition NotEqual(pid, 0) ThenBlock: { ReturnValue(1) }
+        SystemCall(SQLiteSys.PRCTL, 1, 9, 0, 0, 0)
+        SQLiteDB.path = path
+        wn = SQLite.WalName()
+        WhileLoop 1 {
+            r = SystemCall(SQLiteSys.READ, SQLiteDB.sync_req, SQLiteDB.sync_buf, 8)
+            IfCondition EqualTo(r, 8) ThenBlock: {
+                target = wn
+                IfCondition EqualTo(Dereference(SQLiteDB.sync_buf), 2) ThenBlock: { target = path }
+                fd = SystemCall(SQLiteSys.OPEN, target, SQLiteSys.O_RDWR, 0)
+                IfCondition GreaterEqual(fd, 0) ThenBlock: {
+                    SystemCall(SQLiteSys.FDATASYNC, fd, 0, 0)
+                    SystemCall(SQLiteSys.CLOSE, fd, 0, 0)
+                }
+                StoreValue(SQLiteDB.sync_buf, 1)
+                SystemCall(SQLiteSys.WRITE, SQLiteDB.sync_done, SQLiteDB.sync_buf, 8)
+            }
+        }
+    }
+}
+
+// Map the grown file and drop the overlay copies of pages it now covers.
+// Called from a checkpoint, when every committed page is in the file.
+Function.SQLite.Remap {
+    Input: need: Integer
+    Body: {
+        mp = SystemCall(SQLiteSys.MMAP, 0, need, SQLiteSys.PROT_READ, SQLiteSys.MAP_PRIVATE, SQLiteDB.fd, 0)
+        IfCondition LessThan(mp, 4096) ThenBlock: { ReturnValue(0) }
+        IfCondition NotEqual(SQLiteDB.old_map, 0) ThenBlock: {
+            SystemCall(SQLiteSys.MUNMAP, SQLiteDB.old_map, SQLiteDB.old_size, 0)
+        }
+        SQLiteDB.old_map = SQLiteDB.map
+        SQLiteDB.old_size = SQLiteDB.size
+        SQLiteDB.map = mp
+        SQLiteDB.size = need
+        ps = SQLiteDB.page
+        keys = Hash.Keys(SQLiteDB.overlay)
+        n = Array.Size(keys)
+        i = 0
+        WhileLoop LessThan(i, n) {
+            key = Array.Get(keys, i)
+            pgno = 0
+            j = 0
+            c = GetByte(key, 0)
+            WhileLoop NotEqual(c, 0) {
+                pgno = Add(Multiply(pgno, 10), Subtract(c, 48))
+                j = Add(j, 1)
+                c = GetByte(key, j)
+            }
+            pending = 0
+            IfCondition NotEqual(Hash.Get(SQLiteDB.ckpt, key), 0) ThenBlock: { pending = 1 }
+            IfCondition EqualTo(pending, 0) ThenBlock: {
+              IfCondition LessThan(Multiply(Subtract(pgno, 1), ps), need) ThenBlock: {
+                ov = Hash.Get(SQLiteDB.overlay, key)
+                IfCondition NotEqual(ov, 0) ThenBlock: {
+                    Hash.Delete(SQLiteDB.overlay, key)
+                    Deallocate(ov, ps)
+                    SQLiteDB.dirty_n = Subtract(SQLiteDB.dirty_n, 1)
+                }
+              }
+            }
+            i = Add(i, 1)
+        }
+        Array.Destroy(keys)
     }
 }
 
@@ -2247,6 +2559,12 @@ Function.SQLite.CellSize {
         IfCondition EqualTo(flags, 2) ThenBlock: { skip = 4 }
         payload = SQLite.Varint(cell, skip)
         rec_off = SQLiteV.next
+        // A table leaf cell has the rowid varint between the payload size and
+        // the record. Leaving it out cut every moved row short.
+        IfCondition EqualTo(flags, 13) ThenBlock: {
+            SQLite.Varint(cell, rec_off)
+            rec_off = SQLiteV.next
+        }
         ReturnValue(Add(rec_off, payload))
     }
 }
@@ -2557,6 +2875,13 @@ Function.SQLite.SplitLeaf {
             SQLite.PutCell(rp, rppos, SQLiteIns.buf, SQLiteIns.len)
         }
         SQLite.SaveSep(pageno)
+        // In an index B-tree the parent cell is an entry itself, so the
+        // separator moves up instead of staying in the left leaf as well.
+        IfCondition EqualTo(flags, 10) ThenBlock: {
+            lp = SQLite.Page(pageno)
+            SQLite.PutBE16(lp, Add(h, 3), Subtract(SQLite.BE16(lp, Add(h, 3)), 1))
+            SQLite.Compact(pageno)
+        }
         SQLiteIns.split = 1
         SQLiteIns.right = rp
         ReturnValue(1)
@@ -2979,6 +3304,10 @@ Function.SQLite.PkWalk {
                 rec = SQLite.IndexCellRec(cell, 4)
                 ku = SQLite.ColInt(rec, 0)
                 kp = SQLite.ColInt(rec, 1)
+                // An interior cell of an index is an entry, not just a bound
+                IfCondition EqualTo(ku, uid) ThenBlock: {
+                    IfCondition EqualTo(kp, pid) ThenBlock: { ReturnValue(1) }
+                }
                 go = 0
                 IfCondition LessThan(uid, ku) ThenBlock: { go = 1 }
                 IfCondition EqualTo(uid, ku) ThenBlock: {

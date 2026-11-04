@@ -8,6 +8,7 @@ LibraryImport.Env
 LibraryImport.JSON
 LibraryImport.Crypto
 LibraryImport.HTTP1
+LibraryImport.HTTP1Front
 LibraryImport.SQLite
 
 FixedPool.FeedSt {
@@ -20,6 +21,7 @@ FixedPool.FeedSt {
     "secret": Initialize=0, CanChange=True
     "start": Initialize=0, CanChange=True
     "ok": Initialize=0, CanChange=True
+    "uname": Initialize=0, CanChange=True
 }
 
 Function.Feed.NowUnix {
@@ -420,7 +422,20 @@ Function.Feed.Auth {
         IfCondition EqualTo(okb, 0) ThenBlock: { ReturnValue(0) }
         tok = Add(b, 7)
         now = Feed.NowUnix()
+        // Every token is verified in full. Its decode, HMAC and JSON buffers
+        // come from the scratch arena and are dropped together afterwards;
+        // the username is copied out first.
+        Arena_ScratchBegin()
         rc = Crypto.JWT_HS256(tok, FeedSt.secret, now)
+        IfCondition EqualTo(rc, 1) ThenBlock: {
+            nm = JWTOut.name
+            nl = StringLength(nm)
+            IfCondition GreaterThan(nl, 255) ThenBlock: { nl = 255 }
+            MemoryCopy(FeedSt.uname, nm, nl)
+            SetByte(FeedSt.uname, nl, 0)
+            JWTOut.name = FeedSt.uname
+        }
+        Arena_ScratchEnd()
         IfCondition EqualTo(rc, 1) ThenBlock: { ReturnValue(1) }
         IfCondition EqualTo(rc, 2) ThenBlock: { ReturnValue(-2) }
         ReturnValue(-1)
@@ -840,7 +855,26 @@ Function.FeedHandler {
     }
 }
 
+FixedPool.Feed {
+    "SYNC_TAG": Initialize=63
+}
+
+// Tagged eventfds: the syncer, or a front's request ring
+Function.Feed.Ring {
+    Input: n: Integer
+    Body: {
+        IfCondition EqualTo(n, Feed.SYNC_TAG) ThenBlock: {
+            SQLite.SyncDone()
+            ReturnValue(0)
+        }
+        Front.OnReq(n)
+    }
+}
+
 SubRoutine.Main {
+    // Lazily built tables must not come from the scratch arena used in Auth
+    Crypto.EnsureInit()
+    FeedSt.uname = Allocate(256)
     FeedSt.out = Allocate(FeedSt.cap)
     FeedSt.ts = Allocate(16)
     FeedSt.iso = Allocate(32)
@@ -864,6 +898,29 @@ SubRoutine.Main {
     IfCondition EqualTo(port, 0) ThenBlock: {
         port = 3000
     }
+    ns = Env.GetInt("HTTP_NSLOT")
+    IfCondition EqualTo(ns, 0) ThenBlock: { ns = 8192 }
+    HTTP1St.nslot = ns
+    HTTP1St.evmax = 256
+    bz = Env.GetInt("HTTP_BUFSZ")
+    IfCondition EqualTo(bz, 0) ThenBlock: { bz = 8192 }
+    HTTP1St.bufsz = bz
+    // Front processes each hold up to HTTP_NSLOT more connections on their
+    // own descriptor limit. Forked before the database opens.
+    fronts = Env.GetInt("HTTP_FRONTS")
+    IfCondition GreaterThan(fronts, 0) ThenBlock: {
+        IfCondition EqualTo(Front.Setup(fronts), 0) ThenBlock: {
+            PrintMessage("FAIL front setup\n")
+            Exit(1)
+        }
+        me = Front.Fork()
+        IfCondition GreaterEqual(me, 0) ThenBlock: {
+            Front.Serve(host, port)
+        }
+        HTTP1St.reuseport = 1
+    }
+    // WAL fdatasyncs for checkpoints run in their own process
+    SQLite.StartSyncer(path)
     dbok = SQLite.Open(path)
     FeedSt.ok = dbok
     IfCondition EqualTo(dbok, 0) ThenBlock: {
@@ -872,17 +929,15 @@ SubRoutine.Main {
     }
     SQLiteDB.auto_commit = 0
     HTTP1St.commit_fn = AddressOf(Feed.CommitBatch)
-    ns = Env.GetInt("HTTP_NSLOT")
-    IfCondition EqualTo(ns, 0) ThenBlock: { ns = 8192 }
-    HTTP1St.nslot = ns
-    HTTP1St.evmax = 256
-    bz = Env.GetInt("HTTP_BUFSZ")
-    IfCondition EqualTo(bz, 0) ThenBlock: { bz = 8192 }
-    HTTP1St.bufsz = bz
     fd = HTTP1.Listen(host, port)
     IfCondition LessThan(fd, 0) ThenBlock: {
         PrintMessage("FAIL listen\n")
         Exit(1)
+    }
+    IfCondition GreaterThan(fronts, 0) ThenBlock: { Front.Attach() }
+    HTTP1St.ring_fn = AddressOf(Feed.Ring)
+    IfCondition GreaterEqual(SQLiteDB.sync_done, 0) ThenBlock: {
+        Epoll.Add(HTTP1St.epfd, SQLiteDB.sync_done, 1, Add(HTTP1Ring.TAG, Feed.SYNC_TAG))
     }
     PrintMessage("listening\n")
     HTTP1.Serve(AddressOf(FeedHandler))

@@ -6,8 +6,13 @@ cd "$(dirname "$0")"
 export JWT_SECRET="${JWT_SECRET:-twelve-dollar-challenge}"
 export HOST="${HOST:-127.0.0.1}"
 export PORT="${PORT:-3000}"
-# Must be at least the number of expected open connections. Default 32768 handles up
-# to ~15k users. For 120k+ concurrent users, set HTTP_NSLOT=131072 or higher.
-export HTTP_NSLOT="${HTTP_NSLOT:-32768}"
+# Maximum open connections, one per user. The official box runs with
+# LimitNOFILE=65535, and the server keeps 7 descriptors of its own, so 65520
+# uses almost all of them while leaving room to accept and close a connection
+# when the table is full. Raise it only together with the fd limit.
+export HTTP_NSLOT="${HTTP_NSLOT:-65520}"
+# Front processes, each with its own descriptor limit and HTTP_NSLOT more
+# connections; requests reach the one database process through shared memory.
+export HTTP_FRONTS="${HTTP_FRONTS:-1}"
 export HTTP_BUFSZ="${HTTP_BUFSZ:-8192}"
 exec ./feed_server.x

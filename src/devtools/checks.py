@@ -10,7 +10,7 @@ import tempfile
 from contextlib import closing
 from pathlib import Path
 
-from . import runtime
+from . import runtime, sources
 
 
 def cpp_editor(image: str) -> None:
@@ -52,8 +52,7 @@ def cpp_editor(image: str) -> None:
     print("Editor headers refreshed from the Linux build image.")
 
 
-def native_check() -> None:
-    image = runtime.build(tests=True)
+def native_check(image: str) -> None:
     if os.name == "nt":
         cpp_editor(image)
     print(
@@ -96,22 +95,29 @@ def check(use_docker: bool) -> None:
         ["ruff", "check", "."],
         ["ruff", "format", "--check", "."],
         ["pyright"],
-        ["python", "-m", "unittest", "-v", "tests.test_dev"],
+        ["python", "-m", "unittest", "discover", "-v", "-s", "tests", "-t", ".", "-p", "test_*.py"],
     ]:
         subprocess.run(["uv", "run", "--locked", *args], cwd=runtime.ROOT / "src", check=True)
     if use_docker:
-        runtime.build()
-        native_check()
-        output = runtime.ROOT / "results"
-        output.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(prefix="check-", dir=output) as directory:
-            work = Path(directory).resolve()
-            with runtime.server(work) as (container, port):
-                verify(container, port, work)
+        with sources.capture(runtime.ROOT) as source:
+            test_image = runtime.build("test-build", source=source)
+            native_check(test_image)
+            image = runtime.build("tested-runtime", source=source)
+            tested = runtime.image_identity(test_image, "/build/out/server")
+            serving = runtime.image_identity(image, "/app/server")
+            if tested["binary_sha256"] != serving["binary_sha256"]:
+                raise RuntimeError("HTTP checks must use the exact server tested by CTest")
+            output = runtime.ROOT / "src/.build/checks"
+            output.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(prefix="check-", dir=output) as directory:
+                work = Path(directory).resolve()
+                with runtime.server(work, image=image, workspace=source.root) as (container, port):
+                    verify(container, port, work)
         subprocess.run(
             ["uv", "run", "--locked", "python", "-m", "unittest", "-v", "tests.test_api"],
             cwd=runtime.ROOT / "src",
-            env=os.environ | {"TDS_HTTP_TESTS": "1"},
+            env=os.environ
+            | {"TDS_HTTP_TESTS": "1", "TDS_HTTP_TEST_IMAGE": str(serving["image_id"])},
             check=True,
         )
 

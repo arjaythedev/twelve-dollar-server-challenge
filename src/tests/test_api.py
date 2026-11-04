@@ -76,7 +76,12 @@ class HTTPTests(unittest.TestCase):
             raise AssertionError("the server cannot restart after persistence inspection")
         if self._endpoint is None:
             self._endpoint = self.stack.enter_context(
-                server(self.output, database=self.database, secret=SECRET.decode())
+                server(
+                    self.output,
+                    database=self.database,
+                    secret=SECRET.decode(),
+                    image=os.environ.get("TDS_HTTP_TEST_IMAGE"),
+                )
             )
         return self._endpoint
 

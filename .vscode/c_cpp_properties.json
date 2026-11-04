@@ -28,7 +28,8 @@
       "browse": {
         "path": [
           "${workspaceFolder}/src/server",
-          "${workspaceFolder}/src/checks"
+          "${workspaceFolder}/src/load",
+          "${workspaceFolder}/src/tests"
         ]
       }
     }

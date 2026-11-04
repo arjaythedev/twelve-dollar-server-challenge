@@ -1,5 +1,6 @@
 """JSON reports, performance parsing and saved result rendering"""
 
+import hashlib
 import json
 import math
 import re
@@ -11,14 +12,8 @@ from statistics import median
 from typing import Literal, Never, NotRequired, TypedDict, cast
 
 PROFILE_EVENT = "cpu-clock:u"
-
-
 PROFILE_FREQUENCY = 997
-
-
 PROFILE_STACK_BYTES = 8192
-
-
 NETWORK_COUNTERS = frozenset(
     {
         "InSegs",
@@ -145,7 +140,7 @@ def write_json(path: Path, value: object, *, compact: bool = False) -> None:
         separators=(",", ":") if compact else None,
         allow_nan=False,
     )
-    temporary.write_text(encoded + "\n", encoding="utf-8")
+    temporary.write_text(encoded + "\n", encoding="utf-8", newline="\n")
     temporary.replace(path)
 
 
@@ -183,12 +178,8 @@ def parse_telemetry(
             mapping(record["totals"])
             if not isinstance(record["windows"], list):
                 raise ValueError("telemetry windows must be an array")
-            for key in ("overwritten_windows", "dropped_events"):
-                value = telemetry_counter(record, key)
-                if key == "overwritten_windows":
-                    overwritten += value
-                else:
-                    dropped += value
+            overwritten += telemetry_counter(record, "overwritten_windows")
+            dropped += telemetry_counter(record, "dropped_events")
             sources.add(source)
             records.append(record)
         except (ValueError, KeyError) as error:
@@ -274,6 +265,39 @@ def read_json(path: Path) -> JSONValue:
     return decode_json(path.read_bytes())
 
 
+def load_saved_report(path: Path) -> JSONValue:
+    if path.is_file():
+        if path.name == "summary.json" and (path.parent / "manifest.json").is_file():
+            return load_saved_report(path.parent)
+        return read_json(path)
+    manifest_path = path / "manifest.json"
+    if manifest_path.is_file():
+        manifest = mapping(read_json(manifest_path))
+        summary = path / "summary.json"
+        provenance = manifest.get("provenance")
+        source = provenance.get("source") if isinstance(provenance, dict) else None
+        if isinstance(source, dict):
+            actual_patch = hashlib.sha256((path / "source.patch").read_bytes()).hexdigest()
+            if actual_patch != source.get("patch_sha256"):
+                raise ValueError(f"source.patch does not match its manifest: {path}")
+        expected = manifest.get("summary_sha256")
+        if (
+            isinstance(expected, str)
+            and hashlib.sha256(summary.read_bytes()).hexdigest() != expected
+        ):
+            raise ValueError(f"summary does not match its manifest: {summary}")
+        return read_json(summary)
+    if not path.is_dir():
+        raise FileNotFoundError(path)
+    manifests = sorted({*path.glob("*/manifest.json"), *path.glob("*/*/manifest.json")})
+    if not manifests:
+        raise ValueError(f"no saved runs in {path}")
+    entries: list[JSONValue] = []
+    for file in manifests:
+        entries.append({"manifest": read_json(file), "summary": load_saved_report(file.parent)})
+    return {"kind": "run_collection", "schema_version": 1, "entries": entries}
+
+
 def mapping(value: JSONValue) -> dict[str, JSONValue]:
     if not isinstance(value, dict):
         raise ValueError("expected a JSON object")
@@ -288,6 +312,9 @@ def number(row: dict[str, JSONValue], key: str) -> float:
 
 
 def integer(row: dict[str, JSONValue], key: str) -> int:
+    original = row[key]
+    if isinstance(original, int) and not isinstance(original, bool):
+        return original
     value = number(row, key)
     if not value.is_integer():
         raise ValueError(f"{key}: expected an integer")
@@ -341,15 +368,7 @@ def parse_results(rows: JSONValue) -> list[Result]:
     return results
 
 
-def append_result(path: Path, result: Result) -> None:
-    rows = read_json(path) if path.exists() else []
-    if not isinstance(rows, list):
-        raise ValueError("results must be a JSON array")
-    # The display projection omits experiment metadata, so preserve the original records
-    write_json(path, [*rows, result])
-
-
-def summarize(output: Path) -> RunReport:
+def summarize(output: Path, *, label: str | None = None) -> RunReport:
     run = mapping(read_json(output / "run.json"))
     summary = mapping(read_json(output / "k6-summary.json"))
     environment = mapping(read_json(output / "environment.json"))
@@ -377,7 +396,7 @@ def summarize(output: Path) -> RunReport:
         raise ValueError("no HTTP requests were measured")
     result = Result(
         date=datetime.fromtimestamp((output / "run.json").stat().st_mtime, UTC).date().isoformat(),
-        name=output.name,
+        name=label or output.name,
         runtime=f"C++ {text(runtime, 'version')}",
         load_generator=text(run, "load_generator") if "load_generator" in run else "native",
         generator=text(run, "generator") if "generator" in run else "k6",
@@ -714,51 +733,111 @@ def show_diagnostics(workload: dict[str, JSONValue]) -> None:
         )
 
 
+def show_telemetry_probe(report: dict[str, JSONValue]) -> None:
+    medians = mapping(report["medians"])
+    before = mapping(medians["before"])
+    after = mapping(medians["after"])
+    reduction = mapping(report["reduction_percent"])
+    print("Telemetry hooks (thread CPU per call)")
+    print("Path                        Before ns   After ns  Reduction")
+    for key in before:
+        label = key.removesuffix("_ns_per_call").replace("_", " ")
+        print(
+            f"{label:26}  {number(before, key):9.2f}  {number(after, key):9.2f}"
+            f"  {number(reduction, key):8.2f}%"
+        )
+
+
 def show_saved_report(document: JSONValue) -> None:
-    if isinstance(document, dict) and document.get("kind") == "server_telemetry":
-        show_telemetry(document)
-        return
-    if isinstance(document, list) or (isinstance(document, dict) and "runs" in document):
+    if isinstance(document, list):
         show_results(parse_results(document))
         return
     report = mapping(document)
-    if "rows" in report:
-        show_group_commits(report)
-        return
-    if "profile" in report:
-        if "benchmark" in report:
-            show_results(parse_results([report["benchmark"]]))
-        show_profile(mapping(report["profile"]))
-        workload = mapping(report.get("load_generator", {}))
-    else:
-        workload = mapping(report.get("generator", {}))
-    show_latency_breakdown(workload)
-    show_diagnostics(workload)
-    if "server_telemetry" in report:
-        telemetry = mapping(report["server_telemetry"])
-        status = "complete" if telemetry["complete"] is True else "incomplete"
+    kind = report.get("kind")
+    canonical = kind in ("workload", "probe", "comparison")
+    if canonical:
+        if report.get("schema_version") != 1:
+            raise ValueError("unsupported run summary version")
+        print(f"Run: {report.get('label', '')} ({text(report, 'status')})")
+        instruments = report.get("instruments")
+        if isinstance(instruments, dict) and kind == "workload":
+            print(
+                f"Telemetry: {instruments.get('server_telemetry')}; "
+                f"client diagnostics: {instruments.get('client_diagnostics')}; "
+                f"perf: {instruments.get('perf')}"
+            )
+    if kind in ("probe", "comparison"):
+        measurement = report.get("measurement")
+        if isinstance(measurement, dict):
+            if measurement.get("kind") in ("telemetry_gate_probe", "telemetry_hook_probe"):
+                show_telemetry_probe(measurement)
+            else:
+                print(json.dumps(measurement, indent=2, allow_nan=False))
+        elif measurement is not None or report.get("status") == "passed":
+            raise ValueError("successful probe requires a measurement object")
+    elif kind == "run_collection":
+        values = report.get("entries")
+        if report.get("schema_version") != 1 or not isinstance(values, list):
+            raise ValueError("unsupported run collection")
+        print("Run                                      Status       Kind")
+        for value in values:
+            manifest = mapping(mapping(value)["manifest"])
+            print(
+                f"{text(manifest, 'label'):40} {text(manifest, 'status'):12} {text(manifest, 'kind')}"
+            )
+    elif kind == "raw_archive":
         print(
-            f"Server telemetry ({telemetry['mode']}): {status}; "
-            f"{telemetry['dropped_events']} dropped events, "
-            f"{telemetry['overwritten_windows']} overwritten windows."
+            f"{text(report, 'name')}: {integer(report, 'file_count')} files, "
+            f"{integer(report, 'size_bytes')} bytes"
         )
+    elif kind in ("telemetry_gate_probe", "telemetry_hook_probe"):
+        show_telemetry_probe(report)
+    elif kind == "server_telemetry":
+        show_telemetry(report)
+    elif "runs" in report:
+        show_results(parse_results(report))
+    elif "rows" in report:
+        show_group_commits(report)
+    elif kind == "workload" or any(
+        key in report for key in ("profile", "generator", "load_generator")
+    ):
+        benchmark = report.get("benchmark")
+        if isinstance(benchmark, dict):
+            show_results(parse_results([benchmark]))
+        elif canonical:
+            print("No complete HTTP measurements available")
+        if "profile" in report:
+            show_profile(mapping(report["profile"]))
+        workload = mapping(report.get("load_generator", report.get("generator", {})))
+        show_latency_breakdown(workload)
+        show_diagnostics(workload)
+        telemetry = report.get("server_telemetry")
+        if isinstance(telemetry, dict):
+            show_telemetry(telemetry)
+    else:
+        raise ValueError("unsupported saved report; use --json to inspect the document")
+    if report.get("error"):
+        print(f"Error: {report['error']}")
+    errors = report.get("secondary_errors", [])
+    if isinstance(errors, list):
+        for error in errors:
+            print(f"Collection: {error}")
 
 
 def show_telemetry(document: JSONValue) -> None:
     report = mapping(document)
-    values = report["reports"]
+    if "reports" in report:
+        report = telemetry_summary(report)
+    values = report["owners"]
     if not isinstance(values, list):
-        raise ValueError("server telemetry reports must be an array")
+        raise ValueError("server telemetry owners must be an array")
     status = "complete" if report["complete"] is True else "incomplete"
     print(f"Server telemetry ({report['mode']}): {status}, {len(values)}/3 owners")
     print("Source         Windows  Overwritten  Dropped events")
     for value in values:
         owner = mapping(value)
-        windows = owner["windows"]
-        if not isinstance(windows, list):
-            raise ValueError("server telemetry windows must be an array")
         print(
-            f"{text(owner, 'source'):13}  {len(windows):7}  "
+            f"{text(owner, 'source'):13}  {integer(owner, 'window_count'):7}  "
             f"{telemetry_counter(owner, 'overwritten_windows'):11}  "
             f"{telemetry_counter(owner, 'dropped_events'):14}"
         )
@@ -770,6 +849,37 @@ def show_telemetry(document: JSONValue) -> None:
         print(f"Missing owner: {source}")
     for error in errors:
         print(f"Collection error: {error}")
+    for value in values:
+        owner = mapping(value)
+        source = text(owner, "source")
+        show_metrics(mapping(owner.get("metrics", {})), prefix=source)
+        counters = mapping(owner.get("counters", {}))
+        selected = ("write_commands", "commits", "checkpoint_busy", "checkpoint_failures")
+        if any(counters.get(key, 0) for key in selected):
+            print(
+                f"  {source}: "
+                + ", ".join(f"{key}={counters[key]}" for key in selected if key in counters)
+            )
+        wal = mapping(owner.get("wal", {}))
+        if wal:
+            print(f"  {source} WAL: " + ", ".join(f"{key}={value}" for key, value in wal.items()))
+
+
+def show_metrics(metrics: dict[str, JSONValue], *, prefix: str) -> None:
+    for name, value in metrics.items():
+        if not isinstance(value, dict):
+            continue
+        label = f"{prefix}.{name}"
+        if "mean" not in value:
+            show_metrics(value, prefix=label)
+            continue
+        unit = text(value, "unit")
+        scale = 1000 if unit == "ns" else 1
+        print(
+            f"  {label}: n={integer(value, 'count'):,}, "
+            f"mean={number(value, 'mean') / scale:.3f}, "
+            f"max={number(value, 'max') / scale:.3f} {'us' if unit == 'ns' else unit}"
+        )
 
 
 def workload_summary(workload: dict[str, JSONValue]) -> dict[str, JSONValue]:
@@ -822,7 +932,9 @@ def workload_summary(workload: dict[str, JSONValue]) -> dict[str, JSONValue]:
 def metric_summary(metrics: dict[str, JSONValue]) -> dict[str, JSONValue]:
     summary: dict[str, JSONValue] = {}
     for name, value in metrics.items():
-        if not isinstance(value, dict):
+        if isinstance(value, list):
+            summary[name] = [metric_summary(mapping(item)) for item in value]
+        elif not isinstance(value, dict):
             summary[name] = value
         elif "buckets" in value:
             count = integer(value, "count")
@@ -864,47 +976,64 @@ def telemetry_summary(document: JSONValue) -> dict[str, JSONValue]:
             raise ValueError("server telemetry windows must be an array")
         row = {key: owner[key] for key in ("source", "overwritten_windows", "dropped_events")}
         row["window_count"] = len(windows)
-        for key in ("counters", "wal", "wal_advice"):
+        compact = metric_summary(totals)
+        for key in ("counters", "wal", "wal_advice", "metrics"):
             if key in totals:
-                row[key] = totals[key]
-        if "metrics" in totals:
-            row["metrics"] = metric_summary(mapping(totals["metrics"]))
-        rings = totals.get("rings", [])
+                row[key] = compact[key]
+        rings = compact.get("rings", [])
         if not isinstance(rings, list):
             raise ValueError("server telemetry rings must be an array")
         if rings:
-            compact_rings: list[JSONValue] = []
-            for ring in rings:
-                data = mapping(ring)
-                compact = {key: item for key, item in data.items() if key != "metrics"}
-                if "metrics" in data:
-                    compact["metrics"] = metric_summary(mapping(data["metrics"]))
-                compact_rings.append(compact)
-            row["rings"] = compact_rings
+            row["rings"] = rings
         owners.append(row)
     summary["owners"] = owners
     return summary
 
 
-def save_profile_result(
-    output: Path, result: Result, workload: dict[str, JSONValue], destination: Path | None
-) -> None:
-    saved = mapping(read_json(output / "profile.json"))
-    profile = mapping(saved.get("profile", saved))
-    window = mapping(read_json(output / "window.json"))
-    report: dict[str, object] = {
-        "benchmark": result,
-        "profile": profile,
-        "window": {key: value for key, value in window.items() if not key.startswith("cgroup_")},
-    }
-    if workload:
-        report["load_generator"] = workload_summary(workload)
-    telemetry = output / "telemetry.json"
-    if telemetry.is_file():
-        report["server_telemetry"] = telemetry_summary(read_json(telemetry))
-    write_json(output / "profile.json", report)
-    if destination is not None:
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        write_json(destination, report)
-    show_profile(profile)
-    show_latency_breakdown(workload)
+def run_summary(
+    output: Path, *, label: str, telemetry: TelemetryMode = "off"
+) -> dict[str, JSONValue]:
+    report: dict[str, JSONValue] = {}
+    errors: list[JSONValue] = []
+    required = ("run.json", "k6-summary.json", "environment.json", "samples.json")
+    missing = [name for name in required if not (output / name).is_file()]
+    if missing:
+        errors.append("Missing workload artifacts: " + ", ".join(missing))
+    else:
+        try:
+            measured = summarize(output, label=label)
+            report["benchmark"] = cast(JSONValue, measured.result)
+            if measured.generator:
+                report["load_generator"] = workload_summary(measured.generator)
+        except (OSError, ValueError, KeyError) as error:
+            errors.append(f"Workload summary: {error}")
+    artifacts = (
+        ("perf-analysis.json", "profile"),
+        ("window.json", "window"),
+        ("telemetry.jsonl", "server_telemetry"),
+        ("collection-errors.json", "collection_errors"),
+    )
+    for filename, key in artifacts:
+        path = output / filename
+        if not path.is_file():
+            if key == "server_telemetry" and telemetry != "off":
+                errors.append("requested server telemetry export is missing")
+            continue
+        try:
+            if key == "server_telemetry":
+                raw = parse_telemetry(path.read_text(encoding="utf-8"), expected_mode=telemetry)
+                report[key] = telemetry_summary(cast(JSONValue, raw))
+            elif key == "collection_errors":
+                values = read_json(path)
+                if not isinstance(values, list):
+                    raise ValueError("collection errors must be an array")
+                errors.extend(values)
+            else:
+                value = mapping(read_json(path))
+                report[key] = {
+                    name: item for name, item in value.items() if not name.startswith("cgroup_")
+                }
+        except (OSError, ValueError, KeyError) as error:
+            errors.append(f"{filename}: {error}")
+    report["collection_errors"] = errors
+    return report

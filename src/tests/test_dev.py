@@ -1,9 +1,11 @@
 """Tests for dev tooling, workload orchestration and profile analysis"""
 
+import hashlib
 import json
 import subprocess
 import tempfile
 import unittest
+from collections.abc import Callable
 from dataclasses import FrozenInstanceError
 from io import StringIO
 from pathlib import Path
@@ -17,7 +19,6 @@ from devtools.reports import (
     JSONValue,
     Result,
     analyze_profile,
-    append_result,
     cpu_delta,
     decode_json,
     duration_seconds,
@@ -41,6 +42,50 @@ from devtools.runtime import (
     run_workload,
     server,
 )
+from devtools.sources import SourceSnapshot
+from tests import TemporaryDirectory
+
+
+class TemporaryCleanupTests(unittest.TestCase):
+    def test_windows_delayed_unlink_is_retried(self) -> None:
+        temporary = TemporaryDirectory()
+        try:
+            busy = OSError(145, "directory not empty", None, 145)
+            with (
+                patch.object(
+                    tempfile.TemporaryDirectory, "cleanup", side_effect=[busy, None]
+                ) as cleanup,
+                patch("tests.time.sleep") as sleep,
+            ):
+                temporary.cleanup()
+                self.assertEqual(cleanup.call_count, 2)
+                sleep.assert_called_once_with(0.05)
+        finally:
+            temporary.cleanup()
+
+    def test_retries_are_bounded_and_other_errors_propagate(self) -> None:
+        cases = (
+            (OSError(145, "directory not empty", None, 145), 5),
+            (PermissionError(5, "denied", None, 5), 1),
+            (OSError("other error"), 1),
+        )
+        for error, attempts in cases:
+            with self.subTest(error=error):
+                temporary = TemporaryDirectory()
+                try:
+                    with (
+                        patch.object(
+                            tempfile.TemporaryDirectory, "cleanup", side_effect=error
+                        ) as cleanup,
+                        patch("tests.time.sleep") as sleep,
+                    ):
+                        with self.assertRaises(OSError) as raised:
+                            temporary.cleanup()
+                        self.assertIs(raised.exception, error)
+                        self.assertEqual(cleanup.call_count, attempts)
+                        self.assertEqual(sleep.call_count, attempts - 1)
+                finally:
+                    temporary.cleanup()
 
 
 def stack(period: int, *frames: tuple[str, str]) -> str:
@@ -61,10 +106,14 @@ class NativeProfileTests(unittest.TestCase):
         for seed in (None, 3132383413):
             with (
                 self.subTest(seed=seed),
-                tempfile.TemporaryDirectory() as directory,
+                TemporaryDirectory() as directory,
                 patch(
                     "devtools.runtime.command",
-                    side_effect=["127.0.0.1:6565", "cpp-version\nsha /app/load"],
+                    return_value="cpp-version",
+                ),
+                patch(
+                    "devtools.runtime.image_identity",
+                    return_value={"image_id": GENERATOR_IMAGE, "binary_sha256": "generator-hash"},
                 ),
                 patch(
                     "devtools.runtime.subprocess.run",
@@ -76,13 +125,12 @@ class NativeProfileTests(unittest.TestCase):
                 args = RunConfig(
                     label="unit-test",
                     generator="cpp",
-                    k6=None,
                     vus=1,
                     hold="60s",
                     ramp="30s",
                     seed=seed,
                 )
-                with load_generator(args, "test-container", 3000, output) as generator:
+                with load_generator(args, "test-container", output) as generator:
                     self.assertIn(GENERATOR_IMAGE, generator.invocation)
                     if seed is None:
                         self.assertNotIn("--seed", generator.invocation)
@@ -90,14 +138,9 @@ class NativeProfileTests(unittest.TestCase):
                         index = generator.invocation.index("--seed")
                         self.assertEqual(generator.invocation[index + 1], str(seed))
 
-    def test_benchmark_append_preserves_experiment_metadata(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+    def test_legacy_result_reader_preserves_saved_experiment_bytes(self) -> None:
+        with TemporaryDirectory() as directory:
             path = Path(directory) / "results.json"
-            previous: JSONValue = {
-                "name": "earlier",
-                "server_sha256": "original",
-                "experiment": {"hold": [1, 2], "wal_cache_eviction": False},
-            }
             result = Result(
                 date="2026-11-03",
                 name="next",
@@ -118,16 +161,14 @@ class NativeProfileTests(unittest.TestCase):
                 server_peak_bytes=1,
                 passed=True,
             )
-            append_result(path, result)
-            self.assertEqual(read_json(path), [result])
-            write_json(path, [previous])
-            append_result(path, result)
-            self.assertEqual(read_json(path), [previous, result])
             write_json(path, {"runs": [result], "experiment": {"hold": [1, 2]}})
-            self.assertEqual(parse_results(read_json(path)), [result])
+            original = path.read_bytes()
+            self.assertEqual(parse_results(reports.load_saved_report(path)), [result])
+            self.assertEqual(path.read_bytes(), original)
+            self.assertEqual(mapping(read_json(path))["experiment"], {"hold": [1, 2]})
             write_json(path, {"invalid": "root"})
             with self.assertRaisesRegex(ValueError, "JSON array"):
-                append_result(path, result)
+                parse_results(reports.load_saved_report(path))
             self.assertEqual(read_json(path), {"invalid": "root"})
 
     def test_combined_profile_separates_modes_and_retains_user_caller_frames(self) -> None:
@@ -172,7 +213,7 @@ class NativeProfileTests(unittest.TestCase):
         self.assertEqual(report.get("syscalls_cpu_ns"), {"io_uring_enter": 300, "other": 100})
 
     def test_finished_generator_can_be_reaped_after_sampler_race(self) -> None:
-        args = RunConfig(vus=1, mode="bench", label="exit-race", ramp="30s", hold="60s")
+        args = RunConfig(vus=1, label="exit-race", ramp="30s", hold="60s")
         generator = LoadGenerator(["k6"], 6565, "test", "test", "load-container")
         snapshot: dict[str, JSONValue] = {
             "user_usec": 0,
@@ -181,7 +222,7 @@ class NativeProfileTests(unittest.TestCase):
             "main_system_ticks": 0,
         }
         with (
-            tempfile.TemporaryDirectory() as directory,
+            TemporaryDirectory() as directory,
             patch("devtools.runtime.subprocess.Popen") as launch,
             patch("devtools.runtime.command", return_value="100"),
             patch("devtools.runtime.k6_status", return_value={"status": 4}),
@@ -204,8 +245,8 @@ class NativeProfileTests(unittest.TestCase):
             self.assertTrue((Path(directory) / "run.json").is_file())
 
     def test_cpp_generator_starts_through_gate_without_k6_api(self) -> None:
-        args = RunConfig(vus=1, mode="bench", label="native-gate", ramp="30s", hold="60s")
-        generator = LoadGenerator(["load_generator"], 0, "test", "test", kind="cpp")
+        args = RunConfig(vus=1, label="native-gate", ramp="30s", hold="60s")
+        generator = LoadGenerator(["load_generator"], 0, "test", "test", "native-load", kind="cpp")
         snapshot: dict[str, JSONValue] = {
             "user_usec": 0,
             "system_usec": 0,
@@ -213,7 +254,7 @@ class NativeProfileTests(unittest.TestCase):
             "main_system_ticks": 0,
         }
         with (
-            tempfile.TemporaryDirectory() as directory,
+            TemporaryDirectory() as directory,
             patch("devtools.runtime.subprocess.Popen") as launch,
             patch("devtools.runtime.command", return_value="100"),
             patch("devtools.runtime.k6_status") as k6_api,
@@ -260,11 +301,14 @@ class NativeProfileTests(unittest.TestCase):
 
     def test_stop_timeout_preserves_failure_and_removes_owned_resources(self) -> None:
         def response(*args: str) -> str:
-            return "127.0.0.1:12345" if args[:2] == ("docker", "port") else "{}"
+            if args[:2] == ("docker", "port"):
+                return "127.0.0.1:12345"
+            return '[{"Image":"server-pinned"}]' if args[:2] == ("docker", "inspect") else "{}"
 
         with (
-            tempfile.TemporaryDirectory() as directory,
+            TemporaryDirectory() as directory,
             patch("devtools.runtime.command", side_effect=response) as command,
+            patch("devtools.runtime.image_identity", return_value={"image_id": "server-pinned"}),
             patch("devtools.runtime.healthy", return_value=True),
             patch("devtools.runtime.subprocess.run") as run,
             patch("builtins.print"),
@@ -272,6 +316,9 @@ class NativeProfileTests(unittest.TestCase):
             output = Path(directory)
             seed = output / "fixture.db"
             seed.touch()
+            workspace = output / "frozen"
+            (workspace / "bench").mkdir(parents=True)
+            (workspace / "bench" / "load.js").write_bytes(b"frozen workload")
             run.side_effect = [
                 subprocess.TimeoutExpired("docker stop", 20),
                 subprocess.CompletedProcess(["docker", "inspect"], 0, "[]", ""),
@@ -280,7 +327,7 @@ class NativeProfileTests(unittest.TestCase):
             ]
             container_name = ""
             with self.assertRaisesRegex(RuntimeError, "request failed"):
-                with server(output, database=seed) as (name, port):
+                with server(output, database=seed, workspace=workspace) as (name, port):
                     container_name = name
                     self.assertEqual(port, 12345)
                     raise RuntimeError("request failed")
@@ -289,6 +336,12 @@ class NativeProfileTests(unittest.TestCase):
             )
             command.assert_any_call("docker", "volume", "rm", container_name + "-data")
             self.assertEqual((output / "server.log").read_text(), "Listening\n")
+            launch = next(call.args for call in command.call_args_list if "--detach" in call.args)
+            self.assertIn(f"seccomp={workspace / 'src/docker/seccomp.json'}", launch)
+            environment = mapping(read_json(output / "environment.json"))
+            self.assertEqual(
+                environment["workload_sha256"], hashlib.sha256(b"frozen workload").hexdigest()
+            )
 
     def test_main_process_and_cgroup_cpu_remain_separate(self) -> None:
         before: dict[str, JSONValue] = {
@@ -389,8 +442,8 @@ class NativeRunnerTests(unittest.TestCase):
             patch("devtools.checks.cpp_editor"),
             patch("devtools.runtime.command", return_value="tests passed") as command,
         ):
-            native_check()
-            build.assert_called_once_with(tests=True)
+            native_check("native-tests")
+            build.assert_not_called()
             command.assert_called_once()
             invocation = command.call_args.args
             self.assertEqual(invocation[invocation.index("--entrypoint") + 1], "ctest")
@@ -400,21 +453,41 @@ class NativeRunnerTests(unittest.TestCase):
 
 
 class GeneratorImageTests(unittest.TestCase):
+    def test_generator_build_records_only_effective_settings(self) -> None:
+        with (
+            patch("devtools.runtime.command", return_value="verified-identity") as command,
+            patch("devtools.runtime.generator_fingerprint", return_value="generator-source"),
+            patch(
+                "devtools.runtime.subprocess.run",
+                return_value=subprocess.CompletedProcess([], 0, "", ""),
+            ),
+        ):
+            runtime.build("generator", telemetry="profile", source=make_snapshot(runtime.ROOT))
+            invocation = command.call_args_list[0].args
+            spec_label = next(
+                value for value in invocation if value.startswith(runtime.BUILD_LABEL + "=")
+            )
+            spec = mapping(decode_json(spec_label.split("=", 1)[1].encode()))
+            self.assertEqual(spec["target"], "generator")
+            self.assertTrue(spec["generator_only"])
+            self.assertNotIn("telemetry", spec)
+            self.assertFalse(any(value.startswith("TDS_TELEMETRY=") for value in invocation))
+
     def test_source_fingerprint_changes_for_every_generator_build_input(self) -> None:
         with (
-            tempfile.TemporaryDirectory() as directory,
+            TemporaryDirectory() as directory,
             patch("devtools.runtime.ROOT", Path(directory)),
         ):
             root = Path(directory) / "src"
             names = (
                 "load/main.cpp",
+                "load/detail/settings.hpp",
+                "load/CMakeLists.txt",
                 "CMakeLists.txt",
                 "Dockerfile",
                 ".dockerignore",
                 "cmake/dependencies.cmake",
                 "cmake/targets.cmake",
-                "tests/CMakeLists.txt",
-                "benchmarks/CMakeLists.txt",
             )
             for name in names:
                 path = root / name
@@ -427,14 +500,23 @@ class GeneratorImageTests(unittest.TestCase):
                     path.write_text(name + " changed", encoding="utf-8")
                     self.assertNotEqual(generator_fingerprint(), original)
                     path.write_text(name, encoding="utf-8")
+            for name in (
+                "tests/CMakeLists.txt",
+                "benchmarks/CMakeLists.txt",
+                "cmake/server-dependencies.cmake",
+            ):
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("unrelated", encoding="utf-8")
+                self.assertEqual(generator_fingerprint(), original)
 
     def test_matching_generator_fingerprint_skips_rebuild(self) -> None:
         with (
             patch("devtools.runtime.generator_fingerprint", return_value="current"),
             patch("devtools.runtime.command", return_value="current") as command,
         ):
-            ensure_generator()
-            command.assert_called_once()
+            self.assertEqual(ensure_generator(make_snapshot(runtime.ROOT)), "current")
+            self.assertEqual(command.call_count, 2)
             self.assertEqual(command.call_args.args[:3], ("docker", "image", "inspect"))
             self.assertEqual(command.call_args.args[-1], GENERATOR_IMAGE)
 
@@ -452,14 +534,12 @@ class GeneratorImageTests(unittest.TestCase):
                         "",
                     ],
                 ) as command,
+                patch("devtools.runtime.build", return_value="generator-pinned") as build,
             ):
-                ensure_generator()
-                self.assertEqual(command.call_count, 2)
-                build = command.call_args.args
-                self.assertEqual(build[:2], ("docker", "build"))
-                self.assertEqual(build[build.index("--tag") + 1], GENERATOR_IMAGE)
-                self.assertEqual(build[build.index("--target") + 1], "generator")
-                self.assertNotIn("TDS_BUILD_TARGET=load_generator", build)
+                source = make_snapshot(runtime.ROOT)
+                self.assertEqual(ensure_generator(source), "generator-pinned")
+                command.assert_called_once()
+                build.assert_called_once_with("generator", source=source)
 
     def test_server_choice_cannot_select_an_obsolete_native_generator(self) -> None:
         captured: list[LoadGenerator] = []
@@ -470,23 +550,32 @@ class GeneratorImageTests(unittest.TestCase):
             captured.append(generator)
             return 0
 
-        variants: tuple[tuple[str, reports.TelemetryMode], ...] = (
-            ("twelve-dollar-cpp:obsolete", "off"),
-            ("twelve-dollar-cpp:local-basic", "basic"),
-            ("twelve-dollar-cpp:local-profile", "profile"),
+        variants: tuple[tuple[str, reports.TelemetryMode, bool], ...] = (
+            ("twelve-dollar-cpp:obsolete", "off", False),
+            ("twelve-dollar-cpp:local-basic", "basic", True),
+            ("twelve-dollar-cpp:local-profile", "profile", False),
         )
-        for image, telemetry in variants:
+        for image, telemetry, diagnostics in variants:
             with (
                 self.subTest(image=image),
-                tempfile.TemporaryDirectory() as directory,
-                patch("devtools.runtime.ensure_generator") as ensure,
+                TemporaryDirectory() as directory,
+                patch(
+                    "devtools.runtime.ensure_generator", return_value="generator-pinned"
+                ) as ensure,
                 patch("devtools.runtime.server") as server_context,
                 patch("devtools.runtime.observing") as observer,
                 patch("devtools.runtime.load", side_effect=loaded),
                 patch(
                     "devtools.runtime.command",
-                    side_effect=["127.0.0.1:6565", "current\nsha /app/load"],
+                    return_value="current",
                 ) as command,
+                patch(
+                    "devtools.runtime.image_identity",
+                    return_value={
+                        "image_id": "generator-pinned",
+                        "binary_sha256": "generator-hash",
+                    },
+                ),
                 patch(
                     "devtools.runtime.subprocess.run",
                     return_value=subprocess.CompletedProcess([], 0, "[]", ""),
@@ -503,20 +592,21 @@ class GeneratorImageTests(unittest.TestCase):
                 write_json(output / "environment.json", {"docker_info": {"MemTotal": 24 * 2**30}})
                 args = RunConfig(
                     label="unit-test",
-                    mode="bench",
                     generator="cpp",
-                    k6=None,
                     vus=1,
                     hold="60s",
                     ramp="30s",
                     telemetry=telemetry,
+                    client_diagnostics=diagnostics,
                 )
                 self.assertEqual(run_workload(args, output, image=image), 0)
-                server_context.assert_called_once_with(output, image=image, telemetry=telemetry)
-                self.assertIn(GENERATOR_IMAGE, captured[-1].invocation)
+                server_context.assert_called_once_with(
+                    output, image=image, telemetry=telemetry, workspace=runtime.ROOT
+                )
+                self.assertIn("generator-pinned", captured[-1].invocation)
                 self.assertNotIn(image, captured[-1].invocation)
-                self.assertEqual("--diagnostics" in captured[-1].invocation, telemetry == "profile")
-                self.assertIn(GENERATOR_IMAGE, command.call_args.args)
+                self.assertEqual("--diagnostics" in captured[-1].invocation, diagnostics)
+                self.assertIn("generator-pinned", command.call_args.args)
 
     def test_failed_generator_refresh_never_starts_the_server(self) -> None:
         with (
@@ -531,9 +621,7 @@ class GeneratorImageTests(unittest.TestCase):
                 vus=1,
                 ramp="30s",
                 hold="60s",
-                mode="bench",
                 generator="cpp",
-                k6=None,
             )
             with self.assertRaises(subprocess.CalledProcessError):
                 run_workload(args, Path("unused"), image="old-server")
@@ -553,25 +641,482 @@ class GeneratorImageTests(unittest.TestCase):
                 vus=1,
                 ramp="30s",
                 hold="60s",
-                mode="bench",
                 generator="k6",
-                k6=None,
                 telemetry="off",
             )
             self.assertEqual(run_workload(args, Path("unused"), image="server"), 0)
             ensure.assert_not_called()
 
 
+CLI_ANCHOR = "a" * 40
+CLI_PATCH = b"captured source bytes\n"
+CLI_SOURCE = "b" * 64
+
+
+def make_snapshot(root: Path) -> SourceSnapshot:
+    return SourceSnapshot(
+        root=root,
+        context=root / "src",
+        base_commit=CLI_ANCHOR,
+        patch_sha256=hashlib.sha256(CLI_PATCH).hexdigest(),
+        source_sha256=CLI_SOURCE,
+        patch=CLI_PATCH,
+        files=(),
+    )
+
+
+def canonical_path(root: Path, label: str) -> Path:
+    return root / "src" / "runs" / CLI_ANCHOR[:7] / label
+
+
+def write_cli_workload(config: RunConfig, output: Path, code: int = 0) -> int:
+    write_json(
+        output / "run.json",
+        {
+            "arguments": [f"VUS={config.vus}", f"DURATION={config.hold}", f"RAMP_UP={config.ramp}"],
+            "exit_code": code,
+            "cgroup_before": {"usage_usec": 100},
+            "cgroup_after": {"usage_usec": 120, "memory_peak": 4096, "oom_kill": 0},
+            "cpu_scope": "server_cgroup",
+            "load_generator": "docker_loopback",
+            "generator": "cpp",
+        },
+    )
+    write_json(
+        output / "k6-summary.json",
+        {
+            "metrics": {
+                "http_reqs": {"count": 2, "rate": 1},
+                "http_req_duration": {"p(95)": 1, "p(99)": 1, "max": 2},
+                "http_req_failed": {"value": 0},
+                "checks": {"fails": 0 if code == 0 else 1},
+            },
+            "generator": {"seed": 42, "workflow_errors": 0},
+        },
+    )
+    write_json(output / "environment.json", {"runtime": {"version": "0.1.0", "sqlite": "3.53.1"}})
+    write_json(output / "samples.json", [])
+    if config.telemetry != "off":
+        rows = "".join(
+            telemetry_record(source, mode=config.telemetry)
+            for source in ("transport", "database", "checkpoint")
+        )
+        (output / "telemetry.jsonl").write_text(rows, encoding="utf-8", newline="\n")
+    return code
+
+
+def invoke_cli(
+    test: unittest.TestCase,
+    root: Path,
+    arguments: list[str],
+    *,
+    workload: Callable[[RunConfig, Path], int] | BaseException | None = None,
+    known_source: bool = True,
+    capture_error: BaseException | None = None,
+    expected_targets: tuple[runtime.BuildTarget, ...] | None = None,
+) -> int | str | None:
+    snapshot = make_snapshot(root)
+    identity: dict[str, JSONValue] = {
+        "image_id": "sha256:" + "d" * 64,
+        "binary_sha256": "e" * 64,
+        "repo_digests": [],
+        "build_spec": {"telemetry": "off"},
+        "toolchain_sha256": "f" * 64,
+        "source": {
+            "base_commit": CLI_ANCHOR,
+            "patch_sha256": snapshot.patch_sha256,
+            "source_sha256": CLI_SOURCE,
+        }
+        if known_source
+        else None,
+    }
+
+    def completed(
+        config: RunConfig,
+        output: Path,
+        *,
+        image: str,
+        source: SourceSnapshot | None = None,
+        profiler_image: str | None = None,
+    ) -> int:
+        test.assertEqual(image, identity["image_id"])
+        test.assertIs(source, snapshot)
+        test.assertEqual(output.name, "raw")
+        if config.perf != "off":
+            test.assertEqual(profiler_image, identity["image_id"])
+        if isinstance(workload, BaseException):
+            raise workload
+        return (workload or write_cli_workload)(config, output)
+
+    with (
+        patch("devtools.runtime.ROOT", root),
+        patch("devtools.runtime.command", return_value=CLI_ANCHOR),
+        patch("devtools.sources.capture") as capture,
+        patch("devtools.runtime.build", return_value="content-addressed-image") as build,
+        patch("devtools.runtime.image_identity", return_value=identity),
+        patch("devtools.runtime.run_workload", side_effect=completed),
+        patch("devtools.reports.show_saved_report"),
+        patch("sys.argv", ["dev.py", *arguments]),
+        patch("sys.stderr", StringIO()),
+        patch("builtins.print"),
+    ):
+        capture.return_value.__enter__.return_value = snapshot
+        capture.return_value.__enter__.side_effect = capture_error
+        with test.assertRaises(SystemExit) as stopped:
+            dev.main()
+        if expected_targets is not None:
+            test.assertEqual(
+                tuple(call.args[0] if call.args else "final" for call in build.call_args_list),
+                expected_targets,
+            )
+        return stopped.exception.code
+
+
+class CanonicalCliTests(unittest.TestCase):
+    def test_reuse_server_skips_only_the_server_build(self) -> None:
+        cases: tuple[tuple[list[str], tuple[runtime.BuildTarget, ...]], ...] = (
+            ([], ("final",)),
+            (["--reuse-server"], ()),
+            (["--image", "reference"], ()),
+            (["--reuse-server", "--perf", "user"], ("profiler",)),
+        )
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            for index, (options, targets) in enumerate(cases):
+                with self.subTest(options=options):
+                    self.assertEqual(
+                        invoke_cli(
+                            self,
+                            root,
+                            ["bench", "--label", f"reuse-{index}", *options],
+                            expected_targets=targets,
+                        ),
+                        0,
+                    )
+
+    def test_source_integrity_failure_cannot_return_success(self) -> None:
+        def altered(config: RunConfig, output: Path) -> int:
+            (output.parent / "source.patch").write_bytes(b"altered")
+            return write_cli_workload(config, output)
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.assertEqual(
+                invoke_cli(self, root, ["bench", "--label", "altered"], workload=altered), 1
+            )
+            saved = mapping(read_json(canonical_path(root, "altered") / "summary.json"))
+            self.assertEqual(saved["status"], "failed")
+
+    def test_instruments_are_recorded_independently(self) -> None:
+        telemetry_modes: tuple[reports.TelemetryMode, ...] = ("off", "basic", "profile")
+        perf_modes: tuple[runtime.PerfMode, ...] = ("off", "user", "kernel", "all")
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            for telemetry in telemetry_modes:
+                for diagnostics in (False, True):
+                    for perf in perf_modes:
+                        label = f"{telemetry}-{int(diagnostics)}-{perf}"
+                        options = [
+                            "bench",
+                            "--label",
+                            label,
+                            "--telemetry",
+                            telemetry,
+                            "--perf",
+                            perf,
+                        ]
+                        if diagnostics:
+                            options.append("--client-diagnostics")
+                        with self.subTest(telemetry=telemetry, diagnostics=diagnostics, perf=perf):
+                            self.assertEqual(invoke_cli(self, root, options), 0)
+                            manifest = mapping(
+                                read_json(canonical_path(root, label) / "manifest.json")
+                            )
+                            self.assertEqual(
+                                manifest["instruments"],
+                                {
+                                    "server_telemetry": telemetry,
+                                    "client_diagnostics": diagnostics,
+                                    "perf": perf,
+                                },
+                            )
+
+    def test_nonzero_workload_keeps_exit_code_and_failed_benchmark(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            code = invoke_cli(
+                self,
+                root,
+                ["bench", "--label", "thresholds"],
+                workload=lambda config, output: write_cli_workload(config, output, 99),
+            )
+            self.assertEqual(code, 99)
+            saved = mapping(read_json(canonical_path(root, "thresholds") / "summary.json"))
+            self.assertEqual((saved["status"], saved["exit_code"]), ("failed", 99))
+            self.assertFalse(mapping(saved["benchmark"])["passed"])
+
+    def test_nonzero_workload_is_preserved_when_cleanup_also_raises(self) -> None:
+        def failed_cleanup(config: RunConfig, output: Path) -> int:
+            write_cli_workload(config, output, 99)
+            raise RuntimeError("server cleanup failed")
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            code = invoke_cli(
+                self, root, ["bench", "--label", "threshold-cleanup"], workload=failed_cleanup
+            )
+            self.assertEqual(code, 99)
+            saved = mapping(read_json(canonical_path(root, "threshold-cleanup") / "summary.json"))
+            self.assertEqual(saved["error"], "load generator exited 99")
+            self.assertEqual(saved["secondary_errors"], ["server cleanup failed"])
+
+    def test_bounded_telemetry_loss_remains_visible_without_failing_http_workload(self) -> None:
+        def bounded(config: RunConfig, output: Path) -> int:
+            code = write_cli_workload(config, output)
+            (output / "telemetry.jsonl").write_text(
+                telemetry_record("transport", mode=config.telemetry, dropped_events=3)
+                + telemetry_record("database", mode=config.telemetry)
+                + telemetry_record("checkpoint", mode=config.telemetry),
+                encoding="utf-8",
+            )
+            return code
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            code = invoke_cli(
+                self,
+                root,
+                ["bench", "--label", "bounded", "--telemetry", "basic"],
+                workload=bounded,
+            )
+            self.assertEqual(code, 0)
+            saved = mapping(read_json(canonical_path(root, "bounded") / "summary.json"))
+            self.assertEqual(saved["status"], "passed")
+            telemetry = mapping(saved["server_telemetry"])
+            self.assertFalse(telemetry["complete"])
+            self.assertEqual(telemetry["dropped_events"], 3)
+
+    def test_initialization_and_capture_failures_still_finish_without_benchmark(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            for label, failure in (("initialize", "init"), ("capture", "capture")):
+                with self.subTest(failure=failure):
+                    code = invoke_cli(
+                        self,
+                        root,
+                        ["bench", "--label", label],
+                        workload=RuntimeError("initialization failed")
+                        if failure == "init"
+                        else None,
+                        capture_error=RuntimeError("capture failed")
+                        if failure == "capture"
+                        else None,
+                    )
+                    self.assertEqual(code, 1)
+                    saved = mapping(read_json(canonical_path(root, label) / "summary.json"))
+                    self.assertEqual(saved["status"], "failed")
+                    self.assertNotIn("benchmark", saved)
+                    self.assertEqual(
+                        saved["error"],
+                        "initialization failed" if failure == "init" else "capture failed",
+                    )
+
+    def test_keyboard_interrupt_finishes_with_130(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.assertEqual(
+                invoke_cli(
+                    self, root, ["bench", "--label", "interrupt"], workload=KeyboardInterrupt()
+                ),
+                130,
+            )
+            saved = mapping(read_json(canonical_path(root, "interrupt") / "summary.json"))
+            self.assertEqual((saved["status"], saved["error"]), ("interrupted", "interrupted"))
+
+    def test_primary_failure_and_multiple_cleanup_failures_remain_distinct(self) -> None:
+        error = RuntimeError("workload failed")
+        error.add_note("server cleanup failed")
+        error.add_note("generator cleanup failed")
+
+        def failed(config: RunConfig, output: Path) -> int:
+            write_cli_workload(config, output)
+            write_json(
+                output / "collection-errors.json",
+                ["server cleanup failed", "generator cleanup failed"],
+            )
+            raise error
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.assertEqual(
+                invoke_cli(self, root, ["bench", "--label", "cleanup"], workload=failed), 1
+            )
+            saved = mapping(read_json(canonical_path(root, "cleanup") / "summary.json"))
+            self.assertEqual(saved["error"], "workload failed")
+            self.assertEqual(
+                saved["secondary_errors"], ["server cleanup failed", "generator cleanup failed"]
+            )
+
+    def test_missing_requested_telemetry_fails_collection_without_changing_http_pass(self) -> None:
+        def missing(config: RunConfig, output: Path) -> int:
+            code = write_cli_workload(config, output)
+            (output / "telemetry.jsonl").unlink()
+            return code
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.assertEqual(
+                invoke_cli(
+                    self,
+                    root,
+                    ["bench", "--label", "missing", "--telemetry", "basic"],
+                    workload=missing,
+                ),
+                1,
+            )
+            saved = mapping(read_json(canonical_path(root, "missing") / "summary.json"))
+            self.assertEqual(saved["status"], "failed")
+            self.assertTrue(mapping(saved["benchmark"])["passed"])
+            self.assertEqual(
+                saved["secondary_errors"], ["requested server telemetry export is missing"]
+            )
+
+    def test_reused_unknown_image_records_binary_and_observer_without_claiming_source(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.assertEqual(
+                invoke_cli(
+                    self,
+                    root,
+                    ["bench", "--label", "reference", "--image", "historical"],
+                    known_source=False,
+                ),
+                0,
+            )
+            path = canonical_path(root, "reference")
+            provenance = mapping(mapping(read_json(path / "manifest.json"))["provenance"])
+            self.assertIsNone(provenance["source"])
+            self.assertFalse((path / "source.patch").exists())
+            self.assertEqual((path / "raw" / "observer.patch").read_bytes(), CLI_PATCH)
+            self.assertEqual(mapping(mapping(provenance["binary"])["server"])["sha256"], "e" * 64)
+
+    def test_perf_analysis_stays_raw_when_final_summary_is_written(self) -> None:
+        profile: dict[str, JSONValue] = {
+            "event": "cpu-clock:u",
+            "samples": 1,
+            "sampled_cpu_ns": 100,
+            "lost_records": 0,
+            "unresolved_leaf_samples": 0,
+            "unrooted_samples": 0,
+            "stages_cpu_ns": {"auth": 100},
+            "hotspots": [],
+        }
+
+        def profiled(config: RunConfig, output: Path) -> int:
+            code = write_cli_workload(config, output)
+            write_json(output / "perf-analysis.json", profile)
+            write_json(output / "window.json", {"hold_s": 60})
+            return code
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.assertEqual(
+                invoke_cli(
+                    self, root, ["bench", "--perf", "user", "--label", "perf"], workload=profiled
+                ),
+                0,
+            )
+            path = canonical_path(root, "perf")
+            self.assertEqual(read_json(path / "raw" / "perf-analysis.json"), profile)
+            saved = mapping(read_json(path / "summary.json"))
+            self.assertEqual(saved["profile"], profile)
+            self.assertEqual(mapping(saved["benchmark"])["name"], "perf")
+
+    def test_unknown_result_format_fails_explicitly(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "unsupported.json"
+            write_json(path, {"unrecognized": True})
+            with (
+                patch("sys.argv", ["dev.py", "results", str(path)]),
+                patch("sys.stderr", StringIO()) as stderr,
+            ):
+                with self.assertRaises(SystemExit) as stopped:
+                    dev.main()
+            self.assertEqual(stopped.exception.code, 1)
+            self.assertIn("unsupported", stderr.getvalue().lower())
+
+    def test_default_results_selects_the_current_anchor(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            anchor = root / "src" / "runs" / CLI_ANCHOR[:7]
+            anchor.mkdir(parents=True)
+            with (
+                patch("sys.argv", ["dev.py", "results", "--json"]),
+                patch("devtools.runtime.ROOT", root),
+                patch("devtools.runtime.command", return_value=CLI_ANCHOR),
+                patch("devtools.reports.load_saved_report", return_value=[]) as read,
+                patch("builtins.print"),
+            ):
+                dev.main()
+                read.assert_called_once_with(anchor)
+
+    def test_default_results_is_empty_before_this_anchor_has_runs(self) -> None:
+        with TemporaryDirectory() as directory:
+            with (
+                patch("sys.argv", ["dev.py", "results", "--json"]),
+                patch("devtools.runtime.ROOT", Path(directory)),
+                patch("devtools.runtime.command", return_value=CLI_ANCHOR),
+                patch("devtools.reports.load_saved_report") as read,
+                patch("builtins.print") as output,
+            ):
+                dev.main()
+                read.assert_not_called()
+                output.assert_called_once_with("[]")
+
+
 class ToolBoundaryTests(unittest.TestCase):
+    def test_client_diagnostics_and_seed_are_rejected_for_k6_before_resources(self) -> None:
+        for option in (["--client-diagnostics"], ["--seed", "7"]):
+            with (
+                self.subTest(option=option),
+                patch(
+                    "sys.argv",
+                    ["dev.py", "bench", "--label", "invalid", "--generator", "k6", *option],
+                ),
+                patch("sys.stderr", StringIO()),
+                patch("devtools.runtime.command") as command,
+                patch("devtools.sources.capture") as capture,
+            ):
+                with self.assertRaises(SystemExit) as stopped:
+                    dev.main()
+                self.assertEqual(stopped.exception.code, 2)
+                command.assert_not_called()
+                capture.assert_not_called()
+
+    def test_obsolete_commands_and_flags_are_rejected(self) -> None:
+        options = (
+            ["profile", "--label", "old"],
+            ["bench", "--label", "old", "--scope", "user"],
+            ["bench", "--label", "old", "--k6", "k6.exe"],
+            ["bench", "--label", "old", "--no-build"],
+        )
+        for arguments in options:
+            with self.subTest(arguments=arguments), patch("sys.stderr", StringIO()):
+                with self.assertRaises(SystemExit) as stopped:
+                    dev.build_parser().parse_args(arguments, namespace=dev.Arguments())
+                self.assertEqual(stopped.exception.code, 2)
+
     def test_parser_creates_an_immutable_workload_snapshot_without_cli_options(self) -> None:
-        for mode, expected_vus in (("bench", 350000), ("profile", 5000)):
-            with self.subTest(mode=mode):
+        modes: tuple[runtime.PerfMode, ...] = ("off", "user", "kernel", "all")
+        for perf in modes:
+            expected_vus = 350000 if perf == "off" else 5000
+            with self.subTest(perf=perf):
                 args = dev.build_parser().parse_args(
-                    [mode, "--label", "snapshot"], namespace=dev.Arguments()
+                    ["bench", "--label", "snapshot", "--perf", perf], namespace=dev.Arguments()
                 )
                 config = dev.workload_config(args)
                 self.assertIsInstance(config, RunConfig)
-                self.assertEqual(config.mode, mode)
+                self.assertEqual(config.perf, perf)
                 self.assertEqual(config.vus, expected_vus)
                 self.assertEqual(config.telemetry, "off")
                 self.assertEqual(
@@ -582,7 +1127,10 @@ class ToolBoundaryTests(unittest.TestCase):
                 with self.assertRaises(FrozenInstanceError):
                     config.__setattr__("vus", 7)
                 self.assertFalse(
-                    any(hasattr(config, name) for name in ("save", "no_build", "image", "docker"))
+                    any(
+                        hasattr(config, name)
+                        for name in ("mode", "scope", "k6", "save", "no_build", "image", "docker")
+                    )
                 )
 
     def test_invalid_cli_workload_preserves_exit_codes_without_starting_resources(self) -> None:
@@ -598,56 +1146,36 @@ class ToolBoundaryTests(unittest.TestCase):
                 self.assertEqual(stopped.exception.code, exit_code)
                 run.assert_not_called()
 
+    def test_removed_export_flag_cannot_overwrite_historical_measurements(self) -> None:
+        with TemporaryDirectory() as directory:
+            destination = Path(directory) / "historical.json"
+            original = b'[{"old_measurement":true}]\n'
+            destination.write_bytes(original)
+            with (
+                patch(
+                    "sys.argv", ["dev.py", "bench", "--label", "export", "--save", str(destination)]
+                ),
+                patch("sys.stderr", StringIO()),
+                patch("devtools.runtime.command") as command,
+            ):
+                with self.assertRaises(SystemExit) as stopped:
+                    dev.main()
+                self.assertEqual(stopped.exception.code, 2)
+                command.assert_not_called()
+            self.assertEqual(destination.read_bytes(), original)
+
     def test_cli_reuses_the_report_summary_for_diagnostics(self) -> None:
         metadata: dict[str, JSONValue] = {"seed": 42, "workflow_errors": 0}
 
-        def completed(config: RunConfig, output: Path, *, image: str) -> int:
-            self.assertEqual((config.vus, config.telemetry, image), (7, "profile", "old-runtime"))
-            write_json(
-                output / "run.json",
-                {
-                    "arguments": ["VUS=7", "DURATION=60s", "RAMP_UP=30s"],
-                    "exit_code": 0,
-                    "cgroup_before": {"usage_usec": 100},
-                    "cgroup_after": {"usage_usec": 120, "memory_peak": 4096, "oom_kill": 0},
-                    "cpu_scope": "server_cgroup",
-                    "load_generator": "docker_loopback",
-                    "generator": "cpp",
-                },
-            )
-            write_json(
-                output / "k6-summary.json",
-                {
-                    "metrics": {
-                        "http_reqs": {"count": 2, "rate": 1},
-                        "http_req_duration": {"p(95)": 1, "p(99)": 1, "max": 2},
-                        "http_req_failed": {"value": 0},
-                        "checks": {"fails": 0},
-                    },
-                    "generator": metadata,
-                },
-            )
-            write_json(
-                output / "environment.json", {"runtime": {"version": "0.1.0", "sqlite": "3.53.1"}}
-            )
-            write_json(output / "samples.json", [])
-            write_json(output / "telemetry.json", parse_telemetry("", expected_mode="profile"))
-            return 0
-
-        with tempfile.TemporaryDirectory() as directory:
+        with TemporaryDirectory() as directory:
             root = Path(directory)
-            destination = root / "saved.json"
             with (
-                patch("devtools.runtime.ROOT", root),
-                patch("devtools.runtime.run_workload", side_effect=completed),
                 patch("devtools.reports.read_json", wraps=reports.read_json) as read,
-                patch("devtools.reports.show_results"),
-                patch("devtools.reports.show_diagnostics") as show,
-                patch("builtins.print"),
-                patch(
-                    "sys.argv",
+            ):
+                code = invoke_cli(
+                    self,
+                    root,
                     [
-                        "dev.py",
                         "bench",
                         "--label",
                         "single-read",
@@ -655,22 +1183,23 @@ class ToolBoundaryTests(unittest.TestCase):
                         "7",
                         "--telemetry",
                         "profile",
+                        "--client-diagnostics",
                         "--image",
                         "old-runtime",
-                        "--save",
-                        str(destination),
                     ],
-                ),
-            ):
-                with self.assertRaises(SystemExit) as stopped:
-                    dev.main()
-                self.assertEqual(stopped.exception.code, 0)
-                summary = root / "results" / "single-read" / "k6-summary.json"
-                self.assertEqual(sum(call.args == (summary,) for call in read.call_args_list), 1)
-                show.assert_called_once_with(metadata)
-            saved = parse_results(read_json(destination))
-            self.assertEqual(saved[0]["cpu_scope"], "server_cgroup")
-            self.assertEqual(saved[0]["cpu_us_per_request"], 10)
+                )
+                self.assertEqual(code, 0)
+                raw = canonical_path(root, "single-read") / "raw" / "k6-summary.json"
+                self.assertEqual(sum(call.args == (raw,) for call in read.call_args_list), 1)
+            saved = mapping(read_json(canonical_path(root, "single-read") / "summary.json"))
+            result = mapping(saved["benchmark"])
+            self.assertEqual(result["name"], "single-read")
+            self.assertEqual(result["cpu_scope"], "server_cgroup")
+            self.assertEqual(result["cpu_us_per_request"], 10)
+            self.assertEqual(saved["load_generator"], metadata)
+            self.assertEqual(
+                (canonical_path(root, "single-read") / "source.patch").read_bytes(), CLI_PATCH
+            )
 
     def test_workload_failure_unwinds_generator_observer_and_server(self) -> None:
         cleanup: list[str] = []
@@ -720,9 +1249,136 @@ def telemetry_record(source: str, **overrides: JSONValue) -> str:
 
 
 class TelemetryTests(unittest.TestCase):
+    def test_integer_and_histogram_summary_preserve_large_json_integers(self) -> None:
+        for value in (2**53 + 1, 2**64 - 1):
+            with self.subTest(value=value):
+                self.assertEqual(reports.integer({"count": value}, "count"), value)
+                histogram: dict[str, JSONValue] = {
+                    "unit": "ns",
+                    "count": value,
+                    "total": value,
+                    "max": value,
+                    "buckets": [],
+                }
+                raw: dict[str, JSONValue] = {"duration": histogram}
+                original = json.dumps(raw)
+                compact = mapping(reports.metric_summary(raw)["duration"])
+                self.assertEqual(compact["count"], value)
+                self.assertEqual(compact["max"], value)
+                self.assertEqual(compact["mean"], 1)
+                self.assertEqual(json.dumps(raw), original)
+
+    def test_integer_keeps_integral_float_support_and_rejects_nonintegers(self) -> None:
+        self.assertEqual(reports.integer({"count": 3.0}, "count"), 3)
+        self.assertEqual(reports.number({"duration": 3.25}, "duration"), 3.25)
+        for value in (True, False, 3.25, float("inf"), float("nan"), "3"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                reports.integer({"count": value}, "count")
+
+    def test_probe_kind_takes_precedence_over_legacy_runs_field(self) -> None:
+        document: dict[str, JSONValue] = {
+            "kind": "telemetry_hook_probe",
+            "runs": [{"variant": "before"}],
+            "medians": {"before": {"io_ns_per_call": 12}, "after": {"io_ns_per_call": 9}},
+            "reduction_percent": {"io_ns_per_call": 25},
+        }
+        with patch("sys.stdout", new_callable=StringIO) as output:
+            reports.show_saved_report(document)
+        self.assertIn("12.00", output.getvalue())
+        self.assertIn("9.00", output.getvalue())
+        self.assertIn("25.00%", output.getvalue())
+
+    def test_workload_views_show_missing_owners_and_retained_timings(self) -> None:
+        telemetry = parse_telemetry(telemetry_record("database"))
+        telemetry["reports"][0]["totals"] = {
+            "metrics": {
+                "write_commit_ns": {
+                    "unit": "ns",
+                    "count": 2,
+                    "total": 5000,
+                    "max": 4000,
+                    "buckets": [],
+                }
+            }
+        }
+        compact = reports.telemetry_summary(decode_json(json.dumps(telemetry).encode()))
+        documents: tuple[JSONValue, ...] = (
+            {"load_generator": {}, "server_telemetry": compact},
+            {
+                "kind": "workload",
+                "schema_version": 1,
+                "label": "missing-owners",
+                "status": "passed",
+                "load_generator": {},
+                "server_telemetry": compact,
+            },
+        )
+        for document in documents:
+            with (
+                self.subTest(document=document),
+                patch("sys.stdout", new_callable=StringIO) as output,
+            ):
+                reports.show_saved_report(document)
+            rendered = output.getvalue()
+            self.assertIn("incomplete", rendered)
+            self.assertIn("transport", rendered)
+            self.assertIn("checkpoint", rendered)
+            self.assertIn("write_commit", rendered)
+            self.assertIn("mean=2.500", rendered)
+            self.assertIn("max=4.000 us", rendered)
+
+    def test_summary_compacts_nested_sync_and_ring_histograms_without_losing_counters(self) -> None:
+        histogram: dict[str, JSONValue] = {
+            "unit": "ns",
+            "count": 2,
+            "total": 17,
+            "max": 12,
+            "buckets": [[3, 1], [4, 1]],
+        }
+        document = parse_telemetry(telemetry_record("transport", overwritten_windows=1))
+        document["reports"][0]["totals"] = {
+            "metrics": {"sync": {"wall_ns": histogram}},
+            "rings": [{"id": 3, "enobufs": 7, "metrics": {"send_ns": histogram}}],
+        }
+        original = json.dumps(document)
+        compact = reports.telemetry_summary(decode_json(json.dumps(document).encode()))
+        owners = compact["owners"]
+        assert isinstance(owners, list)
+        owner = mapping(owners[0])
+        sync = mapping(mapping(mapping(owner["metrics"])["sync"])["wall_ns"])
+        self.assertEqual((sync["mean"], sync["max"], sync["count"]), (8.5, 12, 2))
+        rings = owner["rings"]
+        assert isinstance(rings, list)
+        ring = mapping(rings[0])
+        self.assertEqual((ring["id"], ring["enobufs"]), (3, 7))
+        self.assertEqual(mapping(mapping(ring["metrics"])["send_ns"]), sync)
+        self.assertFalse(compact["complete"])
+        self.assertEqual(compact["overwritten_windows"], 1)
+        self.assertNotIn('"buckets"', json.dumps(compact))
+        self.assertEqual(json.dumps(document), original)
+
+    def test_summary_keeps_other_results_when_optional_artifacts_are_malformed(self) -> None:
+        config = RunConfig(label="partial", vus=5, ramp="1s", hold="5s", telemetry="profile")
+        with TemporaryDirectory() as directory:
+            output = Path(directory)
+            write_cli_workload(config, output)
+            (output / "perf-analysis.json").write_text("{broken", encoding="utf-8")
+            (output / "telemetry.jsonl").write_text('{"source":', encoding="utf-8")
+            write_json(output / "window.json", {"start": 1, "end": 5})
+            write_json(output / "collection-errors.json", ["cleanup failed"])
+            report = reports.run_summary(output, label="partial", telemetry="profile")
+        self.assertTrue(mapping(report["benchmark"])["passed"])
+        self.assertEqual(report["window"], {"start": 1, "end": 5})
+        errors = report["collection_errors"]
+        assert isinstance(errors, list)
+        self.assertEqual(len(errors), 3)
+        self.assertIn("cleanup failed", errors)
+        self.assertTrue(any("perf-analysis.json" in str(error) for error in errors))
+        self.assertTrue(any("telemetry" in str(error).lower() for error in errors))
+
     def test_compact_telemetry_and_pretty_summary_preserve_json_values(self) -> None:
         value = {"counter": 2**64 - 1, "label": 'quote" and newline\n'}
-        with tempfile.TemporaryDirectory() as directory:
+        with TemporaryDirectory() as directory:
             compact = Path(directory) / "telemetry.json"
             pretty = Path(directory) / "summary.json"
             write_json(compact, value, compact=True)
@@ -853,11 +1509,25 @@ class TelemetryTests(unittest.TestCase):
     def test_build_modes_are_explicit_and_perf_stays_independent(self) -> None:
         modes: tuple[reports.TelemetryMode, ...] = ("off", "basic", "profile")
         for mode in modes:
-            with self.subTest(mode=mode), patch("devtools.runtime.command") as command:
-                image = runtime.build(telemetry=mode)
-                self.assertEqual(image, runtime.IMAGE + ("" if mode == "off" else f"-{mode}"))
-                self.assertIn(f"TDS_TELEMETRY={mode}", command.call_args.args)
-                self.assertNotIn("TDS_DIAGNOSTICS=ON", command.call_args.args)
+            with (
+                self.subTest(mode=mode),
+                patch("devtools.runtime.command", return_value="verified-identity") as command,
+                patch(
+                    "devtools.runtime.subprocess.run",
+                    return_value=subprocess.CompletedProcess([], 0, "", ""),
+                ),
+            ):
+                source = make_snapshot(runtime.ROOT)
+                image = runtime.build(telemetry=mode, source=source)
+                self.assertTrue(
+                    image.startswith(
+                        f"twelve-dollar-cpp:{CLI_ANCHOR[:12]}-{source.patch_sha256[:12]}-"
+                    )
+                )
+                invocation = command.call_args_list[0].args
+                self.assertEqual(invocation[:2], ("docker", "build"))
+                self.assertIn(f"TDS_TELEMETRY={mode}", invocation)
+                self.assertNotIn("TDS_DIAGNOSTICS=ON", invocation)
         with (
             patch("devtools.runtime.server") as server_context,
             patch("devtools.runtime.observing") as observer,
@@ -866,13 +1536,13 @@ class TelemetryTests(unittest.TestCase):
         ):
             server_context.return_value.__enter__.return_value = ("server", 3000)
             config = RunConfig(
-                label="profile-off", vus=1, ramp="30s", hold="60s", mode="profile", generator="k6"
+                label="profile-off", vus=1, ramp="30s", hold="60s", perf="user", generator="k6"
             )
             runtime.run_workload(config, Path("unused"), image=runtime.IMAGE)
             self.assertTrue(observer.call_args.kwargs["profiling"])
             self.assertEqual(observer.call_args.kwargs["profiler_image"], runtime.PROFILER_IMAGE)
             server_context.assert_called_once_with(
-                Path("unused"), image=runtime.IMAGE, telemetry="off"
+                Path("unused"), image=runtime.IMAGE, telemetry="off", workspace=runtime.ROOT
             )
 
     def test_export_is_copied_after_stop_and_before_container_removal(self) -> None:
@@ -884,6 +1554,8 @@ class TelemetryTests(unittest.TestCase):
                 return "127.0.0.1:12345"
             if args[-1] == "--version":
                 return '{"telemetry":"profile"}'
+            if args[:2] == ("docker", "inspect"):
+                return '[{"Image":"server-pinned"}]'
             return "{}"
 
         def run(args: list[str], **_options: object) -> subprocess.CompletedProcess[str]:
@@ -896,8 +1568,9 @@ class TelemetryTests(unittest.TestCase):
             return subprocess.CompletedProcess(args, 0, "[]", "")
 
         with (
-            tempfile.TemporaryDirectory() as directory,
+            TemporaryDirectory() as directory,
             patch("devtools.runtime.command", side_effect=command),
+            patch("devtools.runtime.image_identity", return_value={"image_id": "server-pinned"}),
             patch("devtools.runtime.healthy", return_value=True),
             patch("devtools.runtime.subprocess.run", side_effect=run),
         ):
@@ -908,8 +1581,11 @@ class TelemetryTests(unittest.TestCase):
                 pass
             self.assertLess(events.index("stop"), events.index("cp"))
             self.assertLess(events.index("cp"), events.index("rm"))
-            saved = mapping(read_json(output / "telemetry.json"))
+            saved = parse_telemetry(
+                (output / "telemetry.jsonl").read_text(encoding="utf-8"), expected_mode="profile"
+            )
             self.assertTrue(saved["complete"])
+            self.assertFalse((output / "telemetry.json").exists())
             self.assertTrue((output / "telemetry.jsonl").is_file())
 
     def test_missing_export_does_not_mask_workload_failure_or_cleanup(self) -> None:
@@ -917,6 +1593,8 @@ class TelemetryTests(unittest.TestCase):
             del timeout
             if args[:2] == ("docker", "port"):
                 return "127.0.0.1:12345"
+            if args[:2] == ("docker", "inspect"):
+                return '[{"Image":"server-pinned"}]'
             return '{"telemetry":"basic"}' if args[-1] == "--version" else "{}"
 
         def run(args: list[str], **_options: object) -> subprocess.CompletedProcess[str]:
@@ -925,8 +1603,9 @@ class TelemetryTests(unittest.TestCase):
             )
 
         with (
-            tempfile.TemporaryDirectory() as directory,
+            TemporaryDirectory() as directory,
             patch("devtools.runtime.command", side_effect=command) as commands,
+            patch("devtools.runtime.image_identity", return_value={"image_id": "server-pinned"}),
             patch("devtools.runtime.healthy", return_value=True),
             patch("devtools.runtime.subprocess.run", side_effect=run) as runs,
             patch("builtins.print"),
@@ -939,7 +1618,8 @@ class TelemetryTests(unittest.TestCase):
                 with server(output, database=seed, telemetry="basic") as (name, _port):
                     container = name
                     raise RuntimeError("workload failed")
-            self.assertFalse(mapping(read_json(output / "telemetry.json"))["complete"])
+            errors = read_json(output / "collection-errors.json")
+            self.assertIn("export missing", str(errors))
             runs.assert_any_call(
                 ["docker", "rm", "--force", container], capture_output=True, check=False
             )
@@ -953,7 +1633,7 @@ class TelemetryTests(unittest.TestCase):
             return '{"telemetry":"profile"}' if args[-1] == "--version" else "{}"
 
         with (
-            tempfile.TemporaryDirectory() as directory,
+            TemporaryDirectory() as directory,
             patch("devtools.runtime.command", side_effect=command),
             patch("devtools.runtime.healthy", return_value=True),
             patch(
@@ -978,14 +1658,12 @@ class TelemetryTests(unittest.TestCase):
             return subprocess.CompletedProcess(args, 0, "", "")
 
         with (
-            tempfile.TemporaryDirectory() as directory,
+            TemporaryDirectory() as directory,
             patch("devtools.runtime.subprocess.run", side_effect=copied),
-            patch("builtins.print") as output_message,
         ):
             output = Path(directory)
-            runtime.collect_telemetry("stopped-server", output, "profile")
-            report = mapping(read_json(output / "telemetry.json"))
-            self.assertFalse(report["complete"])
+            runtime.collect_telemetry("stopped-server", output)
+            report = reports.run_summary(output, label="truncated", telemetry="profile")
             self.assertTrue(report["collection_errors"])
             self.assertTrue((output / "telemetry.jsonl").read_text().endswith('{"source":'))
-            output_message.assert_called_once()
+            self.assertFalse((output / "telemetry.json").exists())

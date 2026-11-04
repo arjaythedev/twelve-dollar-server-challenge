@@ -20,7 +20,7 @@ link-mode = "copy"
 
 [tool.pyright]
 include = ["."]
-exclude = [".venv", ".build", "**/__pycache__"]
+exclude = [".venv", ".build", "runs", "**/__pycache__"]
 typeCheckingMode = "strict"
 pythonVersion = "3.15"
 venvPath = "."
@@ -30,6 +30,7 @@ reportUnnecessaryTypeIgnoreComment = "error"
 [tool.ruff]
 target-version = "py315"
 line-length = 100
+extend-exclude = ["runs"]
 
 [tool.ruff.lint]
 select = ["E4", "E7", "E9", "F", "I", "UP", "ANN", "B", "RUF", "S"]

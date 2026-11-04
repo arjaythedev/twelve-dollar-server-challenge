@@ -15,7 +15,9 @@ import time
 import unittest
 from contextlib import ExitStack, closing
 from pathlib import Path
+from typing import ClassVar
 
+from devtools import images
 from devtools.reports import JSONValue, decode_json, integer, mapping
 from devtools.reports import text as json_text
 from devtools.runtime import ROOT, command, server
@@ -50,6 +52,14 @@ def literal(value: str) -> str:
 
 @unittest.skipUnless(os.environ.get("TDS_HTTP_TESTS") == "1", "run dev.py check --docker")
 class HTTPTests(unittest.TestCase):
+    image: ClassVar[images.ImageIdentity]
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.image = images.inspect(
+            os.environ.get("TDS_HTTP_TEST_IMAGE") or images.IMAGE, "/app/server"
+        )
+
     def setUp(self) -> None:
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)
@@ -80,7 +90,7 @@ class HTTPTests(unittest.TestCase):
                     self.output,
                     database=self.database,
                     secret=SECRET.decode(),
-                    image=os.environ.get("TDS_HTTP_TEST_IMAGE"),
+                    image=self.image,
                 )
             )
         return self._endpoint
@@ -468,7 +478,10 @@ class HTTPTests(unittest.TestCase):
 
     def test_health_degrades_without_creating_database(self) -> None:
         missing = self.output / "missing.db"
-        with server(self.output, database=missing, secret=SECRET.decode()) as (container, port):
+        with server(self.output, image=self.image, database=missing, secret=SECRET.decode()) as (
+            container,
+            port,
+        ):
             with closing(http.client.HTTPConnection("127.0.0.1", port, timeout=5)) as connection:
                 connection.request("GET", "/health")
                 response = connection.getresponse()

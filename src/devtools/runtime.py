@@ -2,8 +2,8 @@
 
 import hashlib
 import http.client
-import json
 import platform
+import re
 import shlex
 import subprocess
 import sys
@@ -12,30 +12,19 @@ import uuid
 from collections.abc import Generator
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
+from functools import cached_property
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast
 
 import psutil
 
-from . import reports, runs, sources
+from . import images, reports, runs, sources
 
 ROOT = Path(__file__).resolve().parents[2]
-IMAGE = "twelve-dollar-cpp:local"
-PROFILER_IMAGE = "twelve-dollar-profiler:local"
-GENERATOR_IMAGE = "twelve-dollar-generator:local"
-GENERATOR_SOURCE_LABEL = "org.twelve-dollar.generator-source-sha256"
-SOURCE_LABEL = "org.twelve-dollar.source-sha256"
-PATCH_LABEL = "org.twelve-dollar.patch-sha256"
-COMMIT_LABEL = "org.twelve-dollar.base-commit"
-BUILD_LABEL = "org.twelve-dollar.build-spec"
-K6_IMAGE = (
-    "grafana/k6:1.3.0@sha256:a90b459a3768c46ad1013da53af24189f735d7112273c6ac3212ca8ed0e18656"
-)
 K6_PAUSED_BEFORE_RUN = 4
 JWT_KEY = "twelve-dollar-challenge"
 type GeneratorKind = Literal["cpp", "k6"]
 type PerfMode = Literal["off", "user", "kernel", "all"]
-type BuildTarget = Literal["final", "profiler", "test-build", "tested-runtime", "generator"]
 
 
 @dataclass(frozen=True)
@@ -53,13 +42,7 @@ class RunConfig:
     def __post_init__(self) -> None:
         if self.vus < 1:
             raise ValueError("VUs must be positive")
-        if (
-            not self.label
-            or len(self.label) > 96
-            or any(
-                character not in "abcdefghijklmnopqrstuvwxyz0123456789-" for character in self.label
-            )
-        ):
+        if re.fullmatch(r"[a-z0-9-]{1,96}", self.label) is None:
             raise ValueError(
                 "a lowercase alphanumeric/hyphen label of at most 96 characters is required"
             )
@@ -67,6 +50,20 @@ class RunConfig:
             raise ValueError("--seed requires the C++ generator and an unsigned 64-bit integer")
         if self.client_diagnostics and self.generator != "cpp":
             raise ValueError("--client-diagnostics requires the C++ generator")
+
+    @cached_property
+    def timing(self) -> tuple[float, float]:
+        return reports.duration_seconds(self.ramp), reports.duration_seconds(self.hold)
+
+    @property
+    def workload(self) -> dict[str, reports.JSONValue]:
+        return {
+            "generator": self.generator,
+            "vus": self.vus,
+            "ramp": self.ramp,
+            "hold": self.hold,
+            "seed": self.seed,
+        }
 
 
 def command(*args: str, timeout: int | None = 30) -> str:
@@ -81,53 +78,8 @@ def file_hash(path: Path) -> str:
         return hashlib.file_digest(source, "sha256").hexdigest()
 
 
-def _toolchain(image: str) -> str:
-    return command(
-        "docker", "run", "--rm", "--network=none", "--entrypoint=cat", image, "/etc/tds-toolchain"
-    )
-
-
-def image_identity(image: str, binary: str) -> dict[str, reports.JSONValue]:
-    inspected = reports.mapping(
-        reports.decode_json(
-            command("docker", "image", "inspect", "--format", "{{json .}}", image).encode()
-        )
-    )
-    identity = reports.text(inspected, "Id")
-    labels = reports.mapping(reports.mapping(inspected["Config"]).get("Labels") or {})
-    source: dict[str, reports.JSONValue] | None = None
-    values = {
-        "base_commit": labels.get(COMMIT_LABEL),
-        "patch_sha256": labels.get(PATCH_LABEL),
-        "source_sha256": labels.get(SOURCE_LABEL),
-    }
-    if all(
-        isinstance(value, str)
-        and len(value) in ((40, 64) if key == "base_commit" else (64,))
-        and all(character in "0123456789abcdef" for character in value)
-        for key, value in values.items()
-    ):
-        source = values
-    spec = labels.get(BUILD_LABEL)
-    try:
-        toolchain = _toolchain(identity)
-    except subprocess.CalledProcessError:
-        toolchain = None
-    return {
-        "image_id": identity,
-        "repo_digests": inspected.get("RepoDigests", []),
-        "source": source,
-        "build_spec": reports.decode_json(spec.encode()) if isinstance(spec, str) else None,
-        "toolchain_sha256": hashlib.sha256(toolchain.encode()).hexdigest() if toolchain else None,
-        "build_sha256": hashlib.sha256(
-            (spec + "\n" + toolchain + "\n" + identity).encode()
-        ).hexdigest()
-        if isinstance(spec, str) and toolchain is not None
-        else None,
-        "binary_sha256": command(
-            "docker", "run", "--rm", "--network=none", "--entrypoint=sha256sum", identity, binary
-        ).split()[0],
-    }
+def container_command(container: str, *args: str) -> str:
+    return command("docker", "exec", container, *args)
 
 
 @contextmanager
@@ -150,6 +102,16 @@ def preserving_failure(output: Path, stage: str) -> Generator[None]:
         primary.add_note(message)
 
 
+@contextmanager
+def removing_container(name: str, *, volume: str | None = None) -> Generator[None]:
+    try:
+        yield
+    finally:
+        subprocess.run(["docker", "rm", "--force", name], capture_output=True, check=False)
+        if volume is not None:
+            command("docker", "volume", "rm", volume)
+
+
 def counters(observer: str) -> dict[str, reports.JSONValue]:
     # Read through the server's root, but run the reader in a separate cgroup
     root = "/proc/1/root/sys/fs/cgroup"
@@ -157,12 +119,7 @@ def counters(observer: str) -> dict[str, reports.JSONValue]:
         f"sed 's/^/{resource}_pressure /' {root}/{resource}.pressure; "
         for resource in ("io", "memory", "cpu")
     )
-    values = command(
-        "docker",
-        "exec",
-        observer,
-        "sh",
-        "-c",
+    script = (
         f"cat {root}/cpu.stat; "
         f"printf 'memory_current '; cat {root}/memory.current; "
         f"printf 'memory_peak '; cat {root}/memory.peak; "
@@ -173,9 +130,9 @@ def counters(observer: str) -> dict[str, reports.JSONValue]:
         "printf 'database_file_bytes '; stat -c %s /proc/1/root/data/feed.db; fi; "
         "if [ -f /proc/1/root/data/feed.db-wal ]; then "
         "printf 'wal_file_bytes '; stat -c %s /proc/1/root/data/feed.db-wal; fi; "
-        "printf 'process_stat '; cat /proc/1/stat",
+        "printf 'process_stat '; cat /proc/1/stat"
     )
-    return reports.parse_counters(values)
+    return reports.parse_counters(container_command(observer, "sh", "-c", script))
 
 
 def k6_status(port: int, *, resume: bool = False) -> dict[str, reports.JSONValue]:
@@ -201,17 +158,11 @@ def k6_status(port: int, *, resume: bool = False) -> dict[str, reports.JSONValue
 
 
 def perf_control(observer: str, action: Literal["ping", "enable", "disable"]) -> None:
-    command(
-        "docker",
-        "exec",
-        observer,
-        "bash",
-        "-c",
+    script = (
         'exec 3<>/tmp/perf-ack 4<>/tmp/perf-control; printf "%s\\n" "$1" >&4; '
-        'read -r -t 5 reply <&3 && test "$reply" = ack',
-        "perf-control",
-        action,
+        'read -r -t 5 reply <&3 && test "$reply" = ack'
     )
+    container_command(observer, "bash", "-c", script, "perf-control", action)
 
 
 def healthy(port: int, *, expected: int = 200) -> bool:
@@ -225,129 +176,6 @@ def healthy(port: int, *, expected: int = 200) -> bool:
         return False
 
 
-def image_name(*, profiler: bool = False, telemetry: reports.TelemetryMode = "off") -> str:
-    base = PROFILER_IMAGE if profiler else IMAGE
-    return base + ("" if telemetry == "off" else f"-{telemetry}")
-
-
-def build(
-    target: BuildTarget = "final",
-    *,
-    telemetry: reports.TelemetryMode = "off",
-    source: sources.SourceSnapshot | None = None,
-) -> str:
-    if source is None:
-        with sources.capture(ROOT) as snapshot:
-            return build(target, telemetry=telemetry, source=snapshot)
-    print(f"Building {target} image...", flush=True)
-    generator = target == "generator"
-    spec: dict[str, reports.JSONValue] = {
-        "platform": "linux/amd64",
-        "target": target,
-        "generator_only": generator,
-        "sanitizers": False,
-        "build_type": "Release",
-    }
-    if not generator:
-        spec["telemetry"] = telemetry
-    encoded = json.dumps(spec, sort_keys=True, separators=(",", ":"))
-    alias = (
-        GENERATOR_IMAGE
-        if generator
-        else image_name(profiler=target == "profiler", telemetry=telemetry)
-        + {"test-build": "-build", "tested-runtime": "-tested"}.get(target, "")
-    )
-    temporary = f"twelve-dollar-build:{uuid.uuid4().hex}"
-    try:
-        command(
-            "docker",
-            "build",
-            "--progress",
-            "plain",
-            "--platform",
-            "linux/amd64",
-            "--tag",
-            temporary,
-            "--target",
-            target,
-            *(["--build-arg", f"TDS_TELEMETRY={telemetry}"] if not generator else []),
-            "--label",
-            f"{SOURCE_LABEL}={source.source_sha256}",
-            "--label",
-            f"{PATCH_LABEL}={source.patch_sha256}",
-            "--label",
-            f"{COMMIT_LABEL}={source.base_commit}",
-            "--label",
-            f"{BUILD_LABEL}={encoded}",
-            *(
-                ["--label", f"{GENERATOR_SOURCE_LABEL}={generator_fingerprint(source.context)}"]
-                if generator
-                else []
-            ),
-            "--file",
-            str(source.context / "Dockerfile"),
-            str(source.context),
-            timeout=None,
-        )
-        identity = command("docker", "image", "inspect", "--format", "{{.Id}}", temporary)
-        toolchain = _toolchain(identity)
-        build_hash = hashlib.sha256(
-            (encoded + "\n" + toolchain + "\n" + identity).encode()
-        ).hexdigest()
-        repository = alias.split(":")[0]
-        image = (
-            f"{repository}:{source.base_commit[:12]}-{source.patch_sha256[:12]}-{build_hash[:12]}"
-        )
-        command("docker", "image", "tag", identity, image)
-        command("docker", "image", "tag", identity, alias)
-        return image
-    finally:
-        subprocess.run(["docker", "image", "rm", temporary], capture_output=True, check=False)
-
-
-def generator_fingerprint(source: Path | None = None) -> str:
-    source = source or ROOT / "src"
-    inputs = [
-        source / name
-        for name in (
-            "CMakeLists.txt",
-            "Dockerfile",
-            ".dockerignore",
-            "cmake/targets.cmake",
-            "cmake/dependencies.cmake",
-        )
-    ]
-    inputs.extend(path for path in (source / "load").rglob("*") if path.is_file())
-    digest = hashlib.sha256()
-    for path in sorted(inputs):
-        digest.update(path.relative_to(source).as_posix().encode() + b"\0")
-        digest.update(path.read_bytes())
-        digest.update(b"\0")
-    return digest.hexdigest()
-
-
-def ensure_generator(source: sources.SourceSnapshot | None = None) -> str:
-    if source is None:
-        with sources.capture(ROOT) as snapshot:
-            return ensure_generator(snapshot)
-    fingerprint = generator_fingerprint(source.context)
-    try:
-        current = command(
-            "docker",
-            "image",
-            "inspect",
-            "--format",
-            '{{index .Config.Labels "' + GENERATOR_SOURCE_LABEL + '"}}',
-            GENERATOR_IMAGE,
-        )
-    except subprocess.CalledProcessError:
-        current = ""
-    if current == fingerprint:
-        return command("docker", "image", "inspect", "--format", "{{.Id}}", GENERATOR_IMAGE)
-    print("Building current native generator...", flush=True)
-    return build("generator", source=source)
-
-
 @dataclass(frozen=True)
 class LoadGenerator:
     invocation: list[str]
@@ -357,10 +185,16 @@ class LoadGenerator:
     container: str
     kind: GeneratorKind = "k6"
 
+    def control(self, output: Path, *, resume: bool = False) -> dict[str, reports.JSONValue]:
+        if self.kind == "k6":
+            return k6_status(self.api_port, resume=resume)
+        if resume:
+            (output / "generator.start").touch()
+            return {}
+        return {"ready": (output / "generator.ready").is_file()}
+
     def sample(self) -> dict[str, reports.JSONValue]:
-        values = command(
-            "docker",
-            "exec",
+        values = container_command(
             self.container,
             "sh",
             "-c",
@@ -377,8 +211,8 @@ def load_generator(
     container: str,
     output: Path,
     *,
-    image: str = GENERATOR_IMAGE,
-    workspace: Path | None = None,
+    image: images.ImageIdentity,
+    workspace: Path,
 ) -> Generator[LoadGenerator]:
     name = f"{container}-load"
     environment = reports.mapping(reports.read_json(output / "environment.json"))
@@ -386,21 +220,11 @@ def load_generator(
     # Leave space for the API and Docker; contain generator failures in its own cgroup
     client_memory = max(vm_memory // 2, vm_memory - 4 * 2**30)
     native = config.generator == "cpp"
-    identity = image_identity(
-        image if native else K6_IMAGE, "/app/load_generator" if native else "/usr/bin/k6"
-    )
-    image = reports.text(identity, "image_id")
-    reports.write_json(output / "generator-image.json", identity)
-    version = command(
-        "docker",
-        "run",
-        "--rm",
-        "--network=none",
-        *(
-            ["--entrypoint=/app/load_generator", image, "--version"]
-            if native
-            else [image, "version"]
-        ),
+    reports.write_json(output / "generator-image.json", image)
+    version = images.image_command(
+        image,
+        "/app/load_generator" if native else "/usr/bin/k6",
+        "--version" if native else "version",
     )
     api_port = (
         0 if native else int(command("docker", "port", container, "6565/tcp").rsplit(":", 1)[1])
@@ -414,28 +238,23 @@ def load_generator(
         f"--memory-swap={client_memory}",
         f"--network=container:{container}",
         "--ulimit=nofile=1048576:1048576",
-        f"--mount=type=bind,source={workspace or ROOT},target=/work,readonly",
+        f"--mount=type=bind,source={workspace},target=/work,readonly",
         f"--mount=type=bind,source={ROOT / 'seed'},target=/seed,readonly",
         f"--mount=type=bind,source={output},target=/results",
     ]
     settings = [
-        "-e",
-        "BASE_URL=http://127.0.0.1:3000",
-        "-e",
-        f"VUS={config.vus}",
-        "-e",
-        f"DURATION={config.hold}",
-        "-e",
-        f"RAMP_UP={config.ramp}",
-        "-e",
-        "TOKENS=/seed/tokens.json",
+        "--env=BASE_URL=http://127.0.0.1:3000",
+        f"--env=VUS={config.vus}",
+        f"--env=DURATION={config.hold}",
+        f"--env=RAMP_UP={config.ramp}",
+        "--env=TOKENS=/seed/tokens.json",
     ]
     if native:
         invocation = [
             *prefix,
             *settings,
             "--entrypoint=/app/load_generator",
-            image,
+            image["image_id"],
             "--summary-export",
             "/results/k6-summary.json",
             "--local-ips=127.0.0.2-127.0.0.33",
@@ -450,15 +269,13 @@ def load_generator(
         invocation = [
             *prefix,
             f"--env=GOMEMLIMIT={client_memory * 9 // 10}B",
-            image,
+            image["image_id"],
             "run",
             "--quiet",
             "--paused",
-            "--address",
-            "0.0.0.0:6565",
+            "--address=0.0.0.0:6565",
             "--local-ips=127.0.0.2-127.0.0.33",
-            "--summary-export",
-            "/results/k6-summary.json",
+            "--summary-export=/results/k6-summary.json",
             *settings,
             "/work/bench/load.js",
         ]
@@ -467,22 +284,20 @@ def load_generator(
             invocation,
             api_port,
             version,
-            reports.text(identity, "binary_sha256"),
+            image["binary_sha256"],
             name,
             config.generator,
         )
     finally:
-        with preserving_failure(output, "generator cleanup"):
+        with preserving_failure(output, "generator cleanup"), removing_container(name):
             inspected = subprocess.run(["docker", "inspect", name], capture_output=True, text=True)
             (output / "load-generator.json").write_text(inspected.stdout, encoding="utf-8")
-            subprocess.run(["docker", "rm", "--force", name], capture_output=True, check=False)
 
 
 def load(config: RunConfig, generator: LoadGenerator, observer: str, output: Path) -> int:
-    warmup = reports.duration_seconds(config.ramp)
-    hold = reports.duration_seconds(config.hold)
+    warmup, hold = config.timing
     profiling = config.perf != "off"
-    ticks = int(command("docker", "exec", observer, "getconf", "CLK_TCK"))
+    ticks = int(container_command(observer, "getconf", "CLK_TCK"))
     samples: list[dict[str, reports.JSONValue]] = []
     with (output / "load.log").open("w", encoding="utf-8") as log:
         with subprocess.Popen(generator.invocation, stdout=log, stderr=subprocess.STDOUT) as child:
@@ -490,18 +305,9 @@ def load(config: RunConfig, generator: LoadGenerator, observer: str, output: Pat
                 initializing = time.monotonic()
                 ready_deadline = initializing + 120
                 next_init_sample = next_init_progress = initializing
-                while True:
-                    if child.poll() is not None:
-                        raise RuntimeError(
-                            "generator exited during initialization; inspect load.log"
-                        )
+                while child.poll() is None:
                     try:
-                        if generator.kind == "cpp":
-                            status: dict[str, reports.JSONValue] = {
-                                "ready": (output / "generator.ready").is_file()
-                            }
-                        else:
-                            status = k6_status(generator.api_port)
+                        status = generator.control(output)
                         if (
                             status.get("ready") is True
                             or status.get("status") == K6_PAUSED_BEFORE_RUN
@@ -520,10 +326,7 @@ def load(config: RunConfig, generator: LoadGenerator, observer: str, output: Pat
                                 }
                             )
                         except subprocess.CalledProcessError:
-                            if child.poll() is not None:
-                                raise RuntimeError(
-                                    "generator exited during initialization; inspect load.log"
-                                ) from None
+                            pass
                         next_init_sample = now + 2
                     if now >= next_init_progress:
                         print(
@@ -534,12 +337,11 @@ def load(config: RunConfig, generator: LoadGenerator, observer: str, output: Pat
                     if time.monotonic() >= ready_deadline:
                         raise RuntimeError("generator did not initialize within 120 seconds")
                     time.sleep(0.1)
+                else:
+                    raise RuntimeError("generator exited during initialization; inspect load.log")
                 before = counters(observer)
                 started = time.monotonic()
-                if generator.kind == "cpp":
-                    (output / "generator.start").touch()
-                else:
-                    k6_status(generator.api_port, resume=True)
+                generator.control(output, resume=True)
                 resumed = time.monotonic() - started
                 next_sample = next_progress = 0.0
                 window: dict[str, reports.JSONValue] = {
@@ -548,7 +350,7 @@ def load(config: RunConfig, generator: LoadGenerator, observer: str, output: Pat
                     "resume_ack_s": resumed,
                 }
                 profile_before: dict[str, reports.JSONValue] | None = None
-                profile_done = False
+                profile_after: dict[str, reports.JSONValue] | None = None
                 while child.poll() is None:
                     elapsed = time.monotonic() - started
                     if profiling and profile_before is None and elapsed >= warmup:
@@ -559,7 +361,7 @@ def load(config: RunConfig, generator: LoadGenerator, observer: str, output: Pat
                         print(
                             f"{config.label}: warm-up complete; sampling {config.hold}", flush=True
                         )
-                    if profiling and not profile_done and elapsed >= warmup + hold:
+                    if profiling and profile_after is None and elapsed >= warmup + hold:
                         window["disable_request_s"] = time.monotonic() - started
                         perf_control(observer, "disable")
                         window["disable_ack_s"] = time.monotonic() - started
@@ -572,7 +374,6 @@ def load(config: RunConfig, generator: LoadGenerator, observer: str, output: Pat
                         window["cgroup_before"] = profile_before
                         window["cgroup_after"] = profile_after
                         reports.write_json(output / "window.json", window)
-                        profile_done = True
                         print(f"{config.label}: sampling complete; draining workload", flush=True)
                     if elapsed < next_sample:
                         time.sleep(0.1)
@@ -608,7 +409,7 @@ def load(config: RunConfig, generator: LoadGenerator, observer: str, output: Pat
                             raise error from None
                         break
                 code = child.wait(timeout=15)
-                if profiling and not profile_done:
+                if profiling and profile_after is None:
                     raise RuntimeError("load ended before the profile window completed")
             finally:
                 if child.poll() is None:
@@ -620,6 +421,7 @@ def load(config: RunConfig, generator: LoadGenerator, observer: str, output: Pat
         output / "run.json",
         {
             "arguments": generator.invocation,
+            "workload": config.workload,
             "exit_code": code,
             "wall_seconds": time.monotonic() - started,
             "cgroup_before": before,
@@ -647,11 +449,10 @@ def server(
     *,
     database: Path | None = None,
     secret: str = JWT_KEY,
-    image: str | None = None,
+    image: images.ImageIdentity,
     telemetry: reports.TelemetryMode = "off",
     workspace: Path | None = None,
 ) -> Generator[tuple[str, int]]:
-    image = image or image_name(telemetry=telemetry)
     workspace = workspace or ROOT
     unique = f"td-bench-{uuid.uuid4().hex[:10]}"
     volume = unique + "-data"
@@ -668,13 +469,10 @@ def server(
             "docker",
             "run",
             "--rm",
-            "--user",
-            "0",
-            "--volume",
-            f"{volume}:/data",
-            "--entrypoint",
-            "chown",
-            image,
+            "--user=0",
+            f"--volume={volume}:/data",
+            "--entrypoint=chown",
+            image["image_id"],
             "10001:10001",
             "/data",
         )
@@ -682,34 +480,21 @@ def server(
             "docker",
             "run",
             "--detach",
-            "--name",
-            unique,
-            "--cpus",
-            "1",
-            "--memory",
-            "2g",
-            "--memory-swap",
-            "2g",
-            "--cap-drop",
-            "ALL",
-            "--security-opt",
-            f"seccomp={workspace / 'src/docker/seccomp.json'}",
-            "--ulimit",
-            "nofile=65535:65535",
-            "--env",
-            f"JWT_SECRET={secret}",
-            *(["--env", "TDS_TELEMETRY_PATH=/data/telemetry.jsonl"] if telemetry != "off" else []),
-            "--publish",
-            "127.0.0.1::3000",
-            "--publish",
-            "127.0.0.1::6565",
-            "--volume",
-            f"{volume}:/data",
-            "--mount",
-            f"type=bind,source={seed.parent},target=/seed,readonly",
-            "--entrypoint",
-            "sh",
-            image,
+            f"--name={unique}",
+            "--cpus=1",
+            "--memory=2g",
+            "--memory-swap=2g",
+            "--cap-drop=ALL",
+            f"--security-opt=seccomp={workspace / 'src/docker/seccomp.json'}",
+            "--ulimit=nofile=65535:65535",
+            f"--env=JWT_SECRET={secret}",
+            *(["--env=TDS_TELEMETRY_PATH=/data/telemetry.jsonl"] if telemetry != "off" else []),
+            "--publish=127.0.0.1::3000",
+            "--publish=127.0.0.1::6565",
+            f"--volume={volume}:/data",
+            f"--mount=type=bind,source={seed.parent},target=/seed,readonly",
+            "--entrypoint=sh",
+            image["image_id"],
             "-c",
             launch,
         )
@@ -721,9 +506,7 @@ def server(
         else:
             raise RuntimeError("container did not become healthy")
         version = reports.mapping(
-            reports.decode_json(
-                command("docker", "exec", unique, "/app/server", "--version").encode()
-            )
+            reports.decode_json(container_command(unique, "/app/server", "--version").encode())
         )
         actual_telemetry = version.get("telemetry")
         if actual_telemetry is None and telemetry == "off":
@@ -738,7 +521,8 @@ def server(
         if not isinstance(inspected, list) or len(inspected) != 1:
             raise RuntimeError("expected one running server container")
         running_image = reports.text(reports.mapping(inspected[0]), "Image")
-        identity = image_identity(running_image, "/app/server")
+        if running_image != image["image_id"]:
+            raise RuntimeError("running server image does not match the verified image")
         reports.write_json(
             output / "environment.json",
             {
@@ -749,17 +533,12 @@ def server(
                     command("docker", "info", "--format", "{{json .}}").encode()
                 ),
                 "container": inspected,
-                "image": reports.decode_json(
-                    command("docker", "image", "inspect", running_image).encode()
-                ),
-                "server_identity": identity,
+                "server_identity": image,
                 "runtime": version,
                 "telemetry": telemetry,
                 "telemetry_mode_verified": actual_telemetry is not None,
-                "filesystem": command("docker", "exec", unique, "df", "-T", "/data"),
-                "limits": command(
-                    "docker",
-                    "exec",
+                "filesystem": container_command(unique, "df", "-T", "/data"),
+                "limits": container_command(
                     unique,
                     "sh",
                     "-c",
@@ -773,7 +552,10 @@ def server(
         )
         yield unique, port
     finally:
-        with preserving_failure(output, "server cleanup"):
+        with (
+            preserving_failure(output, "server cleanup"),
+            removing_container(unique, volume=volume),
+        ):
             try:
                 subprocess.run(
                     ["docker", "stop", "--time=10", unique],
@@ -783,20 +565,12 @@ def server(
                 )
             except subprocess.TimeoutExpired:
                 print("Server stop timed out; removing the container.", flush=True)
-            try:
-                state = subprocess.run(
-                    ["docker", "inspect", unique], capture_output=True, text=True
-                )
-                (output / "container-final.json").write_text(state.stdout, encoding="utf-8")
-                logs = subprocess.run(["docker", "logs", unique], capture_output=True, text=True)
-                (output / "server.log").write_text(logs.stdout + logs.stderr, encoding="utf-8")
-                if telemetry != "off":
-                    collect_telemetry(unique, output)
-            finally:
-                subprocess.run(
-                    ["docker", "rm", "--force", unique], capture_output=True, check=False
-                )
-                command("docker", "volume", "rm", volume)
+            state = subprocess.run(["docker", "inspect", unique], capture_output=True, text=True)
+            (output / "container-final.json").write_text(state.stdout, encoding="utf-8")
+            logs = subprocess.run(["docker", "logs", unique], capture_output=True, text=True)
+            (output / "server.log").write_text(logs.stdout + logs.stderr, encoding="utf-8")
+            if telemetry != "off":
+                collect_telemetry(unique, output)
 
 
 def collect_telemetry(container: str, output: Path) -> None:
@@ -812,9 +586,12 @@ def collect_telemetry(container: str, output: Path) -> None:
 
 
 def collect_profile(
-    container: str, output: Path, *, scope: reports.ProfileScope = "user", image: str | None = None
+    container: str,
+    output: Path,
+    *,
+    image: images.ImageIdentity,
+    scope: reports.ProfileScope = "user",
 ) -> None:
-    image = image or PROFILER_IMAGE
     common = [
         "docker",
         "run",
@@ -824,7 +601,7 @@ def collect_profile(
         "--cap-drop=ALL",
         *(["--user=0", "--cap-add=SYSLOG", "--cap-add=SYS_PTRACE"] if scope != "user" else []),
         f"--mount=type=bind,source={output},target=/profile,readonly",
-        image,
+        image["image_id"],
     ]
     stacks = command(
         *common,
@@ -857,26 +634,21 @@ def observing(
     *,
     profiling: bool,
     scope: reports.ProfileScope = "user",
-    image: str | None = None,
-    profiler_image: str | None = None,
+    image: images.ImageIdentity,
+    profiler_image: images.ImageIdentity | None = None,
 ) -> Generator[str]:
-    image = image or IMAGE
-    profiler_image = profiler_image or PROFILER_IMAGE
     name = f"{container}-observer"
-    launch = ["--read-only", "--entrypoint=sleep", image, "infinity"]
-    target_hash = ""
+    launch = ["--read-only", "--entrypoint=sleep", image["image_id"], "infinity"]
     if profiling:
-        target_hash = command("docker", "exec", container, "sha256sum", "/app/server").split()[0]
-        symbol_hash = command(
-            "docker", "run", "--rm", "--entrypoint=sha256sum", profiler_image, "/app/server"
-        ).split()[0]
-        if target_hash != symbol_hash:
+        if profiler_image is None:
+            raise ValueError("profiling requires a verified profiler image")
+        if image["binary_sha256"] != profiler_image["binary_sha256"]:
             raise RuntimeError("profiler symbols do not match the running server")
         launch = [
             "--cap-add=PERFMON",
             *(["--cap-add=SYSLOG", "--cap-add=SYS_PTRACE"] if scope != "user" else []),
             "--entrypoint=sh",
-            profiler_image,
+            profiler_image["image_id"],
             "-c",
             'mkfifo /tmp/perf-control /tmp/perf-ack && exec perf "$@"',
             "perf",
@@ -911,77 +683,77 @@ def observing(
         created = True
         if profiling:
             time.sleep(1)
-            if command("docker", "inspect", "--format", "{{.State.Running}}", name) != "true":
+            if command("docker", "inspect", "--format={{.State.Running}}", name) != "true":
                 raise RuntimeError(command("docker", "logs", name))
             perf_control(name, "ping")
             reports.write_json(
                 output / "sampler.json",
                 {
-                    "perf_version": command("docker", "exec", name, "perf", "--version"),
-                    "binary_sha256": target_hash,
+                    "perf_version": container_command(name, "perf", "--version"),
+                    "binary_sha256": image["binary_sha256"],
                     "container": reports.decode_json(command("docker", "inspect", name).encode()),
                 },
             )
         yield name
         completed = True
     finally:
-        with preserving_failure(output, "profiler cleanup"):
-            try:
-                if created and profiling:
-                    command("docker", "stop", "--signal", "SIGINT", "--timeout", "15", name)
-                    logs = subprocess.run(["docker", "logs", name], capture_output=True, text=True)
-                    (output / "perf.log").write_text(logs.stdout + logs.stderr, encoding="utf-8")
-                    exit_code = command(
-                        "docker", "inspect", "--format", "{{.State.ExitCode}}", name
-                    )
-                    if exit_code not in ("0", "130"):
-                        raise RuntimeError(f"perf exited with {exit_code}; see perf.log")
-                    command("docker", "cp", f"{name}:/tmp/perf.data", str(output / "perf.data"))
-                    if completed:
-                        collect_profile(container, output, scope=scope, image=profiler_image)
-            finally:
-                subprocess.run(["docker", "rm", "--force", name], capture_output=True, check=False)
+        with preserving_failure(output, "profiler cleanup"), removing_container(name):
+            if created and profiling:
+                command("docker", "stop", "--signal=SIGINT", "--timeout=15", name)
+                logs = subprocess.run(["docker", "logs", name], capture_output=True, text=True)
+                (output / "perf.log").write_text(logs.stdout + logs.stderr, encoding="utf-8")
+                exit_code = command("docker", "inspect", "--format={{.State.ExitCode}}", name)
+                if exit_code not in ("0", "130"):
+                    raise RuntimeError(f"perf exited with {exit_code}; see perf.log")
+                command("docker", "cp", f"{name}:/tmp/perf.data", str(output / "perf.data"))
+                if completed and profiler_image is not None:
+                    collect_profile(container, output, scope=scope, image=profiler_image)
 
 
 def run_workload(
     config: RunConfig,
     output: Path,
     *,
-    image: str,
-    source: sources.SourceSnapshot | None = None,
-    profiler_image: str | None = None,
+    image: images.ImageIdentity,
+    source: sources.SourceSnapshot,
+    profiler_image: images.ImageIdentity | None = None,
 ) -> int:
-    generator_image = GENERATOR_IMAGE
-    if config.generator == "cpp":
-        generator_image = ensure_generator(source)
-    workspace = source.root if source is not None else ROOT
+    generator_image = (
+        images.ensure_generator(source)
+        if config.generator == "cpp"
+        else images.inspect(images.K6_IMAGE, "/usr/bin/k6")
+    )
     with (
-        server(output, image=image, telemetry=config.telemetry, workspace=workspace) as (
-            container,
-            _port,
-        ),
+        server(
+            output,
+            image=image,
+            telemetry=config.telemetry,
+            workspace=source.root,
+        ) as (container, _port),
         observing(
             container,
             output,
             profiling=config.perf != "off",
             scope=config.perf if config.perf != "off" else "user",
             image=image,
-            profiler_image=profiler_image or image_name(profiler=True, telemetry=config.telemetry),
+            profiler_image=profiler_image,
         ) as observer,
         load_generator(
-            config, container, output, image=generator_image, workspace=workspace
+            config, container, output, image=generator_image, workspace=source.root
         ) as generator,
     ):
         return load(config, generator, observer, output)
 
 
-def _record_image(run: runs.RunRecord, component: str, image: str) -> dict[str, reports.JSONValue]:
-    identity = image_identity(image, "/app/server")
-    run.record_build(component, identity)
+def _record_image(
+    run: runs.RunRecord,
+    component: str,
+    identity: images.ImageIdentity | dict[str, reports.JSONValue],
+) -> None:
+    run.record_build(component, cast("dict[str, reports.JSONValue]", identity))
     run.record_binary(
         component, {"image_id": identity["image_id"], "sha256": identity["binary_sha256"]}
     )
-    return identity
 
 
 def _measure(
@@ -1002,26 +774,26 @@ def _measure(
     (run.raw / "observer.patch").write_bytes(source.patch)
     run.record_observer({**source_identity, "patch": "raw/observer.patch"})
     rebuilt = not reuse_server and image is None
-    image = (
-        build(telemetry=config.telemetry, source=source)
+    identity = (
+        images.build(source, telemetry=config.telemetry)
         if rebuilt
-        else image or image_name(telemetry=config.telemetry)
+        else images.inspect(image or images.image_name(telemetry=config.telemetry), "/app/server")
     )
-    identity = _record_image(run, "server", image)
+    _record_image(run, "server", identity)
     if identity["source"] == source_identity:
         run.record_source(source.base_commit, source.patch, source.source_sha256)
     elif rebuilt:
         raise RuntimeError("built server image source does not match the frozen build inputs")
     profiler_image = None
     if config.perf != "off":
-        profiler_image = build("profiler", telemetry=config.telemetry, source=source)
-        profiler_image = reports.text(_record_image(run, "profiler", profiler_image), "image_id")
+        profiler_image = images.build(source, "profiler", telemetry=config.telemetry)
+        _record_image(run, "profiler", profiler_image)
     if config.telemetry != "off":
         print(f"Server telemetry: {config.telemetry}; collection overhead is included.", flush=True)
     return run_workload(
         config,
         run.raw,
-        image=reports.text(identity, "image_id"),
+        image=identity,
         source=source,
         profiler_image=profiler_image,
     )
@@ -1040,20 +812,13 @@ def _error_text(error: BaseException) -> str:
 def execute_workload(
     config: RunConfig, *, image: str | None = None, reuse_server: bool = False
 ) -> int:
-    reports.duration_seconds(config.ramp)
-    reports.duration_seconds(config.hold)
+    _ = config.timing
     anchor = command("git", "-C", str(ROOT), "rev-parse", "HEAD")
     run = runs.create_run(
         ROOT,
         anchor,
         config.label,
-        {
-            "generator": config.generator,
-            "vus": config.vus,
-            "ramp": config.ramp,
-            "hold": config.hold,
-            "seed": config.seed,
-        },
+        config.workload,
         {
             "server_telemetry": config.telemetry,
             "client_diagnostics": config.client_diagnostics,
@@ -1101,35 +866,23 @@ def execute_workload(
                 primary = None
         generator_identity = run.raw / "generator-image.json"
         if generator_identity.is_file():
-            identity = reports.mapping(reports.read_json(generator_identity))
-            run.record_build("generator", identity)
-            run.record_binary(
-                "generator", {"image_id": identity["image_id"], "sha256": identity["binary_sha256"]}
-            )
+            _record_image(run, "generator", reports.mapping(reports.read_json(generator_identity)))
     except Exception as error:
         secondary.append(_error_text(error))
     secondary = list(dict.fromkeys(secondary))
     if code == 0 and secondary:
         code = 1
     status: runs.TerminalStatus = (
-        "interrupted"
-        if isinstance(primary, KeyboardInterrupt) or code == 130
-        else "passed"
-        if code == 0
-        else "failed"
+        "passed" if code == 0 else "interrupted" if code == 130 else "failed"
     )
-    message = (
-        _error_text(primary)
-        if primary is not None
-        else f"load generator exited {code}"
-        if code not in (0, 1)
-        else None
-    )
+    message = None
+    if primary is not None:
+        message = _error_text(primary)
+    elif code not in (0, 1):
+        message = f"load generator exited {code}"
     code = run.finish(status, summary, code, message, secondary)
     reports.show_saved_report(reports.read_json(run.path / "summary.json"))
-    if message is not None:
-        print(message, file=sys.stderr)
-    for failure in secondary:
+    for failure in ([message] if message is not None else []) + secondary:
         print(failure, file=sys.stderr)
     print(f"Run: {run.path}", flush=True)
     return code

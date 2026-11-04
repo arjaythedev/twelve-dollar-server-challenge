@@ -10,7 +10,7 @@ import tempfile
 from contextlib import closing
 from pathlib import Path
 
-from . import runtime, sources
+from . import images, runtime, sources
 
 
 def cpp_editor(image: str) -> None:
@@ -79,8 +79,7 @@ def native_check(image: str) -> None:
             "nofile=65535:65535",
             "--security-opt",
             f"seccomp={runtime.ROOT / 'src/docker/seccomp.json'}",
-            "--entrypoint",
-            "ctest",
+            "--entrypoint=ctest",
             image,
             "--test-dir",
             "/build/out",
@@ -100,12 +99,10 @@ def check(use_docker: bool) -> None:
         subprocess.run(["uv", "run", "--locked", *args], cwd=runtime.ROOT / "src", check=True)
     if use_docker:
         with sources.capture(runtime.ROOT) as source:
-            test_image = runtime.build("test-build", source=source)
-            native_check(test_image)
-            image = runtime.build("tested-runtime", source=source)
-            tested = runtime.image_identity(test_image, "/build/out/server")
-            serving = runtime.image_identity(image, "/app/server")
-            if tested["binary_sha256"] != serving["binary_sha256"]:
+            test_image = images.build(source, "test-build")
+            native_check(test_image["image_id"])
+            image = images.build(source, "tested-runtime")
+            if test_image["binary_sha256"] != image["binary_sha256"]:
                 raise RuntimeError("HTTP checks must use the exact server tested by CTest")
             output = runtime.ROOT / "src/.build/checks"
             output.mkdir(parents=True, exist_ok=True)
@@ -116,8 +113,7 @@ def check(use_docker: bool) -> None:
         subprocess.run(
             ["uv", "run", "--locked", "python", "-m", "unittest", "-v", "tests.test_api"],
             cwd=runtime.ROOT / "src",
-            env=os.environ
-            | {"TDS_HTTP_TESTS": "1", "TDS_HTTP_TEST_IMAGE": str(serving["image_id"])},
+            env=os.environ | {"TDS_HTTP_TESTS": "1", "TDS_HTTP_TEST_IMAGE": image["image_id"]},
             check=True,
         )
 

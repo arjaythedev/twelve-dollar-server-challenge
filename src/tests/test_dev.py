@@ -13,8 +13,9 @@ from types import TracebackType
 from unittest.mock import patch
 
 import dev
-from devtools import reports, runtime
+from devtools import images, reports, runtime
 from devtools.checks import native_check
+from devtools.images import GENERATOR_IMAGE, ensure_generator, generator_fingerprint
 from devtools.reports import (
     JSONValue,
     Result,
@@ -32,11 +33,8 @@ from devtools.reports import (
     write_json,
 )
 from devtools.runtime import (
-    GENERATOR_IMAGE,
     LoadGenerator,
     RunConfig,
-    ensure_generator,
-    generator_fingerprint,
     load,
     load_generator,
     run_workload,
@@ -108,13 +106,10 @@ class NativeProfileTests(unittest.TestCase):
                 self.subTest(seed=seed),
                 TemporaryDirectory() as directory,
                 patch(
-                    "devtools.runtime.command",
+                    "devtools.images.image_command",
                     return_value="cpp-version",
-                ),
-                patch(
-                    "devtools.runtime.image_identity",
-                    return_value={"image_id": GENERATOR_IMAGE, "binary_sha256": "generator-hash"},
-                ),
+                ) as version,
+                patch("devtools.images.inspect") as inspect,
                 patch(
                     "devtools.runtime.subprocess.run",
                     return_value=subprocess.CompletedProcess([], 0, "[]", ""),
@@ -130,8 +125,21 @@ class NativeProfileTests(unittest.TestCase):
                     ramp="30s",
                     seed=seed,
                 )
-                with load_generator(args, "test-container", output) as generator:
+                with load_generator(
+                    args,
+                    "test-container",
+                    output,
+                    image=make_identity(GENERATOR_IMAGE, "generator-hash"),
+                    workspace=runtime.ROOT,
+                ) as generator:
                     self.assertIn(GENERATOR_IMAGE, generator.invocation)
+                    self.assertEqual(generator.sha256, "generator-hash")
+                    version.assert_called_once_with(
+                        make_identity(GENERATOR_IMAGE, "generator-hash"),
+                        "/app/load_generator",
+                        "--version",
+                    )
+                    inspect.assert_not_called()
                     if seed is None:
                         self.assertNotIn("--seed", generator.invocation)
                     else:
@@ -272,6 +280,7 @@ class NativeProfileTests(unittest.TestCase):
             self.assertEqual(
                 mapping(decode_json((output / "run.json").read_bytes()))["generator"], "cpp"
             )
+            self.assertEqual(mapping(read_json(output / "run.json"))["workload"], args.workload)
 
     def test_process_name_does_not_shift_cpu_fields(self) -> None:
         fields = ["S", *(["0"] * 10), "123", "45", *(["0"] * 30)]
@@ -308,7 +317,6 @@ class NativeProfileTests(unittest.TestCase):
         with (
             TemporaryDirectory() as directory,
             patch("devtools.runtime.command", side_effect=response) as command,
-            patch("devtools.runtime.image_identity", return_value={"image_id": "server-pinned"}),
             patch("devtools.runtime.healthy", return_value=True),
             patch("devtools.runtime.subprocess.run") as run,
             patch("builtins.print"),
@@ -327,7 +335,10 @@ class NativeProfileTests(unittest.TestCase):
             ]
             container_name = ""
             with self.assertRaisesRegex(RuntimeError, "request failed"):
-                with server(output, database=seed, workspace=workspace) as (name, port):
+                with server(output, image=make_identity(), database=seed, workspace=workspace) as (
+                    name,
+                    port,
+                ):
                     container_name = name
                     self.assertEqual(port, 12345)
                     raise RuntimeError("request failed")
@@ -337,7 +348,7 @@ class NativeProfileTests(unittest.TestCase):
             command.assert_any_call("docker", "volume", "rm", container_name + "-data")
             self.assertEqual((output / "server.log").read_text(), "Listening\n")
             launch = next(call.args for call in command.call_args_list if "--detach" in call.args)
-            self.assertIn(f"seccomp={workspace / 'src/docker/seccomp.json'}", launch)
+            self.assertIn(f"--security-opt=seccomp={workspace / 'src/docker/seccomp.json'}", launch)
             environment = mapping(read_json(output / "environment.json"))
             self.assertEqual(
                 environment["workload_sha256"], hashlib.sha256(b"frozen workload").hexdigest()
@@ -438,7 +449,7 @@ class NativeProfileTests(unittest.TestCase):
 class NativeRunnerTests(unittest.TestCase):
     def test_ctest_owns_the_native_test_list_and_has_writable_logs(self) -> None:
         with (
-            patch("devtools.runtime.build", return_value="native-tests") as build,
+            patch("devtools.images.build") as build,
             patch("devtools.checks.cpp_editor"),
             patch("devtools.runtime.command", return_value="tests passed") as command,
         ):
@@ -446,7 +457,7 @@ class NativeRunnerTests(unittest.TestCase):
             build.assert_not_called()
             command.assert_called_once()
             invocation = command.call_args.args
-            self.assertEqual(invocation[invocation.index("--entrypoint") + 1], "ctest")
+            self.assertIn("--entrypoint=ctest", invocation)
             self.assertIn("--read-only", invocation)
             self.assertIn("--tmpfs=/build/out/Testing:rw,mode=1777,size=32m", invocation)
             self.assertEqual(invocation[-3:], ("--test-dir", "/build/out", "--output-on-failure"))
@@ -455,29 +466,31 @@ class NativeRunnerTests(unittest.TestCase):
 class GeneratorImageTests(unittest.TestCase):
     def test_generator_build_records_only_effective_settings(self) -> None:
         with (
-            patch("devtools.runtime.command", return_value="verified-identity") as command,
-            patch("devtools.runtime.generator_fingerprint", return_value="generator-source"),
+            patch("devtools.images._command") as command,
+            patch("devtools.images.inspect", return_value=make_identity()),
+            patch("devtools.images.generator_fingerprint", return_value="generator-source"),
             patch(
                 "devtools.runtime.subprocess.run",
                 return_value=subprocess.CompletedProcess([], 0, "", ""),
             ),
         ):
-            runtime.build("generator", telemetry="profile", source=make_snapshot(runtime.ROOT))
+            images.build(make_snapshot(runtime.ROOT), "generator", telemetry="profile")
             invocation = command.call_args_list[0].args
             spec_label = next(
-                value for value in invocation if value.startswith(runtime.BUILD_LABEL + "=")
+                value
+                for value in invocation
+                if value.startswith("--label=" + images.BUILD_LABEL + "=")
             )
-            spec = mapping(decode_json(spec_label.split("=", 1)[1].encode()))
+            spec = mapping(decode_json(spec_label.split("=", 2)[2].encode()))
             self.assertEqual(spec["target"], "generator")
             self.assertTrue(spec["generator_only"])
             self.assertNotIn("telemetry", spec)
-            self.assertFalse(any(value.startswith("TDS_TELEMETRY=") for value in invocation))
+            self.assertFalse(
+                any(value.startswith("--build-arg=TDS_TELEMETRY=") for value in invocation)
+            )
 
     def test_source_fingerprint_changes_for_every_generator_build_input(self) -> None:
-        with (
-            TemporaryDirectory() as directory,
-            patch("devtools.runtime.ROOT", Path(directory)),
-        ):
+        with TemporaryDirectory() as directory:
             root = Path(directory) / "src"
             names = (
                 "load/main.cpp",
@@ -493,12 +506,12 @@ class GeneratorImageTests(unittest.TestCase):
                 path = root / name
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(name, encoding="utf-8")
-            original = generator_fingerprint()
+            original = generator_fingerprint(root)
             for name in names:
                 with self.subTest(name=name):
                     path = root / name
                     path.write_text(name + " changed", encoding="utf-8")
-                    self.assertNotEqual(generator_fingerprint(), original)
+                    self.assertNotEqual(generator_fingerprint(root), original)
                     path.write_text(name, encoding="utf-8")
             for name in (
                 "tests/CMakeLists.txt",
@@ -508,38 +521,63 @@ class GeneratorImageTests(unittest.TestCase):
                 path = root / name
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text("unrelated", encoding="utf-8")
-                self.assertEqual(generator_fingerprint(), original)
+                self.assertEqual(generator_fingerprint(root), original)
 
     def test_matching_generator_fingerprint_skips_rebuild(self) -> None:
+        inspected = {
+            "Id": "generator-pinned",
+            "Config": {"Labels": {images.GENERATOR_SOURCE_LABEL: "current"}},
+            "RepoDigests": ["generator@sha256:pinned"],
+        }
         with (
-            patch("devtools.runtime.generator_fingerprint", return_value="current"),
-            patch("devtools.runtime.command", return_value="current") as command,
+            patch("devtools.images.generator_fingerprint", return_value="current"),
+            patch(
+                "devtools.images._command",
+                side_effect=[
+                    json.dumps(inspected),
+                    "toolchain",
+                    "generator-hash /app/load_generator",
+                ],
+            ) as command,
+            patch("devtools.images.build") as build,
         ):
-            self.assertEqual(ensure_generator(make_snapshot(runtime.ROOT)), "current")
-            self.assertEqual(command.call_count, 2)
-            self.assertEqual(command.call_args.args[:3], ("docker", "image", "inspect"))
-            self.assertEqual(command.call_args.args[-1], GENERATOR_IMAGE)
+            identity = ensure_generator(make_snapshot(runtime.ROOT))
+            self.assertEqual(identity["image_id"], "generator-pinned")
+            self.assertEqual(identity["binary_sha256"], "generator-hash")
+            self.assertEqual(identity["repo_digests"], inspected["RepoDigests"])
+            inspections = [
+                call
+                for call in command.call_args_list
+                if call.args[:3] == ("docker", "image", "inspect")
+            ]
+            self.assertEqual(len(inspections), 1)
+            self.assertEqual(inspections[0].args[-1], GENERATOR_IMAGE)
+            for call in command.call_args_list[1:]:
+                self.assertIn("generator-pinned", call.args)
+                self.assertNotIn(GENERATOR_IMAGE, call.args)
+            build.assert_not_called()
 
     def test_missing_or_stale_generator_rebuilds_only_the_generator_target(self) -> None:
         for cached in ("old", None):
             with (
                 self.subTest(cached=cached),
-                patch("devtools.runtime.generator_fingerprint", return_value="current"),
+                patch("devtools.images.generator_fingerprint", return_value="current"),
                 patch(
-                    "devtools.runtime.command",
+                    "devtools.images._command",
                     side_effect=[
-                        cached
+                        json.dumps({"Config": {"Labels": {images.GENERATOR_SOURCE_LABEL: cached}}})
                         if cached is not None
                         else subprocess.CalledProcessError(1, "inspect"),
-                        "",
                     ],
                 ) as command,
-                patch("devtools.runtime.build", return_value="generator-pinned") as build,
+                patch(
+                    "devtools.images.build", return_value=make_identity("generator-pinned")
+                ) as build,
             ):
                 source = make_snapshot(runtime.ROOT)
-                self.assertEqual(ensure_generator(source), "generator-pinned")
+                self.assertEqual(ensure_generator(source)["image_id"], "generator-pinned")
                 command.assert_called_once()
-                build.assert_called_once_with("generator", source=source)
+                build.assert_called_once_with(source, "generator")
 
     def test_server_choice_cannot_select_an_obsolete_native_generator(self) -> None:
         captured: list[LoadGenerator] = []
@@ -555,27 +593,23 @@ class GeneratorImageTests(unittest.TestCase):
             ("twelve-dollar-cpp:local-basic", "basic", True),
             ("twelve-dollar-cpp:local-profile", "profile", False),
         )
-        for image, telemetry, diagnostics in variants:
+        for image_name, telemetry, diagnostics in variants:
+            image = make_identity(image_name)
+            source = make_snapshot(runtime.ROOT)
+            generator_identity = make_identity("generator-pinned", "generator-hash")
             with (
-                self.subTest(image=image),
+                self.subTest(image=image_name),
                 TemporaryDirectory() as directory,
                 patch(
-                    "devtools.runtime.ensure_generator", return_value="generator-pinned"
+                    "devtools.images.ensure_generator", return_value=generator_identity
                 ) as ensure,
                 patch("devtools.runtime.server") as server_context,
                 patch("devtools.runtime.observing") as observer,
                 patch("devtools.runtime.load", side_effect=loaded),
                 patch(
-                    "devtools.runtime.command",
+                    "devtools.images.image_command",
                     return_value="current",
                 ) as command,
-                patch(
-                    "devtools.runtime.image_identity",
-                    return_value={
-                        "image_id": "generator-pinned",
-                        "binary_sha256": "generator-hash",
-                    },
-                ),
                 patch(
                     "devtools.runtime.subprocess.run",
                     return_value=subprocess.CompletedProcess([], 0, "[]", ""),
@@ -599,19 +633,19 @@ class GeneratorImageTests(unittest.TestCase):
                     telemetry=telemetry,
                     client_diagnostics=diagnostics,
                 )
-                self.assertEqual(run_workload(args, output, image=image), 0)
+                self.assertEqual(run_workload(args, output, image=image, source=source), 0)
                 server_context.assert_called_once_with(
                     output, image=image, telemetry=telemetry, workspace=runtime.ROOT
                 )
                 self.assertIn("generator-pinned", captured[-1].invocation)
-                self.assertNotIn(image, captured[-1].invocation)
+                self.assertNotIn(image_name, captured[-1].invocation)
                 self.assertEqual("--diagnostics" in captured[-1].invocation, diagnostics)
-                self.assertIn("generator-pinned", command.call_args.args)
+                self.assertIs(command.call_args.args[0], generator_identity)
 
     def test_failed_generator_refresh_never_starts_the_server(self) -> None:
         with (
             patch(
-                "devtools.runtime.ensure_generator",
+                "devtools.images.ensure_generator",
                 side_effect=subprocess.CalledProcessError(1, "build"),
             ),
             patch("devtools.runtime.server") as server_context,
@@ -624,12 +658,18 @@ class GeneratorImageTests(unittest.TestCase):
                 generator="cpp",
             )
             with self.assertRaises(subprocess.CalledProcessError):
-                run_workload(args, Path("unused"), image="old-server")
+                run_workload(
+                    args,
+                    Path("unused"),
+                    image=make_identity("old-server"),
+                    source=make_snapshot(runtime.ROOT),
+                )
             server_context.assert_not_called()
 
     def test_k6_does_not_require_the_native_generator_image(self) -> None:
         with (
-            patch("devtools.runtime.ensure_generator") as ensure,
+            patch("devtools.images.ensure_generator") as ensure,
+            patch("devtools.images.inspect", return_value=make_identity("k6-pinned")) as inspect,
             patch("devtools.runtime.server") as server_context,
             patch("devtools.runtime.observing"),
             patch("devtools.runtime.load_generator"),
@@ -644,13 +684,37 @@ class GeneratorImageTests(unittest.TestCase):
                 generator="k6",
                 telemetry="off",
             )
-            self.assertEqual(run_workload(args, Path("unused"), image="server"), 0)
+            self.assertEqual(
+                run_workload(
+                    args, Path("unused"), image=make_identity(), source=make_snapshot(runtime.ROOT)
+                ),
+                0,
+            )
             ensure.assert_not_called()
+            inspect.assert_called_once_with(images.K6_IMAGE, "/usr/bin/k6")
 
 
 CLI_ANCHOR = "a" * 40
 CLI_PATCH = b"captured source bytes\n"
 CLI_SOURCE = "b" * 64
+
+
+def make_identity(
+    image_id: str = "server-pinned", binary_sha256: str = "e" * 64
+) -> images.ImageIdentity:
+    return images.ImageIdentity(
+        image_id=image_id,
+        binary_sha256=binary_sha256,
+        repo_digests=[],
+        source={
+            "base_commit": CLI_ANCHOR,
+            "patch_sha256": hashlib.sha256(CLI_PATCH).hexdigest(),
+            "source_sha256": CLI_SOURCE,
+        },
+        build_spec={"telemetry": "off"},
+        toolchain_sha256="f" * 64,
+        build_sha256="c" * 64,
+    )
 
 
 def make_snapshot(root: Path) -> SourceSnapshot:
@@ -665,6 +729,119 @@ def make_snapshot(root: Path) -> SourceSnapshot:
     )
 
 
+class VerifiedRuntimeTests(unittest.TestCase):
+    def test_server_checks_running_image_without_reinspecting_prepared_metadata(self) -> None:
+        identity = make_identity()
+        for running_image in (identity["image_id"], "changed-server"):
+            with (
+                self.subTest(running_image=running_image),
+                TemporaryDirectory() as directory,
+                patch("devtools.images.inspect") as inspect,
+                patch("devtools.images._command") as image_command,
+                patch("devtools.runtime.healthy", return_value=True),
+                patch(
+                    "devtools.runtime.subprocess.run",
+                    return_value=subprocess.CompletedProcess([], 0, "[]", ""),
+                ),
+                patch("builtins.print"),
+            ):
+                output = Path(directory)
+                seed = output / "fixture.db"
+                seed.touch()
+                (output / "bench").mkdir()
+                (output / "bench" / "load.js").write_bytes(b"frozen workload")
+
+                def response(
+                    *args: str, timeout: int | None = 30, actual: str = running_image
+                ) -> str:
+                    del timeout
+                    if args[:2] == ("docker", "port"):
+                        return "127.0.0.1:12345"
+                    if args[:2] == ("docker", "inspect"):
+                        return json.dumps([{"Image": actual}])
+                    return '{"telemetry":"off"}' if args[-1] == "--version" else "{}"
+
+                with patch("devtools.runtime.command", side_effect=response) as command:
+                    if running_image == identity["image_id"]:
+                        with server(output, image=identity, database=seed, workspace=output):
+                            environment = mapping(read_json(output / "environment.json"))
+                            self.assertEqual(environment["server_identity"], identity)
+                    else:
+                        with self.assertRaisesRegex(RuntimeError, "verified image"):
+                            with server(output, image=identity, database=seed, workspace=output):
+                                self.fail("a different running image cannot be measured")
+                    self.assertTrue(
+                        any(
+                            call.args[:2] == ("docker", "inspect")
+                            for call in command.call_args_list
+                        )
+                    )
+                    self.assertFalse(
+                        any(
+                            "sha256sum" in call.args or "/etc/tds-toolchain" in call.args
+                            for call in command.call_args_list
+                        )
+                    )
+                inspect.assert_not_called()
+                image_command.assert_not_called()
+
+    def test_profiler_hash_mismatch_is_rejected_without_rehashing_binaries(self) -> None:
+        with (
+            patch("devtools.runtime.command") as command,
+            patch("devtools.images.inspect") as inspect,
+            patch("devtools.images._command") as image_command,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "symbols do not match"):
+                with runtime.observing(
+                    "server",
+                    Path("unused"),
+                    image=make_identity(),
+                    profiling=True,
+                    profiler_image=make_identity("profiler-pinned", "different-binary"),
+                ):
+                    self.fail("mismatched symbols cannot enter the measurement")
+            command.assert_not_called()
+            inspect.assert_not_called()
+            image_command.assert_not_called()
+
+    def test_matching_profiler_metadata_uses_pinned_image_and_retains_exit_130(self) -> None:
+        identity = make_identity()
+        profiler = make_identity("profiler-pinned")
+
+        def response(*args: str, timeout: int | None = 30) -> str:
+            del timeout
+            if "--format={{.State.Running}}" in args:
+                return "true"
+            if "--format={{.State.ExitCode}}" in args:
+                return "130"
+            return "[]" if args[:2] == ("docker", "inspect") else "perf version"
+
+        with (
+            TemporaryDirectory() as directory,
+            patch("devtools.runtime.command", side_effect=response) as command,
+            patch("devtools.runtime.perf_control"),
+            patch("devtools.runtime.time.sleep"),
+            patch("devtools.runtime.collect_profile") as collect,
+            patch("devtools.images.inspect") as inspect,
+            patch("devtools.images._command") as image_command,
+            patch(
+                "devtools.runtime.subprocess.run",
+                return_value=subprocess.CompletedProcess([], 0, "perf log", ""),
+            ),
+        ):
+            output = Path(directory)
+            with runtime.observing(
+                "server", output, image=identity, profiling=True, profiler_image=profiler
+            ):
+                sampler = mapping(read_json(output / "sampler.json"))
+                self.assertEqual(sampler["binary_sha256"], identity["binary_sha256"])
+            self.assertIn("profiler-pinned", command.call_args_list[0].args)
+            self.assertFalse(any("sha256sum" in call.args for call in command.call_args_list))
+            collect.assert_called_once_with("server", output, scope="user", image=profiler)
+            inspect.assert_not_called()
+            image_command.assert_not_called()
+
+
 def canonical_path(root: Path, label: str) -> Path:
     return root / "src" / "runs" / CLI_ANCHOR[:7] / label
 
@@ -674,6 +851,7 @@ def write_cli_workload(config: RunConfig, output: Path, code: int = 0) -> int:
         output / "run.json",
         {
             "arguments": [f"VUS={config.vus}", f"DURATION={config.hold}", f"RAMP_UP={config.ramp}"],
+            "workload": config.workload,
             "exit_code": code,
             "cgroup_before": {"usage_usec": 100},
             "cgroup_after": {"usage_usec": 120, "memory_peak": 4096, "oom_kill": 0},
@@ -713,15 +891,16 @@ def invoke_cli(
     workload: Callable[[RunConfig, Path], int] | BaseException | None = None,
     known_source: bool = True,
     capture_error: BaseException | None = None,
-    expected_targets: tuple[runtime.BuildTarget, ...] | None = None,
+    expected_targets: tuple[images.BuildTarget, ...] | None = None,
 ) -> int | str | None:
     snapshot = make_snapshot(root)
-    identity: dict[str, JSONValue] = {
+    identity: images.ImageIdentity = {
         "image_id": "sha256:" + "d" * 64,
         "binary_sha256": "e" * 64,
         "repo_digests": [],
         "build_spec": {"telemetry": "off"},
         "toolchain_sha256": "f" * 64,
+        "build_sha256": "c" * 64,
         "source": {
             "base_commit": CLI_ANCHOR,
             "patch_sha256": snapshot.patch_sha256,
@@ -735,15 +914,15 @@ def invoke_cli(
         config: RunConfig,
         output: Path,
         *,
-        image: str,
-        source: SourceSnapshot | None = None,
-        profiler_image: str | None = None,
+        image: images.ImageIdentity,
+        source: SourceSnapshot,
+        profiler_image: images.ImageIdentity | None = None,
     ) -> int:
-        test.assertEqual(image, identity["image_id"])
+        test.assertIs(image, identity)
         test.assertIs(source, snapshot)
         test.assertEqual(output.name, "raw")
         if config.perf != "off":
-            test.assertEqual(profiler_image, identity["image_id"])
+            test.assertIs(profiler_image, identity)
         if isinstance(workload, BaseException):
             raise workload
         return (workload or write_cli_workload)(config, output)
@@ -752,8 +931,8 @@ def invoke_cli(
         patch("devtools.runtime.ROOT", root),
         patch("devtools.runtime.command", return_value=CLI_ANCHOR),
         patch("devtools.sources.capture") as capture,
-        patch("devtools.runtime.build", return_value="content-addressed-image") as build,
-        patch("devtools.runtime.image_identity", return_value=identity),
+        patch("devtools.images.build", return_value=identity) as build,
+        patch("devtools.images.inspect", return_value=identity) as inspect,
         patch("devtools.runtime.run_workload", side_effect=completed),
         patch("devtools.reports.show_saved_report"),
         patch("sys.argv", ["dev.py", *arguments]),
@@ -766,15 +945,20 @@ def invoke_cli(
             dev.main()
         if expected_targets is not None:
             test.assertEqual(
-                tuple(call.args[0] if call.args else "final" for call in build.call_args_list),
+                tuple(
+                    call.args[1] if len(call.args) > 1 else "final" for call in build.call_args_list
+                ),
                 expected_targets,
             )
+        test.assertEqual(
+            inspect.call_count, int("--image" in arguments or "--reuse-server" in arguments)
+        )
         return stopped.exception.code
 
 
 class CanonicalCliTests(unittest.TestCase):
     def test_reuse_server_skips_only_the_server_build(self) -> None:
-        cases: tuple[tuple[list[str], tuple[runtime.BuildTarget, ...]], ...] = (
+        cases: tuple[tuple[list[str], tuple[images.BuildTarget, ...]], ...] = (
             ([], ("final",)),
             (["--reuse-server"], ()),
             (["--image", "reference"], ()),
@@ -1075,6 +1259,46 @@ class CanonicalCliTests(unittest.TestCase):
 
 
 class ToolBoundaryTests(unittest.TestCase):
+    def test_workload_settings_are_explicit_and_duration_parsing_is_cached(self) -> None:
+        config = RunConfig(
+            label="cached", vus=7, ramp="15s", hold="45s", seed=42, telemetry="profile", perf="all"
+        )
+        self.assertEqual(
+            config.workload,
+            {"generator": "cpp", "vus": 7, "ramp": "15s", "hold": "45s", "seed": 42},
+        )
+        with patch("devtools.reports.duration_seconds", wraps=duration_seconds) as parse:
+            self.assertEqual(config.timing, (15, 45))
+            self.assertEqual(config.timing, (15, 45))
+            self.assertEqual([call.args for call in parse.call_args_list], [("15s",), ("45s",)])
+
+    def test_summary_uses_workload_and_only_current_cgroup_client_memory(self) -> None:
+        config = RunConfig(label="summary", vus=7, ramp="15s", hold="45s", seed=42)
+        with TemporaryDirectory() as directory:
+            output = Path(directory)
+            write_cli_workload(config, output)
+            run = mapping(read_json(output / "run.json"))
+            run["arguments"] = ["VUS=999", "DURATION=1s", "RAMP_UP=2s"]
+            run["load_generator"] = "native"
+            write_json(output / "run.json", run)
+            write_json(
+                output / "samples.json",
+                [
+                    {"client_rss_bytes": 999999, "client_cgroup_bytes": 4096},
+                    {"client_rss_bytes": 9999999},
+                    {"client_cgroup_bytes": 8192},
+                ],
+            )
+            result = reports.summarize(output).result
+            self.assertEqual((result["users"], result["hold"], result["ramp"]), (7, "45s", "15s"))
+            self.assertEqual(result.get("client_sampled_peak_bytes"), 8192)
+            del run["arguments"]
+            write_json(output / "run.json", run)
+            write_json(output / "samples.json", [{"client_rss_bytes": 9999999}])
+            result = reports.summarize(output).result
+            self.assertEqual(result["users"], 7)
+            self.assertNotIn("client_sampled_peak_bytes", result)
+
     def test_client_diagnostics_and_seed_are_rejected_for_k6_before_resources(self) -> None:
         for option in (["--client-diagnostics"], ["--seed", "7"]):
             with (
@@ -1140,11 +1364,13 @@ class ToolBoundaryTests(unittest.TestCase):
                 patch("sys.argv", ["dev.py", "bench", "--label", "invalid", *options]),
                 patch("sys.stderr", StringIO()),
                 patch("devtools.runtime.run_workload") as run,
+                patch("devtools.runs.create_run") as create,
             ):
                 with self.assertRaises(SystemExit) as stopped:
                     dev.main()
                 self.assertEqual(stopped.exception.code, exit_code)
                 run.assert_not_called()
+                create.assert_not_called()
 
     def test_removed_export_flag_cannot_overwrite_historical_measurements(self) -> None:
         with TemporaryDirectory() as directory:
@@ -1204,7 +1430,9 @@ class ToolBoundaryTests(unittest.TestCase):
     def test_workload_failure_unwinds_generator_observer_and_server(self) -> None:
         cleanup: list[str] = []
         with (
-            patch("devtools.runtime.ensure_generator"),
+            patch(
+                "devtools.images.ensure_generator", return_value=make_identity("generator-pinned")
+            ),
             patch("devtools.runtime.server") as server_context,
             patch("devtools.runtime.observing") as observer_context,
             patch("devtools.runtime.load_generator") as generator_context,
@@ -1230,7 +1458,12 @@ class ToolBoundaryTests(unittest.TestCase):
                 context.return_value.__exit__.side_effect = finished
             config = RunConfig(label="cleanup", vus=1, ramp="30s", hold="60s")
             with self.assertRaisesRegex(RuntimeError, "failed workload"):
-                runtime.run_workload(config, Path("unused"), image="server")
+                runtime.run_workload(
+                    config,
+                    Path("unused"),
+                    image=make_identity(),
+                    source=make_snapshot(runtime.ROOT),
+                )
         self.assertEqual(cleanup, ["generator", "observer", "server"])
 
 
@@ -1511,38 +1744,48 @@ class TelemetryTests(unittest.TestCase):
         for mode in modes:
             with (
                 self.subTest(mode=mode),
-                patch("devtools.runtime.command", return_value="verified-identity") as command,
+                patch("devtools.images._command") as command,
+                patch("devtools.images.inspect", return_value=make_identity()) as inspect,
                 patch(
                     "devtools.runtime.subprocess.run",
                     return_value=subprocess.CompletedProcess([], 0, "", ""),
                 ),
             ):
                 source = make_snapshot(runtime.ROOT)
-                image = runtime.build(telemetry=mode, source=source)
-                self.assertTrue(
-                    image.startswith(
-                        f"twelve-dollar-cpp:{CLI_ANCHOR[:12]}-{source.patch_sha256[:12]}-"
-                    )
+                image = images.build(source, telemetry=mode)
+                self.assertIs(image, inspect.return_value)
+                self.assertIn(
+                    f"twelve-dollar-cpp:{CLI_ANCHOR[:12]}-{source.patch_sha256[:12]}-{'c' * 12}",
+                    command.call_args_list[1].args,
                 )
                 invocation = command.call_args_list[0].args
                 self.assertEqual(invocation[:2], ("docker", "build"))
-                self.assertIn(f"TDS_TELEMETRY={mode}", invocation)
-                self.assertNotIn("TDS_DIAGNOSTICS=ON", invocation)
+                self.assertIn(f"--build-arg=TDS_TELEMETRY={mode}", invocation)
+                self.assertNotIn("--build-arg=TDS_DIAGNOSTICS=ON", invocation)
         with (
             patch("devtools.runtime.server") as server_context,
             patch("devtools.runtime.observing") as observer,
             patch("devtools.runtime.load_generator"),
             patch("devtools.runtime.load", return_value=0),
+            patch("devtools.images.inspect", return_value=make_identity("k6-pinned")),
         ):
             server_context.return_value.__enter__.return_value = ("server", 3000)
             config = RunConfig(
                 label="profile-off", vus=1, ramp="30s", hold="60s", perf="user", generator="k6"
             )
-            runtime.run_workload(config, Path("unused"), image=runtime.IMAGE)
+            image = make_identity()
+            profiler = make_identity("profiler-pinned")
+            runtime.run_workload(
+                config,
+                Path("unused"),
+                image=image,
+                source=make_snapshot(runtime.ROOT),
+                profiler_image=profiler,
+            )
             self.assertTrue(observer.call_args.kwargs["profiling"])
-            self.assertEqual(observer.call_args.kwargs["profiler_image"], runtime.PROFILER_IMAGE)
+            self.assertIs(observer.call_args.kwargs["profiler_image"], profiler)
             server_context.assert_called_once_with(
-                Path("unused"), image=runtime.IMAGE, telemetry="off", workspace=runtime.ROOT
+                Path("unused"), image=image, telemetry="off", workspace=runtime.ROOT
             )
 
     def test_export_is_copied_after_stop_and_before_container_removal(self) -> None:
@@ -1570,14 +1813,13 @@ class TelemetryTests(unittest.TestCase):
         with (
             TemporaryDirectory() as directory,
             patch("devtools.runtime.command", side_effect=command),
-            patch("devtools.runtime.image_identity", return_value={"image_id": "server-pinned"}),
             patch("devtools.runtime.healthy", return_value=True),
             patch("devtools.runtime.subprocess.run", side_effect=run),
         ):
             output = Path(directory)
             seed = output / "fixture.db"
             seed.touch()
-            with server(output, database=seed, telemetry="profile"):
+            with server(output, image=make_identity(), database=seed, telemetry="profile"):
                 pass
             self.assertLess(events.index("stop"), events.index("cp"))
             self.assertLess(events.index("cp"), events.index("rm"))
@@ -1605,7 +1847,6 @@ class TelemetryTests(unittest.TestCase):
         with (
             TemporaryDirectory() as directory,
             patch("devtools.runtime.command", side_effect=command) as commands,
-            patch("devtools.runtime.image_identity", return_value={"image_id": "server-pinned"}),
             patch("devtools.runtime.healthy", return_value=True),
             patch("devtools.runtime.subprocess.run", side_effect=run) as runs,
             patch("builtins.print"),
@@ -1615,7 +1856,10 @@ class TelemetryTests(unittest.TestCase):
             seed.touch()
             container = ""
             with self.assertRaisesRegex(RuntimeError, "workload failed"):
-                with server(output, database=seed, telemetry="basic") as (name, _port):
+                with server(output, image=make_identity(), database=seed, telemetry="basic") as (
+                    name,
+                    _port,
+                ):
                     container = name
                     raise RuntimeError("workload failed")
             errors = read_json(output / "collection-errors.json")
@@ -1646,7 +1890,7 @@ class TelemetryTests(unittest.TestCase):
             seed.touch()
             entered = False
             with self.assertRaisesRegex(RuntimeError, "requested 'off'"):
-                with server(output, database=seed, telemetry="off"):
+                with server(output, image=make_identity(), database=seed, telemetry="off"):
                     entered = True
             self.assertFalse(entered)
 

@@ -1,0 +1,139 @@
+{
+  "benchmark": {
+    "date": "2026-11-04",
+    "name": "runtime-reduction-smoke",
+    "runtime": "C++ 0.1.0",
+    "load_generator": "docker_loopback",
+    "generator": "cpp",
+    "sqlite": "3.53.1",
+    "users": 100,
+    "hold": "15s",
+    "ramp": "1s",
+    "requests": 393,
+    "rps": 7.01777646312,
+    "p95_ms": 0.249024799998,
+    "p99_ms": 0.38240108,
+    "max_ms": 4.170739,
+    "error_rate": 0.0,
+    "cpu_us_per_request": 120.75063613231552,
+    "cpu_scope": "server_cgroup",
+    "server_peak_bytes": 266555392,
+    "passed": true,
+    "client_sampled_peak_bytes": 13352960
+  },
+  "load_generator": {
+    "name": "td-load",
+    "version": "0.1.0",
+    "seed": 20261104,
+    "vus": 100,
+    "passed": true,
+    "checks_passed": true,
+    "workflow_errors": 0,
+    "target_concurrency_reached": true,
+    "http_response_coverage_complete": true,
+    "peak_live_connections": 100,
+    "hold_peak_live_connections": 100,
+    "endpoint_requests": {
+      "feed": 185,
+      "post": 185,
+      "like": 19,
+      "create": 4
+    },
+    "endpoint_duration_ms": {
+      "feed": {
+        "count": 185,
+        "avg": 0.17304307027,
+        "p95": 0.222659999998,
+        "p99": 0.255082960001,
+        "max": 4.170739
+      },
+      "post": {
+        "count": 185,
+        "avg": 0.160251967568,
+        "p95": 0.198558600001,
+        "p99": 0.244481960001,
+        "max": 2.982801
+      },
+      "like": {
+        "count": 19,
+        "avg": 0.456929368421,
+        "p95": 0.7226955,
+        "p99": 3.4089327,
+        "max": 4.080492
+      },
+      "create": {
+        "count": 4,
+        "avg": 0.405192750001,
+        "p95": 0.6067606,
+        "p99": 0.64172572,
+        "max": 0.650467
+      }
+    },
+    "phase_duration_ms": {
+      "ramp_up": {
+        "count": 13,
+        "avg": 0.142683153846,
+        "p95": 0.1901614,
+        "p99": 0.21877228,
+        "max": 0.225925
+      },
+      "hold": {
+        "count": 200,
+        "avg": 0.181759025,
+        "p95": 0.242291,
+        "p99": 0.67379034,
+        "max": 4.080492
+      },
+      "ramp_down": {
+        "count": 175,
+        "avg": 0.18681464,
+        "p95": 0.257493900001,
+        "p99": 0.30926546,
+        "max": 4.170739
+      },
+      "grace": {
+        "count": 5,
+        "avg": 0.212552599997,
+        "p95": 0.337089999999,
+        "p99": 0.3546908,
+        "max": 0.359091
+      }
+    }
+  },
+  "collection_errors": [],
+  "schema_version": 1,
+  "anchor": "9c6c4a2a08546791a4ec207d24b7603c31195dd7",
+  "label": "runtime-reduction-smoke",
+  "kind": "workload",
+  "started_at": "2026-11-04T01:50:25.285780+00:00",
+  "status": "passed",
+  "finished_at": "2026-11-04T01:51:41.042387+00:00",
+  "exit_code": 0,
+  "error": null,
+  "secondary_errors": [],
+  "workload": {
+    "generator": "cpp",
+    "vus": 100,
+    "ramp": "1s",
+    "hold": "15s",
+    "seed": 20261104
+  },
+  "instruments": {
+    "server_telemetry": "off",
+    "client_diagnostics": false,
+    "perf": "off"
+  },
+  "provenance": {
+    "source": null,
+    "binary": {
+      "server": {
+        "image_id": "sha256:d3a0328e636e2624bd8196476c001851befd0c4424f028e2404d81907d4cfd05",
+        "sha256": "ee3b619c88a4b9452730ebfd2f90cfcb28b915d16604836eb93a7a5715f7e44a"
+      },
+      "generator": {
+        "image_id": "sha256:b3a9dfeeef7fe18ec8fbb04de63fd2be953cd2e17fbbf1f1ff99dfa8c1b217e3",
+        "sha256": "c584e6751f6c73ced9b8042e7437cd95d160f82f3cc9242975a9a46f5698ebd0"
+      }
+    }
+  }
+}

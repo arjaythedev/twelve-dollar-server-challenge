@@ -41,6 +41,7 @@ select = ["E4", "E7", "E9", "F", "I", "UP", "ANN", "B", "RUF", "S"]
 "tests/test_api.py" = ["S311", "S608"]
 # Local tools run without a shell; the fixed /tmp path belongs to a disposable container.
 "devtools/runtime.py" = ["S603", "S607", "S108"]
+"devtools/images.py" = ["S603", "S607"]
 "devtools/checks.py" = ["S603", "S607", "S108"]
 
 [tool.ruff.format]

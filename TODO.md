@@ -1,6 +1,6 @@
 # TODO
 
-Status: Telemetry work is paused. Phases 1 through 3 are complete; the current task is runtime cleanup and separate checkpoints.
+Status: Telemetry work is paused. Phases 1 through 3 and the additional runtime cleanup are complete and checkpointed.
 
 ## Target
 
@@ -45,7 +45,7 @@ Preserve the existing uncommitted telemetry changes and their results. Do not de
 - [x] Reuse the tested server for HTTP checks only if flags and binary identity match. Keep required submission scripts and active editor support
 - [x] Pass CLI/default/error tests, instrument-combination tests, strict Python checks and targeted build checks; preserve workload failures when collection or cleanup also fails
 - [x] Simplify runtime ownership and report evaluation, remove duplicated parsing and plumbing, and keep the default result view compact. Check whether the server export needs changes
-- [ ] Remove repeated image verification and generator control logic, use normalized workload settings directly, and commit the completed tooling separately
+- [x] Remove repeated image verification and generator control logic, use normalized workload settings directly, and commit the completed tooling separately
 
 ### 3. Native load generator
 

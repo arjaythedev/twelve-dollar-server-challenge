@@ -379,17 +379,7 @@ def summarize(output: Path, *, label: str | None = None) -> RunReport:
     errors = mapping(metrics["http_req_failed"])
     before = mapping(run["cgroup_before"])
     after = mapping(run["cgroup_after"])
-    arguments = run["arguments"]
-    if not isinstance(arguments, list):
-        raise ValueError("run arguments must be an array")
-
-    def setting(key: str) -> str:
-        prefix = key + "="
-        return next(
-            arg[len(prefix) :]
-            for arg in arguments
-            if isinstance(arg, str) and arg.startswith(prefix)
-        )
+    workload = mapping(run["workload"])
 
     count = integer(requests, "count")
     if count <= 0:
@@ -401,9 +391,9 @@ def summarize(output: Path, *, label: str | None = None) -> RunReport:
         load_generator=text(run, "load_generator") if "load_generator" in run else "native",
         generator=text(run, "generator") if "generator" in run else "k6",
         sqlite=text(runtime, "sqlite"),
-        users=int(setting("VUS")),
-        hold=setting("DURATION"),
-        ramp=setting("RAMP_UP"),
+        users=integer(workload, "vus"),
+        hold=text(workload, "hold"),
+        ramp=text(workload, "ramp"),
         requests=count,
         rps=number(requests, "rate"),
         p95_ms=number(latency, "p(95)"),
@@ -422,16 +412,11 @@ def summarize(output: Path, *, label: str | None = None) -> RunReport:
     samples = read_json(output / "samples.json")
     if not isinstance(samples, list):
         raise ValueError("client samples must be an array")
-    memory_key = (
-        "client_cgroup_bytes"
-        if result["load_generator"] == "docker_loopback"
-        else "client_rss_bytes"
-    )
     peak_bytes = 0
     for value in samples:
         sample = mapping(value)
-        if memory_key in sample:
-            peak_bytes = max(peak_bytes, integer(sample, memory_key))
+        if "client_cgroup_bytes" in sample:
+            peak_bytes = max(peak_bytes, integer(sample, "client_cgroup_bytes"))
     if peak_bytes:
         result["client_sampled_peak_bytes"] = peak_bytes
     return RunReport(result, mapping(summary.get("generator", {})))

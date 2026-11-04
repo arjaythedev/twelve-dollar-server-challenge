@@ -90,6 +90,13 @@ Assign disjoint files before each implementation batch. Agents preserve concurre
 - [x] Keep large snapshot frames out of per-turn deadline checks
 - [x] Cache the DB scope histogram, reducing the scope from 64 to 56 bytes; retain measurements and rejected inlining results
 
+## Next
+
+- [ ] Validate generator CPU headroom at 350k, including a one/two-worker comparison; keep the 100ms activation margin and exact latency aggregation
+- [x] Compare CQ waits with focused I/O tests and a short 350k A/B; keep `wait_nr=1`
+- [ ] Reduce wait-one CPU costs without losing write batching or tail latency; stay compatible with stock Linux 6.8
+- [ ] Compare direct B-tree post reads with prepared SQL, including the complete request lifecycle and fallback behavior
+
 ## Later
 
 - [ ] Check socket/heap/pool memory after draining, then allocation reuse and socket-buffer caps in Ideas.md order

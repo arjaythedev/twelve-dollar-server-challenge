@@ -9,9 +9,11 @@ Unchecked items are experiments; checked items include completed work and discar
 - [ ] Measure the current split between user space, kernel networking, io_uring and filesystem work at low and high load. The [historical 350k profile](src/runs/legacy/profile-unix-excl-350000/summary.json) sampled 30.19 of 65.64 CPU-seconds in kernel networking; Docker loopback costs may differ from a real NIC.
   Record enter duration, requested/returned CQ batch sizes, pending-SQ age and completion-to-dispatch delay separately. Existing send-preparation-to-CQE timing combines submission, kernel and CQ-service waits; CPU samples exclude blocked time. Use kernel tracing when exact CQ-post timing is needed.
 
-- [ ] Compare `io_uring_submit_and_wait_min_timeout()` with the current busy-only 32-CQE / 4-ms wait in [Reactor::wait](src/server/net/reactor.cpp). Test 50/100/250/500 us batch budgets while retaining the 4-ms outer timeout.
-  Return when 32 completions arrive or the batch budget expires with any completion ready; with none ready, continue waiting for the first within the outer timeout ([liburing](https://github.com/axboe/liburing/blob/liburing-2.15/man/io_uring_submit_and_wait_min_timeout.3)).
-  Require `IORING_FEAT_MIN_TIMEOUT` (Linux 6.12+) and retain the current fallback, idle/accept/shutdown bypasses and primary GETEVENTS progress. Compare p95/p99, CPU/request, wakeups and requests/enter. The reported ~4.1-ms low-load p95 is a batching hypothesis, not established causation.
+- [ ] Validate generator headroom at 350k with one versus two workers. Use a shared start gate, disjoint VUs/source IPs and fixed worker seeds; merge latency samples before calculating percentiles.
+  Preserve total load and API checks. Reject late activation, incomplete response coverage and workflow failures; report client CPU, timer lag and epoll service lag separately. Repeat server comparisons with the same worker split.
+
+- [ ] Reduce the CPU cost of `wait_nr=1` in [Reactor::wait](src/server/net/reactor.cpp) while preserving its latency benefit and ready-CQE bulk drain. Compare 50/100/250/500 us collection budgets and track write-batch sizes as well as CPU/request.
+  On stock Linux 6.8, test a bounded two-stage wait: collect up to 32 CQEs briefly, then wait for one if none are ready, within the remaining 4-ms outer deadline. Preserve idle/accept/shutdown bypasses and primary GETEVENTS progress. Native `IORING_FEAT_MIN_TIMEOUT` needs Linux 6.12+ and is unavailable on the target VPS ([liburing](https://github.com/axboe/liburing/blob/liburing-2.15/man/io_uring_submit_and_wait_min_timeout.3)).
 
 - [ ] Compare bounded handler/CQ work and age-aware batching after separating wait costs. The current CQ drain already caps each ring at 256 entries; compare elapsed-time limits and oldest-response age without waiting while application work is ready.
   `C ~= C_enter/requests_per_enter + C_other`. Submit pending sends promptly; the earlier per-ring submission comparison found no gain.
@@ -174,7 +176,9 @@ Unchecked items are experiments; checked items include completed work and discar
 
 - [x] Send headers and the moved response body with one scatter-gather operation; release body storage after the final send completion.
 
-- [x] Use a busy-only 32-CQE / 4-ms wait with idle, accept and shutdown bypasses. An 8-ms wait did not reduce CPU further.
+- [x] Compare busy-only 32-CQE / 4-ms waits with idle, accept and shutdown bypasses. An 8-ms wait did not reduce CPU further.
+
+- [x] Keep `wait_nr=1` and the existing bulk drain. The short 350k pair lowered p99 but used about 15% more server CPU, with smaller write batches. The [control](src/runs/f5874c6/wait-one-control-350000/summary.json) missed the generator activation deadline; the [candidate](src/runs/f5874c6/wait-one-candidate-350000/summary.json) passed. Treat the comparison as provisional.
 
 - [x] Remove the admission experiment after the 300k/5m regression. Revisit only under the bounded-admission idea above.
 
@@ -280,6 +284,8 @@ Unchecked items are experiments; checked items include completed work and discar
   Use an event loop and timers instead of a JavaScript runtime per user. Compare small runs against k6 before using it for capacity experiments; keep k6 as the reference.
 
 - [x] Bound the load generator's due-timer pass to 256 services / 1 ms, checked between calls. Record time from epoll return to the next call separately from dispatch lag. A single blocking syscall can still exceed the budget; causation of earlier server tails remains unproven.
+
+- [x] Keep timer metadata together, move heap entries only in the required direction, skip unchanged epoll registrations and remove receive-buffer zeroing. Ordering, partial sends, reconnects and exact latency tests pass; storage remains 88 bytes/VU. Generator headroom under 350k load still needs validation.
 
 - [x] Fix WSL mirrored-networking source-bind delays with NAT and reject runs that miss the activation deadline.
 

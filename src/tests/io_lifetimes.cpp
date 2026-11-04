@@ -466,6 +466,219 @@ void primary_progress_with_ready_satellite()
     shutdown();
 }
 
+void prime_primary_hot_turn(Reactor &reactor)
+{
+    auto &primary = *reactor.rings().front();
+    require(primary.queue.features & IORING_FEAT_EXT_ARG,
+            "primary timed-wait fixture requires extended arguments");
+    for (unsigned index = 0; index < 2; ++index)
+    {
+        io_uring_prep_nop(primary.entry(nullptr));
+    }
+    primary.submit();
+    const auto deadline = Clock::now() + 2s;
+    while (io_uring_cq_ready(&primary.queue) < 2)
+    {
+        require(Clock::now() < deadline, "primary hot-turn priming timed out");
+        const int result = io_uring_get_events(&primary.queue);
+        require(result >= 0 || result == -EINTR, "primary hot-turn get events failed");
+    }
+    reactor.begin_turn();
+    unsigned count = 0;
+    drain_turn(reactor, [&](const Completion &completion) {
+        require(completion.kind == CompletionKind::control, "unexpected hot-turn payload");
+        ++count;
+    });
+    require(count == 2, "primary hot turn did not drain exactly two completions");
+    for (const auto &ring : reactor.rings())
+    {
+        require(io_uring_cq_ready(&ring->queue) == 0,
+                "hot-turn fixture retained a ready primary or satellite CQ");
+    }
+}
+
+void primary_progress_after_hot_turn()
+{
+    FileLimit limited(64);
+    std::string payload(1, 'y');
+    iovec vector{payload.data(), payload.size()};
+    msghdr message{};
+    message.msg_iov = &vector;
+    message.msg_iovlen = 1;
+    Reactor reactor("127.0.0.1", 0);
+    reactor.start();
+    Client peer(reactor.port());
+    const auto deadline = Clock::now() + 2s;
+    await_completion(reactor, deadline);
+    reactor.begin_turn();
+    drain_turn(reactor, [](const Completion &completion) {
+        require(completion.kind == CompletionKind::control, "unexpected timed-wait setup payload");
+    });
+    auto &connection = only_connection(reactor);
+    require(&connection.ring == reactor.rings().front().get() && reactor.rings().size() == 2,
+            "timed-wait fixture did not retain its primary connection and quiet satellite");
+
+    const auto sparse_turn = [&](const auto &handler) {
+        for (const auto &ring : reactor.rings())
+        {
+            require(io_uring_cq_ready(&ring->queue) == 0,
+                    "a ready CQ bypassed the sparse primary timed wait");
+        }
+        // No readiness helper may run deferred primary task work before the production wait
+        reactor.begin_turn();
+        unsigned count = 0;
+        drain_turn(reactor, [&](Completion &completion) {
+            ++count;
+            handler(completion);
+        });
+        require(Clock::now() < deadline, "sparse primary timed wait lost progress");
+        require(count > 0 && count < 32,
+                "sparse primary timed wait did not drain fewer than 32 completions");
+    };
+
+    prime_primary_hot_turn(reactor);
+    peer.send_byte();
+    bool received = false;
+    sparse_turn([&](Completion &completion) {
+        require(completion.kind == CompletionKind::received && !received &&
+                    completion.connection == &connection && completion.result == 1 &&
+                    completion.buffer.bytes().size() == 1 &&
+                    completion.buffer.bytes().front() == 'x',
+                "timed primary receive lost its original operation or payload");
+        completion.buffer.release();
+        received = true;
+    });
+    require(received, "timed primary receive did not complete");
+
+    prime_primary_hot_turn(reactor);
+    reactor.send(connection, message);
+    bool sent = false;
+    sparse_turn([&](const Completion &completion) {
+        require(completion.kind == CompletionKind::sent && !sent &&
+                    completion.connection == &connection && completion.result == 1,
+                "timed primary send lost its original operation or byte count");
+        sent = true;
+    });
+    require(sent, "timed primary send did not complete");
+    std::size_t delivered = 0;
+    while (delivered != payload.size())
+    {
+        require(Clock::now() < deadline, "timed primary send lost its payload");
+        delivered += peer.drain_bytes('y');
+        require(delivered <= payload.size(), "timed primary send duplicated its payload");
+        if (!delivered)
+        {
+            std::this_thread::sleep_for(1ms);
+        }
+    }
+
+    prime_primary_hot_turn(reactor);
+    reactor.receive(connection);
+    reactor.request_stop();
+    sparse_turn([](const Completion &completion) {
+        require(completion.kind == CompletionKind::control,
+                "unexpected application payload during the timed primary stop");
+    });
+    require(reactor.stopping(), "sparse primary timed wait did not service stop");
+    while (reactor.pending_count())
+    {
+        require(Clock::now() < deadline, "timed primary stop retained an original operation");
+        reactor.begin_turn();
+        drain_turn(reactor, [](const Completion &completion) {
+            require(completion.kind == CompletionKind::control,
+                    "timed primary stop exposed application I/O");
+        });
+    }
+    require(peer.closed(deadline), "timed primary stop did not deliver TCP EOF");
+}
+
+void empty_primary_turn_returns_to_blocking_wait()
+{
+    FileLimit limited(64);
+    Reactor reactor("127.0.0.1", 0);
+    reactor.start();
+    Client peer(reactor.port());
+    const auto deadline = Clock::now() + 2s;
+    await_completion(reactor, deadline);
+    reactor.begin_turn();
+    drain_turn(reactor, [](const Completion &completion) {
+        require(completion.kind == CompletionKind::control, "unexpected idle-wait setup payload");
+    });
+    auto &connection = only_connection(reactor);
+    require(&connection.ring == reactor.rings().front().get() && reactor.rings().size() == 2,
+            "idle-wait fixture did not retain its primary connection and quiet satellite");
+
+    const auto empty_timed_turn = [&] {
+        prime_primary_hot_turn(reactor);
+        // One empty timed turn must reset the next production wait to blocking wait-one
+        reactor.begin_turn();
+        unsigned count = 0;
+        drain_turn(reactor, [&](const Completion &) {
+            ++count;
+        });
+        require(count == 0 && Clock::now() < deadline,
+                "idle primary timed turn did not finish empty");
+    };
+
+    empty_timed_turn();
+    std::exception_ptr publish_failure;
+    std::jthread receive_publisher([&] {
+        std::this_thread::sleep_for(20ms);
+        try
+        {
+            peer.send_byte();
+        }
+        catch (...)
+        {
+            publish_failure = std::current_exception();
+            reactor.request_stop();
+        }
+    });
+    // Returning empty before the worker publishes would expose repeated timed polling
+    reactor.begin_turn();
+    unsigned received = 0;
+    drain_turn(reactor, [&](Completion &completion) {
+        require(completion.kind == CompletionKind::received && received == 0 &&
+                    completion.connection == &connection && completion.result == 1 &&
+                    completion.buffer.bytes().size() == 1 &&
+                    completion.buffer.bytes().front() == 'x',
+                "idle primary receive lost its original operation or payload");
+        completion.buffer.release();
+        ++received;
+    });
+    receive_publisher.join();
+    if (publish_failure)
+    {
+        std::rethrow_exception(publish_failure);
+    }
+    require(received == 1 && Clock::now() < deadline,
+            "idle primary wait returned empty before the worker receive");
+
+    empty_timed_turn();
+    std::jthread stop_publisher([&] {
+        std::this_thread::sleep_for(20ms);
+        reactor.request_stop();
+    });
+    reactor.begin_turn();
+    drain_turn(reactor, [](const Completion &completion) {
+        require(completion.kind == CompletionKind::control,
+                "unexpected application payload during the idle primary stop");
+    });
+    stop_publisher.join();
+    require(reactor.stopping() && Clock::now() < deadline,
+            "idle primary wait returned empty before the worker stop");
+    while (reactor.pending_count())
+    {
+        require(Clock::now() < deadline, "idle primary stop retained an original operation");
+        reactor.begin_turn();
+        drain_turn(reactor, [](const Completion &completion) {
+            require(completion.kind == CompletionKind::control,
+                    "idle primary stop exposed application I/O");
+        });
+    }
+    require(peer.closed(deadline), "idle primary stop did not deliver TCP EOF");
+}
+
 void fixed_cq_order_and_growth()
 {
     FileLimit limited(32);
@@ -1323,6 +1536,8 @@ int main()
     {
         reservation_and_record_guards();
         primary_progress_with_ready_satellite();
+        primary_progress_after_hot_turn();
+        empty_primary_turn_returns_to_blocking_wait();
         fixed_cq_order_and_growth();
         exhausted_receive_retries();
         close_and_late_accept();
@@ -1333,6 +1548,7 @@ int main()
         ::alarm(0);
         std::puts(
             "I/O reservation, fixed CQ order/growth, primary progress with a ready satellite, "
+            "sparse timed and idle primary waits, "
             "original-CQE lifetime, "
             "prompt TCP EOF and late-accept shutdown checks passed");
 

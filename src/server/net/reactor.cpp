@@ -569,8 +569,8 @@ int Reactor::wait()
     __kernel_timespec timeout{0, 4'000'000};
     io_uring_cqe *first = nullptr;
 
-    return io_uring_submit_and_wait_timeout(&primary, &first, immediate ? 1 : 32, &timeout,
-                                            nullptr);
+    // Wake on the first CQE; next() still drains the completions already queued
+    return io_uring_submit_and_wait_timeout(&primary, &first, 1, &timeout, nullptr);
 }
 
 void Reactor::finish_wakeups()

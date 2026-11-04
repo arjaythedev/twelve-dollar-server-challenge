@@ -71,8 +71,7 @@ id, and count entries in one range of another index.
 `Sources/CSQLite/db.c` does exactly those steps. It `#include`s the unmodified amalgamation so it
 can open SQLite's own B-tree cursors, and Swift decodes the record bytes the cursors point at.
 Nothing is cached between requests, every row comes out of SQLite while the request is served,
-and writes still go through ordinary SQL. The idea comes from
-[rust-iouring-kensac](https://github.com/arjaythedev/twelve-dollar-server-challenge/tree/main/submissions/rust-iouring-kensac).
+and writes still go through ordinary SQL.
 
 Things that turned out to matter:
 

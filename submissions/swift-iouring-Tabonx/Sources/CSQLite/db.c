@@ -3,9 +3,7 @@
  * GET /feed and GET /posts/:id walk SQLite's own B-tree cursors inside the pass's transaction and
  * skip the bytecode engine; Swift decodes the record bytes. Writes, BEGIN/COMMIT and /health are
  * ordinary SQL. Everything runs on the event-loop thread except WAL checkpoints, which a second
- * thread runs on its own connection (SQLITE_THREADSAFE=2: each connection stays on one thread).
- *
- * The B-tree read plan follows submissions/rust-iouring-kensac. */
+ * thread runs on its own connection (SQLITE_THREADSAFE=2: each connection stays on one thread). */
 #include "sqlite3.c"
 #include "feeddb.h"
 #include <pthread.h>

@@ -1,3 +1,6 @@
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 #ifndef HTTP_H
 #define HTTP_H
 
@@ -207,17 +210,26 @@ static inline int parse_post_body(const char *raw, size_t raw_len, char *out_bod
     const char *end = raw + raw_len;
     while (p < end && isspace((unsigned char)*p)) p++;
     if (p >= end || *p != '{') return POST_BODY_MALFORMED;
+    p++;
+    while (p < end && isspace((unsigned char)*p)) p++;
 
-    const char *key = strstr(p, "\"body\"");
+    const char *key = NULL;
+    if (__builtin_expect(p + 6 <= end && memcmp(p, "\"body\"", 6) == 0, 1)) {
+        key = p;
+    } else {
+        key = (const char *)memmem(p, (size_t)(end - p), "\"body\"", 6);
+    }
+
     if (!key) {
         // If not malformed JSON, then body is missing -> body is required
         // Check if there is closing brace
-        const char *close_brace = memchr(p, '}', (size_t)(end - p));
+        const char *close_brace = (const char *)memchr(p, '}', (size_t)(end - p));
         if (!close_brace) return POST_BODY_MALFORMED;
         return POST_BODY_REQUIRED;
     }
 
-    const char *colon = strchr(key + 6, ':');
+    if (key + 6 > end) return POST_BODY_MALFORMED;
+    const char *colon = (const char *)memchr(key + 6, ':', (size_t)(end - (key + 6)));
     if (!colon) return POST_BODY_MALFORMED;
     p = colon + 1;
     while (p < end && isspace((unsigned char)*p)) p++;

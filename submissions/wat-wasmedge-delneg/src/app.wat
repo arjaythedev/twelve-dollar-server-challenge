@@ -21,7 +21,7 @@
 ;;   0xa00000  (OUTB's last MiB: headroom for the connection being served)
 ;;   0xe00000  CQ    completions copied out by the host: 131,072 x 16 bytes (user_data, res, flags)
 ;; From SQLite's heap (malloc): CONN and GEN (per connection, see $conn), and per ring an SQE staging array,
-;; a provided-buffer ring and its 2048 receive buffers (see $ring_setup)
+;; a provided-buffer ring and its 8192 receive buffers (see $ring_setup)
 (module
   (import "sq" "memory" (memory 1))
   (import "sq" "__indirect_function_table" (table $tb 1 funcref))
@@ -47,6 +47,7 @@
   (import "sq" "sqlite3_wal_checkpoint_v2" (func $wal_ckpt (param i32 i32 i32 i32 i32) (result i32)))
   (import "sq" "shmx_init" (func $shmx_init (result i32)))   ;; H1: checkpoints on a second instance (sqlite_glue.c)
   (import "sq" "ck_tick" (func $ck_tick (param i32 i32 i32) (result i32)))
+  (import "sq" "ck_hold" (func $ck_hold (result i32)))
   (import "sq" "getenv" (func $getenv (param i32) (result i32)))
   (import "sq" "malloc" (func $malloc (param i32) (result i32)))
   (import "sq" "free" (func $free (param i32)))
@@ -220,6 +221,9 @@
   (global $wal_n (mut i32) (i32.const 0))   ;; the WAL's size after the last commit, from $wal_cb
   (global $wal_cbi (mut i32) (i32.const 0)) ;; $wal_cb's index in the function table
   (global $shmx (mut i32) (i32.const 0))    ;; H1: the shared-wal-index VFS's name, or 0
+  (global $holdw (mut i32) (i32.const 0))   ;; writes are held: POSTs wait in their connection's pending bytes
+  (global $nparked (mut i32) (i32.const 0)) ;; connections to replay when the hold ends, (cid, gen) pairs at $parked
+  (global $parked (mut i32) (i32.const 0))
   (global $pc_tmp (mut i32) (i32.const 0))
 
   ;; ---------- memory helpers ----------
@@ -1413,7 +1417,7 @@
   ;; LimitNOFILE=65535 caps each ring's table, not the server: accept moves to the next ring at a high-water
   ;; mark (up to 8 rings, ~490k connections). Its id is cid = ring << 16 | slot.
   ;; RING table at 0x102000, 64 bytes per ring: 0 SQE staging array, 4 staged SQEs, 8 buffer-ring tail
-  ;; (these three are what $ring_go reads), 12 buffer ring, 16 receive buffers (2048 x 2 KiB), 20 ring fd,
+  ;; (these three are what $ring_go reads), 12 buffer ring, 16 receive buffers (8192 x 512 B), 20 ring fd,
   ;; 24 table size, 28 live connections, 32 state (1 accept armed, 2 table full, 4 above the high-water
   ;; mark, 8 watched by ring 0), 36 high-water mark, 40 low gap
   ;; CONN at $connb, 32 bytes per cid: 0 in_ptr, 4 in_len (unfinished request), 8 wire_ptr, 12 wire_len,
@@ -1459,10 +1463,10 @@
     (local $t i32) (local $e i32)
     (local.set $t (call $rt (local.get $k)))
     (local.set $e (i32.add (i32.load offset=12 (local.get $t))
-      (i32.shl (i32.and (i32.load offset=8 (local.get $t)) (i32.const 2047)) (i32.const 4))))
+      (i32.shl (i32.and (i32.load offset=8 (local.get $t)) (i32.const 8191)) (i32.const 4))))
     (i64.store (local.get $e) (i64.add (global.get $mb)
-      (i64.extend_i32_u (i32.add (i32.load offset=16 (local.get $t)) (i32.shl (local.get $bid) (i32.const 11))))))
-    (i32.store offset=8 (local.get $e) (i32.const 2048))
+      (i64.extend_i32_u (i32.add (i32.load offset=16 (local.get $t)) (i32.shl (local.get $bid) (i32.const 9))))))
+    (i32.store offset=8 (local.get $e) (i32.const 512))
     (i32.store16 offset=12 (local.get $e) (local.get $bid))   ;; bytes 14-15 of entry 0 are the ring's tail: left alone
     (i32.store offset=8 (local.get $t) (i32.add (i32.load offset=8 (local.get $t)) (i32.const 1))))
 
@@ -1474,14 +1478,14 @@
     (local.set $t (call $rt (local.get $k)))
     (if (call $ring_new (local.get $k) (i32.add (local.get $t) (i32.const 20))) (then (return (i32.const 1))))
     (i32.store (local.get $t) (call $malloc (i32.const 65536)))
-    (i32.store offset=12 (local.get $t) (i32.and (i32.add (call $malloc (i32.const 0x9000)) (i32.const 4095)) (i32.const -4096)))
-    (memory.fill (i32.load offset=12 (local.get $t)) (i32.const 0) (i32.const 0x8000))
-    (i32.store offset=16 (local.get $t) (call $malloc (i32.const 0x400000)))
+    (i32.store offset=12 (local.get $t) (i32.and (i32.add (call $malloc (i32.const 135168)) (i32.const 4095)) (i32.const -4096)))
+    (memory.fill (i32.load offset=12 (local.get $t)) (i32.const 0) (i32.const 131072))
+    (i32.store offset=16 (local.get $t) (call $malloc (i32.const 4194304)))
     (if (i32.or (i32.eqz (i32.load offset=16 (local.get $t))) (i32.eqz (i32.load (local.get $t)))) (then (return (i32.const 1))))
-    (if (call $ring_pbuf (local.get $k) (i32.load offset=12 (local.get $t)) (i32.const 2048) (i32.const 0))
+    (if (call $ring_pbuf (local.get $k) (i32.load offset=12 (local.get $t)) (i32.const 8192) (i32.const 0))
       (then (return (i32.const 1))))
     (block $d (loop $l
-      (br_if $d (i32.ge_u (local.get $i) (i32.const 2048)))
+      (br_if $d (i32.ge_u (local.get $i) (i32.const 8192)))
       (call $recycle (local.get $k) (local.get $i))
       (local.set $i (i32.add (local.get $i) (i32.const 1)))
       (br $l)))
@@ -1721,7 +1725,10 @@
   ;; With CKPT_AUTO=1, SQLite's wal_autocheckpoint does it inside the commit instead, and this never runs.
   (func $ckpt_step
     (if (global.get $shmx)
-      (then (global.set $wal_n (call $ck_tick (global.get $db) (global.get $wal_n) (global.get $ck_t))) (return)))
+      (then
+        (global.set $wal_n (call $ck_tick (global.get $db) (global.get $wal_n) (global.get $ck_t)))
+        (global.set $holdw (call $ck_hold))
+        (return)))
     (if (i32.lt_s (global.get $wal_n) (global.get $ck_t)) (then (return)))
     (global.set $wal_n (i32.const 0))
     (drop (call $wal_ckpt (global.get $db) (i32.const 0) (i32.const 0) (i32.const 0) (i32.const 0))))   ;; PASSIVE
@@ -1950,7 +1957,7 @@
       (then
         (if (i32.eqz (i32.and (local.get $f) (i32.const 4)))
           (then (call $on_data (local.get $cid) (local.get $c)
-                  (i32.add (i32.load offset=16 (call $rt (local.get $k))) (i32.shl (local.get $bid) (i32.const 11))) (local.get $res))))
+                  (i32.add (i32.load offset=16 (call $rt (local.get $k))) (i32.shl (local.get $bid) (i32.const 9))) (local.get $res))))
         (call $recycle (local.get $k) (local.get $bid))
         (if (i32.eq (i32.and (i32.load offset=28 (local.get $c)) (i32.const 7)) (i32.const 1)) (then (call $arm_recv (local.get $cid))))
         (return)))
@@ -1958,10 +1965,41 @@
       (then (if (i32.eq (i32.and (local.get $f) (i32.const 3)) (i32.const 1)) (then (call $arm_recv (local.get $cid)))) (return)))
     (call $drop (local.get $cid)))
 
+  ;; the hold is over: serve the parked POSTs (a closed connection's generation has moved on; a repeat finds nothing pending)
+  (func $replay
+    (local $i i32) (local $cid i32) (local $c i32) (local $e i32)
+    (block $d (loop $l
+      (br_if $d (i32.ge_u (local.get $i) (global.get $nparked)))
+      (local.set $e (i32.add (global.get $parked) (i32.shl (local.get $i) (i32.const 3))))
+      (local.set $cid (i32.load (local.get $e)))
+      (local.set $c (call $conn (local.get $cid)))
+      (if (i32.and (i32.eq (i32.load offset=4 (local.get $e)) (call $gen (local.get $cid))) (i32.ne (i32.load offset=4 (local.get $c)) (i32.const 0)))
+        (then (if (i32.and (i32.load offset=28 (local.get $c)) (i32.const 1))
+          (then (call $on_data (local.get $cid) (local.get $c) (i32.const 0) (i32.const 0)) (call $maybe_flush)))))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br $l)))
+    (global.set $nparked (i32.const 0)))
+
   ;; serve straight from the receive buffer, unless an unfinished request is waiting to be joined
   (func $on_data (param $cid i32) (param $c i32) (param $buf i32) (param $r i32)
-    (local $pin i32)
+    (local $pin i32) (local $np i32)
     (local.set $pin (i32.load offset=4 (local.get $c)))
+    ;; a hold: a POST (or more bytes of one) joins its connection's pending bytes, and is replayed when the hold ends
+    (if (i32.and (global.get $holdw) (i32.lt_u (global.get $nparked) (i32.const 4096)))
+      (then (if (i32.eq (i32.load (if (result i32) (local.get $pin) (then (i32.load (local.get $c))) (else (local.get $buf)))) (i32.const 0x54534f50))   ;; "POST"
+        (then
+          (local.set $np (call $malloc (i32.add (local.get $pin) (local.get $r))))
+          (if (local.get $pin)
+            (then
+              (memory.copy (local.get $np) (i32.load (local.get $c)) (local.get $pin))
+              (call $free (i32.load (local.get $c)))))
+          (memory.copy (i32.add (local.get $np) (local.get $pin)) (local.get $buf) (local.get $r))
+          (i32.store (local.get $c) (local.get $np))
+          (i32.store offset=4 (local.get $c) (i32.add (local.get $pin) (local.get $r)))
+          (i32.store (i32.add (global.get $parked) (i32.shl (global.get $nparked) (i32.const 3))) (local.get $cid))
+          (i32.store offset=4 (i32.add (global.get $parked) (i32.shl (global.get $nparked) (i32.const 3))) (call $gen (local.get $cid)))
+          (global.set $nparked (i32.add (global.get $nparked) (i32.const 1)))
+          (return)))))
     (if (i32.eqz (local.get $pin))
       (then (call $after_recv (local.get $cid) (local.get $c) (local.get $buf) (i32.const 0) (local.get $r)) (return)))
     (if (i32.gt_s (local.get $r) (i32.sub (i32.const 0x20000) (local.get $pin)))   ;; a request over 128 KiB
@@ -2138,6 +2176,7 @@
       (then (call $fatal (i32.const 0x101180))))
     (call $hmac_init (local.get $key) (call $strlen (local.get $key)))
     (global.set $shmx (call $shmx_init))
+    (global.set $parked (call $malloc (i32.const 32768)))
     (if (call $db_open (local.get $path)) (then (call $fatal (i32.const 0x1010c0))))
     (global.set $db (i32.load (i32.const 0x295000)))
     (if (call $db_exec (global.get $db) (i32.add (i32.const 0x100d00) (select (i32.const 31) (i32.const 0) (global.get $shmx))) (i32.const 0) (i32.const 0) (i32.const 0)) (then (call $fatal (i32.const 0x1010c0))))
@@ -2192,7 +2231,7 @@
             (if (result i32) (global.get $txopen)
               (then (i32.mul (select (local.tee $w (i32.sub (i32.const 2) (i32.sub (call $clock_ms) (global.get $txt0))))
                                      (i32.const 0) (i32.gt_s (local.get $w) (i32.const 0))) (i32.const 1000)))
-              (else (i32.const 500000))))
+              (else (select (i32.const 1000) (i32.const 500000) (global.get $holdw)))))
           (local.set $k (i32.const 1))
           (block $d2 (loop $l2
             (br_if $d2 (i32.ge_u (local.get $k) (global.get $nr)))
@@ -2201,6 +2240,7 @@
             (br $l2)))
           (global.set $tick (call $clock_ms))))
       (if (i32.eqz (global.get $txopen)) (then (call $tx_begin)))
+      (if (i32.and (i32.eqz (global.get $holdw)) (i32.ne (global.get $nparked) (i32.const 0))) (then (call $replay)))
       (block $d (loop $l
         (br_if $d (i32.ge_u (global.get $cqi) (global.get $ncq)))
         (local.set $e (i32.add (i32.const 0xe00000) (i32.shl (global.get $cqi) (i32.const 4))))

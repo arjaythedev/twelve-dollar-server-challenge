@@ -150,3 +150,15 @@ NEW H24. H4 inside H1: CKPT_FRAMES and CKPT_TAIL again. The stall no longer grow
 NEW H25. Survey (3 Nov): PGO in native entries (objc-uring-delneg, c-iouring-pavlyhalim: -fprofile-use) and -DSQLITE_USE_ALLOCA, -DSQLITE_OMIT_SHARED_CACHE etc. (mojo, shivansh, pavlyhalim). E19 already measured the defines as noise on wasm (12.95 vs 12.94 us/req); no new reason for H17 beyond that, and H18 (PGO) stays untested.
 H10: E59: WAT already beats clang/rustc on SHA-256 and integers; JSON lost 15-45 %, fixed (local cursor + overlapping tail): ~0.15 us/req
 H5: E59: H5b dead, memory.copy costs ~3 ns extra on small copies
+H1: E58: 5-min holds at 220k on the spin harness: both fail on CPU (p99 1,380 h1b, 1,215 b4). Spin harness can't judge H1 past 210k; H2 next
+NEW H26. Buffer-ring exhaustion at a stall (DeepSeek round 2): each ring has 2,048 x 2 KiB provided buffers; 22k req/s spread over 4 rings is ~5.5k/s per ring, so a stall over ~370 ms runs a ring dry and multishot receives end with -ENOBUFS, each needing its own re-arm. That is a hard threshold at constant CPU, a possible shape for the scorer's jump between 200k and 210k at ~70 % CPU. Same check for CQ overflow. Test: bpftrace on io_uring_complete res -105 and io_uring_cqe_overflow at the failure point. Fix if real: more, smaller buffers (8,192 x 512 B has the same memory). Cost: low.
+NEW H27. CKPT_NICE: 10 against 0. On one vCPU a niced checkpointer may fall behind when it matters most (DeepSeek). Cost: env.
+NOTE evidence for H1 found while weighing DeepSeek's "wrong trigger": f220565 (E26), whose database sync went through io_uring and so never stopped the loop, HELD 270,000 on the real scorer; #272 and df9da40, whose checkpoints fsync on the loop, held 200,000. So on the scorer, keeping the DB sync off the loop was worth ~70k users. That build was dropped only because it wrote SQLite's private nBackfill. H1 gets the same effect through public APIs.
+H1: E62: on the capped harness H1 gains little at 240-280k because the inline tail still stalls the loop (mean 176 ms, 3 syncs). CKPT_TAIL=30 next
+H26: E62: confirmed ENOBUFS storm (~3,000/s at 22k req/s under long stalls); k4/bb build has 8,192 x 512 B buffers, A/B pending
+H26: E63: ENOBUFS gone (0 of 9.1M) with 8,192 x 512 B, little latency change; kept
+H24: E63: CKPT_TAIL=30 changes nothing, the inline fsync's cost doesn't depend on the tail's size
+H27: E63: CKPT_NICE 0 vs 10 within noise; dead
+H11: dead by source: sqlite3BtreeTableMoveto only shortcuts to key+1 (BtreeNext); other seeks start with moveToRoot, so sorting 20 scattered ids saves no descent
+H1c: E64: k5, no sync on the loop: 240k p95/p99 17/164 vs k4 525/770; 280k 65/235, k4 fails. Holds next
+

@@ -92,18 +92,36 @@ const char *shmx_init(void) {
   if (shmx_setup() || h_spawn()) return 0;
   return "shmx";
 }
-// the loop, between batches with no transaction open; n = the WAL's frames after the last commit -> what to keep
-static int tailmax = -1;
-int ck_tick(sqlite3 *db, int n, int t) {
-  static int ready;
-  if (!ready) { h_cas(W_READY, 0, 1); ready = 1; const char *e = getenv("CKPT_TAIL"); tailmax = e ? atoi(e) : 300; }
-  static int busy;
-  if (!busy) { if (n < t) return n; busy = 1; h_cas(W_ST, 0, 1); h_wake(); return n; }
-  if (h_add(W_ST, 0) != 3) return n;
-  if (n - h_add(W_DONE, 0) > tailmax) { h_cas(W_ST, 3, 1); h_wake(); return n; }   // another bulk pass on the checkpointer
-  int nl = 0, nd = 0, rc = sqlite3_wal_checkpoint_v2(db, 0, SQLITE_CHECKPOINT_PASSIVE, &nl, &nd);   // the small tail, here
-  h_cas(W_ST, 3, 0); busy = 0;
+// the loop, between batches with no transaction open; n = the WAL's frames after the last commit -> what to keep.
+// Bulk passes on the checkpointer until few frames are left; then writes are held (the loop parks POSTs, see
+// $on_data in app.wat; reads go on) while the checkpointer copies the rest. With nothing written since, the WAL
+// is then fully copied, and the first write restarts it: no sync ever runs on the loop. A hold ends after
+// holdms at the latest (writes go on, the next round tries again). Past 3x the threshold the passes aren't
+// catching up: one inline checkpoint, as the last resort. CKPT_HOLD=0: the tail runs inline instead (E54-E63).
+static int tailmax, holdms, hold; static long long hold_t0;
+static long long now_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1000LL + t.tv_nsec / 1000000; }
+int ck_hold(void) { return hold; }
+static int ck_inline(sqlite3 *db, int n, int *busy) {
+  int nl = 0, nd = 0, rc = sqlite3_wal_checkpoint_v2(db, 0, SQLITE_CHECKPOINT_PASSIVE, &nl, &nd);
+  h_cas(W_ST, 3, 0); *busy = 0;
   return rc == SQLITE_OK && nl == nd ? 0 : n;
+}
+int ck_tick(sqlite3 *db, int n, int t) {
+  static int ready, busy;
+  if (!ready) {
+    h_cas(W_READY, 0, 1); ready = 1;
+    const char *e = getenv("CKPT_TAIL"); tailmax = e ? atoi(e) : 300;
+    e = getenv("CKPT_HOLD"); holdms = e ? atoi(e) : 250;
+  }
+  if (!busy) { if (n < t) return n; busy = 1; h_cas(W_ST, 0, 1); h_wake(); return n; }
+  if (h_add(W_ST, 0) != 3) { if (hold && now_ms() - hold_t0 > holdms) hold = 0; return n; }
+  int done = h_add(W_DONE, 0);
+  if (hold) { hold = 0; h_cas(W_ST, 3, 0); busy = 0; return n == done ? 0 : n; }   // the tail pass is done
+  if (n >= 3 * t) return ck_inline(db, n, &busy);
+  if (n - done > tailmax) { h_cas(W_ST, 3, 1); h_wake(); return n; }   // another bulk pass
+  if (!holdms) return ck_inline(db, n, &busy);
+  hold = 1; hold_t0 = now_ms(); h_cas(W_ST, 3, 1); h_wake();
+  return n;
 }
 // the checkpointer's instance (run by the host on its thread): its own connection, PASSIVE checkpoints on request
 void ckpt_main(void) {

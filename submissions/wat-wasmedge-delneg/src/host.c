@@ -259,7 +259,7 @@ static WasmEdge_VMContext *mkvm(const char *app) {
   WasmEdge_VMContext *vm = WasmEdge_VMCreate(conf, NULL);
 
   // WASI: the SPEC's env vars, and the database's directory pre-opened at the same path
-  static const char *names[] = {"SQLITE_PATH", "JWT_SECRET", "HOST", "PORT", "CKPT_FRAMES", "CKPT_AUTO", "SHMX", "CKPT_TAIL", "CKPT_NAP_US", "SPIN_NS"};
+  static const char *names[] = {"SQLITE_PATH", "JWT_SECRET", "HOST", "PORT", "CKPT_FRAMES", "CKPT_AUTO", "SHMX", "CKPT_TAIL", "CKPT_HOLD", "SPIN_NS"};
   const char *envs[10]; int ne = 0;
   for (int i = 0; i < 10; i++) {
     const char *v = getenv(names[i]); if (!v) continue;

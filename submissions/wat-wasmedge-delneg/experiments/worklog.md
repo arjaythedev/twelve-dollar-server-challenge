@@ -1017,7 +1017,7 @@ RLIMIT_MEMLOCK 8 MiB (VmLck 8,192 kB), which the code pinning already uses.
 Synteq sysctls restored from w3/sysctl.orig; the calibrated values are in w3/sysctl.cal.
 
 ## TdscWat4 (3 Nov on): hypotheses first (experiments/hypotheses.md, append-only, locked), then E53+
-Paid calls tally (limit $1): consult 1103-205423-0386 round 1 $0.0233. Total $0.023.
+Paid calls tally (limit $1): consult 1103-205423-0386 round 1 $0.0233, round 2 $0.0177. Total $0.041.
 Boxes: Synteq (harness v2 = hs2.sh/q2.sh, SPIN_NS=10000 unless marked), opt-box (builds).
 
 ## E53 (H3): fsync cost against dirty pages, Synteq disk (3 Nov, root, `bin/fsb`, source /tmp/tdsc-wat4/fsb.c)
@@ -1095,3 +1095,60 @@ ns per call, all merged and put through wasm-opt -O3 like the entry; WAT = the f
 - memory.copy (H5b): 8-40 bytes 5.8 ns against an inline loop's 2.4-3.2; 100-200 bytes 6.3-7.0 against 6.7-8.6. So the runtime
   call costs ~3 ns on small copies, not the tens of ns we assumed. SQLite's copies aren't worth replacing: dead.
 The compiler output has no trick that moves the total: our own code is a small slice of ~28-35 us and most of it matches or beats them.
+
+## E58 (H1): 5-minute holds at 220k on harness v2 with the spin (4 Nov) — no gain there, because that harness is CPU-bound
+- h1bs: 22.8k rps, p50 92, p95 715, p99 1,380, max 2,208 ms, 0 errors, CPU 0 busy 95 %
+- b4s: 22.8k rps, p50 115, p95 735, p99 1,215, max 2,461 ms, 0 errors, CPU 0 busy 93 %
+Both fail. With 10 us of spin per request CPU 0 has no room at 220k, so taking the stall off the loop can't help; the scorer ran 220k at
+69-75 % CPU, so it was not out of CPU there (fact F2 in hypotheses.md). The rest of that queue (repeat pair, 230k, 240k) was stopped: more
+spin runs can't answer the question. Next: H2, a harness without the spin whose disk is slowed instead.
+
+## E60 (H1): correctness of the shared wal-index (4 Nov, opt-box, `h1check.py`, CKPT_FRAMES=100 so checkpoints never stop; DeepSeek asked for this before trusting any number)
+8 writer connections (random user, random post) + 4 oracle connections: one post each, distinct users in order, and after each 201 a GET
+must show exactly one more like; then kill -9 under load; the database is opened with native SQLite; the server restarted on it.
+k2: 16,260 read-your-writes checks, 0 stale; 110,378 acked likes, 0 missing after kill -9; integrity_check ok; restart: /health 200, /feed fine.
+k3 (below): 15,927 checks, 0 stale; 107,933 acked, 0 missing; integrity ok. The WAL at the kill was 45.7 MB in k2 with a 100-frame threshold:
+if passes can't catch up it would keep growing, so k3 adds a limit: past 3x the threshold the loop does one inline checkpoint (11.7 MB at the
+kill). In the 220k holds it peaked at 46 MB, so passes do converge there. 42/42.
+
+## E61 (H2): harness v3 = v2 without the spin, the disk slowed by a cgroup cap (hs3.sh/q3.sh on Synteq; 4 Nov)
+The cap (`IOWriteIOPSMax=/dev/sda N` on the unit) only bites if the file's inode belongs to the unit's cgroup (writeback goes to the inode's owner), so the unit
+copies the seed itself in ExecStartPre (a plain systemd-run on a file made by root's shell showed no slowdown at all). fsb, 2,400 dirty pages: no cap ~170 ms; 8,000 IOPS 250 ms; 4,000 525 ms; 2,000 1,110 ms.
+Baseline (b4 = c49b70d, no spin), 2-minute probes, 0 errors in all:
+- 8,000: 210k p95 194, p99 295
+- 4,000: 200k p95 305, p99 430; 210k 345 / 490; 220k 350 / 500; 240k 455 / 700
+- 3,000: 210k p95 495, p99 685; 220k 530 / 745
+Scorer on df9da40: 200k 229 / 356 held; 210k p99 1.5 s; 220k p99 4.5 s; 240k+ refused. The app cgroup now uses 64-68 % of CPU 0 at 200-210k, as the scorer's 68 %, which the spin build didn't (88 %).
+But it has no cliff at 210k: the tail grows smoothly. So neither calibration reproduces the scorer: the spin gets the cliff by running out of CPU the scorer still has, and the cap gets the CPU right
+without the cliff. Whatever turns ~70 % CPU into p99 1.5 s on the scorer isn't modelled yet. A harness caveat, not a result.
+
+## E62 (H1, H26): baseline against H1 on harness v3, ENOBUFS and loop gaps (4 Nov, cap 3,000 IOPS, no spin, 2-minute probes, 0 errors)
+- 240k: k3 p50 18, p95 535, p99 780, max 1,345 ms; b4 p50 59, p95 625, p99 895, max 1,324 ms
+- 260k: k3 p50 83, p95 665, p99 1,025, max 1,754 ms; b4 p50 97, p95 680, p99 985, max 1,748 ms
+- 280k: k3 p95 2,150, p99 4,110; b4 p95 1,740, p99 2,885 (CPU 0 busy 94 % / 89 %)
+So H1 as built gains little under the cap, and the reason is measurable (gap.bt on the loop thread, k3 at 240k, p95 570, p99 820):
+273 loop gaps > 40 ms in ~180 s, mean 176 ms, worst ~490 ms, each with ~3 fsyncs on the loop thread (sync_ms ~ gap): the inline tail. At up to 300 frames, under
+a slowed disk and behind the bulk pass's queued writes, the tail is far from the few ms E53 implied on the free disk. Next: CKPT_TAIL=30 (E63), and if needed H1c (hold writes, no sync on the loop at all).
+H26 (bpftrace enob.bt, baseline b4 at 220k): 315,223 receives ended -ENOBUFS out of 8.98M completions, ~3,000 per second at 22k req/s: during each long stall a ring's 2,048 buffers run dry, and each of those
+connections takes a re-arm. CQ overflow only at the end of the run (135k, when the load generator closes every connection). k3 at 240k: 403,123 (its stalls are still long).
+
+## E63 (H26, H24, H27): smaller buffers, smaller tail, nice (4 Nov, harness v3, cap 3,000 IOPS, 2-minute probes, 0 errors)
+Buffers (8,192 x 512 B per ring instead of 2,048 x 2 KiB, same 4 MiB). bb = b4 with them, k4 = k3 with them:
+- 240k: b4 625/895, bb 590/850; k3 535/780 (570/820 with bpftrace), k4 525/770
+- 260k: b4 680/985, bb 965/2,415 (one bad run); k3 665/1,025, k4 600/875 and 595/900
+H26 verdict: ENOBUFS gone (0 of 9.1M completions, was 403k), which helps a little at most: the stalls are the cost, the storm a side effect. Kept, costs nothing.
+k4 CKPT_TAIL=30 (H24): 240k 525/780, 260k 585/855. Nothing: gap.bt still has ~195 gaps > 40 ms in 180 s, mean 209 ms, 3 fsyncs each, sync_ms ~ gap (184, 353, 438 ms). So the size of the tail
+isn't the cost. Each inline fsync waits for the disk under the writes already queued, whatever the tail adds. H24 done for the tail. (pw=0 in those lines isn't real: WasmEdge's WASI doesn't use pwrite64.)
+CKPT_NICE=0 (H27): 260k 560/840 against 585/855, within noise. Dead.
+Without the cap, k4 CKPT_TAIL=30 at 240k: 198/325.
+
+## E64 (H1c): writes held while the checkpointer finishes, no sync on the loop at all (4 Nov, harness v3, 2-minute probes, 0 errors)
+k5 = k4 + hold, sha256 afb95b16 of merged.opt.wasm, rebuilt identically from the worktree. After a bulk pass with <= 300 frames left the loop parks POSTs in the connection's pending bytes (GETs go on), the
+checkpointer does the last pass, and the first write afterwards restarts the WAL. A hold ends after 250 ms at the latest. Only the 3x-threshold inline checkpoint can still sync on the loop.
+- 240k cap 3,000: k5 p50 1.4, p95 16.6, p99 164, max 876 (k4 22/525/770)
+- 260k cap 3,000: k5 p50 1.5, p95 18, p99 124, max 401 (k4 65/595/900)
+- 280k cap 3,000: k5 p50 1.8, p95 65, p99 235, max 1,084 (k4 and b4 failed here in E62)
+A step, not a trim: p95 falls 30-fold, us/req 17.3 -> 15.3. This matches the f220565 finding (E26: DB sync off the loop held 270k on the scorer), now without writing private state.
+Checks: 42/42. h1check.py: 672 checks 0 stale, 4,122 acked 0 missing after kill -9, integrity ok (CKPT_FRAMES=100). holdcheck.py (new, raw sockets through constant holds): 1,193 split POSTs, 1,115 pipelined
+POST+GET+POST in order, 1,143 POSTs over 3 KiB split, 1,137 closes right after a POST; 0 bad, 0 of 4,566 acked missing after kill -9, integrity ok.
+

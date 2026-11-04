@@ -1,0 +1,155 @@
+{
+  "benchmark": {
+    "date": "2026-11-04",
+    "name": "baseline-release-350000-5m",
+    "runtime": "C++ 0.1.0",
+    "load_generator": "docker_loopback",
+    "generator": "cpp",
+    "sqlite": "3.53.1",
+    "users": 350000,
+    "hold": "5m",
+    "ramp": "30s",
+    "requests": 12513188,
+    "rps": 33819.3387594,
+    "p95_ms": 13.4285248,
+    "p99_ms": 18.75970926,
+    "max_ms": 111.460533,
+    "error_rate": 0.0,
+    "cpu_us_per_request": 19.36501361603454,
+    "cpu_scope": "server_cgroup",
+    "server_peak_bytes": 1063559168,
+    "passed": true,
+    "client_sampled_peak_bytes": 1614290944
+  },
+  "load_generator": {
+    "name": "td-load",
+    "version": "0.1.0",
+    "seed": 20261104,
+    "vus": 350000,
+    "passed": true,
+    "checks_passed": true,
+    "workflow_errors": 0,
+    "ramp_up_seconds": 30,
+    "target_activation_seconds": 30.000704394,
+    "activation_deadline_grace_ms": 100,
+    "target_activation_on_time": true,
+    "prepared_sockets": 350000,
+    "socket_preparation_seconds": 2.447911307,
+    "duration_semantics": "send+wait+receive, excludes connection acquisition and client request preparation; interrupted requests omitted",
+    "target_concurrency_reached": true,
+    "http_response_coverage_complete": true,
+    "http_metrics_passed": true,
+    "peak_live_connections": 350000,
+    "hold_peak_live_connections": 350000,
+    "max_rss_bytes": 444354560,
+    "idle_vu_state_bytes": 88,
+    "interrupted_iterations": 179242,
+    "endpoint_requests": {
+      "feed": 5767793,
+      "post": 5767793,
+      "like": 862596,
+      "create": 115006
+    },
+    "endpoint_duration_ms": {
+      "feed": {
+        "count": 5767793,
+        "avg": 4.94990906754,
+        "p95": 13.3931612,
+        "p99": 18.66175016,
+        "max": 111.283208
+      },
+      "post": {
+        "count": 5767793,
+        "avg": 4.99377670055,
+        "p95": 13.4153936,
+        "p99": 18.77292632,
+        "max": 111.460533
+      },
+      "like": {
+        "count": 862596,
+        "avg": 5.16533514415,
+        "p95": 13.80346925,
+        "p99": 19.2309646,
+        "max": 111.218163
+      },
+      "create": {
+        "count": 115006,
+        "avg": 4.94886900243,
+        "p95": 13.16037375,
+        "p99": 19.03995425,
+        "max": 108.440715
+      }
+    },
+    "phase_duration_ms": {
+      "ramp_up": {
+        "count": 731397,
+        "avg": 4.09369658623,
+        "p95": 9.8231434,
+        "p99": 15.17328344,
+        "max": 31.745343
+      },
+      "hold": {
+        "count": 11113585,
+        "avg": 5.06021926202,
+        "p95": 13.7598798,
+        "p99": 18.91812728,
+        "max": 111.460533
+      },
+      "ramp_down": {
+        "count": 656250,
+        "avg": 4.71829845062,
+        "p95": 11.7771654,
+        "p99": 17.65013933,
+        "max": 31.887298
+      },
+      "grace": {
+        "count": 11956,
+        "avg": 4.19794098896,
+        "p95": 8.42941549999,
+        "p99": 8.87753915,
+        "max": 17.824535
+      }
+    }
+  },
+  "collection_errors": [],
+  "schema_version": 1,
+  "anchor": "d297ca9754b69a3a1eec7c1caa6dae38199e3030",
+  "label": "baseline-release-350000-5m",
+  "kind": "workload",
+  "started_at": "2026-11-04T16:44:07.972447+00:00",
+  "status": "passed",
+  "finished_at": "2026-11-04T16:51:15.049540+00:00",
+  "exit_code": 0,
+  "error": null,
+  "secondary_errors": [],
+  "workload": {
+    "generator": "cpp",
+    "vus": 350000,
+    "ramp": "30s",
+    "hold": "5m",
+    "seed": 20261104
+  },
+  "instruments": {
+    "server_telemetry": "off",
+    "client_diagnostics": false,
+    "perf": "off"
+  },
+  "provenance": {
+    "source": {
+      "base_commit": "d297ca9754b69a3a1eec7c1caa6dae38199e3030",
+      "patch_sha256": "97b7fff0a47bb28bc70e76d4112e9626cc5d19ebc425e1bfd1b3d6a667cabab0",
+      "source_sha256": "53279d3bb6b740fe2a681c884a8cd374c0beadbd72568f87212f4fe919c1456f",
+      "patch": "source.patch"
+    },
+    "binary": {
+      "server": {
+        "image_id": "sha256:ceeca2df6795f6e1517439eefdaafd43e728eb717b5beba112ea895c3fcdafc5",
+        "sha256": "84de9ffc1fa5623739744ba99d0df875adf7999743f46954d163d159e4df6197"
+      },
+      "generator": {
+        "image_id": "sha256:0f33d6a292cd1137bf8f1645e799e916b9f28e3131ec8eea3c99da61fc3116cd",
+        "sha256": "f2634e9500b5017ee4c3ca77329ea8a98c54544b92e972ba9ba637fba69a4a1e"
+      }
+    }
+  }
+}

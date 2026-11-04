@@ -1,0 +1,42 @@
+{
+  "measurement": {
+    "native_tests": [
+      "transport_lifetimes",
+      "group_commit_contract",
+      "application_contract",
+      "checkpoint_lifetimes"
+    ],
+    "passed": true
+  },
+  "schema_version": 1,
+  "anchor": "d297ca9754b69a3a1eec7c1caa6dae38199e3030",
+  "label": "sql-write32-contract",
+  "kind": "probe",
+  "started_at": "2026-11-04T16:16:31.779651+00:00",
+  "status": "passed",
+  "finished_at": "2026-11-04T16:17:03.388840+00:00",
+  "exit_code": 0,
+  "error": null,
+  "secondary_errors": [],
+  "workload": {
+    "kind": "sql_write_batch_contract"
+  },
+  "instruments": {
+    "server_telemetry": "profile",
+    "perf": "off",
+    "client_diagnostics": false
+  },
+  "provenance": {
+    "source": {
+      "base_commit": "d297ca9754b69a3a1eec7c1caa6dae38199e3030",
+      "patch_sha256": "14180a8497e09b26c17f48a56917fecb317f1f455834126dd537d3b273343a5e",
+      "source_sha256": "963ffe31d89839ede5819becd490cc73bdff1ba4e15a168b39b03544a5098129",
+      "patch": "source.patch"
+    },
+    "binary": {
+      "server": {
+        "sha256": "3bdc094a5e1fca7cafd367b8886e7bca93fc9027f05c3996602639b8611d384b"
+      }
+    }
+  }
+}

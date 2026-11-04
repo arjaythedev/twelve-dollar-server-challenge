@@ -338,6 +338,60 @@ void fifo_isolation_and_visibility()
             "committed create is not visible to feed reads");
 }
 
+void full_batch_boundary()
+{
+    for (const bool reject_commit : {false, true})
+    {
+        Fixture fixture;
+        Store db(fixture.path);
+        auto reader = open(fixture.path);
+        Control control(reader.get());
+        control.commit_failure = reject_commit ? CommitFailure::busy : CommitFailure::none;
+
+        std::vector<WriteCommand> jobs;
+        jobs.reserve(tds::write_batch_limit + 1);
+        for (std::size_t index = 0; index < tds::write_batch_limit; ++index)
+        {
+            jobs.emplace_back(CreatePost{UserId{1}, "first", "full:" + std::to_string(index)});
+        }
+        const auto results = run_batch(db, jobs);
+        require(control.commits == 1 && control.visible_posts == 1,
+                "full batch committed early or exposed provisional writes");
+        if (reject_commit)
+        {
+            all_failed(results, jobs.size());
+            require(scalar(reader.get(), "SELECT count(*) FROM posts") == 1,
+                    "failed full batch retained a write");
+        }
+        else
+        {
+            for (std::size_t index = 0; index < jobs.size(); ++index)
+            {
+                require(created(results[index]).id.value == static_cast<std::int64_t>(index + 2),
+                        "full batch lost its FIFO result or final command");
+            }
+            require(scalar(reader.get(), "SELECT count(*) FROM posts") ==
+                        static_cast<std::int64_t>(jobs.size() + 1),
+                    "full batch did not persist every acknowledged write");
+        }
+
+        jobs.emplace_back(CreatePost{UserId{1}, "first", "over capacity"});
+        std::vector<WriteOutcome> oversized(jobs.size());
+        const auto steps = control.steps;
+        bool rejected = false;
+        try
+        {
+            static_cast<void>(db.commit(jobs, oversized));
+        }
+        catch (const std::logic_error &)
+        {
+            rejected = true;
+        }
+        require(rejected && control.steps == steps && control.commits == 1,
+                "oversized batch touched SQLite before rejecting its capacity");
+    }
+}
+
 void failed_commits()
 {
     for (const auto failure : {CommitFailure::hook, CommitFailure::busy})
@@ -780,6 +834,7 @@ int main()
     try
     {
         fifo_isolation_and_visibility();
+        full_batch_boundary();
         failed_commits();
         automatic_rollback();
         fatal_error();

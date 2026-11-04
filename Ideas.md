@@ -6,8 +6,9 @@ Unchecked items are experiments; checked items include completed work and discar
 
 ### 1. CQ waits and current profiling
 
-- [ ] Measure the current split between user space, kernel networking, io_uring and filesystem work at low and high load. The [historical 350k profile](src/runs/legacy/profile-unix-excl-350000/summary.json) sampled 30.19 of 65.64 CPU-seconds in kernel networking; Docker loopback costs may differ from a real NIC.
-  Record enter duration, requested/returned CQ batch sizes, pending-SQ age and completion-to-dispatch delay separately. Existing send-preparation-to-CQE timing combines submission, kernel and CQ-service waits; CPU samples exclude blocked time. Use kernel tracing when exact CQ-post timing is needed.
+- [x] Profile the selected policy at 350k for five minutes ([results](src/runs/d297ca9/baseline-full-profile-350000-5m-analysis/summary.json)): 47.2% networking, 19.1% database/rows, 10.0% io_uring and 9.2% filesystem CPU. No lost perf records; Docker loopback costs may differ from a real NIC.
+
+- [ ] Trace enter duration, requested/returned CQ sizes, pending-SQ age and completion-to-dispatch delay only where needed to explain queue behavior. Existing send timing combines submission, kernel and CQ-service waits; CPU samples exclude blocked time. Exact CQ-post timing needs kernel tracing.
 
 - [ ] Compare one versus two generator workers if higher loads exhaust the optimized single worker. Use a shared start gate, disjoint VUs/source IPs and fixed worker seeds; merge latency samples before calculating percentiles.
   Preserve total load and API checks. Reject late activation, incomplete response coverage and workflow failures; report client CPU, timer lag and epoll service lag separately. Repeat server comparisons with the same worker split.
@@ -20,15 +21,13 @@ Unchecked items are experiments; checked items include completed work and discar
 
 - [ ] Compare a direct B-tree point reader with prepared SQL for `GET /posts/:id` ([current SQL path](src/server/storage/database.cpp), [feed cursor API](src/server/sqlite_read.h)). Post reads were about 46% of requests in the historical 350k profile; confirm their current CPU share.
   Include fresh snapshot/cursor setup, author lookup, current like counts and cleanup. Reuse request-local feed primitives, preserve missing-post/error behavior and retain SQL fallback for unsupported cases; compare route CPU and whole-server CPU/request.
+  The current five-minute profile attributes 4.5% of CPU to the whole route, including required work; this is an upper bound for a replacement.
 
 - [ ] Skip storing irrelevant header values in [Parser callbacks](src/server/http/parser.cpp), while llhttp still validates every byte and handles framing. Match fragmented, case-insensitive `authorization` fields and copy only required request data.
   Preserve existing field/value size limits, duplicate-header behavior, early auth errors, fragments, chunking and pipelining. Measure copies/allocations before considering a second HTTP parser.
 
 - [ ] Revisit direct receive-buffer parsing only for a measured frequent case of a complete ordinary request, with the current Session-copy path for fragments and retained tails ([receive handler](src/server/server.cpp)).
   The broader leased-buffer experiment found no CPU gain. Keep llhttp, request-owned fields before releasing the lease, early auth errors and pipeline order; compare copies, CPU and memory before expanding it.
-
-- [ ] Compare the satellite eventfd `POLL_ADD` plus `read()` path with `IORING_OP_READ` ([complete_wake](src/server/net/reactor.cpp)). Probe kernel behavior first: `EFD_NONBLOCK` may complete with `EAGAIN` instead of waiting.
-  Keep stable counter storage, bounded rearming, wakeup/shutdown progress and no missed notifications. Historical sampled `read` CPU was only ~0.24 of 65.64 seconds, so check its current share before adding machinery.
 
 ### 3. Failure-path robustness
 
@@ -51,6 +50,7 @@ Unchecked items are experiments; checked items include completed work and discar
 - [ ] Compare multishot accept separately to reduce accept SQEs and rearming. Count accepted sockets and terminal CQEs correctly, close arrivals during shutdown and rearm after termination.
 
 - [ ] Compare persistent satellite notification polls with the one-shot wake READ ([C on_evfd](submissions/c-iouring-pavlyhalim/src/server.c)). The reference leaves the counter unread and rearms only after a terminal CQE. Probe repeated wakeups, MORE accounting, cancellation and overflow before changing ownership.
+  Low priority after READ: the current short profile no longer identifies wakeup handling as a significant hotspot; symbol attribution can omit inlined work.
 
 - [ ] Compare process-local TCP options independently: `TCP_NODELAY` for small responses, `TCP_DEFER_ACCEPT` for churn and explicitly uncorked `TCP_CORK` for deliberate coalescing ([TCP options](https://man7.org/linux/man-pages/man7/tcp.7.html)).
   Accepted sockets use direct descriptors: never pass a fixed-file slot to `setsockopt()`. Check supported io_uring socket commands or listener-option inheritance first. Measure packets, CPU and p99; the existing single header/body send already coalesces output, corking can delay it, and deferred accept mainly affects establishment. Keep system-wide kernel settings unchanged.
@@ -95,9 +95,12 @@ Unchecked items are experiments; checked items include completed work and discar
 - [ ] If WAL backfill falls behind, compare a bounded write gate ([Ada PR 211](https://github.com/visseranalytics/twelve-dollar-server-challenge/blob/7ff01df614ba46dfe89c6388aab52ed176538873/submissions/ada-native-visseranalytics/src/database.adb#L28)). Keep independent reads moving; release held writes after the requested checkpoint pass or a timeout.
   Add explicit worker retry and reactor wakeup: our worker currently waits for another commit, which a gate could prevent. Preserve pipeline order and commit-before-response; compare WAL backlog, memory and write p99.
 
-- [ ] Compare write-batch caps 16 and 32 with the selected 128-CQE / 8-ms policy. Cap 16 now binds in 13.8% of full-hold batches, containing 38.7% of writes; larger receive pools and CQs showed no pressure in that run.
-  Preserve per-command rollback, connection order and commit-before-response. Average collection wait `~= (b-1)/(2*lambda)`; compare kernel/user CPU per request, commits and p99 before adding another queue.
-  Rust and C commit across a turn, while our CQ drain stops at 256 entries per ring and SQL commits at 16 writes. Test those limits separately; their larger CQ targets alone do not reproduce their transaction batching.
+- [x] Compare write-batch caps 16 and 32 with 128 CQEs / 8 ms fixed ([pair](src/runs/d297ca9/sql-write16-vs32-350000/summary.json)). The short 350k pair used 3.2% less CPU and 2.4% less kernel CPU at 32; average batch size rose from 5.56 to 5.99. The control's tail spike prevents attributing the p99 improvement to this change. Keep 16 for the full-profile reference until review.
+
+- [ ] Compare bounded FIFO writes across reactor turns, flushing at capacity or the oldest command's deadline. Current end-turn flushing limits collection even with a larger cap; the CQ timeout is not a write window. Compare 0/1 ms first at a fixed cap, then 2 ms if promising.
+  Keep commands outside SQLite transactions until flush, bound reactor waits and busy-drain overshoot, and preserve FIFO, pipeline visibility, commit-before-response and shutdown discard. Without EXT_ARG, keep immediate flushing rather than exposing liburing's hidden timeout SQE to raw CQ dispatch.
+  At about 2,900 writes/s, 2 ms spans roughly 5.8 arrivals; bursts determine actual batch growth. Fewer commits save only their fixed cost, not all request CPU. Record flush reason, batch-size distribution and queue age; existing diagnostics already cover batch sizes.
+  The long profile attributes 10.1% of CPU to all write-batch work and 7.2% to SQLite commit phases, with overlapping WAL costs. These are ceilings, not additive savings estimates.
 
 - [ ] Compare removing per-write savepoints for the fixed schema, relying on SQLite's statement rollback for ABORT constraints. Preserve batch failure, rollback quarantine and isolation; `RAISE(FAIL)` and custom trigger side effects need separate handling.
 
@@ -113,10 +116,17 @@ Unchecked items are experiments; checked items include completed work and discar
   Keep navigation in SQLite's pager/B-tree; logical IDs and timestamps do not identify stable file offsets.
 
 - [ ] Compare contiguous WAL-write coalescing over `unix-excl` ([Pavly](submissions/c-iouring-pavlyhalim/src/db.h)). Target pwrite calls; preserve commit visibility, short-write/error handling and NORMAL sync. Keep WAL eviction working through the wrapper; it currently requires `xRead == unixRead`.
+  The current five-minute profile attributes 4.8% of CPU to foreground pwrite paths, an upper bound rather than expected savings. Flush buffered commit bytes before SQLite publishes NORMAL commit visibility; flushing only at xSync is insufficient.
+
+- [ ] Compare checkpoint notification by newly committed frames and generation-aware eviction of only new completed ranges, separately. The current threshold uses absolute WAL frames and advice repeats the completed prefix. Preserve partial-checkpoint retries and memory bounds; 128/8-ms collection has already removed most historical checkpoint churn.
 
 - [ ] Compare fresh Btrfs CoW and `chattr +C` directories on the same Mini, then ext4 on the same hardware if available. Measure WAL residency, I/O and p99; `+C` also disables data checksums and compression.
 
 - [ ] Consider a create-only preupdate hook if timestamp readback becomes material. It needs `SQLITE_ENABLE_PREUPDATE_HOOK` and unpacks the full inserted record; copy provisional metadata immediately and publish only after successful statement and batch completion.
+
+- [ ] Native-screen binding cleanup for parameterless transaction statements, retaining reset and errors. Disassembly shows `2*N+2` unnecessary clear calls per multi-write batch, but all clear_bindings together sampled only 0.037% of current short-profile CPU.
+
+- [ ] Native-screen a create-only borrowed body binding against `SQLITE_TRANSIENT`. Keep command bytes alive through step, reset and clear; test Unicode, constraints and rollback. The initial copy exists in assembly, but current sampling cannot resolve a useful gain.
 
 ## Conditional: larger changes and build experiments
 

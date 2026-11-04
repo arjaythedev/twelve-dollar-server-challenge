@@ -610,6 +610,7 @@ def collect_profile(
         "--input=/profile/perf.data",
         "-F",
         "period,ip,sym,dso",
+        timeout=600,
     )
     statistics = command(
         *common,
@@ -619,6 +620,7 @@ def collect_profile(
         "--stdio",
         "--stats",
         "--no-children",
+        timeout=600,
     )
     (output / "stacks.txt").write_text(stacks + "\n", encoding="utf-8")
     (output / "perf-stats.txt").write_text(statistics + "\n", encoding="utf-8")

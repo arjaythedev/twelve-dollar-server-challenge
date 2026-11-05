@@ -92,6 +92,8 @@ typedef int (*TDHandleIMP)(id, SEL, TDReq *, TDWorker *, TDBuf *);
 
 // Output buffers: most responses fit one (a /feed is ~4 KB), a larger one grows and is freed after its send.
 uint32_t td_opt_poolcap = 6144, td_opt_poolmax = 4096;   // --poolcap=N --poolmax=N
+extern int td_opt_lock;
+void td_lock_code(void);
 int td_opt_rearm = 2048;   // --rearm=N: receives re-armed per ring per pass (0: all at once)
 uint32_t td_opt_answers = 2048;   // --answers=N: requests answered per pass; the rest stay parked in the batch (0: all)
 
@@ -234,7 +236,7 @@ static struct io_uring_sqe *sqe_get(struct io_uring *r) {
 static struct io_uring_buf_ring *setup_buf_ring(struct io_uring *ring, int k) {
     size_t sz = (size_t)BUF_COUNT * sizeof(struct io_uring_buf);
     struct io_uring_buf_ring *br = mmap(NULL, sz, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
-    if (br == MAP_FAILED) { perror("mmap buf ring"); exit(1); }
+    if (br == MAP_FAILED) return NULL;
     struct io_uring_buf_reg reg;
     memset(&reg, 0, sizeof reg);
     reg.ring_addr = (unsigned long)br;
@@ -246,41 +248,48 @@ static struct io_uring_buf_ring *setup_buf_ring(struct io_uring *ring, int k) {
         reg.resv[0] = 1;
         ret = io_uring_register_buf_ring(ring, &reg, 0);
         if (ret == 0 && k == 0) fprintf(stderr, "io_uring buffer ring registered with resv[0]=1 (inverted kernel check)\n");
-        if (ret < 0) { fprintf(stderr, "register_buf_ring: %s\n", strerror(-first)); exit(1); }
+        if (ret < 0) { fprintf(stderr, "register_buf_ring: %s\n", strerror(-first)); munmap(br, sz); return NULL; }
     }
     io_uring_buf_ring_init(br);
     return br;
 }
 
 int td_opt_cq = 65536;   // --cq=N: completions per ring; more than a ring's connections, so a burst never takes the kernel's overflow list
-- (void)setupRing:(int)k TD_DIRECT {
+// Returns false if the ring can't be made. Kernels newer than 6.8 charge ring memory to RLIMIT_MEMLOCK (8 MB under
+// systemd), so the completion queue halves until it fits, and a ring that doesn't fit at all is one ring less.
+- (bool)setupRing:(int)k TD_DIRECT {
     TDRingState *rs = &R[k];
     rs->rq = malloc(sizeof(uint32_t) * slots);
     struct io_uring_params p;
-    memset(&p, 0, sizeof p);
-    // Ring 0 is the one we wait on: completions run as deferred task work in
-    // batches. The other rings post completions directly so that ring 0's poll
-    // on their fds sees them.
-    p.flags = IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_COOP_TASKRUN | IORING_SETUP_SUBMIT_ALL | IORING_SETUP_CQSIZE;
-    if (k == 0) p.flags |= IORING_SETUP_DEFER_TASKRUN;
-    p.cq_entries = td_opt_cq;
-    int ret = io_uring_queue_init_params(4096, &rs->ring, &p);
-    if (ret < 0) {
+    int ret = -ENOMEM;
+    for (unsigned cq = (unsigned)td_opt_cq; cq >= 4096 && ret == -ENOMEM; cq /= 2) {
         memset(&p, 0, sizeof p);
-        p.flags = IORING_SETUP_CQSIZE;
-        p.cq_entries = td_opt_cq;
+        // Ring 0 is the one we wait on: completions run as deferred task work in
+        // batches. The other rings post completions directly so that ring 0's poll
+        // on their fds sees them.
+        p.flags = IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_COOP_TASKRUN | IORING_SETUP_SUBMIT_ALL | IORING_SETUP_CQSIZE;
+        if (k == 0) p.flags |= IORING_SETUP_DEFER_TASKRUN;
+        p.cq_entries = cq;
         ret = io_uring_queue_init_params(4096, &rs->ring, &p);
     }
-    if (ret < 0) { fprintf(stderr, "io_uring_queue_init: %s\n", strerror(-ret)); exit(1); }
+    if (ret < 0 && k == 0) {
+        memset(&p, 0, sizeof p);
+        p.flags = IORING_SETUP_CQSIZE;
+        p.cq_entries = 4096;
+        ret = io_uring_queue_init_params(4096, &rs->ring, &p);
+    }
+    if (ret < 0) { fprintf(stderr, "io_uring_queue_init(ring %d): %s\n", k, strerror(-ret)); return false; }
     ret = io_uring_register_files_sparse(&rs->ring, slots);
-    if (ret < 0) { fprintf(stderr, "register_files_sparse(%u): %s\n", slots, strerror(-ret)); exit(1); }
+    if (ret < 0) { fprintf(stderr, "register_files_sparse(%u): %s\n", slots, strerror(-ret)); io_uring_queue_exit(&rs->ring); return false; }
     rs->br = setup_buf_ring(&rs->ring, k);
+    if (!rs->br) { io_uring_queue_exit(&rs->ring); return false; }
     rs->bufs = mmap(NULL, (size_t)BUF_SIZE * BUF_COUNT, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (rs->bufs == MAP_FAILED) { perror("mmap bufs"); exit(1); }
+    if (rs->bufs == MAP_FAILED) { io_uring_queue_exit(&rs->ring); return false; }
     rs->brMask = io_uring_buf_ring_mask(BUF_COUNT);
     for (uint32_t i = 0; i < BUF_COUNT; i++)
         io_uring_buf_ring_add(rs->br, rs->bufs + (size_t)i * BUF_SIZE, BUF_SIZE, (unsigned short)i, rs->brMask, (int)i);
     io_uring_buf_ring_advance(rs->br, BUF_COUNT);
+    return true;
 }
 
 TD_INLINE void buf_recycle(TDRingState *rs, uint32_t bid) {
@@ -851,16 +860,23 @@ int td_opt_batch = 128, td_opt_bwait = 1000, td_opt_bthresh = 8;   // --batch=N 
 - (void)stats:(bool)final TD_DIRECT {
     uint32_t live = 0, dropped = 0;
     for (int k = 0; k < nrings; k++) { live += R[k].live; if (R[k].active) dropped += *R[k].ring.cq.koverflow; }
-    fprintf(stderr, "stats%s t=%lld live=%u accErr=%llu last=%d cqOvfPasses=%llu cqDropped=%u nobufs=%llu armed=%d rq=%u maxBatch=%llu npool=%u\n",
+    fprintf(stderr, "stats%s t=%lld live=%u accErr=%llu last=%d cqOvfPasses=%llu cqDropped=%u nobufs=%llu armed=%d rq=%u maxBatch=%llu npool=%u cacheKB=%d miss=%d\n",
             final ? "-final" : "", (long long)(now - started), live, (unsigned long long)accErr, lastAccErr,
-            (unsigned long long)cqOvf, dropped, (unsigned long long)nobufs, (int)[self acceptArmedAnywhere], nrearm, (unsigned long long)maxBatch, npool);
+            (unsigned long long)cqOvf, dropped, (unsigned long long)nobufs, (int)[self acceptArmedAnywhere], nrearm, (unsigned long long)maxBatch, npool, [store cacheStat:0], [store cacheStat:1]);
     maxBatch = 0;
 }
 
 - (void)run {
     statsOn = getenv("TD_STATS") != NULL;
     uint32_t lastReq = 0;
-    for (int k = 0; k < nrings; k++) [self setupRing:k];
+    for (int k = 0; k < nrings; k++)
+        if (![self setupRing:k]) {
+            if (k == 0) exit(1);
+            fprintf(stderr, "serving on %d rings\n", k);
+            nrings = k;
+            break;
+        }
+    if (td_opt_lock) td_lock_code();
     [self armAccept:0];
     if (ckReq >= 0) [self ckptArmRead];
     for (;;) {

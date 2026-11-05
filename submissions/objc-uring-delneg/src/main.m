@@ -16,13 +16,13 @@ extern int td_opt_ckptproc, td_opt_hold;
 extern int td_opt_ckpt, td_opt_batch, td_opt_bwait, td_opt_bthresh;
 extern long long td_opt_mmap;
 extern int td_opt_btree;
-extern int td_opt_ckpass, td_opt_rearm, td_opt_cq, td_opt_cachekb, td_opt_cknice, td_opt_lock, td_opt_jsl;
+extern int td_opt_ckpass, td_opt_rearm, td_opt_cq, td_opt_cachekb, td_opt_cknice, td_opt_lock, td_opt_jsl, td_opt_warm, td_opt_ckdrop;
 extern uint32_t td_opt_poolcap, td_opt_poolmax, td_opt_answers;
 
 // Locks the code and read-only data of the binary and its libraries in RAM, up to RLIMIT_MEMLOCK (8 MB under systemd).
 // With no swap, reclaim at the memory wall takes file-backed pages first, and the loop would stall on major faults
 // reading its own code back from disk. (#245, #257 do this too.) Best effort.
-static void lock_code(void) {
+void td_lock_code(void) {
     FILE *f = fopen("/proc/self/maps", "r");
     if (!f) return;
     char line[512];
@@ -73,6 +73,8 @@ int main(int argc, char **argv) {
         else if (!strncmp(argv[i], "--ckpass=", 9)) td_opt_ckpass = atoi(argv[i] + 9);
         else if (!strncmp(argv[i], "--answers=", 10)) td_opt_answers = (uint32_t)atoi(argv[i] + 10);
         else if (!strncmp(argv[i], "--jsl=", 6)) td_opt_jsl = atoi(argv[i] + 6);
+        else if (!strncmp(argv[i], "--warm=", 7)) td_opt_warm = atoi(argv[i] + 7);
+        else if (!strncmp(argv[i], "--ckdrop=", 9)) td_opt_ckdrop = atoi(argv[i] + 9);
         else if (!strncmp(argv[i], "--rearm=", 8)) td_opt_rearm = atoi(argv[i] + 8);
         else if (!strncmp(argv[i], "--cq=", 5)) td_opt_cq = atoi(argv[i] + 5);
         else if (!strncmp(argv[i], "--cache=", 8)) td_opt_cachekb = atoi(argv[i] + 8);
@@ -121,7 +123,6 @@ int main(int argc, char **argv) {
                            .ckptReq = ckReq, .ckptDone = ckDone };
     TDWorker *w = [[TDWorker make] initWithConfig:&cfg];
     fprintf(stderr, "objc-uring: 1 thread, %d rings x %u slots on %s:%s\n", rings, slots, host, port ? port : "80");
-    if (td_opt_lock) lock_code();
     [w run];
     return 0;
 }

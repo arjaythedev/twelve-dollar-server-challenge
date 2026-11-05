@@ -233,3 +233,19 @@ v3 = v2, parked requests untouched: `reqs[reqHead..nreq)` FIFO, a pass looks at 
 | v3 320k (with bpftrace attached, so not a fair run) | alive, 0 errors, p50 750 ms, WAL grew to ~1 GB |
 
 Page-cache trace (`mm_filemap_add_to_page_cache` by pid and inode, 15 s): main process 7,291 pages of **feed.db-wal**, 16 of -shm, 0 of feed.db; checkpointer child 1,034 of feed.db. So with the larger SQLite cache the loop no longer reads the DB; it reads the WAL. Reason: WAL frames are 4,120 bytes, not page-aligned, and the file is overwritten from the start after a rewind. Overwriting part of a file page that reclaim evicted makes the kernel read it from disk first, on the loop (D state). New: H13 `PRAGMA journal_size_limit=0`.
+
+## C2: CPU handicap; consult (5 Nov)
+
+`BURN=8` (a process taking 8 % of CPU 0 in 20 ms cycles) on `1fe6941` at 280k, SRVMB=1850: p95 37.8 / p99 350, app 75 %, against the scorer's 35 / 227, 79 %. Calibration from here: **SRVMB=1850 BURN=8**. 290k dies with or without it.
+
+Consult 1105-144212-3a93 (DeepSeek; Gemini was overloaded), what I did with it:
+- "tcp_mem is per netns": checked, wrong. `/proc/sys/net/ipv4/tcp_mem` doesn't exist inside srvns; the limit is global.
+- "Drop WAL, journal_mode=MEMORY, synchronous=OFF": rule 6 forbids it.
+- `locking_mode=EXCLUSIVE`: rejected, the checkpointer child needs shared memory (and the README's A/B: 11.56 vs 11.54-11.60 µs/req).
+- `mmap_size` instead of page cache: rejected. Mapped pages are reclaimable, which is exactly the major-fault stall at the wall; also measured slower.
+- Kept: the harness is fitted at one point, so trust A/B deltas more than absolute numbers (agrees with WAT: 260k local → 220k scored); watch the 5-minute hold for page-cache growth; target rdMB ≈ 0 over the full hold; hold under slower I/O as well (add an IOPS cap run); count TIME_WAIT (0 here: no reconnects).
+
+## E25: 5-minute hold, v4 at 320k (no burner)
+
+p95 840 / p99 995, 0 errors, peak 1,318 MB, app 89 % of CPU 0. Memory flat (avail ~720 MB), WAL 2-32 MB, TCP ≤ 2k pages except one 4.4k. Latency and CPU rise through the hold: 85 % in the first minutes, 92 % at the end, rdMB per 10 s from 0 to ~12, maxBatch from ~1k to 27k. So a slow slide: the loop reads ~1.2 MB/s, likely cold index leaves (writes land on random leaves of `sqlite_autoindex_likes_1` 29.5 MB and `posts_user_id_idx` 5.3 MB, authors on `users` 2.5 MB) now that the file cache is gone, and kswapd scans ~5k pages/s.
+v5: read those three at startup into the page cache (`--warm`), and the checkpointer drops feed.db's clean file pages after each pass (`posix_fadvise DONTNEED`, `--ckdrop`), on a descriptor it keeps open because closing one would drop its POSIX locks.

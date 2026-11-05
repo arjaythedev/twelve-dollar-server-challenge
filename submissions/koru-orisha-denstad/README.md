@@ -23,4 +23,5 @@ Optimizations:
 - io_uring `SINGLE_ISSUER|DEFER_TASKRUN`, TCP_NODELAY, keep-alive
 
 Build: `install.sh` fetches zig 0.15.2; `build.sh` clones the pinned
-compiler/framework/stdlib hashes and builds natively.
+compiler/framework/stdlib hashes as dependencies and compiles the app's own
+source (`twelve/main.k`, `handlers.k`, `support.kz` — vendored here) natively.

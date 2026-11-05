@@ -27,7 +27,7 @@ zig build
 # koruc resolves its compiler sources at <prefix>/src — zig-out is the prefix.
 ln -sfn "$SRC/koru/src" "$SRC/koru/zig-out/src"
 ln -sfn "$SRC/koru/koru_std" "$SRC/koru/zig-out/koru_std"
-cd "$SRC/orisha/twelve"
+cd "$SUB_DIR/twelve"
 export KORU_STDLIB="$SRC/koru/koru_std"
 export KORU_PATH="$SRC/koru"
 mkdir -p "$SUB_DIR/bin"

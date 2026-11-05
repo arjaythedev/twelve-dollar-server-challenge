@@ -204,15 +204,29 @@ static int dexbt_raw(const char* s, size_t n) {
     return 0;
 }
 
-static int dexbt_long(i64 v) {
+static const char dexbt_digits[201] =
+    "00010203040506070809101112131415161718192021222324252627282930313233343536373839"
+    "40414243444546474849505152535455565758596061626364656667686970717273747576777879"
+    "8081828384858687888990919293949596979899";
+
+/* v in decimal at o, which has 21 bytes of room. Returns the bytes written. */
+static size_t dexbt_put_long(char* o, i64 v) {
     char d[24];
-    int i = 0;
+    char* e = d + sizeof(d);
+    char* q = e;
     u64 u = v < 0 ? (u64)0 - (u64)v : (u64)v;
-    do { d[i++] = (char)('0' + u % 10); u /= 10; } while (u);
-    if (dexbt_need((size_t)i + 1) < 0) return -1;
-    if (v < 0) dexbt_out[dexbt_out_len++] = '-';
-    while (i) dexbt_out[dexbt_out_len++] = d[--i];
-    return 0;
+    while (u >= 100) {
+        unsigned r = (unsigned)(u % 100);
+        u /= 100;
+        q -= 2;
+        memcpy(q, dexbt_digits + r * 2, 2);
+    }
+    if (u >= 10) { q -= 2; memcpy(q, dexbt_digits + u * 2, 2); }
+    else *--q = (char)('0' + u);
+    if (v < 0) *--q = '-';
+    size_t n = (size_t)(e - q);
+    memcpy(o, q, n);
+    return n;
 }
 
 /* Bytes that need no escape: none below 0x20, no quote, no backslash. */
@@ -240,7 +254,6 @@ static int dexbt_str(const DexBtVal* v) {
     const u8* d = v->p;
     u32 n = v->n;
     if (dexbt_clean(d, n)) {
-        if (dexbt_need((size_t)n + 2) < 0) return -1;
         char* o = dexbt_out + dexbt_out_len;
         o[0] = '"';
         memcpy(o + 1, d, n);
@@ -248,7 +261,6 @@ static int dexbt_str(const DexBtVal* v) {
         dexbt_out_len += (size_t)n + 2;
         return 0;
     }
-    if (dexbt_need((size_t)n * 6 + 2) < 0) return -1;
     char* o = dexbt_out + dexbt_out_len;
     size_t k = 0;
     o[k++] = '"';
@@ -304,6 +316,26 @@ static int dexbt_like_post(BtCursor* c, i64* post) {
     const u8* rec;
     u32 size;
     DexBtVal v[1];
+    /* The usual entry is small and on its page, with one-byte header size
+     * and first serial type: the post_id is read straight off it. */
+    u32 local = 0;
+    size = sqlite3BtreePayloadSize(c);
+    rec = (const u8*)sqlite3BtreePayloadFetch(c, &local);
+    if (rec && local >= size && size >= 2 && rec[0] < 0x80 && rec[1] < 0x80) {
+        u32 hdr = rec[0], t = rec[1];
+        if (t == 8) { *post = 0; return 0; }
+        if (t == 9) { *post = 1; return 0; }
+        if (t >= 1 && t <= 6 && hdr >= 2) {
+            u32 len = dexbt_serial_len(t);
+            if (hdr + len <= size) {
+                const u8* d = rec + hdr;
+                i64 x = (d[0] & 0x80) ? -1 : 0;
+                for (u32 i = 0; i < len; i++) x = (i64)(((u64)x << 8) | d[i]);
+                *post = x;
+                return 0;
+            }
+        }
+    }
     if (dexbt_read(c, dexbt_ibuf, DEXBT_INDEX_REC, &rec, &size) < 0) return -1;
     if (dexbt_parse(rec, size, v, 1) < 1 || dexbt_int(&v[0], post) < 0) return -1;
     return 0;
@@ -407,12 +439,22 @@ static int dexbt_fill(int first, i64 id, BtCursor* pc, BtCursor* uc, BtCursor* l
     int likes;
     if ((w ? dexbt_count_likes_desc(lc, w, id, &likes) : dexbt_count_likes(lc, id, &likes)) < 0) return -1;
 
-    if (dexbt_raw(first ? "{\"id\":" : ",{\"id\":", first ? 6 : 7) < 0 || dexbt_long(id) < 0 ||
-        dexbt_raw(",\"body\":", 8) < 0 || dexbt_str(&f[2]) < 0 ||
-        dexbt_raw(",\"created_at\":", 14) < 0 || dexbt_str(&f[3]) < 0 ||
-        dexbt_raw(",\"author\":", 10) < 0 || dexbt_str(&u[1]) < 0 ||
-        dexbt_raw(",\"like_count\":", 14) < 0 || dexbt_long(likes) < 0 || dexbt_raw("}", 1) < 0)
-        return -1;
+    /* Room for the worst case (every text byte escaped as \u00XX), so the
+     * writes below need no checks. */
+    if (dexbt_need(128 + ((size_t)f[2].n + f[3].n + u[1].n) * 6) < 0) return -1;
+#define DEXBT_LIT(s) (memcpy(dexbt_out + dexbt_out_len, s, sizeof(s) - 1), dexbt_out_len += sizeof(s) - 1)
+    if (first) DEXBT_LIT("{\"id\":"); else DEXBT_LIT(",{\"id\":");
+    dexbt_out_len += dexbt_put_long(dexbt_out + dexbt_out_len, id);
+    DEXBT_LIT(",\"body\":");
+    if (dexbt_str(&f[2]) < 0) return -1;
+    DEXBT_LIT(",\"created_at\":");
+    if (dexbt_str(&f[3]) < 0) return -1;
+    DEXBT_LIT(",\"author\":");
+    if (dexbt_str(&u[1]) < 0) return -1;
+    DEXBT_LIT(",\"like_count\":");
+    dexbt_out_len += dexbt_put_long(dexbt_out + dexbt_out_len, likes);
+    DEXBT_LIT("}");
+#undef DEXBT_LIT
     return 1;
 }
 

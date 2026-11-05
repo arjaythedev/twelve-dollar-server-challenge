@@ -99,7 +99,7 @@ int td_opt_onewrite = 1;   // --onewrite=0|1
 int td_opt_rearm = 2048;   // --rearm=N: receives re-armed per ring per pass (0: all at once)
 uint32_t td_opt_answers = 512;    // --answers=N: requests answered per pass; the rest stay parked in the batch (0: all)
 int td_opt_lifo = 1;              // --lifo=0|1: past one pass of backlog, answer the newest first
-uint32_t td_opt_lifoage = 400;    // --lifoage=MS: the age at which the old end gets the whole pass
+uint32_t td_opt_lifoage = 250;    // --lifoage=MS: the age at which the old end gets the whole pass
 
 // ---------------------------------------------------------------- helpers
 TD_INLINE bool ieq(const char *a, const char *lower, uint32_t n) {

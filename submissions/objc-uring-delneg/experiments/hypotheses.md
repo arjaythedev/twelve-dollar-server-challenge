@@ -43,3 +43,5 @@ H14 status: open, same reason.
 H15 status: keeps p50 low at 310k in every rep (9 of 9); doesn't by itself pass a 5-minute hold at 310k.
 NEW H16 (5 Nov): page cache through PCACHE2 (dense array, clock, cheap truncate). Challenges "the stock page cache is free". Expect 2-4 % CPU. Flag `--pcache`.
 NEW H17 (5 Nov): smaller passes. Challenges "a bigger batch is cheaper per request" (flush per answer rises from 9 to 12.5 us as passes grow). Flag `--answers`.
+H16 status: kept, about 4 % less CPU per request over two pairs.
+H17 status: dropped, 512 stays. 128 and 64 show no clear gain over two pairs.

@@ -343,3 +343,34 @@ Phase timing per second (TD_STATS): flush cost per answer tracks pass size, 9 us
 ## Page cache: PENDING_BYTE page forces full hash scans
 
 `pcache1TruncateUnsafe` 1.5 % of CPU normally, 3.1 % in a backlog. bpftrace, about 8 s after the server started: ~30 calls/s from commits, 256-512 us each, `iMaxKey` 262,145, the pending-byte page: `balance_nonroot` parks a page under it, so the next commit scans the whole hash (this is the line #154's old SQLite patch changed). That patch is forbidden. The public `SQLITE_CONFIG_PCACHE2` is named as allowed in the leaderboard's rulings, so: `td_pcache` in td_btree.c, a dense array by key, a clock instead of an LRU list, truncate looks only at keys added above the last limit. Stress test against stock pcache1 under ASan and UBSan, 150-400 rounds of inserts, updates, deletes, rollbacks, VACUUM, checkpoint, reopen, at caches of 64 KB, 500 KB, 2 MB, 256 MB, WAL and rollback journal: same content hash, integrity_check ok, no sanitizer report.
+
+## E61-E66: v11 and v12 (5 Nov, SRVMB=1850 BURN=8)
+
+v11 310k, MEAS=200, A/B of pass size and page cache:
+
+| flags | p50 | p95 | p99 | us/req |
+|---|---:|---:|---:|---:|
+| `--answers=512` | 6.6 | 24 | 480 | 17.59 |
+| `--answers=128` | 3.8 | 23 | 220 | 17.58 |
+| `--answers=64` | 2.2 | 565 | 935 | 17.80 |
+| `--answers=512 --pcache=0` | 11 | 550 | 1,170 | 18.55 |
+| `--answers=512` | 5.3 | 19 | 76 | 17.17 |
+| `--answers=128` | 3.9 | 42 | 375 | 18.53 |
+| `--answers=64` | 2.0 | 103 | 480 | 17.84 |
+| `--answers=512 --pcache=0` | 8.7 | 38 | 530 | 18.00 |
+
+H16: about 4 % less CPU per request, two pairs. H17: no clear gain from smaller passes; 512 stays.
+
+5-minute holds:
+
+| build | users | p50 | p95 | p99 | max | note |
+|---|---:|---:|---:|---:|---:|---|
+| v11 | 310k | 12 | 540 | 1,070 | 1,372 | fail |
+| base | 280k | 3.6 | 54 | 315 | 2,027 | pass |
+| v12 lifoage=400 | 310k | 6.5 | 1,010 | 1,945 | 2,415 | fail; quiet until t≈340, then kswapd scan, major faults, queue to 52k |
+| v12 lifoage=250 | 310k | 5.9 | 103 | 235 | 609 | **pass**, one rep, 58.7 % cgroup CPU |
+| v12 lifoage=400 | 320k | 22 | 1,190 | 1,495 | 1,801 | fail |
+
+Consult 1105-192451-31a6 (DeepSeek): a fixed 1/8 share never shrinks a backlog, so the share now grows with age. Its claims on `msg_name` and registering files don't apply: sends have no address and sockets are direct descriptors.
+
+Costs so far: DeepSeek consults $0.0193 + $0.0229 + $0.0126, a few `ds` searches at ~$0.00075 each (count not logged). About $0.06 of the $1 limit.

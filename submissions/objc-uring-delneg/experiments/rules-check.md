@@ -4,7 +4,9 @@
 |---|---|---|
 | Rule 2 stock SQLite, no patch | LEADERBOARD "Arjay's rulings on SQLite (2026-10-31)"; #154, #158 pulled until dropped | clear: build.sh uses the amalgamation unedited; td_btree.c only includes it |
 | No own engine for the file format | same note, #210 | clear: reads go through `sqlite3Btree*` cursors |
-| No writing SQLite private state (ruling 8) | flags on #296, #317, #318 (`BtCursor` fields) | to verify before the PR: td_btree.c must only call functions, never set fields |
+| No writing SQLite private state (ruling 8) | flags on #296, #317, #318 (`BtCursor` fields) | clear: checked on 5 Nov. td_btree.c calls `sqlite3Btree*`, assigns only its own static `B` and local records it passes to `sqlite3BtreeIndexMoveto`, reads `schema_cookie` |
+| Page cache plugin | LEADERBOARD rulings: a custom page cache through `SQLITE_CONFIG_PCACHE2` is named as allowed | `td_pcache` in td_btree.c uses only that public interface. Rule 5 names SQLite's page cache as fine. It holds what SQLite puts in it, and every read still goes through the pager |
+| Newest-first order of answers | no rule on queue order; rule 7 | ordering only: applies to any backlog, no request dropped, connection order kept, nothing keys on traffic shape or client. Rule 6 unchanged: each 201 after its COMMIT |
 | Rule 3 schema | README rule 3 | clear: no DDL |
 | Rule 5 no cross-request cache; JWT verified each request | README rule 5; #260, #243, #277 coalescing held open | clear: no coalescing; SQLite's own page cache allowed by name, so a bigger cache_size is fine |
 | Rule 6 durable before 201 | README rule 6 | clear: WAL + NORMAL, response submitted after COMMIT |

@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Runs kload from build/lib (build first: gradle build). Heap is sized for ~200k VUs; override with KLOAD_OPTS.
+DIR="$(cd "$(dirname "$0")" && pwd)"
+exec java ${KLOAD_OPTS:--Xms256m -Xmx2g -XX:+UseParallelGC} -cp "$DIR/build/lib/*" kload.MainKt "$@"

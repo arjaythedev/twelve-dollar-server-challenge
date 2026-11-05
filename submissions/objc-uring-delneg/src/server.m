@@ -94,8 +94,11 @@ typedef int (*TDHandleIMP)(id, SEL, TDReq *, TDWorker *, TDBuf *);
 uint32_t td_opt_poolcap = 6144, td_opt_poolmax = 4096;   // --poolcap=N --poolmax=N
 extern int td_opt_lock;
 void td_lock_code(void);
+int td_opt_onewrite = 1;   // --onewrite=0|1
 int td_opt_rearm = 2048;   // --rearm=N: receives re-armed per ring per pass (0: all at once)
-uint32_t td_opt_answers = 2048;   // --answers=N: requests answered per pass; the rest stay parked in the batch (0: all)
+uint32_t td_opt_answers = 512;    // --answers=N: requests answered per pass; the rest stay parked in the batch (0: all)
+int td_opt_lifo = 1;              // --lifo=0|1: past one pass of backlog, answer the newest first
+uint32_t td_opt_lifoage = 500;    // --lifoage=MS: past this age the old end gets half of each pass
 
 // ---------------------------------------------------------------- helpers
 TD_INLINE bool ieq(const char *a, const char *lower, uint32_t n) {
@@ -153,7 +156,7 @@ typedef struct {
     Class connClass;
     uint32_t slots, highWater, lowGap;
     int ckReq, ckDone, ckFrom, ckBackfilled;   // checkpointer process state
-    bool ckBusy, ckHold;
+    bool ckBusy, ckHold, ckRewind;   // ckRewind: the WAL is copied, and the next commit rewinds it
     double ckHoldT;
     int ckRes[3];             // rc, frames in WAL, frames backfilled
     int listenFd;
@@ -164,15 +167,18 @@ typedef struct {
     int64_t lastStats;
     TDAuth *auth;
     int64_t started, now;
+    uint32_t passMs;
     // batch
     TDReq *reqs;              // parsed requests waiting for an answer: reqs[reqHead..nreq), oldest first
     uint32_t reqHead, nreq, reqCap;
     uint32_t *dirty, ndirty;  // connections with an answer built in this flush
     uint32_t nrearm;
     uint64_t maxBatch;
+    double tEnter, tReap, tFlush, tRest;   // TD_STATS: seconds per loop phase
+    uint64_t nPass, nAns, nWalCommit;
     TDBuf body, scratch, harena;
-    TDReq *hreqs;
-    uint32_t hcap;
+    TDReq *hreqs, *treqs;
+    uint32_t hcap, tcap;
     char **pool;
     uint32_t npool;
     id handlers[R_COUNT];
@@ -406,6 +412,7 @@ TD_INLINE TDReq *new_req(TDWorker *w, uint32_t slot, TDConn *c, bool close) {
     r->close = close;
     r->route = R_ERR;
     r->held = 0;
+    r->ms = w->passMs;
     r->msg = NULL;
     c->queued++;
     return r;
@@ -588,52 +595,89 @@ static const char *find_crlf2(const char *p, uint32_t n) {
 // Runs the batch in one transaction. During a WAL hold (see the checkpointer
 // below) writes wait: a write, and every later request on its connection, stays
 // at the front of the batch for the next flush, while reads are answered.
+- (void)answer:(TDReq *)r conn:(TDConn *)c TD_DIRECT {
+    if (r->held) c->held--;
+    c->queued--;
+    body.len = 0;
+    int st2 = imps[r->route](handlers[r->route], handleSel, r, self, &body);
+    uint32_t sl;
+    const char *line = status_line(st2, &sl);
+    pool_take(self, &c->out);
+    TDBuf *o = &c->out;
+    td_buf_reserve(o, sl + 96 + body.len);
+    memcpy(o->p + o->len, line, sl);
+    o->len += sl;
+    td_buf_lit(o, "Content-Type: application/json\r\nContent-Length: ");
+    o->len += td_utoa(o->p + o->len, body.len);
+    if (r->close) td_buf_lit(o, "\r\nConnection: close\r\n\r\n");
+    else td_buf_lit(o, "\r\n\r\n");
+    memcpy(o->p + o->len, body.p, body.len);
+    o->len += body.len;
+    if (!c->inDirty) { c->inDirty = true; dirty[ndirty++] = r->slot; }
+}
+
 - (void)flush TD_DIRECT {
     TDStore *st = store;
     uptime = now - started;
-    bool hold = ckHold;
+    bool hold = ckHold, oneWrite = ckRewind && td_opt_onewrite && !ckHold;
     bool db = false;
-    uint32_t first = reqHead, last = nreq;
-    if (td_opt_answers && last - first > td_opt_answers) last = first + td_opt_answers;   // only a first look: routes only
-    if (hold) db = true;
+    uint32_t first = reqHead, budget = td_opt_answers ? td_opt_answers : UINT32_MAX, last = nreq;
+    if (last - first > budget) last = first + budget;   // only a first look: routes only
+    // A request answered more than 40 ms after it arrived has cost the kernel a delayed-ACK timer and a bare ACK, about
+    // a fifth more CPU per request. In a backlog, oldest-first makes every newcomer wait that long too, and the extra
+    // CPU keeps the backlog alive. So past one pass of backlog the newest go first, while an eighth of each pass, or half
+    // when the oldest has been parked for too long, goes from the old end. A connection's own requests keep their order.
+    bool lifo = td_opt_lifo && nreq - first > budget;
+    uint32_t oldShare = lifo ? budget / 8 : budget;
+    if (hold || lifo) db = true;
     else for (uint32_t i = first; i < last; i++) if (reqs[i].route != R_ERR) { db = true; break; }
     bool wrote = false;
-    uint32_t nheld = 0, answered = 0, i = first;
+    uint32_t nheld = 0, ntail = 0, answered = 0, i = first;
     pthread_mutex_lock(&st->lock);
     bool txn = db && [st begin];
     // Answers are capped per pass: a request already read costs its record here, one left unread in its socket costs a
-    // 3-4 KB network buffer, so reading goes on while a pass stays short. The rest wait in order, untouched.
-    for (; i < nreq && !(td_opt_answers && answered >= td_opt_answers); i++) {
+    // 3-4 KB network buffer, so reading goes on while a pass stays short.
+    for (; i < nreq && answered < budget; i++) {
         TDReq *r = &reqs[i];
+        if (lifo && answered >= oldShare && (answered >= budget / 2 || passMs - r->ms < td_opt_lifoage)) break;
         TDConn *c = conn_at(self, r->slot);
         if (c->gen != r->gen) continue;
         if (!c->live && !c->closeAfter) { c->queued--; continue; }
-        if (TD_UNLIKELY(hold) && (r->held || c->held || r->route == R_CREATE || r->route == R_LIKE)) {
+        // SQLite truncates the WAL at the end of the first commit after a rewind, so that commit's frames still overwrite
+        // old file pages, and each one reclaim has evicted is read from disk first. So it carries one write, not a batch.
+        bool isWrite = r->route == R_CREATE || r->route == R_LIKE;
+        if (TD_UNLIKELY(oneWrite) && isWrite) { oneWrite = false; hold = true; }   // this one goes, later writes wait
+        else if (TD_UNLIKELY(hold) && (r->held || c->held || isWrite)) {
             if (!r->held) { r->held = 1; c->held++; }
             if (nheld == hcap) { hcap = hcap ? hcap * 2 : 256; hreqs = realloc(hreqs, sizeof(TDReq) * hcap); }
             hreqs[nheld++] = *r;
             continue;
         }
-        if (r->held) c->held--;
-        c->queued--;
+        [self answer:r conn:c];
         answered++;
-        body.len = 0;
-        int st2 = imps[r->route](handlers[r->route], handleSel, r, self, &body);
-        if (r->route == R_CREATE || r->route == R_LIKE) wrote = true;
-        uint32_t sl;
-        const char *line = status_line(st2, &sl);
-        pool_take(self, &c->out);
-        TDBuf *o = &c->out;
-        td_buf_reserve(o, sl + 96 + body.len);
-        memcpy(o->p + o->len, line, sl);
-        o->len += sl;
-        td_buf_lit(o, "Content-Type: application/json\r\nContent-Length: ");
-        o->len += td_utoa(o->p + o->len, body.len);
-        if (r->close) td_buf_lit(o, "\r\nConnection: close\r\n\r\n");
-        else td_buf_lit(o, "\r\n\r\n");
-        memcpy(o->p + o->len, body.p, body.len);
-        o->len += body.len;
-        if (!c->inDirty) { c->inDirty = true; dirty[ndirty++] = r->slot; }
+        if (isWrite) { wrote = true; ckRewind = false; }
+    }
+    if (lifo) {
+        uint32_t k = nreq;
+        for (; k > i && answered < budget; k--) {
+            TDReq *r = &reqs[k - 1];
+            TDConn *c = conn_at(self, r->slot);
+            if (c->gen != r->gen) continue;
+            if (!c->live && !c->closeAfter) { c->queued--; continue; }
+            if (c->queued > 1) break;              // pipelined: its older request goes first
+            bool isWrite = r->route == R_CREATE || r->route == R_LIKE;
+            if (TD_UNLIKELY(oneWrite) && isWrite) { oneWrite = false; hold = true; }
+            else if (TD_UNLIKELY(hold) && (r->held || isWrite)) {
+                if (!r->held) { r->held = 1; c->held++; }
+                if (ntail == tcap) { tcap = tcap ? tcap * 2 : 256; treqs = realloc(treqs, sizeof(TDReq) * tcap); }
+                treqs[ntail++] = *r;
+                continue;
+            }
+            [self answer:r conn:c];
+            answered++;
+            if (isWrite) { wrote = true; ckRewind = false; }
+        }
+        nreq = k;
     }
     bool ok = true;
     if (txn && ![st commit]) { ok = false; [st rollback]; }
@@ -658,6 +702,7 @@ static const char *find_crlf2(const char *p, uint32_t n) {
     // Writes held by a checkpoint go back in front of what wasn't looked at, in order.
     if (nheld) memcpy(reqs + i - nheld, hreqs, sizeof(TDReq) * nheld);
     reqHead = i - nheld;
+    if (ntail) { memcpy(reqs + nreq, treqs, sizeof(TDReq) * ntail); nreq += ntail; }   // the tail walk freed their places
     if (reqHead == nreq) {
         reqHead = nreq = 0;
         arena.len = 0;
@@ -849,7 +894,7 @@ static double mono_s(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &
     if (ckRes[0] == SQLITE_OK && ckRes[2] >= 0) ckBackfilled = ckRes[2];
     if (ckHold) {
         if (store->walFrames != ckFrom) [self ckptRequest];   // frames were added during the pass: one more
-        else { ckHold = false; if (getenv("TD_CKLOG")) fprintf(stderr, "hold %.1f ms frames %d rc %d log %d ck %d nobufs %llu\n", (mono_s() - ckHoldT) * 1e3, store->walFrames, ckRes[0], ckRes[1], ckRes[2], (unsigned long long)nobufs); }
+        else { ckHold = false; ckRewind = true; if (getenv("TD_CKLOG")) fprintf(stderr, "hold %.1f ms frames %d rc %d log %d ck %d nobufs %llu\n", (mono_s() - ckHoldT) * 1e3, store->walFrames, ckRes[0], ckRes[1], ckRes[2], (unsigned long long)nobufs); }
     }
     if (ckReq >= 0) [self ckptArmRead];
 }
@@ -863,6 +908,8 @@ int td_opt_batch = 128, td_opt_bwait = 1000, td_opt_bthresh = 8;   // --batch=N 
     fprintf(stderr, "stats%s t=%lld live=%u accErr=%llu last=%d cqOvfPasses=%llu cqDropped=%u nobufs=%llu armed=%d rq=%u maxBatch=%llu npool=%u cacheKB=%d miss=%d\n",
             final ? "-final" : "", (long long)(now - started), live, (unsigned long long)accErr, lastAccErr,
             (unsigned long long)cqOvf, dropped, (unsigned long long)nobufs, (int)[self acceptArmedAnywhere], nrearm, (unsigned long long)maxBatch, npool, [store cacheStat:0], [store cacheStat:1]);
+    fprintf(stderr, " phases enter=%.3f reap=%.3f flush=%.3f passes=%llu ans=%llu\n", tEnter, tReap, tFlush, (unsigned long long)nPass, (unsigned long long)nAns);
+    tEnter = tReap = tFlush = 0; nPass = nAns = 0;
     maxBatch = 0;
 }
 
@@ -880,12 +927,15 @@ int td_opt_batch = 128, td_opt_bwait = 1000, td_opt_bthresh = 8;   // --batch=N 
     [self armAccept:0];
     if (ckReq >= 0) [self ckptArmRead];
     for (;;) {
+        double t0 = 0, t1 = 0, t2 = 0, t3 = 0;
+        if (TD_UNLIKELY(statsOn)) t0 = mono_s();
         for (int k = 1; k < nrings; k++)
             if (R[k].active && io_uring_sq_ready(&R[k].ring)) io_uring_submit(&R[k].ring);
         int ret;
         // Under load, wait a little for more completions: bigger batches mean
         // fewer io_uring_enter calls, one commit for more writes, warmer caches.
-        if (td_opt_batch > 1 && (lastReq >= td_opt_bthresh || nrearm || nreq > reqHead)) {
+        if (nreq > reqHead && !ckHold) ret = io_uring_submit_and_get_events(&R[0].ring);   // answers are waiting: no pause
+        else if (td_opt_batch > 1 && (lastReq >= td_opt_bthresh || nrearm)) {
             struct __kernel_timespec ts = { .tv_sec = 0, .tv_nsec = (long long)td_opt_bwait * 1000 };
             struct io_uring_cqe *cq;
             ret = io_uring_submit_and_wait_timeout(&R[0].ring, &cq, (unsigned)td_opt_batch, &ts, NULL);
@@ -900,9 +950,14 @@ int td_opt_batch = 128, td_opt_bwait = 1000, td_opt_bthresh = 8;   // --batch=N 
             }
             if (ret != -EBADR) usleep(1000);
         }
+        if (TD_UNLIKELY(statsOn)) t1 = mono_s();
         now = time(NULL);
+        struct timespec mts;
+        clock_gettime(CLOCK_MONOTONIC_COARSE, &mts);
+        passMs = (uint32_t)((uint64_t)mts.tv_sec * 1000 + (uint64_t)mts.tv_nsec / 1000000);
         for (int k = 0; k < nrings; k++) if (k == 0 || R[k].active) [self reap:k];
         if (TD_UNLIKELY(statsOn)) {
+            t2 = mono_s();
             for (int k = 0; k < nrings; k++)
                 if (R[k].active && (IO_URING_READ_ONCE(*R[k].ring.sq.kflags) & IORING_SQ_CQ_OVERFLOW)) cqOvf++;
             if (now != lastStats) { lastStats = now; [self stats:false]; }
@@ -913,7 +968,12 @@ int td_opt_batch = 128, td_opt_bwait = 1000, td_opt_bthresh = 8;   // --batch=N 
             ckHold = false;
             if (getenv("TD_CKLOG")) fprintf(stderr, "hold timeout frames %d\n", store->walFrames);
         }
-        if (nreq > reqHead) { [self flush]; [self ckptAfterFlush]; }
+        if (nreq > reqHead) {
+            uint32_t before = nreq - reqHead;
+            [self flush];
+            if (TD_UNLIKELY(statsOn)) { nAns += before - (nreq - reqHead); nPass++; t3 = mono_s(); tEnter += t1 - t0; tReap += t2 - t1; tFlush += t3 - t2; }
+            [self ckptAfterFlush];
+        } else if (TD_UNLIKELY(statsOn)) { tEnter += t1 - t0; tReap += t2 - t1; }
         if (nrearm) {
             // A burst empties the buffer ring and ends every other armed receive with ENOBUFS. Each socket still has
             // its request queued, so re-arming them all at once only ends them again. A pass re-arms what the ring's

@@ -34,3 +34,9 @@ NEW H13 (after the lock, 5 Nov): `PRAGMA journal_size_limit=0`. Challenges "the 
 H1 status: bounded re-arm kept with H10; alone it did not save 300k.
 H3 status: decisive, `--cache=256000` turned 300k from OOM-killed to pass. RSS 138-163 MB, so the limit isn't the cost.
 H10 status: kept (v2/v3); TCP memory stays near zero through the ramp end.
+H6 status: dropped. TcpExt ListenOverflows didn't move during a run (58,973 before and after), so one accept queue is enough.
+H4 status: kept (`--lock`, `td_lock_code`), within RLIMIT_MEMLOCK. Not separately decisive; rdMB and majf fall mostly from H3 and H13.
+NEW H14 (5 Nov): the first commit after a rewind should carry one write only. Challenges "a batch commit after the rewind is as cheap as any other". Trace of a late hold: ~725 block reads per 10 s from the server itself in `ext4_block_write_begin`, a partial page write to the WAL (4,120-byte frames straddle file pages), while SQLite `miss` stays flat. After journal_size_limit truncates, appended frames don't need those reads. Expect fewer loop stalls in the D state. Flag `--onewrite`.
+NEW H15 (5 Nov): newest first past one pass of backlog, passes of ≤ 512 answers. Challenges "oldest first is the fair order in a burst". Every request answered after 40 ms costs a bare ACK, ~20 % more CPU, so FIFO in a backlog makes newcomers expensive too. Flags `--lifo`, `--lifoage`, `--answers`. Rules: ordering only, no shedding and no traffic detection; a connection's own requests keep their order.
+H5 status: open at 310k. One good rep at 300k (35/158), then both good and bad reps at 310k; not separable from the bistability so far.
+H14 status: open, same reason.

@@ -249,3 +249,60 @@ Consult 1105-144212-3a93 (DeepSeek; Gemini was overloaded), what I did with it:
 
 p95 840 / p99 995, 0 errors, peak 1,318 MB, app 89 % of CPU 0. Memory flat (avail ~720 MB), WAL 2-32 MB, TCP ≤ 2k pages except one 4.4k. Latency and CPU rise through the hold: 85 % in the first minutes, 92 % at the end, rdMB per 10 s from 0 to ~12, maxBatch from ~1k to 27k. So a slow slide: the loop reads ~1.2 MB/s, likely cold index leaves (writes land on random leaves of `sqlite_autoindex_likes_1` 29.5 MB and `posts_user_id_idx` 5.3 MB, authors on `users` 2.5 MB) now that the file cache is gone, and kswapd scans ~5k pages/s.
 v5: read those three at startup into the page cache (`--warm`), and the checkpointer drops feed.db's clean file pages after each pass (`posix_fadvise DONTNEED`, `--ckdrop`), on a descriptor it keeps open because closing one would drop its POSIX locks.
+
+## E26-E30: v5 under the calibrated burner (5 Nov, SRVMB=1850 BURN=8)
+
+| run | result |
+|---|---|
+| v4 330k, 5 min, no burner | pass, p95 665 / p99 970, 94 % of CPU 0, no OOM |
+| v4 320k, 5 min, BURN=8 | **fail on p99** 1,315 (p95 910), 0 errors, CPU 0 busy 99 % |
+| v5 320k, 2 min | fail, p95 1,240 / p99 1,390, 0 errors |
+| v5 340k, 2 min | fail, p95 2,210 / p99 2,395, 0 errors, no OOM, peak 1,826 MB, MemoryMax reached (memory.events max 21,987) |
+| v5 310k, 2 min | pass, p95 305 / p99 465 |
+| v5 310k, 5 min | **fail**, p95 1,255 / p99 1,530, 30.6k req/s of ~32.8k asked, 86 % + burner, CPU 0 busy 95 % |
+
+No deaths and no errors from 310k to 340k now: **the limit moved from memory to CPU**. On this harness at BURN=8 the knee is near 300-310k. `miss` in TD_STATS stays at 9,507 through the hold, so SQLite's page cache misses nothing; cache grows ~0.2 MB/s from new rows (112 MB after 5 min).
+
+Clean install (opt-box docker `ubuntu:24.04`, --cpus=1 --memory=2g, kernel 7.0, head `921063f`): install.sh 69 s, test/run.sh 61 s including the PGO build, 42/42.
+Profile at 310k (perf on CPU 0, 15 s): server kernel 69 %, server user 20 %, libc 2.4 %, burner 6 %. `__inet_lookup_established` 14 % (310k sockets in 16k buckets, the 2 GB box's size, not ours to tune), post_view 6 %, feed 2.8 %, AppArmor send hooks 2.8 %.
+
+## E31-E37: v6 and v7 at 300k and 310k, SRVMB=1850 BURN=8 (5 Nov)
+
+| run | users | rps | p50 | p95 | p99 | note |
+|---|---|---:|---:|---:|---:|---|
+| v6 | 300k | 31,404 | 11 | 355 | 670 | traced, unfair |
+| v6 `--answers=0` | 300k | 31,490 | 8 | 225 | 440 | max 2,939, RSS 220 MB |
+| v6 `--cknice=10` | 300k | 31,652 | 6 | 35 | 158 | one good rep |
+| v6 | 300k | 31,656 | 7.5 | 180 | 955 | |
+| v6 `--ckdrop=0` | 300k | 31,655 | 5.9 | 151 | 245 | |
+| base `1fe6941` | 280k | 4,702 | 1,370 | 5,320 | 5,320 | **collapsed**: global OOM again, the earlier 37.8/350 rep at BURN=8 is one side of its edge |
+
+310k, MEAS=200, interleaved:
+
+| run | rps | p50 | p95 | p99 | us/req | softirq % |
+|---|---:|---:|---:|---:|---:|---:|
+| v7 | 32,661 | 7.6 | 89 | 365 | 17.5 | 36 |
+| v7 `--cknice=10` | 31,959 | 64 | 900 | 1,205 | 20.5 | 43 |
+| v6 `--cknice=10` | 32,669 | 8.2 | 158 | 240 | 18.0 | 35 |
+| v7 | 31,718 | 240 | 900 | 1,095 | 21.2 | 44 |
+| v7 `--cknice=10` | 31,611 | 295 | 885 | 1,110 | 22.1 | 57 |
+| v6 `--cknice=10` | 31,514 | 355 | 815 | 1,015 | 21.2 | 44 |
+
+So 310k is **bistable**, whatever the variant. Same load, either p50 ~8 ms and ~17.5 us/req, or p50 240-355 ms and ~21 us/req. The nice value and v7's one-write commit don't decide it; at this rep count they can't be told apart. Differences above between variants aren't evidence.
+
+## Bistability: late answers cost the kernel a bare ACK per request
+
+v7 at 310k, counters from the server's netns over the hold:
+
+| run | p50 | OutSegs/s | data segs/s | bare ACKs/s | DelayedACKs/s |
+|---|---:|---:|---:|---:|---:|
+| v7 | 12.8 | 77,449 | 62,274 | 15,175 | 4,786 |
+| v7 | 47.8 | 81,858 | 61,066 | 20,792 | 2,945 |
+| v8 fifo, 2,048 | 16.3 | 77,833 | 61,928 | 15,905 | 3,841 |
+| v8 lifoage=300 | 390 | 86,573 | 60,602 | 25,971 | 4,923 |
+
+bpftrace on `tcp_send_ack`, 8 s, FIFO 2,048: nearly all of them come from `tcp_rcv_established` (an immediate ACK when the request arrives), ~9,100 from the delayed-ACK timer. Reading of kernel logic, unverified against the 6.8 source on this box: a reply later than `ato` (40 ms) doesn't count as ping-pong, a missed delayed ACK leaves ping-pong mode, and a socket out of ping-pong with quick-ACK credit ACKs each request at once. So every late reply adds a packet out, and CPU per request rises about a fifth. Above ~83 % that extra cost keeps the backlog alive: one stall can flip the run.
+
+That's a new reading of the limit: capacity with most answers under 40 ms is ~20 % above capacity with most over it.
+
+v8: H15, newest first past one pass of backlog. First try, `--lifoage=300`, `--answers=512`: p50 390, p95 1,020, p99 1,215. Its age rule sends everything through the old end once a queue stands at 300 ms, so it behaves as FIFO with a floor. Next: a much longer age limit.

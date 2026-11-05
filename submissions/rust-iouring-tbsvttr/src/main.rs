@@ -18,9 +18,6 @@ fn main() {
     }
     let slots = raise_nofile_limit();
 
-    #[cfg(target_os = "linux")]
-    mlock_self_code_segments();
-
     let db_path = env::var("SQLITE_PATH")
         .or_else(|_| env::var("DB_PATH"))
         .unwrap_or_else(|_| "./seed/feed.db".to_string());
@@ -65,41 +62,6 @@ fn raise_nofile_limit() -> u32 {
     }
 }
 
-#[cfg(target_os = "linux")]
-fn mlock_self_code_segments() {
-    let Ok(maps) = std::fs::read_to_string("/proc/self/maps") else {
-        return;
-    };
-    let mut locked_bytes = 0usize;
-    const MAX_LOCK_BYTES: usize = 4 * 1024 * 1024;
-    for line in maps.lines() {
-        let mut parts = line.split_whitespace();
-        let Some(range) = parts.next() else { continue };
-        let Some(perms) = parts.next() else { continue };
-        if !perms.starts_with("r-xp") {
-            continue;
-        }
-        let Some((start_hex, end_hex)) = range.split_once('-') else {
-            continue;
-        };
-        let Ok(start) = usize::from_str_radix(start_hex, 16) else {
-            continue;
-        };
-        let Ok(end) = usize::from_str_radix(end_hex, 16) else {
-            continue;
-        };
-        let len = end.saturating_sub(start);
-        if len == 0 || locked_bytes + len > MAX_LOCK_BYTES {
-            continue;
-        }
-        unsafe {
-            if crate::sys::mlock(start as *const std::ffi::c_void, len) == 0 {
-                locked_bytes += len;
-            }
-        }
-    }
-}
-
 /* =========================================================================
  * Raw Linux Multi-Ring io_uring Transport Engine (Zero External Crates)
  * ========================================================================= */
@@ -127,11 +89,13 @@ mod linux_uring {
     const IORING_OFF_SQES: i64 = 0x10000000;
 
     const IORING_SETUP_CQSIZE: u32 = 1 << 3;
+    const IORING_SETUP_CLAMP: u32 = 1 << 4;
     const IORING_SETUP_SUBMIT_ALL: u32 = 1 << 7;
-    const IORING_SETUP_COOP_TASKRUN: u32 = 1 << 8;
     const IORING_SETUP_TASKRUN_FLAG: u32 = 1 << 9;
     const IORING_SETUP_SINGLE_ISSUER: u32 = 1 << 12;
     const IORING_SETUP_DEFER_TASKRUN: u32 = 1 << 13;
+
+    const IORING_FEAT_SINGLE_MMAP: u32 = 1 << 0;
 
     const IORING_ENTER_GETEVENTS: u32 = 1 << 0;
     const IORING_ENTER_EXT_ARG: u32 = 1 << 3;
@@ -152,7 +116,7 @@ mod linux_uring {
     const IORING_CQE_F_BUFFER: u32 = 1 << 0;
     const IORING_CQE_F_MORE: u32 = 1 << 1;
 
-    const IORING_REGISTER_FILES2: c_uint = 15;
+    const IORING_REGISTER_FILES2: c_uint = 13;
     const IORING_RSRC_REGISTER_SPARSE: u32 = 1 << 0;
     const IORING_REGISTER_PBUF_RING: c_uint = 22;
 
@@ -178,8 +142,9 @@ mod linux_uring {
     const MSG_DONTWAIT: u32 = 0x40;
     const MSG_NOSIGNAL: u32 = 0x4000;
 
-    const EINVAL: i32 = 22;
     const EAGAIN: i32 = 11;
+    const ENOMEM: i32 = 12;
+    const EINVAL: i32 = 22;
     const ENFILE: i32 = 23;
     const ENOBUFS: i32 = 105;
 
@@ -333,28 +298,38 @@ mod linux_uring {
 
     impl RawRing {
         fn create(sq_entries: u32, cq_entries: u32, direct_slots: u32) -> io::Result<Self> {
-            let mut params = io_uring_params {
-                sq_entries,
-                cq_entries,
-                flags: IORING_SETUP_CQSIZE
-                    | IORING_SETUP_SUBMIT_ALL
-                    | IORING_SETUP_SINGLE_ISSUER
-                    | IORING_SETUP_DEFER_TASKRUN
-                    | IORING_SETUP_COOP_TASKRUN
-                    | IORING_SETUP_TASKRUN_FLAG,
-                ..io_uring_params::default()
-            };
+            let mut params = io_uring_params::default();
+            let mut cq = cq_entries;
+            let fd = loop {
+                params = io_uring_params {
+                    sq_entries,
+                    cq_entries: cq,
+                    flags: IORING_SETUP_CQSIZE
+                        | IORING_SETUP_CLAMP
+                        | IORING_SETUP_SUBMIT_ALL
+                        | IORING_SETUP_SINGLE_ISSUER
+                        | IORING_SETUP_DEFER_TASKRUN
+                        | IORING_SETUP_TASKRUN_FLAG,
+                    ..io_uring_params::default()
+                };
 
-            let fd = unsafe {
-                syscall(
-                    SYS_IO_URING_SETUP,
-                    c_ulong::from(sq_entries),
-                    &mut params as *mut io_uring_params,
-                )
+                let rc = unsafe {
+                    syscall(
+                        SYS_IO_URING_SETUP,
+                        c_ulong::from(sq_entries),
+                        &mut params as *mut io_uring_params,
+                    )
+                };
+                if rc >= 0 {
+                    break rc;
+                }
+                let err = io::Error::last_os_error();
+                if err.raw_os_error() == Some(ENOMEM) && cq > 4096 {
+                    cq /= 2;
+                    continue;
+                }
+                return Err(err);
             };
-            if fd < 0 {
-                return Err(io::Error::last_os_error());
-            }
             let ring_fd = fd as c_int;
 
             /* Register sparse direct descriptor table of size `direct_slots` */
@@ -385,11 +360,17 @@ mod linux_uring {
             let cq_ring_sz = (params.cq_off.cqes as usize)
                 + (params.cq_entries as usize) * std::mem::size_of::<io_uring_cqe>();
             let sqes_sz = (params.sq_entries as usize) * std::mem::size_of::<io_uring_sqe>();
+            let single_mmap = (params.features & IORING_FEAT_SINGLE_MMAP) != 0;
+            let map_sz = if single_mmap {
+                sq_ring_sz.max(cq_ring_sz)
+            } else {
+                sq_ring_sz
+            };
 
             let sq_ptr = unsafe {
                 mmap(
                     ptr::null_mut(),
-                    sq_ring_sz,
+                    map_sz,
                     PROT_READ | PROT_WRITE,
                     MAP_SHARED | MAP_POPULATE,
                     ring_fd,
@@ -401,20 +382,28 @@ mod linux_uring {
                 return Err(io::Error::last_os_error());
             }
 
-            let cq_ptr = unsafe {
-                mmap(
-                    ptr::null_mut(),
-                    cq_ring_sz,
-                    PROT_READ | PROT_WRITE,
-                    MAP_SHARED | MAP_POPULATE,
-                    ring_fd,
-                    IORING_OFF_CQ_RING,
-                )
+            let cq_ptr = if single_mmap {
+                sq_ptr
+            } else {
+                let ptr = unsafe {
+                    mmap(
+                        ptr::null_mut(),
+                        cq_ring_sz,
+                        PROT_READ | PROT_WRITE,
+                        MAP_SHARED | MAP_POPULATE,
+                        ring_fd,
+                        IORING_OFF_CQ_RING,
+                    )
+                };
+                if ptr == MAP_FAILED {
+                    unsafe {
+                        munmap(sq_ptr, map_sz);
+                        close(ring_fd);
+                    }
+                    return Err(io::Error::last_os_error());
+                }
+                ptr
             };
-            if cq_ptr == MAP_FAILED {
-                unsafe { close(ring_fd) };
-                return Err(io::Error::last_os_error());
-            }
 
             let sqes_ptr = unsafe {
                 mmap(
@@ -529,6 +518,24 @@ mod linux_uring {
                     ptr::null::<c_void>(),
                     0usize,
                 );
+            }
+        }
+
+        #[inline]
+        fn enter_if_pending(&mut self) {
+            let to_submit = self.flush_sq();
+            if to_submit > 0 {
+                unsafe {
+                    let _ = syscall(
+                        SYS_IO_URING_ENTER,
+                        self.ring_fd,
+                        to_submit,
+                        0u32,
+                        IORING_ENTER_GETEVENTS,
+                        ptr::null::<c_void>(),
+                        0usize,
+                    );
+                }
             }
         }
 
@@ -1370,7 +1377,7 @@ mod linux_uring {
                 }
                 budget -= k;
                 for r in &mut self.rings {
-                    r.ring.enter_nowait();
+                    r.ring.enter_if_pending();
                 }
                 for ri in 0..self.rings.len() {
                     n += self.drain(ri);
@@ -1429,9 +1436,13 @@ mod linux_uring {
                     let ri = self.rings.len();
                     arm_accept(&mut r, ri, &self.listen_fds);
                     self.rings.push(r);
+                    eprintln!("ring {ri} added ({} slots each)", self.slots);
                     true
                 }
-                Err(_) => false,
+                Err(e) => {
+                    eprintln!("cannot add ring: {e}");
+                    false
+                }
             }
         }
 
@@ -1482,12 +1493,10 @@ mod linux_uring {
         fn run(&mut self) -> ! {
             loop {
                 let busy = !self.rq.is_empty() || !self.ready.is_empty();
-                let total_open: u32 = self.rings.iter().map(|r| r.open).sum();
-                let wait_min = if total_open <= 64 { 1 } else { WAIT_MIN };
 
                 for (ri, r) in self.rings.iter_mut().enumerate().rev() {
                     if ri == 0 && !busy {
-                        r.ring.enter_wait_timeout(wait_min, WAIT_NS);
+                        r.ring.enter_wait_timeout(WAIT_MIN, WAIT_NS);
                     } else {
                         r.ring.enter_nowait();
                     }
@@ -1524,7 +1533,8 @@ mod linux_uring {
 
         let mut ring0 = match RingState::new(slots) {
             Ok(r) => r,
-            Err(_) => {
+            Err(e) => {
+                eprintln!("io_uring init failed ({e}); falling back to portable loop");
                 for &fd in &listen_fds {
                     if fd >= 0 {
                         unsafe { close(fd) };
@@ -1534,6 +1544,9 @@ mod linux_uring {
             }
         };
         arm_accept(&mut ring0, 0, &listen_fds);
+        eprintln!(
+            "listening on {bind_addr}; io_uring, {slots} direct descriptors per ring"
+        );
 
         let mut srv = Server {
             rings: vec![ring0],
@@ -1844,6 +1857,17 @@ mod tests {
         let (st, body) = run_raw_req(&mut app, b"POST /posts/abc/like HTTP/1.1\r\n\r\n");
         assert_eq!(st, 401);
         assert_eq!(body, "{\"error\":\"missing bearer token\"}");
+
+        // Validly signed HS256 token without an `exp` claim must be rejected with 401
+        // Header: {"alg":"HS256","typ":"JWT"} -> eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9
+        // Payload: {"sub":"1","username":"golden_ember_1"} -> eyJzdWIiOiIxIiwidXNlcm5hbWUiOiJnb2xkZW5fZW1iZXJfMSJ9
+        let no_exp_token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxIiwidXNlcm5hbWUiOiJnb2xkZW5fZW1iZXJfMSJ9.rbJfYkSojM-HouBSSfwI0qTO64EkrqCBYCZjqR4vzuI";
+        let no_exp_req = format!(
+            "POST /posts/1/like HTTP/1.1\r\nAuthorization: Bearer {no_exp_token}\r\n\r\n"
+        );
+        let (st, body) = run_raw_req(&mut app, no_exp_req.as_bytes());
+        assert_eq!(st, 401);
+        assert_eq!(body, "{\"error\":\"invalid or expired token\"}");
 
         let (st, body) = run_raw_req(&mut app, b"GET /health HTTP/1.1\r\n\r\n");
         assert_eq!(st, 200);

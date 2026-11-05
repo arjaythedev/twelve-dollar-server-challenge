@@ -358,8 +358,10 @@ fn parse_payload_claims(b: &[u8], now_s: i64) -> Result<VerifiedClaims, JwtError
     }
     i = skip_ws(b, i + 1);
 
-    let mut sub_id: Option<i64> = None;
-    let mut username_slice: Option<&[u8]> = None;
+    let mut sub_raw: Option<&[u8]> = None;
+    let mut sub_bad_type = false;
+    let mut username_raw: Option<&[u8]> = None;
+    let mut username_bad_type = false;
     let mut exp_val: Option<i64> = None;
     let mut nbf_val: Option<i64> = None;
 
@@ -381,22 +383,21 @@ fn parse_payload_claims(b: &[u8], now_s: i64) -> Result<VerifiedClaims, JwtError
             b"sub" => {
                 if b[i] == b'"' {
                     let (val, next_i) = read_raw_json_str(b, i).ok_or(JwtError::InvalidOrExpired)?;
-                    sub_id = Some(parse_positive_i64(val).ok_or(JwtError::InvalidPayload)?);
+                    sub_raw = Some(val);
                     i = next_i;
                 } else {
-                    return Err(JwtError::InvalidPayload);
+                    sub_bad_type = true;
+                    i = skip_simple_json_val(b, i).ok_or(JwtError::InvalidOrExpired)?;
                 }
             }
             b"username" => {
                 if b[i] == b'"' {
                     let (val, next_i) = read_raw_json_str(b, i).ok_or(JwtError::InvalidOrExpired)?;
-                    if val.is_empty() || val.len() > 128 || val.contains(&b'\\') {
-                        return Err(JwtError::InvalidPayload);
-                    }
-                    username_slice = Some(val);
+                    username_raw = Some(val);
                     i = next_i;
                 } else {
-                    return Err(JwtError::InvalidPayload);
+                    username_bad_type = true;
+                    i = skip_simple_json_val(b, i).ok_or(JwtError::InvalidOrExpired)?;
                 }
             }
             b"exp" => {
@@ -424,10 +425,9 @@ fn parse_payload_claims(b: &[u8], now_s: i64) -> Result<VerifiedClaims, JwtError
         }
     }
 
-    if let Some(exp) = exp_val {
-        if now_s > exp {
-            return Err(JwtError::InvalidOrExpired);
-        }
+    let exp = exp_val.ok_or(JwtError::InvalidOrExpired)?;
+    if now_s >= exp {
+        return Err(JwtError::InvalidOrExpired);
     }
     if let Some(nbf) = nbf_val {
         if now_s < nbf {
@@ -435,8 +435,15 @@ fn parse_payload_claims(b: &[u8], now_s: i64) -> Result<VerifiedClaims, JwtError
         }
     }
 
-    let user_id = sub_id.ok_or(JwtError::InvalidPayload)?;
-    let uname = username_slice.ok_or(JwtError::InvalidPayload)?;
+    if sub_bad_type || username_bad_type {
+        return Err(JwtError::InvalidPayload);
+    }
+    let sub_bytes = sub_raw.ok_or(JwtError::InvalidPayload)?;
+    let user_id = parse_positive_i64(sub_bytes).ok_or(JwtError::InvalidPayload)?;
+    let uname = username_raw.ok_or(JwtError::InvalidPayload)?;
+    if uname.is_empty() || uname.len() > 128 || uname.contains(&b'\\') {
+        return Err(JwtError::InvalidPayload);
+    }
     let mut claims = VerifiedClaims {
         user_id,
         username_len: uname.len(),

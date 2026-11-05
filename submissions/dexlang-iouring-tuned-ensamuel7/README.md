@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Language** | [DexLang](https://github.com/ensamuel7/dex) `v0.9.31`: statically typed, compiles to C, which `cc` builds into a native binary |
+| **Language** | [DexLang](https://github.com/ensamuel7/dex) `v0.9.26`: statically typed, compiles to C, which `cc` builds into a native binary |
 | **Framework** | None. DexLang's own `http` and `db` standard library modules |
 | **Server** | The `http` module's io_uring backend (`http.uring()`), with handlers run on the ring's thread |
 | **SQL** | Built with [dexqu](https://github.com/ensamuel7/dex-modules/tree/main/dexqu) `v0.1.0` at startup, prepared once; used for every write |
@@ -96,20 +96,20 @@ cases were:
 The engine answered all of them. It handed only a NUL inside the newest body
 back to the SQL, as designed. The entry passes the test suite, 42/42.
 
-**Second revision (dex v0.9.31 and the writer above).** Scored at 226,000
-before it. 250k passed the 2-minute probe and failed the hold on p99 at 96 %
-CPU, so this revision goes after CPU per request:
-- dex v0.9.31 queues the read after each keep-alive response with
-  `IORING_RECVSEND_POLL_FIRST`: the socket is almost always empty then, so the
-  kernel waits for data instead of trying a read that fails first. That was
-  about 7 % less CPU per request locally (10.96 → 10.15 µs, three interleaved
-  runs, 3 rings as on the box).
-- It also enters only the rings with work waiting (`IORING_SETUP_TASKRUN_FLAG`),
-  a third fewer `io_uring_enter` calls, and starts shedding keep-alive at most
-  4,096 connections short of the cap rather than a sixteenth short, which
-  moves that point on the box from about 245.7k connections to about 258k.
-- The writer changes take user-space instructions per request from 47.7k to
-  42.9k (callgrind, same load).
+**Second revision (the writer above).** Scored at 226,000 before it. 250k
+passed the 2-minute probe and failed the hold on p99 at 96 % CPU, so this
+revision goes after CPU per request. The writer changes take user-space
+instructions per request from 47.7k to 42.9k (callgrind, same load), with
+responses byte-identical to the scored version across 3,003 requests.
+
+A first cut also moved to dex v0.9.31 (reads queued with
+`IORING_RECVSEND_POLL_FIRST`, idle rings skipped with
+`IORING_SETUP_TASKRUN_FLAG`, keep-alive shed closer to the cap). It used about
+7 % less CPU per request locally and about 6 % less on a copy of the benchmark
+box at 80k users, but the official run held only 190k, failing 200k on p99 at
+81 % CPU. The load boxes I have can't reach that scale, so this revision keeps
+the runtime the 226k score was measured on, v0.9.26, and changes only the
+writer.
 
 **Tried, not kept:**
 - Preparing `BEGIN IMMEDIATE` and `COMMIT` once instead of running them
@@ -318,10 +318,10 @@ server.dx    routes, handlers, auth, response building
 queries.dx   the SQL statements, built with dexqu
 btree.c      the read engine: /feed, /posts/:id and the like check on B-tree cursors
 btree.h      its interface, as server.dx's `external module bt` sees it
-dex.mod      module file: dex 0.9.31, dexqu v0.1.0 (pinned in dex.sum)
+dex.mod      module file: dex 0.9.26, dexqu v0.1.0 (pinned in dex.sum)
 install.sh   root, once: build-essential, git, pkg-config, libsqlite3-dev,
              libssl-dev, libcurl, and Go 1.27.2 (sha256-checked)
-build.sh     builds the dex compiler from the pinned v0.9.31 tag through the Go
+build.sh     builds the dex compiler from the pinned v0.9.26 tag through the Go
              module proxy (checksum-verified), fetches dexqu and the SQLite
              3.54.1 amalgamation (sha256-checked), writes the sqlite3.c that
              includes it and btree.c, compiles server.dx

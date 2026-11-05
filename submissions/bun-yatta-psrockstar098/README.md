@@ -85,6 +85,19 @@ A 5-endpoint feed API (see `SPEC.md`) implemented with
   UTF-16 units long. Same verdict on ascii/unicode/long inputs.
 - `idleTimeout: 120` so keep-alive connections survive the load test's
   think/idle gaps without reconnect churn.
+- WAL auto-checkpoint raised to 50,000 pages: SQLite's default (1,000
+  pages) fires a checkpoint inline in a write transaction every ~1,000
+  pages. Measured locally: like-INSERT ~425µs at the default, ~204µs
+  at 50,000, ~201µs with checkpointing off entirely — so ~half the
+  write cost was checkpoint amortization (raw fsync here is ~10µs;
+  synchronous=FULL is 16.5ms, so NORMAL itself is not the cost). The
+  WAL is bounded at ~200MB and feed reads are unaffected (41.5µs with
+  a 70MB WAL present vs 41.9µs on a clean DB). Durability is
+  unchanged: journal mode stays WAL, synchronous stays NORMAL, and the
+  fixed schema is untouched — only when WAL pages are copied back to
+  the main DB moves. End-to-end driver A/B (same window, alternating,
+  3 rounds): new binary faster every round, median 7,029 vs 6,194
+  req/s (+13.5%), p99 latency better every round.
 - Compiled binary (`bun build --compile`): the server starts in well
   under the 60 s health window with no module-resolution cost at boot.
 
@@ -111,6 +124,14 @@ request, ~4-5% of the in-process request cost): the local driver cannot
 resolve a single-digit-percent change (its spread is 4-35%), so the
 in-process probes are the evidence and the maintainer's benchmark is
 the real test.
+
+Round 2 (wal_autocheckpoint): unlike round 1, this one IS visible to
+the local driver — the write path was ~62% of the blended
+per-iteration server cost, and cutting the like-INSERT from ~425µs to
+~204µs is worth ~30µs per iteration (~20% of server CPU). Driver A/B
+measured +13.5% req/s (median 7,029 vs 6,194), so the honest estimate
+is ~80,000-85,000 users held, up from 71,000 — still an estimate; only
+the maintainer's benchmark confirms it.
 
 ## Scripts
 

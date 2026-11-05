@@ -45,6 +45,9 @@ Everything the Rust entry's README describes holds here, so only the short versi
   every answered connection gets a 500 and closes.
 - **Checkpoints** run on a second `nice 19` thread (PASSIVE). Writes are held for at most 250 ms while it
   copies the log's tail; the loop checkpoints itself past 65,536 frames.
+- **Rings.** A ring's table of direct descriptors is as large as `RLIMIT_NOFILE` (65,535 on the benchmark
+  box). When it is nearly full, accepting moves to the next ring with room, adding one if needed (up to
+  16), and one thread drives them all, as in the Rust entry.
 - **Ring setup.** Registered sparse file table, single-shot accepts into direct descriptors on 8
   `SO_REUSEPORT` listeners (512 in flight), one multishot receive per connection into a provided-buffer
   ring (1024 x 2 KB, so idle connections hold no receive buffer), `ENOBUFS` handled with bounded
@@ -57,18 +60,18 @@ Everything the Rust entry's README describes holds here, so only the short versi
 
 ## Differences from the Rust entry
 
-- **One ring.** The Rust entry adds rings (up to 16) when the descriptor table fills. Here a single ring
-  has as many slots as `RLIMIT_NOFILE` allows (65,535 on the benchmark box), and accepting pauses when
-  the table is nearly full. That covers the ~15,000 connections the load test opens.
 - **SHA-256 is portable C**, not the `sha2` crate's SHA-NI path.
 - **The escaper is C** (`util.c`) rather than Rust intrinsics; same algorithm.
 - Body length uses the same rule as the reference: JS-style trim, then Unicode scalars.
 
 ## Status
 
-Verified on Linux (aarch64, kernel 7.0, in Docker with seccomp unconfined): builds from `build.sh`,
-passes all 42 checks of `test/test.sh`, and survives 6,000 concurrent `POST /posts` plus 4,000 concurrent
-`GET /feed` with the WAL checkpointing underneath. **Not yet** benchmarked with `bench/load.js` or run
-on the x86_64 Ubuntu 24.04 box, so there is no users-held number and `install.sh` has not been
-exercised on a clean machine. The Rust entry's design is the reference; expect the speed to come from
-that design, not from the language.
+The first benchmark (`44dfa26`, one ring only) held 67,000 users on the 1 vCPU / 2 GB box at 23% CPU,
+stopped by the descriptor table: connections past it were accepted but never served, so `GET /feed` timed
+out. Rings now spill as above.
+
+That fix is verified on Linux (aarch64, kernel 7.0, in Docker with seccomp unconfined), not yet under
+`bench/load.js` or at the real table size. With `RLIMIT_NOFILE` lowered to 256, 1,000 and 3,000 held
+connections were all served, where the one-ring build served only 224 of 1,000. `test/test.sh` passes 42/42,
+also with connections held across spilled rings, and 6,000 concurrent `POST /posts` plus 4,000 concurrent
+`GET /feed` ran cleanly. Crash, full-disk and soak tests have not been run.

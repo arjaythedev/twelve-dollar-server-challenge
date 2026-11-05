@@ -3,6 +3,7 @@ package main
 import (
 	"crawshaw.io/sqlite"
 	"crawshaw.io/sqlite/sqlitex"
+	"errors"
 	"fmt"
 	"github.com/valyala/fasthttp"
 	"io"
@@ -62,8 +63,40 @@ func Feed(pool *sqlitex.Pool) fasthttp.RequestHandler {
 }
 
 func GetPost(pool *sqlitex.Pool) fasthttp.RequestHandler {
+	const query = `
+	SELECT json_object('post', 
+		json_object('id', p.id, 'body', p.body, 'created_at', p.created_at, 'author', u.username, 'like_count', (SELECT count(*) FROM likes l WHERE l.post_id = p.id)))
+	FROM posts p
+	    JOIN users u ON u.id = p.user_id
+	WHERE p.id = $1`
+
 	return func(ctx *fasthttp.RequestCtx) {
-		ctx.SetStatusCode(200)
+		id, err := strconv.ParseInt(ctx.UserValue("id").(string), 10, 64)
+		if err != nil || id < 1 {
+			erred(ctx, fasthttp.StatusBadRequest, errors.New("invalid post id"))
+			return
+		}
+
+		conn := pool.Get(ctx)
+		defer pool.Put(conn)
+
+		stmt := conn.Prep(query)
+		defer clearAndReset(stmt)
+
+		stmt.BindInt64(1, id)
+		ok, err := stmt.Step()
+		if err != nil {
+			erred(ctx, fasthttp.StatusInternalServerError, err)
+		} else if !ok {
+			erred(ctx, fasthttp.StatusNotFound, errors.New("post not found"))
+		} else {
+			ctx.SetStatusCode(fasthttp.StatusOK)
+			ctx.SetContentType("application/json")
+
+			if _, err = io.Copy(ctx, stmt.ColumnReader(0)); err != nil {
+				erred(ctx, fasthttp.StatusInternalServerError, err)
+			}
+		}
 	}
 }
 

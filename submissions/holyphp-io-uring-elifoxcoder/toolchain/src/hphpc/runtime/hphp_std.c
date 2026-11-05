@@ -8168,6 +8168,10 @@ hval hpbi_arr_free(hval a) {
     if (a.tag == HV_ARR && a.u.a) hp_arr_free(a.u.a);
     return hp_of_bool(true);
 }
+hval hpbi_object_free(hval obj) {
+    if (obj.tag == HV_OBJ && obj.u.p) hp_free(obj.u.p);
+    return hp_of_bool(true);
+}
 
 /* ---- generic B-tree cursor binding ----
  * The implementation is appended to the SQLite amalgamation by build.sh

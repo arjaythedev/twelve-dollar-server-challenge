@@ -46,6 +46,19 @@ class Json {
         return $this->i == $this->n;
     }
 
+    /* JSON values form an exclusive tree, so release nested arrays before
+     * their parent. Strings are request-scoped and are reclaimed at scope_end. */
+    public function release_value($v): void {
+        if (!is_array($v)) { return; }
+        foreach ($v as $child) { $this->release_value($child); }
+        arr_free($v);
+    }
+
+    public function dispose(): void {
+        $this->release_value($this->root);
+        object_free($this);
+    }
+
     public function ws(): void {
         while ($this->i < $this->n) {
             $c = $this->s[$this->i];
@@ -1542,17 +1555,18 @@ class Server {
 
         $j = new Json($body);
         if (!$j->parse()) {
+            $j->dispose();
             $this->send_json($fd, 400, '{"error":"malformed JSON body"}');
             return;
         }
         $v = $j->root;
         if (!is_array($v) || !isset($v["body"]) || !is_string($v["body"])) {
-            arr_free($v);
+            $j->dispose();
             $this->send_json($fd, 400, '{"error":"body is required"}');
             return;
         }
         $text = trim($v["body"]);
-        arr_free($v);
+        $j->dispose();
         if ($text == "") {
             $this->send_json($fd, 400, '{"error":"body is required"}');
             return;

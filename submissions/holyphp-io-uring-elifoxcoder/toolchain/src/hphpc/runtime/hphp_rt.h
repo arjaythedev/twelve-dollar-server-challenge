@@ -1074,6 +1074,7 @@ hval hpbi_live_bytes(void);
 hval hpbi_live_allocs(void);
 hval hpbi_arr_clear(hval a);
 hval hpbi_arr_free(hval a);
+hval hpbi_object_free(hval obj);
 hval hpbi_bt_root(hval db, hval name, hval is_index);
 hval hpbi_bt_open(hval db, hval name, hval is_index);
 hval hpbi_bt_close(hval h);

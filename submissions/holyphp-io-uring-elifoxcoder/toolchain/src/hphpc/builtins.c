@@ -886,6 +886,7 @@ void builtins_init(void) {
     add("live_allocs",          B_MISC, ty_int,    false, false);
     add("arr_clear",            B_MISC, ty_bool,   false, false);
     add("arr_free",             B_MISC, ty_bool,   false, false);
+    add("object_free",          B_MISC, ty_bool,   false, false);
     add("bt_root",              B_MISC, ty_int,    false, false);
     add("bt_open",              B_MISC, ty_int,    false, false);
     add("bt_close",             B_MISC, ty_bool,   false, false);

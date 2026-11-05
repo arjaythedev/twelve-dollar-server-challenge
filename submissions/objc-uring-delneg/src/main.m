@@ -7,6 +7,7 @@
 #include <pthread.h>
 #include <signal.h>
 #include <fcntl.h>
+#include <sys/mman.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -15,7 +16,27 @@ extern int td_opt_ckptproc, td_opt_hold;
 extern int td_opt_ckpt, td_opt_batch, td_opt_bwait, td_opt_bthresh;
 extern long long td_opt_mmap;
 extern int td_opt_btree;
-extern int td_opt_ckpass;
+extern int td_opt_ckpass, td_opt_rearm, td_opt_cq, td_opt_cachekb, td_opt_cknice, td_opt_lock, td_opt_jsl;
+extern uint32_t td_opt_poolcap, td_opt_poolmax, td_opt_answers;
+
+// Locks the code and read-only data of the binary and its libraries in RAM, up to RLIMIT_MEMLOCK (8 MB under systemd).
+// With no swap, reclaim at the memory wall takes file-backed pages first, and the loop would stall on major faults
+// reading its own code back from disk. (#245, #257 do this too.) Best effort.
+static void lock_code(void) {
+    FILE *f = fopen("/proc/self/maps", "r");
+    if (!f) return;
+    char line[512];
+    unsigned long locked = 0;
+    while (fgets(line, sizeof line, f)) {
+        unsigned long a, b;
+        char perm[8];
+        if (sscanf(line, "%lx-%lx %7s", &a, &b, perm) != 3 || !strchr(line, '/')) continue;
+        if (perm[1] == 'w' || perm[0] != 'r') continue;
+        if (mlock((void *)a, b - a) == 0) locked += b - a;
+    }
+    fclose(f);
+    fprintf(stderr, "locked %lu KB of code and read-only data\n", locked >> 10);
+}
 
 static int listen_on(const char *host, int port) {
     int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
@@ -50,6 +71,15 @@ int main(int argc, char **argv) {
         else if (!strncmp(argv[i], "--hold=", 7)) td_opt_hold = atoi(argv[i] + 7);
         else if (!strncmp(argv[i], "--btree=", 8)) td_opt_btree = atoi(argv[i] + 8);
         else if (!strncmp(argv[i], "--ckpass=", 9)) td_opt_ckpass = atoi(argv[i] + 9);
+        else if (!strncmp(argv[i], "--answers=", 10)) td_opt_answers = (uint32_t)atoi(argv[i] + 10);
+        else if (!strncmp(argv[i], "--jsl=", 6)) td_opt_jsl = atoi(argv[i] + 6);
+        else if (!strncmp(argv[i], "--rearm=", 8)) td_opt_rearm = atoi(argv[i] + 8);
+        else if (!strncmp(argv[i], "--cq=", 5)) td_opt_cq = atoi(argv[i] + 5);
+        else if (!strncmp(argv[i], "--cache=", 8)) td_opt_cachekb = atoi(argv[i] + 8);
+        else if (!strncmp(argv[i], "--cknice=", 9)) td_opt_cknice = atoi(argv[i] + 9);
+        else if (!strncmp(argv[i], "--lock=", 7)) td_opt_lock = atoi(argv[i] + 7);
+        else if (!strncmp(argv[i], "--poolcap=", 10)) td_opt_poolcap = (uint32_t)atoi(argv[i] + 10);
+        else if (!strncmp(argv[i], "--poolmax=", 10)) td_opt_poolmax = (uint32_t)atoi(argv[i] + 10);
     signal(SIGPIPE, SIG_IGN);
 
     // Accepted sockets live in io_uring fixed-file tables, not the fd table.
@@ -91,6 +121,7 @@ int main(int argc, char **argv) {
                            .ckptReq = ckReq, .ckptDone = ckDone };
     TDWorker *w = [[TDWorker make] initWithConfig:&cfg];
     fprintf(stderr, "objc-uring: 1 thread, %d rings x %u slots on %s:%s\n", rings, slots, host, port ? port : "80");
+    if (td_opt_lock) lock_code();
     [w run];
     return 0;
 }

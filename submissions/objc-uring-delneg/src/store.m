@@ -4,11 +4,14 @@
 #include <signal.h>
 #include <stdio.h>
 #include <sys/prctl.h>
+#include <sys/resource.h>
 #include <time.h>
 #include <unistd.h>
 
 int td_opt_ckpt = 250;    // wal_autocheckpoint pages (--ckpt=N): smaller, more frequent checkpoint stalls
 int td_opt_ckptproc = 1; // --ckptproc=0: inline autocheckpoint, EXCLUSIVE locking
+int td_opt_jsl = 0;   // --jsl=N: journal_size_limit bytes (-1: unlimited)
+int td_opt_cachekb = 256000, td_opt_cknice = 0, td_opt_lock = 1;   // --cache=KB --cknice=N --lock=0|1
 long long td_opt_mmap = 0; // mmap_size bytes (--mmap=N); 0: page cache reads beat per-page mmap objects
 
 #define POST_COLS "SELECT p.id, p.body, p.created_at, u.username, " \
@@ -73,8 +76,18 @@ static void exec(sqlite3 *db, const char *sql) {
     char mm[64];
     snprintf(mm, sizeof mm, "PRAGMA mmap_size=%lld", td_opt_mmap);
     exec(db, mm);
-    exec(db, "PRAGMA cache_size=-32768");
+    char cs[64];
+    snprintf(cs, sizeof cs, "PRAGMA cache_size=-%d", td_opt_cachekb);
+    exec(db, cs);
     exec(db, "PRAGMA temp_store=MEMORY");
+    if (td_opt_jsl >= 0) {
+        // The WAL is overwritten from the start after each rewind. Frames aren't page-aligned, so overwriting a file page
+        // the kernel has evicted makes it read the old page from disk first, on this thread. With a limit SQLite truncates
+        // the file at the rewind's first commit: later frames append to fresh pages, and the old ones are freed at once.
+        char jl[64];
+        snprintf(jl, sizeof jl, "PRAGMA journal_size_limit=%d", td_opt_jsl);
+        exec(db, jl);
+    }
     if (td_opt_ckptproc) sqlite3_wal_hook(db, wal_frames_hook, self);   // replaces autocheckpoint
     else sqlite3_wal_autocheckpoint(db, td_opt_ckpt);
     exec(db, "SELECT count(*) FROM sqlite_schema"); // takes the exclusive lock now
@@ -390,6 +403,7 @@ typedef struct { uint32_t body, bodyLen, ca, caLen, au, auLen; int64_t likes; bo
 // locking, never writes) and answers {rc, frames in WAL, frames backfilled}.
 void td_ckpt_child(const char *path, int req, int done) {
     prctl(PR_SET_PDEATHSIG, SIGKILL);
+    if (td_opt_cknice) setpriority(PRIO_PROCESS, 0, td_opt_cknice);
     sqlite3 *cdb = NULL;
     char c;
     for (;;) {

@@ -29,3 +29,8 @@ caused its own connect timeouts; #112 flagged for /proc/meminfo), closing idle c
 #277), raising oom_score of helpers or sacrificial processes (benchmark gaming), restart loops in start.sh (rule flag).
 
 --- LIST LOCKED 2026-11-05T11:20Z ---
+
+NEW H13 (after the lock, 5 Nov): `PRAGMA journal_size_limit=0`. Challenges "the WAL's rewind costs only its header". SQLite truncates the WAL at the first commit after a rewind, so frames append to fresh file pages (no read-before-write of evicted pages on the loop) and the WAL's old file pages are freed at once. Public pragma, rule 6 unaffected.
+H1 status: bounded re-arm kept with H10; alone it did not save 300k.
+H3 status: decisive, `--cache=256000` turned 300k from OOM-killed to pass. RSS 138-163 MB, so the limit isn't the cost.
+H10 status: kept (v2/v3); TCP memory stays near zero through the ramp end.

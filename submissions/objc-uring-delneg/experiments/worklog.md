@@ -205,3 +205,31 @@ dentry 0.19 + io_kiocb 0.25 + others ~0.15 KB = ~4 KB; 1.2 GB at 300k, which lea
 Amplifier seen with TD_STATS: ENOBUFS endings 592 until 218k users, then 76,820 at t=53 s, 572,899 at t=59, 1,207,438 at t=65,
 1,821,603 at t=71, CQ overflows in 109 passes. That is the re-arm storm #245 and #264 describe. Every re-arm finds its request
 queued and no buffer, and ends again.
+
+## E14-E18: bounded re-arm + 6 KB buffers + locked code (v1), then SQLite page cache (5 Nov, SRVMB=1850, 2 min)
+
+v1 = head + `--rearm=1024` FIFO per ring + output buffers 16 KB → 6 KB, free list 8,192 + CQ 65,536 + mlock of code. All at 300k:
+| run | result |
+|---|---|
+| v1 | OOM-killed at ~130 s, 75 % errors; 2nd run 84 % |
+| v1 `--rearm=0` | OOM-killed, 48 % errors |
+| v1 at 320k | OOM-killed in the ramp |
+| v1 `--cache=128000` | **alive**, p95/p99 5,320 (bad stall at the end of the ramp, WAL 113 MB, then clean), rdMB 227 |
+| v1 `--cache=256000` | **pass, p95 13 / p99 143**, rdMB 13, majf 212, 73 % of CPU 0, RSS 163 MB, peak 1,629 MB |
+
+Bounded re-arm alone doesn't save it: nobufs fell to 448k-834k and no CQ overflow, but the loop stays in D state reading the DB (rdMB 60-70 per 10 s) and sockets fill. With the hot set in SQLite's own page cache the loop stops reading the disk at the wall, and the spiral never starts. RSS stays low, so the cache limit isn't what costs memory: the touched set is about 100 MB. The kernel would evict its own copy of those pages anyway. Rule 5 allows SQLite's page cache by name.
+
+## E19-E24: drain first, and what the loop actually reads (5 Nov, SRVMB=1850, 2 min)
+
+v2 = v1 + 256 MB cache default + receive buffers 2 KB × 2,048 → 1 KB × 4,096 + at most 2,048 answers per pass, the rest parked as records.
+320k: alive, 0 errors, TCP ≤ 4.5k pages, nobufs 0, but p50 2.3 s at 23k req/s, 170k parked: each pass walked every parked request and
+dirty connection, a cost I added. 340k: OOM-killed, and a build ran during it, so void.
+Don't build on Synteq during a run: the hog leaves no memory for it (linker OOM-killed, plain non-PGO binary, runs disturbed).
+
+v3 = v2, parked requests untouched: `reqs[reqHead..nreq)` FIFO, a pass looks at most at what it answers, per-connection `queued` count replaces `inBatch`, arena kept until the queue is empty (compacted past 16 MB). 42/42.
+| run | result |
+|---|---|
+| v3 300k | **p95 12.2 / p99 34**, peak 1,334 MB, RSS 138 MB, 77 % of CPU 0, rdMB 23 |
+| v3 320k (with bpftrace attached, so not a fair run) | alive, 0 errors, p50 750 ms, WAL grew to ~1 GB |
+
+Page-cache trace (`mm_filemap_add_to_page_cache` by pid and inode, 15 s): main process 7,291 pages of **feed.db-wal**, 16 of -shm, 0 of feed.db; checkpointer child 1,034 of feed.db. So with the larger SQLite cache the loop no longer reads the DB; it reads the WAL. Reason: WAL frames are 4,120 bytes, not page-aligned, and the file is overwritten from the start after a rewind. Overwriting part of a file page that reclaim evicted makes the kernel read it from disk first, on the loop (D state). New: H13 `PRAGMA journal_size_limit=0`.

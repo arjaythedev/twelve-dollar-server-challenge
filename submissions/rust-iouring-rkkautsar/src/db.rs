@@ -586,6 +586,11 @@ impl WriteDb {
         self.db.prepare(sql)
     }
 
+    pub(crate) fn prepare_static(&self, sql: &str) -> Result<Stmt<'static>, String> {
+        let stmt = self.db.prepare(sql)?;
+        Ok(unsafe { std::mem::transmute::<Stmt<'_>, Stmt<'static>>(stmt) })
+    }
+
 
 
     pub fn changes(&self) -> i32 {

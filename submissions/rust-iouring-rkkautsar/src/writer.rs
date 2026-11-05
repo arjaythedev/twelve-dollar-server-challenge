@@ -6,8 +6,54 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::db::WriteDb;
+use crate::db::{Stmt, WriteDb};
 use crate::{error, json_string, WriteCmd, WriteKind};
+
+const POST_INSERT_SQL: &str = "INSERT INTO posts (user_id, body)
+                     SELECT CAST(value->>0 AS INTEGER), CAST(value->>1 AS TEXT)
+                       FROM json_each(?1)
+                     RETURNING id, created_at";
+const LIKE_INSERT_SQL: &str = "INSERT INTO likes (user_id, post_id)
+                     SELECT CAST(value->>0 AS INTEGER), CAST(value->>1 AS INTEGER)
+                       FROM json_each(?1)
+                      WHERE 1
+                      ON CONFLICT (user_id, post_id) DO NOTHING
+                     RETURNING user_id, post_id";
+const LIKE_INSERT_FILTERED_SQL: &str = "INSERT INTO likes (user_id, post_id)
+                     SELECT CAST(value->>0 AS INTEGER), CAST(value->>1 AS INTEGER)
+                       FROM json_each(?1)
+                      WHERE EXISTS (SELECT 1 FROM posts
+                                     WHERE id = CAST(value->>1 AS INTEGER))
+                      ON CONFLICT (user_id, post_id) DO NOTHING
+                     RETURNING user_id, post_id";
+const POST_EXISTS_SQL: &str = "SELECT CAST(value AS INTEGER)
+                       FROM json_each(?1)
+                      WHERE CAST(value AS INTEGER) IN (SELECT id FROM posts)";
+
+pub struct BatchCache {
+    post_insert: Option<Stmt<'static>>,
+    like_insert: Option<Stmt<'static>>,
+    like_insert_filtered: Option<Stmt<'static>>,
+    post_exists: Option<Stmt<'static>>,
+}
+
+impl BatchCache {
+    pub fn new(db: &WriteDb) -> Self {
+        Self {
+            post_insert: db.prepare_static(POST_INSERT_SQL).ok(),
+            like_insert: db.prepare_static(LIKE_INSERT_SQL).ok(),
+            like_insert_filtered: db.prepare_static(LIKE_INSERT_FILTERED_SQL).ok(),
+            post_exists: db.prepare_static(POST_EXISTS_SQL).ok(),
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.post_insert = None;
+        self.like_insert = None;
+        self.like_insert_filtered = None;
+        self.post_exists = None;
+    }
+}
 
 pub struct WriteJob {
     pub ring: usize,
@@ -50,6 +96,7 @@ pub fn spawn(
                 return;
             }
         };
+        let mut cache = BatchCache::new(&db);
         let _ = ready.send(());
         let window_us = std::env::var("WRITE_COALESCE_US")
             .ok()
@@ -84,7 +131,7 @@ pub fn spawn(
                 }
             }
 
-            let (results, committed) = run_batch(&mut db, &jobs);
+            let (results, committed) = run_batch(&mut db, &mut cache, &jobs);
             if committed && !jobs.is_empty() {
                 dirty.fetch_add(1, Ordering::Relaxed);
             }
@@ -134,7 +181,11 @@ pub fn spawn(
     });
 }
 
-pub fn run_batch(db: &mut WriteDb, jobs: &[WriteJob]) -> (Vec<(u16, Vec<u8>)>, bool) {
+pub fn run_batch(
+    db: &mut WriteDb,
+    cache: &mut BatchCache,
+    jobs: &[WriteJob],
+) -> (Vec<(u16, Vec<u8>)>, bool) {
     let began = db.begin().is_ok();
     let mut committed = false;
     let mut results: Vec<(u16, Vec<u8>)> = (0..jobs.len())
@@ -151,50 +202,22 @@ pub fn run_batch(db: &mut WriteDb, jobs: &[WriteJob]) -> (Vec<(u16, Vec<u8>)>, b
                 .iter()
                 .any(|j| matches!(&j.cmd.kind, WriteKind::Like { .. }));
             let mut bulk_create = if has_create {
-                db.prepare(
-                    "INSERT INTO posts (user_id, body)
-                     SELECT CAST(value->>0 AS INTEGER), CAST(value->>1 AS TEXT)
-                       FROM json_each(?1)
-                     RETURNING id, created_at",
-                )
-                .ok()
+                cache.post_insert.as_mut()
             } else {
                 None
             };
             let mut bulk_like = if has_like {
-                db.prepare(
-                    "INSERT INTO likes (user_id, post_id)
-                     SELECT CAST(value->>0 AS INTEGER), CAST(value->>1 AS INTEGER)
-                       FROM json_each(?1)
-                      WHERE 1
-                      ON CONFLICT (user_id, post_id) DO NOTHING
-                     RETURNING user_id, post_id",
-                )
-                .ok()
+                cache.like_insert.as_mut()
             } else {
                 None
             };
             let mut bulk_like_filtered = if has_like {
-                db.prepare(
-                    "INSERT INTO likes (user_id, post_id)
-                     SELECT CAST(value->>0 AS INTEGER), CAST(value->>1 AS INTEGER)
-                       FROM json_each(?1)
-                      WHERE EXISTS (SELECT 1 FROM posts
-                                     WHERE id = CAST(value->>1 AS INTEGER))
-                      ON CONFLICT (user_id, post_id) DO NOTHING
-                     RETURNING user_id, post_id",
-                )
-                .ok()
+                cache.like_insert_filtered.as_mut()
             } else {
                 None
             };
             let mut bulk_exists = if has_like {
-                db.prepare(
-                    "SELECT CAST(value AS INTEGER)
-                       FROM json_each(?1)
-                      WHERE CAST(value AS INTEGER) IN (SELECT id FROM posts)",
-                )
-                .ok()
+                cache.post_exists.as_mut()
             } else {
                 None
             };

@@ -57,9 +57,13 @@ fn main() -> io::Result<()> {
 
 impl App {
     pub(crate) fn open(path: &str, secret: Vec<u8>, coalesce: bool) -> Result<Self, String> {
+        let read = ReadDb::open(path)?;
+        let write = WriteDb::open(path)?;
+        let write_cache = writer::BatchCache::new(&write);
         Ok(Self {
-            read: ReadDb::open(path)?,
-            write: WriteDb::open(path)?,
+            read,
+            write_cache,
+            write,
             post_ids: Vec::new(),
             coalesce,
             secret,
@@ -70,6 +74,7 @@ impl App {
 
 pub(crate) struct App {
     pub read: ReadDb,
+    pub write_cache: writer::BatchCache,
     pub write: WriteDb,
     pub post_ids: Vec<i64>,
     coalesce: bool,

@@ -1098,7 +1098,8 @@ fn apply_writes(app: &mut App, rings: &mut [RingState], jobs: &mut Vec<WriteJob>
     if jobs.is_empty() {
         return;
     }
-    let (mut results, committed) = super::writer::run_batch(&mut app.write, &jobs);
+    let (mut results, committed) =
+        super::writer::run_batch(&mut app.write, &mut app.write_cache, &jobs);
     let mut touched = vec![false; rings.len()];
     for (i, job) in jobs.drain(..).enumerate() {
         let pair = results

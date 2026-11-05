@@ -338,10 +338,10 @@ int init_feed_engine(const char *db_path) {
     rc = sqlite3_prepare_v2(g_engine.db, "SELECT 1;", -1, &g_engine.stmt_health, NULL);
     if (rc != SQLITE_OK) return -7;
 
-    rc = sqlite3_prepare_v2(g_engine.db, "INSERT INTO posts (user_id, body) VALUES (?, ?) RETURNING id, created_at;", -1, &g_engine.stmt_insert_post, NULL);
+    rc = sqlite3_prepare_v2(g_engine.db, "INSERT INTO posts (user_id, body, created_at) VALUES (?, ?, ?) RETURNING id;", -1, &g_engine.stmt_insert_post, NULL);
     if (rc != SQLITE_OK) return -8;
 
-    rc = sqlite3_prepare_v2(g_engine.db, "INSERT INTO likes (user_id, post_id) VALUES (?, ?) ON CONFLICT (user_id, post_id) DO NOTHING;", -1, &g_engine.stmt_insert_like, NULL);
+    rc = sqlite3_prepare_v2(g_engine.db, "INSERT INTO likes (user_id, post_id, created_at) VALUES (?, ?, ?) ON CONFLICT (user_id, post_id) DO NOTHING;", -1, &g_engine.stmt_insert_like, NULL);
     if (rc != SQLITE_OK) return -9;
 
     return 0;
@@ -509,9 +509,9 @@ int create_posts_batch(
     const int32_t *body_offsets,
     const int32_t *body_lens,
     int n,
-    char *out_cat_buf,
-    int out_cat_cap,
-    CreatePostBatchItem *items
+    const char *now_str,
+    int64_t *out_ids,
+    int32_t *out_statuses
 ) {
     if (!g_engine.db || !g_engine.stmt_insert_post) return -1;
     if (n <= 0) return 0;
@@ -525,29 +525,18 @@ int create_posts_batch(
         if (rc != SQLITE_OK) return -2;
     }
 
-    int cat_pos = 0;
-
     for (int i = 0; i < n; i++) {
         sqlite3_bind_int64(g_engine.stmt_insert_post, 1, user_ids[i]);
         sqlite3_bind_text(g_engine.stmt_insert_post, 2, bodies_buf + body_offsets[i], body_lens[i], SQLITE_STATIC);
+        sqlite3_bind_text(g_engine.stmt_insert_post, 3, now_str, 24, SQLITE_STATIC);
 
         rc = sqlite3_step(g_engine.stmt_insert_post);
         if (rc == SQLITE_ROW) {
-            items[i].id = sqlite3_column_int64(g_engine.stmt_insert_post, 0);
-            const unsigned char *cat = sqlite3_column_text(g_engine.stmt_insert_post, 1);
-            int cat_len = sqlite3_column_bytes(g_engine.stmt_insert_post, 1);
-
-            if (cat && cat_len > 0 && cat_pos + cat_len <= out_cat_cap) {
-                memcpy(out_cat_buf + cat_pos, cat, cat_len);
-                items[i].cat_offset = cat_pos;
-                items[i].cat_len = cat_len;
-                cat_pos += cat_len;
-                items[i].status = 201;
-            } else {
-                items[i].status = 500;
-            }
+            out_ids[i] = sqlite3_column_int64(g_engine.stmt_insert_post, 0);
+            out_statuses[i] = 201;
         } else {
-            items[i].status = 500;
+            out_ids[i] = 0;
+            out_statuses[i] = 500;
         }
 
         sqlite3_reset(g_engine.stmt_insert_post);
@@ -562,6 +551,7 @@ int insert_likes_batch(
     const int64_t *user_ids,
     const int64_t *post_ids,
     int n,
+    const char *now_str,
     int32_t *results
 ) {
     if (!g_engine.db || !g_engine.stmt_insert_like || !g_engine.post) return -1;
@@ -595,9 +585,10 @@ int insert_likes_batch(
             continue;
         }
 
-        // 2. Thực thi INSERT INTO likes ON CONFLICT DO NOTHING
+        // 2. Thực thi INSERT INTO likes ON CONFLICT DO NOTHING với now_str đã format sẵn
         sqlite3_bind_int64(g_engine.stmt_insert_like, 1, uid);
         sqlite3_bind_int64(g_engine.stmt_insert_like, 2, pid);
+        sqlite3_bind_text(g_engine.stmt_insert_like, 3, now_str, 24, SQLITE_STATIC);
 
         rc = sqlite3_step(g_engine.stmt_insert_like);
         if (rc == SQLITE_DONE) {

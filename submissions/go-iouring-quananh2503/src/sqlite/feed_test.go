@@ -185,8 +185,9 @@ func TestWritesAndHealth(t *testing.T) {
 	userIDs := []int64{101, 101, 102, 101}
 	postIDs := []int64{2, 2, 2, 999999999}
 	likeResults := make([]int32, len(userIDs))
+	nowStr := []byte("2026-11-05T03:15:00.000Z")
 
-	err = InsertLikesBatch(userIDs, postIDs, likeResults)
+	err = InsertLikesBatch(userIDs, postIDs, nowStr, likeResults)
 	if err != nil {
 		t.Fatalf("InsertLikesBatch lỗi: %v", err)
 	}
@@ -214,29 +215,28 @@ func TestWritesAndHealth(t *testing.T) {
 		bodiesBuf = append(bodiesBuf, []byte(b)...)
 	}
 
-	outCatBuf := make([]byte, 1024)
-	cItems := make([]CreatePostBatchItem, len(bodies))
+	cIDs := make([]int64, len(bodies))
+	cStatuses := make([]int32, len(bodies))
 
-	err = CreatePostsBatch(cUserIDs, bodiesBuf, bodyOffsets, bodyLens, outCatBuf, cItems)
+	err = CreatePostsBatch(cUserIDs, bodiesBuf, bodyOffsets, bodyLens, nowStr, cIDs, cStatuses)
 	if err != nil {
 		t.Fatalf("CreatePostsBatch lỗi: %v", err)
 	}
 
-	for i := range cItems {
-		if cItems[i].Status != 201 {
-			t.Fatalf("CreatePost[%d] status != 201: %d", i, cItems[i].Status)
+	for i := range bodies {
+		if cStatuses[i] != 201 {
+			t.Fatalf("CreatePost[%d] status != 201: %d", i, cStatuses[i])
 		}
-		if cItems[i].ID <= 500000 {
-			t.Fatalf("CreatePost[%d] ID không tăng: %d", i, cItems[i].ID)
+		if cIDs[i] <= 500000 {
+			t.Fatalf("CreatePost[%d] ID không tăng: %d", i, cIDs[i])
 		}
-		createdAt := string(outCatBuf[cItems[i].CatOffset : cItems[i].CatOffset+cItems[i].CatLen])
-		t.Logf("Tạo post thành công: ID=%d, created_at=%s", cItems[i].ID, createdAt)
+		t.Logf("Tạo post thành công: ID=%d, created_at=%s", cIDs[i], string(nowStr))
 	}
 
 	// 3. Test đọc lại post mới tạo bằng GetPost trực tiếp từ B-Tree
-	postBytes, status, err := GetPost(cItems[0].ID)
+	postBytes, status, err := GetPost(cIDs[0])
 	if err != nil || status != 200 {
-		t.Fatalf("GetPost(%d) sau khi create lỗi: status=%d err=%v", cItems[0].ID, status, err)
+		t.Fatalf("GetPost(%d) sau khi create lỗi: status=%d err=%v", cIDs[0], status, err)
 	}
 	t.Logf("Đọc lại post mới tạo thành công: %s", string(postBytes))
 

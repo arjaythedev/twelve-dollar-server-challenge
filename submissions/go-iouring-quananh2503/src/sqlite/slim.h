@@ -33,14 +33,6 @@ int get_posts_batch(const int64_t *ids, int n, char *out_buf, int out_cap, PostB
 // Kiểm tra nhiều bài viết có tồn tại hay không theo batch trong 1 transaction:
 int post_exists_batch(const int64_t *ids, int n, int32_t *results);
 
-// Kết quả của từng bài viết tạo mới trong create_posts_batch
-typedef struct {
-    int64_t id;         // ID vừa được tạo
-    int32_t status;     // 201 nếu OK, 500 nếu lỗi
-    int32_t cat_offset; // vị trí created_at trong out_cat_buf
-    int32_t cat_len;    // độ dài created_at
-} CreatePostBatchItem;
-
 // Tạo nhiều bài viết theo batch trong 1 CGO call & 1 Write Transaction (Group Commit):
 int create_posts_batch(
     const int64_t *user_ids,
@@ -48,9 +40,9 @@ int create_posts_batch(
     const int32_t *body_offsets,
     const int32_t *body_lens,
     int n,
-    char *out_cat_buf,
-    int out_cat_cap,
-    CreatePostBatchItem *items
+    const char *now_str,
+    int64_t *out_ids,
+    int32_t *out_statuses
 );
 
 // Chèn nhiều like theo batch trong 1 CGO call & 1 Write Transaction (Group Commit):
@@ -59,6 +51,7 @@ int insert_likes_batch(
     const int64_t *user_ids,
     const int64_t *post_ids,
     int n,
+    const char *now_str,
     int32_t *results
 );
 

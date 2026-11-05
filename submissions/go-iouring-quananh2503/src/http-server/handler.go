@@ -267,8 +267,9 @@ type CreatePostSystem struct {
 	bodyBuf     []byte
 	bodyOffsets []int32
 	bodyLens    []int32
-	outCatBuf   []byte
-	items       []sqlite.CreatePostBatchItem
+	postIDs     []int64
+	statuses    []int32
+	nowBuf      [32]byte
 }
 
 func NewCreatePostSystem(db *DB, sendPool, recvPool *BufferPool) *CreatePostSystem {
@@ -282,8 +283,8 @@ func NewCreatePostSystem(db *DB, sendPool, recvPool *BufferPool) *CreatePostSyst
 		bodyBuf:     make([]byte, 0, 1024*1024),
 		bodyOffsets: make([]int32, 4096),
 		bodyLens:    make([]int32, 4096),
-		outCatBuf:   make([]byte, 256*1024),
-		items:       make([]sqlite.CreatePostBatchItem, 4096),
+		postIDs:     make([]int64, 4096),
+		statuses:    make([]int32, 4096),
 	}
 }
 
@@ -297,7 +298,8 @@ func (s *CreatePostSystem) Process(events []CreatePostEvent, outTasks *[]iouring
 		s.userIDs = make([]int64, n)
 		s.bodyOffsets = make([]int32, n)
 		s.bodyLens = make([]int32, n)
-		s.items = make([]sqlite.CreatePostBatchItem, n)
+		s.postIDs = make([]int64, n)
+		s.statuses = make([]int32, n)
 	}
 
 	s.bodyBuf = s.bodyBuf[:0]
@@ -310,34 +312,37 @@ func (s *CreatePostSystem) Process(events []CreatePostEvent, outTasks *[]iouring
 		s.bodyBuf = append(s.bodyBuf, ev.Body...)
 	}
 
+	// Go tính timestamp UTC đúng 1 lần (Zero-Alloc), truyền xuống C và dùng luôn cho JSON response
+	now := time.Now().UTC()
+	nowFormatted := now.AppendFormat(s.nowBuf[:0], "2006-01-02T15:04:05.000Z")
+
 	// 1 CGO call & 1 Write Transaction duy nhất (Group Commit) cho cả batch!
 	err := sqlite.CreatePostsBatch(
 		s.userIDs[:n],
 		s.bodyBuf,
 		s.bodyOffsets[:n],
 		s.bodyLens[:n],
-		s.outCatBuf,
-		s.items[:n],
+		nowFormatted,
+		s.postIDs[:n],
+		s.statuses[:n],
 	)
 
 	for i := 0; i < n; i++ {
 		ev := &events[i]
 		s.RecvPool.Release(ev.BufID)
 
-		item := &s.items[i]
-		if err != nil || item.Status != 201 {
+		if err != nil || s.statuses[i] != 201 {
 			s.bodyW.Reset()
 			s.bodyW.WriteString(`{"error":"internal server error"}`)
 			buildHTTPResponse(s.writer, "500 Internal Server Error", s.bodyW.Bytes())
 		} else {
-			createdAt := s.outCatBuf[item.CatOffset : item.CatOffset+item.CatLen]
 			s.bodyW.Reset()
 			s.bodyW.WriteString(`{"post":{"id":`)
-			s.bodyW.WriteInt(int(item.ID))
+			s.bodyW.WriteInt(int(s.postIDs[i]))
 			s.bodyW.WriteString(`,"body":"`)
 			s.bodyW.WriteBytes(ev.Body)
 			s.bodyW.WriteString(`","created_at":"`)
-			s.bodyW.WriteBytes(createdAt)
+			s.bodyW.WriteBytes(nowFormatted)
 			s.bodyW.WriteString(`","author":"`)
 			s.bodyW.WriteBytes(ev.Username)
 			s.bodyW.WriteString(`","like_count":0}}`)
@@ -362,6 +367,7 @@ type LikePostSystem struct {
 	userIDs []int64
 	postIDs []int64
 	results []int32
+	nowBuf  [32]byte
 }
 
 func NewLikePostSystem(db *DB, sendPool, recvPool *BufferPool) *LikePostSystem {
@@ -394,8 +400,12 @@ func (s *LikePostSystem) Process(events []LikePostEvent, outTasks *[]iouring.Sen
 		s.postIDs[i] = int64(events[i].PostID)
 	}
 
+	// Go tính timestamp UTC đúng 1 lần (Zero-Alloc), truyền xuống C loại bỏ hàm strftime của SQLite
+	now := time.Now().UTC()
+	nowFormatted := now.AppendFormat(s.nowBuf[:0], "2006-01-02T15:04:05.000Z")
+
 	// 1 CGO call duy nhất: qsort, B-tree cache lookup, in-batch deduplication, Group Commit
-	err := sqlite.InsertLikesBatch(s.userIDs[:n], s.postIDs[:n], s.results[:n])
+	err := sqlite.InsertLikesBatch(s.userIDs[:n], s.postIDs[:n], nowFormatted, s.results[:n])
 
 	for i := 0; i < n; i++ {
 		ev := &events[i]

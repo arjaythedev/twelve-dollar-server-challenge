@@ -1,7 +1,7 @@
 package sqlite
 
 /*
-#cgo CFLAGS: -O3 -march=native -I${SRCDIR} -DSQLITE_THREADSAFE=2 -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_DEFAULT_MEMSTATUS=0
+#cgo CFLAGS: -O3 -march=native -I${SRCDIR} -DSQLITE_THREADSAFE=2 -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_DEFAULT_MEMSTATUS=0 -DSQLITE_OMIT_PROGRESS_CALLBACK=1 -DSQLITE_DQS=0 -DSQLITE_TEMP_STORE=3
 #include "slim.h"
 #include <stdlib.h>
 */
@@ -238,21 +238,15 @@ func DBHealth() bool {
 	return C.db_health() == 1
 }
 
-// CreatePostBatchItem chứa kết quả cho từng bài viết tạo mới trong batch
-type CreatePostBatchItem struct {
-	ID        int64
-	Status    int32
-	CatOffset int32
-	CatLen    int32
-}
-
 // CreatePostsBatch tạo một batch bài viết mới trong 1 CGO call & 1 transaction duy nhất (Group Commit)
+// Go cung cấp mảng phẳng DOD và chuỗi nowStr (24 bytes UTC), C chỉ trả về outIDs và outStatuses (không cần trả về ngày tháng)
 func CreatePostsBatch(
 	userIDs []int64,
 	bodiesBuf []byte,
 	bodyOffsets, bodyLens []int32,
-	outCatBuf []byte,
-	items []CreatePostBatchItem,
+	nowStr []byte,
+	outIDs []int64,
+	outStatuses []int32,
 ) error {
 	feedMu.Lock()
 	defer feedMu.Unlock()
@@ -267,9 +261,9 @@ func CreatePostsBatch(
 		bodiesPtr = (*C.char)(unsafe.Pointer(&bodiesBuf[0]))
 	}
 
-	var catPtr *C.char
-	if len(outCatBuf) > 0 {
-		catPtr = (*C.char)(unsafe.Pointer(&outCatBuf[0]))
+	var nowPtr *C.char
+	if len(nowStr) > 0 {
+		nowPtr = (*C.char)(unsafe.Pointer(&nowStr[0]))
 	}
 
 	rc := C.create_posts_batch(
@@ -278,9 +272,9 @@ func CreatePostsBatch(
 		(*C.int32_t)(unsafe.Pointer(&bodyOffsets[0])),
 		(*C.int32_t)(unsafe.Pointer(&bodyLens[0])),
 		C.int(n),
-		catPtr,
-		C.int(len(outCatBuf)),
-		(*C.CreatePostBatchItem)(unsafe.Pointer(&items[0])),
+		nowPtr,
+		(*C.int64_t)(unsafe.Pointer(&outIDs[0])),
+		(*C.int32_t)(unsafe.Pointer(&outStatuses[0])),
 	)
 
 	if rc != 0 {
@@ -290,8 +284,8 @@ func CreatePostsBatch(
 }
 
 // InsertLikesBatch chèn một batch lượt like trong 1 CGO call & 1 transaction duy nhất (Group Commit)
-// Go thực hiện sort & deduplication trước (Zero-Alloc), C chỉ duyệt insert và ghi kết quả vào mảng results
-func InsertLikesBatch(userIDs, postIDs []int64, results []int32) error {
+// Go thực hiện sort & deduplication trước (Zero-Alloc) và cung cấp nowStr, C chỉ duyệt insert và ghi kết quả vào mảng results
+func InsertLikesBatch(userIDs, postIDs []int64, nowStr []byte, results []int32) error {
 	feedMu.Lock()
 	defer feedMu.Unlock()
 
@@ -340,11 +334,17 @@ func InsertLikesBatch(userIDs, postIDs []int64, results []int32) error {
 		likeMap[curr.origIdx] = int32(numUnique - 1)
 	}
 
-	// 3. CGO call duy nhất: C mở transaction, kiểm tra tồn tại và insert
+	var nowPtr *C.char
+	if len(nowStr) > 0 {
+		nowPtr = (*C.char)(unsafe.Pointer(&nowStr[0]))
+	}
+
+	// 3. CGO call duy nhất: C mở transaction, kiểm tra tồn tại và insert với now_str
 	rc := C.insert_likes_batch(
 		(*C.int64_t)(unsafe.Pointer(&likeUniqueUIDs[0])),
 		(*C.int64_t)(unsafe.Pointer(&likeUniquePIDs[0])),
 		C.int(numUnique),
+		nowPtr,
 		(*C.int32_t)(unsafe.Pointer(&likeRawRes[0])),
 	)
 

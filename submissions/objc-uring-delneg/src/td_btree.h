@@ -16,3 +16,6 @@ int td_bt_init(sqlite3 *db);        // 1: fast paths on
 int td_bt_feed(TDPostSink sink, void *ctx);                 // rows given to sink, newest first
 int td_bt_post(int64_t id, TDPostSink sink, void *ctx);     // 1 found, 0 no such post
 void td_bt_end(void);               // closes the cursors: before COMMIT or ROLLBACK
+
+/* Before the first sqlite3_open: SQLITE_OK, or SQLite's refusal when it already started. */
+int td_pcache_install(void);

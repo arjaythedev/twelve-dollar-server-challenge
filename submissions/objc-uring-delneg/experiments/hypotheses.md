@@ -40,3 +40,6 @@ NEW H14 (5 Nov): the first commit after a rewind should carry one write only. Ch
 NEW H15 (5 Nov): newest first past one pass of backlog, passes of ≤ 512 answers. Challenges "oldest first is the fair order in a burst". Every request answered after 40 ms costs a bare ACK, ~20 % more CPU, so FIFO in a backlog makes newcomers expensive too. Flags `--lifo`, `--lifoage`, `--answers`. Rules: ordering only, no shedding and no traffic detection; a connection's own requests keep their order.
 H5 status: open at 310k. One good rep at 300k (35/158), then both good and bad reps at 310k; not separable from the bistability so far.
 H14 status: open, same reason.
+H15 status: keeps p50 low at 310k in every rep (9 of 9); doesn't by itself pass a 5-minute hold at 310k.
+NEW H16 (5 Nov): page cache through PCACHE2 (dense array, clock, cheap truncate). Challenges "the stock page cache is free". Expect 2-4 % CPU. Flag `--pcache`.
+NEW H17 (5 Nov): smaller passes. Challenges "a bigger batch is cheaper per request" (flush per answer rises from 9 to 12.5 us as passes grow). Flag `--answers`.

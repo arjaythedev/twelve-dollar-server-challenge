@@ -18,7 +18,7 @@ extern long long td_opt_mmap;
 extern int td_opt_btree;
 extern int td_opt_ckpass, td_opt_rearm, td_opt_cq, td_opt_cachekb, td_opt_cknice, td_opt_lock, td_opt_jsl, td_opt_warm, td_opt_ckdrop, td_opt_onewrite;
 extern uint32_t td_opt_poolcap, td_opt_poolmax, td_opt_answers, td_opt_lifoage;
-extern int td_opt_lifo;
+extern int td_opt_lifo, td_opt_pcache;
 
 // Locks the code and read-only data of the binary and its libraries in RAM, up to RLIMIT_MEMLOCK (8 MB under systemd).
 // With no swap, reclaim at the memory wall takes file-backed pages first, and the loop would stall on major faults
@@ -74,6 +74,7 @@ int main(int argc, char **argv) {
         else if (!strncmp(argv[i], "--ckpass=", 9)) td_opt_ckpass = atoi(argv[i] + 9);
         else if (!strncmp(argv[i], "--answers=", 10)) td_opt_answers = (uint32_t)atoi(argv[i] + 10);
         else if (!strncmp(argv[i], "--lifo=", 7)) td_opt_lifo = atoi(argv[i] + 7);
+        else if (!strncmp(argv[i], "--pcache=", 9)) td_opt_pcache = atoi(argv[i] + 9);
         else if (!strncmp(argv[i], "--lifoage=", 10)) td_opt_lifoage = (uint32_t)atoi(argv[i] + 10);
         else if (!strncmp(argv[i], "--jsl=", 6)) td_opt_jsl = atoi(argv[i] + 6);
         else if (!strncmp(argv[i], "--onewrite=", 11)) td_opt_onewrite = atoi(argv[i] + 11);

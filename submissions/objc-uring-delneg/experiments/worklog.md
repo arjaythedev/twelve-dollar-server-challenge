@@ -306,3 +306,40 @@ bpftrace on `tcp_send_ack`, 8 s, FIFO 2,048: nearly all of them come from `tcp_r
 That's a new reading of the limit: capacity with most answers under 40 ms is ~20 % above capacity with most over it.
 
 v8: H15, newest first past one pass of backlog. First try, `--lifoage=300`, `--answers=512`: p50 390, p95 1,020, p99 1,215. Its age rule sends everything through the old end once a queue stands at 300 ms, so it behaves as FIFO with a floor. Next: a much longer age limit.
+
+## E38-E60: newest first (v8-v10), SRVMB=1850 BURN=8 (5 Nov)
+
+310k, MEAS=200:
+
+| run | rps | p50 | p95 | p99 | us/req | bare ACKs/s |
+|---|---:|---:|---:|---:|---:|---:|
+| v8 `--lifoage=1000` | 32,731 | 9 | 27 | 215 | 17.9 | |
+| v8 `--lifoage=1000 --answers=256` | 32,637 | 8 | 275 | 1,015 | 18.7 | |
+| v8 `--lifoage=1000` | 31,910 | 17 | 1,160 | 1,380 | 19.8 | |
+| v8 `--lifoage=1000 --answers=256` | 32,672 | 8 | 83 | 695 | 18.2 | |
+| v9 `--lifoage=1000` | 32,752 | 8 | 27 | 390 | 17.7 | |
+| v9 `--lifoage=1000` | 32,730 | 7 | 22 | 141 | 17.0 | |
+| v9 `--lifoage=1000` | 32,678 | 9 | 75 | 1,045 | 18.9 | |
+| v10 (old end gets half past 500 ms) | 32,625 | 9 | 400 | 1,015 | 18.1 | |
+| v10 | 32,731 | 8 | 24 | 161 | 17.4 | |
+
+Against FIFO at 310k (p50 8-355, p95 89-1,040): p50 stays low in every rep, the run no longer goes into the p50 240+ state, and bare ACKs fall to 2-4k/s from 15-26k/s. Steal is 0 in all of them, checked with the new sampler column. The child takes 3.4 % of the CPU.
+
+v10 330k: p95 5,320, memory wall (file cache down to 1-5 MB, kswapd scan and major faults explode 3 minutes in, the WAL reaches 415 MB). Second rep 330k: p95 3,235, rps 32,797. 350k: dead. So on this harness the memory wall sits between 310k and 330k.
+
+5-minute holds, v10:
+
+| users | rps | p50 | p95 | p99 |
+|---|---:|---:|---:|---:|
+| 310k | 32,335 | 14 | 650 | 2,895 |
+| 320k | 31,926 | 25 | 2,240 | 3,350 |
+| 310k | 31,535 | 24 | 1,195 | 2,265 |
+| 320k | 31,414 | 36 | 2,525 | 2,910 |
+
+All fail. The queue is near zero for long stretches, then rises slowly over 10-20 s to 40-68k parked requests and falls again. That holds up to 20 % of users, so arrivals drop too.
+
+Phase timing per second (TD_STATS): flush cost per answer tracks pass size, 9 us at ~190 passes/s, 12.5 us at ~55 passes/s. perf on CPU 0, in and out of a backlog, has the same shape (kernel 69 %, user 20 %), which reads as a uniform slowdown. My guess, unverified: passes of 512 answers walk more memory than the 1 MB L2. A/B on the pass size is queued.
+
+## Page cache: PENDING_BYTE page forces full hash scans
+
+`pcache1TruncateUnsafe` 1.5 % of CPU normally, 3.1 % in a backlog. bpftrace, about 8 s after the server started: ~30 calls/s from commits, 256-512 us each, `iMaxKey` 262,145, the pending-byte page: `balance_nonroot` parks a page under it, so the next commit scans the whole hash (this is the line #154's old SQLite patch changed). That patch is forbidden. The public `SQLITE_CONFIG_PCACHE2` is named as allowed in the leaderboard's rulings, so: `td_pcache` in td_btree.c, a dense array by key, a clock instead of an LRU list, truncate looks only at keys added above the last limit. Stress test against stock pcache1 under ASan and UBSan, 150-400 rounds of inserts, updates, deletes, rollbacks, VACUUM, checkpoint, reopen, at caches of 64 KB, 500 KB, 2 MB, 256 MB, WAL and rollback journal: same content hash, integrity_check ok, no sanitizer report.

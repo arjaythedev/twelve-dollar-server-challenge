@@ -5,14 +5,14 @@ use std::mem::size_of;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::os::fd::{AsRawFd, RawFd};
 use std::sync::mpsc::{Receiver, Sender};
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use io_uring::{cqueue, opcode, squeue, types, IoUring};
 
 use super::{parse_request, response_bytes, App, Handled, ParseResult};
-use crate::reader::{FeedReply, FeedRequest, PostReply, PostRequest, PostResponse};
+use crate::reader::PostResponse;
 use crate::stats;
 use crate::writer::{WriteJob, WriteResult};
 
@@ -26,10 +26,6 @@ const SLOT_MASK: u64 = (1 << 20) - 1;
 
 const FILE_TABLE: u32 = 65_000;
 const RING_ENTRIES: u32 = 4_096;
-const NEW_RING_AT: usize = 65_000;
-const MAX_RINGS: usize = 16;
-const MAX_READ_BATCH: usize = 8192;
-const READ_BATCH: usize = 256;
 const READ_BUF: usize = 2_048;
 const BUF_READ: usize = 512;
 const BUF_RING_ENTRIES: u16 = 32_768;
@@ -106,16 +102,6 @@ pub(crate) enum ReadKind {
     Post(i64),
 }
 
-struct FeedPending {
-    jobs: Vec<ReadJob>,
-    rx: Receiver<FeedReply>,
-}
-
-struct PostPending {
-    jobs: Vec<ReadJob>,
-    rx: Receiver<PostReply>,
-}
-
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct UringBuf {
@@ -181,7 +167,7 @@ impl BufRing {
         if (bid as usize) >= self.bufs.len() / BUF_READ {
             return;
         }
-        let slot = ((self.tail & self.mask) as usize);
+        let slot = (self.tail & self.mask) as usize ;
         let e = UringBuf {
             addr: unsafe { self.bufs.as_ptr().add(bid as usize * BUF_READ) as u64 },
             len: BUF_READ as u32,
@@ -319,7 +305,7 @@ impl RingState {
         let listener = make_listener(addr)?;
         let mut builder = IoUring::builder();
         builder.setup_cqsize(8_192);
-        let mut ring = match builder.build(RING_ENTRIES) {
+        let ring = match builder.build(RING_ENTRIES) {
             Ok(r) => r,
             Err(e) => {
                 unsafe {
@@ -757,40 +743,6 @@ fn process_ring(
     Ok(())
 }
 
-fn flush_feed(
-    reads: &mut Vec<ReadJob>,
-    pending: &mut Option<FeedPending>,
-    tx: &Sender<FeedRequest>,
-    event_fd: RawFd,
-) {
-    if pending.is_some() || reads.is_empty() {
-        return;
-    }
-    let take = reads.len().min(MAX_READ_BATCH);
-    let jobs: Vec<ReadJob> = reads.drain(..take).collect();
-    let (reply, rx) = std::sync::mpsc::channel();
-    if tx.send(FeedRequest { jobs: jobs.clone(), reply, event_fd }).is_ok() {
-        *pending = Some(FeedPending { jobs, rx });
-    }
-}
-
-fn flush_post(
-    reads: &mut Vec<ReadJob>,
-    pending: &mut Option<PostPending>,
-    tx: &Sender<PostRequest>,
-    event_fd: RawFd,
-) {
-    if pending.is_some() || reads.is_empty() {
-        return;
-    }
-    let take = reads.len().min(MAX_READ_BATCH);
-    let jobs: Vec<ReadJob> = reads.drain(..take).collect();
-    let (reply, rx) = std::sync::mpsc::channel();
-    if tx.send(PostRequest { jobs: jobs.clone(), reply, event_fd }).is_ok() {
-        *pending = Some(PostPending { jobs, rx });
-    }
-}
-
 fn apply_feed_jobs(
     app: &mut App,
     rings: &mut [RingState],
@@ -835,22 +787,6 @@ fn apply_feed_jobs(
                 let _ = r.ring.submit();
             }
         }
-    }
-}
-
-fn process_feed(
-    app: &mut App,
-    rings: &mut [RingState],
-    pending: &mut Option<FeedPending>,
-    write_rx: &Receiver<WriteResult>,
-) {
-    loop {
-        let reply = match pending.as_ref().and_then(|p| p.rx.try_recv().ok()) {
-            Some(reply) => reply,
-            None => break,
-        };
-        let Some(p) = pending.take() else { break };
-        apply_feed_jobs(app, rings, &p.jobs, reply.body, write_rx);
     }
 }
 
@@ -914,22 +850,6 @@ fn apply_post_jobs(
     }
 }
 
-fn process_post(
-    app: &mut App,
-    rings: &mut [RingState],
-    pending: &mut Option<PostPending>,
-    write_rx: &Receiver<WriteResult>,
-) {
-    loop {
-        let reply = match pending.as_ref().and_then(|p| p.rx.try_recv().ok()) {
-            Some(reply) => reply,
-            None => break,
-        };
-        let Some(p) = pending.take() else { break };
-        apply_post_jobs(app, rings, &p.jobs, reply.packets, write_rx);
-    }
-}
-
 fn process_writer(
     app: &mut App,
     rings: &mut [RingState],
@@ -975,116 +895,6 @@ fn process_writer(
                 let _ = r.ring.submit();
             }
         }
-    }
-}
-
-pub fn run_shard(
-    db_path: String,
-    secret: Vec<u8>,
-    coalesce: bool,
-    addr: String,
-    write_tx: Sender<WriteJob>,
-    write_result_tx: Sender<WriteResult>,
-    write_res_rx: Receiver<WriteResult>,
-    write_event_fd: RawFd,
-    feed_tx: Sender<FeedRequest>,
-    post_tx: Sender<PostRequest>,
-    dirty: Arc<AtomicU64>,
-    shard: usize,
-) -> io::Result<()> {
-    let mut app = App::open(&db_path, secret, coalesce)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-    let mut ring = RingState::new(&addr)?;
-    let read_event_fd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC) };
-    if read_event_fd < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let _ = shard;
-    let mut feed_reads: Vec<ReadJob> = Vec::new();
-    let mut post_reads: Vec<ReadJob> = Vec::new();
-    let mut feed_pending: Option<FeedPending> = None;
-    let mut post_pending: Option<PostPending> = None;
-    let mut fds: Vec<libc::pollfd> = Vec::with_capacity(3);
-    loop {
-        process_writer(&mut app, std::slice::from_mut(&mut ring), &write_res_rx);
-        process_feed(
-            &mut app,
-            std::slice::from_mut(&mut ring),
-            &mut feed_pending,
-            &write_res_rx,
-        );
-        process_post(
-            &mut app,
-            std::slice::from_mut(&mut ring),
-            &mut post_pending,
-            &write_res_rx,
-        );
-        app.read.refresh();
-        process_ring(
-            0,
-            &mut ring,
-            &mut app,
-            &write_tx,
-            &write_result_tx,
-            write_event_fd,
-            &mut feed_reads,
-            &mut post_reads,
-        )?;
-        process_writer(&mut app, std::slice::from_mut(&mut ring), &write_res_rx);
-        flush_feed(&mut feed_reads, &mut feed_pending, &feed_tx, read_event_fd);
-        flush_post(&mut post_reads, &mut post_pending, &post_tx, read_event_fd);
-
-        fds.clear();
-        fds.push(libc::pollfd {
-            fd: ring.ring.as_raw_fd(),
-            events: libc::POLLIN,
-            revents: 0,
-        });
-        fds.push(libc::pollfd {
-            fd: write_event_fd,
-            events: libc::POLLIN,
-            revents: 0,
-        });
-        fds.push(libc::pollfd {
-            fd: read_event_fd,
-            events: libc::POLLIN,
-            revents: 0,
-        });
-        let rc = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, 1) };
-        if rc < 0 {
-            let e = io::Error::last_os_error();
-            if e.raw_os_error() != Some(libc::EINTR) {
-                return Err(e);
-            }
-        }
-        let mut val = 0u64;
-        unsafe {
-            libc::read(
-                write_event_fd,
-                &mut val as *mut u64 as *mut libc::c_void,
-                size_of::<u64>(),
-            );
-            libc::read(
-                read_event_fd,
-                &mut val as *mut u64 as *mut libc::c_void,
-                size_of::<u64>(),
-            );
-        }
-        process_writer(&mut app, std::slice::from_mut(&mut ring), &write_res_rx);
-        process_feed(
-            &mut app,
-            std::slice::from_mut(&mut ring),
-            &mut feed_pending,
-            &write_res_rx,
-        );
-        process_post(
-            &mut app,
-            std::slice::from_mut(&mut ring),
-            &mut post_pending,
-            &write_res_rx,
-        );
-        flush_feed(&mut feed_reads, &mut feed_pending, &feed_tx, read_event_fd);
-        flush_post(&mut post_reads, &mut post_pending, &post_tx, read_event_fd);
     }
 }
 

@@ -1,13 +1,7 @@
 use std::env;
 use std::io;
-use std::io::Write as _;
-use std::sync::mpsc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-mod checkpoint;
 mod db;
 mod reader;
 mod stats;
@@ -194,48 +188,6 @@ impl App {
             }
             _ => Handled::Reply(404, error("not found")),
         }
-    }
-}
-
-pub(crate) fn apply_write(write: &db::WriteDb, cmd: &WriteCmd) -> (u16, Vec<u8>) {
-    match &cmd.kind {
-        WriteKind::Create {
-            user_id,
-            username,
-            body,
-        } => match write.create_post(*user_id, body) {
-            Ok((id, created_at)) => {
-                let body_json = json_string(body);
-                let author_json = json_string(username);
-                let created_json = json_string(&created_at);
-                (
-                    201,
-                    format!(
-                        "{{\"post\":{{\"id\":{id},\"body\":{body_json},\"created_at\":{created_json},\"author\":{author_json},\"like_count\":0}}}}"
-                    )
-                    .into_bytes(),
-                )
-            }
-            Err(e) => {
-                eprintln!("create error: {e}");
-                (500, error("internal server error"))
-            }
-        },
-        WriteKind::Like { user_id, post_id } => match write.like(*user_id, *post_id) {
-            Ok(Some((inserted, _count))) => {
-                let status = if inserted { 201 } else { 200 };
-                (
-                    status,
-                    format!(
-                        "{{\"liked\":true,\"already_liked\":{},\"post_id\":{post_id}}}",
-                        !inserted
-                    )
-                    .into_bytes(),
-                )
-            }
-            Ok(None) => (404, error("post not found")),
-            Err(_) => (500, error("internal server error")),
-        },
     }
 }
 

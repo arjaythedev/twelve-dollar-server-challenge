@@ -46,13 +46,6 @@ impl BatchCache {
             post_exists: db.prepare_static(POST_EXISTS_SQL).ok(),
         }
     }
-
-    pub fn clear(&mut self) {
-        self.post_insert = None;
-        self.like_insert = None;
-        self.like_insert_filtered = None;
-        self.post_exists = None;
-    }
 }
 
 pub struct WriteJob {

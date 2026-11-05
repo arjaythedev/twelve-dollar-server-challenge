@@ -351,7 +351,10 @@ and 280,000 failed the 2-minute probe on p99 (2.26 s at 76 % CPU / 3.30 s at 85 
 ᵋ **objc-uring-delneg** stays on its merged #154 row. Its follow-up **#326** (`197ad57`, PCACHE2 page cache, newest-first
 answers once a backlog builds, OOM at 290k fixed; held, not merged: it didn't beat the merged row, it tied it) also held
 **280,000** (26,714 req/s, p95 189.9 / p99 348.5 ms, 0 err, 79 % CPU, 27 µs/req, 807 MB, 2026-11-05). 290,000 and
-300,000 failed the 2-minute probe on p99 (1.05 s at 84 % CPU / 2.33 s at 84 % CPU, 0 errors).
+300,000 failed the 2-minute probe on p99 (1.05 s at 84 % CPU / 2.33 s at 84 % CPU, 0 errors). Re-run at its newer head
+`2b4d6d8` (`--lifocap` backlog-share tuning): **280,000** again (26,702 req/s, p95 82.3 / p99 567.4 ms, 0 err, 78 % CPU,
+26 µs/req, 1,323 MB, 2026-11-05); 290,000 and 300,000 failed the 2-minute probe on p95 (1.13 s at 82 % CPU / 1.20 s at
+87 % CPU, 0 errors).
 
 **Connection collapses in scored entries' failing probes.** v-epoll-i098 #191: 270,000 passed the 2-minute probe but
 failed the 5-minute hold with 60 % errors, nearly all `connection refused` from mid-hold on (an earlier attempt at

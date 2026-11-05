@@ -374,3 +374,42 @@ H16: about 4 % less CPU per request, two pairs. H17: no clear gain from smaller 
 Consult 1105-192451-31a6 (DeepSeek): a fixed 1/8 share never shrinks a backlog, so the share now grows with age. Its claims on `msg_name` and registering files don't apply: sends have no address and sockets are direct descriptors.
 
 Costs so far: DeepSeek consults $0.0193 + $0.0229 + $0.0126, a few `ds` searches at ~$0.00075 each (count not logged). About $0.06 of the $1 limit.
+
+PR #326 opened on `197ad57` at Denis's order (5 Nov), before a repeated 310k hold. Clean install on that head: opt-box Docker `ubuntu:24.04`, 1 CPU, 2 GB, kernel 7.0: install.sh 71 s, 42/42. v10 at 350k: cgroup OOM kill of the server at MemoryMax=1750M, so the OOM limit moved up rather than away.
+
+## E67-E71: holds after the PR (5 Nov, SRVMB=1850 BURN=8, MEAS=300)
+
+| build | users | rps | p50 | p95 | p99 | max | result |
+|---|---:|---:|---:|---:|---:|---:|---|
+| v12 lifoage=400, bufs=4096 | 310k | 32,361 | 10 | 695 | 1,220 | 1,546 | fail; RSS 197 MB against 185 |
+| v12 lifoage=250 | 320k | 32,734 | 235 | 1,205 | 1,375 | 1,643 | fail, stuck at FIFO at 250 ms, ~20 us/req |
+| v12 lifoage=250 (head of #326) | 310k | 32,637 | 7 | 380 | 575 | 821 | **pass**, second of two |
+| v13 cap 1/2 until 2×lifoage, 250 | 320k | 33,601 | 10 | 525 | 620 | 905 | p95 just over; first run that reaches the 320k rate |
+| v13 250 | 310k | 32,601 | 8 | 515 | 725 | 994 | p95 just over |
+| v13 300 | 320k | 33,362 | 16 | 715 | 1,370 | 1,792 | fail |
+
+With all of a pass going to the old end at the age limit, a run past capacity stays in the slow state: all replies late, ~20 us/req, 32.7k req/s at most. v13 caps the old end at half up to twice the limit, keeps half the replies fast, and the queue empties again after each rise (peaks 37k, 16k, 8k, then back under 2k). p95 sits at about twice the limit, so a lower limit is next.
+
+## E72-E76 (5 Nov, same harness, MEAS=300)
+
+| build | users | rps | p50 | p95 | p99 | max | result |
+|---|---:|---:|---:|---:|---:|---:|---|
+| v13 250, `--cache=80000` | 310k | 32,109 | 15 | 925 | 1,050 | 1,283 | fail, the cache cap costs more than it saves (RSS 156 MB, 19.7 us/req) |
+| v13 200 | 320k | 32,292 | 430 | 1,330 | 1,670 | 1,921 | fail, stuck: all of a pass goes to the old end at 400 ms |
+| v14 150, seven eighths at 4×limit | 320k | 31,130 | 625 | 2,040 | 5,320 | 6,032 | fail |
+| v14 200 | 320k | 32,824 | 22 | 1,065 | 1,705 | 1,949 | fail |
+| v14 150 | 310k | 32,606 | 8 | 395 | 655 | 942 | pass |
+
+Run-to-run spread is wide, so one rep of a setting says little. Not pushed: v13 and v14 aren't clearly better than the #326 head at 310k (103/235, 380/575). Three experiments left.
+
+## E77-E80: last holds (5 Nov, same harness, MEAS=300)
+
+E77 v14 150 at 330k: stopped early, void, and counted anyway.
+
+| build | users | rps | p50 | p95 | p99 | max | result |
+|---|---:|---:|---:|---:|---:|---:|---|
+| v13 250 | 320k | 33,235 | 16 | 940 | 1,475 | 1,801 | fail |
+| v13 225 | 320k | 33,570 | 10 | 500 | 905 | 1,170 | on the p95 limit (p95 must be under 500) |
+| v13 225 | 310k | 32,728 | 5.7 | 53 | 425 | 704 | pass, 17.32 us/req |
+
+v13 with 225 becomes the default. v14 dropped. At 320k reclaim starts near the end of a hold (scanK 370k and majf 6k per 44 s in the v14 150 run), so the memory wall is still close there.

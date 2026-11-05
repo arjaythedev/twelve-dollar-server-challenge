@@ -45,3 +45,4 @@ NEW H16 (5 Nov): page cache through PCACHE2 (dense array, clock, cheap truncate)
 NEW H17 (5 Nov): smaller passes. Challenges "a bigger batch is cheaper per request" (flush per answer rises from 9 to 12.5 us as passes grow). Flag `--answers`.
 H16 status: kept, about 4 % less CPU per request over two pairs.
 H17 status: dropped, 512 stays. 128 and 64 show no clear gain over two pairs.
+Cache cap to delay the memory wall (`--cache=80000`): dropped after one rep, CPU per request rose to 19.7 us.

@@ -48,6 +48,20 @@ if (!JWT_SECRET) {
 // is given, so no migration/sync runs against it; the file is used as-is.
 const db = createDatabase({ path: SQLITE_PATH });
 
+// WAL auto-checkpoint threshold: Yatta opens the DB with WAL +
+// synchronous NORMAL + busy_timeout, and SQLite's default auto-checkpoint
+// (1,000 WAL pages) fires a checkpoint inline in a write transaction every
+// ~1,000 pages — measured locally at ~425us per like-INSERT, of which
+// ~175us is checkpoint amortization (raw fsync here is ~10us, and
+// synchronous=FULL is 16.5ms, so NORMAL itself is not the cost).
+// Raising the threshold to 50,000 pages cuts the like-INSERT to ~204us
+// (same as disabling auto-checkpoint entirely, ~201us) while bounding the
+// WAL at ~200MB; feed reads are unaffected (41.5us with a 70MB WAL
+// present vs 41.9us on a clean DB). Durability is unchanged: journal
+// mode stays WAL, synchronous stays NORMAL, and the fixed schema is
+// untouched — only when WAL pages are copied back to the main DB moves.
+db.exec("PRAGMA wal_autocheckpoint = 50000;");
+
 const startedAt = Date.now();
 
 // ---------------------------------------------------------------------------

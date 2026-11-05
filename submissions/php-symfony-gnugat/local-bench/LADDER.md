@@ -22,7 +22,7 @@ Two measures, both throttled:
   round.
 
 Users searched 2026-10-30 to 2026-11-01, requests per second measured 2026-11-06, on FrankenPHP 1.13.0 (PHP 8.5.11) and
-Symfony 8.1.8, before the update to FrankenPHP 1.13.4 (PHP 8.5.12) and Symfony 8.1.10 for their security fixes.
+Symfony 8.1.8, before the updates to FrankenPHP 1.13.5 (PHP 8.5.12) and Symfony 8.1.11 for their security fixes.
 
 **Only compare these numbers with each other.** The leaderboard's box is not a quarter of this core: #256, this app's
 last scored version (`4a11a5d`), scores 18,500 users there and 5,500 here (3.36 times as many), PR 40 21,000 and 5,750

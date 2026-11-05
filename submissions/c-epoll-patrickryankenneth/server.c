@@ -948,7 +948,7 @@ static int uring_serve(int lfd, unsigned nofile, const char *host, const char *p
     for (int i = 1; i < NR; i++) ring_flush(&rg[i]);
     uring *r0 = &rg[0];
     __atomic_store_n(r0->sq_tail, r0->sq_local, __ATOMIC_RELEASE);
-    int n = sys_enter_to(r0->fd, r0->to_submit, 16, IORING_ENTER_GETEVENTS, 1000000);
+    int n = sys_enter_to(r0->fd, r0->to_submit, 1, IORING_ENTER_GETEVENTS, 1000000);
     if (n < 0) { if (errno != EINTR && errno != EBUSY && errno != EAGAIN && errno != ETIME) { perror("io_uring_enter"); exit(1); } }
     else r0->to_submit -= (unsigned)n;
     for (int i = 0; i < NR; i++) reap(i);

@@ -38,7 +38,10 @@ fn C.sqlite3_column_bytes(&C.sqlite3_stmt, i32) i32
 fn C.sqlite3_changes(&C.sqlite3) i32
 fn C.sqlite3_errmsg(&C.sqlite3) &char
 fn C.sqlite3_db_config(&C.sqlite3, i32, i32, voidptr) i32
-fn C.HMAC(voidptr, voidptr, i32, &u8, usize, &u8, &u32) &u8
+fn C.HMAC_CTX_new() voidptr
+fn C.HMAC_Init_ex(voidptr, voidptr, i32, voidptr, voidptr) i32
+fn C.HMAC_Update(voidptr, &u8, usize) i32
+fn C.HMAC_Final(voidptr, &u8, &u32) i32
 fn C.sqlite3_wal_hook(&C.sqlite3, voidptr, voidptr) voidptr
 fn C.eventfd(u32, i32) i32
 fn C.td_ckpt_start(&char, int, int)
@@ -126,6 +129,7 @@ mut:
 	in_txn    bool
 	btree_feed bool // td_feed_init found the schema it reads directly
 	secret    []u8
+	hmac      voidptr // HMAC_CTX keyed with secret once; each token reuses its hashed key blocks
 	started   i64
 	transport &C.td_net = unsafe { nil }
 	conns     []Conn
@@ -670,7 +674,14 @@ fn (mut s Server) auth(buf []u8, start int, end int) !(i64, string) {
 	}
 	mut mac := [32]u8{}
 	mut mac_len := u32(0)
-	C.HMAC(C.EVP_sha256(), s.secret.data, s.secret.len, token.str, dot2, &mac[0], &mac_len)
+	if s.hmac == unsafe { nil } {
+		s.hmac = C.HMAC_CTX_new()
+		C.HMAC_Init_ex(s.hmac, s.secret.data, s.secret.len, C.EVP_sha256(), unsafe { nil })
+	} else {
+		C.HMAC_Init_ex(s.hmac, unsafe { nil }, 0, unsafe { nil }, unsafe { nil })
+	}
+	C.HMAC_Update(s.hmac, token.str, usize(dot2))
+	C.HMAC_Final(s.hmac, &mac[0], &mac_len)
 	mut sig := [43]u8{}
 	b64url_encode_32(mac, mut sig)
 	mut diff := u8(0)

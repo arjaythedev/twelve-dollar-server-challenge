@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crawshaw.io/sqlite"
 	"crawshaw.io/sqlite/sqlitex"
 	"errors"
@@ -29,7 +30,7 @@ func Health(pool *sqlitex.Pool) fasthttp.RequestHandler {
 			_, _ = fmt.Fprintf(ctx, `{"status":"degraded","db":"unreachable","error":"internal server error"}`)
 		} else {
 			ctx.SetStatusCode(fasthttp.StatusOK)
-			_, _ = fmt.Fprintf(ctx, `{"status":"ok","db":"ok","uptime_s": %d}`, int64(time.Since(started).Seconds()))
+			_, _ = fmt.Fprintf(ctx, `{"status":"ok","db":"ok","uptime_s":%d}`, int64(time.Since(started).Seconds()))
 		}
 	}
 }
@@ -164,8 +165,53 @@ func CreatePost(pool *sqlitex.Pool) fasthttp.RequestHandler {
 }
 
 func LikePost(pool *sqlitex.Pool) fasthttp.RequestHandler {
+	var arenas fastjson.ArenaPool
+	const query = `INSERT INTO likes (user_id, post_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`
+
 	return func(ctx *fasthttp.RequestCtx) {
-		ctx.SetStatusCode(200)
+		id, err := strconv.ParseInt(ctx.UserValue("id").(string), 10, 64)
+		if err != nil || id < 1 {
+			erred(ctx, fasthttp.StatusBadRequest, errors.New("invalid post id"))
+			return
+		}
+
+		conn := pool.Get(ctx)
+		defer pool.Put(conn)
+
+		stmt := conn.Prep(query)
+		defer clearAndReset(stmt)
+
+		stmt.BindInt64(1, 1) // TODO: get user_id from auth token
+		stmt.BindInt64(2, id)
+
+		ok, err := stmt.Step()
+		if err != nil {
+			if sqlite.ErrCode(err) == sqlite.SQLITE_CONSTRAINT_FOREIGNKEY {
+				erred(ctx, fasthttp.StatusNotFound, errors.New("post not found"))
+			} else {
+				erred(ctx, fasthttp.StatusInternalServerError, err)
+			}
+		} else {
+			ctx.SetContentType("application/json")
+
+			arena := arenas.Get()
+			defer arenas.Put(arena)
+
+			ret := arena.NewObject()
+			ret.Set("liked", arena.NewTrue())
+			if !ok {
+				ctx.SetStatusCode(fasthttp.StatusOK)
+				ret.Set("already_liked", arena.NewTrue())
+			} else {
+				ctx.SetStatusCode(fasthttp.StatusCreated)
+				ret.Set("already_liked", arena.NewFalse())
+			}
+			ret.Set("post_id", arena.NewNumberInt(int(id)))
+
+			if _, err = io.Copy(ctx, bytes.NewReader(ret.MarshalTo(nil))); err != nil {
+				erred(ctx, fasthttp.StatusInternalServerError, err)
+			}
+		}
 	}
 }
 

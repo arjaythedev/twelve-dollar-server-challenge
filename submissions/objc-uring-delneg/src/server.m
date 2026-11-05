@@ -10,7 +10,8 @@
 #include <unistd.h>
 
 #define BUF_SIZE 1024u
-#define BUF_COUNT 4096u        // per ring, power of two
+uint32_t td_opt_bufs = 1024;   // --bufs=N: receive buffers per ring, a power of two
+#define BUF_COUNT td_opt_bufs
 #define BUF_GROUP 0
 #define MAX_REQ 16384u         // bytes of one request (headers + body)
 
@@ -98,7 +99,7 @@ int td_opt_onewrite = 1;   // --onewrite=0|1
 int td_opt_rearm = 2048;   // --rearm=N: receives re-armed per ring per pass (0: all at once)
 uint32_t td_opt_answers = 512;    // --answers=N: requests answered per pass; the rest stay parked in the batch (0: all)
 int td_opt_lifo = 1;              // --lifo=0|1: past one pass of backlog, answer the newest first
-uint32_t td_opt_lifoage = 500;    // --lifoage=MS: past this age the old end gets half of each pass
+uint32_t td_opt_lifoage = 400;    // --lifoage=MS: the age at which the old end gets the whole pass
 
 // ---------------------------------------------------------------- helpers
 TD_INLINE bool ieq(const char *a, const char *lower, uint32_t n) {
@@ -625,10 +626,18 @@ static const char *find_crlf2(const char *p, uint32_t n) {
     if (last - first > budget) last = first + budget;   // only a first look: routes only
     // A request answered more than 40 ms after it arrived has cost the kernel a delayed-ACK timer and a bare ACK, about
     // a fifth more CPU per request. In a backlog, oldest-first makes every newcomer wait that long too, and the extra
-    // CPU keeps the backlog alive. So past one pass of backlog the newest go first, while an eighth of each pass, or half
-    // when the oldest has been parked for too long, goes from the old end. A connection's own requests keep their order.
+    // CPU keeps the backlog alive. So past one pass of backlog the newest go first, and the old end gets a share of the
+    // pass that grows with the age of the oldest: an eighth up to a quarter of --lifoage, all of it at --lifoage. So the
+    // oldest stay near that age, and under a lasting overload the order is plain FIFO at that age. A connection's own
+    // requests keep their order.
     bool lifo = td_opt_lifo && nreq - first > budget;
-    uint32_t oldShare = lifo ? budget / 8 : budget;
+    uint32_t oldShare = budget;
+    if (lifo) {
+        uint32_t age = passMs - reqs[first].ms, a = td_opt_lifoage, low = a / 4;
+        if (age >= a) oldShare = budget;
+        else if (age <= low) oldShare = budget / 8;
+        else oldShare = budget / 8 + (uint32_t)((uint64_t)(budget - budget / 8) * (age - low) / (a - low));
+    }
     if (hold || lifo) db = true;
     else for (uint32_t i = first; i < last; i++) if (reqs[i].route != R_ERR) { db = true; break; }
     bool wrote = false;
@@ -639,7 +648,7 @@ static const char *find_crlf2(const char *p, uint32_t n) {
     // 3-4 KB network buffer, so reading goes on while a pass stays short.
     for (; i < nreq && answered < budget; i++) {
         TDReq *r = &reqs[i];
-        if (lifo && answered >= oldShare && (answered >= budget / 2 || passMs - r->ms < td_opt_lifoage)) break;
+        if (lifo && answered >= oldShare) break;
         TDConn *c = conn_at(self, r->slot);
         if (c->gen != r->gen) continue;
         if (!c->live && !c->closeAfter) { c->queued--; continue; }

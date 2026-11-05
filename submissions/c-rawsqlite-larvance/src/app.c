@@ -248,9 +248,9 @@ static void exec_write(job_t *j) {
     }
     case K_CREATE: {
       i64 id = 0;
-      const u8 *created = NULL;
+      u8 created[64];
       u32 created_len = 0;
-      int rc = db_create_post(j->uid, j->text, j->text_len, &id, &created, &created_len);
+      int rc = db_create_post(j->uid, j->text, j->text_len, &id, created, &created_len);
       if (rc != 0) {
         j->resp = ERR(INTERNAL);
         return;

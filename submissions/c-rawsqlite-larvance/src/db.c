@@ -7,11 +7,11 @@
 
 typedef struct {
   i64 id;
-  const u8 *body;
+  u8 body[2048];
   u32 body_len;
-  const u8 *created_at;
+  u8 created_at[64];
   u32 created_at_len;
-  const u8 *author;
+  u8 author[128];
   u32 author_len;
   i64 like_count;
 } db_post_view_t;
@@ -338,11 +338,26 @@ int db_get_post(i64 post_id, db_post_view_t *view) {
   const u8 *payload = cursor_fetch_record(cursor_posts, &len);
   if (!payload) return -1;
   i64 uid = 0;
-  if (extract_post_row(payload, len, &uid, &view->body, &view->body_len, &view->created_at, &view->created_at_len) != 0) {
+  const u8 *pbody = NULL, *pcreated = NULL;
+  u32 blen = 0, clen = 0;
+  if (extract_post_row(payload, len, &uid, &pbody, &blen, &pcreated, &clen) != 0) {
     return -1;
   }
+  if (blen >= sizeof(view->body)) blen = sizeof(view->body) - 1;
+  if (clen >= sizeof(view->created_at)) clen = sizeof(view->created_at) - 1;
+  memcpy(view->body, pbody, blen);
+  view->body_len = blen;
+  memcpy(view->created_at, pcreated, clen);
+  view->created_at_len = clen;
   view->id = post_id;
-  if (db_fetch_author(uid, &view->author, &view->author_len) != 0) return -1;
+
+  const u8 *pauthor = NULL;
+  u32 alen = 0;
+  if (db_fetch_author(uid, &pauthor, &alen) != 0) return -1;
+  if (alen >= sizeof(view->author)) alen = sizeof(view->author) - 1;
+  memcpy(view->author, pauthor, alen);
+  view->author_len = alen;
+
   view->like_count = 0;
   if (tally_likes_span(post_id, post_id, &view->like_count) != 0) return -1;
   return 0;
@@ -354,56 +369,54 @@ int db_get_feed(db_feed_result_t *feed) {
   if (sqlite3BtreeLast(cursor_posts, &empty) != SQLITE_OK) return -1;
   if (empty) return 0;
 
-  struct {
-    i64 id;
-    i64 uid;
-    const u8 *body;
-    u32 body_len;
-    const u8 *created;
-    u32 created_len;
-  } collected[20];
-
+  i64 uids[20];
   int n = 0;
   for (int i = 0; i < 20; i++) {
-    collected[n].id = sqlite3BtreeIntegerKey(cursor_posts);
+    feed->items[n].id = sqlite3BtreeIntegerKey(cursor_posts);
     u32 len = 0;
     const u8 *payload = cursor_fetch_record(cursor_posts, &len);
     if (!payload) return -1;
-    if (extract_post_row(payload, len, &collected[n].uid,
-                         &collected[n].body, &collected[n].body_len,
-                         &collected[n].created, &collected[n].created_len) != 0) {
+    const u8 *pbody = NULL, *pcreated = NULL;
+    u32 blen = 0, clen = 0;
+    if (extract_post_row(payload, len, &uids[n], &pbody, &blen, &pcreated, &clen) != 0) {
       return -1;
     }
+    if (blen >= sizeof(feed->items[n].body)) blen = sizeof(feed->items[n].body) - 1;
+    if (clen >= sizeof(feed->items[n].created_at)) clen = sizeof(feed->items[n].created_at) - 1;
+    memcpy(feed->items[n].body, pbody, blen);
+    feed->items[n].body_len = blen;
+    memcpy(feed->items[n].created_at, pcreated, clen);
+    feed->items[n].created_at_len = clen;
     n++;
     int step_rc = sqlite3BtreePrevious(cursor_posts, 0);
     if (step_rc != SQLITE_OK) break;
   }
 
   if (n == 0) return 0;
-  i64 hi = collected[0].id;
-  i64 lo = collected[n - 1].id;
+  i64 hi = feed->items[0].id;
+  i64 lo = feed->items[n - 1].id;
   if (hi - lo < 64) {
     i64 counts[64];
     if (tally_likes_span(lo, hi, counts) != 0) return -1;
     for (int i = 0; i < n; i++) {
-      feed->items[i].id = collected[i].id;
-      feed->items[i].body = collected[i].body;
-      feed->items[i].body_len = collected[i].body_len;
-      feed->items[i].created_at = collected[i].created;
-      feed->items[i].created_at_len = collected[i].created_len;
-      feed->items[i].like_count = counts[collected[i].id - lo];
-      if (db_fetch_author(collected[i].uid, &feed->items[i].author, &feed->items[i].author_len) != 0) return -1;
+      feed->items[i].like_count = counts[feed->items[i].id - lo];
+      const u8 *pauthor = NULL;
+      u32 alen = 0;
+      if (db_fetch_author(uids[i], &pauthor, &alen) != 0) return -1;
+      if (alen >= sizeof(feed->items[i].author)) alen = sizeof(feed->items[i].author) - 1;
+      memcpy(feed->items[i].author, pauthor, alen);
+      feed->items[i].author_len = alen;
     }
   } else {
     for (int i = 0; i < n; i++) {
-      feed->items[i].id = collected[i].id;
-      feed->items[i].body = collected[i].body;
-      feed->items[i].body_len = collected[i].body_len;
-      feed->items[i].created_at = collected[i].created;
-      feed->items[i].created_at_len = collected[i].created_len;
       feed->items[i].like_count = 0;
-      if (tally_likes_span(collected[i].id, collected[i].id, &feed->items[i].like_count) != 0) return -1;
-      if (db_fetch_author(collected[i].uid, &feed->items[i].author, &feed->items[i].author_len) != 0) return -1;
+      if (tally_likes_span(feed->items[i].id, feed->items[i].id, &feed->items[i].like_count) != 0) return -1;
+      const u8 *pauthor = NULL;
+      u32 alen = 0;
+      if (db_fetch_author(uids[i], &pauthor, &alen) != 0) return -1;
+      if (alen >= sizeof(feed->items[i].author)) alen = sizeof(feed->items[i].author) - 1;
+      memcpy(feed->items[i].author, pauthor, alen);
+      feed->items[i].author_len = alen;
     }
   }
   feed->count = n;
@@ -425,7 +438,7 @@ int db_like_post(i64 user_id, i64 post_id, int *out_already_liked) {
   return 0;
 }
 
-int db_create_post(i64 user_id, const u8 *body, u32 body_len, i64 *out_id, const u8 **out_created_at, u32 *out_created_at_len) {
+int db_create_post(i64 user_id, const u8 *body, u32 body_len, i64 *out_id, u8 out_created[64], u32 *out_created_len) {
   sqlite3_bind_int64(stmt_insert_post, 1, user_id);
   sqlite3_bind_text(stmt_insert_post, 2, (const char *)body, (int)body_len, SQLITE_STATIC);
   int rc = sqlite3_step(stmt_insert_post);
@@ -434,8 +447,12 @@ int db_create_post(i64 user_id, const u8 *body, u32 body_len, i64 *out_id, const
     return -1;
   }
   *out_id = sqlite3_column_int64(stmt_insert_post, 0);
-  *out_created_at = sqlite3_column_text(stmt_insert_post, 1);
-  *out_created_at_len = (u32)sqlite3_column_bytes(stmt_insert_post, 1);
+  const u8 *txt = sqlite3_column_text(stmt_insert_post, 1);
+  u32 len = (u32)sqlite3_column_bytes(stmt_insert_post, 1);
+  if (len >= 64) len = 63;
+  memcpy(out_created, txt, len);
+  out_created[len] = '\0';
+  *out_created_len = len;
   sqlite3_reset(stmt_insert_post);
   return 0;
 }

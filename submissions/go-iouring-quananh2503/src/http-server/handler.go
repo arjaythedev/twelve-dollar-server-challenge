@@ -21,7 +21,7 @@ func buildHTTPResponse(w *PacketWriter, statusText string, body []byte) {
 	w.WriteBytes(body)
 }
 
-func appendResponse(outTasks *[]iouring.SendInfo, sendPool *BufferPool, fd int32, data []byte) {
+func appendResponse(outTasks *[]iouring.SendInfo, sendPool *BufferPool, fixedFD int32, data []byte) {
 	bufID, err := sendPool.Acquire()
 	if err != nil {
 		return
@@ -31,24 +31,21 @@ func appendResponse(outTasks *[]iouring.SendInfo, sendPool *BufferPool, fd int32
 
 	*outTasks = append(*outTasks, iouring.SendInfo{
 		Opcode:   iouring.OpSend,
-		FD:       fd,
+		Flags:    iouring.IOSQE_FIXED_FILE,
+		FD:       fixedFD,
 		Buf:      buf[:n],
-		UserData: EncodeUserData(EventSend, bufID, fd),
+		UserData: EncodeUserData(EventSend, bufID, fixedFD),
 	})
 }
 
 // =============================================================================
-// 1. ACCEPT SYSTEM
+// 1. ACCEPT SYSTEM (TREO MULTISHOT RECV TRÊN FIXED FD MỚI)
 // =============================================================================
 
-type AcceptSystem struct {
-	RecvPool *BufferPool
-}
+type AcceptSystem struct{}
 
-func NewAcceptSystem(pool *BufferPool) *AcceptSystem {
-	return &AcceptSystem{
-		RecvPool: pool,
-	}
+func NewAcceptSystem() *AcceptSystem {
+	return &AcceptSystem{}
 }
 
 func (s *AcceptSystem) Process(events []AcceptEvent, outTasks *[]iouring.SendInfo) {
@@ -58,17 +55,14 @@ func (s *AcceptSystem) Process(events []AcceptEvent, outTasks *[]iouring.SendInf
 			continue
 		}
 
-		// Treo ngay một lệnh RECV trên client FD mới
-		bufID, err := s.RecvPool.Acquire()
-		if err != nil {
-			continue
-		}
-		buf := s.RecvPool.Get(bufID)
+		// Treo 1 lệnh Multishot Recv duy nhất trên client fixed FD mới
 		*outTasks = append(*outTasks, iouring.SendInfo{
 			Opcode:   iouring.OpRecv,
+			Flags:    iouring.IOSQE_FIXED_FILE | iouring.IOSQE_BUFFER_SELECT,
+			IOPrio:   iouring.IORING_RECV_MULTISHOT,
 			FD:       ev.ClientFD,
-			Buf:      buf,
-			UserData: EncodeUserData(EventRecv, bufID, ev.ClientFD),
+			BufIndex: 0,
+			UserData: EncodeUserData(EventRecv, 0, ev.ClientFD),
 		})
 	}
 }
@@ -82,16 +76,14 @@ type HealthSystem struct {
 	writer   *PacketWriter
 	bodyW    *PacketWriter
 	SendPool *BufferPool
-	RecvPool *BufferPool
 }
 
-func NewHealthSystem(db *DB, sendPool, recvPool *BufferPool) *HealthSystem {
+func NewHealthSystem(db *DB, sendPool *BufferPool) *HealthSystem {
 	return &HealthSystem{
 		db:       db,
 		writer:   NewPacketWriter(1024),
 		bodyW:    NewPacketWriter(512),
 		SendPool: sendPool,
-		RecvPool: recvPool,
 	}
 }
 
@@ -121,7 +113,6 @@ func (s *HealthSystem) Process(events []HealthEvent, outTasks *[]iouring.SendInf
 
 	for i := range events {
 		ev := &events[i]
-		s.RecvPool.Release(ev.BufID)
 		appendResponse(outTasks, s.SendPool, ev.FD, respBytes)
 	}
 }
@@ -135,17 +126,15 @@ type FeedSystem struct {
 	writer   *PacketWriter
 	bodyW    *PacketWriter
 	SendPool *BufferPool
-	RecvPool *BufferPool
 	feedBuf  []byte
 }
 
-func NewFeedSystem(db *DB, sendPool, recvPool *BufferPool) *FeedSystem {
+func NewFeedSystem(db *DB, sendPool *BufferPool) *FeedSystem {
 	return &FeedSystem{
 		db:       db,
 		writer:   NewPacketWriter(16384),
 		bodyW:    NewPacketWriter(16384),
 		SendPool: sendPool,
-		RecvPool: recvPool,
 		feedBuf:  make([]byte, 65536),
 	}
 }
@@ -169,7 +158,6 @@ func (s *FeedSystem) Process(events []FeedEvent, outTasks *[]iouring.SendInfo) {
 
 	for i := range events {
 		ev := &events[i]
-		s.RecvPool.Release(ev.BufID)
 		appendResponse(outTasks, s.SendPool, ev.FD, respBytes)
 	}
 }
@@ -183,20 +171,18 @@ type GetPostSystem struct {
 	writer   *PacketWriter
 	bodyW    *PacketWriter
 	SendPool *BufferPool
-	RecvPool *BufferPool
 
 	ids    []int64
 	items  []sqlite.PostBatchItem
 	outBuf []byte
 }
 
-func NewGetPostSystem(db *DB, sendPool, recvPool *BufferPool) *GetPostSystem {
+func NewGetPostSystem(db *DB, sendPool *BufferPool) *GetPostSystem {
 	return &GetPostSystem{
 		db:       db,
 		writer:   NewPacketWriter(4096),
 		bodyW:    NewPacketWriter(2048),
 		SendPool: sendPool,
-		RecvPool: recvPool,
 		ids:      make([]int64, 4096),
 		items:    make([]sqlite.PostBatchItem, 4096),
 		outBuf:   make([]byte, 2*1024*1024),
@@ -226,7 +212,6 @@ func (s *GetPostSystem) Process(events []GetPostEvent, outTasks *[]iouring.SendI
 
 	for i := 0; i < n; i++ {
 		ev := &events[i]
-		s.RecvPool.Release(ev.BufID)
 
 		if err != nil {
 			s.bodyW.Reset()
@@ -261,7 +246,6 @@ type CreatePostSystem struct {
 	writer   *PacketWriter
 	bodyW    *PacketWriter
 	SendPool *BufferPool
-	RecvPool *BufferPool
 
 	userIDs     []int64
 	bodyBuf     []byte
@@ -272,13 +256,12 @@ type CreatePostSystem struct {
 	nowBuf      [32]byte
 }
 
-func NewCreatePostSystem(db *DB, sendPool, recvPool *BufferPool) *CreatePostSystem {
+func NewCreatePostSystem(db *DB, sendPool *BufferPool) *CreatePostSystem {
 	return &CreatePostSystem{
 		db:          db,
 		writer:      NewPacketWriter(4096),
 		bodyW:       NewPacketWriter(2048),
 		SendPool:    sendPool,
-		RecvPool:    recvPool,
 		userIDs:     make([]int64, 4096),
 		bodyBuf:     make([]byte, 0, 1024*1024),
 		bodyOffsets: make([]int32, 4096),
@@ -329,7 +312,6 @@ func (s *CreatePostSystem) Process(events []CreatePostEvent, outTasks *[]iouring
 
 	for i := 0; i < n; i++ {
 		ev := &events[i]
-		s.RecvPool.Release(ev.BufID)
 
 		if err != nil || s.statuses[i] != 201 {
 			s.bodyW.Reset()
@@ -362,7 +344,6 @@ type LikePostSystem struct {
 	writer   *PacketWriter
 	bodyW    *PacketWriter
 	SendPool *BufferPool
-	RecvPool *BufferPool
 
 	userIDs []int64
 	postIDs []int64
@@ -370,13 +351,12 @@ type LikePostSystem struct {
 	nowBuf  [32]byte
 }
 
-func NewLikePostSystem(db *DB, sendPool, recvPool *BufferPool) *LikePostSystem {
+func NewLikePostSystem(db *DB, sendPool *BufferPool) *LikePostSystem {
 	return &LikePostSystem{
 		db:       db,
 		writer:   NewPacketWriter(1024),
 		bodyW:    NewPacketWriter(512),
 		SendPool: sendPool,
-		RecvPool: recvPool,
 		userIDs:  make([]int64, 4096),
 		postIDs:  make([]int64, 4096),
 		results:  make([]int32, 4096),
@@ -409,7 +389,6 @@ func (s *LikePostSystem) Process(events []LikePostEvent, outTasks *[]iouring.Sen
 
 	for i := 0; i < n; i++ {
 		ev := &events[i]
-		s.RecvPool.Release(ev.BufID)
 
 		if err != nil {
 			s.bodyW.Reset()
@@ -460,14 +439,14 @@ type SystemManager struct {
 	LikePostSys   *LikePostSystem
 }
 
-func NewSystemManager(db *DB, sendPool, recvPool *BufferPool) *SystemManager {
+func NewSystemManager(db *DB, sendPool *BufferPool) *SystemManager {
 	return &SystemManager{
-		AcceptSys:     NewAcceptSystem(recvPool),
-		HealthSys:     NewHealthSystem(db, sendPool, recvPool),
-		FeedSys:       NewFeedSystem(db, sendPool, recvPool),
-		GetPostSys:    NewGetPostSystem(db, sendPool, recvPool),
-		CreatePostSys: NewCreatePostSystem(db, sendPool, recvPool),
-		LikePostSys:   NewLikePostSystem(db, sendPool, recvPool),
+		AcceptSys:     NewAcceptSystem(),
+		HealthSys:     NewHealthSystem(db, sendPool),
+		FeedSys:       NewFeedSystem(db, sendPool),
+		GetPostSys:    NewGetPostSystem(db, sendPool),
+		CreatePostSys: NewCreatePostSystem(db, sendPool),
+		LikePostSys:   NewLikePostSystem(db, sendPool),
 	}
 }
 

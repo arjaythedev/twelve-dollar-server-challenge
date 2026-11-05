@@ -16,7 +16,7 @@ type Server struct {
 	listenFD int
 	ring     *iouring.IOUring
 	db       *DB
-	recvPool *BufferPool
+	bufRing  *iouring.ProvidedBufRing
 	sendPool *BufferPool
 	batch    *EventBatch
 	tasks    []iouring.ReadInfo
@@ -92,30 +92,45 @@ func NewServer(cfg Config) (*Server, error) {
 		return nil, fmt.Errorf("khởi tạo io_uring ring lỗi: %w", err)
 	}
 
-	// 4. Khởi tạo các bộ đệm và System đáp ứng trọn vẹn 20.000 VUs
-	recvPool := NewBufferPool(40000, 2048)  // 40.000 slots x 2KB = 80MB arena
+	// 4. Đăng ký Fixed Files Table (65,000 slots)
+	if err := iouring.RegisterFileTable(ring.FD(), 65000); err != nil {
+		ring.Close()
+		syscall.Close(listenFD)
+		db.Close()
+		return nil, fmt.Errorf("đăng ký fixed files table lỗi: %w", err)
+	}
+
+	// 5. Đăng ký Provided Buffer Ring (32,768 buffers x 2048 bytes = 64MB)
+	bufRing, err := iouring.NewProvidedBufRing(ring.FD(), 0, 32768, 2048)
+	if err != nil {
+		ring.Close()
+		syscall.Close(listenFD)
+		db.Close()
+		return nil, fmt.Errorf("đăng ký provided buffer ring lỗi: %w", err)
+	}
+
 	sendPool := NewBufferPool(16384, 16384) // 16.384 slots x 16KB = 268MB arena
 	batch := NewEventBatch(4096)
 	tasks := make([]iouring.ReadInfo, 4096)
 	outTasks := make([]iouring.SendInfo, 0, 8192)
 
-	parser := NewParser(recvPool, sendPool, cfg.JWTSecret)
-	sysMgr := NewSystemManager(db, sendPool, recvPool)
+	parser := NewParser(bufRing, sendPool, cfg.JWTSecret)
+	sysMgr := NewSystemManager(db, sendPool)
 
-	// Mồi sẵn 64 lệnh Accept đồng thời vào ring để đón lượng kết nối ồ ạt
-	initAccepts := make([]iouring.SendInfo, 64)
-	for i := 0; i < 64; i++ {
-		initAccepts[i] = iouring.SendInfo{
-			Opcode:   iouring.OpAccept,
-			FD:       int32(listenFD),
-			UserData: EncodeUserData(EventAccept, 0, int32(listenFD)),
-		}
+	// Mồi 1 lệnh Multishot Accept duy nhất với IORING_FILE_INDEX_ALLOC
+	initAccept := iouring.SendInfo{
+		Opcode:     iouring.OpAccept,
+		FD:         int32(listenFD),
+		IOPrio:     iouring.IORING_ACCEPT_MULTISHOT,
+		SpliceFDIn: iouring.IORING_FILE_INDEX_ALLOC,
+		UserData:   EncodeUserData(EventAccept, 0, int32(listenFD)),
 	}
-	if _, err := ring.SendTasks(initAccepts); err != nil {
+	if _, err := ring.SendTasks([]iouring.SendInfo{initAccept}); err != nil {
+		bufRing.Close()
 		ring.Close()
 		syscall.Close(listenFD)
 		db.Close()
-		return nil, fmt.Errorf("mồi 64 accepts thất bại: %w", err)
+		return nil, fmt.Errorf("mồi multishot accept thất bại: %w", err)
 	}
 
 	return &Server{
@@ -123,7 +138,7 @@ func NewServer(cfg Config) (*Server, error) {
 		listenFD: listenFD,
 		ring:     ring,
 		db:       db,
-		recvPool: recvPool,
+		bufRing:  bufRing,
 		sendPool: sendPool,
 		batch:    batch,
 		tasks:    tasks,
@@ -163,6 +178,9 @@ func (s *Server) Run() error {
 }
 
 func (s *Server) Close() {
+	if s.bufRing != nil {
+		s.bufRing.Close()
+	}
 	if s.ring != nil {
 		s.ring.Close()
 	}

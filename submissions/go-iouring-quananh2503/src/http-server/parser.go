@@ -6,7 +6,6 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
-	"syscall"
 	"time"
 
 	iouring "go-iouring-quananh2503/src/io-uring"
@@ -22,6 +21,7 @@ const (
 	EventAccept EventType = 1
 	EventRecv   EventType = 2
 	EventSend   EventType = 3
+	EventClose  EventType = 4
 )
 
 // EncodeUserData đóng gói EventType, BufferID và FD vào uint64
@@ -47,32 +47,27 @@ type AcceptEvent struct {
 }
 
 type HealthEvent struct {
-	FD    int32
-	BufID uint32
+	FD int32
 }
 
 type FeedEvent struct {
-	FD    int32
-	BufID uint32
+	FD int32
 }
 
 type GetPostEvent struct {
 	FD     int32
-	BufID  uint32
 	PostID int
 }
 
 type CreatePostEvent struct {
 	FD       int32
-	BufID    uint32
 	UserID   int
-	Username []byte // Slice trỏ trực tiếp vào buffer payload
-	Body     []byte // Slice trỏ trực tiếp vào buffer body
+	Username []byte // Slice trỏ trực tiếp vào payload
+	Body     []byte // Slice trỏ trực tiếp vào body
 }
 
 type LikePostEvent struct {
 	FD     int32
-	BufID  uint32
 	UserID int
 	PostID int
 }
@@ -111,14 +106,14 @@ func (b *EventBatch) Reset() {
 // =============================================================================
 
 type Parser struct {
-	RecvPool  *BufferPool
+	BufRing   *iouring.ProvidedBufRing
 	SendPool  *BufferPool
 	JWTSecret []byte
 }
 
-func NewParser(recvPool, sendPool *BufferPool, jwtSecret []byte) *Parser {
+func NewParser(bufRing *iouring.ProvidedBufRing, sendPool *BufferPool, jwtSecret []byte) *Parser {
 	return &Parser{
-		RecvPool:  recvPool,
+		BufRing:   bufRing,
 		SendPool:  sendPool,
 		JWTSecret: jwtSecret,
 	}
@@ -140,15 +135,13 @@ func (p *Parser) Parse(tasks []iouring.ReadInfo, batch *EventBatch, outTasks *[]
 		case EventSend:
 			p.SendPool.Release(bufID) // Giải phóng send buffer về pool
 			if task.Res < 0 {
-				// Client đã ngắt kết nối giữa chừng -> đóng socket
-				syscall.Close(int(fd))
-			} else {
-				// HTTP 1.1 Keep-Alive: Treo tiếp lệnh RECV chờ request tiếp theo
-				p.rearmRecv(fd, outTasks)
+				// Client đã ngắt kết nối giữa chừng -> đóng fixed socket
+				p.closeConn(fd, outTasks)
 			}
+			// Multishot Recv vẫn đang thường trực trong kernel! Không cần rearmRecv!
 
 		// -------------------------------------------------------------
-		// B. SỰ KIỆN KẾT NỐI MỚI (ACCEPT)
+		// B. SỰ KIỆN KẾT NỐI MỚI (ACCEPT MULTISHOT)
 		// -------------------------------------------------------------
 		case EventAccept:
 			if task.Res >= 0 {
@@ -157,74 +150,81 @@ func (p *Parser) Parse(tasks []iouring.ReadInfo, batch *EventBatch, outTasks *[]
 					ClientFD: task.Res,
 				})
 			}
-			// Vét sạch tất cả kết nối đang xếp hàng trong kernel backlog bằng accept4 non-blocking
-			for {
-				r, _, errno := syscall.RawSyscall6(syscall.SYS_ACCEPT4, uintptr(fd), 0, 0,
-					syscall.SOCK_NONBLOCK|syscall.SOCK_CLOEXEC, 0, 0)
-				if errno != 0 {
-					break
-				}
-				batch.AcceptEvents = append(batch.AcceptEvents, AcceptEvent{
-					ListenFD: fd,
-					ClientFD: int32(r),
-				})
+			// Nếu cờ IORING_CQE_F_MORE bị tắt, re-arm lại multishot accept
+			if task.Flags&iouring.IORING_CQE_F_MORE == 0 {
+				p.rearmAccept(fd, outTasks)
 			}
-			// Luôn re-arm lại Accept trên listenFD để đón client tiếp theo
-			p.rearmAccept(fd, outTasks)
 
 		// -------------------------------------------------------------
-		// C. SỰ KIỆN NHẬN DỮ LIỆU TỪ SOCKET (RECV)
+		// C. SỰ KIỆN NHẬN DỮ LIỆU TỪ SOCKET (RECV MULTISHOT)
 		// -------------------------------------------------------------
 		case EventRecv:
 			// 1. Kiểm tra ngắt kết nối hoặc lỗi mạng
-			if task.Res <= 0 {
-				p.RecvPool.Release(bufID)
-				syscall.Close(int(fd))
+			if task.Res <= 0 || task.Flags&iouring.IORING_CQE_F_BUFFER == 0 {
+				if task.Flags&iouring.IORING_CQE_F_BUFFER != 0 {
+					p.BufRing.Release(uint16(task.Flags >> 16))
+				}
+				p.closeConn(fd, outTasks)
 				continue
 			}
 
-			// 2. Lấy dữ liệu raw bytes (Nằm sẵn trong CPU L1 Cache)
-			raw := p.RecvPool.GetSlice(bufID, int(task.Res))
+			// 2. Lấy dữ liệu raw bytes từ Provided Buffer Ring
+			bid := uint16(task.Flags >> 16)
+			raw := p.BufRing.GetSlice(bid, int(task.Res))
 
 			// 3. Quét Single-Pass toàn bộ request
-			p.parseSingle(fd, bufID, raw, now, batch, outTasks)
+			p.parseSingle(fd, raw, now, batch, outTasks)
+
+			// 4. Giải phóng buffer ngay lập tức về lại io_uring_buf_ring
+			p.BufRing.Release(bid)
+
+			// 5. Nếu kernel báo hết multishot (không còn cờ F_MORE), re-arm lại
+			if task.Flags&iouring.IORING_CQE_F_MORE == 0 {
+				p.rearmRecv(fd, outTasks)
+			}
+
+		// -------------------------------------------------------------
+		// D. SỰ KIỆN ĐÓNG SOCKET (CLOSE FIXED FILE)
+		// -------------------------------------------------------------
+		case EventClose:
+			// Kernel đã giải phóng slot trong fixed file table
 		}
 	}
 }
 
 // parseSingle phân tích trọn vẹn 1 request trong khi dữ liệu vẫn còn nóng trong Cache
-func (p *Parser) parseSingle(fd int32, bufID uint32, raw []byte, now int64, batch *EventBatch, outTasks *[]iouring.SendInfo) {
+func (p *Parser) parseSingle(fd int32, raw []byte, now int64, batch *EventBatch, outTasks *[]iouring.SendInfo) {
 	if len(raw) < 14 {
-		p.replyError(fd, bufID, 400, "malformed request", outTasks)
+		p.replyError(fd, 400, "malformed request", outTasks)
 		return
 	}
 
 	// 1. Phân loại theo HTTP Method
 	if bytes.HasPrefix(raw, []byte("GET ")) {
-		p.parseGET(fd, bufID, raw[4:], batch, outTasks)
+		p.parseGET(fd, raw[4:], batch, outTasks)
 	} else if bytes.HasPrefix(raw, []byte("POST ")) {
-		p.parsePOST(fd, bufID, raw[5:], raw, now, batch, outTasks)
+		p.parsePOST(fd, raw[5:], raw, now, batch, outTasks)
 	} else {
-		p.replyError(fd, bufID, 404, "not found", outTasks)
+		p.replyError(fd, 404, "not found", outTasks)
 	}
 }
 
 // parseGET xử lý: /health, /feed, /posts/:id
-func (p *Parser) parseGET(fd int32, bufID uint32, pathPart []byte, batch *EventBatch, outTasks *[]iouring.SendInfo) {
+func (p *Parser) parseGET(fd int32, pathPart []byte, batch *EventBatch, outTasks *[]iouring.SendInfo) {
 	if len(pathPart) < 2 || pathPart[0] != '/' {
-		p.replyError(fd, bufID, 404, "not found", outTasks)
+		p.replyError(fd, 404, "not found", outTasks)
 		return
 	}
 
 	switch pathPart[1] {
 	case 'h': // /health
 		if bytes.HasPrefix(pathPart, []byte("/health")) {
-			batch.HealthEvents = append(batch.HealthEvents, HealthEvent{FD: fd, BufID: bufID})
+			batch.HealthEvents = append(batch.HealthEvents, HealthEvent{FD: fd})
 			return
 		}
 	case 'f': // /feed
 		if bytes.HasPrefix(pathPart, []byte("/feed")) {
-			batch.FeedEvents = append(batch.FeedEvents, FeedEvent{FD: fd, BufID: bufID})
+			batch.FeedEvents = append(batch.FeedEvents, FeedEvent{FD: fd})
 			return
 		}
 	case 'p': // /posts/:id
@@ -236,35 +236,35 @@ func (p *Parser) parseGET(fd int32, bufID uint32, pathPart []byte, batch *EventB
 			}
 			postID, ok := parsePositiveInt(idBytes)
 			if !ok {
-				p.replyError(fd, bufID, 400, "invalid post id", outTasks)
+				p.replyError(fd, 400, "invalid post id", outTasks)
 				return
 			}
-			batch.GetPostEvents = append(batch.GetPostEvents, GetPostEvent{FD: fd, BufID: bufID, PostID: postID})
+			batch.GetPostEvents = append(batch.GetPostEvents, GetPostEvent{FD: fd, PostID: postID})
 			return
 		}
 	}
 
-	p.replyError(fd, bufID, 404, "not found", outTasks)
+	p.replyError(fd, 404, "not found", outTasks)
 }
 
 // parsePOST xử lý: POST /posts, POST /posts/:id/like
-func (p *Parser) parsePOST(fd int32, bufID uint32, pathPart []byte, raw []byte, now int64, batch *EventBatch, outTasks *[]iouring.SendInfo) {
+func (p *Parser) parsePOST(fd int32, pathPart []byte, raw []byte, now int64, batch *EventBatch, outTasks *[]iouring.SendInfo) {
 	if !bytes.HasPrefix(pathPart, []byte("/posts")) {
-		p.replyError(fd, bufID, 404, "not found", outTasks)
+		p.replyError(fd, 404, "not found", outTasks)
 		return
 	}
 
 	// [QUY TẮC SPEC]: Phải kiểm tra Auth TRƯỚC, rồi mới kiểm tra ID/Body!
 	token := extractBearerToken(raw)
 	if len(token) == 0 {
-		p.replyError(fd, bufID, 401, "missing bearer token", outTasks)
+		p.replyError(fd, 401, "missing bearer token", outTasks)
 		return
 	}
 
 	// Verify chữ ký HMAC và bóc UserID, Username ngay tại chỗ
 	userID, username, authErr, status := verifyJWT(token, p.JWTSecret, now)
 	if authErr != "" {
-		p.replyError(fd, bufID, status, authErr, outTasks)
+		p.replyError(fd, status, authErr, outTasks)
 		return
 	}
 
@@ -274,12 +274,11 @@ func (p *Parser) parsePOST(fd int32, bufID uint32, pathPart []byte, raw []byte, 
 	if len(afterPosts) == 0 || afterPosts[0] == ' ' || afterPosts[0] == '?' {
 		body, bodyErr := extractJSONBodyField(raw)
 		if bodyErr != "" {
-			p.replyError(fd, bufID, 400, bodyErr, outTasks)
+			p.replyError(fd, 400, bodyErr, outTasks)
 			return
 		}
 		batch.CreatePostEvents = append(batch.CreatePostEvents, CreatePostEvent{
 			FD:       fd,
-			BufID:    bufID,
 			UserID:   userID,
 			Username: username,
 			Body:     body,
@@ -294,12 +293,11 @@ func (p *Parser) parsePOST(fd int32, bufID uint32, pathPart []byte, raw []byte, 
 			idBytes := afterPosts[1:likeIdx]
 			postID, ok := parsePositiveInt(idBytes)
 			if !ok {
-				p.replyError(fd, bufID, 400, "invalid post id", outTasks)
+				p.replyError(fd, 400, "invalid post id", outTasks)
 				return
 			}
 			batch.LikePostEvents = append(batch.LikePostEvents, LikePostEvent{
 				FD:     fd,
-				BufID:  bufID,
 				UserID: userID,
 				PostID: postID,
 			})
@@ -307,7 +305,7 @@ func (p *Parser) parsePOST(fd int32, bufID uint32, pathPart []byte, raw []byte, 
 		}
 	}
 
-	p.replyError(fd, bufID, 404, "not found", outTasks)
+	p.replyError(fd, 404, "not found", outTasks)
 }
 
 // =============================================================================
@@ -317,7 +315,7 @@ func (p *Parser) parsePOST(fd int32, bufID uint32, pathPart []byte, raw []byte, 
 func (p *Parser) sendError(fd int32, statusText string, body string, outTasks *[]iouring.SendInfo) {
 	sendBufID, err := p.SendPool.Acquire()
 	if err != nil {
-		syscall.Close(int(fd))
+		p.closeConn(fd, outTasks)
 		return
 	}
 	buf := p.SendPool.Get(sendBufID)
@@ -329,16 +327,15 @@ func (p *Parser) sendError(fd int32, statusText string, body string, outTasks *[
 
 	*outTasks = append(*outTasks, iouring.SendInfo{
 		Opcode:   iouring.OpSend,
+		Flags:    iouring.IOSQE_FIXED_FILE,
 		FD:       fd,
 		Buf:      buf[:n],
 		UserData: EncodeUserData(EventSend, sendBufID, fd),
 	})
 }
 
-// replyError gửi ngay mã lỗi HTTP về cho client và thu hồi buffer đọc
-func (p *Parser) replyError(fd int32, recvBufID uint32, status int, msg string, outTasks *[]iouring.SendInfo) {
-	p.RecvPool.Release(recvBufID)
-
+// replyError gửi ngay mã lỗi HTTP về cho client
+func (p *Parser) replyError(fd int32, status int, msg string, outTasks *[]iouring.SendInfo) {
 	body := fmt.Sprintf(`{"error":"%s"}`, msg)
 	statusText := "400 Bad Request"
 	switch status {
@@ -353,26 +350,32 @@ func (p *Parser) replyError(fd int32, recvBufID uint32, status int, msg string, 
 	p.sendError(fd, statusText, body, outTasks)
 }
 
-func (p *Parser) rearmRecv(fd int32, outTasks *[]iouring.SendInfo) {
-	bufID, err := p.RecvPool.Acquire()
-	if err != nil {
-		syscall.Close(int(fd))
-		return
-	}
-	buf := p.RecvPool.Get(bufID)
+func (p *Parser) rearmRecv(fixedFD int32, outTasks *[]iouring.SendInfo) {
 	*outTasks = append(*outTasks, iouring.SendInfo{
 		Opcode:   iouring.OpRecv,
-		FD:       fd,
-		Buf:      buf,
-		UserData: EncodeUserData(EventRecv, bufID, fd),
+		Flags:    iouring.IOSQE_FIXED_FILE | iouring.IOSQE_BUFFER_SELECT,
+		IOPrio:   iouring.IORING_RECV_MULTISHOT,
+		FD:       fixedFD,
+		BufIndex: 0,
+		UserData: EncodeUserData(EventRecv, 0, fixedFD),
 	})
 }
 
 func (p *Parser) rearmAccept(listenFD int32, outTasks *[]iouring.SendInfo) {
 	*outTasks = append(*outTasks, iouring.SendInfo{
-		Opcode:   iouring.OpAccept,
-		FD:       listenFD,
-		UserData: EncodeUserData(EventAccept, 0, listenFD),
+		Opcode:     iouring.OpAccept,
+		FD:         listenFD,
+		IOPrio:     iouring.IORING_ACCEPT_MULTISHOT,
+		SpliceFDIn: iouring.IORING_FILE_INDEX_ALLOC,
+		UserData:   EncodeUserData(EventAccept, 0, listenFD),
+	})
+}
+
+func (p *Parser) closeConn(fixedFD int32, outTasks *[]iouring.SendInfo) {
+	*outTasks = append(*outTasks, iouring.SendInfo{
+		Opcode:     iouring.OpClose,
+		SpliceFDIn: fixedFD + 1,
+		UserData:   EncodeUserData(EventClose, 0, fixedFD),
 	})
 }
 

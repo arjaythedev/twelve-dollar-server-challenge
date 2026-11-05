@@ -8,8 +8,9 @@ import (
 )
 
 const (
-	SYS_IO_URING_SETUP = 425
-	SYS_IO_URING_ENTER = 426
+	SYS_IO_URING_SETUP    = 425
+	SYS_IO_URING_ENTER    = 426
+	SYS_IO_URING_REGISTER = 427
 
 	OFF_SQ_RING = 0
 	OFF_CQ_RING = 0x8000000
@@ -21,6 +22,27 @@ const (
 	IORING_SETUP_COOP_TASKRUN  = 1 << 8
 	IORING_SETUP_SINGLE_ISSUER = 1 << 12
 	IORING_SETUP_DEFER_TASKRUN = 1 << 13
+
+	// Opcodes đăng ký (io_uring_register)
+	IORING_REGISTER_FILES       = 2
+	IORING_REGISTER_FILES2      = 13
+	IORING_REGISTER_PBUF_RING   = 22
+	IORING_UNREGISTER_PBUF_RING = 23
+	IORING_RSRC_REGISTER_SPARSE = 1
+
+	// SQE Flags
+	IOSQE_FIXED_FILE       = 1 << 0
+	IOSQE_BUFFER_SELECT    = 1 << 5
+	IOSQE_CQE_SKIP_SUCCESS = 1 << 6
+
+	// Multishot & Direct File Allocation
+	IORING_RECV_MULTISHOT          = 1 << 1
+	IORING_ACCEPT_MULTISHOT        = 1 << 0
+	IORING_FILE_INDEX_ALLOC int32  = -1
+
+	// CQE Flags
+	IORING_CQE_F_BUFFER = 1 << 0
+	IORING_CQE_F_MORE   = 1 << 1
 )
 
 // Các Opcode cơ bản
@@ -40,17 +62,24 @@ const (
 
 // SendInfo chứa đầy đủ thông tin của 1 yêu cầu cần gửi vào Ring
 type SendInfo struct {
-	Opcode   uint8  // OpRead, OpWrite, OpAccept, OpClose, OpSend, OpRecv
-	FD       int32  // Socket FD hoặc File FD
-	Buf      []byte // Mảng byte đọc/ghi
-	Off      uint64 // Offset file (socket thì để là 0)
-	UserData uint64 // Tag ID do bạn tự đặt
+	Opcode     uint8  // OpRead, OpWrite, OpAccept, OpClose, OpSend, OpRecv
+	Flags      uint8  // IOSQE_FIXED_FILE, IOSQE_BUFFER_SELECT, IOSQE_CQE_SKIP_SUCCESS
+	IOPrio     uint16 // Flags passed in sqe.ioprio (e.g. IORING_ACCEPT_MULTISHOT, IORING_RECV_MULTISHOT)
+	FD         int32  // Socket FD hoặc Fixed File Index
+	Off        uint64 // Offset file
+	Buf        []byte // Mảng byte đọc/ghi
+	Len        uint32 // Độ dài (nếu không dùng Buf)
+	OpFlags    uint32 // Flags passed in sqe.rw_flags / sqe.msg_flags
+	UserData   uint64 // Tag ID do bạn tự đặt
+	BufIndex   uint16 // Buffer Group ID (bgid) khi dùng IOSQE_BUFFER_SELECT
+	SpliceFDIn int32  // IORING_FILE_INDEX_ALLOC (-1) khi accept fixed file, hoặc fixed file index khi close
 }
 
 // ReadInfo chứa đầy đủ thông tin của 1 kết quả hoàn thành từ Ring
 type ReadInfo struct {
 	UserData uint64 // Khớp với UserData lúc gửi
 	Res      int32  // >= 0: số bytes hoặc FD mới; < 0: lỗi (-errno)
+	Flags    uint32 // IORING_CQE_F_MORE, IORING_CQE_F_BUFFER, BID (Flags >> 16)
 }
 
 // =============================================================================
@@ -163,14 +192,21 @@ func (io *IOUring) SendTasks(requests []SendInfo) (int, error) {
 			req := requests[i]
 			s := &io.sq.sqes[io.sq.localTail&io.sq.mask]
 			*s = rawSQE{
-				Opcode:   req.Opcode,
-				FD:       req.FD,
-				Off:      req.Off,
-				UserData: req.UserData,
+				Opcode:     req.Opcode,
+				Flags:      req.Flags,
+				IOPrio:     req.IOPrio,
+				FD:         req.FD,
+				Off:        req.Off,
+				OpFlags:    req.OpFlags,
+				UserData:   req.UserData,
+				BufIndex:   req.BufIndex,
+				SpliceFDIn: req.SpliceFDIn,
 			}
 			if len(req.Buf) > 0 {
 				s.Addr = uint64(uintptr(unsafe.Pointer(&req.Buf[0])))
 				s.Len = uint32(len(req.Buf))
+			} else if req.Len > 0 {
+				s.Len = req.Len
 			}
 
 			io.sq.localTail++
@@ -230,6 +266,7 @@ func (io *IOUring) RecieveOutputTasks(out []ReadInfo, waitMin uint32) (int, erro
 		out[count] = ReadInfo{
 			UserData: raw.UserData,
 			Res:      raw.Res,
+			Flags:    raw.Flags,
 		}
 		count++
 		head++
@@ -254,14 +291,21 @@ func (io *IOUring) SubmitAndRecieve(requests []SendInfo, out []ReadInfo, waitMin
 			req := requests[i]
 			s := &io.sq.sqes[io.sq.localTail&io.sq.mask]
 			*s = rawSQE{
-				Opcode:   req.Opcode,
-				FD:       req.FD,
-				Off:      req.Off,
-				UserData: req.UserData,
+				Opcode:     req.Opcode,
+				Flags:      req.Flags,
+				IOPrio:     req.IOPrio,
+				FD:         req.FD,
+				Off:        req.Off,
+				OpFlags:    req.OpFlags,
+				UserData:   req.UserData,
+				BufIndex:   req.BufIndex,
+				SpliceFDIn: req.SpliceFDIn,
 			}
 			if len(req.Buf) > 0 {
 				s.Addr = uint64(uintptr(unsafe.Pointer(&req.Buf[0])))
 				s.Len = uint32(len(req.Buf))
+			} else if req.Len > 0 {
+				s.Len = req.Len
 			}
 
 			io.sq.localTail++
@@ -331,6 +375,7 @@ func (io *IOUring) SubmitAndRecieve(requests []SendInfo, out []ReadInfo, waitMin
 		out[count] = ReadInfo{
 			UserData: raw.UserData,
 			Res:      raw.Res,
+			Flags:    raw.Flags,
 		}
 		count++
 		cqHead++
@@ -366,6 +411,171 @@ func (io *IOUring) Close() error {
 	}
 
 	return firstErr
+}
+
+func (io *IOUring) FD() int {
+	return io.fd
+}
+
+// =============================================================================
+// 3. PROVIDED BUFFER RING (LINUX 5.19+ IORING_REGISTER_PBUF_RING)
+// =============================================================================
+
+type ioUringBuf struct {
+	Addr uint64
+	Len  uint32
+	BID  uint16
+	Resv uint16
+}
+
+type ioUringBufReg struct {
+	RingAddr    uint64
+	RingEntries uint32
+	BGID        uint16
+	Flags       uint16
+	Resv        [3]uint64
+}
+
+type ProvidedBufRing struct {
+	ringFD int
+	bgid   uint16
+	count  uint32
+	mask   uint32
+	bufLen int
+	tail   uint16
+	mem    []byte
+	bufs   []byte
+}
+
+func NewProvidedBufRing(ringFD int, bgid uint16, count uint32, bufLen int) (*ProvidedBufRing, error) {
+	// 1. Cấp phát vùng nhớ mmap ẩn (page-aligned) cho header và các entries của buf_ring
+	ringBytes := int(count) * 16
+	mem, err := syscall.Mmap(-1, 0, ringBytes, syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_PRIVATE|syscall.MAP_ANONYMOUS)
+	if err != nil {
+		return nil, fmt.Errorf("mmap buf ring mem thất bại: %w", err)
+	}
+
+	// 2. Cấp phát mảng chứa dữ liệu packet
+	bufs := make([]byte, int(count)*bufLen)
+
+	// 3. Đăng ký với Kernel
+	reg := ioUringBufReg{
+		RingAddr:    uint64(uintptr(unsafe.Pointer(&mem[0]))),
+		RingEntries: count,
+		BGID:        bgid,
+	}
+	if _, _, errno := syscall.Syscall6(
+		SYS_IO_URING_REGISTER,
+		uintptr(ringFD),
+		IORING_REGISTER_PBUF_RING,
+		uintptr(unsafe.Pointer(&reg)),
+		1, 0, 0,
+	); errno != 0 {
+		syscall.Munmap(mem)
+		return nil, fmt.Errorf("đăng ký pbuf ring thất bại, errno: %d", errno)
+	}
+
+	// 4. Khởi tạo toàn bộ các slot ban đầu
+	for i := 0; i < int(count); i++ {
+		b := (*ioUringBuf)(unsafe.Pointer(&mem[i*16]))
+		b.Addr = uint64(uintptr(unsafe.Pointer(&bufs[i*bufLen])))
+		b.Len = uint32(bufLen)
+		b.BID = uint16(i)
+		b.Resv = 0
+	}
+
+	// 5. Cập nhật tail ban đầu cho kernel (ở offset 14; dùng StoreUint32 tại offset 12)
+	atomic.StoreUint32((*uint32)(unsafe.Pointer(&mem[12])), count<<16)
+
+	return &ProvidedBufRing{
+		ringFD: ringFD,
+		bgid:   bgid,
+		count:  count,
+		mask:   count - 1,
+		bufLen: bufLen,
+		tail:   uint16(count),
+		mem:    mem,
+		bufs:   bufs,
+	}, nil
+}
+
+func (r *ProvidedBufRing) Release(bid uint16) {
+	slot := uint32(r.tail) & r.mask
+	b := (*ioUringBuf)(unsafe.Pointer(&r.mem[slot*16]))
+	b.Addr = uint64(uintptr(unsafe.Pointer(&r.bufs[int(bid)*r.bufLen])))
+	b.Len = uint32(r.bufLen)
+	b.BID = bid
+	b.Resv = 0
+	r.tail++
+	atomic.StoreUint32((*uint32)(unsafe.Pointer(&r.mem[12])), uint32(r.tail)<<16)
+}
+
+func (r *ProvidedBufRing) GetSlice(bid uint16, length int) []byte {
+	start := int(bid) * r.bufLen
+	return r.bufs[start : start+length]
+}
+
+func (r *ProvidedBufRing) Close() error {
+	reg := ioUringBufReg{
+		BGID: r.bgid,
+	}
+	syscall.Syscall6(
+		SYS_IO_URING_REGISTER,
+		uintptr(r.ringFD),
+		IORING_UNREGISTER_PBUF_RING,
+		uintptr(unsafe.Pointer(&reg)),
+		1, 0, 0,
+	)
+	if r.mem != nil {
+		syscall.Munmap(r.mem)
+		r.mem = nil
+	}
+	r.bufs = nil
+	return nil
+}
+
+// =============================================================================
+// 4. FIXED REGISTERED FILES (LINUX 5.19+ IORING_REGISTER_FILES2)
+// =============================================================================
+
+type ioUringRsrcRegister struct {
+	Nr    uint32
+	Flags uint32
+	Resv2 uint64
+	Data  uint64
+	Tags  uint64
+}
+
+func RegisterFileTable(ringFD int, n int) error {
+	reg := ioUringRsrcRegister{
+		Nr:    uint32(n),
+		Flags: IORING_RSRC_REGISTER_SPARSE,
+	}
+	if _, _, errno := syscall.Syscall6(
+		SYS_IO_URING_REGISTER,
+		uintptr(ringFD),
+		IORING_REGISTER_FILES2,
+		uintptr(unsafe.Pointer(&reg)),
+		1, 0, 0,
+	); errno == 0 {
+		return nil
+	}
+
+	fds := make([]int32, n)
+	for i := range fds {
+		fds[i] = -1
+	}
+	if _, _, errno := syscall.Syscall6(
+		SYS_IO_URING_REGISTER,
+		uintptr(ringFD),
+		IORING_REGISTER_FILES,
+		uintptr(unsafe.Pointer(&fds[0])),
+		uintptr(len(fds)),
+		0, 0,
+	); errno != 0 {
+		return fmt.Errorf("đăng ký fixed files thất bại, errno: %d", errno)
+	}
+	return nil
 }
 
 // =============================================================================

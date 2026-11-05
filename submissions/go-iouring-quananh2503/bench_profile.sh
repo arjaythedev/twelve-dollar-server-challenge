@@ -107,8 +107,9 @@ fi
 PPROF_BG_PID=$!
 
 # 6. Chạy k6 toàn bộ chu trình và in kết quả đầy đủ
-echo "5. Bắt đầu chạy k6 (30s ramp-up -> 30s giữ đỉnh -> in kết quả)..."
+echo "5. Bắt đầu chạy k6 ($RAMP_UP ramp-up -> $DURATION giữ đỉnh -> in kết quả)..."
 K6_BIN=$(which k6 || echo "${REPO_ROOT}/bin/k6")
+set +e
 taskset -c 1-15 "$K6_BIN" run \
   -e BASE_URL=http://127.0.0.1:3000 \
   -e VUS="$VUS" \
@@ -117,6 +118,8 @@ taskset -c 1-15 "$K6_BIN" run \
   -e DURATION="$DURATION" \
   -e TOKENS="${REPO_ROOT}/seed/tokens.json" \
   "${REPO_ROOT}/bench/load.js"
+K6_RC=$?
+set -e
 
 wait "$PPROF_BG_PID" 2>/dev/null || true
 

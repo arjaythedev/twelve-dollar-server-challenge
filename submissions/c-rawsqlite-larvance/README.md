@@ -1,6 +1,6 @@
 # SQLite 3 Amalgamation B-Tree and WAL Server with io_uring
 
-A pure C99 / GNU C implementation for the Twelve-Dollar Server Challenge that complies with Rule 2 by linking the official SQLite 3 amalgamation (vendor/sqlite3.c, version 3.45.1) and driving SQLite internal B-tree cursors directly on top of a custom multi-ring io_uring transport.
+A pure C99 / GNU C implementation for the Twelve-Dollar Server Challenge that complies with Rule 2 by linking the official SQLite 3 amalgamation (vendor/sqlite3.c, version 3.54.1) and driving SQLite internal B-tree cursors directly on top of a custom multi-ring io_uring transport.
 
 ---
 
@@ -10,9 +10,9 @@ A pure C99 / GNU C implementation for the Twelve-Dollar Server Challenge that co
 | :--- | :--- |
 | Language | C99 / GNU C (gcc 13.x on Ubuntu 24.04, glibc 2.39, Linux 6.8+) |
 | HTTP Framework | Custom zero-library multi-ring io_uring HTTP/1.1 keep-alive server (src/uring.c, src/http.c) |
-| Database Engine | Official SQLite 3.45.1 amalgamation (vendor/sqlite3.c) using native B-tree cursors (src/db.c) |
+| Database Engine | Official SQLite 3.54.1 amalgamation (vendor/sqlite3.c) using native B-tree cursors (src/db.c) |
 | JSON and JWT | Custom zero-copy AVX2 JSON parser/serializer (src/json.c, src/out.c) and hardware SHA-NI HS256 JWT verifier (src/jwt.c) |
-| External Libraries | SQLite 3.45.1 amalgamation (compiled from source), libc, libpthread, libm |
+| External Libraries | SQLite 3.54.1 amalgamation (compiled from source), libc, libpthread, libm |
 
 ---
 
@@ -27,16 +27,16 @@ A pure C99 / GNU C implementation for the Twelve-Dollar Server Challenge that co
 
 ## 3. Optimizations and Architecture
 
-### A. Official SQLite Amalgamation and Native B-Tree Cursors (src/db.c)
+### A. Official SQLite Amalgamation and B-Tree Engine (src/db.c)
 Rule 2 requires that the database is SQLite. By including the official SQLite amalgamation directly into the server compilation unit, all database structures, pager caching, WAL indexing, and lock management are handled by SQLite, while reads bypass the SQL tokenizer, parser, and VDBE bytecode interpreter:
 
 1. Native B-Tree Cursors for Fast Path Reads:
-   - sqlite3BtreeCursor creates direct cursors on posts, users, and likes_post_id_idx.
+   - Direct cursors on posts, users, and likes_post_id_idx traverse records directly through SQLite's internal B-tree cursor API.
    - GET /feed fetches the newest 20 posts in rowid order using sqlite3BtreeLast and sqlite3BtreePrevious, and counts likes with a single index range scan on likes_post_id_idx via sqlite3BtreeIndexMoveto.
    - GET /posts/:id seeks rows directly via sqlite3BtreeTableMoveto with zero SQL statement parsing overhead.
-   - sqlite3BtreePayloadFetch reads record bytes directly from the mmap/page buffer without memory copies.
+   - A single-pass record extractor decodes SQLite varints and serial types directly into target output buffers without intermediate column descriptor arrays.
 2. Background Checkpointing Thread:
-   - A dedicated checkpointer connection (ckpt_db) runs passive checkpoints in the background once the WAL passes 1,000 frames (CKPT_FRAMES), preventing disk sync stalls from blocking request dispatching.
+   - A dedicated checkpointer connection (ckpt_db) runs passive checkpoints in the background once the WAL passes 1,000 frames (CKPT_THRESHOLD), preventing disk sync stalls from blocking request dispatching.
 3. Batched Multi-Request Transactions:
    - Each io_uring batch opens one read transaction at batch start, processes all read requests from a consistent SQLite snapshot, executes prepared statement writes, and finishes with a single COMMIT.
 
@@ -63,3 +63,9 @@ Rule 2 requires that the database is SQLite. By including the official SQLite am
 | POST /posts/:id/like | 38,421 req/s | 129,609 req/s | 3.37x |
 | POST /posts (create) | 39,491 req/s | 126,793 req/s | 3.21x |
 | mixed (46/46/7/1%) | 33,126 req/s | 84,765 req/s | 2.56x |
+
+---
+
+## 5. Acknowledgements and Prior Art
+
+- Credit to c-iouring-pavlyhalim (#245, submissions/c-iouring-pavlyhalim) for the B-tree cursor and index range-scan helper patterns used to interface with SQLite native cursors.

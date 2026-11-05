@@ -2,9 +2,4 @@ seed/feed.db*
 seed/tokens.json
 seed/tsv/
 results/
-src/runs/**
-!src/runs/**/
-!src/runs/**/summary.json
-src/runs/**/raw/
-src/runs/legacy/raw-*/
 .DS_Store

@@ -1,6 +1,0 @@
-*.sh text eol=lf
-*.py text eol=lf
-*.toml text eol=lf
-*.lock text eol=lf
-*.json text eol=lf
-runs/** -text -eol -whitespace

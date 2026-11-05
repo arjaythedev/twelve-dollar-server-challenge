@@ -13,7 +13,7 @@ mod reader;
 mod stats;
 mod uring;
 mod writer;
-use db::ReadDb;
+use db::{ReadDb, WriteDb};
 
 use base64::engine::general_purpose::{URL_SAFE, URL_SAFE_NO_PAD};
 use base64::Engine;
@@ -48,94 +48,19 @@ fn main() -> io::Result<()> {
     let shards = env::var("SHARDS")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(4)
+        .unwrap_or(8)
         .clamp(1, 16);
     let addr = format!("{host}:{port}");
 
-    let (job_tx, job_rx) = mpsc::channel();
-    let (ready_tx, ready_rx) = mpsc::channel();
-    let dirty = Arc::new(AtomicU64::new(0));
-    writer::spawn(db_path.clone(), job_rx, dirty.clone(), ready_tx);
-    let _ = ready_rx.recv();
-    if stats::enabled() {
-        unsafe { db::btree_stats_enable(1) };
-        thread::Builder::new()
-            .name("btree-stats".into())
-            .spawn(|| loop {
-                thread::sleep(Duration::from_secs(5));
-                let mut v = [0u64; 4];
-                unsafe { db::btree_stats(v.as_mut_ptr()) };
-                let f = if v[0] > 0 { v[1] / v[0] / 1000 } else { 0 };
-                let p = if v[2] > 0 { v[3] / v[2] / 1000 } else { 0 };
-                eprintln!(
-                    "btree feed_calls={} feed_avg_us={} post_calls={} post_avg_us={}",
-                    v[0], f, v[2], p
-                );
-            })
-            .ok();
-    }
-    let (feed_tx, feed_rx) = mpsc::channel();
-    reader::spawn_feed(db_path.clone(), feed_rx, dirty.clone());
-    let post_workers = env::var("POST_WORKERS")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(1)
-        .clamp(1, 4);
-    let mut post_txs = Vec::with_capacity(post_workers);
-    for _ in 0..post_workers {
-        let (post_tx, post_rx) = mpsc::channel();
-        reader::spawn_post(db_path.clone(), post_rx, dirty.clone());
-        post_txs.push(post_tx);
-    }
-
-    let mut handles = Vec::with_capacity(shards);
-    for shard in 0..shards {
-        let (res_tx, res_rx) = mpsc::channel();
-        let write_event_fd =
-            unsafe { libc::eventfd(0, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC) };
-        if write_event_fd < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let write_tx = job_tx.clone();
-        let feed_tx = feed_tx.clone();
-        let post_tx = post_txs[shard % post_workers].clone();
-        let path = db_path.clone();
-        let secret = secret.clone();
-        let addr = addr.clone();
-        let dirty = dirty.clone();
-        handles.push(
-            thread::Builder::new()
-                .name(format!("shard-{shard}"))
-                .spawn(move || {
-                    if let Err(e) = uring::run_shard(
-                        path,
-                        secret,
-                        coalesce,
-                        addr,
-                        write_tx,
-                        res_tx,
-                        res_rx,
-                        write_event_fd,
-                        feed_tx,
-                        post_tx,
-                        dirty,
-                        shard,
-                    ) {
-                        eprintln!("shard {shard} stopped: {e}");
-                    }
-                })?,
-        );
-    }
-    for handle in handles {
-        let _ = handle.join();
-    }
-    Ok(())
+    uring::run_pass(db_path, secret, coalesce, addr, shards)
 }
 
 impl App {
     pub(crate) fn open(path: &str, secret: Vec<u8>, coalesce: bool) -> Result<Self, String> {
         Ok(Self {
             read: ReadDb::open(path)?,
+            write: WriteDb::open(path)?,
+            post_ids: Vec::new(),
             coalesce,
             secret,
             started: Instant::now(),
@@ -145,6 +70,8 @@ impl App {
 
 pub(crate) struct App {
     pub read: ReadDb,
+    pub write: WriteDb,
+    pub post_ids: Vec<i64>,
     coalesce: bool,
     secret: Vec<u8>,
     started: Instant,
@@ -379,7 +306,21 @@ fn parse_request<'a>(buf: &'a [u8]) -> ParseResult<'a> {
 }
 
 fn find_head_end(buf: &[u8]) -> Option<usize> {
-    buf.windows(4).position(|w| w == b"\r\n\r\n").map(|p| p + 4)
+    let mut from = 0usize;
+    while from < buf.len() {
+        let pos = buf[from..].iter().position(|&b| b == b'\n')?;
+        let p = from + pos;
+        if p >= 1
+            && buf[p - 1] == b'\r'
+            && p + 2 < buf.len()
+            && buf[p + 1] == b'\r'
+            && buf[p + 2] == b'\n'
+        {
+            return Some(p + 3);
+        }
+        from = p + 1;
+    }
+    None
 }
 
 fn trim_cr(line: &[u8]) -> &[u8] {
@@ -408,15 +349,30 @@ fn trim_ascii(mut s: &[u8]) -> &[u8] {
     s
 }
 
+fn push_decimal(out: &mut Vec<u8>, mut n: usize) {
+    let mut buf = [0u8; 20];
+    let mut i = buf.len();
+    loop {
+        i -= 1;
+        buf[i] = b'0' + (n % 10) as u8;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    out.extend_from_slice(&buf[i..]);
+}
+
 pub(crate) fn response_bytes(status: u16, body: &[u8], close: bool) -> Vec<u8> {
     let reason = status_reason(status);
     let mut out = Vec::with_capacity(96 + body.len());
-    write!(
-        &mut out,
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n",
-        body.len()
-    )
-    .unwrap();
+    out.extend_from_slice(b"HTTP/1.1 ");
+    push_decimal(&mut out, status as usize);
+    out.push(b' ');
+    out.extend_from_slice(reason.as_bytes());
+    out.extend_from_slice(b"\r\nContent-Type: application/json\r\nContent-Length: ");
+    push_decimal(&mut out, body.len());
+    out.extend_from_slice(b"\r\n");
     if close {
         out.extend_from_slice(b"Connection: close\r\n\r\n");
     } else {

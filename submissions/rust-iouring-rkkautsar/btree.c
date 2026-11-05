@@ -6,6 +6,7 @@
 // no row data survives a request.
 #define _GNU_SOURCE 1
 #include <stdint.h>
+#include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
@@ -331,7 +332,12 @@ static int first_int(const unsigned char *p, u32 n, sqlite3_int64 *out) {
   return SQLITE_OK;
 }
 
-static int like_count(BtreeReader *r, sqlite3_int64 post_id, jout *o) {
+typedef struct {
+  sqlite3_int64 id;
+  int idx;
+} LikePair;
+
+static void like_find_set(BtreeReader *r, sqlite3_int64 post_id) {
   Mem *m = &r->likeFind->aMem[0];
   m->flags = MEM_Int;
   m->u.i = post_id;
@@ -347,29 +353,108 @@ static int like_count(BtreeReader *r, sqlite3_int64 post_id, jout *o) {
   r->likeFind->nField = 2;
   r->likeFind->default_rc = 0;
   r->likeFind->eqSeen = 0;
-
-  int res = 0;
-  int rc = sqlite3BtreeIndexMoveto(r->like, r->likeFind, &res);
-  if (rc != SQLITE_OK) return rc;
-  int count = 0;
-  while (!sqlite3BtreeEof(r->like)) {
-    u32 n;
-    const unsigned char *p = payload(r->like, &n);
-    if (!p) return SQLITE_CORRUPT;
-    sqlite3_int64 key;
-    int ir = first_int(p, n, &key);
-    if (ir == SQLITE_NOTFOUND) break;
-    if (ir != SQLITE_OK) return SQLITE_CORRUPT;
-    if (key != post_id) break;
-    count++;
-    rc = sqlite3BtreeNext(r->like, 0);
-    if (rc != SQLITE_OK) return rc;
-  }
-  jint(o, (sqlite3_int64)count);
-  return SQLITE_OK;
 }
 
-static int emit_post(BtreeReader *r, sqlite3_int64 id, jout *o) {
+/* Count likes for every requested post id with one forward walk over the
+   (post_id, rowid) index.  Pairs are sorted so the cursor only moves
+   forward; no per-post re-seek. */
+static int like_counts(BtreeReader *r, const sqlite3_int64 *ids, int n,
+                       sqlite3_int64 *likes) {
+  for (int i = 0; i < n; i++) likes[i] = 0;
+  if (n <= 0) return SQLITE_OK;
+
+  LikePair local[64];
+  LikePair *pairs = local;
+  if (n > (int)(sizeof(local) / sizeof(local[0]))) {
+    pairs = (LikePair *)sqlite3_malloc64((sqlite3_uint64)n * sizeof(*pairs));
+    if (!pairs) return SQLITE_NOMEM;
+  }
+  for (int i = 0; i < n; i++) {
+    pairs[i].id = ids[i];
+    pairs[i].idx = i;
+  }
+  for (int i = 1; i < n; i++) {
+    LikePair key = pairs[i];
+    int j = i - 1;
+    while (j >= 0 && pairs[j].id > key.id) {
+      pairs[j + 1] = pairs[j];
+      j--;
+    }
+    pairs[j + 1] = key;
+  }
+
+  like_find_set(r, pairs[0].id);
+  int res = 0;
+  int rc = sqlite3BtreeIndexMoveto(r->like, r->likeFind, &res);
+  int pi = 0;
+  sqlite3_int64 prev = 0;
+  while (rc == SQLITE_OK && pi < n && !sqlite3BtreeEof(r->like)) {
+    sqlite3_int64 target = pairs[pi].id;
+    /* Random post ids can be far apart.  Walking every like between
+       them would scan the whole index, so reseek across large gaps.
+       Dense ids (the 20-post feed) still use one forward walk. */
+    if (pi > 0 && (target < prev || target - prev > 4096)) {
+      like_find_set(r, target);
+      rc = sqlite3BtreeIndexMoveto(r->like, r->likeFind, &res);
+      if (rc != SQLITE_OK) break;
+      if (sqlite3BtreeEof(r->like)) break;
+    }
+    sqlite3_int64 key = 0;
+    int ir = SQLITE_OK;
+
+    while (!sqlite3BtreeEof(r->like)) {
+      u32 pn;
+      const unsigned char *p = payload(r->like, &pn);
+      if (!p) { rc = SQLITE_CORRUPT; break; }
+      ir = first_int(p, pn, &key);
+      if (ir != SQLITE_OK) break;
+      if (key >= target) break;
+      rc = sqlite3BtreeNext(r->like, 0);
+      if (rc != SQLITE_OK) break;
+    }
+    if (rc != SQLITE_OK || ir != SQLITE_OK) {
+      if (rc == SQLITE_OK && ir != SQLITE_OK) rc = SQLITE_CORRUPT;
+      break;
+    }
+    if (sqlite3BtreeEof(r->like)) break;
+    if (key > target) {
+      pi++;
+      continue;
+    }
+
+    sqlite3_int64 count = 0;
+    while (!sqlite3BtreeEof(r->like)) {
+      u32 pn;
+      const unsigned char *p = payload(r->like, &pn);
+      if (!p) { rc = SQLITE_CORRUPT; break; }
+      ir = first_int(p, pn, &key);
+      if (ir != SQLITE_OK) break;
+      if (key != target) break;
+      count++;
+      rc = sqlite3BtreeNext(r->like, 0);
+      if (rc != SQLITE_OK) break;
+    }
+    if (rc != SQLITE_OK) break;
+    if (ir != SQLITE_OK) { rc = SQLITE_CORRUPT; break; }
+    likes[pairs[pi].idx] = count;
+    prev = target;
+    pi++;
+  }
+
+  if (rc == SQLITE_DONE) rc = SQLITE_OK;
+  if (pairs != local) sqlite3_free(pairs);
+  return rc;
+}
+
+static int like_count(BtreeReader *r, sqlite3_int64 post_id, jout *o) {
+  sqlite3_int64 ids[1] = {post_id};
+  sqlite3_int64 likes[1] = {0};
+  int rc = like_counts(r, ids, 1, likes);
+  if (rc == SQLITE_OK) jint(o, likes[0]);
+  return rc;
+}
+
+static int emit_post(BtreeReader *r, sqlite3_int64 id, sqlite3_int64 likes, jout *o) {
   int res = 0;
   int rc = sqlite3BtreeTableMoveto(r->post, id, 0, &res);
   if (rc != SQLITE_OK) return rc;
@@ -404,8 +489,7 @@ static int emit_post(BtreeReader *r, sqlite3_int64 id, jout *o) {
   jraw(o, ",\"author\":", 10);
   jstr(o, uf[1].z, uf[1].n);
   jraw(o, ",\"like_count\":", 14);
-  rc = like_count(r, id, o);
-  if (rc != SQLITE_OK) return rc;
+  jint(o, likes);
   jch(o, '}');
   return SQLITE_OK;
 }
@@ -421,27 +505,34 @@ int feed_btree(BtreeReader *r, char *out, int cap, int *outlen) {
   }
 
   int res = 0;
+  sqlite3_int64 feed_ids[20];
+  sqlite3_int64 feed_likes[20];
+  int nfeed = 0;
   rc = sqlite3BtreeFirst(r->feed, &res);
+  while (rc == SQLITE_OK && !sqlite3BtreeEof(r->feed) && nfeed < 20) {
+    u32 n;
+    const unsigned char *p = payload(r->feed, &n);
+    if (!p) {
+      rc = SQLITE_CORRUPT;
+      break;
+    }
+    val f[2];
+    if (parse_vals(p, n, f, 2) != SQLITE_OK || f[1].kind != V_INT) {
+      rc = SQLITE_CORRUPT;
+      break;
+    }
+    feed_ids[nfeed++] = f[1].i;
+    rc = sqlite3BtreeNext(r->feed, 0);
+  }
+  if (rc == SQLITE_DONE) rc = SQLITE_OK;
+  if (rc == SQLITE_OK && nfeed > 0) {
+    rc = like_counts(r, feed_ids, nfeed, feed_likes);
+  }
   if (rc == SQLITE_OK) {
     jch(&o, '[');
-    int count = 0;
-    while (!sqlite3BtreeEof(r->feed) && count < 20) {
-      u32 n;
-      const unsigned char *p = payload(r->feed, &n);
-      if (!p) {
-        rc = SQLITE_CORRUPT;
-        break;
-      }
-      val f[2];
-      if (parse_vals(p, n, f, 2) != SQLITE_OK || f[1].kind != V_INT) {
-        rc = SQLITE_CORRUPT;
-        break;
-      }
-      if (count) jch(&o, ',');
-      rc = emit_post(r, f[1].i, &o);
-      if (rc != SQLITE_OK) break;
-      count++;
-      rc = sqlite3BtreeNext(r->feed, 0);
+    for (int i = 0; i < nfeed; i++) {
+      if (i) jch(&o, ',');
+      rc = emit_post(r, feed_ids[i], feed_likes[i], &o);
       if (rc != SQLITE_OK) break;
     }
     if (rc == SQLITE_OK) jch(&o, ']');
@@ -459,7 +550,6 @@ int feed_btree(BtreeReader *r, char *out, int cap, int *outlen) {
 
 int posts_btree(BtreeReader *r, const sqlite3_int64 *ids, int n, char *out,
                 int cap, int *outlen, int *lens) {
-  uint64_t t0 = stat_on ? mono_ns() : 0;
   *outlen = 0;
   if (n <= 0) return SQLITE_OK;
   for (int i = 0; i < n; i++) lens[i] = 0;
@@ -467,10 +557,26 @@ int posts_btree(BtreeReader *r, const sqlite3_int64 *ids, int n, char *out,
   int rc = reader_begin(r);
   if (rc != SQLITE_OK) return rc;
 
+  sqlite3_int64 local_likes[64];
+  sqlite3_int64 *likes = local_likes;
+  if (n > (int)(sizeof(local_likes) / sizeof(local_likes[0]))) {
+    likes = (sqlite3_int64 *)sqlite3_malloc64((sqlite3_uint64)n * sizeof(*likes));
+    if (!likes) {
+      reader_end(r, 0);
+      return SQLITE_NOMEM;
+    }
+  }
+  rc = like_counts(r, ids, n, likes);
+  if (rc != SQLITE_OK) {
+    if (likes != local_likes) sqlite3_free(likes);
+    reader_end(r, 0);
+    return rc;
+  }
+
   int pos = 0;
   for (int i = 0; i < n; i++) {
     jout o = {out + pos, cap - pos, 0, 0};
-    rc = emit_post(r, ids[i], &o);
+    rc = emit_post(r, ids[i], likes[i], &o);
     if (rc == SQLITE_NOTFOUND) {
       rc = SQLITE_OK;
       continue;
@@ -483,13 +589,10 @@ int posts_btree(BtreeReader *r, const sqlite3_int64 *ids, int n, char *out,
     lens[i] = o.n;
     pos += o.n;
   }
+  if (likes != local_likes) sqlite3_free(likes);
   int endrc = reader_end(r, rc == SQLITE_OK);
   if (rc == SQLITE_OK) rc = endrc;
   *outlen = pos;
-  if (stat_on) {
-    __atomic_add_fetch(&stat_post_calls, 1, __ATOMIC_RELAXED);
-    __atomic_add_fetch(&stat_post_ns, mono_ns() - t0, __ATOMIC_RELAXED);
-  }
   return rc;
 }
 

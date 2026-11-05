@@ -268,6 +268,7 @@ pub struct ReadDb {
     pub feed_out: Vec<u8>,
     pub post_out: Vec<u8>,
     pub posts_out: Vec<u8>,
+    posts_lens: Vec<i32>,
 }
 
 impl Drop for ReadDb {
@@ -284,7 +285,18 @@ impl ReadDb {
     pub fn open(path: &str) -> Result<Self, String> {
         let db = Db::open(path)?;
         db.exec("PRAGMA busy_timeout=200")?;
-        db.exec("PRAGMA mmap_size=268435456")?;
+        let cache_mb = std::env::var("READ_CACHE_MB")
+            .ok()
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or(16)
+            .max(1);
+        let mmap_mb = std::env::var("READ_MMAP_MB")
+            .ok()
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or(256)
+            .max(0);
+        db.exec(&format!("PRAGMA cache_size=-{}", cache_mb * 1024))?;
+        db.exec(&format!("PRAGMA mmap_size={}", mmap_mb * 1024 * 1024))?;
         let roots = load_roots(&db);
         let reader = match roots {
             Some((posts, users, posts_idx, likes_idx)) => unsafe {
@@ -303,6 +315,7 @@ impl ReadDb {
             feed_out: vec![0u8; 64 * 1024],
             post_out: vec![0u8; 128 * 1024],
             posts_out: vec![0u8; 128 * 1024],
+            posts_lens: Vec::new(),
         })
     }
 
@@ -409,16 +422,22 @@ impl ReadDb {
     }
 
     pub fn posts(&mut self, ids: &[i64]) -> Result<HashMap<i64, Option<Vec<u8>>>, ()> {
-        let mut out = HashMap::with_capacity(ids.len());
-        if ids.is_empty() {
-            return Ok(out);
-        }
         let mut unique: Vec<i64> = ids.to_vec();
         unique.sort_unstable();
         unique.dedup();
+        Ok(self.posts_sorted(&unique)?.into_iter().collect())
+    }
+
+    /// `unique` must be sorted ascending with no duplicates.  Returns rows in
+    /// the same sorted order so callers can binary-search instead of hashing.
+    pub fn posts_sorted(&mut self, unique: &[i64]) -> Result<Vec<(i64, Option<Vec<u8>>)>, ()> {
+        if unique.is_empty() {
+            return Ok(Vec::new());
+        }
         if self.reader.is_null() {
-            for id in unique {
-                out.insert(id, self.post_sql(id)?);
+            let mut out = Vec::with_capacity(unique.len());
+            for &id in unique {
+                out.push((id, self.post_sql(id)?));
             }
             return Ok(out);
         }
@@ -426,7 +445,10 @@ impl ReadDb {
         if self.posts_out.len() < cap {
             self.posts_out.resize(cap, 0);
         }
-        let mut lens = vec![0i32; unique.len()];
+        if self.posts_lens.len() < unique.len() {
+            self.posts_lens.resize(unique.len(), 0);
+        }
+        let lens = &mut self.posts_lens[..unique.len()];
         let mut n = 0i32;
         let batch_buf = &mut self.posts_out;
         let rc = unsafe {
@@ -441,17 +463,19 @@ impl ReadDb {
             )
         };
         if rc != SQLITE_OK {
-            for id in unique {
-                out.insert(id, self.post_sql(id)?);
+            let mut out = Vec::with_capacity(unique.len());
+            for &id in unique {
+                out.push((id, self.post_sql(id)?));
             }
             return Ok(out);
         }
+        let mut slots: Vec<Option<Vec<u8>>> = vec![None; unique.len()];
         let mut pos = 0usize;
         let mut missing = Vec::new();
         for (i, id) in unique.iter().enumerate() {
             let len = lens[i].max(0) as usize;
             if len == 0 {
-                missing.push(*id);
+                missing.push((i, *id));
                 continue;
             }
             if pos + len > n.max(0) as usize || pos + len > batch_buf.len() {
@@ -462,13 +486,13 @@ impl ReadDb {
             body.extend_from_slice(b"{\"post\":");
             body.extend_from_slice(frag);
             body.push(b'}');
-            out.insert(*id, Some(body));
+            slots[i] = Some(body);
             pos += len;
         }
-        for id in missing {
-            out.insert(id, self.post_sql(id)?);
+        for (i, id) in missing {
+            slots[i] = self.post_sql(id)?;
         }
-        Ok(out)
+        Ok(unique.iter().copied().zip(slots).collect())
     }
 
     fn feed_sql(&self) -> Result<Vec<u8>, ()> {
@@ -561,6 +585,8 @@ impl WriteDb {
     pub fn prepare(&self, sql: &str) -> Result<Stmt<'_>, String> {
         self.db.prepare(sql)
     }
+
+
 
     pub fn changes(&self) -> i32 {
         changes(self.db.raw())

@@ -13,7 +13,6 @@ use crate::uring::ReadJob;
 #[derive(Clone)]
 pub struct PostResponse {
     pub normal: Arc<Vec<u8>>,
-    pub close: Option<Arc<Vec<u8>>>,
 }
 
 pub struct FeedRequest {
@@ -33,7 +32,7 @@ pub struct PostRequest {
 }
 
 pub struct PostReply {
-    pub packets: Option<Arc<HashMap<i64, Option<Arc<PostResponse>>>>>,
+    pub packets: Option<Arc<Vec<(i64, Option<Arc<PostResponse>>)>>>,
 }
 
 fn coalesce_requests<T>(rx: &Receiver<T>, first: T, window_us: u64) -> Vec<T> {
@@ -134,23 +133,19 @@ pub fn spawn_post(path: String, rx: Receiver<PostRequest>, dirty: Arc<AtomicU64>
                     }
                 }
                 let bodies = read.posts(&ids.into_iter().collect::<Vec<_>>()).ok();
-                let packets: Option<Arc<HashMap<i64, Option<Arc<PostResponse>>>>> = bodies.map(|bodies| {
-                    Arc::new(
-                        bodies
-                            .into_iter()
-                            .map(|(id, body)| {
-                                let response = body.map(|body| {
-                                    let normal = Arc::new(response_bytes(200, &body, false));
-                                    let close = Arc::new(response_bytes(200, &body, true));
-                                    Arc::new(PostResponse {
-                                        normal,
-                                        close: Some(close),
-                                    })
-                                });
-                                (id, response)
-                            })
-                            .collect(),
-                    )
+                let packets: Option<Arc<Vec<(i64, Option<Arc<PostResponse>>)>>> = bodies.map(|bodies| {
+                    let mut v: Vec<_> = bodies
+                        .into_iter()
+                        .map(|(id, body)| {
+                            let response = body.map(|body| {
+                                let normal = Arc::new(response_bytes(200, &body, false));
+                                Arc::new(PostResponse { normal })
+                            });
+                            (id, response)
+                        })
+                        .collect();
+                    v.sort_unstable_by_key(|e| e.0);
+                    Arc::new(v)
                 });
                 for req in requests {
                     if req.reply.send(PostReply { packets: packets.clone() }).is_err() {
@@ -168,3 +163,4 @@ pub fn spawn_post(path: String, rx: Receiver<PostRequest>, dirty: Arc<AtomicU64>
             }
         });
 }
+

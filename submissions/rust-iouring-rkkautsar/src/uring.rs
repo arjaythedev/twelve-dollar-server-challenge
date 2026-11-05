@@ -7,6 +7,7 @@ use std::os::fd::{AsRawFd, RawFd};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use io_uring::{cqueue, opcode, squeue, types, IoUring};
 
@@ -28,8 +29,9 @@ const RING_ENTRIES: u32 = 4_096;
 const NEW_RING_AT: usize = 65_000;
 const MAX_RINGS: usize = 16;
 const MAX_READ_BATCH: usize = 8192;
+const READ_BATCH: usize = 256;
 const READ_BUF: usize = 2_048;
-const BUF_READ: usize = 1_024;
+const BUF_READ: usize = 512;
 const BUF_RING_ENTRIES: u16 = 32_768;
 const BUF_GROUP: u16 = 1;
 
@@ -208,8 +210,10 @@ struct RingState {
     multishot: bool,
     buf_ring: Option<BufRing>,
     next_gen: u32,
+    last_cqes: usize,
     accepting: bool,
     accept_paused: bool,
+    accept_resume: Option<Instant>,
 }
 
 #[inline]
@@ -352,8 +356,10 @@ impl RingState {
             multishot,
             buf_ring,
             next_gen: 1,
+            last_cqes: 0,
             accepting: false,
             accept_paused: false,
+            accept_resume: None,
         };
         state.arm_accept()?;
         state.ring.submit()?;
@@ -410,6 +416,17 @@ fn arm_close(ring: &mut IoUring, slot: u32, gen: u32) -> io::Result<()> {
         .build()
         .user_data(ud(slot, gen, TAG_CLOSE));
     push(ring, entry)
+}
+
+fn close_packet(normal: &[u8]) -> Vec<u8> {
+    let Some(h) = normal.windows(4).position(|w| w == b"\r\n\r\n") else {
+        return normal.to_vec();
+    };
+    let mut out = Vec::with_capacity(normal.len() + 20);
+    out.extend_from_slice(&normal[..h]);
+    out.extend_from_slice(b"\r\nConnection: close\r\n\r\n");
+    out.extend_from_slice(&normal[h + 4..]);
+    out
 }
 
 fn queue_reply(c: &mut Conn, status: u16, body: &[u8], close: bool) {
@@ -572,6 +589,7 @@ fn process_ring(
             break;
         }
     }
+    r.last_cqes = cqes.len();
     for (user, res, flags) in cqes.drain(..) {
         if user == TAG_ACCEPT {
             if res >= 0 {
@@ -587,6 +605,7 @@ fn process_ring(
                 let errno = -res;
                 if errno == libc::ENFILE || errno == libc::EMFILE || errno == libc::ENOMEM {
                     r.accept_paused = true;
+                    r.accept_resume = Some(Instant::now() + Duration::from_millis(100));
                 } else if !r.accept_paused {
                     r.arm_accept()?;
                 }
@@ -732,7 +751,9 @@ fn process_ring(
         }
     }
     r.cqes = cqes;
-    r.ring.submit()?;
+    if !r.ring.submission().is_empty() {
+        r.ring.submit()?;
+    }
     Ok(())
 }
 
@@ -770,6 +791,53 @@ fn flush_post(
     }
 }
 
+fn apply_feed_jobs(
+    app: &mut App,
+    rings: &mut [RingState],
+    jobs: &[ReadJob],
+    body: Option<Arc<Vec<u8>>>,
+    write_rx: &Receiver<WriteResult>,
+) {
+    let feed_packet = body.map(|body| Arc::new(response_bytes(200, &body, false)));
+    let mut dirty = 0u64;
+    for (i, job) in jobs.iter().enumerate() {
+        let Some(r) = rings.get_mut(job.ring) else { continue };
+        let Some(c) = r.conns.get_mut(&job.slot) else { continue };
+        if c.gen != job.gen {
+            continue;
+        }
+        match &feed_packet {
+            Some(normal) => {
+                let packet = if job.close {
+                    Arc::new(close_packet(normal))
+                } else {
+                    normal.clone()
+                };
+                queue_shared(c, packet, job.close);
+                stats::record(stats::FEED, job.at);
+            }
+            None => queue_reply(c, 500, &super::error("internal server error"), true),
+        }
+        let close_now = c.close_after && c.out.len() == 0;
+        if close_now {
+            let _ = finish_close(&mut r.ring, &mut r.conns, job.slot);
+        } else {
+            let _ = arm_write(&mut r.ring, job.slot, c);
+            dirty |= 1u64 << job.ring;
+        }
+        if i % 256 == 255 {
+            process_writer(app, rings, write_rx);
+        }
+    }
+    if dirty != 0 {
+        for (i, r) in rings.iter_mut().enumerate() {
+            if dirty & (1u64 << i) != 0 {
+                let _ = r.ring.submit();
+            }
+        }
+    }
+}
+
 fn process_feed(
     app: &mut App,
     rings: &mut [RingState],
@@ -782,47 +850,65 @@ fn process_feed(
             None => break,
         };
         let Some(p) = pending.take() else { break };
-        let feed_packets = reply.body.as_ref().map(|body| {
-            (
-                Arc::new(response_bytes(200, body, false)),
-                Arc::new(response_bytes(200, body, true)),
-            )
-        });
-        let mut dirty = 0u64;
-        for (i, job) in p.jobs.iter().enumerate() {
-            let Some(r) = rings.get_mut(job.ring) else {
-                continue;
-            };
-            let Some(c) = r.conns.get_mut(&job.slot) else {
-                continue;
-            };
-            if c.gen != job.gen {
-                continue;
+        apply_feed_jobs(app, rings, &p.jobs, reply.body, write_rx);
+    }
+}
+
+fn apply_post_jobs(
+    app: &mut App,
+    rings: &mut [RingState],
+    jobs: &[ReadJob],
+    packets: Option<Arc<Vec<(i64, Option<Arc<PostResponse>>)>>>,
+    write_rx: &Receiver<WriteResult>,
+) {
+    let mut dirty = 0u64;
+    for (i, job) in jobs.iter().enumerate() {
+        let Some(r) = rings.get_mut(job.ring) else { continue };
+        let Some(c) = r.conns.get_mut(&job.slot) else { continue };
+        if c.gen != job.gen {
+            continue;
+        }
+        let id = match job.kind {
+            ReadKind::Post(id) => id,
+            _ => continue,
+        };
+        let post = packets
+            .as_ref()
+            .and_then(|v| v.binary_search_by_key(&id, |e| e.0).ok().and_then(|i| v[i].1.clone()));
+        match post {
+            Some(post) => {
+                let packet = if job.close {
+                    Arc::new(close_packet(&post.normal))
+                } else {
+                    post.normal.clone()
+                };
+                queue_shared(c, packet, job.close);
+                stats::record(stats::POST, job.at);
             }
-            match &feed_packets {
-                Some((normal, close_packet)) => {
-                    let packet = if job.close { close_packet.clone() } else { normal.clone() };
-                    queue_shared(c, packet, job.close);
-                    stats::record(stats::FEED, job.at);
-                }
-                None => queue_reply(c, 500, &super::error("internal server error"), true),
+            None if packets.is_some() => {
+                queue_reply(c, 404, &super::error("post not found"), job.close);
+                stats::record(stats::POST, job.at);
             }
-            let close_now = c.close_after && c.out.len() == 0;
-            if close_now {
-                let _ = finish_close(&mut r.ring, &mut r.conns, job.slot);
-            } else {
-                let _ = arm_write(&mut r.ring, job.slot, c);
-                dirty |= 1u64 << job.ring;
-            }
-            if i % 256 == 255 {
-                process_writer(app, rings, write_rx);
+            None => {
+                queue_reply(c, 500, &super::error("internal server error"), true);
+                stats::record(stats::POST, job.at);
             }
         }
-        if dirty != 0 {
-            for (i, r) in rings.iter_mut().enumerate() {
-                if dirty & (1u64 << i) != 0 {
-                    let _ = r.ring.submit();
-                }
+        let close_now = c.close_after && c.out.len() == 0;
+        if close_now {
+            let _ = finish_close(&mut r.ring, &mut r.conns, job.slot);
+        } else {
+            let _ = arm_write(&mut r.ring, job.slot, c);
+            dirty |= 1u64 << job.ring;
+        }
+        if i % 256 == 255 {
+            process_writer(app, rings, write_rx);
+        }
+    }
+    if dirty != 0 {
+        for (i, r) in rings.iter_mut().enumerate() {
+            if dirty & (1u64 << i) != 0 {
+                let _ = r.ring.submit();
             }
         }
     }
@@ -840,63 +926,7 @@ fn process_post(
             None => break,
         };
         let Some(p) = pending.take() else { break };
-        let mut dirty = 0u64;
-        for (i, job) in p.jobs.iter().enumerate() {
-            let Some(r) = rings.get_mut(job.ring) else {
-                continue;
-            };
-            let Some(c) = r.conns.get_mut(&job.slot) else {
-                continue;
-            };
-            if c.gen != job.gen {
-                continue;
-            }
-            let id = match job.kind {
-                ReadKind::Post(id) => id,
-                _ => continue,
-            };
-            let post = reply
-                .packets
-                .as_ref()
-                .and_then(|map| map.get(&id).cloned())
-                .flatten();
-            match post {
-                Some(post) => {
-                    let packet = if job.close {
-                        post.close.as_ref().unwrap_or(&post.normal).clone()
-                    } else {
-                        post.normal.clone()
-                    };
-                    queue_shared(c, packet, job.close);
-                    stats::record(stats::POST, job.at);
-                }
-                None if reply.packets.is_some() => {
-                    queue_reply(c, 404, &super::error("post not found"), job.close);
-                    stats::record(stats::POST, job.at);
-                }
-                None => {
-                    queue_reply(c, 500, &super::error("internal server error"), true);
-                    stats::record(stats::POST, job.at);
-                }
-            }
-            let close_now = c.close_after && c.out.len() == 0;
-            if close_now {
-                let _ = finish_close(&mut r.ring, &mut r.conns, job.slot);
-            } else {
-                let _ = arm_write(&mut r.ring, job.slot, c);
-                dirty |= 1u64 << job.ring;
-            }
-            if i % 256 == 255 {
-                process_writer(app, rings, write_rx);
-            }
-        }
-        if dirty != 0 {
-            for (i, r) in rings.iter_mut().enumerate() {
-                if dirty & (1u64 << i) != 0 {
-                    let _ = r.ring.submit();
-                }
-            }
-        }
+        apply_post_jobs(app, rings, &p.jobs, reply.packets, write_rx);
     }
 }
 
@@ -1055,5 +1085,213 @@ pub fn run_shard(
         );
         flush_feed(&mut feed_reads, &mut feed_pending, &feed_tx, read_event_fd);
         flush_post(&mut post_reads, &mut post_pending, &post_tx, read_event_fd);
+    }
+}
+
+fn drain_writes(write_rx: &Receiver<WriteJob>, pending: &mut Vec<WriteJob>) {
+    while let Ok(job) = write_rx.try_recv() {
+        pending.push(job);
+    }
+}
+
+fn apply_writes(app: &mut App, rings: &mut [RingState], jobs: &mut Vec<WriteJob>) {
+    if jobs.is_empty() {
+        return;
+    }
+    let (mut results, committed) = super::writer::run_batch(&mut app.write, &jobs);
+    let mut touched = vec![false; rings.len()];
+    for (i, job) in jobs.drain(..).enumerate() {
+        let pair = results
+            .get_mut(i)
+            .map(|r| std::mem::replace(r, (0, Vec::new())))
+            .filter(|r| r.0 != 0);
+        let (status, body) = if committed {
+            pair.unwrap_or_else(|| (500, crate::error("internal server error")))
+        } else {
+            (500, crate::error("internal server error"))
+        };
+        let close = job.close || !committed;
+        let Some(r) = rings.get_mut(job.ring) else { continue };
+        touched[job.ring] = true;
+        let Some(c) = r.conns.get_mut(&job.slot) else { continue };
+        if c.gen != job.gen {
+            continue;
+        }
+        c.write_pending = false;
+        queue_reply(c, status, &body, close);
+        stats::record(job.stat, job.at);
+        if c.close_after && c.out.len() == 0 {
+            let _ = finish_close(&mut r.ring, &mut r.conns, job.slot);
+        } else {
+            let _ = arm_write(&mut r.ring, job.slot, c);
+        }
+    }
+    if committed {
+        app.read.invalidate_feed();
+        app.read.invalidate_post();
+        app.read.invalidate_like();
+    }
+    for (i, r) in rings.iter_mut().enumerate() {
+        if touched[i] {
+            let _ = r.ring.submit();
+        }
+    }
+}
+
+fn apply_reads(
+    app: &mut App,
+    rings: &mut [RingState],
+    feed_reads: &mut Vec<ReadJob>,
+    post_reads: &mut Vec<ReadJob>,
+    write_res_rx: &Receiver<WriteResult>,
+) {
+    if !feed_reads.is_empty() {
+        let body = app.read.feed().ok().map(Arc::new);
+        apply_feed_jobs(app, rings, feed_reads, body, write_res_rx);
+        feed_reads.clear();
+    }
+    if !post_reads.is_empty() {
+        let post_slice = &post_reads[..];
+        let mut ids = std::mem::take(&mut app.post_ids);
+        ids.clear();
+        ids.extend(post_slice.iter().filter_map(|job| match job.kind {
+            ReadKind::Post(id) => Some(id),
+            _ => None,
+        }));
+        ids.sort_unstable();
+        ids.dedup();
+        let bodies = app.read.posts_sorted(&ids).ok();
+        let packets: Option<Arc<Vec<(i64, Option<Arc<PostResponse>>)>>> = bodies.map(|bodies| {
+            Arc::new(
+                bodies
+                    .into_iter()
+                    .map(|(id, body)| {
+                        let response = body.map(|body| {
+                            let normal = Arc::new(response_bytes(200, &body, false));
+                            Arc::new(PostResponse { normal })
+                        });
+                        (id, response)
+                    })
+                    .collect(),
+            )
+        });
+        apply_post_jobs(app, rings, post_slice, packets, write_res_rx);
+        post_reads.clear();
+        ids.clear();
+        app.post_ids = ids;
+    }
+
+}
+
+pub fn run_pass(
+    db_path: String,
+    secret: Vec<u8>,
+    coalesce: bool,
+    addr: String,
+    ring_count: usize,
+) -> io::Result<()> {
+    let mut app = App::open(&db_path, secret, coalesce)
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    let mut rings = Vec::with_capacity(ring_count.max(1));
+    for _ in 0..ring_count.max(1) {
+        rings.push(RingState::new(&addr)?);
+    }
+    let (write_tx, write_rx) = std::sync::mpsc::channel();
+    let (res_tx, write_res_rx) = std::sync::mpsc::channel();
+    let mut feed_reads: Vec<ReadJob> = Vec::new();
+    let mut post_reads: Vec<ReadJob> = Vec::new();
+    let mut fds: Vec<libc::pollfd> = Vec::with_capacity(rings.len());
+    let defer_us = std::env::var("WRITE_DEFER_US")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(0);
+    let defer_batch = std::env::var("WRITE_BATCH")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(64)
+        .max(1);
+    let mut pending_writes: Vec<WriteJob> = Vec::new();
+    let mut pending_since: Option<Instant> = None;
+    let pass_stats = std::env::var("PASS_STATS").is_ok();
+    let mut passes = 0u64;
+    let mut cqes_total = 0u64;
+    let mut proc_ns = 0u128;
+    let mut write_ns = 0u128;
+    let mut read_ns = 0u128;
+    let mut poll_ns = 0u128;
+    loop {
+        let t0 = Instant::now();
+        let mut cqes = 0u64;
+        for ri in 0..rings.len() {
+            process_ring(
+                ri,
+                &mut rings[ri],
+                &mut app,
+                &write_tx,
+                &res_tx,
+                -1,
+                &mut feed_reads,
+                &mut post_reads,
+            )?;
+            cqes += rings[ri].last_cqes as u64;
+        }
+        let t1 = Instant::now();
+        drain_writes(&write_rx, &mut pending_writes);
+        if !pending_writes.is_empty() {
+            let now = Instant::now();
+            let first = *pending_since.get_or_insert(now);
+            let due = defer_us > 0
+                && pending_writes.len() < defer_batch
+                && now.duration_since(first).as_micros() < defer_us as u128;
+            if !due {
+                apply_writes(&mut app, &mut rings, &mut pending_writes);
+                pending_since = None;
+            }
+        } else {
+            pending_since = None;
+        }
+        let t2 = Instant::now();
+        app.read.refresh();
+        apply_reads(&mut app, &mut rings, &mut feed_reads, &mut post_reads, &write_res_rx);
+        let t3 = Instant::now();
+
+        fds.clear();
+        for r in &rings {
+            fds.push(libc::pollfd {
+                fd: r.ring.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            });
+        }
+        let rc = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, 1) };
+        let t4 = Instant::now();
+        if rc < 0 {
+            let e = io::Error::last_os_error();
+            if e.raw_os_error() != Some(libc::EINTR) {
+                return Err(e);
+            }
+        }
+        if pass_stats {
+            passes += 1;
+            cqes_total += cqes;
+            proc_ns += t1.duration_since(t0).as_nanos();
+            write_ns += t2.duration_since(t1).as_nanos();
+            read_ns += t3.duration_since(t2).as_nanos();
+            poll_ns += t4.duration_since(t3).as_nanos();
+            if passes % 100 == 0 {
+                let n = passes as u128;
+                let total = t4.duration_since(t0).as_nanos();
+                eprintln!(
+                    "pass n={} cqes={} total_ms={} proc_ms={} write_ms={} read_ms={} poll_ms={}",
+                    passes,
+                    cqes_total / passes,
+                    total / 1_000_000,
+                    proc_ns / n / 1_000_000,
+                    write_ns / n / 1_000_000,
+                    read_ns / n / 1_000_000,
+                    poll_ns / n / 1_000_000
+                );
+            }
+        }
     }
 }

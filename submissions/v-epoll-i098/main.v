@@ -14,7 +14,6 @@ import time
 #flag -lm -lcrypto
 #include "uring_bridge.h"
 #include "json_scan.h"
-#include "row_out.h"
 #include <openssl/hmac.h>
 #include "sqlite3.h"
 #include "ckpt.h"
@@ -70,25 +69,9 @@ fn C.td_net_resume(&C.td_net, int, int, int)
 fn C.td_net_abort(&C.td_net, int)
 fn C.td_json_scan(&u8, int) int
 
-struct C.td_feed_row {
-	id       i64
-	likes    i64
-	body     &u8
-	created  &u8
-	user     &u8
-	body_len int
-	user_len int
-}
-
-struct C.td_feed {
-	row [20]C.td_feed_row
-}
-
 fn C.td_feed_init(&C.sqlite3) int
-fn C.td_feed_read(int) int
-fn C.td_post_read(i64) int
-fn C.td_feed_out() &C.td_feed
-fn C.td_put_row(&u8, &C.td_feed_row) &u8
+fn C.td_feed_read(int, &u8, &u8) &u8
+fn C.td_post_read(i64, &u8, &u8) &u8
 fn C.memchr(voidptr, int, usize) voidptr
 fn C.getrlimit(i32, &C.rlimit) i32
 fn C.setrlimit(i32, &C.rlimit) i32
@@ -1141,9 +1124,14 @@ fn (mut s Server) like(user_id i64, post_id i64) {
 fn (mut s Server) feed() {
 	s.txn()
 	if s.btree_feed {
-		n := C.td_feed_read(feed_span)
-		if n > 0 {
-			s.feed_btree(n)
+		s.start_body()
+		put(mut s.out, '{"posts":[')
+		d, dend := s.out_room(65536)
+		end := C.td_feed_read(feed_span, d, dend)
+		if end != unsafe { nil } {
+			s.out_to(end)
+			put(mut s.out, ']}')
+			s.respond(200)
 			return
 		}
 	}
@@ -1168,30 +1156,17 @@ fn (mut s Server) feed() {
 	s.feed_full()
 }
 
-// feed_btree answers the feed from rows td_feed_read copied out of the B-trees.
-fn (mut s Server) feed_btree(n int) {
-	out := C.td_feed_out()
-	s.start_body()
-	put(mut s.out, '{"posts":[')
-	for k in 0 .. n {
-		if k > 0 {
-			put(mut s.out, ',')
-		}
-		s.put_feed_row(&out.row[k])
-	}
-	put(mut s.out, ']}')
-	s.respond(200)
+// out_room reserves room bytes past the end of s.out for C code that writes the body there.
+fn (mut s Server) out_room(room int) (&u8, &u8) {
+	s.out.ensure_cap(s.out.len + room)
+	d := unsafe { &u8(s.out.data) + s.out.len }
+	return d, unsafe { d + room }
 }
 
-fn (mut s Server) put_feed_row(r &C.td_feed_row) {
-	room := r.body_len * 6 + r.user_len * 6 + 160 // worst case, see td_put_row
-	if s.out.len + room > s.out.cap {
-		s.out.ensure_cap(s.out.len + room)
-	}
+// out_to keeps what C code wrote into s.out up to end.
+fn (mut s Server) out_to(end &u8) {
 	unsafe {
-		start := &u8(s.out.data)
-		end := C.td_put_row(start + s.out.len, r)
-		s.out.len = int(usize(end) - usize(start))
+		s.out.len = int(usize(end) - usize(s.out.data))
 	}
 }
 
@@ -1266,14 +1241,17 @@ fn (mut s Server) feed_full() {
 
 fn (mut s Server) post(id i64) {
 	s.txn()
-	if s.btree_feed && C.td_post_read(id) == 1 {
+	if s.btree_feed {
 		s.start_body()
 		put(mut s.out, '{"post":')
-		out := C.td_feed_out()
-		s.put_feed_row(&out.row[0])
-		put_byte(mut s.out, `}`)
-		s.respond(200)
-		return
+		d, dend := s.out_room(16384)
+		end := C.td_post_read(id, d, dend)
+		if end != unsafe { nil } {
+			s.out_to(end)
+			put_byte(mut s.out, `}`)
+			s.respond(200)
+			return
+		}
 	}
 	st := s.st_post
 	C.sqlite3_bind_int64(st, 1, id)

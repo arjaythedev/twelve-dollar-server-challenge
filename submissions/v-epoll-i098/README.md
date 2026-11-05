@@ -69,7 +69,7 @@ The C transport keeps debug symbols and frame pointers for local profiles.
   key descriptions. Unusual cases (overflow pages, wide id spans, unknown ids) run the SQL path.
 - **Prepared statements** for every query, plus `BEGIN`/`COMMIT`, made once at startup.
 - **JSON written by hand into reused buffers.** A feed or post row is written by one C function
-  (`row_out.h`) straight into the response buffer. It copies each string 16 bytes at a time (SSE2) while
+  (`row_out.h`) straight from the B-tree page into the response buffer. It copies each string 16 bytes at a time (SSE2) while
   it checks for a byte that needs escaping, and finishes that string bytewise only after the first such
   byte. Keys come out in the spec order. `tests/row_out.c` compares it with a plain reference writer.
 - **Every token is verified.** HS256 only, signature compared in constant time, then `exp`, `sub` and

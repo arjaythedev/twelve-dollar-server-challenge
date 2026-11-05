@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"github.com/valyala/fasthttp"
+	"github.com/valyala/fastjson"
 	"io"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -101,8 +103,63 @@ func GetPost(pool *sqlitex.Pool) fasthttp.RequestHandler {
 }
 
 func CreatePost(pool *sqlitex.Pool) fasthttp.RequestHandler {
+	var parsers fastjson.ParserPool
+
+	const query = `INSERT INTO posts (user_id, body) VALUES ($1, $2) RETURNING (
+    	json_object('post', 
+    		json_object('id', id, 'body', body, 'created_at', created_at, 'author', (SELECT username FROM users WHERE id = user_id), 'like_count', 0)
+    	)
+    )`
+
 	return func(ctx *fasthttp.RequestCtx) {
-		ctx.SetStatusCode(200)
+		parser := parsers.Get()
+		defer parsers.Put(parser)
+
+		val, err := parser.ParseBytes(ctx.PostBody())
+		if err != nil {
+			erred(ctx, fasthttp.StatusBadRequest, errors.New("malformed JSON body"))
+			return
+		}
+
+		var body strings.Builder
+		if buf := val.GetStringBytes("body"); buf == nil {
+			erred(ctx, fasthttp.StatusBadRequest, errors.New("body is required"))
+			return
+		} else {
+			body.Write(buf)
+		}
+
+		trimmed := strings.TrimSpace(body.String())
+		if trimmed == "" {
+			erred(ctx, fasthttp.StatusBadRequest, errors.New("body is required"))
+			return
+		} else if len(trimmed) > 500 {
+			erred(ctx, fasthttp.StatusBadRequest, errors.New("body must be at most 500 characters"))
+			return
+		}
+
+		conn := pool.Get(ctx)
+		defer pool.Put(conn)
+
+		stmt := conn.Prep(query)
+		defer clearAndReset(stmt)
+
+		stmt.BindInt64(1, 1) // TODO: get user_id from auth token
+		stmt.BindText(2, trimmed)
+
+		ok, err := stmt.Step()
+		if err != nil {
+			erred(ctx, fasthttp.StatusInternalServerError, err)
+		} else if !ok {
+			erred(ctx, fasthttp.StatusNotFound, errors.New("internal server error"))
+		} else {
+			ctx.SetStatusCode(fasthttp.StatusCreated)
+			ctx.SetContentType("application/json")
+
+			if _, err = io.Copy(ctx, stmt.ColumnReader(0)); err != nil {
+				erred(ctx, fasthttp.StatusInternalServerError, err)
+			}
+		}
 	}
 }
 

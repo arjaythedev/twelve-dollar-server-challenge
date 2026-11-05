@@ -176,3 +176,32 @@ off 26.48, 95.0 %, 97 / 173 and 25.51, 91.4 %, 179 / 297; on 25.61, 88.8 %, 1,63
 CPU per request the same. Cause not found (every skipped truncate verified at 150k). E13 dropped; E12 kept (no effect
 locally, it only matters when the kernel reports an error).
 Fifth wrapper run (u14-b12-340k-2): 24.75 µs, 88.9 %, 42 / 210, pass. Wrapper: 2 fails in 5; without: 0 in 5.
+
+## 5 Nov (ObjcTop): C0, C1: calibration, and the refusals reproduced (`/root/objc2/hs.sh` on Synteq)
+
+Harness: Synteq 8 vCPU, kernel 6.8.0-147, the WAT agents' netns + veth + RPS (server softirq on CPU 0), systemd unit as `deploy`,
+LimitNOFILE=65535, MemoryMax=1750M (the rig's cap, LEADERBOARD note ᵐ), CPU 0, no Restart, fresh seed DB, tcp_mem 45000/60000/90000,
+memory hog leaving SRVMB plus the load generator's own 11.5 KB/user, ul2 (`bench/load.js` model) on CPUs 1-7, 60 s ramp + 120 s.
+ul2 plateau rate matches the scorer: the scorer's 26,741 req/s is averaged with the ramp in; 79 % CPU / 27 µs = ~29.3k req/s, here 29.6k.
+
+| run | SRVMB | users | result |
+|---|---|---|---|
+| base (`1fe6941`) | 1900 | 280k | pass, p95 7.6 / p99 26, app 71 % of CPU 0 |
+| base | 1900 | 290k | pass, p95 75 / p99 510 |
+| base | 1900 | 300k | **OOM-killed**, 63 % errors, 2.78M connect errors |
+| head (`6b50ca8`) | 1900 | 300k × 2 | **OOM-killed at the end of the ramp**, 99.6-99.9 % errors |
+| base | 1850 | 280k | pass, p95 10.5 / p99 33 |
+| base | 1850 | 290k | **OOM-killed**, 98.7 % errors |
+
+**SRVMB=1850 reproduces the scorer's cliff: 280k holds, 290k dies with connection refused.** Latency here is lower than the
+scorer's (p95 10 vs 35, p99 33 vs 227) and the app takes 71-73 % of CPU against 79 %, so CPU is ~8 % generous.
+
+Proven cause on this harness: **the global OOM killer** (`oom-kill:constraint=CONSTRAINT_NONE ... global_oom`, `Out of memory: Killed
+process (server)`, unit Result=oom-kill). Not our exit, not an accept failure, not a stall. Timeline in the 300k base run: file
+cache gone (cgroup file 10 MB), loop in D state reading the DB, requests queue in sockets (cgroup sock 222 → 904 MB in 12 s, TCP
+57k → 217k pages), RSS 206 → 260 MB, kill. Kernel memory per server socket from slabtop: TCP 2.31 + sock_inode 0.81 + filp 0.25 +
+dentry 0.19 + io_kiocb 0.25 + others ~0.15 KB = ~4 KB; 1.2 GB at 300k, which leaves very little on a 1,967 MB box.
+
+Amplifier seen with TD_STATS: ENOBUFS endings 592 until 218k users, then 76,820 at t=53 s, 572,899 at t=59, 1,207,438 at t=65,
+1,821,603 at t=71, CQ overflows in 109 passes. That is the re-arm storm #245 and #264 describe. Every re-arm finds its request
+queued and no buffer, and ends again.

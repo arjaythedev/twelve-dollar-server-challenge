@@ -341,7 +341,9 @@ didn't beat the merged row, it tied it) also held **219,000** (21,352 req/s, p95
 leaner JSON writer, like-index fast path; held, not merged: it didn't beat the merged row) scored **190,000** (18,631
 req/s, p95 225 / p99 338 ms, 0 err, 76 % CPU, 38 µs/req, 649 MB, 2026-11-05). 200,000 passed the 2-minute probe but
 failed the 5-minute hold on p99 (2.2 s at 81 % CPU, 0 errors); 210,000 failed the 2-minute probe on p99 (2.8 s) and
-220,000 / 240,000 on refused connections (68 % / 1.3 % errors).
+220,000 / 240,000 on refused connections (68 % / 1.3 % errors). Re-run at `8f633c4` (dex pinned back to v0.9.26):
+**195,000** (19,107 req/s, p95 244 / p99 349 ms, 0 err, 79 % CPU, 38 µs/req, 1,221 MB, 2026-11-05); 200,000 failed the
+2-minute probe on p99 (2.4 s), 240,000 on refused connections (81 % errors), so still not above the merged row.
 
 ᵟ **rust-iouring-tbsvttr** stays on its merged #323 row. Its follow-up **#325** (`f87f432`, PCACHE2 max-key truncate
 filter, coalescing WAL shim VFS, interpolated B-tree descent for /feed; held, not merged: it didn't beat the merged row)

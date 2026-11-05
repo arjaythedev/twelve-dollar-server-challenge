@@ -38,7 +38,6 @@ fn main() -> io::Result<()> {
     let port = env::var("PORT").unwrap_or_else(|_| "3000".to_string());
     let db_path = env::var("SQLITE_PATH").expect("SQLITE_PATH");
     let secret = env::var("JWT_SECRET").expect("JWT_SECRET").into_bytes();
-    let coalesce = env::var("READ_COALESCE").map(|v| v != "0").unwrap_or(true);
     let shards = env::var("SHARDS")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
@@ -46,11 +45,11 @@ fn main() -> io::Result<()> {
         .clamp(1, 16);
     let addr = format!("{host}:{port}");
 
-    uring::run_pass(db_path, secret, coalesce, addr, shards)
+    uring::run_pass(db_path, secret, addr, shards)
 }
 
 impl App {
-    pub(crate) fn open(path: &str, secret: Vec<u8>, coalesce: bool) -> Result<Self, String> {
+    pub(crate) fn open(path: &str, secret: Vec<u8>) -> Result<Self, String> {
         let read = ReadDb::open(path)?;
         let write = WriteDb::open(path)?;
         let write_cache = writer::BatchCache::new(&write);
@@ -59,7 +58,6 @@ impl App {
             write_cache,
             write,
             post_ids: Vec::new(),
-            coalesce,
             secret,
             started: Instant::now(),
         })
@@ -71,7 +69,6 @@ pub(crate) struct App {
     pub write_cache: writer::BatchCache,
     pub write: WriteDb,
     pub post_ids: Vec<i64>,
-    coalesce: bool,
     secret: Vec<u8>,
     started: Instant,
 }
@@ -119,16 +116,7 @@ impl App {
                     )
                 }
             }
-            ("GET", "/feed") => {
-                if self.coalesce {
-                    Handled::Feed
-                } else {
-                    match self.read.feed() {
-                        Ok(body) => Handled::Reply(200, body),
-                        Err(_) => Handled::Reply(500, error("internal server error")),
-                    }
-                }
-            }
+            ("GET", "/feed") => Handled::Feed,
             ("POST", "/posts") => match authenticate(req, &self.secret) {
                 Err(resp) => Handled::Reply(resp.0, resp.1),
                 Ok(claims) => {
@@ -159,15 +147,7 @@ impl App {
                 let Some(id) = parse_positive_id(&path["/posts/".len()..]) else {
                     return Handled::Reply(400, error("invalid post id"));
                 };
-                if self.coalesce {
-                    Handled::Post(id)
-                } else {
-                    match self.read.post(id) {
-                        Ok(Some(body)) => Handled::Reply(200, body),
-                        Ok(None) => Handled::Reply(404, error("post not found")),
-                        Err(_) => Handled::Reply(500, error("internal server error")),
-                    }
-                }
+                Handled::Post(id)
             }
             ("POST", path) if path.starts_with("/posts/") && path.ends_with("/like") => {
                 match authenticate(req, &self.secret) {

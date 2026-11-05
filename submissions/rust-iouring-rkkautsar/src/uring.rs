@@ -1000,11 +1000,10 @@ fn apply_reads(
 pub fn run_pass(
     db_path: String,
     secret: Vec<u8>,
-    coalesce: bool,
     addr: String,
     ring_count: usize,
 ) -> io::Result<()> {
-    let mut app = App::open(&db_path, secret, coalesce)
+    let mut app = App::open(&db_path, secret)
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
     let mut rings = Vec::with_capacity(ring_count.max(1));
     for _ in 0..ring_count.max(1) {
@@ -1037,6 +1036,13 @@ pub fn run_pass(
         let t0 = Instant::now();
         let mut cqes = 0u64;
         for ri in 0..rings.len() {
+            if rings[ri].accept_paused
+                && rings[ri].accept_resume.is_some_and(|t| Instant::now() >= t)
+            {
+                rings[ri].accept_paused = false;
+                rings[ri].accept_resume = None;
+                let _ = rings[ri].arm_accept();
+            }
             process_ring(
                 ri,
                 &mut rings[ri],

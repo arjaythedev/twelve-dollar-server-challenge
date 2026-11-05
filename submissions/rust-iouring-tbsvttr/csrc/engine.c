@@ -1242,9 +1242,19 @@ int tvcc_db_feed(TvccDbEngine *eng, TvccFeedResult *out) {
     for (uint32_t i = 0; i < n_rows; i++) {
         int64_t pid = order[i].post_id;
         uint32_t slot = order[i].slot;
-        int cmp = 0;
-        if (sqlite3BtreeTableMoveto(eng->cur_posts, pid, 0, &cmp) != SQLITE_OK || cmp != 0) {
-            return tvcc_feed_sql_fallback(eng, out);
+        int moved = 0;
+        if (i > 0 && eng->cur_posts->eState == CURSOR_VALID) {
+            if (sqlite3BtreeNext(eng->cur_posts, 0) == SQLITE_OK &&
+                eng->cur_posts->eState == CURSOR_VALID &&
+                sqlite3BtreeIntegerKey(eng->cur_posts) == pid) {
+                moved = 1;
+            }
+        }
+        if (!moved) {
+            int cmp = 0;
+            if (sqlite3BtreeTableMoveto(eng->cur_posts, pid, 0, &cmp) != SQLITE_OK || cmp != 0) {
+                return tvcc_feed_sql_fallback(eng, out);
+            }
         }
         uint32_t rec_sz = 0;
         const uint8_t *rec = tvcc_fetch_record(eng, eng->cur_posts, &rec_sz);

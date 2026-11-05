@@ -1,0 +1,782 @@
+{
+  "notes": [
+    "All runs are local same-host diagnostics, not organizer scores.",
+    "The five-minute investigation also used a 99 Hz server/generator perf capture: 52205 samples, zero lost; kernel symbols unavailable.",
+    "Burst trials inject a roughly half-second server cgroup pause; short-run thresholds are not five-minute qualification.",
+    "The first candidate only changed retry budgets; the final candidate also enqueues fresh receives behind an existing retry FIFO.",
+    "One-second unsynchronized queue snapshots bound observations, not exact recovery times. Sequential trials do not isolate host variation."
+  ],
+  "trials": [
+    {
+      "server_sha256": "3a07352ab36159baf611f82fcaaa13d91939f415e05a70c7f7a3d7a0dfbe35d4",
+      "generator_sha256": "1c3908541a89e78401d782271c49e742fe89631cb724ca5af7650b51ed11087d",
+      "generator_revision": "e31cd6285704b436422c2fc100d3beb10e558f6c",
+      "arguments": {
+        "users": 275000,
+        "duration": "5m",
+        "ramp_up": "60s",
+        "warmup": true,
+        "score": false,
+        "start_users": 275000,
+        "max_users": 500000,
+        "label": "mjc-p99-investigation",
+        "server_arg": [],
+        "inspect_rings": true
+      },
+      "server_limits": {
+        "cpus": 1,
+        "cpuset": "0",
+        "memory_bytes": 2147483648,
+        "swap_bytes": 0,
+        "nofile": 65535
+      },
+      "client_limits": {
+        "cpuset": "1-7,9-15",
+        "memory_bytes": 12884901888,
+        "swap_bytes": 0,
+        "nofile": 1048576,
+        "tokio_threads": 4
+      },
+      "passed": false,
+      "result_directory": "mjc-p99-investigation-20261023T195510",
+      "native": {
+        "aggregate": {
+          "avg_ms": 66.31687576058937,
+          "checks_failed": 0,
+          "errors": {
+            "counts": {},
+            "examples": [],
+            "omitted": 0
+          },
+          "failed": 0,
+          "failure_rate": 0,
+          "max_ms": 13382.500492000001,
+          "med_ms": 1.8185894999999999,
+          "p95_ms": 71.8534475,
+          "p99_ms": 1304.0781562000393,
+          "requests": 10195946
+        },
+        "maximum_users": 275000,
+        "common_hold_s": 300.000936681,
+        "duration_s": 400.082933588,
+        "hold": {
+          "memory_scope": "sampled cgroup memory.current for selected application and proxy groups, including descendants, socket buffers and page cache",
+          "requests_per_second": 28956.94760205386,
+          "sample_duration_s": 295.039647089,
+          "sample_finished_at": "2026-10-23T19:03:58.301183121+00:00",
+          "sample_started_at": "2026-10-23T18:59:03.261536032+00:00",
+          "sampled_peak_memory_bytes": 1578569728,
+          "service_cpu_percent": 63.2161019172239,
+          "system_memory": {
+            "min_available_bytes": 23507353600,
+            "peak_total_minus_available_bytes": 41618055168,
+            "peak_total_minus_free_bytes_including_reclaimable": 63526572032,
+            "scope": "whole observed system from /proc/meminfo; MemAvailable is never inferred when missing; MemFree-only usage includes reclaimable cache",
+            "total_bytes": 65125408768
+          }
+        },
+        "runtime_errors": 0,
+        "passed": false
+      },
+      "peak_cgroup_bytes": 1585741824,
+      "server_exit_code": 0,
+      "integrity_check": null,
+      "peak_deferred_by_ring": [
+        14628,
+        25793,
+        32375,
+        3924,
+        0,
+        0,
+        0,
+        0
+      ],
+      "peak_total_deferred": 56568,
+      "requests_over_1000ms": 110526,
+      "requests_over_500ms": 128895,
+      "over_1000ms_by_completion_window_end_seconds": {
+        "60": 21150,
+        "65": 20570,
+        "70": 14956,
+        "75": 22282,
+        "80": 16848,
+        "85": 1777,
+        "95": 2866,
+        "100": 792,
+        "105": 9285
+      },
+      "selected_queue_snapshots": [
+        {
+          "benchmark_seconds": 55.506,
+          "deferred_by_ring": [
+            3671,
+            1135,
+            0,
+            1340,
+            0,
+            0,
+            0,
+            0
+          ],
+          "completion_depth_by_ring": [
+            23,
+            0,
+            0,
+            36,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "benchmark_seconds": 60.507,
+          "deferred_by_ring": [
+            11940,
+            0,
+            2225,
+            2316,
+            0,
+            0,
+            0,
+            0
+          ],
+          "completion_depth_by_ring": [
+            10,
+            7,
+            201,
+            216,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "benchmark_seconds": 66.51,
+          "deferred_by_ring": [
+            7157,
+            10495,
+            32375,
+            2900,
+            0,
+            0,
+            0,
+            0
+          ],
+          "completion_depth_by_ring": [
+            244,
+            3699,
+            874,
+            117,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "benchmark_seconds": 69.511,
+          "deferred_by_ring": [
+            2805,
+            25793,
+            23415,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "completion_depth_by_ring": [
+            1664,
+            1607,
+            225,
+            1888,
+            4,
+            10,
+            8,
+            5
+          ]
+        },
+        {
+          "benchmark_seconds": 78.515,
+          "deferred_by_ring": [
+            0,
+            2113,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "completion_depth_by_ring": [
+            0,
+            159,
+            16,
+            7,
+            0,
+            0,
+            0,
+            1
+          ]
+        },
+        {
+          "benchmark_seconds": 81.516,
+          "deferred_by_ring": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "completion_depth_by_ring": [
+            11,
+            6,
+            0,
+            31,
+            0,
+            1,
+            1,
+            0
+          ]
+        },
+        {
+          "benchmark_seconds": 99.525,
+          "deferred_by_ring": [
+            0,
+            16534,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "completion_depth_by_ring": [
+            39,
+            903,
+            1009,
+            1523,
+            1,
+            0,
+            2,
+            2
+          ]
+        },
+        {
+          "benchmark_seconds": 104.525,
+          "deferred_by_ring": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "completion_depth_by_ring": [
+            17,
+            5,
+            6,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "server_sha256": "3a07352ab36159baf611f82fcaaa13d91939f415e05a70c7f7a3d7a0dfbe35d4",
+      "generator_sha256": "1c3908541a89e78401d782271c49e742fe89631cb724ca5af7650b51ed11087d",
+      "generator_revision": "e31cd6285704b436422c2fc100d3beb10e558f6c",
+      "arguments": {
+        "users": 275000,
+        "duration": "1m",
+        "ramp_up": "60s",
+        "warmup": false,
+        "score": false,
+        "start_users": 275000,
+        "max_users": 500000,
+        "label": "mjc-enobuf-old-burst",
+        "server_arg": [],
+        "inspect_rings": true,
+        "pause_after": 80,
+        "pause_seconds": 0.5
+      },
+      "server_limits": {
+        "cpus": 1,
+        "cpuset": "0",
+        "memory_bytes": 2147483648,
+        "swap_bytes": 0,
+        "nofile": 65535
+      },
+      "client_limits": {
+        "cpuset": "1-7,9-15",
+        "memory_bytes": 12884901888,
+        "swap_bytes": 0,
+        "nofile": 1048576,
+        "tokio_threads": 4
+      },
+      "passed": true,
+      "result_directory": "mjc-enobuf-old-burst-20261023T200733",
+      "native": {
+        "aggregate": {
+          "avg_ms": 15.718175177277969,
+          "checks_failed": 0,
+          "errors": {
+            "counts": {},
+            "examples": [],
+            "omitted": 0
+          },
+          "failed": 0,
+          "failure_rate": 0,
+          "max_ms": 3260.499313,
+          "med_ms": 1.271193,
+          "p95_ms": 34.54460999999999,
+          "p99_ms": 118.71648568000005,
+          "requests": 3282597
+        },
+        "maximum_users": 275000,
+        "common_hold_s": 60.001003351,
+        "duration_s": 160.084999812,
+        "hold": {
+          "memory_scope": "sampled cgroup memory.current for selected application and proxy groups, including descendants, socket buffers and page cache",
+          "requests_per_second": 29009.889212523743,
+          "sample_duration_s": 55.005734909,
+          "sample_finished_at": "2026-10-23T19:09:30.930354598+00:00",
+          "sample_started_at": "2026-10-23T19:08:35.924619689+00:00",
+          "sampled_peak_memory_bytes": 1547005952,
+          "service_cpu_percent": 61.30896543022498,
+          "system_memory": {
+            "min_available_bytes": 22859919360,
+            "peak_total_minus_available_bytes": 42265489408,
+            "peak_total_minus_free_bytes_including_reclaimable": 58315415552,
+            "scope": "whole observed system from /proc/meminfo; MemAvailable is never inferred when missing; MemFree-only usage includes reclaimable cache",
+            "total_bytes": 65125408768
+          }
+        },
+        "runtime_errors": 0,
+        "passed": true
+      },
+      "peak_cgroup_bytes": 1574813696,
+      "server_exit_code": 0,
+      "integrity_check": "ok",
+      "peak_deferred_by_ring": [
+        3447,
+        2201,
+        4996,
+        4642,
+        0,
+        0,
+        0,
+        0
+      ],
+      "peak_total_deferred": 15286,
+      "requests_over_1000ms": 13260,
+      "requests_over_500ms": 18807,
+      "injected_pause": {
+        "start": 1792782535.465616,
+        "requested_seconds": 0.5,
+        "finished": 1792782535.9970286
+      },
+      "recovery_samples": [
+        {
+          "seconds_after_resume": 0.569,
+          "deferred_by_ring": [
+            3447,
+            2201,
+            4996,
+            4642,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "seconds_after_resume": 1.569,
+          "deferred_by_ring": [
+            1143,
+            0,
+            4547,
+            3490,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "seconds_after_resume": 2.569,
+          "deferred_by_ring": [
+            0,
+            0,
+            3907,
+            2082,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "seconds_after_resume": 3.569,
+          "deferred_by_ring": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "seconds_after_resume": 4.569,
+          "deferred_by_ring": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "server_sha256": "b6fc7427c7564c734752864da6dc68a1b6aeb0d2c43adcc0e945f87967a449fe",
+      "generator_sha256": "1c3908541a89e78401d782271c49e742fe89631cb724ca5af7650b51ed11087d",
+      "generator_revision": "e31cd6285704b436422c2fc100d3beb10e558f6c",
+      "arguments": {
+        "users": 275000,
+        "duration": "1m",
+        "ramp_up": "60s",
+        "warmup": false,
+        "score": false,
+        "start_users": 275000,
+        "max_users": 500000,
+        "label": "mjc-enobuf-fair-burst",
+        "server_arg": [],
+        "inspect_rings": true,
+        "pause_after": 80,
+        "pause_seconds": 0.5
+      },
+      "server_limits": {
+        "cpus": 1,
+        "cpuset": "0",
+        "memory_bytes": 2147483648,
+        "swap_bytes": 0,
+        "nofile": 65535
+      },
+      "client_limits": {
+        "cpuset": "1-7,9-15",
+        "memory_bytes": 12884901888,
+        "swap_bytes": 0,
+        "nofile": 1048576,
+        "tokio_threads": 4
+      },
+      "passed": true,
+      "result_directory": "mjc-enobuf-fair-burst-20261023T201131",
+      "native": {
+        "aggregate": {
+          "avg_ms": 12.75983935264563,
+          "checks_failed": 0,
+          "errors": {
+            "counts": {},
+            "examples": [],
+            "omitted": 0
+          },
+          "failed": 0,
+          "failure_rate": 0,
+          "max_ms": 2907.822772,
+          "med_ms": 1.287654,
+          "p95_ms": 35.59752219999955,
+          "p99_ms": 154.72518958999842,
+          "requests": 3284294
+        },
+        "maximum_users": 275000,
+        "common_hold_s": 60.000684401,
+        "duration_s": 160.086843337,
+        "hold": {
+          "memory_scope": "sampled cgroup memory.current for selected application and proxy groups, including descendants, socket buffers and page cache",
+          "requests_per_second": 29062.811399551323,
+          "sample_duration_s": 55.082798838,
+          "sample_finished_at": "2026-10-23T19:13:28.565627460+00:00",
+          "sample_started_at": "2026-10-23T19:12:33.482828622+00:00",
+          "sampled_peak_memory_bytes": 1536622592,
+          "service_cpu_percent": 60.66585886145454,
+          "system_memory": {
+            "min_available_bytes": 25359593472,
+            "peak_total_minus_available_bytes": 39765815296,
+            "peak_total_minus_free_bytes_including_reclaimable": 55593357312,
+            "scope": "whole observed system from /proc/meminfo; MemAvailable is never inferred when missing; MemFree-only usage includes reclaimable cache",
+            "total_bytes": 65125408768
+          }
+        },
+        "runtime_errors": 0,
+        "passed": true
+      },
+      "peak_cgroup_bytes": 1547403264,
+      "server_exit_code": 0,
+      "integrity_check": "ok",
+      "peak_deferred_by_ring": [
+        2034,
+        1356,
+        2718,
+        5202,
+        0,
+        0,
+        0,
+        0
+      ],
+      "peak_total_deferred": 9296,
+      "requests_over_1000ms": 7018,
+      "requests_over_500ms": 22514,
+      "injected_pause": {
+        "start": 1792782772.3902874,
+        "requested_seconds": 0.5,
+        "finished": 1792782772.9208932
+      },
+      "recovery_samples": [
+        {
+          "seconds_after_resume": 0.181,
+          "deferred_by_ring": [
+            2034,
+            1356,
+            2718,
+            3188,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "seconds_after_resume": 1.181,
+          "deferred_by_ring": [
+            52,
+            0,
+            2164,
+            5202,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "seconds_after_resume": 2.181,
+          "deferred_by_ring": [
+            0,
+            0,
+            603,
+            1874,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "seconds_after_resume": 3.181,
+          "deferred_by_ring": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "seconds_after_resume": 4.181,
+          "deferred_by_ring": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "server_sha256": "4c195011c6776e03a70e1808bec4ad6a90840535aa8b82fecec86a5c710e96d3",
+      "generator_sha256": "1c3908541a89e78401d782271c49e742fe89631cb724ca5af7650b51ed11087d",
+      "generator_revision": "e31cd6285704b436422c2fc100d3beb10e558f6c",
+      "arguments": {
+        "users": 275000,
+        "duration": "1m",
+        "ramp_up": "60s",
+        "warmup": false,
+        "score": false,
+        "start_users": 275000,
+        "max_users": 500000,
+        "label": "mjc-enobuf-fifo-burst",
+        "server_arg": [],
+        "inspect_rings": true,
+        "pause_after": 80,
+        "pause_seconds": 0.5
+      },
+      "server_limits": {
+        "cpus": 1,
+        "cpuset": "0",
+        "memory_bytes": 2147483648,
+        "swap_bytes": 0,
+        "nofile": 65535
+      },
+      "client_limits": {
+        "cpuset": "1-7,9-15",
+        "memory_bytes": 12884901888,
+        "swap_bytes": 0,
+        "nofile": 1048576,
+        "tokio_threads": 4
+      },
+      "passed": true,
+      "result_directory": "mjc-enobuf-fifo-burst-20261023T201719",
+      "native": {
+        "aggregate": {
+          "avg_ms": 9.06434999045851,
+          "checks_failed": 0,
+          "errors": {
+            "counts": {},
+            "examples": [],
+            "omitted": 0
+          },
+          "failed": 0,
+          "failure_rate": 0,
+          "max_ms": 1594.357582,
+          "med_ms": 1.3448799999999999,
+          "p95_ms": 33.488265199999915,
+          "p99_ms": 89.48214155999958,
+          "requests": 3284277
+        },
+        "maximum_users": 275000,
+        "common_hold_s": 60.000819056,
+        "duration_s": 160.079607796,
+        "hold": {
+          "memory_scope": "sampled cgroup memory.current for selected application and proxy groups, including descendants, socket buffers and page cache",
+          "requests_per_second": 29044.327296010426,
+          "sample_duration_s": 55.005037175,
+          "sample_finished_at": "2026-10-23T19:19:16.260564842+00:00",
+          "sample_started_at": "2026-10-23T19:18:21.255527667+00:00",
+          "sampled_peak_memory_bytes": 1564090368,
+          "service_cpu_percent": 58.66876500297539,
+          "system_memory": {
+            "min_available_bytes": 27185565696,
+            "peak_total_minus_available_bytes": 37939843072,
+            "peak_total_minus_free_bytes_including_reclaimable": 53187424256,
+            "scope": "whole observed system from /proc/meminfo; MemAvailable is never inferred when missing; MemFree-only usage includes reclaimable cache",
+            "total_bytes": 65125408768
+          }
+        },
+        "runtime_errors": 0,
+        "passed": true
+      },
+      "peak_cgroup_bytes": 1567006720,
+      "server_exit_code": 0,
+      "integrity_check": "ok",
+      "peak_deferred_by_ring": [
+        2758,
+        2260,
+        5680,
+        7284,
+        0,
+        0,
+        0,
+        0
+      ],
+      "peak_total_deferred": 15575,
+      "requests_over_1000ms": 3196,
+      "requests_over_500ms": 15018,
+      "injected_pause": {
+        "start": 1792783120.2263417,
+        "requested_seconds": 0.5,
+        "finished": 1792783120.7565815
+      },
+      "recovery_samples": [
+        {
+          "seconds_after_resume": 0.127,
+          "deferred_by_ring": [
+            2758,
+            2260,
+            2880,
+            3166,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "seconds_after_resume": 1.127,
+          "deferred_by_ring": [
+            2611,
+            0,
+            5680,
+            7284,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "seconds_after_resume": 2.127,
+          "deferred_by_ring": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "seconds_after_resume": 3.129,
+          "deferred_by_ring": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "seconds_after_resume": 4.129,
+          "deferred_by_ring": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      ]
+    }
+  ]
+}

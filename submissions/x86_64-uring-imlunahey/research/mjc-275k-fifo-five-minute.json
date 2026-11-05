@@ -1,0 +1,224 @@
+{
+  "generator_revision": "e31cd6285704b436422c2fc100d3beb10e558f6c",
+  "generator_sha256": "1c3908541a89e78401d782271c49e742fe89631cb724ca5af7650b51ed11087d",
+  "server_sha256": "4c195011c6776e03a70e1808bec4ad6a90840535aa8b82fecec86a5c710e96d3",
+  "arguments": {
+    "users": 275000,
+    "duration": "5m",
+    "ramp_up": "60s",
+    "warmup": true,
+    "score": false,
+    "start_users": 275000,
+    "max_users": 500000,
+    "label": "mjc-enobuf-fifo-confirm",
+    "server_arg": [],
+    "inspect_rings": false,
+    "pause_after": null,
+    "pause_seconds": 0.5
+  },
+  "server_limits": {
+    "cpus": 1,
+    "cpuset": "0",
+    "memory_bytes": 2147483648,
+    "swap_bytes": 0,
+    "nofile": 65535
+  },
+  "client_limits": {
+    "cpuset": "1-7,9-15",
+    "memory_bytes": 12884901888,
+    "swap_bytes": 0,
+    "nofile": 1048576,
+    "tokio_threads": 4
+  },
+  "topology": "separate cgroups; private shared loopback and PID namespace; host cgroup namespace read-only in client",
+  "server_final_state": {
+    "Status": "exited",
+    "Running": false,
+    "Paused": false,
+    "Restarting": false,
+    "OOMKilled": false,
+    "Dead": false,
+    "Pid": 0,
+    "ExitCode": 0,
+    "Error": "",
+    "StartedAt": "2026-10-23T19:20:35.32499827Z",
+    "FinishedAt": "2026-10-23T19:30:19.163155787Z"
+  },
+  "integrity_check": "ok",
+  "passed": true,
+  "source_result_directory": "mjc-enobuf-fifo-confirm-20261023T202035",
+  "peak_cgroup_bytes": 1453129728,
+  "max_memory_events": {
+    "max": 0,
+    "oom": 0,
+    "oom_kill": 0
+  },
+  "native_report": {
+    "aggregate": {
+      "avg_ms": 5.946021731784431,
+      "checks_failed": 0,
+      "errors": {
+        "counts": {},
+        "examples": [],
+        "omitted": 0
+      },
+      "failed": 0,
+      "failure_rate": 0,
+      "max_ms": 555.3034799999999,
+      "med_ms": 1.4853589999999999,
+      "p95_ms": 32.489248799999984,
+      "p99_ms": 72.99751075999997,
+      "requests": 10267297
+    },
+    "common_hold_s": 300.000579767,
+    "completed": true,
+    "connections": {
+      "attempts": 275000,
+      "attempts_per_second": 687.3458242711205,
+      "cancelled": 0,
+      "connections_per_second": 687.3458242711205,
+      "errors": {},
+      "established": 275000,
+      "failed": 0,
+      "failed_per_second": 0,
+      "failed_setup_duration_ms": {
+        "avg_ms": null,
+        "max_ms": null,
+        "med_ms": null,
+        "p95_ms": null,
+        "p99_ms": null,
+        "samples": 0
+      },
+      "scope": "client connection setup including DNS and TCP; pooled requests do not start a new attempt; an attempt may try multiple DNS addresses and source ports",
+      "setup_duration_ms": {
+        "avg_ms": 0.48143603681454733,
+        "max_ms": 155.344441,
+        "med_ms": 0.075039,
+        "p95_ms": 0.27708699999999953,
+        "p99_ms": 7.842612700000151,
+        "samples": 275000
+      },
+      "successful_setup_duration_ms": {
+        "avg_ms": 0.48143603681454733,
+        "max_ms": 155.344441,
+        "med_ms": 0.075039,
+        "p95_ms": 0.27708699999999953,
+        "p99_ms": 7.842612700000151,
+        "samples": 275000
+      }
+    },
+    "duration_s": 400.089722363,
+    "endpoints": {
+      "GET /feed": {
+        "avg_ms": 6.092783530611602,
+        "checks_failed": 0,
+        "errors": {
+          "counts": {},
+          "examples": [],
+          "omitted": 0
+        },
+        "failed": 0,
+        "failed_requests_per_second": 0,
+        "failure_rate": 0,
+        "max_ms": 555.3034799999999,
+        "med_ms": 1.4922119999999999,
+        "p95_ms": 33.139532,
+        "p99_ms": 75.43544100000001,
+        "requests": 4732051,
+        "requests_per_second": 11827.474527592654,
+        "successful_requests_per_second": 11827.474527592654
+      },
+      "GET /posts/:id": {
+        "avg_ms": 5.829917207149833,
+        "checks_failed": 0,
+        "errors": {
+          "counts": {},
+          "examples": [],
+          "omitted": 0
+        },
+        "failed": 0,
+        "failed_requests_per_second": 0,
+        "failure_rate": 0,
+        "max_ms": 555.274316,
+        "med_ms": 1.472796,
+        "p95_ms": 32.0512435,
+        "p99_ms": 71.29512249999999,
+        "requests": 4732051,
+        "requests_per_second": 11827.474527592654,
+        "successful_requests_per_second": 11827.474527592654
+      },
+      "POST /posts": {
+        "avg_ms": 5.908374860961125,
+        "checks_failed": 0,
+        "errors": {
+          "counts": {},
+          "examples": [],
+          "omitted": 0
+        },
+        "failed": 0,
+        "failed_requests_per_second": 0,
+        "failure_rate": 0,
+        "max_ms": 381.780262,
+        "med_ms": 1.601045,
+        "p95_ms": 31.445621,
+        "p99_ms": 69.10527560000001,
+        "requests": 94621,
+        "requests_per_second": 236.49945177584615,
+        "successful_requests_per_second": 236.49945177584615
+      },
+      "POST /posts/:id/like": {
+        "avg_ms": 5.746311326891718,
+        "checks_failed": 0,
+        "errors": {
+          "counts": {},
+          "examples": [],
+          "omitted": 0
+        },
+        "failed": 0,
+        "failed_requests_per_second": 0,
+        "failure_rate": 0,
+        "max_ms": 466.765219,
+        "med_ms": 1.5055215,
+        "p95_ms": 31.333765549999992,
+        "p99_ms": 69.50180113000015,
+        "requests": 708574,
+        "requests_per_second": 1771.037745771218,
+        "successful_requests_per_second": 1771.037745771218
+      }
+    },
+    "hold": {
+      "memory_scope": "sampled cgroup memory.current for selected application and proxy groups, including descendants, socket buffers and page cache",
+      "requests_per_second": 29093.865562266063,
+      "sample_duration_s": 295.028607553,
+      "sample_finished_at": "2026-10-23T19:29:23.387248431+00:00",
+      "sample_started_at": "2026-10-23T19:24:28.358640878+00:00",
+      "sampled_peak_memory_bytes": 1440825344,
+      "service_cpu_percent": 59.002774830480995,
+      "system_memory": {
+        "min_available_bytes": 13028888576,
+        "peak_total_minus_available_bytes": 52096520192,
+        "peak_total_minus_free_bytes_including_reclaimable": 64243957760,
+        "scope": "whole observed system from /proc/meminfo; MemAvailable is never inferred when missing; MemFree-only usage includes reclaimable cache",
+        "total_bytes": 65125408768
+      }
+    },
+    "hold_started_at": "2026-10-23T19:24:28.350939204Z",
+    "hold_finished_at": "2026-10-23T19:29:28.351518971Z",
+    "maximum_users": 275000,
+    "passed": true,
+    "required_hold_s": 300,
+    "runtime_errors": 0,
+    "thresholds": {
+      "failure_rate_lt": 0.01,
+      "p95_ms_lt": 500,
+      "p99_ms_lt": 1000
+    },
+    "latency": "HTTP send through complete response body, excluding DNS and TCP connection setup"
+  },
+  "notes": [
+    "Clean selected-population confirmation: no induced pause, ring inspector or perf profiler.",
+    "Warmup 1000 users for two minutes; main ramp 60 seconds, hold five minutes, normal 30-second ramp-down plus 10-second grace.",
+    "No host sysctl changes; same-host private loopback and diagnostic CPU placement differ from the organizer.",
+    "Highest confirmed population in these trials, not a maximum-user search or proof of superiority to a language."
+  ]
+}

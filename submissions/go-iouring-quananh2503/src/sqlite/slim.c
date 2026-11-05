@@ -234,8 +234,8 @@ static int count_likes(Engine *e, sqlite3_int64 post_id, int *likes_out) {
     return SQLITE_OK;
 }
 
-/* Format 1 post object */
-static int emit_post(Engine *e, sqlite3_int64 id, jout *o) {
+/* Format 1 post object with precomputed likes count */
+static int emit_post_with_likes(Engine *e, sqlite3_int64 id, int likes, jout *o) {
     int res = 0;
     int rc = sqlite3BtreeTableMoveto(e->post, id, 0, &res);
     if (rc != SQLITE_OK) return rc;
@@ -262,10 +262,6 @@ static int emit_post(Engine *e, sqlite3_int64 id, jout *o) {
         return SQLITE_CORRUPT;
     }
 
-    int likes = 0;
-    rc = count_likes(e, id, &likes);
-    if (rc != SQLITE_OK) return rc;
-
     jraw(o, "{\"id\":", 6);
     jint(o, id);
     jraw(o, ",\"body\":", 8);
@@ -278,6 +274,14 @@ static int emit_post(Engine *e, sqlite3_int64 id, jout *o) {
     jint(o, (sqlite3_int64)likes);
     jch(o, '}');
     return SQLITE_OK;
+}
+
+/* Format 1 post object */
+static int emit_post(Engine *e, sqlite3_int64 id, jout *o) {
+    int likes = 0;
+    int rc = count_likes(e, id, &likes);
+    if (rc != SQLITE_OK) return rc;
+    return emit_post_with_likes(e, id, likes, o);
 }
 
 static Pgno get_rootpage(sqlite3 *db, const char *name) {
@@ -354,6 +358,8 @@ int db_health(void) {
     return (rc == SQLITE_ROW) ? 1 : 0;
 }
 
+#define FEED_SPAN 256
+
 int get_feed(char *out, int cap, int *outlen) {
     if (!g_engine.bt) return -1;
     jout o = {out, cap, 0, 0};
@@ -368,29 +374,110 @@ int get_feed(char *out, int cap, int *outlen) {
         if (rc != SQLITE_OK) return -2;
     }
 
-    jraw(&o, "{\"posts\":[", 10);
+    // 2. Thu thập tối đa 20 post_id từ g_engine.feed
+    sqlite3_int64 ids[20];
+    int n_posts = 0;
     int res = 0;
     rc = sqlite3BtreeFirst(g_engine.feed, &res);
     if (rc == SQLITE_OK && res == 0) {
-        int count = 0;
-        while (!sqlite3BtreeEof(g_engine.feed) && count < 20) {
+        while (!sqlite3BtreeEof(g_engine.feed) && n_posts < 20) {
             u32 n = 0;
             const unsigned char *p = payload(g_engine.feed, &n);
-            if (!p) { rc = SQLITE_CORRUPT; break; }
+            if (!p) break;
 
             val f[2];
             int prc = parse_vals(p, n, f, 2);
-            if (prc != SQLITE_OK || f[1].kind != V_INT) {
-                rc = SQLITE_CORRUPT;
-                break;
-            }
-            if (count > 0) jch(&o, ',');
-            rc = emit_post(&g_engine, f[1].i, &o);
-            if (rc != SQLITE_OK) break;
+            if (prc != SQLITE_OK || f[1].kind != V_INT) break;
 
-            count++;
+            ids[n_posts++] = f[1].i;
             rc = sqlite3BtreeNext(g_engine.feed, 0);
             if (rc != SQLITE_OK && rc != SQLITE_DONE) break;
+        }
+    }
+
+    jraw(&o, "{\"posts\":[", 10);
+
+    if (n_posts > 0) {
+        sqlite3_int64 lo = ids[0];
+        sqlite3_int64 hi = ids[0];
+        for (int i = 1; i < n_posts; i++) {
+            if (ids[i] < lo) lo = ids[i];
+            if (ids[i] > hi) hi = ids[i];
+        }
+
+        int fast_ok = 0;
+
+        // Fast Path: khi (hi - lo) < FEED_SPAN
+        if (hi - lo < FEED_SPAN) {
+            int counts[FEED_SPAN];
+            memset(counts, 0, sizeof(counts));
+            int scan_ok = 1;
+
+            Mem m;
+            memset(&m, 0, sizeof(m));
+            m.flags = MEM_Int;
+            m.u.i = lo;
+
+            UnpackedRecord r;
+            memset(&r, 0, sizeof(r));
+            r.pKeyInfo = g_engine.likeKey;
+            r.aMem = &m;
+            r.nField = 1;
+            r.default_rc = +1;
+
+            int seek_res = 0;
+            int lrc = sqlite3BtreeIndexMoveto(g_engine.like, &r, &seek_res);
+            if (lrc != SQLITE_OK) {
+                scan_ok = 0;
+            } else if (!sqlite3BtreeEof(g_engine.like)) {
+                if (seek_res < 0) {
+                    lrc = sqlite3BtreeNext(g_engine.like, 0);
+                    if (lrc != SQLITE_OK && lrc != SQLITE_DONE) {
+                        scan_ok = 0;
+                    }
+                }
+                if (scan_ok && lrc != SQLITE_DONE && !sqlite3BtreeEof(g_engine.like)) {
+                    while (!sqlite3BtreeEof(g_engine.like)) {
+                        u32 ln = 0;
+                        const unsigned char *lp = payload(g_engine.like, &ln);
+                        if (!lp) { scan_ok = 0; break; }
+                        val lf[1];
+                        if (parse_vals(lp, ln, lf, 1) != SQLITE_OK || lf[0].kind != V_INT) {
+                            scan_ok = 0;
+                            break;
+                        }
+                        sqlite3_int64 pid = lf[0].i;
+                        if (pid > hi) break;
+                        if (pid < lo) {
+                            scan_ok = 0;
+                            break;
+                        }
+                        counts[pid - lo]++;
+                        lrc = sqlite3BtreeNext(g_engine.like, 0);
+                        if (lrc == SQLITE_DONE) break;
+                        if (lrc != SQLITE_OK) { scan_ok = 0; break; }
+                    }
+                }
+            }
+
+            if (scan_ok) {
+                for (int i = 0; i < n_posts; i++) {
+                    if (i > 0) jch(&o, ',');
+                    int likes = counts[ids[i] - lo];
+                    rc = emit_post_with_likes(&g_engine, ids[i], likes, &o);
+                    if (rc != SQLITE_OK) break;
+                }
+                fast_ok = 1;
+            }
+        }
+
+        // Fallback Safe Path: khi hi - lo >= FEED_SPAN hoặc range scan lỗi
+        if (!fast_ok) {
+            for (int i = 0; i < n_posts; i++) {
+                if (i > 0) jch(&o, ',');
+                rc = emit_post(&g_engine, ids[i], &o);
+                if (rc != SQLITE_OK) break;
+            }
         }
     }
 

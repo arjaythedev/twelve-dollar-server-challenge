@@ -126,14 +126,13 @@ func (p *Parser) Parse(tasks []iouring.ReadInfo, batch *EventBatch, outTasks *[]
 
 	for i := range tasks {
 		task := &tasks[i]
-		eventType, bufID, fd := DecodeUserData(task.UserData)
+		eventType, _, fd := DecodeUserData(task.UserData)
 
 		switch eventType {
 		// -------------------------------------------------------------
-		// A. SỰ KIỆN GỬI HOÀN TẤT
+		// A. SỰ KIỆN GỬI HOÀN TẤT (CHỈ NHẬN KHI LỖI DO ĐÃ BẬT IOSQE_CQE_SKIP_SUCCESS)
 		// -------------------------------------------------------------
 		case EventSend:
-			p.SendPool.Release(bufID) // Giải phóng send buffer về pool
 			if task.Res < 0 {
 				// Client đã ngắt kết nối giữa chừng -> đóng fixed socket
 				p.closeConn(fd, outTasks)
@@ -184,10 +183,10 @@ func (p *Parser) Parse(tasks []iouring.ReadInfo, batch *EventBatch, outTasks *[]
 			}
 
 		// -------------------------------------------------------------
-		// D. SỰ KIỆN ĐÓNG SOCKET (CLOSE FIXED FILE)
+		// D. SỰ KIỆN ĐÓNG SOCKET (CHỈ NHẬN KHI LỖI DO ĐÃ BẬT IOSQE_CQE_SKIP_SUCCESS)
 		// -------------------------------------------------------------
 		case EventClose:
-			// Kernel đã giải phóng slot trong fixed file table
+			// Đóng socket thành công đã skip CQE; CQE chỉ sinh khi lỗi và không cần xử lý gì thêm
 		}
 	}
 }
@@ -327,7 +326,7 @@ func (p *Parser) sendError(fd int32, statusText string, body string, outTasks *[
 
 	*outTasks = append(*outTasks, iouring.SendInfo{
 		Opcode:   iouring.OpSend,
-		Flags:    iouring.IOSQE_FIXED_FILE,
+		Flags:    iouring.IOSQE_FIXED_FILE | iouring.IOSQE_CQE_SKIP_SUCCESS,
 		FD:       fd,
 		Buf:      buf[:n],
 		UserData: EncodeUserData(EventSend, sendBufID, fd),
@@ -374,6 +373,7 @@ func (p *Parser) rearmAccept(listenFD int32, outTasks *[]iouring.SendInfo) {
 func (p *Parser) closeConn(fixedFD int32, outTasks *[]iouring.SendInfo) {
 	*outTasks = append(*outTasks, iouring.SendInfo{
 		Opcode:     iouring.OpClose,
+		Flags:      iouring.IOSQE_CQE_SKIP_SUCCESS,
 		SpliceFDIn: fixedFD + 1,
 		UserData:   EncodeUserData(EventClose, 0, fixedFD),
 	})

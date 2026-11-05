@@ -64,8 +64,9 @@ PORT=3125 bash test/run.sh submissions/go-iouring-quananh2503
   - Tuy nhiên, độ trễ $p99$ dội lên **1.20s** (vượt chuẩn 1.0s).
 - **Nguyên nhân cốt lõi:** Cơ chế Ping-Pong 2 pha (`OpSend` hoàn thành sinh `EventSend` $\to$ đánh thức vòng lặp chỉ để nộp lại `OpRecv`). Ở 5.000 req/s, hàng nghìn micro-batch rỗng sinh ra mỗi giây tạo ra "cửa sổ mù" (blind window) trên các socket đang gửi response, khiến 1% request đuôi bị tích lũy trễ trong hàng đợi TCP của Kernel.
 
-### 4. Kế Hoạch Đang Triển Khai Tiếp Theo (Next Steps)
-- [ ] **Bật cờ `IOSQE_CQE_SKIP_SUCCESS` (1 << 6):** Bỏ qua hoàn toàn CQE khi gửi response thành công và khi đóng socket (`OpClose`). Triệt tiêu 100% các sự kiện `EventSend` vô ích.
-- [ ] **Provided Buffer Ring (`IORING_REGISTER_PBUF_RING`):** Đăng ký bể chứa buffer dùng chung giữa Go và Kernel, trả buffer bằng atomic ở User-space (0 syscall).
-- [ ] **Multishot Recv (`IORING_RECV_MULTISHOT`):** Treo lệnh đọc vĩnh viễn trên socket từ lúc accept; không bao giờ cần re-arm lại `OpRecv` thủ công sau mỗi request.
+### 4. Kế Hoạch & Tiến Độ Cải Tiến (Milestones)
+- [x] **Provided Buffer Ring (`IORING_REGISTER_PBUF_RING`):** Đăng ký bể chứa buffer dùng chung giữa Go và Kernel, trả buffer bằng atomic ở User-space (0 syscall).
+- [x] **Multishot Recv (`IORING_RECV_MULTISHOT`):** Treo lệnh đọc vĩnh viễn trên socket từ lúc accept; không bao giờ cần re-arm lại `OpRecv` thủ công sau mỗi request.
+- [x] **Bật cờ `IOSQE_CQE_SKIP_SUCCESS` (1 << 6):** Bỏ qua hoàn toàn CQE khi gửi response thành công (`OpSend`) và khi đóng socket (`OpClose`). Triệt tiêu 100% các sự kiện CQE vô ích trên đường gửi.
+- [x] **Circular Send Buffer Pool (Ring Arena):** Tái cấu trúc bộ đệm gửi response theo mô hình xoay vòng O(1) với con trỏ `head & mask`, loại bỏ chi phí quản lý LIFO stack và không phụ thuộc vào `EventSend` CQE.
 

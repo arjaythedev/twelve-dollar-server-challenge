@@ -31,7 +31,7 @@ func appendResponse(outTasks *[]iouring.SendInfo, sendPool *BufferPool, fixedFD 
 
 	*outTasks = append(*outTasks, iouring.SendInfo{
 		Opcode:   iouring.OpSend,
-		Flags:    iouring.IOSQE_FIXED_FILE,
+		Flags:    iouring.IOSQE_FIXED_FILE | iouring.IOSQE_CQE_SKIP_SUCCESS,
 		FD:       fixedFD,
 		Buf:      buf[:n],
 		UserData: EncodeUserData(EventSend, bufID, fixedFD),

@@ -9,7 +9,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-GO=go; command -v go >/dev/null 2>&1 || GO=/usr/local/go/bin/go
+GO=/usr/local/go/bin/go; [ -x "$GO" ] || GO=go   # prefer install.sh's Go over a preinstalled one on PATH
 CC="${CC:-gcc}"
 
 # ---- 1. SQLite source ---------------------------------------------------------------------------

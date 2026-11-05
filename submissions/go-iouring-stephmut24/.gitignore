@@ -1,0 +1,8 @@
+bin/
+.sqlite-download/
+csrc/sqlite3.c
+csrc/sqlite3.h
+pgo/*.gcda
+pgo/*.o
+*.profraw
+jq.bin

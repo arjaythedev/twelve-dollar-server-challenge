@@ -192,7 +192,6 @@ struct RingState {
     ring: IoUring,
     listener: i32,
     conns: HashMap<u32, Conn>,
-    cqes: Vec<(u64, i32, u32)>,
     multishot: bool,
     buf_ring: Option<BufRing>,
     next_gen: u32,
@@ -338,7 +337,6 @@ impl RingState {
             ring,
             listener,
             conns: HashMap::with_capacity(32_768),
-            cqes: Vec::with_capacity(256),
             multishot,
             buf_ring,
             next_gen: 1,
@@ -567,16 +565,21 @@ fn process_ring(
     feed_reads: &mut Vec<ReadJob>,
     post_reads: &mut Vec<ReadJob>,
 ) -> io::Result<()> {
-    let mut cqes = std::mem::take(&mut r.cqes);
-    cqes.clear();
-    for cqe in r.ring.completion() {
-        cqes.push((cqe.user_data(), cqe.result(), cqe.flags()));
-        if cqes.len() >= 1024 {
+    let mut cqe_count = 0usize;
+    loop {
+        if cqe_count >= 1024 {
             break;
         }
-    }
-    r.last_cqes = cqes.len();
-    for (user, res, flags) in cqes.drain(..) {
+        let next = {
+            let mut completions = r.ring.completion();
+            completions
+                .next()
+                .map(|cqe| (cqe.user_data(), cqe.result(), cqe.flags()))
+        };
+        let Some((user, res, flags)) = next else {
+            break;
+        };
+        cqe_count += 1;
         if user == TAG_ACCEPT {
             if res >= 0 {
                 let slot = res as u32;
@@ -736,7 +739,7 @@ fn process_ring(
             let _ = finish_close(&mut r.ring, &mut r.conns, slot);
         }
     }
-    r.cqes = cqes;
+    r.last_cqes = cqe_count;
     if !r.ring.submission().is_empty() {
         r.ring.submit()?;
     }

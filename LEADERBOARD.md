@@ -79,7 +79,7 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | 11 | lexlean-iouring-humuhumu33 | #287 | C (LexLean/Lean 4-generated core, io_uring, SQLite B-tree reads) | **270,000** | 25,873 | 40.2 | 206 | 0.00 | 78 | 27 | 1,067 | 2026-11-03 |
 | 11 | goose-iouring-ahmadsh2007 | #291 | Goose (compiles to C, io_uring, SQLite B-tree reads) | **270,000** | 25,770 | 261 | 906 | 0.00 | 79 | 28 | 1,106 | 2026-11-04 |
 | 11 | lean-verified-soonhokong | #286 | Lean 4 (verified handlers, io_uring, SQLite B-tree reads) | **270,000** | 25,856 | 40.2 | 282.8 | 0.00 | 74 | 26 | 954 | 2026-11-05 |
-| 11 | rust-iouring-tbsvttr | #323 | Rust (io_uring, SQLite B-tree reads) | **270,000** | 25,818 | 97.5 | 294.2 | 0.00 | 81 | 28 | 1,307 | 2026-11-05 |
+| 11 | rust-iouring-tbsvttr | #323 | Rust (io_uring, SQLite B-tree reads) | **270,000** ᵟ | 25,818 | 97.5 | 294.2 | 0.00 | 81 | 28 | 1,307 | 2026-11-05 |
 | 16 | rust-epoll-scooter1337 | #82 | Rust (io_uring) | **264,000** ˣ | 25,147 | 259 | 499 | 0.00 | 84 | 30 | 630 | 2026-10-21 |
 | 17 | csharp-kestrel-mbobka | #316 | C# (.NET 10 ReadyToRun, Kestrel host, io_uring) | **260,000** | 24,980 | 134 | 286 | 0.00 | 82 | 30 | 692 | 2026-11-05 |
 | 18 | v-epoll-i098 | #191 | V (io_uring, SQLite B-tree reads) | **257,000** | 24,766 | 13.5 | 29 | 0.00 | 74 | 27 | 732 | 2026-10-30 |
@@ -337,6 +337,11 @@ leaner JSON writer, like-index fast path; held, not merged: it didn't beat the m
 req/s, p95 225 / p99 338 ms, 0 err, 76 % CPU, 38 µs/req, 649 MB, 2026-11-05). 200,000 passed the 2-minute probe but
 failed the 5-minute hold on p99 (2.2 s at 81 % CPU, 0 errors); 210,000 failed the 2-minute probe on p99 (2.8 s) and
 220,000 / 240,000 on refused connections (68 % / 1.3 % errors).
+
+ᵟ **rust-iouring-tbsvttr** stays on its merged #323 row. Its follow-up **#325** (`f87f432`, PCACHE2 max-key truncate
+filter, coalescing WAL shim VFS, interpolated B-tree descent for /feed; held, not merged: it didn't beat the merged row)
+scored **250,000** (24,128 req/s, p95 36.4 / p99 158.8 ms, 0 err, 70 % CPU, 26 µs/req, 1,225 MB, 2026-11-05). 260,000
+and 280,000 failed the 2-minute probe on p99 (2.26 s at 76 % CPU / 3.30 s at 85 % CPU, 0 errors).
 
 **Connection collapses in scored entries' failing probes.** v-epoll-i098 #191: 270,000 passed the 2-minute probe but
 failed the 5-minute hold with 60 % errors, nearly all `connection refused` from mid-hold on (an earlier attempt at

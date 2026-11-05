@@ -3914,6 +3914,46 @@ static void collect_globals_stmt(PtrVec *syms, Stmt *s) {
     }
 }
 
+/* An auto array is normally initialized to a fresh empty value so that
+ * indexed writes have PHP-like behavior. If its first use is an explicit
+ * `$a = []`, that fresh value would be immediately overwritten. Detect this
+ * simple top-level case and start the C slot as NULL instead; the literal
+ * assignment initializes it before any later use. */
+static bool auto_array_starts_with_empty_assignment(AstFn *fn, VarSym *v) {
+    if (!fn || !v || !v->is_auto || !v->type ||
+        strcmp(ctype_of(v->type), "harr*") != 0) return false;
+    /* Function bodies are commonly wrapped in one ST_BLOCK node. Treat that
+     * wrapper as transparent; do not cross control-flow boundaries, where an
+     * assignment may be conditional. */
+    PtrVec *stmts = &fn->body;
+    if (stmts->len == 1 && stmts->items[0] &&
+        ((Stmt *)stmts->items[0])->kind == ST_BLOCK)
+        stmts = &((Stmt *)stmts->items[0])->u.block.stmts;
+    for (size_t i = 0; i < stmts->len; i++) {
+        Stmt *s = stmts->items[i];
+        PtrVec refs = {0};
+        collect_syms_stmt(&refs, s);
+        bool mentions = false;
+        for (size_t j = 0; j < refs.len; j++)
+            if (refs.items[j] == v) { mentions = true; break; }
+        free(refs.items);
+        if (!mentions) continue;
+        if (s->kind != ST_EXPR || !s->u.expr.expr ||
+            s->u.expr.expr->kind != EX_ASSIGN) {
+            return false;
+        }
+        Expr *a = s->u.expr.expr;
+        bool is_empty_init = a->u.assign.target &&
+               a->u.assign.target->kind == EX_VAR &&
+               a->u.assign.target->u.var.sym == v &&
+               a->u.assign.value &&
+               a->u.assign.value->kind == EX_ARRAY_LIT &&
+               a->u.assign.value->u.arr.elems.len == 0;
+        return is_empty_init;
+    }
+    return false;
+}
+
 /* Declare auto vars at fn top (C89-friendly, mirrors PHP hoisting). */
 static void emit_auto_decls(Codegen *g, AstFn *fn) {
     PtrVec syms = {0};
@@ -3933,8 +3973,10 @@ static void emit_auto_decls(Codegen *g, AstFn *fn) {
              * All frame accesses go through (*v). */
             line(g, "hval *%s = hp_box_new();", var_name(v));
         } else {
+            const char *init = auto_array_starts_with_empty_assignment(fn, v)
+                ? "NULL" : zero_init_decl_of(v->type);
             line(g, "%s %s = %s;", ctype_of(v->type),
-                 var_name(v), zero_init_decl_of(v->type));
+                 var_name(v), init);
         }
     }
     /* A by-value parameter that a closure captured by reference under its own

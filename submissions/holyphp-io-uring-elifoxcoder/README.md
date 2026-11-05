@@ -104,10 +104,14 @@ allocation-stable for a long-running server. All of this is generic:
   accept armed on the listener that completed and fills a bounded queue of 512
   single-shot accepts per active ring. If reuseport is unavailable, the server
   falls back to one ordinary listener. Connections then use multishot recv over
-  a provided-buffer ring (one SQE for the connection's lifetime,
-  data copied into the connection's own buffer, buffer id returned at once),
-  fixed-file sends, and ring CLOSE. Direct handles live above every real fd,
-  so the 65535 fd limit no longer caps held connections. `HPHP_RINGS`
+  a provided-buffer ring (one SQE for the connection's lifetime). By default,
+  receive data is copied into per-connection state and the provided buffer is
+  returned immediately. With opt-in `HPHP_RECV_ZEROCOPY=1`, a complete request
+  that fits in one selected buffer is parsed in place; partial or multi-buffer
+  requests are promoted to an owned string before the buffer is returned. Both
+  modes use fixed-file sends and ring CLOSE.
+  Direct handles live above every real fd, so the 65535 fd limit no longer caps
+  held connections. `HPHP_RINGS`
   (default 6) creates six rings, each with its own sparse table and buffer
   ring: ~393k direct slots at the default. A registered eventfd per ring keeps CQ wakeups
   reliable with `DEFER_TASKRUN`; wait/retry/close paths are ring-aware, and a

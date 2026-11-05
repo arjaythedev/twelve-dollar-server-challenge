@@ -8,6 +8,10 @@ set -euo pipefail
 # HPHP_DIRECT=0 forces it.
 export HPHP_DIRECT="${HPHP_DIRECT:-1}"
 export HPHP_BG_CHECKPOINT="${HPHP_BG_CHECKPOINT:-1}"
+# Optional: parse requests directly from the selected io_uring buffer when they
+# fit in one receive. Partial/multi-buffer requests promote to an owned string.
+# Enable with HPHP_RECV_ZEROCOPY=1; the default copy path remains the baseline.
+export HPHP_RECV_ZEROCOPY="${HPHP_RECV_ZEROCOPY:-0}"
 # Store only partial receive buffers in the PHP map; idle sockets need no
 # per-connection empty-string entry. Set 0 to compare the legacy layout.
 export HPHP_SPARSE_BUFS="${HPHP_SPARSE_BUFS:-1}"

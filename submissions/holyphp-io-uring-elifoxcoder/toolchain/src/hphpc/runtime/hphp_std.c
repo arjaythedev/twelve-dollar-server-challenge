@@ -4178,6 +4178,37 @@ static bool hp_uring_arm_accept(hp_sock fd, int ring) {
 /* Rust fills ring 0 first, then adds acceptance on the next table only when
  * the current ring reaches its safety margin. A ring reopened by closes can
  * accept again alongside the active spill ring, as in Rust's close path. */
+static void hp_ur_fill_accept_quota(int r) {
+    struct hp_uring_ring *rg = &hp_ur_rings[r];
+    if (!rg->accepting || rg->accept_full || !hp_ur_listen_count) return;
+
+    /* Keep the same per-listener accept floor as the reference runtime.
+     * SO_REUSEPORT hashes connections to a listener before accept(); a healthy
+     * global accept count can therefore hide an empty queue on one listener. */
+    uint32_t quota = hp_ur_accept_depth / hp_ur_listen_count;
+    if (!quota) quota = 1;
+    for (int li = 0; li < HP_UR_LISTENERS_MAX; li++) {
+        hp_sock fd = hp_ur_listen_fds[li];
+        if (fd <= 0) continue;
+        while (rg->accepts_by_listener[li] < quota &&
+               rg->accept_armed < hp_ur_accept_depth && !rg->accept_full) {
+            uint32_t before = rg->accept_armed;
+            if (!hp_uring_arm_accept(fd, r) || rg->accept_armed == before)
+                return;
+        }
+    }
+
+    /* Distribute a non-divisible remainder so the configured total depth is
+     * retained when users choose a listener count that does not divide it. */
+    while (rg->accept_armed < hp_ur_accept_depth && !rg->accept_full) {
+        uint32_t before = rg->accept_armed;
+        hp_sock fd = hp_ur_listener_next();
+        if (fd < 0 || !hp_uring_arm_accept(fd, r) ||
+            rg->accept_armed == before)
+            return;
+    }
+}
+
 static void hp_ur_arm_all_accepts(void) {
     if (!hp_ur_listen_on || hp_ur_listen_count == 0 || hp_ur_direct != 1) return;
     if (hp_ur_accept_depth) {
@@ -4192,13 +4223,7 @@ static void hp_ur_arm_all_accepts(void) {
             struct hp_uring_ring *rg = &hp_ur_rings[r];
             if (!rg->accepting || rg->accept_full) continue;
             hp_ur_cur = rg;
-            while (rg->accept_armed < hp_ur_accept_depth &&
-                   !rg->accept_full) {
-                uint32_t before = rg->accept_armed;
-                hp_sock lfd = hp_ur_listener_next();
-                if (lfd < 0 || !hp_uring_arm_accept(lfd, r) ||
-                    rg->accept_armed == before) break;
-            }
+            hp_ur_fill_accept_quota(r);
         }
         int accepting = 0;
         for (int r = 0; r < hp_ur_nrings; r++)
@@ -4213,13 +4238,7 @@ static void hp_ur_arm_all_accepts(void) {
                     fprintf(stderr, "[ur] accept-start ring=%d live=%u margin=%u slots=%u\n",
                             r, rg->live, rg->accept_margin, rg->dircap);
                 hp_ur_cur = rg;
-                while (rg->accept_armed < hp_ur_accept_depth &&
-                       !rg->accept_full) {
-                    uint32_t before = rg->accept_armed;
-                    hp_sock lfd = hp_ur_listener_next();
-                    if (lfd < 0 || !hp_uring_arm_accept(lfd, r) ||
-                        rg->accept_armed == before) break;
-                }
+                hp_ur_fill_accept_quota(r);
                 break;
             }
         }

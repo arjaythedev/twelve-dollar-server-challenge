@@ -100,7 +100,9 @@ int td_opt_rearm = 2048;   // --rearm=N: receives re-armed per ring per pass (0:
 uint32_t td_opt_answers = 512;    // --answers=N: requests answered per pass; the rest stay parked in the batch (0: all)
 int td_opt_lifo = 1;              // --lifo=0|1: past one pass of backlog, answer the newest first
 uint32_t td_opt_lifocap = 4;      // --lifocap=N: eighths of a pass the old end gets at --lifoage
-uint32_t td_opt_lifoage = 225;    // --lifoage=MS: the age at which the old end gets the whole pass
+uint32_t td_opt_lifomin = 0;      // --lifomin=N: eighths of a pass the old end gets before --lifoage
+uint32_t td_opt_lifoage = 8000;   // --lifoage=MS: from this age the old end gets --lifocap eighths of a pass, from twice this age all of it
+uint32_t td_opt_wwin = 0;         // --wwin=MS: writes commit at most once per this many ms (group commit window)
 
 // ---------------------------------------------------------------- helpers
 TD_INLINE bool ieq(const char *a, const char *lower, uint32_t n) {
@@ -169,7 +171,7 @@ typedef struct {
     int64_t lastStats;
     TDAuth *auth;
     int64_t started, now;
-    uint32_t passMs;
+    uint32_t passMs, lastWriteMs, nHeldNow;
     // batch
     TDReq *reqs;              // parsed requests waiting for an answer: reqs[reqHead..nreq), oldest first
     uint32_t reqHead, nreq, reqCap;
@@ -262,6 +264,7 @@ static struct io_uring_buf_ring *setup_buf_ring(struct io_uring *ring, int k) {
     return br;
 }
 
+int td_opt_rdefer = 1;   // --rdefer=0|1: every ring runs its completions as deferred task work, entered in turn by the loop
 int td_opt_cq = 65536;   // --cq=N: completions per ring; more than a ring's connections, so a burst never takes the kernel's overflow list
 // Returns false if the ring can't be made. Kernels newer than 6.8 charge ring memory to RLIMIT_MEMLOCK (8 MB under
 // systemd), so the completion queue halves until it fits, and a ring that doesn't fit at all is one ring less.
@@ -272,11 +275,10 @@ int td_opt_cq = 65536;   // --cq=N: completions per ring; more than a ring's con
     int ret = -ENOMEM;
     for (unsigned cq = (unsigned)td_opt_cq; cq >= 4096 && ret == -ENOMEM; cq /= 2) {
         memset(&p, 0, sizeof p);
-        // Ring 0 is the one we wait on: completions run as deferred task work in
-        // batches. The other rings post completions directly so that ring 0's poll
-        // on their fds sees them.
+        // Completions run as deferred task work, in batches, when the loop enters the ring. Task work that isn't deferred
+        // runs on every return to user space, an interrupt's included, so a few completions at a time.
         p.flags = IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_COOP_TASKRUN | IORING_SETUP_SUBMIT_ALL | IORING_SETUP_CQSIZE;
-        if (k == 0) p.flags |= IORING_SETUP_DEFER_TASKRUN;
+        if (k == 0 || td_opt_rdefer) p.flags |= IORING_SETUP_DEFER_TASKRUN;
         p.cq_entries = cq;
         ret = io_uring_queue_init_params(4096, &rs->ring, &p);
     }
@@ -621,23 +623,24 @@ static const char *find_crlf2(const char *p, uint32_t n) {
 - (void)flush TD_DIRECT {
     TDStore *st = store;
     uptime = now - started;
-    bool hold = ckHold, oneWrite = ckRewind && td_opt_onewrite && !ckHold;
+    // Group commit window: a commit's WAL frames are the pages its writes dirtied, and the hot ones (the table's last leaf,
+    // the feed index's first leaf) are in every commit. So more writes per commit means fewer frames per write, fewer
+    // pwrites, and less for the checkpointer to copy. Reads don't wait for this.
+    bool wwin = td_opt_wwin && (uint32_t)(passMs - lastWriteMs) < td_opt_wwin;
+    bool hold = ckHold || wwin, oneWrite = ckRewind && td_opt_onewrite && !hold;
     bool db = false;
     uint32_t first = reqHead, budget = td_opt_answers ? td_opt_answers : UINT32_MAX, last = nreq;
     if (last - first > budget) last = first + budget;   // only a first look: routes only
     // A request answered more than 40 ms after it arrived has cost the kernel a delayed-ACK timer and a bare ACK, about
     // a fifth more CPU per request. In a backlog, oldest-first makes every newcomer wait that long too, and the extra
-    // CPU keeps the backlog alive. So past one pass of backlog the newest go first, and the old end gets a share of the
-    // pass that grows with the age of the oldest: an eighth up to a quarter of --lifoage, --lifocap eighths at --lifoage,
-    // all of it at twice that age. A connection's own requests keep their order.
+    // CPU keeps the backlog alive. So past one pass of backlog the newest go first. The requests at the old end wait
+    // for spare capacity, and from --lifoage on they get a share of the pass (half, then all of it at twice that age),
+    // so waiting has a bound however long a backlog lasts. A connection's own requests keep their order.
     bool lifo = td_opt_lifo && nreq - first > budget;
     uint32_t oldShare = budget;
     if (lifo) {
-        uint32_t age = passMs - reqs[first].ms, a = td_opt_lifoage, low = a / 4, top = budget * td_opt_lifocap / 8;
-        if (age >= a * 2) oldShare = budget;
-        else if (age >= a) oldShare = top;
-        else if (age <= low) oldShare = budget / 8;
-        else oldShare = budget / 8 + (uint32_t)((uint64_t)(top - budget / 8) * (age - low) / (a - low));
+        uint32_t age = passMs - reqs[first].ms, a = td_opt_lifoage;
+        oldShare = budget * (age >= a * 2 ? 8 : age >= a ? td_opt_lifocap : td_opt_lifomin) / 8;
     }
     if (hold || lifo) db = true;
     else for (uint32_t i = first; i < last; i++) if (reqs[i].route != R_ERR) { db = true; break; }
@@ -689,6 +692,8 @@ static const char *find_crlf2(const char *p, uint32_t n) {
         }
         nreq = k;
     }
+    if (wrote) lastWriteMs = passMs;
+    nHeldNow = nheld + ntail;
     bool ok = true;
     if (txn && ![st commit]) { ok = false; [st rollback]; }
     pthread_mutex_unlock(&st->lock);
@@ -925,7 +930,7 @@ int td_opt_batch = 128, td_opt_bwait = 1000, td_opt_bthresh = 8;   // --batch=N 
 
 - (void)run {
     statsOn = getenv("TD_STATS") != NULL;
-    uint32_t lastReq = 0;
+    uint32_t lastReq = 0, idlePasses = 0;
     for (int k = 0; k < nrings; k++)
         if (![self setupRing:k]) {
             if (k == 0) exit(1);
@@ -939,14 +944,25 @@ int td_opt_batch = 128, td_opt_bwait = 1000, td_opt_bthresh = 8;   // --batch=N 
     for (;;) {
         double t0 = 0, t1 = 0, t2 = 0, t3 = 0;
         if (TD_UNLIKELY(statsOn)) t0 = mono_s();
-        for (int k = 1; k < nrings; k++)
-            if (R[k].active && io_uring_sq_ready(&R[k].ring)) io_uring_submit(&R[k].ring);
+        bool others = false, ready = false;
+        for (int k = 1; k < nrings; k++) {
+            if (!R[k].active) continue;
+            others = true;
+            if (td_opt_rdefer) {
+                // Sends go out, and this ring's completions run now. It isn't entered again until the next pass.
+                io_uring_submit_and_get_events(&R[k].ring);
+                if (io_uring_cq_ready(&R[k].ring)) ready = true;
+            } else if (io_uring_sq_ready(&R[k].ring)) io_uring_submit(&R[k].ring);
+        }
+        others = others && td_opt_rdefer;
         int ret;
         // Under load, wait a little for more completions: bigger batches mean
         // fewer io_uring_enter calls, one commit for more writes, warmer caches.
-        if (nreq > reqHead && !ckHold) ret = io_uring_submit_and_get_events(&R[0].ring);   // answers are waiting: no pause
-        else if (td_opt_batch > 1 && (lastReq >= td_opt_bthresh || nrearm)) {
-            struct __kernel_timespec ts = { .tv_sec = 0, .tv_nsec = (long long)td_opt_bwait * 1000 };
+        if ((nreq > reqHead + nHeldNow && !ckHold) || ready) ret = io_uring_submit_and_get_events(&R[0].ring);   // work is waiting: no pause
+        else if (td_opt_batch > 1 && (lastReq >= td_opt_bthresh || nrearm || others || nHeldNow)) {
+            // Only the wait on ring 0 sleeps, so with other rings in use it always has a time limit, longer when nothing comes.
+            long long us = others && idlePasses > 64 ? 5000 : td_opt_bwait;
+            struct __kernel_timespec ts = { .tv_sec = 0, .tv_nsec = us * 1000 };
             struct io_uring_cqe *cq;
             ret = io_uring_submit_and_wait_timeout(&R[0].ring, &cq, (unsigned)td_opt_batch, &ts, NULL);
         } else ret = io_uring_submit_and_wait(&R[0].ring, 1);
@@ -974,6 +990,7 @@ int td_opt_batch = 128, td_opt_bwait = 1000, td_opt_bthresh = 8;   // --batch=N 
         }
         lastReq = nreq - reqHead;
         if (lastReq > maxBatch) maxBatch = lastReq;
+        idlePasses = lastReq ? 0 : idlePasses + 1;
         if (TD_UNLIKELY(ckHold) && mono_s() - ckHoldT > 0.25) {   // child stuck: don't wait longer
             ckHold = false;
             if (getenv("TD_CKLOG")) fprintf(stderr, "hold timeout frames %d\n", store->walFrames);
@@ -1008,7 +1025,7 @@ int td_opt_batch = 128, td_opt_bwait = 1000, td_opt_bthresh = 8;   // --batch=N 
             int q = [self acceptTarget];
             if (q >= 0) [self armAccept:q];
         }
-        for (int k = 1; k < nrings; k++) {
+        for (int k = 1; k < nrings && !td_opt_rdefer; k++) {
             if (R[k].active && !R[k].pollArmed) {
                 struct io_uring_sqe *sq = sqe_get(&R[0].ring);
                 io_uring_prep_poll_multishot(sq, R[k].ring.ring_fd, POLLIN);

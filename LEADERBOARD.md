@@ -123,8 +123,8 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | 56 | csharp-iouring-oswaldosierra | #157 | C# (Native AOT, io_uring) | **189,000** | 18,592 | 20 | 51 | 0.00 | 88 | 44 | 1,176 | 2026-10-28 |
 | 56 | csharp-iouring-AlexandruLT | #196 | C# (Native AOT, io_uring) | **189,000** | 18,599 | 19.5 | 212 | 0.00 | 84 | 42 | 693 | 2026-10-29 |
 | 58 | go-epoll-MegaPanchamZ | #144 | Go (raw epoll) | **185,000** | 18,086 | 288 | 479 | 0.00 | 99 | 51 | 1,286 | 2026-10-28 |
-| 59 | cpp-iouring-smolblackhole | #318 | C++ (io_uring, SQLite B-tree reads) | **181,000** | 17,809 | 18.0 | 51.1 | 0.00 | 73 | 38 | 437 | 2026-11-05 |
-| 59 | c-modular-ascendnoosphere | #331 | C (io_uring, SQLite B-tree reads) | **181,000** ᵡ | 17,751 | 166.9 | 345.0 | 0.00 | 78 | 41 | 845 | 2026-11-06 |
+| 58 | c-modular-ascendnoosphere | #333 | C (io_uring, SQLite B-tree reads) | **185,000** | 18,127 | 178.9 | 294.2 | 0.00 | 79 | 41 | 397 | 2026-11-06 |
+| 60 | cpp-iouring-smolblackhole | #318 | C++ (io_uring, SQLite B-tree reads) | **181,000** | 17,809 | 18.0 | 51.1 | 0.00 | 73 | 38 | 437 | 2026-11-05 |
 | 61 | go-epoll-kaikegm | #151 | Go (raw epoll, cgo SQLite) | **175,000** | 16,616 | 37 | 253 | 0.61 | 98 | 55 | 749 | 2026-10-28 |
 | 62 | c-iouring-raoz | #26 | C (io_uring) | **172,000** | 16,875 | 98 | 125 | 0.00 | 69 | 38 | 419 | 2026-10-27 |
 | 63 | asm-nasm-melroy89 | #86 | x86-64 asm (io_uring) | **171,000** | 16,777 | 87 | 142 | 0.00 | 78 | 43 | 358 | 2026-10-21 |
@@ -480,13 +480,6 @@ per connection.
 direct-descriptor table nears full: 257,000 held at 76 % CPU (28 µs/req, 675 MB, 0 err); 270,000 passed the 2-minute
 probe but failed the 5-minute hold on p99 (2.8 s), 280,000 failed on p99 (2.7 s). Its first run at `44dfa26` held only
 67,000: `GET /feed` timed out at 23 % CPU (0.34 % err at 67k, 1.78 % at 80k), the problem the new commit targets.
-
-ᵡ **c-modular-ascendnoosphere #331 is scored at `0e52f65`**, which reads only through SQLite's public B-tree cursor
-calls (no private `BtCursor` writes, no own page walk) and runs passive `sqlite3_wal_checkpoint_v2` on a second
-connection: 181,000 held at 78 % CPU (41 µs/req, 845 MB, 0 err); 190,000 passed the 2-minute probe but failed the
-5-minute hold on p99 (1.8 s), 195,000 failed on p99 (1.2 s). Its first run at `78fe83f` held 160,000. The head moved
-to `c73af7e` (direct accepts into io_uring file slots) during the run; #331 was closed and the same code re-opened as
-**#333**, which is queued.
 
 ᵒ **wat-wasmedge-delneg** is scored at its follow-up **#288** (`a5c516a`, shim VFS + checkpointer through public
 SQLite APIs; merged 2026-11-04): 220,000 held at 72 % CPU (31 µs/req, 913 MB); 230,000 and 240,000 failed the 2-minute

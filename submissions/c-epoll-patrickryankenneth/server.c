@@ -320,6 +320,7 @@ static void besc(buf *b, const char *s, size_t n) {
 /* ---------------------------------------------------------------- DB */
 static sqlite3 *db;
 static int g_bt;
+static long long nowus(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (long long)t.tv_sec * 1000000 + t.tv_nsec / 1000; }
 static int g_ckpt_child;
 static int bt_init(void);
 static int g_group, g_tx;                      /* group commit: io_uring mode only */
@@ -1140,11 +1141,16 @@ static int uring_serve(int lfd, unsigned nofile, const char *host, const char *p
     for (int i = 1; i < NR; i++) ring_flush(&rg[i]);
     uring *r0 = &rg[0];
     __atomic_store_n(r0->sq_tail, r0->sq_local, __ATOMIC_RELEASE);
+    long long t0 = nowus();
     int n = sys_enter_to(r0->fd, r0->to_submit, 1, IORING_ENTER_GETEVENTS, 1000000);
     if (n < 0) { if (errno != EINTR && errno != EBUSY && errno != EAGAIN && errno != ETIME) { perror("io_uring_enter"); exit(1); } }
     else r0->to_submit -= (unsigned)n;
+    long long t1 = nowus();
     for (int i = 0; i < NR; i++) reap(i);
+    long long t2 = nowus();
     tx_flush();
+    long long t3 = nowus();
+    if (t3 - t0 > 30000) fprintf(stderr, "slow pass t=%lds wait=%lldus reap=%lldus flush=%lldus\n", (long)(time(NULL) - t_start), t1 - t0, t2 - t1, t3 - t2);
   }
 }
 
@@ -1173,7 +1179,7 @@ static void ckpt_spawn(const char *path) {
     }
     int nlog = -1, nckpt = -1;
     int rc = sqlite3_wal_checkpoint_v2(c, NULL, SQLITE_CHECKPOINT_PASSIVE, &nlog, &nckpt);
-    if (++ticks <= 5 || ticks % 30 == 0 || rc != SQLITE_OK) {
+    if (++ticks <= 5 || ticks % 30 == 0 || rc != SQLITE_OK || nlog > 150000) {
       struct stat st; long wal = stat(wp, &st) == 0 ? (long)st.st_size : -1;
       fprintf(stderr, "ckpt rc=%d log=%d ckpt=%d wal_bytes=%ld\n", rc, nlog, nckpt, wal);
     }

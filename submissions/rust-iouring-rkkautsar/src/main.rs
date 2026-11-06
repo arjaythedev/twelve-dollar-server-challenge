@@ -38,6 +38,9 @@ fn main() -> io::Result<()> {
     let port = env::var("PORT").unwrap_or_else(|_| "3000".to_string());
     let db_path = env::var("SQLITE_PATH").expect("SQLITE_PATH");
     let secret = env::var("JWT_SECRET").expect("JWT_SECRET").into_bytes();
+    let coalesce = env::var("READ_COALESCE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
     let shards = env::var("SHARDS")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
@@ -45,11 +48,11 @@ fn main() -> io::Result<()> {
         .clamp(1, 16);
     let addr = format!("{host}:{port}");
 
-    uring::run_pass(db_path, secret, addr, shards)
+    uring::run_pass(db_path, secret, coalesce, addr, shards)
 }
 
 impl App {
-    pub(crate) fn open(path: &str, secret: Vec<u8>) -> Result<Self, String> {
+    pub(crate) fn open(path: &str, secret: Vec<u8>, coalesce: bool) -> Result<Self, String> {
         let read = ReadDb::open(path)?;
         let write = WriteDb::open(path)?;
         let write_cache = writer::BatchCache::new(&write);
@@ -58,6 +61,7 @@ impl App {
             write_cache,
             write,
             post_ids: Vec::new(),
+            coalesce,
             secret,
             started: Instant::now(),
         })
@@ -69,6 +73,7 @@ pub(crate) struct App {
     pub write_cache: writer::BatchCache,
     pub write: WriteDb,
     pub post_ids: Vec<i64>,
+    pub(crate) coalesce: bool,
     secret: Vec<u8>,
     started: Instant,
 }
@@ -300,21 +305,26 @@ fn push_decimal(out: &mut Vec<u8>, mut n: usize) {
     out.extend_from_slice(&buf[i..]);
 }
 
-pub(crate) fn response_bytes(status: u16, body: &[u8], close: bool) -> Vec<u8> {
+pub(crate) fn response_header(status: u16, body_len: usize, close: bool) -> Vec<u8> {
     let reason = status_reason(status);
-    let mut out = Vec::with_capacity(96 + body.len());
+    let mut out = Vec::with_capacity(96 + body_len);
     out.extend_from_slice(b"HTTP/1.1 ");
     push_decimal(&mut out, status as usize);
     out.push(b' ');
     out.extend_from_slice(reason.as_bytes());
     out.extend_from_slice(b"\r\nContent-Type: application/json\r\nContent-Length: ");
-    push_decimal(&mut out, body.len());
+    push_decimal(&mut out, body_len);
     out.extend_from_slice(b"\r\n");
     if close {
         out.extend_from_slice(b"Connection: close\r\n\r\n");
     } else {
         out.extend_from_slice(b"\r\n");
     }
+    out
+}
+
+pub(crate) fn response_bytes(status: u16, body: &[u8], close: bool) -> Vec<u8> {
+    let mut out = response_header(status, body.len(), close);
     out.extend_from_slice(body);
     out
 }

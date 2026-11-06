@@ -66,6 +66,10 @@ extern "C" {
     fn sqlite3_changes(db: *mut Sqlite3) -> c_int;
 
     fn btree_reader_free(reader: *mut BtreeReader);
+    fn btree_reader_begin(reader: *mut BtreeReader) -> c_int;
+    fn btree_reader_end(reader: *mut BtreeReader, ok: c_int) -> c_int;
+    fn btree_reader_reopen(reader: *mut BtreeReader) -> c_int;
+    fn btree_reader_close_cursors(reader: *mut BtreeReader);
     pub(crate) fn btree_stats_enable(on: c_int);
     pub(crate) fn btree_stats(out: *mut u64);
     fn btree_reader_new(
@@ -146,7 +150,12 @@ impl Db {
         let db = Self { raw };
         db.exec("PRAGMA journal_mode=WAL")?;
         db.exec("PRAGMA synchronous=NORMAL")?;
-        db.exec("PRAGMA wal_autocheckpoint=1000")?;
+        let ckpt = std::env::var("WAL_AUTOCHECKPOINT")
+            .ok()
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or(1000)
+            .max(0);
+        db.exec(&format!("PRAGMA wal_autocheckpoint={}", ckpt))?;
         db.exec("PRAGMA cache_size=-16384")?;
         Ok(db)
     }
@@ -264,6 +273,7 @@ pub struct ReadDb {
     needs_post: bool,
     needs_like: bool,
     reader: *mut BtreeReader,
+    in_tx: bool,
     /// Scratch used only while a call is being served.
     pub feed_out: Vec<u8>,
     pub post_out: Vec<u8>,
@@ -288,12 +298,12 @@ impl ReadDb {
         let cache_mb = std::env::var("READ_CACHE_MB")
             .ok()
             .and_then(|v| v.parse::<i64>().ok())
-            .unwrap_or(16)
+            .unwrap_or(64)
             .max(1);
         let mmap_mb = std::env::var("READ_MMAP_MB")
             .ok()
             .and_then(|v| v.parse::<i64>().ok())
-            .unwrap_or(256)
+            .unwrap_or(0)
             .max(0);
         db.exec(&format!("PRAGMA cache_size=-{}", cache_mb * 1024))?;
         db.exec(&format!("PRAGMA mmap_size={}", mmap_mb * 1024 * 1024))?;
@@ -312,11 +322,37 @@ impl ReadDb {
             needs_post: false,
             needs_like: false,
             reader,
+            in_tx: false,
             feed_out: vec![0u8; 64 * 1024],
             post_out: vec![0u8; 128 * 1024],
             posts_out: vec![0u8; 128 * 1024],
             posts_lens: Vec::new(),
         })
+    }
+
+    pub fn begin_read(&mut self) -> bool {
+        if self.reader.is_null() {
+            return true;
+        }
+        if self.db.exec("BEGIN").is_err() {
+            return false;
+        }
+        if unsafe { btree_reader_begin(self.reader) } != SQLITE_OK
+            || unsafe { btree_reader_reopen(self.reader) } != SQLITE_OK
+        {
+            let _ = self.db.exec("ROLLBACK");
+            return false;
+        }
+        self.in_tx = true;
+        true
+    }
+
+    pub fn end_read(&mut self, ok: bool) {
+        if self.in_tx {
+            unsafe { btree_reader_close_cursors(self.reader) };
+            let _ = self.db.exec(if ok { "COMMIT" } else { "ROLLBACK" });
+            self.in_tx = false;
+        }
     }
 
     pub fn invalidate_feed(&mut self) {
@@ -364,12 +400,21 @@ impl ReadDb {
         if !self.reader.is_null() {
             let mut n = 0;
             let rc = unsafe {
-                feed_btree(
-                    self.reader,
-                    self.feed_out.as_mut_ptr() as *mut c_char,
-                    self.feed_out.len() as c_int,
-                    &mut n,
-                )
+                if self.in_tx {
+                    feed_btree_tx(
+                        self.reader,
+                        self.feed_out.as_mut_ptr() as *mut c_char,
+                        self.feed_out.len() as c_int,
+                        &mut n,
+                    )
+                } else {
+                    feed_btree(
+                        self.reader,
+                        self.feed_out.as_mut_ptr() as *mut c_char,
+                        self.feed_out.len() as c_int,
+                        &mut n,
+                    )
+                }
             };
             if rc == SQLITE_OK && n >= 0 {
                 let array = &self.feed_out[..n as usize];
@@ -383,21 +428,67 @@ impl ReadDb {
         self.feed_sql()
     }
 
+    /// Complete HTTP response, avoiding a separate body allocation and copy.
+    pub fn feed_response(&mut self) -> Result<Vec<u8>, ()> {
+        if !self.reader.is_null() {
+            let mut n = 0;
+            let rc = unsafe {
+                if self.in_tx {
+                    feed_btree_tx(
+                        self.reader,
+                        self.feed_out.as_mut_ptr() as *mut c_char,
+                        self.feed_out.len() as c_int,
+                        &mut n,
+                    )
+                } else {
+                    feed_btree(
+                        self.reader,
+                        self.feed_out.as_mut_ptr() as *mut c_char,
+                        self.feed_out.len() as c_int,
+                        &mut n,
+                    )
+                }
+            };
+            if rc == SQLITE_OK && n >= 0 {
+                let array = &self.feed_out[..n as usize];
+                let mut out = crate::response_header(200, array.len() + 10, false);
+                out.extend_from_slice(b"{\"posts\":");
+                out.extend_from_slice(array);
+                out.push(b'}');
+                return Ok(out);
+            }
+        }
+        let body = self.feed_sql()?;
+        Ok(crate::response_bytes(200, &body, false))
+    }
+
     pub fn post(&mut self, id: i64) -> Result<Option<Vec<u8>>, ()> {
         if !self.reader.is_null() {
             let ids = [id];
             let mut lens = [0i32; 1];
             let mut n = 0;
             let rc = unsafe {
-                posts_btree(
-                    self.reader,
-                    ids.as_ptr(),
-                    1,
-                    self.post_out.as_mut_ptr() as *mut c_char,
-                    self.post_out.len() as c_int,
-                    &mut n,
-                    lens.as_mut_ptr(),
-                )
+                if self.in_tx {
+                    posts_btree_tx(
+                        self.reader,
+                        ids.as_ptr(),
+                        1,
+                        self.post_out.as_mut_ptr() as *mut c_char,
+                        self.post_out.len() as c_int,
+                        &mut n,
+                        lens.as_mut_ptr(),
+                    )
+                } else {
+                    posts_btree(
+                        self.reader,
+                        ids.as_ptr(),
+                        1,
+                        self.post_out.as_mut_ptr() as *mut c_char,
+                        self.post_out.len() as c_int,
+                        &mut n,
+                        lens.as_mut_ptr(),
+                    )
+                }
             };
             if rc == SQLITE_OK {
                 if n == 0 || lens[0] == 0 {
@@ -413,6 +504,50 @@ impl ReadDb {
             }
         }
         self.post_sql(id)
+    }
+
+    pub fn post_response(&mut self, id: i64) -> Result<Option<Vec<u8>>, ()> {
+        if !self.reader.is_null() {
+            let ids = [id];
+            let mut lens = [0i32; 1];
+            let mut n = 0;
+            let rc = unsafe {
+                if self.in_tx {
+                    posts_btree_tx(
+                        self.reader,
+                        ids.as_ptr(),
+                        1,
+                        self.post_out.as_mut_ptr() as *mut c_char,
+                        self.post_out.len() as c_int,
+                        &mut n,
+                        lens.as_mut_ptr(),
+                    )
+                } else {
+                    posts_btree(
+                        self.reader,
+                        ids.as_ptr(),
+                        1,
+                        self.post_out.as_mut_ptr() as *mut c_char,
+                        self.post_out.len() as c_int,
+                        &mut n,
+                        lens.as_mut_ptr(),
+                    )
+                }
+            };
+            if rc == SQLITE_OK {
+                if n == 0 || lens[0] == 0 {
+                    let _ = self.reopen();
+                    return Ok(self.post_sql(id)?.map(|body| crate::response_bytes(200, &body, false)));
+                }
+                let frag = &self.post_out[..n as usize];
+                let mut out = crate::response_header(200, frag.len() + 9, false);
+                out.extend_from_slice(b"{\"post\":");
+                out.extend_from_slice(frag);
+                out.push(b'}');
+                return Ok(Some(out));
+            }
+        }
+        Ok(self.post_sql(id)?.map(|body| crate::response_bytes(200, &body, false)))
     }
 
     pub(crate) fn reopen(&mut self) -> Result<(), ()> {
@@ -452,15 +587,27 @@ impl ReadDb {
         let mut n = 0i32;
         let batch_buf = &mut self.posts_out;
         let rc = unsafe {
-            posts_btree(
-                self.reader,
-                unique.as_ptr(),
-                unique.len() as c_int,
-                batch_buf.as_mut_ptr() as *mut c_char,
-                batch_buf.len() as c_int,
-                &mut n,
-                lens.as_mut_ptr(),
-            )
+            if self.in_tx {
+                posts_btree_tx(
+                    self.reader,
+                    unique.as_ptr(),
+                    unique.len() as c_int,
+                    batch_buf.as_mut_ptr() as *mut c_char,
+                    batch_buf.len() as c_int,
+                    &mut n,
+                    lens.as_mut_ptr(),
+                )
+            } else {
+                posts_btree(
+                    self.reader,
+                    unique.as_ptr(),
+                    unique.len() as c_int,
+                    batch_buf.as_mut_ptr() as *mut c_char,
+                    batch_buf.len() as c_int,
+                    &mut n,
+                    lens.as_mut_ptr(),
+                )
+            }
         };
         if rc != SQLITE_OK {
             let mut out = Vec::with_capacity(unique.len());

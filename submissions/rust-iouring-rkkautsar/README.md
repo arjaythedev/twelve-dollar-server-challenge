@@ -10,7 +10,7 @@
 - One event-loop thread owns HTTP parsing, JWT verification, SQLite reads and writes, and all ring I/O. `SHARDS` controls the number of io_uring rings/listeners, not thread count.
 - Each ring has its own io_uring, `SO_REUSEPORT` listener, direct-descriptor slots, and (with the default multishot recv) a provided-buffer ring. Accepted sockets use io_uring direct descriptors, so they do not consume the process `RLIMIT_NOFILE` budget.
 - A pass drains completions from every ring, executes collected writes in one `BEGIN IMMEDIATE`/`COMMIT`, refreshes B-tree cursors, then resolves all reads and releases responses. Write responses are queued only after the commit succeeds.
-- Feed and `/posts/:id` requests are always coalesced per pass: all feed jobs share one feed read and one response packet; post jobs share one sorted read batch and one packet per post. There is no cross-request response or query-result cache.
+- By default each `/feed` and `/posts/:id` request executes its own B-tree read. Setting `READ_COALESCE=1` shares one feed read and one sorted post batch across requests parked in the same pass; this batching path is opt-in, not the default.
 - Writes use one transaction per pass and `json_each` batch inserts with `RETURNING`. A like is an `INSERT ... ON CONFLICT DO NOTHING`; post-existence is checked only for like jobs that produced no row.
 - `/feed` and `/posts/:id` use SQLite B-tree cursors, not the SQL VM. Like counts come from a direct walk over `likes_post_id_idx`: dense post-id ranges are walked once, while large gaps reseek.
 - Writer prepared statements are cached across batches; parameters are rebound and statements reset for each batch.
@@ -26,6 +26,7 @@
 | `HOST`, `PORT` | `127.0.0.1`, `3000` | Listen address |
 | `SHARDS` | `8` | io_uring rings/listeners polled by the single event loop |
 | `MULTISHOT` | `1` | `0` disables multishot recv |
+| `READ_COALESCE` | `0` | `1` shares one feed/post read per pass; `0` reads per request |
 | `STATS` | unset | `1` enables latency counters |
 | `PASS_STATS` | unset | Any value prints per-100-pass timing to stderr |
 | `WRITE_DEFER_US` | `0` | Defer write batches for this many microseconds; `0` disables |
@@ -50,6 +51,4 @@ SQLITE_PATH=/path/to/feed.db JWT_SECRET=twelve-dollar-challenge \
 bash test/run.sh submissions/rust-iouring-rkkautsar
 ```
 
-The submission passes all 42 checks on a fresh seed database.
-
-With host networking, 200k users, 12 client processes, and the default 8 rings: 4/5 runs passed the latency gates; p50 ≈ 12 ms, p95 ≈ 61–106 ms, p99 ≈ 113–317 ms in those runs. One run hit p95 727 ms. At 230k the server remained up but did not consistently meet the p95 gate.
+The submission passes all 42 checks on a fresh seed database. Benchmark results depend on `READ_COALESCE`: the default is `0` (one B-tree read per request); `READ_COALESCE=1` is the shared-read batch path.

@@ -19,6 +19,10 @@ const char sqlite3_version[] = SQLITE_VERSION;
 
 static int stat_on;
 static uint64_t stat_feed_calls, stat_feed_ns, stat_post_calls, stat_post_ns;
+static uint64_t part_calls, part_idx_ns, part_like_ns, part_emit_ns;
+static uint64_t part_total_ns, part_ok, part_err, part_rows;
+static int part_last_rc = 9999;
+static int part_last_stage = 0;
 static inline uint64_t mono_ns(void) {
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -130,23 +134,33 @@ static sqlite3_int64 read_int(const unsigned char *p, int n) {
   return (sqlite3_int64)v;
 }
 
+static u8 read_varint32(const unsigned char *p, u32 *v) {
+  if (p[0] < 0x80) {
+    *v = p[0];
+    return 1;
+  }
+  return sqlite3GetVarint32(p, v);
+}
+
 // Parse the first `want` fields of a SQLite record without constructing Mem
 // objects.  This schema only needs null, integer and text fields.
 static int parse_vals(const unsigned char *p, u32 n, val *v, int want) {
   u32 hdr = 0;
-  int hb = sqlite3GetVarint32(p, &hdr);
-  if (hb <= 0 || hdr > n || (u32)hb > hdr) return SQLITE_CORRUPT;
+  int hb = read_varint32(p, &hdr);
   const unsigned char *h = p + hb;
   const unsigned char *data = p + hdr;
   u32 off = 0;
+  u32 st = 0;
+  u32 len = 0;
+  int fail = 0;
+  if (hb <= 0 || hdr > n || (u32)hb > hdr) { fail = 1; goto bad; }
   for (int i = 0; i < want; i++) {
-    if (h >= p + hdr) return SQLITE_CORRUPT;
-    u32 st = 0;
-    int nb = sqlite3GetVarint32(h, &st);
-    if (nb <= 0) return SQLITE_CORRUPT;
+    if (h >= p + hdr) { fail = 2; goto bad; }
+    int nb = read_varint32(h, &st);
+    if (nb <= 0) { fail = 3; goto bad; }
     h += nb;
-    u32 len = sqlite3VdbeSerialTypeLen(st);
-    if (off + len > (u32)(p + n - data)) return SQLITE_CORRUPT;
+    len = sqlite3VdbeSerialTypeLen(st);
+    if (off + len > (u32)(p + n - data)) { fail = 4; goto bad; }
     val *x = &v[i];
     memset(x, 0, sizeof(*x));
     if (st == 0) {
@@ -162,11 +176,18 @@ static int parse_vals(const unsigned char *p, u32 n, val *v, int want) {
       x->z = data + off;
       x->n = (int)len;
     } else {
-      return SQLITE_CORRUPT;
+      fail = 5;
+      goto bad;
     }
     off += len;
   }
   return SQLITE_OK;
+bad:
+  if (getenv("FEED_PARTS")) {
+    fprintf(stderr, "parsefail f=%d n=%u hdr=%u hb=%d off=%u st=%u len=%u want=%d\n",
+            fail, n, hdr, hb, off, st, len, want);
+  }
+  return SQLITE_CORRUPT;
 }
 
 typedef struct BtreeReader BtreeReader;
@@ -181,6 +202,7 @@ struct BtreeReader {
   KeyInfo *feedKey;
   KeyInfo *likeKey;
   UnpackedRecord *likeFind;
+  char *feed_scratch;
   Pgno feed_root;
   Pgno post_root;
   Pgno user_root;
@@ -219,6 +241,7 @@ static void reader_free(BtreeReader *r) {
   if (r->likeFind) sqlite3DbFree(r->db, r->likeFind);
   if (r->feedKey) sqlite3KeyInfoUnref(r->feedKey);
   if (r->likeKey) sqlite3KeyInfoUnref(r->likeKey);
+  sqlite3_free(r->feed_scratch);
   sqlite3_free(r);
 }
 
@@ -231,10 +254,14 @@ BtreeReader *btree_reader_new(sqlite3 *db, unsigned posts_root,
   r->db = db;
   r->bt = db->aDb[0].pBt;
   if (!r->bt) goto fail;
+  r->feed_scratch = (char *)sqlite3_malloc64(64 * 1024);
+  if (!r->feed_scratch) goto fail;
 
   r->feedKey = sqlite3KeyInfoAlloc(db, 2, 1);
-  r->likeKey = sqlite3KeyInfoAlloc(db, 2, 0);
+  r->likeKey = sqlite3KeyInfoAlloc(db, 1, 1);
   if (!r->feedKey || !r->likeKey) goto fail;
+  for (int i = 0; i < r->feedKey->nAllField; i++) r->feedKey->aColl[i] = db->pDfltColl;
+  for (int i = 0; i < r->likeKey->nAllField; i++) r->likeKey->aColl[i] = db->pDfltColl;
   // posts_created_at_id_idx is (created_at DESC, id DESC).
   r->feedKey->aSortFlags[0] = KEYINFO_ORDER_DESC;
   r->feedKey->aSortFlags[1] = KEYINFO_ORDER_DESC;
@@ -244,6 +271,11 @@ BtreeReader *btree_reader_new(sqlite3 *db, unsigned posts_root,
   r->post_root = (Pgno)posts_root;
   r->user_root = (Pgno)users_root;
   r->like_root = (Pgno)likes_idx_root;
+  if (getenv("FEED_PARTS")) {
+    fprintf(stderr, "roots feed=%u post=%u user=%u like=%u\n",
+            (unsigned)r->feed_root, (unsigned)r->post_root,
+            (unsigned)r->user_root, (unsigned)r->like_root);
+  }
   r->feed = open_cursor(r->bt, r->feed_root, r->feedKey, &rc);
   if (!r->feed) goto fail;
   r->post = open_cursor(r->bt, r->post_root, NULL, &rc);
@@ -255,10 +287,10 @@ BtreeReader *btree_reader_new(sqlite3 *db, unsigned posts_root,
 
   r->likeFind = sqlite3VdbeAllocUnpackedRecord(r->likeKey);
   if (!r->likeFind) goto fail;
-  r->likeFind->nField = 2;
-  r->likeFind->r1 = -1;
-  r->likeFind->r2 = 1;
-  r->likeFind->default_rc = 0;
+  r->likeFind->nField = 1;
+  r->likeFind->r1 = 0;
+  r->likeFind->r2 = 0;
+  r->likeFind->default_rc = 1;
   return r;
 
 fail:
@@ -277,6 +309,44 @@ static int reader_end(BtreeReader *r, int ok) {
   if (!manage_tx) return SQLITE_OK;
   if (ok) return sqlite3BtreeCommit(r->bt);
   return sqlite3BtreeRollback(r->bt, SQLITE_OK, 0);
+}
+
+int btree_reader_begin(BtreeReader *r) { return reader_begin(r); }
+int btree_reader_end(BtreeReader *r, int ok) { return reader_end(r, ok); }
+
+int btree_reader_reopen(BtreeReader *r) {
+  int rc = SQLITE_OK;
+  BtCursor *feed = open_cursor(r->bt, r->feed_root, r->feedKey, &rc);
+  BtCursor *post = feed ? open_cursor(r->bt, r->post_root, NULL, &rc) : NULL;
+  BtCursor *user = post ? open_cursor(r->bt, r->user_root, NULL, &rc) : NULL;
+  BtCursor *like = user ? open_cursor(r->bt, r->like_root, r->likeKey, &rc) : NULL;
+  if (!feed || !post || !user || !like) {
+    close_cursor(feed);
+    close_cursor(post);
+    close_cursor(user);
+    close_cursor(like);
+    return rc == SQLITE_OK ? SQLITE_NOMEM : rc;
+  }
+  close_cursor(r->feed);
+  close_cursor(r->post);
+  close_cursor(r->user);
+  close_cursor(r->like);
+  r->feed = feed;
+  r->post = post;
+  r->user = user;
+  r->like = like;
+  return SQLITE_OK;
+}
+
+void btree_reader_close_cursors(BtreeReader *r) {
+  close_cursor(r->feed);
+  close_cursor(r->post);
+  close_cursor(r->user);
+  close_cursor(r->like);
+  r->feed = NULL;
+  r->post = NULL;
+  r->user = NULL;
+  r->like = NULL;
 }
 
 static const unsigned char *payload(BtCursor *c, u32 *n) {
@@ -326,7 +396,7 @@ static int first_int(const unsigned char *p, u32 n, sqlite3_int64 *out) {
   }
   if (st == 0) return SQLITE_NOTFOUND;
   if (st < 1 || st > 6) return SQLITE_NOTFOUND;
-  uint64_t off = (uint64_t)hl + (uint64_t)sl;
+  uint64_t off = (uint64_t)hdr;
   if (off + st > n) return SQLITE_CORRUPT;
   *out = read_int(p + off, (int)st);
   return SQLITE_OK;
@@ -344,14 +414,8 @@ static void like_find_set(BtreeReader *r, sqlite3_int64 post_id) {
   m->n = 0;
   m->z = 0;
   m->szMalloc = 0;
-  Mem *rid = &r->likeFind->aMem[1];
-  rid->flags = MEM_Int;
-  rid->u.i = 0;
-  rid->n = 0;
-  rid->z = 0;
-  rid->szMalloc = 0;
-  r->likeFind->nField = 2;
-  r->likeFind->default_rc = 0;
+  r->likeFind->nField = 1;
+  r->likeFind->default_rc = 1;
   r->likeFind->eqSeen = 0;
 }
 
@@ -386,6 +450,8 @@ static int like_counts(BtreeReader *r, const sqlite3_int64 *ids, int n,
   like_find_set(r, pairs[0].id);
   int res = 0;
   int rc = sqlite3BtreeIndexMoveto(r->like, r->likeFind, &res);
+  if (rc == SQLITE_OK && res < 0 && !sqlite3BtreeEof(r->like)) rc = sqlite3BtreeNext(r->like, 0);
+  if (getenv("FEED_PARTS") && n == 1) fprintf(stderr, "like target=%lld seek_res=%d eof=%d\n", (long long)pairs[0].id, res, sqlite3BtreeEof(r->like));
   int pi = 0;
   sqlite3_int64 prev = 0;
   while (rc == SQLITE_OK && pi < n && !sqlite3BtreeEof(r->like)) {
@@ -396,6 +462,8 @@ static int like_counts(BtreeReader *r, const sqlite3_int64 *ids, int n,
     if (pi > 0 && (target < prev || target - prev > 4096)) {
       like_find_set(r, target);
       rc = sqlite3BtreeIndexMoveto(r->like, r->likeFind, &res);
+      if (rc != SQLITE_OK) break;
+      if (res < 0 && !sqlite3BtreeEof(r->like)) rc = sqlite3BtreeNext(r->like, 0);
       if (rc != SQLITE_OK) break;
       if (sqlite3BtreeEof(r->like)) break;
     }
@@ -429,14 +497,21 @@ static int like_counts(BtreeReader *r, const sqlite3_int64 *ids, int n,
       if (!p) { rc = SQLITE_CORRUPT; break; }
       ir = first_int(p, pn, &key);
       if (ir != SQLITE_OK) break;
+      if (getenv("FEED_PARTS") && n == 1 && count < 4) {
+        fprintf(stderr, "like key=%lld target=%lld bytes=", (long long)key, (long long)target);
+        for (u32 bi = 0; bi < pn && bi < 10; bi++) fprintf(stderr, "%02x", p[bi]);
+        fprintf(stderr, "\n");
+      }
       if (key != target) break;
       count++;
       rc = sqlite3BtreeNext(r->like, 0);
+      if (rc == SQLITE_DONE) { rc = SQLITE_OK; break; }
       if (rc != SQLITE_OK) break;
     }
     if (rc != SQLITE_OK) break;
     if (ir != SQLITE_OK) { rc = SQLITE_CORRUPT; break; }
     likes[pairs[pi].idx] = count;
+    if (getenv("FEED_PARTS") && n == 1) fprintf(stderr, "like count=%lld\n", (long long)count);
     prev = target;
     pi++;
   }
@@ -495,52 +570,133 @@ static int emit_post(BtreeReader *r, sqlite3_int64 id, sqlite3_int64 likes, jout
 }
 
 int feed_btree(BtreeReader *r, char *out, int cap, int *outlen) {
+  static int parts = -1;
+  if (parts < 0) parts = getenv("FEED_PARTS") != NULL;
+  uint64_t p0 = parts ? mono_ns() : 0;
   uint64_t t0 = stat_on ? mono_ns() : 0;
   jout o = {out, cap, 0, 0};
   *outlen = 0;
+  int stage = 1;
   int rc = reader_begin(r);
   if (rc != SQLITE_OK) {
     sqlite3BtreeRollback(r->bt, SQLITE_OK, 0);
     return rc;
   }
+  stage = 2;
 
   int res = 0;
   sqlite3_int64 feed_ids[20];
   sqlite3_int64 feed_likes[20];
   int nfeed = 0;
+  stage = 3;
   rc = sqlite3BtreeFirst(r->feed, &res);
+  if (rc != SQLITE_OK) {
+    stage = 33;
+    if (parts) fprintf(stderr, "feedfirst rc=%d txn=%d manage=%d res=%d\n", rc, sqlite3BtreeTxnState(r->bt), manage_tx, res);
+  }
   while (rc == SQLITE_OK && !sqlite3BtreeEof(r->feed) && nfeed < 20) {
+    stage = 4;
     u32 n;
     const unsigned char *p = payload(r->feed, &n);
     if (!p) {
       rc = SQLITE_CORRUPT;
       break;
     }
+    stage = 5;
     val f[2];
-    if (parse_vals(p, n, f, 2) != SQLITE_OK || f[1].kind != V_INT) {
+    int prc = parse_vals(p, n, f, 2);
+    if (parts && part_calls < 3) {
+      fprintf(stderr, "feedrow n=%u prc=%d k0=%d k1=%d bytes=", n, prc, f[0].kind, f[1].kind);
+      for (u32 bi = 0; bi < n && bi < 12; bi++) fprintf(stderr, "%02x", p[bi]);
+      fprintf(stderr, "\n");
+    }
+    if (prc != SQLITE_OK || f[1].kind != V_INT) {
       rc = SQLITE_CORRUPT;
       break;
     }
+    stage = 6;
     feed_ids[nfeed++] = f[1].i;
     rc = sqlite3BtreeNext(r->feed, 0);
   }
   if (rc == SQLITE_DONE) rc = SQLITE_OK;
+  if (parts && part_calls < 3) fprintf(stderr, "feedloop res=%d eof=%d nfeed=%d rc=%d txn=%d\n", res, sqlite3BtreeEof(r->feed), nfeed, rc, sqlite3BtreeTxnState(r->bt));
+  stage = 7;
+  uint64_t p1 = parts ? mono_ns() : 0;
   if (rc == SQLITE_OK && nfeed > 0) {
     rc = like_counts(r, feed_ids, nfeed, feed_likes);
   }
-  if (rc == SQLITE_OK) {
-    jch(&o, '[');
-    for (int i = 0; i < nfeed; i++) {
-      if (i) jch(&o, ',');
-      rc = emit_post(r, feed_ids[i], feed_likes[i], &o);
-      if (rc != SQLITE_OK) break;
+  uint64_t p2 = parts ? mono_ns() : 0;
+  if (rc == SQLITE_OK && nfeed > 0) {
+    int order[20];
+    int starts[20];
+    int lens[20];
+    for (int i = 0; i < nfeed; i++) order[i] = i;
+    for (int i = 1; i < nfeed; i++) {
+      int key = order[i];
+      int j = i - 1;
+      while (j >= 0 && feed_ids[order[j]] > feed_ids[key]) {
+        order[j + 1] = order[j];
+        j--;
+      }
+      order[j + 1] = key;
     }
-    if (rc == SQLITE_OK) jch(&o, ']');
+    jout to = {r->feed_scratch, cap, 0, 0};
+    for (int k = 0; k < nfeed; k++) {
+      int idx = order[k];
+      starts[idx] = to.n;
+      rc = emit_post(r, feed_ids[idx], feed_likes[idx], &to);
+      if (rc != SQLITE_OK) break;
+      lens[idx] = to.n - starts[idx];
+    }
+    if (rc == SQLITE_OK && to.err) rc = SQLITE_TOOBIG;
+    if (rc == SQLITE_OK) {
+      jch(&o, '[');
+      for (int i = 0; i < nfeed; i++) {
+        if (i) jch(&o, ',');
+        jraw(&o, r->feed_scratch + starts[i], lens[i]);
+      }
+      jch(&o, ']');
+    }
   }
+  if (rc == SQLITE_OK && nfeed == 0) {
+    jch(&o, '[');
+    jch(&o, ']');
+  }
+  if (parts && part_calls < 3) fprintf(stderr, "feedpreend rc=%d\n", rc);
+  stage = 8;
   int endrc = reader_end(r, rc == SQLITE_OK);
+  if (parts && part_calls < 3) fprintf(stderr, "feedend endrc=%d\n", endrc);
   if (rc == SQLITE_OK) rc = endrc;
+  stage = 9;
   if (o.err && rc == SQLITE_OK) rc = SQLITE_TOOBIG;
   *outlen = o.n;
+  if (parts) {
+    uint64_t p3 = mono_ns();
+    uint64_t n = __atomic_add_fetch(&part_calls, 1, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&part_idx_ns, p1 - p0, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&part_like_ns, p2 - p1, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&part_emit_ns, p3 - p2, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&part_total_ns, p3 - p0, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&part_rows, nfeed, __ATOMIC_RELAXED);
+    if (rc == SQLITE_OK) __atomic_add_fetch(&part_ok, 1, __ATOMIC_RELAXED);
+    else {
+      __atomic_add_fetch(&part_err, 1, __ATOMIC_RELAXED);
+      part_last_rc = rc;
+      part_last_stage = stage;
+    }
+    if (n <= 3 || n % 8192 == 0) {
+      fprintf(stderr, "feedparts n=%llu total_ns=%llu idx_ns=%llu like_ns=%llu emit_ns=%llu ok=%llu err=%llu rows_x100=%llu\n",
+              (unsigned long long)n,
+              (unsigned long long)(part_total_ns / n),
+              (unsigned long long)(part_idx_ns / n),
+              (unsigned long long)(part_like_ns / n),
+              (unsigned long long)(part_emit_ns / n),
+              (unsigned long long)part_ok,
+              (unsigned long long)part_err,
+              (unsigned long long)(part_rows * 100 / n));
+      if (part_err) fprintf(stderr, "feedparts last_rc=%d stage=%d\n", part_last_rc, part_last_stage);
+    }
+  }
   if (stat_on) {
     __atomic_add_fetch(&stat_feed_calls, 1, __ATOMIC_RELAXED);
     __atomic_add_fetch(&stat_feed_ns, mono_ns() - t0, __ATOMIC_RELAXED);

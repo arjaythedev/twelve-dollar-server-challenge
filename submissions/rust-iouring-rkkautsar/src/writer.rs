@@ -94,7 +94,7 @@ pub fn spawn(
         let window_us = std::env::var("WRITE_COALESCE_US")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(100_000);
+            .unwrap_or(0);
         loop {
             let first = match rx.recv() {
                 Ok(job) => job,

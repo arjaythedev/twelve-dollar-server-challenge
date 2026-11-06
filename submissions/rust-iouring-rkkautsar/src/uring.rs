@@ -5,7 +5,8 @@ use std::mem::size_of;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::os::fd::{AsRawFd, RawFd};
 use std::sync::mpsc::{Receiver, Sender};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::OnceLock;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -26,10 +27,94 @@ const SLOT_MASK: u64 = (1 << 20) - 1;
 
 const FILE_TABLE: u32 = 65_000;
 const RING_ENTRIES: u32 = 4_096;
+const CQES_PER_RING: usize = 2048;
+const READ_QUEUE_CAP: usize = usize::MAX;
+const FEED_ANSWERS_PER_PASS: usize = usize::MAX;
+const POST_ANSWERS_PER_PASS: usize = usize::MAX;
 const READ_BUF: usize = 2_048;
 const BUF_READ: usize = 512;
 const BUF_RING_ENTRIES: u16 = 32_768;
 const BUF_GROUP: u16 = 1;
+
+#[derive(Clone, Copy)]
+enum Diag { Process, Feed, Post, Write }
+
+static DIAG_N: [AtomicU64; 4] = [
+    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
+];
+static DIAG_NS: [AtomicU64; 4] = [
+    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
+];
+static DIAG_MAX: [AtomicU64; 4] = [
+    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
+];
+static ACCEPTS: AtomicU64 = AtomicU64::new(0);
+static CLOSES: AtomicU64 = AtomicU64::new(0);
+static EOFS: AtomicU64 = AtomicU64::new(0);
+static READ_ERRORS: AtomicU64 = AtomicU64::new(0);
+static ACTIVE: AtomicU64 = AtomicU64::new(0);
+
+fn diag_on() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("DIAG").is_ok())
+}
+
+fn diag_start() -> Option<Instant> {
+    if diag_on() { Some(Instant::now()) } else { None }
+}
+
+fn diag_end(kind: Diag, at: Option<Instant>) {
+    let Some(at) = at else { return };
+    let idx = kind as usize;
+    let ns = at.elapsed().as_nanos() as u64;
+    DIAG_N[idx].fetch_add(1, Ordering::Relaxed);
+    DIAG_NS[idx].fetch_add(ns, Ordering::Relaxed);
+    let mut old = DIAG_MAX[idx].load(Ordering::Relaxed);
+    while ns > old {
+        match DIAG_MAX[idx].compare_exchange_weak(old, ns, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => break,
+            Err(v) => old = v,
+        }
+    }
+}
+
+fn diag_tick(passes: u64, feed_q: usize, post_q: usize) {
+    if !diag_on() || passes % 2048 != 0 {
+        return;
+    }
+    let mut ru: libc::rusage = unsafe { std::mem::zeroed() };
+    unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut ru) };
+    let utime = ru.ru_utime.tv_sec as u64 * 1_000_000 + ru.ru_utime.tv_usec as u64;
+    let stime = ru.ru_stime.tv_sec as u64 * 1_000_000 + ru.ru_stime.tv_usec as u64;
+    let mut out = String::new();
+    for (name, i) in [("proc", 0), ("feed", 1), ("post", 2), ("write", 3)] {
+        let n = DIAG_N[i].load(Ordering::Relaxed);
+        let ns = DIAG_NS[i].load(Ordering::Relaxed);
+        out.push_str(&format!(
+            " {}_n={} {}_avg_us={} {}_max_us={}",
+            name,
+            n,
+            name,
+            if n == 0 { 0 } else { ns / n / 1000 },
+            name,
+            DIAG_MAX[i].load(Ordering::Relaxed) / 1000
+        ));
+    }
+    eprintln!(
+        "diag pass={} accepts={} closes={} eofs={} rerr={} active={} fq={} pq={} utime_us={} stime_us={}{}",
+        passes,
+        ACCEPTS.load(Ordering::Relaxed),
+        CLOSES.load(Ordering::Relaxed),
+        EOFS.load(Ordering::Relaxed),
+        READ_ERRORS.load(Ordering::Relaxed),
+        ACTIVE.load(Ordering::Relaxed),
+        feed_q,
+        post_q,
+        utime,
+        stime,
+        out
+    );
+}
 
 enum OutBuf {
     Empty,
@@ -59,6 +144,7 @@ impl OutBuf {
         }
     }
 }
+
 
 struct Conn {
     input: Vec<u8>,
@@ -266,6 +352,13 @@ fn make_listener(addr: &str) -> io::Result<i32> {
             &one as *const _ as *const libc::c_void,
             size_of::<libc::c_int>() as libc::socklen_t,
         );
+        libc::setsockopt(
+            fd,
+            libc::IPPROTO_TCP,
+            libc::TCP_NODELAY,
+            &one as *const _ as *const libc::c_void,
+            size_of::<libc::c_int>() as libc::socklen_t,
+        );
     }
     let sin = libc::sockaddr_in {
         sin_family: libc::AF_INET as libc::sa_family_t,
@@ -289,7 +382,7 @@ fn make_listener(addr: &str) -> io::Result<i32> {
         }
         return Err(err);
     }
-    if unsafe { libc::listen(fd, 4096) } < 0 {
+    if unsafe { libc::listen(fd, 65_535) } < 0 {
         let err = io::Error::last_os_error();
         unsafe {
             libc::close(fd);
@@ -302,15 +395,35 @@ fn make_listener(addr: &str) -> io::Result<i32> {
 impl RingState {
     fn new(addr: &str) -> io::Result<Self> {
         let listener = make_listener(addr)?;
-        let mut builder = IoUring::builder();
-        builder.setup_cqsize(8_192);
-        let ring = match builder.build(RING_ENTRIES) {
-            Ok(r) => r,
-            Err(e) => {
-                unsafe {
-                    libc::close(listener);
+        let ring = {
+            let mut last = None;
+            let mut ring = None;
+            for attempt in 0..6 {
+                let mut builder = IoUring::builder();
+                builder.setup_single_issuer().setup_coop_taskrun().setup_cqsize(8_192);
+                match builder.build(RING_ENTRIES) {
+                    Ok(r) => {
+                        ring = Some(r);
+                        break;
+                    }
+                    Err(e) => {
+                        let retry = e.raw_os_error() == Some(libc::ENOMEM) && attempt < 5;
+                        last = Some(e);
+                        if !retry {
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
                 }
-                return Err(e);
+            }
+            match ring {
+                Some(r) => r,
+                None => {
+                    unsafe {
+                        libc::close(listener);
+                    }
+                    return Err(last.unwrap_or_else(|| io::Error::from_raw_os_error(libc::ENOMEM)));
+                }
             }
         };
         if let Err(e) = ring.submitter().register_files_sparse(FILE_TABLE) {
@@ -427,14 +540,51 @@ fn queue_shared(c: &mut Conn, packet: Arc<Vec<u8>>, close: bool) {
     }
 }
 
+fn queue_owned(c: &mut Conn, packet: Vec<u8>, close: bool) {
+    c.out = OutBuf::Owned(packet, 0);
+    if close {
+        c.close_after = true;
+    }
+}
+
 fn finish_close(ring: &mut IoUring, conns: &mut HashMap<u32, Conn>, slot: u32) -> io::Result<()> {
     if let Some(c) = conns.remove(&slot) {
+        CLOSES.fetch_add(1, Ordering::Relaxed);
         arm_close(ring, slot, c.gen)?;
     }
     Ok(())
 }
 
 fn process_input(
+    ring: &mut IoUring,
+    ring_idx: usize,
+    slot: u32,
+    c: &mut Conn,
+    app: &mut App,
+    write_tx: &Sender<WriteJob>,
+    write_result_tx: &Sender<WriteResult>,
+    write_event_fd: RawFd,
+    feed_reads: &mut Vec<ReadJob>,
+    post_reads: &mut Vec<ReadJob>,
+) -> io::Result<()> {
+    let at = diag_start();
+    let r = process_input_inner(
+        ring,
+        ring_idx,
+        slot,
+        c,
+        app,
+        write_tx,
+        write_result_tx,
+        write_event_fd,
+        feed_reads,
+        post_reads,
+    );
+    diag_end(Diag::Process, at);
+    r
+}
+
+fn process_input_inner(
     ring: &mut IoUring,
     ring_idx: usize,
     slot: u32,
@@ -564,10 +714,15 @@ fn process_ring(
     write_event_fd: RawFd,
     feed_reads: &mut Vec<ReadJob>,
     post_reads: &mut Vec<ReadJob>,
-) -> io::Result<()> {
+) -> io::Result<bool> {
     let mut cqe_count = 0usize;
+    let mut full = false;
     loop {
-        if cqe_count >= 1024 {
+        if feed_reads.len() + post_reads.len() >= READ_QUEUE_CAP {
+            full = true;
+            break;
+        }
+        if cqe_count >= CQES_PER_RING {
             break;
         }
         let next = {
@@ -585,6 +740,7 @@ fn process_ring(
                 let slot = res as u32;
                 let gen = r.next_gen;
                 r.next_gen = r.next_gen.wrapping_add(1).max(1);
+                ACCEPTS.fetch_add(1, Ordering::Relaxed);
                 r.conns.insert(slot, Conn::new(gen, r.multishot));
                 if let Some(c) = r.conns.get_mut(&slot) {
                     arm_read(&mut r.ring, slot, c)?;
@@ -696,6 +852,8 @@ fn process_ring(
                         let _ = arm_read(&mut r.ring, slot, c);
                         false
                     } else {
+                        if res == 0 { EOFS.fetch_add(1, Ordering::Relaxed); }
+                        else { READ_ERRORS.fetch_add(1, Ordering::Relaxed); }
                         true
                     }
                 }
@@ -740,21 +898,25 @@ fn process_ring(
         }
     }
     r.last_cqes = cqe_count;
-    if !r.ring.submission().is_empty() {
-        r.ring.submit()?;
+    Ok(full)
+}
+
+fn submit_rings(rings: &mut [RingState]) {
+    for r in rings {
+        if !r.ring.submission().is_empty() {
+            let _ = r.ring.submit();
+        }
     }
-    Ok(())
 }
 
 fn apply_feed_jobs(
     app: &mut App,
     rings: &mut [RingState],
     jobs: &[ReadJob],
-    body: Option<Arc<Vec<u8>>>,
+    normal: Option<Arc<Vec<u8>>>,
     write_rx: &Receiver<WriteResult>,
 ) {
-    let feed_packet = body.map(|body| Arc::new(response_bytes(200, &body, false)));
-    let mut dirty = 0u64;
+    let feed_packet = normal;
     for (i, job) in jobs.iter().enumerate() {
         let Some(r) = rings.get_mut(job.ring) else { continue };
         let Some(c) = r.conns.get_mut(&job.slot) else { continue };
@@ -778,18 +940,35 @@ fn apply_feed_jobs(
             let _ = finish_close(&mut r.ring, &mut r.conns, job.slot);
         } else {
             let _ = arm_write(&mut r.ring, job.slot, c);
-            dirty |= 1u64 << job.ring;
         }
         if i % 256 == 255 {
             process_writer(app, rings, write_rx);
         }
     }
-    if dirty != 0 {
-        for (i, r) in rings.iter_mut().enumerate() {
-            if dirty & (1u64 << i) != 0 {
-                let _ = r.ring.submit();
-            }
+}
+
+fn apply_feed_one(rings: &mut [RingState], job: &ReadJob, packet: Option<Vec<u8>>) {
+    let Some(r) = rings.get_mut(job.ring) else { return };
+    let Some(c) = r.conns.get_mut(&job.slot) else { return };
+    if c.gen != job.gen {
+        return;
+    }
+    match packet {
+        Some(packet) => {
+            let packet = if job.close {
+                close_packet(&packet)
+            } else {
+                packet
+            };
+            queue_owned(c, packet, job.close);
+            stats::record(stats::FEED, job.at);
         }
+        None => queue_reply(c, 500, &super::error("internal server error"), true),
+    }
+    if c.close_after && c.out.len() == 0 {
+        let _ = finish_close(&mut r.ring, &mut r.conns, job.slot);
+    } else {
+        let _ = arm_write(&mut r.ring, job.slot, c);
     }
 }
 
@@ -800,7 +979,6 @@ fn apply_post_jobs(
     packets: Option<Arc<Vec<(i64, Option<Arc<PostResponse>>)>>>,
     write_rx: &Receiver<WriteResult>,
 ) {
-    let mut dirty = 0u64;
     for (i, job) in jobs.iter().enumerate() {
         let Some(r) = rings.get_mut(job.ring) else { continue };
         let Some(c) = r.conns.get_mut(&job.slot) else { continue };
@@ -838,18 +1016,47 @@ fn apply_post_jobs(
             let _ = finish_close(&mut r.ring, &mut r.conns, job.slot);
         } else {
             let _ = arm_write(&mut r.ring, job.slot, c);
-            dirty |= 1u64 << job.ring;
         }
         if i % 256 == 255 {
             process_writer(app, rings, write_rx);
         }
     }
-    if dirty != 0 {
-        for (i, r) in rings.iter_mut().enumerate() {
-            if dirty & (1u64 << i) != 0 {
-                let _ = r.ring.submit();
-            }
+}
+
+fn apply_post_one(
+    rings: &mut [RingState],
+    job: &ReadJob,
+    packet: Option<Vec<u8>>,
+    not_found: bool,
+) {
+    let Some(r) = rings.get_mut(job.ring) else { return };
+    let Some(c) = r.conns.get_mut(&job.slot) else { return };
+    if c.gen != job.gen {
+        return;
+    }
+    match packet {
+        Some(normal) => {
+            let packet = if job.close {
+                close_packet(&normal)
+            } else {
+                normal
+            };
+            queue_owned(c, packet, job.close);
+            stats::record(stats::POST, job.at);
         }
+        None if not_found => {
+            queue_reply(c, 404, &super::error("post not found"), job.close);
+            stats::record(stats::POST, job.at);
+        }
+        None => {
+            queue_reply(c, 500, &super::error("internal server error"), true);
+            stats::record(stats::POST, job.at);
+        }
+    }
+    if c.close_after && c.out.len() == 0 {
+        let _ = finish_close(&mut r.ring, &mut r.conns, job.slot);
+    } else {
+        let _ = arm_write(&mut r.ring, job.slot, c);
     }
 }
 
@@ -911,8 +1118,10 @@ fn apply_writes(app: &mut App, rings: &mut [RingState], jobs: &mut Vec<WriteJob>
     if jobs.is_empty() {
         return;
     }
+    let at = diag_start();
     let (mut results, committed) =
         super::writer::run_batch(&mut app.write, &mut app.write_cache, &jobs);
+    diag_end(Diag::Write, at);
     let mut touched = vec![false; rings.len()];
     for (i, job) in jobs.drain(..).enumerate() {
         let pair = results
@@ -960,50 +1169,103 @@ fn apply_reads(
     write_res_rx: &Receiver<WriteResult>,
 ) {
     if !feed_reads.is_empty() {
-        let body = app.read.feed().ok().map(Arc::new);
-        apply_feed_jobs(app, rings, feed_reads, body, write_res_rx);
-        feed_reads.clear();
+        if app.coalesce {
+            let at = diag_start();
+            let packet = app.read.feed_response().ok().map(Arc::new);
+            diag_end(Diag::Feed, at);
+            apply_feed_jobs(app, rings, feed_reads, packet, write_res_rx);
+        } else {
+            let n = feed_reads.len().min(FEED_ANSWERS_PER_PASS);
+            let ok = app.read.begin_read();
+            for job in &feed_reads[..n] {
+                let at = diag_start();
+                let packet = if ok {
+                    app.read.feed_response().ok()
+                } else {
+                    None
+                };
+                diag_end(Diag::Feed, at);
+                apply_feed_one(rings, job, packet);
+            }
+            app.read.end_read(ok);
+            feed_reads.drain(..n);
+        }
+        if app.coalesce {
+            feed_reads.clear();
+        }
     }
     if !post_reads.is_empty() {
-        let post_slice = &post_reads[..];
-        let mut ids = std::mem::take(&mut app.post_ids);
-        ids.clear();
-        ids.extend(post_slice.iter().filter_map(|job| match job.kind {
-            ReadKind::Post(id) => Some(id),
-            _ => None,
-        }));
-        ids.sort_unstable();
-        ids.dedup();
-        let bodies = app.read.posts_sorted(&ids).ok();
-        let packets: Option<Arc<Vec<(i64, Option<Arc<PostResponse>>)>>> = bodies.map(|bodies| {
-            Arc::new(
-                bodies
-                    .into_iter()
-                    .map(|(id, body)| {
-                        let response = body.map(|body| {
-                            let normal = Arc::new(response_bytes(200, &body, false));
-                            Arc::new(PostResponse { normal })
-                        });
-                        (id, response)
-                    })
-                    .collect(),
-            )
-        });
-        apply_post_jobs(app, rings, post_slice, packets, write_res_rx);
-        post_reads.clear();
-        ids.clear();
-        app.post_ids = ids;
+        if app.coalesce {
+            let post_slice = &post_reads[..];
+            let mut ids = std::mem::take(&mut app.post_ids);
+            ids.clear();
+            ids.extend(post_slice.iter().filter_map(|job| match job.kind {
+                ReadKind::Post(id) => Some(id),
+                _ => None,
+            }));
+            ids.sort_unstable();
+            ids.dedup();
+            let at = diag_start();
+            let bodies = app.read.posts_sorted(&ids).ok();
+            diag_end(Diag::Post, at);
+            let packets: Option<Arc<Vec<(i64, Option<Arc<PostResponse>>)>>> = bodies.map(|bodies| {
+                Arc::new(
+                    bodies
+                        .into_iter()
+                        .map(|(id, body)| {
+                            let response = body.map(|body| {
+                                let normal = Arc::new(response_bytes(200, &body, false));
+                                Arc::new(PostResponse { normal })
+                            });
+                            (id, response)
+                        })
+                        .collect(),
+                )
+            });
+            apply_post_jobs(app, rings, post_slice, packets, write_res_rx);
+            ids.clear();
+            app.post_ids = ids;
+        } else {
+            let n = post_reads.len().min(POST_ANSWERS_PER_PASS);
+            let ok = app.read.begin_read();
+            for job in &post_reads[..n] {
+                let id = match job.kind {
+                    ReadKind::Post(id) => id,
+                    _ => continue,
+                };
+                if !ok {
+                    apply_post_one(rings, job, None, false);
+                    continue;
+                }
+                let at = diag_start();
+                let result = app.read.post_response(id);
+                diag_end(Diag::Post, at);
+                match result {
+                    Ok(Some(packet)) => {
+                        apply_post_one(rings, job, Some(packet), false)
+                    }
+                    Ok(None) => apply_post_one(rings, job, None, true),
+                    Err(_) => apply_post_one(rings, job, None, false),
+                }
+            }
+            app.read.end_read(ok);
+            post_reads.drain(..n);
+        }
+        if app.coalesce {
+            post_reads.clear();
+        }
     }
-
+    submit_rings(rings);
 }
 
 pub fn run_pass(
     db_path: String,
     secret: Vec<u8>,
+    coalesce: bool,
     addr: String,
     ring_count: usize,
 ) -> io::Result<()> {
-    let mut app = App::open(&db_path, secret)
+    let mut app = App::open(&db_path, secret, coalesce)
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
     let mut rings = Vec::with_capacity(ring_count.max(1));
     for _ in 0..ring_count.max(1) {
@@ -1011,31 +1273,29 @@ pub fn run_pass(
     }
     let (write_tx, write_rx) = std::sync::mpsc::channel();
     let (res_tx, write_res_rx) = std::sync::mpsc::channel();
+    let dirty = std::sync::Arc::new(AtomicU64::new(0));
+    let (writer_ready_tx, writer_ready_rx) = std::sync::mpsc::channel();
+    crate::writer::spawn(db_path.clone(), write_rx, dirty, writer_ready_tx);
+    let _ = writer_ready_rx.recv();
     let mut feed_reads: Vec<ReadJob> = Vec::new();
     let mut post_reads: Vec<ReadJob> = Vec::new();
     let mut fds: Vec<libc::pollfd> = Vec::with_capacity(rings.len());
-    let defer_us = std::env::var("WRITE_DEFER_US")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(0);
-    let defer_batch = std::env::var("WRITE_BATCH")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(64)
-        .max(1);
-    let mut pending_writes: Vec<WriteJob> = Vec::new();
-    let mut pending_since: Option<Instant> = None;
     let pass_stats = std::env::var("PASS_STATS").is_ok();
     let mut passes = 0u64;
+    let mut pass_no = 0u64;
     let mut cqes_total = 0u64;
     let mut proc_ns = 0u128;
     let mut write_ns = 0u128;
     let mut read_ns = 0u128;
     let mut poll_ns = 0u128;
+    let mut ring_cursor = 0usize;
     loop {
         let t0 = Instant::now();
         let mut cqes = 0u64;
-        for ri in 0..rings.len() {
+        let mut queue_full = false;
+        let nrings = rings.len();
+        for k in 0..nrings {
+            let ri = (ring_cursor + k) % nrings;
             if rings[ri].accept_paused
                 && rings[ri].accept_resume.is_some_and(|t| Instant::now() >= t)
             {
@@ -1043,7 +1303,7 @@ pub fn run_pass(
                 rings[ri].accept_resume = None;
                 let _ = rings[ri].arm_accept();
             }
-            process_ring(
+            queue_full |= process_ring(
                 ri,
                 &mut rings[ri],
                 &mut app,
@@ -1055,25 +1315,22 @@ pub fn run_pass(
             )?;
             cqes += rings[ri].last_cqes as u64;
         }
+        ring_cursor = (ring_cursor + 1) % nrings;
         let t1 = Instant::now();
-        drain_writes(&write_rx, &mut pending_writes);
-        if !pending_writes.is_empty() {
-            let now = Instant::now();
-            let first = *pending_since.get_or_insert(now);
-            let due = defer_us > 0
-                && pending_writes.len() < defer_batch
-                && now.duration_since(first).as_micros() < defer_us as u128;
-            if !due {
-                apply_writes(&mut app, &mut rings, &mut pending_writes);
-                pending_since = None;
-            }
-        } else {
-            pending_since = None;
-        }
+        process_writer(&mut app, &mut rings, &write_res_rx);
         let t2 = Instant::now();
+        let feed_q = feed_reads.len();
+        let post_q = post_reads.len();
+        let nwrites = 0usize;
         app.read.refresh();
         apply_reads(&mut app, &mut rings, &mut feed_reads, &mut post_reads, &write_res_rx);
         let t3 = Instant::now();
+        pass_no += 1;
+        ACTIVE.store(
+            rings.iter().map(|r| r.conns.len() as u64).sum(),
+            Ordering::Relaxed,
+        );
+        diag_tick(pass_no, feed_q, post_q);
 
         fds.clear();
         for r in &rings {
@@ -1083,14 +1340,36 @@ pub fn run_pass(
                 revents: 0,
             });
         }
-        let rc = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, 1) };
-        let t4 = Instant::now();
-        if rc < 0 {
-            let e = io::Error::last_os_error();
-            if e.raw_os_error() != Some(libc::EINTR) {
-                return Err(e);
+        let t4 = if cqes > 0 || queue_full {
+            t3
+        } else {
+            let rc = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, 1) };
+            if rc < 0 {
+                let e = io::Error::last_os_error();
+                if e.raw_os_error() != Some(libc::EINTR) {
+                    return Err(e);
+                }
+            }
+            Instant::now()
+        };
+        if diag_on() {
+            let slow = t4.duration_since(t0);
+            if slow.as_millis() >= 20 {
+                eprintln!(
+                    "slow total_us={} proc_us={} write_us={} read_us={} poll_us={} cqes={} feed_q={} post_q={} writes={}",
+                    slow.as_micros(),
+                    t1.duration_since(t0).as_micros(),
+                    t2.duration_since(t1).as_micros(),
+                    t3.duration_since(t2).as_micros(),
+                    t4.duration_since(t3).as_micros(),
+                    cqes,
+                    feed_q,
+                    post_q,
+                    nwrites
+                );
             }
         }
+
         if pass_stats {
             passes += 1;
             cqes_total += cqes;

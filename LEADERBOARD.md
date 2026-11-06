@@ -377,7 +377,9 @@ and 280,000 failed the 2-minute probe on p99 (2.26 s at 76 % CPU / 3.30 s at 85 
 Re-run at `f4aa4cb` (drops the PCACHE2 filter and shim VFS for plain `unix-excl`, monotonic B-tree steps for
 consecutive ids): **270,000** (25,827 req/s, p95 82.3 / p99 243.6 ms, 0 err, 81 % CPU, 28 µs/req, 1,003 MB,
 2026-11-06), the same as the merged row, so not merged; 280,000 failed the 2-minute probe on p99 (1.16 s at 85 % CPU,
-0 errors).
+0 errors). Re-run at `6bd89a6` (WAL checkpoint tail hold cap, direct user lookup, SHA-NI JWT): **250,000** (24,128
+req/s, p95 54.8 / p99 165.2 ms, 0 err, 74 % CPU, 28 µs/req, 1,293 MB, 2026-11-06), below the merged row, so not
+merged; 260,000 failed the 2-minute probe on p99 (2.03 s at 75 % CPU, 0 errors).
 
 ᵋ **objc-uring-delneg** stays on its merged #154 row. Its follow-up **#326** (`197ad57`, PCACHE2 page cache, newest-first
 answers once a backlog builds, OOM at 290k fixed; held, not merged: it didn't beat the merged row, it tied it) also held

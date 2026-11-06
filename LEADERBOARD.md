@@ -292,7 +292,11 @@ the 2-minute probe but failed the 5-minute hold on refused connections (68 % err
 on refused connections and 240,000 on p95 (8.5 s). Re-run at its newer head **`b92dd52`** (JSON parser memory-leak
 fix; not merged: not above 210,000) it held **179,000** (17,618 req/s, p95 5.8 / p99 18.3 ms, 0 err, 67 % CPU, 35 µs/req,
 1,218 MB, 2026-11-05); 200,000–230,000 passed the 2-minute probe, but every 5-minute hold from 230,000 down to 188,000
-failed (p95 8–11 s at 230k/208k, 40–70 % refused connections at 219k/198k/188k). Its earlier
+failed (p95 8–11 s at 230k/208k, 40–70 % refused connections at 219k/198k/188k). Re-run at **`d24b07f`** (bitfield-packed
+connection state, 1,024 provided buffers; not merged: not above 210,000; newer head `a358963` queued) it held **190,000**
+(18,698 req/s, p95 7.5 / p99 36.8 ms, 0 err, 70 % CPU, 35 µs/req, 1,185 MB, 2026-11-06); 200,000 passed the 2-minute
+probe but failed the 5-minute hold on refused connections (89 % errors), 210,000/220,000 failed the 2-minute probe on
+p95 (6.2 / 2.6 s) and 240,000 on refused connections (74 %). Its earlier
 follow-up **#304** (`cbdb08d`, `-O3 -march=native -flto`, background checkpoint
 thread, batched B-tree reads, default unix VFS; not merged: its head moved to `d9aace0` during the run and #304 was then
 closed unmerged) scored **179,000** (17,574 req/s, p95 91.9 / p99 401 ms, 0 err, 65 % CPU, 34 µs/req, 1,172 MB,

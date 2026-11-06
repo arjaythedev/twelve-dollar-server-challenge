@@ -1,14 +1,21 @@
 #include "store.h"
 #include "td_btree.h"
 #include <errno.h>
+#include <fcntl.h>
 #include <signal.h>
 #include <stdio.h>
 #include <sys/prctl.h>
+#include <sys/resource.h>
 #include <time.h>
 #include <unistd.h>
 
 int td_opt_ckpt = 250;    // wal_autocheckpoint pages (--ckpt=N): smaller, more frequent checkpoint stalls
 int td_opt_ckptproc = 1; // --ckptproc=0: inline autocheckpoint, EXCLUSIVE locking
+int td_opt_pcache = 1;   // --pcache=0|1: our page cache plugin, or SQLite's
+int td_opt_walbuf = 1;   // --walbuf=0|1: one pwrite per commit for the WAL, or SQLite's two per frame
+int td_opt_warm = 1, td_opt_ckdrop = 1;   // --warm=0|1 --ckdrop=0|1
+int td_opt_jsl = 0;   // --jsl=N: journal_size_limit bytes (-1: unlimited)
+int td_opt_cachekb = 256000, td_opt_cknice = 0, td_opt_lock = 1;   // --cache=KB --cknice=N --lock=0|1
 long long td_opt_mmap = 0; // mmap_size bytes (--mmap=N); 0: page cache reads beat per-page mmap objects
 
 #define POST_COLS "SELECT p.id, p.body, p.created_at, u.username, " \
@@ -60,6 +67,8 @@ static void exec(sqlite3 *db, const char *sql) {
 
 - (instancetype)initWithPath:(const char *)path {
     pthread_mutex_init(&lock, NULL);
+    if (td_opt_pcache) td_pcache_install();
+    if (td_opt_walbuf) td_vfs_install();
     if (sqlite3_open_v2(path, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX, NULL) != SQLITE_OK) {
         fprintf(stderr, "open %s: %s\n", path, db ? sqlite3_errmsg(db) : "?");
         exit(1);
@@ -73,8 +82,18 @@ static void exec(sqlite3 *db, const char *sql) {
     char mm[64];
     snprintf(mm, sizeof mm, "PRAGMA mmap_size=%lld", td_opt_mmap);
     exec(db, mm);
-    exec(db, "PRAGMA cache_size=-32768");
+    char cs[64];
+    snprintf(cs, sizeof cs, "PRAGMA cache_size=-%d", td_opt_cachekb);
+    exec(db, cs);
     exec(db, "PRAGMA temp_store=MEMORY");
+    if (td_opt_jsl >= 0) {
+        // The WAL is overwritten from the start after each rewind. Frames aren't page-aligned, so overwriting a file page
+        // the kernel has evicted makes it read the old page from disk first, on this thread. With a limit SQLite truncates
+        // the file at the rewind's first commit: later frames append to fresh pages, and the old ones are freed at once.
+        char jl[64];
+        snprintf(jl, sizeof jl, "PRAGMA journal_size_limit=%d", td_opt_jsl);
+        exec(db, jl);
+    }
     if (td_opt_ckptproc) sqlite3_wal_hook(db, wal_frames_hook, self);   // replaces autocheckpoint
     else sqlite3_wal_autocheckpoint(db, td_opt_ckpt);
     exec(db, "SELECT count(*) FROM sqlite_schema"); // takes the exclusive lock now
@@ -91,6 +110,14 @@ static void exec(sqlite3 *db, const char *sql) {
     sLikeRange = prep(db, "SELECT td_tally(post_id) FROM likes WHERE post_id BETWEEN ?1 AND ?2");
     // No RETURNING: it buffers rows in an ephemeral table (a page cache built and
     // torn down per insert). created_at is written in the schema default's format.
+    if (td_opt_warm) {
+        // Writes land on random leaves of these indexes, and authors on random rows of users. Reading them now, while
+        // memory is plentiful, puts them in the page cache: later the loop would stall reading them from disk one by one
+        // just when the kernel has dropped its file cache.
+        sqlite3_exec(db, "SELECT sum(user_id) FROM likes INDEXED BY sqlite_autoindex_likes_1", NULL, NULL, NULL);
+        sqlite3_exec(db, "SELECT sum(user_id) FROM posts INDEXED BY posts_user_id_idx", NULL, NULL, NULL);
+        sqlite3_exec(db, "SELECT sum(length(username)) FROM users", NULL, NULL, NULL);
+    }
     sCreate = prep(db, "INSERT INTO posts (user_id, body, created_at) VALUES (?1, ?2, ?3)");
     sLike = prep(db, "INSERT INTO likes (user_id, post_id, created_at) SELECT ?1, ?2, ?3 "
                      "WHERE EXISTS (SELECT 1 FROM posts WHERE id = ?2) ON CONFLICT DO NOTHING");
@@ -101,6 +128,12 @@ static void exec(sqlite3 *db, const char *sql) {
     sCommit = prep(db, "COMMIT");
     sRollback = prep(db, "ROLLBACK");
     return self;
+}
+
+- (int)cacheStat:(int)which {
+    int cur = 0, hi = 0;
+    sqlite3_db_status(db, which ? SQLITE_DBSTATUS_CACHE_MISS : SQLITE_DBSTATUS_CACHE_USED, &cur, &hi, 0);
+    return which ? cur : cur / 1024;
 }
 
 - (void)useInlineCheckpoints {
@@ -138,8 +171,8 @@ TD_INLINE bool run1(sqlite3_stmt *s) {
 }
 
 - (bool)begin { return run1(sBegin); }
-- (bool)commit { return run1(sCommit); }
-- (void)rollback { if (!sqlite3_get_autocommit(db)) run1(sRollback); }
+- (bool)commit { td_bt_end(); return run1(sCommit); }
+- (void)rollback { td_bt_end(); if (!sqlite3_get_autocommit(db)) run1(sRollback); }
 
 static void put_post(TDBuf *b, sqlite3_stmt *s) {
     td_buf_lit(b, "{\"id\":");
@@ -390,7 +423,9 @@ typedef struct { uint32_t body, bodyLen, ca, caLen, au, auLen; int64_t likes; bo
 // locking, never writes) and answers {rc, frames in WAL, frames backfilled}.
 void td_ckpt_child(const char *path, int req, int done) {
     prctl(PR_SET_PDEATHSIG, SIGKILL);
+    if (td_opt_cknice) setpriority(PRIO_PROCESS, 0, td_opt_cknice);
     sqlite3 *cdb = NULL;
+    int dropFd = -1;
     char c;
     for (;;) {
         ssize_t n = read(req, &c, 1);
@@ -401,9 +436,14 @@ void td_ckpt_child(const char *path, int req, int done) {
             sqlite3_busy_timeout(cdb, 0);
             exec(cdb, "PRAGMA synchronous=NORMAL");
             sqlite3_wal_autocheckpoint(cdb, 0);
+            // Kept open: closing any descriptor of a file drops this process's POSIX locks on it.
+            if (td_opt_ckdrop) dropFd = open(path, O_RDONLY | O_CLOEXEC);
         }
         int r[3] = { 0, -1, -1 };
         r[0] = sqlite3_wal_checkpoint_v2(cdb, "main", SQLITE_CHECKPOINT_PASSIVE, &r[1], &r[2]);
+        // The pass synced the pages it wrote. The server's reads come from its page cache, so the kernel's copy has no use,
+        // and left in place it only makes the kernel reclaim, on the one CPU, when memory is short.
+        if (dropFd >= 0) posix_fadvise(dropFd, 0, 0, POSIX_FADV_DONTNEED);
         if (write(done, r, sizeof r) != (ssize_t)sizeof r) _exit(1);
     }
 }

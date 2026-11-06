@@ -7,6 +7,7 @@
 #include <pthread.h>
 #include <signal.h>
 #include <fcntl.h>
+#include <sys/mman.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -15,6 +16,29 @@ extern int td_opt_ckptproc, td_opt_hold;
 extern int td_opt_ckpt, td_opt_batch, td_opt_bwait, td_opt_bthresh;
 extern long long td_opt_mmap;
 extern int td_opt_btree;
+extern int td_opt_ckpass, td_opt_rearm, td_opt_cq, td_opt_cachekb, td_opt_cknice, td_opt_lock, td_opt_jsl, td_opt_warm, td_opt_ckdrop, td_opt_onewrite;
+extern int td_opt_ready; extern int td_opt_rpoll; extern uint32_t td_opt_gate, td_opt_lifomin, td_opt_wwin, td_opt_poolcap, td_opt_poolmax, td_opt_answers, td_opt_lifoage, td_opt_lifocap, td_opt_bufs;
+extern int td_opt_lifo, td_opt_pcache, td_opt_rdefer, td_opt_walbuf;
+int td_opt_backlog = 65535, td_opt_defacc = 0, td_opt_thin = 0, td_opt_rcvbuf = 0, td_opt_sndbuf = 0; static const char *td_opt_cc = NULL; extern int td_opt_huge;   // --defacc=SECONDS: TCP_DEFER_ACCEPT on the listener
+
+// Locks the code and read-only data of the binary and its libraries in RAM, up to RLIMIT_MEMLOCK (8 MB under systemd).
+// With no swap, reclaim at the memory wall takes file-backed pages first, and the loop would stall on major faults
+// reading its own code back from disk. (#245, #257 do this too.) Best effort.
+void td_lock_code(void) {
+    FILE *f = fopen("/proc/self/maps", "r");
+    if (!f) return;
+    char line[512];
+    unsigned long locked = 0;
+    while (fgets(line, sizeof line, f)) {
+        unsigned long a, b;
+        char perm[8];
+        if (sscanf(line, "%lx-%lx %7s", &a, &b, perm) != 3 || !strchr(line, '/')) continue;
+        if (perm[1] == 'w' || perm[0] != 'r') continue;
+        if (mlock((void *)a, b - a) == 0) locked += b - a;
+    }
+    fclose(f);
+    fprintf(stderr, "locked %lu KB of code and read-only data\n", locked >> 10);
+}
 
 static int listen_on(const char *host, int port) {
     int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
@@ -23,10 +47,15 @@ static int listen_on(const char *host, int port) {
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
     setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof one);
     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+    if (td_opt_defacc > 0) setsockopt(fd, IPPROTO_TCP, TCP_DEFER_ACCEPT, &td_opt_defacc, sizeof td_opt_defacc);
+    if (td_opt_cc) setsockopt(fd, IPPROTO_TCP, TCP_CONGESTION, td_opt_cc, (socklen_t)strlen(td_opt_cc));
+    if (td_opt_thin) setsockopt(fd, IPPROTO_TCP, TCP_THIN_LINEAR_TIMEOUTS, &td_opt_thin, sizeof td_opt_thin);
+    if (td_opt_rcvbuf) setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &td_opt_rcvbuf, sizeof td_opt_rcvbuf);
+    if (td_opt_sndbuf) setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &td_opt_sndbuf, sizeof td_opt_sndbuf);
     struct sockaddr_in a = { .sin_family = AF_INET, .sin_port = htons((uint16_t)port) };
     if (inet_pton(AF_INET, host, &a.sin_addr) != 1) { fprintf(stderr, "bad HOST %s\n", host); exit(1); }
     if (bind(fd, (struct sockaddr *)&a, sizeof a) < 0) { perror("bind"); exit(1); }
-    if (listen(fd, 65535) < 0) { perror("listen"); exit(1); }
+    if (listen(fd, td_opt_backlog) < 0) { perror("listen"); exit(1); }
     return fd;
 }
 
@@ -48,6 +77,38 @@ int main(int argc, char **argv) {
         else if (!strncmp(argv[i], "--ckptproc=", 11)) td_opt_ckptproc = atoi(argv[i] + 11);
         else if (!strncmp(argv[i], "--hold=", 7)) td_opt_hold = atoi(argv[i] + 7);
         else if (!strncmp(argv[i], "--btree=", 8)) td_opt_btree = atoi(argv[i] + 8);
+        else if (!strncmp(argv[i], "--ckpass=", 9)) td_opt_ckpass = atoi(argv[i] + 9);
+        else if (!strncmp(argv[i], "--answers=", 10)) td_opt_answers = (uint32_t)atoi(argv[i] + 10);
+        else if (!strncmp(argv[i], "--lifo=", 7)) td_opt_lifo = atoi(argv[i] + 7);
+        else if (!strncmp(argv[i], "--rdefer=", 9)) td_opt_rdefer = atoi(argv[i] + 9);
+        else if (!strncmp(argv[i], "--wwin=", 7)) td_opt_wwin = (uint32_t)atoi(argv[i] + 7);
+        else if (!strncmp(argv[i], "--lifomin=", 10)) td_opt_lifomin = (uint32_t)atoi(argv[i] + 10);
+        else if (!strncmp(argv[i], "--defacc=", 9)) td_opt_defacc = atoi(argv[i] + 9);
+        else if (!strncmp(argv[i], "--lifocap=", 10)) td_opt_lifocap = (uint32_t)atoi(argv[i] + 10);
+        else if (!strncmp(argv[i], "--bufs=", 7)) td_opt_bufs = (uint32_t)atoi(argv[i] + 7);
+        else if (!strncmp(argv[i], "--pcache=", 9)) td_opt_pcache = atoi(argv[i] + 9);
+        else if (!strncmp(argv[i], "--walbuf=", 9)) td_opt_walbuf = atoi(argv[i] + 9);
+        else if (!strncmp(argv[i], "--huge=", 7)) td_opt_huge = atoi(argv[i] + 7);
+        else if (!strncmp(argv[i], "--rpoll=", 8)) td_opt_rpoll = atoi(argv[i] + 8);
+        else if (!strncmp(argv[i], "--ready=", 8)) td_opt_ready = atoi(argv[i] + 8);
+        else if (!strncmp(argv[i], "--gate=", 7)) td_opt_gate = (uint32_t)atoi(argv[i] + 7);
+        else if (!strncmp(argv[i], "--backlog=", 10)) td_opt_backlog = atoi(argv[i] + 10);
+        else if (!strncmp(argv[i], "--cc=", 5)) td_opt_cc = argv[i] + 5;
+        else if (!strncmp(argv[i], "--thin=", 7)) td_opt_thin = atoi(argv[i] + 7);
+        else if (!strncmp(argv[i], "--rcvbuf=", 9)) td_opt_rcvbuf = atoi(argv[i] + 9);
+        else if (!strncmp(argv[i], "--sndbuf=", 9)) td_opt_sndbuf = atoi(argv[i] + 9);
+        else if (!strncmp(argv[i], "--lifoage=", 10)) td_opt_lifoage = (uint32_t)atoi(argv[i] + 10);
+        else if (!strncmp(argv[i], "--jsl=", 6)) td_opt_jsl = atoi(argv[i] + 6);
+        else if (!strncmp(argv[i], "--onewrite=", 11)) td_opt_onewrite = atoi(argv[i] + 11);
+        else if (!strncmp(argv[i], "--warm=", 7)) td_opt_warm = atoi(argv[i] + 7);
+        else if (!strncmp(argv[i], "--ckdrop=", 9)) td_opt_ckdrop = atoi(argv[i] + 9);
+        else if (!strncmp(argv[i], "--rearm=", 8)) td_opt_rearm = atoi(argv[i] + 8);
+        else if (!strncmp(argv[i], "--cq=", 5)) td_opt_cq = atoi(argv[i] + 5);
+        else if (!strncmp(argv[i], "--cache=", 8)) td_opt_cachekb = atoi(argv[i] + 8);
+        else if (!strncmp(argv[i], "--cknice=", 9)) td_opt_cknice = atoi(argv[i] + 9);
+        else if (!strncmp(argv[i], "--lock=", 7)) td_opt_lock = atoi(argv[i] + 7);
+        else if (!strncmp(argv[i], "--poolcap=", 10)) td_opt_poolcap = (uint32_t)atoi(argv[i] + 10);
+        else if (!strncmp(argv[i], "--poolmax=", 10)) td_opt_poolmax = (uint32_t)atoi(argv[i] + 10);
     signal(SIGPIPE, SIG_IGN);
 
     // Accepted sockets live in io_uring fixed-file tables, not the fd table.

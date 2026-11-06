@@ -1,5 +1,20 @@
 // Root class, byte buffers and a small validating JSON reader.
 #include "td.h"
+#include <sys/mman.h>
+
+int td_opt_huge = 1;   // --huge=0|1
+void *td_huge(size_t n) {
+    const size_t h = (size_t)2 << 20;
+    n = (n + h - 1) & ~(h - 1);
+    char *p = mmap(NULL, n + h, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    if (p == MAP_FAILED) return NULL;
+    char *a = (char *)(((uintptr_t)p + h - 1) & ~(uintptr_t)(h - 1));
+    if (a > p) munmap(p, (size_t)(a - p));
+    munmap(a + n, (size_t)(p + h - a));
+    if (td_opt_huge) madvise(a, n, MADV_HUGEPAGE);
+    return a;
+}
+
 
 @implementation TDObject
 + (instancetype)make {

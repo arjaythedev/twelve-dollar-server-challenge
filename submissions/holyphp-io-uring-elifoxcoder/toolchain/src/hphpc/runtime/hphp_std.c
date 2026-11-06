@@ -2828,8 +2828,8 @@ struct hp_urfds {
     int64_t cdeadline;                    /* idle/close deadline */
     uint32_t epoch;
     uint32_t rborrow_bid;
-    int32_t squeued;                      /* queued send chain length */
     uint16_t diridx;                      /* slot in the registered file table */
+    unsigned int squeued:7;               /* queue is capped at 64 chunks */
     unsigned int rarmed:1;                /* a recv SQE is queued or in flight */
     unsigned int rready:1;                /* rbuf holds unconsumed data */
     unsigned int reof:1;
@@ -2849,7 +2849,7 @@ struct hp_urfds {
     unsigned int ranswerq:1;              /* ready, but deferred by the answer cap */
     unsigned int rborrowed:1;             /* rh is an in-place view of a provided buffer */
 };
-_Static_assert(sizeof(struct hp_urfds) <= 72,
+_Static_assert(sizeof(struct hp_urfds) <= 64,
                "per-connection runtime state must stay compact");
 
 /* Overflow readiness: the kernel caps the SQ ring at 32768 entries, so above

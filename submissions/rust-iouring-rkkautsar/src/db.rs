@@ -334,13 +334,11 @@ impl ReadDb {
         if self.reader.is_null() {
             return true;
         }
-        if self.db.exec("BEGIN").is_err() {
+        if unsafe { btree_reader_begin(self.reader) } != SQLITE_OK {
             return false;
         }
-        if unsafe { btree_reader_begin(self.reader) } != SQLITE_OK
-            || unsafe { btree_reader_reopen(self.reader) } != SQLITE_OK
-        {
-            let _ = self.db.exec("ROLLBACK");
+        if unsafe { btree_reader_reopen(self.reader) } != SQLITE_OK {
+            unsafe { btree_reader_end(self.reader, 0) };
             return false;
         }
         self.in_tx = true;
@@ -349,8 +347,10 @@ impl ReadDb {
 
     pub fn end_read(&mut self, ok: bool) {
         if self.in_tx {
-            unsafe { btree_reader_close_cursors(self.reader) };
-            let _ = self.db.exec(if ok { "COMMIT" } else { "ROLLBACK" });
+            unsafe {
+                btree_reader_close_cursors(self.reader);
+                btree_reader_end(self.reader, if ok { 0 } else { 1 });
+            }
             self.in_tx = false;
         }
     }

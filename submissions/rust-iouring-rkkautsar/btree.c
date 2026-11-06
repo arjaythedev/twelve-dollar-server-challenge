@@ -451,7 +451,6 @@ static int like_counts(BtreeReader *r, const sqlite3_int64 *ids, int n,
   int res = 0;
   int rc = sqlite3BtreeIndexMoveto(r->like, r->likeFind, &res);
   if (rc == SQLITE_OK && res < 0 && !sqlite3BtreeEof(r->like)) rc = sqlite3BtreeNext(r->like, 0);
-  if (getenv("FEED_PARTS") && n == 1) fprintf(stderr, "like target=%lld seek_res=%d eof=%d\n", (long long)pairs[0].id, res, sqlite3BtreeEof(r->like));
   int pi = 0;
   sqlite3_int64 prev = 0;
   while (rc == SQLITE_OK && pi < n && !sqlite3BtreeEof(r->like)) {
@@ -497,11 +496,6 @@ static int like_counts(BtreeReader *r, const sqlite3_int64 *ids, int n,
       if (!p) { rc = SQLITE_CORRUPT; break; }
       ir = first_int(p, pn, &key);
       if (ir != SQLITE_OK) break;
-      if (getenv("FEED_PARTS") && n == 1 && count < 4) {
-        fprintf(stderr, "like key=%lld target=%lld bytes=", (long long)key, (long long)target);
-        for (u32 bi = 0; bi < pn && bi < 10; bi++) fprintf(stderr, "%02x", p[bi]);
-        fprintf(stderr, "\n");
-      }
       if (key != target) break;
       count++;
       rc = sqlite3BtreeNext(r->like, 0);
@@ -511,7 +505,6 @@ static int like_counts(BtreeReader *r, const sqlite3_int64 *ids, int n,
     if (rc != SQLITE_OK) break;
     if (ir != SQLITE_OK) { rc = SQLITE_CORRUPT; break; }
     likes[pairs[pi].idx] = count;
-    if (getenv("FEED_PARTS") && n == 1) fprintf(stderr, "like count=%lld\n", (long long)count);
     prev = target;
     pi++;
   }

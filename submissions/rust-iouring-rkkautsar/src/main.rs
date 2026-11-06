@@ -38,9 +38,8 @@ fn main() -> io::Result<()> {
     let port = env::var("PORT").unwrap_or_else(|_| "3000".to_string());
     let db_path = env::var("SQLITE_PATH").expect("SQLITE_PATH");
     let secret = env::var("JWT_SECRET").expect("JWT_SECRET").into_bytes();
-    let coalesce = env::var("READ_COALESCE")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
+    // No cross-request read/response coalescing: every request reads SQLite while served.
+    let coalesce = false;
     let shards = env::var("SHARDS")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())

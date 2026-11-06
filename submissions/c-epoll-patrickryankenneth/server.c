@@ -20,6 +20,7 @@
 #include <poll.h>
 #include <sys/mman.h>
 #include <sys/syscall.h>
+#include <sys/prctl.h>
 #include "build/sqlite3.c"   /* one translation unit with the amalgamation */
 
 /* ---------------------------------------------------------------- SHA-256 / HMAC */
@@ -318,6 +319,7 @@ static void besc(buf *b, const char *s, size_t n) {
 /* ---------------------------------------------------------------- DB */
 static sqlite3 *db;
 static int g_bt;
+static int g_ckpt_child;
 static int bt_init(void);
 static int g_group, g_tx;                      /* group commit: io_uring mode only */
 static sqlite3_stmt *st_feed, *st_one, *st_ins, *st_exists, *st_like, *st_health;
@@ -338,7 +340,7 @@ static void db_open(const char *path) {
   if (sqlite3_exec(db, "PRAGMA journal_mode=WAL;PRAGMA synchronous=NORMAL;PRAGMA temp_store=MEMORY;"
                        "PRAGMA mmap_size=0;PRAGMA cache_size=-16384;PRAGMA busy_timeout=5000;",
                    NULL, NULL, &em) != SQLITE_OK) { fprintf(stderr, "pragma: %s\n", em); exit(1); }
-  sqlite3_exec(db, "PRAGMA wal_autocheckpoint=10000;", NULL, NULL, NULL);   /* small, frequent checkpoints: big inline ones stall the loop on slow disks */
+  sqlite3_exec(db, g_ckpt_child ? "PRAGMA wal_autocheckpoint=200000;" : "PRAGMA wal_autocheckpoint=10000;", NULL, NULL, NULL);   /* small, frequent checkpoints: big inline ones stall the loop on slow disks */
   st_feed = prep(POST_SQL "ORDER BY p.created_at DESC, p.id DESC LIMIT 20");
   st_one = prep(POST_SQL "WHERE p.id=?");
   st_ins = prep("INSERT INTO posts(user_id,body) VALUES(?,?) RETURNING id,created_at");
@@ -1145,6 +1147,29 @@ static int uring_serve(int lfd, unsigned nofile, const char *host, const char *p
   }
 }
 
+/* Checkpoints run in a helper process so their fsyncs never block the serving loop.
+** Forked before db_open so the child starts with no SQLite state of its own to inherit. */
+static void ckpt_spawn(const char *path) {
+  if (getenv("NO_CKPT_CHILD") || getenv("NO_URING")) return;
+  pid_t parent = getpid();
+  pid_t pid = fork();
+  if (pid < 0) return;
+  if (pid > 0) { g_ckpt_child = 1; fprintf(stderr, "checkpoint helper pid %d\n", (int)pid); return; }
+  prctl(PR_SET_PDEATHSIG, SIGKILL);
+  if (getppid() != parent) _exit(0);
+  if (nice(10) < 0) { /* best effort */ }
+  sqlite3 *c = NULL;
+  for (;;) {
+    usleep(1000000);
+    if (getppid() != parent) _exit(0);
+    if (!c) {
+      if (sqlite3_open_v2(path, &c, SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX, NULL) != SQLITE_OK) { sqlite3_close(c); c = NULL; continue; }
+      sqlite3_busy_timeout(c, 5000);
+    }
+    sqlite3_wal_checkpoint_v2(c, NULL, SQLITE_CHECKPOINT_PASSIVE, NULL, NULL);
+  }
+}
+
 int main(void) {
   signal(SIGPIPE, SIG_IGN);
   const char *path = getenv("SQLITE_PATH"), *secret = getenv("JWT_SECRET");
@@ -1154,6 +1179,7 @@ int main(void) {
   if (!port) port = "3000";
   b64_init(); hmac_init((const uint8_t *)secret, strlen(secret));
   t_start = time(NULL);
+  ckpt_spawn(path);
   db_open(path);
 
   struct rlimit rl;

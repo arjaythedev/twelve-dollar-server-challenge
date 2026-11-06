@@ -129,9 +129,13 @@ same way epoll and the SQLite binding are.
 - `build-essential`, `curl`, `unzip`, `libsqlite3-dev`.
 - `build.sh` builds the pinned SQLite amalgamation (3.46.1 by default,
   sha256-checked) with
-  `-DSQLITE_THREADSAFE=1`: the generic in-process checkpoint worker can use a second SQLite connection;
-  the request connection remains NOMUTEX and event-loop-owned. If the download or
-  the build fails, it falls back to the system library, so an offline box still
+  `-DSQLITE_THREADSAFE=2` with memory-status tracking disabled and SQLite C APIs
+  that the runtime does not expose omitted. Both request and checkpoint
+  connections use NOMUTEX and are owned by separate threads; `sqlite3_initialize`
+  is called explicitly. SQL syntax and default pragmas are unchanged. Set
+  `HPHP_SQLITE_DEFINES` to replace the default define list or
+  `HPHP_SQLITE_THREADSAFE` to choose another thread mode. If the download or
+  build fails, it falls back to the system library, so an offline box still
   produces a working server. JSON1 and `INSERT … RETURNING` need SQLite ≥ 3.38.
 
 ## Run

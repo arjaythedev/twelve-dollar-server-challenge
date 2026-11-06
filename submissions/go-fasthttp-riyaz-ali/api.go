@@ -145,7 +145,7 @@ func CreatePost(pool *sqlitex.Pool) fasthttp.RequestHandler {
 		stmt := conn.Prep(query)
 		defer clearAndReset(stmt)
 
-		stmt.BindInt64(1, 1) // TODO: get user_id from auth token
+		stmt.BindInt64(1, ctx.UserValue("sub").(int64))
 		stmt.BindText(2, trimmed)
 
 		ok, err := stmt.Step()
@@ -181,7 +181,7 @@ func LikePost(pool *sqlitex.Pool) fasthttp.RequestHandler {
 		stmt := conn.Prep(query)
 		defer clearAndReset(stmt)
 
-		stmt.BindInt64(1, 1) // TODO: get user_id from auth token
+		stmt.BindInt64(1, ctx.UserValue("sub").(int64))
 		stmt.BindInt64(2, id)
 
 		ok, err := stmt.Step()

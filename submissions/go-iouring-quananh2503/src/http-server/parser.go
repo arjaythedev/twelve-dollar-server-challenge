@@ -36,28 +36,39 @@ func DecodeUserData(userData uint64) (eventType EventType, bufID uint32, fd int3
 	return
 }
 
+const NumRings = 4
+
 // =============================================================================
 // 2. CÁC ĐỊNH NGHĨA TASK & EVENT STRUCTS THEO CHUẨN DOD
 // =============================================================================
 
 type AcceptEvent struct {
+	RingIdx  uint8
 	ListenFD int32
 	ClientFD int32
 }
 
+type ClientRef struct {
+	RingIdx uint8
+	FD      int32
+}
+
 type GetPostTask struct {
-	FD     int32
-	PostID int64
+	RingIdx uint8
+	FD      int32
+	PostID  int64
 }
 
 type LikePostTask struct {
-	FD     int32
-	PostID int64
-	Token  []byte
-	UserID int64
+	RingIdx uint8
+	FD      int32
+	PostID  int64
+	Token   []byte
+	UserID  int64
 }
 
 type CreatePostTask struct {
+	RingIdx  uint8
 	FD       int32
 	Token    []byte
 	Body     []byte
@@ -67,36 +78,37 @@ type CreatePostTask struct {
 }
 
 type ErrorTask struct {
-	FD     int32
-	Status int    // 400, 401, 404, 500
-	Msg    string // "not found", "invalid post id", "missing bearer token"...
+	RingIdx uint8
+	FD      int32
+	Status  int    // 400, 401, 404, 500
+	Msg     string // "not found", "invalid post id", "missing bearer token"...
 }
 
 type EventBatch struct {
 	AcceptEvents     []AcceptEvent
-	HealthTasks      []int32
-	FeedTasks        []int32
+	HealthTasks      []ClientRef
+	FeedTasks        []ClientRef
 	GetPostTasks     []GetPostTask
 	LikePostTasks    []LikePostTask
 	CreatePostTasks  []CreatePostTask
 	ErrorTasks       []ErrorTask
-	CloseQueue       []int32
-	RearmRecvQueue   []int32
-	RearmAcceptQueue []int32
+	CloseQueue       []ClientRef
+	RearmRecvQueue   []ClientRef
+	RearmAcceptQueue []ClientRef
 }
 
 func NewEventBatch(cap int) *EventBatch {
 	return &EventBatch{
 		AcceptEvents:     make([]AcceptEvent, 0, cap),
-		HealthTasks:      make([]int32, 0, cap),
-		FeedTasks:        make([]int32, 0, cap),
+		HealthTasks:      make([]ClientRef, 0, cap),
+		FeedTasks:        make([]ClientRef, 0, cap),
 		GetPostTasks:     make([]GetPostTask, 0, cap),
 		LikePostTasks:    make([]LikePostTask, 0, cap),
 		CreatePostTasks:  make([]CreatePostTask, 0, cap),
 		ErrorTasks:       make([]ErrorTask, 0, cap),
-		CloseQueue:       make([]int32, 0, cap),
-		RearmRecvQueue:   make([]int32, 0, cap),
-		RearmAcceptQueue: make([]int32, 0, cap),
+		CloseQueue:       make([]ClientRef, 0, cap),
+		RearmRecvQueue:   make([]ClientRef, 0, cap),
+		RearmAcceptQueue: make([]ClientRef, 0, cap),
 	}
 }
 
@@ -113,23 +125,36 @@ func (b *EventBatch) Reset() {
 	b.RearmAcceptQueue = b.RearmAcceptQueue[:0]
 }
 
+func (b *EventBatch) HasEvents() bool {
+	return len(b.AcceptEvents) > 0 ||
+		len(b.HealthTasks) > 0 ||
+		len(b.FeedTasks) > 0 ||
+		len(b.GetPostTasks) > 0 ||
+		len(b.LikePostTasks) > 0 ||
+		len(b.CreatePostTasks) > 0 ||
+		len(b.ErrorTasks) > 0 ||
+		len(b.CloseQueue) > 0 ||
+		len(b.RearmRecvQueue) > 0 ||
+		len(b.RearmAcceptQueue) > 0
+}
+
 // =============================================================================
 // 3. PARSER CHÍNH (ZERO SIDE-EFFECTS SINGLE-PASS)
 // =============================================================================
 
 type Parser struct {
-	BufRing *iouring.ProvidedBufRing
+	bufRings [NumRings]*iouring.ProvidedBufRing
 }
 
-func NewParser(bufRing *iouring.ProvidedBufRing) *Parser {
+func NewParser(bufRings [NumRings]*iouring.ProvidedBufRing) *Parser {
 	return &Parser{
-		BufRing: bufRing,
+		bufRings: bufRings,
 	}
 }
 
 // Parse gặt mảng ReadInfo từ Kernel và phân loại vào EventBatch sạch (Zero Side-Effects)
-func (p *Parser) Parse(tasks []iouring.ReadInfo, batch *EventBatch) {
-	batch.Reset()
+func (p *Parser) Parse(ringIdx uint8, tasks []iouring.ReadInfo, batch *EventBatch) {
+	bufRing := p.bufRings[ringIdx]
 
 	for i := range tasks {
 		task := &tasks[i]
@@ -142,7 +167,7 @@ func (p *Parser) Parse(tasks []iouring.ReadInfo, batch *EventBatch) {
 		case EventSend:
 			if task.Res < 0 {
 				// Client đã ngắt kết nối giữa chừng -> ghi nhận đóng fixed socket
-				batch.CloseQueue = append(batch.CloseQueue, fd)
+				batch.CloseQueue = append(batch.CloseQueue, ClientRef{RingIdx: ringIdx, FD: fd})
 			}
 
 		// -------------------------------------------------------------
@@ -151,13 +176,14 @@ func (p *Parser) Parse(tasks []iouring.ReadInfo, batch *EventBatch) {
 		case EventAccept:
 			if task.Res >= 0 {
 				batch.AcceptEvents = append(batch.AcceptEvents, AcceptEvent{
+					RingIdx:  ringIdx,
 					ListenFD: fd,
 					ClientFD: task.Res,
 				})
 			}
 			// Nếu cờ IORING_CQE_F_MORE bị tắt, ghi nhận cần re-arm lại multishot accept
 			if task.Flags&iouring.IORING_CQE_F_MORE == 0 {
-				batch.RearmAcceptQueue = append(batch.RearmAcceptQueue, fd)
+				batch.RearmAcceptQueue = append(batch.RearmAcceptQueue, ClientRef{RingIdx: ringIdx, FD: fd})
 			}
 
 		// -------------------------------------------------------------
@@ -167,25 +193,25 @@ func (p *Parser) Parse(tasks []iouring.ReadInfo, batch *EventBatch) {
 			// 1. Kiểm tra ngắt kết nối hoặc lỗi mạng
 			if task.Res <= 0 || task.Flags&iouring.IORING_CQE_F_BUFFER == 0 {
 				if task.Flags&iouring.IORING_CQE_F_BUFFER != 0 {
-					p.BufRing.Release(uint16(task.Flags >> 16))
+					bufRing.Release(uint16(task.Flags >> 16))
 				}
-				batch.CloseQueue = append(batch.CloseQueue, fd)
+				batch.CloseQueue = append(batch.CloseQueue, ClientRef{RingIdx: ringIdx, FD: fd})
 				continue
 			}
 
 			// 2. Lấy dữ liệu raw bytes từ Provided Buffer Ring
 			bid := uint16(task.Flags >> 16)
-			raw := p.BufRing.GetSlice(bid, int(task.Res))
+			raw := bufRing.GetSlice(bid, int(task.Res))
 
 			// 3. Quét Single-Pass trích xuất thông tin vào EventBatch (Zero Allocation)
-			p.parseSingle(fd, raw, batch)
+			p.parseSingle(ringIdx, fd, raw, batch)
 
 			// 4. Trả buffer về lại ring
-			p.BufRing.Release(bid)
+			bufRing.Release(bid)
 
 			// 5. Nếu kernel báo hết multishot (không còn cờ F_MORE), ghi nhận cần re-arm
 			if task.Flags&iouring.IORING_CQE_F_MORE == 0 {
-				batch.RearmRecvQueue = append(batch.RearmRecvQueue, fd)
+				batch.RearmRecvQueue = append(batch.RearmRecvQueue, ClientRef{RingIdx: ringIdx, FD: fd})
 			}
 
 		// -------------------------------------------------------------
@@ -198,37 +224,40 @@ func (p *Parser) Parse(tasks []iouring.ReadInfo, batch *EventBatch) {
 }
 
 // parseSingle phân tích 1 request và đẩy vào mảng compact struct tương ứng
-func (p *Parser) parseSingle(fd int32, raw []byte, batch *EventBatch) {
+func (p *Parser) parseSingle(ringIdx uint8, fd int32, raw []byte, batch *EventBatch) {
 	if len(raw) < 14 {
 		batch.ErrorTasks = append(batch.ErrorTasks, ErrorTask{
-			FD:     fd,
-			Status: 400,
-			Msg:    "malformed request",
+			RingIdx: ringIdx,
+			FD:      fd,
+			Status:  400,
+			Msg:     "malformed request",
 		})
 		return
 	}
 
 	// 1. Phân loại theo HTTP Method
 	if bytes.HasPrefix(raw, []byte("GET ")) {
-		p.parseGET(fd, raw[4:], batch)
+		p.parseGET(ringIdx, fd, raw[4:], batch)
 	} else if bytes.HasPrefix(raw, []byte("POST ")) {
-		p.parsePOST(fd, raw[5:], raw, batch)
+		p.parsePOST(ringIdx, fd, raw[5:], raw, batch)
 	} else {
 		batch.ErrorTasks = append(batch.ErrorTasks, ErrorTask{
-			FD:     fd,
-			Status: 404,
-			Msg:    "not found",
+			RingIdx: ringIdx,
+			FD:      fd,
+			Status:  404,
+			Msg:     "not found",
 		})
 	}
 }
 
 // parseGET xử lý: /health, /feed, /posts/:id
-func (p *Parser) parseGET(fd int32, pathPart []byte, batch *EventBatch) {
+func (p *Parser) parseGET(ringIdx uint8, fd int32, pathPart []byte, batch *EventBatch) {
 	if len(pathPart) < 2 || pathPart[0] != '/' {
 		batch.ErrorTasks = append(batch.ErrorTasks, ErrorTask{
-			FD:     fd,
-			Status: 404,
-			Msg:    "not found",
+			RingIdx: ringIdx,
+			FD:      fd,
+			Status:  404,
+			Msg:     "not found",
 		})
 		return
 	}
@@ -236,12 +265,12 @@ func (p *Parser) parseGET(fd int32, pathPart []byte, batch *EventBatch) {
 	switch pathPart[1] {
 	case 'h': // /health
 		if bytes.HasPrefix(pathPart, []byte("/health")) {
-			batch.HealthTasks = append(batch.HealthTasks, fd)
+			batch.HealthTasks = append(batch.HealthTasks, ClientRef{RingIdx: ringIdx, FD: fd})
 			return
 		}
 	case 'f': // /feed
 		if bytes.HasPrefix(pathPart, []byte("/feed")) {
-			batch.FeedTasks = append(batch.FeedTasks, fd)
+			batch.FeedTasks = append(batch.FeedTasks, ClientRef{RingIdx: ringIdx, FD: fd})
 			return
 		}
 	case 'p': // /posts/:id
@@ -254,34 +283,38 @@ func (p *Parser) parseGET(fd int32, pathPart []byte, batch *EventBatch) {
 			postID, ok := parsePositiveInt(idBytes)
 			if !ok {
 				batch.ErrorTasks = append(batch.ErrorTasks, ErrorTask{
-					FD:     fd,
-					Status: 400,
-					Msg:    "invalid post id",
+					RingIdx: ringIdx,
+					FD:      fd,
+					Status:  400,
+					Msg:     "invalid post id",
 				})
 				return
 			}
 			batch.GetPostTasks = append(batch.GetPostTasks, GetPostTask{
-				FD:     fd,
-				PostID: int64(postID),
+				RingIdx: ringIdx,
+				FD:      fd,
+				PostID:  int64(postID),
 			})
 			return
 		}
 	}
 
 	batch.ErrorTasks = append(batch.ErrorTasks, ErrorTask{
-		FD:     fd,
-		Status: 404,
-		Msg:    "not found",
+		RingIdx: ringIdx,
+		FD:      fd,
+		Status:  404,
+		Msg:     "not found",
 	})
 }
 
 // parsePOST xử lý: POST /posts, POST /posts/:id/like
-func (p *Parser) parsePOST(fd int32, pathPart []byte, raw []byte, batch *EventBatch) {
+func (p *Parser) parsePOST(ringIdx uint8, fd int32, pathPart []byte, raw []byte, batch *EventBatch) {
 	if !bytes.HasPrefix(pathPart, []byte("/posts")) {
 		batch.ErrorTasks = append(batch.ErrorTasks, ErrorTask{
-			FD:     fd,
-			Status: 404,
-			Msg:    "not found",
+			RingIdx: ringIdx,
+			FD:      fd,
+			Status:  404,
+			Msg:     "not found",
 		})
 		return
 	}
@@ -292,9 +325,10 @@ func (p *Parser) parsePOST(fd int32, pathPart []byte, raw []byte, batch *EventBa
 	// Case 1: POST /posts (Tạo bài viết mới)
 	if len(afterPosts) == 0 || afterPosts[0] == ' ' || afterPosts[0] == '?' {
 		batch.CreatePostTasks = append(batch.CreatePostTasks, CreatePostTask{
-			FD:    fd,
-			Token: token,
-			Body:  raw,
+			RingIdx: ringIdx,
+			FD:      fd,
+			Token:   token,
+			Body:    raw,
 		})
 		return
 	}
@@ -310,18 +344,20 @@ func (p *Parser) parsePOST(fd int32, pathPart []byte, raw []byte, batch *EventBa
 				id = int64(postID)
 			}
 			batch.LikePostTasks = append(batch.LikePostTasks, LikePostTask{
-				FD:     fd,
-				PostID: id,
-				Token:  token,
+				RingIdx: ringIdx,
+				FD:      fd,
+				PostID:  id,
+				Token:   token,
 			})
 			return
 		}
 	}
 
 	batch.ErrorTasks = append(batch.ErrorTasks, ErrorTask{
-		FD:     fd,
-		Status: 404,
-		Msg:    "not found",
+		RingIdx: ringIdx,
+		FD:      fd,
+		Status:  404,
+		Msg:     "not found",
 	})
 }
 
@@ -503,18 +539,20 @@ func (v *JWTVerifier) Verify(token []byte, now int64) (userID int, username []by
 
 	// 3. Trích xuất exp
 	expKey := []byte(`"exp":`)
-	if idx := bytes.Index(payload, expKey); idx >= 0 {
-		val := bytes.TrimSpace(payload[idx+len(expKey):])
-		expNum := 0
-		for _, c := range val {
-			if c < '0' || c > '9' {
-				break
-			}
-			expNum = expNum*10 + int(c-'0')
+	idx := bytes.Index(payload, expKey)
+	if idx < 0 {
+		return 0, nil, "invalid or expired token", 401
+	}
+	val := bytes.TrimSpace(payload[idx+len(expKey):])
+	var expNum int64
+	for _, c := range val {
+		if c < '0' || c > '9' {
+			break
 		}
-		if int64(expNum) < now {
-			return 0, nil, "invalid or expired token", 401
-		}
+		expNum = expNum*10 + int64(c-'0')
+	}
+	if expNum == 0 || expNum < now {
+		return 0, nil, "invalid or expired token", 401
 	}
 
 	// 4. Trích xuất sub (User ID)

@@ -28,6 +28,7 @@ const (
 	// Opcodes đăng ký (io_uring_register)
 	IORING_REGISTER_FILES       = 2
 	IORING_REGISTER_FILES2      = 13
+	IORING_REGISTER_EVENTFD     = 4
 	IORING_REGISTER_RING_FDS    = 20
 	IORING_REGISTER_PBUF_RING   = 22
 	IORING_UNREGISTER_PBUF_RING = 23
@@ -275,13 +276,41 @@ func (io *IOUring) SendTasks(requests []SendInfo) (int, error) {
 	return totalSubmitted, nil
 }
 
+// Submit nộp toàn bộ SQE đang chờ nếu có (toSubmit > 0)
+func (io *IOUring) Submit() (int, error) {
+	if io.sq.toSubmit == 0 {
+		return 0, nil
+	}
+	enterFD := uintptr(io.fd)
+	flags := uint32(0)
+	if io.ringIdx >= 0 {
+		enterFD = uintptr(io.ringIdx)
+		flags |= IORING_ENTER_REGISTERED_RING
+	}
+
+	atomic.StoreUint32(io.sq.tail, io.sq.localTail)
+	n, _, errno := syscall.RawSyscall6(
+		SYS_IO_URING_ENTER,
+		enterFD,
+		uintptr(io.sq.toSubmit),
+		0,
+		uintptr(flags),
+		0, 0,
+	)
+	if errno != 0 && errno != syscall.EINTR && errno != syscall.EAGAIN {
+		return 0, errno
+	}
+	io.sq.toSubmit -= uint32(n)
+	return int(n), nil
+}
+
 // RecieveOutputTasks: Nhận vào mảng out []ReadInfo, gom tất cả kết quả hoàn thành từ CQ đổ vào mảng này
 // waitMin: số lượng kết quả tối thiểu muốn chờ (0 = không chờ; >=1: chờ có kết quả)
 func (io *IOUring) RecieveOutputTasks(out []ReadInfo, waitMin uint32) (int, error) {
 	head := *io.cq.head
 	tail := atomic.LoadUint32(io.cq.tail)
 
-	if head == tail && waitMin > 0 {
+	if head == tail {
 		enterFD := uintptr(io.fd)
 		flags := uint32(IORING_ENTER_GETEVENTS)
 		if io.ringIdx >= 0 {
@@ -289,16 +318,36 @@ func (io *IOUring) RecieveOutputTasks(out []ReadInfo, waitMin uint32) (int, erro
 			flags |= IORING_ENTER_REGISTERED_RING
 		}
 
-		_, _, errno := syscall.Syscall6(
-			SYS_IO_URING_ENTER,
-			enterFD,
-			0,
-			uintptr(waitMin),
-			uintptr(flags),
-			0, 0,
-		)
-		if errno != 0 && errno != syscall.EINTR {
-			return 0, errno
+		if io.sq.toSubmit > 0 {
+			atomic.StoreUint32(io.sq.tail, io.sq.localTail)
+		}
+
+		if waitMin == 0 {
+			n, _, errno := syscall.RawSyscall6(
+				SYS_IO_URING_ENTER,
+				enterFD,
+				uintptr(io.sq.toSubmit),
+				0,
+				uintptr(flags),
+				0, 0,
+			)
+			if errno != 0 && errno != syscall.EINTR && errno != syscall.EAGAIN {
+				return 0, errno
+			}
+			io.sq.toSubmit -= uint32(n)
+		} else {
+			n, _, errno := syscall.Syscall6(
+				SYS_IO_URING_ENTER,
+				enterFD,
+				uintptr(io.sq.toSubmit),
+				uintptr(waitMin),
+				uintptr(flags),
+				0, 0,
+			)
+			if errno != 0 && errno != syscall.EINTR && errno != syscall.EAGAIN {
+				return 0, errno
+			}
+			io.sq.toSubmit -= uint32(n)
 		}
 		tail = atomic.LoadUint32(io.cq.tail)
 	}
@@ -641,6 +690,21 @@ func RegisterFileTable(ringFD int, n int) error {
 		0, 0,
 	); errno != 0 {
 		return fmt.Errorf("đăng ký fixed files thất bại, errno: %d", errno)
+	}
+	return nil
+}
+
+func RegisterEventFD(ringFD int, eventFD int) error {
+	efd := uint32(eventFD)
+	_, _, errno := syscall.Syscall6(
+		SYS_IO_URING_REGISTER,
+		uintptr(ringFD),
+		IORING_REGISTER_EVENTFD,
+		uintptr(unsafe.Pointer(&efd)),
+		1, 0, 0,
+	)
+	if errno != 0 {
+		return errno
 	}
 	return nil
 }

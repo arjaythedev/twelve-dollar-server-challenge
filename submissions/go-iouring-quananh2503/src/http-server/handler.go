@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"os"
 	"time"
 
 	iouring "go-iouring-quananh2503/src/io-uring"
@@ -25,10 +26,10 @@ func NewResponseWriter(sendPool *BufferPool) *ResponseWriter {
 	}
 }
 
-func (rw *ResponseWriter) appendSend(fixedFD int32, data []byte, outTasks *[]iouring.SendInfo) {
+func (rw *ResponseWriter) appendSend(ringIdx uint8, fixedFD int32, data []byte, outTasks *[NumRings][]iouring.SendInfo) {
 	bufID, err := rw.SendPool.Acquire()
 	if err != nil {
-		*outTasks = append(*outTasks, iouring.SendInfo{
+		(*outTasks)[ringIdx] = append((*outTasks)[ringIdx], iouring.SendInfo{
 			Opcode:     iouring.OpClose,
 			Flags:      iouring.IOSQE_CQE_SKIP_SUCCESS,
 			SpliceFDIn: fixedFD + 1,
@@ -39,7 +40,7 @@ func (rw *ResponseWriter) appendSend(fixedFD int32, data []byte, outTasks *[]iou
 	buf := rw.SendPool.Get(bufID)
 	n := copy(buf, data)
 
-	*outTasks = append(*outTasks, iouring.SendInfo{
+	(*outTasks)[ringIdx] = append((*outTasks)[ringIdx], iouring.SendInfo{
 		Opcode:   iouring.OpSend,
 		Flags:    iouring.IOSQE_FIXED_FILE | iouring.IOSQE_CQE_SKIP_SUCCESS,
 		FD:       fixedFD,
@@ -58,7 +59,7 @@ func (rw *ResponseWriter) buildHTTPResponse(statusText string, body []byte) {
 	rw.writer.WriteBytes(body)
 }
 
-func (rw *ResponseWriter) WriteErrors(tasks []ErrorTask, outTasks *[]iouring.SendInfo) {
+func (rw *ResponseWriter) WriteErrors(tasks []ErrorTask, outTasks *[NumRings][]iouring.SendInfo) {
 	for i := range tasks {
 		task := &tasks[i]
 		statusText := "400 Bad Request"
@@ -79,12 +80,12 @@ func (rw *ResponseWriter) WriteErrors(tasks []ErrorTask, outTasks *[]iouring.Sen
 		rw.bodyW.WriteString(`"}`)
 
 		rw.buildHTTPResponse(statusText, rw.bodyW.Bytes())
-		rw.appendSend(task.FD, rw.writer.Bytes(), outTasks)
+		rw.appendSend(task.RingIdx, task.FD, rw.writer.Bytes(), outTasks)
 	}
 }
 
-func (rw *ResponseWriter) appendSendShared(fds []int32, data []byte, outTasks *[]iouring.SendInfo) {
-	if len(fds) == 0 {
+func (rw *ResponseWriter) appendSendShared(tasks []ClientRef, data []byte, outTasks *[NumRings][]iouring.SendInfo) {
+	if len(tasks) == 0 {
 		return
 	}
 	bufID, err := rw.SendPool.Acquire()
@@ -95,18 +96,18 @@ func (rw *ResponseWriter) appendSendShared(fds []int32, data []byte, outTasks *[
 	n := copy(buf, data)
 	sharedBuf := buf[:n]
 
-	for _, fd := range fds {
-		*outTasks = append(*outTasks, iouring.SendInfo{
+	for _, task := range tasks {
+		(*outTasks)[task.RingIdx] = append((*outTasks)[task.RingIdx], iouring.SendInfo{
 			Opcode:   iouring.OpSend,
 			Flags:    iouring.IOSQE_FIXED_FILE | iouring.IOSQE_CQE_SKIP_SUCCESS,
-			FD:       fd,
+			FD:       task.FD,
 			Buf:      sharedBuf,
-			UserData: EncodeUserData(EventSend, bufID, fd),
+			UserData: EncodeUserData(EventSend, bufID, task.FD),
 		})
 	}
 }
 
-func (rw *ResponseWriter) WriteHealth(tasks []int32, ok bool, uptime int, outTasks *[]iouring.SendInfo) {
+func (rw *ResponseWriter) WriteHealth(tasks []ClientRef, ok bool, uptime int, outTasks *[NumRings][]iouring.SendInfo) {
 	rw.bodyW.Reset()
 	if !ok {
 		rw.bodyW.WriteString(`{"status":"degraded","db":"unreachable"}`)
@@ -121,7 +122,7 @@ func (rw *ResponseWriter) WriteHealth(tasks []int32, ok bool, uptime int, outTas
 	rw.appendSendShared(tasks, rw.writer.Bytes(), outTasks)
 }
 
-func (rw *ResponseWriter) WriteFeed(tasks []int32, feedBytes []byte, err error, outTasks *[]iouring.SendInfo) {
+func (rw *ResponseWriter) WriteFeed(tasks []ClientRef, feedBytes []byte, err error, outTasks *[NumRings][]iouring.SendInfo) {
 	if err == nil && len(feedBytes) > 0 {
 		rw.buildHTTPResponse("200 OK", feedBytes)
 	} else {
@@ -133,7 +134,7 @@ func (rw *ResponseWriter) WriteFeed(tasks []int32, feedBytes []byte, err error, 
 	rw.appendSendShared(tasks, rw.writer.Bytes(), outTasks)
 }
 
-func (rw *ResponseWriter) WriteGetPosts(tasks []GetPostTask, items []sqlite.PostBatchItem, outBuf []byte, err error, outTasks *[]iouring.SendInfo) {
+func (rw *ResponseWriter) WriteGetPosts(tasks []GetPostTask, items []sqlite.PostBatchItem, outBuf []byte, err error, outTasks *[NumRings][]iouring.SendInfo) {
 	for i := range tasks {
 		task := &tasks[i]
 		if err != nil {
@@ -155,11 +156,11 @@ func (rw *ResponseWriter) WriteGetPosts(tasks []GetPostTask, items []sqlite.Post
 				rw.buildHTTPResponse("500 Internal Server Error", rw.bodyW.Bytes())
 			}
 		}
-		rw.appendSend(task.FD, rw.writer.Bytes(), outTasks)
+		rw.appendSend(task.RingIdx, task.FD, rw.writer.Bytes(), outTasks)
 	}
 }
 
-func (rw *ResponseWriter) WriteCreatePosts(tasks []CreatePostTask, statuses []int32, nowFormatted []byte, err error, outTasks *[]iouring.SendInfo) {
+func (rw *ResponseWriter) WriteCreatePosts(tasks []CreatePostTask, statuses []int32, nowFormatted []byte, err error, outTasks *[NumRings][]iouring.SendInfo) {
 	for i := range tasks {
 		task := &tasks[i]
 		if err != nil || statuses[i] != 201 {
@@ -179,11 +180,11 @@ func (rw *ResponseWriter) WriteCreatePosts(tasks []CreatePostTask, statuses []in
 			rw.bodyW.WriteString(`","like_count":0}}`)
 			rw.buildHTTPResponse("201 Created", rw.bodyW.Bytes())
 		}
-		rw.appendSend(task.FD, rw.writer.Bytes(), outTasks)
+		rw.appendSend(task.RingIdx, task.FD, rw.writer.Bytes(), outTasks)
 	}
 }
 
-func (rw *ResponseWriter) WriteLikePosts(tasks []LikePostTask, results []int32, err error, outTasks *[]iouring.SendInfo) {
+func (rw *ResponseWriter) WriteLikePosts(tasks []LikePostTask, results []int32, err error, outTasks *[NumRings][]iouring.SendInfo) {
 	for i := range tasks {
 		task := &tasks[i]
 		if err != nil {
@@ -214,7 +215,7 @@ func (rw *ResponseWriter) WriteLikePosts(tasks []LikePostTask, results []int32, 
 				rw.buildHTTPResponse("500 Internal Server Error", rw.bodyW.Bytes())
 			}
 		}
-		rw.appendSend(task.FD, rw.writer.Bytes(), outTasks)
+		rw.appendSend(task.RingIdx, task.FD, rw.writer.Bytes(), outTasks)
 	}
 }
 
@@ -228,14 +229,14 @@ func NewConnectionSystem() *ConnectionSystem {
 	return &ConnectionSystem{}
 }
 
-func (s *ConnectionSystem) ProcessLifecycle(batch *EventBatch, outTasks *[]iouring.SendInfo) {
+func (s *ConnectionSystem) ProcessLifecycle(batch *EventBatch, outTasks *[NumRings][]iouring.SendInfo) {
 	// 1. Accept events: Treo 1 lệnh Multishot Recv duy nhất trên client fixed FD mới
 	for i := range batch.AcceptEvents {
 		ev := &batch.AcceptEvents[i]
 		if ev.ClientFD < 0 {
 			continue
 		}
-		*outTasks = append(*outTasks, iouring.SendInfo{
+		(*outTasks)[ev.RingIdx] = append((*outTasks)[ev.RingIdx], iouring.SendInfo{
 			Opcode:   iouring.OpRecv,
 			Flags:    iouring.IOSQE_FIXED_FILE | iouring.IOSQE_BUFFER_SELECT,
 			IOPrio:   iouring.IORING_RECV_MULTISHOT,
@@ -246,35 +247,35 @@ func (s *ConnectionSystem) ProcessLifecycle(batch *EventBatch, outTasks *[]iouri
 	}
 
 	// 2. Rearm Accept multishot
-	for _, fd := range batch.RearmAcceptQueue {
-		*outTasks = append(*outTasks, iouring.SendInfo{
+	for _, task := range batch.RearmAcceptQueue {
+		(*outTasks)[task.RingIdx] = append((*outTasks)[task.RingIdx], iouring.SendInfo{
 			Opcode:     iouring.OpAccept,
-			FD:         fd,
+			FD:         task.FD,
 			IOPrio:     iouring.IORING_ACCEPT_MULTISHOT,
 			SpliceFDIn: iouring.IORING_FILE_INDEX_ALLOC,
-			UserData:   EncodeUserData(EventAccept, 0, fd),
+			UserData:   EncodeUserData(EventAccept, 0, task.FD),
 		})
 	}
 
 	// 3. Rearm Recv multishot
-	for _, fd := range batch.RearmRecvQueue {
-		*outTasks = append(*outTasks, iouring.SendInfo{
+	for _, task := range batch.RearmRecvQueue {
+		(*outTasks)[task.RingIdx] = append((*outTasks)[task.RingIdx], iouring.SendInfo{
 			Opcode:   iouring.OpRecv,
 			Flags:    iouring.IOSQE_FIXED_FILE | iouring.IOSQE_BUFFER_SELECT,
 			IOPrio:   iouring.IORING_RECV_MULTISHOT,
-			FD:       fd,
+			FD:       task.FD,
 			BufIndex: 0,
-			UserData: EncodeUserData(EventRecv, 0, fd),
+			UserData: EncodeUserData(EventRecv, 0, task.FD),
 		})
 	}
 
 	// 4. Close sockets
-	for _, fd := range batch.CloseQueue {
-		*outTasks = append(*outTasks, iouring.SendInfo{
+	for _, task := range batch.CloseQueue {
+		(*outTasks)[task.RingIdx] = append((*outTasks)[task.RingIdx], iouring.SendInfo{
 			Opcode:     iouring.OpClose,
 			Flags:      iouring.IOSQE_CQE_SKIP_SUCCESS,
-			SpliceFDIn: fd + 1,
-			UserData:   EncodeUserData(EventClose, 0, fd),
+			SpliceFDIn: task.FD + 1,
+			UserData:   EncodeUserData(EventClose, 0, task.FD),
 		})
 	}
 }
@@ -295,7 +296,7 @@ func NewHealthSystem(db *DB, respWriter *ResponseWriter) *HealthSystem {
 	}
 }
 
-func (s *HealthSystem) Process(tasks []int32, outTasks *[]iouring.SendInfo) {
+func (s *HealthSystem) Process(tasks []ClientRef, outTasks *[NumRings][]iouring.SendInfo) {
 	if len(tasks) == 0 {
 		return
 	}
@@ -323,16 +324,32 @@ func NewFeedSystem(db *DB, respWriter *ResponseWriter) *FeedSystem {
 	}
 }
 
-func (s *FeedSystem) Process(tasks []int32, outTasks *[]iouring.SendInfo) {
+func (s *FeedSystem) Process(tasks []ClientRef, outTasks *[NumRings][]iouring.SendInfo) {
 	if len(tasks) == 0 {
 		return
 	}
-	n, err := sqlite.GetFeedInto(s.feedBuf)
-	var feedBytes []byte
-	if err == nil && n > 0 {
-		feedBytes = s.feedBuf[:n]
+	shareFeed := os.Getenv("SHARE_FEED") == "1"
+	if shareFeed {
+		n, err := sqlite.GetFeedInto(s.feedBuf)
+		var feedBytes []byte
+		if err == nil && n > 0 {
+			feedBytes = s.feedBuf[:n]
+		}
+		s.respWriter.WriteFeed(tasks, feedBytes, err, outTasks)
+		return
 	}
-	s.respWriter.WriteFeed(tasks, feedBytes, err, outTasks)
+
+	for _, task := range tasks {
+		n, err := sqlite.GetFeedInto(s.feedBuf)
+		if err == nil && n > 0 {
+			s.respWriter.buildHTTPResponse("200 OK", s.feedBuf[:n])
+		} else {
+			s.respWriter.bodyW.Reset()
+			s.respWriter.bodyW.WriteString(`{"error":"internal server error"}`)
+			s.respWriter.buildHTTPResponse("500 Internal Server Error", s.respWriter.bodyW.Bytes())
+		}
+		s.respWriter.appendSend(task.RingIdx, task.FD, s.respWriter.writer.Bytes(), outTasks)
+	}
 }
 
 // =============================================================================
@@ -357,7 +374,7 @@ func NewGetPostSystem(db *DB, respWriter *ResponseWriter) *GetPostSystem {
 	}
 }
 
-func (s *GetPostSystem) Process(batch *EventBatch, outTasks *[]iouring.SendInfo) {
+func (s *GetPostSystem) Process(batch *EventBatch, outTasks *[NumRings][]iouring.SendInfo) {
 	tasks := batch.GetPostTasks
 	n := len(tasks)
 	if n == 0 {
@@ -370,9 +387,10 @@ func (s *GetPostSystem) Process(batch *EventBatch, outTasks *[]iouring.SendInfo)
 		task := &tasks[i]
 		if task.PostID <= 0 {
 			batch.ErrorTasks = append(batch.ErrorTasks, ErrorTask{
-				FD:     task.FD,
-				Status: 400,
-				Msg:    "invalid post id",
+				RingIdx: task.RingIdx,
+				FD:      task.FD,
+				Status:  400,
+				Msg:     "invalid post id",
 			})
 			continue
 		}
@@ -434,7 +452,7 @@ func NewCreatePostSystem(db *DB, respWriter *ResponseWriter, jwtSecret []byte) *
 	}
 }
 
-func (s *CreatePostSystem) Process(batch *EventBatch, outTasks *[]iouring.SendInfo) {
+func (s *CreatePostSystem) Process(batch *EventBatch, outTasks *[NumRings][]iouring.SendInfo) {
 	tasks := batch.CreatePostTasks
 	if len(tasks) == 0 {
 		return
@@ -452,9 +470,10 @@ func (s *CreatePostSystem) Process(batch *EventBatch, outTasks *[]iouring.SendIn
 		// 1. Kiểm tra Auth TRƯỚC theo đúng SPEC
 		if len(task.Token) == 0 {
 			batch.ErrorTasks = append(batch.ErrorTasks, ErrorTask{
-				FD:     task.FD,
-				Status: 401,
-				Msg:    "missing bearer token",
+				RingIdx: task.RingIdx,
+				FD:      task.FD,
+				Status:  401,
+				Msg:     "missing bearer token",
 			})
 			continue
 		}
@@ -462,9 +481,10 @@ func (s *CreatePostSystem) Process(batch *EventBatch, outTasks *[]iouring.SendIn
 		userID, username, authErr, status := s.verifier.Verify(task.Token, now)
 		if authErr != "" {
 			batch.ErrorTasks = append(batch.ErrorTasks, ErrorTask{
-				FD:     task.FD,
-				Status: status,
-				Msg:    authErr,
+				RingIdx: task.RingIdx,
+				FD:      task.FD,
+				Status:  status,
+				Msg:     authErr,
 			})
 			continue
 		}
@@ -473,9 +493,10 @@ func (s *CreatePostSystem) Process(batch *EventBatch, outTasks *[]iouring.SendIn
 		body, bodyErr := extractJSONBodyField(task.Body)
 		if bodyErr != "" {
 			batch.ErrorTasks = append(batch.ErrorTasks, ErrorTask{
-				FD:     task.FD,
-				Status: 400,
-				Msg:    bodyErr,
+				RingIdx: task.RingIdx,
+				FD:      task.FD,
+				Status:  400,
+				Msg:     bodyErr,
 			})
 			continue
 		}
@@ -562,7 +583,7 @@ func NewLikePostSystem(db *DB, respWriter *ResponseWriter, jwtSecret []byte) *Li
 	}
 }
 
-func (s *LikePostSystem) Process(batch *EventBatch, outTasks *[]iouring.SendInfo) {
+func (s *LikePostSystem) Process(batch *EventBatch, outTasks *[NumRings][]iouring.SendInfo) {
 	tasks := batch.LikePostTasks
 	if len(tasks) == 0 {
 		return
@@ -578,9 +599,10 @@ func (s *LikePostSystem) Process(batch *EventBatch, outTasks *[]iouring.SendInfo
 		// 1. Kiểm tra Auth TRƯỚC theo đúng SPEC
 		if len(task.Token) == 0 {
 			batch.ErrorTasks = append(batch.ErrorTasks, ErrorTask{
-				FD:     task.FD,
-				Status: 401,
-				Msg:    "missing bearer token",
+				RingIdx: task.RingIdx,
+				FD:      task.FD,
+				Status:  401,
+				Msg:     "missing bearer token",
 			})
 			continue
 		}
@@ -588,9 +610,10 @@ func (s *LikePostSystem) Process(batch *EventBatch, outTasks *[]iouring.SendInfo
 		userID, _, authErr, status := s.verifier.Verify(task.Token, now)
 		if authErr != "" {
 			batch.ErrorTasks = append(batch.ErrorTasks, ErrorTask{
-				FD:     task.FD,
-				Status: status,
-				Msg:    authErr,
+				RingIdx: task.RingIdx,
+				FD:      task.FD,
+				Status:  status,
+				Msg:     authErr,
 			})
 			continue
 		}
@@ -598,9 +621,10 @@ func (s *LikePostSystem) Process(batch *EventBatch, outTasks *[]iouring.SendInfo
 		// 2. Kiểm tra PostID SAU khi Auth hợp lệ
 		if task.PostID <= 0 {
 			batch.ErrorTasks = append(batch.ErrorTasks, ErrorTask{
-				FD:     task.FD,
-				Status: 400,
-				Msg:    "invalid post id",
+				RingIdx: task.RingIdx,
+				FD:      task.FD,
+				Status:  400,
+				Msg:     "invalid post id",
 			})
 			continue
 		}
@@ -663,7 +687,7 @@ func NewSystemManager(db *DB, sendPool *BufferPool, jwtSecret []byte) *SystemMan
 	}
 }
 
-func (m *SystemManager) Dispatch(batch *EventBatch, outTasks *[]iouring.SendInfo) {
+func (m *SystemManager) Dispatch(batch *EventBatch, outTasks *[NumRings][]iouring.SendInfo) {
 	// 1. Connection lifecycle (Accept, Rearm, Close)
 	m.ConnSys.ProcessLifecycle(batch, outTasks)
 

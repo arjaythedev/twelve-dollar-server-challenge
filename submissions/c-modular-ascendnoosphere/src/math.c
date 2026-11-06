@@ -8,8 +8,31 @@
 #define MATH_FORCE 0
 #endif
 
-static size_t special_scalar(const unsigned char *p, size_t n) {
-    for (size_t i = 0; i < n; ++i)
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+static inline uint64_t special_word(uint64_t x) {
+    const uint64_t ones=UINT64_C(0x0101010101010101), high=UINT64_C(0x8080808080808080);
+    uint64_t quote=x^UINT64_C(0x2222222222222222);
+    uint64_t slash=x^UINT64_C(0x5c5c5c5c5c5c5c5c);
+    /* Borrow can add later matches, but cannot precede the first matching byte. */
+    return ((x-UINT64_C(0x2020202020202020))&~x&high) |
+           ((quote-ones)&~quote&high) | ((slash-ones)&~slash&high);
+}
+#endif
+static inline __attribute__((always_inline)) size_t special_scalar(const unsigned char *p, size_t n) {
+    size_t i=0;
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+    for(;n-i>=8;i+=8) {
+        uint64_t x;memcpy(&x,p+i,sizeof(x));
+        uint64_t mask=special_word(x);
+        if(mask)return i+(size_t)__builtin_ctzll(mask)/8;
+    }
+    if(i && n-i) {
+        uint64_t x;memcpy(&x,p+n-8,sizeof(x));
+        uint64_t mask=special_word(x);
+        return mask?n-8+(size_t)__builtin_ctzll(mask)/8:n;
+    }
+#endif
+    for (;i<n;++i)
         if ((p[i] < 32) | (p[i] == '"') | (p[i] == '\\')) return i;
     return n;
 }
@@ -115,17 +138,36 @@ static int base64_scalar(Slice s,unsigned char *out,size_t cap,size_t *length) {
 
 __attribute__((target("avx2")))
 static size_t special_avx2(const unsigned char *p, size_t n) {
+    if(n<32) {
+        if(n<16)return special_scalar(p,n);
+        const __m128i q=_mm_set1_epi8('"'),s=_mm_set1_epi8('\\');
+        const __m128i lo=_mm_set1_epi8(31),z=_mm_setzero_si128();
+        __m128i v=_mm_loadu_si128((const __m128i *)p);
+        __m128i mask=_mm_or_si128(_mm_cmpeq_epi8(v,q),_mm_cmpeq_epi8(v,s));
+        mask=_mm_or_si128(mask,_mm_cmpeq_epi8(_mm_subs_epu8(v,lo),z));
+        unsigned bits=(unsigned)_mm_movemask_epi8(mask);
+        if(bits)return (unsigned)__builtin_ctz(bits);
+        if(n>16) {
+            v=_mm_loadu_si128((const __m128i *)(p+n-16));
+            mask=_mm_or_si128(_mm_cmpeq_epi8(v,q),_mm_cmpeq_epi8(v,s));
+            mask=_mm_or_si128(mask,_mm_cmpeq_epi8(_mm_subs_epu8(v,lo),z));
+            bits=(unsigned)_mm_movemask_epi8(mask);
+            return bits?n-16+(unsigned)__builtin_ctz(bits):n;
+        }
+        return n;
+    }
     size_t i = 0;
     const __m256i quote = _mm256_set1_epi8('"'), slash = _mm256_set1_epi8('\\');
     const __m256i low = _mm256_set1_epi8(31), zero = _mm256_setzero_si256();
-    for (; n-i >= 32; i += 32) {
+    do {
         __m256i v = _mm256_loadu_si256((const __m256i *)(p+i));
         __m256i mask = _mm256_or_si256(_mm256_cmpeq_epi8(v, quote), _mm256_cmpeq_epi8(v, slash));
         mask = _mm256_or_si256(mask, _mm256_cmpeq_epi8(_mm256_subs_epu8(v, low), zero));
         uint32_t bits = (uint32_t)_mm256_movemask_epi8(mask);
         if (bits) return i + (unsigned)__builtin_ctz(bits);
-    }
-    if (i && n-i) {
+        i+=32;
+    } while(n-i>=32);
+    if (n-i) {
         /* Overlap the tail with the last in-bounds vector. */
         __m256i v = _mm256_loadu_si256((const __m256i *)(p+n-32));
         __m256i mask = _mm256_or_si256(_mm256_cmpeq_epi8(v, quote), _mm256_cmpeq_epi8(v, slash));
@@ -133,7 +175,7 @@ static size_t special_avx2(const unsigned char *p, size_t n) {
         uint32_t bits = (uint32_t)_mm256_movemask_epi8(mask);
         return bits ? n-32+(unsigned)__builtin_ctz(bits) : n;
     }
-    return i + special_scalar(p+i, n-i);
+    return n;
 }
 
 __attribute__((target("avx512f,avx512bw")))

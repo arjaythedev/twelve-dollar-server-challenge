@@ -56,7 +56,10 @@ static void http_restore(const HttpMachine *s,const Buffer *input,Request *q) {
     q->close=s->close;q->expect_continue=s->expect;
 }
 
-static Buffer response_workspace, request_workspace;
+enum { RESPONSE_POOL_MAX=32,RESPONSE_POOL_BYTES=256u*1024u };
+static Buffer response_pool[RESPONSE_POOL_MAX], request_workspace;
+static unsigned response_pool_n;
+static uint32_t response_pool_bytes;
 #ifndef ASC_REQUEST_SLICE
 #define ASC_REQUEST_SLICE 16u
 #endif
@@ -65,7 +68,9 @@ static Buffer response_workspace, request_workspace;
 #endif
 _Static_assert(ASC_REQUEST_SLICE>0 && ASC_ACCEPT_SLICE>0,"work slices must be positive");
 __attribute__((destructor)) static void release_workspace(void) {
-    buffer_free(&response_workspace); buffer_free(&request_workspace);
+    while(response_pool_n)buffer_free(&response_pool[--response_pool_n]);
+    response_pool_bytes=0;
+    buffer_free(&request_workspace);
 }
 static void retain_input(Connection *c) {
     /* Pool only empty input buffers; partial requests stay with their connection. */
@@ -83,11 +88,21 @@ static void borrow_input(Connection *c) {
     }
 }
 static void retain_response(Response *response) {
-    if(response->body.cap<=65536 && response->body.cap>=response_workspace.cap) {
-        if(response_workspace.p)free(response_workspace.p);
-        response_workspace=response->body;buffer_clear(&response_workspace);
-        memset(&response->body,0,sizeof(response->body));
-    } else buffer_free(&response->body);
+    Buffer body=response->body;
+    memset(&response->body,0,sizeof(response->body));
+    if(body.p && !body.failed && body.cap && body.cap<=65536 &&
+       response_pool_n<RESPONSE_POOL_MAX && body.cap<=RESPONSE_POOL_BYTES-response_pool_bytes) {
+        buffer_clear(&body);
+        response_pool[response_pool_n++]=body;
+        response_pool_bytes+=body.cap;
+    } else buffer_free(&body);
+}
+static Buffer borrow_response(void) {
+    if(!response_pool_n)return (Buffer){0};
+    Buffer body=response_pool[--response_pool_n];
+    response_pool_bytes-=body.cap;
+    memset(&response_pool[response_pool_n],0,sizeof(Buffer));
+    return body;
 }
 
 static int equal_ci(Slice s, const char *literal) {
@@ -544,7 +559,7 @@ static void service(Ring *r,Connection *c,Context *ctx,TransportState *s) {
             }
             break;
         }
-        response.body=response_workspace;memset(&response_workspace,0,sizeof(response_workspace));
+        response.body=borrow_response();
         if(result<0) {
             response.status=-result;q.close=1;used=visible.n;
             buffer_text(&response.body,"{\"error\":\"malformed HTTP request\"}");

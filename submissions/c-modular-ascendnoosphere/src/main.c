@@ -172,11 +172,21 @@ int main(void) {
 #ifdef ASC_BUILTIN
             fprintf(stderr,"SIGHUP: linked build remains active; restart to load a new executable\n");
 #else
+            /* Separate SQLite copies must not keep file locks across a reload. */
+            bundle->ctx.store->close(bundle->ctx.database);
+            bundle->ctx.database=NULL;
             Bundle *next=load_bundle(directory,db,secret,started);
             if (next) {
                 Bundle *old=bundle; bundle=next; destroy(old);
                 fprintf(stderr,"reload committed; math=%s; connections preserved\n",bundle->ctx.math->h.name);
-            } else fprintf(stderr,"reload rejected; previous generation remains active\n");
+            } else {
+                bundle->ctx.database=bundle->ctx.store->open(db);
+                if(!bundle->ctx.database) {
+                    fprintf(stderr,"reload rejected; cannot reopen previous database\n");
+                    result=1;break;
+                }
+                fprintf(stderr,"reload rejected; previous generation remains active\n");
+            }
 #endif
             continue;
         }

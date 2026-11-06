@@ -91,6 +91,11 @@ cases were:
 The engine answered all of them. It handed only a NUL inside the newest body
 back to the SQL, as designed. The entry passes the test suite, 42/42.
 
+**Control run.** The code here is byte-identical to the version scored at
+226,000. Two follow-ups held less: 190,000 with dex v0.9.31 and a leaner JSON
+writer in `btree.c`, and 195,000 with that writer alone. This run measures
+whether the writer caused the drop or the same code now scores lower.
+
 **Tried, not kept:**
 - `http.batchWindow(1)` (dex v0.9.28 and later), which holds a batch open for
   a millisecond: 14.1–14.5 µs per request under wrk, and no better under

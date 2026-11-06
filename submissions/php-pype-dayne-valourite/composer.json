@@ -1,0 +1,17 @@
+{
+    "name": "pype/twelve-pype",
+    "description": "The $12 server challenge API (arjaythedev/twelve-dollar-server-challenge) built with pype.",
+    "type": "project",
+    "license": "MIT",
+    "require": {
+        "php": ">=8.3",
+        "pype/framework": "^0.12"
+    },
+    "autoload": {
+        "psr-4": {
+            "App\\": "app/"
+        }
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}

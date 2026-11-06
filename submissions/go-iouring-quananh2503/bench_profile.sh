@@ -12,9 +12,9 @@ fi
 
 SUBMISSION_DIR="${REPO_ROOT}/submissions/go-iouring-quananh2503"
 
-# Cấu hình chuẩn mô phỏng 50.000 VUs với ramp-up mượt mà 30s
+# Cấu hình chuẩn 20.000 VUs đẩy tải cực hạn SLEEP_FACTOR=0.04
 VUS="${VUS:-20000}"
-SLEEP_FACTOR="${SLEEP_FACTOR:-0.4}"
+SLEEP_FACTOR="${SLEEP_FACTOR:-0.04}"
 RAMP_UP="${RAMP_UP:-30s}"
 DURATION="${DURATION:-30s}"
 WAIT_BEFORE_PROF="${WAIT_BEFORE_PROF:-32}" # Chờ 32s (qua hết 30s ramp-up để đạt đỉnh ổn định)

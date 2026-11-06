@@ -16,8 +16,10 @@ const (
 	OFF_CQ_RING = 0x8000000
 	OFF_SQES    = 0x10000000
 
-	IORING_ENTER_GETEVENTS = 1 << 0
+	IORING_ENTER_GETEVENTS       = 1 << 0
+	IORING_ENTER_REGISTERED_RING = 1 << 4
 
+	IORING_SETUP_CQSIZE        = 1 << 3
 	IORING_SETUP_SUBMIT_ALL    = 1 << 7
 	IORING_SETUP_COOP_TASKRUN  = 1 << 8
 	IORING_SETUP_SINGLE_ISSUER = 1 << 12
@@ -26,6 +28,7 @@ const (
 	// Opcodes đăng ký (io_uring_register)
 	IORING_REGISTER_FILES       = 2
 	IORING_REGISTER_FILES2      = 13
+	IORING_REGISTER_RING_FDS    = 20
 	IORING_REGISTER_PBUF_RING   = 22
 	IORING_UNREGISTER_PBUF_RING = 23
 	IORING_RSRC_REGISTER_SPARSE = 1
@@ -107,16 +110,24 @@ type CQRing struct {
 	cqes    []rawCQE
 }
 
+type ioUringRsrcUpdate struct {
+	Offset uint32
+	Resv   uint32
+	Data   uint64
+}
+
 type IOUring struct {
-	fd int
-	sq SQRing
-	cq CQRing
+	fd      int
+	ringIdx int
+	sq      SQRing
+	cq      CQRing
 }
 
 // NewRing khởi tạo ring với các cờ tối ưu nhân Linux (SINGLE_ISSUER + DEFER_TASKRUN)
 func NewRing(size int) (*IOUring, error) {
 	var params RingParams
-	params.Flags = IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN | IORING_SETUP_SUBMIT_ALL
+	params.Flags = IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN | IORING_SETUP_SUBMIT_ALL | IORING_SETUP_CQSIZE
+	params.CQEntries = uint32(size * 4) // Mở rộng CQ gấp 4 lần SQ (ví dụ SQ 4096 -> CQ 16384 entries)
 
 	fd, _, errno := syscall.Syscall6(
 		SYS_IO_URING_SETUP,
@@ -127,8 +138,10 @@ func NewRing(size int) (*IOUring, error) {
 	if errno != 0 {
 		return nil, fmt.Errorf("io_uring_setup(%d) failed, errno: %d", size, errno)
 	}
-	ring := IOUring{}
-	ring.fd = int(fd)
+	ring := IOUring{
+		fd:      int(fd),
+		ringIdx: -1,
+	}
 
 	prot := syscall.PROT_READ | syscall.PROT_WRITE
 	flags := syscall.MAP_SHARED | syscall.MAP_POPULATE
@@ -176,6 +189,24 @@ func NewRing(size int) (*IOUring, error) {
 	ring.cq.mask = *(*uint32)(unsafe.Pointer(&cqMem[params.CQOff.RingMask]))
 	ring.cq.cqes = unsafe.Slice((*rawCQE)(unsafe.Pointer(&cqMem[params.CQOff.CQEs])), params.CQEntries)
 
+	// 4. Đăng ký File Descriptor của io_uring vào bảng kernel (IORING_REGISTER_RING_FDS)
+	up := ioUringRsrcUpdate{
+		Offset: 0xFFFFFFFF,
+		Data:   uint64(ring.fd),
+	}
+	n, _, errno := syscall.Syscall6(
+		SYS_IO_URING_REGISTER,
+		uintptr(ring.fd),
+		IORING_REGISTER_RING_FDS,
+		uintptr(unsafe.Pointer(&up)),
+		1, 0, 0,
+	)
+	if errno == 0 && n == 1 {
+		ring.ringIdx = int(up.Offset)
+	} else {
+		ring.ringIdx = -1
+	}
+
 	return &ring, nil
 }
 
@@ -184,6 +215,13 @@ func NewRing(size int) (*IOUring, error) {
 func (io *IOUring) SendTasks(requests []SendInfo) (int, error) {
 	totalSubmitted := 0
 	i := 0
+
+	enterFD := uintptr(io.fd)
+	flags := uint32(IORING_ENTER_GETEVENTS)
+	if io.ringIdx >= 0 {
+		enterFD = uintptr(io.ringIdx)
+		flags |= IORING_ENTER_REGISTERED_RING
+	}
 
 	for i < len(requests) {
 		head := atomic.LoadUint32(io.sq.head)
@@ -217,12 +255,12 @@ func (io *IOUring) SendTasks(requests []SendInfo) (int, error) {
 		if io.sq.toSubmit > 0 {
 			atomic.StoreUint32(io.sq.tail, io.sq.localTail)
 
-			n, _, errno := syscall.Syscall6(
+			n, _, errno := syscall.RawSyscall6(
 				SYS_IO_URING_ENTER,
-				uintptr(io.fd),
+				enterFD,
 				uintptr(io.sq.toSubmit),
 				0,
-				uintptr(IORING_ENTER_GETEVENTS),
+				uintptr(flags),
 				0, 0,
 			)
 			if errno != 0 && errno != syscall.EINTR && errno != syscall.EAGAIN {
@@ -244,12 +282,19 @@ func (io *IOUring) RecieveOutputTasks(out []ReadInfo, waitMin uint32) (int, erro
 	tail := atomic.LoadUint32(io.cq.tail)
 
 	if head == tail && waitMin > 0 {
+		enterFD := uintptr(io.fd)
+		flags := uint32(IORING_ENTER_GETEVENTS)
+		if io.ringIdx >= 0 {
+			enterFD = uintptr(io.ringIdx)
+			flags |= IORING_ENTER_REGISTERED_RING
+		}
+
 		_, _, errno := syscall.Syscall6(
 			SYS_IO_URING_ENTER,
-			uintptr(io.fd),
+			enterFD,
 			0,
 			uintptr(waitMin),
-			uintptr(IORING_ENTER_GETEVENTS),
+			uintptr(flags),
 			0, 0,
 		)
 		if errno != 0 && errno != syscall.EINTR {
@@ -282,6 +327,13 @@ func (io *IOUring) RecieveOutputTasks(out []ReadInfo, waitMin uint32) (int, erro
 // SubmitAndRecieve: Unified Single-Syscall nộp lô requests mới (SQ) VÀ gặt kết quả (CQ)
 // Giảm 50% chi phí gọi Syscall, tự động tận dụng Natural Batching và 0-syscall khi RAM đã có sẵn việc!
 func (io *IOUring) SubmitAndRecieve(requests []SendInfo, out []ReadInfo, waitMin uint32) (int, error) {
+	enterFD := uintptr(io.fd)
+	flags := uint32(IORING_ENTER_GETEVENTS)
+	if io.ringIdx >= 0 {
+		enterFD = uintptr(io.ringIdx)
+		flags |= IORING_ENTER_REGISTERED_RING
+	}
+
 	// 1. Điền toàn bộ requests vào Submission Queue (SQ) trên RAM
 	i := 0
 	for i < len(requests) {
@@ -316,12 +368,12 @@ func (io *IOUring) SubmitAndRecieve(requests []SendInfo, out []ReadInfo, waitMin
 		// Nếu danh sách nộp quá lớn vượt quá kích thước Ring, xả bớt trước (minComplete=0)
 		if i < len(requests) && io.sq.toSubmit > 0 {
 			atomic.StoreUint32(io.sq.tail, io.sq.localTail)
-			n, _, errno := syscall.Syscall6(
+			n, _, errno := syscall.RawSyscall6(
 				SYS_IO_URING_ENTER,
-				uintptr(io.fd),
+				enterFD,
 				uintptr(io.sq.toSubmit),
 				0,
-				uintptr(IORING_ENTER_GETEVENTS),
+				uintptr(flags),
 				0, 0,
 			)
 			if errno != 0 && errno != syscall.EINTR && errno != syscall.EAGAIN {
@@ -340,21 +392,36 @@ func (io *IOUring) SubmitAndRecieve(requests []SendInfo, out []ReadInfo, waitMin
 	cqTail := atomic.LoadUint32(io.cq.tail)
 
 	// 3. Gọi ĐÚNG 1 SYSCALL DUY NHẤT nếu có việc cần Submit HOẶC CQ đang rỗng cần Wait
-	flags := uint32(IORING_ENTER_GETEVENTS)
 	minComplete := uint32(0)
 	if cqHead == cqTail && waitMin > 0 {
 		minComplete = waitMin
 	}
 
 	for io.sq.toSubmit > 0 || (cqHead == cqTail && minComplete > 0) {
-		n, _, errno := syscall.Syscall6(
-			SYS_IO_URING_ENTER,
-			uintptr(io.fd),
-			uintptr(io.sq.toSubmit),
-			uintptr(minComplete),
-			uintptr(flags),
-			0, 0,
-		)
+		var n uintptr
+		var errno syscall.Errno
+
+		if minComplete == 0 {
+			// Non-blocking Submit: dùng RawSyscall6 loại bỏ 100% exitsyscall, futex và scheduler overhead
+			n, _, errno = syscall.RawSyscall6(
+				SYS_IO_URING_ENTER,
+				enterFD,
+				uintptr(io.sq.toSubmit),
+				0,
+				uintptr(flags),
+				0, 0,
+			)
+		} else {
+			// Blocking Wait: dùng Syscall6 chuẩn để runtime quản lý thread khi ngủ
+			n, _, errno = syscall.Syscall6(
+				SYS_IO_URING_ENTER,
+				enterFD,
+				uintptr(io.sq.toSubmit),
+				uintptr(minComplete),
+				uintptr(flags),
+				0, 0,
+			)
+		}
 		if errno == syscall.EINTR {
 			continue
 		}

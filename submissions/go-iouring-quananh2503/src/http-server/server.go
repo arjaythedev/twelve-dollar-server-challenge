@@ -111,11 +111,11 @@ func NewServer(cfg Config) (*Server, error) {
 
 	sendPool := NewBufferPool(16384, 16384) // 16.384 slots x 16KB = 268MB arena
 	batch := NewEventBatch(4096)
-	tasks := make([]iouring.ReadInfo, 4096)
+	tasks := make([]iouring.ReadInfo, 16384)
 	outTasks := make([]iouring.SendInfo, 0, 8192)
 
-	parser := NewParser(bufRing, sendPool, cfg.JWTSecret)
-	sysMgr := NewSystemManager(db, sendPool)
+	parser := NewParser(bufRing)
+	sysMgr := NewSystemManager(db, sendPool, cfg.JWTSecret)
 
 	// Mồi 1 lệnh Multishot Accept duy nhất với IORING_FILE_INDEX_ALLOC
 	initAccept := iouring.SendInfo{
@@ -169,10 +169,10 @@ func (s *Server) Run() error {
 			continue
 		}
 
-		// 2. Single-Pass Parse: phân loại completions vào EventBatch sạch
-		s.parser.Parse(s.tasks[:count], s.batch, &s.outTasks)
+		// 2. Single-Pass Parse: trích xuất nhanh vào EventBatch sạch (Zero Side-Effects)
+		s.parser.Parse(s.tasks[:count], s.batch)
 
-		// 3. Dispatch: 6 Systems xử lý theo chùm
+		// 3. Dispatch: Pipeline xử lý (Two-Pointer In-Place Filtering -> DB CGO Batch -> Centralized Response Writer)
 		s.sysMgr.Dispatch(s.batch, &s.outTasks)
 	}
 }

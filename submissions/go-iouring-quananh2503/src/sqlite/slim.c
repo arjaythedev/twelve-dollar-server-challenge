@@ -234,12 +234,38 @@ static int count_likes(Engine *e, sqlite3_int64 post_id, int *likes_out) {
     return SQLITE_OK;
 }
 
-/* Format 1 post object with precomputed likes count */
-static int emit_post_with_likes(Engine *e, sqlite3_int64 id, int likes, jout *o) {
-    int res = 0;
-    int rc = sqlite3BtreeTableMoveto(e->post, id, 0, &res);
-    if (rc != SQLITE_OK) return rc;
-    if (res != 0) return SQLITE_NOTFOUND;
+/* Context tối ưu cho feed: sequential step cursor e->post & cache tác giả ucache */
+typedef struct {
+    struct {
+        sqlite3_int64 uid;
+        unsigned char name[64];
+        u32 len;
+    } ucache[8];
+    int n_ucache;
+    int replace_idx;
+    sqlite3_int64 prev_post_id;
+} FeedContext;
+
+/* Format 1 post object with precomputed likes count and optional context cache */
+static int emit_post_feed(Engine *e, sqlite3_int64 id, int likes, jout *o, FeedContext *ctx) {
+    int seek_ok = 0;
+    // Tận dụng đặc tính ID mới nhất giảm dần liên tiếp (Sequential step thay vì Point Seek từ Root)
+    if (ctx && ctx->prev_post_id == id + 1 && e->post->eState == CURSOR_VALID) {
+        if (sqlite3BtreePrevious(e->post, 0) == SQLITE_OK &&
+            e->post->eState == CURSOR_VALID &&
+            sqlite3BtreeIntegerKey(e->post) == id) {
+            seek_ok = 1;
+        }
+    }
+    if (!seek_ok) {
+        int res = 0;
+        int rc = sqlite3BtreeTableMoveto(e->post, id, 0, &res);
+        if (rc != SQLITE_OK) return rc;
+        if (res != 0) return SQLITE_NOTFOUND;
+    }
+    if (ctx) {
+        ctx->prev_post_id = id;
+    }
 
     u32 pn = 0;
     const unsigned char *p = payload(e->post, &pn);
@@ -250,16 +276,52 @@ static int emit_post_with_likes(Engine *e, sqlite3_int64 id, int likes, jout *o)
         return SQLITE_CORRUPT;
     }
 
-    rc = sqlite3BtreeTableMoveto(e->user, pf[1].i, 0, &res);
-    if (rc != SQLITE_OK) return rc;
-    if (res != 0) return SQLITE_NOTFOUND;
+    sqlite3_int64 user_id = pf[1].i;
+    const unsigned char *author_z = NULL;
+    int author_n = 0;
 
-    u32 un = 0;
-    const unsigned char *up = payload(e->user, &un);
-    if (!up) return SQLITE_CORRUPT;
-    val uf[2];
-    if (parse_vals(up, un, uf, 2) != SQLITE_OK || uf[1].kind != V_TEXT) {
-        return SQLITE_CORRUPT;
+    // 1. Kiểm tra cache tác giả trên stack
+    if (ctx) {
+        for (int u = 0; u < ctx->n_ucache; u++) {
+            if (ctx->ucache[u].uid == user_id) {
+                author_z = ctx->ucache[u].name;
+                author_n = (int)ctx->ucache[u].len;
+                break;
+            }
+        }
+    }
+
+    // 2. Cache miss: seek B-Tree bảng users và lưu vào cache
+    if (!author_z) {
+        int res = 0;
+        int rc = sqlite3BtreeTableMoveto(e->user, user_id, 0, &res);
+        if (rc != SQLITE_OK) return rc;
+        if (res != 0) return SQLITE_NOTFOUND;
+
+        u32 un = 0;
+        const unsigned char *up = payload(e->user, &un);
+        if (!up) return SQLITE_CORRUPT;
+        val uf[2];
+        if (parse_vals(up, un, uf, 2) != SQLITE_OK || uf[1].kind != V_TEXT) {
+            return SQLITE_CORRUPT;
+        }
+
+        author_z = uf[1].z;
+        author_n = uf[1].n;
+
+        if (ctx && uf[1].n < (int)sizeof(ctx->ucache[0].name)) {
+            int idx;
+            if (ctx->n_ucache < 8) {
+                idx = ctx->n_ucache++;
+            } else {
+                idx = (ctx->replace_idx++) & 7;
+            }
+            ctx->ucache[idx].uid = user_id;
+            memcpy(ctx->ucache[idx].name, uf[1].z, (size_t)uf[1].n);
+            ctx->ucache[idx].name[uf[1].n] = '\0';
+            ctx->ucache[idx].len = (u32)uf[1].n;
+            author_z = ctx->ucache[idx].name;
+        }
     }
 
     jraw(o, "{\"id\":", 6);
@@ -269,11 +331,15 @@ static int emit_post_with_likes(Engine *e, sqlite3_int64 id, int likes, jout *o)
     jraw(o, ",\"created_at\":", 14);
     jstr(o, pf[3].z, pf[3].n);
     jraw(o, ",\"author\":", 10);
-    jstr(o, uf[1].z, uf[1].n);
+    jstr(o, author_z, author_n);
     jraw(o, ",\"like_count\":", 14);
     jint(o, (sqlite3_int64)likes);
     jch(o, '}');
     return SQLITE_OK;
+}
+
+static int emit_post_with_likes(Engine *e, sqlite3_int64 id, int likes, jout *o) {
+    return emit_post_feed(e, id, likes, o, NULL);
 }
 
 /* Format 1 post object */
@@ -461,10 +527,15 @@ int get_feed(char *out, int cap, int *outlen) {
             }
 
             if (scan_ok) {
+                FeedContext ctx;
+                ctx.n_ucache = 0;
+                ctx.replace_idx = 0;
+                ctx.prev_post_id = -1;
+
                 for (int i = 0; i < n_posts; i++) {
                     if (i > 0) jch(&o, ',');
                     int likes = counts[ids[i] - lo];
-                    rc = emit_post_with_likes(&g_engine, ids[i], likes, &o);
+                    rc = emit_post_feed(&g_engine, ids[i], likes, &o, &ctx);
                     if (rc != SQLITE_OK) break;
                 }
                 fast_ok = 1;
@@ -473,9 +544,17 @@ int get_feed(char *out, int cap, int *outlen) {
 
         // Fallback Safe Path: khi hi - lo >= FEED_SPAN hoặc range scan lỗi
         if (!fast_ok) {
+            FeedContext ctx;
+            ctx.n_ucache = 0;
+            ctx.replace_idx = 0;
+            ctx.prev_post_id = -1;
+
             for (int i = 0; i < n_posts; i++) {
                 if (i > 0) jch(&o, ',');
-                rc = emit_post(&g_engine, ids[i], &o);
+                int likes = 0;
+                rc = count_likes(&g_engine, ids[i], &likes);
+                if (rc != SQLITE_OK) break;
+                rc = emit_post_feed(&g_engine, ids[i], likes, &o, &ctx);
                 if (rc != SQLITE_OK) break;
             }
         }

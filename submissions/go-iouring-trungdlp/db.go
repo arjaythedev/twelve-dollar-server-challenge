@@ -68,6 +68,6 @@ func dbHealth() (bool, []byte) {
 	return true, nil
 }
 
-func dbCommit() bool  { return C.td_commit() == 0 }
-func dbTick()         { C.td_tick() }
+func dbCommit() bool   { return C.td_commit() == 0 }
+func dbTick()          { C.td_tick() }
 func writesHeld() bool { return C.td_writes_held() != 0 }

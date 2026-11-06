@@ -26,11 +26,11 @@ const (
 // plain8 reports whether none of the 8 bytes in w needs escaping (no '"', '\\' or control
 // character). Bytes >= 0x80 never need it.
 func plain8(w uint64) bool {
-	ctl := (w - lo7*0x20) &^ w           // high bit set where a byte < 0x20 (or a borrow from one)
+	ctl := (w - lo7*0x20) &^ w // high bit set where a byte < 0x20 (or a borrow from one)
 	q := w ^ (lo7 * '"')
-	quo := (q - lo7) &^ q                // high bit where a byte == '"'
+	quo := (q - lo7) &^ q // high bit where a byte == '"'
 	bs := w ^ (lo7 * '\\')
-	bsl := (bs - lo7) &^ bs              // high bit where a byte == '\\'
+	bsl := (bs - lo7) &^ bs // high bit where a byte == '\\'
 	return (ctl|quo|bsl)&hi7 == 0
 }
 

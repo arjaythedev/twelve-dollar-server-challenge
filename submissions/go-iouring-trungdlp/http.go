@@ -4,11 +4,11 @@ import "bytes"
 
 // request is one parsed HTTP/1.1 request; its slices point into the receive buffer.
 type request struct {
-	method []byte
-	path   []byte
-	auth   []byte
+	method  []byte
+	path    []byte
+	auth    []byte
 	hasAuth bool
-	body   []byte
+	body    []byte
 }
 
 const (

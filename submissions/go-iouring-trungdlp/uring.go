@@ -58,14 +58,14 @@ type sqOffsets struct {
 
 type cqOffsets struct {
 	head, tail, ringMask, ringEntries, overflow, cqes, flags, resv1 uint32
-	userAddr                                                       uint64
+	userAddr                                                        uint64
 }
 
 type params struct {
 	sqEntries, cqEntries, flags, sqThreadCPU, sqThreadIdle, features, wqFd uint32
-	resv                                                                  [3]uint32
-	sqOff                                                                 sqOffsets
-	cqOff                                                                 cqOffsets
+	resv                                                                   [3]uint32
+	sqOff                                                                  sqOffsets
+	cqOff                                                                  cqOffsets
 }
 
 type sqe struct {

@@ -6,7 +6,6 @@ package main
 
 import (
 	"fmt"
-	"strconv"
 	"os"
 	"syscall"
 	"time"
@@ -23,19 +22,18 @@ const (
 )
 
 const (
-	listeners   = 8      // SO_REUSEPORT listeners, each with its own accept queue
-	acceptDepth = 512    // single-shot accepts in flight on the accepting ring
-	sqEntries   = 4096
-	cqEntries   = 65536
-	bufSize     = 2048   // receive buffer; a longer request is read in more than one piece
-	bufCount    = 1024   // receive buffers per ring
-	maxRings    = 16
-	waitMin     = 4096   // a pass waits for this many completions on ring 0 ...
-	waitNs      = 4000000 // ... or this long, whichever comes first
+	listeners      = 8   // SO_REUSEPORT listeners, each with its own accept queue
+	acceptDepth    = 512 // single-shot accepts in flight on the accepting ring
+	sqEntries      = 4096
+	cqEntries      = 65536
+	bufSize        = 2048 // receive buffer; a longer request is read in more than one piece
+	bufCount       = 1024 // receive buffers per ring
+	maxRings       = 16
+	waitMin        = 4096    // a pass waits for this many completions on ring 0 ...
+	waitNs         = 4000000 // ... or this long, whichever comes first
 	readsPerPass   = 16384
 	answersPerPass = 2048
-	outCap      = 8192
-	poolMax     = 4096
+	outCap         = 8192
 )
 
 func ud(op, ring int, gen uint16, slot uint32) uint64 {
@@ -70,22 +68,24 @@ type conn struct {
 }
 
 type ring struct {
-	u        *uring
-	bufs     *bufRing
-	conns    []conn
+	u         *uring
+	bufs      *bufRing
+	conns     []conn
 	accepting bool
-	full     bool
-	accepts  [listeners]uint32
-	depth    uint32
-	open     uint32
-	margin   uint32
-	reads    uint32 // single-shot reads in flight (each holds at most one receive buffer)
+	full      bool
+	accepts   [listeners]uint32
+	depth     uint32
+	open      uint32
+	margin    uint32
+	reads     uint32 // single-shot reads in flight (each holds at most one receive buffer)
 }
 
 // ref names a connection in a queue: ring, slot, generation.
 type ref uint64
 
-func mkref(ri int, slot uint32, gen uint16) ref { return ref(uint64(ri)<<48 | uint64(gen)<<32 | uint64(slot)) }
+func mkref(ri int, slot uint32, gen uint16) ref {
+	return ref(uint64(ri)<<48 | uint64(gen)<<32 | uint64(slot))
+}
 func (r ref) ring() int    { return int(r >> 48) }
 func (r ref) slot() uint32 { return uint32(r) }
 func (r ref) gen() uint16  { return uint16(r >> 32) }
@@ -113,21 +113,21 @@ func (f *fifo) pop() ref {
 }
 
 type server struct {
-	rings   []*ring
-	app     *app
-	listen  []int
-	slots   uint32
-	pool     [][]byte
-	freeOut  []int32 // spare response buffers
-	freePart []int32 // spare request buffers
-	dead     []int32 // pool slots whose buffer was dropped
-	touched []ref
-	held    []ref
-	rq      fifo // connections to read, first in first out
-	ready   fifo // connections with bytes read but not answered, oldest first
-	answers int
-	req     request
-	needRing  bool
+	rings      []*ring
+	app        *app
+	listen     []int
+	slots      uint32
+	pool       [][]byte
+	freeOut    []int32 // spare response buffers
+	freePart   []int32 // spare request buffers
+	dead       []int32 // pool slots whose buffer was dropped
+	touched    []ref
+	held       []ref
+	rq         fifo // connections to read, first in first out
+	ready      fifo // connections with bytes read but not answered, oldest first
+	answers    int
+	req        request
+	needRing   bool
 	spillAfter time.Time
 }
 
@@ -394,7 +394,6 @@ func (s *server) complete(ri int, r *ring, u uint64, res int32, flags uint32) {
 	case udAccept:
 		r.accepts[slot]--
 		if res >= 0 {
-			stAccepts++
 			c := &r.conns[res]
 			g := c.gen + 1
 			*c = conn{gen: g, flags: fOpen}
@@ -428,7 +427,6 @@ func (s *server) complete(ri int, r *ring, u uint64, res int32, flags uint32) {
 				s.queueRead(ri, slot, c)
 			}
 		case res == -int32(syscall.ENOBUFS):
-			stEnobufs++
 			// A burst emptied the buffer ring. Not re-armed now: re-arming every receive at once
 			// would only repeat the storm.
 			s.queueRead(ri, slot, c)
@@ -634,7 +632,6 @@ func (s *server) readRounds() {
 			return
 		}
 		budget -= k
-		stReads += k
 		for _, r := range s.rings {
 			if r.u.pending > 0 {
 				r.u.poll()
@@ -646,53 +643,22 @@ func (s *server) readRounds() {
 	}
 }
 
-var tuneWaitNs, tuneWaitMin = envInt("TD_WAIT_NS", waitNs), envInt("TD_WAIT_MIN", waitMin)
-
-// Debug counters (TD_STATS=1): printed once a second.
-var (
-	statsOn                                                 = os.Getenv("TD_STATS") != ""
-	stPasses, stCqes, stEnobufs, stAccepts, stReads, stAnsw int
-	stMaxPass                                               time.Duration
-	stLast                                                  = time.Now()
-)
-
-func (s *server) stats(t0 time.Time, n int) {
-	stPasses++
-	stCqes += n
-	if d := time.Since(t0); d > stMaxPass {
-		stMaxPass = d
-	}
-	if time.Since(stLast) >= time.Second {
-		open := 0
-		for _, r := range s.rings {
-			open += int(r.open)
-		}
-		fmt.Fprintf(os.Stderr, "stats: passes=%d cqes/pass=%.1f maxpass=%v accepts=%d enobufs=%d reads=%d answers=%d rq=%d ready=%d held=%d rings=%d open=%d pool=%d\n",
-			stPasses, float64(stCqes)/float64(stPasses), stMaxPass.Round(time.Microsecond), stAccepts, stEnobufs, stReads, stAnsw,
-			s.rq.len(), s.ready.len(), len(s.held), len(s.rings), open, len(s.pool))
-		stPasses, stCqes, stEnobufs, stAccepts, stReads, stAnsw, stMaxPass = 0, 0, 0, 0, 0, 0, 0
-		stLast = time.Now()
-	}
-}
-
 func (s *server) run() {
-	ts := timespec{nsec: int64(tuneWaitNs)}
+	ts := timespec{nsec: waitNs}
 	for {
 		busy := s.rq.len() > 0 || s.ready.len() > 0
 		for ri := len(s.rings) - 1; ri >= 0; ri-- {
 			u := s.rings[ri].u
 			if ri == 0 && !busy {
-				u.enter(enterGetEvents, uint32(tuneWaitMin), &ts)
+				u.enter(enterGetEvents, waitMin, &ts)
 			} else {
 				u.poll()
 			}
 		}
-		t0 := time.Now()
-		s.app.now = t0.Unix()
+		s.app.now = time.Now().Unix()
 		s.answers = answersPerPass
-		n := 0
 		for ri := range s.rings {
-			n += s.drain(ri)
+			s.drain(ri)
 		}
 		s.runReady()
 		s.readRounds()
@@ -700,16 +666,5 @@ func (s *server) run() {
 			s.releaseHeld()
 		}
 		s.endPass()
-		if statsOn {
-			stAnsw += answersPerPass - s.answers
-			s.stats(t0, n)
-		}
 	}
-}
-
-func envInt(k string, d int) int {
-	if v, err := strconv.Atoi(os.Getenv(k)); err == nil {
-		return v
-	}
-	return d
 }

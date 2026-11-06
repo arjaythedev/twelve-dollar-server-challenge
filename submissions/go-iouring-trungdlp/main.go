@@ -35,11 +35,6 @@ func listener(ip net.IP, port int) (int, error) {
 		return -1, err
 	}
 	syscall.SetsockoptInt(fd, syscall.IPPROTO_TCP, syscall.TCP_NODELAY, 1)
-	if os.Getenv("TD_DEFER") != "" {
-		// A connection is handed over once its first request has arrived, so the receive armed
-		// right after the accept finds data at once instead of waiting for it.
-		syscall.SetsockoptInt(fd, syscall.IPPROTO_TCP, syscall.TCP_DEFER_ACCEPT, 1)
-	}
 	var a syscall.SockaddrInet4
 	a.Port = port
 	copy(a.Addr[:], ip.To4())

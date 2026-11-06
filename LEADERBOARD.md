@@ -185,7 +185,7 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | 101 | c-libco-ssmurfgg04-gif | #121 | C (libco coroutines, epoll) | **71,000** ᶠ | 6,546 | 141 | 210 | 0.93 | 52 | 74 | 717 | 2026-10-27 |
 | 101 | java-springboot-reactor-mohkamfer | #138 | Java (Spring Boot, Reactor Netty, FFM SQLite) | **71,000** ᶠ | 6,555 | 11 | 56 | 0.93 | 62 | 88 | 503 | 2026-10-28 |
 | 101 | rust-axum-connorw-dev | #140 | Rust (Axum) | **71,000** ᶠ | 6,554 | 6.1 | 11 | 0.93 | 52 | 74 | 1,131 | 2026-10-28 |
-| 101 | bun-yatta-psrockstar098 | #179 | Bun (Yatta JS, bun:sqlite) | **71,000** ᶠ | 6,545 | 54 | 133 | 0.93 | 91 | 130 | 213 | 2026-10-29 |
+| 101 | bun-yatta-psrockstar098 | #179 | Bun (Yatta JS, bun:sqlite) | **71,000** ᶠ ᵠ | 6,545 | 54 | 133 | 0.93 | 91 | 130 | 213 | 2026-10-29 |
 | 101 | rust-mqbridge-marcomq | #253 | Rust (mq-bridge, sqlx SQLite) | **71,000** ᶠ | 6,548 | 72 | 106 | 0.93 | 76 | 109 | 1,409 | 2026-11-01 |
 | 101 | c-iouring-marwanabdelhameed | #270 | C (io_uring) | **71,000** ᶠ | 6,558 | 0.8 | 3.4 | 0.93 | 39 | 56 | 1,448 | 2026-11-02 |
 | 101 | c-fio-tbsvttr | #5 | C (facil.io) | **71,000** | 6,959 | 130 | 621 | 0.00 | 81 | 108 | 646 | 2026-10-26 |
@@ -357,6 +357,12 @@ answers once a backlog builds, OOM at 290k fixed; held, not merged: it didn't be
 `2b4d6d8` (`--lifocap` backlog-share tuning): **280,000** again (26,702 req/s, p95 82.3 / p99 567.4 ms, 0 err, 78 % CPU,
 26 µs/req, 1,323 MB, 2026-11-05); 290,000 and 300,000 failed the 2-minute probe on p95 (1.13 s at 82 % CPU / 1.20 s at
 87 % CPU, 0 errors).
+
+ᵠ **bun-yatta-psrockstar098** stays on its merged #179 row. Its follow-up **#329** (`ebc7969`, Bun.CryptoHasher JWT
+verify, local JSON helper, ASCII length fast path; held, not merged: it didn't beat the merged row, it tied it) also held
+**71,000** (6,551 req/s, p95 51.6 / p99 73.8 ms, 0.93 % err = connect timeouts, 91 % CPU, 130 µs/req, 212 MB,
+2026-11-06). 75,000 passed the 2-minute probe but failed the 5-minute hold on connect timeouts (1.59 % at 91 % CPU);
+78,000 and 80,000 failed the 2-minute probe the same way (1.36 % / 1.68 %).
 
 **Connection collapses in scored entries' failing probes.** v-epoll-i098 #191: 270,000 passed the 2-minute probe but
 failed the 5-minute hold with 60 % errors, nearly all `connection refused` from mid-hold on (an earlier attempt at

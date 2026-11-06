@@ -34,8 +34,8 @@ its #229 run (`f0fb733`) held 232,000, its #216 run (`ee683db`) and #211 run (`7
 not merged: it didn't beat the merged row) scored 290,000 (27,513 req/s, p95 78 / p99 345 ms, 0 err, 87 % CPU, 28 µs/req,
 654 MB, 2026-11-02; 300,000 failed the 2-minute probe on p99 4.0 s). rust-iouring-kensac is scored at its follow-up PR #264
 (`4298101`, merged 2026-11-04 as the same folder rebased to `e69dbb6`); its earlier merged #248 code (`3bd2352`, merged as rebased `551ff3a`) held 270,000 and its
-#247 run (`d42783b`) 257,000. php-symfony-gnugat is scored at its follow-up PR #256 (`4a11a5d`); its
-earlier #136 run (`48e3783`) held 15,500. mojo-iouring-oh-meh is scored at its follow-up PR #257 (`a9df151`); its merged
+#247 run (`d42783b`) 257,000. php-symfony-gnugat is scored at its follow-up PR #338 (`9c22b83`); its
+merged #256 code (`4a11a5d`) held 18,500 and its earlier #136 run (`48e3783`) 15,500. mojo-iouring-oh-meh is scored at its follow-up PR #257 (`a9df151`); its merged
 #224 code (`ef45beb`) held 280,000, and its earlier #224 runs held 280,000 (`29024f3`) and 290,000 (`1f4eb0b`). Its later follow-up #319 (`396de83`, bounded reads after a burst;
 held, not merged: it didn't beat the merged row) scored 280,000 (26,667 req/s, p95 206 / p99 812 ms, 0 err, 84 % CPU,
 28 µs/req, 676 MB, 2026-11-05; 290,000 failed the 2-minute probe on p99 1.21 s).
@@ -253,7 +253,7 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | 186 | pascal-horse-viniabreu | #134 | Pascal (Horse) | **20,000** | 1,966 | 81 | 111 | 0.00 | 90 | 426 | 270 | 2026-10-28 |
 | 187 | csharp-aspnetcore-larsholm | #47 | C# (ASP.NET Core) | **19,000** | 1,854 | 381 | 943 | 0.00 | 57 | 286 | 439 | 2026-10-26 |
 | 187 | crystal-kemal-krthr | #146 | Crystal (Kemal) | **19,000** ᵐ | 1,869 | 27 | 153 | 0.00 | 24 | 119 | 1,631 | 2026-10-28 |
-| 189 | php-symfony-gnugat | #256 | PHP (Symfony, FrankenPHP) | **18,500** | 1,809 | 325 | 804 | 0.00 | 96 | 494 | 1,111 | 2026-11-01 |
+| 187 | php-symfony-gnugat | #338 | PHP (Symfony, FrankenPHP) | **19,000** | 1,863 | 253 | 608 | 0.00 | 92 | 459 | 1,090 | 2026-11-06 |
 | 190 | kotlin-springboot-Mindstorm1750 | #66 | Kotlin (Spring Boot, Tomcat, virtual threads) | **18,000** | 1,760 | 397 | 870 | 0.00 | 61 | 323 | 792 | 2026-10-27 |
 | 191 | python-litestar-przwr | #23 | Python (Litestar) | **16,000** | 1,569 | 259 | 788 | 0.00 | 66 | 391 | 256 | 2026-10-26 |
 | 192 | kotlin-ktor-jvm-syorito-hatsuki | #36 | Kotlin (Ktor, JVM) | **14,000** | 1,370 | 370 | 728 | 0.00 | 79 | 536 | 603 | 2026-10-26 |

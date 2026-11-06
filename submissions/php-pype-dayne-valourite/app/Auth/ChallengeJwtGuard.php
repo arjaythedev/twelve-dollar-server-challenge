@@ -22,7 +22,7 @@ final class ChallengeJwtGuard implements Guard
 
     public function __construct(Application $app)
     {
-        $this->secret = (string) $app->config('auth.jwt.secret', '');
+        $this->secret = (string) $app->config('auth.challenge.secret', '');
     }
 
     public function authenticate(Request $request): ?object

@@ -4,7 +4,7 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "43932a751560d0deb413809aea536740",
+    "content-hash": "6c99b3b74fb50c4483e39b4a72deeabd",
     "packages": [
         {
             "name": "dragonmantank/cron-expression",
@@ -68,8 +68,7 @@
                     "type": "github"
                 }
             ],
-            "time": "2026-10-19T17:53:57+00:00",
-            "published-time": "2026-10-19T17:54:31+00:00"
+            "time": "2026-10-19T17:53:57+00:00"
         },
         {
             "name": "psr/container",
@@ -122,8 +121,7 @@
                 "issues": "https://github.com/php-fig/container/issues",
                 "source": "https://github.com/php-fig/container/tree/2.0.2"
             },
-            "time": "2021-11-05T16:47:00+00:00",
-            "published-time": "2021-11-05T16:53:27+00:00"
+            "time": "2021-11-05T16:47:00+00:00"
         },
         {
             "name": "psr/log",
@@ -173,8 +171,7 @@
             "support": {
                 "source": "https://github.com/php-fig/log/tree/3.0.2"
             },
-            "time": "2024-09-11T13:17:53+00:00",
-            "published-time": "2024-09-11T13:21:14+00:00"
+            "time": "2024-09-11T13:17:53+00:00"
         },
         {
             "name": "psr/simple-cache",
@@ -225,21 +222,20 @@
             "support": {
                 "source": "https://github.com/php-fig/simple-cache/tree/3.0.0"
             },
-            "time": "2021-10-29T13:26:27+00:00",
-            "published-time": "2021-10-29T13:27:19+00:00"
+            "time": "2021-10-29T13:26:27+00:00"
         },
         {
             "name": "pype/framework",
-            "version": "v0.12.0",
+            "version": "v0.13.1",
             "source": {
                 "type": "git",
                 "url": "https://github.com/Valourite/pype-framework.git",
-                "reference": "657c6f08e65f415e0bddb5510840b23bc07f4af8"
+                "reference": "7d47e409a5a45b51247e79d6de89eec4270a8b16"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/Valourite/pype-framework/zipball/657c6f08e65f415e0bddb5510840b23bc07f4af8",
-                "reference": "657c6f08e65f415e0bddb5510840b23bc07f4af8",
+                "url": "https://api.github.com/repos/Valourite/pype-framework/zipball/7d47e409a5a45b51247e79d6de89eec4270a8b16",
+                "reference": "7d47e409a5a45b51247e79d6de89eec4270a8b16",
                 "shasum": ""
             },
             "require": {
@@ -294,21 +290,20 @@
             ],
             "support": {
                 "issues": "https://github.com/Valourite/pype-framework/issues",
-                "source": "https://github.com/Valourite/pype-framework/tree/v0.12.0"
+                "source": "https://github.com/Valourite/pype-framework/tree/v0.13.1"
             },
-            "time": "2026-11-03T11:00:47+00:00",
-            "published-time": "2026-11-03T11:02:24+00:00"
+            "time": "2026-11-06T13:47:53+00:00"
         }
     ],
     "packages-dev": [],
     "aliases": [],
     "minimum-stability": "stable",
-    "stability-flags": {},
+    "stability-flags": [],
     "prefer-stable": true,
     "prefer-lowest": false,
     "platform": {
         "php": ">=8.3"
     },
-    "platform-dev": {},
-    "plugin-api-version": "2.11.0"
+    "platform-dev": [],
+    "plugin-api-version": "2.6.0"
 }

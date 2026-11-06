@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Installs the locked dependencies (pype/framework v0.12.0 and its PSR packages, see composer.lock)
+# Installs the locked dependencies (pype/framework v0.13.1 and its PSR packages, see composer.lock)
 # with an authoritative classmap, and caches the routes (`bin/pype optimize`).
 set -euo pipefail
 cd "$(dirname "$0")"

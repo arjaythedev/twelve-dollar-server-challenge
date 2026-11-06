@@ -1,9 +1,11 @@
+#define _POSIX_C_SOURCE 200809L
 #include "abi.h"
 #include "sqlite3.h"
 #include "tree.h"
 #include <errno.h>
 #include <stdio.h>
 #include <limits.h>
+#include <pthread.h>
 #ifndef ASC_STORE_MODE
 #define ASC_STORE_MODE 3
 #endif
@@ -20,21 +22,103 @@
 #elif ASC_STORE_MODE == 2
 #define ASC_STORE_NAME "sqlite-3.54.1/cursor-vector-records"
 #elif ASC_STORE_MODE == 3
-#define ASC_STORE_NAME "sqlite-3.54.1/cursor-logarithmic-runs"
+#define ASC_STORE_NAME "sqlite-3.54.1/cursor-monotone-counts"
 #else
-#define ASC_STORE_NAME "sqlite-3.54.1/cursor-vector-logarithmic"
+#define ASC_STORE_NAME "sqlite-3.54.1/cursor-vector-monotone"
 #endif
 
+typedef struct {
+    sqlite3 *db;
+    pthread_t thread;
+    pthread_mutex_t mutex;
+    pthread_cond_t wake;
+    unsigned initialized;
+    int stopping;
+} Checkpoint;
+enum { CHECKPOINT_MUTEX=1u,CHECKPOINT_COND=2u,CHECKPOINT_THREAD=4u };
 typedef struct {
     sqlite3 *db;
     sqlite3_stmt *health,*feed,*post,*create,*exists,*like;
     sqlite3_stmt *begin,*commit,*rollback;
     AscTree *tree;
+    Checkpoint checkpoint;
 } Store;
 #define SELECT_POST "SELECT p.id,p.body,p.created_at,u.username,(SELECT count(*) FROM likes l WHERE l.post_id=p.id) FROM posts p JOIN users u ON u.id=p.user_id "
+static void *checkpoint_worker(void *opaque) {
+    Checkpoint *c=opaque;
+    uint64_t failures=0;
+    pthread_mutex_lock(&c->mutex);
+    while(!c->stopping) {
+        struct timespec deadline;
+        if(clock_gettime(CLOCK_MONOTONIC,&deadline)) {
+            fprintf(stderr,"SQLite checkpoint clock: %s; automatic checkpoints remain enabled\n",strerror(errno));
+            break;
+        }
+        deadline.tv_nsec+=250000000L;
+        if(deadline.tv_nsec>=1000000000L){++deadline.tv_sec;deadline.tv_nsec-=1000000000L;}
+        int result=0;
+        while(!c->stopping && !result)result=pthread_cond_timedwait(&c->wake,&c->mutex,&deadline);
+        if(c->stopping)break;
+        if(result!=ETIMEDOUT) {
+            fprintf(stderr,"SQLite checkpoint wait: %s; automatic checkpoints remain enabled\n",strerror(result));
+            break;
+        }
+        pthread_mutex_unlock(&c->mutex);
+        result=sqlite3_wal_checkpoint_v2(c->db,"main",SQLITE_CHECKPOINT_PASSIVE,NULL,NULL);
+        if(result!=SQLITE_OK && result!=SQLITE_BUSY && result!=SQLITE_LOCKED) {
+            ++failures;
+            if(!(failures&(failures-1)))
+                fprintf(stderr,"SQLite passive checkpoint: %s; automatic checkpoints remain enabled\n",sqlite3_errmsg(c->db));
+        }
+        pthread_mutex_lock(&c->mutex);
+    }
+    pthread_mutex_unlock(&c->mutex);
+    return NULL;
+}
+static void stop_checkpoint(Checkpoint *c) {
+    if(c->initialized&CHECKPOINT_THREAD) {
+        pthread_mutex_lock(&c->mutex);c->stopping=1;
+        pthread_cond_signal(&c->wake);pthread_mutex_unlock(&c->mutex);
+        int result=pthread_join(c->thread,NULL);
+        if(result){fprintf(stderr,"SQLite checkpoint join: %s\n",strerror(result));abort();}
+    }
+    if(c->db)sqlite3_close(c->db);
+    if(c->initialized&CHECKPOINT_COND)pthread_cond_destroy(&c->wake);
+    if(c->initialized&CHECKPOINT_MUTEX)pthread_mutex_destroy(&c->mutex);
+    memset(c,0,sizeof(*c));
+}
+static int start_checkpoint(Checkpoint *c,const char *path) {
+    if(!sqlite3_threadsafe())return 0;
+    if(sqlite3_open_v2(path,&c->db,SQLITE_OPEN_READWRITE|SQLITE_OPEN_NOMUTEX,NULL)!=SQLITE_OK ||
+       sqlite3_busy_timeout(c->db,0)!=SQLITE_OK ||
+       sqlite3_exec(c->db,"PRAGMA synchronous=NORMAL;PRAGMA cache_size=-64;PRAGMA mmap_size=0;",NULL,NULL,NULL)!=SQLITE_OK)
+        goto fail;
+    int result=pthread_mutex_init(&c->mutex,NULL);
+    if(result)goto thread_fail;
+    c->initialized|=CHECKPOINT_MUTEX;
+    pthread_condattr_t attributes;
+    result=pthread_condattr_init(&attributes);
+    if(result)goto thread_fail;
+    result=pthread_condattr_setclock(&attributes,CLOCK_MONOTONIC);
+    if(!result)result=pthread_cond_init(&c->wake,&attributes);
+    pthread_condattr_destroy(&attributes);
+    if(result)goto thread_fail;
+    c->initialized|=CHECKPOINT_COND;
+    result=pthread_create(&c->thread,NULL,checkpoint_worker,c);
+    if(result)goto thread_fail;
+    c->initialized|=CHECKPOINT_THREAD;
+    return 1;
+thread_fail:
+    fprintf(stderr,"SQLite checkpoint worker: %s; using automatic checkpoints\n",strerror(result));
+    stop_checkpoint(c);return 0;
+fail:
+    fprintf(stderr,"SQLite checkpoint connection: %s; using automatic checkpoints\n",c->db?sqlite3_errmsg(c->db):"allocation failed");
+    stop_checkpoint(c);return 0;
+}
 static void close_store(void *opaque) {
     Store *s=opaque;
     if (!s) return;
+    stop_checkpoint(&s->checkpoint);
     asc_tree_close(s->tree);
     sqlite3_finalize(s->health); sqlite3_finalize(s->feed); sqlite3_finalize(s->post);
     sqlite3_finalize(s->create); sqlite3_finalize(s->exists); sqlite3_finalize(s->like);
@@ -83,6 +167,13 @@ static void *open_store(const char *path) {
         !prepare(s,&s->begin,"BEGIN IMMEDIATE") || !prepare(s,&s->commit,"COMMIT") ||
         !prepare(s,&s->rollback,"ROLLBACK")) goto fail;
     if (ASC_STORE_MODE) s->tree=asc_tree_open(s->db,(unsigned)(ASC_STORE_MODE-1));
+    if(start_checkpoint(&s->checkpoint,path)) {
+        if(!getenv("ASC_SQLITE_WAL_PAGES")) {
+            wal_pages=4096;
+            if(sqlite3_wal_autocheckpoint(s->db,wal_pages)!=SQLITE_OK)goto fail;
+        }
+        fprintf(stderr,"SQLite checkpoint: passive worker every 250 ms\n");
+    }
     fprintf(stderr,"SQLite direct reads: %s; mode=%d\n",s->tree?"enabled":"SQL fallback",ASC_STORE_MODE);
     fprintf(stderr,"SQLite cache=%d KiB; busy=%d ms; WAL checkpoint=%d pages\n",cache_kib,busy_ms,wal_pages);
     return s;

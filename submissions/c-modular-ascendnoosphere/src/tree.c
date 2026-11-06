@@ -2,7 +2,7 @@
 #include "sqlite3.c"
 #include "tree.h"
 #include "record.h"
-_Static_assert(SQLITE_VERSION_NUMBER==3054001,"Review private cursor invariants when upgrading SQLite");
+_Static_assert(SQLITE_VERSION_NUMBER==3054001,"Review the B-tree binding when upgrading SQLite");
 #ifndef ASC_TREE_BACKSTEP
 #define ASC_TREE_BACKSTEP 1
 #endif
@@ -25,7 +25,6 @@ typedef struct {
     uint32_t body,body_n,created,created_n,author,author_n;
 } AscRow;
 typedef struct { int active,key_valid; int64_t previous,key; } AscCountState;
-typedef struct { int active; int64_t previous,upper; } AscAuthorSearch;
 
 static int asc_table(Table *table,const char *const *columns,unsigned n) {
     if (!table || table->eTabType!=TABTYP_NORM || !HasRowid(table) ||
@@ -109,44 +108,6 @@ static int asc_text(AscTree *tree,const unsigned char *p,AscField field,uint32_t
     *offset=tree->scratch.n; *n=field.length;
     return buffer_add(&tree->scratch,p+field.offset,field.length);
 }
-static int asc_leaf_key(AscTree *tree,BtCursor *cursor,unsigned index,int64_t *id) {
-    /* Match sqlite3BtreeNext's cursor invalidation when changing ix. */
-    cursor->ix=(u16)index;
-    cursor->info.nSize=0;
-    cursor->curFlags&=~(BTCF_ValidNKey|BTCF_ValidOvfl|BTCF_AtLast);
-    return asc_index_key(tree,cursor,id);
-}
-static int asc_leaf_run(AscTree *tree,BtCursor *cursor,int64_t id,unsigned *count) {
-    unsigned start=cursor->ix, end=cursor->pPage->nCell, low=start+1, high=end, stride=1;
-    /* Equal leaf endpoints imply all keys in between match. */
-    if (start==0 && end>=32) {
-        int64_t last;
-        if (!asc_leaf_key(tree,cursor,end-1,&last) || last<id) return 0;
-        if (last==id) { low=end; goto located; }
-    }
-    /* Find the run boundary with exponential probes, then bisection. */
-    while (low<end) {
-        unsigned probe=start+stride;
-        if (probe>=end) probe=end-1;
-        int64_t value;
-        if (!asc_leaf_key(tree,cursor,probe,&value) || value<id) return 0;
-        if (value!=id) { high=probe; break; }
-        low=probe+1;
-        stride<<=1;
-    }
-    while (low<high) {
-        unsigned middle=low+((high-low)>>1);
-        int64_t value;
-        if (!asc_leaf_key(tree,cursor,middle,&value) || value<id) return 0;
-        if (value==id) low=middle+1; else high=middle;
-    }
-located:
-    *count=low-start;
-    cursor->ix=(u16)(low-1);
-    cursor->info.nSize=0;
-    cursor->curFlags&=~(BTCF_ValidNKey|BTCF_ValidOvfl|BTCF_AtLast);
-    return 1;
-}
 static int asc_count(AscTree *tree,BtCursor *cursor,int64_t id,int64_t *count) {
     Mem value={0}; value.flags=MEM_Int; value.u.i=id;
     UnpackedRecord search={0}; search.pKeyInfo=tree->likes_key; search.aMem=&value;
@@ -161,51 +122,12 @@ static int asc_count(AscTree *tree,BtCursor *cursor,int64_t id,int64_t *count) {
         int64_t found;
         if (!asc_index_key(tree,cursor,&found)) return 0;
         if (found!=id) return 1;
-        if ((tree->flags&2u) && cursor->pPage->leaf) {
-            unsigned run=0;
-            if (!asc_leaf_run(tree,cursor,id,&run) || run>(uint64_t)(INT64_MAX-*count)) return 0;
-            *count+=run;
-            if ((unsigned)cursor->ix+1<cursor->pPage->nCell) return 1;
-        } else {
-            if (*count==INT64_MAX) return 0;
-            ++*count;
-        }
+        if (*count==INT64_MAX) return 0;
+        ++*count;
         rc=sqlite3BtreeNext(cursor,0);
         if (rc==SQLITE_DONE) return 1;
         if (rc!=SQLITE_OK) return 0;
     }
-    return 1;
-}
-
-/* Reverse exponential search for the first equal key. */
-static int asc_leaf_reverse_run(AscTree *tree,BtCursor *cursor,int64_t id,unsigned *count) {
-    unsigned start=cursor->ix, low=0, high=start, stride=1;
-    /* Matching endpoints cover the whole equal-key prefix. */
-    if(start>=32 || start+1==cursor->pPage->nCell) {
-        int64_t first;
-        if(!asc_leaf_key(tree,cursor,0,&first) || first>id)return 0;
-        if(first==id){low=0;goto complete;}
-    }
-    while (high) {
-        unsigned probe=stride>start?0:start-stride;
-        int64_t value;
-        if (!asc_leaf_key(tree,cursor,probe,&value) || value>id) return 0;
-        if (value!=id) { low=probe+1; break; }
-        high=probe;
-        if (!high) break;
-        stride<<=1;
-    }
-    while (low<high) {
-        unsigned middle=low+((high-low)>>1);
-        int64_t value;
-        if (!asc_leaf_key(tree,cursor,middle,&value) || value>id) return 0;
-        if (value==id) high=middle; else low=middle+1;
-    }
-complete:
-    *count=start-low+1;
-    cursor->ix=(u16)low;
-    cursor->info.nSize=0;
-    cursor->curFlags&=~(BTCF_ValidNKey|BTCF_ValidOvfl|BTCF_AtLast);
     return 1;
 }
 
@@ -249,14 +171,8 @@ static int asc_count_reverse(AscTree *tree,BtCursor *cursor,AscCountState *state
         if (found!=id) return 1;
         /* Invalidate the cached key before moving the cursor. */
         state->key_valid=0;
-        if ((tree->flags&2u) && cursor->pPage->leaf) {
-            unsigned run=0;
-            if (!asc_leaf_reverse_run(tree,cursor,id,&run) || run>(uint64_t)(INT64_MAX-*count)) return 0;
-            *count+=run;
-        } else {
-            if (*count==INT64_MAX) return 0;
-            ++*count;
-        }
+        if (*count==INT64_MAX) return 0;
+        ++*count;
         rc=sqlite3BtreePrevious(cursor,0);
         if (rc==SQLITE_DONE) return 1;
         if (rc!=SQLITE_OK) return 0;
@@ -264,109 +180,23 @@ static int asc_count_reverse(AscTree *tree,BtCursor *cursor,AscCountState *state
     return 1;
 }
 
-/* Keep SQLite's page traversal and invalidation for backward steps. */
+/* Consecutive table keys can step without another seek. SQLite owns the cursor. */
 static int asc_table_move(BtCursor *cursor,int64_t id,int *position) {
-    if (ASC_TREE_BACKSTEP && cursor->eState==CURSOR_VALID &&
-        (cursor->curFlags&BTCF_ValidNKey) && cursor->info.nKey>INT64_MIN &&
-        id==cursor->info.nKey-1) {
-        int rc=sqlite3BtreePrevious(cursor,0);
-        if (rc==SQLITE_OK && sqlite3BtreeIntegerKey(cursor)==id) {
-            *position=0; return SQLITE_OK;
+    if (ASC_TREE_BACKSTEP && sqlite3BtreeCursorIsValidNN(cursor)) {
+        int64_t previous=sqlite3BtreeIntegerKey(cursor);
+        if (previous>INT64_MIN && id==previous-1) {
+            int rc=sqlite3BtreePrevious(cursor,0);
+            if (rc==SQLITE_OK && sqlite3BtreeIntegerKey(cursor)==id) {
+                *position=0; return SQLITE_OK;
+            }
+            if (rc!=SQLITE_OK && rc!=SQLITE_DONE) return rc;
         }
-        if (rc!=SQLITE_OK && rc!=SQLITE_DONE) return rc;
     }
     return sqlite3BtreeTableMoveto(cursor,id,1,position);
 }
-static int asc_table_key(MemPage *page,unsigned index,int64_t *key) {
-    const unsigned char *p=findCellPastPtr(page,index), *end=page->aDataEnd;
-    if (p>=end) return 0;
-    if (page->intKeyLeaf) {
-        unsigned n=0;
-        while (*p++&128) {
-            if (++n==9 || p>=end) return 0;
-        }
-        if (p>=end) return 0;
-    }
-    if (*p<128) { *key=*p; return 1; }
-    if (end-p>=2 && p[1]<128) {
-        *key=((int64_t)(p[0]&127)<<7)|p[1]; return 1;
-    }
-    u64 value;
-    if (end-p>=9) sqlite3GetVarint(p,&value);
-    else {
-        unsigned char tail[9]={0};
-        size_t n=(size_t)(end-p);
-        memcpy(tail,p,n);
-        if (sqlite3GetVarint(tail,&value)>n) return 0;
-    }
-    memcpy(key,&value,sizeof(value));
-    return 1;
-}
-static int asc_author_bound(BtCursor *cursor,int64_t *upper) {
-    for (int depth=cursor->iPage-1;depth>=0;--depth) {
-        MemPage *parent=cursor->apPage[depth];
-        unsigned index=cursor->aiIdx[depth];
-        if (index<parent->nCell) return asc_table_key(parent,index,upper);
-    }
-    *upper=INT64_MAX; return 1;
-}
-static int asc_author_move(BtCursor *cursor,AscAuthorSearch *search,int64_t id,int *position) {
-    if (!search || !search->active || id<search->previous ||
-        cursor->eState!=CURSOR_VALID || !cursor->pPage->intKeyLeaf) {
-        int rc=sqlite3BtreeTableMoveto(cursor,id,0,position);
-        if (search) {
-            search->active=rc==SQLITE_OK && cursor->eState==CURSOR_VALID &&
-                cursor->pPage->intKeyLeaf && asc_author_bound(cursor,&search->upper);
-            search->previous=id;
-        }
-        return rc;
-    }
-    /* Sorted keys retain every ancestor whose subtree still contains the target. */
-    unsigned start=0;
-    int moved=0;
-    if (id>search->upper) {
-        do {
-            if (cursor->iPage<=0) return SQLITE_CORRUPT_BKPT;
-            moveToParent(cursor);
-            if (!asc_author_bound(cursor,&search->upper)) return SQLITE_CORRUPT_BKPT;
-        } while (id>search->upper);
-        start=(unsigned)cursor->ix+1;
-        moved=1;
-    }
-    for (;;) {
-        MemPage *page=cursor->pPage;
-        unsigned low=start,high=page->nCell;
-        if (!high) return SQLITE_CORRUPT_BKPT;
-        while (low<high) {
-            unsigned middle=low+((high-low)>>1);
-            int64_t key;
-            if (!asc_table_key(page,middle,&key)) return SQLITE_CORRUPT_BKPT;
-            if (key<id) low=middle+1; else high=middle;
-        }
-        cursor->info.nSize=0;
-        cursor->curFlags&=~(BTCF_ValidNKey|BTCF_ValidOvfl|BTCF_AtLast);
-        if (page->leaf) {
-            unsigned index=low<page->nCell?low:low-1;
-            int64_t key;
-            if (!asc_table_key(page,index,&key)) return SQLITE_CORRUPT_BKPT;
-            cursor->ix=(u16)index;
-            *position=key<id?-1:(key>id?1:0);
-            if (!*position) { cursor->info.nKey=id; cursor->curFlags|=BTCF_ValidNKey; }
-            if (moved && !asc_author_bound(cursor,&search->upper)) return SQLITE_CORRUPT_BKPT;
-            search->previous=id;
-            return SQLITE_OK;
-        }
-        Pgno child=low==page->nCell?get4byte(&page->aData[page->hdrOffset+8]):
-                                   get4byte(findCell(page,low));
-        cursor->ix=(u16)low;
-        int rc=moveToChild(cursor,child);
-        if (rc!=SQLITE_OK) return rc;
-        start=0;
-    }
-}
-static int asc_author(AscTree *tree,BtCursor *cursor,AscAuthorSearch *search,int64_t id,AscRow *row) {
+static int asc_author(AscTree *tree,BtCursor *cursor,int64_t id,AscRow *row) {
     int position=0;
-    if (asc_author_move(cursor,search,id,&position)!=SQLITE_OK) return -1;
+    if (sqlite3BtreeTableMoveto(cursor,id,0,&position)!=SQLITE_OK) return -1;
     if (position) return 0;
     AscField fields[4];
     const unsigned char *p=asc_payload(tree,cursor,3,fields);
@@ -384,10 +214,9 @@ static int asc_authors(AscTree *tree,BtCursor *cursor,AscRow rows[20],int first,
         }
         order[at]=index;
     }
-    AscAuthorSearch search={0};
     for (int i=0;i<n;) {
         AscRow *row=&rows[order[i]];
-        int found=asc_author(tree,cursor,&search,row->user,row);
+        int found=asc_author(tree,cursor,row->user,row);
         if (found<0) return -1;
         if (!found) { row->author=0; row->author_n=UINT32_MAX; }
         int next=i+1;
@@ -422,7 +251,7 @@ static int asc_row(AscTree *tree,BtCursor cursors[4],AscCountState *counts,int d
     if (!buffer_add(&tree->scratch,p+fields[2].offset,
                     (size_t)row->body_n+row->created_n)) return -1;
     if (deferred) return 1;
-    int author=asc_author(tree,&cursors[1],NULL,user,row);
+    int author=asc_author(tree,&cursors[1],user,row);
     return author<=0?author:asc_row_likes(tree,cursors,counts,row);
 }
 int asc_tree_read(AscTree *tree,int64_t id,int feed,PostVisitor emit,void *state) {
@@ -460,7 +289,7 @@ int asc_tree_read(AscTree *tree,int64_t id,int feed,PostVisitor emit,void *state
             count=asc_authors(tree,&cursors[1],rows,first,count);
             if (count<0) goto done;
             for (int i=first;i<count;i++)
-                if (asc_row_likes(tree,cursors,ASC_TREE_REVERSE_COUNTS?&counts:NULL,&rows[i])<0) goto done;
+                if (asc_row_likes(tree,cursors,ASC_TREE_REVERSE_COUNTS && (tree->flags&2u)?&counts:NULL,&rows[i])<0) goto done;
             if (count==20 || empty) break;
             rc=sqlite3BtreeNext(&cursors[2],0);
             if (rc==SQLITE_DONE) break;

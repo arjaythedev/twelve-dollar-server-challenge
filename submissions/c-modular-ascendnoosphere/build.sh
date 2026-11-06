@@ -7,13 +7,13 @@ CC=${CC:-gcc}
 uring=deps/liburing-2.5
 mode=${BUILD_MODE:-linked}
 store_mode=${STORE_MODE:-3}
-sqlite_mutexes=${SQLITE_MUTEXES:-0}
+sqlite_mutexes=${SQLITE_MUTEXES:-2}
 portable=${PORTABLE:-0}
 case "$mode" in linked|modules) ;; *) echo 'BUILD_MODE must be linked or modules' >&2; exit 2 ;; esac
 case "$store_mode" in 0|1|2|3|4) ;; *) exit 2 ;; esac
 case "$sqlite_mutexes" in 0|2) ;; *) exit 2 ;; esac
 case "$portable" in 0|1) ;; *) exit 2 ;; esac
-flags=(-std=gnu11 -O2 -g -fPIC -fno-plt -ffunction-sections -fdata-sections
+flags=(-std=gnu11 -O2 -g -fPIC -fno-plt -pthread -ffunction-sections -fdata-sections
   -Wall -Wextra -Wshadow -Wconversion -Wno-deprecated-declarations
   -Isrc -Ideps -Ideps/sqlite-amalgamation-3540100 -isystem "$uring/src/include")
 link=(-Wl,-z,relro,-z,now,--gc-sections)
@@ -24,11 +24,11 @@ if [[ ${SANITIZE:-0} == 1 ]]; then
 else
   flags+=(-flto);link+=(-flto)
 fi
-# SQLite is confined to one thread.
+# Each SQLite connection has one owner; checkpoints use a separate connection.
 sqlite_flags=(-DSQLITE_THREADSAFE="$sqlite_mutexes" -DSQLITE_DEFAULT_MEMSTATUS=0
   -DSQLITE_DQS=0 -DSQLITE_DEFAULT_WAL_SYNCHRONOUS=1 -DSQLITE_OMIT_LOAD_EXTENSION
-  -DSQLITE_OMIT_DECLTYPE -DSQLITE_OMIT_DEPRECATED -DSQLITE_OMIT_PROGRESS_CALLBACK)
-if [[ "$sqlite_mutexes" == 0 ]]; then sqlite_flags+=(-DSQLITE_OMIT_SHARED_CACHE); fi
+  -DSQLITE_OMIT_DECLTYPE -DSQLITE_OMIT_DEPRECATED -DSQLITE_OMIT_PROGRESS_CALLBACK
+  -DSQLITE_OMIT_SHARED_CACHE)
 json_flags=(-DYYJSON_DISABLE_WRITER=1 -DYYJSON_DISABLE_UTILS=1)
 make -C "$uring/src" clean
 (

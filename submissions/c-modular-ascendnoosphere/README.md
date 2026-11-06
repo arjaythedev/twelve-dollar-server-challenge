@@ -8,4 +8,4 @@ bash build.sh
 SQLITE_PATH=/path/to/feed.db JWT_SECRET=secret HOST=0.0.0.0 PORT=80 bash start.sh
 ```
 
-Prepared statements and direct B-tree reads reduce query overhead. SIMD parsing reduces scanning work. Multiple rings hold sockets in registered file tables. Bounded connection work and backpressure limit queueing and input growth.
+Reads use SQLite's B-tree cursor API with a prepared SQL fallback. SIMD parsing reduces scanning work. Network completions are drained before request handling, with bounded connection work and backpressure. Passive WAL checkpoints run on a separate SQLite connection and thread, with automatic checkpoints as a fallback. Registered file tables grow across rings as connections arrive.

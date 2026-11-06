@@ -344,7 +344,8 @@ static size_t response_header(char out[256],int status,uint32_t length,int close
 enum { CONNECTION_LIVE=1u,RECEIVING=2u,SENDING=4u,POLLING=8u,
        CLOSING=16u,CANCELING=32u,WAITING_BUFFER=64u };
 enum { OP_RECEIVE=1,OP_SEND,OP_POLL,OP_CANCEL };
-enum { RING_ENTRIES=512,RECEIVE_BUFFERS=256,RECEIVE_BYTES=1024,SEND_BLOCK=64 };
+enum { RING_ENTRIES=4096,COMPLETION_ENTRIES=16384,RECEIVE_BUFFERS=1024,
+       RECEIVE_BYTES=1024,SEND_BLOCK=64,COMPLETION_BUDGET=4096 };
 #define NO_SLOT UINT32_MAX
 
 typedef struct {
@@ -359,7 +360,9 @@ typedef struct {
     Ring *rings,*available;
     uint32_t slots;
     uint64_t ring_count,active,peak;
-    int epoll,stopping;
+    uint64_t completions,enobufs,accept_backoffs,accept_retry_ns;
+    uint32_t ready_peak,waiting_peak,accept_retry_ms;
+    int epoll,stopping,listener_watched;
 } Fleet;
 struct Ring {
     struct io_uring uring;
@@ -431,12 +434,14 @@ static void schedule(Ring *r,Connection *c) {
     uint32_t slot=(uint32_t)(c-r->connections);
     r->ready[(r->ready_head+r->ready_n)%r->slots]=slot;
     ++r->ready_n;c->scheduled=1;
+    if(!r->fleet->stopping && r->ready_n>r->fleet->ready_peak)r->fleet->ready_peak=r->ready_n;
 }
 static void wait_for_buffer(Ring *r,Connection *c) {
     if(c->scheduled || r->waiting_n==r->slots){r->error=EPROTO;return;}
     uint32_t slot=(uint32_t)(c-r->connections);
     r->waiting[(r->waiting_head+r->waiting_n)%r->slots]=slot;
     ++r->waiting_n;c->scheduled=2;c->events|=WAITING_BUFFER;
+    if(r->waiting_n>r->fleet->waiting_peak)r->fleet->waiting_peak=r->waiting_n;
 }
 static void retry_waiters(Ring *r) {
     while(r->waiting_n && (r->returned || r->fleet->stopping)) {
@@ -570,7 +575,7 @@ static void run_ready(Ring *r,Context *ctx,TransportState *s,unsigned budget) {
         service(r,c,ctx,s);
     }
 }
-static void completion(Ring *r,struct io_uring_cqe *cqe,Context *ctx,TransportState *s) {
+static void completion(Ring *r,struct io_uring_cqe *cqe) {
     unsigned type=(unsigned)(cqe->user_data&7u);
     uint64_t index=cqe->user_data>>3;
     if(!r->inflight || index>=r->allocated){r->error=EPROTO;return;}
@@ -602,9 +607,9 @@ static void completion(Ring *r,struct io_uring_cqe *cqe,Context *ctx,TransportSt
         if(c->events&CLOSING){close_connection(r,c);return;}
         if(r->error)return;
         if(!result)c->eof=1;
-        else if(result==-ENOBUFS){wait_for_buffer(r,c);return;}
+        else if(result==-ENOBUFS){++r->fleet->enobufs;wait_for_buffer(r,c);return;}
         else if(result<0 && result!=-EINTR && result!=-EAGAIN){close_connection(r,c);return;}
-        service(r,c,ctx,s);return;
+        schedule(r,c);return;
     }
     if(type==OP_CANCEL) {
         if(result<0 && result!=-ENOENT && result!=-EALREADY && result!=-ECANCELED)r->error=-result;
@@ -627,14 +632,20 @@ static void completion(Ring *r,struct io_uring_cqe *cqe,Context *ctx,TransportSt
     if(op->offset==total) {
         uint32_t id=c->sent;c->sent=op->next;release_send(r,id);
     }
-    service(r,c,ctx,s);
+    schedule(r,c);
 }
-static unsigned drain_completions(Ring *r,Context *ctx,TransportState *s) {
+static unsigned drain_completions(Ring *r) {
     struct io_uring_cqe *batch[256];
-    unsigned count=io_uring_peek_batch_cqe(&r->uring,batch,256);
-    for(unsigned i=0;i<count;++i)completion(r,batch[i],ctx,s);
-    io_uring_cq_advance(&r->uring,count);
-    retry_waiters(r);return count;
+    unsigned total=0,count;
+    do {
+        count=io_uring_peek_batch_cqe(&r->uring,batch,256);
+        for(unsigned i=0;i<count;++i)completion(r,batch[i]);
+        /* Publish completed receives and recycled buffers before running requests. */
+        io_uring_cq_advance(&r->uring,count);
+        total+=count;
+    } while(count==256 && total<COMPLETION_BUDGET && !r->error);
+    r->fleet->completions+=total;
+    retry_waiters(r);return total;
 }
 static void free_ring(Ring *r) {
     if(r->watched)epoll_ctl(r->fleet->epoll,EPOLL_CTL_DEL,r->uring.ring_fd,NULL);
@@ -651,7 +662,7 @@ static void free_ring(Ring *r) {
 static Ring *new_ring(Fleet *f) {
     Ring *r=calloc(1,sizeof(*r));if(!r)return NULL;
     r->fleet=f;r->slots=f->slots;r->free_slot=NO_SLOT;
-    struct io_uring_params parameters={0};
+    struct io_uring_params parameters={.flags=IORING_SETUP_CQSIZE,.cq_entries=COMPLETION_ENTRIES};
     int result=io_uring_queue_init_params(RING_ENTRIES,&r->uring,&parameters);
     if(result<0)goto fail;
     r->initialized=1;
@@ -676,7 +687,7 @@ static Ring *new_ring(Fleet *f) {
             (unsigned long long)f->ring_count,r->slots,RECEIVE_BUFFERS);
     return r;
 fail:
-    fprintf(stderr,"io_uring required: %s\n",strerror(-result));
+    fprintf(stderr,"cannot create io_uring ring: %s\n",strerror(-result));
     free_ring(r);errno=-result;return NULL;
 }
 static Ring *available_ring(Fleet *f) {
@@ -685,9 +696,51 @@ static Ring *available_ring(Fleet *f) {
     for(r=f->rings;r;r=r->next)if(r->active<r->slots){f->available=r;return r;}
     return new_ring(f);
 }
+static int resource_pressure(int error) {
+    return error==EMFILE || error==ENFILE || error==ENOMEM || error==ENOBUFS ||
+           error==ENOSPC || error==EAGAIN || error==EBUSY;
+}
+static int pause_accepts(TransportState *s,int error) {
+    Fleet *f=s->internal;
+    struct timespec now;
+    if(clock_gettime(CLOCK_MONOTONIC,&now))return 0;
+    if(f->listener_watched) {
+        if(epoll_ctl(s->epoll,EPOLL_CTL_DEL,s->listener,NULL))return 0;
+        f->listener_watched=0;
+    }
+    f->accept_retry_ms=f->accept_retry_ms?(f->accept_retry_ms<500?2*f->accept_retry_ms:1000):10;
+    f->accept_retry_ns=(uint64_t)now.tv_sec*UINT64_C(1000000000)+(uint64_t)now.tv_nsec+
+                       (uint64_t)f->accept_retry_ms*UINT64_C(1000000);
+    ++f->accept_backoffs;
+    if(f->accept_retry_ms==10)fprintf(stderr,"accept backoff: %s\n",strerror(error));
+    return 1;
+}
+static int accept_timeout(TransportState *s,int *timeout) {
+    Fleet *f=s->internal;
+    if(!f->accept_retry_ns)return 1;
+    struct timespec now;
+    if(clock_gettime(CLOCK_MONOTONIC,&now))return 0;
+    uint64_t ns=(uint64_t)now.tv_sec*UINT64_C(1000000000)+(uint64_t)now.tv_nsec;
+    if(ns>=f->accept_retry_ns) {
+        struct epoll_event event={.events=EPOLLIN,.data.ptr=NULL};
+        if(epoll_ctl(s->epoll,EPOLL_CTL_ADD,s->listener,&event))return 0;
+        f->listener_watched=1;f->accept_retry_ns=0;
+    } else {
+        int remaining=(int)((f->accept_retry_ns-ns+UINT64_C(999999))/UINT64_C(1000000));
+        if(*timeout<0 || *timeout>remaining)*timeout=remaining;
+    }
+    return 1;
+}
 static int accept_connections(TransportState *s) {
     Fleet *f=s->internal;
+    if(!f->listener_watched)return 1;
     for(unsigned accepted=0;accepted<ASC_ACCEPT_SLICE;) {
+        Ring *r=available_ring(f);
+        if(!r) {
+            int error=errno;
+            if(resource_pressure(error))return pause_accepts(s,error);
+            errno=error;return 0;
+        }
         int client=accept4(s->listener,NULL,NULL,SOCK_NONBLOCK|SOCK_CLOEXEC);
         if(client<0) {
             if(errno==EINTR)continue;
@@ -695,12 +748,11 @@ static int accept_connections(TransportState *s) {
             if(errno==ECONNABORTED || errno==EPROTO || errno==ENETDOWN ||
                errno==ENONET || errno==ENETUNREACH || errno==EHOSTDOWN ||
                errno==EHOSTUNREACH || errno==EOPNOTSUPP || errno==ENOPROTOOPT)return 1;
+            if(resource_pressure(errno))return pause_accepts(s,errno);
             return 0;
         }
         ++accepted;int one=1;
         if(setsockopt(client,IPPROTO_TCP,TCP_NODELAY,&one,sizeof(one))){close(client);continue;}
-        Ring *r=available_ring(f);
-        if(!r){int saved=errno;close(client);errno=saved;return 0;}
         uint32_t slot=r->free_slot;
         if(slot!=NO_SLOT)r->free_slot=(uint32_t)r->connections[slot].fd;
         else slot=r->allocated++;
@@ -708,12 +760,14 @@ static int accept_connections(TransportState *s) {
         do{result=io_uring_register_files_update(&r->uring,slot,&client,1);}while(result==-EINTR);
         int saved=result<0?-result:EIO;close(client);
         if(result!=1) {
-            r->connections[slot].fd=(int)r->free_slot;r->free_slot=slot;errno=saved;return 0;
+            r->connections[slot].fd=(int)r->free_slot;r->free_slot=slot;
+            if(resource_pressure(saved))return pause_accepts(s,saved);
+            errno=saved;return 0;
         }
         Connection *c=&r->connections[slot];memset(c,0,sizeof(*c));
         c->fd=(int)slot;c->events=CONNECTION_LIVE;
         ++r->active;++f->active;if(f->active>f->peak)f->peak=f->active;
-        ++s->accepted;queue_receive(r,c);
+        ++s->accepted;f->accept_retry_ms=0;queue_receive(r,c);
         if(r->error){errno=r->error;return 0;}
     }
     return 1;
@@ -739,15 +793,18 @@ static TransportState *open_transport(const char *host,const char *port) {
     f->epoll=s->epoll;f->slots=limit.rlim_cur<65535?(uint32_t)limit.rlim_cur:65535u;
     if(s->epoll<0)goto fail;
     struct epoll_event event={.events=EPOLLIN,.data.ptr=NULL};
-    if(epoll_ctl(s->epoll,EPOLL_CTL_ADD,listener,&event) || !new_ring(f))goto fail;
+    if(epoll_ctl(s->epoll,EPOLL_CTL_ADD,listener,&event))goto fail;
+    f->listener_watched=1;
+    if(!new_ring(f))goto fail;
     return s;
 fail:
     {int saved=errno;close(listener);if(s->epoll>=0)close(s->epoll);free(f);free(s);errno=saved;return NULL;}
 }
 static int step(TransportState *s,Context *ctx,int timeout) {
     Fleet *f=s->internal;
+    if(!accept_timeout(s,&timeout))return -1;
     for(Ring *r=f->rings;r;r=r->next) {
-        retry_waiters(r);run_ready(r,ctx,s,256);
+        retry_waiters(r);
         if(!flush_ring(r) || r->error){errno=r->error;return -1;}
         if(r->ready_n || io_uring_sq_ready(&r->uring))timeout=0;
     }
@@ -759,12 +816,15 @@ static int step(TransportState *s,Context *ctx,int timeout) {
         Ring *r=events[i].data.ptr;
         if(!r){if(!accept_connections(s))return -1;}
         else {
-            drain_completions(r,ctx,s);run_ready(r,ctx,s,256);
+            drain_completions(r);
             if(r->error){errno=r->error;return -1;}
         }
     }
-    for(Ring *r=f->rings;r;r=r->next)
+    /* Drain every signaled ring before any SQLite or rendering work. */
+    for(Ring *r=f->rings;r;r=r->next) {
+        run_ready(r,ctx,s,256);
         if(!flush_ring(r) || r->error){errno=r->error;return -1;}
+    }
     return 0;
 }
 static int stop_ring(Ring *r,TransportState *s) {
@@ -776,7 +836,7 @@ static int stop_ring(Ring *r,TransportState *s) {
     while(r->active || r->inflight) {
         run_ready(r,NULL,s,256);
         if(!flush_ring(r))return 0;
-        unsigned completed=drain_completions(r,NULL,s);
+        unsigned completed=drain_completions(r);
         if(r->error)return 0;
         if(!completed && !r->ready_n && r->inflight && !io_uring_sq_ready(&r->uring)) {
             int result;
@@ -793,8 +853,11 @@ static void close_transport(TransportState *s) {
         fprintf(stderr,"io_uring shutdown: %s; retaining live buffers until process exit\n",strerror(r->error));
         return;
     }
-    fprintf(stderr,"io_uring: rings=%llu peak_connections=%llu active=%llu\n",
-            (unsigned long long)f->ring_count,(unsigned long long)f->peak,(unsigned long long)f->active);
+    fprintf(stderr,"io_uring: rings=%llu peak_connections=%llu active=%llu completions=%llu "
+            "enobufs=%llu ready_peak=%u waiting_peak=%u accept_backoffs=%llu\n",
+            (unsigned long long)f->ring_count,(unsigned long long)f->peak,(unsigned long long)f->active,
+            (unsigned long long)f->completions,(unsigned long long)f->enobufs,f->ready_peak,f->waiting_peak,
+            (unsigned long long)f->accept_backoffs);
     Ring *r=f->rings;
     while(r){Ring *next=r->next;free_ring(r);r=next;}
     close(s->listener);close(s->epoll);free(f);free(s);

@@ -8889,8 +8889,28 @@ hval hpbi_sqlite_bg_checkpoint_start(hval dbv, hval pathv, hval framesv, hval ho
         return hp_of_bool(false);
     }
     sqlite3_busy_timeout(ckdb, 5000);
-    sqlite3_exec(ckdb, "PRAGMA synchronous=NORMAL", NULL, NULL, NULL);
-    sqlite3_exec(ckdb, "PRAGMA cache_size=-65536", NULL, NULL, NULL);
+    if (sqlite3_exec(ckdb,
+                     "PRAGMA synchronous=NORMAL; PRAGMA wal_autocheckpoint=0",
+                     NULL, NULL, NULL) != SQLITE_OK) {
+        sqlite3_close(ckdb);
+        return hp_of_bool(false);
+    }
+    /* A checkpoint connection copies WAL pages but never serves requests.
+     * Keep its pager cache small (matching the Rust leader's 16-page cache)
+     * instead of allowing a second 64 MiB request-sized cache. Operators can
+     * override SQLite's cache_size value for same-binary A/B measurements. */
+    int ckpt_cache = 16;
+    const char *cache_env = getenv("HPHP_SQLITE_CKPT_CACHE");
+    if (cache_env && *cache_env) {
+        int v = atoi(cache_env);
+        if (v >= -65536 && v <= 65536 && v != 0) ckpt_cache = v;
+    }
+    char cache_pragma[48];
+    snprintf(cache_pragma, sizeof cache_pragma, "PRAGMA cache_size=%d", ckpt_cache);
+    if (sqlite3_exec(ckdb, cache_pragma, NULL, NULL, NULL) != SQLITE_OK) {
+        sqlite3_close(ckdb);
+        return hp_of_bool(false);
+    }
     memset(&w->thread, 0, sizeof w->thread);
     w->main_db = db;
     w->ckpt_db = ckdb;

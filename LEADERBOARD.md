@@ -94,15 +94,15 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | 27 | asm-epoll-umitaltintas | #152 | x86-64 asm (io_uring) | **240,000** | 22,985 | 366 | 633 | 0.00 | 83 | 33 | 545 | 2026-10-28 |
 | 27 | cider-iouring-pomilon-v5 | #273 | Cider (native x86-64, io_uring, SQLite B-tree reads) | **240,000** | 23,198 | 145 | 236 | 0.02 | 92 | 36 | 706 | 2026-11-02 |
 | 27 | c-rawsqlite-larvance | #210 | C (io_uring, SQLite B-tree reads) | **240,000** | 23,237 | 118 | 280 | 0.00 | 84 | 33 | 1,153 | 2026-11-05 |
-| 30 | c-iouring-meros | #199 | C (io_uring) | **238,000** | 22,796 | 417 | 750 | 0.00 | 78 | 31 | 1,567 | 2026-10-30 |
-| 31 | zig-iouring-unorig-username | #190 | Zig (io_uring) | **235,000** | 22,785 | 34 | 160 | 0.00 | 80 | 32 | 1,019 | 2026-10-29 |
-| 31 | cider-iouring-pomilon-v4 | #249 | Cider (native x86-64, io_uring, SQLite B-tree reads) | **235,000** | 22,817 | 10.5 | 29 | 0.00 | 88 | 35 | 908 | 2026-11-01 |
-| 33 | c-uring-curvynes | #217 | C (io_uring, SQLite B-tree reads) | **230,000** | 22,287 | 259 | 374 | 0.00 | 82 | 34 | 773 | 2026-10-30 |
-| 33 | c-iouring-moneebullah25 | #244 | C (io_uring, SQLite B-tree reads) | **230,000** | 22,289 | 51 | 470 | 0.00 | 67 | 28 | 828 | 2026-11-01 |
-| 33 | go-iouring-rkkautsar | #260 | Go (io_uring, cgo SQLite B-tree reads) | **230,000** | 22,069 | 66.8 | 438 | 0.00 | 93 | 39 | 799 | 2026-11-03 |
-| 33 | rust-native-M3M0KA | #265 | Rust (no crates, epoll/io_uring, 5 worker processes, SQLite B-tree reads) | **230,000** ʳ | 22,304 | 150 | 352 | 0.00 | 90 | 37 | 1,350 | 2026-11-02 |
-| 33 | nelua-iouring-tbsvttr | #281 | Nelua (io_uring, SQLite B-tree reads) | **230,000** | 22,379 | 11.8 | 49.6 | 0.00 | 69 | 28 | 938 | 2026-11-02 |
-| 33 | rust-iouring-rkkautsar | #322 | Rust (io_uring, SQLite B-tree reads) | **230,000** | 22,162 | 322 | 519 | 0.00 | 83 | 34 | 732 | 2026-11-05 |
+| 27 | rust-iouring-rkkautsar | #322 | Rust (io_uring, SQLite B-tree reads) | **240,000** | 23,202 | 227.2 | 442.5 | 0.00 | 95 | 38 | 780 | 2026-11-06 |
+| 31 | c-iouring-meros | #199 | C (io_uring) | **238,000** | 22,796 | 417 | 750 | 0.00 | 78 | 31 | 1,567 | 2026-10-30 |
+| 32 | zig-iouring-unorig-username | #190 | Zig (io_uring) | **235,000** | 22,785 | 34 | 160 | 0.00 | 80 | 32 | 1,019 | 2026-10-29 |
+| 32 | cider-iouring-pomilon-v4 | #249 | Cider (native x86-64, io_uring, SQLite B-tree reads) | **235,000** | 22,817 | 10.5 | 29 | 0.00 | 88 | 35 | 908 | 2026-11-01 |
+| 34 | c-uring-curvynes | #217 | C (io_uring, SQLite B-tree reads) | **230,000** | 22,287 | 259 | 374 | 0.00 | 82 | 34 | 773 | 2026-10-30 |
+| 34 | c-iouring-moneebullah25 | #244 | C (io_uring, SQLite B-tree reads) | **230,000** | 22,289 | 51 | 470 | 0.00 | 67 | 28 | 828 | 2026-11-01 |
+| 34 | go-iouring-rkkautsar | #260 | Go (io_uring, cgo SQLite B-tree reads) | **230,000** | 22,069 | 66.8 | 438 | 0.00 | 93 | 39 | 799 | 2026-11-03 |
+| 34 | rust-native-M3M0KA | #265 | Rust (no crates, epoll/io_uring, 5 worker processes, SQLite B-tree reads) | **230,000** ʳ | 22,304 | 150 | 352 | 0.00 | 90 | 37 | 1,350 | 2026-11-02 |
+| 34 | nelua-iouring-tbsvttr | #281 | Nelua (io_uring, SQLite B-tree reads) | **230,000** | 22,379 | 11.8 | 49.6 | 0.00 | 69 | 28 | 938 | 2026-11-02 |
 | 39 | cider-iouring-pomilon-v3 | #234 | Cider (native x86-64, io_uring, SQLite B-tree reads) | **228,000** | 21,945 | 370 | 853 | 0.00 | 86 | 36 | 668 | 2026-10-31 |
 | 39 | holyphp-io-uring-elifoxcoder | #321 | HolyPHP (io_uring, SQLite B-tree reads) | **228,000** ᵘ | 22,172 | 31.7 | 175.4 | 0.46 | 82 | 34 | 1,073 | 2026-11-06 |
 | 41 | dexlang-iouring-tuned-ensamuel7 | #279 | DexLang (generated C, io_uring, SQLite B-tree reads) | **226,000** ᵝ | 21,876 | 297 | 633 | 0.00 | 84 | 35 | 873 | 2026-11-02 |
@@ -628,8 +628,7 @@ public plugin APIs (a custom page cache through `SQLITE_CONFIG_PCACHE2`, a custo
   coalesces `/feed` reads by default (`readGroup`, one read per write generation, 500 µs window; `READ_COALESCE=0`
   turns it off), and since `d9d93f3` also batches concurrent `/posts/:id` reads into one `IN` query by default
   (`POST_BATCH`); scored as submitted (62k at `a1d2732`; 60k at `70145d4`, 45k at `d9d93f3`, 0 at `26d1785`, see failures), held open.
-  The same author's rust-iouring #322 always coalesces `/feed` and `/posts/:id` reads per pass (one feed read, one sorted post batch; no switch); scored as
-  submitted (230k at `188e078`), held open.
+  (The same author's rust-iouring #322 coalesced reads too at `188e078`, 230k; since `9d3aea1` each request does its own read, so it's no longer flagged.)
 - **lean-verified-soonhokong #286 (was #271) reuses c-iouring-pavlyhalim #245's B-tree helpers**: `runtime/db.c`'s record
   decoder, payload fetch, index seek and multi-key descent closely follow #245's `src/btree.h` (now credited in its
   README); the Lean handlers, HTTP/JWT/JSON code and the io_uring transport are new. Open question for Arjay: building

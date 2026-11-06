@@ -22,6 +22,10 @@ export HPHP_RINGS="${HPHP_RINGS:-6}"
 # direct-mode defaults. Set HPHP_ACCEPT_DEPTH=0 to use multishot accept.
 export HPHP_RING0_WAIT="${HPHP_RING0_WAIT:-1}"
 export HPHP_ACCEPT_DEPTH="${HPHP_ACCEPT_DEPTH:-512}"
+# Keep accept ownership on one ring at a time and hand over before its direct
+# table reaches the reserved-slot watermark (leader-style bounded accepts).
+# Set HPHP_ACCEPT_HANDOVER=0 to retain the prior multi-ring accept scheduler.
+export HPHP_ACCEPT_HANDOVER="${HPHP_ACCEPT_HANDOVER:-1}"
 # Exact-mix high-load WSL A/B favored a 1 ms ceiling over 2 ms at 260k
 # configured users; both the CQE target and timeout remain overridable.
 case "$HPHP_RINGS" in

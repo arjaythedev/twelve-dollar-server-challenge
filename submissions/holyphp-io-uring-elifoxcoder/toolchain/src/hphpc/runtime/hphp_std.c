@@ -2876,6 +2876,11 @@ static _Thread_local int hp_ur_ring0_wait = 1;
 /* The bounded one-shot accept queue mirrors the Rust leader. An explicit 0
  * keeps the earlier multishot listener available for A/B comparison. */
 static _Thread_local uint32_t hp_ur_accept_depth = HP_UR_ACCEPT_DEPTH;
+/* Optional Rust-style one-accept-lane handover. Only one ring accepts at a
+ * time; it yields while its table still has room for all in-flight accepts. */
+static _Thread_local int hp_ur_accept_handover = 0;
+static _Thread_local int hp_ur_accept_lane = -1;
+static _Thread_local int hp_ur_accept_last_lane = -1;
 static _Thread_local int hp_ur_accept_diag = 0;
 static _Thread_local int hp_ur_taskrun = 1;
 
@@ -3671,6 +3676,14 @@ static bool hp_uring_setup(void) {
         if (depth >= 0 && depth <= HP_UR_ACCEPT_DEPTH)
             hp_ur_accept_depth = (uint32_t)depth;
     }
+    if ((env = getenv("HPHP_ACCEPT_HANDOVER")) && env[0] == '1') {
+        hp_ur_accept_handover = 1;
+        /* Ring handover requires bounded one-shot accepts; multishot can
+         * install more slots after the active lane has yielded. */
+        if (!hp_ur_accept_depth) hp_ur_accept_depth = HP_UR_ACCEPT_DEPTH;
+        hp_ur_accept_lane = -1;
+        hp_ur_accept_last_lane = -1;
+    }
     if ((env = getenv("HPHP_ACCEPT_DIAG")) && env[0] == '1')
         hp_ur_accept_diag = 1;
     if ((env = getenv("HPHP_BATCH_N"))) hp_ur_batch = atol(env);
@@ -3852,10 +3865,24 @@ static bool hp_uring_direct_setup(void) {
         hp_ur_dircap = n;
         hp_ur_cur->live = 0;
         hp_ur_cur->accept_armed = 0;
-        hp_ur_cur->accept_margin = n / 4;
-        if (hp_ur_cur->accept_margin > 512) hp_ur_cur->accept_margin = 512;
-        if (hp_ur_cur->accept_margin < HP_UR_ACCEPT_DEPTH + 1)
-            hp_ur_cur->accept_margin = HP_UR_ACCEPT_DEPTH + 1;
+        hp_ur_cur->accepting = 0;
+        hp_ur_cur->accept_full = 0;
+        hp_ur_cur->accept_resume = 0;
+        if (hp_ur_accept_handover) {
+            /* Match the leader's 1/8 table watermark, capped at 1,024 slots,
+             * while preserving room for every queued single-shot accept. */
+            hp_ur_cur->accept_margin = n / 8;
+            if (hp_ur_cur->accept_margin > 1024)
+                hp_ur_cur->accept_margin = 1024;
+        } else {
+            hp_ur_cur->accept_margin = n / 4;
+            if (hp_ur_cur->accept_margin > 512)
+                hp_ur_cur->accept_margin = 512;
+        }
+        uint32_t accept_min = hp_ur_accept_handover
+            ? hp_ur_accept_depth + 1 : HP_UR_ACCEPT_DEPTH + 1;
+        if (hp_ur_cur->accept_margin < accept_min)
+            hp_ur_cur->accept_margin = accept_min;
         /* Provided buffers are the fast path, not a requirement. If the
          * kernel refuses the registration (memlock/accounting), keep direct
          * descriptors and use one fixed-file recv per connection. */
@@ -4238,6 +4265,57 @@ static void hp_ur_fill_accept_quota(int r) {
 static void hp_ur_arm_all_accepts(void) {
     if (!hp_ur_listen_on || hp_ur_listen_count == 0 || hp_ur_direct != 1) return;
     if (hp_ur_accept_depth) {
+        if (hp_ur_accept_handover) {
+            int lane = hp_ur_accept_lane;
+            if (lane >= 0 && lane < hp_ur_nrings) {
+                struct hp_uring_ring *rg = &hp_ur_rings[lane];
+                if (!rg->accepting || rg->accept_full ||
+                    rg->live + rg->accept_armed + rg->accept_margin >= rg->dircap) {
+                    rg->accepting = 0;
+                    if (rg->live + rg->accept_armed + rg->accept_margin >= rg->dircap)
+                        rg->accept_full = 1;
+                    hp_ur_accept_last_lane = lane;
+                    hp_ur_accept_lane = -1;
+                    lane = -1;
+                }
+            } else {
+                lane = -1;
+            }
+            if (lane < 0) {
+                for (int step = 1; step <= hp_ur_nrings; step++) {
+                    int r = (hp_ur_accept_last_lane + step + hp_ur_nrings) %
+                            hp_ur_nrings;
+                    struct hp_uring_ring *rg = &hp_ur_rings[r];
+                    uint64_t used = (uint64_t)rg->live + rg->accept_armed +
+                                    rg->accept_margin;
+                    if (rg->accept_full || used >= rg->dircap) {
+                        if (used >= rg->dircap) {
+                            rg->accepting = 0;
+                            rg->accept_full = 1;
+                        }
+                        continue;
+                    }
+                    rg->accept_full = 0;
+                    rg->accept_resume = 0;
+                    rg->accepting = 1;
+                    hp_ur_accept_lane = r;
+                    hp_ur_accept_last_lane = r;
+                    lane = r;
+                    if (hp_ur_accept_diag)
+                        fprintf(stderr,
+                                "[ur] accept-handover ring=%d live=%u armed=%u margin=%u slots=%u\n",
+                                r, rg->live, rg->accept_armed,
+                                rg->accept_margin, rg->dircap);
+                    break;
+                }
+            }
+            if (lane >= 0 && lane < hp_ur_nrings) {
+                hp_ur_cur = &hp_ur_rings[lane];
+                hp_ur_fill_accept_quota(lane);
+            }
+            hp_ur_cur = &hp_ur_rings[0];
+            return;
+        }
         for (int r = 0; r < hp_ur_nrings; r++) {
             struct hp_uring_ring *rg = &hp_ur_rings[r];
             if (rg->accept_resume && !rg->accept_full) {

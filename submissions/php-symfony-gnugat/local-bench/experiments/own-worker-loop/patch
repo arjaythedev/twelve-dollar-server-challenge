@@ -1,0 +1,232 @@
+Experiment: the worker loop of FrankenPHP's docs in public/index.php instead of symfony/runtime's runner.
+symfony/runtime is removed, and bin/console bootstraps Symfony itself: as long as the SymfonyRuntime class exists,
+FrameworkBundle::boot() leaves registering Symfony's ErrorHandler to symfony/runtime, so a loop that bypasses it
+while the package stays installed runs without the ErrorHandler.
+
+diff --git a/bin/console b/bin/console
+index d8d530e..89db8b6 100755
+--- a/bin/console
++++ b/bin/console
+@@ -3,19 +3,34 @@
+ 
+ use App\Kernel;
+ use Symfony\Bundle\FrameworkBundle\Console\Application;
++use Symfony\Component\Console\Input\ArgvInput;
++use Symfony\Component\Dotenv\Dotenv;
++use Symfony\Component\ErrorHandler\Debug;
+ 
+ if (!is_dir(dirname(__DIR__).'/vendor')) {
+     throw new LogicException('Dependencies are missing. Try running "composer install".');
+ }
+ 
+-if (!is_file(dirname(__DIR__).'/vendor/autoload_runtime.php')) {
+-    throw new LogicException('Symfony Runtime is missing. Try running "composer require symfony/runtime".');
++set_time_limit(0);
++
++require dirname(__DIR__).'/vendor/autoload.php';
++
++// --env and --no-debug, as symfony/runtime reads them
++$input = new ArgvInput();
++if (null !== $env = $input->getParameterOption(['--env', '-e'], null, true)) {
++    putenv('APP_ENV='.$_SERVER['APP_ENV'] = $_ENV['APP_ENV'] = $env);
++}
++if ($input->hasParameterOption('--no-debug', true)) {
++    putenv('APP_DEBUG='.$_SERVER['APP_DEBUG'] = $_ENV['APP_DEBUG'] = '0');
+ }
+ 
+-require_once dirname(__DIR__).'/vendor/autoload_runtime.php';
++(new Dotenv())->bootEnv(dirname(__DIR__).'/.env');
+ 
+-return function (array $context) {
+-    $kernel = new Kernel($context['APP_ENV'], (bool) $context['APP_DEBUG']);
++if ($_SERVER['APP_DEBUG']) {
++    umask(0000);
++    Debug::enable();
++}
+ 
+-    return new Application($kernel);
+-};
++$kernel = new Kernel($_SERVER['APP_ENV'], (bool) $_SERVER['APP_DEBUG']);
++$application = new Application($kernel);
++$application->run($input);
+diff --git a/composer.json b/composer.json
+index 47e979a..cdb667c 100644
+--- a/composer.json
++++ b/composer.json
+@@ -13,7 +13,6 @@
+         "symfony/flex": "^2",
+         "symfony/framework-bundle": "8.1.*",
+         "symfony/json-streamer": "8.1.*",
+-        "symfony/runtime": "8.1.*",
+         "symfony/security-bundle": "8.1.*",
+         "symfony/yaml": "8.1.*"
+     },
+@@ -27,8 +26,7 @@
+     "config": {
+         "allow-plugins": {
+             "php-http/discovery": true,
+-            "symfony/flex": true,
+-            "symfony/runtime": true
++            "symfony/flex": true
+         },
+         "bump-after-update": true,
+         "sort-packages": true
+diff --git a/composer.lock b/composer.lock
+index 4db9e5d..7feaaf2 100644
+--- a/composer.lock
++++ b/composer.lock
+@@ -4,7 +4,7 @@
+         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
+         "This file is @generated automatically"
+     ],
+-    "content-hash": "aa649a575fd3184d8e255c704ad5f391",
++    "content-hash": "ed8dac9599c1c30b13e320a594a386f3",
+     "packages": [
+         {
+             "name": "doctrine/dbal",
+@@ -3147,90 +3147,6 @@
+             ],
+             "time": "2026-09-28T19:13:15+00:00"
+         },
+-        {
+-            "name": "symfony/runtime",
+-            "version": "v8.1.0",
+-            "source": {
+-                "type": "git",
+-                "url": "https://github.com/symfony/runtime.git",
+-                "reference": "b7ea1abe04561e814b3134db0f56c287cedb35cc"
+-            },
+-            "dist": {
+-                "type": "zip",
+-                "url": "https://api.github.com/repos/symfony/runtime/zipball/b7ea1abe04561e814b3134db0f56c287cedb35cc",
+-                "reference": "b7ea1abe04561e814b3134db0f56c287cedb35cc",
+-                "shasum": ""
+-            },
+-            "require": {
+-                "composer-plugin-api": "^1.0|^2.0",
+-                "php": ">=8.4.1"
+-            },
+-            "conflict": {
+-                "symfony/error-handler": "<7.4"
+-            },
+-            "require-dev": {
+-                "composer/composer": "^2.6",
+-                "symfony/console": "^7.4|^8.0",
+-                "symfony/dependency-injection": "^7.4|^8.0",
+-                "symfony/dotenv": "^7.4|^8.0",
+-                "symfony/http-foundation": "^7.4|^8.0",
+-                "symfony/http-kernel": "^7.4|^8.0"
+-            },
+-            "type": "composer-plugin",
+-            "extra": {
+-                "class": "Symfony\\Component\\Runtime\\Internal\\ComposerPlugin"
+-            },
+-            "autoload": {
+-                "psr-4": {
+-                    "Symfony\\Component\\Runtime\\": "",
+-                    "Symfony\\Runtime\\Symfony\\Component\\": "Internal/"
+-                },
+-                "exclude-from-classmap": [
+-                    "/Tests/"
+-                ]
+-            },
+-            "notification-url": "https://packagist.org/downloads/",
+-            "license": [
+-                "MIT"
+-            ],
+-            "authors": [
+-                {
+-                    "name": "Nicolas Grekas",
+-                    "email": "p@tchwork.com"
+-                },
+-                {
+-                    "name": "Symfony Community",
+-                    "homepage": "https://symfony.com/contributors"
+-                }
+-            ],
+-            "description": "Enables decoupling PHP applications from global state",
+-            "homepage": "https://symfony.com",
+-            "keywords": [
+-                "runtime"
+-            ],
+-            "support": {
+-                "source": "https://github.com/symfony/runtime/tree/v8.1.0"
+-            },
+-            "funding": [
+-                {
+-                    "url": "https://symfony.com/sponsor",
+-                    "type": "custom"
+-                },
+-                {
+-                    "url": "https://github.com/fabpot",
+-                    "type": "github"
+-                },
+-                {
+-                    "url": "https://github.com/nicolas-grekas",
+-                    "type": "github"
+-                },
+-                {
+-                    "url": "https://tidelift.com/funding/github/packagist/symfony/symfony",
+-                    "type": "tidelift"
+-                }
+-            ],
+-            "time": "2026-05-29T05:06:50+00:00"
+-        },
+         {
+             "name": "symfony/security-bundle",
+             "version": "v8.1.8",
+@@ -5739,5 +5655,5 @@
+         "ext-iconv": "*"
+     },
+     "platform-dev": {},
+-    "plugin-api-version": "2.9.0"
++    "plugin-api-version": "2.11.0"
+ }
+diff --git a/public/index.php b/public/index.php
+index 1cff472..80e6c6b 100644
+--- a/public/index.php
++++ b/public/index.php
+@@ -3,7 +3,41 @@
+ declare(strict_types=1);
+ 
+ use App\Kernel;
++use Symfony\Component\HttpFoundation\Request;
+ 
+-require_once __DIR__.'/../vendor/autoload_runtime.php';
++require dirname(__DIR__).'/vendor/autoload.php';
+ 
+-return static fn (array $context): Kernel => new Kernel($context['APP_ENV'], (bool) $context['APP_DEBUG']);
++// The variables of .env.local.php (composer dump-env prod). FrankenPHP gives each request a new $_SERVER, so they are
++// merged into every request's: symfony/runtime merges the whole $_SERVER the worker started with.
++$env = require dirname(__DIR__).'/.env.local.php';
++$_SERVER += $env;
++$kernel = new Kernel($_SERVER['APP_ENV'], (bool) ($_SERVER['APP_DEBUG'] ?? 'prod' !== $_SERVER['APP_ENV']));
++
++// Classic mode (local-bench/Caddyfile.classic): one request per script. FrankenPHP sets FRANKENPHP_WORKER for workers.
++if (!isset($_SERVER['FRANKENPHP_WORKER'])) {
++    $request = Request::createFromGlobals();
++    $response = $kernel->handle($request);
++    $response->send();
++    $kernel->terminate($request, $response);
++
++    return;
++}
++
++// Worker mode: Symfony boots once, then handles requests in a loop, restarted every 500 requests like symfony/runtime
++$kernel->boot();
++$request = $response = null;
++$handler = static function () use ($kernel, $env, &$request, &$response): void {
++    $_SERVER += $env;
++    $request = Request::createFromGlobals();
++    $response = $kernel->handle($request);
++    $response->send();
++};
++$loops = 0;
++do {
++    $keepRunning = frankenphp_handle_request($handler);
++    // After the response is sent: Symfony resets its services
++    if (null !== $request && null !== $response) {
++        $kernel->terminate($request, $response);
++    }
++    gc_collect_cycles();
++} while ($keepRunning && ++$loops < 500);

@@ -18,5 +18,6 @@
 /phpstan.neon
 ###< phpstan/phpstan ###
 
-# symfony: generated on cache warmup, only used by IDEs for PHP config files
+# symfony: generated on cache warmup, only used by IDEs for PHP config files (reference.php) and YAML ones (schema.json)
 /config/reference.php
+/config/schema.json

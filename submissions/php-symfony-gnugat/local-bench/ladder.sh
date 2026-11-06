@@ -10,8 +10,8 @@
 # nobody waits for. So each setup's load calibrates itself: errors above 1% halve it, p95 under 1 s doubles it,
 # and the run starts again; the next rounds start from the calibrated load. Users only wait longer at higher loads:
 # within the window, requests served per second stay the same.
-# Env: PHASES (default: every phase commit of the branch, from git log), BASE (the commit before phase 0, default: the
-#      merge base with origin/main).
+# Env: PHASES (phase numbers, e.g. "12 13"; default: every phase commit of the branch, from git log), BASE (the commit
+#      before phase 0, default: the merge base with origin/main).
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 APP="$(cd "$HERE/.." && pwd)"
@@ -29,7 +29,7 @@ phases() {
       Add\ php-symfony-gnugat*) echo "0 $hash" ;;
       *phase\ [0-9]*,*) echo "$(sed -E 's/.*phase ([0-9]+),.*/\1/' <<< "$subject") $hash" ;;
     esac
-  done
+  done | if [ -n "${PHASES:-}" ]; then grep -E "^($(tr ' ' '|' <<< "$PHASES")) "; else cat; fi
 }
 
 case "${1:-}" in
@@ -53,7 +53,7 @@ case "${1:-}" in
       while read -r n _hash <&3; do
         for mode in worker classic; do
           users_file="$STATE/users.p$n.$mode"
-          [ -f "$users_file" ] || { if [ "$mode" = worker ]; then [ "$n" -ge 6 ] && echo 10000 || echo 3000; else [ "$n" -ge 9 ] && echo 4000 || echo 2000; fi; } > "$users_file"
+          [ -f "$users_file" ] || { if [ "$mode" = worker ]; then [ "$n" -ge 4 ] && echo 10000 || echo 3000; else [ "$n" -ge 7 ] && echo 4000 || echo 2000; fi; } > "$users_file"
           args="--cpus=0.25"; [ "$mode" = classic ] && args="$args -v $STATE/Caddyfile.classic.p$n:/app/Caddyfile:ro"
           for _try in 1 2 3 4 5; do
             users="$(cat "$users_file")"

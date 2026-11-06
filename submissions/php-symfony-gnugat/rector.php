@@ -23,6 +23,8 @@ return RectorConfig::configure()
         // [php-symfony-gnugat]
         __DIR__.'/config/bundles.php',
         __DIR__.'/config/reference.php',
+        // Ignored by the repository's root .gitignore: other submissions' code, copied for local benchmarks
+        __DIR__.'/local-bench/results',
         __DIR__.'/var',
         __DIR__.'/vendor',
 

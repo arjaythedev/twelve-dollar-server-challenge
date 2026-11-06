@@ -35,6 +35,8 @@ foreground and reads the challenge's `HOST`, `PORT`, `SQLITE_PATH`, and
   recovery and deferred task-running approach was informed by the publicly
   described work in
   [rust-iouring-kensac #264](https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/264).
+- The B-tree traversal helpers in `src/btree_feed.h` are adapted from
+  [c-iouring-pavlyhalim #245](https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/245).
 - Reads access the supplied SQLite database on each request. The feed and post
   fast paths use SQLite B-tree cursors against the existing schema and indexes,
   with prepared SQL fallbacks. No response, row, or JWT-verification result is

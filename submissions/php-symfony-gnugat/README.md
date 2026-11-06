@@ -11,12 +11,14 @@ Symfony components first. No custom HTTP server, no hand-written JSON, no group 
 | SQLite driver | PDO SQLite (SQLite 3.45.2) via Doctrine DBAL 4.5 (DoctrineBundle 3.3) |
 | **Nginx or direct** | **Direct**: FrankenPHP serves `HOST:PORT` itself (`0.0.0.0:80` on the droplet) |
 
-FrankenPHP and Composer are pinned and checksum-verified in `install.sh`, PHP dependencies in `composer.lock`.
+FrankenPHP and Composer are pinned in `install.sh`: FrankenPHP verified by its GitHub build attestation (its release
+binaries are rebuilt every night, so their checksum changes), Composer by its checksum. PHP dependencies are pinned in
+`composer.lock`.
 
 ## Running it
 
 ```bash
-sudo bash install.sh   # FrankenPHP's release binary (PHP built in) and Composer, pinned and checksum-verified
+sudo bash install.sh   # FrankenPHP's release binary (PHP built in) and Composer, pinned and verified
 bash build.sh          # composer install --no-dev --classmap-authoritative, dump-env prod, cache:warmup
 SQLITE_PATH=... JWT_SECRET=... HOST=0.0.0.0 PORT=80 bash start.sh
 ```

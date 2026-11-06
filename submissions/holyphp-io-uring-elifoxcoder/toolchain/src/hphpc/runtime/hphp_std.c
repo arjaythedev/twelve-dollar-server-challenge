@@ -3095,8 +3095,18 @@ static void hp_ur_use_ring(hp_sock fd) {
     int r = hp_ur_ring_of(fd);
     hp_ur_cur = (r >= 0) ? &hp_ur_rings[r] : &hp_ur_rings[0];
 }
-/* A direct slot was released: let that ring's accept be re-armed if its
- * table had been full. */
+/* A direct slot has actually left its registered file table: resume accepts
+ * after the same hysteresis used when a ring fills. */
+static void hp_ur_slot_maybe_resume(struct hp_uring_ring *rg) {
+    /* Hysteresis matches Rust: pause near the end, resume only after a
+     * substantial number of slots are free again. */
+    if (rg->accept_full && rg->live + 2 * rg->accept_margin < rg->dircap) {
+        rg->accept_full = 0;
+        rg->accept_resume = 1;
+    }
+}
+
+/* Synchronous removal (the SQ-full fallback) still has the live slot state. */
 static void hp_ur_slot_freed(hp_sock fd) {
     int r = hp_ur_ring_of(fd);
     if (r < 0) return;
@@ -3106,12 +3116,18 @@ static void hp_ur_slot_freed(hp_sock fd) {
         st->slot_live = 0;
         if (rg->live) rg->live--;
     }
-    /* Hysteresis matches Rust: pause near the end, resume only after a
-     * substantial number of slots are free again. */
-    if (rg->accept_full && rg->live + 2 * rg->accept_margin < rg->dircap) {
-        rg->accept_full = 0;
-        rg->accept_resume = 1;
-    }
+    hp_ur_slot_maybe_resume(rg);
+}
+
+/* Async close CQEs may arrive after this connection state has been detached,
+ * or even after the same direct slot has been reused. Account only the old
+ * close here; never touch the current slot's generation/state. */
+static void hp_ur_slot_close_done(hp_sock fd) {
+    int r = hp_ur_ring_of(fd);
+    if (r < 0) return;
+    struct hp_uring_ring *rg = &hp_ur_rings[r];
+    if (rg->live) rg->live--;
+    hp_ur_slot_maybe_resume(rg);
 }
 
 /* An enter is only needed when the ring has SQEs to submit, deferred task
@@ -3359,28 +3375,31 @@ static hp_sock hp_ur_ud_handle(uint64_t ud);
 
 /* Submit one IORING_OP_CLOSE for a registered file slot. The uapi encodes
  * the slot as file_index = idx + 1 and rejects IOSQE_FIXED_FILE on CLOSE. */
-static bool hp_ur_close_slot(uint32_t idx, uint64_t ud) {
+/* 1 = asynchronous close queued, 0 = synchronous table removal succeeded,
+ * -1 = both close paths failed. */
+static int hp_ur_close_slot(uint32_t idx, uint64_t ud) {
     struct hp_uring_sqe s;
     memset(&s, 0, sizeof s);
     s.opcode = HP_UR_OP_CLOSE;
     s.fd = 0;
     s.file_index = idx + 1;
     s.user_data = ud;
-    if (hp_ur_sq_push(&s)) return true;
+    if (hp_ur_sq_push(&s)) return 1;
     hp_st[HP_ST_ARM_FAIL]++;
     long pend = (long)(hp_ur_sqtail -
         __atomic_load_n(hp_ur_sq_head, __ATOMIC_ACQUIRE));
     hp_ur_enter(pend, 0, 0);
-    if (hp_ur_sq_push(&s)) return true;
+    if (hp_ur_sq_push(&s)) return 1;
     /* Last resort: clear the registered slot synchronously. */
     int nfd = -1;
     struct hp_uring_files_update up;
     up.offset = idx;
     up.resv = 0;
     up.fds = (uint64_t)(uintptr_t)&nfd;
-    syscall(SYS_io_uring_register, (long)hp_ur_fd,
-            HP_UR_REGISTER_FILES_UPDATE, (long)&up, 1L);
-    return false;
+    if (syscall(SYS_io_uring_register, (long)hp_ur_fd,
+                HP_UR_REGISTER_FILES_UPDATE, (long)&up, 1L) == 1)
+        return 0;
+    return -1;
 }
 
 /* The app asked to close an fd while a SEND is still queued in the ring.
@@ -3398,9 +3417,14 @@ static void hp_ur_finish_close(hp_sock fd) {
     st->closeafter = 0;
     st->sarmed = 0;                /* nothing may defer the close again */
     if (st->direct) {
-        if (!st->listener)
-            hp_ur_close_slot((uint32_t)st->diridx,
-                             hp_ur_ud(st, fd, HP_UR_KIND_CLOSE));
+        if (!st->listener) {
+            int cr = hp_ur_close_slot((uint32_t)st->diridx,
+                                      hp_ur_ud(st, fd, HP_UR_KIND_CLOSE));
+            if (cr == 0) hp_ur_slot_freed(fd);
+            else if (cr < 0 && hp_ur_dbg)
+                fprintf(stderr, "[ur] direct close failed fd=%d slot=%u errno=%d\n",
+                        (int)fd, st->diridx, errno);
+        }
         sock_forget((intptr_t)fd);
     } else {
         sock_forget((intptr_t)fd);
@@ -3417,7 +3441,6 @@ static void hp_ur_free_fd(hp_sock fd) {
     hp_ur_use_ring(fd);
     struct hp_urfds *st = hp_ur_st_of(fd);
     if (!st) return;
-    if (st->direct && !st->listener) hp_ur_slot_freed(fd);
     if (!st->listener && (st->sarmed || st->shead)) {
         if (!st->sarmed) hp_ur_arm_send_head(fd);
         /* The send SQE is already queued; the next wait cycle submits it
@@ -4683,6 +4706,14 @@ static int hp_ur_drain_ring(HpFdList *in) {
             kind != HP_UR_KIND_POLL && kind != HP_UR_KIND_ACCEPT &&
             kind != HP_UR_KIND_CLOSE) continue;
         hp_sock fd = hp_ur_ud_handle(ud);
+        if (kind == HP_UR_KIND_CLOSE) {
+            if (c->res == 0 || c->res == -EBADF)
+                hp_ur_slot_close_done(fd);
+            else if (hp_ur_dbg)
+                fprintf(stderr, "[ur] direct close CQE failed fd=%d res=%d\n",
+                        (int)fd, c->res);
+            continue;
+        }
         uint32_t epoch = (uint32_t)(ud >> 40);
         if (kind == HP_UR_KIND_READ && self->read_inflight > 0)
             self->read_inflight--;
@@ -4730,9 +4761,17 @@ static int hp_ur_drain_ring(HpFdList *in) {
                     /* no queue room: release the fresh slot right away */
                     if (nh != HP_SOCK_BAD) {
                         struct hp_urfds *ns = hp_ur_st_of(nh);
-                        hp_ur_slot_freed(nh);
-                        hp_ur_close_slot(idx,
+                        int cr = hp_ur_close_slot(idx,
                             ns ? hp_ur_ud(ns, nh, HP_UR_KIND_CLOSE) : 0);
+                        if (cr == 0) {
+                            hp_ur_slot_freed(nh);
+                            if (ns) hp_ur_detach(ns);
+                        } else if (cr > 0) {
+                            if (ns) hp_ur_detach(ns);
+                        } else if (hp_ur_dbg) {
+                            fprintf(stderr, "[ur] accepted slot close failed fd=%d slot=%u\n",
+                                    (int)nh, idx);
+                        }
                     } else {
                         if (hp_ur_accept_depth && hp_ur_rings[rr].live)
                             hp_ur_rings[rr].live--;
@@ -4789,7 +4828,6 @@ static int hp_ur_drain_ring(HpFdList *in) {
                 hp_uring_arm_accept(fd, rr);
             continue;
         }
-        if (kind == HP_UR_KIND_CLOSE) continue;
         if (kind == HP_UR_KIND_READ) {
             hp_st[HP_ST_CQE_RECV]++;
             hp_ur_recovery_mode = 1;

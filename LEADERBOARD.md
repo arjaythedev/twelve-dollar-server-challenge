@@ -362,7 +362,10 @@ answers once a backlog builds, OOM at 290k fixed; held, not merged: it didn't be
 verify, local JSON helper, ASCII length fast path; held, not merged: it didn't beat the merged row, it tied it) also held
 **71,000** (6,551 req/s, p95 51.6 / p99 73.8 ms, 0.93 % err = connect timeouts, 91 % CPU, 130 µs/req, 212 MB,
 2026-11-06). 75,000 passed the 2-minute probe but failed the 5-minute hold on connect timeouts (1.59 % at 91 % CPU);
-78,000 and 80,000 failed the 2-minute probe the same way (1.36 % / 1.68 %).
+78,000 and 80,000 failed the 2-minute probe the same way (1.36 % / 1.68 %). The next follow-up **#330** (`e7cc30b`,
+#329 plus `wal_autocheckpoint = 50000`; held, not merged: it tied the merged row too) also held **71,000** (6,556 req/s,
+p95 2.7 / p99 107.7 ms, 0.93 % err = connect timeouts, 100 % CPU, 143 µs/req, 409 MB, 2026-11-06), with the same
+75,000 5-minute failure (1.59 % timeouts).
 
 **Connection collapses in scored entries' failing probes.** v-epoll-i098 #191: 270,000 passed the 2-minute probe but
 failed the 5-minute hold with 60 % errors, nearly all `connection refused` from mid-hold on (an earlier attempt at

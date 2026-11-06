@@ -689,11 +689,12 @@ public plugin APIs (a custom page cache through `SQLITE_CONFIG_PCACHE2`, a custo
   `Sources/CShim/shim.c` is #264's `csrc/shim.c` with only signature/cast changes; the liburing loop (C) and the Swift
   HTTP/JSON/JWT/record-decoder/feed code are new but follow #264's design closely. Open question for Arjay: credited
   reuse (ruling 9) vs. the copies rule for a translation. Scored as submitted (257k at `952fd62`); held open for Arjay.
-- **c-iouring-le0nvfx #340 reuses c-iouring-pavlyhalim #245's B-tree helpers without credit**: `src/btree_feed.h`
+- **c-iouring-le0nvfx #340 reuses c-iouring-pavlyhalim #245's B-tree helpers**: `src/btree_feed.h`
   (schema checks, KeyInfo setup, record decoder, likes range count, multi-key descent, feed plan) closely follows #245's
   `src/btree.h` with renamed identifiers; `server.c`, `ring.c`, the WAL shim VFS and the checkpoint thread are its own.
-  Arjay ruled 2026-11-04 that reusing another entry's helpers is fine when the README credits it; its README credits
-  only #264. Scored as submitted (195k at `a0443a9`); held until the README credits #245.
+  Arjay ruled 2026-11-04 that reusing another entry's helpers is fine when the README credits it; `1d952d2` added the
+  #245 credit (plus whitespace-only restores in the vendored stock sqlite3.c) → merged at `1d952d2`. Scored at
+  `a0443a9` (195k).
 - **Reads can see uncommitted writes** in the same batch: Deno #119 (also serves a snapshot up to 20 ms stale), Zig #125.
 - **start.sh restart loops** (the app restarts itself instead of letting systemd see a crash): Deno #119, c-epoll #64,
   c-iouring-raoz #26 (restarts after a signal exit), go-epoll-Antheurus #65 (worker 0 re-spawns dead workers).

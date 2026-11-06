@@ -2643,9 +2643,10 @@ static _Thread_local int g_epfd = -1;
  * (the box sets 65535), so that is the default and the runtime clamps any
  * HPHP_DIRECT_FILES override to the same limit. */
 #define HP_UR_DIRECT_FILES_DEF     65535U
-/* Provided-buffer ring: one page-aligned ring plus N buffers. 16k buffers of
- * 1 KB cover the in-flight window at 280k mostly-idle connections. */
-#define HP_UR_PBUF_N_DEF           4096
+/* Provided-buffer ring: keep the in-flight receive window bounded per ring.
+ * 1k buffers of 1 KB match the Rust leader's count and are replenished as
+ * requests are consumed; the larger count remains available via HPHP_PBUF_N. */
+#define HP_UR_PBUF_N_DEF           1024
 
 /* Recv buffer size per connection, overridable at run time (HPHP_RECV_LEN)
  * so the size can be A/B-tested on one binary. */
@@ -2819,35 +2820,37 @@ static void hp_ur_chunk_release(struct hp_urchunk *c) {
  * that arrive after a close plus fd reuse drop. */
 struct hp_urfds {
     struct hp_urchunk *shead, *stail;     /* queued send chain */
-    int    squeued;
     hstr *rh;                             /* recv target as a live hstr:
                                               the kernel writes data[], the
                                               app gets it without a copy */
     size_t rcap;
     size_t rlen;                          /* fresh bytes available */
-    int    rarmed;                        /* a recv SQE is queued or in flight */
-    int    rready;                        /* rbuf holds unconsumed data */
-    int    reof;
-    int    listener;
-    int    pollarmed;
-    int    sarmed;                        /* a send SQE is queued or in flight */
-    int    rtagged;                       /* parked in the retry ring */
-    int    closeafter;                    /* close deferred until sends drain */
-    int    ctagged;                       /* listed for the deadline check */
-    int    epolled;                       /* readiness via epoll, no recv SQE */
-    int    ringconn;                      /* this connection holds a ring slot */
-    int    direct;                        /* direct descriptor (direct fds) */
-    int    slot_live;                     /* counted against its ring's accept table */
-    int    diridx;                        /* slot in the registered file table */
-    int    rmshot;                        /* recv SQE is multishot */
-    int    rreadq;                        /* queued for a bounded single-shot drain */
-    int    rreading;                      /* bounded single-shot recv is in flight */
-    int    ranswerq;                      /* ready, but deferred by the answer cap */
-    int    rborrowed;                     /* rh is an in-place view of a provided buffer */
-    uint32_t rborrow_bid;
-    int64_t cdeadline;
+    int64_t cdeadline;                    /* idle/close deadline */
     uint32_t epoch;
+    uint32_t rborrow_bid;
+    int32_t squeued;                      /* queued send chain length */
+    uint16_t diridx;                      /* slot in the registered file table */
+    unsigned int rarmed:1;                /* a recv SQE is queued or in flight */
+    unsigned int rready:1;                /* rbuf holds unconsumed data */
+    unsigned int reof:1;
+    unsigned int listener:1;
+    unsigned int pollarmed:1;
+    unsigned int sarmed:1;                /* a send SQE is queued or in flight */
+    unsigned int rtagged:1;               /* parked in the retry ring */
+    unsigned int closeafter:1;            /* close deferred until sends drain */
+    unsigned int ctagged:1;               /* listed for the deadline check */
+    unsigned int epolled:1;               /* readiness via epoll, no recv SQE */
+    unsigned int ringconn:1;              /* this connection holds a ring slot */
+    unsigned int direct:1;                /* direct descriptor (direct fds) */
+    unsigned int slot_live:1;             /* counted against its ring's accept table */
+    unsigned int rmshot:1;                /* recv SQE is multishot */
+    unsigned int rreadq:1;                /* queued for a bounded single-shot drain */
+    unsigned int rreading:1;              /* bounded single-shot recv is in flight */
+    unsigned int ranswerq:1;              /* ready, but deferred by the answer cap */
+    unsigned int rborrowed:1;             /* rh is an in-place view of a provided buffer */
 };
+_Static_assert(sizeof(struct hp_urfds) <= 72,
+               "per-connection runtime state must stay compact");
 
 /* Overflow readiness: the kernel caps the SQ ring at 32768 entries, so above
  * ~28k connections one armed recv per connection no longer fits. Those

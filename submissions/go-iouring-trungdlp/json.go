@@ -18,8 +18,46 @@ var needsEsc = func() (t [256]bool) {
 
 const hexDigits = "0123456789abcdef"
 
-// appendEsc appends s as the inside of a JSON string.
+const (
+	lo7 = 0x0101010101010101
+	hi7 = 0x8080808080808080
+)
+
+// plain8 reports whether none of the 8 bytes in w needs escaping (no '"', '\\' or control
+// character). Bytes >= 0x80 never need it.
+func plain8(w uint64) bool {
+	ctl := (w - lo7*0x20) &^ w           // high bit set where a byte < 0x20 (or a borrow from one)
+	q := w ^ (lo7 * '"')
+	quo := (q - lo7) &^ q                // high bit where a byte == '"'
+	bs := w ^ (lo7 * '\\')
+	bsl := (bs - lo7) &^ bs              // high bit where a byte == '\\'
+	return (ctl|quo|bsl)&hi7 == 0
+}
+
+// appendEsc appends s as the inside of a JSON string. Text without anything to escape (the
+// usual case) is checked 8 bytes at a time and copied in one piece.
 func appendEsc(b, s []byte) []byte {
+	i := 0
+	for ; i+8 <= len(s); i += 8 {
+		if !plain8(le64(s[i:])) {
+			break
+		}
+	}
+	for ; i < len(s) && !needsEsc[s[i]]; i++ {
+	}
+	if i == len(s) {
+		return append(b, s...)
+	}
+	return appendEscSlow(b, s)
+}
+
+func le64(b []byte) uint64 {
+	_ = b[7]
+	return uint64(b[0]) | uint64(b[1])<<8 | uint64(b[2])<<16 | uint64(b[3])<<24 |
+		uint64(b[4])<<32 | uint64(b[5])<<40 | uint64(b[6])<<48 | uint64(b[7])<<56
+}
+
+func appendEscSlow(b, s []byte) []byte {
 	start := 0
 	for i := 0; i < len(s); i++ {
 		c := s[i]

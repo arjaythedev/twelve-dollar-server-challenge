@@ -218,14 +218,17 @@ func (r *uring) flush() {
 }
 
 // enter publishes the local tail and calls io_uring_enter. With ts set it waits for min
-// completions or the timeout (as a blocking syscall the Go runtime knows about).
+// completions or the timeout. Every call is a raw syscall, the wait included: as an ordinary
+// blocking syscall, the runtime's sysmon thread would take the P away during each 1 ms wait and
+// then keep polling every 20 us. With one thread doing all the work and no garbage collection
+// there is nothing for the runtime to do meanwhile.
 func (r *uring) enter(flags uint32, min uint32, ts *timespec) {
 	atomic.StoreUint32(r.sqTail, r.tail)
 	n := r.pending
 	r.pending = 0
 	if ts != nil {
 		a := getEventsArg{ts: uint64(uintptr(unsafe.Pointer(ts)))}
-		_, _, e := syscall.Syscall6(sysIoUringEnter, uintptr(r.fd), uintptr(n), uintptr(min), uintptr(flags|enterExtArg),
+		_, _, e := syscall.RawSyscall6(sysIoUringEnter, uintptr(r.fd), uintptr(n), uintptr(min), uintptr(flags|enterExtArg),
 			uintptr(unsafe.Pointer(&a)), unsafe.Sizeof(a))
 		enterErr(e)
 		return

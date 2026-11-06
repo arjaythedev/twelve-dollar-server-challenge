@@ -6,6 +6,7 @@ package main
 
 import (
 	"fmt"
+	"strconv"
 	"os"
 	"syscall"
 	"time"
@@ -29,8 +30,8 @@ const (
 	bufSize     = 2048   // receive buffer; a longer request is read in more than one piece
 	bufCount    = 1024   // receive buffers per ring
 	maxRings    = 16
-	waitMin     = 256    // a pass waits for this many completions on ring 0 ...
-	waitNs      = 1000000 // ... or this long, whichever comes first
+	waitMin     = 4096   // a pass waits for this many completions on ring 0 ...
+	waitNs      = 4000000 // ... or this long, whichever comes first
 	readsPerPass   = 16384
 	answersPerPass = 2048
 	outCap      = 8192
@@ -615,14 +616,16 @@ func (s *server) readRounds() {
 	}
 }
 
+var tuneWaitNs, tuneWaitMin = envInt("TD_WAIT_NS", waitNs), envInt("TD_WAIT_MIN", waitMin)
+
 func (s *server) run() {
-	ts := timespec{nsec: waitNs}
+	ts := timespec{nsec: int64(tuneWaitNs)}
 	for {
 		busy := s.rq.len() > 0 || s.ready.len() > 0
 		for ri := len(s.rings) - 1; ri >= 0; ri-- {
 			u := s.rings[ri].u
 			if ri == 0 && !busy {
-				u.enter(enterGetEvents, waitMin, &ts)
+				u.enter(enterGetEvents, uint32(tuneWaitMin), &ts)
 			} else {
 				u.enter(enterGetEvents, 0, nil)
 			}
@@ -639,4 +642,11 @@ func (s *server) run() {
 		}
 		s.endPass()
 	}
+}
+
+func envInt(k string, d int) int {
+	if v, err := strconv.Atoi(os.Getenv(k)); err == nil {
+		return v
+	}
+	return d
 }

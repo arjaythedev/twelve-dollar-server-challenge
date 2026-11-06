@@ -341,7 +341,7 @@ static void db_open(const char *path) {
   if (sqlite3_exec(db, "PRAGMA journal_mode=WAL;PRAGMA synchronous=NORMAL;PRAGMA temp_store=MEMORY;"
                        "PRAGMA mmap_size=0;PRAGMA cache_size=-16384;PRAGMA busy_timeout=5000;",
                    NULL, NULL, &em) != SQLITE_OK) { fprintf(stderr, "pragma: %s\n", em); exit(1); }
-  sqlite3_exec(db, g_ckpt_child ? "PRAGMA wal_autocheckpoint=200000;" : "PRAGMA wal_autocheckpoint=10000;", NULL, NULL, NULL);   /* small, frequent checkpoints: big inline ones stall the loop on slow disks */
+  sqlite3_exec(db, g_ckpt_child ? "PRAGMA wal_autocheckpoint=50000;" : "PRAGMA wal_autocheckpoint=10000;", NULL, NULL, NULL);   /* small, frequent checkpoints: big inline ones stall the loop on slow disks */
   st_feed = prep(POST_SQL "ORDER BY p.created_at DESC, p.id DESC LIMIT 20");
   st_one = prep(POST_SQL "WHERE p.id=?");
   st_ins = prep("INSERT INTO posts(user_id,body) VALUES(?,?) RETURNING id,created_at");

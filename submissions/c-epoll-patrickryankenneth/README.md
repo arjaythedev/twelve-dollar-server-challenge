@@ -12,7 +12,7 @@
 - Prepared, persistent statements; WAL + `synchronous=NORMAL`; each write is committed before its response is sent.
 - No response caches, query caches or table copies.
 - `/feed` and `/posts/:id` are read through SQLite's own B-tree cursor API (stock SQLite, unpatched): the `posts_created_at_id_idx` index scan, `posts` and `users` seeks, and like counts read from `likes_post_id_idx` on every request. Nothing is cached between requests, and no counters are kept in memory. Any row the fast path doesn't cover (unknown id, overflow record, id span of 256 or more) falls back to the normal prepared SQL, so every route works for any request. `NO_BT_FEED=1` turns the cursor path off.
-- WAL checkpoints run in a helper process (forked before the database is opened) that runs `wal_checkpoint(PASSIVE)` once a second on its own connection, so checkpoint fsyncs never block the serving loop. The server's own auto-checkpoint is a 200,000-page safety net. Commits are unchanged: WAL, `synchronous=NORMAL`, committed before the response. `NO_CKPT_CHILD=1` goes back to inline auto-checkpointing at 10,000 pages.
+- WAL checkpoints run in a helper process (forked before the database is opened) that runs `wal_checkpoint(PASSIVE)` once a second on its own connection, so checkpoint fsyncs never block the serving loop. The server's own auto-checkpoint is a 50,000-page safety net (about 200 MB of WAL). Commits are unchanged: WAL, `synchronous=NORMAL`, committed before the response. `NO_CKPT_CHILD=1` goes back to inline auto-checkpointing at 10,000 pages.
 
 ## Local test notes
 - Load was generated with a custom epoll client that follows bench/load.js's user model, not k6 itself, because k6 needs a lot of RAM per VU on a single test machine.

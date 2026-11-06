@@ -210,7 +210,7 @@ func (r *uring) reserve(n uint32) {
 // flush submits everything queued and runs completions, without waiting.
 func (r *uring) flush() {
 	for tries := 0; ; tries++ {
-		r.enter(enterGetEvents, 0, nil)
+		r.poll()
 		if r.sqeFree() > 0 || tries > 100 {
 			return
 		}
@@ -249,6 +249,14 @@ func enterErr(e syscall.Errno) {
 		println("io_uring_enter:", e.Error())
 	}
 }
+
+// zeroTS makes a waiting enter return at once.
+var zeroTS timespec
+
+// poll submits and collects completions without waiting. It asks for many completions with a zero
+// timeout instead of none: newer kernels run at most max(min_complete, 20) deferred completions
+// per enter, so an enter with min_complete = 0 would see only ~20 of them.
+func (r *uring) poll() { r.enter(enterGetEvents, cqEntries, &zeroTS) }
 
 func atomicLoad(p *uint32) uint32     { return atomic.LoadUint32(p) }
 func atomicStore(p *uint32, v uint32) { atomic.StoreUint32(p, v) }

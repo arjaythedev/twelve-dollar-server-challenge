@@ -117,8 +117,10 @@ type server struct {
 	app     *app
 	listen  []int
 	slots   uint32
-	pool    [][]byte
-	free    []int32
+	pool     [][]byte
+	freeOut  []int32 // spare response buffers
+	freePart []int32 // spare request buffers
+	dead     []int32 // pool slots whose buffer was dropped
 	touched []ref
 	held    []ref
 	rq      fifo // connections to read, first in first out
@@ -131,27 +133,52 @@ type server struct {
 
 // ---- buffers ------------------------------------------------------------------------------------
 
-func (s *server) take() int32 {
-	if n := len(s.free); n > 0 {
-		i := s.free[n-1]
-		s.free = s.free[:n-1]
-		return i
+// Buffers live in s.pool and are named by index+1 (0 = none). Responses take 8 KB buffers; bytes
+// read but not yet answered take small ones (a request is a few hundred bytes), so a backlog of
+// tens of thousands of waiting requests costs megabytes, not hundreds of them. Past keepFree spare
+// buffers of a kind, returned ones are dropped for the collector.
+const (
+	partCap  = 512
+	keepFree = 4096
+)
+
+func (s *server) takeOut() int32  { return s.takeKind(&s.freeOut, outCap) }
+func (s *server) takePart() int32 { return s.takeKind(&s.freePart, partCap) }
+
+func (s *server) takeKind(free *[]int32, size int) int32 {
+	if n := len(*free); n > 0 {
+		i := (*free)[n-1]
+		*free = (*free)[:n-1]
+		return i + 1
 	}
-	s.pool = append(s.pool, make([]byte, 0, outCap))
-	return int32(len(s.pool) - 1)
+	b := make([]byte, 0, size)
+	if n := len(s.dead); n > 0 {
+		i := s.dead[n-1]
+		s.dead = s.dead[:n-1]
+		s.pool[i] = b
+		return i + 1
+	}
+	s.pool = append(s.pool, b)
+	return int32(len(s.pool))
 }
 
 func (s *server) give(i int32) {
 	if i == 0 {
 		return
 	}
-	b := s.pool[i-1]
-	if cap(b) > 4*outCap {
-		s.pool[i-1] = make([]byte, 0, outCap)
-	} else {
-		s.pool[i-1] = b[:0]
+	i--
+	b := s.pool[i]
+	free := &s.freeOut
+	if cap(b) < outCap {
+		free = &s.freePart
 	}
-	s.free = append(s.free, i-1)
+	if len(*free) >= keepFree || cap(b) > 4*outCap {
+		s.pool[i] = nil
+		s.dead = append(s.dead, i)
+		return
+	}
+	s.pool[i] = b[:0]
+	*free = append(*free, i)
 }
 
 func (s *server) buf(i int32) []byte { return s.pool[i-1] }
@@ -248,7 +275,7 @@ func (s *server) finish(ri int, slot uint32, c *conn) {
 // stash keeps bytes on the connection behind any it already has.
 func (s *server) stash(c *conn, data []byte) {
 	if c.part == 0 {
-		c.part = s.take() + 1
+		c.part = s.takePart()
 	}
 	s.pool[c.part-1] = append(s.pool[c.part-1], data...)
 }
@@ -291,7 +318,7 @@ func (s *server) serve(ri int, slot uint32, c *conn, data []byte) {
 			s.mark(ri, slot, c)
 			c.flags |= fAnswered | fCloseAfter
 			if c.out == 0 {
-				c.out = s.take() + 1
+				c.out = s.takeOut()
 			}
 			s.pool[c.out-1] = errorResp(s.pool[c.out-1], 400, "bad request")
 			off = len(buf)
@@ -307,7 +334,7 @@ func (s *server) serve(ri int, slot uint32, c *conn, data []byte) {
 		s.mark(ri, slot, c)
 		c.flags |= fAnswered
 		if c.out == 0 {
-			c.out = s.take() + 1
+			c.out = s.takeOut()
 		}
 		s.pool[c.out-1] = s.app.handle(&s.req, s.pool[c.out-1])
 		off += used
@@ -323,7 +350,7 @@ func (s *server) serve(ri int, slot uint32, c *conn, data []byte) {
 			s.pool[c.part-1] = p[:n]
 		}
 	} else if len(rest) > 0 {
-		c.part = s.take() + 1
+		c.part = s.takePart()
 		s.pool[c.part-1] = append(s.pool[c.part-1], rest...)
 	}
 }
@@ -367,6 +394,7 @@ func (s *server) complete(ri int, r *ring, u uint64, res int32, flags uint32) {
 	case udAccept:
 		r.accepts[slot]--
 		if res >= 0 {
+			stAccepts++
 			c := &r.conns[res]
 			g := c.gen + 1
 			*c = conn{gen: g, flags: fOpen}
@@ -400,6 +428,7 @@ func (s *server) complete(ri int, r *ring, u uint64, res int32, flags uint32) {
 				s.queueRead(ri, slot, c)
 			}
 		case res == -int32(syscall.ENOBUFS):
+			stEnobufs++
 			// A burst emptied the buffer ring. Not re-armed now: re-arming every receive at once
 			// would only repeat the storm.
 			s.queueRead(ri, slot, c)
@@ -605,9 +634,10 @@ func (s *server) readRounds() {
 			return
 		}
 		budget -= k
+		stReads += k
 		for _, r := range s.rings {
 			if r.u.pending > 0 {
-				r.u.enter(enterGetEvents, 0, nil)
+				r.u.poll()
 			}
 		}
 		for ri := range s.rings {
@@ -618,6 +648,33 @@ func (s *server) readRounds() {
 
 var tuneWaitNs, tuneWaitMin = envInt("TD_WAIT_NS", waitNs), envInt("TD_WAIT_MIN", waitMin)
 
+// Debug counters (TD_STATS=1): printed once a second.
+var (
+	statsOn                                                 = os.Getenv("TD_STATS") != ""
+	stPasses, stCqes, stEnobufs, stAccepts, stReads, stAnsw int
+	stMaxPass                                               time.Duration
+	stLast                                                  = time.Now()
+)
+
+func (s *server) stats(t0 time.Time, n int) {
+	stPasses++
+	stCqes += n
+	if d := time.Since(t0); d > stMaxPass {
+		stMaxPass = d
+	}
+	if time.Since(stLast) >= time.Second {
+		open := 0
+		for _, r := range s.rings {
+			open += int(r.open)
+		}
+		fmt.Fprintf(os.Stderr, "stats: passes=%d cqes/pass=%.1f maxpass=%v accepts=%d enobufs=%d reads=%d answers=%d rq=%d ready=%d held=%d rings=%d open=%d pool=%d\n",
+			stPasses, float64(stCqes)/float64(stPasses), stMaxPass.Round(time.Microsecond), stAccepts, stEnobufs, stReads, stAnsw,
+			s.rq.len(), s.ready.len(), len(s.held), len(s.rings), open, len(s.pool))
+		stPasses, stCqes, stEnobufs, stAccepts, stReads, stAnsw, stMaxPass = 0, 0, 0, 0, 0, 0, 0
+		stLast = time.Now()
+	}
+}
+
 func (s *server) run() {
 	ts := timespec{nsec: int64(tuneWaitNs)}
 	for {
@@ -627,13 +684,15 @@ func (s *server) run() {
 			if ri == 0 && !busy {
 				u.enter(enterGetEvents, uint32(tuneWaitMin), &ts)
 			} else {
-				u.enter(enterGetEvents, 0, nil)
+				u.poll()
 			}
 		}
-		s.app.now = time.Now().Unix()
+		t0 := time.Now()
+		s.app.now = t0.Unix()
 		s.answers = answersPerPass
+		n := 0
 		for ri := range s.rings {
-			s.drain(ri)
+			n += s.drain(ri)
 		}
 		s.runReady()
 		s.readRounds()
@@ -641,6 +700,10 @@ func (s *server) run() {
 			s.releaseHeld()
 		}
 		s.endPass()
+		if statsOn {
+			stAnsw += answersPerPass - s.answers
+			s.stats(t0, n)
+		}
 	}
 }
 

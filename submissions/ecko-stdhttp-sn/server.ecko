@@ -1,0 +1,172 @@
+# The $12 server challenge API (SPEC.md) in Ecko: std.http on std.sql.
+#
+# Config comes from the environment: SQLITE_PATH, JWT_SECRET, HOST, PORT.
+# Response bodies are built as text rather than with http.json, because the
+# spec fixes the key order and an Ecko map has none.
+
+import std.encoding
+import std.hash
+import std.http
+import std.json
+import std.os
+import std.sql
+import std.str
+import std.time
+
+SECRET = os.env_or("JWT_SECRET", "twelve-dollar-challenge")
+DB = sql.open(os.env_or("SQLITE_PATH", "feed.db"))
+STARTED = time.monotonic()
+
+# Only this process opens the database, so it takes SQLite's lock once and
+# keeps it. Set before WAL, the WAL index then lives in process memory rather
+# than a shared-memory file, and a read no longer takes and releases a file
+# lock (two fcntl calls) every time.
+sql.query(DB, "PRAGMA locking_mode = EXCLUSIVE")
+sql.query(DB, "PRAGMA journal_mode = WAL")
+sql.exec(DB, "PRAGMA synchronous = NORMAL")
+sql.exec(DB, "PRAGMA cache_size = -65536")
+
+POST_JSON = "json_object('id', p.id, 'body', p.body, 'created_at', p.created_at, 'author', u.username, 'like_count', (SELECT count(*) FROM likes l WHERE l.post_id = p.id))"
+FEED_SQL = "SELECT '\{\"posts\":[' || group_concat(j, ',' ORDER BY created_at DESC, id DESC) || ']}' AS body FROM (SELECT {POST_JSON} AS j, p.created_at, p.id FROM posts p JOIN users u ON u.id = p.user_id ORDER BY p.created_at DESC, p.id DESC LIMIT 20)"
+ONE_SQL = "SELECT {POST_JSON} AS j FROM posts p JOIN users u ON u.id = p.user_id WHERE p.id = ?"
+JSON_HEADERS = { "content-type": "application/json" }
+
+fn reply(status, body) = http.response(status, body, JSON_HEADERS)
+
+fn fail(status, message) = reply(status, "\{\"error\":{json.encode(message)}}")
+
+fn post_json(r) = "\{\"id\":{r.id},\"body\":{json.encode(r.body)},\"created_at\":{json.encode(r.created_at)},\"author\":{json.encode(r.username)},\"like_count\":{r.like_count}}"
+
+# A positive integer written in plain digits, or null.
+fn parse_id(s) {
+    unless s != "" and str.is_digit(s) { return null }
+    id = try { int(s) } catch (e) { null }
+    if id != null and id > 0 { id } else { null }
+}
+
+fn b64url_decode(s) {
+    std = replace(replace(s, "-", "+"), "_", "/")
+    pad = (4 - len(std) % 4) % 4
+    encoding.base64_decode_text(std + str.repeat("=", pad))
+}
+
+fn b64url_encode(data) = replace(
+    replace(replace(encoding.base64_encode(data), "+", "-"), "/", "_"),
+    "=",
+    "",
+)
+
+# The caller as { id, username }, or an error response.
+fn authenticate(req) {
+    header = get(req.headers, "authorization") ?? ""
+    unless str.starts_with(header, "Bearer ") { return fail(401, "missing bearer token") }
+    token = str.substring(header, 7, len(header))
+    parts = str.split(token, ".")
+    if len(parts) != 3 { return fail(401, "invalid or expired token") }
+    claims = try {
+        head = json.decode(b64url_decode(parts[0]))
+        unless type_of(head) == "map" and get(head, "alg") == "HS256" { error("alg") }
+        want = b64url_encode(hash.hmac_sha256_bytes(SECRET, "{parts[0]}.{parts[1]}"))
+        unless hash.constant_eq(want, parts[2]) { error("signature") }
+        body = json.decode(b64url_decode(parts[1]))
+        unless type_of(body) == "map" { error("payload") }
+        exp = get(body, "exp")
+        unless type_of(exp) == "int" or type_of(exp) == "float" { error("exp") }
+        if exp <= time.now() // 1000 { error("expired") }
+        body
+    } catch (e) { null }
+    if claims == null { return fail(401, "invalid or expired token") }
+    sub = get(claims, "sub")
+    name = get(claims, "username")
+    uid = if type_of(sub) == "string" { parse_id(sub) } else { null }
+    if uid == null or type_of(name) != "string" { return fail(401, "invalid token payload") }
+    { id: uid, username: name }
+}
+
+fn is_response(v) = type_of(v) == "map" and get(v, "status") != null
+
+fn health() {
+    try {
+        sql.query_one(DB, "SELECT 1 AS ok")
+        reply(
+            200,
+            "\{\"status\":\"ok\",\"db\":\"ok\",\"uptime_s\":{(time.monotonic() - STARTED) // 1000}}",
+        )
+    } catch (e) {
+        msg = get(e, "message") ?? "unknown"
+        reply(503, "\{\"status\":\"degraded\",\"db\":\"unreachable\",\"error\":{json.encode(msg)}}")
+    }
+}
+
+fn feed() = reply(200, sql.query_one(DB, FEED_SQL).body)
+
+fn show(raw) {
+    id = parse_id(raw)
+    if id == null { return fail(400, "invalid post id") }
+    row = sql.query_one(DB, ONE_SQL, [id])
+    if row == null { return fail(404, "post not found") }
+    reply(200, "\{\"post\":{row.j}}")
+}
+
+fn create(req) {
+    user = authenticate(req)
+    if is_response(user) { return user }
+    # Wrapped in a list so a body that is itself valid JSON for any value,
+    # null or the string "malformed" included, is told apart from a parse error.
+    parsed = try { [json.decode(req.body)] } catch (e) { null }
+    if parsed == null { return fail(400, "malformed JSON body") }
+    payload = parsed[0]
+    raw = if type_of(payload) == "map" { get(payload, "body") } else { null }
+    unless type_of(raw) == "string" { return fail(400, "body is required") }
+    body = str.trim(raw)
+    if body == "" { return fail(400, "body is required") }
+    if len(body) > 500 { return fail(400, "body must be at most 500 characters") }
+    made = sql.query_one(
+        DB,
+        "INSERT INTO posts (user_id, body) VALUES (?, ?) RETURNING id, created_at",
+        [user.id, body],
+    )
+    row = {
+        id: made.id,
+        body: body,
+        created_at: made.created_at,
+        username: user.username,
+        like_count: 0,
+    }
+    reply(201, "\{\"post\":{post_json(row)}}")
+}
+
+fn like(req, raw) {
+    user = authenticate(req)
+    if is_response(user) { return user }
+    id = parse_id(raw)
+    if id == null { return fail(400, "invalid post id") }
+    if sql.query_one(DB, "SELECT 1 AS ok FROM posts WHERE id = ?", [id]) == null {
+        return fail(404, "post not found")
+    }
+    added = sql.exec(
+        DB,
+        "INSERT INTO likes (user_id, post_id) VALUES (?, ?) ON CONFLICT (user_id, post_id) DO NOTHING",
+        [user.id, id],
+    )
+    status = if added == 1 { 201 } else { 200 }
+    reply(status, "\{\"liked\":true,\"already_liked\":{added != 1},\"post_id\":{id}}")
+}
+
+fn route(req) {
+    parts = str.split(req.path, "/")
+    match [req.method, parts] {
+        ["GET", ["", "health"]] => health()
+        ["GET", ["", "feed"]] => feed()
+        ["GET", ["", "posts", id]] => show(id)
+        ["POST", ["", "posts"]] => create(req)
+        ["POST", ["", "posts", id, "like"]] => like(req, id)
+        _ => fail(404, "not found")
+    }
+}
+
+fn handle(req) {
+    try { route(req) } catch (e) { fail(500, "internal server error") }
+}
+
+http.serve(int(os.env_or("PORT", "3000")), handle, host: os.env_or("HOST", "127.0.0.1"))

@@ -51,11 +51,6 @@ unmodified for this challenge.
     records into one reused buffer. Each value is copied once, with no `Post`
     structs or strings in between.
 
-  The writer reserves room once per post (for the worst case, every text byte
-  escaped), then writes without further checks, and prints integers two
-  digits at a time. A like-index entry that sits whole on its page with
-  one-byte header fields has its `post_id` read straight off the record.
-
   It checks the schema at startup and the schema cookie on every call. It
   returns "can't answer" (-1) on anything it doesn't expect, and the handler
   then runs #251's SQL. That covers no open transaction, a record of another
@@ -96,26 +91,12 @@ cases were:
 The engine answered all of them. It handed only a NUL inside the newest body
 back to the SQL, as designed. The entry passes the test suite, 42/42.
 
-**Second revision (the writer above).** Scored at 226,000 before it. 250k
-passed the 2-minute probe and failed the hold on p99 at 96 % CPU, so this
-revision goes after CPU per request. The writer changes take user-space
-instructions per request from 47.7k to 42.9k (callgrind, same load), with
-responses byte-identical to the scored version across 3,003 requests.
-
-A first cut also moved to dex v0.9.31 (reads queued with
-`IORING_RECVSEND_POLL_FIRST`, idle rings skipped with
-`IORING_SETUP_TASKRUN_FLAG`, keep-alive shed closer to the cap). It used about
-7 % less CPU per request locally and about 6 % less on a copy of the benchmark
-box at 80k users, but the official run held only 190k, failing 200k on p99 at
-81 % CPU. The load boxes I have can't reach that scale, so this revision keeps
-the runtime the 226k score was measured on, v0.9.26, and changes only the
-writer.
+**Control run.** The code here is byte-identical to the version scored at
+226,000. Two follow-ups held less: 190,000 with dex v0.9.31 and a leaner JSON
+writer in `btree.c`, and 195,000 with that writer alone. This run measures
+whether the writer caused the drop or the same code now scores lower.
 
 **Tried, not kept:**
-- Preparing `BEGIN IMMEDIATE` and `COMMIT` once instead of running them
-  through `exec`: no measurable difference.
-- `http.limits(..., 400000)`, which opens 6 rings instead of 3: about 5 % more
-  CPU per request.
 - `http.batchWindow(1)` (dex v0.9.28 and later), which holds a batch open for
   a millisecond: 14.1–14.5 µs per request under wrk, and no better under
   think-time load.

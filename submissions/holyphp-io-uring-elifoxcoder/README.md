@@ -99,12 +99,19 @@ allocation-stable for a long-running server. All of this is generic:
   `HPHP_DIRECT=1` (default in `start.sh`), each ring registers a sparse
   65535-slot file table (`IORING_REGISTER_FILES2` +
   `IORING_RSRC_REGISTER_SPARSE`, clamped to `RLIMIT_NOFILE`) and accepts
-  straight into it with a bounded queue of 512 single-shot accepts per ring
-  (matching the Rust leader's in-flight accept depth). Connections then use multishot
-  recv over a provided-buffer ring (one SQE for the connection's lifetime,
-  data copied into the connection's own buffer, buffer id returned at once),
-  fixed-file sends, and ring CLOSE. Direct handles live above every real fd,
-  so the 65535 fd limit no longer caps held connections. `HPHP_RINGS`
+  straight into it from eight `SO_REUSEPORT` listeners. Their independent
+  kernel accept queues spread connection bursts; the generic runtime keeps an
+  accept armed on the listener that completed and fills a bounded queue of 512
+  single-shot accepts per active ring. If reuseport is unavailable, the server
+  falls back to one ordinary listener. Connections then use multishot recv over
+  a provided-buffer ring (one SQE for the connection's lifetime). By default,
+  receive data is copied into per-connection state and the provided buffer is
+  returned immediately. With opt-in `HPHP_RECV_ZEROCOPY=1`, a complete request
+  that fits in one selected buffer is parsed in place; partial or multi-buffer
+  requests are promoted to an owned string before the buffer is returned. Both
+  modes use fixed-file sends and ring CLOSE.
+  Direct handles live above every real fd, so the 65535 fd limit no longer caps
+  held connections. `HPHP_RINGS`
   (default 6) creates six rings, each with its own sparse table and buffer
   ring: ~393k direct slots at the default. A registered eventfd per ring keeps CQ wakeups
   reliable with `DEFER_TASKRUN`; wait/retry/close paths are ring-aware, and a
@@ -460,3 +467,18 @@ functional suites both passed 42/42. The 800-VU, 30-second A/B/B/A run measured
 had zero HTTP failures. The candidate did not improve the results and the
 sequence drifted, so the prefetch change was removed. This WSL test does not
 justify a speed claim or box estimate.
+
+#### Listener-group accept rearm (local WSL, 2026-11-04)
+
+The direct runtime now rearms an accept on the same `SO_REUSEPORT` listener
+after each completion. Without that, the bounded ring-wide accept pool could
+temporarily leave a busy listener with no outstanding accept while the ring
+waited on other listeners. The challenge suite passed 42/42 in both Direct
+and Classic modes. A staged synthetic run then held 280,000 concurrent
+connections for over five minutes; all 280,000 `/health` requests returned
+HTTP 200, and all connections later closed cleanly. Five direct rings were
+active, with no parked SQEs or accept-arm failures. WSL's original
+`nf_conntrack_max` of 262,144 blocked the fourth 70,000-connection batch, so
+the local limit was temporarily raised to 1,048,576 for this run and restored
+afterward. This is a local idle-connection capacity and stability check, not
+the challenge's box benchmark or a throughput result.

@@ -8,6 +8,10 @@ set -euo pipefail
 # HPHP_DIRECT=0 forces it.
 export HPHP_DIRECT="${HPHP_DIRECT:-1}"
 export HPHP_BG_CHECKPOINT="${HPHP_BG_CHECKPOINT:-1}"
+# Optional: parse requests directly from the selected io_uring buffer when they
+# fit in one receive. Partial/multi-buffer requests promote to an owned string.
+# Enable with HPHP_RECV_ZEROCOPY=1; the default copy path remains the baseline.
+export HPHP_RECV_ZEROCOPY="${HPHP_RECV_ZEROCOPY:-0}"
 # Store only partial receive buffers in the PHP map; idle sockets need no
 # per-connection empty-string entry. Set 0 to compare the legacy layout.
 export HPHP_SPARSE_BUFS="${HPHP_SPARSE_BUFS:-1}"
@@ -18,6 +22,10 @@ export HPHP_RINGS="${HPHP_RINGS:-6}"
 # direct-mode defaults. Set HPHP_ACCEPT_DEPTH=0 to use multishot accept.
 export HPHP_RING0_WAIT="${HPHP_RING0_WAIT:-1}"
 export HPHP_ACCEPT_DEPTH="${HPHP_ACCEPT_DEPTH:-512}"
+# Keep accept ownership on one ring at a time and hand over before its direct
+# table reaches the reserved-slot watermark (leader-style bounded accepts).
+# Set HPHP_ACCEPT_HANDOVER=0 to retain the prior multi-ring accept scheduler.
+export HPHP_ACCEPT_HANDOVER="${HPHP_ACCEPT_HANDOVER:-1}"
 # Exact-mix high-load WSL A/B favored a 1 ms ceiling over 2 ms at 260k
 # configured users; both the CQE target and timeout remain overridable.
 case "$HPHP_RINGS" in

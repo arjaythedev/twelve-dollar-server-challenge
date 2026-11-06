@@ -97,7 +97,7 @@ extern int td_opt_lock;
 void td_lock_code(void);
 int td_opt_onewrite = 1;   // --onewrite=0|1
 int td_opt_rearm = 2048;   // --rearm=N: receives re-armed per ring per pass (0: all at once)
-uint32_t td_opt_answers = 512;    // --answers=N: requests answered per pass; the rest stay parked in the batch (0: all)
+uint32_t td_opt_answers = 128;    // --answers=N: requests answered per pass; the rest stay parked in the batch (0: all)
 int td_opt_lifo = 1;              // --lifo=0|1: past one pass of backlog, answer the newest first
 uint32_t td_opt_lifocap = 4;      // --lifocap=N: eighths of a pass the old end gets at --lifoage
 uint32_t td_opt_lifomin = 0;      // --lifomin=N: eighths of a pass the old end gets before --lifoage

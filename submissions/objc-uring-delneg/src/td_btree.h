@@ -19,3 +19,5 @@ void td_bt_end(void);               // closes the cursors: before COMMIT or ROLL
 
 /* Before the first sqlite3_open: SQLITE_OK, or SQLite's refusal when it already started. */
 int td_pcache_install(void);
+/* Before the first sqlite3_open: registers the VFS that writes each commit's WAL frames with one pwrite. */
+int td_vfs_install(void);

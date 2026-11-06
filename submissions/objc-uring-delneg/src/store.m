@@ -12,6 +12,7 @@
 int td_opt_ckpt = 250;    // wal_autocheckpoint pages (--ckpt=N): smaller, more frequent checkpoint stalls
 int td_opt_ckptproc = 1; // --ckptproc=0: inline autocheckpoint, EXCLUSIVE locking
 int td_opt_pcache = 1;   // --pcache=0|1: our page cache plugin, or SQLite's
+int td_opt_walbuf = 1;   // --walbuf=0|1: one pwrite per commit for the WAL, or SQLite's two per frame
 int td_opt_warm = 1, td_opt_ckdrop = 1;   // --warm=0|1 --ckdrop=0|1
 int td_opt_jsl = 0;   // --jsl=N: journal_size_limit bytes (-1: unlimited)
 int td_opt_cachekb = 256000, td_opt_cknice = 0, td_opt_lock = 1;   // --cache=KB --cknice=N --lock=0|1
@@ -67,6 +68,7 @@ static void exec(sqlite3 *db, const char *sql) {
 - (instancetype)initWithPath:(const char *)path {
     pthread_mutex_init(&lock, NULL);
     if (td_opt_pcache) td_pcache_install();
+    if (td_opt_walbuf) td_vfs_install();
     if (sqlite3_open_v2(path, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX, NULL) != SQLITE_OK) {
         fprintf(stderr, "open %s: %s\n", path, db ? sqlite3_errmsg(db) : "?");
         exit(1);

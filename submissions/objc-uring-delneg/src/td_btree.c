@@ -449,3 +449,108 @@ int td_pcache_install(void) {
     };
     return sqlite3_config(SQLITE_CONFIG_PCACHE2, &m);
 }
+
+/* ---- one pwrite per commit for the WAL (https://sqlite.org/c3ref/vfs.html)
+** SQLite writes a WAL frame as two pwrites, a 24-byte header and the page, so a commit of n frames costs 2n syscalls,
+** each taking the inode lock, updating timestamps and walking the page cache. This VFS sits over the default one and
+** only touches WAL files: it keeps consecutive frames in a buffer and writes them at once when the page of the commit
+** frame arrives. SQLite publishes a commit in the WAL index only after that write returns, so no reader, the
+** checkpointer included, can look for a frame that isn't in the file, and a failed write fails the commit. Any other
+** use of the file writes the buffer first, which keeps every operation in SQLite's order. */
+typedef struct TDWalFile {
+    sqlite3_file base;
+    sqlite3_file *real;     /* the default VFS's file, behind this struct */
+    u8 *buf;
+    i64 start;              /* file offset of buf[0] */
+    i64 pageAt;             /* where the page of the header last seen goes; 0: no header waiting for its page */
+    i64 readAt;             /* last read: SQLite rewrites a header it just read to fix checksums, and no page follows */
+    u32 len;
+    int commit;             /* that header is a commit frame's */
+} TDWalFile;
+#define TDW_CAP 131071u     /* the unix VFS keeps the low 17 bits of a write's length, and calls a write it cut short SQLITE_FULL */
+
+static sqlite3_vfs tdv, *tdv_base;
+
+static int tdw_flush(TDWalFile *w) {
+    if (!w->len) return SQLITE_OK;
+    u32 n = w->len;
+    w->len = 0;
+    return w->real->pMethods->xWrite(w->real, w->buf, (int)n, w->start);
+}
+static int tdw_write(sqlite3_file *f, const void *z, int n, sqlite3_int64 off) {
+    TDWalFile *w = (TDWalFile *)f;
+    int rc, last = 0;
+    if (w->pageAt == off) last = w->commit;             /* the page of the header before it */
+    else if (n == 24 && off != w->readAt) w->commit = ((const u8 *)z)[4] | ((const u8 *)z)[5] | ((const u8 *)z)[6] | ((const u8 *)z)[7];   /* nonzero: db size after commit */
+    else {                                              /* the WAL header, or a page or header rewritten in place */
+        w->pageAt = 0;
+        if ((rc = tdw_flush(w))) return rc;
+        return w->real->pMethods->xWrite(w->real, z, n, off);
+    }
+    if (w->len && (off != w->start + w->len || w->len + (u32)n > TDW_CAP) && (rc = tdw_flush(w))) { w->pageAt = 0; return rc; }
+    if (!w->buf && !(w->buf = sqlite3_malloc(TDW_CAP))) { w->pageAt = 0; return w->real->pMethods->xWrite(w->real, z, n, off); }
+    if (!w->len) w->start = off;
+    memcpy(w->buf + w->len, z, (size_t)n);
+    w->len += (u32)n;
+    w->pageAt = w->pageAt == off ? 0 : off + n;
+    return last ? tdw_flush(w) : SQLITE_OK;
+}
+static int tdw_read(sqlite3_file *f, void *z, int n, sqlite3_int64 off) {
+    TDWalFile *w = (TDWalFile *)f;
+    int rc = tdw_flush(w);
+    w->readAt = off;
+    return rc ? rc : w->real->pMethods->xRead(w->real, z, n, off);
+}
+static int tdw_truncate(sqlite3_file *f, sqlite3_int64 size) {
+    TDWalFile *w = (TDWalFile *)f;
+    int rc = tdw_flush(w);
+    w->pageAt = 0;
+    return rc ? rc : w->real->pMethods->xTruncate(w->real, size);
+}
+static int tdw_sync(sqlite3_file *f, int flags) {
+    TDWalFile *w = (TDWalFile *)f;
+    int rc = tdw_flush(w);
+    return rc ? rc : w->real->pMethods->xSync(w->real, flags);
+}
+static int tdw_size(sqlite3_file *f, sqlite3_int64 *size) {
+    TDWalFile *w = (TDWalFile *)f;
+    int rc = tdw_flush(w);
+    return rc ? rc : w->real->pMethods->xFileSize(w->real, size);
+}
+static int tdw_close(sqlite3_file *f) {
+    TDWalFile *w = (TDWalFile *)f;
+    int rc = tdw_flush(w), rc2 = w->real->pMethods->xClose(w->real);
+    sqlite3_free(w->buf);
+    w->buf = 0;
+    return rc ? rc : rc2;
+}
+static int tdw_lock(sqlite3_file *f, int l) { return ((TDWalFile *)f)->real->pMethods->xLock(((TDWalFile *)f)->real, l); }
+static int tdw_unlock(sqlite3_file *f, int l) { return ((TDWalFile *)f)->real->pMethods->xUnlock(((TDWalFile *)f)->real, l); }
+static int tdw_checklock(sqlite3_file *f, int *r) { return ((TDWalFile *)f)->real->pMethods->xCheckReservedLock(((TDWalFile *)f)->real, r); }
+static int tdw_control(sqlite3_file *f, int op, void *a) { return ((TDWalFile *)f)->real->pMethods->xFileControl(((TDWalFile *)f)->real, op, a); }
+static int tdw_sector(sqlite3_file *f) { return ((TDWalFile *)f)->real->pMethods->xSectorSize(((TDWalFile *)f)->real); }
+static int tdw_devchar(sqlite3_file *f) { return ((TDWalFile *)f)->real->pMethods->xDeviceCharacteristics(((TDWalFile *)f)->real); }
+
+static int tdv_open(sqlite3_vfs *v, sqlite3_filename name, sqlite3_file *f, int flags, int *out) {
+    (void)v;
+    static const sqlite3_io_methods m = {
+        1, tdw_close, tdw_read, tdw_write, tdw_truncate, tdw_sync, tdw_size, tdw_lock, tdw_unlock, tdw_checklock,
+        tdw_control, tdw_sector, tdw_devchar
+    };
+    if (!(flags & SQLITE_OPEN_WAL)) return tdv_base->xOpen(tdv_base, name, f, flags, out);
+    TDWalFile *w = (TDWalFile *)f;
+    memset(w, 0, sizeof *w);
+    w->real = (sqlite3_file *)(w + 1);
+    int rc = tdv_base->xOpen(tdv_base, name, w->real, flags, out);
+    w->base.pMethods = rc == SQLITE_OK ? &m : 0;
+    return rc;
+}
+
+int td_vfs_install(void) {
+    if (!(tdv_base = sqlite3_vfs_find(0))) return SQLITE_ERROR;
+    tdv = *tdv_base;
+    tdv.zName = "td-wal";
+    tdv.szOsFile = tdv_base->szOsFile + (int)sizeof(TDWalFile);
+    tdv.xOpen = tdv_open;
+    return sqlite3_vfs_register(&tdv, 1);
+}

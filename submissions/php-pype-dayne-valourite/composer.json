@@ -5,7 +5,7 @@
     "license": "MIT",
     "require": {
         "php": ">=8.3",
-        "pype/framework": "^0.12"
+        "pype/framework": "^0.13.1"
     },
     "autoload": {
         "psr-4": {

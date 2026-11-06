@@ -55,10 +55,24 @@ SQLITE_PATH=... JWT_SECRET=... HOST=0.0.0.0 PORT=80 bash start.sh
   `temp_store=MEMORY`) plus `mmap_size` 256 MB. pype's `Connection` keeps each prepared statement for reuse (the plan, not the data).
   No caching across requests (rule 5).
 
+## Changes since #335
+
+#335 (pype 0.12.0) scored 36,000 users, CPU-bound at 246 µs per request. This follow-up runs pype
+0.13.1, whose per-request work was cut after profiling this app (excimer, the challenge's request
+mix): rows hydrate through PHP's own type coercion instead of a cast per value, the container
+reflects each constructor once, the stage pipeline runs by index instead of nested closures, and the
+static-file check is skipped for extension-less paths. The app itself is unchanged except that the
+challenge's secret moved to `auth.challenge.secret` (0.13 refuses a short `auth.jwt.secret` at boot).
+
+CPU per request, this folder's scripts in an `ubuntu:24.04` container (`--cpus 1`, fixed 8,000
+req/s of the challenge's mix, four alternating runs each on a busy host): **0.12.0: 61 µs,
+0.13.1: 55.5 µs (−9%)**.
+
 ## Measured locally
 
-A `docker run --cpus 1 --memory 2g --ulimit nofile=65535` container built from these scripts
-(Ubuntu 24.04, PHP 8.3), k6 on the same 16-core host. Not the benchmark box, so treat as indicative.
+With pype 0.12.0 (#335). A `docker run --cpus 1 --memory 2g --ulimit nofile=65535` container built from
+these scripts (Ubuntu 24.04, PHP 8.3), k6 on the same 16-core host. Not the benchmark box: there the
+same code was CPU-bound at 36,000 users, so treat these as indicative.
 
 | test | result |
 |---|---|
@@ -66,5 +80,5 @@ A `docker run --cpus 1 --memory 2g --ulimit nofile=65535` container built from t
 | `bench/load.js`, 69,000-71,000 users | FAIL on errors (1.1-1.35%), latency unchanged |
 | fixed request rate, challenge request mix | 24,000 req/s passes at 91% CPU (p95 6.9 ms); 20,000 at 75% |
 
-The limit is the 65,535 open files: past ~65k users OpenSwoole logs `accept() failed, Error: Too
-many open files`, while latency and CPU stay flat.
+Locally the limit was the 65,535 open files (past ~65k users OpenSwoole logs `accept() failed,
+Error: Too many open files`), because this host's CPU is ~5x faster than the benchmark box's.

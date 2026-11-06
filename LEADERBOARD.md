@@ -324,7 +324,10 @@ descriptors, multishot accept/recv, 5 rings) scored **157,000** (15,401 req/s, p
 during the run; #280 replaced it. #304's first head `7f2a823` (same changes, unix-excl VFS) scored
 **135,000** (13,248 req/s, p95 24.5 / p99 646 ms, 0.59 % err = HTTP 500 on 23,480 likes and 4,500 posts, 55 % CPU,
 39 µs/req, 1,244 MB, 2026-11-04). 140,000 failed the 2-minute probe on p95/p99 (2.15 / 2.68 s, 53 % CPU, 0 errors);
-160,000 failed with 1.33 % HTTP 500s.
+160,000 failed with 1.33 % HTTP 500s. Its later follow-up **#336** (`e5dd49f`, low-overhead SQLite build defaults +
+JSON1 batched group-commit writes; not merged: not above 228,000; newer head `e19285b` queued) held **147,000** (14,473
+req/s, p95 3.3 / p99 8.8 ms, 0 err, 51 % CPU, 33 µs/req, 803 MB, 42/42, 2026-11-06); 155,000 passed the 2-minute probe
+but failed the 5-minute hold on refused connections (84 % errors), 160,000 failed the 2-minute probe the same way (83 %).
 
 ʸ **scala-netty-jacksonhoran** stays on its merged #107 row. Its follow-up **#149** (`4430836`, rejects tokens
 without `exp`; held, not merged: it didn't beat the merged row) scored **83,000** (8,128 req/s, p95 325 / p99 627 ms,

@@ -1,0 +1,8 @@
+bin/
+target/
+vendor/
+pgo/
+*.o
+*.a
+*.gcda
+*.gcno

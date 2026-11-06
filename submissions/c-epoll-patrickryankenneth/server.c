@@ -21,6 +21,7 @@
 #include <sys/mman.h>
 #include <sys/syscall.h>
 #include <sys/prctl.h>
+#include <sys/stat.h>
 #include "build/sqlite3.c"   /* one translation unit with the amalgamation */
 
 /* ---------------------------------------------------------------- SHA-256 / HMAC */
@@ -1158,15 +1159,24 @@ static void ckpt_spawn(const char *path) {
   prctl(PR_SET_PDEATHSIG, SIGKILL);
   if (getppid() != parent) _exit(0);
   if (nice(10) < 0) { /* best effort */ }
+  syscall(SYS_ioprio_set, 1 /* WHO_PROCESS */, 0, (3 /* IDLE */ << 13) | 0);
   sqlite3 *c = NULL;
+  int ticks = 0;
+  char wp[1024]; snprintf(wp, sizeof wp, "%s-wal", path);
   for (;;) {
     usleep(1000000);
     if (getppid() != parent) _exit(0);
     if (!c) {
       if (sqlite3_open_v2(path, &c, SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX, NULL) != SQLITE_OK) { sqlite3_close(c); c = NULL; continue; }
       sqlite3_busy_timeout(c, 5000);
+      sqlite3_exec(c, "SELECT 1 FROM sqlite_schema LIMIT 1;", NULL, NULL, NULL);   /* first read attaches the WAL; without it the checkpoint is a no-op */
     }
-    sqlite3_wal_checkpoint_v2(c, NULL, SQLITE_CHECKPOINT_PASSIVE, NULL, NULL);
+    int nlog = -1, nckpt = -1;
+    int rc = sqlite3_wal_checkpoint_v2(c, NULL, SQLITE_CHECKPOINT_PASSIVE, &nlog, &nckpt);
+    if (++ticks <= 5 || ticks % 30 == 0 || rc != SQLITE_OK) {
+      struct stat st; long wal = stat(wp, &st) == 0 ? (long)st.st_size : -1;
+      fprintf(stderr, "ckpt rc=%d log=%d ckpt=%d wal_bytes=%ld\n", rc, nlog, nckpt, wal);
+    }
   }
 }
 

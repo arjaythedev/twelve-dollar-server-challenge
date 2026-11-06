@@ -15,7 +15,7 @@ uint32_t td_opt_bufs = 1024;   // --bufs=N: receive buffers per ring, a power of
 #define BUF_GROUP 0
 #define MAX_REQ 16384u         // bytes of one request (headers + body)
 
-enum { UD_ACCEPT = 1, UD_RECV, UD_SEND, UD_CLOSE, UD_POLL, UD_CKPT };
+enum { UD_ACCEPT = 1, UD_RECV, UD_SEND, UD_CLOSE, UD_POLL, UD_CKPT, UD_RPOLL };
 #define MAX_RINGS 16
 #define UD(t, slot, gen) ((uint64_t)(t) << 56 | (uint64_t)((gen) & 0xFFFFFFu) << 32 | (uint64_t)(slot))
 #define UD_T(u) ((uint32_t)((u) >> 56))
@@ -30,7 +30,7 @@ enum { UD_ACCEPT = 1, UD_RECV, UD_SEND, UD_CLOSE, UD_POLL, UD_CKPT };
     uint32_t gen;
     uint32_t held;  // requests deferred by a write hold (they stay at the front of the batch)
     uint32_t queued;   // requests read and not answered yet
-    bool live, recvArmed, sending, closeAfter, inDirty, needRearm;
+    bool live, recvArmed, sending, closeAfter, inDirty, needRearm, pollArmed;
     TDBuf in;      // partial request bytes
     TDBuf out;     // responses built, not yet submitted
     TDBuf wire;    // bytes owned by the kernel (in-flight send)
@@ -102,6 +102,10 @@ int td_opt_lifo = 1;              // --lifo=0|1: past one pass of backlog, answe
 uint32_t td_opt_lifocap = 4;      // --lifocap=N: eighths of a pass the old end gets at --lifoage
 uint32_t td_opt_lifomin = 0;      // --lifomin=N: eighths of a pass the old end gets before --lifoage
 uint32_t td_opt_lifoage = 8000;   // --lifoage=MS: from this age the old end gets --lifocap eighths of a pass, from twice this age all of it
+int td_opt_ready = 1;              // --ready=0: completions waiting on other rings don't cut ring 0's pause short
+int td_opt_rpoll = 0;              // --rpoll=1: multishot poll plus one read per wake-up instead of multishot recv
+uint32_t td_opt_gate = 0;         // --gate=N: no new connections are accepted while more than N passes of requests wait; 0: always accept
+uint32_t td_opt_wwin = 0;         // --wwin=MS: writes commit at most once per this many ms (group commit window)
 
 // ---------------------------------------------------------------- helpers
 TD_INLINE bool ieq(const char *a, const char *lower, uint32_t n) {
@@ -170,7 +174,9 @@ typedef struct {
     int64_t lastStats;
     TDAuth *auth;
     int64_t started, now;
-    uint32_t passMs, nHeldNow;
+    uint32_t passMs, lastWriteMs, nHeldNow;
+    uint64_t gates, nLoop, nWork, nReady, nTimed, nEtime; double tTimed;
+    int gateRing;     // the ring whose accept the gate cancelled, or -1
     // batch
     TDReq *reqs;              // parsed requests waiting for an answer: reqs[reqHead..nreq), oldest first
     uint32_t reqHead, nreq, reqCap;
@@ -214,6 +220,7 @@ static struct io_uring_sqe *sqe_get(struct io_uring *r) {
     ckDone = cfg->ckptDone;
     uint32_t margin = slots / 4 < 4096 ? slots / 4 : 4096;   // > a listen backlog's burst (somaxconn 4096)
     highWater = slots - margin;
+    gateRing = -1;
     lowGap = margin / 2;
     listenFd = cfg->listenFd;
     nrings = cfg->rings < 1 ? 1 : cfg->rings > MAX_RINGS ? MAX_RINGS : cfg->rings;
@@ -334,6 +341,21 @@ TD_INLINE void buf_recycle(TDRingState *rs, uint32_t bid) {
 
 TD_INLINE void arm_recv(TDWorker *w, TDConn *c, uint32_t slot) {
     struct io_uring_sqe *s = sqe_get(ring_of(w, slot));
+    if (td_opt_rpoll) {
+        if (!c->pollArmed) {
+            io_uring_prep_poll_multishot(s, fslot(w, slot), POLLIN);
+            s->flags |= IOSQE_FIXED_FILE;
+            io_uring_sqe_set_data64(s, UD(UD_RPOLL, slot, c->gen));
+            c->pollArmed = true;
+        } else {
+            io_uring_prep_recv(s, fslot(w, slot), NULL, 0, MSG_DONTWAIT);
+            s->flags |= IOSQE_FIXED_FILE | IOSQE_BUFFER_SELECT;
+            s->buf_group = BUF_GROUP;
+            io_uring_sqe_set_data64(s, UD(UD_RECV, slot, c->gen));
+        }
+        c->recvArmed = true;
+        return;
+    }
     io_uring_prep_recv_multishot(s, fslot(w, slot), NULL, 0, 0);
     s->flags |= IOSQE_FIXED_FILE | IOSQE_BUFFER_SELECT;
     s->buf_group = BUF_GROUP;
@@ -369,6 +391,13 @@ TD_INLINE void pool_give(TDWorker *w, TDBuf *b) {
         io_uring_prep_shutdown(s, fslot(self, slot), SHUT_RDWR);
         s->flags |= IOSQE_FIXED_FILE | IOSQE_IO_HARDLINK | IOSQE_CQE_SKIP_SUCCESS;
         io_uring_sqe_set_data64(s, UD(UD_CLOSE, slot, 0xFFFFFF));
+    }
+    if (c->pollArmed) {
+        s = sqe_get(ring_of(self, slot));
+        io_uring_prep_poll_remove(s, UD(UD_RPOLL, slot, c->gen));
+        s->flags |= IOSQE_CQE_SKIP_SUCCESS;
+        io_uring_sqe_set_data64(s, UD(UD_CLOSE, slot, 0xFFFFFF));
+        c->pollArmed = false;
     }
     s = sqe_get(ring_of(self, slot));
     io_uring_prep_close_direct(s, (unsigned)fslot(self, slot));
@@ -622,7 +651,11 @@ static const char *find_crlf2(const char *p, uint32_t n) {
 - (void)flush TD_DIRECT {
     TDStore *st = store;
     uptime = now - started;
-    bool hold = ckHold, oneWrite = ckRewind && td_opt_onewrite && !hold;
+    // Group commit window: a commit's WAL frames are the pages its writes dirtied, and the hot ones (the table's last leaf,
+    // the feed index's first leaf) are in every commit. So more writes per commit means fewer frames per write, fewer
+    // pwrites, and less for the checkpointer to copy. Reads don't wait for this.
+    bool wwin = td_opt_wwin && (uint32_t)(passMs - lastWriteMs) < td_opt_wwin;
+    bool hold = ckHold || wwin, oneWrite = ckRewind && td_opt_onewrite && !hold;
     bool db = false;
     uint32_t first = reqHead, budget = td_opt_answers ? td_opt_answers : UINT32_MAX, last = nreq;
     if (last - first > budget) last = first + budget;   // only a first look: routes only
@@ -687,6 +720,7 @@ static const char *find_crlf2(const char *p, uint32_t n) {
         }
         nreq = k;
     }
+    if (wrote) lastWriteMs = passMs;
     nHeldNow = nheld + ntail;
     bool ok = true;
     if (txn && ![st commit]) { ok = false; [st rollback]; }
@@ -745,6 +779,22 @@ static const char *find_crlf2(const char *p, uint32_t n) {
         uint32_t bid = flags >> IORING_CQE_BUFFER_SHIFT;
         TDRingState *rs = &R[k];
         if (c->gen != UD_GEN(ud)) { if (hasBuf) buf_recycle(rs, bid); break; }
+        if (td_opt_rpoll) {
+            if (res > 0) {
+                if (c->live) [self onData:c slot:slot data:rs->bufs + (size_t)bid * BUF_SIZE length:(uint32_t)res];
+                buf_recycle(rs, bid);
+                if (c->live && ((flags & IORING_CQE_F_SOCK_NONEMPTY) || res == BUF_SIZE || !c->pollArmed)) arm_recv(self, c, slot);
+            } else if (res == -ENOBUFS) {
+                nobufs++;
+                if (c->live && !c->needRearm) {
+                    c->needRearm = true;
+                    c->recvArmed = false;
+                    rs->rq[(rs->rqHead + rs->rqLen++) % slots] = slot;
+                    nrearm++;
+                }
+            } else if (res != -EAGAIN && c->live) [self drop:c slot:slot];
+            break;
+        }
         if (!(flags & IORING_CQE_F_MORE)) c->recvArmed = false;
         if (res > 0) {
             if (c->live) [self onData:c slot:slot data:rs->bufs + (size_t)bid * BUF_SIZE length:(uint32_t)res];
@@ -761,6 +811,14 @@ static const char *find_crlf2(const char *p, uint32_t n) {
             if (c->live) [self drop:c slot:slot];
             else if (!c->sending && !c->closeAfter) { /* already closing */ }
         }
+        break;
+    }
+    case UD_RPOLL: {
+        TDConn *c = conn_at(self, slot);
+        if (c->gen != UD_GEN(ud)) break;
+        if (!(flags & IORING_CQE_F_MORE)) c->pollArmed = false;
+        if (res > 0 && c->live) arm_recv(self, c, slot);
+        else if (res < 0 && res != -ECANCELED && c->live) [self drop:c slot:slot];
         break;
     }
     case UD_SEND: {
@@ -836,6 +894,30 @@ static const char *find_crlf2(const char *p, uint32_t n) {
     case UD_POLL:
         if (!(flags & IORING_CQE_F_MORE)) R[slot].pollArmed = false;
         break;
+    }
+}
+
+// Admission control. A new connection costs about as much CPU as two requests (handshake, sockets, accept, first read),
+// and when requests are already waiting that CPU comes out of the requests being served. So while a backlog stands the
+// server stops accepting: the listen queue fills, the kernel drops further SYNs at little cost, and clients retry them.
+// Established connections keep all the CPU. The backlog ends, and accept comes back, within passes.
+- (void)gateCheck TD_DIRECT {
+    uint32_t waiting = nreq - reqHead;
+    if (gateRing < 0) {
+        if (waiting <= td_opt_gate * td_opt_answers) return;
+        for (int k = 0; k < nrings; k++) {
+            if (!R[k].acceptArmed) continue;
+            struct io_uring_sqe *cs = sqe_get(&R[k].ring);
+            io_uring_prep_cancel64(cs, UD(UD_ACCEPT, k, 0), 0);
+            io_uring_sqe_set_data64(cs, UD(UD_CLOSE, 0, 0xFFFFFF));
+            gateRing = k;
+            gates++;
+            return;
+        }
+    } else if (waiting <= td_opt_answers / 2 && !R[gateRing].acceptArmed) {
+        int q = [self acceptTarget];
+        gateRing = -1;
+        if (q >= 0 && ![self acceptArmedAnywhere]) [self armAccept:q];
     }
 }
 
@@ -917,7 +999,8 @@ int td_opt_batch = 128, td_opt_bwait = 1000, td_opt_bthresh = 8;   // --batch=N 
     fprintf(stderr, "stats%s t=%lld live=%u accErr=%llu last=%d cqOvfPasses=%llu cqDropped=%u nobufs=%llu armed=%d rq=%u maxBatch=%llu npool=%u cacheKB=%d miss=%d\n",
             final ? "-final" : "", (long long)(now - started), live, (unsigned long long)accErr, lastAccErr,
             (unsigned long long)cqOvf, dropped, (unsigned long long)nobufs, (int)[self acceptArmedAnywhere], nrearm, (unsigned long long)maxBatch, npool, [store cacheStat:0], [store cacheStat:1]);
-    fprintf(stderr, " phases enter=%.3f reap=%.3f flush=%.3f passes=%llu ans=%llu\n", tEnter, tReap, tFlush, (unsigned long long)nPass, (unsigned long long)nAns);
+    fprintf(stderr, " phases enter=%.3f reap=%.3f flush=%.3f passes=%llu ans=%llu loops=%llu work=%llu ready=%llu timed=%llu etime=%llu tTimed=%.3f\n", tEnter, tReap, tFlush, (unsigned long long)nPass, (unsigned long long)nAns, (unsigned long long)nLoop, (unsigned long long)nWork, (unsigned long long)nReady, (unsigned long long)nTimed, (unsigned long long)nEtime, tTimed);
+    nLoop = nWork = nReady = nTimed = nEtime = 0; tTimed = 0;
     tEnter = tReap = tFlush = 0; nPass = nAns = 0;
     maxBatch = 0;
 }
@@ -950,15 +1033,17 @@ int td_opt_batch = 128, td_opt_bwait = 1000, td_opt_bthresh = 8;   // --batch=N 
         }
         others = others && td_opt_rdefer;
         int ret;
+        double tw0 = 0; if (TD_UNLIKELY(statsOn)) { tw0 = mono_s(); nLoop++; }
         // Under load, wait a little for more completions: bigger batches mean
         // fewer io_uring_enter calls, one commit for more writes, warmer caches.
-        if ((nreq > reqHead + nHeldNow && !ckHold) || ready) ret = io_uring_submit_and_get_events(&R[0].ring);   // work is waiting: no pause
+        if ((nreq > reqHead + nHeldNow && !ckHold) || (ready && td_opt_ready)) { if (TD_UNLIKELY(statsOn)) { if (nreq > reqHead + nHeldNow && !ckHold) nWork++; else nReady++; } ret = io_uring_submit_and_get_events(&R[0].ring); }   // work is waiting: no pause
         else if (td_opt_batch > 1 && (lastReq >= td_opt_bthresh || nrearm || others || nHeldNow)) {
             // Only the wait on ring 0 sleeps, so with other rings in use it always has a time limit, longer when nothing comes.
             long long us = others && idlePasses > 64 ? 5000 : td_opt_bwait;
             struct __kernel_timespec ts = { .tv_sec = 0, .tv_nsec = us * 1000 };
             struct io_uring_cqe *cq;
             ret = io_uring_submit_and_wait_timeout(&R[0].ring, &cq, (unsigned)td_opt_batch, &ts, NULL);
+            if (TD_UNLIKELY(statsOn)) { nTimed++; tTimed += mono_s() - tw0; if (ret == -ETIME) nEtime++; }
         } else ret = io_uring_submit_and_wait(&R[0].ring, 1);
         if (ret < 0 && ret != -EINTR && ret != -ETIME && ret != -EBUSY && ret != -EAGAIN) {
             // Never exit here: a dead process leaves no listener, and every later connect is refused. Under memory
@@ -995,6 +1080,7 @@ int td_opt_batch = 128, td_opt_bwait = 1000, td_opt_bthresh = 8;   // --batch=N 
             if (TD_UNLIKELY(statsOn)) { nAns += before - (nreq - reqHead); nPass++; t3 = mono_s(); tEnter += t1 - t0; tReap += t2 - t1; tFlush += t3 - t2; }
             [self ckptAfterFlush];
         } else if (TD_UNLIKELY(statsOn)) { tEnter += t1 - t0; tReap += t2 - t1; }
+        if (td_opt_gate) [self gateCheck];
         if (nrearm) {
             // A burst empties the buffer ring and ends every other armed receive with ENOBUFS. Each socket still has
             // its request queued, so re-arming them all at once only ends them again. A pass re-arms what the ring's
@@ -1015,7 +1101,7 @@ int td_opt_batch = 128, td_opt_bwait = 1000, td_opt_bthresh = 8;   // --batch=N 
                 nrearm -= n;
             }
         }
-        if (![self acceptArmedAnywhere]) {
+        if (gateRing < 0 && ![self acceptArmedAnywhere]) {   // the gate decides while it's closed
             int q = [self acceptTarget];
             if (q >= 0) [self armAccept:q];
         }

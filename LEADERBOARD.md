@@ -69,10 +69,10 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | 2 | mojo-iouring-oh-meh | #257 | Mojo (io_uring, SQLite B-tree reads) | **304,000** | 28,705 | 159 | 545 | 0.00 | 82 | 26 | 726 | 2026-11-01 |
 | 3 | c-iouring-pavlyhalim | #245 | C (io_uring, SQLite B-tree reads) | **295,000** | 28,013 | 28 | 117 | 0.00 | 81 | 26 | 1,536 | 2026-11-01 |
 | 4 | rust-native-scooter1337 | #267 | Rust (io_uring, SQLite B-tree reads) | **290,000** | 27,580 | 26.5 | 514 | 0.00 | 80 | 26 | 1,035 | 2026-11-02 |
-| 5 | lean-derive-hargup | #153 | Lean 4 (generated C, io_uring) | **280,000** | 26,683 | 141 | 316 | 0.00 | 92 | 31 | 836 | 2026-10-28 |
-| 5 | objc-uring-delneg | #154 | Objective-C (GNUstep, io_uring, SQLite B-tree reads) | **280,000** ᵋ | 26,741 | 35 | 227 | 0.00 | 79 | 27 | 1,245 | 2026-10-31 |
-| 5 | c-iouring-unorig-username | #290 | C (io_uring, SQLite B-tree reads) | **280,000** | 26,688 | 56.4 | 713 | 0.00 | 78 | 26 | 1,357 | 2026-11-03 |
-| 5 | csharp-kestrel-btree-mbobka | #317 | C# (.NET 10 ReadyToRun, Kestrel host, io_uring, SQLite B-tree reads) | **280,000** | 26,686 | 190 | 385 | 0.00 | 83 | 28 | 854 | 2026-11-05 |
+| 4 | objc-uring-delneg | #326 | Objective-C (GNUstep, io_uring, SQLite B-tree reads) | **290,000** ᵋ | 27,547 | 43 | 614 | 0.00 | 81 | 26 | 658 | 2026-11-06 |
+| 6 | lean-derive-hargup | #153 | Lean 4 (generated C, io_uring) | **280,000** | 26,683 | 141 | 316 | 0.00 | 92 | 31 | 836 | 2026-10-28 |
+| 6 | c-iouring-unorig-username | #290 | C (io_uring, SQLite B-tree reads) | **280,000** | 26,688 | 56.4 | 713 | 0.00 | 78 | 26 | 1,357 | 2026-11-03 |
+| 6 | csharp-kestrel-btree-mbobka | #317 | C# (.NET 10 ReadyToRun, Kestrel host, io_uring, SQLite B-tree reads) | **280,000** | 26,686 | 190 | 385 | 0.00 | 83 | 28 | 854 | 2026-11-05 |
 | 9 | c-iouring-shivanshthapliyal | #250 | C (io_uring, SQLite B-tree reads) | **276,000** | 26,403 | 23 | 147 | 0.00 | 77 | 26 | 638 | 2026-11-01 |
 | 10 | c-iouring-public | #158 | C (io_uring, SQLite B-tree reads) | **275,000** ᵇ | 26,227 | 128 | 672 | 0.00 | 80 | 28 | 625 | 2026-10-31 |
 | 11 | crystal-epoll-faustinoaq | #193 | Crystal (io_uring) | **270,000** | 25,693 | 348 | 879 | 0.00 | 92 | 32 | 1,160 | 2026-10-29 |
@@ -382,15 +382,14 @@ consecutive ids): **270,000** (25,827 req/s, p95 82.3 / p99 243.6 ms, 0 err, 81 
 req/s, p95 54.8 / p99 165.2 ms, 0 err, 74 % CPU, 28 µs/req, 1,293 MB, 2026-11-06), below the merged row, so not
 merged; 260,000 failed the 2-minute probe on p99 (2.03 s at 75 % CPU, 0 errors).
 
-ᵋ **objc-uring-delneg** stays on its merged #154 row. Its follow-up **#326** (`197ad57`, PCACHE2 page cache, newest-first
-answers once a backlog builds, OOM at 290k fixed; held, not merged: it didn't beat the merged row, it tied it) also held
-**280,000** (26,714 req/s, p95 189.9 / p99 348.5 ms, 0 err, 79 % CPU, 27 µs/req, 807 MB, 2026-11-05). 290,000 and
-300,000 failed the 2-minute probe on p99 (1.05 s at 84 % CPU / 2.33 s at 84 % CPU, 0 errors). Re-run at its newer head
-`2b4d6d8` (`--lifocap` backlog-share tuning): **280,000** again (26,702 req/s, p95 82.3 / p99 567.4 ms, 0 err, 78 % CPU,
-26 µs/req, 1,323 MB, 2026-11-05); 290,000 and 300,000 failed the 2-minute probe on p95 (1.13 s at 82 % CPU / 1.20 s at
-87 % CPU, 0 errors). Re-run at `1ae8cff` (shim WAL VFS, PCACHE2 on huge pages, per-feed-position B-tree cursors):
-**280,000** again (26,731 req/s, p95 25.4 / p99 236.4 ms, 0 err, 83 % CPU, 28 µs/req, 629 MB, 2026-11-06); 290,000 and
-300,000 failed the 2-minute probe on p99 (2.52 s at 86 % CPU / 2.99 s at 87 % CPU, 0 errors).
+ᵋ **objc-uring-delneg** is scored at its follow-up PR **#326** (`1baccb2`, merged: 64 answers per pass, 10 ms
+group-commit window, TCP_DEFER_ACCEPT); 300,000 failed the 2-minute probe on p99 (8.0 s at 87 % CPU, 0 errors). Its
+merged #154 code (`1fe6941`, stock SQLite 3.54.1) held 280,000 (26,741 req/s, p95 35 / p99 227 ms, 79 % CPU,
+2026-10-31) and its earlier #154 run (`10067c1`, with a SQLite source patch) 240,000. Earlier #326 runs all held
+**280,000**: `197ad57` (PCACHE2 page cache, newest-first answers once a backlog builds; 26,714 req/s, p95 189.9 / p99
+348.5 ms, 2026-11-05), `2b4d6d8` (`--lifocap` tuning; 26,702 req/s, p95 82.3 / p99 567.4 ms, 2026-11-05) and `1ae8cff`
+(shim WAL VFS, PCACHE2 on huge pages, per-feed-position B-tree cursors; 26,731 req/s, p95 25.4 / p99 236.4 ms,
+2026-11-06); 290,000 failed the 2-minute probe each time.
 
 ᵠ **bun-yatta-psrockstar098** stays on its merged #179 row. Its follow-up **#329** (`ebc7969`, Bun.CryptoHasher JWT
 verify, local JSON helper, ASCII length fast path; held, not merged: it didn't beat the merged row, it tied it) also held

@@ -6,7 +6,7 @@
 #include <string.h>
 #include <time.h>
 
-#define ASC_ABI 0x4153430au
+#define ASC_ABI 0x4153430bu
 #ifndef ASC_MODULE_ENTRY
 #define ASC_MODULE_ENTRY asc_module
 #endif

@@ -166,7 +166,7 @@ func CreatePost(pool *sqlitex.Pool) fasthttp.RequestHandler {
 
 func LikePost(pool *sqlitex.Pool) fasthttp.RequestHandler {
 	var arenas fastjson.ArenaPool
-	const query = `INSERT INTO likes (user_id, post_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`
+	const query = `INSERT INTO likes (user_id, post_id) VALUES ($1, $2) ON CONFLICT DO NOTHING RETURNING user_id, post_id`
 
 	return func(ctx *fasthttp.RequestCtx) {
 		id, err := strconv.ParseInt(ctx.UserValue("id").(string), 10, 64)
@@ -186,7 +186,7 @@ func LikePost(pool *sqlitex.Pool) fasthttp.RequestHandler {
 
 		ok, err := stmt.Step()
 		if err != nil {
-			if sqlite.ErrCode(err) == sqlite.SQLITE_CONSTRAINT_FOREIGNKEY {
+			if strings.Contains(err.Error(), "FOREIGN KEY constraint failed") {
 				erred(ctx, fasthttp.StatusNotFound, errors.New("post not found"))
 			} else {
 				erred(ctx, fasthttp.StatusInternalServerError, err)

@@ -215,6 +215,12 @@ func LikePost(pool *sqlitex.Pool) fasthttp.RequestHandler {
 	}
 }
 
+func NotFound() fasthttp.RequestHandler {
+	return func(ctx *fasthttp.RequestCtx) {
+		erred(ctx, fasthttp.StatusNotFound, errors.New("not found"))
+	}
+}
+
 func clearAndReset(stmt *sqlite.Stmt) (err error) {
 	if err = stmt.ClearBindings(); err == nil {
 		err = stmt.Reset()

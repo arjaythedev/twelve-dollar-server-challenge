@@ -25,6 +25,10 @@ func main() {
 	r.POST("/posts", Auth(CreatePost(pool), secret))
 	r.POST("/posts/{id}/like", Auth(LikePost(pool), secret))
 
+	// configure not-found handler
+	r.HandleMethodNotAllowed = false
+	r.NotFound = NotFound()
+
 	addr := net.JoinHostPort(env("HOST", "127.0.0.1"), env("PORT", "3000"))
 	log.Printf("listening on %s", addr)
 

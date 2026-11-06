@@ -53,3 +53,5 @@ bash test/run.sh submissions/rust-iouring-rkkautsar
 The submission passes all 42 checks on a fresh seed database. Every request reads its own data from SQLite while served; there is no cross-request coalescing or response cache.
 
 At 280k virtual users (23,333 connections, 12 independent loadgen processes, server pinned to one CPU), all 12 loadgen processes passed: p95 ≤0.6 ms, p99 ≤1.9 ms, max ≤117 ms, ~2.3k requests/s, and no network errors.
+
+At 310k virtual users (25,833 connections, same harness), all 12 processes passed: p95 ≤0.6 ms, p99 ≤2.4 ms, max ≤55 ms, ~2.56k requests/s. On the identical 310k harness, the current top reference measured p50 1.0 ms, p95 2.4–2.5 ms, p99 3.5–4.1 ms.

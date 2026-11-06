@@ -387,7 +387,9 @@ answers once a backlog builds, OOM at 290k fixed; held, not merged: it didn't be
 300,000 failed the 2-minute probe on p99 (1.05 s at 84 % CPU / 2.33 s at 84 % CPU, 0 errors). Re-run at its newer head
 `2b4d6d8` (`--lifocap` backlog-share tuning): **280,000** again (26,702 req/s, p95 82.3 / p99 567.4 ms, 0 err, 78 % CPU,
 26 µs/req, 1,323 MB, 2026-11-05); 290,000 and 300,000 failed the 2-minute probe on p95 (1.13 s at 82 % CPU / 1.20 s at
-87 % CPU, 0 errors).
+87 % CPU, 0 errors). Re-run at `1ae8cff` (shim WAL VFS, PCACHE2 on huge pages, per-feed-position B-tree cursors):
+**280,000** again (26,731 req/s, p95 25.4 / p99 236.4 ms, 0 err, 83 % CPU, 28 µs/req, 629 MB, 2026-11-06); 290,000 and
+300,000 failed the 2-minute probe on p99 (2.52 s at 86 % CPU / 2.99 s at 87 % CPU, 0 errors).
 
 ᵠ **bun-yatta-psrockstar098** stays on its merged #179 row. Its follow-up **#329** (`ebc7969`, Bun.CryptoHasher JWT
 verify, local JSON helper, ASCII length fast path; held, not merged: it didn't beat the merged row, it tied it) also held

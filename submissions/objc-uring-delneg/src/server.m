@@ -102,7 +102,6 @@ int td_opt_lifo = 1;              // --lifo=0|1: past one pass of backlog, answe
 uint32_t td_opt_lifocap = 4;      // --lifocap=N: eighths of a pass the old end gets at --lifoage
 uint32_t td_opt_lifomin = 0;      // --lifomin=N: eighths of a pass the old end gets before --lifoage
 uint32_t td_opt_lifoage = 8000;   // --lifoage=MS: from this age the old end gets --lifocap eighths of a pass, from twice this age all of it
-uint32_t td_opt_wwin = 0;         // --wwin=MS: writes commit at most once per this many ms (group commit window)
 
 // ---------------------------------------------------------------- helpers
 TD_INLINE bool ieq(const char *a, const char *lower, uint32_t n) {
@@ -171,7 +170,7 @@ typedef struct {
     int64_t lastStats;
     TDAuth *auth;
     int64_t started, now;
-    uint32_t passMs, lastWriteMs, nHeldNow;
+    uint32_t passMs, nHeldNow;
     // batch
     TDReq *reqs;              // parsed requests waiting for an answer: reqs[reqHead..nreq), oldest first
     uint32_t reqHead, nreq, reqCap;
@@ -220,8 +219,8 @@ static struct io_uring_sqe *sqe_get(struct io_uring *r) {
     nrings = cfg->rings < 1 ? 1 : cfg->rings > MAX_RINGS ? MAX_RINGS : cfg->rings;
     connClass = objc_getClass("TDConn");
     stride = (class_getInstanceSize(connClass) + 15) & ~(size_t)15;
-    slab = mmap(NULL, stride * slots * (size_t)nrings, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
-    if (slab == MAP_FAILED) { perror("mmap slab"); exit(1); }
+    slab = td_huge(stride * slots * (size_t)nrings);
+    if (!slab) { perror("mmap slab"); exit(1); }
     reqCap = 1024;
     reqs = malloc(sizeof(TDReq) * reqCap);
     dirty = malloc(sizeof(uint32_t) * slots * (size_t)nrings);
@@ -293,8 +292,8 @@ int td_opt_cq = 65536;   // --cq=N: completions per ring; more than a ring's con
     if (ret < 0) { fprintf(stderr, "register_files_sparse(%u): %s\n", slots, strerror(-ret)); io_uring_queue_exit(&rs->ring); return false; }
     rs->br = setup_buf_ring(&rs->ring, k);
     if (!rs->br) { io_uring_queue_exit(&rs->ring); return false; }
-    rs->bufs = mmap(NULL, (size_t)BUF_SIZE * BUF_COUNT, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (rs->bufs == MAP_FAILED) { io_uring_queue_exit(&rs->ring); return false; }
+    rs->bufs = td_huge((size_t)BUF_SIZE * BUF_COUNT);
+    if (!rs->bufs) { io_uring_queue_exit(&rs->ring); return false; }
     rs->brMask = io_uring_buf_ring_mask(BUF_COUNT);
     for (uint32_t i = 0; i < BUF_COUNT; i++)
         io_uring_buf_ring_add(rs->br, rs->bufs + (size_t)i * BUF_SIZE, BUF_SIZE, (unsigned short)i, rs->brMask, (int)i);
@@ -623,11 +622,7 @@ static const char *find_crlf2(const char *p, uint32_t n) {
 - (void)flush TD_DIRECT {
     TDStore *st = store;
     uptime = now - started;
-    // Group commit window: a commit's WAL frames are the pages its writes dirtied, and the hot ones (the table's last leaf,
-    // the feed index's first leaf) are in every commit. So more writes per commit means fewer frames per write, fewer
-    // pwrites, and less for the checkpointer to copy. Reads don't wait for this.
-    bool wwin = td_opt_wwin && (uint32_t)(passMs - lastWriteMs) < td_opt_wwin;
-    bool hold = ckHold || wwin, oneWrite = ckRewind && td_opt_onewrite && !hold;
+    bool hold = ckHold, oneWrite = ckRewind && td_opt_onewrite && !hold;
     bool db = false;
     uint32_t first = reqHead, budget = td_opt_answers ? td_opt_answers : UINT32_MAX, last = nreq;
     if (last - first > budget) last = first + budget;   // only a first look: routes only
@@ -692,7 +687,6 @@ static const char *find_crlf2(const char *p, uint32_t n) {
         }
         nreq = k;
     }
-    if (wrote) lastWriteMs = passMs;
     nHeldNow = nheld + ntail;
     bool ok = true;
     if (txn && ![st commit]) { ok = false; [st rollback]; }

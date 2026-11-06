@@ -3,13 +3,16 @@
 ** locking and page cache are SQLite's, only the bytecode engine is skipped.
 ** Reads run inside the batch's transaction (BEGIN ... COMMIT around each
 ** completion batch). Nothing is kept between calls but schema facts (root
-** pages, key descriptions), checked against the schema cookie on every call.
+** pages, key descriptions), checked against the schema cookie on every call,
+** and the cursors' positions for the rest of the batch.
 ** Any row the fast path does not cover (overflow pages, unexpected types)
 ** sends the caller back to its SQL statements. */
 #include "sqlite3.c"
 #include "td_btree.h"
 
 _Static_assert(SQLITE_VERSION_NUMBER == 3054001, "check td_btree.c against this SQLite version");
+
+extern void *td_huge(size_t n);
 
 static struct {
     sqlite3 *db;
@@ -19,10 +22,13 @@ static struct {
     /* Cursors stay open for the rest of the batch's transaction (td_bt_end closes
     ** them before COMMIT/ROLLBACK); a write in between makes SQLite save and
     ** reseek them, as for any open statement cursor. */
-    BtCursor cur[4];
-    u8 open[4];
+    BtCursor cur[4 + 40];
+    u8 open[4 + 40];
 } B;
-enum { C_TOP, C_POSTS, C_USERS, C_LIKES };
+/* The feed reads its n-th post and that post's author through its own cursors (C_FEEDPOST + n, C_AUTHOR + n). Requests in
+** one pass mostly ask for the same rows, and sqlite3BtreeTableMoveto returns at once from a cursor already on the key.
+** A row is still decoded from SQLite's page for each request, and a write to the table makes SQLite save and reseek. */
+enum { C_TOP, C_POSTS, C_USERS, C_LIKES, C_FEEDPOST, C_AUTHOR = C_FEEDPOST + 20, C_COUNT = C_AUTHOR + 20 };
 
 int td_bt_init(sqlite3 *db) {
     memset(&B, 0, sizeof B);
@@ -89,20 +95,18 @@ static int rec(BtCursor *c, int n, Col *col) {
 #define IS_TEXT(c) ((c).type >= 13 && ((c).type & 1))
 
 static BtCursor *cur(int i) {
-    static const u8 isIndex[4] = {1, 0, 0, 1};
     BtCursor *c = &B.cur[i];
     if (B.open[i]) return c;
-    Pgno root = i == C_TOP ? B.top : i == C_POSTS ? B.posts : i == C_USERS ? B.users : B.likes;
+    Pgno root = i == C_TOP ? B.top : i == C_LIKES ? B.likes : i == C_USERS || i >= C_AUTHOR ? B.users : B.posts;
     memset(c, 0, sizeof *c);
     sqlite3BtreeCursorZero(c);
-    if (sqlite3BtreeCursor(B.db->aDb[0].pBt, root, 0,
-                           isIndex[i] ? (i == C_TOP ? B.topKey : B.likesKey) : NULL, c)) return NULL;
+    if (sqlite3BtreeCursor(B.db->aDb[0].pBt, root, 0, i == C_TOP ? B.topKey : i == C_LIKES ? B.likesKey : NULL, c)) return NULL;
     B.open[i] = 1;
     return c;
 }
 
 void td_bt_end(void) {
-    for (int i = 0; i < 4; i++)
+    for (int i = 0; i < C_COUNT; i++)
         if (B.open[i]) { sqlite3BtreeCloseCursor(&B.cur[i]); B.open[i] = 0; }
 }
 
@@ -171,8 +175,8 @@ static int begin_read(void) {
 
 int td_bt_feed(TDPostSink sink, void *ctx) {
     if (begin_read()) return -1;
-    BtCursor *top = cur(C_TOP), *pc = cur(C_POSTS), *uc = cur(C_USERS), *lc = cur(C_LIKES);
-    if (!top || !pc || !uc || !lc) return -1;
+    BtCursor *top = cur(C_TOP), *lc = cur(C_LIKES);
+    if (!top || !lc) return -1;
     i64 ids[20];
     int n = 0, res = 0;
     int rc = sqlite3BtreeFirst(top, &res);     /* the index is (created_at DESC, id DESC): newest first */
@@ -199,18 +203,10 @@ int td_bt_feed(TDPostSink sink, void *ctx) {
     if (rc) return -1;
     TDPostView v;
     for (int i = 0; i < n; i++) {
-        int at = 0;
-        if (i == 0 && ids[0] == hi) {
-            /* the newest post is usually the table's last row: a rightmost descent, no search */
-            at = sqlite3BtreeLast(pc, &res) == SQLITE_OK && !res && sqlite3BtreeIntegerKey(pc) == ids[0];
-        } else if (i > 0 && ids[i] == ids[i - 1] - 1) {
-            /* consecutive ids: step back one row instead of seeking from the root */
-            at = sqlite3BtreePrevious(pc, 0) == SQLITE_OK && sqlite3BtreeIntegerKey(pc) == ids[i];
-        }
-        if (!at) {
-            if (sqlite3BtreeTableMoveto(pc, ids[i], 0, &res)) return -1;
-            if (res != 0) continue;     /* not in the table: same as the SQL join */
-        }
+        BtCursor *pc = cur(C_FEEDPOST + i), *uc = cur(C_AUTHOR + i);
+        if (!pc || !uc) return -1;
+        if (sqlite3BtreeTableMoveto(pc, ids[i], 0, &res)) return -1;
+        if (res != 0) continue;     /* not in the table: same as the SQL join */
         if (post_view(pc, uc, &v)) return -1;
         v.id = ids[i];
         v.likes = likes[i];
@@ -313,7 +309,8 @@ static TDPage *tdp_alloc(TDCache *c) {
         c->capAll = cap;
     }
     if (!c->carveLeft) {
-        u32 n = c->purgeable ? 64 : 4;
+        const size_t huge = (size_t)2 << 20;
+        u32 n = c->purgeable ? (u32)(huge / (u32)c->szAlloc) : 4;
         if (c->nChunks == c->capChunks) {
             u32 cap = c->capChunks ? c->capChunks * 2 : 16;
             void **a = realloc(c->chunks, cap * sizeof *a);
@@ -321,7 +318,7 @@ static TDPage *tdp_alloc(TDCache *c) {
             c->chunks = a;
             c->capChunks = cap;
         }
-        char *m = malloc((size_t)c->szAlloc * n);
+        char *m = c->purgeable ? td_huge(huge) : malloc((size_t)c->szAlloc * n);
         if (!m) return 0;
         c->chunks[c->nChunks++] = m;
         c->carve = m;
@@ -430,7 +427,10 @@ static void tdp_truncate(sqlite3_pcache *pc, unsigned limit) {
 
 static void tdp_destroy(sqlite3_pcache *pc) {
     TDCache *c = (TDCache *)pc;
-    for (u32 i = 0; i < c->nChunks; i++) free(c->chunks[i]);
+    for (u32 i = 0; i < c->nChunks; i++) {
+        if (c->purgeable) munmap(c->chunks[i], (size_t)2 << 20);
+        else free(c->chunks[i]);
+    }
     free(c->chunks);
     free(c->all);
     free(c->above);

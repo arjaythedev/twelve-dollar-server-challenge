@@ -124,13 +124,13 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | 56 | csharp-iouring-AlexandruLT | #196 | C# (Native AOT, io_uring) | **189,000** | 18,599 | 19.5 | 212 | 0.00 | 84 | 42 | 693 | 2026-10-29 |
 | 58 | go-epoll-MegaPanchamZ | #144 | Go (raw epoll) | **185,000** | 18,086 | 288 | 479 | 0.00 | 99 | 51 | 1,286 | 2026-10-28 |
 | 59 | cpp-iouring-smolblackhole | #318 | C++ (io_uring, SQLite B-tree reads) | **181,000** | 17,809 | 18.0 | 51.1 | 0.00 | 73 | 38 | 437 | 2026-11-05 |
-| 60 | go-epoll-kaikegm | #151 | Go (raw epoll, cgo SQLite) | **175,000** | 16,616 | 37 | 253 | 0.61 | 98 | 55 | 749 | 2026-10-28 |
-| 61 | c-iouring-raoz | #26 | C (io_uring) | **172,000** | 16,875 | 98 | 125 | 0.00 | 69 | 38 | 419 | 2026-10-27 |
-| 62 | asm-nasm-melroy89 | #86 | x86-64 asm (io_uring) | **171,000** | 16,777 | 87 | 142 | 0.00 | 78 | 43 | 358 | 2026-10-21 |
-| 63 | go-epoll-unorig-username | #186 | Go (raw epoll, cgo SQLite) | **165,000** | 16,020 | 479 | 952 | 0.00 | 97 | 56 | 665 | 2026-10-29 |
-| 64 | asm-epoll-HauLTCE | #207 | x86-64 asm (epoll, forked workers) | **160,000** ᵃ | 15,682 | 291 | 757 | 0.61 | 95 | 56 | 1,307 | 2026-10-30 |
-| 64 | ruby-cring-cicloid | #309 | Ruby (C io_uring extension, SQLite B-tree reads) | **160,000** | 15,628 | 266 | 699 | 0.01 | 84 | 50 | 1,017 | 2026-11-04 |
-| 64 | c-modular-ascendnoosphere | #331 | C (io_uring, SQLite B-tree reads) | **160,000** | 15,721 | 75.3 | 238.8 | 0.00 | 65 | 38 | 492 | 2026-11-06 |
+| 59 | c-modular-ascendnoosphere | #331 | C (io_uring, SQLite B-tree reads) | **181,000** ᵡ | 17,751 | 166.9 | 345.0 | 0.00 | 78 | 41 | 845 | 2026-11-06 |
+| 61 | go-epoll-kaikegm | #151 | Go (raw epoll, cgo SQLite) | **175,000** | 16,616 | 37 | 253 | 0.61 | 98 | 55 | 749 | 2026-10-28 |
+| 62 | c-iouring-raoz | #26 | C (io_uring) | **172,000** | 16,875 | 98 | 125 | 0.00 | 69 | 38 | 419 | 2026-10-27 |
+| 63 | asm-nasm-melroy89 | #86 | x86-64 asm (io_uring) | **171,000** | 16,777 | 87 | 142 | 0.00 | 78 | 43 | 358 | 2026-10-21 |
+| 64 | go-epoll-unorig-username | #186 | Go (raw epoll, cgo SQLite) | **165,000** | 16,020 | 479 | 952 | 0.00 | 97 | 56 | 665 | 2026-10-29 |
+| 65 | asm-epoll-HauLTCE | #207 | x86-64 asm (epoll, forked workers) | **160,000** ᵃ | 15,682 | 291 | 757 | 0.61 | 95 | 56 | 1,307 | 2026-10-30 |
+| 65 | ruby-cring-cicloid | #309 | Ruby (C io_uring extension, SQLite B-tree reads) | **160,000** | 15,628 | 266 | 699 | 0.01 | 84 | 50 | 1,017 | 2026-11-04 |
 | 67 | java-uring-crux | #170 | Java (FFM io_uring, C row formatter) | **158,000** | 15,531 | 137 | 312 | 0.00 | 72 | 43 | 1,139 | 2026-10-29 |
 | 68 | asm-epoll-unorig-username | #181 | x86-64 asm (epoll) | **155,000** | 15,256 | 14 | 55 | 0.00 | 87 | 53 | 858 | 2026-10-29 |
 | 68 | python-pypy-iouring-kiwamizamurai | #284 | PyPy (io_uring, SQLite B-tree reads) | **155,000** | 15,201 | 120 | 277 | 0.00 | 80 | 49 | 525 | 2026-11-03 |
@@ -481,6 +481,13 @@ direct-descriptor table nears full: 257,000 held at 76 % CPU (28 µs/req, 675 MB
 probe but failed the 5-minute hold on p99 (2.8 s), 280,000 failed on p99 (2.7 s). Its first run at `44dfa26` held only
 67,000: `GET /feed` timed out at 23 % CPU (0.34 % err at 67k, 1.78 % at 80k), the problem the new commit targets.
 
+ᵡ **c-modular-ascendnoosphere #331 is scored at `0e52f65`**, which reads only through SQLite's public B-tree cursor
+calls (no private `BtCursor` writes, no own page walk) and runs passive `sqlite3_wal_checkpoint_v2` on a second
+connection: 181,000 held at 78 % CPU (41 µs/req, 845 MB, 0 err); 190,000 passed the 2-minute probe but failed the
+5-minute hold on p99 (1.8 s), 195,000 failed on p99 (1.2 s). Its first run at `78fe83f` held 160,000. The head moved
+to `c73af7e` (direct accepts into io_uring file slots) during the run; #331 was closed and the same code re-opened as
+**#333**, which is queued.
+
 ᵒ **wat-wasmedge-delneg** is scored at its follow-up **#288** (`a5c516a`, shim VFS + checkpointer through public
 SQLite APIs; merged 2026-11-04): 220,000 held at 72 % CPU (31 µs/req, 913 MB); 230,000 and 240,000 failed the 2-minute
 probe on p99 (1.0 s / 2.5 s, 0 err, 73–80 % CPU), 320,000 on `connection refused`. An earlier #288 run (`df9da40`,
@@ -648,10 +655,6 @@ public plugin APIs (a custom page cache through `SQLITE_CONFIG_PCACHE2`, a custo
   `tds_like_counts` decodes leaf cells itself (`findCell`, `page->nCell`) and `tds_like_position` sets `BtCursor`
   fields (`ix`, `info.nSize`, `curFlags`). Same open question for Arjay as #296 / #317 (ruling 8 vs. the allowed B-tree
   cursor reads). Scored as submitted (181k at `bf31d5a`); held open for Arjay.
-- **c-modular-ascendnoosphere #331 writes SQLite's private B-tree cursor fields**: `src/tree.c` descends pages itself
-  (`pPage->nCell`) and sets `BtCursor` fields (`ix`, `info.nSize`, `info.nKey`, `curFlags`) directly (l.114–116,
-  145–147, 206–208, 346–361). Same open question for Arjay as #296 / #317 / #318 (ruling 8 vs. the allowed B-tree
-  cursor reads). Scored as submitted (160k at `78fe83f`); held open for Arjay.
 - **c-iouring-fajarreza-gif #302 reuses c-iouring-pavlyhalim #245's syscall layer**: `src/sys.h` (io_uring ABI/ring
   code, 415 lines) is byte-identical to #245's and `sha256.h` nearly so (credited in its README since `d7a2e70`);
   `server.c`, HTTP, JWT and the database code are new. Arjay ruled 2026-11-04: credited reuse is fine → merged at

@@ -1,8 +1,5 @@
 use std::collections::HashSet;
-use std::os::fd::RawFd;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
-use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -56,8 +53,6 @@ pub struct WriteJob {
     pub at: Option<Instant>,
     pub stat: usize,
     pub cmd: WriteCmd,
-    pub result_tx: Sender<WriteResult>,
-    pub event_fd: RawFd,
 }
 
 pub struct WriteResult {
@@ -76,7 +71,7 @@ pub struct WriteResult {
 pub fn spawn(
     path: String,
     rx: Receiver<WriteJob>,
-    dirty: Arc<AtomicU64>,
+    result_tx: Sender<WriteResult>,
     ready: Sender<()>,
 ) {
     thread::Builder::new()
@@ -125,22 +120,17 @@ pub fn spawn(
             }
 
             let (results, committed) = run_batch(&mut db, &mut cache, &jobs);
-            if committed && !jobs.is_empty() {
-                dirty.fetch_add(1, Ordering::Relaxed);
-            }
-            let mut wake_fds: Vec<RawFd> = Vec::new();
-            for (i, job) in jobs.into_iter().enumerate() {
+            let mut results = results.into_iter();
+            for job in jobs {
                 let (status, body) = if committed {
-                    results.get(i).cloned().unwrap_or_else(|| (500, error("internal server error")))
+                    results.next().unwrap_or_else(|| (500, error("internal server error")))
                 } else {
                     (500, error("internal server error"))
                 };
                 let close = job.close || !committed;
                 let feed_dirty = matches!(job.cmd.kind, WriteKind::Create { .. });
                 let like_dirty = matches!(job.cmd.kind, WriteKind::Like { .. });
-                wake_fds.push(job.event_fd);
-                if job
-                    .result_tx
+                if result_tx
                     .send(WriteResult {
                         ring: job.ring,
                         slot: job.slot,
@@ -156,18 +146,6 @@ pub fn spawn(
                     .is_err()
                 {
                     return;
-                }
-            }
-            wake_fds.sort_unstable();
-            wake_fds.dedup();
-            let one = 1u64;
-            for event_fd in wake_fds {
-                unsafe {
-                    libc::write(
-                        event_fd,
-                        &one as *const u64 as *const libc::c_void,
-                        std::mem::size_of::<u64>(),
-                    );
                 }
             }
         }
@@ -405,6 +383,9 @@ pub fn run_batch(
                         }
                     }
                 }
+                // An inserted pair also proves the post exists for later
+                // duplicate pairs in this batch.
+                existing.extend(inserted.iter().map(|&(_, post_id)| post_id));
 
                 if batch_ok {
                     for (pair, i) in pairs.iter().zip(pair_jobs.iter()) {

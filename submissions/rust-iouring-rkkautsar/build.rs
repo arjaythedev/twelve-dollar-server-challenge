@@ -12,6 +12,7 @@ fn main() {
     let mut cc = Command::new("cc");
     cc.args([
         "-O3",
+        "-DNDEBUG",
         "-fPIC",
         "-march=native",
         "-DSQLITE_THREADSAFE=2",

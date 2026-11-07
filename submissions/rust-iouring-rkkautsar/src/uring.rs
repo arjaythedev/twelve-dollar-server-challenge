@@ -1,19 +1,17 @@
 use std::alloc::{alloc_zeroed, dealloc, Layout};
-use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::io;
 use std::mem::size_of;
 use std::net::{SocketAddr, ToSocketAddrs};
-use std::os::fd::{AsRawFd, RawFd};
+use std::os::fd::AsRawFd;
 use std::sync::mpsc::{Receiver, Sender};
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU16, AtomicU64, AtomicI64, Ordering};
 use std::sync::OnceLock;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use io_uring::{cqueue, opcode, squeue, types, IoUring};
 
 use super::{parse_request, response_bytes, App, Handled, ParseResult};
-use crate::reader::PostResponse;
 use crate::stats;
 use crate::writer::{WriteJob, WriteResult};
 
@@ -21,37 +19,49 @@ const TAG_ACCEPT: u64 = 1;
 const TAG_READ: u64 = 2;
 const TAG_WRITE: u64 = 3;
 const TAG_CLOSE: u64 = 4;
+const TAG_READ_SINGLE: u64 = 5;
+const TAG_POLL: u64 = 6;
+const TAG_CANCEL: u64 = 7;
+const TAG_SHUTDOWN: u64 = 8;
+const TAG_RECV_MULTI: u64 = 9;
 const TAG_SHIFT: u64 = 52;
 const GEN_SHIFT: u64 = 20;
 const SLOT_MASK: u64 = (1 << 20) - 1;
 
 const FILE_TABLE: u32 = 65_000;
 const RING_ENTRIES: u32 = 4_096;
-const CQES_PER_RING: usize = 2048;
-const READ_QUEUE_CAP: usize = usize::MAX;
-const FEED_ANSWERS_PER_PASS: usize = usize::MAX;
-const POST_ANSWERS_PER_PASS: usize = usize::MAX;
+const CQES_PER_RING: usize = 4_096;
+const READ_QUEUE_CAP: usize = 16_384;
+const READ_REARM_PER_PASS: usize = 16_384;
+const FEED_ANSWERS_PER_PASS: usize = 1_024;
+const POST_ANSWERS_PER_PASS: usize = 1_024;
 const READ_BUF: usize = 2_048;
 const BUF_READ: usize = 512;
-const BUF_RING_ENTRIES: u16 = 32_768;
+// 2 MiB of provided data buffers per ring; excess readable sockets wait in
+// read_queue until a previous receive's completion returns its buffer.
+const BUF_RING_ENTRIES: u16 = 4_096;
 const BUF_GROUP: u16 = 1;
 
 #[derive(Clone, Copy)]
-enum Diag { Process, Feed, Post, Write }
+enum Diag { Process, Feed, Post, Write, Send, Submit }
 
-static DIAG_N: [AtomicU64; 4] = [
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
+static DIAG_N: [AtomicU64; 6] = [
+    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
 ];
-static DIAG_NS: [AtomicU64; 4] = [
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
+static DIAG_NS: [AtomicU64; 6] = [
+    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
 ];
-static DIAG_MAX: [AtomicU64; 4] = [
-    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
+static DIAG_MAX: [AtomicU64; 6] = [
+    AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0),
 ];
 static ACCEPTS: AtomicU64 = AtomicU64::new(0);
 static CLOSES: AtomicU64 = AtomicU64::new(0);
 static EOFS: AtomicU64 = AtomicU64::new(0);
 static READ_ERRORS: AtomicU64 = AtomicU64::new(0);
+static ENOBUFS_COUNT: AtomicU64 = AtomicU64::new(0);
+static ACCEPT_ERRORS: AtomicU64 = AtomicU64::new(0);
+static ACCEPT_LAST_ERR: AtomicI64 = AtomicI64::new(0);
+static ACCEPT_PAUSED: AtomicU64 = AtomicU64::new(0);
 static ACTIVE: AtomicU64 = AtomicU64::new(0);
 
 fn diag_on() -> bool {
@@ -87,7 +97,7 @@ fn diag_tick(passes: u64, feed_q: usize, post_q: usize) {
     let utime = ru.ru_utime.tv_sec as u64 * 1_000_000 + ru.ru_utime.tv_usec as u64;
     let stime = ru.ru_stime.tv_sec as u64 * 1_000_000 + ru.ru_stime.tv_usec as u64;
     let mut out = String::new();
-    for (name, i) in [("proc", 0), ("feed", 1), ("post", 2), ("write", 3)] {
+    for (name, i) in [("proc", 0), ("feed", 1), ("post", 2), ("write", 3), ("send", 4), ("submit", 5)] {
         let n = DIAG_N[i].load(Ordering::Relaxed);
         let ns = DIAG_NS[i].load(Ordering::Relaxed);
         out.push_str(&format!(
@@ -101,12 +111,16 @@ fn diag_tick(passes: u64, feed_q: usize, post_q: usize) {
         ));
     }
     eprintln!(
-        "diag pass={} accepts={} closes={} eofs={} rerr={} active={} fq={} pq={} utime_us={} stime_us={}{}",
+        "diag pass={} accepts={} closes={} eofs={} rerr={} enobufs={} aerr={} alast={} apaused={} active={} fq={} pq={} utime_us={} stime_us={}{}",
         passes,
         ACCEPTS.load(Ordering::Relaxed),
         CLOSES.load(Ordering::Relaxed),
         EOFS.load(Ordering::Relaxed),
         READ_ERRORS.load(Ordering::Relaxed),
+        ENOBUFS_COUNT.load(Ordering::Relaxed),
+        ACCEPT_ERRORS.load(Ordering::Relaxed),
+        ACCEPT_LAST_ERR.load(Ordering::Relaxed),
+        ACCEPT_PAUSED.load(Ordering::Relaxed),
         ACTIVE.load(Ordering::Relaxed),
         feed_q,
         post_q,
@@ -119,7 +133,6 @@ fn diag_tick(passes: u64, feed_q: usize, post_q: usize) {
 enum OutBuf {
     Empty,
     Owned(Vec<u8>, usize),
-    Shared(Arc<Vec<u8>>, usize),
 }
 
 impl OutBuf {
@@ -127,20 +140,18 @@ impl OutBuf {
         match self {
             OutBuf::Empty => 0,
             OutBuf::Owned(v, off) => v.len().saturating_sub(*off),
-            OutBuf::Shared(v, off) => v.len().saturating_sub(*off),
         }
     }
     fn ptr(&self, off: usize) -> *const u8 {
         match self {
             OutBuf::Empty => std::ptr::null(),
             OutBuf::Owned(v, o) => unsafe { v.as_ptr().add(*o + off) },
-            OutBuf::Shared(v, o) => unsafe { v.as_ptr().add(*o + off) },
         }
     }
     fn advance(&mut self, n: usize) {
         match self {
             OutBuf::Empty => {}
-            OutBuf::Owned(_, off) | OutBuf::Shared(_, off) => *off += n,
+            OutBuf::Owned(_, off) => *off += n,
         }
     }
 }
@@ -151,21 +162,42 @@ struct Conn {
     read: Option<Box<[u8; READ_BUF]>>,
     out: OutBuf,
     gen: u32,
-    multishot: bool,
+    poll_read: bool,
+    hybrid: bool,
+    // Poll notifications are hints; at most one queued or in-flight recv exists.
+    poll_armed: bool,
+    read_ready: bool,
+    peer_hup: bool,
+    read_queued: bool,
+    reading: bool,
+    response_pending: bool,
+    closing: bool,
+    shutdown_pending: bool,
     writing: bool,
+    send_start: Option<Instant>,
     write_pending: bool,
     close_after: bool,
 }
 
 impl Conn {
-    fn new(gen: u32, multishot: bool) -> Self {
+    fn new(gen: u32, poll_read: bool, hybrid: bool) -> Self {
         Self {
             input: Vec::new(),
-            read: if multishot { None } else { Some(Box::new([0u8; READ_BUF])) },
+            read: if poll_read { None } else { Some(Box::new([0u8; READ_BUF])) },
             out: OutBuf::Empty,
             gen,
-            multishot,
+            poll_read,
+            hybrid,
+            poll_armed: false,
+            read_ready: false,
+            peer_hup: false,
+            read_queued: false,
+            reading: false,
+            response_pending: false,
+            closing: false,
+            shutdown_pending: false,
             writing: false,
+            send_start: None,
             write_pending: false,
             close_after: false,
         }
@@ -244,7 +276,7 @@ impl BufRing {
         }
         br.tail = entries as u32;
         unsafe {
-            (&*(br.mem.add(12) as *const AtomicU32)).store(br.tail << 16, Ordering::Release);
+            (&*(br.mem.add(14) as *const AtomicU16)).store(br.tail as u16, Ordering::Release);
         }
         Ok(br)
     }
@@ -254,16 +286,16 @@ impl BufRing {
             return;
         }
         let slot = (self.tail & self.mask) as usize ;
-        let e = UringBuf {
-            addr: unsafe { self.bufs.as_ptr().add(bid as usize * BUF_READ) as u64 },
-            len: BUF_READ as u32,
-            bid,
-            resv: 0,
-        };
-        unsafe { std::ptr::write(self.mem.add(slot * 16) as *mut UringBuf, e) };
+        // Entry zero's reserved field overlaps the shared tail.
+        let entry = unsafe { self.mem.add(slot * 16) as *mut UringBuf };
+        unsafe {
+            std::ptr::addr_of_mut!((*entry).addr).write(self.bufs.as_ptr().add(bid as usize * BUF_READ) as u64);
+            std::ptr::addr_of_mut!((*entry).len).write(BUF_READ as u32);
+            std::ptr::addr_of_mut!((*entry).bid).write(bid);
+        }
         self.tail = (self.tail.wrapping_add(1)) & 0xffff;
         unsafe {
-            (&*(self.mem.add(12) as *const AtomicU32)).store(self.tail << 16, Ordering::Release);
+            (&*(self.mem.add(14) as *const AtomicU16)).store(self.tail as u16, Ordering::Release);
         }
     }
 }
@@ -274,11 +306,56 @@ impl Drop for BufRing {
     }
 }
 
+// Direct descriptors are indices in the registered file table.
+struct ConnMap {
+    slots: Box<[Option<Conn>]>,
+    live: usize,
+}
+
+impl ConnMap {
+    fn new() -> Self {
+        Self {
+            slots: std::iter::repeat_with(|| None)
+                .take(FILE_TABLE as usize).collect(),
+            live: 0,
+        }
+    }
+
+    fn insert(&mut self, slot: u32, conn: Conn) {
+        if self.slots[slot as usize].replace(conn).is_none() {
+            self.live += 1;
+        }
+    }
+
+    fn get(&self, slot: &u32) -> Option<&Conn> {
+        self.slots.get(*slot as usize)?.as_ref()
+    }
+
+    fn get_mut(&mut self, slot: &u32) -> Option<&mut Conn> {
+        self.slots.get_mut(*slot as usize)?.as_mut()
+    }
+
+    fn remove(&mut self, slot: &u32) -> Option<Conn> {
+        let conn = self.slots.get_mut(*slot as usize)?.take();
+        if conn.is_some() {
+            self.live -= 1;
+        }
+        conn
+    }
+
+    fn len(&self) -> usize {
+        self.live
+    }
+}
+
 struct RingState {
     ring: IoUring,
     listener: i32,
-    conns: HashMap<u32, Conn>,
-    multishot: bool,
+    conns: ConnMap,
+    read_queue: VecDeque<(u32, u32)>,
+    reads_in_flight: usize,
+    poll_read: bool,
+    hybrid: bool,
     buf_ring: Option<BufRing>,
     next_gen: u32,
     last_cqes: usize,
@@ -306,7 +383,7 @@ fn push(ring: &mut IoUring, entry: squeue::Entry) -> io::Result<()> {
         {
             let mut sq = ring.submission();
             if unsafe { sq.push(&entry) }.is_ok() {
-                sq.sync();
+                // Dropping SubmissionQueue publishes the updated tail.
                 return Ok(());
             }
         }
@@ -394,13 +471,20 @@ fn make_listener(addr: &str) -> io::Result<i32> {
 
 impl RingState {
     fn new(addr: &str) -> io::Result<Self> {
+        let (poll_read, hybrid) = match std::env::var("RECV_MODE").as_deref() {
+            Ok("hybrid") | Err(std::env::VarError::NotPresent) => (true, true),
+            Ok("poll") => (true, false),
+            Ok("direct") => (false, false),
+            _ => return Err(io::Error::new(io::ErrorKind::InvalidInput,
+                                          "RECV_MODE must be hybrid, poll, or direct")),
+        };
         let listener = make_listener(addr)?;
         let ring = {
             let mut last = None;
             let mut ring = None;
             for attempt in 0..6 {
                 let mut builder = IoUring::builder();
-                builder.setup_single_issuer().setup_coop_taskrun().setup_cqsize(8_192);
+                builder.setup_single_issuer().setup_coop_taskrun().setup_cqsize(16_384);
                 match builder.build(RING_ENTRIES) {
                     Ok(r) => {
                         ring = Some(r);
@@ -432,10 +516,7 @@ impl RingState {
             }
             return Err(e);
         }
-        let multishot = std::env::var("MULTISHOT")
-            .map(|v| v != "0")
-            .unwrap_or(true);
-        let buf_ring = if multishot {
+        let buf_ring = if poll_read {
             match BufRing::new(&ring) {
                 Ok(b) => Some(b),
                 Err(e) => {
@@ -449,8 +530,11 @@ impl RingState {
         let mut state = Self {
             ring,
             listener,
-            conns: HashMap::with_capacity(32_768),
-            multishot,
+            conns: ConnMap::new(),
+            read_queue: VecDeque::with_capacity(READ_REARM_PER_PASS),
+            reads_in_flight: 0,
+            poll_read,
+            hybrid,
             buf_ring,
             next_gen: 1,
             last_cqes: 0,
@@ -478,18 +562,53 @@ impl RingState {
 }
 
 fn arm_read(ring: &mut IoUring, slot: u32, c: &mut Conn) -> io::Result<()> {
+    if c.close_after || c.closing {
+        return Ok(());
+    }
+    if c.poll_read {
+        if c.poll_armed || (c.hybrid && (c.reading || c.read_ready || c.peer_hup)) {
+            return Ok(());
+        }
+        let entry = if c.hybrid {
+            opcode::RecvMulti::new(types::Fixed(slot), BUF_GROUP)
+                .build().user_data(ud(slot, c.gen, TAG_RECV_MULTI))
+        } else {
+            opcode::PollAdd::new(types::Fixed(slot), (libc::POLLIN | libc::POLLRDHUP) as u32)
+                .multi(true).build().user_data(ud(slot, c.gen, TAG_POLL))
+        };
+        push(ring, entry)?;
+        c.poll_armed = true;
+        Ok(())
+    } else {
+        let buf = c.read.as_mut().unwrap();
+        let entry = opcode::Recv::new(types::Fixed(slot), buf.as_mut_ptr(), READ_BUF as u32)
+            .build()
+            .user_data(ud(slot, c.gen, TAG_READ));
+        push(ring, entry)
+    }
+}
+
+fn queue_ready(queue: &mut VecDeque<(u32, u32)>, slot: u32, c: &mut Conn) {
+    if c.poll_read && c.read_ready && !c.read_queued && !c.reading
+        && (!c.hybrid || (!c.poll_armed && !c.peer_hup))
+        && !c.response_pending && !c.closing && !c.close_after
+    {
+        c.read_queued = true;
+        queue.push_back((slot, c.gen));
+    }
+}
+
+fn arm_single_read(ring: &mut IoUring, slot: u32, c: &Conn) -> io::Result<()> {
     if c.close_after {
         return Ok(());
     }
-    let entry = if c.multishot {
-        opcode::RecvMulti::new(types::Fixed(slot), BUF_GROUP)
-            .len(0)
-            .build()
-    } else {
-        let buf = c.read.as_mut().unwrap();
-        opcode::Recv::new(types::Fixed(slot), buf.as_mut_ptr(), READ_BUF as u32).build()
-    };
-    push(ring, entry.user_data(ud(slot, c.gen, TAG_READ)))
+    let entry = opcode::Recv::new(types::Fixed(slot), std::ptr::null_mut(), 0)
+        .buf_group(BUF_GROUP)
+        .flags(libc::MSG_DONTWAIT)
+        .build()
+        .flags(squeue::Flags::BUFFER_SELECT)
+        .user_data(ud(slot, c.gen, TAG_READ_SINGLE));
+    push(ring, entry)
 }
 
 fn arm_write(ring: &mut IoUring, slot: u32, c: &mut Conn) -> io::Result<()> {
@@ -502,6 +621,7 @@ fn arm_write(ring: &mut IoUring, slot: u32, c: &mut Conn) -> io::Result<()> {
     }
     let ptr = c.out.ptr(0);
     c.writing = true;
+    c.send_start = diag_start();
     let entry = opcode::Send::new(types::Fixed(slot), ptr, len as u32)
         .build()
         .user_data(ud(slot, c.gen, TAG_WRITE));
@@ -533,12 +653,6 @@ fn queue_reply(c: &mut Conn, status: u16, body: &[u8], close: bool) {
     }
 }
 
-fn queue_shared(c: &mut Conn, packet: Arc<Vec<u8>>, close: bool) {
-    c.out = OutBuf::Shared(packet, 0);
-    if close {
-        c.close_after = true;
-    }
-}
 
 fn queue_owned(c: &mut Conn, packet: Vec<u8>, close: bool) {
     c.out = OutBuf::Owned(packet, 0);
@@ -547,12 +661,49 @@ fn queue_owned(c: &mut Conn, packet: Vec<u8>, close: bool) {
     }
 }
 
-fn finish_close(ring: &mut IoUring, conns: &mut HashMap<u32, Conn>, slot: u32) -> io::Result<()> {
-    if let Some(c) = conns.remove(&slot) {
+fn finish_close(ring: &mut IoUring, conns: &mut ConnMap, slot: u32) -> io::Result<()> {
+    let Some(c) = conns.get_mut(&slot) else { return Ok(()) };
+    if !c.closing {
+        c.closing = true;
         CLOSES.fetch_add(1, Ordering::Relaxed);
-        arm_close(ring, slot, c.gen)?;
+        if c.poll_read {
+            // Cancel by the generation-qualified poll user_data, not by fd:
+            // a fixed-file poll retains the socket even after the slot closes.
+            if c.poll_armed {
+                let tag = if c.hybrid { TAG_RECV_MULTI } else { TAG_POLL };
+                let cancel = opcode::AsyncCancel::new(ud(slot, c.gen, tag))
+                    .build().user_data(ud(slot, c.gen, TAG_CANCEL));
+                push(ring, cancel)?;
+            }
+            // A send can be pending when the poll fails. Shutdown wakes it;
+            // the slot and all borrowed buffers stay alive through its CQE.
+            let shutdown = opcode::Shutdown::new(types::Fixed(slot), libc::SHUT_RDWR)
+                .build().user_data(ud(slot, c.gen, TAG_SHUTDOWN));
+            push(ring, shutdown)?;
+            c.shutdown_pending = true;
+        }
+    }
+    if !c.poll_armed && !c.reading && !c.writing && !c.shutdown_pending {
+        let gen = c.gen;
+        arm_close(ring, slot, gen)?;
+        conns.remove(&slot);
     }
     Ok(())
+}
+
+// The returned work owns everything it needs; no request borrow escapes this
+// function. Only incomplete requests and pipelined bytes need retaining.
+fn receive_input(input: &mut Vec<u8>, data: &[u8], app: &mut App) -> Option<(Handled, bool)> {
+    if input.is_empty() {
+        if let ParseResult::Complete(req, used) = parse_request(data) {
+            let close = req.close;
+            let handled = app.handle(&req);
+            input.extend_from_slice(&data[used..]);
+            return Some((handled, close));
+        }
+    }
+    input.extend_from_slice(data);
+    None
 }
 
 fn process_input(
@@ -562,10 +713,9 @@ fn process_input(
     c: &mut Conn,
     app: &mut App,
     write_tx: &Sender<WriteJob>,
-    write_result_tx: &Sender<WriteResult>,
-    write_event_fd: RawFd,
     feed_reads: &mut Vec<ReadJob>,
     post_reads: &mut Vec<ReadJob>,
+    ready: Option<(Handled, bool)>,
 ) -> io::Result<()> {
     let at = diag_start();
     let r = process_input_inner(
@@ -575,10 +725,9 @@ fn process_input(
         c,
         app,
         write_tx,
-        write_result_tx,
-        write_event_fd,
         feed_reads,
         post_reads,
+        ready,
     );
     diag_end(Diag::Process, at);
     r
@@ -591,39 +740,42 @@ fn process_input_inner(
     c: &mut Conn,
     app: &mut App,
     write_tx: &Sender<WriteJob>,
-    write_result_tx: &Sender<WriteResult>,
-    write_event_fd: RawFd,
     feed_reads: &mut Vec<ReadJob>,
     post_reads: &mut Vec<ReadJob>,
+    ready: Option<(Handled, bool)>,
 ) -> io::Result<()> {
-    if c.writing || c.write_pending || c.close_after {
+    if c.response_pending || c.writing || c.write_pending || c.close_after || c.closing {
         return Ok(());
     }
-    match parse_request(&c.input) {
-        ParseResult::Incomplete => {
-            if c.multishot {
-                Ok(())
-            } else {
-                arm_read(ring, slot, c)
+    // No next read while a response (including a queued database job) is
+    // outstanding. after_write processes buffered pipelined input first.
+    let (handled, close) = if let Some(ready) = ready {
+        ready
+    } else {
+        match parse_request(&c.input) {
+            ParseResult::Incomplete => return arm_read(ring, slot, c),
+            ParseResult::Bad => {
+                c.response_pending = true;
+                queue_reply(c, 400, br#"{"error":"bad request"}"#, true);
+                return arm_write(ring, slot, c);
+            }
+            ParseResult::Complete(req, used) => {
+                let close = req.close;
+                let handled = app.handle(&req);
+                if used == c.input.len() {
+                    c.input.clear();
+                } else {
+                    c.input.drain(..used);
+                }
+                if c.input.is_empty() && c.input.capacity() > 64 * 1024 {
+                    c.input.shrink_to(4 * 1024);
+                }
+                (handled, close)
             }
         }
-        ParseResult::Bad => {
-            queue_reply(c, 400, br#"{"error":"bad request"}"#, true);
-            arm_write(ring, slot, c)
-        }
-        ParseResult::Complete(req, used) => {
-            let close = req.close;
-            let handled = app.handle(&req);
-            drop(req);
-            if used == c.input.len() {
-                c.input.clear();
-            } else {
-                c.input.drain(..used);
-            }
-            if c.input.is_empty() && c.input.capacity() > 64 * 1024 {
-                c.input.shrink_to(4 * 1024);
-            }
-            match handled {
+    };
+    c.response_pending = true;
+    match handled {
                 Handled::Reply(status, body) => {
                     queue_reply(c, status, &body, close);
                     arm_write(ring, slot, c)
@@ -663,8 +815,6 @@ fn process_input_inner(
                         at: stats::mark(),
                         stat,
                         cmd,
-                        result_tx: write_result_tx.clone(),
-                        event_fd: write_event_fd,
                     };
                     if write_tx.send(job).is_err() {
                         queue_reply(c, 500, &super::error("internal server error"), true);
@@ -674,8 +824,6 @@ fn process_input_inner(
                     Ok(())
                 }
             }
-        }
-    }
 }
 
 fn after_write(
@@ -685,20 +833,26 @@ fn after_write(
     c: &mut Conn,
     app: &mut App,
     write_tx: &Sender<WriteJob>,
-    write_result_tx: &Sender<WriteResult>,
-    write_event_fd: RawFd,
     feed_reads: &mut Vec<ReadJob>,
     post_reads: &mut Vec<ReadJob>,
     res: i32,
 ) -> io::Result<bool> {
     c.writing = false;
+    diag_end(Diag::Send, c.send_start.take());
     c.out.advance(res as usize);
     if c.out.len() == 0 {
         c.out = OutBuf::Empty;
+        c.response_pending = false;
         if c.close_after {
             return Ok(true);
         }
-        process_input(ring, ring_idx, slot, c, app, write_tx, write_result_tx, write_event_fd, feed_reads, post_reads)?;
+        if c.hybrid && c.peer_hup && c.input.is_empty() {
+            return Ok(true);
+        }
+        process_input(ring, ring_idx, slot, c, app, write_tx, feed_reads, post_reads, None)?;
+        if c.hybrid && c.peer_hup && !c.response_pending {
+            return Ok(true);
+        }
         return Ok(false);
     }
     arm_write(ring, slot, c)?;
@@ -710,8 +864,6 @@ fn process_ring(
     r: &mut RingState,
     app: &mut App,
     write_tx: &Sender<WriteJob>,
-    write_result_tx: &Sender<WriteResult>,
-    write_event_fd: RawFd,
     feed_reads: &mut Vec<ReadJob>,
     post_reads: &mut Vec<ReadJob>,
 ) -> io::Result<bool> {
@@ -741,14 +893,17 @@ fn process_ring(
                 let gen = r.next_gen;
                 r.next_gen = r.next_gen.wrapping_add(1).max(1);
                 ACCEPTS.fetch_add(1, Ordering::Relaxed);
-                r.conns.insert(slot, Conn::new(gen, r.multishot));
+                r.conns.insert(slot, Conn::new(gen, r.poll_read, r.hybrid));
                 if let Some(c) = r.conns.get_mut(&slot) {
                     arm_read(&mut r.ring, slot, c)?;
                 }
             } else {
                 r.accepting = false;
                 let errno = -res;
+                ACCEPT_ERRORS.fetch_add(1, Ordering::Relaxed);
+                ACCEPT_LAST_ERR.store(errno as i64, Ordering::Relaxed);
                 if errno == libc::ENFILE || errno == libc::EMFILE || errno == libc::ENOMEM {
+                    ACCEPT_PAUSED.fetch_add(1, Ordering::Relaxed);
                     r.accept_paused = true;
                     r.accept_resume = Some(Instant::now() + Duration::from_millis(100));
                 } else if !r.accept_paused {
@@ -763,194 +918,293 @@ fn process_ring(
             continue;
         }
         let (slot, gen, tag) = split_ud(user);
-        if tag == TAG_READ {
-            if !r.multishot {
-                let close_now = if let Some(c) = r.conns.get_mut(&slot) {
-                    if c.gen != gen {
-                        false
-                    } else if res <= 0 {
-                        true
-                    } else {
-                        let n = res as usize;
-                        if c.input.len() + n > (1 << 20) {
-                            true
-                        } else {
-                            let data = &c.read.as_ref().unwrap()[..n];
-                            c.input.extend_from_slice(data);
-                            process_input(
-                                &mut r.ring,
-                                ring_idx,
-                                slot,
-                                c,
-                                app,
-                                write_tx,
-                                write_result_tx,
-                                write_event_fd,
-                                feed_reads,
-                                post_reads,
-                            )?;
-                            false
-                        }
-                    }
-                } else {
-                    false
-                };
-                if close_now {
-                    let _ = finish_close(&mut r.ring, &mut r.conns, slot);
-                }
-                continue;
-            }
-            let bid = cqueue::buffer_select(flags);
-            let close_now = if let Some(c) = r.conns.get_mut(&slot) {
-                if c.gen != gen {
-                    if let Some(bid) = bid {
-                        r.buf_ring.as_mut().unwrap().put(bid);
-                    }
-                    false
-                } else if res > 0 {
-                    match bid {
-                        Some(bid) if (bid as usize) < BUF_RING_ENTRIES as usize => {
-                            let n = res as usize;
-                            if n > BUF_READ || c.input.len() + n > (1 << 20) {
-                                r.buf_ring.as_mut().unwrap().put(bid);
-                                true
-                            } else {
-                                let start = bid as usize * BUF_READ;
-                                {
-                                    let data = &r.buf_ring.as_ref().unwrap().bufs[start..start + n];
-                                    c.input.extend_from_slice(data);
-                                }
-                                r.buf_ring.as_mut().unwrap().put(bid);
-                                process_input(
-                                    &mut r.ring,
-                                    ring_idx,
-                                    slot,
-                                    c,
-                                    app,
-                                    write_tx,
-                                    write_result_tx,
-                                    write_event_fd,
-                                    feed_reads,
-                                    post_reads,
-                                )?;
-                                if !cqueue::more(flags) {
-                                    let _ = arm_read(&mut r.ring, slot, c);
-                                }
-                                false
-                            }
-                        }
-                        _ => true,
-                    }
-                } else {
-                    if let Some(bid) = bid {
-                        r.buf_ring.as_mut().unwrap().put(bid);
-                    }
-                    if res == -libc::ENOBUFS
-                        || res == -libc::EAGAIN
-                        || res == -libc::EINTR
-                    {
-                        let _ = arm_read(&mut r.ring, slot, c);
-                        false
-                    } else {
-                        if res == 0 { EOFS.fetch_add(1, Ordering::Relaxed); }
-                        else { READ_ERRORS.fetch_add(1, Ordering::Relaxed); }
-                        true
-                    }
-                }
-            } else {
-                if let Some(bid) = bid {
-                    r.buf_ring.as_mut().unwrap().put(bid);
-                }
-                false
-            };
-            if close_now {
-                let _ = finish_close(&mut r.ring, &mut r.conns, slot);
-            }
-            continue;
-        }
-        if tag == TAG_WRITE && res < 0 {
-            if let Some(c) = r.conns.get(&slot) {
-                if c.gen == gen {
-                    let _ = finish_close(&mut r.ring, &mut r.conns, slot);
-                }
-            }
-            continue;
-        }
         if tag == TAG_CLOSE {
+            if res < 0 {
+                return Err(io::Error::from_raw_os_error(-res));
+            }
             continue;
         }
-        let close_now = {
-            let Some(c) = r.conns.get_mut(&slot) else {
-                continue;
-            };
+        if tag == TAG_CANCEL {
+            if res == -libc::EALREADY {
+                if let Some(c) = r.conns.get(&slot) {
+                    if c.gen == gen && c.closing && c.poll_armed {
+                        let tag = if c.hybrid { TAG_RECV_MULTI } else { TAG_POLL };
+                        let cancel = opcode::AsyncCancel::new(ud(slot, gen, tag))
+                            .build().user_data(ud(slot, gen, TAG_CANCEL));
+                        push(&mut r.ring, cancel)?;
+                    }
+                }
+            } else if res < 0 && res != -libc::ENOENT {
+                return Err(io::Error::from_raw_os_error(-res));
+            }
+            continue;
+        }
+        if tag == TAG_SHUTDOWN {
+            // An already disconnected TCP socket may report ENOTCONN; its
+            // outstanding socket operations will still complete with errors.
+            if res < 0 && res != -libc::ENOTCONN {
+                return Err(io::Error::from_raw_os_error(-res));
+            }
+            if let Some(c) = r.conns.get_mut(&slot) {
+                if c.gen == gen {
+                    c.shutdown_pending = false;
+                    finish_close(&mut r.ring, &mut r.conns, slot)?;
+                }
+            }
+            continue;
+        }
+        if tag == TAG_RECV_MULTI {
+            let bid = cqueue::buffer_select(flags);
+            let mut ready = None;
+            let mut close_now = false;
+            if let Some(c) = r.conns.get_mut(&slot) {
+                if c.gen == gen {
+                    if !cqueue::more(flags) {
+                        c.poll_armed = false;
+                    }
+                    if c.closing {
+                        close_now = true;
+                    } else if res > 0 {
+                        match bid {
+                            Some(bid) if (bid as usize) < BUF_RING_ENTRIES as usize
+                                && (res as usize) <= BUF_READ
+                                && c.input.len() + (res as usize) <= (1 << 20) => {
+                                let start = bid as usize * BUF_READ;
+                                let data = &r.buf_ring.as_ref().unwrap().bufs[start..start + res as usize];
+                                if c.response_pending || c.close_after {
+                                    if !c.close_after {
+                                        c.input.extend_from_slice(data);
+                                    }
+                                } else {
+                                    ready = receive_input(&mut c.input, data, app);
+                                }
+                                if !c.poll_armed {
+                                    c.read_ready = true;
+                                }
+                            }
+                            _ => close_now = true,
+                        }
+                    } else if res == 0 {
+                        EOFS.fetch_add(1, Ordering::Relaxed);
+                        c.peer_hup = true;
+                        close_now = !c.response_pending;
+                    } else if res == -libc::ENOBUFS || res == -libc::EINTR || res == -libc::EAGAIN {
+                        if res == -libc::ENOBUFS {
+                            ENOBUFS_COUNT.fetch_add(1, Ordering::Relaxed);
+                        }
+                        if !c.poll_armed {
+                            c.read_ready = true;
+                        }
+                    } else {
+                        READ_ERRORS.fetch_add(1, Ordering::Relaxed);
+                        close_now = true;
+                    }
+                }
+            }
+            if let Some(bid) = bid {
+                r.buf_ring.as_mut().unwrap().put(bid);
+            }
+            if close_now {
+                finish_close(&mut r.ring, &mut r.conns, slot)?;
+            } else if let Some(c) = r.conns.get_mut(&slot) {
+                if c.gen == gen && !c.closing {
+                    if res > 0 {
+                        process_input(
+                            &mut r.ring, ring_idx, slot, c, app, write_tx,
+                            feed_reads, post_reads, ready,
+                        )?;
+                    }
+                    queue_ready(&mut r.read_queue, slot, c);
+                }
+            }
+            continue;
+        }
+        if tag == TAG_POLL {
+            let Some(c) = r.conns.get_mut(&slot) else { continue };
             if c.gen != gen {
                 continue;
             }
-            match tag {
-                TAG_WRITE => {
-                    after_write(&mut r.ring, ring_idx, slot, c, app, write_tx, write_result_tx, write_event_fd, feed_reads, post_reads, res as i32)?
-                }
-                _ => false,
+            if !cqueue::more(flags) {
+                c.poll_armed = false;
             }
-        };
-        if close_now {
-            let _ = finish_close(&mut r.ring, &mut r.conns, slot);
+            if c.closing {
+                finish_close(&mut r.ring, &mut r.conns, slot)?;
+            } else if res >= 0 {
+                c.read_ready = true;
+                c.peer_hup |= res & (libc::POLLRDHUP | libc::POLLHUP | libc::POLLERR) as i32 != 0;
+                if !c.poll_armed {
+                    arm_read(&mut r.ring, slot, c)?;
+                }
+                queue_ready(&mut r.read_queue, slot, c);
+            } else if res == -libc::EINTR {
+                if !c.poll_armed {
+                    arm_read(&mut r.ring, slot, c)?;
+                }
+            } else {
+                READ_ERRORS.fetch_add(1, Ordering::Relaxed);
+                finish_close(&mut r.ring, &mut r.conns, slot)?;
+            }
+            continue;
+        }
+        if tag == TAG_READ_SINGLE {
+            r.reads_in_flight -= 1;
+            let bid = cqueue::buffer_select(flags);
+            let mut ready = None;
+            let mut close_now = false;
+            if let Some(c) = r.conns.get_mut(&slot) {
+                if c.gen == gen {
+                    c.reading = false;
+                    if c.closing {
+                        close_now = true;
+                    } else if res > 0 {
+                        match bid {
+                            Some(bid) if (bid as usize) < BUF_RING_ENTRIES as usize
+                                && (res as usize) <= BUF_READ
+                                && c.input.len() + (res as usize) <= (1 << 20) => {
+                                let start = bid as usize * BUF_READ;
+                                let data = &r.buf_ring.as_ref().unwrap().bufs[start..start + res as usize];
+                                ready = receive_input(&mut c.input, data, app);
+                                // A full buffer may leave bytes unread. A hangup
+                                // hint requires another read to observe EOF.
+                                c.read_ready |= res as usize == BUF_READ || c.peer_hup;
+                            }
+                            _ => close_now = true,
+                        }
+                    } else if res == -libc::ENOBUFS || res == -libc::EINTR {
+                        if res == -libc::ENOBUFS {
+                            ENOBUFS_COUNT.fetch_add(1, Ordering::Relaxed);
+                        }
+                        c.read_ready = true;
+                    } else if res != -libc::EAGAIN {
+                        if res == 0 { EOFS.fetch_add(1, Ordering::Relaxed); }
+                        else { READ_ERRORS.fetch_add(1, Ordering::Relaxed); }
+                        close_now = true;
+                    }
+                }
+            }
+            // Return selected buffers even for stale, failed, or closing reads.
+            if let Some(bid) = bid {
+                r.buf_ring.as_mut().unwrap().put(bid);
+            }
+            if close_now {
+                finish_close(&mut r.ring, &mut r.conns, slot)?;
+            } else if let Some(c) = r.conns.get_mut(&slot) {
+                if c.gen == gen && !c.closing {
+                    if res > 0 {
+                        process_input(
+                            &mut r.ring, ring_idx, slot, c, app, write_tx,
+                            feed_reads, post_reads, ready,
+                        )?;
+                    }
+                    if c.hybrid && !c.read_ready {
+                        arm_read(&mut r.ring, slot, c)?;
+                    }
+                    queue_ready(&mut r.read_queue, slot, c);
+                }
+            }
+            continue;
+        }
+        if tag == TAG_READ {
+            let close_now = if let Some(c) = r.conns.get_mut(&slot) {
+                if c.gen != gen {
+                    false
+                } else if res == -libc::EINTR {
+                    arm_read(&mut r.ring, slot, c)?;
+                    false
+                } else if res <= 0 {
+                    true
+                } else {
+                    let n = res as usize;
+                    if n > READ_BUF || c.input.len() + n > (1 << 20) {
+                        true
+                    } else {
+                        let data = &c.read.as_ref().unwrap()[..n];
+                        let ready = if !c.writing && !c.write_pending && !c.close_after {
+                            receive_input(&mut c.input, data, app)
+                        } else {
+                            c.input.extend_from_slice(data);
+                            None
+                        };
+                        process_input(
+                            &mut r.ring, ring_idx, slot, c, app, write_tx,
+                            feed_reads, post_reads, ready,
+                        )?;
+                        false
+                    }
+                }
+            } else {
+                false
+            };
+            if close_now {
+                finish_close(&mut r.ring, &mut r.conns, slot)?;
+            }
+            continue;
+        }
+        if tag == TAG_WRITE {
+            let Some(c) = r.conns.get_mut(&slot) else { continue };
+            if c.gen != gen {
+                continue;
+            }
+            if c.closing || res <= 0 {
+                c.writing = false;
+                diag_end(Diag::Send, c.send_start.take());
+                finish_close(&mut r.ring, &mut r.conns, slot)?;
+            } else {
+                let close_now = after_write(
+                    &mut r.ring, ring_idx, slot, c, app, write_tx,
+                    feed_reads, post_reads, res,
+                )?;
+                if close_now {
+                    finish_close(&mut r.ring, &mut r.conns, slot)?;
+                } else {
+                    queue_ready(&mut r.read_queue, slot, c);
+                }
+            }
         }
     }
     r.last_cqes = cqe_count;
+    for _ in 0..READ_REARM_PER_PASS {
+        // Each selected receive can consume one provided buffer until its CQE
+        // is reaped. Bound the number in flight rather than overrun the ring.
+        if r.reads_in_flight >= BUF_RING_ENTRIES as usize {
+            break;
+        }
+        let Some((slot, gen)) = r.read_queue.pop_front() else { break };
+        let Some(c) = r.conns.get_mut(&slot) else { continue };
+        if c.gen != gen {
+            continue;
+        }
+        c.read_queued = false;
+        if c.closing || c.close_after || c.response_pending || c.reading {
+            continue;
+        }
+        if arm_single_read(&mut r.ring, slot, c).is_err() {
+            r.read_queue.push_back((slot, gen));
+            c.read_queued = true;
+            break;
+        }
+        c.read_ready = false;
+        c.reading = true;
+        r.reads_in_flight += 1;
+    }
     Ok(full)
 }
 
 fn submit_rings(rings: &mut [RingState]) {
     for r in rings {
         if !r.ring.submission().is_empty() {
+            let at = diag_start();
             let _ = r.ring.submit();
+            diag_end(Diag::Submit, at);
         }
     }
 }
 
-fn apply_feed_jobs(
-    app: &mut App,
-    rings: &mut [RingState],
-    jobs: &[ReadJob],
-    normal: Option<Arc<Vec<u8>>>,
-    write_rx: &Receiver<WriteResult>,
-) {
-    let feed_packet = normal;
-    for (i, job) in jobs.iter().enumerate() {
-        let Some(r) = rings.get_mut(job.ring) else { continue };
-        let Some(c) = r.conns.get_mut(&job.slot) else { continue };
-        if c.gen != job.gen {
-            continue;
-        }
-        match &feed_packet {
-            Some(normal) => {
-                let packet = if job.close {
-                    Arc::new(close_packet(normal))
-                } else {
-                    normal.clone()
-                };
-                queue_shared(c, packet, job.close);
-                stats::record(stats::FEED, job.at);
-            }
-            None => queue_reply(c, 500, &super::error("internal server error"), true),
-        }
-        let close_now = c.close_after && c.out.len() == 0;
-        if close_now {
-            let _ = finish_close(&mut r.ring, &mut r.conns, job.slot);
-        } else {
-            let _ = arm_write(&mut r.ring, job.slot, c);
-        }
-        if i % 256 == 255 {
-            process_writer(app, rings, write_rx);
-        }
-    }
-}
 
 fn apply_feed_one(rings: &mut [RingState], job: &ReadJob, packet: Option<Vec<u8>>) {
     let Some(r) = rings.get_mut(job.ring) else { return };
     let Some(c) = r.conns.get_mut(&job.slot) else { return };
-    if c.gen != job.gen {
+    if c.gen != job.gen || c.closing {
         return;
     }
     match packet {
@@ -972,56 +1226,6 @@ fn apply_feed_one(rings: &mut [RingState], job: &ReadJob, packet: Option<Vec<u8>
     }
 }
 
-fn apply_post_jobs(
-    app: &mut App,
-    rings: &mut [RingState],
-    jobs: &[ReadJob],
-    packets: Option<Arc<Vec<(i64, Option<Arc<PostResponse>>)>>>,
-    write_rx: &Receiver<WriteResult>,
-) {
-    for (i, job) in jobs.iter().enumerate() {
-        let Some(r) = rings.get_mut(job.ring) else { continue };
-        let Some(c) = r.conns.get_mut(&job.slot) else { continue };
-        if c.gen != job.gen {
-            continue;
-        }
-        let id = match job.kind {
-            ReadKind::Post(id) => id,
-            _ => continue,
-        };
-        let post = packets
-            .as_ref()
-            .and_then(|v| v.binary_search_by_key(&id, |e| e.0).ok().and_then(|i| v[i].1.clone()));
-        match post {
-            Some(post) => {
-                let packet = if job.close {
-                    Arc::new(close_packet(&post.normal))
-                } else {
-                    post.normal.clone()
-                };
-                queue_shared(c, packet, job.close);
-                stats::record(stats::POST, job.at);
-            }
-            None if packets.is_some() => {
-                queue_reply(c, 404, &super::error("post not found"), job.close);
-                stats::record(stats::POST, job.at);
-            }
-            None => {
-                queue_reply(c, 500, &super::error("internal server error"), true);
-                stats::record(stats::POST, job.at);
-            }
-        }
-        let close_now = c.close_after && c.out.len() == 0;
-        if close_now {
-            let _ = finish_close(&mut r.ring, &mut r.conns, job.slot);
-        } else {
-            let _ = arm_write(&mut r.ring, job.slot, c);
-        }
-        if i % 256 == 255 {
-            process_writer(app, rings, write_rx);
-        }
-    }
-}
 
 fn apply_post_one(
     rings: &mut [RingState],
@@ -1031,7 +1235,7 @@ fn apply_post_one(
 ) {
     let Some(r) = rings.get_mut(job.ring) else { return };
     let Some(c) = r.conns.get_mut(&job.slot) else { return };
-    if c.gen != job.gen {
+    if c.gen != job.gen || c.closing {
         return;
     }
     match packet {
@@ -1065,9 +1269,7 @@ fn process_writer(
     rings: &mut [RingState],
     rx: &Receiver<WriteResult>,
 ) {
-    let mut dirty = 0u64;
     while let Ok(result) = rx.try_recv() {
-        dirty |= 1u64 << result.ring;
         if result.feed_dirty {
             app.read.invalidate_feed();
             app.read.invalidate_post();
@@ -1082,7 +1284,7 @@ fn process_writer(
             let Some(c) = r.conns.get_mut(&result.slot) else {
                 continue;
             };
-            if c.gen != result.gen {
+            if c.gen != result.gen || c.closing {
                 continue;
             }
             c.write_pending = false;
@@ -1099,161 +1301,55 @@ fn process_writer(
             let _ = finish_close(&mut r.ring, &mut r.conns, result.slot);
         }
     }
-    if dirty != 0 {
-        for (i, r) in rings.iter_mut().enumerate() {
-            if dirty & (1u64 << i) != 0 {
-                let _ = r.ring.submit();
-            }
-        }
-    }
 }
 
-fn drain_writes(write_rx: &Receiver<WriteJob>, pending: &mut Vec<WriteJob>) {
-    while let Ok(job) = write_rx.try_recv() {
-        pending.push(job);
-    }
-}
 
-fn apply_writes(app: &mut App, rings: &mut [RingState], jobs: &mut Vec<WriteJob>) {
-    if jobs.is_empty() {
-        return;
-    }
-    let at = diag_start();
-    let (mut results, committed) =
-        super::writer::run_batch(&mut app.write, &mut app.write_cache, &jobs);
-    diag_end(Diag::Write, at);
-    let mut touched = vec![false; rings.len()];
-    for (i, job) in jobs.drain(..).enumerate() {
-        let pair = results
-            .get_mut(i)
-            .map(|r| std::mem::replace(r, (0, Vec::new())))
-            .filter(|r| r.0 != 0);
-        let (status, body) = if committed {
-            pair.unwrap_or_else(|| (500, crate::error("internal server error")))
-        } else {
-            (500, crate::error("internal server error"))
-        };
-        let close = job.close || !committed;
-        let Some(r) = rings.get_mut(job.ring) else { continue };
-        touched[job.ring] = true;
-        let Some(c) = r.conns.get_mut(&job.slot) else { continue };
-        if c.gen != job.gen {
-            continue;
-        }
-        c.write_pending = false;
-        queue_reply(c, status, &body, close);
-        stats::record(job.stat, job.at);
-        if c.close_after && c.out.len() == 0 {
-            let _ = finish_close(&mut r.ring, &mut r.conns, job.slot);
-        } else {
-            let _ = arm_write(&mut r.ring, job.slot, c);
-        }
-    }
-    if committed {
-        app.read.invalidate_feed();
-        app.read.invalidate_post();
-        app.read.invalidate_like();
-    }
-    for (i, r) in rings.iter_mut().enumerate() {
-        if touched[i] {
-            let _ = r.ring.submit();
-        }
-    }
-}
 
 fn apply_reads(
     app: &mut App,
     rings: &mut [RingState],
     feed_reads: &mut Vec<ReadJob>,
     post_reads: &mut Vec<ReadJob>,
-    write_res_rx: &Receiver<WriteResult>,
 ) {
     if !feed_reads.is_empty() {
-        if app.coalesce {
+        let n = feed_reads.len().min(FEED_ANSWERS_PER_PASS);
+        let ok = app.read.begin_read();
+        for job in &feed_reads[..n] {
             let at = diag_start();
-            let packet = app.read.feed_response().ok().map(Arc::new);
+            let packet = if ok {
+                app.read.feed_response().ok()
+            } else {
+                None
+            };
             diag_end(Diag::Feed, at);
-            apply_feed_jobs(app, rings, feed_reads, packet, write_res_rx);
-        } else {
-            let n = feed_reads.len().min(FEED_ANSWERS_PER_PASS);
-            let ok = app.read.begin_read();
-            for job in &feed_reads[..n] {
-                let at = diag_start();
-                let packet = if ok {
-                    app.read.feed_response().ok()
-                } else {
-                    None
-                };
-                diag_end(Diag::Feed, at);
-                apply_feed_one(rings, job, packet);
-            }
-            app.read.end_read(ok);
-            feed_reads.drain(..n);
+            apply_feed_one(rings, job, packet);
         }
-        if app.coalesce {
-            feed_reads.clear();
-        }
+        app.read.end_read(ok);
+        feed_reads.drain(..n);
     }
     if !post_reads.is_empty() {
-        if app.coalesce {
-            let post_slice = &post_reads[..];
-            let mut ids = std::mem::take(&mut app.post_ids);
-            ids.clear();
-            ids.extend(post_slice.iter().filter_map(|job| match job.kind {
-                ReadKind::Post(id) => Some(id),
-                _ => None,
-            }));
-            ids.sort_unstable();
-            ids.dedup();
-            let at = diag_start();
-            let bodies = app.read.posts_sorted(&ids).ok();
-            diag_end(Diag::Post, at);
-            let packets: Option<Arc<Vec<(i64, Option<Arc<PostResponse>>)>>> = bodies.map(|bodies| {
-                Arc::new(
-                    bodies
-                        .into_iter()
-                        .map(|(id, body)| {
-                            let response = body.map(|body| {
-                                let normal = Arc::new(response_bytes(200, &body, false));
-                                Arc::new(PostResponse { normal })
-                            });
-                            (id, response)
-                        })
-                        .collect(),
-                )
-            });
-            apply_post_jobs(app, rings, post_slice, packets, write_res_rx);
-            ids.clear();
-            app.post_ids = ids;
-        } else {
-            let n = post_reads.len().min(POST_ANSWERS_PER_PASS);
-            let ok = app.read.begin_read();
-            for job in &post_reads[..n] {
-                let id = match job.kind {
-                    ReadKind::Post(id) => id,
-                    _ => continue,
-                };
-                if !ok {
-                    apply_post_one(rings, job, None, false);
-                    continue;
-                }
-                let at = diag_start();
-                let result = app.read.post_response(id);
-                diag_end(Diag::Post, at);
-                match result {
-                    Ok(Some(packet)) => {
-                        apply_post_one(rings, job, Some(packet), false)
-                    }
-                    Ok(None) => apply_post_one(rings, job, None, true),
-                    Err(_) => apply_post_one(rings, job, None, false),
-                }
+        let n = post_reads.len().min(POST_ANSWERS_PER_PASS);
+        let ok = app.read.begin_read();
+        for job in &post_reads[..n] {
+            let id = match job.kind {
+                ReadKind::Post(id) => id,
+                _ => continue,
+            };
+            if !ok {
+                apply_post_one(rings, job, None, false);
+                continue;
             }
-            app.read.end_read(ok);
-            post_reads.drain(..n);
+            let at = diag_start();
+            let result = app.read.post_response(id);
+            diag_end(Diag::Post, at);
+            match result {
+                Ok(Some(packet)) => apply_post_one(rings, job, Some(packet), false),
+                Ok(None) => apply_post_one(rings, job, None, true),
+                Err(_) => apply_post_one(rings, job, None, false),
+            }
         }
-        if app.coalesce {
-            post_reads.clear();
-        }
+        app.read.end_read(ok);
+        post_reads.drain(..n);
     }
     submit_rings(rings);
 }
@@ -1261,11 +1357,10 @@ fn apply_reads(
 pub fn run_pass(
     db_path: String,
     secret: Vec<u8>,
-    coalesce: bool,
     addr: String,
     ring_count: usize,
 ) -> io::Result<()> {
-    let mut app = App::open(&db_path, secret, coalesce)
+    let mut app = App::open(&db_path, secret)
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
     let mut rings = Vec::with_capacity(ring_count.max(1));
     for _ in 0..ring_count.max(1) {
@@ -1273,9 +1368,8 @@ pub fn run_pass(
     }
     let (write_tx, write_rx) = std::sync::mpsc::channel();
     let (res_tx, write_res_rx) = std::sync::mpsc::channel();
-    let dirty = std::sync::Arc::new(AtomicU64::new(0));
     let (writer_ready_tx, writer_ready_rx) = std::sync::mpsc::channel();
-    crate::writer::spawn(db_path.clone(), write_rx, dirty, writer_ready_tx);
+    crate::writer::spawn(db_path.clone(), write_rx, res_tx, writer_ready_tx);
     let _ = writer_ready_rx.recv();
     let mut feed_reads: Vec<ReadJob> = Vec::new();
     let mut post_reads: Vec<ReadJob> = Vec::new();
@@ -1308,8 +1402,6 @@ pub fn run_pass(
                 &mut rings[ri],
                 &mut app,
                 &write_tx,
-                &res_tx,
-                -1,
                 &mut feed_reads,
                 &mut post_reads,
             )?;
@@ -1323,7 +1415,7 @@ pub fn run_pass(
         let post_q = post_reads.len();
         let nwrites = 0usize;
         app.read.refresh();
-        apply_reads(&mut app, &mut rings, &mut feed_reads, &mut post_reads, &write_res_rx);
+        apply_reads(&mut app, &mut rings, &mut feed_reads, &mut post_reads);
         let t3 = Instant::now();
         pass_no += 1;
         ACTIVE.store(
@@ -1332,17 +1424,20 @@ pub fn run_pass(
         );
         diag_tick(pass_no, feed_q, post_q);
 
-        fds.clear();
-        for r in &rings {
-            fds.push(libc::pollfd {
-                fd: r.ring.as_raw_fd(),
-                events: libc::POLLIN,
-                revents: 0,
-            });
-        }
-        let t4 = if cqes > 0 || queue_full {
+        let ready_reads = rings.iter().any(|r| {
+            !r.read_queue.is_empty() && r.reads_in_flight < BUF_RING_ENTRIES as usize
+        });
+        let t4 = if cqes > 0 || queue_full || ready_reads {
             t3
         } else {
+            fds.clear();
+            for r in &rings {
+                fds.push(libc::pollfd {
+                    fd: r.ring.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                });
+            }
             let rc = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, 1) };
             if rc < 0 {
                 let e = io::Error::last_os_error();

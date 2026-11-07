@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::ptr;
 
@@ -153,7 +152,7 @@ impl Db {
         let ckpt = std::env::var("WAL_AUTOCHECKPOINT")
             .ok()
             .and_then(|v| v.parse::<i64>().ok())
-            .unwrap_or(1000)
+            .unwrap_or(10_000)
             .max(0);
         db.exec(&format!("PRAGMA wal_autocheckpoint={}", ckpt))?;
         db.exec("PRAGMA cache_size=-16384")?;
@@ -277,8 +276,6 @@ pub struct ReadDb {
     /// Scratch used only while a call is being served.
     pub feed_out: Vec<u8>,
     pub post_out: Vec<u8>,
-    pub posts_out: Vec<u8>,
-    posts_lens: Vec<i32>,
 }
 
 impl Drop for ReadDb {
@@ -325,8 +322,6 @@ impl ReadDb {
             in_tx: false,
             feed_out: vec![0u8; 64 * 1024],
             post_out: vec![0u8; 128 * 1024],
-            posts_out: vec![0u8; 128 * 1024],
-            posts_lens: Vec::new(),
         })
     }
 
@@ -349,7 +344,7 @@ impl ReadDb {
         if self.in_tx {
             unsafe {
                 btree_reader_close_cursors(self.reader);
-                btree_reader_end(self.reader, if ok { 0 } else { 1 });
+                btree_reader_end(self.reader, if ok { 1 } else { 0 });
             }
             self.in_tx = false;
         }
@@ -556,91 +551,6 @@ impl ReadDb {
         Ok(())
     }
 
-    pub fn posts(&mut self, ids: &[i64]) -> Result<HashMap<i64, Option<Vec<u8>>>, ()> {
-        let mut unique: Vec<i64> = ids.to_vec();
-        unique.sort_unstable();
-        unique.dedup();
-        Ok(self.posts_sorted(&unique)?.into_iter().collect())
-    }
-
-    /// `unique` must be sorted ascending with no duplicates.  Returns rows in
-    /// the same sorted order so callers can binary-search instead of hashing.
-    pub fn posts_sorted(&mut self, unique: &[i64]) -> Result<Vec<(i64, Option<Vec<u8>>)>, ()> {
-        if unique.is_empty() {
-            return Ok(Vec::new());
-        }
-        if self.reader.is_null() {
-            let mut out = Vec::with_capacity(unique.len());
-            for &id in unique {
-                out.push((id, self.post_sql(id)?));
-            }
-            return Ok(out);
-        }
-        let cap = unique.len().saturating_mul(4096).max(4096);
-        if self.posts_out.len() < cap {
-            self.posts_out.resize(cap, 0);
-        }
-        if self.posts_lens.len() < unique.len() {
-            self.posts_lens.resize(unique.len(), 0);
-        }
-        let lens = &mut self.posts_lens[..unique.len()];
-        let mut n = 0i32;
-        let batch_buf = &mut self.posts_out;
-        let rc = unsafe {
-            if self.in_tx {
-                posts_btree_tx(
-                    self.reader,
-                    unique.as_ptr(),
-                    unique.len() as c_int,
-                    batch_buf.as_mut_ptr() as *mut c_char,
-                    batch_buf.len() as c_int,
-                    &mut n,
-                    lens.as_mut_ptr(),
-                )
-            } else {
-                posts_btree(
-                    self.reader,
-                    unique.as_ptr(),
-                    unique.len() as c_int,
-                    batch_buf.as_mut_ptr() as *mut c_char,
-                    batch_buf.len() as c_int,
-                    &mut n,
-                    lens.as_mut_ptr(),
-                )
-            }
-        };
-        if rc != SQLITE_OK {
-            let mut out = Vec::with_capacity(unique.len());
-            for &id in unique {
-                out.push((id, self.post_sql(id)?));
-            }
-            return Ok(out);
-        }
-        let mut slots: Vec<Option<Vec<u8>>> = vec![None; unique.len()];
-        let mut pos = 0usize;
-        let mut missing = Vec::new();
-        for (i, id) in unique.iter().enumerate() {
-            let len = lens[i].max(0) as usize;
-            if len == 0 {
-                missing.push((i, *id));
-                continue;
-            }
-            if pos + len > n.max(0) as usize || pos + len > batch_buf.len() {
-                return Err(());
-            }
-            let frag = &batch_buf[pos..pos + len];
-            let mut body = Vec::with_capacity(frag.len() + 10);
-            body.extend_from_slice(b"{\"post\":");
-            body.extend_from_slice(frag);
-            body.push(b'}');
-            slots[i] = Some(body);
-            pos += len;
-        }
-        for (i, id) in missing {
-            slots[i] = self.post_sql(id)?;
-        }
-        Ok(unique.iter().copied().zip(slots).collect())
-    }
 
     fn feed_sql(&self) -> Result<Vec<u8>, ()> {
         const SQL: &str = r#"

@@ -1,0 +1,168 @@
+# SQLite through its C API (build/libjr.so = the pinned amalgamation), plus the read-backend interface.
+
+const LIBJR = normpath(joinpath(@__DIR__, "..", "build", "libjr.so"))
+
+const SQLITE_ROW = Cint(100)
+const SQLITE_DONE = Cint(101)
+
+const DB = Ref{Ptr{Cvoid}}(C_NULL)
+const ST_HEALTH = Ref{Ptr{Cvoid}}(C_NULL)
+const ST_FEED = Ref{Ptr{Cvoid}}(C_NULL)
+const ST_POST = Ref{Ptr{Cvoid}}(C_NULL)
+const ST_EXISTS = Ref{Ptr{Cvoid}}(C_NULL)
+const ST_INSERT_POST = Ref{Ptr{Cvoid}}(C_NULL)
+const ST_INSERT_LIKE = Ref{Ptr{Cvoid}}(C_NULL)
+
+const POST_SELECT = """
+SELECT p.id, p.body, p.created_at, u.username,
+       (SELECT count(*) FROM likes l WHERE l.post_id = p.id)
+  FROM posts p JOIN users u ON u.id = p.user_id"""
+
+db_errmsg() = unsafe_string(ccall((:sqlite3_errmsg, LIBJR), Cstring, (Ptr{Cvoid},), DB[]))
+
+function db_exec(sql::String)
+    rc = ccall((:sqlite3_exec, LIBJR), Cint, (Ptr{Cvoid}, Cstring, Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}),
+        DB[], sql, C_NULL, C_NULL, C_NULL)
+    rc == 0 || error("sqlite: $sql: $(db_errmsg())")
+end
+
+function db_prepare(sql::String)
+    pp = Ref{Ptr{Cvoid}}(C_NULL)
+    rc = ccall((:sqlite3_prepare_v3, LIBJR), Cint,
+        (Ptr{Cvoid}, Cstring, Cint, Cuint, Ref{Ptr{Cvoid}}, Ptr{Cvoid}), DB[], sql, -1, 0x01, pp, C_NULL)
+    rc == 0 || error("sqlite prepare: $sql: $(db_errmsg())")
+    pp[]
+end
+
+function db_open(path::String)
+    pp = Ref{Ptr{Cvoid}}(C_NULL)
+    rc = ccall((:sqlite3_open_v2, LIBJR), Cint, (Cstring, Ref{Ptr{Cvoid}}, Cint, Ptr{Cvoid}),
+        path, pp, 0x00000002 | 0x00008000, C_NULL)        # READWRITE | NOMUTEX
+    DB[] = pp[]
+    rc == 0 || error("sqlite open $path: $(db_errmsg())")
+    db_exec("PRAGMA journal_mode=WAL")
+    db_exec("PRAGMA synchronous=NORMAL")
+    db_exec("PRAGMA busy_timeout=5000")
+    db_exec("PRAGMA cache_size=-65536")
+    db_exec("PRAGMA mmap_size=268435456")
+    db_exec("PRAGMA temp_store=MEMORY")
+    ST_HEALTH[] = db_prepare("SELECT 1")
+    ST_FEED[] = db_prepare(POST_SELECT * " ORDER BY p.created_at DESC, p.id DESC LIMIT 20")
+    ST_POST[] = db_prepare(POST_SELECT * " WHERE p.id = ?1")
+    ST_EXISTS[] = db_prepare("SELECT 1 FROM posts WHERE id = ?1")
+    ST_INSERT_POST[] = db_prepare("INSERT INTO posts (user_id, body) VALUES (?1, ?2) RETURNING id, created_at")
+    ST_INSERT_LIKE[] = db_prepare("INSERT INTO likes (user_id, post_id) VALUES (?1, ?2) ON CONFLICT (user_id, post_id) DO NOTHING")
+    nothing
+end
+
+@inline step(st::Ptr{Cvoid}) = ccall((:sqlite3_step, LIBJR), Cint, (Ptr{Cvoid},), st)
+@inline reset(st::Ptr{Cvoid}) = ccall((:sqlite3_reset, LIBJR), Cint, (Ptr{Cvoid},), st)
+@inline bind_int(st::Ptr{Cvoid}, i::Int, v::Int) =
+    ccall((:sqlite3_bind_int64, LIBJR), Cint, (Ptr{Cvoid}, Cint, Int64), st, i, v)
+@inline bind_text(st::Ptr{Cvoid}, i::Int, p::Ptr{UInt8}, n::Int) =     # SQLITE_STATIC: p outlives the step
+    ccall((:sqlite3_bind_text, LIBJR), Cint, (Ptr{Cvoid}, Cint, Ptr{UInt8}, Cint, Ptr{Cvoid}), st, i, p, n, C_NULL)
+@inline col_int(st::Ptr{Cvoid}, i::Int) = Int(ccall((:sqlite3_column_int64, LIBJR), Int64, (Ptr{Cvoid}, Cint), st, i))
+@inline col_text(st::Ptr{Cvoid}, i::Int) = ccall((:sqlite3_column_text, LIBJR), Ptr{UInt8}, (Ptr{Cvoid}, Cint), st, i)
+@inline col_bytes(st::Ptr{Cvoid}, i::Int) = Int(ccall((:sqlite3_column_bytes, LIBJR), Cint, (Ptr{Cvoid}, Cint), st, i))
+@inline db_changes() = Int(ccall((:sqlite3_changes, LIBJR), Cint, (Ptr{Cvoid},), DB[]))
+
+@inline function put_text_col!(b::Buf, st::Ptr{Cvoid}, i::Int)
+    p = col_text(st, i)             # text before bytes, as the SQLite docs recommend
+    putjsonstr!(b, p, col_bytes(st, i))
+end
+
+# Post object from a POST_SELECT row.
+function put_post_row!(b::Buf, st::Ptr{Cvoid})
+    putstr!(b, "{\"id\":"); putint!(b, col_int(st, 0))
+    putstr!(b, ",\"body\":"); put_text_col!(b, st, 1)
+    putstr!(b, ",\"created_at\":"); put_text_col!(b, st, 2)
+    putstr!(b, ",\"author\":"); put_text_col!(b, st, 3)
+    putstr!(b, ",\"like_count\":"); putint!(b, col_int(st, 4))
+    pushb!(b, UInt8('}'))
+end
+
+# ---- read backends (PLAN.md phase 5b). Each writes response JSON straight into b. ----
+
+abstract type ReadBackend end
+struct SqlBackend <: ReadBackend end
+
+# {"posts":[...]} -> true, or false on a database error.
+function feed!(::SqlBackend, b::Buf)
+    st = ST_FEED[]
+    putstr!(b, "{\"posts\":[")
+    first = true
+    while true
+        rc = step(st)
+        rc == SQLITE_ROW || (reset(st); return rc == SQLITE_DONE && (putstr!(b, "]}"); true))
+        first || pushb!(b, UInt8(','))
+        first = false
+        put_post_row!(b, st)
+    end
+end
+
+# {"post":{...}} -> 1 found, 0 not found, -1 error.
+function post!(::SqlBackend, b::Buf, id::Int)
+    st = ST_POST[]
+    bind_int(st, 1, id)
+    rc = step(st)
+    if rc == SQLITE_ROW
+        putstr!(b, "{\"post\":")
+        put_post_row!(b, st)
+        pushb!(b, UInt8('}'))
+        reset(st)
+        return 1
+    end
+    reset(st)
+    rc == SQLITE_DONE ? 0 : -1
+end
+
+# 1 exists, 0 not found, -1 error.
+function post_exists(::SqlBackend, id::Int)
+    st = ST_EXISTS[]
+    bind_int(st, 1, id)
+    rc = step(st)
+    reset(st)
+    rc == SQLITE_ROW ? 1 : rc == SQLITE_DONE ? 0 : -1
+end
+
+const READ = SqlBackend()
+
+# ---- writes (always SQL) ----
+
+# Inserts a post and writes {"post":{...}}. Returns false on a database error.
+function create_post!(b::Buf, uid::Int, p::Ptr{UInt8}, n::Int, author::Buf)
+    st = ST_INSERT_POST[]
+    bind_int(st, 1, uid)
+    bind_text(st, 2, p, n)
+    rc = step(st)
+    if rc != SQLITE_ROW
+        reset(st)
+        return false
+    end
+    putstr!(b, "{\"post\":{\"id\":"); putint!(b, col_int(st, 0))
+    putstr!(b, ",\"body\":"); putjsonstr!(b, p, n)
+    putstr!(b, ",\"created_at\":"); put_text_col!(b, st, 1)
+    putstr!(b, ",\"author\":"); putjsonstr!(b, author)
+    putstr!(b, ",\"like_count\":0}}")
+    rc = step(st)                   # run to completion: the autocommit happens here
+    reset(st)
+    rc == SQLITE_DONE
+end
+
+# 1 new like, 2 already liked, -1 error.
+function insert_like(uid::Int, pid::Int)
+    st = ST_INSERT_LIKE[]
+    bind_int(st, 1, uid)
+    bind_int(st, 2, pid)
+    rc = step(st)
+    reset(st)
+    rc == SQLITE_DONE || return -1
+    db_changes() == 1 ? 1 : 2
+end
+
+function health_ok()
+    st = ST_HEALTH[]
+    rc = step(st)
+    reset(st)
+    rc == SQLITE_ROW
+end

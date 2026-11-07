@@ -424,6 +424,9 @@ probe on p99 (9.96 s at 83 % CPU, 0 errors); 260,000 / 280,000 / 320,000 collaps
 ᶿ **go-iouring-trungdlp** is scored at its follow-up PR **#343** (`39efd02`, merged: PCACHE2 page-cache wrapper,
 per-request C JSON, build flags, 1 ms batch window); 280,000 failed the 2-minute probe on p99 (2.73 s at 86 % CPU,
 0 errors). Its merged #339 code held **260,000** (24,933 req/s, p95 104.5 / p99 280.0 ms, 82 % CPU, 2026-11-06).
+Its follow-up **#346** (`96a03ad`, asm trampoline instead of cgo calls) also held **270,000** (25,827 req/s, p95 98.5 /
+p99 348.5 ms, 81 % CPU, 911 MB, 2026-11-07); 280,000 failed the 2-minute probe on p99 (3.30 s at 86 % CPU). Not above
+the merged row, so #346 is not merged and the row stays at #343.
 
 ᶳ **go-fasthttp-riyaz-ali #344 is scored at `e95e747`** (unpatched; it replaces the 37,000 its `3159a41` held with a
 one-line build patch, ᵖ below). 52,000 passed the 2-minute probe, but the 5-minute holds failed at 52,000 and 49,000 on

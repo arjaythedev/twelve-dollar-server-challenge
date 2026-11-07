@@ -1,7 +1,7 @@
 // Swift's side of io_uring (ioring.h): a ring that one thread owns, the requests the server makes of it and the
 // completions it reads back. The shape follows swift-system's IORing (prepare requests, submit, consume completions),
-// with the socket requests that one doesn't offer yet: multishot accept into direct descriptors, multishot receive
-// into provided buffers, send, shutdown and close.
+// with the socket requests that one doesn't offer yet: multishot accept into direct descriptors, multishot and single
+// receives into provided buffers, send, shutdown and close.
 import CIORing
 import Glibc
 
@@ -17,6 +17,9 @@ nonisolated struct IORing: ~Copyable, ~Sendable {
         case acceptMultishot(listener: Int32)
         /// Receives on direct descriptor `slot` until it fails, each chunk into a provided buffer.
         case receiveMultishot(slot: UInt32)
+        /// Receives once on direct descriptor `slot` into a provided buffer, without waiting: what is there completes
+        /// inside the submit, an empty socket with -EAGAIN.
+        case receive(slot: UInt32)
         /// Sends all of `bytes` (which must stay put until the completion).
         case send(slot: UInt32, bytes: UnsafeRawBufferPointer)
         /// Shuts the socket down both ways, which ends its multishot receive, and closes it after that. Only the close
@@ -49,9 +52,11 @@ nonisolated struct IORing: ~Copyable, ~Sendable {
 
     /// A ring of `queueDepth` submissions and `completionDepth` completions, `files` direct descriptors and `bufferCount`
     /// receive buffers of `bufferSize` bytes. Only this thread submits to it (SINGLE_ISSUER), and it posts completions
-    /// when this thread asks for them (DEFER_TASKRUN), so they come in batches, without interrupts.
+    /// when this thread asks for them (DEFER_TASKRUN), so they come in batches, without interrupts; the kernel flags
+    /// when there are some to post (TASKRUN_FLAG), so a ring with nothing to do needs no enter.
     init(queueDepth: UInt32, completionDepth: UInt32, files: UInt32, bufferCount: UInt32, bufferSize: UInt32) throws(SystemError) {
         let flags = UInt32(IORING_SETUP_SINGLE_ISSUER) | UInt32(IORING_SETUP_DEFER_TASKRUN) | UInt32(IORING_SETUP_SUBMIT_ALL)
+            | UInt32(IORING_SETUP_TASKRUN_FLAG)
         var rc = ioring_init(&raw, queueDepth, completionDepth, flags | UInt32(IORING_SETUP_NO_SQARRAY))
         if rc == -EINVAL { rc = ioring_init(&raw, queueDepth, completionDepth, flags) }
         guard rc == 0 else { throw SystemError("io_uring_setup", -rc) }
@@ -85,6 +90,8 @@ nonisolated struct IORing: ~Copyable, ~Sendable {
             ioring_prep_accept_direct_multishot(entry(), listener, userData)
         case .receiveMultishot(let slot):
             ioring_prep_recv_multishot(entry(), slot, buffers.group, userData)
+        case .receive(let slot):
+            ioring_prep_recv(entry(), slot, buffers.group, userData)
         case .send(let slot, let bytes):
             ioring_prep_send(entry(), slot, bytes.baseAddress, UInt32(bytes.count), userData)
         case .shutdownAndClose(let slot):
@@ -109,6 +116,15 @@ nonisolated struct IORing: ~Copyable, ~Sendable {
     mutating func submit(waitingFor count: UInt32 = 0, timeoutNanos: Int64 = -1) -> Int32 {
         ioring_enter(&raw, count, timeoutNanos)
     }
+
+    /// Whether a `submit` would do anything: entries to submit, or completions to post or that overflowed.
+    var needsEnter: Bool {
+        withUnsafePointer(to: raw) { ioring_needs_enter($0) != 0 }
+    }
+
+    /// The provided buffers: how many, and their size.
+    var bufferCount: Int { Int(buffers.count) }
+    var bufferSize: Int { Int(buffers.size) }
 
     // ---------- completions ----------
 

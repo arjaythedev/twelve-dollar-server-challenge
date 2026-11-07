@@ -16,6 +16,7 @@ struct ioring {
     // until `ioring_enter` publishes it.
     unsigned *sq_khead;
     unsigned *sq_ktail;
+    unsigned *sq_kflags; // IORING_SQ_TASKRUN, IORING_SQ_CQ_OVERFLOW
     unsigned *sq_array; // NULL with IORING_SETUP_NO_SQARRAY
     unsigned sq_mask;
     unsigned sq_entries;
@@ -87,6 +88,13 @@ static inline unsigned ioring_sq_pending(const struct ioring *ring) {
     return ring->sqe_tail - *ring->sq_ktail;
 }
 
+/// Whether an enter would do anything: entries to submit, completions waiting for this thread to post them
+/// (IORING_SQ_TASKRUN, with IORING_SETUP_TASKRUN_FLAG), or completions that overflowed the queue.
+static inline int ioring_needs_enter(const struct ioring *ring) {
+    unsigned flags = __atomic_load_n(ring->sq_kflags, __ATOMIC_ACQUIRE);
+    return ioring_sq_pending(ring) > 0 || (flags & (IORING_SQ_TASKRUN | IORING_SQ_CQ_OVERFLOW)) != 0;
+}
+
 /// A multishot accept on `listener` into the ring's table of direct descriptors (the completion's `res` is the slot).
 static inline void ioring_prep_accept_direct_multishot(struct io_uring_sqe *sqe, int listener, uint64_t data) {
     sqe->opcode = IORING_OP_ACCEPT;
@@ -103,6 +111,17 @@ static inline void ioring_prep_recv_multishot(struct io_uring_sqe *sqe, unsigned
     sqe->flags = IOSQE_FIXED_FILE | IOSQE_BUFFER_SELECT;
     sqe->ioprio = IORING_RECV_MULTISHOT;
     sqe->buf_group = group;
+    sqe->user_data = data;
+}
+
+/// One receive on direct descriptor `slot` into a buffer of `group`, without waiting (MSG_DONTWAIT): with data
+/// waiting it completes inside the submit, else with -EAGAIN.
+static inline void ioring_prep_recv(struct io_uring_sqe *sqe, unsigned slot, unsigned short group, uint64_t data) {
+    sqe->opcode = IORING_OP_RECV;
+    sqe->fd = (int)slot;
+    sqe->flags = IOSQE_FIXED_FILE | IOSQE_BUFFER_SELECT;
+    sqe->buf_group = group;
+    sqe->msg_flags = 0x40; // MSG_DONTWAIT
     sqe->user_data = data;
 }
 

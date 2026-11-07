@@ -51,6 +51,7 @@ int ioring_init(struct ioring *ring, unsigned entries, unsigned cq_entries, unsi
     ring->cq_map = cq;
     ring->sq_khead = (unsigned *)(s + p.sq_off.head);
     ring->sq_ktail = (unsigned *)(s + p.sq_off.tail);
+    ring->sq_kflags = (unsigned *)(s + p.sq_off.flags);
     ring->sq_mask = *(unsigned *)(s + p.sq_off.ring_mask);
     ring->sq_entries = *(unsigned *)(s + p.sq_off.ring_entries);
     ring->sqe_tail = *ring->sq_ktail;

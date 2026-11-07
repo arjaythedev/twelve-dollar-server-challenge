@@ -14,13 +14,26 @@
   `io_uring_register` through `syscall(2)`, the rings mapped with `mmap`, head and tail updated with the acquire
   and release orderings the ring protocol asks for. `IORing.swift` is the Swift type over it, shaped like
   swift-system's `IORing` (prepare requests, submit, consume completions) with the socket requests that one doesn't
-  have yet: multishot accept into direct descriptors, multishot receive into provided buffers, send, shutdown and
-  close. The ring is `SINGLE_ISSUER` and `DEFER_TASKRUN`: one thread submits, and completions are posted when it
-  asks, in batches, without interrupts.
+  have yet: multishot accept into direct descriptors, multishot and single receives into provided buffers, send,
+  shutdown and close. The ring is `SINGLE_ISSUER` and `DEFER_TASKRUN`: one thread submits, and completions are posted when it
+  asks, in batches, without interrupts. With `TASKRUN_FLAG` the kernel says when a ring has completions to post, so
+  a pass enters only the rings with something to do. Each ring's completion queue (65,536) is larger than its
+  connections, so a burst never spills into the kernel's overflow list.
 - **Connections live in the rings, not the descriptor table.** Each ring has a table of direct descriptors as large
   as the descriptor limit (65,535 on the box), so the limit caps one ring, not the server: when a ring's table is
-  within 1,024 slots of full, its accept is cancelled and the next ring (added if needed, up to 16) takes over.
-  Receives use provided buffers, so an idle connection holds no receive buffer.
+  within 1,024 slots of full, its accepts are cancelled and the next ring (added if needed, up to 16) takes over.
+  Receives use provided buffers, so an idle connection holds no receive buffer. Eight `SO_REUSEPORT` listeners
+  each have an accept queue of their own (4,096 on the box), so a ramp or a stall's new connections wait there
+  instead of being refused.
+- **Reading after a burst is bounded.** After a stall every connection has a request waiting, the multishot
+  receives use up a ring's buffers at once, and the rest end with ENOBUFS; re-arming them all together would only
+  do that again, pass after pass. So a receive that ends isn't re-armed: its connection goes on a first-in,
+  first-out read queue, read with single non-blocking receives that never outnumber the ring's buffers. They
+  complete inside the pass's enter, in rounds while the queue is longer than the buffers. A receive that fills its
+  buffer queues the connection again; a shorter one, or an empty socket, sends it back to its multishot receive. A
+  pass answers at most 2,048 requests: what it reads beyond that waits in the connection's own buffer, a copy the
+  size of the request instead of a 3-4 KB socket buffer, on a ready list later passes answer first. While anything
+  is queued, the loop doesn't wait.
 - **One thread, proved by the compiler.** The box has one CPU, and the server is one thread: the target's default
   isolation is `MainActor`, so the server's state belongs to the main thread, and the compiler checks that. The value
   types that hold no shared state (bytes, JSON, HTTP, buffers, the store) are `nonisolated`, so their code carries
@@ -34,20 +47,23 @@
   preference), and learns it finished from an eventfd its ring reads, a completion like any other. Crossing to it is
   the one place the compiler asks for `await` and `Sendable`. The process has two threads: the loop and the
   checkpointer.
-- **Writes wait for a checkpoint; reads don't.** A PASSIVE checkpoint can't copy the frames written while it runs,
-  and SQLite starts the WAL over only once every frame is copied, so under steady writes it never would: locally the
-  WAL reached 767 MB in a minute, and the WAL index SQLite keeps in memory with it. So while a checkpoint runs, a
-  write waits (its connection parses nothing further, so responses stay in order) and reads go on; when the
-  checkpoint's completion arrives, the held writes run in that pass's transaction and the first of them starts the
-  WAL over. A checkpoint that takes longer than 250 ms stops holding writes. (This is rust-iouring-kensac's write
-  hold, applied to the whole checkpoint.)
+- **Checkpoints copy all along; writes wait only for the WAL to start over.** The checkpointer copies the WAL every
+  250 ms while writes go on. SQLite starts the WAL over only at a write that begins with every frame copied, which
+  group commit under steady writes never leaves (locally the WAL reached 767 MB in a minute, and the WAL index
+  SQLite keeps in memory with it). So past 8,192 frames (32 MiB) writes wait (a connection with a held write parses
+  nothing further, so responses stay in order) and reads go on, while the checkpointer copies the rest back to back;
+  since it has kept up, little is left. At the end of the pass that sees it all copied, the checkpointer starts the
+  WAL over itself, with a commit that changes nothing (`user_version` set to what it is), so the sync of the new
+  WAL's header, which `synchronous=NORMAL` makes when a WAL starts over, happens on its thread and not the loop's;
+  then the held writes run. A hold ends after 1 s regardless. The log says once a minute how many holds there were,
+  how many ran out, and how many copies the loop made itself (past 16,384 frames).
 - **Group commit per pass.** Every request of a pass runs inside one SQLite transaction (WAL,
   `synchronous=NORMAL`), and no response of the pass is sent before its `COMMIT` returns (rule 6). If it fails, the
   pass's connections close without an answer, so no response ever claims a write that didn't land.
 - **SQLite.** Opened through the `unix-excl` VFS: the process holds the file's lock for its life and the WAL index
   lives in its memory, shared by its two connections (no `-shm` file). The statements are prepared once; 256 MB
-  page cache, no mmap. Automatic checkpoints are off: past 1,024 WAL frames the loop starts a PASSIVE checkpoint
-  on the checkpointer (`CHECKPOINT_THREAD=0` runs it in the loop instead). Rows are written as JSON straight from
+  page cache, no mmap. Automatic checkpoints are off: the loop starts PASSIVE checkpoints on the checkpointer
+  (`CHECKPOINT_THREAD=0` runs them in the loop instead, past 8,192 frames). Rows are written as JSON straight from
   SQLite's memory.
 - **Reads walk SQLite's B-trees.** The feed, a post, and a like's check that its post exists skip SQL: they move
   SQLite's own cursors inside the pass's transaction, as its query plan would, without the bytecode engine.

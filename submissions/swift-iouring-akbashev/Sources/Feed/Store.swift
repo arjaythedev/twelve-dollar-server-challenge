@@ -39,8 +39,11 @@ nonisolated struct Store: ~Copyable, ~Sendable {
     /// A statement failed in a way that ended the transaction: the rest of the pass is answered with 500s.
     private(set) var passFailed = false
 
-    /// Checkpoints run past this many WAL frames (automatic checkpoints are off).
-    static let checkpointFrames: Int32 = 1024
+    /// Past this many WAL frames (32 MiB) the WAL is due to start over: writes wait until it's all copied (automatic
+    /// checkpoints are off).
+    static let restartFrames: Int32 = 8192
+    /// Past this many the loop copies the WAL itself: the checkpointer keeps falling behind.
+    static let overdueFrames: Int32 = 16384
 
     private static let postColumns = """
         SELECT p.id, p.body, p.created_at, u.username, (SELECT count(*) FROM likes l WHERE l.post_id = p.id)
@@ -122,21 +125,27 @@ nonisolated struct Store: ~Copyable, ~Sendable {
         return false
     }
 
-    var checkpointDue: Bool { walFrames.pointee >= Self.checkpointFrames }
+    /// The WAL has frames since it last started over.
+    var hasWAL: Bool { walFrames.pointee > 0 }
+    var restartDue: Bool { walFrames.pointee >= Self.restartFrames }
+    var checkpointOverdue: Bool { walFrames.pointee >= Self.overdueFrames }
 
     /// The reads walk the B-trees (the schema is the one they assume).
     var directReads: Bool { reads.available }
 
-    /// The checkpointer copied the WAL: the next commit reports what's in it again.
+    /// The whole WAL is copied and writes waited for it: the next write starts it over, and its commit reports what's
+    /// in it.
     func checkpointFinished() {
         walFrames.pointee = 0
     }
 
-    /// Copies the WAL back into the database file on this connection, in the loop (`CHECKPOINT_THREAD=0`; the
-    /// checkpointer does it otherwise).
+    /// Copies the WAL back into the database file on this connection, in the loop (`CHECKPOINT_THREAD=0`, or a
+    /// checkpointer that keeps falling behind).
     mutating func checkpoint() {
-        sqlite3_wal_checkpoint_v2(db, nil, SQLITE_CHECKPOINT_PASSIVE, nil, nil)
-        walFrames.pointee = 0
+        var logged: Int32 = -1
+        var copied: Int32 = -2
+        let rc = sqlite3_wal_checkpoint_v2(db, nil, SQLITE_CHECKPOINT_PASSIVE, &logged, &copied)
+        if rc == SQLITE_OK && logged == copied { walFrames.pointee = 0 }
     }
 
     private mutating func beginIfNeeded() -> Bool {

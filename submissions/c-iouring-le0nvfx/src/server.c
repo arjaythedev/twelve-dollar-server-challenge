@@ -48,17 +48,17 @@
 #define RING_POOL_SIZE 20
 #define RING_ACCEPT_LISTENER_COUNT 8
 #define RING_FILE_LIMIT 65535
-#define RING_BUFFER_COUNT 256
+#define RING_BUFFER_COUNT 1024
 #define RING_BUFFER_SIZE 2048
 #define RING_CQ_ENTRIES 4096
-#define RING_CQ_BATCH 64
+#define RING_CQ_BATCH 256
 #define RING_CQ_DRAIN_PER_RING 1024
 #define RING_CQ_DRAIN_BUDGET 32768
 #define PIPELINE_INPUT_PAUSE_THRESHOLD \
     (PIPELINE_INPUT_CAP - (RING_CQ_ENTRIES * RING_BUFFER_SIZE) - \
      RING_BUFFER_SIZE)
-#define RING_READY_ANSWER_BUDGET 256
-#define RING_RECOVERY_INFLIGHT_LIMIT 64
+#define RING_READY_ANSWER_BUDGET 2048
+#define RING_RECOVERY_INFLIGHT_LIMIT 1024
 #define RESPONSE_POOL_LIMIT 256
 #define SECRET_DEFAULT "twelve-dollar-challenge"
 #define WAL_HOLD_THRESHOLD_FRAMES 4096
@@ -67,6 +67,132 @@
 #define WAL_HOLD_RETRY_LIMIT 250U
 #define WAL_CHECKPOINT_IDLE_NS 250000000L
 #define WAL_RESUME_BATCH 128
+
+/* SQLite's default cache, wrapped to avoid scans after a B-tree page's temporary
+ * lock-byte-page rekey has inflated pcache1's high-water mark. */
+typedef struct {
+    /* Each NOMUTEX connection is thread-confined: g_db belongs to the event loop,
+     * and the checkpoint worker owns a separate connection and cache. */
+    sqlite3_pcache *base;
+    unsigned max_page;
+    unsigned lock_page;
+    bool may_have_parked_lock_page; /* conservative; cleared by rekey/truncate */
+} PageCacheWrapper;
+
+static sqlite3_pcache_methods2 g_page_cache_base;
+
+static int page_cache_wrapper_init(void *arg) {
+    (void)arg;
+    return g_page_cache_base.xInit
+        ? g_page_cache_base.xInit(g_page_cache_base.pArg) : SQLITE_OK;
+}
+
+static void page_cache_wrapper_shutdown(void *arg) {
+    (void)arg;
+    if (g_page_cache_base.xShutdown)
+        g_page_cache_base.xShutdown(g_page_cache_base.pArg);
+}
+
+static sqlite3_pcache *page_cache_wrapper_create(int page_size, int extra,
+                                                  int purgeable) {
+    if (page_size <= 0) return NULL;
+    PageCacheWrapper *wrapper = sqlite3_malloc(sizeof(*wrapper));
+    if (!wrapper) return NULL;
+    wrapper->base = g_page_cache_base.xCreate(page_size, extra, purgeable);
+    if (!wrapper->base) {
+        sqlite3_free(wrapper);
+        return NULL;
+    }
+    wrapper->max_page = 0;
+    wrapper->lock_page = 0x40000000U / (unsigned)page_size + 1U;
+    wrapper->may_have_parked_lock_page = false;
+    return (sqlite3_pcache *)wrapper;
+}
+
+#define PAGE_CACHE_BASE(p) (((PageCacheWrapper *)(p))->base)
+
+static void page_cache_wrapper_cachesize(sqlite3_pcache *cache, int pages) {
+    g_page_cache_base.xCachesize(PAGE_CACHE_BASE(cache), pages);
+}
+
+static int page_cache_wrapper_pagecount(sqlite3_pcache *cache) {
+    return g_page_cache_base.xPagecount(PAGE_CACHE_BASE(cache));
+}
+
+static sqlite3_pcache_page *page_cache_wrapper_fetch(sqlite3_pcache *cache,
+                                                      unsigned key,
+                                                      int create) {
+    PageCacheWrapper *wrapper = (PageCacheWrapper *)cache;
+    sqlite3_pcache_page *page =
+        g_page_cache_base.xFetch(wrapper->base, key, create);
+    if (page && create) {
+        if (key == wrapper->lock_page)
+            wrapper->may_have_parked_lock_page = true;
+        else if (key > wrapper->max_page) wrapper->max_page = key;
+    }
+    return page;
+}
+
+static void page_cache_wrapper_unpin(sqlite3_pcache *cache,
+                                      sqlite3_pcache_page *page,
+                                      int discard) {
+    g_page_cache_base.xUnpin(PAGE_CACHE_BASE(cache), page, discard);
+}
+
+static void page_cache_wrapper_rekey(sqlite3_pcache *cache,
+                                      sqlite3_pcache_page *page,
+                                      unsigned from, unsigned to) {
+    PageCacheWrapper *wrapper = (PageCacheWrapper *)cache;
+    g_page_cache_base.xRekey(wrapper->base, page, from, to);
+    if (to == wrapper->lock_page)
+        wrapper->may_have_parked_lock_page = true;
+    else {
+        if (from == wrapper->lock_page)
+            wrapper->may_have_parked_lock_page = false;
+        if (to > wrapper->max_page) wrapper->max_page = to;
+    }
+}
+
+static void page_cache_wrapper_truncate(sqlite3_pcache *cache,
+                                         unsigned limit) {
+    PageCacheWrapper *wrapper = (PageCacheWrapper *)cache;
+    if (!wrapper->may_have_parked_lock_page && wrapper->max_page < limit) return;
+    g_page_cache_base.xTruncate(wrapper->base, limit);
+    if (limit > 0U && wrapper->max_page >= limit)
+        wrapper->max_page = limit - 1U;
+    if (wrapper->lock_page >= limit) wrapper->may_have_parked_lock_page = false;
+}
+
+static void page_cache_wrapper_destroy(sqlite3_pcache *cache) {
+    g_page_cache_base.xDestroy(PAGE_CACHE_BASE(cache));
+    sqlite3_free(cache);
+}
+
+static void page_cache_wrapper_shrink(sqlite3_pcache *cache) {
+    g_page_cache_base.xShrink(PAGE_CACHE_BASE(cache));
+}
+
+#undef PAGE_CACHE_BASE
+
+static int page_cache_wrapper_install(void) {
+    static sqlite3_pcache_methods2 methods;
+    int rc = sqlite3_config(SQLITE_CONFIG_GETPCACHE2, &g_page_cache_base);
+    if (rc != SQLITE_OK) return rc;
+    methods = g_page_cache_base;
+    methods.pArg = NULL;
+    methods.xInit = page_cache_wrapper_init;
+    methods.xShutdown = page_cache_wrapper_shutdown;
+    methods.xCreate = page_cache_wrapper_create;
+    methods.xCachesize = page_cache_wrapper_cachesize;
+    methods.xPagecount = page_cache_wrapper_pagecount;
+    methods.xFetch = page_cache_wrapper_fetch;
+    methods.xUnpin = page_cache_wrapper_unpin;
+    methods.xRekey = page_cache_wrapper_rekey;
+    methods.xTruncate = page_cache_wrapper_truncate;
+    methods.xDestroy = page_cache_wrapper_destroy;
+    methods.xShrink = page_cache_wrapper_shrink;
+    return sqlite3_config(SQLITE_CONFIG_PCACHE2, &methods);
+}
 
 typedef struct {
     char key[64];
@@ -4520,6 +4646,12 @@ int main(void) {
     if (secret && *secret) g_secret = secret;
     const unsigned ring_pool_size = 6;
     g_secret_len = strlen(g_secret);
+    int pcache_rc = page_cache_wrapper_install();
+    if (pcache_rc != SQLITE_OK) {
+        fprintf(stderr, "SQLite page-cache wrapper install failed: %s\n",
+                sqlite3_errstr(pcache_rc));
+        return 1;
+    }
     if (init_db() != 0) return 1;
     (void)start_wal_checkpoint_thread();
     const char *host = getenv("HOST");

@@ -29,19 +29,29 @@ foreground and reads the challenge's `HOST`, `PORT`, `SQLITE_PATH`, and
 ## Implementation
 
 - Six io_uring rings use sparse fixed-file tables, multishot direct accepts,
-  and 256 shared 2-KiB receive buffers per ring. Accepted TCP sockets use the
-  kernel's default send/receive buffer autotuning with `TCP_NODELAY`. An epoll
-  implementation is available if io_uring is unavailable. The bounded receive
-  recovery and deferred task-running approach was informed by the publicly
-  described work in
+  and 1,024 shared 2-KiB receive buffers per ring. If a multishot receive ends,
+  the connection enters a FIFO recovery queue instead of being immediately
+  re-armed. Bounded `MSG_DONTWAIT` reads use at most one receive per ring buffer;
+  each pass answers up to 2,048 queued requests. Completion batches contain up
+  to 256 entries. This bounded recovery and drain-first approach follows the
+  publicly described work in
   [rust-iouring-kensac #264](https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/264).
+  Accepted TCP sockets use the kernel's default send/receive buffer autotuning
+  with `TCP_NODELAY`. An epoll implementation is available if io_uring is
+  unavailable.
 - The B-tree traversal helpers in `src/btree_feed.h` are adapted from
   [c-iouring-pavlyhalim #245](https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/245).
 - Reads access the supplied SQLite database on each request. The feed and post
   fast paths use SQLite B-tree cursors against the existing schema and indexes,
   with prepared SQL fallbacks. No response, row, or JWT-verification result is
   cached across requests. SQLite's own page cache is configured to 64 MiB;
-  SQLite memory mapping is disabled.
+  SQLite memory mapping is disabled. A `SQLITE_CONFIG_PCACHE2` wrapper skips a
+  page-cache truncate only when its tracked page keys prove that no cached page
+  can be beyond the limit; uncertain cases use SQLite's original truncate. The
+  approach is inspired by the public truncate-skip work in
+  [Go io_uring PR #343](https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/343),
+  which credits its underlying idea to
+  [C io_uring PR #245](https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/245).
 - Writes use WAL and `synchronous=NORMAL`. Multiple writes may share a SQLite
   transaction; affected responses are held until commit succeeds. A background
   checkpoint thread manages WAL growth, and the VFS coalesces WAL writes while

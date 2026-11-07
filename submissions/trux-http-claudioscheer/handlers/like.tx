@@ -1,0 +1,60 @@
+package handlers
+
+import "http"
+import "sqlite"
+
+pub func likePost(request int) int {
+  let userId int, _ string, ok bool = requireUser(request)
+  if !ok {
+    return 0
+  }
+  let id int = positiveId(http.param(request, "id"))
+  if id < 0 {
+    return fail(request, 400, "invalid post id")
+  }
+  let db *sqlite.DB, err error = openDB()
+  if err != nil {
+    return serverError(request)
+  }
+  let sql string = "INSERT INTO likes (user_id, post_id) SELECT ?1, ?2 WHERE EXISTS (SELECT 1 FROM posts WHERE id = ?2) ON CONFLICT (user_id, post_id) DO NOTHING"
+  let stmt *sqlite.Stmt, perr error = sqlite.prepare(db, sql)
+  if perr != nil {
+    return serverError(request)
+  }
+  let uerr error = sqlite.bindInt(stmt, 1, userId)
+  let ierr error = sqlite.bindInt(stmt, 2, id)
+  if uerr != nil || ierr != nil {
+    let _ error = sqlite.finalize(stmt)
+    return serverError(request)
+  }
+  let has bool, serr error = sqlite.step(stmt)
+  if serr != nil || has {
+    let _ error = sqlite.finalize(stmt)
+    return serverError(request)
+  }
+  let changed int = sqlite.changes(db)
+  let _ error = sqlite.finalize(stmt)
+  if changed == 1 {
+    http.json(request, 201, "{\"liked\":true,\"already_liked\":false,\"post_id\":" + intToString(id) + "}")
+    return 0
+  }
+  let exists *sqlite.Stmt, eerr error = sqlite.prepare(db, "SELECT 1 FROM posts WHERE id = ?")
+  if eerr != nil {
+    return serverError(request)
+  }
+  let berr error = sqlite.bindInt(exists, 1, id)
+  if berr != nil {
+    let _ error = sqlite.finalize(exists)
+    return serverError(request)
+  }
+  let found bool, ferr error = sqlite.step(exists)
+  let _ error = sqlite.finalize(exists)
+  if ferr != nil {
+    return serverError(request)
+  }
+  if !found {
+    return fail(request, 404, "post not found")
+  }
+  http.json(request, 200, "{\"liked\":true,\"already_liked\":true,\"post_id\":" + intToString(id) + "}")
+  return 0
+}

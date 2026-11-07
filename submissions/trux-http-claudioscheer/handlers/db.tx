@@ -1,0 +1,32 @@
+package handlers
+
+import "io"
+import "json"
+import "sqlite"
+
+func setting(name string) string {
+  let env map[string]string = io.env()
+  return env[name]
+}
+
+func openDB() (*sqlite.DB, error) {
+  let path string = setting("SQLITE_PATH")
+  let db *sqlite.DB, err error = sqlite.openThreadLocal(path)
+  if err != nil {
+    return db, err
+  }
+  let perr error = sqlite.exec(db, "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=5000; PRAGMA mmap_size=268435456; PRAGMA cache_size=-32768;")
+  if perr != nil {
+    return db, perr
+  }
+  return db, nil
+}
+
+func fillPost(doc *json.MutDoc, obj *json.MutVal, stmt *sqlite.Stmt) int {
+  json.addInt(doc, obj, "id", sqlite.columnInt(stmt, 0))
+  json.addString(doc, obj, "body", sqlite.columnText(stmt, 1))
+  json.addString(doc, obj, "created_at", sqlite.columnText(stmt, 2))
+  json.addString(doc, obj, "author", sqlite.columnText(stmt, 3))
+  json.addInt(doc, obj, "like_count", sqlite.columnInt(stmt, 4))
+  return 0
+}

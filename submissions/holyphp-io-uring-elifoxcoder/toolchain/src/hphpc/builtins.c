@@ -301,6 +301,7 @@ void builtins_init(void) {
     add("accept_emfile",     B_ZERO,    ty_bool,   false, false);   /* last accept failed with EMFILE/ENFILE */
     add("stream_set_blocking",  B_MISC, ty_bool,   false, false);
     add("stream_set_nodelay",   B_MISC, ty_bool,   false, false);
+    add("stream_set_socket_buffers", B_MISC, ty_bool, false, false); /* listener values are inherited by accepted TCP sockets on Linux */
     add("stream_ready",         B_MISC, type_array_of(ty_mixed), false, false);
     add("stream_ready_into",    B_MISC, type_array_of(ty_mixed), false, false);
     add("epoll_add",            B_MISC, ty_bool,   false, false);

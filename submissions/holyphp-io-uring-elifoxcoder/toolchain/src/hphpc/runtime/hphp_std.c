@@ -33,6 +33,7 @@ static bool hp_num_like(hval v) {
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <limits.h>
 #include <math.h>
 #include <time.h>
 #if defined(_WIN32)
@@ -2307,6 +2308,25 @@ hval hpbi_stream_set_nodelay(hval s) {
     int one = 1;
     return hp_of_bool(setsockopt(fd, IPPROTO_TCP, TCP_NODELAY,
                                  (const char *)&one, sizeof one) == 0);
+}
+
+/* Set TCP socket buffer ceilings. Linux accepted sockets inherit these values
+ * from their listening socket; this lets direct-descriptor accept paths cap
+ * per-connection kernel memory without needing a process fd for each socket. */
+hval hpbi_stream_set_socket_buffers(hval s, hval recv_bytes, hval send_bytes) {
+    hp_sock fd = sock_of(s);
+    int64_t rcv64 = hp_val_to_int(recv_bytes);
+    int64_t snd64 = hp_val_to_int(send_bytes);
+    if (fd == HP_SOCK_BAD || rcv64 <= 0 || snd64 <= 0 ||
+        rcv64 > INT_MAX || snd64 > INT_MAX)
+        return hp_of_bool(false);
+    int rcv = (int)rcv64;
+    int snd = (int)snd64;
+    if (setsockopt(fd, SOL_SOCKET, SO_RCVBUF,
+                   (const char *)&rcv, sizeof rcv) != 0)
+        return hp_of_bool(false);
+    return hp_of_bool(setsockopt(fd, SOL_SOCKET, SO_SNDBUF,
+                                 (const char *)&snd, sizeof snd) == 0);
 }
 
 hval hpbi_stream_recv(hval s, hval maxn) {

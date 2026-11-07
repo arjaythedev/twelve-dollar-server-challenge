@@ -491,6 +491,7 @@ hval hpbi_stream_socket_client(hval addr);
 hval hpbi_stream_socket_accept(hval srv);
 hval hpbi_stream_set_blocking(hval s, hval block);
 hval hpbi_stream_set_nodelay(hval s);
+hval hpbi_stream_set_socket_buffers(hval s, hval recv_bytes, hval send_bytes);
 hval hpbi_stream_recv(hval s, hval max);
 hval hpbi_stream_recv_release(hval s);
 hval hpbi_stream_send(hval s, hval data);

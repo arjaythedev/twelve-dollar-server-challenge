@@ -358,6 +358,7 @@ class Server {
     pub bool $feedBatchUsers = false;
     pub bool $postSendBuilder = false;
     pub bool $sparseBufs = false;
+    pub int $writeWaitMs = 4;
     pub int $reqs = 0;
     pub int $reqsBase = 0;
 
@@ -384,6 +385,11 @@ class Server {
         if ($sec === false || $sec == "") { $sec = "twelve-dollar-challenge"; }
         $this->secret = $sec;
         $this->jwtVerifier = jwt_verifier_new($sec);
+        $batchWaitEnv = getenv("HPHP_WRITE_WAIT_MS");
+        if ($batchWaitEnv != "") {
+            $batchWait = intval($batchWaitEnv);
+            if ($batchWait >= 0 && $batchWait <= 10) { $this->writeWaitMs = $batchWait; }
+        }
         $this->postSendBuilder = (getenv("HPHP_POST_SB") == "1");
         if (getenv("HPHP_STATS") == "1") { $this->statsmode = true; }
         $idleEnv = getenv("HPHP_IDLE_TIMEOUT");
@@ -413,7 +419,19 @@ class Server {
         sqlite_exec($db, "PRAGMA foreign_keys=OFF");
         if ($bgCheckpoint) {
             sqlite_exec($db, "PRAGMA wal_autocheckpoint=0");
-            if (!sqlite_bg_checkpoint_start($db, $path, 4096, 250)) {
+            $ckptFrames = 256;
+            $ckptFramesEnv = getenv("HPHP_CKPT_FRAMES");
+            if ($ckptFramesEnv != "") {
+                $ckptFramesSet = intval($ckptFramesEnv);
+                if ($ckptFramesSet >= 32 && $ckptFramesSet <= 16384) { $ckptFrames = $ckptFramesSet; }
+            }
+            $ckptHoldMs = 20;
+            $ckptHoldEnv = getenv("HPHP_CKPT_HOLD_MS");
+            if ($ckptHoldEnv != "") {
+                $ckptHoldSet = intval($ckptHoldEnv);
+                if ($ckptHoldSet >= 1 && $ckptHoldSet <= 1000) { $ckptHoldMs = $ckptHoldSet; }
+            }
+            if (!sqlite_bg_checkpoint_start($db, $path, $ckptFrames, $ckptHoldMs)) {
                 echo "fatal: cannot start SQLite background checkpoint worker\n";
                 return false;
             }
@@ -540,6 +558,14 @@ class Server {
          * the full reuseport group before the runtime arms its accept batch. */
         foreach ($this->listeners as $ls) {
             stream_set_nodelay($ls);
+            /* Keep idle keep-alives cheap in kernel memory. On Linux these
+             * listener settings are inherited by accepted direct sockets;
+             * Linux doubles the requested values for accounting. */
+            if (getenv("HPHP_SOCKET_BUFFERS") != "0") {
+                if (!stream_set_socket_buffers($ls, 4096, 8192)) {
+                    echo "warning: could not cap TCP socket buffers\n";
+                }
+            }
             iarr_set($this->listenerIds, $ls, 1);
             epoll_add($ls);
         }
@@ -671,12 +697,14 @@ class Server {
             else { epoll_wait2($this->ready, $this->writable, 50); }
             $this->handle_ready();
             /* A transaction has a fixed cost; when only a few writes are
-             * pending, wait up to a millisecond for more requests before
+             * pending, wait briefly for more requests before
              * committing. That batches them without hurting the tail much. */
             $n = count($this->pending);
             if ($n > 0 && $n < 32) {
-                if ($this->fdArrays) { epoll_wait_iarr2($this->readyIds, $this->writableIds, 1); }
-                else { epoll_wait2($this->ready, $this->writable, 1); }
+                if ($this->writeWaitMs > 0) {
+                    if ($this->fdArrays) { epoll_wait_iarr2($this->readyIds, $this->writableIds, $this->writeWaitMs); }
+                    else { epoll_wait2($this->ready, $this->writable, $this->writeWaitMs); }
+                }
                 $this->handle_ready();
             }
             $this->execute_writes();

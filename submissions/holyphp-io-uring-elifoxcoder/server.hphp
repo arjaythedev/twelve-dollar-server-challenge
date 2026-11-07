@@ -1655,6 +1655,12 @@ class Server {
     public function on_stats(int $fd): void {
         $rt = runtime_stats();
         $body = '{"interval":{"reqs":' . ($this->reqs - $this->reqsBase)
+              . '},"server":{"connections":' . $this->nconn
+              . ',"shed_at":' . $this->shedAt
+              . ',"paused":' . $this->paused
+              . ',"listeners":' . count($this->listeners)
+              . ',"pending_writes":' . count($this->pending)
+              . ',"pending_responses":' . count($this->out)
               . '},"runtime":' . $rt . '}';
         $this->reqsBase = $this->reqs;
         $this->send_json($fd, 200, $body);

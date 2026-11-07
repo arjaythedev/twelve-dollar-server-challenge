@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"crawshaw.io/sqlite"
-	"crawshaw.io/sqlite/sqlitex"
 	"errors"
 	"fmt"
 	"github.com/valyala/fasthttp"
@@ -14,13 +13,13 @@ import (
 	"time"
 )
 
-func Health(pool *sqlitex.Pool) fasthttp.RequestHandler {
+func Health(db *DB) fasthttp.RequestHandler {
 	var started = time.Now()
 	const query = "SELECT 1"
 
 	return func(ctx *fasthttp.RequestCtx) {
-		conn := pool.Get(ctx)
-		defer pool.Put(conn)
+		conn := db.Get()
+		defer db.Put(conn)
 
 		stmt := conn.Prep(query)
 		defer clearAndReset(stmt)
@@ -35,7 +34,7 @@ func Health(pool *sqlitex.Pool) fasthttp.RequestHandler {
 	}
 }
 
-func Feed(pool *sqlitex.Pool) fasthttp.RequestHandler {
+func Feed(db *DB) fasthttp.RequestHandler {
 	const query = `
 		WITH serialized_posts AS (
 			SELECT json_object('id', p.id, 'body', p.body, 'created_at', p.created_at, 'author', u.username, 'like_count', (SELECT count(*) FROM likes l WHERE l.post_id = p.id)) AS val
@@ -46,8 +45,8 @@ func Feed(pool *sqlitex.Pool) fasthttp.RequestHandler {
         ) SELECT json_object('posts', json_group_array(json(val))) FROM serialized_posts`
 
 	return func(ctx *fasthttp.RequestCtx) {
-		conn := pool.Get(ctx)
-		defer pool.Put(conn)
+		conn := db.Get()
+		defer db.Put(conn)
 
 		stmt := conn.Prep(query)
 		defer clearAndReset(stmt)
@@ -65,7 +64,7 @@ func Feed(pool *sqlitex.Pool) fasthttp.RequestHandler {
 	}
 }
 
-func GetPost(pool *sqlitex.Pool) fasthttp.RequestHandler {
+func GetPost(db *DB) fasthttp.RequestHandler {
 	const query = `
 	SELECT json_object('post', 
 		json_object('id', p.id, 'body', p.body, 'created_at', p.created_at, 'author', u.username, 'like_count', (SELECT count(*) FROM likes l WHERE l.post_id = p.id)))
@@ -80,8 +79,8 @@ func GetPost(pool *sqlitex.Pool) fasthttp.RequestHandler {
 			return
 		}
 
-		conn := pool.Get(ctx)
-		defer pool.Put(conn)
+		conn := db.Get()
+		defer db.Put(conn)
 
 		stmt := conn.Prep(query)
 		defer clearAndReset(stmt)
@@ -103,7 +102,7 @@ func GetPost(pool *sqlitex.Pool) fasthttp.RequestHandler {
 	}
 }
 
-func CreatePost(pool *sqlitex.Pool) fasthttp.RequestHandler {
+func CreatePost(db *DB) fasthttp.RequestHandler {
 	var parsers fastjson.ParserPool
 
 	const query = `INSERT INTO posts (user_id, body) VALUES ($1, $2) RETURNING (
@@ -139,8 +138,8 @@ func CreatePost(pool *sqlitex.Pool) fasthttp.RequestHandler {
 			return
 		}
 
-		conn := pool.Get(ctx)
-		defer pool.Put(conn)
+		conn := db.Get()
+		defer db.Put(conn)
 
 		stmt := conn.Prep(query)
 		defer clearAndReset(stmt)
@@ -164,7 +163,7 @@ func CreatePost(pool *sqlitex.Pool) fasthttp.RequestHandler {
 	}
 }
 
-func LikePost(pool *sqlitex.Pool) fasthttp.RequestHandler {
+func LikePost(db *DB) fasthttp.RequestHandler {
 	var arenas fastjson.ArenaPool
 	const query = `INSERT INTO likes (user_id, post_id) VALUES ($1, $2) ON CONFLICT DO NOTHING RETURNING user_id, post_id`
 
@@ -175,8 +174,8 @@ func LikePost(pool *sqlitex.Pool) fasthttp.RequestHandler {
 			return
 		}
 
-		conn := pool.Get(ctx)
-		defer pool.Put(conn)
+		conn := db.Get()
+		defer db.Put(conn)
 
 		stmt := conn.Prep(query)
 		defer clearAndReset(stmt)

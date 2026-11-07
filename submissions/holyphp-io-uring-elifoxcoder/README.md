@@ -25,6 +25,10 @@ the app itself.
   post and author and escapes their payload bytes straight into the response
   buffer. `/posts/:id` uses the same cursors and an index range scan for its
   count. Records are decoded in place without row objects or per-field strings.
+  The feed's `posts` table record is decoded inline in typed HolyPHP, matching
+  the fixed `schema.sql` layout; invalid or overflow records fall back to the
+  generic B-tree decoder. Set `HPHP_FEED_RAW=0` to use the generic decoder for
+  every row.
   This is a generic driver binding (`bt_root` / `bt_open` / `bt_last` / …),
   not challenge logic, and it falls back to the SQL path when the pinned
   SQLite could not be built (the binding is a weak reference).
@@ -486,3 +490,9 @@ active, with no parked SQEs or accept-arm failures. WSL's original
 the local limit was temporarily raised to 1,048,576 for this run and restored
 afterward. This is a local idle-connection capacity and stability check, not
 the challenge's box benchmark or a throughput result.
+
+#### Typed HolyPHP feed record decoder A/B (WSL, 2026-11-07)
+
+The fixed `posts` SQLite record can be decoded inline in typed HolyPHP, matching the top submission's single-pass record decoder. `start.sh` enables this path; `HPHP_FEED_RAW=0` retains the generic `bt_cols` decoder. The inline path checks header and payload bounds and falls back to the generic decoder if a record does not fit.
+
+On the real seed database, same-binary A/B/B/A at 800 VUs (30% likes, 5% posts; 5 s ramp + 15 s active) had zero HTTP failures. Generic decode averaged 17,523 req/s, p95 41.64 ms, p99 57.43 ms, and 16.72 µs process CPU/request. Inline decode averaged 17,824 req/s, p95 39.73 ms, p99 52.16 ms, and 16.48 µs CPU/request. These are WSL diagnostics, not box results; run-to-run warm-up drift remains visible.

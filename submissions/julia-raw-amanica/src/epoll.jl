@@ -15,23 +15,31 @@ const EPOLLOUT = UInt32(0x004)
 const EPOLLERR = UInt32(0x008)
 const EPOLLHUP = UInt32(0x010)
 const EPOLL_CTL_ADD = Cint(1)
+const EPOLL_CTL_DEL = Cint(2)
 const EPOLL_CTL_MOD = Cint(3)
 const EAGAIN = 11
 const EINTR = 4
+const EMFILE = 24
+const ENFILE = 23
 
-const MAXEV = 512
-const RBUF_SIZE = 16384
-const RBUF_MAX = 1 << 20
+const MAXEV = 1024
+const RBUF_SHARED = 1 << 18     # one read buffer shared by all connections
+const SPILL_SIZE = 16384        # pooled per-connection buffer, only while a request or a send is incomplete
+const STATS_EVERY = 10.0        # seconds between "stats" lines in the log
 
+# Per-connection state. An idle connection holds no buffers: inbuf/outbuf are EMPTY unless a partial
+# request is waiting for more bytes or a response could not be sent in full.
 mutable struct Conn
     fd::Cint
-    rbuf::Vector{UInt8}
-    rlen::Int
-    out::Buf
-    woff::Int
+    inbuf::Vector{UInt8}
+    inlen::Int
+    outbuf::Vector{UInt8}
+    outoff::Int
+    outlen::Int
     pollout::Bool
     closing::Bool
 end
+const EMPTY = UInt8[]
 
 const EVSCRATCH = zeros(UInt8, 12)
 
@@ -69,16 +77,30 @@ end
 mutable struct Loop
     ep::Cint
     lfd::Cint
+    listening::Bool             # false while accept is paused after EMFILE/ENFILE
+    resume_at::Float64
     conns::Vector{Union{Nothing,Conn}}
     pool::Vector{Conn}
+    spill::Vector{Vector{UInt8}}
+    nconns::Int
+    rbuf::Vector{UInt8}
+    out::Buf
 end
+
+function take_spill!(L::Loop, need::Int)
+    need > SPILL_SIZE && return Vector{UInt8}(undef, need)          # rare: big request or response
+    isempty(L.spill) ? Vector{UInt8}(undef, SPILL_SIZE) : pop!(L.spill)
+end
+@inline give_spill!(L::Loop, v::Vector{UInt8}) = (length(v) == SPILL_SIZE && push!(L.spill, v); nothing)
 
 function close_conn!(L::Loop, c::Conn)
     ccall(:close, Cint, (Cint,), c.fd)
     L.conns[c.fd+1] = nothing
-    c.fd = -1; c.rlen = 0; c.woff = 0; c.pollout = false; c.closing = false
-    reset!(c.out)
-    length(c.rbuf) > RBUF_SIZE && resize!(c.rbuf, RBUF_SIZE)
+    L.nconns -= 1
+    c.inbuf !== EMPTY && give_spill!(L, c.inbuf)
+    c.outbuf !== EMPTY && give_spill!(L, c.outbuf)
+    c.fd = -1; c.inbuf = EMPTY; c.inlen = 0; c.outbuf = EMPTY; c.outoff = 0; c.outlen = 0
+    c.pollout = false; c.closing = false
     push!(L.pool, c)
     nothing
 end
@@ -87,47 +109,88 @@ function accept_all!(L::Loop)
     while true
         fd = ccall(:accept4, Cint, (Cint, Ptr{Cvoid}, Ptr{Cvoid}, Cint), L.lfd, C_NULL, C_NULL,
             SOCK_NONBLOCK | SOCK_CLOEXEC)
-        fd < 0 && return nothing                  # EAGAIN, or EMFILE etc.: try again on the next event
+        if fd < 0
+            e = Libc.errno()
+            if e == EMFILE || e == ENFILE      # out of fds: stop polling the listener for a moment, or the
+                ep_ctl(L.ep, EPOLL_CTL_DEL, L.lfd, UInt32(0))  # level-triggered event would spin the loop
+                L.listening = false
+                L.resume_at = time() + 0.1
+            end
+            return nothing
+        end
         if fd + 1 > length(L.conns)
             old = length(L.conns)
             resize!(L.conns, 2 * (fd + 1))
             fill!(view(L.conns, old+1:length(L.conns)), nothing)
         end
-        c = isempty(L.pool) ? Conn(fd, Vector{UInt8}(undef, RBUF_SIZE), 0, Buf(8192), 0, false, false) : pop!(L.pool)
+        c = isempty(L.pool) ? Conn(fd, EMPTY, 0, EMPTY, 0, 0, false, false) : pop!(L.pool)
         c.fd = fd
         L.conns[fd+1] = c
+        L.nconns += 1
         ep_ctl(L.ep, EPOLL_CTL_ADD, fd, EPOLLIN)
     end
 end
 
-# Sends pending output; returns false if the connection was closed.
-function flush!(L::Loop, c::Conn)
-    out = c.out
-    while c.woff < out.len
-        n = GC.@preserve out ccall(:send, Cssize_t, (Cint, Ptr{UInt8}, Csize_t, Cint),
-            c.fd, pointer(out.data, c.woff + 1), out.len - c.woff, MSG_NOSIGNAL)
-        if n > 0
-            c.woff += n
-        else
-            e = Libc.errno()
-            e == EINTR && continue
-            if e == EAGAIN
-                if !c.pollout
-                    c.pollout = true
-                    ep_ctl(L.ep, EPOLL_CTL_MOD, c.fd, EPOLLIN | EPOLLOUT)
-                end
-                return true
-            end
-            close_conn!(L, c)
-            return false
+@inline function arm_out!(L::Loop, c::Conn, on::Bool)
+    c.pollout == on && return nothing
+    c.pollout = on
+    ep_ctl(L.ep, EPOLL_CTL_MOD, c.fd, on ? (EPOLLIN | EPOLLOUT) : EPOLLIN)
+    nothing
+end
+
+# Sends p[1:n] (or queues it behind an incomplete earlier send). Returns false if the connection closed.
+function send_or_queue!(L::Loop, c::Conn, p::Ptr{UInt8}, n::Int)
+    if c.outlen > c.outoff                      # earlier bytes still queued: keep the order
+        need = c.outlen + n
+        need > length(c.outbuf) && resize!(c.outbuf, max(need, 2 * length(c.outbuf)))
+        GC.@preserve c unsafe_copyto!(pointer(c.outbuf, c.outlen + 1), p, n)
+        c.outlen = need
+        return true
+    end
+    sent = 0
+    while sent < n
+        r = ccall(:send, Cssize_t, (Cint, Ptr{UInt8}, Csize_t, Cint), c.fd, p + sent, n - sent, MSG_NOSIGNAL)
+        if r > 0
+            sent += r
+            continue
         end
+        e = Libc.errno()
+        e == EINTR && continue
+        if e == EAGAIN
+            rem = n - sent
+            c.outbuf = take_spill!(L, rem)
+            GC.@preserve c unsafe_copyto!(pointer(c.outbuf), p + sent, rem)
+            c.outoff = 0; c.outlen = rem
+            arm_out!(L, c, true)
+            return true
+        end
+        close_conn!(L, c)
+        return false
     end
-    reset!(out)
-    c.woff = 0
-    if c.pollout
-        c.pollout = false
-        ep_ctl(L.ep, EPOLL_CTL_MOD, c.fd, EPOLLIN)
+    if c.closing
+        close_conn!(L, c)
+        return false
     end
+    true
+end
+
+function on_writable!(L::Loop, c::Conn)
+    while c.outoff < c.outlen
+        r = GC.@preserve c ccall(:send, Cssize_t, (Cint, Ptr{UInt8}, Csize_t, Cint),
+            c.fd, pointer(c.outbuf, c.outoff + 1), c.outlen - c.outoff, MSG_NOSIGNAL)
+        if r > 0
+            c.outoff += r
+            continue
+        end
+        e = Libc.errno()
+        e == EINTR && continue
+        e == EAGAIN && return true
+        close_conn!(L, c)
+        return false
+    end
+    give_spill!(L, c.outbuf)
+    c.outbuf = EMPTY; c.outoff = 0; c.outlen = 0
+    arm_out!(L, c, false)
     if c.closing
         close_conn!(L, c)
         return false
@@ -137,68 +200,109 @@ end
 
 const REQ = Req()
 const BADREQ = Buf(64)
+const NREQ = Ref(0)
 
-function process!(c::Conn)
-    d = c.rbuf
+# Handles the complete requests in d[1:len], appending responses to out. Returns the index of the first
+# unconsumed byte (a partial request).
+function process!(c::Conn, d::Vector{UInt8}, len::Int, out::Buf)
     pos = 1
-    while pos <= c.rlen && !c.closing
-        st = parse_req!(REQ, d, pos, c.rlen)
+    while pos <= len && !c.closing
+        st = parse_req!(REQ, d, pos, len)
         st == 0 && break
         if st < 0
             err!(BADREQ, 400, "bad request")
-            write_response!(c.out, 400, BADREQ, false)
+            write_response!(out, 400, BADREQ, false)
             c.closing = true
-            pos = c.rlen + 1
-            break
+            return len + 1
         end
-        handle!(c.out, d, REQ)
+        handle!(out, d, REQ)
+        NREQ[] += 1
         pos = REQ.next
         REQ.keepalive || (c.closing = true)
     end
-    if pos > 1
-        rest = c.rlen - pos + 1
-        rest > 0 && copyto!(d, 1, d, pos, rest)
-        c.rlen = max(rest, 0)
+    pos
+end
+
+function on_readable!(L::Loop, c::Conn)
+    rb = L.rbuf
+    n0 = 0
+    if c.inlen > 0                              # partial request from before goes first
+        copyto!(rb, 1, c.inbuf, 1, c.inlen)
+        n0 = c.inlen
+        give_spill!(L, c.inbuf)
+        c.inbuf = EMPTY; c.inlen = 0
+    end
+    while true
+        room = length(rb) - n0
+        if room == 0                            # request larger than the shared buffer: out of scope
+            close_conn!(L, c)
+            return
+        end
+        r = GC.@preserve rb ccall(:read, Cssize_t, (Cint, Ptr{UInt8}, Csize_t), c.fd, pointer(rb, n0 + 1), room)
+        if r > 0
+            n0 += r
+            break
+        elseif r == 0
+            close_conn!(L, c)
+            return
+        end
+        e = Libc.errno()
+        e == EINTR && continue
+        e == EAGAIN && break
+        close_conn!(L, c)
+        return
+    end
+    out = L.out
+    reset!(out)
+    pos = process!(c, rb, n0, out)
+    rest = n0 - pos + 1
+    if rest > 0 && !c.closing
+        c.inbuf = take_spill!(L, rest)
+        copyto!(c.inbuf, 1, rb, pos, rest)
+        c.inlen = rest
+    end
+    if out.len > 0
+        GC.@preserve out send_or_queue!(L, c, pointer(out.data), out.len)
+    elseif c.closing && c.outlen == c.outoff
+        close_conn!(L, c)
     end
     nothing
 end
 
-function on_readable!(L::Loop, c::Conn)
-    while true
-        if c.rlen == length(c.rbuf)
-            length(c.rbuf) >= RBUF_MAX && (close_conn!(L, c); return)
-            resize!(c.rbuf, 2 * length(c.rbuf))
-        end
-        room = length(c.rbuf) - c.rlen
-        n = GC.@preserve c ccall(:read, Cssize_t, (Cint, Ptr{UInt8}, Csize_t), c.fd, pointer(c.rbuf, c.rlen + 1), room)
-        if n > 0
-            c.rlen += n
-            n < room && break
-        elseif n == 0
-            close_conn!(L, c)
-            return
-        else
-            e = Libc.errno()
-            e == EINTR && continue
-            e == EAGAIN && break
-            close_conn!(L, c)
-            return
-        end
-    end
-    process!(c)
-    flush!(L, c)
+mutable struct Stats
+    at::Float64
+    reqs::Int
+    bytes::Int64
+    gc_ns::UInt64
+    pauses::Int
+end
+
+# One "stats" line per STATS_EVERY seconds: allocation per request is the number Phase 3 drives to zero.
+function log_stats!(st::Stats, L::Loop, now::Float64)
+    b = Base.gc_bytes()
+    g = Base.gc_num()
+    dreq = NREQ[] - st.reqs
+    per = dreq > 0 ? (b - st.bytes) ÷ dreq : 0
+    println("stats conns=", L.nconns, " reqs=", dreq, " alloc_per_req=", per,
+        " gc_ms=", (g.total_time - st.gc_ns) ÷ 1_000_000, " gc_pauses=", g.pause - st.pauses,
+        " max_pause_ms=", g.max_pause ÷ 1_000_000, " spill_pool=", length(L.spill))
+    flush(stdout)
+    st.at = now; st.reqs = NREQ[]; st.bytes = Base.gc_bytes(); st.gc_ns = g.total_time; st.pauses = g.pause
     nothing
 end
 
 function serve(lfd::Cint)
     ep = ccall(:epoll_create1, Cint, (Cint,), SOCK_CLOEXEC)
     ep < 0 && error("epoll_create1: $(Libc.strerror(Libc.errno()))")
-    conns = Vector{Union{Nothing,Conn}}(nothing, 65536)
-    L = Loop(ep, lfd, conns, Conn[])
+    L = Loop(ep, lfd, true, 0.0, Vector{Union{Nothing,Conn}}(nothing, 65536), Conn[], Vector{UInt8}[], 0,
+        Vector{UInt8}(undef, RBUF_SHARED), Buf(1 << 16))
     ep_ctl(ep, EPOLL_CTL_ADD, lfd, EPOLLIN)
     evs = zeros(UInt8, 12 * MAXEV)
+    g = Base.gc_num()
+    st = Stats(time(), NREQ[], Base.gc_bytes(), g.total_time, g.pause)
     while true
-        n = GC.@preserve evs ccall(:epoll_wait, Cint, (Cint, Ptr{UInt8}, Cint, Cint), ep, evs, MAXEV, 1000)
+        n = GC.@preserve evs ccall(:epoll_wait, Cint, (Cint, Ptr{UInt8}, Cint, Cint), ep, evs, MAXEV,
+            L.listening ? 1000 : 100)
         if n < 0
             Libc.errno() == EINTR && continue
             error("epoll_wait: $(Libc.strerror(Libc.errno()))")
@@ -218,9 +322,15 @@ function serve(lfd::Cint)
                 continue
             end
             if ev & EPOLLOUT != 0
-                flush!(L, c) || continue
+                on_writable!(L, c) || continue
             end
             ev & EPOLLIN != 0 && on_readable!(L, c)
         end
+        now = time()
+        if !L.listening && now >= L.resume_at
+            ep_ctl(ep, EPOLL_CTL_ADD, lfd, EPOLLIN)
+            L.listening = true
+        end
+        now - st.at >= STATS_EVERY && log_stats!(st, L, now)
     end
 end

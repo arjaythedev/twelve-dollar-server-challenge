@@ -80,12 +80,14 @@ Caveats:
 
 <!-- results:begin -->
 Best local result per change. Raw runs: [stress-results.csv](stress-results.csv); how to run: above.
-Blast req/s (max throughput at 1 CPU) is the number to watch, with % change against the previous change.
+Blast req/s (max throughput at 1 CPU): median of the passing runs (they vary ~10%), with % change against the
+previous change and the number of runs. Changes under ~10% are noise unless they repeat.
 k6 / wrk users = highest passing run (not always a full ladder). k6 is capped near 20k users on this host;
 wrk users (`GEN=users`, think time per connection) are cheap, so they reach the connection limits.
 
-| change | k6 users | wrk users | blast req/s |
+| change | k6 users | wrk users (server RSS) | blast req/s |
 |---|--:|--:|--:|
 | epoll baseline | 19,350 | – | – |
-| epoll + heap-hint 512M | 10,000 | 60,000 | 24,940 |
+| epoll + heap-hint 512M | 10,000 | 60,000 (990 MB) | 23,832, n=12 |
+| P3: shared buffers | – | 60,000 (315 MB) | 22,857 (-4%), n=3 |
 <!-- results:end -->

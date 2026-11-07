@@ -9,7 +9,8 @@ import csv, datetime, json, os, re, sys
 COLUMNS = ["timestamp", "commit", "label", "gen", "julia", "backend", "transport", "cpus", "mem",
            "vus", "ramp", "duration", "requests", "req_s", "est_users", "p95_ms", "p99_ms", "max_ms",
            "err_pct", "pass", "failed_on", "srv_cpu_avg", "srv_cpu_max", "srv_rss_peak_mb",
-           "srv_cgmem_peak_mb", "srv_conns_peak", "gen_mem_peak", "boot_ms", "notes"]
+           "srv_cgmem_peak_mb", "srv_conns_peak", "alloc_b_per_req", "gc_ms", "gc_max_pause_ms", "gen_mem_peak",
+           "boot_ms", "notes"]
 RENAMED = {"k6_mem_peak": "gen_mem_peak"}
 USERS_PER_REQ_S = 10.6   # leaderboard: 310k users <-> 29.3k req/s
 
@@ -109,6 +110,14 @@ row.update(julia=info.get("julia", ""), backend=info.get("backend", ""), transpo
            srv_rss_peak_mb=str(max(rss)) if rss else "", srv_cgmem_peak_mb=str(max(cg)) if cg else "",
            gen_mem_peak=f"{max(gm):.0f}MB" if gm else "", boot_ms=(re.findall(r"boot_ms=(\d+)", log) or [""])[0])
 
+# allocation / GC, from the server's "stats" lines (one per 10 s); only windows with real load count
+st = [dict(re.findall(r"(\w+)=(\d+)", l)) for l in log.splitlines() if l.startswith("stats ")]
+loaded = [x for x in st if int(x.get("reqs", 0)) >= 1000]
+if loaded:
+    per = sorted(int(x["alloc_per_req"]) for x in loaded)
+    row.update(alloc_b_per_req=str(per[len(per) // 2]), gc_ms=str(sum(int(x["gc_ms"]) for x in st)),
+               gc_max_pause_ms=str(max(int(x["max_pause_ms"]) for x in st)))
+
 # open connections ~ julia's fds minus the ones it holds idle (stdio, db, wal, shm, epoll, listener, ...)
 BASE_FDS = 23   # measured: 60,000 users -> 60,023 fds
 conns = max(fds) - BASE_FDS if fds else None
@@ -138,7 +147,7 @@ what = "connections" if gen == "blast" else "users"
 print(f"   {'PASS' if ok else 'FAIL'}  {gen} {row['vus']} {what}  boot={row['boot_ms']}ms req/s={row['req_s']}"
       + (f" (~{row['est_users']} users)" if row["est_users"] else "")
       + f" p95={row['p95_ms']}ms p99={row['p99_ms']}ms err={row['err_pct']}%"
-      + f" cpu avg/max={row['srv_cpu_avg']}/{row['srv_cpu_max']}% rss={row['srv_rss_peak_mb']}MB conns={row['srv_conns_peak']}"
+      + f" cpu avg/max={row['srv_cpu_avg']}/{row['srv_cpu_max']}% rss={row['srv_rss_peak_mb']}MB conns={row['srv_conns_peak']} alloc/req={row['alloc_b_per_req']}B gc={row['gc_ms']}ms"
       + f" {gen}={row['gen_mem_peak']} {row['failed_on']}")
 if not ok and cpu and max(cpu) < 85:
     print("   note: server CPU never above 85%: the limit may be the load generator, the host or a "

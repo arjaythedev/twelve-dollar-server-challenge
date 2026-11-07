@@ -26,7 +26,6 @@ const MAXEV = 1024
 const RBUF_SHARED = 1 << 18     # one read buffer shared by all connections
 const SPILL_SIZE = 16384        # pooled per-connection buffer, only while a request or a send is incomplete
 const STATS_EVERY = 10.0        # seconds between "stats" lines in the log (JR_DEBUG=1 only)
-const DEBUG = Ref(false)
 
 # Per-connection state. An idle connection holds no buffers: inbuf/outbuf are EMPTY unless a partial
 # request is waiting for more bytes or a response could not be sent in full.
@@ -97,7 +96,7 @@ end
 function close_conn!(L::Loop, c::Conn)
     ccall(:close, Cint, (Cint,), c.fd)
     L.conns[c.fd+1] = nothing
-    L.nconns -= 1
+    @dbg L.nconns -= 1
     c.inbuf !== EMPTY && give_spill!(L, c.inbuf)
     c.outbuf !== EMPTY && give_spill!(L, c.outbuf)
     c.fd = -1; c.inbuf = EMPTY; c.inlen = 0; c.outbuf = EMPTY; c.outoff = 0; c.outlen = 0
@@ -127,7 +126,7 @@ function accept_all!(L::Loop)
         c = isempty(L.pool) ? Conn(fd, EMPTY, 0, EMPTY, 0, 0, false, false) : pop!(L.pool)
         c.fd = fd
         L.conns[fd+1] = c
-        L.nconns += 1
+        @dbg L.nconns += 1
         ep_ctl(L.ep, EPOLL_CTL_ADD, fd, EPOLLIN)
     end
 end
@@ -217,7 +216,7 @@ function process!(c::Conn, d::Vector{UInt8}, len::Int, out::Buf)
             return len + 1
         end
         handle!(out, d, REQ)
-        NREQ[] += 1
+        @dbg NREQ[] += 1
         pos = REQ.next
         REQ.keepalive || (c.closing = true)
     end
@@ -299,8 +298,7 @@ function serve(lfd::Cint)
         Vector{UInt8}(undef, RBUF_SHARED), Buf(1 << 16))
     ep_ctl(ep, EPOLL_CTL_ADD, lfd, EPOLLIN)
     evs = zeros(UInt8, 12 * MAXEV)
-    g = Base.gc_num()
-    st = Stats(time(), NREQ[], Base.gc_bytes(), g.total_time, g.pause)
+    @dbg (g = Base.gc_num(); st = Stats(time(), NREQ[], Base.gc_bytes(), g.total_time, g.pause))
     while true
         n = GC.@preserve evs ccall(:epoll_wait, Cint, (Cint, Ptr{UInt8}, Cint, Cint), ep, evs, MAXEV,
             L.listening ? 1000 : 100)
@@ -331,7 +329,7 @@ function serve(lfd::Cint)
             ep_ctl(ep, EPOLL_CTL_ADD, lfd, EPOLLIN)
             L.listening = true
         end
-        if DEBUG[]
+        @dbg begin
             now = time()
             now - st.at >= STATS_EVERY && log_stats!(st, L, now)
         end

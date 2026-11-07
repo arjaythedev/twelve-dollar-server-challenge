@@ -3,11 +3,10 @@ use std::io;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 mod db;
-mod reader;
 mod stats;
 mod uring;
 mod writer;
-use db::{ReadDb, WriteDb};
+use db::ReadDb;
 
 use base64::engine::general_purpose::{URL_SAFE, URL_SAFE_NO_PAD};
 use base64::Engine;
@@ -38,8 +37,6 @@ fn main() -> io::Result<()> {
     let port = env::var("PORT").unwrap_or_else(|_| "3000".to_string());
     let db_path = env::var("SQLITE_PATH").expect("SQLITE_PATH");
     let secret = env::var("JWT_SECRET").expect("JWT_SECRET").into_bytes();
-    // No cross-request read/response coalescing: every request reads SQLite while served.
-    let coalesce = false;
     let shards = env::var("SHARDS")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
@@ -47,21 +44,17 @@ fn main() -> io::Result<()> {
         .clamp(1, 16);
     let addr = format!("{host}:{port}");
 
-    uring::run_pass(db_path, secret, coalesce, addr, shards)
+    uring::run_pass(db_path, secret, addr, shards)
 }
 
 impl App {
-    pub(crate) fn open(path: &str, secret: Vec<u8>, coalesce: bool) -> Result<Self, String> {
+    pub(crate) fn open(path: &str, secret: Vec<u8>) -> Result<Self, String> {
         let read = ReadDb::open(path)?;
-        let write = WriteDb::open(path)?;
-        let write_cache = writer::BatchCache::new(&write);
+        let mac = Hmac::<Sha256>::new_from_slice(&secret)
+            .map_err(|_| "invalid JWT secret".to_string())?;
         Ok(Self {
             read,
-            write_cache,
-            write,
-            post_ids: Vec::new(),
-            coalesce,
-            secret,
+            mac,
             started: Instant::now(),
         })
     }
@@ -69,11 +62,7 @@ impl App {
 
 pub(crate) struct App {
     pub read: ReadDb,
-    pub write_cache: writer::BatchCache,
-    pub write: WriteDb,
-    pub post_ids: Vec<i64>,
-    pub(crate) coalesce: bool,
-    secret: Vec<u8>,
+    mac: Hmac<Sha256>,
     started: Instant,
 }
 
@@ -121,7 +110,7 @@ impl App {
                 }
             }
             ("GET", "/feed") => Handled::Feed,
-            ("POST", "/posts") => match authenticate(req, &self.secret) {
+            ("POST", "/posts") => match authenticate(req, &self.mac) {
                 Err(resp) => Handled::Reply(resp.0, resp.1),
                 Ok(claims) => {
                     let value: serde_json::Value = match serde_json::from_slice(&req.body) {
@@ -154,7 +143,7 @@ impl App {
                 Handled::Post(id)
             }
             ("POST", path) if path.starts_with("/posts/") && path.ends_with("/like") => {
-                match authenticate(req, &self.secret) {
+                match authenticate(req, &self.mac) {
                     Err(resp) => Handled::Reply(resp.0, resp.1),
                     Ok(claims) => {
                         let rest = &path["/posts/".len()..path.len() - "/like".len()];
@@ -328,17 +317,17 @@ pub(crate) fn response_bytes(status: u16, body: &[u8], close: bool) -> Vec<u8> {
     out
 }
 
-fn authenticate(req: &Request<'_>, secret: &[u8]) -> Result<Claims, (u16, Vec<u8>)> {
+fn authenticate(req: &Request<'_>, mac: &Hmac<Sha256>) -> Result<Claims, (u16, Vec<u8>)> {
     let Some(value) = req.auth.as_deref() else {
         return Err((401, error("missing bearer token")));
     };
     let Some(token) = value.strip_prefix("Bearer ") else {
         return Err((401, error("missing bearer token")));
     };
-    verify_token(token, secret).map_err(|kind| (401, error(kind)))
+    verify_token(token, mac).map_err(|kind| (401, error(kind)))
 }
 
-fn verify_token(token: &str, secret: &[u8]) -> Result<Claims, &'static str> {
+fn verify_token(token: &str, mac: &Hmac<Sha256>) -> Result<Claims, &'static str> {
     let mut parts = token.split('.');
     let (Some(header_b64), Some(payload_b64), Some(sig_b64)) =
         (parts.next(), parts.next(), parts.next())
@@ -357,7 +346,7 @@ fn verify_token(token: &str, secret: &[u8]) -> Result<Claims, &'static str> {
         return Err("invalid or expired token");
     }
 
-    let mut mac = Hmac::<Sha256>::new_from_slice(secret).map_err(|_| "invalid or expired token")?;
+    let mut mac = mac.clone();
     mac.update(header_b64.as_bytes());
     mac.update(b".");
     mac.update(payload_b64.as_bytes());

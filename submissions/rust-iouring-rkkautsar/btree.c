@@ -2,14 +2,17 @@
 // translation unit that compiles SQLite: including the amalgamation here
 // keeps SQLite's internal B-tree/cursor API visible.  A reader context owns
 // its cursors, key infos and one packed like-key for the life of a database
-// connection.  Each request still starts and ends its own read transaction;
-// no row data survives a request.
+// connection. Each request reads its rows independently within the current
+// transaction; no row data survives a request.
 #define _GNU_SOURCE 1
 #include <stdint.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
+#if defined(__SSE2__)
+#include <emmintrin.h>
+#endif
 #include "sqlite3.h"
 #include "sqlite/sqlite3.c"
 
@@ -57,30 +60,63 @@ static void jraw(jout *o, const char *s, int n) {
 static void jch(jout *o, char c) { jraw(o, &c, 1); }
 
 static void jint(jout *o, sqlite3_int64 v) {
-  char b[24];
-  int n = 0;
-  uint64_t u;
-  if (v < 0) {
-    u = (uint64_t)(-(v + 1)) + 1;
-  } else {
-    u = (uint64_t)v;
+  if ((uint64_t)v <= 9) {
+    jch(o, (char)('0' + v));
+    return;
   }
+  char b[24];
+  char *p = b + sizeof(b);
+  uint64_t u = v < 0 ? (uint64_t)(-(v + 1)) + 1 : (uint64_t)v;
   do {
-    b[n++] = (char)('0' + (u % 10));
+    *--p = (char)('0' + (u % 10));
     u /= 10;
   } while (u);
-  if (v < 0) b[n++] = '-';
-  char out[24];
-  for (int i = 0; i < n; i++) out[i] = b[n - 1 - i];
-  jraw(o, out, n);
+  if (v < 0) *--p = '-';
+  jraw(o, p, (int)(b + sizeof(b) - p));
+}
+
+static inline uint64_t has_zero_byte(uint64_t x) {
+  return (x - UINT64_C(0x0101010101010101)) & ~x & UINT64_C(0x8080808080808080);
 }
 
 static void jstr(jout *o, const unsigned char *s, int n) {
   static const char hex[] = "0123456789abcdef";
   jch(o, '"');
+  int i = 0;
+  if (s && n > 0) {
+#if defined(__SSE2__)
+    const __m128i control_max = _mm_set1_epi8(0x1f);
+    const __m128i quote = _mm_set1_epi8('"');
+    const __m128i slash = _mm_set1_epi8('\\');
+    for (; i <= n - 16; i += 16) {
+      __m128i x = _mm_loadu_si128((const __m128i *)(s + i));
+      __m128i control = _mm_cmpeq_epi8(_mm_min_epu8(x, control_max), x);
+      __m128i escaped = _mm_or_si128(control, _mm_or_si128(
+          _mm_cmpeq_epi8(x, quote), _mm_cmpeq_epi8(x, slash)));
+      if (_mm_movemask_epi8(escaped)) break;
+    }
+#endif
+    for (; i <= n - 8; i += 8) {
+      uint64_t word;
+      memcpy(&word, s + i, sizeof(word));
+      if (has_zero_byte(word & UINT64_C(0xe0e0e0e0e0e0e0e0)) ||
+          has_zero_byte(word ^ UINT64_C(0x2222222222222222)) ||
+          has_zero_byte(word ^ UINT64_C(0x5c5c5c5c5c5c5c5c))) break;
+    }
+    for (; i < n; i++) {
+      unsigned char c = s[i];
+      if (c < 0x20 || c == '"' || c == '\\') break;
+    }
+    if (i == n) {
+      jraw(o, (const char *)s, n);
+      jch(o, '"');
+      return;
+    }
+  }
   if (s && n > 0) {
     int start = 0;
-    for (int i = 0; i < n; i++) {
+    /* The prefix before i was already checked by the fast scan. */
+    for (; i < n; i++) {
       unsigned char c = s[i];
       const char *esc = NULL;
       char buf[6];
@@ -162,7 +198,7 @@ static int parse_vals(const unsigned char *p, u32 n, val *v, int want) {
     len = sqlite3VdbeSerialTypeLen(st);
     if (off + len > (u32)(p + n - data)) { fail = 4; goto bad; }
     val *x = &v[i];
-    memset(x, 0, sizeof(*x));
+    /* Only the member selected by kind is read by callers. */
     if (st == 0) {
       x->kind = V_NULL;
     } else if (st <= 6) {
@@ -397,8 +433,9 @@ static int first_int(const unsigned char *p, u32 n, sqlite3_int64 *out) {
   if (st == 0) return SQLITE_NOTFOUND;
   if (st < 1 || st > 6) return SQLITE_NOTFOUND;
   uint64_t off = (uint64_t)hdr;
-  if (off + st > n) return SQLITE_CORRUPT;
-  *out = read_int(p + off, (int)st);
+  int width = st == 5 ? 6 : st == 6 ? 8 : (int)st;
+  if (off + (uint64_t)width > n) return SQLITE_CORRUPT;
+  *out = read_int(p + off, width);
   return SQLITE_OK;
 }
 
@@ -458,7 +495,7 @@ static int like_counts(BtreeReader *r, const sqlite3_int64 *ids, int n,
     /* Random post ids can be far apart.  Walking every like between
        them would scan the whole index, so reseek across large gaps.
        Dense ids (the 20-post feed) still use one forward walk. */
-    if (pi > 0 && (target < prev || target - prev > 4096)) {
+    if (pi > 0 && (target < prev || (uint64_t)target - (uint64_t)prev > 4096)) {
       like_find_set(r, target);
       rc = sqlite3BtreeIndexMoveto(r->like, r->likeFind, &res);
       if (rc != SQLITE_OK) break;
@@ -522,11 +559,20 @@ static int like_count(BtreeReader *r, sqlite3_int64 post_id, jout *o) {
   return rc;
 }
 
-static int emit_post(BtreeReader *r, sqlite3_int64 id, sqlite3_int64 likes, jout *o) {
-  int res = 0;
-  int rc = sqlite3BtreeTableMoveto(r->post, id, 0, &res);
-  if (rc != SQLITE_OK) return rc;
-  if (res != 0) return SQLITE_NOTFOUND;
+static int emit_post(BtreeReader *r, sqlite3_int64 id, sqlite3_int64 likes,
+                     int next_post, jout *o) {
+  int rc, res = 0;
+  if (next_post) {
+    rc = sqlite3BtreeNext(r->post, 0);
+    if (rc == SQLITE_DONE) return SQLITE_NOTFOUND;
+    if (rc != SQLITE_OK) return rc;
+    if (sqlite3BtreeEof(r->post) || sqlite3BtreeIntegerKey(r->post) != id)
+      return SQLITE_NOTFOUND;
+  } else {
+    rc = sqlite3BtreeTableMoveto(r->post, id, 0, &res);
+    if (rc != SQLITE_OK) return rc;
+    if (res != 0) return SQLITE_NOTFOUND;
+  }
 
   u32 pn;
   const unsigned char *p = payload(r->post, &pn);
@@ -543,9 +589,20 @@ static int emit_post(BtreeReader *r, sqlite3_int64 id, sqlite3_int64 likes, jout
   u32 un;
   const unsigned char *up = payload(r->user, &un);
   if (!up) return SQLITE_CORRUPT;
-  val uf[2];
-  if (parse_vals(up, un, uf, 2) != SQLITE_OK || uf[1].kind != V_TEXT) {
-    return SQLITE_CORRUPT;
+  const unsigned char *name;
+  int name_len;
+  if (un >= 3 && up[0] >= 3 && up[0] < 128 && up[0] <= un &&
+      up[1] == 0 && up[2] >= 12 && up[2] < 128 &&
+      (u32)((up[2] - 12) >> 1) <= un - up[0]) {
+    name = up + up[0];
+    name_len = (up[2] - 12) >> 1;
+  } else {
+    val uf[2];
+    if (parse_vals(up, un, uf, 2) != SQLITE_OK || uf[1].kind != V_TEXT) {
+      return SQLITE_CORRUPT;
+    }
+    name = uf[1].z;
+    name_len = uf[1].n;
   }
 
   jraw(o, "{\"id\":", 6);
@@ -555,7 +612,7 @@ static int emit_post(BtreeReader *r, sqlite3_int64 id, sqlite3_int64 likes, jout
   jraw(o, ",\"created_at\":", 14);
   jstr(o, pf[3].z, pf[3].n);
   jraw(o, ",\"author\":", 10);
-  jstr(o, uf[1].z, uf[1].n);
+  jstr(o, name, name_len);
   jraw(o, ",\"like_count\":", 14);
   jint(o, likes);
   jch(o, '}');
@@ -599,7 +656,8 @@ int feed_btree(BtreeReader *r, char *out, int cap, int *outlen) {
     val f[2];
     int prc = parse_vals(p, n, f, 2);
     if (parts && part_calls < 3) {
-      fprintf(stderr, "feedrow n=%u prc=%d k0=%d k1=%d bytes=", n, prc, f[0].kind, f[1].kind);
+      fprintf(stderr, "feedrow n=%u prc=%d k0=%d k1=%d bytes=", n, prc,
+              prc == SQLITE_OK ? f[0].kind : -1, prc == SQLITE_OK ? f[1].kind : -1);
       for (u32 bi = 0; bi < n && bi < 12; bi++) fprintf(stderr, "%02x", p[bi]);
       fprintf(stderr, "\n");
     }
@@ -633,11 +691,14 @@ int feed_btree(BtreeReader *r, char *out, int cap, int *outlen) {
       }
       order[j + 1] = key;
     }
-    jout to = {r->feed_scratch, cap, 0, 0};
+    jout to = {r->feed_scratch, cap < 64 * 1024 ? cap : 64 * 1024, 0, 0};
     for (int k = 0; k < nfeed; k++) {
       int idx = order[k];
       starts[idx] = to.n;
-      rc = emit_post(r, feed_ids[idx], feed_likes[idx], &to);
+      sqlite3_int64 id = feed_ids[idx];
+      int next_post = k > 0 && feed_ids[order[k - 1]] < INT64_MAX &&
+                      id == feed_ids[order[k - 1]] + 1;
+      rc = emit_post(r, id, feed_likes[idx], next_post, &to);
       if (rc != SQLITE_OK) break;
       lens[idx] = to.n - starts[idx];
     }
@@ -725,7 +786,7 @@ int posts_btree(BtreeReader *r, const sqlite3_int64 *ids, int n, char *out,
   int pos = 0;
   for (int i = 0; i < n; i++) {
     jout o = {out + pos, cap - pos, 0, 0};
-    rc = emit_post(r, ids[i], likes[i], &o);
+    rc = emit_post(r, ids[i], likes[i], 0, &o);
     if (rc == SQLITE_NOTFOUND) {
       rc = SQLITE_OK;
       continue;
@@ -760,19 +821,23 @@ int posts_btree_tx(BtreeReader *r, const sqlite3_int64 *ids, int n, char *out,
   return rc;
 }
 
+/* Batch-end closes these cursors; the next read reopens them in its transaction. */
 void btree_reader_refresh_feed(BtreeReader *r) {
+  if (!r->feed) return;
   int rc = SQLITE_OK;
   BtCursor *c = open_cursor(r->bt, r->feed_root, r->feedKey, &rc);
   if (c) { close_cursor(r->feed); r->feed = c; }
 }
 
 void btree_reader_refresh_post(BtreeReader *r) {
+  if (!r->post) return;
   int rc = SQLITE_OK;
   BtCursor *c = open_cursor(r->bt, r->post_root, NULL, &rc);
   if (c) { close_cursor(r->post); r->post = c; }
 }
 
 void btree_reader_refresh_like(BtreeReader *r) {
+  if (!r->like) return;
   int rc = SQLITE_OK;
   BtCursor *c = open_cursor(r->bt, r->like_root, r->likeKey, &rc);
   if (c) { close_cursor(r->like); r->like = c; }

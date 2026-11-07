@@ -255,6 +255,81 @@ pub fn drain_counter(fd: c_int) {
     }
 }
 
+/// Binds one listening socket on `host:port` with `SO_REUSEADDR` and
+/// `SO_REUSEPORT` set before `bind`, so several can share the port and the
+/// kernel spreads new connections across their accept queues. Accepted
+/// sockets inherit `TCP_NODELAY`; the listener itself is non-blocking
+/// (`accept4` in the epoll loop gets the flag from its own call). Retries
+/// `EADDRINUSE` for up to 30 s. Returns fd, 2 for an unsupported host (the
+/// caller falls back to the standard listener), or -1.
+pub fn listen_reuseport(host: &str, port: u16, backlog: c_int) -> c_int {
+    const AF_INET: c_int = 2;
+    const SOCK_STREAM: c_int = 1;
+    const SOCK_CLOEXEC: c_int = 0o2000000;
+    const SOCK_NONBLOCK_LOCAL: c_int = 0o4000;
+    extern "C" {
+        fn socket(domain: c_int, ty: c_int, proto: c_int) -> c_int;
+        fn bind(fd: c_int, addr: *const c_void, len: u32) -> c_int;
+        fn listen(fd: c_int, backlog: c_int) -> c_int;
+        fn close(fd: c_int) -> c_int;
+        fn usleep(us: u32) -> c_int;
+    }
+    unsafe {
+        let fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK_LOCAL, 0);
+        if fd < 0 {
+            return -1;
+        }
+        let one: i32 = 1;
+        setsockopt(fd, SOL_SOCKET, 2, &one as *const c_int as *const c_void, 4); // SO_REUSEADDR
+        setsockopt(fd, SOL_SOCKET, 15, &one as *const c_int as *const c_void, 4); // SO_REUSEPORT
+        set_nodelay(fd); // accepted sockets inherit this
+        // sockaddr_in { family (host order), port (network order), addr }
+        let addr: u32 = match host {
+            "0.0.0.0" => 0,
+            "127.0.0.1" => (127 << 24) | 1,
+            _ => return 2,
+        };
+        let b = [
+            AF_INET as u8,
+            0,
+            (port >> 8) as u8,
+            (port & 0xff) as u8,
+            (addr >> 24) as u8,
+            (addr >> 16) as u8,
+            (addr >> 8) as u8,
+            addr as u8,
+            0, 0, 0, 0, 0, 0, 0, 0,
+        ];
+        let mut ok = false;
+        for i in 0..300 {
+            let rc = bind(fd, b.as_ptr() as *const c_void, 16);
+            if rc == 0 {
+                ok = true;
+                break;
+            }
+            let err = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+            if err != 98 {
+                // EADDRINUSE
+                eprintln!("listen_reuseport: bind {host}:{port} failed: {err}");
+                break;
+            }
+            let _ = i;
+            usleep(100_000);
+        }
+        if !ok {
+            close(fd);
+            return -1;
+        }
+        if listen(fd, backlog) != 0 {
+            let e = std::io::Error::last_os_error();
+            eprintln!("listen_reuseport: listen {host}:{port} failed: {e}");
+            close(fd);
+            return -1;
+        }
+        fd
+    }
+}
+
 pub fn would_block() -> bool {
     std::io::Error::last_os_error().kind() == std::io::ErrorKind::WouldBlock
 }

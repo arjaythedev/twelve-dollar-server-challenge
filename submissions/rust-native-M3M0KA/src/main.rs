@@ -14,6 +14,7 @@ mod db;
 mod http;
 mod json;
 mod net_uring;
+mod writer;
 mod sys;
 mod uring;
 
@@ -428,16 +429,43 @@ fn main() {
 
     sys::raise_nofile();
 
-    let listener = match TcpListener::bind((host.as_str(), port)) {
-        Ok(l) => l,
-        Err(e) => {
-            eprintln!("cannot bind {host}:{port}: {e}");
-            std::process::exit(1);
+    // N listening sockets share the port with SO_REUSEPORT: the kernel spreads
+    // new connections across their accept queues, so a burst of synchronizes
+    // has N x somaxconn slots to land in instead of one queue that overflows
+    // during a ramp or a stall (the shape every top-board submission runs,
+    // because a dropped syn is retried after 1 s and then 3 s). Each epoll
+    // worker accepts on its own socket; the io_uring transport keeps all of
+    // them.
+    let workers_for_listeners = std::env::var("FEED_WORKERS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(5)
+        .clamp(1, 8);
+    let nlisteners: usize = std::env::var("FEED_LISTENERS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| workers_for_listeners)
+        .clamp(1, 8);
+    let mut lfds: Vec<c_int> = Vec::with_capacity(nlisteners);
+    for _ in 0..nlisteners {
+        let fd = sys::listen_reuseport(&host, port, 4096);
+        if fd < 0 {
+            break;
         }
-    };
-    listener.set_nonblocking(true).expect("nonblocking listener");
-    let lfd = listener.into_raw_fd();
-    sys::set_reuseaddr(lfd);
+        lfds.push(fd);
+    }
+    if lfds.len() > 1 {
+        eprintln!("listeners: {} reuseport queues", lfds.len());
+    }
+    if lfds.is_empty() {
+        // Reuseport refused (or the fd table is short): one listener through
+        // the standard path, the behavior every earlier verification ran.
+        let std_l = std::net::TcpListener::bind((host.as_str(), port)).expect("std bind");
+        std_l.set_nonblocking(true).expect("nonblocking listener");
+        lfds.push(std_l.into_raw_fd());
+        sys::set_reuseaddr(lfds[0]);
+    }
+    eprintln!("listening sockets: {}", lfds.len());
 
     // io_uring lifts the connection ceiling inside one process. It is used only
     // after a live end-to-end self test; otherwise the epoll loop serves the same
@@ -449,7 +477,7 @@ fn main() {
         eprintln!("transport: io_uring");
         let app = App::new(&db_path, &secret);
         // Returns only when the rings could not be set up after all.
-        started = Some(net_uring::serve(app, lfd));
+        started = Some(net_uring::serve(app, &lfds));
         eprintln!("io_uring: no ring could be opened; serving on epoll in one process");
     }
 
@@ -468,16 +496,21 @@ fn main() {
         workers = 1;
     }
     let mut is_child = false;
-    for _ in 1..workers {
+    let mut worker_index = 0usize;
+    for k in 1..workers {
+        worker_index = k;
         if sys::fork_process() == 0 {
             is_child = true;
-            break;
+            break; // the child keeps this loop's index as its listener index
         }
+        // The fork returned to the PARENT, which accepts on listener 0.
+        worker_index = 0;
     }
-    eprintln!("transport: epoll, worker {} of {}", if is_child { "child" } else { "parent" }, workers);
+    eprintln!("transport: epoll, worker {} of {}: listener {}", if is_child { "child" } else { "parent" }, workers, worker_index);
 
     let ep = unsafe { sys::epoll_create1(0x80000) }; // EPOLL_CLOEXEC
     assert!(ep >= 0, "epoll_create1 failed");
+    let lfd = lfds[worker_index % lfds.len()]; // per-worker accept queue
     let ev = sys::event_for(lfd, sys::EPOLL_IN_FOR_LISTENER);
     unsafe {
         assert!(sys::epoll_ctl(ep, sys::EPOLL_CTL_ADD, lfd, &ev) >= 0);

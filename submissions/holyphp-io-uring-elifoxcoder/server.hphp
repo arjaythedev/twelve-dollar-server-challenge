@@ -1764,7 +1764,24 @@ class Server {
     }
 
     public function execute_writes(): void {
-        if ($this->bgCheckpoint && sqlite_bg_checkpoint_hold($this->db)) { return; }
+        if ($this->bgCheckpoint && sqlite_bg_checkpoint_hold($this->db)) {
+            /* A checkpoint can defer this batch across poll cycles. Strings
+             * copied from the current request live only until scope_end(),
+             * while $pending survives. Move deferred post fields to heap
+             * storage before leaving this scope. */
+            $pi = 0;
+            $pn = count($this->pending);
+            while ($pi < $pn) {
+                $r = $this->pending[$pi];
+                if ($r["kind"] == 1) {
+                    $r["text"] = str_persist($r["text"]);
+                    $r["name"] = str_persist($r["name"]);
+                    $this->pending[$pi] = $r;
+                }
+                $pi = $pi + 1;
+            }
+            return;
+        }
         $n = count($this->pending);
         if ($n == 0) { return; }
 

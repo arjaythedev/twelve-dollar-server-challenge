@@ -234,10 +234,10 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | 167 | java-helidon-dglynch | #159 | Java (Helidon) | **46,000** | 4,525 | 76 | 121 | 0.00 | 84 | 173 | 1,579 | 2026-10-29 |
 | 168 | python-granian-tbsvttr | #13 | Python (Granian) | **45,000** | 4,400 | 202 | 812 | 0.00 | 93 | 197 | 709 | 2026-10-26 |
 | 168 | go-nethttp-NaveedZahoorKhan | #129 | Go (net/http, cgo SQLite) | **45,000** ᵏ | 4,429 | 33 | 303 | 0.00 | 67 | 141 | 1,507 | 2026-10-28 |
-| 170 | node-fastify-gmr458 | #61 | TypeScript (Fastify, Node) | **44,000** | 4,285 | 489 | 915 | 0.00 | 86 | 187 | 812 | 2026-10-27 |
-| 171 | ruby-iodine-tbsvttr | #14 | Ruby (iodine) | **43,000** | 4,223 | 89 | 175 | 0.00 | 86 | 189 | 1,096 | 2026-10-26 |
-| 172 | php-pype-dayne-valourite | #337 | PHP 8.3 (pype framework, OpenSwoole) | **37,000** | 3,626 | 250.9 | 573.1 | 0.00 | 90 | 231 | 329 | 2026-11-06 |
-| 172 | go-fasthttp-riyaz-ali ᵖ | #344 | Go (fasthttp, cgo SQLite) | **37,000** ᶳ | 3,640 | 45.3 | 173.6 | 0.00 | 73 | 186 | 1,611 | 2026-11-07 |
+| 168 | go-fasthttp-riyaz-ali | #344 | Go (fasthttp, cgo SQLite) | **45,000** ᶳ | 4,422 | 79.1 | 652.2 | 0.00 | 78 | 164 | 1,618 | 2026-11-07 |
+| 171 | node-fastify-gmr458 | #61 | TypeScript (Fastify, Node) | **44,000** | 4,285 | 489 | 915 | 0.00 | 86 | 187 | 812 | 2026-10-27 |
+| 172 | ruby-iodine-tbsvttr | #14 | Ruby (iodine) | **43,000** | 4,223 | 89 | 175 | 0.00 | 86 | 189 | 1,096 | 2026-10-26 |
+| 173 | php-pype-dayne-valourite | #337 | PHP 8.3 (pype framework, OpenSwoole) | **37,000** | 3,626 | 250.9 | 573.1 | 0.00 | 90 | 231 | 329 | 2026-11-06 |
 | 174 | swift-vapor-Tabonx | #299 | Swift (Vapor 4, GRDB) | **35,000** | 3,409 | 297.2 | 498.6 | 0.00 | 100 | 273 | 475 | 2026-11-05 |
 | 175 | d-vibe-http-cyrusmsk | #162 | D (vibe.d) | **33,000** | 3,233 | 300 | 579 | 0.00 | 85 | 244 | 1,663 | 2026-10-29 |
 | 176 | java-spring-boot-nb-99 | #33 | Java (Spring Boot WebFlux) | **32,000** | 3,151 | 9.9 | 27 | 0.00 | 81 | 239 | 763 | 2026-10-26 |
@@ -421,10 +421,10 @@ probe on p99 (9.96 s at 83 % CPU, 0 errors); 260,000 / 280,000 / 320,000 collaps
 per-request C JSON, build flags, 1 ms batch window); 280,000 failed the 2-minute probe on p99 (2.73 s at 86 % CPU,
 0 errors). Its merged #339 code held **260,000** (24,933 req/s, p95 104.5 / p99 280.0 ms, 82 % CPU, 2026-11-06).
 
-ᶳ **go-fasthttp-riyaz-ali #344 is scored at `3159a41`** (with a one-line build patch, ᵖ below); its head moved to
-`e95e747` ("pass cgo flags") during the run, and that commit is queued for its own run. CPU-bound: 39,000 passed the
-2-minute probe but failed the 5-minute hold on p95/p99 (2.6 / 3.0 s at 83 % CPU, 0 errors); 40,000 failed the 2-minute
-probe on p95 (2.5 s at 92 % CPU). Its cgroup memory peaked at 1.6 GB.
+ᶳ **go-fasthttp-riyaz-ali #344 is scored at `e95e747`** (unpatched; it replaces the 37,000 its `3159a41` held with a
+one-line build patch, ᵖ below). 52,000 passed the 2-minute probe, but the 5-minute holds failed at 52,000 and 49,000 on
+refused connections (68 % / 10 % errors at 82–84 % CPU) and at 47,000 on p95 (1.07 s at 85 % CPU, 0 errors); 53,000+
+failed the 2-minute probe. Its cgroup memory peaked at 1.6 GB.
 
 **Connection collapses in scored entries' failing probes.** v-epoll-i098 #191: 270,000 passed the 2-minute probe but
 failed the 5-minute hold with 60 % errors, nearly all `connection refused` from mid-hold on (an earlier attempt at
@@ -623,7 +623,8 @@ committed in this repo.
   timeout and passed 42/42 (row above).
 - **Go fasthttp #344** (`3159a41`) — CI test failed 41/42 (a like on a missing post got 201, not 404): `build.sh` sets
   `CGO_CFLAGS` (with `-DSQLITE_DEFAULT_FOREIGN_KEYS=1`) without `export`, so cgo never saw it and foreign keys stayed
-  off. Patch: `export CGO_CFLAGS=…`. The author's `e95e747` fixes it; that commit is queued for an unpatched run.
+  off. Patch: `export CGO_CFLAGS=…` (held 37,000). The author's `e95e747` fixes it and was re-run unpatched: 45,000
+  (row above).
 - **D #123** (vibe.d) — dropped before the run: fails test.sh (HTML default 404 body; a bad `sub` crashes with 500).
 
 ## Rule flags from code review (nothing malicious found; please fix in a follow-up PR)

@@ -357,7 +357,11 @@ class Server {
     pub bool $feedBatchAuthors = false;
     pub bool $feedBatchUsers = false;
     pub bool $postSendBuilder = false;
+    pub bool $feedRawDecode = false;
     pub bool $sparseBufs = false;
+    pub bool $retryingWrites = false;
+    pub int $persistedPending = 0;
+    pub int $writeWaitMs = 1;
     pub int $reqs = 0;
     pub int $reqsBase = 0;
 
@@ -384,6 +388,11 @@ class Server {
         if ($sec === false || $sec == "") { $sec = "twelve-dollar-challenge"; }
         $this->secret = $sec;
         $this->jwtVerifier = jwt_verifier_new($sec);
+        $batchWaitEnv = getenv("HPHP_WRITE_WAIT_MS");
+        if ($batchWaitEnv != "") {
+            $batchWait = intval($batchWaitEnv);
+            if ($batchWait >= 0 && $batchWait <= 10) { $this->writeWaitMs = $batchWait; }
+        }
         $this->postSendBuilder = (getenv("HPHP_POST_SB") == "1");
         if (getenv("HPHP_STATS") == "1") { $this->statsmode = true; }
         $idleEnv = getenv("HPHP_IDLE_TIMEOUT");
@@ -400,7 +409,10 @@ class Server {
             return false;
         }
         $this->db = $db;
-        sqlite_busy_timeout($db, 5000);
+        /* With the background checkpoint path, let the event loop retry
+         * SQLITE_BUSY on its next turn instead of sleeping here. */
+        if ($bgCheckpoint) { sqlite_busy_timeout($db, 0); }
+        else { sqlite_busy_timeout($db, 5000); }
         sqlite_exec($db, "PRAGMA journal_mode=WAL");
         sqlite_exec($db, "PRAGMA synchronous=NORMAL");
         /* Both connections use SQLite's default unix VFS so they see the same
@@ -413,7 +425,19 @@ class Server {
         sqlite_exec($db, "PRAGMA foreign_keys=OFF");
         if ($bgCheckpoint) {
             sqlite_exec($db, "PRAGMA wal_autocheckpoint=0");
-            if (!sqlite_bg_checkpoint_start($db, $path, 4096, 250)) {
+            $ckptFrames = 4096;
+            $ckptFramesEnv = getenv("HPHP_CKPT_FRAMES");
+            if ($ckptFramesEnv != "") {
+                $ckptFramesSet = intval($ckptFramesEnv);
+                if ($ckptFramesSet >= 32 && $ckptFramesSet <= 16384) { $ckptFrames = $ckptFramesSet; }
+            }
+            $ckptHoldMs = 250;
+            $ckptHoldEnv = getenv("HPHP_CKPT_HOLD_MS");
+            if ($ckptHoldEnv != "") {
+                $ckptHoldSet = intval($ckptHoldEnv);
+                if ($ckptHoldSet >= 1 && $ckptHoldSet <= 1000) { $ckptHoldMs = $ckptHoldSet; }
+            }
+            if (!sqlite_bg_checkpoint_start($db, $path, $ckptFrames, $ckptHoldMs)) {
                 echo "fatal: cannot start SQLite background checkpoint worker\n";
                 return false;
             }
@@ -540,6 +564,14 @@ class Server {
          * the full reuseport group before the runtime arms its accept batch. */
         foreach ($this->listeners as $ls) {
             stream_set_nodelay($ls);
+            /* Keep idle keep-alives cheap in kernel memory. On Linux these
+             * listener settings are inherited by accepted direct sockets;
+             * Linux doubles the requested values for accounting. */
+            if (getenv("HPHP_SOCKET_BUFFERS") != "0") {
+                if (!stream_set_socket_buffers($ls, 4096, 8192)) {
+                    echo "warning: could not cap TCP socket buffers\n";
+                }
+            }
             iarr_set($this->listenerIds, $ls, 1);
             epoll_add($ls);
         }
@@ -591,6 +623,7 @@ class Server {
         /* A/B knob: HPHP_FEED=json forces the native JSON1 feed query instead
          * of the VM B-tree walk (operator measurement, unset in the bench). */
         $this->feedjson = (getenv("HPHP_FEED") == "json");
+        $this->feedRawDecode = (getenv("HPHP_FEED_RAW") == "1");
         $this->feedBatchAuthors = (getenv("HPHP_FEED_BATCH_AUTHORS") == "1");
         $this->feedBatchUsers = (getenv("HPHP_FEED_BATCH_USERS") == "1");
         /* The hot path does not need one empty PHP-array entry per idle
@@ -667,16 +700,20 @@ class Server {
              * by scope_end(): no per-request malloc survives the round. */
             scope_begin();
 
-            if ($this->fdArrays) { epoll_wait_iarr2($this->readyIds, $this->writableIds, 50); }
-            else { epoll_wait2($this->ready, $this->writable, 50); }
+            $pollWaitMs = 50;
+            if ($this->retryingWrites) { $pollWaitMs = 1; }
+            if ($this->fdArrays) { epoll_wait_iarr2($this->readyIds, $this->writableIds, $pollWaitMs); }
+            else { epoll_wait2($this->ready, $this->writable, $pollWaitMs); }
             $this->handle_ready();
             /* A transaction has a fixed cost; when only a few writes are
-             * pending, wait up to a millisecond for more requests before
+             * pending, wait briefly for more requests before
              * committing. That batches them without hurting the tail much. */
             $n = count($this->pending);
-            if ($n > 0 && $n < 32) {
-                if ($this->fdArrays) { epoll_wait_iarr2($this->readyIds, $this->writableIds, 1); }
-                else { epoll_wait2($this->ready, $this->writable, 1); }
+            if (!$this->retryingWrites && $n > 0 && $n < 32) {
+                if ($this->writeWaitMs > 0) {
+                    if ($this->fdArrays) { epoll_wait_iarr2($this->readyIds, $this->writableIds, $this->writeWaitMs); }
+                    else { epoll_wait2($this->ready, $this->writable, $this->writeWaitMs); }
+                }
                 $this->handle_ready();
             }
             $this->execute_writes();
@@ -687,6 +724,7 @@ class Server {
             /* Match Rust's batch-scoped B-tree snapshot and release the read
              * transaction before the next poll/checkpoint opportunity. */
             $this->close_bt_cursors();
+            if ($this->bgCheckpoint) { sqlite_bg_checkpoint_tick($this->db); }
 
             scope_end();
         }
@@ -1303,12 +1341,98 @@ class Server {
             $co: int = 0;
             $cl: int = 0;
             $p = bt_payload_ptr($this->btPosts);
-            if (bt_cols($this->btPosts) < 4) { break; }
-            $uid = bt_col_int(1);
-            $bo = bt_col_off(2);
-            $bl = bt_col_len(2);
-            $co = bt_col_off(3);
-            $cl = bt_col_len(3);
+            $rawOk = false;
+            if ($this->feedRawDecode && $p != 0) {
+                $psz = bt_payload_size($this->btPosts);
+                $bad = false;
+                unsafe {
+                    $q = $p as *u8;
+                    $k = 0;
+                    $hdr = 0;
+                    $vb = 0;
+                    $vn = 0;
+                    $headerDone = false;
+                    $st1 = 0;
+                    $st2 = 0;
+                    $st3 = 0;
+                    while ($vn < 5 && $k < $psz) {
+                        $vb = *($q + $k) & 255;
+                        $k = $k + 1;
+                        $hdr = ($hdr << 7) | ($vb & 127);
+                        $vn = $vn + 1;
+                        if ($vb < 128) { $headerDone = true; break; }
+                    }
+                    if (!$headerDone || $hdr < $k || $hdr > $psz) { $bad = true; }
+                    /* posts.id is an INTEGER PRIMARY KEY, stored as NULL in
+                     * the record; columns 1..3 are uid/body/created_at. */
+                    if (!$bad) {
+                        if ($k >= $hdr || (*($q + $k) & 255) != 0) { $bad = true; }
+                    }
+                    if (!$bad) {
+                        $k = $k + 1;
+                        if ($k >= $hdr) { $bad = true; }
+                    }
+                    if (!$bad) {
+                        $st1 = *($q + $k) & 255;
+                        $k = $k + 1;
+                        if ($k >= $hdr) { $bad = true; }
+                    }
+                    if (!$bad) {
+                        $st2 = *($q + $k) & 255;
+                        $k = $k + 1;
+                        if ($st2 >= 128) {
+                            if ($k >= $hdr) { $bad = true; }
+                            else {
+                                $vb = *($q + $k) & 255;
+                                $st2 = (($st2 & 127) << 7) | ($vb & 127);
+                                $k = $k + 1;
+                                if ($vb >= 128) { $bad = true; }
+                            }
+                        }
+                        if ($k >= $hdr) { $bad = true; }
+                        if (!$bad) { $st3 = *($q + $k) & 255; $k = $k + 1; }
+                        if ($st3 >= 128) {
+                            if ($k >= $hdr) { $bad = true; }
+                            else {
+                                $vb = *($q + $k) & 255;
+                                $st3 = (($st3 & 127) << 7) | ($vb & 127);
+                                $k = $k + 1;
+                                if ($vb >= 128) { $bad = true; }
+                            }
+                        }
+                        if ($k != $hdr || $st2 < 13 || ($st2 & 1) == 0 ||
+                            $st3 < 13 || ($st3 & 1) == 0) { $bad = true; }
+                        if (!$bad) {
+                            $l1 = 0;
+                            if ($st1 >= 1 && $st1 <= 4) { $l1 = $st1; }
+                            else if ($st1 == 5) { $l1 = 6; }
+                            else if ($st1 == 6) { $l1 = 8; }
+                            else if ($st1 == 9) { $uid = 1; }
+                            else if ($st1 != 8) { $bad = true; }
+                            $o1 = $hdr;
+                            $bl = ($st2 - 13) >> 1;
+                            $bo = $o1 + $l1;
+                            $cl = ($st3 - 13) >> 1;
+                            $co = $bo + $bl;
+                            if ($bo + $bl > $psz || $co + $cl > $psz) { $bad = true; }
+                            $j = 0;
+                            while (!$bad && $j < $l1) {
+                                $uid = ($uid << 8) | (*($q + $o1 + $j) & 255);
+                                $j = $j + 1;
+                            }
+                        }
+                    }
+                }
+                if (!$bad) { $rawOk = true; }
+            }
+            if (!$rawOk) {
+                if (bt_cols($this->btPosts) < 4) { break; }
+                $uid = bt_col_int(1);
+                $bo = bt_col_off(2);
+                $bl = bt_col_len(2);
+                $co = bt_col_off(3);
+                $cl = bt_col_len(3);
+            }
 
             /* every like whose post id equals this one: they are contiguous */
             $cnt = 0;
@@ -1539,6 +1663,12 @@ class Server {
     public function on_stats(int $fd): void {
         $rt = runtime_stats();
         $body = '{"interval":{"reqs":' . ($this->reqs - $this->reqsBase)
+              . '},"server":{"connections":' . $this->nconn
+              . ',"shed_at":' . $this->shedAt
+              . ',"paused":' . $this->paused
+              . ',"listeners":' . count($this->listeners)
+              . ',"pending_writes":' . count($this->pending)
+              . ',"pending_responses":' . count($this->out)
               . '},"runtime":' . $rt . '}';
         $this->reqsBase = $this->reqs;
         $this->send_json($fd, 200, $body);
@@ -1736,15 +1866,29 @@ class Server {
     }
 
     public function execute_writes(): void {
-        if ($this->bgCheckpoint && sqlite_bg_checkpoint_hold($this->db)) { return; }
         $n = count($this->pending);
         if ($n == 0) { return; }
+        if ($this->bgCheckpoint && sqlite_bg_checkpoint_hold($this->db)) {
+            /* A checkpoint can defer this batch across poll cycles. Strings
+             * copied from the current request live only until scope_end(),
+             * while $pending survives. Move deferred post fields to heap
+             * storage before leaving this scope. */
+            $this->persist_pending_posts();
+            $this->retryingWrites = true;
+            return;
+        }
 
         /* Close low-level cursors before SQLite writes; reopen after commit or
          * rollback so no cursor position is retained across mutations. */
         $this->close_bt_cursors();
         if (!$this->txn($this->beginTx)) {
-            $this->fail_writes("begin", sqlite_errmsg($this->db));
+            if (sqlite_is_lock_error($this->db)) {
+                $this->persist_pending_posts();
+                $this->retryingWrites = true;
+                return;
+            }
+            $beginCode = sqlite_extended_errcode($this->db);
+            $this->fail_writes("begin", sqlite_errmsg($this->db), $beginCode);
             $this->flush();
             return;
         }
@@ -1752,6 +1896,7 @@ class Server {
         $ok = true;
         $failWhere = "";
         $failDetail = "";
+        $failCode = 0;
         $i = 0;
         while ($i < $n) {
             $r = $this->pending[$i];
@@ -1762,6 +1907,7 @@ class Server {
                 if ($rc != 100) {
                     $failWhere = "insert post";
                     $failDetail = sqlite_errmsg($this->db);
+                    $failCode = sqlite_extended_errcode($this->db);
                     /* sqlite3_step errors leave the statement active until it
                      * is reset; do that before rolling back the batch. */
                     sqlite_reset($this->insPost);
@@ -1775,6 +1921,7 @@ class Server {
                 if ($done != 101) {
                     $failWhere = "finish post insert";
                     $failDetail = sqlite_errmsg($this->db);
+                    $failCode = sqlite_extended_errcode($this->db);
                 }
                 sqlite_reset($this->insPost);
                 sqlite_clear_bindings($this->insPost);
@@ -1806,6 +1953,7 @@ class Server {
                 if ($rc != 101 && $rc != 100) {
                     $failWhere = "insert like";
                     $failDetail = sqlite_errmsg($this->db);
+                    $failCode = sqlite_extended_errcode($this->db);
                 }
                 sqlite_reset($this->insLike);
                 sqlite_clear_bindings($this->insLike);
@@ -1819,6 +1967,7 @@ class Server {
                     if ($hc != 100 && $hc != 101) {
                         $failWhere = "check liked post";
                         $failDetail = sqlite_errmsg($this->db);
+                        $failCode = sqlite_extended_errcode($this->db);
                     }
                     sqlite_reset($this->hasPost);
                     sqlite_clear_bindings($this->hasPost);
@@ -1840,16 +1989,47 @@ class Server {
             $ok = false;
             $failWhere = "commit";
             $failDetail = sqlite_errmsg($this->db);
+            $failCode = sqlite_extended_errcode($this->db);
         }
         if (!$ok) {
+            /* Capture the SQLite lock error before ROLLBACK overwrites the
+             * connection error code. The whole transaction is safe to retry
+             * because it has not committed. */
+            $retryLockError = sqlite_is_lock_error($this->db);
             $this->txn($this->rollbackTx);
-            $this->fail_writes($failWhere, $failDetail);
+            if ($retryLockError) {
+                $this->persist_pending_posts();
+                $this->retryingWrites = true;
+                return;
+            }
+            $this->fail_writes($failWhere, $failDetail, $failCode);
         }
         $this->flush();
     }
 
-    public function fail_writes(string $where, string $detail): void {
-        echo "sqlite write failure at " . $where . ": " . $detail . "\n";
+    public function persist_pending_posts(): void {
+        /* Pending requests outlive the current request scope while a SQLite
+         * lock/checkpoint clears. Copy request-backed strings before returning
+         * to the event loop so the next write attempt sees valid data. The
+         * queue only grows until flush(), so resume at the first unpersisted
+         * entry instead of rescanning the whole batch on each 1 ms retry. */
+        $n = count($this->pending);
+        $i = $this->persistedPending;
+        if ($i >= $n) { return; }
+        while ($i < $n) {
+            $r = $this->pending[$i];
+            if ($r["kind"] == 1) {
+                $r["text"] = str_persist($r["text"]);
+                $r["name"] = str_persist($r["name"]);
+                $this->pending[$i] = $r;
+            }
+            $i = $i + 1;
+        }
+        $this->persistedPending = $n;
+    }
+
+    public function fail_writes(string $where, string $detail, int $code): void {
+        echo "sqlite write failure at " . $where . " code=" . $code . ": " . $detail . "\n";
         $i = 0;
         $n = count($this->pending);
         while ($i < $n) {
@@ -1867,6 +2047,8 @@ class Server {
             arr_free($r);
         }
         arr_clear($this->pending);
+        $this->persistedPending = 0;
+        $this->retryingWrites = false;
     }
 
     /* ------------------------------------------------------ send side */

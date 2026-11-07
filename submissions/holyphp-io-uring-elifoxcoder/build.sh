@@ -42,17 +42,36 @@ done
 #    and owned by the event-loop thread. Falls back to the system library if
 #    the download or build fails, so an offline box still produces a server.
 SQLITE_VER="${HPHP_SQLITE_VERSION:-3460100}"
-SQLITE_THREADSAFE="${HPHP_SQLITE_THREADSAFE:-1}"
+SQLITE_THREADSAFE="${HPHP_SQLITE_THREADSAFE:-2}"
 SQLITE_YEAR="${HPHP_SQLITE_YEAR:-2024}"
 SQLITE_SHA="${HPHP_SQLITE_SHA:-77823cb110929c2bcb0f5d48e4833b5c59a8a6e40cdea3936b99e199dbbe5784}"
 SQLITE_EXTRA_DEFS=()
-if [[ -n "${HPHP_SQLITE_DEFINES:-}" ]]; then
+# Use the low-overhead SQLite build settings used by the Rust leader without
+# changing SQL syntax or SQLite's default pragma behavior. Set
+# HPHP_SQLITE_DEFINES to replace this list for other configurations.
+if [[ ${HPHP_SQLITE_DEFINES+x} ]]; then
   SQLITE_DEFS=()
   read -r -a SQLITE_DEFS <<< "$HPHP_SQLITE_DEFINES"
-  for def in "${SQLITE_DEFS[@]}"; do
-    SQLITE_EXTRA_DEFS+=("-D$def")
-  done
+else
+  SQLITE_DEFS=(
+    SQLITE_DEFAULT_MEMSTATUS=0
+    SQLITE_OMIT_PROGRESS_CALLBACK
+    SQLITE_OMIT_SHARED_CACHE
+    SQLITE_OMIT_LOAD_EXTENSION
+    SQLITE_OMIT_AUTOINIT
+    SQLITE_OMIT_UTF16
+    SQLITE_OMIT_TRACE
+    SQLITE_OMIT_COMPLETE
+    SQLITE_OMIT_GET_TABLE
+    SQLITE_OMIT_TCL_VARIABLE
+    SQLITE_USE_ALLOCA
+    HAVE_FDATASYNC=1
+    HAVE_USLEEP=1
+  )
 fi
+for def in "${SQLITE_DEFS[@]}"; do
+  SQLITE_EXTRA_DEFS+=("-D$def")
+done
 SQLITE_ZIP="sqlite-amalgamation-$SQLITE_VER.zip"
 SQLITE_URL="https://www.sqlite.org/$SQLITE_YEAR/$SQLITE_ZIP"
 SQLITE_DIR="$BUILD/sqlite"

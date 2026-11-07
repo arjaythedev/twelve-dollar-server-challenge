@@ -81,9 +81,9 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | 11 | lean-verified-soonhokong | #286 | Lean 4 (verified handlers, io_uring, SQLite B-tree reads) | **270,000** | 25,856 | 40.2 | 282.8 | 0.00 | 74 | 26 | 954 | 2026-11-05 |
 | 11 | rust-iouring-tbsvttr | #323 | Rust (io_uring, SQLite B-tree reads) | **270,000** ᵟ | 25,818 | 97.5 | 294.2 | 0.00 | 81 | 28 | 1,307 | 2026-11-05 |
 | 11 | fortran-iouring-oh-meh | #332 | Fortran (io_uring, SQLite B-tree reads) | **270,000** | 25,823 | 189.9 | 720.5 | 0.00 | 85 | 30 | 1,041 | 2026-11-06 |
-| 17 | rust-epoll-scooter1337 | #82 | Rust (io_uring) | **264,000** ˣ | 25,147 | 259 | 499 | 0.00 | 84 | 30 | 630 | 2026-10-21 |
-| 18 | csharp-kestrel-mbobka | #316 | C# (.NET 10 ReadyToRun, Kestrel host, io_uring) | **260,000** | 24,980 | 134 | 286 | 0.00 | 82 | 30 | 692 | 2026-11-05 |
-| 18 | go-iouring-trungdlp | #339 | Go (io_uring, cgo SQLite B-tree reads) | **260,000** | 24,933 | 104.5 | 280.0 | 0.00 | 82 | 30 | 694 | 2026-11-06 |
+| 11 | go-iouring-trungdlp | #343 | Go (io_uring, cgo SQLite B-tree reads) | **270,000** ᶿ | 25,841 | 99.5 | 246.0 | 0.00 | 81 | 28 | 736 | 2026-11-07 |
+| 18 | rust-epoll-scooter1337 | #82 | Rust (io_uring) | **264,000** ˣ | 25,147 | 259 | 499 | 0.00 | 84 | 30 | 630 | 2026-10-21 |
+| 19 | csharp-kestrel-mbobka | #316 | C# (.NET 10 ReadyToRun, Kestrel host, io_uring) | **260,000** | 24,980 | 134 | 286 | 0.00 | 82 | 30 | 692 | 2026-11-05 |
 | 20 | v-epoll-i098 | #191 | V (io_uring, SQLite B-tree reads) | **257,000** ᵂ | 24,766 | 13.5 | 29 | 0.00 | 74 | 27 | 732 | 2026-10-30 |
 | 20 | c-iouring-oix7 | #296 | C (io_uring, SQLite B-tree reads) | **257,000** | 24,654 | 239 | 796 | 0.00 | 76 | 28 | 905 | 2026-11-04 |
 | 20 | swift-iouring-c2p-cmd | #314 | Swift (io_uring, SQLite B-tree reads) | **257,000** ⁱ | 24,737 | 55.9 | 163.6 | 0.00 | 76 | 28 | 675 | 2026-11-05 |
@@ -410,6 +410,10 @@ pages, 4 ms batch window, smaller socket buffers; held, not merged: it didn't be
 (23,181 req/s, p95 103.5 / p99 735.0 ms, 0 err, 77 % CPU, 30 µs/req, 686 MB, 2026-11-07). 250,000 failed the 2-minute
 probe on p99 (9.96 s at 83 % CPU, 0 errors); 260,000 / 280,000 / 320,000 collapsed on refused connections (58 % / 21 % /
 74 % errors).
+
+ᶿ **go-iouring-trungdlp** is scored at its follow-up PR **#343** (`39efd02`, merged: PCACHE2 page-cache wrapper,
+per-request C JSON, build flags, 1 ms batch window); 280,000 failed the 2-minute probe on p99 (2.73 s at 86 % CPU,
+0 errors). Its merged #339 code held **260,000** (24,933 req/s, p95 104.5 / p99 280.0 ms, 82 % CPU, 2026-11-06).
 
 **Connection collapses in scored entries' failing probes.** v-epoll-i098 #191: 270,000 passed the 2-minute probe but
 failed the 5-minute hold with 60 % errors, nearly all `connection refused` from mid-hold on (an earlier attempt at

@@ -1876,7 +1876,7 @@ class Server {
          * rollback so no cursor position is retained across mutations. */
         $this->close_bt_cursors();
         if (!$this->txn($this->beginTx)) {
-            if (sqlite_is_busy($this->db)) {
+            if (sqlite_is_lock_error($this->db)) {
                 $this->persist_pending_posts();
                 return;
             }
@@ -1978,12 +1978,12 @@ class Server {
             $failDetail = sqlite_errmsg($this->db);
         }
         if (!$ok) {
-            /* Capture SQLITE_BUSY before ROLLBACK overwrites the connection's
-             * last error code with SQLITE_OK. The whole transaction is safe to
-             * retry because it has not committed. */
-            $retryBusy = sqlite_is_busy($this->db);
+            /* Capture the SQLite lock error before ROLLBACK overwrites the
+             * connection error code. The whole transaction is safe to retry
+             * because it has not committed. */
+            $retryLockError = sqlite_is_lock_error($this->db);
             $this->txn($this->rollbackTx);
-            if ($retryBusy) {
+            if ($retryLockError) {
                 $this->persist_pending_posts();
                 return;
             }

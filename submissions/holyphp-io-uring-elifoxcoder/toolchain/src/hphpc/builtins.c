@@ -950,7 +950,7 @@ void builtins_init(void) {
     add("sqlite_changes",       B_MISC, ty_int,    false, false);
     add("sqlite_last_insert_rowid", B_MISC, ty_int, false, false);
     add("sqlite_errmsg",        B_MISC, ty_string, false, false);
-    add("sqlite_is_busy",       B_MISC, ty_bool,   false, false);
+    add("sqlite_is_lock_error", B_MISC, ty_bool,   false, false);
     add("sqlite_busy_timeout",  B_MISC, ty_bool,   false, false);
 }
 

@@ -1130,7 +1130,7 @@ hval hpbi_sqlite_column_int(hval stmt, hval col);
 hval hpbi_sqlite_changes(hval db);
 hval hpbi_sqlite_last_insert_rowid(hval db);
 hval hpbi_sqlite_errmsg(hval db);
-hval hpbi_sqlite_is_busy(hval db);
+hval hpbi_sqlite_is_lock_error(hval db);
 hval hpbi_sqlite_busy_timeout(hval db, hval ms);
 
 /* ---- typed builtin fast paths (see hphp_std.c) ---- */

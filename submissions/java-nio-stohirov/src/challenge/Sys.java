@@ -3,9 +3,7 @@ package challenge;
 import static java.lang.foreign.ValueLayout.ADDRESS;
 import static java.lang.foreign.ValueLayout.JAVA_BYTE;
 import static java.lang.foreign.ValueLayout.JAVA_INT;
-import static java.lang.foreign.ValueLayout.JAVA_INT_UNALIGNED;
 import static java.lang.foreign.ValueLayout.JAVA_LONG;
-import static java.lang.foreign.ValueLayout.JAVA_LONG_UNALIGNED;
 import static java.lang.foreign.ValueLayout.JAVA_SHORT;
 
 import java.lang.foreign.Arena;
@@ -20,25 +18,16 @@ import java.net.Inet6Address;
 import java.net.InetAddress;
 import java.nio.ByteOrder;
 
-/** Linux sockets and epoll through FFM: the server's I/O without SocketChannel or Selector. Single-threaded. */
+/** The system calls the server makes through FFM: listen sockets, io_uring and thread priority. */
 final class Sys {
     // Linux values, the same on x86_64 and aarch64.
-    static final int AF_INET = 2, AF_INET6 = 10, SOCK_STREAM = 1, SOCK_NONBLOCK = 0x800, SOCK_CLOEXEC = 0x80000;
-    static final int SOL_SOCKET = 1, SO_REUSEADDR = 2, SO_LINGER = 13, IPPROTO_TCP = 6, TCP_NODELAY = 1;
-    static final int EPOLL_CLOEXEC = 0x80000, EPOLL_CTL_ADD = 1, EPOLL_CTL_MOD = 3;
-    static final int EPOLLIN = 0x1, EPOLLOUT = 0x4, EPOLLERR = 0x8, EPOLLHUP = 0x10;
-    static final int EINTR = 4, EAGAIN = 11, ENFILE = 23, EMFILE = 24, ECONNABORTED = 103;
-
-    // struct epoll_event is packed (12 bytes) on x86_64 and naturally aligned (16 bytes) elsewhere.
-    private static final boolean X86 = switch (System.getProperty("os.arch")) {
-        case "amd64", "x86_64" -> true;
-        default -> false;
-    };
-    static final int EVENT_SIZE = X86 ? 12 : 16;
-    private static final int EVENT_DATA = X86 ? 4 : 8;
+    private static final int AF_INET = 2, AF_INET6 = 10, SOCK_STREAM = 1, SOCK_CLOEXEC = 0x80000;
+    private static final int SOL_SOCKET = 1, SO_REUSEADDR = 2, SO_REUSEPORT = 15, IPPROTO_TCP = 6, TCP_NODELAY = 1;
+    private static final long SYS_IO_URING_SETUP = 425, SYS_IO_URING_ENTER = 426, SYS_IO_URING_REGISTER = 427;
+    private static final int PROT_READ_WRITE = 3, MAP_SHARED_POPULATE = 0x8001, PRIO_PROCESS = 0;
+    static final int EINTR = 4, EAGAIN = 11, EBUSY = 16, EINVAL = 22, ENFILE = 23, ETIME = 62, ENOBUFS = 105;
 
     private static final Linker LINKER = Linker.nativeLinker();
-    private static final Linker.Option CRITICAL = Linker.Option.critical(false);
     private static final Linker.Option ERRNO = Linker.Option.captureCallState("errno");
     private static final MemoryLayout STATE_LAYOUT = Linker.Option.captureStateLayout();
     private static final VarHandle ERRNO_VALUE =
@@ -49,28 +38,21 @@ final class Sys {
         return LINKER.downcallHandle(f, fd, options);
     }
 
-    private static final MethodHandle SOCKET =
-            fn("socket", FunctionDescriptor.of(JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT), ERRNO);
-    private static final MethodHandle SETSOCKOPT = fn("setsockopt",
-            FunctionDescriptor.of(JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT, ADDRESS, JAVA_INT), CRITICAL);
-    private static final MethodHandle BIND =
-            fn("bind", FunctionDescriptor.of(JAVA_INT, JAVA_INT, ADDRESS, JAVA_INT), ERRNO);
+    // syscall(2) is variadic. Every call passes all six arguments, and the kernel ignores the extras.
+    private static final MethodHandle SYSCALL = fn("syscall", FunctionDescriptor.of(JAVA_LONG, JAVA_LONG,
+            JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_LONG), ERRNO, Linker.Option.firstVariadicArg(1));
+    private static final MethodHandle MMAP = fn("mmap",
+            FunctionDescriptor.of(JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_LONG), ERRNO);
+    private static final MethodHandle SOCKET = fn("socket", FunctionDescriptor.of(JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT), ERRNO);
+    private static final MethodHandle SETSOCKOPT =
+            fn("setsockopt", FunctionDescriptor.of(JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT, ADDRESS, JAVA_INT), ERRNO);
+    private static final MethodHandle BIND = fn("bind", FunctionDescriptor.of(JAVA_INT, JAVA_INT, ADDRESS, JAVA_INT), ERRNO);
     private static final MethodHandle LISTEN = fn("listen", FunctionDescriptor.of(JAVA_INT, JAVA_INT, JAVA_INT), ERRNO);
-    private static final MethodHandle ACCEPT4 = fn("accept4",
-            FunctionDescriptor.of(JAVA_INT, JAVA_INT, ADDRESS, ADDRESS, JAVA_INT), CRITICAL, ERRNO);
-    private static final MethodHandle EPOLL_CREATE1 =
-            fn("epoll_create1", FunctionDescriptor.of(JAVA_INT, JAVA_INT), ERRNO);
-    private static final MethodHandle EPOLL_CTL =
-            fn("epoll_ctl", FunctionDescriptor.of(JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT, ADDRESS), CRITICAL);
-    // Blocks, so not critical: a GC must be able to run while the loop waits.
-    private static final MethodHandle EPOLL_WAIT =
-            fn("epoll_wait", FunctionDescriptor.of(JAVA_INT, JAVA_INT, ADDRESS, JAVA_INT, JAVA_INT), ERRNO);
-    private static final MethodHandle READ =
-            fn("read", FunctionDescriptor.of(JAVA_LONG, JAVA_INT, ADDRESS, JAVA_LONG), CRITICAL, ERRNO);
-    private static final MethodHandle WRITE =
-            fn("write", FunctionDescriptor.of(JAVA_LONG, JAVA_INT, ADDRESS, JAVA_LONG), CRITICAL, ERRNO);
-    private static final MethodHandle CLOSE = fn("close", FunctionDescriptor.of(JAVA_INT, JAVA_INT), CRITICAL);
+    private static final MethodHandle GETTID = fn("gettid", FunctionDescriptor.of(JAVA_INT));
+    private static final MethodHandle SETPRIORITY =
+            fn("setpriority", FunctionDescriptor.of(JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT));
 
+    // Only the event-loop thread uses these.
     private static final MemorySegment STATE = Arena.global().allocate(STATE_LAYOUT);
     private static final MemorySegment SCRATCH = Arena.global().allocate(64, 8);
 
@@ -82,93 +64,74 @@ final class Sys {
         return new IllegalStateException(t);
     }
 
-    /** errno of the last failed call made through a handle that captures it. */
+    /** errno of the last failed call. */
     static int errno() { return (int) ERRNO_VALUE.get(STATE, 0L); }
 
+    private static long syscall(long nr, long a, long b, long c, long d, long e, long f) {
+        try {
+            return (long) SYSCALL.invokeExact(STATE, nr, a, b, c, d, e, f);
+        } catch (Throwable t) { throw rethrow(t); }
+    }
+
+    static long uringSetup(int entries, MemorySegment params) {
+        return syscall(SYS_IO_URING_SETUP, entries, params.address(), 0, 0, 0, 0);
+    }
+
+    static long uringEnter(int fd, int toSubmit, int minComplete, int flags, long arg, long argSize) {
+        return syscall(SYS_IO_URING_ENTER, fd, toSubmit, minComplete, flags, arg, argSize);
+    }
+
+    static long uringRegister(int fd, int opcode, MemorySegment arg, int nr) {
+        return syscall(SYS_IO_URING_REGISTER, fd, opcode, arg.address(), nr, 0, 0);
+    }
+
+    static MemorySegment mapRing(int fd, long offset, long length) {
+        try {
+            long a = (long) MMAP.invokeExact(STATE, 0L, length, PROT_READ_WRITE, MAP_SHARED_POPULATE, fd, offset);
+            if (a == -1L) throw new IllegalStateException("mmap: errno " + errno());
+            return MemorySegment.ofAddress(a).reinterpret(length);
+        } catch (Throwable t) { throw rethrow(t); }
+    }
+
+    /**
+     * A blocking listener on a shared port: a non-blocking one would make io_uring fail an accept with
+     * EAGAIN instead of waiting for a connection. Accepted sockets inherit TCP_NODELAY, which matters
+     * because a direct descriptor has no fd to call setsockopt on.
+     */
     static int listen(InetAddress host, int port, int backlog) {
         boolean v6 = host instanceof Inet6Address;
-        int fd = socket(v6 ? AF_INET6 : AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC);
-        if (fd < 0) throw new IllegalStateException("socket: errno " + errno());
-        setInt(fd, SOL_SOCKET, SO_REUSEADDR, 1);
-        MemorySegment sa = SCRATCH.asSlice(0, v6 ? 28 : 16).fill((byte) 0);
-        sa.set(JAVA_SHORT, 0, (short) (v6 ? AF_INET6 : AF_INET));
-        sa.set(JAVA_SHORT.withOrder(ByteOrder.BIG_ENDIAN), 2, (short) port);
-        byte[] addr = host.getAddress();
-        MemorySegment.copy(addr, 0, sa, JAVA_BYTE, host instanceof Inet4Address ? 4 : 8, addr.length);
         try {
+            int fd = (int) SOCKET.invokeExact(STATE, v6 ? AF_INET6 : AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+            if (fd < 0) throw new IllegalStateException("socket: errno " + errno());
+            setInt(fd, SOL_SOCKET, SO_REUSEADDR);
+            setInt(fd, SOL_SOCKET, SO_REUSEPORT);
+            setInt(fd, IPPROTO_TCP, TCP_NODELAY);
+            MemorySegment sa = SCRATCH.asSlice(0, v6 ? 28 : 16).fill((byte) 0);
+            sa.set(JAVA_SHORT, 0, (short) (v6 ? AF_INET6 : AF_INET));
+            sa.set(JAVA_SHORT.withOrder(ByteOrder.BIG_ENDIAN), 2, (short) port);
+            byte[] addr = host.getAddress();
+            MemorySegment.copy(addr, 0, sa, JAVA_BYTE, host instanceof Inet4Address ? 4 : 8, addr.length);
             if ((int) BIND.invokeExact(STATE, fd, sa, (int) sa.byteSize()) != 0) {
                 throw new IllegalStateException("bind " + host.getHostAddress() + ":" + port + ": errno " + errno());
             }
             if ((int) LISTEN.invokeExact(STATE, fd, backlog) != 0) throw new IllegalStateException("listen: errno " + errno());
+            return fd;
         } catch (Throwable t) { throw rethrow(t); }
-        return fd;
     }
 
-    private static int socket(int domain, int type) {
-        try { return (int) SOCKET.invokeExact(STATE, domain, type, 0); } catch (Throwable t) { throw rethrow(t); }
+    private static void setInt(int fd, int level, int name) throws Throwable {
+        MemorySegment one = SCRATCH.asSlice(32, 4);
+        one.set(JAVA_INT, 0, 1);
+        if ((int) SETSOCKOPT.invokeExact(STATE, fd, level, name, one, 4) != 0) {
+            throw new IllegalStateException("setsockopt " + name + ": errno " + errno());
+        }
     }
 
-    static int setInt(int fd, int level, int name, int value) {
-        SCRATCH.set(JAVA_INT, 32, value);
+    /** Lowers the calling thread only: Linux nice values are per thread. */
+    static void lowestPriority() {
         try {
-            return (int) SETSOCKOPT.invokeExact(fd, level, name, SCRATCH.asSlice(32, 4), 4);
+            int tid = (int) GETTID.invokeExact();
+            int ignored = (int) SETPRIORITY.invokeExact(PRIO_PROCESS, tid, 19);
         } catch (Throwable t) { throw rethrow(t); }
-    }
-
-    /** SO_LINGER {on, 0 s}: close() then resets the connection instead of sending FIN, leaving no TIME_WAIT. */
-    static int lingerZero(int fd) {
-        SCRATCH.set(JAVA_INT, 40, 1);
-        SCRATCH.set(JAVA_INT, 44, 0);
-        try {
-            return (int) SETSOCKOPT.invokeExact(fd, SOL_SOCKET, SO_LINGER, SCRATCH.asSlice(40, 8), 8);
-        } catch (Throwable t) { throw rethrow(t); }
-    }
-
-    static int accept(int fd) {
-        try {
-            return (int) ACCEPT4.invokeExact(STATE, fd, MemorySegment.NULL, MemorySegment.NULL, SOCK_NONBLOCK | SOCK_CLOEXEC);
-        } catch (Throwable t) { throw rethrow(t); }
-    }
-
-    static int epollCreate() {
-        try {
-            int ep = (int) EPOLL_CREATE1.invokeExact(STATE, EPOLL_CLOEXEC);
-            if (ep < 0) throw new IllegalStateException("epoll_create1: errno " + errno());
-            return ep;
-        } catch (Throwable t) { throw rethrow(t); }
-    }
-
-    /** Registers or changes fd's events; the event's data is the fd itself. */
-    static int epollCtl(int ep, int op, int fd, int events) {
-        MemorySegment ev = SCRATCH.asSlice(0, EVENT_SIZE);
-        ev.set(JAVA_INT_UNALIGNED, 0, events);
-        ev.set(JAVA_LONG_UNALIGNED, EVENT_DATA, fd);
-        try { return (int) EPOLL_CTL.invokeExact(ep, op, fd, ev); } catch (Throwable t) { throw rethrow(t); }
-    }
-
-    static int epollWait(int ep, MemorySegment events, int max, int timeoutMillis) {
-        try {
-            return (int) EPOLL_WAIT.invokeExact(STATE, ep, events, max, timeoutMillis);
-        } catch (Throwable t) { throw rethrow(t); }
-    }
-
-    static int eventFd(MemorySegment events, int i) {
-        return events.get(JAVA_INT_UNALIGNED, (long) i * EVENT_SIZE + EVENT_DATA);
-    }
-
-    static int eventFlags(MemorySegment events, int i) {
-        return events.get(JAVA_INT_UNALIGNED, (long) i * EVENT_SIZE);
-    }
-
-    static long read(int fd, MemorySegment buf, long n) {
-        try { return (long) READ.invokeExact(STATE, fd, buf, n); } catch (Throwable t) { throw rethrow(t); }
-    }
-
-    static long write(int fd, MemorySegment buf, long n) {
-        try { return (long) WRITE.invokeExact(STATE, fd, buf, n); } catch (Throwable t) { throw rethrow(t); }
-    }
-
-    static void close(int fd) {
-        try { int ignored = (int) CLOSE.invokeExact(fd); } catch (Throwable t) { throw rethrow(t); }
     }
 }

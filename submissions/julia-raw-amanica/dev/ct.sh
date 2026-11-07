@@ -14,8 +14,11 @@
 #   GEN=k6     (default) bench/load.js, the real user model. N = virtual users. Costs ~0.3 MB per user.
 #   GEN=blast  wrk with the same request mix and no think time. N = open connections. Cheap; measures
 #              max req/s (users estimated as req/s x 10.6).
+#   GEN=users  wrk with the same mix plus think time (3-16 s) per connection: N connections ~ N users.
+#              ~10 KB per user, so 100k+ users fit; shows connection limits (fds, memory).
 # Env: LABEL (free text for the CSV row), NOTES, CPUS (1), MEM (2g), RAMP_UP (30s, k6 only),
-#      WARMUP (5s, blast only), WRK_THREADS (4), SECCOMP (unconfined; "default" to test without io_uring).
+#      WARMUP (5s, blast only), WRK_THREADS (4, per wrk process), SHARDS (parallel wrk processes;
+#      default N / CONNS_PER_SHARD), CONNS_PER_SHARD (5000), SECCOMP (unconfined; "default" to test without io_uring).
 # Raw output of each run: results/<timestamp>-<gen><N>/ (gitignored). The CSV is committed.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
@@ -26,13 +29,13 @@ WRK_IMAGE=localhost/julia-raw-amanica-wrk
 K6_IMAGE="${K6_IMAGE:-docker.io/grafana/k6:2.3.0@sha256:2dd4756ec6e14e62778916e1eb850108e4b499304c02df56760fa0bdb0fba0b8}"
 GEN="${GEN:-k6}" CPUS="${CPUS:-1}" MEM="${MEM:-2g}" RAMP_UP="${RAMP_UP:-30s}" WARMUP="${WARMUP:-5s}"
 WRK_THREADS="${WRK_THREADS:-4}" LABEL="${LABEL:-dev}" NOTES="${NOTES:-}"
-case "$GEN" in k6|blast) ;; *) echo "GEN must be k6 or blast" >&2; exit 2 ;; esac
+case "$GEN" in k6|blast|users) ;; *) echo "GEN must be k6, blast or users" >&2; exit 2 ;; esac
 SEC=(); [ "${SECCOMP:-unconfined}" = unconfined ] && SEC=(--security-opt seccomp=unconfined)
 [ -f "$ROOT/seed/feed.db" ] || { echo "no seed/feed.db: run bash seed/make-seed.sh in $ROOT" >&2; exit 1; }
 
 image() {
   podman build -q -f "$HERE/dev/Containerfile" -t "$IMAGE" "$HERE" >/dev/null
-  [ "$GEN" = blast ] && podman build -q -f "$HERE/dev/Containerfile.wrk" -t "$WRK_IMAGE" "$HERE/dev" >/dev/null
+  [ "$GEN" != k6 ] && podman build -q -f "$HERE/dev/Containerfile.wrk" -t "$WRK_IMAGE" "$HERE/dev" >/dev/null
   true
 }
 box() {
@@ -41,19 +44,20 @@ box() {
 }
 
 # Samples every 2 s while the server container lives: server CPU % over the window (cgroup usage_usec
-# deltas), server cgroup memory (includes page cache), julia RSS, and the generator container's memory.
+# deltas), server cgroup memory (includes page cache), julia RSS, julia's open fds (~ connections + ~23),
+# and the generator container's memory.
 sampler() { # sampler <server> <generator>
   local srv="$1" g="$2" prev="" cur now_ns gm
   while podman container exists "$srv"; do
-    cur="$(podman exec "$srv" sh -c 'awk "/usage_usec/{print \$2}" /sys/fs/cgroup/cpu.stat; cat /sys/fs/cgroup/memory.current; ps -o rss= -C julia | head -1' 2>/dev/null | tr '\n' ' ')"
+    cur="$(podman exec "$srv" sh -c 'awk "/usage_usec/{print \$2}" /sys/fs/cgroup/cpu.stat; cat /sys/fs/cgroup/memory.current; p=$(pgrep -o julia); ps -o rss= -p $p; ls /proc/$p/fd | wc -l' 2>/dev/null | tr '\n' ' ')"
     now_ns="$(date +%s%N)"
     # shellcheck disable=SC2086
     set -- $cur
     if [ -n "$prev" ] && [ -n "${3:-}" ]; then
       # shellcheck disable=SC2086
-      set -- $prev "$@"     # prev_usec prev_ns usec mem rss
+      set -- $prev "$@"     # prev_usec prev_ns usec mem rss fds
       gm="$(podman stats --no-stream --format '{{.MemUsage}}' "$g" 2>/dev/null | cut -d' ' -f1)"
-      echo "$(date +%T) cpu=$(( ($3 - $1) * 100000 / (now_ns - $2) )) cgmem_mb=$(( $4 >> 20 )) rss_mb=$(( $5 >> 10 )) genmem=${gm:-?}"
+      echo "$(date +%T) cpu=$(( ($3 - $1) * 100000 / (now_ns - $2) )) cgmem_mb=$(( $4 >> 20 )) rss_mb=$(( $5 >> 10 )) fds=${6:-0} genmem=${gm:-?}"
       prev="$3 $now_ns"
     elif [ -n "${1:-}" ]; then
       prev="$1 $now_ns"
@@ -70,16 +74,39 @@ run_k6() { # run_k6 <server> <name> <n> <dur> <out>
     -e TOKENS=/seed/tokens.json --summary-export /out/summary.json /bench/load.js > "$5/k6.txt" 2>&1
 }
 
-run_blast() { # run_blast <server> <name> <n> <dur> <out>
-  local t="$WRK_THREADS"; [ "$3" -lt "$t" ] && t="$3"
-  local args=(--rm --name "$2" --network "container:$1" --ulimit nofile="$(ulimit -Hn)":"$(ulimit -Hn)"
-              -v "$HERE/dev/blast.lua:/blast.lua:ro" -v "$ROOT/seed/tokens.json:/seed/tokens.json:ro")
-  # warm-up (JIT, page cache), not recorded
-  podman run "${args[@]}" "$WRK_IMAGE" -t "$t" -c "$3" -d "$WARMUP" --timeout 10s -s /blast.lua \
-    http://127.0.0.1:3000 > "$5/wrk-warmup.txt" 2>&1 || true
-  podman run "${args[@]}" "$WRK_IMAGE" -t "$t" -c "$3" -d "$4" --timeout 10s -s /blast.lua \
-    http://127.0.0.1:3000 > "$5/wrk.txt" 2>&1
+secs() { case "$1" in *m) echo $(( ${1%m} * 60 ));; *s) echo "${1%s}";; *) echo "$1";; esac; }
+
+# Runs N connections as parallel wrk processes ("shards") inside one generator container. Each shard
+# targets its own 127.0.0.x (the server binds 0.0.0.0), so no (src, dst) pair runs out of ephemeral ports.
+# users: shard start times are spread over RAMP_UP (wrk opens all its connections at once), and all
+# shards end together. Output: <out>/shard-<i>.txt, merged by record.py.
+run_wrk() { # run_wrk <server> <name> <n> <dur> <out> <lua> <stagger 0|1>
+  local n="$3" per shards t dur_s ramp_s script i c off len
+  per="${CONNS_PER_SHARD:-5000}"
+  shards="${SHARDS:-$(( (n + per - 1) / per ))}"; [ "$shards" -lt 1 ] && shards=1
+  per=$(( (n + shards - 1) / shards ))
+  t="$WRK_THREADS"; [ "$per" -lt "$t" ] && t="$per"
+  dur_s="$(secs "$4")"; ramp_s=0; [ "$7" = 1 ] && ramp_s="$(secs "$RAMP_UP")"
+  script=""
+  for ((i = 0; i < shards; i++)); do
+    c=$(( i < shards - 1 ? per : n - per * (shards - 1) )); [ "$c" -lt 1 ] && break
+    off="$(awk "BEGIN{printf \"%.2f\", $ramp_s * $i / $shards}")"
+    len="$(awk "BEGIN{printf \"%d\", $ramp_s - $off + $dur_s}")"
+    script+="( sleep $off; exec wrk -t$(( c < t ? c : t )) -c$c -d${len}s --timeout 10s -s $6 http://127.0.0.$(( i % 250 + 1 )):3000 > /out/shard-$i.txt 2>&1 ) & "
+  done
+  script+="wait"
+  echo "   $shards shard(s) x ~$per connections, $t thread(s) each$([ "$7" = 1 ] && echo ", started over $RAMP_UP")"
+  podman run --rm --name "$2" --network "container:$1" --ulimit nofile="$(ulimit -Hn)":"$(ulimit -Hn)" \
+    -v "$HERE/dev/blast.lua:/blast.lua:ro" -v "$HERE/dev/users.lua:/users.lua:ro" \
+    -v "$ROOT/seed/tokens.json:/seed/tokens.json:ro" -v "$5:/out" --entrypoint sh "$WRK_IMAGE" -c "$script"
 }
+
+run_blast() { # warm-up (JIT, page cache) first, not recorded
+  mkdir -p "$5/warmup"
+  local d="$4"; set -- "$1" "$2" "$3" "$WARMUP" "$5/warmup"; run_wrk "$@" /blast.lua 0 >/dev/null
+  set -- "$1" "$2" "$3" "$d" "${5%/warmup}"; run_wrk "$@" /blast.lua 0
+}
+run_users() { run_wrk "$@" /users.lua 1; }
 
 # One run. Sets RUN_PASS=1/0.
 stress_run() { # stress_run <n> <duration>
@@ -134,6 +161,7 @@ report() { python3 -I "$HERE/dev/report.py" "$CSV" "$HERE/README.md"; }
 
 cmd="${1:-test}"; shift || true
 if [ "$GEN" = blast ]; then def_n=256 def_start=16 def_max=16384 def_dur=30s
+elif [ "$GEN" = users ]; then def_n=20000 def_start=10000 def_max=320000 def_dur=1m
 else def_n=1000 def_start=2500 def_max=320000 def_dur=1m; fi
 case "$cmd" in
   image) image; echo "$IMAGE" ;;

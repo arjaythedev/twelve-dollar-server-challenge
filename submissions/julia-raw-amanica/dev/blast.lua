@@ -49,4 +49,8 @@ function done(s, lat, req)
     '"err_write":%d,"err_timeout":%d,"p50_us":%d,"p95_us":%d,"p99_us":%d,"max_us":%d,"mean_us":%.1f}\n',
     s.requests, s.duration, s.errors.status, s.errors.connect, s.errors.read, s.errors.write,
     s.errors.timeout, lat:percentile(50), lat:percentile(95), lat:percentile(99), lat.max, lat.mean))
+  -- 200 latency quantiles (0.5% steps), so several wrk shards can be merged (GEN=users)
+  local q = {}
+  for i = 1, 200 do q[i] = string.format("%d", lat:percentile(i * 0.5)) end
+  io.write('BLAST_Q [' .. table.concat(q, ",") .. ']\n')
 end

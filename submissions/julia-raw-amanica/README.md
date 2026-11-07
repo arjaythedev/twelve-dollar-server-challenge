@@ -38,22 +38,30 @@ LABEL="what changed" dev/ct.sh stress 10000 1m    # one k6 run with 10k users �
 LABEL="what changed" dev/ct.sh ladder 2500 20000  # double users until a run fails, then bisect to within 5%
 GEN=blast LABEL="what changed" dev/ct.sh stress 256 30s  # cheap max-throughput run, 256 connections
 GEN=blast LABEL="what changed" dev/ct.sh ladder          # connections 16 → 16384 (mostly shows queueing, see caveats)
+GEN=users LABEL="what changed" dev/ct.sh stress 80000 1m # 80k users with think time: tests connection limits
+GEN=users LABEL="what changed" dev/ct.sh ladder         # users 10k → 320k
 dev/ct.sh report                                  # rebuild the results tables below from the CSV
 dev/ct.sh shell                                   # shell inside the Ubuntu 24.04 dev image
 ```
 
-Two load generators (`GEN`):
+Three load generators (`GEN`):
 
 | `GEN` | What it runs | N means | Cost | Use it for |
 |---|---|---|---|---|
 | `k6` (default) | `bench/load.js`, the scoring's user model, think time included | virtual users | ~0.3 MB per user: this 32 GB host tops out near 20k | latency under the real traffic shape |
 | `blast` | wrk + `dev/blast.lua`: the same request mix (feed 1 : post 1 : like 0.15 : create 0.02), no think time | open connections | a few MB | max req/s at 1 CPU, comparing optimizations |
+| `users` | wrk + `dev/users.lua`: the same mix, each connection pausing 3–16 s (mean 9.5 s, like load.js) | users (one connection each) | ~25 KB per user | many open connections: fd limit, per-connection memory, accept rate |
 
 Every run starts a fresh server on a fresh copy of the seed database (like the scoring), checks the same
 thresholds (p95 < 500 ms, p99 < 1 s, errors < 1%), samples server CPU / RSS every 2 s, and records the boot
 time (`start.sh` → first healthy `/health`). Raw output goes to `results/<time>-<gen><N>/` (gitignored).
 
-Other settings: `NOTES` (free text in the row), `RAMP_UP` (30s, k6), `WARMUP` (5s, blast), `WRK_THREADS` (4),
+wrk runs as several parallel processes (shards) in one generator container: `CONNS_PER_SHARD` (5000) or
+`SHARDS` sets how many, `WRK_THREADS` (4) the threads in each. Each shard connects to its own `127.0.0.x`
+(the server binds `0.0.0.0`), so one client address never runs out of its ~64k ephemeral ports. For `users`,
+shard start times are spread over `RAMP_UP`, because wrk opens all its connections at once.
+
+Other settings: `NOTES` (free text in the row), `RAMP_UP` (30s, k6 and users), `WARMUP` (5s, blast),
 `CPUS` / `MEM` (1 / 2g), `SECCOMP=default` (podman's default profile, which blocks io_uring).
 
 Caveats:
@@ -73,10 +81,11 @@ Caveats:
 <!-- results:begin -->
 Best local result per change. Raw runs: [stress-results.csv](stress-results.csv); how to run: above.
 Blast req/s (max throughput at 1 CPU) is the number to watch, with % change against the previous change.
-k6 users = highest passing run, not always a full ladder; this host caps k6 near 20k users.
+k6 / wrk users = highest passing run (not always a full ladder). k6 is capped near 20k users on this host;
+wrk users (`GEN=users`, think time per connection) are cheap, so they reach the connection limits.
 
-| change | k6 users | blast req/s |
-|---|--:|--:|
-| epoll baseline | 19,350 | – |
-| epoll + heap-hint 512M | 10,000 | 24,940 |
+| change | k6 users | wrk users | blast req/s |
+|---|--:|--:|--:|
+| epoll baseline | 19,350 | – | – |
+| epoll + heap-hint 512M | 10,000 | 60,000 | 24,940 |
 <!-- results:end -->

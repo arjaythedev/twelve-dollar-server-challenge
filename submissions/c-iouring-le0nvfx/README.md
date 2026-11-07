@@ -39,18 +39,6 @@ foreground and reads the challenge's `HOST`, `PORT`, `SQLITE_PATH`, and
   Accepted TCP sockets use the kernel's default send/receive buffer autotuning
   with `TCP_NODELAY`. An epoll implementation is available if io_uring is
   unavailable.
-- Ring 0 owns the timed wait. Secondary rings publish completions and signal
-  eventfds; multishot polls on ring 0 wake the loop, which drains every ring's
-  completion queue without entering each secondary ring to wait. Busy waits
-  request 64 completions with a 2-ms timeout, and idle waits use a 1-s timeout.
-  Ring 0 uses deferred task running while secondary rings post completions
-  normally. This eventfd-wait design follows the public approach in
-  [C io_uring #245](https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/245).
-- JWT verification precomputes the HMAC-SHA256 inner and outer pad states at
-  startup, then clones those states for each request. Every request still
-  verifies its signature and uses a constant-time comparison. This follows the
-  published key-schedule approach in
-  [rust-iouring-kensac #264](https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/264).
 - The B-tree traversal helpers in `src/btree_feed.h` are adapted from
   [c-iouring-pavlyhalim #245](https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/245).
 - Reads access the supplied SQLite database on each request. The feed and post
@@ -67,9 +55,8 @@ foreground and reads the challenge's `HOST`, `PORT`, `SQLITE_PATH`, and
 - Writes use WAL and `synchronous=NORMAL`. Multiple writes may share a SQLite
   transaction; affected responses are held until commit succeeds. A background
   checkpoint thread manages WAL growth, and the VFS coalesces WAL writes while
-  preserving SQLite's I/O barriers. After a complete checkpoint, the program
-  may use `posix_fadvise(POSIX_FADV_DONTNEED)` on a range of its own WAL file to
-  release clean cached pages; it does not change system-wide kernel settings.
+  preserving SQLite's I/O barriers. The program can advise the kernel to
+  release already-checkpointed WAL pages.
 
 The code makes no schema or index changes and does not modify kernel settings
 or pin CPUs. Dependency and source licenses are retained with the vendored

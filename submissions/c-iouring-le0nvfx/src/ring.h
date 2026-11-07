@@ -3,7 +3,6 @@
 
 #include <linux/io_uring.h>
 
-#include <stdbool.h>
 #include <stddef.h>
 #ifdef RING_DIAG
 #include <stdint.h>
@@ -31,8 +30,6 @@ typedef struct ring {
  * available CQEs.
  */
 int ring_init(ring *r, unsigned sq_entries, unsigned cq_entries);
-int ring_init_ex(ring *r, unsigned sq_entries, unsigned cq_entries,
-                 bool defer_taskrun);
 int ring_register_files_sparse(ring *r, unsigned slots);
 int ring_unregister_files(ring *r);
 int ring_clear_file(ring *r, unsigned slot);
@@ -51,8 +48,6 @@ int ring_flush_cq_overflow(ring *r);
 /* SQEs visible to userspace but not yet consumed by the kernel. */
 unsigned ring_sq_pending(ring *r);
 int ring_wait(ring *r, unsigned min_complete);
-/* Wait for min_complete CQEs, or return -ETIME after timeout_ms. */
-int ring_wait_timeout(ring *r, unsigned min_complete, unsigned timeout_ms);
 unsigned ring_cq_ready(ring *r);
 struct io_uring_cqe *ring_peek_cqe(ring *r);
 struct io_uring_cqe *ring_peek_cqe_at(ring *r, unsigned offset);

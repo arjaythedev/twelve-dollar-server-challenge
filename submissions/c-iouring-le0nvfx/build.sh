@@ -19,7 +19,7 @@ if [[ ! -f "$openssl_dir/libcrypto.a" ]]; then
 fi
 cc -O3 -DNDEBUG -flto -fno-plt -fomit-frame-pointer -march=x86-64-v3 \
   -Wall -Wextra -Wshadow -Wno-unused-function -Wno-unused-variable \
-  -Wno-unused-but-set-variable -std=gnu11 -pthread -DRING_WAL_FADVISE \
+  -Wno-unused-but-set-variable -std=gnu11 -pthread -DRING_WAL_FADVISE_TEST \
   -DSQLITE_THREADSAFE=2 -DSQLITE_DEFAULT_MEMSTATUS=0 \
   -DSQLITE_DEFAULT_WAL_SYNCHRONOUS=1 -DSQLITE_OMIT_PROGRESS_CALLBACK \
   -DSQLITE_OMIT_SHARED_CACHE -DSQLITE_OMIT_DEPRECATED \

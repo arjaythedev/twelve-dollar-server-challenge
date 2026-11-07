@@ -10,9 +10,9 @@ the same 42 checks. Everything is built from source on the box.
 |---|---|
 | Language / compiler | C11, gcc 13 (Ubuntu 24.04 `build-essential`), `-O3 -march=native`, PGO |
 | Database | SQLite **3.54.1** amalgamation, downloaded and sha256-pinned by `build.sh`, unmodified, compiled into the binary |
-| HTTP | our [cursed-http-parser](https://github.com/public/cursed-http-parser) at commit `3be7fd3` (MIT), vendored in `third_party/` and checked against its pin by `build.sh`: `fastparse.h` regenerated from `gen/spec.json` by its `gen/httpgen.py`, `batchparse.h` (lane-parallel batch parsing) and `fbparse.h` (SIMD general parser with picohttpparser `465a7ff`'s API and identical validation) as the slow path; others selectable at build time (below) |
+| HTTP | our [cursed-http](https://github.com/public/cursed-http) at commit `be52489` (MIT), vendored in `third_party/` and checked against its pin by `build.sh`: `fastparse.h` regenerated from `gen/spec.json` by its `gen/httpgen.py`, `batchparse.h` (lane-parallel batch parsing) and `fbparse.h` (SIMD general parser with picohttpparser `465a7ff`'s API and identical validation) as the slow path; others selectable at build time (below) |
 | Event loop | own, io_uring via raw syscalls (no liburing). Needs Linux ≥ 6.1; 6.8 is the target |
-| JWT | our [cursed-jwt](https://github.com/public/cursed-jwt) at commit `6f92f71` (MIT), vendored in `third_party/` and checked against its pin by `build.sh`: batch HS256, multi-buffer HMAC-SHA256 with the engine picked at run time (AVX-512VL on ymm, AVX2, ARMv8 SHA2, NEON or scalar); on x86-64 Linux single tokens use OpenSSL's extracted SHA-256 block function (Apache-2.0, in that repo) |
+| JWT | our [cursed-jwt](https://github.com/public/cursed-jwt) at commit `74f62ce` (MIT), vendored in `third_party/` and checked against its pin by `build.sh`: batch HS256, multi-buffer HMAC-SHA256 with the engine picked at run time (AVX-512VL on ymm, AVX2, ARMv8 SHA2, NEON or scalar); on x86-64 Linux single tokens use OpenSSL's extracted SHA-256 block function (Apache-2.0, in that repo) |
 
 **Direct mode: no Nginx.** Listen on `HOST:PORT` (e.g. `0.0.0.0:80`).
 
@@ -45,7 +45,7 @@ locking, scalar JWT, picohttpparser for every request.
 | Variable | Cursed (default, submitted) | Boring |
 |---|---|---|
 | `SQLITE_LINK` | `unity`: `components/engine.c` `#include`s `sqlite3.c`, one unit, so it can use SQLite's internals | `separate`: `sqlite3.c` is its own unit, and `src/engine_public.c` uses only the public API (`sqlite3.h`). The build checks that no other SQLite symbol is referenced. Needs the `sql` / `stock` / `sqlite` or `inline` / `keep` values below |
-| `DB_READS` | `direct`: reads through SQLite's own B-tree cursors | `sql`: the spec's prepared SELECTs |
+| `DB_READS` | `turbo`: the spec's prepared feed and post SELECTs, run by our [cursed-sqlite-turbo](https://github.com/public/cursed-sqlite-turbo) at commit `f748f0b` (vendored, pinned), whose plans write the JSON body. It is compiled after SQLite 3.54.1's own `sqlite3.c`, unmodified (`QC_STOCK=1`, no generated copies), and any statement it can't reproduce exactly runs in SQLite's interpreter. Or `direct`: reads through SQLite's own B-tree cursors (#158's default) | `sql`: the spec's prepared SELECTs |
 | `DB_VFS` | `cursed`: WAL write-coalescing and file-size-cache shim | `stock`: SQLite's unix VFS |
 | `DB_CKPT` | `thread`: SQLite's own `sqlite3_wal_checkpoint_v2` from a checkpoint thread on a second connection, in passes of 1,024 WAL frames, with a write gate at 8,192 frames (32 MB); checkpointed WAL pages are dropped from the page cache, `SQLITE_THREADSAFE=2`. Or `bounded`: SQLite's own RESTART checkpoint on the event loop every 16,384 WAL frames, after the batch's replies are submitted; the WAL is reused in place, no write gate, `SQLITE_THREADSAFE=0` (Rust #82's checkpoint style, with a 4× larger mark); `uring`: the engine runs SQLite's checkpoint step itself, as a state machine on the event loop's io_uring, with a write gate; `inline`: PASSIVE after the replies. `CURSED=boring` refuses `uring` | `sqlite`: SQLite's autocheckpoint |
 | `DB_WAL_DROP` | `drop` with `thread` / `uring`: checkpointed WAL pages are dropped from the page cache, and the WAL is truncated at restart; `keep` with `bounded` (its ~64 MB WAL stays hot) | `keep` |
@@ -139,7 +139,7 @@ the code by `tools/knobs.py`; the `CURSED_*` and `LOOP_TEST_*` variables exist f
 | `CURSED_CKPT_FRAMES` | 1024 (thread) / 4096 (uring) / 16384 (bounded, inline) | checkpoint pass size in WAL frames. Bounded's 16384 (was 4096): each pass stalls the loop about as long whatever the mark, so 4× fewer passes held 17.5k vs 15.5k req/s at p99 < 1 s, loop busy 86–87 vs 93–95 % at 14.5k, p95 98–113 vs 131 ms, p99 ≤ 20 ms worse, same µs/request, +48 MB page cache (Xeon, one CPU) |
 | `CURSED_CKPT_THREAD` | 1 in thread mode | thread mode only. 1: checkpoint from the background thread; 0: inline |
 | `CURSED_CKPT_RESTART` | 8192 (thread) / 32768 (uring) | the write gate's drain mark (WAL frames): new POSTs wait while the WAL is past it. Thread mode's 8192 (32 MB, was 32768): every frame past the restart is a fresh page-cache page at the box's memory wall; on the Xeon at ~24k req/s, 4096 held writes 8× as often (p99 131 vs 77 ms) |
-| `CURSED_CKPT_NICE` | 19 (thread) | nice level of the checkpoint thread. 19: at the memory wall a nice-0 thread took half the single vCPU from the loop for each 300-430 ms pass, and that stall turned fatal (edge holds: 2 of 3 died at 0, 3 of 3 held at 19) |
+| `CURSED_CKPT_NICE` | 10 (thread) | nice level of the checkpoint thread. At 0 it took half the single vCPU from the loop for each 300-430 ms pass, which turned fatal at the memory wall; at 19 it starves once the CPU saturates (p99 2.6 s, 100 write-hold timeouts with a CPU burner); 10: p99 150 ms, 0 timeouts in the same run |
 | `CURSED_COALESCE` | 0 | 1: share one feed computation between the feed requests of a batch. Off until the organizer rules on whether that counts as caching (rule 5) |
 
 **Test-only**
@@ -194,8 +194,11 @@ wakeup is one batch:
 3. **Authenticate.** All Bearer tokens of the batch are verified in one multi-buffer HMAC call. Every signature is
    recomputed, and `exp` is required.
 4. **Database.** All requests of the batch run in one SQLite transaction (group commit), in arrival order:
-   - Reads use SQLite's B-tree cursors directly: the feed's like counts come from one index range scan, and its 20
-     author lookups run as one batched seek.
+   - Reads are the spec's prepared `SELECT`s, run by cursed-sqlite-turbo: it reads the bytecode SQLite's planner made
+     for each statement and runs a plan with the same results. The feed's 20 like-count subqueries become one index range
+     walk and its author joins one batched seek, and the plan writes the JSON body. It runs on stock SQLite, unmodified,
+     and anything it can't reproduce exactly falls back to SQLite's interpreter before a byte is written.
+     (`DB_READS=direct` reads SQLite's B-tree cursors with our own code instead, as #158 did.)
    - Writes are prepared SQL `INSERT`s.
    - A small VFS shim writes each commit's WAL frames with one `pwrite` and caches the DB file size while the lock
      is held.

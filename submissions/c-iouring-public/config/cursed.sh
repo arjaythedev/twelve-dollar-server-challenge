@@ -8,7 +8,9 @@
 #                   unit, so it can use SQLite's internals)                 src/engine_public.c uses only sqlite3.h
 #                   (separate needs DB_READS=sql, DB_VFS=stock, DB_CKPT=sqlite|inline,
 #                   DB_WAL_DROP=keep, and build.sh checks the objects use only public sqlite3_* symbols)
-#   DB_READS        direct: reads through SQLite's B-tree cursors           sql: the spec's prepared SELECTs
+#   DB_READS        turbo: the spec's prepared SELECTs, run by              sql: the spec's prepared SELECTs
+#                   cursed-sqlite-turbo's qc plans, which write the JSON body, on the same unmodified amalgamation
+#                   (QC_STOCK; needs SQLITE_LINK=unity). Or direct: reads through SQLite's B-tree cursors (#158's)
 #   DB_VFS          cursed: WAL write-coalescing + file-size cache shim     stock: SQLite's unix VFS
 #   DB_CKPT         thread (max's default; below) or uring: the engine's    sqlite: SQLite's autocheckpoint
 #                   own checkpoint as
@@ -53,7 +55,16 @@ choose() {
   echo "$name must be one of: ${*%%=*}" >&2
   exit 2
 }
-D=$(choose DB_READS "${DB_READS:-direct}" direct=1 sql=0) || exit 2
+D=$(choose DB_READS "${DB_READS:-turbo}" direct=1 sql=0 turbo=2) || exit 2
+TURBO=0
+if [ "$D" = 2 ]; then # turbo: prepared SQL (APP_DB_DIRECT=0) with qc's plans over it, compiled into engine.c's unit
+  D=0 TURBO=1
+  [ "${CURSED:-max}" = boring ] && { echo "CURSED=boring reads through plain prepared SQL; DB_READS=turbo isn't boring" >&2; exit 2; }
+  [ "${SQLITE_LINK:-unity}" = unity ] || { echo "DB_READS=turbo needs SQLITE_LINK=unity" >&2; exit 2; }
+  # QC_STOCK: on SQLite's own sqlite3.c, unmodified (no patch.py hooks: side tables, explicit calls). QC_STOCK_COPIES=0:
+  # no generated copies of SQLite functions either (turbo: ~0.8 % more interpreter instructions, which here run only writes)
+  SQLOPTS="$SQLOPTS -DENG_TURBO=1 -DQC_STOCK=1 -DQC_STOCK_COPIES=0"
+fi
 V=$(choose DB_VFS "${DB_VFS:-cursed}" cursed=1 stock=0) || exit 2
 K=$(choose DB_CKPT "${DB_CKPT:-thread}" thread=2 inline=1 sqlite=0 uring=3 bounded=4) || exit 2
 [ "$K" = 4 ] && : "${DB_WAL_DROP:=keep}" # bounded: a 16,384-frame WAL (~64 MB) reused in place stays hot
@@ -86,7 +97,7 @@ if [ "$K" = 4 ]; then # bounded: one thread, one connection
 fi
 
 APPOPTS="$APPOPTS -DAPP_DB_DIRECT=$D -DAPP_DB_VFS=$V -DAPP_DB_CKPT=$K -DAPP_DB_EXCL=$X"
-APPOPTS="$APPOPTS -DAPP_DB_WAL_DROP=$WD -DAPP_JWT_SCALAR=$J -DAPP_SQLITE_LINK=$L"
-CURSED_SUMMARY="sqlite_link=${SQLITE_LINK:-unity} reads=${DB_READS:-direct} vfs=${DB_VFS:-cursed}"
+APPOPTS="$APPOPTS -DAPP_DB_WAL_DROP=$WD -DAPP_JWT_SCALAR=$J -DAPP_SQLITE_LINK=$L -DAPP_DB_TURBO=$TURBO"
+CURSED_SUMMARY="sqlite_link=${SQLITE_LINK:-unity} reads=${DB_READS:-turbo} vfs=${DB_VFS:-cursed}"
 CURSED_SUMMARY="$CURSED_SUMMARY ckpt=${DB_CKPT:-thread} wal_drop=${DB_WAL_DROP:-drop} locking=${DB_LOCKING:-exclusive}"
 CURSED_SUMMARY="$CURSED_SUMMARY jwt=${JWT:-simd}"

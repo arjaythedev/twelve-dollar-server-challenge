@@ -360,6 +360,7 @@ class Server {
     pub bool $feedRawDecode = false;
     pub bool $sparseBufs = false;
     pub bool $retryingWrites = false;
+    pub int $persistedPending = 0;
     pub int $writeWaitMs = 1;
     pub int $reqs = 0;
     pub int $reqsBase = 0;
@@ -723,6 +724,7 @@ class Server {
             /* Match Rust's batch-scoped B-tree snapshot and release the read
              * transaction before the next poll/checkpoint opportunity. */
             $this->close_bt_cursors();
+            if ($this->bgCheckpoint) { sqlite_bg_checkpoint_tick($this->db); }
 
             scope_end();
         }
@@ -1885,7 +1887,8 @@ class Server {
                 $this->retryingWrites = true;
                 return;
             }
-            $this->fail_writes("begin", sqlite_errmsg($this->db));
+            $beginCode = sqlite_extended_errcode($this->db);
+            $this->fail_writes("begin", sqlite_errmsg($this->db), $beginCode);
             $this->flush();
             return;
         }
@@ -1893,6 +1896,7 @@ class Server {
         $ok = true;
         $failWhere = "";
         $failDetail = "";
+        $failCode = 0;
         $i = 0;
         while ($i < $n) {
             $r = $this->pending[$i];
@@ -1903,6 +1907,7 @@ class Server {
                 if ($rc != 100) {
                     $failWhere = "insert post";
                     $failDetail = sqlite_errmsg($this->db);
+                    $failCode = sqlite_extended_errcode($this->db);
                     /* sqlite3_step errors leave the statement active until it
                      * is reset; do that before rolling back the batch. */
                     sqlite_reset($this->insPost);
@@ -1916,6 +1921,7 @@ class Server {
                 if ($done != 101) {
                     $failWhere = "finish post insert";
                     $failDetail = sqlite_errmsg($this->db);
+                    $failCode = sqlite_extended_errcode($this->db);
                 }
                 sqlite_reset($this->insPost);
                 sqlite_clear_bindings($this->insPost);
@@ -1947,6 +1953,7 @@ class Server {
                 if ($rc != 101 && $rc != 100) {
                     $failWhere = "insert like";
                     $failDetail = sqlite_errmsg($this->db);
+                    $failCode = sqlite_extended_errcode($this->db);
                 }
                 sqlite_reset($this->insLike);
                 sqlite_clear_bindings($this->insLike);
@@ -1960,6 +1967,7 @@ class Server {
                     if ($hc != 100 && $hc != 101) {
                         $failWhere = "check liked post";
                         $failDetail = sqlite_errmsg($this->db);
+                        $failCode = sqlite_extended_errcode($this->db);
                     }
                     sqlite_reset($this->hasPost);
                     sqlite_clear_bindings($this->hasPost);
@@ -1981,6 +1989,7 @@ class Server {
             $ok = false;
             $failWhere = "commit";
             $failDetail = sqlite_errmsg($this->db);
+            $failCode = sqlite_extended_errcode($this->db);
         }
         if (!$ok) {
             /* Capture the SQLite lock error before ROLLBACK overwrites the
@@ -1993,7 +2002,7 @@ class Server {
                 $this->retryingWrites = true;
                 return;
             }
-            $this->fail_writes($failWhere, $failDetail);
+            $this->fail_writes($failWhere, $failDetail, $failCode);
         }
         $this->flush();
     }
@@ -2001,9 +2010,12 @@ class Server {
     public function persist_pending_posts(): void {
         /* Pending requests outlive the current request scope while a SQLite
          * lock/checkpoint clears. Copy request-backed strings before returning
-         * to the event loop so the next write attempt sees valid data. */
-        $i = 0;
+         * to the event loop so the next write attempt sees valid data. The
+         * queue only grows until flush(), so resume at the first unpersisted
+         * entry instead of rescanning the whole batch on each 1 ms retry. */
         $n = count($this->pending);
+        $i = $this->persistedPending;
+        if ($i >= $n) { return; }
         while ($i < $n) {
             $r = $this->pending[$i];
             if ($r["kind"] == 1) {
@@ -2013,10 +2025,11 @@ class Server {
             }
             $i = $i + 1;
         }
+        $this->persistedPending = $n;
     }
 
-    public function fail_writes(string $where, string $detail): void {
-        echo "sqlite write failure at " . $where . ": " . $detail . "\n";
+    public function fail_writes(string $where, string $detail, int $code): void {
+        echo "sqlite write failure at " . $where . " code=" . $code . ": " . $detail . "\n";
         $i = 0;
         $n = count($this->pending);
         while ($i < $n) {
@@ -2034,6 +2047,7 @@ class Server {
             arr_free($r);
         }
         arr_clear($this->pending);
+        $this->persistedPending = 0;
         $this->retryingWrites = false;
     }
 

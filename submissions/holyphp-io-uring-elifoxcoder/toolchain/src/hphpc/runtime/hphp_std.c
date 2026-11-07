@@ -8880,6 +8880,9 @@ typedef struct {
     int active_flag;           /* lock-free common-case poll by the event loop */
     int started;
     int threshold_frames;
+    uint32_t wal_frames;         /* latest frame count from sqlite3_wal_hook */
+    uint64_t wal_generation;     /* protected by mu; commits during checkpoints */
+    uint32_t force_frames;       /* synchronous catch-up threshold */
     int max_hold_ms;
     int64_t hold_since_ms;
 } HpSqliteCkpt;
@@ -8897,9 +8900,12 @@ static int64_t hp_mono_ms(void) {
 static int hp_sqlite_wal_hook(void *arg, sqlite3 *db, const char *name, int nframe) {
     HpSqliteCkpt *w = (HpSqliteCkpt *)arg;
     (void)db; (void)name;
-    if (nframe < w->threshold_frames) return SQLITE_OK;
     pthread_mutex_lock(&w->mu);
-    if (w->state == 0) {
+    if (nframe >= 0) {
+        __atomic_store_n(&w->wal_frames, (uint32_t)nframe, __ATOMIC_RELEASE);
+        w->wal_generation++;
+    }
+    if (nframe >= w->threshold_frames && w->state == 0) {
         w->state = 1;
         __atomic_store_n(&w->active_flag, 1, __ATOMIC_RELEASE);
         pthread_cond_signal(&w->cv);
@@ -8913,12 +8919,14 @@ static void *hp_sqlite_ckpt_main(void *arg) {
     (void)setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), 19);
     for (;;) {
         int mode, nlog = -1, ndone = -1;
+        uint64_t generation;
         pthread_mutex_lock(&w->mu);
         while (w->state != 1 && w->state != 3 && w->state != 6)
             pthread_cond_wait(&w->cv, &w->mu);
         if (w->state == 6) { pthread_mutex_unlock(&w->mu); break; }
         mode = w->state;
         w->state = mode == 1 ? 2 : 4;
+        generation = w->wal_generation;
         pthread_mutex_unlock(&w->mu);
 
         int rc = sqlite3_wal_checkpoint_v2(w->ckpt_db, "main",
@@ -8931,6 +8939,8 @@ static void *hp_sqlite_ckpt_main(void *arg) {
         if (rc == SQLITE_OK && nlog >= 0 && ndone >= nlog) {
             w->state = 0;
             w->hold_since_ms = 0;
+            if (w->wal_generation == generation)
+                __atomic_store_n(&w->wal_frames, 0, __ATOMIC_RELEASE);
             __atomic_store_n(&w->active_flag, 0, __ATOMIC_RELEASE);
         } else {
             w->state = 5;
@@ -8981,6 +8991,48 @@ static void hp_sqlite_ckpt_stop(sqlite3 *db) {
     w->state = 0;
     __atomic_store_n(&w->active_flag, 0, __ATOMIC_RELEASE);
     w->hold_since_ms = 0;
+}
+
+/* Bound WAL growth with a synchronous last-resort checkpoint once the log
+ * keeps growing past its configured limit. Run this from the event-loop thread
+ * between request batches, after the app has closed its B-tree cursors. */
+static bool hp_sqlite_ckpt_tick(sqlite3 *db) {
+    HpSqliteCkpt *w = &hp_sqlite_ckpt;
+    if (!w->started || w->main_db != db || !w->force_frames ||
+        __atomic_load_n(&w->wal_frames, __ATOMIC_ACQUIRE) < w->force_frames)
+        return false;
+
+    pthread_mutex_lock(&w->mu);
+    if (w->state != 0 ||
+        __atomic_load_n(&w->wal_frames, __ATOMIC_ACQUIRE) < w->force_frames) {
+        pthread_mutex_unlock(&w->mu);
+        return false;
+    }
+    /* State 7 reserves the main connection for this checkpoint. The worker
+     * sleeps in every state except its bulk/tail requests and stop. */
+    w->state = 7;
+    uint64_t generation = w->wal_generation;
+    pthread_mutex_unlock(&w->mu);
+
+    struct timespec started, ended;
+    clock_gettime(CLOCK_MONOTONIC, &started);
+    int nlog = -1, ndone = -1;
+    int rc = sqlite3_wal_checkpoint_v2(db, "main", SQLITE_CHECKPOINT_PASSIVE,
+                                       &nlog, &ndone);
+    bool full = rc == SQLITE_OK && nlog >= 0 && ndone >= nlog;
+    clock_gettime(CLOCK_MONOTONIC, &ended);
+    int64_t elapsed_us = (int64_t)(ended.tv_sec - started.tv_sec) * 1000000 +
+                         (ended.tv_nsec - started.tv_nsec) / 1000;
+
+    pthread_mutex_lock(&w->mu);
+    if (full && w->wal_generation == generation)
+        __atomic_store_n(&w->wal_frames, 0, __ATOMIC_RELEASE);
+    if (w->state == 7) w->state = 0;
+    pthread_mutex_unlock(&w->mu);
+    if (getenv("HPHP_STATS") && strcmp(getenv("HPHP_STATS"), "1") == 0)
+        fprintf(stderr, "[sqlite-ckpt] mode=forced rc=%d log=%d done=%d full=%d us=%lld\n",
+                rc, nlog, ndone, full ? 1 : 0, (long long)elapsed_us);
+    return full;
 }
 #endif
 
@@ -9055,6 +9107,14 @@ hval hpbi_sqlite_bg_checkpoint_start(hval dbv, hval pathv, hval framesv, hval ho
     w->ckpt_db = ckdb;
     w->threshold_frames = frames;
     w->max_hold_ms = hold_ms;
+    w->force_frames = 65536;
+    const char *force_env = getenv("HPHP_CKPT_FORCE_FRAMES");
+    if (force_env && *force_env) {
+        long v = strtol(force_env, NULL, 10);
+        if (v >= 1 && v <= 1048576) w->force_frames = (uint32_t)v;
+    }
+    __atomic_store_n(&w->wal_frames, 0, __ATOMIC_RELEASE);
+    w->wal_generation = 0;
     w->hold_since_ms = 0;
     w->state = 0;
     __atomic_store_n(&w->active_flag, 0, __ATOMIC_RELEASE);
@@ -9082,6 +9142,15 @@ hval hpbi_sqlite_bg_checkpoint_hold(hval dbv) {
     if (hp_sqlite_db(dbv) != hp_sqlite_ckpt.main_db || !hp_sqlite_ckpt.started)
         return hp_of_bool(false);
     return hp_of_bool(hp_sqlite_ckpt_hold());
+#else
+    (void)dbv;
+    return hp_of_bool(false);
+#endif
+}
+
+hval hpbi_sqlite_bg_checkpoint_tick(hval dbv) {
+#if !defined(_WIN32)
+    return hp_of_bool(hp_sqlite_ckpt_tick(hp_sqlite_db(dbv)));
 #else
     (void)dbv;
     return hp_of_bool(false);
@@ -9196,6 +9265,11 @@ hval hpbi_sqlite_last_insert_rowid(hval dbv) {
 hval hpbi_sqlite_errmsg(hval dbv) {
     sqlite3 *db = hp_sqlite_db(dbv);
     return hp_of_str(hp_str_lit(db ? sqlite3_errmsg(db) : ""));
+}
+
+hval hpbi_sqlite_extended_errcode(hval dbv) {
+    sqlite3 *db = hp_sqlite_db(dbv);
+    return hp_of_int(db ? (int64_t)sqlite3_extended_errcode(db) : SQLITE_MISUSE);
 }
 
 hval hpbi_sqlite_is_lock_error(hval dbv) {

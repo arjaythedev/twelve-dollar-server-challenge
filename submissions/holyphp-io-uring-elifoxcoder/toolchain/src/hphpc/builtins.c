@@ -935,6 +935,7 @@ void builtins_init(void) {
     add("sqlite_open_vfs",      B_MISC, ty_int,    false, false);  /* (path, vfs) -> handle|0 */
     add("sqlite_bg_checkpoint_start", B_MISC, ty_bool, false, false); /* (db, path, frames, hold_ms) */
     add("sqlite_bg_checkpoint_hold", B_MISC, ty_bool, false, false); /* (db) */
+    add("sqlite_bg_checkpoint_tick", B_MISC, ty_bool, false, false); /* (db), generic forced WAL catch-up */
     add("sqlite_bg_checkpoint_active", B_MISC, ty_bool, false, false); /* (db) */
     add("sqlite_close",         B_MISC, ty_bool,   false, false);
     add("sqlite_exec",          B_MISC, ty_bool,   false, false);  /* (db, sql) */
@@ -950,6 +951,7 @@ void builtins_init(void) {
     add("sqlite_changes",       B_MISC, ty_int,    false, false);
     add("sqlite_last_insert_rowid", B_MISC, ty_int, false, false);
     add("sqlite_errmsg",        B_MISC, ty_string, false, false);
+    add("sqlite_extended_errcode", B_MISC, ty_int, false, false);
     add("sqlite_is_lock_error", B_MISC, ty_bool,   false, false);
     add("sqlite_busy_timeout",  B_MISC, ty_bool,   false, false);
 }

@@ -86,9 +86,12 @@ pointers, all buffers in `mmap`'d memory (their addresses are handed to C), `-gc
   `unix-excl` keeps the wal-index in heap memory (no `-shm`, no `fcntl` per transaction).
   `TD_WALSHIM=0` disables it.
 - `journal_mode=WAL`, `synchronous=NORMAL`, `wal_autocheckpoint=0`, `mmap_size=0`. Checkpoints run on
-  a second connection in a `nice 19` thread: PASSIVE past 4,096 frames, then writes are held between
-  passes (≤ 250 ms) while the tail is copied so the log restarts; past 65,536 frames the loop
-  checkpoints inline (the scheme of rust-iouring-kensac #264).
+  a second connection in a thread at normal priority: PASSIVE past 4,096 frames (repeated while
+  more than 128 frames remain), then the thread **syncs the database file itself and copies once
+  more**, and only then are writes held between passes while it copies the last few dozen frames so
+  the log restarts (the scheme of rust-iouring-kensac #264, with two changes learned the hard way;
+  see "The first benchmark" below). The database file grows in 64 MB steps
+  (`SQLITE_FCNTL_CHUNK_SIZE`). Past 65,536 frames the loop checkpoints inline as a last resort.
 - SQLite build: `THREADSAFE=2` + `OPEN_NOMUTEX`, `DEFAULT_MEMSTATUS=0`, `USE_ALLOCA`, the `OMIT_*`
   options of #264, `-O3 -march=native -mprefer-vector-width=256 -fno-plt -fno-stack-protector
   -fcf-protection=none`. JSON strings are checked for characters to escape 32 bytes at a time (AVX2)
@@ -192,6 +195,26 @@ the transaction, the batch call) over more requests, for a few milliseconds of l
 
 (p99 at 12,000 users is dominated by the load generator sharing the vCPU.) `ANSWER_ORDER=lifo`
 made no measurable difference at these loads and stays off.
+
+### The first benchmark, and the checkpoint fix
+
+The organiser's run of the first version (commit `07004d1`) held **250,000 users** (24,053 req/s,
+p95 94.6 ms, p99 271.7 ms, 0 errors, 78 % app CPU, 30 µs per request); 260,000 and 280,000 failed
+on p99 (1.4 s and 2.5 s) with the CPU at 72-78 %, i.e. not on CPU. The cause was the checkpoint
+thread: at `nice 19` it was starved exactly when the loop was saturated, so the write hold ran to
+its 250 ms cap without the log restarting (the 272 ms p99), the WAL grew past 65,536 frames and the
+inline checkpoint stalled every request for hundreds of milliseconds (the cliff).
+
+Reproduced on the box with the load generator on the same vCPU (60,000 users, think times scaled to
+~18,000 req/s, 150 s hold): holds averaged **173 ms** even at normal priority. `strace -T` on the
+thread showed why: a passive checkpoint that does not complete the backfill writes its pages to the
+database file without syncing it, so the held tail's `fdatasync` flushed the whole cycle (~14 MB,
+117-167 ms on this disk), and when the file had grown by a few pages the sync also waited for the
+file system's journal. With the thread syncing the database before the hold, one more passive copy,
+and a 64 MB chunk size: holds **17 ms average, 68 ms max**, the log restarts every cycle
+(75 of 75), and over 2.96M requests the hold-period latency was p50 5.7 ms, **p95 10.4 ms,
+p99 56.5 ms**, 0 errors, 17.0 µs CPU per request (generator included on the vCPU). The stats line
+now reports every checkpoint cycle (`hold_ms`, `tail_ms`, `restarts`, `inline`).
 
 **Not measured:** a run at 300,000+ users. That needs a load generator in the same network with
 several source addresses (one address holds at most ~64k connections to one port), which was not

@@ -11,6 +11,7 @@
 // before the next one runs (rule 5). Anything unexpected falls back to the reference SQL.
 #include "sqlite/sqlite3.c"
 
+#include <fcntl.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <sys/mman.h>
@@ -37,7 +38,7 @@ static int in_tx, broken;
 static int wal_frames;
 
 // Counters (td_stats).
-enum { S_FEED, S_POST, S_LIKE, S_INSERT, S_FALLBACK, S_SPILL, S_WAL_WRITES, S_WAL_FRAMES, S_TRUNC, S_TRUNC_SCAN, S_EVICT, S_FETCH, S_CK, N_STATS };
+enum { S_FEED, S_POST, S_LIKE, S_INSERT, S_FALLBACK, S_SPILL, S_WAL_WRITES, S_WAL_FRAMES, S_TRUNC, S_TRUNC_SCAN, S_EVICT, S_FETCH, S_CK, S_HOLD_MS, S_HOLD_MAX, S_CK_INLINE, S_CK_FULL, S_CK_PARTIAL, S_RESTART, S_CK_RC, S_TAIL_MS, S_TAIL_MAX, S_BULK_MS, S_ROUNDS, N_STATS };
 static int64_t stats[N_STATS];
 
 // The first few failures of the request path are reported on stderr (they are never silent).
@@ -420,10 +421,16 @@ static int wv_install(void) {
 
 // ---- checkpoints -------------------------------------------------------------------------------
 //
-// Automatic checkpoints are off. Past CK_FRAMES frames a nice-19 thread runs a PASSIVE checkpoint
-// on its own connection while the loop goes on; since the log restarts only once fully copied,
-// writes are then held (between passes, at most HOLD_MS) while the thread copies the tail. Past
-// CK_FORCE frames the loop checkpoints inline. (The scheme of rust-iouring-kensac #264.)
+// Automatic checkpoints are off. Past CK_FRAMES frames a thread runs a PASSIVE checkpoint on its
+// own connection while the loop goes on; since the log restarts only once fully copied, writes
+// are then held (between passes, at most HOLD_MS) while the thread copies the tail. Past CK_FORCE
+// frames the loop checkpoints inline. (The scheme of rust-iouring-kensac #264.)
+//
+// The thread runs at normal priority (TD_CK_NICE, default 0). A cycle is ~15 ms of copying, 1-2 %
+// of the CPU at the benchmark's write rate, but at nice 19 it is starved exactly when the loop is
+// saturated: the hold then expires at HOLD_MS without a restart, the log grows past CK_FORCE and
+// the inline checkpoint stalls every request for hundreds of milliseconds (the first benchmark of
+// this entry failed its p99 that way at 260,000 users while the CPU was at 78 %).
 #define CK_FRAMES 4096
 #define CK_FORCE 65536
 #define HOLD_MS 250
@@ -437,10 +444,14 @@ static pthread_cond_t ck_cv = PTHREAD_COND_INITIALIZER;
 static struct timespec held_at;
 
 static int wal_hook(void *a, sqlite3 *d, const char *name, int frames) {
+  static int last;
   (void)a; (void)d; (void)name;
-  wal_frames = frames;
+  if (frames < last) stats[S_RESTART]++; // the log restarted
+  last = wal_frames = frames;
   return SQLITE_OK;
 }
+
+int td_wal_frames(void) { return wal_frames; }
 
 static void ck_set(int s) {
   pthread_mutex_lock(&ck_mu);
@@ -449,23 +460,19 @@ static void ck_set(int s) {
   pthread_mutex_unlock(&ck_mu);
 }
 
-static void *ck_main(void *a) {
-  (void)a;
-  setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), 19);
-  for (;;) {
-    pthread_mutex_lock(&ck_mu);
-    while (ck_state != CK_BULK && ck_state != CK_TAIL) pthread_cond_wait(&ck_cv, &ck_mu);
-    int st = ck_state;
-    pthread_mutex_unlock(&ck_mu);
-    int nlog = -1, ndone = -2;
-    int rc = sqlite3_wal_checkpoint_v2(ckdb, "main", SQLITE_CHECKPOINT_PASSIVE, &nlog, &ndone);
-    stats[S_CK]++;
-    pthread_mutex_lock(&ck_mu);
-    ck_full = rc == SQLITE_OK && nlog == ndone;
-    atomic_store_explicit(&ck_state, st + 1, memory_order_release);
-    pthread_mutex_unlock(&ck_mu);
-  }
-  return 0;
+// The bulk phase repeats (up to CK_ROUNDS times) while the frames it could not copy yet, those
+// written meanwhile, are more than CK_TAIL_MAX: every round brings the backfill closer, so the
+// tail copied under the hold is small. A passive checkpoint that does not complete the backfill
+// writes its pages to the database file without syncing it (SQLite syncs only when the log is
+// fully copied), so the tail's sync would flush the whole cycle's pages, ~14 MB and 120 ms on the
+// benchmark box, while writes are held. The thread therefore syncs the database file itself
+// before the hold and copies once more, leaving the held tail a few dozen frames and a few ms.
+#define CK_ROUNDS 4
+#define CK_TAIL_MAX 128
+static int db_fd = -1;
+
+static void presync(void) {
+  if (db_fd >= 0) fdatasync(db_fd);
 }
 
 static long ms_since(const struct timespec *t0) {
@@ -474,11 +481,56 @@ static long ms_since(const struct timespec *t0) {
   return (t.tv_sec - t0->tv_sec) * 1000 + (t.tv_nsec - t0->tv_nsec) / 1000000;
 }
 
+static void *ck_main(void *a) {
+  (void)a;
+  long nice = env_long("TD_CK_NICE", 0);
+  if (nice) setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), (int)nice);
+  for (;;) {
+    pthread_mutex_lock(&ck_mu);
+    while (ck_state != CK_BULK && ck_state != CK_TAIL) pthread_cond_wait(&ck_cv, &ck_mu);
+    int st = ck_state;
+    pthread_mutex_unlock(&ck_mu);
+    int nlog = -1, ndone = -2, rc = SQLITE_OK;
+    struct timespec t0;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    for (int round = 0; round < (st == CK_BULK ? CK_ROUNDS : 1); round++) {
+      rc = sqlite3_wal_checkpoint_v2(ckdb, "main", SQLITE_CHECKPOINT_PASSIVE, &nlog, &ndone);
+      stats[S_CK]++;
+      stats[S_ROUNDS]++;
+      if (rc != SQLITE_OK) {
+        stats[S_CK_RC] = rc;
+        break;
+      }
+      if (nlog - ndone <= CK_TAIL_MAX) break;
+    }
+    if (st == CK_BULK && rc == SQLITE_OK) {
+      presync(); // the cycle's pages reach the disk before writes are held
+      rc = sqlite3_wal_checkpoint_v2(ckdb, "main", SQLITE_CHECKPOINT_PASSIVE, &nlog, &ndone);
+      stats[S_CK]++;
+      presync();
+    }
+    long ms = ms_since(&t0);
+    if (st == CK_TAIL) {
+      stats[S_TAIL_MS] += ms;
+      if (ms > stats[S_TAIL_MAX]) stats[S_TAIL_MAX] = ms;
+    } else {
+      stats[S_BULK_MS] += ms;
+    }
+    pthread_mutex_lock(&ck_mu);
+    ck_full = rc == SQLITE_OK && nlog == ndone;
+    if (st == CK_TAIL) stats[ck_full ? S_CK_FULL : S_CK_PARTIAL]++;
+    atomic_store_explicit(&ck_state, st + 1, memory_order_release);
+    pthread_mutex_unlock(&ck_mu);
+  }
+  return 0;
+}
+
 void td_tick(void) {
   switch (atomic_load_explicit(&ck_state, memory_order_acquire)) {
   case CK_IDLE:
     if (wal_frames >= CK_FORCE) {
       int nlog = 0, ndone = 0;
+      stats[S_CK_INLINE]++;
       if (sqlite3_wal_checkpoint_v2(db, "main", SQLITE_CHECKPOINT_PASSIVE, &nlog, &ndone) == SQLITE_OK && nlog == ndone)
         wal_frames = 0;
     } else if (wal_frames >= CK_FRAMES) {
@@ -490,11 +542,15 @@ void td_tick(void) {
     clock_gettime(CLOCK_MONOTONIC, &held_at);
     ck_set(CK_TAIL);
     break;
-  case CK_TAIL_DONE:
+  case CK_TAIL_DONE: {
+    long ms = held ? ms_since(&held_at) : HOLD_MS;
+    stats[S_HOLD_MS] += ms;
+    if (ms > stats[S_HOLD_MAX]) stats[S_HOLD_MAX] = ms;
     if (ck_full) wal_frames = 0;
     held = 0;
     ck_set(CK_IDLE);
     break;
+  }
   default:
     if (held && ms_since(&held_at) > HOLD_MS) held = 0;
     break;
@@ -618,6 +674,19 @@ int td_open(const char *path, char *err, int n) {
       sqlite3_exec(ckdb, "PRAGMA synchronous = NORMAL; PRAGMA wal_autocheckpoint = 0; PRAGMA cache_size = 64", 0, 0, 0)) {
     snprintf(err, n, "checkpoint connection: %s", ckdb ? sqlite3_errmsg(ckdb) : "cannot open");
     return -1;
+  }
+  db_fd = open(path, O_RDONLY | O_CLOEXEC);
+  // The database file grows in 64 MB steps (SQLITE_FCNTL_CHUNK_SIZE, a hint to SQLite's own VFS).
+  // A checkpoint that completes the backfill truncates the file to its logical size and syncs it;
+  // when that size changes by a few pages the fdatasync must wait for the file system's journal
+  // (~170 ms on the benchmark box's disk against ~3 ms for the data alone), and it happens while
+  // writes are held. With the file pre-extended the truncate is a no-op and the sync is data only.
+  {
+    int chunk = (int)(env_long("TD_CHUNK_MB", 64) << 20);
+    if (chunk > 0) {
+      sqlite3_file_control(ckdb, "main", SQLITE_FCNTL_CHUNK_SIZE, &chunk);
+      sqlite3_file_control(db, "main", SQLITE_FCNTL_CHUNK_SIZE, &chunk);
+    }
   }
   pthread_t t;
   pthread_attr_t a;

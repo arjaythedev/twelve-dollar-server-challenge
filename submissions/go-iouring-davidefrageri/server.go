@@ -847,12 +847,12 @@ func (s *server) log(now time.Time) {
 	for _, r := range s.rings {
 		open += r.open
 	}
-	var st [16]int64
+	var st [24]int64
 	dbStats(st[:])
 	fmt.Fprintf(os.Stderr, "%s conns=%d rings=%d requests=%d feed=%d post=%d like=%d insert=%d fallback=%d spill=%d "+
-		"wal_writes=%d wal_frames=%d trunc=%d/%d evict=%d fetch=%d ckpt=%d pool=%d backlog=%d\n",
+		"wal_writes=%d wal_frames=%d trunc=%d/%d evict=%d fetch=%d ckpt=%d rounds=%d bulk_ms=%d hold_ms=%d/max %d tail_ms=%d/max %d inline=%d tail_full=%d/partial %d restarts=%d ck_rc=%d pool=%d backlog=%d\n",
 		now.Format("15:04:05"), open, len(s.rings), s.requests, st[0], st[1], st[2], st[3], st[4], st[5], st[6], st[7],
-		st[9], st[8], st[10], st[11], st[12], len(s.pool), s.ready.len())
+		st[9], st[8], st[10], st[11], st[12], st[23], st[22], st[13], st[14], st[20], st[21], st[15], st[16], st[17], st[18], st[19], len(s.pool), s.ready.len())
 }
 
 func (s *server) run() {

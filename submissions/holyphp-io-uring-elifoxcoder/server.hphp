@@ -403,7 +403,9 @@ class Server {
 
         $bgCheckpoint = getenv("HPHP_BG_CHECKPOINT") == "1";
         $this->bgCheckpoint = $bgCheckpoint;
-        $db = sqlite_open($path);
+        $sqliteVfs = getenv("HPHP_SQLITE_VFS");
+        if ($sqliteVfs === false || $sqliteVfs == "") { $db = sqlite_open($path); }
+        else { $db = sqlite_open_vfs($path, $sqliteVfs); }
         if ($db == 0) {
             echo "fatal: cannot open sqlite database " . $path . "\n";
             return false;

@@ -8,6 +8,9 @@ set -euo pipefail
 # HPHP_DIRECT=0 forces it.
 export HPHP_DIRECT="${HPHP_DIRECT:-1}"
 export HPHP_BG_CHECKPOINT="${HPHP_BG_CHECKPOINT:-1}"
+# Coalesce sequential SQLite WAL frame writes in the generic runtime VFS.
+# Set HPHP_SQLITE_VFS= to use SQLite's default VFS for an A/B comparison.
+export HPHP_SQLITE_VFS="${HPHP_SQLITE_VFS-wal-coalesce}"
 # Optional: parse requests directly from the selected io_uring buffer when they
 # fit in one receive. Partial/multi-buffer requests promote to an owned string.
 # Enable with HPHP_RECV_ZEROCOPY=1; the default copy path remains the baseline.

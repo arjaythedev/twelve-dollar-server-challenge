@@ -41,6 +41,11 @@ the app itself.
 - **WAL + `synchronous=NORMAL`**, `temp_store=MEMORY`, 64 MB page cache and
   prepared statements. SQLite mmap is disabled by default; set `HPHP_MMAP=1`
   to enable the tested 256 MB mmap path.
+- **WAL frame write coalescing in the generic SQLite VFS.** `start.sh` selects
+  `HPHP_SQLITE_VFS=wal-coalesce`; sequential frame-header/page writes are
+  flushed as one contiguous write at each commit. Reads, syncs, truncates, and
+  file controls flush pending bytes first, preserving the SQLite commit
+  boundary. Set `HPHP_SQLITE_VFS=` to use SQLite's default VFS.
 - **One write for small bodies**, header + body written separately for the feed
   (avoids one multi-KB copy).
 - **`Content-Encoding: identity`** — compression is optional per SPEC.md, and the

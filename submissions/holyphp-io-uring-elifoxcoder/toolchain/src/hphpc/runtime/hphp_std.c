@@ -9036,14 +9036,206 @@ static bool hp_sqlite_ckpt_tick(sqlite3 *db) {
 }
 #endif
 
+/* Optional generic SQLite VFS wrapper. SQLite emits separate xWrite calls
+ * for WAL frame headers and pages; sequential frames are buffered until a
+ * commit frame, then written as one contiguous range. All reads, syncs,
+ * truncates, locks, and file controls flush first, so SQLite observes the
+ * same bytes and durability boundary as the underlying VFS. */
+#if !defined(_WIN32)
+typedef struct {
+    sqlite3_file base;
+    sqlite3_file *real;
+    unsigned char *buf;
+    size_t n, cap;
+    sqlite3_int64 off, next;
+    int wal, commit_hdr;
+} HpWalFile;
+static sqlite3_vfs *hp_wal_base_vfs;
+static sqlite3_vfs hp_wal_vfs;
+
+static int hp_wal_flush(HpWalFile *f) {
+    if (!f->n) return SQLITE_OK;
+    int rc = SQLITE_OK;
+    for (size_t at = 0; at < f->n && rc == SQLITE_OK; at += 0x1f000) {
+        size_t n = f->n - at;
+        if (n > 0x1f000) n = 0x1f000;
+        rc = f->real->pMethods->xWrite(f->real, f->buf + at, (int)n,
+                                       f->off + (sqlite3_int64)at);
+    }
+    f->n = 0;
+    return rc;
+}
+#define HP_WAL_FLUSH(f) do { int hp_rc_ = hp_wal_flush((HpWalFile *)(f)); if (hp_rc_ != SQLITE_OK) return hp_rc_; } while (0)
+static int hp_wal_close(sqlite3_file *file) {
+    HpWalFile *f = (HpWalFile *)file;
+    int rc = hp_wal_flush(f);
+    free(f->buf);
+    f->buf = NULL;
+    int rc2 = f->real->pMethods->xClose(f->real);
+    return rc != SQLITE_OK ? rc : rc2;
+}
+static int hp_wal_read(sqlite3_file *file, void *buf, int n, sqlite3_int64 off) {
+    HP_WAL_FLUSH(file);
+    HpWalFile *f = (HpWalFile *)file;
+    return f->real->pMethods->xRead(f->real, buf, n, off);
+}
+static int hp_wal_write(sqlite3_file *file, const void *buf, int n, sqlite3_int64 off) {
+    HpWalFile *f = (HpWalFile *)file;
+    if (!f->wal) return f->real->pMethods->xWrite(f->real, buf, n, off);
+    /* SQLite can rewrite a previously emitted frame header after a cache
+     * spill. Write that header through immediately; otherwise a commit could
+     * return before its final checksum reaches the underlying VFS. */
+    if (n == 24 && off != f->next) {
+        HP_WAL_FLUSH(file);
+        f->next = off + n;
+        const unsigned char *h = (const unsigned char *)buf;
+        f->commit_hdr = (h[4] | h[5] | h[6] | h[7]) != 0;
+        return f->real->pMethods->xWrite(f->real, buf, n, off);
+    }
+    f->next = off + n;
+    if (f->n && off != f->off + (sqlite3_int64)f->n) HP_WAL_FLUSH(file);
+    if (f->n + (size_t)n > f->cap) {
+        if (f->n + (size_t)n > (8u << 20)) {
+            HP_WAL_FLUSH(file);
+            if ((size_t)n > f->cap) return f->real->pMethods->xWrite(f->real, buf, n, off);
+        } else {
+            size_t cap = f->cap ? f->cap : 65536;
+            while (cap < f->n + (size_t)n) cap *= 2;
+            unsigned char *next = (unsigned char *)realloc(f->buf, cap);
+            if (!next) {
+                HP_WAL_FLUSH(file);
+                return f->real->pMethods->xWrite(f->real, buf, n, off);
+            }
+            f->buf = next;
+            f->cap = cap;
+        }
+    }
+    if (!f->n) f->off = off;
+    memcpy(f->buf + f->n, buf, (size_t)n);
+    f->n += (size_t)n;
+    if (n == 24) {
+        const unsigned char *h = (const unsigned char *)buf;
+        f->commit_hdr = (h[4] | h[5] | h[6] | h[7]) != 0;
+        return SQLITE_OK;
+    }
+    if (f->commit_hdr) {
+        f->commit_hdr = 0;
+        return hp_wal_flush(f);
+    }
+    return SQLITE_OK;
+}
+static int hp_wal_truncate(sqlite3_file *file, sqlite3_int64 size) {
+    HP_WAL_FLUSH(file);
+    HpWalFile *f = (HpWalFile *)file;
+    return f->real->pMethods->xTruncate(f->real, size);
+}
+static int hp_wal_sync(sqlite3_file *file, int flags) {
+    HP_WAL_FLUSH(file);
+    HpWalFile *f = (HpWalFile *)file;
+    return f->real->pMethods->xSync(f->real, flags);
+}
+static int hp_wal_size(sqlite3_file *file, sqlite3_int64 *size) {
+    HP_WAL_FLUSH(file);
+    HpWalFile *f = (HpWalFile *)file;
+    return f->real->pMethods->xFileSize(f->real, size);
+}
+static int hp_wal_lock(sqlite3_file *file, int level) {
+    HpWalFile *f = (HpWalFile *)file;
+    return f->real->pMethods->xLock(f->real, level);
+}
+static int hp_wal_unlock(sqlite3_file *file, int level) {
+    HP_WAL_FLUSH(file);
+    HpWalFile *f = (HpWalFile *)file;
+    return f->real->pMethods->xUnlock(f->real, level);
+}
+static int hp_wal_reserved(sqlite3_file *file, int *result) {
+    HpWalFile *f = (HpWalFile *)file;
+    return f->real->pMethods->xCheckReservedLock(f->real, result);
+}
+static int hp_wal_control(sqlite3_file *file, int op, void *arg) {
+    HP_WAL_FLUSH(file);
+    HpWalFile *f = (HpWalFile *)file;
+    return f->real->pMethods->xFileControl(f->real, op, arg);
+}
+static int hp_wal_sector(sqlite3_file *file) {
+    HpWalFile *f = (HpWalFile *)file;
+    return f->real->pMethods->xSectorSize(f->real);
+}
+static int hp_wal_device(sqlite3_file *file) {
+    HpWalFile *f = (HpWalFile *)file;
+    return f->real->pMethods->xDeviceCharacteristics(f->real);
+}
+static int hp_wal_shm_map(sqlite3_file *file, int page, int size, int extend,
+                          void volatile **out) {
+    HpWalFile *f = (HpWalFile *)file;
+    return f->real->pMethods->xShmMap(f->real, page, size, extend, out);
+}
+static int hp_wal_shm_lock(sqlite3_file *file, int off, int n, int flags) {
+    HpWalFile *f = (HpWalFile *)file;
+    return f->real->pMethods->xShmLock(f->real, off, n, flags);
+}
+static void hp_wal_shm_barrier(sqlite3_file *file) {
+    HpWalFile *f = (HpWalFile *)file;
+    f->real->pMethods->xShmBarrier(f->real);
+}
+static int hp_wal_shm_unmap(sqlite3_file *file, int del) {
+    HpWalFile *f = (HpWalFile *)file;
+    return f->real->pMethods->xShmUnmap(f->real, del);
+}
+static int hp_wal_fetch(sqlite3_file *file, sqlite3_int64 off, int n, void **out) {
+    HpWalFile *f = (HpWalFile *)file;
+    if (f->real->pMethods->iVersion < 3 || !f->real->pMethods->xFetch) { *out = NULL; return SQLITE_OK; }
+    return f->real->pMethods->xFetch(f->real, off, n, out);
+}
+static int hp_wal_unfetch(sqlite3_file *file, sqlite3_int64 off, void *ptr) {
+    HpWalFile *f = (HpWalFile *)file;
+    if (f->real->pMethods->iVersion < 3 || !f->real->pMethods->xUnfetch) return SQLITE_OK;
+    return f->real->pMethods->xUnfetch(f->real, off, ptr);
+}
+static const sqlite3_io_methods hp_wal_io = {
+    3, hp_wal_close, hp_wal_read, hp_wal_write, hp_wal_truncate, hp_wal_sync,
+    hp_wal_size, hp_wal_lock, hp_wal_unlock, hp_wal_reserved, hp_wal_control,
+    hp_wal_sector, hp_wal_device, hp_wal_shm_map, hp_wal_shm_lock,
+    hp_wal_shm_barrier, hp_wal_shm_unmap, hp_wal_fetch, hp_wal_unfetch
+};
+static int hp_wal_open(sqlite3_vfs *vfs, const char *name, sqlite3_file *file,
+                       int flags, int *out_flags) {
+    (void)vfs;
+    HpWalFile *f = (HpWalFile *)file;
+    memset(f, 0, sizeof(*f));
+    f->real = (sqlite3_file *)(f + 1);
+    int rc = hp_wal_base_vfs->xOpen(hp_wal_base_vfs, name, f->real, flags, out_flags);
+    f->wal = (flags & SQLITE_OPEN_WAL) != 0;
+    f->base.pMethods = rc == SQLITE_OK && f->real->pMethods ? &hp_wal_io : NULL;
+    return rc;
+}
+static int hp_wal_vfs_register(void) {
+    if (sqlite3_vfs_find("hphp-wal-coalesce")) return SQLITE_OK;
+    hp_wal_base_vfs = sqlite3_vfs_find(NULL);
+    if (!hp_wal_base_vfs) return SQLITE_ERROR;
+    hp_wal_vfs = *hp_wal_base_vfs;
+    hp_wal_vfs.zName = "hphp-wal-coalesce";
+    hp_wal_vfs.szOsFile = (int)sizeof(HpWalFile) + hp_wal_base_vfs->szOsFile;
+    hp_wal_vfs.xOpen = hp_wal_open;
+    return sqlite3_vfs_register(&hp_wal_vfs, 0);
+}
+#else
+static int hp_wal_vfs_register(void) { return SQLITE_NOTFOUND; }
+#endif
+
 static hval hpbi_sqlite_open_impl(hval path, hval vfs) {
     hstr *p = hp_val_to_str(path);
     hstr *v = vfs.tag == HV_STR ? hp_val_to_str(vfs) : NULL;
     sqlite3 *db = NULL;
     if (sqlite3_initialize() != SQLITE_OK) return hp_of_int(0);
+    const char *vfs_name = v && v->len ? v->data : NULL;
+    if (vfs.tag == HV_STR && vfs_name && strcmp(vfs_name, "wal-coalesce") == 0) {
+        if (hp_wal_vfs_register() != SQLITE_OK) return hp_of_int(0);
+        vfs_name = "hphp-wal-coalesce";
+    }
     int rc = sqlite3_open_v2(p->data, &db,
                              SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX,
-                             v && v->len ? v->data : NULL);
+                             vfs_name);
     if (rc != SQLITE_OK) {
         if (db) sqlite3_close(db);
         return hp_of_int(0);
@@ -9069,12 +9261,17 @@ hval hpbi_sqlite_bg_checkpoint_start(hval dbv, hval pathv, hval framesv, hval ho
     int hold_ms = (int)hp_val_to_int(holdv);
     if (!db || !path || frames < 1 || hold_ms < 1 || sqlite3_threadsafe() == 0 || w->started)
         return hp_of_bool(false);
-    /* Use the same VFS as the request connection. unix-excl keeps its WAL
-     * index in connection-local heap memory; a second connection using that
-     * VFS cannot safely checkpoint a database opened by the default unix VFS. */
+    /* Use the request connection's VFS for its checkpoint connection too, so
+     * both handles share the same underlying WAL/shm implementation. */
+    const char *ck_vfs = NULL;
+    const char *vfs_env = getenv("HPHP_SQLITE_VFS");
+    if (vfs_env && strcmp(vfs_env, "wal-coalesce") == 0) {
+        if (hp_wal_vfs_register() != SQLITE_OK) return hp_of_bool(false);
+        ck_vfs = "hphp-wal-coalesce";
+    }
     int rc = sqlite3_open_v2(path->data, &ckdb,
                              SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX,
-                             NULL);
+                             ck_vfs);
     if (rc != SQLITE_OK) {
         if (ckdb) sqlite3_close(ckdb);
         return hp_of_bool(false);

@@ -1,38 +1,49 @@
 #!/usr/bin/env bash
-# Build, test and stress test the submission in a podman container that mimics the box:
-# Ubuntu 24.04, 1 CPU, 2 GB RAM, no swap, nofile 65535.
+# Build, test and stress test the submission in podman containers that mimic the box:
+# Ubuntu 24.04, 1 CPU, 2 GB RAM, no swap, nofile 65535. See README.md "Running locally".
 #
-#   dev/ct.sh image                         build the dev image (install.sh baked in)
-#   dev/ct.sh build                         run build.sh in a clean container
-#   dev/ct.sh test                          test/run.sh (build + start + 42 checks), as CI does
-#   dev/ct.sh stress [VUS] [DUR]            one k6 run on a fresh server + DB; appends a row to stress-results.csv
-#   dev/ct.sh ladder [START] [MAX] [DUR]    double VUS until a run fails, then bisect (like the scoring)
-#   dev/ct.sh report                        rewrite the results section of README.md from the CSV
-#   dev/ct.sh shell                         interactive shell in the dev image
+#   dev/ct.sh image                       build the dev images
+#   dev/ct.sh build                       run build.sh in a clean container
+#   dev/ct.sh test                        test/run.sh (build + start + 42 checks), as CI does
+#   dev/ct.sh stress [N] [DUR]            one run on a fresh server + DB; appends a row to stress-results.csv
+#   dev/ct.sh ladder [START] [MAX] [DUR]  double N until a run fails, then bisect to within 5%
+#   dev/ct.sh report                      rewrite the results section of README.md from the CSV
+#   dev/ct.sh shell                       interactive shell in the dev image
 #
-# Env: LABEL (free text for the CSV row, e.g. "epoll baseline"), NOTES, CPUS (1), MEM (2g), RAMP_UP (30s),
-#      SECCOMP (unconfined; "default" to test without io_uring), K6_IMAGE.
-# Raw output of each run: results/<timestamp>-vus<N>/ (gitignored). The CSV is committed.
+# GEN picks the load generator:
+#   GEN=k6     (default) bench/load.js, the real user model. N = virtual users. Costs ~0.3 MB per user.
+#   GEN=blast  wrk with the same request mix and no think time. N = open connections. Cheap; measures
+#              max req/s (users estimated as req/s x 10.6).
+# Env: LABEL (free text for the CSV row), NOTES, CPUS (1), MEM (2g), RAMP_UP (30s, k6 only),
+#      WARMUP (5s, blast only), WRK_THREADS (4), SECCOMP (unconfined; "default" to test without io_uring).
+# Raw output of each run: results/<timestamp>-<gen><N>/ (gitignored). The CSV is committed.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
 CSV="$HERE/stress-results.csv"
 IMAGE=localhost/julia-raw-amanica-dev
+WRK_IMAGE=localhost/julia-raw-amanica-wrk
 K6_IMAGE="${K6_IMAGE:-docker.io/grafana/k6:2.3.0@sha256:2dd4756ec6e14e62778916e1eb850108e4b499304c02df56760fa0bdb0fba0b8}"
-CPUS="${CPUS:-1}" MEM="${MEM:-2g}" RAMP_UP="${RAMP_UP:-30s}" LABEL="${LABEL:-dev}" NOTES="${NOTES:-}"
+GEN="${GEN:-k6}" CPUS="${CPUS:-1}" MEM="${MEM:-2g}" RAMP_UP="${RAMP_UP:-30s}" WARMUP="${WARMUP:-5s}"
+WRK_THREADS="${WRK_THREADS:-4}" LABEL="${LABEL:-dev}" NOTES="${NOTES:-}"
+case "$GEN" in k6|blast) ;; *) echo "GEN must be k6 or blast" >&2; exit 2 ;; esac
 SEC=(); [ "${SECCOMP:-unconfined}" = unconfined ] && SEC=(--security-opt seccomp=unconfined)
 [ -f "$ROOT/seed/feed.db" ] || { echo "no seed/feed.db: run bash seed/make-seed.sh in $ROOT" >&2; exit 1; }
 
-image() { podman build -q -f "$HERE/dev/Containerfile" -t "$IMAGE" "$HERE" >/dev/null; }
+image() {
+  podman build -q -f "$HERE/dev/Containerfile" -t "$IMAGE" "$HERE" >/dev/null
+  [ "$GEN" = blast ] && podman build -q -f "$HERE/dev/Containerfile.wrk" -t "$WRK_IMAGE" "$HERE/dev" >/dev/null
+  true
+}
 box() {
   podman run --rm --cpus "$CPUS" --memory "$MEM" --memory-swap "$MEM" --ulimit nofile=65535:65535 \
     "${SEC[@]}" -v "$ROOT:/src:ro" -v julia-raw-amanica-dl:/cache:U -e JR_DL_CACHE=/cache "$@"
 }
 
-# Samples every 5 s while the server container lives: server CPU % over the window (cgroup usage_usec
-# deltas), server cgroup memory (includes page cache), julia RSS, and the k6 container's memory.
-sampler() { # sampler <server> <k6> <outfile>
-  local srv="$1" k6="$2" prev="" cur now_ns
+# Samples every 2 s while the server container lives: server CPU % over the window (cgroup usage_usec
+# deltas), server cgroup memory (includes page cache), julia RSS, and the generator container's memory.
+sampler() { # sampler <server> <generator>
+  local srv="$1" g="$2" prev="" cur now_ns gm
   while podman container exists "$srv"; do
     cur="$(podman exec "$srv" sh -c 'awk "/usage_usec/{print \$2}" /sys/fs/cgroup/cpu.stat; cat /sys/fs/cgroup/memory.current; ps -o rss= -C julia | head -1' 2>/dev/null | tr '\n' ' ')"
     now_ns="$(date +%s%N)"
@@ -41,25 +52,42 @@ sampler() { # sampler <server> <k6> <outfile>
     if [ -n "$prev" ] && [ -n "${3:-}" ]; then
       # shellcheck disable=SC2086
       set -- $prev "$@"     # prev_usec prev_ns usec mem rss
-      k6mem="$(podman stats --no-stream --format '{{.MemUsage}}' "$k6" 2>/dev/null | cut -d' ' -f1)"
-      echo "$(date +%T) cpu=$(( ($3 - $1) * 100000 / (now_ns - $2) )) cgmem_mb=$(( $4 >> 20 )) rss_mb=$(( $5 >> 10 )) k6mem=${k6mem:-?}"
+      gm="$(podman stats --no-stream --format '{{.MemUsage}}' "$g" 2>/dev/null | cut -d' ' -f1)"
+      echo "$(date +%T) cpu=$(( ($3 - $1) * 100000 / (now_ns - $2) )) cgmem_mb=$(( $4 >> 20 )) rss_mb=$(( $5 >> 10 )) genmem=${gm:-?}"
       prev="$3 $now_ns"
     elif [ -n "${1:-}" ]; then
       prev="$1 $now_ns"
     fi
-    sleep 5
+    sleep 2
   done
 }
 
-csv_header="timestamp,commit,label,julia,backend,transport,cpus,mem,vus,ramp,duration,requests,req_s,p95_ms,p99_ms,max_ms,err_pct,pass,failed_on,srv_cpu_avg,srv_cpu_max,srv_rss_peak_mb,srv_cgmem_peak_mb,k6_mem_peak,boot_ms,notes"
+run_k6() { # run_k6 <server> <name> <n> <dur> <out>
+  podman run --rm --name "$2" --user 0 --network "container:$1" \
+    --ulimit nofile="$(ulimit -Hn)":"$(ulimit -Hn)" \
+    -v "$ROOT/bench:/bench:ro" -v "$ROOT/seed/tokens.json:/seed/tokens.json:ro" -v "$5:/out" \
+    "$K6_IMAGE" run -q --no-color -e VUS="$3" -e DURATION="$4" -e RAMP_UP="$RAMP_UP" \
+    -e TOKENS=/seed/tokens.json --summary-export /out/summary.json /bench/load.js > "$5/k6.txt" 2>&1
+}
+
+run_blast() { # run_blast <server> <name> <n> <dur> <out>
+  local t="$WRK_THREADS"; [ "$3" -lt "$t" ] && t="$3"
+  local args=(--rm --name "$2" --network "container:$1" --ulimit nofile="$(ulimit -Hn)":"$(ulimit -Hn)"
+              -v "$HERE/dev/blast.lua:/blast.lua:ro" -v "$ROOT/seed/tokens.json:/seed/tokens.json:ro")
+  # warm-up (JIT, page cache), not recorded
+  podman run "${args[@]}" "$WRK_IMAGE" -t "$t" -c "$3" -d "$WARMUP" --timeout 10s -s /blast.lua \
+    http://127.0.0.1:3000 > "$5/wrk-warmup.txt" 2>&1 || true
+  podman run "${args[@]}" "$WRK_IMAGE" -t "$t" -c "$3" -d "$4" --timeout 10s -s /blast.lua \
+    http://127.0.0.1:3000 > "$5/wrk.txt" 2>&1
+}
 
 # One run. Sets RUN_PASS=1/0.
-stress_run() { # stress_run <vus> <duration>
-  local vus="$1" dur="$2" out name k6name rc=0 statpid
-  out="$HERE/results/$(date +%Y%m%d-%H%M%S)-vus$vus"; mkdir -p "$out"
-  name="jr-srv-$$-$vus"; k6name="jr-k6-$$-$vus"
+stress_run() { # stress_run <n> <duration>
+  local n="$1" dur="$2" out name gname rc=0 statpid commit
+  out="$HERE/results/$(date +%Y%m%d-%H%M%S)-$GEN$n"; mkdir -p "$out"
+  name="jr-srv-$$-$n"; gname="jr-gen-$$-$n"
   # shellcheck disable=SC2064
-  trap "podman rm -f $name $k6name >/dev/null 2>&1 || true" EXIT
+  trap "podman rm -f $name $gname >/dev/null 2>&1 || true" EXIT
   box -d --name "$name" --sysctl net.ipv4.ip_local_port_range="1024 65535" \
     "$IMAGE" bash /src/submissions/julia-raw-amanica/dev/in-container.sh serve >/dev/null
   for _ in $(seq 600); do
@@ -68,126 +96,51 @@ stress_run() { # stress_run <vus> <duration>
     sleep 1
   done
   podman exec "$name" curl -sf http://127.0.0.1:3000/health >/dev/null || { podman logs "$name" | tail -30; return 1; }
-  echo "== VUS=$vus RAMP_UP=$RAMP_UP DURATION=$dur -> ${out#"$HERE"/}"
-  sampler "$name" "$k6name" > "$out/stats.log" 2>&1 &
+  echo "== GEN=$GEN N=$n DURATION=$dur -> ${out#"$HERE"/}"
+  sampler "$name" "$gname" > "$out/stats.log" 2>&1 &
   statpid=$!
-  podman run --rm --name "$k6name" --user 0 --network "container:$name" \
-    --ulimit nofile="$(ulimit -Hn)":"$(ulimit -Hn)" \
-    -v "$ROOT/bench:/bench:ro" -v "$ROOT/seed/tokens.json:/seed/tokens.json:ro" -v "$out:/out" \
-    "$K6_IMAGE" run -q --no-color -e VUS="$vus" -e DURATION="$dur" -e RAMP_UP="$RAMP_UP" \
-    -e TOKENS=/seed/tokens.json --summary-export /out/summary.json /bench/load.js > "$out/k6.txt" 2>&1 || rc=$?
+  "run_$GEN" "$name" "$gname" "$n" "$dur" "$out" || rc=$?
   podman logs "$name" > "$out/server.log" 2>&1 || true
   podman rm -f "$name" >/dev/null 2>&1 || true
   wait "$statpid" 2>/dev/null || true
   trap - EXIT
-
-  [ -f "$CSV" ] || echo "$csv_header" > "$CSV"
-  local commit; commit="$(git -C "$HERE" rev-parse --short HEAD 2>/dev/null || echo none)"
+  commit="$(git -C "$HERE" rev-parse --short HEAD 2>/dev/null || echo none)"
   git -C "$HERE" status --porcelain -- . 2>/dev/null | grep -q . && commit="$commit+dirty"
-  local row
-  row="$(python3 -I - "$out" "$rc" <<'PY'
-import json, re, sys, os
-out, rc = sys.argv[1], int(sys.argv[2])
-def num(x, d=3): return "" if x is None else f"{x:.{d}f}"
-s = {}
-try: s = json.load(open(os.path.join(out, "summary.json")))["metrics"]
-except Exception: pass
-dur = s.get("http_req_duration", {}); fail = s.get("http_req_failed", {}); reqs = s.get("http_reqs", {})
-failed_on = [n for m in ("http_req_duration", "http_req_failed")
-             for n, crossed in s.get(m, {}).get("thresholds", {}).items() if crossed]
-cpu, cg, rss, k6 = [], [], [], []
-for line in open(os.path.join(out, "stats.log")):
-    m = dict(re.findall(r"(\w+)=(\S+)", line))
-    if "cpu" in m: cpu.append(int(m["cpu"])); cg.append(int(m["cgmem_mb"])); rss.append(int(m["rss_mb"]))
-    if m.get("k6mem", "?") != "?": k6.append(m["k6mem"])
-def k6v(v):
-    m = re.match(r"([\d.]+)([kMG]?B)", v); f = {"B": 1e-6, "kB": 1e-3, "MB": 1, "GB": 1e3}
-    return float(m.group(1)) * f[m.group(2)] if m else 0
-log = open(os.path.join(out, "server.log")).read()
-kv = dict(re.findall(r"(\w+)=(\S+)", log.split("listening")[0][-300:])) if "listening" in log else {}
-busy = [c for c in cpu if c > 2] or cpu
-print(",".join([
-    kv.get("julia", ""), kv.get("backend", ""), kv.get("transport", ""),
-    str(reqs.get("count", "")), num(reqs.get("rate"), 1),
-    num(dur.get("p(95)")), num(dur.get("p(99)")), num(dur.get("max"), 1),
-    num(100 * fail["value"], 3) if "value" in fail else "",
-    "1" if rc == 0 and s else "0",
-    ("k6 exit %d" % rc if not s else " ".join(failed_on)).replace(",", ";"),
-    str(round(sum(busy) / len(busy))) if busy else "", str(max(cpu)) if cpu else "",
-    str(max(rss)) if rss else "", str(max(cg)) if cg else "",
-    ("%.0fMB" % max(map(k6v, k6))) if k6 else "",
-    (re.findall(r"boot_ms=(\d+)", log) or [""])[0],
-]))
-PY
-)"
-  IFS=, read -r jv be tr req rps p95 p99 mx err pass failed_on cavg cmax rss cg k6m boot <<< "$row"
-  echo "$(date -u +%FT%TZ),$commit,${LABEL//,/;},$jv,$be,$tr,$CPUS,$MEM,$vus,$RAMP_UP,$dur,$req,$rps,$p95,$p99,$mx,$err,$pass,$failed_on,$cavg,$cmax,$rss,$cg,$k6m,$boot,${NOTES//,/;}" >> "$CSV"
-  printf '   %s  boot=%sms req/s=%s p95=%sms p99=%sms err=%s%% cpu avg/max=%s/%s%% rss=%sMB k6=%s %s\n' \
-    "$([ "$pass" = 1 ] && echo PASS || echo FAIL)" "$boot" "$rps" "$p95" "$p99" "$err" "$cavg" "$cmax" "$rss" "$k6m" "$failed_on"
-  if [ "$pass" != 1 ] && [ -n "$cmax" ] && [ "$cmax" -lt 85 ]; then
-    echo "   note: server CPU never above 85%: the limit may be the load generator or a connection limit, not the server"
-  fi
-  RUN_PASS="$pass"
+  RUN_PASS=0
+  GEN="$GEN" LABEL="${LABEL//,/;}" NOTES="${NOTES//,/;}" CPUS="$CPUS" MEM="$MEM" VUS="$n" RAMP="$RAMP_UP" \
+    DUR="$dur" COMMIT="$commit" python3 -I "$HERE/dev/record.py" "$out" "$rc" "$CSV" && RUN_PASS=1
+  true
 }
 
 ladder() { # ladder <start> <max> <dur>
-  local vus="$1" max="$2" dur="$3" lo=0 hi=0 tol mid
-  while [ "$vus" -le "$max" ]; do
-    stress_run "$vus" "$dur"
-    if [ "$RUN_PASS" = 1 ]; then lo="$vus"; vus=$((vus * 2)); else hi="$vus"; break; fi
+  local n="$1" max="$2" dur="$3" lo=0 hi=0 tol mid
+  while [ "$n" -le "$max" ]; do
+    stress_run "$n" "$dur"
+    if [ "$RUN_PASS" = 1 ]; then lo="$n"; n=$((n * 2)); else hi="$n"; break; fi
   done
-  if [ "$hi" = 0 ]; then echo "== passed up to $lo VUS (MAX=$max reached)"; return; fi
-  while :; do                                  # narrow down to within 5% (min 250 VUS)
-    tol=$(( lo / 20 )); [ "$tol" -lt 250 ] && tol=250
+  if [ "$hi" = 0 ]; then echo "== passed up to $lo (MAX=$max reached)"; return; fi
+  while :; do                                  # narrow down to within 5% (min 250 users / 8 connections)
+    tol=$(( lo / 20 )); min=250; [ "$GEN" = blast ] && min=8; [ "$tol" -lt "$min" ] && tol="$min"
     [ $((hi - lo)) -le "$tol" ] && break
-    mid=$(( (lo + hi) / 2 / 50 * 50 ))
+    mid=$(( (lo + hi) / 2 )); [ "$GEN" = k6 ] && mid=$(( mid / 50 * 50 ))
     { [ "$mid" -le "$lo" ] || [ "$mid" -ge "$hi" ]; } && break
     stress_run "$mid" "$dur"
     if [ "$RUN_PASS" = 1 ]; then lo="$mid"; else hi="$mid"; fi
   done
-  echo "== highest passing: $lo VUS (lowest failing: $hi)"
+  echo "== highest passing: $lo (lowest failing: $hi)"
 }
 
-report() {
-  [ -f "$CSV" ] || { echo "no $CSV yet"; return 1; }
-  python3 -I - "$CSV" "$HERE/README.md" <<'PY'
-import csv, sys
-rows = list(csv.DictReader(open(sys.argv[1])))
-best = {}
-for r in rows:
-    if r["pass"] == "1":
-        k = r["label"]
-        if k not in best or int(r["vus"]) > int(best[k]["vus"]): best[k] = r
-L = ["Local runs, `dev/ct.sh` (podman: server 1 CPU / 2 GB; k6 on the same host, so numbers are only",
-     "comparable with each other, not with the official leaderboard). Source: [stress-results.csv](stress-results.csv).", "",
-     "**Best passing run per label**", "",
-     "| label | commit | VUS | req/s | p95 ms | p99 ms | err % | server CPU avg | RSS MB | boot ms |",
-     "|---|---|--:|--:|--:|--:|--:|--:|--:|--:|"]
-for r in sorted(best.values(), key=lambda r: int(r["vus"]), reverse=True):
-    L.append(f"| {r['label']} | {r['commit']} | {r['vus']} | {r['req_s']} | {r['p95_ms']} | {r['p99_ms']} | {r['err_pct']} | {r['srv_cpu_avg']}% | {r['srv_rss_peak_mb']} | {r.get('boot_ms') or '–'} |")
-L += ["", "**Last 20 runs**", "",
-      "| when (UTC) | label | VUS | dur | req/s | p95 ms | p99 ms | err % | CPU avg/max | result |",
-      "|---|---|--:|---|--:|--:|--:|--:|--:|---|"]
-for r in rows[-20:][::-1]:
-    res = "pass" if r["pass"] == "1" else "FAIL " + r["failed_on"]
-    L.append(f"| {r['timestamp'][:16].replace('T',' ')} | {r['label']} | {r['vus']} | {r['duration']} | {r['req_s']} | {r['p95_ms']} | {r['p99_ms']} | {r['err_pct']} | {r['srv_cpu_avg']}/{r['srv_cpu_max']}% | {res} |")
-readme = open(sys.argv[2]).read()
-b, e = "<!-- results:begin -->", "<!-- results:end -->"
-block = b + "\n" + "\n".join(L) + "\n" + e
-if b in readme: readme = readme[:readme.index(b)] + block + readme[readme.index(e) + len(e):]
-else: readme = readme.rstrip() + "\n\n## Local stress results\n\n" + block + "\n"
-open(sys.argv[2], "w").write(readme)
-print("README.md updated:", len(rows), "runs,", len(best), "labels")
-PY
-}
+report() { python3 -I "$HERE/dev/report.py" "$CSV" "$HERE/README.md"; }
 
 cmd="${1:-test}"; shift || true
+if [ "$GEN" = blast ]; then def_n=256 def_start=16 def_max=16384 def_dur=30s
+else def_n=1000 def_start=2500 def_max=320000 def_dur=1m; fi
 case "$cmd" in
   image) image; echo "$IMAGE" ;;
   build|test) image; box "$IMAGE" bash /src/submissions/julia-raw-amanica/dev/in-container.sh "$cmd" ;;
   shell) image; box -it "$IMAGE" bash ;;
-  stress) image; stress_run "${1:-1000}" "${2:-1m}"; [ "$RUN_PASS" = 1 ] ;;
-  ladder) image; ladder "${1:-2500}" "${2:-320000}" "${3:-1m}" ;;
+  stress) image; stress_run "${1:-$def_n}" "${2:-$def_dur}"; report >/dev/null; [ "$RUN_PASS" = 1 ] ;;
+  ladder) image; ladder "${1:-$def_start}" "${2:-$def_max}" "${3:-$def_dur}"; report ;;
   report) report ;;
-  *) sed -n '2,18p' "$0"; exit 2 ;;
+  *) sed -n '2,24p' "$0"; exit 2 ;;
 esac

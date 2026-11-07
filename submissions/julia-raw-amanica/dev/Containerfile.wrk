@@ -1,0 +1,6 @@
+# Dev-only load generator for GEN=blast: wrk from the Ubuntu 24.04 archive, pinned.
+ARG BASE=docker.io/library/ubuntu:24.04@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852
+FROM ${BASE}
+RUN apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+      wrk=4.1.0-4build2 && rm -rf /var/lib/apt/lists/*
+ENTRYPOINT ["wrk"]

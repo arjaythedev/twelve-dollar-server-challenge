@@ -115,13 +115,13 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | 45 | cider-iouring-pomilon-v2 | #225 | Cider (native x86-64, io_uring) | **210,000** | 20,404 | 348 | 504 | 0.00 | 86 | 39 | 611 | 2026-10-31 |
 | 45 | kotlin-trikeshed-jnorthrup | #298 | Kotlin (Kotlin/Native, io_uring, SQLite B-tree reads) | **210,000** | 20,566 | 61.7 | 207.7 | 0.00 | 69 | 31 | 579 | 2026-11-04 |
 | 45 | swift-iouring-akbashev | #297 | Swift (io_uring, SQLite B-tree reads) | **210,000** | 20,571 | 22.4 | 149.6 | 0.00 | 75 | 34 | 664 | 2026-11-05 |
-| 51 | csharp-iouring-jit-gichamba | #175 | C# (JIT, io_uring) | **209,000** | 20,265 | 366 | 735 | 0.00 | 84 | 38 | 633 | 2026-10-31 |
-| 52 | go-iouring-quananh2503 | #327 | Go (io_uring, cgo SQLite B-tree reads) | **208,000** | 20,388 | 15.2 | 165.2 | 0.00 | 91 | 41 | 1,118 | 2026-11-06 |
-| 53 | zig-epoll-unorig-username | #189 | Zig (epoll) | **200,000** | 19,661 | 54 | 154 | 0.00 | 94 | 44 | 1,155 | 2026-10-29 |
-| 53 | crystal-rayo-faustinoaq | #218 | Crystal (Rayo, io_uring, SQLite B-tree reads) | **200,000** | 19,615 | 236 | 596 | 0.00 | 82 | 39 | 1,198 | 2026-10-31 |
-| 53 | c-epoll-patrickryankenneth | #246 | C (io_uring, epoll fallback) | **200,000** ᵉ | 19,464 | 447 | 692 | 0.00 | 81 | 39 | 762 | 2026-11-02 |
-| 56 | dexlang-iouring-ensamuel7 | #251 | DexLang (generated C, io_uring) | **199,000** | 19,425 | 316 | 579 | 0.00 | 89 | 43 | 713 | 2026-11-01 |
-| 57 | c-iouring-le0nvfx | #340 | C (io_uring, SQLite B-tree reads) | **195,000** | 19,189 | 12.6 | 139.5 | 0.00 | 73 | 35 | 644 | 2026-11-06 |
+| 45 | c-iouring-le0nvfx | #341 | C (io_uring, SQLite B-tree reads) | **210,000** ᵡ | 20,594 | 14.0 | 63.6 | 0.00 | 76 | 34 | 605 | 2026-11-07 |
+| 52 | csharp-iouring-jit-gichamba | #175 | C# (JIT, io_uring) | **209,000** | 20,265 | 366 | 735 | 0.00 | 84 | 38 | 633 | 2026-10-31 |
+| 53 | go-iouring-quananh2503 | #327 | Go (io_uring, cgo SQLite B-tree reads) | **208,000** | 20,388 | 15.2 | 165.2 | 0.00 | 91 | 41 | 1,118 | 2026-11-06 |
+| 54 | zig-epoll-unorig-username | #189 | Zig (epoll) | **200,000** | 19,661 | 54 | 154 | 0.00 | 94 | 44 | 1,155 | 2026-10-29 |
+| 54 | crystal-rayo-faustinoaq | #218 | Crystal (Rayo, io_uring, SQLite B-tree reads) | **200,000** | 19,615 | 236 | 596 | 0.00 | 82 | 39 | 1,198 | 2026-10-31 |
+| 54 | c-epoll-patrickryankenneth | #246 | C (io_uring, epoll fallback) | **200,000** ᵉ | 19,464 | 447 | 692 | 0.00 | 81 | 39 | 762 | 2026-11-02 |
+| 57 | dexlang-iouring-ensamuel7 | #251 | DexLang (generated C, io_uring) | **199,000** | 19,425 | 316 | 579 | 0.00 | 89 | 43 | 713 | 2026-11-01 |
 | 58 | sql-oneselect-grMLEqomlkkU5Eeinz4brIrOVCUCkJuN | #243 | SQL (one SELECT over a virtual table, C io_uring) | **190,000** | 18,653 | 129 | 573 | 0.00 | 94 | 47 | 1,205 | 2026-11-02 |
 | 59 | csharp-iouring-oswaldosierra | #157 | C# (Native AOT, io_uring) | **189,000** | 18,592 | 20 | 51 | 0.00 | 88 | 44 | 1,176 | 2026-10-28 |
 | 59 | csharp-iouring-AlexandruLT | #196 | C# (Native AOT, io_uring) | **189,000** | 18,599 | 19.5 | 212 | 0.00 | 84 | 42 | 693 | 2026-10-29 |
@@ -400,6 +400,10 @@ verify, local JSON helper, ASCII length fast path; held, not merged: it didn't b
 #329 plus `wal_autocheckpoint = 50000`; held, not merged: it tied the merged row too) also held **71,000** (6,556 req/s,
 p95 2.7 / p99 107.7 ms, 0.93 % err = connect timeouts, 100 % CPU, 143 µs/req, 409 MB, 2026-11-06), with the same
 75,000 5-minute failure (1.59 % timeouts).
+
+ᵡ **c-iouring-le0nvfx** is scored at its follow-up PR **#341** (`abcc24a`, merged: SQLite `cache_size` 8 → 64 MiB);
+220,000 failed the 2-minute probe on p99 (1.95 s at 80 % CPU, 0 errors). Its merged #340 code (`a0443a9`) held
+**195,000** (19,189 req/s, p95 12.6 / p99 139.5 ms, 73 % CPU, 2026-11-06).
 
 **Connection collapses in scored entries' failing probes.** v-epoll-i098 #191: 270,000 passed the 2-minute probe but
 failed the 5-minute hold with 60 % errors, nearly all `connection refused` from mid-hold on (an earlier attempt at
@@ -694,7 +698,7 @@ public plugin APIs (a custom page cache through `SQLITE_CONFIG_PCACHE2`, a custo
   `src/btree.h` with renamed identifiers; `server.c`, `ring.c`, the WAL shim VFS and the checkpoint thread are its own.
   Arjay ruled 2026-11-04 that reusing another entry's helpers is fine when the README credits it; `1d952d2` added the
   #245 credit (plus whitespace-only restores in the vendored stock sqlite3.c) → merged at `1d952d2`. Scored at
-  `a0443a9` (195k).
+  `a0443a9` (195k); now scored at its follow-up #341 (`abcc24a`, 210k).
 - **Reads can see uncommitted writes** in the same batch: Deno #119 (also serves a snapshot up to 20 ms stale), Zig #125.
 - **start.sh restart loops** (the app restarts itself instead of letting systemd see a crash): Deno #119, c-epoll #64,
   c-iouring-raoz #26 (restarts after a signal exit), go-epoll-Antheurus #65 (worker 0 re-spawns dead workers).

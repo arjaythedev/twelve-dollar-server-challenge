@@ -1864,17 +1864,17 @@ class Server {
     }
 
     public function execute_writes(): void {
+        $n = count($this->pending);
+        if ($n == 0) { return; }
         if ($this->bgCheckpoint && sqlite_bg_checkpoint_hold($this->db)) {
             /* A checkpoint can defer this batch across poll cycles. Strings
              * copied from the current request live only until scope_end(),
              * while $pending survives. Move deferred post fields to heap
              * storage before leaving this scope. */
             $this->persist_pending_posts();
-            $this->retryingWrites = false;
+            $this->retryingWrites = true;
             return;
         }
-        $n = count($this->pending);
-        if ($n == 0) { return; }
 
         /* Close low-level cursors before SQLite writes; reopen after commit or
          * rollback so no cursor position is retained across mutations. */

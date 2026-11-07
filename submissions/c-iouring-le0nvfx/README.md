@@ -40,7 +40,7 @@ foreground and reads the challenge's `HOST`, `PORT`, `SQLITE_PATH`, and
 - Reads access the supplied SQLite database on each request. The feed and post
   fast paths use SQLite B-tree cursors against the existing schema and indexes,
   with prepared SQL fallbacks. No response, row, or JWT-verification result is
-  cached across requests. SQLite's own page cache is configured to 8 MiB;
+  cached across requests. SQLite's own page cache is configured to 64 MiB;
   SQLite memory mapping is disabled.
 - Writes use WAL and `synchronous=NORMAL`. Multiple writes may share a SQLite
   transaction; affected responses are held until commit succeeds. A background

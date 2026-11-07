@@ -10,7 +10,7 @@ SQLITE_YEAR=2026
 SQLITE_SHA3_256=92281c86e2957f9b9305890f9ac04204caa7b677cc868dc326d942689df28e30   # as published on sqlite.org
 SQLITE_URL="https://sqlite.org/${SQLITE_YEAR}/sqlite-amalgamation-${SQLITE_ID}.zip"
 
-# Read path (PLAN.md phase 5b): sql (public SQLite API, default) or btree (not implemented yet).
+# Read path: sql (public SQLite API, default) or btree (SQLite's internal B-tree cursors; not implemented yet).
 READ_BACKEND=sql
 
 # GC soft target for the Julia heap (julia --heap-size-hint). The box has 2 GB for everything.

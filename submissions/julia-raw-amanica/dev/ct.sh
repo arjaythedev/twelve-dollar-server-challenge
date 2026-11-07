@@ -16,6 +16,8 @@
 #              max req/s (users estimated as req/s x 10.6).
 #   GEN=users  wrk with the same mix plus think time (3-16 s) per connection: N connections ~ N users.
 #              ~10 KB per user, so 100k+ users fit; shows connection limits (fds, memory).
+# --debug (first argument): also count the server's connections (fds) and log its allocation/GC stats
+#   (JR_DEBUG=1). Off by default so measuring costs nothing; the CSV's debug column says which.
 # Env: LABEL (free text for the CSV row), NOTES, CPUS (1), MEM (2g), RAMP_UP (30s, k6 only),
 #      WARMUP (5s, blast only), WRK_THREADS (4, per wrk process), SHARDS (parallel wrk processes;
 #      default N / CONNS_PER_SHARD), CONNS_PER_SHARD (5000), SECCOMP (unconfined; "default" to test without io_uring).
@@ -33,6 +35,19 @@ case "$GEN" in k6|blast|users) ;; *) echo "GEN must be k6, blast or users" >&2; 
 SEC=(); [ "${SECCOMP:-unconfined}" = unconfined ] && SEC=(--security-opt seccomp=unconfined)
 [ -f "$ROOT/seed/feed.db" ] || { echo "no seed/feed.db: run bash seed/make-seed.sh in $ROOT" >&2; exit 1; }
 
+# dev/tools.jl runs on the host in its own project environment (dev/Project.toml + Manifest.toml, pinned).
+# JULIA_DEV picks the julia binary: juliaup's 1.13 channel if there is one, else julia on PATH.
+JULIA_DEV="${JULIA_DEV:-$(command -v juliaup >/dev/null && juliaup status 2>/dev/null | grep -q ' 1\.13 ' && echo 'julia +1.13' || echo julia)}"
+tools() {
+  local stamp="$HERE/results/.dev-env" want
+  want="$(sha256sum "$HERE/dev/Manifest.toml" | cut -c1-16)"
+  mkdir -p "$HERE/results"
+  if [ "$(cat "$stamp" 2>/dev/null)" != "$want" ]; then
+    $JULIA_DEV --startup-file=no --project="$HERE/dev" -e 'using Pkg; Pkg.instantiate()' >&2 && echo "$want" > "$stamp"
+  fi
+  $JULIA_DEV --startup-file=no --project="$HERE/dev" "$HERE/dev/tools.jl" "$@"
+}
+
 image() {
   podman build -q -f "$HERE/dev/Containerfile" -t "$IMAGE" "$HERE" >/dev/null
   [ "$GEN" != k6 ] && podman build -q -f "$HERE/dev/Containerfile.wrk" -t "$WRK_IMAGE" "$HERE/dev" >/dev/null
@@ -43,35 +58,29 @@ box() {
     "${SEC[@]}" -v "$ROOT:/src:ro" -v julia-raw-amanica-dl:/cache:U -e JR_DL_CACHE=/cache "$@"
 }
 
-# Samples every 2 s while the server container lives: server CPU % over the window (cgroup usage_usec
-# deltas), server cgroup memory (includes page cache), julia RSS, julia's open fds (~ connections + ~23),
-# and the generator container's memory.
+# Samples every 2 s while the server container lives, from the HOST side (cgroup files and /proc of the
+# container's pid 1, which is julia after the execs), so sampling costs the server's 1 CPU nothing:
+# CPU % over the window (cgroup usage_usec deltas), cgroup memory (includes page cache), julia RSS,
+# the generator container's memory and, with --debug, julia's open fds (~ connections + ~23).
 sampler() { # sampler <server> <generator>
-  local srv="$1" g="$2" prev="" cur now_ns gm
-  while podman container exists "$srv"; do
-    cur="$(podman exec "$srv" sh -c 'awk "/usage_usec/{print \$2}" /sys/fs/cgroup/cpu.stat; cat /sys/fs/cgroup/memory.current; p=$(pgrep -o julia); ps -o rss= -p $p; ls /proc/$p/fd | wc -l' 2>/dev/null | tr '\n' ' ')"
-    now_ns="$(date +%s%N)"
-    # shellcheck disable=SC2086
-    set -- $cur
-    if [ -n "$prev" ] && [ -n "${3:-}" ]; then
-      # shellcheck disable=SC2086
-      set -- $prev "$@"     # prev_usec prev_ns usec mem rss fds
+  set +e +o pipefail   # a failed read must not end the sampling
+  local srv="$1" g="$2" pid cg prev="" usec now_ns mem rss fds gm
+  pid="$(podman inspect -f '{{.State.Pid}}' "$srv" 2>/dev/null)" || return 0
+  cg="/sys/fs/cgroup$(cut -d: -f3- "/proc/$pid/cgroup" 2>/dev/null)"
+  while [ -d "/proc/$pid" ] && podman container exists "$srv"; do
+    usec="$(awk '/usage_usec/{print $2}' "$cg/cpu.stat" 2>/dev/null)"; now_ns="$(date +%s%N)"
+    if [ -n "$prev" ] && [ -n "$usec" ]; then
+      set -- $prev
+      mem="$(cat "$cg/memory.current" 2>/dev/null || echo 0)"
+      rss="$(awk '/^VmRSS/{print $2}' "/proc/$pid/status" 2>/dev/null)"
+      fds=""   # /proc/<pid>/fd of a rootless container is only readable inside podman's user namespace
+      [ "$DEBUG" = 1 ] && fds=" fds=$(podman unshare ls "/proc/$pid/fd" 2>/dev/null | wc -l || true)"
       gm="$(podman stats --no-stream --format '{{.MemUsage}}' "$g" 2>/dev/null | cut -d' ' -f1)"
-      echo "$(date +%T) cpu=$(( ($3 - $1) * 100000 / (now_ns - $2) )) cgmem_mb=$(( $4 >> 20 )) rss_mb=$(( $5 >> 10 )) fds=${6:-0} genmem=${gm:-?}"
-      prev="$3 $now_ns"
-    elif [ -n "${1:-}" ]; then
-      prev="$1 $now_ns"
+      echo "$(date +%T) cpu=$(( (usec - $1) * 100000 / (now_ns - $2) )) cgmem_mb=$(( mem >> 20 )) rss_mb=$(( ${rss:-0} >> 10 ))$fds genmem=${gm:-?}"
     fi
+    [ -n "$usec" ] && prev="$usec $now_ns"
     sleep 2
   done
-}
-
-run_k6() { # run_k6 <server> <name> <n> <dur> <out>
-  podman run --rm --name "$2" --user 0 --network "container:$1" \
-    --ulimit nofile="$(ulimit -Hn)":"$(ulimit -Hn)" \
-    -v "$ROOT/bench:/bench:ro" -v "$ROOT/seed/tokens.json:/seed/tokens.json:ro" -v "$5:/out" \
-    "$K6_IMAGE" run -q --no-color -e VUS="$3" -e DURATION="$4" -e RAMP_UP="$RAMP_UP" \
-    -e TOKENS=/seed/tokens.json --summary-export /out/summary.json /bench/load.js > "$5/k6.txt" 2>&1
 }
 
 secs() { case "$1" in *m) echo $(( ${1%m} * 60 ));; *s) echo "${1%s}";; *) echo "$1";; esac; }
@@ -115,7 +124,7 @@ stress_run() { # stress_run <n> <duration>
   name="jr-srv-$$-$n"; gname="jr-gen-$$-$n"
   # shellcheck disable=SC2064
   trap "podman rm -f $name $gname >/dev/null 2>&1 || true" EXIT
-  box -d --name "$name" --sysctl net.ipv4.ip_local_port_range="1024 65535" \
+  box -d --name "$name" -e JR_DEBUG="$DEBUG" --sysctl net.ipv4.ip_local_port_range="1024 65535" \
     "$IMAGE" bash /src/submissions/julia-raw-amanica/dev/in-container.sh serve >/dev/null
   for _ in $(seq 600); do
     podman exec "$name" curl -sf http://127.0.0.1:3000/health >/dev/null 2>&1 && break
@@ -134,8 +143,8 @@ stress_run() { # stress_run <n> <duration>
   commit="$(git -C "$HERE" rev-parse --short HEAD 2>/dev/null || echo none)"
   git -C "$HERE" status --porcelain -- . 2>/dev/null | grep -q . && commit="$commit+dirty"
   RUN_PASS=0
-  GEN="$GEN" LABEL="${LABEL//,/;}" NOTES="${NOTES//,/;}" CPUS="$CPUS" MEM="$MEM" VUS="$n" RAMP="$RAMP_UP" \
-    DUR="$dur" COMMIT="$commit" python3 -I "$HERE/dev/record.py" "$out" "$rc" "$CSV" && RUN_PASS=1
+  DEBUG="$DEBUG" GEN="$GEN" LABEL="${LABEL//,/;}" NOTES="${NOTES//,/;}" CPUS="$CPUS" MEM="$MEM" VUS="$n" RAMP="$RAMP_UP" \
+    DUR="$dur" COMMIT="$commit" tools record "$out" "$rc" "$CSV" && RUN_PASS=1
   true
 }
 
@@ -157,8 +166,10 @@ ladder() { # ladder <start> <max> <dur>
   echo "== highest passing: $lo (lowest failing: $hi)"
 }
 
-report() { python3 -I "$HERE/dev/report.py" "$CSV" "$HERE/README.md"; }
+report() { tools report "$CSV" "$HERE/README.md"; }
 
+DEBUG="${DEBUG:-0}"
+[ "${1:-}" = --debug ] && { DEBUG=1; shift; }
 cmd="${1:-test}"; shift || true
 if [ "$GEN" = blast ]; then def_n=256 def_start=16 def_max=16384 def_dur=30s
 elif [ "$GEN" = users ]; then def_n=20000 def_start=10000 def_max=320000 def_dur=1m
@@ -170,5 +181,5 @@ case "$cmd" in
   stress) image; stress_run "${1:-$def_n}" "${2:-$def_dur}"; report >/dev/null; [ "$RUN_PASS" = 1 ] ;;
   ladder) image; ladder "${1:-$def_start}" "${2:-$def_max}" "${3:-$def_dur}"; report ;;
   report) report ;;
-  *) sed -n '2,24p' "$0"; exit 2 ;;
+  *) sed -n '2,30p' "$0"; exit 2 ;;
 esac

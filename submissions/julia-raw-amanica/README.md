@@ -2,13 +2,15 @@
 
 Julia 1.13.3 · no framework · SQLite 3.54.1 (amalgamation compiled from source, called with `ccall`) · **direct** (no Nginx)
 
-Work in progress. See [PLAN.md](PLAN.md) for the roadmap and the decisions log.
+Work in progress.
 
 ## Current state
 
 - Single-threaded, level-triggered epoll loop on raw file descriptors (no libuv, no Tasks).
-- HTTP/1.1 parsed in place in the connection's read buffer; responses written straight into reusable
-  byte buffers (no intermediate objects, no JSON library).
+- HTTP/1.1 parsed in place in one read buffer shared by all connections; responses written straight into
+  a shared output buffer (no intermediate objects, no JSON library). An idle connection holds no buffers;
+  0 bytes allocated per request, so the GC does not run under load.
+- No Julia packages: the server uses only Base and `ccall`.
 - JWT HS256 verified on every request with libcrypto's `HMAC`.
 - Prepared statements via the SQLite C API. Reads go through a read-backend interface (`READ_BACKEND`
   in `config.sh`; only `sql`, the public-API backend, exists so far).
@@ -22,12 +24,19 @@ Work in progress. See [PLAN.md](PLAN.md) for the roadmap and the decisions log.
 | `build.sh` | user: downloads the SQLite amalgamation (SHA3-256 checked), compiles `build/libjr.so` |
 | `start.sh` | runs `src/main.jl` |
 | `src/` | the server |
-| `dev/` | local testing in podman (not used on the box), see below |
-| `stress-results.csv` | every local stress run, one row each |
+| `dev/` | **development only**: local test and benchmark tooling (podman, k6/wrk, `tools.jl`), see below |
+| `stress-results.csv` | every local stress run, one row each (written by `dev/`) |
 
 ## Running locally
 
-Needs podman (rootless is fine), plus `seed/feed.db` (from the repo root: `bash seed/make-seed.sh`).
+Everything in `dev/` (and `stress-results.csv`) exists only to test and benchmark while developing. The
+submission itself is `install.sh`, `build.sh`, `start.sh`, `config.sh` and `src/`: none of them use `dev/`,
+and the benchmark box never runs it. The dev tools' Julia package (JSON.jl) lives in `dev/`'s own project
+environment; the server has no package dependencies.
+
+Needs podman (rootless is fine), Julia on the host for `dev/tools.jl` (records runs and builds the table
+below; its own pinned environment in `dev/Project.toml`, installed on first use; juliaup's `1.13` channel
+is used if present, or set `JULIA_DEV`), plus `seed/feed.db` (from the repo root: `bash seed/make-seed.sh`).
 Everything runs from this folder, in containers that mimic the box: Ubuntu 24.04, server limited to
 1 CPU / 2 GB / no swap / nofile 65535. Each run copies the submission fresh into the container, so local
 build output never leaks in.
@@ -38,7 +47,7 @@ LABEL="what changed" dev/ct.sh stress 10000 1m    # one k6 run with 10k users �
 LABEL="what changed" dev/ct.sh ladder 2500 20000  # double users until a run fails, then bisect to within 5%
 GEN=blast LABEL="what changed" dev/ct.sh stress 256 30s  # cheap max-throughput run, 256 connections
 GEN=blast LABEL="what changed" dev/ct.sh ladder          # connections 16 → 16384 (mostly shows queueing, see caveats)
-GEN=users LABEL="what changed" dev/ct.sh stress 80000 1m # 80k users with think time: tests connection limits
+GEN=users LABEL="what changed" dev/ct.sh --debug stress 80000 1m # 80k users with think time; --debug checks they all connected
 GEN=users LABEL="what changed" dev/ct.sh ladder         # users 10k → 320k
 dev/ct.sh report                                  # rebuild the results tables below from the CSV
 dev/ct.sh shell                                   # shell inside the Ubuntu 24.04 dev image
@@ -60,6 +69,12 @@ wrk runs as several parallel processes (shards) in one generator container: `CON
 `SHARDS` sets how many, `WRK_THREADS` (4) the threads in each. Each shard connects to its own `127.0.0.x`
 (the server binds `0.0.0.0`), so one client address never runs out of its ~64k ephemeral ports. For `users`,
 shard start times are spread over `RAMP_UP`, because wrk opens all its connections at once.
+
+`--debug` (first argument, e.g. `dev/ct.sh --debug stress 60000`) also counts the server's open connections
+(`users` runs then fail if fewer than 99% of users connected) and makes the server log allocation/GC stats
+every 10 s (`JR_DEBUG=1`; bytes per request should stay 0). Off by default so measuring costs nothing. CPU
+and memory are always sampled from the host side (cgroup files, `/proc`), outside the server's 1-CPU budget.
+The CSV's `debug` column says which mode a run used.
 
 Other settings: `NOTES` (free text in the row), `RAMP_UP` (30s, k6 and users), `WARMUP` (5s, blast),
 `CPUS` / `MEM` (1 / 2g), `SECCOMP=default` (podman's default profile, which blocks io_uring).
@@ -89,5 +104,5 @@ wrk users (`GEN=users`, think time per connection) are cheap, so they reach the 
 |---|--:|--:|--:|
 | epoll baseline | 19,350 | – | – |
 | epoll + heap-hint 512M | 10,000 | 60,000 (990 MB) | 23,832, n=12 |
-| P3: shared buffers | – | 60,000 (315 MB) | 22,857 (-4%), n=3 |
+| P3: shared buffers | – | 60,000 (315 MB) | 21,288 (-11%), n=6 |
 <!-- results:end -->

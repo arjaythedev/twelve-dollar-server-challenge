@@ -81,7 +81,7 @@ function put_post_row!(b::Buf, st::Ptr{Cvoid})
     pushb!(b, UInt8('}'))
 end
 
-# ---- read backends (PLAN.md phase 5b). Each writes response JSON straight into b. ----
+# ---- read backends (selected by READ_BACKEND in config.sh). Each writes response JSON straight into b. ----
 
 abstract type ReadBackend end
 struct SqlBackend <: ReadBackend end

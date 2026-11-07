@@ -25,7 +25,8 @@ const ENFILE = 23
 const MAXEV = 1024
 const RBUF_SHARED = 1 << 18     # one read buffer shared by all connections
 const SPILL_SIZE = 16384        # pooled per-connection buffer, only while a request or a send is incomplete
-const STATS_EVERY = 10.0        # seconds between "stats" lines in the log
+const STATS_EVERY = 10.0        # seconds between "stats" lines in the log (JR_DEBUG=1 only)
+const DEBUG = Ref(false)
 
 # Per-connection state. An idle connection holds no buffers: inbuf/outbuf are EMPTY unless a partial
 # request is waiting for more bytes or a response could not be sent in full.
@@ -326,11 +327,13 @@ function serve(lfd::Cint)
             end
             ev & EPOLLIN != 0 && on_readable!(L, c)
         end
-        now = time()
-        if !L.listening && now >= L.resume_at
+        if !L.listening && time() >= L.resume_at
             ep_ctl(ep, EPOLL_CTL_ADD, lfd, EPOLLIN)
             L.listening = true
         end
-        now - st.at >= STATS_EVERY && log_stats!(st, L, now)
+        if DEBUG[]
+            now = time()
+            now - st.at >= STATS_EVERY && log_stats!(st, L, now)
+        end
     end
 end

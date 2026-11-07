@@ -9,6 +9,16 @@ package main
 #cgo CFLAGS: -DSQLITE_OMIT_COMPLETE -DSQLITE_OMIT_GET_TABLE -DSQLITE_OMIT_TCL_VARIABLE
 #cgo CFLAGS: -DHAVE_FDATASYNC=1 -DHAVE_USLEEP=1
 #cgo LDFLAGS: -lm -lpthread
+// The shim and SQLite use only C callbacks; none can enter Go.
+#cgo nocallback td_feed
+#cgo nocallback td_post
+#cgo nocallback td_like
+#cgo nocallback td_insert_post
+#cgo nocallback td_render
+#cgo nocallback td_health
+#cgo nocallback td_commit
+#cgo nocallback td_tick
+#cgo nocallback td_writes_held
 #include <stdlib.h>
 #include "shim.h"
 */

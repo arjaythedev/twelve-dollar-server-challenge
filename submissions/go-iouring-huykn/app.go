@@ -12,11 +12,8 @@ type app struct {
 	started  time.Time
 	body     []byte
 	postJSON postBytes // request-scoped object bytes; overwritten for each row
-	ms       [1]member
-	now      int64 // unix seconds, refreshed every pass
+	now      int64     // unix seconds, refreshed every pass
 }
-
-var bodyKey = []string{"body"}
 
 func newApp(secret []byte) *app {
 	return &app{jwt: newVerifier(secret), started: time.Now(), body: make([]byte, 0, 4096)}
@@ -291,18 +288,21 @@ func (a *app) create(r *request, b []byte) []byte {
 	if !ok {
 		return b
 	}
-	ms := a.ms[:]
-	valid, isObj := object(r.body, bodyKey, ms, a.body[:0])
+	var body byteValue
+	valid, isObj := walkObject(r.body, a.body[:0], func(key []byte, value byteValue) {
+		if string(key) == "body" {
+			body = value
+		}
+	})
 	if !valid {
 		return errorResp(b, 400, "malformed JSON body")
 	}
-	m := ms[0]
-	if !isObj || !m.found || m.kind != jStr {
+	if !isObj || body.kind != byteString {
 		return errorResp(b, 400, "body is required")
 	}
-	txt := m.val
-	if m.esc {
-		a.body = unescape(m.val, a.body[:0])
+	txt := body.raw
+	if body.escaped {
+		a.body = unescape(body.raw, a.body[:0])
 		txt = a.body
 	}
 	txt = trimJS(txt)

@@ -24,8 +24,6 @@ type verifier struct {
 	inner, outer []byte // saved SHA-256 states after the ipad / opad block
 	dec          []byte // decoded header, payload and signature
 	name         []byte // the unescaped username
-	keys         []string
-	ms           [3]member
 	mac          [32]byte
 	sum          [32]byte
 }
@@ -52,10 +50,8 @@ func newVerifier(secret []byte) *verifier {
 		return s
 	}
 	return &verifier{h: sha256.New(), inner: state(0x36), outer: state(0x5c), dec: make([]byte, 0, 4096),
-		name: make([]byte, 0, 256), keys: []string{"sub", "username", "exp"}}
+		name: make([]byte, 0, 256)}
 }
-
-var algKey = []string{"alg"}
 
 var b64 = func() (t [256]byte) {
 	for i := range t {
@@ -154,17 +150,20 @@ func (v *verifier) verify(hdr []byte, has bool, now int64) (int, int64, []byte) 
 	if !ok {
 		return authInvalid, 0, nil
 	}
-	var hm [1]member
-	if ok, isObj := object(head, algKey, hm[:], v.name[:0]); !ok || !isObj {
+	var alg byteValue
+	if valid, obj := walkObject(head, v.name[:0], func(key []byte, value byteValue) {
+		if string(key) == "alg" {
+			alg = value
+		}
+	}); !valid || !obj {
 		return authInvalid, 0, nil
 	}
-	alg := hm[0]
-	if !alg.found || alg.kind != jStr {
+	if alg.kind != byteString {
 		return authInvalid, 0, nil
 	}
-	algorithm := alg.val
-	if alg.esc {
-		v.name = unescape(alg.val, v.name[:0])
+	algorithm := alg.raw
+	if alg.escaped {
+		v.name = unescape(alg.raw, v.name[:0])
 		algorithm = v.name
 	}
 	if string(algorithm) != "HS256" {
@@ -174,34 +173,41 @@ func (v *verifier) verify(hdr []byte, has bool, now int64) (int, int64, []byte) 
 	if !ok {
 		return authInvalid, 0, nil
 	}
-	ms := v.ms[:]
-	if ok, isObj := object(pay, v.keys, ms, v.name[:0]); !ok || !isObj {
+	var sub, name, exp byteValue
+	if valid, obj := walkObject(pay, v.name[:0], func(key []byte, value byteValue) {
+		switch string(key) {
+		case "sub":
+			sub = value
+		case "username":
+			name = value
+		case "exp":
+			exp = value
+		}
+	}); !valid || !obj {
 		return authInvalid, 0, nil
 	}
 	// exp is required and must be in the future.
-	exp := ms[2]
-	if !exp.found || exp.kind != jNum || !expAfter(exp.val, now) {
+	if exp.kind != byteNumber || !expAfter(exp.raw, now) {
 		return authInvalid, 0, nil
 	}
-	sub, name := ms[0], ms[1]
-	if !sub.found || sub.kind != jStr {
+	if sub.kind != byteString {
 		return authPayload, 0, nil
 	}
-	subject := sub.val
-	if sub.esc {
-		v.name = unescape(sub.val, v.name[:0])
+	subject := sub.raw
+	if sub.escaped {
+		v.name = unescape(sub.raw, v.name[:0])
 		subject = v.name
 	}
 	uid, ok := positive(subject)
 	if !ok {
 		return authPayload, 0, nil
 	}
-	if !name.found || name.kind != jStr {
+	if name.kind != byteString {
 		return authPayload, 0, nil
 	}
-	user := name.val
-	if name.esc {
-		v.name = unescape(name.val, v.name[:0])
+	user := name.raw
+	if name.escaped {
+		v.name = unescape(name.raw, v.name[:0])
 		user = v.name
 	} else {
 		// The payload buffer is reused by the next call; copy the name out.

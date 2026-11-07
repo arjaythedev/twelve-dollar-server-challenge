@@ -2,24 +2,37 @@ package main
 
 import (
 	"bytes"
+	"math"
+	"strconv"
 	"testing"
 )
+
+func TestAppendInt(t *testing.T) {
+	for _, n := range []int64{math.MinInt64, -100, -99, -10, -1, 0, 9, 10, 99, 100, math.MaxInt64} {
+		got := appendInt([]byte("prefix:"), n)
+		want := strconv.AppendInt([]byte("prefix:"), n, 10)
+		if !bytes.Equal(got, want) {
+			t.Fatalf("integer %d: %s", n, got)
+		}
+	}
+}
 
 func TestAppendEsc(t *testing.T) {
 	for _, input := range []string{"plain", "quote: \" slash: \\", "\x00\x01\x1f\n\t\r\b\f", "café ✓ /<>&"} {
 		raw := []byte(input)
 		escaped := appendEsc(nil, raw)
-		if !bytes.Equal(escaped, appendEscSlow(nil, raw)) {
-			t.Fatalf("escaping mismatch for %q", input)
-		}
-		var members [1]member
+		var body byteValue
 		doc := append(append([]byte(`{"body":"`), escaped...), []byte(`"}`)...)
-		valid, obj := object(doc, []string{"body"}, members[:], nil)
-		if !valid || !obj || members[0].kind != jStr {
+		valid, obj := walkObject(doc, nil, func(key []byte, value byteValue) {
+			if string(key) == "body" {
+				body = value
+			}
+		})
+		if !valid || !obj || body.kind != byteString {
 			t.Fatalf("invalid escaped object: %s", doc)
 		}
-		decoded := members[0].val
-		if members[0].esc {
+		decoded := body.raw
+		if body.escaped {
 			decoded = unescape(decoded, nil)
 		}
 		if !bytes.Equal(decoded, raw) {

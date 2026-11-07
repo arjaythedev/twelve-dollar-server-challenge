@@ -11,7 +11,8 @@ Requires Linux with io_uring enabled.
 - A single event-loop thread owns SQLite. WAL uses `synchronous=NORMAL`;
   up to 256 ready completions share a commit before any new response is sent.
   Batching adds no fixed collection delay; commit failures replace staged responses.
-- No JSON marshal/unmarshal. A byte scanner validates input and handles escapes.
+- No JSON marshal/unmarshal. `scan.go` validates raw bytes with a visitor, skips unknown values,
+  and decodes selected escaped strings. `bytes.go` appends output bytes directly.
   C renders read responses directly into spare byte capacity, with a Go fallback.
   Post objects use the reusable `postJSON` byte buffer, then append into responses.
   `like_count` stays last; `likeOffset` allows replacing only its numeric tail.

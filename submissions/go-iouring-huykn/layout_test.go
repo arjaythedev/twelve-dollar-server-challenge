@@ -15,16 +15,16 @@ func TestStructSizes(t *testing.T) {
 	types := map[string]reflect.Type{
 		"app":        reflect.TypeOf(app{}),
 		"connection": reflect.TypeOf(connection{}),
-		"jsonReader": reflect.TypeOf(jsonReader{}),
-		"member":     reflect.TypeOf(member{}),
+		"byteReader": reflect.TypeOf(byteReader{}),
+		"byteValue":  reflect.TypeOf(byteValue{}),
 		"postBytes":  reflect.TypeOf(postBytes{}),
 		"request":    reflect.TypeOf(request{}),
 		"server":     reflect.TypeOf(server{}),
 		"verifier":   reflect.TypeOf(verifier{}),
 	}
 	want := map[string]uintptr{
-		"app": 136, "connection": 72, "jsonReader": 40, "member": 40,
-		"postBytes": 32, "request": 104, "server": 56, "verifier": 320,
+		"app": 96, "connection": 72, "byteReader": 32, "byteValue": 32,
+		"postBytes": 32, "request": 104, "server": 56, "verifier": 176,
 	}
 	for name, typ := range types {
 		if got := typ.Size(); got != want[name] {

@@ -745,18 +745,33 @@ static u8 *json_esc(u8 *d, const u8 *s, u32 n) {
     if (((w - lo * 0x20) & ~w | (qq - lo) & ~qq | (bb - lo) & ~bb) & hi) break;
     memcpy(d + i, &w, 8);
   }
+  // n + ROOM was checked above; plain tail bytes cannot expand.
+  for (; i < n && s[i] >= 0x20 && s[i] != '"' && s[i] != '\\'; i++) d[i] = s[i];
   return json_esc_slow(d + i, s + i, n - i);
 }
 
 static u8 *json_int(u8 *d, i64 v) {
+  static const char pairs[] =
+    "00010203040506070809101112131415161718192021222324252627282930313233343536373839404142434445464748495051525354555657585960616263646566676869707172737475767778798081828384858687888990919293949596979899";
+  u64 u = v < 0 ? (u64)0 - (u64)v : (u64)v;
+  if (v < 0) *d++ = '-';
+  if (u < 10) {
+    *d++ = (u8)('0' + u);
+    return d;
+  }
   u8 t[20];
   int k = 20;
-  u64 u = v < 0 ? (u64)0 - (u64)v : (u64)v;
-  do {
-    t[--k] = (u8)('0' + u % 10);
-    u /= 10;
-  } while (u);
-  if (v < 0) *d++ = '-';
+  while (u >= 100) {
+    unsigned int r = (unsigned int)(u % 100) * 2;
+    u /= 100;
+    t[--k] = pairs[r + 1];
+    t[--k] = pairs[r];
+  }
+  if (u < 10) t[--k] = (u8)('0' + u);
+  else {
+    t[--k] = pairs[u * 2 + 1];
+    t[--k] = pairs[u * 2];
+  }
   memcpy(d, t + k, 20 - k);
   return d + 20 - k;
 }

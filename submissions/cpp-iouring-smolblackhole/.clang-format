@@ -1,0 +1,11 @@
+BasedOnStyle: Microsoft
+ColumnLimit: 100
+IndentWidth: 4
+NamespaceIndentation: None
+AllowShortBlocksOnASingleLine: Never
+AllowShortFunctionsOnASingleLine: None
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLambdasOnASingleLine: None
+AllowShortLoopsOnASingleLine: false
+InsertBraces: true
+SeparateDefinitionBlocks: Always

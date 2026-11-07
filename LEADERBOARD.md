@@ -109,14 +109,14 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | 42 | cider-iouring-pomilon-v3 | #234 | Cider (native x86-64, io_uring, SQLite B-tree reads) | **228,000** | 21,945 | 370 | 853 | 0.00 | 86 | 36 | 668 | 2026-10-31 |
 | 43 | dexlang-iouring-tuned-ensamuel7 | #279 | DexLang (generated C, io_uring, SQLite B-tree reads) | **226,000** ᵝ | 21,876 | 297 | 633 | 0.00 | 84 | 35 | 873 | 2026-11-02 |
 | 44 | wat-wasmedge-delneg | #288 | WebAssembly (hand-written WAT, WasmEdge AOT, io_uring, SQLite B-tree reads) | **220,000** ᵒ | 21,464 | 21.9 | 263.7 | 0.00 | 72 | 31 | 913 | 2026-11-04 |
-| 45 | swift-iouring-Tabonx | #173 | Swift (io_uring, SQLite) | **219,000** ᶻ | 21,284 | 135 | 352 | 0.00 | 80 | 35 | 1,128 | 2026-10-29 |
-| 46 | cpp-eastl-io_uring-pgo-hendy643 | #32 | C++ (io_uring, EASTL) | **210,000** | 20,436 | 322 | 672 | 0.00 | 73 | 33 | 633 | 2026-10-26 |
-| 46 | csharp-epoll-gichamba | #174 | C# (Native AOT, io_uring) | **210,000** | 20,411 | 277 | 853 | 0.00 | 76 | 35 | 632 | 2026-10-29 |
-| 46 | c-epoll-unorig-username | #183 | C (epoll) | **210,000** | 20,425 | 300 | 713 | 0.00 | 95 | 43 | 808 | 2026-10-29 |
-| 46 | cider-iouring-pomilon-v2 | #225 | Cider (native x86-64, io_uring) | **210,000** | 20,404 | 348 | 504 | 0.00 | 86 | 39 | 611 | 2026-10-31 |
-| 46 | kotlin-trikeshed-jnorthrup | #298 | Kotlin (Kotlin/Native, io_uring, SQLite B-tree reads) | **210,000** | 20,566 | 61.7 | 207.7 | 0.00 | 69 | 31 | 579 | 2026-11-04 |
-| 46 | swift-iouring-akbashev | #297 | Swift (io_uring, SQLite B-tree reads) | **210,000** | 20,571 | 22.4 | 149.6 | 0.00 | 75 | 34 | 664 | 2026-11-05 |
-| 46 | c-iouring-le0nvfx | #341 | C (io_uring, SQLite B-tree reads) | **210,000** ᵡ | 20,594 | 14.0 | 63.6 | 0.00 | 76 | 34 | 605 | 2026-11-07 |
+| 44 | c-iouring-le0nvfx | #352 | C (io_uring, SQLite B-tree reads) | **220,000** ᵡ | 21,431 | 142.3 | 633.1 | 0.00 | 82 | 35 | 702 | 2026-11-07 |
+| 46 | swift-iouring-Tabonx | #173 | Swift (io_uring, SQLite) | **219,000** ᶻ | 21,284 | 135 | 352 | 0.00 | 80 | 35 | 1,128 | 2026-10-29 |
+| 47 | cpp-eastl-io_uring-pgo-hendy643 | #32 | C++ (io_uring, EASTL) | **210,000** | 20,436 | 322 | 672 | 0.00 | 73 | 33 | 633 | 2026-10-26 |
+| 47 | csharp-epoll-gichamba | #174 | C# (Native AOT, io_uring) | **210,000** | 20,411 | 277 | 853 | 0.00 | 76 | 35 | 632 | 2026-10-29 |
+| 47 | c-epoll-unorig-username | #183 | C (epoll) | **210,000** | 20,425 | 300 | 713 | 0.00 | 95 | 43 | 808 | 2026-10-29 |
+| 47 | cider-iouring-pomilon-v2 | #225 | Cider (native x86-64, io_uring) | **210,000** | 20,404 | 348 | 504 | 0.00 | 86 | 39 | 611 | 2026-10-31 |
+| 47 | kotlin-trikeshed-jnorthrup | #298 | Kotlin (Kotlin/Native, io_uring, SQLite B-tree reads) | **210,000** | 20,566 | 61.7 | 207.7 | 0.00 | 69 | 31 | 579 | 2026-11-04 |
+| 47 | swift-iouring-akbashev | #297 | Swift (io_uring, SQLite B-tree reads) | **210,000** | 20,571 | 22.4 | 149.6 | 0.00 | 75 | 34 | 664 | 2026-11-05 |
 | 53 | csharp-iouring-jit-gichamba | #175 | C# (JIT, io_uring) | **209,000** | 20,265 | 366 | 735 | 0.00 | 84 | 38 | 633 | 2026-10-31 |
 | 54 | go-iouring-quananh2503 | #327 | Go (io_uring, cgo SQLite B-tree reads) | **208,000** | 20,388 | 15.2 | 165.2 | 0.00 | 91 | 41 | 1,118 | 2026-11-06 |
 | 55 | zig-epoll-unorig-username | #189 | Zig (epoll) | **200,000** | 19,661 | 54 | 154 | 0.00 | 94 | 44 | 1,155 | 2026-10-29 |
@@ -419,9 +419,13 @@ verify, local JSON helper, ASCII length fast path; held, not merged: it didn't b
 p95 2.7 / p99 107.7 ms, 0.93 % err = connect timeouts, 100 % CPU, 143 µs/req, 409 MB, 2026-11-06), with the same
 75,000 5-minute failure (1.59 % timeouts).
 
-ᵡ **c-iouring-le0nvfx** is scored at its follow-up PR **#341** (`abcc24a`, merged: SQLite `cache_size` 8 → 64 MiB);
-220,000 failed the 2-minute probe on p99 (1.95 s at 80 % CPU, 0 errors). Its merged #340 code (`a0443a9`) held
-**195,000** (19,189 req/s, p95 12.6 / p99 139.5 ms, 73 % CPU, 2026-11-06).
+ᵡ **c-iouring-le0nvfx** is scored at its follow-up PR **#352** at commit **`3e10490`** (bigger recv/drain batches, PCACHE2
+truncate-skip wrapper); above the merged #341's 210,000, but not merged: the head moved to `2711b28` during the run, and
+`2711b28` is queued. The 220,000 hold had 0 errors; 230,000 failed the 2-minute probe on p95/p99 (0.60 / 2.07 s, 85 %
+CPU) and 240,000 on p95 (3.8 s, 93 % CPU). The merged code is #341 (`abcc24a`, SQLite `cache_size` 8 → 64 MiB), which
+held **210,000** (20,594 req/s, p95 14.0 / p99 63.6 ms, 76 % CPU, 605 MB, 2026-11-07); 220,000 failed its 2-minute probe
+on p99 (1.95 s at 80 % CPU, 0 errors). Its merged #340 code (`a0443a9`) held **195,000** (19,189 req/s, p95 12.6 / p99
+139.5 ms, 73 % CPU, 2026-11-06).
 
 ᵂ **v-epoll-i098** stays on its merged #191 row. Its follow-up **#342** (`4c2205c`, C row JSON straight from B-tree
 pages, 4 ms batch window, smaller socket buffers; held, not merged: it didn't beat the merged row) scored **240,000**
@@ -746,7 +750,8 @@ public plugin APIs (a custom page cache through `SQLITE_CONFIG_PCACHE2`, a custo
   `src/btree.h` with renamed identifiers; `server.c`, `ring.c`, the WAL shim VFS and the checkpoint thread are its own.
   Arjay ruled 2026-11-04 that reusing another entry's helpers is fine when the README credits it; `1d952d2` added the
   #245 credit (plus whitespace-only restores in the vendored stock sqlite3.c) → merged at `1d952d2`. Scored at
-  `a0443a9` (195k); now scored at its follow-up #341 (`abcc24a`, 210k).
+  `a0443a9` (195k); then at its merged follow-up #341 (`abcc24a`, 210k); now at follow-up #352 (`3e10490`, 220k, not
+  merged yet).
 - **Reads can see uncommitted writes** in the same batch: Deno #119 (also serves a snapshot up to 20 ms stale), Zig #125.
 - **start.sh restart loops** (the app restarts itself instead of letting systemd see a crash): Deno #119, c-epoll #64,
   c-iouring-raoz #26 (restarts after a signal exit), go-epoll-Antheurus #65 (worker 0 re-spawns dead workers).

@@ -1,0 +1,2129 @@
+// Library.Arena.ailang
+// Slab allocator for fixed-size allocations
+// Eliminates per-allocation mmap overhead
+//
+// Design:
+//   - mmap large chunks (4MB) once
+//   - Divide into fixed-size blocks (24, 32, 64, 128 bytes)
+//   - Free list per size class
+//   - Allocate = pop from free list or bump pointer
+//   - Deallocate = push to free list (instant reuse)
+//
+// Copyright (c) 2025-2026 Sean Collins, 2 Paws Machine and Engineering.
+// Released under the MIT License, as required for submissions to this challenge.
+
+// =============================================================================
+// CONSTANTS
+// =============================================================================
+FixedPool.ArenaConst {
+    "CHUNK_SIZE": Initialize=4194304   
+    "SLAB_24": Initialize=24
+    "SLAB_32": Initialize=32
+    "SLAB_64": Initialize=64
+    "SLAB_128": Initialize=128
+    "SLAB_256": Initialize=256
+}
+
+// =============================================================================
+// SLAB STATE - One per size class
+// =============================================================================
+FixedPool.Slab24 {
+    "chunk": Initialize=0         
+    "next": Initialize=0           
+    "end": Initialize=0            
+    "free_list": Initialize=0     
+    "alloc_count": Initialize=0     
+    "free_count": Initialize=0
+    "chunk_count": Initialize=0
+}
+
+FixedPool.Slab32 {
+    "chunk": Initialize=0
+    "next": Initialize=0
+    "end": Initialize=0
+    "free_list": Initialize=0
+    "alloc_count": Initialize=0
+    "free_count": Initialize=0
+    "chunk_count": Initialize=0
+}
+
+FixedPool.Slab256 {
+    "chunk": Initialize=0
+    "next": Initialize=0
+    "end": Initialize=0
+    "free_list": Initialize=0
+    "alloc_count": Initialize=0
+    "free_count": Initialize=0
+    "chunk_count": Initialize=0
+}
+
+FixedPool.Slab512 {
+    "chunk": Initialize=0
+    "next": Initialize=0
+    "end": Initialize=0
+    "free_list": Initialize=0
+    "alloc_count": Initialize=0
+    "free_count": Initialize=0
+    "chunk_count": Initialize=0
+}
+
+FixedPool.Slab1024 {
+    "chunk": Initialize=0
+    "next": Initialize=0
+    "end": Initialize=0
+    "free_list": Initialize=0
+    "alloc_count": Initialize=0
+    "free_count": Initialize=0
+    "chunk_count": Initialize=0
+}
+
+FixedPool.Slab2048 {
+    "chunk": Initialize=0
+    "next": Initialize=0
+    "end": Initialize=0
+    "free_list": Initialize=0
+    "alloc_count": Initialize=0
+    "free_count": Initialize=0
+    "chunk_count": Initialize=0
+}
+
+FixedPool.Slab64 {
+    "chunk": Initialize=0
+    "next": Initialize=0
+    "end": Initialize=0
+    "free_list": Initialize=0
+    "alloc_count": Initialize=0
+    "free_count": Initialize=0
+    "chunk_count": Initialize=0
+}
+
+FixedPool.Slab128 {
+    "chunk": Initialize=0
+    "next": Initialize=0
+    "end": Initialize=0
+    "free_list": Initialize=0
+    "alloc_count": Initialize=0
+    "free_count": Initialize=0
+    "chunk_count": Initialize=0
+}
+
+
+FixedPool.Slab4096 {
+    "chunk": Initialize=0
+    "next": Initialize=0
+    "end": Initialize=0
+    "free_list": Initialize=0
+    "alloc_count": Initialize=0
+    "free_count": Initialize=0
+    "chunk_count": Initialize=0
+}
+
+FixedPool.Slab8192 {
+    "chunk": Initialize=0
+    "next": Initialize=0
+    "end": Initialize=0
+    "free_list": Initialize=0
+    "alloc_count": Initialize=0
+    "free_count": Initialize=0
+    "chunk_count": Initialize=0
+}
+
+FixedPool.Slab16384 {
+    "chunk": Initialize=0
+    "next": Initialize=0
+    "end": Initialize=0
+    "free_list": Initialize=0
+    "alloc_count": Initialize=0
+    "free_count": Initialize=0
+    "chunk_count": Initialize=0
+}
+
+FixedPool.Slab32768 {
+    "chunk": Initialize=0
+    "next": Initialize=0
+    "end": Initialize=0
+    "free_list": Initialize=0
+    "alloc_count": Initialize=0
+    "free_count": Initialize=0
+    "chunk_count": Initialize=0
+}
+
+FixedPool.Slab65536 {
+    "chunk": Initialize=0
+    "next": Initialize=0
+    "end": Initialize=0
+    "free_list": Initialize=0
+    "alloc_count": Initialize=0
+    "free_count": Initialize=0
+    "chunk_count": Initialize=0
+}
+
+// General arena for large/variable allocations. After the 8K..64K slabs
+// were added this now only sees sizes > 65536 (handled by direct mmap)
+// — the bump-allocator fields below are kept for back-compat but are
+// effectively unused.
+FixedPool.ArenaGeneral {
+    "chunk": Initialize=0
+    "next": Initialize=0
+    "end": Initialize=0
+    "alloc_count": Initialize=0
+    "chunk_count": Initialize=0
+    "fallback_count": Initialize=0
+}
+
+// Per-turn scratch bump. While on==1, Arena_Alloc takes from here and
+// Arena_Free is a no-op. ScratchEnd rewinds to the first chunk (pages stay
+// mapped — RSS is high-water of the biggest turn, not a leak).
+FixedPool.ArenaScratch {
+    "on":          Initialize=0, CanChange=True
+    "head":        Initialize=0, CanChange=True
+    "chunk":       Initialize=0, CanChange=True
+    "next":        Initialize=0, CanChange=True
+    "end":         Initialize=0, CanChange=True
+    "chunk_count": Initialize=0, CanChange=True
+}
+
+// Large-mmap cache for allocations > 65536 bytes. Power-of-2 buckets
+// indexed by log2(size) of the rounded-up allocation. Freeing pushes
+// onto the bucket's freelist; allocating pops if non-empty, else mmaps.
+// This fixes the "just leak" path that previously burned arbitrary RSS
+// when large XArrays grew past 65536 and called Arena_Free on the
+// old backing. Each freelist node stores next_ptr in the first 8 B
+// and alloc_size in bytes 8..15, so the block itself serves as its
+// own list header.
+FixedPool.LargeMmapCache {
+    "b_131072":  Initialize=0, CanChange=True
+    "b_262144":  Initialize=0, CanChange=True
+    "b_524288":  Initialize=0, CanChange=True
+    "b_1048576": Initialize=0, CanChange=True
+    "b_2097152": Initialize=0, CanChange=True
+    "b_4194304": Initialize=0, CanChange=True
+    "hits":      Initialize=0, CanChange=True
+    "misses":    Initialize=0, CanChange=True
+    "releases":  Initialize=0, CanChange=True
+    "unmapped":  Initialize=0, CanChange=True
+}
+
+// =============================================================================
+// INITIALIZATION
+// =============================================================================
+Function.Arena_Init {
+    Body: {
+        // Initialize 24-byte slab
+        Arena_InitSlab24()
+        
+        // Initialize 32-byte slab
+        Arena_InitSlab32()
+        
+        // Initialize 64-byte slab  
+        Arena_InitSlab64()
+        
+        // Initialize 128-byte slab
+        Arena_InitSlab128()
+        
+        // Initialize 256-byte slab
+        Arena_InitSlab256()
+        
+        // Initialize 512-byte slab
+        Arena_InitSlab512()
+        
+        // Initialize 1024-byte slab
+        Arena_InitSlab1024()
+        
+        // Initialize 2048-byte slab
+        Arena_InitSlab2048()
+        
+        // Initialize 4096-byte slab
+        Arena_InitSlab4096()
+
+        // Initialize 8192-byte slab
+        Arena_InitSlab8192()
+
+        // Initialize 16384-byte slab
+        Arena_InitSlab16384()
+
+        // Initialize 32768-byte slab
+        Arena_InitSlab32768()
+
+        // Initialize 65536-byte slab
+        Arena_InitSlab65536()
+
+        // Initialize general arena
+        Arena_InitGeneral()
+
+        ReturnValue(1)
+    }
+}
+
+Function.Arena_InitSlab24 {
+    Body: {
+        chunk = Arena_MmapChunk()
+        StoreValue(chunk, 0)
+        Slab24.chunk = chunk
+        Slab24.next = Add(chunk, 8)
+        Slab24.end = Add(chunk, ArenaConst.CHUNK_SIZE)
+        Slab24.free_list = 0
+        Slab24.alloc_count = 0
+        Slab24.free_count = 0
+        Slab24.chunk_count = 1
+    }
+}
+
+Function.Arena_InitSlab32 {
+    Body: {
+        chunk = Arena_MmapChunk()
+        StoreValue(chunk, 0)
+        Slab32.chunk = chunk
+        Slab32.next = Add(chunk, 8)
+        Slab32.end = Add(chunk, ArenaConst.CHUNK_SIZE)
+        Slab32.free_list = 0
+        Slab32.alloc_count = 0
+        Slab32.free_count = 0
+        Slab32.chunk_count = 1
+    }
+}
+
+Function.Arena_InitSlab64 {
+    Body: {
+        chunk = Arena_MmapChunk()
+        StoreValue(chunk, 0)
+        Slab64.chunk = chunk
+        Slab64.next = Add(chunk, 8)
+        Slab64.end = Add(chunk, ArenaConst.CHUNK_SIZE)
+        Slab64.free_list = 0
+        Slab64.alloc_count = 0
+        Slab64.free_count = 0
+        Slab64.chunk_count = 1
+    }
+}
+
+Function.Arena_InitSlab128 {
+    Body: {
+        chunk = Arena_MmapChunk()
+        StoreValue(chunk, 0)
+        Slab128.chunk = chunk
+        Slab128.next = Add(chunk, 8)
+        Slab128.end = Add(chunk, ArenaConst.CHUNK_SIZE)
+        Slab128.free_list = 0
+        Slab128.alloc_count = 0
+        Slab128.free_count = 0
+        Slab128.chunk_count = 1
+    }
+}
+
+Function.Arena_InitSlab256 {
+    Body: {
+        chunk = Arena_MmapChunk()
+        StoreValue(chunk, 0)
+        Slab256.chunk = chunk
+        Slab256.next = Add(chunk, 8)
+        Slab256.end = Add(chunk, ArenaConst.CHUNK_SIZE)
+        Slab256.free_list = 0
+        Slab256.alloc_count = 0
+        Slab256.free_count = 0
+        Slab256.chunk_count = 1
+    }
+}
+
+Function.Arena_InitSlab512 {
+    Body: {
+        chunk = Arena_MmapChunk()
+        StoreValue(chunk, 0)
+        Slab512.chunk = chunk
+        Slab512.next = Add(chunk, 8)
+        Slab512.end = Add(chunk, ArenaConst.CHUNK_SIZE)
+        Slab512.free_list = 0
+        Slab512.alloc_count = 0
+        Slab512.free_count = 0
+        Slab512.chunk_count = 1
+    }
+}
+
+Function.Arena_InitSlab1024 {
+    Body: {
+        chunk = Arena_MmapChunk()
+        StoreValue(chunk, 0)
+        Slab1024.chunk = chunk
+        Slab1024.next = Add(chunk, 8)
+        Slab1024.end = Add(chunk, ArenaConst.CHUNK_SIZE)
+        Slab1024.free_list = 0
+        Slab1024.alloc_count = 0
+        Slab1024.free_count = 0
+        Slab1024.chunk_count = 1
+    }
+}
+
+Function.Arena_InitSlab2048 {
+    Body: {
+        chunk = Arena_MmapChunk()
+        StoreValue(chunk, 0)
+        Slab2048.chunk = chunk
+        Slab2048.next = Add(chunk, 8)
+        Slab2048.end = Add(chunk, ArenaConst.CHUNK_SIZE)
+        Slab2048.free_list = 0
+        Slab2048.alloc_count = 0
+        Slab2048.free_count = 0
+        Slab2048.chunk_count = 1
+    }
+}
+
+Function.Arena_InitSlab4096 {
+    Body: {
+        chunk = Arena_MmapChunk()
+        StoreValue(chunk, 0)
+        Slab4096.chunk = chunk
+        Slab4096.next = Add(chunk, 8)
+        Slab4096.end = Add(chunk, ArenaConst.CHUNK_SIZE)
+        Slab4096.free_list = 0
+        Slab4096.alloc_count = 0
+        Slab4096.free_count = 0
+        Slab4096.chunk_count = 1
+    }
+}
+
+Function.Arena_InitGeneral {
+    Body: {
+        chunk = Arena_MmapChunk()
+        StoreValue(chunk, 0)
+        ArenaGeneral.chunk = chunk
+        ArenaGeneral.next = Add(chunk, 8)
+        ArenaGeneral.end = Add(chunk, ArenaConst.CHUNK_SIZE)
+        ArenaGeneral.alloc_count = 0
+        ArenaGeneral.chunk_count = 1
+        ArenaGeneral.fallback_count = 0
+    }
+}
+
+// =============================================================================
+// RAW MMAP - Get a new chunk from kernel
+// =============================================================================
+Function.Arena_MmapChunk {
+    Output: Address
+    Body: {
+        // mmap(NULL, CHUNK_SIZE, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0)
+        // syscall 9: rdi=addr, rsi=len, rdx=prot, r10=flags, r8=fd, r9=offset
+        addr = SystemCall(9, 0, ArenaConst.CHUNK_SIZE, 3, 34, -1, 0)
+        
+        IfCondition LessThan(addr, 0) ThenBlock: {
+            PrintMessage("[ARENA] FATAL: mmap failed!\n")
+            Exit(1)
+        }
+        
+        ReturnValue(addr)
+    }
+}
+
+
+
+
+// =============================================================================
+// SLAB 24 - Allocate/Free 24-byte blocks
+// =============================================================================
+Function.Arena_Alloc24 {
+    Output: Address
+    Body: {
+        Slab24.alloc_count = Add(Slab24.alloc_count, 1)
+        
+        // Check free list first (instant reuse)
+        IfCondition NotEqual(Slab24.free_list, 0) ThenBlock: {
+            ptr = Slab24.free_list
+            // Free list stores next pointer at [ptr]
+            Slab24.free_list = Dereference(ptr)
+            ReturnValue(ptr)
+        }
+        
+        // Bump allocate
+        IfCondition GreaterEqual(Add(Slab24.next, 24), Slab24.end) ThenBlock: {
+            // Need new chunk
+            Arena_GrowSlab24()
+        }
+        
+        ptr = Slab24.next
+        Slab24.next = Add(Slab24.next, 24)
+        ReturnValue(ptr)
+    }
+}
+
+Function.Arena_Free24 {
+    Input: ptr: Address
+    Body: {
+        Slab24.free_count = Add(Slab24.free_count, 1)
+        
+        // Push to free list (store current head at ptr, update head)
+        StoreValue(ptr, Slab24.free_list)
+        Slab24.free_list = ptr
+    }
+}
+
+Function.Arena_GrowSlab24 {
+    Body: {
+        // Allocate new chunk
+        old_chunk = Slab24.chunk
+        chunk = Arena_MmapChunk()
+        StoreValue(chunk, old_chunk)
+        Slab24.chunk = chunk
+        Slab24.next = Add(chunk, 8)
+        Slab24.end = Add(chunk, ArenaConst.CHUNK_SIZE)
+        Slab24.chunk_count = Add(Slab24.chunk_count, 1)
+    }
+}
+
+Function.Arena_FreeSlab24 {
+    Body: {
+        current = Slab24.chunk
+        WhileLoop NotEqual(current, 0) {
+            prev = Dereference(current)
+            SystemCall(11, current, ArenaConst.CHUNK_SIZE, 0, 0, 0, 0)
+            current = prev
+        }
+        Slab24.chunk = 0
+        Slab24.next = 0
+        Slab24.end = 0
+        Slab24.free_list = 0
+        Slab24.alloc_count = 0
+        Slab24.free_count = 0
+        Slab24.chunk_count = 0
+    }
+}
+
+// =============================================================================
+// SLAB 32 - Allocate/Free 32-byte blocks
+// =============================================================================
+Function.Arena_Alloc32 {
+    Output: Address
+    Body: {
+        Slab32.alloc_count = Add(Slab32.alloc_count, 1)
+        
+        IfCondition NotEqual(Slab32.free_list, 0) ThenBlock: {
+            ptr = Slab32.free_list
+            Slab32.free_list = Dereference(ptr)
+            ReturnValue(ptr)
+        }
+        
+        IfCondition GreaterEqual(Add(Slab32.next, 32), Slab32.end) ThenBlock: {
+            Arena_GrowSlab32()
+        }
+        
+        ptr = Slab32.next
+        Slab32.next = Add(Slab32.next, 32)
+        ReturnValue(ptr)
+    }
+}
+
+Function.Arena_Free32 {
+    Input: ptr: Address
+    Body: {
+        Slab32.free_count = Add(Slab32.free_count, 1)
+        StoreValue(ptr, Slab32.free_list)
+        Slab32.free_list = ptr
+    }
+}
+
+Function.Arena_GrowSlab32 {
+    Body: {
+        old_chunk = Slab32.chunk
+        chunk = Arena_MmapChunk()
+        StoreValue(chunk, old_chunk)
+        Slab32.chunk = chunk
+        Slab32.next = Add(chunk, 8)
+        Slab32.end = Add(chunk, ArenaConst.CHUNK_SIZE)
+        Slab32.chunk_count = Add(Slab32.chunk_count, 1)
+    }
+}
+
+Function.Arena_FreeSlab32 {
+    Body: {
+        current = Slab32.chunk
+        WhileLoop NotEqual(current, 0) {
+            prev = Dereference(current)
+            SystemCall(11, current, ArenaConst.CHUNK_SIZE, 0, 0, 0, 0)
+            current = prev
+        }
+        Slab32.chunk = 0
+        Slab32.next = 0
+        Slab32.end = 0
+        Slab32.free_list = 0
+        Slab32.alloc_count = 0
+        Slab32.free_count = 0
+        Slab32.chunk_count = 0
+    }
+}
+
+// =============================================================================
+// SLAB 64 - Allocate/Free 64-byte blocks
+// =============================================================================
+Function.Arena_Alloc64 {
+    Output: Address
+    Body: {
+        Slab64.alloc_count = Add(Slab64.alloc_count, 1)
+        
+        IfCondition NotEqual(Slab64.free_list, 0) ThenBlock: {
+            ptr = Slab64.free_list
+            Slab64.free_list = Dereference(ptr)
+            ReturnValue(ptr)
+        }
+        
+        IfCondition GreaterEqual(Add(Slab64.next, 64), Slab64.end) ThenBlock: {
+            Arena_GrowSlab64()
+        }
+        
+        ptr = Slab64.next
+        Slab64.next = Add(Slab64.next, 64)
+        ReturnValue(ptr)
+    }
+}
+
+Function.Arena_Free64 {
+    Input: ptr: Address
+    Body: {
+        Slab64.free_count = Add(Slab64.free_count, 1)
+        StoreValue(ptr, Slab64.free_list)
+        Slab64.free_list = ptr
+    }
+}
+
+Function.Arena_GrowSlab64 {
+    Body: {
+        old_chunk = Slab64.chunk
+        chunk = Arena_MmapChunk()
+        StoreValue(chunk, old_chunk)
+        Slab64.chunk = chunk
+        Slab64.next = Add(chunk, 8)
+        Slab64.end = Add(chunk, ArenaConst.CHUNK_SIZE)
+        Slab64.chunk_count = Add(Slab64.chunk_count, 1)
+    }
+}
+
+Function.Arena_FreeSlab64 {
+    Body: {
+        current = Slab64.chunk
+        WhileLoop NotEqual(current, 0) {
+            prev = Dereference(current)
+            SystemCall(11, current, ArenaConst.CHUNK_SIZE, 0, 0, 0, 0)
+            current = prev
+        }
+        Slab64.chunk = 0
+        Slab64.next = 0
+        Slab64.end = 0
+        Slab64.free_list = 0
+        Slab64.alloc_count = 0
+        Slab64.free_count = 0
+        Slab64.chunk_count = 0
+    }
+}
+
+
+// =============================================================================
+// SLAB 128 - Allocate/Free 128-byte blocks  
+// =============================================================================
+Function.Arena_Alloc128 {
+    Output: Address
+    Body: {
+        Slab128.alloc_count = Add(Slab128.alloc_count, 1)
+        
+        IfCondition NotEqual(Slab128.free_list, 0) ThenBlock: {
+            ptr = Slab128.free_list
+            Slab128.free_list = Dereference(ptr)
+            ReturnValue(ptr)
+        }
+        
+        IfCondition GreaterEqual(Add(Slab128.next, 128), Slab128.end) ThenBlock: {
+            Arena_GrowSlab128()
+        }
+        
+        ptr = Slab128.next
+        Slab128.next = Add(Slab128.next, 128)
+        ReturnValue(ptr)
+    }
+}
+
+Function.Arena_Free128 {
+    Input: ptr: Address
+    Body: {
+        Slab128.free_count = Add(Slab128.free_count, 1)
+        StoreValue(ptr, Slab128.free_list)
+        Slab128.free_list = ptr
+    }
+}
+
+Function.Arena_GrowSlab128 {
+    Body: {
+        old_chunk = Slab128.chunk
+        chunk = Arena_MmapChunk()
+        StoreValue(chunk, old_chunk)
+        Slab128.chunk = chunk
+        Slab128.next = Add(chunk, 8)
+        Slab128.end = Add(chunk, ArenaConst.CHUNK_SIZE)
+        Slab128.chunk_count = Add(Slab128.chunk_count, 1)
+    }
+}
+
+Function.Arena_FreeSlab128 {
+    Body: {
+        current = Slab128.chunk
+        WhileLoop NotEqual(current, 0) {
+            prev = Dereference(current)
+            SystemCall(11, current, ArenaConst.CHUNK_SIZE, 0, 0, 0, 0)
+            current = prev
+        }
+        Slab128.chunk = 0
+        Slab128.next = 0
+        Slab128.end = 0
+        Slab128.free_list = 0
+        Slab128.alloc_count = 0
+        Slab128.free_count = 0
+        Slab128.chunk_count = 0
+    }
+}
+
+// =============================================================================
+// SLAB 256 - Allocate/Free 256-byte blocks
+// =============================================================================
+Function.Arena_Alloc256 {
+    Output: Address
+    Body: {
+        Slab256.alloc_count = Add(Slab256.alloc_count, 1)
+        
+        IfCondition NotEqual(Slab256.free_list, 0) ThenBlock: {
+            ptr = Slab256.free_list
+            Slab256.free_list = Dereference(ptr)
+            ReturnValue(ptr)
+        }
+        
+        IfCondition GreaterEqual(Add(Slab256.next, 256), Slab256.end) ThenBlock: {
+            Arena_GrowSlab256()
+        }
+        
+        ptr = Slab256.next
+        Slab256.next = Add(Slab256.next, 256)
+        ReturnValue(ptr)
+    }
+}
+
+Function.Arena_Free256 {
+    Input: ptr: Address
+    Body: {
+        Slab256.free_count = Add(Slab256.free_count, 1)
+        StoreValue(ptr, Slab256.free_list)
+        Slab256.free_list = ptr
+    }
+}
+
+Function.Arena_GrowSlab256 {
+    Body: {
+        old_chunk = Slab256.chunk
+        chunk = Arena_MmapChunk()
+        StoreValue(chunk, old_chunk)
+        Slab256.chunk = chunk
+        Slab256.next = Add(chunk, 8)
+        Slab256.end = Add(chunk, ArenaConst.CHUNK_SIZE)
+        Slab256.chunk_count = Add(Slab256.chunk_count, 1)
+    }
+}
+
+Function.Arena_FreeSlab256 {
+    Body: {
+        current = Slab256.chunk
+        WhileLoop NotEqual(current, 0) {
+            prev = Dereference(current)
+            SystemCall(11, current, ArenaConst.CHUNK_SIZE, 0, 0, 0, 0)
+            current = prev
+        }
+        Slab256.chunk = 0
+        Slab256.next = 0
+        Slab256.end = 0
+        Slab256.free_list = 0
+        Slab256.alloc_count = 0
+        Slab256.free_count = 0
+        Slab256.chunk_count = 0
+    }
+}
+
+// =============================================================================
+// SLAB 512 - Allocate/Free 512-byte blocks
+// =============================================================================
+Function.Arena_Alloc512 {
+    Output: Address
+    Body: {
+        Slab512.alloc_count = Add(Slab512.alloc_count, 1)
+        
+        IfCondition NotEqual(Slab512.free_list, 0) ThenBlock: {
+            ptr = Slab512.free_list
+            Slab512.free_list = Dereference(ptr)
+            ReturnValue(ptr)
+        }
+        
+        IfCondition GreaterEqual(Add(Slab512.next, 512), Slab512.end) ThenBlock: {
+            Arena_GrowSlab512()
+        }
+        
+        ptr = Slab512.next
+        Slab512.next = Add(Slab512.next, 512)
+        ReturnValue(ptr)
+    }
+}
+
+Function.Arena_Free512 {
+    Input: ptr: Address
+    Body: {
+        Slab512.free_count = Add(Slab512.free_count, 1)
+        StoreValue(ptr, Slab512.free_list)
+        Slab512.free_list = ptr
+    }
+}
+
+Function.Arena_GrowSlab512 {
+    Body: {
+        old_chunk = Slab512.chunk
+        chunk = Arena_MmapChunk()
+        StoreValue(chunk, old_chunk)
+        Slab512.chunk = chunk
+        Slab512.next = Add(chunk, 8)
+        Slab512.end = Add(chunk, ArenaConst.CHUNK_SIZE)
+        Slab512.chunk_count = Add(Slab512.chunk_count, 1)
+    }
+}
+
+Function.Arena_FreeSlab512 {
+    Body: {
+        current = Slab512.chunk
+        WhileLoop NotEqual(current, 0) {
+            prev = Dereference(current)
+            SystemCall(11, current, ArenaConst.CHUNK_SIZE, 0, 0, 0, 0)
+            current = prev
+        }
+        Slab512.chunk = 0
+        Slab512.next = 0
+        Slab512.end = 0
+        Slab512.free_list = 0
+        Slab512.alloc_count = 0
+        Slab512.free_count = 0
+        Slab512.chunk_count = 0
+    }
+}
+
+// =============================================================================
+// SLAB 1024 - Allocate/Free 1024-byte blocks
+// =============================================================================
+Function.Arena_Alloc1024 {
+    Output: Address
+    Body: {
+        Slab1024.alloc_count = Add(Slab1024.alloc_count, 1)
+        
+        IfCondition NotEqual(Slab1024.free_list, 0) ThenBlock: {
+            ptr = Slab1024.free_list
+            Slab1024.free_list = Dereference(ptr)
+            ReturnValue(ptr)
+        }
+        
+        IfCondition GreaterEqual(Add(Slab1024.next, 1024), Slab1024.end) ThenBlock: {
+            Arena_GrowSlab1024()
+        }
+        
+        ptr = Slab1024.next
+        Slab1024.next = Add(Slab1024.next, 1024)
+        ReturnValue(ptr)
+    }
+}
+
+Function.Arena_Free1024 {
+    Input: ptr: Address
+    Body: {
+        Slab1024.free_count = Add(Slab1024.free_count, 1)
+        StoreValue(ptr, Slab1024.free_list)
+        Slab1024.free_list = ptr
+    }
+}
+
+Function.Arena_GrowSlab1024 {
+    Body: {
+        old_chunk = Slab1024.chunk
+        chunk = Arena_MmapChunk()
+        StoreValue(chunk, old_chunk)
+        Slab1024.chunk = chunk
+        Slab1024.next = Add(chunk, 8)
+        Slab1024.end = Add(chunk, ArenaConst.CHUNK_SIZE)
+        Slab1024.chunk_count = Add(Slab1024.chunk_count, 1)
+    }
+}
+
+Function.Arena_FreeSlab1024 {
+    Body: {
+        current = Slab1024.chunk
+        WhileLoop NotEqual(current, 0) {
+            prev = Dereference(current)
+            SystemCall(11, current, ArenaConst.CHUNK_SIZE, 0, 0, 0, 0)
+            current = prev
+        }
+        Slab1024.chunk = 0
+        Slab1024.next = 0
+        Slab1024.end = 0
+        Slab1024.free_list = 0
+        Slab1024.alloc_count = 0
+        Slab1024.free_count = 0
+        Slab1024.chunk_count = 0
+    }
+}
+
+// =============================================================================
+// SLAB 2048 - Allocate/Free 2048-byte blocks
+// =============================================================================
+Function.Arena_Alloc2048 {
+    Output: Address
+    Body: {
+        Slab2048.alloc_count = Add(Slab2048.alloc_count, 1)
+        
+        IfCondition NotEqual(Slab2048.free_list, 0) ThenBlock: {
+            ptr = Slab2048.free_list
+            Slab2048.free_list = Dereference(ptr)
+            ReturnValue(ptr)
+        }
+        
+        IfCondition GreaterEqual(Add(Slab2048.next, 2048), Slab2048.end) ThenBlock: {
+            Arena_GrowSlab2048()
+        }
+        
+        ptr = Slab2048.next
+        Slab2048.next = Add(Slab2048.next, 2048)
+        ReturnValue(ptr)
+    }
+}
+
+Function.Arena_Free2048 {
+    Input: ptr: Address
+    Body: {
+        Slab2048.free_count = Add(Slab2048.free_count, 1)
+        StoreValue(ptr, Slab2048.free_list)
+        Slab2048.free_list = ptr
+    }
+}
+
+Function.Arena_GrowSlab2048 {
+    Body: {
+        old_chunk = Slab2048.chunk
+        chunk = Arena_MmapChunk()
+        StoreValue(chunk, old_chunk)
+        Slab2048.chunk = chunk
+        Slab2048.next = Add(chunk, 8)
+        Slab2048.end = Add(chunk, ArenaConst.CHUNK_SIZE)
+        Slab2048.chunk_count = Add(Slab2048.chunk_count, 1)
+    }
+}
+
+Function.Arena_FreeSlab2048 {
+    Body: {
+        current = Slab2048.chunk
+        WhileLoop NotEqual(current, 0) {
+            prev = Dereference(current)
+            SystemCall(11, current, ArenaConst.CHUNK_SIZE, 0, 0, 0, 0)
+            current = prev
+        }
+        Slab2048.chunk = 0
+        Slab2048.next = 0
+        Slab2048.end = 0
+        Slab2048.free_list = 0
+        Slab2048.alloc_count = 0
+        Slab2048.free_count = 0
+        Slab2048.chunk_count = 0
+    }
+}
+
+// =============================================================================
+// SLAB 4096 - Allocate/Free 4096-byte blocks
+// =============================================================================
+Function.Arena_Alloc4096 {
+    Output: Address
+    Body: {
+        Slab4096.alloc_count = Add(Slab4096.alloc_count, 1)
+        
+        IfCondition NotEqual(Slab4096.free_list, 0) ThenBlock: {
+            ptr = Slab4096.free_list
+            Slab4096.free_list = Dereference(ptr)
+            ReturnValue(ptr)
+        }
+        
+        IfCondition GreaterEqual(Add(Slab4096.next, 4096), Slab4096.end) ThenBlock: {
+            Arena_GrowSlab4096()
+        }
+        
+        ptr = Slab4096.next
+        Slab4096.next = Add(Slab4096.next, 4096)
+        ReturnValue(ptr)
+    }
+}
+
+Function.Arena_Free4096 {
+    Input: ptr: Address
+    Body: {
+        Slab4096.free_count = Add(Slab4096.free_count, 1)
+        StoreValue(ptr, Slab4096.free_list)
+        Slab4096.free_list = ptr
+    }
+}
+
+Function.Arena_GrowSlab4096 {
+    Body: {
+        old_chunk = Slab4096.chunk
+        chunk = Arena_MmapChunk()
+        StoreValue(chunk, old_chunk)
+        Slab4096.chunk = chunk
+        Slab4096.next = Add(chunk, 8)
+        Slab4096.end = Add(chunk, ArenaConst.CHUNK_SIZE)
+        Slab4096.chunk_count = Add(Slab4096.chunk_count, 1)
+    }
+}
+
+Function.Arena_FreeSlab4096 {
+    Body: {
+        current = Slab4096.chunk
+        WhileLoop NotEqual(current, 0) {
+            prev = Dereference(current)
+            SystemCall(11, current, ArenaConst.CHUNK_SIZE, 0, 0, 0, 0)
+            current = prev
+        }
+        Slab4096.chunk = 0
+        Slab4096.next = 0
+        Slab4096.end = 0
+        Slab4096.free_list = 0
+        Slab4096.alloc_count = 0
+        Slab4096.free_count = 0
+        Slab4096.chunk_count = 0
+    }
+}
+
+// =============================================================================
+// SLAB 8192 — backs XArrays with capacity 511..1022 (16+cap*8 = 4104..8192)
+// =============================================================================
+Function.Arena_InitSlab8192 {
+    Body: {
+        chunk = Arena_MmapChunk()
+        StoreValue(chunk, 0)
+        Slab8192.chunk = chunk
+        Slab8192.next = Add(chunk, 8)
+        Slab8192.end = Add(chunk, ArenaConst.CHUNK_SIZE)
+        Slab8192.free_list = 0
+        Slab8192.alloc_count = 0
+        Slab8192.free_count = 0
+        Slab8192.chunk_count = 1
+    }
+}
+
+Function.Arena_Alloc8192 {
+    Output: Address
+    Body: {
+        Slab8192.alloc_count = Add(Slab8192.alloc_count, 1)
+        IfCondition NotEqual(Slab8192.free_list, 0) ThenBlock: {
+            ptr = Slab8192.free_list
+            Slab8192.free_list = Dereference(ptr)
+            ReturnValue(ptr)
+        }
+        IfCondition GreaterEqual(Add(Slab8192.next, 8192), Slab8192.end) ThenBlock: {
+            Arena_GrowSlab8192()
+        }
+        ptr = Slab8192.next
+        Slab8192.next = Add(Slab8192.next, 8192)
+        ReturnValue(ptr)
+    }
+}
+
+Function.Arena_Free8192 {
+    Input: ptr: Address
+    Body: {
+        Slab8192.free_count = Add(Slab8192.free_count, 1)
+        StoreValue(ptr, Slab8192.free_list)
+        Slab8192.free_list = ptr
+    }
+}
+
+Function.Arena_GrowSlab8192 {
+    Body: {
+        old_chunk = Slab8192.chunk
+        chunk = Arena_MmapChunk()
+        StoreValue(chunk, old_chunk)
+        Slab8192.chunk = chunk
+        Slab8192.next = Add(chunk, 8)
+        Slab8192.end = Add(chunk, ArenaConst.CHUNK_SIZE)
+        Slab8192.chunk_count = Add(Slab8192.chunk_count, 1)
+    }
+}
+
+Function.Arena_FreeSlab8192 {
+    Body: {
+        current = Slab8192.chunk
+        WhileLoop NotEqual(current, 0) {
+            prev = Dereference(current)
+            SystemCall(11, current, ArenaConst.CHUNK_SIZE, 0, 0, 0, 0)
+            current = prev
+        }
+        Slab8192.chunk = 0
+        Slab8192.next = 0
+        Slab8192.end = 0
+        Slab8192.free_list = 0
+        Slab8192.alloc_count = 0
+        Slab8192.free_count = 0
+        Slab8192.chunk_count = 0
+    }
+}
+
+// =============================================================================
+// SLAB 16384 — backs XArrays with capacity 1023..2046
+// =============================================================================
+Function.Arena_InitSlab16384 {
+    Body: {
+        chunk = Arena_MmapChunk()
+        StoreValue(chunk, 0)
+        Slab16384.chunk = chunk
+        Slab16384.next = Add(chunk, 8)
+        Slab16384.end = Add(chunk, ArenaConst.CHUNK_SIZE)
+        Slab16384.free_list = 0
+        Slab16384.alloc_count = 0
+        Slab16384.free_count = 0
+        Slab16384.chunk_count = 1
+    }
+}
+
+Function.Arena_Alloc16384 {
+    Output: Address
+    Body: {
+        Slab16384.alloc_count = Add(Slab16384.alloc_count, 1)
+        IfCondition NotEqual(Slab16384.free_list, 0) ThenBlock: {
+            ptr = Slab16384.free_list
+            Slab16384.free_list = Dereference(ptr)
+            ReturnValue(ptr)
+        }
+        IfCondition GreaterEqual(Add(Slab16384.next, 16384), Slab16384.end) ThenBlock: {
+            Arena_GrowSlab16384()
+        }
+        ptr = Slab16384.next
+        Slab16384.next = Add(Slab16384.next, 16384)
+        ReturnValue(ptr)
+    }
+}
+
+Function.Arena_Free16384 {
+    Input: ptr: Address
+    Body: {
+        Slab16384.free_count = Add(Slab16384.free_count, 1)
+        StoreValue(ptr, Slab16384.free_list)
+        Slab16384.free_list = ptr
+    }
+}
+
+Function.Arena_GrowSlab16384 {
+    Body: {
+        old_chunk = Slab16384.chunk
+        chunk = Arena_MmapChunk()
+        StoreValue(chunk, old_chunk)
+        Slab16384.chunk = chunk
+        Slab16384.next = Add(chunk, 8)
+        Slab16384.end = Add(chunk, ArenaConst.CHUNK_SIZE)
+        Slab16384.chunk_count = Add(Slab16384.chunk_count, 1)
+    }
+}
+
+Function.Arena_FreeSlab16384 {
+    Body: {
+        current = Slab16384.chunk
+        WhileLoop NotEqual(current, 0) {
+            prev = Dereference(current)
+            SystemCall(11, current, ArenaConst.CHUNK_SIZE, 0, 0, 0, 0)
+            current = prev
+        }
+        Slab16384.chunk = 0
+        Slab16384.next = 0
+        Slab16384.end = 0
+        Slab16384.free_list = 0
+        Slab16384.alloc_count = 0
+        Slab16384.free_count = 0
+        Slab16384.chunk_count = 0
+    }
+}
+
+// =============================================================================
+// SLAB 32768 — backs XArrays with capacity 2047..4094
+// =============================================================================
+Function.Arena_InitSlab32768 {
+    Body: {
+        chunk = Arena_MmapChunk()
+        StoreValue(chunk, 0)
+        Slab32768.chunk = chunk
+        Slab32768.next = Add(chunk, 8)
+        Slab32768.end = Add(chunk, ArenaConst.CHUNK_SIZE)
+        Slab32768.free_list = 0
+        Slab32768.alloc_count = 0
+        Slab32768.free_count = 0
+        Slab32768.chunk_count = 1
+    }
+}
+
+Function.Arena_Alloc32768 {
+    Output: Address
+    Body: {
+        Slab32768.alloc_count = Add(Slab32768.alloc_count, 1)
+        IfCondition NotEqual(Slab32768.free_list, 0) ThenBlock: {
+            ptr = Slab32768.free_list
+            Slab32768.free_list = Dereference(ptr)
+            ReturnValue(ptr)
+        }
+        IfCondition GreaterEqual(Add(Slab32768.next, 32768), Slab32768.end) ThenBlock: {
+            Arena_GrowSlab32768()
+        }
+        ptr = Slab32768.next
+        Slab32768.next = Add(Slab32768.next, 32768)
+        ReturnValue(ptr)
+    }
+}
+
+Function.Arena_Free32768 {
+    Input: ptr: Address
+    Body: {
+        Slab32768.free_count = Add(Slab32768.free_count, 1)
+        StoreValue(ptr, Slab32768.free_list)
+        Slab32768.free_list = ptr
+    }
+}
+
+Function.Arena_GrowSlab32768 {
+    Body: {
+        old_chunk = Slab32768.chunk
+        chunk = Arena_MmapChunk()
+        StoreValue(chunk, old_chunk)
+        Slab32768.chunk = chunk
+        Slab32768.next = Add(chunk, 8)
+        Slab32768.end = Add(chunk, ArenaConst.CHUNK_SIZE)
+        Slab32768.chunk_count = Add(Slab32768.chunk_count, 1)
+    }
+}
+
+Function.Arena_FreeSlab32768 {
+    Body: {
+        current = Slab32768.chunk
+        WhileLoop NotEqual(current, 0) {
+            prev = Dereference(current)
+            SystemCall(11, current, ArenaConst.CHUNK_SIZE, 0, 0, 0, 0)
+            current = prev
+        }
+        Slab32768.chunk = 0
+        Slab32768.next = 0
+        Slab32768.end = 0
+        Slab32768.free_list = 0
+        Slab32768.alloc_count = 0
+        Slab32768.free_count = 0
+        Slab32768.chunk_count = 0
+    }
+}
+
+// =============================================================================
+// SLAB 65536 — backs XArrays with capacity 4095..8190
+// =============================================================================
+Function.Arena_InitSlab65536 {
+    Body: {
+        chunk = Arena_MmapChunk()
+        StoreValue(chunk, 0)
+        Slab65536.chunk = chunk
+        Slab65536.next = Add(chunk, 8)
+        Slab65536.end = Add(chunk, ArenaConst.CHUNK_SIZE)
+        Slab65536.free_list = 0
+        Slab65536.alloc_count = 0
+        Slab65536.free_count = 0
+        Slab65536.chunk_count = 1
+    }
+}
+
+Function.Arena_Alloc65536 {
+    Output: Address
+    Body: {
+        Slab65536.alloc_count = Add(Slab65536.alloc_count, 1)
+        IfCondition NotEqual(Slab65536.free_list, 0) ThenBlock: {
+            ptr = Slab65536.free_list
+            Slab65536.free_list = Dereference(ptr)
+            ReturnValue(ptr)
+        }
+        IfCondition GreaterEqual(Add(Slab65536.next, 65536), Slab65536.end) ThenBlock: {
+            Arena_GrowSlab65536()
+        }
+        ptr = Slab65536.next
+        Slab65536.next = Add(Slab65536.next, 65536)
+        ReturnValue(ptr)
+    }
+}
+
+Function.Arena_Free65536 {
+    Input: ptr: Address
+    Body: {
+        Slab65536.free_count = Add(Slab65536.free_count, 1)
+        StoreValue(ptr, Slab65536.free_list)
+        Slab65536.free_list = ptr
+    }
+}
+
+Function.Arena_GrowSlab65536 {
+    Body: {
+        old_chunk = Slab65536.chunk
+        chunk = Arena_MmapChunk()
+        StoreValue(chunk, old_chunk)
+        Slab65536.chunk = chunk
+        Slab65536.next = Add(chunk, 8)
+        Slab65536.end = Add(chunk, ArenaConst.CHUNK_SIZE)
+        Slab65536.chunk_count = Add(Slab65536.chunk_count, 1)
+    }
+}
+
+Function.Arena_FreeSlab65536 {
+    Body: {
+        current = Slab65536.chunk
+        WhileLoop NotEqual(current, 0) {
+            prev = Dereference(current)
+            SystemCall(11, current, ArenaConst.CHUNK_SIZE, 0, 0, 0, 0)
+            current = prev
+        }
+        Slab65536.chunk = 0
+        Slab65536.next = 0
+        Slab65536.end = 0
+        Slab65536.free_list = 0
+        Slab65536.alloc_count = 0
+        Slab65536.free_count = 0
+        Slab65536.chunk_count = 0
+    }
+}
+
+// =============================================================================
+// LARGE MMAP CACHE — size-bucketed freelist for allocations > 65536
+// Replaces the previous "just leak" path. Buckets are power-of-2 from
+// 128K..4M. Sizes get rounded up to the next bucket; anything above 4M
+// is still munmap'd immediately (rare).
+// =============================================================================
+
+Function.Arena_LargeBucketRoundUp {
+    Input: size: Integer
+    Output: Integer
+    Body: {
+        IfCondition LessEqual(size, 131072) ThenBlock: { ReturnValue(131072) }
+        IfCondition LessEqual(size, 262144) ThenBlock: { ReturnValue(262144) }
+        IfCondition LessEqual(size, 524288) ThenBlock: { ReturnValue(524288) }
+        IfCondition LessEqual(size, 1048576) ThenBlock: { ReturnValue(1048576) }
+        IfCondition LessEqual(size, 2097152) ThenBlock: { ReturnValue(2097152) }
+        IfCondition LessEqual(size, 4194304) ThenBlock: { ReturnValue(4194304) }
+        ReturnValue(0)  // Above 4MB — no caching
+    }
+}
+
+Function.Arena_LargeBucketHead {
+    Input: bucket: Integer
+    Output: Address
+    Body: {
+        IfCondition EqualTo(bucket, 131072)  ThenBlock: { ReturnValue(LargeMmapCache.b_131072) }
+        IfCondition EqualTo(bucket, 262144)  ThenBlock: { ReturnValue(LargeMmapCache.b_262144) }
+        IfCondition EqualTo(bucket, 524288)  ThenBlock: { ReturnValue(LargeMmapCache.b_524288) }
+        IfCondition EqualTo(bucket, 1048576) ThenBlock: { ReturnValue(LargeMmapCache.b_1048576) }
+        IfCondition EqualTo(bucket, 2097152) ThenBlock: { ReturnValue(LargeMmapCache.b_2097152) }
+        IfCondition EqualTo(bucket, 4194304) ThenBlock: { ReturnValue(LargeMmapCache.b_4194304) }
+        ReturnValue(0)
+    }
+}
+
+Function.Arena_LargeBucketSetHead {
+    Input: bucket: Integer
+    Input: head: Address
+    Body: {
+        IfCondition EqualTo(bucket, 131072)  ThenBlock: { LargeMmapCache.b_131072  = head }
+        IfCondition EqualTo(bucket, 262144)  ThenBlock: { LargeMmapCache.b_262144  = head }
+        IfCondition EqualTo(bucket, 524288)  ThenBlock: { LargeMmapCache.b_524288  = head }
+        IfCondition EqualTo(bucket, 1048576) ThenBlock: { LargeMmapCache.b_1048576 = head }
+        IfCondition EqualTo(bucket, 2097152) ThenBlock: { LargeMmapCache.b_2097152 = head }
+        IfCondition EqualTo(bucket, 4194304) ThenBlock: { LargeMmapCache.b_4194304 = head }
+    }
+}
+
+Function.Arena_LargeCacheAlloc {
+    Input: size: Integer
+    Output: Address
+    Body: {
+        bucket = Arena_LargeBucketRoundUp(size)
+        IfCondition EqualTo(bucket, 0) ThenBlock: {
+            LargeMmapCache.misses = Add(LargeMmapCache.misses, 1)
+            ReturnValue(Arena_MmapDirect(size))
+        }
+        head = Arena_LargeBucketHead(bucket)
+        IfCondition NotEqual(head, 0) ThenBlock: {
+            // Pop: first 8 bytes of the block hold the next pointer.
+            next = Dereference(head)
+            Arena_LargeBucketSetHead(bucket, next)
+            LargeMmapCache.hits = Add(LargeMmapCache.hits, 1)
+            ReturnValue(head)
+        }
+        LargeMmapCache.misses = Add(LargeMmapCache.misses, 1)
+        ReturnValue(Arena_MmapDirect(bucket))
+    }
+}
+
+Function.Arena_LargeCacheFree {
+    Input: ptr: Address
+    Input: size: Integer
+    Body: {
+        bucket = Arena_LargeBucketRoundUp(size)
+        IfCondition EqualTo(bucket, 0) ThenBlock: {
+            // Above 4MB — munmap directly, don't cache.
+            SystemCall(11, ptr, size, 0, 0, 0, 0)
+            LargeMmapCache.unmapped = Add(LargeMmapCache.unmapped, 1)
+            ReturnValue(0)
+        }
+        // Push onto bucket's freelist: store current head in ptr[0].
+        head = Arena_LargeBucketHead(bucket)
+        StoreValue(ptr, head)
+        Arena_LargeBucketSetHead(bucket, ptr)
+        LargeMmapCache.releases = Add(LargeMmapCache.releases, 1)
+    }
+}
+
+// =============================================================================
+// GENERAL ALLOCATOR - For variable/large sizes
+// =============================================================================
+Function.Arena_AllocGeneral {
+    Input: size: Integer
+    Output: Address
+    Body: {
+        ArenaGeneral.alloc_count = Add(ArenaGeneral.alloc_count, 1)
+        
+        // Align to 8 bytes
+        aligned = BitwiseAnd(Add(size, 7), -8)
+        
+        // If too large, fall back to direct mmap
+        IfCondition GreaterThan(aligned, 65536) ThenBlock: {
+            ArenaGeneral.fallback_count = Add(ArenaGeneral.fallback_count, 1)
+            ReturnValue(Arena_MmapDirect(aligned))
+        }
+        
+        // Check if fits in current chunk
+        IfCondition GreaterEqual(Add(ArenaGeneral.next, aligned), ArenaGeneral.end) ThenBlock: {
+            Arena_GrowGeneral()
+        }
+        
+        ptr = ArenaGeneral.next
+        ArenaGeneral.next = Add(ArenaGeneral.next, aligned)
+        ReturnValue(ptr)
+    }
+}
+
+Function.Arena_GrowGeneral {
+    Body: {
+        old_chunk = ArenaGeneral.chunk
+        chunk = Arena_MmapChunk()
+        StoreValue(chunk, old_chunk)
+        ArenaGeneral.chunk = chunk
+        ArenaGeneral.next = Add(chunk, 8)
+        ArenaGeneral.end = Add(chunk, ArenaConst.CHUNK_SIZE)
+        ArenaGeneral.chunk_count = Add(ArenaGeneral.chunk_count, 1)
+    }
+}
+
+Function.Arena_FreeGeneral {
+    Body: {
+        current = ArenaGeneral.chunk
+        WhileLoop NotEqual(current, 0) {
+            prev = Dereference(current)
+            SystemCall(11, current, ArenaConst.CHUNK_SIZE, 0, 0, 0, 0)
+            current = prev
+        }
+        ArenaGeneral.chunk = 0
+        ArenaGeneral.next = 0
+        ArenaGeneral.end = 0
+        ArenaGeneral.alloc_count = 0
+        ArenaGeneral.chunk_count = 0
+        ArenaGeneral.fallback_count = 0
+    }
+}
+
+
+Function.Arena_FreeAll {
+    Body: {
+        Arena_FreeSlab24()
+        Arena_FreeSlab32()
+        Arena_FreeSlab64()
+        Arena_FreeSlab128()
+        Arena_FreeSlab256()
+        Arena_FreeSlab512()
+        Arena_FreeSlab1024()
+        Arena_FreeSlab2048()
+        Arena_FreeSlab4096()
+        Arena_FreeGeneral()
+    }
+}
+
+Function.Arena_MmapDirect {
+    Input: size: Integer
+    Output: Address
+    Body: {
+        // Round up to page size
+        page_size = 4096
+        pages = Divide(Add(size, 4095), 4096)
+        total = Multiply(pages, page_size)
+        
+        addr = SystemCall(9, 0, total, 3, 34, -1, 0)
+        ReturnValue(addr)
+    }
+}
+
+// =============================================================================
+// UNIFIED ALLOCATOR - Replaces Allocate()
+// Routes to appropriate slab based on size
+// =============================================================================
+Function.Arena_ScratchGrow {
+    Body: {
+        linked = 0
+        IfCondition NotEqual(ArenaScratch.chunk, 0) ThenBlock: {
+            linked = Dereference(ArenaScratch.chunk)
+        }
+        IfCondition NotEqual(linked, 0) ThenBlock: {
+            ArenaScratch.chunk = linked
+            ArenaScratch.next = Add(linked, 8)
+            ArenaScratch.end = Add(linked, ArenaConst.CHUNK_SIZE)
+            ReturnValue(0)
+        }
+        c = Arena_MmapChunk()
+        StoreValue(c, 0)
+        IfCondition EqualTo(ArenaScratch.head, 0) ThenBlock: {
+            ArenaScratch.head = c
+        } ElseBlock: {
+            IfCondition NotEqual(ArenaScratch.chunk, 0) ThenBlock: {
+                StoreValue(ArenaScratch.chunk, c)
+            }
+        }
+        ArenaScratch.chunk = c
+        ArenaScratch.next = Add(c, 8)
+        ArenaScratch.end = Add(c, ArenaConst.CHUNK_SIZE)
+        ArenaScratch.chunk_count = Add(ArenaScratch.chunk_count, 1)
+    }
+}
+
+Function.Arena_ScratchAlloc {
+    Input: size: Integer
+    Output: Address
+    Body: {
+        IfCondition LessEqual(size, 0) ThenBlock: { size = 1 }
+        aligned = BitwiseAnd(Add(size, 7), -8)
+        IfCondition GreaterThan(aligned, Subtract(ArenaConst.CHUNK_SIZE, 16)) ThenBlock: {
+            ReturnValue(Arena_MmapDirect(aligned))
+        }
+        IfCondition EqualTo(ArenaScratch.chunk, 0) ThenBlock: {
+            Arena_ScratchGrow()
+        }
+        IfCondition GreaterEqual(Add(ArenaScratch.next, aligned), ArenaScratch.end) ThenBlock: {
+            Arena_ScratchGrow()
+        }
+        ptr = ArenaScratch.next
+        ArenaScratch.next = Add(ptr, aligned)
+        ReturnValue(ptr)
+    }
+}
+
+Function.Arena_ScratchBegin {
+    Body: {
+        ArenaScratch.on = 1
+        IfCondition EqualTo(ArenaScratch.head, 0) ThenBlock: {
+            Arena_ScratchGrow()
+        } ElseBlock: {
+            ArenaScratch.chunk = ArenaScratch.head
+            ArenaScratch.next = Add(ArenaScratch.head, 8)
+            ArenaScratch.end = Add(ArenaScratch.head, ArenaConst.CHUNK_SIZE)
+        }
+    }
+}
+
+Function.Arena_ScratchEnd {
+    Body: {
+        ArenaScratch.on = 0
+        IfCondition NotEqual(ArenaScratch.head, 0) ThenBlock: {
+            ArenaScratch.chunk = ArenaScratch.head
+            ArenaScratch.next = Add(ArenaScratch.head, 8)
+            ArenaScratch.end = Add(ArenaScratch.head, ArenaConst.CHUNK_SIZE)
+        }
+    }
+}
+
+Function.Arena_Alloc {
+    Input: size: Integer
+    Output: Address
+    Body: {
+        IfCondition EqualTo(ArenaScratch.on, 1) ThenBlock: {
+            ReturnValue(Arena_ScratchAlloc(size))
+        }
+        // Route to appropriate slab
+        IfCondition LessEqual(size, 24) ThenBlock: {
+            ReturnValue(Arena_Alloc24())
+        }
+        
+        IfCondition LessEqual(size, 32) ThenBlock: {
+            ReturnValue(Arena_Alloc32())
+        }
+        
+        IfCondition LessEqual(size, 64) ThenBlock: {
+            ReturnValue(Arena_Alloc64())
+        }
+        
+        IfCondition LessEqual(size, 128) ThenBlock: {
+            ReturnValue(Arena_Alloc128())
+        }
+        
+        IfCondition LessEqual(size, 256) ThenBlock: {
+            ReturnValue(Arena_Alloc256())
+        }
+        
+        IfCondition LessEqual(size, 512) ThenBlock: {
+            ReturnValue(Arena_Alloc512())
+        }
+        
+        IfCondition LessEqual(size, 1024) ThenBlock: {
+            ReturnValue(Arena_Alloc1024())
+        }
+        
+        IfCondition LessEqual(size, 2048) ThenBlock: {
+            ReturnValue(Arena_Alloc2048())
+        }
+        
+        IfCondition LessEqual(size, 4096) ThenBlock: {
+            ReturnValue(Arena_Alloc4096())
+        }
+
+        IfCondition LessEqual(size, 8192) ThenBlock: {
+            ReturnValue(Arena_Alloc8192())
+        }
+
+        IfCondition LessEqual(size, 16384) ThenBlock: {
+            ReturnValue(Arena_Alloc16384())
+        }
+
+        IfCondition LessEqual(size, 32768) ThenBlock: {
+            ReturnValue(Arena_Alloc32768())
+        }
+
+        IfCondition LessEqual(size, 65536) ThenBlock: {
+            ReturnValue(Arena_Alloc65536())
+        }
+
+        // Above 65536 — size-bucketed mmap cache (128K..4M buckets).
+        ReturnValue(Arena_LargeCacheAlloc(size))
+    }
+}
+
+// =============================================================================
+// UNIFIED FREE - Replaces Deallocate()
+// Routes to appropriate slab based on size
+// =============================================================================
+Function.Arena_Free {
+    Input: ptr: Address
+    Input: size: Integer
+    Body: {
+        IfCondition EqualTo(ptr, 0) ThenBlock: {
+            ReturnValue(0)
+        }
+        // Scratch pointers must not enter slab freelists.
+        IfCondition EqualTo(ArenaScratch.on, 1) ThenBlock: {
+            ReturnValue(0)
+        }
+        
+        IfCondition LessEqual(size, 24) ThenBlock: {
+            Arena_Free24(ptr)
+            ReturnValue(1)
+        }
+        
+        IfCondition LessEqual(size, 32) ThenBlock: {
+            Arena_Free32(ptr)
+            ReturnValue(1)
+        }
+        
+        IfCondition LessEqual(size, 64) ThenBlock: {
+            Arena_Free64(ptr)
+            ReturnValue(1)
+        }
+        
+        IfCondition LessEqual(size, 128) ThenBlock: {
+            Arena_Free128(ptr)
+            ReturnValue(1)
+        }
+        
+        IfCondition LessEqual(size, 256) ThenBlock: {
+            Arena_Free256(ptr)
+            ReturnValue(1)
+        }
+        
+        IfCondition LessEqual(size, 512) ThenBlock: {
+            Arena_Free512(ptr)
+            ReturnValue(1)
+        }
+        
+        IfCondition LessEqual(size, 1024) ThenBlock: {
+            Arena_Free1024(ptr)
+            ReturnValue(1)
+        }
+        
+        IfCondition LessEqual(size, 2048) ThenBlock: {
+            Arena_Free2048(ptr)
+            ReturnValue(1)
+        }
+        
+        IfCondition LessEqual(size, 4096) ThenBlock: {
+            Arena_Free4096(ptr)
+            ReturnValue(1)
+        }
+
+        IfCondition LessEqual(size, 8192) ThenBlock: {
+            Arena_Free8192(ptr)
+            ReturnValue(1)
+        }
+
+        IfCondition LessEqual(size, 16384) ThenBlock: {
+            Arena_Free16384(ptr)
+            ReturnValue(1)
+        }
+
+        IfCondition LessEqual(size, 32768) ThenBlock: {
+            Arena_Free32768(ptr)
+            ReturnValue(1)
+        }
+
+        IfCondition LessEqual(size, 65536) ThenBlock: {
+            Arena_Free65536(ptr)
+            ReturnValue(1)
+        }
+
+        // Above 65536 — size-bucketed mmap freelist (no more leaks).
+        Arena_LargeCacheFree(ptr, size)
+        ReturnValue(1)
+    }
+}
+
+
+Function.Arena_ArrayDestroy {
+    Input: arr: Address
+    Body: {
+        IfCondition EqualTo(arr, 0) ThenBlock: {
+            ReturnValue(0)
+        }
+        
+        // alloc_size is stored 8 bytes BEFORE the arr pointer
+        block = Subtract(arr, 8)
+        alloc_size = Dereference(block)
+        
+        // Sanity check - alloc_size should be reasonable
+        IfCondition LessThan(alloc_size, 16) ThenBlock: {
+            PrintMessage("[ARENA] WARNING: Invalid alloc_size in ArrayDestroy: ")
+            PrintNumber(alloc_size)
+            PrintMessage("\n")
+            ReturnValue(0)
+        }
+        
+        IfCondition GreaterThan(alloc_size, 10485760) ThenBlock: {
+            // > 10MB seems suspicious, might be corrupted
+            PrintMessage("[ARENA] WARNING: Suspiciously large alloc_size: ")
+            PrintNumber(alloc_size)
+            PrintMessage("\n")
+            // Still try to free it
+        }
+        
+        // Route to appropriate slab free based on size
+        Arena_Free(block, alloc_size)
+        
+        ReturnValue(1)
+    }
+}
+
+
+
+// =============================================================================
+// ARENA-BACKED ARRAY - Fixed version with size tracking
+// 
+// Memory layout:
+//   [0-7]   alloc_size  (hidden - before returned pointer)
+//   [8-15]  capacity    (user sees this as offset 0)
+//   [16-23] element 0   (user sees this as offset 8)
+//   [24-31] element 1
+//   ...
+//
+// This preserves ArrayGet/ArraySet compatibility since returned pointer
+// looks like normal array: [capacity, elem0, elem1, ...]
+// =============================================================================
+
+Function.Arena_ArrayCreate {
+    Input: capacity: Integer
+    Output: Address
+    Body: {
+        // Total size: 8 (hidden size) + 8 (capacity) + capacity * 8 (elements)
+        alloc_size = Add(16, Multiply(capacity, 8))
+        
+        // Allocate from arena
+        block = Arena_Alloc(alloc_size)
+        
+        IfCondition EqualTo(block, 0) ThenBlock: {
+            PrintMessage("[ARENA] ArrayCreate failed for capacity ")
+            PrintNumber(capacity)
+            PrintMessage("\n")
+            ReturnValue(0)
+        }
+        
+        // Store alloc_size at offset 0 (hidden)
+        StoreValue(block, alloc_size)
+        
+        // Return pointer to offset 8 - this is what user sees as "the array"
+        arr = Add(block, 8)
+        
+        // Store capacity at arr[0] (which is block[8])
+        StoreValue(arr, capacity)
+        
+        ReturnValue(arr)
+    }
+}
+
+
+// =============================================================================
+// OPTIONAL: Arena_ArrayResize - Resize with proper cleanup
+// Can be used by XArray instead of create + copy + destroy
+// =============================================================================
+Function.Arena_ArrayResize {
+    Input: old_arr: Address
+    Input: new_capacity: Integer
+    Output: Address
+    Body: {
+        IfCondition EqualTo(old_arr, 0) ThenBlock: {
+            // No old array, just create new
+            ReturnValue(Arena_ArrayCreate(new_capacity))
+        }
+        
+        // Get old capacity
+        old_capacity = Dereference(old_arr)
+        
+        // If shrinking or same size, could potentially reuse
+        // For now, always create new (simple and safe)
+        
+        // Create new array
+        new_arr = Arena_ArrayCreate(new_capacity)
+        IfCondition EqualTo(new_arr, 0) ThenBlock: {
+            ReturnValue(0)
+        }
+        
+        // Copy elements (min of old and new capacity)
+        copy_count = old_capacity
+        IfCondition LessThan(new_capacity, old_capacity) ThenBlock: {
+            copy_count = new_capacity
+        }
+        
+        i = 0
+        WhileLoop LessThan(i, copy_count) {
+            val = ArrayGet(old_arr, i)
+            ArraySet(new_arr, i, val)
+            i = Add(i, 1)
+        }
+        
+        // Free old array (this now actually works!)
+        Arena_ArrayDestroy(old_arr)
+        
+        ReturnValue(new_arr)
+    }
+}
+
+// =============================================================================
+// ARENA RESET - Reuse chunks without freeing to kernel
+// =============================================================================
+Function.Arena_Reset {
+    Body: {
+        // === Slab24: Free extra chunks, keep first ===
+        IfCondition GreaterThan(Slab24.chunk_count, 1) ThenBlock: {
+            // Walk from first chunk's link to free extras
+            first_chunk = Slab24.chunk
+            current = Dereference(first_chunk)  // second chunk (linked from first)
+            WhileLoop NotEqual(current, 0) {
+                next_chunk = Dereference(current)
+                SystemCall(11, current, ArenaConst.CHUNK_SIZE, 0, 0, 0, 0)
+                current = next_chunk
+            }
+            StoreValue(first_chunk, 0)  // clear link in first chunk
+            Slab24.chunk_count = 1
+        }
+        Slab24.next = Slab24.chunk
+        Slab24.end = Add(Slab24.chunk, ArenaConst.CHUNK_SIZE)
+        Slab24.free_list = 0
+        Slab24.alloc_count = 0
+        Slab24.free_count = 0
+
+        // === Slab32: Free extra chunks, keep first ===
+        IfCondition GreaterThan(Slab32.chunk_count, 1) ThenBlock: {
+            first_chunk = Slab32.chunk
+            current = Dereference(first_chunk)
+            WhileLoop NotEqual(current, 0) {
+                next_chunk = Dereference(current)
+                SystemCall(11, current, ArenaConst.CHUNK_SIZE, 0, 0, 0, 0)
+                current = next_chunk
+            }
+            StoreValue(first_chunk, 0)
+            Slab32.chunk_count = 1
+        }
+        Slab32.next = Slab32.chunk
+        Slab32.end = Add(Slab32.chunk, ArenaConst.CHUNK_SIZE)
+        Slab32.free_list = 0
+        Slab32.alloc_count = 0
+        Slab32.free_count = 0
+
+        // === Slab64: Free extra chunks, keep first ===
+        IfCondition GreaterThan(Slab64.chunk_count, 1) ThenBlock: {
+            first_chunk = Slab64.chunk
+            current = Dereference(first_chunk)
+            WhileLoop NotEqual(current, 0) {
+                next_chunk = Dereference(current)
+                SystemCall(11, current, ArenaConst.CHUNK_SIZE, 0, 0, 0, 0)
+                current = next_chunk
+            }
+            StoreValue(first_chunk, 0)
+            Slab64.chunk_count = 1
+        }
+        Slab64.next = Slab64.chunk
+        Slab64.end = Add(Slab64.chunk, ArenaConst.CHUNK_SIZE)
+        Slab64.free_list = 0
+        Slab64.alloc_count = 0
+        Slab64.free_count = 0
+
+        // === Slab128: Free extra chunks, keep first ===
+        IfCondition GreaterThan(Slab128.chunk_count, 1) ThenBlock: {
+            first_chunk = Slab128.chunk
+            current = Dereference(first_chunk)
+            WhileLoop NotEqual(current, 0) {
+                next_chunk = Dereference(current)
+                SystemCall(11, current, ArenaConst.CHUNK_SIZE, 0, 0, 0, 0)
+                current = next_chunk
+            }
+            StoreValue(first_chunk, 0)
+            Slab128.chunk_count = 1
+        }
+        Slab128.next = Slab128.chunk
+        Slab128.end = Add(Slab128.chunk, ArenaConst.CHUNK_SIZE)
+        Slab128.free_list = 0
+        Slab128.alloc_count = 0
+        Slab128.free_count = 0
+
+        // === Slab256: Free extra chunks, keep first ===
+        IfCondition GreaterThan(Slab256.chunk_count, 1) ThenBlock: {
+            first_chunk = Slab256.chunk
+            current = Dereference(first_chunk)
+            WhileLoop NotEqual(current, 0) {
+                next_chunk = Dereference(current)
+                SystemCall(11, current, ArenaConst.CHUNK_SIZE, 0, 0, 0, 0)
+                current = next_chunk
+            }
+            StoreValue(first_chunk, 0)
+            Slab256.chunk_count = 1
+        }
+        Slab256.next = Slab256.chunk
+        Slab256.end = Add(Slab256.chunk, ArenaConst.CHUNK_SIZE)
+        Slab256.free_list = 0
+        Slab256.alloc_count = 0
+        Slab256.free_count = 0
+
+        // === Slab512: Free extra chunks, keep first ===
+        IfCondition GreaterThan(Slab512.chunk_count, 1) ThenBlock: {
+            first_chunk = Slab512.chunk
+            current = Dereference(first_chunk)
+            WhileLoop NotEqual(current, 0) {
+                next_chunk = Dereference(current)
+                SystemCall(11, current, ArenaConst.CHUNK_SIZE, 0, 0, 0, 0)
+                current = next_chunk
+            }
+            StoreValue(first_chunk, 0)
+            Slab512.chunk_count = 1
+        }
+        Slab512.next = Slab512.chunk
+        Slab512.end = Add(Slab512.chunk, ArenaConst.CHUNK_SIZE)
+        Slab512.free_list = 0
+        Slab512.alloc_count = 0
+        Slab512.free_count = 0
+
+        // === Slab1024: Free extra chunks, keep first ===
+        IfCondition GreaterThan(Slab1024.chunk_count, 1) ThenBlock: {
+            first_chunk = Slab1024.chunk
+            current = Dereference(first_chunk)
+            WhileLoop NotEqual(current, 0) {
+                next_chunk = Dereference(current)
+                SystemCall(11, current, ArenaConst.CHUNK_SIZE, 0, 0, 0, 0)
+                current = next_chunk
+            }
+            StoreValue(first_chunk, 0)
+            Slab1024.chunk_count = 1
+        }
+        Slab1024.next = Slab1024.chunk
+        Slab1024.end = Add(Slab1024.chunk, ArenaConst.CHUNK_SIZE)
+        Slab1024.free_list = 0
+        Slab1024.alloc_count = 0
+        Slab1024.free_count = 0
+
+        // === Slab2048: Free extra chunks, keep first ===
+        IfCondition GreaterThan(Slab2048.chunk_count, 1) ThenBlock: {
+            first_chunk = Slab2048.chunk
+            current = Dereference(first_chunk)
+            WhileLoop NotEqual(current, 0) {
+                next_chunk = Dereference(current)
+                SystemCall(11, current, ArenaConst.CHUNK_SIZE, 0, 0, 0, 0)
+                current = next_chunk
+            }
+            StoreValue(first_chunk, 0)
+            Slab2048.chunk_count = 1
+        }
+        Slab2048.next = Slab2048.chunk
+        Slab2048.end = Add(Slab2048.chunk, ArenaConst.CHUNK_SIZE)
+        Slab2048.free_list = 0
+        Slab2048.alloc_count = 0
+        Slab2048.free_count = 0
+
+        // === Slab4096: Free extra chunks, keep first ===
+        IfCondition GreaterThan(Slab4096.chunk_count, 1) ThenBlock: {
+            first_chunk = Slab4096.chunk
+            current = Dereference(first_chunk)
+            WhileLoop NotEqual(current, 0) {
+                next_chunk = Dereference(current)
+                SystemCall(11, current, ArenaConst.CHUNK_SIZE, 0, 0, 0, 0)
+                current = next_chunk
+            }
+            StoreValue(first_chunk, 0)
+            Slab4096.chunk_count = 1
+        }
+        Slab4096.next = Slab4096.chunk
+        Slab4096.end = Add(Slab4096.chunk, ArenaConst.CHUNK_SIZE)
+        Slab4096.free_list = 0
+        Slab4096.alloc_count = 0
+        Slab4096.free_count = 0
+
+        // === ArenaGeneral: Free extra chunks, keep first ===
+        IfCondition GreaterThan(ArenaGeneral.chunk_count, 1) ThenBlock: {
+            first_chunk = ArenaGeneral.chunk
+            current = Dereference(first_chunk)
+            WhileLoop NotEqual(current, 0) {
+                next_chunk = Dereference(current)
+                SystemCall(11, current, ArenaConst.CHUNK_SIZE, 0, 0, 0, 0)
+                current = next_chunk
+            }
+            StoreValue(first_chunk, 0)
+            ArenaGeneral.chunk_count = 1
+        }
+        ArenaGeneral.next = ArenaGeneral.chunk
+        ArenaGeneral.end = Add(ArenaGeneral.chunk, ArenaConst.CHUNK_SIZE)
+        ArenaGeneral.alloc_count = 0
+    }
+}
+
+// =============================================================================
+// DIAGNOSTICS
+// =============================================================================
+Function.Arena_Report {
+    Body: {
+        PrintMessage("\n========== ARENA MEMORY REPORT ==========\n")
+        
+        PrintMessage("Slab 24-byte:\n")
+        PrintMessage("  Chunks: ")
+        PrintNumber(Slab24.chunk_count)
+        PrintMessage(" (")
+        PrintNumber(Multiply(Slab24.chunk_count, 4))
+        PrintMessage(" MB)\n")
+        PrintMessage("  Allocs: ")
+        PrintNumber(Slab24.alloc_count)
+        PrintMessage("\n  Frees: ")
+        PrintNumber(Slab24.free_count)
+        PrintMessage("\n  In use: ")
+        PrintNumber(Subtract(Slab24.alloc_count, Slab24.free_count))
+        PrintMessage("\n")
+        
+        PrintMessage("Slab 32-byte:\n")
+        PrintMessage("  Chunks: ")
+        PrintNumber(Slab32.chunk_count)
+        PrintMessage("\n  Allocs: ")
+        PrintNumber(Slab32.alloc_count)
+        PrintMessage("\n  Frees: ")
+        PrintNumber(Slab32.free_count)
+        PrintMessage("\n")
+        
+        PrintMessage("Slab 64-byte:\n")
+        PrintMessage("  Chunks: ")
+        PrintNumber(Slab64.chunk_count)
+        PrintMessage("\n  Allocs: ")
+        PrintNumber(Slab64.alloc_count)
+        PrintMessage("\n  Frees: ")
+        PrintNumber(Slab64.free_count)
+        PrintMessage("\n")
+        
+        PrintMessage("Slab 128-byte:\n")
+        PrintMessage("  Chunks: ")
+        PrintNumber(Slab128.chunk_count)
+        PrintMessage("\n  Allocs: ")
+        PrintNumber(Slab128.alloc_count)
+        PrintMessage("\n  Frees: ")
+        PrintNumber(Slab128.free_count)
+        PrintMessage("\n")
+        
+        PrintMessage("Slab 256-byte:\n")
+        PrintMessage("  Chunks: ")
+        PrintNumber(Slab256.chunk_count)
+        PrintMessage("\n  Allocs: ")
+        PrintNumber(Slab256.alloc_count)
+        PrintMessage("\n  Frees: ")
+        PrintNumber(Slab256.free_count)
+        PrintMessage("\n")
+        
+        PrintMessage("Slab 512-byte:\n")
+        PrintMessage("  Chunks: ")
+        PrintNumber(Slab512.chunk_count)
+        PrintMessage("\n  Allocs: ")
+        PrintNumber(Slab512.alloc_count)
+        PrintMessage("\n  Frees: ")
+        PrintNumber(Slab512.free_count)
+        PrintMessage("\n")
+        
+        PrintMessage("Slab 1024-byte:\n")
+        PrintMessage("  Chunks: ")
+        PrintNumber(Slab1024.chunk_count)
+        PrintMessage("\n  Allocs: ")
+        PrintNumber(Slab1024.alloc_count)
+        PrintMessage("\n  Frees: ")
+        PrintNumber(Slab1024.free_count)
+        PrintMessage("\n")
+        
+        PrintMessage("Slab 2048-byte:\n")
+        PrintMessage("  Chunks: ")
+        PrintNumber(Slab2048.chunk_count)
+        PrintMessage("\n  Allocs: ")
+        PrintNumber(Slab2048.alloc_count)
+        PrintMessage("\n  Frees: ")
+        PrintNumber(Slab2048.free_count)
+        PrintMessage("\n")
+        
+        PrintMessage("Slab 4096-byte:\n")
+        PrintMessage("  Chunks: ")
+        PrintNumber(Slab4096.chunk_count)
+        PrintMessage("\n  Allocs: ")
+        PrintNumber(Slab4096.alloc_count)
+        PrintMessage("\n  Frees: ")
+        PrintNumber(Slab4096.free_count)
+        PrintMessage("\n")
+        
+        PrintMessage("General arena:\n")
+        PrintMessage("  Chunks: ")
+        PrintNumber(ArenaGeneral.chunk_count)
+        PrintMessage("\n  Allocs: ")
+        PrintNumber(ArenaGeneral.alloc_count)
+        PrintMessage("\n  Fallbacks: ")
+        PrintNumber(ArenaGeneral.fallback_count)
+        PrintMessage("\n")
+        
+        total_chunks = Add(Slab24.chunk_count, Slab32.chunk_count)
+        total_chunks = Add(total_chunks, Slab64.chunk_count)
+        total_chunks = Add(total_chunks, Slab128.chunk_count)
+        total_chunks = Add(total_chunks, Slab256.chunk_count)
+        total_chunks = Add(total_chunks, Slab512.chunk_count)
+        total_chunks = Add(total_chunks, Slab1024.chunk_count)
+        total_chunks = Add(total_chunks, Slab2048.chunk_count)
+        total_chunks = Add(total_chunks, Slab4096.chunk_count)
+        total_chunks = Add(total_chunks, ArenaGeneral.chunk_count)
+        
+        PrintMessage("Total: ")
+        PrintNumber(total_chunks)
+        PrintMessage(" chunks = ")
+        PrintNumber(Multiply(total_chunks, 4))
+        PrintMessage(" MB\n")
+        PrintMessage("=========================================\n")
+    }
+}

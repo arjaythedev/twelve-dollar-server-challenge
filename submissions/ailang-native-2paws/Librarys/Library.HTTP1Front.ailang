@@ -1,0 +1,518 @@
+// Library.HTTP1Front.ailang — more connections than one process's fd limit
+//
+// LimitNOFILE caps each process at 65,535 descriptors, and every user holds a
+// keep-alive connection. Front processes, forked before the database opens,
+// accept connections on their own SO_REUSEPORT socket and pass each parsed
+// request to the database process through a ring in shared memory. The
+// database process runs the request on a virtual connection (FD = -2) and
+// writes the response to a ring going back. The handler, the batched commit
+// and the database stay in one process.
+//
+// Per front, one MAP_SHARED region: a request ring and a response ring.
+// Ring: [0] head, [8] tail, then NSLOT slots of SLOT bytes. One producer,
+// one consumer; the slot is written before tail moves and read before head
+// moves. Each ring has an eventfd the consumer waits on.
+//
+// Request slot:  [0] gen [8] idx [16] keep [24] mlen [32] plen [40] blen
+//                [48] dlen, then method\0 path\0 bearer\0 body\0 from 64
+// Response slot: [0] gen [8] idx [16] keep [24] len, then bytes from 64
+//
+// Copyright (c) 2026 Sean Collins, 2 Paws Machine and Engineering.
+// Released under the MIT License, as required for submissions to this challenge.
+
+LibraryImport.Arena
+LibraryImport.Socket
+LibraryImport.HTTP1
+
+FixedPool.FrontC {
+    "NSLOT": Initialize=1024
+    "SLOT": Initialize=8448
+    "HDR": Initialize=64
+    "SYS_READ": Initialize=0
+    "SYS_WRITE": Initialize=1
+    "SYS_MMAP": Initialize=9
+    "SYS_YIELD": Initialize=24
+    "SYS_FORK": Initialize=57
+    "SYS_PRCTL": Initialize=157
+    "SYS_EVENTFD2": Initialize=290
+    "EFD_NONBLOCK": Initialize=2048
+}
+
+// Index n: shared region, request eventfd, response eventfd
+FixedPool.FrontSt {
+    "n": Initialize=0, CanChange=True
+    "regions": Initialize=0, CanChange=True
+    "req_efd": Initialize=0, CanChange=True
+    "resp_efd": Initialize=0, CanChange=True
+    "me": Initialize=-1, CanChange=True
+    "vfree": Initialize=0, CanChange=True
+    "busy": Initialize=0, CanChange=True
+    "efbuf": Initialize=0, CanChange=True
+    // Rings written this pass and not yet signalled: one flag for the front's
+    // request ring, one per front for the database's response rings
+    "req_pend": Initialize=0, CanChange=True
+    "resp_pend": Initialize=0, CanChange=True
+    // Requests waiting for room in the request ring, oldest first. Each is a
+    // block [next, len, slot image]
+    "ov_head": Initialize=0, CanChange=True
+    "ov_tail": Initialize=0, CanChange=True
+}
+
+Function.Front.Get {
+    Input: arr: Address
+    Input: i: Integer
+    Output: Integer
+    Body: {
+        ReturnValue(Dereference(Add(arr, Multiply(i, 8))))
+    }
+}
+
+Function.Front.RingBytes {
+    Output: Integer
+    Body: {
+        ReturnValue(Add(FrontC.HDR, Multiply(FrontC.NSLOT, FrontC.SLOT)))
+    }
+}
+
+Function.Front.ReqRing {
+    Input: f: Integer
+    Output: Address
+    Body: {
+        ReturnValue(Front.Get(FrontSt.regions, f))
+    }
+}
+
+Function.Front.RespRing {
+    Input: f: Integer
+    Output: Address
+    Body: {
+        ReturnValue(Add(Front.Get(FrontSt.regions, f), Front.RingBytes()))
+    }
+}
+
+// Next slot to fill, or 0 when the ring is full
+Function.Front.PushSlot {
+    Input: ring: Address
+    Output: Address
+    Body: {
+        head = Dereference(ring)
+        tail = Dereference(Add(ring, 8))
+        IfCondition GreaterEqual(Subtract(tail, head), FrontC.NSLOT) ThenBlock: { ReturnValue(0) }
+        i = Modulo(tail, FrontC.NSLOT)
+        ReturnValue(Add(Add(ring, FrontC.HDR), Multiply(i, FrontC.SLOT)))
+    }
+}
+
+Function.Front.PushDone {
+    Input: ring: Address
+    Body: {
+        StoreValue(Add(ring, 8), Add(Dereference(Add(ring, 8)), 1))
+    }
+}
+
+// Oldest filled slot, or 0 when the ring is empty
+Function.Front.PopSlot {
+    Input: ring: Address
+    Output: Address
+    Body: {
+        head = Dereference(ring)
+        tail = Dereference(Add(ring, 8))
+        IfCondition EqualTo(head, tail) ThenBlock: { ReturnValue(0) }
+        i = Modulo(head, FrontC.NSLOT)
+        ReturnValue(Add(Add(ring, FrontC.HDR), Multiply(i, FrontC.SLOT)))
+    }
+}
+
+Function.Front.PopDone {
+    Input: ring: Address
+    Body: {
+        StoreValue(ring, Add(Dereference(ring), 1))
+    }
+}
+
+Function.Front.Signal {
+    Input: efd: Integer
+    Body: {
+        StoreValue(FrontSt.efbuf, 1)
+        SystemCall(FrontC.SYS_WRITE, efd, FrontSt.efbuf, 8)
+    }
+}
+
+Function.Front.Drain {
+    Input: efd: Integer
+    Body: {
+        SystemCall(FrontC.SYS_READ, efd, FrontSt.efbuf, 8)
+    }
+}
+
+// Shared rings and eventfds for n fronts. Call before Front.Fork.
+Function.Front.Setup {
+    Input: n: Integer
+    Output: Integer
+    Body: {
+        FrontSt.n = n
+        FrontSt.efbuf = Allocate(8)
+        FrontSt.regions = Allocate(Multiply(Add(n, 1), 8))
+        FrontSt.req_efd = Allocate(Multiply(Add(n, 1), 8))
+        FrontSt.resp_efd = Allocate(Multiply(Add(n, 1), 8))
+        FrontSt.resp_pend = Allocate(Multiply(Add(n, 1), 8))
+        MemorySet(FrontSt.resp_pend, 0, Multiply(Add(n, 1), 8))
+        bytes = Multiply(Front.RingBytes(), 2)
+        f = 0
+        WhileLoop LessThan(f, n) {
+            // MAP_SHARED | MAP_ANONYMOUS: both processes see the same pages
+            r = SystemCall(FrontC.SYS_MMAP, 0, bytes, 3, 33, -1, 0)
+            IfCondition LessThan(r, 4096) ThenBlock: { ReturnValue(0) }
+            StoreValue(Add(FrontSt.regions, Multiply(f, 8)), r)
+            StoreValue(Add(FrontSt.req_efd, Multiply(f, 8)), SystemCall(FrontC.SYS_EVENTFD2, 0, FrontC.EFD_NONBLOCK))
+            StoreValue(Add(FrontSt.resp_efd, Multiply(f, 8)), SystemCall(FrontC.SYS_EVENTFD2, 0, FrontC.EFD_NONBLOCK))
+            f = Add(f, 1)
+        }
+        ReturnValue(1)
+    }
+}
+
+// Fork the fronts. Returns -1 in the parent, the front index in a child.
+Function.Front.Fork {
+    Output: Integer
+    Body: {
+        f = 0
+        WhileLoop LessThan(f, FrontSt.n) {
+            pid = SystemCall(FrontC.SYS_FORK)
+            IfCondition EqualTo(pid, 0) ThenBlock: {
+                // PR_SET_PDEATHSIG = SIGKILL: a front never outlives the database
+                SystemCall(FrontC.SYS_PRCTL, 1, 9, 0, 0, 0)
+                FrontSt.me = f
+                ReturnValue(f)
+            }
+            f = Add(f, 1)
+        }
+        ReturnValue(-1)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Front process
+// ---------------------------------------------------------------------------
+
+Function.Front.Busy {
+    Input: conn: Address
+    Body: {
+        HTTP1.Reply(conn, 503, "{\"error\":\"busy\"}", 16)
+    }
+}
+
+// Handler in the front: copy the request into the ring and park the
+// connection (DEFER without the commit list) until the response arrives.
+Function.Front.Handler {
+    Input: conn: Address
+    Body: {
+        f = FrontSt.me
+        ring = Front.ReqRing(f)
+        slot = Front.PushSlot(ring)
+        method = HTTP1.CGet(conn, HTTP1Off.METHOD)
+        path = HTTP1.CGet(conn, HTTP1Off.PATH)
+        bearer = HTTP1.CGet(conn, HTTP1Off.BEARER)
+        blen = HTTP1.CGet(conn, HTTP1Off.BEARER_LEN)
+        IfCondition EqualTo(bearer, 0) ThenBlock: { blen = 0 }
+        body = HTTP1.CGet(conn, HTTP1Off.BODY)
+        dlen = HTTP1.CGet(conn, HTTP1Off.BODY_LEN)
+        IfCondition EqualTo(body, 0) ThenBlock: { dlen = 0 }
+        mlen = StringLength(method)
+        plen = StringLength(path)
+        need = Add(Add(Add(Add(FrontC.HDR, mlen), plen), Add(blen, dlen)), 4)
+        IfCondition GreaterThan(need, FrontC.SLOT) ThenBlock: {
+            FrontSt.busy = Add(FrontSt.busy, 1)
+            Front.Busy(conn)
+            ReturnValue(0)
+        }
+        // The database is behind (or older requests already wait): queue the
+        // request here instead of failing it. Front.Tick moves it to the ring.
+        blk = 0
+        IfCondition Or(EqualTo(slot, 0), NotEqual(FrontSt.ov_head, 0)) ThenBlock: {
+            blk = Allocate(Add(need, 16))
+            StoreValue(blk, 0)
+            StoreValue(Add(blk, 8), need)
+            slot = Add(blk, 16)
+        }
+        idx = Divide(Subtract(conn, HTTP1St.slots), HTTP1Off.SLOT)
+        StoreValue(slot, HTTP1.CGet(conn, HTTP1Off.GEN))
+        StoreValue(Add(slot, 8), idx)
+        StoreValue(Add(slot, 16), HTTP1.CGet(conn, HTTP1Off.KEEP))
+        StoreValue(Add(slot, 24), mlen)
+        StoreValue(Add(slot, 32), plen)
+        StoreValue(Add(slot, 40), blen)
+        StoreValue(Add(slot, 48), dlen)
+        p = Add(slot, FrontC.HDR)
+        MemoryCopy(p, method, mlen)
+        SetByte(p, mlen, 0)
+        p = Add(p, Add(mlen, 1))
+        MemoryCopy(p, path, plen)
+        SetByte(p, plen, 0)
+        p = Add(p, Add(plen, 1))
+        IfCondition GreaterThan(blen, 0) ThenBlock: { MemoryCopy(p, bearer, blen) }
+        SetByte(p, blen, 0)
+        p = Add(p, Add(blen, 1))
+        IfCondition GreaterThan(dlen, 0) ThenBlock: { MemoryCopy(p, body, dlen) }
+        SetByte(p, dlen, 0)
+        IfCondition EqualTo(blk, 0) ThenBlock: {
+            Front.PushDone(ring)
+            FrontSt.req_pend = 1
+        } ElseBlock: {
+            IfCondition EqualTo(FrontSt.ov_head, 0) ThenBlock: {
+                FrontSt.ov_head = blk
+            } ElseBlock: {
+                StoreValue(FrontSt.ov_tail, blk)
+            }
+            FrontSt.ov_tail = blk
+        }
+        HTTP1.CSet(conn, HTTP1Off.DEFER, 1)
+    }
+}
+
+// Responses from the database: copy into the connection and send.
+Function.Front.OnResp {
+    Input: unused: Integer
+    Body: {
+        f = FrontSt.me
+        Front.Drain(Front.Get(FrontSt.resp_efd, f))
+        ring = Front.RespRing(f)
+        slot = Front.PopSlot(ring)
+        WhileLoop NotEqual(slot, 0) {
+            gen = Dereference(slot)
+            idx = Dereference(Add(slot, 8))
+            keep = Dereference(Add(slot, 16))
+            len = Dereference(Add(slot, 24))
+            conn = HTTP1.ConnAt(idx)
+            ok = 0
+            IfCondition GreaterThan(HTTP1.CGet(conn, HTTP1Off.FD), 0) ThenBlock: {
+                IfCondition EqualTo(HTTP1.CGet(conn, HTTP1Off.GEN), gen) ThenBlock: {
+                    IfCondition EqualTo(HTTP1.CGet(conn, HTTP1Off.DEFER), 1) ThenBlock: { ok = 1 }
+                }
+            }
+            IfCondition EqualTo(ok, 1) ThenBlock: {
+                b = HTTP1.CGet(conn, HTTP1Off.PRIV_OUT)
+                IfCondition EqualTo(b, 0) ThenBlock: {
+                    b = HTTP1.PoolGet()
+                    HTTP1.CSet(conn, HTTP1Off.PRIV_OUT, b)
+                }
+                IfCondition GreaterThan(len, HTTP1St.bufsz) ThenBlock: { len = HTTP1St.bufsz }
+                MemoryCopy(b, Add(slot, FrontC.HDR), len)
+                HTTP1.CSet(conn, HTTP1Off.OUT, b)
+                HTTP1.CSet(conn, HTTP1Off.OUT_LEN, len)
+                HTTP1.CSet(conn, HTTP1Off.OUT_SENT, 0)
+                HTTP1.CSet(conn, HTTP1Off.STATE, 3)
+                HTTP1.CSet(conn, HTTP1Off.DEFER, 0)
+                HTTP1.CSet(conn, HTTP1Off.KEEP, keep)
+            }
+            Front.PopDone(ring)
+            IfCondition EqualTo(ok, 1) ThenBlock: {
+                fr = HTTP1.Flush(conn)
+                IfCondition EqualTo(fr, -1) ThenBlock: { HTTP1.ClearConn(conn) }
+                IfCondition EqualTo(fr, 1) ThenBlock: {
+                    IfCondition EqualTo(keep, 0) ThenBlock: {
+                        HTTP1.ClearConn(conn)
+                    } ElseBlock: {
+                        HTTP1.ResetParse(conn)
+                        HTTP1.ReleaseOut(conn)
+                    }
+                }
+            }
+            slot = Front.PopSlot(ring)
+        }
+    }
+}
+
+// End of an event-loop pass: one signal per ring written during it. Every
+// push is followed by a signal, so the consumer, which drains to empty on
+// each wake, never misses one.
+Function.Front.Tick {
+    Input: unused: Integer
+    Body: {
+        IfCondition GreaterEqual(FrontSt.me, 0) ThenBlock: {
+            ring = Front.ReqRing(FrontSt.me)
+            blk = FrontSt.ov_head
+            WhileLoop NotEqual(blk, 0) {
+                slot = Front.PushSlot(ring)
+                IfCondition EqualTo(slot, 0) ThenBlock: { BreakLoop }
+                len = Dereference(Add(blk, 8))
+                MemoryCopy(slot, Add(blk, 16), len)
+                Front.PushDone(ring)
+                FrontSt.req_pend = 1
+                nxt = Dereference(blk)
+                Deallocate(blk, Add(len, 16))
+                blk = nxt
+            }
+            FrontSt.ov_head = blk
+            IfCondition EqualTo(blk, 0) ThenBlock: { FrontSt.ov_tail = 0 }
+            IfCondition EqualTo(FrontSt.req_pend, 1) ThenBlock: {
+                FrontSt.req_pend = 0
+                Front.Signal(Front.Get(FrontSt.req_efd, FrontSt.me))
+            }
+            ReturnValue(0)
+        }
+        f = 0
+        WhileLoop LessThan(f, FrontSt.n) {
+            IfCondition EqualTo(Front.Get(FrontSt.resp_pend, f), 1) ThenBlock: {
+                StoreValue(Add(FrontSt.resp_pend, Multiply(f, 8)), 0)
+                Front.Signal(Front.Get(FrontSt.resp_efd, f))
+            }
+            f = Add(f, 1)
+        }
+    }
+}
+
+// Runs in a forked child. Never returns.
+Function.Front.Serve {
+    Input: host: Address
+    Input: port: Integer
+    Body: {
+        HTTP1St.reuseport = 1
+        HTTP1St.commit_fn = 0
+        HTTP1St.ring_fn = AddressOf(Front.OnResp)
+        HTTP1St.tick_fn = AddressOf(Front.Tick)
+        fd = HTTP1.Listen(host, port)
+        IfCondition LessThan(fd, 0) ThenBlock: {
+            PrintMessage("FAIL front listen\n")
+            Exit(1)
+        }
+        Epoll.Add(HTTP1St.epfd, Front.Get(FrontSt.resp_efd, FrontSt.me), 1, HTTP1Ring.TAG)
+        PrintMessage("front listening\n")
+        HTTP1.Serve(AddressOf(Front.Handler))
+        Exit(0)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Database process
+// ---------------------------------------------------------------------------
+
+// Register the request eventfds with the database's event loop
+Function.Front.Attach {
+    Body: {
+        HTTP1St.ring_fn = AddressOf(Front.OnReq)
+        HTTP1St.vsend_fn = AddressOf(Front.VSend)
+        HTTP1St.tick_fn = AddressOf(Front.Tick)
+        f = 0
+        WhileLoop LessThan(f, FrontSt.n) {
+            Epoll.Add(HTTP1St.epfd, Front.Get(FrontSt.req_efd, f), 1, Add(HTTP1Ring.TAG, f))
+            f = Add(f, 1)
+        }
+    }
+}
+
+Function.Front.VGet {
+    Output: Address
+    Body: {
+        v = FrontSt.vfree
+        IfCondition EqualTo(v, 0) ThenBlock: {
+            v = Allocate(HTTP1Off.SLOT)
+            MemorySet(v, 0, HTTP1Off.SLOT)
+            HTTP1.CSet(v, HTTP1Off.CAP, HTTP1St.bufsz)
+            ReturnValue(v)
+        }
+        FrontSt.vfree = Dereference(Add(v, HTTP1Off.VIDX))
+        ReturnValue(v)
+    }
+}
+
+Function.Front.VPut {
+    Input: v: Address
+    Body: {
+        StoreValue(Add(v, HTTP1Off.VIDX), FrontSt.vfree)
+        FrontSt.vfree = v
+    }
+}
+
+// Flush of a virtual connection: the response goes to its front's ring
+Function.Front.VSend {
+    Input: conn: Address
+    Output: Integer
+    Body: {
+        f = HTTP1.CGet(conn, HTTP1Off.VFRONT)
+        ring = Front.RespRing(f)
+        slot = Front.PushSlot(ring)
+        WhileLoop EqualTo(slot, 0) {
+            // The front drains this ring; wake it and let it run
+            Front.Signal(Front.Get(FrontSt.resp_efd, f))
+            SystemCall(FrontC.SYS_YIELD)
+            slot = Front.PushSlot(ring)
+        }
+        len = HTTP1.CGet(conn, HTTP1Off.OUT_LEN)
+        StoreValue(slot, HTTP1.CGet(conn, HTTP1Off.VGEN))
+        StoreValue(Add(slot, 8), HTTP1.CGet(conn, HTTP1Off.VIDX))
+        StoreValue(Add(slot, 16), HTTP1.CGet(conn, HTTP1Off.KEEP))
+        StoreValue(Add(slot, 24), len)
+        IfCondition GreaterThan(len, 0) ThenBlock: {
+            MemoryCopy(Add(slot, FrontC.HDR), HTTP1.CGet(conn, HTTP1Off.OUT), len)
+        }
+        Front.PushDone(ring)
+        StoreValue(Add(FrontSt.resp_pend, Multiply(f, 8)), 1)
+        HTTP1.CSet(conn, HTTP1Off.OUT_SENT, len)
+        // Its fields stay readable until the caller resets it; it is only
+        // reused by the next Front.OnReq
+        Front.VPut(conn)
+        ReturnValue(1)
+    }
+}
+
+// Requests from front f: run each on a virtual connection
+Function.Front.OnReq {
+    Input: f: Integer
+    Body: {
+        Front.Drain(Front.Get(FrontSt.req_efd, f))
+        ring = Front.ReqRing(f)
+        slot = Front.PopSlot(ring)
+        WhileLoop NotEqual(slot, 0) {
+            v = Front.VGet()
+            mlen = Dereference(Add(slot, 24))
+            plen = Dereference(Add(slot, 32))
+            blen = Dereference(Add(slot, 40))
+            dlen = Dereference(Add(slot, 48))
+            p = Add(slot, FrontC.HDR)
+            HTTP1.CSet(v, HTTP1Off.METHOD, p)
+            p = Add(p, Add(mlen, 1))
+            HTTP1.CSet(v, HTTP1Off.PATH, p)
+            HTTP1.CSet(v, HTTP1Off.PATH_LEN, plen)
+            p = Add(p, Add(plen, 1))
+            bearer = 0
+            IfCondition GreaterThan(blen, 0) ThenBlock: { bearer = p }
+            HTTP1.CSet(v, HTTP1Off.BEARER, bearer)
+            HTTP1.CSet(v, HTTP1Off.BEARER_LEN, blen)
+            p = Add(p, Add(blen, 1))
+            body = 0
+            IfCondition GreaterThan(dlen, 0) ThenBlock: { body = p }
+            HTTP1.CSet(v, HTTP1Off.BODY, body)
+            HTTP1.CSet(v, HTTP1Off.BODY_LEN, dlen)
+            HTTP1.CSet(v, HTTP1Off.KEEP, Dereference(Add(slot, 16)))
+            HTTP1.CSet(v, HTTP1Off.VGEN, Dereference(slot))
+            HTTP1.CSet(v, HTTP1Off.VIDX, Dereference(Add(slot, 8)))
+            HTTP1.CSet(v, HTTP1Off.VFRONT, f)
+            HTTP1.CSet(v, HTTP1Off.FD, -2)
+            HTTP1.CSet(v, HTTP1Off.STATE, 1)
+            HTTP1.CSet(v, HTTP1Off.DEFER, 0)
+            HTTP1.CSet(v, HTTP1Off.WSEQ, 0)
+            HTTP1.CSet(v, HTTP1Off.FILL, 0)
+            HTTP1.CSet(v, HTTP1Off.HDR_END, 0)
+            HTTP1.CSet(v, HTTP1Off.CLEN, 0)
+            HTTP1.CSet(v, HTTP1Off.BUF, HTTP1St.scratch_in)
+            HTTP1.CSet(v, HTTP1Off.PRIV_IN, 0)
+            HTTP1.CSet(v, HTTP1Off.PRIV_OUT, 0)
+            HTTP1.HandleReady(v)
+            IfCondition EqualTo(HTTP1.CGet(v, HTTP1Off.DEFER), 1) ThenBlock: {
+                // Kept until the batch commits; the request slot is not needed
+                b = HTTP1.PoolGet()
+                ol = HTTP1.CGet(v, HTTP1Off.OUT_LEN)
+                IfCondition GreaterThan(ol, 0) ThenBlock: {
+                    MemoryCopy(b, HTTP1St.scratch_out, ol)
+                }
+                HTTP1.CSet(v, HTTP1Off.OUT, b)
+                HTTP1.CSet(v, HTTP1Off.PRIV_OUT, b)
+            } ElseBlock: {
+                Front.VSend(v)
+            }
+            Front.PopDone(ring)
+            slot = Front.PopSlot(ring)
+        }
+    }
+}

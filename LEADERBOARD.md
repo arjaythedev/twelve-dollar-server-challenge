@@ -84,7 +84,7 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | 17 | rust-epoll-scooter1337 | #82 | Rust (io_uring) | **264,000** ˣ | 25,147 | 259 | 499 | 0.00 | 84 | 30 | 630 | 2026-10-21 |
 | 18 | csharp-kestrel-mbobka | #316 | C# (.NET 10 ReadyToRun, Kestrel host, io_uring) | **260,000** | 24,980 | 134 | 286 | 0.00 | 82 | 30 | 692 | 2026-11-05 |
 | 18 | go-iouring-trungdlp | #339 | Go (io_uring, cgo SQLite B-tree reads) | **260,000** | 24,933 | 104.5 | 280.0 | 0.00 | 82 | 30 | 694 | 2026-11-06 |
-| 20 | v-epoll-i098 | #191 | V (io_uring, SQLite B-tree reads) | **257,000** | 24,766 | 13.5 | 29 | 0.00 | 74 | 27 | 732 | 2026-10-30 |
+| 20 | v-epoll-i098 | #191 | V (io_uring, SQLite B-tree reads) | **257,000** ᵂ | 24,766 | 13.5 | 29 | 0.00 | 74 | 27 | 732 | 2026-10-30 |
 | 20 | c-iouring-oix7 | #296 | C (io_uring, SQLite B-tree reads) | **257,000** | 24,654 | 239 | 796 | 0.00 | 76 | 28 | 905 | 2026-11-04 |
 | 20 | swift-iouring-c2p-cmd | #314 | Swift (io_uring, SQLite B-tree reads) | **257,000** ⁱ | 24,737 | 55.9 | 163.6 | 0.00 | 76 | 28 | 675 | 2026-11-05 |
 | 23 | asm-iouring-unorig-username | #206 | x86-64 asm (io_uring) | **250,000** | 24,053 | 141 | 397 | 0.00 | 91 | 34 | 1,486 | 2026-10-30 |
@@ -405,6 +405,12 @@ p95 2.7 / p99 107.7 ms, 0.93 % err = connect timeouts, 100 % CPU, 143 µs/req, 4
 220,000 failed the 2-minute probe on p99 (1.95 s at 80 % CPU, 0 errors). Its merged #340 code (`a0443a9`) held
 **195,000** (19,189 req/s, p95 12.6 / p99 139.5 ms, 73 % CPU, 2026-11-06).
 
+ᵂ **v-epoll-i098** stays on its merged #191 row. Its follow-up **#342** (`4c2205c`, C row JSON straight from B-tree
+pages, 4 ms batch window, smaller socket buffers; held, not merged: it didn't beat the merged row) scored **240,000**
+(23,181 req/s, p95 103.5 / p99 735.0 ms, 0 err, 77 % CPU, 30 µs/req, 686 MB, 2026-11-07). 250,000 failed the 2-minute
+probe on p99 (9.96 s at 83 % CPU, 0 errors); 260,000 / 280,000 / 320,000 collapsed on refused connections (58 % / 21 % /
+74 % errors).
+
 **Connection collapses in scored entries' failing probes.** v-epoll-i098 #191: 270,000 passed the 2-minute probe but
 failed the 5-minute hold with 60 % errors, nearly all `connection refused` from mid-hold on (an earlier attempt at
 `0ed86bf` hit the 1-hour install timeout). c-iouring-moneebullah25 #244: 240,000 failed the 2-minute probe on p99
@@ -679,6 +685,10 @@ public plugin APIs (a custom page cache through `SQLITE_CONFIG_PCACHE2`, a custo
   `tds_like_counts` decodes leaf cells itself (`findCell`, `page->nCell`) and `tds_like_position` sets `BtCursor`
   fields (`ix`, `info.nSize`, `curFlags`). Same open question for Arjay as #296 / #317 (ruling 8 vs. the allowed B-tree
   cursor reads). Scored as submitted (181k at `bf31d5a`); held open for Arjay.
+- **v-epoll-i098 #342 (follow-up to #191) writes SQLite's private B-tree cursor fields**: `td_sqlite.c`'s
+  `table_moveto` reimplements `sqlite3BtreeTableMoveto` (moveToRoot / moveToChild / findCell) and sets `BtCursor`
+  fields (`ix`, `curFlags`, `info.nKey`, `info.nSize`). Same open question for Arjay as #296 / #317 / #318. Scored 240k
+  at `4c2205c` (below the merged #191 row, footnote ᵂ); held open.
 - **c-iouring-fajarreza-gif #302 reuses c-iouring-pavlyhalim #245's syscall layer**: `src/sys.h` (io_uring ABI/ring
   code, 415 lines) is byte-identical to #245's and `sha256.h` nearly so (credited in its README since `d7a2e70`);
   `server.c`, HTTP, JWT and the database code are new. Arjay ruled 2026-11-04: credited reuse is fine → merged at

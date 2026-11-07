@@ -288,7 +288,11 @@ conflicts with the merged #82 folder) scored **230,000** on the standard 4-sourc
 own listeners; above #321's 228,000, but not merged: the head moved to `4dec92c` and then `21703ba` during the run, and
 `21703ba` is queued). The 230,000 hold had 0.89 % errors (73,737 HTTP 500s, all on `POST /posts/:id/like` and
 `POST /posts`, about 12 % of writes), under the 1 % limit; 240,000 failed the 2-minute probe on p95/p99 (9.4 / 10.0 s,
-71 % CPU) and 320,000 on p95 (2.8 s, 100 % CPU), 0 errors in both. Before that it was scored at its merged follow-up
+71 % CPU) and 320,000 on p95 (2.8 s, 100 % CPU), 0 errors in both. #336 at **`7d59dc9`** (inline post-record decode
+from the cursor, BUSY retry) held **226,000** (22,013 req/s, p95 21.1 / p99 123.8 ms, 0 err, 79 % CPU, 33 µs/req,
+1,064 MB, 2026-11-07), not above 230,000, so the row stays at `94645de`; 250,000 passed the 2-minute probe but 250,000
+and 238,000 failed the 5-minute hold on p95 (14.3 / 10.7 s). The head then moved to `4758859`, which is queued. Before
+that it was scored at its merged follow-up
 **#321** (`b3e1e26`, single-ring accept handover by default, merged
 2026-11-06; above #307's 210,000). The 228,000 hold had 0.46 % errors (37,386 HTTP 500s, all on `POST /posts/:id/like`
 and `POST /posts`, about 6 % of writes), under the 1 % limit; 240,000 passed the 2-minute probe but failed the 5-minute

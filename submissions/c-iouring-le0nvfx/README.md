@@ -39,6 +39,13 @@ foreground and reads the challenge's `HOST`, `PORT`, `SQLITE_PATH`, and
   Accepted TCP sockets use the kernel's default send/receive buffer autotuning
   with `TCP_NODELAY`. An epoll implementation is available if io_uring is
   unavailable.
+- Ring 0 owns the timed wait. Secondary rings publish completions and signal
+  eventfds; multishot polls on ring 0 wake the loop, which drains every ring's
+  completion queue without entering each secondary ring to wait. Busy waits
+  request 64 completions with a 2-ms timeout, and idle waits use a 1-s timeout.
+  Ring 0 uses deferred task running while secondary rings post completions
+  normally. This eventfd-wait design follows the public approach in
+  [C io_uring #245](https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/245).
 - JWT verification precomputes the HMAC-SHA256 inner and outer pad states at
   startup, then clones those states for each request. Every request still
   verifies its signature and uses a constant-time comparison. This follows the

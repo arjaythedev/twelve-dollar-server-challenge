@@ -77,7 +77,10 @@ call per request.
 - Each connection has one **multishot receive** into a per-ring provided-buffer ring (1,024 × 2 KB),
   so an idle connection holds no receive buffer. A receive that ends (ENOBUFS after a burst) is not
   re-armed at once but read with bounded single-shot `MSG_DONTWAIT` reads, then re-armed. A pass
-  answers at most 2,048 requests; the rest wait on their connection, oldest first.
+  answers at most 256 requests; the rest wait on their connection, oldest first. Short passes
+  matter under overload: a reply sent more than 40 ms after its request makes the kernel's delayed
+  ACK timer send a separate ACK first, so long passes add a packet to every late request and keep
+  the CPU saturated. 2,048 per pass meant passes of ~50 ms in a backlog.
 - The connection table holds no Go pointers (buffers are pool indexes), so the collector never
   scans it. Responses use 8 KB pooled buffers; bytes read but not yet answered use small (512 B)
   ones, so a backlog of tens of thousands of waiting requests costs megabytes. Idle connections are
@@ -103,7 +106,24 @@ call per request.
 ## Measured
 
 **On the benchmark box:** #339 (`e78b5a4`) held 260,000 users; #343 (`39efd02`) held 270,000 and
-failed 280,000 on p99 (2.7 s) at 86% CPU with 0 errors.
+failed 280,000 on p99 (2.7 s) at 86% CPU with 0 errors; #346 held 270,000.
+
+**On a box replica:** a 1 vCPU / 2 GB KVM VPS with the box's CPU (Xeon Platinum 8260), Ubuntu
+24.04 with kernel 6.8, both entries built there with their own `install.sh` and `build.sh`, the
+load generator (a Go port of `bench/load.js`) on a second VPS in the same datacenter. One
+generator reaches 180,000 connections, so users think 2x faster (`think x 0.5`, ~38,000 req/s);
+ramp 36 s (5,000 new connections a second, as a 300,000-user ramp on the box), hold 70 s, builds
+alternating. CPU is the whole machine's busy time in the hold, per request.
+
+| 180,000 users | µs per request | p95 | p99 |
+|---|---|---|---|
+| this version | 19.97, 20.52, 20.71 | 130, 120, 264 ms | 0.81, 0.74, 0.93 s |
+| #346 (2,048 answers per pass) | 21.07, 20.85, 21.10 | 646, 757, 1,296 ms | 1.97, 1.54, 2.35 s |
+
+The only change from #346 is answers per pass (see Connections): separate delayed ACKs fall from
+0.04 to 0.06 per request to 0.02 to 0.03, packets out from 1.15 to 1.23 to 1.07 to 1.08. On the
+same replica #346 and rust-iouring-kensac (#264) cost the same or ours less (60,000 users: 20.4
+and 20.6 vs 21.0 and 21.0 µs; 180,000 users at 90 s ramp: 21.4 and 21.9 vs 22.1 and 25.4 µs).
 
 **At the edge, in a box-shaped VM:** a KVM guest with 1 vCPU and 2 GB (1,967 MB visible, as on the
 box), Ubuntu 24.04's cloud image with its 6.8 kernel, a virtio NIC, the server as a systemd

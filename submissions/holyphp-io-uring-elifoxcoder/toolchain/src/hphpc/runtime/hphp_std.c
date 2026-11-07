@@ -9198,6 +9198,11 @@ hval hpbi_sqlite_errmsg(hval dbv) {
     return hp_of_str(hp_str_lit(db ? sqlite3_errmsg(db) : ""));
 }
 
+hval hpbi_sqlite_is_busy(hval dbv) {
+    sqlite3 *db = hp_sqlite_db(dbv);
+    return hp_of_bool(db && (sqlite3_errcode(db) & 0xff) == SQLITE_BUSY);
+}
+
 hval hpbi_sqlite_busy_timeout(hval dbv, hval ms) {
     sqlite3 *db = hp_sqlite_db(dbv);
     if (!db) return hp_of_bool(false);

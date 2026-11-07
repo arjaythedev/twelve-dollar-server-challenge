@@ -46,6 +46,17 @@ func dbFeed() ([]row, bool) {
 	return out.rows[:n], true
 }
 
+// render writes the last read's JSON body into b's spare capacity (td_render) and returns its
+// length, or -1 if it might not fit (the caller then builds it in Go).
+func render(kind int, b []byte) int {
+	free := cap(b) - len(b)
+	if free < 512 {
+		return -1
+	}
+	p := unsafe.Pointer(unsafe.SliceData(b[len(b):cap(b)]))
+	return int(C.td_render(C.int(kind), (*C.uchar)(p), C.int(free)))
+}
+
 // dbPost: 1 found (out.rows[0]), 0 missing, -1 error.
 func dbPost(id int64) int { return int(C.td_post(C.longlong(id))) }
 

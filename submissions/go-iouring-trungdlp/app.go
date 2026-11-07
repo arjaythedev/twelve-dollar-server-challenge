@@ -135,6 +135,9 @@ func (a *app) feed(b []byte) []byte {
 		return errorResp(b, 500, "internal server error")
 	}
 	b, s := start(b, 200)
+	if n := render(0, b); n >= 0 {
+		return end(b[:len(b)+n], s)
+	}
 	b = append(b, `{"posts":[`...)
 	for i := range rows {
 		r := &rows[i]
@@ -158,6 +161,9 @@ func (a *app) post(b []byte, id int64) []byte {
 	}
 	r := &out.rows[0]
 	b, s := start(b, 200)
+	if n := render(1, b); n >= 0 {
+		return end(b[:len(b)+n], s)
+	}
 	b = append(b, `{"post":`...)
 	b = appendPost(b, id, text(r.body_off, r.body_len), text(r.created_off, r.created_len),
 		text(r.author_off, r.author_len), int64(r.likes))

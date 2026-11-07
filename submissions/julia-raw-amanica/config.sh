@@ -12,3 +12,6 @@ SQLITE_URL="https://sqlite.org/${SQLITE_YEAR}/sqlite-amalgamation-${SQLITE_ID}.z
 
 # Read path (PLAN.md phase 5b): sql (public SQLite API, default) or btree (not implemented yet).
 READ_BACKEND=sql
+
+# GC soft target for the Julia heap (julia --heap-size-hint). The box has 2 GB for everything.
+JULIA_HEAP_HINT=512M

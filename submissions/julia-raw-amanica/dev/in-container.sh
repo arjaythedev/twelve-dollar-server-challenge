@@ -17,6 +17,10 @@ case "${1:-test}" in
          mkdir -p /work/data && cp /src/seed/feed.db /work/data/feed.db
          export SQLITE_PATH=/work/data/feed.db JWT_SECRET=twelve-dollar-challenge
          export HOST="${HOST:-0.0.0.0}" PORT="${PORT:-3000}"
+         # boot time: start.sh exec -> first healthy /health, printed into the server log
+         t0="$(date +%s%N)"
+         ( until curl -sf "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; do sleep 0.05; done
+           echo "boot_ms=$(( ($(date +%s%N) - t0) / 1000000 ))" ) &
          exec bash "submissions/$SUB/start.sh" ;;
   *) echo "unknown: $1" >&2; exit 2 ;;
 esac

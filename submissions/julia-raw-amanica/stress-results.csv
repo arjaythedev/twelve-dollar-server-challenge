@@ -1,0 +1,10 @@
+timestamp,commit,label,julia,backend,transport,cpus,mem,vus,ramp,duration,requests,req_s,p95_ms,p99_ms,max_ms,err_pct,pass,failed_on,srv_cpu_avg,srv_cpu_max,srv_rss_peak_mb,srv_cgmem_peak_mb,k6_mem_peak,boot_ms,notes
+2026-11-07T00:43:29Z,22d7c53+dirty,epoll baseline,1.13.3,sql,epoll,1,2g,2500,30s,1m,25894,199.2,0.884,1.842,158.3,0.000,1,,4,7,325,783,740MB,,
+2026-11-07T00:46:31Z,22d7c53+dirty,epoll baseline,1.13.3,sql,epoll,1,2g,5000,30s,1m,51901,399.3,0.789,1.807,31.4,0.000,1,,6,11,357,858,1439MB,,
+2026-11-07T00:49:26Z,22d7c53+dirty,epoll baseline,1.13.3,sql,epoll,1,2g,10000,30s,1m,103578,796.6,1.352,3.296,44.6,0.000,1,,12,24,421,823,2878MB,,
+2026-11-07T00:52:24Z,22d7c53+dirty,epoll baseline,1.13.3,sql,epoll,1,2g,20000,30s,1m,182679,1404.6,421.929,8052.534,15697.3,0.000,0,p(99)<1000,28,48,549,981,5744MB,,k6 stalled: http_req_sending max 13s; server CPU max 48%; host overloaded (load-generator limit)
+2026-11-07T00:55:24Z,22d7c53+dirty,epoll baseline,1.13.3,sql,epoll,1,2g,15000,30s,1m,155396,1195.2,1.626,13.448,93.0,0.000,1,,20,32,484,895,4310MB,,
+2026-11-07T00:58:13Z,22d7c53+dirty,epoll baseline,1.13.3,sql,epoll,1,2g,17500,30s,1m,181455,1395.3,1.517,12.315,97.9,0.000,1,,19,38,518,782,5026MB,,
+2026-11-07T01:01:09Z,22d7c53+dirty,epoll baseline,1.13.3,sql,epoll,1,2g,18750,30s,1m,194416,1494.8,1.621,10.433,98.6,0.000,1,,21,43,531,965,5397MB,,
+2026-11-07T01:04:07Z,22d7c53+dirty,epoll baseline,1.13.3,sql,epoll,1,2g,19350,30s,1m,200619,1542.5,1.958,24.505,151.4,0.000,1,,19,34,540,845,5599MB,,
+2026-11-07T01:13:34Z,22d7c53+dirty,epoll + heap-hint 512M,1.13.3,sql,epoll,1,2g,10000,30s,1m,103811,798.5,1.602,5.452,64.1,0.000,1,,15,29,421,746,2867MB,2278,

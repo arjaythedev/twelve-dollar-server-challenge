@@ -3,4 +3,4 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 . ./config.sh
-exec "$JULIA_HOME/bin/julia" --startup-file=no --history-file=no -O3 src/main.jl
+exec "$JULIA_HOME/bin/julia" --startup-file=no --history-file=no -O3 --heap-size-hint="$JULIA_HEAP_HINT" src/main.jl

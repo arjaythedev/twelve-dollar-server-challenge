@@ -92,19 +92,19 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | 23 | c-rawuring-thehimalayanleo | #269 | C (io_uring, SQLite B-tree reads) | **250,000** | 24,014 | 220 | 359 | 0.00 | 79 | 30 | 970 | 2026-11-02 |
 | 26 | fsharp-kestrel-delneg | #201 | F# (Kestrel, io_uring) | **247,000** | 23,884 | 14 | 72 | 0.00 | 71 | 27 | 750 | 2026-10-30 |
 | 26 | lisp-sbcl-heyitstony97-max | #283 | Common Lisp (SBCL, io_uring, SQLite B-tree reads) | **247,000** | 23,772 | 251 | 596 | 0.00 | 79 | 30 | 1,187 | 2026-11-03 |
-| 28 | asm-epoll-umitaltintas | #152 | x86-64 asm (io_uring) | **240,000** | 22,985 | 366 | 633 | 0.00 | 83 | 33 | 545 | 2026-10-28 |
-| 28 | cider-iouring-pomilon-v5 | #273 | Cider (native x86-64, io_uring, SQLite B-tree reads) | **240,000** | 23,198 | 145 | 236 | 0.02 | 92 | 36 | 706 | 2026-11-02 |
-| 28 | c-rawsqlite-larvance | #210 | C (io_uring, SQLite B-tree reads) | **240,000** | 23,237 | 118 | 280 | 0.00 | 84 | 33 | 1,153 | 2026-11-05 |
-| 28 | rust-iouring-rkkautsar | #322 | Rust (io_uring, SQLite B-tree reads) | **240,000** | 23,202 | 227.2 | 442.5 | 0.00 | 95 | 38 | 780 | 2026-11-06 |
-| 32 | c-iouring-meros | #199 | C (io_uring) | **238,000** | 22,796 | 417 | 750 | 0.00 | 78 | 31 | 1,567 | 2026-10-30 |
-| 33 | zig-iouring-unorig-username | #190 | Zig (io_uring) | **235,000** | 22,785 | 34 | 160 | 0.00 | 80 | 32 | 1,019 | 2026-10-29 |
-| 33 | cider-iouring-pomilon-v4 | #249 | Cider (native x86-64, io_uring, SQLite B-tree reads) | **235,000** | 22,817 | 10.5 | 29 | 0.00 | 88 | 35 | 908 | 2026-11-01 |
-| 35 | c-uring-curvynes | #217 | C (io_uring, SQLite B-tree reads) | **230,000** | 22,287 | 259 | 374 | 0.00 | 82 | 34 | 773 | 2026-10-30 |
-| 35 | c-iouring-moneebullah25 | #244 | C (io_uring, SQLite B-tree reads) | **230,000** | 22,289 | 51 | 470 | 0.00 | 67 | 28 | 828 | 2026-11-01 |
-| 35 | go-iouring-rkkautsar | #260 | Go (io_uring, cgo SQLite B-tree reads) | **230,000** | 22,069 | 66.8 | 438 | 0.00 | 93 | 39 | 799 | 2026-11-03 |
-| 35 | rust-native-M3M0KA | #265 | Rust (no crates, epoll/io_uring, 5 worker processes, SQLite B-tree reads) | **230,000** ʳ | 22,304 | 150 | 352 | 0.00 | 90 | 37 | 1,350 | 2026-11-02 |
-| 35 | nelua-iouring-tbsvttr | #281 | Nelua (io_uring, SQLite B-tree reads) | **230,000** | 22,379 | 11.8 | 49.6 | 0.00 | 69 | 28 | 938 | 2026-11-02 |
-| 35 | holyphp-io-uring-elifoxcoder | #336 | HolyPHP (io_uring, SQLite B-tree reads) | **230,000** ᵘ | 22,367 | 28.4 | 231.7 | 0.89 | 81 | 33 | 1,069 | 2026-11-07 |
+| 28 | holyphp-io-uring-elifoxcoder | #336 | HolyPHP (io_uring, SQLite B-tree reads) | **244,000** ᵘ | 23,557 | 128.8 | 735.0 | 0.00 | 81 | 31 | 907 | 2026-11-07 |
+| 29 | asm-epoll-umitaltintas | #152 | x86-64 asm (io_uring) | **240,000** | 22,985 | 366 | 633 | 0.00 | 83 | 33 | 545 | 2026-10-28 |
+| 29 | cider-iouring-pomilon-v5 | #273 | Cider (native x86-64, io_uring, SQLite B-tree reads) | **240,000** | 23,198 | 145 | 236 | 0.02 | 92 | 36 | 706 | 2026-11-02 |
+| 29 | c-rawsqlite-larvance | #210 | C (io_uring, SQLite B-tree reads) | **240,000** | 23,237 | 118 | 280 | 0.00 | 84 | 33 | 1,153 | 2026-11-05 |
+| 29 | rust-iouring-rkkautsar | #322 | Rust (io_uring, SQLite B-tree reads) | **240,000** | 23,202 | 227.2 | 442.5 | 0.00 | 95 | 38 | 780 | 2026-11-06 |
+| 33 | c-iouring-meros | #199 | C (io_uring) | **238,000** | 22,796 | 417 | 750 | 0.00 | 78 | 31 | 1,567 | 2026-10-30 |
+| 34 | zig-iouring-unorig-username | #190 | Zig (io_uring) | **235,000** | 22,785 | 34 | 160 | 0.00 | 80 | 32 | 1,019 | 2026-10-29 |
+| 34 | cider-iouring-pomilon-v4 | #249 | Cider (native x86-64, io_uring, SQLite B-tree reads) | **235,000** | 22,817 | 10.5 | 29 | 0.00 | 88 | 35 | 908 | 2026-11-01 |
+| 36 | c-uring-curvynes | #217 | C (io_uring, SQLite B-tree reads) | **230,000** | 22,287 | 259 | 374 | 0.00 | 82 | 34 | 773 | 2026-10-30 |
+| 36 | c-iouring-moneebullah25 | #244 | C (io_uring, SQLite B-tree reads) | **230,000** | 22,289 | 51 | 470 | 0.00 | 67 | 28 | 828 | 2026-11-01 |
+| 36 | go-iouring-rkkautsar | #260 | Go (io_uring, cgo SQLite B-tree reads) | **230,000** | 22,069 | 66.8 | 438 | 0.00 | 93 | 39 | 799 | 2026-11-03 |
+| 36 | rust-native-M3M0KA | #265 | Rust (no crates, epoll/io_uring, 5 worker processes, SQLite B-tree reads) | **230,000** ʳ | 22,304 | 150 | 352 | 0.00 | 90 | 37 | 1,350 | 2026-11-02 |
+| 36 | nelua-iouring-tbsvttr | #281 | Nelua (io_uring, SQLite B-tree reads) | **230,000** | 22,379 | 11.8 | 49.6 | 0.00 | 69 | 28 | 938 | 2026-11-02 |
 | 41 | cider-iouring-pomilon-v3 | #234 | Cider (native x86-64, io_uring, SQLite B-tree reads) | **228,000** | 21,945 | 370 | 853 | 0.00 | 86 | 36 | 668 | 2026-10-31 |
 | 42 | dexlang-iouring-tuned-ensamuel7 | #279 | DexLang (generated C, io_uring, SQLite B-tree reads) | **226,000** ᵝ | 21,876 | 297 | 633 | 0.00 | 84 | 35 | 873 | 2026-11-02 |
 | 43 | wat-wasmedge-delneg | #288 | WebAssembly (hand-written WAT, WasmEdge AOT, io_uring, SQLite B-tree reads) | **220,000** ᵒ | 21,464 | 21.9 | 263.7 | 0.00 | 72 | 31 | 913 | 2026-11-04 |
@@ -284,14 +284,18 @@ conflicts with the merged #82 folder) scored **230,000** on the standard 4-sourc
 62 ms, 0 err, 91 % CPU, 37 µs/req, 931 MB, 2026-10-28) and is CPU-bound, not source-port-bound: 240,000 failed at 95 % CPU
 (p99 1.5 s). The row above stays on #82's merged code until #141 is rebased and merged.
 
-ᵘ **HolyPHP** is scored at its follow-up **#336** at commit **`94645de`** (1 ms write wait, small socket buffers on its
-own listeners; above #321's 228,000, but not merged: the head moved to `4dec92c` and then `21703ba` during the run, and
+ᵘ **HolyPHP** is scored at its follow-up **#336** at commit **`4758859`** (forced PASSIVE checkpoint through
+`sqlite3_wal_checkpoint_v2`, extended error codes; merged 2026-11-07, above the 230,000 row). The 244,000 hold had 0
+errors; 257,000 and 270,000 passed the 2-minute probe but failed the 5-minute hold on p95 (4.6 / 13.8 s), 280,000 failed
+the 2-minute probe on p95 (9.4 s, 76 % CPU) and 320,000 on p95 (2.9 s, 100 % CPU). Before that it was scored at #336 at
+**`94645de`** (**230,000**, 22,367 req/s, p95 28.4 / p99 231.7 ms, 81 % CPU, 33 µs/req, 1,069 MB; 1 ms write wait, small
+socket buffers on its own listeners; above #321's 228,000, but not merged: the head moved to `4dec92c` and then `21703ba` during the run, and
 `21703ba` is queued). The 230,000 hold had 0.89 % errors (73,737 HTTP 500s, all on `POST /posts/:id/like` and
 `POST /posts`, about 12 % of writes), under the 1 % limit; 240,000 failed the 2-minute probe on p95/p99 (9.4 / 10.0 s,
 71 % CPU) and 320,000 on p95 (2.8 s, 100 % CPU), 0 errors in both. #336 at **`7d59dc9`** (inline post-record decode
 from the cursor, BUSY retry) held **226,000** (22,013 req/s, p95 21.1 / p99 123.8 ms, 0 err, 79 % CPU, 33 µs/req,
 1,064 MB, 2026-11-07), not above 230,000, so the row stays at `94645de`; 250,000 passed the 2-minute probe but 250,000
-and 238,000 failed the 5-minute hold on p95 (14.3 / 10.7 s). The head then moved to `4758859`, which is queued. Before
+and 238,000 failed the 5-minute hold on p95 (14.3 / 10.7 s). The head then moved to `4758859`, scored above. Before
 that it was scored at its merged follow-up
 **#321** (`b3e1e26`, single-ring accept handover by default, merged
 2026-11-06; above #307's 210,000). The 228,000 hold had 0.46 % errors (37,386 HTTP 500s, all on `POST /posts/:id/like`

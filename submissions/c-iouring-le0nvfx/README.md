@@ -39,6 +39,11 @@ foreground and reads the challenge's `HOST`, `PORT`, `SQLITE_PATH`, and
   Accepted TCP sockets use the kernel's default send/receive buffer autotuning
   with `TCP_NODELAY`. An epoll implementation is available if io_uring is
   unavailable.
+- JWT verification precomputes the HMAC-SHA256 inner and outer pad states at
+  startup, then clones those states for each request. Every request still
+  verifies its signature and uses a constant-time comparison. This follows the
+  published key-schedule approach in
+  [rust-iouring-kensac #264](https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/264).
 - The B-tree traversal helpers in `src/btree_feed.h` are adapted from
   [c-iouring-pavlyhalim #245](https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/245).
 - Reads access the supplied SQLite database on each request. The feed and post
@@ -55,8 +60,9 @@ foreground and reads the challenge's `HOST`, `PORT`, `SQLITE_PATH`, and
 - Writes use WAL and `synchronous=NORMAL`. Multiple writes may share a SQLite
   transaction; affected responses are held until commit succeeds. A background
   checkpoint thread manages WAL growth, and the VFS coalesces WAL writes while
-  preserving SQLite's I/O barriers. The program can advise the kernel to
-  release already-checkpointed WAL pages.
+  preserving SQLite's I/O barriers. After a complete checkpoint, the program
+  may use `posix_fadvise(POSIX_FADV_DONTNEED)` on a range of its own WAL file to
+  release clean cached pages; it does not change system-wide kernel settings.
 
 The code makes no schema or index changes and does not modify kernel settings
 or pin CPUs. Dependency and source licenses are retained with the vendored

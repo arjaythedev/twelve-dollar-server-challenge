@@ -436,6 +436,71 @@ static unsigned g_listener_count;
 static time_t g_started;
 static const char *g_secret = SECRET_DEFAULT;
 static size_t g_secret_len;
+static EVP_MD_CTX *g_hmac_inner_state;
+static EVP_MD_CTX *g_hmac_outer_state;
+static EVP_MD_CTX *g_hmac_work;
+
+/* Request handling is serialized on the event-loop thread. Keep only the HMAC
+ * key's inner and outer SHA-256 states; signatures are still checked per request. */
+static int auth_hmac_init(void) {
+    enum { HMAC_BLOCK_LEN = 64, HMAC_DIGEST_LEN = 32 };
+    unsigned char key[HMAC_BLOCK_LEN] = {0};
+    unsigned char pad[HMAC_BLOCK_LEN];
+    unsigned int key_len = 0;
+    if (g_secret_len > HMAC_BLOCK_LEN) {
+        if (EVP_Digest(g_secret, g_secret_len, key, &key_len,
+                       EVP_sha256(), NULL) != 1 || key_len != HMAC_DIGEST_LEN) {
+            OPENSSL_cleanse(key, sizeof(key));
+            return -1;
+        }
+    } else if (g_secret_len != 0U) {
+        memcpy(key, g_secret, g_secret_len);
+    }
+
+    g_hmac_inner_state = EVP_MD_CTX_new();
+    g_hmac_outer_state = EVP_MD_CTX_new();
+    g_hmac_work = EVP_MD_CTX_new();
+    if (!g_hmac_inner_state || !g_hmac_outer_state || !g_hmac_work) goto fail;
+
+    for (size_t i = 0; i < HMAC_BLOCK_LEN; ++i) pad[i] = key[i] ^ 0x36U;
+    if (EVP_DigestInit_ex2(g_hmac_inner_state, EVP_sha256(), NULL) != 1 ||
+        EVP_DigestUpdate(g_hmac_inner_state, pad, sizeof(pad)) != 1) goto fail;
+
+    for (size_t i = 0; i < HMAC_BLOCK_LEN; ++i) pad[i] = key[i] ^ 0x5cU;
+    if (EVP_DigestInit_ex2(g_hmac_outer_state, EVP_sha256(), NULL) != 1 ||
+        EVP_DigestUpdate(g_hmac_outer_state, pad, sizeof(pad)) != 1) goto fail;
+
+    OPENSSL_cleanse(key, sizeof(key));
+    OPENSSL_cleanse(pad, sizeof(pad));
+    return 0;
+
+fail:
+    OPENSSL_cleanse(key, sizeof(key));
+    OPENSSL_cleanse(pad, sizeof(pad));
+    EVP_MD_CTX_free(g_hmac_inner_state);
+    EVP_MD_CTX_free(g_hmac_outer_state);
+    EVP_MD_CTX_free(g_hmac_work);
+    g_hmac_inner_state = NULL;
+    g_hmac_outer_state = NULL;
+    g_hmac_work = NULL;
+    return -1;
+}
+
+static int auth_hmac_sha256(const unsigned char *message, size_t message_len,
+                            unsigned char digest[32]) {
+    unsigned char inner_digest[32];
+    unsigned int digest_len = 0;
+    int ok = EVP_MD_CTX_copy_ex(g_hmac_work, g_hmac_inner_state) == 1 &&
+             EVP_DigestUpdate(g_hmac_work, message, message_len) == 1 &&
+             EVP_DigestFinal_ex(g_hmac_work, inner_digest, &digest_len) == 1 &&
+             digest_len == sizeof(inner_digest) &&
+             EVP_MD_CTX_copy_ex(g_hmac_work, g_hmac_outer_state) == 1 &&
+             EVP_DigestUpdate(g_hmac_work, inner_digest, sizeof(inner_digest)) == 1 &&
+             EVP_DigestFinal_ex(g_hmac_work, digest, &digest_len) == 1 &&
+             digest_len == 32U;
+    OPENSSL_cleanse(inner_digest, sizeof(inner_digest));
+    return ok ? 1 : 0;
+}
 static char *g_listener_tag = "listener";
 
 static void ring_release_direct(Conn *c);
@@ -1247,10 +1312,9 @@ static int verify_auth(const char *header, size_t header_len, Auth *auth) {
         base64url_decode(dot2 + 1, right, sig, sizeof(sig), &siglen) != 0) return AUTH_INVALID;
     hbuf[hlen] = '\0';
     pbuf[plen] = '\0';
-    unsigned int digest_len = 0;
-    if (!HMAC(EVP_sha256(), g_secret, (int)g_secret_len, (const unsigned char *)token,
-              (size_t)(dot2 - token), digest, &digest_len) || digest_len != 32 ||
-        siglen != digest_len || CRYPTO_memcmp(sig, digest, digest_len) != 0)
+    if (!auth_hmac_sha256((const unsigned char *)token,
+                          (size_t)(dot2 - token), digest) ||
+        siglen != 32U || CRYPTO_memcmp(sig, digest, 32U) != 0)
         return AUTH_INVALID;
     JsonObject hobj;
     if (parse_json_object((const char *)hbuf, hlen, &hobj) != 0) return AUTH_INVALID;
@@ -1801,7 +1865,7 @@ static uint64_t wal_monotonic_ns(void) {
     return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
 }
 
-#ifdef RING_WAL_FADVISE_TEST
+#ifdef RING_WAL_FADVISE
 #define WAL_ADVISE_MIN_BYTES (16ULL * 1024ULL * 1024ULL)
 #define WAL_ADVISE_KEEP_BYTES (32ULL * 1024ULL * 1024ULL)
 #define WAL_ADVISE_START_BYTES (64ULL * 1024ULL * 1024ULL)
@@ -1981,7 +2045,7 @@ static void *wal_checkpoint_main(void *arg) {
             return NULL;
         }
 
-#ifdef RING_WAL_FADVISE_TEST
+#ifdef RING_WAL_FADVISE
         if (checkpoint_rc == SQLITE_OK) {
             wal_advise_checkpointed_pages(db, log_frames, checkpointed_frames);
         }
@@ -2014,7 +2078,7 @@ static void *wal_checkpoint_main(void *arg) {
                 return NULL;
             }
 
-#ifdef RING_WAL_FADVISE_TEST
+#ifdef RING_WAL_FADVISE
             if (checkpoint_rc == SQLITE_OK) {
                 wal_advise_checkpointed_pages(db, log_frames,
                                               checkpointed_frames);
@@ -4646,6 +4710,10 @@ int main(void) {
     if (secret && *secret) g_secret = secret;
     const unsigned ring_pool_size = 6;
     g_secret_len = strlen(g_secret);
+    if (auth_hmac_init() != 0) {
+        fprintf(stderr, "could not initialize HS256 verifier\n");
+        return 1;
+    }
     int pcache_rc = page_cache_wrapper_install();
     if (pcache_rc != SQLITE_OK) {
         fprintf(stderr, "SQLite page-cache wrapper install failed: %s\n",

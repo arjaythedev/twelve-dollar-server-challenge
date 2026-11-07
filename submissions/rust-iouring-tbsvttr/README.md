@@ -14,16 +14,17 @@
 
 2. **Stock SQLite B-Tree Cursor Read Engine + Monotonic Leaf Walks:**
    - Compiles unmodified SQLite `3.54.1` in `csrc/engine.c` with `"unix-excl"` VFS (heap-resident WAL index shared across the process's connections without `-shm` file lock overhead) and drives SQLite's B-tree cursor API (`sqlite3BtreeBeginTrans`, `sqlite3BtreeCursor`, `sqlite3BtreeTableMoveto`, `sqlite3BtreeIndexMoveto`, `sqlite3BtreeFirst`, `sqlite3BtreeNext`) inside a shared per-pass transaction.
-   - Reverses descending `/feed` post IDs into ascending order without sorting when monotonic, stepping `cur_posts` across consecutive IDs via `sqlite3BtreeNext` (`O(1)` leaf step instead of full B-tree binary search) and counting likes across the 20-post range in a single direct leaf-cell scan (`tvcc_count_likes_range`).
+   - Extracts `created_at` directly from `posts_created_at_id_idx` (`cur_feed`) so `cur_posts` only decodes `(user_id, body)`, reverses descending `/feed` post IDs into ascending order without sorting when monotonic, stepping `cur_posts` across consecutive IDs via `sqlite3BtreeNext` (`O(1)` leaf step instead of full B-tree binary search), and counts likes across the 20-post range in a single direct leaf-cell scan (`tvcc_count_likes_range`).
    - Deduplicates and sorts unique `user_id`s per `/feed` pass so `cur_users` walks leaf pages monotonically.
 
-3. **Two-Stage Condition-Variable `nice(19)` Checkpoint State Machine (`250 ms` Hold Cap):**
+3. **Two-Stage Condition-Variable `nice(19)` Checkpoint State Machine (`150 ms` Hold Cap):**
    - Tracks exact WAL length via `sqlite3_wal_hook` and wakes the `nice 19` checkpoint thread via `pthread_cond_signal` only between event-loop passes (when no read transaction is open on `db`).
    - **Stage 1 (`CK_BULK` at 4,096 frames):** Runs a `PASSIVE` checkpoint in the background while writes continue unblocked.
-   - **Stage 2 (`CK_TAIL`):** Holds incoming `POST` requests between passes only for the tiny remaining WAL tail so the next write resets the WAL to frame 1, enforcing a hard `HOLD_MAX_MS = 250 ms` cap so tail latency (`p99`) never spikes under 1-vCPU saturation.
+   - **Stage 2 (`CK_TAIL`):** Holds incoming `POST` requests between passes only for the tiny remaining WAL tail so the next write resets the WAL to frame 1, enforcing a hard `HOLD_MAX_MS = 150 ms` cap so tail latency (`p99`) never spikes under 1-vCPU saturation.
 
-4. **Single-Reservation SIMD (`AVX2` / `SSE2` / `SWAR`) JSON Serializer & Single-Pass HTTP Parser:**
-   - `fill_json` reserves the worst-case output bound once per response and writes JSON via raw pointer stores, copying and checking string bodies for JSON special characters (`< 0x20`, `'"'`, `'\\'`) 32 bytes at a time with AVX2 (`_mm256_min_epu8` + `_mm256_movemask_epi8`), 16 bytes with SSE2, and 8 bytes with 64-bit SWAR.
+4. **8 KB Pool-Preserving SIMD (`AVX2` / `SSE2` / `SWAR`) JSON Serializer & Single-Pass HTTP Parser:**
+   - `fill_json` reserves `1x` input length (`+ 64` bytes SIMD/escape slack) upfront so `/feed` responses (~3.6 KB) always fit inside the 8 KB (`OUT_CAP = 8192`) pooled `Vec<u8>` buffers with zero `realloc`/`munmap` churn and 100% buffer pool reuse, expanding via `#[cold] fn grow_cold` only if a string contains heavy control-character escaping.
+   - Copies and checks string bodies for JSON special characters (`< 0x20`, `'"'`, `'\\'`) 32 bytes at a time with AVX2 (`_mm256_min_epu8` + `_mm256_movemask_epi8`), 16 bytes with SSE2, and 8 bytes with 64-bit SWAR.
    - `parse_http_request` parses the request line and headers in a single `memchr('\n')` pass.
 
 

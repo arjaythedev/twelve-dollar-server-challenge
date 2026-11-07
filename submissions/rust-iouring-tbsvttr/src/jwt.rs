@@ -20,6 +20,118 @@ const SHA256_K: [u32; 64] = [
 
 #[inline]
 fn sha256_compress(state: &mut [u32; 8], block: &[u8; 64]) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        static HAS_SHANI: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+        let flag = HAS_SHANI.load(std::sync::atomic::Ordering::Relaxed);
+        let supported = if flag == 0 {
+            let ok = std::is_x86_feature_detected!("sha")
+                && std::is_x86_feature_detected!("sse4.1")
+                && std::is_x86_feature_detected!("ssse3");
+            HAS_SHANI.store(if ok { 1 } else { 2 }, std::sync::atomic::Ordering::Relaxed);
+            ok
+        } else {
+            flag == 1
+        };
+        if supported {
+            unsafe {
+                sha256_compress_shani(state, block);
+            }
+            return;
+        }
+    }
+    sha256_compress_scalar(state, block);
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sha,sse4.1,ssse3")]
+unsafe fn compress_m_shani(
+    state: &mut [u32; 8],
+    mut m0: core::arch::x86_64::__m128i,
+    mut m1: core::arch::x86_64::__m128i,
+    mut m2: core::arch::x86_64::__m128i,
+    mut m3: core::arch::x86_64::__m128i,
+) {
+    unsafe {
+        use core::arch::x86_64::*;
+
+        let s0 = _mm_loadu_si128(state.as_ptr().cast());
+        let s1 = _mm_loadu_si128(state.as_ptr().add(4).cast());
+        let tmp = _mm_shuffle_epi32(s0, 0xB1);
+        let efgh = _mm_shuffle_epi32(s1, 0x1B);
+        let mut abef = _mm_alignr_epi8(tmp, efgh, 8);
+        let mut cdgh = _mm_blend_epi16(efgh, tmp, 0xF0);
+        let abef_save = abef;
+        let cdgh_save = cdgh;
+
+        let load_k = |idx: usize| -> __m128i {
+            _mm_loadu_si128(SHA256_K.as_ptr().add(idx).cast())
+        };
+
+        macro_rules! rnd4 {
+            ($m_cur:ident, $k_idx:expr) => {{
+                let wk = _mm_add_epi32($m_cur, load_k($k_idx));
+                cdgh = _mm_sha256rnds2_epu32(cdgh, abef, wk);
+                abef = _mm_sha256rnds2_epu32(abef, cdgh, _mm_shuffle_epi32(wk, 0x0E));
+            }};
+            ($m0:ident, $m1:ident, $m2:ident, $m3:ident, $k_idx:expr) => {{
+                let wk = _mm_add_epi32($m0, load_k($k_idx));
+                cdgh = _mm_sha256rnds2_epu32(cdgh, abef, wk);
+                $m0 = _mm_sha256msg1_epu32($m0, $m1);
+                abef = _mm_sha256rnds2_epu32(abef, cdgh, _mm_shuffle_epi32(wk, 0x0E));
+                $m0 = _mm_add_epi32($m0, _mm_alignr_epi8($m3, $m2, 4));
+                $m0 = _mm_sha256msg2_epu32($m0, $m3);
+            }};
+        }
+
+        rnd4!(m0, m1, m2, m3, 0);
+        rnd4!(m1, m2, m3, m0, 4);
+        rnd4!(m2, m3, m0, m1, 8);
+        rnd4!(m3, m0, m1, m2, 12);
+        rnd4!(m0, m1, m2, m3, 16);
+        rnd4!(m1, m2, m3, m0, 20);
+        rnd4!(m2, m3, m0, m1, 24);
+        rnd4!(m3, m0, m1, m2, 28);
+        rnd4!(m0, m1, m2, m3, 32);
+        rnd4!(m1, m2, m3, m0, 36);
+        rnd4!(m2, m3, m0, m1, 40);
+        rnd4!(m3, m0, m1, m2, 44);
+        rnd4!(m0, 48);
+        rnd4!(m1, 52);
+        rnd4!(m2, 56);
+        rnd4!(m3, 60);
+
+        abef = _mm_add_epi32(abef, abef_save);
+        cdgh = _mm_add_epi32(cdgh, cdgh_save);
+
+        let feba = _mm_shuffle_epi32(abef, 0x1B);
+        let dchg = _mm_shuffle_epi32(cdgh, 0xB1);
+        let out0 = _mm_blend_epi16(feba, dchg, 0xF0);
+        let out1 = _mm_alignr_epi8(dchg, feba, 8);
+        _mm_storeu_si128(state.as_mut_ptr().cast(), out0);
+        _mm_storeu_si128(state.as_mut_ptr().add(4).cast(), out1);
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sha,sse4.1,ssse3")]
+unsafe fn sha256_compress_shani(state: &mut [u32; 8], block: &[u8; 64]) {
+    unsafe {
+        use core::arch::x86_64::*;
+        let bswap = _mm_set_epi8(12, 13, 14, 15, 8, 9, 10, 11, 4, 5, 6, 7, 0, 1, 2, 3);
+        let ptr = block.as_ptr();
+        compress_m_shani(
+            state,
+            _mm_shuffle_epi8(_mm_loadu_si128(ptr.cast()), bswap),
+            _mm_shuffle_epi8(_mm_loadu_si128(ptr.add(16).cast()), bswap),
+            _mm_shuffle_epi8(_mm_loadu_si128(ptr.add(32).cast()), bswap),
+            _mm_shuffle_epi8(_mm_loadu_si128(ptr.add(48).cast()), bswap),
+        );
+    }
+}
+
+#[inline]
+fn sha256_compress_scalar(state: &mut [u32; 8], block: &[u8; 64]) {
     let mut w = [0u32; 64];
     for i in 0..16 {
         let j = i * 4;

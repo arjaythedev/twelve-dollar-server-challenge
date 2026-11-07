@@ -1,5 +1,4 @@
 module CSQLite {
-    header "csqlite.h"
-    link "m"
+    header "feeddb.h"
     export *
 }

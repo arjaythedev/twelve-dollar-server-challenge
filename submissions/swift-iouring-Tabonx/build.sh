@@ -22,7 +22,7 @@ if [ ! -f "$DEPS/sqlite3.c" ]; then
     unzip -q -o "$DEPS/sqlite.zip" -d "$DEPS"
     cp "$DEPS/sqlite-amalgamation-$SQLITE_VER/sqlite3.c" "$DEPS/sqlite3.c"
 fi
-cp "$DEPS/sqlite-amalgamation-$SQLITE_VER/sqlite3.h" Sources/CSQLite/include/sqlite3.h
+cp "$DEPS/sqlite-amalgamation-$SQLITE_VER/sqlite3.h" "$DEPS/sqlite3.h"
 URING_VER=2.15
 fetch "https://github.com/axboe/liburing/archive/refs/tags/liburing-$URING_VER.tar.gz" "$DEPS/liburing.tar.gz" \
     8d052f2622dcb3678cbaee5ff582a87572672a6c0a56533cdda5b65cb636120a
@@ -33,22 +33,27 @@ if [ ! -f "$URING/lib/liburing.a" ]; then
      make -j"$(nproc)" -s -C src install >/dev/null)
 fi
 
-# Single-threaded SQLite without mmap, deprecated APIs or shared cache.
+# SQLite without mmap, deprecated APIs or shared cache. THREADSAFE=2: the event loop and the
+# checkpoint thread each use their own connection.
 CFLAGS=(-O3 -march=native -fomit-frame-pointer)
-SQLITE_DEFINES=(-DSQLITE_THREADSAFE=0 -DSQLITE_DEFAULT_MEMSTATUS=0 -DSQLITE_DEFAULT_WAL_SYNCHRONOUS=1
+SQLITE_DEFINES=(-DSQLITE_THREADSAFE=2 -DSQLITE_DEFAULT_MEMSTATUS=0 -DSQLITE_DEFAULT_WAL_SYNCHRONOUS=1
   -DSQLITE_DQS=0 -DSQLITE_MAX_MMAP_SIZE=0 -DSQLITE_MAX_EXPR_DEPTH=0 -DSQLITE_OMIT_DEPRECATED
   -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_OMIT_PROGRESS_CALLBACK -DSQLITE_OMIT_SHARED_CACHE
-  -DSQLITE_LIKE_DOESNT_MATCH_BLOBS -DHAVE_FDATASYNC=1)
+  -DSQLITE_OMIT_AUTOINIT -DSQLITE_OMIT_UTF16 -DSQLITE_OMIT_TRACE -DSQLITE_OMIT_COMPLETE -DSQLITE_OMIT_GET_TABLE
+  -DSQLITE_OMIT_TCL_VARIABLE -DSQLITE_USE_ALLOCA -DSQLITE_LIKE_DOESNT_MATCH_BLOBS -DHAVE_FDATASYNC=1 -DHAVE_USLEEP=1)
+# db.c compiles the amalgamation into its own translation unit, so the profile is trained on the
+# same translation unit that ships.
+DB_SRC=(-I"$DEPS" -ISources/CSQLite/include Sources/CSQLite/db.c)
 CLANG="$BIN/clang"
 if ! (rm -rf "$OUT/pgo" && mkdir -p "$OUT/pgo" &&
       "$CLANG" "${CFLAGS[@]}" "${SQLITE_DEFINES[@]}" -fprofile-instr-generate="$OUT/pgo/%p.profraw" \
-          -ISources/CSQLite/include "$DEPS/sqlite3.c" pgo/train.c -lm -o "$OUT/pgo/train" &&
+          "${DB_SRC[@]}" pgo/train.c -lm -lpthread -o "$OUT/pgo/train" &&
       "$OUT/pgo/train" "$SCHEMA" "$OUT/pgo/train.db" 8 &&
       "$BIN/llvm-profdata" merge -o "$OUT/pgo/sqlite.profdata" "$OUT"/pgo/*.profraw &&
       "$CLANG" "${CFLAGS[@]}" "${SQLITE_DEFINES[@]}" -fprofile-instr-use="$OUT/pgo/sqlite.profdata" \
-          -Wno-profile-instr-out-of-date -c "$DEPS/sqlite3.c" -o "$OUT/sqlite3.o"); then
+          -Wno-profile-instr-out-of-date -c "${DB_SRC[@]}" -o "$OUT/db.o"); then
     echo "PGO failed, building SQLite without a profile" >&2
-    "$CLANG" "${CFLAGS[@]}" "${SQLITE_DEFINES[@]}" -c "$DEPS/sqlite3.c" -o "$OUT/sqlite3.o"
+    "$CLANG" "${CFLAGS[@]}" "${SQLITE_DEFINES[@]}" -c "${DB_SRC[@]}" -o "$OUT/db.o"
 fi
 rm -f "$OUT"/pgo/train.db*
 
@@ -58,5 +63,5 @@ rm -f "$OUT"/pgo/train.db*
     -static-stdlib \
     -I Sources/CSQLite/include -I Sources/CShim/include -I Sources/CUring/include \
     -Xcc -ISources/CSQLite/include -Xcc -ISources/CShim/include -Xcc -ISources/CUring/include -Xcc -I"$URING/include" \
-    Sources/Server/*.swift "$OUT/shim.o" "$OUT/tu.o" "$OUT/sqlite3.o" "$URING/lib/liburing.a" -o bin/server
+    Sources/Server/*.swift "$OUT/shim.o" "$OUT/tu.o" "$OUT/db.o" -lpthread "$URING/lib/liburing.a" -o bin/server
 echo "built bin/server"

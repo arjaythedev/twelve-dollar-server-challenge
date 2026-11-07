@@ -65,7 +65,7 @@ struct EpollServer: ~Copyable {
     init?(service: FeedService, host: UnsafePointer<CChar>, port: Int32) {
         sv_ignore_sigpipe()
         let limit = Int(sv_raise_nofile())
-        let fd = sv_listen(host, port, 4096)
+        let fd = sv_listen(host, port, 4096, 0)
         guard fd >= 0 else { return nil }
         self.service = service
         listener = fd
@@ -112,16 +112,11 @@ struct EpollServer: ~Copyable {
             if flags & 5 != 0 { readInto(i, fd) }
         }
 
-        // 2. Parse and answer. One transaction when the batch has more than one request.
-        var requests = 0
-        for i in 0..<n where readStart[i] >= 0 {
-            requests &+= countHint(i)
-        }
-        let transaction = requests > 1 && service.beginBatch()
+        // 2. Parse and answer. The requests share one transaction.
         for i in 0..<n where readStart[i] >= 0 {
             answer(eventFDs[i], readStart[i], readEnd[i])
         }
-        if transaction && !service.endBatch() {
+        if !service.endPass() {
             failBatch()
         }
 
@@ -131,14 +126,10 @@ struct EpollServer: ~Copyable {
             send(e.fd, outputArena.base + e.outputStart, e.outputEnd &- e.outputStart, close: e.close)
         }
 
-        // Commits only mark a checkpoint as due; run it after the responses are written.
-        service.checkpointIfDue()
+        // Checkpoints run on their own thread; this only drives it.
+        service.tick()
         if acceptPending { acceptAll() }
     }
-
-    /// Whether this event carries at least one request; enough to decide on a transaction.
-    @inline(__always)
-    func countHint(_ i: Int) -> Int { readEnd[i] > readStart[i] ? 1 : 0 }
 
     // MARK: Reading
 

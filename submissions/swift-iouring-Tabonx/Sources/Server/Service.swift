@@ -40,19 +40,17 @@ public final class FeedService {
         startedAt = sv_monotonic_s()
     }
 
-    // MARK: Batches
+    // MARK: Passes
 
-    /// Starts sharing one transaction across the following requests. Their responses must not be sent
-    /// until `endBatch` returns true.
-    public func beginBatch() -> Bool { db.beginTransaction() }
+    /// Ends the pass: commits the transaction its requests joined. Their responses must not be sent
+    /// until this returns true. False means it was rolled back and every response in it must become a 500.
+    public func endPass() -> Bool { db.commit() }
 
-    /// Commits the batch. False means it was rolled back and every response in it must become a 500.
-    public func endBatch() -> Bool { db.commitTransaction() }
+    /// Between passes, after the commit: drives the checkpoint thread.
+    public func tick() { db.tick() }
 
-    /// Whether a WAL checkpoint is due. Read without the lock as a hint; run it under the lock.
-    public var checkpointDue: Bool { db.checkpointDue }
-
-    public func checkpointIfDue() { db.checkpointIfDue() }
+    /// While true, requests that write must wait unread (the checkpoint thread is finishing).
+    public var writesHeld: Bool { db.writesHeld }
 
     // MARK: Requests
 
@@ -92,14 +90,13 @@ public final class FeedService {
     }
 
     func health(_ out: inout OutBuffer) -> Int {
-        if db.healthCheck() {
+        bodyScratch.truncate(0)
+        if db.health(&bodyScratch) {
             out.append("{\"status\":\"ok\",\"db\":\"ok\",\"uptime_s\":")
             out.appendInt(sv_monotonic_s() &- startedAt)
             out.append(UInt8(ascii: "}"))
             return 200
         }
-        bodyScratch.truncate(0)
-        db.appendError(&bodyScratch)
         out.append("{\"status\":\"degraded\",\"db\":\"unreachable\",\"error\":")
         out.appendJSONString(bodyScratch.view)
         out.append(UInt8(ascii: "}"))

@@ -287,7 +287,10 @@ conflicts with the merged #82 folder) scored **230,000** on the standard 4-sourc
 ᵘ **HolyPHP** is scored at its follow-up **#336** at commit **`4758859`** (forced PASSIVE checkpoint through
 `sqlite3_wal_checkpoint_v2`, extended error codes; merged 2026-11-07, above the 230,000 row). The 244,000 hold had 0
 errors; 257,000 and 270,000 passed the 2-minute probe but failed the 5-minute hold on p95 (4.6 / 13.8 s), 280,000 failed
-the 2-minute probe on p95 (9.4 s, 76 % CPU) and 320,000 on p95 (2.9 s, 100 % CPU). Before that it was scored at #336 at
+the 2-minute probe on p95 (9.4 s, 76 % CPU) and 320,000 on p95 (2.9 s, 100 % CPU). Its later follow-up **#348**
+(`8dabf64`, shim WAL-coalescing VFS; held, not merged: not above 244,000) held **238,000** (23,050 req/s, p95 46.2 /
+p99 258.5 ms, 0 err, 81 % CPU, 32 µs/req, 1,366 MB, 2026-11-07); 250,000 passed the 2-minute probe but failed the
+5-minute hold on p95 (2.7 s), and 260,000 / 280,000 failed the 2-minute probe (p99 1.9 s / p95 1.0 s). Before that it was scored at #336 at
 **`94645de`** (**230,000**, 22,367 req/s, p95 28.4 / p99 231.7 ms, 81 % CPU, 33 µs/req, 1,069 MB; 1 ms write wait, small
 socket buffers on its own listeners; above #321's 228,000, but not merged: the head moved to `4dec92c` and then `21703ba` during the run, and
 `21703ba` is queued). The 230,000 hold had 0.89 % errors (73,737 HTTP 500s, all on `POST /posts/:id/like` and

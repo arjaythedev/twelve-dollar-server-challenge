@@ -442,7 +442,9 @@ p99 348.5 ms, 81 % CPU, 911 MB, 2026-11-07); 280,000 failed the 2-minute probe o
 the merged row, so #346 is not merged and the row stays at #343. Its follow-up **#350** (`3029679`, #346 plus
 `answersPerPass` 2048 → 256) held **230,000** (22,374 req/s, p95 16.9 / p99 127.6 ms, 0 err, 69 % CPU, 28 µs/req,
 572 MB, 2026-11-07); 240,000 failed the 2-minute probe on p99 (1.20 s at 71 % CPU) and 320,000 on refused connections.
-Not above the merged row, so #350 is not merged either.
+Not above the merged row, so #350 is not merged either. Re-run at the author's request at `05ac13b` (empty commit, same
+code): **230,000** again (22,368 req/s, p95 16.4 / p99 136.8 ms, 0 err, 67 % CPU, 28 µs/req, 603 MB, 2026-11-07);
+240,000 failed the 2-minute probe on p99 (9.67 s at 77 % CPU, 0 errors).
 
 ᶳ **go-fasthttp-riyaz-ali #344 is scored at `aea8b28`** (one shared SQLite connection with EXCLUSIVE locking,
 keep-alive shedding near the fd limit). 70,000 passed the 2-minute probe, but the 5-minute holds failed on p95 at 70,000

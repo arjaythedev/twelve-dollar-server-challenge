@@ -21,7 +21,7 @@ SQLite bindings are written in this repository.
   the process descriptor limit; the accepting ring hands the listener to the next ring
   before its slots run out. Accepts are one-shot and armed only while slots remain
   (multishot accept can be handed more connections than slots hold), receives are
-  multishot with buffer selection, and buffers move through
+  one-shot with buffer selection, and buffers move through
   `IORING_OP_PROVIDE_BUFFERS`, which every Linux 5.7+ kernel accepts. Used only after a
   live self test (`self_test`) — which drives real concurrent, pipelined, split and
   closing clients through a ring boundary — succeeds; where the kernel refuses
@@ -32,7 +32,7 @@ SQLite bindings are written in this repository.
 - `src/btree.rs`, `src/sqlite_shim.c` - B-tree read plans for `/feed` and `/posts/:id`
   (the shim is compiled into the same translation unit as the unmodified amalgamation)
 - `src/uring.rs` - raw kernel UAPI bindings, with byte-level and constant checks for
-  everything the server submits (`rustc --test src/main.rs`, 13 tests)
+  everything the server submits (`rustc --test src/main.rs`, 17 tests)
 - `src/http.rs`, `src/json.rs`, `src/crypto.rs`, `src/sys.rs` - protocol primitives
 - `src/pgo_train.c` - build-time profile training on a synthetic database (not the seed)
 - `tests/oracle.sh` - differential test: B-tree plans vs pure SQL, byte-identical, before and after writes
@@ -67,7 +67,7 @@ they differ.
   acknowledged writes surviving a `kill -9`.
 - `rustc --test src/main.rs`: byte-level tests of every io_uring submission entry, the
   register-opcode constants against the uapi, the ring handover watermark, and the
-  memory guard (13 tests).
+  memory guard and generation-tag routing (17 tests).
 - The B-tree plan checks the schema layout and the feed invariant (dense rowids,
   non-decreasing `created_at`) at startup and after every insert. Any violation, foreign
   write, or unreadable record disables the plan permanently and reads use SQL.
@@ -81,11 +81,29 @@ SQLite connection and its own epoll set; the kernel distributes accepts among th
 Five workers give 327,675 descriptors. io_uring, when its self test passes, serves from a
 single process instead.
 
+All io_uring lanes use ordinary eventfd notifications with nondeferred task
+work, so each lane can wake the issuer sleeping in epoll. Pending completions
+are checked before sleeping after a bounded drain. Direct closes use the
+one-based `file_index` ABI and are hard-linked after shutdown; failed closes
+never return a slot to the free count. Socket-operation tags carry a generation
+to ignore completions for an older occupant of a reused slot.
+
+Startup now runs the actual ring-boundary self test: 64 simultaneous clients
+against 32-slot tables. The table override is bounded independently of the lane
+count, and the handover watermark fits small tables. `python3 tests/capacity.py`
+also exercises the blocking production loop with 600 held sockets under a
+512-fd process limit, cross-ring committed writes, a pipelined burst, and slot
+reuse. `python3 tests/capacity.py --connections 70000 --nofile 65535` checks
+capacity beyond one challenge-sized table. These are functional capacity checks,
+not a paced leaderboard benchmark.
+
 ## Durability
 
-Each event-loop pass runs in one SQLite transaction. Responses are written only after
-`COMMIT` returns. If the commit fails, every response in the pass is replaced by a
-500 and its connection is closed. WAL with `synchronous=NORMAL`.
+The io_uring writer gathers bounded FIFO batches on its own SQLite connection.
+The issuer parks a connection's pipeline until its write commits, then publishes
+the reply. Reads use issuer transactions. The epoll fallback writes inline in
+event-loop transactions. Responses acknowledge writes only after `COMMIT`;
+SQLite uses WAL with `synchronous=NORMAL`.
 
 ## Measured (local, not official)
 

@@ -2003,7 +2003,7 @@ static int init_db(void) {
         "PRAGMA synchronous=NORMAL;"
         "PRAGMA foreign_keys=ON;"
         "PRAGMA mmap_size=0;"
-        "PRAGMA cache_size=-8192;"
+        "PRAGMA cache_size=-65536;"
         "PRAGMA temp_store=MEMORY;";
     if (sqlite3_exec(g_db, pragmas, NULL, NULL, &err) != SQLITE_OK) {
         fprintf(stderr, "sqlite pragmas failed: %s\n", err ? err : sqlite3_errmsg(g_db));

@@ -15,3 +15,6 @@ READ_BACKEND=sql
 
 # GC soft target for the Julia heap (julia --heap-size-hint). The box has 2 GB for everything.
 JULIA_HEAP_HINT=512M
+
+# Network transport: auto (io_uring if the kernel allows it, else epoll), uring, or epoll.
+TRANSPORT=auto

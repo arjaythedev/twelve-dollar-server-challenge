@@ -124,7 +124,7 @@ stress_run() { # stress_run <n> <duration>
   name="jr-srv-$$-$n"; gname="jr-gen-$$-$n"
   # shellcheck disable=SC2064
   trap "podman rm -f $name $gname >/dev/null 2>&1 || true" EXIT
-  box -d --name "$name" -e JR_DEBUG="$DEBUG" --sysctl net.ipv4.ip_local_port_range="1024 65535" \
+  box -d --name "$name" -e JR_DEBUG="$DEBUG" -e JR_TRANSPORT="${TRANSPORT:-}" --sysctl net.ipv4.ip_local_port_range="1024 65535" \
     "$IMAGE" bash /src/submissions/julia-raw-amanica/dev/in-container.sh serve >/dev/null
   for _ in $(seq 600); do
     podman exec "$name" curl -sf http://127.0.0.1:3000/health >/dev/null 2>&1 && break

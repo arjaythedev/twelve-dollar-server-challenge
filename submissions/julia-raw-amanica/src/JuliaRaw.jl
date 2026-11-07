@@ -15,6 +15,7 @@ include("db.jl")
 include("http.jl")
 include("handlers.jl")
 include("epoll.jl")
+include("uring.jl")
 
 function main()
     START[] = time()
@@ -26,9 +27,23 @@ function main()
     port = parse(Int, get(ENV, "PORT", "80"))
     lfd = listen_tcp(host, port)
     println("memory: total=$(Sys.total_memory() >> 20)MB free=$(Sys.free_memory() >> 20)MB")
-    println("julia-raw-amanica julia=$(VERSION) backend=sql transport=epoll debug=$(DEBUG ? 1 : 0) listening on $host:$port")
+    # JR_TRANSPORT (from TRANSPORT in config.sh, exported by start.sh): uring, epoll, or auto = io_uring
+    # when the kernel allows it (seccomp, old kernel), else epoll.
+    want = get(ENV, "JR_TRANSPORT", "auto")
+    U = nothing
+    if want != "epoll"
+        U = try
+            uring_init(lfd)
+        catch e
+            want == "uring" && rethrow()
+            println("io_uring unavailable ($(sprint(showerror, e))): using epoll")
+            nothing
+        end
+    end
+    println("julia-raw-amanica julia=$(VERSION) backend=sql transport=$(U === nothing ? "epoll" : "uring") ",
+        "debug=$(DEBUG ? 1 : 0) listening on $host:$port")
     flush(stdout)
-    serve(lfd)
+    U === nothing ? serve(lfd) : serve_uring(U)
 end
 
 end # module

@@ -278,14 +278,14 @@ mutable struct Stats
 end
 
 # One "stats" line per STATS_EVERY seconds: allocation per request is the number Phase 3 drives to zero.
-function log_stats!(st::Stats, L::Loop, now::Float64)
+function log_stats!(st::Stats, conns::Int, spill::Int, now::Float64, extra::String = "")
     b = Base.gc_bytes()
     g = Base.gc_num()
     dreq = NREQ[] - st.reqs
     per = dreq > 0 ? (b - st.bytes) ÷ dreq : 0
-    println("stats conns=", L.nconns, " reqs=", dreq, " alloc_per_req=", per,
+    println("stats conns=", conns, " reqs=", dreq, " alloc_per_req=", per,
         " gc_ms=", (g.total_time - st.gc_ns) ÷ 1_000_000, " gc_pauses=", g.pause - st.pauses,
-        " max_pause_ms=", g.max_pause ÷ 1_000_000, " spill_pool=", length(L.spill))
+        " max_pause_ms=", g.max_pause ÷ 1_000_000, " spill_pool=", spill, extra)
     flush(stdout)
     st.at = now; st.reqs = NREQ[]; st.bytes = Base.gc_bytes(); st.gc_ns = g.total_time; st.pauses = g.pause
     nothing
@@ -331,7 +331,7 @@ function serve(lfd::Cint)
         end
         @dbg begin
             now = time()
-            now - st.at >= STATS_EVERY && log_stats!(st, L, now)
+            now - st.at >= STATS_EVERY && log_stats!(st, L.nconns, length(L.spill), now)
         end
     end
 end

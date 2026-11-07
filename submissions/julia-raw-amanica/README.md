@@ -6,7 +6,13 @@ Work in progress.
 
 ## Current state
 
-- Single-threaded, level-triggered epoll loop on raw file descriptors (no libuv, no Tasks).
+- Single thread, no libuv, no Tasks. Transport (`TRANSPORT` in `config.sh`, default `auto`):
+  - **io_uring** through raw syscalls (no liburing). Sockets are direct descriptors in the rings' file
+    tables, not process fds, so `LimitNOFILE=65535` doesn't cap connections: a new ring opens when one is
+    full. Multishot receives into a provided-buffer ring (an idle connection holds no buffer), 4096
+    accepts in flight, sends from refcounted arenas, close = shutdown linked to close.
+  - **epoll** fallback (level-triggered, raw fds) when io_uring is unavailable (seccomp, old kernel); capped
+    at ~65k connections by the fd limit.
 - HTTP/1.1 parsed in place in one read buffer shared by all connections; responses written straight into
   a shared output buffer (no intermediate objects, no JSON library). An idle connection holds no buffers;
   0 bytes allocated per request, so the GC does not run under load.
@@ -105,4 +111,5 @@ wrk users (`GEN=users`, think time per connection) are cheap, so they reach the 
 | epoll baseline | 19,350 | – | – |
 | epoll + heap-hint 512M | 10,000 | 60,000 (990 MB) | 23,832, n=12 |
 | P3: shared buffers | – | 60,000 (315 MB) | 21,288 (-11%), n=6 |
+| P4: io_uring | – | 175,000 (396 MB) | 24,699 (+16%), n=4 |
 <!-- results:end -->

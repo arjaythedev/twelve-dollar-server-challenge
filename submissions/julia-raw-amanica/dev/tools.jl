@@ -155,8 +155,14 @@ function record(out, rc, csv_path)
         row["gc_max_pause_ms"] = string(maximum(parse(Int, x["max_pause_ms"]) for x in st))
     end
 
-    # open connections ~ julia's fds minus the ones it holds anyway (--debug)
-    conns = isempty(fds) ? nothing : maximum(fds) - BASE_FDS
+    # open connections (--debug): epoll sockets are fds (julia's fds minus the ones it holds anyway); io_uring
+    # sockets are direct descriptors, not fds, so they come from the server's own stats lines
+    conns = if row["transport"] == "uring"
+        cs = [parse(Int, x["conns"]) for x in st if haskey(x, "conns")]
+        isempty(cs) ? nothing : maximum(cs)
+    else
+        isempty(fds) ? nothing : maximum(fds) - BASE_FDS
+    end
     conns === nothing || (row["srv_conns_peak"] = string(max(conns, 0)))
     nv = tryparse(Int, row["vus"])
     if gen == "users" && conns !== nothing && nv !== nothing && nv > 0 && conns < 0.99 * nv

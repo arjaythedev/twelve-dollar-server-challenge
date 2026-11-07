@@ -2,7 +2,7 @@
 
 One locked OS thread runs an io_uring event loop written directly against the kernel ABI, an
 HTTP/1.1 parser, a JSON reader/writer and HS256 verification, all in Go and allocation-free on the
-request path. SQLite (the pinned, unmodified amalgamation) is linked in through cgo, with one cgo
+request path. SQLite (the pinned, unmodified amalgamation) is linked in through cgo, with one
 call per request.
 
 | | |
@@ -26,8 +26,9 @@ call per request.
   an index row without its post), and the server refuses to start on a different schema.
 - **Writes** go through prepared SQL: `INSERT … RETURNING id, created_at` and
   `INSERT … ON CONFLICT DO NOTHING` (`sqlite3_changes` tells a new like from a repeat).
-- **One cgo call per request** (`td_feed`, `td_post`, `td_like`, `td_insert_post`) plus one
-  `COMMIT` per pass. Measured with `perf`, cgo's own overhead is about 0.4% of the CPU.
+- **One call into C per request** (`td_feed`, `td_post`, `td_like`, `td_insert_post`) plus one
+  `COMMIT` per pass, made through a small assembly trampoline rather than cgo's call path (see
+  Go runtime).
 - **JWT:** the HMAC key's inner and outer blocks are hashed once at startup and their SHA-256
   states restored per request, so each verification hashes only `header.payload` and the outer
   digest. Signature (canonical base64url only), `alg` (HS256 only) and `exp` (required) are checked
@@ -86,14 +87,41 @@ call per request.
 
 - `GOMAXPROCS=1`, `runtime.LockOSThread`, garbage collection off (`SetGCPercent(-1)`) with a
   512 MB memory limit as a backstop; the request path allocates nothing.
-- Every `io_uring_enter` is a raw syscall, the 4 ms wait included: as an ordinary blocking syscall
+- Every `io_uring_enter` is a raw syscall, the 1 ms wait included: as an ordinary blocking syscall
   the runtime's sysmon thread would take the P away on every wait and then poll every 20 µs.
+- **C is called without cgo's call path** (`ccall/`, `ccall_amd64.go`). A cgo call marks the
+  thread as in a system call, and with one P, sysmon takes the P back from any call it finds still
+  running on its next check, drops its own polling interval back to 20 µs, and the loop must win
+  the P back when C returns. At moderate load that is cheap; near saturation, when interrupts
+  stretch C calls, it fed on itself: in a 1 vCPU VM at the edge, sysmon used 13% of the CPU and
+  preempted the loop 2,000 times a second. Here an assembly trampoline switches to a stack of
+  its own (8 MB, `mmap`ed, guard page below) and calls the C function with the System V
+  convention, so the goroutine never leaves the running state. Only the loop's goroutine calls
+  in, and nothing in `shim.c` calls back into Go. (Elsewhere than amd64, plain cgo calls.)
 - `GODEBUG=asyncpreemptoff=1`: no preemption signals interrupting the loop.
 
 ## Measured
 
-**On the benchmark box (#339, `e78b5a4`):** 260,000 users held, 24,933 req/s, 30 µs/req. That
-version was tuned on an ARM laptop, where it looked cheaper per request than #264; on x86 it wasn't.
+**On the benchmark box:** #339 (`e78b5a4`) held 260,000 users; #343 (`39efd02`) held 270,000 and
+failed 280,000 on p99 (2.7 s) at 86% CPU with 0 errors.
+
+**At the edge, in a box-shaped VM:** a KVM guest with 1 vCPU and 2 GB (1,967 MB visible, as on the
+box), Ubuntu 24.04's cloud image with its 6.8 kernel, a virtio NIC, the server as a systemd
+service with `LimitNOFILE=65535`; the load generator (a Go port of `bench/load.js`) on the host.
+The guest runs nested on a Haswell VPS, so everything costs about three times what it does on the
+box and the edge sits near 110,000 users, but it fails the way the box does: softirq work and the
+loop compete for the one CPU, and a burst at the end of the ramp or a checkpoint tips it over.
+Probes are 60 s ramp + 60 s hold, builds alternating:
+
+| users | #343 | this version | rust-iouring-kensac (#264) |
+|---:|---|---|---|
+| 90,000 | p99 2.4 s, 2.5 s, 0.4 s (1 of 3 pass) | | p99 0.4, 0.8, 0.6 s (3 of 3) |
+| 95,000 | | p99 0.31, 0.31, 0.76 s (3 of 3) | p99 0.41, 0.61, 0.35 s (3 of 3) |
+| 105,000 | p99 3.8 s, 0.7 s (1 of 2) | p99 0.56, 0.49 s (2 of 2) | p99 0.28, 0.43 s (2 of 2) |
+| 110,000 | | p99 0.57, 1.8, 0.34 s (2 of 3) | p99 1.9, 2.6, 1.8 s (0 of 3) |
+
+The difference between #343 and this version is the C call path (see Go runtime): in the failing
+#343 runs the guest's CPU went to 90%+ with sysmon at 13% of it.
 
 **This version, on x86:** a Haswell VPS (Ubuntu 24.04, kernel 6.8), the server alone on one
 reserved core, the load generator (a Go port of `bench/load.js`, same user model) on the others in
@@ -133,7 +161,8 @@ scratch.
 | `uring.go` | io_uring setup, submission/completion rings, operations, provided buffers |
 | `app.go` | routes, handlers, responses |
 | `http.go`, `json.go`, `jwt.go` | request framing, JSON in and out, HS256 |
-| `db.go`, `shim.c`, `shim.h` | cgo bindings and the SQLite layer (B-tree reads, SQL writes, checkpoints) |
+| `db.go`, `shim.c`, `shim.h` | bindings and the SQLite layer (B-tree reads, SQL writes, checkpoints) |
+| `ccall_amd64.go`, `ccall/` | calls into `shim.c` through an assembly trampoline (`ccall_other.go`: plain cgo elsewhere) |
 
 ## Run
 

@@ -28,6 +28,7 @@ void td_tick(void);
 int td_writes_held(void);
 int td_feed(void);
 int td_post(long long id);
+int td_render(int kind, unsigned char *dst, int cap);
 int td_like(long long uid, long long pid);
 int td_insert_post(long long uid, const char *body, int len);
 int td_health(void);

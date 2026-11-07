@@ -13,4 +13,16 @@ if [ ! -f sqlite/sqlite3.c ]; then
   (cd sqlite && unzip -qo $SQ.zip && mv $SQ/sqlite3.c $SQ/sqlite3.h . && rm -rf $SQ $SQ.zip)
 fi
 export CGO_ENABLED=1 GOFLAGS=-trimpath GOTOOLCHAIN=local
+# C: no stack protector, CET or fortify checks (Ubuntu's gcc adds them by default). Go: generate
+# code for x86-64-v3 (AVX2, BMI2, ...) when the CPU has it; Go's default is the 2003 baseline.
+export CGO_CFLAGS="-O2 -fno-stack-protector -U_FORTIFY_SOURCE"
+if [ "$(uname -m)" = x86_64 ]; then
+  CGO_CFLAGS="$CGO_CFLAGS -fcf-protection=none"
+  v3=1
+  for f in avx2 bmi1 bmi2 fma movbe f16c lzcnt; do
+    [ "$f" = lzcnt ] && f=abm
+    grep -qw "$f" /proc/cpuinfo || v3=0
+  done
+  [ $v3 = 1 ] && export GOAMD64=v3
+fi
 go build -o bin/server .

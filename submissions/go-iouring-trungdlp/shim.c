@@ -11,6 +11,9 @@
 #include <sys/resource.h>
 #include <sys/syscall.h>
 #include <time.h>
+#if defined(__AVX2__)
+#include <immintrin.h>
+#endif
 
 #include "shim.h"
 
@@ -173,9 +176,93 @@ void td_tick(void) {
 
 int td_writes_held(void) { return held; }
 
+// ---- page cache -------------------------------------------------------------------------------
+
+// SQLite's own page cache (pcache1) behind the documented plugin interface (SQLITE_CONFIG_PCACHE2),
+// with one shortcut: a commit's xTruncate (drop pages past the end of the file) returns at once
+// when no such page can be cached. pcache1 keeps the largest page number it has ever held, and a
+// B-tree split briefly renames a page to the lock-byte page (1 GiB / page size + 1); from then on
+// it scans its whole hash table at every commit to drop nothing. The wrapper tracks the largest
+// key itself, leaving out pages parked at the lock-byte page. (Idea from c-iouring-pavlyhalim, #245.)
+typedef struct {
+  sqlite3_pcache *base;
+  unsigned max;    // largest key that entered the cache, parked pages left out
+  unsigned lockpg; // the lock-byte page's number
+  unsigned parked; // pages currently renamed to lockpg
+} pcw_t;
+
+static sqlite3_pcache_methods2 pc1;
+
+static int pcw_init(void *a) { (void)a; return pc1.xInit(pc1.pArg); }
+static void pcw_shutdown(void *a) { (void)a; pc1.xShutdown(pc1.pArg); }
+static sqlite3_pcache *pcw_create(int sz, int extra, int purgeable) {
+  pcw_t *w = sqlite3_malloc(sizeof *w);
+  if (!w) return 0;
+  if (!(w->base = pc1.xCreate(sz, extra, purgeable))) {
+    sqlite3_free(w);
+    return 0;
+  }
+  w->max = 0;
+  w->lockpg = 0x40000000u / (unsigned)sz + 1;
+  w->parked = 0;
+  return (sqlite3_pcache *)w;
+}
+#define PCW(p) (((pcw_t *)(p))->base)
+static void pcw_cachesize(sqlite3_pcache *p, int n) { pc1.xCachesize(PCW(p), n); }
+static int pcw_pagecount(sqlite3_pcache *p) { return pc1.xPagecount(PCW(p)); }
+static sqlite3_pcache_page *pcw_fetch(sqlite3_pcache *p, unsigned key, int create) {
+  pcw_t *w = (pcw_t *)p;
+  sqlite3_pcache_page *pg = pc1.xFetch(w->base, key, create);
+  if (pg && create) {
+    if (key == w->lockpg) w->parked++;
+    else if (key > w->max) w->max = key;
+  }
+  return pg;
+}
+static void pcw_unpin(sqlite3_pcache *p, sqlite3_pcache_page *pg, int discard) { pc1.xUnpin(PCW(p), pg, discard); }
+static void pcw_rekey(sqlite3_pcache *p, sqlite3_pcache_page *pg, unsigned from, unsigned to) {
+  pcw_t *w = (pcw_t *)p;
+  pc1.xRekey(w->base, pg, from, to);
+  if (from == w->lockpg && w->parked) w->parked--;
+  if (to == w->lockpg) w->parked++;
+  else if (to > w->max) w->max = to;
+}
+static void pcw_truncate(sqlite3_pcache *p, unsigned limit) {
+  pcw_t *w = (pcw_t *)p;
+  if (!w->parked && w->max < limit) return; // nothing at or past limit is cached
+  pc1.xTruncate(w->base, limit);
+  if (limit > 0 && w->max >= limit) w->max = limit - 1;
+  if (w->lockpg >= limit) w->parked = 0;
+}
+static void pcw_destroy(sqlite3_pcache *p) {
+  pc1.xDestroy(PCW(p));
+  sqlite3_free(p);
+}
+static void pcw_shrink(sqlite3_pcache *p) { pc1.xShrink(PCW(p)); }
+
+static int pcw_install(void) {
+  static sqlite3_pcache_methods2 m;
+  if (sqlite3_config(SQLITE_CONFIG_GETPCACHE2, &pc1) != SQLITE_OK) return -1;
+  m = pc1;
+  m.pArg = 0;
+  m.xInit = pcw_init;
+  m.xShutdown = pcw_shutdown;
+  m.xCreate = pcw_create;
+  m.xCachesize = pcw_cachesize;
+  m.xPagecount = pcw_pagecount;
+  m.xFetch = pcw_fetch;
+  m.xUnpin = pcw_unpin;
+  m.xRekey = pcw_rekey;
+  m.xTruncate = pcw_truncate;
+  m.xDestroy = pcw_destroy;
+  m.xShrink = pcw_shrink;
+  return sqlite3_config(SQLITE_CONFIG_PCACHE2, &m) == SQLITE_OK ? 0 : -1;
+}
+
 // ---- open -------------------------------------------------------------------------------------
 
 int td_open(const char *path, char *err, int n) {
+  if (pcw_install()) return errf(err, n, "page cache");
   if (sqlite3_initialize()) return errf(err, n, "init");
   // unix-excl: one process owns the file; the WAL index lives in heap memory shared by this
   // process's two connections (no -shm file, no file locks per transaction).
@@ -587,6 +674,131 @@ int td_post(i64 id) {
   row->likes = c1;
   td_out.nrows = 1;
   return 1;
+}
+
+// ---- JSON -------------------------------------------------------------------------------------
+
+// The read's rows rendered as the response body, straight into the caller's buffer: one pass
+// over each text, which is checked for characters to escape 32 bytes at a time (AVX2) and copied
+// in the same step.
+
+static const char hexd[] = "0123456789abcdef";
+static u8 *lim; // end of the caller's buffer
+static int ovf; // the body didn't fit
+// Every text write leaves this much room for the rest of its row (literals and integers).
+#define ROOM 96
+
+static u8 *json_esc_slow(u8 *d, const u8 *s, u32 n) {
+  for (u32 i = 0; i < n; i++) {
+    u8 c = s[i];
+    if (d + 6 + ROOM > lim) {
+      ovf = 1;
+      return d;
+    }
+    if (c >= 0x20 && c != '"' && c != '\\') {
+      *d++ = c;
+      continue;
+    }
+    *d++ = '\\';
+    switch (c) {
+    case '"': *d++ = '"'; break;
+    case '\\': *d++ = '\\'; break;
+    case '\n': *d++ = 'n'; break;
+    case '\r': *d++ = 'r'; break;
+    case '\t': *d++ = 't'; break;
+    case '\b': *d++ = 'b'; break;
+    case '\f': *d++ = 'f'; break;
+    default:
+      *d++ = 'u'; *d++ = '0'; *d++ = '0';
+      *d++ = hexd[c >> 4]; *d++ = hexd[c & 15];
+    }
+  }
+  return d;
+}
+
+static u8 *json_esc(u8 *d, const u8 *s, u32 n) {
+  u32 i = 0;
+  if (ovf || (u64)(lim - d) < (u64)n + ROOM) {
+    ovf = 1;
+    return d;
+  }
+#if defined(__AVX2__)
+  const __m256i q = _mm256_set1_epi8('"'), b = _mm256_set1_epi8('\\'), c = _mm256_set1_epi8(0x1f);
+  for (; i + 32 <= n; i += 32) {
+    __m256i v = _mm256_loadu_si256((const __m256i *)(s + i));
+    __m256i m = _mm256_or_si256(_mm256_or_si256(_mm256_cmpeq_epi8(v, q), _mm256_cmpeq_epi8(v, b)),
+                                _mm256_cmpeq_epi8(_mm256_max_epu8(v, c), c));
+    if (_mm256_movemask_epi8(m)) break;
+    _mm256_storeu_si256((__m256i *)(d + i), v);
+  }
+#endif
+  for (; i + 8 <= n; i += 8) {
+    u64 w;
+    memcpy(&w, s + i, 8);
+    const u64 lo = 0x0101010101010101ULL, hi = 0x8080808080808080ULL;
+    u64 qq = w ^ (lo * '"'), bb = w ^ (lo * '\\');
+    if (((w - lo * 0x20) & ~w | (qq - lo) & ~qq | (bb - lo) & ~bb) & hi) break;
+    memcpy(d + i, &w, 8);
+  }
+  return json_esc_slow(d + i, s + i, n - i);
+}
+
+static u8 *json_int(u8 *d, i64 v) {
+  u8 t[20];
+  int k = 20;
+  u64 u = v < 0 ? (u64)0 - (u64)v : (u64)v;
+  do {
+    t[--k] = (u8)('0' + u % 10);
+    u /= 10;
+  } while (u);
+  if (v < 0) *d++ = '-';
+  memcpy(d, t + k, 20 - k);
+  return d + 20 - k;
+}
+
+#define LIT(d, s) (memcpy(d, s, sizeof s - 1), d + sizeof s - 1)
+
+static u8 *json_row(u8 *d, const td_row_t *r) {
+  const u8 *t = td_out.text;
+  if (ovf || lim - d < 2 * ROOM) { // the row's fixed parts and integers
+    ovf = 1;
+    return d;
+  }
+  d = LIT(d, "{\"id\":");
+  d = json_int(d, r->id);
+  d = LIT(d, ",\"body\":\"");
+  d = json_esc(d, t + r->body_off, r->body_len);
+  d = LIT(d, "\",\"created_at\":\"");
+  d = json_esc(d, t + r->created_off, r->created_len);
+  d = LIT(d, "\",\"author\":\"");
+  d = json_esc(d, t + r->author_off, r->author_len);
+  d = LIT(d, "\",\"like_count\":");
+  d = json_int(d, r->likes);
+  *d++ = '}';
+  return d;
+}
+
+// Renders the last read: kind 0 the feed ({"posts":[...]}), 1 one post ({"post":{...}}).
+// Returns the bytes written, or -1 if it doesn't fit in cap (the caller then renders it itself).
+int td_render(int kind, unsigned char *dst, int cap) {
+  int n = kind == 0 ? td_out.nrows : 1;
+  if (cap < 32) return -1;
+  lim = dst + cap - 16; // room for the closing brackets
+  ovf = 0;
+  u8 *d = dst;
+  if (kind == 0) {
+    d = LIT(d, "{\"posts\":[");
+    for (int i = 0; i < n; i++) {
+      if (i) *d++ = ',';
+      d = json_row(d, &td_out.rows[i]);
+    }
+    d = LIT(d, "]}");
+  } else {
+    d = LIT(d, "{\"post\":");
+    d = json_row(d, &td_out.rows[0]);
+    *d++ = '}';
+  }
+  return ovf ? -1 : (int)(d - dst);
 }
 
 // ---- writes -----------------------------------------------------------------------------------

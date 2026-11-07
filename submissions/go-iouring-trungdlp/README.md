@@ -9,7 +9,7 @@ call per request.
 |---|---|
 | Language | Go 1.27.3 (official tarball, sha256-checked by `install.sh`), cgo with gcc 13 for SQLite |
 | Framework | none: own io_uring binding (raw syscalls, no liburing, no third-party Go modules), HTTP/1.1, JSON, HS256 (`crypto/sha256`) |
-| SQLite | 3.54.1 amalgamation, sha256-checked, downloaded by `build.sh`, compiled with `-O3 -march=native` |
+| SQLite | 3.54.1 amalgamation, sha256-checked, downloaded by `build.sh`, compiled with `-O3 -march=native` (no stack protector, CET or fortify checks); Go code built for x86-64-v3 when the CPU has it |
 | **Nginx or direct** | **Direct**: serves `HOST:PORT` itself (`0.0.0.0:80` on the benchmark box) |
 | Needs | Linux 6.1+ (io_uring with `DEFER_TASKRUN`, multishot receive, provided-buffer rings, direct descriptors) |
 
@@ -32,10 +32,13 @@ call per request.
   states restored per request, so each verification hashes only `header.payload` and the outer
   digest. Signature (canonical base64url only), `alg` (HS256 only) and `exp` (required) are checked
   on every request (rule 5).
-- **JSON output** is checked for characters to escape 8 bytes at a time (SWAR) and copied in one
-  piece when there are none (the usual case). Content-Length is a fixed 5-character field filled in
-  after the body, right-aligned (leading spaces are optional whitespace, RFC 9110 5.6.3), so no
-  body is ever moved.
+- **JSON output** for a feed or a post is written by `shim.c` straight into the response buffer
+  from the columns the read copied out: each text is checked for characters to escape 32 bytes at
+  a time (AVX2) while it is copied, so the usual text is one pass. (Rendering in Go cost about 3%
+  more CPU per request.) Content-Length is a fixed 5-character field filled in after the body,
+  right-aligned (leading spaces are optional whitespace, RFC 9110 5.6.3), so no body is ever moved.
+  [bytedance/sonic](https://github.com/bytedance/sonic) (`ConfigFastest`) was measured on the same
+  20-post feed: 2 to 4 times slower than the hand-written Go encoder, and it allocates.
 - **JSON input** is validated in full (malformed → 400); the last duplicate key wins, as in
   `JSON.parse`. `body` is trimmed with JavaScript's `trim()` whitespace set and counted in code
   points.
@@ -44,13 +47,17 @@ call per request.
 
 - WAL with `synchronous=NORMAL`, `unix-excl` VFS (one process owns the file; the WAL index lives in
   heap memory, no `-shm` file), 96 MB page cache, no mmap, automatic checkpoints off.
+- SQLite's own page cache sits behind a thin `SQLITE_CONFIG_PCACHE2` wrapper that skips a commit's
+  truncate when no page past the end of the file can be cached. pcache1 never lowers the largest
+  page number it has held, and a B-tree split briefly parks a page at the lock-byte page's number,
+  so afterwards every commit would scan the whole cache's hash table to drop nothing (0.5 to 1% of
+  the CPU in profiles, growing as the cache fills). The idea is c-iouring-pavlyhalim's (#245).
 - **Each event-loop pass is one SQLite transaction.** Its reads share a snapshot and its writes are
   group-committed (rule 6). No response from a pass reaches the kernel before its `COMMIT` returns;
   if a commit fails, every response the pass produced becomes a 500 and the connection closes.
-- **A pass waits up to 4 ms** (or for 4,096 completions) before answering. Measured at 40k req/s on
-  one core, 1 ms / 2 ms / 4 ms windows cost 11.1 / 10.7 / 10.5 µs per request (three runs each):
-  a longer window shares each `COMMIT`, its WAL frames and each `io_uring_enter` among more
-  requests. Latency grows by a few milliseconds; 8 ms and 16 ms were worse again.
+- **A pass waits up to 1 ms** (or for 256 completions) before answering, as #264 does. On x86,
+  1 ms, 2 ms and 4 ms windows measured the same CPU per request within noise (41.0, 41.1 and
+  41.7 µs, three runs each); the shorter window keeps the bursts of sends after each `COMMIT` small.
 - Checkpoints run on a second thread at nice 19 on its own connection (PASSIVE), started past
   4,096 WAL frames; while it copies the log's tail, writes are held between passes for at most
   250 ms so the log can restart. This is rust-iouring-kensac's (#264) scheme; see Credits.
@@ -83,18 +90,27 @@ call per request.
   the runtime's sysmon thread would take the P away on every wait and then poll every 20 µs.
 - `GODEBUG=asyncpreemptoff=1`: no preemption signals interrupting the loop.
 
-## Measured (local, Docker on an Apple M4 Pro, server limited to 0.43 of one core and 1.7 GB)
+## Measured
 
-The load generator (a Go port of `bench/load.js`, same user model) ran 60 s ramp + 120 s hold. Same
-setup, same day, against rust-iouring-kensac (#264, #1 on the board when this was written):
+**On the benchmark box (#339, `e78b5a4`):** 260,000 users held, 24,933 req/s, 30 µs/req. That
+version was tuned on an ARM laptop, where it looked cheaper per request than #264; on x86 it wasn't.
 
-| users | this entry | rust-iouring-kensac |
-|---:|---|---|
-| 220,000 | pass: p95 28 ms, p99 112 ms, 16.2 µs/req, 1.02 GB peak | fail: p99 1.7 s, 18.1 µs/req, 1.38 GB |
-| 230,000 | pass: p95 124 ms, p99 229 ms, 16.9 µs/req, 1.03 GB peak | fail: p99 4.4 s, 18.2 µs/req, 1.47 GB |
-| 240,000 | fail (p99 at the end of the ramp) | |
+**This version, on x86:** a Haswell VPS (Ubuntu 24.04, kernel 6.8), the server alone on one
+reserved core, the load generator (a Go port of `bench/load.js`, same user model) on the others in
+a separate network namespace, connected by a veth pair whose receive processing is steered to the
+server's core (so that core also does the packet work a NIC box's only core does). CPU is that
+core's total busy time during the hold, per request; runs alternate between builds.
 
-The absolute numbers depend on the CPU limit chosen to imitate the box; the comparison is the point.
+| 60,000 users, 60 s hold | µs per request (each run) | mean |
+|---|---|---:|
+| this version | 39.1, 39.4, 39.9 | 39.4 |
+| rust-iouring-kensac (#264) | 41.1, 39.5, 41.1, 40.4 | 40.5 |
+| #339 as scored | 42.1, 40.0, 41.9, 43.8 | 42.0 |
+
+Per request the kernel's TCP work is about two thirds of the CPU and the same for every entry
+(2.2 packets in and 1.3 out per request here, for this entry and #264 alike); the differences
+are in user space. The steps, each measured in alternating runs:
+`GOAMD64=v3` and SQLite without hardening flags −4%, JSON rendered in C −3%.
 
 ## Credits
 
@@ -103,7 +119,8 @@ group commit per pass, bounded reads after a burst) follows what
 [rust-iouring-kensac](../rust-iouring-kensac) (#264) and [c-iouring-pavlyhalim](../c-iouring-pavlyhalim)
 (#245) describe in their READMEs. In `shim.c`, the checkpoint thread and its hold state machine
 (`ck_main`, `td_tick`) and the index seek helper (`seek_ge`) closely follow #264's `csrc/shim.c`
-(credited reuse, per Arjay's 2026-11-04 ruling). Everything else (the Go io_uring binding, event
+(credited reuse, per Arjay's 2026-11-04 ruling). The page cache wrapper (`pcw_*`) implements
+#245's idea of skipping the commit-time truncate scan. Everything else (the Go io_uring binding, event
 loop, HTTP, JSON, JWT, the feed/post read plans and record decoding in `shim.c`) is written from
 scratch.
 

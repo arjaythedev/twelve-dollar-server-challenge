@@ -29,8 +29,8 @@ const (
 	bufSize        = 2048 // receive buffer; a longer request is read in more than one piece
 	bufCount       = 1024 // receive buffers per ring
 	maxRings       = 16
-	waitMin        = 4096    // a pass waits for this many completions on ring 0 ...
-	waitNs         = 4000000 // ... or this long, whichever comes first
+	waitMin        = 256     // a pass waits for this many completions on ring 0 ...
+	waitNs         = 1000000 // ... or this long, whichever comes first
 	readsPerPass   = 16384
 	answersPerPass = 2048
 	outCap         = 8192

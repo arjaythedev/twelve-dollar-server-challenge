@@ -359,6 +359,7 @@ class Server {
     pub bool $postSendBuilder = false;
     pub bool $feedRawDecode = false;
     pub bool $sparseBufs = false;
+    pub bool $retryingWrites = false;
     pub int $writeWaitMs = 1;
     pub int $reqs = 0;
     pub int $reqsBase = 0;
@@ -698,14 +699,16 @@ class Server {
              * by scope_end(): no per-request malloc survives the round. */
             scope_begin();
 
-            if ($this->fdArrays) { epoll_wait_iarr2($this->readyIds, $this->writableIds, 50); }
-            else { epoll_wait2($this->ready, $this->writable, 50); }
+            $pollWaitMs = 50;
+            if ($this->retryingWrites) { $pollWaitMs = 1; }
+            if ($this->fdArrays) { epoll_wait_iarr2($this->readyIds, $this->writableIds, $pollWaitMs); }
+            else { epoll_wait2($this->ready, $this->writable, $pollWaitMs); }
             $this->handle_ready();
             /* A transaction has a fixed cost; when only a few writes are
              * pending, wait briefly for more requests before
              * committing. That batches them without hurting the tail much. */
             $n = count($this->pending);
-            if ($n > 0 && $n < 32) {
+            if (!$this->retryingWrites && $n > 0 && $n < 32) {
                 if ($this->writeWaitMs > 0) {
                     if ($this->fdArrays) { epoll_wait_iarr2($this->readyIds, $this->writableIds, $this->writeWaitMs); }
                     else { epoll_wait2($this->ready, $this->writable, $this->writeWaitMs); }
@@ -1867,6 +1870,7 @@ class Server {
              * while $pending survives. Move deferred post fields to heap
              * storage before leaving this scope. */
             $this->persist_pending_posts();
+            $this->retryingWrites = false;
             return;
         }
         $n = count($this->pending);
@@ -1878,6 +1882,7 @@ class Server {
         if (!$this->txn($this->beginTx)) {
             if (sqlite_is_lock_error($this->db)) {
                 $this->persist_pending_posts();
+                $this->retryingWrites = true;
                 return;
             }
             $this->fail_writes("begin", sqlite_errmsg($this->db));
@@ -1985,6 +1990,7 @@ class Server {
             $this->txn($this->rollbackTx);
             if ($retryLockError) {
                 $this->persist_pending_posts();
+                $this->retryingWrites = true;
                 return;
             }
             $this->fail_writes($failWhere, $failDetail);
@@ -2028,6 +2034,7 @@ class Server {
             arr_free($r);
         }
         arr_clear($this->pending);
+        $this->retryingWrites = false;
     }
 
     /* ------------------------------------------------------ send side */

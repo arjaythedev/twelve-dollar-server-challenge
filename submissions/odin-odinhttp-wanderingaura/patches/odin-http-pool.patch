@@ -1,0 +1,383 @@
+diff --git a/pool_arena.odin b/pool_arena.odin
+new file mode 100644
+index 0000000..52ce503
+--- /dev/null
++++ b/pool_arena.odin
+@@ -0,0 +1,187 @@
++package http
++
++import "base:runtime"
++import "core:mem"
++
++// Request-scoped memory for a connection, borrowed from a pool of fixed-size blocks only while a
++// request is being served: an idle keep-alive connection holds no block and no mapping.
++//
++// Allocations bump a pointer inside the block; anything that does not fit gets its own heap
++// allocation, freed together with the block on `free_all`.
++
++POOL_BLOCK_SIZE :: 16 * mem.Kilobyte
++
++@(private)
++Pool_Free :: struct {
++	next: ^Pool_Free,
++}
++
++@(private)
++Pool_Overflow :: struct {
++	next: ^Pool_Overflow,
++}
++
++// Per thread, so it needs no locking. Threads that never call `pool_init` use the heap.
++@(private, thread_local)
++block_pool: struct {
++	free:  ^Pool_Free,
++	start: uintptr,
++	end:   uintptr,
++}
++
++// Carves the calling thread's request blocks out of `slab` (which should be page aligned and
++// already touched). Once the slab runs out, blocks come from the heap and are returned to it.
++pool_init :: proc(slab: []byte) {
++	n := len(slab) / POOL_BLOCK_SIZE
++	block_pool.start = uintptr(raw_data(slab))
++	block_pool.end   = block_pool.start + uintptr(n * POOL_BLOCK_SIZE)
++	block_pool.free  = nil
++	for i := n - 1; i >= 0; i -= 1 {
++		b := (^Pool_Free)(&slab[i * POOL_BLOCK_SIZE])
++		b.next = block_pool.free
++		block_pool.free = b
++	}
++}
++
++@(private)
++pool_block_acquire :: proc() -> ([^]byte, mem.Allocator_Error) {
++	if b := block_pool.free; b != nil {
++		block_pool.free = b.next
++		return ([^]byte)(b), nil
++	}
++	raw, err := mem.alloc_bytes_non_zeroed(POOL_BLOCK_SIZE, 64, runtime.heap_allocator())
++	return raw_data(raw), err
++}
++
++@(private)
++pool_block_release :: proc(b: [^]byte) {
++	p := uintptr(b)
++	if p >= block_pool.start && p < block_pool.end {
++		f := (^Pool_Free)(b)
++		f.next = block_pool.free
++		block_pool.free = f
++	} else {
++		mem.free(b, runtime.heap_allocator())
++	}
++}
++
++Pool_Arena :: struct {
++	block:    [^]byte, // nil while idle
++	offset:   int,
++	last:     rawptr,  // last allocation inside the block, so it can grow or shrink in place
++	overflow: ^Pool_Overflow,
++}
++
++pool_arena_allocator :: proc(a: ^Pool_Arena) -> mem.Allocator {
++	return {procedure = pool_arena_proc, data = a}
++}
++
++// Returns the block (and any overflow allocations); the arena stays usable.
++pool_arena_free_all :: proc(a: ^Pool_Arena) {
++	for o := a.overflow; o != nil; {
++		next := o.next
++		mem.free(o, runtime.heap_allocator())
++		o = next
++	}
++	a.overflow = nil
++	if a.block != nil {
++		pool_block_release(a.block)
++		a.block = nil
++	}
++	a.offset = 0
++	a.last   = nil
++}
++
++@(private)
++pool_arena_alloc :: proc(a: ^Pool_Arena, size, alignment: int, zero: bool) -> (bytes: []byte, err: mem.Allocator_Error) {
++	if size <= 0 { return nil, nil }
++	alignment := max(alignment, 1)
++
++	if size <= POOL_BLOCK_SIZE / 2 {
++		if a.block == nil {
++			a.block  = pool_block_acquire() or_return
++			a.offset = 0
++		}
++		start := mem.align_forward_int(a.offset, alignment)
++		if start + size <= POOL_BLOCK_SIZE {
++			ptr := &a.block[start]
++			a.offset = start + size
++			a.last   = ptr
++			if zero { mem.zero(ptr, size) }
++			return mem.byte_slice(ptr, size), nil
++		}
++	}
++
++	align  := max(alignment, 16)
++	header := mem.align_forward_int(size_of(Pool_Overflow), align)
++	raw    := mem.alloc_bytes_non_zeroed(header + size, align, runtime.heap_allocator()) or_return
++	o := (^Pool_Overflow)(raw_data(raw))
++	o.next = a.overflow
++	a.overflow = o
++	ptr := &raw[header]
++	if zero { mem.zero(ptr, size) }
++	return mem.byte_slice(ptr, size), nil
++}
++
++@(private)
++pool_arena_proc :: proc(
++	allocator_data: rawptr,
++	mode: mem.Allocator_Mode,
++	size, alignment: int,
++	old_memory: rawptr,
++	old_size: int,
++	loc := #caller_location,
++) -> (bytes: []byte, err: mem.Allocator_Error) {
++	a := (^Pool_Arena)(allocator_data)
++
++	switch mode {
++	case .Alloc:
++		return pool_arena_alloc(a, size, alignment, true)
++
++	case .Alloc_Non_Zeroed:
++		return pool_arena_alloc(a, size, alignment, false)
++
++	case .Free:
++		if old_memory != nil && old_memory == a.last {
++			a.offset = int(uintptr(old_memory) - uintptr(a.block))
++			a.last   = nil
++		}
++		return nil, nil
++
++	case .Free_All:
++		pool_arena_free_all(a)
++		return nil, nil
++
++	case .Resize, .Resize_Non_Zeroed:
++		zero := mode == .Resize
++		if old_memory == nil {
++			return pool_arena_alloc(a, size, alignment, zero)
++		}
++		if old_memory == a.last {
++			start := int(uintptr(old_memory) - uintptr(a.block))
++			if start + size <= POOL_BLOCK_SIZE {
++				a.offset = start + size
++				if zero && size > old_size { mem.zero(&a.block[start + old_size], size - old_size) }
++				return mem.byte_slice(old_memory, size), nil
++			}
++		}
++		if size <= old_size {
++			return mem.byte_slice(old_memory, size), nil
++		}
++		new_memory := pool_arena_alloc(a, size, alignment, false) or_return
++		copy(new_memory, mem.byte_slice(old_memory, old_size))
++		if zero { mem.zero_slice(new_memory[old_size:]) }
++		return new_memory, nil
++
++	case .Query_Features:
++		set := (^mem.Allocator_Mode_Set)(old_memory)
++		if set != nil {
++			set^ = {.Alloc, .Alloc_Non_Zeroed, .Free, .Free_All, .Resize, .Resize_Non_Zeroed, .Query_Features}
++		}
++		return nil, nil
++
++	case .Query_Info:
++		return nil, .Mode_Not_Implemented
++	}
++	return nil, nil
++}
+diff --git a/response.odin b/response.odin
+index e22f82c..762cca9 100644
+--- a/response.odin
++++ b/response.odin
+@@ -3,7 +3,6 @@ package http
+ import "core:bytes"
+ import "core:io"
+ import "core:log"
+-import "core:mem/virtual"
+ import "core:nbio"
+ import "core:slice"
+ import "core:strconv"
+@@ -351,7 +350,7 @@ on_response_sent :: proc(op: ^nbio.Operation, conn: ^Connection) {
+ // Response has been sent, clean up and close/handle next.
+ @(private)
+ clean_request_loop :: proc(conn: ^Connection, close: Maybe(bool) = nil) {
+-	context.temp_allocator = virtual.arena_allocator(&conn.temp_allocator)
++	context.temp_allocator = pool_arena_allocator(&conn.temp_allocator)
+ 
+ 	// blocks, size, used := allocator_free_all(&conn.temp_allocator)
+ 	// log.debugf("temp_allocator had %d blocks of a total size of %m of which %m was used", blocks, size, used)
+@@ -365,7 +364,9 @@ clean_request_loop :: proc(conn: ^Connection, close: Maybe(bool) = nil) {
+ 
+ 	conn.loop.res = {}
+ 
+-	if c, ok := close.?; (ok && c) || conn.state == .Will_Close {
++	if c, ok := close.?; ok && c {
++		connection_close(conn, immediate = true)
++	} else if conn.state == .Will_Close {
+ 		connection_close(conn)
+ 	} else {
+ 		if !connection_set_state(conn, .Idle) { return }
+diff --git a/scanner.odin b/scanner.odin
+index 6328630..a1f2c2b 100644
+--- a/scanner.odin
++++ b/scanner.odin
+@@ -1,7 +1,6 @@
+ #+private
+ package http
+ 
+-import "core:mem/virtual"
+ import "base:intrinsics"
+ 
+ import "core:bufio"
+@@ -206,7 +205,7 @@ scanner_scan :: proc(
+ }
+ 
+ scanner_on_read :: proc(op: ^nbio.Operation, s: ^Scanner) {
+-	context.temp_allocator = virtual.arena_allocator(&s.connection.temp_allocator)
++	context.temp_allocator = pool_arena_allocator(&s.connection.temp_allocator)
+ 
+ 	defer scanner_scan(s, s.user_data, s.callback)
+ 
+diff --git a/server.odin b/server.odin
+index be92dd2..5e7588b 100644
+--- a/server.odin
++++ b/server.odin
+@@ -8,12 +8,12 @@ import "core:c/libc"
+ import "core:fmt"
+ import "core:log"
+ import "core:mem"
+-import "core:mem/virtual"
+ import "core:nbio"
+ import "core:net"
+ import "core:os"
+ import "core:slice"
+ import "core:sync"
++import "core:sys/linux"
+ import "core:thread"
+ import "core:time"
+ 
+@@ -185,6 +185,7 @@ _server_thread_init :: proc(s: ^Server, ttd: ^Server_Thread) {
+ 	td = ttd
+ 
+ 	td.conns = make(map[net.TCP_Socket]^Connection)
++	reserve(&td.conns, 65536)
+ 	// td.free_temp_blocks = make(map[int]queue.Queue(^Block))
+ 
+ 	if td != &s.threads[0] {
+@@ -197,7 +198,12 @@ _server_thread_init :: proc(s: ^Server, ttd: ^Server_Thread) {
+ 
+ 	log.debug("accepting connections")
+ 
+-	td.accept = nbio.accept_poly(s.tcp_sock, s, on_accept)
++	// Several accepts in flight, each re-arming itself, so a burst of new connections is taken in
++	// one loop pass instead of one per pass. `td.accept` only remembers the last one, so a graceful
++	// shutdown would leave the others pending.
++	for _ in 0 ..< ACCEPTS_IN_FLIGHT {
++		td.accept = nbio.accept_poly(s.tcp_sock, s, on_accept)
++	}
+ 
+ 	log.debug("starting event loop")
+ 	td.state = .Serving
+@@ -334,6 +340,13 @@ Max_Post_Handler_Discard_Bytes :: 256 << 10
+ @(private)
+ Conn_Close_Delay :: time.Millisecond * 500
+ 
++@(private)
++ACCEPTS_IN_FLIGHT :: 32
++
++// Bytes waiting in a socket's receive queue (asm-generic ioctls: x86_64 and arm64).
++@(private)
++FIONREAD :: 0x541B
++
+ Connection_State :: enum {
+ 	Pending, // Pending a client to attach.
+ 	New, // Got client, waiting to service first request.
+@@ -364,7 +377,7 @@ Connection :: struct {
+ 	socket:         net.TCP_Socket,
+ 	state:          Connection_State,
+ 	scanner:        Scanner,
+-	temp_allocator: virtual.Arena,
++	temp_allocator: Pool_Arena,
+ 	loop:           Loop,
+ }
+ 
+@@ -376,8 +389,11 @@ Loop :: struct {
+ 	res:  Response,
+ }
+ 
++// `immediate` skips the close delay; use it when there is no response left for the client to read
++// (it disconnected, or the request could not be parsed). Thousands of delayed closes at once
++// queue up behind the io_uring ring and stall accepting new connections for seconds.
+ @(private)
+-connection_close :: proc(c: ^Connection, loc := #caller_location) {
++connection_close :: proc(c: ^Connection, immediate := false, loc := #caller_location) {
+ 	assert_has_td(loc)
+ 
+ 	if c.state >= .Closing {
+@@ -389,6 +405,27 @@ connection_close :: proc(c: ^Connection, loc := #caller_location) {
+ 
+ 	c.state = .Closing
+ 
++	on_closed :: proc(_: ^nbio.Operation, c: ^Connection) {
++		log.debugf("closed connection: %i", c.socket)
++
++		c.state = .Closed
++
++		pool_arena_free_all(&c.temp_allocator)
++
++		scanner_destroy(&c.scanner)
++		delete_key(&td.conns, c.socket)
++		free(c, c.server.conn_allocator)
++	}
++
++	// The delay below only matters when the client sent bytes we never read: closing with unread
++	// input makes the kernel answer with a reset, which can destroy the response in flight.
++	// Without unread input, close now so the descriptor is free again at once.
++	unread: i32
++	if immediate || (linux.ioctl(linux.Fd(c.socket), FIONREAD, uintptr(&unread)) == 0 && unread == 0) {
++		nbio.close_poly(c.socket, c, on_closed)
++		return
++	}
++
+ 	// RFC 7230 6.6.
+ 
+ 	// Close read side of the connection, then wait a little bit, allowing the client
+@@ -396,18 +433,7 @@ connection_close :: proc(c: ^Connection, loc := #caller_location) {
+ 	net.shutdown(c.socket, net.Shutdown_Manner.Send)
+ 
+ 	nbio.timeout_poly(Conn_Close_Delay, c, proc(_: ^nbio.Operation, c: ^Connection) {
+-		nbio.close_poly(c.socket, c, proc(_: ^nbio.Operation, c: ^Connection) {
+-			log.debugf("closed connection: %i", c.socket)
+-
+-			c.state = .Closed
+-
+-			// allocator_destroy(&c.temp_allocator)
+-			virtual.arena_destroy(&c.temp_allocator)
+-
+-			scanner_destroy(&c.scanner)
+-			delete_key(&td.conns, c.socket)
+-			free(c, c.server.conn_allocator)
+-		})
++		nbio.close_poly(c.socket, c, on_closed)
+ 	})
+ }
+ 
+@@ -448,11 +474,7 @@ conn_handle_reqs :: proc(c: ^Connection) {
+ 	// TODO/PERF: not sure why this is allocated on the connections allocator, can't it use the arena?
+ 	scanner_init(&c.scanner, c, c.server.conn_allocator)
+ 
+-	// allocator_init(&c.temp_allocator, c.server.conn_allocator)
+-	// context.temp_allocator = allocator(&c.temp_allocator)
+-	err := virtual.arena_init_growing(&c.temp_allocator)
+-	assert(err == nil)
+-	context.temp_allocator = virtual.arena_allocator(&c.temp_allocator)
++	context.temp_allocator = pool_arena_allocator(&c.temp_allocator)
+ 
+ 	conn_handle_req(c, context.temp_allocator)
+ }

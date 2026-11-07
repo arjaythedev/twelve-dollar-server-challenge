@@ -122,3 +122,11 @@ fn test_put_json_escapes_at_every_position_and_length() {
 		}
 	}
 }
+
+fn test_put_json_appends_escaped_and_empty_strings() {
+	mut b := 'prefix:'.bytes()
+	text := 'a\n'
+	put_json(mut b, text.str, text.len)
+	put_json(mut b, text.str, 0)
+	assert b.bytestr() == 'prefix:"a\\n"""'
+}

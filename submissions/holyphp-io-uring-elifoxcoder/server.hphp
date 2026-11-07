@@ -358,7 +358,7 @@ class Server {
     pub bool $feedBatchUsers = false;
     pub bool $postSendBuilder = false;
     pub bool $sparseBufs = false;
-    pub int $writeWaitMs = 4;
+    pub int $writeWaitMs = 1;
     pub int $reqs = 0;
     pub int $reqsBase = 0;
 
@@ -419,13 +419,13 @@ class Server {
         sqlite_exec($db, "PRAGMA foreign_keys=OFF");
         if ($bgCheckpoint) {
             sqlite_exec($db, "PRAGMA wal_autocheckpoint=0");
-            $ckptFrames = 256;
+            $ckptFrames = 4096;
             $ckptFramesEnv = getenv("HPHP_CKPT_FRAMES");
             if ($ckptFramesEnv != "") {
                 $ckptFramesSet = intval($ckptFramesEnv);
                 if ($ckptFramesSet >= 32 && $ckptFramesSet <= 16384) { $ckptFrames = $ckptFramesSet; }
             }
-            $ckptHoldMs = 20;
+            $ckptHoldMs = 250;
             $ckptHoldEnv = getenv("HPHP_CKPT_HOLD_MS");
             if ($ckptHoldEnv != "") {
                 $ckptHoldSet = intval($ckptHoldEnv);

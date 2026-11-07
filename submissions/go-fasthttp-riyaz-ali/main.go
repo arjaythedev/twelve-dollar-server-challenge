@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"crawshaw.io/sqlite"
 	"crawshaw.io/sqlite/sqlitex"
 	"github.com/fasthttp/router"
@@ -12,18 +13,30 @@ import (
 	"runtime"
 )
 
+const pragmas = `
+PRAGMA temp_store = MEMORY;
+PRAGMA mmap_size = 268435456;
+PRAGMA cache_size = -65536;
+`
+
 func main() {
 	secret, path := env("JWT_SECRET", "twelve-dollar-challenge"), env("SQLITE_PATH", "seed/feed.db")
 
-	pool := must(sqlitex.Open(path, sqlite.OpenFlagsDefault, runtime.NumCPU()*2))
-	defer pool.Close()
-
+	ctx := context.Background()
 	r := router.New()
-	r.GET("/health", Health(pool))
-	r.GET("/feed", Feed(pool))
-	r.GET("/posts/{id}", GetPost(pool))
-	r.POST("/posts", Auth(CreatePost(pool), secret))
-	r.POST("/posts/{id}/like", Auth(LikePost(pool), secret))
+
+	reader := must(sqlitex.OpenInit(ctx, path, sqlite.OpenFlagsDefault, runtime.NumCPU()*2, pragmas))
+	defer reader.Close()
+
+	r.GET("/health", Health(reader))
+	r.GET("/feed", Feed(reader))
+	r.GET("/posts/{id}", GetPost(reader))
+
+	writer := must(sqlitex.OpenInit(ctx, path, sqlite.OpenFlagsDefault, runtime.NumCPU()*2, pragmas))
+	defer writer.Close()
+
+	r.POST("/posts", Auth(CreatePost(writer), secret))
+	r.POST("/posts/{id}/like", Auth(LikePost(writer), secret))
 
 	// configure not-found handler
 	r.HandleMethodNotAllowed = false

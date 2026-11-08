@@ -1186,8 +1186,11 @@ static void db_open(const char *path) {
   if (sqlite3_open_v2(path, &db, fl, "unix-excl") != SQLITE_OK) { fprintf(stderr, "open %s: %s\n", path, sqlite3_errmsg(db)); exit(1); }
   sqlite3_busy_timeout(db, 5000);
   char *e = NULL;
+  // journal_size_limit=0: the first commit after the log restarts truncates the WAL file, so later frames append to fresh
+  // pages instead of overwriting old ones, which the kernel reads back from disk first when it has evicted them (#326).
+  // Only the file's size changes: the frame counts and checkpoint outcomes the hold logic below reads are the same.
   if (sqlite3_exec(db, "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA mmap_size=0; PRAGMA cache_size=-" STR(CACHE_KB) "; PRAGMA wal_autocheckpoint=0;"
-                   "SELECT count(*) FROM users WHERE id = 1;", NULL, NULL, &e) != SQLITE_OK) { fprintf(stderr, "pragma: %s\n", e); exit(1); }
+                   "PRAGMA journal_size_limit=0; SELECT count(*) FROM users WHERE id = 1;", NULL, NULL, &e) != SQLITE_OK) { fprintf(stderr, "pragma: %s\n", e); exit(1); }
   sqlite3_wal_hook(db, wal_hook, NULL);
   wal_asks = eventfd(0, EFD_CLOEXEC); wal_replies = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
   if (wal_asks < 0 || wal_replies < 0 || sqlite3_open_v2(path, &wal_db, fl, "unix-excl") != SQLITE_OK ||

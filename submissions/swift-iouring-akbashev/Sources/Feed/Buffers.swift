@@ -70,6 +70,15 @@ nonisolated struct ByteBuffer: ~Copyable, ~Sendable {
         count += n
     }
 
+    /// Lets `body` fill up to `maximum` bytes past the end (a socket read straight into the buffer); returns what
+    /// `body` returned, and keeps that many bytes if it is positive.
+    @inline(__always) mutating func appendSpare(maximum: Int, _ body: (UnsafeMutableRawBufferPointer) -> Int) -> Int {
+        let spare = UnsafeMutableRawBufferPointer(start: reserve(maximum), count: maximum)
+        let n = body(spare)
+        if n > 0 { count += n }
+        return n
+    }
+
     @inline(__always) subscript(i: Int) -> UInt8 {
         get {
             precondition(i >= 0 && i < count)

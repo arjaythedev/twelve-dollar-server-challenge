@@ -54,9 +54,13 @@ foreground and reads the challenge's `HOST`, `PORT`, `SQLITE_PATH`, and
   [C io_uring PR #245](https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/245).
 - Writes use WAL and `synchronous=NORMAL`. Multiple writes may share a SQLite
   transaction; affected responses are held until commit succeeds. A background
-  checkpoint thread manages WAL growth, and the VFS coalesces WAL writes while
-  preserving SQLite's I/O barriers. The program can advise the kernel to
-  release already-checkpointed WAL pages.
+  checkpoint thread runs at nice 5, performs up to four passive bulk rounds
+  before holding writes for the remaining tail, and syncs the database around a
+  final passive checkpoint. SQLite uses 64 MiB database-file chunks backed by
+  `posix_fallocate`; the VFS coalesces WAL writes while preserving SQLite's I/O
+  barriers. The checkpoint approach adapts the documented technique from
+  [Go io_uring PR #354](https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/354).
+  The program can advise the kernel to release already-checkpointed WAL pages.
 
 The code makes no schema or index changes and does not modify kernel settings
 or pin CPUs. Dependency and source licenses are retained with the vendored
@@ -107,10 +111,16 @@ challenge repository with a freshly generated seed. Optional additional checks:
   The 210,000-user two-minute probe failed p99 at 1.99 s; 220,000 failed p99
   at 2.4 s. The maintainer says this same tree has varied from 209,000 to
   220,000 across runs, so this result is recorded as a footnote, not a new row.
+- The official rerun at `3949a1a` uses the same server files and held **219,000
+  users for five minutes**: 21,366 req/s, p95 69.5 ms, p99 231.7 ms, zero
+  errors, 81% app CPU, and 1,185 MB peak RAM. A 230,000-user two-minute probe
+  passed but its five-minute hold failed p99 at 1.08 s (85% CPU); 240,000
+  failed p95 at 1.0 s. The leaderboard row remains 220,000 at `3e10490`.
 
 The maintainer attributes the differences to run-to-run variation around the
 210,000–220,000-user edge. The leaderboard retains the 220,000 row from
-`3e10490` and records the subsequent 210,000, 209,000, and 200,000 runs in its
-footnote. The helper-process experiment was reverted; current head `0012110`
-uses the same server tree as `3e10490`. These are official maintainer results;
-local diagnostics are not leaderboard scores.
+`3e10490` and records the subsequent 210,000, 209,000, 200,000, and 219,000
+runs in its footnote. The helper-process experiment was reverted; `3949a1a`
+uses the same server tree as `3e10490`. The current checkpoint-tuning candidate
+is unscored; these are official maintainer results, and local diagnostics are
+not leaderboard scores.

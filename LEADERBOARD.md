@@ -84,7 +84,7 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | 11 | go-iouring-trungdlp | #343 | Go (io_uring, cgo SQLite B-tree reads) | **270,000** ᶿ | 25,841 | 99.5 | 246.0 | 0.00 | 81 | 28 | 736 | 2026-11-07 |
 | 18 | rust-epoll-scooter1337 | #82 | Rust (io_uring) | **264,000** ˣ | 25,147 | 259 | 499 | 0.00 | 84 | 30 | 630 | 2026-10-21 |
 | 19 | csharp-kestrel-mbobka | #316 | C# (.NET 10 ReadyToRun, Kestrel host, io_uring) | **260,000** | 24,980 | 134 | 286 | 0.00 | 82 | 30 | 692 | 2026-11-05 |
-| 19 | rust-iouring-rkkautsar | #353 | Rust (io_uring, SQLite B-tree reads) | **260,000** | 24,969 | 135.4 | 429.4 | 0.00 | 93 | 34 | 627 | 2026-11-07 |
+| 19 | rust-iouring-rkkautsar | #353 | Rust (io_uring, SQLite B-tree reads) | **260,000** ᴿ | 24,969 | 135.4 | 429.4 | 0.00 | 93 | 34 | 627 | 2026-11-07 |
 | 21 | v-epoll-i098 | #191 | V (io_uring, SQLite B-tree reads) | **257,000** ᵂ | 24,766 | 13.5 | 29 | 0.00 | 74 | 27 | 732 | 2026-10-30 |
 | 21 | c-iouring-oix7 | #296 | C (io_uring, SQLite B-tree reads) | **257,000** | 24,654 | 239 | 796 | 0.00 | 76 | 28 | 905 | 2026-11-04 |
 | 21 | swift-iouring-c2p-cmd | #314 | Swift (io_uring, SQLite B-tree reads) | **257,000** ⁱ | 24,737 | 55.9 | 163.6 | 0.00 | 76 | 28 | 675 | 2026-11-05 |
@@ -463,6 +463,11 @@ one-line build patch (ᵖ below).
 priority change; held, not merged: it didn't beat the merged row) scored **230,000** (22,348 req/s, p95 31.1 / p99
 128.8 ms, 0 err, 69 % CPU, 28 µs/req, 1,205 MB, 2026-11-08). 240,000 failed the 2-minute probe on p99 (6.90 s at 81 %
 CPU, 0 errors) and 320,000 on p95/p99 (11.2 / 16.7 s at 98 % CPU).
+
+ᴿ **rust-iouring-rkkautsar** stays on its merged #353 row. Its follow-up **#355** (`9762a8d`, `SHARDS` 8 → 6, queued
+reads drained before the next poll wait; held, not merged: it didn't beat the merged row) also held **260,000**
+(24,986 req/s, p95 106.6 / p99 331.6 ms, 0 err, 93 % CPU, 34 µs/req, 609 MB, 2026-11-08). 270,000 failed the 2-minute
+probe on p95/p99 (804 / 1,322 ms at 94 % CPU, 0 errors) and 280,000 on p95/p99 (614 / 1,417 ms at 96 % CPU).
 
 **Connection collapses in scored entries' failing probes.** v-epoll-i098 #191: 270,000 passed the 2-minute probe but
 failed the 5-minute hold with 60 % errors, nearly all `connection refused` from mid-hold on (an earlier attempt at

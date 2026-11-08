@@ -22,6 +22,7 @@
 #define ACCEPT_DEPTH 64
 #define SQ_SIZE 2048
 #define CQ_SIZE 8192
+#define TASKRUN_ROUNDS 64 /* 64 enters of up to 20 items: about 1,280 completions per ring per pass */
 #define BATCH_NS 4000000 /* Bound completion coalescing before one SQLite transaction. */
 #define PENDING_LIMIT (1u << 20) /* Input held while the application is busy; more closes the client. */
 #define TD_CANCEL (UINT64_MAX - 1)
@@ -215,8 +216,11 @@ static void td_submit(struct td_net *net, struct td_ring *r)
         td_fail("submit", rc);
     if (*r->ring.sq.kdropped) td_fail("dropped SQE", EOVERFLOW);
     /* DEFER_TASKRUN posts completions only inside io_uring_enter; the kernel raises
-     * IORING_SQ_TASKRUN when work waits, and IORING_SQ_CQ_OVERFLOW when the CQ spilled. */
-    if (*r->ring.sq.kflags & (IORING_SQ_CQ_OVERFLOW | IORING_SQ_TASKRUN)) {
+     * IORING_SQ_TASKRUN when work waits, and IORING_SQ_CQ_OVERFLOW when the CQ spilled.
+     * Since Linux 6.13 one enter without a wait runs at most 20 deferred items, so drain
+     * until the flag clears; the bound keeps one busy ring from starving the others. */
+    for (int round = 0; round < TASKRUN_ROUNDS &&
+                        (*r->ring.sq.kflags & (IORING_SQ_CQ_OVERFLOW | IORING_SQ_TASKRUN)); ++round) {
         rc = io_uring_get_events(&r->ring);
         if (rc < 0 && rc != -EINTR && rc != -EBUSY) td_fail("flush deferred work", rc);
     }

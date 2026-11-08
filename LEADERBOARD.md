@@ -496,6 +496,10 @@ probe on p95/p99 (804 / 1,322 ms at 94 % CPU, 0 errors) and 280,000 on p95/p99 (
 Re-run at `aafffb5` (feed responses submitted before the post batch): **260,000** again (24,999 req/s, p95 90.9 / p99
 250.9 ms, 0 err, 95 % CPU, 35 µs/req, 603 MB, 2026-11-08); 270,000 failed the 2-minute probe on p95/p99 (562 / 981 ms
 at 96 % CPU, 0 errors) and 280,000 on p95/p99 (943 / 1,613 ms at 97 % CPU). Not merged (ties the row).
+Re-run at `27343ac` (`-C target-cpu=native`): **257,000** (24,730 req/s, p95 115.5 / p99 303.2 ms, 0 err, 95 % CPU,
+35 µs/req, 638 MB, 2026-11-08); 270,000 passed the 2-minute probe but failed the 5-minute hold on p95/p99 (529 /
+1,062 ms at 96 % CPU, 0 errors), 280,000 failed the 2-minute probe (529 / 1,417 ms at 97 % CPU). Not merged (below the
+row).
 
 **Connection collapses in scored entries' failing probes.** v-epoll-i098 #191: 270,000 passed the 2-minute probe but
 failed the 5-minute hold with 60 % errors, nearly all `connection refused` from mid-hold on (an earlier attempt at

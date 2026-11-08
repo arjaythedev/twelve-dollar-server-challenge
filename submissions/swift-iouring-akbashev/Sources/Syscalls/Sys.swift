@@ -1,50 +1,49 @@
-// The Linux interface: the constants are the Linux ABI's; the calls Glibc's Swift module leaves out are declared in the
-// Syscalls module.
+// The thin Swift side of the Linux interface: the constants are the Linux ABI's, and the calls Glibc's Swift module
+// leaves out are declared next to this (Syscalls.swift).
 import Glibc
-import Syscalls
 
-/// Thread-safe helpers, usable from any thread: nonisolated, unlike the rest of the server.
-nonisolated enum Sys {
-    static let RLIMIT_NOFILE: Int32 = 7
-    static let AF_INET: Int32 = 2
-    static let AF_INET6: Int32 = 10
-    static let SOCK_STREAM: Int32 = 1
-    static let SOCK_NONBLOCK: Int32 = 0o4000
-    static let SOCK_CLOEXEC: Int32 = 0o2000000
-    static let SOL_SOCKET: Int32 = 1
-    static let SO_REUSEADDR: Int32 = 2
-    static let SO_REUSEPORT: Int32 = 15
-    static let IPPROTO_TCP: Int32 = 6
-    static let TCP_NODELAY: Int32 = 1
-    static let IPPROTO_IPV6: Int32 = 41
-    static let IPV6_V6ONLY: Int32 = 26
-    static let EINTR: Int32 = 4
-    static let EFD_CLOEXEC: Int32 = 0o2000000
+/// Thread-safe helpers, usable from any thread.
+public enum Sys {
+    public static let RLIMIT_NOFILE: Int32 = 7
+    public static let AF_INET: Int32 = 2
+    public static let AF_INET6: Int32 = 10
+    public static let SOCK_STREAM: Int32 = 1
+    public static let SOCK_NONBLOCK: Int32 = 0o4000
+    public static let SOCK_CLOEXEC: Int32 = 0o2000000
+    public static let SOL_SOCKET: Int32 = 1
+    public static let SO_REUSEADDR: Int32 = 2
+    public static let SO_REUSEPORT: Int32 = 15
+    public static let IPPROTO_TCP: Int32 = 6
+    public static let TCP_NODELAY: Int32 = 1
+    public static let IPPROTO_IPV6: Int32 = 41
+    public static let IPV6_V6ONLY: Int32 = 26
+    public static let EINTR: Int32 = 4
+    public static let EFD_CLOEXEC: Int32 = 0o2000000
 
 }
 
-nonisolated extension Sys {
+extension Sys {
     struct RLimit {
         var cur: UInt64 = 0
         var max: UInt64 = 0
     }
 
     /// Monotonic time in nanoseconds.
-    @inline(__always) static func monotonicNanos() -> UInt64 {
+    @inlinable public static func monotonicNanos() -> UInt64 {
         var ts = timespec()
         clock_gettime(CLOCK_MONOTONIC, &ts)
         return UInt64(ts.tv_sec) &* 1_000_000_000 &+ UInt64(ts.tv_nsec)
     }
 
     /// Seconds since the Unix epoch, as a Double.
-    @inline(__always) static func unixNowF64() -> Double {
+    @inlinable public static func unixNowF64() -> Double {
         var ts = timespec()
         clock_gettime(CLOCK_REALTIME, &ts)
         return Double(ts.tv_sec) + Double(ts.tv_nsec) / 1e9
     }
 
     /// Raises the descriptor soft limit to the hard one (the box's unit allows 8,388,608) and returns it.
-    static func raiseNofileLimit() -> Int {
+    public static func raiseNofileLimit() -> Int {
         var rl = RLimit()
         guard sys_getrlimit(RLIMIT_NOFILE, &rl) == 0 else { return 0 }
         if rl.cur < rl.max {
@@ -60,7 +59,7 @@ nonisolated extension Sys {
     }
 
     /// A non-blocking listener on `host:port`.
-    static func bindListener(host: String, port: UInt16) throws(SystemError) -> Int32 {
+    public static func bindListener(host: String, port: UInt16) throws(SystemError) -> Int32 {
         var v4 = in_addr()
         var v6 = in6_addr()
         let isV4 = inet_pton(AF_INET, host, &v4) == 1
@@ -93,19 +92,19 @@ nonisolated extension Sys {
     }
 
     /// A line on standard error.
-    static func logLine(_ line: String) {
+    public static func logLine(_ line: String) {
         var text = line + "\n"
         text.withUTF8 { _ = sys_write(2, $0.baseAddress, $0.count) }
     }
 
 }
 
-nonisolated struct SystemError: Error, CustomStringConvertible {
-    let call: String
-    let code: Int32
-    init(_ call: String, _ code: Int32 = errno) {
+public struct SystemError: Error, CustomStringConvertible {
+    public let call: String
+    public let code: Int32
+    public init(_ call: String, _ code: Int32 = errno) {
         self.call = call
         self.code = code
     }
-    var description: String { "\(call): \(String(cString: strerror(code)))" }
+    public var description: String { "\(call): \(String(cString: strerror(code)))" }
 }

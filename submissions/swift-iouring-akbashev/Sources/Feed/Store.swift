@@ -3,6 +3,7 @@
 // walk SQLite's B-trees directly (Reads.swift), with these statements as their fallback; writes are SQL. Rows are
 // written as JSON straight from SQLite's memory. The checkpointer has a connection of its own.
 import CSQLite
+import Syscalls
 
 /// What a request asks the database.
 nonisolated enum Query {
@@ -51,7 +52,7 @@ nonisolated struct Store: ~Copyable, ~Sendable {
         """
 
     init(path: String, started: UInt64, directReads: Bool) throws(StoreError) {
-        let db = try SQLite.open(path, cacheKiB: 256 * 1024)
+        let db = try SQLite.open(path, cacheKiB: 64 * 1024)
         let statements: [OpaquePointer]
         do {
             statements = try Self.prepareAll(db)
@@ -101,6 +102,9 @@ nonisolated struct Store: ~Copyable, ~Sendable {
     }
 
     deinit {
+        // The cursors hold memory from the connection's allocator: freed before it closes.
+        var reads = self.reads
+        reads.release()
         for stmt in [feed, post, postExists, insertPost, insertLike, health, begin, commit, rollback] { sqlite3_finalize(stmt) }
         sqlite3_close_v2(db)
         walFrames.deallocate()
@@ -323,6 +327,9 @@ nonisolated enum SQLite {
     /// with synchronous=NORMAL (rule 6); checkpoints run by the server, not by SQLite after a commit; SQLite's own
     /// page cache of `cacheKiB`, no mmap.
     static func open(_ path: String, cacheKiB: Int) throws(StoreError) -> OpaquePointer {
+        // Built with SQLITE_OMIT_AUTOINIT: the library is set up here, before the first connection; later calls return
+        // at once.
+        guard sqlite3_initialize() == SQLITE_OK else { throw StoreError(description: "sqlite3_initialize") }
         var handle: OpaquePointer?
         let rc = sqlite3_open_v2(path, &handle, SQLITE_OPEN_READWRITE, "unix-excl")
         guard rc == SQLITE_OK, let db = handle else {

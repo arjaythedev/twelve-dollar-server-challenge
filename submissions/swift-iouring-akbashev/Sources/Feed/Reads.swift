@@ -3,6 +3,7 @@
 // they expect, SQL answers instead.
 import BTree
 import CSQLite
+import Syscalls
 
 /// The read queries over four cursors: the posts and users tables (by rowid), posts_created_at_id_idx (newest first)
 /// and likes_post_id_idx. The cursors open with the pass's first read and close before its commit.
@@ -30,12 +31,21 @@ nonisolated struct Reads: ~Copyable, ~Sendable {
             : (0, 0, 0, 0)
         available = roots.0 != 0 && roots.1 != 0 && roots.2 != 0 && roots.3 != 0
         guard let posts = Cursor(db, root: roots.0), let users = Cursor(db, root: roots.1),
-              let newest = Cursor(db, root: roots.2, keyColumns: 2, descending: true),
+              let newest = Cursor(db, root: roots.2, keyColumns: 2),
               let likes = Cursor(db, root: roots.3, keyColumns: 1) else { throw StoreError(description: "btree cursors: out of memory") }
         self.posts = posts
         self.users = users
         self.newest = newest
         self.likes = likes
+    }
+
+    /// Frees the cursors, before the connection closes.
+    mutating func release() {
+        close()
+        posts.release()
+        users.release()
+        newest.release()
+        likes.release()
     }
 
     /// Before the pass's transaction ends.
@@ -200,7 +210,9 @@ nonisolated struct Reads: ~Copyable, ~Sendable {
             ("SELECT count(*) FROM pragma_index_list('users') WHERE origin = 'pk'", "0"),
             ("SELECT name || ' ' || desc FROM pragma_index_xinfo('posts_created_at_id_idx') WHERE key", "created_at 1,id 1"),
             ("SELECT name || ' ' || desc FROM pragma_index_xinfo('likes_post_id_idx') WHERE key", "post_id 0"),
-            ("PRAGMA encoding", "UTF-8"),
+            // The record decoder reads text as UTF-8. A text cast to a BLOB is its bytes in the database's encoding:
+            // two characters are 2 bytes only in UTF-8 (`PRAGMA encoding` isn't compiled in: SQLITE_OMIT_UTF16).
+            ("SELECT length(CAST('ab' AS BLOB))", "2"),
         ]
         for (sql, expected) in checks where rows(db, sql) != expected {
             Sys.logLine("btree reads off, SQL answers: \(sql) gave \(rows(db, sql) ?? "an error")")

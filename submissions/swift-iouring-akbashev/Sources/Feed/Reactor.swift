@@ -13,8 +13,8 @@
 // outnumber a ring's buffers, and back to its multishot receive once its socket is empty. A pass answers at most
 // `answersPerPass` requests; what it reads beyond that waits in the connection's buffer, on a ready list later passes
 // answer first, so the kernel's socket buffers empty while passes stay short (rust-iouring-kensac's recovery).
-import CIORing
 import Glibc
+import IORing
 import Syscalls
 
 final class Reactor {

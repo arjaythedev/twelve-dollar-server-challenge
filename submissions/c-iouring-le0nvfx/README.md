@@ -101,10 +101,16 @@ challenge repository with a freshly generated seed. Optional additional checks:
   CPU, and 736 MB peak RAM. The 220,000-user two-minute probe failed p95/p99
   at 1.00/2.15 s; the 240,000-user probe failed p95 at 2.7 s. The maintainer
   confirmed the helper was rule-compliant but it did not beat the 220,000 row.
+- The official rerun at `0012110`, which restored the same thread-based server
+  tree as `3e10490`, held **200,000 users for five minutes**: 19,684 req/s,
+  p95 12.1 ms, p99 46.2 ms, zero errors, 74% app CPU, and 636 MB peak RAM.
+  The 210,000-user two-minute probe failed p99 at 1.99 s; 220,000 failed p99
+  at 2.4 s. The maintainer says this same tree has varied from 209,000 to
+  220,000 across runs, so this result is recorded as a footnote, not a new row.
 
-The maintainer attributed the difference to run-to-run variation at the
-threshold. The leaderboard retains the 220,000 row from `3e10490` and records
-the 210,000 and both 209,000 reruns in its footnote. The helper-process
-experiment was reverted to the previously scored thread-based implementation;
-the current server tree has no score of its own yet. These are official
-maintainer results; local diagnostics are not leaderboard scores.
+The maintainer attributes the differences to run-to-run variation around the
+210,000–220,000-user edge. The leaderboard retains the 220,000 row from
+`3e10490` and records the subsequent 210,000, 209,000, and 200,000 runs in its
+footnote. The helper-process experiment was reverted; current head `0012110`
+uses the same server tree as `3e10490`. These are official maintainer results;
+local diagnostics are not leaderboard scores.

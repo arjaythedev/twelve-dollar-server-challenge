@@ -1326,6 +1326,9 @@ fn apply_reads(
         }
         app.read.end_read(ok);
         feed_reads.drain(..n);
+        // Flush the feed responses now instead of after the post batch, so a
+        // feed answer does not wait behind unrelated post work in the SQ.
+        submit_rings(rings);
     }
     if !post_reads.is_empty() {
         let n = post_reads.len().min(POST_ANSWERS_PER_PASS);
@@ -1427,10 +1430,7 @@ pub fn run_pass(
         let ready_reads = rings.iter().any(|r| {
             !r.read_queue.is_empty() && r.reads_in_flight < BUF_RING_ENTRIES as usize
         });
-        // Database work is already runnable even if the rings have no CQEs.
-        let t4 = if cqes > 0 || queue_full || ready_reads
-            || !feed_reads.is_empty() || !post_reads.is_empty()
-        {
+        let t4 = if cqes > 0 || queue_full || ready_reads || !feed_reads.is_empty() || !post_reads.is_empty() {
             t3
         } else {
             fds.clear();

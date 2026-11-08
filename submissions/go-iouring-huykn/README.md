@@ -98,6 +98,15 @@ bash test/run.sh submissions/go-iouring-huykn
 `JWT_SECRET`, `HOST`, and `PORT`; the default address is `127.0.0.1:3000`.
 Connections retain receive/send buffers until io_uring completion. Fragmented
 requests, pipelining and partial sends are supported, with no keep-alive timeout.
+On descriptor exhaustion (`EMFILE`/`ENFILE`), the loop retires up to 256 idle
+connections and retries accept after an asynchronous 10 ms delay. Pending reads
+complete before their descriptors close; active requests and sends continue.
+This allows more users to share the descriptor budget through reconnects, rather
+than exiting at the hard limit. Reproduce with a 128-descriptor server limit:
+
+```sh
+python3 submissions/go-iouring-huykn/testdata/fd_exhaustion.py
+```
 
 Use disposable seed copies for database-backed tests:
 

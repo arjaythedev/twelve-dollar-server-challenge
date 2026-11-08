@@ -492,8 +492,8 @@ p99 128.8 ms, 69 % CPU, 2026-11-08).
 ᴿ **rust-iouring-rkkautsar** is scored at its follow-up **#355** at commit **`2daf238`** (one B-tree read transaction
 reused across passes). The 300,000 hold had 0 errors; 310,000 failed the 2-minute probe on p95/p99 (1.09 / 3.17 s at 98 %
 CPU, 0 errors) and 320,000 on p95/p99 (1.34 / 4.23 s at 94 % CPU). It beats the merged #353 row (`80d0e95`, **260,000**,
-24,969 req/s, p95 135.4 / p99 429.4 ms, 93 % CPU, 34 µs/req, 627 MB, 2026-11-07) but is not merged yet: the head moved
-to `dbacabd` during the run, which is queued for its own run. Earlier #355 heads: `9762a8d` (`SHARDS` 8 → 6, queued
+24,969 req/s, p95 135.4 / p99 429.4 ms, 93 % CPU, 34 µs/req, 627 MB, 2026-11-07) but is not merged: the head moved
+to `dbacabd` during the run, and `dbacabd` didn't beat the merged row (below). Earlier #355 heads: `9762a8d` (`SHARDS` 8 → 6, queued
 reads drained before the next poll wait; not merged: it didn't beat the merged row) also held **260,000**
 (24,986 req/s, p95 106.6 / p99 331.6 ms, 0 err, 93 % CPU, 34 µs/req, 609 MB, 2026-11-08). 270,000 failed the 2-minute
 probe on p95/p99 (804 / 1,322 ms at 94 % CPU, 0 errors) and 280,000 on p95/p99 (614 / 1,417 ms at 96 % CPU).
@@ -503,7 +503,10 @@ at 96 % CPU, 0 errors) and 280,000 on p95/p99 (943 / 1,613 ms at 97 % CPU). Not 
 Re-run at `27343ac` (`-C target-cpu=native`): **257,000** (24,730 req/s, p95 115.5 / p99 303.2 ms, 0 err, 95 % CPU,
 35 µs/req, 638 MB, 2026-11-08); 270,000 passed the 2-minute probe but failed the 5-minute hold on p95/p99 (529 /
 1,062 ms at 96 % CPU, 0 errors), 280,000 failed the 2-minute probe (529 / 1,417 ms at 97 % CPU). Not merged (below the
-row).
+row). Re-run at `dbacabd` (one transaction per pass for reads and writes): **257,000** (24,452 req/s, p95 469.7 / p99
+672.0 ms, 0 err, 88 % CPU, 33 µs/req, 754 MB, 2026-11-08); 270,000 passed the 2-minute probe but failed the 5-minute
+hold on p95/p99 (556 / 804 ms at 90 % CPU, 0 errors), 280,000 failed the 2-minute probe (721 / 2,308 ms at 92 % CPU).
+Not merged (below the merged row).
 
 **Connection collapses in scored entries' failing probes.** v-epoll-i098 #191: 270,000 passed the 2-minute probe but
 failed the 5-minute hold with 60 % errors, nearly all `connection refused` from mid-hold on (an earlier attempt at

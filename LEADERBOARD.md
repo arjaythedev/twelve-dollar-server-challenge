@@ -82,16 +82,16 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | 11 | rust-iouring-tbsvttr | #323 | Rust (io_uring, SQLite B-tree reads) | **270,000** ᵟ | 25,818 | 97.5 | 294.2 | 0.00 | 81 | 28 | 1,307 | 2026-11-05 |
 | 11 | fortran-iouring-oh-meh | #332 | Fortran (io_uring, SQLite B-tree reads) | **270,000** | 25,823 | 189.9 | 720.5 | 0.00 | 85 | 30 | 1,041 | 2026-11-06 |
 | 11 | go-iouring-trungdlp | #343 | Go (io_uring, cgo SQLite B-tree reads) | **270,000** ᶿ | 25,841 | 99.5 | 246.0 | 0.00 | 81 | 28 | 736 | 2026-11-07 |
-| 18 | rust-epoll-scooter1337 | #82 | Rust (io_uring) | **264,000** ˣ | 25,147 | 259 | 499 | 0.00 | 84 | 30 | 630 | 2026-10-21 |
-| 19 | csharp-kestrel-mbobka | #316 | C# (.NET 10 ReadyToRun, Kestrel host, io_uring) | **260,000** | 24,980 | 134 | 286 | 0.00 | 82 | 30 | 692 | 2026-11-05 |
-| 19 | rust-iouring-rkkautsar | #353 | Rust (io_uring, SQLite B-tree reads) | **260,000** ᴿ | 24,969 | 135.4 | 429.4 | 0.00 | 93 | 34 | 627 | 2026-11-07 |
-| 21 | v-epoll-i098 | #191 | V (io_uring, SQLite B-tree reads) | **257,000** ᵂ | 24,766 | 13.5 | 29 | 0.00 | 74 | 27 | 732 | 2026-10-30 |
-| 21 | c-iouring-oix7 | #296 | C (io_uring, SQLite B-tree reads) | **257,000** | 24,654 | 239 | 796 | 0.00 | 76 | 28 | 905 | 2026-11-04 |
-| 21 | swift-iouring-c2p-cmd | #314 | Swift (io_uring, SQLite B-tree reads) | **257,000** ⁱ | 24,737 | 55.9 | 163.6 | 0.00 | 76 | 28 | 675 | 2026-11-05 |
-| 24 | asm-iouring-unorig-username | #206 | x86-64 asm (io_uring) | **250,000** | 24,053 | 141 | 397 | 0.00 | 91 | 34 | 1,486 | 2026-10-30 |
-| 24 | ada-native-visseranalytics | #237 | Ada (GNAT, io_uring) | **250,000** | 24,119 | 84 | 286 | 0.00 | 77 | 29 | 1,169 | 2026-11-01 |
-| 24 | c-rawuring-thehimalayanleo | #269 | C (io_uring, SQLite B-tree reads) | **250,000** | 24,014 | 220 | 359 | 0.00 | 79 | 30 | 970 | 2026-11-02 |
-| 24 | go-iouring-davidefrageri | #351 | Go (io_uring, cgo SQLite B-tree reads) | **250,000** ᴰ | 24,053 | 94.6 | 271.7 | 0.00 | 78 | 30 | 1,297 | 2026-11-07 |
+| 11 | go-iouring-davidefrageri | #354 | Go (io_uring, cgo SQLite B-tree reads) | **270,000** ᴰ | 25,841 | 62.9 | 328.3 | 0.00 | 78 | 27 | 1,214 | 2026-11-08 |
+| 19 | rust-epoll-scooter1337 | #82 | Rust (io_uring) | **264,000** ˣ | 25,147 | 259 | 499 | 0.00 | 84 | 30 | 630 | 2026-10-21 |
+| 20 | csharp-kestrel-mbobka | #316 | C# (.NET 10 ReadyToRun, Kestrel host, io_uring) | **260,000** | 24,980 | 134 | 286 | 0.00 | 82 | 30 | 692 | 2026-11-05 |
+| 20 | rust-iouring-rkkautsar | #353 | Rust (io_uring, SQLite B-tree reads) | **260,000** ᴿ | 24,969 | 135.4 | 429.4 | 0.00 | 93 | 34 | 627 | 2026-11-07 |
+| 22 | v-epoll-i098 | #191 | V (io_uring, SQLite B-tree reads) | **257,000** ᵂ | 24,766 | 13.5 | 29 | 0.00 | 74 | 27 | 732 | 2026-10-30 |
+| 22 | c-iouring-oix7 | #296 | C (io_uring, SQLite B-tree reads) | **257,000** | 24,654 | 239 | 796 | 0.00 | 76 | 28 | 905 | 2026-11-04 |
+| 22 | swift-iouring-c2p-cmd | #314 | Swift (io_uring, SQLite B-tree reads) | **257,000** ⁱ | 24,737 | 55.9 | 163.6 | 0.00 | 76 | 28 | 675 | 2026-11-05 |
+| 25 | asm-iouring-unorig-username | #206 | x86-64 asm (io_uring) | **250,000** | 24,053 | 141 | 397 | 0.00 | 91 | 34 | 1,486 | 2026-10-30 |
+| 25 | ada-native-visseranalytics | #237 | Ada (GNAT, io_uring) | **250,000** | 24,119 | 84 | 286 | 0.00 | 77 | 29 | 1,169 | 2026-11-01 |
+| 25 | c-rawuring-thehimalayanleo | #269 | C (io_uring, SQLite B-tree reads) | **250,000** | 24,014 | 220 | 359 | 0.00 | 79 | 30 | 970 | 2026-11-02 |
 | 28 | fsharp-kestrel-delneg | #201 | F# (Kestrel, io_uring) | **247,000** | 23,884 | 14 | 72 | 0.00 | 71 | 27 | 750 | 2026-10-30 |
 | 28 | lisp-sbcl-heyitstony97-max | #283 | Common Lisp (SBCL, io_uring, SQLite B-tree reads) | **247,000** | 23,772 | 251 | 596 | 0.00 | 79 | 30 | 1,187 | 2026-11-03 |
 | 30 | holyphp-io-uring-elifoxcoder | #336 | HolyPHP (io_uring, SQLite B-tree reads) | **244,000** ᵘ | 23,557 | 128.8 | 735.0 | 0.00 | 81 | 31 | 907 | 2026-11-07 |
@@ -471,10 +471,11 @@ keep-alive shedding near the fd limit). 70,000 passed the 2-minute probe, but th
 `e95e747` held 45,000 (5-minute holds at 52,000 and 49,000 failed on refused connections); `3159a41` held 37,000 with a
 one-line build patch (ᵖ below).
 
-ᴰ **go-iouring-davidefrageri** stays on its merged #351 row. Its follow-up **#354** (`6de54ca`, checkpoint-thread
-priority change; held, not merged: it didn't beat the merged row) scored **230,000** (22,348 req/s, p95 31.1 / p99
-128.8 ms, 0 err, 69 % CPU, 28 µs/req, 1,205 MB, 2026-11-08). 240,000 failed the 2-minute probe on p99 (6.90 s at 81 %
-CPU, 0 errors) and 320,000 on p95/p99 (11.2 / 16.7 s at 98 % CPU).
+ᴰ **go-iouring-davidefrageri** is scored at its follow-up PR **#354** (`7ffa625`, merged: four-ring latency, accept
+cancel on spill, real fallocate, checkpoint thread at nice 5); 280,000 failed the 2-minute probe on p99 (4.77 s at 83 %
+CPU, 0 errors). Its merged #351 code (`07004d1`) held **250,000** (24,053 req/s, p95 94.6 / p99 271.7 ms, 78 % CPU,
+2026-11-07). An earlier #354 head (`6de54ca`, checkpoint-thread priority change) held 230,000 (22,348 req/s, p95 31.1 /
+p99 128.8 ms, 69 % CPU, 2026-11-08).
 
 ᴿ **rust-iouring-rkkautsar** stays on its merged #353 row. Its follow-up **#355** (`9762a8d`, `SHARDS` 8 → 6, queued
 reads drained before the next poll wait; held, not merged: it didn't beat the merged row) also held **260,000**

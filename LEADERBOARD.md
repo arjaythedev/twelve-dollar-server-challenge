@@ -395,7 +395,10 @@ p99 (1.3 s / 1.8 s, 0 errors), 240,000 on refused connections (42 % errors). Re-
 180,000 and 200,000 failed the 2-minute probe on p99 (1.2 s / 1.7 s, 0 errors), 240,000 on refused connections (72 %
 errors). Re-run at `28151db` (checkpointer sync before RESTART, 64 MB chunk size, `http.gather(64, 250)`): **190,000**
 (18,665 req/s, p95 43 / p99 804 ms, 0 err, 72 % CPU, 36 µs/req, 1,317 MB, 2026-11-08); 195,000 failed the 2-minute
-probe on p99 (2.1 s, 0 errors), 200,000 / 240,000 on refused connections (76 % / 82 % errors).
+probe on p99 (2.1 s, 0 errors), 200,000 / 240,000 on refused connections (76 % / 82 % errors). Re-run at `bb2b6c2`
+(dex v0.9.33, busy handler, reads don't wait for the checkpoint restart, writes parked with `http.later`): **185,000**
+(18,210 req/s, p95 4.9 / p99 32 ms, 0 err, 68 % CPU, 35 µs/req, 1,230 MB, 2026-11-08); 190,000 and 200,000 failed the
+2-minute probe on p99 (1.0 s / 3.0 s, 0 errors), 240,000 on refused connections (65 % errors).
 
 ᵟ **rust-iouring-tbsvttr** stays on its merged #323 row. Its follow-up **#325** (`f87f432`, PCACHE2 max-key truncate
 filter, coalescing WAL shim VFS, interpolated B-tree descent for /feed; held, not merged: it didn't beat the merged row)

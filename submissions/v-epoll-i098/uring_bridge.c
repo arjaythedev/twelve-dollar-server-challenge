@@ -443,7 +443,9 @@ int td_net_next(struct td_net *net, struct td_event *events, int capacity, int t
             struct td_ring *r = &net->rings[i];
             td_schedule(r, now);
             td_submit(net, r);
-            while (r->deliver_head >= 0 && count < capacity) {
+            int budget = count + (capacity / RINGS > 0 ? capacity / RINGS : 1);
+            if (budget > capacity) budget = capacity;
+            while (r->deliver_head >= 0 && count < budget) {
                 int slot = r->deliver_head;
                 struct td_client *c = &r->clients[slot];
                 r->deliver_head = c->next;
@@ -459,7 +461,7 @@ int td_net_next(struct td_net *net, struct td_event *events, int capacity, int t
             struct io_uring_cqe *cqe;
             unsigned head, consumed = 0;
             io_uring_for_each_cqe(&r->ring, head, cqe) {
-                if (count == capacity || consumed == CQ_SIZE) break;
+                if (count == budget || consumed == CQ_SIZE) break;
                 if (cqe->user_data == TD_CANCEL) {
                     /* -ENOENT or -EALREADY: the receive already ended or is ending. */
                 } else if (cqe->user_data == UINT64_MAX) {

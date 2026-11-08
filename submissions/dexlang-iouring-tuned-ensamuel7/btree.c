@@ -15,6 +15,8 @@
  * and running out of its fixed buffers. */
 
 #include "btree.h"
+#include <stdint.h>
+#include <time.h>
 
 #define DEXBT_FEED 20
 #define DEXBT_INDEX_REC 512     /* largest index record read (created_at, id, rowid) */
@@ -82,6 +84,32 @@ int dexbt_sync_db(void) {
     sqlite3_file* f = NULL;
     if (!dexbt_ckdb || sqlite3_file_control(dexbt_ckdb, "main", SQLITE_FCNTL_FILE_POINTER, &f) != SQLITE_OK || !f || !f->pMethods) return -1;
     return f->pMethods->xSync(f, SQLITE_SYNC_NORMAL) == SQLITE_OK ? 0 : -1;
+}
+
+/* Wait for a lock in 200 µs steps, up to ms milliseconds. SQLite's own busy
+ * handler sleeps 1, 2, 5, 10, 15, 20, 25 ms and so on between tries, so a
+ * batch that meets a 35 ms checkpoint restart wakes at 53 ms; this one wakes
+ * within 200 µs of the lock coming free. The checkpointer uses it too: a
+ * restart holds the write lock while it waits for readers, so its waits are
+ * the loop's waits. */
+static int dexbt_nowait_on;
+
+static int dexbt_busy_cb(void* arg, int count) {
+    struct timespec ts = { 0, 200000 };
+    if (dexbt_nowait_on) return 0;
+    if ((long)count * 200 >= (long)(intptr_t)arg * 1000) return 0;
+    nanosleep(&ts, NULL);
+    return 1;
+}
+
+/* While on, the busy handler gives up at once: the loop tries for the write
+ * lock without waiting. Event loop thread only. */
+int dexbt_nowait(int on) { dexbt_nowait_on = on; return 0; }
+
+int dexbt_busy(int ms, int checkpointer) {
+    sqlite3* db = checkpointer ? dexbt_ckdb : dexbt_db;
+    if (!db) return -1;
+    return sqlite3_busy_handler(db, dexbt_busy_cb, (void*)(intptr_t)ms) == SQLITE_OK ? 0 : -1;
 }
 
 static int dexbt_col_is(Table* t, int i, const char* name) {

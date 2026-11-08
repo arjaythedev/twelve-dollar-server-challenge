@@ -20,6 +20,14 @@ int dexbt_chunk(int mb);
 /* fdatasync the database file from the checkpointer's connection: 0 or -1. */
 int dexbt_sync_db(void);
 
+/* Busy handler that retries every 200 µs for up to ms milliseconds, on the
+ * event loop's connection or (checkpointer != 0) the checkpointer's. 0 on
+ * success. */
+int dexbt_busy(int ms, int checkpointer);
+
+/* on != 0: the busy handler gives up at once instead of waiting. */
+int dexbt_nowait(int on);
+
 /* After the schema is loaded (any statement prepared): 1 if the engine can
  * serve reads on that connection, 0 if it stays off. */
 int dexbt_init(void);

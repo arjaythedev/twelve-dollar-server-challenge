@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Language** | [DexLang](https://github.com/ensamuel7/dex) `v0.9.32`: statically typed, compiles to C, which `cc` builds into a native binary |
+| **Language** | [DexLang](https://github.com/ensamuel7/dex) `v0.9.33`: statically typed, compiles to C, which `cc` builds into a native binary |
 | **Framework** | None. DexLang's own `http` and `db` standard library modules |
 | **Server** | The `http` module's io_uring backend (`http.uring()`), with handlers run on the ring's thread |
 | **SQL** | Built with [dexqu](https://github.com/ensamuel7/dex-modules/tree/main/dexqu) `v0.1.0` at startup, prepared once; used for every write |
@@ -126,6 +126,42 @@ On a copy of the benchmark box at the scored request rate (18,600 req/s from
 Durability is unchanged: `synchronous=NORMAL`, and no response before `COMMIT`.
 The extra sync only moves the database file's sync earlier.
 
+**Fourth revision (dex v0.9.33): reads don't wait for the restart.**
+Each restart still held the write lock for about 35 ms, every 2 s, and the whole
+loop waited: every request opened its batch with `BEGIN IMMEDIATE`, and SQLite's
+busy handler sleeps in steps of 1, 2, 5, 10, 15, 20 and 25 ms, so the loop woke at
+33, 53 or 78 ms. Each stall also left a backlog to drain. Four changes:
+- **Restart every 32,768 frames, not 8,192**, so about every 8 s at the same load.
+  `journal_size_limit` is 256 MB, so the longer WAL is reused and not truncated.
+- **A busy handler that retries every 200 µs** (`bt.busy`), on both connections.
+- **The loop no longer waits for the lock.** A batch tries `BEGIN IMMEDIATE` once
+  (`bt.nowait`). If the checkpointer has the lock, reads run in a plain `BEGIN`,
+  which doesn't need it, and writes call `http.later()` (new in v0.9.33), which runs
+  their handler again on a later pass. A 201 still goes out only after its commit.
+  After 1 s `http.later` refuses and the write waits for the lock.
+- **`HAVE_POSIX_FALLOCATE`**, which `build.sh` now defines. Without it, SQLite
+  grows the file by writing one byte to each block, which dirties the whole step.
+
+On a copy of the benchmark box, 50,000 users with think times scaled down
+(about 31,000 req/s, CPU about 75 %), 3-minute holds, two runs each:
+
+| version | p95 | p99 | max | CPU |
+|---|--:|--:|--:|--:|
+| third revision | 179–181 ms | 385–499 ms | 1,011–1,162 ms | 78 % |
+| 32k-frame restarts, fine busy handler | 30–142 ms | 97–706 ms | 370–2,873 ms | 74–77 % |
+| also `http.later` | 4.3–4.6 ms | 21–27 ms | 214–332 ms | 73–74 % |
+
+A checker wrote and read back about 17,000 posts per run during these holds: no
+failed, lost or duplicated write, across about 76,000–91,000 parks per run (a
+write can park more than once while it waits).
+The same box held 225,000 idle connections with 75 MB of server memory.
+
+That table is from a build of `http.later` on v0.9.32. v0.9.33 adds compiler
+fixes on top, so it was run again against that build, on a noisier day: v0.9.33
+gave p99 22 ms and 144 ms (p95 4.2 and 23 ms, CPU 73 and 78 %), the older build
+87 ms (p95 4.7 ms, CPU 73 %). Each run had a few bad 5-second windows, none of
+them repeating, and the checker again found no bad writes.
+
 **Tried, not kept:**
 - `http.batchWindow(1)` (dex v0.9.28 and later), which holds a batch open for
   a millisecond: 14.1–14.5 µs per request under wrk, and no better under
@@ -216,14 +252,15 @@ against slow, oversized, aborted and reset clients, with no findings.
   normal load. A thread spawned at startup runs `wal_checkpoint(PASSIVE)`
   every 100 ms: it copies committed frames into the database file and fsyncs
   it without blocking the writer, so the loop never waits on that disk work.
-  Once the WAL passes 8,192 frames (32 MB), the thread also runs a `RESTART`
+  Once the WAL passes 32,768 frames (128 MB), the thread also runs a `RESTART`
   pass, which waits for the writer between batches and lets the next commit
-  start the WAL from the beginning. That is why a batch begins with
-  `BEGIN IMMEDIATE`: a transaction that has already read cannot wait for the
-  write lock it then needs (SQLite answers BUSY at once), but one that asks
-  for it first waits under `busy_timeout`. In local runs at full load the WAL
-  stayed under about 50 MB; with passive passes alone it grew to the 256 MB
-  ceiling the loop's autocheckpoint sets as a fallback. Durability is
+  start the WAL from the beginning. A batch tries `BEGIN IMMEDIATE` once, because
+  a transaction that has already read cannot wait for the write lock it then
+  needs (SQLite answers BUSY at once). If the restart has the lock, the batch
+  reads in a plain `BEGIN` and its writes run again on a later pass
+  (`http.later`). In local runs at full load the WAL stayed under about 150 MB;
+  with passive passes alone it grew to the 256 MB ceiling the loop's
+  autocheckpoint sets as a fallback. Durability is
   unchanged: every commit is in the WAL, written with `synchronous=NORMAL`,
   before its response goes out. If the second connection cannot be opened,
   the loop checkpoints as SQLite normally does.
@@ -321,6 +358,8 @@ folder:
 - `http.afterBatch`, the group-commit hook above. Under io_uring a batch is a
   pass of the loop; on epoll and the thread pool it is one request, so code
   written for it is correct on every backend.
+- `http.later`, which runs a handler again on a later pass of the loop, so a
+  write that can't get the lock doesn't hold up the reads behind it.
 
 ## Files
 
@@ -330,10 +369,10 @@ queries.dx   the SQL statements, built with dexqu
 btree.c      the read engine: /feed, /posts/:id and the like check on B-tree cursors,
              and the checkpointer's file sync and chunk size
 btree.h      its interface, as server.dx's `external module bt` sees it
-dex.mod      module file: dex 0.9.32, dexqu v0.1.0 (pinned in dex.sum)
+dex.mod      module file: dex 0.9.33, dexqu v0.1.0 (pinned in dex.sum)
 install.sh   root, once: build-essential, git, pkg-config, libsqlite3-dev,
              libssl-dev, libcurl, and Go 1.27.2 (sha256-checked)
-build.sh     builds the dex compiler from the pinned v0.9.32 tag through the Go
+build.sh     builds the dex compiler from the pinned v0.9.33 tag through the Go
              module proxy (checksum-verified), fetches dexqu and the SQLite
              3.54.1 amalgamation (sha256-checked), writes the sqlite3.c that
              includes it and btree.c, compiles server.dx

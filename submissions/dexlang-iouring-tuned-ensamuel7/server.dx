@@ -21,6 +21,8 @@ external module bt {
     fn attachCheckpointer(): int = "dexbt_attach_checkpointer"
     fn chunk(mb: int): int = "dexbt_chunk"
     fn syncDb(): int = "dexbt_sync_db"
+    fn busy(ms: int, checkpointer: int): int = "dexbt_busy"
+    fn nowait(on: int): int = "dexbt_nowait"
     fn init(): int = "dexbt_init"
     fn feed(): int = "dexbt_feed"
     fn post(id: long): int = "dexbt_post"
@@ -43,6 +45,7 @@ let stRange: int = -1
 // commitBatch before any response in the batch is sent (group commit). Reads
 // share it too, so a batch takes one snapshot instead of one per statement.
 let inTx: bool = false
+let readOnly: bool = false
 
 let btreeReads: bool = false
 
@@ -148,14 +151,56 @@ fn authenticate(req: http.HttpRequest): Auth {
     return Auth { userId: uid, username: name.asString(), err: "" }
 }
 
-// IMMEDIATE takes the write lock up front. A transaction that has already
+// IMMEDIATE takes the write lock up front: a transaction that has already
 // read cannot wait for a lock it then needs to write (SQLite returns BUSY at
-// once), and the checkpointer holds that lock while it restarts the WAL, so
-// the batch waits for it here, under busy_timeout, instead.
-fn beginBatch(): void {
-    if (!inTx && db.exec(conn, "BEGIN IMMEDIATE") >= 0) {
+// once). The checkpointer holds that lock while it restarts the WAL, for tens
+// of milliseconds every few seconds, and the loop does not wait for it: the
+// batch tries once, and if the lock is taken it reads in a plain BEGIN, which
+// needs no write lock, and its writes run again on a later pass (http.later).
+fn tryBegin(): bool {
+    bt.nowait(1)
+    let rc: int = db.exec(conn, "BEGIN IMMEDIATE")
+    bt.nowait(0)
+    return rc >= 0
+}
+
+fn beginRead(): void {
+    if (inTx) {
+        return
+    }
+    if (tryBegin()) {
+        inTx = true
+        return
+    }
+    if (db.exec(conn, "BEGIN") >= 0) {
+        inTx = true
+        readOnly = true
+    }
+}
+
+// False when the request has been parked to run again on a later pass: the
+// handler returns at once, and what it returns is not sent.
+fn beginWrite(): bool {
+    if (inTx && !readOnly) {
+        return true
+    }
+    if (!inTx && tryBegin()) {
+        inTx = true
+        return true
+    }
+    if (http.later()) {
+        return false
+    }
+    // Parked for a second already: wait for the lock, as a batch did before.
+    if (inTx) {
+        db.exec(conn, "COMMIT")
+        inTx = false
+        readOnly = false
+    }
+    if (db.exec(conn, "BEGIN IMMEDIATE") >= 0) {
         inTx = true
     }
+    return true
 }
 
 // Runs after every batch of handlers, before their responses go out. A batch
@@ -167,6 +212,7 @@ fn commitBatch(): bool {
         return true
     }
     inTx = false
+    readOnly = false
     if (db.exec(conn, "COMMIT") < 0) {
         db.exec(conn, "ROLLBACK")
         return false
@@ -205,7 +251,7 @@ const FEED_SPAN: long = 256
 // The engine writes the response body itself, the bytes json.encode would
 // make of the same rows.
 fn feed(req: http.HttpRequest): http.HttpResponse {
-    beginBatch()
+    beginRead()
     if (btreeReads) {
         if (bt.feed() >= 0) {
             return http.response(200, bt.json(), "application/json")
@@ -296,7 +342,7 @@ fn onePost(req: http.HttpRequest): http.HttpResponse {
         return fail(400, "invalid post id")
     }
 
-    beginBatch()
+    beginRead()
     if (btreeReads) {
         let found: int = bt.post(id)
         if (found == 0) {
@@ -342,7 +388,9 @@ fn createPost(req: http.HttpRequest): http.HttpResponse {
     if (tooLong(body, 500)) {
         return fail(400, "body must be at most 500 characters")
     }
-    beginBatch()
+    if (!beginWrite()) {
+        return fail(503, "parked")
+    }
     db.reset(stInsert)
     db.bindLong(stInsert, 1, auth.userId)
     db.bindStr(stInsert, 2, body)
@@ -372,7 +420,9 @@ fn likePost(req: http.HttpRequest): http.HttpResponse {
     if (id == 0) {
         return fail(400, "invalid post id")
     }
-    beginBatch()
+    if (!beginWrite()) {
+        return fail(503, "parked")
+    }
     let known: int = -1
     if (btreeReads) {
         known = bt.exists(id)
@@ -410,7 +460,7 @@ fn likePost(req: http.HttpRequest): http.HttpResponse {
 // Without restarts the WAL only starts over when a passive pass happens to
 // finish between two batches, so it grows to hundreds of megabytes and the
 // loop pays for truncating it.
-const CKPT_RESTART_FRAMES: int = 8192
+const CKPT_RESTART_FRAMES: int = 32768
 
 // A file name as a URI path, so the connections can name a VFS.
 fn fileUri(path: string): string {
@@ -472,13 +522,14 @@ fn main(): void {
     db.exec(conn, "PRAGMA journal_mode=WAL")
     db.exec(conn, "PRAGMA synchronous=NORMAL")
     db.exec(conn, "PRAGMA busy_timeout=5000")
+    bt.busy(5000, 0)
     // Pages are read through the page cache, not a memory map: a mapped read
     // costs a WAL lookup plus a fetch and unfetch per page, and the mapped
     // pages count against the box's 2 GB. 32 MB holds the hot pages.
     db.exec(conn, "PRAGMA cache_size=-32768")
     db.exec(conn, "PRAGMA mmap_size=0")
     db.exec(conn, "PRAGMA temp_store=MEMORY")
-    db.exec(conn, "PRAGMA journal_size_limit=67108864")
+    db.exec(conn, "PRAGMA journal_size_limit=268435456")
     // The checkpointer below copies the WAL back; past 64k frames the loop
     // does it too, so the WAL stays bounded if that thread falls behind.
     db.exec(conn, "PRAGMA wal_autocheckpoint=65536")
@@ -538,6 +589,7 @@ fn main(): void {
     let restart: int = -1
     if (ckpt != -1) {
         db.exec(ckpt, "PRAGMA busy_timeout=250")
+        bt.busy(250, 1)
         passive = db.prepare(ckpt, "PRAGMA wal_checkpoint(PASSIVE)")
         restart = db.prepare(ckpt, "PRAGMA wal_checkpoint(RESTART)")
         bt.chunk(64)

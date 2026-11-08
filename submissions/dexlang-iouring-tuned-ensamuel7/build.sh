@@ -5,7 +5,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 # The compiler revision this submission was written and tested against.
-DEX_VERSION="${DEX_VERSION:-v0.9.32}"
+DEX_VERSION="${DEX_VERSION:-v0.9.33}"
 
 # DEX_BIN points at an already-built compiler, which is what the local test
 # loop uses. CI and the benchmark box leave it unset and build from the pinned
@@ -51,7 +51,7 @@ cp "vendor/$SQLITE_TARBALL/sqlite3.h" vendor/engine/
 # The prelude drops options this server never uses from the db module's
 # defaults: secure delete zeroes freed pages on every write, and the others
 # compile out checks on paths the program does not take.
-printf '#undef SQLITE_SECURE_DELETE\n#define SQLITE_OMIT_DEPRECATED 1\n#define SQLITE_OMIT_SHARED_CACHE 1\n#define SQLITE_OMIT_PROGRESS_CALLBACK 1\n#define SQLITE_MAX_EXPR_DEPTH 0\n#include "%s"\n#include "%s"\n' "$PWD/vendor/$SQLITE_TARBALL/sqlite3.c" "$PWD/btree.c" > vendor/engine/sqlite3.c
+printf '#undef SQLITE_SECURE_DELETE\n#define HAVE_POSIX_FALLOCATE 1\n#define SQLITE_OMIT_DEPRECATED 1\n#define SQLITE_OMIT_SHARED_CACHE 1\n#define SQLITE_OMIT_PROGRESS_CALLBACK 1\n#define SQLITE_MAX_EXPR_DEPTH 0\n#include "%s"\n#include "%s"\n' "$PWD/vendor/$SQLITE_TARBALL/sqlite3.c" "$PWD/btree.c" > vendor/engine/sqlite3.c
 DEX_SQLITE="vendor/engine/sqlite3.c" "$DEX" build server.dx
 
 test -x build/server

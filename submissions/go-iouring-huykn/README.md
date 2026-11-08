@@ -102,7 +102,10 @@ On descriptor exhaustion (`EMFILE`/`ENFILE`), the loop retires up to 256 idle
 connections and retries accept after an asynchronous 10 ms delay. Pending reads
 complete before their descriptors close; active requests and sends continue.
 This allows more users to share the descriptor budget through reconnects, rather
-than exiting at the hard limit. Reproduce with a 128-descriptor server limit:
+than exiting at the hard limit. Connections still use ordinary process file
+descriptors: this recovery does not increase the simultaneous connection limit,
+and reconnect churn can limit throughput above it. Reproduce with a
+128-descriptor server limit:
 
 ```sh
 python3 submissions/go-iouring-huykn/testdata/fd_exhaustion.py

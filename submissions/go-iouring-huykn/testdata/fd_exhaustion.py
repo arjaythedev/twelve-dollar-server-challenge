@@ -129,7 +129,9 @@ def main():
 
 def readable(connection):
     import select
-    return bool(select.select([connection], [], [], 0)[0])
+    poller = select.poll()
+    poller.register(connection, select.POLLIN)
+    return bool(poller.poll(0))
 
 
 if __name__ == "__main__":

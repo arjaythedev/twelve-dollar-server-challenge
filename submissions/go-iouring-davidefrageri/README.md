@@ -15,7 +15,8 @@ request reads the database and verifies its token.
 - Rings with `SINGLE_ISSUER | DEFER_TASKRUN | SUBMIT_ALL`, a 65,536-entry completion queue and a
   sparse **direct-descriptor table** sized to the hard `RLIMIT_NOFILE` (the soft limit is raised to
   it). Accepted sockets never become process file descriptors. When a ring's table is within a
-  margin of full, accepting moves to the next ring (up to 16 rings).
+  margin of full, accepting moves to the next ring (up to 16 rings) and the full ring's accepts are
+  cancelled (left armed they end in `ENFILE`, each dropping one accepted connection).
 - **8 `SO_REUSEPORT` listeners**, each with a **multishot accept** that allocates direct descriptors.
 - **Multishot receive into a provided-buffer ring** (1,024 × 2 KB per ring): an idle connection holds
   no receive memory. When a burst empties the buffer ring, the connections that lost their receive
@@ -25,9 +26,10 @@ request reads the database and verifies its token.
   responses; the rest of the bytes wait in 512-byte per-connection buffers and are answered oldest
   first in later passes. Socket memory therefore never piles up on the receive side, which is what
   turns a stall into a collapse near saturation.
-- A pass on ring 0 waits for 256 completions or `WINDOW_US` (default 4,000 µs); every other enter is
-  non-blocking and asks for many completions with a zero timeout (kernel 6.8 runs at most
-  `max(min_complete, 20)` deferred task-work items per enter).
+- A pass waits on ring 0 for 256 completions (spread over the rings) or `WINDOW_US` (default
+  4,000 µs), then polls the other rings and drains them all; the other rings' sends are submitted at
+  the end of the pass. Every poll is non-blocking and asks for many completions with a zero timeout
+  (kernel 6.8 runs at most `max(min_complete, 20)` deferred task-work items per enter).
 - One send in flight per connection, `shutdown`+`close` as a hard-linked pair, generation numbers in
   `user_data` so stale completions are ignored. Idle connections are never closed.
 
@@ -86,9 +88,13 @@ pointers, all buffers in `mmap`'d memory (their addresses are handed to C), `-gc
   `unix-excl` keeps the wal-index in heap memory (no `-shm`, no `fcntl` per transaction).
   `TD_WALSHIM=0` disables it.
 - `journal_mode=WAL`, `synchronous=NORMAL`, `wal_autocheckpoint=0`, `mmap_size=0`. Checkpoints run on
-  a second connection in a `nice 19` thread: PASSIVE past 4,096 frames, then writes are held between
-  passes (≤ 250 ms) while the tail is copied so the log restarts; past 65,536 frames the loop
-  checkpoints inline (the scheme of rust-iouring-kensac #264).
+  a second connection in a thread at `nice 5`: PASSIVE past 4,096 frames (repeated while
+  more than 128 frames remain), then the thread **syncs the database file itself and copies once
+  more**, and only then are writes held between passes while it copies the last few dozen frames so
+  the log restarts (the scheme of rust-iouring-kensac #264, with two changes learned the hard way;
+  see "The first benchmark" below). The database file grows in 64 MB steps
+  (`SQLITE_FCNTL_CHUNK_SIZE`, one `posix_fallocate` per step). Past 65,536 frames the loop
+  checkpoints inline as a last resort.
 - SQLite build: `THREADSAFE=2` + `OPEN_NOMUTEX`, `DEFAULT_MEMSTATUS=0`, `USE_ALLOCA`, the `OMIT_*`
   options of #264, `-O3 -march=native -mprefer-vector-width=256 -fno-plt -fno-stack-protector
   -fcf-protection=none`. JSON strings are checked for characters to escape 32 bytes at a time (AVX2)
@@ -124,6 +130,8 @@ SPEC.md; only `"`, `\` and control characters are escaped.
 | `TD_CACHE_MB` | 128 | page cache budget (huge-page backed) |
 | `TD_PCACHE` | | `default` uses SQLite's pcache1 instead |
 | `TD_WALSHIM` | 1 | `0` writes WAL frames the way SQLite does |
+| `TD_CK_NICE` | 5 | priority of the checkpoint thread |
+| `TD_CHUNK_MB` | 64 | database file growth step (`0` disables) |
 | `LOG_S` | 60 | seconds between stats lines on stderr |
 
 ## Measurements
@@ -193,9 +201,69 @@ the transaction, the batch call) over more requests, for a few milliseconds of l
 (p99 at 12,000 users is dominated by the load generator sharing the vCPU.) `ANSWER_ORDER=lifo`
 made no measurable difference at these loads and stays off.
 
+### The first benchmark, and the checkpoint fix
+
+The organiser's run of the first version (commit `07004d1`) held **250,000 users** (24,053 req/s,
+p95 94.6 ms, p99 271.7 ms, 0 errors, 78 % app CPU, 30 µs per request); 260,000 and 280,000 failed
+on p99 (1.4 s and 2.5 s) with the CPU at 72-78 %, i.e. not on CPU. The cause was the checkpoint
+thread: at `nice 19` it was starved exactly when the loop was saturated, so the write hold ran to
+its 250 ms cap without the log restarting (the 272 ms p99), the WAL grew past 65,536 frames and the
+inline checkpoint stalled every request for hundreds of milliseconds (the cliff).
+
+Reproduced on the box with the load generator on the same vCPU (60,000 users, think times scaled to
+~18,000 req/s, 150 s hold): holds averaged **173 ms** even at normal priority. `strace -T` on the
+thread showed why: a passive checkpoint that does not complete the backfill writes its pages to the
+database file without syncing it, so the held tail's `fdatasync` flushed the whole cycle (~14 MB,
+117-167 ms on this disk), and when the file had grown by a few pages the sync also waited for the
+file system's journal. With the thread syncing the database before the hold, one more passive copy,
+and a 64 MB chunk size: holds **17 ms average, 68 ms max**, the log restarts every cycle
+(75 of 75), and over 2.96M requests the hold-period latency was p50 5.7 ms, **p95 10.4 ms,
+p99 56.5 ms**, 0 errors, 17.0 µs CPU per request (generator included on the vCPU). The stats line
+now reports every checkpoint cycle (`hold_ms`, `tail_ms`, `restarts`, `inline`).
+
+### The second benchmark: four rings
+
+The organiser's run of the checkpoint fix (commit `6de54ca`) held **230,000 users** (22,348 req/s,
+p95 31.1 ms, p99 128.8 ms, 0 errors, 69 % CPU, 28 µs per request); 240,000 failed on p99 (6.9 s at
+81 %). Lower than the first version, with a better p95 and less CPU per request. Two things differed
+from every local test, which had run on one ring (at most 60,000 connections): on the box, with
+`LimitNOFILE=65535`, 230,000 connections live on four rings; and the 64 MB chunk size was not what
+it claimed to be.
+
+Reproduced at 60,000 users by lowering the service's descriptor limit to 16,384 (four rings): the
+same CPU per request, but the median doubled (5.8 → 11.4 ms), p95 doubled (11.1 → 22.5 ms), the
+longest hold went from 52 to 172 ms, and every ring spill reset 8 connections. Causes and fixes:
+
+- The loop polled rings 1-3 *before* the ring-0 wait. Their deferred task work runs only when they
+  are entered, so what arrived on them during the wait was drained a pass late, and their sends,
+  queued during the pass, were only submitted at that next poll. Now: wait on ring 0, poll the
+  others, drain, and submit the other rings' sends at the end of the pass. The completion count that
+  cuts a pass short is spread over the rings.
+- A full ring's multishot accepts stayed armed and ended in `ENFILE`, each dropping one accepted
+  connection; they are cancelled when accepting moves on.
+- `HAVE_POSIX_FALLOCATE` was not defined, so SQLite "allocated" each 64 MB step by writing one byte
+  into every 4 KB block: 16,384 writes, 64 MB of dirty pages and a second-long sync in the
+  checkpoint thread, about a minute into every run (the seed is 249 MB; the file crosses 256 MB
+  after ~7 MB of growth). Now one `posix_fallocate`.
+- The checkpoint thread runs at `nice 5` instead of 0. At nice 0 it took half the CPU from the loop
+  whenever both were runnable, so every cycle's burst put the loop behind by the burst's length; at
+  nice 5 it runs in the loop's idle time and still gets a quarter of a contended CPU (the nice-19
+  starvation of the first version came from 1.5 %).
+
+60,000 users, ~18,000 req/s, 150 s hold, generator on the same vCPU, hold-period latency:
+
+| | one ring, `6de54ca` | four rings, `6de54ca` | four rings, this | one ring, this |
+|---|---:|---:|---:|---:|
+| p50 / p95 / p99 | 5.8 / 11.1 / 39.5 ms | 11.4 / 22.5 / 49.9 ms | 5.7 / 11.8 / 39.2 ms | 5.7 / 9.9 / 29.8 ms |
+| longest hold | 52 ms | 172 ms | 35 ms | 70 ms |
+| errors | 0 | 24 (resets at spills) | 0 | 0 |
+| CPU per request | 16.72 µs | 17.02 µs | 16.81 µs | 16.50 µs |
+
 **Not measured:** a run at 300,000+ users. That needs a load generator in the same network with
 several source addresses (one address holds at most ~64k connections to one port), which was not
-available; the multi-ring spill past 65,535 descriptors has been exercised by code review only.
+available. The multi-ring spill has been exercised at 16,384 slots per ring (three spills, no
+errors), not at 65,535. The CPU per request at 230,000 (28 µs against #264's 25 µs at 310,000) is
+not explained by any of the above and could not be profiled at that scale.
 
 ## Credits
 

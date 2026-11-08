@@ -21,6 +21,7 @@ const (
 	udSend
 	udShutdown
 	udClose
+	udCancel
 )
 
 const (
@@ -30,7 +31,7 @@ const (
 	bufSize        = 2048 // receive buffer; a longer request is read in more than one piece
 	bufCount       = 1024 // receive buffers per ring
 	maxRings       = 16
-	waitMin        = 256   // a pass waits for this many completions on ring 0 ...
+	waitMin        = 256   // a pass waits for this many completions (spread over the rings) ...
 	readsPerPass   = 16384 // single-shot reads issued per pass after a burst
 	answersPerPass = 2048  // responses produced per pass; the rest wait, oldest first
 	maxReqs        = answersPerPass + 64
@@ -557,6 +558,13 @@ func (s *server) drain(ri int) int {
 		if r.full {
 			r.accepting = false
 			s.needRing = true
+			// Left armed, the accepts would go on filling the margin until each ended in ENFILE,
+			// dropping one accepted connection per listener (measured: 8 resets per spill).
+			for li := range s.listen {
+				if r.armed[li] {
+					r.u.cancel(ud(udAccept, ri, 0, uint32(li)), ud(udCancel, ri, 0, uint32(li)))
+				}
+			}
 		} else {
 			s.arm(ri)
 		}
@@ -847,40 +855,54 @@ func (s *server) log(now time.Time) {
 	for _, r := range s.rings {
 		open += r.open
 	}
-	var st [16]int64
+	var st [24]int64
 	dbStats(st[:])
 	fmt.Fprintf(os.Stderr, "%s conns=%d rings=%d requests=%d feed=%d post=%d like=%d insert=%d fallback=%d spill=%d "+
-		"wal_writes=%d wal_frames=%d trunc=%d/%d evict=%d fetch=%d ckpt=%d pool=%d backlog=%d\n",
+		"wal_writes=%d wal_frames=%d trunc=%d/%d evict=%d fetch=%d ckpt=%d rounds=%d bulk_ms=%d hold_ms=%d/max %d tail_ms=%d/max %d inline=%d tail_full=%d/partial %d restarts=%d ck_rc=%d pool=%d backlog=%d\n",
 		now.Format("15:04:05"), open, len(s.rings), s.requests, st[0], st[1], st[2], st[3], st[4], st[5], st[6], st[7],
-		st[9], st[8], st[10], st[11], st[12], len(s.pool), s.ready.len())
+		st[9], st[8], st[10], st[11], st[12], st[23], st[22], st[13], st[14], st[20], st[21], st[15], st[16], st[17], st[18], st[19], len(s.pool), s.ready.len())
 }
 
 func (s *server) run() {
 	for {
 		busy := s.rq.len() > 0 || s.ready.len() > 0
-		for ri := len(s.rings) - 1; ri >= 0; ri-- {
-			u := s.rings[ri].u
-			if ri == 0 && !busy {
-				u.enter(enterGetEvents, waitMin, &s.window)
-			} else {
-				u.poll()
-			}
+		// Ring 0 is waited on first and the other rings are polled after it: their deferred task
+		// work runs only when they are entered, so polling them before the wait would park what
+		// they complete during it until the next pass (measured: the median doubled on 4 rings).
+		// The completion count that cuts a pass short is spread over the rings.
+		if busy {
+			s.rings[0].u.poll()
+		} else {
+			s.rings[0].u.enter(enterGetEvents, max(uint32(waitMin/len(s.rings)), 32), &s.window)
 		}
-		now := time.Now()
-		s.now = now.Unix()
-		s.answers = answersPerPass
-		for ri := range s.rings {
-			s.drain(ri)
+		for ri := 1; ri < len(s.rings); ri++ {
+			s.rings[ri].u.poll()
 		}
-		s.runReady()
-		s.readRounds()
-		if len(s.held) > 0 && !s.heldW {
-			s.releaseHeld()
-		}
-		s.endPass()
-		if now.After(s.nextLog) {
-			s.nextLog = now.Add(s.logEvery)
-			s.log(now)
-		}
+		s.pass()
+	}
+}
+
+// pass drains every ring, answers what it can and issues the sends.
+func (s *server) pass() {
+	now := time.Now()
+	s.now = now.Unix()
+	s.answers = answersPerPass
+	for ri := range s.rings {
+		s.drain(ri)
+	}
+	s.runReady()
+	s.readRounds()
+	if len(s.held) > 0 && !s.heldW {
+		s.releaseHeld()
+	}
+	s.endPass()
+	if now.After(s.nextLog) {
+		s.nextLog = now.Add(s.logEvery)
+		s.log(now)
+	}
+	// Ring 0's sends go out with its next enter, the wait; the other rings' would otherwise wait
+	// for their next poll, after it.
+	for ri := 1; ri < len(s.rings); ri++ {
+		s.rings[ri].u.submit()
 	}
 }

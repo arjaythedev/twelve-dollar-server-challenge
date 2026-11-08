@@ -39,5 +39,7 @@ void td_tick(void);
 int td_writes_held(void);
 // Counters for the log line.
 void td_stats(int64_t *out, int n);
+// Frames in the WAL after the last commit.
+int td_wal_frames(void);
 
 #endif

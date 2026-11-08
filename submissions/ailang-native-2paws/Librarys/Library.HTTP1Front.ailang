@@ -25,7 +25,7 @@ LibraryImport.Socket
 LibraryImport.HTTP1
 
 FixedPool.FrontC {
-    "NSLOT": Initialize=1024
+    "NSLOT": Initialize=4096
     "SLOT": Initialize=8448
     "HDR": Initialize=64
     "SYS_READ": Initialize=0

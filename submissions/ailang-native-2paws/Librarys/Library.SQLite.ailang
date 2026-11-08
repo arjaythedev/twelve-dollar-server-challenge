@@ -98,7 +98,7 @@ FixedPool.SQLiteDB {
     "ckpt_at": Initialize=4194304, CanChange=True
     // WAL size at the last write-back, and the size at which the WAL restarts
     "bf_at": Initialize=0, CanChange=True
-    "reset_at": Initialize=67108864, CanChange=True
+    "reset_at": Initialize=8388608, CanChange=True
     // Syncer process: eventfds to ask for a WAL fdatasync and to hear it is
     // done, the pages frozen for that sync, and the WAL size they cover
     "sync_req": Initialize=-1, CanChange=True

@@ -40,7 +40,7 @@ typedef struct {
   char *in; uint32_t inlen, incap;  // partial request, or input held while a send is in flight
   sop_t *q;                         // responses queued behind the send in flight
   sop_t *out;                       // the send in flight
-  uint32_t gen;
+  uint32_t gen, ready_s;            // ready_s: when it joined the ready list
   uint8_t open, closing, sending, eof, sent100, queued, ready;
 } conn_t;
 // Accepted sockets live in each ring's registered file table, not in the process descriptor table.
@@ -847,9 +847,10 @@ static void process(uint64_t who, conn_t *c, char *buf, size_t n) {
 }
 // After a stall every connection has a request waiting. Letting them sit costs a socket buffer each (3 to 4 KB, toward
 // TCP's limit) and answering them all makes one very long pass, so a pass answers ANSWERS and reads READS: the rest
-// wait on their connection, in a copy the size of the request, on a first-in, first-out list.
-#define ANSWERS 1024
+// wait on their connection, in a copy the size of the request, on a list served newest first (below).
+#define ANSWERS 128       // #326 (objc-uring-delneg): 128 answers held p99 at 117-131 ms where 256 gave 134-290 and 512 850-910
 #define READS 4096
+#define READY_AGE_S 8     // the oldest on the list get half of a pass once they have waited this long (#326 --lifoage, --lifocap)
 static int answers_left = ANSWERS;
 static inline uint64_t fifo_pop(fifo_t *f) {
   uint64_t v = f->a[f->head++];
@@ -865,12 +866,22 @@ static void on_data(uint64_t who, conn_t *c, const char *p, uint32_t n) {
   if (c->incap - c->inlen < n) { c->incap = (c->inlen + n) * 2; c->in = realloc(c->in, c->incap); }
   memcpy(c->in + c->inlen, p, n); c->inlen += n;
   if (c->inlen > 4 * MAXREQ) { conn_close(who); return; }  // keeps sending but won't read its replies
-  if (later) { if (!c->ready) { c->ready = 1; push(&readyq.a, &readyq.n, &readyq.cap, who); } }
+  if (later) { if (!c->ready) { c->ready = 1; c->ready_s = now_s; push(&readyq.a, &readyq.n, &readyq.cap, who); } }
   else if (!c->sending) process(who, c, c->in, c->inlen);
 }
-static void run_ready(void) {  // with the answers this pass has left, what earlier passes read, oldest first
+// With the answers this pass has left, what earlier passes read: newest first, as #326 (objc-uring-delneg, 1baccb2) does.
+// A reply later than 40 ms after its request costs the kernel a delayed-ACK timer and a bare ACK, so oldest first in a
+// backlog makes every newcomer late too and the extra CPU keeps the backlog alive. The oldest wait for spare capacity,
+// and from READY_AGE_S on get half of each pass, so waiting is bounded. A connection's own requests keep their order.
+static void run_ready(void) {
+  while (readyq.n && !conn_of(readyq.a[readyq.head])) fifo_pop(&readyq);  // closed while waiting
+  int old = 0;
+  if (readyq.n && now_s - R[K(readyq.a[readyq.head])].c[SLOT(readyq.a[readyq.head])].ready_s >= READY_AGE_S) old = ANSWERS / 2;
   while (answers_left && readyq.n) {
-    uint64_t who = fifo_pop(&readyq); conn_t *c = conn_of(who);
+    uint64_t who;
+    if (old-- > 0) who = fifo_pop(&readyq);
+    else { who = readyq.a[--readyq.n]; if (readyq.n == readyq.head) readyq.head = readyq.n = 0; }
+    conn_t *c = conn_of(who);
     if (!c) continue;
     c->ready = 0;
     if (c->inlen && !c->sending) { answers_left--; process(who, c, c->in, c->inlen); }

@@ -1,0 +1,83 @@
+[package]
+name = "twelve-loop"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94.0"
+build = "build.rs"
+publish = false
+license = "MIT"
+
+[[bin]]
+name = "twelve-loop"
+path = "src/main.rs"
+
+[dependencies]
+io-uring = { version = "0.7.15", default-features = false, features = ["io_safety"] }
+libc = { version = "0.2.183", default-features = false, features = ["std"] }
+httparse = { version = "1.10.1", default-features = false, features = ["std"] }
+hmac = { version = "0.12.1", default-features = false, features = ["std"] }
+sha2 = { version = "0.10.9", default-features = false, features = ["std"] }
+
+[build-dependencies]
+sha2 = { version = "0.10.9", default-features = false }
+
+[dev-dependencies]
+serde_json = { version = "1.0.149", default-features = false, features = ["std", "raw_value"] }
+
+[workspace]
+members = ["."]
+resolver = "3"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_abi = "deny"
+unused_must_use = "deny"
+improper_ctypes = "deny"
+improper_ctypes_definitions = "deny"
+elided_lifetimes_in_paths = "deny"
+missing_debug_implementations = "deny"
+
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "deny"
+unwrap_used = "deny"
+panic = "deny"
+unreachable = "deny"
+indexing_slicing = "deny"
+multiple_unsafe_ops_per_block = "deny"
+missing_safety_doc = "deny"
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+await_holding_lock = "deny"
+await_holding_refcell_ref = "deny"
+significant_drop_in_scrutinee = "deny"
+clone_on_ref_ptr = "deny"
+allow_attributes = "deny"
+allow_attributes_without_reason = "deny"
+cast_possible_truncation = "deny"
+cast_possible_wrap = "deny"
+cast_sign_loss = "deny"
+cast_lossless = "deny"
+string_slice = "deny"
+missing_errors_doc = "deny"
+missing_panics_doc = "deny"
+wildcard_imports = "deny"
+
+[workspace.lints.rustdoc]
+broken_intra_doc_links = "deny"
+
+[lints]
+workspace = true
+
+[profile.release]
+opt-level = 3
+# UNSAFE PATH (speed): no Rust frame pointers; the fast build passes no -C force-frame-pointers=yes, which takes a register from every function, and the line tables kept here still map each address to its source line.
+debug = "line-tables-only"
+# UNSAFE PATH (speed): overflow checks off; overflow checks stay off in the fast build because each overflow-capable operation states its semantics in the code (checked, strict, saturating or wrapping), and each plain operation kept for speed is listed with the invariant that bounds it among its module's unsafe paths.
+overflow-checks = false
+# UNSAFE PATH (speed): unmeasured release settings; fat LTO and one codegen unit carry no benchmark beside them, and they change only inlining and code layout, never what the program does.
+lto = "fat"
+codegen-units = 1
+panic = "abort"

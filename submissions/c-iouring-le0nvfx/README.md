@@ -75,3 +75,18 @@ challenge repository with a freshly generated seed. Optional additional checks:
   checks acknowledged writes after a server-process SIGKILL and restart.
 - `tests/test_auth_subject_overflow.sh http://127.0.0.1:3000` checks signed
   oversized JWT subjects against an already running server with disposable data.
+
+## Official benchmark history
+
+- The maintainer's official run at submission commit `3e10490` held **220,000
+  users for five minutes**: 21,431 req/s, p95 142.3 ms, p99 633.1 ms, zero
+  errors, 82% app CPU, and 702 MB peak RAM.
+- The 2026-11-08 rerun at `5318219` used the same submission files and held
+  **210,000 users for five minutes**: 20,573 req/s, p95 21.7 ms, p99 256.0 ms,
+  zero errors, 78% app CPU, and 670 MB peak RAM. Its 220,000-user two-minute
+  probe failed p95/p99 at 0.55/1.75 s.
+
+The maintainer attributed the difference to run-to-run variation at the
+threshold. The leaderboard retains the 220,000 row from `3e10490` and records
+the 210,000 rerun in its footnote. These are official maintainer results; local
+diagnostics are not leaderboard scores.

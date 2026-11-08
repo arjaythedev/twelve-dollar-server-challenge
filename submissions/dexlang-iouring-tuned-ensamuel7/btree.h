@@ -11,6 +11,15 @@
  * through. Call just before db.openSingleThreaded. */
 int dexbt_attach_next(void);
 
+/* The next connection opened is the checkpointer's (dexbt_sync_db). */
+int dexbt_attach_checkpointer(void);
+
+/* Grow the database file mb megabytes at a time, on both connections. */
+int dexbt_chunk(int mb);
+
+/* fdatasync the database file from the checkpointer's connection: 0 or -1. */
+int dexbt_sync_db(void);
+
 /* After the schema is loaded (any statement prepared): 1 if the engine can
  * serve reads on that connection, 0 if it stays off. */
 int dexbt_init(void);

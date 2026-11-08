@@ -91,23 +91,40 @@ cases were:
 The engine answered all of them. It handed only a NUL inside the newest body
 back to the SQL, as designed. The entry passes the test suite, 42/42.
 
-**Third revision (dex v0.9.32, `http.gather`).** The merged code held 226,000
-when it was scored, and the same code held 190,000 in a control run later, so
-this revision goes after CPU per request again, in the runtime this time.
-Under load the event loop used to wake for every completion, so a pass served a
-handful of requests and paid a round of system calls and a commit for them.
-`http.gather(128, 1000)` makes it sleep until 128 completions have arrived or
-1 ms has passed. On a copy of the benchmark box at 80,000 users (two load
-boxes, 3-minute holds, two runs each, interleaved):
+**Third revision (dex v0.9.32): checkpoints that don't stall the loop.**
+The merged code held 226,000 when it was scored and 190,000 in a later control
+run, and every run since has failed on p99 with the CPU at 68–81 %. The cause
+was the checkpointer:
+- Past 8,192 WAL frames it ran `wal_checkpoint(RESTART)`, which holds the write
+  lock. Every batch starts with `BEGIN IMMEDIATE`, so the loop waited for it in
+  SQLite's busy handler, which sleeps in steps of up to 100 ms.
+- The restart also paid for syncing everything the passive passes had copied
+  without syncing (a passive pass that doesn't copy the whole WAL leaves the
+  database file unsynced), so it held the lock for that whole `fdatasync`.
 
-| version | CPU per request | p95 / p99 (second load box) |
-|---|--:|--:|
-| merged (dex v0.9.26) | 43.8 / 44.6 µs | 1.4 / 123 ms |
-| same code, dex v0.9.32 | 42.8 / 42.9 µs | 1.4 / 125 ms |
-| dex v0.9.32 with `http.gather(128, 1000)` | 29.0 / 28.0 µs | 2.6 / 120 ms |
+Now, once the WAL is long, the checkpoint thread syncs the database file itself
+(`bt.syncDb`, through SQLite's own file handle) and runs another passive pass
+before the restart, so the restart is left a few frames and a small sync. The
+database file grows 64 MB at a time (`SQLITE_FCNTL_CHUNK_SIZE`), so a
+checkpoint rarely has a file-size change to commit. Dropping restarts
+altogether is worse: the WAL then only starts over when a passive pass happens
+to finish between batches, grows to 260 MB, and the loop pays to truncate it.
 
-The read engine is the merged version's; the leaner writer from #324 is left
-out so this change is measured on its own.
+The loop also gathers completions (`http.gather(64, 250)`, new in v0.9.32):
+when busy it sleeps until 64 have arrived or 250 µs have passed, instead of
+waking for each.
+
+On a copy of the benchmark box at the scored request rate (18,600 req/s from
+30,000 users with think times scaled down, 3-minute holds):
+
+| version | p95 | p99 | max | WAL | CPU |
+|---|--:|--:|--:|--:|--:|
+| restart as before, `http.gather(128, 1000)` | 124 ms | 251 ms | 1,021 ms | — | 37 % |
+| no restarts, `http.gather(64, 250)` | 1.3 ms | 114 ms | 772 ms | to 260 MB | 43 % |
+| synced restart, chunked file, `http.gather(64, 250)` | 2.1 ms | 47.6 ms | 409 ms | 37 MB | 42 % |
+
+Durability is unchanged: `synchronous=NORMAL`, and no response before `COMMIT`.
+The extra sync only moves the database file's sync earlier.
 
 **Tried, not kept:**
 - `http.batchWindow(1)` (dex v0.9.28 and later), which holds a batch open for
@@ -310,7 +327,8 @@ folder:
 ```
 server.dx    routes, handlers, auth, response building
 queries.dx   the SQL statements, built with dexqu
-btree.c      the read engine: /feed, /posts/:id and the like check on B-tree cursors
+btree.c      the read engine: /feed, /posts/:id and the like check on B-tree cursors,
+             and the checkpointer's file sync and chunk size
 btree.h      its interface, as server.dx's `external module bt` sees it
 dex.mod      module file: dex 0.9.32, dexqu v0.1.0 (pinned in dex.sum)
 install.sh   root, once: build-essential, git, pkg-config, libsqlite3-dev,

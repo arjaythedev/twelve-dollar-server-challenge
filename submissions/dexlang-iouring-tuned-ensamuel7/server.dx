@@ -18,6 +18,9 @@ external module bt {
     include "btree.h"
 
     fn attachNext(): int = "dexbt_attach_next"
+    fn attachCheckpointer(): int = "dexbt_attach_checkpointer"
+    fn chunk(mb: int): int = "dexbt_chunk"
+    fn syncDb(): int = "dexbt_sync_db"
     fn init(): int = "dexbt_init"
     fn feed(): int = "dexbt_feed"
     fn post(id: long): int = "dexbt_post"
@@ -404,6 +407,9 @@ fn likePost(req: http.HttpRequest): http.HttpResponse {
 
 // WAL frames (4 KB each) past which the checkpointer, having copied what it
 // could without blocking anyone, waits for the writer to restart the WAL.
+// Without restarts the WAL only starts over when a passive pass happens to
+// finish between two batches, so it grows to hundreds of megabytes and the
+// loop pays for truncating it.
 const CKPT_RESTART_FRAMES: int = 8192
 
 // A file name as a URI path, so the connections can name a VFS.
@@ -427,6 +433,13 @@ fn checkpointer(passive: int, restart: int): void {
         }
         db.reset(passive)
         if (frames >= CKPT_RESTART_FRAMES) {
+            // The restart holds the write lock, and the loop waits for it.
+            // Sync what the passive passes copied, and copy what came since,
+            // first: the restart is then left a few frames and a small sync.
+            bt.syncDb()
+            db.reset(passive)
+            db.step(passive)
+            db.reset(passive)
             db.reset(restart)
             db.step(restart)
             db.reset(restart)
@@ -519,6 +532,7 @@ fn main(): void {
 
     // Its own connection and statements, set up here so that if any of it
     // fails, checkpoints stay where SQLite normally runs them, on the loop.
+    bt.attachCheckpointer()
     let ckpt: int = db.openSingleThreaded("sqlite", uri)
     let passive: int = -1
     let restart: int = -1
@@ -526,6 +540,7 @@ fn main(): void {
         db.exec(ckpt, "PRAGMA busy_timeout=250")
         passive = db.prepare(ckpt, "PRAGMA wal_checkpoint(PASSIVE)")
         restart = db.prepare(ckpt, "PRAGMA wal_checkpoint(RESTART)")
+        bt.chunk(64)
     }
     if (passive == -1 || restart == -1) {
         fmt.println("no checkpoint connection; the event loop checkpoints")
@@ -535,9 +550,9 @@ fn main(): void {
     }
     http.afterBatch(commitBatch)
     http.uring()
-    // Under load, sleep until 128 completions have arrived or 1 ms has passed
+    // Under load, sleep until 64 completions have arrived or 250 µs have passed
     // before each pass of the loop, instead of waking for every one.
-    http.gather(128, 1000)
+    http.gather(64, 250)
     http.limits(0, 75, 200000)
 
     fmt.println("dex feed api on " + host + ":" + str.fromInt(port))

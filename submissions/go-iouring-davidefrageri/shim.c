@@ -426,11 +426,14 @@ static int wv_install(void) {
 // are then held (between passes, at most HOLD_MS) while the thread copies the tail. Past CK_FORCE
 // frames the loop checkpoints inline. (The scheme of rust-iouring-kensac #264.)
 //
-// The thread runs at normal priority (TD_CK_NICE, default 0). A cycle is ~15 ms of copying, 1-2 %
-// of the CPU at the benchmark's write rate, but at nice 19 it is starved exactly when the loop is
-// saturated: the hold then expires at HOLD_MS without a restart, the log grows past CK_FORCE and
-// the inline checkpoint stalls every request for hundreds of milliseconds (the first benchmark of
-// this entry failed its p99 that way at 260,000 users while the CPU was at 78 %).
+// The thread runs at nice 5 (TD_CK_NICE). A cycle is ~25 ms of copying, 1-2 % of the CPU at the
+// benchmark's write rate. At nice 19 it was starved exactly when the loop was saturated: the hold
+// expired at HOLD_MS without a restart, the log grew past CK_FORCE and the inline checkpoint
+// stalled every request for hundreds of milliseconds (the first benchmark of this entry failed its
+// p99 that way at 260,000 users while the CPU was at 78 %). At nice 0 it takes half the CPU from
+// the loop whenever both are runnable, so each cycle's burst puts the loop behind by its whole
+// length; at nice 5 it gets a quarter of a contended CPU, enough to finish, and otherwise runs in
+// the loop's idle time.
 #define CK_FRAMES 4096
 #define CK_FORCE 65536
 #define HOLD_MS 250
@@ -483,7 +486,7 @@ static long ms_since(const struct timespec *t0) {
 
 static void *ck_main(void *a) {
   (void)a;
-  long nice = env_long("TD_CK_NICE", 0);
+  long nice = env_long("TD_CK_NICE", 5);
   if (nice) setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), (int)nice);
   for (;;) {
     pthread_mutex_lock(&ck_mu);
@@ -681,6 +684,8 @@ int td_open(const char *path, char *err, int n) {
   // when that size changes by a few pages the fdatasync must wait for the file system's journal
   // (~170 ms on the benchmark box's disk against ~3 ms for the data alone), and it happens while
   // writes are held. With the file pre-extended the truncate is a no-op and the sync is data only.
+  // The step is one posix_fallocate (HAVE_POSIX_FALLOCATE in db.go): without it SQLite fakes the
+  // allocation by writing a byte into every block, 16,384 writes and 64 MB of dirty pages per step.
   {
     int chunk = (int)(env_long("TD_CHUNK_MB", 64) << 20);
     if (chunk > 0) {

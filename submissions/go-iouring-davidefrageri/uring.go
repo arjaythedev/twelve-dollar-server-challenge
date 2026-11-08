@@ -30,6 +30,7 @@ const (
 	offSQEs   = 0x10000000
 
 	opAccept   = 13
+	opCancel   = 14
 	opClose    = 19
 	opSend     = 26
 	opRecv     = 27
@@ -262,6 +263,13 @@ var zeroTS timespec
 // per enter, so min_complete = 0 would surface only ~20 completions per call.
 func (r *uring) poll() { r.enter(enterGetEvents, cqEntries, &zeroTS) }
 
+// submit hands queued SQEs to the kernel without collecting anything.
+func (r *uring) submit() {
+	if r.pending > 0 {
+		r.enter(0, 0, nil)
+	}
+}
+
 // ---- operations ---------------------------------------------------------------------------------
 
 // acceptMulti arms a multishot accept on a listening socket; each connection lands in a free
@@ -272,6 +280,15 @@ func (r *uring) acceptMulti(lfd int, ud uint64) {
 	e.ioprio = acceptMultishot
 	e.fd = int32(lfd)
 	e.fileIdx = fileIndexAlloc
+	e.userData = ud
+}
+
+// cancel ends the operation tagged target (a multishot accept, once its ring is full).
+func (r *uring) cancel(target, ud uint64) {
+	e := r.next()
+	e.opcode = opCancel
+	e.fd = -1
+	e.addr = target
 	e.userData = ud
 }
 

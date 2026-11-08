@@ -273,6 +273,7 @@ pub struct ReadDb {
     needs_like: bool,
     reader: *mut BtreeReader,
     in_tx: bool,
+    txn_stale: bool,
     /// Scratch used only while a call is being served.
     pub feed_out: Vec<u8>,
     pub post_out: Vec<u8>,
@@ -320,6 +321,7 @@ impl ReadDb {
             needs_like: false,
             reader,
             in_tx: false,
+            txn_stale: false,
             feed_out: vec![0u8; 64 * 1024],
             post_out: vec![0u8; 128 * 1024],
         })
@@ -329,6 +331,12 @@ impl ReadDb {
         if self.reader.is_null() {
             return true;
         }
+        if self.in_tx {
+            if !self.txn_stale {
+                return true;
+            }
+            self.end_read(true);
+        }
         if unsafe { btree_reader_begin(self.reader) } != SQLITE_OK {
             return false;
         }
@@ -336,6 +344,7 @@ impl ReadDb {
             unsafe { btree_reader_end(self.reader, 0) };
             return false;
         }
+        self.txn_stale = false;
         self.in_tx = true;
         true
     }
@@ -352,14 +361,17 @@ impl ReadDb {
 
     pub fn invalidate_feed(&mut self) {
         self.needs_feed = true;
+        self.txn_stale = true;
     }
 
     pub fn invalidate_post(&mut self) {
         self.needs_post = true;
+        self.txn_stale = true;
     }
 
     pub fn invalidate_like(&mut self) {
         self.needs_like = true;
+        self.txn_stale = true;
     }
 
     pub fn refresh(&mut self) {

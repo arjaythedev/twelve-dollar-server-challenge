@@ -1311,9 +1311,18 @@ fn apply_reads(
     feed_reads: &mut VecDeque<ReadJob>,
     post_reads: &mut VecDeque<ReadJob>,
 ) {
+    if feed_reads.is_empty() && post_reads.is_empty() {
+        submit_rings(rings);
+        return;
+    }
+    // One read transaction per pass, reused across passes until a write
+    // invalidates the snapshot (see ReadDb::begin_read).
+    let ok = app.read.begin_read();
+    if !ok {
+        app.read.end_read(false);
+    }
     if !feed_reads.is_empty() {
         let n = feed_reads.len().min(FEED_ANSWERS_PER_PASS);
-        let ok = app.read.begin_read();
         for job in feed_reads.iter().take(n) {
             let at = diag_start();
             let packet = if ok {
@@ -1324,7 +1333,6 @@ fn apply_reads(
             diag_end(Diag::Feed, at);
             apply_feed_one(rings, job, packet);
         }
-        app.read.end_read(ok);
         feed_reads.drain(..n);
         // Flush the feed responses now instead of after the post batch, so a
         // feed answer does not wait behind unrelated post work in the SQ.
@@ -1332,7 +1340,6 @@ fn apply_reads(
     }
     if !post_reads.is_empty() {
         let n = post_reads.len().min(POST_ANSWERS_PER_PASS);
-        let ok = app.read.begin_read();
         for job in post_reads.iter().take(n) {
             let id = match job.kind {
                 ReadKind::Post(id) => id,
@@ -1351,7 +1358,6 @@ fn apply_reads(
                 Err(_) => apply_post_one(rings, job, None, false),
             }
         }
-        app.read.end_read(ok);
         post_reads.drain(..n);
     }
     submit_rings(rings);

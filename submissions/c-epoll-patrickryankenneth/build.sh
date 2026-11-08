@@ -22,6 +22,5 @@ SQLITE_OPTS="-DSQLITE_THREADSAFE=0 -DSQLITE_DEFAULT_MEMSTATUS=0 -DSQLITE_DQS=0 \
  -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_OMIT_DEPRECATED -DSQLITE_OMIT_SHARED_CACHE \
  -DSQLITE_OMIT_PROGRESS_CALLBACK -DSQLITE_USE_ALLOCA -DSQLITE_DEFAULT_WAL_SYNCHRONOUS=1"
 
-gcc -O2 $SQLITE_OPTS -c build/sqlite3.c -o build/sqlite3.o
-gcc -O3 -march=x86-64-v2 -Wall -Wextra -Ibuild server.c build/sqlite3.o -o bin/server -lm
+gcc -O3 -march=x86-64-v2 -Wall -Wextra $SQLITE_OPTS -Ibuild server.c -o bin/server -lm
 echo "built bin/server"

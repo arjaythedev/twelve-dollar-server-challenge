@@ -36,9 +36,11 @@ fn feed_counts_likes_across_extreme_signed_post_ids() {
             INSERT INTO users VALUES(1, 'first'), (2, 'second');
             INSERT INTO posts VALUES
               (-9223372036854775808, 1, 'minimum', '2030-01-01T00:00:00.000Z'),
+              (-9223372036854775807, 2, 'minimum plus one', '2030-01-01T00:00:00.500Z'),
               (-140737488355328, 2, 'negative six-byte', '2030-01-01T00:00:01.000Z'),
               (1, 1, 'middle', '2030-01-01T00:00:02.000Z'),
               (2147483648, 2, 'positive six-byte', '2030-01-01T00:00:03.000Z'),
+              (9223372036854775806, 1, 'maximum minus one', '2030-01-01T00:00:03.500Z'),
               (9223372036854775807, 2, 'maximum', '2030-01-01T00:00:04.000Z');
             INSERT INTO likes VALUES(1, -9223372036854775808), (2, -9223372036854775808),
                                     (1, -140737488355328), (1, 1), (1, 2147483648),
@@ -64,9 +66,11 @@ fn feed_counts_likes_across_extreme_signed_post_ids() {
         let actual: serde_json::Value = serde_json::from_slice(&bytes[..len as usize]).unwrap();
         assert_eq!(actual, serde_json::json!([
             {"id": i64::MAX, "body": "maximum", "created_at": "2030-01-01T00:00:04.000Z", "author": "second", "like_count": 1},
+            {"id": i64::MAX - 1, "body": "maximum minus one", "created_at": "2030-01-01T00:00:03.500Z", "author": "first", "like_count": 0},
             {"id": 2147483648i64, "body": "positive six-byte", "created_at": "2030-01-01T00:00:03.000Z", "author": "second", "like_count": 1},
             {"id": 1, "body": "middle", "created_at": "2030-01-01T00:00:02.000Z", "author": "first", "like_count": 1},
             {"id": -140737488355328i64, "body": "negative six-byte", "created_at": "2030-01-01T00:00:01.000Z", "author": "second", "like_count": 1},
+            {"id": i64::MIN + 1, "body": "minimum plus one", "created_at": "2030-01-01T00:00:00.500Z", "author": "second", "like_count": 0},
             {"id": i64::MIN, "body": "minimum", "created_at": "2030-01-01T00:00:00.000Z", "author": "first", "like_count": 2}
         ]));
         btree_reader_close_cursors(reader);
@@ -81,6 +85,10 @@ fn feed_counts_likes_across_extreme_signed_post_ids() {
         assert_eq!(feed_btree_tx(reader, bytes.as_mut_ptr().cast(), bytes.len() as c_int, &mut len), 0);
         let refreshed: serde_json::Value = serde_json::from_slice(&bytes[..len as usize]).unwrap();
         assert_eq!(refreshed[0]["id"], 2);
+        let ids: Vec<i64> = refreshed.as_array().unwrap().iter()
+            .map(|post| post["id"].as_i64().unwrap()).collect();
+        assert_eq!(ids, [2, i64::MAX, i64::MAX - 1, 2147483648, 1,
+                         -140737488355328, i64::MIN + 1, i64::MIN]);
         let middle = refreshed.as_array().unwrap().iter().find(|post| post["id"] == 1).unwrap();
         assert_eq!(middle["like_count"], 2);
         btree_reader_close_cursors(reader);

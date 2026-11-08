@@ -30,7 +30,7 @@ the SQLite B-tree approach was compared with `c-iouring-pavlyhalim`
 | `SQLITE_PATH` | required | Database path |
 | `JWT_SECRET` | required | HS256 secret |
 | `HOST`, `PORT` | `127.0.0.1`, `3000` | Listen address |
-| `SHARDS` | `8` | io_uring rings/listeners polled by the single event loop |
+| `SHARDS` | `6` | io_uring rings/listeners polled by the single event loop |
 | `RECV_MODE` | `hybrid` | `hybrid`: multishot receive with bounded recovery; `poll`: readiness poll plus single-shot receive; `direct`: per-connection receive buffer |
 | `STATS` | unset | `1` enables latency counters |
 | `PASS_STATS` | unset | Any value prints per-100-pass timing to stderr |
@@ -59,12 +59,14 @@ SQLITE_PATH=/path/to/feed.db JWT_SECRET=twelve-dollar-challenge \
 bash test/run.sh submissions/rust-iouring-rkkautsar
 ```
 
-For a local 300,000-connection capacity run on a 12-CPU Docker host, build the
-release binaries and run `USERS=300000 bash submissions/rust-iouring-rkkautsar/bench-240k.sh`
-from the repository root. The script uses a fresh seed database, one server CPU,
-11 client workers, a shared ramp and a 30-second measurement window by default. After the hold, sockets are released over 30 seconds rather than all at once.
-`USERS=310000` selects 310,000 connections; `SHARDS=8` was used for sustained
-300,000 verification. `HOLD_SECONDS=300` selects a five-minute hold. With
+For a local capacity run on a 12-CPU Docker host, build the release binaries and
+run `USERS=320000 bash submissions/rust-iouring-rkkautsar/bench-240k.sh` from the
+repository root. The script uses a fresh seed database, one server CPU, 11 client
+workers, a shared ramp and a 30-second measurement window by default. After the
+hold, sockets are released over 30 seconds rather than all at once.
+`USERS=300000` selects 300,000 connections. `HOLD_SECONDS=300` selects a
+five-minute hold. The server binary defaults to six rings; the benchmark selects
+its own count when SHARDS is unset. With
 `VERIFY_CONNECTIONS=1`, kernel socket snapshots from all namespaces must match
 by TCP four-tuple; snapshots alone do not establish continuous liveness.
 The server, client and network/observer helpers share a Docker-host cgroup
@@ -82,12 +84,14 @@ The server container is not privileged. Results include aggregate latency and
 client scheduling/packet-queue diagnostics. Server and clients share the host
 kernel, so this local capacity measurement is not an official benchmark score.
 
-A local five-minute 300,000-VU run with eight rings and a 10,000-page WAL
-autocheckpoint reported p95 180.7 ms, p99 262.5 ms, and zero errors across
-9,429,281 requests. All workers reported the full active target; six independent
-kernel snapshots each matched 300,000 client/server socket tuples. A subsequent
-run at the prior 1,000-page checkpoint threshold failed at p95 727.4 ms and
-p99 1,098.0 ms. These are local measurements, not official scores or proof of
-continuous kernel socket occupancy between snapshots.
+A local 320,000-connection run with six rings and a 10,000-page WAL autocheckpoint
+passed twice at a 30-second hold (p95 99.1 ms / p99 133.8 ms, then p95 129.4 ms /
+p99 164.9 ms, zero errors, over 1,000,000 requests each) and once at a
+five-minute hold using the binary's default ring count with no SHARDS override
+(p95 142.3 ms, p99 256.0 ms, zero errors, 10,091,643 requests). In every run all
+workers held the full 320,000 active target and six independent kernel snapshots
+matched 320,000 client/server socket tuples. The server uses one CPU; the
+aggregate cgroup allowed eight CPUs and 6 GiB. These are local measurements, not
+official scores or proof of continuous kernel socket occupancy between snapshots.
 
 The submission passes all 42 checks on a fresh seed database. Every request reads its own data from SQLite while served; there is no cross-request coalescing or response cache.

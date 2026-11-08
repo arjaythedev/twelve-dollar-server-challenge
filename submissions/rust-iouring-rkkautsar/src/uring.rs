@@ -713,8 +713,8 @@ fn process_input(
     c: &mut Conn,
     app: &mut App,
     write_tx: &Sender<WriteJob>,
-    feed_reads: &mut Vec<ReadJob>,
-    post_reads: &mut Vec<ReadJob>,
+    feed_reads: &mut VecDeque<ReadJob>,
+    post_reads: &mut VecDeque<ReadJob>,
     ready: Option<(Handled, bool)>,
 ) -> io::Result<()> {
     let at = diag_start();
@@ -740,8 +740,8 @@ fn process_input_inner(
     c: &mut Conn,
     app: &mut App,
     write_tx: &Sender<WriteJob>,
-    feed_reads: &mut Vec<ReadJob>,
-    post_reads: &mut Vec<ReadJob>,
+    feed_reads: &mut VecDeque<ReadJob>,
+    post_reads: &mut VecDeque<ReadJob>,
     ready: Option<(Handled, bool)>,
 ) -> io::Result<()> {
     if c.response_pending || c.writing || c.write_pending || c.close_after || c.closing {
@@ -781,7 +781,7 @@ fn process_input_inner(
                     arm_write(ring, slot, c)
                 }
                 Handled::Feed => {
-                    feed_reads.push(ReadJob {
+                    feed_reads.push_back(ReadJob {
                         ring: ring_idx,
                         slot,
                         gen: c.gen,
@@ -792,7 +792,7 @@ fn process_input_inner(
                     Ok(())
                 }
                 Handled::Post(id) => {
-                    post_reads.push(ReadJob {
+                    post_reads.push_back(ReadJob {
                         ring: ring_idx,
                         slot,
                         gen: c.gen,
@@ -833,8 +833,8 @@ fn after_write(
     c: &mut Conn,
     app: &mut App,
     write_tx: &Sender<WriteJob>,
-    feed_reads: &mut Vec<ReadJob>,
-    post_reads: &mut Vec<ReadJob>,
+    feed_reads: &mut VecDeque<ReadJob>,
+    post_reads: &mut VecDeque<ReadJob>,
     res: i32,
 ) -> io::Result<bool> {
     c.writing = false;
@@ -864,8 +864,8 @@ fn process_ring(
     r: &mut RingState,
     app: &mut App,
     write_tx: &Sender<WriteJob>,
-    feed_reads: &mut Vec<ReadJob>,
-    post_reads: &mut Vec<ReadJob>,
+    feed_reads: &mut VecDeque<ReadJob>,
+    post_reads: &mut VecDeque<ReadJob>,
 ) -> io::Result<bool> {
     let mut cqe_count = 0usize;
     let mut full = false;
@@ -1308,13 +1308,13 @@ fn process_writer(
 fn apply_reads(
     app: &mut App,
     rings: &mut [RingState],
-    feed_reads: &mut Vec<ReadJob>,
-    post_reads: &mut Vec<ReadJob>,
+    feed_reads: &mut VecDeque<ReadJob>,
+    post_reads: &mut VecDeque<ReadJob>,
 ) {
     if !feed_reads.is_empty() {
         let n = feed_reads.len().min(FEED_ANSWERS_PER_PASS);
         let ok = app.read.begin_read();
-        for job in &feed_reads[..n] {
+        for job in feed_reads.iter().take(n) {
             let at = diag_start();
             let packet = if ok {
                 app.read.feed_response().ok()
@@ -1330,7 +1330,7 @@ fn apply_reads(
     if !post_reads.is_empty() {
         let n = post_reads.len().min(POST_ANSWERS_PER_PASS);
         let ok = app.read.begin_read();
-        for job in &post_reads[..n] {
+        for job in post_reads.iter().take(n) {
             let id = match job.kind {
                 ReadKind::Post(id) => id,
                 _ => continue,
@@ -1371,8 +1371,8 @@ pub fn run_pass(
     let (writer_ready_tx, writer_ready_rx) = std::sync::mpsc::channel();
     crate::writer::spawn(db_path.clone(), write_rx, res_tx, writer_ready_tx);
     let _ = writer_ready_rx.recv();
-    let mut feed_reads: Vec<ReadJob> = Vec::new();
-    let mut post_reads: Vec<ReadJob> = Vec::new();
+    let mut feed_reads: VecDeque<ReadJob> = VecDeque::new();
+    let mut post_reads: VecDeque<ReadJob> = VecDeque::new();
     let mut fds: Vec<libc::pollfd> = Vec::with_capacity(rings.len());
     let pass_stats = std::env::var("PASS_STATS").is_ok();
     let mut passes = 0u64;
@@ -1427,7 +1427,10 @@ pub fn run_pass(
         let ready_reads = rings.iter().any(|r| {
             !r.read_queue.is_empty() && r.reads_in_flight < BUF_RING_ENTRIES as usize
         });
-        let t4 = if cqes > 0 || queue_full || ready_reads {
+        // Database work is already runnable even if the rings have no CQEs.
+        let t4 = if cqes > 0 || queue_full || ready_reads
+            || !feed_reads.is_empty() || !post_reads.is_empty()
+        {
             t3
         } else {
             fds.clear();

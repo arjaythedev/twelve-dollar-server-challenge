@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Language** | [DexLang](https://github.com/ensamuel7/dex) `v0.9.26`: statically typed, compiles to C, which `cc` builds into a native binary |
+| **Language** | [DexLang](https://github.com/ensamuel7/dex) `v0.9.32`: statically typed, compiles to C, which `cc` builds into a native binary |
 | **Framework** | None. DexLang's own `http` and `db` standard library modules |
 | **Server** | The `http` module's io_uring backend (`http.uring()`), with handlers run on the ring's thread |
 | **SQL** | Built with [dexqu](https://github.com/ensamuel7/dex-modules/tree/main/dexqu) `v0.1.0` at startup, prepared once; used for every write |
@@ -91,10 +91,23 @@ cases were:
 The engine answered all of them. It handed only a NUL inside the newest body
 back to the SQL, as designed. The entry passes the test suite, 42/42.
 
-**Control run.** The code here is byte-identical to the version scored at
-226,000. Two follow-ups held less: 190,000 with dex v0.9.31 and a leaner JSON
-writer in `btree.c`, and 195,000 with that writer alone. This run measures
-whether the writer caused the drop or the same code now scores lower.
+**Third revision (dex v0.9.32, `http.gather`).** The merged code held 226,000
+when it was scored, and the same code held 190,000 in a control run later, so
+this revision goes after CPU per request again, in the runtime this time.
+Under load the event loop used to wake for every completion, so a pass served a
+handful of requests and paid a round of system calls and a commit for them.
+`http.gather(128, 1000)` makes it sleep until 128 completions have arrived or
+1 ms has passed. On a copy of the benchmark box at 80,000 users (two load
+boxes, 3-minute holds, two runs each, interleaved):
+
+| version | CPU per request | p95 / p99 (second load box) |
+|---|--:|--:|
+| merged (dex v0.9.26) | 43.8 / 44.6 µs | 1.4 / 123 ms |
+| same code, dex v0.9.32 | 42.8 / 42.9 µs | 1.4 / 125 ms |
+| dex v0.9.32 with `http.gather(128, 1000)` | 29.0 / 28.0 µs | 2.6 / 120 ms |
+
+The read engine is the merged version's; the leaner writer from #324 is left
+out so this change is measured on its own.
 
 **Tried, not kept:**
 - `http.batchWindow(1)` (dex v0.9.28 and later), which holds a batch open for
@@ -299,10 +312,10 @@ server.dx    routes, handlers, auth, response building
 queries.dx   the SQL statements, built with dexqu
 btree.c      the read engine: /feed, /posts/:id and the like check on B-tree cursors
 btree.h      its interface, as server.dx's `external module bt` sees it
-dex.mod      module file: dex 0.9.26, dexqu v0.1.0 (pinned in dex.sum)
+dex.mod      module file: dex 0.9.32, dexqu v0.1.0 (pinned in dex.sum)
 install.sh   root, once: build-essential, git, pkg-config, libsqlite3-dev,
              libssl-dev, libcurl, and Go 1.27.2 (sha256-checked)
-build.sh     builds the dex compiler from the pinned v0.9.26 tag through the Go
+build.sh     builds the dex compiler from the pinned v0.9.32 tag through the Go
              module proxy (checksum-verified), fetches dexqu and the SQLite
              3.54.1 amalgamation (sha256-checked), writes the sqlite3.c that
              includes it and btree.c, compiles server.dx

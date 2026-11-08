@@ -535,6 +535,9 @@ fn main(): void {
     }
     http.afterBatch(commitBatch)
     http.uring()
+    // Under load, sleep until 128 completions have arrived or 1 ms has passed
+    // before each pass of the loop, instead of waking for every one.
+    http.gather(128, 1000)
     http.limits(0, 75, 200000)
 
     fmt.println("dex feed api on " + host + ":" + str.fromInt(port))

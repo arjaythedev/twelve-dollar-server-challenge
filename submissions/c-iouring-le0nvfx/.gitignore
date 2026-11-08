@@ -1,6 +1,6 @@
 bin/
-/vendor/
+.build/
 pgo/
 *.gcda
-.DS_Store
-.build/
+__pycache__/
+*.py[cod]

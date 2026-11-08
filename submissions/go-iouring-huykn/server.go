@@ -4,6 +4,7 @@ import (
 	"errors"
 	"syscall"
 	"time"
+	"unsafe"
 
 	"github.com/godzie44/go-uring/uring"
 )
@@ -24,6 +25,44 @@ type server struct {
 	clients map[int]*connection
 	accept  *uring.AcceptOp
 	ready   []int
+	retry   acceptDelay
+}
+
+const acceptRetryTag = ^uint64(0)
+
+func (c *connection) idleAfterSend() bool {
+	return c.sent > 0 && !c.sending && !c.closing && c.used == 0 && len(c.out) == 0
+}
+
+// Keep the timeout storage reachable until its CQE, just like receive buffers.
+type acceptDelay struct{ spec syscall.Timespec }
+
+func (op *acceptDelay) PrepSQE(sqe *uring.SQEntry) {
+	op.spec = syscall.NsecToTimespec(int64(10 * time.Millisecond))
+	*sqe = uring.SQEntry{OpCode: uint8(uring.TimeoutCode), Fd: -1,
+		Addr: uint64(uintptr(unsafe.Pointer(&op.spec))), Len: 1}
+}
+
+func (op *acceptDelay) Code() uring.OpCode { return uring.TimeoutCode }
+
+func (s *server) relievePressure() error {
+	retired := 0
+	for fd, c := range s.clients {
+		if !c.idleAfterSend() {
+			continue
+		}
+		// Shutdown wakes the pending receive. Close only after its completion,
+		// so neither the fd nor its buffers can be reused while still in flight.
+		c.closing = true
+		syscall.Shutdown(fd, syscall.SHUT_RD)
+		retired++
+		if retired == 256 {
+			break
+		}
+	}
+	// No idle clients is also possible. A timer prevents a hot accept-fail loop
+	// while allowing active requests and sends to continue making progress.
+	return s.queue(&s.retry, acceptRetryTag)
 }
 
 func (s *server) queue(op uring.Operation, tag uint64) error {
@@ -84,24 +123,36 @@ func (s *server) respond(fd int, c *connection) error {
 	return nil
 }
 
-func (s *server) complete(tag uint64, result int32) error {
-	var err error
-	if tag == 0 {
-		if result >= 0 {
-			fd := int(result)
-			syscall.SetsockoptInt(fd, syscall.IPPROTO_TCP, syscall.TCP_NODELAY, 1)
-			c := &connection{in: make([]byte, 4096), out: make([]byte, 0, 8192)}
-			s.clients[fd] = c
-			if err := s.receive(fd, c); err != nil {
-				return err
-			}
-		} else if result != -int32(syscall.EINTR) && result != -int32(syscall.ECONNABORTED) {
-			return syscall.Errno(-result)
-		}
-		if err := s.queue(s.accept, 0); err != nil {
+func (s *server) completeAccept(result int32) error {
+	switch {
+	case result >= 0:
+		fd := int(result)
+		syscall.SetsockoptInt(fd, syscall.IPPROTO_TCP, syscall.TCP_NODELAY, 1)
+		c := &connection{in: make([]byte, 4096), out: make([]byte, 0, 8192)}
+		s.clients[fd] = c
+		if err := s.receive(fd, c); err != nil {
 			return err
 		}
-		return nil
+	case result == -int32(syscall.EMFILE), result == -int32(syscall.ENFILE):
+		return s.relievePressure()
+	case result == -int32(syscall.EINTR), result == -int32(syscall.ECONNABORTED):
+		// Retry interrupted or aborted accepts immediately.
+	default:
+		return syscall.Errno(-result)
+	}
+	return s.queue(s.accept, 0)
+}
+
+func (s *server) complete(tag uint64, result int32) error {
+	var err error
+	if tag == acceptRetryTag {
+		if result != -int32(syscall.ETIME) {
+			return syscall.Errno(-result)
+		}
+		return s.queue(s.accept, 0)
+	}
+	if tag == 0 {
+		return s.completeAccept(result)
 	}
 	fd := int(tag - 1)
 	c := s.clients[fd]

@@ -23,7 +23,7 @@ func TestStructSizes(t *testing.T) {
 	}
 	want := map[string]uintptr{
 		"app": 64, "connection": 72, "byteReader": 32, "byteValue": 32,
-		"request": 104, "server": 56, "verifier": 96,
+		"request": 104, "server": 72, "verifier": 96,
 	}
 	for name, typ := range types {
 		if got := typ.Size(); got != want[name] {

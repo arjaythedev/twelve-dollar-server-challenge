@@ -81,7 +81,7 @@ function put_post_row!(b::Buf, st::Ptr{Cvoid})
     pushb!(b, UInt8('}'))
 end
 
-# ---- read backends (selected by READ_BACKEND in config.sh). Each writes response JSON straight into b. ----
+# ---- reads, through SQLite's public API only (prepared statements). Each writes response JSON straight into b. ----
 
 abstract type ReadBackend end
 struct SqlBackend <: ReadBackend end

@@ -26,8 +26,8 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
 CSV="$HERE/stress-results.csv"
-IMAGE=localhost/julia-raw-amanica-dev
-WRK_IMAGE=localhost/julia-raw-amanica-wrk
+IMAGE=localhost/julia-iouring-amanica-dev
+WRK_IMAGE=localhost/julia-iouring-amanica-wrk
 K6_IMAGE="${K6_IMAGE:-docker.io/grafana/k6:2.3.0@sha256:2dd4756ec6e14e62778916e1eb850108e4b499304c02df56760fa0bdb0fba0b8}"
 GEN="${GEN:-k6}" CPUS="${CPUS:-1}" MEM="${MEM:-2g}" RAMP_UP="${RAMP_UP:-30s}" WARMUP="${WARMUP:-5s}"
 WRK_THREADS="${WRK_THREADS:-4}" LABEL="${LABEL:-dev}" NOTES="${NOTES:-}"
@@ -55,7 +55,7 @@ image() {
 }
 box() {
   podman run --rm --cpus "$CPUS" --memory "$MEM" --memory-swap "$MEM" --ulimit nofile=65535:65535 \
-    "${SEC[@]}" -v "$ROOT:/src:ro" -v julia-raw-amanica-dl:/cache:U -e JR_DL_CACHE=/cache "$@"
+    "${SEC[@]}" -v "$ROOT:/src:ro" -v julia-iouring-amanica-dl:/cache:U -e JR_DL_CACHE=/cache "$@"
 }
 
 # Samples every 2 s while the server container lives, from the HOST side (cgroup files and /proc of the
@@ -125,7 +125,7 @@ stress_run() { # stress_run <n> <duration>
   # shellcheck disable=SC2064
   trap "podman rm -f $name $gname >/dev/null 2>&1 || true" EXIT
   box -d --name "$name" -e JR_DEBUG="$DEBUG" -e JR_TRANSPORT="${TRANSPORT:-}" --sysctl net.ipv4.ip_local_port_range="1024 65535" \
-    "$IMAGE" bash /src/submissions/julia-raw-amanica/dev/in-container.sh serve >/dev/null
+    "$IMAGE" bash /src/submissions/julia-iouring-amanica/dev/in-container.sh serve >/dev/null
   for _ in $(seq 600); do
     podman exec "$name" curl -sf http://127.0.0.1:3000/health >/dev/null 2>&1 && break
     podman container exists "$name" || { echo "server container died" >&2; return 1; }
@@ -176,7 +176,7 @@ elif [ "$GEN" = users ]; then def_n=20000 def_start=10000 def_max=320000 def_dur
 else def_n=1000 def_start=2500 def_max=320000 def_dur=1m; fi
 case "$cmd" in
   image) image; echo "$IMAGE" ;;
-  build|test) image; box "$IMAGE" bash /src/submissions/julia-raw-amanica/dev/in-container.sh "$cmd" ;;
+  build|test) image; box "$IMAGE" bash /src/submissions/julia-iouring-amanica/dev/in-container.sh "$cmd" ;;
   shell) image; box -it "$IMAGE" bash ;;
   stress) image; stress_run "${1:-$def_n}" "${2:-$def_dur}"; report >/dev/null; [ "$RUN_PASS" = 1 ] ;;
   ladder) image; ladder "${1:-$def_start}" "${2:-$def_max}" "${3:-$def_dur}"; report ;;

@@ -1,4 +1,4 @@
-# julia-raw-amanica
+# julia-iouring-amanica
 
 Julia 1.13.3 · no framework · SQLite 3.54.1 (amalgamation compiled from source, called with `ccall`) · **direct** (no Nginx)
 
@@ -18,8 +18,7 @@ Work in progress.
   0 bytes allocated per request, so the GC does not run under load.
 - No Julia packages: the server uses only Base and `ccall`.
 - JWT HS256 verified on every request with libcrypto's `HMAC`.
-- Prepared statements via the SQLite C API. Reads go through a read-backend interface (`READ_BACKEND`
-  in `config.sh`; only `sql`, the public-API backend, exists so far).
+- SQLite through its public C API only: prepared statements for every read and write (no B-tree internals).
 
 ## Files
 

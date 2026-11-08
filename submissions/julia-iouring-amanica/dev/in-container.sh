@@ -2,7 +2,7 @@
 # Runs inside the dev container as the unprivileged user. /src is the repo, mounted read-only.
 # Builds from a fresh copy of the submission, so nothing from the host checkout leaks in.
 set -euo pipefail
-SUB=julia-raw-amanica
+SUB=julia-iouring-amanica
 mkdir -p /work/submissions
 for d in seed test bench; do ln -sfn "/src/$d" "/work/$d"; done
 rm -rf "/work/submissions/$SUB"

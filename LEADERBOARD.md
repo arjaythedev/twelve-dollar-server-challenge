@@ -446,10 +446,14 @@ code) held **219,000** (21,366 req/s, p95 69.5 / p99 231.7 ms, 0 errors, 81 % CP
 passed its 2-minute probe but failed the 5-minute hold on p99, 1.08 s), above the merged 210,000 but not this row, so
 it is held for the organizer. The next head **`4ea8223`** (WAL checkpoint tail tuning, credits #354) held
 **210,000** (20,531 req/s, p95 143.7 / p99 713.3 ms, 0 errors, 80 % CPU, 667 MB, 2026-11-08; 220,000 failed its
-2-minute probe on p99, 1.32 s), not above this row or the merged 210,000, so it isn't merged. The current head
+2-minute probe on p99, 1.32 s), not above this row or the merged 210,000, so it isn't merged. The next head
 **`5e0cb7e`** (drops `4ea8223`'s bulk checkpoint rounds and fdatasyncs, keeps nice 5 and 64 MiB chunks) held
 **210,000** (20,586 req/s, p95 17.1 / p99 58.7 ms, 0 errors, 78 % CPU, 648 MB, 2026-11-08; 220,000 failed its
-2-minute probe on p95/p99, 0.50 / 2.35 s), not above this row or the merged 210,000, so it isn't merged. The 220,000 hold had 0 errors; 230,000 failed the 2-minute probe on p95/p99 (0.60 / 2.07 s, 85 %
+2-minute probe on p95/p99, 0.50 / 2.35 s), not above this row or the merged 210,000, so it isn't merged. The current
+head **`0e8a332`** (ring-0 wait on the other rings' eventfds, precomputed HMAC pad states; credits #245/#264) held
+**219,000** (21,380 req/s, p95 24.7 / p99 157.2 ms, 0 errors, 77 % CPU, 948 MB, 2026-11-08; 230,000 passed its
+2-minute probe but failed the 5-minute hold on p99, 2.90 s), above the merged 210,000 but not this row, so it is held
+for the organizer like `3949a1a`. The 220,000 hold had 0 errors; 230,000 failed the 2-minute probe on p95/p99 (0.60 / 2.07 s, 85 %
 CPU) and 240,000 on p95 (3.8 s, 93 % CPU). The merged code is #341 (`abcc24a`, SQLite `cache_size` 8 → 64 MiB), which
 held **210,000** (20,594 req/s, p95 14.0 / p99 63.6 ms, 76 % CPU, 605 MB, 2026-11-07); 220,000 failed its 2-minute probe
 on p99 (1.95 s at 80 % CPU, 0 errors). Its merged #340 code (`a0443a9`) held **195,000** (19,189 req/s, p95 12.6 / p99

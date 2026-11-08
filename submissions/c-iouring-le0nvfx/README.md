@@ -53,10 +53,14 @@ foreground and reads the challenge's `HOST`, `PORT`, `SQLITE_PATH`, and
   which credits its underlying idea to
   [C io_uring PR #245](https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/245).
 - Writes use WAL and `synchronous=NORMAL`. Multiple writes may share a SQLite
-  transaction; affected responses are held until commit succeeds. A background
-  checkpoint thread manages WAL growth, and the VFS coalesces WAL writes while
-  preserving SQLite's I/O barriers. The program can advise the kernel to
-  release already-checkpointed WAL pages.
+  transaction; affected responses are held until commit succeeds. A separate
+  helper process runs passive WAL checkpoints once per second; SQLite's
+  50,000-frame auto-checkpoint remains as a safety net, with the existing
+  checkpoint thread as a fallback if the helper is unavailable. The helper
+  process approach follows the allowed design in
+  [c-epoll PR #289](https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/289).
+  The VFS coalesces WAL writes while preserving SQLite's I/O barriers. The
+  program can advise the kernel to release already-checkpointed WAL pages.
 
 The code makes no schema or index changes and does not modify kernel settings
 or pin CPUs. Dependency and source licenses are retained with the vendored
@@ -90,8 +94,19 @@ challenge repository with a freshly generated seed. Optional additional checks:
   78% app CPU, and 700 MB peak RAM. The 220,000-user two-minute probe passed
   (p99 331.6 ms), but its five-minute hold failed p95/p99 at 2.93/6.63 s
   (84% CPU); the 230,000-user two-minute probe failed p99 at 1.45 s.
+- The maintainer reran the same executable tree at README-only head `66aff42`:
+  **209,000 users for five minutes**, 20,477 req/s, p95 18.7 ms, p99 218.3 ms,
+  zero errors, 76% app CPU, and 681 MB peak RAM. The 220,000-user two-minute
+  probe passed (p99 870 ms), but its five-minute hold failed p99 at 1.40 s
+  (82% CPU); the 230,000-user two-minute probe failed p99 at 1.49 s.
+
+The checkpoint-helper candidate follows the allowed mechanism in
+[c-epoll PR #289](https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/289),
+whose merged server held 238,000 users on the official box. This submission
+already had B-tree cursor reads; no score is claimed for the candidate until
+its server change is measured by the maintainer.
 
 The maintainer attributed the difference to run-to-run variation at the
 threshold. The leaderboard retains the 220,000 row from `3e10490` and records
-the 210,000 and 209,000 reruns in its footnote. These are official maintainer
-results; local diagnostics are not leaderboard scores.
+the 210,000 and both 209,000 reruns in its footnote. These are official
+maintainer results; local diagnostics are not leaderboard scores.

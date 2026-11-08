@@ -314,8 +314,8 @@ static int wrapper_current_time64(sqlite3_vfs *vfs, sqlite3_int64 *time_value) {
 
 int challenge_wal_vfs_install(void) {
     if (sqlite3_vfs_find(CHALLENGE_WAL_VFS_NAME)) return SQLITE_OK;
-    /* The server and its checkpoint thread are the only database processes. */
-    g_underlying_vfs = sqlite3_vfs_find("unix-excl");
+    /* The server and checkpoint helper use separate, lock-cooperating processes. */
+    g_underlying_vfs = sqlite3_vfs_find("unix");
     if (!g_underlying_vfs || g_underlying_vfs->iVersion < 2) {
         return SQLITE_ERROR;
     }

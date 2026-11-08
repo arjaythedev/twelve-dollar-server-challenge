@@ -935,9 +935,16 @@ static struct io_uring_buf_ring *buf_ring(struct io_uring *u) {
 static int ring_init(int k) {
   ring_t *r = &R[k];
   // DEFER_TASKRUN on every ring: completion work runs when the loop asks, in one batch, never interrupting a pass.
-  struct io_uring_params p = {.flags = IORING_SETUP_SUBMIT_ALL | IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_CQSIZE |
-                              IORING_SETUP_DEFER_TASKRUN, .cq_entries = 16384};
-  if (io_uring_queue_init_params(4096, &r->r, &p) < 0) return -1;
+  // The completion queue holds one entry per connection the ring can have (1 MB): after a pause a ring of multishot
+  // receives completes more than 16k at once, and what doesn't fit goes to a kmalloc'd overflow list, at the moment
+  // memory is short (#245 sizes its queues over the connection count for this reason). Halved if the kernel refuses it.
+  int rc = -1;
+  for (unsigned cq = 65536; cq >= 16384 && rc < 0; cq /= 2) {
+    struct io_uring_params p = {.flags = IORING_SETUP_SUBMIT_ALL | IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_CQSIZE |
+                                IORING_SETUP_DEFER_TASKRUN, .cq_entries = cq};
+    rc = io_uring_queue_init_params(4096, &r->r, &p);
+  }
+  if (rc < 0) return -1;
   if (io_uring_register_files_sparse(&r->r, tsize) < 0 || !(r->br = buf_ring(&r->r))) {
     io_uring_queue_exit(&r->r); return -1;
   }

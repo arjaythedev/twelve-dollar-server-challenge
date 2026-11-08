@@ -12,7 +12,8 @@ using Printf, Dates, JSON
 
 const COLUMNS = ["timestamp", "commit", "label", "gen", "debug", "julia", "backend", "transport", "cpus", "mem",
     "vus", "ramp", "duration", "requests", "req_s", "est_users", "p95_ms", "p99_ms", "max_ms",
-    "err_pct", "pass", "failed_on", "srv_cpu_avg", "srv_cpu_max", "srv_rss_peak_mb",
+    "err_pct", "pass", "failed_on", "srv_cpu_avg", "srv_cpu_max", "srv_main_avg", "srv_runq_avg", "srv_runq_max",
+    "srv_thr_avg", "loop_wait_pct", "srv_rss_peak_mb",
     "srv_cgmem_peak_mb", "srv_conns_peak", "alloc_b_per_req", "gc_ms", "gc_max_pause_ms", "gen_mem_peak",
     "boot_ms", "notes"]
 const RENAMED = Dict("k6_mem_peak" => "gen_mem_peak")
@@ -125,11 +126,14 @@ function record(out, rc, csv_path)
 
     # host-side samples (dev/ct.sh sampler)
     cpu, cg, rss, gm, fds = Int[], Int[], Int[], Float64[], Int[]
+    mainc, runq, thr = Int[], Int[], Int[]           # per window, paired with cpu
     for line in eachline(IOBuffer(readall(joinpath(out, "stats.log"))))
         d = kv(line)
         if haskey(d, "cpu")
             push!(cpu, parse(Int, d["cpu"])); push!(cg, parse(Int, d["cgmem_mb"])); push!(rss, parse(Int, d["rss_mb"]))
             haskey(d, "fds") && push!(fds, parse(Int, d["fds"]))
+            haskey(d, "main") && (push!(mainc, parse(Int, d["main"])); push!(runq, parse(Int, d["runq"]));
+                                  push!(thr, parse(Int, d["thr"])))
         end
         mm = match(r"^([\d.]+)([kMG]?B)", get(d, "genmem", ""))
         mm === nothing || push!(gm, parse(Float64, mm[1]) * Dict("B" => 1e-6, "kB" => 1e-3, "MB" => 1.0, "GB" => 1e3)[mm[2]])
@@ -140,6 +144,12 @@ function record(out, rc, csv_path)
     row["julia"] = get(info, "julia", ""); row["backend"] = get(info, "backend", ""); row["transport"] = get(info, "transport", "")
     isempty(busy) || (row["srv_cpu_avg"] = string(round(Int, sum(busy) / length(busy))))
     isempty(cpu) || (row["srv_cpu_max"] = string(maximum(cpu)))
+    if !isempty(mainc)                      # averaged over the same busy windows as srv_cpu_avg
+        bi = [k for k in eachindex(cpu) if cpu[k] > 2]; isempty(bi) && (bi = collect(eachindex(cpu)))
+        avg(v) = string(round(Int, sum(v[bi]) / length(bi)))
+        row["srv_main_avg"] = avg(mainc); row["srv_runq_avg"] = avg(runq); row["srv_thr_avg"] = avg(thr)
+        row["srv_runq_max"] = string(maximum(runq))
+    end
     isempty(rss) || (row["srv_rss_peak_mb"] = string(maximum(rss)))
     isempty(cg) || (row["srv_cgmem_peak_mb"] = string(maximum(cg)))
     isempty(gm) || (row["gen_mem_peak"] = @sprintf("%.0fMB", maximum(gm)))
@@ -153,6 +163,8 @@ function record(out, rc, csv_path)
         row["alloc_b_per_req"] = string(per[length(per)÷2+1])
         row["gc_ms"] = string(sum(parse(Int, x["gc_ms"]) for x in st))
         row["gc_max_pause_ms"] = string(maximum(parse(Int, x["max_pause_ms"]) for x in st))
+        lw = sort([parse(Int, x["loop_wait_pct"]) for x in loaded if haskey(x, "loop_wait_pct")])
+        isempty(lw) || (row["loop_wait_pct"] = string(lw[length(lw)÷2+1]))
     end
 
     # open connections (--debug): epoll sockets are fds (julia's fds minus the ones it holds anyway); io_uring
@@ -182,7 +194,8 @@ function record(out, rc, csv_path)
     println("   ", ok ? "PASS" : "FAIL", "  $gen $(row["vus"]) $what  boot=$(row["boot_ms"])ms req/s=$(row["req_s"])",
         isempty(row["est_users"]) ? "" : " (~$(row["est_users"]) users)",
         " p95=$(row["p95_ms"])ms p99=$(row["p99_ms"])ms err=$(row["err_pct"])%",
-        " cpu avg/max=$(row["srv_cpu_avg"])/$(row["srv_cpu_max"])% rss=$(row["srv_rss_peak_mb"])MB",
+        " cpu avg/max=$(row["srv_cpu_avg"])/$(row["srv_cpu_max"])% loop on-cpu=$(row["srv_main_avg"])% runq=$(row["srv_runq_avg"])%",
+        " throttled=$(row["srv_thr_avg"])% loop-wait=$(row["loop_wait_pct"])% rss=$(row["srv_rss_peak_mb"])MB",
         " conns=$(row["srv_conns_peak"]) alloc/req=$(row["alloc_b_per_req"])B gc=$(row["gc_ms"])ms",
         " $gen=$(row["gen_mem_peak"]) $(row["failed_on"])")
     gen == "users" && conns === nothing &&

@@ -14,8 +14,12 @@ case "${1:-test}" in
   test)  bash test/run.sh "submissions/$SUB" ;;
   serve) # build, then run the server on a fresh copy of the seed in the foreground (for stress)
          bash "submissions/$SUB/build.sh"
-         mkdir -p /work/data && cp /src/seed/feed.db /work/data/feed.db
-         export SQLITE_PATH=/work/data/feed.db JWT_SECRET=twelve-dollar-challenge
+         # JR_DATA: where the database copy lives. dev/ct.sh mounts a volume (host ext4) at /data; the
+         # container's own filesystem is fuse-overlayfs under rootless podman, which made every SQLite
+         # write a round trip to a userspace daemon and blocked the event loop ~20% of the time.
+         data="${JR_DATA:-/work/data}"
+         mkdir -p "$data" && cp /src/seed/feed.db "$data/feed.db"
+         export SQLITE_PATH="$data/feed.db" JWT_SECRET=twelve-dollar-challenge
          export HOST="${HOST:-0.0.0.0}" PORT="${PORT:-3000}"
          # boot time: start.sh exec -> first healthy /health, printed into the server log
          t0="$(date +%s%N)"

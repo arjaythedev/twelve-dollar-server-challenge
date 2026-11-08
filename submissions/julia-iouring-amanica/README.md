@@ -56,6 +56,7 @@ GEN=users LABEL="what changed" dev/ct.sh --debug stress 80000 1m # 80k users wit
 GEN=users LABEL="what changed" dev/ct.sh ladder         # users 10k → 320k
 dev/ct.sh report                                  # rebuild the results tables below from the CSV
 dev/ct.sh shell                                   # shell inside the Ubuntu 24.04 dev image
+dev/ct.sh clean                                   # remove stress containers left by an interrupted run
 ```
 
 Three load generators (`GEN`):

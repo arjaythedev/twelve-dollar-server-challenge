@@ -9,6 +9,7 @@
 #   dev/ct.sh ladder [START] [MAX] [DUR]  double N until a run fails, then bisect to within 5%
 #   dev/ct.sh report                      rewrite the results section of README.md from the CSV
 #   dev/ct.sh shell                       interactive shell in the dev image
+#   dev/ct.sh clean                       remove leftover stress containers (jr-srv-*, jr-gen-*)
 #
 # GEN picks the load generator:
 #   GEN=k6     (default) bench/load.js, the real user model. N = virtual users. Costs ~0.3 MB per user.
@@ -18,7 +19,9 @@
 #              ~10 KB per user, so 100k+ users fit; shows connection limits (fds, memory).
 # --debug (first argument): also count the server's connections (fds) and log its allocation/GC stats
 #   (JR_DEBUG=1). Off by default so measuring costs nothing; the CSV's debug column says which.
-# Env: LABEL (free text for the CSV row), NOTES, CPUS (1), MEM (2g), RAMP_UP (30s, k6 only),
+# Env: DATA (volume: the DB copy on a per-run podman volume on the host's disk; overlay: on the container's
+#      fuse-overlayfs, as before 2026-11-08, which blocks the loop on every write),
+#      LABEL (free text for the CSV row), NOTES, CPUS (1), MEM (2g), RAMP_UP (30s, k6 only),
 #      WARMUP (5s, blast only), WRK_THREADS (4, per wrk process), SHARDS (parallel wrk processes;
 #      default N / CONNS_PER_SHARD), CONNS_PER_SHARD (5000), SECCOMP (unconfined; "default" to test without io_uring).
 # Raw output of each run: results/<timestamp>-<gen><N>/ (gitignored). The CSV is committed.
@@ -29,6 +32,7 @@ CSV="$HERE/stress-results.csv"
 IMAGE=localhost/julia-iouring-amanica-dev
 WRK_IMAGE=localhost/julia-iouring-amanica-wrk
 K6_IMAGE="${K6_IMAGE:-docker.io/grafana/k6:2.3.0@sha256:2dd4756ec6e14e62778916e1eb850108e4b499304c02df56760fa0bdb0fba0b8}"
+DATA="${DATA:-volume}"   # where the server's DB copy lives: volume (host ext4) or overlay (fuse-overlayfs)
 GEN="${GEN:-k6}" CPUS="${CPUS:-1}" MEM="${MEM:-2g}" RAMP_UP="${RAMP_UP:-30s}" WARMUP="${WARMUP:-5s}"
 WRK_THREADS="${WRK_THREADS:-4}" LABEL="${LABEL:-dev}" NOTES="${NOTES:-}"
 case "$GEN" in k6|blast|users) ;; *) echo "GEN must be k6, blast or users" >&2; exit 2 ;; esac
@@ -60,25 +64,29 @@ box() {
 
 # Samples every 2 s while the server container lives, from the HOST side (cgroup files and /proc of the
 # container's pid 1, which is julia after the execs), so sampling costs the server's 1 CPU nothing:
-# CPU % over the window (cgroup usage_usec deltas), cgroup memory (includes page cache), julia RSS,
+# CPU % over the window (cgroup usage_usec deltas), the event loop thread's on-CPU % (main) and run-queue
+# wait % (runq: runnable but not running, i.e. the host starving it), cgroup memory, julia RSS,
 # the generator container's memory and, with --debug, julia's open fds (~ connections + ~23).
 sampler() { # sampler <server> <generator>
   set +e +o pipefail   # a failed read must not end the sampling
-  local srv="$1" g="$2" pid cg prev="" usec now_ns mem rss fds gm
+  local srv="$1" g="$2" pid cg prev="" usec thr now_ns mem rss fds gm run wait
   pid="$(podman inspect -f '{{.State.Pid}}' "$srv" 2>/dev/null)" || return 0
   cg="/sys/fs/cgroup$(cut -d: -f3- "/proc/$pid/cgroup" 2>/dev/null)"
   while [ -d "/proc/$pid" ] && podman container exists "$srv"; do
     usec="$(awk '/usage_usec/{print $2}' "$cg/cpu.stat" 2>/dev/null)"; now_ns="$(date +%s%N)"
+    thr="$(awk '/throttled_usec/{print $2}' "$cg/cpu.stat" 2>/dev/null)"
+    # main thread (the event loop): ns on a CPU, ns runnable but waiting for one (run-queue delay)
+    read -r run wait _ < "/proc/$pid/schedstat" 2>/dev/null || { run=0; wait=0; }
     if [ -n "$prev" ] && [ -n "$usec" ]; then
-      set -- $prev
+      set -- $prev     # prev_usec prev_ns prev_run prev_wait prev_thr
       mem="$(cat "$cg/memory.current" 2>/dev/null || echo 0)"
       rss="$(awk '/^VmRSS/{print $2}' "/proc/$pid/status" 2>/dev/null)"
       fds=""   # /proc/<pid>/fd of a rootless container is only readable inside podman's user namespace
       [ "$DEBUG" = 1 ] && fds=" fds=$(podman unshare ls "/proc/$pid/fd" 2>/dev/null | wc -l || true)"
       gm="$(podman stats --no-stream --format '{{.MemUsage}}' "$g" 2>/dev/null | cut -d' ' -f1)"
-      echo "$(date +%T) cpu=$(( (usec - $1) * 100000 / (now_ns - $2) )) cgmem_mb=$(( mem >> 20 )) rss_mb=$(( ${rss:-0} >> 10 ))$fds genmem=${gm:-?}"
+      echo "$(date +%T) cpu=$(( (usec - $1) * 100000 / (now_ns - $2) )) main=$(( (run - $3) * 100 / (now_ns - $2) )) runq=$(( (wait - $4) * 100 / (now_ns - $2) )) thr=$(( (${thr:-0} - $5) * 100000 / (now_ns - $2) )) cgmem_mb=$(( mem >> 20 )) rss_mb=$(( ${rss:-0} >> 10 ))$fds genmem=${gm:-?}"
     fi
-    [ -n "$usec" ] && prev="$usec $now_ns"
+    [ -n "$usec" ] && prev="$usec $now_ns $run $wait ${thr:-0}"
     sleep 2
   done
 }
@@ -123,8 +131,12 @@ stress_run() { # stress_run <n> <duration>
   out="$HERE/results/$(date +%Y%m%d-%H%M%S)-$GEN$n"; mkdir -p "$out"
   name="jr-srv-$$-$n"; gname="jr-gen-$$-$n"
   # shellcheck disable=SC2064
-  trap "podman rm -f $name $gname >/dev/null 2>&1 || true" EXIT
-  box -d --name "$name" -e JR_DEBUG="$DEBUG" -e JR_TRANSPORT="${TRANSPORT:-}" --sysctl net.ipv4.ip_local_port_range="1024 65535" \
+  # remove this run's containers however the script ends (an interrupted run left idle servers behind)
+  local vol="jr-data-$$-$n" dataopt=(-e JR_DATA=/work/data)
+  [ "$DATA" = volume ] && dataopt=(-v "$vol:/data:U" -e JR_DATA=/data)
+  trap "podman rm -f $name $gname >/dev/null 2>&1; podman volume rm -f $vol >/dev/null 2>&1 || true" EXIT
+  trap "podman rm -f $name $gname >/dev/null 2>&1; podman volume rm -f $vol >/dev/null 2>&1; exit 130" INT TERM HUP PIPE
+  box -d --name "$name" "${dataopt[@]}" -e JR_DEBUG="$DEBUG" -e JR_TRANSPORT="${TRANSPORT:-}" --sysctl net.ipv4.ip_local_port_range="1024 65535" \
     "$IMAGE" bash /src/submissions/julia-iouring-amanica/dev/in-container.sh serve >/dev/null
   for _ in $(seq 600); do
     podman exec "$name" curl -sf http://127.0.0.1:3000/health >/dev/null 2>&1 && break
@@ -138,12 +150,14 @@ stress_run() { # stress_run <n> <duration>
   "run_$GEN" "$name" "$gname" "$n" "$dur" "$out" || rc=$?
   podman logs "$name" > "$out/server.log" 2>&1 || true
   podman rm -f "$name" >/dev/null 2>&1 || true
+  podman volume rm -f "$vol" >/dev/null 2>&1 || true
   wait "$statpid" 2>/dev/null || true
-  trap - EXIT
+  trap - EXIT INT TERM HUP PIPE
   commit="$(git -C "$HERE" rev-parse --short HEAD 2>/dev/null || echo none)"
   git -C "$HERE" status --porcelain -- . 2>/dev/null | grep -q . && commit="$commit+dirty"
   RUN_PASS=0
-  DEBUG="$DEBUG" GEN="$GEN" LABEL="${LABEL//,/;}" NOTES="${NOTES//,/;}" CPUS="$CPUS" MEM="$MEM" VUS="$n" RAMP="$RAMP_UP" \
+  local notes="${NOTES:+$NOTES; }DATA=$DATA"
+  DEBUG="$DEBUG" GEN="$GEN" LABEL="${LABEL//,/;}" NOTES="${notes//,/;}" CPUS="$CPUS" MEM="$MEM" VUS="$n" RAMP="$RAMP_UP" \
     DUR="$dur" COMMIT="$commit" tools record "$out" "$rc" "$CSV" && RUN_PASS=1
   true
 }
@@ -170,6 +184,13 @@ report() { tools report "$CSV" "$HERE/README.md"; }
 
 DEBUG="${DEBUG:-0}"
 [ "${1:-}" = --debug ] && { DEBUG=1; shift; }
+# Stress runs share the host with their load generator: two at once distort each other's numbers.
+only_run() {
+  local other
+  other="$(podman ps --format '{{.Names}}' | grep -E '^jr-(srv|gen)-' | head -1 || true)"
+  [ -z "$other" ] || { echo "another stress run is active (container $other): wait for it, or dev/ct.sh clean" >&2; exit 3; }
+}
+
 cmd="${1:-test}"; shift || true
 if [ "$GEN" = blast ]; then def_n=256 def_start=16 def_max=16384 def_dur=30s
 elif [ "$GEN" = users ]; then def_n=20000 def_start=10000 def_max=320000 def_dur=1m
@@ -178,8 +199,12 @@ case "$cmd" in
   image) image; echo "$IMAGE" ;;
   build|test) image; box "$IMAGE" bash /src/submissions/julia-iouring-amanica/dev/in-container.sh "$cmd" ;;
   shell) image; box -it "$IMAGE" bash ;;
-  stress) image; stress_run "${1:-$def_n}" "${2:-$def_dur}"; report >/dev/null; [ "$RUN_PASS" = 1 ] ;;
-  ladder) image; ladder "${1:-$def_start}" "${2:-$def_max}" "${3:-$def_dur}"; report ;;
+  stress) only_run; image; stress_run "${1:-$def_n}" "${2:-$def_dur}"; report >/dev/null; [ "$RUN_PASS" = 1 ] ;;
+  ladder) only_run; image; ladder "${1:-$def_start}" "${2:-$def_max}" "${3:-$def_dur}"; report ;;
   report) report ;;
+  clean) n="$(podman ps -a --format '{{.Names}}' | grep -E '^jr-(srv|gen)-' || true)"
+         [ -n "$n" ] && podman rm -f $n >/dev/null
+         v="$(podman volume ls --format '{{.Name}}' | grep '^jr-data-' || true)"
+         [ -n "$v" ] && podman volume rm -f $v >/dev/null; echo "removed: ${n:-no containers} ${v:-no volumes}" ;;
   *) sed -n '2,30p' "$0"; exit 2 ;;
 esac

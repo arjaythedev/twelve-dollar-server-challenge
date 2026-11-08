@@ -154,6 +154,7 @@ mutable struct Uring
     ring_cqes::Vector{Int}
     nobufs::Int
     backlogs::Int
+    wait_ns::UInt64             # time blocked in io_uring_enter waiting for completions
 end
 
 function nofile_limit()
@@ -610,7 +611,7 @@ function uring_init(lfd::Cint)
     r, flags = Ring(0, nslots, want)
     U = Uring(lfd, [r], 1, flags, [Arena(Vector{UInt8}(undef, ARENA_SIZE), 0, 0)], 1, Buf(1 << 16),
         Vector{UInt8}[], Dict{UInt64,Vector{UInt8}}(), Tuple{Int,Int,UInt32}[], 1, 0,
-        Int64[0, 1_000_000], zeros(UInt64, 3), nslots, 0, 0, 0, 0, UInt64(0), zeros(Int, MAX_RINGS), 0, 0)
+        Int64[0, 1_000_000], zeros(UInt64, 3), nslots, 0, 0, 0, 0, UInt64(0), zeros(Int, MAX_RINGS), 0, 0, UInt64(0))
     U.evarg[3] = UInt(pointer(U.timeout))                    # getevents_arg.ts
     println("io_uring: flags=0x$(string(flags, base = 16)) slots/ring=$nslots buffers=$NBUF x $BUFSZ B")
     U
@@ -635,9 +636,13 @@ function serve_uring(U::Uring)
                 enter(r, 0, ENTER_GETEVENTS)                 # submit and run deferred work, no waiting
             end
         elseif length(rings) == 1
+            @dbg tw = time_ns()
             ret = enter(r0, 1, ENTER_GETEVENTS)
+            @dbg U.wait_ns += time_ns() - tw
         else
+            @dbg tw = time_ns()
             ret = GC.@preserve U enter(r0, 1, ENTER_GETEVENTS | ENTER_EXT_ARG, Ptr{Cvoid}(pointer(U.evarg)), 24)
+            @dbg U.wait_ns += time_ns() - tw
             for k in 2:length(rings)
                 enter(rings[k], 0, ENTER_GETEVENTS)
             end
@@ -692,7 +697,9 @@ function serve_uring(U::Uring)
                 log_stats!(st, U.conns, length(U.spill), now,
                     " passes=$(U.passes) cqes_per_pass=$(U.passes > 0 ? U.ncqes ÷ U.passes : 0) rings=$(length(U.rings))" *
                     " max_pass_ms=$(U.max_pass_ns ÷ 1_000_000) backlog_passes=$(U.backlogs) nobufs=$(U.nobufs)" *
-                    " ring_cqes=$(join(U.ring_cqes[1:length(U.rings)], '/')) arenas=$(length(U.arenas))")
+                    " ring_cqes=$(join(U.ring_cqes[1:length(U.rings)], '/')) arenas=$(length(U.arenas))" *
+                    " loop_wait_pct=$(round(Int, U.wait_ns / 1e7 / (now - st.at)))")
+                U.wait_ns = 0
                 U.passes = 0; U.ncqes = 0; U.max_pass_ns = 0; U.backlogs = 0; U.nobufs = 0; fill!(U.ring_cqes, 0)
             end
         end

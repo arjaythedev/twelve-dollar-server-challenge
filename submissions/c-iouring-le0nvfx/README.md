@@ -85,8 +85,13 @@ challenge repository with a freshly generated seed. Optional additional checks:
   **210,000 users for five minutes**: 20,573 req/s, p95 21.7 ms, p99 256.0 ms,
   zero errors, 78% app CPU, and 670 MB peak RAM. Its 220,000-user two-minute
   probe failed p95/p99 at 0.55/1.75 s.
+- A further official rerun at README-only head `9748f27` held **209,000 users
+  for five minutes**: 20,438 req/s, p95 49.6 ms, p99 608.4 ms, zero errors,
+  78% app CPU, and 700 MB peak RAM. The 220,000-user two-minute probe passed
+  (p99 331.6 ms), but its five-minute hold failed p95/p99 at 2.93/6.63 s
+  (84% CPU); the 230,000-user two-minute probe failed p99 at 1.45 s.
 
 The maintainer attributed the difference to run-to-run variation at the
 threshold. The leaderboard retains the 220,000 row from `3e10490` and records
-the 210,000 rerun in its footnote. These are official maintainer results; local
-diagnostics are not leaderboard scores.
+the 210,000 and 209,000 reruns in its footnote. These are official maintainer
+results; local diagnostics are not leaderboard scores.

@@ -40,8 +40,9 @@ function main()
             nothing
         end
     end
+    ckpt = U !== nothing && ckpt_start(path)
     println("julia-iouring-amanica julia=$(VERSION) backend=sql transport=$(U === nothing ? "epoll" : "uring") ",
-        "debug=$(DEBUG ? 1 : 0) listening on $host:$port")
+        "ckpt=$(ckpt ? "thread" : "auto") hold_pages=$(ckpt ? HOLD_PAGES : 0) debug=$(DEBUG ? 1 : 0) listening on $host:$port")
     flush(stdout)
     U === nothing ? serve(lfd) : serve_uring(U)
 end

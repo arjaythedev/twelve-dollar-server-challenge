@@ -19,7 +19,10 @@
 #              ~10 KB per user, so 100k+ users fit; shows connection limits (fds, memory).
 # --debug (first argument): also count the server's connections (fds) and log its allocation/GC stats
 #   (JR_DEBUG=1). Off by default so measuring costs nothing; the CSV's debug column says which.
-# Env: DATA (volume: the DB copy on a per-run podman volume on the host's disk; overlay: on the container's
+# Env: CKPT (auto: SQLite's automatic checkpoint on the event loop, for A/B; default: background thread),
+#      HOLD_PAGES (WAL pages at which writes wait for the checkpoint; 0: never; default in src/db.jl),
+#      RESTART (loop: the event loop's next write restarts the WAL, for A/B; default: the checkpoint thread),
+#      DATA (volume: the DB copy on a per-run podman volume on the host's disk; overlay: on the container's
 #      fuse-overlayfs, as before 2026-11-08, which blocks the loop on every write),
 #      LABEL (free text for the CSV row), NOTES, CPUS (1), MEM (2g), RAMP_UP (30s, k6 only),
 #      WARMUP (5s, blast only), WRK_THREADS (4, per wrk process), SHARDS (parallel wrk processes;
@@ -57,8 +60,9 @@ image() {
   [ "$GEN" != k6 ] && podman build -q -f "$HERE/dev/Containerfile.wrk" -t "$WRK_IMAGE" "$HERE/dev" >/dev/null
   true
 }
+BOX_RM=(--rm)
 box() {
-  podman run --rm --cpus "$CPUS" --memory "$MEM" --memory-swap "$MEM" --ulimit nofile=65535:65535 \
+  podman run "${BOX_RM[@]}" --cpus "$CPUS" --memory "$MEM" --memory-swap "$MEM" --ulimit nofile=65535:65535 \
     "${SEC[@]}" -v "$ROOT:/src:ro" -v julia-iouring-amanica-dl:/cache:U -e JR_DL_CACHE=/cache "$@"
 }
 
@@ -136,14 +140,19 @@ stress_run() { # stress_run <n> <duration>
   [ "$DATA" = volume ] && dataopt=(-v "$vol:/data:U" -e JR_DATA=/data)
   trap "podman rm -f $name $gname >/dev/null 2>&1; podman volume rm -f $vol >/dev/null 2>&1 || true" EXIT
   trap "podman rm -f $name $gname >/dev/null 2>&1; podman volume rm -f $vol >/dev/null 2>&1; exit 130" INT TERM HUP PIPE
-  box -d --name "$name" "${dataopt[@]}" -e JR_DEBUG="$DEBUG" -e JR_TRANSPORT="${TRANSPORT:-}" --sysctl net.ipv4.ip_local_port_range="1024 65535" \
+  BOX_RM=()    # keep the server container until we have its log, also when it dies at startup
+  box -d --name "$name" "${dataopt[@]}" -e JR_DEBUG="$DEBUG" -e JR_TRANSPORT="${TRANSPORT:-}" -e JR_CKPT="${CKPT:-}" -e JR_HOLD_PAGES="${HOLD_PAGES:-}" -e JR_RESTART="${RESTART:-}" --sysctl net.ipv4.ip_local_port_range="1024 65535" \
     "$IMAGE" bash /src/submissions/julia-iouring-amanica/dev/in-container.sh serve >/dev/null
   for _ in $(seq 600); do
     podman exec "$name" curl -sf http://127.0.0.1:3000/health >/dev/null 2>&1 && break
-    podman container exists "$name" || { echo "server container died" >&2; return 1; }
+    [ "$(podman inspect -f '{{.State.Running}}' "$name" 2>/dev/null)" = true ] || break
     sleep 1
   done
-  podman exec "$name" curl -sf http://127.0.0.1:3000/health >/dev/null || { podman logs "$name" | tail -30; return 1; }
+  if ! podman exec "$name" curl -sf http://127.0.0.1:3000/health >/dev/null 2>&1; then
+    podman logs "$name" > "$out/server.log" 2>&1 || true
+    echo "FAIL: server not healthy (log: ${out#"$HERE"/}/server.log):" >&2; tail -20 "$out/server.log" >&2
+    return 1
+  fi
   echo "== GEN=$GEN N=$n DURATION=$dur -> ${out#"$HERE"/}"
   sampler "$name" "$gname" > "$out/stats.log" 2>&1 &
   statpid=$!
@@ -156,7 +165,7 @@ stress_run() { # stress_run <n> <duration>
   commit="$(git -C "$HERE" rev-parse --short HEAD 2>/dev/null || echo none)"
   git -C "$HERE" status --porcelain -- . 2>/dev/null | grep -q . && commit="$commit+dirty"
   RUN_PASS=0
-  local notes="${NOTES:+$NOTES; }DATA=$DATA"
+  local notes="${NOTES:+$NOTES; }DATA=$DATA${CKPT:+; CKPT=$CKPT}${HOLD_PAGES:+; HOLD_PAGES=$HOLD_PAGES}${RESTART:+; RESTART=$RESTART}"
   DEBUG="$DEBUG" GEN="$GEN" LABEL="${LABEL//,/;}" NOTES="${notes//,/;}" CPUS="$CPUS" MEM="$MEM" VUS="$n" RAMP="$RAMP_UP" \
     DUR="$dur" COMMIT="$commit" tools record "$out" "$rc" "$CSV" && RUN_PASS=1
   true

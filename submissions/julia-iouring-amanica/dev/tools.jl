@@ -147,7 +147,9 @@ function record(out, rc, csv_path)
     if !isempty(mainc)                      # averaged over the same busy windows as srv_cpu_avg
         bi = [k for k in eachindex(cpu) if cpu[k] > 2]; isempty(bi) && (bi = collect(eachindex(cpu)))
         avg(v) = string(round(Int, sum(v[bi]) / length(bi)))
-        row["srv_main_avg"] = avg(mainc); row["srv_runq_avg"] = avg(runq); row["srv_thr_avg"] = avg(thr)
+        row["srv_main_avg"] = avg(mainc); row["srv_runq_avg"] = avg(runq)
+        # (not the last sample: the throttling counter jumps while the container shuts down)
+        tb = filter(!=(length(thr)), bi); row["srv_thr_avg"] = isempty(tb) ? "0" : string(round(Int, sum(thr[tb]) / length(tb)))
         row["srv_runq_max"] = string(maximum(runq))
     end
     isempty(rss) || (row["srv_rss_peak_mb"] = string(maximum(rss)))

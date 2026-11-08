@@ -2,6 +2,10 @@
 
 const LIBJR = normpath(joinpath(@__DIR__, "..", "build", "libjr.so"))
 
+const CKPT_PAGES = 1000     # WAL size that wakes the checkpoint thread (SQLite's autocheckpoint default)
+# WAL size at which writes wait until the checkpoint has caught up (62 MB, as in fsharp-kestrel-delneg).
+# JR_HOLD_PAGES overrides it for dev A/B (0: never hold).
+const HOLD_PAGES = parse(Int, let v = get(ENV, "JR_HOLD_PAGES", ""); isempty(v) ? "15000" : v end)
 const SQLITE_ROW = Cint(100)
 const SQLITE_DONE = Cint(101)
 
@@ -54,6 +58,18 @@ function db_open(path::String)
     ST_INSERT_LIKE[] = db_prepare("INSERT INTO likes (user_id, post_id) VALUES (?1, ?2) ON CONFLICT (user_id, post_id) DO NOTHING")
     nothing
 end
+
+# Checkpoints on a background thread (csrc/shim.c): on a real disk they blocked the event loop ~65% of the
+# time. Only for a transport that can hold writes (io_uring): otherwise the WAL would grow without limit, so
+# epoll keeps SQLite's automatic checkpoint. JR_CKPT=auto forces that too (dev A/B only).
+function ckpt_start(path::String)
+    get(ENV, "JR_CKPT", "") == "auto" && return false
+    restart = get(ENV, "JR_RESTART", "") == "loop" ? 0 : 1   # dev A/B only: who restarts the WAL after a hold
+    rc = ccall((:jr_ckpt_start, LIBJR), Cint, (Ptr{Cvoid}, Cstring, Cint, Cint, Cint), DB[], path, CKPT_PAGES, HOLD_PAGES, restart)
+    rc == 0 || error("checkpoint thread: sqlite error $rc")
+    true
+end
+@inline write_hold() = ccall((:jr_ckpt_hold, LIBJR), Cint, ()) != 0
 
 @inline step(st::Ptr{Cvoid}) = ccall((:sqlite3_step, LIBJR), Cint, (Ptr{Cvoid},), st)
 @inline reset(st::Ptr{Cvoid}) = ccall((:sqlite3_reset, LIBJR), Cint, (Ptr{Cvoid},), st)
@@ -131,6 +147,7 @@ const READ = SqlBackend()
 
 # Inserts a post and writes {"post":{...}}. Returns false on a database error.
 function create_post!(b::Buf, uid::Int, p::Ptr{UInt8}, n::Int, author::Buf)
+    @dbg t0 = time_ns()
     st = ST_INSERT_POST[]
     bind_int(st, 1, uid)
     bind_text(st, 2, p, n)
@@ -146,16 +163,21 @@ function create_post!(b::Buf, uid::Int, p::Ptr{UInt8}, n::Int, author::Buf)
     putstr!(b, ",\"like_count\":0}}")
     rc = step(st)                   # run to completion: the autocommit happens here
     reset(st)
+    @dbg MAX_WRITE_NS[] = max(MAX_WRITE_NS[], time_ns() - t0)
     rc == SQLITE_DONE
 end
 
+const MAX_WRITE_NS = Ref(UInt64(0))     # --debug: longest single write on the event loop in this stats window
+
 # 1 new like, 2 already liked, -1 error.
 function insert_like(uid::Int, pid::Int)
+    @dbg t0 = time_ns()
     st = ST_INSERT_LIKE[]
     bind_int(st, 1, uid)
     bind_int(st, 2, pid)
     rc = step(st)
     reset(st)
+    @dbg MAX_WRITE_NS[] = max(MAX_WRITE_NS[], time_ns() - t0)
     rc == SQLITE_DONE || return -1
     db_changes() == 1 ? 1 : 2
 end

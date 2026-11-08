@@ -128,6 +128,7 @@ mutable struct Ring
     pendlen::Vector{Int}
     inbuf::Vector{Vector{UInt8}}# a partial request waiting for more bytes
     inlen::Vector{Int}
+    held::Vector{Bool}          # waits in U.held: a POST in its inbuf until the write hold ends
 end
 
 mutable struct Uring
@@ -143,6 +144,8 @@ mutable struct Uring
     rearm::Vector{Tuple{Int,Int,UInt32}}   # receives that found no buffer, re-armed in order as buffers return
     rearm_head::Int
     returned::Int                          # buffers given back this pass
+    held::Vector{Tuple{Int,Int,UInt32}}    # connections with a POST waiting for the write hold to end
+    held2::Vector{Tuple{Int,Int,UInt32}}
     timeout::Vector{Int64}      # struct __kernel_timespec + struct io_uring_getevents_arg
     evarg::Vector{UInt64}
     nslots::Int
@@ -231,7 +234,7 @@ function ring_setup(p::Vector{UInt8}, pp::Ptr{UInt8}, idx::Int, nslots::Int, fla
         nslots, 0, 0, true,
         zeros(UInt32, nslots), fill(false, nslots), fill(false, nslots), fill(false, nslots), fill(false, nslots),
         fill(Ptr{UInt8}(0), nslots), zeros(Int, nslots), zeros(Int, nslots),
-        fill(EMPTY, nslots), fill(EMPTY, nslots), zeros(Int, nslots), fill(EMPTY, nslots), zeros(Int, nslots))
+        fill(EMPTY, nslots), fill(EMPTY, nslots), zeros(Int, nslots), fill(EMPTY, nslots), zeros(Int, nslots), fill(false, nslots))
     ring.sq_tail = unsafe_load(ring.sq_tail_p)
     for b in 0:NBUF-1
         give_buf!(ring, b)
@@ -432,6 +435,13 @@ function on_data!(U::Uring, r::Ring, slot::Int, d::Vector{UInt8}, s::Int, n::Int
             pos = len + 1
             break
         end
+        if REQ.method == M_POST && write_hold()              # stays in the input until the hold ends
+            if !r.held[i]
+                r.held[i] = true
+                push!(U.held, (r.idx, slot, r.gen[i]))
+            end
+            break
+        end
         handle!(out, data, REQ)
         @dbg NREQ[] += 1
         pos = REQ.next
@@ -471,7 +481,7 @@ function on_accept!(U::Uring, r::Ring, res::Int)
     slot = res
     i = slot + 1
     r.gen[i] += UInt32(1)
-    r.live[i] = true; r.closing[i] = false; r.sending[i] = false; r.recving[i] = false
+    r.live[i] = true; r.closing[i] = false; r.sending[i] = false; r.recving[i] = false; r.held[i] = false
     r.inlen[i] = 0; r.pendlen[i] = 0
     r.open += 1
     @dbg U.conns += 1
@@ -610,7 +620,7 @@ function uring_init(lfd::Cint)
     want = SETUP_CQSIZE | SETUP_SUBMIT_ALL | SETUP_COOP_TASKRUN | SETUP_SINGLE_ISSUER | SETUP_DEFER_TASKRUN
     r, flags = Ring(0, nslots, want)
     U = Uring(lfd, [r], 1, flags, [Arena(Vector{UInt8}(undef, ARENA_SIZE), 0, 0)], 1, Buf(1 << 16),
-        Vector{UInt8}[], Dict{UInt64,Vector{UInt8}}(), Tuple{Int,Int,UInt32}[], 1, 0,
+        Vector{UInt8}[], Dict{UInt64,Vector{UInt8}}(), Tuple{Int,Int,UInt32}[], 1, 0, Tuple{Int,Int,UInt32}[], Tuple{Int,Int,UInt32}[],
         Int64[0, 1_000_000], zeros(UInt64, 3), nslots, 0, 0, 0, 0, UInt64(0), zeros(Int, MAX_RINGS), 0, 0, UInt64(0))
     U.evarg[3] = UInt(pointer(U.timeout))                    # getevents_arg.ts
     println("io_uring: flags=0x$(string(flags, base = 16)) slots/ring=$nslots buffers=$NBUF x $BUFSZ B")
@@ -635,7 +645,7 @@ function serve_uring(U::Uring)
             for r in rings
                 enter(r, 0, ENTER_GETEVENTS)                 # submit and run deferred work, no waiting
             end
-        elseif length(rings) == 1
+        elseif length(rings) == 1 && isempty(U.held)
             @dbg tw = time_ns()
             ret = enter(r0, 1, ENTER_GETEVENTS)
             @dbg U.wait_ns += time_ns() - tw
@@ -687,6 +697,18 @@ function serve_uring(U::Uring)
             end
         end
         U.returned = 0
+        # The write hold ended: run the POSTs that waited (they may start waiting again if a new hold began).
+        if !isempty(U.held) && !write_hold()
+            U.held, U.held2 = U.held2, U.held
+            for (ri, slot, g) in U.held2
+                q = rings[ri+1]
+                if q.live[slot+1] && q.gen[slot+1] == g
+                    q.held[slot+1] = false
+                    on_data!(U, q, slot, q.bufs, 1, 0)
+                end
+            end
+            empty!(U.held2)
+        end
         top_up_accepts!(U)
         A = U.arenas[U.cur]
         A.refs == 0 && (A.len = 0)                           # nothing points into it: reuse from the start
@@ -698,7 +720,13 @@ function serve_uring(U::Uring)
                     " passes=$(U.passes) cqes_per_pass=$(U.passes > 0 ? U.ncqes ÷ U.passes : 0) rings=$(length(U.rings))" *
                     " max_pass_ms=$(U.max_pass_ns ÷ 1_000_000) backlog_passes=$(U.backlogs) nobufs=$(U.nobufs)" *
                     " ring_cqes=$(join(U.ring_cqes[1:length(U.rings)], '/')) arenas=$(length(U.arenas))" *
-                    " loop_wait_pct=$(round(Int, U.wait_ns / 1e7 / (now - st.at)))")
+                    " loop_wait_pct=$(round(Int, U.wait_ns / 1e7 / (now - st.at)))" *
+                    " ckpts=$(ccall((:jr_ckpt_count, LIBJR), Clong, ())) holds=$(ccall((:jr_ckpt_holds, LIBJR), Clong, ()))" *
+                    " hold_timeouts=$(ccall((:jr_ckpt_hold_timeouts, LIBJR), Clong, ()))" *
+                    " hold_ms=$(ccall((:jr_ckpt_hold_ms, LIBJR), Clong, ()))" *
+                    " wal_max_pages=$(ccall((:jr_ckpt_max_pages, LIBJR), Clong, ()))" *
+                    " restarts=$(ccall((:jr_ckpt_restarts, LIBJR), Clong, ())) max_write_ms=$(MAX_WRITE_NS[] ÷ 1_000_000)")
+                MAX_WRITE_NS[] = 0
                 U.wait_ns = 0
                 U.passes = 0; U.ncqes = 0; U.max_pass_ns = 0; U.backlogs = 0; U.nobufs = 0; fill!(U.ring_cqes, 0)
             end

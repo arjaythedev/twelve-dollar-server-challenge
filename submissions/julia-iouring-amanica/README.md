@@ -19,6 +19,7 @@ Work in progress.
 - No Julia packages: the server uses only Base and `ccall`.
 - JWT HS256 verified on every request with libcrypto's `HMAC`.
 - SQLite through its public C API only: prepared statements for every read and write (no B-tree internals).
+  WAL checkpoints run on a background thread, so their fsyncs don't block the event loop.
 
 ## Files
 
@@ -29,6 +30,7 @@ Work in progress.
 | `build.sh` | user: downloads the SQLite amalgamation (SHA3-256 checked), compiles `build/libjr.so` |
 | `start.sh` | runs `src/main.jl` |
 | `src/` | the server |
+| `csrc/shim.c` | WAL checkpoints on a background thread (public SQLite API), compiled into `build/libjr.so` |
 | `dev/` | **development only**: local test and benchmark tooling (podman, k6/wrk, `tools.jl`), see below |
 | `stress-results.csv` | every local stress run, one row each (written by `dev/`) |
 
@@ -82,6 +84,11 @@ every 10 s (`JR_DEBUG=1`; bytes per request should stay 0). Off by default so me
 and memory are always sampled from the host side (cgroup files, `/proc`), outside the server's 1-CPU budget.
 The CSV's `debug` column says which mode a run used.
 
+The server's database copy lives on a per-run podman volume on the host's disk (`DATA=volume`, the default).
+`DATA=overlay` puts it on the container's own fuse-overlayfs instead, where throughput measured about twice
+as high (probably cheaper checkpoint fsyncs, not verified), so numbers there may flatter the server: runs
+before 2026-11-08 used it.
+
 Other settings: `NOTES` (free text in the row), `RAMP_UP` (30s, k6 and users), `WARMUP` (5s, blast),
 `CPUS` / `MEM` (1 / 2g), `SECCOMP=default` (podman's default profile, which blocks io_uring).
 
@@ -112,4 +119,9 @@ wrk users (`GEN=users`, think time per connection) are cheap, so they reach the 
 | epoll + heap-hint 512M | 10,000 | 60,000 (990 MB) | 23,832, n=12 |
 | P3: shared buffers | – | 60,000 (315 MB) | 21,288 (-11%), n=6 |
 | P4: io_uring | – | 175,000 (396 MB) | 24,699 (+16%), n=4 |
+| P5.2: checkpoint auto | – | – | 11,448 (-54%), n=3 |
+| P5.2: checkpoint thread | – | – | 32,668 (+185%), n=3 |
+| P5.3: write hold | – | 225,000 (460 MB) | 30,557 (-6%), n=1 |
+| P5.3b: restart loop | – | 175,000 (426 MB) | – |
+| P5.3b: restart thread | – | 175,000 (428 MB) | – |
 <!-- results:end -->

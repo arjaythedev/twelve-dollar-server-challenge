@@ -32,8 +32,6 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <sys/prctl.h>
-#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -394,7 +392,6 @@ typedef struct {
 
 static sqlite3 *g_db;
 static const char *g_db_path;
-static volatile sig_atomic_t g_wal_checkpoint_child = -1;
 static pthread_t g_wal_checkpoint_thread;
 static sem_t g_wal_checkpoint_sem;
 static _Atomic int g_wal_checkpoint_sem_ready;
@@ -2095,127 +2092,7 @@ static int start_wal_checkpoint_thread(void) {
     return 0;
 }
 
-/* Fork while SQLite is initialized and the challenge VFS is registered, but
- * before either process opens a connection. This gives the helper an isolated
- * SQLite cache and lets it checkpoint without sharing the event-loop process. */
-static void wal_checkpoint_helper_main(const char *path, pid_t parent_pid) {
-    if (prctl(PR_SET_PDEATHSIG, SIGKILL) != 0 || getppid() != parent_pid) {
-        _exit(0);
-    }
-    if (setpriority(PRIO_PROCESS, 0, 10) != 0) {
-        fprintf(stderr, "could not lower SQLite checkpoint helper priority: %s\n",
-                strerror(errno));
-    }
-
-    sqlite3 *db = NULL;
-    for (;;) {
-        sleep(1);
-        if (getppid() != parent_pid) _exit(0);
-
-        if (!db) {
-            int rc = sqlite3_open_v2(path, &db,
-                                     SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX,
-                                     CHALLENGE_WAL_VFS_NAME);
-            if (rc != SQLITE_OK) {
-                fprintf(stderr, "SQLite checkpoint helper open failed: %s\n",
-                        db ? sqlite3_errmsg(db) : sqlite3_errstr(rc));
-                if (db) sqlite3_close(db);
-                db = NULL;
-                continue;
-            }
-            sqlite3_busy_timeout(db, 5000);
-            sqlite3_stmt *mode = NULL;
-            rc = sqlite3_prepare_v2(db, "PRAGMA journal_mode", -1, &mode, NULL);
-            bool wal_mode = false;
-            if (rc == SQLITE_OK && sqlite3_step(mode) == SQLITE_ROW) {
-                const unsigned char *mode_text = sqlite3_column_text(mode, 0);
-                wal_mode = mode_text &&
-                    sqlite3_stricmp((const char *)mode_text, "wal") == 0;
-            }
-            if (mode) sqlite3_finalize(mode);
-            if (!wal_mode) {
-                sqlite3_close(db);
-                db = NULL;
-                continue;
-            }
-            char *error = NULL;
-            rc = sqlite3_exec(db,
-                              "PRAGMA synchronous=NORMAL;"
-                              "PRAGMA wal_autocheckpoint=0;"
-                              "PRAGMA mmap_size=0;"
-                              "SELECT 1 FROM sqlite_schema LIMIT 1;",
-                              NULL, NULL, &error);
-            if (rc != SQLITE_OK) {
-                fprintf(stderr, "SQLite checkpoint helper attach failed: %s\n",
-                        error ? error : sqlite3_errmsg(db));
-                sqlite3_free(error);
-                sqlite3_close(db);
-                db = NULL;
-                continue;
-            }
-            sqlite3_free(error);
-        }
-
-        int log_frames = -1;
-        int checkpointed_frames = -1;
-        int rc = sqlite3_wal_checkpoint_v2(db, NULL, SQLITE_CHECKPOINT_PASSIVE,
-                                           &log_frames, &checkpointed_frames);
-        if (rc != SQLITE_OK && rc != SQLITE_BUSY && rc != SQLITE_LOCKED) {
-            fprintf(stderr,
-                    "SQLite checkpoint helper failed: %s (log=%d checkpointed=%d)\n",
-                    sqlite3_errmsg(db), log_frames, checkpointed_frames);
-            sqlite3_close(db);
-            db = NULL;
-        }
-    }
-}
-
-static pid_t start_wal_checkpoint_helper(void) {
-    if (getenv("NO_CKPT_CHILD")) return -1;
-    pid_t parent_pid = getpid();
-    pid_t pid = fork();
-    if (pid < 0) {
-        fprintf(stderr, "could not fork SQLite checkpoint helper: %s\n",
-                strerror(errno));
-        return -1;
-    }
-    if (pid == 0) {
-        wal_checkpoint_helper_main(g_db_path, parent_pid);
-        _exit(0);
-    }
-    g_wal_checkpoint_child = pid;
-    fprintf(stderr, "SQLite checkpoint helper started (pid %d)\n", (int)pid);
-    return pid;
-}
-
-static void start_wal_checkpoint_service(void) {
-    if (g_wal_checkpoint_child > 0) {
-        int rc = sqlite3_wal_autocheckpoint(g_db, 50000);
-        if (rc == SQLITE_OK) {
-            fprintf(stderr,
-                    "SQLite checkpoint helper active (50,000-frame safety checkpoint)\n");
-            return;
-        }
-        fprintf(stderr, "could not set checkpoint safety limit: %s\n",
-                sqlite3_errmsg(g_db));
-        (void)kill(g_wal_checkpoint_child, SIGKILL);
-        (void)waitpid(g_wal_checkpoint_child, NULL, 0);
-        g_wal_checkpoint_child = -1;
-    }
-    (void)start_wal_checkpoint_thread();
-}
-
 static void wal_checkpoint_fallback_if_needed(void) {
-    if (g_wal_checkpoint_child > 0) {
-        int status = 0;
-        pid_t reaped = waitpid(g_wal_checkpoint_child, &status, WNOHANG);
-        if (reaped == g_wal_checkpoint_child) {
-            fprintf(stderr,
-                    "SQLite checkpoint helper exited; starting thread fallback\n");
-            g_wal_checkpoint_child = -1;
-            (void)start_wal_checkpoint_thread();
-        }
-    }
     if (atomic_exchange_explicit(&g_wal_checkpoint_failed, 0,
                                  memory_order_acq_rel) == 0) {
         return;
@@ -2226,7 +2103,7 @@ static void wal_checkpoint_fallback_if_needed(void) {
             rc == SQLITE_OK ? "enabled" : "failed");
 }
 
-static int init_db_runtime(void) {
+static int init_db(void) {
     if (sqlite3_initialize() != SQLITE_OK) {
         fprintf(stderr, "sqlite initialize failed\n");
         return -1;
@@ -2240,11 +2117,6 @@ static int init_db_runtime(void) {
     const char *path = getenv("SQLITE_PATH");
     if (!path || !*path) path = "seed/feed.db";
     g_db_path = path;
-    return 0;
-}
-
-static int init_db_connection(void) {
-    const char *path = g_db_path;
     int flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX;
     if (sqlite3_open_v2(path, &g_db, flags, CHALLENGE_WAL_VFS_NAME) != SQLITE_OK) {
         fprintf(stderr, "sqlite open failed: %s\n", g_db ? sqlite3_errmsg(g_db) : "out of memory");
@@ -4766,13 +4638,6 @@ static int run_ring_server(const int *listeners, unsigned listener_count) {
 
 static void on_signal(int sig) {
     (void)sig;
-    pid_t checkpoint_child = (pid_t)g_wal_checkpoint_child;
-    g_wal_checkpoint_child = -1;
-    if (checkpoint_child > 0) {
-        (void)kill(checkpoint_child, SIGTERM);
-        while (waitpid(checkpoint_child, NULL, 0) < 0 && errno == EINTR) {
-        }
-    }
     _exit(0);
 }
 
@@ -4787,10 +4652,8 @@ int main(void) {
                 sqlite3_errstr(pcache_rc));
         return 1;
     }
-    if (init_db_runtime() != 0) return 1;
-    (void)start_wal_checkpoint_helper();
-    if (init_db_connection() != 0) return 1;
-    start_wal_checkpoint_service();
+    if (init_db() != 0) return 1;
+    (void)start_wal_checkpoint_thread();
     const char *host = getenv("HOST");
     const char *port = getenv("PORT");
     if (!host || !*host) host = "127.0.0.1";

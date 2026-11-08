@@ -65,8 +65,6 @@
 #define WAL_HOLD_MAX_NS 250000000ULL
 #define WAL_HOLD_RETRY_NS 1000000L
 #define WAL_HOLD_RETRY_LIMIT 250U
-#define WAL_CHECKPOINT_BULK_ROUNDS 4U
-#define WAL_CHECKPOINT_BULK_TAIL_FRAMES 128
 #define WAL_DATABASE_CHUNK_SIZE (64 * 1024 * 1024)
 #define WAL_CHECKPOINT_IDLE_NS 250000000L
 #define WAL_RESUME_BATCH 128
@@ -395,7 +393,6 @@ typedef struct {
 
 static sqlite3 *g_db;
 static const char *g_db_path;
-static int g_wal_database_sync_fd = -1;
 static pthread_t g_wal_checkpoint_thread;
 static sem_t g_wal_checkpoint_sem;
 static _Atomic int g_wal_checkpoint_sem_ready;
@@ -1937,25 +1934,6 @@ static bool wal_checkpoint_needed(int log_frames, int checkpointed_frames) {
            checkpointed_frames >= 0 && checkpointed_frames < log_frames;
 }
 
-static bool wal_checkpoint_bulk_needed(int log_frames,
-                                       int checkpointed_frames) {
-    return log_frames > 0 && checkpointed_frames >= 0 &&
-           log_frames - checkpointed_frames >
-               WAL_CHECKPOINT_BULK_TAIL_FRAMES;
-}
-
-static void wal_sync_database_file(void) {
-    if (g_wal_database_sync_fd < 0) return;
-    int rc;
-    do {
-        rc = fdatasync(g_wal_database_sync_fd);
-    } while (rc != 0 && errno == EINTR);
-    if (rc != 0) {
-        fprintf(stderr, "SQLite checkpoint database fdatasync failed: %s\n",
-                strerror(errno));
-    }
-}
-
 static void sqlite_set_database_chunk_size(sqlite3 *db) {
     int chunk_size = WAL_DATABASE_CHUNK_SIZE;
     int rc = sqlite3_file_control(db, "main", SQLITE_FCNTL_CHUNK_SIZE,
@@ -2020,54 +1998,6 @@ static void *wal_checkpoint_main(void *arg) {
             wal_advise_checkpointed_pages(db, log_frames, checkpointed_frames);
         }
 #endif
-
-        if (!wal_checkpoint_needed(log_frames, checkpointed_frames)) continue;
-
-        /* Bulk-checkpoint without pausing writes, keeping only a small tail for
-         * the write hold. Syncing between passes keeps that final hold short. */
-        unsigned bulk_rounds = 1U;
-        while (bulk_rounds < WAL_CHECKPOINT_BULK_ROUNDS &&
-               wal_checkpoint_bulk_needed(log_frames, checkpointed_frames)) {
-            checkpoint_rc = SQLITE_ERROR;
-            rc = wal_checkpoint_passive(db, &log_frames, &checkpointed_frames,
-                                        &checkpoint_rc);
-            if (rc != 0) {
-                fprintf(stderr, "SQLite bulk checkpoint failed: %s\n",
-                        sqlite3_errmsg(db));
-                wal_set_write_hold(0);
-                atomic_store_explicit(&g_wal_checkpoint_failed, 1,
-                                      memory_order_release);
-                sqlite3_close(db);
-                return NULL;
-            }
-            ++bulk_rounds;
-#ifdef RING_WAL_FADVISE_TEST
-            if (checkpoint_rc == SQLITE_OK) {
-                wal_advise_checkpointed_pages(db, log_frames,
-                                              checkpointed_frames);
-            }
-#endif
-        }
-
-        wal_sync_database_file();
-        checkpoint_rc = SQLITE_ERROR;
-        rc = wal_checkpoint_passive(db, &log_frames, &checkpointed_frames,
-                                    &checkpoint_rc);
-        if (rc != 0) {
-            fprintf(stderr, "SQLite final passive checkpoint failed: %s\n",
-                    sqlite3_errmsg(db));
-            wal_set_write_hold(0);
-            atomic_store_explicit(&g_wal_checkpoint_failed, 1,
-                                  memory_order_release);
-            sqlite3_close(db);
-            return NULL;
-        }
-#ifdef RING_WAL_FADVISE_TEST
-        if (checkpoint_rc == SQLITE_OK) {
-            wal_advise_checkpointed_pages(db, log_frames, checkpointed_frames);
-        }
-#endif
-        wal_sync_database_file();
 
         if (!wal_checkpoint_needed(log_frames, checkpointed_frames)) continue;
 
@@ -2169,10 +2099,9 @@ static int start_wal_checkpoint_thread(void) {
     }
     (void)pthread_detach(g_wal_checkpoint_thread);
     fprintf(stderr,
-            "SQLite catch-up checkpoint thread started (%u frames, %llu ms max hold, nice 5, %u bulk rounds, %d-frame tail, %d MiB DB chunks)\n",
+            "SQLite catch-up checkpoint thread started (%u frames, %llu ms max hold, nice 5, %d MiB DB chunks)\n",
             WAL_HOLD_THRESHOLD_FRAMES,
             (unsigned long long)(WAL_HOLD_MAX_NS / 1000000ULL),
-            WAL_CHECKPOINT_BULK_ROUNDS, WAL_CHECKPOINT_BULK_TAIL_FRAMES,
             WAL_DATABASE_CHUNK_SIZE / (1024 * 1024));
     return 0;
 }
@@ -2221,12 +2150,6 @@ static int init_db(void) {
         return -1;
     }
     sqlite_set_database_chunk_size(g_db);
-    g_wal_database_sync_fd = open(path, O_RDONLY | O_CLOEXEC);
-    if (g_wal_database_sync_fd < 0) {
-        fprintf(stderr,
-                "SQLite checkpoint database sync descriptor unavailable: %s\n",
-                strerror(errno));
-    }
     if (prepare(g_db, &g_feed_stmt,
         "SELECT p.id,p.body,p.created_at,u.username,"
         "(SELECT count(*) FROM likes l WHERE l.post_id=p.id) "

@@ -54,13 +54,15 @@ foreground and reads the challenge's `HOST`, `PORT`, `SQLITE_PATH`, and
   [C io_uring PR #245](https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/245).
 - Writes use WAL and `synchronous=NORMAL`. Multiple writes may share a SQLite
   transaction; affected responses are held until commit succeeds. A background
-  checkpoint thread runs at nice 5, performs up to four passive bulk rounds
-  before holding writes for the remaining tail, and syncs the database around a
-  final passive checkpoint. SQLite uses 64 MiB database-file chunks backed by
-  `posix_fallocate`; the VFS coalesces WAL writes while preserving SQLite's I/O
-  barriers. The checkpoint approach adapts the documented technique from
+  checkpoint thread runs at nice 5 and can briefly hold writes for tail catch-up.
+  SQLite uses 64 MiB database-file chunks backed by `posix_fallocate`; the VFS
+  coalesces WAL writes while preserving SQLite's I/O barriers. The thread
+  priority and chunk-allocation approach adapts techniques from
   [Go io_uring PR #354](https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/354).
-  The program can advise the kernel to release already-checkpointed WAL pages.
+  The extra bulk rounds and database syncs tested at `4ea8223` were removed
+  after its official run; the maintainer reported that the extra passes did not
+  help on the challenge machine. The program can advise the kernel to release
+  already-checkpointed WAL pages.
 
 The code makes no schema or index changes and does not modify kernel settings
 or pin CPUs. Dependency and source licenses are retained with the vendored
@@ -116,11 +118,20 @@ challenge repository with a freshly generated seed. Optional additional checks:
   errors, 81% app CPU, and 1,185 MB peak RAM. A 230,000-user two-minute probe
   passed but its five-minute hold failed p99 at 1.08 s (85% CPU); 240,000
   failed p95 at 1.0 s. The leaderboard row remains 220,000 at `3e10490`.
+- The official run at `4ea8223`, which added bulk passive-checkpoint rounds
+  and database-file syncs, held **210,000 users for five minutes**: 20,531
+  req/s, p95 143.7 ms, p99 713.3 ms, zero errors, 80% app CPU, and 667 MB
+  peak RAM. The 220,000-user two-minute probe failed p99 at 1.32 s; 240,000
+  failed p95 at 3.2 s. The maintainer said the p99 was higher than the
+  `3949a1a` rerun at similar CPU and that the extra checkpoint passes did not
+  help. The result is a footnote; the 220,000 row remains at `3e10490`.
 
 The maintainer attributes the differences to run-to-run variation around the
 210,000–220,000-user edge. The leaderboard retains the 220,000 row from
 `3e10490` and records the subsequent 210,000, 209,000, 200,000, and 219,000
-runs in its footnote. The helper-process experiment was reverted; `3949a1a`
-uses the same server tree as `3e10490`. The current checkpoint-tuning candidate
-is unscored; these are official maintainer results, and local diagnostics are
-not leaderboard scores.
+runs in its footnote, including the 210,000-user result at `4ea8223`. The
+helper-process experiment was reverted; `3949a1a` uses the same server tree as
+`3e10490`. The current candidate retains the checkpoint-thread priority and
+database chunking changes but removes the extra passes and syncs; it is
+unscored. These are official maintainer results, and local diagnostics are not
+leaderboard scores.

@@ -1,4 +1,3 @@
 #!/usr/bin/env bash
-set -euo pipefail
-cd "$(dirname "$0")"
-exec ./bin/server
+# Runs the server in the foreground. Configured only by SQLITE_PATH, JWT_SECRET, HOST and PORT.
+exec "$(dirname "$0")/bin/server"

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
+# Runs once as root on a clean Ubuntu 24.04: the C toolchain and curl, nothing else.
 set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
 apt-get update
-DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-  build-essential ca-certificates curl perl
+apt-get install -y --no-install-recommends build-essential curl ca-certificates

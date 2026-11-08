@@ -392,7 +392,9 @@ Control run at `439fb17` (code byte-identical to the merged #279 version, README
 p99 (1.3 s / 1.8 s, 0 errors), 240,000 on refused connections (42 % errors). Re-run at `f4be994` (dex v0.9.32,
 `http.gather`): **175,000** (17,144 req/s, p95 248 / p99 425 ms, 0 err, 68 % CPU, 37 µs/req, 805 MB, 2026-11-08);
 180,000 and 200,000 failed the 2-minute probe on p99 (1.2 s / 1.7 s, 0 errors), 240,000 on refused connections (72 %
-errors).
+errors). Re-run at `28151db` (checkpointer sync before RESTART, 64 MB chunk size, `http.gather(64, 250)`): **190,000**
+(18,665 req/s, p95 43 / p99 804 ms, 0 err, 72 % CPU, 36 µs/req, 1,317 MB, 2026-11-08); 195,000 failed the 2-minute
+probe on p99 (2.1 s, 0 errors), 200,000 / 240,000 on refused connections (76 % / 82 % errors).
 
 ᵟ **rust-iouring-tbsvttr** stays on its merged #323 row. Its follow-up **#325** (`f87f432`, PCACHE2 max-key truncate
 filter, coalescing WAL shim VFS, interpolated B-tree descent for /feed; held, not merged: it didn't beat the merged row)

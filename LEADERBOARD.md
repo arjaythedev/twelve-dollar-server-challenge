@@ -430,10 +430,12 @@ probe on p95/p99, 0.55 / 1.75 s), not above this row or the merged 210,000, so i
 78 % CPU, 700 MB, 2026-11-08; 220,000 passed its 2-minute probe but failed the 5-minute hold on p95/p99, 2.93 / 6.63 s),
 so it isn't merged either. **`66aff42`** (README-only change, same server code) held **209,000**
 (20,477 req/s, p95 18.7 / p99 218.3 ms, 0 errors, 76 % CPU, 681 MB, 2026-11-08; 220,000 passed its 2-minute probe but
-failed the 5-minute hold on p99, 1.40 s), so it isn't merged either. The current head **`806aaa6`** (WAL checkpoint in a
+failed the 5-minute hold on p99, 1.40 s), so it isn't merged either. **`806aaa6`** (WAL checkpoint in a
 separate helper process, credits #289) held **210,000** (20,565 req/s, p95 77.6 / p99 246.0 ms, 0 errors, 72 % CPU,
 736 MB, 2026-11-08; 220,000 failed its 2-minute probe on p95/p99, 1.00 / 2.15 s), not above this row, so it isn't
-merged either. The 220,000 hold had 0 errors; 230,000 failed the 2-minute probe on p95/p99 (0.60 / 2.07 s, 85 %
+merged either. The current head **`0012110`** (reverts `806aaa6`; same server code as `3e10490`) held **200,000**
+(19,684 req/s, p95 12.1 / p99 46.2 ms, 0 errors, 74 % CPU, 636 MB, 2026-11-08; 210,000 failed its 2-minute probe on
+p95/p99, 0.20 / 1.99 s), so it isn't merged either. The 220,000 hold had 0 errors; 230,000 failed the 2-minute probe on p95/p99 (0.60 / 2.07 s, 85 %
 CPU) and 240,000 on p95 (3.8 s, 93 % CPU). The merged code is #341 (`abcc24a`, SQLite `cache_size` 8 → 64 MiB), which
 held **210,000** (20,594 req/s, p95 14.0 / p99 63.6 ms, 76 % CPU, 605 MB, 2026-11-07); 220,000 failed its 2-minute probe
 on p99 (1.95 s at 80 % CPU, 0 errors). Its merged #340 code (`a0443a9`) held **195,000** (19,189 req/s, p95 12.6 / p99

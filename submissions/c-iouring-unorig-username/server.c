@@ -4,6 +4,7 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <liburing.h>
+#include <link.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <pthread.h>
@@ -1209,6 +1210,19 @@ static void db_open(const char *path) {
   st_begin = prep("BEGIN"); st_commit = prep("COMMIT"); st_rollback = prep("ROLLBACK");
 }
 
+// Locks the code and read-only data of the binary and its libraries in RAM, within RLIMIT_MEMLOCK (8 MB by default).
+// With no swap, reclaim at the memory wall takes file-backed pages first, and the loop would then stall on major faults
+// reading its own code back from disk. Best effort, as in #245, #257 and #326.
+static int lock_segment(struct dl_phdr_info *i, size_t n, void *locked) {
+  for (int k = 0; k < i->dlpi_phnum; k++) {
+    const ElfW(Phdr) *p = &i->dlpi_phdr[k];
+    if (p->p_type != PT_LOAD || (p->p_flags & PF_W)) continue;
+    uintptr_t a = (i->dlpi_addr + p->p_vaddr) & ~(uintptr_t)4095, e = i->dlpi_addr + p->p_vaddr + p->p_memsz;
+    if (mlock((void *)a, e - a) == 0) *(size_t *)locked += e - a;
+  }
+  return 0;
+}
+
 #ifdef PGO_TRAIN
 #include "train.c"
 #endif
@@ -1243,6 +1257,8 @@ int main(int argc, char **argv) {
     if (bind(lfd[i], (struct sockaddr *)&a, sizeof a) || listen(lfd[i], 65535)) { perror("bind/listen"); return 1; }
   }
   arena = huge_alloc(BATCH_OUT);
+  size_t locked = 0; dl_iterate_phdr(lock_segment, &locked);
+  fprintf(stderr, "locked %zu KB of code and read-only data\n", locked >> 10);
   if (ring_init(0) < 0) { fprintf(stderr, "io_uring setup failed (needs Linux 6.1+ with io_uring enabled)\n"); return 1; }
   arm_wal_msg();
   run();

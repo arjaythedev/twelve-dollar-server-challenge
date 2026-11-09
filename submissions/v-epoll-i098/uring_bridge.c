@@ -26,6 +26,7 @@
 #define BATCH_NS 4000000 /* Bound completion coalescing before one SQLite transaction. */
 #define PENDING_LIMIT (1u << 20) /* Input held while the application is busy; more closes the client. */
 #define TD_CANCEL (UINT64_MAX - 1)
+static const int td_zero = 0;
 
 enum { FREE, ACCEPT, RECV, SEND, CLOSE, APPLICATION };
 
@@ -175,10 +176,10 @@ static void td_submit(struct td_net *net, struct td_ring *r)
         int slot = r->ready_head;
         struct td_client *c = &r->clients[slot];
         /* A close cancels the armed receive first; the hard link runs the close if nothing matched. */
-        unsigned need = c->operation == CLOSE && c->armed ? 2 : 1;
+        unsigned need = (c->operation == CLOSE && c->armed) || c->operation == SEND ? 2 : 1;
         if (io_uring_sq_space_left(&r->ring) < need) break;
         struct io_uring_sqe *sqe = io_uring_get_sqe(&r->ring);
-        if (need == 2) {
+        if (c->operation == CLOSE && need == 2) {
             td_prep_cancel(sqe, slot);
             sqe->flags |= IOSQE_IO_HARDLINK;
             sqe = io_uring_get_sqe(&r->ring);
@@ -201,6 +202,14 @@ static void td_submit(struct td_net *net, struct td_ring *r)
             break;
         case SEND:
             assert(c->sent < c->output_len);
+            /* TCP_QUICKACK 0 puts the socket back in delayed-ACK (pingpong) mode, which a reply
+             * later than the delayed-ACK timer ends; then the next request would get its own ACK
+             * packet instead of riding on the reply. Errors (kernels before 6.7) are ignored. */
+            io_uring_prep_cmd_sock(sqe, SOCKET_URING_OP_SETSOCKOPT, slot, IPPROTO_TCP, TCP_QUICKACK,
+                                   (void *)&td_zero, sizeof(td_zero));
+            sqe->flags |= IOSQE_FIXED_FILE | IOSQE_CQE_SKIP_SUCCESS;
+            sqe->user_data = TD_CANCEL;
+            sqe = io_uring_get_sqe(&r->ring);
             io_uring_prep_send(sqe, slot, c->output + c->sent,
                                c->output_len - c->sent, MSG_NOSIGNAL);
             sqe->flags |= IOSQE_FIXED_FILE;

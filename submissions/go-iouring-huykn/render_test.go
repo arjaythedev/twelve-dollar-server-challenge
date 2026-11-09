@@ -98,13 +98,11 @@ func TestRenderDatabase(t *testing.T) {
 		if !bytes.Equal(guard[limit:], bytes.Repeat([]byte{0xa5}, len(guard)-limit)) {
 			t.Fatal("write beyond capacity")
 		}
-		c := &connection{in: []byte("GET /feed HTTP/1.1\r\nHost: test\r\n\r\n"), out: make([]byte, 0, 65536)}
-		c.used = len(c.in)
-		s := &server{app: a}
-		if err := s.respond(7, c); err != nil {
-			t.Fatal(err)
-		}
-		if len(s.ready) != 1 || s.ready[0] != 7 || c.sending || !bytes.Equal(c.out, feed) {
+		s := &server{app: a, rings: []*ring{{conns: make([]conn, 1)}}}
+		c := &s.rings[0].conns[0]
+		*c = conn{gen: 1, flags: fOpen}
+		s.serve(0, 0, c, []byte("GET /feed HTTP/1.1\r\nHost: test\r\n\r\n"))
+		if len(s.touched) != 1 || c.flags&fSending != 0 || c.wire != 0 || !bytes.Equal(s.buf(c.out), feed) {
 			t.Fatal("response sent before commit")
 		}
 		if !dbCommit() {

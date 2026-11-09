@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Linux regression: real EMFILE, repeated reconnects, and subsequent recovery.
+"""Linux regression: held direct connections exceed the process descriptor limit.
 
 Run after build.sh; only the child server gets the reduced descriptor limit.
 All database changes and logs stay in a temporary directory.
@@ -41,7 +41,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--server", type=Path, default=root / "bin/server")
     parser.add_argument("--limit", type=int, default=128)
+    parser.add_argument("--connections", type=int, default=384)
     args = parser.parse_args()
+    assert args.connections > args.limit, "connections must exceed the descriptor limit"
     assert args.limit >= 64, "use at least 64 descriptors"
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
@@ -76,41 +78,23 @@ def main():
                 health(client)
                 clients.append(client)
                 peak = 0
-                # Keep every client-side socket open. Only server-side pressure
-                # relief can free enough descriptors to answer all these calls.
-                for _ in range(args.limit * 3):
-                    client = socket.create_connection(("127.0.0.1", port), timeout=3)
+                # Spread client addresses across loopback IPs so the client's
+                # ephemeral port range does not cap the held-connection test.
+                for i in range(args.connections - 1):
+                    source = (f"127.0.0.{2 + i // 20000}", 0)
+                    client = socket.create_connection(("127.0.0.1", port), timeout=3,
+                                                      source_address=source)
                     clients.append(client)
                     health(client)
                     peak = max(peak, len(os.listdir(f"/proc/{process.pid}/fd")))
                     assert process.poll() is None, "server exited on descriptor exhaustion"
-                retired = sum(client.recv(1, socket.MSG_PEEK | socket.MSG_DONTWAIT) == b""
-                              for client in clients[:-args.limit] if readable(client))
-                assert peak >= args.limit - 4, f"descriptor pressure not reached: {peak}"
-                assert retired > 0, "server did not retire any idle connections"
-                assert process.poll() is None, "server exited after pressure"
+                # Every socket must remain usable: idle eviction would fail here.
                 for client in clients:
-                    client.close()
-                clients.clear()
-                with socket.create_connection(("127.0.0.1", port), timeout=3) as client:
                     health(client)
-                    health(client)  # Persistent connections still work after recovery.
-                # Exhaust descriptors again with first requests still pending:
-                # there are no completed keep-alives eligible for eviction.
-                for _ in range(args.limit * 2):
-                    clients.append(socket.create_connection(("127.0.0.1", port), timeout=3))
-                time.sleep(0.05)
-                assert process.poll() is None, "server exited with no idle eviction candidate"
-                for client in clients[:4]:
-                    health(client)  # Existing requests progress while accept backs off.
-                for client in clients:
-                    client.close()
-                clients.clear()
-                with socket.create_connection(("127.0.0.1", port), timeout=3) as client:
-                    health(client)
-                print(f"PASS: limit={args.limit}, peak_fds={peak}, "
-                      f"requests={args.limit * 3 + 8}, retired_idle={retired}, "
-                      "no-idle recovery passed, server alive")
+                assert peak < args.limit, f"ordinary descriptor budget exhausted: {peak}"
+                assert process.poll() is None, "server exited after held-connection check"
+                print(f"PASS: limit={args.limit}, held_connections={len(clients)}, "
+                      f"peak_process_fds={peak}, all keep-alives reusable")
             except BaseException:
                 log.flush()
                 log.seek(0)
@@ -126,12 +110,6 @@ def main():
                     process.kill()
                     process.wait()
 
-
-def readable(connection):
-    import select
-    poller = select.poll()
-    poller.register(connection, select.POLLIN)
-    return bool(poller.poll(0))
 
 
 if __name__ == "__main__":

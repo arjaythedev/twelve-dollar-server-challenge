@@ -1,17 +1,17 @@
 # Go + io_uring + SQLite
 
-A direct HTTP server using `github.com/godzie44/go-uring`, per-request HS256
+A direct HTTP server using a local io_uring binding, per-request HS256
 verification, an independent indexed database read plan, and SQL writes batched
 before response sends. JSON output is built directly in Go.
 
 | Component | Configuration |
 |---|---|
 | Runtime | Go 1.27.3, cgo, one locked event-loop thread |
-| Networking | `github.com/godzie44/go-uring` at `d16a9e597639` |
+| Networking | Direct descriptors over multiple rings; shared provided buffers |
 | Database | Stock SQLite 3.54.1, downloaded and checksum-verified at build time |
 | HTTP / JSON / JWT | Application code and standard-library cryptography |
 | Deployment | Direct on `HOST:PORT`; `0.0.0.0:80` for the benchmark |
-| Platform | Linux with io_uring enabled |
+| Platform | Linux with sparse direct descriptors, multishot receives and deferred task work |
 
 ## Database design
 
@@ -55,8 +55,9 @@ query and skip a write transaction if already present.
 
 ## Transactions and checkpoints
 
-The loop drains at most 256 ready completions per pass. Writes and indexed reads
-start a deferred transaction on demand. Later requests in the same pass can see
+The loop waits up to 1 ms or 256 completions and stages up to 2,048 receive
+answers per pass. Writes and indexed reads start a deferred transaction on
+demand. Later requests in the same pass can see
 its writes. Responses remain staged until commit succeeds; commit failure turns
 all staged responses into errors. Implicit SQLite rollback is tracked so lost
 writes cannot be acknowledged as successful.
@@ -96,19 +97,24 @@ bash test/run.sh submissions/go-iouring-huykn
 
 `start.sh` stays in the foreground. Runtime configuration uses `SQLITE_PATH`,
 `JWT_SECRET`, `HOST`, and `PORT`; the default address is `127.0.0.1:3000`.
-Connections retain receive/send buffers until io_uring completion. Fragmented
-requests, pipelining and partial sends are supported, with no keep-alive timeout.
-On descriptor exhaustion (`EMFILE`/`ENFILE`), the loop retires up to 256 idle
-connections and retries accept after an asynchronous 10 ms delay. Pending reads
-complete before their descriptors close; active requests and sends continue.
-This allows more users to share the descriptor budget through reconnects, rather
-than exiting at the hard limit. Connections still use ordinary process file
-descriptors: this recovery does not increase the simultaneous connection limit,
-and reconnect churn can limit throughput above it. Reproduce with a
-128-descriptor server limit:
+Accepted sockets occupy a sparse direct-descriptor table per ring. The server
+adds rings before each table fills (up to 16), without retiring idle keep-alives.
+Eight `SO_REUSEPORT` listeners have up to 512 accepts in flight. Each idle
+connection uses a 24-byte record and no private receive/response buffers.
+
+Each ring shares 1,024 receive buffers of 2 KiB. Multishot receives select a
+buffer when data arrives; buffer exhaustion falls back to bounded single reads.
+Fragmented requests retain only their incomplete bytes; response buffers return
+to bounded pools after sends complete. Generation tags reject stale completions.
+Pipelining and partial sends remain supported, with no keep-alive timeout.
+Go GC uses a 512 MiB soft memory limit; C SQLite and mmap memory are outside it.
+
+Verify that held connections remain usable beyond the process fd limit:
 
 ```sh
-python3 submissions/go-iouring-huykn/testdata/fd_exhaustion.py
+cd submissions/go-iouring-huykn
+python3 testdata/fd_exhaustion.py
+python3 testdata/fd_exhaustion.py --limit 65535 --connections 70000
 ```
 
 Use disposable seed copies for database-backed tests:
@@ -144,16 +150,19 @@ cp ../../seed/feed.db /tmp/huykn-contract.db
 /tmp/huykn-store-test /tmp/huykn-contract.db
 ```
 
-[BENCHMARKS.md](BENCHMARKS.md) records the local comparison and its limits.
 These microbenchmarks are not the organizer's full-server score.
 
 ## Credits
 
-Some application/response, validation, and startup helpers derive from
-[go-iouring-trungdlp](../go-iouring-trungdlp/). The byte-oriented JSON visitor
+The local binding (`uring.go`) and multi-ring connection loop (`server.go`)
+are adapted from [go-iouring-trungdlp](../go-iouring-trungdlp/), including direct
+descriptors, provided buffers, receive recovery and response pools. Some
+application/response, validation, and startup helpers also derive from it.
+The port retains this entry's database and commit handling and adds submission
+accounting and cleanup. There are no third-party Go dependencies.
+The byte-oriented JSON visitor
 and pass-level commit design were also informed by
-[rust-iouring-kensac](../rust-iouring-kensac/). Networking uses
-[godzie44/go-uring](https://github.com/godzie44/go-uring).
+[rust-iouring-kensac](../rust-iouring-kensac/).
 
 The database adapter, indexed read-plan module, sparse like-index merge, result
 ownership, and per-handle checkpoint lifecycle are implemented in this entry.

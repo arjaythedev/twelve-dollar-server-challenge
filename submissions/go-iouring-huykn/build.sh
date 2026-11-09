@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Builds as a normal user: fetches the pinned SQLite amalgamation (sha256-checked) into sqlite/,
-# then compiles the server and SQLite for this CPU. Go modules are pinned in go.mod/go.sum.
+# then compiles the server and SQLite for this CPU. No third-party Go modules are needed.
 set -euo pipefail
 cd "$(dirname "$0")"
 export PATH="/usr/local/go/bin:$PATH"

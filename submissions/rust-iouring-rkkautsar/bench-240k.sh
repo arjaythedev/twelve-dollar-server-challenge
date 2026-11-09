@@ -3,6 +3,15 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 submission="$PWD/submissions/rust-iouring-rkkautsar"
+# Keep only the five most recent result directories; each holds a 249 MB
+# database copy, so a long session of runs would otherwise fill the disk.
+# Files written by a container are root-owned, so fall back to removing them
+# from a container. Never fail the run over cleanup.
+for stale in $(ls -dt /tmp/feed-240k.* 2>/dev/null | tail -n +5); do
+  rm -rf "$stale" 2>/dev/null \
+    || docker run --rm -v /tmp:/t --entrypoint rm lgipimg:latest -rf "/t/$(basename "$stale")" >/dev/null 2>&1 \
+    || true
+done
 run_dir=$(mktemp -d /tmp/feed-240k.XXXXXX)
 name="feed240k-$$"
 link_prefix="v$$"
@@ -51,6 +60,11 @@ cleanup() {
   docker logs "$name-server" >"$run_dir/server.log" 2>&1 || true
   docker inspect "$name-client" >"$run_dir/client-inspect.json" 2>&1 || true
   docker rm -f "$name-server" "${containers[@]}" >/dev/null 2>&1 || true
+  # The run directory carries a 249 MB copy of the seed database plus its WAL.
+  # Keep the logs and results, drop the database, so runs do not fill the disk.
+  rm -rf "$run_dir/data" 2>/dev/null \
+    || docker run --rm -v "$run_dir:/c" --entrypoint rm lgipimg:latest -rf /c/data >/dev/null 2>&1 \
+    || true
   docker run --rm --privileged --cgroupns host lgipimg:latest \
     cat "$cgroup_path/memory.events" >"$run_dir/cgroup-memory.events" 2>&1 || true
   docker run --rm --privileged --cgroupns host lgipimg:latest \

@@ -85,15 +85,15 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | 13 | fortran-iouring-oh-meh | #332 | Fortran (io_uring, SQLite B-tree reads) | **270,000** | 25,823 | 189.9 | 720.5 | 0.00 | 85 | 30 | 1,041 | 2026-11-06 |
 | 13 | go-iouring-trungdlp | #343 | Go (io_uring, cgo SQLite B-tree reads) | **270,000** ᶿ | 25,841 | 99.5 | 246.0 | 0.00 | 81 | 28 | 736 | 2026-11-07 |
 | 13 | go-iouring-davidefrageri | #354 | Go (io_uring, cgo SQLite B-tree reads) | **270,000** ᴰ | 25,841 | 62.9 | 328.3 | 0.00 | 78 | 27 | 1,214 | 2026-11-08 |
-| 21 | rust-epoll-scooter1337 | #82 | Rust (io_uring) | **264,000** ˣ | 25,147 | 259 | 499 | 0.00 | 84 | 30 | 630 | 2026-10-21 |
-| 22 | csharp-kestrel-mbobka | #316 | C# (.NET 10 ReadyToRun, Kestrel host, io_uring) | **260,000** | 24,980 | 134 | 286 | 0.00 | 82 | 30 | 692 | 2026-11-05 |
-| 23 | v-epoll-i098 | #191 | V (io_uring, SQLite B-tree reads) | **257,000** ᵂ | 24,766 | 13.5 | 29 | 0.00 | 74 | 27 | 732 | 2026-10-30 |
-| 23 | c-iouring-oix7 | #296 | C (io_uring, SQLite B-tree reads) | **257,000** | 24,654 | 239 | 796 | 0.00 | 76 | 28 | 905 | 2026-11-04 |
-| 23 | swift-iouring-c2p-cmd | #314 | Swift (io_uring, SQLite B-tree reads) | **257,000** ⁱ | 24,737 | 55.9 | 163.6 | 0.00 | 76 | 28 | 675 | 2026-11-05 |
-| 26 | asm-iouring-unorig-username | #206 | x86-64 asm (io_uring) | **250,000** | 24,053 | 141 | 397 | 0.00 | 91 | 34 | 1,486 | 2026-10-30 |
-| 26 | ada-native-visseranalytics | #237 | Ada (GNAT, io_uring) | **250,000** | 24,119 | 84 | 286 | 0.00 | 77 | 29 | 1,169 | 2026-11-01 |
-| 26 | c-rawuring-thehimalayanleo | #269 | C (io_uring, SQLite B-tree reads) | **250,000** | 24,014 | 220 | 359 | 0.00 | 79 | 30 | 970 | 2026-11-02 |
-| 26 | swift-iouring-akbashev | #361 | Swift (io_uring, SQLite B-tree reads) | **250,000** ᴬ | 24,108 | 83.2 | 222.7 | 0.00 | 85 | 32 | 1,293 | 2026-11-09 |
+| 13 | swift-iouring-akbashev | #371 | Swift (io_uring, SQLite B-tree reads) | **270,000** ᴬ | 25,841 | 87.4 | 216.1 | 0.00 | 89 | 31 | 1,200 | 2026-11-09 |
+| 22 | rust-epoll-scooter1337 | #82 | Rust (io_uring) | **264,000** ˣ | 25,147 | 259 | 499 | 0.00 | 84 | 30 | 630 | 2026-10-21 |
+| 23 | csharp-kestrel-mbobka | #316 | C# (.NET 10 ReadyToRun, Kestrel host, io_uring) | **260,000** | 24,980 | 134 | 286 | 0.00 | 82 | 30 | 692 | 2026-11-05 |
+| 24 | v-epoll-i098 | #191 | V (io_uring, SQLite B-tree reads) | **257,000** ᵂ | 24,766 | 13.5 | 29 | 0.00 | 74 | 27 | 732 | 2026-10-30 |
+| 24 | c-iouring-oix7 | #296 | C (io_uring, SQLite B-tree reads) | **257,000** | 24,654 | 239 | 796 | 0.00 | 76 | 28 | 905 | 2026-11-04 |
+| 24 | swift-iouring-c2p-cmd | #314 | Swift (io_uring, SQLite B-tree reads) | **257,000** ⁱ | 24,737 | 55.9 | 163.6 | 0.00 | 76 | 28 | 675 | 2026-11-05 |
+| 27 | asm-iouring-unorig-username | #206 | x86-64 asm (io_uring) | **250,000** | 24,053 | 141 | 397 | 0.00 | 91 | 34 | 1,486 | 2026-10-30 |
+| 27 | ada-native-visseranalytics | #237 | Ada (GNAT, io_uring) | **250,000** | 24,119 | 84 | 286 | 0.00 | 77 | 29 | 1,169 | 2026-11-01 |
+| 27 | c-rawuring-thehimalayanleo | #269 | C (io_uring, SQLite B-tree reads) | **250,000** | 24,014 | 220 | 359 | 0.00 | 79 | 30 | 970 | 2026-11-02 |
 | 30 | fsharp-kestrel-delneg | #201 | F# (Kestrel, io_uring) | **247,000** | 23,884 | 14 | 72 | 0.00 | 71 | 27 | 750 | 2026-10-30 |
 | 30 | lisp-sbcl-heyitstony97-max | #283 | Common Lisp (SBCL, io_uring, SQLite B-tree reads) | **247,000** | 23,772 | 251 | 596 | 0.00 | 79 | 30 | 1,187 | 2026-11-03 |
 | 32 | holyphp-io-uring-elifoxcoder | #336 | HolyPHP (io_uring, SQLite B-tree reads) | **244,000** ᵘ | 23,557 | 128.8 | 735.0 | 0.00 | 81 | 31 | 907 | 2026-11-07 |
@@ -657,15 +657,15 @@ direct-descriptor table nears full: 257,000 held at 76 % CPU (28 µs/req, 675 MB
 probe but failed the 5-minute hold on p99 (2.8 s), 280,000 failed on p99 (2.7 s). Its first run at `44dfa26` held only
 67,000: `GET /feed` timed out at 23 % CPU (0.34 % err at 67k, 1.78 % at 80k), the problem the new commit targets.
 
-ᴬ **swift-iouring-akbashev** is scored at its follow-up PR **#361** (`e417d34`, merged 2026-11-09: io_uring in pure
-Swift over syscalls, B-tree reads through SQLite's own `sqlite3Btree*` functions on the unmodified amalgamation,
-checkpointer through public APIs, lighter Swift install): 250,000 held at 85 % CPU, 0 errors; 260,000 failed the
-2-minute probe on p99 (1.07 s, 87 % CPU) and 280,000 on p99 (8.3 s). Its merged #297 code (`e3d25b3`) held **210,000**
-(20,571 req/s, p95 22.4 / p99 149.6 ms, 75 % CPU, 2026-11-05). Its first follow-up, #349 (`250251a`, reopened as #361),
-couldn't be scored: the box ran out of disk unpacking the Swift toolchain, not the entry's fault. Its later follow-up
-**#371** (`a04c2ad`, full LTO, checkpointer tuning; held, not merged: it writes a SQLite B-tree cursor field, see the rule
-flags) scored **280,000** (26,686 req/s, p95 96.5 / p99 229.4 ms, 0 err, 93 % CPU, 31 µs/req, 811 MB, 2026-11-09;
-290,000 failed the 2-minute probe on p99 10.0 s), so #361's row stays until a clean version is merged.
+ᴬ **swift-iouring-akbashev** is scored at its follow-up PR **#371** (`bd715b2`, merged 2026-11-09: full LTO,
+checkpointer tuning, like counts stepped entry by entry through `sqlite3BtreeNext`): 270,000 held at 89 % CPU, 0
+errors; 280,000 failed the 2-minute probe on p99 (2.6 s, 91 % CPU) and 320,000 on p99 (32 s). Its earlier #371 run
+(`a04c2ad`) held 280,000 but wrote SQLite's private `BtCursor.ix` field (ruling 8), so it wasn't merged; `bd715b2`
+drops that write. Its merged #361 code (`e417d34`: io_uring in pure Swift over syscalls, B-tree reads through SQLite's
+own `sqlite3Btree*` functions on the unmodified amalgamation, checkpointer through public APIs, lighter Swift install)
+held **250,000** (24,108 req/s, p95 83.2 / p99 222.7 ms, 85 % CPU, 2026-11-09) and its #297 code (`e3d25b3`)
+**210,000** (20,571 req/s, p95 22.4 / p99 149.6 ms, 75 % CPU, 2026-11-05). Its first follow-up, #349 (`250251a`,
+reopened as #361), couldn't be scored: the box ran out of disk unpacking the Swift toolchain, not the entry's fault.
 
 ᵒ **wat-wasmedge-delneg** is scored at its follow-up **#288** (`a5c516a`, shim VFS + checkpointer through public
 SQLite APIs; merged 2026-11-04): 220,000 held at 72 % CPU (31 µs/req, 913 MB); 230,000 and 240,000 failed the 2-minute
@@ -838,10 +838,6 @@ public plugin APIs (a custom page cache through `SQLITE_CONFIG_PCACHE2`, a custo
   `table_moveto` reimplements `sqlite3BtreeTableMoveto` (moveToRoot / moveToChild / findCell) and sets `BtCursor`
   fields (`ix`, `curFlags`, `info.nKey`, `info.nSize`). Same open question for Arjay as #296 / #317 / #318. Scored 240k
   at `4c2205c` (below the merged #191 row, footnote ᵂ); held open.
-- **swift-iouring-akbashev #371 (follow-up to #361) writes SQLite's private B-tree cursor fields**: `Cursor.swift`'s
-  `cellIndex` setter stores `BtCursor.ix` at a hard-coded offset before `sqlite3BtreeNext` (ruling 8), and
-  `Page.firstInteger(ofCell:)` decodes index leaf cells from page bytes itself (same open question as #296 / #317 /
-  #318). Scored 280k at `a04c2ad` (footnote ᴬ); held open, so #361's row (250k) stays.
 - **c-iouring-fajarreza-gif #302 reuses c-iouring-pavlyhalim #245's syscall layer**: `src/sys.h` (io_uring ABI/ring
   code, 415 lines) is byte-identical to #245's and `sha256.h` nearly so (credited in its README since `d7a2e70`);
   `server.c`, HTTP, JWT and the database code are new. Arjay ruled 2026-11-04: credited reuse is fine → merged at

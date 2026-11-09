@@ -176,26 +176,35 @@ saturated), five runs of each build:
 The old worst cases are write holds running into their 250 ms limit. The req/s ranges overlap: on
 this sandbox the cache stays small (about 1,500 pages), so the cache walk the fix removes is short.
 
-### One run on a DigitalOcean droplet
+### On DigitalOcean droplets (not the benchmark box)
 
-Before the changes above: a Basic droplet like the benchmark box (s-1vcpu-2gb, Ubuntu 24.04,
-kernel 6.8.0-147) serving directly, with eight 1-vCPU load-generator droplets running the k6 user
-model (a C rewrite of `bench/load.js`: same think times, mix and pass thresholds). Each step held
-its user count for 2 minutes, the final one for 5. CPU is the server's own cgroup, which leaves
-out interrupt handling and steal time, so the box was busier than these figures show.
+A Basic droplet of the benchmark box's size (s-1vcpu-2gb, Ubuntu 24.04, kernel 6.8.0-147) serving
+directly, eight 1-vCPU load-generator droplets running the k6 user model (a C rewrite of
+`bench/load.js`: same think times, mix and pass thresholds), and the leaderboard's search: 2-minute
+probes doubling from 40,000, bisecting to ~5%, then 5-minute holds stepping down 5%. Both servers
+ran on the same droplet, one after the other, each on a fresh copy of the seed. CPU is the server's
+own cgroup, which leaves out interrupt handling and steal time, so the box was busier than shown.
+
+**This code** (the second run):
 
 | users | this server | rust-iouring-kensac |
 |---|---|---|
-| 40,000 | pass · 17% CPU · 41.3 µs/req | pass · 21% CPU · 49.5 µs/req |
-| 80,000 | pass · 31% · 36.6 µs · p99 32 ms | pass · 34% · 39.9 µs · p99 31 ms |
-| 100,000 | | pass · 45% · 42.6 µs |
-| 120,000 | pass · 48% · 37.6 µs · p99 352 ms | fail · 56% · 44.2 µs · p99 3,558 ms |
-| 125,000, 5-minute hold | pass · 13,201 req/s · 53% · 40.1 µs · p99 643 ms · 362 MB cgroup peak | |
-| 130,000 / 140,000 | fail / fail | |
-| 160,000 | fail · 64% · 37.8 µs · p99 1,628 ms | fail · 73% · 43.1 µs · p99 2,538 ms |
+| 40,000 | pass · 18% CPU · 43.5 µs/req | pass · 20% · 47.7 µs |
+| 80,000 | pass · 34% · 40.3 µs · p99 56 ms | pass · 34% · 40.0 µs · p99 24 ms |
+| 120,000 | pass · 47% · 37.4 µs · p99 86 ms | pass · 58% · 45.7 µs · p99 379 ms |
+| 130,000 | pass · 57% · 41.6 µs · p99 795 ms | |
+| 135,000 | pass · 56% · 39.5 µs · p99 863 ms | |
+| 140,000 | fail · 59% · p99 1,014 ms | pass · 67% · 45.0 µs · p99 618 ms |
+| 145,000 / 150,000 | | fail / fail |
+| 160,000 | fail · 69% · p99 5,715 ms | fail · 77% · p99 3,603 ms |
+| **5-minute hold** | **135,000: pass** · 14,279 req/s · 54% · 37.5 µs · p99 372 ms | 140,000 fail (p99 1,660 ms), 133,000 fail (p99 2,695 ms), **126,000: pass** · 13,297 req/s · 64% · 48.3 µs · p99 776 ms |
 
-A shared vCPU adds noise, so treat this as one sample. Both servers fail while their own CPU
-reads 54–73%: with 1 vCPU, the rest goes to the kernel's network processing and to steal.
+Same droplet, same search: this server held 135,000 users for 5 minutes, rust-iouring-kensac
+(310,000 on the leaderboard) 126,000. A shared vCPU adds noise, and the search's 5% steps leave
+each limit somewhere between its last pass and its first fail, so this is one sample.
+
+The first run, on another droplet and before the checkpoint and page-cache changes above, held
+125,000 users (p99 643 ms), and kensac passed 100,000 and failed 120,000 in 2-minute probes.
 
 Correctness checks beyond `test/test.sh` (42/42):
 

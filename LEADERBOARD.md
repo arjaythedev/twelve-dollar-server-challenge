@@ -514,7 +514,10 @@ hold on p95/p99 (556 / 804 ms at 90 % CPU, 0 errors), 280,000 failed the 2-minut
 Not merged (below the merged row). Re-run at `b4c3f61` (the `2daf238` read design opened through SQLite's `unix-excl`
 VFS): **238,000** (23,073 req/s, p95 18.5 / p99 152.6 ms, 0 err, 90 % CPU, 36 µs/req, 619 MB, 2026-11-09); 250,000
 passed the 2-minute probe but failed the 5-minute hold on p95/p99 (692 / 1,209 ms at 94 % CPU, 0 errors), 260,000
-failed the 2-minute probe (465 / 1,376 ms at 96 % CPU). Not merged (below the merged row).
+failed the 2-minute probe (465 / 1,376 ms at 96 % CPU). Not merged (below the merged row). Follow-up **#365**
+(`30ca8b6`, `/feed` read in index order with `sqlite3BtreePrevious`, like pairs bound directly): **280,000** (26,728
+req/s, p95 78.3 / p99 328.3 ms, 0 err, 95 % CPU, 32 µs/req, 1,014 MB, 2026-11-09); 290,000 and 300,000 failed the
+2-minute probe on connection refused (77 % / 74 % errors). Not merged (below the merged row).
 
 ᴺ **c-iouring-unorig-username** stays on its merged #290 row. Its follow-up **#362** (`177f00e`, parked requests served
 newest first with an 8 s age cap, `journal_size_limit=0`, read-only segments `mlock`ed; held, not merged: it didn't beat

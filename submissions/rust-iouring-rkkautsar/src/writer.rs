@@ -6,6 +6,9 @@ use std::time::{Duration, Instant};
 use crate::db::{Stmt, WriteDb};
 use crate::{error, json_string, WriteCmd, WriteKind};
 
+// Batches this small are cheaper to bind than to serialise.
+const LIKE_DIRECT_MAX: usize = 4;
+
 const POST_INSERT_SQL: &str = "INSERT INTO posts (user_id, body)
                      SELECT CAST(value->>0 AS INTEGER), CAST(value->>1 AS TEXT)
                        FROM json_each(?1)
@@ -14,6 +17,10 @@ const LIKE_INSERT_SQL: &str = "INSERT INTO likes (user_id, post_id)
                      SELECT CAST(value->>0 AS INTEGER), CAST(value->>1 AS INTEGER)
                        FROM json_each(?1)
                       WHERE 1
+                      ON CONFLICT (user_id, post_id) DO NOTHING
+                     RETURNING user_id, post_id";
+const LIKE_INSERT_ONE_SQL: &str = "INSERT INTO likes (user_id, post_id)
+                     VALUES (?1, ?2)
                       ON CONFLICT (user_id, post_id) DO NOTHING
                      RETURNING user_id, post_id";
 const LIKE_INSERT_FILTERED_SQL: &str = "INSERT INTO likes (user_id, post_id)
@@ -30,6 +37,7 @@ const POST_EXISTS_SQL: &str = "SELECT CAST(value AS INTEGER)
 pub struct BatchCache {
     post_insert: Option<Stmt<'static>>,
     like_insert: Option<Stmt<'static>>,
+    like_insert_one: Option<Stmt<'static>>,
     like_insert_filtered: Option<Stmt<'static>>,
     post_exists: Option<Stmt<'static>>,
 }
@@ -39,6 +47,7 @@ impl BatchCache {
         Self {
             post_insert: db.prepare_static(POST_INSERT_SQL).ok(),
             like_insert: db.prepare_static(LIKE_INSERT_SQL).ok(),
+            like_insert_one: db.prepare_static(LIKE_INSERT_ONE_SQL).ok(),
             like_insert_filtered: db.prepare_static(LIKE_INSERT_FILTERED_SQL).ok(),
             post_exists: db.prepare_static(POST_EXISTS_SQL).ok(),
         }
@@ -262,31 +271,58 @@ pub fn run_batch(
             }
 
             if batch_ok && !pairs.is_empty() {
-                let json = serde_json::to_string(&pairs).unwrap_or_else(|_| "[]".to_string());
                 let mut inserted: HashSet<(i64, i64)> = HashSet::with_capacity(pairs.len());
                 let mut fallback = false;
 
                 // Optimistic path: no post-existence pre-check.  The
                 // FK on likes rejects a missing post; duplicate likes
                 // simply return no row.
-                match bulk_like.as_mut() {
-                    Some(st) => {
-                        st.reset();
-                        st.bind_text(1, &json);
-                        loop {
-                            match st.step() {
-                                Ok(true) => {
-                                    inserted.insert((st.column_i64(0), st.column_i64(1)));
-                                }
-                                Ok(false) => break,
-                                Err(_) => {
-                                    fallback = true;
-                                    break;
+                if pairs.len() <= LIKE_DIRECT_MAX {
+                    // Small batches bind the pair straight into the statement.
+                    // Formatting it as JSON only for json_each to parse it back
+                    // costs more than the pair itself.
+                    match cache.like_insert_one.as_mut() {
+                        Some(st) => {
+                            for pair in &pairs {
+                                st.reset();
+                                st.bind_i64(1, pair[0]);
+                                st.bind_i64(2, pair[1]);
+                                match st.step() {
+                                    Ok(true) => {
+                                        inserted.insert((pair[0], pair[1]));
+                                        while matches!(st.step(), Ok(true)) {}
+                                    }
+                                    Ok(false) => {}
+                                    Err(_) => {
+                                        fallback = true;
+                                        break;
+                                    }
                                 }
                             }
                         }
+                        None => batch_ok = false,
                     }
-                    None => batch_ok = false,
+                } else {
+                    let json = serde_json::to_string(&pairs).unwrap_or_else(|_| "[]".to_string());
+                    match bulk_like.as_mut() {
+                        Some(st) => {
+                            st.reset();
+                            st.bind_text(1, &json);
+                            loop {
+                                match st.step() {
+                                    Ok(true) => {
+                                        inserted.insert((st.column_i64(0), st.column_i64(1)));
+                                    }
+                                    Ok(false) => break,
+                                    Err(_) => {
+                                        fallback = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        None => batch_ok = false,
+                    }
                 }
 
                 let mut existing: HashSet<i64> = HashSet::new();

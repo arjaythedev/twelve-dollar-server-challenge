@@ -509,7 +509,10 @@ Re-run at `27343ac` (`-C target-cpu=native`): **257,000** (24,730 req/s, p95 115
 row). Re-run at `dbacabd` (one transaction per pass for reads and writes): **257,000** (24,452 req/s, p95 469.7 / p99
 672.0 ms, 0 err, 88 % CPU, 33 µs/req, 754 MB, 2026-11-08); 270,000 passed the 2-minute probe but failed the 5-minute
 hold on p95/p99 (556 / 804 ms at 90 % CPU, 0 errors), 280,000 failed the 2-minute probe (721 / 2,308 ms at 92 % CPU).
-Not merged (below the merged row).
+Not merged (below the merged row). Re-run at `b4c3f61` (the `2daf238` read design opened through SQLite's `unix-excl`
+VFS): **238,000** (23,073 req/s, p95 18.5 / p99 152.6 ms, 0 err, 90 % CPU, 36 µs/req, 619 MB, 2026-11-09); 250,000
+passed the 2-minute probe but failed the 5-minute hold on p95/p99 (692 / 1,209 ms at 94 % CPU, 0 errors), 260,000
+failed the 2-minute probe (465 / 1,376 ms at 96 % CPU). Not merged (below the merged row).
 
 ᴺ **c-iouring-unorig-username** stays on its merged #290 row. Its follow-up **#362** (`177f00e`, parked requests served
 newest first with an 8 s age cap, `journal_size_limit=0`, read-only segments `mlock`ed; held, not merged: it didn't beat

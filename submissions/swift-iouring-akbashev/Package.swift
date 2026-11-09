@@ -33,6 +33,8 @@ let package = Package(
                 .define("SQLITE_OMIT_TCL_VARIABLE"),
                 .define("SQLITE_USE_ALLOCA"),
                 .define("HAVE_FDATASYNC", to: "1"),
+                // Growing the database file by a chunk is one posix_fallocate, not a byte written into every block.
+                .define("HAVE_POSIX_FALLOCATE", to: "1"),
                 .define("HAVE_USLEEP", to: "1"),
                 .unsafeFlags(["-O3", "-Wno-everything"]),
             ]

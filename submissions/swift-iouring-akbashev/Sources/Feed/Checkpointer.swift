@@ -1,5 +1,5 @@
 // The one effect that leaves the main thread: copying the WAL back into the database file, whose fsync would otherwise
-// stall the loop. An actor on a thread of its own at the lowest priority (nice 19), so on one CPU it runs while the
+// stall the loop. An actor on a thread of its own at a low priority (nice 5), so on one CPU it mostly runs while the
 // loop waits, with a SQLite connection of its own that only copies: it never commits, since a commit from another
 // connection makes SQLite drop the loop connection's page cache. The loop starts a checkpoint without waiting for it,
 // and learns that it finished from an eventfd its ring reads: a completion like any other.
@@ -13,21 +13,41 @@ actor Checkpointer {
     nonisolated var unownedExecutor: UnownedSerialExecutor { executor.asUnownedSerialExecutor() }
 
     private let db: OpaquePointer
+    /// The database file, for syncing it before writes are held.
+    private let file: Int32
     /// Written when a checkpoint is done: `copiedAll`, or 1 if frames are left.
     private let done: Int32
     static let copiedAll: UInt64 = 2
 
     init(path: String, done: Int32) throws(StoreError) {
         db = try SQLite.open(path, cacheKiB: 8 * 1024)
+        file = Glibc.open(path, O_RDONLY | O_CLOEXEC)
         self.done = done
-        executor = ThreadExecutor(name: "checkpoint", nice: 19)
+        // At nice 19 it was starved exactly when the loop was saturated, so a hold ran out before the copy did; at
+        // nice 0 it takes half the CPU from the loop whenever both run. At 5 it gets about a quarter of a contended CPU.
+        executor = ThreadExecutor(name: "checkpoint", nice: 5)
     }
 
-    /// A PASSIVE checkpoint: it copies what no reader still needs and never waits for the loop's transaction.
-    func checkpoint() {
+    /// PASSIVE checkpoints: they copy what no reader still needs and never wait for the loop's transaction.
+    ///
+    /// `bulk`, while writes go on: up to four copies while more than 128 frames are left, then the database file
+    /// synced, one more copy, and another sync. A copy that doesn't finish the WAL writes its pages without syncing
+    /// them (SQLite syncs the file only once every frame is in), so the sync at the end of the held copy would flush
+    /// the whole cycle's pages while writes wait; synced here, the held copy is a few dozen frames. Otherwise (writes
+    /// held) one copy, which syncs.
+    func checkpoint(bulk: Bool) {
         var logged: Int32 = -1
         var copied: Int32 = -2
-        let rc = sqlite3_wal_checkpoint_v2(db, nil, SQLITE_CHECKPOINT_PASSIVE, &logged, &copied)
+        var rc = SQLITE_OK
+        for _ in 0..<(bulk ? 4 : 1) {
+            rc = sqlite3_wal_checkpoint_v2(db, nil, SQLITE_CHECKPOINT_PASSIVE, &logged, &copied)
+            if rc != SQLITE_OK || logged - copied <= 128 { break }
+        }
+        if bulk && rc == SQLITE_OK {
+            if file >= 0 { _ = fdatasync(file) }
+            rc = sqlite3_wal_checkpoint_v2(db, nil, SQLITE_CHECKPOINT_PASSIVE, &logged, &copied)
+            if file >= 0 { _ = fdatasync(file) }
+        }
         var result: UInt64 = rc == SQLITE_OK && logged == copied ? Self.copiedAll : 1
         _ = sys_write(done, &result, 8)
     }

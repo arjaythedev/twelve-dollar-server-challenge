@@ -517,7 +517,10 @@ passed the 2-minute probe but failed the 5-minute hold on p95/p99 (692 / 1,209 m
 failed the 2-minute probe (465 / 1,376 ms at 96 % CPU). Not merged (below the merged row). Follow-up **#365**
 (`30ca8b6`, `/feed` read in index order with `sqlite3BtreePrevious`, like pairs bound directly): **280,000** (26,728
 req/s, p95 78.3 / p99 328.3 ms, 0 err, 95 % CPU, 32 µs/req, 1,014 MB, 2026-11-09); 290,000 and 300,000 failed the
-2-minute probe on connection refused (77 % / 74 % errors). Not merged (below the merged row).
+2-minute probe on connection refused (77 % / 74 % errors). Not merged (below the merged row). Follow-up **#367**
+(`437252d`, #365 plus `READ_CACHE_MB` 64 → 256): **270,000** (25,819 req/s, p95 180.7 / p99 652.2 ms, 0 err, 95 % CPU,
+33 µs/req, 892 MB, 2026-11-09); 280,000 failed the 2-minute probe on p95/p99 (499 / 1,233 ms, 0 errors) and 320,000 on
+connection refused (74 % errors). Not merged (below the merged row).
 
 ᴺ **c-iouring-unorig-username** stays on its merged #290 row. Its follow-up **#362** (`177f00e`, parked requests served
 newest first with an 8 s age cap, `journal_size_limit=0`, read-only segments `mlock`ed; held, not merged: it didn't beat

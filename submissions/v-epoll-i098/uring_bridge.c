@@ -57,6 +57,7 @@ struct td_net {
     struct pollfd polls[RINGS + 1]; /* [RINGS] is the checkpoint eventfd */
     int wake; /* every ring signals this eventfd when work for the loop arrives */
     int listeners[RINGS], cursor, checkpoint_waiting;
+    uint64_t batch_at; /* CLOCK_MONOTONIC ns when td_net_next last returned events */
 };
 
 _Static_assert(TD_CAPACITY == RINGS * SLOTS, "capacity mismatch");
@@ -496,8 +497,13 @@ int td_net_next(struct td_net *net, struct td_event *events, int capacity, int t
             struct timespec clock;
             if (clock_gettime(CLOCK_MONOTONIC, &clock)) td_fail("batch clock", errno);
             uint64_t nanos = (uint64_t)clock.tv_sec * 1000000000 + clock.tv_nsec;
-            if (!flush_at) flush_at = nanos + BATCH_NS;
-            if (count == capacity || nanos >= flush_at || td_now() >= deadline) return count;
+            /* The window runs from the last return, so time the application spent on that batch
+             * counts: a saturated loop never sleeps, and no batch period is shorter than BATCH_NS. */
+            if (!flush_at) flush_at = net->batch_at + BATCH_NS;
+            if (count == capacity || nanos >= flush_at || td_now() >= deadline) {
+                net->batch_at = nanos;
+                return count;
+            }
             struct timespec pause = { .tv_nsec = (long)(flush_at - nanos) };
             /* Collect until the batch deadline instead of waking for each completion. */
             if (nanosleep(&pause, NULL) && errno != EINTR) td_fail("batch sleep", errno);

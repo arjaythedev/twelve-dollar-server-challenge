@@ -20,6 +20,9 @@ bounded result arena. Its independent read plan is in `btree_reader.h`, compiled
 after the pinned, unmodified SQLite amalgamation. `read_plan.h` isolates the
 private SQLite types from the rest of the server.
 
+SQLite initializes explicitly at connection startup. Shared-cache support,
+progress callbacks, and tracing are compiled out; connections use private caches.
+
 The read plan uses SQLite's read-only B-tree cursor operations. It does not
 modify SQLite pages or pager state:
 
@@ -139,6 +142,7 @@ isolation, the WAL growth barrier, and schema-cookie fallback:
 ```sh
 cc -O1 -DSQLITE_DEBUG -DSQLITE_THREADSAFE=2 -DSQLITE_DEFAULT_MEMSTATUS=0 -DSQLITE_DQS=0 \
   -DSQLITE_OMIT_LOAD_EXTENSION -DHAVE_FDATASYNC=1 -DHAVE_USLEEP=1 \
+  -DSQLITE_OMIT_SHARED_CACHE -DSQLITE_OMIT_PROGRESS_CALLBACK -DSQLITE_OMIT_TRACE -DSQLITE_OMIT_AUTOINIT \
   testdata/store_contract.c sqlite_engine.c checkpoint.c -lm -lpthread -o /tmp/huykn-store-test
 cp ../../seed/feed.db /tmp/huykn-contract.db
 /tmp/huykn-store-test /tmp/huykn-contract.db

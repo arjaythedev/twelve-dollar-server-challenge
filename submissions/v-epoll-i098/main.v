@@ -154,6 +154,26 @@ mut:
 	deferred      []int
 }
 
+// conn_table returns the connection table on calloc pages, which stay untouched (no RSS)
+// until a slot is used; V's own array would zero-fill all 21 MB at start. The table holds
+// inbuf pointers, so it is registered as a GC root.
+fn conn_table() []Conn {
+	n := int(C.TD_CAPACITY)
+	p := C.calloc(usize(n), sizeof(Conn))
+	if p == unsafe { nil } {
+		panic('allocate connection table')
+	}
+	C.GC_add_roots(p, unsafe { &u8(p) + n * int(sizeof(Conn)) })
+	mut t := []Conn{}
+	unsafe {
+		t.data = p
+		t.len = n
+		t.cap = n
+		t.flags = .nogrow | .nofree
+	}
+	return t
+}
+
 fn main() {
 	mut s := &Server{
 		secret:  os.getenv('JWT_SECRET').bytes()
@@ -162,7 +182,7 @@ fn main() {
 		head:    []u8{cap: header_room}
 		jkey:    []u8{cap: 64}
 		jbody:   []u8{cap: 2048}
-		conns:   []Conn{len: int(C.TD_CAPACITY)}
+		conns:   conn_table()
 	}
 	path := os.getenv('SQLITE_PATH')
 	s.open_db(path)

@@ -17,7 +17,7 @@
 
 #define RINGS 8
 #define SLOTS 65535
-#define BUFFERS 1024
+#define BUFFERS 256 /* per ring; a 4 ms batch holds far fewer receives than this */
 #define BUFFER_SIZE 2048
 #define ACCEPT_DEPTH 64
 #define SQ_SIZE 2048
@@ -149,7 +149,8 @@ static void td_schedule(struct td_ring *r, uint64_t now)
         r->retry_head = r->retry_tail = -1;
     }
     while (r->free_count && r->accepting < ACCEPT_DEPTH && now >= r->accept_at) {
-        int slot = r->free_slots[--r->free_count];
+        --r->free_count;
+        int slot = r->free_slots[r->free_count] ^ r->free_count;
         struct td_client *c = &r->clients[slot];
         assert(c->operation == FREE && !c->busy && !c->queued && !c->output && !c->pending && !c->armed);
         c->eof = 0; /* a receive cancelled by the last close can end after that close */
@@ -279,9 +280,11 @@ struct td_net *td_net_new(int listener, int checkpoint)
         if (!r->buffers) td_fail("register buffer ring", rc);
         r->memory = malloc(BUFFERS * BUFFER_SIZE);
         r->clients = calloc(SLOTS, sizeof(*r->clients));
-        r->free_slots = malloc(SLOTS * sizeof(*r->free_slots));
+        /* Entry i holds slot ^ i, so the zeroed calloc pages already read as slots 0..SLOTS-1
+         * and only the stack depth in use is ever touched. */
+        r->free_slots = calloc(SLOTS, sizeof(*r->free_slots));
         if (!r->memory || !r->clients || !r->free_slots) td_fail("allocate ring state", ENOMEM);
-        for (int slot = 0; slot < SLOTS; ++slot) r->free_slots[r->free_count++] = slot;
+        r->free_count = SLOTS;
         for (int b = 0; b < BUFFERS; ++b)
             io_uring_buf_ring_add(r->buffers, r->memory + b * BUFFER_SIZE,
                                  BUFFER_SIZE, b, BUFFERS - 1, b);
@@ -370,7 +373,8 @@ static int td_complete(struct td_ring *r, int ring_index, const struct io_uring_
         --r->accepting;
         if (result < 0) {
             c->operation = FREE;
-            r->free_slots[r->free_count++] = slot;
+            r->free_slots[r->free_count] = slot ^ r->free_count;
+            r->free_count++;
             if (result == -ENFILE || result == -EMFILE || result == -ENOBUFS || result == -ENOMEM ||
                 result == -EAGAIN || result == -ENETDOWN || result == -ENONET ||
                 result == -EHOSTDOWN || result == -EHOSTUNREACH || result == -ENETUNREACH ||
@@ -399,7 +403,8 @@ static int td_complete(struct td_ring *r, int ring_index, const struct io_uring_
         c->pending_len = c->close_after = 0;
         c->armed = c->cancelling = c->eof = 0;
         c->operation = FREE;
-        r->free_slots[r->free_count++] = slot;
+        r->free_slots[r->free_count] = slot ^ r->free_count;
+        r->free_count++;
         event->kind = 3;
         return 1;
     }

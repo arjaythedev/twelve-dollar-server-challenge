@@ -520,7 +520,11 @@ req/s, p95 78.3 / p99 328.3 ms, 0 err, 95 % CPU, 32 µs/req, 1,014 MB, 2026-11-0
 2-minute probe on connection refused (77 % / 74 % errors). Not merged (below the merged row). Follow-up **#367**
 (`437252d`, #365 plus `READ_CACHE_MB` 64 → 256): **270,000** (25,819 req/s, p95 180.7 / p99 652.2 ms, 0 err, 95 % CPU,
 33 µs/req, 892 MB, 2026-11-09); 280,000 failed the 2-minute probe on p95/p99 (499 / 1,233 ms, 0 errors) and 320,000 on
-connection refused (74 % errors). Not merged (below the merged row).
+connection refused (74 % errors). Not merged (below the merged row). Follow-up **#368** (`af24316`, #355's `2daf238` without the
+mid-pass `submit_rings` in `apply_reads`): **257,000** (24,700 req/s, p95 107.7 / p99 474.4 ms, 0 err, 93 % CPU,
+34 µs/req, 729 MB, 2026-11-09); 270,000 passed the 2-minute probe but failed the 5-minute hold on p95/p99 (421 /
+2,931 ms at 95 % CPU, 0 errors), 280,000 failed the 2-minute probe (1,116 / 2,048 ms at 97 % CPU) and 320,000 on
+connection refused (75 % errors). Not merged (below the merged row).
 
 ᴺ **c-iouring-unorig-username** stays on its merged #290 row. Its follow-up **#362** (`177f00e`, parked requests served
 newest first with an 8 s age cap, `journal_size_limit=0`, read-only segments `mlock`ed; held, not merged: it didn't beat

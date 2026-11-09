@@ -79,7 +79,7 @@ func appendEsc(b, s []byte) []byte {
 	if i == len(s) {
 		return append(b, s...)
 	}
-	return appendEscSlow(b, s)
+	return appendEscSlow(append(b, s[:i]...), s[i:])
 }
 
 func appendEscSlow(b, s []byte) []byte {

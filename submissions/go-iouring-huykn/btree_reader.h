@@ -344,7 +344,6 @@ static int join_counts(hkn_read_plan *plan, hkn_result *result, lookup_task *pos
 }
 
 static int read_plan_locked(hkn_read_plan *plan, int single, int64_t key, hkn_result *result) {
-  if (!plan) return SQLITE_NOTFOUND;
   result->length = 0;
   result->used = 0;
   int code = plan_begin(plan);

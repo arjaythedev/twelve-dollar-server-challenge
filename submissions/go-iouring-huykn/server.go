@@ -134,8 +134,8 @@ type server struct {
 
 // ---- buffers ------------------------------------------------------------------------------------
 
-// Buffers live in s.pool and are named by index+1 (0 = none). Responses take 8 KB buffers; bytes
-// read but not yet answered take small ones (a request is a few hundred bytes), so a backlog of
+// Buffers live in s.pool and are named by index+1 (0 = none). Feeds start with 8 KB buffers;
+// other responses and bytes read but not yet answered take small ones, so a backlog of
 // tens of thousands of waiting requests costs megabytes, not hundreds of them. Past keepFree spare
 // buffers of a kind, returned ones are dropped for the collector.
 const (
@@ -298,7 +298,7 @@ func (s *server) received(ri int, slot uint32, c *conn, data []byte) {
 	if c.flags&fCloseAfter != 0 {
 		return
 	}
-	if c.flags&(fReady) != 0 || s.answers == 0 {
+	if c.flags&(fReady) != 0 || s.answers == 0 || s.ready.len() > 0 {
 		s.stash(c, data)
 		if c.flags&(fReady) == 0 {
 			c.flags |= fReady
@@ -334,7 +334,7 @@ func (s *server) parseRequests(ri int, slot uint32, c *conn, buf []byte) {
 			s.mark(ri, slot, c)
 			c.flags |= fAnswered | fCloseAfter
 			if c.out == 0 {
-				c.out = s.takeOut()
+				c.out = s.takePart()
 			}
 			s.pool[c.out-1] = errorResp(s.pool[c.out-1], 400, "bad request")
 			off = len(buf)
@@ -357,9 +357,16 @@ func (s *server) parseRequests(ri int, slot uint32, c *conn, buf []byte) {
 
 func (s *server) answerRequest(c *conn) {
 	if c.out == 0 {
-		c.out = s.takeOut()
+		c.out = s.takeResponse()
 	}
 	s.pool[c.out-1] = s.app.handle(&s.req, s.pool[c.out-1])
+}
+
+func (s *server) takeResponse() int32 {
+	if string(s.req.path) == "/feed" {
+		return s.takeOut()
+	}
+	return s.takePart()
 }
 
 func (s *server) retainRest(c *conn, rest []byte, off int) {

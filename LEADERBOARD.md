@@ -595,7 +595,10 @@ now scored at its follow-up #364 (`14cdc3c`, was 247,000 at #363): the ring wait
 at 93 % CPU, 0 errors; 290k passed the 2-minute probe but failed the 5-minute hold on p99 (1.58 s). Follow-up #370
 (`9fd80b9`, 2026-11-09: header-name length check, b-tree reader helpers; the SSE2 feed path is off in the default build)
 held **250,000** at 88 % CPU (24,098 req/s, p99 470 ms, 0 errors; 260k/280k failed the 2-minute probe on p99). That is
-below #369's 276,000, so it is not merged and the row stays at #369.
+below #369's 276,000, so it is not merged and the row stays at #369. Re-run at `f74a600` (2026-11-09: SSE2 feed
+serializer on amd64, smaller non-feed buffers, queued requests first) held **271,000** at 86 % CPU (25,943 req/s, p99
+269 ms, 0 errors; 300k passed the 2-minute probe but 300k and 285k failed the 5-minute hold on p99, 12.8 s / 1.46 s).
+Still below 276,000, so the row stays at #369.
 go-gnet-kaikegm is now scored at its follow-up #180 (`372538d`, was 65,000 at #48): it closes the oldest idle
 connections past 55k open, so it no longer hits the limit at 80–93k (88,000 held at 77 % CPU, CPU-bound: 93k failed the
 5-minute hold on p99), but a fast ramp to 120k/160k still fills the fd table and the process exits the same way (89–94 %

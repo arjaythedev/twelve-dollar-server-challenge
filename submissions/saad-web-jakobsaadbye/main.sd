@@ -1,0 +1,278 @@
+// A small feed API, a stripped-down Twitter, on SQLite: the API of the $12 server challenge
+// (https://github.com/arjaythedev/twelve-dollar-server-challenge, see SPEC.md there). Built with web, dbms.sqlite and
+// jwt of the standard library.
+//
+//     GET  /health              {"status":"ok","db":"ok","uptime_s":12}
+//     GET  /feed                {"posts":[<post> x 20]}, the newest first
+//     GET  /posts/{id}          {"post":<post>}
+//     POST /posts               {"body":"..."} -> 201 {"post":<post>}          (Authorization: Bearer <jwt>)
+//     POST /posts/{id}/like     -> 201, or 200 when liked before               (Authorization: Bearer <jwt>)
+//
+// Configured by SQLITE_PATH, JWT_SECRET, HOST and PORT, and WORKERS (threads, 1 unless given) and CHECKPOINTS (0 when
+// another process makes them). See README.md
+
+import web;
+import json;
+import jwt;
+import dbms;
+import dbms.sqlite;
+import errors;
+import time;
+import os;
+import fmt;
+import mem;
+import thread;
+
+Session :: struct {
+    @embed base: web.Session;
+    userId:   i64;      // Of the token, for the endpoints that authorize
+    username: string;
+}
+
+// A post as the API writes it, and as the queries read it: created_at and like_count by the names of the members
+Post :: struct {
+    id:        i64;
+    body:      string;
+    createdAt: string;
+    author:    string;
+    likeCount: i64;
+}
+
+FeedReply :: struct { posts: [..]Post; }
+PostReply :: struct { post: Post; }
+
+Liked :: struct {
+    liked:        bool;
+    alreadyLiked: bool;
+    postId:       i64;
+}
+
+Created :: struct {
+    id:        i64;
+    createdAt: string;
+}
+
+// The post object: the author's username and the likes as of this request
+PostColumns :: "SELECT p.id, p.body, p.created_at, u.username AS author, (SELECT count(*) FROM likes l WHERE l.post_id = p.id) AS like_count FROM posts p JOIN users u ON u.id = p.user_id";
+FeedSql     :: "SELECT p.id, p.body, p.created_at, u.username AS author, (SELECT count(*) FROM likes l WHERE l.post_id = p.id) AS like_count FROM posts p JOIN users u ON u.id = p.user_id ORDER BY p.created_at DESC, p.id DESC LIMIT 20";
+PostSql     :: "SELECT p.id, p.body, p.created_at, u.username AS author, (SELECT count(*) FROM likes l WHERE l.post_id = p.id) AS like_count FROM posts p JOIN users u ON u.id = p.user_id WHERE p.id = ?";
+InsertPost  :: "INSERT INTO posts (user_id, body) VALUES (?, ?) RETURNING id, created_at";
+// Only a post that is there is liked, so a like of a post that isn't there changes nothing
+InsertLike  :: "INSERT INTO likes (user_id, post_id) SELECT ?, id FROM posts WHERE id = ? ON CONFLICT (user_id, post_id) DO NOTHING";
+PostExists  :: "SELECT count(*) FROM posts WHERE id = ?";
+
+started:  time.Time;
+key:      jwt.Key;
+dbPath:   string;
+
+// Each worker thread has a connection of its own
+@threadLocal connection: dbms.Connection;
+
+db :: () -> *dbms.Connection {
+    if connection.handle == null {
+        conn, err := sqlite.open(dbPath, sqlite.Options{create: false});
+        if err != null { throw err; }
+        connection = conn;
+        configure(&connection);
+    }
+    return &connection;
+}
+
+// WAL with synchronous=NORMAL: a commit is durable before the response (the challenge's rule 6). The file is read
+// through mmap, so the pages of the database are shared by the processes and read without copies
+configure :: (conn: *dbms.Connection) {
+    conn.exec("PRAGMA journal_mode = WAL");
+    conn.exec("PRAGMA synchronous = NORMAL");
+    conn.exec("PRAGMA mmap_size = 1073741824");
+    conn.exec("PRAGMA cache_size = -16384");   // 16 MB: the pages are read through mmap, which the processes share
+    conn.exec("PRAGMA temp_store = MEMORY");
+    // The checkpoints are made by a thread of their own (checkpoints below), so a commit doesn't copy the log into
+    // the database and wait for the disk. Past 64 MB of log, a commit does it itself
+    conn.exec("PRAGMA wal_autocheckpoint = 16384");
+}
+
+// Copies the log of WAL into the database, on a connection of its own, while the workers go on. PASSIVE never waits for
+// the workers' locks, and they never wait for it
+Checkpoints :: struct {
+    milliseconds: int;   // Between two checkpoints
+}
+
+checkpoints :: (settings: *Checkpoints) {
+    conn, err := sqlite.open(dbPath, sqlite.Options{create: false});
+    if err != null { return; }
+    while true {
+        thread.sleep(settings.milliseconds);
+        try {
+            conn.exec("PRAGMA wal_checkpoint(PASSIVE)");
+        } catch (e) {}
+    }
+}
+
+@web.endpoint(.get, path: "/health")
+health :: (session: *Session) -> json.Value {
+    reply := json.newObject();
+    one, _, err := db().queryOne<i64>("SELECT 1");
+    if err != null || one != 1 {
+        session.response.status = 503;
+        reply.put("status", json.newString("degraded"));
+        reply.put("db", json.newString("unreachable"));
+        message := "SELECT 1 failed";
+        if err != null { message = err.message; }
+        reply.put("error", json.newString(message));
+        return reply;
+    }
+    reply.put("status", json.newString("ok"));
+    reply.put("db", json.newString("ok"));
+    reply.put("uptime_s", json.newNumber((time.now().unix() - started.unix()) as f64));
+    return reply;
+}
+
+@web.endpoint(.get, path: "/feed")
+feed :: (session: *Session) -> FeedReply {
+    return FeedReply{db().query<Post>(FeedSql)};
+}
+
+@web.endpoint(.get, path: "/posts/{id}")
+getPost :: (session: *Session, id: string) -> PostReply {
+    post, found := db().queryOne<Post>(PostSql, postId(id));
+    if !found { throw errors.make("post not found", kind: web.NotFound); }
+    return PostReply{post};
+}
+
+@web.endpoint(.post, path: "/posts", authorize: true)
+createPost :: (session: *Session, body: string) -> PostReply {
+    text := trim(body);
+    if text.len == 0 { throw errors.make("body is required", kind: web.BadRequest); }
+    if characters(text) > 500 { throw errors.make("body must be at most 500 characters", kind: web.BadRequest); }
+    made, _ := db().queryOne<Created>(InsertPost, session.userId, text);
+    session.response.status = 201;
+    return PostReply{Post{id: made.id, body: text, createdAt: made.createdAt, author: session.username, likeCount: 0}};
+}
+
+@web.endpoint(.post, path: "/posts/{id}/like", authorize: true)
+like :: (session: *Session, id: string) -> Liked {
+    post := postId(id);
+    added := db().exec(InsertLike, session.userId, post);
+    if added == 0 {
+        // Liked before, or no such post
+        count, _ := db().queryOne<i64>(PostExists, post);
+        if count == 0 { throw errors.make("post not found", kind: web.NotFound); }
+        return Liked{liked: true, alreadyLiked: true, postId: post};
+    }
+    session.response.status = 201;
+    return Liked{liked: true, alreadyLiked: false, postId: post};
+}
+
+// The user of the token: HS256 with JWT_SECRET, not expired, with sub a positive integer and username a string
+authorize :: (session: *Session) {
+    header, given := session.request.header("Authorization");
+    if !given || !header.startsWith("Bearer ") { throw errors.make("missing bearer token", kind: web.Unauthorized); }
+    claims, err := key.verify(header.slice(7));
+    if err != null { throw errors.make("invalid or expired token", kind: web.Unauthorized); }
+    sub := claims.get("sub");
+    name := claims.get("username");
+    user := positiveInteger(sub.text);
+    if sub.kind != .string || user <= 0 || name.kind != .string {
+        throw errors.make("invalid token payload", kind: web.Unauthorized);
+    }
+    session.userId   = user;
+    session.username = name.text;
+}
+
+// The id of a path: a positive integer, else a 400
+postId :: (text: string) -> i64 {
+    id := positiveInteger(text);
+    if id <= 0 { throw errors.make("invalid post id", kind: web.BadRequest); }
+    return id;
+}
+
+// The number of the digits, or -1 when it isn't one, e.g of -1, abc or 1.5
+positiveInteger :: (text: string) -> i64 {
+    if text.len == 0 || text.len > 18 { return -1; }
+    n: i64 = 0;
+    for ch in text {
+        if !ch.isDigit() { return -1; }
+        n = n * 10 + ch.digitValue();
+    }
+    return n;
+}
+
+// Without the whitespace at its ends, like String.prototype.trim of JavaScript for ASCII and the no-break space
+trim :: (text: string) -> string {
+    start := 0;
+    end := text.len as int;
+    while start < end && isSpace(text, start) { start += spaceLength(text, start); }
+    while end > start && isSpaceBefore(text, end) { end -= spaceLengthBefore(text, end); }
+    return text.slice(start, end);
+}
+
+isSpace :: (text: string, at: int) -> bool { return spaceLength(text, at) > 0; }
+
+spaceLength :: (text: string, at: int) -> int {
+    ch := text[at];
+    if ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' || ch == 11 || ch == 12 { return 1; }
+    if ch == 0xC2 && at + 1 < text.len && text[at + 1] == 0xA0 { return 2; }   // U+00A0
+    if ch == 0xEF && at + 2 < text.len && text[at + 1] == 0xBB && text[at + 2] == 0xBF { return 3; }   // U+FEFF
+    return 0;
+}
+
+isSpaceBefore :: (text: string, end: int) -> bool { return spaceLengthBefore(text, end) > 0; }
+
+spaceLengthBefore :: (text: string, end: int) -> int {
+    if end >= 1 && spaceLength(text, end - 1) == 1 { return 1; }
+    if end >= 2 && spaceLength(text, end - 2) == 2 { return 2; }
+    if end >= 3 && spaceLength(text, end - 3) == 3 { return 3; }
+    return 0;
+}
+
+// The characters of UTF-8 text, as SQLite's length() counts them
+characters :: (text: string) -> int {
+    count := 0;
+    for ch in text {
+        if (ch & 0xC0) != 0x80 { count += 1; }
+    }
+    return count;
+}
+
+main :: () {
+    started = time.now();
+    path, hasPath := os.getEnv("SQLITE_PATH");
+    secret, hasSecret := os.getEnv("JWT_SECRET");
+    host, _ := os.getEnv("HOST");
+    port, hasPort := os.getEnv("PORT");
+    if !hasPath || !hasSecret {
+        fmt.print("SQLITE_PATH and JWT_SECRET are needed");
+        os.exit(1);
+    }
+    if !hasPort { port = "3000"; }
+    dbPath = path.copy(mem.heap());
+    key = jwt.newKey(secret.copy(mem.heap()), requireExp: true);
+    db();   // The database is there, before the first request
+    // One process of start.sh makes the checkpoints for all
+    checkpointing, given := os.getEnv("CHECKPOINTS");
+    if !given || checkpointing != "0" {
+        settings := new(Checkpoints, mem.heap());
+        settings.milliseconds = 250;
+        thread.spawn(checkpoints, settings);
+    }
+
+    app := web.newApp<Session>("");
+    app.useJson(json.SnakeCase);
+    app.errorKinds = false;
+    app.setMessage(web.NoEndpoint, "not found");
+    app.setMessage(web.MethodNotAllowed, "not found");
+    app.setMessage(web.MalformedJson, "malformed JSON body");
+    app.setMessage(web.MissingParameter, "body is required");
+    app.setMessage(web.InvalidParameter, "body is required");
+    app.setMessage(web.InternalError, "internal server error");
+    app.onAuthorize(authorize);
+    app.server.workers = 1;
+    workers, hasWorkers := os.getEnv("WORKERS");
+    if hasWorkers { app.server.workers = positiveInteger(workers) as int; }
+    app.server.reusePort   = true;     // More processes can serve the port, see start.sh
+    app.server.idleTimeout = 120000;   // Longer than the 65 s that Nginx keeps a connection
+    app.server.log = false;
+    address := fmt.sprint("%:%", host, port);
+    err := app.listenAndServe(address);
+    if err != null { fmt.print("Can't serve %: %", address, err.message); os.exit(1); }
+}

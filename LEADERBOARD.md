@@ -662,7 +662,10 @@ Swift over syscalls, B-tree reads through SQLite's own `sqlite3Btree*` functions
 checkpointer through public APIs, lighter Swift install): 250,000 held at 85 % CPU, 0 errors; 260,000 failed the
 2-minute probe on p99 (1.07 s, 87 % CPU) and 280,000 on p99 (8.3 s). Its merged #297 code (`e3d25b3`) held **210,000**
 (20,571 req/s, p95 22.4 / p99 149.6 ms, 75 % CPU, 2026-11-05). Its first follow-up, #349 (`250251a`, reopened as #361),
-couldn't be scored: the box ran out of disk unpacking the Swift toolchain, not the entry's fault.
+couldn't be scored: the box ran out of disk unpacking the Swift toolchain, not the entry's fault. Its later follow-up
+**#371** (`a04c2ad`, full LTO, checkpointer tuning; held, not merged: it writes a SQLite B-tree cursor field, see the rule
+flags) scored **280,000** (26,686 req/s, p95 96.5 / p99 229.4 ms, 0 err, 93 % CPU, 31 µs/req, 811 MB, 2026-11-09;
+290,000 failed the 2-minute probe on p99 10.0 s), so #361's row stays until a clean version is merged.
 
 ᵒ **wat-wasmedge-delneg** is scored at its follow-up **#288** (`a5c516a`, shim VFS + checkpointer through public
 SQLite APIs; merged 2026-11-04): 220,000 held at 72 % CPU (31 µs/req, 913 MB); 230,000 and 240,000 failed the 2-minute
@@ -835,6 +838,10 @@ public plugin APIs (a custom page cache through `SQLITE_CONFIG_PCACHE2`, a custo
   `table_moveto` reimplements `sqlite3BtreeTableMoveto` (moveToRoot / moveToChild / findCell) and sets `BtCursor`
   fields (`ix`, `curFlags`, `info.nKey`, `info.nSize`). Same open question for Arjay as #296 / #317 / #318. Scored 240k
   at `4c2205c` (below the merged #191 row, footnote ᵂ); held open.
+- **swift-iouring-akbashev #371 (follow-up to #361) writes SQLite's private B-tree cursor fields**: `Cursor.swift`'s
+  `cellIndex` setter stores `BtCursor.ix` at a hard-coded offset before `sqlite3BtreeNext` (ruling 8), and
+  `Page.firstInteger(ofCell:)` decodes index leaf cells from page bytes itself (same open question as #296 / #317 /
+  #318). Scored 280k at `a04c2ad` (footnote ᴬ); held open, so #361's row (250k) stays.
 - **c-iouring-fajarreza-gif #302 reuses c-iouring-pavlyhalim #245's syscall layer**: `src/sys.h` (io_uring ABI/ring
   code, 415 lines) is byte-identical to #245's and `sha256.h` nearly so (credited in its README since `d7a2e70`);
   `server.c`, HTTP, JWT and the database code are new. Arjay ruled 2026-11-04: credited reuse is fine → merged at

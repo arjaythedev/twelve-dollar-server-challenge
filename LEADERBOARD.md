@@ -67,7 +67,7 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 |---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
 | 1 | rust-iouring-kensac | #264 | Rust (io_uring, SQLite B-tree reads) | **310,000** | 29,284 | 62 | 190 | 0.00 | 82 | 25 | 1,114 | 2026-11-02 |
 | 2 | mojo-iouring-oh-meh | #257 | Mojo (io_uring, SQLite B-tree reads) | **304,000** | 28,705 | 159 | 545 | 0.00 | 82 | 26 | 726 | 2026-11-01 |
-| 3 | rust-iouring-rkkautsar | #355 | Rust (io_uring, SQLite B-tree reads) | **300,000** ᴿ | 28,343 | 189.9 | 961.5 | 0.00 | 97 | 31 | 778 | 2026-11-08 |
+| 3 | rust-iouring-rkkautsar | #355 | Rust (io_uring, SQLite B-tree reads) | **300,000** ᴿ | 28,417 | 107.7 | 345.0 | 0.00 | 96 | 30 | 1,159 | 2026-11-09 |
 | 4 | c-iouring-pavlyhalim | #245 | C (io_uring, SQLite B-tree reads) | **295,000** | 28,013 | 28 | 117 | 0.00 | 81 | 26 | 1,536 | 2026-11-01 |
 | 5 | rust-native-scooter1337 | #267 | Rust (io_uring, SQLite B-tree reads) | **290,000** | 27,580 | 26.5 | 514 | 0.00 | 80 | 26 | 1,035 | 2026-11-02 |
 | 5 | objc-uring-delneg | #326 | Objective-C (GNUstep, io_uring, SQLite B-tree reads) | **290,000** ᵋ | 27,547 | 43 | 614 | 0.00 | 81 | 26 | 658 | 2026-11-06 |
@@ -493,10 +493,12 @@ CPU, 0 errors). Its merged #351 code (`07004d1`) held **250,000** (24,053 req/s,
 p99 128.8 ms, 69 % CPU, 2026-11-08).
 
 ᴿ **rust-iouring-rkkautsar** is scored at its follow-up **#355** at commit **`2daf238`** (one B-tree read transaction
-reused across passes). The 300,000 hold had 0 errors; 310,000 failed the 2-minute probe on p95/p99 (1.09 / 3.17 s at 98 %
-CPU, 0 errors) and 320,000 on p95/p99 (1.34 / 4.23 s at 94 % CPU). It beats the merged #353 row (`80d0e95`, **260,000**,
-24,969 req/s, p95 135.4 / p99 429.4 ms, 93 % CPU, 34 µs/req, 627 MB, 2026-11-07) but is not merged: the head moved
-to `dbacabd` during the run, and `dbacabd` didn't beat the merged row (below). Earlier #355 heads: `9762a8d` (`SHARDS` 8 → 6, queued
+reused across passes), merged 2026-11-09 after the author reverted the PR to that commit. The re-run there held
+**300,000** again with 0 errors; 310,000 failed the 2-minute probe on p95/p99 (393 ms / 1.03 s at 97 % CPU, 0 errors) and
+320,000 on p95/p99 (679 ms / 1.60 s at 99 % CPU). The first `2daf238` run (2026-11-08) also held 300,000 (28,343 req/s,
+p95 189.9 / p99 961.5 ms, 97 % CPU, 31 µs/req, 778 MB) but wasn't merged then because the head moved during the run. It
+replaces the merged #353 row (`80d0e95`, **260,000**, 24,969 req/s, p95 135.4 / p99 429.4 ms, 93 % CPU, 34 µs/req,
+627 MB, 2026-11-07). Earlier #355 heads: `9762a8d` (`SHARDS` 8 → 6, queued
 reads drained before the next poll wait; not merged: it didn't beat the merged row) also held **260,000**
 (24,986 req/s, p95 106.6 / p99 331.6 ms, 0 err, 93 % CPU, 34 µs/req, 609 MB, 2026-11-08). 270,000 failed the 2-minute
 probe on p95/p99 (804 / 1,322 ms at 94 % CPU, 0 errors) and 280,000 on p95/p99 (614 / 1,417 ms at 96 % CPU).

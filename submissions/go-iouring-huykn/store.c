@@ -88,7 +88,8 @@ hkn_store *hkn_connect(const char *filename, char *error, int capacity) {
   }
   const char *vfs = getenv("HKN_VFS");
   if (!vfs) vfs = "unix-excl";
-  int code = sqlite3_open_v2(filename, &s->connection,
+  int code = sqlite3_initialize();
+  if (code == SQLITE_OK) code = sqlite3_open_v2(filename, &s->connection,
                            SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX | SQLITE_OPEN_PRIVATECACHE, vfs);
   if (code == SQLITE_OK) code = sqlite3_busy_timeout(s->connection, 1000);
   if (code == SQLITE_OK) code = sqlite3_db_config(s->connection,
@@ -112,7 +113,7 @@ hkn_store *hkn_connect(const char *filename, char *error, int capacity) {
     }
     return s;
   }
-  snprintf(error, capacity, "%s", sqlite3_errmsg(s->connection));
+  snprintf(error, capacity, "%s", s->connection ? sqlite3_errmsg(s->connection) : sqlite3_errstr(code));
   hkn_disconnect(s);
   return NULL;
 }

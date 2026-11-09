@@ -306,7 +306,6 @@ func (s *server) received(ri int, slot uint32, c *conn, data []byte) {
 		}
 		return
 	}
-	s.answers--
 	s.serve(ri, slot, c, data)
 }
 
@@ -325,11 +324,12 @@ func (s *server) serve(ri int, slot uint32, c *conn, data []byte) {
 
 func (s *server) parseRequests(ri int, slot uint32, c *conn, buf []byte) {
 	off := 0
-	for off < len(buf) {
+	for off < len(buf) && s.answers > 0 {
 		used, st := parse(buf[off:], &s.req)
 		if st == parsedPartial {
 			break
 		}
+		s.answers--
 		if st == parsedBad {
 			s.mark(ri, slot, c)
 			c.flags |= fAnswered | fCloseAfter
@@ -349,6 +349,10 @@ func (s *server) parseRequests(ri int, slot uint32, c *conn, buf []byte) {
 		off += used
 	}
 	s.retainRest(c, buf[off:], off)
+	if off < len(buf) && s.answers == 0 && c.flags&fReady == 0 {
+		c.flags |= fReady
+		s.ready.push(mkref(ri, slot, c.gen))
+	}
 }
 
 func (s *server) answerRequest(c *conn) {
@@ -376,11 +380,10 @@ func (s *server) retainRest(c *conn, rest []byte, off int) {
 
 // ---- completions --------------------------------------------------------------------------------
 
-func (s *server) drain(ri int) int {
+func (s *server) drain(ri int) {
 	r := s.rings[ri]
 	u := r.u
 	head := *u.cqHead
-	n := 0
 	for {
 		tail := atomicLoad(u.cqTail)
 		if head == tail {
@@ -388,7 +391,6 @@ func (s *server) drain(ri int) int {
 		}
 		for ; head != tail; head++ {
 			e := u.cqes[head&u.cqMask]
-			n++
 			s.complete(ri, r, e.userData, e.res, e.flags)
 		}
 		atomicStore(u.cqHead, head)
@@ -402,7 +404,6 @@ func (s *server) drain(ri int) int {
 			s.fillAccepts(ri)
 		}
 	}
-	return n
 }
 
 func (s *server) complete(ri int, r *ring, u uint64, res int32, flags uint32) {
@@ -593,6 +594,9 @@ func (s *server) finishTouched(t ref, committed bool) {
 	slot := t.slot()
 	r := s.rings[ri]
 	c := &r.conns[slot]
+	if c.gen != t.gen() {
+		return
+	}
 	if !committed && c.flags&fAnswered != 0 && c.out != 0 {
 		// No response from a rolled-back pass may claim success.
 		o := s.pool[c.out-1][:c.mark]
@@ -627,9 +631,8 @@ func (s *server) runReady() {
 			continue
 		}
 		c.flags &^= fReady
-		s.answers--
 		s.serve(t.ring(), t.slot(), c, nil)
-		if c.flags&fEOF != 0 {
+		if c.flags&fEOF != 0 && c.flags&fReady == 0 {
 			c.flags |= fCloseAfter
 			s.mark(t.ring(), t.slot(), c)
 		}

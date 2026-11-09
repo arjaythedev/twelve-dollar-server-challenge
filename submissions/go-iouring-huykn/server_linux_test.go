@@ -17,7 +17,7 @@ func testServer(slots int) *server {
 	for i := range r.conns {
 		r.conns[i] = conn{gen: 1, flags: fOpen}
 	}
-	return &server{app: newApp(nil), rings: []*ring{r}}
+	return &server{app: newApp(nil), rings: []*ring{r}, answers: answersPerPass}
 }
 
 func TestBorrowedInputAndPipelining(t *testing.T) {
@@ -196,6 +196,7 @@ func BenchmarkNetworkResponse(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
+		s.answers = answersPerPass
 		s.pool[c.out-1] = s.buf(c.out)[:0]
 		s.serve(0, 0, c, wire)
 	}

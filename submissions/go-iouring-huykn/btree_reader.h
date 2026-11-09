@@ -8,7 +8,6 @@ struct hkn_read_plan {
   sqlite3 *connection;
   Btree *tree;
   Pgno roots[PLAN_CURSOR_COUNT];
-  Pgno like_table_root;
   KeyInfo *keys[PLAN_CURSOR_COUNT];
   BtCursor cursors[PLAN_CURSOR_COUNT];
   int opened, cookie;
@@ -54,7 +53,6 @@ static hkn_read_plan *create_read_plan(sqlite3 *connection) {
   plan->roots[PLAN_USERS] = users->tnum;
   plan->roots[PLAN_FEED] = feed->tnum;
   plan->roots[PLAN_LIKES] = likes->tnum;
-  plan->like_table_root = likes->pTable->tnum;
   Parse parser = {0};
   parser.db = connection;
   plan->keys[PLAN_FEED] = sqlite3KeyInfoOfIndex(&parser, feed);
@@ -106,12 +104,6 @@ static int plan_begin(hkn_read_plan *plan) {
   u32 cookie;
   sqlite3BtreeGetMeta(plan->tree, BTREE_SCHEMA_VERSION, &cookie);
   if (cookie != (u32)plan->cookie) return SQLITE_NOTFOUND;
-  // Index cursors require the read lock of their owning table, as SQLite's
-  // VDBE does. These are no-ops with the normal private-cache connection.
-  code = sqlite3BtreeLockTable(plan->tree, plan->roots[PLAN_POSTS], 0);
-  if (code == SQLITE_OK) code = sqlite3BtreeLockTable(plan->tree, plan->roots[PLAN_USERS], 0);
-  if (code == SQLITE_OK) code = sqlite3BtreeLockTable(plan->tree, plan->like_table_root, 0);
-  if (code != SQLITE_OK) return code;
   for (int i = 0; i < PLAN_CURSOR_COUNT; ++i) {
     sqlite3BtreeCursorZero(&plan->cursors[i]);
     code = sqlite3BtreeCursor(plan->tree, plan->roots[i], 0, plan->keys[i], &plan->cursors[i]);

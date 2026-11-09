@@ -98,7 +98,7 @@ func TestRenderDatabase(t *testing.T) {
 		if !bytes.Equal(guard[limit:], bytes.Repeat([]byte{0xa5}, len(guard)-limit)) {
 			t.Fatal("write beyond capacity")
 		}
-		s := &server{app: a, rings: []*ring{{conns: make([]conn, 1)}}}
+		s := &server{app: a, rings: []*ring{{conns: make([]conn, 1)}}, answers: answersPerPass}
 		c := &s.rings[0].conns[0]
 		*c = conn{gen: 1, flags: fOpen}
 		s.serve(0, 0, c, []byte("GET /feed HTTP/1.1\r\nHost: test\r\n\r\n"))

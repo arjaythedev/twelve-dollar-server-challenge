@@ -17,7 +17,7 @@
 
 #define RINGS 8
 #define SLOTS 65535
-#define BUFFERS 256 /* per ring; a 4 ms batch holds far fewer receives than this */
+#define BUFFERS 1024 /* per ring; 256 ran dry when the loop fell behind (12 M ENOBUFS re-arms in 2 min at 200k) */
 #define BUFFER_SIZE 2048
 #define ACCEPT_DEPTH 64
 #define SQ_SIZE 2048

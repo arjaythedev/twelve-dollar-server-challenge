@@ -352,6 +352,11 @@ nonisolated enum SQLite {
                 throw StoreError(description: "\(pragma): \(message)")
             }
         }
+        // The file grows 64 MiB at a time (one posix_fallocate): a checkpoint that copies the whole WAL truncates the
+        // file to its size and syncs it, and a size that changed by a few pages makes that sync wait for the file
+        // system's journal too, while writes are held.
+        var chunk: Int32 = 64 << 20
+        _ = sqlite3_file_control(db, "main", SQLITE_FCNTL_CHUNK_SIZE, &chunk)
         return db
     }
 }

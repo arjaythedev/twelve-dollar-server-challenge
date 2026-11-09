@@ -44,20 +44,29 @@
   no locks and no atomics. Each pass submits what the last one prepared, waits on ring 0 for 256 completions or 1 ms
   (whichever comes first; with nothing happening, for anything), and takes every ring's completions.
 - **The one effect that leaves it is an actor.** A checkpoint's `fsync` would stall the loop, so checkpoints are the
-  `Checkpointer`'s: an actor on a thread of its own at nice 19 (on one CPU it runs while the loop waits), with its
+  `Checkpointer`'s: an actor on a thread of its own at nice 5 (on one CPU it mostly runs while the loop waits), with its
   own SQLite connection. The loop starts one without waiting for it (a `Task` with the checkpointer's executor as its
   preference), and learns it finished from an eventfd its ring reads, a completion like any other. Crossing to it is
   the one place the compiler asks for `await` and `Sendable`. The process has two threads: the loop and the
   checkpointer.
 - **Checkpoints in two copies; the loop's own write starts the WAL over.** Past 4,096 frames (16 MiB) the
-  checkpointer copies the WAL back while writes go on. Then writes wait (a connection with a held write parses
-  nothing further, so responses stay in order) and reads go on, while it copies what was written meanwhile; a hold
-  lasts at most 250 ms. SQLite starts the WAL over only at a write that begins with every frame copied, which group
-  commit under steady writes never leaves (locally the WAL reached 767 MB in a minute, and the WAL index SQLite keeps
-  in memory with it): the pass after the hold reads with the WAL all copied, so its first write starts it over, on
+  checkpointer copies the WAL back while writes go on, again until at most 128 frames are left, then syncs the
+  database file itself and copies once more. Then writes wait (a connection with a held write parses nothing
+  further, so responses stay in order) and reads go on, while it copies what was written meanwhile; a hold lasts at
+  most 250 ms. The sync before the hold is what keeps holds short: a copy that doesn't finish the WAL writes its
+  pages without syncing them (SQLite syncs the file only once every frame is in), so the held copy's sync would
+  flush the whole cycle while writes wait, and on a slow disk the hold would run out before it did. The database
+  file grows 64 MiB at a time (one `posix_fallocate`), so a finished copy's truncate and sync don't also wait for
+  the file system's journal. The checkpointer runs at nice 5: at nice 19, near saturation, it got so little of the
+  one CPU that holds ran out. SQLite starts the WAL over only at a write that begins with every frame copied, which
+  group commit under steady writes never leaves (locally the WAL reached 767 MB in a minute, and the WAL index SQLite
+  keeps in memory with it): the pass after the hold reads with the WAL all copied, so its first write starts it over, on
   the loop's own connection. The checkpointer only copies and never commits, since a commit from another connection
   makes SQLite drop the loop connection's page cache. The log says once a minute how many holds there were, how many
-  ran out, and how many copies the loop made itself (past 65,536 frames).
+  ran out, and how many copies the loop made itself (past 65,536 frames). On a runner with the server's disk capped
+  at 30 MB/s and 1,000 writes a second, near saturation, holds that ran out went from most to about one in five, the
+  WAL from 310 MB to 50 MB, the memory peak from 821 MB to 406 MB, the loop's own copies from 5 to 0, and p99 from
+  1.4 s to 250 ms.
 - **Group commit per pass.** Every request of a pass runs inside one SQLite transaction (WAL,
   `synchronous=NORMAL`), and no response of the pass is sent before its `COMMIT` returns (rule 6). If it fails, the
   pass's connections close without an answer, so no response ever claims a write that didn't land.

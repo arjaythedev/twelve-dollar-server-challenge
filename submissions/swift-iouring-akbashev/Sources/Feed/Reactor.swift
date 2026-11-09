@@ -186,14 +186,14 @@ final class Reactor {
                 checkpointInLoop()
             } else if store.checkpointDue {
                 checkpointPhase = .copying
-                startCheckpoint()
+                startCheckpoint(bulk: true)
             }
         case .copied:
             checkpointCounts.holds += 1
             holdingWrites = true
             holdStarted = now
             checkpointPhase = .copyingRest
-            startCheckpoint()
+            startCheckpoint(bulk: false)
         case .copiedRest(let all):
             // All copied: the next write starts the WAL over, and its commit reports what's in it.
             if all { store.checkpointFinished() }
@@ -216,11 +216,11 @@ final class Reactor {
         }
     }
 
-    private func startCheckpoint() {
+    private func startCheckpoint(bulk: Bool) {
         guard let checkpointer else { return }
         // The effect leaves the main thread here: the task starts on the checkpointer's own executor, and the loop
         // goes on.
-        Task(executorPreference: checkpointer.executor) { @concurrent in await checkpointer.checkpoint() }
+        Task(executorPreference: checkpointer.executor) { @concurrent in await checkpointer.checkpoint(bulk: bulk) }
     }
 
     private func checkpointInLoop() {

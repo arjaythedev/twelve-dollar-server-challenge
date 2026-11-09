@@ -296,7 +296,10 @@ impl ReadDb {
         let cache_mb = std::env::var("READ_CACHE_MB")
             .ok()
             .and_then(|v| v.parse::<i64>().ok())
-            .unwrap_or(64)
+            // The database is 238MB of pages; a 64MB page cache left most random
+            // post reads going back to the file. 256MB covers it and costs ~50MB
+            // of resident memory in practice, since the cache fills on demand.
+            .unwrap_or(256)
             .max(1);
         let mmap_mb = std::env::var("READ_MMAP_MB")
             .ok()

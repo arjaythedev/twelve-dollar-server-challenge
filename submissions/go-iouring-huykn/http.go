@@ -94,20 +94,21 @@ func parse(wire []byte, dst *request) (int, int) {
 			break
 		}
 		name, value, found := bytes.Cut(line, []byte{':'})
-		if !found {
+		// Consumed names are at least as long as Authorization. Skip common
+		// ignored headers (Host, User-Agent, Content-Type) before value work.
+		if !found || len(name) < len("Authorization") {
 			continue
 		}
-		value = bytes.Trim(value, " \t")
 		switch {
 		case bytes.EqualFold(name, []byte("Authorization")):
-			dst.auth, dst.hasAuth = value, true
+			dst.auth, dst.hasAuth = bytes.Trim(value, " \t"), true
 		case bytes.EqualFold(name, []byte("Content-Length")):
 			if lengthSeen {
 				return 0, parsedBad
 			}
 			lengthSeen = true
 			var valid bool
-			bodySize, valid = contentBytes(value)
+			bodySize, valid = contentBytes(bytes.Trim(value, " \t"))
 			if !valid {
 				return 0, parsedBad
 			}

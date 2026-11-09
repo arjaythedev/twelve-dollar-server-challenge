@@ -25,6 +25,22 @@ static int named_columns(Table *table, const char *const *names, int count) {
   return 1;
 }
 
+static int valid_feed_index(Index *index, Table *posts) {
+  // A binary ascending/descending plan is invalid for custom collations.
+  return index && index->pTable == posts && index->nKeyCol == 2 &&
+      index->aiColumn[0] == 3 && index->aiColumn[1] == 0 &&
+      index->aSortOrder[0] && index->aSortOrder[1] && !index->pPartIdxWhere &&
+      !strcmp(index->azColl[0], "BINARY") && !strcmp(index->azColl[1], "BINARY");
+}
+
+static int valid_likes_index(Index *index) {
+  return index && index->nKeyCol == 1 && index->aiColumn[0] == 1 &&
+      !strcmp(index->pTable->zName, "likes") &&
+      !strcmp(index->pTable->aCol[1].zCnName, "post_id") &&
+      !index->aSortOrder[0] && !index->pPartIdxWhere &&
+      !strcmp(index->azColl[0], "BINARY");
+}
+
 static hkn_read_plan *create_read_plan(sqlite3 *connection) {
   if (ENC(connection) != SQLITE_UTF8) return NULL;
   const char *const post_columns[] = {"id", "user_id", "body", "created_at"};
@@ -34,15 +50,7 @@ static hkn_read_plan *create_read_plan(sqlite3 *connection) {
   Index *feed = sqlite3FindIndex(connection, "posts_created_at_id_idx", "main");
   Index *likes = sqlite3FindIndex(connection, "likes_post_id_idx", "main");
   if (!named_columns(posts, post_columns, 4) || !named_columns(users, user_columns, 3)) return NULL;
-  if (!feed || feed->pTable != posts || feed->nKeyCol != 2 ||
-      feed->aiColumn[0] != 3 || feed->aiColumn[1] != 0 ||
-      !feed->aSortOrder[0] || !feed->aSortOrder[1] || feed->pPartIdxWhere) return NULL;
-  if (!likes || likes->nKeyCol != 1 || likes->aiColumn[0] != 1 ||
-      likes->aSortOrder[0] || likes->pPartIdxWhere ||
-      strcmp(likes->pTable->zName, "likes") != 0) return NULL;
-  // A binary ascending/descending plan is invalid for custom collations.
-  if (strcmp(feed->azColl[0], "BINARY") || strcmp(feed->azColl[1], "BINARY") ||
-      strcmp(likes->azColl[0], "BINARY")) return NULL;
+  if (!valid_feed_index(feed, posts) || !valid_likes_index(likes)) return NULL;
   hkn_read_plan *plan = sqlite3_malloc64(sizeof *plan);
   if (!plan) return NULL; // The SQL path can still report any real allocation failure.
   memset(plan, 0, sizeof *plan);

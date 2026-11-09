@@ -35,7 +35,7 @@ INSERT INTO posts(id,user_id,body,created_at) VALUES
  (5001,1,'body','2025-12-31T23:59:19.409Z');
 INSERT INTO likes(user_id,post_id) VALUES(1,1),(2,1),(1,2001);
 `
-	for _, name := range []string{"empty", "sparse", "orphan", "mixed", "blob", "schema", "utf16", "overflow_page", "integers"} {
+	for _, name := range []string{"empty", "sparse", "orphan", "mixed", "blob", "schema", "likes_column", "utf16", "overflow_page", "integers"} {
 		t.Run(name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "feed.db")
 			sql := string(schema)
@@ -59,6 +59,12 @@ INSERT INTO likes(user_id,post_id) VALUES(1,1),(2,1),(1,2001);
 				sql += `UPDATE posts SET created_at=CAST(created_at AS BLOB);`
 			case "schema":
 				sql += `DROP INDEX posts_created_at_id_idx; CREATE INDEX posts_created_at_id_idx ON posts(created_at ASC,id ASC);`
+			case "likes_column":
+				sql += `ALTER TABLE likes RENAME TO old_likes;
+CREATE TABLE likes(post_id INTEGER NOT NULL,user_id INTEGER NOT NULL,created_at TEXT,PRIMARY KEY(user_id,post_id));
+INSERT INTO likes SELECT post_id,user_id,created_at FROM old_likes;
+DROP TABLE old_likes;
+CREATE INDEX likes_post_id_idx ON likes(user_id);`
 			case "overflow_page":
 				sql += `UPDATE users SET username=printf('%.*c',5000,'a') WHERE id=1;`
 			}

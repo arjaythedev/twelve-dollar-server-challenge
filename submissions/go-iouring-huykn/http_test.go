@@ -10,6 +10,7 @@ func TestHTTPFraming(t *testing.T) {
 		"GET /feed HTTP/1.1junk\r\n\r\n",
 		"POST /posts HTTP/1.1\r\nContent-Length: 0\r\nContent-Length: 12\r\n\r\n{\"body\":\"x\"}",
 		"POST /posts HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n",
+		"POST /posts HTTP/1.1\r\nTranſfer-Encoding: chunked\r\n\r\n",
 		"GET /feed HTTP/1.1\r\n" + string(bytes.Repeat([]byte{'x'}, maxHead)) + "\r\n\r\n",
 	} {
 		var req request

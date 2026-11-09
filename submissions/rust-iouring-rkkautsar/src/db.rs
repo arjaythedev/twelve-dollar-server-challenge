@@ -149,10 +149,14 @@ impl Db {
         let db = Self { raw };
         db.exec("PRAGMA journal_mode=WAL")?;
         db.exec("PRAGMA synchronous=NORMAL")?;
+        // 10,000 pages (40 MB) meant the auto-checkpoint fired on nearly every
+        // commit, and a checkpoint fsyncs the database file: commits measured
+        // 1.5 ms against 0.08 ms without it. Keep a bound, but one a benchmark
+        // run will not reach (100,000 pages = 400 MB of WAL).
         let ckpt = std::env::var("WAL_AUTOCHECKPOINT")
             .ok()
             .and_then(|v| v.parse::<i64>().ok())
-            .unwrap_or(10_000)
+            .unwrap_or(100_000)
             .max(0);
         db.exec(&format!("PRAGMA wal_autocheckpoint={}", ckpt))?;
         db.exec("PRAGMA cache_size=-16384")?;

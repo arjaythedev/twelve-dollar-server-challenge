@@ -238,7 +238,6 @@ struct BtreeReader {
   KeyInfo *feedKey;
   KeyInfo *likeKey;
   UnpackedRecord *likeFind;
-  char *feed_scratch;
   Pgno feed_root;
   Pgno post_root;
   Pgno user_root;
@@ -277,7 +276,6 @@ static void reader_free(BtreeReader *r) {
   if (r->likeFind) sqlite3DbFree(r->db, r->likeFind);
   if (r->feedKey) sqlite3KeyInfoUnref(r->feedKey);
   if (r->likeKey) sqlite3KeyInfoUnref(r->likeKey);
-  sqlite3_free(r->feed_scratch);
   sqlite3_free(r);
 }
 
@@ -290,9 +288,6 @@ BtreeReader *btree_reader_new(sqlite3 *db, unsigned posts_root,
   r->db = db;
   r->bt = db->aDb[0].pBt;
   if (!r->bt) goto fail;
-  r->feed_scratch = (char *)sqlite3_malloc64(64 * 1024);
-  if (!r->feed_scratch) goto fail;
-
   r->feedKey = sqlite3KeyInfoAlloc(db, 2, 1);
   r->likeKey = sqlite3KeyInfoAlloc(db, 1, 1);
   if (!r->feedKey || !r->likeKey) goto fail;
@@ -683,7 +678,9 @@ int feed_btree(BtreeReader *r, char *out, int cap, int *outlen) {
     }
     stage = 6;
     feed_ids[nfeed++] = f[1].i;
-    rc = sqlite3BtreeNext(r->feed, 0);
+    // The last row is never read again: stop instead of stepping to a 21st
+    // entry that no one consumes (and that may pull in another page).
+    if (nfeed < 20) rc = sqlite3BtreeNext(r->feed, 0);
   }
   if (rc == SQLITE_DONE) rc = SQLITE_OK;
   if (parts && part_calls < 3) fprintf(stderr, "feedloop res=%d eof=%d nfeed=%d rc=%d txn=%d\n", res, sqlite3BtreeEof(r->feed), nfeed, rc, sqlite3BtreeTxnState(r->bt));

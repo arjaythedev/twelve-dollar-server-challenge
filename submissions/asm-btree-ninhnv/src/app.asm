@@ -7,7 +7,7 @@ extern jwt_verify, jwt_uid, jwt_uname, jwt_ulen, parse_positive, json_obj, json_
 extern db_begin, db_feed, db_post, db_post_exists
 extern td_insert_post, td_insert_like, td_health
 
-global resp_begin, resp_end, resp_error, handle_request, g_out_slot, g_start_s
+global resp_begin, resp_end, resp_error, handle_request, g_out_slot, g_start_s, g_oom
 global E_BAD_REQUEST, E_BAD_REQUEST_len, E_INTERNAL, E_INTERNAL_len
 
 section .rodata
@@ -52,6 +52,7 @@ g_out_slot: resq 1               ; &conn->out of the request being answered
 g_rbuf:     resq 1               ; the buffer the response is written into
 g_bstart:   resq 1               ; start of its body
 g_start_s:  resq 1               ; monotonic seconds at startup
+g_oom:      resq 1               ; a response could not be written (out of memory)
 ts:         resq 2
 slot:       resb J_SIZE
 newid:      resq 1
@@ -72,7 +73,7 @@ resp_begin:
   add rsi, 192
   call buf_reserve
   test rax, rax
-  jz .r
+  jz .oom
   mov [g_rbuf], rax
   mov ecx, [rax + B_LEN]
   lea rdi, [rax + B_DATA + rcx]
@@ -111,6 +112,9 @@ resp_begin:
   WLIT HDRS
   mov [g_bstart], rdi
   mov rax, rdi
+  jmp .r
+.oom:
+  mov qword [g_oom], 1           ; the request goes unanswered: serve closes the connection
 .r:
   add rsp, 8
   pop r12

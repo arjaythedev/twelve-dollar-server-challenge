@@ -4,7 +4,7 @@ A feed server whose application code is hand-written x86-64 assembly (NASM): the
 loop (raw `io_uring_setup`/`enter`/`register` syscalls on hand-mapped rings, no liburing), HTTP/1.1
 framing, routing, a validating JSON reader, JSON output, SHA-256/HMAC-SHA256, base64url, the JWT
 checks, and the decoding of SQLite's B-tree records. One thread drives everything except WAL
-checkpoints, which a second low-priority thread runs.
+checkpoints, which two helper threads run.
 
 The design follows [rust-iouring-kensac](../rust-iouring-kensac) (one pass = one SQLite
 transaction, reads through SQLite's B-tree cursors, direct descriptors, multishot receives, a
@@ -32,7 +32,7 @@ assembly.
 | `src/json.asm` | validating JSON reader (strict UTF-8, escapes, nesting) and unescaper |
 | `src/http.asm` | request-line and header parsing (SSE2 byte search) |
 | `src/out.asm` | integer and JSON-string writers, output-buffer pool, kept-input buffers |
-| `src/shim.c` | the amalgamation plus thin wrappers: open, per-pass transaction, cursor moves, record bytes, a page view, the two INSERTs, `SELECT 1`, the SQL fallback, the checkpoint thread |
+| `src/shim.c` | the amalgamation plus thin wrappers: open, per-pass transaction, cursor moves, record bytes, a page view, the two INSERTs, `SELECT 1`, the SQL fallback, the checkpoint threads |
 | `tools/lg.c` | the load generator used for the measurements below (not part of the build) |
 
 ## Reads go through SQLite's B-tree, not its SQL engine
@@ -57,8 +57,11 @@ straight from those bytes. There is no bytecode engine and no `sqlite3_column_*`
   pass's transaction. Only prepared statements, cursors, two KeyInfo objects and the four root page
   numbers (read from `sqlite_schema` at startup) are reused. Every JWT signature is verified on
   every request.
-- **Writes use SQL:** `INSERT … RETURNING id, created_at` and `INSERT … ON CONFLICT DO NOTHING`
-  (`sqlite3_changes` tells a new like from a repeat). The like handler's 404 check is a B-tree seek.
+- **Writes use SQL:** `INSERT INTO posts (user_id, body) …` and `INSERT … ON CONFLICT DO NOTHING`
+  (`sqlite3_changes` tells a new like from a repeat). A new post's `created_at` (the column
+  default) is read back from its row through the posts cursor, in the same transaction:
+  `RETURNING` gives the same values but buffers them in a temporary B-tree, with its own pager and
+  page cache, built and torn down on every call. The like handler's 404 check is a B-tree seek.
 
 ## Durability and batching
 
@@ -70,12 +73,20 @@ straight from those bytes. There is no bytecode engine and no `sqlite3_column_*`
   commit, rule 6). **No response from a pass is handed to the kernel until that `COMMIT` returns.**
   If it fails, every response the pass produced is replaced by a 500 and the connection is closed.
 - **Checkpoints off the request path.** Automatic checkpoints are off. Once the WAL holds 4,096
-  frames, a second thread (nice 19, own connection) runs a PASSIVE checkpoint. Then writes are
-  briefly held: the next POST on each connection stays unread while the thread copies the frames
-  written meanwhile, so the next write can restart the log from the top. Reads go on during a
-  hold, and a hold lasts at most 250 ms. Past 65,536 frames the loop checkpoints by itself. In a
+  frames, a helper thread (nice 19, own connection) runs a PASSIVE checkpoint. Then writes are
+  briefly held: the next POST on each connection stays unread while a second helper thread copies
+  the frames written meanwhile, so the next write can restart the log from the top. That one runs
+  at normal priority because writes wait for it: at nice 19 it got ~1.5% of a busy CPU and holds
+  ran into their limit (below). Reads go on during a hold, and a hold lasts at most 250 ms. Past
+  65,536 frames the loop checkpoints by itself. In a
   30-second write-heavy run (27k posts and 200k likes at ~96k req/s) the WAL file never grew past
   33 MB and `integrity_check` was `ok` afterwards.
+- **Page cache after a split.** When a write splits a B-tree page, SQLite renumbers the new pages
+  through a temporary page number far past the end of the file, and the page cache keeps that as
+  its largest key. The commit then truncates the cache to the file size, and from that key it
+  walks every cached page (all of the 64 MB cache) rather than the few numbers past the end.
+  Before each commit the shim checks that nothing is cached at that number and puts the largest
+  key back at the file size, so the truncate has nothing to walk.
 - **Batch size.** Each pass waits on ring 0 for 256 completions or 4 ms, whichever comes first
   (never while reads or answers are queued). Bigger passes share one `COMMIT` and fewer WAL frame
   writes. At ~18k req/s over 18,000 connections, 4 ms instead of 1 ms cut server CPU from 17.8 to
@@ -152,6 +163,39 @@ benchmark droplet.
 The latency difference is the 4 ms batching wait (see above); both are far inside the
 500 ms / 1 s limits. About two thirds of the CPU per request is the kernel's (TCP and io_uring), which is the same for
 both servers.
+
+The normal-priority checkpoint tail, the page-cache fix and the INSERT without `RETURNING`, same
+sandbox, 2,000 busy connections (closed loop, so writes are frequent and the server is
+saturated), five runs of each build:
+
+| | p99 | worst request | req/s |
+|---|---|---|---|
+| before (tail at nice 19) | 128–151 ms | 283–316 ms | 94–105k |
+| after | 29–35 ms | 81–111 ms | 98–111k |
+
+The old worst cases are write holds running into their 250 ms limit. The req/s ranges overlap: on
+this sandbox the cache stays small (about 1,500 pages), so the cache walk the fix removes is short.
+
+### One run on a DigitalOcean droplet
+
+Before the changes above: a Basic droplet like the benchmark box (s-1vcpu-2gb, Ubuntu 24.04,
+kernel 6.8.0-147) serving directly, with eight 1-vCPU load-generator droplets running the k6 user
+model (a C rewrite of `bench/load.js`: same think times, mix and pass thresholds). Each step held
+its user count for 2 minutes, the final one for 5. CPU is the server's own cgroup, which leaves
+out interrupt handling and steal time, so the box was busier than these figures show.
+
+| users | this server | rust-iouring-kensac |
+|---|---|---|
+| 40,000 | pass · 17% CPU · 41.3 µs/req | pass · 21% CPU · 49.5 µs/req |
+| 80,000 | pass · 31% · 36.6 µs · p99 32 ms | pass · 34% · 39.9 µs · p99 31 ms |
+| 100,000 | | pass · 45% · 42.6 µs |
+| 120,000 | pass · 48% · 37.6 µs · p99 352 ms | fail · 56% · 44.2 µs · p99 3,558 ms |
+| 125,000, 5-minute hold | pass · 13,201 req/s · 53% · 40.1 µs · p99 643 ms · 362 MB cgroup peak | |
+| 130,000 / 140,000 | fail / fail | |
+| 160,000 | fail · 64% · 37.8 µs · p99 1,628 ms | fail · 73% · 43.1 µs · p99 2,538 ms |
+
+A shared vCPU adds noise, so treat this as one sample. Both servers fail while their own CPU
+reads 54–73%: with 1 vCPU, the rest goes to the kernel's network processing and to steal.
 
 Correctness checks beyond `test/test.sh` (42/42):
 

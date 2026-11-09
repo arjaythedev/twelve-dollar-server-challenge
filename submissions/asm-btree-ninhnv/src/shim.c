@@ -113,18 +113,21 @@ static int step_reset(sqlite3_stmt *s) {
 static void ck_set(int s) {
   pthread_mutex_lock(&ck_mu);
   __atomic_store_n(&ck_state, s, __ATOMIC_RELEASE);
-  pthread_cond_signal(&ck_cv);
+  pthread_cond_broadcast(&ck_cv);
   pthread_mutex_unlock(&ck_mu);
 }
 
 /* One PASSIVE checkpoint per request from the loop. PASSIVE never waits for the loop's locks
- * and the loop never waits for this thread. Nice 19: on one vCPU it runs in the loop's idle time. */
+ * and the loop never waits for these threads. Two threads take turns on the one connection (the
+ * states are strictly sequential): the bulk copy at nice 19, so on one vCPU it runs in the loop's
+ * idle time, and the tail at normal priority, because writes wait for it: at nice 19 it gets ~1.5%
+ * of a busy CPU and the hold ran into its 250 ms limit. */
 static void *ck_main(void *arg) {
-  (void)arg;
-  setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), 19);
+  int serve = (int)(long)arg;
+  if (serve == CK_BULK) setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), 19);
   for (;;) {
     pthread_mutex_lock(&ck_mu);
-    while (ck_state != CK_BULK && ck_state != CK_TAIL) pthread_cond_wait(&ck_cv, &ck_mu);
+    while (ck_state != serve) pthread_cond_wait(&ck_cv, &ck_mu);
     int st = ck_state;
     pthread_mutex_unlock(&ck_mu);
     int nlog = -1, ndone = -2;
@@ -162,7 +165,8 @@ int td_open(const char *path, char *err, int n) {
   pthread_attr_t a;
   pthread_attr_init(&a);
   pthread_attr_setstacksize(&a, 256 << 10);
-  int rc = pthread_create(&t, &a, ck_main, 0);
+  int rc = pthread_create(&t, &a, ck_main, (void *)(long)CK_BULK);
+  if (!rc) rc = pthread_create(&t, &a, ck_main, (void *)(long)CK_TAIL);
   pthread_attr_destroy(&a);
   if (rc) { snprintf(err, n, "checkpoint thread"); return -1; }
 
@@ -191,7 +195,7 @@ int td_open(const char *path, char *err, int n) {
   st_begin = prep("BEGIN");
   st_commit = prep("COMMIT");
   st_rollback = prep("ROLLBACK");
-  st_post = prep("INSERT INTO posts (user_id, body) VALUES (?1, ?2) RETURNING id, created_at");
+  st_post = prep("INSERT INTO posts (user_id, body) VALUES (?1, ?2)");
   st_like = prep("INSERT INTO likes (user_id, post_id) VALUES (?1, ?2) ON CONFLICT (user_id, post_id) DO NOTHING");
   st_health = prep("SELECT 1");
   st_feed = prep("SELECT p.id, p.body, p.created_at, u.username, "
@@ -237,17 +241,34 @@ int td_begin(void) {
   return 0;
 }
 
+/* A B-tree split (balance_nonroot) swaps page numbers through a temporary one far past the end of
+ * the file, and the page cache keeps that as its largest key. The commit then truncates the cache
+ * to the file size, and with the largest key that far out it walks every cached page instead of
+ * the few numbers past the end: a scan of the whole 64 MB cache after any pass that split a page.
+ * Once the split is done nothing is cached at the temporary number (checked), and no page is
+ * cached past the file size, so the largest key goes back to the file size. */
+static void cache_maxkey(void) {
+  Pager *pg = sqlite3BtreePager(bt);
+  PCache1 *c = (PCache1 *)pg->pPCache->pCache;
+  Pgno tmp = PAGER_SJ_PGNO(pg);
+  if (c->iMaxKey != tmp || pg->dbSize >= tmp || !c->nHash) return;
+  for (PgHdr1 *p = c->apHash[tmp % c->nHash]; p; p = p->pNext)
+    if (p->iKey == tmp) return;
+  c->iMaxKey = pg->dbSize;
+}
+
 /* Ends the pass's transaction. 0 committed (or nothing to commit), -1 rolled back. */
 int td_commit(void) {
   if (tx_broken) {
     tx_broken = 0;
     close_cursors();
-    if (!sqlite3_get_autocommit(db)) step_reset(st_rollback);
+    if (!sqlite3_get_autocommit(db)) { cache_maxkey(); step_reset(st_rollback); }
     return -1;
   }
   if (!in_tx) return 0;
   in_tx = 0;
   close_cursors();
+  cache_maxkey();
   if (step_reset(st_commit) != SQLITE_DONE) { step_reset(st_rollback); return -1; }
   return 0;
 }
@@ -381,22 +402,47 @@ static void check_tx(void) {
   if (in_tx && sqlite3_get_autocommit(db)) { in_tx = 0; tx_broken = 1; }
 }
 
-/* INSERT ... RETURNING id, created_at: 0 ok (id and created_at filled, created_at <= 63 bytes). */
+/* Text column `col` of a record: 0 ok, -1 not text or malformed. */
+static int rec_text(const u8 *rec, u32 n, int col, const u8 **p, u32 *len) {
+  u32 hdr, t, i, off;
+  if (!n) return -1;
+  i = getVarint32(rec, hdr);
+  if (hdr > n) return -1;
+  off = hdr;
+  for (int c = 0;; c++) {
+    if (i >= hdr) return -1;
+    i += getVarint32(rec + i, t);
+    u32 sz = sqlite3VdbeSerialTypeLen(t);
+    if (off + sz > n) return -1;
+    if (c == col) {
+      if (t < 13 || !(t & 1)) return -1;
+      *p = rec + off;
+      *len = sz;
+      return 0;
+    }
+    off += sz;
+  }
+}
+
+/* INSERT, then the new row's created_at (the column default) read back through the posts cursor
+ * in the same transaction. Same result as INSERT ... RETURNING, which buffers its rows in a
+ * temporary B-tree (its own pager and page cache) built and torn down on every call.
+ * 0 ok (id and created_at filled, created_at <= 63 bytes). */
 int td_insert_post(i64 uid, const char *body, int len, i64 *id, char *created, int *clen) {
   sqlite3_bind_int64(st_post, 1, uid);
   sqlite3_bind_text(st_post, 2, body, len, SQLITE_STATIC);
   int rc = sqlite3_step(st_post);
-  if (rc != SQLITE_ROW) { sqlite3_reset(st_post); sqlite3_clear_bindings(st_post); check_tx(); return -1; }
-  *id = sqlite3_column_int64(st_post, 0);
-  int n = sqlite3_column_bytes(st_post, 1);
-  const unsigned char *t = sqlite3_column_text(st_post, 1);
-  if (!t || n > 63) { sqlite3_reset(st_post); sqlite3_clear_bindings(st_post); return -1; }
-  memcpy(created, t, n);
-  *clen = n;
-  rc = sqlite3_step(st_post);
   sqlite3_reset(st_post);
   sqlite3_clear_bindings(st_post);
-  return rc == SQLITE_DONE ? 0 : -1;
+  if (rc != SQLITE_DONE) { check_tx(); return -1; }
+  *id = sqlite3_last_insert_rowid(db);
+  const u8 *rec, *t;
+  u32 n, tn;
+  if (td_seek(cur[0], *id) != 1 || !(rec = td_payload(cur[0], &n)) || rec_text(rec, n, 3, &t, &tn) || tn > 63)
+    return -1;
+  memcpy(created, t, tn);
+  *clen = (int)tn;
+  return 0;
 }
 
 /* 1 inserted, 0 already liked, -1 error. */

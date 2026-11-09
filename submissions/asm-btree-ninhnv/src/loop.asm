@@ -5,7 +5,7 @@ extern getenv, signal, clock_gettime, dprintf, exit, atoi, inet_pton, strlen, ca
 extern getrlimit, setrlimit, memmove
 extern td_open, td_commit, td_tick
 extern db_init, g_in_tx, hmac_init, http_parse, handle_request, resp_error
-extern buf_give, part_append, part_free, g_out_slot, g_start_s
+extern buf_give, part_append, part_free, g_out_slot, g_start_s, g_oom
 extern E_BAD_REQUEST, E_BAD_REQUEST_len, E_INTERNAL, E_INTERNAL_len
 
 global main
@@ -521,10 +521,16 @@ serve:
   or word [rbp + C_FLAGS], F_ANSWERED
   lea rax, [rbp + C_OUT]
   mov [g_out_slot], rax
+  mov qword [g_oom], 0
   lea rdi, [g_req]
   call handle_request
   add r15, [g_req + Q_USED]
-  jmp .loop
+  cmp qword [g_oom], 0
+  je .loop
+  ; out of memory: a request went unanswered, so nothing after it can be answered in order
+  or word [rbp + C_FLAGS], F_CLOSEAFT
+  mov r15, r14
+  jmp .after
 .bad:
   mov rdi, rbx
   mov esi, r12d

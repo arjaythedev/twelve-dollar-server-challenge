@@ -79,6 +79,15 @@ nonisolated struct ByteBuffer: ~Copyable, ~Sendable {
         return n
     }
 
+    /// Lets `body` write up to `maximum` bytes past the end, through an `OutputRawSpan` over that room, and keeps what
+    /// it wrote.
+    @inline(__always) mutating func append(maximum: Int, _ body: (inout OutputRawSpan) -> Void) {
+        let room = UnsafeMutableRawBufferPointer(start: reserve(maximum), count: maximum)
+        var output = OutputRawSpan(buffer: room, initializedCount: 0)
+        body(&output)
+        count += output.finalize(for: room)
+    }
+
     @inline(__always) subscript(i: Int) -> UInt8 {
         get {
             precondition(i >= 0 && i < count)

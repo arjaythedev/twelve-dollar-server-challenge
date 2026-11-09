@@ -49,33 +49,37 @@
   preference), and learns it finished from an eventfd its ring reads, a completion like any other. Crossing to it is
   the one place the compiler asks for `await` and `Sendable`. The process has two threads: the loop and the
   checkpointer.
-- **Checkpoints copy all along; writes wait only for the WAL to start over.** The checkpointer copies the WAL every
-  250 ms while writes go on. SQLite starts the WAL over only at a write that begins with every frame copied, which
-  group commit under steady writes never leaves (locally the WAL reached 767 MB in a minute, and the WAL index
-  SQLite keeps in memory with it). So past 8,192 frames (32 MiB) writes wait (a connection with a held write parses
-  nothing further, so responses stay in order) and reads go on, while the checkpointer copies the rest back to back;
-  since it has kept up, little is left. At the end of the pass that sees it all copied, the checkpointer starts the
-  WAL over itself, with a commit that changes nothing (`user_version` set to what it is), so the sync of the new
-  WAL's header, which `synchronous=NORMAL` makes when a WAL starts over, happens on its thread and not the loop's;
-  then the held writes run. A hold ends after 1 s regardless. The log says once a minute how many holds there were,
-  how many ran out, and how many copies the loop made itself (past 16,384 frames).
+- **Checkpoints in two copies; the loop's own write starts the WAL over.** Past 4,096 frames (16 MiB) the
+  checkpointer copies the WAL back while writes go on. Then writes wait (a connection with a held write parses
+  nothing further, so responses stay in order) and reads go on, while it copies what was written meanwhile; a hold
+  lasts at most 250 ms. SQLite starts the WAL over only at a write that begins with every frame copied, which group
+  commit under steady writes never leaves (locally the WAL reached 767 MB in a minute, and the WAL index SQLite keeps
+  in memory with it): the pass after the hold reads with the WAL all copied, so its first write starts it over, on
+  the loop's own connection. The checkpointer only copies and never commits, since a commit from another connection
+  makes SQLite drop the loop connection's page cache. The log says once a minute how many holds there were, how many
+  ran out, and how many copies the loop made itself (past 65,536 frames).
 - **Group commit per pass.** Every request of a pass runs inside one SQLite transaction (WAL,
   `synchronous=NORMAL`), and no response of the pass is sent before its `COMMIT` returns (rule 6). If it fails, the
   pass's connections close without an answer, so no response ever claims a write that didn't land.
 - **SQLite.** Opened through the `unix-excl` VFS: the process holds the file's lock for its life and the WAL index
   lives in its memory, shared by its two connections (no `-shm` file). The statements are prepared once; 64 MB
   page cache, no mmap. Automatic checkpoints are off: the loop starts PASSIVE checkpoints on the checkpointer
-  (`CHECKPOINT_THREAD=0` runs them in the loop instead, past 8,192 frames). Rows are written as JSON straight from
+  (`CHECKPOINT_THREAD=0` runs them in the loop instead, past 4,096 frames). Rows are written as JSON straight from
   SQLite's memory.
 - **Reads walk SQLite's B-trees.** The feed, a post, and a like's check that its post exists skip SQL: they move
   SQLite's own cursors inside the pass's transaction, as its query plan would, without the bytecode engine. SQLite's
   B-tree layer isn't part of its API, so the amalgamation is compiled with `SQLITE_PRIVATE` defined empty (it would be
   `static`): its internal functions link like any other, and `Sources/BTree` declares the ones it uses with
-  `@_extern(c)` and opaque pointers, never looking into SQLite's structs. `Cursor` moves are `mutating` and a record
-  is a `Span` borrowed from the cursor, so the compiler rules out reading a row after its cursor moved on; `Record`
-  decodes SQLite's row format in place. The feed takes its 20 ids off `posts_created_at_id_idx`, counts their likes in
-  one walk of `likes_post_id_idx`, then reads each post (a step back from the one before, as the ids go down) and its
-  author, writing the JSON as it goes. The schema is checked at startup. A row these reads don't expect (a post
+  `@_extern(c)`. `Cursor` moves are `mutating` and a record is a `Span` borrowed from the cursor, so the compiler
+  rules out reading a row after its cursor moved on; `Record` decodes SQLite's row format in place. The feed takes its
+  20 entries off `posts_created_at_id_idx`, reads the posts in ascending id order (so SQLite's seek from one post to
+  the next is a step along the leaf), then their authors, counts their likes in one walk of `likes_post_id_idx`, and
+  writes the response in one reservation, escaping 32 bytes at a time. That walk steps SQLite's cursor entry by entry
+  (`sqlite3BtreeNext`), and its seek key is a one-column one: an `UnpackedRecord` and its `Mem`, built in the
+  server's own memory at offsets for the pinned 3.54.1. At startup the server checks that seeks with it count what the
+  two-column key does, and keeps the two-column key if they don't, saying so in the log. The
+  build links Swift and SQLite with full link-time optimization (`build.sh`), so SQLite's small functions these reads
+  call are inlined into them. The schema is checked at startup. A row these reads don't expect (a post
   without its user, a record that spills onto overflow pages) is answered by the SQL statements instead, and so is
   every read when the schema differs. Locally the answers matched SQL's byte for byte, on the seed and on databases
   edited to reach each fallback.

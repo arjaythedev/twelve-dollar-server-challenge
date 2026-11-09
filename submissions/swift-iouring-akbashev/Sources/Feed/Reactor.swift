@@ -25,6 +25,7 @@ final class Reactor {
     private var store: Store
     /// The reads walk SQLite's B-trees (else SQL answers them).
     var directReads: Bool { store.directReads }
+    var oneColumnSeeks: Bool { store.oneColumnSeeks }
 
     /// `SO_REUSEPORT` listeners on the port: each has its own accept queue (capped at `somaxconn`, 4,096 on the box), so
     /// together they hold a ramp's or a stall's new connections instead of refusing them.
@@ -50,16 +51,14 @@ final class Reactor {
     private let checkpointDone: Int32
     private let checkpointSignal = UnsafeMutableRawBufferPointer.allocate(byteCount: 8, alignment: 8)
     private var checkpointPhase = CheckpointPhase.idle
-    private var checkpointStarted: UInt64 = 0
-    /// While the WAL is due to start over, writes wait (and their connections parse nothing further, so responses
-    /// stay in order) and reads go on, until it is all copied: SQLite starts the WAL over only at a write that begins
-    /// with every frame copied, which group commit under steady writes never leaves, so the WAL, and the index SQLite
-    /// keeps of it in memory, would grow without end.
+    /// While the checkpointer copies what was written since its first copy, writes wait (and their connections parse
+    /// nothing further, so responses stay in order) and reads go on: SQLite starts the WAL over only at a write that
+    /// begins with every frame copied, which group commit under steady writes never leaves, so the WAL, and the index
+    /// SQLite keeps of it in memory, would grow without end.
     private var holdingWrites = false
     private var holdStarted: UInt64 = 0
     private var held: [HeldWrite] = []
-    private static let checkpointIntervalNanos: UInt64 = 250_000_000
-    private static let holdLimitNanos: UInt64 = 1_000_000_000
+    private static let holdLimitNanos: UInt64 = 250_000_000
     /// Logged once a minute when there were any.
     private var checkpointCounts = CheckpointCounts()
     private var countsLogged: UInt64 = 0
@@ -141,19 +140,9 @@ final class Reactor {
         case .checkpointed:
             let copiedAll = checkpointSignal.load(as: UInt64.self) == Checkpointer.copiedAll
             switch checkpointPhase {
-            case .copying, .copyingHeld where !holdingWrites:
-                // A routine copy is done, or the hold ran out and writes went on.
-                checkpointPhase = .idle
-            case .copyingHeld where copiedAll:
-                // The WAL starts over at the end of the pass (`stepCheckpoint`).
-                checkpointPhase = .copiedAll
-            case .copyingHeld:
-                // Back to back while writes wait.
-                startCheckpoint()
-            case .restarting:
-                checkpointPhase = .restarted
-            case .idle, .copiedAll, .restarted:
-                break
+            case .copying: checkpointPhase = .copied
+            case .copyingRest: checkpointPhase = .copiedRest(all: copiedAll)
+            case .idle, .copied, .copiedRest: break
             }
             armCheckpointSignal()
         case .cancel, .none:
@@ -164,12 +153,6 @@ final class Reactor {
 
     /// The pass's transaction commits; then its responses go out.
     private func endPass() {
-        // A hold longer than the limit ends (the next pass starts another); not while the checkpointer writes, which
-        // a write of the loop's would collide with.
-        if holdingWrites && checkpointPhase != .restarting && Sys.monotonicNanos() - holdStarted > Self.holdLimitNanos {
-            checkpointCounts.expired += 1
-            releaseWrites()
-        }
         if !store.finishPass() {
             // Nothing from this pass may claim a write that didn't land: its connections close without an answer.
             Sys.logLine("sqlite: the pass's transaction didn't commit; closing its connections")
@@ -184,47 +167,45 @@ final class Reactor {
         stepCheckpoint()
     }
 
-    /// Checkpoints as mojo-iouring-oh-meh runs them: the checkpointer copies the WAL every 250 ms while writes go on,
-    /// and only once the WAL is due to start over do writes wait, while it copies the rest back to back. Then the
-    /// checkpointer starts the WAL over itself with a commit that changes nothing, so the sync of the new WAL's header
-    /// happens on its thread, not the loop's (c-iouring-shivanshthapliyal's idea). Steps are taken here, between passes
-    /// with no transaction open: the copy takes every write committed before the hold, and the restart finds no
-    /// reader of the loop's on the old WAL.
+    /// Checkpoints in two copies. Past `Store.checkpointFrames` the checkpointer copies the WAL back while writes go on;
+    /// then writes wait (at most `holdLimitNanos`) while it copies what was written meanwhile. If that leaves nothing,
+    /// the loop's next write starts the WAL over on the loop's own connection, so its page cache stays (a commit from
+    /// another connection would make SQLite drop it). Steps are taken here, between passes with no transaction open:
+    /// a hold starts after the last write committed, and the pass after it reads with the WAL all copied, which lets
+    /// its first write start the WAL over.
     private func stepCheckpoint() {
         guard checkpointer != nil else {
-            if store.restartDue { checkpointInLoop() }
+            if store.checkpointDue { checkpointInLoop() }
             return
         }
+        let now = Sys.monotonicNanos()
         switch checkpointPhase {
         case .idle:
             if store.checkpointOverdue {
                 // The checkpointer keeps falling behind: the loop copies the WAL itself, as a last resort.
                 checkpointInLoop()
-            } else if store.restartDue {
-                checkpointCounts.holds += 1
-                holdingWrites = true
-                holdStarted = Sys.monotonicNanos()
-                checkpointPhase = .copyingHeld
-                startCheckpoint()
-            } else if store.hasWAL && Sys.monotonicNanos() - checkpointStarted >= Self.checkpointIntervalNanos {
+            } else if store.checkpointDue {
                 checkpointPhase = .copying
                 startCheckpoint()
             }
-        case .copiedAll:
-            if holdingWrites {
-                checkpointPhase = .restarting
-                startRestart()
-            } else {
-                checkpointPhase = .idle
-            }
-        case .restarted:
-            store.checkpointFinished()
+        case .copied:
+            checkpointCounts.holds += 1
+            holdingWrites = true
+            holdStarted = now
+            checkpointPhase = .copyingRest
+            startCheckpoint()
+        case .copiedRest(let all):
+            // All copied: the next write starts the WAL over, and its commit reports what's in it.
+            if all { store.checkpointFinished() }
             checkpointPhase = .idle
-            releaseWrites()
-        case .copying, .copyingHeld, .restarting:
-            break
+            if holdingWrites { releaseWrites() }
+        case .copying, .copyingRest:
+            if holdingWrites && now - holdStarted > Self.holdLimitNanos {
+                // The hold ran out: writes go on, and a later round copies the rest.
+                checkpointCounts.expired += 1
+                releaseWrites()
+            }
         }
-        let now = Sys.monotonicNanos()
         if now - countsLogged >= 60_000_000_000 {
             let c = checkpointCounts
             if c.any {
@@ -237,15 +218,9 @@ final class Reactor {
 
     private func startCheckpoint() {
         guard let checkpointer else { return }
-        checkpointStarted = Sys.monotonicNanos()
         // The effect leaves the main thread here: the task starts on the checkpointer's own executor, and the loop
         // goes on.
         Task(executorPreference: checkpointer.executor) { @concurrent in await checkpointer.checkpoint() }
-    }
-
-    private func startRestart() {
-        guard let checkpointer else { return }
-        Task(executorPreference: checkpointer.executor) { @concurrent in await checkpointer.restartWAL() }
     }
 
     private func checkpointInLoop() {
@@ -780,14 +755,12 @@ extension Reactor {
         case idle
         /// Copying the WAL while writes go on.
         case copying
-        /// Copying the WAL while writes wait for it to start over.
-        case copyingHeld
-        /// All of it is copied: at the end of the pass the checkpointer starts the WAL over.
-        case copiedAll
-        /// The checkpointer's commit that starts the WAL over runs; writes still wait.
-        case restarting
-        /// It ran: writes go on at the end of the pass.
-        case restarted
+        /// That copy is done: at the end of the pass writes start waiting for the rest to be copied.
+        case copied
+        /// Copying what was written meanwhile, while writes wait.
+        case copyingRest
+        /// That copy is done (`all`: nothing is left, so the loop's next write starts the WAL over).
+        case copiedRest(all: Bool)
     }
 
     /// Holds of writes, those that ran out, and the loop's own copies.

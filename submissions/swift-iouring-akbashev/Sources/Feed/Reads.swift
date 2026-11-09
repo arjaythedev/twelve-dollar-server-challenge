@@ -24,6 +24,21 @@ nonisolated struct Reads: ~Copyable, ~Sendable {
     private var newest: Cursor
     private var likes: Cursor
     private var isOpen = false
+    /// The feed rows' texts, copied as each cursor moves on.
+    private var text = ByteBuffer(capacity: 16 * 1024)
+
+    /// A feed row: its post, author and likes, and where its texts are in `text`.
+    private struct Row {
+        var id: Int64 = 0
+        var userID: Int64 = 0
+        var likes: UInt32 = 0
+        var body = 0..<0
+        var created = 0..<0
+        var author = 0..<0
+    }
+
+    /// Like counts seek with the one-column key (`checkOneColumnSeeks`).
+    var oneColumnSeeks: Bool { likes.oneColumnSeeks }
 
     init(_ db: OpaquePointer, enabled: Bool) throws(StoreError) {
         let roots = enabled && Self.schemaMatches(db)
@@ -73,62 +88,157 @@ nonisolated struct Reads: ~Copyable, ~Sendable {
 
     // ---------- the queries ----------
 
-    /// `{"posts":[...]}`: the newest ids off the index, their likes counted in one walk of the likes index, then each
-    /// post and its author, written as they are read.
+    /// `{"posts":[...]}`: the newest (created_at, id) entries off the index; then the posts in ascending id order, so each
+    /// seek from the one before is a step along the leaf; their authors; their likes in one walk of the likes index;
+    /// then the response in one reservation. The rows' texts are copied aside (`text`) as each cursor moves on.
     mutating func feed(into body: inout ByteBuffer) -> Answer {
         guard openIfNeeded() else { return .failed }
-        // The feed's ids, newest first: (created_at, id) entries.
-        var ids = InlineArray<20, Int64>(repeating: 0)
+        text.removeAll()
+        var rows = InlineArray<20, Row>(repeating: Row())
         var n = 0
         var move = newest.first()
-        while move == .entry && n < ids.count {
-            guard let id = Self.indexedID(newest.record) else { return .unexpected }
-            ids[n] = id
+        while move == .entry && n < rows.count {
+            do {
+                // The entry is borrowed from the cursor until the end of this block, before the cursor moves on.
+                let entry = newest.record
+                guard let columns: InlineArray<2, Record.Column> = Record.columns(entry), columns[0].isText,
+                      let id = Record.integer(entry, columns[1]) else { return .unexpected }
+                rows[n].id = id
+                let from = text.count
+                text.append(entry.extracting(columns[0].range))
+                rows[n].created = from..<text.count
+            }
             n += 1
             move = newest.next()
         }
         if move == .failed { return .failed }
 
+        // Newest first is normally descending ids, so ascending is the reverse; otherwise sorted.
+        var order = InlineArray<20, Int>(repeating: 0)
+        for k in 0..<n { order[k] = n - 1 - k }
+        var ascending = true
+        for k in 0..<max(n - 1, 0) where rows[order[k]].id >= rows[order[k + 1]].id { ascending = false }
+        if !ascending {
+            for k in 1..<max(n, 1) {
+                let i = order[k]
+                var j = k
+                while j > 0 && rows[order[j - 1]].id > rows[i].id {
+                    order[j] = order[j - 1]
+                    j -= 1
+                }
+                order[j] = i
+            }
+        }
+        for k in 0..<n {
+            let i = order[k]
+            switch posts.seek(rows[i].id) {
+            case .entry: break
+            case .none: return .unexpected // the index and the table disagree
+            case .failed: return .failed
+            }
+            let row = posts.record
+            guard let columns: InlineArray<3, Record.Column> = Record.columns(row),
+                  let userID = Record.integer(row, columns[1]), columns[2].isText else { return .unexpected }
+            rows[i].userID = userID
+            let from = text.count
+            text.append(row.extracting(columns[2].range))
+            rows[i].body = from..<text.count
+        }
+        // A post without its user is no row of the join: SQL answers.
+        for i in 0..<n {
+            switch users.seek(rows[i].userID) {
+            case .entry: break
+            case .none: return .unexpected
+            case .failed: return .failed
+            }
+            let author = users.record
+            guard let columns: InlineArray<2, Record.Column> = Record.columns(author), columns[1].isText else { return .unexpected }
+            let from = text.count
+            text.append(author.extracting(columns[1].range))
+            rows[i].author = from..<text.count
+        }
+
         // Their likes in one walk when their ids lie close together (new posts' ids follow one another).
-        var counts = InlineArray<513, UInt32>(repeating: 0)
         var lo = Int64.max, hi = Int64.min
         for i in 0..<n {
-            lo = min(lo, ids[i])
-            hi = max(hi, ids[i])
+            lo = min(lo, rows[i].id)
+            hi = max(hi, rows[i].id)
         }
-        let together = n > 0 && hi - lo < Int64(counts.count)
-        if together {
+        if n > 0 && hi - lo < 513 {
+            var counts = InlineArray<513, UInt32>(repeating: 0)
             var span = counts.mutableSpan
             switch likes.count(lo, hi, into: &span) {
             case .done: break
             case .unexpected: return .unexpected
             case .failed: return .failed
             }
-        }
-
-        body.append("{\"posts\":[")
-        for i in 0..<n {
-            if i > 0 { body.append(",") }
-            let likeCount: UInt32
-            if together {
-                likeCount = counts[Int(ids[i] - lo)]
-            } else {
+            for i in 0..<n { rows[i].likes = counts[Int(rows[i].id - lo)] }
+        } else {
+            for i in 0..<n {
                 var one = InlineArray<1, UInt32>(repeating: 0)
                 var span = one.mutableSpan
-                switch likes.count(ids[i], ids[i], into: &span) {
-                case .done: likeCount = one[0]
+                switch likes.count(rows[i].id, rows[i].id, into: &span) {
+                case .done: rows[i].likes = one[0]
                 case .unexpected: return .unexpected
                 case .failed: return .failed
                 }
             }
-            switch writePost(ids[i], likes: likeCount, into: &body) {
-            case .done: continue
-            case .missing: return .unexpected
-            case let other: return other
+        }
+
+        // Each row's fixed part and two integers take under 112 bytes, and an escaped byte at most 6.
+        let bound = 12 + 112 * n + 6 * text.count
+        let t = text.span
+        body.append(maximum: bound) { out in
+            out.append("{\"posts\":[")
+            for i in 0..<n {
+                if i > 0 { out.append(0x2C) }
+                out.append("{\"id\":")
+                out.appendDecimal(rows[i].id)
+                out.append(",\"body\":\"")
+                out.appendJSONStringContents(t.extracting(rows[i].body))
+                out.append("\",\"created_at\":\"")
+                out.appendJSONStringContents(t.extracting(rows[i].created))
+                out.append("\",\"author\":\"")
+                out.appendJSONStringContents(t.extracting(rows[i].author))
+                out.append("\",\"like_count\":")
+                out.appendDecimal(Int64(rows[i].likes))
+                out.append(0x7D)
+            }
+            out.append("]}")
+        }
+        return .done
+    }
+
+    /// Turns the likes cursor's one-column seeks on if they count what the two-column key does, over the newest posts
+    /// and a spread of others (so `Layout`'s offsets are SQLite's). Run once, inside a transaction; returns what didn't
+    /// match, if anything.
+    mutating func checkOneColumnSeeks() -> String? {
+        guard available, openIfNeeded() else { return "no cursors" }
+        defer { close() }
+        var bases: [Int64] = [1, 2, 1_000, 123_457, 250_000, 499_990]
+        if newest.first() == .entry {
+            let entry = newest.record
+            if let columns: InlineArray<2, Record.Column> = Record.columns(entry), let id = Record.integer(entry, columns[1]) {
+                bases += [id - 63, id - 300]
             }
         }
-        body.append("]}")
-        return .done
+        for base in bases where base > 0 {
+            var expected = InlineArray<64, UInt32>(repeating: 0)
+            var found = InlineArray<64, UInt32>(repeating: 0)
+            likes.oneColumnSeeks = false
+            var expectedSpan = expected.mutableSpan
+            guard likes.count(base, base + 63, into: &expectedSpan) == .done else { return "counting from \(base)" }
+            likes.oneColumnSeeks = true
+            var foundSpan = found.mutableSpan
+            let result = likes.count(base, base + 63, into: &foundSpan)
+            likes.oneColumnSeeks = false
+            guard result == .done else { return "counting from \(base) with the one-column key: \(result)" }
+            for i in 0..<64 where expected[i] != found[i] {
+                return "post \(base + Int64(i)): \(found[i]) likes with the one-column key, \(expected[i]) with the two-column one"
+            }
+        }
+        likes.oneColumnSeeks = true
+        return nil
     }
 
     /// `{"post":{...}}`.

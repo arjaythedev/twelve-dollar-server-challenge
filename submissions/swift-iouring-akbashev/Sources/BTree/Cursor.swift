@@ -15,6 +15,13 @@ public struct Cursor: ~Copyable, ~Sendable {
     @usableFromInline var keys: OpaquePointer?
     /// The key an index seek compares with, unpacked into SQLite's form.
     @usableFromInline var probe: OpaquePointer?
+    /// A one-column key (an `UnpackedRecord` and the `Mem` it points to, at `Layout`'s offsets, in the cursor's own
+    /// memory), used once `oneColumnSeeks` is on: the integer alone, with entries equal to it sorting after it.
+    @usableFromInline let probeRecord: UnsafeMutableRawPointer?
+    @usableFromInline let probeValue: UnsafeMutableRawPointer?
+    /// Seeks use the one-column key. Off until the reads have checked that it finds what the two-column one does
+    /// (`Layout`'s offsets are SQLite's).
+    public var oneColumnSeeks = false
     @usableFromInline var isOpen = false
     private var released = false
 
@@ -40,10 +47,25 @@ public struct Cursor: ~Copyable, ~Sendable {
         self.root = root
         self.keys = keys
         self.probe = probe
+        if let keys {
+            let record = UnsafeMutableRawPointer.allocate(byteCount: Layout.recordSize, alignment: 8)
+            let value = UnsafeMutableRawPointer.allocate(byteCount: Layout.valueSize, alignment: 8)
+            record.initializeMemory(as: UInt8.self, repeating: 0, count: Layout.recordSize)
+            value.initializeMemory(as: UInt8.self, repeating: 0, count: Layout.valueSize)
+            record.storeBytes(of: UnsafeRawPointer(keys), toByteOffset: Layout.recordKeyInfo, as: UnsafeRawPointer.self)
+            record.storeBytes(of: UnsafeRawPointer(value), toByteOffset: Layout.recordValues, as: UnsafeRawPointer.self)
+            probeRecord = record
+            probeValue = value
+        } else {
+            probeRecord = nil
+            probeValue = nil
+        }
     }
 
     deinit {
         if !released { Self.free(db, raw, keys, probe, open: isOpen) }
+        probeRecord?.deallocate()
+        probeValue?.deallocate()
     }
 
     /// Frees the cursor. `keys` and `probe` came from the connection's allocator, so this comes before it closes.
@@ -78,25 +100,33 @@ public struct Cursor: ~Copyable, ~Sendable {
         isOpen = false
     }
 
-    /// The table row `rowid`. From the row just after it (a walk down the ids), one step back; SQLite's own seek
-    /// steps forward from the row before.
+    /// The table row `rowid`. From the row just before it (rows read in ascending order), SQLite's seek takes one step
+    /// along the leaf instead of a descent from the root.
     @inlinable public mutating func seek(_ rowid: Int64) -> Move {
-        if sqlite3BtreeEof(raw) == 0 && sqlite3BtreeIntegerKey(raw) == rowid &+ 1 {
-            let rc = sqlite3BtreePrevious(raw, 0)
-            if rc == SQLITE_OK {
-                if sqlite3BtreeIntegerKey(raw) == rowid { return .entry }
-            } else if rc != SQLITE_DONE {
-                return .failed
-            }
-        }
         var res: Int32 = 0
         guard sqlite3BtreeTableMoveto(raw, rowid, 0, &res) == SQLITE_OK else { return .failed }
-        return res == 0 && sqlite3BtreeEof(raw) == 0 ? .entry : .none
+        // An exact match leaves the cursor on it.
+        return res == 0 ? .entry : .none
     }
 
-    /// The first index entry whose first column, an integer, is at least `key`. It seeks to (key, the smallest rowid),
-    /// which every entry of `key` sorts after, so the cursor lands just before the first of them.
+    /// The first index entry whose first column, an integer, is at least `key`.
     @inlinable public mutating func seek(atLeast key: Int64) -> Move {
+        if oneColumnSeeks, let probeRecord, let probeValue {
+            // The integer alone, as a `Mem`; with `default_rc` +1 every entry equal to it sorts after it, so the cursor
+            // lands on the first of them or just before.
+            probeValue.storeBytes(of: key, toByteOffset: Layout.valueInteger, as: Int64.self)
+            probeValue.storeBytes(of: Layout.memInt, toByteOffset: Layout.valueFlags, as: UInt16.self)
+            probeRecord.storeBytes(of: 1, toByteOffset: Layout.recordFieldCount, as: UInt16.self)
+            probeRecord.storeBytes(of: 1, toByteOffset: Layout.recordDefaultResult, as: Int8.self)
+            probeRecord.storeBytes(of: 0, toByteOffset: Layout.recordErrorCode, as: UInt8.self)
+            probeRecord.storeBytes(of: 0, toByteOffset: Layout.recordEqualSeen, as: UInt8.self)
+            var res: Int32 = 0
+            guard sqlite3BtreeIndexMoveto(raw, OpaquePointer(probeRecord), &res) == SQLITE_OK else { return .failed }
+            if sqlite3BtreeEof(raw) != 0 { return .none }
+            return res < 0 ? next() : .entry
+        }
+        // It seeks to (key, the smallest rowid), which every entry of `key` sorts after, so the cursor lands just before
+        // the first of them.
         guard let probe else { return .failed }
         // A record of two 8-byte integers (serial type 6): header [3, 6, 6], then each value big-endian.
         var bytes = InlineArray<19, UInt8>(repeating: 0)
@@ -166,4 +196,16 @@ public struct Cursor: ~Copyable, ~Sendable {
     public enum Count {
         case done, unexpected, failed
     }
+}
+
+/// Byte offsets into SQLite 3.54.1's structs (build.sh pins it), the same on x86-64 and arm64: `UnpackedRecord` and
+/// `Mem` (`sqlite3_value`), which the one-column seek key fills in the cursor's own memory. Only used once the reads
+/// have checked seeks with it against the two-column key.
+@usableFromInline enum Layout {
+    // UnpackedRecord (40 bytes): pKeyInfo, aMem, nField, default_rc, errCode, eqSeen.
+    @usableFromInline static let recordSize = 40, recordKeyInfo = 0, recordValues = 8, recordFieldCount = 28
+    @usableFromInline static let recordDefaultResult = 30, recordErrorCode = 31, recordEqualSeen = 34
+    // Mem (56 bytes): u.i and flags; MEM_Int.
+    @usableFromInline static let valueSize = 64, valueInteger = 0, valueFlags = 20
+    @usableFromInline static let memInt: UInt16 = 0x0004
 }

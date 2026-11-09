@@ -6,6 +6,10 @@
 #   -target-cpu <this CPU>          code for the box's own CPU; Swift has no "native", so the toolchain's clang says
 #                                   which CPU it detects, and nothing is added if it can't tell. The C targets get
 #                                   clang's own -march=native (-mcpu=native on arm64).
+#   --experimental-lto-mode=full    link-time optimization over the Swift modules and SQLite together (linked by the
+#                                   toolchain's lld, SwiftPM's native build system): SQLite's small functions the
+#                                   B-tree reads call (PayloadSize, PayloadFetch, Eof, ...) are inlined into them, and
+#                                   SQLite is optimized knowing which of its functions are called and from where.
 set -euo pipefail
 cd "$(dirname "$0")"
 export PATH="/opt/swift/usr/bin:$PATH"
@@ -20,7 +24,8 @@ if [ ! -f Sources/CSQLite/sqlite3.c ]; then
   cp ".deps/$SQLITE/sqlite3.h" Sources/CSQLite/include/sqlite3.h
 fi
 FLAGS=(-c release -Xswiftc -enforce-exclusivity=unchecked)
-[ "$(uname -s)" = Linux ] && FLAGS+=(--static-swift-stdlib)
+[ "$(uname -s)" = Linux ] && FLAGS+=(--static-swift-stdlib --build-system native --experimental-lto-mode=full
+  -Xswiftc -use-ld=lld -Xlinker --lto-O3)
 CPU=$(clang -march=native -### -c -x c /dev/null 2>&1 | grep -o '"-target-cpu" "[^"]*"' | cut -d'"' -f4 || true)
 if [ -n "$CPU" ] && [ "$CPU" != generic ]; then
   FLAGS+=(-Xswiftc -target-cpu -Xswiftc "$CPU")

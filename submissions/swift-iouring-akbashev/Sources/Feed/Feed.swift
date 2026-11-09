@@ -34,7 +34,8 @@ struct Feed {
             fatalError("\(error)")
         }
         Sys.logLine("listening on \(host):\(port): io_uring, \(files) connections per ring, pass of \(settings.batch) "
-            + "completions or \(settings.windowNanos / 1000) us, reads \(reactor.directReads ? "off the B-trees" : "through SQL")")
+            + "completions or \(settings.windowNanos / 1000) us, reads \(reactor.directReads ? "off the B-trees" : "through SQL")"
+            + (reactor.oneColumnSeeks ? ", one-column like seeks" : ""))
         reactor.run()
     }
 }

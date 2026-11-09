@@ -1,7 +1,7 @@
 // SQLite's B-tree layer, which isn't part of its API. The amalgamation is compiled with `SQLITE_PRIVATE` defined
 // empty (it would be `static`), so these functions, internal to it, link like any other; they're declared here with
-// opaque pointers, as 3.54.1 has them (build.sh pins it by sha256). Btree*, BtCursor*, KeyInfo* and UnpackedRecord*
-// are never looked into: every field the cursor needs, a function returns.
+// opaque pointers, as 3.54.1 has them (build.sh pins it by sha256). The one-column seek key, built in the cursor's
+// own memory, follows `Layout`'s offsets, checked against SQLite at start.
 import CSQLite
 
 @usableFromInline @_extern(c, "sqlite3DbNameToBtree")
@@ -27,12 +27,8 @@ func sqlite3BtreeIndexMoveto(_ cursor: UnsafeMutableRawPointer, _ key: OpaquePoi
 func sqlite3BtreeFirst(_ cursor: UnsafeMutableRawPointer, _ empty: UnsafeMutablePointer<Int32>) -> Int32
 @usableFromInline @_extern(c, "sqlite3BtreeNext")
 func sqlite3BtreeNext(_ cursor: UnsafeMutableRawPointer, _ flags: Int32) -> Int32
-@usableFromInline @_extern(c, "sqlite3BtreePrevious")
-func sqlite3BtreePrevious(_ cursor: UnsafeMutableRawPointer, _ flags: Int32) -> Int32
 @usableFromInline @_extern(c, "sqlite3BtreeEof")
 func sqlite3BtreeEof(_ cursor: UnsafeMutableRawPointer) -> Int32
-@usableFromInline @_extern(c, "sqlite3BtreeIntegerKey")
-func sqlite3BtreeIntegerKey(_ cursor: UnsafeMutableRawPointer) -> Int64
 @usableFromInline @_extern(c, "sqlite3BtreePayloadFetch")
 func sqlite3BtreePayloadFetch(_ cursor: UnsafeMutableRawPointer, _ local: UnsafeMutablePointer<UInt32>) -> UnsafeRawPointer?
 @usableFromInline @_extern(c, "sqlite3BtreePayloadSize")

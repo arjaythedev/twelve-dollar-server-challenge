@@ -63,6 +63,109 @@ nonisolated enum Bytes {
 
 // ---------- JSON output ----------
 
+/// Writing a response into room reserved for all of it (`ByteBuffer.append(maximum:)`): each append checks the room
+/// left, which `-Ounchecked` builds leave out.
+nonisolated extension OutputRawSpan {
+    /// A literal's bytes.
+    @inline(__always) @_lifetime(self: copy self)
+    mutating func append(_ literal: StaticString) {
+        let n = literal.utf8CodeUnitCount
+        withUnsafeMutableBytes { buffer, initialized in
+            precondition(n <= buffer.count - initialized, "OutputRawSpan: no room for the literal")
+            (buffer.baseAddress! + initialized).copyMemory(from: literal.utf8Start, byteCount: n)
+            initialized += n
+        }
+    }
+
+    /// `value`'s bytes, wherever the output has got to: `storeBytes` needs no alignment, where `append(_:as:)`
+    /// initializes memory as `T` and so assumes it (a 32-byte vector store that faults on x86 when it isn't).
+    @inline(__always) @_lifetime(self: copy self)
+    mutating func appendBytes<T: BitwiseCopyable>(of value: T) {
+        let n = MemoryLayout<T>.size
+        withUnsafeMutableBytes { buffer, initialized in
+            precondition(n <= buffer.count - initialized, "OutputRawSpan: no room for the value")
+            buffer.baseAddress!.storeBytes(of: value, toByteOffset: initialized, as: T.self)
+            initialized += n
+        }
+    }
+
+    /// `value` in decimal, at most 20 bytes.
+    @inline(__always) @_lifetime(self: copy self)
+    mutating func appendDecimal(_ value: Int64) {
+        if value < 0 { append(0x2D) }
+        var digits = InlineArray<20, UInt8>(repeating: 0)
+        var pos = 20
+        var n = value.magnitude
+        let lut = JSON.decDigits.utf8Start
+        while n >= 100 {
+            let rem = Int((n % 100) * 2)
+            n /= 100
+            pos -= 2
+            digits[pos] = lut[rem]
+            digits[pos + 1] = lut[rem + 1]
+        }
+        if n < 10 {
+            pos -= 1
+            digits[pos] = 0x30 + UInt8(n)
+        } else {
+            let rem = Int(n * 2)
+            pos -= 2
+            digits[pos] = lut[rem]
+            digits[pos + 1] = lut[rem + 1]
+        }
+        for k in pos..<20 { append(digits[k]) }
+    }
+
+    /// `text` as a JSON string's contents, quotes not included; at most 6 bytes per byte. Checked 32 bytes at a time
+    /// (one AVX2 compare where the CPU has it) and copied whole when none needs escaping; escaped as `JSON.writeString`
+    /// does.
+    @inline(__always) @_lifetime(self: copy self)
+    mutating func appendJSONStringContents(_ text: Span<UInt8>) {
+        let bytes = text.bytes
+        let n = text.count
+        var i = 0
+        while i + 32 <= n {
+            let v = bytes.unsafeLoadUnaligned(fromByteOffset: i, as: SIMD32<UInt8>.self)
+            if JSON.clean32(v) { appendBytes(of: v) } else { appendEscaping(text.extracting(i..<(i + 32))) }
+            i += 32
+        }
+        if i + 16 <= n {
+            let v = bytes.unsafeLoadUnaligned(fromByteOffset: i, as: SIMD16<UInt8>.self)
+            if JSON.clean16(v) { appendBytes(of: v) } else { appendEscaping(text.extracting(i..<(i + 16))) }
+            i += 16
+        }
+        if i < n { appendEscaping(text.extracting(i..<n)) }
+    }
+
+    @inline(__always) @_lifetime(self: copy self)
+    private mutating func appendEscaping(_ chunk: Span<UInt8>) {
+        for j in 0..<chunk.count {
+            let c = chunk[j]
+            if c >= 0x20 && c != 0x22 && c != 0x5C {
+                append(c)
+            } else {
+                appendEscape(c)
+            }
+        }
+    }
+
+    /// `\"`, `\\`, `\n`, `\r`, `\t`, and `\u00xx` for the other control characters.
+    @inline(never) @_lifetime(self: copy self)
+    private mutating func appendEscape(_ c: UInt8) {
+        switch c {
+        case 0x22: append("\\\"")
+        case 0x5C: append("\\\\")
+        case 0x0A: append("\\n")
+        case 0x0D: append("\\r")
+        case 0x09: append("\\t")
+        default:
+            append("\\u00")
+            append(JSON.hexDigits.utf8Start[Int(c >> 4)])
+            append(JSON.hexDigits.utf8Start[Int(c & 0x0F)])
+        }
+    }
+}
+
 /// The JSON writer, and (below) the parser for request bodies and JWT claims.
 nonisolated enum JSON {
     private static let maskLo: UInt64 = 0x0101_0101_0101_0101
@@ -77,12 +180,18 @@ nonisolated enum JSON {
     }
 
     /// Whether 16 bytes need no escaping (portable SIMD).
-    @inline(__always) private static func clean16(_ v: SIMD16<UInt8>) -> Bool {
+    @inline(__always) fileprivate static func clean16(_ v: SIMD16<UInt8>) -> Bool {
         let special = (v .== SIMD16(repeating: 0x22)) .| (v .== SIMD16(repeating: 0x5C)) .| (v .< SIMD16(repeating: 0x20))
         return !any(special)
     }
 
-    private static let hexDigits: StaticString = "0123456789abcdef"
+    /// Whether 32 bytes need no escaping (one AVX2 compare where the CPU has it).
+    @inline(__always) fileprivate static func clean32(_ v: SIMD32<UInt8>) -> Bool {
+        let special = (v .== SIMD32(repeating: 0x22)) .| (v .== SIMD32(repeating: 0x5C)) .| (v .< SIMD32(repeating: 0x20))
+        return !any(special)
+    }
+
+    fileprivate static let hexDigits: StaticString = "0123456789abcdef"
 
     /// `src` as a JSON string, quotes included. Its clean start is copied as it is scanned, 16 bytes at a time, then 8,
     /// then one; the first byte that needs escaping hands the rest to `writeEscapedTail`.
@@ -180,7 +289,7 @@ nonisolated enum JSON {
         dst.append("}")
     }
 
-    private static let decDigits: StaticString = """
+    fileprivate static let decDigits: StaticString = """
         00010203040506070809101112131415161718192021222324252627282930313233343536373839\
         40414243444546474849505152535455565758596061626364656667686970717273747576777879\
         8081828384858687888990919293949596979899

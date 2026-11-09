@@ -40,11 +40,10 @@ nonisolated struct Store: ~Copyable, ~Sendable {
     /// A statement failed in a way that ended the transaction: the rest of the pass is answered with 500s.
     private(set) var passFailed = false
 
-    /// Past this many WAL frames (32 MiB) the WAL is due to start over: writes wait until it's all copied (automatic
-    /// checkpoints are off).
-    static let restartFrames: Int32 = 8192
+    /// Past this many WAL frames (16 MiB) a checkpoint starts (automatic checkpoints are off).
+    static let checkpointFrames: Int32 = 4096
     /// Past this many the loop copies the WAL itself: the checkpointer keeps falling behind.
-    static let overdueFrames: Int32 = 16384
+    static let overdueFrames: Int32 = 65536
 
     private static let postColumns = """
         SELECT p.id, p.body, p.created_at, u.username, (SELECT count(*) FROM likes l WHERE l.post_id = p.id)
@@ -77,6 +76,13 @@ nonisolated struct Store: ~Copyable, ~Sendable {
             context!.assumingMemoryBound(to: Int32.self).pointee = frames
             return SQLITE_OK
         }, walFrames)
+        // Whether the like counts may read leaf pages themselves: checked once, in a transaction of its own.
+        if reads.available && sqlite3_exec(db, "BEGIN", nil, nil, nil) == SQLITE_OK {
+            if let mismatch = reads.checkPageReads() {
+                Sys.logLine("like counts entry by entry: SQLite's structs aren't as expected (\(mismatch))")
+            }
+            sqlite3_exec(db, "COMMIT", nil, nil, nil)
+        }
     }
 
     /// The statements, prepared once (in the order the properties take them).
@@ -129,13 +135,13 @@ nonisolated struct Store: ~Copyable, ~Sendable {
         return false
     }
 
-    /// The WAL has frames since it last started over.
-    var hasWAL: Bool { walFrames.pointee > 0 }
-    var restartDue: Bool { walFrames.pointee >= Self.restartFrames }
+    var checkpointDue: Bool { walFrames.pointee >= Self.checkpointFrames }
     var checkpointOverdue: Bool { walFrames.pointee >= Self.overdueFrames }
 
     /// The reads walk the B-trees (the schema is the one they assume).
     var directReads: Bool { reads.available }
+    /// The like counts read the likes index's leaf pages themselves.
+    var pageReads: Bool { reads.pageReads }
 
     /// The whole WAL is copied and writes waited for it: the next write starts it over, and its commit reports what's
     /// in it.

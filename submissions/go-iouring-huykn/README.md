@@ -55,8 +55,10 @@ query and skip a write transaction if already present.
 
 ## Transactions and checkpoints
 
-The loop waits up to 1 ms or 256 completions and stages up to 2,048 receive
-answers per pass. Writes and indexed reads start a deferred transaction on
+The loop wakes on the first completion on ring 0, then drains ready completions.
+An idle wait lasts at most 1 ms before polling the other rings. Each pass stages
+up to 2,048 receive answers without waiting for a full batch.
+Writes and indexed reads start a deferred transaction on
 demand. Later requests in the same pass can see
 its writes. Responses remain staged until commit succeeds; commit failure turns
 all staged responses into errors. Implicit SQLite rollback is tracked so lost
@@ -109,14 +111,6 @@ to bounded pools after sends complete. Generation tags reject stale completions.
 Pipelining and partial sends remain supported, with no keep-alive timeout.
 Go GC uses a 512 MiB soft memory limit; C SQLite and mmap memory are outside it.
 
-Verify that held connections remain usable beyond the process fd limit:
-
-```sh
-cd submissions/go-iouring-huykn
-python3 testdata/fd_exhaustion.py
-python3 testdata/fd_exhaustion.py --limit 65535 --connections 70000
-```
-
 Use disposable seed copies for database-backed tests:
 
 ```sh
@@ -150,7 +144,6 @@ cp ../../seed/feed.db /tmp/huykn-contract.db
 /tmp/huykn-store-test /tmp/huykn-contract.db
 ```
 
-These microbenchmarks are not the organizer's full-server score.
 
 ## Credits
 
@@ -159,7 +152,7 @@ are adapted from [go-iouring-trungdlp](../go-iouring-trungdlp/), including direc
 descriptors, provided buffers, receive recovery and response pools. Some
 application/response, validation, and startup helpers also derive from it.
 The port retains this entry's database and commit handling and adds submission
-accounting and cleanup. There are no third-party Go dependencies.
+accounting, cleanup and ownership tests. There are no third-party Go dependencies.
 The byte-oriented JSON visitor
 and pass-level commit design were also informed by
 [rust-iouring-kensac](../rust-iouring-kensac/).

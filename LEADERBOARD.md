@@ -592,7 +592,10 @@ now scored at its follow-up #364 (`14cdc3c`, was 247,000 at #363): the ring wait
 256, so **270,000** held at 91 % CPU, 0 errors; 280k (2 min) failed on p99 (1.75 s). It is now scored at its follow-up
 #369 (`4d85716`, merged 2026-11-09, was 270,000 at #364): the pipeline is bounded per pass, SQLite is built with
 `SQLITE_OMIT_*` flags and an explicit `sqlite3_initialize`, and the no-op lock-table calls are gone, so **276,000** held
-at 93 % CPU, 0 errors; 290k passed the 2-minute probe but failed the 5-minute hold on p99 (1.58 s).
+at 93 % CPU, 0 errors; 290k passed the 2-minute probe but failed the 5-minute hold on p99 (1.58 s). Follow-up #370
+(`9fd80b9`, 2026-11-09: header-name length check, b-tree reader helpers; the SSE2 feed path is off in the default build)
+held **250,000** at 88 % CPU (24,098 req/s, p99 470 ms, 0 errors; 260k/280k failed the 2-minute probe on p99). That is
+below #369's 276,000, so it is not merged and the row stays at #369.
 go-gnet-kaikegm is now scored at its follow-up #180 (`372538d`, was 65,000 at #48): it closes the oldest idle
 connections past 55k open, so it no longer hits the limit at 80–93k (88,000 held at 77 % CPU, CPU-bound: 93k failed the
 5-minute hold on p99), but a fast ramp to 120k/160k still fills the fd table and the process exits the same way (89–94 %

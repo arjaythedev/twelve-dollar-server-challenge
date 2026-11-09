@@ -1,7 +1,8 @@
 // The one effect that leaves the main thread: copying the WAL back into the database file, whose fsync would otherwise
 // stall the loop. An actor on a thread of its own at the lowest priority (nice 19), so on one CPU it runs while the
 // loop waits, with a SQLite connection of its own. The loop starts a checkpoint without waiting for it, and learns that
-// it finished from an eventfd its ring reads: a completion like any other.
+// it finished from an eventfd its ring reads: a completion like any other. It also starts the WAL over when the loop
+// asks, so the sync that comes with that is its, not the loop's.
 import CSQLite
 import Glibc
 import Synchronization
@@ -12,20 +13,43 @@ actor Checkpointer {
     nonisolated var unownedExecutor: UnownedSerialExecutor { executor.asUnownedSerialExecutor() }
 
     private let db: OpaquePointer
-    /// Written when a checkpoint is done.
+    /// Written when a checkpoint is done: `copiedAll`, or 1 if frames are left.
     private let done: Int32
+    static let copiedAll: UInt64 = 2
+    /// The database's `user_version`, which `restartWAL` writes back as it is.
+    private let userVersion: Int64
 
     init(path: String, done: Int32) throws(StoreError) {
         db = try SQLite.open(path, cacheKiB: 8 * 1024)
+        userVersion = Self.userVersion(db)
         self.done = done
         executor = ThreadExecutor(name: "checkpoint", nice: 19)
     }
 
     /// A PASSIVE checkpoint: it copies what no reader still needs and never waits for the loop's transaction.
     func checkpoint() {
-        sqlite3_wal_checkpoint_v2(db, nil, SQLITE_CHECKPOINT_PASSIVE, nil, nil)
-        var one: UInt64 = 1
-        _ = sys_write(done, &one, 8)
+        var logged: Int32 = -1
+        var copied: Int32 = -2
+        let rc = sqlite3_wal_checkpoint_v2(db, nil, SQLITE_CHECKPOINT_PASSIVE, &logged, &copied)
+        var result: UInt64 = rc == SQLITE_OK && logged == copied ? Self.copiedAll : 1
+        _ = sys_write(done, &result, 8)
+    }
+
+    /// Starts the WAL over, with every frame copied and the loop's writes waiting: a commit that changes nothing
+    /// (`user_version` set to what it is) is the first in the fresh WAL, so the sync of its header, which
+    /// synchronous=NORMAL makes when a WAL starts over, happens on this thread, not the loop's. If a reader still
+    /// holds the old WAL the commit just goes after it, and the next round tries again.
+    func restartWAL() {
+        let rc = sqlite3_exec(db, "PRAGMA user_version = \(userVersion)", nil, nil, nil)
+        var result: UInt64 = rc == SQLITE_OK ? Self.copiedAll : 1
+        _ = sys_write(done, &result, 8)
+    }
+
+    private static func userVersion(_ db: OpaquePointer) -> Int64 {
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "PRAGMA user_version", -1, &stmt, nil) == SQLITE_OK, let stmt else { return 0 }
+        defer { sqlite3_finalize(stmt) }
+        return sqlite3_step(stmt) == SQLITE_ROW ? sqlite3_column_int64(stmt, 0) : 0
     }
 }
 

@@ -70,6 +70,15 @@ nonisolated struct ByteBuffer: ~Copyable, ~Sendable {
         count += n
     }
 
+    /// Lets `body` fill up to `maximum` bytes past the end (a socket read straight into the buffer); returns what
+    /// `body` returned, and keeps that many bytes if it is positive.
+    @inline(__always) mutating func appendSpare(maximum: Int, _ body: (UnsafeMutableRawBufferPointer) -> Int) -> Int {
+        let spare = UnsafeMutableRawBufferPointer(start: reserve(maximum), count: maximum)
+        let n = body(spare)
+        if n > 0 { count += n }
+        return n
+    }
+
     @inline(__always) subscript(i: Int) -> UInt8 {
         get {
             precondition(i >= 0 && i < count)
@@ -173,3 +182,28 @@ nonisolated struct UniqueArray<Element: ~Copyable>: ~Copyable, ~Sendable {
     }
 }
 
+
+/// A first-in, first-out queue: appends at the back, removes from the front without moving the rest.
+nonisolated struct Fifo<Element> {
+    private var items: [Element] = []
+    private var head = 0
+
+    @inline(__always) var count: Int { items.count - head }
+    @inline(__always) var isEmpty: Bool { head == items.count }
+
+    @inline(__always) mutating func append(_ item: Element) { items.append(item) }
+
+    mutating func popFirst() -> Element? {
+        guard head < items.count else { return nil }
+        let item = items[head]
+        head += 1
+        if head == items.count {
+            items.removeAll(keepingCapacity: true)
+            head = 0
+        } else if head >= 1024 && head * 2 >= items.count {
+            items.removeFirst(head)
+            head = 0
+        }
+        return item
+    }
+}

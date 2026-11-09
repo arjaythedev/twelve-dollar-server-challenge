@@ -13,4 +13,7 @@ import Glibc
 @_extern(c, "read") public func sys_read(_ fd: Int32, _ buf: UnsafeMutableRawPointer?, _ count: Int) -> Int
 @_extern(c, "setpriority") public func sys_setpriority(_ which: Int32, _ who: UInt32, _ prio: Int32) -> Int32
 @_extern(c, "gettid") public func sys_gettid() -> Int32
+// syscall(2) is variadic in C. glibc's is assembly that takes the number and up to six arguments from where a call with
+// that many fixed integer arguments puts them (registers, then the stack), on x86-64 and arm64 alike.
+@_extern(c, "syscall") public func sys_syscall(_ number: Int, _ a1: Int, _ a2: Int, _ a3: Int, _ a4: Int, _ a5: Int, _ a6: Int) -> Int
 @_extern(c, "pthread_setname_np") public func sys_pthread_setname_np(_ thread: pthread_t, _ name: UnsafePointer<CChar>) -> Int32

@@ -3,6 +3,7 @@
 // walk SQLite's B-trees directly (Reads.swift), with these statements as their fallback; writes are SQL. Rows are
 // written as JSON straight from SQLite's memory. The checkpointer has a connection of its own.
 import CSQLite
+import Syscalls
 
 /// What a request asks the database.
 nonisolated enum Query {
@@ -39,8 +40,11 @@ nonisolated struct Store: ~Copyable, ~Sendable {
     /// A statement failed in a way that ended the transaction: the rest of the pass is answered with 500s.
     private(set) var passFailed = false
 
-    /// Checkpoints run past this many WAL frames (automatic checkpoints are off).
-    static let checkpointFrames: Int32 = 1024
+    /// Past this many WAL frames (32 MiB) the WAL is due to start over: writes wait until it's all copied (automatic
+    /// checkpoints are off).
+    static let restartFrames: Int32 = 8192
+    /// Past this many the loop copies the WAL itself: the checkpointer keeps falling behind.
+    static let overdueFrames: Int32 = 16384
 
     private static let postColumns = """
         SELECT p.id, p.body, p.created_at, u.username, (SELECT count(*) FROM likes l WHERE l.post_id = p.id)
@@ -48,7 +52,7 @@ nonisolated struct Store: ~Copyable, ~Sendable {
         """
 
     init(path: String, started: UInt64, directReads: Bool) throws(StoreError) {
-        let db = try SQLite.open(path, cacheKiB: 256 * 1024)
+        let db = try SQLite.open(path, cacheKiB: 64 * 1024)
         let statements: [OpaquePointer]
         do {
             statements = try Self.prepareAll(db)
@@ -98,6 +102,9 @@ nonisolated struct Store: ~Copyable, ~Sendable {
     }
 
     deinit {
+        // The cursors hold memory from the connection's allocator: freed before it closes.
+        var reads = self.reads
+        reads.release()
         for stmt in [feed, post, postExists, insertPost, insertLike, health, begin, commit, rollback] { sqlite3_finalize(stmt) }
         sqlite3_close_v2(db)
         walFrames.deallocate()
@@ -122,21 +129,27 @@ nonisolated struct Store: ~Copyable, ~Sendable {
         return false
     }
 
-    var checkpointDue: Bool { walFrames.pointee >= Self.checkpointFrames }
+    /// The WAL has frames since it last started over.
+    var hasWAL: Bool { walFrames.pointee > 0 }
+    var restartDue: Bool { walFrames.pointee >= Self.restartFrames }
+    var checkpointOverdue: Bool { walFrames.pointee >= Self.overdueFrames }
 
     /// The reads walk the B-trees (the schema is the one they assume).
     var directReads: Bool { reads.available }
 
-    /// The checkpointer copied the WAL: the next commit reports what's in it again.
+    /// The whole WAL is copied and writes waited for it: the next write starts it over, and its commit reports what's
+    /// in it.
     func checkpointFinished() {
         walFrames.pointee = 0
     }
 
-    /// Copies the WAL back into the database file on this connection, in the loop (`CHECKPOINT_THREAD=0`; the
-    /// checkpointer does it otherwise).
+    /// Copies the WAL back into the database file on this connection, in the loop (`CHECKPOINT_THREAD=0`, or a
+    /// checkpointer that keeps falling behind).
     mutating func checkpoint() {
-        sqlite3_wal_checkpoint_v2(db, nil, SQLITE_CHECKPOINT_PASSIVE, nil, nil)
-        walFrames.pointee = 0
+        var logged: Int32 = -1
+        var copied: Int32 = -2
+        let rc = sqlite3_wal_checkpoint_v2(db, nil, SQLITE_CHECKPOINT_PASSIVE, &logged, &copied)
+        if rc == SQLITE_OK && logged == copied { walFrames.pointee = 0 }
     }
 
     private mutating func beginIfNeeded() -> Bool {
@@ -314,6 +327,9 @@ nonisolated enum SQLite {
     /// with synchronous=NORMAL (rule 6); checkpoints run by the server, not by SQLite after a commit; SQLite's own
     /// page cache of `cacheKiB`, no mmap.
     static func open(_ path: String, cacheKiB: Int) throws(StoreError) -> OpaquePointer {
+        // Built with SQLITE_OMIT_AUTOINIT: the library is set up here, before the first connection; later calls return
+        // at once.
+        guard sqlite3_initialize() == SQLITE_OK else { throw StoreError(description: "sqlite3_initialize") }
         var handle: OpaquePointer?
         let rc = sqlite3_open_v2(path, &handle, SQLITE_OPEN_READWRITE, "unix-excl")
         guard rc == SQLITE_OK, let db = handle else {

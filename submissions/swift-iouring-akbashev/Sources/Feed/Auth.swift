@@ -1,6 +1,7 @@
 // SHA-256 and HMAC-SHA256 (HS256 with the secret's ipad/opad midstates computed once), and the bearer token check
 // SPEC.md asks for on every authenticated request: signature, `alg`, a required `exp`, then `sub` and `username`.
 import Glibc
+import Syscalls
 
 /// SHA-256 and HMAC-SHA256, portable: Swift doesn't reach the SHA-NI instructions.
 nonisolated enum SHA256 {

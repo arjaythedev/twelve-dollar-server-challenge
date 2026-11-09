@@ -525,7 +525,11 @@ connection refused (74 % errors). Not merged (below the merged row). Follow-up *
 mid-pass `submit_rings` in `apply_reads`): **257,000** (24,700 req/s, p95 107.7 / p99 474.4 ms, 0 err, 93 % CPU,
 34 µs/req, 729 MB, 2026-11-09); 270,000 passed the 2-minute probe but failed the 5-minute hold on p95/p99 (421 /
 2,931 ms at 95 % CPU, 0 errors), 280,000 failed the 2-minute probe (1,116 / 2,048 ms at 97 % CPU) and 320,000 on
-connection refused (75 % errors). Not merged (below the merged row).
+connection refused (75 % errors). Not merged (below the merged row). Follow-up **#374** (`ea5d642`,
+`wal_autocheckpoint` default 10,000 → 100,000 pages): **280,000** (26,738 req/s, p95 31.1 / p99 199.6 ms, 0 err, 97 % CPU,
+33 µs/req, 981 MB, 2026-11-09); 290,000 failed the 2-minute probe on p95/p99 (451 / 1,031 ms at 92 % CPU, 0 errors),
+300,000 on p95/p99 (1,185 / 9,021 ms at 89 % CPU, 0 errors) and 320,000 on connection refused (74 % errors). Not merged
+(below the merged row).
 
 ᴺ **c-iouring-unorig-username** stays on its merged #290 row. Its follow-up **#362** (`177f00e`, parked requests served
 newest first with an 8 s age cap, `journal_size_limit=0`, read-only segments `mlock`ed; held, not merged: it didn't beat

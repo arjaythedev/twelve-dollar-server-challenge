@@ -76,10 +76,10 @@ nonisolated struct Store: ~Copyable, ~Sendable {
             context!.assumingMemoryBound(to: Int32.self).pointee = frames
             return SQLITE_OK
         }, walFrames)
-        // Whether the like counts may read leaf pages themselves: checked once, in a transaction of its own.
+        // Whether the like counts may seek with the one-column key: checked once, in a transaction of its own.
         if reads.available && sqlite3_exec(db, "BEGIN", nil, nil, nil) == SQLITE_OK {
-            if let mismatch = reads.checkPageReads() {
-                Sys.logLine("like counts entry by entry: SQLite's structs aren't as expected (\(mismatch))")
+            if let mismatch = reads.checkOneColumnSeeks() {
+                Sys.logLine("like counts seek with the two-column key: SQLite's structs aren't as expected (\(mismatch))")
             }
             sqlite3_exec(db, "COMMIT", nil, nil, nil)
         }
@@ -140,8 +140,8 @@ nonisolated struct Store: ~Copyable, ~Sendable {
 
     /// The reads walk the B-trees (the schema is the one they assume).
     var directReads: Bool { reads.available }
-    /// The like counts read the likes index's leaf pages themselves.
-    var pageReads: Bool { reads.pageReads }
+    /// The like counts seek with the one-column key.
+    var oneColumnSeeks: Bool { reads.oneColumnSeeks }
 
     /// The whole WAL is copied and writes waited for it: the next write starts it over, and its commit reports what's
     /// in it.

@@ -74,10 +74,10 @@
   rules out reading a row after its cursor moved on; `Record` decodes SQLite's row format in place. The feed takes its
   20 entries off `posts_created_at_id_idx`, reads the posts in ascending id order (so SQLite's seek from one post to
   the next is a step along the leaf), then their authors, counts their likes in one walk of `likes_post_id_idx`, and
-  writes the response in one reservation, escaping 32 bytes at a time. That walk decodes each leaf page's cells
-  itself, and its seek key is a one-column one, reading a few fields of SQLite's structs (`BtCursor`, `MemPage`,
-  `UnpackedRecord`) at offsets for the pinned 3.54.1: at startup the server checks them against SQLite's own answers
-  (where a cell is, counts entry by entry), and counts entry by entry if they don't match, saying so in the log. The
+  writes the response in one reservation, escaping 32 bytes at a time. That walk steps SQLite's cursor entry by entry
+  (`sqlite3BtreeNext`), and its seek key is a one-column one: an `UnpackedRecord` and its `Mem`, built in the
+  server's own memory at offsets for the pinned 3.54.1. At startup the server checks that seeks with it count what the
+  two-column key does, and keeps the two-column key if they don't, saying so in the log. The
   build links Swift and SQLite with full link-time optimization (`build.sh`), so SQLite's small functions these reads
   call are inlined into them. The schema is checked at startup. A row these reads don't expect (a post
   without its user, a record that spills onto overflow pages) is answered by the SQL statements instead, and so is

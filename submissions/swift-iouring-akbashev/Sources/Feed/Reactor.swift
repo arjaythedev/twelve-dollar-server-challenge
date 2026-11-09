@@ -25,7 +25,7 @@ final class Reactor {
     private var store: Store
     /// The reads walk SQLite's B-trees (else SQL answers them).
     var directReads: Bool { store.directReads }
-    var pageReads: Bool { store.pageReads }
+    var oneColumnSeeks: Bool { store.oneColumnSeeks }
 
     /// `SO_REUSEPORT` listeners on the port: each has its own accept queue (capped at `somaxconn`, 4,096 on the box), so
     /// together they hold a ramp's or a stall's new connections instead of refusing them.

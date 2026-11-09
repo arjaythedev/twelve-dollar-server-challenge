@@ -1,7 +1,7 @@
 // SQLite's B-tree layer, which isn't part of its API. The amalgamation is compiled with `SQLITE_PRIVATE` defined
 // empty (it would be `static`), so these functions, internal to it, link like any other; they're declared here with
-// opaque pointers, as 3.54.1 has them (build.sh pins it by sha256). The few struct fields the cursor reads itself
-// (the leaf walk, the one-column seek key) are at `Layout`'s offsets, checked against SQLite at start.
+// opaque pointers, as 3.54.1 has them (build.sh pins it by sha256). The one-column seek key, built in the cursor's
+// own memory, follows `Layout`'s offsets, checked against SQLite at start.
 import CSQLite
 
 @usableFromInline @_extern(c, "sqlite3DbNameToBtree")

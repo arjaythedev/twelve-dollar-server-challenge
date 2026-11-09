@@ -37,8 +37,8 @@ nonisolated struct Reads: ~Copyable, ~Sendable {
         var author = 0..<0
     }
 
-    /// Like counts read the likes index's leaf pages themselves (`checkPageReads`).
-    var pageReads: Bool { likes.pageReads }
+    /// Like counts seek with the one-column key (`checkOneColumnSeeks`).
+    var oneColumnSeeks: Bool { likes.oneColumnSeeks }
 
     init(_ db: OpaquePointer, enabled: Bool) throws(StoreError) {
         let roots = enabled && Self.schemaMatches(db)
@@ -167,7 +167,7 @@ nonisolated struct Reads: ~Copyable, ~Sendable {
         if n > 0 && hi - lo < 513 {
             var counts = InlineArray<513, UInt32>(repeating: 0)
             var span = counts.mutableSpan
-            switch countLikes(lo, hi, into: &span) {
+            switch likes.count(lo, hi, into: &span) {
             case .done: break
             case .unexpected: return .unexpected
             case .failed: return .failed
@@ -177,7 +177,7 @@ nonisolated struct Reads: ~Copyable, ~Sendable {
             for i in 0..<n {
                 var one = InlineArray<1, UInt32>(repeating: 0)
                 var span = one.mutableSpan
-                switch countLikes(rows[i].id, rows[i].id, into: &span) {
+                switch likes.count(rows[i].id, rows[i].id, into: &span) {
                 case .done: rows[i].likes = one[0]
                 case .unexpected: return .unexpected
                 case .failed: return .failed
@@ -209,26 +209,12 @@ nonisolated struct Reads: ~Copyable, ~Sendable {
         return .done
     }
 
-    /// Likes per post for ids `lo...hi`, added into `counts` (zeroed): a leaf page at a time where the layout checked
-    /// out, entry by entry otherwise or for a page in a form the leaf walk doesn't expect.
-    private mutating func countLikes(_ lo: Int64, _ hi: Int64, into counts: inout MutableSpan<UInt32>) -> Cursor.Count {
-        if likes.pageReads {
-            let result = likes.countByPage(lo, hi, into: &counts)
-            if result != .unexpected { return result }
-            for i in 0..<counts.count { counts[i] = 0 }
-        }
-        return likes.count(lo, hi, into: &counts)
-    }
-
-    /// Turns the likes cursor's page reads on if SQLite's structs are where `Layout` says: on an entry, its page must
-    /// place the entry's cell where SQLite's payload pointer does, and counts by page must equal counts entry by entry
-    /// (with the two-column seek key) over the newest posts and a spread of others. Run once, inside a transaction;
-    /// returns what didn't match, if anything.
-    mutating func checkPageReads() -> String? {
+    /// Turns the likes cursor's one-column seeks on if they count what the two-column key does, over the newest posts
+    /// and a spread of others (so `Layout`'s offsets are SQLite's). Run once, inside a transaction; returns what didn't
+    /// match, if anything.
+    mutating func checkOneColumnSeeks() -> String? {
         guard available, openIfNeeded() else { return "no cursors" }
         defer { close() }
-        guard likes.first() == .entry else { return "no first likes entry" }
-        if let mismatch = likes.pageLayoutMismatch() { return "the page layout: " + mismatch }
         var bases: [Int64] = [1, 2, 1_000, 123_457, 250_000, 499_990]
         if newest.first() == .entry {
             let entry = newest.record
@@ -239,19 +225,19 @@ nonisolated struct Reads: ~Copyable, ~Sendable {
         for base in bases where base > 0 {
             var expected = InlineArray<64, UInt32>(repeating: 0)
             var found = InlineArray<64, UInt32>(repeating: 0)
-            likes.pageReads = false
+            likes.oneColumnSeeks = false
             var expectedSpan = expected.mutableSpan
             guard likes.count(base, base + 63, into: &expectedSpan) == .done else { return "counting from \(base)" }
-            likes.pageReads = true
+            likes.oneColumnSeeks = true
             var foundSpan = found.mutableSpan
-            let result = likes.countByPage(base, base + 63, into: &foundSpan)
-            likes.pageReads = false
-            guard result == .done else { return "counting from \(base) by page: \(result)" }
+            let result = likes.count(base, base + 63, into: &foundSpan)
+            likes.oneColumnSeeks = false
+            guard result == .done else { return "counting from \(base) with the one-column key: \(result)" }
             for i in 0..<64 where expected[i] != found[i] {
-                return "post \(base + Int64(i)): \(found[i]) likes by page, \(expected[i]) entry by entry"
+                return "post \(base + Int64(i)): \(found[i]) likes with the one-column key, \(expected[i]) with the two-column one"
             }
         }
-        likes.pageReads = true
+        likes.oneColumnSeeks = true
         return nil
     }
 
@@ -260,7 +246,7 @@ nonisolated struct Reads: ~Copyable, ~Sendable {
         guard openIfNeeded() else { return .failed }
         var one = InlineArray<1, UInt32>(repeating: 0)
         var span = one.mutableSpan
-        switch countLikes(id, id, into: &span) {
+        switch likes.count(id, id, into: &span) {
         case .done: break
         case .unexpected: return .unexpected
         case .failed: return .failed

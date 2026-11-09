@@ -243,7 +243,7 @@ struct td_net *td_net_new(int listener, int checkpoint)
     socklen_t address_len = sizeof(address);
     if (getsockname(listener, (struct sockaddr *)&address, &address_len)) td_fail("listener address", errno);
     close(listener);
-    int one = 1, receive_buffer = 4096, send_buffer = 8192;
+    int one = 1;
     for (int i = 0; i < RINGS; ++i) {
         int fd = socket(address.ss_family, SOCK_STREAM | SOCK_CLOEXEC, 0);
         if (fd < 0) td_fail("listener socket", errno);
@@ -253,11 +253,6 @@ struct td_net *td_net_new(int listener, int checkpoint)
         /* Accepted sockets inherit TCP_NODELAY without entering the process file table. */
         if (setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one)))
             td_fail("listener TCP_NODELAY", errno);
-        /* Bound queued socket data when a checkpoint or a slow peer delays progress. */
-        if (setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &receive_buffer, sizeof(receive_buffer)))
-            td_fail("listener SO_RCVBUF", errno);
-        if (setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &send_buffer, sizeof(send_buffer)))
-            td_fail("listener SO_SNDBUF", errno);
         if (bind(fd, (struct sockaddr *)&address, address_len) || listen(fd, 65535))
             td_fail("listener bind", errno);
         net->listeners[i] = fd;

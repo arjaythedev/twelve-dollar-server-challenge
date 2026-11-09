@@ -174,7 +174,12 @@ fn conn_table() []Conn {
 	return t
 }
 
+fn C.GC_set_free_space_divisor(u64)
+
 fn main() {
+	// Boehm sizes its heap from the roots, which include the 21 MB connection table; a higher
+	// divisor collects after ~2 MB of garbage instead of growing the heap to ~25 MB.
+	C.GC_set_free_space_divisor(12)
 	mut s := &Server{
 		secret:  os.getenv('JWT_SECRET').bytes()
 		started: time.now().unix()

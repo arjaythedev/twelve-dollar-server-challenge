@@ -1334,9 +1334,6 @@ fn apply_reads(
             apply_feed_one(rings, job, packet);
         }
         feed_reads.drain(..n);
-        // Flush the feed responses now instead of after the post batch, so a
-        // feed answer does not wait behind unrelated post work in the SQ.
-        submit_rings(rings);
     }
     if !post_reads.is_empty() {
         let n = post_reads.len().min(POST_ANSWERS_PER_PASS);

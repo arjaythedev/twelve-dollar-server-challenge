@@ -56,7 +56,7 @@ struct td_net {
     struct td_ring rings[RINGS];
     struct pollfd polls[RINGS + 1]; /* [RINGS] is the checkpoint eventfd */
     int wake; /* every ring signals this eventfd when work for the loop arrives */
-    int listener, cursor, checkpoint_waiting;
+    int listeners[RINGS], cursor, checkpoint_waiting;
 };
 
 _Static_assert(TD_CAPACITY == RINGS * SLOTS, "capacity mismatch");
@@ -188,7 +188,7 @@ static void td_submit(struct td_net *net, struct td_ring *r)
         switch (c->operation) {
         case ACCEPT:
             /* The slot stays reserved until the matching close CQE is consumed. */
-            io_uring_prep_accept_direct(sqe, net->listener, NULL, NULL, 0, slot);
+            io_uring_prep_accept_direct(sqe, net->listeners[r - net->rings], NULL, NULL, 0, slot);
             break;
         case RECV:
             io_uring_prep_recv_multishot(sqe, slot, NULL, 0, 0);
@@ -235,19 +235,32 @@ struct td_net *td_net_new(int listener, int checkpoint)
         td_fail("Linux 6.1 or newer is required", ENOTSUP);
     struct td_net *net = calloc(1, sizeof(*net));
     if (!net) td_fail("allocate network state", ENOMEM);
-    net->listener = listener;
     net->wake = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
     if (net->wake < 0) td_fail("wake eventfd", errno);
-    int one = 1;
-    /* Accepted sockets inherit TCP_NODELAY without entering the process file table. */
-    if (setsockopt(listener, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one)))
-        td_fail("listener TCP_NODELAY", errno);
-    /* Bound queued socket data when a checkpoint or a slow peer delays progress. */
-    int receive_buffer = 4096, send_buffer = 8192;
-    if (setsockopt(listener, SOL_SOCKET, SO_RCVBUF, &receive_buffer, sizeof(receive_buffer)))
-        td_fail("listener SO_RCVBUF", errno);
-    if (setsockopt(listener, SOL_SOCKET, SO_SNDBUF, &send_buffer, sizeof(send_buffer)))
-        td_fail("listener SO_SNDBUF", errno);
+    /* One SO_REUSEPORT listener per ring: the kernel spreads SYNs over 8 accept queues. */
+    struct sockaddr_storage address;
+    socklen_t address_len = sizeof(address);
+    if (getsockname(listener, (struct sockaddr *)&address, &address_len)) td_fail("listener address", errno);
+    close(listener);
+    int one = 1, receive_buffer = 4096, send_buffer = 8192;
+    for (int i = 0; i < RINGS; ++i) {
+        int fd = socket(address.ss_family, SOCK_STREAM | SOCK_CLOEXEC, 0);
+        if (fd < 0) td_fail("listener socket", errno);
+        if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one)) ||
+            setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof(one)))
+            td_fail("listener SO_REUSEPORT", errno);
+        /* Accepted sockets inherit TCP_NODELAY without entering the process file table. */
+        if (setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one)))
+            td_fail("listener TCP_NODELAY", errno);
+        /* Bound queued socket data when a checkpoint or a slow peer delays progress. */
+        if (setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &receive_buffer, sizeof(receive_buffer)))
+            td_fail("listener SO_RCVBUF", errno);
+        if (setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &send_buffer, sizeof(send_buffer)))
+            td_fail("listener SO_SNDBUF", errno);
+        if (bind(fd, (struct sockaddr *)&address, address_len) || listen(fd, 65535))
+            td_fail("listener bind", errno);
+        net->listeners[i] = fd;
+    }
     for (int i = 0; i < RINGS; ++i) {
         struct td_ring *r = &net->rings[i];
         r->ready_head = r->ready_tail = r->retry_head = r->retry_tail = -1;

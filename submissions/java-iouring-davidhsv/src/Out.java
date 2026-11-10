@@ -1,0 +1,136 @@
+/** Bytes out: decimal numbers and the JSON writer. */
+final class Out {
+    private Out() {}
+
+    static final long ONES = 0x0101010101010101L;
+    static final long HIGHS = 0x8080808080808080L;
+    private static final byte[] HEX = "0123456789abcdef".getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+
+    /** Writes v in decimal at a and returns the number of bytes. */
+    static int digits(long a, long v) {
+        if (v < 0) {
+            N.put(a, '-');
+            if (v == Long.MIN_VALUE) {
+                byte[] min = "9223372036854775808".getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+                N.copy(min, 0, a + 1, min.length);
+                return 1 + min.length;
+            }
+            return 1 + digits(a + 1, -v);
+        }
+        int n = width(v);
+        long at = a + n;
+        do {
+            at--;
+            N.put(at, (int) ('0' + v % 10));
+            v /= 10;
+        } while (v != 0);
+        return n;
+    }
+
+    /** How many decimal digits a non-negative v has. */
+    static int width(long v) {
+        int n = 1;
+        while (v >= 10) { v /= 10; n++; }
+        return n;
+    }
+
+    static boolean eq(long a, long n, byte[] s) {
+        if (n != s.length) return false;
+        for (int k = 0; k < s.length; k++) if (N.b(a + k) != s[k]) return false;
+        return true;
+    }
+
+    static boolean startsWith(long a, long n, byte[] s) {
+        if (n < s.length) return false;
+        for (int k = 0; k < s.length; k++) if (N.b(a + k) != s[k]) return false;
+        return true;
+    }
+
+    // The first eight bytes at a (memory order), as a little- or big-endian word: special8 looks
+    // at each byte on its own, so the order does not matter.
+    static long load64(long a) { return N.M.get(N.LONG_U, a); }
+
+    /** Nonzero when one of the eight bytes of x is a control character, a quote or a backslash:
+     * the bytes JSON escapes inside a string. */
+    static long special8(long x) {
+        long quote = x ^ (ONES * 0x22);
+        long slash = x ^ (ONES * 0x5c);
+        return (((x - ONES * 0x20) & ~x) | ((quote - ONES) & ~quote) | ((slash - ONES) & ~slash)) & HIGHS;
+    }
+
+    /** True when none of the n bytes at a needs escaping. Eight bytes at a time; the last word
+     * overlaps the one before it instead of being cut short. */
+    static boolean isPlain(long a, long n) {
+        if (n >= 8) {
+            long found = 0;
+            long p = a, end = a + n - 8;
+            while (p < end) {
+                found |= special8(load64(p));
+                p += 8;
+            }
+            return (found | special8(load64(end))) == 0;
+        }
+        for (long p = a; p < a + n; p++) {
+            int c = N.u(p);
+            if (c < 0x20 || c == '"' || c == '\\') return false;
+        }
+        return true;
+    }
+
+    /** Appends the n bytes at a as the inside of a JSON string. */
+    static void text(Buf out, long a, long n) {
+        if (isPlain(a, n)) { out.put(a, n); return; }
+        out.ensure(n * 6);
+        long w = out.base + out.len;
+        for (long p = a; p < a + n; p++) {
+            int c = N.u(p);
+            if (c == '"') { N.put(w++, '\\'); N.put(w++, '"'); }
+            else if (c == '\\') { N.put(w++, '\\'); N.put(w++, '\\'); }
+            else if (c >= 0x20) N.put(w++, c);
+            else if (c == '\n') { N.put(w++, '\\'); N.put(w++, 'n'); }
+            else if (c == '\r') { N.put(w++, '\\'); N.put(w++, 'r'); }
+            else if (c == '\t') { N.put(w++, '\\'); N.put(w++, 't'); }
+            else if (c == 8) { N.put(w++, '\\'); N.put(w++, 'b'); }
+            else if (c == 12) { N.put(w++, '\\'); N.put(w++, 'f'); }
+            else {
+                N.put(w++, '\\'); N.put(w++, 'u'); N.put(w++, '0'); N.put(w++, '0');
+                N.put(w++, HEX[c >> 4]);
+                N.put(w++, HEX[c & 15]);
+            }
+        }
+        out.len = w - out.base;
+    }
+
+    private static final byte[] P_ID = ascii("{\"id\":");
+    private static final byte[] P_BODY = ascii(",\"body\":\"");
+    private static final byte[] P_CREATED = ascii("\",\"created_at\":\"");
+    private static final byte[] P_AUTHOR = ascii("\",\"author\":\"");
+    private static final byte[] P_LIKES = ascii("\",\"like_count\":");
+
+    /** One post object. When created_at lies right after the body, as in a posts record, one
+     * scan clears both. */
+    static void post(Buf out, long id, long body, long bodyLen, long created, long createdLen, long author,
+                     long authorLen, long likes) {
+        out.put(P_ID);
+        out.num(id);
+        out.put(P_BODY);
+        boolean plain = created == body + bodyLen ? isPlain(body, bodyLen + createdLen)
+                : isPlain(body, bodyLen) && isPlain(created, createdLen);
+        if (plain) {
+            out.put(body, bodyLen);
+            out.put(P_CREATED);
+            out.put(created, createdLen);
+        } else {
+            text(out, body, bodyLen);
+            out.put(P_CREATED);
+            text(out, created, createdLen);
+        }
+        out.put(P_AUTHOR);
+        text(out, author, authorLen);
+        out.put(P_LIKES);
+        out.num(likes);
+        out.put('}');
+    }
+
+    static byte[] ascii(String s) { return s.getBytes(java.nio.charset.StandardCharsets.UTF_8); }
+}

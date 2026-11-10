@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"strconv"
 )
 
 // A frame borrows its input until the response has been serialized.
@@ -65,15 +66,10 @@ func contentBytes(value []byte) (int, bool) {
 	if len(value) == 0 || len(value) > 9 {
 		return 0, false
 	}
-	// At most nine decimal digits fit in an int even on 32-bit systems.
-	length := 0
-	for _, c := range value {
-		if c < '0' || c > '9' {
-			return 0, false
-		}
-		length = length*10 + int(c-'0')
-	}
-	return length, length <= maxBody
+	// ParseUint rejects signs, suffixes, and overflow without creating a string
+	// copy on the successful path. maxBody is checked before slicing the body.
+	length, err := strconv.ParseUint(string(value), 10, 32)
+	return int(length), err == nil && length <= maxBody
 }
 
 // parse separates framing from application validation. It rejects ambiguous
@@ -98,21 +94,20 @@ func parse(wire []byte, dst *request) (int, int) {
 			break
 		}
 		name, value, found := bytes.Cut(line, []byte{':'})
-		// Consumed names are at least as long as Authorization. Skip common
-		// ignored headers (Host, User-Agent, Content-Type) before value work.
-		if !found || len(name) < len("Authorization") {
+		if !found {
 			continue
 		}
+		value = bytes.Trim(value, " \t")
 		switch {
 		case bytes.EqualFold(name, []byte("Authorization")):
-			dst.auth, dst.hasAuth = bytes.Trim(value, " \t"), true
+			dst.auth, dst.hasAuth = value, true
 		case bytes.EqualFold(name, []byte("Content-Length")):
 			if lengthSeen {
 				return 0, parsedBad
 			}
 			lengthSeen = true
 			var valid bool
-			bodySize, valid = contentBytes(bytes.Trim(value, " \t"))
+			bodySize, valid = contentBytes(value)
 			if !valid {
 				return 0, parsedBad
 			}

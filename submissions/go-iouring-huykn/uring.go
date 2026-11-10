@@ -29,6 +29,7 @@ const (
 	featSingleMmap = 1 << 0
 
 	offSQRing = 0
+	offCQRing = 0x8000000
 	offSQEs   = 0x10000000
 
 	opAccept   = 13

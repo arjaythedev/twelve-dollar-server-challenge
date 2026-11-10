@@ -43,9 +43,9 @@ struct hkn_store {
   hkn_result result;
   hkn_read_plan *reader;
   hkn_checkpoint *checkpoint;
-  uint64_t wal_written, checkpoint_sent, tail_written;
+  uint64_t write_epoch, tail_epoch;
   int64_t hold_started;
-  int wal_frames;
+  int wal_frames, checkpoint_sent;
   char error[256];
   int transaction, poisoned, checkpoint_phase, holding;
 };
@@ -77,15 +77,10 @@ void hkn_disconnect(hkn_store *s) {
 }
 
 static int record_wal(void *context, sqlite3 *db, const char *name, int frames) {
-  (void)name;
+  (void)db; (void)name;
   hkn_store *s = context;
   s->wal_frames = frames;
-  // Count actual writes, not WAL extent: SQLite can rewind between commits.
-  int pages = 0, high = 0;
-  if (sqlite3_db_status(db, SQLITE_DBSTATUS_CACHE_WRITE, &pages, &high, 1) == SQLITE_OK && pages > 0) {
-    s->wal_written += (unsigned)pages;
-    hkn_checkpoint_observe(s->checkpoint, s->wal_written);
-  }
+  ++s->write_epoch; // A later tail completion must not erase newer writes.
   return SQLITE_OK;
 }
 
@@ -254,12 +249,12 @@ int hkn_finish(hkn_store *s) {
   s->transaction = 0;
   s->poisoned = 0;
   if (bad || !s->checkpoint) return bad ? -1 : 0;
-  // Scheduling runs after commit, with all read cursors closed. Normal batches
-  // adapt to traffic; unfinished checkpoints retry after 2,048 further writes.
-  unsigned interval = hkn_checkpoint_interval(s->checkpoint);
-  if (!s->checkpoint_phase && (s->wal_written - s->checkpoint_sent >= interval ||
-      (!s->checkpoint_sent && s->wal_frames >= (int)interval))) {
-    s->checkpoint_sent = s->wal_written;
+  // WAL growth is observed only after durable commit, with all read cursors
+  // closed. Signal at coarse frame intervals rather than on every request.
+  if (s->wal_frames < s->checkpoint_sent) s->checkpoint_sent = 0;
+  if (!s->checkpoint_phase && s->wal_frames >= 8192 &&
+      (!s->checkpoint_sent || s->wal_frames - s->checkpoint_sent >= 2048)) {
+    s->checkpoint_sent = s->wal_frames;
     int code = hkn_checkpoint_request(s->checkpoint);
     if (code != SQLITE_OK) return failed(s, code);
     s->checkpoint_phase = 1;
@@ -279,26 +274,24 @@ int hkn_tick(hkn_store *s, int64_t now) {
   if (s->checkpoint_phase == 1 && result > 0) {
     s->holding = 1;
     s->hold_started = now;
-    s->tail_written = s->wal_written;
+    s->tail_epoch = s->write_epoch;
     s->checkpoint_phase = 2;
     if (hkn_checkpoint_tail(s->checkpoint) != SQLITE_OK) return -1;
   } else if (s->checkpoint_phase == 2) {
     if (result > 0) {
-      // If a timed-out hold admitted newer writes, this completion cannot
-      // describe their WAL extent. Let the next cycle account for it.
-      if (result == 2 && s->wal_written == s->tail_written) s->wal_frames = 0;
+      // A timed-out hold may have admitted writes after this tail started.
+      if (result == 2 && s->write_epoch == s->tail_epoch) s->wal_frames = s->checkpoint_sent = 0;
       s->holding = s->checkpoint_phase = 0;
     } else if (now - s->hold_started >= 250000000) {
       s->holding = 0;
     }
   }
   if (!s->checkpoint_phase && s->wal_frames >= 65536) {
-    // Last resort, only with the worker idle. Committed sends have already
-    // reached io_uring; external readers may still defer a safe restart.
+    // Last resort, only with the worker idle and committed sends submitted.
     int code = hkn_checkpoint_wait(s->checkpoint);
     if (code == SQLITE_OK) code = sqlite3_wal_checkpoint_v2(s->connection, "main", SQLITE_CHECKPOINT_RESTART, NULL, NULL);
     if (code != SQLITE_OK && code != SQLITE_BUSY) return failed(s, code);
-    if (code == SQLITE_OK) { s->wal_frames = 0; s->checkpoint_sent = s->wal_written; }
+    if (code == SQLITE_OK) { s->wal_frames = 0; s->checkpoint_sent = 0; }
   }
   return s->holding;
 }

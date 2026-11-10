@@ -1,12 +1,10 @@
 #define _GNU_SOURCE
 #include "checkpoint.h"
-#include "checkpoint_policy.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdlib.h>
-#include <time.h>
 #include <sys/resource.h>
 #include <sys/syscall.h>
 #include <unistd.h>
@@ -18,18 +16,9 @@ struct hkn_checkpoint {
   pthread_t thread;
   pthread_mutex_t mutex;
   pthread_cond_t changed;
-  hkn_checkpoint_policy policy;
-  _Atomic uint64_t written;
-  _Atomic unsigned schedule;
   _Atomic int result;
-  int sync_fd, stop, queued, running, error, retry, health;
+  int sync_fd, stop, queued, running, error;
 };
-
-static int64_t checkpoint_now(void) {
-  struct timespec ts;
-  clock_gettime(CLOCK_MONOTONIC, &ts);
-  return (int64_t)ts.tv_sec * 1000000000 + ts.tv_nsec;
-}
 
 static int checkpoint_sync(hkn_checkpoint *worker) {
   int rc;
@@ -59,16 +48,8 @@ static void *checkpoint_loop(void *argument) {
   setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), 5);
   pthread_mutex_lock(&worker->mutex);
   for (;;) {
+    while (!worker->queued && !worker->stop) pthread_cond_wait(&worker->changed, &worker->mutex);
     if (worker->stop) break;
-    int64_t now = checkpoint_now();
-    hkn_checkpoint_policy_sample(&worker->policy, now,
-      atomic_load_explicit(&worker->written, memory_order_relaxed), worker->health);
-    atomic_store_explicit(&worker->schedule, worker->policy.target | worker->retry, memory_order_relaxed);
-    if (!worker->queued) {
-      struct timespec until = {.tv_sec = now / 1000000000 + 1, .tv_nsec = now % 1000000000};
-      pthread_cond_timedwait(&worker->changed, &worker->mutex, &until);
-      continue;
-    }
     int bulk = worker->queued == 1;
     worker->queued = 0;
     worker->running = 1;
@@ -77,9 +58,6 @@ static void *checkpoint_loop(void *argument) {
     int code = checkpoint_copy(worker, bulk, &log, &copied);
     pthread_mutex_lock(&worker->mutex);
     if (code != SQLITE_OK && code != SQLITE_BUSY) worker->error = code;
-    worker->retry = code != SQLITE_OK || log < 0 || copied < 0 || copied < log;
-    worker->health = code == SQLITE_OK && log >= 0 && copied >= 0 &&
-                     log - copied <= HKN_CHECKPOINT_STEP ? 1 : -1;
     worker->running = 0;
     atomic_store_explicit(&worker->result, worker->error ? -worker->error :
       log >= 0 && copied == log && code == SQLITE_OK ? 2 : 1, memory_order_release);
@@ -107,15 +85,7 @@ hkn_checkpoint *hkn_checkpoint_new(const char *path, const char *vfs) {
   code = sqlite3_exec(worker->connection, "SELECT count(*) FROM sqlite_schema", NULL, NULL, NULL);
   if (code != SQLITE_OK) goto connection_error;
   if (pthread_mutex_init(&worker->mutex, NULL)) goto connection_error;
-  pthread_condattr_t clock;
-  if (pthread_condattr_init(&clock)) goto mutex_error;
-  int condition = pthread_condattr_setclock(&clock, CLOCK_MONOTONIC);
-  if (!condition) condition = pthread_cond_init(&worker->changed, &clock);
-  pthread_condattr_destroy(&clock);
-  if (condition) goto mutex_error;
-  hkn_checkpoint_policy_init(&worker->policy, checkpoint_now());
-  atomic_init(&worker->written, 0);
-  atomic_init(&worker->schedule, HKN_CHECKPOINT_MIN);
+  if (pthread_cond_init(&worker->changed, NULL)) goto mutex_error;
   atomic_init(&worker->result, 0);
   if (pthread_create(&worker->thread, NULL, checkpoint_loop, worker)) goto condition_error;
   return worker;
@@ -157,22 +127,9 @@ int hkn_checkpoint_result(hkn_checkpoint *worker) {
 int hkn_checkpoint_wait(hkn_checkpoint *worker) {
   pthread_mutex_lock(&worker->mutex);
   while (worker->queued || worker->running) pthread_cond_wait(&worker->changed, &worker->mutex);
-  // The caller may restart the WAL while quiescent. Old progress is no longer
-  // evidence for the next WAL cycle; sampling alone never starts checkpoint I/O.
-  worker->retry = worker->health = 0;
-  atomic_store_explicit(&worker->schedule, worker->policy.target, memory_order_relaxed);
   int code = worker->error;
   pthread_mutex_unlock(&worker->mutex);
   return code;
-}
-
-void hkn_checkpoint_observe(hkn_checkpoint *worker, uint64_t written) {
-  atomic_store_explicit(&worker->written, written, memory_order_relaxed);
-}
-
-unsigned hkn_checkpoint_interval(hkn_checkpoint *worker) {
-  unsigned schedule = atomic_load_explicit(&worker->schedule, memory_order_relaxed);
-  return schedule & HKN_CHECKPOINT_RETRY ? HKN_CHECKPOINT_STEP : schedule;
 }
 
 void hkn_checkpoint_free(hkn_checkpoint *worker) {

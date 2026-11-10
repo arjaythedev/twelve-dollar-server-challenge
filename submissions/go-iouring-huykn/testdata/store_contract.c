@@ -2,7 +2,6 @@
 #include "../store.c"
 #include <assert.h>
 #include <fcntl.h>
-#include <time.h>
 
 static int allocation_calls;
 static int count_allocation(int fd, off_t offset, off_t length) {
@@ -105,13 +104,8 @@ int main(int argc, char **argv) {
     assert(hkn_finish(s) == 0);
     assert(hkn_checkpoint_request(s->checkpoint) == SQLITE_OK);
     // SQLITE_OK from PASSIVE does not imply that the old reader let it finish.
-    for (int attempt = 0; attempt < 1000 && hkn_checkpoint_interval(s->checkpoint) != 2048; ++attempt) {
-      struct timespec pause = {.tv_nsec = 1000000};
-      nanosleep(&pause, NULL);
-    }
-    assert(hkn_checkpoint_interval(s->checkpoint) == 2048);
     assert(hkn_checkpoint_wait(s->checkpoint) == SQLITE_OK);
-    assert(hkn_checkpoint_interval(s->checkpoint) >= 8192);
+    assert(hkn_checkpoint_result(s->checkpoint) == 1);
     s->checkpoint_phase = 1;
     assert(hkn_tick(s, 1000000000) == 1);
     assert(hkn_checkpoint_wait(s->checkpoint) == SQLITE_OK);
@@ -134,11 +128,11 @@ int main(int argc, char **argv) {
     s->checkpoint_phase = 2;
     s->holding = 1;
     s->hold_started = 3000000000;
-    s->tail_written = s->wal_written;
+    s->tail_epoch = s->write_epoch;
     assert(hkn_tick(s, 3249999999) == 1);
     assert(hkn_tick(s, 3250000000) == 0 && s->checkpoint_phase == 2);
     assert(hkn_create(s, 1, "after timeout", 13));
-    assert(hkn_finish(s) == 0 && s->wal_written > s->tail_written);
+    assert(hkn_finish(s) == 0 && s->write_epoch > s->tail_epoch);
     assert(hkn_checkpoint_tail(s->checkpoint) == SQLITE_OK);
     assert(hkn_checkpoint_wait(s->checkpoint) == SQLITE_OK);
     assert(hkn_tick(s, 3250000001) == 0 && s->wal_frames > 0);
@@ -146,17 +140,17 @@ int main(int argc, char **argv) {
     s->checkpoint = original;
     // Drive the growth-barrier branch without writing 256 MiB in a unit test.
     assert(begin_batch(s) == 0);
-    s->checkpoint_sent = s->wal_written;
+    s->checkpoint_sent = 65536;
     s->wal_frames = 65536;
     assert(hkn_finish(s) == 0);
     assert(s->wal_frames == 65536); // COMMIT never waits for a checkpoint.
     assert(hkn_tick(s, 4000000000) == 0);
-    assert(s->wal_frames == 0 && s->checkpoint_sent == s->wal_written);
-    // WAL rewinds must not erase observed write pressure or underflow budgets.
+    assert(s->wal_frames == 0 && s->checkpoint_sent == 0);
+    // WAL rewinds must not erase the commit generation used by late-tail guards.
     for (int cycle = 0; cycle < 3; ++cycle) {
-      uint64_t written = s->wal_written;
+      uint64_t written = s->write_epoch;
       assert(hkn_create(s, 1, "rewind test", 11));
-      assert(hkn_finish(s) == 0 && s->wal_written > written);
+      assert(hkn_finish(s) == 0 && s->write_epoch > written);
       assert(hkn_checkpoint_request(s->checkpoint) == SQLITE_OK);
       assert(hkn_checkpoint_wait(s->checkpoint) == SQLITE_OK);
       assert(sqlite3_wal_checkpoint_v2(s->connection, "main", SQLITE_CHECKPOINT_RESTART, NULL, NULL) == SQLITE_OK);

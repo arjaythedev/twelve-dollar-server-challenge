@@ -67,22 +67,17 @@ its writes. Responses remain staged until commit succeeds; commit failure turns
 all staged responses into errors. Implicit SQLite rollback is tracked so lost
 writes cannot be acknowledged as successful.
 
-WAL uses `synchronous=NORMAL`. A per-handle worker runs passive checkpoints
-on its own connection. Its normal write budget starts at 8,192 WAL pages and
-adapts between 8,192 and 16,384 in steps of 2,048. The worker samples smoothed
-page-write traffic once per second; growth requires checkpoint progress, three
-agreeing samples, and five seconds between changes. Incomplete checkpoints
-retry after 2,048 further page writes. WAL rewinds preserve traffic accounting.
-Timer wakeups only sample; database commits request checkpoint work. The worker
-runs at nice 5, copies the bulk while writes continue, and pre-syncs dirty database
-pages. It then copies the tail while POST requests wait for at most 250 ms;
-reads on other connections continue. Held pipelines preserve order, EOF and the
-normal response budget. Completion is checked between transactions using the
-existing bounded 1 ms loop wait. At 65,536 frames, an idle worker permits a
-request-thread restart attempt after committed sends have been submitted.
-Long-lived readers may defer a restart. Worker startup failure retains SQLite's
-automatic checkpoint fallback at 8,192 pages. Both connections use 64 MiB growth
-chunks with native `posix_fallocate` enabled.
+The code baseline is PR369 (`e7c9291`, identical submission source to `4d85716`),
+which reached 276k VUs on x86. The new checkpoint patch is unscored.
+WAL uses `synchronous=NORMAL`. PR369's trigger remains 8,192 WAL frames, with
+2,048-frame retry spacing. A nice-5 worker copies and pre-syncs the bulk while
+writes continue, then copies the tail while POSTs wait for at most 250 ms.
+Other connections' reads continue; held pipelines retain ordering and EOF.
+Completion is checked between transactions using the existing 1 ms bounded wait.
+At 65,536 frames, an idle worker permits a restart after committed sends are
+submitted. Long-lived readers can defer restart. Worker startup failure retains
+SQLite's automatic 8,192-page checkpoint fallback. Both connections use 64 MiB
+growth chunks with native `posix_fallocate` enabled.
 
 The default is SQLite's built-in `unix-excl` VFS: one process owns the database
 and SQLite keeps the WAL index in heap memory. Other processes cannot open the

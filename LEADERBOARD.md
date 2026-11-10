@@ -534,6 +534,10 @@ connection refused (75 % errors). Not merged (below the merged row). Follow-up *
 to 10,000): **280,000** (26,684 req/s, p95 157.2 / p99 652.2 ms, 0 err, 96 % CPU, 32 µs/req, 1,198 MB, 2026-11-10);
 290,000 failed the 2-minute probe on p95/p99 (1,221 / 3,402 ms at 97 % CPU, 0 errors), 300,000 on connection refused
 (75 % errors) and 320,000 on p95/p99 (1,836 / 2,844 ms at 99 % CPU, 0 errors). Not merged (below the merged row).
+Follow-up **#381** (`43b79c7`, 30 ms group-commit window by default): **219,000** (21,373 req/s, p95 46.7 / p99 381.1 ms,
+0 err, 78 % CPU, 34 µs/req, 1,385 MB, 2026-11-10); 230,000 passed the 2-minute probe but failed the 5-minute hold on
+p99 (10.5 s, writes stalled ~12–14 s at 81 % CPU, 0 errors), 240,000 failed the 2-minute probe on p95/p99 (214 /
+2,378 ms at 84 % CPU) and 320,000 on connection refused (74 % errors). Not merged (below the merged row).
 
 ᴺ **c-iouring-unorig-username** stays on its merged #290 row. Its follow-up **#362** (`177f00e`, parked requests served
 newest first with an 8 s age cap, `journal_size_limit=0`, read-only segments `mlock`ed; held, not merged: it didn't beat

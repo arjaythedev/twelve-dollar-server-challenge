@@ -1425,6 +1425,11 @@ pub fn run_pass(
         let nwrites = 0usize;
         app.read.refresh();
         apply_reads(&mut app, &mut rings, &mut feed_reads, &mut post_reads);
+        // The snapshot pins WAL frames for as long as it is open, so a
+        // checkpoint from the writer cannot copy past it. Ending it here, once
+        // the pass' reads are done, lets PASSIVE checkpoints complete; the next
+        // pass begins a fresh one.
+        app.read.end_read(true);
         let t3 = Instant::now();
         pass_no += 1;
         ACTIVE.store(

@@ -149,14 +149,15 @@ impl Db {
         let db = Self { raw };
         db.exec("PRAGMA journal_mode=WAL")?;
         db.exec("PRAGMA synchronous=NORMAL")?;
-        // 10,000 pages (40 MB) meant the auto-checkpoint fired on nearly every
-        // commit, and a checkpoint fsyncs the database file: commits measured
-        // 1.5 ms against 0.08 ms without it. Keep a bound, but one a benchmark
-        // run will not reach (100,000 pages = 400 MB of WAL).
+        // 40 MB of WAL. Raising this only ever hid the real problem: the read
+        // snapshot was held across passes, so a PASSIVE checkpoint could never
+        // finish and every commit retried one (1.5 ms per commit, and a WAL
+        // that grew to hundreds of MB). The loop now ends the snapshot at the
+        // end of each pass, so checkpoints complete at this size.
         let ckpt = std::env::var("WAL_AUTOCHECKPOINT")
             .ok()
             .and_then(|v| v.parse::<i64>().ok())
-            .unwrap_or(100_000)
+            .unwrap_or(10_000)
             .max(0);
         db.exec(&format!("PRAGMA wal_autocheckpoint={}", ckpt))?;
         db.exec("PRAGMA cache_size=-16384")?;

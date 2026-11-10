@@ -64,7 +64,7 @@ nonisolated enum Bytes {
 // ---------- JSON output ----------
 
 /// Writing a response into room reserved for all of it (`ByteBuffer.append(maximum:)`): each append checks the room
-/// left, which `-Ounchecked` builds leave out.
+/// left.
 nonisolated extension OutputRawSpan {
     /// A literal's bytes.
     @inline(__always) @_lifetime(self: copy self)

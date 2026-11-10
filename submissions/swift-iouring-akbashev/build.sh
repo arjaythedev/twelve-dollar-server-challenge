@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # Builds the server -> ./.build/release/Feed. Runs as a normal user: fetches SQLite's amalgamation (pinned,
 # sha256-checked) into Sources/CSQLite, then builds everything with SwiftPM.
-#   -enforce-exclusivity=unchecked  no dynamic exclusivity checks (the reactor's state is touched by its own thread).
 #   --static-swift-stdlib           the Swift runtime linked in: direct calls instead of PLT stubs.
 #   -target-cpu <this CPU>          code for the box's own CPU; Swift has no "native", so the toolchain's clang says
 #                                   which CPU it detects, and nothing is added if it can't tell. The C targets get
@@ -23,7 +22,7 @@ if [ ! -f Sources/CSQLite/sqlite3.c ]; then
   cp ".deps/$SQLITE/sqlite3.c" Sources/CSQLite/sqlite3.c
   cp ".deps/$SQLITE/sqlite3.h" Sources/CSQLite/include/sqlite3.h
 fi
-FLAGS=(-c release -Xswiftc -enforce-exclusivity=unchecked)
+FLAGS=(-c release)
 [ "$(uname -s)" = Linux ] && FLAGS+=(--static-swift-stdlib --build-system native --experimental-lto-mode=full
   -Xswiftc -use-ld=lld -Xlinker --lto-O3)
 CPU=$(clang -march=native -### -c -x c /dev/null 2>&1 | grep -o '"-target-cpu" "[^"]*"' | cut -d'"' -f4 || true)

@@ -39,7 +39,7 @@
 - **One thread, proved by the compiler.** The box has one CPU, and the server is one thread: the target's default
   isolation is `MainActor`, so the server's state belongs to the main thread, and the compiler checks that. The value
   types that hold no shared state (bytes, JSON, HTTP, buffers, the store) are `nonisolated`, so their code carries
-  no runtime checks. `main()`
+  no isolation checks. The release build keeps Swift's bounds, overflow and exclusivity checks. `main()`
   is synchronous and runs the loop: nothing is scheduled on any executor, there is no `async` on the request path,
   no locks and no atomics. Each pass submits what the last one prepared, waits on ring 0 for 256 completions or 1 ms
   (whichever comes first; with nothing happening, for anything), and takes every ring's completions.

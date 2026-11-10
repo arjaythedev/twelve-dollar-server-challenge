@@ -47,7 +47,6 @@ let package = Package(
             swiftSettings: [
                 .enableExperimentalFeature("Lifetimes"),
                 .enableExperimentalFeature("Extern"),
-                .unsafeFlags(["-Ounchecked", "-enforce-exclusivity=unchecked"], .when(configuration: .release)),
             ]
         ),
         // The Linux calls Glibc's module leaves out, declared in Swift with `@_extern(c)`, and the thin Swift helpers
@@ -57,7 +56,6 @@ let package = Package(
             path: "Sources/Syscalls",
             swiftSettings: [
                 .enableExperimentalFeature("Extern"),
-                .unsafeFlags(["-Ounchecked", "-enforce-exclusivity=unchecked"], .when(configuration: .release)),
             ]
         ),
         // io_uring over its system calls: the rings, requests and completions. The per-request calls are inlinable, so
@@ -65,10 +63,7 @@ let package = Package(
         .target(
             name: "IORing",
             dependencies: ["Syscalls"],
-            path: "Sources/IORing",
-            swiftSettings: [
-                .unsafeFlags(["-Ounchecked", "-enforce-exclusivity=unchecked"], .when(configuration: .release)),
-            ]
+            path: "Sources/IORing"
         ),
         .executableTarget(
             name: "Feed",
@@ -86,7 +81,6 @@ let package = Package(
                 // `@_lifetime` on the ~Escapable views (an HTTP request, the JSON parser) and on the Spans the
                 // noncopyable buffers lend out.
                 .enableExperimentalFeature("Lifetimes"),
-                .unsafeFlags(["-Ounchecked", "-enforce-exclusivity=unchecked"], .when(configuration: .release)),
             ]
         ),
     ]

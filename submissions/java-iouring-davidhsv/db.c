@@ -40,6 +40,32 @@ static char created[64]; /* a new post's created_at */
 API feed_io_t *db_io(void) { return &io; }
 API const char *db_error(void) { return errbuf; }
 
+/* ---- what FEED_STATS reports about the disk ---- */
+
+/* How long the event-loop thread spends in the log's writes and syncs, and how long each
+ * checkpoint takes on its thread: the places where a slow disk would hold up the loop or the
+ * write queue. Counted always (a clock read per write call); reported only with FEED_STATS. */
+enum { S_WRITE_N, S_WRITE_US, S_WRITE_MAX, S_SYNC_N, S_SYNC_US, S_SYNC_MAX, S_CK_N, S_CK_US, S_CK_MAX, NS };
+static int64_t io_stats[NS];
+static pthread_t loop_thread;
+
+static int64_t mono_us(void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (int64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+}
+
+static void account(int n, int us, int max, int64_t t) {
+  __atomic_add_fetch(&io_stats[n], 1, __ATOMIC_RELAXED);
+  __atomic_add_fetch(&io_stats[us], t, __ATOMIC_RELAXED);
+  if (t > __atomic_load_n(&io_stats[max], __ATOMIC_RELAXED)) __atomic_store_n(&io_stats[max], t, __ATOMIC_RELAXED);
+}
+
+/* Copies the counters to out[0..8] and starts them over. */
+API void db_stats_take(int64_t *out) {
+  for (int i = 0; i < NS; i++) out[i] = __atomic_exchange_n(&io_stats[i], 0, __ATOMIC_RELAXED);
+}
+
 /* ---- the checkpoint thread ---- */
 
 /* On one vCPU a checkpoint at the loop's priority would take the CPU from it for as long as it
@@ -60,7 +86,9 @@ static void *ck_main(void *arg) {
     pthread_mutex_unlock(&ck_mu);
     /* PASSIVE never waits on the loop's locks, and the loop never waits for this thread. */
     int in_log = -1, copied = -2;
+    int64_t t0 = mono_us();
     int rc = sqlite3_wal_checkpoint_v2(ck_db, "main", SQLITE_CHECKPOINT_PASSIVE, &in_log, &copied);
+    account(S_CK_N, S_CK_US, S_CK_MAX, mono_us() - t0);
     __atomic_store_n(&ck_state, rc == SQLITE_OK && in_log == copied ? CK_DONE_ALL : CK_DONE_SOME, __ATOMIC_RELEASE);
   }
   return 0;
@@ -129,6 +157,23 @@ typedef struct {
 static sqlite3_vfs feed_vfs;
 static sqlite3_vfs *excl_vfs;
 
+/* unix-excl's write and sync, timed when the event-loop thread makes them. */
+static int real_write(log_file *f, const void *data, int amt, i64 off) {
+  if (!pthread_equal(pthread_self(), loop_thread)) return f->real->pMethods->xWrite(f->real, data, amt, off);
+  int64_t t0 = mono_us();
+  int rc = f->real->pMethods->xWrite(f->real, data, amt, off);
+  account(S_WRITE_N, S_WRITE_US, S_WRITE_MAX, mono_us() - t0);
+  return rc;
+}
+
+static int real_sync(log_file *f, int flags) {
+  if (!pthread_equal(pthread_self(), loop_thread)) return f->real->pMethods->xSync(f->real, flags);
+  int64_t t0 = mono_us();
+  int rc = f->real->pMethods->xSync(f->real, flags);
+  account(S_SYNC_N, S_SYNC_US, S_SYNC_MAX, mono_us() - t0);
+  return rc;
+}
+
 /* Writes out what is gathered. Every operation but a write that is held back comes through
  * here first. */
 static int log_flush(log_file *f) {
@@ -136,7 +181,7 @@ static int log_flush(log_file *f) {
   f->lone = -1;
   for (int done = 0; done < f->n && rc == SQLITE_OK;) {
     int step = f->n - done < GATHER_STEP ? f->n - done : GATHER_STEP;
-    rc = f->real->pMethods->xWrite(f->real, f->buf + done, step, f->at + done);
+    rc = real_write(f, f->buf + done, step, f->at + done);
     done += step;
   }
   f->n = 0;
@@ -179,7 +224,7 @@ static int log_write(sqlite3_file *file, const void *data, int amt, sqlite3_int6
   i64 lone = f->lone;
   int rc = log_flush(f);
   if (rc != SQLITE_OK) return rc;
-  rc = f->real->pMethods->xWrite(f->real, data, amt, off);
+  rc = real_write(f, data, amt, off);
   /* Where the log ends: after its own header when the log starts over, and after a frame that
    * was just written through whole, its header and then, as the very next operation, its page.
    * That is an append, or the last frame being rewritten; either way the log ends behind it. A
@@ -206,7 +251,7 @@ static int log_truncate(sqlite3_file *file, sqlite3_int64 size) {
 static int log_sync(sqlite3_file *file, int flags) {
   log_file *f = (log_file *)file;
   int rc = log_flush(f);
-  return rc != SQLITE_OK ? rc : f->real->pMethods->xSync(f->real, flags);
+  return rc != SQLITE_OK ? rc : real_sync(f, flags);
 }
 
 static int log_size(sqlite3_file *file, sqlite3_int64 *size) {
@@ -357,6 +402,7 @@ API int32_t db_open(const uint8_t *path_p, int64_t path_len) {
   }
   memcpy(path, path_p, (size_t)path_len);
   path[path_len] = 0;
+  loop_thread = pthread_self();
   if (sqlite3_initialize() != SQLITE_OK) { snprintf(errbuf, sizeof errbuf, "sqlite3_initialize"); return -1; }
   /* unix-excl (under "feed", above): this process locks the file once and keeps it, so no other
    * process can open it, and the WAL index is heap memory shared by the process's two

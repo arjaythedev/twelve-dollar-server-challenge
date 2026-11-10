@@ -129,6 +129,7 @@ final class N {
     private static final MethodHandle CK_POLL = fn(true, i());
     private static final MethodHandle WAL_FRAMES = fn(true, l());
     private static final MethodHandle WAL_RESTARTS = fn(true, v());
+    private static final MethodHandle STATS_TAKE = fn(false, v(JAVA_LONG));
 
     /** The functions' addresses, found when the library is loaded at run time, and where db.c's
      * feed_io_t is, with its fields at fixed offsets (see feed.h). */
@@ -184,6 +185,7 @@ final class N {
         static final MemorySegment CK_POLL = sym("db_ck_poll");
         static final MemorySegment WAL_FRAMES = sym("db_wal_frames");
         static final MemorySegment WAL_RESTARTS = sym("db_wal_restarts");
+        static final MemorySegment STATS_TAKE = sym("db_stats_take");
 
         static final long IO_LEN = dbIo(), IO_ID = IO_LEN + 8, IO_LIKES = IO_LEN + 16, IO_TEXT = IO_LEN + 24,
                 IO_TEXT_LEN = IO_LEN + 48;
@@ -207,6 +209,7 @@ final class N {
     static void ckAsk() { try { CK_ASK.invokeExact(A.CK_ASK); } catch (Throwable t) { throw fail(t); } }
     static int ckPoll() { try { return (int) CK_POLL.invokeExact(A.CK_POLL); } catch (Throwable t) { throw fail(t); } }
     static long walFrames() { try { return (long) WAL_FRAMES.invokeExact(A.WAL_FRAMES); } catch (Throwable t) { throw fail(t); } }
+    static void statsTake(long out) { try { STATS_TAKE.invokeExact(A.STATS_TAKE, out); } catch (Throwable t) { throw fail(t); } }
     static void walRestarts() { try { WAL_RESTARTS.invokeExact(A.WAL_RESTARTS); } catch (Throwable t) { throw fail(t); } }
 
     /** The length of a NUL-terminated C string. */

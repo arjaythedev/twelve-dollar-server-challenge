@@ -60,6 +60,7 @@ public final class Server {
     static long ringRetry;  // adding a ring failed: not again before this (µs)
 
     private static final int CQ_ENTRIES = 65536;
+    private static final long DISK = Arena.global().allocate(9 * 8L, 8).address();  // db_stats_take's counters
     private static final long CQES = Arena.global().allocate(CQ_ENTRIES * 16L, 64).address();
     private static int[] touched = new int[4096];  // connections with output (or a close) for the end of this pass
     private static int ntouched;
@@ -97,16 +98,17 @@ public final class Server {
     // log frames, ask for a copy. When it is done, hold the write queue (reads go on) and ask
     // again: that copy takes the frames written meanwhile, and once the whole log is copied the
     // next write starts the log over. Past ckHigh the queue is held too, so the log stays bounded
-    // when the loop leaves the thread no idle time. A hold lasts at most GATE_US.
+    // when the loop leaves the thread no idle time. A hold lasts at most gateUs.
     static long ckStart = 16384;  // FEED_CK_FRAMES overrides it
-    static long ckHigh = 40960;
-    static final long GATE_US = 200000;
+    static long ckHigh = 40960;   // FEED_CK_HIGH overrides it
+    static long gateUs = 200000;  // FEED_GATE_US overrides it
     static int ckPhase;           // 0 idle, 1 copying, 2 copying the tail with writes held
     static boolean gate;
     static long gateSince;
 
     static boolean statsOn;
     static long stAt, stPasses, stReqs, stCqes, stWrites, stWpasses, stNobuf, stRearms, stGates, stRestarts, stMaxpass,
+            stGateUs, stGateMax, stOldest,
             stServeUs, stWriteUs, stCommitUs;
 
     // ---- the loop
@@ -194,7 +196,8 @@ public final class Server {
         // Test knobs; none is set on the benchmark box.
         writeWindow = envInt("FEED_WRITE_US", 0, 1000000, writeWindow);
         ckStart = envInt("FEED_CK_FRAMES", 64, 1000000, ckStart);
-        ckHigh = ckStart + 24576;
+        ckHigh = envInt("FEED_CK_HIGH", 64, 10000000, ckStart + 24576);
+        gateUs = envInt("FEED_GATE_US", 0, 10000000, gateUs);
         waitNs = envInt("FEED_WAIT_US", 50, 100000, waitNs / 1000) * 1000;
         statsOn = env("FEED_STATS") != null;
 
@@ -434,6 +437,21 @@ public final class Server {
         }
     }
 
+    private static void hold() {
+        if (gate) return;
+        gate = true;
+        gateSince = nowUs;
+        stGates++;
+    }
+
+    private static void release() {
+        if (!gate) return;
+        gate = false;
+        long held = nowUs - gateSince;
+        stGateUs += held;
+        if (held > stGateMax) stGateMax = held;
+    }
+
     private static void checkpoints() {
         int st = N.ckPoll();  // 0 idle, 1 copying, 2 done with the whole log copied, 3 done, frames left
         if (ckPhase == 0) {
@@ -442,26 +460,24 @@ public final class Server {
             if (st >= 2) {
                 // Copied up to where the log was when it started. Now nothing may be written until
                 // the rest is copied, so that the log can start over.
-                if (!gate) { gate = true; gateSince = nowUs; stGates++; }
+                hold();
                 N.ckAsk();
                 ckPhase = 2;
             } else if (!gate && N.walFrames() >= ckHigh) {
-                gate = true;
-                gateSince = nowUs;
-                stGates++;
-            } else if (gate && nowUs - gateSince > GATE_US) {
-                gate = false;
+                hold();
+            } else if (gate && nowUs - gateSince > gateUs) {
+                release();
             }
         } else if (st == 2) {
             N.walRestarts();
-            gate = false;
+            release();
             ckPhase = 0;
             stRestarts++;
         } else if (st == 3) {
-            gate = false;
+            release();
             ckPhase = 0;
-        } else if (gate && nowUs - gateSince > GATE_US) {
-            gate = false;  // the copy is slow: writes go on, and a later round tries again
+        } else if (gate && nowUs - gateSince > gateUs) {
+            release();  // the copy is slow: writes go on, and a later round tries again
         }
     }
 
@@ -473,14 +489,20 @@ public final class Server {
         if (nowUs - stAt < 1000000) return;
         long open = 0;
         for (int r = 0; r < nrings; r++) open += ringOpen[r];
+        if (gate) { long held = nowUs - gateSince; stGateUs += held; stGateMax = Math.max(stGateMax, held); gateSince = nowUs; }
+        N.statsTake(DISK);
+        long[] d = new long[9];
+        for (int i = 0; i < 9; i++) d[i] = N.getLong(DISK + 8L * i);
         log("stats: " + stReqs + " req/s, " + stPasses + " passes, " + stCqes + " cqes, " + stWrites + " writes in "
                 + stWpasses + " write passes, max pass " + stMaxpass + " us (serve " + stServeUs + ", writes "
-                + stWriteUs + ", commit " + stCommitUs + "), nobuf " + stNobuf + ", rearms " + stRearms + ", open "
-                + open + ", rings " + nrings + ", wal " + N.walFrames() + ", gates " + stGates + ", restarts "
-                + stRestarts + ", queued " + njobs);
+                + stWriteUs + ", commit " + stCommitUs + "), oldest write " + stOldest / 1000 + " ms, nobuf " + stNobuf
+                + ", rearms " + stRearms + ", open " + open + ", rings " + nrings + ", wal " + N.walFrames()
+                + ", gates " + stGates + " held " + stGateUs / 1000 + " ms max " + stGateMax / 1000 + " ms, restarts "
+                + stRestarts + ", queued " + njobs + "; loop log writes " + d[0] + " max " + d[2] + " us, syncs " + d[3]
+                + " max " + d[5] + " us; checkpoints " + d[6] + " " + d[7] / 1000 + " ms max " + d[8] / 1000 + " ms");
         stAt = nowUs;
         stReqs = stPasses = stCqes = stWrites = stWpasses = stNobuf = stRearms = stMaxpass = 0;
-        stServeUs = stWriteUs = stCommitUs = 0;
+        stServeUs = stWriteUs = stCommitUs = stGates = stRestarts = stGateUs = stGateMax = stOldest = 0;
     }
 
     // ---- serving a connection's bytes
@@ -533,6 +555,7 @@ public final class Server {
     private static void runWrites() {
         writesNow = true;
         stWpasses++;
+        stOldest = Math.max(stOldest, nowUs - (writeAt - writeWindow));
         long jb = jobBytes.base;
         for (int j = 0; j < njobs; j++) {
             int ci = jCi[j];

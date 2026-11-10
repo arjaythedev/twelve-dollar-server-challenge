@@ -43,7 +43,8 @@ struct hkn_store {
   hkn_result result;
   hkn_read_plan *reader;
   hkn_checkpoint *checkpoint;
-  int wal_frames, checkpoint_sent;
+  uint64_t wal_written, checkpoint_sent;
+  int wal_frames;
   char error[256];
   int transaction, poisoned;
 };
@@ -75,8 +76,15 @@ void hkn_disconnect(hkn_store *s) {
 }
 
 static int record_wal(void *context, sqlite3 *db, const char *name, int frames) {
-  (void)db; (void)name;
-  ((hkn_store *)context)->wal_frames = frames;
+  (void)name;
+  hkn_store *s = context;
+  s->wal_frames = frames;
+  // Count actual writes, not WAL extent: SQLite can rewind between commits.
+  int pages = 0, high = 0;
+  if (sqlite3_db_status(db, SQLITE_DBSTATUS_CACHE_WRITE, &pages, &high, 1) == SQLITE_OK && pages > 0) {
+    s->wal_written += (unsigned)pages;
+    hkn_checkpoint_observe(s->checkpoint, s->wal_written);
+  }
   return SQLITE_OK;
 }
 
@@ -243,12 +251,12 @@ int hkn_finish(hkn_store *s) {
   s->transaction = 0;
   s->poisoned = 0;
   if (bad || !s->checkpoint) return bad ? -1 : 0;
-  // WAL growth is observed only after durable commit, with all read cursors
-  // closed. Signal at coarse frame intervals rather than on every request.
-  if (s->wal_frames < s->checkpoint_sent) s->checkpoint_sent = 0;
-  if (s->wal_frames >= 4096 &&
-      (!s->checkpoint_sent || s->wal_frames - s->checkpoint_sent >= 2048)) {
-    s->checkpoint_sent = s->wal_frames;
+  // Scheduling runs after commit, with all read cursors closed. Normal batches
+  // adapt to traffic; unfinished checkpoints retry after 2,048 further writes.
+  unsigned interval = hkn_checkpoint_interval(s->checkpoint);
+  if (s->wal_written - s->checkpoint_sent >= interval ||
+      (!s->checkpoint_sent && s->wal_frames >= (int)interval)) {
+    s->checkpoint_sent = s->wal_written;
     int code = hkn_checkpoint_request(s->checkpoint);
     if (code != SQLITE_OK) return failed(s, code);
   }
@@ -258,7 +266,7 @@ int hkn_finish(hkn_store *s) {
     int code = hkn_checkpoint_wait(s->checkpoint);
     if (code == SQLITE_OK) code = sqlite3_wal_checkpoint_v2(s->connection, "main", SQLITE_CHECKPOINT_RESTART, NULL, NULL);
     if (code != SQLITE_OK && code != SQLITE_BUSY) return failed(s, code);
-    if (code == SQLITE_OK) { s->wal_frames = 0; s->checkpoint_sent = 0; }
+    if (code == SQLITE_OK) { s->wal_frames = 0; s->checkpoint_sent = s->wal_written; }
   }
   return 0;
 }

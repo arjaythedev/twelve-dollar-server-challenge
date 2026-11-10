@@ -67,9 +67,14 @@ its writes. Responses remain staged until commit succeeds; commit failure turns
 all staged responses into errors. Implicit SQLite rollback is tracked so lost
 writes cannot be acknowledged as successful.
 
-WAL uses `synchronous=NORMAL`. A new per-handle worker runs passive checkpoints
-on its own connection. Notifications coalesce and start at 4,096 WAL frames,
-with further notifications at coarse growth intervals. At 65,536 frames the
+WAL uses `synchronous=NORMAL`. A per-handle worker runs passive checkpoints
+on its own connection. Its normal write budget starts at 8,192 WAL pages and
+adapts between 8,192 and 16,384 in steps of 2,048. The worker samples smoothed
+page-write traffic once per second; growth requires checkpoint progress, three
+agreeing samples, and five seconds between changes. Incomplete checkpoints
+retry after 2,048 further page writes. WAL rewinds preserve traffic accounting.
+Timer wakeups only sample; database commits request checkpoint work.
+At 65,536 frames the
 request thread waits for the worker, then attempts a WAL restart outside any
 transaction. Long-lived readers may defer a restart; the normal server has no
 cross-batch read cursors. Worker startup failure retains SQLite's automatic

@@ -1,6 +1,7 @@
 // White-box contract checks: compile with sqlite_engine.c, never into the server.
 #include "../store.c"
 #include <assert.h>
+#include <time.h>
 
 static int reject_commit(void *unused, int action, const char *arg,
                          const char *b, const char *c, const char *d) {
@@ -85,14 +86,30 @@ int main(int argc, char **argv) {
     assert(hkn_create(s, 1, "snapshot test", 13));
     assert(hkn_finish(s) == 0);
     assert(hkn_checkpoint_request(s->checkpoint) == SQLITE_OK);
+    // SQLITE_OK from PASSIVE does not imply that the old reader let it finish.
+    for (int attempt = 0; attempt < 1000 && hkn_checkpoint_interval(s->checkpoint) != 2048; ++attempt) {
+      struct timespec pause = {.tv_nsec = 1000000};
+      nanosleep(&pause, NULL);
+    }
+    assert(hkn_checkpoint_interval(s->checkpoint) == 2048);
     assert(hkn_checkpoint_wait(s->checkpoint) == SQLITE_OK);
+    assert(hkn_checkpoint_interval(s->checkpoint) >= 8192);
     assert(scalar(observer, "SELECT count(*) FROM posts") == snapshot);
     assert(sqlite3_exec(observer, "COMMIT", NULL, NULL, NULL) == SQLITE_OK);
     // Drive the growth-barrier branch without writing 256 MiB in a unit test.
     assert(begin_batch(s) == 0);
     s->wal_frames = 65536;
     assert(hkn_finish(s) == 0);
-    assert(s->wal_frames == 0 && s->checkpoint_sent == 0);
+    assert(s->wal_frames == 0 && s->checkpoint_sent == s->wal_written);
+    // WAL rewinds must not erase observed write pressure or underflow budgets.
+    for (int cycle = 0; cycle < 3; ++cycle) {
+      uint64_t written = s->wal_written;
+      assert(hkn_create(s, 1, "rewind test", 11));
+      assert(hkn_finish(s) == 0 && s->wal_written > written);
+      assert(hkn_checkpoint_request(s->checkpoint) == SQLITE_OK);
+      assert(hkn_checkpoint_wait(s->checkpoint) == SQLITE_OK);
+      assert(sqlite3_wal_checkpoint_v2(s->connection, "main", SQLITE_CHECKPOINT_RESTART, NULL, NULL) == SQLITE_OK);
+    }
   }
   // A changed schema cookie must switch the old read plan to SQL, not reuse
   // its cached root-page assumptions. This DDL is fixture-only.

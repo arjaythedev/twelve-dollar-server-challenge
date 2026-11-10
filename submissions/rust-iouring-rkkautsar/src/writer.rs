@@ -86,10 +86,16 @@ pub fn spawn(
         };
         let mut cache = BatchCache::new(&db);
         let _ = ready.send(());
+        // Commit is a fixed cost per transaction (measured 28 us of the 40 us
+        // a single write costs), and it does not amortise by itself: live
+        // batches averaged 1.3 writes, so almost every write paid it. Holding
+        // writes briefly costs latency the p95/p99 gate can absorb -- 500 ms
+        // and 1000 ms against the ~50 ms this adds -- and cuts transactions,
+        // writer wakeups and context switches on a single core.
         let window_us = std::env::var("WRITE_COALESCE_US")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(0);
+            .unwrap_or(30_000);
         loop {
             let first = match rx.recv() {
                 Ok(job) => job,

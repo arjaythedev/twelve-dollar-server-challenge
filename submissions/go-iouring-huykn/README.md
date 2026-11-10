@@ -68,8 +68,9 @@ all staged responses into errors. Implicit SQLite rollback is tracked so lost
 writes cannot be acknowledged as successful.
 
 The code baseline is PR369 (`e7c9291`, identical submission source to `4d85716`),
-which reached 276k VUs on x86. The new checkpoint patch is unscored.
-WAL uses `synchronous=NORMAL`. PR369's trigger remains 8,192 WAL frames, with
+which reached 276k VUs on x86. The checkpoint follow-up (`9b938fb`) held 270k
+at the same reported 32 µs/request, with better reported tail latency.
+WAL uses `synchronous=NORMAL`. The checkpoint trigger is 10,240 WAL frames, with
 2,048-frame retry spacing. A nice-5 worker copies and pre-syncs the bulk while
 writes continue, then copies the tail while POSTs wait for at most 250 ms.
 Other connections' reads continue; held pipelines retain ordering and EOF.
@@ -78,6 +79,11 @@ At 65,536 frames, an idle worker permits a restart after committed sends are
 submitted. Long-lived readers can defer restart. Worker startup failure retains
 SQLite's automatic 8,192-page checkpoint fallback. Both connections use 64 MiB
 growth chunks with native `posix_fallocate` enabled.
+
+A local ARM sweep of 8,192–16,384 frames established no reliable replacement
+for 8,192. Production x86 performance at 28 µs/request remains unverified.
+The current 10,240-frame
+setting is a requested experiment after that sweep.
 
 The default is SQLite's built-in `unix-excl` VFS: one process owns the database
 and SQLite keeps the WAL index in heap memory. Other processes cannot open the

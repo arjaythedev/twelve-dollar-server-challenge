@@ -50,17 +50,22 @@ static int cur_open;
 static u8 *spill;
 static u32 spill_cap;
 
-/* Checkpoints. Past CKPT_FRAMES frames a helper thread copies the log back into the database,
- * then, in rounds, copies what was written meanwhile and syncs the database file, until at most
- * CKPT_LEFT frames were written during a round. Then writes are held (reads go on) while the other helper copies what was written
- * meanwhile, so the next write can restart the log from the top. A hold lasts at most HOLD_MS.
- * Past CKPT_FORCE frames (the helpers can't keep up) the loop checkpoints by itself. */
+/* Checkpoints. Past CKPT_FRAMES frames a helper thread copies the log back into the database.
+ * While the log stays short (below CKPT_GROW times CKPT_FRAMES) it goes on in rounds: sync the
+ * database file, copy what was written meanwhile, until at most CKPT_LEFT frames were written
+ * during a round or a round stops gaining. Then writes are held (reads go on) while the other
+ * helper copies what was written meanwhile, so the next write can restart the log from the top.
+ * A hold lasts at most HOLD_MS. Past CKPT_FORCE frames (the helpers can't keep up) the loop
+ * checkpoints by itself. */
 #ifndef CKPT_FRAMES /* overridable only to exercise holds in tests */
 #define CKPT_FRAMES 4096
 #endif
 #define CKPT_FORCE 65536
 #define CKPT_LEFT 128
+#ifndef CKPT_ROUNDS
 #define CKPT_ROUNDS 5
+#endif
+#define CKPT_GROW 2
 #define HOLD_MS 250
 #ifndef BULK_NICE
 #define BULK_NICE 19
@@ -74,8 +79,16 @@ static pthread_cond_t ck_cv = PTHREAD_COND_INITIALIZER;
 static int held;
 static struct timespec hold_t0;
 /* For the log line: holds, holds that ran into HOLD_MS, checkpoints the loop made itself, the
- * most frames the log held. */
+ * most frames the log held; the longest hold and all of them together, the helper's rounds; the
+ * loop's longest pass (with the CPU time it used: far less means it was blocked or waiting for
+ * the CPU), passes over 100 ms, and the longest commit. */
 static unsigned n_holds, n_expired, n_forced, max_frames;
+static unsigned hold_max_ms, hold_all_ms, n_rounds;
+static unsigned pass_max_us, pass_max_cpu_us, n_slow, commit_max_us;
+
+static unsigned us_between(const struct timespec *a, const struct timespec *b) {
+  return (unsigned)((b->tv_sec - a->tv_sec) * 1000000 + (b->tv_nsec - a->tv_nsec) / 1000);
+}
 
 static int wal_hook(void *a, sqlite3 *d, const char *n, int frames) {
   (void)a; (void)d; (void)n;
@@ -165,15 +178,25 @@ static void *ck_main(void *arg) {
     int nlog = -1, ndone = -2, rc = SQLITE_OK;
     if (serve == CK_BULK) {
       /* The cycle's frames, then rounds of [copy what was written meanwhile, sync the database]
-       * until little was written during a round: each round is shorter than the one before as
-       * long as the disk is faster than the writes. A checkpoint reports the log as it was when
+       * until little was written during a round. A checkpoint reports the log as it was when
        * it began; what the loop wrote since is the loop's own count (wal_frames, set at each
        * commit) minus that. */
       rc = sqlite3_wal_checkpoint_v2(ckdb, "main", SQLITE_CHECKPOINT_PASSIVE, &nlog, &ndone);
-      for (int i = 0; i < CKPT_ROUNDS && rc == SQLITE_OK && nlog == ndone; i++) {
-        rc = sqlite3_wal_checkpoint_v2(ckdb, "main", SQLITE_CHECKPOINT_PASSIVE, &nlog, &ndone);
+      /* Rounds pay off while this thread keeps up: the hold then finds a few frames to copy and
+       * a few pages to flush. When it does not keep up (a busy CPU leaves a nice-19 thread
+       * little, or the disk is slower than the writes), rounds only let the log grow while no
+       * hold can start: at 260,000 users on a droplet the log reached 41,000 frames with
+       * unbounded rounds and 9,000 without any. So a round starts only while the log is short
+       * and the round before it gained. */
+      for (int i = 0, prev = 0; i < CKPT_ROUNDS && rc == SQLITE_OK && nlog == ndone; i++) {
+        int now = __atomic_load_n(&wal_frames, __ATOMIC_RELAXED);
+        if (now >= CKPT_GROW * CKPT_FRAMES) break;
         ck_sync_db();
-        if (__atomic_load_n(&wal_frames, __ATOMIC_RELAXED) - nlog <= CKPT_LEFT) break;
+        int left = __atomic_load_n(&wal_frames, __ATOMIC_RELAXED) - nlog;
+        if (left <= CKPT_LEFT || (i && left >= prev)) break;
+        prev = left;
+        rc = sqlite3_wal_checkpoint_v2(ckdb, "main", SQLITE_CHECKPOINT_PASSIVE, &nlog, &ndone);
+        n_rounds++;
       }
     } else {
       rc = sqlite3_wal_checkpoint_v2(ckdb, "main", SQLITE_CHECKPOINT_PASSIVE, &nlog, &ndone);
@@ -441,7 +464,13 @@ int td_commit(void) {
   if (!in_tx) return 0;
   in_tx = 0;
   close_cursors();
-  if (step_reset(st_commit) != SQLITE_DONE) { step_reset(st_rollback); return -1; }
+  struct timespec t0, t1;
+  clock_gettime(CLOCK_MONOTONIC, &t0);
+  int rc = step_reset(st_commit);
+  clock_gettime(CLOCK_MONOTONIC, &t1);
+  unsigned us = us_between(&t0, &t1);
+  if (us > commit_max_us) commit_max_us = us;
+  if (rc != SQLITE_DONE) { step_reset(st_rollback); return -1; }
   return 0;
 }
 
@@ -451,19 +480,39 @@ static long ms_since(const struct timespec *t0) {
   return (t.tv_sec - t0->tv_sec) * 1000 + (t.tv_nsec - t0->tv_nsec) / 1000000;
 }
 
+static void hold_note(void) {
+  unsigned ms = (unsigned)ms_since(&hold_t0);
+  if (ms > hold_max_ms) hold_max_ms = ms;
+  hold_all_ms += ms;
+}
+
 /* Between passes (no transaction open): drives the checkpoint threads. Holds start and end only
  * here. Returns whether writes are held. Once a minute, a line for the log. */
 int td_tick(void) {
   static unsigned ticks;
-  static struct timespec log_t0;
+  static struct timespec log_t0, pass_t0, cpu_t0;
+  struct timespec now, cpu;
   if ((unsigned)wal_frames > max_frames) max_frames = (unsigned)wal_frames;
+  /* a pass: from one call to the next (its wait for completions included, at most WAIT_NS) */
+  clock_gettime(CLOCK_MONOTONIC, &now);
+  clock_gettime(CLOCK_THREAD_CPUTIME_ID, &cpu);
+  if (pass_t0.tv_sec) {
+    unsigned us = us_between(&pass_t0, &now);
+    if (us > pass_max_us) { pass_max_us = us; pass_max_cpu_us = us_between(&cpu_t0, &cpu); }
+    if (us > 100000) n_slow++;
+  }
+  pass_t0 = now;
+  cpu_t0 = cpu;
   if (!(++ticks & 1023)) {
-    if (!log_t0.tv_sec) clock_gettime(CLOCK_MONOTONIC, &log_t0);
+    if (!log_t0.tv_sec) log_t0 = now;
     else if (ms_since(&log_t0) >= 60000) {
-      clock_gettime(CLOCK_MONOTONIC, &log_t0);
-      dprintf(2, "wal: %u holds, %u ran out, %u copies on the loop, at most %u frames\n", n_holds, n_expired,
-              n_forced, max_frames);
-      n_holds = n_expired = n_forced = max_frames = 0;
+      log_t0 = now;
+      dprintf(2, "wal: %u holds (longest %u ms, %u ms in all, %u extra rounds), %u ran out, %u copies on the loop, "
+                 "at most %u frames; loop: longest pass %u ms (%u ms of CPU), %u over 100 ms, longest commit %u ms\n",
+              n_holds, hold_max_ms, hold_all_ms, n_rounds, n_expired, n_forced, max_frames, pass_max_us / 1000,
+              pass_max_cpu_us / 1000, n_slow, commit_max_us / 1000);
+      n_holds = n_expired = n_forced = max_frames = hold_max_ms = hold_all_ms = n_rounds = 0;
+      pass_max_us = pass_max_cpu_us = n_slow = commit_max_us = 0;
     }
   }
   switch (__atomic_load_n(&ck_state, __ATOMIC_ACQUIRE)) {
@@ -485,11 +534,12 @@ int td_tick(void) {
     break;
   case CK_TAIL_DONE:
     if (ck_full) wal_frames = 0;
+    if (held) hold_note();
     held = 0;
     ck_set(CK_IDLE);
     break;
   default:
-    if (held && ms_since(&hold_t0) > HOLD_MS) { held = 0; n_expired++; }
+    if (held && ms_since(&hold_t0) > HOLD_MS) { hold_note(); held = 0; n_expired++; }
     break;
   }
   return held;

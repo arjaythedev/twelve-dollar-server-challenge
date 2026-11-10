@@ -245,7 +245,10 @@ end
 
 # ---- submission
 
+# The kernel reads new SQEs only here, so committing first means no queued reply leaves before its write is
+# committed (group commit, src/db.jl).
 @inline function enter(r::Ring, min_complete::Integer, flags::UInt32, arg::Ptr{Cvoid} = C_NULL, argsz = 0)
+    IN_TXN[] && txn_commit!()
     unsafe_store!(r.sq_tail_p, r.sq_tail, 1, :release)
     n = r.to_submit
     ret = sys(SYS_IO_URING_ENTER, r.fd, n, min_complete, flags, Clong(UInt(arg)), argsz)
@@ -628,6 +631,7 @@ function uring_init(lfd::Cint)
 end
 
 function serve_uring(U::Uring)
+    GROUP_ON[] = GROUP
     @dbg (g = Base.gc_num(); st = Stats(time(), NREQ[], Base.gc_bytes(), g.total_time, g.pause))
     top_up_accepts!(U)
     while true

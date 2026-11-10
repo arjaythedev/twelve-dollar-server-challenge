@@ -20,6 +20,9 @@ Work in progress.
 - JWT HS256 verified on every request with libcrypto's `HMAC`.
 - SQLite through its public C API only: prepared statements for every read and write (no B-tree internals).
   WAL checkpoints run on a background thread, so their fsyncs don't block the event loop.
+- Group commit (io_uring): all writes of one event-loop pass share one transaction, committed before the
+  loop hands any reply to the kernel, so each 201 still waits for its commit (rule 6). Max req/s went up
+  ~48% (blast 30k → 45k); at 150k users p95 fell from 4–27 ms to 1.5–3.7 ms.
 
 ## Files
 
@@ -124,4 +127,8 @@ wrk users (`GEN=users`, think time per connection) are cheap, so they reach the 
 | P5.3: write hold | – | 225,000 (460 MB) | 30,557 (-6%), n=1 |
 | P5.3b: restart loop | – | 175,000 (426 MB) | – |
 | P5.3b: restart thread | – | 175,000 (428 MB) | – |
+| P5.3c: restart hold | – | 175,000 (433 MB) | – |
+| P5.3c: restart catchup | – | – | – |
+| P5.4: group off | – | 150,000 (418 MB) | 30,472 (-0%), n=3 |
+| P5.4: group on | – | 150,000 (420 MB) | 45,018 (+48%), n=3 |
 <!-- results:end -->

@@ -16,6 +16,15 @@ const ST_POST = Ref{Ptr{Cvoid}}(C_NULL)
 const ST_EXISTS = Ref{Ptr{Cvoid}}(C_NULL)
 const ST_INSERT_POST = Ref{Ptr{Cvoid}}(C_NULL)
 const ST_INSERT_LIKE = Ref{Ptr{Cvoid}}(C_NULL)
+const ST_BEGIN = Ref{Ptr{Cvoid}}(C_NULL)
+const ST_COMMIT = Ref{Ptr{Cvoid}}(C_NULL)
+
+# Group commit (io_uring only): the writes of one event-loop pass share one transaction, committed before the
+# loop next submits to the kernel, so every reply waits for its commit (rule 6). JR_GROUP=off: one commit per
+# write, for dev A/B.
+const GROUP = get(ENV, "JR_GROUP", "") != "off"
+const GROUP_ON = Ref(false)         # set by the transport that commits before it submits
+const IN_TXN = Ref(false)
 
 const POST_SELECT = """
 SELECT p.id, p.body, p.created_at, u.username,
@@ -56,6 +65,33 @@ function db_open(path::String)
     ST_EXISTS[] = db_prepare("SELECT 1 FROM posts WHERE id = ?1")
     ST_INSERT_POST[] = db_prepare("INSERT INTO posts (user_id, body) VALUES (?1, ?2) RETURNING id, created_at")
     ST_INSERT_LIKE[] = db_prepare("INSERT INTO likes (user_id, post_id) VALUES (?1, ?2) ON CONFLICT (user_id, post_id) DO NOTHING")
+    ST_BEGIN[] = db_prepare("BEGIN")
+    ST_COMMIT[] = db_prepare("COMMIT")
+    nothing
+end
+
+# Before a write: opens the pass's transaction when grouping. false on a database error.
+@inline function txn_begin!()
+    (GROUP_ON[] && !IN_TXN[]) || return true
+    rc = step(ST_BEGIN[])
+    reset(ST_BEGIN[])
+    rc == SQLITE_DONE || return false
+    IN_TXN[] = true
+    true
+end
+
+# Commits the open transaction. Replies already written claim these rows, so if the commit fails (or an
+# error rolled the transaction back early) the process stops before submitting them: no reply then claims a
+# write that isn't committed.
+function txn_commit!()
+    @dbg t0 = time_ns()
+    IN_TXN[] = false
+    ccall((:sqlite3_get_autocommit, LIBJR), Cint, (Ptr{Cvoid},), DB[]) == 0 ||
+        error("group commit: the transaction was rolled back: $(db_errmsg())")
+    rc = step(ST_COMMIT[])
+    reset(ST_COMMIT[])
+    rc == SQLITE_DONE || error("group commit failed: $(db_errmsg())")
+    @dbg MAX_WRITE_NS[] = max(MAX_WRITE_NS[], time_ns() - t0)
     nothing
 end
 
@@ -148,6 +184,7 @@ const READ = SqlBackend()
 # Inserts a post and writes {"post":{...}}. Returns false on a database error.
 function create_post!(b::Buf, uid::Int, p::Ptr{UInt8}, n::Int, author::Buf)
     @dbg t0 = time_ns()
+    txn_begin!() || return false
     st = ST_INSERT_POST[]
     bind_int(st, 1, uid)
     bind_text(st, 2, p, n)
@@ -172,6 +209,7 @@ const MAX_WRITE_NS = Ref(UInt64(0))     # --debug: longest single write on the e
 # 1 new like, 2 already liked, -1 error.
 function insert_like(uid::Int, pid::Int)
     @dbg t0 = time_ns()
+    txn_begin!() || return -1
     st = ST_INSERT_LIKE[]
     bind_int(st, 1, uid)
     bind_int(st, 2, pid)

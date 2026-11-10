@@ -2,16 +2,29 @@
  * amalgamation, so the assembly can reach SQLite's B-tree functions (they are `static` inside
  * sqlite3.c and have no public API).
  *
+ * Adapted from rust-iouring-kensac's csrc/shim.c (submissions/rust-iouring-kensac, PR #264): the
+ * td_* interface, the cursor helpers, the checkpoint thread's states and the spill buffer come
+ * from there. Changed or added here: the page view for the assembly's likes walk, INSERT without
+ * RETURNING, the page-cache wrapper, the copy rounds and database sync before a write hold, the
+ * second (tail) thread, the code lock, the once-a-minute log line.
+ *
  * What lives here: opening the database, the per-pass transaction, B-tree cursor moves, the
  * record bytes of the current row, a view of the current page (so the assembly can walk the likes
  * index a leaf at a time), the three SQL statements (two INSERTs, SELECT 1), the reference feed
- * query used as a fallback, and the WAL checkpoint thread. Everything else (decoding records,
+ * query used as a fallback, and the WAL checkpoint threads. Everything else (decoding records,
  * counting likes, JSON, HTTP, JWT, io_uring) is in the .asm files.
  *
- * SQLite runs on the event-loop thread, except WAL checkpoints, which a second thread runs on its
- * own connection; hence SQLITE_THREADSAFE=2 (each connection is used by one thread). */
+ * SQLite's own state is only read here, never written: cursors move through sqlite3Btree*
+ * calls, and the page cache is adjusted through its plugin interface (SQLITE_CONFIG_PCACHE2).
+ *
+ * SQLite runs on the event-loop thread, except WAL checkpoints, which two helper threads run on
+ * their own connection; hence SQLITE_THREADSAFE=2 (each connection is used by one thread at a
+ * time). */
 #include "sqlite3.c"
 #include <pthread.h>
+#include <signal.h>
+#include <ucontext.h>
+#include <sys/mman.h>
 #include <sys/resource.h>
 #include <sys/syscall.h>
 
@@ -37,15 +50,21 @@ static int cur_open;
 static u8 *spill;
 static u32 spill_cap;
 
-/* Checkpoints. Past CKPT_FRAMES frames the thread copies the log back into the database. Then
- * writes are held (reads go on) while it copies what was written meanwhile, so the next write
- * can restart the log from the top. A hold lasts at most HOLD_MS. Past CKPT_FORCE frames (the
- * thread can't keep up) the loop checkpoints by itself. */
+/* Checkpoints. Past CKPT_FRAMES frames a helper thread copies the log back into the database,
+ * then, in rounds, copies what was written meanwhile and syncs the database file, until at most
+ * CKPT_LEFT frames were written during a round. Then writes are held (reads go on) while the other helper copies what was written
+ * meanwhile, so the next write can restart the log from the top. A hold lasts at most HOLD_MS.
+ * Past CKPT_FORCE frames (the helpers can't keep up) the loop checkpoints by itself. */
 #ifndef CKPT_FRAMES /* overridable only to exercise holds in tests */
 #define CKPT_FRAMES 4096
 #endif
 #define CKPT_FORCE 65536
+#define CKPT_LEFT 128
+#define CKPT_ROUNDS 5
 #define HOLD_MS 250
+#ifndef BULK_NICE
+#define BULK_NICE 19
+#endif
 static sqlite3 *ckdb;
 enum { CK_IDLE, CK_BULK, CK_BULK_DONE, CK_TAIL, CK_TAIL_DONE };
 static int ck_state;
@@ -54,6 +73,9 @@ static pthread_mutex_t ck_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t ck_cv = PTHREAD_COND_INITIALIZER;
 static int held;
 static struct timespec hold_t0;
+/* For the log line: holds, holds that ran into HOLD_MS, checkpoints the loop made itself, the
+ * most frames the log held. */
+static unsigned n_holds, n_expired, n_forced, max_frames;
 
 static int wal_hook(void *a, sqlite3 *d, const char *n, int frames) {
   (void)a; (void)d; (void)n;
@@ -117,31 +139,198 @@ static void ck_set(int s) {
   pthread_mutex_unlock(&ck_mu);
 }
 
-/* One PASSIVE checkpoint per request from the loop. PASSIVE never waits for the loop's locks
- * and the loop never waits for these threads. Two threads take turns on the one connection (the
- * states are strictly sequential): the bulk copy at nice 19, so on one vCPU it runs in the loop's
- * idle time, and the tail at normal priority, because writes wait for it: at nice 19 it gets ~1.5%
- * of a busy CPU and the hold ran into its 250 ms limit. */
+/* Syncs the database file. An unfinished copy leaves the pages it wrote unsynced (SQLite syncs the
+ * file only when a copy brings in every frame), so the copy made during a write hold would have to
+ * flush the whole cycle's pages while writes wait: on a slow disk the hold ran out first, the log
+ * never restarted and grew until the loop had to copy it. Synced before the hold, the held copy
+ * has only its own few pages to flush. (The approach of swift-iouring-akbashev, PR #376.) */
+static void ck_sync_db(void) {
+  sqlite3_file *f = 0;
+  if (sqlite3_file_control(ckdb, "main", SQLITE_FCNTL_FILE_POINTER, &f) == SQLITE_OK && f && f->pMethods)
+    f->pMethods->xSync(f, SQLITE_SYNC_NORMAL);
+}
+
+/* PASSIVE checkpoints, as the loop asks for them. PASSIVE never waits for the loop's locks and the
+ * loop never waits for these threads. Two threads take turns on the one connection (the states
+ * are strictly sequential). The bulk thread runs at nice BULK_NICE, so on one vCPU its copying and
+ * its syncs stay out of the loop's way. The tail thread runs at normal priority because writes
+ * wait for it; after the bulk thread's rounds it has a handful of frames to copy and sync. */
 static void *ck_main(void *arg) {
   int serve = (int)(long)arg;
-  if (serve == CK_BULK) setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), 19);
+  if (serve == CK_BULK) setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), BULK_NICE);
   for (;;) {
     pthread_mutex_lock(&ck_mu);
     while (ck_state != serve) pthread_cond_wait(&ck_cv, &ck_mu);
-    int st = ck_state;
     pthread_mutex_unlock(&ck_mu);
-    int nlog = -1, ndone = -2;
-    int rc = sqlite3_wal_checkpoint_v2(ckdb, "main", SQLITE_CHECKPOINT_PASSIVE, &nlog, &ndone);
+    int nlog = -1, ndone = -2, rc = SQLITE_OK;
+    if (serve == CK_BULK) {
+      /* The cycle's frames, then rounds of [copy what was written meanwhile, sync the database]
+       * until little was written during a round: each round is shorter than the one before as
+       * long as the disk is faster than the writes. A checkpoint reports the log as it was when
+       * it began; what the loop wrote since is the loop's own count (wal_frames, set at each
+       * commit) minus that. */
+      rc = sqlite3_wal_checkpoint_v2(ckdb, "main", SQLITE_CHECKPOINT_PASSIVE, &nlog, &ndone);
+      for (int i = 0; i < CKPT_ROUNDS && rc == SQLITE_OK && nlog == ndone; i++) {
+        rc = sqlite3_wal_checkpoint_v2(ckdb, "main", SQLITE_CHECKPOINT_PASSIVE, &nlog, &ndone);
+        ck_sync_db();
+        if (__atomic_load_n(&wal_frames, __ATOMIC_RELAXED) - nlog <= CKPT_LEFT) break;
+      }
+    } else {
+      rc = sqlite3_wal_checkpoint_v2(ckdb, "main", SQLITE_CHECKPOINT_PASSIVE, &nlog, &ndone);
+    }
     pthread_mutex_lock(&ck_mu);
     ck_full = rc == SQLITE_OK && nlog == ndone;
-    __atomic_store_n(&ck_state, st + 1, __ATOMIC_RELEASE);
+    __atomic_store_n(&ck_state, serve + 1, __ATOMIC_RELEASE);
     pthread_mutex_unlock(&ck_mu);
   }
   return 0;
 }
 
+/* ---- page cache --------------------------------------------------------------------------------
+ * SQLite's default page cache behind its plugin interface (SQLITE_CONFIG_PCACHE2), with one
+ * decision changed: a truncate that cannot find anything to drop is not passed on.
+ *
+ * Why: the default cache remembers the largest page number it has held and never lowers it. A
+ * B-tree split (balance_nonroot) renumbers pages through a temporary number, the lock-byte
+ * page's (1 GiB / page size + 1), far beyond the end of the file. From then on every
+ * commit's truncate to the file size looks as if such pages might exist, and the cache walks
+ * every page it holds (all of the 64 MB cache) to find none.
+ *
+ * The wrapper sees every page number that enters a cache (a fetch that may create, a rekey). It
+ * keeps the largest, and counts the pages parked at the temporary number apart from it. With
+ * nothing parked and the largest number below the limit, no page at or past the limit exists and
+ * the truncate has nothing to do. Pages that leave only make the record an overestimate, which
+ * errs toward passing the truncate on. (The same approach as the wrappers of c-iouring-pavlyhalim
+ * #245 and wat-wasmedge-delneg #272; written for this shim.) */
+static sqlite3_pcache_methods2 pc_base;
+struct pc_wrap { sqlite3_pcache *base; unsigned maxkey, parked_at, nparked; };
+#define PCW(p) ((struct pc_wrap *)(p))
+
+static int pc_init(void *a) { (void)a; return pc_base.xInit(pc_base.pArg); }
+static void pc_shutdown(void *a) { (void)a; pc_base.xShutdown(pc_base.pArg); }
+static sqlite3_pcache *pc_create(int szPage, int szExtra, int purgeable) {
+  struct pc_wrap *w = sqlite3_malloc(sizeof *w);
+  if (!w) return 0;
+  if (!(w->base = pc_base.xCreate(szPage, szExtra, purgeable))) { sqlite3_free(w); return 0; }
+  w->maxkey = 0;
+  w->parked_at = 0x40000000u / (unsigned)szPage + 1; /* the lock-byte page's number */
+  w->nparked = 0;
+  return (sqlite3_pcache *)w;
+}
+static void pc_cachesize(sqlite3_pcache *p, int n) { pc_base.xCachesize(PCW(p)->base, n); }
+static int pc_pagecount(sqlite3_pcache *p) { return pc_base.xPagecount(PCW(p)->base); }
+static sqlite3_pcache_page *pc_fetch(sqlite3_pcache *p, unsigned key, int create) {
+  struct pc_wrap *w = PCW(p);
+  sqlite3_pcache_page *pg = pc_base.xFetch(w->base, key, create);
+  if (create && pg) {
+    if (key == w->parked_at) w->nparked++;
+    else if (key > w->maxkey) w->maxkey = key;
+  }
+  return pg;
+}
+static void pc_unpin(sqlite3_pcache *p, sqlite3_pcache_page *pg, int discard) {
+  pc_base.xUnpin(PCW(p)->base, pg, discard);
+}
+static void pc_rekey(sqlite3_pcache *p, sqlite3_pcache_page *pg, unsigned from, unsigned to) {
+  struct pc_wrap *w = PCW(p);
+  pc_base.xRekey(w->base, pg, from, to);
+  if (from == w->parked_at && w->nparked) w->nparked--;
+  if (to == w->parked_at) w->nparked++;
+  else if (to > w->maxkey) w->maxkey = to;
+}
+static void pc_truncate(sqlite3_pcache *p, unsigned limit) {
+  struct pc_wrap *w = PCW(p);
+  if (!w->nparked && w->maxkey < limit) return;
+  pc_base.xTruncate(w->base, limit);
+  if (limit && w->maxkey >= limit) w->maxkey = limit - 1;
+  if (w->parked_at >= limit) w->nparked = 0;
+}
+static void pc_destroy(sqlite3_pcache *p) {
+  pc_base.xDestroy(PCW(p)->base);
+  sqlite3_free(p);
+}
+static void pc_shrink(sqlite3_pcache *p) { pc_base.xShrink(PCW(p)->base); }
+
+/* Before sqlite3_initialize. */
+static int pc_install(void) {
+  static sqlite3_pcache_methods2 m;
+  if (sqlite3_config(SQLITE_CONFIG_GETPCACHE2, &pc_base) != SQLITE_OK) return -1;
+  m = pc_base;
+  m.pArg = 0;
+  m.xInit = pc_init;
+  m.xShutdown = pc_shutdown;
+  m.xCreate = pc_create;
+  m.xCachesize = pc_cachesize;
+  m.xPagecount = pc_pagecount;
+  m.xFetch = pc_fetch;
+  m.xUnpin = pc_unpin;
+  m.xRekey = pc_rekey;
+  m.xTruncate = pc_truncate;
+  m.xDestroy = pc_destroy;
+  m.xShrink = pc_shrink;
+  return sqlite3_config(SQLITE_CONFIG_PCACHE2, &m) == SQLITE_OK ? 0 : -1;
+}
+
+/* ---- code kept in RAM -------------------------------------------------------------------------
+ * Locks the program's code and read-only data (this binary first, then the libraries it loads)
+ * into memory. With no swap the kernel reclaims file-backed pages first when memory runs short,
+ * which on the 2 GB box is where a few hundred thousand sockets take it; without the lock the
+ * loop then stalls on major faults reading its own code back from disk. A few MB, inside the
+ * 8 MB RLIMIT_MEMLOCK a systemd service gets; whatever doesn't fit stays unlocked.
+ * td_unlock_code undoes it (the loop calls it if the kernel refuses a ring: some kernels count a
+ * ring's memory against the same limit). Returns the KB locked. */
+static struct { unsigned long a, n; } locked[64];
+static int nlocked;
+
+long td_lock_code(void) {
+  FILE *f = fopen("/proc/self/maps", "r");
+  char line[512];
+  long kb = 0;
+  if (!f) return 0;
+  while (fgets(line, sizeof line, f) && nlocked < 64) {
+    unsigned long a, b, ino;
+    char perm[8];
+    if (sscanf(line, "%lx-%lx %7s %*s %*s %lu", &a, &b, perm, &ino) != 4) continue;
+    if (!ino || perm[1] == 'w' || perm[3] != 'p' || !strchr(line, '/')) continue;
+    if (mlock((void *)a, b - a)) break;
+    locked[nlocked].a = a;
+    locked[nlocked++].n = b - a;
+    kb += (long)((b - a) >> 10);
+  }
+  fclose(f);
+  return kb;
+}
+
+void td_unlock_code(void) {
+  while (nlocked) { nlocked--; munlock((void *)locked[nlocked].a, locked[nlocked].n); }
+}
+
+/* A crash leaves one line in the log (the signal, the faulting address, where the code was) and
+ * then takes its default course, so the service manager still sees the signal. */
+static void on_crash(int sig, siginfo_t *si, void *uc) {
+  greg_t *r = ((ucontext_t *)uc)->uc_mcontext.gregs;
+  dprintf(2, "fatal signal %d: address %p, rip %p, rsp %p, rbp %p, loop pid %d, thread %ld\n", sig, si->si_addr,
+          (void *)r[REG_RIP], (void *)r[REG_RSP], (void *)r[REG_RBP], (int)getpid(), (long)syscall(SYS_gettid));
+  signal(sig, SIG_DFL);
+  raise(sig);
+}
+
+static void crash_log(void) {
+  static char stack[32768];
+  stack_t ss = {.ss_sp = stack, .ss_size = sizeof stack};
+  struct sigaction sa;
+  memset(&sa, 0, sizeof sa);
+  sigaltstack(&ss, 0);
+  sa.sa_sigaction = on_crash;
+  sa.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_NODEFER;
+  sigemptyset(&sa.sa_mask);
+  int sigs[] = {SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT};
+  for (size_t i = 0; i < sizeof sigs / sizeof sigs[0]; i++) sigaction(sigs[i], &sa, 0);
+}
+
 int td_open(const char *path, char *err, int n) {
-  if (sqlite3_initialize()) return fail(err, n, "init");
+  crash_log();
+  if (pc_install() || sqlite3_initialize()) return fail(err, n, "init");
   /* unix-excl: the process keeps an exclusive lock on the file, so the WAL index lives in heap
    * memory shared by the two connections (no -shm file, no file locks per transaction). */
   if (sqlite3_open_v2(path, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX, "unix-excl"))
@@ -241,34 +430,17 @@ int td_begin(void) {
   return 0;
 }
 
-/* A B-tree split (balance_nonroot) swaps page numbers through a temporary one far past the end of
- * the file, and the page cache keeps that as its largest key. The commit then truncates the cache
- * to the file size, and with the largest key that far out it walks every cached page instead of
- * the few numbers past the end: a scan of the whole 64 MB cache after any pass that split a page.
- * Once the split is done nothing is cached at the temporary number (checked), and no page is
- * cached past the file size, so the largest key goes back to the file size. */
-static void cache_maxkey(void) {
-  Pager *pg = sqlite3BtreePager(bt);
-  PCache1 *c = (PCache1 *)pg->pPCache->pCache;
-  Pgno tmp = PAGER_SJ_PGNO(pg);
-  if (c->iMaxKey != tmp || pg->dbSize >= tmp || !c->nHash) return;
-  for (PgHdr1 *p = c->apHash[tmp % c->nHash]; p; p = p->pNext)
-    if (p->iKey == tmp) return;
-  c->iMaxKey = pg->dbSize;
-}
-
 /* Ends the pass's transaction. 0 committed (or nothing to commit), -1 rolled back. */
 int td_commit(void) {
   if (tx_broken) {
     tx_broken = 0;
     close_cursors();
-    if (!sqlite3_get_autocommit(db)) { cache_maxkey(); step_reset(st_rollback); }
+    if (!sqlite3_get_autocommit(db)) step_reset(st_rollback);
     return -1;
   }
   if (!in_tx) return 0;
   in_tx = 0;
   close_cursors();
-  cache_maxkey();
   if (step_reset(st_commit) != SQLITE_DONE) { step_reset(st_rollback); return -1; }
   return 0;
 }
@@ -279,13 +451,26 @@ static long ms_since(const struct timespec *t0) {
   return (t.tv_sec - t0->tv_sec) * 1000 + (t.tv_nsec - t0->tv_nsec) / 1000000;
 }
 
-/* Between passes (no transaction open): drives the checkpoint thread. Holds start and end only
- * here. Returns whether writes are held. */
+/* Between passes (no transaction open): drives the checkpoint threads. Holds start and end only
+ * here. Returns whether writes are held. Once a minute, a line for the log. */
 int td_tick(void) {
+  static unsigned ticks;
+  static struct timespec log_t0;
+  if ((unsigned)wal_frames > max_frames) max_frames = (unsigned)wal_frames;
+  if (!(++ticks & 1023)) {
+    if (!log_t0.tv_sec) clock_gettime(CLOCK_MONOTONIC, &log_t0);
+    else if (ms_since(&log_t0) >= 60000) {
+      clock_gettime(CLOCK_MONOTONIC, &log_t0);
+      dprintf(2, "wal: %u holds, %u ran out, %u copies on the loop, at most %u frames\n", n_holds, n_expired,
+              n_forced, max_frames);
+      n_holds = n_expired = n_forced = max_frames = 0;
+    }
+  }
   switch (__atomic_load_n(&ck_state, __ATOMIC_ACQUIRE)) {
   case CK_IDLE:
     if (wal_frames >= CKPT_FORCE) {
       int nlog = 0, ndone = 0;
+      n_forced++;
       if (sqlite3_wal_checkpoint_v2(db, "main", SQLITE_CHECKPOINT_PASSIVE, &nlog, &ndone) == SQLITE_OK && nlog == ndone)
         wal_frames = 0;
     } else if (wal_frames >= CKPT_FRAMES) {
@@ -293,10 +478,8 @@ int td_tick(void) {
     }
     break;
   case CK_BULK_DONE:
-#ifdef TD_STATS /* test builds only: proves holds happen */
-    { static long n; if (++n % 50 == 0) fprintf(stderr, "holds: %ld\n", n); }
-#endif
     held = 1;
+    n_holds++;
     clock_gettime(CLOCK_MONOTONIC, &hold_t0);
     ck_set(CK_TAIL);
     break;
@@ -306,7 +489,7 @@ int td_tick(void) {
     ck_set(CK_IDLE);
     break;
   default:
-    if (held && ms_since(&hold_t0) > HOLD_MS) held = 0;
+    if (held && ms_since(&hold_t0) > HOLD_MS) { held = 0; n_expired++; }
     break;
   }
   return held;
@@ -389,10 +572,22 @@ void td_pv(BtCursor *c, struct td_pv *v) {
   v->mask = pg->maskPage;
 }
 
-/* Moves past entry `ix` of the current page (the last one the assembly read): 1 on the next entry,
- * 0 at the end, -1 error. */
+/* Moves past entry `ix` of the current page (the last one the assembly read from the view): 1 on
+ * the next entry, 0 at the end, -1 error. The cursor is only moved by sqlite3BtreeNext (within a
+ * leaf each call is an index step), and not at all when the page is the index's last leaf and
+ * the assembly read it to its end, which is how a feed's like counts usually finish: every
+ * ancestor was entered through its right-most child, so nothing follows. */
 int td_next_after(BtCursor *c, u32 ix) {
-  c->ix = (u16)ix;
+  MemPage *pg = c->pPage;
+  if (pg->leaf && ix + 1 >= pg->nCell) {
+    int i = 0;
+    while (i < c->iPage && c->aiIdx[i] == c->apPage[i]->nCell) i++;
+    if (i == c->iPage) return 0;
+  }
+  while (c->ix < ix) {
+    int rc = sqlite3BtreeNext(c, 0);
+    if (rc != SQLITE_OK) return rc == SQLITE_DONE ? 0 : -1;
+  }
   return td_next(c);
 }
 

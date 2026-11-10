@@ -6,10 +6,18 @@ framing, routing, a validating JSON reader, JSON output, SHA-256/HMAC-SHA256, ba
 checks, and the decoding of SQLite's B-tree records. One thread drives everything except WAL
 checkpoints, which two helper threads run.
 
-The design follows [rust-iouring-kensac](../rust-iouring-kensac) (one pass = one SQLite
+The design follows [rust-iouring-kensac](../rust-iouring-kensac) (PR #264): one pass = one SQLite
 transaction, reads through SQLite's B-tree cursors, direct descriptors, multishot receives, a
-checkpoint thread with write holds, drain-first recovery after a stall), re-implemented in
-assembly.
+checkpoint thread with write holds, drain-first recovery after a stall. The event loop and the
+application are re-implemented in assembly.
+
+**Reused code:** `src/shim.c` is adapted from `submissions/rust-iouring-kensac/csrc/shim.c`
+(PR #264): the `td_*` interface, the cursor helpers, the checkpoint thread's states and the
+overflow (spill) buffer come from there. What this shim changes or adds is listed at the top of
+the file. Ideas taken from other submissions and written anew here: the page-cache wrapper
+(c-iouring-pavlyhalim #245, wat-wasmedge-delneg #272), syncing the database before a write hold
+(swift-iouring-akbashev #376), locking the code in RAM (c-iouring-pavlyhalim #245,
+mojo-iouring-oh-meh #257).
 
 | | |
 |---|---|
@@ -32,7 +40,7 @@ assembly.
 | `src/json.asm` | validating JSON reader (strict UTF-8, escapes, nesting) and unescaper |
 | `src/http.asm` | request-line and header parsing (SSE2 byte search) |
 | `src/out.asm` | integer and JSON-string writers, output-buffer pool, kept-input buffers |
-| `src/shim.c` | the amalgamation plus thin wrappers: open, per-pass transaction, cursor moves, record bytes, a page view, the two INSERTs, `SELECT 1`, the SQL fallback, the checkpoint threads |
+| `src/shim.c` | the amalgamation plus thin wrappers (adapted from rust-iouring-kensac's `csrc/shim.c`, see above): open, per-pass transaction, cursor moves, record bytes, a page view, the two INSERTs, `SELECT 1`, the SQL fallback, the checkpoint threads, the page-cache wrapper, the code lock |
 | `tools/lg.c` | the load generator used for the measurements below (not part of the build) |
 
 ## Reads go through SQLite's B-tree, not its SQL engine
@@ -73,20 +81,41 @@ straight from those bytes. There is no bytecode engine and no `sqlite3_column_*`
   commit, rule 6). **No response from a pass is handed to the kernel until that `COMMIT` returns.**
   If it fails, every response the pass produced is replaced by a 500 and the connection is closed.
 - **Checkpoints off the request path.** Automatic checkpoints are off. Once the WAL holds 4,096
-  frames, a helper thread (nice 19, own connection) runs a PASSIVE checkpoint. Then writes are
-  briefly held: the next POST on each connection stays unread while a second helper thread copies
-  the frames written meanwhile, so the next write can restart the log from the top. That one runs
-  at normal priority because writes wait for it: at nice 19 it got ~1.5% of a busy CPU and holds
-  ran into their limit (below). Reads go on during a hold, and a hold lasts at most 250 ms. Past
-  65,536 frames the loop checkpoints by itself. In a
-  30-second write-heavy run (27k posts and 200k likes at ~96k req/s) the WAL file never grew past
-  33 MB and `integrity_check` was `ok` afterwards.
+  frames, a helper thread (nice 19, own connection) copies it back with PASSIVE checkpoints: the
+  cycle's frames first, then rounds of "copy what was written meanwhile, sync the database file"
+  until at most 128 frames were written during a round. Then writes are briefly held: the next
+  POST on each connection stays unread while a second helper thread copies the last frames, so the
+  next write can restart the log from the top. Reads go on during a hold, and a hold lasts at
+  most 250 ms. Past 65,536 frames the loop checkpoints by itself.
+  - *Why the sync before the hold:* a copy that doesn't finish the log leaves its pages unsynced
+    (SQLite syncs the database only when every frame is in), so the held copy had to flush the
+    whole cycle while writes waited. On a slow disk the hold ran out first, the log was not
+    restarted, and the next cycle began at once. With the disk modelled at 60 MB/s (every
+    `fsync` taking 5 ms plus its unsynced bytes at that rate) and 240,000 users of the k6 model,
+    hold-phase latency went from p99 89–91 ms and a 290–300 ms maximum (every hold ran its full
+    250 ms) to p99 23–24 ms and a 90–116 ms maximum, with no hold running out (two runs each).
+  - *Why two threads:* the second one runs at normal priority because writes wait for it; at
+    nice 19 it got ~1.5% of a busy CPU and holds ran out. After the rounds it has a handful of
+    frames to copy and sync.
+  - The log has a line a minute: holds, holds that ran out, copies the loop made itself, and the
+    most frames the WAL held.
 - **Page cache after a split.** When a write splits a B-tree page, SQLite renumbers the new pages
-  through a temporary page number far past the end of the file, and the page cache keeps that as
-  its largest key. The commit then truncates the cache to the file size, and from that key it
-  walks every cached page (all of the 64 MB cache) rather than the few numbers past the end.
-  Before each commit the shim checks that nothing is cached at that number and puts the largest
-  key back at the file size, so the truncate has nothing to walk.
+  through a temporary page number far past the end of the file, and its page cache keeps the
+  largest number it has seen. Every later commit truncates the cache to the file size, and from
+  that number the cache walks every page it holds (all 64 MB) to find nothing. SQLite's default
+  page cache therefore sits behind its plugin interface (`SQLITE_CONFIG_PCACHE2`): the wrapper
+  notes the page numbers that enter a cache and does not pass on a truncate that has nothing to
+  drop. In a write-heavy run all 1,047 truncates in 5 seconds were skipped; afterwards
+  `integrity_check` was `ok` and all 513,401 posts matched the reference query. SQLite's own
+  state is never written from outside: cursors move only through `sqlite3Btree*` calls.
+- **Code locked in RAM.** At startup the binary's and its libraries' code and read-only data
+  (3.7 MB) are `mlock`ed. On the 2 GB box a few hundred thousand sockets take most of the memory;
+  with no swap the kernel then reclaims file-backed pages first, and an unlocked loop stalls on
+  major faults reading its own code back from disk. It fits the 8 MB `RLIMIT_MEMLOCK` of a systemd
+  service (checked as an unprivileged user with that limit and four rings on kernel 6.8). If the
+  kernel ever refuses a ring for that limit, the lock is dropped and the ring retried.
+- **A crash leaves a line in the log** (signal, faulting address, instruction pointer) before the
+  signal takes its default course.
 - **Batch size.** Each pass waits on ring 0 for 256 completions or 4 ms, whichever comes first
   (never while reads or answers are queued). Bigger passes share one `COMMIT` and fewer WAL frame
   writes. At ~18k req/s over 18,000 connections, 4 ms instead of 1 ms cut server CPU from 17.8 to
@@ -164,7 +193,8 @@ The latency difference is the 4 ms batching wait (see above); both are far insid
 500 ms / 1 s limits. About two thirds of the CPU per request is the kernel's (TCP and io_uring), which is the same for
 both servers.
 
-The normal-priority checkpoint tail, the page-cache fix and the INSERT without `RETURNING`, same
+The normal-priority checkpoint tail, the page-cache fix (then a reset of the cache's largest key
+before each commit, since replaced by the wrapper above) and the INSERT without `RETURNING`, same
 sandbox, 2,000 busy connections (closed loop, so writes are frequent and the server is
 saturated), five runs of each build:
 
@@ -176,6 +206,13 @@ saturated), five runs of each build:
 The old worst cases are write holds running into their 250 ms limit. The req/s ranges overlap: on
 this sandbox the cache stays small (about 1,500 pages), so the cache walk the fix removes is short.
 
+### On the benchmark box
+
+PR #373 at `9f80f1f` (before the checkpoint rounds, the page-cache wrapper and the code lock):
+**230,000 users** held for 5 minutes (22,362 req/s, p95 21.9 ms, p99 103.5 ms, 0 errors, 58% CPU,
+24 µs per request, 581 MB peak). 2-minute probes: 200,000, 220,000 and 230,000 passed; 320,000
+failed on latency (p99 1.14 s, 0 errors); 240,000 failed with refused connections.
+
 ### On DigitalOcean droplets (not the benchmark box)
 
 A Basic droplet of the benchmark box's size (s-1vcpu-2gb, Ubuntu 24.04, kernel 6.8.0-147) serving
@@ -185,7 +222,7 @@ probes doubling from 40,000, bisecting to ~5%, then 5-minute holds stepping down
 ran on the same droplet, one after the other, each on a fresh copy of the seed. CPU is the server's
 own cgroup, which leaves out interrupt handling and steal time, so the box was busier than shown.
 
-**This code** (the second run):
+The code scored above (the second run):
 
 | users | this server | rust-iouring-kensac |
 |---|---|---|
@@ -215,14 +252,25 @@ Correctness checks beyond `test/test.sh` (42/42):
   and decoded `body`); all 11,814 single-character mutations of a valid JWT are rejected.
 - Every acknowledged write is in the database, and nothing else: with the checkpoint threshold
   lowered to 64 frames (500 write holds in 10 s, pipelined POSTs), after `kill -9` mid-load
-  (three trials), and on a full disk (writes then get 500, never 201; reads and `/health` go on).
+  (three trials; three more on the slow-disk model with the checkpoint rounds, 31,841–42,121
+  posts and as many likes each), and on a full disk (writes then get 500, never 201; reads and
+  `/health` go on).
+- After 2.3 million requests of mixed load with the page-cache wrapper: `integrity_check` ok, and
+  all 522,289 posts (with their like counts) and the feed match the reference query.
+- 240,500 keep-alive users of the k6 model over 13 rings: no errors, also with the server
+  stopped for 2.5 s six times (55,000 requests waiting each time) and with every `fsync` taking
+  0.3–2.5 s.
+- 250,000 short connections ending in every way a client can (unread responses, resets, half
+  closes, partial requests, garbage, 60 pipelined requests then a reset) beside 58,500 keep-alive
+  users over 4 rings, with write holds every 64 frames (1,042 holds) on the slow-disk model: no
+  crash, no failed request among the keep-alive users.
 - 30,000 connections of mutated, randomly split and pipelined requests (corrupt bytes, 20 KB
   headers, bad lengths, resets): no crash, no descriptor or memory growth.
 - Pipelining, byte-by-byte requests, 100 KB bodies, escaped and Unicode bodies, 19,500
   concurrent connections (a second ring is added), 7,000 connections over 4 rings.
 
 `src/shim.c` has two test-only switches, off in the build: `-DCKPT_FRAMES=n` (checkpoint sooner,
-to exercise write holds) and `-DTD_STATS` (log the hold count).
+to exercise write holds) and `-DBULK_NICE=n` (the copying thread's priority).
 
 ## Run
 

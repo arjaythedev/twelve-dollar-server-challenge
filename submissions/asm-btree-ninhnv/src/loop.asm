@@ -3,7 +3,7 @@
 
 extern getenv, signal, clock_gettime, dprintf, exit, atoi, inet_pton, strlen, calloc
 extern getrlimit, setrlimit, memmove
-extern td_open, td_commit, td_tick
+extern td_open, td_commit, td_tick, td_lock_code, td_unlock_code
 extern db_init, g_in_tx, hmac_init, http_parse, handle_request, resp_error
 extern buf_give, part_append, part_free, g_out_slot, g_start_s, g_oom
 extern E_BAD_REQUEST, E_BAD_REQUEST_len, E_INTERNAL, E_INTERNAL_len
@@ -23,7 +23,7 @@ M_DB:       db "database: %s", 10, 0
 M_HOST:     db "HOST must be an IPv4 address: %s", 10, 0
 M_LISTEN:   db "listen %s:%d failed (%d)", 10, 0
 M_URING:    db "io_uring setup failed", 10, 0
-M_READY:    db "listening on %s:%d; io_uring, %d direct descriptors per ring", 10, 0
+M_READY:    db "listening on %s:%d; io_uring, %d direct descriptors per ring, %ld KB of code locked", 10, 0
 M_RING:     db "ring %d added", 10, 0
 M_NORING:   db "cannot add a ring (%d rings)", 10, 0
 
@@ -33,6 +33,7 @@ g_rings:      resq MAX_RINGS
 g_nrings:     resq 1
 g_listen:     resd LISTENERS
 g_slots:      resq 1
+g_locked:     resq 1             ; KB of code locked in RAM
 g_touched:    resq 1
 g_ntouched:   resq 1
 g_rq:         resq 1
@@ -1259,7 +1260,17 @@ spill:
   mov edi, eax
   call ring_new
   test rax, rax
+  jnz .added
+  ; refused: where a ring's memory counts against RLIMIT_MEMLOCK, the locked code is in its way
+  cmp qword [g_locked], 0
+  je .fail
+  mov qword [g_locked], 0
+  call td_unlock_code
+  mov edi, [g_nrings]
+  call ring_new
+  test rax, rax
   jz .fail
+.added:
   mov rbx, rax
   mov rcx, [g_nrings]
   lea rdx, [g_rings]
@@ -1737,11 +1748,14 @@ main:
   lea rax, [g_wts]
   mov [g_geta + 16], rax
   mov qword [g_wts + 8], WAIT_NS
+  call td_lock_code              ; code and read-only data stay in RAM (see shim.c)
+  mov [g_locked], rax
   mov edi, 2
   lea rsi, [M_READY]
   mov rdx, [g_host]
   mov rcx, [g_port]
   mov r8, [g_slots]
+  mov r9, rax
   xor eax, eax
   call dprintf
 

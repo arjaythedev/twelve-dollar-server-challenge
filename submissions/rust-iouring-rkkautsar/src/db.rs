@@ -648,6 +648,11 @@ impl WriteDb {
     pub fn open(path: &str) -> Result<Self, String> {
         let db = Db::open(path)?;
         db.exec("PRAGMA foreign_keys=ON")?;
+        // Checkpoints are run deliberately from the event loop, with the read
+        // snapshot released (see run_pass). Left automatic they fire inside a
+        // commit, where one costs tens of milliseconds, and cannot finish while
+        // a reader holds its mark anyway.
+        db.exec("PRAGMA wal_autocheckpoint=0")?;
         Ok(Self { db })
     }
 

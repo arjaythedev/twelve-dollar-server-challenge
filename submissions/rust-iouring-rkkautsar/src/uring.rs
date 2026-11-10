@@ -1392,6 +1392,25 @@ pub fn run_pass(
     let mut read_ns = 0u128;
     let mut poll_ns = 0u128;
     let mut ring_cursor = 0usize;
+    // A transaction reused across passes keeps reads cheap, but its snapshot
+    // pins the log: a PASSIVE checkpoint copies only up to the reader's mark,
+    // so the log grows without bound (631 MB measured at 200k). Release the
+    // snapshot now and then, when the log passes a watermark and has regrown
+    // since the last copy, and checkpoint from here while no reader is open.
+    let ckpt_db = crate::db::Db::open(&db_path)
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    let wal_path = format!("{db_path}-wal");
+    let watermark = std::env::var("WAL_WATERMARK_MB")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(64)
+        * 1_048_576;
+    let regrow = std::env::var("WAL_REGROW_MB")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(4)
+        * 1_048_576;
+    let mut last_ckpt_wal = 0u64;
     loop {
         let t0 = Instant::now();
         let mut cqes = 0u64;
@@ -1425,6 +1444,14 @@ pub fn run_pass(
         let nwrites = 0usize;
         app.read.refresh();
         apply_reads(&mut app, &mut rings, &mut feed_reads, &mut post_reads);
+        if watermark > 0 && pass_no % 256 == 0 {
+            let len = std::fs::metadata(&wal_path).map(|m| m.len()).unwrap_or(0);
+            if len > watermark && len > last_ckpt_wal + regrow {
+                app.read.end_read(true);
+                let _ = ckpt_db.exec("PRAGMA wal_checkpoint(PASSIVE)");
+                last_ckpt_wal = len;
+            }
+        }
         let t3 = Instant::now();
         pass_no += 1;
         ACTIVE.store(

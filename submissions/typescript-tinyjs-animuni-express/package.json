@@ -1,0 +1,11 @@
+{
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tinyjs build",
+    "start": "tinyjs serve"
+  },
+  "dependencies": {
+    "tinyjs-fullstack": "0.1.0"
+  }
+}

@@ -155,7 +155,7 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | 87 | go-epoll-Antheurus | #65 | Go (raw epoll, 3 processes) | **125,000** | 12,274 | 116 | 665 | 0.00 | 98 | 74 | 292 | 2026-10-27 |
 | 87 | go-lowlevel-janso123 | #91 | Go (io_uring, PGO + ThinLTO) | **125,000** | 12,284 | 68 | 261 | 0.00 | 95 | 72 | 500 | 2026-10-27 |
 | 87 | java-nio-unorig-username | #187 | Java (NIO, FFM SQLite) | **125,000** | 12,303 | 9.2 | 49 | 0.00 | 88 | 66 | 1,038 | 2026-10-29 |
-| 91 | kotlin-nio-3x3xX3N0N | #83 | Kotlin (NIO, 2 JVMs) | **120,000** | 11,759 | 246 | 524 | 0.00 | 100 | 79 | 1,380 | 2026-10-21 |
+| 91 | kotlin-nio-3x3xX3N0N | #83 | Kotlin (NIO, 2 JVMs) | **120,000** ᴷ | 11,759 | 246 | 524 | 0.00 | 100 | 79 | 1,380 | 2026-10-21 |
 | 91 | rust-iouring-unorig-username | #188 | Rust (io_uring) | **120,000** | 11,799 | 12 | 144 | 0.00 | 46 | 36 | 543 | 2026-10-29 |
 | 93 | cpp-uwebsockets-tbsvttr | #6 | C++ (uWebSockets) | **115,000** | 10,940 | 261 | 652 | 0.00 | 87 | 74 | 215 | 2026-10-26 |
 | 94 | d-iouring-cyrusmsk | #163 | D (io_uring, during) | **114,000** | 11,158 | 248 | 567 | 0.00 | 87 | 73 | 475 | 2026-11-01 |
@@ -540,6 +540,12 @@ newest first with an 8 s age cap, `journal_size_limit=0`, read-only segments `ml
 the merged row, it tied it) also held **280,000** (26,658 req/s, p95 44.9 / p99 749.7 ms, 0 err, 78 % CPU, 26 µs/req,
 710 MB, 2026-11-08). 290,000 and 300,000 failed the 2-minute probe on p99 (1.04 s / 2.79 s, 0 errors) and 320,000 on
 p95/p99 (1.03 / 6.50 s at 93 % CPU).
+
+ᴷ **kotlin-nio-3x3xX3N0N** stays on its merged #83 row. Its follow-up **#377** (`9ab23cc`, rejects tokens without a
+numeric `exp`, two-step /feed, checkpointer thread through `PRAGMA wal_checkpoint`, 2 ms group-commit window, 3 workers;
+held, not merged: it didn't beat the merged row) scored **110,000** (10,812 req/s, p95 85.7 / p99 331.6 ms, 0 err, 95 %
+CPU, 82 µs/req, 636 MB, 2026-11-10). CPU-bound: 115,000 and 120,000 failed the 2-minute probe on p95/p99 (627 / 1,041 ms
+and 591 / 1,221 ms at 97–98 % CPU, 0 errors).
 
 **Connection collapses in scored entries' failing probes.** v-epoll-i098 #191: 270,000 passed the 2-minute probe but
 failed the 5-minute hold with 60 % errors, nearly all `connection refused` from mid-hold on (an earlier attempt at
